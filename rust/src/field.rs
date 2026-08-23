@@ -1,0 +1,429 @@
+// meteor-cfd - Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+// Source-available, not Open Source. Educational use is free; research,
+// publication and commercial use require a licence - simul@msimul.com
+// See LICENSE at the repository root.
+
+//! `volScalarField` / `volVectorField` / `surfaceScalarField`, device resident.
+//!
+//! Provenance: original. The single Robin boundary representation below is
+//! this project's own design, specified in SPEC-LIT.md section 4. The second
+//! old time level (`f00`) is SPEC-LIT.md section 13.3. No GPL-licensed source
+//! was consulted.
+//!
+//! Boundary conditions are stored in ONE universal form - the Robin (mixed)
+//! form that every scalar boundary condition in this solver reduces to
+//! (SPEC-LIT.md section 4; the representation is our design):
+//!
+//! ```text
+//! psi_b = fr*refValue + (1 - fr)*(psi_c + refGrad/deltaCoeffs)
+//! ```
+//!
+//! with `fr = 1` giving fixedValue, `fr = 0, g = 0` zeroGradient (and symmetry
+//! or slip for a scalar), `fr = 0, g != 0` fixedGradient, and anything between
+//! mixed or inletOutlet.
+//!
+//! That single representation is what makes the matrix coefficients
+//! branch-free, which matters a lot on a GPU:
+//!
+//! ```text
+//! valueInternalCoeffs    =  1 - fr
+//! valueBoundaryCoeffs    =  fr*refValue + (1 - fr)*refGrad/deltaCoeffs
+//! gradientInternalCoeffs = -fr*deltaCoeffs
+//! gradientBoundaryCoeffs =  fr*deltaCoeffs*refValue + (1 - fr)*refGrad
+//! ```
+//!
+//! A wall function is then nothing more than a kernel that rewrites `fr`,
+//! `ref_value` and `ref_grad` on the faces it owns. No virtual dispatch, no
+//! host involvement.
+//!
+//! # Names, and what happens to one this solver does not have
+//!
+//! [`BcKind::from_name`] is the *only* place a boundary-condition name is
+//! interpreted. It follows SPEC-LIT.md §13.4: a name it implements is used, a
+//! name it recognises but does not implement is an error naming the
+//! alternatives, and a name it has never heard of is an error naming the
+//! setting. It used to turn everything it did not know into `Calculated`,
+//! which evaluates as a hard Dirichlet at whatever the file's `value` held -
+//! so `turbulentIntensityKineticEnergyInlet`, `totalPressure` and the literal
+//! string `garbageBC` all ran to completion and all gave the same answer.
+//!
+//! Extended from:
+//!   ofgpu `SPEC-LIT.md` §4 (the triple), §13.4 (the rule above), §15.2 and
+//!     §15.5 (which patches get a wall function, and `nutLowRe`)
+//! No GPL-licensed source was consulted.
+
+use crate::device::{DevBuf, Gpu};
+use crate::error::Result;
+use crate::io::contract::unsupported;
+use crate::mesh::GpuMesh;
+use crate::{Label, Scalar, Vec3};
+
+/// Which rule regenerates `(fr, ref_value, ref_grad)` each outer iteration.
+///
+/// Stored per boundary face as an `i32` so the kernels can switch on it.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BcKind {
+    FixedValue = 0,
+    ZeroGradient = 1,
+    FixedGradient = 2,
+    Mixed = 3,
+    /// Value is written by the model, never solved for.
+    Calculated = 4,
+    /// 2-D front/back: contributes nothing anywhere.
+    Empty = 5,
+    /// Scalars: zeroGradient. Vectors: reflect the normal component.
+    Symmetry = 6,
+    /// Coupled; handled inside `amul`.
+    Cyclic = 7,
+    /// `fr = 1` where the face flux is inward, else 0.
+    ///
+    /// 8 to 12 are the FLUX-SWITCHED block: every one of them is Dirichlet on
+    /// inflow and zero-gradient on outflow, and they differ only in where the
+    /// inflow value comes from. `fldInletOutletFraction` in `cuda/field.cu`
+    /// tests the whole range, so the block must stay contiguous.
+    InletOutlet = 8,
+
+    /// `k = 3/2 (I |U|)^2` on inflow (Launder & Spalding's definition of the
+    /// turbulence intensity `I`); zero-gradient on outflow.
+    TurbulentIntensityKineticEnergyInlet = 9,
+
+    /// `epsilon = C_mu^{3/4} k^{3/2} / L` on inflow; zero-gradient on outflow.
+    TurbulentMixingLengthDissipationRateInlet = 10,
+
+    /// `omega = k^{1/2} / (C_mu^{1/4} L)` on inflow; zero-gradient on outflow.
+    TurbulentMixingLengthFrequencyInlet = 11,
+
+    /// Velocity at an open boundary next to a prescribed pressure: the flux
+    /// sets the normal component on inflow, zero-gradient on outflow.
+    PressureInletOutletVelocity = 12,
+
+    /// Pressure whose surface-normal gradient is whatever makes the boundary
+    /// flux come out as prescribed - a fixed-gradient condition whose gradient
+    /// the pressure equation writes.
+    FixedFluxPressure = 13,
+
+    /// `p = p0 - |U|^2/2` on inflow, `p = p0` on outflow (kinematic pressure).
+    TotalPressure = 14,
+
+    /// The wall's own velocity, with the wall-normal component removed.
+    MovingWallVelocity = 15,
+
+    /// `U = -n Q/A`: a uniform normal velocity carrying the prescribed
+    /// volumetric flow rate.
+    FlowRateInletVelocity = 16,
+
+    /// `nu_t = 0` at the wall: the mesh resolves the viscous sublayer and NO
+    /// wall function is wanted (SPEC-LIT §15.2). This is 22 for history; the
+    /// point of the name is that it is not a wall function at all, and
+    /// [`Self::is_nut_wall_function`] says so.
+    NutkWallFunction = 20,
+    NutUWallFunction = 21,
+    NutLowReWallFunction = 22,
+    EpsilonWallFunction = 23,
+    OmegaWallFunction = 24,
+    /// zeroGradient wearing a wall-function name.
+    KqRWallFunction = 25,
+    KLowReWallFunction = 26,
+}
+
+/// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
+///
+/// Every kind in it is Dirichlet where the face flux is inward and
+/// zero-gradient where it is outward; they differ only in what the inflow
+/// value is. `fldInletOutletFraction` in `cuda/field.cu` tests the range, and
+/// `field_ops::bc_kind_values_match_the_device` pins these two numbers to the
+/// `OFGPU_BC_INLET_OUTLET_*` macros there.
+pub const FLUX_SWITCHED_FIRST: Label = BcKind::InletOutlet as Label;
+pub const FLUX_SWITCHED_LAST: Label = BcKind::PressureInletOutletVelocity as Label;
+
+/// Every condition [`BcKind::from_name`] accepts, for the diagnostic a
+/// rejected name gets. Kept next to the match so the two cannot drift.
+pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
+    "fixedValue",
+    "uniformFixedValue",
+    "noSlip",
+    "zeroGradient",
+    "fixedGradient",
+    "uniformFixedGradient",
+    "mixed",
+    "freestream",
+    "freestreamVelocity",
+    "freestreamPressure",
+    "calculated",
+    "empty",
+    "symmetry",
+    "symmetryPlane",
+    "slip",
+    "wedge",
+    "cyclic",
+    "cyclicAMI",
+    "cyclicSlip",
+    "processor",
+    "inletOutlet",
+    "outletInlet",
+    "turbulentIntensityKineticEnergyInlet",
+    "turbulentMixingLengthDissipationRateInlet",
+    "turbulentMixingLengthFrequencyInlet",
+    "pressureInletOutletVelocity",
+    "fixedFluxPressure",
+    "totalPressure",
+    "movingWallVelocity",
+    "flowRateInletVelocity",
+    "nutkWallFunction",
+    "nutUWallFunction",
+    "nutLowReWallFunction",
+    "epsilonWallFunction",
+    "omegaWallFunction",
+    "kqRWallFunction",
+    "kLowReWallFunction",
+];
+
+impl BcKind {
+    /// Map an OpenFOAM boundary-condition type string, per SPEC-LIT §13.4.
+    ///
+    /// A name this solver does not implement is an **error** naming the
+    /// setting and listing what is available. `-permissive` downgrades that to
+    /// a warning and substitutes `calculated` - a Dirichlet at whatever the
+    /// file's `value` entry held - which is what this function used to do
+    /// silently for every name it had never heard of.
+    ///
+    /// `patch` is only for the diagnostic; a user with forty patches needs to
+    /// be told which one is wrong.
+    pub fn from_name(name: &str, field: &str, patch: &str) -> Result<Self> {
+        let k = match name {
+            "fixedValue" | "noSlip" | "uniformFixedValue" => Self::FixedValue,
+            "zeroGradient" => Self::ZeroGradient,
+            "fixedGradient" | "uniformFixedGradient" => Self::FixedGradient,
+            "mixed" | "freestream" | "freestreamVelocity" => Self::Mixed,
+            // Its own condition now, and only for a field that says so: a
+            // value written by a model and never solved for.
+            "calculated" => Self::Calculated,
+            "empty" => Self::Empty,
+            "symmetry" | "symmetryPlane" | "slip" | "wedge" => Self::Symmetry,
+            "cyclic" | "cyclicAMI" | "cyclicSlip" | "processor" => Self::Cyclic,
+            "inletOutlet" | "outletInlet" | "freestreamPressure" => Self::InletOutlet,
+
+            "turbulentIntensityKineticEnergyInlet" => {
+                Self::TurbulentIntensityKineticEnergyInlet
+            }
+            "turbulentMixingLengthDissipationRateInlet" => {
+                Self::TurbulentMixingLengthDissipationRateInlet
+            }
+            "turbulentMixingLengthFrequencyInlet" => Self::TurbulentMixingLengthFrequencyInlet,
+            "pressureInletOutletVelocity" => Self::PressureInletOutletVelocity,
+            "fixedFluxPressure" => Self::FixedFluxPressure,
+            "totalPressure" => Self::TotalPressure,
+            "movingWallVelocity" => Self::MovingWallVelocity,
+            "flowRateInletVelocity" => Self::FlowRateInletVelocity,
+
+            "nutkWallFunction" => Self::NutkWallFunction,
+            "nutUWallFunction" => Self::NutUWallFunction,
+
+            // SPEC-LIT 15.3: a rough wall shifts the log law down by dB, a
+            // function of the sand-grain height Ks and the roughness constant
+            // Cs. Neither is implemented, and "a rough-wall condition that
+            // discards them is a smooth wall with a misleading name" - so it
+            // is an error, not an alias.
+            "nutkRoughWallFunction" | "nutURoughWallFunction" | "nutkAtmRoughWallFunction" => {
+                return unsupported(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &["nutkWallFunction", "nutUWallFunction", "nutLowReWallFunction"],
+                    "the SMOOTH wall function of the same family (Ks and Cs are discarded)",
+                    if name.starts_with("nutU") {
+                        Self::NutUWallFunction
+                    } else {
+                        Self::NutkWallFunction
+                    },
+                );
+            }
+            "nutLowReWallFunction" => Self::NutLowReWallFunction,
+            "epsilonWallFunction" => Self::EpsilonWallFunction,
+            "omegaWallFunction" => Self::OmegaWallFunction,
+            "kqRWallFunction" => Self::KqRWallFunction,
+            "kLowReWallFunction" => Self::KLowReWallFunction,
+
+            other => {
+                return unsupported(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    other,
+                    IMPLEMENTED_BC_NAMES,
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+        };
+        Ok(k)
+    }
+
+    /// True for the conditions whose value fraction is regenerated from the
+    /// sign of the face flux every outer iteration.
+    #[inline]
+    pub fn is_flux_switched(self) -> bool {
+        let v = self as Label;
+        (FLUX_SWITCHED_FIRST..=FLUX_SWITCHED_LAST).contains(&v)
+    }
+
+    /// True for the two conditions that constrain the wall-adjacent CELL
+    /// rather than just the face value - SPEC-LIT §15.5.
+    ///
+    /// Asked of `epsilon`'s or `omega`'s OWN patch type, never of another
+    /// field's.
+    #[inline]
+    pub fn constrains_wall_cell(self) -> bool {
+        matches!(self, Self::EpsilonWallFunction | Self::OmegaWallFunction)
+    }
+
+    /// True where `nu_t` gets a wall-function value - SPEC-LIT §15.2 and
+    /// §15.5.
+    ///
+    /// **`nutLowReWallFunction` is deliberately false.** It declares that the
+    /// mesh resolves the viscous sublayer, so `nu_t = 0` at the wall and the
+    /// molecular viscosity alone carries the shear; applying a wall function
+    /// there adds turbulent viscosity the mesh is already resolving and
+    /// overpredicts the wall shear stress. Asked of `nut`'s own patch type,
+    /// never of `epsilon`'s.
+    #[inline]
+    pub fn is_nut_wall_function(self) -> bool {
+        matches!(self, Self::NutkWallFunction | Self::NutUWallFunction)
+    }
+
+    /// True where `nu_t` is pinned to zero at the wall (SPEC-LIT §15.2:
+    /// "`nu_t,w = 0`. That is the whole model, and the point of it.").
+    #[inline]
+    pub fn is_nut_low_re(self) -> bool {
+        matches!(self, Self::NutLowReWallFunction)
+    }
+}
+
+/// A cell field plus its boundary state.
+pub struct GpuScalarField {
+    pub name: String,
+    pub n_cells: usize,
+    pub n_boundary_faces: usize,
+
+    /// `[n_cells]` internal field
+    pub f: DevBuf<Scalar>,
+    /// `[n_cells]` previous time level, `psi^{n-1}`
+    pub f0: DevBuf<Scalar>,
+    /// `[n_cells]` the level before that, `psi^{n-2}`.
+    ///
+    /// BDF2 needs it (`SPEC-LIT` §3.3, §13.3) and a field carrying only one
+    /// old level cannot support the scheme whatever the kernel can compute -
+    /// which is precisely why `fv::fvm_ddt_bdf2` sat here unreachable. The
+    /// rotation is `psi^{n-2} <- psi^{n-1} <- psi`, in that order, once per
+    /// time step: [`crate::field_ops::store_old_time`].
+    pub f00: DevBuf<Scalar>,
+    /// `[n_bf]` evaluated boundary values
+    pub bf: DevBuf<Scalar>,
+
+    /// `[n_bf]` valueFraction
+    pub fr: DevBuf<Scalar>,
+    pub ref_value: DevBuf<Scalar>,
+    pub ref_grad: DevBuf<Scalar>,
+    /// `[n_bf]` `BcKind` as `i32`
+    pub bc_kind: DevBuf<Label>,
+}
+
+impl GpuScalarField {
+    /// All zeros, with every face marked from the mesh's `PatchKind` rather
+    /// than left at `0` - which would be `FixedValue` with `refValue = 0`, a
+    /// silent Dirichlet condition on every patch.
+    pub fn zeros(gpu: &Gpu, m: &GpuMesh, name: &str) -> Result<Self> {
+        let kinds: Vec<Label> = kinds_from_patches(m);
+        Ok(Self {
+            name: name.to_string(),
+            n_cells: m.n_cells,
+            n_boundary_faces: m.n_boundary_faces,
+            f: gpu.zeros(m.n_cells)?,
+            f0: gpu.zeros(m.n_cells)?,
+            f00: gpu.zeros(m.n_cells)?,
+            bf: gpu.zeros(m.n_boundary_faces)?,
+            fr: gpu.zeros(m.n_boundary_faces)?,
+            ref_value: gpu.zeros(m.n_boundary_faces)?,
+            ref_grad: gpu.zeros(m.n_boundary_faces)?,
+            bc_kind: gpu.upload(&kinds)?,
+        })
+    }
+}
+
+pub struct GpuVectorField {
+    pub name: String,
+    pub n_cells: usize,
+    pub n_boundary_faces: usize,
+
+    pub f: DevBuf<Vec3>,
+    /// `psi^{n-1}`
+    pub f0: DevBuf<Vec3>,
+    /// `psi^{n-2}` - see [`GpuScalarField::f00`].
+    pub f00: DevBuf<Vec3>,
+    pub bf: DevBuf<Vec3>,
+
+    pub fr: DevBuf<Scalar>,
+    pub ref_value: DevBuf<Vec3>,
+    pub ref_grad: DevBuf<Vec3>,
+    pub bc_kind: DevBuf<Label>,
+}
+
+impl GpuVectorField {
+    pub fn zeros(gpu: &Gpu, m: &GpuMesh, name: &str) -> Result<Self> {
+        let kinds: Vec<Label> = kinds_from_patches(m);
+        Ok(Self {
+            name: name.to_string(),
+            n_cells: m.n_cells,
+            n_boundary_faces: m.n_boundary_faces,
+            f: gpu.zeros(m.n_cells)?,
+            f0: gpu.zeros(m.n_cells)?,
+            f00: gpu.zeros(m.n_cells)?,
+            bf: gpu.zeros(m.n_boundary_faces)?,
+            fr: gpu.zeros(m.n_boundary_faces)?,
+            ref_value: gpu.zeros(m.n_boundary_faces)?,
+            ref_grad: gpu.zeros(m.n_boundary_faces)?,
+            bc_kind: gpu.upload(&kinds)?,
+        })
+    }
+}
+
+/// A face field: the volumetric flux `phi`, and interpolated diffusivities.
+pub struct GpuSurfaceScalarField {
+    pub name: String,
+    pub n_internal_faces: usize,
+    pub n_boundary_faces: usize,
+    pub f: DevBuf<Scalar>,
+    pub bf: DevBuf<Scalar>,
+}
+
+impl GpuSurfaceScalarField {
+    pub fn zeros(gpu: &Gpu, m: &GpuMesh, name: &str) -> Result<Self> {
+        Ok(Self {
+            name: name.to_string(),
+            n_internal_faces: m.n_internal_faces,
+            n_boundary_faces: m.n_boundary_faces,
+            f: gpu.zeros(m.n_internal_faces)?,
+            bf: gpu.zeros(m.n_boundary_faces)?,
+        })
+    }
+}
+
+/// Seed `bc_kind` from the mesh topology. The field file overwrites this for
+/// patches it names; the mesh has the last word on `empty` and `cyclic`,
+/// because a field file cannot put a fixedValue on an empty patch and have it
+/// mean anything.
+fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
+    use crate::mesh::PatchKind;
+
+    let mut kinds = vec![BcKind::ZeroGradient as Label; m.n_boundary_faces];
+    for p in &m.patches {
+        let k = match p.kind {
+            PatchKind::Empty => BcKind::Empty,
+            PatchKind::Cyclic | PatchKind::Processor => BcKind::Cyclic,
+            PatchKind::Symmetry => BcKind::Symmetry,
+            _ => BcKind::ZeroGradient,
+        } as Label;
+        for i in 0..p.size {
+            kinds[p.start + i] = k;
+        }
+    }
+    kinds
+}

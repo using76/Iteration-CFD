@@ -1,0 +1,94 @@
+meteor-cfd
+Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+
+Licensed under the Meteor Simulation Source-Available License, Version 1.0.
+See LICENSE. Educational use is free; research, publication and commercial use
+require a licence — simul@msimul.com.
+
+================================================================================
+Provenance
+================================================================================
+
+The numerical core of meteor-cfd is implemented from published literature.
+Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
+source file carries a header naming the papers it was written from and the
+line "No GPL-licensed source was consulted."
+
+meteor-cfd reads and writes the OpenFOAM ASCII case format so that existing
+pre- and post-processing tools can be used with it. A file format is not a work
+of authorship: the reader and writer here were written from the format as it
+appears in data files. meteor-cfd links against no part of OpenFOAM, contains
+no OpenFOAM source, and is neither derived from nor affiliated with OpenFOAM,
+the OpenFOAM Foundation, or OpenCFD Ltd.
+
+`rust/PROVENANCE.md` is the per-file record.
+
+================================================================================
+Third-party components
+================================================================================
+
+These remain under their own licences. Nothing in the meteor-cfd licence
+restricts any right you have in them under their own terms.
+
+AMGX
+  Copyright (c) 2011-2024, NVIDIA CORPORATION
+  BSD 3-Clause License.
+  Optional; built only with the `amgx` Cargo feature, which is off by default.
+  Bundled under third_party/amgx when present; see its LICENSE.
+
+cudarc
+  MIT OR Apache-2.0. Cargo dependency.
+
+thiserror
+  MIT OR Apache-2.0. Cargo dependency.
+
+anyhow
+  MIT OR Apache-2.0. Build dependency.
+
+NVIDIA CUDA Toolkit, cuFFT, cuBLAS
+  Used under the NVIDIA CUDA Toolkit End User License Agreement, which permits
+  linking and redistribution of applications built against it. Not redistributed
+  here; the toolkit must be installed separately.
+
+================================================================================
+Reference material
+================================================================================
+
+Fire Dynamics Simulator (FDS)
+  Developed by the National Institute of Standards and Technology (NIST).
+  Software developed by NIST employees is not subject to copyright protection
+  within the United States and is in the public domain.
+
+  Where meteor-cfd adapts an approach from FDS, the file in question says so in
+  its header. NIST is acknowledged as the source of that material. NIST does
+  not endorse meteor-cfd, and provides the FDS software "AS IS" with no
+  warranty of any kind.
+
+  FDS is not redistributed in this repository.
+
+================================================================================
+Published sources
+================================================================================
+
+The models and schemes implemented here are published mathematics. The full
+citation list is `rust/SPEC-LIT.md`; the principal sources are:
+
+  Jasak (1996); Moukalled, Mangani & Darwish (2016); Ferziger & Perić
+  Patankar (1980); Patankar & Spalding (1972); Van Doormaal & Raithby (1984)
+  Issa (1986); Rhie & Chow (1983)
+  Launder & Spalding (1974); Wilcox; Menter (1994, 2003)
+  Spalding (1961); Cebeci & Bradshaw (1977)
+  Smagorinsky (1963); Deardorff (1970, 1980); Nicoud & Ducros (1999)
+  van Driest (1956); Scotti, Meneveau & Lilly (1993)
+  Sweby (1984); van Leer (1977, 1979); Roe (1986); van Albada et al. (1982)
+  Warming & Beam (1976); Leonard (1979); Khosla & Rubin (1974)
+  Barth & Jespersen (1989); Venkatakrishnan (1993)
+  Hirt & Nichols (1981); Zalesak (1979); Brackbill, Kothe & Zemach (1992)
+  Saad (2003); van der Vorst (1992); Hestenes & Stiefel (1952)
+  Swarztrauber (1977); Tucker (1998); Rehm & Baum (1978); Rodi (1987)
+
+  Validation data: Ghia, Ghia & Shin (1982); Moser, Kim & Mansour (1999);
+  Driver & Seegmiller (1985); McCaffrey (1979); Martin & Moyce (1952).
+
+Publishing a paper is not covered by the free educational grant; see section 2
+of LICENSE.

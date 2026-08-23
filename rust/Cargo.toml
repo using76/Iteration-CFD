@@ -1,0 +1,101 @@
+[package]
+name = "ofgpu"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "GPU-native finite-volume CFD, resident on the device"
+authors = ["주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.) <simul@msimul.com>"]
+repository = "https://github.com/using76/meteor-cfd"
+# Source-available, not Open Source. Educational use is free; research,
+# publication and commercial use require a licence - simul@msimul.com.
+# Not an SPDX identifier, so it is given as a file reference.
+license-file = "../LICENSE"
+publish = false
+
+[dependencies]
+# Host-side CUDA. The kernels stay in CUDA C++ and are compiled to PTX by
+# build.rs; cudarc owns contexts, streams, modules, device memory and graphs.
+#
+# cuda-version-from-build-system asks nvcc what version it is rather than
+# hard-coding a feature like cuda-13030, so the same Cargo.toml works on a
+# machine with a different toolkit.
+cudarc = { version = "0.19", default-features = false, features = [
+    "driver",
+    "nvrtc",
+    "cufft",
+    "cuda-version-from-build-system",
+    "dynamic-loading",
+] }
+
+thiserror = "2"
+
+[features]
+default = []
+# Solve in f32 instead of f64. Reaches the kernels too - build.rs passes
+# -DOFGPU_SINGLE to nvcc so `ofscalar` matches `Scalar`.
+single = []
+# Build the NVIDIA AMGX pressure backend. OFF by default and it must stay that
+# way: AMGX is not installed anywhere, it has to be built from source, and
+# NVIDIA's own notes put Windows support at "very limited" with CUDA 12.2 as
+# the newest verified toolkit against this machine's 13.3. With the feature off
+# the crate still compiles, every test still passes, and the selector reports
+# AMGX as unavailable rather than pretending it was never a candidate - see
+# `src/pressure/amgx.rs`.
+#
+# Turning it on needs libamgxsh (or libamgx) reachable by the linker; point
+# AMGX_DIR or AMGX_LIB_DIR at the directory holding it.
+amgx = []
+
+[build-dependencies]
+# build.rs needs the same detection logic cudarc uses
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1          # keep line info for Nsight
+
+[[bin]]
+name = "ofgpu-probe"
+path = "src/bin/probe.rs"
+
+[[bin]]
+name = "ofgpu-generate-mesh"
+path = "src/bin/generate_mesh.rs"
+
+[[bin]]
+name = "ofgpu-k-epsilon"
+path = "src/bin/k_epsilon.rs"
+
+[[bin]]
+name = "ofgpu-k-omega"
+path = "src/bin/k_omega.rs"
+
+[[bin]]
+name = "ofgpu-validate"
+path = "src/bin/validate.rs"
+
+[[bin]]
+name = "ofgpu-bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "ofgpu-graph-bench"
+path = "src/bin/graph_bench.rs"
+
+[[bin]]
+name = "ofgpu-plume"
+path = "src/bin/plume.rs"
+
+[[bin]]
+name = "ofgpu-buoyant"
+path = "src/bin/buoyant.rs"
+
+[[bin]]
+name = "ofgpu-dispatch-bench"
+path = "src/bin/dispatch_bench.rs"
+
+[[bin]]
+name = "ofgpu-vof"
+path = "src/bin/vof.rs"

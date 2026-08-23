@@ -1,0 +1,181 @@
+Meteor Simulation Source-Available License, Version 1.0
+
+-----------------------------------------------------------------------------
+
+Licensor              주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+
+Licensed Work         meteor-cfd, including the `ofgpu` crate and every file
+                      in this repository.
+                      Copyright (c) 2026 주식회사 메테오시뮬레이션.
+                      All rights reserved except as granted below.
+
+Educational Use       Free of charge, on the terms of section 2.
+Grant
+
+Change Date           2036-08-23
+
+Change License        Apache License, Version 2.0
+
+Licence enquiries     simul@msimul.com
+
+-----------------------------------------------------------------------------
+
+NOTICE
+
+This is **not** an Open Source licence, and it is not the Business Source
+Licence. Its structure — a source-available grant that converts to an open
+source licence on a stated date — follows the Business Source License 1.1,
+but the terms differ in one substantive way and it therefore does not use that
+name.
+
+The difference: BUSL 1.1 grants all non-production use free of charge, which
+would include academic research. This licence does not. Under this licence,
+**educational use is free and research use is not**; see sections 2 and 3.
+
+On the Change Date the version of the Licensed Work then published becomes
+available under the Change License, and these restrictions cease to apply to
+that version.
+
+-----------------------------------------------------------------------------
+
+TERMS
+
+1. Source grant
+
+   Licensor grants you a non-exclusive, worldwide, royalty-free right to read,
+   copy, modify, create derivative works of, and redistribute the source of
+   the Licensed Work, subject to sections 4 and 5.
+
+   This grant does not by itself permit you to USE the Licensed Work, or any
+   derivative of it, to compute a result. Use is governed by sections 2 and 3.
+
+2. Educational Use Grant
+
+   You may use the Licensed Work free of charge for Educational Purposes.
+
+   "Educational Purposes" means teaching, coursework, classroom demonstration,
+   and self-study, by students and by educators at an educational institution
+   or by an individual learning the subject.
+
+   Educational Purposes do NOT include:
+
+     (a) research of any kind, whether academic, institutional, governmental
+         or industrial;
+     (b) generating, or contributing to, any result that is published,
+         presented, submitted for publication, or included in a thesis,
+         dissertation, paper, preprint, report, or patent application;
+     (c) any use in the course of providing a service to a third party;
+     (d) any use that is part of, or in support of, a commercial activity.
+
+   A student using the Licensed Work to learn computational fluid dynamics is
+   within this grant. The same student using it to produce a figure for a
+   published paper is not.
+
+3. Licensed Use
+
+   Any use of the Licensed Work outside section 2 — including research,
+   publication, evaluation for procurement, internal engineering use,
+   consultancy, and any commercial or production use — requires a separate
+   commercial licence from Licensor.
+
+   Commercial licences are available. Please write to simul@msimul.com with a
+   description of the intended use, and Licensor will respond with terms.
+
+   Licensor will consider no-cost or reduced-cost licences for individual
+   academic researchers and for non-profit work. Ask.
+
+4. Redistribution
+
+   If you redistribute the Licensed Work, or any derivative of it, in source
+   or in any other form, you must:
+
+     (a) include a complete, unmodified copy of this licence;
+     (b) retain all copyright, licence, and attribution notices, including the
+         file NOTICE;
+     (c) state prominently that the recipient's use is governed by this
+         licence and that use beyond section 2 requires a licence from
+         Licensor;
+     (d) if you modified the Licensed Work, carry a prominent notice saying
+         that you changed it, and the date.
+
+   You may not sublicense the Licensed Work, and you may not offer it to
+   others on terms more permissive than these.
+
+5. Third-party components
+
+   The Licensed Work incorporates or links against components licensed by
+   others. Those components remain under their own licences, which are listed
+   in the file NOTICE and which are not affected by this licence. Nothing here
+   restricts any right you have in those components under their own terms.
+
+6. Change Date
+
+   On the Change Date stated above, the version of the Licensed Work published
+   as of that date becomes available under the Change License, and sections 2,
+   3 and 4 cease to apply to that version. Versions published after the Change
+   Date carry their own Change Date, and this licence continues to govern them
+   until it arrives.
+
+7. Trademarks
+
+   This licence grants no right to use the name, logo, or trademarks of
+   주식회사 메테오시뮬레이션, except as required by section 4 to give
+   attribution.
+
+8. Termination
+
+   If you use the Licensed Work outside the terms of this licence, the rights
+   granted here terminate automatically. They are reinstated if you cure the
+   breach within 30 days of becoming aware of it, unless Licensor has already
+   notified you of the breach, in which case reinstatement requires Licensor's
+   written agreement.
+
+9. No warranty
+
+   THE LICENSED WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, AND
+   NON-INFRINGEMENT.
+
+   This is numerical simulation software. Its results depend on the mesh, the
+   discretisation, the models selected, and the boundary conditions supplied,
+   and they may be wrong. Do not rely on them for any decision affecting
+   safety, health, property, or the environment without independent
+   verification.
+
+10. Limitation of liability
+
+    TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL
+    LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN
+    AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+    CONNECTION WITH THE LICENSED WORK OR THE USE OR OTHER DEALINGS IN IT.
+
+11. Governing law
+
+    This licence is governed by the laws of the Republic of Korea, without
+    regard to its conflict of laws provisions. The Seoul Central District
+    Court shall have exclusive jurisdiction over any dispute arising from it.
+
+-----------------------------------------------------------------------------
+
+  Licence enquiries:  simul@msimul.com
+  주식회사 메테오시뮬레이션 / Meteo Simulation Co., Ltd.
+
+-----------------------------------------------------------------------------
+
+
+한국어 요약 (편의를 위한 것이며, 법적 효력은 위 영문에 있습니다)
+
+  * 소스는 공개입니다. 읽고, 고치고, 포크하고, 재배포할 수 있습니다.
+  * **교육 목적 사용은 무료입니다.** 수업, 과제, 강의 실습, 독학이 여기
+    해당합니다.
+  * **연구·논문·상업적 이용은 별도 유상 라이선스가 필요합니다.** 학술
+    연구도 포함되며, 논문·학위논문·보고서·특허에 들어가는 결과를 만드는
+    것도 포함됩니다.
+  * 재배포할 때는 이 라이선스 전문과 NOTICE를 함께 넣고, 고쳤다면 고쳤다고
+    밝혀야 합니다.
+  * **2036년 8월 23일**부터 그 시점에 공개된 버전은 Apache-2.0이 됩니다.
+  * 개인 연구자와 비영리 목적에는 무상 또는 감면 라이선스를 검토합니다.
+    문의해 주세요.
+
+  라이선스 문의: simul@msimul.com
