@@ -1,9 +1,10 @@
 meteor-cfd
 Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
 
-Licensed under the Meteor Simulation Source-Available License, Version 1.0.
-See LICENSE. Educational use is free; research, publication and commercial use
-require a licence — simul@msimul.com.
+Licensed under the Meteor Simulation Source-Available License, Version 1.1.
+See LICENSE. Teaching and academic research at an educational institution are
+free, publication of academic results included; commercial and non-academic
+research require a licence — simul@msimul.com.
 
 ================================================================================
 Provenance
@@ -90,5 +91,5 @@ citation list is `rust/SPEC-LIT.md`; the principal sources are:
   Validation data: Ghia, Ghia & Shin (1982); Moser, Kim & Mansour (1999);
   Driver & Seegmiller (1985); McCaffrey (1979); Martin & Moyce (1952).
 
-Publishing a paper is not covered by the free educational grant; see section 2
-of LICENSE.
+Publishing academic results obtained with meteor-cfd is covered by the free
+Academic Use Grant, and requires acknowledgement — see section 2.5 of LICENSE.

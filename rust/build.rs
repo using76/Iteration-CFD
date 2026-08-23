@@ -1,6 +1,7 @@
 // meteor-cfd - Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
-// Source-available, not Open Source. Educational use is free; research,
-// publication and commercial use require a licence - simul@msimul.com
+// Source-available, not Open Source. Teaching and academic research are
+// free; commercial and non-academic research require a licence.
+// Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
 
 //! Compiles the CUDA C++ kernels in `cuda/` to CUBIN and embeds them in the
