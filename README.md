@@ -1,89 +1,161 @@
-# meteor-cfd — GPU-native finite volume CFD
+# meteor-cfd
 
-**주식회사 메테오시뮬레이션** 개발. Rust 호스트 + CUDA 커널. 메쉬와 필드를 한 번 올린 뒤 시간 루프
-전체가 device에 머무르는 것을 목표로 합니다.
+**GPU 상주 유한체적 전산유체역학 솔버**
 
-```
-rust/          호스트(Rust) + 커널(CUDA C++)
-rust/SPEC-LIT.md   수치 명세 — 모든 수식이 논문/교과서로 인용됨
-docs/          CFD 모델 카탈로그와 GPU 이식성 분류
-cases/         테스트 케이스
-tools/         볼륨 렌더러, 리포트 생성기
-third_party/   AMGX (BSD-3-Clause)
-reference/fds  FDS (NIST, 퍼블릭 도메인) — 참조용, 배포물 아님
-```
+주식회사 메테오시뮬레이션 · Rust 호스트 + CUDA 커널
+
+[English](README.en.md)
+
+---
+
+## 개요
+
+meteor-cfd는 시간 적분 루프 전체가 GPU에 머무르도록 설계된 비정렬 격자 유한체적
+CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 루프 안에서 장치 메모리
+할당도, 필드 데이터의 호스트 전송도 발생하지 않습니다.
+
+수치 코어 전체를 공개 문헌으로부터 직접 구현했으며, 모든 수식은
+[`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)에 원논문 인용과 함께 명세되어 있습니다.
+검증은 인위해법(MMS), 해석해, 공개 벤치마크만을 사용하며 다른 CFD 코드와
+비교하지 않습니다.
+
+| 항목 | |
+|---|---|
+| 언어 | Rust 1.85 (호스트) / CUDA C++ (커널) |
+| 정밀도 | 배정밀도 기본, `single` 기능으로 단정밀도 |
+| 대상 | NVIDIA GPU |
+| 의존성 | cudarc, thiserror (선택적 AMGX) |
+| 검증 | 503개 단위 시험, 198개 수치 검증 항목 |
 
 ---
 
 ## 라이선스
 
-**소스는 공개되지만 오픈소스는 아닙니다.**
+**소스는 공개하되 오픈소스는 아닙니다.**
 
-| | |
+| 용도 | 조건 |
 |---|---|
-| 교육 (수업·과제·실습·독학) | **무료** |
-| **학교 연구** — 대학·학교와 그 소속 연구소·연구실 | **무료** |
-| 그 연구 결과의 논문·학위논문·발표 | **무료** (출처 표기 조건) |
-| 기업 내부 연구개발 | 유상 |
-| 학교 밖 국가·정부출연 연구기관 | 유상 |
-| 컨설팅·수탁 연구·시험 대행 | 유상 |
-| 실제 제품·설비의 설계·인증·운용 | 유상 |
+| 교육 — 수업, 과제, 실습, 독학 | **무료** |
+| **학술 연구** — 대학·학교 및 그 소속 연구소·연구실 | **무료** |
+| 학술 연구 결과의 논문·학위논문·발표 | **무료** (출처 표기 조건) |
+| 기업 내부 연구개발 | 유상 라이선스 |
+| 학교에 속하지 않은 국가·정부출연 연구기관 | 유상 라이선스 |
+| 컨설팅, 수탁 연구, 시험 대행 | 유상 라이선스 |
+| 실제 제품·설비·시스템의 설계·인증·운용 | 유상 라이선스 |
 
-**라이선스 문의: simul@msimul.com**
+기업이 연구비를 지원하더라도 **결과를 공개 발표하는 연구는 무료 범위**입니다.
+결과가 비공개이거나 스폰서가 독점권을 갖는 수탁 연구만 유상 라이선스 대상입니다.
 
-기업이 연구비를 대더라도 **결과를 공개 발표하는 연구는 무료 범위**입니다.
-결과가 비공개이거나 스폰서가 독점권을 갖는 수탁 연구만 유상입니다.
-
-발표하실 때는 출처를 밝혀 주세요 — 요청이 아니라 조건입니다:
+연구 결과를 발표하실 때는 다음과 같이 출처를 표기해 주십시오. 이는 라이선스
+조건입니다.
 
 ```
 meteor-cfd, 주식회사 메테오시뮬레이션, https://github.com/using76/meteor-cfd
 ```
 
-국가연구소·병원 연구팀·비영리·대학 스핀오프처럼 경계가 애매하면 추측하지
-마시고 문의해 주세요. 실질이 상업적이지 않으면 무상 또는 감면을 검토합니다.
+국가연구소, 병원 연구팀, 비영리 기관, 대학 스핀오프 등 적용 범위가 불분명한
+경우 문의해 주시기 바랍니다. 실질이 상업적이지 않은 이용에 대해서는 무상 또는
+감면 라이선스를 검토합니다.
 
-**2036년 8월 23일**부터 그 시점에 공개된 버전은 Apache-2.0이 됩니다. 전문은
-[`LICENSE`](LICENSE), 서드파티 고지는 [`NOTICE`](NOTICE)에 있습니다.
+**라이선스 문의: simul@msimul.com**
 
-> 이 라이선스는 Business Source License 1.1의 구조를 따르지만 **BUSL이
-> 아닙니다.** BUSL은 모든 비생산 이용을 무료로 허용하고, 그 안에는 기업 내부
-> 연구개발이 들어갑니다. 여기서는 교육과 학교 연구만 무료입니다.
+2036년 8월 23일 이후, 해당 시점에 공개된 버전은 Apache License 2.0으로
+전환됩니다. 전문은 [`LICENSE`](LICENSE), 서드파티 고지는 [`NOTICE`](NOTICE)를
+참조하십시오.
 
----
-
-## 코드 출처
-
-수치 코드는 전부 **문헌에서 직접 구현**했습니다.
-
-- 모든 수식을 원논문으로 인용한 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)를
-  명세로 삼았고, 구현자는 그것만 봅니다.
-- 파일별 출처는 [`rust/PROVENANCE.md`](rust/PROVENANCE.md)에 있고, 53개 파일이
-  자기가 어느 논문에서 나왔는지와 `No GPL-licensed source was consulted.`를
-  헤더에 적습니다.
-- **검증은 다른 CFD 코드와 비교하지 않습니다.** 인위해(MMS), 해석해,
-  공개 벤치마크뿐입니다.
-- 의존성은 cudarc(MIT/Apache-2.0), thiserror, 선택적 AMGX(BSD-3절)뿐입니다.
-
-OpenFOAM ASCII 케이스 형식을 읽고 씁니다 — ParaView·`foamToVTK` 같은 기존
-도구를 그대로 쓰기 위한 상호운용이며, OpenFOAM의 어떤 부분과도 링크하지
-않고 그 소스를 포함하지도 않습니다. 파일 형식은 저작물이 아닙니다.
+> 본 라이선스는 Business Source License 1.1의 구조를 차용하였으나 BUSL이
+> 아닙니다. BUSL은 모든 비생산 이용을 무상으로 허용하며 여기에는 기업 내부
+> 연구개발이 포함됩니다. 본 라이선스에서 무상 범위는 교육과 학술 연구로
+> 한정됩니다.
 
 ---
 
-## 설정은 동작하거나, 시끄럽게 실패합니다
+## 기능
 
-조용한 대체가 없습니다. 케이스 파일의 모든 항목은 셋 중 하나입니다
-(`rust/SPEC-LIT.md` §13.4):
+### 이산화
+
+| 구분 | 지원 |
+|---|---|
+| 대류 항 | Gauss linear, upwind, linearUpwind, cubic, QUICK, Gamma, blended |
+| TVD 제한자 | minmod, van Leer, van Albada, Superbee, MUSCL, Sweby-φ |
+| 기울기 | Green–Gauss, 최소제곱, cellLimited·faceLimited (Barth–Jespersen, Venkatakrishnan) |
+| 면법선 기울기 | uncorrected, corrected, limited α |
+| 시간 적분 | steadyState, Euler, BDF2 (가변 시간간격 포함), 국소 시간전진 |
+| 확산 항 | 과이완(over-relaxed) 비직교 보정, 비직교 보정자 반복 |
+
+### 압력–속도 결합
+
+SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용하며, 체적력은
+셀 값을 보간하지 않고 면에서 직접 처리합니다.
+
+### 난류 모형
+
+| 구분 | 모형 |
+|---|---|
+| RANS | 표준 k-ε, Wilcox k-ω, Menter k-ω SST |
+| LES | Smagorinsky, WALE, Deardorff |
+| LES 여과폭 | 체적 세제곱근, 최대 모서리 길이, Scotti 이방성 보정, van Driest 감쇠 |
+| 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
+| 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
+| 부력 생성 | G_b 항 (Rodi 1987, Henkes et al. 1991) |
+
+### 다상 및 수송
+
+| 구분 | 지원 |
+|---|---|
+| VOF | 계면 압축, Zalesak FCT 유계화, 하위 순환, CSF 표면장력, p_rgh 정식화 |
+| 스칼라 수송 | 온도, 다성분 화학종 (질량분율 합 = 1 강제) |
+| 소스 항 | 체적 열원, 운동량 소스, Darcy–Forchheimer 다공성 저항 |
+| 부력 | 비Boussinesq 밀도비 `b = g(T_ref/T − 1)` |
+
+### 선형 해법
+
+| 구분 | 지원 |
+|---|---|
+| Krylov | PBiCGStab, PCG |
+| 전처리기 | 없음, Jacobi, 다색(multi-colour) DIC, 다색 DILU |
+| 압력 backend | 반복법, cuFFT 직접해, AMGX (선택적 기능) |
+| Backend 선택 | 적용 가능성 판정 → 정확도 검증 → 실측 시간 비교 |
+
+---
+
+## GPU 상주 설계
+
+메쉬와 필드를 한 번 업로드한 뒤 시간 루프 안에서 다음이 성립합니다.
+
+- `cudaMalloc` 호출 없음 — 모든 버퍼는 생성 시점에 일괄 할당
+- 필드 데이터의 `cudaMemcpy` 없음 — 필드, flux, 행렬 전부 장치 상주
+- Krylov 해법의 제어 스칼라(α, β, ω, ρ, 잔차)도 장치 메모리에 상주하며, 단일
+  스레드 커널이 갱신하고 axpy 커널이 장치 포인터로 직접 참조
+
+호스트로 전송되는 것은 다음 두 스칼라뿐입니다.
+
+| 항목 | 크기 | 시점 | 비활성화 |
+|---|---|---|---|
+| 선형 해법 수렴 플래그 | 4 B | `checkInterval` 반복마다 | `-fixedIters N` |
+| 잔차 기록 | 3 × 8 B | 방정식 해석 완료 시 | `-fixedIters N` |
+
+`-fixedIters` 지정 시 호스트 전송이 완전히 사라지며, 이 상태에서만 시간 단계
+전체를 CUDA Graph로 캡처할 수 있습니다.
+
+면 루프에서 대각 성분을 누적하는 연산은 모두 cell→face CSR을 통한 **gather**로
+구현하였습니다. 배정밀도 atomic 연산이 불필요하고, 합산 순서가 고정되어 결과가
+비트 단위로 재현됩니다.
+
+---
+
+## 케이스 설정 처리 원칙
+
+지원하지 않는 설정을 임의의 다른 값으로 대체하지 않습니다. 케이스 파일의 모든
+항목은 다음 세 가지 중 하나로 처리됩니다.
+
+| 상태 | 동작 |
+|---|---|
+| 지원하는 설정 | 그대로 적용 |
+| 인식되나 미구현 | 설정 이름과 사용 가능한 대안을 명시한 오류 |
+| 인식 불가 | 설정 이름을 명시한 오류 |
 
 ```
-인식되고 구현됨   -> 사용
-인식되나 미구현   -> 설정 이름과 대안을 밝힌 에러
-인식 안 됨        -> 설정 이름을 밝힌 에러
-```
-
-```
-$ ofgpu-k-epsilon case            # fvSchemes 에 `div(phi,k) Gauss totalGarbage;`
 error: divSchemes/div(phi,k): "Gauss totalGarbage" is not supported by ofgpu;
        available: Gauss linear, Gauss upwind, Gauss linearUpwind [grad],
        Gauss cubic, Gauss QUICK, Gauss QUICKUnlimited, Gauss Gamma <0.1..0.5>,
@@ -93,201 +165,135 @@ error: divSchemes/div(phi,k): "Gauss totalGarbage" is not supported by ofgpu;
   (run with -permissive to substitute Gauss upwind and continue)
 ```
 
-탈출구는 `-permissive` 하나뿐이고, **무엇으로 대체했는지 매번 출력합니다.**
-그럴듯한 틀린 답이 답이 없는 것보다 나쁘기 때문입니다.
+`-permissive` 옵션이 유일한 예외이며, 이 경우에도 대체한 내용을 매번 출력합니다.
 
-증거: 아래 여섯 스킴이 같은 케이스에서 각각 다른 결과를 냅니다. 예전에는
-전부 upwind와 비트 단위로 같았습니다.
+동일 케이스에서 이산화 기법만 변경하였을 때 각각 다른 결과가 산출됨을
+확인하였습니다.
 
-| fvSchemes | `0/k` 해시 |
+| `divSchemes` 항목 | `0/k` 해시 |
 |---|---|
 | `Gauss upwind` | `dec2a499fd69` |
 | `Gauss linear` | `4c774d8fd354` |
 | `Gauss vanLeer` | `e3315377c41a` |
 | `Gauss linearUpwind grad(U)` | `b9ce961dad61` |
 | `Gauss QUICK` | `05413b401b03` |
-| `Gauss totalGarbageScheme` | **에러, exit 1** |
+| `Gauss totalGarbageScheme` | 오류 종료 |
 
 ---
 
-## 무엇이 들어 있나
-
-| 영역 | |
-|---|---|
-| **이산화** | Gauss linear / upwind / linearUpwind / cubic / QUICK / Gamma / blended, TVD 리미터 6종 (minmod, van Leer, van Albada, Superbee, MUSCL, Sweby), bounded 보정 |
-| **기울기** | Green-Gauss, 최소제곱, cellLimited·faceLimited (Barth-Jespersen, Venkatakrishnan) |
-| **snGrad** | uncorrected / corrected / limited α |
-| **시간** | steadyState, Euler, BDF2 (가변 dt 포함), local time stepping. theta법은 구현됐으나 완화된 방정식에서 도달 불가 — 그 사실을 에러로 알립니다 |
-| **압력-속도** | SIMPLE, SIMPLEC, PISO, PIMPLE (외부 보정자, 마지막 반복에서 완화 해제) |
-| **난류 RAS** | k-ε, k-ω, **k-ω SST** |
-| **난류 LES** | **Smagorinsky, WALE, Deardorff** + 필터 폭 (cube-root, max-edge, Scotti 이방성, van Driest 감쇠, 평활화) |
-| **벽함수** | nutk, **nutU (Spalding 역해)**, **nutLowRe**, **거친 벽 (Cebeci-Bradshaw)**, epsilon, omega, kqR, **kLowRe** |
-| **벽거리** | **Poisson 방법 (Tucker 1998)** — SST와 van Driest가 필요로 함 |
-| **다상** | **VOF** — 계면 압축, Zalesak FCT 유계화, 서브사이클링, CSF 표면장력, p_rgh |
-| **수송** | 온도, **화학종 N종 (합=1 강제)**, **체적 소스, Darcy-Forchheimer** |
-| **부력** | 밀도비 `b = g(T_ref/T−1)`, **난류 생성항 G_b** |
-| **선형 솔버** | PBiCGStab, PCG, **다색 DIC / DILU**, AMGX (feature), cuFFT 직접해 |
-| **케이스 I/O** | OpenFOAM ASCII 형식, **정규식 패치 키** (`".*"`, `"(U\|k\|epsilon)"`) |
-
-굵은 항목이 이번에 추가된 것입니다.
-
----
-
-## 검증 — RTX 5070 Ti, double precision
+## 검증
 
 ```
-ofgpu-validate     198 / 198 checks passed
-cargo test         503 tests passed, 0 failed
+cargo test        503 passed, 0 failed
+ofgpu-validate    198 / 198 checks passed
 ```
 
-다른 CFD 코드와 비교하는 검사는 **하나도 없습니다.**
+### 수렴 차수 — 인위해법 (MMS)
 
-**수렴 차수** — 인위해(MMS), 격자를 절반으로:
+`−∇²ψ = f`, 격자 간격 1/2 세분화.
 
 | 격자 | 조격자 L2 | 세격자 L2 | 관측 차수 |
 |---|---|---|---|
-| 3-D graded (10³ → 20³) | 7.943e-3 | 1.857e-3 | **2.10** |
-| 3-D sheared (8³ → 16³) | 4.350e-3 | 1.154e-3 | **1.91** |
-| 2-D empty patches (16² → 32²) | 4.075e-3 | 9.711e-4 | **2.07** |
+| 3차원 비균일 (10³ → 20³) | 7.943 × 10⁻³ | 1.857 × 10⁻³ | **2.10** |
+| 3차원 전단 (8³ → 16³) | 4.350 × 10⁻³ | 1.154 × 10⁻³ | **1.91** |
+| 2차원 empty 패치 (16² → 32²) | 4.075 × 10⁻³ | 9.711 × 10⁻⁴ | **2.07** |
 
-**공개 벤치마크** — Ghia, Ghia & Shin, *JCP* 48 (1982) 387, 80×80 캐비티:
+### 공개 벤치마크
 
-| Re | SIMPLE 반복 | 최대 \|Δu\| | 최대 \|Δv\| |
-|---|---|---|---|
-| 100 | 3,000 | 0.0046 | 0.0088 |
-| 400 | 6,000 | 0.0067 | 0.0057 |
+**뚜껑구동 공동유동** — Ghia, Ghia & Shin (1982) Table I·II, 80 × 80 격자.
 
-Table II의 Re=400, x=0.9063 한 점(−0.23827)은 **논문의 오식**이라 제외했습니다.
-그 표 자체의 단조 구간을 깨고, Nilsson & Wallin (Uppsala 22015, 2022) §5.2도
-같은 이유로 제외합니다. 원표는 편집 없이 두고 출력에 표시만 합니다.
+| Re | SIMPLE 반복 | 운동량 잔차 | 최대 \|Δu\| | 최대 \|Δv\| |
+|---|---|---|---|---|
+| 100 | 3,000 | 1.011 × 10⁻⁴ | 0.0046 | 0.0088 |
+| 400 | 6,000 | 7.382 × 10⁻⁴ | 0.0067 | 0.0057 |
 
-**VOF** — 댐 붕괴 (6,000셀, 0.25초, 1,250스텝, 118초):
+Table II의 Re = 400, x = 0.9063 지점(−0.23827)은 논문의 오식으로 판단하여
+비교에서 제외하였습니다. 해당 값은 논문 자체 표의 단조 구간(x = 0.9453의
+−0.22847에서 최소값 x = 0.8594의 −0.44993으로 이어지는 구간)을 위배하며,
+Nilsson & Wallin (2022) §5.2도 동일한 사유로 제외합니다. 원표는 수정하지 않고
+보존하며 출력 시 해당 지점을 표시합니다.
+
+### VOF
+
+**댐 붕괴** — 6,000 셀, 0.25초, 1,250 시간단계, 118초 소요.
 
 ```
-phase volume 1.256250e-05 -> 1.256250e-05   (상대 변화 1.35e-16)
+phase volume 1.256250e-05 → 1.256250e-05    (상대 변화 1.35 × 10⁻¹⁶)
 alpha in [-4.163e-17, 1]
 ```
 
-| 검사 | 결과 |
+| 검증 항목 | 결과 |
 |---|---|
-| Zalesak 회전 슬롯 원반: `min α ≥ 0` | 1.7e-18 |
-| 같은 것: 상 체적 보존 | 3.9e-12 |
-| 정지 액적 Laplace 압력 `σ/R` | 4.888 대 5.000 (2.2 %) |
-| **밀폐 성층 탱크가 정지 유지** | max \|U\| 5.5e-11 m/s (√gH = 3.13) |
+| Zalesak 회전 슬롯 원반: min α ≥ 0 | 1.7 × 10⁻¹⁸ |
+| Zalesak 회전 슬롯 원반: 상 체적 보존 | 3.9 × 10⁻¹² |
+| 정지 액적 Laplace 압력 σ/R | 4.888 대 5.000 (오차 2.2 %) |
+| 밀폐 성층 탱크 정지 유지 | max \|U\| = 5.5 × 10⁻¹¹ m/s (√gH = 3.13) |
 
-마지막 것이 `p_rgh` 정식화가 옳다는 유일한 결정적 증거입니다 — 안 쓰면 즉시
-깨집니다.
+마지막 항목은 p_rgh 정식화의 타당성을 판정하는 결정적 시험입니다.
 
-**부력 생성항·소스·화학종**:
+### 부력 생성, 소스, 화학종
 
-| 검사 | 결과 |
+| 검증 항목 | 결과 |
 |---|---|
-| G_b 부호: 안정 성층 (dT/dz > 0) → 음수 | 정확 |
-| G_b 부호: 열원 위 (dT/dz < 0) → 양수 | 정확 |
-| G_b 크기 | 1.6e-14 |
-| 열원이 정확히 그 출력만큼 주입 | 2.3e-16 |
+| G_b 부호 — 안정 성층 (dT/dz > 0)에서 음수 | 일치 |
+| G_b 부호 — 열원 상부 (dT/dz < 0)에서 양수 | 일치 |
+| G_b 크기 | 1.6 × 10⁻¹⁴ |
+| 열원의 주입 열량 정확도 | 2.3 × 10⁻¹⁶ |
 | 화학종 질량분율 합 = 1 | 0.0 |
 
-**기계 정밀도** (발췌): 행렬 조립·완화·경계 folding·`Amul` 대 독립 CPU 구현
-~2e-16; PCG/PBiCGStab 대 조밀 직접해 2.8e-15 / 1.1e-15; cuFFT Poisson 대 같은
-행렬의 반복해 1.4e-15; 정수압 평형 6.6e-15.
+### 기계 정밀도 검증
+
+| 검증 항목 | 오차 |
+|---|---|
+| 행렬 조립 (대각·상·하·소스·경계계수) 대 독립 CPU 구현 | ~2 × 10⁻¹⁶ |
+| 저이완, 경계항 병합, 행렬–벡터 곱 | ~3 × 10⁻¹⁶ |
+| PCG / PBiCGStab 대 조밀 직접해 | 2.8 × 10⁻¹⁵ / 1.1 × 10⁻¹⁵ |
+| cuFFT Poisson 직접해 대 동일 행렬의 반복해 | 1.4 × 10⁻¹⁵ |
+| 정수압 평형 | 6.6 × 10⁻¹⁵ |
+
+CPU 참조 구현은 장치 코드가 gather 방식인 것과 달리 의도적으로 scatter 루프로
+작성하였습니다. 구조가 서로 다른 두 구현이 일치할 때 비로소 검증으로서 의미를
+갖습니다.
 
 ---
 
-## 무엇이 "GPU-native"인가
+## 성능
 
-메쉬와 필드를 한 번 올린 뒤, 시간 루프 안에서:
+측정 환경: NVIDIA GeForce RTX 5070 Ti (70 SM, 896 GB/s), 배정밀도.
 
-- `cudaMalloc` 없음 — 모든 버퍼는 생성 시점에 한 번만 할당
-- 필드 데이터의 `cudaMemcpy` 없음 — k, epsilon/omega, nut, U, phi, 행렬 전부 device 상주
-- Krylov 솔버의 alpha/beta/omega/rho 같은 **제어 스칼라도 device에 있습니다.**
-  1-스레드 커널이 계산하고 axpy 커널이 device 포인터로 바로 읽습니다.
+1회 외부 반복은 완전한 수송방정식 2개(조립, 저이완, 벽함수 구속, Krylov 해)에
+해당합니다.
 
-host로 넘어가는 것은 두 가지뿐이고, 둘 다 필드가 아니라 **스칼라**입니다.
-
-| What | Size | When | 끄는 법 |
-|---|---|---|---|
-| 선형 솔버 수렴 플래그 | 4 B | 솔버 반복 `checkInterval`회마다 | `-fixedIters N` |
-| 잔차 로그 (`initRes`, `finalRes`, `converged`) | 3 × 8 B | 방정식을 다 푼 뒤 | `SolverControls::report_residuals = false` |
-| 수렴 판정 `max dk/k` | 8 B | `-check N`회마다 | `-check`를 크게 |
-
-`-fixedIters N`을 주면 앞의 둘이 사라집니다. 이 상태라야 시간 스텝 전체를
-CUDA graph로 캡처할 수 있습니다.
-
-면 루프에서 `diag[owner[f]] -= ...` 로 **흩뿌리는(scatter)** 연산은 전부
-cell→face CSR을 통한 **모으기(gather)** 로 뒤집었습니다. double atomic이 필요
-없고, 합산 순서가 고정되어 결과가 비트 단위로 재현됩니다.
-
-## 압력 방정식 — 문제에 맞는 솔버를 골라냅니다
-
-`PressureBackend` 트레이트 뒤에 세 가지 구현이 있고, 선택은 추측이 아니라
-**측정**입니다.
-
-| Backend | 적용 조건 | 비고 |
-|---|---|---|
-| PBiCGStab / PCG | 항상 | 기본값 |
-| AMGX | 임의 비정렬 계 | BSD-3-Clause |
-| cuFFT 직접 해 | 균일 직교 격자 + 상수계수 + 분리 가능한 BC | 조건을 만족할 때만 |
-
-선택기는 (1) `applicable(&SystemProbe)`로 하드 필터를 걸고, (2) 정확도를
-검증하고, (3) 실제 시간을 재서 고릅니다. cuFFT는 상수계수 Poisson에서 25.2배
-빠르지만 SIMPLE의 압력 방정식은 `rAUf`가 셀마다 다르므로 선택기가 정확히
-거부합니다 — 이것이 이 설계의 핵심입니다.
-
-FFT 고유값은 연속형 `−k²`가 아니라 **이산형 `2(cosθ−1)/h²`** 를 씁니다. 그래야
-같은 2차 라플라시안의 정확한 역이 되어 이산화 오차가 아니라 round-off까지
-맞습니다 (`rust/SPEC-LIT.md` §8.5).
-
-## 부력
-
-Boussinesq는 `ΔT/T ≪ 1`을 요구하는데, 화재 플룸은 293 K 대 1173 K로
-`ΔT/T ≈ 3`입니다. 그래서 쓰지 않고 밀도비를 그대로 남깁니다:
-
-```
-b = g·(T_ref/T − 1)
-```
-
-`g = (0,0,−9.81)`, `T_ref = 293.15 K`, `T = 1173.15 K` → `b = (0,0,+7.36)`.
-`T = T_ref`에서 정확히 0입니다. 완전한 처리는 Rehm & Baum (1978)의 저마하
-정식화이고, 그것을 구현한 FDS가 `reference/fds`에 있습니다 (퍼블릭 도메인).
-
-## 성능 — RTX 5070 Ti (70 SM, 896 GB/s, double)
-
-한 번의 outer iteration은 완전한 수송방정식 두 개입니다 — 조립, 완화,
-벽함수 구속, Krylov 해.
-
-| Mesh | ms / iter (k-ε) | ms / iter (k-ω) | Mcell-iter/s | Device memory |
+| 격자 | k-ε (ms/iter) | k-ω (ms/iter) | Mcell-iter/s | 장치 메모리 |
 |---|---|---|---|---|
 | 80 k | 1.187 | 1.150 | 67 / 70 | 1.4 GB |
 | 500 k | 3.427 | 3.400 | 146 / 147 | 1.9 GB |
 | 2 M | 13.346 | 13.337 | 150 / 150 | 4.0 GB |
 
-작은 메쉬에서는 커널 실행 오버헤드가 지배하고, 500 k 이상에서 메모리 대역폭
-한계에 도달합니다.
+소규모 격자에서는 커널 실행 오버헤드가 지배적이며, 500 k 셀 이상에서 메모리
+대역폭 한계에 도달합니다.
 
-### CUDA Graph — 24 k 셀, 200 iteration
+### CUDA Graph
 
-| Mode | ms / iter | Mcell-iter/s |
+24,000 셀, 200회 외부 반복 기준.
+
+| 모드 | ms/iter | Mcell-iter/s |
 |---|---|---|
-| 적응형 (반복마다 4바이트 플래그) | 1.323 | 18.1 |
-| 고정 반복, per-launch | 1.191 | 20.1 |
-| 고정 반복, **CUDA graph** | **0.377** | **63.7** |
+| 적응형 (반복마다 4바이트 플래그 전송) | 1.323 | 18.1 |
+| 고정 반복, 커널 개별 실행 | 1.191 | 20.1 |
+| 고정 반복, **CUDA Graph** | **0.377** | **63.7** |
 
-**3.16배**입니다. 캡처와 instantiate는 0.46 ms, 한 번뿐입니다. 그리고 결과는
-per-launch 경로와 **24,000셀 전부가 비트 단위로 동일**합니다 — graph는 실행
-순서를 바꾸지 않고 실행 오버헤드만 없애기 때문입니다.
+**3.16배** 향상이며, 캡처 및 인스턴스화 비용은 0.46 ms로 1회에 그칩니다. 결과는
+개별 실행 경로와 24,000 셀 전부가 비트 단위로 일치합니다. Graph는 실행 순서를
+변경하지 않고 실행 오버헤드만 제거하기 때문입니다.
 
-작은 메쉬일수록 이득이 큽니다. 1.19 ms 중 0.81 ms가 순수 실행 오버헤드였다는
-뜻이고, 이것이 `-fixedIters`로 host 전송을 0으로 만드는 이유입니다 — 전송이
-남아 있으면 캡처가 불가능합니다.
+### 압력 backend 자동 선택
 
-### 압력 백엔드 선택 — 82,320셀 플룸 격자
-
-선택기가 실제로 측정한 것:
+82,320 셀 플룸 격자에서 선택기가 실측한 결과입니다.
 
 ```
 uniform cartesian    (98, 42, 20), h = (0.1494, 0.1486, 0.15)
-separable bcs        true      symmetric  true      constant coefficient  true
+separable bcs        true    symmetric  true    constant coefficient  true
 
   PBiCGStab   applicable    51.13 ms   (reference)      residual 7.19e-12
   cuFFT       applicable     2.05 ms   agrees to 8.0e-11
@@ -296,66 +302,27 @@ separable bcs        true      symmetric  true      constant coefficient  true
 chosen: cuFFT   —  25.0x
 ```
 
-전송을 끈 cuFFT는 **0.86 ms**까지 내려갑니다. 두 해의 상대 차이는 1.5e-14 —
-같은 행렬의 정확한 역이라는 뜻입니다.
+전송을 비활성화한 cuFFT는 0.86 ms까지 단축됩니다. 두 해의 상대 차이는
+1.5 × 10⁻¹⁴로, 동일 행렬의 정확한 역연산임을 의미합니다.
 
-이 25배는 **상수계수 Poisson에서만** 나옵니다. SIMPLE의 압력 방정식은 `rAUf`가
-셀마다 다르므로 선택기가 cuFFT를 정확히 거부합니다. 그게 이 설계의 요점입니다.
+이 성능 이득은 상수계수 Poisson 방정식에서만 성립합니다. SIMPLE의 압력
+방정식은 계수 `rAUf`가 셀마다 달라 선택기가 cuFFT를 배제합니다.
 
-## 런타임 선택은 공짜인가
+### 실행시간 분기 비용
 
-측정했습니다 (`cargo run --release --bin ofgpu-dispatch-bench`).
-
-| Granularity | 비용 |
+| 분기 단위 | 비용 |
 |---|---|
-| 커널 **실행**당 가상 호출 | 측정 불가 수준 (노이즈 내) |
-| **요소**당 가상 호출 | 1.75–1.80배 느림 |
+| 커널 실행당 가상 호출 | 측정 한계 이하 |
+| 요소당 가상 호출 | 1.75 – 1.80배 |
 
-이 솔버의 모든 런타임 선택 — SIMPLE/PISO, k-ε/k-ω/SST, 솔버 백엔드 — 은 실행
-단위에 있습니다. 조합마다 빌드할 필요가 없습니다.
-
----
-
-## 문서
-
-| File | Contents |
-|---|---|
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | **수치 명세.** 모든 수식이 논문/교과서로 인용됨. 구현자는 이것만 봅니다 |
-| [`rust/PROVENANCE.md`](rust/PROVENANCE.md) | **파일별 출처.** 어느 파일이 어느 논문에서 나왔는지, 무엇이 우리 설계인지 |
-| [`LICENSING.md`](LICENSING.md) | 라이선스 감사와 재작성 계획 |
-| `docs/01-model-catalog.md` | CFD 모델 전수 목록 (1,823개 구성요소) |
-| `docs/02-gpu-portability.md` | 같은 구성요소들의 GPU 이식 등급 (A~E)과 맞는 NVIDIA 라이브러리 |
-| `docs/03-esi-vs-foundation.md` | 두 상류 배포판의 모델 구성 차이 |
-| `cases/README.md` | 테스트 케이스별 기하·속도장 설명 |
-
-`docs/01`과 `02`는 `docs/_build_catalog.py`가 조사 에이전트들의 구조화된
-출력에서 **결정적으로** 생성합니다. 요약이 아니라
-전수입니다 — 데이터의 모든 항목이 정확히 한 행이 됩니다.
-
-### GPU 이식성 분류 — 구성요소 1,824개
-
-| Tier | 뜻 | 맞는 라이브러리 | 개수 |
-|---|---|---|---:|
-| **A-trivial** | 요소별 또는 면 스텐실. 순수 CUDA 커널로 device 상주 가능 | 없음 (직접 커널) | 899 |
-| **B-sparse-solve** | 비용이 sparse 선형해에 지배됨. 조립부는 A등급 | AMGX, cuDSS, cuSPARSE | 85 |
-| **C-fft** | 스펙트럴/합성곱 | cuFFT | 7 |
-| **D-hard** | 불규칙·직렬·위상변경·탐색 위주 | — | 214 |
-| **E-cpu-only** | I/O, 딕셔너리, 런타임 선택, 분할 설정 | — | 619 |
-
-**A + B = 984개 (54 %)** 가 완전 device 상주 경로에 올라가고, 난류 모델 전체와
-압력 방정식이 그 안에 있습니다. E등급 619개는 애초에 시간 루프 안에 없습니다.
-실제로 시간 루프를 막는 것은 **D등급 214개**, 대부분 Lagrangian 추적과 메쉬
-위상 변경입니다.
-
-`cuFFT`가 맞는 곳이 7개뿐인 것은 비정렬 격자 FV 코드의 핵심 루프에 FFT가 없기
-때문입니다. `cuDSS`는 큰 압력계가 아니라 셀별 화학 반응 Jacobian 같은 작은
-dense 계가 표적입니다.
+본 solver의 모든 실행시간 선택(SIMPLE/PISO, 난류 모형, 해법 backend)은 커널 실행
+단위에서 이루어지므로 조합별 빌드가 불필요합니다.
 
 ---
 
 ## 빌드
 
-필요한 것: Rust 1.85 stable, Visual Studio 2022 (C++ 워크로드), CUDA Toolkit 13.x.
+요구사항: Rust 1.85 이상, Visual Studio 2022 (C++ 워크로드), CUDA Toolkit 13.x.
 
 ```powershell
 cd rust
@@ -363,83 +330,285 @@ cargo build --release
 cargo test  --release
 ```
 
-`build.rs`가 `vcvars64.bat`을 실행해 MSVC 환경을 잡고, `nvcc`로 각 `.cu`를
-**CUBIN**(PTX 아님)으로 컴파일해 `OUT_DIR`에 넣습니다. 드라이버가 보고하는 CUDA
-버전보다 툴킷이 새로우면 PTX는 `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`으로 죽기
-때문입니다.
+`build.rs`가 `vcvars64.bat`을 실행하여 MSVC 환경을 구성하고, 각 `.cu` 파일을
+PTX가 아닌 **CUBIN**으로 컴파일합니다. 드라이버가 보고하는 CUDA 버전보다 툴킷이
+최신인 경우 PTX는 `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`으로 실패하기 때문입니다.
 
-`-Xcompiler=/Zc:preprocessor`가 필요합니다 — CUDA 13의 CCCL 헤더가 MSVC의
-전통적 전처리기에서 `fatal error C1189`를 냅니다.
+CUDA 13의 CCCL 헤더가 MSVC 전통 전처리기에서 `fatal error C1189`를 발생시키므로
+`-Xcompiler=/Zc:preprocessor`를 지정합니다.
 
-| Binary | Purpose |
+### 실행 파일
+
+| 실행 파일 | 용도 |
 |---|---|
-| `ofgpu-validate` | GPU 커널 대 독립 CPU 구현, MMS 수렴 차수 |
-| `ofgpu-bench` | 처리량·메모리 벤치마크 |
-| `ofgpu-graph-bench` | CUDA graph 캡처 대 스트림 실행 |
-| `ofgpu-dispatch-bench` | 런타임 선택의 실제 비용 |
-| `ofgpu-probe` | 장치 속성과 최소 커널 왕복 |
-| `ofgpu-generate-mesh` | 바로 실행 가능한 케이스 생성 |
-| `ofgpu-k-epsilon`, `ofgpu-k-omega` | 난류 모델 단독 실행 |
+| `ofgpu-validate` | 수치 검증 (198개 항목) |
+| `ofgpu-bench` | 처리량 및 메모리 벤치마크 |
+| `ofgpu-graph-bench` | CUDA Graph 대 개별 실행 비교 |
+| `ofgpu-dispatch-bench` | 실행시간 분기 비용 측정 |
+| `ofgpu-probe` | 장치 속성 조회 |
+| `ofgpu-generate-mesh` | 케이스 생성 |
+| `ofgpu-k-epsilon`, `ofgpu-k-omega` | 난류 모형 단독 실행 |
 | `ofgpu-plume`, `ofgpu-buoyant` | 부력 플룸 |
-| `ofgpu-vof` | 2상 VOF (댐 붕괴) |
+| `ofgpu-vof` | 2상 VOF |
+
+---
 
 ## 실행
 
 ```powershell
 cd rust
-cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 120 1
-cargo run --release --bin ofgpu-k-epsilon    -- ..\cases\channel -iters 4000 -check 400
-cargo run --release --bin ofgpu-k-omega      -- ..\cases\channelKW -iters 4000 -check 400
-cargo run --release --bin ofgpu-generate-mesh -- damBreak ..\cases\damBreak 60 100 1
-cargo run --release --bin ofgpu-vof          -- ..\cases\damBreak -endTime 0.25 -surge
+cargo run --release --bin ofgpu-generate-mesh -- channel  ..\cases\channel  200 120 1
+cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
+cargo run --release --bin ofgpu-generate-mesh -- damBreak ..\cases\damBreak  60 100 1
+cargo run --release --bin ofgpu-vof           -- ..\cases\damBreak -endTime 0.25 -surge
 cargo run --release --bin ofgpu-validate
 ```
 
-| Flag | Meaning |
+| 옵션 | 설명 |
 |---|---|
-| `-iters N` | outer iteration 수 (기본값은 `controlDict`의 `endTime`) |
-| `-fixedIters N` | 선형 솔버를 정확히 N번 돌리고 잔차를 읽지 않음 — host 전송 0 |
+| `-iters N` | 외부 반복 횟수 (기본값은 `controlDict`의 `endTime`) |
+| `-fixedIters N` | 선형 해법을 정확히 N회 실행하고 잔차를 읽지 않음 (호스트 전송 없음) |
 | `-check N` | N회마다 수렴 판정 |
-| `-write NAME` | 결과를 쓸 시간 디렉터리 |
-| `-noWrite` | 결과를 쓰지 않음 (타이밍용) |
-| `-permissive` | 지원하지 않는 설정을 에러 대신 경고로 낮추고, **무엇으로 대체했는지 출력** |
+| `-write NAME` | 결과 출력 시간 디렉터리 |
+| `-noWrite` | 결과를 기록하지 않음 |
+| `-permissive` | 미지원 설정을 오류 대신 경고로 처리하고 대체 내용을 출력 |
 
 생성 가능한 케이스: `channel`, `cavity`, `step`, `big`, `plume`, `damBreak`.
 
-난류 모델은 `constant/momentumTransport`의 `RAS { model ...; }` 또는
-`simulationType LES;`가 정합니다 — 어느 바이너리를 실행했느냐가 아니라.
-없는 이름을 쓰면 있는 목록을 알려주는 에러가 납니다.
+난류 모형은 `constant/momentumTransport`의 `RAS { model ...; }` 또는
+`simulationType LES;`로 지정합니다. 미지원 모형명을 지정하면 사용 가능한 목록을
+포함한 오류가 발생합니다.
 
-케이스는 **OpenFOAM ASCII 형식**으로 읽고 씁니다 — `constant/polyMesh`, `0/`,
+케이스는 OpenFOAM ASCII 형식으로 읽고 씁니다 — `constant/polyMesh`, `0/`,
 `constant/physicalProperties`, `constant/momentumTransport`,
-`system/{fvSolution,fvSchemes,controlDict}`. 기존 도구 체인(ParaView,
-`foamToVTK`)을 그대로 쓸 수 있게 하려는 상호운용 목적이며, ofgpu는 OpenFOAM의
-어떤 부분과도 링크하지 않습니다. 바이너리 케이스는 먼저 ASCII로 변환해야 합니다.
+`system/{fvSolution, fvSchemes, controlDict}`. 이는 ParaView, `foamToVTK` 등
+기존 전·후처리 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떠한
+부분과도 링크하지 않고 그 소스를 포함하지 않습니다. 바이너리 형식 케이스는
+ASCII로 변환한 뒤 사용하십시오.
 
 ---
 
-## 지금 하지 않는 것
+## 문서
 
-- **MPI 다중 GPU는 없습니다.** 단일 GPU 전용입니다.
-- **AMGX는 빌드해 두었으나 `amgx` Cargo feature가 기본 비활성입니다.**
-  NVIDIA의 Windows 지원이 제한적이고 검증된 최신 툴킷이 CUDA 12.2인데 이
-  기계는 13.3입니다. 꺼진 상태에서도 선택기는 AMGX를 "unavailable"로
-  **보고합니다** — 후보가 아니었던 척하지 않습니다.
-- **Crank-Nicolson은 구현됐지만 완화된 방정식에서 도달할 수 없습니다.**
-  theta 가중과 암시적 완화가 조립의 같은 자리를 원하고, 완화는 가중되지 않은
-  대각을 봐야 합니다. 조용히 Euler로 떨어뜨리지 않고 그 사실을 에러로
-  알립니다.
-- **압축성·천음속은 없습니다.** `fv.rs`에 밀도 가중 시간미분이 있고 VOF가
-  쓰지만, 압력 방정식은 비압축성입니다.
-- **화학반응·복사는 없습니다.** 체적 소스로 열 방출은 넣을 수 있습니다.
-- **cyclic 패치의 비직교 보정 벡터가 없습니다.** 직교 메쉬에서는 영향 없음.
+| 파일 | 내용 |
+|---|---|
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세. 모든 수식의 원논문 인용 포함 |
+| [`rust/PROVENANCE.md`](rust/PROVENANCE.md) | 파일별 출처 및 설계 결정 기록 |
+| [`LICENSING.md`](LICENSING.md) | 라이선스 감사 기록 |
+| `docs/01-model-catalog.md` | CFD 구성요소 목록 (1,823항목) |
+| `docs/02-gpu-portability.md` | GPU 이식성 등급 분류 |
+| `docs/03-esi-vs-foundation.md` | 상류 배포판 간 모형 구성 차이 |
+| `cases/README.md` | 시험 케이스 형상 설명 |
 
-## 라이선스 문의
+---
+
+## 제한사항
+
+- **MPI 다중 GPU를 지원하지 않습니다.** 단일 GPU 전용입니다.
+- **AMGX는 `amgx` Cargo 기능으로 제공되며 기본 비활성 상태입니다.** NVIDIA의
+  Windows 지원 범위가 제한적이고 검증된 최신 툴킷이 CUDA 12.2인 반면 개발 환경은
+  13.3입니다. 비활성 상태에서도 backend 선택기는 AMGX를 "unavailable"로 명시
+  보고합니다.
+- **Crank–Nicolson은 구현되었으나 저이완 방정식에서 사용할 수 없습니다.** θ
+  가중과 암시적 저이완이 조립 과정의 동일 위치를 요구하며, 저이완은 가중되지 않은
+  대각 성분을 참조해야 하기 때문입니다. 묵시적으로 Euler로 대체하지 않고 해당
+  사유를 오류로 보고합니다.
+- **압축성 및 천음속 해석을 지원하지 않습니다.** 밀도 가중 시간미분은 구현되어
+  VOF에서 사용되나, 압력 방정식은 비압축성입니다.
+- **화학반응 및 복사 전달을 지원하지 않습니다.** 체적 소스를 통한 열 방출
+  모델링은 가능합니다.
+- **cyclic 패치의 비직교 보정 벡터가 없습니다.** 직교 격자에서는 영향이 없습니다.
+
+---
+
+## 참고문헌
+
+수치 기법과 모형의 출처입니다. 절 번호는 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)
+기준입니다.
+
+### 유한체적 이산화
+
+- Jasak, H. (1996). *Error Analysis and Estimation for the Finite Volume Method
+  with Applications to Fluid Flows.* PhD thesis, Imperial College London. — §2, §3
+- Moukalled, F., Mangani, L., & Darwish, M. (2016). *The Finite Volume Method in
+  Computational Fluid Dynamics.* Springer. — §2, §3, §11
+- Ferziger, J. H., & Perić, M. *Computational Methods for Fluid Dynamics.*
+  Springer. — §2.4, §3.3, §11.1, §11.5
+- Patankar, S. V. (1980). *Numerical Heat Transfer and Fluid Flow.* Hemisphere.
+  — §3.4, §5.2, §18
+
+### 대류 이산화 기법
+
+- Warming, R. F., & Beam, R. M. (1976). Upwind second-order difference schemes
+  and applications in aerodynamic flows. *AIAA Journal*, 14(9), 1241–1249. — §11.2
+- Leonard, B. P. (1979). A stable and accurate convective modelling procedure
+  based on quadratic upstream interpolation. *Computer Methods in Applied
+  Mechanics and Engineering*, 19(1), 59–98. — §11.3
+- Khosla, P. K., & Rubin, S. G. (1974). A diagonally dominant second-order
+  accurate implicit scheme. *Computers & Fluids*, 2(2), 207–209. — §11.1
+- Jasak, H., Weller, H. G., & Gosman, A. D. (1999). High resolution NVD
+  differencing scheme for arbitrarily unstructured meshes. *International Journal
+  for Numerical Methods in Fluids*, 31(2), 431–449. — §11.6
+- Sweby, P. K. (1984). High resolution schemes using flux limiters for hyperbolic
+  conservation laws. *SIAM Journal on Numerical Analysis*, 21(5), 995–1011. — §7
+- van Leer, B. (1977). Towards the ultimate conservative difference scheme IV.
+  A new approach to numerical convection. *Journal of Computational Physics*,
+  23(3), 276–299. — §7
+- van Leer, B. (1979). Towards the ultimate conservative difference scheme V.
+  A second-order sequel to Godunov's method. *Journal of Computational Physics*,
+  32(1), 101–136. — §7
+- van Albada, G. D., van Leer, B., & Roberts, W. W. (1982). A comparative study
+  of computational methods in cosmic gas dynamics. *Astronomy and Astrophysics*,
+  108, 76–84. — §7
+- Roe, P. L. (1986). Characteristic-based schemes for the Euler equations.
+  *Annual Review of Fluid Mechanics*, 18, 337–365. — §7
+- Darwish, M., & Moukalled, F. (2003). TVD schemes for unstructured grids.
+  *International Journal of Heat and Mass Transfer*, 46(4), 599–611. — §7
+
+### 기울기 및 제한자
+
+- Barth, T. J., & Jespersen, D. C. (1989). The design and application of upwind
+  schemes on unstructured meshes. *AIAA Paper 89-0366.* — §12.2
+- Venkatakrishnan, V. (1993). On the accuracy of limiters and convergence to
+  steady state solutions. *AIAA Paper 93-0880.* — §12.2
+
+### 시간 적분
+
+- Crank, J., & Nicolson, P. (1947). A practical method for numerical evaluation
+  of solutions of partial differential equations of the heat-conduction type.
+  *Mathematical Proceedings of the Cambridge Philosophical Society*, 43(1),
+  50–67. — §13.1
+
+### 압력–속도 결합
+
+- Patankar, S. V., & Spalding, D. B. (1972). A calculation procedure for heat,
+  mass and momentum transfer in three-dimensional parabolic flows.
+  *International Journal of Heat and Mass Transfer*, 15(10), 1787–1806. — §5.2
+- Van Doormaal, J. P., & Raithby, G. D. (1984). Enhancements of the SIMPLE method
+  for predicting incompressible fluid flows. *Numerical Heat Transfer*, 7(2),
+  147–163. — §5.3
+- Issa, R. I. (1986). Solution of the implicitly discretised fluid flow equations
+  by operator-splitting. *Journal of Computational Physics*, 62(1), 40–65.
+  — §5.4, §14
+- Rhie, C. M., & Chow, W. L. (1983). Numerical study of the turbulent flow past
+  an airfoil with trailing edge separation. *AIAA Journal*, 21(11), 1525–1532.
+  — §5.1
+
+### 난류 모형 — RANS
+
+- Launder, B. E., & Spalding, D. B. (1974). The numerical computation of
+  turbulent flows. *Computer Methods in Applied Mechanics and Engineering*, 3(2),
+  269–289. — §6.1, §6.4
+- Wilcox, D. C. *Turbulence Modeling for CFD.* DCW Industries. — §6.2
+- Menter, F. R. (1994). Two-equation eddy-viscosity turbulence models for
+  engineering applications. *AIAA Journal*, 32(8), 1598–1605. — §6.3
+- Menter, F. R., Kuntz, M., & Langtry, R. (2003). Ten years of industrial
+  experience with the SST turbulence model. *Turbulence, Heat and Mass Transfer*,
+  4, 625–632. — §6.3
+
+### 난류 모형 — LES
+
+- Smagorinsky, J. (1963). General circulation experiments with the primitive
+  equations. *Monthly Weather Review*, 91(3), 99–164. — §6.5
+- Deardorff, J. W. (1970). A numerical study of three-dimensional turbulent
+  channel flow at large Reynolds numbers. *Journal of Fluid Mechanics*, 41(2),
+  453–480. — §16.1
+- Deardorff, J. W. (1980). Stratocumulus-capped mixed layers derived from a
+  three-dimensional model. *Boundary-Layer Meteorology*, 18(4), 495–527. — §6.5
+- Nicoud, F., & Ducros, F. (1999). Subgrid-scale stress modelling based on the
+  square of the velocity gradient tensor. *Flow, Turbulence and Combustion*,
+  62(3), 183–200. — §6.5
+- van Driest, E. R. (1956). On turbulent flow near a wall. *Journal of the
+  Aeronautical Sciences*, 23(11), 1007–1011. — §16.4
+- Scotti, A., Meneveau, C., & Lilly, D. K. (1993). Generalized Smagorinsky model
+  for anisotropic grids. *Physics of Fluids A*, 5(9), 2306–2308. — §16.3
+
+### 벽 처리
+
+- Spalding, D. B. (1961). A single formula for the law of the wall. *Journal of
+  Applied Mechanics*, 28(3), 455–458. — §6.4, §15.1
+- Cebeci, T., & Bradshaw, P. (1977). *Momentum Transfer in Boundary Layers.*
+  Hemisphere. — §15.3
+- Tucker, P. G. (1998). Assessment of geometric multilevel convergence robustness
+  and a wall distance method for flows with multiple internal boundaries.
+  *Applied Mathematical Modelling*, 22(4–5), 293–305. — §6.6
+
+### 부력
+
+- Rehm, R. G., & Baum, H. R. (1978). The equations of motion for thermally driven
+  buoyant flows. *Journal of Research of the National Bureau of Standards*,
+  83(3), 297–308. — §9
+- Spiegel, E. A., & Veronis, G. (1960). On the Boussinesq approximation for a
+  compressible fluid. *Astrophysical Journal*, 131, 442–447. — §9
+- Rodi, W. (1987). Examples of calculation methods for flow and mixing in
+  stratified fluids. *Journal of Geophysical Research*, 92(C5), 5305–5328. — §17
+- Henkes, R. A. W. M., van der Vlugt, F. F., & Hoogendoorn, C. J. (1991).
+  Natural-convection flow in a square cavity calculated with low-Reynolds-number
+  turbulence models. *International Journal of Heat and Mass Transfer*, 34(2),
+  377–388. — §17
+
+### 다상 유동
+
+- Hirt, C. W., & Nichols, B. D. (1981). Volume of fluid (VOF) method for the
+  dynamics of free boundaries. *Journal of Computational Physics*, 39(1),
+  201–225. — §20.1
+- Zalesak, S. T. (1979). Fully multidimensional flux-corrected transport
+  algorithms for fluids. *Journal of Computational Physics*, 31(3), 335–362.
+  — §20.2
+- Brackbill, J. U., Kothe, D. B., & Zemach, C. (1992). A continuum method for
+  modeling surface tension. *Journal of Computational Physics*, 100(2), 335–354.
+  — §20.4
+- Ubbink, O. (1997). *Numerical Prediction of Two Fluid Systems with Sharp
+  Interfaces.* PhD thesis, Imperial College London. — §20.1
+- Rusche, H. (2002). *Computational Fluid Dynamics of Dispersed Two-Phase Flows
+  at High Phase Fractions.* PhD thesis, Imperial College London. — §20.1
+
+### 선형 해법
+
+- Saad, Y. (2003). *Iterative Methods for Sparse Linear Systems*, 2nd ed. SIAM.
+  — §8, §21
+- van der Vorst, H. A. (1992). Bi-CGSTAB: a fast and smoothly converging variant
+  of Bi-CG for the solution of nonsymmetric linear systems. *SIAM Journal on
+  Scientific and Statistical Computing*, 13(2), 631–644. — §8.1
+- Hestenes, M. R., & Stiefel, E. (1952). Methods of conjugate gradients for
+  solving linear systems. *Journal of Research of the National Bureau of
+  Standards*, 49(6), 409–436. — §8.2
+- Swarztrauber, P. N. (1977). The methods of cyclic reduction, Fourier analysis
+  and the FACR algorithm for the discrete solution of Poisson's equation on a
+  rectangle. *SIAM Review*, 19(3), 490–501. — §8.5
+- Stüben, K. (2001). A review of algebraic multigrid. *Journal of Computational
+  and Applied Mathematics*, 128(1–2), 281–309. — §8.3
+
+### 다공성 매질
+
+- Ward, J. C. (1964). Turbulent flow in porous media. *Journal of the Hydraulics
+  Division, ASCE*, 90(5), 1–12. — §18
+
+### 검증 데이터
+
+- Ghia, U., Ghia, K. N., & Shin, C. T. (1982). High-Re solutions for
+  incompressible flow using the Navier–Stokes equations and a multigrid method.
+  *Journal of Computational Physics*, 48(3), 387–411.
+- Moser, R. D., Kim, J., & Mansour, N. N. (1999). Direct numerical simulation of
+  turbulent channel flow up to Re_τ = 590. *Physics of Fluids*, 11(4), 943–945.
+- Driver, D. M., & Seegmiller, H. L. (1985). Features of a reattaching turbulent
+  shear layer in divergent channel flow. *AIAA Journal*, 23(2), 163–171.
+- McCaffrey, B. J. (1979). *Purely Buoyant Diffusion Flames: Some Experimental
+  Results.* NBSIR 79-1910, National Bureau of Standards.
+- Martin, J. C., & Moyce, W. J. (1952). An experimental study of the collapse of
+  liquid columns on a rigid horizontal plane. *Philosophical Transactions of the
+  Royal Society A*, 244(882), 312–324.
+- Nilsson, A., & Wallin, S. (2022). *Lid Driven Cavity Flow Using Finite
+  Difference and Radial Basis Function Methods.* Uppsala University report 22015.
+
+---
+
+## 문의
 
 **simul@msimul.com**
 
 주식회사 메테오시뮬레이션 / Meteo Simulation Co., Ltd.
 
-교육과 **학교 연구**는 무료입니다. 기업 연구개발, 학교 밖 연구기관, 수탁·상업
-이용은 라이선스가 필요합니다 — [`LICENSE`](LICENSE) 제2·3절. 경계가 애매하면
-문의해 주세요.
+교육과 학술 연구는 무료입니다. 기업 연구개발, 학교에 속하지 않은 연구기관, 수탁
+및 상업적 이용은 별도 라이선스가 필요합니다 — [`LICENSE`](LICENSE) 제2·3절.
+적용 범위가 불분명한 경우 문의해 주시기 바랍니다.
