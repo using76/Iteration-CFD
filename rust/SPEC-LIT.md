@@ -1542,3 +1542,111 @@ Extends §10. Same rule: **no test compares against another CFD code.**
 | Backward-facing step | **Driver & Seegmiller, *AIAA J.* 23 (1985) 163** | reattachment length |
 | Buoyant plume | **McCaffrey, NBS TN 910 (1979)** | centreline decay |
 | Dam break | **Martin & Moyce, *Phil. Trans. R. Soc. A* 244 (1952) 312** | surge front position vs time |
+
+---
+
+## 23. Surface intake and castellated meshing
+
+The first stage of the surface-driven mesh path (docs/05-io-redesign.md §4.3):
+triangulated surfaces in, a stair-step (castellated) Cartesian mesh out. The
+cut-cell stage comes later and is specified separately; castellation alone is
+a 20-year production precedent — FDS models obstructions exactly this way
+(`&OBST`, and `&GEOM` surfaces voxelised onto the structured grid; NIST,
+public domain).
+
+### 23.1 STL — the format
+
+De facto public specification (3D Systems, 1987); no licence encumbrance.
+
+```
+binary : 80-byte header (ignore; must NOT start with "solid" ambiguity — see
+         below), uint32 triangle count, then per triangle 50 bytes:
+         float32 normal[3], float32 v0[3], v1[3], v2[3], uint16 attribute.
+         Little-endian throughout.
+ascii  : solid <name> / facet normal nx ny nz / outer loop / vertex x y z ×3 /
+         endloop / endfacet ... endsolid
+```
+
+Detection: a file is ASCII only if it starts with "solid" AND parses as ASCII;
+binary files sometimes start with "solid" in the comment header, so on parse
+failure fall back to binary. Stored normals are untrustworthy — recompute from
+the winding `(v1-v0)×(v2-v0)` and ignore the stored one.
+
+**Patch identity** (docs/05 §4.2): one patch per `solid` name in an ASCII
+file; for a binary file (which has no name) the FILE STEM is the patch name;
+multiple `-stl` arguments merge into one Surface with distinct patches. The
+`bc_` prefix convention applies when surfaces arrive from DCC tools.
+
+*DESIGN*: vertices are welded by exact bit-equality only (STL repeats each
+vertex per triangle; files written by one tool repeat bit-identical
+coordinates). No epsilon welding — an epsilon is a silent geometry edit.
+
+### 23.2 Validation before use
+
+A surface that will classify inside/outside must be closed. Check by edge
+counting: every undirected edge must appear exactly twice with opposite
+orientations. Report the number of open and non-manifold edges and REFUSE a
+non-closed surface (SPEC-LIT §13.4 contract; `-permissive` downgrades to a
+warning and uses parity voting, §23.3). Degenerate triangles (zero area at
+f64) are dropped with a count.
+
+### 23.3 Inside/outside classification
+
+Column-parity ray casting, the standard voxelizer construction:
+
+```
+for each grid column (fixed y_j, z_k), cast the line x = t through the
+triangle soup; collect crossings t_i with watertight ray-triangle
+intersection; sort; between consecutive crossings the parity says
+inside/outside; cell centres in the column inherit the classification.
+```
+
+Robustness rules:
+- ray–vertex and ray–edge hits are resolved by simulation-of-simplicity: use
+  the parity of a ray jittered by an irrational offset within the cell, retry
+  with a different offset on disagreement, and take a 3-axis majority vote for
+  any cell whose x/y/z column classifications disagree.
+- the reference for why parity + voting is preferred over signed normals:
+  generalized winding numbers (Barill, Dickson, Schmidt, Levin & Jacobson,
+  *ACM TOG* 37(4), 2018) tolerate imperfect surfaces; the exact solid-angle
+  winding number is the arbiter for cells the vote cannot settle (rare, so
+  the O(tris) cost per arbitrated cell is acceptable).
+
+Castellation context: Aftosmis, Berger & Melton, *AIAA J.* 36(6) (1998) 952 —
+this section implements their "castellate" stage only.
+
+### 23.4 Carving the block mesh
+
+Input: a structured Cartesian block (§ blockgen) plus the solid mask of
+§23.3. Output: a HostMesh-compatible polyMesh containing only fluid cells.
+
+```
+renumber fluid cells in (i fastest, j, k) order
+internal faces: between two fluid cells, owner = lower index (upper-
+                triangular ordering preserved)
+boundary faces: fluid cell against (a) domain boundary — keep the block's
+                patch; (b) solid cell — NEW patch, named for the surface
+                patch of the nearest triangle to the face centre
+```
+
+Nearest-triangle queries use a uniform grid bucket over the surface bounding
+box (cell size ~ the mesh spacing); no tree needed at these sizes.
+
+*DESIGN*: faces carved against solid cells are `wall` type. Field files get
+the same wall boundary conditions blockgen already writes for walls (noSlip,
+nutkWallFunction, ...), so a carved case runs unmodified.
+
+### 23.5 What castellation must satisfy
+
+| Check | Expected |
+|---|---|
+| axis-aligned cuboid STL, grid-aligned | carved cell count EXACTLY equals the analytic count |
+| sphere of radius r | volume error O(h), first order — castellation's honest accuracy |
+| face closure on the carved mesh | round-off, same as §10 |
+| MMS on a carved mesh | 2nd order in the fluid interior |
+| open surface | refused, with the open-edge count |
+| solver on a carved case | runs, converges, no NaN |
+
+Castellation is FIRST-ORDER at the boundary (stair steps). That is the
+documented trade until the cut-cell stage exists, and it is exactly what FDS
+shipped for two decades.
