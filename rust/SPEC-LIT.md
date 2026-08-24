@@ -25,6 +25,26 @@ Rules for anyone implementing from this document:
    directly.** `reference/fds` is a work of the US Government (NIST) and is in
    the public domain; reading and adapting it is unrestricted. AMGX, Nek5000,
    PyFR and Ginkgo are BSD-licensed.
+
+   `reference/pyfr` (BSD-3, Imperial College) is cloned locally. Where it is
+   worth consulting, specifically:
+
+   * `pyfr/readers/gmsh.py` — a BSD implementation of the MSH **4.1** reader:
+     the legal cross-check for our own `.msh` reader's handling of blocked
+     `$Nodes`, non-contiguous tags and `$PhysicalNames`.
+   * `pyfr/readers/stl.py` — a second BSD STL reader to cross-check ours.
+   * `pyfr/writers/vtk/` — a BSD VTU/VTK writer to cross-check the appended-
+     binary encoding and offsets in ours.
+   * Its INI case convention `[soln-bcs-<patch>]` — patch-name-in-section with
+     a `type` discriminator — is prior art for our patch-major JSONC layout.
+   * `pyfr/backends/` — runtime kernel generation over CUDA/HIP/OpenCL and a
+     kernel-graph abstraction; architectural prior art for our backend and
+     CUDA-graph design, not code to port (Python, different discretisation).
+
+   PyFR is a high-order flux-reconstruction code, not finite-volume: its
+   numerics do NOT transfer. Its I/O, case conventions and backend
+   architecture do. Adaptations are acknowledged in the file header like any
+   other permissive source.
 3. **Where this document is silent, derive it or design it — do not go looking
    for how someone else did it.** Sections marked *DESIGN* are deliberately our
    own choice and should be documented as such.
