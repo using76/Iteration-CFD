@@ -85,6 +85,9 @@ Each of these carries its own citation header. The papers are listed in
 | `src/species.rs`, `cuda/species.cu` | §19 | advection–diffusion with a turbulent Schmidt number |
 | `src/sources.rs`, `cuda/sources.cu` | §18 | Patankar (1980) §4.2; Ward, *J. Hydraul. Div. ASCE* 90 (1964) 1 |
 | `src/io/schemes.rs` | §11, §12, §13.4 | Warming & Beam (1976); Leonard (1979); Khosla & Rubin (1974); Jasak, Weller & Gosman (1999); Barth & Jespersen (1989); Venkatakrishnan (1993) |
+| `src/surface/mod.rs`, `src/surface/stl.rs` | §23.1–§23.2 | The STL format (3D Systems, 1987 — a de facto public specification); Aftosmis, Berger & Melton, *AIAA J.* 36(6) (1998) 952 for the castellation context. Normals are recomputed from the winding; stored normals are never used |
+| `src/surface/classify.rs` | §23.3 | Column-parity ray casting with simulation-of-simplicity jitter and a 3-axis majority vote; Barill, Dickson, Schmidt, Levin & Jacobson, *ACM TOG* 37(4) (2018) — the exact solid-angle winding number as the arbiter for cells the vote cannot settle |
+| `write_carved_case` and the carver in `src/blockgen.rs` | §23.4–§23.5 | Aftosmis, Berger & Melton (1998), the “castellate” stage only; the FDS precedent (NIST, public domain) for stair-step obstructions |
 
 ## Ours by design
 
@@ -95,6 +98,8 @@ anyone.
 | Thing | Where | SPEC-LIT |
 |---|---|---|
 | The single Robin triple `(fr, ref_value, ref_grad)` for every BC | `src/field.rs`, `src/field_setup.rs` | §4 |
+| Vertex welding by exact bit-equality only — no epsilon weld, because an epsilon is a silent geometry edit | `src/surface/mod.rs`, `src/surface/stl.rs` | §23.1 |
+| Faces carved against solid cells are `wall` type and receive the same wall boundary conditions blockgen already writes, so a carved case runs unmodified | `src/blockgen.rs` | §23.4 |
 | Gather over a cell→face CSR instead of scatter over faces | `src/mesh/topology.rs` and every kernel | §1 |
 | Continuous blending across `y+_lam`, and the wall-adjacent-cell treatment | `src/wallfunctions.rs` | §6.4 |
 | Bounding of `k` and `epsilon` | `src/turbulence.rs` | §6.1 |

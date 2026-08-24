@@ -5,7 +5,19 @@
 fvSchemes,fvSolution}` and a `0/` directory with `U`, `k`, `epsilon`, `omega` and `nut`.
 
 ```powershell
-cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz]
+cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [-stl [name=]path]... [-permissive]
+```
+
+`-stl [name=]path` (반복 가능) — 어느 케이스든 블록 격자를 STL 표면으로 계단식
+(castellated)으로 조각합니다 (SPEC-LIT §23). 표면 안에 셀 중심이 놓인 셀은 제거되고,
+그 자리에 STL의 `solid` 이름(이진 STL은 파일 이름, `name=`으로 재지정)을 딴
+새 wall 패치가 생깁니다. 새 패치는 blockgen이 벽에 쓰는 것과 같은 벽 경계조건을
+받으므로 생성된 케이스는 그대로 실행됩니다. 표면은 닫혀 있어야 하며, 열린
+표면은 열린 모서리 개수를 보고하고 거부됩니다 — `-permissive`는 패리티 투표로
+대체하고 계속합니다. 예:
+
+```powershell
+cargo run --release --bin ofgpu-generate-mesh -- plume ..\cases\plumeCol 60 40 30 -stl column=column.stl
 ```
 
 케이스별 설명입니다. 어느 것도 운동량 방정식을 풀지 않습니다 — **U와 phi는 고정**이고,

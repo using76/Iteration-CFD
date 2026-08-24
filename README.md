@@ -25,7 +25,7 @@ CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 �
 | 정밀도 | 배정밀도 기본, `single` 기능으로 단정밀도 |
 | 대상 | NVIDIA GPU |
 | 의존성 | cudarc, thiserror (선택적 AMGX) |
-| 검증 | 503개 단위 시험, 198개 수치 검증 항목 |
+| 검증 | 521개 단위 시험, 198개 수치 검증 항목 |
 
 ---
 
@@ -116,6 +116,13 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 전처리기 | 없음, Jacobi, 다색(multi-colour) DIC, 다색 DILU |
 | 압력 backend | 반복법, cuFFT 직접해, AMGX (선택적 기능) |
 | Backend 선택 | 적용 가능성 판정 → 정확도 검증 → 실측 시간 비교 |
+
+### 메쉬 생성
+
+| 구분 | 지원 |
+|---|---|
+| 블록 격자 | 케이스별 구조 격자 — grading, 경계 패치, `0/` 필드까지 한 번에 생성 |
+| STL 장애물 | 이진·ASCII STL로 블록 격자를 계단식(castellated)으로 조각 — 닫힘 검증(열린 모서리 개수 보고 후 거부, `-permissive`는 패리티 투표로 진행), 열 단위 패리티 판정과 3축 다수결, 새 wall 패치에 기존 벽 경계조건 자동 부여 (`-stl [name=]path`, Aftosmis et al. 1998; Barill et al. 2018) |
 
 ---
 
@@ -360,6 +367,7 @@ cd rust
 cargo run --release --bin ofgpu-generate-mesh -- channel  ..\cases\channel  200 120 1
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 cargo run --release --bin ofgpu-generate-mesh -- damBreak ..\cases\damBreak  60 100 1
+cargo run --release --bin ofgpu-generate-mesh -- plume    ..\cases\plumeCol  60 40 30 -stl column=column.stl
 cargo run --release --bin ofgpu-vof           -- ..\cases\damBreak -endTime 0.25 -surge
 cargo run --release --bin ofgpu-validate
 ```
@@ -374,6 +382,8 @@ cargo run --release --bin ofgpu-validate
 | `-permissive` | 미지원 설정을 오류 대신 경고로 처리하고 대체 내용을 출력 |
 
 생성 가능한 케이스: `channel`, `cavity`, `step`, `big`, `plume`, `damBreak`.
+`-stl [name=]path`(반복 가능)를 붙이면 어떤 케이스든 블록 격자를 STL 표면으로
+조각합니다 — [cases/README.md](cases/README.md) 참조.
 
 난류 모형은 `constant/momentumTransport`의 `RAS { model ...; }` 또는
 `simulationType LES;`로 지정합니다. 미지원 모형명을 지정하면 사용 가능한 목록을

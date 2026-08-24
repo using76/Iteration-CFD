@@ -63,6 +63,7 @@ pub mod wallfunctions;
 pub mod blockgen;
 pub mod io;
 pub mod reference;
+pub mod surface;
 
 pub use device::{cfg_for, DevBuf, Gpu, Graph, KernelSet, BLOCK};
 pub use error::{Error, Result};

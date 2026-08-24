@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 503 unit tests, 198 numerical checks |
+| Validation | 521 unit tests, 198 numerical checks |
 
 ---
 
@@ -120,6 +120,13 @@ applied on faces rather than interpolated from cell values.
 | Preconditioners | None, Jacobi, multi-colour DIC, multi-colour DILU |
 | Pressure backends | Iterative, cuFFT direct solve, AMGX (optional feature) |
 | Backend selection | Applicability filter → accuracy verification → measured timing |
+
+### Mesh generation
+
+| | |
+|---|---|
+| Block mesh | Per-case structured grids — grading, boundary patches and the `0/` fields written together |
+| STL obstacles | Binary and ASCII STL carve the block into a castellated mesh — closure validation (refused with the open-edge count; `-permissive` proceeds on parity voting), column-parity classification with a 3-axis majority vote, new wall patches receive the existing wall boundary conditions (`-stl [name=]path`, Aftosmis et al. 1998; Barill et al. 2018) |
 
 ---
 
@@ -372,6 +379,7 @@ cd rust
 cargo run --release --bin ofgpu-generate-mesh -- channel  ..\cases\channel  200 120 1
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 cargo run --release --bin ofgpu-generate-mesh -- damBreak ..\cases\damBreak  60 100 1
+cargo run --release --bin ofgpu-generate-mesh -- plume    ..\cases\plumeCol  60 40 30 -stl column=column.stl
 cargo run --release --bin ofgpu-vof           -- ..\cases\damBreak -endTime 0.25 -surge
 cargo run --release --bin ofgpu-validate
 ```
@@ -386,6 +394,8 @@ cargo run --release --bin ofgpu-validate
 | `-permissive` | Downgrade unsupported-setting errors to warnings and report the substitution |
 
 Generatable cases: `channel`, `cavity`, `step`, `big`, `plume`, `damBreak`.
+`-stl [name=]path` (repeatable) carves any case's block mesh against a
+triangulated surface — see [cases/README.md](cases/README.md).
 
 The turbulence model is chosen by `RAS { model ...; }` or `simulationType LES;`
 in `constant/momentumTransport`. Naming a model that is not implemented
