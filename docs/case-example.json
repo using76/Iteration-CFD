@@ -1,0 +1,116 @@
+// meteor-cfd case — the whole of cases/plumeB, which today is 13 files,
+// 705 lines and a 13 MB polyMesh. JSONC: JSON plus comments plus trailing
+// commas, nothing else.
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "plumeB",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [-7.3, -3.1, 0.0], "max": [7.3, 3.1, 3.0] },
+    "cells":  [98, 42, 20],
+
+    // Which patch each box face belongs to. Regions below may carve
+    // windows out of these.
+    "boundaries": {
+      "xmin": "outlet", "xmax": "outlet",
+      "ymin": "outlet", "ymax": "outlet",
+      "zmin": "floor",  "zmax": "ceiling",
+    },
+
+    // The burner inlet: a window in the floor. In the OpenFOAM format this
+    // needed the PatchWindow workaround because a patch is only
+    // startFace + nFaces; here it is just a region.
+    "regions": [
+      {
+        "name": "inlet",
+        "on": "zmin",
+        "shape": { "kind": "box", "min": [-0.5, -0.5, -1], "max": [0.5, 0.5, 1] },
+      },
+    ],
+  },
+
+  "physics": {
+    "gravity": [0, 0, -9.81],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",   // b = g (TRef/T - 1); Boussinesq is wrong at dT/T ~ 3
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+  },
+
+  // ORDERED list, matched first-to-last — JSON objects cannot carry file
+  // order, and "patterns match in file order" is load-bearing.
+  "patches": [
+    {
+      "match": "inlet",
+      "kind": "inlet",
+      "U": { "type": "fixedValue", "value": [0, 0, 2.0] },
+      "T": { "type": "fixedValue", "value": 1173.15 },
+      "turbulence": { "intensity": 0.05, "mixingLength": 0.07 },
+    },
+    {
+      "match": "outlet",
+      "kind": "open",
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "inletOutlet", "inletValue": 293.15 },
+    },
+    // Everything else is a wall: floor, ceiling, and any patch a surface
+    // file introduces later.
+    { "match": ".*", "kind": "wall" },
+  ],
+
+  "initial": {
+    "U": [0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "outerCorrectors": 2, "correctors": 2 },
+    "ddt": "backward",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "Gauss limitedLinear 1",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "limited 0.33", "nonOrthogonalCorrectors": 1 },
+    "relaxation": { "U": 0.7, "p": 0.3 },
+    "solvers": [
+      { "match": "p",  "solver": "PCG",       "preconditioner": "DIC",  "tolerance": 1e-7 },
+      { "match": ".*", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-8 },
+    ],
+  },
+
+  "run": {
+    "endTime": 20.0,
+    "deltaT": 0.005,
+    "adjustTimeStep": true,
+    "maxCo": 0.8,
+  },
+
+  "output": {
+    // Visualisation: .vdb files (built as NanoVDB on the GPU), plus a USD
+    // scene that references them — Blender and Omniverse both read this.
+    // ".nvdb" is deliberately not a distribution format: Blender cannot
+    // read it and its layout tracks the NanoVDB ABI.
+    "visualisation": {
+      "format": "vdb",
+      "interval": 2.0,
+      "fields": ["U", "T", "p", "k", "epsilon", "nut"],
+      "precision": "fp16",
+      "usdScene": true,
+    },
+    // Exact, polyhedra-preserving interchange. VTU is read by ParaView and
+    // by NVIDIA's cae-openusd-plugins (Kit-CAE / Omniverse).
+    // "openfoam" is also accepted here.
+    "exact": { "format": "vtu", "interval": 10.0 },
+    // Restart is its own file, not a visualisation artefact: full f64,
+    // includes phi, refuses to load onto a mesh with a different hash.
+    "restart": { "interval": 10.0, "keep": 2 },
+  },
+}
