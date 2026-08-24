@@ -1,0 +1,1179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JsonCase",
+  "description": "The whole case file. `$schema` is accepted and ignored - it points a\nhuman's editor at [`emit_schema`]'s output, and carries no information the\nreader needs.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "initial": {
+      "$ref": "#/$defs/JsonInitial"
+    },
+    "mesh": {
+      "$ref": "#/$defs/JsonMesh"
+    },
+    "name": {
+      "type": "string"
+    },
+    "numerics": {
+      "$ref": "#/$defs/JsonNumerics"
+    },
+    "output": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonOutput"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "patches": {
+      "description": "ORDERED, matched first-to-last - section 4.1 point 1. A JSON object's\nkeys cannot carry this, which is the entire reason this is an array of\n`{match, ...}` records rather than a `{\"pattern\": {...}}` map.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JsonPatchRule"
+      }
+    },
+    "physics": {
+      "$ref": "#/$defs/JsonPhysics"
+    },
+    "run": {
+      "$ref": "#/$defs/JsonRun"
+    },
+    "turbulence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonTurbulence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "mesh",
+    "physics",
+    "patches",
+    "initial",
+    "numerics",
+    "run"
+  ],
+  "$defs": {
+    "AlgorithmKind": {
+      "type": "string",
+      "enum": [
+        "SIMPLE",
+        "PISO",
+        "PIMPLE"
+      ]
+    },
+    "BuoyancyModel": {
+      "description": "`b = g·(TRef/T - 1)` (density-ratio, `SPEC-LIT` §9) is the only model this\nsolver implements - see [`crate::momentum::BuoyancyCoeffs`]. `boussinesq`\nis accepted here, so the schema documents that OpenFOAM cases spell it\nthat way too, and [`JsonCase::lower`] rejects it under the §13.4 contract\nrather than silently linearising a fire plume's `ΔT/T ≈ 3`.",
+      "type": "string",
+      "enum": [
+        "densityRatio",
+        "boussinesq"
+      ]
+    },
+    "JsonAlgorithm": {
+      "type": "object",
+      "properties": {
+        "correctors": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/AlgorithmKind"
+        },
+        "outerCorrectors": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ]
+    },
+    "JsonBoundaries": {
+      "description": "Which patch each of the six box faces belongs to, `-x +x -y +y -z +z` -\n[`crate::blockgen::BlockSpec`]'s own slot order.",
+      "type": "object",
+      "properties": {
+        "xmax": {
+          "type": "string"
+        },
+        "xmin": {
+          "type": "string"
+        },
+        "ymax": {
+          "type": "string"
+        },
+        "ymin": {
+          "type": "string"
+        },
+        "zmax": {
+          "type": "string"
+        },
+        "zmin": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "xmin",
+        "xmax",
+        "ymin",
+        "ymax",
+        "zmin",
+        "zmax"
+      ]
+    },
+    "JsonBounds": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "min": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "JsonCombustion": {
+      "description": "SPEC-LIT §27's mixing-controlled combustion, overridable per case.\nPresence of this block (`physics.fire.combustion`) is what turns\ncombustion ON in `ofgpu-fire`; everything inside it is optional and falls\nback to [`CombustionCoeffs::default`]'s propane values (SPEC-LIT §27's own\n*DESIGN* default fuel).\n\nThe species set combustion needs (`Y_F`, `Y_O2`, `Y_P`, inert `N2`) is\nNOT named here - it is fixed by [`JsonCase::lower`], because SPEC-LIT §27\nnames exactly these three reacting species and there is nothing for a\ncase to choose about their identities, only about the coefficients above.\nA case turns combustion on by giving `initial.Y_F` and an inlet patch's\nown `Y_F` condition - see [`y_f_spec_for`].",
+      "type": "object",
+      "properties": {
+        "CEDM": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "CEDMLES": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "dhc": {
+          "description": "Heat of combustion, J/kg. Propane's `46.45e6` by default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "s": {
+          "description": "Stoichiometric O2/fuel MASS ratio `s`. Propane's `3.63` by default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonExact": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "interval": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "interval"
+      ]
+    },
+    "JsonFire": {
+      "description": "`physics.fire`: the two S27/S28 blocks `ofgpu-fire` reads. Either or both\nmay be absent - a case with neither runs the plain S25/S26 low-Mach solver\n`ofgpu-fire` already had, unchanged.",
+      "type": "object",
+      "properties": {
+        "combustion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonCombustion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "radiation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRadiation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonFluid": {
+      "type": "object",
+      "properties": {
+        "Pr": {
+          "type": "number",
+          "format": "double"
+        },
+        "Prt": {
+          "type": "number",
+          "format": "double"
+        },
+        "TRef": {
+          "type": "number",
+          "format": "double"
+        },
+        "nu": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "nu",
+        "Pr",
+        "Prt",
+        "TRef"
+      ]
+    },
+    "JsonInitial": {
+      "type": "object",
+      "properties": {
+        "T": {
+          "description": "Absent for an isothermal case - not every case solves a temperature\nequation, and a `0` here would claim one does.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "U": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "Y_F": {
+          "description": "The ambient fuel mass fraction, and the presence check that turns\ncombustion (SPEC-LIT §27) on - same convention as [`Self::t`]:\nabsent means this case does not solve species at all. Usually `0.0`\n(no fuel in the ambient air); the fuel inlet's own value comes from\nits patch rule's `Y_F` ([`y_f_spec_for`]), not from here.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "epsilon": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "k": {
+          "description": "The four turbulence closure fields, each absent when the case does\nnot solve it - same reasoning as [`Self::t`]. Present exactly when a\n`patches[]` rule must carry the matching [`TurbBc`] - see\n[`turb_field_spec`].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "nut": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "omega": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "p": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "U",
+        "p"
+      ]
+    },
+    "JsonLaplacian": {
+      "type": "object",
+      "properties": {
+        "nonOrthogonalCorrectors": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "snGrad": {
+          "description": "The `snGradSchemes` half of a `laplacianSchemes` entry -\n`crate::io::schemes::parse_sn_grad`'s grammar (`corrected`,\n`uncorrected`, `limited <alpha>`). The `Gauss <interpolation>` half is\nnot exposed: `linear` is the only interpolation this solver has, so\nthere is nothing for a case to choose.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "snGrad",
+        "nonOrthogonalCorrectors"
+      ]
+    },
+    "JsonMesh": {
+      "type": "object",
+      "properties": {
+        "boundaries": {
+          "$ref": "#/$defs/JsonBoundaries"
+        },
+        "bounds": {
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "cells": {
+          "description": "Cell counts along `x, y, z`.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "kind": {
+          "$ref": "#/$defs/MeshKind"
+        },
+        "regions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonRegion"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "bounds",
+        "cells",
+        "boundaries"
+      ]
+    },
+    "JsonNumerics": {
+      "type": "object",
+      "properties": {
+        "algorithm": {
+          "$ref": "#/$defs/JsonAlgorithm"
+        },
+        "ddt": {
+          "description": "`ddtSchemes/default`'s grammar - `crate::timescheme::DdtScheme::parse`.",
+          "type": "string"
+        },
+        "div": {
+          "description": "`divSchemes`, keyed by entry name (`\"default\"`, `\"div(phi,U)\"`, ...).\nA map rather than named fields: the set of equations a case names here\nis open-ended, and `crate::io::schemes::parse_div` is what validates\neach value, not this type.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "grad": {
+          "description": "`gradSchemes/default` - `crate::io::schemes::parse_grad`'s grammar.",
+          "type": "string"
+        },
+        "laplacian": {
+          "$ref": "#/$defs/JsonLaplacian"
+        },
+        "relaxation": {
+          "description": "`relaxationFactors/equations`, keyed by field name.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "solvers": {
+          "description": "ORDERED, matched first-to-last against the equation's name - the same\nreason `patches` is an array rather than a map.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonSolverRule"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "ddt",
+        "div",
+        "grad",
+        "laplacian",
+        "solvers"
+      ]
+    },
+    "JsonOutput": {
+      "type": "object",
+      "properties": {
+        "exact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonExact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restart": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRestart"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visualisation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonVisualisation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonPatchRule": {
+      "description": "One ordered rule of the `patches` array.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "U": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VectorBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Y_F": {
+          "description": "The fuel mass fraction at this patch - SPEC-LIT §27's \"an inlet\ncarrying `Y_F`\". Only required on the patch(es) that inject fuel; see\n[`y_f_spec_for`] for the wall/open defaults and why `Y_O2`/`Y_P` are\nnot separately named here.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "epsilon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurbBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "k": {
+          "description": "`k`'s own condition. Only required when `initial.k` is given (this\ncase solves `k`) - see [`turb_field_spec`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurbBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/PatchPresetKind"
+        },
+        "match": {
+          "type": "string"
+        },
+        "nut": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurbBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "omega": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurbBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "p": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarBc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turbulence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonPatchTurbulence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "match",
+        "kind"
+      ]
+    },
+    "JsonPatchTurbulence": {
+      "description": "The turbulence intensity/mixing-length estimate an inlet carries, in the\nsame units OpenFOAM's own `turbulentIntensityKineticEnergyInlet` /\n`turbulentMixingLengthDissipationRateInlet` take: `intensity` a fraction\nof the inlet speed, `mixingLength` an absolute length in metres (NOT a\nfraction - `crate::blockgen`'s canned cases multiply a fraction by a\nhydraulic diameter internally; a case file names the length directly).",
+      "type": "object",
+      "properties": {
+        "intensity": {
+          "type": "number",
+          "format": "double"
+        },
+        "mixingLength": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "intensity",
+        "mixingLength"
+      ]
+    },
+    "JsonPhysics": {
+      "type": "object",
+      "properties": {
+        "buoyancy": {
+          "$ref": "#/$defs/BuoyancyModel"
+        },
+        "fire": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonFire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fluid": {
+          "$ref": "#/$defs/JsonFluid"
+        },
+        "gravity": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gravity",
+        "fluid",
+        "buoyancy"
+      ]
+    },
+    "JsonRadiation": {
+      "description": "SPEC-LIT §28's P1 gray radiation. `model` is validated by\n[`RadiationModel::from_name`] - naming `fvDOM` here is the §13.4 gate that\nsection documents, not a silent fallback to P1.",
+      "type": "object",
+      "properties": {
+        "a": {
+          "description": "Gray absorption coefficient `a`, 1/m. Constant, case-supplied\n(SPEC-LIT §28 v1; WSGG is later work).",
+          "type": "number",
+          "format": "double"
+        },
+        "chiR": {
+          "description": "The radiant-fraction floor `chi_r`. Defaults to\n[`crate::radiation::CHI_R_DEFAULT`] (`0.35`, FDS practice).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`\"P1\"` - the only model this crate implements; see\n[`RadiationModel::from_name`] for what happens with anything else.",
+          "type": "string"
+        },
+        "wallEmissivity": {
+          "description": "Marshak wall emissivity, applied to every `wall`-kind patch. Defaults\nto `1.0` (black wall) when absent.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "a"
+      ]
+    },
+    "JsonRegion": {
+      "description": "A rectangular window carved out of one box face, replacing the\n`PatchWindow` workaround `docs/05-io-redesign.md` section 4.1's opening\ncomment complains about: here it is just a region.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "on": {
+          "description": "Which `JsonBoundaries` face this window is cut from: `xmin`, `xmax`,\n`ymin`, `ymax`, `zmin` or `zmax`.",
+          "type": "string"
+        },
+        "shape": {
+          "$ref": "#/$defs/JsonShape"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "on",
+        "shape"
+      ]
+    },
+    "JsonRestart": {
+      "type": "object",
+      "properties": {
+        "interval": {
+          "type": "number",
+          "format": "double"
+        },
+        "keep": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "interval",
+        "keep"
+      ]
+    },
+    "JsonRun": {
+      "type": "object",
+      "properties": {
+        "adjustTimeStep": {
+          "type": "boolean",
+          "default": false
+        },
+        "deltaT": {
+          "type": "number",
+          "format": "double"
+        },
+        "endTime": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxCo": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "endTime",
+        "deltaT"
+      ]
+    },
+    "JsonShape": {
+      "description": "Internally tagged on `kind`, so today's one variant already carries its\nown `oneOf`/`const` discriminator in [`emit_schema`]'s output and a second\nshape (`cylinder`, say) is additive.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "box"
+            },
+            "max": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "min": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "min",
+            "max"
+          ]
+        }
+      ]
+    },
+    "JsonSolverRule": {
+      "description": "One `numerics.solvers` rule.",
+      "type": "object",
+      "properties": {
+        "match": {
+          "type": "string"
+        },
+        "maxIter": {
+          "description": "`SolverControls::default`'s own `1000` when absent, for the same\nreason as [`Self::rel_tol`].",
+          "type": "integer",
+          "format": "int32",
+          "default": 1000
+        },
+        "preconditioner": {
+          "type": "string"
+        },
+        "relTol": {
+          "description": "`SolverControls::default`'s own `0.0` (no relative tolerance) when\nabsent - the same fallback an OpenFOAM `solvers/<var>` entry with no\n`relTol` gets from `read_solver_controls`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "solver": {
+          "type": "string"
+        },
+        "tolerance": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "match",
+        "solver",
+        "preconditioner",
+        "tolerance"
+      ]
+    },
+    "JsonTurbulence": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TurbulenceKind"
+        },
+        "model": {
+          "description": "`kEpsilon`, `kOmegaSST`, ... - validated at model-construction time,\nsame as an OpenFOAM `momentumTransport`'s `RAS/model`; not here, so a\nbuild without a given model is not a reason to refuse every case.",
+          "type": "string"
+        },
+        "wallFunctions": {
+          "$ref": "#/$defs/JsonWallFunctions"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "model",
+        "wallFunctions"
+      ]
+    },
+    "JsonVisualisation": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "format": {
+          "type": "string"
+        },
+        "interval": {
+          "type": "number",
+          "format": "double"
+        },
+        "precision": {
+          "type": "string"
+        },
+        "usdScene": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "interval",
+        "fields",
+        "precision"
+      ]
+    },
+    "JsonWallFunctions": {
+      "type": "object",
+      "properties": {
+        "E": {
+          "type": "number",
+          "format": "double"
+        },
+        "kappa": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kappa",
+        "E"
+      ]
+    },
+    "MeshKind": {
+      "type": "string",
+      "enum": [
+        "cartesian"
+      ]
+    },
+    "PatchPresetKind": {
+      "type": "string",
+      "enum": [
+        "wall",
+        "inlet",
+        "open"
+      ]
+    },
+    "ScalarBc": {
+      "description": "One `{\"type\": \"fixedValue\", \"value\": ...}`-shaped scalar boundary\ncondition. Internally tagged, so `emit_schema` renders it as `oneOf` with\na `const` discriminator on `type` - deliverable 4 of this module.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fixedValue"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "inletValue": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "inletOutlet"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "inletValue"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "zeroGradient"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "TurbBc": {
+      "description": "One `k`/`epsilon`/`omega`/`nut` boundary condition. A superset of\n[`ScalarBc`]: a turbulence closure field's wall treatment is a wall\nFUNCTION, not `fixedValue`/`zeroGradient`, and which one governs whether\n[`crate::field_setup::WallFaces::from_case`] treats a patch as a wall at\nall (it reads `epsilon`'s and `nut`'s own patch *type strings* - see that\nfunction and `crate::field_setup::wall_cell_faces`/`nut_wall_faces`). This\ntype exists because the B3 gate (`docs/05-io-redesign.md` phase 1) needs a\nJSONC case to reproduce a generated OpenFOAM case's `k`/`epsilon`/`nut`\nEXACTLY, wall-function type strings included - `JsonPatchTurbulence`'s\nintensity/mixing-length inlet estimate has nothing to say about a wall\npatch's type, only an inlet's value. `value` is the uniform value written\non every variant, including the wall-function ones: OpenFOAM itself writes\na `value` entry there too (the field's own initial guess before the wall\nfunction first runs), and `docs/case-example.json`'s own generated\ncounterpart does the same - see e.g. `cases/plumeB/0/k`'s `floor` entry.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fixedValue"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "zeroGradient"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "`nut`'s own non-wall-function type (an inlet/outlet with no\nprescribed eddy viscosity) - OpenFOAM's `calculated`.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "calculated"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "kqRWallFunction"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "epsilonWallFunction"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "omegaWallFunction"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "nutkWallFunction"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "TurbulenceKind": {
+      "type": "string",
+      "enum": [
+        "RAS",
+        "LES"
+      ]
+    },
+    "VectorBc": {
+      "description": "Vector counterpart of [`ScalarBc`], for `U`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fixedValue"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "inletValue": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": {
+              "type": "string",
+              "const": "inletOutlet"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "inletValue"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "zeroGradient"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -70,23 +70,25 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use ofgpu::error::IoContext;
 use ofgpu::field_setup::{
     harvest_scalar_field, harvest_vector_field, setup_scalar_field, setup_vector_field,
 };
 use ofgpu::io::case::{find_start_time, format_time_name};
 use ofgpu::io::dict::FoamDict;
-use ofgpu::io::fields::{
-    read_scalar_field, read_vector_field, write_scalar_field, write_vector_field,
-};
+use ofgpu::io::fields::{read_scalar_field, read_vector_field};
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
+use ofgpu::restart::{self, RestartData};
 use ofgpu::vof::{phase_names, Vof, VofControls, VofProperties};
 use ofgpu::{Error, Gpu, GpuMesh, HostMesh, Result, Scalar, Vec3};
 
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{device_banner, g, next_arg, sci};
+use common::{
+    build_writers, device_banner, find_restart_field, from_restart_scalars, from_restart_vectors,
+    g, mean, next_arg, parse_output_formats, restart_scalar, restart_shell, restart_surface,
+    restart_vector, sci, OutputFormat,
+};
 
 // ==========================================================================
 //  Command line
@@ -103,13 +105,25 @@ struct Options {
     surge: bool,
     /// Non-positive means "work it out from the initial condition".
     column_width: f64,
+    /// `-output foam|vtu|nvdb|vdb|usda`, comma list.
+    output: Vec<OutputFormat>,
+    /// `-restartWrite N` - write a `.mcr` checkpoint every N STEPS.
+    restart_write: Option<u64>,
+    /// `-restartFrom FILE` - load state from a `.mcr` checkpoint instead of
+    /// the case's own start-time directory, and skip straight past the
+    /// zero-velocity flux initialisation that directory would otherwise get.
+    restart_from: Option<PathBuf>,
+    /// `-reportEvery N` - print the per-step residual line every N steps
+    /// (always also on step 1 and the last step).
+    report_every: u64,
 }
 
 fn usage() {
     eprintln!(
         "usage: ofgpu-vof <caseDir> [-endTime T] [-deltaT dt] [-maxCo C] \
          [-maxDeltaT dt]\n       \
-         [-writeInterval W] [-noWrite] [-surge] [-a A]\n\
+         [-writeInterval W] [-noWrite] [-surge] [-a A] [-output LIST]\n       \
+         [-restartWrite N] [-restartFrom FILE] [-reportEvery N]\n\
          {}",
         ofgpu::io::contract::PERMISSIVE_USAGE
     );
@@ -145,6 +159,10 @@ fn parse(args: &[String]) -> Result<Options> {
         do_write: true,
         surge: false,
         column_width: -1.0,
+        output: vec![OutputFormat::Foam],
+        restart_write: None,
+        restart_from: None,
+        report_every: 20,
     };
 
     let mut i = 2;
@@ -162,6 +180,22 @@ fn parse(args: &[String]) -> Result<Options> {
             "-noWrite" => o.do_write = false,
             "-surge" => o.surge = true,
             "-a" => o.column_width = parse_number("-a", &next_arg(args, &mut i)?)?,
+            "-output" => o.output = parse_output_formats(&next_arg(args, &mut i)?)?,
+            "-restartWrite" => {
+                let n = parse_number("-restartWrite", &next_arg(args, &mut i)?)?;
+                if n <= 0.0 {
+                    return Err(Error::Config("-restartWrite needs a positive step count".into()));
+                }
+                o.restart_write = Some(n as u64);
+            }
+            "-restartFrom" => o.restart_from = Some(PathBuf::from(next_arg(args, &mut i)?)),
+            "-reportEvery" => {
+                let n = parse_number("-reportEvery", &next_arg(args, &mut i)?)?;
+                if n <= 0.0 {
+                    return Err(Error::Config("-reportEvery needs a positive step count".into()));
+                }
+                o.report_every = n as u64;
+            }
             // Set before any dictionary is opened, so every rejection this run
             // makes sees the same policy.
             "-permissive" => ofgpu::io::contract::set_permissive(true),
@@ -323,6 +357,26 @@ fn run(o: &Options) -> Result<()> {
     let hm = build_host_mesh(&raw)?;
     hm.print_report();
     let m = GpuMesh::upload(&gpu, &hm)?;
+    let mesh_hash = restart::mesh_hash(&hm);
+
+    // ---- restart, if asked for ---------------------------------------------
+    //
+    // Read (and hash-check) up front, before anything else touches the case,
+    // so a bad `-restartFrom` fails before a single kernel launches rather
+    // than after the mesh and case dictionaries were already read for
+    // nothing.
+    let restart_data: Option<RestartData> = match &o.restart_from {
+        Some(p) => Some(restart::read_restart(p, mesh_hash)?),
+        None => None,
+    };
+    if let Some(rd) = &restart_data {
+        println!(
+            "restart: loaded {} (t = {}, mesh hash 0x{:016x} matches)",
+            o.restart_from.as_ref().unwrap().display(),
+            g(rd.time),
+            mesh_hash
+        );
+    }
 
     // ---- the case ---------------------------------------------------------
     let names = phase_names(case)?;
@@ -398,11 +452,71 @@ fn run(o: &Options) -> Result<()> {
     setup_vector_field(&gpu, vof.u_mut(), &raw_u, &hm)?;
     setup_scalar_field(&gpu, vof.p_rgh_mut(), &raw_p, &hm)?;
 
-    // A flux to start from. The first pressure correction makes it
-    // conservative; this only decides how much work that correction has to do,
-    // and starting from a velocity of zero it is exactly zero anyway.
-    vof.initialise_flux_from_velocity(&gpu)?;
+    if let Some(rd) = &restart_data {
+        // Overwrite only the INTERNAL cell values with the restart's numbers.
+        // The boundary condition TYPES just read from `dir` above
+        // (`fixedValue`, `zeroGradient`, ...) are case parameters that do not
+        // change during a run - only the field itself does - and
+        // `vof.initialise` below re-derives every boundary cell from the
+        // restored internal ones regardless.
+        let a = find_restart_field(rd, &alpha_name)?;
+        gpu.write(&mut vof.alpha_mut().f, &from_restart_scalars(&a.internal))?;
+        let u = find_restart_field(rd, "U")?;
+        gpu.write(&mut vof.u_mut().f, &from_restart_vectors(&u.internal))?;
+        let p = find_restart_field(rd, "p_rgh")?;
+        gpu.write(&mut vof.p_rgh_mut().f, &from_restart_scalars(&p.internal))?;
+    }
+
+    if let Some(rd) = &restart_data {
+        // The conservative flux this restart was written with - SPEC-LIT
+        // 5.1. `initialise_flux_from_velocity` would throw it away for
+        // `interpolate(U) & Sf`, exactly the non-conservative fallback a
+        // restart exists to skip.
+        let phi = find_restart_field(rd, "phi")?;
+        gpu.write(&mut vof.phi_mut().f, &from_restart_scalars(&phi.internal))?;
+        gpu.write(&mut vof.phi_mut().bf, &from_restart_scalars(&phi.boundary))?;
+        println!("restart: phi loaded from the checkpoint - not re-derived from U");
+    } else {
+        // A flux to start from. The first pressure correction makes it
+        // conservative; this only decides how much work that correction has
+        // to do, and starting from a velocity of zero it is exactly zero
+        // anyway.
+        vof.initialise_flux_from_velocity(&gpu)?;
+    }
     vof.initialise(&gpu)?;
+
+    if let Some(rd) = &restart_data {
+        // `initialise` re-derives every boundary cell generically
+        // (`correct_boundary_conditions[_vector]`), which assumes a COLD
+        // start: it does not first run `update_inlet_outlet[_vector]`, so on
+        // a patch whose flow direction has flipped since the case's own `0/`
+        // files were written, it evaluates the WRONG branch of an
+        // `inletOutlet`/`pressureInletOutletVelocity` condition. The
+        // checkpoint's own boundary values do not have that problem - they
+        // are exactly what the continuous run had - so they overwrite
+        // whatever `initialise` just computed.
+        let a = find_restart_field(rd, &alpha_name)?;
+        gpu.write(&mut vof.alpha_mut().bf, &from_restart_scalars(&a.boundary))?;
+        let u = find_restart_field(rd, "U")?;
+        gpu.write(&mut vof.u_mut().bf, &from_restart_vectors(&u.boundary))?;
+        let p = find_restart_field(rd, "p_rgh")?;
+        gpu.write(&mut vof.p_rgh_mut().bf, &from_restart_scalars(&p.boundary))?;
+
+        // `initialise` also reseeds `alpha_phi`/`rho_phi` with the cold-start
+        // upwind approximation (`seed_alpha_flux`) and rebuilds `rho0` from
+        // the just-restored `alpha` (`rho0 == rho`, i.e. a zero density ddt
+        // for the next step) - both wrong for a resumed run. Put back the
+        // exact values the checkpoint carries, same reasoning as the
+        // boundary restore above - see `Vof::alpha_phi_mut`.
+        let aphi = find_restart_field(rd, "alphaPhi")?;
+        gpu.write(&mut vof.alpha_phi_mut().f, &from_restart_scalars(&aphi.internal))?;
+        gpu.write(&mut vof.alpha_phi_mut().bf, &from_restart_scalars(&aphi.boundary))?;
+        let rphi = find_restart_field(rd, "rhoPhi")?;
+        gpu.write(&mut vof.rho_phi_mut().f, &from_restart_scalars(&rphi.internal))?;
+        gpu.write(&mut vof.rho_phi_mut().bf, &from_restart_scalars(&rphi.boundary))?;
+        let rho0 = find_restart_field(rd, "rho0")?;
+        gpu.write(vof.rho_old_mut(), &from_restart_scalars(&rho0.internal))?;
+    }
 
     println!(
         "interface normal eps = {} (SPEC-LIT 20.1, stated as the section asks)",
@@ -443,7 +557,7 @@ fn run(o: &Options) -> Result<()> {
     let gmag = props.g.mag();
 
     // ---- the time loop ----------------------------------------------------
-    let mut t = 0.0 as Scalar;
+    let mut t = restart_data.as_ref().map_or(0.0, |d| d.time as Scalar);
     let mut dt = ctrl.delta_t;
     let mut next_write = write_interval;
     let mut step = 0u64;
@@ -482,16 +596,16 @@ fn run(o: &Options) -> Result<()> {
             );
             z_prev = zz;
             t_prev = t;
-        } else if step % 20 == 0 || t >= end_time {
+        } else if step == 1 || step % o.report_every == 0 || t >= end_time {
             let (lo, hi) = vof.alpha_bounds(&gpu)?;
             println!(
-                "t = {:>10}  dt {:>10}  alphaCo {:>8}  x{} sub  p_rgh {} -> {} in {} \
+                "step {step:>5}  t = {:>10}  dt {:>10}  alphaCo {:>8}  x{} sub  p_rgh {} -> {} in {} \
                  iters  continuity {}  alpha [{}, {}]",
                 g(f64::from(t)),
                 g(f64::from(dt)),
                 g(f64::from(perf.alpha_courant)),
                 perf.n_sub_cycles,
-                sci(f64::from(perf.p_rgh.initial_residual), 2),
+                sci(f64::from(perf.p_rgh.initial_residual), 16),
                 sci(f64::from(perf.p_rgh.final_residual), 2),
                 perf.p_rgh.n_iterations,
                 sci(f64::from(perf.continuity_error), 2),
@@ -513,9 +627,19 @@ fn run(o: &Options) -> Result<()> {
         }
 
         if o.do_write && t + 1e-12 >= next_write {
-            write_time(&gpu, &vof, &hm, case, t, &mut raw_alpha, &mut raw_u, &mut raw_p)?;
+            write_time(
+                &gpu, &vof, &hm, case, t, &o.output, &alpha_name, &mut raw_alpha, &mut raw_u,
+                &mut raw_p,
+            )?;
             next_write += write_interval;
         }
+
+        if let Some(interval) = o.restart_write {
+            if step % interval == 0 {
+                write_restart_checkpoint(&gpu, &vof, &hm, case, mesh_hash, t, &alpha_name)?;
+            }
+        }
+
     }
 
     let elapsed = clock.elapsed().as_secs_f64();
@@ -537,9 +661,68 @@ fn run(o: &Options) -> Result<()> {
     println!("alpha in [{}, {}]", sci(f64::from(lo), 3), g(f64::from(hi)));
 
     if o.do_write {
-        write_time(&gpu, &vof, &hm, case, t, &mut raw_alpha, &mut raw_u, &mut raw_p)?;
+        write_time(
+            &gpu, &vof, &hm, case, t, &o.output, &alpha_name, &mut raw_alpha, &mut raw_u,
+            &mut raw_p,
+        )?;
     }
 
+    Ok(())
+}
+
+/// Everything one restart interval needs: `alpha`, `U`, `p_rgh` and `phi`,
+/// Everything one restart interval needs: `alpha`, `U`, `p_rgh` and `phi`,
+/// including their boundary face values (`phi`'s in particular, since a
+/// `SurfaceScalar` restart field's boundary array is `phi.bf` itself, not a
+/// per-patch `PatchFieldSpec`). See `common::restart_scalar` and friends.
+fn write_restart_checkpoint(
+    gpu: &Gpu,
+    vof: &Vof<'_>,
+    hm: &HostMesh,
+    case: &Path,
+    mesh_hash: u64,
+    t: Scalar,
+    alpha_name: &str,
+) -> Result<()> {
+    let alpha_i = gpu.download(&vof.alpha().f)?;
+    let alpha_b = gpu.download(&vof.alpha().bf)?;
+    let u_i = gpu.download(&vof.u().f)?;
+    let u_b = gpu.download(&vof.u().bf)?;
+    let p_i = gpu.download(&vof.p_rgh().f)?;
+    let p_b = gpu.download(&vof.p_rgh().bf)?;
+    let phi_i = gpu.download(&vof.phi().f)?;
+    let phi_b = gpu.download(&vof.phi().bf)?;
+    // The Zalesak-limited advective fluxes `solve_alpha` last produced, and
+    // the density level the momentum ddt is differenced against - not part
+    // of the case's own fields, but load-bearing state a restart loses
+    // silently otherwise. See `Vof::alpha_phi_mut`'s doc.
+    let aphi_i = gpu.download(&vof.alpha_phi().f)?;
+    let aphi_b = gpu.download(&vof.alpha_phi().bf)?;
+    let rphi_i = gpu.download(&vof.rho_phi().f)?;
+    let rphi_b = gpu.download(&vof.rho_phi().bf)?;
+    let rho0 = gpu.download(vof.rho_old())?;
+
+    let p0 = mean(&p_i);
+    let mut data = restart_shell(mesh_hash, t, p0, hm);
+    data.fields.push(restart_scalar(alpha_name, &alpha_i, &alpha_b));
+    data.fields.push(restart_vector("U", &u_i, &u_b));
+    data.fields.push(restart_scalar("p_rgh", &p_i, &p_b));
+    data.fields.push(restart_surface("phi", &phi_i, &phi_b));
+    data.fields.push(restart_surface("alphaPhi", &aphi_i, &aphi_b));
+    data.fields.push(restart_surface("rhoPhi", &rphi_i, &rphi_b));
+    // `rho0` has no natural boundary array (it is a plain cell buffer, not a
+    // `GpuScalarField`) - padded with zeros to satisfy the `CellScalar`
+    // layout; never read back on the boundary side.
+    data.fields.push(restart_scalar("rho0", &rho0, &vec![0.0 as Scalar; hm.n_boundary_faces]));
+
+    let path = case.join("restart.mcr");
+    restart::write_restart(&path, &data)?;
+    println!(
+        "  restart checkpoint written to {} (t = {}, p0 = {})",
+        path.display(),
+        g(f64::from(t)),
+        sci(f64::from(p0), 3)
+    );
     Ok(())
 }
 
@@ -550,23 +733,48 @@ fn write_time(
     hm: &HostMesh,
     case: &Path,
     t: Scalar,
+    output: &[OutputFormat],
+    alpha_name: &str,
     raw_alpha: &mut ofgpu::io::fields::RawScalarField,
     raw_u: &mut ofgpu::io::fields::RawVectorField,
     raw_p: &mut ofgpu::io::fields::RawScalarField,
 ) -> Result<()> {
     let name = format_time_name(t);
-    let dir = case.join(&name);
-    std::fs::create_dir_all(&dir).path(&dir)?;
 
     harvest_scalar_field(gpu, raw_alpha, vof.alpha(), hm)?;
     harvest_vector_field(gpu, raw_u, vof.u(), hm)?;
     harvest_scalar_field(gpu, raw_p, vof.p_rgh(), hm)?;
 
-    write_scalar_field(&dir.join(&raw_alpha.name), raw_alpha, &name)?;
-    write_vector_field(&dir.join("U"), raw_u, &name)?;
-    write_scalar_field(&dir.join("p_rgh"), raw_p, &name)?;
+    // One seam call per requested format, replacing what used to be three
+    // scattered `fields::write_*` sites - see `ofgpu::io::writer`.
+    let foam_fields = [
+        ofgpu::io::FoamField::scalar(alpha_name, raw_alpha),
+        ofgpu::io::FoamField::vector("U", raw_u),
+        ofgpu::io::FoamField::scalar("p_rgh", raw_p),
+    ];
+    let vis_fields = [
+        ofgpu::io::OutputField::scalar(alpha_name, &raw_alpha.internal),
+        ofgpu::io::OutputField::vector("U", &raw_u.internal),
+        ofgpu::io::OutputField::scalar("p_rgh", &raw_p.internal),
+    ];
+    let cart = ofgpu::pressure::cartesian::detect(hm)
+        .ok()
+        .map(|c| ofgpu::io::cartesian_info(hm, &c));
+    let ctx = ofgpu::io::WriteCtx {
+        time: t,
+        step: 0,
+        name: &name,
+        mesh: hm,
+        cart: cart.as_ref(),
+        fields: &vis_fields,
+        foam: &foam_fields,
+    };
+    let mut writers = build_writers(case, "vof", output)?;
+    for w in &mut writers {
+        w.write_step(&ctx)?;
+    }
 
-    println!("  written {}", dir.display());
+    println!("  written to {}", case.join(&name).display());
     Ok(())
 }
 

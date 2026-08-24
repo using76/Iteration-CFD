@@ -1549,6 +1549,7 @@ mod tests {
     /// then had a Reynolds number nobody asked for.
     #[test]
     fn an_unreadable_physical_property_is_an_error() {
+        let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
 
         let d = match FoamDict::parse("nu  banana;", "physicalProperties") {
@@ -1664,6 +1665,7 @@ mod tests {
 
     #[test]
     fn an_unimplemented_solver_is_an_error_that_names_it() {
+        let _guard = crate::io::contract::permissive_test_guard();
         let _serial = permissive_guard();
         crate::io::contract::set_permissive(false);
         let e = LinearSolverKind::from_name("smoothSolver")
@@ -1678,6 +1680,7 @@ mod tests {
     /// and `DILU` - which silently ran Jacobi - said nothing at all.
     #[test]
     fn dic_and_dilu_are_honoured_rather_than_silently_downgraded() {
+        let _guard = crate::io::contract::permissive_test_guard();
         let _serial = permissive_guard();
         assert_eq!(Preconditioner::from_name("DIC").unwrap(), Preconditioner::Dic);
         assert_eq!(Preconditioner::from_name("FDIC").unwrap(), Preconditioner::Dic);
@@ -1695,6 +1698,7 @@ mod tests {
 
     #[test]
     fn permissive_downgrades_the_error_and_says_what_it_did() {
+        let _guard = crate::io::contract::permissive_test_guard();
         let _serial = permissive_guard();
         crate::io::contract::set_permissive(true);
         let got = Preconditioner::from_name("banana").expect("permissive must not fail");
@@ -1706,6 +1710,7 @@ mod tests {
 
     #[test]
     fn ddt_schemes_reaches_the_controls_in_full() {
+        let _guard = crate::io::contract::permissive_test_guard();
         let _serial = permissive_guard();
         crate::io::contract::set_permissive(false);
         for (src, want) in [
@@ -1731,6 +1736,7 @@ mod tests {
     /// become first-order Euler with nothing printed.
     #[test]
     fn an_unimplemented_ddt_scheme_is_an_error() {
+        let _guard = crate::io::contract::permissive_test_guard();
         let _serial = permissive_guard();
         crate::io::contract::set_permissive(false);
         let src = "ddtSchemes { default CoEuler rDeltaT; } \

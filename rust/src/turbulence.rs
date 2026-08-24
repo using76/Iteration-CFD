@@ -1140,7 +1140,19 @@ impl<'m> RasCore<'m> {
             // single `1/dt` that was zero when steady, which turned
             // `backward` and `localEuler` into first-order Euler in silence
             // (SPEC-LIT 13.3, 13.4).
-            ddt: Ddt::new(gpu, mesh, ctrl.ddt.reconciled(ctrl.steady), ctrl.delta_t, ctrl.lts)?,
+            // `relaxed = k_relax < 1.0`: this is also the ddt a passive
+            // scalar built on `RasCore` (`scalar_transport::Transport`) gets,
+            // so `CrankNicolson` becomes reachable there too whenever the
+            // case leaves that equation's relaxation factor at 1 (SPEC-LIT
+            // §13.1, `timescheme::Ddt::new_with_relax`).
+            ddt: Ddt::new_with_relax(
+                gpu,
+                mesh,
+                ctrl.ddt.reconciled(ctrl.steady),
+                ctrl.delta_t,
+                ctrl.lts,
+                ctrl.k_relax < 1.0,
+            )?,
 
             wd: WallData::build(gpu, hm, wall_faces)?,
             a: GpuLduMatrix::new(gpu, mesh)?,

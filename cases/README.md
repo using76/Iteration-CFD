@@ -71,6 +71,27 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 결과는 `<caseDir>/1/`에 OpenFOAM ASCII 형식으로 쓰이므로 ParaView나 `foamToVTK`로
 바로 열립니다.
 
+## JSONC 케이스 (`*.jsonc`)
+
+`ofgpu-buoyant`, `ofgpu-fire` 등 부력/화재 계열 드라이버는 OpenFOAM 케이스
+디렉터리 대신 주석과 trailing comma를 허용하는 JSON 파일 하나로도 케이스를
+읽습니다 (`docs/05-io-redesign.md` §4.1; 스키마는 `docs/schema/case-1.json`,
+`ofgpu::io::case_json::emit_schema`로 자동 생성). 디렉터리 대신 `.jsonc`/`.json`
+파일 경로를 넘기면 됩니다 — 출력은 `<stem>_jsonc/`에 씁니다.
+
+| Case | 드라이버 | 설명 |
+|---|---|---|
+| `plume.jsonc` | `ofgpu-k-epsilon` 등 | `plumeB`(OpenFOAM 형식)의 JSONC 재현 — 두 형식이 같은 필드를 만든다는 B3 게이트 |
+| `burnerPlume.jsonc` | `ofgpu-fire -combustion -radiation` | 프로판 버너 화재 데모 — SPEC-LIT §25(저-마하)·§26(에너지)·§27(연소)·§28(복사)를 한 케이스에서 결합. 바닥 창(`Y_F = 1` 고정)으로 연료가 들어가고, 열은 전부 연소의 `q'''_c`에서 나옵니다(입구 자체는 상온) |
+
+```powershell
+cd ..\rust
+cargo run --release --bin ofgpu-fire -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005 -check 200
+```
+
+자세한 화재 솔버 설명은 [`../docs/07-fire-solver.md`](../docs/07-fire-solver.md)를
+보십시오.
+
 ## 직접 만든 OpenFOAM 케이스 쓰기
 
 그대로 넣으면 됩니다. 제약은 하나뿐입니다 — **ASCII 형식이어야 합니다.**

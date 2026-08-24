@@ -1494,6 +1494,7 @@ mod tests {
     /// a field indistinguishable from a real one.
     #[test]
     fn an_unrecognised_bc_name_is_an_error_that_names_it() {
+        let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
 
         let mut sp = spec("garbageBC");

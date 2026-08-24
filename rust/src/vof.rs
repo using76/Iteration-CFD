@@ -727,6 +727,36 @@ impl<'m> Vof<'m> {
     pub fn rho(&self) -> &GpuScalarField {
         &self.rho
     }
+    /// The advective mass flux `alpha_phi` this step's (or the last step's)
+    /// `solve_alpha` produced - the Zalesak/limited flux, NOT the plain
+    /// upwind [`Vof::initialise`] seeds it with on a cold start.
+    ///
+    /// Exposed `_mut` for exactly one reason: a restart. `initialise` cannot
+    /// tell a resumed run from a cold one, so calling it again mid-run
+    /// replaces this field's limited flux with the cold-start upwind
+    /// approximation - a restart driver that only restores `alpha`/`U`/
+    /// `p_rgh`/`phi` and then calls `initialise` gets a plausible but not
+    /// bit-identical continuation, because this field's own history did not
+    /// come along. Restoring it directly from a checkpoint after
+    /// `initialise` runs is what makes a restart reproduce the continuous
+    /// run's next pressure residual to round-off.
+    pub fn alpha_phi_mut(&mut self) -> &mut GpuSurfaceScalarField {
+        &mut self.alpha_phi_sum
+    }
+    /// The mass flux `rho_phi = alpha_phi`-mixed. See [`Vof::alpha_phi_mut`]
+    /// for why a restart needs to set this directly.
+    pub fn rho_phi_mut(&mut self) -> &mut GpuSurfaceScalarField {
+        &mut self.rho_phi
+    }
+    /// `rho0`, the density level [`Vof::step`]'s momentum ddt differences
+    /// against. See [`Vof::alpha_phi_mut`] for why a restart needs to set
+    /// this directly rather than let `initialise` recompute it from the
+    /// just-restored `alpha` (which gives `rho0 == rho`, a zero density ddt
+    /// for the FIRST step after the restart - wrong whenever `alpha` was
+    /// still changing at the moment the checkpoint was written).
+    pub fn rho_old_mut(&mut self) -> &mut DevBuf<Scalar> {
+        &mut self.rho0
+    }
     /// The mixture dynamic viscosity. `.f` and `.bf` only.
     pub fn mu(&self) -> &GpuScalarField {
         &self.mu

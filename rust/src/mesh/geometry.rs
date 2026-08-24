@@ -441,6 +441,7 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     let mut b_mag_sf = vec![0.0 as Scalar; n_bf];
     let mut b_cf = vec![Vec3::ZERO; n_bf];
     let mut b_delta_coeffs = vec![0.0 as Scalar; n_bf];
+    let mut b_non_orth_corr = vec![Vec3::ZERO; n_bf];
     let mut b_y = vec![0.0 as Scalar; n_bf];
 
     for bf in 0..n_bf {
@@ -478,12 +479,27 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
             let d_nbr = m.c[n_cell] - f_cf[n_if + nbr];
             let d = d_own + d_nbr;
 
-            b_delta_coeffs[bf] = non_orth_split(sf, d).0;
+            // SPEC-LIT 2.4's over-relaxed split, applied to the SAME `d` that
+            // spans the periodic image: a cyclic pair is, geometrically, one
+            // internal face folded in half, so it gets the identical
+            // treatment an internal face gets and no more. Before this, only
+            // `Delta` (`.0`) was kept and the explicit correction `k` (`.1`)
+            // was silently dropped, so a cyclic face on a sheared mesh lost
+            // its non-orthogonal correction even though the internal faces
+            // right next to it kept theirs.
+            let (delta, k) = non_orth_split(sf, d);
+            b_delta_coeffs[bf] = delta;
+            b_non_orth_corr[bf] = k;
             // Both offsets are projected on the OWNER-side `Sf`, which is the
             // face the weight is used on.
             m.b_weights[bf] = weight_from_offsets(sf.dot(d_own).abs(), sf.dot(d_nbr).abs());
         } else {
             b_delta_coeffs[bf] = non_orth_split(sf, d_own).0;
+            // Left at zero: an uncoupled boundary face has no neighbour cell
+            // to interpolate `psi` from, so `snGrad` there is not the
+            // internal-face formula this correction belongs to - SPEC-LIT
+            // section 4's `(fr, psi_ref, g_ref)` triple is evaluated directly
+            // on the face instead.
         }
     }
 
@@ -491,6 +507,7 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     m.b_mag_sf = b_mag_sf;
     m.b_cf = b_cf;
     m.b_delta_coeffs = b_delta_coeffs;
+    m.b_non_orth_corr = b_non_orth_corr;
     m.b_y = b_y;
 
     Ok(())
@@ -1226,6 +1243,18 @@ mod tests {
                     // y stays the owner-side distance, which is half a cell.
                     assert!(close(m.b_y[bf], 0.5 * d.x));
                     assert_eq!(m.b_kind[bf], PatchKind::Cyclic as Label);
+                    // The cyclic couple is axis-aligned, so `nf` and `d` are
+                    // exactly collinear and `k = nf - d*Delta` cancels to
+                    // exactly zero, not merely close to it - this is what an
+                    // uncorrected cyclic face on a SHEARED mesh (below) fails
+                    // to do.
+                    assert_eq!(
+                        m.b_non_orth_corr[bf],
+                        Vec3::ZERO,
+                        "bf {bf}: b_non_orth_corr should be exactly zero on an \
+                         orthogonal cyclic couple, got {}",
+                        m.b_non_orth_corr[bf]
+                    );
                 }
             }
         }
@@ -1236,6 +1265,84 @@ mod tests {
             assert_eq!(m.b_nbr_cell[bf], -1);
             assert!(close(m.b_weights[bf], 1.0));
             assert!(close(m.b_delta_coeffs[bf], 2.0 / d.y));
+        }
+    }
+
+    /// The cyclic patches sit on `x = 0` and `x = Lx`, and `shear_x_with_y`
+    /// moves a point's `x` by `s*y` only - identical for every point at a
+    /// given `y`, including a face's own centroid and the cell centre behind
+    /// it. So the shear tilts every x-normal face's `Sf`, exactly as it does
+    /// for `a_sheared_mesh_reports_the_analytic_non_orthogonality`, while
+    /// leaving `d` exactly axis-aligned - for the cyclic couple no less than
+    /// for an ordinary internal face: `d_own`/`d_nbr` are each a face
+    /// centroid minus a cell centre at the SAME `(j, k)`, so the shear
+    /// cancels out of them exactly.
+    ///
+    /// The couple is therefore geometrically two mirrored copies of the same
+    /// internal x-face translated along x - translation does not change a
+    /// tilt - so its correction vector `k` must equal the internal face's,
+    /// up to the sign flip that comes from the `x = 0` patch's `Sf` pointing
+    /// the opposite way. Before the fix in this module, both patches simply
+    /// read zero, having been skipped in the coupled branch entirely.
+    #[test]
+    fn a_sheared_cyclic_couple_gets_the_same_correction_as_an_internal_face() {
+        let (nx, ny, nz) = (3usize, 2usize, 1usize);
+        let d = Vec3::new(0.5, 0.25, 2.0);
+        let s: Scalar = 0.3;
+
+        let (mut m, mut points, faces) = box_mesh([nx, ny, nz], d);
+        for (p, nbr) in [(0usize, 1usize), (1, 0)] {
+            m.patches[p].kind = PatchKind::Cyclic;
+            m.patches[p].type_name = "cyclic".to_string();
+            m.patches[p].nbr_patch = Some(nbr);
+        }
+        shear_x_with_y(&mut points, s);
+        m.compute_geometry(&points, &faces).expect("geometry");
+
+        let cell = |i: usize, j: usize, k: usize| (i + nx * (j + ny * k)) as Label;
+
+        for k in 0..nz {
+            for j in 0..ny {
+                let idx = j + ny * k;
+                let lo = m.patches[0].start + idx;
+                let hi = m.patches[1].start + idx;
+
+                // Not the degenerate orthogonal case any more: shearing must
+                // actually have moved the correction away from zero, or this
+                // test is not exercising SPEC-LIT 2.4 at all.
+                assert!(
+                    m.b_non_orth_corr[hi].mag() > 1.0e-3,
+                    "k, j={j}: b_non_orth_corr[{hi}] is {} - the shear left it \
+                     at zero",
+                    m.b_non_orth_corr[hi]
+                );
+
+                // An internal x-face between the two cells at the SAME (j, k)
+                // - any one will do, since the tilt does not depend on i.
+                let (io, in_) = (cell(0, j, k) as usize, cell(1, j, k) as usize);
+                let f_internal = (0..m.n_internal_faces)
+                    .find(|&f| m.owner[f] as usize == io && m.neighbour[f] as usize == in_)
+                    .expect("an internal x-face joins cell 0 and cell 1 at this (j, k)");
+
+                let want = m.non_orth_corr[f_internal];
+                assert!(
+                    (m.b_non_orth_corr[hi] - want).mag() <= TOL,
+                    "j={j}: hi patch (x = Lx, Sf pointing +x like the internal \
+                     face) got {}, internal face gave {}",
+                    m.b_non_orth_corr[hi],
+                    want
+                );
+                // The x = 0 patch's `Sf` points the other way, so its `nf`
+                // and `d` are both the internal face's negated - and `k` is
+                // linear in each, so it comes out negated twice, i.e. equal
+                // to the internal face's `k` with ITS OWN sign flipped once.
+                assert!(
+                    (m.b_non_orth_corr[lo] + want).mag() <= TOL,
+                    "j={j}: lo patch (x = 0, Sf pointing -x) got {}, wanted {}",
+                    m.b_non_orth_corr[lo],
+                    -want
+                );
+            }
         }
     }
 

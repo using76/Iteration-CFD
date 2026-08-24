@@ -580,6 +580,40 @@ impl<'m> Simple<'m> {
         t: &GpuScalarField,
         is_final: bool,
     ) -> Result<SimplePerformance> {
+        self.correct_outer_impl(gpu, backend, nut, t, None, is_final)
+    }
+
+    /// [`Self::correct_outer`] plus SPEC-LIT §25.1's target divergence in the
+    /// pressure equation's source - the ONE seam §25.3 names for a low-Mach
+    /// solver ("SIMPLE/PISO change in ONE place"). `target_div` is
+    /// [`crate::energy::Energy::target_divergence`], refreshed for this outer
+    /// iteration before this is called.
+    ///
+    /// Everything else is identical to [`Self::correct_outer`] - which is
+    /// exactly [`Self::correct_outer_impl`] called with `target_div = None`,
+    /// so a driver that never calls this one gets bit-identical behaviour to
+    /// before this method existed.
+    pub fn correct_outer_low_mach(
+        &mut self,
+        gpu: &Gpu,
+        backend: &mut dyn PressureBackend,
+        nut: &GpuScalarField,
+        t: &GpuScalarField,
+        target_div: &DevBuf<Scalar>,
+        is_final: bool,
+    ) -> Result<SimplePerformance> {
+        self.correct_outer_impl(gpu, backend, nut, t, Some(target_div), is_final)
+    }
+
+    fn correct_outer_impl(
+        &mut self,
+        gpu: &Gpu,
+        backend: &mut dyn PressureBackend,
+        nut: &GpuScalarField,
+        t: &GpuScalarField,
+        target_div: Option<&DevBuf<Scalar>>,
+        is_final: bool,
+    ) -> Result<SimplePerformance> {
         let m = self.m;
         let n = m.n_cells;
         if n == 0 {
@@ -657,7 +691,7 @@ impl<'m> Simple<'m> {
             // explicit correction re-evaluated against the latest `p`
             // (Jasak §3.4.3). A different loop doing a different job.
             for _ in 0..=self.ctrl.n_non_orth_correctors {
-                self.assemble_pressure(gpu)?;
+                self.assemble_pressure(gpu, target_div)?;
                 p_perf = backend.solve(gpu, &mut self.p.f, &self.a_p, m)?;
 
                 if self.pinned {
@@ -738,12 +772,17 @@ impl<'m> Simple<'m> {
         ])
     }
 
-    /// `laplacian(rAU_f, p) = div(phi_HbyA)`.
+    /// `laplacian(rAU_f, p) = div(phi_HbyA)`, or with `target_div` supplied,
+    /// SPEC-LIT §25.3's low-Mach source:
+    /// `laplacian(rAU_f, p) = div(phi_HbyA) - (div u)_target`.
     ///
     /// The right-hand side is the volume integral `Σ_f (±phi_HbyA_f)`, not
     /// `(1/V)Σ_f` - it is added straight to the matrix source, which is what
-    /// the operator's own `A·psi` is measured against.
-    fn assemble_pressure(&mut self, gpu: &Gpu) -> Result<()> {
+    /// the operator's own `A·psi` is measured against. `target_div` is a
+    /// per-cell (not volume-integrated) field, so it goes in through
+    /// [`crate::fv::fvm_su`] exactly like any other §18 source, which does
+    /// that integral itself.
+    fn assemble_pressure(&mut self, gpu: &Gpu, target_div: Option<&DevBuf<Scalar>>) -> Result<()> {
         let m = self.m;
         let n = m.n_cells;
 
@@ -790,6 +829,17 @@ impl<'m> Simple<'m> {
                 m,
                 true,
             )?;
+        }
+
+        // SPEC-LIT §25.1/§25.3: subtract the target divergence, so the
+        // velocity this pressure equation produces satisfies
+        // `div u = (div u)_target` rather than `div u = 0`. `sign = -1`
+        // against `fvm_su`'s `source += sign*V*su` gives exactly
+        // `source -= V*(div u)_target`. Absent for every existing caller
+        // ([`Self::correct_outer`] passes `None`), so this is a no-op unless
+        // a driver opts in through [`Self::correct_outer_low_mach`].
+        if let Some(td) = target_div {
+            fv::fvm_su(gpu, &self.fvk, &mut self.a_p, m, td, -1.0)?;
         }
 
         // A singular system needs a consistent right-hand side; see
@@ -2234,5 +2284,86 @@ mod tests {
         assert!((c.momentum.u_relax - 0.7).abs() < 1e-12);
         assert!((c.p_relax - 0.3).abs() < 1e-12);
         assert!((c.momentum.u_relax + c.p_relax - 1.0).abs() < 1e-12);
+    }
+
+    // ----------------------------------------------------------------------
+    //  §25.1/§25.3 - the low-Mach pressure source, checked independently of
+    //  crate::energy
+    // ----------------------------------------------------------------------
+
+    /// A uniform target divergence `S`, fed through
+    /// [`Simple::correct_outer_low_mach`], with every patch a wall except ONE
+    /// open outlet: the only place the volume `S` generates in every cell can
+    /// leave is that outlet, so the net boundary outflow must equal
+    /// `S * V_dom` exactly - the discrete statement that SPEC-LIT §25.3's
+    /// "the pressure equation's source acquires the target divergence"
+    /// actually holds. [`Simple::correct_outer`] (`target_div = None`) is
+    /// untouched by this method's existence - every OTHER test in this module
+    /// stays green, which is `correct_outer_low_mach` calling
+    /// `correct_outer_impl(..., None, ...)` reducing to exactly the code path
+    /// those tests already exercise.
+    #[test]
+    fn a_uniform_target_divergence_drives_the_matching_net_outflow() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        let hm = boxed([5, 5, 5], Vec3::new(0.1, 0.1, 0.1), [PatchKind::Wall; 6]);
+        let m = GpuMesh::upload(&g, &hm)?;
+
+        let ctrl = SimpleControls {
+            momentum: MomentumControls {
+                nu: 1.0,
+                sn_grad: crate::fv::SnGradScheme::Uncorrected,
+                variable_viscosity_stress: false,
+                ..MomentumControls::default()
+            },
+            p_solver: tight(),
+            ..SimpleControls::default()
+        };
+
+        let mut s = Simple::new(&g, &hm, &m, ctrl, BuoyancyCoeffs {
+            g: Vec3::ZERO,
+            ..BuoyancyCoeffs::default()
+        })?;
+
+        // Every patch a wall except patch 1, open: zero-gradient U, fixedValue
+        // p = 0 - the one place the generated volume can leave. Which
+        // GEOMETRIC face patch 1 is does not matter: the test only needs one
+        // consistent open patch, walls everywhere else.
+        set_velocity_bcs(
+            &g,
+            s.u_mut(),
+            &hm,
+            &[Some(Vec3::ZERO), None, Some(Vec3::ZERO), Some(Vec3::ZERO), Some(Vec3::ZERO), Some(Vec3::ZERO)],
+        )?;
+        set_scalar_bcs(&g, s.p_mut(), &hm, &[None, Some(0.0), None, None, None, None])?;
+        s.initialise(&g)?;
+        assert!(
+            !s.pressure_is_pinned(),
+            "a fixedValue face must be recognised as pinning the level"
+        );
+
+        let nut = laminar_nut(&g, &m, &hm)?;
+        let t_ref = BuoyancyCoeffs::default().t_ref;
+        let t = temperature(&g, &m, &hm, &vec![t_ref; hm.n_cells], &[Some(t_ref); 6])?;
+
+        let s_target: Scalar = 0.5; // 1/s - an arbitrary uniform expansion rate
+        let target_div = g.upload(&vec![s_target; hm.n_cells])?;
+
+        let mut backend = PbicgstabBackend::new(ctrl.p_solver);
+        backend.setup(&g, &hm, &m, &SystemProbe::default())?;
+
+        for _ in 0..800 {
+            s.correct_outer_low_mach(&g, &mut backend, &nut, &t, &target_div, false)?;
+        }
+
+        let bf = g.download(&s.phi().bf)?;
+        let net_outflow: Scalar = bf.iter().sum();
+        let want = s_target * m.total_volume;
+
+        assert!(
+            (net_outflow - want).abs() < 1e-3 * want.abs(),
+            "net boundary outflow = {net_outflow}, S*V_dom = {want}"
+        );
+        Ok(())
     }
 }

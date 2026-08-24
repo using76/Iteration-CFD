@@ -25,7 +25,7 @@ CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 �
 | 정밀도 | 배정밀도 기본, `single` 기능으로 단정밀도 |
 | 대상 | NVIDIA GPU |
 | 의존성 | cudarc, thiserror (선택적 AMGX) |
-| 검증 | 521개 단위 시험, 198개 수치 검증 항목 |
+| 검증 | 640개 단위 시험, 214개 수치 검증 항목 |
 
 ---
 
@@ -123,6 +123,28 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 |---|---|
 | 블록 격자 | 케이스별 구조 격자 — grading, 경계 패치, `0/` 필드까지 한 번에 생성 |
 | STL 장애물 | 이진·ASCII STL로 블록 격자를 계단식(castellated)으로 조각 — 닫힘 검증(열린 모서리 개수 보고 후 거부, `-permissive`는 패리티 투표로 진행), 열 단위 패리티 판정과 3축 다수결, 새 wall 패치에 기존 벽 경계조건 자동 부여 (`-stl [name=]path`, Aftosmis et al. 1998; Barill et al. 2018) |
+| 잘림 셀 (cut cell) | 계단식 다음 단계 — 교차 셀을 제거하지 않고 부피/면적 분율과 닫힘식으로 정의된 절단면을 부여 (슈퍼샘플링, 기본 16³, SPEC-LIT §24); `theta_min` 미만인 얇은 셀은 가장 넓은 유체 면을 공유하는 이웃에 병합 |
+| Gmsh `.msh` | v4.1 사면체·육면체·프리즘·피라미드 요소, `$PhysicalNames` 패치 읽기 — 공개 포맷 사양으로부터 구현 |
+
+### 화재 물리 (저-마하 가변밀도, 연소, 복사)
+
+`ofgpu-fire`가 SPEC-LIT §25–28을 하나로 결합합니다.
+
+| 구분 | 지원 |
+|---|---|
+| 저-마하 정식화 | `p = p0(t) + p~(x,t)` 분리, 발산 구속조건, 밀폐/개방 공간의 `p0(t)` 적분 (Rehm & Baum 1978) |
+| 에너지 방정식 | 현열 엔탈피, `k_eff = k + rho cp nu_t/Prt`, 벽 열유속·고정온도 경계 |
+| 연소 | 혼합제어 단일 스텝 EDM (Magnussen & Hjertager 1977) — `Y_F`, `Y_O2`, `Y_P` 수송, 연료 고갈 방지 클리핑, 소모된 연료질량과 방출열이 정확히 일치 (반올림 오차 수준) |
+| 복사 | 회색 P1 근사 (Modest), Marshak 벽 경계, `chi_r` 복사분율 하한 — `fvDOM`은 §13.4 계약에 따라 이름을 명시하며 거부 |
+| 검증 게이트 | 밀폐 상자 `dp0/dt` 램프(해석해), 버너 정확 열방출, 복사 평형, 컷셀 닫힘, msh 육면체 닫힘 — 전부 `ofgpu-validate`의 상시 항목 |
+
+### 케이스 입력 형식과 재시작
+
+| 구분 | 지원 |
+|---|---|
+| JSONC 케이스 | 주석·trailing comma를 허용하는 JSON 한 파일로 메쉬·물성·경계·수치·화재 블록을 기술 — `schemars`로 스키마를 자동 생성해 리더와 스키마가 어긋날 수 없음 |
+| 재시작 (`.mcr`) | 전체 배정밀도, `phi` 포함, 메쉬 해시 불일치 시 거부, 버전 관리 |
+| 시각화/교환 출력 | VTU(부가 이진, 폴리헤드라 보존), NanoVDB/OpenVDB(`.vdb`/`.nvdb`), USD(`.usda`) 장면 참조 |
 
 ---
 
@@ -191,8 +213,8 @@ error: divSchemes/div(phi,k): "Gauss totalGarbage" is not supported by ofgpu;
 ## 검증
 
 ```
-cargo test        503 passed, 0 failed
-ofgpu-validate    198 / 198 checks passed
+cargo test        640 passed, 0 failed
+ofgpu-validate    214 / 214 checks passed
 ```
 
 ### 수렴 차수 — 인위해법 (MMS)
@@ -348,7 +370,7 @@ CUDA 13의 CCCL 헤더가 MSVC 전통 전처리기에서 `fatal error C1189`를 
 
 | 실행 파일 | 용도 |
 |---|---|
-| `ofgpu-validate` | 수치 검증 (198개 항목) |
+| `ofgpu-validate` | 수치 검증 (214개 항목) |
 | `ofgpu-bench` | 처리량 및 메모리 벤치마크 |
 | `ofgpu-graph-bench` | CUDA Graph 대 개별 실행 비교 |
 | `ofgpu-dispatch-bench` | 실행시간 분기 비용 측정 |
@@ -357,6 +379,7 @@ CUDA 13의 CCCL 헤더가 MSVC 전통 전처리기에서 `fatal error C1189`를 
 | `ofgpu-k-epsilon`, `ofgpu-k-omega` | 난류 모형 단독 실행 |
 | `ofgpu-plume`, `ofgpu-buoyant` | 부력 플룸 |
 | `ofgpu-vof` | 2상 VOF |
+| `ofgpu-fire` | 저-마하 연소·복사 (SPEC-LIT §25–28) |
 
 ---
 
@@ -369,6 +392,7 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 cargo run --release --bin ofgpu-generate-mesh -- damBreak ..\cases\damBreak  60 100 1
 cargo run --release --bin ofgpu-generate-mesh -- plume    ..\cases\plumeCol  60 40 30 -stl column=column.stl
 cargo run --release --bin ofgpu-vof           -- ..\cases\damBreak -endTime 0.25 -surge
+cargo run --release --bin ofgpu-fire          -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005
 cargo run --release --bin ofgpu-validate
 ```
 
@@ -425,8 +449,10 @@ ASCII로 변환한 뒤 사용하십시오.
   사유를 오류로 보고합니다.
 - **압축성 및 천음속 해석을 지원하지 않습니다.** 밀도 가중 시간미분은 구현되어
   VOF에서 사용되나, 압력 방정식은 비압축성입니다.
-- **화학반응 및 복사 전달을 지원하지 않습니다.** 체적 소스를 통한 열 방출
-  모델링은 가능합니다.
+- **연소는 혼합제어 단일 스텝(EDM)만 지원합니다.** 유한율 화학반응 메커니즘은
+  없습니다. **복사는 회색 P1 근사만 지원합니다.** `fvDOM`(유한체적 이산종좌표법)은
+  광학적으로 얇은 화재 경계에서 더 정확하지만 명세된 다음 단계이며, 요청 시
+  §13.4 계약에 따라 이름을 명시하고 거부됩니다.
 - **cyclic 패치의 비직교 보정 벡터가 없습니다.** 직교 격자에서는 영향이 없습니다.
 
 ---

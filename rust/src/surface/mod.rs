@@ -660,6 +660,7 @@ mod tests {
 
     #[test]
     fn open_box_is_refused_naming_four_open_edges() {
+        let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         // Drop the z = 1 lid: 10 triangles, the top rim's 4 edges open.
         let p = cube_points();

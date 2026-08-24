@@ -32,6 +32,14 @@
 //! downgrades the closed-surface requirement (and every other §13.4
 //! rejection) to a printed warning.
 //!
+//! `-cutcell` (only with at least one `-stl`; not `damBreak`, which has no
+//! cut-cell VOF path yet) selects embedded-boundary cutting instead of
+//! castellation - SPEC-LIT §24: intersected cells keep REDUCED volumes and
+//! face areas rather than being removed whole, closed by one new cut face
+//! per cut cell. `-s N` sets the supersample lattice size (default 16,
+//! §24.2/§24.4) and `-thetaMin X` the small-cell merge threshold (default
+//! 0.2, §24.5). Castellation stays the default when `-cutcell` is absent.
+//!
 //! Carried across from this project's own earlier C++ case generator. Every
 //! geometric
 //! decision the C++ `main` made — extents, grading, patch names and types,
@@ -41,8 +49,9 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use ofgpu::blockgen::{write_carved_case, write_case, CaseKind};
+use ofgpu::blockgen::{write_carved_case, write_case, write_cutcell_case, CaseKind};
 use ofgpu::io::contract;
+use ofgpu::surface::cutcell::{DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN};
 use ofgpu::surface::{stl::read_stl, Surface};
 use ofgpu::{Error, Result};
 
@@ -54,7 +63,7 @@ use common::atoi;
 fn usage() {
     eprintln!(
         "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|damBreak> <outputDir> \
-         [nx ny nz] [-stl [name=]path]... [-permissive]\n       \
+         [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]] [-permissive]\n       \
          ofgpu-generate-mesh big <outputDir> [n] [-stl ...]   # n^3 cells\n\
          {}",
         contract::PERMISSIVE_USAGE
@@ -110,10 +119,14 @@ fn run(args: &[String]) -> Result<()> {
     // ---- flags and positionals --------------------------------------------
     let mut positional: Vec<&String> = Vec::new();
     let mut stl_args: Vec<String> = Vec::new();
+    let mut cutcell = false;
+    let mut supersample = DEFAULT_SUPERSAMPLE;
+    let mut theta_min = DEFAULT_THETA_MIN;
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
             "-permissive" => contract::set_permissive(true),
+            "-cutcell" => cutcell = true,
             "-stl" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
@@ -121,6 +134,28 @@ fn run(args: &[String]) -> Result<()> {
                     return Err(Error::Config("-stl needs a [name=]path argument".to_string()));
                 };
                 stl_args.push(v.clone());
+            }
+            "-s" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config("-s needs a supersample size".to_string()));
+                };
+                let n = atoi(v);
+                if n < 1 {
+                    return Err(Error::Config(format!("-s: bad supersample size '{v}'")));
+                }
+                supersample = n as usize;
+            }
+            "-thetaMin" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config("-thetaMin needs a threshold".to_string()));
+                };
+                theta_min = v.parse::<f64>().map_err(|_| {
+                    Error::Config(format!("-thetaMin: '{v}' is not a number"))
+                })? as ofgpu::Scalar;
             }
             _ => positional.push(&args[i]),
         }
@@ -158,11 +193,15 @@ fn run(args: &[String]) -> Result<()> {
         nz = clamp_dim(atoi(positional[4]))?;
     }
 
+    if cutcell && stl_args.is_empty() {
+        usage();
+        return Err(Error::Config("-cutcell needs at least one -stl surface".to_string()));
+    }
+
     if stl_args.is_empty() {
         return write_case(Path::new(dir), kind, nx, ny, nz);
     }
 
-    // ---- the carved path (SPEC-LIT §23) -------------------------------------
     let surface = read_surfaces(&stl_args)?;
     println!(
         "[stl] merged: {} triangle(s), {} patch(es): {}",
@@ -171,6 +210,17 @@ fn run(args: &[String]) -> Result<()> {
         surface.patch_names.join(", ")
     );
 
+    if cutcell {
+        // ---- the cut-cell path (SPEC-LIT §24) -----------------------------
+        let s = write_cutcell_case(
+            Path::new(dir), kind, nx, ny, nz, &surface, supersample, theta_min,
+        )?;
+        // `write_cutcell_case` already prints its own [cutcell] summary.
+        let _ = s;
+        return Ok(());
+    }
+
+    // ---- the carved path (SPEC-LIT §23) -------------------------------------
     let s = write_carved_case(Path::new(dir), kind, nx, ny, nz, &surface)?;
 
     println!(

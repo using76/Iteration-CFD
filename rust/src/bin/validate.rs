@@ -56,7 +56,10 @@ use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ofgpu::blockgen;
 use ofgpu::blockgen::{write_block_mesh, BlockSpec, GradedAxis};
+use ofgpu::combustion::{Combustion, CombustionCoeffs};
+use ofgpu::energy::{DomainKind, EnergySources, GasProperties, GasState};
 use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{
     correct_boundary_conditions, correct_boundary_conditions_vector, FieldKernels,
@@ -67,7 +70,8 @@ use ofgpu::fv::{
     fvm_laplacian_non_orth_correction, fvm_sp, fvm_su, fvm_susp, interpolate_linear,
     sn_grad_flux, turbulence_production, DivScheme, FvKernels, Limiter, SnGradScheme,
 };
-use ofgpu::io::case::{Preconditioner, SolverControls};
+use ofgpu::io::case::{LinearSolverKind, Preconditioner, SolverControls};
+use ofgpu::io::msh::parse_msh;
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::ldu::{CsrPattern, GpuLduMatrix};
 use ofgpu::ldu_ops::{
@@ -76,10 +80,16 @@ use ofgpu::ldu_ops::{
 use ofgpu::mesh::{HostMesh, PatchKind};
 use ofgpu::pressure::fft::cufft_available;
 use ofgpu::pressure::{FftBackend, PbicgstabBackend, PressureBackend, SystemProbe};
+use ofgpu::radiation::{Radiation, RadiationProps};
 use ofgpu::reference as cpu;
 use ofgpu::solver::{solve_pbicgstab, solve_pcg, SolverKernels, SolverWorkspace};
+use ofgpu::species::{Species, SpeciesCoeffs};
+use ofgpu::surface::classify::BlockAxes;
+use ofgpu::surface::cutcell::{classify_cutcells, CellState, DEFAULT_SUPERSAMPLE};
+use ofgpu::surface::stl::parse_stl;
+use ofgpu::turbulence::TurbulenceControls;
 use ofgpu::vof::{Vof, VofControls, VofProperties};
-use ofgpu::{DevBuf, Gpu, GpuMesh, Label, Result, Scalar, Tensor, Vec3};
+use ofgpu::{DevBuf, Error, Gpu, GpuMesh, Label, Result, Scalar, Tensor, Vec3};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -276,10 +286,14 @@ impl MeshSpec {
     }
 }
 
-/// Build a block, write it, read it back through the real parser.
+/// Build a block straight into a [`HostMesh`], no file on disk anywhere.
 ///
-/// Round-tripping through the file format is deliberate: it puts `blockgen`
-/// and the polyMesh reader under test at the same time as everything else.
+/// Used to round-trip through `write_block_mesh` + `read_poly_mesh`, which
+/// put `blockgen` and the polyMesh reader under test at the same time as
+/// everything else; `blockgen::build_mesh` now shares the exact same face
+/// construction and is exercised directly by `blockgen`'s own
+/// `build_mesh_matches_the_file_round_trip` test, so that coverage is not
+/// lost - it just does not need a scratch directory per call any more.
 fn make_mesh(dir: &Path, s: &MeshSpec) -> Result<HostMesh> {
     let axis = |i: usize| GradedAxis {
         lo: 0.0,
@@ -312,19 +326,21 @@ fn make_mesh(dir: &Path, s: &MeshSpec) -> Result<HostMesh> {
         patch_type: types,
     };
 
-    // Left over from a previous run, the boundary file would still name the
-    // old patch types; remove rather than overwrite.
-    let _ = std::fs::remove_dir_all(dir);
-    write_block_mesh(dir, &b)?;
-
-    let mut raw = read_poly_mesh(dir)?;
-    if s.shear != 0.0 {
-        for p in raw.points.iter_mut() {
-            p.x += s.shear * p.z;
-            p.y += 0.5 * s.shear * p.z;
-        }
+    if s.shear == 0.0 {
+        return blockgen::build_mesh(&b);
     }
 
+    // The shear applies to the raw points before geometry is computed, so
+    // this one case still goes through `PolyMeshRaw` rather than straight to
+    // `HostMesh` - shearing is a test fixture, not something `BlockSpec`
+    // itself can express.
+    let _ = std::fs::remove_dir_all(dir);
+    write_block_mesh(dir, &b)?;
+    let mut raw = read_poly_mesh(dir)?;
+    for p in raw.points.iter_mut() {
+        p.x += s.shear * p.z;
+        p.y += 0.5 * s.shear * p.z;
+    }
     let m = build_host_mesh(&raw)?;
     let _ = std::fs::remove_dir_all(dir);
     Ok(m)
@@ -1960,6 +1976,17 @@ fn run(c: &mut Checks) -> Result<()> {
 === volume of fluid (SPEC-LIT 20, the 22 rows) ===");
     check_vof(c, &gpu)?;
 
+    // ---- surface intake and embedded boundaries (SPEC-LIT 23, 24) --------
+    println!("\n=== msh hex closure, cut-cell closure (SPEC-LIT 23, 24) ===");
+    check_msh_hex_closure(c)?;
+    check_cutcell_closure(c)?;
+
+    // ---- fire: low-Mach p0, combustion, radiation (SPEC-LIT 25, 27, 28) ---
+    println!("\n=== fire: low-Mach p0, combustion, radiation (SPEC-LIT 25, 27, 28) ===");
+    check_low_mach_p0(c, &gpu)?;
+    check_burner_heat_release(c, &gpu)?;
+    check_radiative_equilibrium(c, &gpu)?;
+
     Ok(())
 }
 
@@ -2947,6 +2974,325 @@ fn main() -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
+
+// ==========================================================================
+//  SPEC-LIT sections 23, 24, 25, 27, 28: the "decisive gates" - promoted
+//  from each module's own unit tests into permanent checks here, so a
+//  regression in the mesh-format reader, the cut-cell fractions, the
+//  low-Mach p0 evolution, combustion or radiation fails `ofgpu-validate`
+//  and not only that one module's own `cargo test`.
+// ==========================================================================
+
+/// SPEC-LIT §23.1/§10: a `.msh` file read through the SAME `parse_msh` a real
+/// Gmsh export goes through closes to round-off. One unit hexahedron, MSH
+/// 4.1, physical surface "walls" on all six sides - the published Gmsh
+/// format (SPEC-LIT §23.1), not anyone's source.
+fn check_msh_hex_closure(c: &mut Checks) -> Result<()> {
+    let pts = [
+        (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0), (1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (0.0, 1.0, 1.0),
+    ];
+    let tags: Vec<i64> = (0..8).map(|i| 11 + i).collect();
+    let mut nodes_body = String::new();
+    for &t in &tags {
+        nodes_body += &format!("{t}\n");
+    }
+    for &(x, y, z) in &pts {
+        nodes_body += &format!("{x} {y} {z}\n");
+    }
+    let hex_nodes: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+    let text = format!(
+        r#"$MeshFormat
+4.1 0 8
+$EndMeshFormat
+$PhysicalNames
+1
+2 1 "walls"
+$EndPhysicalNames
+$Entities
+0 0 1 1
+1 0 0 0 1 1 1 1 1 0
+7 0 0 0 1 1 1 0 0
+$EndEntities
+$Nodes
+1 8 11 18
+3 1 0 8
+{nodes_body}$EndNodes
+$Elements
+2 7 1 7
+2 1 3 6
+1 11 14 13 12
+2 15 16 17 18
+3 11 12 16 15
+4 14 18 17 13
+5 11 15 18 14
+6 12 13 17 16
+3 5 5 1
+7 {hex}
+$EndElements
+"#,
+        hex = hex_nodes.join(" ")
+    );
+
+    let raw = parse_msh(&text, "<memory>")?;
+    let hm = build_host_mesh(&raw)?;
+    c.require("msh hex: exactly one cell", hm.n_cells == 1);
+    c.require("msh hex: exactly six boundary faces", hm.n_boundary_faces == 6);
+    check_mesh(c, &hm, 1.0);
+    Ok(())
+}
+
+/// A closed triangle soup for an axis-aligned box, written as ASCII STL text
+/// - the published STL format (SPEC-LIT §23.1), read back through the SAME
+/// `parse_stl` a real exported file goes through.
+fn ascii_stl_cuboid(lo: Vec3, hi: Vec3) -> String {
+    let p = [
+        Vec3::new(lo.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, lo.z),
+        Vec3::new(hi.x, hi.y, lo.z), Vec3::new(lo.x, hi.y, lo.z),
+        Vec3::new(lo.x, lo.y, hi.z), Vec3::new(hi.x, lo.y, hi.z),
+        Vec3::new(hi.x, hi.y, hi.z), Vec3::new(lo.x, hi.y, hi.z),
+    ];
+    const T: [[usize; 3]; 12] = [
+        [0, 3, 2], [0, 2, 1],
+        [4, 5, 6], [4, 6, 7],
+        [0, 4, 7], [0, 7, 3],
+        [1, 2, 6], [1, 6, 5],
+        [0, 1, 5], [0, 5, 4],
+        [3, 7, 6], [3, 6, 2],
+    ];
+    let mut s = String::from("solid box\n");
+    for &[a, b, cc] in &T {
+        let (v0, v1, v2) = (p[a], p[b], p[cc]);
+        let normal = (v1 - v0).cross(v2 - v0);
+        let normal = normal / normal.mag().max(1e-30);
+        s += &format!(
+            "facet normal {} {} {}\nouter loop\n\
+             vertex {} {} {}\nvertex {} {} {}\nvertex {} {} {}\n\
+             endloop\nendfacet\n",
+            normal.x, normal.y, normal.z,
+            v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z,
+        );
+    }
+    s += "endsolid box\n";
+    s
+}
+
+/// SPEC-LIT §24.3/§24.6 row 1, the decisive gate for the whole embedded-
+/// boundary construction: the cut face's area vector is DEFINED as what
+/// closure demands, so every cut cell must close to round-off whatever the
+/// fractions came out to be - on a surface read through the published STL
+/// format, not an internal geometry fixture.
+fn check_cutcell_closure(c: &mut Checks) -> Result<()> {
+    let lo = Vec3::new(0.26, 0.24, 0.27);
+    let hi = Vec3::new(0.71, 0.76, 0.69);
+    let text = ascii_stl_cuboid(lo, hi);
+    let surf = parse_stl(text.as_bytes(), "box", "<memory>")?;
+    surf.require_closed()?;
+
+    let n = 20usize;
+    let axis = |lo: Scalar, hi: Scalar| -> Vec<Scalar> {
+        (0..=n).map(|i| lo + (hi - lo) * i as Scalar / n as Scalar).collect()
+    };
+    let (xn, yn, zn) = (axis(0.0, 1.0), axis(0.0, 1.0), axis(0.0, 1.0));
+    let axes = BlockAxes { xn: &xn, yn: &yn, zn: &zn };
+
+    let field = classify_cutcells(&axes, &surf, DEFAULT_SUPERSAMPLE)?;
+    c.require("cutcell: the off-grid cuboid actually cuts cells", field.n_cut > 0);
+
+    let h = 1.0 / n as Scalar;
+    let full: [Vec3; 6] = [
+        Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0),
+    ];
+    let mut max_err: Scalar = 0.0;
+    for cell in field.cells.iter().flatten() {
+        if cell.state != CellState::Cut {
+            continue;
+        }
+        let mut sum = cell.cut_sf;
+        for d in 0..6 {
+            sum += full[d] * (cell.alpha[d] * h * h);
+        }
+        max_err = max_err.max(sum.mag());
+    }
+    c.note(&format!("cut-cell closure: {} cut cells out of {}", field.n_cut, field.cells.len()));
+    c.check("cut-cell closure (S24.3/24.6 row 1): sum Sf = 0", max_err / (h * h), 1e-8);
+    Ok(())
+}
+
+/// SPEC-LIT §25.2's decisive gate: a sealed box with a heater of known power
+/// `P` raises `p0` at EXACTLY `dp0/dt = (gamma-1)P/V` - analytic, no
+/// tolerance excuses - and an open domain with the identical heater does not
+/// move `p0` at all.
+fn check_low_mach_p0(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    let spec = MeshSpec { n: [4, 4, 4], l: [0.4, 0.4, 0.4], ..Default::default() };
+    let hm = make_mesh(&scratch_dir("lowmach_p0"), &spec)?;
+    let m = GpuMesh::upload(gpu, &hm)?;
+
+    let props = GasProperties::default();
+    let p0_init = props.r_s() * 300.0 * 1.2;
+
+    let mut sources = EnergySources::new(gpu, &m)?;
+    let p_watts: Scalar = 2500.0;
+    let q_per_vol = p_watts / m.total_volume;
+    let q_field = gpu.upload(&vec![q_per_vol; hm.n_cells])?;
+    sources.register_explicit(gpu, &q_field)?;
+    let total_q = sources.total_q(gpu, &m)?;
+    c.check(
+        "low-Mach S25.1: integral(Q)dV matches the heater power",
+        (total_q - p_watts).abs() / p_watts,
+        1e-6,
+    );
+
+    let dt = 1e-3;
+    let mut sealed = GasState::new(gpu, &m, props, DomainKind::Sealed, p0_init)?;
+    sealed.advance_p0(total_q, dt)?;
+    let want_dp0dt = (props.gamma - 1.0) * p_watts / m.total_volume;
+    let got = sealed.dp0dt();
+    c.note(&format!("sealed dp0/dt = {got}, analytic (gamma-1)P/V = {want_dp0dt}"));
+    c.check(
+        "low-Mach S25.2 (decisive): sealed dp0/dt = (gamma-1) P / V",
+        (got - want_dp0dt).abs() / want_dp0dt.abs(),
+        1e-3,
+    );
+
+    let mut open = GasState::new(gpu, &m, props, DomainKind::Open, p0_init)?;
+    open.advance_p0(total_q, dt)?;
+    c.require(
+        "low-Mach S25.2: an open domain does not move p0 at all",
+        open.dp0dt() == 0.0 && open.p0() == p0_init,
+    );
+
+    Ok(())
+}
+
+/// SPEC-LIT §27's decisive gate: a burner supplying fuel that burns
+/// completely releases EXACTLY the fuel mass consumed times `dh_c` - not
+/// approximately, because `q'''_c` and the mass actually consumed come from
+/// the SAME `dYF` inside one reaction kernel.
+fn check_burner_heat_release(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    let spec = MeshSpec { n: [4, 4, 4], l: [0.4, 0.4, 0.4], all_generic: true, ..Default::default() };
+    let hm = make_mesh(&scratch_dir("burner"), &spec)?;
+    let m = GpuMesh::upload(gpu, &hm)?;
+    let n = hm.n_cells;
+    let nbf = hm.n_boundary_faces;
+
+    let names: Vec<String> = ["Fuel", "O2", "Products", "N2"].iter().map(|s| s.to_string()).collect();
+    let coeffs = [SpeciesCoeffs::default(); 4];
+    let mut sp = Species::new(gpu, &hm, &m, &names, &coeffs, "N2", 1.5e-5, TurbulenceControls::default())?;
+    let y_f0: Scalar = 0.02;
+    gpu.write(&mut sp.by_name_mut("Fuel").ok_or_else(|| Error::Config("species set has no \"Fuel\"".to_string()))?.field_mut().f, &vec![y_f0; n])?;
+    gpu.write(&mut sp.by_name_mut("O2").ok_or_else(|| Error::Config("species set has no \"O2\"".to_string()))?.field_mut().f, &vec![0.5 as Scalar; n])?;
+    gpu.write(&mut sp.by_name_mut("Products").ok_or_else(|| Error::Config("species set has no \"Products\"".to_string()))?.field_mut().f, &vec![0.0 as Scalar; n])?;
+    sp.initialise(gpu)?;
+
+    let coeffs_c = CombustionCoeffs::default();
+    let mut cmb = Combustion::new(gpu, &m, coeffs_c, &sp, "Fuel", "O2", "Products")?;
+
+    let mut rho = GpuScalarField::zeros(gpu, &m, "rho")?;
+    gpu.write(&mut rho.f, &vec![1.1 as Scalar; n])?;
+    gpu.write(&mut rho.bf, &vec![1.1 as Scalar; nbf])?;
+    let mut k = GpuScalarField::zeros(gpu, &m, "k")?;
+    gpu.write(&mut k.f, &vec![0.2 as Scalar; n])?;
+    gpu.write(&mut k.bf, &vec![0.2 as Scalar; nbf])?;
+    let mut eps = GpuScalarField::zeros(gpu, &m, "epsilon")?;
+    gpu.write(&mut eps.f, &vec![1.0 as Scalar; n])?;
+    gpu.write(&mut eps.bf, &vec![1.0 as Scalar; nbf])?;
+
+    let mut sources = EnergySources::new(gpu, &m)?;
+    let dt: Scalar = 5.0e-3;
+    let vol = &hm.v;
+
+    let mut energy_released = 0.0f64;
+    let mut fuel_mass_consumed = 0.0f64;
+    for _ in 0..300 {
+        let yf_before = gpu.download(&sp.by_name("Fuel").ok_or_else(|| Error::Config("species set has no \"Fuel\"".to_string()))?.field().f)?;
+        let rho_h = gpu.download(&rho.f)?;
+        sources.clear(gpu)?;
+        cmb.react_rans(gpu, &mut sp, &rho, &k, &eps, dt, &mut sources)?;
+        let yf_after = gpu.download(&sp.by_name("Fuel").ok_or_else(|| Error::Config("species set has no \"Fuel\"".to_string()))?.field().f)?;
+        let q = gpu.download(cmb.q())?;
+        for cell in 0..n {
+            let d_yf = (yf_before[cell] - yf_after[cell]).max(0.0) as f64;
+            fuel_mass_consumed += rho_h[cell] as f64 * d_yf * vol[cell] as f64;
+            energy_released += q[cell] as f64 * vol[cell] as f64 * dt as f64;
+        }
+    }
+
+    let expect = fuel_mass_consumed * coeffs_c.dh_c as f64;
+    let rel = if expect.abs() > 0.0 {
+        ((energy_released - expect).abs() / expect.abs()) as Scalar
+    } else {
+        0.0
+    };
+    c.note(&format!(
+        "burner: fuel consumed {fuel_mass_consumed:.6e} kg, heat released \
+         {energy_released:.6e} J, m_F*dh_c {expect:.6e} J"
+    ));
+    c.check("burner exact heat release (S27, decisive)", rel, 1e-9);
+
+    let sum_err = sp.max_sum_error(gpu)?;
+    c.check("burner: species mass fractions still sum to 1", sum_err, 4.0 * Scalar::EPSILON);
+
+    Ok(())
+}
+
+/// SPEC-LIT §28's decisive gate: an isothermal medium with hot walls reaches
+/// `G = 4 sigma T^4` everywhere (equilibrium) to round-off, whatever wall
+/// emissivity was chosen.
+fn check_radiative_equilibrium(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    let n = [6usize, 6, 6];
+    let l: [Scalar; 3] = [0.3, 0.3, 0.3];
+    let axis = |i: usize| GradedAxis { lo: 0.0, hi: l[i], n: n[i], expansion: 1.0, two_sided: false };
+    let b = BlockSpec {
+        x: axis(0),
+        y: axis(1),
+        z: axis(2),
+        window: None,
+        patch_name: BlockSpec::default().patch_name,
+        patch_type: ["wall", "wall", "wall", "wall", "wall", "wall"].map(String::from),
+    };
+    let hm = blockgen::build_mesh(&b)?;
+    let gm = GpuMesh::upload(gpu, &hm)?;
+
+    let props = RadiationProps::new(2.0)?;
+    let mut rad = Radiation::new(gpu, &gm, props)?;
+    rad.set_walls(&hm, 0.6)?;
+    rad.initialise(gpu)?;
+
+    let t0: Scalar = 1000.0;
+    let mut t = GpuScalarField::zeros(gpu, &gm, "T")?;
+    gpu.write(&mut t.f, &vec![t0; hm.n_cells])?;
+    gpu.write(&mut t.bf, &vec![t0; hm.n_boundary_faces])?;
+    let kind = vec![BcKind::FixedValue as Label; hm.n_boundary_faces];
+    let fr = vec![1.0 as Scalar; hm.n_boundary_faces];
+    let ref_value = vec![t0; hm.n_boundary_faces];
+    let ref_grad = vec![0.0 as Scalar; hm.n_boundary_faces];
+    gpu.write(&mut t.bc_kind, &kind)?;
+    gpu.write(&mut t.fr, &fr)?;
+    gpu.write(&mut t.ref_value, &ref_value)?;
+    gpu.write(&mut t.ref_grad, &ref_grad)?;
+    let fldk = FieldKernels::new(gpu)?;
+    correct_boundary_conditions(gpu, &fldk, &mut t, &gm)?;
+
+    let solver_ctrl = SolverControls {
+        solver: LinearSolverKind::PCG,
+        precon: Preconditioner::Diagonal,
+        tolerance: 1e-14,
+        rel_tol: 0.0,
+        max_iter: 5000,
+        report_residuals: true,
+        ..Default::default()
+    };
+    rad.correct(gpu, &t, None, &solver_ctrl, 1)?;
+
+    let g = gpu.download(&rad.field().f)?;
+    let want = 4.0 * ofgpu::radiation::SIGMA_SB * t0 * t0 * t0 * t0;
+    let worst = g.iter().fold(0.0 as Scalar, |w, &v| w.max((v - want).abs() / want));
+    c.check("radiative equilibrium (S28, decisive): G = 4 sigma T^4", worst, 1e-8);
+    Ok(())
 }
 
 // ==========================================================================

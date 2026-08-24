@@ -737,6 +737,7 @@ mod tests {
 
     #[test]
     fn permissive_downgrades_and_says_what_it_substituted() {
+        let _guard = crate::io::contract::permissive_test_guard();
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_warnings();
         set_permissive(true);

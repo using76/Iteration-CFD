@@ -54,7 +54,6 @@ use ofgpu::field_setup::{
     setup_scalar_field_with, setup_vector_field, update_inlet_outlet, wall_coeffs_from_case,
     BcInputs, WallFaces,
 };
-use ofgpu::error::IoContext;
 use ofgpu::io::case::{find_start_time, model_coeff, read_case_controls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
@@ -65,7 +64,7 @@ use ofgpu::{Error, GpuMesh, Label, Result, Scalar};
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{atoi, device_banner, g, next_arg, sci};
+use common::{atoi, build_writers, device_banner, g, next_arg, parse_output_formats, sci, OutputFormat};
 
 /// Everything the command line can change.
 struct Options {
@@ -78,12 +77,14 @@ struct Options {
     /// SPEC-LIT 13.4's one escape hatch: unsupported settings become warnings
     /// that say what was substituted.
     permissive: bool,
+    /// `-output foam|vtu|nvdb|vdb|usda`, comma list - see `common::build_writers`.
+    output: Vec<OutputFormat>,
 }
 
 fn usage() {
     eprintln!(
         "usage: ofgpu-k-omega <caseDir> [-iters N] [-fixedIters N] \
-         [-write NAME] [-noWrite] [-check N] [-permissive]"
+         [-write NAME] [-noWrite] [-check N] [-permissive] [-output LIST]"
     );
 }
 
@@ -101,6 +102,7 @@ fn parse(args: &[String]) -> Result<Options> {
         do_write: true,
         write_time: String::new(),
         permissive: false,
+        output: vec![OutputFormat::Foam],
     };
 
     let mut i = 2;
@@ -112,6 +114,7 @@ fn parse(args: &[String]) -> Result<Options> {
             "-write" => o.write_time = next_arg(args, &mut i)?,
             "-noWrite" => o.do_write = false,
             "-permissive" => o.permissive = true,
+            "-output" => o.output = parse_output_formats(&next_arg(args, &mut i)?)?,
             other => {
                 usage();
                 return Err(Error::Config(format!("unknown option {other}")));
@@ -428,8 +431,6 @@ fn run(o: &Options) -> Result<()> {
         } else {
             o.write_time.clone()
         };
-        let out_dir = o.case_dir.join(&wt);
-        std::fs::create_dir_all(&out_dir).path(&out_dir)?;
 
         // Carry the ORIGINAL boundary types across so the written fields can
         // be used as the start time of another run.
@@ -458,12 +459,37 @@ fn run(o: &Options) -> Result<()> {
         out_w.dimensions = "[0 0 -1 0 0 0 0]".to_string();
         out_nut.dimensions = "[0 2 -1 0 0 0 0]".to_string();
 
-        ofgpu::io::fields::write_scalar_field(&out_dir.join("k"), &out_k, &wt)?;
-        ofgpu::io::fields::write_scalar_field(&out_dir.join("omega"), &out_w, &wt)?;
-        ofgpu::io::fields::write_scalar_field(&out_dir.join("nut"), &out_nut, &wt)?;
-        ofgpu::io::fields::write_surface_scalar_field(&out_dir.join("phi"), &out_phi, &wt)?;
+        // One seam call per requested format, replacing what used to be four
+        // scattered `fields::write_*` sites - see `ofgpu::io::writer`.
+        let foam_fields = [
+            ofgpu::io::FoamField::scalar("k", &out_k),
+            ofgpu::io::FoamField::scalar("omega", &out_w),
+            ofgpu::io::FoamField::scalar("nut", &out_nut),
+            ofgpu::io::FoamField::surface("phi", &out_phi),
+        ];
+        let vis_fields = [
+            ofgpu::io::OutputField::scalar("k", &out_k.internal),
+            ofgpu::io::OutputField::scalar("omega", &out_w.internal),
+            ofgpu::io::OutputField::scalar("nut", &out_nut.internal),
+        ];
+        let cart = ofgpu::pressure::cartesian::detect(&hm)
+            .ok()
+            .map(|c| ofgpu::io::cartesian_info(&hm, &c));
+        let ctx = ofgpu::io::WriteCtx {
+            time: 0.0,
+            step: done as usize,
+            name: &wt,
+            mesh: &hm,
+            cart: cart.as_ref(),
+            fields: &vis_fields,
+            foam: &foam_fields,
+        };
+        let mut writers = build_writers(&o.case_dir, "kOmega", &o.output)?;
+        for w in &mut writers {
+            w.write_step(&ctx)?;
+        }
 
-        println!("written to {}", out_dir.display());
+        println!("written to {}", o.case_dir.join(&wt).display());
     }
 
     Ok(())

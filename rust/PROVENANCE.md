@@ -89,6 +89,30 @@ Each of these carries its own citation header. The papers are listed in
 | `src/surface/classify.rs` | §23.3 | Column-parity ray casting with simulation-of-simplicity jitter and a 3-axis majority vote; Barill, Dickson, Schmidt, Levin & Jacobson, *ACM TOG* 37(4) (2018) — the exact solid-angle winding number as the arbiter for cells the vote cannot settle |
 | `write_carved_case` and the carver in `src/blockgen.rs` | §23.4–§23.5 | Aftosmis, Berger & Melton (1998), the “castellate” stage only; the FDS precedent (NIST, public domain) for stair-step obstructions |
 
+## Fire physics — literature
+
+`ofgpu-fire`'s low-Mach variable-density solver: SPEC-LIT sections 25-28.
+
+| File | SPEC-LIT | Primary sources |
+|---|---|---|
+| `src/energy.rs` | §25, §26 | Rehm & Baum, *J. Res. Natl. Bur. Stand.* 83 (1978) 297-308 (the `p = p0(t) + p~` split, the divergence constraint and `p0` evolution); Majda & Sethian, *Combust. Sci. Technol.* 42 (1985) 185 (low-Mach acoustic filtering); the FDS Technical Reference Guide (McGrattan et al., NIST SP 1018, public domain — `reference/fds` read and adapted for the SHAPE of the divergence constraint and the sealed/open `p0` bookkeeping, acknowledged per SPEC-LIT §0; no FDS code copied); Patankar (1980) §4.2 for the `Su`/`Sp` linearisation the `EnergySources` registry hands to `fvm_su`/`fvm_sp` |
+| `src/combustion.rs`, `cuda/combustion.cu` | §27 | Magnussen & Hjertager, *Proc. Combust. Inst.* 16 (1977) 719-729 (the eddy-dissipation model, `omega_F = C_EDM rho (eps/k) min(Y_F, Y_O2/s)`); Poinsot & Veynante, *Theoretical and Numerical Combustion*, for background; the FDS Technical Reference Guide (public domain) read for acknowledgement that FDS's own mixing-controlled default rests on the same idea — no FDS machinery used; Patankar (1980) §4.2 for the fuel sink's implicit linearisation |
+| `src/radiation.rs`, `cuda/radiation.cu` | §28 | Modest, *Radiative Heat Transfer*, 3rd ed., ch. 15 (the P1/differential approximation and its Marshak boundary condition); Patankar (1980) §4.2 for the `T^4 ~= 4 T0^3 T - 3 T0^4` implicit emission linearisation |
+
+## New I/O formats and machinery — format / literature
+
+| File | What it is |
+|---|---|
+| `src/io/msh.rs` | Gmsh `.msh` 4.1 reader (tet/hex/prism/pyramid cells, `$PhysicalNames` patches). The FORMAT is published (Gmsh manual) and not copyrightable; `reference/pyfr`'s BSD-3 `pyfr/readers/gmsh.py` was the legal cross-check for blocked `$Nodes`, non-contiguous tags and physical names — no Gmsh source was read |
+| `src/surface/stl.rs`, `src/surface/obj.rs` | STL (3D Systems, 1987, a de facto public spec) and Wavefront OBJ (also a published, uncopyrightable format) readers, for surface intake (SPEC-LIT §23) |
+| `src/surface/classify.rs` | Column-parity ray-casting inside/outside classification (SPEC-LIT §23.3); Barill, Dickson, Schmidt, Levin & Jacobson, *ACM TOG* 37(4) (2018), the exact solid-angle winding number as tie-break |
+| `src/surface/cutcell.rs`, the cut-cell section of `src/blockgen.rs` | Embedded-boundary volume/area fractions by supersampling (SPEC-LIT §24) — Aftosmis, Berger & Melton, *AIAA J.* 36(6) (1998) 952 for the castellation/cut-cell context; the cut face's closure-defined area vector, the merge rule and the sample count are *DESIGN* (§24.3, §24.5) |
+| `src/restart.rs` | The `.mcr` restart file: full-precision `phi`, mesh-hash guarded, versioned. Format and layout are *DESIGN* — original, no external spec |
+| `src/io/case_json.rs` | The JSONC case reader/lowering (`docs/05-io-redesign.md` §4.1). `schemars`-generated JSON Schema so the schema and the reader cannot disagree; the patch-major, ordered-array layout is prior art from `reference/pyfr`'s `[soln-bcs-<patch>]` INI convention (BSD-3), read as a case-format precedent, not code |
+| `src/io/vtu.rs` | Appended-binary VTU/VTK writer; `reference/pyfr`'s BSD-3 `pyfr/writers/vtk/` was the cross-check for the encoding and offsets |
+| `src/io/vdb.rs`, `src/io/nvdb.rs` | OpenVDB-compatible and NanoVDB volume writers. The NanoVDB layout is read from the Apache-2.0 PNanoVDB/NanoVDB headers (AcademySoftwareFoundation GitHub) |
+| `src/io/usda.rs` | USD ASCII (`.usda`) scene writer referencing the VDB output — the format is Pixar's published USD spec |
+
 ## Ours by design
 
 Marked *DESIGN* in `SPEC-LIT.md` where the literature does not prescribe the
@@ -138,6 +162,15 @@ anyone.
 | Forming the compression term as `alpha_f(1 - alpha_f)` from the interpolated face value rather than interpolating the cell product, which would switch compression off exactly at a sharp interface | `cuda/vof.cu` | §20.1 |
 | The plain interpolated cell gradient as the face interface normal, rather than that gradient with its normal component replaced by `snGrad(alpha)` — measured, and the replacement is seven times worse | `cuda/vof.cu` | §20.4 |
 | Leaving the momentum predictor switchable, and taking `|U|` as the limiter sensor for `div(rhoPhi, U)` | `src/vof.rs` | §20.3, §5.4 |
+| `rho_f` by linear interpolation of cell `rho`, `rho_infinity` from `TRef` at `p0` | `src/energy.rs` | §25.3 |
+| `chi_r` radiant-fraction floor default (0.35, FDS practice) and the `LES` mixing-frequency substitute `C_EDM'` defaulted to the same `4.0` as the RANS constant until a case overrides it | `src/combustion.rs` | §27 |
+| Combustion applied as its own operator-split pass over `Species`, not fused into its transport matrix — an EDM rate is a LOCAL field, not the uniform value every other `SourceSet` entry is | `src/combustion.rs` | §27, §18 |
+| The fuel sink's backward-Euler closed form on the 0-D reaction ODE, positive for any `dt` | `src/combustion.rs` | §3.4, §27 |
+| `s×s` face supersample lattice default `s = 16`, and `theta_min = 0.2` for cut-cell merging | `src/surface/cutcell.rs` | §24.2, §24.5 |
+| Cut face centroid as the mean of interface sample midpoints, and its patch from the nearest surface triangle | `src/surface/cutcell.rs` | §24.3 |
+| `ofgpu-fire`'s `Y_O2`/`Y_P` boundary conditions derived from patch kind (ambient `inletOutlet` on `open`, `fixedValue 0` on a fuel `inlet`) rather than named per case — only `Y_F` is a case-supplied field | `src/io/case_json.rs`, `src/bin/fire.rs` | §27, §19 |
+| Species transport and combustion/radiation's segregated lag: read at the END of the PREVIOUS unit of work, registered before the CURRENT iteration's target-divergence/energy assembly — the same one-iteration lag `nu_t` and `T` already run at | `src/bin/fire.rs` | §25, §26, §27, §28 |
+| The `.mcr` restart format itself (header, mesh hash, versioning, full-`f64` `phi`) | `src/restart.rs` | — |
 
 ## GPU plumbing and tooling — original
 

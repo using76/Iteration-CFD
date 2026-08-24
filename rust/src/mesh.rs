@@ -126,6 +126,12 @@ pub struct HostMesh {
     pub b_mag_sf: Vec<Scalar>,
     pub b_cf: Vec<Vec3>,
     pub b_delta_coeffs: Vec<Scalar>,
+    /// `[n_bf]` the over-relaxed explicit non-orthogonal correction vector
+    /// (SPEC-LIT section 2.4), computed through the cyclic delta for a
+    /// coupled face; `Vec3::ZERO` on every uncoupled boundary face, where the
+    /// boundary condition is imposed directly on the face rather than
+    /// interpolated across a `d` that could be non-collinear with `Sf`.
+    pub b_non_orth_corr: Vec<Vec3>,
     /// `[n_bf]` wall-normal distance of the adjacent cell centre, `nf . delta`
     pub b_y: Vec<Scalar>,
     /// `[n_bf]` cyclic: the cell across the couple; `-1` otherwise
@@ -186,7 +192,8 @@ impl HostMesh {
     }
 
     /// Compute `v`, `c`, `sf`, `mag_sf`, `cf`, `weights`, `delta_coeffs`,
-    /// `non_orth_corr` and the boundary metrics from raw points and faces.
+    /// `non_orth_corr`, `b_non_orth_corr` and the boundary metrics from raw
+    /// points and faces.
     /// Mirrors `primitiveMesh` + `surfaceInterpolation`.
     pub fn compute_geometry(
         &mut self,
@@ -246,6 +253,7 @@ pub struct GpuMesh {
     pub b_mag_sf: DevBuf<Scalar>,
     pub b_cf: DevBuf<Vec3>,
     pub b_delta_coeffs: DevBuf<Scalar>,
+    pub b_non_orth_corr: DevBuf<Vec3>,
     pub b_y: DevBuf<Scalar>,
     pub b_nbr_cell: DevBuf<Label>,
     pub b_weights: DevBuf<Scalar>,
@@ -288,6 +296,7 @@ impl GpuMesh {
             b_mag_sf: gpu.upload(&m.b_mag_sf)?,
             b_cf: gpu.upload(&m.b_cf)?,
             b_delta_coeffs: gpu.upload(&m.b_delta_coeffs)?,
+            b_non_orth_corr: gpu.upload(&m.b_non_orth_corr)?,
             b_y: gpu.upload(&m.b_y)?,
             b_nbr_cell: gpu.upload(&m.b_nbr_cell)?,
             b_weights: gpu.upload(&m.b_weights)?,

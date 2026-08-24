@@ -537,12 +537,17 @@ impl<'m> Momentum<'m> {
             mk: MomentumKernels::new(gpu)?,
             srck: crate::sources::SourceKernels::new(gpu)?,
             sources: crate::sources::SourceSet::new(),
-            ddt: crate::timescheme::Ddt::new(
+            // `relaxed = u_relax < 1.0`: a PISO/PIMPLE momentum equation left
+            // at its default `relaxationFactors == 1` is exactly the
+            // condition under which `CrankNicolson` is reachable
+            // (`timescheme::Ddt::new_with_relax`, SPEC-LIT §13.1/§14).
+            ddt: crate::timescheme::Ddt::new_with_relax(
                 gpu,
                 m,
                 ctrl.ddt.reconciled(ctrl.steady),
                 ctrl.delta_t,
                 ctrl.lts,
+                ctrl.u_relax < 1.0,
             )?,
 
             a: GpuLduMatrix::new(gpu, m)?,

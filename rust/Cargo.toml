@@ -104,3 +104,7 @@ path = "src/bin/dispatch_bench.rs"
 [[bin]]
 name = "ofgpu-vof"
 path = "src/bin/vof.rs"
+
+[[bin]]
+name = "ofgpu-fire"
+path = "src/bin/fire.rs"

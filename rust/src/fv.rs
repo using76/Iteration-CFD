@@ -1493,11 +1493,18 @@ pub fn fvm_laplacian(
 /// nothing to correct, hence the `fr` factor.
 ///
 /// `k_b` is rebuilt in the kernel from `Sf_b`, `Cf_b`, `C_P` and `Delta_b`,
-/// because the mesh carries a correction vector for internal faces only.
+/// because the mesh carries a correction vector for internal faces only -
+/// for an UNCOUPLED patch, where the condition is imposed directly on the
+/// face and `d = Cf - C_P` really is the separation the condition sees.
 ///
-/// Coupled faces are skipped: a matched cyclic pair is orthogonal by
-/// construction here, and `Cf - C_P` across a couple is not the couple's
-/// separation vector anyway.
+/// A cyclic couple is different: it is one internal face folded in half, so
+/// it gets the identical over-relaxed correction an internal face gets,
+/// through `m.b_non_orth_corr` (`SPEC-LIT` §2.4, built by
+/// `mesh/geometry.rs::compute` from the `d` that spans the periodic image,
+/// not from `Cf - C_P`) and a gradient interpolated between the two coupled
+/// cells via `m.b_nbr_cell`/`m.b_weights` exactly as an internal face's is.
+/// Before this these faces were skipped outright, so a cyclic boundary on a
+/// sheared mesh silently lost its non-orthogonal correction.
 ///
 /// # The `sn_grad` argument
 ///
@@ -1557,6 +1564,9 @@ pub fn fvm_laplacian_non_orth_correction(
             .arg(&m.b_mag_sf)
             .arg(&m.b_cf)
             .arg(&m.b_delta_coeffs)
+            .arg(&m.b_non_orth_corr)
+            .arg(&m.b_nbr_cell)
+            .arg(&m.b_weights)
             .arg(&psi.fr)
             .arg(&psi.ref_value)
             .arg(&psi.ref_grad)
@@ -2251,6 +2261,9 @@ pub fn sn_grad_flux_correction(
                 .arg(&m.b_mag_sf)
                 .arg(&m.b_cf)
                 .arg(&m.b_delta_coeffs)
+                .arg(&m.b_non_orth_corr)
+                .arg(&m.b_nbr_cell)
+                .arg(&m.b_weights)
                 .arg(&psi.fr)
                 .arg(&psi.ref_value)
                 .arg(&psi.ref_grad)
@@ -4047,6 +4060,188 @@ mod tests {
             errs_on[1] < errs_off[1],
             "the non-orthogonal correction made the finer mesh worse: \
              {:.4e} vs {:.4e}",
+            errs_on[1],
+            errs_off[1]
+        );
+        Ok(())
+    }
+
+    /// The same MMS again, but on a mesh `poisson_error`'s hand-rolled `boxed`
+    /// geometry cannot build at all: a SHEARED mesh with a CYCLIC pair of
+    /// patches, i.e. a periodic channel. This is what exercises the fix to
+    /// `fvLapNonOrth`/`fvSnGradCorrBoundary`'s cyclic branches - a mesh needs
+    /// both a real coupled boundary (`mesh::geometry::compute`, not `boxed`'s
+    /// exact-but-uncoupled-only geometry) and non-orthogonality on exactly
+    /// that boundary for the correction this module ships to have anything to
+    /// do.
+    ///
+    /// `psi(x, y) = sin(2*pi*x/Lx)*sin(pi*y/Ly)` is exactly periodic in `x` -
+    /// value AND normal derivative match across the `x = 0`/`x = Lx` couple -
+    /// and exactly zero on the `y` walls, so both boundaries get their exact
+    /// condition with no approximation of their own. `-laplacian(psi) =
+    /// lambda*psi` with `lambda = (2*pi/Lx)^2 + (pi/Ly)^2`, the same
+    /// `fvm_su`-as-manufactured-source pattern as `poisson_error`.
+    ///
+    /// Solved with the crate's own device solver and
+    /// `ldu_ops::add_boundary_contributions` - which is what actually turns a
+    /// cyclic face's `internalCoeffs`/`boundaryCoeffs` into a coupled matrix
+    /// entry - rather than `poisson_error`'s host `cg`/`fold_boundary`, which
+    /// know only the uncoupled boundary fold.
+    fn periodic_channel(n: usize, lx: Scalar, ly: Scalar, shear: Scalar) -> Result<HostMesh> {
+        let d = Vec3::new(lx / n as Scalar, ly / n as Scalar, 1.0);
+        let (mut m, mut points, faces) = crate::mesh::topology::tests::box_mesh([n, n, 1], d);
+
+        // x-min / x-max, Generic by box_mesh's default, become one cyclic
+        // pair - a periodic streamwise direction, as SPEC-LIT S2.4's cyclic
+        // extension is meant for.
+        m.patches[0].kind = PatchKind::Cyclic;
+        m.patches[0].type_name = "cyclic".to_string();
+        m.patches[0].nbr_patch = Some(1);
+        m.patches[1].kind = PatchKind::Cyclic;
+        m.patches[1].type_name = "cyclic".to_string();
+        m.patches[1].nbr_patch = Some(0);
+
+        // x += s*y: planar, volume-preserving, and (SPEC-LIT S2.4) it tilts
+        // every x-normal face - the internal ones AND the cyclic couple -
+        // while leaving `d` axis-aligned, exactly as
+        // `mesh::geometry::tests::a_sheared_cyclic_couple_...` establishes.
+        for q in points.iter_mut() {
+            q.x += shear * q.y;
+        }
+
+        m.build_cell_face_maps();
+        m.compute_geometry(&points, &faces)?;
+        Ok(m)
+    }
+
+    fn periodic_channel_error(
+        hm: &HostMesh,
+        lx: Scalar,
+        ly: Scalar,
+        n_non_orth: usize,
+    ) -> Result<Scalar> {
+        use crate::ldu_ops::{self, LduKernels};
+        use crate::solver::{self, SolverControls, SolverKernels, SolverWorkspace};
+
+        let Some(gpu) = gpu() else {
+            return Ok(0.0);
+        };
+        let k = FvKernels::new(&gpu)?;
+        let lduk = LduKernels::new(&gpu)?;
+        let solk = SolverKernels::new(&gpu)?;
+        let m = GpuMesh::upload(&gpu, hm)?;
+
+        let pi = std::f64::consts::PI as Scalar;
+        let (kx, ky) = (2.0 * pi / lx, pi / ly);
+        let lambda = kx * kx + ky * ky;
+        let exact = |p: Vec3| (kx * p.x).sin() * (ky * p.y).sin();
+
+        let ex: Vec<Scalar> = (0..hm.n_cells).map(|c| exact(hm.c[c])).collect();
+        // The y walls' exact value; the x (cyclic) patches ignore `bf`/`fr`
+        // entirely; `dirichlet_field` writing them anyway is harmless.
+        let ex_b: Vec<Scalar> = (0..hm.n_boundary_faces).map(|i| exact(hm.b_cf[i])).collect();
+        let su_h: Vec<Scalar> = ex.iter().map(|v| lambda * *v).collect();
+
+        let d_gamma = gpu.upload(&hm.mag_sf)?;
+        let d_b_gamma = gpu.upload(&hm.b_mag_sf)?;
+        let d_su = gpu.upload(&su_h)?;
+
+        let zeros_c = vec![0.0 as Scalar; hm.n_cells];
+        let mut psi = dirichlet_field(&gpu, &m, hm, &zeros_c, &ex_b)?;
+
+        let mut grad: DevBuf<Vec3> = gpu.zeros(hm.n_cells.max(1))?;
+        let mut a = GpuLduMatrix::new(&gpu, &m)?;
+        let mut ws = SolverWorkspace::for_mesh(&gpu, &m)?;
+        let ctrl = SolverControls {
+            tolerance: 1e-14,
+            rel_tol: 0.0,
+            max_iter: 8000,
+            ..SolverControls::default()
+        };
+
+        for pass in 0..=n_non_orth {
+            a.zero(&gpu)?;
+            fvm_laplacian(&gpu, &k, &mut a, &m, &d_gamma, &d_b_gamma, &psi, -1.0)?;
+            if pass > 0 {
+                fvm_laplacian_non_orth_correction(
+                    &gpu,
+                    &k,
+                    &mut a,
+                    &m,
+                    &d_gamma,
+                    &d_b_gamma,
+                    &psi,
+                    &grad,
+                    SnGradScheme::Corrected,
+                    -1.0,
+                )?;
+            }
+            fvm_su(&gpu, &k, &mut a, &m, &d_su, 1.0)?;
+            ldu_ops::add_boundary_contributions(&gpu, &lduk, &mut a, &m)?;
+            gpu.sync()?;
+
+            let perf =
+                solver::solve_pbicgstab(&gpu, &solk, &mut psi.f, &a, &m, &mut ws, &ctrl)?;
+            assert!(
+                perf.converged,
+                "periodic-channel solve stagnated at {:e}",
+                perf.final_residual
+            );
+
+            fvc_grad_scalar(&gpu, &k, &mut grad, &psi, &m)?;
+            gpu.sync()?;
+        }
+
+        let got = gpu.download(&psi.f)?;
+        let mut l2: Scalar = 0.0;
+        let mut vol: Scalar = 0.0;
+        for c in 0..hm.n_cells {
+            let e = got[c] - ex[c];
+            l2 += e * e * hm.v[c];
+            vol += hm.v[c];
+        }
+        Ok((l2 / vol).sqrt())
+    }
+
+    #[test]
+    fn the_cyclic_non_orthogonal_correction_improves_a_sheared_periodic_channel() -> Result<()> {
+        let Some(gpu0) = gpu() else { return Ok(()) };
+        drop(gpu0);
+
+        let (lx, ly) = (1.0 as Scalar, 0.7 as Scalar);
+        let shear: Scalar = 0.3; // atan(0.3) = 16.7 degrees at the cyclic couple
+
+        let mut errs_off = Vec::new();
+        let mut errs_on = Vec::new();
+
+        for n in [8usize, 16usize] {
+            let hm = periodic_channel(n, lx, ly, shear)?;
+            assert_closes(&hm);
+
+            errs_off.push(periodic_channel_error(&hm, lx, ly, 0)?);
+            errs_on.push(periodic_channel_error(&hm, lx, ly, 12)?);
+        }
+
+        let order_off = observed_order(errs_off[0], errs_off[1]);
+        let order_on = observed_order(errs_on[0], errs_on[1]);
+
+        println!(
+            "  sheared periodic channel: uncorrected L2 {:.4e} -> {:.4e} (order \
+             {order_off:.3}); corrected L2 {:.4e} -> {:.4e} (order {order_on:.3})",
+            errs_off[0], errs_off[1], errs_on[0], errs_on[1]
+        );
+
+        assert!(
+            order_on >= 1.8,
+            "with the cyclic non-orthogonal correction the observed order on \
+             the periodic channel is only {order_on:.3} (L2 {:.4e} -> {:.4e})",
+            errs_on[0],
+            errs_on[1]
+        );
+        assert!(
+            errs_on[1] < errs_off[1],
+            "the cyclic non-orthogonal correction made the finer periodic \
+             mesh worse: {:.4e} vs {:.4e}",
             errs_on[1],
             errs_off[1]
         );

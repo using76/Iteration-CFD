@@ -2975,6 +2975,7 @@ mod tests {
     /// naming the setting - not a silent Jacobi, which is what this used to be.
     #[test]
     fn dic_without_a_colouring_is_an_error_and_not_a_silent_jacobi() {
+        let _guard = crate::io::contract::permissive_test_guard();
         let Some(gpu) = Gpu::new(0).ok() else { return };
         let w = SolverWorkspace::new(&gpu, 16).expect("workspace");
         crate::io::contract::set_permissive(false);

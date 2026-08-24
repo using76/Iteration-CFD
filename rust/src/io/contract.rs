@@ -201,17 +201,34 @@ pub fn warn_once(setting: &str, msg: &str) {
 //  Tests
 // ==========================================================================
 
+/// Serialises every test, in ANY module, that touches the process-wide
+/// permissive flag or the warn-once set.
+///
+/// The flag is global on purpose (a run is either permissive or it is not),
+/// which makes tests that set it race each other under cargo's parallel
+/// runner: a strict-mode assertion observes another module's
+/// `set_permissive(true)` and fails only when the scheduler interleaves them
+/// - the worst kind of flake. Take this guard FIRST in any test that calls
+/// [`set_permissive`] or [`reset_warnings`]. Poisoning is ignored: a panic in
+/// one such test must not cascade into every other one.
+pub fn permissive_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: Mutex<()> = Mutex::new(());
+    match GUARD.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The warn-once set and the permissive flag are process-wide, so these
-    /// have to run one at a time.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    // All these take the crate-wide guard above - the flag is shared with
+    // every other module's permissive tests, not just this file's.
 
     #[test]
     fn strict_is_the_default_and_names_the_setting_and_the_menu() {
-        let _g = SERIAL.lock();
+        let _g = permissive_test_guard();
         set_permissive(false);
 
         let e = unsupported(
@@ -233,7 +250,7 @@ mod tests {
 
     #[test]
     fn permissive_substitutes_and_says_so() {
-        let _g = SERIAL.lock();
+        let _g = permissive_test_guard();
         reset_warnings();
         set_permissive(true);
 
@@ -248,7 +265,7 @@ mod tests {
 
     #[test]
     fn unreadable_is_an_error_when_strict() {
-        let _g = SERIAL.lock();
+        let _g = permissive_test_guard();
         set_permissive(false);
         let e = unreadable("nu", "banana", "a number", 1e-5f64).unwrap_err();
         assert!(e.to_string().contains("banana"));

@@ -18,17 +18,16 @@
 //!
 //! Carried across from this project's own earlier C++ benchmark driver.
 
-use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use cudarc::driver::sys::CUdevice_attribute;
 
-use ofgpu::blockgen::{write_block_mesh, BlockSpec, GradedAxis};
+use ofgpu::blockgen;
+use ofgpu::blockgen::{BlockSpec, GradedAxis};
 use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::max_div_phi;
-use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::mesh::{HostMesh, PatchKind};
 use ofgpu::models::{KEpsilon, KEpsilonCoeffs, KOmega, KOmegaCoeffs};
 use ofgpu::turbulence::{FlowState, TurbulenceControls};
@@ -53,14 +52,7 @@ struct Bench {
     nu: Scalar,
 }
 
-fn build_flow(
-    gpu: &Gpu,
-    fk: &FieldKernels,
-    dir: &Path,
-    nx: usize,
-    ny: usize,
-    nz: usize,
-) -> Result<Bench> {
+fn build_flow(gpu: &Gpu, fk: &FieldKernels, nx: usize, ny: usize, nz: usize) -> Result<Bench> {
     let spec = BlockSpec {
         x: GradedAxis { lo: 0.0, hi: 4.0, n: nx, ..Default::default() },
         y: GradedAxis {
@@ -85,10 +77,7 @@ fn build_flow(
         .map(String::from),
     };
 
-    let _ = std::fs::remove_dir_all(dir);
-    write_block_mesh(dir, &spec)?;
-
-    let hm = build_host_mesh(&read_poly_mesh(dir)?)?;
+    let hm = blockgen::build_mesh(&spec)?;
     let mesh = GpuMesh::upload(gpu, &hm)?;
 
     // A 1/7-power-law channel profile in x only. div(U) is not exactly zero
@@ -383,8 +372,6 @@ fn run(o: &Options) -> Result<()> {
         precision_name()
     );
 
-    let dir = std::env::temp_dir().join("ofgpuBenchCase");
-
     println!(
         "building {} x {} x {} = {} cells ...",
         o.nx,
@@ -394,7 +381,7 @@ fn run(o: &Options) -> Result<()> {
     );
 
     let fk = FieldKernels::new(&gpu)?;
-    let b = build_flow(&gpu, &fk, &dir, o.nx, o.ny, o.nz)?;
+    let b = build_flow(&gpu, &fk, o.nx, o.ny, o.nz)?;
 
     println!(
         "       {} cells, {} internal faces, {} boundary faces",
@@ -470,8 +457,6 @@ fn run(o: &Options) -> Result<()> {
 
         run_model(&gpu, "kOmega", &mut model, &flow, o.n_iters, b.hm.n_cells)?;
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 
     Ok(())
 }

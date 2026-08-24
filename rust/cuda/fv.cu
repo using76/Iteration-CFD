@@ -1143,9 +1143,13 @@ extern "C" __global__ void fvLapBoundary
 //  non-orthogonal mesh; the test
 //  fv::tests::the_non_orthogonal_correction_restores_second_order measures it.
 //
-//  Coupled faces are skipped: a matched cyclic pair is orthogonal by
-//  construction here, and d_b across a couple is not the couple's separation
-//  vector anyway.
+//  Coupled (cyclic) faces are NOT skipped: SPEC-LIT S2.4's over-relaxed split
+//  applies to them exactly as it does to an internal face - a matched cyclic
+//  pair IS one internal face folded in half - using `bNonOrthCorr`, which the
+//  host geometry sweep (`mesh/geometry.rs::compute`) builds from the `d` that
+//  spans the periodic image, not from `Cf - C_P`. `boundaryCorrVector` below
+//  remains correct for an UNCOUPLED patch, where the condition is imposed
+//  directly on the face and `d = Cf - C_P` really is the right separation.
 extern "C" __global__ void fvLapNonOrth
 (
     ofscalar* __restrict__ source,
@@ -1160,6 +1164,9 @@ extern "C" __global__ void fvLapNonOrth
     const ofscalar* __restrict__ bMagSf,
     const ofvec3* __restrict__ bCf,
     const ofscalar* __restrict__ bDeltaCoeffs,
+    const ofvec3* __restrict__ bNonOrthCorr,
+    const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bWeights,
     const ofscalar* __restrict__ fr,
     const ofscalar* __restrict__ refValue,
     const ofscalar* __restrict__ refGrad,
@@ -1206,20 +1213,39 @@ extern "C" __global__ void fvLapNonOrth
     {
         const oflabel b = bcfFace[j];
         const oflabel kind = bKind[b];
-        if (kind == OFPATCH_EMPTY || kind == OFPATCH_CYCLIC) continue;
+        if (kind == OFPATCH_EMPTY) continue;
 
-        const ofvec3 kb = boundaryCorrVector
-        (
-            bSf[b], bMagSf[b], bCf[b], C[c], bDeltaCoeffs[b]
-        );
+        ofscalar corr;
+        ofscalar orth;
 
-        const ofscalar corr = fr[b]*dot3(kb, gP);
+        if (kind == OFPATCH_CYCLIC)
+        {
+            const oflabel n = bNbrCell[b];
+            if (n < 0) continue;   // named but not yet paired: no couple yet
 
-        // The orthogonal part of snGrad_b implied by the mixed form of S4,
-        // which is what S12.3 compares the correction against.
-        const ofscalar orth =
-            bcGradInternal(fr[b], bDeltaCoeffs[b])*psi[c]
-          + bcGradBoundary(fr[b], refValue[b], refGrad[b], bDeltaCoeffs[b]);
+            // The couple is one internal face folded in half, so the
+            // gradient is interpolated across it exactly as an internal
+            // face's is, with `bWeights[b]` this face's share of the split.
+            const ofvec3 gf = faceGrad(gP, gradPsi[n], bWeights[b]);
+
+            corr = dot3(bNonOrthCorr[b], gf);
+            orth = bDeltaCoeffs[b]*(psi[n] - psi[c]);
+        }
+        else
+        {
+            const ofvec3 kb = boundaryCorrVector
+            (
+                bSf[b], bMagSf[b], bCf[b], C[c], bDeltaCoeffs[b]
+            );
+
+            corr = fr[b]*dot3(kb, gP);
+
+            // The orthogonal part of snGrad_b implied by the mixed form of
+            // S4, which is what S12.3 compares the correction against.
+            orth =
+                bcGradInternal(fr[b], bDeltaCoeffs[b])*psi[c]
+              + bcGradBoundary(fr[b], refValue[b], refGrad[b], bDeltaCoeffs[b]);
+        }
 
         acc += bGammaMagSf[b]*snGradLimitScale(alpha, orth, corr)*corr;
     }
@@ -2305,6 +2331,12 @@ extern "C" __global__ void fvSnGradCorrInternal
 }
 
 
+//- Coupled (cyclic) faces are NOT skipped, for the same reason as
+//  `fvLapNonOrth`: this must reproduce `fvm_laplacian_non_orth_correction`
+//  exactly (see the pair's doc above), and that function no longer skips
+//  them either. `bNonOrthCorr` carries the correction through the periodic
+//  image; `bWeights`/`bNbrCell` let the face gradient be interpolated
+//  between the two coupled cells exactly as an internal face's is.
 extern "C" __global__ void fvSnGradCorrBoundary
 (
     ofscalar* __restrict__ bphi,
@@ -2313,6 +2345,9 @@ extern "C" __global__ void fvSnGradCorrBoundary
     const ofscalar* __restrict__ bMagSf,
     const ofvec3* __restrict__ bCf,
     const ofscalar* __restrict__ bDeltaCoeffs,
+    const ofvec3* __restrict__ bNonOrthCorr,
+    const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bWeights,
     const ofscalar* __restrict__ fr,
     const ofscalar* __restrict__ refValue,
     const ofscalar* __restrict__ refGrad,
@@ -2329,20 +2364,35 @@ extern "C" __global__ void fvSnGradCorrBoundary
     if (i >= nbf) return;
 
     const oflabel kind = bKind[i];
-    if (kind == OFPATCH_EMPTY || kind == OFPATCH_CYCLIC) return;
+    if (kind == OFPATCH_EMPTY) return;
 
     const oflabel o = bFaceCells[i];
 
-    const ofvec3 kb = boundaryCorrVector
-    (
-        bSf[i], bMagSf[i], bCf[i], C[o], bDeltaCoeffs[i]
-    );
+    ofscalar corr;
+    ofscalar orth;
 
-    const ofscalar corr = fr[i]*dot3(kb, gradPsi[o]);
+    if (kind == OFPATCH_CYCLIC)
+    {
+        const oflabel n = bNbrCell[i];
+        if (n < 0) return;   // named but not yet paired: no couple yet
 
-    const ofscalar orth =
-        bcGradInternal(fr[i], bDeltaCoeffs[i])*psi[o]
-      + bcGradBoundary(fr[i], refValue[i], refGrad[i], bDeltaCoeffs[i]);
+        const ofvec3 gf = faceGrad(gradPsi[o], gradPsi[n], bWeights[i]);
+        corr = dot3(bNonOrthCorr[i], gf);
+        orth = bDeltaCoeffs[i]*(psi[n] - psi[o]);
+    }
+    else
+    {
+        const ofvec3 kb = boundaryCorrVector
+        (
+            bSf[i], bMagSf[i], bCf[i], C[o], bDeltaCoeffs[i]
+        );
+
+        corr = fr[i]*dot3(kb, gradPsi[o]);
+
+        orth =
+            bcGradInternal(fr[i], bDeltaCoeffs[i])*psi[o]
+          + bcGradBoundary(fr[i], refValue[i], refGrad[i], bDeltaCoeffs[i]);
+    }
 
     bphi[i] += bGammaMagSf[i]*snGradLimitScale(alpha, orth, corr)*corr;
 }

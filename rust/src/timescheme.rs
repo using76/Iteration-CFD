@@ -872,18 +872,11 @@ pub struct Ddt {
 }
 
 impl Ddt {
-    /// Build the ddt term for `scheme`.
-    ///
-    /// **`CrankNicolson` is refused here**, and that is deliberate rather than
-    /// an oversight: the theta method weights the *spatial* operator
-    /// ([`apply_theta`]), so it has to be applied between the boundary fold
-    /// and the ddt, and the implicit under-relaxation this crate's momentum
-    /// and turbulence equations run
-    /// ([`crate::ldu_ops::relax`]) sits in exactly that gap and must see the
-    /// unrelaxed, unfolded diagonal. Silently running Euler instead would be
-    /// the very substitution `SPEC-LIT` §13.4 forbids, so the request is
-    /// refused with a message that names it and says where the theta method
-    /// *is* available. `-permissive` downgrades it to Euler, and says so.
+    /// Build the ddt term for `scheme`, for an equation that carries implicit
+    /// under-relaxation (`SPEC-LIT` §5.2) at a factor below 1 - which is every
+    /// equation in this crate that predates this constructor, so this is the
+    /// conservative default. See [`Self::new_with_relax`] for the condition
+    /// under which `CrankNicolson` is actually reachable.
     pub fn new(
         gpu: &Gpu,
         m: &GpuMesh,
@@ -891,12 +884,49 @@ impl Ddt {
         dt: Scalar,
         lts_ctrl: LtsControls,
     ) -> Result<Self> {
+        Self::new_with_relax(gpu, m, scheme, dt, lts_ctrl, true)
+    }
+
+    /// Build the ddt term for `scheme`, gating `CrankNicolson` on whether the
+    /// equation it will sit in is implicitly under-relaxed.
+    ///
+    /// **`CrankNicolson` is refused when `relaxed`**, and that is deliberate
+    /// rather than an oversight: the theta method weights the *spatial*
+    /// operator ([`apply_theta`]), so it has to be applied between the
+    /// boundary fold and the ddt, and this crate's implicit under-relaxation
+    /// ([`crate::ldu_ops::relax`]) sits in exactly that gap and must see the
+    /// unrelaxed, unfolded diagonal. Applying `apply_theta` first and relaxing
+    /// afterwards would relax the theta-scaled matrix instead - a different,
+    /// unpublished scheme - so the two cannot coexist in one equation.
+    ///
+    /// `relaxed = false` is exactly the equations `SPEC-LIT` §5.2's
+    /// relaxation pair excludes: a PISO/PIMPLE equation with its relaxation
+    /// factor left at 1 (Issa 1986 §2 runs the predictor and every corrector
+    /// unrelaxed - that is what makes it non-iterative), or any other
+    /// equation a case has explicitly set to `relaxationFactors { ... 1; }`.
+    /// There `apply_theta` is the *only* thing touching the diagonal in that
+    /// gap, so the theta method is fully reachable - and this constructor
+    /// is what lets it through.
+    ///
+    /// Silently running Euler instead of a refused `CrankNicolson` would be
+    /// the very substitution `SPEC-LIT` §13.4 forbids, so the request is
+    /// refused with a message that names it, names the condition
+    /// (`relaxed`), and says where the theta method *is* available.
+    /// `-permissive` downgrades it to Euler, and says so.
+    pub fn new_with_relax(
+        gpu: &Gpu,
+        m: &GpuMesh,
+        scheme: DdtScheme,
+        dt: Scalar,
+        lts_ctrl: LtsControls,
+        relaxed: bool,
+    ) -> Result<Self> {
         let scheme = match scheme {
-            DdtScheme::CrankNicolson(_) => crate::io::contract::unsupported_note(
+            DdtScheme::CrankNicolson(_) if relaxed => crate::io::contract::unsupported_note(
                 "ddtSchemes/default",
                 "CrankNicolson",
                 &["steadyState", "Euler", "backward", "localEuler"],
-                "the theta method IS implemented (timescheme::apply_theta, SPEC-LIT 13.1); it cannot be reached from an implicitly under-relaxed equation, because the theta weighting and the relaxation want the same slot in the assembly and the relaxation has to see the unweighted diagonal",
+                "the theta method IS implemented (timescheme::apply_theta, SPEC-LIT 13.1) and IS reachable from an equation with no implicit under-relaxation (relaxationFactors == 1, as PISO/PIMPLE run) - it cannot be reached from an implicitly under-relaxed equation, because the theta weighting and the relaxation want the same slot in the assembly and the relaxation has to see the unweighted diagonal",
                 "Euler",
                 DdtScheme::Euler,
             )?,
@@ -1294,11 +1324,18 @@ mod tests {
     /// `template` is the spatial system, assembled once: it does not depend on
     /// time here, which is precisely the condition the §13.1 *DESIGN* needs
     /// for the theta method to be second order.
+    ///
+    /// Goes through the real [`Ddt`] object rather than the bare [`fvm_ddt`]
+    /// function, `apply_theta` applied by the caller exactly as a PISO
+    /// momentum equation would: this is what proves `CrankNicolson` is not
+    /// merely correct in isolation but actually *reachable* end to end at
+    /// `relaxed = false`, and still refused at `relaxed = true`.
     #[allow(clippy::too_many_arguments)]
     fn march_error(
         fx: &Fx,
         template: &GpuLduMatrix,
         scheme: DdtScheme,
+        relaxed: bool,
         psi0: &[Scalar],
         reference: &[f64],
         t_end: Scalar,
@@ -1326,6 +1363,7 @@ mod tests {
             ..SolverControls::default()
         };
 
+        let mut ddt = Ddt::new_with_relax(gpu, m, scheme, dts[0], LtsControls::default(), relaxed)?;
         let mut ts = TimeState::new(dts[0]);
 
         for (i, &dt) in dts.iter().enumerate() {
@@ -1345,12 +1383,12 @@ mod tests {
             gpu.stream().memcpy_dtod(&template.lower, &mut a.lower)?;
             gpu.stream().memcpy_dtod(&template.source, &mut a.source)?;
 
-            if let DdtScheme::CrankNicolson(theta) = scheme {
+            if let DdtScheme::CrankNicolson(theta) = ddt.scheme {
                 apply_theta(gpu, &fx.tk, &fx.lduk, &mut a, m, &f0, &mut scratch, theta)?;
             }
 
-            let c = ts.coeffs(scheme)?;
-            fvm_ddt(gpu, &fx.tk, &mut a, m, &f0, &f00, c, 1.0)?;
+            ddt.state = ts;
+            ddt.add(gpu, &mut a, m, &f0, &f00, 1.0)?;
 
             let perf = solver::solve_pbicgstab(gpu, &fx.solk, &mut psi_f, &a, m, &mut ws, &ctrl)?;
             assert!(
@@ -1386,6 +1424,60 @@ mod tests {
         raw.iter().map(|d| d * t_end / total).collect()
     }
 
+    /// The gate itself, with no march involved: `CrankNicolson` is refused
+    /// (with the note pointing at `apply_theta` and at the unrelaxed
+    /// condition) when the equation is relaxed, and constructs cleanly - with
+    /// its `theta` preserved - when it is not.
+    #[test]
+    fn crank_nicolson_is_refused_relaxed_and_reachable_unrelaxed() -> Result<()> {
+        let Some(fx) = fixture([2, 2, 1]) else { return Ok(()) };
+        let (gpu, m) = (&fx.gpu, &fx.m);
+
+        let e = match Ddt::new_with_relax(
+            gpu,
+            m,
+            DdtScheme::CrankNicolson(0.5),
+            0.1,
+            LtsControls::default(),
+            true,
+        ) {
+            Ok(_) => panic!("CrankNicolson at relaxed = true should have been refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("CrankNicolson"), "{e}");
+        assert!(e.contains("apply_theta"), "{e}");
+        assert!(e.contains("permissive"), "{e}");
+
+        // The plain `Ddt::new` is the same conservative default: still
+        // refused, because it assumes `relaxed = true`.
+        assert!(Ddt::new(gpu, m, DdtScheme::CrankNicolson(0.5), 0.1, LtsControls::default())
+            .is_err());
+
+        let ddt = Ddt::new_with_relax(
+            gpu,
+            m,
+            DdtScheme::CrankNicolson(0.5),
+            0.1,
+            LtsControls::default(),
+            false,
+        )?;
+        assert_eq!(ddt.scheme, DdtScheme::CrankNicolson(0.5));
+
+        // Every other scheme is unaffected by `relaxed` either way.
+        for scheme in [
+            DdtScheme::SteadyState,
+            DdtScheme::Euler,
+            DdtScheme::Backward,
+            DdtScheme::LocalEuler,
+        ] {
+            assert!(Ddt::new_with_relax(gpu, m, scheme, 0.1, LtsControls::default(), true).is_ok());
+            assert!(
+                Ddt::new_with_relax(gpu, m, scheme, 0.1, LtsControls::default(), false).is_ok()
+            );
+        }
+        Ok(())
+    }
+
     /// `SPEC-LIT` §22: BDF2 order, MMS in TIME - fix the mesh, refine `dt`.
     ///
     /// Run at a NON-UNIT step ratio, so what is measured is the general
@@ -1405,6 +1497,7 @@ mod tests {
                 &fx,
                 &a,
                 DdtScheme::Backward,
+                true,
                 &psi0,
                 &reference,
                 t_end,
@@ -1424,9 +1517,13 @@ mod tests {
         Ok(())
     }
 
-    /// `SPEC-LIT` §22: theta = 1/2 order, the same way.
+    /// `SPEC-LIT` §22: theta = 1/2 order, the same way - and, unlike the
+    /// low-level check above, through the actual gated [`Ddt::new_with_relax`]
+    /// at `relaxed = false`. This is the PISO/PIMPLE condition
+    /// (`relaxationFactors == 1`): the theta method must be reachable there
+    /// and still be second order once it is reached, not merely accepted.
     #[test]
-    fn crank_nicolson_is_second_order_in_time() -> Result<()> {
+    fn crank_nicolson_is_reachable_and_second_order_for_an_unrelaxed_equation() -> Result<()> {
         let Some(fx) = fixture([6, 6, 1]) else { return Ok(()) };
         let (a, dense, psi0) = diffusion_system(&fx)?;
 
@@ -1440,6 +1537,7 @@ mod tests {
                 &fx,
                 &a,
                 DdtScheme::CrankNicolson(0.5),
+                false,
                 &psi0,
                 &reference,
                 t_end,
@@ -1476,6 +1574,7 @@ mod tests {
                 &fx,
                 &a,
                 DdtScheme::Euler,
+                true,
                 &psi0,
                 &reference,
                 t_end,
@@ -1507,13 +1606,24 @@ mod tests {
             &fx,
             &a,
             DdtScheme::CrankNicolson(1.0),
+            false,
             &psi0,
             &reference,
             0.2,
             4,
             1.0,
         )?;
-        let e_euler = march_error(&fx, &a, DdtScheme::Euler, &psi0, &reference, 0.2, 4, 1.0)?;
+        let e_euler = march_error(
+            &fx,
+            &a,
+            DdtScheme::Euler,
+            false,
+            &psi0,
+            &reference,
+            0.2,
+            4,
+            1.0,
+        )?;
         assert_eq!(
             e_theta, e_euler,
             "theta = 1 is not Euler; the theta transform is not a no-op at 1"

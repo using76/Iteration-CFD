@@ -4,10 +4,19 @@
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
 
-//! `ofgpu-k-epsilon` - run the GPU-native k-epsilon model on a case directory.
+//! `ofgpu-k-epsilon` - run the GPU-native k-epsilon model on a case.
+//!
+//! `<case>` is either an OpenFOAM case DIRECTORY (`constant/polyMesh` + `0/`,
+//! as always) or a single `.jsonc`/`.json` case FILE - told apart by
+//! extension (`common::is_json_case`). The JSONC path builds its mesh
+//! straight into memory (`blockgen::build_mesh`) and its fields off the
+//! case's own `initial`/`patches`, with no disk polyMesh or `0/` directory at
+//! any point - `docs/05-io-redesign.md` phase 1 (B3). Output for a JSONC case
+//! goes to `<stem>_jsonc/` next to the file (`common::json_case_output_dir`),
+//! never into a same-named OpenFOAM directory that might already exist.
 //!
 //! ```text
-//! ofgpu-k-epsilon <caseDir> [options]
+//! ofgpu-k-epsilon <caseDir|case.jsonc> [options]
 //!
 //!   -iters N        outer iterations (default: from controlDict endTime)
 //!   -fixedIters N   run the linear solver for exactly N sweeps and never
@@ -44,10 +53,8 @@ use ofgpu::field_setup::{
     setup_scalar_field_with, setup_vector_field, update_inlet_outlet, wall_coeffs_from_case,
     BcInputs, WallFaces,
 };
-use ofgpu::error::IoContext;
-use ofgpu::io::case::{find_start_time, model_coeff, read_case_controls};
+use ofgpu::io::case::{find_start_time, model_coeff};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
-use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::models::{select_turbulence_model, KEpsilon, KEpsilonCoeffs, RasModel};
 use ofgpu::turbulence::FlowState;
 use ofgpu::{Error, GpuMesh, Label, Result, Scalar};
@@ -55,7 +62,7 @@ use ofgpu::{Error, GpuMesh, Label, Result, Scalar};
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{atoi, device_banner, g, next_arg, sci};
+use common::{atoi, build_writers, device_banner, g, next_arg, parse_output_formats, sci, OutputFormat};
 
 /// Everything the command line can change.
 struct Options {
@@ -68,12 +75,14 @@ struct Options {
     /// SPEC-LIT 13.4's one escape hatch: unsupported settings become warnings
     /// that say what was substituted.
     permissive: bool,
+    /// `-output foam|vtu|nvdb|vdb|usda`, comma list - see `common::build_writers`.
+    output: Vec<OutputFormat>,
 }
 
 fn usage() {
     eprintln!(
         "usage: ofgpu-k-epsilon <caseDir> [-iters N] [-fixedIters N] \
-         [-write NAME] [-noWrite] [-check N] [-permissive]"
+         [-write NAME] [-noWrite] [-check N] [-permissive] [-output LIST]"
     );
 }
 
@@ -91,6 +100,7 @@ fn parse(args: &[String]) -> Result<Options> {
         do_write: true,
         write_time: String::new(),
         permissive: false,
+        output: vec![OutputFormat::Foam],
     };
 
     let mut i = 2;
@@ -102,6 +112,7 @@ fn parse(args: &[String]) -> Result<Options> {
             "-write" => o.write_time = next_arg(args, &mut i)?,
             "-noWrite" => o.do_write = false,
             "-permissive" => o.permissive = true,
+            "-output" => o.output = parse_output_formats(&next_arg(args, &mut i)?)?,
             other => {
                 usage();
                 return Err(Error::Config(format!("unknown option {other}")));
@@ -168,11 +179,17 @@ fn run(o: &Options) -> Result<()> {
     let gpu = ofgpu::Gpu::new(0)?;
     println!("{}", device_banner(&gpu, "k-epsilon")?);
 
-    // ---- mesh -------------------------------------------------------------
+    // ---- mesh + controls ----------------------------------------------------
+    // `common::load_case` is the docs/05-io-redesign.md phase 1 seam: a
+    // `.jsonc`/`.json` case FILE builds its mesh straight into memory
+    // (`blockgen::build_mesh`, no disk polyMesh at all) and an OpenFOAM case
+    // DIRECTORY still reads one, same as before - either way this driver
+    // gets the same `(HostMesh, CaseControls)` pair from here on. `json` is
+    // `Some` only on the JSONC path, and carries the raw fields (`U`, `k`,
+    // `epsilon`, `nut`, ...) a `0/` directory would otherwise be read from.
     let t0 = Instant::now();
 
-    let raw_mesh = read_poly_mesh(&o.case_dir)?;
-    let hm = build_host_mesh(&raw_mesh)?;
+    let (hm, mut cc, json) = common::load_case(&o.case_dir)?;
     hm.print_report();
 
     let mesh = GpuMesh::upload(&gpu, &hm)?;
@@ -181,7 +198,6 @@ fn run(o: &Options) -> Result<()> {
     println!("mesh uploaded in {} s", g(t0.elapsed().as_secs_f64()));
 
     // ---- controls ---------------------------------------------------------
-    let mut cc = read_case_controls(&o.case_dir)?;
 
     if o.n_iters > 0 {
         cc.turb.n_outer_iterations = o.n_iters;
@@ -249,13 +265,54 @@ fn run(o: &Options) -> Result<()> {
         g(f64::from(coeffs.sigma_eps))
     );
 
-    // ---- fields -----------------------------------------------------------
-    let t = find_start_time(&o.case_dir)?;
-    let t_dir = o.case_dir.join(&t);
+    // ---- fields -------------------------------------------------------------
+    // JSONC has no `0/` directory: every field comes off `json`'s own
+    // `LoweredScalarField`/`LoweredVectorField`
+    // (`LoweredScalarField::to_raw`/`LoweredVectorField::to_raw`, sized now
+    // that `hm.n_cells` is known) rather than off disk. `t_dir` stays `None`
+    // on that path - there is no time directory to look a `phi`/`nut` file up
+    // in, which is also why phi is always RECONSTRUCTED rather than read for
+    // a JSONC case (see below).
+    let (raw_u, raw_k, raw_e, raw_nut, t_dir) = if let Some(lc) = &json {
+        let u = lc.u_field.to_raw(hm.n_cells);
+        let k = lc
+            .k_field
+            .as_ref()
+            .ok_or_else(|| Error::Config(
+                "this case does not solve k (initial.k is absent); ofgpu-k-epsilon needs it"
+                    .to_string(),
+            ))?
+            .to_raw(hm.n_cells);
+        let e = lc
+            .epsilon_field
+            .as_ref()
+            .ok_or_else(|| Error::Config(
+                "this case does not solve epsilon (initial.epsilon is absent); ofgpu-k-epsilon \
+                 needs it"
+                    .to_string(),
+            ))?
+            .to_raw(hm.n_cells);
+        let nut = lc.nut_field.as_ref().map(|f| f.to_raw(hm.n_cells));
+        (u, k, e, nut, None)
+    } else {
+        let t = find_start_time(&o.case_dir)?;
+        let t_dir = o.case_dir.join(&t);
 
-    let raw_u = read_vector_field(&t_dir.join("U"), hm.n_cells)?;
-    let raw_k = read_scalar_field(&t_dir.join("k"), hm.n_cells)?;
-    let raw_e = read_scalar_field(&t_dir.join("epsilon"), hm.n_cells)?;
+        let u = read_vector_field(&t_dir.join("U"), hm.n_cells)?;
+        let k = read_scalar_field(&t_dir.join("k"), hm.n_cells)?;
+        let e = read_scalar_field(&t_dir.join("epsilon"), hm.n_cells)?;
+
+        // SPEC-LIT 15.5: nut's wall treatment comes from nut's own patch
+        // types and epsilon's wall-cell constraint from epsilon's, never one
+        // from the other.
+        let nut_path = t_dir.join("nut");
+        let nut = if nut_path.exists() {
+            Some(read_scalar_field(&nut_path, hm.n_cells)?)
+        } else {
+            None
+        };
+        (u, k, e, nut, Some(t_dir))
+    };
 
     let fk = FieldKernels::new(&gpu)?;
 
@@ -264,22 +321,22 @@ fn run(o: &Options) -> Result<()> {
     correct_boundary_conditions_vector(&gpu, &fk, &mut u, &mesh)?;
 
     let mut phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
-    load_phi(&gpu, &mut phi, &u, &hm, &t_dir)?;
+    match &t_dir {
+        Some(t_dir) => load_phi(&gpu, &mut phi, &u, &hm, t_dir)?,
+        // No time directory to look a `phi` file up in - a JSONC case never
+        // carries one, so this is not the fallback `load_phi` takes when a
+        // FILE happens to be missing, it is the only option there is.
+        None => {
+            compute_phi_from_u(&gpu, &mut phi, &u, &hm)?;
+            println!("phi reconstructed as interpolate(U) & Sf");
+        }
+    }
 
     println!(
         "max |sum_f phi| per cell = {}   (0 means the flux is discretely conservative)",
         g(f64::from(max_div_phi(&gpu, &phi, &hm)?))
     );
 
-    // SPEC-LIT 15.5: nut's wall treatment comes from nut's own patch types
-    // and epsilon's wall-cell constraint from epsilon's, never one from the
-    // other.
-    let nut_path = t_dir.join("nut");
-    let raw_nut = if nut_path.exists() {
-        Some(read_scalar_field(&nut_path, hm.n_cells)?)
-    } else {
-        None
-    };
     let wf_faces = WallFaces::from_case(&raw_e, raw_nut.as_ref(), &hm)?;
 
     let flow = FlowState::new(&u, &phi, cc.nu);
@@ -428,8 +485,6 @@ fn run(o: &Options) -> Result<()> {
         } else {
             o.write_time.clone()
         };
-        let out_dir = o.case_dir.join(&wt);
-        std::fs::create_dir_all(&out_dir).path(&out_dir)?;
 
         // Carry the ORIGINAL boundary types across. `harvest_scalar_field`
         // only fills in a type where none is set, so seeding them here keeps
@@ -460,12 +515,42 @@ fn run(o: &Options) -> Result<()> {
         out_e.dimensions = "[0 2 -3 0 0 0 0]".to_string();
         out_nut.dimensions = "[0 2 -1 0 0 0 0]".to_string();
 
-        ofgpu::io::fields::write_scalar_field(&out_dir.join("k"), &out_k, &wt)?;
-        ofgpu::io::fields::write_scalar_field(&out_dir.join("epsilon"), &out_e, &wt)?;
-        ofgpu::io::fields::write_scalar_field(&out_dir.join("nut"), &out_nut, &wt)?;
-        ofgpu::io::fields::write_surface_scalar_field(&out_dir.join("phi"), &out_phi, &wt)?;
+        // One seam call per requested format, replacing what used to be four
+        // scattered `fields::write_*` sites - see `ofgpu::io::writer`.
+        let foam_fields = [
+            ofgpu::io::FoamField::scalar("k", &out_k),
+            ofgpu::io::FoamField::scalar("epsilon", &out_e),
+            ofgpu::io::FoamField::scalar("nut", &out_nut),
+            ofgpu::io::FoamField::surface("phi", &out_phi),
+        ];
+        let vis_fields = [
+            ofgpu::io::OutputField::scalar("k", &out_k.internal),
+            ofgpu::io::OutputField::scalar("epsilon", &out_e.internal),
+            ofgpu::io::OutputField::scalar("nut", &out_nut.internal),
+        ];
+        let cart = ofgpu::pressure::cartesian::detect(&hm)
+            .ok()
+            .map(|c| ofgpu::io::cartesian_info(&hm, &c));
+        let ctx = ofgpu::io::WriteCtx {
+            time: 0.0,
+            step: done as usize,
+            name: &wt,
+            mesh: &hm,
+            cart: cart.as_ref(),
+            fields: &vis_fields,
+            foam: &foam_fields,
+        };
+        // The OUTPUT root: the case directory itself for an OpenFOAM case,
+        // `common::json_case_output_dir` for a JSONC one - `o.case_dir` is a
+        // FILE in that case, not a directory `FoamWriter`/`VtuWriter`/... can
+        // write time directories under.
+        let out_root = common::output_root(&o.case_dir);
+        let mut writers = build_writers(&out_root, "kEpsilon", &o.output)?;
+        for w in &mut writers {
+            w.write_step(&ctx)?;
+        }
 
-        println!("written to {}", out_dir.display());
+        println!("written to {}", out_root.join(&wt).display());
     }
 
     Ok(())

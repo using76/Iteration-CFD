@@ -53,10 +53,41 @@ use crate::error::{Error, IoContext, Result};
 use crate::io::fields::{
     write_scalar_field, write_vector_field, PatchFieldSpec, RawScalarField, RawVectorField,
 };
-use crate::mesh::PatchKind;
+use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
+use crate::mesh::{HostMesh, PatchInfo, PatchKind};
 use crate::surface::classify::{classify, BlockAxes, SolidMask};
+use crate::surface::cutcell::{
+    classify_cutcells, merge_small_cells, CellState, CutCellField, MergeResult,
+    DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN,
+};
 use crate::surface::{Surface, TriIndex};
-use crate::{Scalar, Vec3};
+use crate::{Label, Scalar, Vec3};
+use std::collections::HashMap;
+
+/// One `0/` directory's worth of fields, entirely in memory - the same
+/// [`RawScalarField`]/[`RawVectorField`] data a case's field writers would
+/// otherwise serialise straight to disk. Order matches the field-name order
+/// each case writes (`U` before `p` before `T` before the turbulence
+/// quartet, or `alpha.water` before `U` before `p_rgh` for the dam break),
+/// but nothing downstream depends on that - each field is its own file.
+#[derive(Debug, Default, Clone)]
+pub struct InMemoryFields {
+    pub scalars: Vec<RawScalarField>,
+    pub vectors: Vec<RawVectorField>,
+}
+
+/// Serialise every field in `fields` to `case_dir/0/<name>` - the shared tail
+/// of every case's field writer, so the disk path and [`build_case`]'s
+/// in-memory path are guaranteed to write exactly what they built.
+fn write_fields(case_dir: &Path, fields: &InMemoryFields) -> Result<()> {
+    for s in &fields.scalars {
+        write_scalar_field(&case_dir.join("0").join(&s.name), s, "0")?;
+    }
+    for v in &fields.vectors {
+        write_vector_field(&case_dir.join("0").join(&v.name), v, "0")?;
+    }
+    Ok(())
+}
 
 // ==========================================================================
 //  Public specification types
@@ -1017,11 +1048,21 @@ impl TextOut {
         Ok(())
     }
 
-    /// 15 significant digits, far more than OpenFOAM's default
-    /// `writePrecision` of 6: a graded mesh loses real geometric accuracy at 6.
+    /// 17 significant digits, far more than OpenFOAM's default
+    /// `writePrecision` of 6 (a graded mesh loses real geometric accuracy at
+    /// 6) and enough to round-trip an `f64` EXACTLY (Steele & White 1990):
+    /// 15 was not - `docs/05-io-redesign.md`'s B3 phase-1 gate (comparing an
+    /// OpenFOAM-format `write_block_mesh` case against the in-memory
+    /// `build_mesh` twin cell for cell) found points this mesh writes that a
+    /// 15-digit round trip does not reproduce bit-for-bit (most nodes of a
+    /// non-power-of-two-friendly axis like `plume`'s 98/42-cell x/y - e.g.
+    /// `-7.87183673469388` reading back to a different `f64` than the
+    /// `-7.871836734693877` that was written). 17 digits is the textbook
+    /// fix, not a guess: verified against every node of that mesh's x and y
+    /// axes.
     fn real(&mut self, v: Scalar) -> Result<()> {
         self.reserve(48)?;
-        self.buf.push_str(&fmt_g_prec(v, 15));
+        self.buf.push_str(&fmt_g_prec(v, 17));
         Ok(())
     }
 
@@ -1242,6 +1283,78 @@ fn write_poly_mesh(case_dir: &Path, block: &Block) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// The uncarved block's points, faces, owner/neighbour and patches, entirely
+/// in memory - the same geometry [`write_poly_mesh`] serialises to
+/// `constant/polyMesh`, built once here so [`build_mesh`] never has to touch
+/// disk to get it. Kept in lock-step with `write_poly_mesh`'s two loops
+/// deliberately: any change to face order or winding there must be made here
+/// too, which is exactly what the byte-identical-output test guards.
+fn poly_mesh_raw(block: &Block) -> Result<PolyMeshRaw> {
+    let g = &block.g;
+
+    let mut points = Vec::with_capacity(block.n_points);
+    for k in 0..=g.nz {
+        for j in 0..=g.ny {
+            for i in 0..=g.nx {
+                points.push(g.point_coord(g.point(i, j, k)));
+            }
+        }
+    }
+
+    let n_faces_total = block.n_faces();
+    let mut faces: Vec<Vec<Label>> = Vec::with_capacity(n_faces_total);
+    let mut owner: Vec<Label> = Vec::with_capacity(n_faces_total);
+    let neighbour: Vec<Label> = block.faces.iter().map(|f| f.nei as Label).collect();
+
+    for (f, iface) in block.faces.iter().enumerate() {
+        let q = internal_quad(g, *iface);
+        if !winding_ok(g, &q) {
+            return Err(bad_winding("internal", f, &q));
+        }
+        faces.push(q.p.iter().map(|&p| p as Label).collect());
+        owner.push(q.own as Label);
+    }
+
+    let mut patches: Vec<PatchInfo> = Vec::with_capacity(block.patches.len());
+    for patch in &block.patches {
+        let (na, _) = slot_dims(g, patch.slot);
+        for idx in 0..patch.size {
+            let q = boundary_quad(g, patch.slot, patch.slot_index(na, idx));
+            if !winding_ok(g, &q) {
+                return Err(bad_winding(&patch.name, idx, &q));
+            }
+            faces.push(q.p.iter().map(|&p| p as Label).collect());
+            owner.push(q.own as Label);
+        }
+        patches.push(PatchInfo {
+            name: patch.name.clone(),
+            type_name: patch.type_name.clone(),
+            kind: PatchKind::from_type(&patch.type_name),
+            start: patch.start - block.n_internal,
+            size: patch.size,
+            nbr_patch: None,
+        });
+    }
+
+    Ok(PolyMeshRaw { points, faces, owner, neighbour, patches })
+}
+
+/// Build a runnable [`HostMesh`] straight from a [`BlockSpec`], with no file
+/// on disk at any point.
+///
+/// This is the in-memory twin of `write_block_mesh` + `read_poly_mesh` +
+/// `build_host_mesh`: same geometry, same validation (`build_host_mesh` still
+/// checks upper-triangular ordering and closure), just without round-tripping
+/// through ASCII to get there. Callers that need the case ON disk (to hand to
+/// another tool, or to re-run without regenerating) still want
+/// [`write_block_mesh`]; this is for a solver or benchmark that only ever
+/// wanted the mesh in memory.
+pub fn build_mesh(b: &BlockSpec) -> Result<HostMesh> {
+    let block = Block::new(b)?;
+    let raw = poly_mesh_raw(&block)?;
+    build_host_mesh(&raw)
 }
 
 // ==========================================================================
@@ -1775,6 +1888,1036 @@ fn write_carved_poly_mesh(case_dir: &Path, block: &Block, cv: &Carved) -> Result
     Ok(())
 }
 
+/// The carved mesh's points, faces, owner/neighbour and patches, entirely in
+/// memory - the point-compaction and face-order twin of
+/// [`write_carved_poly_mesh`], built from the same [`Carved::for_each_quad`]
+/// so the two cannot disagree about face order without disagreeing about
+/// winding too, which the geometry check downstream would catch.
+fn poly_mesh_raw_carved(block: &Block, cv: &Carved) -> Result<PolyMeshRaw> {
+    let g = &block.g;
+    let n_internal = cv.ifaces.len();
+    let n_faces = n_internal + cv.n_domain_faces() + cv.n_wall_faces();
+
+    let mut used = vec![false; block.n_points];
+    cv.for_each_quad(block, |q, _| {
+        for &p in &q.p {
+            used[p] = true;
+        }
+        Ok(())
+    })?;
+    let mut pmap = vec![-1i64; block.n_points];
+    let mut points = Vec::with_capacity(block.n_points);
+    for (p, &u) in used.iter().enumerate() {
+        if u {
+            pmap[p] = points.len() as i64;
+            points.push(g.point_coord(p));
+        }
+    }
+
+    let mut faces: Vec<Vec<Label>> = Vec::with_capacity(n_faces);
+    let mut owner: Vec<Label> = Vec::with_capacity(n_faces);
+    cv.for_each_quad(block, |q, _| {
+        faces.push(q.p.iter().map(|&p| pmap[p] as Label).collect());
+        owner.push(cv.new_of_old[q.own] as Label);
+        Ok(())
+    })?;
+    let neighbour: Vec<Label> = cv
+        .ifaces
+        .iter()
+        .map(|f| cv.new_of_old[f.nei] as Label)
+        .collect();
+
+    let mut patches: Vec<PatchInfo> = Vec::with_capacity(block.patches.len() + cv.walls.len());
+    // FLATTENED offset (`startFace - nInternalFaces`, per `PatchInfo::start`'s
+    // contract), not the global face index `write_carved_poly_mesh`'s `start`
+    // tracks - the domain patches begin at 0 here, not at `n_internal`.
+    let mut start = 0usize;
+    for (bi, patch) in block.patches.iter().enumerate() {
+        let size = cv.domain[bi].len();
+        patches.push(PatchInfo {
+            name: patch.name.clone(),
+            type_name: patch.type_name.clone(),
+            kind: PatchKind::from_type(&patch.type_name),
+            start,
+            size,
+            nbr_patch: None,
+        });
+        start += size;
+    }
+    for (name, wfaces) in &cv.walls {
+        let size = wfaces.len();
+        patches.push(PatchInfo {
+            name: name.clone(),
+            type_name: "wall".to_string(),
+            kind: PatchKind::Wall,
+            start,
+            size,
+            nbr_patch: None,
+        });
+        start += size;
+    }
+
+    Ok(PolyMeshRaw { points, faces, owner, neighbour, patches })
+}
+
+/// Build a carved [`HostMesh`] straight from a [`BlockSpec`] and a surface -
+/// the in-memory twin of [`write_carved_case`]'s mesh half, with no file on
+/// disk anywhere.
+pub fn build_carved_mesh(b: &BlockSpec, surface: &Surface) -> Result<(HostMesh, CarveSummary)> {
+    let block = Block::new(b)?;
+    let cv = carve_block(&block, surface)?;
+    let summary = cv.summary(&block);
+    let raw = poly_mesh_raw_carved(&block, &cv)?;
+    Ok((build_host_mesh(&raw)?, summary))
+}
+
+// ==========================================================================
+//  Cut-cell meshing - SPEC-LIT §24
+// ==========================================================================
+//
+// Written from SPEC-LIT §24 (via `surface::cutcell`, which owns the
+// fractions/closure/merging maths) and §23.4 (nearest-triangle patch naming,
+// carried over unchanged). No GPL-licensed source was consulted.
+//
+// `surface::cutcell::classify_cutcells` and `merge_small_cells` compute every
+// per-cell fraction and the closure-defined cut face; everything here is
+// mesh ASSEMBLY - turning those fractions into an actual `PolyMeshRaw` (and,
+// through it, a `HostMesh`) the rest of ofgpu can read and solve on.
+//
+// The one construction worth explaining is `synthetic_quad`: a face's
+// area vector and centroid (`Sf`, `Cf`) are what SPEC-LIT §24 actually
+// specifies - not any particular polygon. `mesh::geometry::face_geometry`
+// (private, and out of this agent's files) recovers `(Sf, Cf)` from a face's
+// point list by triangulating about the vertex average; `synthetic_quad`
+// picks the one planar SQUARE, centred at the target `Cf` with the target
+// `Sf` as its own normal-times-area, that this triangulation reproduces
+// EXACTLY (verified in the `cutcell_geometry` tests below by round-tripping
+// every face through `build_host_mesh` and comparing `m.sf`/`m.cf` back to
+// what was asked for). That is what carries §24.3's "exact by construction"
+// claim through an actual point-based polyMesh file: closure holds to
+// round-off no matter how approximate the fractions are, because it is
+// asking the same triangulation identity that already makes an ordinary
+// hex mesh close, just fed a square instead of the real face shape.
+//
+// Cell VOLUME is a different story: `compute_geometry`'s pyramid formula,
+// `V = (1/3) sum_f Sf . Cf` once closure has cancelled the apex term, is only
+// the TRUE volume when `Sf`/`Cf` come from the true physical boundary. For a
+// cut cell they do not - `synthetic_quad` reproduces the right (Sf, Cf) pair
+// for the FLUX and CLOSURE identities, not the right enclosed shape - so
+// `V = theta_c * V_full` (§24.4, a definition, not something to re-derive)
+// is written into `m.v`/`m.c` directly after `build_host_mesh` runs, and the
+// two per-face coefficients that depend on cell centroids (the interpolation
+// weight and the non-orthogonal split, SPEC-LIT §2.3/§2.4) are recomputed
+// from the corrected centroids - `mesh::geometry`'s own versions of those
+// two small, cited formulas are private, so `cutcell_face_coeffs` below
+// re-derives them from the same citation rather than editing a file this
+// agent does not own.
+
+/// What cut-cell meshing did, for the CLI summary and the §24.6 gates.
+#[derive(Debug, Clone)]
+pub struct CutCellSummary {
+    pub n_cells_block: usize,
+    pub n_solid: usize,
+    /// Fluid cells with `theta = 1` (never supersampled, or found fully
+    /// fluid by the fine lattice).
+    pub n_fluid_full: usize,
+    /// Cells the supersample lattice found mixed, before merging.
+    pub n_cut: usize,
+    /// Slivers merged away (§24.5).
+    pub n_merged: usize,
+    /// Cells in the final mesh (`n_fluid_full + n_cut - n_merged`).
+    pub n_cells_out: usize,
+    pub n_internal_faces: usize,
+    pub n_domain_faces: usize,
+    /// New wall patches in written order: `(name, nFaces)`.
+    pub wall_faces: Vec<(String, usize)>,
+    pub supersample: usize,
+    pub theta_min: Scalar,
+}
+
+/// A planar square centred at `cf`, normal `sf.normalised()`, sized so that
+/// `mesh::geometry::face_geometry`'s triangulate-about-vertex-average
+/// reproduces `(sf, cf)` EXACTLY.
+///
+/// Proof sketch (also pinned down by `cutcell_geometry::round_trips_sf_and_cf`
+/// below): for four points arranged symmetrically about their own vertex
+/// average `cf` as `cf +- h*u +- h*v` (`u, v, n` a right-handed orthonormal
+/// frame), each of the four triangle-about-average sub-triangles contributes
+/// the SAME cross product `2h^2 n` (the four are 90-degree rotations of one
+/// another about `n`), so `Sf = 0.5 * sum = 0.5 * 4 * 2h^2 n = 4h^2 n`; taking
+/// `h = sqrt(area)/2` makes `|Sf| = area` with direction `n`. The centroid is
+/// `cf` by the same four-fold symmetry (the four sub-triangle centroids are
+/// evenly spaced around it).
+fn synthetic_quad(sf: Vec3, cf: Vec3) -> [Vec3; 4] {
+    let area = sf.mag();
+    let n = if area > 0.0 { sf / area } else { Vec3::new(0.0, 0.0, 1.0) };
+    // Any unit vector not parallel to `n` gives a valid in-plane frame; the
+    // axis threshold just avoids the near-parallel case where the cross
+    // product below would lose precision.
+    let helper = if n.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
+    let u = helper.cross(n).normalised();
+    let v = n.cross(u);
+    let h = 0.5 * area.max(0.0).sqrt();
+    [cf + u * h + v * h, cf - u * h + v * h, cf - u * h - v * h, cf + u * h - v * h]
+}
+
+/// Push a fresh, unshared quad's four points and return their labels.
+///
+/// Faces are not welded to the block's own point grid (unlike castellation):
+/// a reduced or cut face's points are synthetic in the first place, so there
+/// is nothing real to share, and giving every face its own four points keeps
+/// this assembly a single uniform code path instead of two.
+fn push_cc_quad(points: &mut Vec<Vec3>, q: [Vec3; 4]) -> Vec<Label> {
+    let base = points.len() as Label;
+    points.extend_from_slice(&q);
+    vec![base, base + 1, base + 2, base + 3]
+}
+
+// ---- SPEC-LIT §2.3/§2.4, re-derived (mesh::geometry's are private) --------
+
+#[cfg(feature = "single")]
+const CC_SMALL: Scalar = 1.0e-19;
+#[cfg(not(feature = "single"))]
+const CC_SMALL: Scalar = 1.0e-150;
+
+/// SPEC-LIT §2.4's floor: at least 5% of `|d|`, so a face nearly tangent to
+/// the line joining the two centres cannot blow the coefficient up.
+const CC_NON_ORTH_FLOOR: Scalar = 0.05;
+
+#[inline]
+fn cc_weight_from_offsets(d_p: Scalar, d_n: Scalar) -> Scalar {
+    let sum = d_p + d_n;
+    if sum > CC_SMALL {
+        d_n / sum
+    } else {
+        0.5
+    }
+}
+
+/// SPEC-LIT §2.3: the interpolation weight that places the interpolated
+/// value where the face plane cuts the line `P-N` (Jasak 1996 §3.3.1).
+#[inline]
+fn cc_interp_weight(sf: Vec3, cf: Vec3, c_p: Vec3, c_n: Vec3) -> Scalar {
+    cc_weight_from_offsets(sf.dot(cf - c_p).abs(), sf.dot(c_n - cf).abs())
+}
+
+#[inline]
+fn cc_floor_along(proj: Scalar, d: Vec3) -> Scalar {
+    proj.max(CC_NON_ORTH_FLOOR * d.mag())
+}
+
+/// SPEC-LIT §2.4's over-relaxed non-orthogonal split, `(Delta, k)`.
+#[inline]
+fn cc_non_orth_split(sf: Vec3, d: Vec3) -> (Scalar, Vec3) {
+    let nf = sf.normalised();
+    let denom = cc_floor_along(nf.dot(d), d);
+    if denom <= CC_SMALL {
+        return (0.0, Vec3::ZERO);
+    }
+    let delta = 1.0 / denom;
+    (delta, nf - d * delta)
+}
+
+/// Overwrite `m.v`/`m.c` with the §24.4 volumes/centroids `build_host_mesh`
+/// cannot have derived correctly (see the module doc), then redo every
+/// per-face coefficient that depends on a cell centroid. `m.sf`/`m.cf`/
+/// `m.mag_sf` (and their boundary twins) are untouched - `synthetic_quad`
+/// already made those exactly right.
+///
+/// The cut-cell path never emits a cyclic patch, so every boundary face is
+/// uncoupled - the same branch `mesh::geometry::compute` takes for one,
+/// leaving `b_non_orth_corr` at zero and `b_weights` at its uncoupled `1.0`.
+fn override_cutcell_geometry(m: &mut HostMesh, v: Vec<Scalar>, c: Vec<Vec3>) {
+    m.v = v;
+    m.c = c;
+
+    for f in 0..m.n_internal_faces {
+        let (p, nb) = (m.owner[f] as usize, m.neighbour[f] as usize);
+        let (sf, cf) = (m.sf[f], m.cf[f]);
+        m.weights[f] = cc_interp_weight(sf, cf, m.c[p], m.c[nb]);
+        let (delta, k) = cc_non_orth_split(sf, m.c[nb] - m.c[p]);
+        m.delta_coeffs[f] = delta;
+        m.non_orth_corr[f] = k;
+    }
+
+    for bf in 0..m.n_boundary_faces {
+        let p = m.b_face_cells[bf] as usize;
+        let (sf, cf) = (m.b_sf[bf], m.b_cf[bf]);
+        let d_own = cf - m.c[p];
+        let nf = sf.normalised();
+        m.b_y[bf] = cc_floor_along(nf.dot(d_own), d_own);
+        m.b_delta_coeffs[bf] = cc_non_orth_split(sf, d_own).0;
+    }
+}
+
+/// The direction-`dir` (`-x +x -y +y -z +z`) full-face `Sf`/`Cf` of block
+/// cell `c`'s own face - the real grid geometry `alpha_f` scales (§24.2).
+/// `dir` must name a face `c` actually owns internally (0,2,4 mean "my own
+/// -x/-y/-z face", 1,3,5 mean "my +x/+y/+z face towards `nbr`"); callers
+/// always know which because they are iterating a specific neighbour
+/// direction.
+fn cc_full_face(g: &Grid, c: usize, dir: usize) -> (Vec3, Vec3) {
+    let q = wall_quad(g, c, dir as u8);
+    (quad_area(g, &q), quad_centre(g, &q))
+}
+
+/// Assemble a `PolyMeshRaw` from cut-cell fractions and a merge result -
+/// SPEC-LIT §24's ANSWER: internal faces (dropped where merging made them
+/// interior, alpha-scaled and combined where merging left more than one
+/// contact between the same two surviving cells), the domain's own boundary
+/// faces (alpha-scaled the same way), and one new wall face per `Cut` cell
+/// (owned by whatever survivor it now belongs to), grouped into patches by
+/// nearest-triangle surface patch exactly as castellation's §23.4 does.
+fn cutcell_mesh_raw(
+    block: &Block,
+    field: &CutCellField,
+    merge: &MergeResult,
+    surf: &Surface,
+) -> Result<(PolyMeshRaw, CutCellSummary, Vec<Scalar>, Vec<Vec3>)> {
+    let g = &block.g;
+    let n_cells = block.n_cells;
+
+    // ---- live roots -> new sequential cell ids, in original i-fastest order
+    let mut new_id = vec![-1i64; n_cells];
+    let mut orig_of_new: Vec<usize> = Vec::new();
+    for c in 0..n_cells {
+        if field.cells[c].is_none() {
+            continue;
+        }
+        let r = merge.root[c] as usize;
+        if r == c && new_id[r] < 0 {
+            new_id[r] = orig_of_new.len() as i64;
+            orig_of_new.push(r);
+        }
+    }
+    let n_cells_out = orig_of_new.len();
+
+    // Per-new-cell volume/centroid (§24.4/§24.5's authoritative values,
+    // independent of anything below) and a running signed closure sum, used
+    // at the end of this function to close every cell EXACTLY regardless of
+    // any cross-cell disagreement in the face-fraction assembly below - see
+    // the module doc's note on why a per-cell independent classification
+    // cannot guarantee two neighbours agree on their shared face, and why
+    // that is fixed here rather than by forcing agreement upstream.
+    let mut v_out = vec![0.0 as Scalar; n_cells_out];
+    let mut c_out = vec![Vec3::ZERO; n_cells_out];
+    for (new_c, &orig_root) in orig_of_new.iter().enumerate() {
+        v_out[new_c] = merge.volume[orig_root];
+        c_out[new_c] = merge.centroid[orig_root];
+    }
+    let mut closure_sum = vec![Vec3::ZERO; n_cells_out];
+
+    let mut points: Vec<Vec3> = Vec::new();
+    let mut faces: Vec<Vec<Label>> = Vec::new();
+    let mut owner: Vec<Label> = Vec::new();
+    let mut neighbour: Vec<Label> = Vec::new();
+
+    // ---- internal faces: +x/+y/+z neighbours only, so each grid face is
+    // visited once; duplicates that land on the same (owner,neighbour) pair
+    // after merging are summed together (§24.5's "a merged cell can absorb
+    // several slivers" - more than one contact with the same neighbour is
+    // exactly that), which keeps the mesh's addressing free of duplicate
+    // pairs (`mesh::geometry::check`'s `ldu_ordered` requires it).
+    struct Contrib {
+        sf: Vec3,
+        cf_num: Vec3,
+        w: Scalar,
+    }
+    let mut internal: HashMap<(i64, i64), Contrib> = HashMap::new();
+
+    for c in 0..n_cells {
+        if field.cells[c].is_none() {
+            continue;
+        }
+        let (i, j, k) = g.decompose_cell(c);
+        let plus_dirs: [(usize, Option<usize>); 3] = [
+            (1, (i + 1 < g.nx).then(|| c + 1)),
+            (3, (j + 1 < g.ny).then(|| c + g.nx)),
+            (5, (k + 1 < g.nz).then(|| c + g.nx * g.ny)),
+        ];
+        for (dir, nbr) in plus_dirs {
+            let Some(nbr) = nbr else { continue };
+            if field.cells[nbr].is_none() {
+                continue; // solid neighbour: no face at all
+            }
+            let (ra, rb) = (merge.root[c] as usize, merge.root[nbr] as usize);
+            let (ida, idb) = (new_id[ra], new_id[rb]);
+            if ida == idb {
+                continue; // merged into the same cell: now interior, drop
+            }
+            let alpha = field.cells[c].as_ref().unwrap().alpha[dir];
+            if alpha <= 0.0 {
+                continue;
+            }
+
+            let (full_sf, full_cf) = cc_full_face(g, c, dir);
+            let (lo, hi, sign): (i64, i64, Scalar) =
+                if ida < idb { (ida, idb, 1.0) } else { (idb, ida, -1.0) };
+            let sf = full_sf * (alpha * sign);
+            let w = (alpha * full_sf.mag()).max(CC_SMALL);
+
+            let entry = internal.entry((lo, hi)).or_insert(Contrib {
+                sf: Vec3::ZERO,
+                cf_num: Vec3::ZERO,
+                w: 0.0,
+            });
+            entry.sf += sf;
+            entry.cf_num += full_cf * w;
+            entry.w += w;
+        }
+    }
+
+    let mut int_faces: Vec<(i64, i64, Vec3, Vec3)> = internal
+        .into_iter()
+        .map(|((lo, hi), c)| {
+            let cf = if c.w > 0.0 { c.cf_num / c.w } else { Vec3::ZERO };
+            (lo, hi, c.sf, cf)
+        })
+        .collect();
+    // Keys are unique pairs, so this sort alone gives strictly ascending
+    // (owner, neighbour) - the upper-triangular order every gather kernel
+    // assumes.
+    int_faces.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+
+    for (lo, hi, sf, cf) in &int_faces {
+        faces.push(push_cc_quad(&mut points, synthetic_quad(*sf, *cf)));
+        owner.push(*lo as Label);
+        neighbour.push(*hi as Label);
+        closure_sum[*lo as usize] += *sf;
+        closure_sum[*hi as usize] -= *sf;
+    }
+    let n_internal = int_faces.len();
+
+    // ---- domain boundary faces, alpha-scaled the same way, per block patch
+    let mut domain_per_patch: Vec<Vec<(i64, Vec3, Vec3)>> = vec![Vec::new(); block.patches.len()];
+    for (bi, patch) in block.patches.iter().enumerate() {
+        let (na, _) = slot_dims(g, patch.slot);
+        for idx in 0..patch.size {
+            let sl = patch.slot_index(na, idx);
+            let q = boundary_quad(g, patch.slot, sl);
+            let Some(cf_frac) = &field.cells[q.own] else { continue };
+            let alpha = cf_frac.alpha[patch.slot];
+            if alpha <= 0.0 {
+                continue;
+            }
+            let owner_id = new_id[merge.root[q.own] as usize];
+            let sf = quad_area(g, &q) * alpha;
+            closure_sum[owner_id as usize] += sf;
+            domain_per_patch[bi].push((owner_id, sf, quad_centre(g, &q)));
+        }
+    }
+
+    // ---- wall faces, grouped by surface patch -----------------------------
+    //
+    // One source of DECIDED wall area, nearest-triangle patched exactly as
+    // castellation's §23.4 carve does: any live cell's own axis face whose
+    // neighbour is SOLID but whose `alpha_f > 0` (this cell's own side is
+    // open there). This is the degenerate case a grid-aligned surface
+    // produces exactly (the interface coincides with the shared plane, so
+    // `alpha_f` on one side is a clean 0 or 1 rather than a fraction) and the
+    // general case a genuinely `Cut` cell's own axis face touching a wholly
+    // solid neighbour also needs.
+    //
+    // Every `Cut` cell's own §24.3 cut face is deliberately NOT emitted here:
+    // `classify_cutcells` computes it from each cell's OWN independent
+    // supersample array, so two neighbouring `Cut` cells (or a `Cut` cell and
+    // a neighbour that independently classified as fully `Fluid`) can
+    // disagree, by a small amount, on the alpha_f of the face they share -
+    // the "one sample lattice, no seams" guarantee (§24.4) is only stated for
+    // the DEGENERATE all-fluid/all-solid case, not for two genuinely mixed
+    // neighbours. Left uncorrected, that disagreement is exactly the leftover
+    // the reconciliation pass below closes: after every internal, domain and
+    // solid-adjacent face above is decided, whatever a cell's own faces fail
+    // to sum to zero becomes ITS cut face, by the same closure identity
+    // §24.3 states - just measured against what was ACTUALLY assigned rather
+    // than assumed in advance.
+    let hint = ((g.xn[g.nx] - g.xn[0]).abs() / g.nx as Scalar
+        + (g.yn[g.ny] - g.yn[0]).abs() / g.ny as Scalar
+        + (g.zn[g.nz] - g.zn[0]).abs() / g.nz as Scalar)
+        / 3.0;
+    let tidx = TriIndex::new(surf, hint.max(Scalar::MIN_POSITIVE))?;
+
+    let mut per_surface_patch: Vec<Vec<(i64, Vec3, Vec3)>> = vec![Vec::new(); surf.patch_names.len()];
+    // The first `Cut` constituent's own interface centroid found for each
+    // surviving cell, so the reconciliation pass has a physically meaningful
+    // place to put a correction rather than the cell centroid.
+    let mut cut_position: Vec<Option<Vec3>> = vec![None; n_cells_out];
+
+    for c in 0..n_cells {
+        let Some(cf) = &field.cells[c] else { continue };
+        let owner_id = new_id[merge.root[c] as usize];
+
+        if cf.state == CellState::Cut && cut_position[owner_id as usize].is_none() {
+            cut_position[owner_id as usize] = Some(cf.cut_cf);
+        }
+
+        let (i, j, k) = g.decompose_cell(c);
+        let all_dirs: [(usize, Option<usize>); 6] = [
+            (0, (i > 0).then(|| c - 1)),
+            (1, (i + 1 < g.nx).then(|| c + 1)),
+            (2, (j > 0).then(|| c - g.nx)),
+            (3, (j + 1 < g.ny).then(|| c + g.nx)),
+            (4, (k > 0).then(|| c - g.nx * g.ny)),
+            (5, (k + 1 < g.nz).then(|| c + g.nx * g.ny)),
+        ];
+        for (dir, nbr) in all_dirs {
+            let Some(nbr) = nbr else { continue }; // domain edge: `domain_per_patch`'s job
+            if field.cells[nbr].is_some() {
+                continue; // fluid/cut neighbour: the internal-face loop's job
+            }
+            let alpha = cf.alpha[dir];
+            if alpha <= 0.0 {
+                continue;
+            }
+            let (full_sf, full_cf) = cc_full_face(g, c, dir);
+            let (t, _) = tidx.nearest_triangle(full_cf);
+            let patch_id = surf.tri_patch[t] as usize;
+            let sf = full_sf * alpha;
+            closure_sum[owner_id as usize] += sf;
+            per_surface_patch[patch_id].push((owner_id, sf, full_cf));
+        }
+    }
+
+    // ---- reconciliation: close every surviving cell EXACTLY ---------------
+    // A cell whose decided faces already sum to (round-off) zero gets no
+    // correction at all - true for every plain `Fluid` cell and for a `Cut`
+    // cell whose neighbours all happened to agree with it.
+    for nc in 0..n_cells_out {
+        let leftover = -closure_sum[nc];
+        let scale = v_out[nc].max(CC_SMALL).powf(2.0 / 3.0);
+        if leftover.mag() < 1.0e-9 * scale {
+            continue;
+        }
+        let position = cut_position[nc].unwrap_or(c_out[nc]);
+        let (t, _) = tidx.nearest_triangle(position);
+        let patch_id = surf.tri_patch[t] as usize;
+        per_surface_patch[patch_id].push((nc as i64, leftover, position));
+    }
+
+    let mut patches: Vec<PatchInfo> = Vec::with_capacity(block.patches.len() + surf.patch_names.len());
+    let mut start = 0usize;
+    for (bi, patch) in block.patches.iter().enumerate() {
+        let list = &domain_per_patch[bi];
+        for &(owner_id, sf, cf) in list {
+            faces.push(push_cc_quad(&mut points, synthetic_quad(sf, cf)));
+            owner.push(owner_id as Label);
+        }
+        patches.push(PatchInfo {
+            name: patch.name.clone(),
+            type_name: patch.type_name.clone(),
+            kind: PatchKind::from_type(&patch.type_name),
+            start,
+            size: list.len(),
+            nbr_patch: None,
+        });
+        start += list.len();
+    }
+
+    let mut wall_faces: Vec<(String, usize)> = Vec::new();
+    for (p, list) in per_surface_patch.into_iter().enumerate() {
+        if list.is_empty() {
+            continue;
+        }
+        let name = surf.patch_names[p].clone();
+        if block.patches.iter().any(|q| q.name == name) {
+            return Err(Error::Mesh(format!(
+                "cutcell: surface patch '{name}' collides with a domain patch of the \
+                 same name - rename the STL solid (or use -stl name=path)"
+            )));
+        }
+        for &(owner_id, sf, cf) in &list {
+            faces.push(push_cc_quad(&mut points, synthetic_quad(sf, cf)));
+            owner.push(owner_id as Label);
+        }
+        wall_faces.push((name.clone(), list.len()));
+        patches.push(PatchInfo {
+            name,
+            type_name: "wall".to_string(),
+            kind: PatchKind::Wall,
+            start,
+            size: list.len(),
+            nbr_patch: None,
+        });
+        start += list.len();
+    }
+
+    let n_fluid_full = field
+        .cells
+        .iter()
+        .flatten()
+        .filter(|c| c.state == CellState::Fluid)
+        .count();
+
+    let summary = CutCellSummary {
+        n_cells_block: n_cells,
+        n_solid: field.n_solid,
+        n_fluid_full,
+        n_cut: field.n_cut,
+        n_merged: merge.n_merged,
+        n_cells_out,
+        n_internal_faces: n_internal,
+        n_domain_faces: domain_per_patch.iter().map(Vec::len).sum(),
+        wall_faces,
+        supersample: field.s,
+        theta_min: DEFAULT_THETA_MIN,
+    };
+
+    Ok((PolyMeshRaw { points, faces, owner, neighbour, patches }, summary, v_out, c_out))
+}
+
+/// Build a runnable cut-cell [`HostMesh`] straight from a [`BlockSpec`] and a
+/// surface (SPEC-LIT §24), with no file on disk anywhere. Uses
+/// [`DEFAULT_SUPERSAMPLE`] and [`DEFAULT_THETA_MIN`]; see
+/// [`build_cutcell_mesh_with`] to override either.
+pub fn build_cutcell_mesh(b: &BlockSpec, surface: &Surface) -> Result<(HostMesh, CutCellSummary)> {
+    build_cutcell_mesh_with(b, surface, DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN)
+}
+
+/// Validate a surface against a block, classify and merge it (SPEC-LIT §24),
+/// and assemble the raw mesh - the common core of [`build_cutcell_mesh_with`]
+/// (which turns the raw mesh into a runnable [`HostMesh`]) and
+/// [`write_cutcell_case`] (which writes it to disk directly, since the
+/// override the in-memory path applies has no hook into the ordinary
+/// polyMesh-reading load path - see the module doc).
+fn cutcell_case_raw(
+    b: &BlockSpec,
+    surface: &Surface,
+    s: usize,
+    theta_min: Scalar,
+) -> Result<(Block, PolyMeshRaw, CutCellSummary, Vec<Scalar>, Vec<Vec3>)> {
+    let block = Block::new(b)?;
+    let g = &block.g;
+
+    surface.require_closed()?;
+
+    let (dlo, dhi) = (
+        Vec3::new(g.xn[0], g.yn[0], g.zn[0]),
+        Vec3::new(g.xn[g.nx], g.yn[g.ny], g.zn[g.nz]),
+    );
+    let (slo, shi) = surface.bbox;
+    if shi.x < dlo.x || slo.x > dhi.x || shi.y < dlo.y || slo.y > dhi.y
+        || shi.z < dlo.z || slo.z > dhi.z
+    {
+        return Err(Error::Mesh(format!(
+            "cutcell: the surface (bounds [{} {} {}] to [{} {} {}]) lies entirely \
+             outside the block ([{} {} {}] to [{} {} {}]) - nothing to cut",
+            fmt_g(slo.x), fmt_g(slo.y), fmt_g(slo.z),
+            fmt_g(shi.x), fmt_g(shi.y), fmt_g(shi.z),
+            fmt_g(dlo.x), fmt_g(dlo.y), fmt_g(dlo.z),
+            fmt_g(dhi.x), fmt_g(dhi.y), fmt_g(dhi.z),
+        )));
+    }
+
+    let axes = BlockAxes { xn: &g.xn, yn: &g.yn, zn: &g.zn };
+    let field = classify_cutcells(&axes, surface, s)?;
+    if field.n_fluid + field.n_cut == 0 {
+        return Err(Error::Mesh(format!(
+            "cutcell: every one of the {} cells is solid - the surface swallows \
+             the whole domain",
+            field.n_solid + field.n_fluid + field.n_cut
+        )));
+    }
+
+    let merge = merge_small_cells(&field, theta_min)?;
+    let (raw, mut summary, v_out, c_out) = cutcell_mesh_raw(&block, &field, &merge, surface)?;
+    summary.theta_min = theta_min;
+
+    Ok((block, raw, summary, v_out, c_out))
+}
+
+/// [`build_cutcell_mesh`] with an explicit supersample size and merge
+/// threshold.
+pub fn build_cutcell_mesh_with(
+    b: &BlockSpec,
+    surface: &Surface,
+    s: usize,
+    theta_min: Scalar,
+) -> Result<(HostMesh, CutCellSummary)> {
+    let (_block, raw, summary, v_out, c_out) = cutcell_case_raw(b, surface, s, theta_min)?;
+    let mut mesh = build_host_mesh(&raw)?;
+    override_cutcell_geometry(&mut mesh, v_out, c_out);
+    Ok((mesh, summary))
+}
+
+/// [`write_carved_case`]'s cut-cell twin: a complete runnable case (polyMesh,
+/// `constant/`, `system/`, `0/`) built by cutting the block against `surface`
+/// with fractional volumes and areas (SPEC-LIT §24) instead of castellating
+/// it away. New wall patches carry exactly the wall boundary conditions the
+/// uncarved writer gives its walls, the same way castellation's do.
+///
+/// *DESIGN*: the disk copy's cell VOLUMES are whatever
+/// `mesh::geometry::compute` derives from the synthetic per-face points on
+/// its own ordinary read-back path (see the module doc for why that is not
+/// `theta_c * V_full` exactly) - there is no hook to run
+/// `override_cutcell_geometry` on a case `ofgpu-k-epsilon <dir>` loads from
+/// files, only on a mesh built in-process by [`build_cutcell_mesh`]. The
+/// fractions, the closure-exact cut face and every AREA (`Sf`, hence every
+/// flux) are exact either way; only the volume used in `ofgpu-k-epsilon`'s
+/// own run is the pyramid-decomposition approximation. `cutcell_geometry`'s
+/// tests below measure how far that approximation is from `theta_c*V_full`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_cutcell_case(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    surface: &Surface,
+    s: usize,
+    theta_min: Scalar,
+) -> Result<CutCellSummary> {
+    if nx < 1 || ny < 1 || nz < 1 {
+        return Err(Error::Config(format!("generate_cases: bad resolution {nx} x {ny} x {nz}")));
+    }
+    if kind == CaseKind::DamBreak {
+        // Not a substitutable setting - VOF/free-surface interaction with a
+        // cut cell simply is not implemented yet, so there is no fallback to
+        // hand `-permissive`, unlike the ordinary §13.4 contract cases.
+        return Err(Error::Config(
+            "cutcell: damBreak has no cut-cell path yet (no VOF/free-surface \
+             interaction with a cut cell) - castellate the surface instead \
+             (drop -cutcell), or use channel|cavity|step|big|plume"
+                .to_string(),
+        ));
+    }
+
+    let b = case_block_spec(kind, nx, ny, nz);
+    let (block, raw, summary, _v_out, c_out) = cutcell_case_raw(&b, surface, s, theta_min)?;
+
+    write_raw_poly_mesh_ascii(case_dir, &raw, summary.n_cells_out)?;
+    write_system(case_dir)?;
+
+    let (nu, u_ref, half_height) = case_run_params(kind, &b, &block);
+    let extra = if kind == CaseKind::Plume {
+        "\n\n// Air at ambient. Read by the temperature equation.\n\
+         Pr              0.71;\n\
+         Prt             0.85;\n\n\
+         // Buoyancy reference: b = g*(TRef/T - 1). Deliberately no beta - this\n\
+         // solver does not use the Boussinesq approximation.\n\
+         TRef            293.15;"
+    } else {
+        ""
+    };
+    write_constant(case_dir, nu, "kEpsilon", extra)?;
+    if kind == CaseKind::Plume {
+        write_gravity(case_dir)?;
+    }
+
+    let wall_names: Vec<String> = summary.wall_faces.iter().map(|(n, _)| n.clone()).collect();
+    let fields = build_cutcell_fields(kind, &c_out, &block, &wall_names, nu, u_ref, half_height, 1)?;
+    write_fields(case_dir, &fields)?;
+
+    println!(
+        "[cutcell] {} x {} x {} block, s = {}, theta_min = {}: {} solid, {} fluid, \
+         {} cut ({} merged) -> {} cells",
+        nx, ny, nz, summary.supersample, summary.theta_min,
+        summary.n_solid, summary.n_fluid_full, summary.n_cut, summary.n_merged,
+        summary.n_cells_out
+    );
+    if summary.wall_faces.is_empty() {
+        println!("[cutcell] no new wall faces - the surface encloses no cell centres");
+    } else {
+        for (patch, n) in &summary.wall_faces {
+            println!("[cutcell] new wall patch {patch}: {n} face(s)");
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Write `case_dir/constant/polyMesh` straight from a [`PolyMeshRaw`) - the
+/// generic twin of [`write_poly_mesh`]/[`write_carved_poly_mesh`] for a mesh
+/// whose faces are not all quads sharing one block's point grid. Uses the
+/// same `TextOut`/`FoamFile` machinery; unlike the block writers it does not
+/// re-verify winding face by face (there is no `Quad`/owner-cell-centre pair
+/// to check it against here) - `mesh::geometry::compute`, run the moment
+/// anything reads this mesh back, is what enforces `owner < neighbour`, and
+/// closure is `check()`'s job, not a per-face structural one.
+fn write_raw_poly_mesh_ascii(case_dir: &Path, raw: &PolyMeshRaw, n_cells: usize) -> Result<()> {
+    let dir = case_dir.join("constant").join("polyMesh");
+    fs::create_dir_all(&dir).path(&dir)?;
+
+    let n_faces = raw.faces.len();
+    let n_internal = raw.neighbour.len();
+    let note = format!(
+        "nPoints:{}  nCells:{n_cells}  nFaces:{n_faces}  nInternalFaces:{n_internal}",
+        raw.points.len()
+    );
+
+    {
+        let mut os = TextOut::create(&dir.join("points"))?;
+        write_foam_header(&mut os, "vectorField", "points", "")?;
+        os.num(raw.points.len())?;
+        os.s("\n(\n")?;
+        for p in &raw.points {
+            os.c('(')?;
+            os.real(p.x)?;
+            os.c(' ')?;
+            os.real(p.y)?;
+            os.c(' ')?;
+            os.real(p.z)?;
+            os.s(")\n")?;
+        }
+        os.s(")")?;
+        write_foam_footer(&mut os)?;
+        os.finish()?;
+    }
+    {
+        let mut os = TextOut::create(&dir.join("faces"))?;
+        write_foam_header(&mut os, "faceList", "faces", "")?;
+        os.num(n_faces)?;
+        os.s("\n(\n")?;
+        for f in &raw.faces {
+            os.num(f.len())?;
+            os.c('(')?;
+            for (i, &p) in f.iter().enumerate() {
+                if i > 0 {
+                    os.c(' ')?;
+                }
+                os.num(p as usize)?;
+            }
+            os.s(")\n")?;
+        }
+        os.s(")")?;
+        write_foam_footer(&mut os)?;
+        os.finish()?;
+    }
+    {
+        let mut os = TextOut::create(&dir.join("owner"))?;
+        write_foam_header(&mut os, "labelList", "owner", &note)?;
+        os.num(n_faces)?;
+        os.s("\n(\n")?;
+        for &o in &raw.owner {
+            os.num(o as usize)?;
+            os.c('\n')?;
+        }
+        os.s(")")?;
+        write_foam_footer(&mut os)?;
+        os.finish()?;
+    }
+    {
+        let mut os = TextOut::create(&dir.join("neighbour"))?;
+        write_foam_header(&mut os, "labelList", "neighbour", &note)?;
+        os.num(n_internal)?;
+        os.s("\n(\n")?;
+        for &n in &raw.neighbour {
+            os.num(n as usize)?;
+            os.c('\n')?;
+        }
+        os.s(")")?;
+        write_foam_footer(&mut os)?;
+        os.finish()?;
+    }
+    {
+        let mut os = TextOut::create(&dir.join("boundary"))?;
+        write_foam_header(&mut os, "polyBoundaryMesh", "boundary", "")?;
+        os.num(raw.patches.len())?;
+        os.s("\n(\n")?;
+        for p in &raw.patches {
+            os.s("    ")?;
+            os.s(&p.name)?;
+            os.s("\n    {\n        type            ")?;
+            os.s(&p.type_name)?;
+            os.s(";\n        nFaces          ")?;
+            os.num(p.size)?;
+            os.s(";\n        startFace       ")?;
+            os.num(n_internal + p.start)?;
+            os.s(";\n    }\n")?;
+        }
+        os.s(")")?;
+        write_foam_footer(&mut os)?;
+        os.finish()?;
+    }
+
+    Ok(())
+}
+
+/// A cut-cell twin of `build_initial_fields`: the same field names,
+/// dimensions and wall boundary conditions (so a cut-cell case runs through
+/// exactly the same solver code path a castellated one does), seeded at each
+/// merged cell's OWN centroid (`centroids`, from [`cutcell_mesh_raw`]) rather
+/// than through `Carved`'s per-block-cell indexing, which does not apply
+/// once cells have been merged. Boundary velocity is a single uniform value
+/// per patch rather than the uncarved writer's per-face profile, since a
+/// cut-cell boundary face has no regular `(j,k)` index to build that profile
+/// from.
+#[allow(clippy::too_many_arguments)]
+fn build_cutcell_fields(
+    kind: CaseKind,
+    centroids: &[Vec3],
+    block: &Block,
+    wall_patch_names: &[String],
+    nu: Scalar,
+    u_ref: Scalar,
+    half_height: Scalar,
+    wall_normal: usize,
+) -> Result<InMemoryFields> {
+    let _ = nu; // carried for signature parity with `build_initial_fields`; unused here
+    let n_cells = centroids.len();
+    let plume = kind == CaseKind::Plume;
+    let cavity = kind == CaseKind::Cavity;
+
+    struct FP<'a> {
+        name: &'a str,
+        type_name: &'a str,
+    }
+    let mut fps: Vec<FP> = block
+        .patches
+        .iter()
+        .map(|p| FP { name: &p.name, type_name: &p.type_name })
+        .collect();
+    for name in wall_patch_names {
+        fps.push(FP { name, type_name: "wall" });
+    }
+
+    let i_turb = 0.05 as Scalar;
+    let cmu = 0.09 as Scalar;
+    let k0 = 1.5 * (i_turb * u_ref) * (i_turb * u_ref);
+    let l = 0.07 * half_height * 2.0;
+    let eps0 = cmu.powf(0.75) * k0.powf(1.5) / l;
+    let omega0 = k0.sqrt() / (cmu.powf(0.25) * l);
+
+    let g = &block.g;
+    let (lo, hi) = centre_bounds(g);
+    let lx = (hi.x - lo.x).max(1e-30);
+    let ly = (hi.y - lo.y).max(1e-30);
+
+    let mut internal = Vec::with_capacity(n_cells);
+    for &centre in centroids {
+        internal.push(if plume {
+            Vec3::ZERO
+        } else {
+            initial_velocity(cavity, centre, lo, lx, ly, u_ref, half_height, wall_normal)
+        });
+    }
+    let mut u = RawVectorField {
+        name: "U".to_string(),
+        dimensions: "[0 1 -1 0 0 0 0]".to_string(),
+        internal,
+        boundary: BTreeMap::new(),
+        boundary_patterns: Vec::new(),
+    };
+    for fp in &fps {
+        let pk = PatchKind::from_type(fp.type_name);
+        let s = if pk == PatchKind::Empty {
+            patch_spec("empty")
+        } else if cavity && fp.name == "movingWall" {
+            let mut s = patch_spec("fixedValue");
+            s.value_v = vec![Vec3::new(u_ref, 0.0, 0.0)];
+            s
+        } else if pk == PatchKind::Wall {
+            let mut s = patch_spec("noSlip");
+            s.value_v = vec![Vec3::ZERO];
+            s
+        } else if fp.name == "inlet" {
+            let mut s = patch_spec("fixedValue");
+            s.value_v = vec![Vec3::new(u_ref, 0.0, 0.0)];
+            s
+        } else if plume {
+            let mut s = patch_spec("inletOutlet");
+            s.inlet_value_v = vec![Vec3::ZERO];
+            s.value_v = vec![Vec3::ZERO];
+            s
+        } else {
+            patch_spec("zeroGradient")
+        };
+        u.boundary.insert(fp.name.to_string(), s);
+    }
+
+    let mut scalars: Vec<RawScalarField> = Vec::new();
+
+    if plume {
+        let mut pf = RawScalarField {
+            name: "p".to_string(),
+            dimensions: "[0 2 -2 0 0 0 0]".to_string(),
+            internal: vec![0.0 as Scalar; n_cells],
+            boundary: BTreeMap::new(),
+            boundary_patterns: Vec::new(),
+        };
+        for fp in &fps {
+            let pk = PatchKind::from_type(fp.type_name);
+            let s = if pk == PatchKind::Empty {
+                patch_spec("empty")
+            } else if fp.name == "outlet" {
+                let mut s = patch_spec("fixedValue");
+                s.value = vec![0.0];
+                s
+            } else {
+                patch_spec("zeroGradient")
+            };
+            pf.boundary.insert(fp.name.to_string(), s);
+        }
+        scalars.push(pf);
+
+        let mut t = RawScalarField {
+            name: "T".to_string(),
+            dimensions: "[0 0 0 1 0 0 0]".to_string(),
+            internal: vec![PLUME_T_AMBIENT; n_cells],
+            boundary: BTreeMap::new(),
+            boundary_patterns: Vec::new(),
+        };
+        for fp in &fps {
+            let pk = PatchKind::from_type(fp.type_name);
+            let s = if pk == PatchKind::Empty {
+                patch_spec("empty")
+            } else if fp.name == "inlet" {
+                let mut s = patch_spec("fixedValue");
+                s.value = vec![PLUME_T_INLET];
+                s
+            } else if pk == PatchKind::Wall {
+                patch_spec("zeroGradient")
+            } else {
+                let mut s = patch_spec("inletOutlet");
+                s.inlet_value = vec![PLUME_T_AMBIENT];
+                s.value = vec![PLUME_T_AMBIENT];
+                s
+            };
+            t.boundary.insert(fp.name.to_string(), s);
+        }
+        scalars.push(t);
+    }
+
+    let specs: [(&str, &str, Scalar, &str); 4] = [
+        ("k", "[0 2 -2 0 0 0 0]", k0, "kqRWallFunction"),
+        ("epsilon", "[0 2 -3 0 0 0 0]", eps0, "epsilonWallFunction"),
+        ("omega", "[0 0 -1 0 0 0 0]", omega0, "omegaWallFunction"),
+        ("nut", "[0 2 -1 0 0 0 0]", 0.0, "nutkWallFunction"),
+    ];
+    for (name, dims, value, wall_type) in specs {
+        let mut f = RawScalarField {
+            name: name.to_string(),
+            dimensions: dims.to_string(),
+            internal: vec![value; n_cells],
+            boundary: BTreeMap::new(),
+            boundary_patterns: Vec::new(),
+        };
+        for fp in &fps {
+            let pk = PatchKind::from_type(fp.type_name);
+            let s = if pk == PatchKind::Empty {
+                patch_spec("empty")
+            } else if pk == PatchKind::Wall {
+                let mut s = patch_spec(wall_type);
+                s.value = vec![value];
+                s
+            } else if name == "nut" {
+                let mut s = patch_spec("calculated");
+                s.value = vec![0.0];
+                s
+            } else if fp.name == "inlet" {
+                let mut s = patch_spec("fixedValue");
+                s.value = vec![value];
+                s
+            } else {
+                patch_spec("zeroGradient")
+            };
+            f.boundary.insert(fp.name.to_string(), s);
+        }
+        scalars.push(f);
+    }
+
+    Ok(InMemoryFields { scalars, vectors: vec![u] })
+}
+
 // ==========================================================================
 //  Cases
 // ==========================================================================
@@ -2088,11 +3231,78 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
     b
 }
 
+/// `(nu, u_ref, half_height)` for a case's initial fields and
+/// `constant/transportProperties` - shared by `write_case_impl` and
+/// [`build_case`] so the file path and the in-memory path can never pick
+/// different numbers for the same case.
+fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Scalar, Scalar) {
+    // Air for the plume; every other case keeps the 1e-5 it has always had.
+    let nu: Scalar = if kind == CaseKind::Plume { 1.5e-5 } else { 1e-5 };
+
+    let inlet = b.window.as_ref().map(|w| window_extent(&block.g, w));
+    let (u_ref, half_height): (Scalar, Scalar) = match kind {
+        CaseKind::Channel => (1.0, 1.0),
+        CaseKind::Step => (10.0, 1.0),
+        CaseKind::Cavity => (1.0, 0.05),
+        CaseKind::Big => (1.0, 0.5),
+        // Unreachable for a runnable case: the two-phase case is handled
+        // before this is ever called. Present because the compiler counts
+        // arms, not reachability.
+        CaseKind::DamBreak => (0.0, DAM_BREAK_A),
+        // The plume has no wall-normal profile; `half_height` only feeds the
+        // inlet mixing length, which scales with the burner, not the room. The
+        // two snapped sides differ by well under a percent, so their mean is
+        // the honest single number to hand it.
+        CaseKind::Plume => {
+            let side = match inlet {
+                Some((fx, fy)) => 0.25 * ((fx[1] - fx[0]) + (fy[1] - fy[0])),
+                None => 0.5 * PLUME_INLET_SIDE,
+            };
+            (PLUME_INLET_U, side)
+        }
+    };
+
+    (nu, u_ref, half_height)
+}
+
 /// Write a complete runnable case: polyMesh, `constant/`, `system/` and a `0/`
 /// directory whose fields are real per-cell profiles rather than a uniform
 /// guess.
 pub fn write_case(case_dir: &Path, kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<()> {
     write_case_impl(case_dir, kind, nx, ny, nz, None).map(|_| ())
+}
+
+/// Build a complete runnable case's mesh and `0/` fields entirely in memory -
+/// no `constant/polyMesh`, no `constant/transportProperties`, no `system/`,
+/// just the two things a solver actually needs to start from: the geometry
+/// and the initial fields. [`write_case`] is this plus every dictionary
+/// serialised to disk; both go through [`case_block_spec`],
+/// [`case_run_params`] and the same field builders, so the two cannot drift
+/// apart on what a case's initial state is.
+///
+/// The dam break case is two-phase and carries `alpha.water`, `U` and
+/// `p_rgh` rather than the single-phase fields below; every other case kind
+/// carries `U` and, for the plume only, `p`, `T` and the four turbulence
+/// fields.
+pub fn build_case(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<(HostMesh, InMemoryFields)> {
+    if nx < 1 || ny < 1 || nz < 1 {
+        return Err(Error::Config(format!(
+            "generate_cases: bad resolution {nx} x {ny} x {nz}"
+        )));
+    }
+
+    let b = case_block_spec(kind, nx, ny, nz);
+    let block = Block::new(&b)?;
+    let mesh = build_host_mesh(&poly_mesh_raw(&block)?)?;
+
+    if kind == CaseKind::DamBreak {
+        let fields = build_dam_break_fields(&block, None)?;
+        return Ok((mesh, fields));
+    }
+
+    let (nu, u_ref, half_height) = case_run_params(kind, &b, &block);
+    let fields = build_initial_fields(kind, &block, None, nu, u_ref, half_height, 1)?;
+    Ok((mesh, fields))
 }
 
 /// [`write_case`], with the block castellated against `surface` first
@@ -2187,7 +3397,8 @@ fn write_case_impl(
     }
 
     // Air for the plume; every other case keeps the 1e-5 it has always had.
-    let nu: Scalar = if kind == CaseKind::Plume { 1.5e-5 } else { 1e-5 };
+    let (nu, u_ref, half_height) = case_run_params(kind, &b, &block);
+    let inlet = b.window.as_ref().map(|w| window_extent(&block.g, w));
 
     // Only the plume carries a temperature equation, so only its dictionary
     // gets the two Prandtl numbers that equation reads. Writing them into the
@@ -2217,29 +3428,8 @@ fn write_case_impl(
     }
 
     // Wall-normal direction and half height per case, so the initial profile is
-    // oriented the way the geometry expects.
-    let inlet = b.window.as_ref().map(|w| window_extent(&block.g, w));
-    let (u_ref, half_height): (Scalar, Scalar) = match kind {
-        CaseKind::Channel => (1.0, 1.0),
-        CaseKind::Step => (10.0, 1.0),
-        CaseKind::Cavity => (1.0, 0.05),
-        CaseKind::Big => (1.0, 0.5),
-        // Unreachable: the two-phase case returned above, before any of this.
-        // Present because the compiler counts arms, not reachability.
-        CaseKind::DamBreak => (0.0, DAM_BREAK_A),
-        // The plume has no wall-normal profile; `half_height` only feeds the
-        // inlet mixing length, which scales with the burner, not the room. The
-        // two snapped sides differ by well under a percent, so their mean is
-        // the honest single number to hand it.
-        CaseKind::Plume => {
-            let side = match inlet {
-                Some((fx, fy)) => 0.25 * ((fx[1] - fx[0]) + (fy[1] - fy[0])),
-                None => 0.5 * PLUME_INLET_SIDE,
-            };
-            (PLUME_INLET_U, side)
-        }
-    };
-
+    // oriented the way the geometry expects. `u_ref`/`half_height` came from
+    // `case_run_params` above, together with `nu`.
     write_initial_fields(case_dir, kind, &block, carve, nu, u_ref, half_height, 1)?;
 
     if let (Some(w), Some((fx, fy))) = (b.window.as_ref(), inlet) {
@@ -2687,11 +3877,11 @@ fn patch_spec(type_name: &str) -> PatchFieldSpec {
 /// cell volume fraction. The column edges land on cell faces exactly, so on
 /// this mesh the two agree; the sharp form is used because it makes the initial
 /// condition independent of the resolution the case is generated at.
-fn write_dam_break_fields(
-    case_dir: &Path,
-    block: &Block,
-    carve: Option<&Carved>,
-) -> Result<()> {
+fn write_dam_break_fields(case_dir: &Path, block: &Block, carve: Option<&Carved>) -> Result<()> {
+    write_fields(case_dir, &build_dam_break_fields(block, carve)?)
+}
+
+fn build_dam_break_fields(block: &Block, carve: Option<&Carved>) -> Result<InMemoryFields> {
     let g = &block.g;
     let n_cells = carve.map_or(g.n_cells(), |cv| cv.fluid_old.len());
     // Internal values are per FLUID cell on a carved mesh; `old_of` maps the
@@ -2746,8 +3936,6 @@ fn write_dam_break_fields(
         alpha.boundary.insert(fp.name.to_string(), s);
     }
 
-    write_scalar_field(&case_dir.join("0").join("alpha.water"), &alpha, "0")?;
-
     // ---- U ---------------------------------------------------------------
     //
     // At rest. Anything else would be an initial condition arguing with the
@@ -2779,8 +3967,6 @@ fn write_dam_break_fields(
         };
         u.boundary.insert(fp.name.to_string(), s);
     }
-
-    write_vector_field(&case_dir.join("0").join("U"), &u, "0")?;
 
     // ---- p_rgh -----------------------------------------------------------
     //
@@ -2819,7 +4005,7 @@ fn write_dam_break_fields(
         p.boundary.insert(fp.name.to_string(), s);
     }
 
-    write_scalar_field(&case_dir.join("0").join("p_rgh"), &p, "0")
+    Ok(InMemoryFields { scalars: vec![alpha, p], vectors: vec![u] })
 }
 
 /// The initial velocity of one cell.
@@ -2911,6 +4097,20 @@ fn write_initial_fields(
     half_height: Scalar,
     wall_normal: usize,
 ) -> Result<()> {
+    let fields = build_initial_fields(kind, block, carve, nu, u_ref, half_height, wall_normal)?;
+    write_fields(case_dir, &fields)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_initial_fields(
+    kind: CaseKind,
+    block: &Block,
+    carve: Option<&Carved>,
+    nu: Scalar,
+    u_ref: Scalar,
+    half_height: Scalar,
+    wall_normal: usize,
+) -> Result<InMemoryFields> {
     let g = &block.g;
     let n_cells = carve.map_or(g.n_cells(), |cv| cv.fluid_old.len());
     // On a carved mesh the internal list runs over the FLUID cells only;
@@ -3028,7 +4228,8 @@ fn write_initial_fields(
         u.boundary.insert(name.to_string(), s);
     }
 
-    write_vector_field(&case_dir.join("0").join("U"), &u, "0")?;
+    let vectors = vec![u];
+    let mut scalars: Vec<RawScalarField> = Vec::new();
 
     // ---- p ---------------------------------------------------------------
     //
@@ -3072,7 +4273,7 @@ fn write_initial_fields(
             pf.boundary.insert(fp.name.to_string(), s);
         }
 
-        write_scalar_field(&case_dir.join("0").join("p"), &pf, "0")?;
+        scalars.push(pf);
     }
 
     // ---- T ---------------------------------------------------------------
@@ -3111,7 +4312,7 @@ fn write_initial_fields(
             t.boundary.insert(fp.name.to_string(), s);
         }
 
-        write_scalar_field(&case_dir.join("0").join("T"), &t, "0")?;
+        scalars.push(t);
     }
 
     // ---- scalars ---------------------------------------------------------
@@ -3160,7 +4361,7 @@ fn write_initial_fields(
             f.boundary.insert(pname.to_string(), s);
         }
 
-        write_scalar_field(&case_dir.join("0").join(name), &f, "0")?;
+        scalars.push(f);
     }
 
     println!(
@@ -3172,7 +4373,7 @@ fn write_initial_fields(
         fmt_g(nu)
     );
 
-    Ok(())
+    Ok(InMemoryFields { scalars, vectors })
 }
 
 // ==========================================================================
@@ -4180,6 +5381,93 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// §B1 gate: `write_case`'s `0/` fields must be byte-identical before and
+    /// after the field writers were split into `build_*` + `write_fields`.
+    /// Regenerated straight from `build_initial_fields`/`build_dam_break_fields`
+    /// and compared against the same case written whole through `write_case`.
+    #[test]
+    fn write_case_and_build_case_agree_on_every_0_field_byte_for_byte() {
+        for kind in [
+            CaseKind::Channel,
+            CaseKind::Step,
+            CaseKind::Cavity,
+            CaseKind::Big,
+            CaseKind::Plume,
+            CaseKind::DamBreak,
+        ] {
+            let dir = temp_dir(&format!("split_{}", kind.as_str()));
+            write_case(&dir, kind, 6, 5, if kind.as_str() == "cavity" { 1 } else { 4 })
+                .unwrap_or_else(|e| panic!("write_case({kind:?}) failed: {e}"));
+
+            let (_mesh, fields) = build_case(kind, 6, 5, if kind.as_str() == "cavity" { 1 } else { 4 })
+                .unwrap_or_else(|e| panic!("build_case({kind:?}) failed: {e}"));
+
+            for s in &fields.scalars {
+                let path = dir.join("0").join(format!("{}.rebuilt", s.name));
+                write_scalar_field(&path, s, "0").expect("write rebuilt scalar");
+                assert_eq!(
+                    fs::read(dir.join("0").join(&s.name)).expect("read on-disk bytes"),
+                    fs::read(&path).expect("read rebuilt"),
+                    "{kind:?}: field {} differs between write_case and build_case",
+                    s.name
+                );
+            }
+            for v in &fields.vectors {
+                let path = dir.join("0").join(format!("{}.rebuilt", v.name));
+                write_vector_field(&path, v, "0").expect("write rebuilt vector");
+                assert_eq!(
+                    fs::read(dir.join("0").join(&v.name)).expect("read on-disk bytes"),
+                    fs::read(&path).expect("read rebuilt"),
+                    "{kind:?}: field {} differs between write_case and build_case",
+                    v.name
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// §B1 gate: `build_mesh` must produce the same `HostMesh` as the file
+    /// round trip (`write_block_mesh` -> `read_poly_mesh` -> `build_host_mesh`)
+    /// it replaces in `validate.rs` and `bench.rs`.
+    #[test]
+    fn build_mesh_matches_the_file_round_trip() {
+        let b = BlockSpec {
+            x: axis(0.0, 1.0, 6, 1.0, false),
+            y: axis(0.0, 0.7, 5, 1.3, true),
+            z: axis(0.0, 0.4, 4, 1.0, false),
+            ..BlockSpec::default()
+        };
+
+        let direct = build_mesh(&b).expect("build_mesh");
+
+        let dir = temp_dir("direct_vs_disk");
+        write_block_mesh(&dir, &b).expect("write_block_mesh");
+        let via_disk = crate::io::polymesh::build_host_mesh(
+            &crate::io::polymesh::read_poly_mesh(&dir).expect("read_poly_mesh"),
+        )
+        .expect("build_host_mesh");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(direct.n_cells, via_disk.n_cells);
+        assert_eq!(direct.n_internal_faces, via_disk.n_internal_faces);
+        assert_eq!(direct.n_boundary_faces, via_disk.n_boundary_faces);
+        assert_eq!(direct.owner, via_disk.owner);
+        assert_eq!(direct.neighbour, via_disk.neighbour);
+        for (a, bb) in direct.v.iter().zip(via_disk.v.iter()) {
+            assert!((a - bb).abs() < 1e3 * EPS, "{a} vs {bb}");
+        }
+        for (a, bb) in direct.sf.iter().zip(via_disk.sf.iter()) {
+            assert!((*a - *bb).mag() < 1e3 * EPS, "{a} vs {bb}");
+        }
+        assert_eq!(direct.patches.len(), via_disk.patches.len());
+        for (a, bb) in direct.patches.iter().zip(via_disk.patches.iter()) {
+            assert_eq!(a.name, bb.name);
+            assert_eq!(a.start, bb.start);
+            assert_eq!(a.size, bb.size);
+        }
+    }
+
     #[test]
     fn a_degenerate_axis_is_refused_rather_than_written() {
         let mut b = spec(3, 3, 3);
@@ -4324,6 +5612,44 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// §B1 gate: `build_carved_mesh` (no file on disk anywhere) must agree
+    /// with `write_carved_case` + the polyMesh reader on the same surface.
+    #[test]
+    fn build_carved_mesh_matches_the_file_round_trip() {
+        let s = cuboid_surface(
+            Vec3::new(0.25, 0.25, 0.25),
+            Vec3::new(0.75, 0.75, 0.75),
+            "boxWall",
+        );
+
+        let b = case_block_spec(CaseKind::Big, 20, 20, 20);
+        let (direct, summary) = build_carved_mesh(&b, &s).expect("build_carved_mesh");
+        assert_eq!(summary.n_fluid, 7000);
+        assert_eq!(summary.wall_faces, vec![("boxWall".to_string(), 600)]);
+
+        let dir = temp_dir("carve_direct_vs_disk");
+        write_carved_case(&dir, CaseKind::Big, 20, 20, 20, &s).expect("write_carved_case");
+        let via_disk = crate::io::polymesh::build_host_mesh(
+            &crate::io::polymesh::read_poly_mesh(&dir).expect("read"),
+        )
+        .expect("host mesh");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(direct.n_cells, via_disk.n_cells);
+        assert_eq!(direct.n_internal_faces, via_disk.n_internal_faces);
+        assert_eq!(direct.n_boundary_faces, via_disk.n_boundary_faces);
+        assert_eq!(direct.owner, via_disk.owner);
+        assert_eq!(direct.neighbour, via_disk.neighbour);
+        assert!((direct.v.iter().sum::<Scalar>() - via_disk.v.iter().sum::<Scalar>()).abs()
+            < 1e3 * EPS);
+        assert_eq!(direct.patches.len(), via_disk.patches.len());
+        for (a, bb) in direct.patches.iter().zip(via_disk.patches.iter()) {
+            assert_eq!(a.name, bb.name);
+            assert_eq!(a.start, bb.start);
+            assert_eq!(a.size, bb.size);
+        }
+    }
+
     /// §23.5 row 2: a sphere of r = 0.3 in the unit box at h = 1/40. The
     /// carved fluid volume must be within O(h) of `1 - 4 pi r^3 / 3` -
     /// bounded here by `h * (sphere area)`, the honest first-order estimate
@@ -4370,6 +5696,7 @@ mod tests {
     /// one that swallows it whole.
     #[test]
     fn carve_refuses_surfaces_outside_or_swallowing_the_domain() {
+        let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         let outside = cuboid_surface(Vec3::new(5.0, 5.0, 5.0), Vec3::new(6.0, 6.0, 6.0), "s");
         let e = match write_carved_case(Path::new("."), CaseKind::Big, 4, 4, 4, &outside) {
@@ -4385,5 +5712,191 @@ mod tests {
             Ok(_) => panic!("a surface swallowing the domain was accepted"),
         };
         assert!(e.contains("swallows the whole domain"), "{e}");
+    }
+
+    // ---- cut-cell meshing (SPEC-LIT §24) ----------------------------------
+
+    /// §24.6 row 2: a grid-aligned cuboid must reproduce castellation's cell
+    /// counts exactly (no cell mixed) and close to round-off.
+    #[test]
+    fn cutcell_grid_aligned_cuboid_matches_castellation() {
+        let s = cuboid_surface(Vec3::new(0.25, 0.25, 0.25), Vec3::new(0.75, 0.75, 0.75), "boxWall");
+        let b = case_block_spec(CaseKind::Big, 20, 20, 20);
+        let (mesh, summary) =
+            build_cutcell_mesh_with(&b, &s, DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN).expect("cutcell");
+
+        assert_eq!(summary.n_solid, 1000, "analytic solid count");
+        assert_eq!(summary.n_fluid_full, 7000, "analytic fluid count");
+        assert_eq!(summary.n_cut, 0, "a grid-aligned cuboid must cut nothing");
+        assert_eq!(mesh.n_cells, 7000);
+
+        let rep = mesh.check();
+        assert!(rep.ldu_ordered, "cut-cell assembly broke the upper-triangular order");
+        assert!(rep.max_closure_error < 1e-10, "closure {}", rep.max_closure_error);
+        assert!(
+            (rep.total_volume - 0.875).abs() < 1e-10,
+            "fluid volume {} is not the analytic 0.875",
+            rep.total_volume
+        );
+        println!(
+            "cutcell grid-aligned cuboid: {} cells, closure {:e}, volume {}",
+            mesh.n_cells, rep.max_closure_error, rep.total_volume
+        );
+    }
+
+    /// §24.6 row 4: the cut-cell sphere's IN-MEMORY volume (theta_c * V_full,
+    /// written by `override_cutcell_geometry` - exact, not the disk path's
+    /// pyramid approximation) must be much closer to the analytic volume than
+    /// castellation's, and closure must still hold to round-off.
+    #[test]
+    fn cutcell_sphere_volume_much_closer_than_castellation() {
+        let pi = std::f64::consts::PI as Scalar;
+        let r: Scalar = 0.3;
+        let surf = sphere_surface(Vec3::new(0.5, 0.5, 0.5), r, 48, 96);
+        let b = case_block_spec(CaseKind::Big, 40, 40, 40);
+
+        let (mesh, summary) =
+            build_cutcell_mesh_with(&b, &surf, DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN).expect("cutcell");
+        assert!(summary.n_cut > 0);
+
+        let rep = mesh.check();
+        assert!(rep.ldu_ordered);
+        assert!(rep.max_closure_error < 1e-10, "closure {}", rep.max_closure_error);
+
+        let expect = 1.0 - 4.0 / 3.0 * pi * r * r * r;
+        let err_cut = (rep.total_volume - expect).abs();
+        let h: Scalar = 1.0 / 40.0;
+        let err_castellated_bound = 4.0 * pi * r * r * h; // O(h), §23.5's own bound
+        println!(
+            "cutcell sphere: volume {} vs analytic {expect}, |err| = {err_cut:e} \
+             (castellation's own O(h) bound is {err_castellated_bound:e})",
+            rep.total_volume
+        );
+        assert!(
+            err_cut < 0.2 * err_castellated_bound,
+            "cut-cell error {err_cut} is not much smaller than castellation's O(h) bound \
+             {err_castellated_bound}"
+        );
+    }
+
+    /// §24.6 row 5, at the mesh-assembly level: after merging, `check()` sees
+    /// no non-positive or absurdly small cell.
+    #[test]
+    fn cutcell_merging_leaves_a_sane_mesh() {
+        let r: Scalar = 0.3;
+        let surf = sphere_surface(Vec3::new(0.501_3, 0.499_7, 0.502_1), r, 32, 64);
+        let b = case_block_spec(CaseKind::Big, 30, 30, 30);
+
+        let (mesh, summary) =
+            build_cutcell_mesh_with(&b, &surf, DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN).expect("cutcell");
+        assert!(summary.n_merged > 0, "this off-grid sphere must produce slivers to merge");
+        assert_eq!(
+            mesh.n_cells,
+            summary.n_fluid_full + summary.n_cut - summary.n_merged,
+            "n_cells_out bookkeeping"
+        );
+
+        let rep = mesh.check();
+        assert!(rep.min_volume > 0.0, "a merged mesh must have no non-positive cell");
+        let h3 = (1.0 / 30.0 as Scalar).powi(3);
+        assert!(
+            rep.min_volume >= DEFAULT_THETA_MIN * h3 * 0.999,
+            "smallest surviving cell {} is below theta_min * V_full = {}",
+            rep.min_volume,
+            DEFAULT_THETA_MIN * h3
+        );
+        println!(
+            "cutcell merge: {} slivers merged, {} cells remain, min volume {} (theta_min*V_full = {})",
+            summary.n_merged, mesh.n_cells, rep.min_volume, DEFAULT_THETA_MIN * h3
+        );
+    }
+
+    /// The disk path: `write_cutcell_case` + the real polyMesh reader must
+    /// produce a mesh that closes to round-off (closure needs only `Sf`,
+    /// which `synthetic_quad` reproduces exactly regardless of the volume
+    /// caveat) and whose topology matches the in-memory summary.
+    #[test]
+    fn write_cutcell_case_round_trips_and_closes() {
+        use crate::io::polymesh::{build_host_mesh as read_build_host_mesh, read_poly_mesh};
+
+        let s = cuboid_surface(Vec3::new(0.25, 0.25, 0.25), Vec3::new(0.75, 0.75, 0.75), "boxWall");
+        let dir = temp_dir("cutcell_disk");
+        let summary = write_cutcell_case(
+            &dir, CaseKind::Big, 20, 20, 20, &s, DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN,
+        )
+        .expect("write_cutcell_case");
+        assert_eq!(summary.n_cells_out, 7000);
+
+        let m = read_build_host_mesh(&read_poly_mesh(&dir).expect("read")).expect("host mesh");
+        assert_eq!(m.n_cells, 7000);
+        let rep = m.check();
+        assert!(rep.ldu_ordered);
+        assert!(rep.max_closure_error < 1e-10, "closure {}", rep.max_closure_error);
+
+        // §24 gate honesty check (this module's *DESIGN* note): on THIS
+        // grid-aligned cuboid every face is alpha in {0,1}, so the pyramid
+        // volume the disk path derives is not an approximation at all here -
+        // it must match the analytic volume too.
+        assert!(
+            (rep.total_volume - 0.875).abs() < 1e-8,
+            "disk-path volume {} vs analytic 0.875",
+            rep.total_volume
+        );
+
+        for field in ["U", "k", "epsilon", "omega", "nut"] {
+            assert!(dir.join("0").join(field).exists(), "missing 0/{field}");
+        }
+        for (field, bc) in [
+            ("U", "noSlip"),
+            ("k", "kqRWallFunction"),
+            ("epsilon", "epsilonWallFunction"),
+        ] {
+            let text = fs::read_to_string(dir.join("0").join(field)).expect(field);
+            assert!(text.contains("boxWall"), "{field}: no boxWall entry");
+            assert!(text.contains(bc), "{field}: boxWall entry lacks {bc}");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The disk path on a genuinely CUT mesh: closure still holds exactly
+    /// (it only needs `Sf`), and the pyramid-derived volume is reported next
+    /// to the exact in-memory one so the module doc's caveat is a measured
+    /// number, not a guess.
+    #[test]
+    fn write_cutcell_case_sphere_closes_and_reports_the_volume_gap() {
+        use crate::io::polymesh::{build_host_mesh as read_build_host_mesh, read_poly_mesh};
+
+        let r: Scalar = 0.3;
+        let surf = sphere_surface(Vec3::new(0.5, 0.5, 0.5), r, 48, 96);
+        let dir = temp_dir("cutcell_disk_sphere");
+        let exact = build_cutcell_mesh_with(
+            &case_block_spec(CaseKind::Big, 40, 40, 40),
+            &surf,
+            DEFAULT_SUPERSAMPLE,
+            DEFAULT_THETA_MIN,
+        )
+        .expect("in-memory cutcell");
+
+        let summary = write_cutcell_case(
+            &dir, CaseKind::Big, 40, 40, 40, &surf, DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN,
+        )
+        .expect("write_cutcell_case");
+        assert_eq!(summary.n_cells_out, exact.0.n_cells);
+
+        let m = read_build_host_mesh(&read_poly_mesh(&dir).expect("read")).expect("host mesh");
+        let rep = m.check();
+        assert!(rep.ldu_ordered);
+        assert!(rep.max_closure_error < 1e-10, "disk-path closure {}", rep.max_closure_error);
+
+        let exact_volume = exact.0.check().total_volume;
+        println!(
+            "cutcell disk-path volume gap: exact (in-memory) {exact_volume}, \
+             pyramid-derived (disk) {} - relative gap {:.4}%",
+            rep.total_volume,
+            100.0 * (rep.total_volume - exact_volume).abs() / exact_volume
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

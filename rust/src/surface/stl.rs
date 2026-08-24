@@ -351,6 +351,7 @@ mod tests {
 
     #[test]
     fn ascii_open_box_is_refused_through_the_contract() {
+        let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         let text = ascii_cube(&[("box", 0..10)]); // no lid
         let s = parsed(text.as_bytes());
