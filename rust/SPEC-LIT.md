@@ -1650,3 +1650,287 @@ nutkWallFunction, ...), so a carved case runs unmodified.
 Castellation is FIRST-ORDER at the boundary (stair steps). That is the
 documented trade until the cut-cell stage exists, and it is exactly what FDS
 shipped for two decades.
+
+---
+
+## 24. Embedded-boundary fractions — cut cells, first stage
+
+Castellation (§23) removes whole cells and leaves a stair-step wall. This
+section refines it: intersected cells stay in the mesh with REDUCED volumes
+and face areas, and a new *cut face* closes each of them. The construction is
+the standard embedded-boundary (EB) geometry of Cartesian cut-cell methods —
+Aftosmis, Berger & Melton, *AIAA J.* 36(6) (1998); the EB data model as in
+AMReX (BSD-3, readable): per cell a volume fraction, per face an area
+fraction, per cut cell one boundary face.
+
+Scope note: this is *approximate* EB — fractions are computed by
+supersampling, not exact clipping. That bounds the boundary accuracy at first
+order with a much smaller constant than castellation. Exact clipping is a
+later upgrade that changes only the fraction computation, nothing downstream.
+
+### 24.1 Classification refresher
+
+§23.3 classifies CELL CENTRES. Here classify the supersample lattice instead:
+a cell is FLUID (all samples fluid), SOLID (all samples solid), or CUT
+(mixed). The same column-parity machinery applies — cast rays through the
+supersample lattice, which costs one crossing sort per (y,z) sub-column.
+
+### 24.2 Face area fractions
+
+For every axis-aligned face of a cut cell, the fluid area fraction
+
+```
+alpha_f = (fluid samples on the face) / (samples per face)
+```
+
+with an s×s sample lattice per face (default s = 16, *DESIGN*; the sample
+points are the face's own supersample columns, so no extra classification
+pass is needed). The face keeps its direction; its area vector becomes
+`alpha_f · Sf_full`. A face with `alpha_f = 0` is dropped; `alpha_f = 1` is a
+full face.
+
+### 24.3 The cut face, by closure
+
+Every closed polyhedron satisfies `Σ_f Sf = 0` exactly. Define the cut face's
+area vector as what closure demands:
+
+```
+Sf_cut = − Σ (fluid-fraction-scaled axis faces of the cell)
+```
+
+This is EXACT by construction — the carved mesh passes the §10 closure check
+to round-off no matter how approximate the fractions are, which is the
+property that keeps the FV operators consistent. The cut face's centroid is
+the mean of the solid/fluid interface sample midpoints within the cell
+(*DESIGN*; adequate at first order), and its patch comes from the nearest
+surface triangle, as §23.4.
+
+### 24.4 Volume fractions and centroids
+
+```
+theta_c = (fluid samples in the cell) / s³        volume  V = theta_c · V_full
+centroid = mean of fluid sample positions
+```
+
+Consistency requirement: use ONE sample lattice for faces and volume (the
+faces of a cell read the boundary planes of the same s³ lattice), so a cell
+whose samples are all fluid gets theta = 1 and alpha = 1 on every face with
+no seams between neighbouring cells.
+
+### 24.5 Small cells
+
+A cut cell with tiny `theta_c` wrecks the implicit system's conditioning
+(§ docs/05 review Q3: for THIS solver the harm is conditioning, not CFL, and
+the remedy is MERGING, not state redistribution). Rule:
+
+```
+theta_c < theta_min  (default 0.2, *DESIGN*)  →  merge into the fluid
+neighbour sharing the largest fluid face area
+```
+
+Merging removes the shared face, sums volumes and area-weighted centroids,
+and re-points the small cell's remaining faces at the survivor. The merged
+cell is just a polyhedron with more faces — the gather-CSR assembly already
+handles it. Merge iteratively until no cell is below threshold (a merged cell
+can absorb several slivers); refuse the mesh if a small cell has no fluid
+neighbour (an isolated sliver — geometry too thin for the grid; the error
+names the cell and suggests refining).
+
+### 24.6 What must hold
+
+| Check | Expected |
+|---|---|
+| closure on every cut cell | round-off, BY CONSTRUCTION (§24.3) |
+| grid-aligned cuboid, faces on gridlines | reproduces §23 castellation exactly (theta ∈ {0,1}) |
+| grid-aligned cuboid, faces at mid-cell | theta = 0.5 rows, volume exact to the sample resolution |
+| sphere volume | error << castellation's (report both) |
+| no cell below theta_min after merging | asserted |
+| solver on a cut-cell mesh | converges, no NaN |
+| plume around a cylinder | smoother wall pressure than castellated (qualitative, reported) |
+
+---
+
+## 25. Low-Mach variable-density formulation
+
+**Rehm & Baum, *J. Res. NBS* 83 (1978) 297–308**; Majda & Sethian, *Combust.
+Sci. Tech.* 42 (1985) 185; the FDS Technical Reference Guide (NIST, public
+domain — `reference/fds` MAY be read and adapted, with acknowledgement).
+
+Fire is Mach ≪ 1 with density ratios of 3–4. Acoustics are filtered by
+splitting the pressure:
+
+```
+p(x,t) = p0(t) + p~(x,t),        p~ ≪ p0
+```
+
+`p0` is the spatially uniform THERMODYNAMIC pressure; `p~` is the
+hydrodynamic perturbation the momentum equation sees. The ideal gas law uses
+`p0` only:
+
+```
+rho = p0 / (R_s T),   R_s = R / W        (v1: constant W = air, stated)
+```
+
+### 25.1 The divergence constraint
+
+Continuity `D(rho)/Dt = −rho ∇·u` with the gas law gives, using the energy
+equation of §26 for `DT/Dt`:
+
+```
+∇·u = Q / (rho cp T)  −  (1/(γ p0)) dp0/dt
+Q   = q'''_c + ∇·(k_eff ∇T) − ∇·q_r          (combustion §27, radiation §28)
+```
+
+Check the limit: `Q = 0`, sealed, gives `∇·u = 0` — incompressible recovered.
+
+### 25.2 p0 evolution
+
+Integrate the constraint over the domain. Boundary volume flux `Φ_b`:
+
+```
+dp0/dt = (γ / V_dom) [ ((γ−1)/γ) ∫ Q dV  −  p0 Φ_b ]      (sealed: Φ_b = 0)
+open domain:  p0 = const,  dp0/dt = 0
+```
+
+*Test (decisive)*: a sealed box with a known heater power P raises p0 at
+exactly `dp0/dt = (γ−1) P / V` — analytic, no tolerance excuses.
+
+### 25.3 Momentum and pressure
+
+```
+rho Du/Dt = −∇p~ + (rho − rho_∞) g + ∇·(mu_eff (∇u + ∇uᵀ − (2/3)(∇·u)I))
+```
+
+The buoyancy `(rho − rho_∞)g` replaces §9's `g(TRef/T − 1)` (they coincide
+at constant p0 and W — show it in a test). SIMPLE/PISO change in ONE place:
+the pressure equation's source acquires the target divergence,
+
+```
+∇·(rho rAU ∇p~) = ∇·(rho phiHbyA) − rho (∇·u)_target
+```
+
+and all convective fluxes become MASS fluxes `rho_f phi`. The
+density-weighted ddt kernels (`fvDdtEulerRho`, `fvDdtBdf2Rho`) exist,
+unit-tested and uncalled — this is what they were built for.
+
+*DESIGN*: rho_f by linear interpolation of cell rho; rho_∞ from TRef at p0.
+
+---
+
+## 26. The energy equation
+
+Temperature form, sensible enthalpy with constant cp (v1, stated; cp(T)
+polynomials are a coefficient change, not a structure change):
+
+```
+rho cp [ ∂T/∂t + ∇·(u T) − T (∇·u) ] = ∇·(k_eff ∇T) + q'''_c − ∇·q_r + dp0/dt
+
+k_eff = k + rho cp nu_t / Pr_t
+```
+
+Assembly with existing machinery: ddt and convection carry the weight
+`rho cp` (the rho-weighted kernels with rho' = rho·cp); the `−T∇·u` term is
+the bounded-convection correction of §3.1 — with a nonzero target divergence
+it is PHYSICS, not stabilisation. Sources arrive through the §18 registry:
+combustion and radiation REGISTER energy sources; the energy module must not
+know their internals (the hook keeps §27/§28 out of this file).
+
+Wall heat transfer: fixed-T and fixed-flux walls via the §4 Robin triple
+(`g_ref = q_w / k_eff`); the convective wall function for temperature
+(Jayatilleke-type) is deferred and SAID so per §13.4.
+
+| Test | Expected |
+|---|---|
+| 1-D transient conduction, fixed-T ends | erf solution (Incropera §5.7), 2nd order in space |
+| steady slab conduction, fixed flux | linear T, exact |
+| sealed heated box | §25.2 p0 ramp, analytic |
+| uniform flow advecting a T front | no new extrema with a limited scheme |
+| Boussinesq consistency | at ΔT→0 matches the §9 buoyant solver |
+
+---
+
+## 27. Combustion — mixing-controlled single step
+
+**Magnussen & Hjertager, *Proc. Combust. Inst.* 16 (1977) 719–729** (the
+eddy-dissipation model); background Poinsot & Veynante, *Theoretical and
+Numerical Combustion*. FDS's mixing-controlled default is the same idea
+(public domain reference).
+
+One global step, mass basis:
+
+```
+Fuel + s·O2 → (1+s)·Products          s = stoichiometric O2/fuel mass ratio
+```
+
+Species (§19 machinery): Y_F, Y_O2, Y_P transported; N2 is the inert
+closure. Reaction rate — mixing-limited, no kinetics:
+
+```
+omega_F = C_EDM · rho · (eps/k) · min(Y_F, Y_O2 / s)         [kg/m³s]
+C_EDM = 4.0 (Magnussen)
+```
+
+For an LES cell substitute `1/tau_mix = C_EDM' · |S|` (*DESIGN*, stated).
+Rate limiting (*DESIGN*): `omega_F ≤ rho·min(Y_F, Y_O2/s)/dt` so a species
+cannot go negative within a step; clip AND report the clipped-cell count.
+
+```
+q'''_c = omega_F · Δh_c        into the §26 source registry
+Y_F   −= omega_F dt / rho ;  Y_O2 −= s·omega_F dt / rho ;  Y_P += (1+s)(...)
+```
+
+as implicit-sink linearisation per §3.4 (Y_F sink is `omega_F/Y_F`-implicit).
+
+Default fuel (*DESIGN*): propane — Δh_c = 46.45 MJ/kg, s = 3.63 — overridable
+in the case.
+
+| Test | Expected |
+|---|---|
+| burner supplying m'_F, complete burn | ∫q''' dV = m'_F·Δh_c exactly |
+| lean/rich limits | the limiting reactant reaches ~0, no negatives |
+| species sum | exactly 1 (existing §19 invariant holds under reaction) |
+| flame height | Heskestad correlation L_f = 0.235 Q^{2/5} − 1.02 D (SFPE handbook), reported not asserted |
+| McCaffrey plume | NBS TN 910 centreline T, ΔT ~ z^{−5/3} in the plume region — §22's entry becomes REACHABLE |
+
+---
+
+## 28. Radiation — P1 gray approximation
+
+**Modest, *Radiative Heat Transfer*, 3rd ed., ch. 15 (the P1/differential
+approximation)**; Marshak boundary conditions ibid. FDS uses finite-volume
+DOM — better in optically thin fire margins — which is the DOCUMENTED next
+step, not this one (§13.4: asking for `fvDOM` errors, naming `P1`).
+
+Incident radiation G [W/m²] satisfies one Helmholtz equation:
+
+```
+∇·( Γ ∇G ) − a G + 4 a σ T⁴ = 0,      Γ = 1/(3a)
+```
+
+`a` = gray absorption coefficient [1/m] (v1: constant, case-supplied;
+WSGG later). Existing laplacian + Sp machinery solves it as-is (SPD → PCG).
+
+Energy coupling, through the §26 registry:
+
+```
+−∇·q_r = a (G − 4 σ T⁴)
+```
+
+Under-resolved flames radiate too little (T⁴ of a smeared flame): prescribe a
+radiant fraction χ_r (*DESIGN*, default 0.35, FDS practice): in cells with
+`q'''_c > 0` the emission term becomes `max(4 a σ T⁴, χ_r q'''_c)`; energy
+sees the matching sink so the budget closes.
+
+Marshak wall BC — a Robin condition, natively the §4 triple:
+
+```
+−Γ ∂G/∂n = (ε_w / (2(2−ε_w))) (4 σ T_w⁴ − G)
+```
+
+| Test | Expected |
+|---|---|
+| isothermal medium, hot walls | G → 4σT⁴ uniformly (equilibrium), exact |
+| optically thick slab | diffusion limit q = −(4σ/(3a))∇T⁴ recovered |
+| cold black walls, hot slab | net wall flux vs 1-D analytic P1 solution |
+| energy budget | ∫(emission − absorption) dV = net boundary radiative flux |
+| χ_r override | with q''' on, radiated power ≥ χ_r·∫q''' |

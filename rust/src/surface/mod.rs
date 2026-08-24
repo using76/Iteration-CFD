@@ -29,6 +29,8 @@
 //! near the mesh spacing is both simpler and fast enough.
 
 pub mod classify;
+pub mod cutcell;
+pub mod obj;
 pub mod stl;
 
 use std::collections::HashMap;
