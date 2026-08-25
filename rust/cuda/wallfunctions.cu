@@ -23,9 +23,22 @@
       wall treatment; named by SPEC-LIT 6.4 as a precedent for blending
     Wilcox, "Turbulence Modeling for CFD" - the viscous-sublayer limit
       omega = 6 nu/(beta_1 y^2)
+    Jayatilleke, Prog. Heat Mass Transfer 1 (1969) 193-330 - the sublayer
+      resistance correction P(Pr/Pr_t) to the thermal log law, SPEC-LIT 29.3
+      (wfThermalWall, at the bottom of this file)
+    Cebeci & Bradshaw, "Momentum Transfer in Boundary Layers", Hemisphere
+      (1977) - the rough-wall downshift dB(Ks+, Cs), SPEC-LIT 15.3/29.2
+      (wfRoughnessDb and the section around it)
     ofgpu SPEC-LIT.md 6.4. The two items marked *DESIGN* there - the blending
       and the treatment of the wall-adjacent CELL - are ours and are set out
       below.
+    ofgpu SPEC-LIT.md 15.1 - the Newton solve for u_tau (wfUTauNewton), the
+      nutU family's own reason to exist
+    ofgpu SPEC-LIT.md 15.3/29.2 - the downshift itself and E_eff, the single
+      substitution every relation containing ln(E y+) shifts through; Ks+
+      iterates with u_tau in the Newton above
+    ofgpu SPEC-LIT.md 29.3 - the thermal wall function itself, its own
+      section at the bottom of this file
   No GPL-licensed source was consulted.
 
   ==========================================================================
@@ -166,11 +179,15 @@
 OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrtf(a); }
 OFGPU_DEV ofscalar oflog_(ofscalar a)  { return logf(a); }
 OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return expf(a); }
+OFGPU_DEV ofscalar ofsin_(ofscalar a)  { return sinf(a); }
 #else
 OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrt(a); }
 OFGPU_DEV ofscalar oflog_(ofscalar a)  { return log(a); }
 OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return exp(a); }
+OFGPU_DEV ofscalar ofsin_(ofscalar a)  { return sin(a); }
 #endif
+
+OFGPU_DEV ofscalar ofabs_(ofscalar a) { return a < (ofscalar)0 ? -a : a; }
 
 //- Kader's blending weights, a = 0.01 and b = 5. See *DESIGN 1*(a).
 #define OFGPU_WF_A ((ofscalar)0.01)
@@ -236,16 +253,168 @@ OFGPU_DEV ofscalar wfYPlusOf(ofscalar k, ofscalar y, ofscalar nu, ofscalar cmu25
 
 
 // ==========================================================================
+//  Rough walls - SPEC-LIT 15.3, completed by 29.2
+//
+//  Written from Cebeci & Bradshaw, "Momentum Transfer in Boundary Layers",
+//  Hemisphere (1977) - the downshift dB(Ks+, Cs) below, all three regimes -
+//  and ofgpu SPEC-LIT.md 15.3/29.2. The host mirrors in src/wallfunctions.rs
+//  document the design (why E_eff, why Ks+ iterates with u_tau in the nutU
+//  Newton) at length; this file states only the arithmetic, kept identical to
+//  the host bit for bit so `tests::device_agrees_with_the_host_law` in
+//  src/wallfunctions.rs can pin the two together.
+//  No GPL-licensed source was consulted.
+// ==========================================================================
+
+//- Ks+ = Cs Ks u_tau / nu.
+OFGPU_DEV ofscalar wfKsPlus(ofscalar ks, ofscalar cs, ofscalar uTau, ofscalar nu)
+{
+    return cs*ofmax_(ks, (ofscalar)0)*ofmax_(uTau, (ofscalar)0)/nu;
+}
+
+
+//- The Cebeci & Bradshaw (1977) roughness downshift dB(Ks+, Cs).
+OFGPU_DEV ofscalar wfRoughnessDb(ofscalar ksPlus, ofscalar cs, ofscalar kappa)
+{
+    if (!(ksPlus > (ofscalar)2.25)) return (ofscalar)0;
+
+    if (ksPlus < (ofscalar)90)
+    {
+        const ofscalar arg  = (ksPlus - (ofscalar)2.25)/(ofscalar)87.75 + cs*ksPlus;
+        const ofscalar sine = ofsin_((ofscalar)0.4258*(oflog_(ksPlus) - (ofscalar)0.811));
+        return oflog_(ofmax_(arg, (ofscalar)1e-30))*sine/kappa;
+    }
+
+    return oflog_((ofscalar)1 + cs*ksPlus)/kappa;
+}
+
+
+//- E_eff = E exp(-kappa dB) - SPEC-LIT 29.2.
+OFGPU_DEV ofscalar wfEeff(ofscalar E, ofscalar kappa, ofscalar db)
+{
+    return E*ofexp_(-kappa*db);
+}
+
+
+//- u_tau implied directly by k: Cmu^{1/4} sqrt(k). What nutk's Ks+ uses -
+//  y+ already comes from k alone there, so u_tau is already known and no
+//  Newton solve is needed (unlike nutU below).
+OFGPU_DEV ofscalar wfUTauFromK(ofscalar k, ofscalar cmu25)
+{
+    return cmu25*ofsqrt_(ofmax_(k, (ofscalar)0));
+}
+
+
+//- Spalding's law inverted for u_tau (SPEC-LIT 15.1), extended by 29.2:
+//  Ks+ = Cs Ks u_tau/nu is recomputed from the CURRENT u_tau iterate every
+//  step, exactly like u+ itself, so u_tau and its own Ks+/dB are mutually
+//  consistent at convergence. ks = 0 keeps E_eff = E on every iteration
+//  regardless of u_tau, so this collapses to the plain smooth Newton bit for
+//  bit - the SPEC-LIT 22 gate.
+//
+//  *DESIGN* (SPEC-LIT 15.1): the viscous guess u_tau = sqrt(nu |U|/y), 10
+//  iterations, relative tolerance 1e-6, clamped to u_tau >= 0. dF/du_tau is
+//  taken with E_eff frozen at the value the current iterate's Ks+ gives -
+//  see src/wallfunctions.rs for the derivation.
+OFGPU_DEV ofscalar wfUTauNewton
+(
+    ofscalar uMag,
+    ofscalar y,
+    ofscalar nu,
+    ofscalar kappa,
+    ofscalar E,
+    ofscalar ks,
+    ofscalar cs
+)
+{
+    if (!(uMag > (ofscalar)0) || !(y > (ofscalar)0)) return (ofscalar)0;
+
+    ofscalar uTau = ofsqrt_(ofmax_(nu*uMag/y, (ofscalar)1e-30));
+
+    #pragma unroll
+    for (int it = 0; it < 10; ++it)
+    {
+        const ofscalar ksPlus = wfKsPlus(ks, cs, uTau, nu);
+        const ofscalar db     = wfRoughnessDb(ksPlus, cs, kappa);
+        const ofscalar eEff   = wfEeff(E, kappa, db);
+
+        const ofscalar uPlus = uMag/uTau;
+        const ofscalar ku    = kappa*uPlus;
+        const ofscalar euk   = ofexp_(ku);
+        const ofscalar poly  = euk - (ofscalar)1 - ku - ku*ku*(ofscalar)0.5
+                              - ku*ku*ku/(ofscalar)6;
+        const ofscalar f = y*uTau/nu - uPlus - poly/eEff;
+
+        const ofscalar dpoly = kappa*(euk - (ofscalar)1 - ku - ku*ku*(ofscalar)0.5);
+        const ofscalar df = y/nu + (uPlus/uTau)*((ofscalar)1 + dpoly/eEff);
+
+        if (!(ofabs_(df) > (ofscalar)0)) break;
+
+        const ofscalar next = ofmax_(uTau - f/df, (ofscalar)1e-30);
+        const bool done = ofabs_(next - uTau) <= (ofscalar)1e-6*ofmax_(ofabs_(next), (ofscalar)1e-30);
+        uTau = next;
+        if (done) break;
+    }
+
+    return ofmax_(uTau, (ofscalar)0);
+}
+
+
+//- nu_t,w = max(0, u_tau^2 y / |U_parallel| - nu) - SPEC-LIT 15.1.
+OFGPU_DEV ofscalar wfNutWU(ofscalar uTau, ofscalar y, ofscalar nu, ofscalar uMag)
+{
+    if (!(uMag > (ofscalar)0)) return (ofscalar)0;
+    return ofmax_(uTau*uTau*y/uMag - nu, (ofscalar)0);
+}
+
+
+//- |(U_P - U_w)_t|, the tangential velocity difference with the wall-normal
+//  component projected out - the numerator wfMagGradUw below divides by y.
+OFGPU_DEV ofscalar wfMagUParallel
+(
+    const ofvec3& Uc,
+    const ofvec3& Uw,
+    const ofvec3& Sf,
+    ofscalar magSf
+)
+{
+    const ofvec3 dU = mkvec(Uc.x - Uw.x, Uc.y - Uw.y, Uc.z - Uw.z);
+
+    ofvec3 t = dU;
+    if (magSf > (ofscalar)0)
+    {
+        const ofvec3 n = mkvec(Sf.x/magSf, Sf.y/magSf, Sf.z/magSf);
+        const ofscalar dn = dot3(dU, n);
+        t = mkvec(dU.x - dn*n.x, dU.y - dn*n.y, dU.z - dn*n.z);
+    }
+
+    return ofsqrt_(dot3(t, t));
+}
+
+
+// ==========================================================================
 //  nu_t on the wall faces
 // ==========================================================================
 
+//- `uBased[i]` selects the nutU family (SPEC-LIT 15.1): velocity-based y+/
+//  u_tau via wfUTauNewton, rather than nutk's k-based one. `ks[i]`/`cs[i]`
+//  carry the SPEC-LIT 15.3/29.2 roughness, zero on every smooth face - which
+//  is what makes both families collapse to their pre-roughness values to
+//  round-off (the SPEC-LIT 22 gate). All three are indexed by `i`, the same
+//  indexing as `wfFace`, not by `bf`.
 extern "C" __global__ void wfNutWall
 (
     ofscalar* __restrict__ nutB,
     const ofscalar* __restrict__ k,
+    const ofvec3* __restrict__ U,
+    const ofvec3* __restrict__ Ub,
     const oflabel* __restrict__ bFaceCells,
     const ofscalar* __restrict__ bY,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
     const oflabel* __restrict__ wfFace,
+    const oflabel* __restrict__ uBased,
+    const ofscalar* __restrict__ ks,
+    const ofscalar* __restrict__ cs,
     ofscalar nu,
     ofscalar kappa,
     ofscalar E,
@@ -265,10 +434,31 @@ extern "C" __global__ void wfNutWall
         return;
     }
 
-    const ofscalar kc = ofmax_(k[bFaceCells[bf]], kMin);
-    const ofscalar yPlus = wfYPlusOf(kc, y, nu, cmu25);
+    const oflabel c = bFaceCells[bf];
+    const ofscalar ksFace = ks[i];
+    const ofscalar csFace = cs[i];
 
-    nutB[bf] = wfNutW(yPlus, nu, kappa, E);
+    if (uBased[i])
+    {
+        // nutU (SPEC-LIT 15.1): y+/u_tau from the wall-parallel velocity, not
+        // from k. Ks+ iterates with u_tau inside the Newton (SPEC-LIT 29.2).
+        const ofscalar uMag = wfMagUParallel(U[c], Ub[bf], bSf[bf], bMagSf[bf]);
+        const ofscalar uTau = wfUTauNewton(uMag, y, nu, kappa, E, ksFace, csFace);
+        nutB[bf] = wfNutWU(uTau, y, nu, uMag);
+        return;
+    }
+
+    // nutk: y+ from k, as always; roughness enters only through E_eff, with
+    // u_tau read directly off k (no iteration - SPEC-LIT 29.2's own note on
+    // why nutk needs none where nutU does).
+    const ofscalar kc = ofmax_(k[c], kMin);
+    const ofscalar yPlus = wfYPlusOf(kc, y, nu, cmu25);
+    const ofscalar uTauK = wfUTauFromK(kc, cmu25);
+    const ofscalar ksPlus = wfKsPlus(ksFace, csFace, uTauK, nu);
+    const ofscalar db = wfRoughnessDb(ksPlus, csFace, kappa);
+    const ofscalar eEff = wfEeff(E, kappa, db);
+
+    nutB[bf] = wfNutW(yPlus, nu, kappa, eEff);
 }
 
 
@@ -301,7 +491,8 @@ extern "C" __global__ void wfYPlus
 //  The wall-adjacent cell
 // ==========================================================================
 
-//- |(U_P - U_w)_t| / y, the tangential wall shear rate of *DESIGN 2*.
+//- |(U_P - U_w)_t| / y, the tangential wall shear rate of *DESIGN 2* -
+//  wfMagUParallel's numerator, divided by the wall distance.
 OFGPU_DEV ofscalar wfMagGradUw
 (
     const ofvec3& Uc,
@@ -311,17 +502,7 @@ OFGPU_DEV ofscalar wfMagGradUw
     ofscalar y
 )
 {
-    const ofvec3 dU = mkvec(Uc.x - Uw.x, Uc.y - Uw.y, Uc.z - Uw.z);
-
-    ofvec3 t = dU;
-    if (magSf > (ofscalar)0)
-    {
-        const ofvec3 n = mkvec(Sf.x/magSf, Sf.y/magSf, Sf.z/magSf);
-        const ofscalar dn = dot3(dU, n);
-        t = mkvec(dU.x - dn*n.x, dU.y - dn*n.y, dU.z - dn*n.z);
-    }
-
-    return ofsqrt_(dot3(t, t))/y;
+    return wfMagUParallel(Uc, Uw, Sf, magSf)/y;
 }
 
 
@@ -548,4 +729,114 @@ extern "C" __global__ void wfMarkFixed
     const oflabel c = wallCells[i];
     isFixed[c] = 1;
     fixedValue[c] = wallCellValue[i];
+}
+
+
+/*---------------------------------------------------------------------------*\
+  The Jayatilleke thermal wall function - SPEC-LIT 29.3
+
+  Written from:
+    Jayatilleke, Prog. Heat Mass Transfer 1 (1969) 193-330 - the sublayer
+      resistance correction P(Pr/Pr_t) to the thermal log law
+    ofgpu SPEC-LIT.md 29.3, which states the thermal law and asks for the
+      SAME blending 6.4 uses everywhere else - the choice of WHICH of 6.4's
+      two blends is ours, and is the same one wfUPlus above already uses (see
+      src/wallfunctions.rs's module doc for why: 29.3 states the log branch
+      as Pr_t(u+ + P), a relation already written in terms of u+).
+  No GPL-licensed source was consulted.
+
+  T+ = t_vis exp(Gamma) + t_log exp(1/Gamma),   Gamma = wfGamma(y+)
+  t_vis = Pr y+                                  viscous branch
+  t_log = Pr_t (uLog + P),   P = 9.24[(Pr/Prt)^0.75 - 1][1 + 0.28 exp(-0.007 Pr/Prt)]
+
+  `P` is precomputed on the HOST (src/wallfunctions.rs's jayatilleke_p) and
+  passed in as `jayP`, exactly like cmu25/cmu75 above - it is the SAME number
+  on every face of a case (Pr, Pr_t are case constants, not per-face), and
+  computing it once removes the only pow() this section would otherwise need.
+
+  This kernel rewrites T's Robin triple to the fixedGradient degenerate form
+  (fr = 0) with refGrad chosen so k_eff_wall * refGrad reproduces the
+  Jayatilleke-corrected wall flux q_w = rho cp u_tau (T_w - T_P)/T+ WHATEVER
+  k_eff_wall (the molecular-plus-eddy conductivity src/energy.rs's
+  update_k_eff already computed at this face) happens to be - see
+  src/wallfunctions.rs's `thermal_wall_ref_grad`, which this kernel is the
+  device twin of, for the full derivation. T_w is read from refValue, which
+  src/field_setup.rs seeded from the field file's `value` entry; this kernel
+  never writes refValue, so it survives being read again next iteration.
+
+  One thread per wall face - no wall-adjacent-CELL constraint here, unlike
+  epsilon/omega: T is not pinned, only its Robin triple is rewritten, so
+  there is no CSR and no scatter (same shape as wfNutWall above).
+\*---------------------------------------------------------------------------*/
+
+//- T+ from y+, continuous from the wall to the log layer - SPEC-LIT 29.3.
+//  `jayP` is Jayatilleke's P(Pr/Pr_t), precomputed by the caller.
+OFGPU_DEV ofscalar wfTPlus
+(
+    ofscalar yPlus,
+    ofscalar pr,
+    ofscalar prt,
+    ofscalar kappa,
+    ofscalar E,
+    ofscalar jayP
+)
+{
+    const ofscalar gamma = wfGamma(yPlus);
+    const ofscalar uLog = oflog_(ofmax_(E*yPlus, (ofscalar)1))/kappa;
+    const ofscalar tVis = pr*yPlus;
+    const ofscalar tLog = prt*(uLog + jayP);
+    return tVis*ofexp_(gamma) + tLog*wfLogWeight(gamma);
+}
+
+
+extern "C" __global__ void wfThermalWall
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ refValue,
+    const ofscalar* __restrict__ T,
+    const ofscalar* __restrict__ k,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ kEffWall,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ bY,
+    const oflabel* __restrict__ wfFace,
+    ofscalar nu,
+    ofscalar cp,
+    ofscalar pr,
+    ofscalar prt,
+    ofscalar jayP,
+    ofscalar kappa,
+    ofscalar E,
+    ofscalar cmu25,
+    ofscalar kMin,
+    oflabel nWallFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nWallFaces) return;
+
+    const oflabel bf = wfFace[i];
+    const ofscalar y = bY[bf];
+    if (!(y > (ofscalar)0)) return;
+
+    const ofscalar keff = kEffWall[bf];
+    if (!(keff > (ofscalar)0)) return;
+
+    const oflabel c = bFaceCells[bf];
+    const ofscalar kc = ofmax_(k[c], kMin);
+    const ofscalar yPlus = wfYPlusOf(kc, y, nu, cmu25);
+    const ofscalar tPlus = wfTPlus(yPlus, pr, prt, kappa, E, jayP);
+
+    //- Only at y+ = 0 itself - T+ is otherwise strictly positive for
+    //  Pr, Pr_t > 0. Leaving the triple alone there is the same
+    //  "degenerate to fixedValue until the kernel can run" convention every
+    //  other wall function in this file follows on its own guard.
+    if (!(tPlus > (ofscalar)0)) return;
+
+    const ofscalar uTau = cmu25*ofsqrt_(kc);
+    const ofscalar qw = rho[c]*cp*uTau*(refValue[bf] - T[c])/tPlus;
+
+    fr[bf] = (ofscalar)0;
+    refGrad[bf] = qw/keff;
 }

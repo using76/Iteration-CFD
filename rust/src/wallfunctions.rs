@@ -19,10 +19,17 @@
 //!   Popovac & Hanjalic, *Flow Turbul. Combust.* 78 (2007) 177-202 - compound
 //!     wall treatment; named by SPEC-LIT §6.4 as a precedent for blending
 //!   Wilcox, *Turbulence Modeling for CFD* - `omega = 6 nu/(beta_1 y^2)`
+//!   Cebeci & Bradshaw, *Momentum Transfer in Boundary Layers*, Hemisphere
+//!     (1977) - the rough-wall downshift `dB(Ks+, Cs)` ([`roughness_db`])
 //!   ofgpu `SPEC-LIT.md` §6.4. The two items marked *DESIGN* there - the
 //!     blending, and the treatment of the wall-adjacent CELL - are ours.
+//!   ofgpu `SPEC-LIT.md` §15.1 - the §15.1 Newton solve for `u_tau`
+//!     ([`u_tau_newton`]), the `nutU` family's own reason to exist
 //!   ofgpu `SPEC-LIT.md` §15.2 - `nutLowRe` is `nu_t = 0`, and §15.5 - each
 //!     field's OWN patch type decides what happens to it at the wall
+//!   ofgpu `SPEC-LIT.md` §15.3/§29.2 - the downshift itself, and `E_eff`, the
+//!     single substitution every relation containing `ln(E y+)` shifts
+//!     through; `Ks+` iterates with `u_tau` in the Newton above
 //! No GPL-licensed source was consulted.
 //!
 //! # The two design decisions, in one paragraph each
@@ -217,6 +224,194 @@ pub fn production_wall(
 }
 
 // ==========================================================================
+//  Rough walls - SPEC-LIT §15.3, completed by §29.2
+// ==========================================================================
+//
+// Written from:
+//   Cebeci & Bradshaw, *Momentum Transfer in Boundary Layers*, Hemisphere
+//     (1977) - the downshift `dB(Ks+, Cs)` below, all three regimes
+//   ofgpu `SPEC-LIT.md` §15.3 (the downshift itself) and §29.2 (`E_eff`, and
+//     that `Ks+` iterates with `u_tau` in the §15.1 Newton)
+// No GPL-licensed source was consulted.
+//
+// Every relation of §6.4 above that contains `ln(E y+)` - which, in this
+// implementation, is exactly [`u_plus`]/[`nut_wall`] and nothing else -
+// shifts by replacing `E` with `E_eff = E exp(-kappa dB)`. `epsilon_wall` and
+// `omega_wall` have no `E` in them to begin with (SPEC-LIT §6.4's log-layer
+// relations for them are pure functions of `k`), so roughness reaches them
+// only indirectly, through the wall production `G`, which already reads back
+// whatever `nut_wall`/`nut_wall_u` wrote to the boundary value.
+
+/// `Ks+ = Cs Ks u_tau / nu` (SPEC-LIT §15.3). `u_tau <= 0` or `Ks <= 0` give
+/// `Ks+ = 0`, i.e. hydraulically smooth.
+#[inline]
+pub fn ks_plus_of(ks: Scalar, cs: Scalar, u_tau: Scalar, nu: Scalar) -> Scalar {
+    cs * ks.max(0.0) * u_tau.max(0.0) / nu
+}
+
+/// The Cebeci & Bradshaw (1977) roughness downshift `dB(Ks+, Cs)` - SPEC-LIT
+/// §15.3, all three regimes in one function, with the transitional band
+/// sine-blended into the other two exactly as the specification writes it.
+///
+/// Continuous at both seams, and for reasons that belong to the published
+/// constants rather than to this implementation: at `Ks+ = 2.25`,
+/// `ln(2.25) = 0.81093...` is already so close to the constant `0.811` that
+/// the sine factor is of order `1e-4` there, and at `Ks+ = 90`,
+/// `(90 - 2.25)/87.75 = 1` exactly, so the transitional branch's log argument
+/// matches the fully-rough branch's `1 + Cs·90` while
+/// `0.4258 (ln 90 - 0.811) = pi/2` exactly, so the sine factor is 1. Neither
+/// seam is rounded to make it land exactly on zero here - the constants are
+/// kept at the literature's own precision, and `tests` measures how small the
+/// resulting step actually is rather than asserting it is nothing.
+#[inline]
+pub fn roughness_db(ks_plus: Scalar, cs: Scalar, kappa: Scalar) -> Scalar {
+    if !(ks_plus > 2.25) {
+        0.0
+    } else if ks_plus < 90.0 {
+        let arg = (ks_plus - 2.25) / 87.75 + cs * ks_plus;
+        let sine = (0.4258 * (ks_plus.ln() - 0.811)).sin();
+        arg.max(1e-300).ln() * sine / kappa
+    } else {
+        (1.0 + cs * ks_plus).ln() / kappa
+    }
+}
+
+/// `E_eff = E exp(-kappa dB)` (SPEC-LIT §29.2) - the one substitution every
+/// relation containing `ln(E y+)` shifts through. `dB = 0` gives `E_eff = E`
+/// exactly, which is what makes `Ks -> 0` reproduce the smooth wall to
+/// round-off (the §22 gate).
+#[inline]
+pub fn e_eff(e: Scalar, kappa: Scalar, db: Scalar) -> Scalar {
+    e * (-kappa * db).exp()
+}
+
+/// `u_tau` implied directly by `k`: `Cmu^{1/4} sqrt(k)`, the same friction
+/// velocity `y+ = Cmu^{1/4} y sqrt(k)/nu` is built from.
+///
+/// `nutk`'s `Ks+` uses this rather than iterating: `y+` there already comes
+/// from `k` alone, so this `u_tau` is already known and no Newton solve is
+/// needed - unlike `nutU`, where `u_tau` is the Newton's own unknown and
+/// `Ks+` must iterate alongside it ([`u_tau_newton`], SPEC-LIT §29.2).
+#[inline]
+pub fn u_tau_from_k(k: Scalar, cmu25: Scalar) -> Scalar {
+    cmu25 * k.max(0.0).sqrt()
+}
+
+/// `nu_t` at a wall face from the `nutk` family, with the roughness downshift
+/// folded into `E` (SPEC-LIT §15.3/§29.2). `ks = 0` reproduces [`nut_wall`]
+/// exactly.
+#[inline]
+pub fn nut_wall_rough_k(
+    y_plus: Scalar,
+    k: Scalar,
+    nu: Scalar,
+    kappa: Scalar,
+    e: Scalar,
+    cmu25: Scalar,
+    ks: Scalar,
+    cs: Scalar,
+) -> Scalar {
+    let u_tau = u_tau_from_k(k, cmu25);
+    let ks_plus = ks_plus_of(ks, cs, u_tau, nu);
+    let db = roughness_db(ks_plus, cs, kappa);
+    nut_wall(y_plus, nu, kappa, e_eff(e, kappa, db))
+}
+
+/// Spalding's law (SPEC-LIT §15.1) inverted for `u_tau`, extended by §29.2
+/// with the roughness downshift: `Ks+ = Cs Ks u_tau/nu` is recomputed from
+/// the CURRENT `u_tau` iterate every step, exactly like `u+` itself, so the
+/// `u_tau` this returns and its own `Ks+`/`dB` are mutually consistent at
+/// convergence. `ks = 0` keeps `E_eff = E` on every iteration regardless of
+/// `u_tau`, so this collapses to the plain smooth Newton bit for bit - the
+/// §22 gate.
+///
+/// ```text
+/// F(u_tau) = y u_tau/nu - u+ - (1/E_eff)[e^{kappa u+} - 1 - kappa u+
+///                                         - (kappa u+)^2/2 - (kappa u+)^3/6]
+/// u+ = |U_parallel| / u_tau
+/// ```
+///
+/// `dF/du_tau` is taken with `E_eff` frozen at the value the current
+/// iterate's `Ks+` gives - the derivative SPEC-LIT leaves to calculus, not a
+/// literature formula - which is exactly what "iterates with u_tau" means:
+/// `Ks+`/`dB`/`E_eff` are refreshed once per outer step rather than
+/// differentiated through.
+///
+/// *DESIGN* (SPEC-LIT §15.1): the viscous guess `u_tau = sqrt(nu |U|/y)`, 10
+/// iterations, relative tolerance `1e-6`, clamped to `u_tau >= 0`.
+/// `|U_parallel| = 0` returns `0` with no iteration - there is nothing to
+/// solve for.
+pub fn u_tau_newton(
+    u_mag: Scalar,
+    y: Scalar,
+    nu: Scalar,
+    kappa: Scalar,
+    e: Scalar,
+    ks: Scalar,
+    cs: Scalar,
+) -> Scalar {
+    if !(u_mag > 0.0) || !(y > 0.0) {
+        return 0.0;
+    }
+
+    let mut u_tau: Scalar = (nu * u_mag / y).max(1e-300).sqrt();
+
+    for _ in 0..10 {
+        let ks_plus = ks_plus_of(ks, cs, u_tau, nu);
+        let db = roughness_db(ks_plus, cs, kappa);
+        let e_eff = e_eff(e, kappa, db);
+
+        let u_plus = u_mag / u_tau;
+        let ku = kappa * u_plus;
+        let euk = ku.exp();
+        let poly = euk - 1.0 - ku - ku * ku * 0.5 - ku * ku * ku / 6.0;
+        let f = y * u_tau / nu - u_plus - poly / e_eff;
+
+        let dpoly = kappa * (euk - 1.0 - ku - ku * ku * 0.5);
+        let df = y / nu + (u_plus / u_tau) * (1.0 + dpoly / e_eff);
+
+        if !(df.abs() > 0.0) {
+            break;
+        }
+
+        let next = (u_tau - f / df).max(1e-300);
+        let done = (next - u_tau).abs() <= 1e-6 * next.abs().max(1e-300);
+        u_tau = next;
+        if done {
+            break;
+        }
+    }
+
+    u_tau.max(0.0)
+}
+
+/// `nu_t,w = max(0, u_tau^2 y / |U_parallel| - nu)` (SPEC-LIT §15.1), from a
+/// `u_tau` already solved for - by [`u_tau_newton`], smooth or rough.
+#[inline]
+pub fn nut_wall_u(u_tau: Scalar, y: Scalar, nu: Scalar, u_mag: Scalar) -> Scalar {
+    if !(u_mag > 0.0) {
+        return 0.0;
+    }
+    (u_tau * u_tau * y / u_mag - nu).max(0.0)
+}
+
+/// `nu_t` at a wall face from the `nutU` family: [`u_tau_newton`] then
+/// [`nut_wall_u`]. `ks = 0` reproduces the plain §15.1 `nutU` exactly.
+#[inline]
+pub fn nut_wall_rough_u(
+    u_mag: Scalar,
+    y: Scalar,
+    nu: Scalar,
+    kappa: Scalar,
+    e: Scalar,
+    ks: Scalar,
+    cs: Scalar,
+) -> Scalar {
+    let u_tau = u_tau_newton(u_mag, y, nu, kappa, e, ks, cs);
+    nut_wall_u(u_tau, y, nu, u_mag)
+}
+
+// ==========================================================================
 //  Kernels
 // ==========================================================================
 
@@ -283,6 +478,16 @@ pub struct WallData {
     pub n_nut_faces: usize,
     /// `[n_nut_faces]` boundary-face indices, ascending.
     pub nut_face: DevBuf<Label>,
+    /// `[n_nut_faces]` `1` where the face is in the `nutU` family (SPEC-LIT
+    /// §15.1) - velocity-based `y+`/`u_tau` - rather than `nutk`'s `k`-based
+    /// one, aligned with [`Self::nut_face`].
+    pub nut_u_based: DevBuf<Label>,
+    /// `[n_nut_faces]` sand-grain height, aligned with [`Self::nut_face`].
+    /// Zero on every smooth face - SPEC-LIT §15.3/§29.2.
+    pub nut_ks: DevBuf<Scalar>,
+    /// `[n_nut_faces]` the roughness constant, aligned with
+    /// [`Self::nut_face`]. Meaningful only where `nut_ks > 0`.
+    pub nut_cs: DevBuf<Scalar>,
 
     /// `[n_wall_cells]` the value `epsilon` (or `omega`) is pinned to.
     ///
@@ -307,8 +512,15 @@ impl WallData {
     ///
     /// `faces.constrained_cells` comes from `epsilon`/`omega`'s patch types
     /// and `faces.nut` from `nut`'s, and they are deliberately independent -
-    /// SPEC-LIT §15.5.
-    pub fn build(gpu: &Gpu, m: &HostMesh, faces: &crate::field_setup::WallFaces) -> Result<Self> {
+    /// SPEC-LIT §15.5. `roughness` is `nut`'s own `Ks`/`Cs`/family data
+    /// (SPEC-LIT §15.3/§29.2); a case with none passes
+    /// [`crate::field_setup::NutRoughness::none`].
+    pub fn build(
+        gpu: &Gpu,
+        m: &HostMesh,
+        faces: &crate::field_setup::WallFaces,
+        roughness: &crate::field_setup::NutRoughness,
+    ) -> Result<Self> {
         let is_wall_function: &[bool] = &faces.constrained_cells;
 
         for (what, v) in [
@@ -320,6 +532,20 @@ impl WallData {
                     "WallData::build: the {what} flag has {} entries, the \
                      mesh has {} boundary faces",
                     v.len(),
+                    m.n_boundary_faces
+                )));
+            }
+        }
+
+        for (what, n) in [
+            ("nut u-based", roughness.u_based.len()),
+            ("nut Ks", roughness.ks.len()),
+            ("nut Cs", roughness.cs.len()),
+        ] {
+            if n != m.n_boundary_faces {
+                return Err(Error::Config(format!(
+                    "WallData::build: the {what} flag has {n} entries, the \
+                     mesh has {} boundary faces",
                     m.n_boundary_faces
                 )));
             }
@@ -373,11 +599,28 @@ impl WallData {
             .collect();
         let n_nut = nut_faces.len();
 
+        // Gathered from `roughness`'s per-boundary-face vectors onto the SAME
+        // indexing as `nut_faces`, so `nut_face[i]`/`nut_ks[i]`/`nut_cs[i]`
+        // describe the one face throughout - SPEC-LIT §15.3/§29.2.
+        let nut_u_based: Vec<Label> = nut_faces
+            .iter()
+            .map(|&bf| roughness.u_based[bf as usize] as Label)
+            .collect();
+        let nut_ks: Vec<Scalar> = nut_faces
+            .iter()
+            .map(|&bf| roughness.ks[bf as usize])
+            .collect();
+        let nut_cs: Vec<Scalar> = nut_faces
+            .iter()
+            .map(|&bf| roughness.cs[bf as usize])
+            .collect();
+
         // A zero-length device allocation is an error rather than an empty
         // buffer, so a case with no wall functions still gets one element -
         // which no kernel ever reads, because every launcher returns early on
         // `n_wall_cells == 0`.
         let pad = |v: Vec<Label>| if v.is_empty() { vec![0 as Label] } else { v };
+        let pad_s = |v: Vec<Scalar>| if v.is_empty() { vec![0.0 as Scalar] } else { v };
 
         Ok(Self {
             n_wall_cells: n_cells_w,
@@ -388,6 +631,9 @@ impl WallData {
 
             n_nut_faces: n_nut,
             nut_face: gpu.upload(&pad(nut_faces))?,
+            nut_u_based: gpu.upload(&pad(nut_u_based))?,
+            nut_ks: gpu.upload(&pad_s(nut_ks))?,
+            nut_cs: gpu.upload(&pad_s(nut_cs))?,
 
             wall_cell_value: gpu.zeros(n_cells_w.max(1))?,
             y_plus: gpu.zeros(n_faces.max(1))?,
@@ -406,11 +652,17 @@ impl WallData {
     ///
     /// Must run before [`Self::update_epsilon`] / [`Self::update_omega`],
     /// which read the value back to form `G`.
+    ///
+    /// `u` is only read on the faces [`Self::nut_u_based`] marks (the `nutU`
+    /// family, SPEC-LIT §15.1) - a case with none of those still passes it,
+    /// because a face's own family is a per-face device flag, not something
+    /// the host can skip ahead of time.
     pub fn update_nut(
         &self,
         gpu: &Gpu,
         nut_bf: &mut DevBuf<Scalar>,
         k: &DevBuf<Scalar>,
+        u: &GpuVectorField,
         m: &GpuMesh,
         wc: &WallFunctionCoeffs,
         nu: Scalar,
@@ -421,6 +673,8 @@ impl WallData {
             return Ok(());
         }
         self.check(nut_bf.len(), k.len(), m)?;
+        expect_count(u.f.len(), m.n_cells, "U")?;
+        expect_count(u.bf.len(), m.n_boundary_faces, "U boundary values")?;
 
         let cmu25 = wc.cmu.powf(0.25);
         let nl = n as Label;
@@ -431,9 +685,16 @@ impl WallData {
                 .launch_builder(&f)
                 .arg(nut_bf)
                 .arg(k)
+                .arg(&u.f)
+                .arg(&u.bf)
                 .arg(&m.b_face_cells)
                 .arg(&m.b_y)
+                .arg(&m.b_sf)
+                .arg(&m.b_mag_sf)
                 .arg(&self.nut_face)
+                .arg(&self.nut_u_based)
+                .arg(&self.nut_ks)
+                .arg(&self.nut_cs)
                 .arg(&nu)
                 .arg(&wc.kappa)
                 .arg(&wc.e)
@@ -667,6 +928,295 @@ pub fn constrain_wall_cells(
     }
 
     set_values(gpu, k, a, m)
+}
+
+// ==========================================================================
+//  The Jayatilleke thermal wall function - SPEC-LIT §29.3
+// ==========================================================================
+//
+// Written from:
+//   Jayatilleke, Prog. Heat Mass Transfer 1 (1969) 193-330 - the sublayer
+//     resistance correction `P(Pr/Pr_t)` to the thermal log law
+//   ofgpu `SPEC-LIT.md` §29.3, which states the thermal law and names the
+//     blending as "the same §6.4 *DESIGN* blending as every other wall
+//     quantity" - the choice of WHICH of §6.4's two blends (Kader's
+//     exponential weight, or epsilon/omega's root-sum-square) is ours: the
+//     exponential one, because it is the one [`u_plus`] itself already uses,
+//     and §29.3 asks for `T+ = Pr_t(u+ + P)` in the log branch - a relation
+//     stated in terms of `u+`, not of `eps_log`/`eps_vis`. Reusing `u_plus`'s
+//     OWN blend makes the `Pr = Pr_t` identity below exact rather than
+//     approximate.
+// No GPL-licensed source was consulted.
+//
+// # The law, and where it comes from
+//
+// ```text
+// P(r)  = 9.24 [ r^{3/4} - 1 ] [ 1 + 0.28 exp(-0.007 r) ],   r = Pr/Pr_t
+// T+    = Pr_t (u_log + P)                      log branch
+// T+    = Pr y+                                 viscous branch
+// T+    = t_vis·e^Gamma + t_log·e^{1/Gamma}      the blend, Gamma = blend_gamma(y+)
+// ```
+//
+// exactly [`u_plus`]'s own blend with `y+` standing in for itself and
+// `u_log` replaced by `t_log = Pr_t(u_log + P)`. At `Pr = Pr_t`, `P(1) = 0`
+// identically (the first bracket vanishes whatever the second one is), so
+// `t_vis = Pr_t·y+ `, `t_log = Pr_t·u_log`, and the blend factors:
+//
+// ```text
+// T+ = Pr_t·y+·e^Gamma + Pr_t·u_log·e^{1/Gamma} = Pr_t·(y+ e^Gamma + u_log e^{1/Gamma}) = Pr_t·u+
+// ```
+//
+// which is `tests::t_plus_reduces_to_prt_times_u_plus_when_pr_equals_prt`
+// below, and SPEC-LIT §29.3's own consistency check.
+//
+// # The Robin triple this rewrites, and which of the two SPEC-LIT forms
+//
+// SPEC-LIT §29.3 gives both a fixed-T and a fixed-q form. **This module
+// ships fixed-T** ([`crate::field::BcKind::ThermalWallFunction`]; `T_w` is
+// the field file's `value` entry, exactly like every other wall-function kind
+// in `src/field.rs` reads theirs). The triple it writes is the
+// `fr = 0` (fixedGradient) degenerate case with
+//
+// ```text
+// ref_grad = q_w / k_eff_wall,     q_w = rho·cp·u_tau·(T_w - T_P)/T+
+// ```
+//
+// which is [`thermal_wall_ref_grad`] below - literally
+// `crate::energy::flux_to_grad(q_w, k_eff_wall)` with `q_w` now DERIVED by
+// the wall function instead of a case constant. `k_eff_wall` is whatever
+// `src/energy.rs`'s own `update_k_eff` already computed at that face
+// (molecular `k` plus the momentum wall function's `nu_t,w`/Pr_t) - choosing
+// `ref_grad` this way makes the total flux come out to `q_w` WHATEVER
+// `k_eff_wall` is, so the two models' resistances are not double-counted.
+//
+// **The fixed-q form falls out of the same function.** Given a case-supplied
+// `q_w` instead of deriving one from `T_w`, `ref_grad = q_w/k_eff_wall` is
+// the identical expression - only the source of `q_w` differs - and the wall
+// temperature SPEC-LIT §29.3 says to diagnose,
+// `T_w = T_P + q_w·T+/(rho·cp·u_tau)`, is `t_p + q_w*t_plus/(rho*cp*u_tau)`,
+// a rearrangement of exactly the formula [`thermal_wall_ref_grad`] inverts.
+// Neither this module nor `src/field.rs` wires a SECOND `BcKind` for it -
+// the task asked for the thermal WALL (fixed-T) condition, and a
+// `heatFluxWallFunction` name was not requested - but the arithmetic a case
+// would need is already here, one call to [`jayatilleke_p`]/[`t_plus`] away.
+//
+// # Why `fr = 0` rather than a genuine Robin fraction
+//
+// A `fr` between 0 and 1 that made the row's IMPLICIT slope
+// (`-fr·k_eff_wall·delta`, what `fvLapBoundary` puts in the matrix) match the
+// physical conductance `h = rho cp u_tau/T+` would need `k_eff_wall` divided
+// back out of `fr` itself, recomputed every outer iteration alongside `y+`
+// and `T_P` - exactly the same lag every OTHER coefficient in this crate
+// already runs at (`nu_t,w`, `G`, `epsilon_wall`...). `fr = 0` is the
+// simplest member of that family: the flux is exact at whatever `T_P` the
+// matrix was assembled with, and outer iteration converges it exactly as it
+// converges every other lagged source term here - `Su`/`Sp` included.
+//
+// # Parallelism
+//
+// One thread per wall face, exactly [`WallData::update_nut`]'s shape: no
+// wall-adjacent-CELL constraint here (§15.4's `k`-at-the-wall distinction has
+// no thermal analogue - `T` is not pinned, only its Robin triple is
+// rewritten), so there is no CSR and no scatter.
+
+/// Jayatilleke's sublayer-resistance correction, `P(Pr/Pr_t)` - SPEC-LIT
+/// §29.3. `P(1) = 0` exactly: the first bracket is `1^{0.75} - 1 = 0`
+/// regardless of the second.
+#[inline]
+pub fn jayatilleke_p(pr: Scalar, prt: Scalar) -> Scalar {
+    let r = pr / prt;
+    9.24 * (r.powf(0.75) - 1.0) * (1.0 + 0.28 * (-0.007 * r).exp())
+}
+
+/// `T+` from `y+`, continuous from the wall to the log layer - SPEC-LIT
+/// §29.3, blended by [`u_plus`]'s own `blend_gamma`/`log_weight`. `p` is
+/// [`jayatilleke_p`], precomputed by the caller once per case rather than
+/// once per face - the same convention `nut_wall`'s callers already follow
+/// for `cmu.powf(0.25)`, and the reason the device twin in
+/// `cuda/wallfunctions.cu` never calls `pow`.
+#[inline]
+pub fn t_plus(y_plus: Scalar, pr: Scalar, prt: Scalar, kappa: Scalar, e: Scalar, p: Scalar) -> Scalar {
+    let gamma = blend_gamma(y_plus);
+    let u_log = (e * y_plus).max(1.0).ln() / kappa;
+    let t_vis = pr * y_plus;
+    let t_log = prt * (u_log + p);
+    t_vis * gamma.exp() + t_log * log_weight(gamma)
+}
+
+/// `u_tau = C_mu^{1/4} sqrt(k_P)` - SPEC-LIT §29.3.
+#[inline]
+pub fn u_tau_of(k: Scalar, cmu: Scalar) -> Scalar {
+    cmu.powf(0.25) * k.max(0.0).sqrt()
+}
+
+/// The `ref_grad` that rewrites a fixed-T wall's Robin triple to encode the
+/// Jayatilleke-corrected conductance - see the module section above.
+/// `k_p`/`y`/`nu`/`cmu` feed [`y_plus_of`] exactly as every other wall
+/// quantity's does; `k_min` floors `k_p` the same way [`nut_wall`]'s callers
+/// floor it before the square root.
+///
+/// `None` where the correction has nothing to divide by: no standoff
+/// (`y <= 0`), a non-positive `k_eff_wall`, or `T+ <= 0` (only at `y+ = 0`
+/// itself, since `T+` is otherwise strictly positive for `Pr, Pr_t > 0`).
+/// The caller leaves the face's existing triple alone in that case - the same
+/// "degenerate to fixedValue until the kernel can run" convention
+/// `src/field_setup.rs` already uses for every other wall-function kind.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn thermal_wall_ref_grad(
+    t_w: Scalar,
+    t_p: Scalar,
+    k_p: Scalar,
+    y: Scalar,
+    nu: Scalar,
+    rho: Scalar,
+    cp: Scalar,
+    pr: Scalar,
+    prt: Scalar,
+    kappa: Scalar,
+    e: Scalar,
+    cmu: Scalar,
+    k_eff_wall: Scalar,
+    k_min: Scalar,
+) -> Option<Scalar> {
+    if !(y > 0.0) || !(k_eff_wall > 0.0) {
+        return None;
+    }
+    let kc = k_p.max(k_min);
+    let y_plus = y_plus_of(kc, y, nu, cmu);
+    let tp = t_plus(y_plus, pr, prt, kappa, e, jayatilleke_p(pr, prt));
+    if !(tp > 0.0) {
+        return None;
+    }
+    let u_tau = u_tau_of(kc, cmu);
+    let q_w = rho * cp * u_tau * (t_w - t_p) / tp;
+    Some(q_w / k_eff_wall)
+}
+
+/// Which boundary faces the Jayatilleke thermal wall function owns, from
+/// `T`'s own patch types (SPEC-LIT §15.5's rule, extended to a fifth field -
+/// see [`crate::field::BcKind::is_thermal_wall_function`]).
+///
+/// A flat per-face list, not a CSR: like [`WallData::update_nut`] this
+/// rewrites one face's triple at a time and never averages over a cell.
+pub struct ThermalWallData {
+    pub n_faces: usize,
+    /// `[n_faces]` boundary-face indices, ascending.
+    pub face: DevBuf<Label>,
+    k: ThermalWallKernels,
+}
+
+struct ThermalWallKernels {
+    update: CudaFunction,
+}
+
+impl ThermalWallKernels {
+    fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::WALLFUNCTIONS)?;
+        Ok(Self {
+            update: k.func("wfThermalWall")?,
+        })
+    }
+}
+
+impl ThermalWallData {
+    /// `faces[bf]` is whatever [`crate::field_setup::faces_where`] with
+    /// [`crate::field::BcKind::is_thermal_wall_function`] computed from `T`'s
+    /// own field file - one entry per boundary face, in the same flattened
+    /// order `HostMesh::b_face_cells` uses.
+    pub fn build(gpu: &Gpu, faces: &[bool]) -> Result<Self> {
+        let list: Vec<Label> = faces
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .map(|(bf, _)| bf as Label)
+            .collect();
+        let n = list.len();
+        // Same convention as `WallData`: a zero-length device buffer is an
+        // error, so a case with no thermal wall function still gets one
+        // element, which `update` never reads because it returns early on
+        // `n_faces == 0`.
+        let padded = if list.is_empty() { vec![0 as Label] } else { list };
+
+        Ok(Self {
+            n_faces: n,
+            face: gpu.upload(&padded)?,
+            k: ThermalWallKernels::new(gpu)?,
+        })
+    }
+
+    /// Rewrite `T`'s Robin triple (`fr = 0`, `ref_grad` from
+    /// [`thermal_wall_ref_grad`]) on every face this owns. `T_w` is read from
+    /// `ref_value` and never written - it is the field file's `value` entry,
+    /// seeded once by `src/field_setup.rs` - so it survives being read again
+    /// next outer iteration. `t_internal` is `T`'s cell field (`T_P`); `k` is
+    /// the turbulence kinetic energy's cell field; `rho` is the cell density;
+    /// `k_eff_wall` is the effective conductivity `src/energy.rs`'s
+    /// `update_k_eff` already computed at every boundary face - call this
+    /// AFTER that, and before the equation is assembled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(
+        &self,
+        gpu: &Gpu,
+        fr: &mut DevBuf<Scalar>,
+        ref_grad: &mut DevBuf<Scalar>,
+        ref_value: &DevBuf<Scalar>,
+        t_internal: &DevBuf<Scalar>,
+        k: &DevBuf<Scalar>,
+        rho: &DevBuf<Scalar>,
+        k_eff_wall: &DevBuf<Scalar>,
+        m: &GpuMesh,
+        wc: &WallFunctionCoeffs,
+        nu: Scalar,
+        cp: Scalar,
+        pr: Scalar,
+        prt: Scalar,
+        k_min: Scalar,
+    ) -> Result<()> {
+        let n = self.n_faces;
+        if n == 0 {
+            return Ok(());
+        }
+        expect_count(fr.len(), m.n_boundary_faces, "T fr")?;
+        expect_count(ref_grad.len(), m.n_boundary_faces, "T ref_grad")?;
+        expect_count(ref_value.len(), m.n_boundary_faces, "T ref_value")?;
+        expect_count(t_internal.len(), m.n_cells, "T")?;
+        expect_count(k.len(), m.n_cells, "k")?;
+        expect_count(rho.len(), m.n_cells, "rho")?;
+        expect_count(k_eff_wall.len(), m.n_boundary_faces, "k_eff wall")?;
+
+        let cmu25 = wc.cmu.powf(0.25);
+        let jay_p = jayatilleke_p(pr, prt);
+        let nl = n as Label;
+        let f = self.k.update.clone();
+
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(fr)
+                .arg(ref_grad)
+                .arg(ref_value)
+                .arg(t_internal)
+                .arg(k)
+                .arg(rho)
+                .arg(k_eff_wall)
+                .arg(&m.b_face_cells)
+                .arg(&m.b_y)
+                .arg(&self.face)
+                .arg(&nu)
+                .arg(&cp)
+                .arg(&pr)
+                .arg(&prt)
+                .arg(&jay_p)
+                .arg(&wc.kappa)
+                .arg(&wc.e)
+                .arg(&cmu25)
+                .arg(&k_min)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
 }
 
 // ==========================================================================
@@ -1077,7 +1627,12 @@ mod tests {
             flags[p.start + i] = true;
         }
 
-        let wd = WallData::build(&gpu, &m, &same_for_both(&flags))?;
+        let wd = WallData::build(
+            &gpu,
+            &m,
+            &same_for_both(&flags),
+            &crate::field_setup::NutRoughness::none(m.n_boundary_faces),
+        )?;
         assert_eq!(wd.n_wall_faces, p.size);
         assert_eq!(wd.n_wall_cells, p.size);
 
@@ -1090,7 +1645,12 @@ mod tests {
         let k_dev = gpu.upload(&k_host)?;
         let mut nut_bf = gpu.zeros::<Scalar>(m.n_boundary_faces)?;
 
-        wd.update_nut(&gpu, &mut nut_bf, &k_dev, &gm, &wc, nu, k_min)?;
+        // Every face here is the k-based (`nutk`) family - see
+        // `same_for_both` above - so `U` is never read; it still has to be
+        // the right shape.
+        let u = GpuVectorField::zeros(&gpu, &gm, "U")?;
+
+        wd.update_nut(&gpu, &mut nut_bf, &k_dev, &u, &gm, &wc, nu, k_min)?;
         gpu.sync()?;
 
         let got = gpu.download(&nut_bf)?;
@@ -1143,7 +1703,12 @@ mod tests {
             }
         }
 
-        let mut wd = WallData::build(&gpu, &m, &same_for_both(&flags))?;
+        let mut wd = WallData::build(
+            &gpu,
+            &m,
+            &same_for_both(&flags),
+            &crate::field_setup::NutRoughness::none(m.n_boundary_faces),
+        )?;
         assert_eq!(wd.n_wall_faces, 4);
         assert_eq!(wd.n_wall_cells, 3, "the corner cell must not be counted twice");
 
@@ -1165,7 +1730,7 @@ mod tests {
         let mut eps = gpu.zeros::<Scalar>(m.n_cells)?;
         let mut g = gpu.zeros::<Scalar>(m.n_cells)?;
 
-        wd.update_nut(&gpu, &mut nut_bf, &k_dev, &gm, &wc, nu, k_min)?;
+        wd.update_nut(&gpu, &mut nut_bf, &k_dev, &u, &gm, &wc, nu, k_min)?;
         wd.update_epsilon(
             &gpu, &mut eps, &mut g, &k_dev, &u, &nut_bf, &gm, &wc, nu, k_min,
         )?;
@@ -1288,7 +1853,12 @@ mod tests {
             }
         }
 
-        let mut wd = WallData::build(&gpu, &m, &same_for_both(&flags))?;
+        let mut wd = WallData::build(
+            &gpu,
+            &m,
+            &same_for_both(&flags),
+            &crate::field_setup::NutRoughness::none(m.n_boundary_faces),
+        )?;
         assert!(wd.n_wall_cells > 0);
 
         let value: Scalar = 4.25;
@@ -1330,6 +1900,606 @@ mod tests {
                 "cell {c}: source {} , diag*value {}",
                 src[c],
                 value * diag[c]
+            );
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  Rough walls - SPEC-LIT §15.3, completed by §29.2
+    // ----------------------------------------------------------------------
+
+    /// `roughness_db`'s own doc comment explains why: at `Ks+ = 2.25` the
+    /// sine factor is of order `1e-4` rather than exactly zero, and at
+    /// `Ks+ = 90` the two branches' log arguments and sine factors coincide
+    /// exactly, in the formula's own terms. Both are properties of the
+    /// published constants, so this measures the actual size of each step
+    /// rather than asserting there is none.
+    #[test]
+    fn roughness_db_is_continuous_at_both_seams() {
+        let cs: Scalar = 0.5;
+        let eps: Scalar = 1e-6;
+
+        let smooth_side = roughness_db(2.25 - eps, cs, KAPPA);
+        let rough_side_at_225 = roughness_db(2.25 + eps, cs, KAPPA);
+        assert_eq!(smooth_side, 0.0, "Ks+ <= 2.25 must be exactly hydraulically smooth");
+        assert!(
+            rough_side_at_225.abs() < 1e-3,
+            "dB jumps to {rough_side_at_225} immediately above Ks+ = 2.25"
+        );
+
+        let trans_side = roughness_db(90.0 - eps, cs, KAPPA);
+        let fully_rough_side = roughness_db(90.0 + eps, cs, KAPPA);
+        let jump = (trans_side - fully_rough_side).abs();
+        assert!(
+            jump < 1e-4,
+            "dB jumps by {jump} across Ks+ = 90 (transitional side {trans_side}, \
+             fully-rough side {fully_rough_side})"
+        );
+    }
+
+    /// SPEC-LIT §15.3's fully-rough branch, `dB = ln(1 + Cs Ks+)/kappa`, is
+    /// exactly what [`roughness_db`] returns for `Ks+ >= 90` - not an
+    /// asymptote it merely approaches.
+    #[test]
+    fn roughness_db_matches_the_fully_rough_analytic_limit() {
+        for (ks_plus, cs) in [
+            (90.0 as Scalar, 0.5 as Scalar),
+            (150.0, 0.6),
+            (1000.0, 1.0),
+            (5000.0, 0.3),
+        ] {
+            let got = roughness_db(ks_plus, cs, KAPPA);
+            let want = (1.0 + cs * ks_plus).ln() / KAPPA;
+            assert!(
+                (got - want).abs() <= 1e-13 * want.abs().max(1e-30),
+                "Ks+={ks_plus} Cs={cs}: dB {got}, analytic {want}"
+            );
+        }
+    }
+
+    /// `E_eff` composes with [`u_plus`] to give exactly SPEC-LIT §29.2's
+    /// `u+ = ln(E y+)/kappa - dB` far above `y+_lam`, where the log branch
+    /// carries essentially all the weight.
+    #[test]
+    fn the_rough_log_law_matches_ln_e_yplus_over_kappa_minus_db() {
+        let ks: Scalar = 8e-3;
+        let cs: Scalar = 0.5;
+        let u_tau: Scalar = 0.4;
+        let nu: Scalar = 1.5e-5;
+
+        let ks_plus = ks_plus_of(ks, cs, u_tau, nu);
+        assert!(ks_plus > 90.0, "test wants the fully-rough regime, got Ks+ = {ks_plus}");
+
+        let db = roughness_db(ks_plus, cs, KAPPA);
+        let eeff = e_eff(E, KAPPA, db);
+
+        let y_plus: Scalar = 5000.0;
+        let up = u_plus(y_plus, KAPPA, eeff);
+        let want = (E * y_plus).ln() / KAPPA - db;
+        assert!(
+            (up - want).abs() < 1e-6 * want.abs(),
+            "u+ = {up}, ln(E y+)/kappa - dB = {want}"
+        );
+    }
+
+    /// `Ks -> 0` must reproduce the smooth `nutk` wall to round-off, on every
+    /// `k`/`y`/`Cs` this sweeps - the §22 gate, at the host-mirror level.
+    #[test]
+    fn ks_zero_reproduces_the_smooth_nutk_wall_everywhere() {
+        let nu: Scalar = 1.2e-5;
+        let cmu25 = CMU.powf(0.25);
+
+        for k in [1e-6 as Scalar, 1e-4, 1e-2, 1.0] {
+            for y in [1e-4 as Scalar, 1e-3, 1e-2] {
+                let y_plus = y_plus_of(k, y, nu, CMU);
+                let smooth = nut_wall(y_plus, nu, KAPPA, E);
+
+                for cs in [0.3 as Scalar, 0.5, 1.0] {
+                    let rough = nut_wall_rough_k(y_plus, k, nu, KAPPA, E, cmu25, 0.0, cs);
+                    assert!(
+                        (rough - smooth).abs() <= 1e-13 * smooth.abs().max(1e-30),
+                        "k={k} y={y} cs={cs}: rough(Ks=0) {rough}, smooth {smooth}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An independent, hand-written smooth Newton (SPEC-LIT §15.1, no
+    /// roughness term anywhere in it), so the `Ks -> 0` gate below checks
+    /// [`u_tau_newton`] against code that never mentions roughness, not
+    /// against itself.
+    fn smooth_u_tau_newton_reference(
+        u_mag: Scalar,
+        y: Scalar,
+        nu: Scalar,
+        kappa: Scalar,
+        e: Scalar,
+    ) -> Scalar {
+        if !(u_mag > 0.0) {
+            return 0.0;
+        }
+        let mut u_tau: Scalar = (nu * u_mag / y).max(1e-300).sqrt();
+        for _ in 0..10 {
+            let u_plus = u_mag / u_tau;
+            let ku = kappa * u_plus;
+            let euk = ku.exp();
+            let poly = euk - 1.0 - ku - ku * ku * 0.5 - ku * ku * ku / 6.0;
+            let f = y * u_tau / nu - u_plus - poly / e;
+            let dpoly = kappa * (euk - 1.0 - ku - ku * ku * 0.5);
+            let df = y / nu + (u_plus / u_tau) * (1.0 + dpoly / e);
+            if !(df.abs() > 0.0) {
+                break;
+            }
+            let next = (u_tau - f / df).max(1e-300);
+            let done = (next - u_tau).abs() <= 1e-6 * next.abs().max(1e-300);
+            u_tau = next;
+            if done {
+                break;
+            }
+        }
+        u_tau.max(0.0)
+    }
+
+    /// `Ks -> 0` must reproduce the smooth `nutU` wall to round-off - the §22
+    /// gate, checked against [`smooth_u_tau_newton_reference`] rather than
+    /// against [`u_tau_newton`] agreeing with itself.
+    #[test]
+    fn ks_zero_reproduces_the_smooth_nutu_wall_everywhere() {
+        let nu: Scalar = 1.5e-5;
+        let y: Scalar = 2e-3;
+
+        for u_mag in [0.05 as Scalar, 0.5, 2.0, 10.0] {
+            let want = smooth_u_tau_newton_reference(u_mag, y, nu, KAPPA, E);
+
+            for cs in [0.3 as Scalar, 0.5, 1.0] {
+                let got = u_tau_newton(u_mag, y, nu, KAPPA, E, 0.0, cs);
+                assert!(
+                    (got - want).abs() <= 1e-10 * want.max(1e-30),
+                    "u_mag={u_mag} cs={cs}: rough(Ks=0) u_tau {got}, independent smooth {want}"
+                );
+            }
+
+            let want_nut = nut_wall_u(want, y, nu, u_mag);
+            let got_nut = nut_wall_rough_u(u_mag, y, nu, KAPPA, E, 0.0, 0.5);
+            assert!(
+                (got_nut - want_nut).abs() <= 1e-10 * want_nut.max(1e-30),
+                "u_mag={u_mag}: rough(Ks=0) nu_t,w {got_nut}, independent smooth {want_nut}"
+            );
+        }
+    }
+
+    /// One boundary-face flag per patch face, `on` on `p`'s faces and `off`
+    /// everywhere else - the setup every device rough-wall test below shares.
+    fn wall_flags(m: &HostMesh, p: &crate::mesh::PatchInfo) -> Vec<bool> {
+        let mut flags = vec![false; m.n_boundary_faces];
+        for i in 0..p.size {
+            flags[p.start + i] = true;
+        }
+        flags
+    }
+
+    /// The device `nutk`-family kernel against [`nut_wall_rough_k`], across a
+    /// sweep of `Ks` from exactly zero (the §22 gate) through hydraulically
+    /// smooth, transitional and fully rough - on a real mesh, not a single
+    /// face.
+    #[test]
+    fn device_rough_nutk_agrees_with_the_host_law() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        // 6 cells, one x-slice each: every cell touches the xmin patch, so
+        // there are 6 distinct wall faces/cells to spread the sweep over.
+        let d = crate::Vec3::new(0.2, 0.1, 1.0);
+        let (mut m, points, faces) = crate::mesh::topology::tests::box_mesh([1, 6, 1], d);
+        m.compute_geometry(&points, &faces)?;
+        m.build_cell_face_maps();
+        let gm = GpuMesh::upload(&gpu, &m)?;
+
+        let p = m.patches[0].clone();
+        assert_eq!(p.size, 6);
+        let flags = wall_flags(&m, &p);
+
+        // Ks = 0 (the gate), then hydraulically smooth, transitional and
+        // fully rough - see the module comment on `nut_wall_rough_k` for how
+        // Ks+ relates to Ks at fixed k.
+        let cs_val: Scalar = 0.5;
+        let ks_vals: [Scalar; 6] = [0.0, 2e-4, 8e-4, 3e-3, 0.02, 0.06];
+
+        let mut ks_v = vec![0.0 as Scalar; m.n_boundary_faces];
+        let mut cs_v = vec![0.5 as Scalar; m.n_boundary_faces];
+        for i in 0..p.size {
+            ks_v[p.start + i] = ks_vals[i];
+            cs_v[p.start + i] = cs_val;
+        }
+        let roughness = crate::field_setup::NutRoughness {
+            u_based: vec![false; m.n_boundary_faces],
+            ks: ks_v,
+            cs: cs_v,
+        };
+
+        let wd = WallData::build(&gpu, &m, &same_for_both(&flags), &roughness)?;
+        assert_eq!(wd.n_nut_faces, p.size);
+
+        let nu: Scalar = 1e-5;
+        let k_min: Scalar = 1e-15;
+        let wc = WallFunctionCoeffs::default();
+        let k_val: Scalar = 0.01;
+        let k_dev = gpu.upload(&vec![k_val; m.n_cells])?;
+        let u = GpuVectorField::zeros(&gpu, &gm, "U")?;
+        let mut nut_bf = gpu.zeros::<Scalar>(m.n_boundary_faces)?;
+
+        wd.update_nut(&gpu, &mut nut_bf, &k_dev, &u, &gm, &wc, nu, k_min)?;
+        gpu.sync()?;
+
+        let got = gpu.download(&nut_bf)?;
+        let cmu25 = wc.cmu.powf(0.25);
+
+        for i in 0..p.size {
+            let bf = p.start + i;
+            let y = m.b_y[bf];
+            let y_plus = y_plus_of(k_val, y, nu, wc.cmu);
+            let want =
+                nut_wall_rough_k(y_plus, k_val, nu, wc.kappa, wc.e, cmu25, ks_vals[i], cs_val);
+
+            assert!(
+                (got[bf] - want).abs() <= 1e-11 * want.abs().max(nu),
+                "face {bf} (Ks={}): device {}, host {want}",
+                ks_vals[i],
+                got[bf]
+            );
+
+            if ks_vals[i] == 0.0 {
+                let smooth = nut_wall(y_plus, nu, wc.kappa, wc.e);
+                assert!(
+                    (got[bf] - smooth).abs() <= 1e-12 * smooth.abs().max(nu),
+                    "face {bf}: Ks=0 gave {} on the device, smooth wall gives {smooth}",
+                    got[bf]
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The device `nutU`-family kernel (the Newton solve, SPEC-LIT §15.1)
+    /// against [`nut_wall_rough_u`], across the same `Ks` sweep, with a real
+    /// wall-parallel velocity driving the Newton on the device exactly as it
+    /// does on the host.
+    #[test]
+    fn device_rough_nutu_agrees_with_the_host_law() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let d = crate::Vec3::new(0.2, 0.1, 1.0);
+        let (mut m, points, faces) = crate::mesh::topology::tests::box_mesh([1, 6, 1], d);
+        m.compute_geometry(&points, &faces)?;
+        m.build_cell_face_maps();
+        let gm = GpuMesh::upload(&gpu, &m)?;
+
+        let p = m.patches[0].clone();
+        assert_eq!(p.size, 6);
+        let flags = wall_flags(&m, &p);
+
+        let cs_val: Scalar = 0.5;
+        let ks_vals: [Scalar; 6] = [0.0, 2e-4, 8e-4, 3e-3, 0.02, 0.06];
+
+        let mut u_based = vec![false; m.n_boundary_faces];
+        let mut ks_v = vec![0.0 as Scalar; m.n_boundary_faces];
+        let mut cs_v = vec![0.5 as Scalar; m.n_boundary_faces];
+        for i in 0..p.size {
+            u_based[p.start + i] = true;
+            ks_v[p.start + i] = ks_vals[i];
+            cs_v[p.start + i] = cs_val;
+        }
+        let roughness = crate::field_setup::NutRoughness {
+            u_based,
+            ks: ks_v,
+            cs: cs_v,
+        };
+
+        let wd = WallData::build(&gpu, &m, &same_for_both(&flags), &roughness)?;
+        assert_eq!(wd.n_nut_faces, p.size);
+
+        let nu: Scalar = 1e-5;
+        let k_min: Scalar = 1e-15;
+        let wc = WallFunctionCoeffs::default();
+        // Not read by the u-based branch, but still has to be the right
+        // shape - `update_nut` checks `k` unconditionally.
+        let k_dev = gpu.zeros::<Scalar>(m.n_cells)?;
+
+        // A different tangential velocity per cell, so the Newton solves a
+        // different u_tau at every face. No-slip: `u.bf` stays zero.
+        let mut u = GpuVectorField::zeros(&gpu, &gm, "U")?;
+        let uc: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|c| crate::Vec3::new(0.3, 0.5 + 0.15 * c as Scalar, 0.2))
+            .collect();
+        gpu.write(&mut u.f, &uc)?;
+
+        let mut nut_bf = gpu.zeros::<Scalar>(m.n_boundary_faces)?;
+
+        wd.update_nut(&gpu, &mut nut_bf, &k_dev, &u, &gm, &wc, nu, k_min)?;
+        gpu.sync()?;
+
+        let got = gpu.download(&nut_bf)?;
+
+        for i in 0..p.size {
+            let bf = p.start + i;
+            let c = m.b_face_cells[bf] as usize;
+            let y = m.b_y[bf];
+
+            let n = m.b_sf[bf] / m.b_mag_sf[bf];
+            let t = uc[c] - n * uc[c].dot(n);
+            let u_mag = t.mag();
+
+            let want =
+                nut_wall_rough_u(u_mag, y, nu, wc.kappa, wc.e, ks_vals[i], cs_val);
+
+            assert!(
+                (got[bf] - want).abs() <= 1e-9 * want.abs().max(nu),
+                "face {bf} (Ks={}, |U|={u_mag}): device {}, host {want}",
+                ks_vals[i],
+                got[bf]
+            );
+
+            if ks_vals[i] == 0.0 {
+                let u_tau = u_tau_newton(u_mag, y, nu, wc.kappa, wc.e, 0.0, cs_val);
+                let smooth = nut_wall_u(u_tau, y, nu, u_mag);
+                assert!(
+                    (got[bf] - smooth).abs() <= 1e-9 * smooth.abs().max(nu),
+                    "face {bf}: Ks=0 gave {} on the device, smooth nutU gives {smooth}",
+                    got[bf]
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  The Jayatilleke thermal wall function - SPEC-LIT §29.3
+    // ----------------------------------------------------------------------
+
+    /// `P(1) = 0` exactly, whatever the second bracket is.
+    #[test]
+    fn jayatilleke_p_is_exactly_zero_at_pr_equals_prt() {
+        for prt in [0.7, 0.85, 1.0, 1.3] {
+            assert_eq!(jayatilleke_p(prt, prt), 0.0, "Pr = Pr_t = {prt}");
+        }
+    }
+
+    /// SPEC-LIT §29.3's own consistency check: at `Pr = Pr_t`, `T+` reduces
+    /// to `Pr_t · u+` because `t_vis = Pr_t·y+ `, `t_log = Pr_t·u_log` and
+    /// both share `u_plus`'s own blend weights exactly.
+    #[test]
+    fn t_plus_reduces_to_prt_times_u_plus_when_pr_equals_prt() {
+        let prt: Scalar = 0.85;
+        let p = jayatilleke_p(prt, prt);
+        assert_eq!(p, 0.0);
+
+        for y_plus in [0.0, 1.0, 5.0, 11.53, 30.0, 100.0, 1000.0] {
+            let tp = t_plus(y_plus, prt, prt, KAPPA, E, p);
+            let want = prt * u_plus(y_plus, KAPPA, E);
+            assert!(
+                (tp - want).abs() <= 1e-9 * want.abs().max(1.0),
+                "y+ {y_plus}: T+ {tp}, Pr_t*u+ {want}"
+            );
+        }
+    }
+
+    /// The blend has no switch to jump at - `t_plus` is built from the SAME
+    /// `blend_gamma`/`log_weight` [`u_plus`] uses, which is smooth by
+    /// construction. This pins that down concretely at the "thermal
+    /// crossover" - the `y+` where the two RAW branches (`Pr y+` and
+    /// `Pr_t(u_log + P)`) cross, found by bisection for a `Pr != Pr_t` case -
+    /// by evaluating `t_plus` from both sides and checking it moves smoothly
+    /// through the crossing rather than jumping.
+    #[test]
+    fn t_plus_is_continuous_across_the_thermal_crossover() {
+        let pr: Scalar = 0.71;
+        let prt: Scalar = 0.85;
+        let p = jayatilleke_p(pr, prt);
+
+        let raw_gap = |y_plus: Scalar| -> Scalar {
+            let u_log = (E * y_plus).max(1.0).ln() / KAPPA;
+            pr * y_plus - prt * (u_log + p)
+        };
+
+        // Bisect for the crossing: `raw_gap` is negative near the wall
+        // (`Pr y+` is small) and positive far from it (the log branch grows
+        // like `ln y+` while the viscous one grows LINEARLY... but Pr < Pr_t
+        // here keeps the viscous branch below the log one until quite far
+        // out - bracket generously and let bisection find it).
+        let mut lo: Scalar = 1.0;
+        let mut hi: Scalar = 2000.0;
+        assert!(raw_gap(lo) < 0.0 && raw_gap(hi) > 0.0, "bad bracket");
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if raw_gap(mid) < 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let crossover = 0.5 * (lo + hi);
+        assert!(raw_gap(crossover).abs() < 1e-6, "bisection did not converge");
+
+        let eps: Scalar = 1e-4;
+        let left = t_plus(crossover - eps, pr, prt, KAPPA, E, p);
+        let mid = t_plus(crossover, pr, prt, KAPPA, E, p);
+        let right = t_plus(crossover + eps, pr, prt, KAPPA, E, p);
+
+        // A smooth function moves by O(eps) across a step of size eps; a
+        // switched one would jump by O(1) (the two raw branches differ by a
+        // large factor away from `y+_lam`-scale y+, and this crossover is
+        // nowhere near either endpoint of the blend).
+        assert!(
+            (left - mid).abs() < 1e-2 && (mid - right).abs() < 1e-2,
+            "T+ jumps at the thermal crossover y+={crossover}: {left}, {mid}, {right}"
+        );
+    }
+
+    /// The `ref_grad` [`thermal_wall_ref_grad`] returns encodes EXACTLY the
+    /// analytic Jayatilleke flux, by construction - the "one-cell energy
+    /// balance" SPEC-LIT §29.3 asks for: `k_eff_wall * ref_grad` must equal
+    /// `rho cp u_tau (T_w - T_P)/T+`.
+    #[test]
+    fn thermal_wall_ref_grad_encodes_the_analytic_flux() {
+        let wc = WallFunctionCoeffs::default();
+        let nu: Scalar = 1.5e-5;
+        let k_min: Scalar = 1e-15;
+
+        let k_p: Scalar = 0.05; // an arbitrary wall-adjacent k
+        let y: Scalar = 0.01;
+        let rho: Scalar = 1.2;
+        let cp: Scalar = 1006.0;
+        let pr: Scalar = 0.71;
+        let prt: Scalar = 0.85;
+        let k_eff_wall: Scalar = 0.04; // molecular-plus-eddy conductivity
+        let t_w: Scalar = 400.0;
+        let t_p: Scalar = 300.0;
+
+        let grad = thermal_wall_ref_grad(
+            t_w, t_p, k_p, y, nu, rho, cp, pr, prt, wc.kappa, wc.e, wc.cmu, k_eff_wall, k_min,
+        )
+        .expect("a valid standoff and k_eff must produce a ref_grad");
+
+        // Recompute q_w independently, from the same law but written out
+        // longhand rather than through the function under test.
+        let y_plus = y_plus_of(k_p, y, nu, wc.cmu);
+        let u_tau = wc.cmu.powf(0.25) * k_p.sqrt();
+        let tp = t_plus(y_plus, pr, prt, wc.kappa, wc.e, jayatilleke_p(pr, prt));
+        let q_w = rho * cp * u_tau * (t_w - t_p) / tp;
+
+        let flux_from_triple = k_eff_wall * grad;
+        assert!(
+            (flux_from_triple - q_w).abs() <= 1e-9 * q_w.abs(),
+            "triple encodes flux {flux_from_triple}, analytic q_w is {q_w}"
+        );
+
+        // And the sign is physical: a hotter wall than cell (T_w > T_P)
+        // drives heat INTO the domain, a positive outward... this is the
+        // wall's own convention (SPEC-LIT §29.3's q_w), so q_w > 0 here.
+        assert!(q_w > 0.0, "T_w > T_P must give a positive q_w, got {q_w}");
+
+        // No standoff, or no conductivity to divide by: `None`, not a NaN or
+        // an infinity a caller could carry into the matrix unnoticed.
+        assert!(thermal_wall_ref_grad(
+            t_w, t_p, k_p, 0.0, nu, rho, cp, pr, prt, wc.kappa, wc.e, wc.cmu, k_eff_wall, k_min
+        )
+        .is_none());
+        assert!(thermal_wall_ref_grad(
+            t_w, t_p, k_p, y, nu, rho, cp, pr, prt, wc.kappa, wc.e, wc.cmu, 0.0, k_min
+        )
+        .is_none());
+    }
+
+    /// The device kernel `wfThermalWall` must reproduce
+    /// [`thermal_wall_ref_grad`] bit-for-bit up to floating-point tolerance -
+    /// the same discipline `device_agrees_with_the_host_law` holds `nut_wall`
+    /// to.
+    #[test]
+    fn thermal_wall_device_agrees_with_the_host_law() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        // A one-cell-thick slab: 4 cells in a row, the xmin patch a wall.
+        let (mut m, points, faces) =
+            crate::mesh::topology::tests::box_mesh([4, 1, 1], crate::Vec3::new(0.25, 1.0, 1.0));
+        m.compute_geometry(&points, &faces)?;
+        m.build_cell_face_maps();
+        let gm = GpuMesh::upload(&gpu, &m)?;
+
+        let mut flags = vec![false; m.n_boundary_faces];
+        let p = &m.patches[0];
+        for i in 0..p.size {
+            flags[p.start + i] = true;
+        }
+
+        let twd = ThermalWallData::build(&gpu, &flags)?;
+        assert_eq!(twd.n_faces, p.size);
+
+        let wc = WallFunctionCoeffs::default();
+        let nu: Scalar = 1.5e-5;
+        let cp: Scalar = 1006.0;
+        let pr: Scalar = 0.71;
+        let prt: Scalar = 0.85;
+        let k_min: Scalar = 1e-15;
+
+        // k chosen so y+ straddles y+_lam, same choice
+        // `device_agrees_with_the_host_law` makes for nu_t.
+        let k_host = vec![2.0e-6 as Scalar; m.n_cells];
+        let k_dev = gpu.upload(&k_host)?;
+        let rho_host = vec![1.2 as Scalar; m.n_cells];
+        let rho_dev = gpu.upload(&rho_host)?;
+        // A non-trivial k_eff per face, standing in for `energy::update_k_eff`.
+        let k_eff_host: Vec<Scalar> = (0..m.n_boundary_faces).map(|i| 0.03 + 0.001 * i as Scalar).collect();
+        let k_eff_dev = gpu.upload(&k_eff_host)?;
+
+        let t_w: Scalar = 400.0;
+        let t_host = vec![300.0 as Scalar; m.n_cells];
+        let t_dev = gpu.upload(&t_host)?;
+
+        let mut fr = gpu.upload(&vec![1.0 as Scalar; m.n_boundary_faces])?;
+        let mut ref_grad = gpu.zeros::<Scalar>(m.n_boundary_faces)?;
+        let ref_value = gpu.upload(&vec![t_w; m.n_boundary_faces])?;
+
+        twd.update(
+            &gpu,
+            &mut fr,
+            &mut ref_grad,
+            &ref_value,
+            &t_dev,
+            &k_dev,
+            &rho_dev,
+            &k_eff_dev,
+            &gm,
+            &wc,
+            nu,
+            cp,
+            pr,
+            prt,
+            k_min,
+        )?;
+        gpu.sync()?;
+
+        let got_fr = gpu.download(&fr)?;
+        let got_grad = gpu.download(&ref_grad)?;
+        let face_ids = gpu.download(&twd.face)?;
+
+        for &bf in face_ids.iter().take(twd.n_faces) {
+            let bf = bf as usize;
+            let y = m.b_y[bf];
+            let c = m.b_face_cells[bf] as usize;
+
+            let want = thermal_wall_ref_grad(
+                t_w,
+                t_host[c],
+                k_host[c],
+                y,
+                nu,
+                rho_host[c],
+                cp,
+                pr,
+                prt,
+                wc.kappa,
+                wc.e,
+                wc.cmu,
+                k_eff_host[bf],
+                k_min,
+            )
+            .expect("every face in this test has a positive standoff and k_eff");
+
+            assert_eq!(got_fr[bf], 0.0, "face {bf}: fr must be rewritten to 0");
+            assert!(
+                (got_grad[bf] - want).abs() <= 1e-9 * want.abs().max(1e-6),
+                "face {bf}: device ref_grad {}, host {want}",
+                got_grad[bf]
             );
         }
 

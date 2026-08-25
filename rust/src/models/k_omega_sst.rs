@@ -305,7 +305,20 @@ impl<'m> KOmegaSst<'m> {
         crate::field_ops::copy_field(gpu, &fld, &mut y_own, y, mesh.n_cells)?;
 
         Ok(Self {
-            core: RasCore::new(gpu, hm, mesh, ctrl, wall, wall_faces)?,
+            // No binary in this crate constructs a `KOmegaSst` from a case
+            // file yet (every call site is a unit test), so there is no
+            // case-file `Ks`/`Cs` to thread through here - see the matching
+            // note in `models::les::Les::new`. `NutRoughness::none` makes
+            // every face smooth, exactly SPEC-LIT §29.2's `Ks -> 0` gate.
+            core: RasCore::new(
+                gpu,
+                hm,
+                mesh,
+                ctrl,
+                wall,
+                wall_faces,
+                &crate::field_setup::NutRoughness::none(hm.n_boundary_faces),
+            )?,
             sst: SstKernels::new(gpu)?,
             fld,
             coeffs,
@@ -524,6 +537,7 @@ impl<'m> KOmegaSst<'m> {
             gpu,
             &mut self.core.nut.bf,
             &self.k.f,
+            flow.u,
             self.core.mesh,
             &wall,
             nu,
@@ -678,6 +692,7 @@ impl<'m> KOmegaSst<'m> {
             gpu,
             &mut self.core.nut.bf,
             &self.k.f,
+            flow.u,
             self.core.mesh,
             &wall,
             flow.nu,
@@ -1063,6 +1078,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
         let flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         let mut kw = KOmega::new(
             &gpu,
@@ -1072,6 +1088,7 @@ mod tests {
             decay_controls(dt),
             WallFunctionCoeffs::default(),
             &no_walls,
+            &no_roughness,
         )?;
         gpu.write(&mut kw.k_mut().f, &vec![k0; mesh.n_cells])?;
         gpu.write(&mut kw.omega_mut().f, &vec![w0; mesh.n_cells])?;
@@ -1139,6 +1156,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
         let flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         let mut ke = KEpsilon::new(
             &gpu,
@@ -1148,6 +1166,7 @@ mod tests {
             decay_controls(dt),
             WallFunctionCoeffs::default(),
             &no_walls,
+            &no_roughness,
         )?;
         gpu.write(&mut ke.k_mut().f, &vec![k0; mesh.n_cells])?;
         gpu.write(&mut ke.epsilon_mut().f, &vec![e0; mesh.n_cells])?;

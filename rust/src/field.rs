@@ -51,6 +51,13 @@
 //! Extended from:
 //!   ofgpu `SPEC-LIT.md` §4 (the triple), §13.4 (the rule above), §15.2 and
 //!     §15.5 (which patches get a wall function, and `nutLowRe`)
+//!   ofgpu `SPEC-LIT.md` §15.1, §15.3 and §29.2 - the `nutU`/`nutk` rough-wall
+//!     variants below; the physics is `crate::wallfunctions`' and
+//!     `crate::field_setup::NutRoughness`'s, this file only names them
+//!   ofgpu `SPEC-LIT.md` §29.3 - `ThermalWallFunction` below, and the
+//!     `compressible::alphatJayatillekeWallFunction` alias `from_name`
+//!     accepts for it; the law itself is `crate::wallfunctions`' and
+//!     `crate::energy`'s, this file only names the condition and the alias
 //! No GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
@@ -126,6 +133,28 @@ pub enum BcKind {
     /// zeroGradient wearing a wall-function name.
     KqRWallFunction = 25,
     KLowReWallFunction = 26,
+
+    /// The Jayatilleke thermal wall function on temperature - SPEC-LIT §29.3.
+    ///
+    /// Rewrites the fixed-T Robin triple to encode the sublayer-resistance
+    /// conductance `rho cp u_tau (T_w - T_P)/T+` instead of the molecular-only
+    /// conductance a plain `fixedValue` implies. `T_w` is the file's `value`
+    /// entry, exactly as the other wall-function kinds above read theirs.
+    ThermalWallFunction = 27,
+
+    /// `nutkWallFunction` with the Cebeci & Bradshaw roughness downshift of
+    /// SPEC-LIT §15.3/§29.2: `y+` still comes from `k`, but `E` is replaced by
+    /// `E_eff = E exp(-kappa dB(Ks+, Cs))` wherever it appears. `Ks = 0`
+    /// collapses `dB` to zero and this reproduces [`Self::NutkWallFunction`]
+    /// to round-off - the §22 gate.
+    NutkRoughWallFunction = 28,
+
+    /// `nutUWallFunction` with the same downshift, except `Ks+ = Cs Ks
+    /// u_tau/nu` is now part of the unknown the §15.1 Newton solves for: it
+    /// is recomputed from the current `u_tau` iterate every step, exactly
+    /// like `u+` itself (SPEC-LIT §29.2). `Ks = 0` reproduces
+    /// [`Self::NutUWallFunction`] to round-off.
+    NutURoughWallFunction = 29,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -178,6 +207,9 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "omegaWallFunction",
     "kqRWallFunction",
     "kLowReWallFunction",
+    "thermalWallFunction",
+    "nutkRoughWallFunction",
+    "nutURoughWallFunction",
 ];
 
 impl BcKind {
@@ -221,22 +253,24 @@ impl BcKind {
             "nutkWallFunction" => Self::NutkWallFunction,
             "nutUWallFunction" => Self::NutUWallFunction,
 
-            // SPEC-LIT 15.3: a rough wall shifts the log law down by dB, a
-            // function of the sand-grain height Ks and the roughness constant
-            // Cs. Neither is implemented, and "a rough-wall condition that
-            // discards them is a smooth wall with a misleading name" - so it
-            // is an error, not an alias.
-            "nutkRoughWallFunction" | "nutURoughWallFunction" | "nutkAtmRoughWallFunction" => {
+            // SPEC-LIT 15.3/29.2: the Cebeci & Bradshaw roughness downshift,
+            // reading Ks (sand-grain height) and Cs (roughness constant) from
+            // the patch entry - see `field_setup::NutRoughness`.
+            "nutkRoughWallFunction" => Self::NutkRoughWallFunction,
+            "nutURoughWallFunction" => Self::NutURoughWallFunction,
+
+            // The atmospheric (Monin-Obukhov) rough wall function is a
+            // different profile, not a discarded parameter - it is an error
+            // naming the two non-atmospheric rough functions this solver
+            // does implement, not a silent substitution.
+            "nutkAtmRoughWallFunction" => {
                 return unsupported(
                     &format!("{field}: boundaryField/{patch}/type"),
                     name,
-                    &["nutkWallFunction", "nutUWallFunction", "nutLowReWallFunction"],
-                    "the SMOOTH wall function of the same family (Ks and Cs are discarded)",
-                    if name.starts_with("nutU") {
-                        Self::NutUWallFunction
-                    } else {
-                        Self::NutkWallFunction
-                    },
+                    &["nutkRoughWallFunction", "nutURoughWallFunction"],
+                    "the non-atmospheric rough wall function of the same family (the \
+                     Monin-Obukhov atmospheric profile is not implemented)",
+                    Self::NutkRoughWallFunction,
                 );
             }
             "nutLowReWallFunction" => Self::NutLowReWallFunction,
@@ -244,6 +278,26 @@ impl BcKind {
             "omegaWallFunction" => Self::OmegaWallFunction,
             "kqRWallFunction" => Self::KqRWallFunction,
             "kLowReWallFunction" => Self::KLowReWallFunction,
+            "thermalWallFunction" => Self::ThermalWallFunction,
+
+            // SPEC-LIT 29.3: OpenFOAM spells the Jayatilleke thermal wall
+            // function on `alphat`, a field this solver does not carry (its
+            // energy equation applies the correction directly to `T`
+            // instead). Accepted as an alias rather than rejected, but the
+            // substitution is printed once, per SPEC-LIT 29.3's own wording -
+            // "the reader accepts ... and says what it mapped it to".
+            "compressible::alphatJayatillekeWallFunction" => {
+                crate::io::contract::warn_once(
+                    &format!("{field}: compressible::alphatJayatillekeWallFunction"),
+                    &format!(
+                        "{field}: boundaryField/{patch}/type \
+                         `compressible::alphatJayatillekeWallFunction` (OpenFOAM's alphat \
+                         wall function; this solver has no alphat field) mapped to \
+                         `thermalWallFunction`"
+                    ),
+                );
+                Self::ThermalWallFunction
+            }
 
             other => {
                 return unsupported(
@@ -287,7 +341,13 @@ impl BcKind {
     /// never of `epsilon`'s.
     #[inline]
     pub fn is_nut_wall_function(self) -> bool {
-        matches!(self, Self::NutkWallFunction | Self::NutUWallFunction)
+        matches!(
+            self,
+            Self::NutkWallFunction
+                | Self::NutUWallFunction
+                | Self::NutkRoughWallFunction
+                | Self::NutURoughWallFunction
+        )
     }
 
     /// True where `nu_t` is pinned to zero at the wall (SPEC-LIT §15.2:
@@ -295,6 +355,30 @@ impl BcKind {
     #[inline]
     pub fn is_nut_low_re(self) -> bool {
         matches!(self, Self::NutLowReWallFunction)
+    }
+
+    /// True for the `nutU` family: `y+` comes from the local velocity via the
+    /// §15.1 Newton solve for `u_tau`, rather than from `k`. Asked of `nut`'s
+    /// own patch type.
+    #[inline]
+    pub fn is_nut_velocity_based(self) -> bool {
+        matches!(self, Self::NutUWallFunction | Self::NutURoughWallFunction)
+    }
+
+    /// True where the face carries the Cebeci & Bradshaw roughness downshift
+    /// of SPEC-LIT §15.3/§29.2 and therefore needs a `Ks`/`Cs` patch entry.
+    #[inline]
+    pub fn is_nut_rough(self) -> bool {
+        matches!(self, Self::NutkRoughWallFunction | Self::NutURoughWallFunction)
+    }
+
+    /// True where the Jayatilleke thermal wall function (SPEC-LIT §29.3)
+    /// rewrites temperature's Robin triple. Asked of the temperature field's
+    /// OWN patch type, the same discipline as [`Self::is_nut_wall_function`]
+    /// - SPEC-LIT §15.5's rule extends unchanged to a fifth field.
+    #[inline]
+    pub fn is_thermal_wall_function(self) -> bool {
+        matches!(self, Self::ThermalWallFunction)
     }
 }
 

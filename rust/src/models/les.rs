@@ -58,7 +58,7 @@
 
 use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
-use crate::field::GpuScalarField;
+use crate::field::{GpuScalarField, GpuVectorField};
 use crate::field_ops::{correct_boundary_conditions, FieldKernels};
 use crate::fv::{fvc_grad_vector, FvKernels};
 use crate::les::{
@@ -244,7 +244,18 @@ impl<'m> Les<'m> {
             turb: TurbKernels::new(gpu)?,
             les: LesKernels::new(gpu)?,
 
-            wd: WallData::build(gpu, hm, wall_faces)?,
+            // `turbulence::RasCore::new` now takes a per-case `NutRoughness`
+            // (SPEC-LIT §29.1/§29.2) - `Les` does not yet, because no binary
+            // in this crate constructs an LES model from a case file (every
+            // call site is a unit test), so there is no case-file roughness
+            // to thread through here. `NutRoughness::none` makes every face
+            // smooth, exactly SPEC-LIT §29.2's `Ks -> 0` gate.
+            wd: WallData::build(
+                gpu,
+                hm,
+                wall_faces,
+                &crate::field_setup::NutRoughness::none(hm.n_boundary_faces),
+            )?,
             delta: LesDelta::new(gpu, mesh, delta)?,
 
             nut: GpuScalarField::zeros(gpu, mesh, "nut")?,
@@ -410,12 +421,14 @@ impl<'m> Les<'m> {
         &mut self,
         gpu: &Gpu,
         k: &DevBuf<Scalar>,
+        u: &GpuVectorField,
         nu: Scalar,
     ) -> Result<()> {
         self.wd.update_nut(
             gpu,
             &mut self.nut.bf,
             k,
+            u,
             self.mesh,
             &self.wall,
             nu,

@@ -102,7 +102,7 @@ use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field, max_div_phi,
     setup_scalar_field, setup_vector_field,
-    update_inlet_outlet, wall_coeffs_from_case, WallFaces,
+    update_inlet_outlet, wall_coeffs_from_case, NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{
     find_start_time, format_time_name, model_coeff, read_case_controls, CaseControls,
@@ -1152,7 +1152,7 @@ fn run(o: &Options) -> Result<()> {
     );
 
     // SPEC-LIT 15.5: nut's own patch types decide nu_t's wall treatment.
-    let raw_nut_for_walls = {
+    let mut raw_nut_for_walls = {
         let p = t_dir.join("nut");
         if p.exists() {
             Some(read_scalar_field(&p, hm.n_cells)?)
@@ -1160,7 +1160,18 @@ fn run(o: &Options) -> Result<()> {
             None
         }
     };
+    let mut raw_k = raw_k;
+    let mut raw_e = raw_e;
+    // SPEC-LIT 29.1: the per-field wall types must form one consistent row.
+    ofgpu::field_setup::validate_wall_rows(
+        &hm.patches,
+        raw_nut_for_walls.as_mut(),
+        Some(&mut raw_k),
+        Some(&mut raw_e),
+        None,
+    )?;
     let wf_faces = WallFaces::from_case(&raw_e, raw_nut_for_walls.as_ref(), &hm)?;
+    let roughness = NutRoughness::from_case(raw_nut_for_walls.as_ref(), &hm)?;
 
     let flow = FlowState::new(&u, &phi, cc.nu);
 
@@ -1172,6 +1183,7 @@ fn run(o: &Options) -> Result<()> {
         cc.turb,
         wall_coeffs_from_case(&cc.wall),
         &wf_faces,
+        &roughness,
     )?;
 
     setup_scalar_field(&gpu, model.k_mut(), &raw_k, &hm)?;

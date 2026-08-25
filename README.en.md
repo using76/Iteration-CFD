@@ -100,6 +100,8 @@ applied on faces rather than interpolated from cell values.
 | LES | Smagorinsky, WALE, Deardorff |
 | LES filter widths | Cube root of volume, maximum edge length, Scotti anisotropy correction, van Driest damping |
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
+| Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1) |
+| Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation |
 | Wall distance | Poisson method (Tucker 1998) |
 | Buoyancy production | G_b term (Rodi 1987, Henkes et al. 1991) |
 
@@ -137,7 +139,7 @@ applied on faces rather than interpolated from cell values.
 | | |
 |---|---|
 | Low-Mach formulation | `p = p0(t) + p~(x,t)` split, the divergence constraint, `p0(t)` integration in a sealed or open compartment (Rehm & Baum 1978) |
-| Energy equation | Sensible enthalpy, `k_eff = k + rho cp nu_t/Prt`, fixed-flux and fixed-temperature wall conditions |
+| Energy equation | Sensible enthalpy, `k_eff = k + rho cp nu_t/Prt`, fixed-flux and fixed-temperature wall conditions, the Jayatilleke thermal wall function on `thermalWallFunction` walls (SPEC-LIT §29.3) |
 | Combustion | Mixing-controlled single-step EDM (Magnussen & Hjertager 1977) — `Y_F`/`Y_O2`/`Y_P` transport, a fuel-depletion clip, fuel mass consumed and heat released agreeing exactly (to round-off) |
 | Radiation | Gray P1 approximation (Modest), Marshak wall condition, a `chi_r` radiant-fraction floor — `fvDOM` is refused by name per the §13.4 contract |
 | Validation gates | Sealed-box `dp0/dt` ramp (analytic), exact burner heat release, radiative equilibrium, cut-cell closure, msh hex closure — all permanent `ofgpu-validate` checks |
@@ -220,8 +222,8 @@ in each instance:
 ## Validation
 
 ```
-cargo test        640 passed, 0 failed
-ofgpu-validate    214 / 214 checks passed
+cargo test        696 passed, 0 failed
+ofgpu-validate    219 / 219 checks passed
 ```
 
 ### Order of convergence — method of manufactured solutions
@@ -291,6 +293,34 @@ The last of these is the decisive test of the p_rgh formulation.
 The CPU reference is written deliberately as scatter loops, where the device
 code gathers. Two implementations of different structure agreeing is what makes
 the comparison meaningful.
+
+### Wall treatment (SPEC-LIT §29)
+
+Two permanent `ofgpu-validate` gates for the `wallTreatment` presets and the
+Jayatilleke thermal wall function:
+
+| Check | Result |
+|---|---|
+| `Ks → 0` reproduces the smooth `nutk` wall function everywhere | 0 (round-off) |
+| `Ks → 0` reproduces the smooth `nutU` wall function everywhere | 0 (round-off) |
+| `P(Pr/Pr_t = 1) = 0` exactly | 0 (round-off) |
+| At `Pr = Pr_t`, `T+ == Pr_t · u+` everywhere | 1.3 × 10⁻¹⁶ |
+| The `thermalWallFunction` Robin triple encodes exactly the analytic Jayatilleke flux (the one-cell conductance identity) | 0 (round-off) |
+
+These establish that the rough-wall law collapses to the existing smooth one
+at `Ks = 0` — the case that never mentions roughness — and that the thermal
+wall function's own algebra is internally exact. They do **not** by
+themselves establish that a coarse wall-function mesh and a resolved
+low-Re mesh agree on the wall heat flux of the *same* flow; that is a
+separate, much larger claim (a converged 3-D turbulent-channel run at two
+mesh resolutions) that no case type in this repository currently wires up
+end to end. A semi-analytic check of the near-wall resistance model alone
+(comparing Jayatilleke's closed-form sublayer resistance against a direct
+quadrature of the same eddy-diffusivity closure, for air's `Pr = 0.71`,
+`Pr_t = 0.85`) shows a difference of order 15% between the two — which is
+the size of Jayatilleke's own correction, not a defect, but is reported
+here rather than hidden, since a true end-to-end 3-D validation remains
+future work.
 
 ---
 

@@ -51,7 +51,7 @@ use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field, max_div_phi,
     setup_scalar_field,
     setup_scalar_field_with, setup_vector_field, update_inlet_outlet, wall_coeffs_from_case,
-    BcInputs, WallFaces,
+    BcInputs, NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{find_start_time, model_coeff};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
@@ -306,11 +306,21 @@ fn run(o: &Options) -> Result<()> {
         // types and epsilon's wall-cell constraint from epsilon's, never one
         // from the other.
         let nut_path = t_dir.join("nut");
-        let nut = if nut_path.exists() {
+        let mut k = k;
+        let mut e = e;
+        let mut nut = if nut_path.exists() {
             Some(read_scalar_field(&nut_path, hm.n_cells)?)
         } else {
             None
         };
+        // SPEC-LIT 29.1: the four per-field wall types must form one row.
+        ofgpu::field_setup::validate_wall_rows(
+            &hm.patches,
+            nut.as_mut(),
+            Some(&mut k),
+            Some(&mut e),
+            None,
+        )?;
         (u, k, e, nut, Some(t_dir))
     };
 
@@ -338,6 +348,7 @@ fn run(o: &Options) -> Result<()> {
     );
 
     let wf_faces = WallFaces::from_case(&raw_e, raw_nut.as_ref(), &hm)?;
+    let roughness = NutRoughness::from_case(raw_nut.as_ref(), &hm)?;
 
     let flow = FlowState::new(&u, &phi, cc.nu);
 
@@ -349,6 +360,7 @@ fn run(o: &Options) -> Result<()> {
         cc.turb,
         wall_coeffs_from_case(&cc.wall),
         &wf_faces,
+        &roughness,
     )?;
 
     // `turbulentIntensityKineticEnergyInlet` is 3/2 (I |U|)^2 and

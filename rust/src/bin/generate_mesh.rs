@@ -40,6 +40,14 @@
 //! §24.2/§24.4) and `-thetaMin X` the small-cell merge threshold (default
 //! 0.2, §24.5). Castellation stays the default when `-cutcell` is absent.
 //!
+//! `-wallModel <standard|spalding|rough|lowRe> [-Ks x [-Cs y]]` - SPEC-LIT
+//! §29.1 route (c): expands the named preset into the `k`/`epsilon`/`omega`/
+//! `nut` (and, for a case that solves `T`, the thermal wall function of
+//! §29.3) types the generated `0/` directory writes, instead of the
+//! hardcoded `standard` row `standard stays the default` when the flag is
+//! absent. `rough` requires `-Ks`; `-Cs` defaults to `0.5`. Carved STL wall
+//! patches follow the same preset as the block's own walls.
+//!
 //! Carried across from this project's own earlier C++ case generator. Every
 //! geometric
 //! decision the C++ `main` made — extents, grading, patch names and types,
@@ -49,7 +57,11 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use ofgpu::blockgen::{write_carved_case, write_case, write_cutcell_case, CaseKind};
+use ofgpu::blockgen::{
+    write_carved_case, write_carved_case_with_wall_model, write_case, write_case_with_wall_model,
+    write_cutcell_case, write_cutcell_case_with_wall_model, CaseKind,
+};
+use ofgpu::io::case::{Roughness, WallTreatment};
 use ofgpu::io::contract;
 use ofgpu::surface::cutcell::{DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN};
 use ofgpu::surface::{stl::read_stl, Surface};
@@ -63,7 +75,8 @@ use common::atoi;
 fn usage() {
     eprintln!(
         "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak> <outputDir> \
-         [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]] [-permissive]\n       \
+         [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]]\n       \
+         [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-permissive]\n       \
          ofgpu-generate-mesh big <outputDir> [n] [-stl ...]   # n^3 cells\n\
          {}",
         contract::PERMISSIVE_USAGE
@@ -122,11 +135,47 @@ fn run(args: &[String]) -> Result<()> {
     let mut cutcell = false;
     let mut supersample = DEFAULT_SUPERSAMPLE;
     let mut theta_min = DEFAULT_THETA_MIN;
+    // SPEC-LIT §29.1 route (c): `None` here means "the flag was never given",
+    // which is what keeps `write_case`'s legacy `standard` row and adiabatic
+    // `T` the exact default when `-wallModel` is absent - not merely
+    // `Some(WallTreatment::Standard)`, which would also turn on §29.3's
+    // thermal wall function nothing asked for.
+    let mut wall_model: Option<WallTreatment> = None;
+    let mut ks: Option<ofgpu::Scalar> = None;
+    let mut cs: Option<ofgpu::Scalar> = None;
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
             "-permissive" => contract::set_permissive(true),
             "-cutcell" => cutcell = true,
+            "-wallModel" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config("-wallModel needs a preset name".to_string()));
+                };
+                wall_model = Some(WallTreatment::from_name(v)?);
+            }
+            "-Ks" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config("-Ks needs a sand-grain height".to_string()));
+                };
+                ks = Some(v.parse::<f64>().map_err(|_| {
+                    Error::Config(format!("-Ks: '{v}' is not a number"))
+                })? as ofgpu::Scalar);
+            }
+            "-Cs" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config("-Cs needs a roughness constant".to_string()));
+                };
+                cs = Some(v.parse::<f64>().map_err(|_| {
+                    Error::Config(format!("-Cs: '{v}' is not a number"))
+                })? as ofgpu::Scalar);
+            }
             "-stl" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
@@ -198,8 +247,19 @@ fn run(args: &[String]) -> Result<()> {
         return Err(Error::Config("-cutcell needs at least one -stl surface".to_string()));
     }
 
+    // SPEC-LIT §29.1 route (c): `-Ks`/`-Cs` are resolved against whatever
+    // preset `-wallModel` actually named - `rough` needs `Ks`, naming it;
+    // every other preset (or no `-wallModel` at all) simply ignores them.
+    let roughness = wall_model
+        .map(|wt| Roughness::resolve(wt, ks, cs, "-wallModel"))
+        .transpose()?
+        .flatten();
+
     if stl_args.is_empty() {
-        return write_case(Path::new(dir), kind, nx, ny, nz);
+        return match wall_model {
+            None => write_case(Path::new(dir), kind, nx, ny, nz),
+            Some(wt) => write_case_with_wall_model(Path::new(dir), kind, nx, ny, nz, wt, roughness),
+        };
     }
 
     let surface = read_surfaces(&stl_args)?;
@@ -212,16 +272,27 @@ fn run(args: &[String]) -> Result<()> {
 
     if cutcell {
         // ---- the cut-cell path (SPEC-LIT §24) -----------------------------
-        let s = write_cutcell_case(
-            Path::new(dir), kind, nx, ny, nz, &surface, supersample, theta_min,
-        )?;
-        // `write_cutcell_case` already prints its own [cutcell] summary.
+        let s = match wall_model {
+            None => write_cutcell_case(
+                Path::new(dir), kind, nx, ny, nz, &surface, supersample, theta_min,
+            )?,
+            Some(wt) => write_cutcell_case_with_wall_model(
+                Path::new(dir), kind, nx, ny, nz, &surface, supersample, theta_min, wt, roughness,
+            )?,
+        };
+        // `write_cutcell_case`/`_with_wall_model` already print their own
+        // [cutcell] summary.
         let _ = s;
         return Ok(());
     }
 
     // ---- the carved path (SPEC-LIT §23) -------------------------------------
-    let s = write_carved_case(Path::new(dir), kind, nx, ny, nz, &surface)?;
+    let s = match wall_model {
+        None => write_carved_case(Path::new(dir), kind, nx, ny, nz, &surface)?,
+        Some(wt) => {
+            write_carved_case_with_wall_model(Path::new(dir), kind, nx, ny, nz, &surface, wt, roughness)?
+        }
+    };
 
     println!(
         "[carve] cells: {} block -> {} fluid / {} solid ({} settled by 3-axis vote, \

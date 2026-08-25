@@ -1109,6 +1109,7 @@ impl<'m> RasCore<'m> {
         ctrl: TurbulenceControls,
         wall: WallFunctionCoeffs,
         wall_faces: &crate::field_setup::WallFaces,
+        roughness: &crate::field_setup::NutRoughness,
     ) -> Result<Self> {
         if hm.n_cells != mesh.n_cells || hm.n_boundary_faces != mesh.n_boundary_faces {
             return Err(Error::Config(format!(
@@ -1154,7 +1155,13 @@ impl<'m> RasCore<'m> {
                 ctrl.k_relax < 1.0,
             )?,
 
-            wd: WallData::build(gpu, hm, wall_faces)?,
+            // SPEC-LIT §29.1/§29.2: `roughness` is `nut`'s own per-face
+            // `Ks`/`Cs` (or [`crate::field_setup::NutRoughness::none`] where
+            // the caller has none - a passive scalar's `RasCore`, or a case
+            // with no `nut` file) - see `WallData::build`'s own doc for why
+            // this is read from `nut` alone, never derived from another
+            // field (SPEC-LIT §15.5).
+            wd: WallData::build(gpu, hm, wall_faces, roughness)?,
             a: GpuLduMatrix::new(gpu, mesh)?,
             ws: SolverWorkspace::for_mesh(gpu, mesh)?,
 

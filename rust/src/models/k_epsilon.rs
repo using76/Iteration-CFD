@@ -137,9 +137,10 @@ impl<'m> KEpsilon<'m> {
         ctrl: TurbulenceControls,
         wall: WallFunctionCoeffs,
         wall_faces: &crate::field_setup::WallFaces,
+        roughness: &crate::field_setup::NutRoughness,
     ) -> Result<Self> {
         Ok(Self {
-            core: RasCore::new(gpu, hm, mesh, ctrl, wall, wall_faces)?,
+            core: RasCore::new(gpu, hm, mesh, ctrl, wall, wall_faces, roughness)?,
             coeffs,
             k: GpuScalarField::zeros(gpu, mesh, "k")?,
             epsilon: GpuScalarField::zeros(gpu, mesh, "epsilon")?,
@@ -304,6 +305,7 @@ impl<'m> KEpsilon<'m> {
             gpu,
             &mut self.core.nut.bf,
             &self.k.f,
+            flow.u,
             self.core.mesh,
             &wall,
             nu,
@@ -488,6 +490,7 @@ impl<'m> KEpsilon<'m> {
             gpu,
             &mut self.core.nut.bf,
             &self.k.f,
+            flow.u,
             self.core.mesh,
             &wall,
             flow.nu,
@@ -593,6 +596,7 @@ mod tests {
         let flow = FlowState::new(&u, &phi, nu);
 
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         for c2 in [1.92 as Scalar, 1.8] {
             let coeffs = KEpsilonCoeffs { c2, ..Default::default() };
@@ -614,6 +618,7 @@ mod tests {
                 decay_controls(dt),
                 WallFunctionCoeffs::default(),
                 &no_walls,
+                &no_roughness,
             )?;
 
             gpu.write(&mut model.k_mut().f, &vec![k0; n_cells])?;
@@ -700,6 +705,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
         let _flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         let mut model = KEpsilon::new(
             &gpu,
@@ -709,6 +715,7 @@ mod tests {
             decay_controls(1e-3),
             WallFunctionCoeffs::default(),
             &no_walls,
+            &no_roughness,
         )?;
 
         // A k and an epsilon that would give a large nu_t if the model ran.
@@ -760,6 +767,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
         let flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         let coeffs = KEpsilonCoeffs::default();
         let mut model = KEpsilon::new(
@@ -770,6 +778,7 @@ mod tests {
             decay_controls(1e-3),
             WallFunctionCoeffs::default(),
             &no_walls,
+            &no_roughness,
         )?;
 
         let k0: Scalar = 0.37;
@@ -873,6 +882,7 @@ mod tests {
                     constrained_cells: wf.clone(),
                     nut: wf.clone(),
                 },
+                &crate::field_setup::NutRoughness::none(hm.n_boundary_faces),
             )?;
 
         gpu.write(&mut model.k_mut().f, &vec![1e-3 as Scalar; hm.n_cells])?;
@@ -958,6 +968,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
         let flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         let mut ctrl = decay_controls(1e-3);
         ctrl.k_solver.fixed_iters = true;
@@ -973,6 +984,7 @@ mod tests {
             ctrl,
             WallFunctionCoeffs::default(),
             &no_walls,
+            &no_roughness,
         )?;
 
         gpu.write(&mut model.k_mut().f, &vec![0.05 as Scalar; hm.n_cells])?;
@@ -996,6 +1008,7 @@ mod tests {
             ctrl,
             WallFunctionCoeffs::default(),
             &no_walls,
+            &no_roughness,
         )?;
         gpu.write(&mut reference.k_mut().f, &gpu.download(&model.k().f)?)?;
         gpu.write(

@@ -421,6 +421,9 @@ fn run(o: &Options) -> Result<()> {
 
     let flow = FlowState::new(&b.u, &b.phi, b.nu);
     let wc = WallFunctionCoeffs::default();
+    // A synthetic benchmark geometry, not a case file - no `nut` field to
+    // read `Ks`/`Cs` from, so every wall face is smooth.
+    let no_roughness = ofgpu::field_setup::NutRoughness::none(b.hm.n_boundary_faces);
 
     if o.which == "kEpsilon" || o.which == "both" {
         let mut model = KEpsilon::new(
@@ -431,6 +434,7 @@ fn run(o: &Options) -> Result<()> {
             ctrl,
             wc,
             &b.wf_faces,
+            &no_roughness,
         )?;
 
         init_scalar(&gpu, model.k_mut(), &b.hm, "k", 0.01, true)?;
@@ -449,6 +453,7 @@ fn run(o: &Options) -> Result<()> {
             ctrl,
             wc,
             &b.wf_faces,
+            &no_roughness,
         )?;
 
         init_scalar(&gpu, model.k_mut(), &b.hm, "k", 0.01, true)?;

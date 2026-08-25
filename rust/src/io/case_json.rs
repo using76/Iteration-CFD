@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::blockgen::{BlockSpec, GradedAxis, PatchWindow};
 use crate::error::{Error, IoContext, Result};
+use crate::field::BcKind;
 use crate::io::case::{
     compute_y_plus_lam, format_time_name, AlgorithmControls, CaseControls, LinearSolverKind,
     Preconditioner, SolverControls, TurbulenceControls, WallFunctionCoeffs,
@@ -290,6 +291,44 @@ pub struct JsonTurbulence {
     pub model: String,
     #[serde(rename = "wallFunctions")]
     pub wall_functions: JsonWallFunctions,
+    /// SPEC-LIT §29.1 route (b): the case-level `wallTreatment` default every
+    /// wall patch's four turbulence-closure types expand to, unless a patch's
+    /// own `treatment` ([`JsonPatchRule::wall_treatment`]) or its own
+    /// explicit `k`/`epsilon`/`omega`/`nut` overrides it. `standard` (the
+    /// OpenFOAM-compatible default) when the case names none.
+    #[serde(rename = "wallTreatment", default)]
+    pub wall_treatment: WallTreatmentKind,
+}
+
+/// SPEC-LIT §29.1's four presets, as the JSONC format spells them -
+/// `crate::io::case::WallTreatment`'s twin, kept separate so this module's
+/// [`schemars`] derive is what puts the four names in [`emit_schema`]'s
+/// output rather than a hand-written schema fragment that could drift from
+/// the reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WallTreatmentKind {
+    Standard,
+    Spalding,
+    Rough,
+    LowRe,
+}
+
+impl Default for WallTreatmentKind {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+impl WallTreatmentKind {
+    pub fn to_case(self) -> crate::io::case::WallTreatment {
+        match self {
+            Self::Standard => crate::io::case::WallTreatment::Standard,
+            Self::Spalding => crate::io::case::WallTreatment::Spalding,
+            Self::Rough => crate::io::case::WallTreatment::Rough,
+            Self::LowRe => crate::io::case::WallTreatment::LowRe,
+        }
+    }
 }
 
 // ---- patches -----------------------------------------------------------
@@ -368,6 +407,20 @@ pub enum TurbBc {
     OmegaWallFunction { value: f64 },
     #[serde(rename = "nutkWallFunction")]
     NutkWallFunction { value: f64 },
+    /// SPEC-LIT §15.1/§29.1: `y+` from the local velocity rather than `k` -
+    /// an explicit per-patch override of the `spalding` preset row's `nut`,
+    /// nameable on its own patch under any case-level default (§29.1's
+    /// precedence: "explicit per-field BCs...override").
+    #[serde(rename = "nutUWallFunction")]
+    NutUWallFunction { value: f64 },
+    /// SPEC-LIT §15.2/§29.1: `nu_t,w = 0`, no wall model - the `lowRe`
+    /// preset row's `nut`, nameable explicitly on one patch.
+    #[serde(rename = "nutLowReWallFunction")]
+    NutLowReWallFunction { value: f64 },
+    /// SPEC-LIT §15.4/§29.1: the resolved-sublayer `k` completion - the
+    /// `lowRe` preset row's `k`, nameable explicitly on one patch.
+    #[serde(rename = "kLowReWallFunction")]
+    KLowReWallFunction { value: f64 },
 }
 
 /// The turbulence intensity/mixing-length estimate an inlet carries, in the
@@ -414,6 +467,20 @@ pub struct JsonPatchRule {
     pub omega: Option<TurbBc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nut: Option<TurbBc>,
+    /// SPEC-LIT §29.1 route (b): this patch's own `wallTreatment` override,
+    /// on a `wall`-kind patch only - `None` falls back to
+    /// `turbulence.wallTreatment`, the case-level default. Meaningless (and
+    /// simply unused) on an `inlet`/`open` rule.
+    #[serde(rename = "treatment", default, skip_serializing_if = "Option::is_none")]
+    pub wall_treatment: Option<WallTreatmentKind>,
+    /// Sand-grain height, m - required when the effective treatment (this
+    /// rule's own [`Self::wall_treatment`], or the case default) is `rough`.
+    #[serde(rename = "Ks", default, skip_serializing_if = "Option::is_none")]
+    pub ks: Option<f64>,
+    /// The roughness constant; defaults to `0.5` (SPEC-LIT §15.3's "uniform
+    /// sand") when `Ks` is given and this is not.
+    #[serde(rename = "Cs", default, skip_serializing_if = "Option::is_none")]
+    pub cs: Option<f64>,
 }
 
 // ---- initial -----------------------------------------------------------
@@ -1155,19 +1222,27 @@ fn p_spec_for(rule: &JsonPatchRule) -> PatchFieldSpec {
     }
 }
 
-/// `T` at one resolved rule: the rule's own `T` if given; otherwise a wall is
-/// adiabatic (`zeroGradient`, matching `write_initial_fields`'s floor and
-/// ceiling) and an `open` boundary is `inletOutlet` at `ambient` (the
-/// initial/ambient temperature the case as a whole gave). An `inlet` preset
-/// with no `T` has no honest ambient to fall back to when the case IS solving
-/// a temperature equation, so that is an error naming the rule - same
-/// reasoning as [`u_spec_for`]'s inlet-with-no-`U`.
-fn t_spec_for(rule: &JsonPatchRule, ambient: Scalar) -> Result<PatchFieldSpec> {
+/// `T` at one resolved rule: the rule's own `T` if given; otherwise a wall
+/// gets the effective `wallTreatment`'s thermal completion - SPEC-LIT §29.3:
+/// `thermalWallFunction` for every row except `lowRe`, which is `zeroGradient`
+/// (adiabatic, matching `write_initial_fields`'s floor and ceiling; `lowRe`
+/// "pins the molecular resistance the resolved mesh already provides", which
+/// on a mesh with no wall function at all IS the adiabatic default) - and an
+/// `open` boundary is `inletOutlet` at `ambient` (the initial/ambient
+/// temperature the case as a whole gave). An `inlet` preset with no `T` has no
+/// honest ambient to fall back to when the case IS solving a temperature
+/// equation, so that is an error naming the rule - same reasoning as
+/// [`u_spec_for`]'s inlet-with-no-`U`.
+fn t_spec_for(
+    rule: &JsonPatchRule,
+    ambient: Scalar,
+    wall_treatment: crate::io::case::WallTreatment,
+) -> Result<PatchFieldSpec> {
     if let Some(bc) = &rule.t {
         return Ok(scalar_bc_spec(bc));
     }
     match rule.kind {
-        PatchPresetKind::Wall => Ok(spec("zeroGradient")),
+        PatchPresetKind::Wall => Ok(spec(wall_treatment.thermal_type().unwrap_or("zeroGradient"))),
         PatchPresetKind::Open => {
             let mut s = spec("inletOutlet");
             s.inlet_value = vec![ambient];
@@ -1274,24 +1349,94 @@ fn turb_bc_spec(bc: &TurbBc) -> PatchFieldSpec {
             s.value = vec![*value as Scalar];
             s
         }
+        TurbBc::NutUWallFunction { value } => {
+            let mut s = spec("nutUWallFunction");
+            s.value = vec![*value as Scalar];
+            s
+        }
+        TurbBc::NutLowReWallFunction { value } => {
+            let mut s = spec("nutLowReWallFunction");
+            s.value = vec![*value as Scalar];
+            s
+        }
+        TurbBc::KLowReWallFunction { value } => {
+            let mut s = spec("kLowReWallFunction");
+            s.value = vec![*value as Scalar];
+            s
+        }
     }
 }
 
-/// `k`/`epsilon`/`omega`/`nut` at one resolved rule: the field-specific
-/// [`TurbBc`] the rule names for `field_name`, or an error naming the rule -
-/// there is no honest wall-function preset to fall back to (unlike
-/// [`u_spec_for`]'s `noSlip`, a wall function needs its OWN type string, and
-/// guessing one would be exactly the silent substitution SPEC-LIT §13.4
-/// forbids). Only called once `initial.<field_name>` has established that
-/// this case solves the field at all.
-fn turb_field_spec(opt: &Option<TurbBc>, rule_pattern: &str, field_name: &str) -> Result<PatchFieldSpec> {
-    match opt {
-        Some(bc) => Ok(turb_bc_spec(bc)),
-        None => Err(Error::Config(format!(
-            "patches: rule \"{rule_pattern}\" has no \"{field_name}\" condition, \
-             and this case solves {field_name} (initial.{field_name} is given)"
-        ))),
+/// The `wallTreatment` preset row's entry for one turbulence field on a wall
+/// patch - SPEC-LIT §29.1's table, expanded to a [`PatchFieldSpec`] the same
+/// shape [`turb_bc_spec`] produces for an explicit one. `nut` under `rough`
+/// carries `Ks`/`Cs` as [`PatchFieldSpec::extra`] entries, read the same way
+/// an OpenFOAM `nutkRoughWallFunction` patch's would be
+/// (`crate::field_setup::NutRoughness::from_case`).
+fn wall_preset_bc_spec(
+    treatment: crate::io::case::WallTreatment,
+    roughness: Option<crate::io::case::Roughness>,
+    field_name: &str,
+) -> PatchFieldSpec {
+    use crate::io::case::WallTreatment;
+
+    let type_name = match field_name {
+        "nut" => treatment.nut_type(),
+        "k" => treatment.k_type(),
+        "epsilon" => treatment.epsilon_type(),
+        "omega" => treatment.omega_type(),
+        _ => "zeroGradient",
+    };
+    let mut s = spec(type_name);
+    if field_name == "nut" && treatment == WallTreatment::Rough {
+        if let Some(r) = roughness {
+            s.extra.insert("Ks".to_string(), r.ks.to_string());
+            s.extra.insert("Cs".to_string(), r.cs.to_string());
+        }
     }
+    s
+}
+
+/// `k`/`epsilon`/`omega`/`nut` at one resolved rule - SPEC-LIT §29.1's three
+/// routes, precedence most-specific-wins: the rule's own field-specific
+/// [`TurbBc`] if it has one; otherwise, on a `wall`-kind patch, the
+/// `wallTreatment` preset row (the rule's own `treatment` override if it has
+/// one, else `case_default`, the case-level `turbulence.wallTreatment`).
+/// A non-wall patch with neither is an error naming the rule - there is no
+/// honest default for an inlet or open boundary's own turbulence quantity,
+/// unlike a wall's (SPEC-LIT §29.1 exists precisely to give walls one).
+fn turb_field_spec(
+    case_default: WallTreatmentKind,
+    rule: &JsonPatchRule,
+    field_name: &str,
+) -> Result<PatchFieldSpec> {
+    let opt = match field_name {
+        "k" => &rule.k,
+        "epsilon" => &rule.epsilon,
+        "omega" => &rule.omega,
+        "nut" => &rule.nut,
+        _ => unreachable!("turb_field_spec only called with k/epsilon/omega/nut"),
+    };
+    if let Some(bc) = opt {
+        return Ok(turb_bc_spec(bc));
+    }
+    if rule.kind != PatchPresetKind::Wall {
+        return Err(Error::Config(format!(
+            "patches: rule \"{}\" has no \"{field_name}\" condition, \
+             and this case solves {field_name} (initial.{field_name} is given)",
+            rule.pattern
+        )));
+    }
+
+    let treatment = rule.wall_treatment.unwrap_or(case_default).to_case();
+    let setting = format!("patches: rule \"{}\"", rule.pattern);
+    let roughness = crate::io::case::Roughness::resolve(
+        treatment,
+        rule.ks.map(|v| v as Scalar),
+        rule.cs.map(|v| v as Scalar),
+        &setting,
+    )?;
+    Ok(wall_preset_bc_spec(treatment, roughness, field_name))
 }
 
 /// Every patch NAME actually present in the mesh: the six boundary slots plus
@@ -1433,6 +1578,16 @@ impl JsonCase {
             None
         };
         wall.y_plus_lam = compute_y_plus_lam(wall.kappa, wall.e);
+        // SPEC-LIT §29.1 route (b): the case-level default every wall
+        // patch's per-field types (and, per §29.3, `T`'s) expand to unless a
+        // patch or a field overrides it. `standard` when the case solves no
+        // turbulence at all - a laminar case with walls still needs a `T`
+        // completion if it carries a temperature equation.
+        let wall_treatment_default = self
+            .turbulence
+            .as_ref()
+            .map(|t| t.wall_treatment)
+            .unwrap_or_default();
 
         let mut turb = TurbulenceControls::default();
         turb.k_solver = solver_for(&self.numerics.solvers, "k")?;
@@ -1540,7 +1695,8 @@ impl JsonCase {
             u_boundary.insert(name.clone(), u_spec_for(rule)?);
             p_boundary.insert(name.clone(), p_spec_for(rule));
             if self.initial.t.is_some() {
-                t_boundary.insert(name.clone(), t_spec_for(rule, ambient_t)?);
+                let treatment = rule.wall_treatment.unwrap_or(wall_treatment_default).to_case();
+                t_boundary.insert(name.clone(), t_spec_for(rule, ambient_t, treatment)?);
             }
         }
 
@@ -1607,14 +1763,7 @@ impl JsonCase {
             let mut boundary = BTreeMap::new();
             for pname in &names {
                 let rule = resolve_patch_rule(&self.patches, pname)?;
-                let bc = match name {
-                    "k" => &rule.k,
-                    "epsilon" => &rule.epsilon,
-                    "omega" => &rule.omega,
-                    "nut" => &rule.nut,
-                    _ => unreachable!("turb_field only called with k/epsilon/omega/nut"),
-                };
-                boundary.insert(pname.clone(), turb_field_spec(bc, &rule.pattern, name)?);
+                boundary.insert(pname.clone(), turb_field_spec(wall_treatment_default, rule, name)?);
             }
             Ok(Some(LoweredScalarField {
                 name: name.to_string(),
@@ -1624,10 +1773,66 @@ impl JsonCase {
             }))
         };
 
-        let k_field = turb_field(self.initial.k, "k", "[0 2 -2 0 0 0 0]")?;
-        let epsilon_field = turb_field(self.initial.epsilon, "epsilon", "[0 2 -3 0 0 0 0]")?;
-        let omega_field = turb_field(self.initial.omega, "omega", "[0 0 -1 0 0 0 0]")?;
-        let nut_field = turb_field(self.initial.nut, "nut", "[0 2 -1 0 0 0 0]")?;
+        let mut k_field = turb_field(self.initial.k, "k", "[0 2 -2 0 0 0 0]")?;
+        let mut epsilon_field = turb_field(self.initial.epsilon, "epsilon", "[0 2 -3 0 0 0 0]")?;
+        let mut omega_field = turb_field(self.initial.omega, "omega", "[0 0 -1 0 0 0 0]")?;
+        let mut nut_field = turb_field(self.initial.nut, "nut", "[0 2 -1 0 0 0 0]")?;
+
+        // ---- SPEC-LIT §29.1 point 3: the consistency contract -------------
+        //
+        // Wired here because this is the one place all four turbulence
+        // fields' resolved patch types are available together, after every
+        // route above (explicit per-field, per-patch `treatment`, case
+        // default) has already had its say on each field independently.
+        for pname in &names {
+            let rule = resolve_patch_rule(&self.patches, pname)?;
+            if rule.kind != PatchPresetKind::Wall {
+                continue;
+            }
+
+            let kind_of = |f: &Option<LoweredScalarField>, field: &str| -> Result<Option<BcKind>> {
+                match f {
+                    Some(lf) => {
+                        let s = lf
+                            .boundary
+                            .get(pname)
+                            .expect("every patch name was inserted into this field above");
+                        Ok(Some(BcKind::from_name(&s.type_name, field, pname)?))
+                    }
+                    None => Ok(None),
+                }
+            };
+
+            let nut_kind = kind_of(&nut_field, "nut")?;
+            let k_kind = kind_of(&k_field, "k")?;
+            let epsilon_kind = kind_of(&epsilon_field, "epsilon")?;
+            let omega_kind = kind_of(&omega_field, "omega")?;
+
+            let corrected = crate::field_setup::validate_wall_row(
+                pname,
+                crate::field_setup::WallRow {
+                    nut: nut_kind,
+                    k: k_kind,
+                    epsilon: epsilon_kind,
+                    omega: omega_kind,
+                },
+            )?;
+
+            let write_back =
+                |f: &mut Option<LoweredScalarField>, before: Option<BcKind>, after: Option<BcKind>| {
+                    if before == after {
+                        return;
+                    }
+                    if let (Some(lf), Some(k)) = (f.as_mut(), after) {
+                        lf.boundary.get_mut(pname).expect("present above").type_name =
+                            crate::field_setup::bc_kind_name(k).to_string();
+                    }
+                };
+            write_back(&mut nut_field, nut_kind, corrected.nut);
+            write_back(&mut k_field, k_kind, corrected.k);
+            write_back(&mut epsilon_field, epsilon_kind, corrected.epsilon);
+            write_back(&mut omega_field, omega_kind, corrected.omega);
+        }
 
         Ok(LoweredCase {
             name: self.name.clone(),
@@ -1779,6 +1984,215 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §29.1: wallTreatment presets (route b, JSONC)
+    // ------------------------------------------------------------------
+
+    fn plume_case() -> JsonCase {
+        let jsonc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/plume.jsonc");
+        read_case_jsonc(&jsonc_path).expect("cases/plume.jsonc should parse")
+    }
+
+    /// The wall rule in `cases/plume.jsonc` (`{"match": ".*", "kind": "wall"}`)
+    /// carries explicit k/epsilon/omega/nut of its own; the preset tests want
+    /// to see what the CASE DEFAULT (or a patch's own `treatment`) expands to
+    /// instead, so this clears them.
+    fn wall_rule_mut(case: &mut JsonCase) -> &mut JsonPatchRule {
+        case.patches
+            .iter_mut()
+            .find(|r| r.kind == PatchPresetKind::Wall)
+            .expect("plume.jsonc has a wall rule")
+    }
+
+    fn clear_explicit_turbulence(rule: &mut JsonPatchRule) {
+        rule.k = None;
+        rule.epsilon = None;
+        rule.omega = None;
+        rule.nut = None;
+    }
+
+    /// Any patch name the `".*"` wall rule governs - every wall-kind field's
+    /// boundary map carries the same row for it since none of the rules
+    /// carry a per-patch override in these tests.
+    fn a_wall_patch_name(lowered: &LoweredCase) -> String {
+        mesh_patch_names(&lowered.block)
+            .into_iter()
+            .find(|n| resolve_patch_rule(&lowered.patch_rules, n).unwrap().kind == PatchPresetKind::Wall)
+            .expect("plume.jsonc has at least one wall patch")
+    }
+
+    /// Each preset expands to exactly its row - SPEC-LIT §29.1's table,
+    /// string-level, through the JSONC lowering path.
+    #[test]
+    fn each_preset_expands_to_exactly_its_row_through_jsonc() {
+        for (wt, nut_want, k_want, eps_want, omega_want) in [
+            (WallTreatmentKind::Standard, "nutkWallFunction", "kqRWallFunction", "epsilonWallFunction", "omegaWallFunction"),
+            (WallTreatmentKind::Spalding, "nutUWallFunction", "kqRWallFunction", "epsilonWallFunction", "omegaWallFunction"),
+            (WallTreatmentKind::Rough, "nutkRoughWallFunction", "kqRWallFunction", "epsilonWallFunction", "omegaWallFunction"),
+            (WallTreatmentKind::LowRe, "nutLowReWallFunction", "kLowReWallFunction", "zeroGradient", "zeroGradient"),
+        ] {
+            let mut case = plume_case();
+            case.turbulence.as_mut().unwrap().wall_treatment = wt;
+            {
+                let r = wall_rule_mut(&mut case);
+                clear_explicit_turbulence(r);
+                if wt == WallTreatmentKind::Rough {
+                    r.ks = Some(0.001);
+                }
+            }
+            let lowered = case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"));
+            let p = a_wall_patch_name(&lowered);
+
+            let ty = |f: &Option<LoweredScalarField>| f.as_ref().unwrap().boundary[&p].type_name.clone();
+            assert_eq!(ty(&lowered.nut_field), nut_want, "{wt:?} nut");
+            assert_eq!(ty(&lowered.k_field), k_want, "{wt:?} k");
+            assert_eq!(ty(&lowered.epsilon_field), eps_want, "{wt:?} epsilon");
+            assert_eq!(ty(&lowered.omega_field), omega_want, "{wt:?} omega");
+        }
+    }
+
+    /// §29.3 through T's own row: every preset except `lowRe` defaults `T` on
+    /// a wall to `thermalWallFunction`; `lowRe` stays adiabatic.
+    #[test]
+    fn thermal_wall_function_follows_the_same_row_except_low_re() {
+        for (wt, want) in [
+            (WallTreatmentKind::Standard, "thermalWallFunction"),
+            (WallTreatmentKind::Spalding, "thermalWallFunction"),
+            (WallTreatmentKind::Rough, "thermalWallFunction"),
+            (WallTreatmentKind::LowRe, "zeroGradient"),
+        ] {
+            let mut case = plume_case();
+            case.turbulence.as_mut().unwrap().wall_treatment = wt;
+            {
+                let r = wall_rule_mut(&mut case);
+                clear_explicit_turbulence(r);
+                r.t = None;
+                if wt == WallTreatmentKind::Rough {
+                    r.ks = Some(0.001);
+                }
+            }
+            let lowered = case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"));
+            let p = a_wall_patch_name(&lowered);
+            assert_eq!(lowered.t_field.unwrap().boundary[&p].type_name, want, "{wt:?}");
+        }
+    }
+
+    /// `rough` needs `Ks` - naming it, whether the treatment came from the
+    /// case default or a patch's own `treatment` override.
+    #[test]
+    fn rough_without_ks_through_jsonc_is_an_error_naming_it() {
+        let mut case = plume_case();
+        case.turbulence.as_mut().unwrap().wall_treatment = WallTreatmentKind::Rough;
+        clear_explicit_turbulence(wall_rule_mut(&mut case));
+        let err = match case.lower() {
+            Err(e) => e,
+            Ok(_) => panic!("rough with no Ks must be refused"),
+        };
+        assert!(err.to_string().contains("Ks"), "{err}");
+    }
+
+    /// Precedence: an explicit `nutUWallFunction` on one patch wins on that
+    /// patch only, even though the case default is `standard`.
+    #[test]
+    fn explicit_nutu_under_a_standard_default_wins_on_its_own_patch_only() {
+        let mut case = plume_case();
+        // Case default stays `standard` (the file names none).
+        assert_eq!(case.turbulence.as_ref().unwrap().wall_treatment, WallTreatmentKind::Standard);
+
+        // Split the wall rule into two: an explicit override on one named
+        // patch, the untouched catch-all everywhere else.
+        let wall_idx = case
+            .patches
+            .iter()
+            .position(|r| r.kind == PatchPresetKind::Wall)
+            .unwrap();
+        let mut overridden = case.patches[wall_idx].clone();
+        overridden.pattern = "floor".to_string();
+        overridden.nut = Some(TurbBc::NutUWallFunction { value: 0.0 });
+        case.patches.insert(wall_idx, overridden);
+
+        let lowered = case.lower().expect("should lower");
+        assert_eq!(
+            lowered.nut_field.as_ref().unwrap().boundary["floor"].type_name,
+            "nutUWallFunction",
+            "the override must win on its own patch"
+        );
+        // Every other wall patch keeps the case default's row, untouched by
+        // the override on `floor`.
+        let other = a_wall_patch_name(&lowered);
+        assert_ne!(other, "floor");
+        assert_eq!(
+            lowered.nut_field.as_ref().unwrap().boundary[&other].type_name,
+            "nutkWallFunction"
+        );
+    }
+
+    /// The consistency contract, wired into the JSONC path: an explicit
+    /// `nutLowReWallFunction` on one patch, left to inherit `epsilon` from a
+    /// `standard` case default, is SPEC-LIT §29.1's own contradiction and is
+    /// refused naming both types.
+    #[test]
+    fn jsonc_wall_row_contradiction_is_refused() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let mut case = plume_case();
+        {
+            // `k` agrees with `nut` (both `lowRe`); `epsilon`/`omega` fall to
+            // the case default (`standard`, `*WallFunction`) and disagree -
+            // the exact contradiction SPEC-LIT §29.1 names.
+            let r = wall_rule_mut(&mut case);
+            r.nut = Some(TurbBc::NutLowReWallFunction { value: 0.0 });
+            r.k = Some(TurbBc::KLowReWallFunction { value: 0.0 });
+            r.epsilon = None;
+            r.omega = None;
+        }
+        let err = match case.lower() {
+            Err(e) => e,
+            Ok(_) => panic!("nutLowRe + epsilonWallFunction must be refused"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("nutLowReWallFunction"), "{msg}");
+        assert!(msg.contains("epsilonWallFunction"), "{msg}");
+    }
+
+    /// `-permissive` resolves the same contradiction to the `lowRe` row and
+    /// prints the substitution, rather than refusing the case outright.
+    #[test]
+    fn jsonc_wall_row_contradiction_is_resolved_under_permissive() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+        crate::io::contract::set_permissive(true);
+
+        let mut case = plume_case();
+        {
+            let r = wall_rule_mut(&mut case);
+            r.nut = Some(TurbBc::NutLowReWallFunction { value: 0.0 });
+            r.k = Some(TurbBc::KLowReWallFunction { value: 0.0 });
+            r.epsilon = None;
+            r.omega = None;
+        }
+        let lowered = case.lower().expect("-permissive resolves it");
+        let p = a_wall_patch_name(&lowered);
+        assert_eq!(
+            lowered.epsilon_field.unwrap().boundary[&p].type_name,
+            "zeroGradient",
+            "epsilon must be corrected to the row nut implied"
+        );
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// The schema names all four presets - deliverable 4 of SPEC-LIT §29.1's
+    /// JSONC route.
+    #[test]
+    fn schema_names_the_four_wall_treatment_presets() {
+        let text = emit_schema();
+        for name in ["standard", "spalding", "rough", "lowRe"] {
+            assert!(text.contains(&format!("\"{name}\"")), "schema missing {name}: {text}");
+        }
+    }
+
     #[test]
     fn ordered_patch_resolution_is_first_match_not_best_match() {
         let rules = vec![
@@ -1794,6 +2208,9 @@ mod tests {
                 epsilon: None,
                 omega: None,
                 nut: None,
+                wall_treatment: None,
+                ks: None,
+                cs: None,
             },
             JsonPatchRule {
                 pattern: ".*".to_string(),
@@ -1807,6 +2224,9 @@ mod tests {
                 epsilon: None,
                 omega: None,
                 nut: None,
+                wall_treatment: None,
+                ks: None,
+                cs: None,
             },
         ];
 

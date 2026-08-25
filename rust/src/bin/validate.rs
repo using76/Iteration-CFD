@@ -70,7 +70,7 @@ use ofgpu::fv::{
     fvm_laplacian_non_orth_correction, fvm_sp, fvm_su, fvm_susp, interpolate_linear,
     sn_grad_flux, turbulence_production, DivScheme, FvKernels, Limiter, SnGradScheme,
 };
-use ofgpu::io::case::{LinearSolverKind, Preconditioner, SolverControls};
+use ofgpu::io::case::{LinearSolverKind, Preconditioner, SolverControls, WallFunctionCoeffs};
 use ofgpu::io::msh::parse_msh;
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::ldu::{CsrPattern, GpuLduMatrix};
@@ -1987,7 +1987,168 @@ fn run(c: &mut Checks) -> Result<()> {
     check_burner_heat_release(c, &gpu)?;
     check_radiative_equilibrium(c, &gpu)?;
 
+    // ---- wall treatment: rough-wall Ks -> 0, the thermal wall function
+    //      (SPEC-LIT 29) --------------------------------------------------
+    println!("\n=== wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29) ===");
+    check_rough_wall_ks_zero(c);
+    check_thermal_wall_function(c);
+
     Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §29: wall-treatment selection and the thermal wall function
+// ==========================================================================
+//
+// Both gates below are promoted from `wallfunctions::tests` - they are host-
+// mirror-level checks (no GPU needed; the device kernels are already held to
+// these same host functions bit-for-bit by
+// `wallfunctions::tests::device_agrees_with_the_host_law` and
+// `..::thermal_wall_device_agrees_with_the_host_law`, run under
+// `cargo test`) - into the acceptance run itself, per SPEC-LIT §29's own
+// table: these are the two properties a wall treatment MUST have before
+// anything built on it can be trusted.
+
+/// An independent, hand-written smooth `u_tau` Newton solve (SPEC-LIT §15.1,
+/// no roughness term anywhere in it) so the gate below checks
+/// [`ofgpu::wallfunctions::u_tau_newton`] against code that never mentions
+/// roughness, not against itself.
+fn smooth_u_tau_reference(u_mag: Scalar, y: Scalar, nu: Scalar, kappa: Scalar, e: Scalar) -> Scalar {
+    if !(u_mag > 0.0) {
+        return 0.0;
+    }
+    let mut u_tau: Scalar = (nu * u_mag / y).max(1e-300).sqrt();
+    for _ in 0..10 {
+        let u_plus = u_mag / u_tau;
+        let ku = kappa * u_plus;
+        let euk = ku.exp();
+        let poly = euk - 1.0 - ku - ku * ku * 0.5 - ku * ku * ku / 6.0;
+        let f = y * u_tau / nu - u_plus - poly / e;
+        let dpoly = kappa * (euk - 1.0 - ku - ku * ku * 0.5);
+        let df = y / nu + (u_plus / u_tau) * (1.0 + dpoly / e);
+        if !(df.abs() > 0.0) {
+            break;
+        }
+        let next = (u_tau - f / df).max(1e-300);
+        let done = (next - u_tau).abs() <= 1e-6 * next.abs().max(1e-300);
+        u_tau = next;
+        if done {
+            break;
+        }
+    }
+    u_tau.max(0.0)
+}
+
+/// `Ks -> 0` must reproduce the smooth wall to round-off - SPEC-LIT §29.2's
+/// gate: `Ks = 0` is exactly what a case that never mentions roughness gets,
+/// so the rough-wall law must not quietly BE a different smooth wall.
+/// Sweeps both wall-function families: `nutk` (`nut_wall_rough_k`, driven by
+/// `k`/`y`) and `nutU` (`u_tau_newton`/`nut_wall_rough_u`, driven by the
+/// wall-parallel velocity).
+fn check_rough_wall_ks_zero(c: &mut Checks) {
+    use ofgpu::wallfunctions::{
+        nut_wall, nut_wall_rough_k, nut_wall_rough_u, nut_wall_u, u_tau_newton, y_plus_of,
+    };
+
+    let wc = WallFunctionCoeffs::default();
+    let cmu25 = wc.cmu.powf(0.25);
+    let nu: Scalar = 1.2e-5;
+
+    let mut worst_k: Scalar = 0.0;
+    for k in [1e-6 as Scalar, 1e-4, 1e-2, 1.0] {
+        for y in [1e-4 as Scalar, 1e-3, 1e-2] {
+            let y_plus = y_plus_of(k, y, nu, wc.cmu);
+            let smooth = nut_wall(y_plus, nu, wc.kappa, wc.e);
+            for cs in [0.3 as Scalar, 0.5, 1.0] {
+                let rough = nut_wall_rough_k(y_plus, k, nu, wc.kappa, wc.e, cmu25, 0.0, cs);
+                worst_k = worst_k.max((rough - smooth).abs() / smooth.abs().max(1e-30));
+            }
+        }
+    }
+    c.check("Ks -> 0 reproduces the smooth nutk wall (S29.2 gate)", worst_k, 1e-12);
+
+    let nu_u: Scalar = 1.5e-5;
+    let y: Scalar = 2e-3;
+    let mut worst_u: Scalar = 0.0;
+    for u_mag in [0.05 as Scalar, 0.5, 2.0, 10.0] {
+        let want = smooth_u_tau_reference(u_mag, y, nu_u, wc.kappa, wc.e);
+        for cs in [0.3 as Scalar, 0.5, 1.0] {
+            let got = u_tau_newton(u_mag, y, nu_u, wc.kappa, wc.e, 0.0, cs);
+            worst_u = worst_u.max((got - want).abs() / want.max(1e-30));
+        }
+        let want_nut = nut_wall_u(want, y, nu_u, u_mag);
+        let got_nut = nut_wall_rough_u(u_mag, y, nu_u, wc.kappa, wc.e, 0.0, 0.5);
+        worst_u = worst_u.max((got_nut - want_nut).abs() / want_nut.max(1e-30));
+    }
+    c.check("Ks -> 0 reproduces the smooth nutU wall (S29.2 gate)", worst_u, 1e-9);
+}
+
+/// Jayatilleke's `P(Pr/Pr_t = 1) = 0` identity, and the one-cell conductance
+/// identity SPEC-LIT §29.3 asks for: `k_eff_wall * ref_grad` (what the
+/// Robin triple the kernel writes actually delivers to the implicit matrix)
+/// must equal the analytic Jayatilleke flux `rho cp u_tau (T_w - T_P)/T+`
+/// exactly, for a `thermalWallFunction` face.
+fn check_thermal_wall_function(c: &mut Checks) {
+    use ofgpu::wallfunctions::{jayatilleke_p, t_plus, thermal_wall_ref_grad, u_plus, y_plus_of};
+
+    let wc = WallFunctionCoeffs::default();
+
+    let mut worst_p: Scalar = 0.0;
+    for prt in [0.7 as Scalar, 0.85, 1.0, 1.3] {
+        worst_p = worst_p.max(jayatilleke_p(prt, prt).abs());
+    }
+    c.check("P(Pr/Pr_t = 1) = 0 exactly (S29.3 gate)", worst_p, 0.0);
+
+    let prt: Scalar = 0.85;
+    let p_at_prt = jayatilleke_p(prt, prt);
+    let mut worst_tplus: Scalar = 0.0;
+    for y_plus in [0.0 as Scalar, 1.0, 5.0, 11.53, 30.0, 100.0, 1000.0] {
+        let tp = t_plus(y_plus, prt, prt, wc.kappa, wc.e, p_at_prt);
+        let want = prt * u_plus(y_plus, wc.kappa, wc.e);
+        worst_tplus = worst_tplus.max((tp - want).abs() / want.abs().max(1.0));
+    }
+    c.check("Pr = Pr_t: T+ == Pr_t * u+ everywhere", worst_tplus, 1e-9);
+
+    // The one-cell conductance identity.
+    let nu: Scalar = 1.5e-5;
+    let k_min: Scalar = 1e-15;
+    let k_p: Scalar = 0.05;
+    let y: Scalar = 0.01;
+    let rho: Scalar = 1.2;
+    let cp: Scalar = 1006.0;
+    let pr: Scalar = 0.71;
+    let t_w: Scalar = 400.0;
+    let t_p: Scalar = 300.0;
+    let k_eff_wall: Scalar = 0.04;
+
+    let grad = thermal_wall_ref_grad(
+        t_w, t_p, k_p, y, nu, rho, cp, pr, prt, wc.kappa, wc.e, wc.cmu, k_eff_wall, k_min,
+    );
+    match grad {
+        Some(grad) => {
+            let y_plus = y_plus_of(k_p, y, nu, wc.cmu);
+            let u_tau = wc.cmu.powf(0.25) * k_p.sqrt();
+            let tp = t_plus(y_plus, pr, prt, wc.kappa, wc.e, jayatilleke_p(pr, prt));
+            let q_w = rho * cp * u_tau * (t_w - t_p) / tp;
+            let flux_from_triple = k_eff_wall * grad;
+
+            c.note(&format!(
+                "one-cell conductance: analytic q_w = {:.6} W/m^2, k_eff_wall*ref_grad = {:.6} W/m^2",
+                f64::from(q_w),
+                f64::from(flux_from_triple)
+            ));
+            c.check(
+                "wall-function triple encodes exactly q_w (S29.3 one-cell conductance)",
+                (flux_from_triple - q_w).abs() / q_w.abs(),
+                1e-9,
+            );
+        }
+        None => c.check(
+            "wall-function triple encodes exactly q_w (S29.3 one-cell conductance)",
+            1.0,
+            0.0,
+        ),
+    }
 }
 
 

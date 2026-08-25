@@ -1214,6 +1214,19 @@ fn write_boundary_field(
             }
         }
 
+        // Every other key the entry carries verbatim - `Ks`/`Cs` on a rough
+        // wall function (SPEC-LIT §15.3/§29.1/§29.2), `turbulentIntensity`,
+        // `mixingLength`, ... `BTreeMap` keeps this deterministic. Without
+        // this a generated rough-wall case would read back as a smooth one
+        // wearing a rough name - the reader (`PatchFieldSpec::extra`'s doc,
+        // and the parser above) already round-trips these FROM disk; nothing
+        // wrote them back TO disk until now.
+        for (k, v) in &s.extra {
+            write_keyword(out, "        ", k, 16);
+            out.push_str(v);
+            out.push_str(";\n");
+        }
+
         out.push_str("    }\n");
     }
 
@@ -1347,6 +1360,45 @@ mod tests {
         // Expansion must leave an already-sized list alone.
         let sized = read_scalar_field(&path, 5).unwrap();
         assert_eq!(sized.internal, f.internal);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `PatchFieldSpec::extra` - `Ks`/`Cs` on a rough wall function
+    /// (SPEC-LIT §15.3/§29.1/§29.2) in particular - must round-trip through
+    /// the writer, not just the reader. It used to be read-only: the parser
+    /// captured `Ks 0.002;` into `extra` (see the "everything else is kept
+    /// verbatim" branch above), but `write_boundary_field` never wrote it
+    /// back, so a generated rough-wall case read back as a smooth one
+    /// wearing a rough name.
+    #[test]
+    fn extra_entries_round_trip_through_the_writer() {
+        let mut f = RawScalarField {
+            name: "nut".to_string(),
+            dimensions: "[0 2 -1 0 0 0 0]".to_string(),
+            internal: vec![0.0, 0.0],
+            boundary: BTreeMap::new(),
+            boundary_patterns: Vec::new(),
+        };
+        let mut wall = patch("nutkRoughWallFunction", &[0.0]);
+        wall.extra.insert("Ks".to_string(), "0.002".to_string());
+        wall.extra.insert("Cs".to_string(), "0.6".to_string());
+        f.boundary.insert("wall".to_string(), wall);
+
+        let dir = scratch("extra_rt");
+        let path = dir.join("0").join("nut");
+        write_scalar_field(&path, &f, "0").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("Ks"), "{text}");
+        assert!(text.contains("0.002"), "{text}");
+        assert!(text.contains("Cs"), "{text}");
+        assert!(text.contains("0.6"), "{text}");
+
+        // `internal` is uniform (both cells 0.0), so the writer collapses it
+        // to one `uniform` entry - expand back to the mesh size to compare.
+        let back = read_scalar_field(&path, 2).unwrap();
+        assert_eq!(back, f);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

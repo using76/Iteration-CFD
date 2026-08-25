@@ -140,9 +140,10 @@ impl<'m> KOmega<'m> {
         ctrl: TurbulenceControls,
         wall: WallFunctionCoeffs,
         wall_faces: &crate::field_setup::WallFaces,
+        roughness: &crate::field_setup::NutRoughness,
     ) -> Result<Self> {
         Ok(Self {
-            core: RasCore::new(gpu, hm, mesh, ctrl, wall, wall_faces)?,
+            core: RasCore::new(gpu, hm, mesh, ctrl, wall, wall_faces, roughness)?,
             coeffs,
             k: GpuScalarField::zeros(gpu, mesh, "k")?,
             omega: GpuScalarField::zeros(gpu, mesh, "omega")?,
@@ -286,6 +287,7 @@ impl<'m> KOmega<'m> {
             gpu,
             &mut self.core.nut.bf,
             &self.k.f,
+            flow.u,
             self.core.mesh,
             &wall,
             nu,
@@ -442,6 +444,7 @@ impl<'m> KOmega<'m> {
             gpu,
             &mut self.core.nut.bf,
             &self.k.f,
+            flow.u,
             self.core.mesh,
             &wall,
             flow.nu,
@@ -547,6 +550,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
         let flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         for beta in [0.072 as Scalar, 0.09] {
             let coeffs = KOmegaCoeffs { beta, ..Default::default() };
@@ -567,6 +571,7 @@ mod tests {
                 decay_controls(dt),
                 WallFunctionCoeffs::default(),
                 &no_walls,
+                &no_roughness,
             )?;
 
             gpu.write(&mut model.k_mut().f, &vec![k0; n_cells])?;
@@ -642,6 +647,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
         let flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         let mut model = KOmega::new(
             &gpu,
@@ -651,6 +657,7 @@ mod tests {
             decay_controls(1e-3),
             WallFunctionCoeffs::default(),
             &no_walls,
+            &no_roughness,
         )?;
 
         let k0: Scalar = 0.44;

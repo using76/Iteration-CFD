@@ -96,6 +96,8 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | LES | Smagorinsky, WALE, Deardorff |
 | LES 여과폭 | 체적 세제곱근, 최대 모서리 길이, Scotti 이방성 보정, van Driest 감쇠 |
 | 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
+| 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1) |
+| 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨 |
 | 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
 | 부력 생성 | G_b 항 (Rodi 1987, Henkes et al. 1991) |
 
@@ -133,7 +135,7 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 구분 | 지원 |
 |---|---|
 | 저-마하 정식화 | `p = p0(t) + p~(x,t)` 분리, 발산 구속조건, 밀폐/개방 공간의 `p0(t)` 적분 (Rehm & Baum 1978) |
-| 에너지 방정식 | 현열 엔탈피, `k_eff = k + rho cp nu_t/Prt`, 벽 열유속·고정온도 경계 |
+| 에너지 방정식 | 현열 엔탈피, `k_eff = k + rho cp nu_t/Prt`, 벽 열유속·고정온도 경계, `thermalWallFunction` 벽의 Jayatilleke 열 벽함수 (SPEC-LIT §29.3) |
 | 연소 | 혼합제어 단일 스텝 EDM (Magnussen & Hjertager 1977) — `Y_F`, `Y_O2`, `Y_P` 수송, 연료 고갈 방지 클리핑, 소모된 연료질량과 방출열이 정확히 일치 (반올림 오차 수준) |
 | 복사 | 회색 P1 근사 (Modest), Marshak 벽 경계, `chi_r` 복사분율 하한 — `fvDOM`은 §13.4 계약에 따라 이름을 명시하며 거부 |
 | 검증 게이트 | 밀폐 상자 `dp0/dt` 램프(해석해), 버너 정확 열방출, 복사 평형, 컷셀 닫힘, msh 육면체 닫힘 — 전부 `ofgpu-validate`의 상시 항목 |
@@ -213,8 +215,8 @@ error: divSchemes/div(phi,k): "Gauss totalGarbage" is not supported by ofgpu;
 ## 검증
 
 ```
-cargo test        640 passed, 0 failed
-ofgpu-validate    214 / 214 checks passed
+cargo test        696 passed, 0 failed
+ofgpu-validate    219 / 219 checks passed
 ```
 
 ### 수렴 차수 — 인위해법 (MMS)
@@ -283,6 +285,31 @@ alpha in [-4.163e-17, 1]
 CPU 참조 구현은 장치 코드가 gather 방식인 것과 달리 의도적으로 scatter 루프로
 작성하였습니다. 구조가 서로 다른 두 구현이 일치할 때 비로소 검증으로서 의미를
 갖습니다.
+
+### 벽 처리 (SPEC-LIT §29)
+
+`wallTreatment` 프리셋과 Jayatilleke 열 벽함수에 대한 상시 `ofgpu-validate`
+게이트 두 가지:
+
+| 검증 항목 | 결과 |
+|---|---|
+| `Ks → 0`가 매끈한 `nutk` 벽함수를 항상 재현 | 0 (반올림 수준) |
+| `Ks → 0`가 매끈한 `nutU` 벽함수를 항상 재현 | 0 (반올림 수준) |
+| `P(Pr/Pr_t = 1) = 0` 정확히 성립 | 0 (반올림 수준) |
+| `Pr = Pr_t`일 때 `T+ == Pr_t · u+` 어디서나 성립 | 1.3 × 10⁻¹⁶ |
+| `thermalWallFunction`의 Robin 삼중값이 Jayatilleke 해석 열유속을 정확히 부호화 (한 셀 전도 항등식) | 0 (반올림 수준) |
+
+이 게이트들은 조도벽 법칙이 `Ks = 0`(조도를 전혀 언급하지 않는 케이스)에서
+기존 매끈한 벽으로 붕괴함과, 열 벽함수 자체의 대수가 내부적으로 정확함을
+입증합니다. 이것만으로는 조(粗)격자 벽함수 메쉬와 저Re 해상 메쉬가 **같은**
+유동의 벽 열유속에 합의한다는 것까지 입증하지는 않습니다 — 그것은 별개의,
+훨씬 큰 주장(두 해상도에서 수렴한 3차원 난류 채널 유동)이며, 현재 이
+저장소의 어떤 케이스 타입도 그것을 끝까지 배선하고 있지 않습니다. 근벽
+저항 모형만을 놓고 본 반해석적 점검(Jayatilleke의 닫힌형 하위층 저항을,
+동일한 와점성 폐쇄식의 직접 구적과 비교, 공기의 `Pr = 0.71`, `Pr_t = 0.85`
+기준)은 두 값이 약 15% 차이남을 보입니다 — 이는 결함이 아니라 Jayatilleke
+보정 자체의 크기이지만, 숨기지 않고 여기에 보고합니다. 완전한 종단 간 3차원
+검증은 향후 과제로 남습니다.
 
 ---
 

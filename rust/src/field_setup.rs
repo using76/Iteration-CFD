@@ -438,8 +438,12 @@ fn scalar_patch(
             // Until then they behave as the condition they degenerate to:
             // nut and k are zeroGradient-like, epsilon and omega are fixed at
             // the wall-adjacent cell, which the wall-function kernel sets.
+            // The rough nut variants degenerate the same way - Ks/Cs only
+            // matter once the wall-function kernel runs (SPEC-LIT 15.3/29.2).
             BcKind::NutkWallFunction
             | BcKind::NutUWallFunction
+            | BcKind::NutkRoughWallFunction
+            | BcKind::NutURoughWallFunction
             | BcKind::EpsilonWallFunction
             | BcKind::OmegaWallFunction => (
                 1.0,
@@ -459,6 +463,22 @@ fn scalar_patch(
             BcKind::KqRWallFunction | BcKind::KLowReWallFunction | BcKind::ZeroGradient => {
                 (0.0, 0.0, 0.0)
             }
+
+            // SPEC-LIT 29.3: the Jayatilleke thermal wall function rewrites
+            // the triple itself once u_tau and y+ are known - see
+            // `EnergyWallData::update` in `src/energy.rs`. Until then it
+            // behaves as a plain fixedValue at the wall temperature `T_w` the
+            // file's `value` entry supplied, the same "degenerate until the
+            // kernel runs" convention the block above uses.
+            BcKind::ThermalWallFunction => (
+                1.0,
+                if spec.value.is_empty() {
+                    internal[i]
+                } else {
+                    value[i]
+                },
+                0.0,
+            ),
 
             // Vector-only conditions on a scalar field. Naming one is a
             // mistake in the case, not something to guess at.
@@ -774,11 +794,14 @@ fn vector_patch(
             | BcKind::TotalPressure
             | BcKind::NutkWallFunction
             | BcKind::NutUWallFunction
+            | BcKind::NutkRoughWallFunction
+            | BcKind::NutURoughWallFunction
             | BcKind::NutLowReWallFunction
             | BcKind::EpsilonWallFunction
             | BcKind::OmegaWallFunction
             | BcKind::KqRWallFunction
-            | BcKind::KLowReWallFunction => {
+            | BcKind::KLowReWallFunction
+            | BcKind::ThermalWallFunction => {
                 return Err(Error::Field {
                     field: field.to_string(),
                     msg: format!(
@@ -1216,6 +1239,438 @@ impl WallFaces {
     }
 }
 
+/// Per-face roughness for `nut`'s wall function - SPEC-LIT §15.3/§29.2.
+///
+/// Read from `nut`'s OWN patch entries, the same file [`WallFaces::nut`]
+/// reads its flag from - never from another field's, for the SPEC-LIT §15.5
+/// reason [`WallFaces`] documents. Every vector has `n_boundary_faces`
+/// entries; a face that is not a rough wall function carries `Ks = 0`, which
+/// is what makes `E_eff = E` there and the rough kernels collapse to the
+/// smooth ones to round-off (the §22 gate).
+#[derive(Debug, Clone)]
+pub struct NutRoughness {
+    /// True where the face's `nu_t` comes from the velocity-based `nutU`
+    /// family rather than `nutk`'s `k`-based one (SPEC-LIT §15.1). Only
+    /// meaningful where [`WallFaces::nut`] is also set for that face.
+    pub u_based: Vec<bool>,
+    /// Sand-grain height, m. Zero on every smooth face.
+    pub ks: Vec<Scalar>,
+    /// The roughness constant. Meaningful only where `ks > 0`; `0.5` is the
+    /// SPEC-LIT §15.3 default for uniform sand, filled in here so a rough
+    /// patch that omits `Cs` still gets it rather than a stray zero.
+    pub cs: Vec<Scalar>,
+}
+
+impl NutRoughness {
+    /// Every face smooth: `nu_t`'s own patch type still decides whether it
+    /// gets a wall value at all, through [`WallFaces::nut`]; this only ever
+    /// widens what a face already asked for.
+    pub fn none(n_boundary_faces: usize) -> Self {
+        Self {
+            u_based: vec![false; n_boundary_faces],
+            ks: vec![0.0; n_boundary_faces],
+            cs: vec![0.5; n_boundary_faces],
+        }
+    }
+
+    /// Read from `nut`'s own patch types, or [`Self::none`] when the case has
+    /// no `nut` file - [`WallFaces::from_case`] already warns about that
+    /// absence once, on the shared cause, so this does not warn again.
+    pub fn from_case(nut: Option<&RawScalarField>, m: &HostMesh) -> Result<Self> {
+        let Some(raw) = nut else {
+            return Ok(Self::none(m.n_boundary_faces));
+        };
+
+        let mut u_based = vec![false; m.n_boundary_faces];
+        let mut ks = vec![0.0 as Scalar; m.n_boundary_faces];
+        let mut cs = vec![0.5 as Scalar; m.n_boundary_faces];
+
+        for p in &m.patches {
+            let Some(spec) = raw.spec(&p.name)? else {
+                continue;
+            };
+            let kind = BcKind::from_name(&spec.type_name, &raw.name, &p.name)?;
+            if !kind.is_nut_wall_function() {
+                continue;
+            }
+
+            let u_flag = kind.is_nut_velocity_based();
+            // A rough type without `Ks` is the §13.4 error its name promised:
+            // discarding the roughness would make it a smooth wall wearing a
+            // rough wall's name (SPEC-LIT §15.3).
+            let (k_val, c_val) = if kind.is_nut_rough() {
+                (
+                    spec.required_number("Ks", &p.name, &spec.type_name)?,
+                    spec.number("Cs", &p.name)?.unwrap_or(0.5),
+                )
+            } else {
+                (0.0, 0.5)
+            };
+
+            for i in 0..p.size {
+                u_based[p.start + i] = u_flag;
+                ks[p.start + i] = k_val;
+                cs[p.start + i] = c_val;
+            }
+        }
+
+        Ok(Self { u_based, ks, cs })
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT §29.1: wallTreatment preset expansion (route a, OpenFOAM)
+// ==========================================================================
+
+/// SPEC-LIT §29.1 route (a): fill in the `wallTreatment` DEFAULT on every
+/// wall patch `raw` left out entirely - "explicit per-field patch types
+/// override per patch" means a patch [`RawScalarField::spec`] already finds
+/// (exact key or matching pattern) is untouched, since that is by
+/// construction the more specific of the two. Only `nut`/`k`/`epsilon`/
+/// `omega`/`T` have a preset row; `field` naming anything else is a no-op.
+///
+/// The synthesised entry carries no `value` - every wall-function [`BcKind`]
+/// this can produce already falls back to the wall cell's own internal value
+/// when `value` is empty (see [`scalar_patch`]), the same default an
+/// explicit entry with no `value` would get.
+pub fn apply_wall_treatment_defaults(
+    raw: &mut RawScalarField,
+    field: &str,
+    m: &HostMesh,
+    treatment: crate::io::case::WallTreatment,
+    roughness: Option<crate::io::case::Roughness>,
+) -> Result<()> {
+    use crate::io::case::WallTreatment;
+
+    let type_name = match field {
+        "nut" => treatment.nut_type(),
+        "k" => treatment.k_type(),
+        "epsilon" => treatment.epsilon_type(),
+        "omega" => treatment.omega_type(),
+        "T" => match treatment.thermal_type() {
+            Some(t) => t,
+            // SPEC-LIT §29.3: `lowRe` pins the molecular resistance the
+            // resolved mesh already provides - nothing to default here.
+            None => return Ok(()),
+        },
+        _ => return Ok(()),
+    };
+
+    for p in &m.patches {
+        if p.kind != PatchKind::Wall {
+            continue;
+        }
+        if raw.spec(&p.name)?.is_some() {
+            continue;
+        }
+
+        let mut s = PatchFieldSpec {
+            type_name: type_name.to_string(),
+            ..Default::default()
+        };
+        if field == "nut" && treatment == WallTreatment::Rough {
+            if let Some(r) = roughness {
+                s.extra.insert("Ks".to_string(), r.ks.to_string());
+                s.extra.insert("Cs".to_string(), r.cs.to_string());
+            }
+        }
+        raw.boundary.insert(p.name.clone(), s);
+    }
+
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §29.1 point 3: the wall-row consistency contract
+// ==========================================================================
+
+/// Whether a field's OWN patch type declares "the wall model constrains this
+/// cell" (`Full`) or "the mesh resolves the sublayer, no wall model"
+/// (`LowRe`). There is no third variant here - `None` (see the `family_of`
+/// functions below) is not a third family, it is "this field has no opinion"
+/// (a plain `fixedValue`, an inlet condition reused unchanged on a wall...),
+/// and SPEC-LIT §15.5 is explicit that the fields are independent: a field
+/// with no opinion never conflicts with one that has one. This check only
+/// catches two fields that DO both have an opinion and disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WallRowFamily {
+    Full,
+    LowRe,
+}
+
+fn nut_family(k: BcKind) -> Option<WallRowFamily> {
+    if k.is_nut_wall_function() {
+        Some(WallRowFamily::Full)
+    } else if k.is_nut_low_re() {
+        Some(WallRowFamily::LowRe)
+    } else {
+        None
+    }
+}
+
+fn k_family(k: BcKind) -> Option<WallRowFamily> {
+    match k {
+        BcKind::KqRWallFunction => Some(WallRowFamily::Full),
+        BcKind::KLowReWallFunction => Some(WallRowFamily::LowRe),
+        _ => None,
+    }
+}
+
+/// `epsilon`'s and `omega`'s own patch types can only ever DECLARE `Full`
+/// (`epsilonWallFunction`/`omegaWallFunction` - SPEC-LIT §6.4); there is no
+/// distinct low-Re-named condition for either. SPEC-LIT §29.1's `lowRe` row
+/// completes them with plain `zeroGradient`, which reads as "no opinion"
+/// here, not a second family - exactly the completion the table asks for.
+fn eps_omega_family(k: BcKind) -> Option<WallRowFamily> {
+    if k.constrains_wall_cell() {
+        Some(WallRowFamily::Full)
+    } else {
+        None
+    }
+}
+
+/// A human name for the `BcKind`s the wall-row check talks about, for its
+/// diagnostics - and for writing a `-permissive` substitution back into a
+/// [`PatchFieldSpec::type_name`].
+pub fn bc_kind_name(k: BcKind) -> &'static str {
+    match k {
+        BcKind::NutkWallFunction => "nutkWallFunction",
+        BcKind::NutUWallFunction => "nutUWallFunction",
+        BcKind::NutkRoughWallFunction => "nutkRoughWallFunction",
+        BcKind::NutURoughWallFunction => "nutURoughWallFunction",
+        BcKind::NutLowReWallFunction => "nutLowReWallFunction",
+        BcKind::KqRWallFunction => "kqRWallFunction",
+        BcKind::KLowReWallFunction => "kLowReWallFunction",
+        BcKind::EpsilonWallFunction => "epsilonWallFunction",
+        BcKind::OmegaWallFunction => "omegaWallFunction",
+        BcKind::ZeroGradient => "zeroGradient",
+        BcKind::FixedValue => "fixedValue",
+        BcKind::Calculated => "calculated",
+        _ => "(other)",
+    }
+}
+
+/// The type name `field` would need for `family` - SPEC-LIT §29.1's table,
+/// restricted to the fields this check covers.
+fn completion_for(field: &str, family: WallRowFamily) -> &'static str {
+    match (field, family) {
+        ("nut", WallRowFamily::Full) => "nutkWallFunction",
+        ("nut", WallRowFamily::LowRe) => "nutLowReWallFunction",
+        ("k", WallRowFamily::Full) => "kqRWallFunction",
+        ("k", WallRowFamily::LowRe) => "kLowReWallFunction",
+        ("epsilon", WallRowFamily::Full) => "epsilonWallFunction",
+        ("epsilon", WallRowFamily::LowRe) => "zeroGradient",
+        ("omega", WallRowFamily::Full) => "omegaWallFunction",
+        ("omega", WallRowFamily::LowRe) => "zeroGradient",
+        _ => "zeroGradient",
+    }
+}
+
+fn family_kind(field: &str, family: WallRowFamily) -> BcKind {
+    match (field, family) {
+        ("nut", WallRowFamily::Full) => BcKind::NutkWallFunction,
+        ("nut", WallRowFamily::LowRe) => BcKind::NutLowReWallFunction,
+        ("k", WallRowFamily::Full) => BcKind::KqRWallFunction,
+        ("k", WallRowFamily::LowRe) => BcKind::KLowReWallFunction,
+        ("epsilon", WallRowFamily::Full) => BcKind::EpsilonWallFunction,
+        ("epsilon", WallRowFamily::LowRe) => BcKind::ZeroGradient,
+        ("omega", WallRowFamily::Full) => BcKind::OmegaWallFunction,
+        _ => BcKind::ZeroGradient,
+    }
+}
+
+/// One wall patch's four turbulence-field patch types, as resolved from
+/// whichever route selected them (an explicit per-field entry, a per-patch
+/// `treatment` override, or a case-level `wallTreatment` preset). `None`
+/// where the case does not solve that field at all - `omega` under
+/// k-epsilon, say; a model that solves neither has nothing for this check to
+/// disagree about.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WallRow {
+    pub nut: Option<BcKind>,
+    pub k: Option<BcKind>,
+    pub epsilon: Option<BcKind>,
+    pub omega: Option<BcKind>,
+}
+
+impl WallRow {
+    fn entries(self) -> [(&'static str, Option<BcKind>, fn(BcKind) -> Option<WallRowFamily>); 4] {
+        [
+            ("nut", self.nut, nut_family as fn(BcKind) -> Option<WallRowFamily>),
+            ("k", self.k, k_family),
+            ("epsilon", self.epsilon, eps_omega_family),
+            ("omega", self.omega, eps_omega_family),
+        ]
+    }
+}
+
+/// SPEC-LIT §29.1 point 3, the consistency contract: whatever route selected
+/// them, the four per-field types on one wall patch must belong to one row of
+/// the §29.1 table (`nut` may be any of `nutk`/`nutU`/`rough` in the shared
+/// "full" row). A mixed row is a §13.4 error naming the patch, the offending
+/// pair and the consistent completions; `-permissive` substitutes the row
+/// implied by the field that spoke first, in `nut`/`k`/`epsilon`/`omega`
+/// order (`nut`'s own choice, in the common case where `nut` has one), and
+/// prints the substitution.
+///
+/// Returns the row unchanged where it was already consistent (the common
+/// case, since every preset-expanded row is consistent by construction); the
+/// corrected row otherwise, under `-permissive`.
+/// [`validate_wall_row`] for the OpenFOAM-directory route.
+///
+/// The JSONC path runs the SPEC-LIT §29.1 consistency contract during
+/// lowering; a case read from `0/` field files must meet the same contract,
+/// or the contradiction the contract exists for (`nutLowReWallFunction` on
+/// `nut` with `epsilonWallFunction` on `epsilon`) runs silently - which is
+/// exactly how it shipped the first time, caught by a supervisor functional
+/// check rather than by the test suite. Builds each WALL patch's row from
+/// the raw fields' own patch types, validates it, and writes a
+/// `-permissive` correction back into the raw specs so the corrected type
+/// is what the solver actually assembles.
+///
+/// Fields the case does not carry are `None` and take no part - a k-epsilon
+/// case has nothing to say about `omega`.
+pub fn validate_wall_rows(
+    patches: &[crate::mesh::PatchInfo],
+    mut nut: Option<&mut RawScalarField>,
+    mut k: Option<&mut RawScalarField>,
+    mut epsilon: Option<&mut RawScalarField>,
+    mut omega: Option<&mut RawScalarField>,
+) -> Result<()> {
+    use crate::mesh::PatchKind;
+
+    for p in patches {
+        if p.kind != PatchKind::Wall {
+            continue;
+        }
+        let pname = p.name.as_str();
+
+        let kind_of = |f: &Option<&mut RawScalarField>, field: &str| -> Result<Option<BcKind>> {
+            match f {
+                Some(rf) => match rf.boundary.get(pname) {
+                    Some(spec) => Ok(Some(BcKind::from_name(&spec.type_name, field, pname)?)),
+                    None => Ok(None),
+                },
+                None => Ok(None),
+            }
+        };
+
+        let row = WallRow {
+            nut: kind_of(&nut, "nut")?,
+            k: kind_of(&k, "k")?,
+            epsilon: kind_of(&epsilon, "epsilon")?,
+            omega: kind_of(&omega, "omega")?,
+        };
+        let corrected = validate_wall_row(pname, row)?;
+
+        let mut write_back =
+            |f: &mut Option<&mut RawScalarField>, before: Option<BcKind>, after: Option<BcKind>| {
+                if before == after {
+                    return;
+                }
+                if let (Some(rf), Some(kk)) = (f.as_deref_mut(), after) {
+                    if let Some(spec) = rf.boundary.get_mut(pname) {
+                        spec.type_name = bc_kind_name(kk).to_string();
+                    }
+                }
+            };
+        write_back(&mut nut, row.nut, corrected.nut);
+        write_back(&mut k, row.k, corrected.k);
+        write_back(&mut epsilon, row.epsilon, corrected.epsilon);
+        write_back(&mut omega, row.omega, corrected.omega);
+    }
+    Ok(())
+}
+
+pub fn validate_wall_row(patch: &str, row: WallRow) -> Result<WallRow> {
+    let entries = row.entries();
+
+    // The reference family: the first field, in nut/k/epsilon/omega order,
+    // that actually declares one. Nothing declaring one means this patch is
+    // not participating in the wall-function family at all, as far as this
+    // check is concerned.
+    let mut reference: Option<(&'static str, WallRowFamily)> = None;
+    for (name, kind, family_of) in entries {
+        if let Some(f) = kind.and_then(family_of) {
+            reference = Some((name, f));
+            break;
+        }
+    }
+    let Some((reference_field, reference_family)) = reference else {
+        return Ok(row);
+    };
+
+    // The first OTHER field that disagrees with the reference.
+    let mut offender: Option<(&'static str, BcKind)> = None;
+    for (name, kind, family_of) in entries {
+        if name == reference_field {
+            continue;
+        }
+        if let Some(k) = kind {
+            if family_of(k).is_some_and(|f| f != reference_family) {
+                offender = Some((name, k));
+                break;
+            }
+        }
+    }
+    let Some((offender_field, offender_kind)) = offender else {
+        return Ok(row);
+    };
+
+    let reference_kind = match reference_field {
+        "nut" => row.nut,
+        "k" => row.k,
+        "epsilon" => row.epsilon,
+        _ => row.omega,
+    }
+    .expect("the reference field carries the family it just supplied");
+
+    let opposite = match reference_family {
+        WallRowFamily::Full => WallRowFamily::LowRe,
+        WallRowFamily::LowRe => WallRowFamily::Full,
+    };
+    let setting = format!("wall consistency/{patch}");
+    let value = format!(
+        "{reference_field} = {} vs {offender_field} = {}",
+        bc_kind_name(reference_kind),
+        bc_kind_name(offender_kind)
+    );
+    let completions = format!(
+        "set {offender_field} to {} to match {reference_field}, or set {reference_field} to {} \
+         to match {offender_field}",
+        completion_for(offender_field, reference_family),
+        completion_for(reference_field, opposite),
+    );
+
+    if !crate::io::contract::permissive() {
+        return Err(Error::Config(format!(
+            "{setting}: {value} is not one row of SPEC-LIT 29.1's wall-treatment table \
+             ({completions})\n  (run with -permissive to substitute the row implied by \
+             {reference_field} and continue)"
+        )));
+    }
+
+    let corrected = family_kind(offender_field, reference_family);
+    crate::io::contract::warn_once(
+        &setting,
+        &format!(
+            "-permissive: {setting}: {value} is not one row of SPEC-LIT 29.1's wall-treatment \
+             table; substituting {offender_field} = {} (the row implied by {reference_field})",
+            bc_kind_name(corrected)
+        ),
+    );
+
+    let mut out = row;
+    match offender_field {
+        "nut" => out.nut = Some(corrected),
+        "k" => out.k = Some(corrected),
+        "epsilon" => out.epsilon = Some(corrected),
+        "omega" => out.omega = Some(corrected),
+        _ => {}
+    }
+    Ok(out)
+}
+
 /// The wall constants a model needs, from the parsed case.
 ///
 /// `kappa`, `E`, `Cmu`, `beta1` and the derived `y_plus_lam` are
@@ -1545,6 +2000,22 @@ mod tests {
         assert_eq!(k("movingWallVelocity"), BcKind::MovingWallVelocity);
         assert_eq!(k("flowRateInletVelocity"), BcKind::FlowRateInletVelocity);
         assert_eq!(k("nutLowReWallFunction"), BcKind::NutLowReWallFunction);
+        assert_eq!(k("thermalWallFunction"), BcKind::ThermalWallFunction);
+    }
+
+    /// SPEC-LIT §29.3: OpenFOAM's `alphat` name for the Jayatilleke wall
+    /// function is accepted as an alias for `thermalWallFunction`, not
+    /// rejected - and the substitution is reported through `warn_once`,
+    /// never silently.
+    #[test]
+    fn the_alphat_jayatilleke_name_is_accepted_as_an_alias_and_reported() {
+        let k = BcKind::from_name(
+            "compressible::alphatJayatillekeWallFunction",
+            "T",
+            "wall4",
+        )
+        .expect("the alias must be accepted, not rejected");
+        assert_eq!(k, BcKind::ThermalWallFunction);
     }
 
     // ------------------------------------------------------------------
@@ -1814,6 +2285,343 @@ mod tests {
         assert!(faces.nut[0], "nutk must not be left inert by epsilon");
     }
 
+    // ------------------------------------------------------------------
+    //  Rough walls - SPEC-LIT §15.3, completed by §29.2
+    // ------------------------------------------------------------------
+
+    /// "A rough type WITHOUT `Ks` is the §13.4 error it is today, now naming
+    /// the missing key" - the error must name `Ks`.
+    #[test]
+    fn nutk_rough_wall_function_without_ks_is_an_error_naming_it() {
+        let m = mesh();
+        let raw = scalar_field("inlet", spec("nutkRoughWallFunction"));
+        let err = NutRoughness::from_case(Some(&raw), &m).expect_err("Ks is missing");
+        let msg = format!("{err}");
+        assert!(msg.contains("Ks"), "error does not name the missing `Ks` entry: {msg}");
+    }
+
+    /// `Ks` is read, and `Cs` defaults to `0.5` (SPEC-LIT §15.3's "uniform
+    /// sand" default) when the patch does not give one.
+    #[test]
+    fn nutk_rough_wall_function_reads_ks_and_defaults_cs() {
+        let m = mesh();
+        let mut s = spec("nutkRoughWallFunction");
+        s.extra.insert("Ks".into(), "0.001".into());
+        let raw = scalar_field("inlet", s);
+
+        let r = NutRoughness::from_case(Some(&raw), &m).expect("builds");
+        assert_eq!(r.ks[0], 0.001);
+        assert_eq!(r.cs[0], 0.5);
+        assert!(!r.u_based[0], "nutk is the k-based family");
+    }
+
+    /// An explicit `Cs` overrides the default.
+    #[test]
+    fn nutk_rough_wall_function_reads_an_explicit_cs() {
+        let m = mesh();
+        let mut s = spec("nutkRoughWallFunction");
+        s.extra.insert("Ks".into(), "0.002".into());
+        s.extra.insert("Cs".into(), "0.8".into());
+        let raw = scalar_field("inlet", s);
+
+        let r = NutRoughness::from_case(Some(&raw), &m).expect("builds");
+        assert_eq!(r.ks[0], 0.002);
+        assert_eq!(r.cs[0], 0.8);
+    }
+
+    /// `nutURoughWallFunction` is the velocity-based family - SPEC-LIT §15.1
+    /// completed by §29.2 - and `NutRoughness` must say so per face.
+    #[test]
+    fn nutu_rough_wall_function_is_marked_velocity_based() {
+        let m = mesh();
+        let mut s = spec("nutURoughWallFunction");
+        s.extra.insert("Ks".into(), "0.001".into());
+        let raw = scalar_field("inlet", s);
+
+        let r = NutRoughness::from_case(Some(&raw), &m).expect("builds");
+        assert!(r.u_based[0]);
+        assert_eq!(r.ks[0], 0.001);
+    }
+
+    /// The smooth `nutk`/`nutU` wall functions carry `Ks = 0` - what makes
+    /// [`crate::wallfunctions::WallData`] collapse the rough kernels to the
+    /// smooth ones without a separate code path.
+    #[test]
+    fn smooth_nut_wall_functions_carry_zero_roughness() {
+        let m = mesh();
+        for name in ["nutkWallFunction", "nutUWallFunction"] {
+            let raw = scalar_field("inlet", spec(name));
+            let r = NutRoughness::from_case(Some(&raw), &m).expect("builds");
+            assert_eq!(r.ks[0], 0.0, "{name} must carry Ks = 0");
+        }
+    }
+
+    /// No `nut` file at all: every face is smooth, same as
+    /// [`NutRoughness::none`].
+    #[test]
+    fn no_nut_file_means_no_roughness_anywhere() {
+        let m = mesh();
+        let r = NutRoughness::from_case(None, &m).expect("builds");
+        assert_eq!(r.ks, vec![0.0; m.n_boundary_faces]);
+        assert_eq!(r.cs, vec![0.5; m.n_boundary_faces]);
+        assert_eq!(r.u_based, vec![false; m.n_boundary_faces]);
+    }
+
+    /// The atmospheric rough wall function is a different profile
+    /// (Monin-Obukhov), not a discarded parameter: it is an error naming the
+    /// two rough functions this solver does implement.
+    #[test]
+    fn nutk_atm_rough_wall_function_is_an_error_naming_the_two() {
+        let err = BcKind::from_name("nutkAtmRoughWallFunction", "nut", "inlet")
+            .expect_err("not implemented");
+        let msg = format!("{err}");
+        assert!(msg.contains("nutkRoughWallFunction"), "{msg}");
+        assert!(msg.contains("nutURoughWallFunction"), "{msg}");
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §29.1: wallTreatment preset expansion (route a)
+    // ------------------------------------------------------------------
+
+    /// One `inlet` patch (Generic) and one `wall1` patch (Wall) - what the
+    /// preset-expansion tests need that [`mesh`] does not have.
+    fn mesh_with_wall() -> HostMesh {
+        HostMesh {
+            n_cells: 2,
+            n_internal_faces: 1,
+            n_boundary_faces: 2,
+            owner: vec![0],
+            neighbour: vec![1],
+            b_face_cells: vec![0, 1],
+            patches: vec![
+                PatchInfo {
+                    name: "inlet".into(),
+                    type_name: "patch".into(),
+                    kind: PatchKind::Generic,
+                    start: 0,
+                    size: 1,
+                    nbr_patch: None,
+                },
+                PatchInfo {
+                    name: "wall1".into(),
+                    type_name: "wall".into(),
+                    kind: PatchKind::Wall,
+                    start: 1,
+                    size: 1,
+                    nbr_patch: None,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn preset_fills_in_a_wall_patch_the_field_left_out() {
+        let m = mesh_with_wall();
+        let mut raw = RawScalarField {
+            name: "nut".into(),
+            ..Default::default()
+        };
+        apply_wall_treatment_defaults(
+            &mut raw,
+            "nut",
+            &m,
+            crate::io::case::WallTreatment::Standard,
+            None,
+        )
+        .expect("applies");
+        assert_eq!(raw.spec("wall1").unwrap().unwrap().type_name, "nutkWallFunction");
+        // A non-wall patch never gets a default from this preset.
+        assert!(raw.spec("inlet").unwrap().is_none());
+    }
+
+    /// Route (a)'s precedence: an explicit per-field entry already on the
+    /// patch is never overwritten by the preset default.
+    #[test]
+    fn preset_never_overrides_an_explicit_patch_entry() {
+        let m = mesh_with_wall();
+        let mut raw = scalar_field("wall1", spec("nutUWallFunction"));
+        raw.name = "nut".into();
+        apply_wall_treatment_defaults(
+            &mut raw,
+            "nut",
+            &m,
+            crate::io::case::WallTreatment::Standard,
+            None,
+        )
+        .expect("applies");
+        assert_eq!(raw.spec("wall1").unwrap().unwrap().type_name, "nutUWallFunction");
+    }
+
+    #[test]
+    fn each_field_gets_its_own_row_entry() {
+        let m = mesh_with_wall();
+        for (field, treatment, want) in [
+            ("nut", crate::io::case::WallTreatment::Spalding, "nutUWallFunction"),
+            ("k", crate::io::case::WallTreatment::LowRe, "kLowReWallFunction"),
+            ("epsilon", crate::io::case::WallTreatment::LowRe, "zeroGradient"),
+            ("omega", crate::io::case::WallTreatment::Standard, "omegaWallFunction"),
+        ] {
+            let mut raw = RawScalarField {
+                name: field.into(),
+                ..Default::default()
+            };
+            apply_wall_treatment_defaults(&mut raw, field, &m, treatment, None).expect("applies");
+            assert_eq!(raw.spec("wall1").unwrap().unwrap().type_name, want, "{field}/{treatment:?}");
+        }
+    }
+
+    #[test]
+    fn rough_preset_writes_ks_and_cs_onto_the_synthesised_entry() {
+        let m = mesh_with_wall();
+        let mut raw = RawScalarField {
+            name: "nut".into(),
+            ..Default::default()
+        };
+        let rough = crate::io::case::Roughness { ks: 0.002, cs: 0.7 };
+        apply_wall_treatment_defaults(
+            &mut raw,
+            "nut",
+            &m,
+            crate::io::case::WallTreatment::Rough,
+            Some(rough),
+        )
+        .expect("applies");
+        let s = raw.spec("wall1").unwrap().unwrap();
+        assert_eq!(s.type_name, "nutkRoughWallFunction");
+        assert_eq!(s.extra.get("Ks").unwrap(), "0.002");
+        assert_eq!(s.extra.get("Cs").unwrap(), "0.7");
+    }
+
+    /// §29.3: `lowRe` pins the molecular resistance already there - `T`
+    /// gets no default from this preset at all.
+    #[test]
+    fn low_re_writes_no_thermal_default() {
+        let m = mesh_with_wall();
+        let mut raw = RawScalarField {
+            name: "T".into(),
+            ..Default::default()
+        };
+        apply_wall_treatment_defaults(
+            &mut raw,
+            "T",
+            &m,
+            crate::io::case::WallTreatment::LowRe,
+            None,
+        )
+        .expect("applies");
+        assert!(raw.spec("wall1").unwrap().is_none());
+    }
+
+    #[test]
+    fn every_other_preset_defaults_t_to_the_thermal_wall_function() {
+        let m = mesh_with_wall();
+        for wt in [
+            crate::io::case::WallTreatment::Standard,
+            crate::io::case::WallTreatment::Spalding,
+            crate::io::case::WallTreatment::Rough,
+        ] {
+            let mut raw = RawScalarField {
+                name: "T".into(),
+                ..Default::default()
+            };
+            apply_wall_treatment_defaults(&mut raw, "T", &m, wt, None).expect("applies");
+            assert_eq!(raw.spec("wall1").unwrap().unwrap().type_name, "thermalWallFunction");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §29.1 point 3: the wall-row consistency contract
+    // ------------------------------------------------------------------
+
+    /// The running example from SPEC-LIT §29.1 itself: `nutLowReWallFunction`
+    /// together with `epsilonWallFunction` is a contradiction, and strict
+    /// mode refuses it naming both types and the two ways to fix it.
+    #[test]
+    fn nut_low_re_with_epsilon_wall_function_is_the_named_contradiction() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let row = WallRow {
+            nut: Some(BcKind::NutLowReWallFunction),
+            k: None,
+            epsilon: Some(BcKind::EpsilonWallFunction),
+            omega: None,
+        };
+        let err = validate_wall_row("wall1", row).expect_err("must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("wall1"), "{msg}");
+        assert!(msg.contains("nutLowReWallFunction"), "{msg}");
+        assert!(msg.contains("epsilonWallFunction"), "{msg}");
+        assert!(msg.contains("zeroGradient"), "{msg} (epsilon's lowRe completion)");
+        assert!(msg.contains("nutkWallFunction"), "{msg} (nut's full completion)");
+    }
+
+    /// `-permissive` substitutes the row implied by `nut` and says so.
+    #[test]
+    fn permissive_substitutes_the_row_implied_by_nut() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+        crate::io::contract::set_permissive(true);
+
+        let row = WallRow {
+            nut: Some(BcKind::NutLowReWallFunction),
+            k: None,
+            epsilon: Some(BcKind::EpsilonWallFunction),
+            omega: None,
+        };
+        let corrected = validate_wall_row("wall1", row).expect("permissive resolves it");
+        assert_eq!(corrected.nut, Some(BcKind::NutLowReWallFunction));
+        assert_eq!(corrected.epsilon, Some(BcKind::ZeroGradient));
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// Every preset row is internally consistent - the common case must never
+    /// be flagged.
+    #[test]
+    fn every_preset_row_is_already_consistent() {
+        for wt in [
+            crate::io::case::WallTreatment::Standard,
+            crate::io::case::WallTreatment::Spalding,
+            crate::io::case::WallTreatment::Rough,
+            crate::io::case::WallTreatment::LowRe,
+        ] {
+            let nut = BcKind::from_name(wt.nut_type(), "nut", "wall1").unwrap();
+            let k = BcKind::from_name(wt.k_type(), "k", "wall1").unwrap();
+            let epsilon = BcKind::from_name(wt.epsilon_type(), "epsilon", "wall1").unwrap();
+            let omega = BcKind::from_name(wt.omega_type(), "omega", "wall1").unwrap();
+
+            let row = WallRow {
+                nut: Some(nut),
+                k: Some(k),
+                epsilon: Some(epsilon),
+                omega: Some(omega),
+            };
+            let corrected = validate_wall_row("wall1", row).unwrap_or_else(|e| {
+                panic!("{:?} row flagged as inconsistent: {e}", wt)
+            });
+            assert_eq!(corrected.nut, row.nut);
+            assert_eq!(corrected.k, row.k);
+            assert_eq!(corrected.epsilon, row.epsilon);
+            assert_eq!(corrected.omega, row.omega);
+        }
+    }
+
+    /// A field with no opinion (`fixedValue`) never conflicts with one that
+    /// has one - SPEC-LIT §15.5's independence, preserved by this check.
+    #[test]
+    fn a_field_with_no_opinion_never_conflicts() {
+        let row = WallRow {
+            nut: Some(BcKind::NutkWallFunction),
+            k: None,
+            epsilon: Some(BcKind::FixedValue),
+            omega: None,
+        };
+        let corrected = validate_wall_row("wall1", row).expect("no conflict");
+        assert_eq!(corrected.epsilon, Some(BcKind::FixedValue));
+    }
+
     #[test]
     fn fixed_value_is_fr_one() {
         let mut raw = RawScalarField {
@@ -1932,4 +2740,43 @@ mod tests {
     fn a_wrong_length_list_is_an_error() {
         assert!(spread(&[1.0, 2.0], 4, 0.0, "value", "p").is_err());
     }
+    /// The OpenFOAM-directory route runs the same §29.1 contract as the
+    /// JSONC route. Regression for the gap where only JSONC validated.
+    #[test]
+    fn raw_field_route_refuses_a_mixed_wall_row() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let patches = vec![crate::mesh::PatchInfo {
+            name: "ceiling".into(),
+            type_name: "wall".into(),
+            kind: crate::mesh::PatchKind::Wall,
+            start: 0,
+            size: 1,
+            nbr_patch: None,
+        }];
+        let mk = |ty: &str| {
+            let mut f = RawScalarField::default();
+            let mut spec = crate::io::fields::PatchFieldSpec::default();
+            spec.type_name = ty.into();
+            f.boundary.insert("ceiling".into(), spec);
+            f
+        };
+        let mut nut = mk("nutLowReWallFunction");
+        let mut k = mk("kqRWallFunction");
+        let mut eps = mk("epsilonWallFunction");
+
+        let err = validate_wall_rows(
+            &patches,
+            Some(&mut nut),
+            Some(&mut k),
+            Some(&mut eps),
+            None,
+        )
+        .expect_err("the lowRe/full mix must be refused");
+        let msg = format!("{err}");
+        assert!(msg.contains("ceiling"), "{msg}");
+        assert!(msg.contains("nutLowReWallFunction"), "{msg}");
+    }
+
 }

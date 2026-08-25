@@ -50,6 +50,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, IoContext, Result};
+use crate::io::case::{Roughness, WallTreatment};
 use crate::io::fields::{
     write_scalar_field, write_vector_field, PatchFieldSpec, RawScalarField, RawVectorField,
 };
@@ -2566,6 +2567,47 @@ pub fn write_cutcell_case(
     s: usize,
     theta_min: Scalar,
 ) -> Result<CutCellSummary> {
+    write_cutcell_case_impl(
+        case_dir, kind, nx, ny, nz, surface, s, theta_min, WallTreatment::Standard, None, false,
+    )
+}
+
+/// [`write_cutcell_case`], with SPEC-LIT §29.1's `wallTreatment` preset (route
+/// c) expanded into the cut-cell case's `0/` fields instead of the hardcoded
+/// `standard` row - the new wall faces the cut follows the surface with
+/// (`summary.wall_faces`) get exactly the same row as the block's own walls,
+/// so "carved STL wall patches follow the same preset" holds for cut cells
+/// too, not only castellation.
+#[allow(clippy::too_many_arguments)]
+pub fn write_cutcell_case_with_wall_model(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    surface: &Surface,
+    s: usize,
+    theta_min: Scalar,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+) -> Result<CutCellSummary> {
+    write_cutcell_case_impl(case_dir, kind, nx, ny, nz, surface, s, theta_min, wall, roughness, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_cutcell_case_impl(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    surface: &Surface,
+    s: usize,
+    theta_min: Scalar,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+    thermal_wall: bool,
+) -> Result<CutCellSummary> {
     if nx < 1 || ny < 1 || nz < 1 {
         return Err(Error::Config(format!("generate_cases: bad resolution {nx} x {ny} x {nz}")));
     }
@@ -2604,7 +2646,9 @@ pub fn write_cutcell_case(
     }
 
     let wall_names: Vec<String> = summary.wall_faces.iter().map(|(n, _)| n.clone()).collect();
-    let fields = build_cutcell_fields(kind, &c_out, &block, &wall_names, nu, u_ref, half_height, 1)?;
+    let fields = build_cutcell_fields(
+        kind, &c_out, &block, &wall_names, nu, u_ref, half_height, 1, wall, roughness, thermal_wall,
+    )?;
     write_fields(case_dir, &fields)?;
 
     println!(
@@ -2751,6 +2795,9 @@ fn build_cutcell_fields(
     u_ref: Scalar,
     half_height: Scalar,
     wall_normal: usize,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+    thermal_wall: bool,
 ) -> Result<InMemoryFields> {
     let _ = nu; // carried for signature parity with `build_initial_fields`; unused here
     let n_cells = centroids.len();
@@ -2866,7 +2913,16 @@ fn build_cutcell_fields(
                 s.value = vec![t_inlet];
                 s
             } else if pk == PatchKind::Wall {
-                patch_spec("zeroGradient")
+                // SPEC-LIT §29.3: every wallTreatment row except `lowRe`
+                // applies the thermal wall function on a wall, when the
+                // energy equation is solved AND a wall model was actually
+                // asked for (`thermal_wall`) - the legacy adiabatic default
+                // (`write_case`/`build_case`, no `-wallModel`) stays exactly
+                // `zeroGradient`.
+                match thermal_wall.then(|| wall.thermal_type()).flatten() {
+                    Some(t) => patch_spec(t),
+                    None => patch_spec("zeroGradient"),
+                }
             } else {
                 let mut s = patch_spec("inletOutlet");
                 s.inlet_value = vec![PLUME_T_AMBIENT];
@@ -2878,13 +2934,13 @@ fn build_cutcell_fields(
         scalars.push(t);
     }
 
-    let specs: [(&str, &str, Scalar, &str); 4] = [
-        ("k", "[0 2 -2 0 0 0 0]", k0, "kqRWallFunction"),
-        ("epsilon", "[0 2 -3 0 0 0 0]", eps0, "epsilonWallFunction"),
-        ("omega", "[0 0 -1 0 0 0 0]", omega0, "omegaWallFunction"),
-        ("nut", "[0 2 -1 0 0 0 0]", 0.0, "nutkWallFunction"),
+    let specs: [(&str, &str, Scalar); 4] = [
+        ("k", "[0 2 -2 0 0 0 0]", k0),
+        ("epsilon", "[0 2 -3 0 0 0 0]", eps0),
+        ("omega", "[0 0 -1 0 0 0 0]", omega0),
+        ("nut", "[0 2 -1 0 0 0 0]", 0.0),
     ];
-    for (name, dims, value, wall_type) in specs {
+    for (name, dims, value) in specs {
         let mut f = RawScalarField {
             name: name.to_string(),
             dimensions: dims.to_string(),
@@ -2897,8 +2953,9 @@ fn build_cutcell_fields(
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
             } else if pk == PatchKind::Wall {
-                let mut s = patch_spec(wall_type);
+                let mut s = patch_spec(wall_row_type(name, wall));
                 s.value = vec![value];
+                apply_roughness(&mut s, name, wall, roughness);
                 s
             } else if name == "nut" {
                 let mut s = patch_spec("calculated");
@@ -3328,7 +3385,26 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
 /// directory whose fields are real per-cell profiles rather than a uniform
 /// guess.
 pub fn write_case(case_dir: &Path, kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None).map(|_| ())
+    write_case_impl(case_dir, kind, nx, ny, nz, None, WallTreatment::Standard, None, false)
+        .map(|_| ())
+}
+
+/// [`write_case`], with SPEC-LIT §29.1's `wallTreatment` preset (route c)
+/// expanded into the generated `0/` fields instead of the hardcoded
+/// `standard` row - `-wallModel <preset> [-Ks x [-Cs y]]` on
+/// `ofgpu-generate-mesh`. `standard` (passed explicitly or via [`write_case`])
+/// reproduces today's hardcoded row exactly, `k`/`epsilon`/`omega`/`nut`
+/// string for string.
+pub fn write_case_with_wall_model(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+) -> Result<()> {
+    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true).map(|_| ())
 }
 
 /// Build a complete runnable case's mesh and `0/` fields entirely in memory -
@@ -3360,7 +3436,8 @@ pub fn build_case(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<(Ho
     }
 
     let (nu, u_ref, half_height) = case_run_params(kind, &b, &block);
-    let fields = build_initial_fields(kind, &block, None, nu, u_ref, half_height, 1)?;
+    let fields =
+        build_initial_fields(kind, &block, None, nu, u_ref, half_height, 1, WallTreatment::Standard, None, false)?;
     Ok((mesh, fields))
 }
 
@@ -3377,13 +3454,34 @@ pub fn write_carved_case(
     nz: usize,
     surface: &Surface,
 ) -> Result<CarveSummary> {
-    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface))? {
+    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), WallTreatment::Standard, None, false)? {
         Some(s) => Ok(s),
         // Unreachable: the impl returns a summary whenever a surface went in.
         None => Err(Error::Mesh("carve produced no summary".to_string())),
     }
 }
 
+/// [`write_carved_case`], with the `wallTreatment` preset (route c) expanded
+/// into the carved case's `0/` fields - the newly carved wall patches follow
+/// the same preset as the block's own walls, since both go through
+/// [`build_initial_fields`]'s one `PatchKind::Wall` branch.
+pub fn write_carved_case_with_wall_model(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    surface: &Surface,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+) -> Result<CarveSummary> {
+    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), wall, roughness, true)? {
+        Some(s) => Ok(s),
+        None => Err(Error::Mesh("carve produced no summary".to_string())),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_case_impl(
     case_dir: &Path,
     kind: CaseKind,
@@ -3391,6 +3489,9 @@ fn write_case_impl(
     ny: usize,
     nz: usize,
     surface: Option<&Surface>,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+    thermal_wall: bool,
 ) -> Result<Option<CarveSummary>> {
     if nx < 1 || ny < 1 || nz < 1 {
         return Err(Error::Config(format!(
@@ -3489,7 +3590,9 @@ fn write_case_impl(
     // Wall-normal direction and half height per case, so the initial profile is
     // oriented the way the geometry expects. `u_ref`/`half_height` came from
     // `case_run_params` above, together with `nu`.
-    write_initial_fields(case_dir, kind, &block, carve, nu, u_ref, half_height, 1)?;
+    write_initial_fields(
+        case_dir, kind, &block, carve, nu, u_ref, half_height, 1, wall, roughness, thermal_wall,
+    )?;
 
     if let (Some(w), Some((fx, fy))) = (b.window.as_ref(), inlet) {
         println!(
@@ -3925,6 +4028,31 @@ fn patch_spec(type_name: &str) -> PatchFieldSpec {
     }
 }
 
+/// SPEC-LIT §29.1's table: the `wallTreatment` row's type name for one
+/// turbulence-closure field. `field` is one of `"k"`/`"epsilon"`/`"omega"`/
+/// `"nut"`; anything else falls back to `zeroGradient`, which nothing here
+/// calls this with.
+fn wall_row_type(field: &str, wall: WallTreatment) -> &'static str {
+    match field {
+        "nut" => wall.nut_type(),
+        "k" => wall.k_type(),
+        "epsilon" => wall.epsilon_type(),
+        "omega" => wall.omega_type(),
+        _ => "zeroGradient",
+    }
+}
+
+/// `Ks`/`Cs` onto a `nut` wall-function entry under the `rough` preset -
+/// SPEC-LIT §29.1/§29.2. A no-op for every other field or treatment.
+fn apply_roughness(s: &mut PatchFieldSpec, field: &str, wall: WallTreatment, roughness: Option<Roughness>) {
+    if field == "nut" && wall == WallTreatment::Rough {
+        if let Some(r) = roughness {
+            s.extra.insert("Ks".to_string(), r.ks.to_string());
+            s.extra.insert("Cs".to_string(), r.cs.to_string());
+        }
+    }
+}
+
 /// `0/alpha.water`, `0/U` and `0/p_rgh` for the dam break.
 ///
 /// Written from SPEC-LIT S20 and the geometry of Martin & Moyce (1952): a
@@ -4155,8 +4283,13 @@ fn write_initial_fields(
     u_ref: Scalar,
     half_height: Scalar,
     wall_normal: usize,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+    thermal_wall: bool,
 ) -> Result<()> {
-    let fields = build_initial_fields(kind, block, carve, nu, u_ref, half_height, wall_normal)?;
+    let fields = build_initial_fields(
+        kind, block, carve, nu, u_ref, half_height, wall_normal, wall, roughness, thermal_wall,
+    )?;
     write_fields(case_dir, &fields)
 }
 
@@ -4169,6 +4302,9 @@ fn build_initial_fields(
     u_ref: Scalar,
     half_height: Scalar,
     wall_normal: usize,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+    thermal_wall: bool,
 ) -> Result<InMemoryFields> {
     let g = &block.g;
     let n_cells = carve.map_or(g.n_cells(), |cv| cv.fluid_old.len());
@@ -4359,9 +4495,16 @@ fn build_initial_fields(
                 s.value = vec![t_inlet];
                 s
             } else if pk == PatchKind::Wall {
-                // Adiabatic floor and ceiling: the case is about the plume, not
-                // about how much heat the room absorbs.
-                patch_spec("zeroGradient")
+                // Adiabatic floor and ceiling by default: the case is about
+                // the plume, not about how much heat the room absorbs.
+                // SPEC-LIT §29.3 overrides that only when a wall model was
+                // actually asked for (`thermal_wall`, `-wallModel`), except
+                // `lowRe`, which pins the same molecular resistance this
+                // default already gives.
+                match thermal_wall.then(|| wall.thermal_type()).flatten() {
+                    Some(t) => patch_spec(t),
+                    None => patch_spec("zeroGradient"),
+                }
             } else {
                 let mut s = patch_spec("inletOutlet");
                 s.inlet_value = vec![PLUME_T_AMBIENT];
@@ -4376,14 +4519,14 @@ fn build_initial_fields(
     }
 
     // ---- scalars ---------------------------------------------------------
-    let specs: [(&str, &str, Scalar, &str); 4] = [
-        ("k", "[0 2 -2 0 0 0 0]", k0, "kqRWallFunction"),
-        ("epsilon", "[0 2 -3 0 0 0 0]", eps0, "epsilonWallFunction"),
-        ("omega", "[0 0 -1 0 0 0 0]", omega0, "omegaWallFunction"),
-        ("nut", "[0 2 -1 0 0 0 0]", 0.0, "nutkWallFunction"),
+    let specs: [(&str, &str, Scalar); 4] = [
+        ("k", "[0 2 -2 0 0 0 0]", k0),
+        ("epsilon", "[0 2 -3 0 0 0 0]", eps0),
+        ("omega", "[0 0 -1 0 0 0 0]", omega0),
+        ("nut", "[0 2 -1 0 0 0 0]", 0.0),
     ];
 
-    for (name, dims, value, wall_type) in specs {
+    for (name, dims, value) in specs {
         let mut f = RawScalarField {
             name: name.to_string(),
             dimensions: dims.to_string(),
@@ -4399,8 +4542,13 @@ fn build_initial_fields(
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
             } else if pk == PatchKind::Wall {
-                let mut s = patch_spec(wall_type);
+                // SPEC-LIT §29.1: the wallTreatment row's entry for this
+                // field, `standard` by default - `wall_row_type` reproduces
+                // today's hardcoded strings exactly when `wall` is
+                // `WallTreatment::Standard`.
+                let mut s = patch_spec(wall_row_type(name, wall));
                 s.value = vec![value];
+                apply_roughness(&mut s, name, wall, roughness);
                 s
             } else if name == "nut" {
                 // nut is never prescribed on a non-wall patch - the model
@@ -5415,6 +5563,166 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §29.1: wallTreatment presets (route c, generate-mesh)
+    // ------------------------------------------------------------------
+
+    /// `write_case_with_wall_model(.., Standard, ..)` reproduces
+    /// `write_case`'s hardcoded row exactly - "standard stays the default".
+    #[test]
+    fn standard_wall_model_matches_the_legacy_default_row() {
+        let dir = temp_dir("wall_model_standard");
+        write_case_with_wall_model(&dir, CaseKind::Plume, 20, 12, 6, WallTreatment::Standard, None)
+            .expect("write");
+
+        let zero = dir.join("0");
+        assert_eq!(fs::read_to_string(zero.join("nut")).unwrap().matches("nutkWallFunction").count(), 5);
+        assert_eq!(fs::read_to_string(zero.join("k")).unwrap().matches("kqRWallFunction").count(), 5);
+        assert_eq!(
+            fs::read_to_string(zero.join("epsilon")).unwrap().matches("epsilonWallFunction").count(),
+            5
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Each preset expands to exactly its row - SPEC-LIT §29.1's table,
+    /// string-level, on the generated `0/` fields.
+    #[test]
+    fn each_wall_model_expands_to_exactly_its_row() {
+        for (wt, nut_want, k_want, eps_want) in [
+            (WallTreatment::Standard, "nutkWallFunction", "kqRWallFunction", "epsilonWallFunction"),
+            (WallTreatment::Spalding, "nutUWallFunction", "kqRWallFunction", "epsilonWallFunction"),
+            (WallTreatment::LowRe, "nutLowReWallFunction", "kLowReWallFunction", "zeroGradient"),
+        ] {
+            let dir = temp_dir(&format!("wall_model_row_{}", wt.name()));
+            write_case_with_wall_model(&dir, CaseKind::Plume, 20, 12, 6, wt, None).expect("write");
+
+            let zero = dir.join("0");
+            let nut = fs::read_to_string(zero.join("nut")).unwrap();
+            let k = fs::read_to_string(zero.join("k")).unwrap();
+            let eps = fs::read_to_string(zero.join("epsilon")).unwrap();
+            let omega = fs::read_to_string(zero.join("omega")).unwrap();
+            let omega_want = if wt == WallTreatment::LowRe { "zeroGradient" } else { "omegaWallFunction" };
+
+            // Every one of the five wall patches, exactly - not a substring
+            // count, which `zeroGradient` (the `lowRe` completion AND the
+            // unrelated non-wall default `outlet` already carries) would
+            // over-count.
+            for wall_patch in ["wallXMin", "wallYMin", "wallYMax", "floor", "ceiling"] {
+                assert!(
+                    patch_entry(&nut, wall_patch).contains(nut_want),
+                    "{wt:?} {wall_patch} nut: {}",
+                    patch_entry(&nut, wall_patch)
+                );
+                assert!(
+                    patch_entry(&k, wall_patch).contains(k_want),
+                    "{wt:?} {wall_patch} k: {}",
+                    patch_entry(&k, wall_patch)
+                );
+                assert!(
+                    patch_entry(&eps, wall_patch).contains(eps_want),
+                    "{wt:?} {wall_patch} epsilon: {}",
+                    patch_entry(&eps, wall_patch)
+                );
+                assert!(
+                    patch_entry(&omega, wall_patch).contains(omega_want),
+                    "{wt:?} {wall_patch} omega: {}",
+                    patch_entry(&omega, wall_patch)
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `rough` writes `Ks`/`Cs` onto every wall face's `nut` entry.
+    #[test]
+    fn rough_wall_model_writes_ks_and_cs() {
+        let dir = temp_dir("wall_model_rough");
+        let rough = Roughness { ks: 0.002, cs: 0.6 };
+        write_case_with_wall_model(&dir, CaseKind::Plume, 20, 12, 6, WallTreatment::Rough, Some(rough))
+            .expect("write");
+
+        let nut = fs::read_to_string(dir.join("0").join("nut")).expect("read nut");
+        assert_eq!(nut.matches("nutkRoughWallFunction").count(), 5, "{nut}");
+        assert_eq!(nut.matches("0.002").count(), 5, "Ks missing:\n{nut}");
+        assert_eq!(nut.matches("0.6").count(), 5, "Cs missing:\n{nut}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// §29.3, through `-wallModel`: every row except `lowRe` puts a
+    /// `thermalWallFunction` on the walls of a case that solves `T`; `lowRe`
+    /// keeps the adiabatic default.
+    #[test]
+    fn wall_model_applies_the_thermal_wall_function_except_low_re() {
+        for (wt, want) in [
+            (WallTreatment::Standard, "thermalWallFunction"),
+            (WallTreatment::LowRe, "zeroGradient"),
+        ] {
+            let dir = temp_dir(&format!("wall_model_thermal_{}", wt.name()));
+            write_case_with_wall_model(&dir, CaseKind::Plume, 20, 12, 6, wt, None).expect("write");
+
+            let t = fs::read_to_string(dir.join("0").join("T")).expect("read T");
+            assert_eq!(t.matches(want).count(), 5, "{wt:?}:\n{t}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Without `-wallModel` (plain [`write_case`]), `T` stays exactly the
+    /// legacy adiabatic default - route (c) changes nothing unless asked.
+    #[test]
+    fn no_wall_model_leaves_t_adiabatic() {
+        let dir = temp_dir("no_wall_model_t");
+        write_case(&dir, CaseKind::Plume, 20, 12, 6).expect("write");
+        let t = fs::read_to_string(dir.join("0").join("T")).expect("read T");
+        assert_eq!(t.matches("zeroGradient").count(), 5);
+        assert!(!t.contains("thermalWallFunction"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Carved STL wall patches follow the same preset as the block's own
+    /// walls - route (c)'s explicit requirement. A small cuboid obstruction
+    /// well inside the plume domain, away from the floor's burner window and
+    /// the +x outlet, castellates into new `wall`-kind patches; those must
+    /// carry the SAME `spalding` row as `wallXMin`/`wallYMin`/etc., not the
+    /// `standard` default.
+    #[test]
+    fn carved_walls_follow_the_same_wall_model() {
+        let dir = temp_dir("wall_model_carved");
+        let plug = cuboid_surface(Vec3::new(2.0, 0.0, 1.0), Vec3::new(3.0, 1.0, 2.0), "plug");
+
+        let summary =
+            write_carved_case_with_wall_model(&dir, CaseKind::Plume, 20, 12, 6, &plug, WallTreatment::Spalding, None)
+                .expect("carve");
+        assert!(!summary.wall_faces.is_empty(), "the plug should carve out new wall faces");
+
+        let nut = fs::read_to_string(dir.join("0").join("nut")).expect("read nut");
+        for (patch, _) in &summary.wall_faces {
+            let entry = patch_entry(&nut, patch);
+            assert!(entry.contains("nutUWallFunction"), "{patch}: {entry}");
+        }
+        // The block's own original walls carry the same row.
+        assert!(patch_entry(&nut, "wallXMin").contains("nutUWallFunction"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The text of one `boundaryField { <patch> { ... } }` entry, for
+    /// per-patch assertions on a field written with one entry per patch
+    /// (never a `".*"` pattern - `write_fields`/`build_initial_fields` always
+    /// expand explicitly).
+    fn patch_entry<'a>(src: &'a str, patch: &str) -> &'a str {
+        let at = src.find(&format!("    {patch}\n")).unwrap_or_else(|| {
+            panic!("no `{patch}` entry:\n{src}")
+        });
+        let open = src[at..].find('{').map(|i| at + i).unwrap();
+        let close = src[open..].find('}').map(|i| open + i).unwrap();
+        &src[open..close]
     }
 
     /// The other cases have to come out byte for byte as they did before the

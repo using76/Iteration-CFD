@@ -115,7 +115,7 @@ use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field,
     harvest_vector_field, max_div_phi,
     setup_scalar_field, setup_vector_field, update_inlet_outlet, wall_coeffs_from_case,
-    WallFaces,
+    NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{
     find_start_time, format_time_name, model_coeff, read_case_controls, CaseControls,
@@ -1857,9 +1857,27 @@ fn run(o: &Options) -> Result<()> {
 
     let raw_u = read_vector_field(&t_dir.join("U"), hm.n_cells)?;
     let raw_p = read_scalar_field(&t_dir.join("p"), hm.n_cells)?;
-    let raw_k = read_scalar_field(&t_dir.join("k"), hm.n_cells)?;
-    let raw_e = read_scalar_field(&t_dir.join("epsilon"), hm.n_cells)?;
+    let mut raw_k = read_scalar_field(&t_dir.join("k"), hm.n_cells)?;
+    let mut raw_e = read_scalar_field(&t_dir.join("epsilon"), hm.n_cells)?;
     let raw_t = read_scalar_field(&t_dir.join("T"), hm.n_cells)?;
+
+    // SPEC-LIT 29.1: the per-field wall types must form one consistent row,
+    // on this route exactly as on the JSONC route.
+    {
+        let nut_path = t_dir.join("nut");
+        let mut raw_nut_row = if nut_path.exists() {
+            Some(read_scalar_field(&nut_path, hm.n_cells)?)
+        } else {
+            None
+        };
+        ofgpu::field_setup::validate_wall_rows(
+            &hm.patches,
+            raw_nut_row.as_mut(),
+            Some(&mut raw_k),
+            Some(&mut raw_e),
+            None,
+        )?;
+    }
 
     let fk = FieldKernels::new(&gpu)?;
 
@@ -1981,6 +1999,7 @@ fn run(o: &Options) -> Result<()> {
         }
     };
     let wf_faces = WallFaces::from_case(&raw_e, raw_nut_for_walls.as_ref(), &hm)?;
+    let roughness = NutRoughness::from_case(raw_nut_for_walls.as_ref(), &hm)?;
 
     let mut model = KEpsilon::new(
         &gpu,
@@ -1990,6 +2009,7 @@ fn run(o: &Options) -> Result<()> {
         cc.turb,
         wall_coeffs_from_case(&cc.wall),
         &wf_faces,
+        &roughness,
     )?;
 
     setup_scalar_field(&gpu, model.k_mut(), &raw_k, &hm)?;

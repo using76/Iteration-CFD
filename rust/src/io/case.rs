@@ -242,6 +242,177 @@ impl Default for WallFunctionCoeffs {
     }
 }
 
+/// SPEC-LIT §29.1: one setting names a whole family of per-field wall patch
+/// types, expanded to those types at CASE-BUILD time - `crate::field`'s
+/// `BcKind` and the kernels in `crate::wallfunctions`/`cuda/wallfunctions.cu`
+/// never see a preset, only the `BcKind` each field ends up with. The row:
+///
+/// ```text
+/// wallTreatment
+///   standard   nut: nutkWallFunction        k: kqRWallFunction   eps/omega: *WallFunction
+///   spalding   nut: nutUWallFunction        k: kqRWallFunction   eps/omega: *WallFunction
+///   rough      nut: nutkRoughWallFunction   k: kqRWallFunction   eps/omega: *WallFunction
+///   lowRe      nut: nutLowReWallFunction    k: kLowReWallFunction eps/omega: zeroGradient
+/// ```
+///
+/// Precedence (most specific wins), the same for every route this crate
+/// reads a case from: an explicit per-field patch type on a patch overrides
+/// whatever this preset would have written there; a per-patch override of the
+/// preset itself (a JSONC patch's own `treatment`) overrides the case-level
+/// default; the case-level default (`standard` when the case names none at
+/// all) is what is left once the more specific two have had their say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallTreatment {
+    Standard,
+    /// SPEC-LIT §15.1: `nut` gets `y+` from the local velocity (the inverse
+    /// Spalding law) rather than from `k`.
+    Spalding,
+    /// SPEC-LIT §15.3/§29.2: the Cebeci & Bradshaw roughness downshift.
+    /// Requires `Ks` - see [`Roughness::resolve`].
+    Rough,
+    /// SPEC-LIT §15.2: the mesh resolves the viscous sublayer, so NO wall
+    /// model constrains any of the four fields - `eps`/`omega` fall back to
+    /// plain `zeroGradient` rather than the `*WallFunction` that would
+    /// otherwise constrain their wall-adjacent cell (SPEC-LIT §29.1's own
+    /// running example of the contradiction this preset mechanism exists to
+    /// rule out: `nutLowReWallFunction` together with `epsilonWallFunction`).
+    LowRe,
+}
+
+impl WallTreatment {
+    /// Under the `SPEC-LIT` §13.4 rule; `""` (the case named none) is
+    /// `standard`, the OpenFOAM-compatible default.
+    pub fn from_name(s: &str) -> Result<Self> {
+        match s {
+            "standard" | "" => Ok(Self::Standard),
+            "spalding" => Ok(Self::Spalding),
+            "rough" => Ok(Self::Rough),
+            "lowRe" => Ok(Self::LowRe),
+            other => unsupported(
+                "RAS/wallTreatment",
+                other,
+                &["standard", "spalding", "rough", "lowRe"],
+                "standard",
+                Self::Standard,
+            ),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Spalding => "spalding",
+            Self::Rough => "rough",
+            Self::LowRe => "lowRe",
+        }
+    }
+
+    /// `nut`'s patch type under this row - SPEC-LIT §29.1's table.
+    pub fn nut_type(self) -> &'static str {
+        match self {
+            Self::Standard => "nutkWallFunction",
+            Self::Spalding => "nutUWallFunction",
+            Self::Rough => "nutkRoughWallFunction",
+            Self::LowRe => "nutLowReWallFunction",
+        }
+    }
+
+    /// `k`'s patch type under this row.
+    pub fn k_type(self) -> &'static str {
+        match self {
+            Self::LowRe => "kLowReWallFunction",
+            _ => "kqRWallFunction",
+        }
+    }
+
+    /// `epsilon`'s patch type under this row. `lowRe` pins NO wall model
+    /// (SPEC-LIT §15.2/§29.1), which this row completes as plain
+    /// `zeroGradient` - there is no distinct low-Re-named `epsilon` wall
+    /// condition in this solver, only the absence of the constraining one.
+    pub fn epsilon_type(self) -> &'static str {
+        match self {
+            Self::LowRe => "zeroGradient",
+            _ => "epsilonWallFunction",
+        }
+    }
+
+    /// `omega`'s patch type under this row - same reasoning as
+    /// [`Self::epsilon_type`].
+    pub fn omega_type(self) -> &'static str {
+        match self {
+            Self::LowRe => "zeroGradient",
+            _ => "omegaWallFunction",
+        }
+    }
+
+    /// SPEC-LIT §29.3: every row applies the Jayatilleke thermal wall
+    /// function to `T` on walls when the energy equation is solved, except
+    /// `lowRe`, which pins the molecular resistance the resolved mesh already
+    /// provides - `None` here means "leave `T` alone", not "no field".
+    pub fn thermal_type(self) -> Option<&'static str> {
+        match self {
+            Self::LowRe => None,
+            _ => Some("thermalWallFunction"),
+        }
+    }
+}
+
+/// Sand-grain roughness for the `rough` `wallTreatment` row - SPEC-LIT
+/// §15.3/§29.1/§29.2. `Cs` defaults to `0.5` (uniform sand); `Ks` has no
+/// default - "a rough wall with no Ks is a smooth wall with a misleading
+/// name" (SPEC-LIT §15.3), so it is refused rather than guessed at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Roughness {
+    pub ks: Scalar,
+    pub cs: Scalar,
+}
+
+impl Roughness {
+    /// `treatment == Rough` requires `ks`; every other treatment ignores
+    /// roughness entirely (`ks`/`cs` given or not - a `Ks` entry on a
+    /// `standard` case is simply unused, not an error).
+    ///
+    /// `setting` names where `Ks` was expected, for the diagnostic - the RAS
+    /// dict path, the JSONC patch rule, or the `-Ks` command line flag.
+    pub fn resolve(
+        treatment: WallTreatment,
+        ks: Option<Scalar>,
+        cs: Option<Scalar>,
+        setting: &str,
+    ) -> Result<Option<Self>> {
+        if treatment != WallTreatment::Rough {
+            return Ok(None);
+        }
+        let ks = ks.ok_or_else(|| {
+            Error::Config(format!(
+                "{setting}: wallTreatment \"rough\" needs a `Ks` entry (sand-grain height, \
+                 m) - a rough wall with no Ks is a smooth wall with a misleading name \
+                 (SPEC-LIT 15.3)"
+            ))
+        })?;
+        Ok(Some(Self { ks, cs: cs.unwrap_or(0.5) }))
+    }
+}
+
+/// `RAS/wallTreatment` and `RAS/roughness` out of an already-read
+/// `constant/momentumTransport` dictionary - SPEC-LIT §29.1 route (a). Split
+/// out of [`read_case_controls`] so it can be exercised directly against a
+/// bare [`FoamDict`], with no polyMesh on disk to satisfy.
+pub fn read_wall_treatment(d: &FoamDict) -> Result<(WallTreatment, Option<Roughness>)> {
+    let wt_name = d.get_or("RAS/wallTreatment", "standard").to_string();
+    let wt = WallTreatment::from_name(&wt_name)?;
+
+    let ks = d
+        .has("RAS/roughness/Ks")
+        .then(|| d.scalar("RAS/roughness/Ks", 0.0));
+    let cs = d
+        .has("RAS/roughness/Cs")
+        .then(|| d.scalar("RAS/roughness/Cs", 0.5));
+    let rough = Roughness::resolve(wt, ks, cs, "constant/momentumTransport: RAS/roughness")?;
+
+    Ok((wt, rough))
+}
+
 /// Everything a RAS model needs from `system/` plus the bounds it enforces.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TurbulenceControls {
@@ -391,6 +562,17 @@ pub struct CaseControls {
     pub turb: TurbulenceControls,
     pub wall: WallFunctionCoeffs,
 
+    /// SPEC-LIT §29.1 route (a): `RAS/wallTreatment` - the case-level
+    /// default every wall patch's per-field types expand to, UNLESS an
+    /// explicit per-field patch type is present in that field's own `0/`
+    /// file. Applying that expansion to a raw field read from disk is
+    /// [`crate::field_setup::apply_wall_treatment_defaults`]; this struct
+    /// only carries what the case asked for.
+    pub wall_treatment: WallTreatment,
+    /// `RAS/roughness { Ks; Cs; }`, resolved against [`Self::wall_treatment`]
+    /// - `None` unless the case is `rough`.
+    pub roughness: Option<Roughness>,
+
     /// `constant/g` and `physicalProperties`' `TRef` - the two entries the
     /// buoyant momentum equation reads.
     ///
@@ -442,6 +624,8 @@ impl Default for CaseControls {
             nu: 1e-5,
             turb: TurbulenceControls::default(),
             wall: WallFunctionCoeffs::default(),
+            wall_treatment: WallTreatment::Standard,
+            roughness: None,
             buoyancy: BuoyancyCoeffs::default(),
             model_name: String::new(),
             write_time: "1".to_string(),
@@ -1042,6 +1226,15 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
         }
     }
 
+    // SPEC-LIT §29.1 route (a): `wallTreatment` (+ `roughness { Ks; Cs; }`)
+    // in the RAS block is the case-level default; "explicit per-field patch
+    // types override per patch" is applied downstream, per field, by
+    // `crate::field_setup::apply_wall_treatment_defaults` - this is only the
+    // default itself.
+    let (wt, rough) = read_wall_treatment(&c.momentum_transport)?;
+    c.wall_treatment = wt;
+    c.roughness = rough;
+
     // SPEC-LIT 15.6: `C_mu`, `kappa` and `E` appear in both the model (6.1)
     // and the wall treatment (6.4), and a case that overrides one must have
     // the override reach both - or `nu_t = C_mu k^2/eps` and
@@ -1319,6 +1512,126 @@ mod tests {
         // switch branch at the wrong y+.
         let residual = ypl - (e * ypl).ln() / kappa;
         assert!(residual.abs() < 2e-2, "fixed-point residual {residual}");
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §29.1: wallTreatment presets
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn wall_treatment_names_round_trip() {
+        for (name, wt) in [
+            ("standard", WallTreatment::Standard),
+            ("spalding", WallTreatment::Spalding),
+            ("rough", WallTreatment::Rough),
+            ("lowRe", WallTreatment::LowRe),
+        ] {
+            assert_eq!(WallTreatment::from_name(name).unwrap(), wt);
+            assert_eq!(wt.name(), name);
+        }
+        // No `wallTreatment` entry at all is `standard`, not an error.
+        assert_eq!(WallTreatment::from_name("").unwrap(), WallTreatment::Standard);
+    }
+
+    /// Each row expands to exactly its table - SPEC-LIT §29.1.
+    #[test]
+    fn each_preset_expands_to_exactly_its_row() {
+        use WallTreatment::*;
+
+        assert_eq!(Standard.nut_type(), "nutkWallFunction");
+        assert_eq!(Standard.k_type(), "kqRWallFunction");
+        assert_eq!(Standard.epsilon_type(), "epsilonWallFunction");
+        assert_eq!(Standard.omega_type(), "omegaWallFunction");
+        assert_eq!(Standard.thermal_type(), Some("thermalWallFunction"));
+
+        assert_eq!(Spalding.nut_type(), "nutUWallFunction");
+        assert_eq!(Spalding.k_type(), "kqRWallFunction");
+        assert_eq!(Spalding.epsilon_type(), "epsilonWallFunction");
+        assert_eq!(Spalding.omega_type(), "omegaWallFunction");
+        assert_eq!(Spalding.thermal_type(), Some("thermalWallFunction"));
+
+        assert_eq!(Rough.nut_type(), "nutkRoughWallFunction");
+        assert_eq!(Rough.k_type(), "kqRWallFunction");
+        assert_eq!(Rough.epsilon_type(), "epsilonWallFunction");
+        assert_eq!(Rough.omega_type(), "omegaWallFunction");
+        assert_eq!(Rough.thermal_type(), Some("thermalWallFunction"));
+
+        assert_eq!(LowRe.nut_type(), "nutLowReWallFunction");
+        assert_eq!(LowRe.k_type(), "kLowReWallFunction");
+        assert_eq!(LowRe.epsilon_type(), "zeroGradient");
+        assert_eq!(LowRe.omega_type(), "zeroGradient");
+        // §29.3: lowRe pins the molecular resistance already there - no
+        // thermal wall function.
+        assert_eq!(LowRe.thermal_type(), None);
+    }
+
+    #[test]
+    fn unknown_wall_treatment_names_the_menu() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        let err = WallTreatment::from_name("garbageTreatment").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("garbageTreatment"), "{msg}");
+        assert!(msg.contains("standard"), "{msg}");
+        assert!(msg.contains("lowRe"), "{msg}");
+    }
+
+    #[test]
+    fn rough_without_ks_is_an_error_naming_it() {
+        let err = Roughness::resolve(WallTreatment::Rough, None, None, "test").unwrap_err();
+        assert!(err.to_string().contains("Ks"), "{err}");
+    }
+
+    #[test]
+    fn rough_with_ks_defaults_cs_to_one_half() {
+        let r = Roughness::resolve(WallTreatment::Rough, Some(0.001), None, "test")
+            .unwrap()
+            .expect("rough carries a roughness");
+        assert_eq!(r.ks, 0.001);
+        assert_eq!(r.cs, 0.5);
+    }
+
+    #[test]
+    fn non_rough_treatments_ignore_ks_entirely() {
+        // A `Ks` entry left over from a different case is simply unused - not
+        // an error - once the treatment is not `rough`.
+        let r = Roughness::resolve(WallTreatment::Standard, None, None, "test").unwrap();
+        assert!(r.is_none());
+        let r = Roughness::resolve(WallTreatment::Standard, Some(0.001), None, "test").unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn ras_dict_default_is_standard_with_no_roughness() {
+        let d = FoamDict::parse("RAS { model kEpsilon; }", "momentumTransport").unwrap();
+        let (wt, rough) = read_wall_treatment(&d).unwrap();
+        assert_eq!(wt, WallTreatment::Standard);
+        assert!(rough.is_none());
+    }
+
+    #[test]
+    fn ras_dict_reads_rough_and_its_roughness() {
+        let d = FoamDict::parse(
+            "RAS { model kEpsilon; wallTreatment rough; roughness { Ks 0.001; Cs 0.6; } }",
+            "momentumTransport",
+        )
+        .unwrap();
+        let (wt, rough) = read_wall_treatment(&d).unwrap();
+        assert_eq!(wt, WallTreatment::Rough);
+        let r = rough.expect("rough case carries a roughness");
+        assert_eq!(r.ks, 0.001);
+        assert_eq!(r.cs, 0.6);
+    }
+
+    #[test]
+    fn ras_dict_rough_without_ks_is_an_error() {
+        let d = FoamDict::parse(
+            "RAS { model kEpsilon; wallTreatment rough; }",
+            "momentumTransport",
+        )
+        .unwrap();
+        let err = read_wall_treatment(&d).unwrap_err();
+        assert!(err.to_string().contains("Ks"), "{err}");
     }
 
     #[test]

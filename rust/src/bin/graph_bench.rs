@@ -33,7 +33,7 @@ use ofgpu::field::{GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, max_div_phi, setup_scalar_field, setup_vector_field,
-    wall_coeffs_from_case, WallFaces,
+    wall_coeffs_from_case, NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{find_start_time, model_coeff, read_case_controls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field};
@@ -141,6 +141,7 @@ fn run(o: &Opts) -> Result<()> {
         None
     };
     let wf = WallFaces::from_case(&raw_e, raw_nut.as_ref(), &hm)?;
+    let roughness = NutRoughness::from_case(raw_nut.as_ref(), &hm)?;
     let flow = FlowState::new(&u, &phi, cc.nu);
 
     // A fresh model per mode, so no mode inherits another's converged state.
@@ -162,6 +163,7 @@ fn run(o: &Opts) -> Result<()> {
             turb,
             wall_coeffs_from_case(&cc.wall),
             &wf,
+            &roughness,
         )?;
         setup_scalar_field(gpu, m.k_mut(), &raw_k, &hm)?;
         setup_scalar_field(gpu, m.epsilon_mut(), &raw_e, &hm)?;

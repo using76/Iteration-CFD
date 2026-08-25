@@ -5,8 +5,38 @@
 fvSchemes,fvSolution}` and a `0/` directory with `U`, `k`, `epsilon`, `omega` and `nut`.
 
 ```powershell
-cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [-stl [name=]path]... [-permissive]
+cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [-stl [name=]path]... [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-permissive]
 ```
+
+### `-wallModel` — 벽 처리 프리셋 (SPEC-LIT §29.1)
+
+한 케이스의 모든 벽에 `nut`/`k`/`epsilon`/`omega`(그리고 에너지 방정식을 풀 때는
+`T`까지) 경계 타입을 **일관된 한 행**으로 채워 넣습니다 — 필드마다 따로 골라
+서로 모순되는 조합(예: 서브레이어를 직접 해상하는 `nutLowReWallFunction`과
+벽함수로 강제하는 `epsilonWallFunction`을 같이 씀)을 만드는 실수를 막기 위한
+것입니다.
+
+| 프리셋 | `nut` | `k` | `epsilon`/`omega` | `T` (에너지 방정식을 풀 때) |
+|---|---|---|---|---|
+| `standard` (기본값) | `nutkWallFunction` | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` | `thermalWallFunction` |
+| `spalding` | `nutUWallFunction` | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` | `thermalWallFunction` |
+| `rough` | `nutkRoughWallFunction`(`-Ks` 필요, `-Cs` 기본 0.5) | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` | `thermalWallFunction` |
+| `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `zeroGradient` (분자 점성만) | 손대지 않음 — 해상된 서브레이어 자체의 분자 저항을 그대로 둠 |
+
+`-wallModel`을 주지 않으면 기존 동작(레거시 기본값) 그대로입니다. `rough`는
+`-Ks`(모래알 거칠기, m)가 필수이고 `-Cs`(거칠기 상수, 기본 0.5)는 선택입니다.
+예:
+
+```powershell
+cargo run --release --bin ofgpu-generate-mesh -- plume ..\cases\plumeRough 30 20 10 -wallModel rough -Ks 0.003
+```
+
+`Ks -> 0`은 매끈한 벽함수를 반올림 오차 수준까지 정확히 재현합니다
+(`ofgpu-validate`의 상시 게이트, 최상위 README "검증" 절 참고). 필드별
+명시적 패치 타입 > 패치별 `wallTreatment` 오버라이드 > 케이스 기본값 순으로
+우선하며, 한 벽 패치의 네(다섯) 필드가 서로 다른 행에 걸쳐 있으면 이름을
+밝힌 오류로 거부합니다 — `-permissive`는 `nut`의 선택이 함의하는 행으로
+대체하고 무엇으로 바꿨는지 출력합니다.
 
 `-stl [name=]path` (반복 가능) — 어느 케이스든 블록 격자를 STL 표면으로 계단식
 (castellated)으로 조각합니다 (SPEC-LIT §23). 표면 안에 셀 중심이 놓인 셀은 제거되고,
@@ -104,5 +134,9 @@ foamFormatConvert -constant -time 0
 지원하는 경계조건: `fixedValue`, `zeroGradient`, `fixedGradient`, `mixed`,
 `inletOutlet`, `calculated`, `empty`, `symmetry`/`symmetryPlane`/`slip`, `cyclic`,
 `noSlip`, 그리고 벽함수 `nutkWallFunction`, `nutUWallFunction`,
-`nutLowReWallFunction`, `epsilonWallFunction`, `omegaWallFunction`,
-`kqRWallFunction`, `kLowReWallFunction`. 모르는 타입은 `calculated`로 처리합니다.
+`nutLowReWallFunction`, `nutkRoughWallFunction`/`nutURoughWallFunction`
+(`Ks`/`Cs` 항목 필요, SPEC-LIT §15.3), `epsilonWallFunction`, `omegaWallFunction`,
+`kqRWallFunction`, `kLowReWallFunction`, 그리고 `T`의 `thermalWallFunction`
+(Jayatilleke 열 벽함수, SPEC-LIT §29.3 — OpenFOAM의
+`compressible::alphatJayatillekeWallFunction`도 별칭으로 인식하며 무엇으로
+해석했는지 출력). 모르는 타입은 `calculated`로 처리합니다.

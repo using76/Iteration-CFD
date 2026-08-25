@@ -237,6 +237,7 @@ impl<'m> ScalarTransport<'m> {
         // A passive scalar has no wall treatment of any kind: neither a
         // constrained wall cell nor a wall value for nu_t.
         let no_wall_functions = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
         let core = RasCore::new(
             gpu,
             hm,
@@ -244,6 +245,7 @@ impl<'m> ScalarTransport<'m> {
             ctrl,
             WallFunctionCoeffs::default(),
             &no_wall_functions,
+            &no_roughness,
         )?;
 
         Ok(Self {

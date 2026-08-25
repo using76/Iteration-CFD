@@ -26,6 +26,12 @@
 //!     (the density-ratio buoyancy this module's gas state feeds), S13
 //!     (`ddtSchemes`, S13.4's unsupported-setting contract) and S18 (the
 //!     volumetric source registry pattern [`EnergySources`] specialises)
+//!   Jayatilleke, *Prog. Heat Mass Transfer* 1 (1969) 193-330 - the sublayer
+//!     resistance correction to the thermal log law, SPEC-LIT S29.3
+//!     ([`Self::set_thermal_wall`]; the law itself and its device kernel live
+//!     in `crate::wallfunctions`/`cuda/wallfunctions.cu`, this module only
+//!     owns the wall-BC wiring - which faces, and where in [`Energy::correct`]
+//!     the triple gets rewritten)
 //! No GPL-licensed source was consulted.
 //!
 //! # What lives here, and what does not
@@ -85,16 +91,20 @@
 //! `SPEC-LIT` S13.4's own rule applied to a gap in this module rather than in
 //! a case setting.
 //!
-//! **3. The T-equation wall function is out of scope, and SAID so.**
-//! `SPEC-LIT` S26: "the convective wall function for temperature
-//! (Jayatilleke-type) is deferred". `crate::field::BcKind` has no
-//! temperature-wall-function variant at all - there is structurally nothing
-//! for a case to request - so a fixed-T or fixed-flux wall is exactly the
-//! generic S4 Robin triple every other scalar in this crate already uses,
-//! with [`flux_to_grad`] doing the one conversion a fixed-flux wall needs
-//! (`g_ref = q_w/k_eff`). Whichever module parses `boundaryField/T/type` is
-//! responsible for rejecting a request for the convective wall function by
-//! name (S13.4); this module offers no silent substitute for one.
+//! **3. The T-equation wall function - SPEC-LIT S29.3, the Jayatilleke
+//! correction - is now implemented.** `crate::field::BcKind::ThermalWallFunction`
+//! is the patch type that asks for it; [`Self::set_thermal_wall`] wires the
+//! faces `T`'s own patch types name (SPEC-LIT S15.5's rule, extended to a
+//! fifth field) onto a [`crate::wallfunctions::ThermalWallData`], and
+//! [`Self::correct`] refreshes its Robin triple every outer iteration, right
+//! after [`Self::update_k_eff`] and before [`Self::assemble`] - the log-law
+//! sublayer resistance this crate's high-Re wall-function meshes were
+//! missing (S26's original note, quoted for history: "the convective wall
+//! function for temperature (Jayatilleke-type) is deferred"). A plain
+//! fixed-T or fixed-flux wall is still exactly the generic S4 Robin triple
+//! every other scalar in this crate uses, with [`flux_to_grad`] doing the one
+//! conversion a fixed-flux wall needs (`g_ref = q_w/k_eff`); a case that never
+//! calls [`Self::set_thermal_wall`] behaves exactly as before.
 
 use std::path::Path;
 
@@ -114,6 +124,7 @@ use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::GpuMesh;
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::timescheme::{Ddt, DdtScheme, TimeKernels};
+use crate::wallfunctions::{ThermalWallData, WallFunctionCoeffs};
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -141,6 +152,12 @@ pub struct GasProperties {
     pub k: Scalar,
     /// Turbulent Prandtl number - S26's `k_eff = k + rho cp nu_t/Pr_t`.
     pub pr_t: Scalar,
+    /// Molecular Prandtl number, `nu cp rho / k` - SPEC-LIT S29.3's
+    /// Jayatilleke thermal wall function needs it apart from `Pr_t`; nothing
+    /// else in this module does, because `k_eff`'s molecular half is already
+    /// `k` directly. 0.71 is air at ambient conditions, the same default
+    /// [`crate::scalar_transport::ScalarTransportCoeffs::pr`] carries.
+    pub pr: Scalar,
 }
 
 impl Default for GasProperties {
@@ -157,6 +174,7 @@ impl Default for GasProperties {
             gamma: 1.4,
             k: 0.026,
             pr_t: 0.85,
+            pr: 0.71,
         }
     }
 }
@@ -175,6 +193,7 @@ impl GasProperties {
             ("gasProperties/Cp", self.cp),
             ("gasProperties/k", self.k),
             ("gasProperties/Prt", self.pr_t),
+            ("gasProperties/Pr", self.pr),
         ];
         for (name, v) in positive {
             if !(v > 0.0) || !v.is_finite() {
@@ -211,6 +230,7 @@ impl GasProperties {
         c.gamma = d.scalar("gamma", c.gamma);
         c.k = d.scalar("k", c.k);
         c.pr_t = d.scalar("Prt", c.pr_t);
+        c.pr = d.scalar("Pr", c.pr);
         Ok(c)
     }
 }
@@ -806,6 +826,18 @@ pub struct Energy<'m> {
 
     dp0dt_su: DevBuf<Scalar>,
     target_div: DevBuf<Scalar>,
+
+    /// `kappa`/`E`/`C_mu` for [`Self::twd`] - SPEC-LIT S15.6: the same
+    /// constants a case's momentum wall function uses, not a second set.
+    /// [`WallFunctionCoeffs::default`] until [`Self::set_thermal_wall`] says
+    /// otherwise.
+    wall: WallFunctionCoeffs,
+    /// The Jayatilleke thermal wall function's faces - SPEC-LIT S29.3.
+    /// `None` until [`Self::set_thermal_wall`] is called, which is exactly
+    /// what a case with no `thermalWallFunction` patch wants: every
+    /// [`ThermalWallData`] launcher is skipped by [`Self::update_thermal_wall`]
+    /// rather than run over zero faces.
+    twd: Option<ThermalWallData>,
 }
 
 impl<'m> Energy<'m> {
@@ -857,6 +889,9 @@ impl<'m> Energy<'m> {
 
             dp0dt_su: gpu.zeros(one(n))?,
             target_div: gpu.zeros(one(n))?,
+
+            wall: WallFunctionCoeffs::default(),
+            twd: None,
         })
     }
 
@@ -910,6 +945,39 @@ impl<'m> Energy<'m> {
     /// Use this field's own `divSchemes` entry - SPEC-LIT S11.7.
     pub fn set_convection(&mut self, conv: DivEntry) {
         self.ctrl.div_scheme = conv;
+    }
+
+    /// Wire the Jayatilleke thermal wall function (SPEC-LIT S29.3) onto
+    /// whichever faces `T`'s OWN patch type asked for -
+    /// `crate::field::BcKind::ThermalWallFunction` - the S15.5 rule this
+    /// crate already applies to `nut`/`epsilon`/`omega` extended to `T`:
+    /// `faces[bf]` must come from `T`'s own field file
+    /// (`crate::field_setup::faces_where` with
+    /// `crate::field::BcKind::is_thermal_wall_function`), never derived from
+    /// another field's.
+    ///
+    /// `wall` is the case's `kappa`/`E`/`C_mu` - SPEC-LIT S15.6, the SAME
+    /// triple the momentum wall function reads, not a second copy a case
+    /// could override independently by accident.
+    ///
+    /// Call once, after [`Self::new`] and before the first [`Self::correct`].
+    /// A case with no `thermalWallFunction` patch on `T` never needs to call
+    /// this at all - [`Self::correct`] skips the update entirely while
+    /// [`Self::twd`] is `None`, and every field this module already set up
+    /// (a plain fixed-T or fixed-flux wall, S26's original behaviour) is
+    /// untouched.
+    pub fn set_thermal_wall(&mut self, gpu: &Gpu, wall: WallFunctionCoeffs, faces: &[bool]) -> Result<()> {
+        if faces.len() != self.m.n_boundary_faces {
+            return Err(Error::Config(format!(
+                "Energy::set_thermal_wall: {} face flags, the mesh has {} \
+                 boundary faces",
+                faces.len(),
+                self.m.n_boundary_faces
+            )));
+        }
+        self.wall = wall;
+        self.twd = Some(ThermalWallData::build(gpu, faces)?);
+        Ok(())
     }
 
     /// Advance the ddt scheme's own time-step bookkeeping - call ONCE per
@@ -976,6 +1044,46 @@ impl<'m> Energy<'m> {
 
         field_ops::copy_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.bf, &self.k_eff_face.bf, m.n_boundary_faces)?;
         field_ops::multiply_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.bf, &m.b_mag_sf, m.n_boundary_faces)
+    }
+
+    /// SPEC-LIT S29.3: rewrite `T`'s Robin triple on every
+    /// `thermalWallFunction` face - a no-op while [`Self::twd`] is `None`
+    /// (`set_thermal_wall` was never called). Reads `self.k_eff_face.bf`, so
+    /// it MUST run after [`Self::update_k_eff`] and before
+    /// [`Self::assemble`]; `k` is the turbulence kinetic energy's cell field
+    /// and `rho` its density, both at the SAME lag `nut` itself carries into
+    /// this equation - the standard segregated coupling every other
+    /// coefficient here already runs at.
+    ///
+    /// `k_min` is [`crate::io::case::TurbulenceControls::k_min`]'s own
+    /// default (`1e-15`) rather than a case override reaching in here: unlike
+    /// `kappa`/`E`/`C_mu` (SPEC-LIT S15.6), it is a floor against `sqrt(0)`,
+    /// not a physical constant the model and the wall treatment could
+    /// disagree about.
+    fn update_thermal_wall(&mut self, gpu: &Gpu, k: &DevBuf<Scalar>, rho: &DevBuf<Scalar>, nu: Scalar) -> Result<()> {
+        const K_MIN: Scalar = 1e-15;
+
+        let Some(twd) = &self.twd else {
+            return Ok(());
+        };
+
+        twd.update(
+            gpu,
+            &mut self.t.fr,
+            &mut self.t.ref_grad,
+            &self.t.ref_value,
+            &self.t.f,
+            k,
+            rho,
+            &self.k_eff_face.bf,
+            self.m,
+            &self.wall,
+            nu,
+            self.props.cp,
+            self.props.pr,
+            self.props.pr_t,
+            K_MIN,
+        )
     }
 
     /// `phi_conv = cp * rho_f * phi` - S26's mass flux, reusing the
@@ -1123,12 +1231,19 @@ impl<'m> Energy<'m> {
     /// mass flux - this function builds the mass flux itself from `gas`).
     /// `nut` is the eddy viscosity the momentum/turbulence equations solved
     /// with this iteration, the same segregated lag every other equation in
-    /// this crate reads it with.
+    /// this crate reads it with. `k` (the turbulence kinetic energy's cell
+    /// field) and `nu` (the molecular kinematic viscosity) are read ONLY by
+    /// [`Self::update_thermal_wall`] - SPEC-LIT S29.3 - and only where
+    /// [`Self::set_thermal_wall`] has been called; a case with no thermal
+    /// wall function may pass any field of the right length (it is never
+    /// dereferenced) and any `nu`.
     pub fn correct(
         &mut self,
         gpu: &Gpu,
         phi: &GpuSurfaceScalarField,
         nut: &GpuScalarField,
+        k: &DevBuf<Scalar>,
+        nu: Scalar,
         gas: &GasState,
     ) -> Result<SolverPerformance> {
         let m = self.m;
@@ -1141,6 +1256,7 @@ impl<'m> Energy<'m> {
 
         self.refresh_rho_cp(gpu, gas)?;
         self.update_k_eff(gpu, nut, gas)?;
+        self.update_thermal_wall(gpu, k, &gas.rho().f, nu)?;
         self.update_conv_flux(gpu, phi)?;
 
         let alpha = self.ctrl.t_relax;
@@ -1170,6 +1286,7 @@ impl<'m> Energy<'m> {
 mod tests {
     use super::*;
     use crate::field::BcKind;
+    use crate::wallfunctions::thermal_wall_ref_grad;
     use crate::mesh::{HostMesh, PatchKind};
     use crate::momentum::BuoyancyCoeffs;
 
@@ -1458,8 +1575,11 @@ mod tests {
         let mut gas = gas;
         gas.update_density(&g, e.field())?;
 
+        // No thermal wall function in this test - `set_thermal_wall` was
+        // never called, so `k`/`nu` below are never read.
+        let k = g.zeros::<Scalar>(hm.n_cells.max(1))?;
         for _ in 0..3 {
-            e.correct(&g, &phi, &nut, &gas)?;
+            e.correct(&g, &phi, &nut, &k, 0.0, &gas)?;
         }
 
         // T(x) = T_L + (q_w/k) * (L - x), so dT/dx = -q_w/k everywhere.
@@ -1571,8 +1691,10 @@ mod tests {
             // not.
             gas.update_density(&g, e.field())?;
 
+            // No thermal wall function in this test.
+            let k = g.zeros::<Scalar>(hm.n_cells.max(1))?;
             for _ in 0..steps {
-                e.correct(&g, &phi, &nut, &gas)?;
+                e.correct(&g, &phi, &nut, &k, 0.0, &gas)?;
             }
 
             let got = g.download(&e.field().f)?;
@@ -1595,6 +1717,127 @@ mod tests {
             "errors were {errors:?}; ratio {ratio} is not close to the \
              4x a 2nd-order scheme should give when h is halved"
         );
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §29.3 - the Jayatilleke thermal wall function's wiring
+    // ----------------------------------------------------------------------
+
+    /// [`Energy::set_thermal_wall`] plus one [`Energy::correct`] must rewrite
+    /// the `thermalWallFunction` face's triple to exactly
+    /// [`crate::wallfunctions::thermal_wall_ref_grad`]'s answer, evaluated at
+    /// the cell temperature as it stood BEFORE this call (`update_thermal_wall`
+    /// runs before `assemble`, so it reads the still-previous `T_P`) and at
+    /// `k_eff_wall = props.k` exactly - `nut` is zero everywhere in this
+    /// laminar test, so S26's `k_eff = k + rho cp nu_t/Pr_t` has nothing to
+    /// add. This is the wall-BC WIRING test; [`thermal_wall_ref_grad`]'s own
+    /// module in `src/wallfunctions.rs` is where the LAW itself is pinned
+    /// down.
+    #[test]
+    fn set_thermal_wall_rewrites_the_triple_through_correct() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 6;
+        let h: Scalar = 0.05;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+
+        let props = GasProperties { k: 0.03, cp: 1006.0, ..GasProperties::default() };
+        let (mut e, nut, phi) = laminar_slab_energy(&g, &hm, &m, props, true, 1.0)?;
+
+        let wc = WallFunctionCoeffs::default();
+        let mut faces = vec![false; hm.n_boundary_faces];
+        let wall_patch = &hm.patches[0]; // xmin, same convention every other slab test here uses
+        for i in 0..wall_patch.size {
+            faces[wall_patch.start + i] = true;
+        }
+        e.set_thermal_wall(&g, wc, &faces)?;
+
+        let t_w: Scalar = 350.0;
+        let t_init: Scalar = 300.0;
+        {
+            let f = e.field_mut();
+            let nbf = hm.n_boundary_faces;
+            let mut kind = vec![BcKind::Empty as Label; nbf];
+            let mut fr = vec![0.0 as Scalar; nbf];
+            let mut rv = vec![0.0 as Scalar; nbf];
+            for (p, pi) in hm.patches.iter().enumerate() {
+                if p == 0 {
+                    for k in 0..pi.size {
+                        kind[pi.start + k] = BcKind::ThermalWallFunction as Label;
+                        fr[pi.start + k] = 1.0; // field_setup's own seed for this kind
+                        rv[pi.start + k] = t_w;
+                    }
+                } else {
+                    for k in 0..pi.size {
+                        kind[pi.start + k] = BcKind::ZeroGradient as Label;
+                    }
+                }
+            }
+            g.write(&mut f.bc_kind, &kind)?;
+            g.write(&mut f.fr, &fr)?;
+            g.write(&mut f.ref_value, &rv)?;
+            g.write(&mut f.f, &vec![t_init; hm.n_cells])?;
+        }
+        e.initialise(&g)?;
+
+        let mut gas = GasState::new(&g, &m, props, DomainKind::Open, 101_325.0)?;
+        gas.update_density(&g, e.field())?;
+
+        let k_val: Scalar = 0.02;
+        let nu: Scalar = 1.5e-5;
+        let k_dev = g.upload(&vec![k_val; hm.n_cells])?;
+
+        e.correct(&g, &phi, &nut, &k_dev, nu, &gas)?;
+
+        let wall_face = wall_patch.start;
+        let wall_cell = hm.b_face_cells[wall_face] as usize;
+        let rho_host = g.download(&gas.rho().f)?;
+        let y = hm.b_y[wall_face];
+
+        let want = thermal_wall_ref_grad(
+            t_w,
+            t_init, // T_P as it stood before `correct` ran
+            k_val,
+            y,
+            nu,
+            rho_host[wall_cell],
+            props.cp,
+            props.pr,
+            props.pr_t,
+            wc.kappa,
+            wc.e,
+            wc.cmu,
+            props.k, // k_eff_wall: nut = 0 everywhere, so k_eff = k exactly
+            1e-15,
+        )
+        .expect("a positive standoff and k_eff must produce a ref_grad");
+
+        let got_fr = g.download(&e.field().fr)?;
+        let got_grad = g.download(&e.field().ref_grad)?;
+
+        assert_eq!(
+            got_fr[wall_face], 0.0,
+            "ThermalWallFunction must rewrite fr to the fixedGradient degenerate form"
+        );
+        assert!(
+            (got_grad[wall_face] - want).abs() <= 1e-9 * want.abs().max(1e-9),
+            "wall face ref_grad {}, wanted {want}",
+            got_grad[wall_face]
+        );
+
+        // Every OTHER boundary face is untouched: it never entered
+        // `ThermalWallData`'s face list, so `fr` still holds whatever
+        // `field_setup`/the test itself seeded (`zeroGradient`'s `fr = 0`,
+        // coincidentally the same number - checked via `bc_kind` instead).
+        let got_kind = g.download(&e.field().bc_kind)?;
+        for (bf, &k) in got_kind.iter().enumerate() {
+            if bf != wall_face {
+                assert_ne!(k, BcKind::ThermalWallFunction as Label);
+            }
+        }
+
         Ok(())
     }
 
