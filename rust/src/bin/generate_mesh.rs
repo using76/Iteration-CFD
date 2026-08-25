@@ -62,7 +62,7 @@ use common::atoi;
 
 fn usage() {
     eprintln!(
-        "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|damBreak> <outputDir> \
+        "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak> <outputDir> \
          [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]] [-permissive]\n       \
          ofgpu-generate-mesh big <outputDir> [n] [-stl ...]   # n^3 cells\n\
          {}",

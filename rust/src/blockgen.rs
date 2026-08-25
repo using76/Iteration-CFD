@@ -2588,7 +2588,7 @@ pub fn write_cutcell_case(
     write_system(case_dir)?;
 
     let (nu, u_ref, half_height) = case_run_params(kind, &b, &block);
-    let extra = if kind == CaseKind::Plume {
+    let extra = if buoyant_case(kind) {
         "\n\n// Air at ambient. Read by the temperature equation.\n\
          Pr              0.71;\n\
          Prt             0.85;\n\n\
@@ -2599,7 +2599,7 @@ pub fn write_cutcell_case(
         ""
     };
     write_constant(case_dir, nu, "kEpsilon", extra)?;
-    if kind == CaseKind::Plume {
+    if buoyant_case(kind) {
         write_gravity(case_dir)?;
     }
 
@@ -2754,7 +2754,8 @@ fn build_cutcell_fields(
 ) -> Result<InMemoryFields> {
     let _ = nu; // carried for signature parity with `build_initial_fields`; unused here
     let n_cells = centroids.len();
-    let plume = kind == CaseKind::Plume;
+    let plume = buoyant_case(kind);
+    let t_inlet = if kind == CaseKind::Room { ROOM_T_INLET } else { PLUME_T_INLET };
     let cavity = kind == CaseKind::Cavity;
 
     struct FP<'a> {
@@ -2862,7 +2863,7 @@ fn build_cutcell_fields(
                 patch_spec("empty")
             } else if fp.name == "inlet" {
                 let mut s = patch_spec("fixedValue");
-                s.value = vec![PLUME_T_INLET];
+                s.value = vec![t_inlet];
                 s
             } else if pk == PatchKind::Wall {
                 patch_spec("zeroGradient")
@@ -2925,6 +2926,10 @@ fn build_cutcell_fields(
 /// The ready-to-run cases `generate_cases` knows how to build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaseKind {
+    /// 10 x 10 x 3 m test room: hot air in through the whole -x wall, a
+    /// 2 x 2 m door in the +x wall as the single pressure opening; interior
+    /// baffles come from an `-stl` carve.
+    Room,
     /// Plane channel, graded to both walls, 2-D.
     Channel,
     /// Lid-driven cavity, 2-D.
@@ -2952,6 +2957,7 @@ impl CaseKind {
             Self::Step => "step",
             Self::Big => "big",
             Self::Plume => "plume",
+            Self::Room => "room",
             Self::DamBreak => "damBreak",
         }
     }
@@ -2963,6 +2969,7 @@ impl CaseKind {
             "step" => Some(Self::Step),
             "big" => Some(Self::Big),
             "plume" => Some(Self::Plume),
+            "room" => Some(Self::Room),
             "damBreak" | "dambreak" => Some(Self::DamBreak),
             _ => None,
         }
@@ -2978,6 +2985,9 @@ impl CaseKind {
             // 14.64 x 6.24 x 3 m at ~0.15 m: the cell count of the published
             // FDS-vs-GPU fire benchmark, so timings are comparable to it.
             Self::Plume => (98, 42, 20),
+            // 10 x 10 x 3 m at 0.1 m: 300k cells; centres at z = ..., 2.75,
+            // 2.85, 2.95, so a near-ceiling slice sits in the hot layer.
+            Self::Room => (100, 100, 30),
             // 5a x 3a at a/30, so the column is 30 cells wide and 60 tall -
             // enough for the surge front to be resolved to a few per cent of
             // `a` without the case taking minutes.
@@ -2993,7 +3003,7 @@ impl std::str::FromStr for CaseKind {
         Self::from_name(s)
             .ok_or_else(|| {
                 Error::Config(format!(
-                    "unknown case '{s}' (channel|cavity|step|big|plume|damBreak)"
+                    "unknown case '{s}' (channel|cavity|step|big|plume|room|damBreak)"
                 ))
             })
     }
@@ -3021,6 +3031,10 @@ const PLUME_INLET_U: Scalar = 2.0;
 
 /// Ambient air, 20 C.
 const PLUME_T_AMBIENT: Scalar = 293.15;
+
+/// Room-case inlet: 300 degC air at 2 m/s through the whole -x wall.
+const ROOM_T_INLET: Scalar = 573.15;
+const ROOM_INLET_U: Scalar = 2.0;
 
 /// Burner outlet, 900 C.
 const PLUME_T_INLET: Scalar = 1173.15;
@@ -3070,6 +3084,29 @@ fn centred_cell_range(nodes: &[Scalar], centre: Scalar, width: Scalar) -> (usize
 }
 
 /// The burner opening, as a window of the `zMin` slot.
+/// The kinds that carry gravity, a temperature equation and the buoyant
+/// `constant/` dictionaries. Field assembly treats them identically; only
+/// the numbers (inlet temperature, reference velocity) differ per kind.
+fn buoyant_case(kind: CaseKind) -> bool {
+    matches!(kind, CaseKind::Plume | CaseKind::Room)
+}
+
+/// The room's door: 2 m wide x 2 m tall, centred on the +x wall at y = 5,
+/// floor-mounted (z 0..2). The window mechanism turns `wallXMax` into
+/// `outlet` (the door) plus the remaining wall.
+fn room_door_window(b: &BlockSpec) -> PatchWindow {
+    let (j0, j1) = centred_cell_range(&graded_nodes(&b.y), 5.0, 2.0);
+    let (k0, k1) = centred_cell_range(&graded_nodes(&b.z), 1.0, 2.0);
+
+    PatchWindow {
+        slot: 1,
+        lo: [j0, k0],
+        hi: [j1, k1],
+        name: "outlet".to_string(),
+        type_name: "patch".to_string(),
+    }
+}
+
 fn plume_inlet_window(b: &BlockSpec) -> PatchWindow {
     let (i0, i1) = centred_cell_range(&graded_nodes(&b.x), 0.0, PLUME_INLET_SIDE);
     let (j0, j1) = centred_cell_range(&graded_nodes(&b.y), 0.0, PLUME_INLET_SIDE);
@@ -3179,6 +3216,22 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
                 ["wall", "wall", "wall", "patch", "empty", "empty"],
             )
         }
+        CaseKind::Room => {
+            // Hot-air serpentine test room. The whole -x wall blows 2 m/s of
+            // 300 degC air; the ONLY pressure opening is the door window cut
+            // from `wallXMax` below - the same single-opening reasoning as
+            // the plume. Baffles are carved from an STL, not geometry here.
+            b.x.lo = 0.0;
+            b.x.hi = 10.0;
+            b.y.lo = 0.0;
+            b.y.hi = 10.0;
+            b.z.lo = 0.0;
+            b.z.hi = 3.0;
+            (
+                ["inlet", "wallXMax", "wallYMin", "wallYMax", "floor", "ceiling"],
+                ["patch", "wall", "wall", "wall", "wall", "wall"],
+            )
+        }
         CaseKind::Plume => {
             // Fire plume in a room-sized box with exactly ONE opening: +x.
             //
@@ -3227,6 +3280,9 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
     if kind == CaseKind::Plume {
         b.window = Some(plume_inlet_window(&b));
     }
+    if kind == CaseKind::Room {
+        b.window = Some(room_door_window(&b));
+    }
 
     b
 }
@@ -3237,7 +3293,7 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
 /// different numbers for the same case.
 fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Scalar, Scalar) {
     // Air for the plume; every other case keeps the 1e-5 it has always had.
-    let nu: Scalar = if kind == CaseKind::Plume { 1.5e-5 } else { 1e-5 };
+    let nu: Scalar = if buoyant_case(kind) { 1.5e-5 } else { 1e-5 };
 
     let inlet = b.window.as_ref().map(|w| window_extent(&block.g, w));
     let (u_ref, half_height): (Scalar, Scalar) = match kind {
@@ -3253,6 +3309,9 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
         // inlet mixing length, which scales with the burner, not the room. The
         // two snapped sides differ by well under a percent, so their mean is
         // the honest single number to hand it.
+        // The room's inlet spans the whole 10 x 3 m wall; the mixing
+        // length scales with that opening's half-height.
+        CaseKind::Room => (ROOM_INLET_U, 1.5),
         CaseKind::Plume => {
             let side = match inlet {
                 Some((fx, fy)) => 0.25 * ((fx[1] - fx[0]) + (fy[1] - fy[0])),
@@ -3403,7 +3462,7 @@ fn write_case_impl(
     // Only the plume carries a temperature equation, so only its dictionary
     // gets the two Prandtl numbers that equation reads. Writing them into the
     // other cases would change files nothing there looks at.
-    let extra = if kind == CaseKind::Plume {
+    let extra = if buoyant_case(kind) {
         // `TRef` is the buoyancy REFERENCE, not a Boussinesq expansion point:
         // `momentum::BuoyancyCoeffs` builds the body force from the ideal-gas
         // ratio `TRef/T`, which stays exact over this case's 293 K to 1173 K
@@ -3423,7 +3482,7 @@ fn write_case_impl(
 
     // Gravity is what makes the plume a plume. Every other case here is
     // isothermal, and a `constant/g` in one of those would be read by nothing.
-    if kind == CaseKind::Plume {
+    if buoyant_case(kind) {
         write_gravity(case_dir)?;
     }
 
@@ -4128,7 +4187,8 @@ fn build_initial_fields(
     let omega0 = k0.sqrt() / (cmu.powf(0.25) * l);
 
     let cavity = kind == CaseKind::Cavity;
-    let plume = kind == CaseKind::Plume;
+    let plume = buoyant_case(kind);
+    let t_inlet = if kind == CaseKind::Room { ROOM_T_INLET } else { PLUME_T_INLET };
 
     let (lo, hi) = centre_bounds(g);
     let lx = (hi.x - lo.x).max(1e-30);
@@ -4296,7 +4356,7 @@ fn build_initial_fields(
                 patch_spec("empty")
             } else if fp.name == "inlet" {
                 let mut s = patch_spec("fixedValue");
-                s.value = vec![PLUME_T_INLET];
+                s.value = vec![t_inlet];
                 s
             } else if pk == PatchKind::Wall {
                 // Adiabatic floor and ceiling: the case is about the plume, not
@@ -5056,6 +5116,8 @@ mod tests {
         }
 
         assert_eq!(CaseKind::from_name("plume"), Some(CaseKind::Plume));
+        assert_eq!(CaseKind::from_name("room"), Some(CaseKind::Room));
+        assert_eq!(CaseKind::Room.as_str(), "room");
         assert_eq!(CaseKind::Plume.as_str(), "plume");
         assert_eq!(CaseKind::Plume.default_resolution(), (98, 42, 20));
     }
@@ -5899,4 +5961,22 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+    /// The room's door window: on the +x slot, named `outlet`, snapped to
+    /// roughly 2 m x 2 m starting at the floor.
+    #[test]
+    fn room_spec_has_a_floor_mounted_door_on_plus_x() {
+        let (nx, ny, nz) = CaseKind::Room.default_resolution();
+        let b = case_block_spec(CaseKind::Room, nx, ny, nz);
+        let w = b.window.as_ref().expect("room has a door window");
+        assert_eq!(w.slot, 1);
+        assert_eq!(w.name, "outlet");
+        let ynodes = graded_nodes(&b.y);
+        let znodes = graded_nodes(&b.z);
+        let wy = ynodes[w.hi[0]] - ynodes[w.lo[0]];
+        let wz = znodes[w.hi[1]] - znodes[w.lo[1]];
+        assert!((wy - 2.0).abs() < 0.11, "door width {wy}");
+        assert!((wz - 2.0).abs() < 0.11, "door height {wz}");
+        assert_eq!(w.lo[1], 0, "door starts at the floor");
+    }
+
 }
