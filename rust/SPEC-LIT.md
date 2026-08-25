@@ -2045,3 +2045,85 @@ the molecular resistance the resolved mesh already provides.
 | Ks → 0 rough thermal wall | reproduces the smooth thermal wall |
 | flat channel, fixed-T walls, y+ ≈ 30 vs y+ ≈ 1 (lowRe) | wall heat flux agrees between the two meshes to a stated tolerance — the whole point of the model |
 | energy budget | wall heat extracted = domain enthalpy change + outflow, closed |
+
+---
+
+## 30. The LES wall model, and turbulence selection in the coupled solvers
+
+### 30.1 Werner-Wengle
+
+**Werner & Wengle, "Large-eddy simulation of turbulent flow over and around
+a cube in a plate channel", 8th Symp. Turb. Shear Flows (1991).**
+
+An LES resolves the outer eddies and models the wall the sublayer cannot
+afford. Werner-Wengle replaces the log law with an analytically invertible
+power law, integrated over the first cell so the wall shear comes from the
+CELL-AVERAGED velocity the LES actually carries - no Newton iteration:
+
+```
+u+ = y+                      y+ <= 11.81
+u+ = A (y+)^B                y+  > 11.81,   A = 8.3,  B = 1/7
+```
+
+Integrating across the first cell of height h and inverting for tau_w, with
+|u_p| the wall-parallel cell-average speed:
+
+```
+viscous:  |u_p| <= nu/(2h) A^{2/(1-B)}     ->  tau_w = 2 nu |u_p| / h
+power:    otherwise ->
+  tau_w = [ (1-B)/2 A^{(1+B)/(1-B)} (nu/h)^{1+B}
+            + (1+B)/A (nu/h)^B |u_p| ]^{2/(1+B)}
+```
+
+The wall's contribution enters as `nu_t,w` on the wall face chosen so the
+face's diffusive flux reproduces `tau_w` exactly:
+`nu_t,w = tau_w * h / |u_p| - nu` (clamped at 0). The same value feeds the
+thermal wall function's `u_tau = sqrt(tau_w)` in place of the RAS
+`C_mu^{1/4} sqrt(k)`.
+
+Selection: the `wallTreatment` rows of §29.1 apply to RAS; under
+`simulationType LES` the presets map `standard|spalding -> wernerWengle`,
+`lowRe -> resolved (nu_t,w = 0)`, and `rough` is a §13.4 error naming the
+two (a rough LES wall model is future work, not an alias).
+
+### 30.2 Turbulence selection in the coupled solvers
+
+*DESIGN.* The standalone drivers already dispatch on `RAS { model ...; }` /
+`simulationType`; the coupled solvers (buoyant, fire) construct k-epsilon
+directly, so a case asking for SST or LES silently gets k-epsilon - the
+exact substitution class §13.4 forbids. The fix is one trait:
+
+```
+CoupledTurbulence
+  correct(flow, energy?)   advance the model one outer step
+  nut()                    the eddy viscosity the momentum/energy eqs read
+  output/restart fields    name -> field, for the writer seam and .mcr
+```
+
+implemented by kEpsilon, kOmega, kOmegaSST and the LES family, constructed
+by the registry from the case. Requirements that come with it:
+
+- **SST needs the wall distance** (§6.6): computed once at setup by the
+  Poisson solve, on whatever mesh arrived - castellated and cut-cell meshes
+  included (their carved wall patches are walls like any other).
+- **Buoyancy production** (§17): k-epsilon takes G_b as it does today;
+  k-omega/SST take the same production route `(gamma/nu_t) G_b` in the
+  omega equation; Deardorff's SGS-TKE equation takes G_b directly;
+  Smagorinsky and WALE are algebraic - no transport equation, so no G_b
+  term, and the buoyant force still acts through the resolved momentum
+  equation. State this in the model docs rather than inventing a term.
+- An LES in the coupled solvers uses the §16 delta machinery, with van
+  Driest damping fed by the wall distance where the delta spec asks for it.
+- `simulationType LES` with a `RAS { model ...; }` block present (or vice
+  versa) is a §13.4 error naming the conflict.
+
+### 30.3 What must hold
+
+| Check | Expected |
+|---|---|
+| WW viscous limit | `tau_w -> nu |u_p|/ (h/2)`-form continuous at the branch point (evaluate both sides) |
+| WW power branch | inverting the integrated law reproduces a manufactured tau_w to round-off |
+| coupled SST | buoyant plume runs NaN-free; nut differs from the k-epsilon run (not bit-identical) |
+| coupled LES (Deardorff) | room/plume case runs NaN-free; mean nut < RAS nut on the same mesh (reported) |
+| selection | `model kOmegaSST` in buoyant/fire constructs SST - verified by the printed banner AND a field difference |
+| the §29.3 deferred gate | channel-with-energy at y+ ~ 30 (thermal WF) vs y+ ~ 1 (resolved): wall heat fluxes reported with their ratio, honestly |
