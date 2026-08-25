@@ -1954,3 +1954,94 @@ Marshak wall BC — a Robin condition, natively the §4 triple:
 | cold black walls, hot slab | net wall flux vs 1-D analytic P1 solution |
 | energy budget | ∫(emission − absorption) dV = net boundary radiative flux |
 | χ_r override | with q''' on, radiated power ≥ χ_r·∫q''' |
+
+---
+
+## 29. Wall-treatment selection, and the thermal wall function
+
+### 29.1 The selection problem
+
+§6.4/§15 give the wall-function family; selection today is four independent
+per-field patch types, which permits combinations that contradict each other
+- `nutLowReWallFunction` (the mesh resolves the sublayer, apply NO wall
+model) together with `epsilonWallFunction` (constrain the wall cell FROM a
+wall model) is not a preference, it is a contradiction.
+
+*DESIGN — presets.* One setting names a consistent family; it EXPANDS to the
+per-field boundary types at case-build time, so the per-face kernel
+architecture of §4 is untouched:
+
+```
+wallTreatment
+  standard   nut: nutk      k: kqR     eps: epsilonWF   omega: omegaWF
+  spalding   nut: nutU      k: kqR     eps: epsilonWF   omega: omegaWF
+  rough      nut: rough(Ks,Cs) k: kqR  eps: epsilonWF   omega: omegaWF
+  lowRe      nut: nutLowRe  k: kLowRe  eps/omega: viscous branch pinned
+```
+
+Precedence, most specific wins: explicit per-field patch type > per-patch
+`wallTreatment` override > the case-level default (`standard` when absent).
+`rough` requires `Ks` (sand-grain height, m) and accepts `Cs` (default 0.5).
+
+*DESIGN — the consistency contract.* Whatever route selected them, the four
+per-field types on one wall patch must belong to one row of the table above
+(nut may differ between standard/spalding/rough rows - those three share the
+k/eps/omega columns). A mixed row is a §13.4 error naming the patch, the
+offending pair, and the consistent completions; `-permissive` substitutes the
+row implied by the NUT choice and says so.
+
+### 29.2 Rough walls — completing §15.3
+
+§15.3 already specifies the Cebeci-Bradshaw downshift dB(Ks+, Cs). The
+implementation note this section adds: every relation of §6.4 that contains
+`ln(E y+)` uses the shifted law
+
+```
+u+ = ln(E y+)/kappa − dB(Ks+, Cs)      equivalently  E_eff = E · exp(−kappa·dB)
+```
+
+so `nut_wall`, the wall production and the wall dissipation all shift
+together through one `E_eff` per face - Ks and Cs are per-FACE device data
+(patches may differ), and `Ks+ = Cs·Ks·u_tau/nu` iterates with `u_tau`
+exactly as the §15.1 Newton does. `Ks → 0` must reproduce the smooth wall to
+round-off (the §22 gate).
+
+### 29.3 The thermal wall function — Jayatilleke
+
+**Jayatilleke, *Prog. Heat Mass Transfer* 1 (1969) 193–330**; the standard
+sublayer-resistance correction to the thermal log law.
+
+The §26 energy equation currently offers fixed-T and fixed-flux walls with a
+molecular-only near-wall resistance, which overpredicts wall heat transfer on
+a wall-function mesh for the same reason nut needs a wall model. The thermal
+log law:
+
+```
+T+ = Pr_t (u+ + P)
+P  = 9.24 [ (Pr/Pr_t)^{3/4} − 1 ] [ 1 + 0.28 exp(−0.007 Pr/Pr_t) ]
+T+ = (T_w − T_P) rho cp u_tau / q_w        u_tau = C_mu^{1/4} sqrt(k_P)
+```
+
+with the viscous branch `T+ = Pr y+` below the thermal crossover, blended by
+the same §6.4 *DESIGN* blending as every other wall quantity. The kernel
+rewrites the temperature field's Robin triple on wall faces:
+
+- fixed-T wall: given `T_w`, the triple encodes the effective conductance
+  `q_w = rho cp u_tau (T_w − T_P)/T+` — a Robin condition with
+  `fr`/`ref` chosen so the implicit matrix sees exactly that conductance;
+- fixed-q wall: the triple's gradient part carries `q_w`, and the wall
+  temperature is diagnosed as `T_w = T_P + q_w T+/(rho cp u_tau)`.
+
+Selection: the temperature patch type `thermalWallFunction` (a meteor-cfd
+name - OpenFOAM spells this on `alphat`, a field this solver does not carry;
+the reader accepts `compressible::alphatJayatillekeWallFunction` as an alias
+and says what it mapped it to). Presets: every `wallTreatment` row applies it
+to T on walls WHEN the energy equation is solved, except `lowRe`, which pins
+the molecular resistance the resolved mesh already provides.
+
+| Test | Expected |
+|---|---|
+| Pr = Pr_t | P = 0 exactly; T+ = Pr_t·u+ |
+| Ks → 0 rough thermal wall | reproduces the smooth thermal wall |
+| flat channel, fixed-T walls, y+ ≈ 30 vs y+ ≈ 1 (lowRe) | wall heat flux agrees between the two meshes to a stated tolerance — the whole point of the model |
+| energy budget | wall heat extracted = domain enthalpy change + outflow, closed |
