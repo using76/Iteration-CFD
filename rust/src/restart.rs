@@ -24,11 +24,12 @@
 //!
 //! ```text
 //! magic          [8]   b"MCFDRSTR"
-//! version        u32   = 1
+//! version        u32   = 2
 //! endian check   u32   = 0x01020304
 //! mesh_hash      u64
 //! time           f64
 //! p0             f64
+//! dp0dt          f64   (added at version 2 - SPEC-LIT §25.2/§31.2)
 //! n_cells        u64
 //! n_internal     u64   (internal faces)
 //! n_boundary     u64   (boundary faces)
@@ -59,6 +60,26 @@
 //! different mesh", so this is a hard error naming both hashes, not a
 //! section-13.4 `unsupported()`/`unreadable()` case (those exist for case
 //! settings with a documented fallback; a restart has none).
+//!
+//! # Version 2: `dp0dt`
+//!
+//! SPEC-LIT §31.2's gate for `ofgpu-fire` found that `p0` alone is not
+//! enough: `ofgpu::energy::Energy::update_target_divergence` reads
+//! `GasState::dp0dt` at a ONE-ITERATION LAG (the value
+//! [`crate::energy::GasState::advance_p0`] computed at the END of the
+//! previous unit of work) - exactly the segregated lag every other coupling
+//! coefficient in that driver already runs at. A `GasState` rebuilt fresh
+//! from a checkpoint's `p0` alone starts with `dp0dt = 0`, which is the
+//! correct value on a cold start and the WRONG one on a restart of a sealed
+//! (§25.2) case with an ongoing heat release: the first pressure solve after
+//! resuming would assemble the low-Mach target divergence without the
+//! `-dp0dt/(gamma p0)` term the continuous run's own next step carried,
+//! producing a first pressure residual that does not match the continuous
+//! run's even though every FIELD (`U`, `p`, `T`, the species) was restored
+//! bit-exact. `dp0dt` closes that gap. A version-1 file has no such field
+//! and is refused by the version check below rather than silently read with
+//! a wrong offset - the same reasoning [`mesh_hash`] mismatches are refused
+//! by.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -68,7 +89,7 @@ use crate::error::{Error, Result, IoContext};
 use crate::mesh::HostMesh;
 
 const MAGIC: &[u8; 8] = b"MCFDRSTR";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const ENDIAN_CHECK: u32 = 0x0102_0304;
 
 // ==========================================================================
@@ -189,6 +210,10 @@ pub struct RestartData {
     pub mesh_hash: u64,
     pub time: f64,
     pub p0: f64,
+    /// Version 2+ only - see the module doc's "Version 2: `dp0dt`" section.
+    /// `0.0` for `ofgpu-buoyant`/`ofgpu-vof`, which have no `p0` ODE and
+    /// nothing to carry here.
+    pub dp0dt: f64,
     pub n_cells: u64,
     pub n_internal: u64,
     pub n_boundary: u64,
@@ -306,6 +331,7 @@ pub fn write_restart(path: impl AsRef<Path>, data: &RestartData) -> Result<()> {
     w.write_all(&data.mesh_hash.to_le_bytes()).path(path)?;
     w.write_all(&data.time.to_le_bytes()).path(path)?;
     w.write_all(&data.p0.to_le_bytes()).path(path)?;
+    w.write_all(&data.dp0dt.to_le_bytes()).path(path)?;
     w.write_all(&data.n_cells.to_le_bytes()).path(path)?;
     w.write_all(&data.n_internal.to_le_bytes()).path(path)?;
     w.write_all(&data.n_boundary.to_le_bytes()).path(path)?;
@@ -383,6 +409,7 @@ pub fn read_restart(path: impl AsRef<Path>, expected_hash: u64) -> Result<Restar
 
     let time = read_f64(&mut r, path, "the restart time")?;
     let p0 = read_f64(&mut r, path, "p0")?;
+    let dp0dt = read_f64(&mut r, path, "dp0dt")?;
     let n_cells = read_u64(&mut r, path, "n_cells")?;
     let n_internal = read_u64(&mut r, path, "n_internal")?;
     let n_boundary = read_u64(&mut r, path, "n_boundary")?;
@@ -402,6 +429,7 @@ pub fn read_restart(path: impl AsRef<Path>, expected_hash: u64) -> Result<Restar
         mesh_hash: file_hash,
         time,
         p0,
+        dp0dt,
         n_cells,
         n_internal,
         n_boundary,
@@ -487,6 +515,7 @@ mod tests {
             mesh_hash: hash,
             time: 12.5,
             p0: 101325.0,
+            dp0dt: -3.5,
             n_cells,
             n_internal,
             n_boundary,
@@ -510,6 +539,7 @@ mod tests {
         let (a, b) = round_trip_case(FieldKind::CellScalar, "p");
         assert_eq!(a.time, b.time);
         assert_eq!(a.p0, b.p0);
+        assert_eq!(a.dp0dt, b.dp0dt);
         assert_eq!(a.mesh_hash, b.mesh_hash);
         assert_eq!(a.fields[0].internal, b.fields[0].internal);
         assert_eq!(a.fields[0].boundary, b.fields[0].boundary);
@@ -540,6 +570,7 @@ mod tests {
             mesh_hash: hash,
             time: 0.0,
             p0: 0.0,
+            dp0dt: 0.0,
             n_cells: mesh.n_cells as u64,
             n_internal: mesh.n_internal_faces as u64,
             n_boundary: mesh.n_boundary_faces as u64,
@@ -566,6 +597,7 @@ mod tests {
             mesh_hash: hash,
             time: 1.0,
             p0: 2.0,
+            dp0dt: 0.0,
             n_cells: mesh.n_cells as u64,
             n_internal: mesh.n_internal_faces as u64,
             n_boundary: mesh.n_boundary_faces as u64,
@@ -603,6 +635,7 @@ mod tests {
             mesh_hash: hash,
             time: 0.0,
             p0: 0.0,
+            dp0dt: 0.0,
             n_cells: mesh.n_cells as u64,
             n_internal: mesh.n_internal_faces as u64,
             n_boundary: mesh.n_boundary_faces as u64,
@@ -611,14 +644,16 @@ mod tests {
         let path = tmp_path("future_version");
         write_restart(&path, &data).expect("write");
 
-        // Patch the version field (bytes 8..12) to 2.
+        // Patch the version field (bytes 8..12) to one past what this build
+        // writes (VERSION = 2, so 3 is "future" regardless of when this
+        // format is next extended).
         let mut bytes = std::fs::read(&path).expect("read back");
-        bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
         std::fs::write(&path, &bytes).expect("rewrite");
 
         let err = read_restart(&path, hash).unwrap_err();
         let s = err.to_string();
-        assert!(s.contains("version 2"), "{s}");
+        assert!(s.contains("version 3"), "{s}");
 
         let _ = std::fs::remove_file(&path);
     }

@@ -1382,6 +1382,7 @@ mod tests {
                 if two_d { "empty" } else { "wall" },
             ]
             .map(String::from),
+            cyclic: None,
         };
 
         write_block_mesh(&dir, &b).expect("write block mesh");

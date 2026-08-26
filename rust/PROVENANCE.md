@@ -180,6 +180,10 @@ anyone.
 | `ofgpu-fire`'s `Y_O2`/`Y_P` boundary conditions derived from patch kind (ambient `inletOutlet` on `open`, `fixedValue 0` on a fuel `inlet`) rather than named per case — only `Y_F` is a case-supplied field | `src/io/case_json.rs`, `src/bin/fire.rs` | §27, §19 |
 | Species transport and combustion/radiation's segregated lag: read at the END of the PREVIOUS unit of work, registered before the CURRENT iteration's target-divergence/energy assembly — the same one-iteration lag `nu_t` and `T` already run at | `src/bin/fire.rs` | §25, §26, §27, §28 |
 | The `.mcr` restart format itself (header, mesh hash, versioning, full-`f64` `phi`) | `src/restart.rs` | — |
+| The cyclic-pair format itself — naming both sides of a pair plus the transform (`translate` only; `rotate` is a named §13.4 refusal, not a silent subset), rather than OpenFOAM's own separate `neighbourPatch`/`transform` dictionary entries on each side independently | `src/blockgen.rs` (`-cyclic x\|y\|z`, `BlockSpec::set_cyclic_axis`), `src/io/case_json.rs` (`mesh.cyclic[]`) | §31.1 |
+| Face matching by nearest translated centroid, and the two invariants that make a mismatched pair loud instead of silently unconserving — every face matches exactly once (a bijection), and `Sf_a == -Sf_b` after the transform to a stated tolerance | `src/blockgen.rs` | §31.1 |
+| The transient/algorithm contract — a case's `run.endTime` and `numerics.ddt`/`numerics.algorithm.kind` are checked as ONE combined setting (`is_transient_run`, `check_transient_algorithm_contract`) rather than three independently-valid ones, because that is exactly how `cases/burnerPlume.jsonc` reached step 20 as `Inf` with nothing having warned | `src/io/case.rs` | §31.3 |
+| A `sources[]` `momentumSource` entry in JSONC — the one case a PERIODIC domain needs (no inlet to prescribe a mass flow from) reusing `crate::sources::SourceTerm::BodyForce`/`CellSelector::All` verbatim, rather than a second JSON copy of the whole `constant/fvSources` box/sphere/six-term-kind surface that format already has | `src/io/case_json.rs` (`JsonSource`) | §18, §31.1 |
 
 ## GPU plumbing and tooling — original
 

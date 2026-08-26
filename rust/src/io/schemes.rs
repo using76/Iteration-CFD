@@ -682,13 +682,16 @@ pub fn parse_interpolation(setting: &str, raw: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::io::contract::{reset_warnings, set_permissive};
-    use std::sync::Mutex;
 
-    /// `-permissive` and the warn-once set are process-wide.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
+    /// `-permissive` and the warn-once set are process-wide, so this takes
+    /// the CRATE-WIDE guard - a mutex private to this module excludes only
+    /// this module's tests, and the flag is shared with every other one.
+    /// (A private SERIAL here was exactly how
+    /// `case_json::tests::jsonc_wall_row_contradiction_is_resolved_under_permissive`
+    /// flaked: it held the crate guard, this held its own, and the two ran
+    /// concurrently with one setting the flag the other had just cleared.)
     fn strict() -> std::sync::MutexGuard<'static, ()> {
-        let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let g = crate::io::contract::permissive_test_guard();
         set_permissive(false);
         reset_warnings();
         g
@@ -737,14 +740,15 @@ mod tests {
 
     #[test]
     fn permissive_downgrades_and_says_what_it_substituted() {
+        // The crate-wide guard alone - this used to take a second, private
+        // mutex as well, which is a lock-ordering hazard as well as no extra
+        // protection.
         let _guard = crate::io::contract::permissive_test_guard();
-        let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_warnings();
         set_permissive(true);
         let e = plume_b().div("div(phi,T)").unwrap();
         assert_eq!(e, DivEntry::UPWIND);
         set_permissive(false);
-        drop(g);
     }
 
     #[test]

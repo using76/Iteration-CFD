@@ -129,6 +129,7 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | STL 장애물 | 이진·ASCII STL로 블록 격자를 계단식(castellated)으로 조각 — 닫힘 검증(열린 모서리 개수 보고 후 거부, `-permissive`는 패리티 투표로 진행), 열 단위 패리티 판정과 3축 다수결, 새 wall 패치에 기존 벽 경계조건 자동 부여 (`-stl [name=]path`, Aftosmis et al. 1998; Barill et al. 2018) |
 | 잘림 셀 (cut cell) | 계단식 다음 단계 — 교차 셀을 제거하지 않고 부피/면적 분율과 닫힘식으로 정의된 절단면을 부여 (슈퍼샘플링, 기본 16³, SPEC-LIT §24); `theta_min` 미만인 얇은 셀은 가장 넓은 유체 면을 공유하는 이웃에 병합 |
 | Gmsh `.msh` | v4.1 사면체·육면체·프리즘·피라미드 요소, `$PhysicalNames` 패치 읽기 — 공개 포맷 사양으로부터 구현 |
+| Cyclic 패치 | 블록의 마주보는 두 면을 경계 대신 결합 — `ofgpu-generate-mesh -cyclic x\|y\|z` 또는 JSONC `mesh.cyclic` 항목으로 양쪽 이름과 변환(`translate`만 지원, `rotate`는 이름을 밝혀 거부)을 지정. 변환된 중심점이 가장 가까운 면끼리 짝짓고, 두 불변식으로 검증 — 모든 면이 정확히 한 번씩 짝지어지는지(전단사), 변환 후 `Sf_a == -Sf_b`인지(지정 허용오차) — 둘 중 하나라도 어긋나면 아무것도 보존하지 않는 격자를 조용히 만드는 대신 패치 쌍과 가장 나쁜 면을 이름으로 밝혀 거부합니다 |
 
 ### 화재 물리 (저-마하 가변밀도, 연소, 복사)
 
@@ -141,12 +142,14 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 연소 | 혼합제어 단일 스텝 EDM (Magnussen & Hjertager 1977) — `Y_F`, `Y_O2`, `Y_P` 수송, 연료 고갈 방지 클리핑, 소모된 연료질량과 방출열이 정확히 일치 (반올림 오차 수준) |
 | 복사 | 회색 P1 근사 (Modest), Marshak 벽 경계, `chi_r` 복사분율 하한 — `fvDOM`은 §13.4 계약에 따라 이름을 명시하며 거부 |
 | 검증 게이트 | 밀폐 상자 `dp0/dt` 램프(해석해), 버너 정확 열방출, 복사 평형, 컷셀 닫힘, msh 육면체 닫힘 — 전부 `ofgpu-validate`의 상시 항목 |
+| 필드 출력·재시작 | `-output foam,vtu,nvdb,vdb,usda`·`-writeInterval`이 `ofgpu-buoyant`/`ofgpu-vof`와 같은 방식으로 `U`·`p`·`T`·난류 완결식·화학종 필드를 씀; `-restartWrite N`/`-restartFrom FILE`이 체크포인트를 쓰고 재개 — `U`/`p`/`T`뿐 아니라 `p0`, `dp0dt`, 화학종 질량분율까지 재시작에서 그대로 이어받습니다(저-마하 실행의 열역학 상태는 그 세 필드만이 아니므로). 연속 40스텝 실행과 20스텝+재시작+20스텝 실행이 재시작 직후 첫 압력 잔차·`p0`·전체 엔탈피에서 일치합니다 |
+| 체적 소스 | `sources[]`(JSONC) 또는 `constant/fvSources`(OpenFOAM 케이스 디렉터리)로 운동량 방정식에 소스를 등록 — 전체 도메인에 걸친 균일 체적력으로, 유입 경계가 없어 질량유량을 지정할 수 없는 periodic(cyclic 패치) 케이스가 필요로 하는 바로 그것입니다 |
 
 ### 케이스 입력 형식과 재시작
 
 | 구분 | 지원 |
 |---|---|
-| JSONC 케이스 | 주석·trailing comma를 허용하는 JSON 한 파일로 메쉬·물성·경계·수치·화재 블록을 기술 — `schemars`로 스키마를 자동 생성해 리더와 스키마가 어긋날 수 없음 |
+| JSONC 케이스 | 주석·trailing comma를 허용하는 JSON 한 파일로 메쉬·물성·경계·수치·소스·화재 블록을 기술 — `schemars`로 스키마를 자동 생성해 리더와 스키마가 어긋날 수 없음 |
 | 재시작 (`.mcr`) | 전체 배정밀도, `phi` 포함, 메쉬 해시 불일치 시 거부, 버전 관리 |
 | 시각화/교환 출력 | VTU(부가 이진, 폴리헤드라 보존), NanoVDB/OpenVDB(`.vdb`/`.nvdb`), USD(`.usda`) 장면 참조 |
 
@@ -212,13 +215,29 @@ error: divSchemes/div(phi,k): "Gauss totalGarbage" is not supported by ofgpu;
 | `Gauss QUICK` | `05413b401b03` |
 | `Gauss totalGarbageScheme` | 오류 종료 |
 
+같은 세 갈래 원칙은 항목 하나가 아니라 설정 조합 전체에도 적용됩니다 — `run.endTime`이
+0보다 크고 `ddt`가 `steadyState`가 아닌 과도(transient) 케이스가 정상상태 알고리즘
+`SIMPLE`을 지정하거나, 반대로 정상상태 케이스가 과도 알고리즘 `PISO`/`PIMPLE`을
+지정하면, 존재하지 않는 정상상태를 향해 완화(under-relaxation)를 거는 대신 이름을
+밝힌 오류로 거부합니다 — `cases/burnerPlume.jsonc`가 정확히 이 경로로 20스텝
+근처에서 `Inf`에 도달했습니다. `endTime`, `ddt`, 알고리즘 딕셔너리가 각각은
+개별적으로 유효했고 아무것도 경고하지 않았습니다.
+
+```
+error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
+       algorithm on a transient case (endTime > 0 and ddt is not steadyState)
+  available for a transient run: PISO, PIMPLE
+  (run with -permissive to substitute PIMPLE with one outer corrector and continue)
+```
+
 ---
 
 ## 검증
 
 ```
-cargo test        734 passed, 0 failed
-ofgpu-validate    228 / 228 checks passed
+cargo test        715 passed, 0 failed (lib 크레이트 기준; 각 바이너리의 소소한 CLI 파싱 스위트까지
+                  전부 합치면 767)
+ofgpu-validate    232 / 232 checks passed
 ```
 
 ### 수렴 차수 — 인위해법 (MMS)
@@ -308,24 +327,20 @@ CPU 참조 구현은 장치 코드가 gather 방식인 것과 달리 의도적�
 결합 솔버에서 `kOmegaSST`를 요청한 케이스가 실제로 그 모형을 구성함을
 입증합니다. 이것만으로는 조(粗)격자 벽함수 메쉬와 저Re 해상 메쉬가 **같은**
 유동의 벽 열유속에 합의한다는 것까지 입증하지는 않습니다 — 이 주장은 반해석적
-대체물로 남겨두지 않고 실제로 돌렸습니다. JSONC 메쉬 블록에 `mesh.grading`
-(축별 `expansion`/`twoSided`, `blockgen`의 `GradedAxis`를 그대로 옮긴 것 —
-없으면 이전과 비트 단위로 동일한 균일 격자)을 추가해 벽 쪽으로 조밀화할 수
-없던 첫 시도의 한계를 닫고, 덕트도 5배 길게(0.4 m → 2.0 m, L/Dh = 10 → 50)
-늘려 재실행했습니다: `cases/channelThermalWF.jsonc`(벽법선 6칸 균일,
-y+ ≈ 37.9, `thermalWallFunction`)와 `cases/channelThermalLowRe.jsonc`
-(`mesh.grading`으로 양쪽 벽을 향해 two-sided grading한 50칸, y+ ≈ 0.89, 평범한
-`fixedValue`)는 동일한 2.0 m 덕트, 벽온도 373.15 K, 중력 0으로 `ofgpu-fire`를
-통해 준정상상태까지 돌린 결과입니다. 측정된 벽 열유입은 **157.2 W**(벽함수
-메쉬) 대 **412.3 W**(해상 메쉬) — 비율 **0.381**로, 첫 시도의 0.095에서
-4배 개선되었지만 여전히 1에 가깝지 않습니다. 튜닝 없이 정직하게 보고합니다:
-이번에는 두 메쉬 모두 원하는 y+ 대역에 실제로 들어갔고 저Re 메쉬는 균일
-과잉해상 대신 진짜 grading을 썼지만, 벽함수 메쉬(6칸)는 여전히 바깥층 해상도
-자체가 낮고, `L/Dh = 50`은 이 Re에서 완전발달로 보기엔 경계선이며(JSONC에는
-아직 주기 경계 patch가 없어 더 긴 덕트가 그 대안입니다), 평형 벽함수 자체가
-완전발달·저압구배 조건에서도 수십 퍼센트 오차를 내는 모형이라는 점도 남아
-있습니다. 게이트는 열린 채로 남습니다. 전체 분석은 `docs/07-fire-solver.md`
-§1.1을 보십시오.
+대체물로 남겨두지 않고 세 번 실제로 돌렸고, 가장 최근에는 진짜 주기(cyclic
+패치) 덕트에서 돌렸습니다: `cases/channelPeriodicWF.jsonc`(y+ ≈ 41.7,
+`thermalWallFunction`)와 `cases/channelPeriodicLowRe.jsonc`(y+ ≈ 0.31, 평범한
+`fixedValue`)는 동일한 스트림방향-cyclic 덕트, 벽온도 373.15 K, 중력 0을
+유입/유출 대신 운동량 소스(체적력)와 그에 대응하는 열싱크로 구동해
+`ofgpu-fire`로 돌린 결과입니다. 측정된 벽 열유입은 **6.00 W**(벽함수 메쉬)
+대 **55.83 W**(해상 메쉬) — 비율 **0.107**로, 이전(비주기, 발달 중) 덕트의
+**0.381**보다 오히려 나빠졌습니다 — 개선이 아닙니다. 두 실행이 서로 매우
+다른 구동 ΔT(≈50 K 대 ≈3 K)에서 정착하기 때문입니다: 같은 ΔT로 맞추려고
+싱크를 키워 봤지만(도메인 코어가 비물리적으로 식음) 실패했습니다. 튜닝 없이
+정직하게 보고합니다 — 게이트는 여전히 열려 있고, 이번 주기 재시도가 남긴
+다음 단계(두 메쉬를 같은 ΔT에서 비교할 수 있는, 공간적으로 가중된 에너지
+닫음식)는 이름만 밝히고 시도하지 않았습니다. 전체 분석(앞선 두 번의 비주기
+시도 포함)은 `docs/07-fire-solver.md` §1.1을 보십시오.
 
 ---
 

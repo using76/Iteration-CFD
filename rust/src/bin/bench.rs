@@ -75,6 +75,7 @@ fn build_flow(gpu: &Gpu, fk: &FieldKernels, nx: usize, ny: usize, nz: usize) -> 
             if nz == 1 { "empty" } else { "wall" },
         ]
         .map(String::from),
+        cyclic: None,
     };
 
     let hm = blockgen::build_mesh(&spec)?;

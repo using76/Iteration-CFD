@@ -393,7 +393,150 @@ pub fn build_host_mesh(raw: &PolyMeshRaw) -> Result<HostMesh> {
     m.compute_geometry(&raw.points, &raw.faces)?;
     m.build_cell_face_maps();
 
+    check_cyclic_invariants(&m)?;
+
     Ok(m)
+}
+
+// ==========================================================================
+//  Cyclic pair invariants - SPEC-LIT §31.1
+// ==========================================================================
+
+/// The two invariants a cyclic pair must satisfy, checked once the geometry
+/// (`b_cf`, `b_sf`) is in hand - no case FILE can declare the pair (that is
+/// [`crate::io::case_json`]'s `"cyclic"` array and [`crate::blockgen`]'s
+/// `BlockSpec::set_cyclic_axis`), but every mesh that carries one, however it
+/// was built, is checked here the same way:
+///
+/// 1. face `k` of `a`, translated, coincides with face `k` of `b` - the
+///    bijection this module's own doc comment already assumes ("written face
+///    for face"). A hand-written or generated mesh that got the order wrong
+///    silently mis-addresses `b_nbr_cell` (a direct index, no search), which
+///    is exactly the "conserves nothing" failure SPEC-LIT §31.1 names.
+/// 2. `Sf_a == -Sf_b` for that same pair - a translation does not rotate the
+///    face, so no transform is applied to the area vector itself.
+///
+/// The translation is not stored anywhere - `"transform": "translate"` is
+/// all a case names (SPEC-LIT §31.1); it is recovered here as the mean of
+/// `b`'s face centroids minus the mean of `a`'s, which is exact for two
+/// planar, congruent patches and only needs to be approximate for the
+/// bijection check itself to fire correctly on a genuinely mismatched pair.
+fn check_cyclic_invariants(m: &HostMesh) -> Result<()> {
+    for (pi_idx, pi) in m.patches.iter().enumerate() {
+        if pi.kind != PatchKind::Cyclic {
+            continue;
+        }
+        let Some(pn_idx) = pi.nbr_patch else { continue };
+        // Each unordered pair once - the patch that appears first names the
+        // rule, the second is skipped over.
+        if pn_idx <= pi_idx {
+            continue;
+        }
+        let pn = &m.patches[pn_idx];
+        if pi.size != pn.size || pi.size == 0 {
+            // A size mismatch is already refused above (or by the blockgen /
+            // polyMesh-reader pairing step) before geometry is ever built;
+            // an empty pair has nothing to check.
+            continue;
+        }
+
+        let n = pi.size;
+        let a = |k: usize| pi.start + k;
+        let b = |k: usize| pn.start + k;
+
+        // ---- the translation, recovered from the mean centroids ----------
+        let mut mean_a = Vec3::ZERO;
+        let mut mean_b = Vec3::ZERO;
+        for k in 0..n {
+            mean_a += m.b_cf[a(k)];
+            mean_b += m.b_cf[b(k)];
+        }
+        let inv_n = 1.0 / (n as Scalar);
+        let translation = (mean_b - mean_a) * inv_n;
+
+        // ---- a length scale for the position tolerance --------------------
+        // A millionth of a typical face's own size - tight enough to catch a
+        // face that landed on the wrong side of a real mismatch, loose enough
+        // to survive round-off in the mean.
+        let mut sum_area: Scalar = 0.0;
+        for k in 0..n {
+            sum_area += m.b_mag_sf[a(k)];
+        }
+        let length_scale = (sum_area * inv_n).max(Scalar::MIN_POSITIVE).sqrt();
+        let pos_tol = 1.0e-6 * length_scale.max(1.0);
+
+        let mut worst_k = 0usize;
+        let mut worst_gap: Scalar = -1.0;
+        for k in 0..n {
+            let want = m.b_cf[a(k)] + translation;
+            let gap = (m.b_cf[b(k)] - want).mag();
+            if gap > worst_gap {
+                worst_gap = gap;
+                worst_k = k;
+            }
+        }
+        if worst_gap > pos_tol {
+            return Err(Error::Mesh(format!(
+                "cyclic pair '{}'/'{}': not a bijection under \"translate\" - face {} of \
+                 '{}' (centroid {:?}) shifted by {:?} lands {:.3e} m from face {} of '{}' \
+                 (centroid {:?}), more than the tolerance {:.3e} m (1e-6 * typical face \
+                 size {:.3e} m). Either the two patches are not congruent under a pure \
+                 translation, or their faces were written in different orders - both \
+                 produce a mesh that conserves nothing across the couple.",
+                pi.name,
+                pn.name,
+                worst_k,
+                pi.name,
+                m.b_cf[a(worst_k)],
+                translation,
+                worst_gap,
+                worst_k,
+                pn.name,
+                m.b_cf[b(worst_k)],
+                pos_tol,
+                length_scale,
+            )));
+        }
+
+        // ---- Sf_a == -Sf_b, per matched face ------------------------------
+        let mut worst_sf_k = 0usize;
+        let mut worst_sf_gap: Scalar = -1.0;
+        let mut worst_sf_tol: Scalar = 0.0;
+        for k in 0..n {
+            let sfa = m.b_sf[a(k)];
+            let sfb = m.b_sf[b(k)];
+            let scale = m.b_mag_sf[a(k)].max(m.b_mag_sf[b(k)]).max(Scalar::MIN_POSITIVE);
+            let gap = (sfa + sfb).mag() / scale;
+            if gap > worst_sf_gap {
+                worst_sf_gap = gap;
+                worst_sf_k = k;
+                worst_sf_tol = scale;
+            }
+        }
+        const SF_REL_TOL: Scalar = 1.0e-6;
+        if worst_sf_gap > SF_REL_TOL {
+            let sfa = m.b_sf[a(worst_sf_k)];
+            let sfb = m.b_sf[b(worst_sf_k)];
+            return Err(Error::Mesh(format!(
+                "cyclic pair '{}'/'{}': Sf_a != -Sf_b at face {} - {:?} (patch '{}') vs {:?} \
+                 (patch '{}'), relative gap {:.3e} exceeds the tolerance {:.3e} (relative to \
+                 the face area {:.3e} m^2). A translation does not rotate the area vector, so \
+                 these must be exactly equal and opposite; this pair conserves nothing.",
+                pi.name,
+                pn.name,
+                worst_sf_k,
+                sfa,
+                pi.name,
+                sfb,
+                pn.name,
+                worst_sf_gap,
+                SF_REL_TOL,
+                worst_sf_tol,
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 // ==========================================================================
@@ -967,6 +1110,122 @@ FoamFile
 
         let _ = fs::remove_dir_all(&root);
         Ok(())
+    }
+
+    /// The same 2-cell box as [`BOUNDARY`], but `cyc_hi`'s two faces are
+    /// written in the OTHER order - face 0 of `cyc_hi` sits over `cyc_lo`'s
+    /// face 1 and vice versa. `b_nbr_cell` would pair them by index anyway
+    /// (SPEC-LIT §31.1: "no search, no geometric matching"), silently
+    /// coupling the wrong cells; [`check_cyclic_invariants`] has to catch it.
+    fn two_cell_box(swap_cyc_hi: bool, reverse_cyc_hi_face: Option<usize>) -> PolyMeshRaw {
+        let points = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(2.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(2.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(2.0, 1.0, 1.0),
+        ];
+
+        // cyc_lo (y=0): k=0 over cell 0 (x in [0,1]), k=1 over cell 1.
+        let cyc_lo: [Vec<Label>; 2] = [vec![0, 1, 7, 6], vec![1, 2, 8, 7]];
+        // cyc_hi (y=1), in the SAME cell order as `cyc_lo` when not swapped.
+        let mut cyc_hi: [Vec<Label>; 2] = [vec![3, 9, 10, 4], vec![4, 10, 11, 5]];
+        let mut cyc_hi_owner = [0i32, 1i32];
+
+        if let Some(k) = reverse_cyc_hi_face {
+            cyc_hi[k].reverse();
+        }
+        if swap_cyc_hi {
+            cyc_hi.swap(0, 1);
+            cyc_hi_owner.swap(0, 1);
+        }
+
+        let faces = vec![
+            vec![1, 4, 10, 7],     // internal, owner 0 / neighbour 1
+            vec![0, 6, 9, 3],      // inlet, owner 0
+            vec![2, 5, 11, 8],     // outlet, owner 1
+            cyc_lo[0].clone(),     // cyc_lo k=0, owner 0
+            cyc_lo[1].clone(),     // cyc_lo k=1, owner 1
+            cyc_hi[0].clone(),
+            cyc_hi[1].clone(),
+        ];
+        let owner = vec![0, 0, 1, 0, 1, cyc_hi_owner[0], cyc_hi_owner[1]];
+        let neighbour = vec![1];
+
+        let patches = vec![
+            PatchInfo {
+                name: "inlet".to_string(),
+                type_name: "patch".to_string(),
+                kind: PatchKind::Generic,
+                start: 0,
+                size: 1,
+                nbr_patch: None,
+            },
+            PatchInfo {
+                name: "outlet".to_string(),
+                type_name: "patch".to_string(),
+                kind: PatchKind::Generic,
+                start: 1,
+                size: 1,
+                nbr_patch: None,
+            },
+            PatchInfo {
+                name: "cyc_lo".to_string(),
+                type_name: "cyclic".to_string(),
+                kind: PatchKind::Cyclic,
+                start: 2,
+                size: 2,
+                nbr_patch: Some(3),
+            },
+            PatchInfo {
+                name: "cyc_hi".to_string(),
+                type_name: "cyclic".to_string(),
+                kind: PatchKind::Cyclic,
+                start: 4,
+                size: 2,
+                nbr_patch: Some(2),
+            },
+        ];
+
+        PolyMeshRaw { points, faces, owner, neighbour, patches }
+    }
+
+    #[test]
+    fn the_matched_two_cell_box_passes_both_cyclic_invariants() -> Result<()> {
+        // The baseline the two failure tests below each perturb one way -
+        // this has to succeed, or the perturbation is not testing what it
+        // claims to.
+        build_host_mesh(&two_cell_box(false, None))?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_cyclic_pair_whose_faces_are_written_in_the_wrong_order() {
+        let msg = match build_host_mesh(&two_cell_box(true, None)) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a shuffled cyclic pair must be refused"),
+        };
+        assert!(msg.contains("cyc_lo"), "{msg}");
+        assert!(msg.contains("cyc_hi"), "{msg}");
+        assert!(msg.contains("bijection"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_a_cyclic_pair_whose_area_vectors_do_not_cancel() {
+        let msg = match build_host_mesh(&two_cell_box(false, Some(1))) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a cyclic pair with parallel (not opposite) Sf must be refused"),
+        };
+        assert!(msg.contains("cyc_lo"), "{msg}");
+        assert!(msg.contains("cyc_hi"), "{msg}");
+        assert!(msg.contains("Sf_a"), "{msg}");
     }
 
     /// Every gather kernel indexes on `owner[f] < neighbour[f]`; a mesh in the

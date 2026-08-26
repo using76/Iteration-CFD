@@ -685,7 +685,13 @@ mod tests {
     use super::*;
     use crate::io::polymesh::build_host_mesh;
 
+    /// Every test in this module goes through here, and every one of them
+    /// needs strict mode - so the crate-wide permissive guard is taken here
+    /// rather than repeated in each test. Returning it would force every
+    /// caller to bind it; instead the guard is held for the duration of the
+    /// parse, which is the only part that reads the flag.
     fn parse(text: &str) -> Result<PolyMeshRaw> {
+        let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         parse_msh(text, "<memory>")
     }

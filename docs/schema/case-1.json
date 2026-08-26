@@ -45,6 +45,13 @@
     "run": {
       "$ref": "#/$defs/JsonRun"
     },
+    "sources": {
+      "description": "SPEC-LIT §18/§31: volumetric sources. Empty (the default) is every\ncase this reader has ever built. See [`JsonSource`] for what a JSONC\ncase can say that the OpenFOAM `constant/fvSources` route\n([`crate::sources::read_sources`]) cannot express and vice versa.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JsonSource"
+      }
+    },
     "turbulence": {
       "anyOf": [
         {
@@ -208,6 +215,27 @@
         }
       },
       "additionalProperties": false
+    },
+    "JsonCyclicPair": {
+      "description": "One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six\n`mesh.boundaries` values, and must name the two opposite slots of one\naxis (`xmin`/`xmax`, `ymin`/`ymax` or `zmin`/`zmax`) - `build_block`\nchecks that, not this type.\n\n`transform` takes only `\"translate\"` - the transform\n[`crate::blockgen::BlockSpec::set_cyclic_axis`] knows how to build a\npairing from, implied by the block's own extent along that axis. A\nrotational pair (`\"rotate\"`, with an axis and an angle) needs a different\nface-matching search and a vector transform on `Sf` that nothing here\nimplements yet, so it deserialises fine (it is a *known* setting) and is\nrefused in `build_block` with a SPEC-LIT §13.4 error naming `translate` -\nexactly like any other recognised-but-unimplemented setting, not a parse\nfailure.",
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "string"
+        },
+        "b": {
+          "type": "string"
+        },
+        "transform": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "a",
+        "b",
+        "transform"
+      ]
     },
     "JsonExact": {
       "type": "object",
@@ -443,6 +471,13 @@
           },
           "maxItems": 3,
           "minItems": 3
+        },
+        "cyclic": {
+          "description": "SPEC-LIT §31.1: cyclic pairs, each naming two of the six `boundaries`\nvalues. Empty (the default) is the ordinary, uncoupled mesh this\nreader has always built. See [`JsonCyclicPair`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonCyclicPair"
+          }
         },
         "grading": {
           "description": "Per-axis grading toward the axis's own two ends, lowered onto\n[`crate::blockgen::GradedAxis`] exactly as `blockgen`'s own cases use\nit (`src/blockgen.rs`'s `case_block_spec`, e.g. the channel case's\n`b.y.expansion = 20.0; b.y.two_sided = true;`). Absent entirely, or an\naxis absent from it, keeps that axis uniform - the pre-grading\nbehaviour this reader had before, bit for bit (see\n`a_case_without_grading_lowers_to_the_same_mesh_as_before`).",
@@ -930,6 +965,39 @@
         "solver",
         "preconditioner",
         "tolerance"
+      ]
+    },
+    "JsonSource": {
+      "description": "One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.\n\n*DESIGN.* `constant/fvSources` (SPEC-LIT §18, [`crate::sources::read_sources`])\nalready has six term kinds over a box/sphere/all-cells selector; this is\ndeliberately not a second copy of that whole surface. It exists because a\nPERIODIC case (SPEC-LIT §31.1) has no inlet to prescribe a mass flow from,\nso the only way left to drive it is a momentum source, and JSONC had no\nway to say one at all - not even the uniform, whole-domain case a periodic\nchannel needs. `momentumSource` is that one case, reusing\n[`crate::sources::SourceTerm::BodyForce`] and\n[`crate::sources::CellSelector::All`] exactly as the OpenFOAM route would\nbuild them for `selection all`. A JSONC case that wants a ZONED source\n(a heat release in a box, say) still has no JSONC way to ask for one -\nextending this enum with `box`/`sphere` selectors is future work, not a\ngap this closes.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "bodyForce": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "field": {
+              "description": "Which equation the body force acts on. A body force is a VECTOR\n(SPEC-LIT §18's [`crate::sources::SourceTerm::BodyForce`] doc) and\nonly the momentum equation has a direction for it to point in, so\n`\"U\"` is the only value [`JsonCase::lower`] accepts - present\nanyway, spelled out, rather than assumed silently, exactly as the\nOpenFOAM `constant/fvSources` route requires a `field` entry.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "momentumSource"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "field",
+            "bodyForce"
+          ]
+        }
       ]
     },
     "JsonTurbulence": {

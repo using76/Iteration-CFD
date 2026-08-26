@@ -131,6 +131,13 @@ pub struct BlockSpec {
     pub patch_type: [String; 6],
     /// Optionally split one slot in two; see [`PatchWindow`].
     pub window: Option<PatchWindow>,
+    /// SPEC-LIT §31.1: the two opposite slots of this axis (0=x, 1=y, 2=z)
+    /// are a cyclic pair - `constant/polyMesh/boundary` gets `neighbourPatch`
+    /// on each, and the in-memory [`build_mesh`] path resolves the pairing
+    /// directly, with no boundary file to read it back from. Set through
+    /// [`BlockSpec::set_cyclic_axis`], which also fixes up `patch_type` -
+    /// this field on its own is not enough to make a slot cyclic.
+    pub cyclic: Option<usize>,
 }
 
 /// A rectangular window of one slot's faces, carved out into a patch of its
@@ -168,7 +175,30 @@ impl Default for BlockSpec {
             patch_name: ["xMin", "xMax", "yMin", "yMax", "zMin", "zMax"].map(String::from),
             patch_type: ["patch", "patch", "wall", "wall", "empty", "empty"].map(String::from),
             window: None,
+            cyclic: None,
         }
+    }
+}
+
+impl BlockSpec {
+    /// Declare the two opposite slots of `axis` (0=x, 1=y, 2=z) a cyclic
+    /// pair (SPEC-LIT §31.1): both slots' `patch_type` become `cyclic` and
+    /// `cyclic` itself is set, which is what [`build_patches`] reads to wire
+    /// `neighbourPatch` between them. There is no rotational form - a §13.4
+    /// error naming `translate` is [`crate::io::case_json`]'s job, one layer
+    /// up, before a `BlockSpec` is even built; by the time one gets here the
+    /// only transform this method (or this whole module) knows how to do is
+    /// the one implied by the block's own extent along `axis`.
+    pub fn set_cyclic_axis(&mut self, axis: usize) -> Result<()> {
+        if axis > 2 {
+            return Err(Error::Config(format!(
+                "blockgen: cyclic axis {axis} is not x, y or z (0, 1 or 2)"
+            )));
+        }
+        self.patch_type[2 * axis] = "cyclic".to_string();
+        self.patch_type[2 * axis + 1] = "cyclic".to_string();
+        self.cyclic = Some(axis);
+        Ok(())
     }
 }
 
@@ -603,6 +633,11 @@ struct OutPatch {
     /// `startFace`: the patch's first face in the GLOBAL face list.
     start: usize,
     size: usize,
+    /// SPEC-LIT §31.1: set from [`BlockSpec::cyclic`] when this patch is one
+    /// of the axis's two opposite slots - the OTHER patch's name, written as
+    /// `neighbourPatch` in the boundary file and resolved to an index by
+    /// [`poly_mesh_raw`] for the in-memory path.
+    nbr_name: Option<String>,
 }
 
 impl OutPatch {
@@ -699,6 +734,47 @@ fn build_patches(
         None => None,
     };
 
+    // SPEC-LIT §31.1: `set_cyclic_axis` is the only supported way to get
+    // here, but the field itself is public, so a caller that poked `cyclic`
+    // directly without also setting both `patch_type` entries gets an error
+    // naming the mismatch rather than a boundary file that claims `cyclic`
+    // pairing for a patch whose own `type` says something else.
+    if let Some(axis) = b.cyclic {
+        if axis > 2 {
+            return Err(Error::Mesh(format!(
+                "blockgen: BlockSpec.cyclic axis {axis} is not x, y or z (0, 1 or 2)"
+            )));
+        }
+        let (lo, hi) = (2 * axis, 2 * axis + 1);
+        if b.patch_type[lo] != "cyclic" || b.patch_type[hi] != "cyclic" {
+            return Err(Error::Mesh(format!(
+                "blockgen: BlockSpec.cyclic names axis {axis} ('{}'/'{}') but their \
+                 patch_type is '{}'/'{}', not 'cyclic' on both - use \
+                 BlockSpec::set_cyclic_axis, which sets both together",
+                b.patch_name[lo], b.patch_name[hi], b.patch_type[lo], b.patch_type[hi]
+            )));
+        }
+        if let Some(w) = &b.window {
+            if w.slot == lo || w.slot == hi {
+                return Err(Error::Mesh(format!(
+                    "blockgen: patch window '{}' splits slot {}, which is half of the \
+                     axis-{axis} cyclic pair - a cyclic patch cannot be windowed",
+                    w.name, w.slot
+                )));
+            }
+        }
+    }
+    let nbr_name = |p: usize| -> Option<String> {
+        let axis = b.cyclic?;
+        if p == 2 * axis {
+            Some(b.patch_name[2 * axis + 1].clone())
+        } else if p == 2 * axis + 1 {
+            Some(b.patch_name[2 * axis].clone())
+        } else {
+            None
+        }
+    };
+
     for p in 0..6 {
         match win {
             Some((w, rect)) if w.slot == p => {
@@ -712,6 +788,7 @@ fn build_patches(
                     win: rect,
                     start: start[p],
                     size: n_win,
+                    nbr_name: None,
                 });
                 out.push(OutPatch {
                     name: b.patch_name[p].clone(),
@@ -721,6 +798,7 @@ fn build_patches(
                     win: rect,
                     start: start[p] + n_win,
                     size: size[p] - n_win,
+                    nbr_name: None,
                 });
             }
             _ => out.push(OutPatch {
@@ -731,6 +809,7 @@ fn build_patches(
                 win: [0; 4],
                 start: start[p],
                 size: size[p],
+                nbr_name: nbr_name(p),
             }),
         }
     }
@@ -1259,7 +1338,16 @@ fn write_poly_mesh(case_dir: &Path, block: &Block) -> Result<()> {
             os.s(&patch.name)?;
             os.s("\n    {\n        type            ")?;
             os.s(&patch.type_name)?;
-            os.s(";\n        nFaces          ")?;
+            os.s(";\n")?;
+            // SPEC-LIT §31.1: the only field the reader needs beyond `type`
+            // to resolve a cyclic pair (`io/polymesh.rs`'s `neighbourPatch`
+            // resolution).
+            if let Some(nbr) = &patch.nbr_name {
+                os.s("        neighbourPatch  ")?;
+                os.s(nbr)?;
+                os.s(";\n")?;
+            }
+            os.s("        nFaces          ")?;
             os.num(patch.size)?;
             os.s(";\n        startFace       ")?;
             os.num(patch.start)?;
@@ -1329,13 +1417,21 @@ fn poly_mesh_raw(block: &Block) -> Result<PolyMeshRaw> {
             faces.push(q.p.iter().map(|&p| p as Label).collect());
             owner.push(q.own as Label);
         }
+        // SPEC-LIT §31.1: `block.patches` and `patches` are built in the same
+        // order, one push per entry, so the neighbour's index here is just
+        // where its name sits in that same list - no different from what
+        // `io/polymesh.rs`'s `neighbourPatch` resolution does for a mesh read
+        // off disk, just without a boundary file to read it from.
+        let nbr_patch = patch.nbr_name.as_ref().and_then(|nbr| {
+            block.patches.iter().position(|q| &q.name == nbr)
+        });
         patches.push(PatchInfo {
             name: patch.name.clone(),
             type_name: patch.type_name.clone(),
             kind: PatchKind::from_type(&patch.type_name),
             start: patch.start - block.n_internal,
             size: patch.size,
-            nbr_patch: None,
+            nbr_patch,
         });
     }
 
@@ -2849,6 +2945,12 @@ fn build_cutcell_fields(
         let pk = PatchKind::from_type(fp.type_name);
         let s = if pk == PatchKind::Empty {
             patch_spec("empty")
+        } else if pk == PatchKind::Cyclic {
+            // SPEC-LIT §31.1: every field carries `cyclic` on a cyclic
+            // patch - `kinds_from_patches` (field.rs) gives the mesh the
+            // last word at runtime, but the written file has to agree
+            // with `constant/polyMesh/boundary` for a round trip.
+            patch_spec("cyclic")
         } else if cavity && fp.name == "movingWall" {
             let mut s = patch_spec("fixedValue");
             s.value_v = vec![Vec3::new(u_ref, 0.0, 0.0)];
@@ -2886,6 +2988,8 @@ fn build_cutcell_fields(
             let pk = PatchKind::from_type(fp.type_name);
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Cyclic {
+                patch_spec("cyclic")
             } else if fp.name == "outlet" {
                 let mut s = patch_spec("fixedValue");
                 s.value = vec![0.0];
@@ -2908,6 +3012,8 @@ fn build_cutcell_fields(
             let pk = PatchKind::from_type(fp.type_name);
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Cyclic {
+                patch_spec("cyclic")
             } else if fp.name == "inlet" {
                 let mut s = patch_spec("fixedValue");
                 s.value = vec![t_inlet];
@@ -2952,6 +3058,8 @@ fn build_cutcell_fields(
             let pk = PatchKind::from_type(fp.type_name);
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Cyclic {
+                patch_spec("cyclic")
             } else if pk == PatchKind::Wall {
                 let mut s = patch_spec(wall_row_type(name, wall));
                 s.value = vec![value];
@@ -3185,8 +3293,10 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
     let (names, types): ([&str; 6], [&str; 6]) = match kind {
         CaseKind::Channel => {
             // Plane channel, Re_tau style geometry. A streamwise cyclic pair
-            // would be the physical choice but cyclics need a coupled patch
-            // pair, so this uses inlet/outlet instead.
+            // is the physical choice for a genuinely developed channel
+            // (SPEC-LIT §31.1: pass `-cyclic x` to get it, or see
+            // `write_case_cyclic`) - this DEFAULT preset stays inlet/outlet,
+            // matching every earlier `channel` case this reader has built.
             b.x.lo = 0.0;
             b.x.hi = 4.0;
             b.y.lo = -1.0;
@@ -3385,7 +3495,55 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
 /// directory whose fields are real per-cell profiles rather than a uniform
 /// guess.
 pub fn write_case(case_dir: &Path, kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, WallTreatment::Standard, None, false)
+    write_case_impl(case_dir, kind, nx, ny, nz, None, WallTreatment::Standard, None, false, None)
+        .map(|_| ())
+}
+
+/// [`write_case`], with the two opposite patches of `axis` (0=x, 1=y, 2=z)
+/// declared a cyclic pair instead of whatever `kind`'s own preset would put
+/// there (SPEC-LIT §31.1) - `ofgpu-generate-mesh <case> <dir> -cyclic <axis>`.
+/// `channel`'s own comment in [`case_block_spec`] names exactly this gap: "a
+/// streamwise cyclic pair would be the physical choice but cyclics need a
+/// coupled patch pair" - `-cyclic 0` on `channel` is that pair, turning
+/// `inlet`/`outlet` into a periodic streamwise direction instead.
+pub fn write_case_cyclic(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    axis: usize,
+) -> Result<()> {
+    write_case_impl(
+        case_dir,
+        kind,
+        nx,
+        ny,
+        nz,
+        None,
+        WallTreatment::Standard,
+        None,
+        false,
+        Some(axis),
+    )
+    .map(|_| ())
+}
+
+/// [`write_case_cyclic`] plus [`write_case_with_wall_model`]'s wall-treatment
+/// preset, for a cyclic case whose remaining (non-cyclic) patches are walls -
+/// `ofgpu-generate-mesh <case> <dir> -cyclic <axis> -wallModel <preset>`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_case_cyclic_with_wall_model(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    axis: usize,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+) -> Result<()> {
+    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, Some(axis))
         .map(|_| ())
 }
 
@@ -3404,7 +3562,7 @@ pub fn write_case_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true).map(|_| ())
+    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, None).map(|_| ())
 }
 
 /// Build a complete runnable case's mesh and `0/` fields entirely in memory -
@@ -3454,7 +3612,9 @@ pub fn write_carved_case(
     nz: usize,
     surface: &Surface,
 ) -> Result<CarveSummary> {
-    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), WallTreatment::Standard, None, false)? {
+    match write_case_impl(
+        case_dir, kind, nx, ny, nz, Some(surface), WallTreatment::Standard, None, false, None,
+    )? {
         Some(s) => Ok(s),
         // Unreachable: the impl returns a summary whenever a surface went in.
         None => Err(Error::Mesh("carve produced no summary".to_string())),
@@ -3475,7 +3635,7 @@ pub fn write_carved_case_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<CarveSummary> {
-    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), wall, roughness, true)? {
+    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), wall, roughness, true, None)? {
         Some(s) => Ok(s),
         None => Err(Error::Mesh("carve produced no summary".to_string())),
     }
@@ -3492,6 +3652,7 @@ fn write_case_impl(
     wall: WallTreatment,
     roughness: Option<Roughness>,
     thermal_wall: bool,
+    cyclic: Option<usize>,
 ) -> Result<Option<CarveSummary>> {
     if nx < 1 || ny < 1 || nz < 1 {
         return Err(Error::Config(format!(
@@ -3499,7 +3660,14 @@ fn write_case_impl(
         )));
     }
 
-    let b = case_block_spec(kind, nx, ny, nz);
+    let mut b = case_block_spec(kind, nx, ny, nz);
+    // SPEC-LIT §31.1: only reachable through `write_case_cyclic`, which never
+    // carries a `surface` - carving and cyclic pairing together is a
+    // combination nothing has asked for yet, so it stays unreachable through
+    // the public API rather than half-supported here.
+    if let Some(axis) = cyclic {
+        b.set_cyclic_axis(axis)?;
+    }
     let block = Block::new(&b)?;
 
     let carved = match surface {
@@ -4112,6 +4280,12 @@ fn build_dam_break_fields(block: &Block, carve: Option<&Carved>) -> Result<InMem
         let pk = PatchKind::from_type(fp.type_name);
         let s = if pk == PatchKind::Empty {
             patch_spec("empty")
+        } else if pk == PatchKind::Cyclic {
+            // SPEC-LIT §31.1: every field carries `cyclic` on a cyclic
+            // patch - `kinds_from_patches` (field.rs) gives the mesh the
+            // last word at runtime, but the written file has to agree
+            // with `constant/polyMesh/boundary` for a round trip.
+            patch_spec("cyclic")
         } else if fp.name == "atmosphere" {
             let mut s = patch_spec("inletOutlet");
             s.inlet_value = vec![0.0];
@@ -4140,6 +4314,12 @@ fn build_dam_break_fields(block: &Block, carve: Option<&Carved>) -> Result<InMem
         let pk = PatchKind::from_type(fp.type_name);
         let s = if pk == PatchKind::Empty {
             patch_spec("empty")
+        } else if pk == PatchKind::Cyclic {
+            // SPEC-LIT §31.1: every field carries `cyclic` on a cyclic
+            // patch - `kinds_from_patches` (field.rs) gives the mesh the
+            // last word at runtime, but the written file has to agree
+            // with `constant/polyMesh/boundary` for a round trip.
+            patch_spec("cyclic")
         } else if fp.name == "atmosphere" {
             // The velocity at an open boundary next to a prescribed pressure:
             // the flux sets the normal component on inflow and the condition
@@ -4182,6 +4362,12 @@ fn build_dam_break_fields(block: &Block, carve: Option<&Carved>) -> Result<InMem
         let pk = PatchKind::from_type(fp.type_name);
         let s = if pk == PatchKind::Empty {
             patch_spec("empty")
+        } else if pk == PatchKind::Cyclic {
+            // SPEC-LIT §31.1: every field carries `cyclic` on a cyclic
+            // patch - `kinds_from_patches` (field.rs) gives the mesh the
+            // last word at runtime, but the written file has to agree
+            // with `constant/polyMesh/boundary` for a round trip.
+            patch_spec("cyclic")
         } else if fp.name == "atmosphere" {
             let mut s = patch_spec("fixedValue");
             s.value = vec![0.0];
@@ -4364,6 +4550,12 @@ fn build_initial_fields(
 
         let s = if pk == PatchKind::Empty {
             patch_spec("empty")
+        } else if pk == PatchKind::Cyclic {
+            // SPEC-LIT §31.1: every field carries `cyclic` on a cyclic
+            // patch - `kinds_from_patches` (field.rs) gives the mesh the
+            // last word at runtime, but the written file has to agree
+            // with `constant/polyMesh/boundary` for a round trip.
+            patch_spec("cyclic")
         } else if cavity && name == "movingWall" {
             let mut s = patch_spec("fixedValue");
             s.value_v = vec![Vec3::new(u_ref, 0.0, 0.0)];
@@ -4455,6 +4647,8 @@ fn build_initial_fields(
 
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Cyclic {
+                patch_spec("cyclic")
             } else if fp.name == "outlet" {
                 let mut s = patch_spec("fixedValue");
                 s.value = vec![0.0];
@@ -4490,6 +4684,8 @@ fn build_initial_fields(
 
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Cyclic {
+                patch_spec("cyclic")
             } else if fp.name == "inlet" {
                 let mut s = patch_spec("fixedValue");
                 s.value = vec![t_inlet];
@@ -4541,6 +4737,8 @@ fn build_initial_fields(
 
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Cyclic {
+                patch_spec("cyclic")
             } else if pk == PatchKind::Wall {
                 // SPEC-LIT §29.1: the wallTreatment row's entry for this
                 // field, `standard` by default - `wall_row_type` reproduces
@@ -5836,6 +6034,101 @@ mod tests {
             assert_eq!(a.start, bb.start);
             assert_eq!(a.size, bb.size);
         }
+    }
+
+    /// SPEC-LIT §31.1, point 1: the in-memory `build_mesh` path (which never
+    /// touches a boundary file) has to produce the SAME `HostMesh` a periodic
+    /// case's file round trip does - hashed, not spot-checked, so nothing
+    /// cyclic-specific (`b_nbr_cell`, `b_kind`, `nbr_patch`) can drift between
+    /// the two without failing.
+    fn hash_mesh(m: &HostMesh) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        m.n_cells.hash(&mut h);
+        m.n_internal_faces.hash(&mut h);
+        m.n_boundary_faces.hash(&mut h);
+        m.owner.hash(&mut h);
+        m.neighbour.hash(&mut h);
+        for x in m.v.iter().chain(m.mag_sf.iter()).chain(m.b_mag_sf.iter()) {
+            x.to_bits().hash(&mut h);
+        }
+        for x in m.c.iter().chain(m.sf.iter()).chain(m.b_sf.iter()).chain(m.b_cf.iter()) {
+            x.x.to_bits().hash(&mut h);
+            x.y.to_bits().hash(&mut h);
+            x.z.to_bits().hash(&mut h);
+        }
+        m.b_nbr_cell.hash(&mut h);
+        m.b_kind.hash(&mut h);
+        m.b_patch.hash(&mut h);
+        for p in &m.patches {
+            p.name.hash(&mut h);
+            p.type_name.hash(&mut h);
+            p.start.hash(&mut h);
+            p.size.hash(&mut h);
+            p.nbr_patch.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    #[test]
+    fn build_mesh_matches_the_file_round_trip_for_a_cyclic_pair() {
+        let mut b = spec(6, 5, 4);
+        b.set_cyclic_axis(0).expect("axis 0 is x");
+
+        let direct = build_mesh(&b).expect("build_mesh");
+
+        let dir = temp_dir("cyclic_direct_vs_disk");
+        write_block_mesh(&dir, &b).expect("write_block_mesh");
+        let via_disk = crate::io::polymesh::build_host_mesh(
+            &crate::io::polymesh::read_poly_mesh(&dir).expect("read_poly_mesh"),
+        )
+        .expect("build_host_mesh");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(hash_mesh(&direct), hash_mesh(&via_disk));
+
+        // The pair itself: some boundary face is actually coupled, and the
+        // geometry closes to round-off same as any other mesh (SPEC-LIT §10).
+        assert!(direct.b_nbr_cell.iter().any(|&c| c >= 0));
+        let rep = crate::mesh::geometry::check(&direct);
+        assert!(rep.max_closure_error < 1e-10, "closure {}", rep.max_closure_error);
+    }
+
+    /// SPEC-LIT §31.1's flux test: for a uniform convecting velocity, the
+    /// two patches of a cyclic pair carry equal and opposite total flux -
+    /// `phi_b = U . Sf_b` for a uniform `U` regardless of boundary kind, so
+    /// this is really `sum(Sf_a) == -sum(Sf_b)` (already true face-by-face,
+    /// per [`crate::io::polymesh::check_cyclic_invariants`]) read back as the
+    /// physical quantity a solver actually cares about.
+    #[test]
+    fn a_cyclic_pair_carries_equal_and_opposite_total_flux() {
+        let mut b = spec(6, 5, 3);
+        b.set_cyclic_axis(0).expect("axis 0 is x");
+        let hm = build_mesh(&b).expect("build_mesh");
+
+        let u = Vec3::new(1.3, -0.4, 0.2);
+        let cyclic = hm
+            .patches
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == PatchKind::Cyclic)
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        assert_eq!(cyclic.len(), 2, "exactly one cyclic pair on this block");
+
+        let flux_of = |p: usize| -> Scalar {
+            let patch = &hm.patches[p];
+            (0..patch.size)
+                .map(|k| u.dot(hm.b_sf[patch.start + k]))
+                .sum()
+        };
+        let (flux_a, flux_b) = (flux_of(cyclic[0]), flux_of(cyclic[1]));
+
+        assert!(flux_a.abs() > 1e-6, "flux_a is suspiciously near zero: {flux_a}");
+        assert!(
+            (flux_a + flux_b).abs() < 1e3 * EPS * flux_a.abs().max(1.0),
+            "flux_a {flux_a} and flux_b {flux_b} are not equal and opposite"
+        );
     }
 
     #[test]

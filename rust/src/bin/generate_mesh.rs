@@ -58,8 +58,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use ofgpu::blockgen::{
-    write_carved_case, write_carved_case_with_wall_model, write_case, write_case_with_wall_model,
-    write_cutcell_case, write_cutcell_case_with_wall_model, CaseKind,
+    write_carved_case, write_carved_case_with_wall_model, write_case, write_case_cyclic,
+    write_case_cyclic_with_wall_model, write_case_with_wall_model, write_cutcell_case,
+    write_cutcell_case_with_wall_model, CaseKind,
 };
 use ofgpu::io::case::{Roughness, WallTreatment};
 use ofgpu::io::contract;
@@ -76,11 +77,26 @@ fn usage() {
     eprintln!(
         "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak> <outputDir> \
          [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]]\n       \
-         [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-permissive]\n       \
+         [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-cyclic x|y|z] \
+         [-permissive]\n       \
          ofgpu-generate-mesh big <outputDir> [n] [-stl ...]   # n^3 cells\n\
          {}",
         contract::PERMISSIVE_USAGE
     );
+}
+
+/// `-cyclic x|y|z` - SPEC-LIT §31.1. Only `translate` exists (the transform
+/// implied by the block's own extent along the named axis), so there is
+/// nothing to name beyond which axis; a §13.4 error lists the three that are.
+fn parse_cyclic_axis(v: &str) -> Result<usize> {
+    match v {
+        "x" => Ok(0),
+        "y" => Ok(1),
+        "z" => Ok(2),
+        _ => Err(Error::Config(format!(
+            "-cyclic: \"{v}\" is not supported by ofgpu; available: x, y, z"
+        ))),
+    }
 }
 
 /// One `-stl` argument: an optional `name=` prefix and the file path.
@@ -143,11 +159,22 @@ fn run(args: &[String]) -> Result<()> {
     let mut wall_model: Option<WallTreatment> = None;
     let mut ks: Option<ofgpu::Scalar> = None;
     let mut cs: Option<ofgpu::Scalar> = None;
+    // SPEC-LIT §31.1: `None` means "no cyclic pair" - the ordinary case every
+    // other flag combination already produces.
+    let mut cyclic: Option<usize> = None;
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
             "-permissive" => contract::set_permissive(true),
             "-cutcell" => cutcell = true,
+            "-cyclic" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config("-cyclic needs an axis: x, y or z".to_string()));
+                };
+                cyclic = Some(parse_cyclic_axis(v)?);
+            }
             "-wallModel" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
@@ -247,6 +274,16 @@ fn run(args: &[String]) -> Result<()> {
         return Err(Error::Config("-cutcell needs at least one -stl surface".to_string()));
     }
 
+    // SPEC-LIT §31.1: cyclic pairing is a plain-block feature - carving picks
+    // its own wall patches out of the cut surface, and there is no coupled
+    // pair left to declare once that has happened.
+    if cyclic.is_some() && !stl_args.is_empty() {
+        return Err(Error::Config(
+            "-cyclic cannot be combined with -stl: carving replaces the block's own \
+             patches with new wall patches, leaving no cyclic pair to declare"
+                .to_string(),
+        ));
+    }
     // SPEC-LIT §29.1 route (c): `-Ks`/`-Cs` are resolved against whatever
     // preset `-wallModel` actually named - `rough` needs `Ks`, naming it;
     // every other preset (or no `-wallModel` at all) simply ignores them.
@@ -256,9 +293,15 @@ fn run(args: &[String]) -> Result<()> {
         .flatten();
 
     if stl_args.is_empty() {
-        return match wall_model {
-            None => write_case(Path::new(dir), kind, nx, ny, nz),
-            Some(wt) => write_case_with_wall_model(Path::new(dir), kind, nx, ny, nz, wt, roughness),
+        return match (wall_model, cyclic) {
+            (None, None) => write_case(Path::new(dir), kind, nx, ny, nz),
+            (Some(wt), None) => {
+                write_case_with_wall_model(Path::new(dir), kind, nx, ny, nz, wt, roughness)
+            }
+            (None, Some(axis)) => write_case_cyclic(Path::new(dir), kind, nx, ny, nz, axis),
+            (Some(wt), Some(axis)) => write_case_cyclic_with_wall_model(
+                Path::new(dir), kind, nx, ny, nz, axis, wt, roughness,
+            ),
         };
     }
 

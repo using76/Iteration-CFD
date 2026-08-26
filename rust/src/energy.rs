@@ -432,6 +432,22 @@ impl<'m> GasState<'m> {
         self.dp0dt
     }
 
+    /// Restore `dp0dt` directly - SPEC-LIT §31.2's restart requirement of
+    /// substance for `ofgpu-fire`: [`Energy::update_target_divergence`]
+    /// reads `dp0dt` at a ONE-ITERATION LAG (the value [`Self::advance_p0`]
+    /// left behind at the end of the previous unit of work), exactly the
+    /// segregated lag every other coupling coefficient in that driver
+    /// already runs at. A `GasState` rebuilt fresh from a checkpoint's `p0`
+    /// alone starts with `dp0dt = 0`, which is correct on a cold start and
+    /// wrong on a restart of a sealed (§25.2) case with an ongoing heat
+    /// release - the FIRST pressure solve after resuming would then
+    /// assemble the low-Mach target divergence missing the
+    /// `-dp0dt/(gamma p0)` term the continuous run's own next step carried.
+    /// Does not touch `p0` itself or either old time level.
+    pub fn set_dp0dt(&mut self, v: Scalar) {
+        self.dp0dt = v;
+    }
+
     pub fn rho(&self) -> &GpuScalarField {
         &self.rho
     }

@@ -137,24 +137,73 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 `grading` 줄을, 실제로 켜서 쓰는 예는 아래 `channelThermalLowRe.jsonc`(벽법선
 방향 y+ ≈ 1을 노리는 two-sided grading)를 보십시오.
 
+`mesh.cyclic` — SPEC-LIT §31.1의 cyclic 패치 쌍. `mesh.boundaries`의 여섯
+이름 중 마주보는 두 개(`xmin`/`xmax`, `ymin`/`ymax`, `zmin`/`zmax` 중 하나)를
+`a`/`b`로 지정하면 그 두 면이 경계가 아니라 결합된 한 쌍이 됩니다.
+`transform`은 `"translate"`만 지원 — 축의 길이만큼 평행이동한다는 뜻이며,
+회전 쌍(`"rotate"`)은 면 매칭·벡터 변환이 아직 없어 `translate`를 이름으로
+밝힌 SPEC-LIT §13.4 오류입니다. `BlockSpec`에 cyclic 축 슬롯이 하나뿐이라
+`mesh.cyclic` 배열도 항목이 정확히 하나여야 하고(`-permissive`는 첫 항목만
+쓰고 계속), cyclic으로 지정된 패치는 `patches[]`의 구체적 규칙으로 또 지정할
+수 없습니다(양쪽 이름을 밝힌 오류) — 다만 만능 규칙(`".*"`)은 상관없고,
+오히려 `resolve_patch_rule`이 모든 패치 이름에 대해 규칙 하나를 요구하므로
+cyclic 패치 두 개를 받아줄 만능 규칙이 case 끝에 있어야 합니다(값 자체는
+cyclic 패치에는 적용되지 않습니다 — 모든 필드가 자동으로 `cyclic` 타입이
+됩니다):
+
+```jsonc
+"mesh": {
+  ...,
+  "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
+},
+```
+
+`blockgen`의 `-cyclic x|y|z` 플래그(OpenFOAM 형식 케이스)와 같은 짝짓기·같은
+두 불변식(전단사, `Sf_a == -Sf_b`)을 씁니다 — 자세한 내용은 SPEC-LIT §31.1과
+`../rust/README.en.md`의 "Cyclic patches" 행을 보십시오. 실제로 켜서 쓰는
+예는 아래 `channelPeriodicWF.jsonc`/`channelPeriodicLowRe.jsonc`입니다.
+
+`sources` — SPEC-LIT §18/§31.1의 체적 소스, JSONC 쪽 입구입니다. 오늘은
+`momentumSource` 한 종류만 지원합니다: 전체 도메인에 걸친 균일 체적력(단위
+질량당, m/s²) — periodic 케이스처럼 유입 경계가 없어 질량유량을 지정할 수
+없는 케이스가 유동을 몰아가는 유일한 방법입니다. `field`는 반드시 `"U"`여야
+하고(체적력은 벡터라 운동량 방정식에만 뜻이 있음), 다른 값은 이름을 밝힌
+오류입니다. OpenFOAM 형식 케이스의 `constant/fvSources`(box/sphere 선택,
+여섯 종류의 항)와 같은 `crate::sources::SourceSpec` 레지스트리로 내려가지만,
+이 배열은 그 전체 표면을 복제하지 않고 페리오딕 케이스에 필요한 이 한 가지만
+추가합니다:
+
+```jsonc
+"sources": [
+  { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
+],
+```
+
 | Case | 드라이버 | 설명 |
 |---|---|---|
 | `plume.jsonc` | `ofgpu-k-epsilon` 등 | `plumeB`(OpenFOAM 형식)의 JSONC 재현 — 두 형식이 같은 필드를 만든다는 B3 게이트 |
 | `burnerPlume.jsonc` | `ofgpu-fire -combustion -radiation` | 프로판 버너 화재 데모 — SPEC-LIT §25(저-마하)·§26(에너지)·§27(연소)·§28(복사)를 한 케이스에서 결합. 바닥 창(`Y_F = 1` 고정)으로 연료가 들어가고, 열은 전부 연소의 `q'''_c`에서 나옵니다(입구 자체는 상온) |
 | `channelThermalWF.jsonc` | `ofgpu-fire` | SPEC-LIT §29.3/§30.3의 게이트, 메쉬 (a): 2.0 m(L/Dh = 50) 입구구동 평면 채널/덕트, 위아래 벽 `Tw = 373.15 K`, 중력 0. 벽법선 방향 균일 격자(6칸) — 측정 y+ 21.95/37.90/40.29(목표 30-60), `standard` 프리셋, `thermalWallFunction`이 실제로 일을 해야 하는 조건 |
 | `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, `mesh.grading`으로 벽법선 방향을 양쪽 벽 모두를 향해 two-sided grading(`expansion: 200`, 50칸, 첫 셀 높이 ≈ 2×10⁻⁵ m)하여 y+ 목표 ≈ 1(측정 0.43/0.89/1.02)을 노리는 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다"). 두 케이스의 벽 열유입 비율은 0.381(첫 시도의 0.095에서 4배 개선, 여전히 게이트는 열려 있음) — 자세한 내용은 `docs/07-fire-solver.md` §1.1 |
+| `channelPeriodicWF.jsonc` | `ofgpu-fire` | SPEC-LIT §31의 페리오딕 재시도, 메쉬 (a): 위 두 케이스와 같은 단면(0.04 m × 0.04 m)·`Tw`를 스트림방향 **cyclic**(`mesh.cyclic`, 0.08 m, 8칸)으로 바꾸고, 유입 대신 `sources[]` `momentumSource`(체적력 3.9 m/s²)로, 에너지는 `-heaterPower -6`(균일 도메인 열싱크)로 구동 — 벽법선 균일 6칸, `standard`/`thermalWallFunction`. 측정 y+ 40.25/41.73/43.41, 완전 수렴(`\|U\|` 잔차 1.3e-10) |
+| `channelPeriodicLowRe.jsonc` | `ofgpu-fire` | 위와 같은 페리오딕 덕트, 벽법선만 `channelThermalLowRe.jsonc`와 같은 two-sided grading(`expansion: 200`, 50칸) — `lowRe`/`fixedValue`. 같은 체적력, 그러나 **다른** 열싱크(`-heaterPower -60`) — 해상된 y+~0.3 서브레이어가 같은 싱크로는 `Tw` 근처까지 데워질 만큼 전도가 좋아서(§1.1의 상세 설명 참고), `-900`까지 올려 두 메쉬를 같은 ΔT로 맞춰 보려 했으나 도메인 코어가 160 K까지 식는 비물리적 결과가 나와 포기 — 측정 y+ 0.302/0.310/0.318, `\|U\|` 잔차는 ~1e-5에서 정체(양은 안정) |
 
 ```powershell
 cd ..\rust
 cargo run --release --bin ofgpu-fire -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005 -check 200
 
-# SPEC-LIT §29.3/§30.3의 게이트 — 정상상태까지 돌리고
+# SPEC-LIT §29.3/§30.3의 게이트 (비주기, 첫 두 시도) — 정상상태까지 돌리고
 # "integrated wall heat flux" 줄을 비교합니다.
 cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalWF.jsonc    -iters 6000 -check 2000
 cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalLowRe.jsonc -iters 6000 -check 1000
+
+# SPEC-LIT §31의 페리오딕 재시도 — 두 케이스의 -heaterPower 값이 다른 이유는
+# cases/channelPeriodicLowRe.jsonc 헤더와 docs/07-fire-solver.md §1.1을 보십시오.
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicWF.jsonc    -iters 3000  -check 3000 -heaterPower -6
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicLowRe.jsonc -iters 40000 -check 5000 -heaterPower -60
 ```
 
-자세한 화재 솔버 설명과 두 채널 케이스가 실제로 낸 벽 열유속·비율은
+자세한 화재 솔버 설명과 네 채널 케이스가 실제로 낸 벽 열유속·비율은
 [`../docs/07-fire-solver.md`](../docs/07-fire-solver.md)를 보십시오.
 
 ## 직접 만든 OpenFOAM 케이스 쓰기

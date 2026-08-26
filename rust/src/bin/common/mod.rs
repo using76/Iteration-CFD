@@ -380,6 +380,12 @@ pub fn restart_shell(mesh_hash: u64, time: Scalar, p0: Scalar, hm: &ofgpu::HostM
         mesh_hash,
         time: f64::from(time),
         p0: f64::from(p0),
+        // `ofgpu-buoyant`/`ofgpu-vof` have no `p0` ODE (SPEC-LIT §25.2 is
+        // `ofgpu-fire`-only) and so nothing to carry here; `ofgpu-fire`'s
+        // own `write_restart_checkpoint` overwrites this field with
+        // `GasState::dp0dt()` after calling this - see `.mcr`'s "Version 2"
+        // doc in `ofgpu::restart`.
+        dp0dt: 0.0,
         n_cells: hm.n_cells as u64,
         n_internal: hm.n_internal_faces as u64,
         n_boundary: hm.n_boundary_faces as u64,

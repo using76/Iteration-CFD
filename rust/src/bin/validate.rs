@@ -324,6 +324,7 @@ fn make_mesh(dir: &Path, s: &MeshSpec) -> Result<HostMesh> {
         window: None,
         patch_name: BlockSpec::default().patch_name,
         patch_type: types,
+        cyclic: None,
     };
 
     if s.shear == 0.0 {
@@ -2002,6 +2003,10 @@ fn run(c: &mut Checks) -> Result<()> {
     check_werner_wengle_inversion(c);
     check_coupled_selection(c, &gpu, &k)?;
 
+    // ---- periodic domains: the cyclic-pair invariants (SPEC-LIT 31.1) ----
+    println!("\n=== periodic domains: cyclic-pair invariants (SPEC-LIT 31.1) ===");
+    check_cyclic_pair(c)?;
+
     Ok(())
 }
 
@@ -3675,6 +3680,7 @@ fn check_radiative_equilibrium(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         window: None,
         patch_name: BlockSpec::default().patch_name,
         patch_type: ["wall", "wall", "wall", "wall", "wall", "wall"].map(String::from),
+        cyclic: None,
     };
     let hm = blockgen::build_mesh(&b)?;
     let gm = GpuMesh::upload(gpu, &hm)?;
@@ -3714,6 +3720,118 @@ fn check_radiative_equilibrium(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let want = 4.0 * ofgpu::radiation::SIGMA_SB * t0 * t0 * t0 * t0;
     let worst = g.iter().fold(0.0 as Scalar, |w, &v| w.max((v - want).abs() / want));
     c.check("radiative equilibrium (S28, decisive): G = 4 sigma T^4", worst, 1e-8);
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §31.1: the cyclic-pair invariants
+//
+//  Cheap and geometric only - no GPU kernel, no solve - which is exactly why
+//  this is the piece of §31.1 promoted into the permanent gate rather than
+//  the two-mesh wall-heat-flux comparison (SPEC-LIT §29.3/§31's own
+//  deferred gate): that one needs `ofgpu-fire` run to convergence on two
+//  meshes, which is minutes, not the seconds this file's whole suite runs
+//  in. What IS cheap, and worth gating permanently, is that a cyclic pair's
+//  face matching itself never regresses - a mismatched pair "silently
+//  produces a mesh that conserves nothing" (SPEC-LIT §31.1's own words),
+//  which is exactly the failure mode a fast geometric check catches before
+//  anything gets as far as a solve.
+// ==========================================================================
+
+/// Independently re-derives SPEC-LIT §31.1's face matching (nearest
+/// translated centroid) and checks both invariants the section names -
+/// bijection, and `Sf_a == -Sf_b` to a stated tolerance - against a small
+/// cyclic block [`blockgen::build_mesh`] itself produced, rather than
+/// trusting the SAME matching code path the reader uses. `cases/README.md`'s
+/// `channelPeriodicWF.jsonc`/`channelPeriodicLowRe.jsonc` exercise the real
+/// reader path end to end; this is the fast, permanent geometric gate behind
+/// it.
+fn check_cyclic_pair(c: &mut Checks) -> Result<()> {
+    // Deliberately NOT cubic and NOT a power of two in any axis, so a bug
+    // that only shows up off an accidental symmetry has somewhere to hide.
+    let mut b = BlockSpec {
+        x: GradedAxis { lo: 0.0, hi: 0.7, n: 6, ..GradedAxis::default() },
+        y: GradedAxis { lo: 0.0, hi: 0.3, n: 5, ..GradedAxis::default() },
+        z: GradedAxis { lo: 0.0, hi: 0.4, n: 4, ..GradedAxis::default() },
+        ..BlockSpec::default()
+    };
+    b.set_cyclic_axis(0)?;
+    let hm = blockgen::build_mesh(&b)?;
+
+    let cyclic_patches: Vec<usize> = hm
+        .patches
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.kind == PatchKind::Cyclic)
+        .map(|(i, _)| i)
+        .collect();
+    c.require("exactly two cyclic patches", cyclic_patches.len() == 2);
+    if cyclic_patches.len() != 2 {
+        return Ok(());
+    }
+    let (pa, pb) = (&hm.patches[cyclic_patches[0]], &hm.patches[cyclic_patches[1]]);
+    c.check(
+        "the two cyclic patches carry equal face counts",
+        (pa.size as Scalar - pb.size as Scalar).abs(),
+        0.0,
+    );
+
+    // The translation SPEC-LIT §31.1 says is implied by the block's own
+    // extent along the cyclic axis - x here, since `set_cyclic_axis(0)` was
+    // asked for above. Independent of `nbr_patch`/`build_patches`: derived
+    // straight from the two patches' own mean face-centre `x`, not assumed
+    // from `b.x.hi`, so a geometry bug in the writer cannot cancel against
+    // the same assumption made here.
+    let mean_x = |p: &ofgpu::mesh::PatchInfo| -> Scalar {
+        let s: Scalar = (0..p.size).map(|i| hm.b_cf[p.start + i].x).sum();
+        s / p.size.max(1) as Scalar
+    };
+    let translate = mean_x(pb) - mean_x(pa);
+
+    // Nearest-centroid matching, SPEC-LIT §31.1's own algorithm re-derived:
+    // O(n^2) over a few dozen faces, which is why this belongs in the
+    // seconds-scale permanent suite and the two-mesh flux comparison does
+    // not.
+    let mut matched_b = vec![false; pb.size];
+    let mut bijection_ok = true;
+    let mut worst_sf_mismatch: Scalar = 0.0;
+    for i in 0..pa.size {
+        let fa = pa.start + i;
+        let target = hm.b_cf[fa] + Vec3::new(translate, 0.0, 0.0);
+        let mut best: Option<(usize, Scalar)> = None;
+        for j in 0..pb.size {
+            let fb = pb.start + j;
+            let d = (hm.b_cf[fb] - target).mag();
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((j, d));
+            }
+        }
+        let Some((j, _)) = best else {
+            bijection_ok = false;
+            continue;
+        };
+        if matched_b[j] {
+            bijection_ok = false; // this partner was already claimed once
+        }
+        matched_b[j] = true;
+
+        let fb = pb.start + j;
+        let scale = hm.b_mag_sf[fa].max(hm.b_mag_sf[fb]).max(1e-30);
+        let mismatch = (hm.b_sf[fa] + hm.b_sf[fb]).mag() / scale;
+        worst_sf_mismatch = worst_sf_mismatch.max(mismatch);
+    }
+    bijection_ok &= matched_b.iter().all(|&m| m);
+
+    c.require(
+        "cyclic pair: face matching is a bijection (SPEC-LIT S31.1 invariant 1)",
+        bijection_ok,
+    );
+    c.check(
+        "cyclic pair: Sf_a == -Sf_b after translation (SPEC-LIT S31.1 invariant 2)",
+        worst_sf_mismatch,
+        1e-12,
+    );
+
     Ok(())
 }
 

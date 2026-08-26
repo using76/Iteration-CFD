@@ -697,6 +697,11 @@ pub fn heat_release_source(q_dot: Scalar, rho_cp: Scalar, zone: &CellZone) -> Re
 /// `selection` is `box`, `sphere` or `all`. Every other `type` is an ERROR
 /// naming what is available, per SPEC-LIT §13.4 - a source the solver cannot
 /// apply must not be read and dropped.
+///
+/// `Clone` so a JSONC `LoweredCase` (SPEC-LIT §31.1's other route to the same
+/// registry, [`crate::io::case_json::JsonSource`]) can be read out of it more
+/// than once without re-lowering the case.
+#[derive(Clone)]
 pub struct SourceSpec {
     pub name: String,
     /// Which equation the source belongs to: `"T"`, `"U"`, a species name.

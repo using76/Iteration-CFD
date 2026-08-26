@@ -25,7 +25,7 @@ use crate::fv::{GradScheme, SnGradScheme};
 use crate::io::dict::FoamDict;
 use crate::io::schemes::{DivEntry, FvSchemes};
 use crate::momentum::BuoyancyCoeffs;
-use crate::io::contract::{permissive, unsupported};
+use crate::io::contract::{permissive, unsupported, warn_once};
 use crate::timescheme::DdtScheme;
 use crate::{Label, Scalar};
 
@@ -799,6 +799,97 @@ impl AlgorithmControls {
     }
 }
 
+/// SPEC-LIT §31.3: a case is transient when its `run` has a positive
+/// `endTime` and its `ddt` scheme is not `steadyState`.
+///
+/// Deliberately the LITERAL scheme, not [`DdtScheme::is_steady`] - that
+/// method also folds in `localEuler` (SPEC-LIT §13.2's local time stepping),
+/// which is its own pseudo-steady acceleration technique and not what this
+/// section is naming.
+pub fn is_transient_run(end_time: Scalar, ddt: DdtScheme) -> bool {
+    end_time > 0.0 && ddt != DdtScheme::SteadyState
+}
+
+/// SPEC-LIT §31.3: the transient/algorithm contract.
+///
+/// `cases/burnerPlume.jsonc` named `SIMPLE` (a steady algorithm, under-
+/// relaxation and all) while being run as a transient fire: the momentum
+/// equation was relaxed toward a steady state a buoyant plume does not
+/// have, and it diverged to Inf around step 20. Nothing in either reader
+/// noticed, because `endTime`, `ddt` and the algorithm dictionary are three
+/// independent settings and each one was individually valid.
+///
+/// A transient run (see [`is_transient_run`]) naming `SIMPLE` is a §13.4
+/// error naming both settings and the transient algorithms this solver has
+/// (`PISO`, `PIMPLE`); a steady run (`ddt steadyState`, or `endTime <= 0`)
+/// naming `PISO` or `PIMPLE` is the same mismatch from the other side.
+/// `-permissive` substitutes `PIMPLE` with one outer corrector for the
+/// first direction and `SIMPLE` for the second, and prints which.
+pub fn check_transient_algorithm_contract(
+    end_time: Scalar,
+    ddt: DdtScheme,
+    algorithm: &mut AlgorithmControls,
+) -> Result<()> {
+    let transient = is_transient_run(end_time, ddt);
+
+    if transient && algorithm.dict == "SIMPLE" {
+        let setting = "numerics/algorithm";
+        let value = format!(
+            "SIMPLE (ddt \"{}\", endTime {})",
+            ddt.describe(),
+            end_time
+        );
+        if !permissive() {
+            return Err(Error::Config(format!(
+                "{setting}: \"{value}\" is a steady algorithm on a transient case \
+                 (endTime > 0 and ddt is not steadyState)\n  \
+                 available for a transient run: PISO, PIMPLE\n  \
+                 (run with -permissive to substitute PIMPLE with one outer corrector \
+                 and continue)"
+            )));
+        }
+        warn_once(
+            setting,
+            &format!(
+                "-permissive: {setting} \"{value}\" is a steady algorithm on a transient \
+                 case; substituting PIMPLE with one outer corrector"
+            ),
+        );
+        algorithm.dict = "PIMPLE";
+        algorithm.n_outer_correctors = 1;
+        return Ok(());
+    }
+
+    if !transient && (algorithm.dict == "PISO" || algorithm.dict == "PIMPLE") {
+        let setting = "numerics/algorithm";
+        let value = format!(
+            "{} (ddt \"{}\", endTime {})",
+            algorithm.dict,
+            ddt.describe(),
+            end_time
+        );
+        if !permissive() {
+            return Err(Error::Config(format!(
+                "{setting}: \"{value}\" is a transient algorithm on a steady case \
+                 (endTime <= 0 or ddt is steadyState)\n  \
+                 available for a steady run: SIMPLE\n  \
+                 (run with -permissive to substitute SIMPLE and continue)"
+            )));
+        }
+        warn_once(
+            setting,
+            &format!(
+                "-permissive: {setting} \"{value}\" is a transient algorithm on a steady \
+                 case; substituting SIMPLE"
+            ),
+        );
+        algorithm.dict = "SIMPLE";
+        return Ok(());
+    }
+
+    Ok(())
+}
+
 // ==========================================================================
 //  residualControl
 // ==========================================================================
@@ -1171,7 +1262,7 @@ fn read_fv_schemes(turb: &mut TurbulenceControls, sch: &FvSchemes) -> Result<()>
     Ok(())
 }
 
-fn read_control_dict(c: &mut CaseControls, d: &FoamDict) {
+fn read_control_dict(c: &mut CaseControls, d: &FoamDict) -> Result<()> {
     c.turb.delta_t = d.scalar("deltaT", c.turb.delta_t);
 
     // Local time stepping reads its Courant number and its ceiling from the
@@ -1196,6 +1287,13 @@ fn read_control_dict(c: &mut CaseControls, d: &FoamDict) {
 
         c.write_time = format_time_name(end_time);
     }
+
+    // SPEC-LIT §31.3: `endTime`, `ddtSchemes` and the `SIMPLE`/`PISO`/
+    // `PIMPLE` dictionary are three settings a case can get individually
+    // right and jointly nonsensical - `cases/burnerPlume.jsonc` did.
+    check_transient_algorithm_contract(end_time, c.turb.ddt, &mut c.algorithm)?;
+
+    Ok(())
 }
 
 /// Read every dictionary the solver needs.
@@ -1313,7 +1411,7 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
     let ctrl_d = case_dir.join("system").join("controlDict");
     if ctrl_d.exists() {
         let d = FoamDict::read(&ctrl_d)?;
-        read_control_dict(&mut c, &d);
+        read_control_dict(&mut c, &d)?;
     }
 
     Ok(c)
@@ -2000,13 +2098,14 @@ mod tests {
 
         let mut steady = CaseControls::default();
         steady.turb.steady = true;
-        read_control_dict(&mut steady, &d);
+        read_control_dict(&mut steady, &d).unwrap();
         assert_eq!(steady.turb.n_outer_iterations, 5);
         assert_eq!(steady.write_time, "5");
 
         let mut transient = CaseControls::default();
         transient.turb.steady = false;
-        read_control_dict(&mut transient, &d);
+        transient.turb.ddt = DdtScheme::Euler;
+        read_control_dict(&mut transient, &d).unwrap();
         assert_eq!(transient.turb.n_outer_iterations, 500);
         assert!((transient.turb.delta_t - 0.01).abs() < 1e-12);
         assert_ne!(transient.turb.r_delta_t(), 0.0);
@@ -2191,7 +2290,7 @@ mod tests {
     fn lts_controls_come_from_the_control_dict() {
         let d = FoamDict::parse("deltaT 1; maxCo 25; maxDeltaT 0.2;", "controlDict").unwrap();
         let mut c = CaseControls::default();
-        read_control_dict(&mut c, &d);
+        read_control_dict(&mut c, &d).unwrap();
         assert_eq!(c.lts.co_max, 25.0);
         assert_eq!(c.lts.dt_max, 0.2);
     }
@@ -2206,5 +2305,142 @@ mod tests {
         assert_eq!(format_time_name(1.0), "1");
         assert_eq!(format_time_name(0.001), "0.001");
         assert_eq!(format_time_name(1e7), "1e+07");
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §31.3: the transient/algorithm contract
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn transient_case_naming_simple_is_an_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let mut algorithm = AlgorithmControls { dict: "SIMPLE", ..AlgorithmControls::default() };
+        let err = check_transient_algorithm_contract(20.0, DdtScheme::Euler, &mut algorithm)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SIMPLE"), "{err}");
+        assert!(err.contains("PISO"), "{err}");
+        assert!(err.contains("PIMPLE"), "{err}");
+    }
+
+    #[test]
+    fn steady_case_naming_piso_is_an_error_from_the_other_side() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        // steadyState ddt: not transient regardless of endTime.
+        let mut algorithm = AlgorithmControls { dict: "PISO", ..AlgorithmControls::default() };
+        let err =
+            check_transient_algorithm_contract(20.0, DdtScheme::SteadyState, &mut algorithm)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("PISO"), "{err}");
+        assert!(err.contains("SIMPLE"), "{err}");
+
+        // endTime <= 0: not transient regardless of ddt.
+        let mut algorithm = AlgorithmControls { dict: "PIMPLE", ..AlgorithmControls::default() };
+        let err = check_transient_algorithm_contract(-1.0, DdtScheme::Euler, &mut algorithm)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("PIMPLE"), "{err}");
+    }
+
+    #[test]
+    fn a_transient_case_naming_piso_or_pimple_is_fine() {
+        let mut algorithm = AlgorithmControls { dict: "PISO", ..AlgorithmControls::default() };
+        check_transient_algorithm_contract(20.0, DdtScheme::Euler, &mut algorithm).unwrap();
+
+        let mut algorithm = AlgorithmControls { dict: "PIMPLE", ..AlgorithmControls::default() };
+        check_transient_algorithm_contract(20.0, DdtScheme::Backward, &mut algorithm).unwrap();
+    }
+
+    #[test]
+    fn a_steady_case_naming_simple_is_fine() {
+        let mut algorithm = AlgorithmControls { dict: "SIMPLE", ..AlgorithmControls::default() };
+        check_transient_algorithm_contract(20.0, DdtScheme::SteadyState, &mut algorithm).unwrap();
+        check_transient_algorithm_contract(-1.0, DdtScheme::Euler, &mut algorithm).unwrap();
+    }
+
+    #[test]
+    fn no_algorithm_named_is_never_flagged() {
+        // A case with no SIMPLE/PISO/PIMPLE dictionary at all - `dict == ""` -
+        // has not named a steady OR a transient algorithm, so there is
+        // nothing here for this contract to reject.
+        let mut algorithm = AlgorithmControls::default();
+        assert_eq!(algorithm.dict, "");
+        check_transient_algorithm_contract(20.0, DdtScheme::Euler, &mut algorithm).unwrap();
+        check_transient_algorithm_contract(-1.0, DdtScheme::SteadyState, &mut algorithm).unwrap();
+    }
+
+    /// The exact defect `cases/burnerPlume.jsonc` shipped with (SPEC-LIT
+    /// §31.3's motivating example): `-permissive` substitutes PIMPLE with
+    /// one outer corrector, and says so.
+    #[test]
+    fn permissive_substitutes_pimple_for_the_transient_simple_case() {
+        let _g = crate::io::contract::permissive_test_guard();
+        let _serial = permissive_guard();
+        crate::io::contract::set_permissive(true);
+
+        let mut algorithm = AlgorithmControls { dict: "SIMPLE", ..AlgorithmControls::default() };
+        check_transient_algorithm_contract(20.0, DdtScheme::Euler, &mut algorithm)
+            .expect("-permissive must not fail");
+        assert_eq!(algorithm.dict, "PIMPLE");
+        assert_eq!(algorithm.n_outer_correctors, 1);
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// The reverse direction's own substitution: a steady case that named a
+    /// transient algorithm falls back to `SIMPLE`.
+    #[test]
+    fn permissive_substitutes_simple_for_the_steady_piso_case() {
+        let _g = crate::io::contract::permissive_test_guard();
+        let _serial = permissive_guard();
+        crate::io::contract::set_permissive(true);
+
+        let mut algorithm = AlgorithmControls { dict: "PISO", ..AlgorithmControls::default() };
+        check_transient_algorithm_contract(-1.0, DdtScheme::Euler, &mut algorithm)
+            .expect("-permissive must not fail");
+        assert_eq!(algorithm.dict, "SIMPLE");
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT §31.3's regression: every case file this project ships must
+    /// pass the contract cleanly - `cases/burnerPlume.jsonc` used not to.
+    #[test]
+    fn every_shipped_case_passes_the_transient_algorithm_contract() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let cases_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases");
+        let entries = std::fs::read_dir(&cases_dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", cases_dir.display()));
+
+        let mut checked = 0usize;
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonc") {
+                let case = crate::io::case_json::read_case_jsonc(&path)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                case.lower()
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                checked += 1;
+            } else if path.is_dir()
+                && path.join("constant").join("polyMesh").join("owner").exists()
+            {
+                read_case_controls(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                checked += 1;
+            }
+        }
+
+        assert!(
+            checked >= 4,
+            "expected to check several case files under {}, found {checked}",
+            cases_dir.display()
+        );
     }
 }

@@ -50,7 +50,7 @@
 //! Wiring this into a driver (building an actual `HostMesh`, running the
 //! solver) is the B3 agent's job, not this file's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use schemars::JsonSchema;
@@ -101,6 +101,43 @@ pub struct JsonCase {
     pub run: JsonRun,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<JsonOutput>,
+    /// SPEC-LIT §18/§31: volumetric sources. Empty (the default) is every
+    /// case this reader has ever built. See [`JsonSource`] for what a JSONC
+    /// case can say that the OpenFOAM `constant/fvSources` route
+    /// ([`crate::sources::read_sources`]) cannot express and vice versa.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<JsonSource>,
+}
+
+/// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
+///
+/// *DESIGN.* `constant/fvSources` (SPEC-LIT §18, [`crate::sources::read_sources`])
+/// already has six term kinds over a box/sphere/all-cells selector; this is
+/// deliberately not a second copy of that whole surface. It exists because a
+/// PERIODIC case (SPEC-LIT §31.1) has no inlet to prescribe a mass flow from,
+/// so the only way left to drive it is a momentum source, and JSONC had no
+/// way to say one at all - not even the uniform, whole-domain case a periodic
+/// channel needs. `momentumSource` is that one case, reusing
+/// [`crate::sources::SourceTerm::BodyForce`] and
+/// [`crate::sources::CellSelector::All`] exactly as the OpenFOAM route would
+/// build them for `selection all`. A JSONC case that wants a ZONED source
+/// (a heat release in a box, say) still has no JSONC way to ask for one -
+/// extending this enum with `box`/`sphere` selectors is future work, not a
+/// gap this closes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum JsonSource {
+    MomentumSource {
+        /// Which equation the body force acts on. A body force is a VECTOR
+        /// (SPEC-LIT §18's [`crate::sources::SourceTerm::BodyForce`] doc) and
+        /// only the momentum equation has a direction for it to point in, so
+        /// `"U"` is the only value [`JsonCase::lower`] accepts - present
+        /// anyway, spelled out, rather than assumed silently, exactly as the
+        /// OpenFOAM `constant/fvSources` route requires a `field` entry.
+        field: String,
+        #[serde(rename = "bodyForce")]
+        body_force: [f64; 3],
+    },
 }
 
 // ---- mesh ----------------------------------------------------------------
@@ -172,6 +209,33 @@ pub struct JsonMesh {
     /// `a_case_without_grading_lowers_to_the_same_mesh_as_before`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grading: Option<JsonGrading>,
+    /// SPEC-LIT §31.1: cyclic pairs, each naming two of the six `boundaries`
+    /// values. Empty (the default) is the ordinary, uncoupled mesh this
+    /// reader has always built. See [`JsonCyclicPair`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cyclic: Vec<JsonCyclicPair>,
+}
+
+/// One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six
+/// `mesh.boundaries` values, and must name the two opposite slots of one
+/// axis (`xmin`/`xmax`, `ymin`/`ymax` or `zmin`/`zmax`) - `build_block`
+/// checks that, not this type.
+///
+/// `transform` takes only `"translate"` - the transform
+/// [`crate::blockgen::BlockSpec::set_cyclic_axis`] knows how to build a
+/// pairing from, implied by the block's own extent along that axis. A
+/// rotational pair (`"rotate"`, with an axis and an angle) needs a different
+/// face-matching search and a vector transform on `Sf` that nothing here
+/// implements yet, so it deserialises fine (it is a *known* setting) and is
+/// refused in `build_block` with a SPEC-LIT §13.4 error naming `translate` -
+/// exactly like any other recognised-but-unimplemented setting, not a parse
+/// failure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonCyclicPair {
+    pub a: String,
+    pub b: String,
+    pub transform: String,
 }
 
 /// [`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is
@@ -985,6 +1049,12 @@ pub struct LoweredCase {
     pub products_field: Option<LoweredScalarField>,
 
     pub output: Option<JsonOutput>,
+
+    /// `sources[]`, resolved to the same [`crate::sources::SourceSpec`] the
+    /// OpenFOAM `constant/fvSources` route ([`crate::sources::read_sources`])
+    /// produces - one registry, two ways to name an entry in it. Empty for
+    /// every case that names no `sources` block.
+    pub sources: Vec<crate::sources::SourceSpec>,
 }
 
 impl LoweredCase {
@@ -1191,11 +1261,80 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
         mesh.boundaries.zmin.clone(),
         mesh.boundaries.zmax.clone(),
     ];
+
+    // SPEC-LIT §31.1: a cyclic slot gets `cyclic` from `set_cyclic_axis`
+    // below, not from a `patches[]` rule - `PatchPresetKind` has no `cyclic`
+    // variant to resolve to, and a cyclic patch does not need one written.
+    let cyclic_slots = cyclic_slot_set(mesh, &names)?;
+
     for (slot, name) in names.iter().enumerate() {
-        let rule = resolve_patch_rule(patches, name)?;
         block.patch_name[slot] = name.clone();
+        if cyclic_slots.contains(&slot) {
+            continue;
+        }
+        let rule = resolve_patch_rule(patches, name)?;
         block.patch_type[slot] = patch_class(rule.kind).to_string();
     }
+
+    // `-permissive` on the "one pair" limit above still means only the
+    // FIRST pair is wired up - `cyclic_slots` (and `block.cyclic`, once
+    // `set_cyclic_axis` runs) can only ever hold one axis.
+    for pair in mesh.cyclic.iter().take(1) {
+        if pair.transform != "translate" {
+            unsupported::<()>(
+                "mesh.cyclic[].transform",
+                &pair.transform,
+                &["translate"],
+                "translate",
+                (),
+            )?;
+        }
+
+        let axis = cyclic_axis_of(&names, pair)?;
+        block.set_cyclic_axis(axis).map_err(|e| Error::Config(e.to_string()))?;
+
+        // Point 2: a cyclic patch may not also be named by a `patches[]`
+        // rule. Every rule's `kind` is `Wall`, `Inlet` or `Open` -
+        // `PatchPresetKind` has no other variant - so this is really "no
+        // rule may match this name", with one exception: the mandatory
+        // catch-all (`resolve_patch_rule`'s own error names the canonical
+        // spelling, `".*"`) every OTHER case is expected to end with, which
+        // says nothing about THIS patch in particular and is not a
+        // contradiction of the pairing.
+        for name in [&pair.a, &pair.b] {
+            if let Some(rule) = patches.iter().find(|r| {
+                r.pattern != ".*"
+                    && Regex::new(&r.pattern).map(|re| re.is_match(name)).unwrap_or(false)
+            }) {
+                return Err(Error::Config(format!(
+                    "mesh.cyclic: patch '{name}' is paired with '{}' but is ALSO named by \
+                     a patches[] rule (\"match\": \"{}\", \"kind\": \"{:?}\") - a cyclic \
+                     patch gets `cyclic` on every field automatically and cannot also \
+                     carry a wall/inlet/open rule",
+                    if name == &pair.a { &pair.b } else { &pair.a },
+                    rule.pattern,
+                    rule.kind,
+                )));
+            }
+        }
+    }
+    // NOTE: `mesh_patch_names` (below) still hands a cyclic patch's name to
+    // `resolve_patch_rule` for every FIELD's own boundary condition (`U`,
+    // `p`, `T`, the turbulence closure, ...) - it will match the mandatory
+    // catch-all, since the check just above refuses anything more specific,
+    // and so, e.g., `U`'s lowered spec for a cyclic patch reads whatever the
+    // catch-all's preset says (`noSlip`, `zeroGradient`, ...), not `cyclic`.
+    // That is deliberate rather than an oversight: `field_setup.rs`'s
+    // `topology_override` (its own comment: "what the mesh insists on,
+    // regardless of what the field file says") forces `BcKind::Cyclic` on
+    // every face of a `PatchKind::Cyclic` patch at the point a field is
+    // actually built, whatever a lowered `PatchFieldSpec` or an OpenFOAM
+    // field file happened to say - the exact mechanism `blockgen`'s own
+    // `field.rs::kinds_from_patches` doc comment names ("the mesh has the
+    // last word on empty and cyclic"). Special-casing all seven per-field
+    // loops below to write `cyclic` explicitly would only change what a
+    // round-tripped field FILE looks like, never what the solver does with
+    // it.
 
     // Only one region reaches `BlockSpec::window` - it has one slot. Every
     // region is still resolved and returned in `windows`, so a case with more
@@ -1239,6 +1378,54 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
     }
 
     Ok((block, windows))
+}
+
+// ------------------------------------------------------------ cyclic pairs
+
+/// Which axis (0=x, 1=y, 2=z) `pair` names, given the six `mesh.boundaries`
+/// values in `-x +x -y +y -z +z` order: `a` and `b` must be two of those six
+/// names, and must be the two OPPOSITE slots of one axis, in either order.
+fn cyclic_axis_of(names: &[String; 6], pair: &JsonCyclicPair) -> Result<usize> {
+    let find = |name: &str| -> Result<usize> {
+        names.iter().position(|n| n == name).ok_or_else(|| {
+            Error::Config(format!(
+                "mesh.cyclic: '{name}' is not one of the six mesh.boundaries values ({})",
+                names.join(", ")
+            ))
+        })
+    };
+    let (sa, sb) = (find(&pair.a)?, find(&pair.b)?);
+    let axis = sa / 2;
+    if sa == sb || sb / 2 != axis {
+        return Err(Error::Config(format!(
+            "mesh.cyclic: '{}' and '{}' are not the two opposite faces of one axis - \
+             a cyclic pair has to be xmin/xmax, ymin/ymax or zmin/zmax",
+            pair.a, pair.b
+        )));
+    }
+    Ok(axis)
+}
+
+/// The boundary slots `mesh.cyclic` claims, as a set - empty when there is no
+/// cyclic pair. Also where the "exactly one pair" limit lives:
+/// `BlockSpec::cyclic` has a single axis slot, exactly as `mesh.regions`'
+/// single window slot does just above, and for the same reason - a second
+/// pair is a §13.4 substitution (keep the first), not a silent truncation.
+fn cyclic_slot_set(mesh: &JsonMesh, names: &[String; 6]) -> Result<BTreeSet<usize>> {
+    if mesh.cyclic.len() > 1 {
+        unsupported::<()>(
+            "mesh.cyclic",
+            &format!("{} pairs", mesh.cyclic.len()),
+            &["exactly one cyclic pair (blockgen::BlockSpec has a single cyclic axis slot)"],
+            "the first pair only",
+            (),
+        )?;
+    }
+    let Some(pair) = mesh.cyclic.first() else {
+        return Ok(BTreeSet::new());
+    };
+    let axis = cyclic_axis_of(names, pair)?;
+    Ok(BTreeSet::from([2 * axis, 2 * axis + 1]))
 }
 
 // ------------------------------------------------------------ patch rules
@@ -1790,7 +1977,17 @@ impl JsonCase {
         turb.ddt = ddt;
         turb.steady = ddt.is_steady();
 
-        let algorithm = build_algorithm(&self.numerics.algorithm, turb.n_non_orth_correctors);
+        let mut algorithm = build_algorithm(&self.numerics.algorithm, turb.n_non_orth_correctors);
+
+        // SPEC-LIT §31.3: `run.endTime`, `numerics.ddt` and `numerics.algorithm`
+        // are three settings a case can get individually right and jointly
+        // nonsensical - `cases/burnerPlume.jsonc` named `SIMPLE` while being
+        // run as a transient fire and diverged to Inf around step 20.
+        crate::io::case::check_transient_algorithm_contract(
+            self.run.end_time as Scalar,
+            ddt,
+            &mut algorithm,
+        )?;
 
         let p_solver = solver_for(&self.numerics.solvers, "p")?;
         let u_solver = solver_for(&self.numerics.solvers, "U")?;
@@ -1962,6 +2159,37 @@ impl JsonCase {
             write_back(&mut omega_field, omega_kind, corrected.omega);
         }
 
+        // ---- SPEC-LIT §18/§31: sources[] -----------------------------------
+        let mut sources: Vec<crate::sources::SourceSpec> = Vec::new();
+        for (i, src) in self.sources.iter().enumerate() {
+            match src {
+                JsonSource::MomentumSource { field, body_force } => {
+                    if field != "U" {
+                        return Err(Error::Config(format!(
+                            "sources[{i}] (momentumSource): field \"{field}\" - a body \
+                             force is a vector and only the momentum equation (\"U\") \
+                             has a direction for it to point in (SPEC-LIT §18)"
+                        )));
+                    }
+                    let b = to_vec3(*body_force);
+                    if !(b.x.is_finite() && b.y.is_finite() && b.z.is_finite()) {
+                        return Err(Error::Config(format!(
+                            "sources[{i}] (momentumSource): bodyForce ({} {} {}) is not \
+                             finite",
+                            b.x, b.y, b.z
+                        )));
+                    }
+                    sources.push(crate::sources::SourceSpec {
+                        name: format!("momentumSource{i}"),
+                        field: field.clone(),
+                        selector: crate::sources::CellSelector::All,
+                        term: Some(crate::sources::SourceTerm::BodyForce(b)),
+                        heat_release: None,
+                    });
+                }
+            }
+        }
+
         Ok(LoweredCase {
             name: self.name.clone(),
             block,
@@ -2001,6 +2229,7 @@ impl JsonCase {
             o2_field,
             products_field,
             output: self.output.clone(),
+            sources,
         })
     }
 }
@@ -2217,6 +2446,199 @@ mod tests {
         };
         let mesh_ref = crate::blockgen::build_mesh(&uniform_block).expect("build_mesh");
         assert_eq!(hash_mesh(&mesh_a), hash_mesh(&mesh_ref), "grading-free lowering must match a hand-built uniform mesh");
+    }
+
+    // ---- SPEC-LIT §31.1: mesh.cyclic ---------------------------------------
+
+    /// [`minimal_case_with_mesh`], but with the `patches` array named too -
+    /// the cyclic/patches-conflict tests need a `patches[]` entry that names
+    /// a cyclic patch specifically, which the hardcoded `".*"` catch-all in
+    /// `minimal_case_with_mesh` cannot express.
+    fn case_with_mesh_and_patches(mesh_extra: &str, patches_json: &str) -> Result<JsonCase> {
+        let text = format!(
+            r#"{{
+                "name": "cyclicTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                    "cells": [4, 6, 8],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}{mesh_extra}
+                }},
+                "physics": {{
+                    "gravity": [0,0,0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+                    "buoyancy": "densityRatio"
+                }},
+                "patches": {patches_json},
+                "initial": {{ "U": [0,0,0], "p": 0.0 }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }}
+            }}"#
+        );
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "case_json_cyclic_test_{}_{n}.jsonc",
+            std::process::id()
+        ));
+        std::fs::write(&path, text).unwrap();
+        let case = read_case_jsonc(&path);
+        let _ = std::fs::remove_file(&path);
+        case
+    }
+
+    const WALL_CATCH_ALL: &str = r#"[ { "match": ".*", "kind": "wall" } ]"#;
+
+    #[test]
+    fn a_cyclic_pair_lowers_to_a_paired_block_spec() {
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [ { "a": "xa", "b": "xb", "transform": "translate" } ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+
+        let lowered = case.lower().expect("lower");
+        assert_eq!(lowered.block.cyclic, Some(0));
+        assert_eq!(lowered.block.patch_type[0], "cyclic");
+        assert_eq!(lowered.block.patch_type[1], "cyclic");
+        assert_eq!(lowered.block.patch_name[0], "xa");
+        assert_eq!(lowered.block.patch_name[1], "xb");
+        // Untouched by the pairing.
+        assert_eq!(lowered.block.patch_type[2], "wall");
+        assert_eq!(lowered.block.patch_type[4], "wall");
+
+        // And it actually builds into a real, checkable mesh.
+        let hm = crate::blockgen::build_mesh(&lowered.block).expect("build_mesh");
+        assert!(hm.patches.iter().any(|p| p.kind == crate::mesh::PatchKind::Cyclic));
+    }
+
+    /// `ya`/`za` are not opposite faces of one axis - a §13.4-shaped error,
+    /// not a panic or a silently wrong pairing.
+    #[test]
+    fn a_cyclic_pair_naming_two_non_opposite_faces_is_an_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [ { "a": "ya", "b": "za", "transform": "translate" } ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail"),
+        };
+        assert!(err.contains("ya"), "{err}");
+        assert!(err.contains("za"), "{err}");
+    }
+
+    /// SPEC-LIT §31.1: only `translate` exists; `rotate` is a recognised,
+    /// unimplemented setting - a §13.4 error naming `translate`, not a parse
+    /// failure (the field itself deserialises fine as a plain string).
+    #[test]
+    fn a_rotate_cyclic_transform_is_a_13_4_error_naming_translate() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [ { "a": "xa", "b": "xb", "transform": "rotate" } ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail"),
+        };
+        assert!(err.contains("translate"), "{err}");
+        assert!(err.contains("rotate"), "{err}");
+    }
+
+    /// Point 2 of SPEC-LIT §31.1: a patch named in a cyclic pair may not ALSO
+    /// be named by a `patches[]` rule - here `xa` gets its own explicit wall
+    /// rule ahead of the catch-all, directly contradicting the pairing.
+    #[test]
+    fn a_cyclic_patch_named_by_a_patches_rule_is_an_error_naming_both() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [ { "a": "xa", "b": "xb", "transform": "translate" } ]"#,
+            r#"[ { "match": "xa", "kind": "wall" }, { "match": ".*", "kind": "wall" } ]"#,
+        )
+        .expect("parse");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail"),
+        };
+        assert!(err.contains("xa"), "{err}");
+        assert!(err.contains("xb"), "{err}");
+    }
+
+    /// The mandatory catch-all is not itself a contradiction - every case is
+    /// expected to end with one, and it says nothing about `xa`/`xb`
+    /// specifically.
+    #[test]
+    fn the_mandatory_catch_all_does_not_conflict_with_a_cyclic_pair() {
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [ { "a": "xa", "b": "xb", "transform": "translate" } ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+        case.lower().expect("the catch-all alone must not conflict with a cyclic pair");
+    }
+
+    /// `BlockSpec` has one cyclic axis slot; a second pair is the same
+    /// "keep the first, `-permissive` says so" contract as `mesh.regions`.
+    #[test]
+    fn more_than_one_cyclic_pair_is_a_13_4_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [
+                { "a": "xa", "b": "xb", "transform": "translate" },
+                { "a": "ya", "b": "yb", "transform": "translate" }
+            ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail"),
+        };
+        assert!(err.contains("mesh.cyclic"), "{err}");
+    }
+
+    /// `-permissive` on the same case: the first pair is wired up, the
+    /// second is rejected but does not abort the run.
+    #[test]
+    fn permissive_substitutes_the_first_of_two_cyclic_pairs() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+        crate::io::contract::set_permissive(true);
+
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [
+                { "a": "xa", "b": "xb", "transform": "translate" },
+                { "a": "ya", "b": "yb", "transform": "translate" }
+            ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+        let lowered = case.lower();
+
+        crate::io::contract::set_permissive(false);
+
+        let lowered = lowered.expect("-permissive keeps the first pair and continues");
+        assert_eq!(lowered.block.cyclic, Some(0));
+        assert_eq!(lowered.block.patch_type[0], "cyclic");
+        assert_eq!(lowered.block.patch_type[2], "wall", "the second pair must not have won");
     }
 
     /// `blockgen`'s own cases spell this exact shape
@@ -2765,4 +3187,218 @@ mod tests {
         assert!(format!("{sel2:?}").contains("KOmegaSST"), "got {sel2:?}");
     }
 
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §31.3: the transient/algorithm contract, JSONC side
+    // ------------------------------------------------------------------
+
+    /// The exact shape `cases/burnerPlume.jsonc` shipped with: `endTime > 0`,
+    /// `ddt` not `steadyState`, and `numerics.algorithm.kind` still `SIMPLE`.
+    #[test]
+    fn a_transient_jsonc_case_naming_simple_is_a_lower_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let mut case = minimal_case_with_mesh("");
+        case.numerics.ddt = "Euler".to_string();
+        case.run.end_time = 20.0;
+        case.run.delta_t = 0.01;
+        // numerics.algorithm.kind is already Simple from minimal_case_with_mesh.
+
+        let err = case.lower().err().expect("transient + SIMPLE must be rejected").to_string();
+        assert!(err.contains("SIMPLE"), "{err}");
+        assert!(err.contains("PISO"), "{err}");
+        assert!(err.contains("PIMPLE"), "{err}");
+        assert!(err.contains("-permissive"), "{err}");
+    }
+
+    /// The same mismatch from the other side: `steadyState` naming `PISO`.
+    #[test]
+    fn a_steady_jsonc_case_naming_piso_is_a_lower_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let mut case = minimal_case_with_mesh("");
+        case.numerics.algorithm.kind = AlgorithmKind::Piso;
+        // ddt stays "steadyState" from minimal_case_with_mesh.
+
+        let err = case.lower().err().expect("steady + PISO must be rejected").to_string();
+        assert!(err.contains("PISO"), "{err}");
+        assert!(err.contains("SIMPLE"), "{err}");
+        assert!(err.contains("-permissive"), "{err}");
+    }
+
+    /// `-permissive` substitutes `PIMPLE` with one outer corrector, and the
+    /// case still lowers.
+    #[test]
+    fn permissive_substitutes_pimple_and_the_jsonc_case_still_lowers() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(true);
+
+        let mut case = minimal_case_with_mesh("");
+        case.numerics.ddt = "Euler".to_string();
+        case.run.end_time = 20.0;
+        case.run.delta_t = 0.01;
+
+        let lowered = case.lower().expect("-permissive must not fail");
+        assert_eq!(lowered.algorithm.dict, "PIMPLE");
+        assert_eq!(lowered.algorithm.n_outer_correctors, 1);
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// A transient case naming `PIMPLE` (`cases/burnerPlume.jsonc`'s fixed
+    /// shape) lowers cleanly - the contract does not reject the combination
+    /// it exists to require.
+    #[test]
+    fn a_transient_jsonc_case_naming_pimple_lowers_cleanly() {
+        let mut case = minimal_case_with_mesh("");
+        case.numerics.algorithm.kind = AlgorithmKind::Pimple;
+        case.numerics.algorithm.outer_correctors = Some(1);
+        case.numerics.ddt = "Euler".to_string();
+        case.run.end_time = 20.0;
+        case.run.delta_t = 0.01;
+
+        let lowered = case.lower().expect("transient + PIMPLE must lower");
+        assert_eq!(lowered.algorithm.dict, "PIMPLE");
+    }
+
+    /// SPEC-LIT §31.3's regression: every `.jsonc` case this project ships
+    /// must pass the contract - `cases/burnerPlume.jsonc` used not to.
+    #[test]
+    fn every_shipped_jsonc_case_passes_the_transient_algorithm_contract() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let cases_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases");
+        let entries = std::fs::read_dir(&cases_dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", cases_dir.display()));
+
+        let mut checked = 0usize;
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonc") {
+                let case = read_case_jsonc(&path)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                case.lower().unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "expected several .jsonc cases under {}, found {checked}", cases_dir.display());
+    }
+
+    // ---- SPEC-LIT §18/§31.1: sources[] --------------------------------------
+
+    /// [`minimal_case_with_mesh`], with a top-level `sources` array spliced
+    /// in - the momentum-source tests need one and no other helper here
+    /// takes arbitrary top-level JSON.
+    fn minimal_case_with_sources(sources_json: &str) -> Result<JsonCase> {
+        let text = format!(
+            r#"{{
+                "name": "sourcesTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                    "cells": [4, 6, 8],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0,0,0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+                    "buoyancy": "densityRatio"
+                }},
+                "patches": [ {{ "match": ".*", "kind": "wall" }} ],
+                "initial": {{ "U": [0,0,0], "p": 0.0 }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }},
+                "sources": [{sources_json}]
+            }}"#
+        );
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "case_json_sources_test_{}_{n}.jsonc",
+            std::process::id()
+        ));
+        std::fs::write(&path, text).unwrap();
+        let case = read_case_jsonc(&path);
+        let _ = std::fs::remove_file(&path);
+        case
+    }
+
+    /// No `sources` key at all lowers to an empty list - every case this
+    /// reader has ever built before this feature existed.
+    #[test]
+    fn a_case_with_no_sources_key_lowers_to_an_empty_list() {
+        let case = minimal_case_with_mesh("");
+        let lowered = case.lower().expect("lower");
+        assert!(lowered.sources.is_empty());
+    }
+
+    /// A `momentumSource` on `U` lowers to exactly the
+    /// [`crate::sources::SourceSpec`] the OpenFOAM `constant/fvSources`
+    /// `momentumSource`/`selection all` route would build - one registry,
+    /// two ways in.
+    #[test]
+    fn a_momentum_source_lowers_to_a_whole_domain_body_force() {
+        let case = minimal_case_with_sources(
+            r#"{ "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0.0, -1.5] }"#,
+        )
+        .expect("parses");
+        let lowered = case.lower().expect("a momentumSource on U must lower");
+        assert_eq!(lowered.sources.len(), 1);
+        let spec = &lowered.sources[0];
+        assert_eq!(spec.field, "U");
+        assert_eq!(spec.selector, crate::sources::CellSelector::All);
+        match spec.term {
+            Some(crate::sources::SourceTerm::BodyForce(b)) => {
+                assert_eq!((b.x, b.y, b.z), (3.9, 0.0, -1.5));
+            }
+            other => panic!("expected SourceTerm::BodyForce, got {other:?}"),
+        }
+    }
+
+    /// SPEC-LIT §18: a body force is a vector and only the momentum equation
+    /// has a direction for it to point in - `field` names anything else is a
+    /// §13.4 error, not a silent no-op.
+    #[test]
+    fn a_momentum_source_naming_a_field_other_than_u_is_an_error() {
+        let case = minimal_case_with_sources(
+            r#"{ "type": "momentumSource", "field": "T", "bodyForce": [1.0, 0.0, 0.0] }"#,
+        )
+        .expect("parses");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail for field \"T\""),
+        };
+        assert!(err.contains("\"T\""), "{err}");
+    }
+
+    /// A `bodyForce` component past `f64`'s range is refused when the case
+    /// is READ, before `lower` ever runs - this reader's own JSON number
+    /// parsing already checks finiteness (see [`Self::f64_round_trips_exactly`]'s
+    /// neighbourhood), so an out-of-range exponent such as `1e400` never
+    /// reaches a `JsonSource` at all. This is the JSONC route's version of
+    /// the same finiteness guard [`crate::sources::SourceTerm::validate`]
+    /// makes for the OpenFOAM `constant/fvSources` route - caught one step
+    /// earlier here, not skipped.
+    #[test]
+    fn an_out_of_range_body_force_component_is_refused_on_read() {
+        let err = match minimal_case_with_sources(
+            r#"{ "type": "momentumSource", "field": "U", "bodyForce": [1e400, 0.0, 0.0] }"#,
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected read_case_jsonc to refuse an out-of-range bodyForce component"),
+        };
+        assert!(err.contains("finite"), "{err}");
+    }
 }

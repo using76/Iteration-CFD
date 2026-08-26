@@ -25,6 +25,18 @@
     // "twoSided": false (the default - one wall only). expansion must be > 0.
     // "grading": { "z": { "expansion": 6.0, "twoSided": true } },
 
+    // SPEC-LIT §31.1: couple two opposite boundaries instead of leaving them
+    // as boundaries — "a" and "b" name two of the six "boundaries" values
+    // above (which must be DISTINCT patch names, unlike this case's own
+    // xmin/xmax, both called "outlet"), opposite faces of one axis
+    // (xmin/xmax, ymin/ymax or zmin/zmax). "translate" (implied by the
+    // block's own extent along that axis) is the only transform this reader
+    // builds; a rotational pair is a named §13.4 refusal. This case has no
+    // cyclic pair, so this stays commented out and illustrative, exactly
+    // like "grading" above — see cases/channelPeriodicWF.jsonc for a case
+    // that actually turns it on.
+    // "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
+
     // The burner inlet: a window in the floor. In the OpenFOAM format this
     // needed the PatchWindow workaround because a patch is only
     // startFace + nFaces; here it is just a region.
