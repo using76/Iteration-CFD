@@ -2127,3 +2127,84 @@ by the registry from the case. Requirements that come with it:
 | coupled LES (Deardorff) | room/plume case runs NaN-free; mean nut < RAS nut on the same mesh (reported) |
 | selection | `model kOmegaSST` in buoyant/fire constructs SST - verified by the printed banner AND a field difference |
 | the §29.3 deferred gate | channel-with-energy at y+ ~ 30 (thermal WF) vs y+ ~ 1 (resolved): wall heat fluxes reported with their ratio, honestly |
+
+---
+
+## 31. Periodic domains, fire output, and case robustness
+
+Three items that close known gaps rather than add physics.
+
+### 31.1 Cyclic patch pairs from a case file
+
+The solver has carried coupled faces from the start: `PatchKind::Cyclic`,
+the `nbr_patch` resolution in the polyMesh reader, the coupled branches in
+`amul`, the assembly and (since §29) the non-orthogonal correction. What no
+case FILE can express is the pair, so every periodic case has had to arrive
+as a hand-written polyMesh.
+
+*DESIGN — the pairing.* A cyclic pair is declared once, naming both sides
+and the transform that maps one onto the other:
+
+```
+blockgen : two opposite slots named as a pair, translation implied by the
+           block extent along that axis
+JSONC    : "boundaries": { "xmin": "inlet", ... },
+           "cyclic": [ { "a": "front", "b": "back", "transform": "translate" } ]
+```
+
+Only `translate` is specified here; a rotational pair (`rotate`, with an
+axis and an angle) is a §13.4 error naming `translate`, because the face
+matching and the vector transform it needs are a separate piece of work.
+
+Face matching, and the two invariants that make it checkable:
+
+```
+for each face of patch a, its partner in b is the face whose centroid,
+shifted by the translation, is nearest;
+INVARIANT 1  every face matches exactly once (a bijection)
+INVARIANT 2  |Sf_a| == |Sf_b| and Sf_a == -Sf_b after the transform,
+             to a stated tolerance
+```
+
+Either invariant failing is a §13.4 error naming the patch pair and the
+worst offending face — a mismatched pair silently produces a mesh that
+conserves nothing, which is exactly the failure mode this contract exists
+to prevent. A cyclic patch may not also be a wall, an inlet or an outlet;
+`validate_wall_rows` skips it as it skips every non-wall.
+
+*Test*: a periodic channel's mesh closes to round-off (§10); a uniform
+field advected through a periodic pair returns to itself; the pair's two
+patches carry equal and opposite total flux at every step.
+
+### 31.2 Field output and restart for the fire solver
+
+`ofgpu-fire` carries no writer and no restart. The machinery exists —
+`io::writer`'s `ResultWriter`/`WriteCtx`, the `.mcr` format of §4.6 in
+docs/05, and `CoupledTurbulence`'s own field accessors. Adopting it is
+wiring, with one requirement of substance: a low-Mach restart must carry
+**p0** (§25.2) and the species mass fractions, or the restarted run starts
+from a different thermodynamic state than the one it stopped in. The mesh
+hash already refuses a mesh mismatch.
+
+*Test*: 40 steps continuous against 20 + restart + 20 — the first pressure
+residual after the restart, p0, and the total enthalpy all agree with the
+continuous run. Where they do not, report the gap rather than hiding it,
+as the VOF restart already does.
+
+### 31.3 Transient cases must not run a steady algorithm
+
+`cases/burnerPlume.jsonc` diverges around step 20: it names
+`"algorithm": { "kind": "SIMPLE" }` with under-relaxation while being run
+as a transient fire, so the momentum equation is relaxed towards a steady
+state that a buoyant plume does not have.
+
+*DESIGN — the contract.* A case whose `run` block has a non-zero `endTime`
+and a `ddt` scheme that is not `steadyState` is transient; a transient case
+naming a steady algorithm is a §13.4 error naming both settings and the
+transient algorithms available (PISO, PIMPLE). The reverse — `steadyState`
+with PISO — is the same error from the other side. `-permissive`
+substitutes PIMPLE with one outer corrector and says so.
+
+This is the same class of defect as every other silent substitution this
+project has removed: the settings were each individually valid, nothing
+warned, and the run produced Inf.
