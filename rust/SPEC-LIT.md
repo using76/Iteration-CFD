@@ -2208,3 +2208,95 @@ substitutes PIMPLE with one outer corrector and says so.
 This is the same class of defect as every other silent substitution this
 project has removed: the settings were each individually valid, nothing
 warned, and the run produced Inf.
+
+---
+
+## 32. The thermal wall-function gate, redesigned
+
+§29.3 asked for one number — the wall heat flux at y+ ≈ 30 against the same
+flow resolved at y+ ≈ 1 — and four attempts produced 0.095, 0.381 and 0.107
+without converging on anything. The fourth attempt's trace is what makes the
+diagnosis possible: the two runs settled at driving temperature differences
+of about 50 K and 3 K. **They solved different problems**, so comparing
+their raw wall heat could not have meant anything, at any resolution.
+
+The defect is in the gate, not in the model. This section replaces it.
+
+### 32.1 Why fixed temperature cannot work here
+
+With a fixed wall temperature in a periodic domain, the bulk temperature is
+free: it drifts until the wall heat balances whatever sink holds the energy
+budget, and the resulting ΔT is an output. Two meshes that predict different
+near-wall conductances therefore settle at different ΔT, and
+`q_w = h·ΔT` compares two products in which BOTH factors differ.
+
+Fixing the sink to match ΔT was tried and collapsed the core to 160 K — a
+spatially uniform sink cannot impose a local temperature difference.
+
+### 32.2 The gate: fixed wall heat flux, compared as a Nusselt number
+
+Impose the same `q_w` on both walls of both meshes. Now the boundary
+condition is identical, ΔT is the model's own prediction, and the
+comparison is dimensionless:
+
+```
+T_b   = bulk (mixed-mean) temperature = ∫ rho cp u T dA / ∫ rho cp u dA
+D_h   = 2H                              parallel plates, H the gap
+Nu    = q_w D_h / ( k (T_w − T_b) )
+Re    = U_b D_h / nu
+```
+
+The wall temperature is diagnosed, not imposed: under the §29.3 thermal
+wall function `T_w = T_P + q_w T+/(rho cp u_tau)`, and on a resolved mesh
+directly from the first cell. Both use the SAME `flux_to_grad(q_w, k_eff)`
+translation into the §4 Robin triple, which already exists.
+
+Energy balance in a periodic domain: what enters through both walls must
+leave, so the compensating sink is `-2 q_w A_wall` — one number, the same
+for both meshes because `q_w` is the same. That is what the fourth attempt
+could not arrange with a fixed-temperature wall.
+
+### 32.3 The independent reference
+
+**Dittus & Boelter, *Univ. Calif. Publ. Eng.* 2 (1930) 443**, reprinted in
+*Int. Commun. Heat Mass Transfer* 12 (1985) 3:
+
+```
+Nu = 0.023 Re^0.8 Pr^0.4          heating, 0.6 < Pr < 160, Re > 10^4
+```
+
+**Gnielinski, *Int. Chem. Eng.* 16 (1976) 359** is the more accurate modern
+form and covers the transitional range:
+
+```
+Nu = (f/8)(Re − 1000) Pr / ( 1 + 12.7 sqrt(f/8) (Pr^{2/3} − 1) )
+f  = (0.79 ln Re − 1.64)^{-2}
+```
+
+State which was used and why. Both are pipe correlations applied to a
+parallel-plate channel through the hydraulic diameter, which is standard
+practice and carries its own error — Dittus–Boelter is conventionally
+quoted at ±20-25 %, Gnielinski at ±10 %. That uncertainty is part of the
+verdict, not an excuse discovered afterwards.
+
+**This is the shape every other validation in this project has** (§10, §22):
+compare against an independent published result, not against another run of
+the same code. The two-mesh comparison is retained as a SECOND, weaker
+check — it says the two treatments agree with each other — but the
+correlation is what says either of them is right.
+
+### 32.4 Verdict
+
+| Check | Criterion |
+|---|---|
+| both meshes land in their regime | measured y+ reported, coarse 30–60, fine ≲ 1 |
+| the resolved mesh against the correlation | within the correlation's own stated band |
+| the wall-function mesh against the correlation | within the same band |
+| the two meshes against each other | Nu ratio reported |
+| energy balance | wall heat in = sink out, to round-off |
+
+The gate CLOSES when both meshes sit inside the correlation band. If the
+resolved mesh does and the wall-function mesh does not, the wall function
+is wrong and that is a real finding. If NEITHER does, the channel case is
+wrong — and the resolved mesh, which models nothing at the wall, is the one
+that says so.
