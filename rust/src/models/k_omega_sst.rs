@@ -113,7 +113,8 @@ use crate::fv::{fvc_grad_scalar_scheme, fvm_sp, fvm_su, fvm_susp};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solver::SolverPerformance;
 use crate::turbulence::{
-    bound_k, bound_omega, nut_boundary, strain_rate_mag, FlowState, RasCore, TurbulenceControls,
+    add_buoyancy_to_k, add_buoyancy_to_omega_cell, bound_k, bound_omega, nut_boundary,
+    strain_rate_mag, BuoyancyProduction, FlowState, RasCore, TurbulenceControls,
 };
 use crate::wallfunctions::WallFunctionCoeffs;
 use crate::{Scalar, Vec3};
@@ -381,6 +382,22 @@ impl<'m> KOmegaSst<'m> {
     pub fn coeffs(&self) -> &KOmegaSstCoeffs {
         &self.coeffs
     }
+
+    /// `k`, `omega` and `nut`, named - see
+    /// [`crate::models::KEpsilon::named_fields`] for why this is a method on
+    /// the concrete model rather than a trait default.
+    pub fn named_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        vec![("k", &self.k), ("omega", &self.omega), ("nut", &self.core.nut)]
+    }
+
+    /// [`Self::named_fields`], mutable - for `0/` upload and `.mcr` restore.
+    pub fn named_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        vec![
+            ("k", &mut self.k),
+            ("omega", &mut self.omega),
+            ("nut", &mut self.core.nut),
+        ]
+    }
     pub fn core(&self) -> &RasCore<'m> {
         &self.core
     }
@@ -402,6 +419,24 @@ impl<'m> KOmegaSst<'m> {
     /// and the cross-diffusion term read is overwritten.
     pub fn force_f1(&mut self, f1: Option<Scalar>) {
         self.f1_override = f1;
+    }
+
+    /// Switch the buoyancy production `G_b` on - SPEC-LIT §17 and §30.2.
+    ///
+    /// See [`crate::models::KEpsilon::set_buoyancy`]. SST's `omega` equation
+    /// takes it by the same production route k-omega does,
+    /// `+ (gamma/nu_t) G_b`, but with `gamma` the per-cell blend `F1 gamma_1 +
+    /// (1 - F1) gamma_2` rather than one constant - SPEC-LIT §6.3's `gamma_b`,
+    /// the same field the shear production already reads.
+    pub fn set_buoyancy(&mut self, b: BuoyancyProduction) -> Result<()> {
+        b.validate()?;
+        self.core.buoyancy = Some(b);
+        Ok(())
+    }
+
+    /// The buoyancy production settings, if any.
+    pub fn buoyancy(&self) -> Option<BuoyancyProduction> {
+        self.core.buoyancy
     }
 
     // ---- set-up -----------------------------------------------------------
@@ -513,6 +548,20 @@ impl<'m> KOmegaSst<'m> {
         gpu: &Gpu,
         flow: &FlowState,
     ) -> Result<(SolverPerformance, SolverPerformance)> {
+        self.correct_buoyant(gpu, flow, None)
+    }
+
+    /// [`KOmegaSst::correct`] with the temperature the buoyancy production is
+    /// built from - SPEC-LIT §17 and §30.2.
+    ///
+    /// `t` is read, never written, and is ignored unless
+    /// [`KOmegaSst::set_buoyancy`] has been called with a non-zero gravity.
+    pub fn correct_buoyant(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        t: Option<&GpuScalarField>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
         let n = self.core.mesh.n_cells;
         let ctrl = self.core.ctrl;
         let wall = self.core.wall;
@@ -529,6 +578,14 @@ impl<'m> KOmegaSst<'m> {
 
         self.core.update_flow_derived(gpu, flow)?;
         self.update_blending(gpu, flow)?;
+
+        // G_b = (nu_t/Pr_t) g.grad(T)/T and its C_3 (SPEC-LIT 17), from the
+        // same PREVIOUS nu_t the shear production G uses - identical to
+        // k-epsilon's and k-omega's placement.
+        let buoyant = match t {
+            Some(tf) => self.core.update_buoyancy_production(gpu, tf, flow.u)?,
+            None => false,
+        };
 
         // Wall functions: nu_t on the wall faces from the current k, then
         // omega and G in the wall-adjacent cells. Identical to k-omega's - SST
@@ -586,6 +643,35 @@ impl<'m> KOmegaSst<'m> {
             n,
         )?;
 
+        // + (gamma_b/nu_t) G_b, split by sign, ACCUMULATED into what
+        // `sst_omega_sources` just wrote (SPEC-LIT 17, 30.2). `gamma_b` is the
+        // SAME per-cell blend the shear production reads - not the k-omega
+        // constant - because SST's omega equation has no single `gamma`
+        // either. Unstable branch only unless the case asked for both,
+        // matching k-epsilon and k-omega.
+        if buoyant {
+            let stable = self
+                .core
+                .buoyancy
+                .map(|b| b.epsilon_stable_branch)
+                .unwrap_or(false);
+            let nut_min = 1e-30 as Scalar;
+            let RasCore { turb, su, sp, gb, nut, .. } = &mut self.core;
+            add_buoyancy_to_omega_cell(
+                gpu,
+                turb,
+                su,
+                sp,
+                gb,
+                &nut.f,
+                &self.omega.f,
+                &self.gamma_b,
+                nut_min,
+                stable,
+                n,
+            )?;
+        }
+
         fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.core.su, 1.0)?;
         fvm_sp(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.core.sp, 1.0)?;
         fvm_susp(
@@ -639,6 +725,18 @@ impl<'m> KOmegaSst<'m> {
         )?;
 
         fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.g_lim, 1.0)?;
+
+        // + G_b, both signs (SPEC-LIT 17) - the same route into `k` every
+        // model here uses, unrelated to which equation carries the
+        // dissipation.
+        if buoyant {
+            {
+                let RasCore { turb, su, sp, gb, .. } = &mut self.core;
+                add_buoyancy_to_k(gpu, turb, su, sp, gb, &self.k.f, ctrl.k_min, n)?;
+            }
+            fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.core.su, 1.0)?;
+        }
+
         fvm_sp(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.core.sp, 1.0)?;
         fvm_susp(
             gpu,
@@ -1119,6 +1217,139 @@ mod tests {
             (k_sst - k_wilcox).abs() > 1e-3 * k_sst,
             "set 1 and Wilcox's 1988 set are indistinguishable here, so the \
              tolerance above is measuring nothing"
+        );
+
+        Ok(())
+    }
+
+    /// SPEC-LIT §17 and §30.2: SST's buoyancy production must collapse onto
+    /// k-omega's when `F1 = 1`, because `gamma_b` is then exactly `gamma_1`
+    /// and the two models are otherwise identical at that limit (see
+    /// `forcing_f1_to_one_reproduces_k_omega`). A separate implementation of
+    /// the same term that happened to agree at `F1 = 1` by accident would be
+    /// a much less useful thing to have proven.
+    #[test]
+    fn forcing_f1_to_one_reproduces_k_omega_with_buoyancy() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let hm = quiet_box();
+        let mesh = GpuMesh::upload(&gpu, &hm)?;
+        let n = mesh.n_cells;
+
+        // T varies with j (the y direction) only: cell c -> j = c/4 on this
+        // 4x4x1 mesh (SPEC-LIT's i-fastest cell ordering, `box_mesh`'s own
+        // `cell(i,j,k) = i + nx*(j + ny*k)`).
+        let t_vals: Vec<Scalar> = (0..n).map(|c| 300.0 + 10.0 * ((c / 4) as Scalar)).collect();
+        let build_t = |gpu: &Gpu, mesh: &GpuMesh| -> Result<GpuScalarField> {
+            let mut t = GpuScalarField::zeros(gpu, mesh, "T")?;
+            gpu.write(&mut t.f, &t_vals)?;
+            let fld = FieldKernels::new(gpu)?;
+            correct_boundary_conditions(gpu, &fld, &mut t, mesh)?;
+            Ok(t)
+        };
+
+        let buoy = BuoyancyProduction {
+            g: Vec3::new(0.0, -9.81, 0.0),
+            prt: 0.85,
+            c3: crate::turbulence::C3Mode::Constant(0.0),
+            epsilon_stable_branch: true,
+            t_min: 1.0,
+        };
+
+        let (k0, w0): (Scalar, Scalar) = (1.0, 2.0);
+        let dt: Scalar = 0.02;
+        let steps = 200;
+
+        let (k_sst, w_sst) = {
+            let u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
+            let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
+            let flow = FlowState::new(&u, &phi, 1e-3);
+            let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+            let y = gpu.upload(&vec![crate::walldistance::NO_WALL; n])?;
+
+            let mut model = KOmegaSst::new(
+                &gpu,
+                &hm,
+                &mesh,
+                KOmegaSstCoeffs::default(),
+                decay_controls(dt),
+                WallFunctionCoeffs::default(),
+                &no_walls,
+                &y,
+            )?;
+            model.force_f1(Some(1.0));
+            model.set_buoyancy(buoy)?;
+
+            gpu.write(&mut model.k_mut().f, &vec![k0; n])?;
+            gpu.write(&mut model.omega_mut().f, &vec![w0; n])?;
+            model.initialise(&gpu, &flow)?;
+
+            let t = build_t(&gpu, &mesh)?;
+            for _ in 0..steps {
+                model.correct_buoyant(&gpu, &flow, Some(&t))?;
+            }
+            gpu.sync()?;
+            (
+                gpu.download(&model.k().f)?[0],
+                gpu.download(&model.omega().f)?[0],
+            )
+        };
+
+        let (k_ref, w_ref) = {
+            let sst = KOmegaSstCoeffs::default();
+            let coeffs = KOmegaCoeffs {
+                beta_star: sst.beta_star,
+                beta: sst.beta_1,
+                gamma: sst.gamma_1,
+                alpha_k: sst.sigma_k1,
+                alpha_omega: sst.sigma_w1,
+            };
+            let u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
+            let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
+            let flow = FlowState::new(&u, &phi, 1e-3);
+            let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+            let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+            let mut kw = KOmega::new(
+                &gpu,
+                &hm,
+                &mesh,
+                coeffs,
+                decay_controls(dt),
+                WallFunctionCoeffs::default(),
+                &no_walls,
+                &no_roughness,
+            )?;
+            kw.set_buoyancy(buoy)?;
+            gpu.write(&mut kw.k_mut().f, &vec![k0; n])?;
+            gpu.write(&mut kw.omega_mut().f, &vec![w0; n])?;
+            kw.initialise(&gpu, &flow)?;
+
+            let t = build_t(&gpu, &mesh)?;
+            for _ in 0..steps {
+                kw.correct_buoyant(&gpu, &flow, Some(&t))?;
+            }
+            gpu.sync()?;
+            (gpu.download(&kw.k().f)?[0], gpu.download(&kw.omega().f)?[0])
+        };
+
+        assert!(
+            (k_sst - k_ref).abs() <= 1e-10 * k_ref.abs().max(1.0),
+            "SST F1=1 with buoyancy gave k = {k_sst}, k-omega gave {k_ref}"
+        );
+        assert!(
+            (w_sst - w_ref).abs() <= 1e-10 * w_ref.abs().max(1.0),
+            "SST F1=1 with buoyancy gave omega = {w_sst}, k-omega gave {w_ref}"
+        );
+
+        // The control: buoyancy must have actually changed something, or the
+        // agreement above would be measuring nothing.
+        let (k_sst_no_b, _) = sst_decay(&gpu, &hm, &mesh, 1.0, k0, w0, dt, steps)?;
+        assert!(
+            (k_sst - k_sst_no_b).abs() > 1e-6 * k_sst_no_b.abs().max(1.0),
+            "buoyancy made no difference to k; the term is not being applied"
         );
 
         Ok(())

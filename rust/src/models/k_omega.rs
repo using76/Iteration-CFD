@@ -180,6 +180,22 @@ impl<'m> KOmega<'m> {
     pub fn coeffs(&self) -> &KOmegaCoeffs {
         &self.coeffs
     }
+
+    /// `k`, `omega` and `nut`, named - see
+    /// [`crate::models::KEpsilon::named_fields`] for why this is a method on
+    /// the concrete model rather than a trait default.
+    pub fn named_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        vec![("k", &self.k), ("omega", &self.omega), ("nut", &self.core.nut)]
+    }
+
+    /// [`Self::named_fields`], mutable - for `0/` upload and `.mcr` restore.
+    pub fn named_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        vec![
+            ("k", &mut self.k),
+            ("omega", &mut self.omega),
+            ("nut", &mut self.core.nut),
+        ]
+    }
     pub fn core(&self) -> &RasCore<'m> {
         &self.core
     }

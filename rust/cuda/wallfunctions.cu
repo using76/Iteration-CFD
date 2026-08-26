@@ -39,6 +39,9 @@
       iterates with u_tau in the Newton above
     ofgpu SPEC-LIT.md 29.3 - the thermal wall function itself, its own
       section at the bottom of this file
+    Werner & Wengle, "Large-eddy simulation of turbulent flow over and
+      around a cube in a plate channel", 8th Symp. Turb. Shear Flows (1991)
+      - the LES wall model, SPEC-LIT.md 30.1 (wfWernerWengle, below wfYPlus)
   No GPL-licensed source was consulted.
 
   ==========================================================================
@@ -487,6 +490,122 @@ extern "C" __global__ void wfYPlus
 }
 
 
+/*---------------------------------------------------------------------------*\
+  The Werner-Wengle LES wall model - SPEC-LIT 30.1
+
+  Written from:
+    Werner & Wengle, "Large-eddy simulation of turbulent flow over and around
+      a cube in a plate channel", 8th Symp. Turb. Shear Flows (1991)
+    ofgpu SPEC-LIT.md 30.1
+  No GPL-licensed source was consulted.
+
+  u+ = y+                    y+ <= 11.81
+  u+ = A (y+)^B               y+  > 11.81,   A = 8.3, B = 1/7
+
+  integrated across the first cell of height h and inverted for tau_w
+  directly - no Newton iteration, unlike wfUTauNewton above:
+
+  viscous:  |u_p| <= nu/(2h) A^{2/(1-B)}   -> tau_w = 2 nu |u_p| / h
+  power:    otherwise ->
+    tau_w = [ (1-B)/2 A^{(1+B)/(1-B)} (nu/h)^{1+B}
+              + (1+B)/A (nu/h)^B |u_p| ]^{2/(1+B)}
+
+  continuous at the branch point (both sides reduce to
+  nu_h^2 A^{2/(1-B)}, nu_h = nu/h - see src/wallfunctions.rs's module tests
+  for the algebra). `nu_t,w = tau_w h/|u_p| - nu`, clamped at zero, is chosen
+  so the wall face's diffusive flux (nu + nu_t,w)|u_p|/h reproduces tau_w
+  exactly.
+
+  |u_p| is the WALL-PARALLEL CELL-AVERAGE speed - wfMagUParallel above,
+  fed with the cell value rather than a face-interpolated one, because an
+  LES has no interpolated near-wall profile to read: the cell average is
+  what the resolved momentum equation actually carries.
+\*---------------------------------------------------------------------------*/
+
+//- x^p for x > 0, via exp(p log x) - this file has no ofpow_, and every
+//  exponent below is irrational (B = 1/7), so a repeated-squaring integer
+//  power will not do.
+OFGPU_DEV ofscalar wfPow(ofscalar x, ofscalar p)
+{
+    return ofexp_(p*oflog_(ofmax_(x, (ofscalar)1e-300)));
+}
+
+//- Werner-Wengle's A, B - see src/wallfunctions.rs's WW_A/WW_B, pinned
+//  together by `tests::device_ww_agrees_with_the_host_law`.
+#define OFGPU_WW_A ((ofscalar)8.3)
+#define OFGPU_WW_B ((ofscalar)0.14285714285714285)
+
+//- tau_w from the integrated-and-inverted Werner-Wengle law.
+OFGPU_DEV ofscalar wfTauWWernerWengle(ofscalar uP, ofscalar h, ofscalar nu)
+{
+    if (!(h > (ofscalar)0) || !(nu > (ofscalar)0)) return (ofscalar)0;
+    uP = ofmax_(uP, (ofscalar)0);
+
+    const ofscalar a = OFGPU_WW_A;
+    const ofscalar b = OFGPU_WW_B;
+    const ofscalar nuH = nu/h;
+    const ofscalar uC = (nuH*(ofscalar)0.5)*wfPow(a, (ofscalar)2/((ofscalar)1 - b));
+
+    if (uP <= uC)
+    {
+        return (ofscalar)2*nu*uP/h;
+    }
+
+    const ofscalar t1 = (ofscalar)0.5*((ofscalar)1 - b)*wfPow(a, ((ofscalar)1 + b)/((ofscalar)1 - b))
+                       *wfPow(nuH, (ofscalar)1 + b);
+    const ofscalar t2 = (((ofscalar)1 + b)/a)*wfPow(nuH, b)*uP;
+    return wfPow(t1 + t2, (ofscalar)2/((ofscalar)1 + b));
+}
+
+//- nu_t,w = tau_w h/|u_p| - nu, clamped at zero.
+OFGPU_DEV ofscalar wfNutWernerWengle(ofscalar tauW, ofscalar h, ofscalar uP, ofscalar nu)
+{
+    if (!(uP > (ofscalar)0) || !(h > (ofscalar)0)) return (ofscalar)0;
+    return ofmax_(tauW*h/uP - nu, (ofscalar)0);
+}
+
+//- nu_t,w on every Werner-Wengle wall face, plus tau_w itself - `tauWOut` is
+//  indexed by BOUNDARY FACE (`bf`, [nBoundaryFaces], the same indexing as
+//  `nutB`), not by `i`/`wfFace`, so a driver can feed it straight to
+//  wfThermalWallTauW below with no re-gather: the thermal wall function's
+//  u_tau = sqrt(tau_w) substitution (SPEC-LIT 30.1), in place of the RAS
+//  Cmu^{1/4} sqrt(k).
+extern "C" __global__ void wfWernerWengle
+(
+    ofscalar* __restrict__ nutB,
+    ofscalar* __restrict__ tauWOut,
+    const ofvec3* __restrict__ U,
+    const ofvec3* __restrict__ Ub,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ bY,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ wfFace,
+    ofscalar nu,
+    oflabel nWallFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nWallFaces) return;
+
+    const oflabel bf = wfFace[i];
+    const ofscalar h = bY[bf];
+    if (!(h > (ofscalar)0))
+    {
+        nutB[bf] = (ofscalar)0;
+        tauWOut[bf] = (ofscalar)0;
+        return;
+    }
+
+    const oflabel c = bFaceCells[bf];
+    const ofscalar uP = wfMagUParallel(U[c], Ub[bf], bSf[bf], bMagSf[bf]);
+    const ofscalar tauW = wfTauWWernerWengle(uP, h, nu);
+
+    nutB[bf] = wfNutWernerWengle(tauW, h, uP, nu);
+    tauWOut[bf] = tauW;
+}
+
+
 // ==========================================================================
 //  The wall-adjacent cell
 // ==========================================================================
@@ -835,6 +954,65 @@ extern "C" __global__ void wfThermalWall
     if (!(tPlus > (ofscalar)0)) return;
 
     const ofscalar uTau = cmu25*ofsqrt_(kc);
+    const ofscalar qw = rho[c]*cp*uTau*(refValue[bf] - T[c])/tPlus;
+
+    fr[bf] = (ofscalar)0;
+    refGrad[bf] = qw/keff;
+}
+
+
+//- wfThermalWall's twin for a wall model that computes u_tau DIRECTLY rather
+//  than through k - SPEC-LIT 30.1: LES's Werner-Wengle substitutes
+//  u_tau = sqrt(tau_w) for the RAS Cmu^{1/4} sqrt(k), and an LES case has no
+//  k for the kernel above to read in the first place. `tauWIn` is TAU_W
+//  itself (not its square root) - indexed by BOUNDARY FACE, [nBoundaryFaces],
+//  the same indexing wfWernerWengle's own `tauWOut` uses, so the two chain
+//  with no re-gather AND no separate elementwise-sqrt pass in between: the
+//  substitution is done once, here, rather than needing its own kernel. See
+//  src/wallfunctions.rs's `ThermalWallData::update_from_tau_w`.
+extern "C" __global__ void wfThermalWallTauW
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ refValue,
+    const ofscalar* __restrict__ T,
+    const ofscalar* __restrict__ tauWIn,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ kEffWall,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ bY,
+    const oflabel* __restrict__ wfFace,
+    ofscalar nu,
+    ofscalar cp,
+    ofscalar pr,
+    ofscalar prt,
+    ofscalar jayP,
+    ofscalar kappa,
+    ofscalar E,
+    oflabel nWallFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nWallFaces) return;
+
+    const oflabel bf = wfFace[i];
+    const ofscalar y = bY[bf];
+    if (!(y > (ofscalar)0)) return;
+
+    const ofscalar keff = kEffWall[bf];
+    if (!(keff > (ofscalar)0)) return;
+
+    const ofscalar uTau = ofsqrt_(ofmax_(tauWIn[bf], (ofscalar)0));
+    if (!(uTau > (ofscalar)0)) return;
+
+    //- y+ = u_tau y / nu, the definition SPEC-LIT 15.1 itself uses - there
+    //  is no k here to build it from Cmu^{1/4} sqrt(k)/nu the way wfYPlusOf
+    //  does above.
+    const ofscalar yPlus = uTau*y/nu;
+    const ofscalar tPlus = wfTPlus(yPlus, pr, prt, kappa, E, jayP);
+    if (!(tPlus > (ofscalar)0)) return;
+
+    const oflabel c = bFaceCells[bf];
     const ofscalar qw = rho[c]*cp*uTau*(refValue[bf] - T[c])/tPlus;
 
     fr[bf] = (ofscalar)0;

@@ -5982,6 +5982,82 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// SPEC-LIT §30.2: SST's wall distance (§6.6) must work on a carved mesh
+    /// exactly as it does on a block one - `crate::walldistance::wall_distance`
+    /// keys off `HostMesh::b_kind == PatchKind::Wall`, and §23.4's *DESIGN*
+    /// choice to give a carved face the ordinary `wall` type is what makes
+    /// that true with no special case anywhere. Finite and positive at every
+    /// fluid cell, and zero at the carved wall boundary itself.
+    #[test]
+    fn sst_wall_distance_on_a_carved_mesh_is_finite_positive_and_zero_at_the_wall() -> Result<()> {
+        let Ok(gpu) = crate::device::Gpu::new(0) else {
+            return Ok(());
+        };
+
+        let s = cuboid_surface(
+            Vec3::new(0.25, 0.25, 0.25),
+            Vec3::new(0.75, 0.75, 0.75),
+            "boxWall",
+        );
+        let b = case_block_spec(CaseKind::Big, 20, 20, 20);
+        let (hm, summary) = build_carved_mesh(&b, &s)?;
+        assert_eq!(summary.n_fluid, 7000);
+        let (_, box_wall_faces) = summary
+            .wall_faces
+            .iter()
+            .find(|(n, _)| n == "boxWall")
+            .expect("boxWall carved");
+        assert_eq!(*box_wall_faces, 600);
+
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm)?;
+        let ctrl = crate::io::case::SolverControls {
+            solver: crate::io::case::LinearSolverKind::PCG,
+            precon: crate::io::case::Preconditioner::Diagonal,
+            tolerance: 1e-10,
+            rel_tol: 0.0,
+            max_iter: 5000,
+            report_residuals: true,
+            ..Default::default()
+        };
+
+        let wd = crate::walldistance::wall_distance(&gpu, &hm, &mesh, &ctrl, 0)?;
+        // Both the block's own walls AND the carved `boxWall` faces must have
+        // been fed to the Poisson solve - not just the 600 carved ones.
+        assert!(
+            wd.n_wall_faces > 600,
+            "n_wall_faces = {}, expected more than the 600 carved boxWall faces alone",
+            wd.n_wall_faces
+        );
+
+        let y = gpu.download(&wd.y.f)?;
+        assert!(
+            y.iter().all(|v| v.is_finite() && *v > 0.0),
+            "every fluid cell must have a finite, positive wall distance"
+        );
+        let y_max = wd.max(&gpu)?;
+        assert!(y_max.is_finite() && y_max > 0.0);
+        // `NO_WALL` is the wall-FREE sentinel; a mesh with real walls must
+        // never fall back to it silently.
+        assert!(y_max < crate::walldistance::NO_WALL, "y_max = {y_max}");
+
+        // Zero exactly on the wall boundary faces - the Dirichlet condition
+        // the Poisson solve was given, not an approximation of it.
+        let y_bf = gpu.download(&wd.y.bf)?;
+        let boxwall = hm.patches.iter().find(|p| p.name == "boxWall").expect("boxWall patch");
+        for i in 0..boxwall.size {
+            let v = y_bf[boxwall.start + i];
+            assert!(v.abs() < 1e-9, "boxWall face {i}: y = {v}, expected 0");
+        }
+        for p in hm.patches.iter().filter(|p| p.kind == PatchKind::Wall && p.name != "boxWall") {
+            for i in 0..p.size {
+                let v = y_bf[p.start + i];
+                assert!(v.abs() < 1e-9, "{}: face {i}: y = {v}, expected 0", p.name);
+            }
+        }
+
+        Ok(())
+    }
+
     /// §B1 gate: `build_carved_mesh` (no file on disk anywhere) must agree
     /// with `write_carved_case` + the polyMesh reader on the same surface.
     #[test]

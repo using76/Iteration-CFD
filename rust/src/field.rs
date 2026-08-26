@@ -58,6 +58,10 @@
 //!     `compressible::alphatJayatillekeWallFunction` alias `from_name`
 //!     accepts for it; the law itself is `crate::wallfunctions`' and
 //!     `crate::energy`'s, this file only names the condition and the alias
+//!   ofgpu `SPEC-LIT.md` §30.1 - `WernerWengleWallFunction` below, the LES
+//!     wall model selected under `simulationType LES;`; the law itself is
+//!     `crate::wallfunctions`' ([`crate::wallfunctions::WernerWengleData`]),
+//!     this file only names the condition
 //! No GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
@@ -155,6 +159,16 @@ pub enum BcKind {
     /// like `u+` itself (SPEC-LIT §29.2). `Ks = 0` reproduces
     /// [`Self::NutUWallFunction`] to round-off.
     NutURoughWallFunction = 29,
+
+    /// Werner & Wengle (1991) - SPEC-LIT §30.1, the LES wall model. Unlike
+    /// every RAS wall function above, `nu_t,w` here comes from the
+    /// analytically-invertible power law integrated over the first cell,
+    /// fed by the wall-parallel CELL-AVERAGE velocity rather than by `k` -
+    /// an LES has no `k` to read. Selected under `simulationType LES;` by
+    /// the `standard`/`spalding` rows of §29.1's table (§30.1 remaps them
+    /// both to this one wall model); `rough` has no LES wall model yet and
+    /// is a §13.4 error naming this and `nutLowReWallFunction`.
+    WernerWengleWallFunction = 30,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -210,6 +224,7 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "thermalWallFunction",
     "nutkRoughWallFunction",
     "nutURoughWallFunction",
+    "wernerWengleWallFunction",
 ];
 
 impl BcKind {
@@ -279,6 +294,13 @@ impl BcKind {
             "kqRWallFunction" => Self::KqRWallFunction,
             "kLowReWallFunction" => Self::KLowReWallFunction,
             "thermalWallFunction" => Self::ThermalWallFunction,
+
+            // SPEC-LIT 30.1: the LES wall model. Nothing to alias here - this
+            // is a meteor-cfd name, not an OpenFOAM one (OpenFOAM's LES wall
+            // treatment is spelled through `nutUWallFunction` with a
+            // `WernerWengle` sub-model this solver does not read that way);
+            // reached only under `simulationType LES;`.
+            "wernerWengleWallFunction" => Self::WernerWengleWallFunction,
 
             // SPEC-LIT 29.3: OpenFOAM spells the Jayatilleke thermal wall
             // function on `alphat`, a field this solver does not carry (its
@@ -379,6 +401,20 @@ impl BcKind {
     #[inline]
     pub fn is_thermal_wall_function(self) -> bool {
         matches!(self, Self::ThermalWallFunction)
+    }
+
+    /// True where the Werner-Wengle LES wall model (SPEC-LIT §30.1) owns the
+    /// face. Asked of `nut`'s OWN patch type, never of another field's -
+    /// SPEC-LIT §15.5's rule, same as [`Self::is_nut_wall_function`].
+    ///
+    /// Deliberately NOT part of [`Self::is_nut_wall_function`]: that family
+    /// feeds [`crate::wallfunctions::WallData`], the RAS `nutk`/`nutU`
+    /// machinery keyed on `k` or a Newton solve for `u_tau` - neither of
+    /// which Werner-Wengle uses. Mixing the two would route a WW face
+    /// through the wrong kernel.
+    #[inline]
+    pub fn is_werner_wengle_wall_function(self) -> bool {
+        matches!(self, Self::WernerWengleWallFunction)
     }
 }
 

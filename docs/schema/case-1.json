@@ -1006,6 +1006,25 @@
           "required": [
             "type"
           ]
+        },
+        {
+          "description": "SPEC-LIT §29.3's Jayatilleke thermal wall function, nameable\nexplicitly on `T` with its own wall target temperature `T_w` -\n[`TurbBc`]'s wall-function variants already carry a `value` this same\nway for `nut`/`k`/`epsilon`/`omega`; `T` had no such variant, only the\ncase-level `wallTreatment` auto-completion of [`t_spec_for`], which\n(deliberately, until this variant existed) never has a wall\ntemperature of its own to write and falls back to the neighbour\ncell's value - fine for an adiabatic-ish plume floor, useless for a\ngenuinely hot wall against a cooler bulk (SPEC-LIT §29.3's own\ndeferred gate: a channel with fixed-T hot walls). An explicit\n`T: { \"type\": \"thermalWallFunction\", \"value\": T_w }` on a wall rule is\nthe highest-precedence route of §29.1's table and is honoured here the\nsame way an explicit `nutkWallFunction { value }` already is.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "thermalWallFunction"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
         }
       ]
     },

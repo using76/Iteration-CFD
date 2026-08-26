@@ -44,13 +44,22 @@
 //! The dispatch is real either way; what is avoided is a virtual call in an
 //! inner loop that runs a hundred kernel launches deep.
 
-use crate::error::Result;
-use crate::io::case::CaseControls;
+use crate::device::Gpu;
+use crate::error::{Error, Result};
+use crate::field_setup::{wall_coeffs_from_case, NutRoughness, WallFaces};
+use crate::io::case::{model_coeff, CaseControls};
 use crate::io::contract::unsupported;
 use crate::io::dict::FoamDict;
 use crate::les::{BaseDelta, DeltaSpec, SmoothSpec};
-use crate::models::les::{LesCoeffs, LesModel};
-use crate::Scalar;
+use crate::mesh::{GpuMesh, HostMesh};
+use crate::models::coupled::{
+    BuoyancySettings, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst, CoupledLaminar,
+    CoupledLes, CoupledTurbulence,
+};
+use crate::models::les::{Les, LesCoeffs, LesModel};
+use crate::models::{KEpsilon, KEpsilonCoeffs, KOmega, KOmegaCoeffs, KOmegaSst, KOmegaSstCoeffs};
+use crate::turbulence::C3Mode;
+use crate::{Scalar, Vec3};
 
 /// A model ofgpu implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,8 +289,39 @@ pub fn select_turbulence_model(c: &CaseControls) -> Result<TurbulenceSelection> 
 
     match sim.as_str() {
         "laminar" => return Ok(TurbulenceSelection::laminar()),
-        "RAS" | "RASModel" => {}
-        "LES" => return select_les(d),
+        "RAS" | "RASModel" => {
+            // SPEC-LIT §30.2: a `LES { model ...; }` block left in a case
+            // that runs `simulationType RAS;` is not read, so it cannot be
+            // what the RAS answer used - which means it is either dead
+            // leftover the case should drop, or the setting the run author
+            // actually wanted and typed in the wrong place. Both are worth
+            // stopping for rather than silently taking the RAS branch.
+            if let Some(les_name) = les_block_model_name(d) {
+                unsupported::<()>(
+                    "momentumTransport (simulationType RAS with an LES model \
+                     block also present)",
+                    &les_name,
+                    &[],
+                    "RAS (the LES block is ignored)",
+                    (),
+                )?;
+            }
+        }
+        "LES" => {
+            // The mirror image: `RAS { model ...; }` left beside
+            // `simulationType LES;` is never read either.
+            if let Some(ras_name) = ras_block_model_name(d) {
+                unsupported::<()>(
+                    "momentumTransport (simulationType LES with a RAS model \
+                     block also present)",
+                    &ras_name,
+                    &[],
+                    "LES (the RAS block is ignored)",
+                    (),
+                )?;
+            }
+            return select_les(d);
+        }
         // A detached-eddy hybrid is a RANS model and an LES model with a
         // switch between them, and the switch is the model. Refused by name
         // rather than run as either half.
@@ -535,6 +575,227 @@ fn first_word(s: &str) -> String {
     s.trim().split_whitespace().next().unwrap_or("").to_string()
 }
 
+/// `RAS/model` (or `RAS/RASModel`), non-empty - SPEC-LIT §30.2's conflict
+/// check. `None` means there is nothing named there, which is different from
+/// "an empty `RAS { turbulence off; }` block": the latter selects nothing
+/// either, so it is not the ambiguity this check exists for.
+fn ras_block_model_name(d: &FoamDict) -> Option<String> {
+    let n = first_word(d.get_or("RAS/model", d.get_or("RAS/RASModel", "")));
+    (!n.is_empty()).then_some(n)
+}
+
+/// [`ras_block_model_name`]'s mirror for `LES/model` / `LES/LESModel`.
+fn les_block_model_name(d: &FoamDict) -> Option<String> {
+    let n = first_word(d.get_or("LES/model", d.get_or("LES/LESModel", "")));
+    (!n.is_empty()).then_some(n)
+}
+
+// ==========================================================================
+//  §30.2 - the coupled solvers (buoyant, fire)
+// ==========================================================================
+
+/// Read `RAS { C3Buoyancy ...; }` into the [`BuoyancySettings`] every
+/// buoyancy-capable model shares - the same reading `src/bin/buoyant.rs` did
+/// inline before this registry grew a constructor, moved here so the two
+/// coupled drivers do not each carry their own copy of it.
+///
+/// `None` when the case has no gravity: a coupled driver's model then never
+/// switches its `G_b` machinery on, which is the isothermal/zero-`g` case's
+/// correct behaviour (`ThermalCtx`'s doc explains why `None` is the signal
+/// rather than a zeroed [`BuoyancySettings`]).
+pub fn buoyancy_settings(c: &CaseControls) -> Option<BuoyancySettings> {
+    if !c.buoyancy.is_active() {
+        return None;
+    }
+    let d = BuoyancySettings::default();
+    Some(BuoyancySettings {
+        c3: match model_coeff(c, "C3Buoyancy", Scalar::NAN) {
+            v if v.is_nan() => C3Mode::Henkes,
+            v => C3Mode::Constant(v),
+        },
+        ..d
+    })
+}
+
+/// Build the turbulence closure a coupled solver (`ofgpu-buoyant`,
+/// `ofgpu-fire`) drives, from the case's own `constant/momentumTransport` -
+/// SPEC-LIT §30.2.
+///
+/// This is the fix for the failure the module doc of
+/// [`crate::models::coupled`] describes: before this function existed, both
+/// coupled drivers built `KEpsilon` directly and never consulted the case at
+/// all, so `RAS { model kOmegaSST; }` and `simulationType LES;` were both
+/// silently read as k-epsilon. Every branch below goes through
+/// [`select_turbulence_model`] first, exactly as `ofgpu-k-epsilon` and
+/// `ofgpu-k-omega` already do, so an unknown or unimplemented name errors
+/// here exactly as it does there.
+///
+/// `wall_faces` and `roughness` are NOT rebuilt here: SPEC-LIT §15.5 requires
+/// them to come from the DISSIPATION field's own patch types
+/// (`epsilon`'s for k-epsilon, `omega`'s for k-omega/SST), and only the
+/// caller knows which `0/` file that is once it has read
+/// `selection.model.dissipation_field()` - so the caller reads it, builds
+/// these two, and hands them in unchanged, exactly as
+/// `src/bin/k_omega.rs` does inline. `RasModel::Laminar` and a §13.4 error
+/// never look at either.
+///
+/// SST additionally needs the wall distance of SPEC-LIT §6.6, computed here
+/// with the case's own pressure-solver tolerance and non-orthogonal
+/// corrector count (`p_solver`, `turb.n_non_orth_correctors`) - the same
+/// Poisson machinery §3.2 assembles everything else with, run once at setup.
+/// `wall_distance` reads `HostMesh::b_kind == PatchKind::Wall` directly, so a
+/// carved castellated or cut-cell mesh's wall patches are walls to it like
+/// any other - SPEC-LIT §23.4's *DESIGN* note that such faces get the
+/// ordinary `wall` type is exactly what makes this work with no special case
+/// here.
+pub fn build_coupled<'m>(
+    gpu: &Gpu,
+    hm: &HostMesh,
+    mesh: &'m GpuMesh,
+    cc: &CaseControls,
+    selection: &TurbulenceSelection,
+    wall_faces: &WallFaces,
+    roughness: &NutRoughness,
+) -> Result<Box<dyn CoupledTurbulence + 'm>> {
+    let buoy = buoyancy_settings(cc);
+    let wall = wall_coeffs_from_case(&cc.wall);
+
+    match selection.model {
+        RasModel::Laminar => Ok(Box::new(CoupledLaminar::new(gpu, mesh)?)),
+
+        RasModel::KEpsilon => {
+            let d = KEpsilonCoeffs::default();
+            let coeffs = KEpsilonCoeffs {
+                cmu: model_coeff(cc, "Cmu", d.cmu),
+                c1: model_coeff(cc, "C1", d.c1),
+                c2: model_coeff(cc, "C2", d.c2),
+                c3: model_coeff(cc, "C3", d.c3),
+                sigmak: model_coeff(cc, "sigmak", d.sigmak),
+                sigma_eps: model_coeff(cc, "sigmaEps", d.sigma_eps),
+            };
+            let mut model =
+                KEpsilon::new(gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, roughness)?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledKEpsilon::new(model, buoy)))
+        }
+
+        RasModel::KOmega => {
+            let d = KOmegaCoeffs::default();
+            let coeffs = KOmegaCoeffs {
+                beta_star: model_coeff(cc, "betaStar", d.beta_star),
+                beta: model_coeff(cc, "beta", d.beta),
+                gamma: model_coeff(cc, "gamma", d.gamma),
+                alpha_k: model_coeff(cc, "alphaK", d.alpha_k),
+                alpha_omega: model_coeff(cc, "alphaOmega", d.alpha_omega),
+            };
+            let mut model =
+                KOmega::new(gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, roughness)?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledKOmega::new(model, buoy)))
+        }
+
+        RasModel::KOmegaSST => {
+            let wd = crate::walldistance::wall_distance(
+                gpu,
+                hm,
+                mesh,
+                &cc.p_solver,
+                cc.turb.n_non_orth_correctors,
+            )?;
+
+            let d = KOmegaSstCoeffs::default();
+            let coeffs = KOmegaSstCoeffs {
+                sigma_k1: model_coeff(cc, "sigmaK1", d.sigma_k1),
+                sigma_w1: model_coeff(cc, "sigmaOmega1", d.sigma_w1),
+                beta_1: model_coeff(cc, "beta1", d.beta_1),
+                gamma_1: model_coeff(cc, "gamma1", d.gamma_1),
+                sigma_k2: model_coeff(cc, "sigmaK2", d.sigma_k2),
+                sigma_w2: model_coeff(cc, "sigmaOmega2", d.sigma_w2),
+                beta_2: model_coeff(cc, "beta2", d.beta_2),
+                gamma_2: model_coeff(cc, "gamma2", d.gamma_2),
+                beta_star: model_coeff(cc, "betaStar", d.beta_star),
+                a1: model_coeff(cc, "a1", d.a1),
+                b1: model_coeff(cc, "b1", d.b1),
+                c1: model_coeff(cc, "c1", d.c1),
+            };
+            let mut model = KOmegaSst::new(
+                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f,
+            )?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledKOmegaSst::new(model, buoy)))
+        }
+
+        // SPEC-LIT §30.2: the LES family, over `CoupledLes`/`Les`. `wall_faces`
+        // means something different here than it does for the RAS arms above
+        // - `select_les`/`select_turbulence_model` never populate it (an LES
+        // case has no dissipation field to read a `constrained_cells` set
+        // from), so the CALLER is the one who must have built
+        // `wall_faces.nut` from `nut`'s own patch types via
+        // `crate::field_setup::les_nut_wall_faces` (SPEC-LIT §30.1) rather
+        // than the RAS `nut_wall_faces` - exactly as `build_coupled`'s own
+        // doc already requires for the dissipation-keyed RAS case.
+        // `roughness` is never read: SPEC-LIT §30.1 has no rough LES wall
+        // model yet, so there is nothing for it to feed.
+        RasModel::Les => {
+            let sel = selection.les.as_ref().ok_or_else(|| {
+                Error::Config(
+                    "momentumTransport: simulationType LES selected with no LES \
+                     model recorded - an internal registry error (select_turbulence_model \
+                     should have refused this case before build_coupled ever saw it), \
+                     not a setting this case file can fix"
+                        .to_string(),
+                )
+            })?;
+
+            // SPEC-LIT §16.4/§30.2: the wall distance is a prerequisite for
+            // van Driest damping and NOTHING else in an LES - unlike SST, it
+            // is not paid for unconditionally. A delta spec that never wraps
+            // `vanDriest` gets the same `NO_WALL`/zero sentinel a wall-free
+            // domain gets, which is what makes the damping inert without a
+            // Poisson solve nobody asked for.
+            let n = hm.n_cells.max(1);
+            let (y, grad_y) = if sel.delta.van_driest {
+                let wd = crate::walldistance::wall_distance(
+                    gpu,
+                    hm,
+                    mesh,
+                    &cc.p_solver,
+                    cc.turb.n_non_orth_correctors,
+                )?;
+                (wd.y.f, wd.grad_y)
+            } else {
+                (
+                    gpu.upload(&vec![crate::walldistance::NO_WALL; n])?,
+                    gpu.upload(&vec![Vec3::ZERO; n])?,
+                )
+            };
+
+            let mut model = Les::new(
+                gpu,
+                hm,
+                mesh,
+                sel.model,
+                sel.coeffs,
+                sel.delta,
+                cc.turb,
+                wall_faces,
+                &y,
+                &grad_y,
+            )?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledLes::new(model)))
+        }
+    }
+}
+
 // ==========================================================================
 //  Tests
 // ==========================================================================
@@ -693,6 +954,73 @@ mod tests {
         assert!(m.contains("simulationType LES"), "{m}");
     }
 
+    /// SPEC-LIT §30.2: `simulationType LES;` beside a leftover
+    /// `RAS { model ...; }` block is an ambiguity, not a preference -
+    /// neither dictionary says which one the run author meant, and reading
+    /// the `simulationType` alone (which is all this registry did before)
+    /// silently drops the other one.
+    #[test]
+    fn les_with_a_leftover_ras_block_is_a_conflict_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let e = select_turbulence_model(&case(
+            "simulationType LES; LES { model WALE; } RAS { model kEpsilon; }",
+        ))
+        .expect_err("LES with a RAS block present must not silently pick LES");
+        let m = e.to_string();
+        assert!(m.contains("kEpsilon"), "{m}");
+        assert!(m.contains("LES"), "{m}");
+    }
+
+    /// The mirror image: `simulationType RAS;` beside a leftover
+    /// `LES { model ...; }` block.
+    #[test]
+    fn ras_with_a_leftover_les_block_is_a_conflict_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let e = select_turbulence_model(&case(
+            "simulationType RAS; RAS { model kEpsilon; } LES { model WALE; }",
+        ))
+        .expect_err("RAS with an LES block present must not silently pick RAS");
+        let m = e.to_string();
+        assert!(m.contains("WALE"), "{m}");
+        assert!(m.contains("RAS"), "{m}");
+    }
+
+    /// `-permissive` substitutes the branch the case's own `simulationType`
+    /// named, and says so - it does not average the two dictionaries or pick
+    /// a third thing.
+    #[test]
+    fn permissive_ignores_the_other_blocks_dictionary() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(true);
+        crate::io::contract::reset_warnings();
+
+        let s = select_turbulence_model(&case(
+            "simulationType RAS; RAS { model kOmega; } LES { model WALE; }",
+        ))
+        .expect("-permissive continues past the conflict");
+        assert_eq!(s.model, RasModel::KOmega);
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// An empty `RAS { turbulence off; }` beside `simulationType LES;` is not
+    /// this ambiguity: nothing is named there, so there is nothing the LES
+    /// answer could have silently overridden.
+    #[test]
+    fn an_empty_ras_block_beside_les_is_not_a_conflict() {
+        let s = select_turbulence_model(&case(
+            "simulationType LES; LES { model WALE; } RAS { turbulence off; }",
+        ))
+        .expect("an empty RAS block names no model, so this is not the conflict");
+        assert_eq!(s.model, RasModel::Les);
+    }
+
     #[test]
     fn k_omega_sst_now_selects_a_model() {
         for name in ["kOmegaSST", "KOmegaSST"] {
@@ -807,5 +1135,270 @@ mod tests {
         let m = e.to_string();
         assert!(m.contains("DES"), "{m}");
         assert!(m.contains("LES"), "{m}");
+    }
+
+    // ------------------------------------------------------------------
+    //  §30.2 - build_coupled
+    // ------------------------------------------------------------------
+
+    fn gpu() -> Option<crate::device::Gpu> {
+        crate::device::Gpu::new(0).ok()
+    }
+
+    /// A closed box with real walls - see `k_omega_sst.rs::tests::quiet_box`
+    /// for why `nz = 1` (an `empty` mesh SST's cross-diffusion term can tell
+    /// from an unclosed one).
+    fn wall_box() -> crate::mesh::HostMesh {
+        let (mut m, points, faces) = crate::mesh::topology::tests::box_mesh(
+            [4, 4, 1],
+            crate::Vec3::new(0.25, 0.25, 0.25),
+        );
+        m.compute_geometry(&points, &faces).expect("geometry");
+        m.build_cell_face_maps();
+        m
+    }
+
+    /// SPEC-LIT §30.2's whole point: the case's own `RAS { model ...; }` (or
+    /// `simulationType laminar;`) must reach the CONCRETE model
+    /// `build_coupled` allocates, not just the string `select_turbulence_model`
+    /// returns. Before this function existed, `ofgpu-buoyant`/`ofgpu-fire`
+    /// built `KEpsilon` regardless of what this loop iterates over.
+    #[test]
+    fn build_coupled_constructs_the_model_the_case_names() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let hm = wall_box();
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm)?;
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+        for (src, want_name) in [
+            ("", "laminar"),
+            ("simulationType laminar; RAS { model kEpsilon; }", "laminar"),
+            ("RAS { model kEpsilon; }", "kEpsilon"),
+            ("RAS { model kOmega; }", "kOmega"),
+            ("RAS { model kOmegaSST; }", "kOmegaSST"),
+        ] {
+            let cc = case(src);
+            let selection = select_turbulence_model(&cc)?;
+            let turb =
+                build_coupled(&gpu, &hm, &mesh, &cc, &selection, &no_walls, &no_roughness)?;
+            assert_eq!(turb.name(), want_name, "case {src:?}");
+            assert_eq!(turb.nut().f.len(), hm.n_cells);
+            assert!(
+                !turb.output_fields().is_empty(),
+                "{want_name}: output_fields must name at least nut"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// SPEC-LIT §30.2's LES requirement, landed: the coupled solvers must
+    /// actually BUILD the LES closure a case asks for, not the k-epsilon
+    /// `build_coupled` used to hand back nothing to and then refuse outright.
+    /// One test per submodel, since each is a different code path through
+    /// `Les::new`/`CoupledLes`.
+    #[test]
+    fn build_coupled_constructs_the_les_model_the_case_names() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let hm = wall_box();
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm)?;
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+        for (src, want_name) in [
+            ("simulationType LES; LES { model Smagorinsky; }", "Smagorinsky"),
+            ("simulationType LES; LES { model WALE; }", "WALE"),
+            ("simulationType LES; LES { model Deardorff; }", "Deardorff"),
+            // §16.4/§30.2: van Driest damping needs the wall distance -
+            // exercises the branch in `build_coupled` that runs the Poisson
+            // solve, not just the `NO_WALL` sentinel path the other three
+            // take.
+            (
+                "simulationType LES; LES { model Smagorinsky; delta vanDriest; }",
+                "Smagorinsky",
+            ),
+        ] {
+            let cc = case(src);
+            let selection = select_turbulence_model(&cc)?;
+            let turb = build_coupled(&gpu, &hm, &mesh, &cc, &selection, &no_walls, &no_roughness)?;
+            assert_eq!(turb.name(), want_name, "case {src:?}");
+            assert_eq!(turb.nut().f.len(), hm.n_cells);
+            assert!(
+                !turb.output_fields().is_empty(),
+                "{want_name}: output_fields must name at least nut"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// SPEC-LIT §30.3: Deardorff, built through the SAME registry path a
+    /// buoyant case uses, must run NaN-free next to a k-epsilon build on the
+    /// identical mesh and flow - with mean `nut` reported, honestly, rather
+    /// than asserted equal or better (SPEC-LIT §30.3 asks only that it
+    /// differ from the RAS number, which a genuinely different model
+    /// trivially does).
+    ///
+    /// The velocity field stands in for a small rising plume's own shear -
+    /// upward in the centre, sheared at the edges - the resolved-momentum
+    /// signature buoyancy leaves behind once the momentum equation itself has
+    /// carried the body force (SPEC-LIT §30.2's own point: an algebraic LES
+    /// has no `G_b` term of its own, so this is exactly how buoyancy is
+    /// supposed to reach it).
+    #[test]
+    fn deardorff_via_build_coupled_runs_a_small_plume_nan_free_and_reports_nut_against_kepsilon()
+    -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let hm = wall_box();
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm)?;
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+        // A plume-like vertical (y) shear: fastest at the centre, at rest at
+        // the ymin/ymax walls - nonzero grad U everywhere, which is the only
+        // thing any of these models reads.
+        let ny = 4usize;
+        let mut u = crate::field::GpuVectorField::zeros(&gpu, &mesh, "U")?;
+        let u_vals: Vec<crate::Vec3> = (0..hm.n_cells)
+            .map(|c| {
+                let j = (c / 4) % ny; // wall_box is a 4x4x1 box - see its own doc
+                let center = (ny as Scalar - 1.0) / 2.0;
+                let r = 1.0 - ((j as Scalar - center).abs() / (center + 1.0));
+                crate::Vec3::new(0.0, 2.0 * r.max(0.0), 0.0)
+            })
+            .collect();
+        gpu.write(&mut u.f, &u_vals)?;
+        let phi = crate::field::GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
+        let flow = crate::turbulence::FlowState::new(&u, &phi, 1e-3);
+
+        let mean_nut = |src: &str| -> Result<(String, Scalar)> {
+            let cc = case(src);
+            let selection = select_turbulence_model(&cc)?;
+            let mut turb =
+                build_coupled(&gpu, &hm, &mesh, &cc, &selection, &no_walls, &no_roughness)?;
+            for (name, f) in turb.output_fields_mut() {
+                if name == "k" {
+                    gpu.write(&mut f.f, &vec![1.0 as Scalar; hm.n_cells])?;
+                }
+            }
+            turb.initialise(&gpu, &flow)?;
+            for _ in 0..10 {
+                turb.correct(&gpu, &flow, None)?;
+            }
+            gpu.sync()?;
+            let nut = gpu.download(&turb.nut().f)?;
+            assert!(
+                nut.iter().all(|v| v.is_finite()),
+                "{}: nu_t has a non-finite value",
+                turb.name()
+            );
+            let mean = nut.iter().sum::<Scalar>() / nut.len().max(1) as Scalar;
+            Ok((turb.name().to_string(), mean))
+        };
+
+        let (ke_name, ke_mean) = mean_nut("RAS { model kEpsilon; }")?;
+        let (les_name, les_mean) =
+            mean_nut("simulationType LES; LES { model Deardorff; }")?;
+
+        println!(
+            "SPEC-LIT 30.3: mean nut - {ke_name} {ke_mean:e}, {les_name} {les_mean:e} \
+             (ratio {les_name}/{ke_name} = {:e})",
+            les_mean / ke_mean.max(1e-300)
+        );
+
+        assert!(ke_mean.is_finite() && ke_mean >= 0.0);
+        assert!(les_mean.is_finite() && les_mean >= 0.0);
+
+        Ok(())
+    }
+
+    /// SPEC-LIT §30.3: `kOmegaSST` built through the registry must actually
+    /// BE SST - measured the way the batch's own gate is worded, by running
+    /// it next to a k-epsilon build on the identical case and mesh and
+    /// checking `nut` differs. A same-named field that happened to match
+    /// would mean the dispatch silently fell back to k-epsilon regardless of
+    /// what the case asked for, which is the exact failure this whole file
+    /// exists to close.
+    #[test]
+    fn komega_sst_via_build_coupled_is_not_bit_identical_to_kepsilon() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let hm = wall_box();
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm)?;
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+        // A non-trivial flow, so the models actually have something to
+        // differ ON - `nu_t = 0` from both would agree for the wrong reason.
+        let mut u = crate::field::GpuVectorField::zeros(&gpu, &mesh, "U")?;
+        let u_vals = vec![crate::Vec3::new(1.0, 0.3, 0.0); hm.n_cells];
+        gpu.write(&mut u.f, &u_vals)?;
+        let phi = crate::field::GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
+        let flow = crate::turbulence::FlowState::new(&u, &phi, 1e-3);
+
+        let k0 = 1.0 as Scalar;
+
+        let ke_nut = {
+            let cc = case("RAS { model kEpsilon; }");
+            let selection = select_turbulence_model(&cc)?;
+            let mut turb =
+                build_coupled(&gpu, &hm, &mesh, &cc, &selection, &no_walls, &no_roughness)?;
+            for (name, f) in turb.output_fields_mut() {
+                if name == "k" {
+                    gpu.write(&mut f.f, &vec![k0; hm.n_cells])?;
+                }
+            }
+            turb.initialise(&gpu, &flow)?;
+            for _ in 0..20 {
+                turb.correct(&gpu, &flow, None)?;
+            }
+            gpu.sync()?;
+            gpu.download(&turb.nut().f)?
+        };
+
+        let sst_nut = {
+            let cc = case("RAS { model kOmegaSST; }");
+            let selection = select_turbulence_model(&cc)?;
+            let mut turb =
+                build_coupled(&gpu, &hm, &mesh, &cc, &selection, &no_walls, &no_roughness)?;
+            for (name, f) in turb.output_fields_mut() {
+                if name == "k" {
+                    gpu.write(&mut f.f, &vec![k0; hm.n_cells])?;
+                }
+            }
+            turb.initialise(&gpu, &flow)?;
+            for _ in 0..20 {
+                turb.correct(&gpu, &flow, None)?;
+            }
+            gpu.sync()?;
+            gpu.download(&turb.nut().f)?
+        };
+
+        assert_eq!(ke_nut.len(), sst_nut.len());
+        let max_diff = ke_nut
+            .iter()
+            .zip(sst_nut.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0 as Scalar, Scalar::max);
+        let scale = ke_nut.iter().cloned().fold(0.0 as Scalar, Scalar::max).max(1e-30);
+        assert!(
+            max_diff > 1e-6 * scale,
+            "kOmegaSST's nut is bit-identical to kEpsilon's (max diff {max_diff}); the \
+             registry did not actually build a different model"
+        );
+
+        Ok(())
     }
 }

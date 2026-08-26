@@ -440,10 +440,14 @@ fn scalar_patch(
             // the wall-adjacent cell, which the wall-function kernel sets.
             // The rough nut variants degenerate the same way - Ks/Cs only
             // matter once the wall-function kernel runs (SPEC-LIT 15.3/29.2).
+            // SPEC-LIT 30.1: the LES wall model degenerates the same way -
+            // Werner-Wengle rewrites nu_t,w itself once the wall-parallel
+            // cell-average speed is known.
             BcKind::NutkWallFunction
             | BcKind::NutUWallFunction
             | BcKind::NutkRoughWallFunction
             | BcKind::NutURoughWallFunction
+            | BcKind::WernerWengleWallFunction
             | BcKind::EpsilonWallFunction
             | BcKind::OmegaWallFunction => (
                 1.0,
@@ -801,7 +805,8 @@ fn vector_patch(
             | BcKind::OmegaWallFunction
             | BcKind::KqRWallFunction
             | BcKind::KLowReWallFunction
-            | BcKind::ThermalWallFunction => {
+            | BcKind::ThermalWallFunction
+            | BcKind::WernerWengleWallFunction => {
                 return Err(Error::Field {
                     field: field.to_string(),
                     msg: format!(
@@ -1129,6 +1134,16 @@ pub fn nut_wall_faces(raw: &RawScalarField, m: &HostMesh) -> Result<Vec<bool>> {
     faces_where(raw, m, BcKind::is_nut_wall_function)
 }
 
+/// Which faces get the Werner-Wengle LES wall model, from `nut`'s own patch
+/// types - SPEC-LIT §30.1. The LES mirror of [`nut_wall_faces`], and
+/// deliberately a different test: a `wernerWengleWallFunction` face is not a
+/// `nutkWallFunction`/`nutUWallFunction` one, and feeding it to the RAS
+/// `WallData` machinery would route it through a kernel that reads `k` or
+/// runs a Newton solve neither of which this wall model uses.
+pub fn les_nut_wall_faces(raw: &RawScalarField, m: &HostMesh) -> Result<Vec<bool>> {
+    faces_where(raw, m, BcKind::is_werner_wengle_wall_function)
+}
+
 /// The old single-flag entry point, kept for callers that have only the
 /// dissipation field to hand.
 ///
@@ -1375,6 +1390,46 @@ pub fn apply_wall_treatment_defaults(
             }
         }
         raw.boundary.insert(p.name.clone(), s);
+    }
+
+    Ok(())
+}
+
+/// [`apply_wall_treatment_defaults`]'s LES twin - SPEC-LIT §30.1.
+///
+/// An LES has no `k`/`epsilon`/`omega` fields for a preset to complete, so
+/// this only ever fills in `nut` (`field` naming anything else is a no-op,
+/// same convention as the RAS function). `treatment.les_nut_type()` is what
+/// does the remapping - `standard`/`spalding` both become
+/// `wernerWengleWallFunction`, `lowRe` stays `nutLowReWallFunction`, and
+/// `rough` is the §13.4 error `les_nut_type` already names, propagated
+/// unchanged so a case that asks for a rough LES wall gets told THERE,
+/// rather than this function inventing a silent fallback of its own.
+pub fn apply_les_wall_treatment_defaults(
+    raw: &mut RawScalarField,
+    field: &str,
+    m: &HostMesh,
+    treatment: crate::io::case::WallTreatment,
+) -> Result<()> {
+    if field != "nut" {
+        return Ok(());
+    }
+    let type_name = treatment.les_nut_type()?;
+
+    for p in &m.patches {
+        if p.kind != PatchKind::Wall {
+            continue;
+        }
+        if raw.spec(&p.name)?.is_some() {
+            continue;
+        }
+        raw.boundary.insert(
+            p.name.clone(),
+            PatchFieldSpec {
+                type_name: type_name.to_string(),
+                ..Default::default()
+            },
+        );
     }
 
     Ok(())
@@ -2511,6 +2566,82 @@ mod tests {
         )
         .expect("applies");
         assert!(raw.spec("wall1").unwrap().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §30.1: the LES preset mapping
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn les_preset_maps_standard_and_spalding_to_werner_wengle() {
+        use crate::io::case::WallTreatment;
+        let m = mesh_with_wall();
+        for wt in [WallTreatment::Standard, WallTreatment::Spalding] {
+            let mut raw = RawScalarField { name: "nut".into(), ..Default::default() };
+            apply_les_wall_treatment_defaults(&mut raw, "nut", &m, wt).expect("applies");
+            assert_eq!(
+                raw.spec("wall1").unwrap().unwrap().type_name,
+                "wernerWengleWallFunction",
+                "{wt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn les_preset_maps_low_re_to_resolved() {
+        use crate::io::case::WallTreatment;
+        let m = mesh_with_wall();
+        let mut raw = RawScalarField { name: "nut".into(), ..Default::default() };
+        apply_les_wall_treatment_defaults(&mut raw, "nut", &m, WallTreatment::LowRe)
+            .expect("applies");
+        assert_eq!(raw.spec("wall1").unwrap().unwrap().type_name, "nutLowReWallFunction");
+    }
+
+    #[test]
+    fn les_preset_refuses_rough_and_names_the_two() {
+        use crate::io::case::WallTreatment;
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let m = mesh_with_wall();
+        let mut raw = RawScalarField { name: "nut".into(), ..Default::default() };
+        let err = apply_les_wall_treatment_defaults(&mut raw, "nut", &m, WallTreatment::Rough)
+            .expect_err("no LES wall model for rough yet");
+        let msg = err.to_string();
+        assert!(msg.contains("wernerWengle"), "{msg}");
+    }
+
+    /// A field this preset has no opinion about (only `nut` matters under
+    /// LES) is a no-op, the same convention the RAS preset uses for a field
+    /// outside its own table.
+    #[test]
+    fn les_preset_is_a_no_op_for_every_field_but_nut() {
+        use crate::io::case::WallTreatment;
+        let m = mesh_with_wall();
+        for field in ["k", "epsilon", "omega", "T", "U"] {
+            let mut raw = RawScalarField { name: field.into(), ..Default::default() };
+            apply_les_wall_treatment_defaults(&mut raw, field, &m, WallTreatment::Standard)
+                .expect("applies");
+            assert!(raw.spec("wall1").unwrap().is_none(), "{field}");
+        }
+    }
+
+    /// SPEC-LIT §30.2's own requirement: `validate_wall_rows` must not choke
+    /// on a Werner-Wengle `nut` row - an LES case never carries `k`/
+    /// `epsilon`/`omega`, so there is nothing for it to disagree with, and
+    /// the row is accepted exactly as a lone `nutkWallFunction` would be.
+    #[test]
+    fn validate_wall_rows_accepts_the_werner_wengle_row() {
+        let m = mesh_with_wall();
+        let mut raw_nut = scalar_field("wall1", spec("wernerWengleWallFunction"));
+        raw_nut.name = "nut".into();
+
+        validate_wall_rows(&m.patches, Some(&mut raw_nut), None, None, None)
+            .expect("a lone WW row has nothing to conflict with");
+        // And the type was left exactly as the case wrote it - no
+        // `-permissive` correction was needed.
+        assert_eq!(raw_nut.spec("wall1").unwrap().unwrap().type_name, "wernerWengleWallFunction");
     }
 
     #[test]

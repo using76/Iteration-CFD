@@ -32,14 +32,22 @@
 //! equation has in common. What is left in these files is the source terms,
 //! which is exactly what a model *is*.
 
+pub mod coupled;
 pub mod k_epsilon;
 pub mod k_omega;
 pub mod k_omega_sst;
 pub mod les;
 pub mod registry;
 
+pub use coupled::{
+    BuoyancySettings, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst, CoupledLaminar,
+    CoupledLes, CoupledTurbulence, ThermalCtx,
+};
 pub use k_epsilon::{KEpsilon, KEpsilonCoeffs};
 pub use k_omega::{KOmega, KOmegaCoeffs};
 pub use k_omega_sst::{KOmegaSst, KOmegaSstCoeffs};
 pub use les::{Les, LesCoeffs, LesModel};
-pub use registry::{available_models, select_turbulence_model, RasModel, TurbulenceSelection};
+pub use registry::{
+    available_models, build_coupled, buoyancy_settings, select_turbulence_model, RasModel,
+    TurbulenceSelection,
+};

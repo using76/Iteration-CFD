@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 640 unit tests, 214 numerical checks |
+| Validation | 725 unit tests, 228 numerical checks |
 
 ---
 
@@ -99,7 +99,9 @@ applied on faces rather than interpolated from cell values.
 | RANS | Standard k-ε, Wilcox k-ω, Menter k-ω SST |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES filter widths | Cube root of volume, maximum edge length, Scotti anisotropy correction, van Driest damping |
+| LES wall model | Werner–Wengle (1991) — an analytically invertible power law integrated over the first cell's wall-parallel average speed, no Newton iteration; the `standard`/`spalding` presets both collapse to this one model under LES, `lowRe` gives `nu_t,w = 0`, and `rough` is refused by name (§13.4) since no rough LES wall model exists yet |
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
+| Turbulence selection in the coupled solvers (`ofgpu-buoyant`, `ofgpu-fire`) | `ofgpu-buoyant`: the `CoupledTurbulence` trait dispatches on the case's own `RAS { model ...; }`/`simulationType`, exactly as the standalone drivers do — k-ε, k-ω, k-ω SST (wall distance computed automatically) and LES (Smagorinsky/WALE/Deardorff, with §16's filter widths and van Driest damping) all construct the ACTUAL model asked for, and buoyancy production `G_b` is wired into the right equation for each (§17, §30.2). `ofgpu-fire`: still k-ε only — its combustion mixing-time closure and thermal wall function need `epsilon` directly, so any other model is refused by name, a §13.4 error, not a silent substitution |
 | Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1) |
 | Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation |
 | Wall distance | Poisson method (Tucker 1998) |
@@ -222,8 +224,8 @@ in each instance:
 ## Validation
 
 ```
-cargo test        696 passed, 0 failed
-ofgpu-validate    219 / 219 checks passed
+cargo test        725 passed, 0 failed
+ofgpu-validate    228 / 228 checks passed
 ```
 
 ### Order of convergence — method of manufactured solutions
@@ -306,21 +308,27 @@ Jayatilleke thermal wall function:
 | `P(Pr/Pr_t = 1) = 0` exactly | 0 (round-off) |
 | At `Pr = Pr_t`, `T+ == Pr_t · u+` everywhere | 1.3 × 10⁻¹⁶ |
 | The `thermalWallFunction` Robin triple encodes exactly the analytic Jayatilleke flux (the one-cell conductance identity) | 0 (round-off) |
+| Werner-Wengle: both branches agree at the branch point, and each branch's own closed form reproduces a manufactured `tau_w` to round-off | 0 (round-off) |
+| Coupled-solver selection: `kOmegaSST` via `ofgpu-buoyant`'s `build_coupled`, on a buoyant case, yields a different `nut` FNV hash than `kEpsilon` on the identical case | hashes differ (decisive) |
 
 These establish that the rough-wall law collapses to the existing smooth one
-at `Ks = 0` — the case that never mentions roughness — and that the thermal
-wall function's own algebra is internally exact. They do **not** by
+at `Ks = 0` — the case that never mentions roughness — that the thermal wall
+function's own algebra is internally exact, and that a case naming
+`kOmegaSST` in a coupled solver actually gets it. They do **not** by
 themselves establish that a coarse wall-function mesh and a resolved
-low-Re mesh agree on the wall heat flux of the *same* flow; that is a
-separate, much larger claim (a converged 3-D turbulent-channel run at two
-mesh resolutions) that no case type in this repository currently wires up
-end to end. A semi-analytic check of the near-wall resistance model alone
-(comparing Jayatilleke's closed-form sublayer resistance against a direct
-quadrature of the same eddy-diffusivity closure, for air's `Pr = 0.71`,
-`Pr_t = 0.85`) shows a difference of order 15% between the two — which is
-the size of Jayatilleke's own correction, not a defect, but is reported
-here rather than hidden, since a true end-to-end 3-D validation remains
-future work.
+low-Re mesh agree on the wall heat flux of the *same* flow — that claim was
+run for real, not left as a semi-analytic proxy: `cases/channelThermalWF.jsonc`
+(y+ ≈ 26.5, `thermalWallFunction`) and `cases/channelThermalLowRe.jsonc`
+(y+ ≈ 4.2, plain `fixedValue`) are the identical 0.4 m duct, hot walls at
+373.15 K, zero gravity, run to quasi-steady through `ofgpu-fire`. Measured
+wall heat input: **40.7 W** (wall-function mesh) vs. **430.4 W** (resolved
+mesh) — ratio **0.095**, not close to 1. Reported honestly, not tuned: the
+mesh was sized from a fully-developed-channel correlation the actual
+(short, developing) duct flow does not reach, the JSONC Cartesian mesh has
+no grading so the coarse mesh is also under-resolved in the outer layer,
+and a short thermally-developing duct is a harder case for an equilibrium
+wall function than the fully developed channel the log law is calibrated
+against. See `docs/07-fire-solver.md` §1.1 for the full breakdown.
 
 ---
 
@@ -412,7 +420,7 @@ raise `fatal error C1189` under the traditional MSVC preprocessor.
 
 | Executable | Purpose |
 |---|---|
-| `ofgpu-validate` | Numerical validation (214 checks) |
+| `ofgpu-validate` | Numerical validation (228 checks) |
 | `ofgpu-bench` | Throughput and memory benchmarks |
 | `ofgpu-graph-bench` | CUDA graph against per-launch execution |
 | `ofgpu-dispatch-bench` | Runtime dispatch cost |
@@ -609,6 +617,12 @@ Sources for the numerical methods and models. Section numbers refer to
   Applied Mechanics*, 28(3), 455–458. — §6.4, §15.1
 - Cebeci, T., & Bradshaw, P. (1977). *Momentum Transfer in Boundary Layers.*
   Hemisphere. — §15.3
+- Jayatilleke, C. L. V. (1969). The influence of Prandtl number and surface
+  roughness on the resistance of the laminar sub-layer to momentum and heat
+  transfer. *Progress in Heat and Mass Transfer*, 1, 193–330. — §29.3
+- Werner, H., & Wengle, H. (1991). Large-eddy simulation of turbulent flow
+  over and around a cube in a plate channel. *8th Symposium on Turbulent
+  Shear Flows.* — §30.1
 - Tucker, P. G. (1998). Assessment of geometric multilevel convergence robustness
   and a wall distance method for flows with multiple internal boundaries.
   *Applied Mathematical Modelling*, 22(4–5), 293–305. — §6.6

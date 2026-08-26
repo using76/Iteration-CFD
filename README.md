@@ -25,7 +25,7 @@ CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 �
 | 정밀도 | 배정밀도 기본, `single` 기능으로 단정밀도 |
 | 대상 | NVIDIA GPU |
 | 의존성 | cudarc, thiserror (선택적 AMGX) |
-| 검증 | 640개 단위 시험, 214개 수치 검증 항목 |
+| 검증 | 725개 단위 시험, 228개 수치 검증 항목 |
 
 ---
 
@@ -95,7 +95,9 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | RANS | 표준 k-ε, Wilcox k-ω, Menter k-ω SST |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES 여과폭 | 체적 세제곱근, 최대 모서리 길이, Scotti 이방성 보정, van Driest 감쇠 |
+| LES 벽모형 | Werner–Wengle (1991) — 첫 셀 평균 속도로부터 적분·역해한 멱법칙, Newton 반복 없음; `standard`/`spalding` 프리셋이 LES에서는 이 모형 하나로 수렴, `lowRe`는 `nu_t,w = 0`, `rough`는 아직 없음(§13.4 오류로 명시) |
 | 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
+| 결합 솔버(`ofgpu-buoyant`, `ofgpu-fire`)의 난류 선택 | `ofgpu-buoyant`: `CoupledTurbulence` 트레이트로 케이스의 `RAS { model ...; }`/`simulationType`을 그대로 반영 — k-ε, k-ω, k-ω SST(벽거리 자동 계산), LES(Smagorinsky/WALE/Deardorff, §16 여과폭·van Driest 포함) 전부 실제로 그 모형을 구성함, 부력 생성 `G_b`도 모형별로 올바른 방정식에 배선됨(§17, §30.2). `ofgpu-fire`: 아직 k-ε만 지원 — 연소 혼합시간 종결식과 열 벽함수가 `epsilon`을 직접 요구하므로 다른 모형은 이름을 밝힌 §13.4 오류로 거부(조용한 대체 없음) |
 | 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1) |
 | 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨 |
 | 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
@@ -215,8 +217,8 @@ error: divSchemes/div(phi,k): "Gauss totalGarbage" is not supported by ofgpu;
 ## 검증
 
 ```
-cargo test        696 passed, 0 failed
-ofgpu-validate    219 / 219 checks passed
+cargo test        725 passed, 0 failed
+ofgpu-validate    228 / 228 checks passed
 ```
 
 ### 수렴 차수 — 인위해법 (MMS)
@@ -298,18 +300,25 @@ CPU 참조 구현은 장치 코드가 gather 방식인 것과 달리 의도적�
 | `P(Pr/Pr_t = 1) = 0` 정확히 성립 | 0 (반올림 수준) |
 | `Pr = Pr_t`일 때 `T+ == Pr_t · u+` 어디서나 성립 | 1.3 × 10⁻¹⁶ |
 | `thermalWallFunction`의 Robin 삼중값이 Jayatilleke 해석 열유속을 정확히 부호화 (한 셀 전도 항등식) | 0 (반올림 수준) |
+| Werner-Wengle: 두 분기가 분기점에서 일치하고, 각 분기 자체의 닫힌식이 조작된 `tau_w`를 반올림 수준까지 재현 | 0 (반올림 수준) |
+| 결합 솔버 선택: `ofgpu-buoyant`의 `build_coupled`로 부력 케이스에서 만든 `kOmegaSST`의 `nut` FNV 해시가 동일 케이스의 `kEpsilon`과 다름 | 해시 불일치 (결정적) |
 
 이 게이트들은 조도벽 법칙이 `Ks = 0`(조도를 전혀 언급하지 않는 케이스)에서
-기존 매끈한 벽으로 붕괴함과, 열 벽함수 자체의 대수가 내부적으로 정확함을
+기존 매끈한 벽으로 붕괴함과, 열 벽함수 자체의 대수가 내부적으로 정확함과,
+결합 솔버에서 `kOmegaSST`를 요청한 케이스가 실제로 그 모형을 구성함을
 입증합니다. 이것만으로는 조(粗)격자 벽함수 메쉬와 저Re 해상 메쉬가 **같은**
-유동의 벽 열유속에 합의한다는 것까지 입증하지는 않습니다 — 그것은 별개의,
-훨씬 큰 주장(두 해상도에서 수렴한 3차원 난류 채널 유동)이며, 현재 이
-저장소의 어떤 케이스 타입도 그것을 끝까지 배선하고 있지 않습니다. 근벽
-저항 모형만을 놓고 본 반해석적 점검(Jayatilleke의 닫힌형 하위층 저항을,
-동일한 와점성 폐쇄식의 직접 구적과 비교, 공기의 `Pr = 0.71`, `Pr_t = 0.85`
-기준)은 두 값이 약 15% 차이남을 보입니다 — 이는 결함이 아니라 Jayatilleke
-보정 자체의 크기이지만, 숨기지 않고 여기에 보고합니다. 완전한 종단 간 3차원
-검증은 향후 과제로 남습니다.
+유동의 벽 열유속에 합의한다는 것까지 입증하지는 않습니다 — 이 주장은 반해석적
+대체물로 남겨두지 않고 실제로 돌렸습니다: `cases/channelThermalWF.jsonc`
+(y+ ≈ 26.5, `thermalWallFunction`)와 `cases/channelThermalLowRe.jsonc`
+(y+ ≈ 4.2, 평범한 `fixedValue`)는 동일한 0.4 m 덕트, 벽온도 373.15 K, 중력
+0으로 `ofgpu-fire`를 통해 준정상상태까지 돌린 결과입니다. 측정된 벽 열유입은
+**40.7 W**(벽함수 메쉬) 대 **430.4 W**(해상 메쉬) — 비율 **0.095**로 1에
+전혀 가깝지 않습니다. 튜닝 없이 정직하게 보고합니다: 격자는 완전발달
+채널 상관식으로 크기를 정했으나 실제 유동(짧고 발달 중인 덕트)은 그 상태에
+도달하지 못했고, JSONC의 카테시안 격자는 grading이 없어 성긴 격자가
+벽 근처뿐 아니라 바깥층 해상도까지 낮으며, 짧고 열적으로 발달 중인 덕트는
+로그법칙이 교정된 완전발달 채널보다 평형 벽함수에 훨씬 불리한 조건입니다.
+전체 분석은 `docs/07-fire-solver.md` §1.1을 보십시오.
 
 ---
 
@@ -397,7 +406,7 @@ CUDA 13의 CCCL 헤더가 MSVC 전통 전처리기에서 `fatal error C1189`를 
 
 | 실행 파일 | 용도 |
 |---|---|
-| `ofgpu-validate` | 수치 검증 (214개 항목) |
+| `ofgpu-validate` | 수치 검증 (228개 항목) |
 | `ofgpu-bench` | 처리량 및 메모리 벤치마크 |
 | `ofgpu-graph-bench` | CUDA Graph 대 개별 실행 비교 |
 | `ofgpu-dispatch-bench` | 실행시간 분기 비용 측정 |
@@ -592,6 +601,12 @@ ASCII로 변환한 뒤 사용하십시오.
   Applied Mechanics*, 28(3), 455–458. — §6.4, §15.1
 - Cebeci, T., & Bradshaw, P. (1977). *Momentum Transfer in Boundary Layers.*
   Hemisphere. — §15.3
+- Jayatilleke, C. L. V. (1969). The influence of Prandtl number and surface
+  roughness on the resistance of the laminar sub-layer to momentum and heat
+  transfer. *Progress in Heat and Mass Transfer*, 1, 193–330. — §29.3
+- Werner, H., & Wengle, H. (1991). Large-eddy simulation of turbulent flow
+  over and around a cube in a plate channel. *8th Symposium on Turbulent
+  Shear Flows.* — §30.1
 - Tucker, P. G. (1998). Assessment of geometric multilevel convergence robustness
   and a wall distance method for flows with multiple internal boundaries.
   *Applied Mathematical Modelling*, 22(4–5), 293–305. — §6.6

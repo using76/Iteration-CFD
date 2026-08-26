@@ -177,6 +177,25 @@ impl<'m> KEpsilon<'m> {
     pub fn coeffs(&self) -> &KEpsilonCoeffs {
         &self.coeffs
     }
+
+    /// `k`, `epsilon` and `nut`, named - the writer seam and the `.mcr`
+    /// restart checkpoint's view of this model (SPEC-LIT §30.2's
+    /// `CoupledTurbulence::output_fields`). A free function rather than a
+    /// trait default because `k`, `epsilon` and `core.nut` are three
+    /// disjoint fields of THIS struct; only code with access to them can
+    /// destructure a borrow of each at once.
+    pub fn named_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        vec![("k", &self.k), ("epsilon", &self.epsilon), ("nut", &self.core.nut)]
+    }
+
+    /// [`Self::named_fields`], mutable - for `0/` upload and `.mcr` restore.
+    pub fn named_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        vec![
+            ("k", &mut self.k),
+            ("epsilon", &mut self.epsilon),
+            ("nut", &mut self.core.nut),
+        ]
+    }
     pub fn core(&self) -> &RasCore<'m> {
         &self.core
     }

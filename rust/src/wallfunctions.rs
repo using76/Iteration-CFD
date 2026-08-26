@@ -412,6 +412,104 @@ pub fn nut_wall_rough_u(
 }
 
 // ==========================================================================
+//  The Werner-Wengle LES wall model - SPEC-LIT §30.1
+// ==========================================================================
+//
+// Written from:
+//   Werner & Wengle, "Large-eddy simulation of turbulent flow over and
+//     around a cube in a plate channel", 8th Symp. Turb. Shear Flows (1991)
+//   ofgpu `SPEC-LIT.md` §30.1
+// No GPL-licensed source was consulted.
+//
+// An LES resolves the outer eddies and models only the sublayer the mesh
+// cannot afford. Werner-Wengle replaces the RAS log law with an
+// analytically-invertible power law, integrated over the first cell so the
+// wall shear comes directly from the CELL-AVERAGED velocity an LES actually
+// carries - no Newton iteration, unlike [`u_tau_newton`] above:
+//
+// ```text
+// u+ = y+                      y+ <= 11.81
+// u+ = A (y+)^B                y+  > 11.81,   A = 8.3,  B = 1/7
+// ```
+//
+// Integrated across the first cell of height `h` and inverted for `tau_w`,
+// with `|u_p|` the wall-parallel cell-average speed:
+//
+// ```text
+// viscous:  |u_p| <= nu/(2h) A^{2/(1-B)}     ->  tau_w = 2 nu |u_p| / h
+// power:    otherwise ->
+//   tau_w = [ (1-B)/2 A^{(1+B)/(1-B)} (nu/h)^{1+B}
+//             + (1+B)/A (nu/h)^B |u_p| ]^{2/(1+B)}
+// ```
+//
+// **Continuity at the branch point.** Substituting `u_p = u_c` (the branch
+// speed) into the power form: writing `nu_h = nu/h`, both terms of the
+// bracket share the exponent `(1+B)/(1-B)` on `A` (the power branch's own
+// `(1+B)/(1-B)` and the viscous exponent `2/(1-B) - 1` are the same number),
+// so the bracket collapses to `A^{(1+B)/(1-B)} nu_h^{1+B} [(1-B)/2 + (1+B)/2]
+// = A^{(1+B)/(1-B)} nu_h^{1+B}`, and raising that to `2/(1+B)` gives
+// `A^{2/(1-B)} nu_h^2` - exactly the viscous branch's own value at `u_c`,
+// `2 nu_h u_c = 2 nu_h (nu_h/2) A^{2/(1-B)} = nu_h^2 A^{2/(1-B)}`. The two
+// sides of the branch are the same function evaluated at the same point, not
+// two different functions that happen to agree - `tests::the_ww_power_branch_
+// reduces_to_the_viscous_one_at_the_branch_point` is that algebra run as a
+// numerical check.
+pub const WW_A: Scalar = 8.3;
+pub const WW_B: Scalar = 1.0 / 7.0;
+
+/// The wall-parallel cell-average speed at which the two branches meet:
+/// `nu/(2h) A^{2/(1-B)}` (SPEC-LIT §30.1).
+#[inline]
+pub fn ww_branch_speed(nu: Scalar, h: Scalar) -> Scalar {
+    if !(h > 0.0) {
+        return 0.0;
+    }
+    (nu / (2.0 * h)) * WW_A.powf(2.0 / (1.0 - WW_B))
+}
+
+/// `tau_w` from the integrated-and-inverted Werner-Wengle power law -
+/// SPEC-LIT §30.1. Continuous at the branch point by construction (see the
+/// module section above); [`tests`] evaluates both sides rather than relying
+/// on the branch itself to hide a discontinuity.
+#[inline]
+pub fn tau_w_werner_wengle(u_p: Scalar, h: Scalar, nu: Scalar) -> Scalar {
+    let u_p = u_p.max(0.0);
+    if !(h > 0.0) || !(nu > 0.0) {
+        return 0.0;
+    }
+
+    if u_p <= ww_branch_speed(nu, h) {
+        return 2.0 * nu * u_p / h;
+    }
+
+    let a = WW_A;
+    let b = WW_B;
+    let nu_h = nu / h;
+    let t1 = 0.5 * (1.0 - b) * a.powf((1.0 + b) / (1.0 - b)) * nu_h.powf(1.0 + b);
+    let t2 = ((1.0 + b) / a) * nu_h.powf(b) * u_p;
+    (t1 + t2).powf(2.0 / (1.0 + b))
+}
+
+/// `nu_t,w = tau_w h/|u_p| - nu`, clamped at zero - SPEC-LIT §30.1: chosen so
+/// the wall face's diffusive flux `(nu + nu_t,w)|u_p|/h` reproduces `tau_w`
+/// exactly, whichever branch produced it.
+#[inline]
+pub fn nut_wall_werner_wengle(tau_w: Scalar, h: Scalar, u_p: Scalar, nu: Scalar) -> Scalar {
+    if !(u_p > 0.0) || !(h > 0.0) {
+        return 0.0;
+    }
+    (tau_w * h / u_p - nu).max(0.0)
+}
+
+/// `u_tau = sqrt(tau_w)` - the substitution SPEC-LIT §30.1 wires into the
+/// thermal wall function under LES ([`thermal_wall_ref_grad_from_u_tau`]),
+/// in place of the RAS `Cmu^{1/4} sqrt(k)` [`u_tau_of`] computes.
+#[inline]
+pub fn u_tau_werner_wengle(tau_w: Scalar) -> Scalar {
+    tau_w.max(0.0).sqrt()
+}
+
+// ==========================================================================
 //  Kernels
 // ==========================================================================
 
@@ -876,6 +974,120 @@ fn expect_count(got: usize, want: usize, what: &str) -> Result<()> {
 }
 
 // ==========================================================================
+//  WernerWengleData - the LES wall model, SPEC-LIT §30.1
+// ==========================================================================
+
+struct WernerWengleKernels {
+    update: CudaFunction,
+}
+
+impl WernerWengleKernels {
+    fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::WALLFUNCTIONS)?;
+        Ok(Self {
+            update: k.func("wfWernerWengle")?,
+        })
+    }
+}
+
+/// Which boundary faces the Werner-Wengle LES wall model owns, from `nut`'s
+/// own patch type (`wernerWengleWallFunction` - SPEC-LIT §15.5's rule,
+/// extended to the LES wall model exactly as [`ThermalWallData`] extends it
+/// to temperature).
+///
+/// A flat per-face list, not a CSR: like [`WallData::update_nut`], this
+/// writes one face's `nu_t,w` at a time and never averages over a cell -
+/// there is no wall-adjacent-CELL constraint here, because an LES has no
+/// `epsilon`/`omega` cell for one to pin.
+pub struct WernerWengleData {
+    pub n_faces: usize,
+    /// `[n_faces]` boundary-face indices, ascending.
+    pub face: DevBuf<Label>,
+    /// `[n_boundary_faces]` `tau_w` from the last [`Self::update_nut`] call -
+    /// indexed by BOUNDARY FACE, not by [`Self::face`], so it chains
+    /// straight into [`ThermalWallData::update_from_tau_w`] with no
+    /// re-gather in between (the thermal wall function's `u_tau =
+    /// sqrt(tau_w)` substitution, [`u_tau_werner_wengle`], taken on the
+    /// device inside that call). Zero on every face this model does not own
+    /// - the callee's own `u_tau > 0` guard is what keeps that from being
+    /// read as a real (and wrong) friction velocity there.
+    pub tau_w: DevBuf<Scalar>,
+    k: WernerWengleKernels,
+}
+
+impl WernerWengleData {
+    /// `faces[bf]` is `nut`'s own patch type test
+    /// ([`crate::field_setup::les_nut_wall_faces`]) - one entry per boundary
+    /// face, in the same flattened order [`HostMesh::b_face_cells`] uses;
+    /// `faces.len()` is therefore `n_boundary_faces`, which is what
+    /// [`Self::tau_w`] is sized from.
+    pub fn build(gpu: &Gpu, faces: &[bool]) -> Result<Self> {
+        let list: Vec<Label> = faces
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .map(|(bf, _)| bf as Label)
+            .collect();
+        let n = list.len();
+        // Same convention as `WallData`/`ThermalWallData`: a zero-length
+        // device buffer is an error, so a case with no LES wall faces still
+        // gets one element, which `update_nut` never reads because it
+        // returns early on `n_faces == 0`.
+        let padded = if list.is_empty() { vec![0 as Label] } else { list };
+
+        Ok(Self {
+            n_faces: n,
+            face: gpu.upload(&padded)?,
+            tau_w: gpu.zeros(faces.len().max(1))?,
+            k: WernerWengleKernels::new(gpu)?,
+        })
+    }
+
+    /// `nu_t,w` on every face this owns, from the wall-parallel CELL-AVERAGE
+    /// speed - SPEC-LIT §30.1. Writes into `nut_bf` at those faces only,
+    /// exactly as [`WallData::update_nut`] does for the RAS families, and
+    /// records `tau_w` for [`Self::tau_w`]/the thermal wall substitution.
+    pub fn update_nut(
+        &mut self,
+        gpu: &Gpu,
+        nut_bf: &mut DevBuf<Scalar>,
+        u: &GpuVectorField,
+        m: &GpuMesh,
+        nu: Scalar,
+    ) -> Result<()> {
+        let n = self.n_faces;
+        if n == 0 {
+            return Ok(());
+        }
+        expect_count(nut_bf.len(), m.n_boundary_faces, "nut boundary values")?;
+        expect_count(self.tau_w.len(), m.n_boundary_faces, "tau_w")?;
+        expect_count(u.f.len(), m.n_cells, "U")?;
+        expect_count(u.bf.len(), m.n_boundary_faces, "U boundary values")?;
+
+        let nl = n as Label;
+        let f = self.k.update.clone();
+
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(nut_bf)
+                .arg(&mut self.tau_w)
+                .arg(&u.f)
+                .arg(&u.bf)
+                .arg(&m.b_face_cells)
+                .arg(&m.b_y)
+                .arg(&m.b_sf)
+                .arg(&m.b_mag_sf)
+                .arg(&self.face)
+                .arg(&nu)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+}
+
+// ==========================================================================
 //  The matrix constraint
 // ==========================================================================
 
@@ -1093,6 +1305,45 @@ pub fn thermal_wall_ref_grad(
     Some(q_w / k_eff_wall)
 }
 
+/// [`thermal_wall_ref_grad`]'s twin for a wall model that computes `u_tau`
+/// DIRECTLY rather than through `k` - SPEC-LIT §30.1: LES's Werner-Wengle
+/// substitutes `u_tau = sqrt(tau_w)` ([`u_tau_werner_wengle`]) for the RAS
+/// `Cmu^{1/4} sqrt(k)`, and an LES case has no `k` for
+/// [`thermal_wall_ref_grad`] to build `y+` from in the first place.
+///
+/// `y+ = u_tau y/nu` here - SPEC-LIT §15.1's own definition of `y+`, rather
+/// than [`y_plus_of`]'s `k`-based one. `None` under the same conditions as
+/// [`thermal_wall_ref_grad`] (no standoff, no `k_eff_wall`, `T+ <= 0`), plus
+/// `u_tau <= 0` - a face this wall model does not own, or one where the flow
+/// has locally separated and the wall shear is momentarily zero.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn thermal_wall_ref_grad_from_u_tau(
+    t_w: Scalar,
+    t_p: Scalar,
+    u_tau: Scalar,
+    y: Scalar,
+    nu: Scalar,
+    rho: Scalar,
+    cp: Scalar,
+    pr: Scalar,
+    prt: Scalar,
+    kappa: Scalar,
+    e: Scalar,
+    k_eff_wall: Scalar,
+) -> Option<Scalar> {
+    if !(y > 0.0) || !(k_eff_wall > 0.0) || !(u_tau > 0.0) {
+        return None;
+    }
+    let y_plus = u_tau * y / nu;
+    let tp = t_plus(y_plus, pr, prt, kappa, e, jayatilleke_p(pr, prt));
+    if !(tp > 0.0) {
+        return None;
+    }
+    let q_w = rho * cp * u_tau * (t_w - t_p) / tp;
+    Some(q_w / k_eff_wall)
+}
+
 /// Which boundary faces the Jayatilleke thermal wall function owns, from
 /// `T`'s own patch types (SPEC-LIT §15.5's rule, extended to a fifth field -
 /// see [`crate::field::BcKind::is_thermal_wall_function`]).
@@ -1108,6 +1359,7 @@ pub struct ThermalWallData {
 
 struct ThermalWallKernels {
     update: CudaFunction,
+    update_tau_w: CudaFunction,
 }
 
 impl ThermalWallKernels {
@@ -1115,6 +1367,7 @@ impl ThermalWallKernels {
         let k = KernelSet::new(gpu, crate::kernels::WALLFUNCTIONS)?;
         Ok(Self {
             update: k.func("wfThermalWall")?,
+            update_tau_w: k.func("wfThermalWallTauW")?,
         })
     }
 }
@@ -1212,6 +1465,75 @@ impl ThermalWallData {
                 .arg(&wc.e)
                 .arg(&cmu25)
                 .arg(&k_min)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::update`]'s twin for a wall model that supplies `tau_w`
+    /// directly rather than `k` - SPEC-LIT §30.1: LES's Werner-Wengle.
+    /// `tau_w`, not `u_tau`, is what this takes: [`WernerWengleData::tau_w`]
+    /// is already indexed by boundary face, so it is passed straight
+    /// through with no re-gather, and the `u_tau = sqrt(tau_w)` substitution
+    /// happens once, on the device, inside the kernel this launches - rather
+    /// than needing a separate elementwise-sqrt pass over every boundary
+    /// face first. There is no `k` argument: an LES case carries none for
+    /// this to read.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_from_tau_w(
+        &self,
+        gpu: &Gpu,
+        fr: &mut DevBuf<Scalar>,
+        ref_grad: &mut DevBuf<Scalar>,
+        ref_value: &DevBuf<Scalar>,
+        t_internal: &DevBuf<Scalar>,
+        tau_w: &DevBuf<Scalar>,
+        rho: &DevBuf<Scalar>,
+        k_eff_wall: &DevBuf<Scalar>,
+        m: &GpuMesh,
+        wc: &WallFunctionCoeffs,
+        nu: Scalar,
+        cp: Scalar,
+        pr: Scalar,
+        prt: Scalar,
+    ) -> Result<()> {
+        let n = self.n_faces;
+        if n == 0 {
+            return Ok(());
+        }
+        expect_count(fr.len(), m.n_boundary_faces, "T fr")?;
+        expect_count(ref_grad.len(), m.n_boundary_faces, "T ref_grad")?;
+        expect_count(ref_value.len(), m.n_boundary_faces, "T ref_value")?;
+        expect_count(t_internal.len(), m.n_cells, "T")?;
+        expect_count(tau_w.len(), m.n_boundary_faces, "tau_w")?;
+        expect_count(rho.len(), m.n_cells, "rho")?;
+        expect_count(k_eff_wall.len(), m.n_boundary_faces, "k_eff wall")?;
+
+        let jay_p = jayatilleke_p(pr, prt);
+        let nl = n as Label;
+        let f = self.k.update_tau_w.clone();
+
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(fr)
+                .arg(ref_grad)
+                .arg(ref_value)
+                .arg(t_internal)
+                .arg(tau_w)
+                .arg(rho)
+                .arg(k_eff_wall)
+                .arg(&m.b_face_cells)
+                .arg(&m.b_y)
+                .arg(&self.face)
+                .arg(&nu)
+                .arg(&cp)
+                .arg(&pr)
+                .arg(&prt)
+                .arg(&jay_p)
+                .arg(&wc.kappa)
+                .arg(&wc.e)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }
@@ -2494,6 +2816,305 @@ mod tests {
                 k_min,
             )
             .expect("every face in this test has a positive standoff and k_eff");
+
+            assert_eq!(got_fr[bf], 0.0, "face {bf}: fr must be rewritten to 0");
+            assert!(
+                (got_grad[bf] - want).abs() <= 1e-9 * want.abs().max(1e-6),
+                "face {bf}: device ref_grad {}, host {want}",
+                got_grad[bf]
+            );
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  Werner-Wengle - SPEC-LIT §30.1
+    // ----------------------------------------------------------------------
+
+    /// **The test SPEC-LIT §30.1's continuity requirement exists for.** The
+    /// power branch and the viscous branch are two different closed-form
+    /// expressions; nothing in [`tau_w_werner_wengle`] forces them to agree
+    /// except the algebra the module section above works out. Evaluate both
+    /// sides of the branch point directly.
+    #[test]
+    fn ww_is_continuous_at_the_branch_point() {
+        for (nu, h) in [
+            (1.5e-5 as Scalar, 0.01 as Scalar),
+            (1.0e-6, 0.002),
+            (2.0e-4, 0.05),
+        ] {
+            let u_c = ww_branch_speed(nu, h);
+            assert!(u_c > 0.0, "nu {nu} h {h}: branch speed is not positive");
+
+            // At the point itself: the viscous closed form, since `<=` picks
+            // that branch there.
+            let at = tau_w_werner_wengle(u_c, h, nu);
+            let viscous_closed_form = 2.0 * nu * u_c / h;
+            assert!(
+                (at - viscous_closed_form).abs() < 1e-9 * viscous_closed_form,
+                "nu {nu} h {h}: tau_w(u_c) = {at}, 2 nu u_c/h = {viscous_closed_form}"
+            );
+
+            // A hair below and a hair above, evaluated from EACH SIDE's own
+            // formula (a tiny perturbation of u_p is guaranteed to fall on
+            // one side or the other of `<=`).
+            let below = tau_w_werner_wengle(u_c * (1.0 - 1e-9), h, nu);
+            let above = tau_w_werner_wengle(u_c * (1.0 + 1e-9), h, nu);
+            let scale = at.max(1e-300);
+            assert!(
+                (below - at).abs() < 1e-6 * scale,
+                "nu {nu} h {h}: viscous side steps by {} crossing the branch point",
+                (below - at).abs() / scale
+            );
+            assert!(
+                (above - at).abs() < 1e-6 * scale,
+                "nu {nu} h {h}: power side steps by {} crossing the branch point",
+                (above - at).abs() / scale
+            );
+        }
+    }
+
+    /// Inverting the integrated power law reproduces a manufactured `tau_w`
+    /// to round-off - SPEC-LIT §30.3's own wording for this gate.
+    #[test]
+    fn ww_power_branch_inverts_a_manufactured_tau_w_to_round_off() {
+        let nu: Scalar = 1.5e-5;
+        let h: Scalar = 0.01;
+        let a = WW_A;
+        let b = WW_B;
+        let nu_h = nu / h;
+
+        // The power branch's own bracket, `tau_w = (t1 + t2 u_p)^{2/(1+b)}`,
+        // inverted for `u_p` given a target `tau_w`.
+        let t1 = 0.5 * (1.0 - b) * a.powf((1.0 + b) / (1.0 - b)) * nu_h.powf(1.0 + b);
+        let t2 = ((1.0 + b) / a) * nu_h.powf(b);
+
+        for tau_w_target in [1.0e-3 as Scalar, 5.0e-2, 2.0] {
+            let u_p = (tau_w_target.powf((1.0 + b) / 2.0) - t1) / t2;
+            assert!(
+                u_p > ww_branch_speed(nu, h),
+                "test setup: tau_w {tau_w_target} landed in the viscous branch, not the power one"
+            );
+
+            let got = tau_w_werner_wengle(u_p, h, nu);
+            assert!(
+                (got - tau_w_target).abs() < 1e-9 * tau_w_target,
+                "tau_w = {tau_w_target}: inverting and reapplying the power law gave {got}"
+            );
+        }
+    }
+
+    /// The viscous branch's own round trip - linear, so the inversion is
+    /// exact algebra rather than a root-find, but the same discipline
+    /// applies: manufacture `tau_w`, invert, reapply, compare.
+    #[test]
+    fn ww_viscous_branch_inverts_a_manufactured_tau_w_to_round_off() {
+        let nu: Scalar = 1.5e-5;
+        let h: Scalar = 0.01;
+
+        for tau_w_target in [1.0e-8 as Scalar, 1.0e-10] {
+            let u_p = tau_w_target * h / (2.0 * nu);
+            assert!(
+                u_p <= ww_branch_speed(nu, h),
+                "test setup: tau_w {tau_w_target} landed in the power branch, not the viscous one"
+            );
+
+            let got = tau_w_werner_wengle(u_p, h, nu);
+            assert!(
+                (got - tau_w_target).abs() < 1e-9 * tau_w_target.max(1e-300),
+                "tau_w = {tau_w_target}: inverting and reapplying the viscous law gave {got}"
+            );
+        }
+    }
+
+    /// `nu_t,w` is well defined only where there IS a wall-parallel speed to
+    /// divide by, and non-negative everywhere else it is defined.
+    #[test]
+    fn ww_nut_wall_is_zero_with_no_wall_parallel_speed_and_never_negative() {
+        assert_eq!(nut_wall_werner_wengle(1.0, 0.01, 0.0, 1.5e-5), 0.0);
+        assert_eq!(nut_wall_werner_wengle(1.0, 0.0, 0.5, 1.5e-5), 0.0);
+
+        for u_p in [1e-4 as Scalar, 1e-2, 1.0, 10.0] {
+            let nu: Scalar = 1.5e-5;
+            let h: Scalar = 0.01;
+            let tau_w = tau_w_werner_wengle(u_p, h, nu);
+            let nut = nut_wall_werner_wengle(tau_w, h, u_p, nu);
+            assert!(nut >= 0.0, "u_p {u_p}: nu_t,w = {nut}");
+        }
+    }
+
+    #[test]
+    fn u_tau_werner_wengle_is_the_square_root_of_tau_w() {
+        assert_eq!(u_tau_werner_wengle(4.0), 2.0);
+        assert_eq!(u_tau_werner_wengle(0.0), 0.0);
+        assert_eq!(u_tau_werner_wengle(-1.0), 0.0);
+    }
+
+    /// The device kernel `wfWernerWengle` must reproduce
+    /// [`tau_w_werner_wengle`]/[`nut_wall_werner_wengle`] - the same
+    /// discipline `device_agrees_with_the_host_law` holds the RAS `nutk`
+    /// kernel to.
+    #[test]
+    fn device_ww_agrees_with_the_host_law() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        // A one-cell-thick slab: 4 cells in a row, the xmin patch a wall.
+        let (mut m, points, faces) =
+            crate::mesh::topology::tests::box_mesh([4, 1, 1], crate::Vec3::new(0.25, 1.0, 1.0));
+        m.compute_geometry(&points, &faces)?;
+        m.build_cell_face_maps();
+        let gm = GpuMesh::upload(&gpu, &m)?;
+
+        let mut flags = vec![false; m.n_boundary_faces];
+        let p = &m.patches[0];
+        for i in 0..p.size {
+            flags[p.start + i] = true;
+        }
+
+        let mut wwd = WernerWengleData::build(&gpu, &flags)?;
+        assert_eq!(wwd.n_faces, p.size);
+
+        let nu: Scalar = 1.5e-5;
+        let mut u = GpuVectorField::zeros(&gpu, &gm, "U")?;
+        // Tangential to the xmin wall (its normal is x): a pure-y velocity
+        // has no normal component to project out, so wfMagUParallel returns
+        // it exactly. The wall's own boundary value is left at the zero
+        // `GpuVectorField::zeros` already gives it - no-slip.
+        let u_mag: Scalar = 0.7;
+        let u_host = vec![crate::Vec3::new(0.0, u_mag, 0.0); m.n_cells];
+        gpu.write(&mut u.f, &u_host)?;
+
+        let mut nut_bf = gpu.zeros::<Scalar>(m.n_boundary_faces)?;
+        wwd.update_nut(&gpu, &mut nut_bf, &u, &gm, nu)?;
+        gpu.sync()?;
+
+        let got_nut = gpu.download(&nut_bf)?;
+        let got_tau = gpu.download(&wwd.tau_w)?;
+        let face_ids = gpu.download(&wwd.face)?;
+
+        for &bf in face_ids.iter().take(wwd.n_faces) {
+            let bf = bf as usize;
+            let h = m.b_y[bf];
+            let want_tau = tau_w_werner_wengle(u_mag, h, nu);
+            let want_nut = nut_wall_werner_wengle(want_tau, h, u_mag, nu);
+
+            assert!(
+                (got_tau[bf] - want_tau).abs() <= 1e-9 * want_tau.max(1e-30),
+                "face {bf}: tau_w device {} host {want_tau}",
+                got_tau[bf]
+            );
+            assert!(
+                (got_nut[bf] - want_nut).abs() <= 1e-9 * want_nut.max(nu),
+                "face {bf}: nu_t,w device {} host {want_nut}",
+                got_nut[bf]
+            );
+        }
+
+        Ok(())
+    }
+
+    /// The `u_tau = sqrt(tau_w)` substitution, wired end to end: build a
+    /// Werner-Wengle wall, run its kernel, feed the `tau_w` it wrote straight
+    /// into [`ThermalWallData::update_from_tau_w`], and check the rewritten
+    /// `ref_grad` against the pure host [`thermal_wall_ref_grad_from_u_tau`]
+    /// evaluated at `u_tau = sqrt(tau_w)`.
+    #[test]
+    fn device_thermal_wall_u_tau_agrees_with_the_host_law() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let (mut m, points, faces) =
+            crate::mesh::topology::tests::box_mesh([4, 1, 1], crate::Vec3::new(0.25, 1.0, 1.0));
+        m.compute_geometry(&points, &faces)?;
+        m.build_cell_face_maps();
+        let gm = GpuMesh::upload(&gpu, &m)?;
+
+        let mut flags = vec![false; m.n_boundary_faces];
+        let p = &m.patches[0];
+        for i in 0..p.size {
+            flags[p.start + i] = true;
+        }
+
+        let nu: Scalar = 1.5e-5;
+        let mut wwd = WernerWengleData::build(&gpu, &flags)?;
+        let mut u = GpuVectorField::zeros(&gpu, &gm, "U")?;
+        let u_mag: Scalar = 0.7;
+        gpu.write(&mut u.f, &vec![crate::Vec3::new(0.0, u_mag, 0.0); m.n_cells])?;
+        let mut nut_bf = gpu.zeros::<Scalar>(m.n_boundary_faces)?;
+        wwd.update_nut(&gpu, &mut nut_bf, &u, &gm, nu)?;
+        gpu.sync()?;
+
+        // Same `nut`-owned faces feed the thermal wall function - realistic
+        // for a case that has both.
+        let twd = ThermalWallData::build(&gpu, &flags)?;
+
+        let wc = WallFunctionCoeffs::default();
+        let cp: Scalar = 1006.0;
+        let pr: Scalar = 0.71;
+        let prt: Scalar = 0.85;
+
+        let rho_host = vec![1.2 as Scalar; m.n_cells];
+        let rho_dev = gpu.upload(&rho_host)?;
+        let k_eff_host: Vec<Scalar> =
+            (0..m.n_boundary_faces).map(|i| 0.03 + 0.001 * i as Scalar).collect();
+        let k_eff_dev = gpu.upload(&k_eff_host)?;
+
+        let t_w: Scalar = 400.0;
+        let t_host = vec![300.0 as Scalar; m.n_cells];
+        let t_dev = gpu.upload(&t_host)?;
+
+        let mut fr = gpu.upload(&vec![1.0 as Scalar; m.n_boundary_faces])?;
+        let mut ref_grad = gpu.zeros::<Scalar>(m.n_boundary_faces)?;
+        let ref_value = gpu.upload(&vec![t_w; m.n_boundary_faces])?;
+
+        twd.update_from_tau_w(
+            &gpu,
+            &mut fr,
+            &mut ref_grad,
+            &ref_value,
+            &t_dev,
+            &wwd.tau_w,
+            &rho_dev,
+            &k_eff_dev,
+            &gm,
+            &wc,
+            nu,
+            cp,
+            pr,
+            prt,
+        )?;
+        gpu.sync()?;
+
+        let got_fr = gpu.download(&fr)?;
+        let got_grad = gpu.download(&ref_grad)?;
+        let got_tau = gpu.download(&wwd.tau_w)?;
+        let face_ids = gpu.download(&twd.face)?;
+
+        for &bf in face_ids.iter().take(twd.n_faces) {
+            let bf = bf as usize;
+            let y = m.b_y[bf];
+            let c = m.b_face_cells[bf] as usize;
+            let u_tau = u_tau_werner_wengle(got_tau[bf]);
+
+            let want = thermal_wall_ref_grad_from_u_tau(
+                t_w,
+                t_host[c],
+                u_tau,
+                y,
+                nu,
+                rho_host[c],
+                cp,
+                pr,
+                prt,
+                wc.kappa,
+                wc.e,
+                k_eff_host[bf],
+            )
+            .expect("every face in this test has a positive standoff, u_tau and k_eff");
 
             assert_eq!(got_fr[bf], 0.0, "face {bf}: fr must be rewritten to 0");
             assert!(

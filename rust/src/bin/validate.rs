@@ -1993,6 +1993,15 @@ fn run(c: &mut Checks) -> Result<()> {
     check_rough_wall_ks_zero(c);
     check_thermal_wall_function(c);
 
+    // ---- the LES wall model, and coupled-solver turbulence selection
+    //      (SPEC-LIT 30) --------------------------------------------------
+    println!(
+        "\n=== Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30) ==="
+    );
+    check_werner_wengle(c);
+    check_werner_wengle_inversion(c);
+    check_coupled_selection(c, &gpu, &k)?;
+
     Ok(())
 }
 
@@ -2151,6 +2160,258 @@ fn check_thermal_wall_function(c: &mut Checks) {
     }
 }
 
+// ==========================================================================
+//  SPEC-LIT §30: the Werner-Wengle LES wall model, and coupled-solver
+//  turbulence selection
+// ==========================================================================
+//
+// The WW pair below is promoted from `wallfunctions::tests` - host-only,
+// same discipline as §29's pair above. The selection check needs a GPU and
+// is new here rather than promoted, because SPEC-LIT §30.3 asks for it
+// against a live `build_coupled` run, not against a closed-form identity.
+
+/// SPEC-LIT §30.3's continuity row: "`tau_w -> nu|u_p|/(h/2)`-form continuous
+/// at the branch point (evaluate both sides)". [`tau_w_werner_wengle`]'s two
+/// branches are two different closed-form expressions - nothing but the
+/// algebra in that function's own module doc forces them to agree - so this
+/// evaluates both sides at, and a hair either side of, the branch point
+/// directly, exactly as `wallfunctions::tests::ww_is_continuous_at_the_
+/// branch_point` does under `cargo test`.
+fn check_werner_wengle(c: &mut Checks) {
+    use ofgpu::wallfunctions::{tau_w_werner_wengle, ww_branch_speed};
+
+    let mut worst_at: Scalar = 0.0;
+    let mut worst_below: Scalar = 0.0;
+    let mut worst_above: Scalar = 0.0;
+    for (nu, h) in [
+        (1.5e-5 as Scalar, 0.01 as Scalar),
+        (1.0e-6, 0.002),
+        (2.0e-4, 0.05),
+    ] {
+        let u_c = ww_branch_speed(nu, h);
+        let at = tau_w_werner_wengle(u_c, h, nu);
+        let viscous_closed_form = 2.0 * nu * u_c / h;
+        worst_at = worst_at.max((at - viscous_closed_form).abs() / viscous_closed_form.max(1e-300));
+
+        let below = tau_w_werner_wengle(u_c * (1.0 - 1e-9), h, nu);
+        let above = tau_w_werner_wengle(u_c * (1.0 + 1e-9), h, nu);
+        let scale = at.max(1e-300);
+        worst_below = worst_below.max((below - at).abs() / scale);
+        worst_above = worst_above.max((above - at).abs() / scale);
+    }
+    c.check(
+        "WW: tau_w(u_c) == 2 nu u_c/h, the viscous closed form (S30.3 gate)",
+        worst_at,
+        1e-9,
+    );
+    c.check(
+        "WW: viscous side does not step crossing the branch point",
+        worst_below,
+        1e-6,
+    );
+    c.check(
+        "WW: power side does not step crossing the branch point",
+        worst_above,
+        1e-6,
+    );
+}
+
+/// SPEC-LIT §30.3's inversion row: "inverting the integrated law reproduces
+/// a manufactured `tau_w` to round-off." One round trip per branch -
+/// manufacture `tau_w`, invert its own closed form for `u_p`, reapply
+/// [`tau_w_werner_wengle`], compare - promoted from
+/// `wallfunctions::tests::ww_power_branch_inverts_a_manufactured_tau_w_to_
+/// round_off` and its viscous twin.
+fn check_werner_wengle_inversion(c: &mut Checks) {
+    use ofgpu::wallfunctions::{tau_w_werner_wengle, ww_branch_speed, WW_A, WW_B};
+
+    let nu: Scalar = 1.5e-5;
+    let h: Scalar = 0.01;
+
+    // The power branch's own bracket, tau_w = (t1 + t2 u_p)^{2/(1+b)},
+    // inverted for u_p given a target tau_w.
+    let a = WW_A;
+    let b = WW_B;
+    let nu_h = nu / h;
+    let t1 = 0.5 * (1.0 - b) * a.powf((1.0 + b) / (1.0 - b)) * nu_h.powf(1.0 + b);
+    let t2 = ((1.0 + b) / a) * nu_h.powf(b);
+
+    let mut worst_power: Scalar = 0.0;
+    for tau_w_target in [1.0e-3 as Scalar, 5.0e-2, 2.0] {
+        let u_p = (tau_w_target.powf((1.0 + b) / 2.0) - t1) / t2;
+        let got = tau_w_werner_wengle(u_p, h, nu);
+        worst_power = worst_power.max((got - tau_w_target).abs() / tau_w_target);
+    }
+    c.check(
+        "WW power branch: invert then reapply reproduces tau_w (S30.3 gate)",
+        worst_power,
+        1e-9,
+    );
+
+    let mut worst_viscous: Scalar = 0.0;
+    for tau_w_target in [1.0e-8 as Scalar, 1.0e-10] {
+        let u_p = tau_w_target * h / (2.0 * nu);
+        c.note(&format!(
+            "  (tau_w = {tau_w_target:e}: u_p = {u_p:e}, branch speed = {:e})",
+            f64::from(ww_branch_speed(nu, h))
+        ));
+        let got = tau_w_werner_wengle(u_p, h, nu);
+        worst_viscous = worst_viscous.max((got - tau_w_target).abs() / tau_w_target.max(1e-300));
+    }
+    c.check(
+        "WW viscous branch: invert then reapply reproduces tau_w (S30.3 gate)",
+        worst_viscous,
+        1e-9,
+    );
+}
+
+/// FNV-1a 64-bit digest of a field's raw bytes - the same algorithm
+/// `restart::mesh_hash` uses, applied here to a `nu_t` snapshot rather than a
+/// mesh, so [`check_coupled_selection`] can report one short, copy-pasteable
+/// number per model instead of a max-diff that says nothing about WHICH
+/// values moved.
+fn field_hash(f: &[Scalar]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h: u64 = FNV_OFFSET;
+    for v in f {
+        for &byte in &f64::from(*v).to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+    }
+    h
+}
+
+/// SPEC-LIT §30.3's selection row: "`model kOmegaSST` in buoyant/fire
+/// constructs SST - verified by the printed banner AND a field difference."
+///
+/// Promoted from `models::registry::tests::komega_sst_via_build_coupled_is_
+/// not_bit_identical_to_kepsilon`, on a genuinely BUOYANT case rather than
+/// an isothermal one: `CaseControls::default()` already carries Earth
+/// gravity (`BuoyancyCoeffs::default()`, SPEC-LIT §9), so `build_coupled`'s
+/// own `buoyancy_settings` turns on for both models with no case file
+/// needed, and a real [`ThermalCtx`] is threaded through `correct` so the
+/// run actually exercises SPEC-LIT §17's `G_b` route for each model
+/// (k-epsilon's own equation vs. SST's `(gamma/nu_t) G_b` in omega) rather
+/// than skipping it.
+fn check_coupled_selection(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
+    use ofgpu::field::GpuVectorField;
+    use ofgpu::field_ops::correct_boundary_conditions;
+    use ofgpu::field_setup::{NutRoughness, WallFaces};
+    use ofgpu::io::case::CaseControls;
+    use ofgpu::io::dict::FoamDict;
+    use ofgpu::models::coupled::ThermalCtx;
+    use ofgpu::models::registry::{build_coupled, select_turbulence_model};
+    use ofgpu::turbulence::FlowState;
+
+    let case = |src: &str| -> CaseControls {
+        let d = FoamDict::parse(src, "momentumTransport")
+            .expect("S30 fixture: hand-written dictionary text must parse");
+        let name = d
+            .get_or("RAS/model", d.get_or("RAS/RASModel", ""))
+            .to_string();
+        CaseControls {
+            model_name: name,
+            momentum_transport: d,
+            ..Default::default()
+        }
+    };
+
+    // A small closed box with real walls on four of six faces - enough for
+    // SST's wall-distance Poisson solve (S6.6) to be non-degenerate.
+    let spec = MeshSpec {
+        n: [6, 6, 4],
+        l: [0.3, 0.3, 0.2],
+        ..Default::default()
+    };
+    let hm = make_mesh(&scratch_dir("coupledSelection"), &spec)?;
+    let mesh = GpuMesh::upload(gpu, &hm)?;
+    let no_walls = WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = NutRoughness::none(hm.n_boundary_faces);
+
+    // A sheared, non-uniform velocity - production needs grad U nonzero
+    // everywhere - held fixed across the 20 outer steps below (this checks
+    // the turbulence closures against one another, not momentum).
+    let mut u = GpuVectorField::zeros(gpu, &mesh, "U")?;
+    let u_vals: Vec<Vec3> = hm
+        .c
+        .iter()
+        .map(|p| Vec3::new(1.0 + 0.5 * p.y, 0.3, 0.0))
+        .collect();
+    gpu.write(&mut u.f, &u_vals)?;
+    let phi = GpuSurfaceScalarField::zeros(gpu, &mesh, "phi")?;
+    let flow = FlowState::new(&u, &phi, 1.5e-5);
+
+    // An unstable stratification - hot at the bottom, g pointing down -
+    // SPEC-LIT §17's G_b > 0 branch, so the buoyancy route each model wires
+    // it through actually has something to carry.
+    let mut t = GpuScalarField::zeros(gpu, &mesh, "T")?;
+    let z_max = spec.l[2];
+    let t_vals: Vec<Scalar> = hm
+        .c
+        .iter()
+        .map(|p| 1173.15 - 880.0 * (p.z / z_max))
+        .collect();
+    gpu.write(&mut t.f, &t_vals)?;
+    correct_boundary_conditions(gpu, &k.field, &mut t, &mesh)?;
+
+    let g = ofgpu::Vec3::new(0.0, 0.0, -9.81);
+    let thermal = ThermalCtx { t: &t, g, prt: 0.85 };
+
+    let run_one = |src: &str| -> Result<(String, Vec<Scalar>)> {
+        let cc = case(src);
+        let selection = select_turbulence_model(&cc)?;
+        let mut turb = build_coupled(gpu, &hm, &mesh, &cc, &selection, &no_walls, &no_roughness)?;
+        for (name, f) in turb.output_fields_mut() {
+            if name == "k" {
+                gpu.write(&mut f.f, &vec![1.0 as Scalar; hm.n_cells])?;
+            }
+        }
+        turb.initialise(gpu, &flow)?;
+        for _ in 0..20 {
+            turb.correct(gpu, &flow, Some(&thermal))?;
+        }
+        gpu.sync()?;
+        let nut = gpu.download(&turb.nut().f)?;
+        Ok((turb.name().to_string(), nut))
+    };
+
+    let (ke_name, ke_nut) = run_one("RAS { model kEpsilon; }")?;
+    let (sst_name, sst_nut) = run_one("RAS { model kOmegaSST; }")?;
+
+    c.require(
+        "S30.3 selection: RAS/model kEpsilon builds the banner \"kEpsilon\"",
+        ke_name == "kEpsilon",
+    );
+    c.require(
+        "S30.3 selection: RAS/model kOmegaSST builds the banner \"kOmegaSST\"",
+        sst_name == "kOmegaSST",
+    );
+
+    let all_finite = ke_nut.iter().chain(sst_nut.iter()).all(|v| v.is_finite());
+    c.require(
+        "S30.3 selection: both the kEpsilon and kOmegaSST runs stay NaN-free",
+        all_finite,
+    );
+
+    let ke_hash = field_hash(&ke_nut);
+    let sst_hash = field_hash(&sst_nut);
+    let ke_mean = ke_nut.iter().sum::<Scalar>() / ke_nut.len().max(1) as Scalar;
+    let sst_mean = sst_nut.iter().sum::<Scalar>() / sst_nut.len().max(1) as Scalar;
+    c.note(&format!(
+        "nut on the buoyant selection case: kEpsilon mean {:e} (FNV {ke_hash:016x}), \
+         kOmegaSST mean {:e} (FNV {sst_hash:016x})",
+        f64::from(ke_mean),
+        f64::from(sst_mean)
+    ));
+    c.require(
+        "S30.3 selection (decisive): kOmegaSST's nut hash differs from kEpsilon's",
+        all_finite && ke_hash != sst_hash,
+    );
+
+    Ok(())
+}
 
 // ==========================================================================
 //  SPEC-LIT section 22: the buoyancy production, the sources, the species,

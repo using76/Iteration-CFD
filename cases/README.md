@@ -23,6 +23,14 @@ cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [
 | `rough` | `nutkRoughWallFunction`(`-Ks` 필요, `-Cs` 기본 0.5) | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` | `thermalWallFunction` |
 | `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `zeroGradient` (분자 점성만) | 손대지 않음 — 해상된 서브레이어 자체의 분자 저항을 그대로 둠 |
 
+`simulationType LES;`인 케이스는 `k`/`epsilon`/`omega` 완결식이 없으므로 위 표는
+`nut` 열 하나로 줄어듭니다 — SPEC-LIT §30.1의 자체 표(§29.1의 유일한 생존
+멤버, 다른 답으로): `standard`/`spalding` 둘 다 `wernerWengleWallFunction`
+(Werner & Wengle 1991 — 첫 셀 평균 속도로 적분·역해한 멱법칙, Newton 반복 없음)
+으로 읽히고, `lowRe`는 그대로 `nutLowReWallFunction`(`nu_t,w = 0`)이며, `rough`는
+아직 LES 벽모형이 없어 둘 중 하나를 이름으로 밝힌 §13.4 오류로 거부됩니다(조용한
+대체 없음 — 미래 작업).
+
 `-wallModel`을 주지 않으면 기존 동작(레거시 기본값) 그대로입니다. `rough`는
 `-Ks`(모래알 거칠기, m)가 필수이고 `-Cs`(거칠기 상수, 기본 0.5)는 선택입니다.
 예:
@@ -113,14 +121,21 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 |---|---|---|
 | `plume.jsonc` | `ofgpu-k-epsilon` 등 | `plumeB`(OpenFOAM 형식)의 JSONC 재현 — 두 형식이 같은 필드를 만든다는 B3 게이트 |
 | `burnerPlume.jsonc` | `ofgpu-fire -combustion -radiation` | 프로판 버너 화재 데모 — SPEC-LIT §25(저-마하)·§26(에너지)·§27(연소)·§28(복사)를 한 케이스에서 결합. 바닥 창(`Y_F = 1` 고정)으로 연료가 들어가고, 열은 전부 연소의 `q'''_c`에서 나옵니다(입구 자체는 상온) |
+| `channelThermalWF.jsonc` | `ofgpu-fire` | SPEC-LIT §29.3/§30.3의 유예되었던 게이트, 메쉬 (a): 입구로 구동되는 평면 채널/덕트, 위아래 벽 `Tw = 373.15 K`, 중력 0. 벽법선 방향이 성긴 격자(y+ ≈ 30, 측정값 26.5) — `standard` 프리셋, `thermalWallFunction`이 실제로 일을 해야 하는 조건 |
+| `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, 벽법선 격자만 y+ ≈ 1(측정값 4.2)로 정밀화하고 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다") |
 
 ```powershell
 cd ..\rust
 cargo run --release --bin ofgpu-fire -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005 -check 200
+
+# SPEC-LIT §29.3/§30.3의 유예되었던 게이트 — 정상상태까지 돌리고
+# "integrated wall heat flux" 줄을 비교합니다.
+cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalWF.jsonc    -iters 3000 -check 1000
+cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalLowRe.jsonc -iters 1200 -check 400
 ```
 
-자세한 화재 솔버 설명은 [`../docs/07-fire-solver.md`](../docs/07-fire-solver.md)를
-보십시오.
+자세한 화재 솔버 설명과 두 채널 케이스가 실제로 낸 벽 열유속·비율은
+[`../docs/07-fire-solver.md`](../docs/07-fire-solver.md)를 보십시오.
 
 ## 직접 만든 OpenFOAM 케이스 쓰기
 

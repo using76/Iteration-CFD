@@ -151,6 +151,7 @@ pub struct TurbKernels {
     add_buoyancy_k: CudaFunction,
     add_buoyancy_epsilon: CudaFunction,
     add_buoyancy_omega: CudaFunction,
+    add_buoyancy_omega_cell: CudaFunction,
 }
 
 impl TurbKernels {
@@ -184,6 +185,7 @@ impl TurbKernels {
             add_buoyancy_k: k.func("turbAddBuoyancyToK")?,
             add_buoyancy_epsilon: k.func("turbAddBuoyancyToEpsilon")?,
             add_buoyancy_omega: k.func("turbAddBuoyancyToOmega")?,
+            add_buoyancy_omega_cell: k.func("turbAddBuoyancyToOmegaCell")?,
         })
     }
 }
@@ -808,6 +810,48 @@ pub fn add_buoyancy_to_omega(
             .arg(nut)
             .arg(omega)
             .arg(&gamma)
+            .arg(&nut_min)
+            .arg(&sb)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// [`add_buoyancy_to_omega`] with `gamma` read per cell rather than as one
+/// constant - SPEC-LIT §17 and §30.2. SST blends `gamma` between its two
+/// coefficient sets with `F1` (SPEC-LIT §6.3), so the production route
+/// `(gamma/nu_t) G_b` needs the same blended field the shear production
+/// already reads, not the single k-omega `gamma`.
+#[allow(clippy::too_many_arguments)]
+pub fn add_buoyancy_to_omega_cell(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    su: &mut DevBuf<Scalar>,
+    sp: &mut DevBuf<Scalar>,
+    gb: &DevBuf<Scalar>,
+    nut: &DevBuf<Scalar>,
+    omega: &DevBuf<Scalar>,
+    gamma: &DevBuf<Scalar>,
+    nut_min: Scalar,
+    stable_branch: bool,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let sb: Label = if stable_branch { 1 } else { 0 };
+    let f = kern.add_buoyancy_omega_cell.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(su)
+            .arg(sp)
+            .arg(gb)
+            .arg(nut)
+            .arg(omega)
+            .arg(gamma)
             .arg(&nut_min)
             .arg(&sb)
             .arg(&nl)

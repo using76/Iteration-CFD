@@ -356,6 +356,21 @@ pub enum ScalarBc {
     },
     #[serde(rename = "zeroGradient")]
     ZeroGradient {},
+    /// SPEC-LIT §29.3's Jayatilleke thermal wall function, nameable
+    /// explicitly on `T` with its own wall target temperature `T_w` -
+    /// [`TurbBc`]'s wall-function variants already carry a `value` this same
+    /// way for `nut`/`k`/`epsilon`/`omega`; `T` had no such variant, only the
+    /// case-level `wallTreatment` auto-completion of [`t_spec_for`], which
+    /// (deliberately, until this variant existed) never has a wall
+    /// temperature of its own to write and falls back to the neighbour
+    /// cell's value - fine for an adiabatic-ish plume floor, useless for a
+    /// genuinely hot wall against a cooler bulk (SPEC-LIT §29.3's own
+    /// deferred gate: a channel with fixed-T hot walls). An explicit
+    /// `T: { "type": "thermalWallFunction", "value": T_w }` on a wall rule is
+    /// the highest-precedence route of §29.1's table and is honoured here the
+    /// same way an explicit `nutkWallFunction { value }` already is.
+    #[serde(rename = "thermalWallFunction")]
+    ThermalWallFunction { value: f64 },
 }
 
 /// Vector counterpart of [`ScalarBc`], for `U`.
@@ -1160,6 +1175,11 @@ fn scalar_bc_spec(bc: &ScalarBc) -> PatchFieldSpec {
             s
         }
         ScalarBc::ZeroGradient {} => spec("zeroGradient"),
+        ScalarBc::ThermalWallFunction { value } => {
+            let mut s = spec("thermalWallFunction");
+            s.value = vec![*value as Scalar];
+            s
+        }
     }
 }
 
@@ -2074,6 +2094,42 @@ mod tests {
             let lowered = case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"));
             let p = a_wall_patch_name(&lowered);
             assert_eq!(lowered.t_field.unwrap().boundary[&p].type_name, want, "{wt:?}");
+        }
+    }
+
+    /// The gap `thermal_wall_function_follows_the_same_row_except_low_re`
+    /// does NOT cover: that row's auto-completion never has a wall
+    /// temperature of its own, so a wall left to the case default gets
+    /// whatever the neighbour cell reads (fine for an adiabatic-ish floor,
+    /// useless for a genuinely HOT wall). `ScalarBc::ThermalWallFunction`
+    /// exists so a case can name `T_w` explicitly - highest precedence,
+    /// SPEC-LIT §29.1's table - and this is the round trip: the type stays
+    /// `thermalWallFunction` (not demoted to plain `fixedValue`, the way an
+    /// explicit `ScalarBc::FixedValue` deliberately would be) and the value
+    /// written is exactly the `T_w` given, on every wall-treatment row.
+    #[test]
+    fn explicit_thermal_wall_function_carries_its_own_t_w() {
+        for wt in [
+            WallTreatmentKind::Standard,
+            WallTreatmentKind::Spalding,
+            WallTreatmentKind::Rough,
+            WallTreatmentKind::LowRe,
+        ] {
+            let mut case = plume_case();
+            case.turbulence.as_mut().unwrap().wall_treatment = wt;
+            {
+                let r = wall_rule_mut(&mut case);
+                clear_explicit_turbulence(r);
+                r.t = Some(ScalarBc::ThermalWallFunction { value: 400.0 });
+                if wt == WallTreatmentKind::Rough {
+                    r.ks = Some(0.001);
+                }
+            }
+            let lowered = case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"));
+            let p = a_wall_patch_name(&lowered);
+            let t = lowered.t_field.unwrap();
+            assert_eq!(t.boundary[&p].type_name, "thermalWallFunction", "{wt:?}");
+            assert_eq!(t.boundary[&p].value, vec![400.0 as Scalar], "{wt:?}");
         }
     }
 

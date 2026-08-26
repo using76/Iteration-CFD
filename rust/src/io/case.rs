@@ -355,6 +355,36 @@ impl WallTreatment {
             _ => Some("thermalWallFunction"),
         }
     }
+
+    /// `nut`'s patch type under this row when the case is
+    /// `simulationType LES;` - SPEC-LIT §30.1.
+    ///
+    /// An LES has no `k`/`epsilon`/`omega` to complete, so this is the only
+    /// member of the §29.1 table that survives the switch from RAS to LES,
+    /// and it survives with a DIFFERENT answer: `standard` and `spalding`
+    /// both mean "put a wall model here", and under LES there is exactly one
+    /// - Werner-Wengle, an analytically-invertible power law fed by the
+    /// resolved wall-parallel velocity rather than by `k` or a Newton solve.
+    /// `lowRe` is unchanged: "the mesh resolves the sublayer" means the same
+    /// thing under LES as under RAS, `nu_t,w = 0`. `rough` has no LES wall
+    /// model yet - a §13.4 error naming the two that exist, not a silent
+    /// substitution to one of them.
+    pub fn les_nut_type(self) -> Result<&'static str> {
+        match self {
+            Self::Standard | Self::Spalding => Ok("wernerWengleWallFunction"),
+            Self::LowRe => Ok("nutLowReWallFunction"),
+            Self::Rough => unsupported(
+                "RAS/wallTreatment (simulationType LES)",
+                "rough",
+                &[
+                    "standard or spalding (-> wernerWengleWallFunction)",
+                    "lowRe (-> nutLowReWallFunction, nu_t,w = 0)",
+                ],
+                "wernerWengleWallFunction (the `standard` row's LES wall model)",
+                "wernerWengleWallFunction",
+            ),
+        }
+    }
 }
 
 /// Sand-grain roughness for the `rough` `wallTreatment` row - SPEC-LIT
@@ -1563,6 +1593,44 @@ mod tests {
         // §29.3: lowRe pins the molecular resistance already there - no
         // thermal wall function.
         assert_eq!(LowRe.thermal_type(), None);
+    }
+
+    /// SPEC-LIT §30.1: `standard`/`spalding` both collapse to Werner-Wengle
+    /// under LES, `lowRe` is unchanged, and `rough` is refused by name.
+    #[test]
+    fn les_preset_mapping_matches_spec_30_1() {
+        use WallTreatment::*;
+
+        assert_eq!(Standard.les_nut_type().unwrap(), "wernerWengleWallFunction");
+        assert_eq!(Spalding.les_nut_type().unwrap(), "wernerWengleWallFunction");
+        assert_eq!(LowRe.les_nut_type().unwrap(), "nutLowReWallFunction");
+    }
+
+    #[test]
+    fn les_rough_wall_treatment_is_refused_and_names_the_two() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let err = WallTreatment::Rough.les_nut_type().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("rough"), "{msg}");
+        assert!(msg.contains("wernerWengle"), "{msg}");
+        assert!(msg.contains("lowRe") || msg.contains("resolved") || msg.contains("nutLowRe"), "{msg}");
+    }
+
+    /// `-permissive` substitutes the `standard` row's LES wall model, and
+    /// says so - not a silent fallback to `lowRe`.
+    #[test]
+    fn les_rough_wall_treatment_is_permissive_downgradable() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(true);
+        crate::io::contract::reset_warnings();
+
+        let t = WallTreatment::Rough.les_nut_type().expect("-permissive continues");
+        assert_eq!(t, "wernerWengleWallFunction");
+
+        crate::io::contract::set_permissive(false);
     }
 
     #[test]

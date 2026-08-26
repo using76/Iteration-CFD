@@ -66,7 +66,7 @@ use crate::les::{
 };
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::turbulence::{nut_boundary, strain_rate_mag, FlowState, TurbKernels, TurbulenceControls};
-use crate::wallfunctions::{WallData, WallFunctionCoeffs};
+use crate::wallfunctions::WernerWengleData;
 use crate::{Scalar, Tensor, Vec3};
 
 /// Which subgrid model - SPEC-LIT §6.5.
@@ -142,7 +142,6 @@ impl Default for LesCoeffs {
 pub struct Les<'m> {
     mesh: &'m GpuMesh,
     ctrl: TurbulenceControls,
-    wall: WallFunctionCoeffs,
 
     model: LesModel,
     coeffs: LesCoeffs,
@@ -156,9 +155,15 @@ pub struct Les<'m> {
     /// reach-through accessor on `delta` would not allow.
     les: LesKernels,
 
-    /// Which faces `nu_t` gets a wall value on - from `nut`'s OWN patch type
-    /// and nothing else's, SPEC-LIT §15.5.
-    wd: WallData,
+    /// The Werner-Wengle LES wall model of SPEC-LIT §30.1, on whichever faces
+    /// `nut`'s OWN patch type asked for one and nothing else's (SPEC-LIT
+    /// §15.5) - `wall_faces.nut` populated by
+    /// [`crate::field_setup::les_nut_wall_faces`], not by the RAS
+    /// [`crate::field_setup::nut_wall_faces`] this struct used to read
+    /// through the RAS [`crate::wallfunctions::WallData`]: an LES has no `k`
+    /// for `nutk`/`nutU` to read and no Newton solve worth running when the
+    /// cell-average velocity inverts the wall shear directly.
+    ww: WernerWengleData,
 
     /// The filter width of SPEC-LIT §16, and everything it needs.
     delta: LesDelta,
@@ -194,7 +199,6 @@ impl<'m> Les<'m> {
         coeffs: LesCoeffs,
         delta: DeltaSpec,
         ctrl: TurbulenceControls,
-        wall: WallFunctionCoeffs,
         wall_faces: &crate::field_setup::WallFaces,
         y: &DevBuf<Scalar>,
         grad_y: &DevBuf<Vec3>,
@@ -235,7 +239,6 @@ impl<'m> Les<'m> {
         Ok(Self {
             mesh,
             ctrl,
-            wall,
             model,
             coeffs,
 
@@ -244,18 +247,13 @@ impl<'m> Les<'m> {
             turb: TurbKernels::new(gpu)?,
             les: LesKernels::new(gpu)?,
 
-            // `turbulence::RasCore::new` now takes a per-case `NutRoughness`
-            // (SPEC-LIT §29.1/§29.2) - `Les` does not yet, because no binary
-            // in this crate constructs an LES model from a case file (every
-            // call site is a unit test), so there is no case-file roughness
-            // to thread through here. `NutRoughness::none` makes every face
-            // smooth, exactly SPEC-LIT §29.2's `Ks -> 0` gate.
-            wd: WallData::build(
-                gpu,
-                hm,
-                wall_faces,
-                &crate::field_setup::NutRoughness::none(hm.n_boundary_faces),
-            )?,
+            // `wall_faces.nut` is `nut`'s OWN patch type test - SPEC-LIT
+            // §30.1/§15.5 - populated by `les_nut_wall_faces`, which reads
+            // `wernerWengleWallFunction` and nothing else, so a plain
+            // `nutkWallFunction` left on an LES case's `nut` file (a RAS
+            // leftover) is correctly read as "no LES wall model here" rather
+            // than silently routed through the wrong kernel.
+            ww: WernerWengleData::build(gpu, &wall_faces.nut)?,
             delta: LesDelta::new(gpu, mesh, delta)?,
 
             nut: GpuScalarField::zeros(gpu, mesh, "nut")?,
@@ -410,30 +408,35 @@ impl<'m> Les<'m> {
         Ok(())
     }
 
-    /// The wall-function pass, for a driver that runs one.
+    /// The Werner-Wengle wall-function pass (SPEC-LIT §30.1), for a driver
+    /// that runs one.
     ///
-    /// Separate from [`Self::correct`] because it needs `k`, and an LES has no
-    /// `k` unless the model is Deardorff. A driver with a modelled `k` - or
-    /// one that wants the Deardorff estimate used this way - passes it here;
-    /// one without simply never calls it, and the wall faces keep the
+    /// Separate from [`Self::correct`] for the same reason
+    /// [`crate::models::KEpsilon`]'s own wall-function pass is: it needs `U`
+    /// with its boundary values already evaluated, which is a driver-level
+    /// concern `correct` has no opinion about. No `k` argument - unlike the
+    /// RAS wall functions, Werner-Wengle is fed by the wall-parallel
+    /// CELL-AVERAGE velocity alone. A driver whose case names no LES wall
+    /// model simply never calls this, and the wall faces keep the
     /// zero-gradient value `correct` left.
-    pub fn apply_nut_wall_function(
+    pub fn apply_werner_wengle_wall_function(
         &mut self,
         gpu: &Gpu,
-        k: &DevBuf<Scalar>,
         u: &GpuVectorField,
         nu: Scalar,
     ) -> Result<()> {
-        self.wd.update_nut(
-            gpu,
-            &mut self.nut.bf,
-            k,
-            u,
-            self.mesh,
-            &self.wall,
-            nu,
-            self.ctrl.k_min,
-        )
+        self.ww.update_nut(gpu, &mut self.nut.bf, u, self.mesh, nu)
+    }
+
+    /// `tau_w` from the last [`Self::apply_werner_wengle_wall_function`]
+    /// call, indexed by boundary face - what a driver reads to feed the
+    /// thermal wall function's `u_tau = sqrt(tau_w)` substitution (SPEC-LIT
+    /// §30.1), via
+    /// [`crate::wallfunctions::ThermalWallData::update_from_tau_w`]. Zero
+    /// everywhere before the first such call, and on every face this wall
+    /// model does not own.
+    pub fn tau_w(&self) -> &DevBuf<Scalar> {
+        &self.ww.tau_w
     }
 }
 
@@ -448,6 +451,7 @@ mod tests {
     use crate::field_ops::correct_boundary_conditions_vector;
     use crate::les::{BaseDelta, SmoothSpec};
     use crate::mesh::PatchKind;
+    use crate::wallfunctions::{nut_wall_werner_wengle, tau_w_werner_wengle};
     use crate::Label;
 
     fn gpu() -> Option<Gpu> {
@@ -544,7 +548,6 @@ mod tests {
             LesCoeffs::default(),
             delta,
             controls(),
-            WallFunctionCoeffs::default(),
             &no_walls,
             &y,
             &grad_y,
@@ -906,7 +909,6 @@ mod tests {
             LesCoeffs::default(),
             DeltaSpec::default(),
             ctrl,
-            WallFunctionCoeffs::default(),
             &no_walls,
             &y,
             &grad_y,
@@ -948,7 +950,6 @@ mod tests {
             LesCoeffs::default(),
             DeltaSpec::default(),
             controls(),
-            WallFunctionCoeffs::default(),
             &no_walls,
             &y,
             &grad_y,
@@ -1013,12 +1014,210 @@ mod tests {
                 ..Default::default()
             },
             controls(),
-            WallFunctionCoeffs::default(),
             &no_walls,
             &short,
             &grad_y,
         )
         .is_err());
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  Werner-Wengle - SPEC-LIT §30.1
+    // ----------------------------------------------------------------------
+
+    /// `wall_faces.nut` reaching `Les` through [`Les::new`] must be exactly
+    /// the faces [`Les::apply_werner_wengle_wall_function`] writes on - no
+    /// more, no less - and [`Les::tau_w`] must carry the value the same call
+    /// computed, ready for a driver's thermal wall function.
+    #[test]
+    fn werner_wengle_wall_function_writes_nut_and_tau_w_on_its_own_faces() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let (n, h): (usize, Scalar) = (5, 0.2);
+        let hm = flat_box(n, h);
+        let mesh = GpuMesh::upload(&gpu, &hm)?;
+
+        // `flat_box`'s own wall patch is `ymin` (see `topology::box_mesh`);
+        // mark its faces as the LES wall model's own, exactly as
+        // `les_nut_wall_faces` would from a `nut` file whose `ymin` entry
+        // reads `wernerWengleWallFunction`.
+        let p = hm.patches[2].clone();
+        assert_eq!(p.name, "ymin");
+        let mut wall_faces = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        for i in 0..p.size {
+            wall_faces.nut[p.start + i] = true;
+        }
+
+        let nu: Scalar = 1e-5;
+        let u_mag: Scalar = 0.5;
+        // A UNIFORM cell velocity, left at the wall's own no-slip zero
+        // (`GpuVectorField::zeros`'s own boundary value, never overwritten) -
+        // Werner-Wengle reads the CELL-AVERAGE speed directly, so this alone
+        // is enough to give every `ymin` face a non-zero |u_p|.
+        let mut u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
+        gpu.write(&mut u.f, &vec![Vec3::new(u_mag, 0.0, 0.0); hm.n_cells])?;
+        let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
+        let flow = FlowState::new(&u, &phi, nu);
+
+        let y = gpu.upload(&vec![crate::walldistance::NO_WALL; mesh.n_cells])?;
+        let grad_y = gpu.upload(&vec![Vec3::ZERO; mesh.n_cells])?;
+
+        let mut les = Les::new(
+            &gpu,
+            &hm,
+            &mesh,
+            LesModel::Smagorinsky,
+            LesCoeffs::default(),
+            DeltaSpec::default(),
+            controls(),
+            &wall_faces,
+            &y,
+            &grad_y,
+        )?;
+
+        les.correct(&gpu, &flow)?;
+        les.apply_werner_wengle_wall_function(&gpu, &u, nu)?;
+        gpu.sync()?;
+
+        let nut_bf = gpu.download(&les.nut().bf)?;
+        let tau_w = gpu.download(les.tau_w())?;
+
+        for i in 0..p.size {
+            let bf = p.start + i;
+            let want_tau = tau_w_werner_wengle(u_mag, hm.b_y[bf], nu);
+            let want_nut = nut_wall_werner_wengle(want_tau, hm.b_y[bf], u_mag, nu);
+            assert!(want_tau > 0.0, "test setup: face {bf} has no wall shear to measure");
+
+            assert!(
+                (tau_w[bf] - want_tau).abs() <= 1e-9 * want_tau,
+                "face {bf}: tau_w = {}, host {want_tau}",
+                tau_w[bf]
+            );
+            assert!(
+                (nut_bf[bf] - want_nut).abs() <= 1e-9 * want_nut.max(nu),
+                "face {bf}: nu_t,w = {}, host {want_nut}",
+                nut_bf[bf]
+            );
+        }
+
+        // A face this wall model does not own (`xmin`, Generic, never
+        // marked) is left exactly where `correct`'s own zero-gradient pass
+        // put it, not written by the Werner-Wengle kernel.
+        let other = hm.patches[0].start;
+        assert_eq!(tau_w[other], 0.0, "an unmarked face must not get a tau_w");
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  Van Driest damping, on a REAL wall distance - SPEC-LIT §16.4/§30.2
+    // ----------------------------------------------------------------------
+
+    /// SPEC-LIT §30.2: an LES's van Driest damping must actually ENGAGE when
+    /// the case asks for it - not merely fail to crash - and this is checked
+    /// against a wall distance the Poisson solve of SPEC-LIT §6.6 actually
+    /// produced on a real mesh, not the synthetic `NO_WALL` sentinel every
+    /// other test in this module uses (those exist to isolate the algebraic
+    /// models from the wall distance entirely; this one exists to prove the
+    /// two machineries connect).
+    ///
+    /// Two identical `Les` models, differing only in `DeltaSpec::van_driest`,
+    /// see the SAME sheared flow; the damped one's filter width at the
+    /// wall-adjacent cell must come out below the geometric (undamped) one's.
+    #[test]
+    fn van_driest_damping_actually_engages_on_a_real_mesh() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let (n, h): (usize, Scalar) = (6, 0.05);
+        let hm = flat_box(n, h);
+        let mesh = GpuMesh::upload(&gpu, &hm)?;
+
+        let wd = crate::walldistance::wall_distance(
+            &gpu,
+            &hm,
+            &mesh,
+            &crate::io::case::SolverControls::default(),
+            0,
+        )?;
+        assert!(wd.n_wall_faces > 0, "test setup: flat_box has no wall faces");
+
+        // A parabolic profile across the wall-normal (y) direction, zero at
+        // both `ymin`/`ymax` walls (left at `GpuVectorField::zeros`'s own
+        // no-slip boundary value, never overwritten) and maximal at the
+        // centre - real shear at the wall, which is what gives van Driest's
+        // `u_tau`/`y+` something other than zero to work with.
+        let y_extent = n as Scalar * h;
+        let yc = y_extent / 2.0;
+        let u0: Scalar = 0.5;
+        let mut u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
+        let u_vals: Vec<Vec3> = hm
+            .c
+            .iter()
+            .map(|c| {
+                let r = 1.0 - ((c.y - yc) / yc).powi(2);
+                Vec3::new(u0 * r.max(0.0), 0.0, 0.0)
+            })
+            .collect();
+        gpu.write(&mut u.f, &u_vals)?;
+        let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
+        let nu: Scalar = 1e-5;
+        let flow = FlowState::new(&u, &phi, nu);
+
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+
+        let mut damped = Les::new(
+            &gpu,
+            &hm,
+            &mesh,
+            LesModel::Smagorinsky,
+            LesCoeffs::default(),
+            DeltaSpec { van_driest: true, ..Default::default() },
+            controls(),
+            &no_walls,
+            &wd.y.f,
+            &wd.grad_y,
+        )?;
+        let mut geometric = Les::new(
+            &gpu,
+            &hm,
+            &mesh,
+            LesModel::Smagorinsky,
+            LesCoeffs::default(),
+            DeltaSpec::default(),
+            controls(),
+            &no_walls,
+            &wd.y.f,
+            &wd.grad_y,
+        )?;
+
+        damped.correct(&gpu, &flow)?;
+        geometric.correct(&gpu, &flow)?;
+        gpu.sync()?;
+
+        let damped_delta = gpu.download(damped.delta().delta())?;
+        let geometric_delta = gpu.download(geometric.delta().delta())?;
+        let y = gpu.download(&wd.y.f)?;
+
+        // The cell with the smallest wall distance is the wall-adjacent one -
+        // exactly where the damping should bite hardest.
+        let (c, &y_c) = y
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .expect("flat_box has at least one cell");
+
+        assert!(
+            damped_delta[c] < geometric_delta[c],
+            "cell {c} (y = {y_c}): van Driest delta {} is not below the geometric delta {}",
+            damped_delta[c],
+            geometric_delta[c]
+        );
 
         Ok(())
     }

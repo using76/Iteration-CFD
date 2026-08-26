@@ -113,9 +113,8 @@ use ofgpu::field::{GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field,
-    harvest_vector_field, max_div_phi,
-    setup_scalar_field, setup_vector_field, update_inlet_outlet, wall_coeffs_from_case,
-    NutRoughness, WallFaces,
+    harvest_vector_field, les_nut_wall_faces, max_div_phi,
+    setup_scalar_field, setup_vector_field, update_inlet_outlet, NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{
     find_start_time, format_time_name, model_coeff, read_case_controls, CaseControls,
@@ -126,8 +125,7 @@ use ofgpu::io::fields::{
     read_scalar_field, read_vector_field, RawScalarField, RawVectorField,
 };
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
-use ofgpu::models::{KEpsilon, KEpsilonCoeffs};
-use ofgpu::turbulence::{BuoyancyProduction, C3Mode};
+use ofgpu::models::{build_coupled, select_turbulence_model, CoupledTurbulence, RasModel, ThermalCtx};
 use ofgpu::momentum::{BuoyancyCoeffs, MomentumControls};
 use ofgpu::potential_flow::{
     mean_inflow_speed, solve_potential_flow, PotentialFlowResult, PotentialFlowSpec,
@@ -902,13 +900,44 @@ struct FieldWriter<'a> {
     case_dir: &'a Path,
     raw_u: &'a RawVectorField,
     raw_p: &'a RawScalarField,
-    raw_k: &'a RawScalarField,
-    raw_e: &'a RawScalarField,
+    /// Boundary-type seeds for the turbulence model's OWN fields, keyed by
+    /// name - "k" and whichever of "epsilon"/"omega" the selected model
+    /// carries (SPEC-LIT §30.2: the field set differs by model, so this
+    /// cannot be two named slots any more). Empty for a laminar run, which
+    /// has none.
+    raw_turb: &'a [(&'static str, RawScalarField)],
     raw_t: &'a RawScalarField,
     output: &'a [OutputFormat],
 }
 
+/// The dimensions SPEC-LIT's own field list gives each turbulence quantity -
+/// the one place this driver has to know that `epsilon` and `omega` are not
+/// interchangeable even in their units, let alone their equation.
+fn turb_field_dimensions(name: &str) -> &'static str {
+    match name {
+        "k" => "[0 2 -2 0 0 0 0]",
+        "epsilon" => "[0 2 -3 0 0 0 0]",
+        "omega" => "[0 0 -1 0 0 0 0]",
+        // "nut" and anything else this batch's models do not name.
+        _ => "[0 2 -1 0 0 0 0]",
+    }
+}
+
 impl FieldWriter<'_> {
+    /// The boundary-type seed for `name` - `self.raw_turb`'s own entry when
+    /// it has one (`k`, `epsilon`/`omega`), and an invented default for
+    /// `nut` exactly as before: `nut` has no case-file counterpart with types
+    /// to inherit, only `0/nut` if the case wrote one, and that file's types
+    /// were already folded into the wall-function selection at set-up, not
+    /// carried here.
+    fn seed_for(&self, name: &str) -> RawScalarField {
+        self.raw_turb
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, r)| seed_types(r))
+            .unwrap_or_default()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn write(
         &self,
@@ -917,7 +946,7 @@ impl FieldWriter<'_> {
         step: usize,
         time: Scalar,
         s: &Simple<'_>,
-        model: &KEpsilon<'_>,
+        turb: &dyn CoupledTurbulence,
         heat: &ScalarTransport<'_>,
         hm: &HostMesh,
     ) -> Result<PathBuf> {
@@ -925,10 +954,7 @@ impl FieldWriter<'_> {
 
         let mut out_u = seed_vector_types(self.raw_u);
         let mut out_p = seed_types(self.raw_p);
-        let mut out_k = seed_types(self.raw_k);
-        let mut out_e = seed_types(self.raw_e);
         let mut out_t = seed_types(self.raw_t);
-        let mut out_nut = RawScalarField::default();
         // `phi` has no input file to inherit boundary types from - it is the
         // pressure equation's output, not the case's input - so the harvest
         // invents them.
@@ -936,19 +962,26 @@ impl FieldWriter<'_> {
 
         harvest_vector_field(gpu, &mut out_u, s.u(), hm)?;
         harvest_scalar_field(gpu, &mut out_p, s.p(), hm)?;
-        harvest_scalar_field(gpu, &mut out_k, model.k(), hm)?;
-        harvest_scalar_field(gpu, &mut out_e, model.epsilon(), hm)?;
         harvest_scalar_field(gpu, &mut out_t, heat.field(), hm)?;
-        harvest_scalar_field(gpu, &mut out_nut, model.nut(), hm)?;
         harvest_surface_scalar_field(gpu, &mut out_phi, s.phi(), hm)?;
+
+        // The turbulence model's own fields - `k`/`epsilon` for k-epsilon,
+        // `k`/`omega` for k-omega and SST, `nut` alone for laminar - named
+        // and dimensioned generically through SPEC-LIT §30.2's
+        // `CoupledTurbulence::output_fields` rather than by a `model.k()`/
+        // `model.epsilon()` this driver used to have to know by name.
+        let mut out_turb: Vec<(&'static str, RawScalarField)> = Vec::new();
+        for (fname, field) in turb.output_fields() {
+            let mut out = self.seed_for(fname);
+            harvest_scalar_field(gpu, &mut out, field, hm)?;
+            out.dimensions = turb_field_dimensions(fname).to_string();
+            out_turb.push((fname, out));
+        }
 
         out_u.dimensions = "[0 1 -1 0 0 0 0]".to_string();
         // Kinematic pressure: p/rho, which is what an incompressible momentum
         // equation carries and what `simple.rs` solves for.
         out_p.dimensions = "[0 2 -2 0 0 0 0]".to_string();
-        out_k.dimensions = "[0 2 -2 0 0 0 0]".to_string();
-        out_e.dimensions = "[0 2 -3 0 0 0 0]".to_string();
-        out_nut.dimensions = "[0 2 -1 0 0 0 0]".to_string();
         out_t.dimensions = if self.raw_t.dimensions.is_empty() {
             "[0 0 0 1 0 0 0]".to_string()
         } else {
@@ -957,26 +990,27 @@ impl FieldWriter<'_> {
 
         // One seam call per requested format, replacing what used to be six
         // scattered `fields::write_*` sites - see `ofgpu::io::writer`.
-        let foam_fields = [
+        let mut foam_fields: Vec<ofgpu::io::FoamField> = vec![
             ofgpu::io::FoamField::vector("U", &out_u),
             ofgpu::io::FoamField::scalar("p", &out_p),
-            ofgpu::io::FoamField::scalar("k", &out_k),
-            ofgpu::io::FoamField::scalar("epsilon", &out_e),
-            ofgpu::io::FoamField::scalar("T", &out_t),
-            ofgpu::io::FoamField::scalar("nut", &out_nut),
-            // The conservative flux, so a restart from this directory begins
-            // on the flux the pressure equation produced rather than on
-            // `interpolate(U)·Sf` - SPEC-LIT §5.1 and the restart check of §22.
-            ofgpu::io::FoamField::surface("phi", &out_phi),
         ];
-        let vis_fields = [
+        for (fname, out) in &out_turb {
+            foam_fields.push(ofgpu::io::FoamField::scalar(fname, out));
+        }
+        foam_fields.push(ofgpu::io::FoamField::scalar("T", &out_t));
+        // The conservative flux, so a restart from this directory begins
+        // on the flux the pressure equation produced rather than on
+        // `interpolate(U)·Sf` - SPEC-LIT §5.1 and the restart check of §22.
+        foam_fields.push(ofgpu::io::FoamField::surface("phi", &out_phi));
+
+        let mut vis_fields: Vec<ofgpu::io::OutputField> = vec![
             ofgpu::io::OutputField::vector("U", &out_u.internal),
             ofgpu::io::OutputField::scalar("p", &out_p.internal),
-            ofgpu::io::OutputField::scalar("k", &out_k.internal),
-            ofgpu::io::OutputField::scalar("epsilon", &out_e.internal),
-            ofgpu::io::OutputField::scalar("T", &out_t.internal),
-            ofgpu::io::OutputField::scalar("nut", &out_nut.internal),
         ];
+        for (fname, out) in &out_turb {
+            vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
+        }
+        vis_fields.push(ofgpu::io::OutputField::scalar("T", &out_t.internal));
         let cart = ofgpu::pressure::cartesian::detect(hm)
             .ok()
             .map(|c| ofgpu::io::cartesian_info(hm, &c));
@@ -1020,7 +1054,7 @@ fn write_restart_checkpoint(
     mesh_hash: u64,
     t: Scalar,
     s: &Simple<'_>,
-    model: &KEpsilon<'_>,
+    turb: &dyn CoupledTurbulence,
     heat: &ScalarTransport<'_>,
     hm: &HostMesh,
 ) -> Result<()> {
@@ -1028,10 +1062,6 @@ fn write_restart_checkpoint(
     let u_b = gpu.download(&s.u().bf)?;
     let p_i = gpu.download(&s.p().f)?;
     let p_b = gpu.download(&s.p().bf)?;
-    let k_i = gpu.download(&model.k().f)?;
-    let k_b = gpu.download(&model.k().bf)?;
-    let e_i = gpu.download(&model.epsilon().f)?;
-    let e_b = gpu.download(&model.epsilon().bf)?;
     let t_i = gpu.download(&heat.field().f)?;
     let t_b = gpu.download(&heat.field().bf)?;
     let phi_i = gpu.download(&s.phi().f)?;
@@ -1041,8 +1071,15 @@ fn write_restart_checkpoint(
     let mut data = restart_shell(mesh_hash, t, p0, hm);
     data.fields.push(restart_vector("U", &u_i, &u_b));
     data.fields.push(restart_scalar("p", &p_i, &p_b));
-    data.fields.push(restart_scalar("k", &k_i, &k_b));
-    data.fields.push(restart_scalar("epsilon", &e_i, &e_b));
+    // Every field the running model owns - "k" and "epsilon" for k-epsilon,
+    // "k" and "omega" for k-omega/SST, "nut" alone for laminar - named
+    // through SPEC-LIT §30.2's `output_fields` rather than by two hardcoded
+    // names this driver used to assume.
+    for (name, field) in turb.output_fields() {
+        let fi = gpu.download(&field.f)?;
+        let fb = gpu.download(&field.bf)?;
+        data.fields.push(restart_scalar(name, &fi, &fb));
+    }
     data.fields.push(restart_scalar("T", &t_i, &t_b));
     data.fields.push(restart_surface("phi", &phi_i, &phi_b));
 
@@ -1063,7 +1100,12 @@ fn write_restart_checkpoint(
 
 /// What the log line for one unit of work prints. Zeroes throughout in
 /// `-fixedIters` mode, where nothing is read back.
-#[derive(Default, Clone, Copy)]
+///
+/// `eps`/`eps_iters` carry whichever dissipation equation the running model
+/// actually has - `epsilon` for k-epsilon, `omega` for k-omega and SST - and
+/// `diss_name` says which, so `by_field` and the printed report label them
+/// correctly instead of assuming k-epsilon (SPEC-LIT §30.2).
+#[derive(Clone, Copy)]
 struct Residuals {
     u: [Scalar; 3],
     u_iters: [usize; 3],
@@ -1073,10 +1115,33 @@ struct Residuals {
     k_iters: usize,
     eps: Scalar,
     eps_iters: usize,
+    /// "epsilon" or "omega" - defaults to "epsilon" so a k-epsilon case's
+    /// `residualControl` matching is unchanged from before this field
+    /// existed.
+    diss_name: &'static str,
     t: Scalar,
     t_iters: usize,
     /// `max_c |sum_f phi_f|` after the last flux correction.
     continuity: Scalar,
+}
+
+impl Default for Residuals {
+    fn default() -> Self {
+        Self {
+            u: [0.0; 3],
+            u_iters: [0; 3],
+            p: 0.0,
+            p_iters: 0,
+            k: 0.0,
+            k_iters: 0,
+            eps: 0.0,
+            eps_iters: 0,
+            diss_name: "epsilon",
+            t: 0.0,
+            t_iters: 0,
+            continuity: 0.0,
+        }
+    }
 }
 
 impl Residuals {
@@ -1100,7 +1165,7 @@ impl Residuals {
             ("U", self.u.iter().copied().fold(0.0 as Scalar, Scalar::max)),
             ("p", self.p),
             ("k", self.k),
-            ("epsilon", self.eps),
+            (self.diss_name, self.eps),
             ("T", self.t),
         ]
     }
@@ -1114,15 +1179,19 @@ impl Residuals {
 /// sequence. It is also the physical order: `k-epsilon` needs the velocity
 /// SIMPLE just produced, and `T` needs the flux SIMPLE just made conservative
 /// and the `nut` k-epsilon just produced from it.
+#[allow(clippy::too_many_arguments)]
 fn one_pass(
     gpu: &Gpu,
     s: &mut Simple<'_>,
-    model: &mut KEpsilon<'_>,
+    turb: &mut dyn CoupledTurbulence,
     heat: &mut ScalarTransport<'_>,
     backend: &mut dyn PressureBackend,
     n_correctors: Label,
+    thermal: Option<(Vec3, Scalar)>,
+    diss_name: &'static str,
 ) -> Result<Residuals> {
     let mut r = Residuals::default();
+    r.diss_name = diss_name;
     let _ = n_correctors;
 
     // ONE call, which runs `nOuterCorrectors` outer correctors internally,
@@ -1136,7 +1205,7 @@ fn one_pass(
     // the output said so. `Simple::correct_outer` now stores the old level in
     // a steady run only; the transient one gets it from `begin_time_step`.
     {
-        let perf = s.solve_step(gpu, backend, model.nut(), heat.field())?;
+        let perf = s.solve_step(gpu, backend, turb.nut(), heat.field())?;
 
         // The residuals reported are the FIRST outer corrector's: they measure
         // the error the step started with, which is what a convergence history
@@ -1156,8 +1225,9 @@ fn one_pass(
     // buoyancy production of SPEC-LIT 17 possible at all. `heat.field()` has
     // had its boundary conditions evaluated by the previous `heat.correct`,
     // which grad(T) reads directly.
-    let (eps, k) = model.correct_buoyant(gpu, &flow, Some(heat.field()))?;
-    let t = heat.correct(gpu, &flow, model.nut())?;
+    let ctx = thermal.map(|(g, prt)| ThermalCtx { t: heat.field(), g, prt });
+    let (eps, k) = turb.correct(gpu, &flow, ctx.as_ref())?;
+    let t = heat.correct(gpu, &flow, turb.nut())?;
 
     r.k = k.initial_residual;
     r.k_iters = k.n_iterations;
@@ -1173,15 +1243,18 @@ fn one_pass(
 ///
 /// The residuals returned are the LAST pass's - the only pass whose systems
 /// were assembled from coefficients the step had already settled on.
+#[allow(clippy::too_many_arguments)]
 fn one_step(
     gpu: &Gpu,
     s: &mut Simple<'_>,
-    model: &mut KEpsilon<'_>,
+    turb: &mut dyn CoupledTurbulence,
     heat: &mut ScalarTransport<'_>,
     backend: &mut dyn PressureBackend,
     outer: Label,
     n_correctors: Label,
     dt: Scalar,
+    thermal: Option<(Vec3, Scalar)>,
+    diss_name: &'static str,
 ) -> Result<Residuals> {
     // ONE rotation of the time levels per TIME STEP, before the correctors -
     // not one per corrector, which would collapse U^{n-2} onto U^{n-1} and
@@ -1190,7 +1263,7 @@ fn one_step(
 
     let mut r = Residuals::default();
     for _ in 0..outer.max(1) {
-        r = one_pass(gpu, s, model, heat, backend, n_correctors)?;
+        r = one_pass(gpu, s, turb, heat, backend, n_correctors, thermal, diss_name)?;
     }
     Ok(r)
 }
@@ -1210,10 +1283,11 @@ fn print_report(head: &str, r: &Residuals, t_stats: (Scalar, Scalar)) {
         r.p_iters
     );
     println!(
-        "         k {} ({})  eps {} ({})  T {} ({})   T[min,max] {} {} K   \
+        "         k {} ({})  {} {} ({})  T {} ({})   T[min,max] {} {} K   \
          max |sum_f phi| {} m3/s",
         sci(f64::from(r.k), 3),
         r.k_iters,
+        r.diss_name,
         sci(f64::from(r.eps), 3),
         r.eps_iters,
         sci(f64::from(r.t), 3),
@@ -1298,9 +1372,17 @@ fn is_write_time(t: f64, w: f64, dt: f64) -> bool {
 /// Everything the loop borrows and does not own.
 struct Fields<'a, 'm> {
     s: &'a mut Simple<'m>,
-    model: &'a mut KEpsilon<'m>,
+    turb: &'a mut dyn CoupledTurbulence,
     heat: &'a mut ScalarTransport<'m>,
     backend: &'a mut dyn PressureBackend,
+    /// `(g, Prt)` when the case has gravity - SPEC-LIT §17's buoyancy
+    /// production, rebuilt into a [`ThermalCtx`] once per pass because the
+    /// temperature field it borrows changes every pass and a `ThermalCtx`
+    /// cannot outlive the borrow that made it.
+    thermal: Option<(Vec3, Scalar)>,
+    /// "epsilon" or "omega" - which dissipation equation this run's model
+    /// actually carries, for [`Residuals::by_field`] and the printed report.
+    diss_name: &'static str,
 }
 
 /// The one loop. `Schedule::transient` decides whether a unit of work is a
@@ -1317,7 +1399,7 @@ fn run_loop(
     up: Vec3,
     t_ref: Scalar,
 ) -> Result<RunReport> {
-    let Fields { s, model, heat, backend } = f;
+    let Fields { s, turb, heat, backend, thermal, diss_name } = f;
 
     // Without -graph nothing is ever captured, so "warm-up" is the whole run.
     let warmup = if sched.graph {
@@ -1349,7 +1431,7 @@ fn run_loop(
             // of a variable inside a loop cannot be used on the next pass.
             let captured = {
                 let sm = &mut *s;
-                let mm = &mut *model;
+                let mm = &mut *turb;
                 let hm2 = &mut *heat;
                 let bk = &mut *backend;
                 gpu.capture(move |_| {
@@ -1362,6 +1444,8 @@ fn run_loop(
                         sched.outer_iters,
                         sched.n_correctors,
                         sched.dt as Scalar,
+                        thermal,
+                        diss_name,
                     )?;
                     Ok(())
                 })?
@@ -1396,12 +1480,14 @@ fn run_loop(
             None => one_step(
                 gpu,
                 s,
-                model,
+                turb,
                 heat,
                 backend,
                 sched.outer_iters,
                 sched.n_correctors,
                 sched.dt as Scalar,
+                thermal,
+                diss_name,
             )?,
         };
 
@@ -1464,8 +1550,15 @@ fn run_loop(
         // a host round trip, so it is refreshed here - where the clock is
         // already stopped - rather than in the loop, which would put a
         // transfer back into the path `-fixedIters` exists to empty.
-        update_inlet_outlet(gpu, model.k_mut(), s.phi(), hm)?;
-        update_inlet_outlet(gpu, model.epsilon_mut(), s.phi(), hm)?;
+        // `nut` deliberately excluded: this refresh is `k` and the
+        // dissipation field only, exactly as it always was - `nut` is the
+        // model's OUTPUT and gets its boundary values from
+        // `correct_nut`/the wall functions, never from `inletOutlet`.
+        for (name, field) in turb.output_fields_mut() {
+            if name != "nut" {
+                update_inlet_outlet(gpu, field, s.phi(), hm)?;
+            }
+        }
         update_inlet_outlet(gpu, heat.field_mut(), s.phi(), hm)?;
 
         let write_now = sched.do_write && (sched.transient || last || converged);
@@ -1475,7 +1568,7 @@ fn run_loop(
             } else {
                 format_time_name(t as Scalar)
             };
-            let dir = writer.write(gpu, &name, step as usize, t as Scalar, s, model, heat, hm)?;
+            let dir = writer.write(gpu, &name, step as usize, t as Scalar, s, &*turb, heat, hm)?;
             writes += 1;
             println!("    written to {}", dir.display());
         }
@@ -1488,7 +1581,7 @@ fn run_loop(
                     sched.mesh_hash,
                     t as Scalar,
                     s,
-                    model,
+                    &*turb,
                     heat,
                     hm,
                 )?;
@@ -1755,28 +1848,20 @@ fn run(o: &Options) -> Result<()> {
         simple_ctrl.report_continuity = false;
     }
 
-    let d = KEpsilonCoeffs::default();
-    let coeffs = KEpsilonCoeffs {
-        cmu: model_coeff(&cc, "Cmu", d.cmu),
-        c1: model_coeff(&cc, "C1", d.c1),
-        c2: model_coeff(&cc, "C2", d.c2),
-        c3: model_coeff(&cc, "C3", d.c3),
-        sigmak: model_coeff(&cc, "sigmak", d.sigmak),
-        sigma_eps: model_coeff(&cc, "sigmaEps", d.sigma_eps),
-    };
+    // SPEC-LIT §30.2: the case's OWN `constant/momentumTransport` picks the
+    // model - `RAS { model kOmegaSST; }` used to build standard k-epsilon
+    // regardless, silently, which is the exact substitution §13.4 forbids.
+    // `build_coupled`, below, is what actually constructs it; this is only
+    // the read that decides which fields to look for.
+    let selection = select_turbulence_model(&cc)?;
+    // "epsilon" for k-epsilon, "omega" for k-omega/SST, `None` for a genuine
+    // `simulationType laminar;` - which has neither.
+    let diss_name: Option<&'static str> = selection.model.dissipation_field();
 
     let t_coeffs = read_prandtl(&o.case_dir, &cc)?;
     let buoy: BuoyancyCoeffs = cc.buoyancy;
 
-    println!(
-        "nu = {} | Cmu {} C1 {} C2 {} sigmak {} sigmaEps {}",
-        g(f64::from(cc.nu)),
-        g(f64::from(coeffs.cmu)),
-        g(f64::from(coeffs.c1)),
-        g(f64::from(coeffs.c2)),
-        g(f64::from(coeffs.sigmak)),
-        g(f64::from(coeffs.sigma_eps))
-    );
+    println!("nu = {} | turbulence model requested: {}", g(f64::from(cc.nu)), selection.model.name());
     println!(
         "T: Pr {} Prt {} -> alphaEff = nu/Pr + nut/Prt, laminar part {}",
         g(f64::from(t_coeffs.pr)),
@@ -1845,37 +1930,57 @@ fn run(o: &Options) -> Result<()> {
     let t = find_start_time(&o.case_dir)?;
     let t_dir = o.case_dir.join(&t);
 
-    for name in ["U", "p", "T", "k", "epsilon"] {
+    let mut required = vec!["U", "p", "T"];
+    if let Some(name) = diss_name {
+        required.push("k");
+        required.push(name);
+    }
+    for name in &required {
         if !t_dir.join(name).exists() {
             return Err(Error::Config(format!(
                 "{} has no {name} field; ofgpu-buoyant solves for U, p and T on top \
-                 of k-epsilon, so the start time must provide all five",
-                t_dir.display()
+                 of {}, so the start time must provide {}",
+                t_dir.display(),
+                selection.model.name(),
+                required.join(", ")
             )));
         }
     }
 
     let raw_u = read_vector_field(&t_dir.join("U"), hm.n_cells)?;
     let raw_p = read_scalar_field(&t_dir.join("p"), hm.n_cells)?;
-    let mut raw_k = read_scalar_field(&t_dir.join("k"), hm.n_cells)?;
-    let mut raw_e = read_scalar_field(&t_dir.join("epsilon"), hm.n_cells)?;
+    let mut raw_k = match diss_name {
+        Some(_) => read_scalar_field(&t_dir.join("k"), hm.n_cells)?,
+        None => RawScalarField::default(),
+    };
+    let mut raw_diss = match diss_name {
+        Some(name) => read_scalar_field(&t_dir.join(name), hm.n_cells)?,
+        None => RawScalarField::default(),
+    };
     let raw_t = read_scalar_field(&t_dir.join("T"), hm.n_cells)?;
 
     // SPEC-LIT 29.1: the per-field wall types must form one consistent row,
-    // on this route exactly as on the JSONC route.
-    {
+    // on this route exactly as on the JSONC route. Only the DISSIPATION
+    // field the selected model actually carries is checked - `epsilon`'s
+    // slot for k-epsilon, `omega`'s for k-omega/SST - because the other one
+    // has no `0/` file to have an opinion in.
+    if diss_name.is_some() {
         let nut_path = t_dir.join("nut");
         let mut raw_nut_row = if nut_path.exists() {
             Some(read_scalar_field(&nut_path, hm.n_cells)?)
         } else {
             None
         };
+        let (eps_slot, omega_slot) = match diss_name {
+            Some("omega") => (None, Some(&mut raw_diss)),
+            _ => (Some(&mut raw_diss), None),
+        };
         ofgpu::field_setup::validate_wall_rows(
             &hm.patches,
             raw_nut_row.as_mut(),
             Some(&mut raw_k),
-            Some(&mut raw_e),
-            None,
+            eps_slot,
+            omega_slot,
         )?;
     }
 
@@ -1998,34 +2103,65 @@ fn run(o: &Options) -> Result<()> {
             None
         }
     };
-    let wf_faces = WallFaces::from_case(&raw_e, raw_nut_for_walls.as_ref(), &hm)?;
+    // SPEC-LIT §30.1: an LES case has no dissipation field for `WallFaces` to
+    // read `constrained_cells` from, but it still has a `nut` file that may
+    // name `wernerWengleWallFunction` on a wall patch - reading THAT is what
+    // lets `ww.update_nut` (inside `CoupledLes`) find any wall faces at all.
+    // Leaving this at `WallFaces::none` (as a genuine `simulationType
+    // laminar;` case correctly does) would silently run every LES wall as a
+    // resolved one regardless of what the case's own `nut` file asked for -
+    // exactly the substitution SPEC-LIT §13.4 forbids, just one field over.
+    let wf_faces = match diss_name {
+        Some(_) => WallFaces::from_case(&raw_diss, raw_nut_for_walls.as_ref(), &hm)?,
+        None if selection.model == RasModel::Les => WallFaces {
+            constrained_cells: vec![false; hm.n_boundary_faces],
+            nut: match raw_nut_for_walls.as_ref() {
+                Some(raw) => les_nut_wall_faces(raw, &hm)?,
+                None => vec![false; hm.n_boundary_faces],
+            },
+        },
+        None => WallFaces::none(hm.n_boundary_faces),
+    };
     let roughness = NutRoughness::from_case(raw_nut_for_walls.as_ref(), &hm)?;
 
-    let mut model = KEpsilon::new(
-        &gpu,
-        &hm,
-        &mesh,
-        coeffs,
-        cc.turb,
-        wall_coeffs_from_case(&cc.wall),
-        &wf_faces,
-        &roughness,
-    )?;
+    // SPEC-LIT §30.2: the model this case actually asked for -
+    // `select_turbulence_model` above decided WHICH; this builds it, wall
+    // distance and all for `kOmegaSST`. Every RAS arm stays in `dyn
+    // CoupledTurbulence` from here on, so the loop below cannot tell which
+    // one it is driving - which is the point.
+    let mut turb: Box<dyn CoupledTurbulence> =
+        build_coupled(&gpu, &hm, &mesh, &cc, &selection, &wf_faces, &roughness)?;
+    println!("turbulence model: {}", turb.name());
 
-    setup_scalar_field(&gpu, model.k_mut(), &raw_k, &hm)?;
-    setup_scalar_field(&gpu, model.epsilon_mut(), &raw_e, &hm)?;
+    for (fname, field) in turb.output_fields_mut() {
+        let raw = match fname {
+            "k" => Some(&raw_k),
+            n if Some(n) == diss_name => Some(&raw_diss),
+            _ => None,
+        };
+        if let Some(raw) = raw {
+            setup_scalar_field(&gpu, field, raw, &hm)?;
+        }
+    }
 
     let nut_path = t_dir.join("nut");
     if nut_path.exists() {
         let raw_nut = read_scalar_field(&nut_path, hm.n_cells)?;
-        setup_scalar_field(&gpu, model.nut_mut(), &raw_nut, &hm)?;
+        for (fname, field) in turb.output_fields_mut() {
+            if fname == "nut" {
+                setup_scalar_field(&gpu, field, &raw_nut, &hm)?;
+            }
+        }
     }
 
-
-    // SPEC-LIT 17: the buoyancy production. A k-epsilon run on a 1173 K plume
-    // in 293 K air with no G_b is missing a leading-order term - buoyancy is
-    // where most of that flow's turbulence comes from, and the stratification
-    // above the fire is where the rest of it is destroyed.
+    // SPEC-LIT 17: the buoyancy production. A run on a 1173 K plume in 293 K
+    // air with no G_b is missing a leading-order term - buoyancy is where
+    // most of that flow's turbulence comes from, and the stratification
+    // above the fire is where the rest of it is destroyed. `build_coupled`
+    // has already wired it into whichever model this is (k-epsilon takes it
+    // as it always has; k-omega/SST through `(gamma/nu_t) G_b` in omega -
+    // SPEC-LIT §17, §30.2); this is only the banner and the per-iteration
+    // `ThermalCtx` the loop below feeds it.
     //
     //     G_b = (nu_t/Pr_t) g . grad(T) / T
     //
@@ -2033,30 +2169,11 @@ fn run(o: &Options) -> Result<()> {
     // diffuses with, read from the case once: two different values of one
     // constant in one run is exactly the kind of quiet inconsistency
     // SPEC-LIT 15.6 is about.
-    if buoy.is_active() {
-        model.set_buoyancy(BuoyancyProduction {
-            g: buoy.g,
-            prt: t_coeffs.prt,
-            // The Henkes form, which SPEC-LIT 17 marks *DESIGN* and defaults
-            // to. `RAS { C3Buoyancy <number>; }` overrides it with a constant,
-            // 0 being the other convention section 17 names.
-            //
-            // NOT spelled `C3`: the standard k-epsilon model of SPEC-LIT 6.1
-            // already has a constant of that name - the coefficient of the
-            // DILATATION term (2/3 C_1 - C_3) div(u) - and two different
-            // constants answering to one key is precisely the silent
-            // substitution SPEC-LIT 15.6 and 13.4 are about.
-            c3: match ofgpu::io::case::model_coeff(&cc, "C3Buoyancy", Scalar::NAN) {
-                v if v.is_nan() => C3Mode::Henkes,
-                v => C3Mode::Constant(v),
-            },
-            ..BuoyancyProduction::default()
-        })?;
+    let thermal_cfg: Option<(Vec3, Scalar)> = if buoy.is_active() {
         println!(
             "turbulence buoyancy: G_b = (nut/Prt) g.grad(T)/T, Prt {}, {}",
             g(f64::from(t_coeffs.prt)),
-            model
-                .buoyancy()
+            ofgpu::models::buoyancy_settings(&cc)
                 .map(|b| b.c3.describe())
                 .unwrap_or_default()
         );
@@ -2064,22 +2181,27 @@ fn run(o: &Options) -> Result<()> {
             "  stable stratification gives G_b < 0 (destroys k); above a heat \
              source G_b > 0 (makes it)"
         );
+        Some((buoy.g, t_coeffs.prt))
     } else {
         println!("turbulence buoyancy: no gravity in the case, so G_b is identically zero");
-    }
+        None
+    };
 
     let mut heat = ScalarTransport::new(&gpu, &hm, &mesh, "T", t_coeffs, t_ctrl)?;
     // `div(phi,T)`, by its own name - see `read_simple_controls`.
     heat.set_convection(cc.schemes.div("div(phi,T)")?);
     setup_scalar_field(&gpu, heat.field_mut(), &raw_t, &hm)?;
 
-    update_inlet_outlet(&gpu, model.k_mut(), s.phi(), &hm)?;
-    update_inlet_outlet(&gpu, model.epsilon_mut(), s.phi(), &hm)?;
+    for (fname, field) in turb.output_fields_mut() {
+        if fname != "nut" {
+            update_inlet_outlet(&gpu, field, s.phi(), &hm)?;
+        }
+    }
     update_inlet_outlet(&gpu, heat.field_mut(), s.phi(), &hm)?;
 
     {
         let flow = s.flow_state();
-        model.initialise(&gpu, &flow)?;
+        turb.initialise(&gpu, &flow)?;
     }
     heat.initialise(&gpu)?;
 
@@ -2087,13 +2209,24 @@ fn run(o: &Options) -> Result<()> {
         // Same reasoning as `U`/`p` above: the internal values are the
         // restart's exact numbers, and the boundary is restored AFTER
         // `initialise` so a flow-direction-dependent condition is not left
-        // evaluating the wrong branch.
-        let k = find_restart_field(rd, "k")?;
-        gpu.write(&mut model.k_mut().f, &from_restart_scalars(&k.internal))?;
-        gpu.write(&mut model.k_mut().bf, &from_restart_scalars(&k.boundary))?;
-        let e = find_restart_field(rd, "epsilon")?;
-        gpu.write(&mut model.epsilon_mut().f, &from_restart_scalars(&e.internal))?;
-        gpu.write(&mut model.epsilon_mut().bf, &from_restart_scalars(&e.boundary))?;
+        // evaluating the wrong branch. `nut` is OPTIONAL on the way in - an
+        // older checkpoint, or one from a laminar run, may not carry it, and
+        // nothing downstream needs it restored rather than recomputed by
+        // `correct_nut` on the first outer iteration - but `k` and whichever
+        // dissipation field this model has are required exactly as they
+        // always were.
+        for (fname, field) in turb.output_fields_mut() {
+            if fname == "nut" {
+                if let Some(rf) = rd.fields.iter().find(|f| f.name == "nut") {
+                    gpu.write(&mut field.f, &from_restart_scalars(&rf.internal))?;
+                    gpu.write(&mut field.bf, &from_restart_scalars(&rf.boundary))?;
+                }
+                continue;
+            }
+            let rf = find_restart_field(rd, fname)?;
+            gpu.write(&mut field.f, &from_restart_scalars(&rf.internal))?;
+            gpu.write(&mut field.bf, &from_restart_scalars(&rf.boundary))?;
+        }
         let t_field = find_restart_field(rd, "T")?;
         gpu.write(&mut heat.field_mut().f, &from_restart_scalars(&t_field.internal))?;
         gpu.write(&mut heat.field_mut().bf, &from_restart_scalars(&t_field.boundary))?;
@@ -2143,17 +2276,22 @@ fn run(o: &Options) -> Result<()> {
     {
         let mut boot = PbicgstabBackend::new(simple_ctrl.p_solver);
         boot.setup(&gpu, &hm, &mesh, &SystemProbe::default())?;
-        s.correct(&gpu, &mut boot, model.nut(), heat.field())?;
+        s.correct(&gpu, &mut boot, turb.nut(), heat.field())?;
     }
 
     let mut backend = pick_backend(&gpu, &hm, &mesh, &s, o.backend, simple_ctrl.p_solver)?;
 
+    // The boundary-type seeds `FieldWriter` inherits from, keyed by the
+    // field names this run's model actually has - see `FieldWriter::raw_turb`.
+    let raw_turb: Vec<(&'static str, RawScalarField)> = match diss_name {
+        Some(name) => vec![("k", raw_k), (name, raw_diss)],
+        None => Vec::new(),
+    };
     let writer = FieldWriter {
         case_dir: &o.case_dir,
         raw_u: &raw_u,
         raw_p: &raw_p,
-        raw_k: &raw_k,
-        raw_e: &raw_e,
+        raw_turb: &raw_turb,
         raw_t: &raw_t,
         output: &o.output,
     };
@@ -2266,7 +2404,14 @@ fn run(o: &Options) -> Result<()> {
 
     let rep = run_loop(
         &gpu,
-        Fields { s: &mut s, model: &mut model, heat: &mut heat, backend: &mut *backend },
+        Fields {
+            s: &mut s,
+            turb: &mut *turb,
+            heat: &mut heat,
+            backend: &mut *backend,
+            thermal: thermal_cfg,
+            diss_name: diss_name.unwrap_or("epsilon"),
+        },
         &hm,
         &sched,
         &writer,

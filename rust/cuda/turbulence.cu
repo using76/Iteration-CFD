@@ -889,3 +889,50 @@ extern "C" __global__ void turbAddBuoyancyToOmega
         if (w > (ofscalar)0) sp[c] += -term/w;
     }
 }
+
+
+// ==========================================================================
+//  G_b into the omega equation, gamma read PER CELL - SPEC-LIT section 17
+//  and section 30.2 ("k-omega and SST take the same production route
+//  (gamma/nu_t) G_b in the omega equation").
+//
+//  Identical to turbAddBuoyancyToOmega above except that SST's gamma is not
+//  one constant but F1's blend of gamma_1 and gamma_2 (SPEC-LIT section 6.3),
+//  already built per cell by sstBlendCoeffs before this kernel runs - the
+//  same relationship turbGammaInternalCell bears to turbGammaInternal.
+// ==========================================================================
+
+extern "C" __global__ void turbAddBuoyancyToOmegaCell
+(
+    ofscalar* __restrict__ su,
+    ofscalar* __restrict__ sp,
+    const ofscalar* __restrict__ gb,
+    const ofscalar* __restrict__ nut,
+    const ofscalar* __restrict__ omega,
+    const ofscalar* __restrict__ gamma,
+    ofscalar nutMin,
+    oflabel  stableBranch,
+    oflabel  nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar b = gb[c];
+    if (b < (ofscalar)0 && stableBranch == 0) return;
+
+    const ofscalar nt = nut[c];
+    if (!(nt > nutMin)) return;
+
+    const ofscalar term = gamma[c]*b/nt;
+
+    if (term >= (ofscalar)0)
+    {
+        su[c] += term;
+    }
+    else
+    {
+        const ofscalar w = omega[c];
+        if (w > (ofscalar)0) sp[c] += -term/w;
+    }
+}
