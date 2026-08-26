@@ -281,6 +281,62 @@
         "TRef"
       ]
     },
+    "JsonGrading": {
+      "description": "[`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is\nuniform; a present one is validated and lowered by\n[`apply_axis_grading`].",
+      "type": "object",
+      "properties": {
+        "x": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "y": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "z": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonGradingAxis": {
+      "description": "One axis's worth of [`crate::blockgen::GradedAxis`] grading:\n`expansion` is the ratio `GradedAxis::expansion` documents (last cell over\nfirst for one-sided, centre over wall for `twoSided`) and must be\nstrictly positive - `0` or negative is not a cell-size ratio for any\nmesh, checked in [`apply_axis_grading`] rather than left for `blockgen` to\nsilently degenerate to uniform (`GradedAxis::default`'s own `!(r > 0)`\nguard exists so a bad ratio never produces NaN coordinates, not so a bad\ncase file goes unnoticed - SPEC-LIT §13.4).",
+      "type": "object",
+      "properties": {
+        "expansion": {
+          "type": "number",
+          "format": "double"
+        },
+        "twoSided": {
+          "description": "`true`: grade symmetrically toward BOTH ends of the axis (a channel's\ntwo walls); `false` (the default - most cases graded toward only one\nend, e.g. a pipe's single wall or a boundary layer growing off one\nplate, name that explicitly rather than leaving it to a default that\nsilently picks a physical setup for them): one-sided, `hi`'s cell\n`expansion` times `lo`'s.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expansion"
+      ]
+    },
     "JsonInitial": {
       "type": "object",
       "properties": {
@@ -387,6 +443,17 @@
           },
           "maxItems": 3,
           "minItems": 3
+        },
+        "grading": {
+          "description": "Per-axis grading toward the axis's own two ends, lowered onto\n[`crate::blockgen::GradedAxis`] exactly as `blockgen`'s own cases use\nit (`src/blockgen.rs`'s `case_block_spec`, e.g. the channel case's\n`b.y.expansion = 20.0; b.y.two_sided = true;`). Absent entirely, or an\naxis absent from it, keeps that axis uniform - the pre-grading\nbehaviour this reader had before, bit for bit (see\n`a_case_without_grading_lowers_to_the_same_mesh_as_before`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGrading"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "kind": {
           "$ref": "#/$defs/MeshKind"

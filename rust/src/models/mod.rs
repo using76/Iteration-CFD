@@ -40,8 +40,8 @@ pub mod les;
 pub mod registry;
 
 pub use coupled::{
-    BuoyancySettings, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst, CoupledLaminar,
-    CoupledLes, CoupledTurbulence, ThermalCtx,
+    BuoyancySettings, CombustionMixing, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst,
+    CoupledLaminar, CoupledLes, CoupledTurbulence, ThermalCtx,
 };
 pub use k_epsilon::{KEpsilon, KEpsilonCoeffs};
 pub use k_omega::{KOmega, KOmegaCoeffs};

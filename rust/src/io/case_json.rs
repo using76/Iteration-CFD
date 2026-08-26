@@ -163,6 +163,51 @@ pub struct JsonMesh {
     pub boundaries: JsonBoundaries,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<JsonRegion>,
+    /// Per-axis grading toward the axis's own two ends, lowered onto
+    /// [`crate::blockgen::GradedAxis`] exactly as `blockgen`'s own cases use
+    /// it (`src/blockgen.rs`'s `case_block_spec`, e.g. the channel case's
+    /// `b.y.expansion = 20.0; b.y.two_sided = true;`). Absent entirely, or an
+    /// axis absent from it, keeps that axis uniform - the pre-grading
+    /// behaviour this reader had before, bit for bit (see
+    /// `a_case_without_grading_lowers_to_the_same_mesh_as_before`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grading: Option<JsonGrading>,
+}
+
+/// [`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is
+/// uniform; a present one is validated and lowered by
+/// [`apply_axis_grading`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct JsonGrading {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<JsonGradingAxis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<JsonGradingAxis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z: Option<JsonGradingAxis>,
+}
+
+/// One axis's worth of [`crate::blockgen::GradedAxis`] grading:
+/// `expansion` is the ratio `GradedAxis::expansion` documents (last cell over
+/// first for one-sided, centre over wall for `twoSided`) and must be
+/// strictly positive - `0` or negative is not a cell-size ratio for any
+/// mesh, checked in [`apply_axis_grading`] rather than left for `blockgen` to
+/// silently degenerate to uniform (`GradedAxis::default`'s own `!(r > 0)`
+/// guard exists so a bad ratio never produces NaN coordinates, not so a bad
+/// case file goes unnoticed - SPEC-LIT §13.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct JsonGradingAxis {
+    pub expansion: f64,
+    /// `true`: grade symmetrically toward BOTH ends of the axis (a channel's
+    /// two walls); `false` (the default - most cases graded toward only one
+    /// end, e.g. a pipe's single wall or a boundary layer growing off one
+    /// plate, name that explicitly rather than leaving it to a default that
+    /// silently picks a physical setup for them): one-sided, `hi`'s cell
+    /// `expansion` times `lo`'s.
+    #[serde(default)]
+    pub two_sided: bool,
 }
 
 // ---- physics ---------------------------------------------------------
@@ -870,6 +915,13 @@ pub struct LoweredCase {
     pub buoyancy: BuoyancyCoeffs,
     pub wall: WallFunctionCoeffs,
     pub turbulence_model: Option<String>,
+    /// `turbulence.kind`, kept so [`Self::to_case_controls`] can route LES:
+    /// the selector reads `simulationType`/`LES/model` from the
+    /// `momentum_transport` dictionary, which a JSONC case does not have -
+    /// dropping the kind here was how `"kind": "LES"` got accepted by the
+    /// schema and then answered with "needs simulationType LES", a setting
+    /// the JSONC format does not spell.
+    pub turbulence_kind: Option<TurbulenceKind>,
 
     /// `physics.fire.combustion`, resolved to [`CombustionCoeffs`] - `None`
     /// when the case has no `fire.combustion` block. Combustion is actually
@@ -974,6 +1026,26 @@ impl LoweredCase {
         if self.run.end_time > 0.0 {
             c.write_time = format_time_name(self.run.end_time);
         }
+        // `"kind": "LES"` routes through the SAME selector the OpenFOAM
+        // format uses, by synthesising the two dictionary entries it reads.
+        // The RAS branch needs nothing: the selector falls back to
+        // `model_name` there, which is already set above.
+        if self.turbulence_kind == Some(TurbulenceKind::Les) {
+            let model = self.turbulence_model.as_deref().unwrap_or("");
+            let src = format!(
+                "simulationType LES;
+LES {{ model {model}; }}
+"
+            );
+            match crate::io::dict::FoamDict::parse(&src, "<jsonc turbulence>") {
+                Ok(d) => c.momentum_transport = d,
+                // Unreachable for the strings this format can produce; a
+                // parse failure here would be a bug in the synthesis, not in
+                // the case, so surface it as the model name and let the
+                // selector produce its own section-13.4 error downstream.
+                Err(_) => {}
+            }
+        }
         c
     }
 }
@@ -1057,6 +1129,36 @@ fn patch_class(kind: PatchPresetKind) -> &'static str {
     }
 }
 
+/// `mesh.grading.{x,y,z}`, applied to one already-built (uniform) axis.
+///
+/// `grading` absent for this axis leaves it exactly as `build_block`'s own
+/// `axis` closure made it - the bit-identity a case without grading owes
+/// (`a_case_without_grading_lowers_to_the_same_mesh_as_before`). A present
+/// entry with `expansion <= 0` is SPEC-LIT §13.4: not a menu of alternatives
+/// (any positive ratio is physical), so [`unsupported`]'s `available` list is
+/// empty and the named fallback is the uniform axis this reader would have
+/// built without the `grading` block at all.
+fn apply_axis_grading(name: &str, axis: &mut GradedAxis, grading: Option<&JsonGradingAxis>) -> Result<()> {
+    let Some(g) = grading else { return Ok(()) };
+
+    if g.expansion > 0.0 {
+        axis.expansion = g.expansion as Scalar;
+        axis.two_sided = g.two_sided;
+        return Ok(());
+    }
+
+    let uniform = unsupported(
+        &format!("mesh.grading.{name}.expansion"),
+        &g.expansion.to_string(),
+        &[],
+        "uniform grading (expansion = 1, the axis's un-graded default)",
+        (1.0 as Scalar, false),
+    )?;
+    axis.expansion = uniform.0;
+    axis.two_sided = uniform.1;
+    Ok(())
+}
+
 fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec, Vec<WindowRegionSpec>)> {
     let MeshKind::Cartesian = mesh.kind;
 
@@ -1074,6 +1176,12 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
         z: axis(mesh.bounds.min[2], mesh.bounds.max[2], mesh.cells[2]),
         ..BlockSpec::default()
     };
+
+    if let Some(g) = &mesh.grading {
+        apply_axis_grading("x", &mut block.x, g.x.as_ref())?;
+        apply_axis_grading("y", &mut block.y, g.y.as_ref())?;
+        apply_axis_grading("z", &mut block.z, g.z.as_ref())?;
+    }
 
     let names = [
         mesh.boundaries.xmin.clone(),
@@ -1590,12 +1698,12 @@ impl JsonCase {
 
         // ---- turbulence -------------------------------------------------
         let mut wall = WallFunctionCoeffs::default();
-        let turbulence_model = if let Some(t) = &self.turbulence {
+        let (turbulence_model, turbulence_kind) = if let Some(t) = &self.turbulence {
             wall.kappa = t.wall_functions.kappa as Scalar;
             wall.e = t.wall_functions.e as Scalar;
-            Some(t.model.clone())
+            (Some(t.model.clone()), Some(t.kind))
         } else {
-            None
+            (None, None)
         };
         wall.y_plus_lam = compute_y_plus_lam(wall.kappa, wall.e);
         // SPEC-LIT §29.1 route (b): the case-level default every wall
@@ -1863,6 +1971,7 @@ impl JsonCase {
             buoyancy,
             wall,
             turbulence_model,
+            turbulence_kind,
             combustion,
             radiation,
             radiation_wall_emissivity,
@@ -2002,6 +2111,234 @@ mod tests {
             assert_eq!(a.start, b.start);
             assert_eq!(a.size, b.size);
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  Task G.1: mesh.grading -> GradedAxis
+    // ------------------------------------------------------------------
+
+    /// A minimal, parseable case whose mesh block callers mutate before
+    /// lowering - `docs/case-example.json` and `cases/plume.jsonc` both carry
+    /// far more machinery (combustion, radiation, windows) than a grading
+    /// test needs to exercise `build_block`.
+    fn minimal_case_with_mesh(mesh_extra: &str) -> JsonCase {
+        let text = format!(
+            r#"{{
+                "name": "gradingTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                    "cells": [4, 6, 8],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}{mesh_extra}
+                }},
+                "physics": {{
+                    "gravity": [0,0,0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+                    "buoyancy": "densityRatio"
+                }},
+                "patches": [ {{ "match": ".*", "kind": "wall" }} ],
+                "initial": {{ "U": [0,0,0], "p": 0.0 }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }}
+            }}"#
+        );
+        // A per-call counter, not just the process id: cargo's test runner
+        // is multi-threaded, and every test in this module calls this helper
+        // - a shared file name would let two threads race on the same path.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "case_json_grading_test_{}_{n}.jsonc",
+            std::process::id()
+        ));
+        std::fs::write(&path, text).unwrap();
+        let case = read_case_jsonc(&path).expect("minimal grading test case should parse");
+        let _ = std::fs::remove_file(&path);
+        case
+    }
+
+    /// The bit-identity requirement Task G.1 names explicitly: a case with NO
+    /// `grading` key lowers to the exact same `HostMesh` as before this
+    /// feature existed - hashed here (via `PartialEq` on the whole array, the
+    /// strongest available check) rather than merely "n matches".
+    #[test]
+    fn a_case_without_grading_lowers_to_the_same_mesh_as_before() {
+        let with_no_grading_key = minimal_case_with_mesh("");
+        let with_explicit_uniform_defaults = minimal_case_with_mesh(
+            r#", "grading": {} "#,
+        );
+
+        let a = with_no_grading_key.lower().expect("lower");
+        let b = with_explicit_uniform_defaults.lower().expect("lower");
+        assert_eq!(a.block, b.block, "an absent grading block and an empty one must lower identically");
+
+        // Every axis is exactly `GradedAxis::default`'s shape but for lo/hi/n.
+        for axis in [&a.block.x, &a.block.y, &a.block.z] {
+            assert_eq!(axis.expansion, 1.0);
+            assert!(!axis.two_sided);
+        }
+
+        let mesh_a = crate::blockgen::build_mesh(&a.block).expect("build_mesh");
+        let mesh_b = crate::blockgen::build_mesh(&b.block).expect("build_mesh");
+        assert_eq!(mesh_a.c, mesh_b.c, "cell centres must be bit-identical");
+        assert_eq!(mesh_a.v, mesh_b.v, "cell volumes must be bit-identical");
+
+        // Hash the node coordinates (what `graded_nodes` actually computes)
+        // against a hand-built uniform axis, so this is checked against the
+        // pre-grading behaviour itself, not just internal self-consistency.
+        use std::hash::{Hash, Hasher};
+        fn hash_mesh(m: &crate::mesh::HostMesh) -> u64 {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for x in &m.c {
+                x.x.to_bits().hash(&mut h);
+                x.y.to_bits().hash(&mut h);
+                x.z.to_bits().hash(&mut h);
+            }
+            for v in &m.v {
+                v.to_bits().hash(&mut h);
+            }
+            h.finish()
+        }
+        let uniform_block = crate::blockgen::BlockSpec {
+            x: GradedAxis { lo: 0.0, hi: 1.0, n: 4, ..GradedAxis::default() },
+            y: GradedAxis { lo: 0.0, hi: 1.0, n: 6, ..GradedAxis::default() },
+            z: GradedAxis { lo: 0.0, hi: 1.0, n: 8, ..GradedAxis::default() },
+            ..a.block.clone()
+        };
+        let mesh_ref = crate::blockgen::build_mesh(&uniform_block).expect("build_mesh");
+        assert_eq!(hash_mesh(&mesh_a), hash_mesh(&mesh_ref), "grading-free lowering must match a hand-built uniform mesh");
+    }
+
+    /// `blockgen`'s own cases spell this exact shape
+    /// (`b.y.expansion = 20.0; b.y.two_sided = true;`, `src/blockgen.rs`'s
+    /// `case_block_spec`); the JSONC reader must lower the mirrored JSON key
+    /// onto exactly the same two `GradedAxis` fields, on whichever axis names
+    /// it.
+    #[test]
+    fn grading_lowers_onto_graded_axis_exactly_as_blockgen_cases_use_it() {
+        let case = minimal_case_with_mesh(
+            r#", "grading": { "y": { "expansion": 20.0, "twoSided": true } } "#,
+        );
+        let lowered = case.lower().expect("case with grading should lower");
+
+        assert_eq!(lowered.block.y.expansion, 20.0);
+        assert!(lowered.block.y.two_sided);
+        // x and z are untouched.
+        assert_eq!(lowered.block.x.expansion, 1.0);
+        assert!(!lowered.block.x.two_sided);
+        assert_eq!(lowered.block.z.expansion, 1.0);
+        assert!(!lowered.block.z.two_sided);
+
+        // And it actually reaches `graded_nodes`: the y-axis is no longer
+        // uniformly spaced.
+        let nodes = crate::blockgen::graded_nodes(&lowered.block.y);
+        let first_cell = nodes[1] - nodes[0];
+        let mid_cell = nodes[nodes.len() / 2] - nodes[nodes.len() / 2 - 1];
+        assert!(mid_cell > first_cell * 5.0, "two-sided grading should make the centre cell much larger than the wall cell");
+    }
+
+    /// One-sided grading (`twoSided` defaulted to `false`) reaches
+    /// `GradedAxis` too - the default is one end plain, not "no grading at
+    /// all".
+    #[test]
+    fn one_sided_grading_defaults_two_sided_to_false() {
+        let case = minimal_case_with_mesh(r#", "grading": { "x": { "expansion": 4.0 } } "#);
+        let lowered = case.lower().expect("lower");
+        assert_eq!(lowered.block.x.expansion, 4.0);
+        assert!(!lowered.block.x.two_sided);
+    }
+
+    #[test]
+    fn zero_or_negative_expansion_is_a_strict_error_naming_the_axis() {
+        // Strict-mode behaviour depends on the process-wide permissive flag
+        // staying `false` - take the same guard the permissive-toggling
+        // tests do so this cannot observe another test's `set_permissive(true)`
+        // mid-run.
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let case = minimal_case_with_mesh(r#", "grading": { "z": { "expansion": 0.0 } } "#);
+        let err = case.lower().err().expect("expected an error").to_string();
+        assert!(err.contains("mesh.grading.z.expansion"), "{err}");
+        assert!(err.contains("-permissive"), "{err}");
+
+        let case = minimal_case_with_mesh(r#", "grading": { "y": { "expansion": -3.0 } } "#);
+        let err = case.lower().err().expect("expected an error").to_string();
+        assert!(err.contains("mesh.grading.y.expansion"), "{err}");
+        assert!(err.contains("-3"), "{err}");
+    }
+
+    #[test]
+    fn permissive_substitutes_uniform_for_a_non_physical_expansion() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+        crate::io::contract::set_permissive(true);
+
+        let case = minimal_case_with_mesh(r#", "grading": { "y": { "expansion": -1.0 } } "#);
+        let lowered = case.lower().expect("permissive should substitute, not fail");
+        assert_eq!(lowered.block.y.expansion, 1.0);
+        assert!(!lowered.block.y.two_sided);
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    #[test]
+    fn unknown_grading_key_names_the_json_path() {
+        let text = r#"{
+            "name": "bad",
+            "mesh": {
+                "kind": "cartesian",
+                "bounds": { "min": [0,0,0], "max": [1,1,1] },
+                "cells": [4,4,4],
+                "boundaries": {
+                    "xmin": "a", "xmax": "a", "ymin": "a",
+                    "ymax": "a", "zmin": "a", "zmax": "a"
+                },
+                "grading": { "y": { "expansion": 2.0, "bogus": true } }
+            },
+            "physics": {
+                "gravity": [0,0,0],
+                "fluid": { "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+                "buoyancy": "densityRatio"
+            },
+            "patches": [ { "match": ".*", "kind": "wall" } ],
+            "initial": { "U": [0,0,0], "p": 0.0 },
+            "numerics": {
+                "algorithm": { "kind": "SIMPLE" },
+                "ddt": "steadyState",
+                "div": { "default": "Gauss upwind" },
+                "grad": "Gauss linear",
+                "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+                "solvers": []
+            },
+            "run": { "endTime": 1.0, "deltaT": 1.0 }
+        }"#;
+
+        let path = std::env::temp_dir().join("case_json_unknown_grading_key_test.jsonc");
+        std::fs::write(&path, text).unwrap();
+        let err = read_case_jsonc(&path).unwrap_err().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(err.contains("mesh.grading.y"), "{err}");
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn schema_documents_the_grading_block() {
+        let text = emit_schema();
+        assert!(text.contains("\"grading\""), "schema missing grading: {text}");
+        assert!(text.contains("\"twoSided\""), "schema missing twoSided: {text}");
+        assert!(text.contains("\"expansion\""), "schema missing expansion: {text}");
     }
 
     // ------------------------------------------------------------------
@@ -2391,4 +2728,41 @@ mod tests {
         assert_eq!(back.mesh.bounds.min[0], case.mesh.bounds.min[0]);
         assert_eq!(back.mesh.bounds.min[0].to_bits(), case.mesh.bounds.min[0].to_bits());
     }
+    /// `"kind": "LES"` must reach the LES branch of the selector - the
+    /// schema advertised it while the lowering dropped it, so a Deardorff
+    /// case was answered with "needs `simulationType LES;`", a setting the
+    /// JSONC format does not spell.
+    #[test]
+    fn jsonc_kind_les_routes_to_the_les_selector() {
+        let mut case = minimal_case_with_mesh("");
+        case.turbulence = Some(JsonTurbulence {
+            kind: TurbulenceKind::Les,
+            model: "Deardorff".to_string(),
+            wall_functions: JsonWallFunctions { kappa: 0.41, e: 9.8 },
+            wall_treatment: WallTreatmentKind::Standard,
+        });
+        let lowered = case.lower().expect("lowers");
+        let cc = lowered.to_case_controls();
+        let sel = crate::models::registry::select_turbulence_model(&cc)
+            .expect("selects without the simulationType complaint");
+        assert!(
+            format!("{sel:?}").contains("Deardorff"),
+            "expected the Deardorff LES selection, got {sel:?}"
+        );
+
+        // And the RAS route is untouched: the same case with kind RAS +
+        // kOmegaSST still selects SST through model_name.
+        let mut ras = minimal_case_with_mesh("");
+        ras.turbulence = Some(JsonTurbulence {
+            kind: TurbulenceKind::Ras,
+            model: "kOmegaSST".to_string(),
+            wall_functions: JsonWallFunctions { kappa: 0.41, e: 9.8 },
+            wall_treatment: WallTreatmentKind::Standard,
+        });
+        let cc2 = ras.lower().expect("lowers").to_case_controls();
+        let sel2 = crate::models::registry::select_turbulence_model(&cc2)
+            .expect("RAS route");
+        assert!(format!("{sel2:?}").contains("KOmegaSST"), "got {sel2:?}");
+    }
+
 }

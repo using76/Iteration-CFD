@@ -117,21 +117,41 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 `ofgpu::io::case_json::emit_schema`로 자동 생성). 디렉터리 대신 `.jsonc`/`.json`
 파일 경로를 넘기면 됩니다 — 출력은 `<stem>_jsonc/`에 씁니다.
 
+`mesh.grading` — 축별 격자 조밀화(선택). 기본은 균일 격자이며, 이 키가 아예
+없거나 축 항목이 비어 있으면 이전과 **비트 단위로 동일한** 메쉬가 나옵니다.
+`blockgen`의 `GradedAxis`(`expansion`, `two_sided`)를 그대로 JSON으로 옮긴
+것입니다 — `expansion`은 `twoSided: true`일 때 중앙 셀/벽 셀의 비, `false`
+(기본값, 벽 하나만 조밀화)일 때는 `hi`쪽 셀/`lo`쪽 셀의 비이며 반드시 0보다
+커야 합니다. `<= 0`인 `expansion`이나 인식하지 못하는 키는 SPEC-LIT §13.4
+오류(대상 축을 이름으로 밝힘)이고, `-permissive`는 그 축을 균일 격자로
+되돌리고 무엇으로 바꿨는지 출력합니다:
+
+```jsonc
+"mesh": {
+  ...,
+  "grading": { "y": { "expansion": 6.0, "twoSided": true } },
+},
+```
+
+예시는 [`../docs/case-example.json`](../docs/case-example.json)의 주석 처리된
+`grading` 줄을, 실제로 켜서 쓰는 예는 아래 `channelThermalLowRe.jsonc`(벽법선
+방향 y+ ≈ 1을 노리는 two-sided grading)를 보십시오.
+
 | Case | 드라이버 | 설명 |
 |---|---|---|
 | `plume.jsonc` | `ofgpu-k-epsilon` 등 | `plumeB`(OpenFOAM 형식)의 JSONC 재현 — 두 형식이 같은 필드를 만든다는 B3 게이트 |
 | `burnerPlume.jsonc` | `ofgpu-fire -combustion -radiation` | 프로판 버너 화재 데모 — SPEC-LIT §25(저-마하)·§26(에너지)·§27(연소)·§28(복사)를 한 케이스에서 결합. 바닥 창(`Y_F = 1` 고정)으로 연료가 들어가고, 열은 전부 연소의 `q'''_c`에서 나옵니다(입구 자체는 상온) |
-| `channelThermalWF.jsonc` | `ofgpu-fire` | SPEC-LIT §29.3/§30.3의 유예되었던 게이트, 메쉬 (a): 입구로 구동되는 평면 채널/덕트, 위아래 벽 `Tw = 373.15 K`, 중력 0. 벽법선 방향이 성긴 격자(y+ ≈ 30, 측정값 26.5) — `standard` 프리셋, `thermalWallFunction`이 실제로 일을 해야 하는 조건 |
-| `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, 벽법선 격자만 y+ ≈ 1(측정값 4.2)로 정밀화하고 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다") |
+| `channelThermalWF.jsonc` | `ofgpu-fire` | SPEC-LIT §29.3/§30.3의 게이트, 메쉬 (a): 2.0 m(L/Dh = 50) 입구구동 평면 채널/덕트, 위아래 벽 `Tw = 373.15 K`, 중력 0. 벽법선 방향 균일 격자(6칸) — 측정 y+ 21.95/37.90/40.29(목표 30-60), `standard` 프리셋, `thermalWallFunction`이 실제로 일을 해야 하는 조건 |
+| `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, `mesh.grading`으로 벽법선 방향을 양쪽 벽 모두를 향해 two-sided grading(`expansion: 200`, 50칸, 첫 셀 높이 ≈ 2×10⁻⁵ m)하여 y+ 목표 ≈ 1(측정 0.43/0.89/1.02)을 노리는 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다"). 두 케이스의 벽 열유입 비율은 0.381(첫 시도의 0.095에서 4배 개선, 여전히 게이트는 열려 있음) — 자세한 내용은 `docs/07-fire-solver.md` §1.1 |
 
 ```powershell
 cd ..\rust
 cargo run --release --bin ofgpu-fire -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005 -check 200
 
-# SPEC-LIT §29.3/§30.3의 유예되었던 게이트 — 정상상태까지 돌리고
+# SPEC-LIT §29.3/§30.3의 게이트 — 정상상태까지 돌리고
 # "integrated wall heat flux" 줄을 비교합니다.
-cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalWF.jsonc    -iters 3000 -check 1000
-cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalLowRe.jsonc -iters 1200 -check 400
+cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalWF.jsonc    -iters 6000 -check 2000
+cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalLowRe.jsonc -iters 6000 -check 1000
 ```
 
 자세한 화재 솔버 설명과 두 채널 케이스가 실제로 낸 벽 열유속·비율은

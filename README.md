@@ -217,7 +217,7 @@ error: divSchemes/div(phi,k): "Gauss totalGarbage" is not supported by ofgpu;
 ## 검증
 
 ```
-cargo test        725 passed, 0 failed
+cargo test        734 passed, 0 failed
 ofgpu-validate    228 / 228 checks passed
 ```
 
@@ -308,17 +308,24 @@ CPU 참조 구현은 장치 코드가 gather 방식인 것과 달리 의도적�
 결합 솔버에서 `kOmegaSST`를 요청한 케이스가 실제로 그 모형을 구성함을
 입증합니다. 이것만으로는 조(粗)격자 벽함수 메쉬와 저Re 해상 메쉬가 **같은**
 유동의 벽 열유속에 합의한다는 것까지 입증하지는 않습니다 — 이 주장은 반해석적
-대체물로 남겨두지 않고 실제로 돌렸습니다: `cases/channelThermalWF.jsonc`
-(y+ ≈ 26.5, `thermalWallFunction`)와 `cases/channelThermalLowRe.jsonc`
-(y+ ≈ 4.2, 평범한 `fixedValue`)는 동일한 0.4 m 덕트, 벽온도 373.15 K, 중력
-0으로 `ofgpu-fire`를 통해 준정상상태까지 돌린 결과입니다. 측정된 벽 열유입은
-**40.7 W**(벽함수 메쉬) 대 **430.4 W**(해상 메쉬) — 비율 **0.095**로 1에
-전혀 가깝지 않습니다. 튜닝 없이 정직하게 보고합니다: 격자는 완전발달
-채널 상관식으로 크기를 정했으나 실제 유동(짧고 발달 중인 덕트)은 그 상태에
-도달하지 못했고, JSONC의 카테시안 격자는 grading이 없어 성긴 격자가
-벽 근처뿐 아니라 바깥층 해상도까지 낮으며, 짧고 열적으로 발달 중인 덕트는
-로그법칙이 교정된 완전발달 채널보다 평형 벽함수에 훨씬 불리한 조건입니다.
-전체 분석은 `docs/07-fire-solver.md` §1.1을 보십시오.
+대체물로 남겨두지 않고 실제로 돌렸습니다. JSONC 메쉬 블록에 `mesh.grading`
+(축별 `expansion`/`twoSided`, `blockgen`의 `GradedAxis`를 그대로 옮긴 것 —
+없으면 이전과 비트 단위로 동일한 균일 격자)을 추가해 벽 쪽으로 조밀화할 수
+없던 첫 시도의 한계를 닫고, 덕트도 5배 길게(0.4 m → 2.0 m, L/Dh = 10 → 50)
+늘려 재실행했습니다: `cases/channelThermalWF.jsonc`(벽법선 6칸 균일,
+y+ ≈ 37.9, `thermalWallFunction`)와 `cases/channelThermalLowRe.jsonc`
+(`mesh.grading`으로 양쪽 벽을 향해 two-sided grading한 50칸, y+ ≈ 0.89, 평범한
+`fixedValue`)는 동일한 2.0 m 덕트, 벽온도 373.15 K, 중력 0으로 `ofgpu-fire`를
+통해 준정상상태까지 돌린 결과입니다. 측정된 벽 열유입은 **157.2 W**(벽함수
+메쉬) 대 **412.3 W**(해상 메쉬) — 비율 **0.381**로, 첫 시도의 0.095에서
+4배 개선되었지만 여전히 1에 가깝지 않습니다. 튜닝 없이 정직하게 보고합니다:
+이번에는 두 메쉬 모두 원하는 y+ 대역에 실제로 들어갔고 저Re 메쉬는 균일
+과잉해상 대신 진짜 grading을 썼지만, 벽함수 메쉬(6칸)는 여전히 바깥층 해상도
+자체가 낮고, `L/Dh = 50`은 이 Re에서 완전발달로 보기엔 경계선이며(JSONC에는
+아직 주기 경계 patch가 없어 더 긴 덕트가 그 대안입니다), 평형 벽함수 자체가
+완전발달·저압구배 조건에서도 수십 퍼센트 오차를 내는 모형이라는 점도 남아
+있습니다. 게이트는 열린 채로 남습니다. 전체 분석은 `docs/07-fire-solver.md`
+§1.1을 보십시오.
 
 ---
 
