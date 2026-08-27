@@ -1160,6 +1160,25 @@
             "type",
             "value"
           ]
+        },
+        {
+          "description": "SPEC-LIT §32.2's redesigned thermal-wall gate: a wall carrying a fixed\nheat FLUX `q` (W/m^2) rather than a temperature -\n`crate::field::BcKind::FixedFluxTemperature`. Deliberately the SAME\nJSON type on a `wallTreatment: standard` wall-function mesh and a\n`lowRe` resolved one - see that `BcKind` variant's own doc for why one\ncondition is exact on both.",
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "fixedFluxTemperature"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "q"
+          ]
         }
       ]
     },

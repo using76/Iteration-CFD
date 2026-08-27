@@ -98,8 +98,8 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | LES 벽모형 | Werner–Wengle (1991) — 첫 셀 평균 속도로부터 적분·역해한 멱법칙, Newton 반복 없음; `standard`/`spalding` 프리셋이 LES에서는 이 모형 하나로 수렴, `lowRe`는 `nu_t,w = 0`, `rough`는 아직 없음(§13.4 오류로 명시) |
 | 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | 결합 솔버(`ofgpu-buoyant`, `ofgpu-fire`)의 난류 선택 | `ofgpu-buoyant`: `CoupledTurbulence` 트레이트로 케이스의 `RAS { model ...; }`/`simulationType`을 그대로 반영 — k-ε, k-ω, k-ω SST(벽거리 자동 계산), LES(Smagorinsky/WALE/Deardorff, §16 여과폭·van Driest 포함) 전부 실제로 그 모형을 구성함, 부력 생성 `G_b`도 모형별로 올바른 방정식에 배선됨(§17, §30.2). `ofgpu-fire`: 아직 k-ε만 지원 — 연소 혼합시간 종결식과 열 벽함수가 `epsilon`을 직접 요구하므로 다른 모형은 이름을 밝힌 §13.4 오류로 거부(조용한 대체 없음) |
-| 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1) |
-| 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨 |
+| 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1). `lowRe`는 추가로 벽 근처를 해석할 수 있는 난류 모형을 요구함 — `kEpsilon`/`kOmega`/`kOmegaSST` 어느 것도 그런 능력이 없으므로, 발산하도록 두는 대신 이름을 명시해 거부함 (SPEC-LIT §32) |
+| 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨. 고정 열유속 주기 덕트에서 Dittus-Boelter/Gnielinski 대비 **검증 완료** — 두 밴드 모두 안쪽인 +2%/−4% (SPEC-LIT §32) |
 | 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
 | 부력 생성 | G_b 항 (Rodi 1987, Henkes et al. 1991) |
 
@@ -235,9 +235,9 @@ error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
 ## 검증
 
 ```
-cargo test        715 passed, 0 failed (lib 크레이트 기준; 각 바이너리의 소소한 CLI 파싱 스위트까지
-                  전부 합치면 767)
-ofgpu-validate    232 / 232 checks passed
+cargo test        724 passed, 0 failed (lib 크레이트 기준; 각 바이너리의 소소한 CLI 파싱 스위트까지
+                  전부 합치면 776)
+ofgpu-validate    240 / 240 checks passed
 ```
 
 ### 수렴 차수 — 인위해법 (MMS)
@@ -321,26 +321,43 @@ CPU 참조 구현은 장치 코드가 gather 방식인 것과 달리 의도적�
 | `thermalWallFunction`의 Robin 삼중값이 Jayatilleke 해석 열유속을 정확히 부호화 (한 셀 전도 항등식) | 0 (반올림 수준) |
 | Werner-Wengle: 두 분기가 분기점에서 일치하고, 각 분기 자체의 닫힌식이 조작된 `tau_w`를 반올림 수준까지 재현 | 0 (반올림 수준) |
 | 결합 솔버 선택: `ofgpu-buoyant`의 `build_coupled`로 부력 케이스에서 만든 `kOmegaSST`의 `nut` FNV 해시가 동일 케이스의 `kEpsilon`과 다름 | 해시 불일치 (결정적) |
+| 열 벽함수 게이트, Nusselt 검증치(재현) — `cases/channelPeriodicFluxWF.jsonc` 자체 측정값을 Dittus-Boelter/Gnielinski와 비교 | +2% / −4% (±10% / ±20–25% 밴드 모두 안쪽) |
 
 이 게이트들은 조도벽 법칙이 `Ks = 0`(조도를 전혀 언급하지 않는 케이스)에서
 기존 매끈한 벽으로 붕괴함과, 열 벽함수 자체의 대수가 내부적으로 정확함과,
 결합 솔버에서 `kOmegaSST`를 요청한 케이스가 실제로 그 모형을 구성함을
-입증합니다. 이것만으로는 조(粗)격자 벽함수 메쉬와 저Re 해상 메쉬가 **같은**
-유동의 벽 열유속에 합의한다는 것까지 입증하지는 않습니다 — 이 주장은 반해석적
-대체물로 남겨두지 않고 세 번 실제로 돌렸고, 가장 최근에는 진짜 주기(cyclic
-패치) 덕트에서 돌렸습니다: `cases/channelPeriodicWF.jsonc`(y+ ≈ 41.7,
-`thermalWallFunction`)와 `cases/channelPeriodicLowRe.jsonc`(y+ ≈ 0.31, 평범한
-`fixedValue`)는 동일한 스트림방향-cyclic 덕트, 벽온도 373.15 K, 중력 0을
-유입/유출 대신 운동량 소스(체적력)와 그에 대응하는 열싱크로 구동해
-`ofgpu-fire`로 돌린 결과입니다. 측정된 벽 열유입은 **6.00 W**(벽함수 메쉬)
-대 **55.83 W**(해상 메쉬) — 비율 **0.107**로, 이전(비주기, 발달 중) 덕트의
-**0.381**보다 오히려 나빠졌습니다 — 개선이 아닙니다. 두 실행이 서로 매우
-다른 구동 ΔT(≈50 K 대 ≈3 K)에서 정착하기 때문입니다: 같은 ΔT로 맞추려고
-싱크를 키워 봤지만(도메인 코어가 비물리적으로 식음) 실패했습니다. 튜닝 없이
-정직하게 보고합니다 — 게이트는 여전히 열려 있고, 이번 주기 재시도가 남긴
-다음 단계(두 메쉬를 같은 ΔT에서 비교할 수 있는, 공간적으로 가중된 에너지
-닫음식)는 이름만 밝히고 시도하지 않았습니다. 전체 분석(앞선 두 번의 비주기
-시도 포함)은 `docs/07-fire-solver.md` §1.1을 보십시오.
+입증합니다. 이것만으로는 조(粗)격자 벽함수 메쉬가 독립적으로 발표된
+상관식과 실제 유동의 벽 열유속에 합의한다는 것까지 입증하지는 않습니다 —
+이 주장은 실제로 돌려야 확인할 수 있었고, SPEC-LIT §32의 재설계된 게이트가
+비로소 그것을 검증 가능하게 만들었습니다: 이전 세 번의 고정벽온도 시도
+(비율 0.095, 0.381, 0.107)는 사실 서로 다른 문제를 푼 두 실행을 비교하고
+있었습니다 — 고정된 `T_w`는 벌크 온도를 자유롭게 두므로, 벽 근처 전도율이
+다른 두 메쉬는 서로 다른 ΔT에 정착합니다.
+
+**검증 완료.** 대신 두 메쉬에 동일한 벽 열유속 `q_w`를 고정하고 — 각자
+자기 자신의 ΔT를 예측하게 하고 — 그 결과를 Dittus & Boelter (1930)와
+Gnielinski (1976) 대비 Nusselt 수로 비교하면 벽함수 쪽 게이트가 닫힙니다.
+`cases/channelPeriodicFluxWF.jsonc`(`standard` wallTreatment, y+ ≈ 41.7):
+`q_w` = 500 W/m², `T_w` = 501.99 K(열 벽함수가 진단), `T_b` = 453.97 K,
+`U_b` = 3.512 m/s. 가열 둘레 기준 수력직경(`D_h` = 0.08 m — 네 벽 중 두
+벽만 가열되는 덕트에 대해 이 상관식들이 유도된 관례)으로 Re = 18,731이고,
+측정된 Nu = 50.41은 **Gnielinski의 +2%**(±10%)와 **Dittus-Boelter의
+−4%**(±20–25%) — 두 밴드 모두 안쪽입니다. 힘-균형 교차검증은
+`U_b/u_tau` = 12.6을 주는데, 완전발달 평면 채널이 주는 15–17보다 낮습니다 —
+이 덕트의 옆벽이 평면-채널 상관식이 모르는 저항을 더하기 때문이며, 숨기지
+않고 그대로 보고합니다. `ofgpu-validate`의
+`check_thermal_wall_function_gate_verdict_replay`가 이 측정치를 매 실행마다
+영구적으로 재현합니다.
+
+**다른 이유로 여전히 열려 있음.** 대응하는 해상 메쉬
+`cases/channelPeriodicFluxLowRe.jsonc`(동일한 `q_w`, y+ ~ 1까지 격자 조정)는
+수렴하지 않습니다 — 벽함수가 틀려서가 아니라, 표준 k-epsilon이 벽 근처
+감쇠가 전혀 없는 고Reynolds수 모형이라 메쉬 해상도와 무관하게 y+ ~ 30 아래에서
+무효하기 때문입니다. ofgpu는 이제 솔버가 발산하도록 조용히 두는 대신 실행
+전에 이를 잡아냅니다(`kEpsilon`/`kOmega`/`kOmegaSST` 모두 `lowRe` 벽 처리를
+이름을 밝혀 거부, §13.4) — 저Reynolds수 RAS 모형(`LaunderSharmaKE`, 인식은
+되지만 아직 미구현)에 막혀 있습니다. 전체 추적 과정(앞선 세 번의 이제는
+대체된 시도 포함)은 `docs/07-fire-solver.md` §1.1을 보십시오.
 
 ---
 
@@ -632,6 +649,13 @@ ASCII로 변환한 뒤 사용하십시오.
 - Tucker, P. G. (1998). Assessment of geometric multilevel convergence robustness
   and a wall distance method for flows with multiple internal boundaries.
   *Applied Mathematical Modelling*, 22(4–5), 293–305. — §6.6
+- Dittus, F. W., & Boelter, L. M. K. (1930). Heat transfer in automobile
+  radiators of the tubular type. *University of California Publications in
+  Engineering*, 2, 443–461. (재인쇄: *International Communications in Heat
+  and Mass Transfer*, 12(1), 3–22, 1985.) — §32.3
+- Gnielinski, V. (1976). New equations for heat and mass transfer in
+  turbulent pipe and channel flow. *International Chemical Engineering*,
+  16(2), 359–368. — §32.3
 
 ### 부력
 

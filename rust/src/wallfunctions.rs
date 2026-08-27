@@ -1207,10 +1207,19 @@ pub fn constrain_wall_cells(
 // temperature SPEC-LIT §29.3 says to diagnose,
 // `T_w = T_P + q_w·T+/(rho·cp·u_tau)`, is `t_p + q_w*t_plus/(rho*cp*u_tau)`,
 // a rearrangement of exactly the formula [`thermal_wall_ref_grad`] inverts.
-// Neither this module nor `src/field.rs` wires a SECOND `BcKind` for it -
-// the task asked for the thermal WALL (fixed-T) condition, and a
-// `heatFluxWallFunction` name was not requested - but the arithmetic a case
-// would need is already here, one call to [`jayatilleke_p`]/[`t_plus`] away.
+//
+// SPEC-LIT §32.2 is what wires the fixed-q form into a case: NOT a second
+// wall-function `BcKind` here, but `crate::field::BcKind::FixedFluxTemperature`
+// in `src/field.rs`/`src/energy.rs` - `ref_grad = q/k_eff_wall` directly
+// (`crate::energy::flux_to_grad`, refreshed every outer iteration against the
+// CURRENT `k_eff_wall`), because a `fr = 0` Robin condition delivers exactly
+// the flux it is given whatever `k_eff_wall` is - the ratio cancels exactly
+// against the same `k_eff_wall` the matrix assembly multiplies by, so no
+// Jayatilleke machinery is needed to get the FLUX right, on a wall-function
+// mesh or a resolved one. Diagnosing the wall TEMPERATURE that flux produces
+// still needs the formula above - that is a postprocessing read of
+// [`jayatilleke_p`]/[`t_plus`]/[`u_tau_of`], done in `src/bin/fire.rs`'s own
+// report, not a second device kernel.
 //
 // # Why `fr = 0` rather than a genuine Robin fraction
 //
@@ -1259,6 +1268,49 @@ pub fn t_plus(y_plus: Scalar, pr: Scalar, prt: Scalar, kappa: Scalar, e: Scalar,
 #[inline]
 pub fn u_tau_of(k: Scalar, cmu: Scalar) -> Scalar {
     cmu.powf(0.25) * k.max(0.0).sqrt()
+}
+
+// ==========================================================================
+//  §32.3  The independent Nusselt-number references
+// ==========================================================================
+//
+// Two published turbulent-pipe-flow correlations, applied to a parallel-plate
+// channel through the hydraulic diameter (standard practice, carrying its own
+// error - see each function's own doc) - SPEC-LIT §32.3's gate for the
+// redesigned thermal-wall comparison of §32.2: `Nu = q_w D_h/(k(T_w - T_b))`,
+// measured from a run, is compared against these, NOT against another run of
+// this solver (§32.3's own point, and the same shape §10/§22 already use).
+
+/// Dittus & Boelter, *Univ. Calif. Publ. Eng.* 2 (1930) 443 (reprinted in
+/// *Int. Commun. Heat Mass Transfer* 12 (1985) 3) - `Nu = 0.023 Re^0.8 Pr^n`,
+/// `n = 0.4` for HEATING (wall hotter than the bulk, SPEC-LIT §32.2's own
+/// case), valid for `0.6 < Pr < 160`, `Re > 1e4`. Conventionally quoted at
+/// ±20-25% - that uncertainty is part of a verdict against this function's
+/// output, not a detail to round away.
+#[inline]
+pub fn dittus_boelter_nu(re: Scalar, pr: Scalar) -> Scalar {
+    0.023 * re.powf(0.8) * pr.powf(0.4)
+}
+
+/// Gnielinski, *Int. Chem. Eng.* 16 (1976) 359 - the more accurate modern
+/// form, covering the transitional range `2300 < Re < 5e6`,
+/// `0.5 < Pr < 2000`. Quoted at ±10%.
+///
+/// ```text
+/// f  = (0.79 ln Re - 1.64)^-2                  Petukhov friction factor
+/// Nu = (f/8)(Re - 1000) Pr / (1 + 12.7 sqrt(f/8) (Pr^(2/3) - 1))
+/// ```
+#[inline]
+pub fn gnielinski_f(re: Scalar) -> Scalar {
+    let d = 0.79 * re.ln() - 1.64;
+    1.0 / (d * d)
+}
+
+#[inline]
+pub fn gnielinski_nu(re: Scalar, pr: Scalar) -> Scalar {
+    let f = gnielinski_f(re);
+    let f8 = f / 8.0;
+    (f8 * (re - 1000.0) * pr) / (1.0 + 12.7 * f8.sqrt() * (pr.powf(2.0 / 3.0) - 1.0))
 }
 
 /// The `ref_grad` that rewrites a fixed-T wall's Robin triple to encode the
@@ -2592,6 +2644,70 @@ mod tests {
         for prt in [0.7, 0.85, 1.0, 1.3] {
             assert_eq!(jayatilleke_p(prt, prt), 0.0, "Pr = Pr_t = {prt}");
         }
+    }
+
+    /// SPEC-LIT §32.3: [`dittus_boelter_nu`]/[`gnielinski_nu`] against a hand
+    /// re-derivation written a DIFFERENT way (`exp(n ln x)` for the power
+    /// laws rather than `powf`, the friction factor inlined rather than
+    /// through [`gnielinski_f`]) - the "independent host mirror" category
+    /// this file's own validate.rs promotion note asks for: two structurally
+    /// different expressions landing on the same number is evidence a typo'd
+    /// exponent or a transposed term would not survive.
+    #[test]
+    fn nu_correlations_match_an_independently_written_derivation() {
+        for (re, pr) in [(1.0e4, 0.71), (1.6e4, 0.71), (1.0e5, 7.0), (5.0e5, 0.6)] {
+            let db = dittus_boelter_nu(re, pr);
+            let db_mirror = 0.023 * (0.8 * re.ln()).exp() * (0.4 * pr.ln()).exp();
+            assert!(
+                (db - db_mirror).abs() <= 1e-9 * db_mirror,
+                "Re {re} Pr {pr}: dittus_boelter_nu {db}, mirror {db_mirror}"
+            );
+
+            let f = gnielinski_f(re);
+            let f_mirror = {
+                let d = 0.79 * re.ln() - 1.64;
+                (d * d).recip()
+            };
+            assert!(
+                (f - f_mirror).abs() <= 1e-12 * f_mirror,
+                "Re {re}: gnielinski_f {f}, mirror {f_mirror}"
+            );
+
+            let gn = gnielinski_nu(re, pr);
+            let sqrt_f8 = (f / 8.0).sqrt();
+            let gn_mirror =
+                (f / 8.0) * (re - 1000.0) * pr / (1.0 + 12.7 * sqrt_f8 * ((2.0 / 3.0 * pr.ln()).exp() - 1.0));
+            assert!(
+                (gn - gn_mirror).abs() <= 1e-9 * gn_mirror.abs().max(1.0),
+                "Re {re} Pr {pr}: gnielinski_nu {gn}, mirror {gn_mirror}"
+            );
+        }
+    }
+
+    /// A closed-form numeric pin at the two channel cases' own operating
+    /// point (SPEC-LIT §32.2: Re ~ 1.6e4, Pr = 0.71) - computed independently
+    /// by hand to 10 significant figures and asserted tightly, so a future
+    /// change to either formula is caught here rather than only downstream in
+    /// the two-mesh comparison.
+    #[test]
+    fn nu_correlations_at_the_channel_operating_point() {
+        let re: Scalar = 1.6e4;
+        let pr: Scalar = 0.71;
+        assert!(
+            (dittus_boelter_nu(re, pr) - 46.294_261_62).abs() < 1e-4,
+            "Nu_DB = {}",
+            dittus_boelter_nu(re, pr)
+        );
+        assert!(
+            (gnielinski_f(re) - 0.027_708_723_8).abs() < 1e-9,
+            "f = {}",
+            gnielinski_f(re)
+        );
+        assert!(
+            (gnielinski_nu(re, pr) - 43.528_672_6).abs() < 1e-3,
+            "Nu_Gn = {}",
+            gnielinski_nu(re, pr)
+        );
     }
 
     /// SPEC-LIT §29.3's own consistency check: at `Pr = Pr_t`, `T+` reduces

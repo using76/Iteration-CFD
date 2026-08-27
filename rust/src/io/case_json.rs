@@ -480,6 +480,14 @@ pub enum ScalarBc {
     /// same way an explicit `nutkWallFunction { value }` already is.
     #[serde(rename = "thermalWallFunction")]
     ThermalWallFunction { value: f64 },
+    /// SPEC-LIT §32.2's redesigned thermal-wall gate: a wall carrying a fixed
+    /// heat FLUX `q` (W/m^2) rather than a temperature -
+    /// `crate::field::BcKind::FixedFluxTemperature`. Deliberately the SAME
+    /// JSON type on a `wallTreatment: standard` wall-function mesh and a
+    /// `lowRe` resolved one - see that `BcKind` variant's own doc for why one
+    /// condition is exact on both.
+    #[serde(rename = "fixedFluxTemperature")]
+    FixedFluxTemperature { q: f64 },
 }
 
 /// Vector counterpart of [`ScalarBc`], for `U`.
@@ -1475,6 +1483,11 @@ fn scalar_bc_spec(bc: &ScalarBc) -> PatchFieldSpec {
             s.value = vec![*value as Scalar];
             s
         }
+        ScalarBc::FixedFluxTemperature { q } => {
+            let mut s = spec("fixedFluxTemperature");
+            s.extra.insert("q".to_string(), q.to_string());
+            s
+        }
     }
 }
 
@@ -1720,10 +1733,17 @@ fn wall_preset_bc_spec(
 /// A non-wall patch with neither is an error naming the rule - there is no
 /// honest default for an inlet or open boundary's own turbulence quantity,
 /// unlike a wall's (SPEC-LIT §29.1 exists precisely to give walls one).
+///
+/// `turbulence_kind`/`model_name` are only for SPEC-LIT §32's second
+/// finding, via [`crate::io::case::validate_low_re_wall_treatment`]: `None`
+/// (an LES case - its own `lowRe` row is always valid, checked separately by
+/// `les_nut_type`) skips that check entirely.
 fn turb_field_spec(
     case_default: WallTreatmentKind,
     rule: &JsonPatchRule,
     field_name: &str,
+    turbulence_kind: Option<TurbulenceKind>,
+    model_name: Option<&str>,
 ) -> Result<PatchFieldSpec> {
     let opt = match field_name {
         "k" => &rule.k,
@@ -1745,6 +1765,15 @@ fn turb_field_spec(
 
     let treatment = rule.wall_treatment.unwrap_or(case_default).to_case();
     let setting = format!("patches: rule \"{}\"", rule.pattern);
+    let treatment = if turbulence_kind == Some(TurbulenceKind::Ras) {
+        crate::io::case::validate_low_re_wall_treatment(
+            &format!("{setting} wallTreatment (\"lowRe\" together with turbulence.model)"),
+            model_name.unwrap_or(""),
+            treatment,
+        )?
+    } else {
+        treatment
+    };
     let roughness = crate::io::case::Roughness::resolve(
         treatment,
         rule.ks.map(|v| v as Scalar),
@@ -2021,6 +2050,24 @@ impl JsonCase {
             p_boundary.insert(name.clone(), p_spec_for(rule));
             if self.initial.t.is_some() {
                 let treatment = rule.wall_treatment.unwrap_or(wall_treatment_default).to_case();
+                // SPEC-LIT §32's second finding, same check as
+                // `turb_field_spec`'s own: `T`'s own `lowRe` row (§29.3,
+                // "pins the molecular resistance") is only meaningful when
+                // `lowRe` itself is - an LES case (`turbulence_kind ==
+                // Les`) skips it, same reasoning as there.
+                let treatment = if turbulence_kind == Some(TurbulenceKind::Ras) {
+                    crate::io::case::validate_low_re_wall_treatment(
+                        &format!(
+                            "patches: rule \"{}\" T wallTreatment (\"lowRe\" together with \
+                             turbulence.model)",
+                            rule.pattern
+                        ),
+                        turbulence_model.as_deref().unwrap_or(""),
+                        treatment,
+                    )?
+                } else {
+                    treatment
+                };
                 t_boundary.insert(name.clone(), t_spec_for(rule, ambient_t, treatment)?);
             }
         }
@@ -2088,7 +2135,16 @@ impl JsonCase {
             let mut boundary = BTreeMap::new();
             for pname in &names {
                 let rule = resolve_patch_rule(&self.patches, pname)?;
-                boundary.insert(pname.clone(), turb_field_spec(wall_treatment_default, rule, name)?);
+                boundary.insert(
+                    pname.clone(),
+                    turb_field_spec(
+                        wall_treatment_default,
+                        rule,
+                        name,
+                        turbulence_kind,
+                        turbulence_model.as_deref(),
+                    )?,
+                );
             }
             Ok(Some(LoweredScalarField {
                 name: name.to_string(),
@@ -2800,6 +2856,25 @@ mod tests {
             .expect("plume.jsonc has at least one wall patch")
     }
 
+    /// `case.lower()`, with the turbulence model switched to `laminar` first
+    /// when `wt` is `LowRe` - `plume_case()`'s own model is `kEpsilon`, and
+    /// SPEC-LIT §32's second finding
+    /// (`crate::io::case::validate_low_re_wall_treatment`) correctly refuses
+    /// `lowRe` under it: no model this solver implements is valid at `lowRe`
+    /// today (that gate has its own tests, below). The tests using this
+    /// helper are exercising a DIFFERENT thing, the PRESET'S ROW SHAPE
+    /// (SPEC-LIT §29.1's table) - a purely mechanical string expansion that
+    /// does not depend on which model is named - so they sidestep the gate
+    /// by naming the one model it always leaves alone (`laminar`, `nu_t = 0`
+    /// regardless of wall treatment) rather than by substituting the row
+    /// away with `-permissive`, which would defeat the point of the test.
+    fn lower_permitting_low_re(mut case: JsonCase, wt: WallTreatmentKind) -> LoweredCase {
+        if wt == WallTreatmentKind::LowRe {
+            case.turbulence.as_mut().unwrap().model = "laminar".to_string();
+        }
+        case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"))
+    }
+
     /// Each preset expands to exactly its row - SPEC-LIT §29.1's table,
     /// string-level, through the JSONC lowering path.
     #[test]
@@ -2819,7 +2894,7 @@ mod tests {
                     r.ks = Some(0.001);
                 }
             }
-            let lowered = case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"));
+            let lowered = lower_permitting_low_re(case, wt);
             let p = a_wall_patch_name(&lowered);
 
             let ty = |f: &Option<LoweredScalarField>| f.as_ref().unwrap().boundary[&p].type_name.clone();
@@ -2850,7 +2925,7 @@ mod tests {
                     r.ks = Some(0.001);
                 }
             }
-            let lowered = case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"));
+            let lowered = lower_permitting_low_re(case, wt);
             let p = a_wall_patch_name(&lowered);
             assert_eq!(lowered.t_field.unwrap().boundary[&p].type_name, want, "{wt:?}");
         }
@@ -2884,11 +2959,45 @@ mod tests {
                     r.ks = Some(0.001);
                 }
             }
-            let lowered = case.lower().unwrap_or_else(|e| panic!("{wt:?} should lower: {e}"));
+            let lowered = lower_permitting_low_re(case, wt);
             let p = a_wall_patch_name(&lowered);
             let t = lowered.t_field.unwrap();
             assert_eq!(t.boundary[&p].type_name, "thermalWallFunction", "{wt:?}");
             assert_eq!(t.boundary[&p].value, vec![400.0 as Scalar], "{wt:?}");
+        }
+    }
+
+    /// SPEC-LIT §32.2's fixed-flux wall, through JSONC: the type stays
+    /// `fixedFluxTemperature` (not folded into `thermalWallFunction` or
+    /// `fixedGradient`) and `q` round-trips through `PatchFieldSpec::extra`
+    /// exactly as `Ks`/`Cs` already do for the rough-wall condition - on
+    /// every wall-treatment row, `lowRe` included, since SPEC-LIT §32.2's own
+    /// point is that this ONE condition is exact on both a wall-function and
+    /// a resolved mesh.
+    #[test]
+    fn fixed_flux_temperature_carries_its_own_q_through_jsonc() {
+        for wt in [
+            WallTreatmentKind::Standard,
+            WallTreatmentKind::Spalding,
+            WallTreatmentKind::Rough,
+            WallTreatmentKind::LowRe,
+        ] {
+            let mut case = plume_case();
+            case.turbulence.as_mut().unwrap().wall_treatment = wt;
+            {
+                let r = wall_rule_mut(&mut case);
+                clear_explicit_turbulence(r);
+                r.t = Some(ScalarBc::FixedFluxTemperature { q: 500.0 });
+                if wt == WallTreatmentKind::Rough {
+                    r.ks = Some(0.001);
+                }
+            }
+            let lowered = lower_permitting_low_re(case, wt);
+            let p = a_wall_patch_name(&lowered);
+            let t = lowered.t_field.unwrap();
+            assert_eq!(t.boundary[&p].type_name, "fixedFluxTemperature", "{wt:?}");
+            let q: f64 = t.boundary[&p].extra["q"].parse().unwrap();
+            assert!((q - 500.0).abs() < 1e-9, "{wt:?}: q = {q}");
         }
     }
 
@@ -2904,6 +3013,51 @@ mod tests {
             Ok(_) => panic!("rough with no Ks must be refused"),
         };
         assert!(err.to_string().contains("Ks"), "{err}");
+    }
+
+    /// SPEC-LIT §32's second finding, wired into the JSONC lowering path:
+    /// `wallTreatment lowRe` under `plume_case()`'s own `kEpsilon` (a
+    /// high-Reynolds-number closure with no near-wall damping) is refused in
+    /// strict mode, naming the model - not a mesh problem, `lowRe` itself is
+    /// invalid under this model at any resolution.
+    #[test]
+    fn lowre_wall_treatment_under_kepsilon_is_refused_naming_the_model() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let mut case = plume_case();
+        case.turbulence.as_mut().unwrap().wall_treatment = WallTreatmentKind::LowRe;
+        clear_explicit_turbulence(wall_rule_mut(&mut case));
+        let err = match case.lower() {
+            Err(e) => e,
+            Ok(_) => panic!("lowRe under kEpsilon must be refused"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("kEpsilon"), "{s}");
+        assert!(s.contains("standard"), "{s}");
+    }
+
+    /// The other direction of the same gate: `-permissive` substitutes
+    /// `standard` (the full wall-function row) and the case lowers - `nut`
+    /// on the wall ends up `nutkWallFunction`, not `nutLowReWallFunction`.
+    #[test]
+    fn permissive_substitutes_standard_for_lowre_under_kepsilon() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+        crate::io::contract::set_permissive(true);
+
+        let mut case = plume_case();
+        case.turbulence.as_mut().unwrap().wall_treatment = WallTreatmentKind::LowRe;
+        clear_explicit_turbulence(wall_rule_mut(&mut case));
+        let lowered = case.lower().expect("-permissive resolves it");
+        let p = a_wall_patch_name(&lowered);
+        assert_eq!(
+            lowered.nut_field.unwrap().boundary[&p].type_name,
+            "nutkWallFunction",
+            "-permissive must substitute the standard row, not leave lowRe in place"
+        );
+
+        crate::io::contract::set_permissive(false);
     }
 
     /// Precedence: an explicit `nutUWallFunction` on one patch wins on that
@@ -3279,7 +3433,31 @@ mod tests {
             if path.extension().and_then(|e| e.to_str()) == Some("jsonc") {
                 let case = read_case_jsonc(&path)
                     .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                case.lower().unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                if let Err(e) = case.lower() {
+                    // SPEC-LIT §32's own open item: `channelPeriodicFluxLowRe`,
+                    // `channelPeriodicLowRe` and `channelThermalLowRe` all
+                    // name `wallTreatment lowRe` under `kEpsilon`, which
+                    // `crate::io::case::validate_low_re_wall_treatment` now
+                    // correctly refuses in strict mode (§32's second finding
+                    // - no model this solver implements is valid at `lowRe`
+                    // today; see `docs/07-fire-solver.md` §1.1's own "OPEN"
+                    // subsection). That is a DIFFERENT contract from the one
+                    // THIS test exercises, so a case blocked on exactly that
+                    // finding is retried under `-permissive` and must still
+                    // lower cleanly; any OTHER failure is the transient-
+                    // algorithm regression this test exists to catch, and is
+                    // not swallowed.
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("wallTreatment (\"lowRe\" together with turbulence.model)"),
+                        "{}: {e}",
+                        path.display()
+                    );
+                    crate::io::contract::set_permissive(true);
+                    let retry = case.lower();
+                    crate::io::contract::set_permissive(false);
+                    retry.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                }
                 checked += 1;
             }
         }

@@ -25,7 +25,7 @@ use crate::fv::{GradScheme, SnGradScheme};
 use crate::io::dict::FoamDict;
 use crate::io::schemes::{DivEntry, FvSchemes};
 use crate::momentum::BuoyancyCoeffs;
-use crate::io::contract::{permissive, unsupported, warn_once};
+use crate::io::contract::{permissive, unsupported, unsupported_note, warn_once};
 use crate::timescheme::DdtScheme;
 use crate::{Label, Scalar};
 
@@ -432,6 +432,29 @@ pub fn read_wall_treatment(d: &FoamDict) -> Result<(WallTreatment, Option<Roughn
     let wt_name = d.get_or("RAS/wallTreatment", "standard").to_string();
     let wt = WallTreatment::from_name(&wt_name)?;
 
+    // SPEC-LIT §32's second finding: `lowRe` is only checked against
+    // `RAS/model` - an LES case's `simulationType LES;` has its own,
+    // always-valid `lowRe` row (§30.1's "resolved, nu_t,w = 0", checked
+    // through `les_nut_type`, not this one), so a case that never named a RAS
+    // model at all (`RAS/model` absent, the normal state for an LES case)
+    // must not be told it named an invalid one.
+    let sim = d
+        .get_or("simulationType", "RAS")
+        .split_whitespace()
+        .next()
+        .unwrap_or("RAS")
+        .to_string();
+    let model_name = if sim == "LES" {
+        String::new()
+    } else {
+        d.get_or("RAS/model", d.get_or("RAS/RASModel", "")).to_string()
+    };
+    let wt = validate_low_re_wall_treatment(
+        "RAS/wallTreatment (\"lowRe\" together with RAS/model)",
+        &model_name,
+        wt,
+    )?;
+
     let ks = d
         .has("RAS/roughness/Ks")
         .then(|| d.scalar("RAS/roughness/Ks", 0.0));
@@ -441,6 +464,68 @@ pub fn read_wall_treatment(d: &FoamDict) -> Result<(WallTreatment, Option<Roughn
     let rough = Roughness::resolve(wt, ks, cs, "constant/momentumTransport: RAS/roughness")?;
 
     Ok((wt, rough))
+}
+
+/// SPEC-LIT §32's second finding, promoted to a standing rule: the `lowRe`
+/// row of §29.1's table pins NO wall model at all on `nut`/`k` (plain
+/// `zeroGradient` on `epsilon`/`omega` too), which is only physically sound
+/// when the turbulence model itself integrates through the viscous sublayer.
+/// Neither RAS model this solver implements does - `kEpsilon` and `kOmega`
+/// (and `kOmegaSST`, which shares k-omega's near-wall behaviour) are all
+/// high-Reynolds-number closures with no near-wall damping function, invalid
+/// below y+ ~ 30 REGARDLESS of what the mesh does there. This is exactly the
+/// §32 gate's own second finding: `cases/channelPeriodicFluxLowRe.jsonc`
+/// still blew `k` up to 160 m2/s2 at y+ 1.4-6.4 on its hot walls even after
+/// its under-resolved side walls were given the correct (`standard`) row -
+/// the mesh was never the problem, the model was. The low-Re variant that
+/// would make `lowRe` valid under a k-epsilon-family model,
+/// `LaunderSharmaKE` (Launder & Sharma 1974), is a recognised-but-not-
+/// implemented model (`models::registry::RECOGNISED_NOT_IMPLEMENTED`) - so
+/// the honest menu of models `lowRe` is valid under, today, is empty, and
+/// that is what gets printed rather than a placeholder name.
+///
+/// `treatment` passes through unchanged when it is not `lowRe`, and
+/// `model_name` empty or `"laminar"` is left alone too - a laminar run has
+/// `nu_t = 0` regardless of what any wall treatment says, so there is no
+/// sublayer-damping question for it to get wrong, and an empty name means
+/// either no RAS model was named at all (a case this function's own callers
+/// have already arranged not to reach it for, e.g. an LES case) or the
+/// model-name error `models::registry::select_turbulence_model` raises on
+/// its own is the one that should fire, not this one. Otherwise a §13.4
+/// error naming the (empty) menu of low-Re-valid models and the alternative
+/// (`standard`); under `-permissive`, `standard` is substituted and the
+/// substitution is printed, once per distinct `setting`.
+pub fn validate_low_re_wall_treatment(
+    setting: &str,
+    model_name: &str,
+    treatment: WallTreatment,
+) -> Result<WallTreatment> {
+    if treatment != WallTreatment::LowRe {
+        return Ok(treatment);
+    }
+    let name = model_name.split_whitespace().next().unwrap_or("");
+    if name.is_empty() || name.eq_ignore_ascii_case("laminar") {
+        return Ok(treatment);
+    }
+
+    // Empty today, and honestly so - see this function's own doc comment.
+    const LOW_RE_VALID: &[&str] = &[];
+    if LOW_RE_VALID.contains(&name) {
+        return Ok(treatment);
+    }
+
+    unsupported_note(
+        setting,
+        name,
+        LOW_RE_VALID,
+        "kEpsilon, kOmega and kOmegaSST are high-Reynolds-number closures \
+         with no near-wall damping function - invalid below y+ ~ 30 \
+         regardless of the mesh's own resolution there (SPEC-LIT S32's \
+         second finding); the low-Re variant that would fix this, \
+         LaunderSharmaKE, is recognised but not yet implemented",
+        "standard (the full wall-function row)",
+        WallTreatment::Standard,
+    )
 }
 
 /// Everything a RAS model needs from `system/` plus the bounds it enforces.
@@ -2426,8 +2511,23 @@ mod tests {
             if path.extension().and_then(|e| e.to_str()) == Some("jsonc") {
                 let case = crate::io::case_json::read_case_jsonc(&path)
                     .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                case.lower()
-                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                if let Err(e) = case.lower() {
+                    // SPEC-LIT §32's own open item, same exception as the
+                    // twin test in `io::case_json` - see that one's comment
+                    // for the full reasoning. Any OTHER failure is the
+                    // transient-algorithm regression this test exists to
+                    // catch, and is not swallowed.
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("wallTreatment (\"lowRe\" together with turbulence.model)"),
+                        "{}: {e}",
+                        path.display()
+                    );
+                    crate::io::contract::set_permissive(true);
+                    let retry = case.lower();
+                    crate::io::contract::set_permissive(false);
+                    retry.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                }
                 checked += 1;
             } else if path.is_dir()
                 && path.join("constant").join("polyMesh").join("owner").exists()

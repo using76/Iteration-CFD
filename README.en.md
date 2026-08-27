@@ -102,8 +102,8 @@ applied on faces rather than interpolated from cell values.
 | LES wall model | Werner–Wengle (1991) — an analytically invertible power law integrated over the first cell's wall-parallel average speed, no Newton iteration; the `standard`/`spalding` presets both collapse to this one model under LES, `lowRe` gives `nu_t,w = 0`, and `rough` is refused by name (§13.4) since no rough LES wall model exists yet |
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | Turbulence selection in the coupled solvers (`ofgpu-buoyant`, `ofgpu-fire`) | `ofgpu-buoyant`: the `CoupledTurbulence` trait dispatches on the case's own `RAS { model ...; }`/`simulationType`, exactly as the standalone drivers do — k-ε, k-ω, k-ω SST (wall distance computed automatically) and LES (Smagorinsky/WALE/Deardorff, with §16's filter widths and van Driest damping) all construct the ACTUAL model asked for, and buoyancy production `G_b` is wired into the right equation for each (§17, §30.2). `ofgpu-fire`: still k-ε only — its combustion mixing-time closure and thermal wall function need `epsilon` directly, so any other model is refused by name, a §13.4 error, not a silent substitution |
-| Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1) |
-| Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation |
+| Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — none of `kEpsilon`/`kOmega`/`kOmegaSST` have one, so it is refused by name rather than left to diverge (SPEC-LIT §32) |
+| Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. **Validated** against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic duct, +2%/−4% inside both bands (SPEC-LIT §32) |
 | Wall distance | Poisson method (Tucker 1998) |
 | Buoyancy production | G_b term (Rodi 1987, Henkes et al. 1991) |
 
@@ -243,8 +243,8 @@ error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
 ## Validation
 
 ```
-cargo test        715 passed, 0 failed (lib; 767 across every target, including the small per-binary CLI-parsing suites)
-ofgpu-validate    232 / 232 checks passed
+cargo test        724 passed, 0 failed (lib; 776 across every target, including the small per-binary CLI-parsing suites)
+ofgpu-validate    240 / 240 checks passed
 ```
 
 ### Order of convergence — method of manufactured solutions
@@ -329,29 +329,46 @@ Jayatilleke thermal wall function:
 | The `thermalWallFunction` Robin triple encodes exactly the analytic Jayatilleke flux (the one-cell conductance identity) | 0 (round-off) |
 | Werner-Wengle: both branches agree at the branch point, and each branch's own closed form reproduces a manufactured `tau_w` to round-off | 0 (round-off) |
 | Coupled-solver selection: `kOmegaSST` via `ofgpu-buoyant`'s `build_coupled`, on a buoyant case, yields a different `nut` FNV hash than `kEpsilon` on the identical case | hashes differ (decisive) |
+| Thermal wall-function gate, Nusselt verdict (replayed measurement) — `cases/channelPeriodicFluxWF.jsonc`'s own numbers, against Dittus-Boelter/Gnielinski | +2% / −4% (inside both ±10% / ±20–25% bands) |
 
 These establish that the rough-wall law collapses to the existing smooth one
 at `Ks = 0` — the case that never mentions roughness — that the thermal wall
 function's own algebra is internally exact, and that a case naming
 `kOmegaSST` in a coupled solver actually gets it. They do **not** by
-themselves establish that a coarse wall-function mesh and a resolved
-low-Re mesh agree on the wall heat flux of the *same* flow — that claim was
-run for real, three times, not left as a semi-analytic proxy, most recently
-on a genuinely periodic (cyclic-patch) duct: `cases/channelPeriodicWF.jsonc`
-(y+ ≈ 41.7, `thermalWallFunction`) and `cases/channelPeriodicLowRe.jsonc`
-(y+ ≈ 0.31, plain `fixedValue`) are the identical streamwise-cyclic duct,
-hot walls at 373.15 K, zero gravity, driven by a momentum-source body force
-and a compensating heat sink in place of an inlet/outlet, run through
-`ofgpu-fire`. Measured wall heat input: **6.00 W** (wall-function mesh) vs.
-**55.83 W** (resolved mesh) — ratio **0.107**, WORSE than the previous
-(non-periodic, developing) duct's **0.381**, not an improvement — because
-the two runs settle at very different driving ΔT (≈ 50 K vs ≈ 3 K; a
-matched-ΔT sink was tried and produced an unphysical domain core instead).
-Reported honestly, not tuned: this gate is still open, and the periodic
-rerun's own next step — a spatially-weighted energy closure so both meshes
-can be compared at the same ΔT — is named, not attempted here. See
-`docs/07-fire-solver.md` §1.1 for the full breakdown, including the two
-earlier (non-periodic) attempts.
+themselves establish that a coarse wall-function mesh agrees with an
+independent published correlation on the wall heat flux of a real flow — that
+claim needed a live run, and SPEC-LIT §32's redesigned gate is what makes it
+checkable at all: three earlier fixed-wall-temperature attempts (ratios
+0.095, 0.381, 0.107) compared two runs that, it turns out, had solved
+different problems (a fixed `T_w` lets the bulk temperature float, so two
+meshes with different near-wall conductances settle at different ΔT).
+
+**Validated.** Fixing the SAME wall heat flux `q_w` on both meshes instead —
+letting each predict its own ΔT — and comparing the result as a Nusselt
+number against Dittus & Boelter (1930) and Gnielinski (1976) closes the
+wall-function leg. `cases/channelPeriodicFluxWF.jsonc` (`standard`
+wallTreatment, y+ ≈ 41.7): `q_w` = 500 W/m², `T_w` = 501.99 K (diagnosed by
+the thermal wall function), `T_b` = 453.97 K, `U_b` = 3.512 m/s. On the
+heated-perimeter hydraulic diameter (`D_h` = 0.08 m, the convention these
+correlations were derived under, for a duct heated on two of its four
+walls), Re = 18 731 and the measured Nu = 50.41 sits at **+2% of Gnielinski**
+(±10%) and **−4% of Dittus-Boelter** (±20–25%) — inside both bands. A
+force-balance cross-check gives `U_b/u_tau` = 12.6 against the 15–17 a fully
+developed plane channel gives, a real caveat (this duct's side walls add
+drag a plane-channel correlation does not know about), reported rather than
+buried. `ofgpu-validate`'s `check_thermal_wall_function_gate_verdict_replay`
+replays this exact measurement on every run, permanently.
+
+**Still open, and for a different reason now.** The matching resolved mesh,
+`cases/channelPeriodicFluxLowRe.jsonc` (identical `q_w`, graded to y+ ~ 1),
+does not converge — not because the wall function is wrong, but because
+standard k-epsilon is a high-Reynolds-number model with no near-wall damping,
+invalid below y+ ~ 30 regardless of mesh resolution. Ofgpu now catches this
+before the solver runs (`kEpsilon`/`kOmega`/`kOmegaSST` all refuse a `lowRe`
+wall treatment, §13.4) rather than letting it diverge silently; it stays
+blocked on a low-Reynolds-number RAS model (`LaunderSharmaKE`, recognised but
+not implemented). See `docs/07-fire-solver.md` §1.1 for the full trace,
+including the three superseded attempts.
 
 ---
 
@@ -649,6 +666,13 @@ Sources for the numerical methods and models. Section numbers refer to
 - Tucker, P. G. (1998). Assessment of geometric multilevel convergence robustness
   and a wall distance method for flows with multiple internal boundaries.
   *Applied Mathematical Modelling*, 22(4–5), 293–305. — §6.6
+- Dittus, F. W., & Boelter, L. M. K. (1930). Heat transfer in automobile
+  radiators of the tubular type. *University of California Publications in
+  Engineering*, 2, 443–461. (reprinted: *International Communications in
+  Heat and Mass Transfer*, 12(1), 3–22, 1985.) — §32.3
+- Gnielinski, V. (1976). New equations for heat and mass transfer in
+  turbulent pipe and channel flow. *International Chemical Engineering*,
+  16(2), 359–368. — §32.3
 
 ### Buoyancy
 

@@ -264,6 +264,7 @@ struct EnergyKernels {
     accumulate: CudaFunction,
     k_eff: CudaFunction,
     target_divergence: CudaFunction,
+    fixed_flux: CudaFunction,
 }
 
 impl EnergyKernels {
@@ -273,6 +274,7 @@ impl EnergyKernels {
             accumulate: k.func("energyAccumulate")?,
             k_eff: k.func("energyKEff")?,
             target_divergence: k.func("energyTargetDivergence")?,
+            fixed_flux: k.func("energyFixedFluxTemperature")?,
         })
     }
 
@@ -355,6 +357,35 @@ impl EnergyKernels {
                 .arg(&cp)
                 .arg(&inv_gamma_p0)
                 .arg(&dp0dt)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// SPEC-LIT §32.2's fixed-flux rewrite, on the `n` faces `face` names.
+    fn fixed_flux(
+        &self,
+        gpu: &Gpu,
+        fr: &mut DevBuf<Scalar>,
+        ref_grad: &mut DevBuf<Scalar>,
+        ref_value: &DevBuf<Scalar>,
+        k_eff_wall: &DevBuf<Scalar>,
+        face: &DevBuf<Label>,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.fixed_flux)
+                .arg(fr)
+                .arg(ref_grad)
+                .arg(ref_value)
+                .arg(k_eff_wall)
+                .arg(face)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }
@@ -854,6 +885,12 @@ pub struct Energy<'m> {
     /// [`ThermalWallData`] launcher is skipped by [`Self::update_thermal_wall`]
     /// rather than run over zero faces.
     twd: Option<ThermalWallData>,
+
+    /// SPEC-LIT §32.2's fixed wall heat flux faces - `T`'s own
+    /// `fixedFluxTemperature` patch type, set by [`Self::set_fixed_flux_walls`].
+    /// `None` until then, same "nothing to do" convention as [`Self::twd`].
+    ffq_faces: Option<DevBuf<Label>>,
+    ffq_n: usize,
 }
 
 impl<'m> Energy<'m> {
@@ -908,6 +945,8 @@ impl<'m> Energy<'m> {
 
             wall: WallFunctionCoeffs::default(),
             twd: None,
+            ffq_faces: None,
+            ffq_n: 0,
         })
     }
 
@@ -993,6 +1032,41 @@ impl<'m> Energy<'m> {
         }
         self.wall = wall;
         self.twd = Some(ThermalWallData::build(gpu, faces)?);
+        Ok(())
+    }
+
+    /// Wire SPEC-LIT §32.2's fixed wall heat flux onto whichever faces `T`'s
+    /// OWN patch type named `fixedFluxTemperature` -
+    /// `crate::field::BcKind::is_fixed_flux_temperature`, the same S15.5
+    /// discipline [`Self::set_thermal_wall`] follows for
+    /// `ThermalWallFunction`. Unlike that condition, this one needs no
+    /// `WallFunctionCoeffs` at all - see `BcKind::FixedFluxTemperature`'s own
+    /// doc for why `flux_to_grad` needs nothing but the current `k_eff_wall`.
+    ///
+    /// Call once, after [`Self::new`] and before the first [`Self::correct`].
+    /// A case with no `fixedFluxTemperature` patch never needs to call this -
+    /// [`Self::correct`] skips the update entirely while this list is empty.
+    pub fn set_fixed_flux_walls(&mut self, gpu: &Gpu, faces: &[bool]) -> Result<()> {
+        if faces.len() != self.m.n_boundary_faces {
+            return Err(Error::Config(format!(
+                "Energy::set_fixed_flux_walls: {} face flags, the mesh has {} \
+                 boundary faces",
+                faces.len(),
+                self.m.n_boundary_faces
+            )));
+        }
+        let list: Vec<Label> = faces
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on)
+            .map(|(bf, _)| bf as Label)
+            .collect();
+        self.ffq_n = list.len();
+        // Same zero-length convention as `ThermalWallData::build`: a padded
+        // one-element buffer that `update_fixed_flux` never reads, because it
+        // returns early on `ffq_n == 0`.
+        let padded = if list.is_empty() { vec![0 as Label] } else { list };
+        self.ffq_faces = Some(gpu.upload(&padded)?);
         Ok(())
     }
 
@@ -1099,6 +1173,27 @@ impl<'m> Energy<'m> {
             self.props.pr,
             self.props.pr_t,
             K_MIN,
+        )
+    }
+
+    /// SPEC-LIT §32.2: rewrite `T`'s Robin triple on every
+    /// `fixedFluxTemperature` face to `ref_grad = q/k_eff_wall` with the
+    /// CURRENT `k_eff_wall` - a no-op while [`Self::ffq_faces`] is `None`
+    /// (`set_fixed_flux_walls` was never called). Reads `self.k_eff_face.bf`,
+    /// so it MUST run after [`Self::update_k_eff`] and before
+    /// [`Self::assemble`], exactly like [`Self::update_thermal_wall`].
+    fn update_fixed_flux(&mut self, gpu: &Gpu) -> Result<()> {
+        let Some(face) = &self.ffq_faces else {
+            return Ok(());
+        };
+        self.ek.fixed_flux(
+            gpu,
+            &mut self.t.fr,
+            &mut self.t.ref_grad,
+            &self.t.ref_value,
+            &self.k_eff_face.bf,
+            face,
+            self.ffq_n,
         )
     }
 
@@ -1273,6 +1368,7 @@ impl<'m> Energy<'m> {
         self.refresh_rho_cp(gpu, gas)?;
         self.update_k_eff(gpu, nut, gas)?;
         self.update_thermal_wall(gpu, k, &gas.rho().f, nu)?;
+        self.update_fixed_flux(gpu)?;
         self.update_conv_flux(gpu, phi)?;
 
         let alpha = self.ctrl.t_relax;
@@ -1608,6 +1704,192 @@ mod tests {
             assert!(
                 (got[i] - want).abs() < 1e-6 * (1.0 + want.abs()),
                 "cell {i}: T={}, want {want} (x={x})",
+                got[i]
+            );
+        }
+        Ok(())
+    }
+
+    /// Build the same slab as [`steady_slab_fixed_flux_gives_an_exact_linear_profile`]
+    /// but through [`BcKind::FixedFluxTemperature`]/[`Energy::set_fixed_flux_walls`]
+    /// (SPEC-LIT §32.2) rather than a hand-set triple, with a UNIFORM but
+    /// NONZERO eddy viscosity so `k_eff_wall != props.k` - the case that
+    /// would expose a wall condition that silently used the molecular `k`
+    /// (or a `k_eff_wall` computed once and never refreshed) instead of the
+    /// CURRENT per-face `k_eff_wall` §32.2 asks for. `gas.update_density` is
+    /// called once, before the loop, exactly as the test above - `rho` stays
+    /// at its uniform initial value for the whole run, so `k_eff_wall` is a
+    /// single known constant throughout and every check below is closed-form.
+    #[allow(clippy::too_many_arguments)]
+    fn fixed_flux_slab<'m>(
+        gpu: &crate::Gpu,
+        hm: &HostMesh,
+        m: &'m crate::GpuMesh,
+        props: GasProperties,
+        q_w: Scalar,
+        t_l: Scalar,
+        nut_val: Scalar,
+    ) -> Result<(Energy<'m>, GpuScalarField, GpuSurfaceScalarField, GasState<'m>, Scalar)> {
+        let (mut e, mut nut, phi) = laminar_slab_energy(gpu, hm, m, props, true, 1.0)?;
+        let nbf = hm.n_boundary_faces;
+
+        gpu.write(&mut nut.f, &vec![nut_val; hm.n_cells])?;
+        gpu.write(&mut nut.bf, &vec![nut_val; nbf])?;
+
+        {
+            let f = e.field_mut();
+            let mut kind = vec![BcKind::Empty as Label; nbf];
+            let mut fr = vec![0.0 as Scalar; nbf];
+            let mut rv = vec![0.0 as Scalar; nbf];
+            for (p, pi) in hm.patches.iter().enumerate() {
+                match p {
+                    // x=0: the fixed-flux patch - `q` lives in `ref_value`,
+                    // exactly the `ThermalWallFunction`-style "seeded once,
+                    // read every iteration" convention (SPEC-LIT §32.2).
+                    0 => {
+                        for k in 0..pi.size {
+                            kind[pi.start + k] = BcKind::FixedFluxTemperature as Label;
+                            fr[pi.start + k] = 0.0;
+                            rv[pi.start + k] = q_w;
+                        }
+                    }
+                    1 => {
+                        for k in 0..pi.size {
+                            kind[pi.start + k] = BcKind::FixedValue as Label;
+                            fr[pi.start + k] = 1.0;
+                            rv[pi.start + k] = t_l;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            gpu.write(&mut f.bc_kind, &kind)?;
+            gpu.write(&mut f.fr, &fr)?;
+            gpu.write(&mut f.ref_value, &rv)?;
+            gpu.write(&mut f.f, &vec![t_l; hm.n_cells])?;
+        }
+
+        let mut faces = vec![false; nbf];
+        for k in 0..hm.patches[0].size {
+            faces[hm.patches[0].start + k] = true;
+        }
+        e.set_fixed_flux_walls(gpu, &faces)?;
+
+        e.initialise(gpu)?;
+        let mut gas = GasState::new(gpu, m, props, DomainKind::Open, 101325.0)?;
+        gas.update_density(gpu, e.field())?;
+
+        let cp_over_prt = props.cp / props.pr_t;
+        let rho0 = props_rho_at(props, t_l);
+        let k_eff_wall = props.k + rho0 * nut_val * cp_over_prt;
+
+        Ok((e, nut, phi, gas, k_eff_wall))
+    }
+
+    /// `rho = p0/(R_s T)` at the SAME `p0`/`T` [`fixed_flux_slab`] seeds
+    /// `GasState` with - a tiny host mirror so the tests above do not need to
+    /// download `gas.rho()` just to predict `k_eff_wall` in closed form.
+    fn props_rho_at(props: GasProperties, t: Scalar) -> Scalar {
+        101325.0 / (props.r_s() * t)
+    }
+
+    /// SPEC-LIT §32.2's one-cell analytic check: after a SINGLE
+    /// [`Energy::correct`] call (no need to iterate to convergence - the
+    /// fixed-flux triple is exact at whatever `T_P`/`k_eff_wall` the matrix
+    /// was assembled with, every single call), the flux face's `ref_grad`
+    /// must equal `q_w / k_eff_wall` EXACTLY, with `k_eff_wall` the CURRENT
+    /// per-face value (molecular `k` plus the eddy term from the uniform,
+    /// nonzero `nut` this test sets) - not the molecular `props.k` alone,
+    /// which is what a wall condition that ignored `k_eff_wall` entirely
+    /// would produce instead.
+    #[test]
+    fn fixed_flux_triple_is_exact_after_one_iteration() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 6;
+        let h: Scalar = 0.02;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+
+        let props = GasProperties { k: 0.5, cp: 1000.0, ..GasProperties::default() };
+        let q_w: Scalar = 200.0;
+        let t_l: Scalar = 300.0;
+        let nut_val: Scalar = 0.01;
+
+        let (mut e, nut, phi, gas, k_eff_wall) =
+            fixed_flux_slab(&g, &hm, &m, props, q_w, t_l, nut_val)?;
+
+        // Sanity: the eddy term genuinely dominates here, so a test that
+        // passed with the molecular `props.k` instead would be caught.
+        assert!(
+            k_eff_wall > 5.0 * props.k,
+            "k_eff_wall = {k_eff_wall} should be well above molecular k = {}",
+            props.k
+        );
+
+        let k_cell = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+        e.correct(&g, &phi, &nut, &k_cell, 0.0, &gas)?;
+
+        let fr = g.download(&e.field().fr)?;
+        let rg = g.download(&e.field().ref_grad)?;
+        let bf0 = hm.patches[0].start;
+        assert_eq!(fr[bf0], 0.0, "fixedFluxTemperature must stay fr = 0");
+
+        let want = flux_to_grad(q_w, k_eff_wall);
+        assert!(
+            (rg[bf0] - want).abs() < 1e-9 * want.abs(),
+            "ref_grad = {}, want q_w/k_eff_wall = {want}",
+            rg[bf0]
+        );
+
+        // And the identity §32.2 actually cares about: the flux the matrix
+        // sees, k_eff_wall * ref_grad, is exactly q_w - whatever k_eff_wall
+        // happens to be.
+        let flux = k_eff_wall * rg[bf0];
+        assert!(
+            (flux - q_w).abs() < 1e-9 * q_w.abs(),
+            "k_eff_wall * ref_grad = {flux}, want q_w = {q_w}"
+        );
+        Ok(())
+    }
+
+    /// SPEC-LIT §32.2: the imposed flux comes back out of the ASSEMBLED
+    /// equation, not just out of the boundary triple in isolation - the
+    /// steady conduction profile this converges to has EXACTLY the slope
+    /// `-q_w/k_eff_wall`, with the turbulent `k_eff_wall` this test's
+    /// nonzero `nut` implies, not the molecular `props.k` alone.
+    #[test]
+    fn fixed_flux_temperature_reproduces_q_through_the_assembled_equation() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 10;
+        let h: Scalar = 0.02;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+
+        let props = GasProperties { k: 0.5, cp: 1000.0, ..GasProperties::default() };
+        let q_w: Scalar = 200.0;
+        let t_l: Scalar = 300.0;
+        let nut_val: Scalar = 0.01;
+
+        let (mut e, nut, phi, gas, k_eff_wall) =
+            fixed_flux_slab(&g, &hm, &m, props, q_w, t_l, nut_val)?;
+
+        let k_cell = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+        for _ in 0..5 {
+            e.correct(&g, &phi, &nut, &k_cell, 0.0, &gas)?;
+        }
+
+        // T(x) = T_L + (q_w/k_eff_wall) * (L - x).
+        let got = g.download(&e.field().f)?;
+        let l = N as Scalar * h;
+        let slope = -q_w / k_eff_wall;
+        for i in 0..N {
+            let x = (i as Scalar + 0.5) * h;
+            let want = t_l + slope * (x - l);
+            assert!(
+                (got[i] - want).abs() < 1e-6 * (1.0 + want.abs()),
+                "cell {i}: T={}, want {want} (x={x}, k_eff_wall={k_eff_wall})",
                 got[i]
             );
         }

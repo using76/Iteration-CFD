@@ -353,6 +353,15 @@ fn scalar_patch(
         BcKind::TotalPressure => Some(spec.required_number("p0", patch, "totalPressure")?),
         _ => None,
     };
+    // SPEC-LIT §32.2: the fixed wall heat flux, read once here so a missing
+    // or unreadable `q` is reported against the condition that wanted it
+    // (§13.4), same convention as `p0`/`turbulentIntensity` above.
+    let q_flux = match kind {
+        BcKind::FixedFluxTemperature => {
+            Some(spec.required_number("q", patch, "fixedFluxTemperature")?)
+        }
+        _ => None,
+    };
 
     let cmu = aux.inputs.cmu();
 
@@ -483,6 +492,17 @@ fn scalar_patch(
                 },
                 0.0,
             ),
+
+            // SPEC-LIT §32.2: a fixed wall heat flux. `fr = 0` from the
+            // start (this is a genuine Neumann condition, not a degenerate
+            // Dirichlet placeholder like the wall functions above) with `q`
+            // held in `ref_value` - `crate::energy::Energy::update_fixed_flux`
+            // reads it back every outer iteration and never rewrites it, the
+            // same "survives being read again" convention `ThermalWallFunction`
+            // uses for `T_w`. The seed `ref_grad` is never used: that method
+            // runs before the very first assembly, exactly like every wall
+            // function above.
+            BcKind::FixedFluxTemperature => (0.0, q_flux.unwrap_or(0.0), 0.0),
 
             // Vector-only conditions on a scalar field. Naming one is a
             // mistake in the case, not something to guess at.
@@ -806,7 +826,8 @@ fn vector_patch(
             | BcKind::KqRWallFunction
             | BcKind::KLowReWallFunction
             | BcKind::ThermalWallFunction
-            | BcKind::WernerWengleWallFunction => {
+            | BcKind::WernerWengleWallFunction
+            | BcKind::FixedFluxTemperature => {
                 return Err(Error::Field {
                     field: field.to_string(),
                     msg: format!(
@@ -2056,6 +2077,7 @@ mod tests {
         assert_eq!(k("flowRateInletVelocity"), BcKind::FlowRateInletVelocity);
         assert_eq!(k("nutLowReWallFunction"), BcKind::NutLowReWallFunction);
         assert_eq!(k("thermalWallFunction"), BcKind::ThermalWallFunction);
+        assert_eq!(k("fixedFluxTemperature"), BcKind::FixedFluxTemperature);
     }
 
     /// SPEC-LIT §29.3: OpenFOAM's `alphat` name for the Jayatilleke wall
@@ -2215,6 +2237,34 @@ mod tests {
 
         assert!((b.ref_value[0] - (10.0 - 2.0)).abs() < 1e-12, "{}", b.ref_value[0]);
         assert!((b.ref_value[1] - 10.0).abs() < 1e-12, "{}", b.ref_value[1]);
+    }
+
+    /// SPEC-LIT §32.2: `fr = 0` from the start (a genuine Neumann condition,
+    /// not a degenerate Dirichlet placeholder), with `q` held in `ref_value`
+    /// exactly as `thermalWallFunction` holds its `T_w` there.
+    #[test]
+    fn fixed_flux_temperature_seeds_fr_zero_and_holds_q_in_ref_value() {
+        let mut sp = spec("fixedFluxTemperature");
+        sp.extra.insert("q".into(), "500".into());
+        let raw = scalar_field("inlet", sp);
+
+        let b = scalar_boundary(&raw, &mesh_with_areas(), &[300.0, 300.0]).expect("builds");
+
+        assert_eq!(b.fr[0], 0.0);
+        assert!((b.ref_value[0] - 500.0).abs() < 1e-12, "{}", b.ref_value[0]);
+    }
+
+    /// `fixedFluxTemperature` with no `q` entry is a case error naming the
+    /// condition, not a silent zero flux.
+    #[test]
+    fn fixed_flux_temperature_without_q_is_an_error() {
+        let sp = spec("fixedFluxTemperature");
+        let raw = scalar_field("inlet", sp);
+
+        let e = scalar_boundary(&raw, &mesh_with_areas(), &[300.0, 300.0])
+            .expect_err("must refuse a missing q");
+        let msg = e.to_string();
+        assert!(msg.contains('q'), "{msg}");
     }
 
     /// A condition defined in terms of another field must say so rather than

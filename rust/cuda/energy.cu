@@ -104,3 +104,39 @@ extern "C" __global__ void energyTargetDivergence
     if (i >= n) return;
     dst[i] = q[i]/(rho[i]*cp*t[i]) - invGammaP0*dp0dt;
 }
+
+//- SPEC-LIT S32.2's fixed wall heat flux: rewrite the fixedGradient-shaped
+//  ({fr = 0}) Robin triple on every `fixedFluxTemperature` face so that
+//  k_eff_wall*refGrad reproduces `q` EXACTLY, whatever k_eff_wall is - see
+//  src/field.rs's `BcKind::FixedFluxTemperature` doc for why one condition
+//  serves both a wall-function mesh (k_eff_wall carries the momentum wall
+//  function's eddy diffusivity, refreshed here every outer iteration as it
+//  evolves) and a resolved/lowRe mesh (k_eff_wall is the constant molecular
+//  k there, so this reproduces a plain steady fixedGradient exactly). `q` is
+//  read from refValue, never written - crate::field_setup seeded it from the
+//  field file's own `q` entry, and this kernel leaves it there so it survives
+//  being read again next iteration, exactly like ThermalWallFunction's T_w.
+//
+//  One thread per owned face - no wall-adjacent-CELL constraint, same shape
+//  as wfThermalWall in cuda/wallfunctions.cu (T is not pinned, only its
+//  triple is rewritten, so there is no CSR and no scatter).
+extern "C" __global__ void energyFixedFluxTemperature
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ refValue,
+    const ofscalar* __restrict__ kEffWall,
+    const oflabel* __restrict__ face,
+    oflabel nFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nFaces) return;
+
+    const oflabel bf = face[i];
+    const ofscalar keff = kEffWall[bf];
+    if (!(keff > (ofscalar)0)) return;
+
+    fr[bf] = (ofscalar)0;
+    refGrad[bf] = refValue[bf]/keff;
+}

@@ -169,6 +169,32 @@ pub enum BcKind {
     /// both to this one wall model); `rough` has no LES wall model yet and
     /// is a §13.4 error naming this and `nutLowReWallFunction`.
     WernerWengleWallFunction = 30,
+
+    /// A fixed wall heat FLUX, `q` (W/m^2) - SPEC-LIT §32.2's redesigned
+    /// thermal-wall gate. `q` is read from the field file's own `q` entry
+    /// (stored in `ref_value`, exactly as `ThermalWallFunction` stores its
+    /// `T_w` there) and never rewritten, so it survives being read again
+    /// every outer iteration; `ref_grad` is rewritten every iteration to
+    /// `crate::energy::flux_to_grad(q, k_eff_wall)` with the CURRENT
+    /// `k_eff_wall` `crate::energy::Energy::update_k_eff` just computed at
+    /// that face - see [`Self::is_fixed_flux_temperature`] and
+    /// `crate::energy::Energy::update_fixed_flux`.
+    ///
+    /// This is deliberately the SAME condition on a `lowRe` (resolved) wall
+    /// and a wall-function wall: SPEC-LIT §32.2's own point is that
+    /// `flux_to_grad(q, k_eff)` is exact WHATEVER `k_eff` is (a `fr = 0`
+    /// Robin condition delivers exactly the flux it is given, independent of
+    /// the conductivity used to construct it - the ratio cancels exactly
+    /// against the same `k_eff` the matrix assembly multiplies by) - a
+    /// SEPARATE Jayatilleke-corrected BcKind would add machinery this
+    /// condition does not need for the FLUX itself. Where the Jayatilleke
+    /// correction still matters is diagnosing the WALL TEMPERATURE a fixed
+    /// flux produces, which is a postprocessing read of `crate::wallfunctions`'
+    /// existing pure functions (`y_plus_of`/`t_plus`/`u_tau_of`), not a
+    /// second device kernel - see SPEC-LIT §32.2 and
+    /// `crate::wallfunctions`'s module doc on the fixed-q form "falling out
+    /// of the same function".
+    FixedFluxTemperature = 31,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -225,6 +251,7 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "nutkRoughWallFunction",
     "nutURoughWallFunction",
     "wernerWengleWallFunction",
+    "fixedFluxTemperature",
 ];
 
 impl BcKind {
@@ -301,6 +328,11 @@ impl BcKind {
             // `WernerWengle` sub-model this solver does not read that way);
             // reached only under `simulationType LES;`.
             "wernerWengleWallFunction" => Self::WernerWengleWallFunction,
+
+            // SPEC-LIT 32.2: a fixed wall heat flux, on either a wall-
+            // function or a resolved (lowRe) mesh - see the variant's own
+            // doc for why one condition serves both.
+            "fixedFluxTemperature" => Self::FixedFluxTemperature,
 
             // SPEC-LIT 29.3: OpenFOAM spells the Jayatilleke thermal wall
             // function on `alphat`, a field this solver does not carry (its
@@ -401,6 +433,16 @@ impl BcKind {
     #[inline]
     pub fn is_thermal_wall_function(self) -> bool {
         matches!(self, Self::ThermalWallFunction)
+    }
+
+    /// True where a fixed wall heat flux (SPEC-LIT §32.2) rewrites `ref_grad`
+    /// every outer iteration. Asked of `T`'s OWN patch type, the same
+    /// discipline [`Self::is_thermal_wall_function`] uses - this is not a
+    /// wall-function-only condition (see [`Self::FixedFluxTemperature`]'s own
+    /// doc), so it is checked independently of it.
+    #[inline]
+    pub fn is_fixed_flux_temperature(self) -> bool {
+        matches!(self, Self::FixedFluxTemperature)
     }
 
     /// True where the Werner-Wengle LES wall model (SPEC-LIT §30.1) owns the
