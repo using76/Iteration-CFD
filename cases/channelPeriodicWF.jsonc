@@ -1,0 +1,189 @@
+// meteor-cfd case - SPEC-LIT S31's rerun of the S29.3/S30.3 thermal-wall-
+// function gate, mesh (a): a STREAMWISE-CYCLIC plane channel/duct (SPEC-LIT
+// S31.1's cyclic-pair pairing, `mesh.cyclic`), hot top and bottom walls at
+// Tw = 373.15 K, gravity zero (forced convection only - no buoyancy in this
+// comparison, exactly as `channelThermalWF.jsonc` before it). The two prior
+// attempts at this gate (see `docs/07-fire-solver.md` S1.1's history) both
+// used a DEVELOPING duct - first 0.4 m (L/Dh = 10, ratio 0.095), then 2.0 m
+// (L/Dh = 50, ratio 0.381) - and named the same remaining cause each time:
+// an inlet-driven duct is never more than APPROACHING the fully-developed
+// state Jayatilleke's log law actually assumes, however long it is made.
+// `mesh.cyclic` (S31.1) removes the question entirely - streamwise-periodic
+// means every cross-section is the SAME cross-section, not an increasingly
+// good approximation to one.
+//
+// A periodic domain has no inlet to prescribe a mass flow from, so the flow
+// is driven by a `sources[]` `momentumSource` (SPEC-LIT S18/S31.1's other
+// new piece) instead - a uniform body force per unit mass over the whole
+// domain, exactly the role a mean streamwise pressure gradient plays in a
+// real duct. `bodyForce` was chosen (over a fixed-mass-flux/Ubar controller,
+// which this driver has no per-iteration feedback loop for) because it is
+// the SIMPLEST mechanism that already exists end-to-end: one constant number,
+// applied by the SAME `crate::sources::SourceSet` the momentum equation has
+// read since SPEC-LIT S18, needing no new per-iteration control logic. Its
+// magnitude (3.9 m/s^2) was reached by direct calibration against this exact
+// case, not derived and trusted blind: an initial Blasius-correlation
+// estimate for Re_Dh ~ 8000 (tau_w ~ 0.045 Pa at rho ~ 1.2 kg/m3, g_x =
+// tau_w * (P/A) / rho with P/A = 4/Dh for a square duct) gave ~3.8 m/s^2;
+// the run converged to a bulk velocity within 2% of the 3.0 m/s target at
+// that number, so it was kept.
+//
+// The energy equation has the SAME well-posedness problem in a periodic
+// domain that momentum does: a fixed wall temperature keeps depositing heat
+// with nowhere for it to leave (no outlet, and a cyclic pair returns the
+// SAME field it sent, not a cooled one), so a bare periodic run never
+// reaches a steady state at all - T climbs toward Tw everywhere, the boring
+// zero-flux equilibrium, exactly as SPEC-LIT S31's own energy-balance
+// argument predicts (steady state needs the NET flux over every cell,
+// walls included, to be zero; a cyclic pair contributes zero net by
+// construction, so the wall flux alone must be canceled by something).
+// `ofgpu-fire -heaterPower` (SPEC-LIT S18, already wired for a POSITIVE
+// heat release) is reused NEGATIVE here as that "something": a uniform
+// domain-wide heat SINK exactly offsetting the wall's own heat input,
+// which is what a real periodic duct's downstream cooling does and this
+// domain has no geometry left to do. Like the body force, the sink's
+// magnitude was found by calibration, not solved for in closed form (the
+// wall's own heat transfer coefficient depends on the flow this case is
+// what measures): run with `-heaterPower -6` (see `cases/README.md` for
+// the full command) - the run settles to a domain temperature of
+// 308-323 K, a total wall heat input of exactly 6 W (matching the sink,
+// SPEC-LIT S31's own energy-balance requirement for a periodic steady
+// state) and y+ 40.3-43.4 (mean 41.7), squarely in the standard preset's
+// 30-60 target. It is a CLI flag (`-heaterPower`), not a case-file
+// setting, because `-heaterPower` already existed as one and nothing
+// SPEC-LIT S18 asks for lives in the case file instead.
+//
+// `channelPeriodicLowRe.jsonc`'s OWN sink is a DIFFERENT number, not this
+// same 6 W - see that file's header for why, and for the honest limit that
+// discovery puts on comparing the two runs' raw wall-heat numbers directly.
+//
+// Cross-section (0.04 m x 0.04 m, `wallHot`/`wallSide`) and both wall
+// temperatures are UNCHANGED from `channelThermalWF.jsonc` - only the
+// streamwise direction and how the flow is driven are different. Six
+// wall-normal cells, uniform: the `standard` wallTreatment row is asked to
+// do its actual job on a deliberately coarse near-wall cell (y+ target
+// 30-60), exactly as before. `channelPeriodicLowRe.jsonc` is the resolved
+// (y+ ~ 1) twin - see that file and `docs/07-fire-solver.md` S1.1 for the
+// measured y+, the two wall heat fluxes and their ratio.
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "channelPeriodicWF",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.08, 0.04, 0.04] },
+    "cells":  [8, 6, 4],
+
+    "boundaries": {
+      "xmin": "streamwiseMin", "xmax": "streamwiseMax",
+      "ymin": "wallHot0", "ymax": "wallHot1",
+      "zmin": "wallSideMin", "zmax": "wallSideMax",
+    },
+
+    // SPEC-LIT S31.1: the streamwise pair. `translate` is implied by the
+    // block's own 0.08 m extent along x - the only transform this reader
+    // builds.
+    "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+    "wallTreatment": "standard",
+  },
+
+  // SPEC-LIT S18/S31.1: the momentum source a periodic domain needs in
+  // place of an inlet. See this file's own header comment for how 3.9 was
+  // reached.
+  "sources": [
+    { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
+  ],
+
+  "patches": [
+    {
+      // Spanwise (z) walls: adiabatic on purpose, explicit - same reasoning
+      // as `channelThermalWF.jsonc`: every watt the domain gains comes from
+      // the two hot walls and nowhere else.
+      "match": "wallSide.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+    {
+      // The hot walls - SPEC-LIT S29.3's `thermalWallFunction`, named
+      // explicitly with its own Tw, since the case-level `wallTreatment`
+      // auto-completion has no wall temperature of its own to write.
+      "match": "wallHot.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "thermalWallFunction", "value": 373.15 },
+    },
+    {
+      // Mandatory catch-all (SPEC-LIT §4.1 point 1): matches the two
+      // `streamwiseMin`/`streamwiseMax` cyclic patches only, since the two
+      // rules above already claim every other name. `resolve_patch_rule`
+      // still needs a hit for a cyclic patch (it feeds the wall-consistency
+      // machinery even though the actual boundary condition on a cyclic
+      // patch is `cyclic` on every field regardless of what a rule says -
+      // SPEC-LIT §31.1) - the values below are never applied to either
+      // streamwise patch.
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+  ],
+
+  "initial": {
+    // Seeded near the calibrated bulk speed rather than at rest - a
+    // periodic case has no inlet profile to grow the flow from, so a
+    // sensible guess only saves outer iterations, it does not change what
+    // the run converges to.
+    "U": [3.0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.03,
+    "epsilon": 0.3,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.5, "p": 0.3, "T": 0.5, "k": 0.5, "epsilon": 0.5 },
+    "solvers": [
+      { "match": "p",       "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-9, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "k",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  // Unused by `ofgpu-fire` in steady mode (no `-endTime`/`-deltaT` given on
+  // the command line) - present because the schema requires it.
+  "run": {
+    "endTime": 1.0,
+    "deltaT": 1.0,
+    "adjustTimeStep": false,
+  },
+}

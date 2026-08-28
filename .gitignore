@@ -17,8 +17,12 @@ reference/
 #   cargo run --release --bin ofgpu-generate-mesh -- cavity   ../cases/cavity    80  80 1
 #   cargo run --release --bin ofgpu-generate-mesh -- damBreak ../cases/damBreak  60 100 1
 #
+# ...but the .jsonc case DEFINITIONS are the opposite of generated data: a
+# few kB of text each, referenced by docs/07-fire-solver.md and by
+# ofgpu-validate, and without them a fresh clone can reproduce nothing.
 cases/*
 !cases/README.md
+!cases/*.jsonc
 
 # ------------------------------------------------------------- results -----
 *.png

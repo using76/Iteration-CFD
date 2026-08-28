@@ -1,0 +1,147 @@
+// meteor-cfd case - SPEC-LIT S31's periodic rerun of the S29.3/S30.3 gate,
+// mesh (b): the SAME streamwise-cyclic duct as `channelPeriodicWF.jsonc`
+// (identical cross-section, streamwise length, hot-wall temperature,
+// momentum source, heat sink), wall-normal mesh GRADED two-sided toward
+// both hot walls (`mesh.grading`, Task G.1) so the first cell sits near
+// y+ ~ 1 - `lowRe`, a resolved sublayer - while the centre cell stays
+// coarse (50 cells total, `expansion: 200`, the same ratio
+// `channelThermalLowRe.jsonc` used). SPEC-LIT S29.3: "lowRe... pins the
+// molecular resistance the resolved mesh already provides", so the hot
+// walls here are plain `fixedValue` rather than `thermalWallFunction` - the
+// resolved sublayer computes the near-wall gradient itself, no log-law
+// correction needed or wanted.
+//
+// See `channelPeriodicWF.jsonc`'s own header for why this pair is driven by
+// a `sources[]` `momentumSource` and a negative `-heaterPower` rather than
+// an inlet.
+//
+// This mesh's OWN `-heaterPower` is NOT `channelPeriodicWF.jsonc`'s -6 -
+// it is -60 (`cases/README.md` has the exact command), and that difference
+// is itself a finding, not a free choice made to look nicer. A resolved
+// y+ ~ 1 sublayer conducts far more effectively than a y+ ~ 40 wall-function
+// cell for the SAME temperature difference (that is the entire reason a
+// wall model is needed), so the SAME sink `channelPeriodicWF.jsonc` uses
+// leaves this mesh's near-wall cell within a few kelvin of Tw - a real but
+// uninteresting near-zero-flux state, not a working thermal boundary layer.
+// -60 was reached by calibration, same as -6 was, watching the run settle
+// rather than solving for a target in closed form.
+//
+// A LARGER sink, sized to reach a near-wall Delta-T comparable to
+// `channelPeriodicWF.jsonc`'s own (about 50 K) so the two runs' raw wall-heat
+// numbers could be compared at matched conditions, was tried (-900 W) and
+// rejected: the uniform-domain sink this case's momentum-source companion
+// applies per unit VOLUME, not weighted by how much of that volume actually
+// carries heat away from the walls, so a sink big enough to matter to the
+// thin, fast-conducting near-wall cells over-cools the much larger core -
+// at -900 W the domain interior fell to 160 K and was still falling after
+// 6000 iterations, not converging. That is a real limit of this technique,
+// reported rather than pushed past: see `docs/07-fire-solver.md` S1.1 for
+// what it means for the two meshes' RATIO, which is compared at
+// deliberately DIFFERENT Delta-T as a result, and for the measured y+, the
+// two wall heat fluxes and the honest reading of their ratio.
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "channelPeriodicLowRe",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.08, 0.04, 0.04] },
+    "cells":  [8, 50, 4],
+
+    "boundaries": {
+      "xmin": "streamwiseMin", "xmax": "streamwiseMax",
+      "ymin": "wallHot0", "ymax": "wallHot1",
+      "zmin": "wallSideMin", "zmax": "wallSideMax",
+    },
+
+    "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
+
+    // Two-sided: both y=0 and y=0.04 are hot walls, so grade toward BOTH -
+    // identical to `channelThermalLowRe.jsonc`'s own grading.
+    "grading": { "y": { "expansion": 200.0, "twoSided": true } },
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+    "wallTreatment": "lowRe",
+  },
+
+  "sources": [
+    { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
+  ],
+
+  "patches": [
+    {
+      // Spanwise (z) walls: adiabatic on purpose, explicit - same reasoning
+      // as `channelPeriodicWF.jsonc`.
+      "match": "wallSide.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+    {
+      // The hot walls - plain `fixedValue`, NOT `thermalWallFunction`: a
+      // y+ ~ 1 mesh resolves the sublayer itself, so the molecular-only
+      // Robin condition is the physically correct one here.
+      "match": "wallHot.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 373.15 },
+    },
+    {
+      // Mandatory catch-all - see `channelPeriodicWF.jsonc`'s own comment.
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+  ],
+
+  "initial": {
+    "U": [3.0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.03,
+    "epsilon": 0.3,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.5, "p": 0.3, "T": 0.5, "k": 0.5, "epsilon": 0.5 },
+    "solvers": [
+      { "match": "p",       "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-9, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "k",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  "run": {
+    "endTime": 1.0,
+    "deltaT": 1.0,
+    "adjustTimeStep": false,
+  },
+}

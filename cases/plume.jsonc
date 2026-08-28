@@ -1,0 +1,154 @@
+// meteor-cfd case — the B3 phase-1 gate (docs/05-io-redesign.md §6, step 1):
+// a JSONC replica of `ofgpu-generate-mesh plume ../cases/plumeB 98 42 20`'s
+// OUTPUT, field for field. Every boundary condition below is written
+// EXPLICITLY (fixedValue/zeroGradient/wall-function, with its own numeric
+// value) rather than through a `patches[].kind` preset, so that running
+// `ofgpu-k-epsilon` on this file and on `cases/plumeB` is a bit-for-bit
+// equality "by construction" rather than something the two happen to agree
+// on: nothing here is DERIVED (no `turbulentIntensityKineticEnergyInlet`
+// estimate, no `noSlip` standing in for `fixedValue 0`), it is copied
+// straight out of `cases/plumeB`'s own field files.
+//
+// Geometry: the domain and the burner window are the literal numbers
+// `crate::blockgen::case_block_spec`/`plume_inlet_window` compute for
+// `CaseKind::Plume` (x/y/z bounds, and the 1.2 m x 1.2 m window centred on
+// the origin - PLUME_INLET_SIDE) - not re-derived here, read off that
+// function and cross-checked against `cases/plumeB/constant/polyMesh`.
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "plumeB",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [-8.32, -2.62, 0.0], "max": [6.32, 3.62, 3.0] },
+    "cells":  [98, 42, 20],
+
+    // `wallXMin/outlet/wallYMin/wallYMax/floor/ceiling`, the block's own
+    // `-x +x -y +y -z +z` slot order - `cases/plumeB/constant/polyMesh/boundary`.
+    "boundaries": {
+      "xmin": "wallXMin", "xmax": "outlet",
+      "ymin": "wallYMin", "ymax": "wallYMax",
+      "zmin": "floor",    "zmax": "ceiling",
+    },
+
+    // The burner: a 1.2 m x 1.2 m window centred on the origin, cut from the
+    // floor - `PLUME_INLET_SIDE` and `plume_inlet_window`'s `centre = 0.0`.
+    // `cell_range_from_bounds` below snaps this to the SAME whole cells
+    // `centred_cell_range` does (i 52..60, j 14..22 at this resolution): both
+    // functions keep a cell whose CENTRE falls in `[lo, hi]`, and no cell
+    // centre in this mesh sits within 1 ULP of +-0.6, so the tiny difference
+    // between `0.0 +- 0.5*1.2` (blockgen's arithmetic) and the literal `0.6`
+    // parsed here cannot move the boundary.
+    "regions": [
+      {
+        "name": "inlet",
+        "on": "zmin",
+        "shape": { "kind": "box", "min": [-0.6, -0.6, -1], "max": [0.6, 0.6, 1] },
+      },
+    ],
+  },
+
+  "physics": {
+    "gravity": [0, 0, -9.81],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    // `cases/plumeB/constant/momentumTransport` sets neither `kappa` nor `E`
+    // (and `blended` is not read by anything - see the comment where ofgpu's
+    // `TextOut::real` precision was raised, and `WallFunctionCoeffs::default`
+    // itself), so these ARE `WallFunctionCoeffs::default()`'s own numbers,
+    // written explicitly rather than left to a default this reader has no
+    // "case gave nothing" branch for.
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+  },
+
+  // ORDERED, first-match-wins. Three rules are enough because every patch
+  // NAME is already unique (`inlet`, `outlet`, and five walls) - the
+  // catch-all is a pattern-reuse convenience, not a preset: every field it
+  // sets is still the literal value `cases/plumeB`'s field files carry on
+  // `ceiling`/`floor`/`wallXMin`/`wallYMin`/`wallYMax` (all five are
+  // identical, being ordinary no-slip, adiabatic, wall-function walls).
+  "patches": [
+    {
+      "match": "inlet",
+      "kind": "inlet",
+      "U": { "type": "fixedValue", "value": [0, 0, 2] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 1173.15 },
+      "k": { "type": "fixedValue", "value": 0.015 },
+      "epsilon": { "type": "fixedValue", "value": 0.00361829 },
+      "omega": { "type": "fixedValue", "value": 2.68022 },
+      "nut": { "type": "calculated", "value": 0 },
+    },
+    {
+      "match": "outlet",
+      "kind": "open",
+      "U": { "type": "inletOutlet", "inletValue": [0, 0, 0] },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "inletOutlet", "inletValue": 293.15 },
+      "k": { "type": "zeroGradient" },
+      "epsilon": { "type": "zeroGradient" },
+      "omega": { "type": "zeroGradient" },
+      "nut": { "type": "calculated", "value": 0 },
+    },
+    {
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "kqRWallFunction", "value": 0.015 },
+      "epsilon": { "type": "epsilonWallFunction", "value": 0.00361829 },
+      "omega": { "type": "omegaWallFunction", "value": 2.68022 },
+      "nut": { "type": "nutkWallFunction", "value": 0 },
+    },
+  ],
+
+  "initial": {
+    "U": [0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.015,
+    "epsilon": 0.00361829,
+    "omega": 2.68022,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      // Never actually consulted: every equation this case runs names its
+      // own entry below. A real, always-parseable scheme rather than
+      // OpenFOAM's `none` sentinel, because `parse_div` (correctly) refuses
+      // `none` as a scheme - see `numerics.div.default`'s doc in `case_json.rs`.
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+      "div(phi,omega)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.7, "p": 0.3, "T": 0.7, "k": 0.7, "epsilon": 0.7, "omega": 0.7 },
+    "solvers": [
+      { "match": "p",       "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-8, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+      { "match": "k",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+      { "match": "omega",   "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  "run": {
+    "endTime": 1.0,
+    "deltaT": 1.0,
+    "adjustTimeStep": false,
+  },
+}

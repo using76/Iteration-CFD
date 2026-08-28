@@ -1,0 +1,139 @@
+// meteor-cfd case - SPEC-LIT S29.3/S30.3's deferred thermal-wall-function
+// gate, mesh (b): the SAME plane channel/duct as `channelThermalWF.jsonc`
+// (identical length, height, width, inlet speed, hot-wall temperature,
+// zero gravity) with the wall-normal mesh GRADED two-sided toward both hot
+// walls (Task G.1's `mesh.grading`, closing the gap
+// `docs/07-fire-solver.md` S1.1 originally reported: "the JSONC Cartesian
+// mesh cannot grade toward walls") so the first cell sits near y+ ~ 1 -
+// `lowRe`, a resolved sublayer - while the CENTRE cell stays coarse (40
+// cells total, not the first attempt's 250 uniform ones, which over-resolved
+// the entire channel just to get one fine wall cell). `expansion: 20` is
+// `blockgen`'s own channel-case ratio (`src/blockgen.rs`'s
+// `case_block_spec`, `CaseKind::Channel`), reused here rather than invented.
+// SPEC-LIT S29.3: "lowRe... pins the molecular resistance the resolved mesh
+// already provides and needs no correction for", so the hot walls here are
+// plain `fixedValue` (the generic S4 Robin condition with pure molecular
+// k_eff, no Jayatilleke log-law correction) rather than `thermalWallFunction`
+// - the resolved sublayer computes the near-wall gradient itself. Compare
+// this run's wall heat transfer against `channelThermalWF.jsonc`'s; see
+// `docs/07-fire-solver.md` S1.1 for the measured numbers and the ratio.
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "channelThermalLowRe",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0.0, 0.0, 0.0], "max": [2.0, 0.04, 0.04] },
+    "cells":  [200, 50, 4],
+
+    "boundaries": {
+      "xmin": "inlet", "xmax": "outlet",
+      "ymin": "wallHot0", "ymax": "wallHot1",
+      "zmin": "wallSideMin", "zmax": "wallSideMax",
+    },
+
+    // Two-sided: both y=0 and y=0.04 are hot walls, so grade toward BOTH.
+    // First cell ~1.52e-4 m (half-height ~7.6e-5 m); with the Dean-estimated
+    // u_tau for this Re_Dh (~8000) that targets y+ ~ 1 - verified against
+    // the solver's own measured y+ in docs/07-fire-solver.md S1.1, not
+    // assumed.
+    "grading": { "y": { "expansion": 200.0, "twoSided": true } },
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+    "wallTreatment": "lowRe",
+  },
+
+  "patches": [
+    {
+      "match": "inlet",
+      "kind": "inlet",
+      "U": { "type": "fixedValue", "value": [3.0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 293.15 },
+      "k": { "type": "fixedValue", "value": 0.03 },
+      "epsilon": { "type": "fixedValue", "value": 0.3 },
+      "nut": { "type": "calculated", "value": 0 },
+    },
+    {
+      "match": "outlet",
+      "kind": "open",
+      "U": { "type": "inletOutlet", "inletValue": [0, 0, 0] },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "inletOutlet", "inletValue": 293.15 },
+      "k": { "type": "zeroGradient" },
+      "epsilon": { "type": "zeroGradient" },
+      "nut": { "type": "calculated", "value": 0 },
+    },
+    {
+      // Spanwise (z) walls: adiabatic on purpose, explicit - same reasoning
+      // as `channelThermalWF.jsonc`.
+      "match": "wallSide.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+    {
+      // The hot walls - plain `fixedValue`, NOT `thermalWallFunction`: a
+      // y+ ~ 1 mesh resolves the sublayer itself, so the molecular-only
+      // Robin condition (SPEC-LIT S26's original T treatment) is the
+      // physically correct one here, not a log-law correction meant for a
+      // wall-function mesh. nut/k/epsilon are left to the `lowRe` row
+      // (`nutLowReWallFunction`/`kLowReWallFunction`/`zeroGradient`).
+      "match": "wallHot.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 373.15 },
+    },
+  ],
+
+  "initial": {
+    "U": [0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.03,
+    "epsilon": 0.3,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.5, "p": 0.3, "T": 0.5, "k": 0.5, "epsilon": 0.5 },
+    "solvers": [
+      { "match": "p",       "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-9, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "k",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  // Unused by `ofgpu-fire` in steady mode (no `-endTime`/`-deltaT` given on
+  // the command line) - present because the schema requires it.
+  "run": {
+    "endTime": 1.0,
+    "deltaT": 1.0,
+    "adjustTimeStep": false,
+  },
+}

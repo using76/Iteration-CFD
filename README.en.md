@@ -544,8 +544,9 @@ Convert binary-format cases to ASCII before use.
   discrete ordinates) is more accurate at optically thin fire margins but is
   the documented next step; asking for it is refused by name per the §13.4
   contract.
-- **No non-orthogonal correction vector on cyclic patches.** No effect on
-  orthogonal meshes.
+- **Only one cyclic pair.** Periodicity can be declared on a single axis, so
+  a true plane channel - periodic in two directions - cannot yet be
+  expressed.
 
 ---
 

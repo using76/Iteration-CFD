@@ -1,0 +1,149 @@
+// meteor-cfd case - SPEC-LIT S32's redesigned thermal-wall-function gate,
+// mesh (a): the SAME streamwise-cyclic plane channel/duct as
+// `channelPeriodicWF.jsonc` (identical geometry, cross-section, momentum
+// source, `standard` wallTreatment, six wall-normal cells at y+ target
+// 30-60) - but the top and bottom walls now carry a FIXED HEAT FLUX
+// (`fixedFluxTemperature`, SPEC-LIT S32.2) instead of a fixed temperature.
+//
+// S32.1 diagnoses why the fixed-T version of this gate (`channelThermalWF`/
+// `channelThermalLowRe`/`channelPeriodicWF`/`channelPeriodicLowRe`, four
+// attempts, ratios 0.095/0.381/0.107) could never have converged on
+// anything: with `Tw` imposed, the bulk temperature is a FREE output that
+// settles wherever the wall conductance and the domain sink happen to
+// balance, so the two meshes' fixed-T runs solved DIFFERENT problems (their
+// own fourth attempt settled at ~50 K and ~3 K driving delta-T) and
+// comparing their raw wall heat compared two products in which BOTH factors
+// differed. S32.2's fix: impose the SAME q_w on both meshes, let each
+// predict its OWN delta-T, and compare Nu = q_w D_h/(k(Tw-Tb)) against the
+// Dittus-Boelter/Gnielinski correlations (S32.3) - the same shape every
+// other validation in this project already has, per S32.3's own point.
+//
+// q_w = 500 W/m^2 on each of the two hot walls, chosen (not calibrated) to
+// give a bulk-to-wall delta-T of order 30 K at this duct's expected
+// Re ~ 1.6e4 (Nu ~ 46 from Dittus-Boelter, h = Nu k/Dh ~ 15 W/m2K,
+// delta-T = q_w/h ~ 33 K) - moderate enough that the low-Mach constant-
+// property assumption stays comfortable, large enough to measure precisely.
+// The compensating sink is `-2 q_w A_wall` (S32.2), with A_wall the area of
+// ONE hot wall (the "2" already counts both): A_wall = 0.08 m * 0.04 m =
+// 0.0032 m2, so the sink is -2*500*0.0032 = -3.2 W, ONE number, IDENTICAL
+// for this mesh and `channelPeriodicFluxLowRe.jsonc` - unlike the fixed-T
+// gate's two DIFFERENT calibrated sinks (-6 W and -60 W), this number is
+// closed-form from q_w and the (shared) geometry alone, no calibration and
+// nothing to get wrong between the two meshes.
+//
+// Momentum, turbulence and mesh are otherwise byte-for-byte
+// `channelPeriodicWF.jsonc` - see that file's own header for the body-force
+// derivation (3.9 m/s^2, Blasius estimate for Re_Dh ~ 8000, tau_w ~ 0.045 Pa)
+// and for why a periodic domain needs `sources[]` `momentumSource` in place
+// of an inlet.
+//
+// A fixed-FLUX wall over a domain with no other Dirichlet condition on T
+// anywhere (cyclic streamwise pair, adiabatic side walls, adiabatic-by-
+// construction net energy balance) leaves T's own absolute LEVEL undetermined
+// by the discrete equation - only its gradients are - so the converged field
+// sits at whatever level the initial condition put it at (293.15 K here);
+// only Tw - Tb, the difference Nu actually needs, is well-posed. This is the
+// same null-space situation SPEC-LIT documents for pressure in a periodic
+// domain (`src/simple.rs`'s own note on a `p` with no Dirichlet boundary
+// anywhere), read for T rather than p, not a new numerical device.
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "channelPeriodicFluxWF",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.08, 0.04, 0.04] },
+    "cells":  [8, 6, 4],
+
+    "boundaries": {
+      "xmin": "streamwiseMin", "xmax": "streamwiseMax",
+      "ymin": "wallHot0", "ymax": "wallHot1",
+      "zmin": "wallSideMin", "zmax": "wallSideMax",
+    },
+
+    "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+    "wallTreatment": "standard",
+  },
+
+  "sources": [
+    { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
+  ],
+
+  "patches": [
+    {
+      "match": "wallSide.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+    {
+      // The hot walls - SPEC-LIT S32.2's fixed-flux condition, named
+      // explicitly with q_w. See this file's own header for how 500 W/m2
+      // was chosen and for the compensating -heaterPower.
+      "match": "wallHot.*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedFluxTemperature", "q": 500.0 },
+    },
+    {
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+  ],
+
+  "initial": {
+    "U": [3.0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.03,
+    "epsilon": 0.3,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.5, "p": 0.3, "T": 0.5, "k": 0.5, "epsilon": 0.5 },
+    "solvers": [
+      { "match": "p",       "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-9, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "k",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  // Unused by `ofgpu-fire` in steady mode (no `-endTime`/`-deltaT` given on
+  // the command line) - present because the schema requires it.
+  "run": {
+    "endTime": 1.0,
+    "deltaT": 1.0,
+    "adjustTimeStep": false,
+  },
+}
