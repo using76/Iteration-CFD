@@ -786,11 +786,11 @@
       ]
     },
     "JsonRadiation": {
-      "description": "SPEC-LIT §28's P1 gray radiation. `model` is validated by\n[`RadiationModel::from_name`] - naming `fvDOM` here is the §13.4 gate that\nsection documents, not a silent fallback to P1.",
+      "description": "SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by\n[`RadiationModel::from_name`] - the §13.4 gate that names both as what is\navailable and anything else as an error.",
       "type": "object",
       "properties": {
         "a": {
-          "description": "Gray absorption coefficient `a`, 1/m. Constant, case-supplied\n(SPEC-LIT §28 v1; WSGG is later work).",
+          "description": "Gray absorption coefficient `a`, 1/m. Constant, case-supplied\n(SPEC-LIT §28/§36 v1; WSGG is later work). Required by both models.",
           "type": "number",
           "format": "double"
         },
@@ -803,8 +803,16 @@
           "format": "double"
         },
         "model": {
-          "description": "`\"P1\"` - the only model this crate implements; see\n[`RadiationModel::from_name`] for what happens with anything else.",
+          "description": "`\"P1\"` or `\"fvDOM\"`; see [`RadiationModel::from_name`] for what\nhappens with anything else.",
           "type": "string"
+        },
+        "sigmaS": {
+          "description": "Gray scattering coefficient `sigma_s`, 1/m - fvDOM only (SPEC-LIT\n§36.1's isotropic-scattering term); ignored, and normally absent,\nunder `model: \"P1\"`. Defaults to `0.0` (non-scattering).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "wallEmissivity": {
           "description": "Marshak wall emissivity, applied to every `wall`-kind patch. Defaults\nto `1.0` (black wall) when absent.",
@@ -996,6 +1004,32 @@
             "type",
             "field",
             "bodyForce"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §35.1: the bulk-temperature thermostat, a uniform volumetric\nproportional controller on the domain's own volume-mean `T`. Always\ncorrects `T` and always acts over the whole mesh - see\n[`crate::sources::Thermostat`]'s own doc for why. `tau` omitted\ndefaults to the domain's flow-through time\n([`crate::sources::flow_through_time`]).",
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "number",
+              "format": "double"
+            },
+            "tau": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "thermostat"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target"
           ]
         }
       ]

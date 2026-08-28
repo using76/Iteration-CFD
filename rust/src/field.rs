@@ -509,6 +509,33 @@ impl GpuScalarField {
             bc_kind: gpu.upload(&kinds)?,
         })
     }
+
+    /// Does any boundary face of this field carry a Dirichlet-like
+    /// condition (`fr > 0`)?
+    ///
+    /// The same test [`crate::simple::Simple`]/[`crate::vof`] already run on
+    /// `p` to decide whether the pressure Poisson problem is pinned
+    /// (SPEC-LIT §8.5's null space), generalised so SPEC-LIT §35.1's check -
+    /// "no Dirichlet `T` anywhere" - can reuse it instead of a third private
+    /// copy. `Empty`/`Cyclic` faces are excluded: neither constrains a
+    /// value, whatever `fr` a lowering happened to leave on them.
+    pub fn has_a_dirichlet(&self, gpu: &Gpu) -> Result<bool> {
+        if self.n_boundary_faces == 0 {
+            return Ok(false);
+        }
+        let fr = gpu.download(&self.fr)?;
+        let kinds = gpu.download(&self.bc_kind)?;
+        for i in 0..self.n_boundary_faces {
+            let k = kinds[i];
+            if k == BcKind::Empty as Label || k == BcKind::Cyclic as Label {
+                continue;
+            }
+            if fr[i] > 0.0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 pub struct GpuVectorField {
@@ -589,4 +616,51 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
         }
     }
     kinds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gpu() -> Option<Gpu> {
+        Gpu::new(0).ok()
+    }
+
+    fn boxed_gpu_mesh(gpu: &Gpu) -> GpuMesh {
+        let (mut m, points, faces) =
+            crate::mesh::topology::tests::box_mesh([3, 3, 3], Vec3::new(0.1, 0.1, 0.1));
+        m.compute_geometry(&points, &faces).expect("geometry");
+        m.build_cell_face_maps();
+        GpuMesh::upload(gpu, &m).expect("upload")
+    }
+
+    /// SPEC-LIT §35.1 reuses this to decide "no Dirichlet T anywhere" -
+    /// every boundary is `ZeroGradient`/`Empty`/`Cyclic` after
+    /// [`GpuScalarField::zeros`], so a fresh field on a wall-only mesh has
+    /// no Dirichlet face at all.
+    #[test]
+    fn a_fresh_field_on_an_all_neumann_mesh_has_no_dirichlet() {
+        let Some(gpu) = gpu() else { return };
+        let m = boxed_gpu_mesh(&gpu);
+        let f = GpuScalarField::zeros(&gpu, &m, "T").expect("field");
+        assert!(!f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
+    }
+
+    /// One `fixedValue` face (the same `fr > 0` convention
+    /// `Simple::pressure_has_a_dirichlet` reads on `p`) is enough.
+    #[test]
+    fn one_fixed_value_face_is_a_dirichlet() {
+        let Some(gpu) = gpu() else { return };
+        let m = boxed_gpu_mesh(&gpu);
+        let mut f = GpuScalarField::zeros(&gpu, &m, "T").expect("field");
+
+        let mut kinds = gpu.download(&f.bc_kind).expect("kinds");
+        let mut fr = gpu.download(&f.fr).expect("fr");
+        kinds[0] = BcKind::FixedValue as Label;
+        fr[0] = 1.0;
+        gpu.write(&mut f.bc_kind, &kinds).expect("write kinds");
+        gpu.write(&mut f.fr, &fr).expect("write fr");
+
+        assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
+    }
 }

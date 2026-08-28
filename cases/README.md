@@ -194,35 +194,50 @@ patches" 행을 보십시오. 실제로 켜서 쓰는 예는 아래
 방식으로 옆벽 없는 진짜 평면 채널입니다.
 
 `sources` — SPEC-LIT §18/§31.1의 체적 소스, JSONC 쪽 입구입니다. 오늘은
-`momentumSource` 한 종류만 지원합니다: 전체 도메인에 걸친 균일 체적력(단위
+두 종류를 지원합니다. `momentumSource`: 전체 도메인에 걸친 균일 체적력(단위
 질량당, m/s²) — periodic 케이스처럼 유입 경계가 없어 질량유량을 지정할 수
 없는 케이스가 유동을 몰아가는 유일한 방법입니다. `field`는 반드시 `"U"`여야
 하고(체적력은 벡터라 운동량 방정식에만 뜻이 있음), 다른 값은 이름을 밝힌
-오류입니다. OpenFOAM 형식 케이스의 `constant/fvSources`(box/sphere 선택,
-여섯 종류의 항)와 같은 `crate::sources::SourceSpec` 레지스트리로 내려가지만,
-이 배열은 그 전체 표면을 복제하지 않고 페리오딕 케이스에 필요한 이 한 가지만
-추가합니다:
+오류입니다. `thermostat`(SPEC-LIT §35.1): 도메인의 체적평균(mixed-mean이
+아님) 온도에 거는 균일 비례 제어기, `q = -rho_cp (T_mean - target)/tau` —
+언제나 `T` 방정식 전체 도메인(`selection`은 생략하거나 `"all"`만 허용)에
+걸립니다. 닫힌 주기 도메인에서 모든 열 경계가 Neumann이면(양쪽 벽
+fixed-flux, 스트림방향 cyclic, 앞뒤 empty) 정상상태 온도 방정식이 순수
+Neumann이 되어 더하는 상수만큼 부정확해지는데(§8.5가 압력에 대해 이미
+하는 것과 같은 null space, `T`로 읽은 것), 이 제어기가 프로파일은 그대로
+두고 그 상수만 고정합니다. `tau`는 생략하면 도메인 자체의 flow-through
+시간(`V^(1/3)/U_ref`)으로 기본값이 잡히고, 명시적으로 줄 수도 있습니다.
+두 종류 모두 같은 `crate::sources::SourceSpec` 레지스트리로 내려가지만
+(OpenFOAM 형식 케이스의 `constant/fvSources`는 box/sphere 선택과 함께 이
+둘을 포함해 일곱 종류의 항을 지원), 이 배열은 그 전체 표면을 복제하지
+않고 페리오딕/닫힌 케이스에 필요한 이 두 가지만 추가합니다:
 
 ```jsonc
 "sources": [
   { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
+  { "type": "thermostat", "target": 293.15, "tau": 0.02 },
 ],
 ```
 
 | Case | 드라이버 | 설명 |
 |---|---|---|
 | `plume.jsonc` | `ofgpu-k-epsilon` 등 | `plumeB`(OpenFOAM 형식)의 JSONC 재현 — 두 형식이 같은 필드를 만든다는 B3 게이트 |
-| `burnerPlume.jsonc` | `ofgpu-fire -combustion -radiation` | 프로판 버너 화재 데모 — SPEC-LIT §25(저-마하)·§26(에너지)·§27(연소)·§28(복사)를 한 케이스에서 결합. 바닥 창(`Y_F = 1` 고정)으로 연료가 들어가고, 열은 전부 연소의 `q'''_c`에서 나옵니다(입구 자체는 상온) |
+| `burnerPlume.jsonc` | `ofgpu-fire -combustion -radiation` | 프로판 버너 화재 데모 — SPEC-LIT §25(저-마하)·§26(에너지)·§27(연소)·§28(P1 복사)를 한 케이스에서 결합. 바닥 창(`Y_F = 1` 고정)으로 연료가 들어가고, 열은 전부 연소의 `q'''_c`에서 나옵니다(입구 자체는 상온) |
+| `burnerPlume_fvDOM.jsonc` | `ofgpu-fire -combustion -radiation` | `burnerPlume.jsonc`와 메쉬·유동·연소가 완전히 동일한 SPEC-LIT §36 fvDOM 쌍둥이 케이스 — `physics.fire.radiation.model`만 `"fvDOM"`으로 다름. 같은 1200스텝(`-endTime 6.0 -deltaT 0.005`)에서 복사 분율 P1 15.08% 대 fvDOM 13.35%(둘 다 도메인 열방출 대비) — 벽시계 시간은 P1 18.8 s 대 fvDOM 119 s(RTX 5070 Ti, 32768 셀) — SPEC-LIT §36.6가 명시한 "N_ordinates배 비용"이 실측치로 확인됨 |
 | `channelThermalWF.jsonc` | `ofgpu-fire` | SPEC-LIT §29.3/§30.3의 게이트, 메쉬 (a): 2.0 m(L/Dh = 50) 입구구동 평면 채널/덕트, 위아래 벽 `Tw = 373.15 K`, 중력 0. 벽법선 방향 균일 격자(6칸) — 측정 y+ 21.95/37.90/40.29(목표 30-60), `standard` 프리셋, `thermalWallFunction`이 실제로 일을 해야 하는 조건 |
 | `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, `mesh.grading`으로 벽법선 방향을 양쪽 벽 모두를 향해 two-sided grading(`expansion: 200`, 50칸, 첫 셀 높이 ≈ 2×10⁻⁵ m)하여 y+ 목표 ≈ 1(측정 0.43/0.89/1.02)을 노리는 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다"). 두 케이스의 벽 열유입 비율은 0.381(첫 시도의 0.095에서 4배 개선, 여전히 게이트는 열려 있음) — 자세한 내용은 `docs/07-fire-solver.md` §1.1 |
 | `channelPeriodicWF.jsonc` | `ofgpu-fire` | SPEC-LIT §31의 페리오딕 재시도, 메쉬 (a): 위 두 케이스와 같은 단면(0.04 m × 0.04 m)·`Tw`를 스트림방향 **cyclic**(`mesh.cyclic`, 0.08 m, 8칸)으로 바꾸고, 유입 대신 `sources[]` `momentumSource`(체적력 3.9 m/s²)로, 에너지는 `-heaterPower -6`(균일 도메인 열싱크)로 구동 — 벽법선 균일 6칸, `standard`/`thermalWallFunction`. 측정 y+ 40.25/41.73/43.41, 완전 수렴(`\|U\|` 잔차 1.3e-10) |
 | `channelPeriodicLowRe.jsonc` | `ofgpu-fire` | 위와 같은 페리오딕 덕트, 벽법선만 `channelThermalLowRe.jsonc`와 같은 two-sided grading(`expansion: 200`, 50칸) — `lowRe`/`fixedValue`. 같은 체적력, 그러나 **다른** 열싱크(`-heaterPower -60`) — 해상된 y+~0.3 서브레이어가 같은 싱크로는 `Tw` 근처까지 데워질 만큼 전도가 좋아서(§1.1의 상세 설명 참고), `-900`까지 올려 두 메쉬를 같은 ΔT로 맞춰 보려 했으나 도메인 코어가 160 K까지 식는 비물리적 결과가 나와 포기 — 측정 y+ 0.302/0.310/0.318, `\|U\|` 잔차는 ~1e-5에서 정체(양은 안정) |
-| `channelPeriodicFluxWF.jsonc` | `ofgpu-fire` | SPEC-LIT §32의 재설계된 게이트, SPEC-LIT §34로 진짜 2차원 평면 채널로 재구성한 메쉬 (a): 스트림방향 cyclic, 앞뒤 `empty`(옆벽 없음), 위아래 가열벽만 — 고정 열유속(`fixedFluxTemperature`, `q = 500 W/m2`, 양쪽 가열벽), `-heaterPower -3.2`(닫힌 형태 `-2 q_w A_wall`)로 균형을 맞춤(§32.2). `standard`/`thermalWallFunction`, 측정 y+ 56.8/57.7/58.5, bit 단위로 고정된 상태로 수렴(`\|U\|` 잔차 1.4e-10). 평면 채널이라 가열-둘레와 젖은-둘레가 일치하여 `D_h` = 2H = 0.08 m 하나뿐 — Re = 28,638, Nu = 65.24 — Gnielinski −4.5%, Dittus-Boelter −11.5%, 둘 다 안쪽(**게이트 닫힘**) |
-| `channelPeriodicFluxLowRe.jsonc` | `ofgpu-fire` | `channelPeriodicFluxWF.jsonc`의 해상 짝, 같은 방식으로 재구성 — 동일 `q_w`, 동일 `-heaterPower -3.2`, 앞뒤 `empty`, 벽법선만 y+ ~ 1을 노리는 two-sided grading(`expansion: 200`, 50칸). `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행: 옛 덕트의 속도 붕괴는 완전히 사라짐 — `\|U\|` 잔차가 반올림 수준(2e-12)까지 수렴, `U_b/u_tau` = 17.35로 평면 채널 목표 15–17에 벽함수 짝(19.23)보다 더 가까움, y+ = 0.00175와 y+<20 셀 192/400개는 40,000·150,000 반복에서 bit 단위로 동일 — 덕트 모서리 가설이 확인됨. 하지만 에너지 방정식이 정상상태에 이르지 못함: `T_b`/`T_w`가 감쇠 없이 선형으로 계속 상승(150,000 반복까지 확인, 매 10,000 반복 증분이 0.377–0.384 K로 일정), Nu가 15,000 반복의 Dittus-Boelter 밴드 안쪽에서 150,000 반복에는 두 밴드 모두 바깥(+31%/+41%)으로 표류 — 난류 모형·격자 조정·솔버 허용오차 모두 배제됨. 파일 자체 헤더와 `docs/07-fire-solver.md` §1.1에 전체 진단이 있음 (**게이트 열려 있음, 세 번째의 새로운 이유**) |
+| `channelPeriodicFluxWF.jsonc` | `ofgpu-fire` | SPEC-LIT §32의 재설계된 게이트, SPEC-LIT §34로 진짜 2차원 평면 채널로 재구성한 메쉬 (a): 스트림방향 cyclic, 앞뒤 `empty`(옆벽 없음), 위아래 가열벽만 — 고정 열유속(`fixedFluxTemperature`, `q = 500 W/m2`, 양쪽 가열벽), SPEC-LIT §35.1의 `sources[]` thermostat(`target 293.15`, `tau 0.02`, 예전 `-heaterPower -3.2`를 대체)으로 균형을 맞춤(§32.2). `standard`/`thermalWallFunction`, 측정 y+ 56.8/57.7/58.5, bit 단위로 고정된 상태로 수렴(`\|U\|` 잔차 1.4e-10). 평면 채널이라 가열-둘레와 젖은-둘레가 일치하여 `D_h` = 2H = 0.08 m 하나뿐 — Re = 28,638, Nu = 65.24(변화 없음) — Gnielinski −4.5%, Dittus-Boelter −11.5%, 둘 다 안쪽(**게이트 닫힘, 유지**). 열평형: thermostat 출력 −3.2 W 대 측정 벽열 3.2 W, 차이 2.8e-7 W(반올림 수준) |
+| `channelPeriodicFluxLowRe.jsonc` | `ofgpu-fire` | `channelPeriodicFluxWF.jsonc`의 해상 짝, 같은 방식으로 재구성 — 동일 `q_w`, 동일 thermostat(`target 293.15`, `tau 0.02`), 앞뒤 `empty`, 벽법선만 y+ ~ 1을 노리는 two-sided grading(`expansion: 200`, 50칸). `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행: 옛 덕트의 속도 붕괴는 완전히 사라짐. **SPEC-LIT §35의 thermostat 적용 후: 에너지 방정식의 표류가 완전히 사라짐** — T0 = 293.15 K와 T0 = 400 K에서 각각 40,000 반복을 돌리면 T_mean(293.574 K)·T_b(292.817 K)·U_b(4.84388 m/s)·thermostat 출력(−3.28977 W)까지 마지막 출력 자릿수까지 동일하게 수렴(§35.2가 요구하는 바로 그 회귀 검증). 열평형은 반올림 수준이 아니라 2.8%의 차이(−3.28977 W 대 3.2 W) — 이 메쉬 고유의 압력 솔버 허용오차 바닥(`contErr` 9.2e-8, `relTol`을 1e-4로 조이면 3,317 반복째에 NaN으로 발산)에서 비롯된 것으로 추적, 조정하지 않고 그대로 보고. 게이트: Re = 25,834, Nu = 73.40 — Dittus-Boelter +8.1%(±20-25% 밴드 안쪽), Gnielinski +16.3%(±10% 밴드 밖) — 두 상관식 모두를 요구하는 §32.4 기준으로는 **게이트가 완전히 닫히지 않음**(WF 짝은 완전히 닫힘), 두 메쉬 Nu 비율 1.125. 예전의 "+31%/+41%, 표류 계속"과는 질적으로 다른, 훨씬 작은 미스 — Launder-Sharma의 근벽 열전달 예측 자체를(§33.3이 검증한 것은 운동량 로그법칙뿐) 시사. 파일 자체 헤더와 `docs/07-fire-solver.md` §1.1에 전체 진단이 있음 |
 
 ```powershell
 cd ..\rust
 cargo run --release --bin ofgpu-fire -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005 -check 200
+
+# SPEC-LIT §36 fvDOM 짝 케이스 — 위와 완전히 같은 셋업, 복사 모델만 다름.
+# "radiated fraction of heat release" 줄을 위 P1 실행과 비교합니다.
+cargo run --release --bin ofgpu-fire -- ..\cases\burnerPlume_fvDOM.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005 -check 200
 
 # SPEC-LIT §29.3/§30.3의 게이트 (비주기, 첫 두 시도) — 정상상태까지 돌리고
 # "integrated wall heat flux" 줄을 비교합니다.
@@ -234,13 +249,16 @@ cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalLowRe.jsonc -iter
 cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicWF.jsonc    -iters 3000  -check 3000 -heaterPower -6
 cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicLowRe.jsonc -iters 40000 -check 5000 -heaterPower -60
 
-# SPEC-LIT §32의 재설계된 게이트 — 고정 열유속, 두 케이스 모두 같은 -heaterPower.
-cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxWF.jsonc    -iters 3000  -check 1000 -heaterPower -3.2
-cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxLowRe.jsonc -iters 40000 -check 5000 -heaterPower -3.2
-# SPEC-LIT §34: U_b/y+/cells-below-y+-20 are all converged by 40 000, but T_b/T_w/Nu
-# are NOT - they drift, undamped, for as long as the run is extended (checked out to
-# 150 000). See docs/07-fire-solver.md §1.1 for the measured drift rate and the four
-# causes ruled out.
+# SPEC-LIT §32의 재설계된 게이트 — 고정 열유속. -heaterPower는 SPEC-LIT §35.1의
+# sources[] thermostat(target 293.15, tau 0.02, 두 케이스 동일)로 대체됐으므로
+# CLI 플래그가 필요 없습니다.
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxWF.jsonc    -iters 3000  -check 1000
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxLowRe.jsonc -iters 40000 -check 5000
+# SPEC-LIT §35: thermostat 덕에 에너지 방정식의 표류가 사라졌습니다 - T0 = 293.15 K와
+# T0 = 400 K에서 각각 위 LowRe 명령을 돌리면(초기 T만 바꿔서) 이제 마지막 출력
+# 자릿수까지 동일한 T_mean/T_b/U_b/thermostat 출력으로 수렴합니다(§35.2의 회귀
+# 검증). 게이트 자체는 Dittus-Boelter는 통과, Gnielinski는 6포인트 벗어남 -
+# docs/07-fire-solver.md §1.1에 전체 표와 진단이 있습니다.
 ```
 
 자세한 화재 솔버 설명과 네 채널 케이스가 실제로 낸 벽 열유속·비율은

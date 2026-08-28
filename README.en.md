@@ -330,8 +330,10 @@ Jayatilleke thermal wall function:
 | The `thermalWallFunction` Robin triple encodes exactly the analytic Jayatilleke flux (the one-cell conductance identity) | 0 (round-off) |
 | Werner-Wengle: both branches agree at the branch point, and each branch's own closed form reproduces a manufactured `tau_w` to round-off | 0 (round-off) |
 | Coupled-solver selection: `kOmegaSST` via `ofgpu-buoyant`'s `build_coupled`, on a buoyant case, yields a different `nut` FNV hash than `kEpsilon` on the identical case | hashes differ (decisive) |
-| Thermal wall-function gate, Nusselt verdict (replayed measurement) — `cases/channelPeriodicFluxWF.jsonc`'s own numbers, against Dittus-Boelter/Gnielinski | −4.5% / −11.5% (inside both ±10% / ±20–25% bands) |
+| Thermal wall-function gate, Nusselt verdict (replayed measurement, post SPEC-LIT §35 thermostat) — `cases/channelPeriodicFluxWF.jsonc`'s own numbers, against Dittus-Boelter/Gnielinski | −4.5% / −11.5% (inside both ±10% / ±20–25% bands) |
 | Resolved-leg mesh resolution (replayed measurement) — `cases/channelPeriodicFluxLowRe.jsonc`'s worst wall-adjacent y+ and cells-below-y+-20 count | y+ = 0.00175, 192/400 cells (both requirements met) |
+| Resolved-leg Nusselt verdict (replayed measurement, SPEC-LIT §35) — same case, against Dittus-Boelter/Gnielinski | +8.1% / +16.3% (inside the DB band, outside Gnielinski's — gate partially closes) |
+| Thermostat sign and steady-state offset — source when cold, sink when hot, matches the closed form `target + Q·tau/rho_cp` | 0 (round-off) |
 
 These establish that the rough-wall law collapses to the existing smooth one
 at `Ks = 0` — the case that never mentions roughness — that the thermal wall
@@ -366,36 +368,46 @@ caveat needed this time, since there is no longer a third or fourth wall.
 `ofgpu-validate`'s `check_thermal_wall_function_gate_verdict_replay` replays
 this rebuilt measurement on every run, permanently.
 
-**Still open, and for a genuinely new, third reason.** `LaunderSharmaKE`
-(SPEC-LIT §33) checks out on every front now available: its damping-function
-limits are exact (`ofgpu-validate`), it reproduces the viscous sublayer
-`u+ = y+` to under 1% and the log law within 1% on a clean periodic channel,
-and — the point SPEC-LIT §34's rebuild was FOR — its own resolved leg,
+**The velocity field checks out; the resolved leg's ENERGY equation used to
+drift, and SPEC-LIT §35 fixed it.** `LaunderSharmaKE` (SPEC-LIT §33) checks
+out on every front now available: its damping-function limits are exact
+(`ofgpu-validate`), it reproduces the viscous sublayer `u+ = y+` to under 1%
+and the log law within 1% on a clean periodic channel, and — the point
+SPEC-LIT §34's rebuild was FOR — its own resolved leg,
 `cases/channelPeriodicFluxLowRe.jsonc` rebuilt the same way (`empty`
 front/back, no side walls at all), converges its velocity field to
 round-off (`|U|` residual `2×10⁻¹²`) with `U_b/u_tau` = 17.35, matching
 the 15–17 plane-channel target more closely than the wall-function leg's
 own 19.23. **The duct-corner hypothesis the previous round of work left
 untested is CONFIRMED**: removing the corners fixed the velocity collapse.
-What did NOT get fixed is the ENERGY equation: `T_b`/`T_w` drift upward at a
-small, linear, apparently UNDAMPED rate for as long as the run is extended
-(checked out to 150 000 iterations, 10x the first checkpoint, with `U_b`
-and the mesh's own y+/cells-below-y+-20 count bit-stable throughout) — Nu
-starts inside Dittus-Boelter's band at 15 000 iterations and drifts to
-**+31% of Dittus-Boelter and +41% of Gnielinski, outside BOTH bands, by
-150 000**. Four causes are ruled out directly (swapping in `kEpsilon`
-reproduces the same drift; a far milder grading still drifts; tightening
-the energy solve's tolerance to exact changes nothing; `-sealed` changes
-nothing, since the imposed flux and the compensating sink are exactly equal
-by construction) — the leading explanation is that `q_w` and the
-volumetric sink are both exactly temperature-independent, buoyancy is off,
-and `T` is Dirichlet nowhere in this domain, leaving the domain-mean
-temperature with no restoring term in the discrete energy balance; why the
-coarse wall-function mesh nonetheless lands on an exact fixed point while
-the fine resolved mesh does not is a genuinely new, previously-invisible
-limitation, reported rather than tuned away. See `docs/07-fire-solver.md`
-§1.1 for the full numbers, including the superseded duct-era attempts and
-the law-of-the-wall table.
+What did NOT check out was the ENERGY equation: `T_b`/`T_w` drifted upward
+at a small, linear, apparently UNDAMPED rate for as long as the run was
+extended. SPEC-LIT §35 diagnosed why: a closed, streamwise-periodic domain
+whose every thermal boundary is Neumann has a steady temperature equation
+that is pure Neumann and singular up to an additive constant — the level
+simply kept whatever it was given (two initial temperatures, 293.15 K and
+400 K, converged to different bulk states). §35.1's fix is a proportional
+controller on the domain's own volume-mean `T`, replacing the old fixed
+`-heaterPower` sink; both channel cases now carry it in `sources[]`. The
+regression this diagnosis needed now passes decisively: rerunning the
+resolved leg from T0 = 293.15 K and T0 = 400 K converges to the IDENTICAL
+state — `T_mean`, `T_b`, `U_b`, thermostat power, all to the last printed
+digit — and the drift itself is gone, not merely slower (`T` bit-identical
+from iteration 5 000 through 39 999). The energy balance closes to
+round-off on the wall-function leg (thermostat power vs. measured wall
+heat, 2.8×10⁻⁷ W) and to 2.8% on the resolved leg — traced to this graded
+mesh's own pressure-solve tolerance floor (tightening it diverges the run),
+not tuned away. **The gate itself: the wall-function leg still closes on
+both correlations (Nu = 65.24, unchanged); the resolved leg now has an
+actual steady Nu = 73.40 — inside Dittus-Boelter's ±20-25% band (+8.1%) but
+outside Gnielinski's tighter ±10% band (+16.3%), a six-point miss.** This is
+a categorically smaller and different question than the runaway drift it
+replaces, and most plausibly implicates Launder-Sharma's own near-wall
+THERMAL prediction (SPEC-LIT §33.3 validated its momentum law of the wall
+independently; nothing has validated its temperature sublayer the same
+way), not another energy-accounting defect. See `docs/07-fire-solver.md`
+§1.1 for the full numbers, including the superseded duct-era attempts, the
+law-of-the-wall table, and the full SPEC-LIT §35 diagnosis and fix.
 
 ---
 

@@ -44,6 +44,49 @@
 // not tuned away - see docs/07-fire-solver.md S1.1 for the full table.
 // ============================================================================
 //
+// ============================================================================
+// UPDATE (SPEC-LIT S35, the bulk-temperature thermostat): the diagnosis
+// above was right about the MECHANISM (no restoring term on the domain
+// mean) and wrong only in calling it unresolved - S35.1's thermostat IS
+// that restoring term, replacing the fixed `-heaterPower -3.2` sink with a
+// `sources[]` thermostat (target 293.15 K, tau 0.02 s, the SAME target as
+// `channelPeriodicFluxWF.jsonc`'s own copy - the two legs are now compared
+// at the same bulk state for the first time). Rerun, 40 000 iterations:
+//
+// * THE DRIFT IS GONE. T is bit-identical (T [290.421, 313.879] K, every
+//   printed digit) from iteration 5 000 through 39 999 - not merely slower,
+//   genuinely stopped, unlike the old undamped ~0.038 K/100-iterations climb.
+// * THE REGRESSION SPEC-LIT S35.2 ASKS FOR PASSES: rerun from T0 = 293.15 K
+//   and T0 = 400 K converge to the IDENTICAL state - T_mean = 293.574 K,
+//   T_b = 292.817 K, U_b = 4.84388 m/s, thermostat power = -3.28977 W -
+//   every one of these to the last printed digit, from either start.
+// * Energy balance (S35.2's table): thermostat power -3.28977 W against
+//   3.2 W of measured wall heat - a 2.8% gap, NOT round-off (unlike the WF
+//   leg's 2.8e-7 W). Traced to this mesh's own pressure-solve tolerance
+//   floor: `contErr` plateaus at 9.2e-8 (identical from either initial
+//   condition - a property of the converged fixed point, not a transient),
+//   and tightening `p`'s relTol from 0.01 to 1e-4 DIVERGES the run at
+//   iteration 3 317 (NaN) - this graded mesh (`expansion: 200`) needs the
+//   looser tolerance to stay stable, and the small residual it leaves feeds
+//   into the bounded convection scheme's own div(phi) correction. Reported,
+//   not tuned away.
+// * THE GATE: Re = 25,834, Nu = 73.40 - Dittus-Boelter +8.1% (inside its
+//   own ±20-25% band), Gnielinski +16.3% (OUTSIDE its own ±10% band). The
+//   wall-function twin closes on BOTH correlations (see that file's own
+//   UPDATE); this leg closes on Dittus-Boelter only. Two-mesh ratio:
+//   Nu_lowRe / Nu_WF = 1.125. VERDICT: the gate does NOT close on both legs
+//   under SPEC-LIT S32.4's own rule (both correlations, both meshes) - but
+//   this is now a SIX-POINT miss on ONE correlation at a converged, stable,
+//   reproducible bulk state, not the +31%/+41%-and-still-drifting failure
+//   above. What it implicates: with the domain-mean bookkeeping fixed, the
+//   remaining gap plausibly reflects Launder-Sharma's own near-wall THERMAL
+//   prediction accuracy (SPEC-LIT S33.3 validated its MOMENTUM law of the
+//   wall independently; nothing here has yet validated its temperature
+//   sublayer the same way) rather than another energy-accounting defect.
+//   See `docs/07-fire-solver.md` S1.1 for the full table and the
+//   two-initial-temperature trace.
+// ============================================================================
+//
 // SPEC-LIT S29.3: "lowRe... pins the molecular resistance the resolved mesh
 // already provides", so the hot walls here are `fixedFluxTemperature` with
 // the SAME q - not `thermalWallFunction` - because BcKind::FixedFluxTemperature
@@ -87,6 +130,17 @@
 
   "sources": [
     { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
+    // SPEC-LIT S35.1: replaces the fixed -heaterPower -3.2 compensation
+    // with the bulk-temperature thermostat - IDENTICAL target to
+    // `channelPeriodicFluxWF.jsonc`'s own copy (293.15 K, this case's own
+    // `initial.T`/`TRef`) and the same tau, so the two legs are compared
+    // at the SAME bulk state for the first time (S35's own point - see
+    // that file's own comment for the full derivation). This is also the
+    // fix for the header's own "third, genuinely different problem" above:
+    // T_b/T_w drifting upward without decay was exactly the symptom of the
+    // free additive constant S35 diagnoses; a domain-mean thermostat is
+    // what removes it.
+    { "type": "thermostat", "target": 293.15, "tau": 0.02 },
   ],
 
   "patches": [
@@ -102,7 +156,8 @@
     {
       // Same q_w as `channelPeriodicFluxWF.jsonc` - see that file's own
       // header and this file's own for why `fixedFluxTemperature` (not
-      // `thermalWallFunction`) is correct on a `lowRe` wall.
+      // `thermalWallFunction`) is correct on a `lowRe` wall. The
+      // `sources[]` thermostat above is what now balances it (S35.1).
       "match": "wallHot.*",
       "kind": "wall",
       "U": { "type": "fixedValue", "value": [0, 0, 0] },

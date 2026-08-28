@@ -68,12 +68,33 @@
 // anywhere (cyclic streamwise pair, adiabatic-by-construction net energy
 // balance, and now no side walls at all to be adiabatic on) leaves T's own
 // absolute LEVEL undetermined by the discrete equation - only its
-// gradients are - so the converged field sits at whatever level the
-// initial condition put it at (293.15 K here); only Tw - Tb, the
-// difference Nu actually needs, is well-posed. This is the same null-space
-// situation SPEC-LIT documents for pressure in a periodic domain
-// (`src/simple.rs`'s own note on a `p` with no Dirichlet boundary
-// anywhere), read for T rather than p, not a new numerical device.
+// gradients are - so the converged field sat at whatever level the initial
+// condition put it at. This is the same null-space situation SPEC-LIT
+// documents for pressure in a periodic domain (`src/simple.rs`'s own note
+// on a `p` with no Dirichlet boundary anywhere), read for T rather than p -
+// SPEC-LIT S35 names it precisely and S35.1's thermostat (below) is the fix,
+// not a new numerical device on top of the old one.
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S35, thermostat): the `-heaterPower -3.2` compensation
+// above is replaced by a `sources[]` thermostat (S35.1) targeting 293.15 K -
+// this case's own `initial.T`/`TRef`, chosen so the already-recorded
+// measurement below is REPRODUCED, not moved. Rerun: T_b = 293.283 K (was
+// 292.92 K), T_w = 317.253 K (was 316.861 K), U_b unchanged at 5.3696 m/s -
+// the small (~0.35 K) rise is the thermostat's own, exactly-predictable
+// steady-state offset (T_mean settles at target + Q_wall*tau/(rho*cp*V),
+// a P-controller's ordinary steady-state error under a persistent forcing,
+// not a defect - see `src/sources.rs`'s `Thermostat` doc). Energy balance:
+// thermostat power -3.2 W against 3.2 W of measured wall heat, difference
+// 2.8e-7 W - round-off. Re = 28,638 (unchanged), Nu = 65.24 (unchanged to
+// the last printed digit) - Gnielinski -4.5%, Dittus-Boelter -11.5%, BOTH
+// still inside their own band: **GATE STILL CLOSES**. Two-initial-
+// temperature regression (this thermostat's whole reason to exist, SPEC-LIT
+// S35.2): rerunning the resolved twin (`channelPeriodicFluxLowRe.jsonc`)
+// from T0 = 293.15 K and T0 = 400 K now converges to the IDENTICAL T_mean
+// (293.574 K, every printed digit) from either start - see that file's own
+// header and `docs/07-fire-solver.md` S1.1 for the full table.
+// ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
   "name": "channelPeriodicFluxWF",
@@ -107,6 +128,19 @@
 
   "sources": [
     { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
+    // SPEC-LIT S35.1: replaces the fixed -heaterPower -3.2 compensation
+    // (the closed-form -2 q_w A_wall this file's own header derives) with a
+    // controller that measures the SAME balance instead of assuming it -
+    // see this file's own header for why a fixed sink alone cannot pin
+    // T's free additive constant. `target` is 293.15 K, this case's own
+    // `initial.T`/`TRef`, so the WF leg's own already-recorded Nu (S1.1's
+    // table) is reproduced rather than moved; `tau` 0.02 s is close to this
+    // domain's own flow-through time (V^(1/3)/U_b ~ 0.017 s at the initial
+    // U_b = 3 m/s). IDENTICAL target on both legs (see
+    // `channelPeriodicFluxLowRe.jsonc`'s own copy) - the two legs are now
+    // compared at the SAME bulk state, which S32/S34's fixed-sink versions
+    // were not (S35's own point).
+    { "type": "thermostat", "target": 293.15, "tau": 0.02 },
   ],
 
   "patches": [
@@ -119,7 +153,8 @@
     {
       // The hot walls - SPEC-LIT S32.2's fixed-flux condition, named
       // explicitly with q_w. See this file's own header for how 500 W/m2
-      // was chosen and for the compensating -heaterPower.
+      // was chosen, and the `sources[]` thermostat above for what now
+      // balances it (SPEC-LIT S35.1).
       "match": "wallHot.*",
       "kind": "wall",
       "U": { "type": "fixedValue", "value": [0, 0, 0] },

@@ -2038,6 +2038,21 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) ===");
     check_resolved_leg_mesh_resolution_replay(c);
 
+    // ---- SPEC-LIT §35: the bulk-temperature thermostat -------------------
+    //
+    // The two-initial-temperature regression itself (SPEC-LIT §35.2) is run
+    // LIVE and reported in `docs/07-fire-solver.md` §1.1, not here: it takes
+    // ~2.5 minutes PER initial condition on the real channel mesh, which
+    // disqualifies it from this always-run suite the same way §33.3's law-
+    // of-the-wall channel run is disqualified above. What IS promoted here:
+    // the controller's own proportional law, checked live on a tiny mesh in
+    // milliseconds (which is what makes the initial-condition independence
+    // true in the first place), and the resolved leg's own Nu verdict now
+    // that it has an actual steady state to measure.
+    println!("\n=== the bulk-temperature thermostat (SPEC-LIT 35) ===");
+    check_thermostat_sign_and_steady_offset(c, &gpu)?;
+    check_resolved_leg_gate_verdict_replay(c);
+
     Ok(())
 }
 
@@ -3956,18 +3971,17 @@ fn check_nu_correlations(c: &mut Checks) {
 /// wall-function leg of the redesigned gate, `cases/channelPeriodicFluxWF.jsonc`,
 /// rebuilt per SPEC-LIT §34 as a genuine 2-D PLANE channel (streamwise-cyclic,
 /// `empty` front/back, hot walls top and bottom - no side walls at all, unlike
-/// the duct this case used to be), as reported in `docs/07-fire-solver.md`
-/// §1.1 (a run to `\|U\|` residual 1.4e-10, bit-identical from 5 000 through
-/// 40 000 iterations - a true fixed point, not merely a small residual):
-/// `q_w = 500 W/m2` on both hot walls, `y+` 56.8/57.7/58.5 (min/mean/max),
-/// `T_w = 316.861 K` (diagnosed by the thermal wall function),
-/// `T_b = 292.92 K` (mixed-mean), `U_b = 5.3696 m/s`, `rho(T_b) = 1.20504
-/// kg/m3`, `k_thermal = 0.025611 W/mK`. `D_h = 0.08 m = 2H` (SPEC-LIT §32.2,
-/// §34): for a genuine plane channel the heated-perimeter and wetted-
-/// perimeter conventions COINCIDE (both walls are hot, there is no third or
-/// fourth wall to argue about), so this is no longer a choice between two
-/// numbers the way the old duct version of this case needed - it is simply
-/// twice the full gap `H = 0.04 m`.
+/// the duct this case used to be) and, since SPEC-LIT §35, driven by the
+/// bulk-temperature thermostat in place of the old fixed `-heaterPower -3.2`,
+/// as reported in `docs/07-fire-solver.md` §1.1 (a run to `\|U\|` residual
+/// 1.4e-10, bit-identical from 5 000 through 40 000 iterations - a true fixed
+/// point, not merely a small residual): `q_w = 500 W/m2` on both hot walls,
+/// `y+` 56.8/57.7/58.5 (min/mean/max), `T_w = 317.253 K` (diagnosed by the
+/// thermal wall function), `T_b = 293.283 K` (mixed-mean), `U_b = 5.3696
+/// m/s`. The thermostat's own energy balance closes to round-off here
+/// (power -3.2 W against 3.2 W of measured wall heat, difference 2.8e-7 W) -
+/// see [`check_thermostat_sign_and_steady_offset`] for the controller's own
+/// law, checked directly rather than only through this replay.
 ///
 /// A live GPU run to statistical steady state has no place in `cargo test` -
 /// see this module's own `published_benchmarks` for why. What this check
@@ -3980,12 +3994,14 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
 
     // ---- the recorded measurement (docs/07-fire-solver.md S1.1) -----------
     let q_w: Scalar = 500.0; // W/m2, imposed on both hot walls
-    let delta_t: Scalar = 316.861 - 292.92; // K, T_w - T_b, the model's OWN prediction
+    let delta_t: Scalar = 317.253 - 293.283; // K, T_w - T_b, the model's OWN prediction
     let u_b: Scalar = 5.3696; // m/s, bulk velocity
     let nu: Scalar = 1.5e-5; // m2/s, the case's constant molecular nu
     let pr: Scalar = 0.71;
     let d_h: Scalar = 0.08; // m, = 2H for this plane channel (SPEC-LIT S32.2/S34)
-    let k_thermal: Scalar = 0.025611; // W/mK, rho(T_b) cp nu / Pr
+    // rho(T_b) cp nu / Pr, T_b = 293.283 K, rho = p0/(R_s T_b) - unchanged
+    // formula, recomputed at the SPEC-LIT S35 measurement's own T_b.
+    let k_thermal: Scalar = 0.025_579_7;
 
     let re = u_b * d_h / nu;
     let nu_measured = q_w * d_h / (k_thermal * delta_t);
@@ -4113,24 +4129,30 @@ fn check_launder_sharma_damping_functions(c: &mut Checks) {
 /// SPEC-LIT §33.2/§34's mesh-resolution check, REPLAYED against
 /// `cases/channelPeriodicFluxLowRe.jsonc` as rebuilt in SPEC-LIT §34 (the
 /// genuine 2-D plane channel, `empty` front/back - see `docs/07-fire-solver.md`
-/// §1.1). `ofgpu-fire`'s own end-of-run report
-/// (`ofgpu::models::mesh_resolution_report`, over a REAL Poisson wall
-/// distance and the converged `k` field, not the duct version's hot-wall-only
-/// approximation) measured `max_first_cell_y_plus = 0.00174716` and
-/// `cells_below_y_plus_20 = 192` of 400 cells at 40 000 iterations - both
-/// numbers are fully converged and bit-stable well before that (the
-/// turbulence/velocity fields reach round-off while `T` alone keeps drifting,
-/// SPEC-LIT §34's own diagnosis), so replaying them here is not vulnerable to
-/// the same non-convergence the energy equation has.
+/// §1.1) and, since SPEC-LIT §35, driven by the bulk-temperature thermostat.
+/// `ofgpu-fire`'s own end-of-run report (`ofgpu::models::mesh_resolution_report`,
+/// over a REAL Poisson wall distance and the converged `k` field, not the
+/// duct version's hot-wall-only approximation) measured
+/// `max_first_cell_y_plus = 0.00174585` and `cells_below_y_plus_20 = 192` of
+/// 400 cells at 40 000 iterations, bit-identical whether the run started at
+/// T0 = 293.15 K or T0 = 400 K (SPEC-LIT §35.2's own regression) - both
+/// numbers are fully converged and stable well before that, so replaying
+/// them here is not vulnerable to the (now fixed - see
+/// [`check_resolved_leg_gate_verdict_replay`]) energy-equation drift SPEC-LIT
+/// §34 first reported this replay against. The last three digits moved by
+/// 0.00174716 -> 0.00174585 (0.03%) from the pre-thermostat measurement -
+/// the thermostat's own converged sink (-3.29 W) is very slightly stronger
+/// than the fixed `-heaterPower -3.2 W` it replaces (SPEC-LIT §35.2's own
+/// energy-balance gap, `docs/07-fire-solver.md` §1.1), which couples back
+/// into `U_b` through the low-Mach `rho(T)` term at exactly this scale.
 ///
 /// This locks §33.2's own pass/fail rule - first-cell y+ < 1, at least 10
-/// cells at y+ < 20 - against regression on every commit, independent of
-/// whether the energy-equation drift above is ever chased to a fix.
+/// cells at y+ < 20 - against regression on every commit.
 fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
     use ofgpu::models::MeshResolutionReport;
 
     let report = MeshResolutionReport {
-        max_first_cell_y_plus: 0.001_747_16,
+        max_first_cell_y_plus: 0.001_745_85,
         cells_below_y_plus_20: 192,
         n_wall_faces: 16,
     };
@@ -4156,6 +4178,162 @@ fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
         "MeshResolutionReport::warnings() is empty for the replayed measurement",
         report.warnings().is_empty(),
     );
+}
+
+/// SPEC-LIT §35.1's proportional law and §35.2's own checks, run LIVE on a
+/// tiny mesh (unlike the two replays above, this is not a recorded snapshot
+/// - `Thermostat::correct` genuinely executes on the GPU here, in
+/// milliseconds, which is what lets this stand in for the two-initial-
+/// temperature regression without a multi-minute channel solve: the
+/// controller's output is a PURE function of the current volume-mean `T`
+/// and the fixed `(target, tau, rho_cp)` it was built with - nothing here
+/// depends on how `T` got to be what it is, so two different histories that
+/// arrive at the same `T` produce bit-identical output by construction, and
+/// this checks that construction directly rather than replaying two
+/// 40 000-iteration runs to demonstrate it (SPEC-LIT §35.2's own regression
+/// was run live instead - see `docs/07-fire-solver.md` §1.1 - and is NOT
+/// promoted here because it takes ~2.5 minutes per initial condition, not
+/// seconds).
+fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::sources::{flow_through_time, Thermostat};
+
+    let spec = MeshSpec {
+        n: [2, 2, 2],
+        l: [0.2, 0.2, 0.2],
+        ..Default::default()
+    };
+    let m = make_mesh(&scratch_dir("thermostat"), &spec)?;
+    let gm = GpuMesh::upload(gpu, &m)?;
+
+    // SPEC-LIT §35.1's default `tau`: V^(1/3) / U_ref. `spec.volume()` is
+    // this mesh's own `0.2^3 = 0.008 m3`, so V^(1/3) = 0.2 m exactly.
+    let tau_default = flow_through_time(spec.volume(), 4.0)?;
+    c.check(
+        "flow_through_time defaults to V^(1/3)/U_ref (SPEC-LIT 35.1)",
+        (tau_default - 0.05).abs(),
+        1e-9,
+    );
+
+    let target: Scalar = 350.0;
+    let tau: Scalar = 0.02;
+    let rho_cp: Scalar = 1206.0;
+    let mut th = Thermostat::new(gpu, &gm, target, tau, rho_cp)?;
+
+    // A SOURCE when the domain starts cold, a SINK when it starts hot -
+    // SPEC-LIT §35.1: "a source as readily as a sink".
+    let cold = gpu.upload(&vec![300.0 as Scalar; m.n_cells])?;
+    let q_cold = th.correct(gpu, &gm, &cold)?;
+    c.require("thermostat is a SOURCE below its target (SPEC-LIT 35.1)", q_cold > 0.0);
+
+    let hot = gpu.upload(&vec![400.0 as Scalar; m.n_cells])?;
+    let q_hot = th.correct(gpu, &gm, &hot)?;
+    c.require("thermostat is a SINK above its target (SPEC-LIT 35.1)", q_hot < 0.0);
+
+    // At T_mean == target it asks for exactly nothing - the fixed point the
+    // full channel regression converges to regardless of initial T.
+    let at_target = gpu.upload(&vec![target; m.n_cells])?;
+    let q_zero = th.correct(gpu, &gm, &at_target)?;
+    c.check("thermostat asks for 0 at its own T_mean == target", q_zero.abs(), 1e-6);
+
+    // A persistent net forcing (here, a manufactured "wall heat" analog Q)
+    // settles the volume-mean at target + Q*tau/(rho_cp*V), NOT at target
+    // exactly - SPEC-LIT §35.1 states the ideal ("at steady state T_mean =
+    // T_target"); §35's own channel measurement (docs/07-fire-solver.md
+    // §1.1) found the true discrete offset is small but real for any
+    // nonzero forcing, and this is that same closed form, checked directly:
+    // iterate `T_mean_{n+1} = T_mean_n + dt*(Q/(rho_cp*V) - (T_mean_n -
+    // target)/tau)` (the ODE `Thermostat` implements one explicit step of)
+    // to ITS OWN fixed point and compare against the closed form.
+    let q_forcing: Scalar = 25_000.0; // W/m3 equivalent, arbitrary
+    let dt: Scalar = 1.0e-4; // small relative to tau, for the explicit Euler step to be stable
+    let mut t_mean: Scalar = target;
+    for _ in 0..2_000_000 {
+        let q = -rho_cp * (t_mean - target) / tau;
+        t_mean += dt * (q_forcing + q) / rho_cp;
+    }
+    let closed_form = target + q_forcing * tau / rho_cp;
+    c.check(
+        "the P-controller's steady-state offset matches target + Q*tau/rho_cp (SPEC-LIT 35.1)",
+        (t_mean - closed_form).abs() / closed_form,
+        1e-6,
+    );
+    c.note(&format!(
+        "a persistent {} W/m3 forcing settles T_mean at target + {} K, not at target exactly \
+         (the ordinary steady-state error of a proportional-only controller) - \
+         docs/07-fire-solver.md S1.1's own {} W leg measured a {} K offset the same way",
+        sci(q_forcing, 4),
+        sci(q_forcing * tau / rho_cp, 4),
+        sci(3.2, 2),
+        sci(0.424, 3),
+    ));
+
+    Ok(())
+}
+
+/// SPEC-LIT §32.4's verdict, REPLAYED, for the resolved leg
+/// (`cases/channelPeriodicFluxLowRe.jsonc`) now that SPEC-LIT §35's
+/// thermostat has given it an actual steady state to measure - see
+/// `docs/07-fire-solver.md` §1.1 for the full derivation and the
+/// two-initial-temperature regression this measurement is downstream of.
+///
+/// UNLIKE [`check_thermal_wall_function_gate_verdict_replay`], this does
+/// NOT close on both correlations, and is not asserted as if it did:
+/// Dittus-Boelter's wider ±20-25% band is met (+8.1%), Gnielinski's tighter
+/// ±10% band is not (+16.3%, six points over). SPEC-LIT §32.4's own rule -
+/// "the gate closes when both meshes sit inside the correlation band" -
+/// is honestly NOT met, so only the Dittus-Boelter comparison is asserted;
+/// the Gnielinski comparison is a NOTE, so a future change that moves this
+/// number is visible without failing the whole suite over an already-known,
+/// reported gap.
+fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
+    use ofgpu::wallfunctions::{dittus_boelter_nu, gnielinski_nu};
+
+    // ---- the recorded measurement (docs/07-fire-solver.md S1.1) -----------
+    let q_w: Scalar = 500.0; // W/m2, imposed on both hot walls
+    let delta_t: Scalar = 314.087 - 292.817; // K, T_w - T_b
+    let u_b: Scalar = 4.843_88; // m/s, bulk velocity
+    let nu: Scalar = 1.5e-5;
+    let pr: Scalar = 0.71;
+    let d_h: Scalar = 0.08; // m, = 2H (SPEC-LIT S32.2/S34)
+    // rho(T_b) cp nu / Pr at T_b = 292.817 K.
+    let k_thermal: Scalar = 0.025_620_4;
+
+    let re = u_b * d_h / nu;
+    let nu_measured = q_w * d_h / (k_thermal * delta_t);
+    let nu_db = dittus_boelter_nu(re, pr);
+    let nu_gn = gnielinski_nu(re, pr);
+
+    c.note(&format!(
+        "resolved leg: Re = {} (D_h = 2H = 0.08 m), Nu_measured = {}, Nu_DB = {}, Nu_Gn = {}",
+        sci(re, 4),
+        sci(nu_measured, 4),
+        sci(nu_db, 4),
+        sci(nu_gn, 4),
+    ));
+    c.note(&format!(
+        "Nu_measured / Nu_DB = {} ({:+.1}%), Nu_measured / Nu_Gn = {} ({:+.1}%) - two-mesh \
+         ratio Nu_resolved / Nu_wallFunction = {}",
+        sci(nu_measured / nu_db, 4),
+        (nu_measured / nu_db - 1.0) * 100.0,
+        sci(nu_measured / nu_gn, 4),
+        (nu_measured / nu_gn - 1.0) * 100.0,
+        sci(nu_measured / 65.237_372, 4),
+    ));
+
+    c.check(
+        "resolved leg Nu within Dittus-Boelter's own +-25% band (replayed measurement, S32.4)",
+        (nu_measured - nu_db).abs() / nu_db,
+        0.25,
+    );
+    // NOT asserted with c.check: this is honestly outside the band (+16.3%
+    // against +-10%) and is reported, not hidden - SPEC-LIT §32.4's OWN
+    // point about what a real finding looks like.
+    c.note(&format!(
+        "OPEN: resolved leg Nu is {:+.1}% of Gnielinski's own +-10% band - the gate does NOT \
+         close on this leg under SPEC-LIT 32.4's rule (both correlations, both meshes); see \
+         docs/07-fire-solver.md S1.1 for what this now implicates",
+        (nu_measured / nu_gn - 1.0) * 100.0,
+    ));
 }
 
 // ==========================================================================

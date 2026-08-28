@@ -50,6 +50,7 @@ pub mod potential_flow;
 pub mod restart;
 pub mod combustion;
 pub mod energy;
+pub mod fvdom;
 pub mod radiation;
 pub mod precon;
 pub mod pressure;

@@ -2515,3 +2515,280 @@ steady solve that is singular.
 | steady state | the thermostat's integrated power equals the wall heat input to round-off |
 | `T_target` unreachable (walls colder than target) | the controller saturates at a sensible value, and says so |
 | **§32's resolved leg** | converges, and its `Nu` compared against Dittus-Boelter and Gnielinski on the same `D_h = 2H` the wall-function leg used |
+
+---
+
+## 36. fvDOM: finite-volume discrete ordinates radiation
+
+**Chandrasekhar, *Radiative Transfer*, Dover (1960)** — the radiative
+transfer equation (RTE) itself, §1. **Modest, *Radiative Heat Transfer*,
+3rd ed., ch. 16** — the discrete-ordinates method, its finite-volume
+discretisation, and the diffuse-wall boundary condition. **Fiveland,
+*J. Heat Transfer* 106 (1984) 699** — assembling the S_N ordinates' spatial
+derivatives with a finite-volume (not finite-difference) scheme, which is the
+form this section implements. **Truelove, *J. Heat Transfer* 109 (1987)
+1048** — the S_N quadrature sets and the two conditions (§36.2) that fix
+their directions and weights. `reference/fds/Source/radi.f90` is public
+domain (NIST) and implements the same physics with a different angular
+quadrature (a solid-angle subdivision rather than a fixed S_N table); read
+for the wall-reflection bookkeeping shape, acknowledged here, not copied —
+this section's quadrature, assembly and wall formula are all derived
+independently below. §28's own text names this the documented next step:
+"FDS uses finite-volume DOM — better in optically thin fire margins — which
+is the DOCUMENTED next step, not this one." This section is that step.
+
+### 36.1 The RTE along one ordinate, as a transport equation this crate already assembles
+
+For a gray, absorbing-emitting-scattering, non-refracting medium
+(`n = 1`, *DESIGN* — no participating medium in this crate changes the speed
+of light; FDS makes the same assumption), the steady RTE along a fixed unit
+direction `s_m` (Modest ch. 9, eq. 9.24; Chandrasekhar ch. 1) is
+
+```
+(s_m . grad) I_m = -(a + sigma_s) I_m + a sigma T^4/pi + (sigma_s/4pi) G
+```
+
+`I_m` is the spectral... here gray, so total... intensity along `s_m`
+[W/(m² sr)], `a` the absorption coefficient, `sigma_s` the (assumed
+isotropic-scattering, *DESIGN* — the phase function `Phi = 1`; anisotropic
+scattering is a coefficient change to the last term, not a structure change)
+scattering coefficient, both [1/m], and `G = sum_m' w_m' I_m'` the incident
+radiation [W/m²] §28 already defines. There is no time derivative: light
+crosses a combustion-scale domain in nanoseconds, so the radiation field is
+always at its (pseudo-)steady state relative to the flow's own timescale —
+the same "instantaneous relative to everything else" assumption §28's own
+Helmholtz solve makes.
+
+The left side is a pure convection with the CONSTANT "velocity" `s_m`, and
+`div(s_m) = 0` makes `(s_m . grad) I_m` and `div(s_m I_m)` the same field, so
+integrating over a cell and applying Gauss's theorem gives exactly §3.1's
+convection operator with the face flux
+
+```
+phi_m,f = s_m . Sf          (internal and boundary faces)
+```
+
+— a field that is CONSTANT (mesh and direction are both fixed), computed once
+per ordinate at construction exactly as §28's `Gamma * magSf` is. The
+extinction `-(a + sigma_s) I_m` is §3.4's implicit sink (`fvm_sp`, always
+`<= 0` since `a, sigma_s >= 0`); the emission and in-scattering source is
+`fvm_su`. **No new spatial operator exists in this section — `fvm_div_gauss`,
+`fvm_sp` and `fvm_su` assemble the whole equation**, which is the reason
+`SPEC-LIT` §28 could name this the next step at all rather than a rewrite.
+
+Upwind weights (§3.1, `w_f = 1 if phi_f >= 0 else 0`) are not a choice here —
+they are the ONLY stable weight for a pure hyperbolic transport with no
+diffusion to regularise a central scheme, exactly the reason DOM/FVM-DOM
+codes use a step (upwind) scheme along each ordinate (Fiveland 1984 §3;
+Modest ch. 16.3). Because `phi_m` is constant, `w_m` is ALSO constant and is
+precomputed once, alongside `phi_m` itself.
+
+**In-scattering, lagged.** `G` on the right side is this equation's own
+solution summed over every OTHER ordinate — a real coupling, not a
+convenience — so it is evaluated at the previous sweep's `G` (§36.3), the same
+lag every coefficient in this crate that depends on "the rest of the system"
+runs at (P1's wall temperature, turbulence's production term, ...). One
+sweep's worth of lag per outer iteration, not per equation — see §36.6.
+
+### 36.2 The angular quadrature
+
+`sum_m w_m = 4 pi` (the solid angle of the sphere) is necessary but nowhere
+near sufficient — a quadrature also has to get the LOW-ORDER MOMENTS of the
+sphere right, or the discrete equation does not converge to the continuum RTE
+as the mesh refines. This crate implements the level-symmetric **S4** set
+(Lathrop & Carlson 1965, reproduced in Truelove 1987 and Fiveland 1984): 24
+ordinates, 3 per octant, each octant's three directions the permutations of
+one triple `(a, a, b)`:
+
+```
+directions, one octant:  (a,a,b), (a,b,a), (b,a,a)     (the other 7 octants: every sign combination)
+weight, every ordinate:  w = pi/6                       (3 per octant * pi/6 = pi/2 ; 8 octants * pi/2 = 4pi)
+```
+
+Two conditions fix `a` and `b`. First, every direction is a unit vector:
+
+```
+2a^2 + b^2 = 1
+```
+
+Second — Lathrop & Carlson's actual defining condition, and the one that
+makes the wall formula of §36.4 exact in the isothermal limit — the
+HALF-RANGE flux of the quadrature along any one axis must reproduce the
+continuum integral `integral_(hemisphere) mu dOmega = pi` exactly. Along `x`,
+the four octants with `a_x > 0` each contribute `(2a + b) * pi/6` to that sum
+(the three permutations' `x`-components are `a, a, b`), so
+
+```
+4 * (2a + b) * pi/6 = pi   =>   2a + b = 3/2
+```
+
+Solving the two simultaneously (`b = 3/2 - 2a` into `2a^2 + b^2 = 1` gives
+`6a^2 - 6a + 1.25 = 0`):
+
+```
+a = (6 - sqrt(6)) / 12  = 0.29587585...
+b = (3 + sqrt(6)) / 6   = 0.90824829...
+```
+
+*DESIGN.* Truelove (1987) and Fiveland (1984) both TABULATE this set rather
+than derive it in the paper itself, so the exact digits above are this
+crate's own closed-form solve of the two defining conditions, not a copied
+table — a value obtained this way is checkable (§36.7's quadrature-invariant
+tests) rather than trusted. The widely-reproduced decimal `0.2958759` for S4
+agrees with the closed form to 7 figures. **S6, S8, S10, S12** are named
+alternatives with no closed form this simple (each needs additional moment
+conditions with no unique solution, which is exactly why the literature
+tabulates them) — requesting one is the §13.4 contract: an error naming `S4`
+as what is available, not a silent substitution.
+
+The second moment needed to recover the diffusion limit (§36.3's third gate),
+`sum_m w_m mu_x^2 = 4pi/3`, holds for ANY `a` satisfying `2a^2+b^2=1` with
+this direction/weight structure (each octant contributes `w(2a^2+b^2) = w`,
+times 8 octants times `w=pi/6` gives `4pi/3` identically) — so it is not a
+third condition on `a`, it is a property of the S4 STRUCTURE, and is
+therefore checkable directly as a quadrature invariant with no dependence on
+which root of the quadratic was taken.
+
+### 36.3 Assembly and the sweep
+
+One `correct()` call, given the current `T` and (optionally) combustion's
+`q'''_c`:
+
+```
+total_emission = max(4 a sigma T^4, chi_r q'''_c)        the SAME §28 floor, reused verbatim
+vol_src        = total_emission/(4pi) + (sigma_s/4pi) G     (G from the PREVIOUS sweep; zero on the first)
+
+for each ordinate m (24, S4):
+    stamp the diffuse-wall triple on m's wall faces (§36.4), from the
+      OTHER ordinates' latest boundary intensities
+    assemble:  fvm_div_gauss(phi_m, w_m, I_m, +1)
+             + fvm_sp(a + sigma_s, +1)
+             + fvm_su(vol_src, +1)
+             + add_boundary_contributions
+    solve (PBiCGStab — §36.1's convection makes the matrix asymmetric,
+           and crate::solver::solve refuses PCG on it by itself, §8.2)
+    correct_boundary_conditions(I_m)
+
+G = sum_m w_m I_m                                        for the NEXT sweep's vol_src, and for §36.5
+```
+
+`total_emission`'s floor and its formula are `a sigma T^4`-shaped exactly as
+§28's own emission term — reusing §28's `RadiationKernels::emission_source`
+CUDA kernel rather than re-deriving it, because the floor is a statement
+about how much a cell radiates in TOTAL (over all `4pi` steradians), and
+that total does not depend on which model computes the ANGULAR distribution
+of it. Dividing by `4pi` spreads it isotropically over the ordinates, which
+recovers the un-floored `a sigma T^4/pi` per-ordinate term exactly when the
+floor is inactive.
+
+`n_sweeps` (a `correct()` parameter, mirroring §28's `n_non_orth`) is extra
+FULL passes over all 24 ordinates within one call, each using the
+just-updated `G` and wall intensities from the pass before. §36.6 discusses
+why v1 defaults to one sweep per call and leans on the outer iteration loop
+to converge the rest, exactly as §28 lags `T`.
+
+### 36.4 Wall boundary: diffuse emission and reflection
+
+A face on a Marshak-analogous wall (emissivity `epsilon_w`, temperature
+`T_w`, diffusely reflecting: Modest ch. 16.5) splits its ordinates by sign of
+`phi_m,bf = s_m . Sf` against the mesh's own outward normal:
+
+```
+phi_m,bf > 0   ray leaves the gas cell toward the wall - "incident" on the wall - outflow BC (zero-gradient, S4 triple: fr=0, refGrad=0)
+phi_m,bf < 0   ray leaves the wall INTO the gas - inflow BC (Dirichlet, S4 triple: fr=1, refValue = I_w)
+```
+
+`I_w`, the SAME for every inflow ordinate at that face (a diffuse wall's
+leaving intensity does not depend on direction), is built from the OTHER
+ordinates' latest boundary intensities — "the incoming intensity built from
+the outgoing ones", and, being one more instance of `psi_b = fr*ref + (1-fr)
+(...)`, the section-4 triple again:
+
+```
+I_w = epsilon_w sigma T_w^4/pi  +  ((1 - epsilon_w)/pi) * sum_(m': phi_m',bf>0) w_m' I_m'(at face) * |phi_m',bf|/magSf_bf
+```
+
+The first term is the wall's own blackbody emission spread isotropically
+over the outward hemisphere (`sigma T^4 = pi * I_black`, the standard
+hemispherical-flux/radiance relation); the second is Lambertian reflection of
+whatever irradiance the wall receives, `(1-epsilon_w)` of it re-emitted
+uniformly over the same hemisphere. `|phi_m',bf|/magSf_bf = |s_m' . n|` is
+the direction cosine against the wall normal, recovered from the flux this
+crate already carries rather than stored again.
+
+**Why this is exact at isothermal equilibrium, and not by luck.** At
+`T = T_w` everywhere, `I_m = sigma T^4/pi` for every ordinate is an exact
+solution of §36.1's interior equation for ANY `a, sigma_s` (its gradient is
+zero and the emission/extinction/in-scattering terms cancel identically —
+the same statement P1's own equilibrium test is checking). It is ALSO an
+exact fixed point of `I_w` above if and only if
+`sum_(phi_m'>0) w_m' |s_m'.n| = pi` — exactly §36.2's half-range flux
+condition, for the wall's own normal direction. On an axis-aligned wall (the
+only kind this crate's Cartesian/`blockgen` meshes build, and every gate
+below), that is precisely the condition the S4 set was SOLVED to satisfy
+(§36.2), to the closed form's own precision — not an approximation, and not
+the same statement as P1's Marshak derivation (which is exact on ANY mesh,
+by construction of a single scalar field's boundary condition); fvDOM's
+version is exact on an axis-aligned wall because the quadrature was chosen
+for it, and would carry a small (checkable) angular-discretisation bias on
+an arbitrarily oriented one.
+
+**Every other boundary** keeps §28's own convention: the default triple
+(`ZeroGradient`, from `GpuScalarField::zeros`) unless a face is named a wall.
+*DESIGN, consistency over "more physical"* — an outlet BC that better
+represented an open sky (Dirichlet zero for inflow ordinates, "cold black
+surroundings") is straightforward to add later, but P1 and fvDOM must run
+the SAME assumption on the SAME case for §36.7's comparison gates to be a
+comparison of the angular method and nothing else.
+
+### 36.5 Coupling to §26 energy: the same registry, unchanged formula
+
+```
+-div(q_r) = a (G - 4 sigma T^4)
+```
+
+is model-agnostic: it is a statement about `G` and `T`, and does not know
+whether `G` came from one Helmholtz solve or twenty-four transport solves.
+§28's `RadiationKernels::energy_coupling` — the Patankar linearisation
+`Sp = -16 a sigma T0^3`, `Su = a G + 12 a sigma T0^4 - excess`, `excess` the
+same radiant-fraction bookkeeping — is called VERBATIM with fvDOM's own `G`,
+and the result registers on the identical `crate::energy::EnergySources` P1
+uses. Energy does not learn, and must not need to learn, which radiation
+model produced its source terms — the whole reason §18's registry exists.
+
+### 36.6 Cost, stated honestly
+
+One fvDOM `correct()` call is `N_ordinates` (24, S4) asymmetric transport
+solves against P1's one symmetric-positive-definite Helmholtz solve — every
+one of PBiCGStab's iterations does more work per iteration than PCG's too,
+since the matrix is not exploitable for a Cholesky-shaped preconditioner
+(§8.2, DIC is refused on it for the same reason P1 gets to use it). This is
+not a constant-factor difference to be optimised away; it is the price of
+resolving the angular distribution P1 collapses to two moments (`G` and its
+gradient) instead of assuming a scalar field.
+
+*DESIGN — recommended, not enforced by a setting in v1.* Radiation couples to
+the flow only through a source term that is smooth on the flow's own
+timescale (photon transit is instantaneous by comparison; the medium's `T`
+that DRIVES the emission term moves on the flow timescale, not faster), so a
+production run should update fvDOM every 5-10 outer iterations rather than
+every one, holding `su`/`sp` fixed in between — the same reasoning that
+justifies lagging turbulence production or a wall function's coefficients.
+`n_sweeps` (§36.3) is the knob for converging the WITHIN-call ordinate
+coupling (wall reflection, scattering) faster than the outer loop would; the
+UPDATE INTERVAL is a driver-level choice (`ofgpu-fire`'s outer-iteration
+loop, not this module) and is not wired to a case setting in v1 — a case
+that wants it approximates it today by simply not calling `correct()` every
+iteration, which is already possible without new plumbing.
+
+### 36.7 What must hold
+
+| Test | Expected |
+|---|---|
+| quadrature weights | `sum_m w_m = 4pi`, `sum_m w_m mu_x^2 = sum w_m mu_y^2 = sum w_m mu_z^2 = 4pi/3`, to the closed form's own precision |
+| half-range flux | `sum_(mu_x>0) w_m mu_x = pi` (§36.2/§36.4's exactness condition), same tolerance |
+| isothermal enclosure at `T_w` | `G -> 4 sigma T_w^4` uniformly — the same check §28 passes, converged over repeated `correct()` calls (§36.3/§36.6's sweep lag, not one call) |
+| optically thick limit | recovers the diffusion result, AND agrees with P1 to within discretisation error — where P1 is right, fvDOM must agree |
+| optically thin limit | fvDOM vs. an analytic thin-medium result vs. P1 vs. the same analytic result — report all three, and how far P1's error is from fvDOM's, which is the reason this section exists |
+| energy budget | domain `integral(emission - absorption) dV` equals net boundary radiative flux, to round-off — §28's own check, unchanged by which model produced `emission`/`absorption` |
+| `cases/burnerPlume.jsonc` | run with `radiationModel P1` and `radiationModel fvDOM`; report the radiated fraction from both |

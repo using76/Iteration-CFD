@@ -72,7 +72,7 @@ use crate::momentum::BuoyancyCoeffs;
 use crate::scalar_transport::ScalarTransportCoeffs;
 use crate::timescheme::DdtScheme;
 use crate::combustion::CombustionCoeffs;
-use crate::radiation::{RadiationModel, RadiationProps};
+use crate::radiation::{RadiationConfig, RadiationModel};
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -137,6 +137,18 @@ pub enum JsonSource {
         field: String,
         #[serde(rename = "bodyForce")]
         body_force: [f64; 3],
+    },
+
+    /// SPEC-LIT §35.1: the bulk-temperature thermostat, a uniform volumetric
+    /// proportional controller on the domain's own volume-mean `T`. Always
+    /// corrects `T` and always acts over the whole mesh - see
+    /// [`crate::sources::Thermostat`]'s own doc for why. `tau` omitted
+    /// defaults to the domain's flow-through time
+    /// ([`crate::sources::flow_through_time`]).
+    Thermostat {
+        target: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tau: Option<f64>,
     },
 }
 
@@ -327,19 +339,24 @@ pub struct JsonCombustion {
     pub dh_c: Option<f64>,
 }
 
-/// SPEC-LIT §28's P1 gray radiation. `model` is validated by
-/// [`RadiationModel::from_name`] - naming `fvDOM` here is the §13.4 gate that
-/// section documents, not a silent fallback to P1.
+/// SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by
+/// [`RadiationModel::from_name`] - the §13.4 gate that names both as what is
+/// available and anything else as an error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JsonRadiation {
-    /// `"P1"` - the only model this crate implements; see
-    /// [`RadiationModel::from_name`] for what happens with anything else.
+    /// `"P1"` or `"fvDOM"`; see [`RadiationModel::from_name`] for what
+    /// happens with anything else.
     pub model: String,
     /// Gray absorption coefficient `a`, 1/m. Constant, case-supplied
-    /// (SPEC-LIT §28 v1; WSGG is later work).
+    /// (SPEC-LIT §28/§36 v1; WSGG is later work). Required by both models.
     #[serde(rename = "a")]
     pub absorption: f64,
+    /// Gray scattering coefficient `sigma_s`, 1/m - fvDOM only (SPEC-LIT
+    /// §36.1's isotropic-scattering term); ignored, and normally absent,
+    /// under `model: "P1"`. Defaults to `0.0` (non-scattering).
+    #[serde(rename = "sigmaS", default, skip_serializing_if = "Option::is_none")]
+    pub scattering: Option<f64>,
     /// The radiant-fraction floor `chi_r`. Defaults to
     /// [`crate::radiation::CHI_R_DEFAULT`] (`0.35`, FDS practice).
     #[serde(rename = "chiR", default, skip_serializing_if = "Option::is_none")]
@@ -1018,7 +1035,7 @@ pub struct LoweredCase {
     pub combustion: Option<CombustionCoeffs>,
     /// `physics.fire.radiation`, resolved - `None` when the case has no
     /// `fire.radiation` block.
-    pub radiation: Option<RadiationProps>,
+    pub radiation: Option<RadiationConfig>,
     /// The Marshak wall emissivity every `wall`-kind patch gets when
     /// `radiation` is `Some`; meaningless otherwise.
     pub radiation_wall_emissivity: Scalar,
@@ -2041,13 +2058,29 @@ impl JsonCase {
         let (radiation, radiation_wall_emissivity) = match self.physics.fire.as_ref().and_then(|f| f.radiation.as_ref())
         {
             Some(r) => {
-                RadiationModel::from_name(&r.model)?;
-                let mut props = RadiationProps::new(r.absorption as Scalar)?;
-                if let Some(v) = r.chi_r {
-                    props.chi_r = v as Scalar;
-                }
-                props.validate()?;
-                (Some(props), r.wall_emissivity.unwrap_or(1.0) as Scalar)
+                let model = RadiationModel::from_name(&r.model)?;
+                let a = r.absorption as Scalar;
+                let chi_r = r.chi_r.map(|v| v as Scalar);
+                let config = match model {
+                    RadiationModel::P1 => {
+                        let mut props = crate::radiation::RadiationProps::new(a)?;
+                        if let Some(v) = chi_r {
+                            props.chi_r = v;
+                        }
+                        props.validate()?;
+                        RadiationConfig::P1(props)
+                    }
+                    RadiationModel::FvDom => {
+                        let sigma_s = r.scattering.unwrap_or(0.0) as Scalar;
+                        let mut props = crate::fvdom::FvDomProps::new(a, sigma_s)?;
+                        if let Some(v) = chi_r {
+                            props.chi_r = v;
+                        }
+                        props.validate()?;
+                        RadiationConfig::FvDom(props)
+                    }
+                };
+                (Some(config), r.wall_emissivity.unwrap_or(1.0) as Scalar)
             }
             None => (None, 1.0),
         };
@@ -2380,6 +2413,32 @@ impl JsonCase {
                         field: field.clone(),
                         selector: crate::sources::CellSelector::All,
                         term: Some(crate::sources::SourceTerm::BodyForce(b)),
+                        heat_release: None,
+                    });
+                }
+                JsonSource::Thermostat { target, tau } => {
+                    if !target.is_finite() {
+                        return Err(Error::Config(format!(
+                            "sources[{i}] (thermostat): target {target} is not \
+                             a finite temperature"
+                        )));
+                    }
+                    if let Some(t) = tau {
+                        if !(*t > 0.0) || !t.is_finite() {
+                            return Err(Error::Config(format!(
+                                "sources[{i}] (thermostat): tau {t} is not a \
+                                 usable relaxation time"
+                            )));
+                        }
+                    }
+                    sources.push(crate::sources::SourceSpec {
+                        name: format!("thermostat{i}"),
+                        field: "T".to_string(),
+                        selector: crate::sources::CellSelector::All,
+                        term: Some(crate::sources::SourceTerm::Thermostat {
+                            target: *target as Scalar,
+                            tau: tau.map(|t| t as Scalar),
+                        }),
                         heat_release: None,
                     });
                 }
@@ -3916,6 +3975,70 @@ mod tests {
             Ok(_) => panic!("expected lower() to fail for field \"T\""),
         };
         assert!(err.contains("\"T\""), "{err}");
+    }
+
+    /// SPEC-LIT §35.1's own worked example: `{"type": "thermostat", "target":
+    /// 350.0, "tau": 0.02}` lowers to a `T`-field, whole-domain
+    /// `SourceTerm::Thermostat` with both numbers preserved exactly.
+    #[test]
+    fn a_thermostat_lowers_to_a_whole_domain_t_source() {
+        let case = minimal_case_with_sources(
+            r#"{ "type": "thermostat", "target": 350.0, "tau": 0.02 }"#,
+        )
+        .expect("parses");
+        let lowered = case.lower().expect("a thermostat must lower");
+        assert_eq!(lowered.sources.len(), 1);
+        let spec = &lowered.sources[0];
+        assert_eq!(spec.field, "T");
+        assert_eq!(spec.selector, crate::sources::CellSelector::All);
+        match spec.term {
+            Some(crate::sources::SourceTerm::Thermostat { target, tau }) => {
+                assert_eq!(target, 350.0);
+                assert_eq!(tau, Some(0.02));
+            }
+            other => panic!("expected SourceTerm::Thermostat, got {other:?}"),
+        }
+    }
+
+    /// `tau` is genuinely optional - SPEC-LIT §35.1's own default (the
+    /// domain flow-through time) is resolved by the DRIVER, not the reader,
+    /// so `None` here must survive the round trip rather than being filled
+    /// in early.
+    #[test]
+    fn a_thermostat_without_tau_leaves_the_default_to_the_driver() {
+        let case = minimal_case_with_sources(r#"{ "type": "thermostat", "target": 350.0 }"#)
+            .expect("parses");
+        let lowered = case.lower().expect("a thermostat without tau must lower");
+        match lowered.sources[0].term {
+            Some(crate::sources::SourceTerm::Thermostat { tau, .. }) => assert_eq!(tau, None),
+            other => panic!("expected SourceTerm::Thermostat, got {other:?}"),
+        }
+    }
+
+    /// A non-finite target is refused at `lower`, not left to fail deep
+    /// inside the solver later (SPEC-LIT §13.4's shape: fail loudly, at the
+    /// point the case said something impossible).
+    #[test]
+    fn a_thermostat_with_a_non_finite_target_is_an_error() {
+        let case = minimal_case_with_sources(r#"{ "type": "thermostat", "target": 1e400 }"#);
+        // `1e400` overflows `f64` at JSON parse time, exactly like the
+        // existing `bodyForce` overflow test below.
+        assert!(case.is_err() || case.unwrap().lower().is_err());
+    }
+
+    /// A `tau` of zero or negative is refused - SPEC-LIT §35.1's own
+    /// relaxation time must be positive to mean anything.
+    #[test]
+    fn a_thermostat_with_a_non_positive_tau_is_an_error() {
+        let case = minimal_case_with_sources(
+            r#"{ "type": "thermostat", "target": 350.0, "tau": -1.0 }"#,
+        )
+        .expect("parses");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail for tau -1.0"),
+        };
+        assert!(err.contains("tau"), "{err}");
     }
 
     /// A `bodyForce` component past `f64`'s range is refused when the case

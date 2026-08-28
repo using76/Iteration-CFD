@@ -62,8 +62,10 @@ use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
+use crate::field_ops::{self, FieldKernels};
 use crate::ldu::GpuLduMatrix;
-use crate::mesh::HostMesh;
+use crate::mesh::{GpuMesh, HostMesh};
+use crate::solver::{self, SolverKernels};
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -291,6 +293,20 @@ pub enum SourceTerm {
     /// scalar would be silently added to all three components alike, which is
     /// exactly the kind of wrong answer this project is removing.
     BodyForce(Vec3),
+
+    /// SPEC-LIT §35.1's bulk-temperature thermostat: `target` (K) and,
+    /// optionally, `tau` (s) - `None` means "default to the domain's own
+    /// flow-through time" ([`flow_through_time`]).
+    ///
+    /// A DATA CARRIER only - unlike every other variant here, this is never
+    /// applied through [`SourceSet::apply`]/[`SourceSet::apply_component`]
+    /// (both refuse it, same as [`SourceTerm::BodyForce`] on a scalar
+    /// equation). Its value depends on the CURRENT volume-mean `T`, which
+    /// changes every outer iteration, so it is unpacked once at start-up
+    /// into a [`Thermostat`] - the object that actually recomputes and
+    /// registers it - and never reaches the generic per-cell kernels this
+    /// enum otherwise drives.
+    Thermostat { target: Scalar, tau: Option<Scalar> },
 }
 
 impl SourceTerm {
@@ -321,6 +337,18 @@ impl SourceTerm {
                     b.x, b.y, b.z
                 )))
             }
+            SourceTerm::Thermostat { target, .. } if !(target > 0.0 && target.is_finite()) => {
+                Err(Error::Config(format!(
+                    "source \"{name}\": thermostat target is {target} K, which \
+                     is not a usable absolute temperature"
+                )))
+            }
+            SourceTerm::Thermostat { tau: Some(tau), .. } if !(tau > 0.0 && tau.is_finite()) => {
+                Err(Error::Config(format!(
+                    "source \"{name}\": thermostat tau is {tau} s, which is not \
+                     a usable relaxation time"
+                )))
+            }
             _ => Ok(()),
         }
     }
@@ -337,6 +365,12 @@ impl SourceTerm {
             SourceTerm::BodyForce(b) => {
                 format!("body force ({} {} {}) m/s2 per unit mass", b.x, b.y, b.z)
             }
+            SourceTerm::Thermostat { target, tau } => match tau {
+                Some(tau) => format!("thermostat target {target} K, tau = {tau} s"),
+                None => format!(
+                    "thermostat target {target} K, tau = domain flow-through time (default)"
+                ),
+            },
         }
     }
 }
@@ -469,6 +503,15 @@ impl SourceSet {
                         "source \"{}\": a body force is a VECTOR and belongs to \
                          the momentum equation. A scalar equation has no \
                          direction for it to point in (SPEC-LIT §18)",
+                        s.zone.name
+                    )))
+                }
+                SourceTerm::Thermostat { .. } => {
+                    return Err(Error::Config(format!(
+                        "source \"{}\": a thermostat is not a static per-cell \
+                         source - it is unpacked into a `Thermostat` and \
+                         registered through `EnergySources` directly (SPEC-LIT \
+                         §35.1), never through `SourceSet::apply`",
                         s.zone.name
                     )))
                 }
@@ -658,6 +701,241 @@ pub fn heat_release_source(q_dot: Scalar, rho_cp: Scalar, zone: &CellZone) -> Re
     Ok(SourceTerm::Explicit(q_dot / (rho_cp * zone.volume())))
 }
 
+// ==========================================================================
+//  §35.1  The bulk-temperature thermostat
+// ==========================================================================
+
+/// SPEC-LIT §35.1's default relaxation time: the domain's own flow-through
+/// time.
+///
+/// *DESIGN.* `tau` only sets how FAST the controller relaxes toward
+/// `T_target`; where it settles is `T_target` itself, always, at steady
+/// state (SPEC-LIT §35.1: "at steady state `T_mean = T_target`"), so any
+/// dimensionally-correct default in the right ballpark serves - this project
+/// has meshes that are not all axis-aligned channels, so rather than pick a
+/// "streamwise" length (which would need a direction this function has no
+/// way to be given), the length scale is `V^(1/3)`, the domain's own cube
+/// root of volume, and the speed is whatever the caller measured as the
+/// flow's own characteristic speed (the volume-mean `|U|` of the initial
+/// condition, in every caller this project has today - see `ofgpu-fire`'s
+/// `main`).
+pub fn flow_through_time(total_volume: Scalar, u_ref: Scalar) -> Result<Scalar> {
+    if !(total_volume > 0.0) {
+        return Err(Error::Config(
+            "thermostat: the mesh's total volume is zero or negative".to_string(),
+        ));
+    }
+    if !(u_ref > 0.0) || !u_ref.is_finite() {
+        return Err(Error::Config(format!(
+            "thermostat: no `tau` was given, and the flow-through-time default \
+             needs a positive characteristic speed; got {u_ref} m/s. Give \
+             `tau` explicitly instead (SPEC-LIT §35.1)"
+        )));
+    }
+    Ok(total_volume.cbrt() / u_ref)
+}
+
+/// How far past the plain proportional law [`Thermostat::correct`] will go
+/// before it saturates instead - SPEC-LIT §35.2's "`T_target` unreachable
+/// ... the controller saturates at a sensible value, and says so".
+///
+/// *DESIGN.* A domain whose only thermal exchange is the wall flux and this
+/// controller has no competing pull, so `T_mean` always reaches `T_target`
+/// exactly and this ceiling is never approached (every case this project
+/// runs has `|T_mean - T_target|` of order 10-50 K). It exists for the case
+/// SPEC-LIT §35.2 is naming: a Dirichlet wall competing with the controller
+/// for the SAME domain mean, which can hold `T_mean` away from `T_target`
+/// indefinitely - without a ceiling the plain law keeps demanding more power
+/// the longer that gap persists, which is unbounded growth chasing a target
+/// it structurally cannot reach. `1000 K` is at least an order of magnitude
+/// past any gap a real case here produces, so it bounds the pathological
+/// case without ever engaging on a working one.
+const THERMOSTAT_SATURATION_DELTA_T: Scalar = 1000.0;
+
+const THERMOSTAT_REDUCE_PARTIALS: usize = 1024;
+
+/// SPEC-LIT §35.1: a uniform volumetric proportional controller on the
+/// domain-mean (volume-mean, NOT the mixed-mean SPEC-LIT §32.2's `T_b`
+/// uses) temperature.
+///
+/// # Why this exists
+///
+/// A closed, streamwise-periodic domain whose every thermal boundary is
+/// Neumann (fixed-flux walls, cyclic streamwise, `empty` front/back) has a
+/// steady temperature equation that is pure Neumann and singular exactly the
+/// way a pure-Neumann pressure Poisson problem is (§8.5's own null space,
+/// [`crate::simple::Simple::pressure_is_pinned`]) - its solution is fixed up
+/// to an additive constant, which the case never said. This term removes
+/// that null direction by pinning the ONE number the equation cannot supply
+/// on its own - `T_mean` - without imposing a value anywhere: the PROFILE is
+/// still entirely `Energy`'s own prediction.
+///
+/// # The value it registers
+///
+/// ```text
+/// T_mean         = (1/V) integral T dV                     over the WHOLE mesh
+/// q_thermostat   = -rho_cp (T_mean - T_target) / tau        W/m3, uniform
+/// ```
+///
+/// `rho_cp` is fixed at construction, `rho(T_target) c_p` - not recomputed
+/// from the CURRENT `T_mean` every iteration, which would make the
+/// controller's own gain a function of its own error and couple a physical
+/// nonlinearity into what is meant to be a plain linear relaxation. Using
+/// `T_target` instead means the gain is a genuine constant for the whole
+/// run, exactly the "uniform volumetric term" SPEC-LIT §35.1 asks for, and
+/// it does not change where the controller settles - only the fixed
+/// `rho(T_target) c_p` a real thermostat's own control loop would use as its
+/// setpoint's own density is a reasonable one regardless.
+///
+/// A SOURCE when the domain is too cold (`T_mean < T_target`, `q > 0`) and a
+/// SINK when it is too hot - "as readily as a sink" (SPEC-LIT §35.1), so a
+/// domain that starts cold gets heated, not just capped.
+pub struct Thermostat {
+    target: Scalar,
+    tau: Scalar,
+    rho_cp: Scalar,
+    total_volume: Scalar,
+    n: usize,
+
+    /// `[n_cells]`, every entry the same `q_thermostat` - what
+    /// [`crate::energy::EnergySources::register_explicit`] wants.
+    uniform: DevBuf<Scalar>,
+    dot_out: DevBuf<Scalar>,
+    partials: DevBuf<Scalar>,
+    fldk: FieldKernels,
+    solk: SolverKernels,
+
+    last_t_mean: Scalar,
+    /// `q_thermostat * V_total`, W - the integrated power SPEC-LIT §35.2's
+    /// energy-balance check compares against the wall heat input.
+    last_power: Scalar,
+    last_saturated: bool,
+}
+
+impl Thermostat {
+    pub fn new(
+        gpu: &Gpu,
+        m: &GpuMesh,
+        target: Scalar,
+        tau: Scalar,
+        rho_cp: Scalar,
+    ) -> Result<Self> {
+        if !(target > 0.0) || !target.is_finite() {
+            return Err(Error::Config(format!(
+                "thermostat: target is {target} K, which is not a usable \
+                 absolute temperature"
+            )));
+        }
+        if !(tau > 0.0) || !tau.is_finite() {
+            return Err(Error::Config(format!(
+                "thermostat: tau is {tau} s, which is not a usable relaxation \
+                 time"
+            )));
+        }
+        if !(rho_cp > 0.0) || !rho_cp.is_finite() {
+            return Err(Error::Config(format!(
+                "thermostat: rho*cp is {rho_cp}, which is not a heat capacity"
+            )));
+        }
+        if !(m.total_volume > 0.0) {
+            return Err(Error::Config(
+                "thermostat: the mesh's total volume is zero or negative".to_string(),
+            ));
+        }
+
+        let n = m.n_cells;
+        let one = |k: usize| k.max(1);
+        Ok(Self {
+            target,
+            tau,
+            rho_cp,
+            total_volume: m.total_volume,
+            n,
+            uniform: gpu.zeros(one(n))?,
+            dot_out: gpu.zeros(1)?,
+            partials: gpu.zeros(THERMOSTAT_REDUCE_PARTIALS)?,
+            fldk: FieldKernels::new(gpu)?,
+            solk: SolverKernels::new(gpu)?,
+            last_t_mean: target,
+            last_power: 0.0,
+            last_saturated: false,
+        })
+    }
+
+    /// Measure `T_mean`, form `q_thermostat`, and refresh the uniform buffer
+    /// [`Self::uniform_buf`] hands to `EnergySources::register_explicit`.
+    ///
+    /// Call once per outer iteration, right after
+    /// `EnergySources::clear` - the same moment the heater and combustion
+    /// register their own contributions.
+    pub fn correct(&mut self, gpu: &Gpu, m: &GpuMesh, t: &DevBuf<Scalar>) -> Result<Scalar> {
+        solver::device_dot(
+            gpu,
+            &self.solk,
+            &mut self.dot_out,
+            t,
+            &m.v,
+            &mut self.partials,
+            self.n,
+        )?;
+        let t_mean = gpu.download(&self.dot_out)?[0] / self.total_volume;
+        self.last_t_mean = t_mean;
+
+        let raw = -self.rho_cp * (t_mean - self.target) / self.tau;
+        let ceiling = self.rho_cp * THERMOSTAT_SATURATION_DELTA_T / self.tau;
+        let (q, saturated) = if raw.abs() > ceiling {
+            (raw.signum() * ceiling, true)
+        } else {
+            (raw, false)
+        };
+        self.last_saturated = saturated;
+        self.last_power = q * self.total_volume;
+
+        if saturated {
+            crate::io::contract::warn_once(
+                "thermostat-saturated",
+                &format!(
+                    "thermostat: T_target {} K is not being reached at the rate \
+                     tau {} s asks for (T_mean is currently {} K) - the \
+                     corrective power has saturated at {} W (SPEC-LIT §35.2)",
+                    self.target, self.tau, t_mean, self.last_power
+                ),
+            );
+        }
+
+        field_ops::set_field(gpu, &self.fldk, &mut self.uniform, q, self.n)?;
+        Ok(q)
+    }
+
+    /// `[n_cells]`, every entry the last `q_thermostat` [`Self::correct`]
+    /// computed - feed straight to `EnergySources::register_explicit`.
+    pub fn uniform_buf(&self) -> &DevBuf<Scalar> {
+        &self.uniform
+    }
+
+    pub fn target(&self) -> Scalar {
+        self.target
+    }
+
+    pub fn tau(&self) -> Scalar {
+        self.tau
+    }
+
+    /// The volume-mean `T` [`Self::correct`] last measured.
+    pub fn t_mean(&self) -> Scalar {
+        self.last_t_mean
+    }
+
+    /// `q_thermostat * V_total`, W - positive is heating, negative is
+    /// cooling.
+    pub fn power(&self) -> Scalar {
+        self.last_power
+    }
+
+    pub fn saturated(&self) -> bool {
+        self.last_saturated
+    }
+}
 
 // ==========================================================================
 //  Reading a case
@@ -763,7 +1041,28 @@ pub fn read_sources(case_dir: &std::path::Path) -> Result<Vec<SourceSpec>> {
         let key = |k: &str| format!("{name}/{k}");
         let kind = d.get_or(&key("type"), "").to_string();
 
-        let selector = read_selector(&d, &name)?;
+        // SPEC-LIT §35.1: a thermostat corrects the WHOLE domain's
+        // volume-mean temperature, so it always selects `all` - it is the
+        // one kind allowed to omit `selection` entirely (every other kind
+        // requires it, see `read_selector`), and the one kind refused if
+        // `selection` names anything but `all`: a zoned thermostat would
+        // measure and correct only that zone's mean, which is not the
+        // domain-wide null direction this term exists to remove.
+        let selector = if kind == "thermostat" {
+            match d.get_or(&key("selection"), "all") {
+                "all" => CellSelector::All,
+                other => {
+                    return Err(Error::Config(format!(
+                        "source \"{name}\" (thermostat): selection \"{other}\" - \
+                         a thermostat corrects the WHOLE domain's volume-mean \
+                         temperature (SPEC-LIT §35.1) and must select \"all\"; \
+                         omit `selection` or say `all`"
+                    )))
+                }
+            }
+        } else {
+            read_selector(&d, &name)?
+        };
 
         let (term, heat_release) = match kind.as_str() {
             "heatRelease" => {
@@ -801,20 +1100,42 @@ pub fn read_sources(case_dir: &std::path::Path) -> Result<Vec<SourceSpec>> {
                 let v = required(&d, &key("value"), &name, "the value to pin the cells to")?;
                 (Some(SourceTerm::FixedValue(v)), None)
             }
+            "thermostat" => {
+                let target = required(
+                    &d,
+                    &key("target"),
+                    &name,
+                    "the target volume-mean temperature in K",
+                )?;
+                let tau = if d.has(&key("tau")) {
+                    Some(required(
+                        &d,
+                        &key("tau"),
+                        &name,
+                        "the relaxation time in s",
+                    )?)
+                } else {
+                    None
+                };
+                (Some(SourceTerm::Thermostat { target, tau }), None)
+            }
             other => {
                 return Err(Error::Config(format!(
                     "source \"{name}\": type \"{other}\" is not one this solver \
                      can apply. Available: heatRelease, scalarSource, \
                      scalarSink, mixedSource, momentumSource, porousDrag, \
-                     fixedValue (SPEC-LIT §18, §13.4)"
+                     fixedValue, thermostat (SPEC-LIT §18, §13.4)"
                 )))
             }
         };
 
         // Which equation. `porousDrag` is a momentum term and nothing else,
-        // so it defaults to U; everything else has to say.
+        // so it defaults to U; a thermostat corrects T and nothing else;
+        // everything else has to say.
         let default_field = if kind == "porousDrag" || kind == "momentumSource" {
             "U"
+        } else if kind == "thermostat" {
+            "T"
         } else {
             ""
         };
@@ -1294,5 +1615,182 @@ mod tests {
             );
             assert_eq!(src[c], 0.0, "porous drag must not touch the source");
         }
+    }
+
+    // ---- SPEC-LIT §35.1: the thermostat ------------------------------------
+
+    #[test]
+    fn flow_through_time_is_length_over_speed() {
+        // V = 8 m3 -> V^(1/3) = 2 m; at 4 m/s that is 0.5 s.
+        let tau = flow_through_time(8.0, 4.0).expect("tau");
+        assert!((tau - 0.5).abs() < 1e-12, "tau = {tau}");
+    }
+
+    #[test]
+    fn flow_through_time_refuses_a_non_positive_speed() {
+        assert!(flow_through_time(8.0, 0.0).is_err());
+        assert!(flow_through_time(8.0, -1.0).is_err());
+        assert!(flow_through_time(0.0, 4.0).is_err());
+    }
+
+    fn gpu_mesh(m: &HostMesh) -> Option<(Gpu, crate::mesh::GpuMesh)> {
+        let gpu = gpu()?;
+        let gm = crate::mesh::GpuMesh::upload(&gpu, m).ok()?;
+        Some((gpu, gm))
+    }
+
+    /// SPEC-LIT §35.1: "a SINK when the domain is too hot and a SOURCE when
+    /// it is too cold" - the plain proportional law's own sign, checked
+    /// directly against a uniform `T` field on each side of `T_target`.
+    #[test]
+    fn a_thermostat_sources_a_cold_domain_and_sinks_a_hot_one() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let target: Scalar = 350.0;
+        let tau: Scalar = 0.02;
+        let rho_cp: Scalar = 1206.0;
+        let mut th = Thermostat::new(&gpu, &gm, target, tau, rho_cp).expect("thermostat");
+
+        let cold = gpu.upload(&vec![300.0 as Scalar; m.n_cells]).expect("cold T");
+        let q_cold = th.correct(&gpu, &gm, &cold).expect("correct cold");
+        assert!(q_cold > 0.0, "a cold domain must be a SOURCE, got {q_cold}");
+        assert!((th.t_mean() - 300.0).abs() < 1e-6, "t_mean = {}", th.t_mean());
+        assert!(th.power() > 0.0, "power = {}", th.power());
+        assert!(!th.saturated());
+
+        let hot = gpu.upload(&vec![400.0 as Scalar; m.n_cells]).expect("hot T");
+        let q_hot = th.correct(&gpu, &gm, &hot).expect("correct hot");
+        assert!(q_hot < 0.0, "a hot domain must be a SINK, got {q_hot}");
+        assert!(th.power() < 0.0, "power = {}", th.power());
+
+        // Exactly the proportional law, to round-off: q = -rho_cp*(T_mean -
+        // target)/tau, with rho_cp fixed at rho(T_target)*cp (here just
+        // "rho_cp", the constructor's own gain).
+        let want = -rho_cp * (300.0 - target) / tau;
+        assert!(
+            (q_cold - want).abs() <= 1e-9 * want.abs(),
+            "q_cold = {q_cold}, want {want}"
+        );
+    }
+
+    /// At `T_mean == T_target` the controller asks for nothing - the fixed
+    /// point SPEC-LIT §35.2's regression checks a full run converges to.
+    #[test]
+    fn a_thermostat_asks_for_nothing_at_its_own_target() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let target: Scalar = 350.0;
+        let mut th = Thermostat::new(&gpu, &gm, target, 0.02, 1206.0).expect("thermostat");
+        let t = gpu.upload(&vec![target; m.n_cells]).expect("T at target");
+        let q = th.correct(&gpu, &gm, &t).expect("correct");
+        // A GPU tree-reduction's rounding, not a bug: comfortably inside
+        // 1e-6 in debug and release both (measured up to ~3.4e-9 in
+        // release), many orders below the physically meaningful scale here.
+        assert!(q.abs() < 1e-6, "q = {q} at T_mean = T_target");
+        assert_eq!(th.power(), 0.0);
+    }
+
+    /// SPEC-LIT §35.2: "`T_target` unreachable ... the controller saturates
+    /// at a sensible value, and says so" - a `T_mean` far enough from
+    /// `T_target` that the plain proportional law would ask for an enormous
+    /// power must be CLAMPED, not left to grow without bound.
+    #[test]
+    fn a_thermostat_saturates_far_from_its_target() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let target: Scalar = 350.0;
+        let tau: Scalar = 0.02;
+        let rho_cp: Scalar = 1206.0;
+        let mut th = Thermostat::new(&gpu, &gm, target, tau, rho_cp).expect("thermostat");
+
+        // Deliberately absurd: 10 000 K away from target.
+        let t = gpu.upload(&vec![10_350.0 as Scalar; m.n_cells]).expect("T");
+        let q = th.correct(&gpu, &gm, &t).expect("correct");
+
+        assert!(th.saturated(), "expected saturation");
+        let ceiling = rho_cp * THERMOSTAT_SATURATION_DELTA_T / tau;
+        assert!(q < 0.0, "still a sink (T_mean > target), got {q}");
+        assert!(
+            (q.abs() - ceiling).abs() <= 1e-6 * ceiling,
+            "q = {q}, ceiling = {ceiling}"
+        );
+    }
+
+    #[test]
+    fn a_thermostat_refuses_a_non_positive_tau_or_target() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+        assert!(Thermostat::new(&gpu, &gm, 350.0, 0.0, 1206.0).is_err());
+        assert!(Thermostat::new(&gpu, &gm, 350.0, -1.0, 1206.0).is_err());
+        assert!(Thermostat::new(&gpu, &gm, 0.0, 0.02, 1206.0).is_err());
+        assert!(Thermostat::new(&gpu, &gm, -1.0, 0.02, 1206.0).is_err());
+        assert!(Thermostat::new(&gpu, &gm, 350.0, 0.02, 0.0).is_err());
+    }
+
+    // ---- read_sources: the OpenFOAM `constant/fvSources` route -------------
+
+    fn write_fv_sources(body: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ofgpu_fvsources_test_{}_{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("constant")).expect("create dir");
+        std::fs::write(dir.join("constant").join("fvSources"), body).expect("write fvSources");
+        dir
+    }
+
+    /// SPEC-LIT §35.1's `constant/fvSources` twin of the JSONC example: no
+    /// `field` and no `selection` needed - both default (`T`, `all`).
+    #[test]
+    fn read_sources_parses_a_thermostat_with_defaults() {
+        let dir = write_fv_sources(
+            "thermostat\n{\n    type thermostat;\n    target 350.0;\n    tau 0.02;\n}\n",
+        );
+        let specs = read_sources(&dir).expect("read_sources");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].field, "T");
+        assert_eq!(specs[0].selector, CellSelector::All);
+        match specs[0].term {
+            Some(SourceTerm::Thermostat { target, tau }) => {
+                assert_eq!(target, 350.0);
+                assert_eq!(tau, Some(0.02));
+            }
+            ref other => panic!("expected Some(Thermostat), got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `tau` omitted reads as `None`, left to the driver's own default.
+    #[test]
+    fn read_sources_parses_a_thermostat_without_tau() {
+        let dir = write_fv_sources("thermostat\n{\n    type thermostat;\n    target 350.0;\n}\n");
+        let specs = read_sources(&dir).expect("read_sources");
+        match specs[0].term {
+            Some(SourceTerm::Thermostat { tau, .. }) => assert_eq!(tau, None),
+            ref other => panic!("expected Some(Thermostat), got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A thermostat naming a zone selection is refused - SPEC-LIT §35.1
+    /// corrects the WHOLE domain's mean, never a sub-zone's.
+    #[test]
+    fn read_sources_refuses_a_zoned_thermostat() {
+        let dir = write_fv_sources(
+            "thermostat\n{\n    type thermostat;\n    target 350.0;\n    selection box;\n    \
+             min (0 0 0);\n    max (1 1 1);\n}\n",
+        );
+        let err = match read_sources(&dir) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected a zoned thermostat to be refused"),
+        };
+        assert!(err.contains("thermostat"), "{err}");
+        assert!(err.contains("\"all\""), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
