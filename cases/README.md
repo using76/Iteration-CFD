@@ -137,31 +137,61 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 `grading` 줄을, 실제로 켜서 쓰는 예는 아래 `channelThermalLowRe.jsonc`(벽법선
 방향 y+ ≈ 1을 노리는 two-sided grading)를 보십시오.
 
-`mesh.cyclic` — SPEC-LIT §31.1의 cyclic 패치 쌍. `mesh.boundaries`의 여섯
-이름 중 마주보는 두 개(`xmin`/`xmax`, `ymin`/`ymax`, `zmin`/`zmax` 중 하나)를
-`a`/`b`로 지정하면 그 두 면이 경계가 아니라 결합된 한 쌍이 됩니다.
-`transform`은 `"translate"`만 지원 — 축의 길이만큼 평행이동한다는 뜻이며,
-회전 쌍(`"rotate"`)은 면 매칭·벡터 변환이 아직 없어 `translate`를 이름으로
-밝힌 SPEC-LIT §13.4 오류입니다. `BlockSpec`에 cyclic 축 슬롯이 하나뿐이라
-`mesh.cyclic` 배열도 항목이 정확히 하나여야 하고(`-permissive`는 첫 항목만
-쓰고 계속), cyclic으로 지정된 패치는 `patches[]`의 구체적 규칙으로 또 지정할
-수 없습니다(양쪽 이름을 밝힌 오류) — 다만 만능 규칙(`".*"`)은 상관없고,
-오히려 `resolve_patch_rule`이 모든 패치 이름에 대해 규칙 하나를 요구하므로
-cyclic 패치 두 개를 받아줄 만능 규칙이 case 끝에 있어야 합니다(값 자체는
-cyclic 패치에는 적용되지 않습니다 — 모든 필드가 자동으로 `cyclic` 타입이
-됩니다):
+`mesh.cyclic` — SPEC-LIT §31.1의 cyclic 패치 쌍, §34.2에서 여러 쌍으로
+일반화됨. `mesh.boundaries`의 여섯 이름 중 마주보는 두 개(`xmin`/`xmax`,
+`ymin`/`ymax`, `zmin`/`zmax` 중 하나)를 `a`/`b`로 지정하면 그 두 면이
+경계가 아니라 결합된 한 쌍이 됩니다. `transform`은 `"translate"`만 지원 —
+축의 길이만큼 평행이동한다는 뜻이며, 회전 쌍(`"rotate"`)은 면 매칭·벡터
+변환이 아직 없어 `translate`를 이름으로 밝힌 SPEC-LIT §13.4 오류입니다.
+`mesh.cyclic` 배열은 이제 축마다 하나씩, 개수 제한 없이 받습니다 — 두
+방향 모두 주기인 평면 채널, 세 방향 모두 주기인 완전 주기 박스까지
+오늘 선언할 수 있습니다(아래 `channelPeriodicFluxWF.jsonc`/
+`channelPeriodicFluxLowRe.jsonc`가 x 하나만 쓰는 예입니다). 같은 축을 두
+쌍이 동시에 주장하면 축을 이름으로 밝힌 오류이고, cyclic으로 지정된
+패치는 `patches[]`의 구체적 규칙(`empty`/`symmetry` 같은 constraint
+포함)으로 또 지정할 수 없습니다(양쪽 이름을 밝힌 오류) — 다만 만능
+규칙(`".*"`)은 상관없고, 오히려 `resolve_patch_rule`이 모든 패치 이름에
+대해 규칙 하나를 요구하므로 cyclic 패치들을 받아줄 만능 규칙이 case
+끝에 있어야 합니다(값 자체는 cyclic 패치에는 적용되지 않습니다 — 모든
+필드가 자동으로 `cyclic` 타입이 됩니다):
 
 ```jsonc
 "mesh": {
   ...,
-  "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
+  "cyclic": [
+    { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" },
+  ],
 },
 ```
 
-`blockgen`의 `-cyclic x|y|z` 플래그(OpenFOAM 형식 케이스)와 같은 짝짓기·같은
-두 불변식(전단사, `Sf_a == -Sf_b`)을 씁니다 — 자세한 내용은 SPEC-LIT §31.1과
-`../rust/README.en.md`의 "Cyclic patches" 행을 보십시오. 실제로 켜서 쓰는
-예는 아래 `channelPeriodicWF.jsonc`/`channelPeriodicLowRe.jsonc`입니다.
+`blockgen`의 `-cyclic x|y|z` 플래그(반복 지정 가능, OpenFOAM 형식 케이스)와
+같은 짝짓기·같은 두 불변식(전단사, `Sf_a == -Sf_b`, 쌍마다 검증)을 씁니다 —
+자세한 내용은 SPEC-LIT §31.1/§34.2와 `../rust/README.en.md`의 "Cyclic
+patches" 행을 보십시오. 실제로 켜서 쓰는 예는 아래
+`channelPeriodicWF.jsonc`/`channelPeriodicLowRe.jsonc`입니다.
+
+`"kind": "empty"`/`"symmetry"` — SPEC-LIT §34.1의 constraint 패치. JSONC가
+전에는 `wall`/`inlet`/`open`만 표현할 수 있어 2차원 케이스를 아예 쓸 수
+없었습니다; 이제 `mesh.boundaries`에서 한 축을 1칸으로 만들고 그 두 면을
+`empty`로 선언하면 됩니다:
+
+```jsonc
+"boundaries": { ..., "zmin": "back", "zmax": "front" },
+"cells": [8, 50, 1],
+```
+
+```jsonc
+"patches": [
+  { "match": "(back|front)", "kind": "empty" },
+  { "match": ".*", "kind": "wall" },
+],
+```
+
+경계조건이 아니라 CONSTRAINT입니다 — `empty`/`symmetry` 규칙이 `U`/`p`/`T`
+등 필드별 BC까지 같이 지정하면 그 필드를 이름으로 밝힌 오류이고, `empty`는
+셀이 두 개 이상인 축에서는 슬롯과 실제 셀 개수를 밝혀 거부합니다. 아래
+`channelPeriodicFluxWF.jsonc`/`channelPeriodicFluxLowRe.jsonc`가 이제 이
+방식으로 옆벽 없는 진짜 평면 채널입니다.
 
 `sources` — SPEC-LIT §18/§31.1의 체적 소스, JSONC 쪽 입구입니다. 오늘은
 `momentumSource` 한 종류만 지원합니다: 전체 도메인에 걸친 균일 체적력(단위
@@ -187,8 +217,8 @@ cyclic 패치에는 적용되지 않습니다 — 모든 필드가 자동으로 
 | `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, `mesh.grading`으로 벽법선 방향을 양쪽 벽 모두를 향해 two-sided grading(`expansion: 200`, 50칸, 첫 셀 높이 ≈ 2×10⁻⁵ m)하여 y+ 목표 ≈ 1(측정 0.43/0.89/1.02)을 노리는 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다"). 두 케이스의 벽 열유입 비율은 0.381(첫 시도의 0.095에서 4배 개선, 여전히 게이트는 열려 있음) — 자세한 내용은 `docs/07-fire-solver.md` §1.1 |
 | `channelPeriodicWF.jsonc` | `ofgpu-fire` | SPEC-LIT §31의 페리오딕 재시도, 메쉬 (a): 위 두 케이스와 같은 단면(0.04 m × 0.04 m)·`Tw`를 스트림방향 **cyclic**(`mesh.cyclic`, 0.08 m, 8칸)으로 바꾸고, 유입 대신 `sources[]` `momentumSource`(체적력 3.9 m/s²)로, 에너지는 `-heaterPower -6`(균일 도메인 열싱크)로 구동 — 벽법선 균일 6칸, `standard`/`thermalWallFunction`. 측정 y+ 40.25/41.73/43.41, 완전 수렴(`\|U\|` 잔차 1.3e-10) |
 | `channelPeriodicLowRe.jsonc` | `ofgpu-fire` | 위와 같은 페리오딕 덕트, 벽법선만 `channelThermalLowRe.jsonc`와 같은 two-sided grading(`expansion: 200`, 50칸) — `lowRe`/`fixedValue`. 같은 체적력, 그러나 **다른** 열싱크(`-heaterPower -60`) — 해상된 y+~0.3 서브레이어가 같은 싱크로는 `Tw` 근처까지 데워질 만큼 전도가 좋아서(§1.1의 상세 설명 참고), `-900`까지 올려 두 메쉬를 같은 ΔT로 맞춰 보려 했으나 도메인 코어가 160 K까지 식는 비물리적 결과가 나와 포기 — 측정 y+ 0.302/0.310/0.318, `\|U\|` 잔차는 ~1e-5에서 정체(양은 안정) |
-| `channelPeriodicFluxWF.jsonc` | `ofgpu-fire` | SPEC-LIT §32의 재설계된 게이트, 메쉬 (a): 위 페리오딕 덕트와 같은 형상·체적력이지만, 고정 벽온도 대신 고정 열유속(`fixedFluxTemperature`, `q = 500 W/m2`, 양쪽 가열벽)으로 바꾸고 `-heaterPower -3.2`(닫힌 형태 `-2 q_w A_wall`, 계산으로 나오는 값이지 맞춘 값이 아님)로 균형을 맞춤 — 이러면 두 메쉬가 각자의 ΔT를 스스로 예측하게 되어 Nu를 Dittus-Boelter/Gnielinski와 비교할 수 있음(§32.2). `standard`/`thermalWallFunction`, 측정 y+ 40.3/41.7/43.4, Nu = 50.41 — Gnielinski +2%, Dittus-Boelter −4%, 둘 다 안쪽(**게이트 닫힘**) |
-| `channelPeriodicFluxLowRe.jsonc` | `ofgpu-fire` | `channelPeriodicFluxWF.jsonc`의 해상 짝 — 동일 `q_w`, 동일 `-heaterPower -3.2`, 벽법선만 y+ ~ 1을 노리는 two-sided grading(`expansion: 200`, 50칸). `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행: 벽 근처 폭주(옛 진단, k가 336 m²/s²까지 발산)는 사라졌지만, 이 특정 3차원 덕트에서는 여전히 수렴하지 않음 — 벌크 속도가 0.24 m/s로 무너지고(짝 케이스는 3.51 m/s, 동일 메쉬의 층류 해는 14.8 m/s), 온도가 정상상태에 이르지 못함. 모형 자체의 벽법칙(u+ = y+, 로그 법칙)은 별도의 2차원 채널에서 1% 이내로 검증됨 — 파일 자체 헤더와 `docs/07-fire-solver.md` §1.1에 전체 진단이 있음 (**게이트 열려 있음, 새로운 이유**) |
+| `channelPeriodicFluxWF.jsonc` | `ofgpu-fire` | SPEC-LIT §32의 재설계된 게이트, SPEC-LIT §34로 진짜 2차원 평면 채널로 재구성한 메쉬 (a): 스트림방향 cyclic, 앞뒤 `empty`(옆벽 없음), 위아래 가열벽만 — 고정 열유속(`fixedFluxTemperature`, `q = 500 W/m2`, 양쪽 가열벽), `-heaterPower -3.2`(닫힌 형태 `-2 q_w A_wall`)로 균형을 맞춤(§32.2). `standard`/`thermalWallFunction`, 측정 y+ 56.8/57.7/58.5, bit 단위로 고정된 상태로 수렴(`\|U\|` 잔차 1.4e-10). 평면 채널이라 가열-둘레와 젖은-둘레가 일치하여 `D_h` = 2H = 0.08 m 하나뿐 — Re = 28,638, Nu = 65.24 — Gnielinski −4.5%, Dittus-Boelter −11.5%, 둘 다 안쪽(**게이트 닫힘**) |
+| `channelPeriodicFluxLowRe.jsonc` | `ofgpu-fire` | `channelPeriodicFluxWF.jsonc`의 해상 짝, 같은 방식으로 재구성 — 동일 `q_w`, 동일 `-heaterPower -3.2`, 앞뒤 `empty`, 벽법선만 y+ ~ 1을 노리는 two-sided grading(`expansion: 200`, 50칸). `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행: 옛 덕트의 속도 붕괴는 완전히 사라짐 — `\|U\|` 잔차가 반올림 수준(2e-12)까지 수렴, `U_b/u_tau` = 17.35로 평면 채널 목표 15–17에 벽함수 짝(19.23)보다 더 가까움, y+ = 0.00175와 y+<20 셀 192/400개는 40,000·150,000 반복에서 bit 단위로 동일 — 덕트 모서리 가설이 확인됨. 하지만 에너지 방정식이 정상상태에 이르지 못함: `T_b`/`T_w`가 감쇠 없이 선형으로 계속 상승(150,000 반복까지 확인, 매 10,000 반복 증분이 0.377–0.384 K로 일정), Nu가 15,000 반복의 Dittus-Boelter 밴드 안쪽에서 150,000 반복에는 두 밴드 모두 바깥(+31%/+41%)으로 표류 — 난류 모형·격자 조정·솔버 허용오차 모두 배제됨. 파일 자체 헤더와 `docs/07-fire-solver.md` §1.1에 전체 진단이 있음 (**게이트 열려 있음, 세 번째의 새로운 이유**) |
 
 ```powershell
 cd ..\rust
@@ -206,7 +236,11 @@ cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicLowRe.jsonc -ite
 
 # SPEC-LIT §32의 재설계된 게이트 — 고정 열유속, 두 케이스 모두 같은 -heaterPower.
 cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxWF.jsonc    -iters 3000  -check 1000 -heaterPower -3.2
-cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxLowRe.jsonc -iters 20000 -check 2000 -heaterPower -3.2
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxLowRe.jsonc -iters 40000 -check 5000 -heaterPower -3.2
+# SPEC-LIT §34: U_b/y+/cells-below-y+-20 are all converged by 40 000, but T_b/T_w/Nu
+# are NOT - they drift, undamped, for as long as the run is extended (checked out to
+# 150 000). See docs/07-fire-solver.md §1.1 for the measured drift rate and the four
+# causes ruled out.
 ```
 
 자세한 화재 솔버 설명과 네 채널 케이스가 실제로 낸 벽 열유속·비율은

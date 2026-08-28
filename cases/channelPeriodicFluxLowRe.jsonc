@@ -1,52 +1,57 @@
-// meteor-cfd case - SPEC-LIT S32's redesigned gate, mesh (b): the SAME
-// streamwise-cyclic duct as `channelPeriodicFluxWF.jsonc` (identical
-// cross-section, streamwise length, momentum source, q_w, compensating
-// sink), wall-normal mesh GRADED two-sided toward both hot walls
-// (`mesh.grading`, 50 cells, `expansion: 200`) so the first cell sits near
-// y+ ~ 1 - `lowRe`, a resolved sublayer.
+// meteor-cfd case - SPEC-LIT S32's redesigned gate, mesh (b): rebuilt per
+// SPEC-LIT S34 as a genuine 2-D PLANE channel, the resolved twin of
+// `channelPeriodicFluxWF.jsonc` - streamwise-cyclic in x, `empty`
+// front/back in z (S34.1), hot walls top and bottom in y, wall-normal mesh
+// GRADED two-sided toward both hot walls (`mesh.grading`, 50 cells,
+// `expansion: 200`) so the first cell sits near y+ ~ 1 - `lowRe`, a
+// resolved sublayer. Identical cross-section, streamwise length, momentum
+// source, q_w and compensating sink to the WF twin above; the ONLY
+// physical difference is the mesh and the `lowRe` wallTreatment - see
+// that file's own header for the D_h/A_wall/sink derivation, unchanged
+// here since neither q_w nor the geometry changed.
 //
 // ============================================================================
-// STATUS (updated once LaunderSharmaKE landed, SPEC-LIT S33): the model
-// FIXES the failure this file used to be kept for - standard k-epsilon's
-// unbounded near-wall k (160-336 m2/s2) is GONE, on every configuration
-// tried, with `RAS { model LaunderSharmaKE; }` below. That is not nothing:
-// SPEC-LIT S33.3's own damping-function limits and the law-of-the-wall
-// profile (u+ = y+ below y+ 5 to <1%, the log law within ~1% at y+ 30-35 -
-// run separately on a clean periodic 2-D channel; see
-// docs/07-fire-solver.md S1.1) both check out. But THIS case - the actual
-// S32 resolved leg, on ITS OWN 3-D duct mesh - does NOT converge to a
-// physically sensible state: U_b collapses to ~0.24 m/s (WF's twin gets
-// 3.51 m/s on the identical body force; a LAMINAR solve of this exact mesh
-// gets 14.7 m/s - both checked directly), and T never reaches a steady
-// state in 20 000 iterations. This is a NEW, DIFFERENT diagnosis from the
-// old one - not "no damping function" (the damping functions are proven
-// correct in isolation) but something about THIS geometry: the collapse
-// persists whether the `wallSide.*` patches are overridden to `standard`
-// or left at the case-wide `lowRe` default, and persists at a much less
-// extreme grading (`expansion: 20` instead of `200`) - so it is not the
-// wall-row mismatch alone, and not the grading's aspect ratio alone. It
-// does NOT reproduce on a 2-D (empty-z) periodic channel with a similar
-// near-wall resolution, which does converge to the expected law of the
-// wall. The most specific remaining lead is the `E`-term's `grad(grad U)`
-// boundary extrapolation (SPEC-LIT S33.1's own DESIGN note) at the DUCT
-// CORNERS, where two wall-adjacent boundary layers meet and the mesh has
-// no `empty` direction to fall back on - untested, not tuned, stated as a
-// lead and not a fix. Do not calibrate this case into passing; report what
-// it does. docs/07-fire-solver.md S1.1 has the full numbers.
+// STATUS (SPEC-LIT S34 rebuild, RUN and REPORTED - docs/07-fire-solver.md
+// S1.1 has the full table): the previous ("mesh b") version of this file was
+// a DUCT - real `wallSide.*` walls at only 4 spanwise cells - and collapsed
+// to U_b = 0.24 m/s (WF duct twin: 3.51 m/s; laminar solve of the same duct
+// mesh: 14.76 m/s). The leading untested lead was the `E` term's
+// `grad(grad U)` boundary extrapolation at the duct CORNERS.
+//
+// THIS rebuild removes the corners. Result: THE VELOCITY COLLAPSE IS FIXED -
+// the corner hypothesis is CONFIRMED, not merely plausible. `|U|` converges
+// to round-off (2e-12 at 40 000 iterations), U_b = 4.846 m/s (below the
+// laminar closed form 34.67 m/s by 7.2x, and below the WF twin's 5.37 m/s),
+// U_b/u_tau = 17.35 - INSIDE the 15-17 plane-channel target, closer than the
+// WF twin's own 19.23. Measured y+ = 0.00175 (< 1) and 192/400 cells (48%)
+// at y+ < 20, both bit-identical at 40 000 AND 150 000 iterations.
+//
+// BUT a new, third, genuinely different problem: T_b/T_w drift UPWARD at a
+// small, LINEAR, UNDAMPED rate for as long as the run is extended (checked
+// to 150 000 iterations - the 10 000-iteration increment is 0.377-0.384 K
+// throughout, with zero sign of decay). Nu starts inside Dittus-Boelter's
+// band at 15 000 iterations (Nu=74.8, +10.0%/+18.4% vs DB/Gnielinski) and
+// drifts to OUTSIDE BOTH bands by 150 000 (Nu=89.2, +31%/+41%). Four causes
+// ruled out directly: not the turbulence model (kEpsilon on the identical
+// mesh drifts the same way), not the grading severity (expansion 20 drifts
+// too), not the T-solver's linear-solve tolerance (exact solve reproduces
+// the identical trajectory), not open-vs-sealed (heat in == sink out
+// exactly by construction, so dp0/dt = 0 either way). Leading explanation:
+// q_w and the sink are both T-INDEPENDENT, buoyancy is off (gravity=0), and
+// T is Dirichlet nowhere in this domain, so the domain-mean temperature has
+// no restoring term - why the COARSE WF mesh nonetheless lands on an exact
+// fixed point while this fine mesh does not is not resolved here. Reported,
+// not tuned away - see docs/07-fire-solver.md S1.1 for the full table.
 // ============================================================================
 //
-// The only physical difference from `channelPeriodicFluxWF.jsonc` is the
-// mesh and the `lowRe` wallTreatment; q_w = 500 W/m2 and the -3.2 W sink are
-// IDENTICAL - see that file's own header for both derivations. SPEC-LIT
-// S29.3: "lowRe... pins the molecular resistance the resolved mesh already
-// provides", so the hot walls here are `fixedFluxTemperature` with the SAME
-// q - not `thermalWallFunction` - because BcKind::FixedFluxTemperature reads
-// `k_eff_wall` off whatever `crate::energy::Energy::update_k_eff` computed at
-// that face, and on a `lowRe` wall (`nu_t,w = 0` pinned) that is the
-// molecular conductivity alone: no Jayatilleke correction is invoked, or
+// SPEC-LIT S29.3: "lowRe... pins the molecular resistance the resolved mesh
+// already provides", so the hot walls here are `fixedFluxTemperature` with
+// the SAME q - not `thermalWallFunction` - because BcKind::FixedFluxTemperature
+// reads `k_eff_wall` off whatever `crate::energy::Energy::update_k_eff`
+// computed at that face, and on a `lowRe` wall (`nu_t,w = 0` pinned) that is
+// the molecular conductivity alone: no Jayatilleke correction is invoked, or
 // needed, because the resolved sublayer supplies its own resistance exactly
-// as SPEC-LIT S32.2 asks (see `docs/07-fire-solver.md` S1.1 for the measured
-// numbers and the verdict).
+// as SPEC-LIT S32.2 asks.
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
   "name": "channelPeriodicFluxLowRe",
@@ -54,12 +59,12 @@
   "mesh": {
     "kind": "cartesian",
     "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.08, 0.04, 0.04] },
-    "cells":  [8, 50, 4],
+    "cells":  [8, 50, 1],
 
     "boundaries": {
       "xmin": "streamwiseMin", "xmax": "streamwiseMax",
       "ymin": "wallHot0", "ymax": "wallHot1",
-      "zmin": "wallSideMin", "zmax": "wallSideMax",
+      "zmin": "back", "zmax": "front",
     },
 
     "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
@@ -86,25 +91,17 @@
 
   "patches": [
     {
-      // The z-direction side walls have only 4 spanwise cells - not a
-      // resolved sublayer, whatever the case-wide `lowRe` default says. The
-      // case-wide default applies NO wall model there by construction
-      // (SPEC-LIT S29.1's `lowRe` row), which on an under-resolved patch is
-      // a contradiction, not a preference - so this patch overrides back to
-      // `standard` (SPEC-LIT S29.1 route b), the row this mesh actually
-      // supports here. This alone is not enough to make the case converge
-      // (see the file header) - the hot walls' own `lowRe` is correct, and
-      // still exposes the missing low-Re model.
-      "match": "wallSide.*",
-      "kind": "wall",
-      "treatment": "standard",
-      "U": { "type": "fixedValue", "value": [0, 0, 0] },
-      "p": { "type": "zeroGradient" },
-      "T": { "type": "zeroGradient" },
+      // SPEC-LIT S34.1: the 2-D constraint, not a boundary condition - no
+      // per-field BC may be named alongside it (checked and refused). This
+      // is what replaces the old duct's `wallSide.*` real walls: there is
+      // no side-wall boundary layer left to interact with the hot-wall one
+      // at a corner, which is the point of this rebuild.
+      "match": "(back|front)",
+      "kind": "empty",
     },
     {
-      // Same q_w as `channelPeriodicFluxWF.jsonc` - see that file's header
-      // and this file's own for why `fixedFluxTemperature` (not
+      // Same q_w as `channelPeriodicFluxWF.jsonc` - see that file's own
+      // header and this file's own for why `fixedFluxTemperature` (not
       // `thermalWallFunction`) is correct on a `lowRe` wall.
       "match": "wallHot.*",
       "kind": "wall",

@@ -1083,11 +1083,25 @@
       ]
     },
     "PatchPresetKind": {
-      "type": "string",
-      "enum": [
-        "wall",
-        "inlet",
-        "open"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "wall",
+            "inlet",
+            "open"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §34.1: `PatchKind::Empty` - the 2-D \"this axis does not\nexist\" declaration the solver has always understood\n(`OFPATCH_EMPTY`), newly nameable in JSONC. A CONSTRAINT, not a\nboundary condition: legal only on a slot exactly one cell across\n(checked in [`build_block`]), and a rule of this kind may not also\ncarry a per-field BC (checked in [`validate_constraint_rules`]) -\nthe constraint decides every field, and `field_setup::topology_override`\nwould silently win over a per-field BC anyway, so naming one is\nalways a mistake worth catching rather than a redundancy worth\ntolerating.",
+          "type": "string",
+          "const": "empty"
+        },
+        {
+          "description": "SPEC-LIT §34.1: `PatchKind::Symmetry` - the mirror-plane constraint\nthe solver's vector-reflection branch has always understood, newly\nnameable in JSONC. Same CONSTRAINT rules as [`Self::Empty`], minus\nthe single-cell check (a symmetry plane has no such restriction).",
+          "type": "string",
+          "const": "symmetry"
+        }
       ]
     },
     "ScalarBc": {

@@ -324,7 +324,7 @@ fn make_mesh(dir: &Path, s: &MeshSpec) -> Result<HostMesh> {
         window: None,
         patch_name: BlockSpec::default().patch_name,
         patch_type: types,
-        cyclic: None,
+        cyclic: Vec::new(),
     };
 
     if s.shear == 0.0 {
@@ -2033,6 +2033,11 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3) ===");
     check_launder_sharma_damping_functions(c);
 
+    // ---- the plane-channel resolved leg's mesh resolution (SPEC-LIT
+    //      §33.2/§34) --------------------------------------------------
+    println!("\n=== resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) ===");
+    check_resolved_leg_mesh_resolution_replay(c);
+
     Ok(())
 }
 
@@ -3706,7 +3711,7 @@ fn check_radiative_equilibrium(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         window: None,
         patch_name: BlockSpec::default().patch_name,
         patch_type: ["wall", "wall", "wall", "wall", "wall", "wall"].map(String::from),
-        cyclic: None,
+        cyclic: Vec::new(),
     };
     let hm = blockgen::build_mesh(&b)?;
     let gm = GpuMesh::upload(gpu, &hm)?;
@@ -3949,15 +3954,20 @@ fn check_nu_correlations(c: &mut Checks) {
 /// SPEC-LIT §32.4's VERDICT, LOCKED AGAINST REGRESSION - this REPLAYS A
 /// RECORDED MEASUREMENT, it does not run the case. The numbers below are the
 /// wall-function leg of the redesigned gate, `cases/channelPeriodicFluxWF.jsonc`,
-/// as reported in `docs/07-fire-solver.md` §1.1 (an 8.4 s run to 1e-8
-/// residuals): `q_w = 500 W/m2` on both hot walls, `y+` 40.3/41.7/43.4
-/// (min/mean/max), `T_w = 501.989 K` (diagnosed by the thermal wall
-/// function), `T_b = 453.974 K` (mixed-mean), `U_b = 3.512 m/s`,
-/// `rho(T_b) = 0.7775 kg/m3`, `k_thermal = 0.01653 W/mK`. `D_h = 0.08 m` is
-/// the HEATED-perimeter hydraulic diameter (two of the duct's four walls are
-/// heated) - SPEC-LIT §32.4 states plainly that this, not the wetted-
-/// perimeter `D_h = 0.04 m`, is the convention the Dittus-Boelter/Gnielinski
-/// correlations were derived under, and the ONLY one checked here.
+/// rebuilt per SPEC-LIT §34 as a genuine 2-D PLANE channel (streamwise-cyclic,
+/// `empty` front/back, hot walls top and bottom - no side walls at all, unlike
+/// the duct this case used to be), as reported in `docs/07-fire-solver.md`
+/// §1.1 (a run to `\|U\|` residual 1.4e-10, bit-identical from 5 000 through
+/// 40 000 iterations - a true fixed point, not merely a small residual):
+/// `q_w = 500 W/m2` on both hot walls, `y+` 56.8/57.7/58.5 (min/mean/max),
+/// `T_w = 316.861 K` (diagnosed by the thermal wall function),
+/// `T_b = 292.92 K` (mixed-mean), `U_b = 5.3696 m/s`, `rho(T_b) = 1.20504
+/// kg/m3`, `k_thermal = 0.025611 W/mK`. `D_h = 0.08 m = 2H` (SPEC-LIT §32.2,
+/// §34): for a genuine plane channel the heated-perimeter and wetted-
+/// perimeter conventions COINCIDE (both walls are hot, there is no third or
+/// fourth wall to argue about), so this is no longer a choice between two
+/// numbers the way the old duct version of this case needed - it is simply
+/// twice the full gap `H = 0.04 m`.
 ///
 /// A live GPU run to statistical steady state has no place in `cargo test` -
 /// see this module's own `published_benchmarks` for why. What this check
@@ -3970,12 +3980,12 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
 
     // ---- the recorded measurement (docs/07-fire-solver.md S1.1) -----------
     let q_w: Scalar = 500.0; // W/m2, imposed on both hot walls
-    let delta_t: Scalar = 48.015; // K, T_w - T_b, the model's OWN prediction
-    let u_b: Scalar = 3.512; // m/s, bulk velocity
+    let delta_t: Scalar = 316.861 - 292.92; // K, T_w - T_b, the model's OWN prediction
+    let u_b: Scalar = 5.3696; // m/s, bulk velocity
     let nu: Scalar = 1.5e-5; // m2/s, the case's constant molecular nu
     let pr: Scalar = 0.71;
-    let d_h: Scalar = 0.08; // m, HEATED-perimeter convention (SPEC-LIT S32.4)
-    let k_thermal: Scalar = 0.01653; // W/mK, rho(T_b) cp nu / Pr
+    let d_h: Scalar = 0.08; // m, = 2H for this plane channel (SPEC-LIT S32.2/S34)
+    let k_thermal: Scalar = 0.025611; // W/mK, rho(T_b) cp nu / Pr
 
     let re = u_b * d_h / nu;
     let nu_measured = q_w * d_h / (k_thermal * delta_t);
@@ -3984,7 +3994,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     let nu_gn = gnielinski_nu(re, pr);
 
     c.note(&format!(
-        "Re = {} (heated D_h = 0.08 m), Nu_measured = {}, Nu_DB = {}, Nu_Gn = {}",
+        "Re = {} (plane-channel D_h = 2H = 0.08 m), Nu_measured = {}, Nu_DB = {}, Nu_Gn = {}",
         sci(re, 4),
         sci(nu_measured, 4),
         sci(nu_db, 4),
@@ -3999,14 +4009,14 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     ));
 
     // Gnielinski is quoted at +-10%; the measurement replayed here sits at
-    // +2%.
+    // about -4.5%.
     c.check(
         "wall-function Nu within Gnielinski's own +-10% band (replayed measurement, S32.4)",
         (nu_measured - nu_gn).abs() / nu_gn,
         0.10,
     );
     // Dittus-Boelter is quoted at +-20-25%; the measurement replayed here
-    // sits at -4%.
+    // sits at about -11.5%.
     c.check(
         "wall-function Nu within Dittus-Boelter's own +-25% band (replayed measurement, S32.4)",
         (nu_measured - nu_db).abs() / nu_db,
@@ -4015,7 +4025,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
 
     // The y+ this measurement was taken at - SPEC-LIT §32.4's own "both
     // meshes land in their regime" row, for the wall-function leg.
-    let y_plus_mean: Scalar = 41.7;
+    let y_plus_mean: Scalar = 57.6931;
     c.check(
         "wall-function mesh's own y+ mean sits inside the 30-60 target (replayed measurement)",
         if (30.0..=60.0).contains(&y_plus_mean) { 0.0 } else { 1.0 },
@@ -4098,6 +4108,54 @@ fn check_launder_sharma_damping_functions(c: &mut Checks) {
     c.require("f_2 is monotone increasing in Re_t (SPEC-LIT 33.3)", f2_monotone);
     c.require("f_mu stays within [0, 1]", fmu_bounded);
     c.require("f_2 stays within [0.7, 1]", f2_bounded);
+}
+
+/// SPEC-LIT §33.2/§34's mesh-resolution check, REPLAYED against
+/// `cases/channelPeriodicFluxLowRe.jsonc` as rebuilt in SPEC-LIT §34 (the
+/// genuine 2-D plane channel, `empty` front/back - see `docs/07-fire-solver.md`
+/// §1.1). `ofgpu-fire`'s own end-of-run report
+/// (`ofgpu::models::mesh_resolution_report`, over a REAL Poisson wall
+/// distance and the converged `k` field, not the duct version's hot-wall-only
+/// approximation) measured `max_first_cell_y_plus = 0.00174716` and
+/// `cells_below_y_plus_20 = 192` of 400 cells at 40 000 iterations - both
+/// numbers are fully converged and bit-stable well before that (the
+/// turbulence/velocity fields reach round-off while `T` alone keeps drifting,
+/// SPEC-LIT §34's own diagnosis), so replaying them here is not vulnerable to
+/// the same non-convergence the energy equation has.
+///
+/// This locks §33.2's own pass/fail rule - first-cell y+ < 1, at least 10
+/// cells at y+ < 20 - against regression on every commit, independent of
+/// whether the energy-equation drift above is ever chased to a fix.
+fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
+    use ofgpu::models::MeshResolutionReport;
+
+    let report = MeshResolutionReport {
+        max_first_cell_y_plus: 0.001_747_16,
+        cells_below_y_plus_20: 192,
+        n_wall_faces: 16,
+    };
+
+    c.note(&format!(
+        "replayed: worst wall-adjacent y+ = {}, {} / 400 cells at y+ < 20 ({} wall faces)",
+        sci(report.max_first_cell_y_plus, 4),
+        report.cells_below_y_plus_20,
+        report.n_wall_faces,
+    ));
+
+    c.check(
+        "resolved leg's own y+ < 1 (SPEC-LIT 33.2, replayed measurement)",
+        if report.max_first_cell_y_plus < 1.0 { 0.0 } else { 1.0 },
+        0.0,
+    );
+    c.check(
+        "resolved leg has at least 10 cells at y+ < 20 (SPEC-LIT 33.2, replayed measurement)",
+        if report.cells_below_y_plus_20 >= 10 { 0.0 } else { 1.0 },
+        0.0,
+    );
+    c.require(
+        "MeshResolutionReport::warnings() is empty for the replayed measurement",
+        report.warnings().is_empty(),
+    );
 }
 
 // ==========================================================================

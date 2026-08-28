@@ -448,6 +448,22 @@ pub enum PatchPresetKind {
     Wall,
     Inlet,
     Open,
+    /// SPEC-LIT §34.1: `PatchKind::Empty` - the 2-D "this axis does not
+    /// exist" declaration the solver has always understood
+    /// (`OFPATCH_EMPTY`), newly nameable in JSONC. A CONSTRAINT, not a
+    /// boundary condition: legal only on a slot exactly one cell across
+    /// (checked in [`build_block`]), and a rule of this kind may not also
+    /// carry a per-field BC (checked in [`validate_constraint_rules`]) -
+    /// the constraint decides every field, and `field_setup::topology_override`
+    /// would silently win over a per-field BC anyway, so naming one is
+    /// always a mistake worth catching rather than a redundancy worth
+    /// tolerating.
+    Empty,
+    /// SPEC-LIT §34.1: `PatchKind::Symmetry` - the mirror-plane constraint
+    /// the solver's vector-reflection branch has always understood, newly
+    /// nameable in JSONC. Same CONSTRAINT rules as [`Self::Empty`], minus
+    /// the single-cell check (a symmetry plane has no such restriction).
+    Symmetry,
 }
 
 /// One `{"type": "fixedValue", "value": ...}`-shaped scalar boundary
@@ -1204,6 +1220,13 @@ fn patch_class(kind: PatchPresetKind) -> &'static str {
     match kind {
         PatchPresetKind::Wall => "wall",
         PatchPresetKind::Inlet | PatchPresetKind::Open => "patch",
+        // SPEC-LIT §34.1: these two are recognised by `PatchKind::from_type`
+        // (`src/mesh.rs`) directly, so the JSON kind name and the OpenFOAM
+        // type string this reader writes into `BlockSpec.patch_type` are the
+        // same word - unlike wall/inlet/open, which fold onto OpenFOAM's own
+        // "wall"/"patch" class.
+        PatchPresetKind::Empty => "empty",
+        PatchPresetKind::Symmetry => "symmetry",
     }
 }
 
@@ -1237,8 +1260,72 @@ fn apply_axis_grading(name: &str, axis: &mut GradedAxis, grading: Option<&JsonGr
     Ok(())
 }
 
+/// SPEC-LIT §34.1: a per-field BC on an `empty`/`symmetry` rule is a §13.4
+/// error naming the field - checked statically over every `patches[]` rule,
+/// independent of whether this particular case even solves that field. The
+/// constraint decides every field for the patch it matches
+/// (`field_setup::topology_override` overrides whatever a field spec says
+/// there regardless), so a rule that ALSO names one has misunderstood
+/// something the reader can catch rather than something worth silently
+/// discarding.
+fn validate_constraint_rules(patches: &[JsonPatchRule]) -> Result<()> {
+    for rule in patches {
+        if !matches!(rule.kind, PatchPresetKind::Empty | PatchPresetKind::Symmetry) {
+            continue;
+        }
+        let kind_name = patch_class(rule.kind);
+        let reject = |field: &str| -> Error {
+            Error::Config(format!(
+                "patches: rule \"{}\" has kind \"{kind_name}\" - a CONSTRAINT, not a \
+                 boundary condition - but also sets \"{field}\"; the constraint decides \
+                 every field on this patch, so remove the \"{field}\" entry",
+                rule.pattern
+            ))
+        };
+        if rule.u.is_some() {
+            return Err(reject("U"));
+        }
+        if rule.p.is_some() {
+            return Err(reject("p"));
+        }
+        if rule.t.is_some() {
+            return Err(reject("T"));
+        }
+        if rule.y_f.is_some() {
+            return Err(reject("Y_F"));
+        }
+        if rule.turbulence.is_some() {
+            return Err(reject("turbulence"));
+        }
+        if rule.k.is_some() {
+            return Err(reject("k"));
+        }
+        if rule.epsilon.is_some() {
+            return Err(reject("epsilon"));
+        }
+        if rule.omega.is_some() {
+            return Err(reject("omega"));
+        }
+        if rule.nut.is_some() {
+            return Err(reject("nut"));
+        }
+        if rule.wall_treatment.is_some() {
+            return Err(reject("treatment"));
+        }
+        if rule.ks.is_some() {
+            return Err(reject("Ks"));
+        }
+        if rule.cs.is_some() {
+            return Err(reject("Cs"));
+        }
+    }
+    Ok(())
+}
+
 fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec, Vec<WindowRegionSpec>)> {
     let MeshKind::Cartesian = mesh.kind;
+
+    validate_constraint_rules(patches)?;
 
     let axis = |lo: f64, hi: f64, n: u32| GradedAxis {
         lo: lo as Scalar,
@@ -1282,12 +1369,33 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
         }
         let rule = resolve_patch_rule(patches, name)?;
         block.patch_type[slot] = patch_class(rule.kind).to_string();
+
+        // SPEC-LIT §34.1: `empty` is legal only across a single cell - this
+        // is already `blockgen`'s own rule for its canned cases (see the
+        // "single cell in that direction" check in `case_block_spec`); the
+        // JSONC reader must not let a case say `empty` on a slot the mesh
+        // builder would then treat as a real, multi-cell boundary.
+        if rule.kind == PatchPresetKind::Empty {
+            let axis = slot / 2;
+            let n = mesh.cells[axis];
+            if n != 1 {
+                return Err(Error::Config(format!(
+                    "mesh.boundaries.{}: patch \"{name}\" is \"empty\" but its axis \
+                     ({}) has {n} cell(s), not 1 - an empty patch is only legal across \
+                     a single cell",
+                    SLOT_NAMES[slot],
+                    ["x", "y", "z"][axis],
+                )));
+            }
+        }
     }
 
-    // `-permissive` on the "one pair" limit above still means only the
-    // FIRST pair is wired up - `cyclic_slots` (and `block.cyclic`, once
-    // `set_cyclic_axis` runs) can only ever hold one axis.
-    for pair in mesh.cyclic.iter().take(1) {
+    // SPEC-LIT §34.2: every pair is wired up now - `BlockSpec.cyclic` is a
+    // list, and `set_cyclic_axis` itself refuses a repeated axis ("an axis
+    // may appear in at most one pair"). The §31.1 "exactly one cyclic pair"
+    // refusal that used to live here is gone: it was `BlockSpec`'s own
+    // limitation, not a policy this reader should still enforce.
+    for pair in &mesh.cyclic {
         if pair.transform != "translate" {
             unsupported::<()>(
                 "mesh.cyclic[].transform",
@@ -1302,13 +1410,15 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
         block.set_cyclic_axis(axis).map_err(|e| Error::Config(e.to_string()))?;
 
         // Point 2: a cyclic patch may not also be named by a `patches[]`
-        // rule. Every rule's `kind` is `Wall`, `Inlet` or `Open` -
-        // `PatchPresetKind` has no other variant - so this is really "no
-        // rule may match this name", with one exception: the mandatory
-        // catch-all (`resolve_patch_rule`'s own error names the canonical
-        // spelling, `".*"`) every OTHER case is expected to end with, which
-        // says nothing about THIS patch in particular and is not a
-        // contradiction of the pairing.
+        // rule - including an `empty`/`symmetry` constraint rule (§34.2:
+        // "a pair and a constraint patch on the same slot is a §13.4 error
+        // naming both, because `empty` and `cyclic` are contradictory
+        // statements about the same faces"). This is really "no rule may
+        // match this name", with one exception: the mandatory catch-all
+        // (`resolve_patch_rule`'s own error names the canonical spelling,
+        // `".*"`) every OTHER case is expected to end with, which says
+        // nothing about THIS patch in particular and is not a contradiction
+        // of the pairing.
         for name in [&pair.a, &pair.b] {
             if let Some(rule) = patches.iter().find(|r| {
                 r.pattern != ".*"
@@ -1318,7 +1428,7 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
                     "mesh.cyclic: patch '{name}' is paired with '{}' but is ALSO named by \
                      a patches[] rule (\"match\": \"{}\", \"kind\": \"{:?}\") - a cyclic \
                      patch gets `cyclic` on every field automatically and cannot also \
-                     carry a wall/inlet/open rule",
+                     carry a wall/inlet/open/empty/symmetry rule",
                     if name == &pair.a { &pair.b } else { &pair.a },
                     rule.pattern,
                     rule.kind,
@@ -1414,26 +1524,33 @@ fn cyclic_axis_of(names: &[String; 6], pair: &JsonCyclicPair) -> Result<usize> {
     Ok(axis)
 }
 
-/// The boundary slots `mesh.cyclic` claims, as a set - empty when there is no
-/// cyclic pair. Also where the "exactly one pair" limit lives:
-/// `BlockSpec::cyclic` has a single axis slot, exactly as `mesh.regions`'
-/// single window slot does just above, and for the same reason - a second
-/// pair is a §13.4 substitution (keep the first), not a silent truncation.
+/// The boundary slots `mesh.cyclic` claims, as a set - empty when there are
+/// no cyclic pairs (SPEC-LIT §34.2 generalises this from at most one pair to
+/// any number). "An axis may appear in at most one pair" is enforced here,
+/// naming the axis, before any pair reaches [`BlockSpec::set_cyclic_axis`]
+/// (which would also catch it, but with a `BlockSpec`-flavoured message
+/// rather than one that names the JSON setting). "A patch may appear in at
+/// most one pair" is the SAME constraint once pairing is axis-based: each
+/// axis's two slots belong to no other axis, so two pairs can only ever
+/// collide by naming the same axis.
 fn cyclic_slot_set(mesh: &JsonMesh, names: &[String; 6]) -> Result<BTreeSet<usize>> {
-    if mesh.cyclic.len() > 1 {
-        unsupported::<()>(
-            "mesh.cyclic",
-            &format!("{} pairs", mesh.cyclic.len()),
-            &["exactly one cyclic pair (blockgen::BlockSpec has a single cyclic axis slot)"],
-            "the first pair only",
-            (),
-        )?;
+    const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
+    let mut slots = BTreeSet::new();
+    let mut axis_owner: BTreeMap<usize, &JsonCyclicPair> = BTreeMap::new();
+
+    for pair in &mesh.cyclic {
+        let axis = cyclic_axis_of(names, pair)?;
+        if let Some(prev) = axis_owner.insert(axis, pair) {
+            return Err(Error::Config(format!(
+                "mesh.cyclic: axis {} is claimed by two pairs - '{}'/'{}' and '{}'/'{}' \
+                 - an axis may appear in at most one cyclic pair",
+                AXIS_NAMES[axis], prev.a, prev.b, pair.a, pair.b,
+            )));
+        }
+        slots.insert(2 * axis);
+        slots.insert(2 * axis + 1);
     }
-    let Some(pair) = mesh.cyclic.first() else {
-        return Ok(BTreeSet::new());
-    };
-    let axis = cyclic_axis_of(names, pair)?;
-    Ok(BTreeSet::from([2 * axis, 2 * axis + 1]))
+    Ok(slots)
 }
 
 // ------------------------------------------------------------ patch rules
@@ -1535,6 +1652,14 @@ fn u_spec_for(rule: &JsonPatchRule) -> Result<PatchFieldSpec> {
              an inlet needs a velocity",
             rule.pattern
         ))),
+        // SPEC-LIT §34.1: `validate_constraint_rules` has already refused a
+        // `U` entry on a constraint rule, so this arm is only ever reached
+        // with no override - the spec written here is a placeholder in the
+        // exact sense `mesh_patch_names`' cyclic-patch comment describes:
+        // `field_setup::topology_override` forces `BcKind::Empty`/`Symmetry`
+        // on every face of the matching `PatchKind` regardless of what this
+        // spec says, so its `type_name` exists for readability, not effect.
+        PatchPresetKind::Empty | PatchPresetKind::Symmetry => Ok(spec(patch_class(rule.kind))),
     }
 }
 
@@ -1582,6 +1707,9 @@ fn t_spec_for(
              and this case solves a temperature equation (initial.T is given)",
             rule.pattern
         ))),
+        // See `u_spec_for`'s matching arm: a placeholder, overridden by the
+        // mesh's own topology at field-build time regardless.
+        PatchPresetKind::Empty | PatchPresetKind::Symmetry => Ok(spec(patch_class(rule.kind))),
     }
 }
 
@@ -1615,6 +1743,8 @@ fn y_f_spec_for(rule: &JsonPatchRule, ambient: Scalar) -> Result<PatchFieldSpec>
              and this case solves combustion (initial.Y_F is given)",
             rule.pattern
         ))),
+        // See `u_spec_for`'s matching arm.
+        PatchPresetKind::Empty | PatchPresetKind::Symmetry => Ok(spec(patch_class(rule.kind))),
     }
 }
 
@@ -1641,6 +1771,8 @@ fn oxidiser_product_spec_for(rule: &JsonPatchRule, ambient: Scalar) -> PatchFiel
             s.value = vec![0.0];
             s
         }
+        // See `u_spec_for`'s matching arm.
+        PatchPresetKind::Empty | PatchPresetKind::Symmetry => spec(patch_class(rule.kind)),
     }
 }
 
@@ -1754,6 +1886,14 @@ fn turb_field_spec(
     };
     if let Some(bc) = opt {
         return Ok(turb_bc_spec(bc));
+    }
+    // SPEC-LIT §34.1: an `empty`/`symmetry` constraint patch needs no
+    // per-field condition and no wall-treatment expansion - it is not a
+    // wall, and `validate_constraint_rules` has already refused an explicit
+    // one here, so this is a placeholder overridden by the mesh's own
+    // topology at field-build time, same as `u_spec_for`'s matching arm.
+    if matches!(rule.kind, PatchPresetKind::Empty | PatchPresetKind::Symmetry) {
+        return Ok(spec(patch_class(rule.kind)));
     }
     if rule.kind != PatchPresetKind::Wall {
         return Err(Error::Config(format!(
@@ -2564,7 +2704,7 @@ mod tests {
         .expect("parse");
 
         let lowered = case.lower().expect("lower");
-        assert_eq!(lowered.block.cyclic, Some(0));
+        assert_eq!(lowered.block.cyclic, vec![0]);
         assert_eq!(lowered.block.patch_type[0], "cyclic");
         assert_eq!(lowered.block.patch_type[1], "cyclic");
         assert_eq!(lowered.block.patch_name[0], "xa");
@@ -2650,16 +2790,74 @@ mod tests {
         case.lower().expect("the catch-all alone must not conflict with a cyclic pair");
     }
 
-    /// `BlockSpec` has one cyclic axis slot; a second pair is the same
-    /// "keep the first, `-permissive` says so" contract as `mesh.regions`.
+    /// SPEC-LIT §34.2: the single-pair limit is gone - two pairs (a plane
+    /// channel periodic in x and y) both close into the block, and the third
+    /// axis is untouched.
     #[test]
-    fn more_than_one_cyclic_pair_is_a_13_4_error() {
+    fn two_cyclic_pairs_both_lower_onto_the_block_spec() {
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [
+                { "a": "xa", "b": "xb", "transform": "translate" },
+                { "a": "ya", "b": "yb", "transform": "translate" }
+            ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+        let lowered = case.lower().expect("two pairs must both lower");
+
+        assert_eq!(lowered.block.cyclic, vec![0, 1]);
+        assert_eq!(lowered.block.patch_type[0], "cyclic");
+        assert_eq!(lowered.block.patch_type[1], "cyclic");
+        assert_eq!(lowered.block.patch_type[2], "cyclic");
+        assert_eq!(lowered.block.patch_type[3], "cyclic");
+        assert_eq!(lowered.block.patch_type[4], "wall", "z is untouched by either pair");
+        assert_eq!(lowered.block.patch_type[5], "wall");
+
+        let hm = crate::blockgen::build_mesh(&lowered.block).expect("build_mesh");
+        assert_eq!(
+            hm.patches.iter().filter(|p| p.kind == crate::mesh::PatchKind::Cyclic).count(),
+            4,
+            "both pairs' four patches must all come back as PatchKind::Cyclic"
+        );
+    }
+
+    /// SPEC-LIT §34.2: three pairs is a fully periodic box - every one of the
+    /// six patches is cyclic and none is left as the mesh's default wall.
+    #[test]
+    fn three_cyclic_pairs_close_a_fully_periodic_box() {
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [
+                { "a": "xa", "b": "xb", "transform": "translate" },
+                { "a": "ya", "b": "yb", "transform": "translate" },
+                { "a": "za", "b": "zb", "transform": "translate" }
+            ]"#,
+            WALL_CATCH_ALL,
+        )
+        .expect("parse");
+        let lowered = case.lower().expect("three pairs must all lower");
+
+        assert_eq!(lowered.block.cyclic, vec![0, 1, 2]);
+        assert!(lowered.block.patch_type.iter().all(|t| t == "cyclic"));
+
+        let hm = crate::blockgen::build_mesh(&lowered.block).expect("build_mesh");
+        assert_eq!(
+            hm.patches.iter().filter(|p| p.kind == crate::mesh::PatchKind::Cyclic).count(),
+            6
+        );
+    }
+
+    /// SPEC-LIT §34.2: "an axis may appear in at most one pair" - here `x` is
+    /// claimed twice (once via `xa`/`xb` directly, once via a second pair
+    /// that also resolves to axis 0), which must be refused naming the axis
+    /// rather than silently pairing whichever came first.
+    #[test]
+    fn an_axis_named_by_two_cyclic_pairs_is_an_error_naming_the_axis() {
         let _g = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         let case = case_with_mesh_and_patches(
             r#", "cyclic": [
                 { "a": "xa", "b": "xb", "transform": "translate" },
-                { "a": "ya", "b": "yb", "transform": "translate" }
+                { "a": "xa", "b": "xb", "transform": "translate" }
             ]"#,
             WALL_CATCH_ALL,
         )
@@ -2669,32 +2867,189 @@ mod tests {
             Ok(_) => panic!("expected lower() to fail"),
         };
         assert!(err.contains("mesh.cyclic"), "{err}");
+        assert!(err.contains('x'), "{err}");
     }
 
-    /// `-permissive` on the same case: the first pair is wired up, the
-    /// second is rejected but does not abort the run.
-    #[test]
-    fn permissive_substitutes_the_first_of_two_cyclic_pairs() {
-        let _g = crate::io::contract::permissive_test_guard();
-        crate::io::contract::reset_warnings();
-        crate::io::contract::set_permissive(true);
+    // ---- SPEC-LIT §34.1: constraint patches (empty/symmetry) --------------
 
+    /// A JSONC case naming the exact shape `blockgen`'s own `Cavity` preset
+    /// builds (four walls, `empty` front/back - `case_block_spec`'s
+    /// `CaseKind::Cavity` arm) must close to the SAME mesh as an actual
+    /// OpenFOAM-format case of that shape, written to disk and read back
+    /// through the ordinary `read_poly_mesh` + `build_host_mesh` path - the
+    /// same cell-for-cell contract `plume_jsonc_mesh_matches_the_generated_
+    /// openfoam_case_exactly` already holds `wall`/`patch` to, extended to
+    /// `empty`. This is the 2-D case §34.1's own doc says JSONC could not
+    /// write before ("`wall`, `inlet`, `open` and nothing else").
+    #[test]
+    fn a_2d_jsonc_case_with_empty_patches_matches_its_openfoam_format_twin() {
+        let (nx, ny) = (8usize, 6usize);
+
+        let text = format!(
+            r#"{{
+                "name": "cavity2d",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [0.1,0.1,0.1] }},
+                    "cells": [{nx}, {ny}, 1],
+                    "boundaries": {{
+                        "xmin": "leftWall", "xmax": "rightWall",
+                        "ymin": "fixedWall", "ymax": "movingWall",
+                        "zmin": "back", "zmax": "front"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0,0,0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+                    "buoyancy": "densityRatio"
+                }},
+                "patches": [
+                    {{ "match": "(back|front)", "kind": "empty" }},
+                    {{ "match": ".*", "kind": "wall" }}
+                ],
+                "initial": {{ "U": [0,0,0], "p": 0.0 }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }}
+            }}"#
+        );
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir();
+        let jsonc_path = tmp.join(format!("case_json_empty_2d_{}_{n}.jsonc", std::process::id()));
+        std::fs::write(&jsonc_path, text).unwrap();
+        let case = read_case_jsonc(&jsonc_path).expect("cavity2d jsonc should parse");
+        let _ = std::fs::remove_file(&jsonc_path);
+
+        let lowered = case.lower().expect("cavity2d jsonc should lower");
+        assert_eq!(lowered.block.patch_type[4], "empty");
+        assert_eq!(lowered.block.patch_type[5], "empty");
+        let direct = crate::blockgen::build_mesh(&lowered.block).expect("build_mesh");
+
+        let case_dir = tmp.join(format!("case_json_empty_2d_case_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&case_dir);
+        crate::blockgen::write_case(&case_dir, crate::blockgen::CaseKind::Cavity, nx, ny, 1)
+            .expect("write_case(Cavity) should write an OpenFOAM-format twin");
+        let raw = crate::io::polymesh::read_poly_mesh(&case_dir).expect("read the twin back");
+        let via_disk = crate::io::polymesh::build_host_mesh(&raw).expect("build_host_mesh");
+        let _ = std::fs::remove_dir_all(&case_dir);
+
+        assert_eq!(direct.n_cells, via_disk.n_cells);
+        assert_eq!(direct.n_internal_faces, via_disk.n_internal_faces);
+        assert_eq!(direct.n_boundary_faces, via_disk.n_boundary_faces);
+        assert_eq!(direct.owner, via_disk.owner);
+        assert_eq!(direct.neighbour, via_disk.neighbour);
+        assert_eq!(direct.v, via_disk.v, "cell volumes must be bit-identical");
+        assert_eq!(direct.c, via_disk.c, "cell centres must be bit-identical");
+        assert_eq!(direct.sf, via_disk.sf);
+        assert_eq!(direct.b_sf, via_disk.b_sf, "boundary face area vectors must be bit-identical");
+        assert_eq!(direct.b_cf, via_disk.b_cf);
+
+        assert_eq!(direct.patches.len(), via_disk.patches.len());
+        for (a, b) in direct.patches.iter().zip(via_disk.patches.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.start, b.start);
+            assert_eq!(a.size, b.size);
+        }
+        assert!(
+            direct.patches.iter().any(|p| p.kind == crate::mesh::PatchKind::Empty),
+            "the back/front patches must have actually come back as PatchKind::Empty"
+        );
+    }
+
+    /// SPEC-LIT §34.1: `empty` is only legal across a single cell - here `z`
+    /// has 3, and the error must name the slot and the offending count
+    /// rather than let a meaningless multi-cell "empty" patch through to the
+    /// mesh builder.
+    #[test]
+    fn empty_on_a_multi_cell_slot_is_refused_naming_the_count() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
         let case = case_with_mesh_and_patches(
-            r#", "cyclic": [
-                { "a": "xa", "b": "xb", "transform": "translate" },
-                { "a": "ya", "b": "yb", "transform": "translate" }
-            ]"#,
-            WALL_CATCH_ALL,
+            "",
+            r#"[ { "match": "(za|zb)", "kind": "empty" }, { "match": ".*", "kind": "wall" } ]"#,
         )
         .expect("parse");
-        let lowered = case.lower();
+        // `case_with_mesh_and_patches`'s fixture mesh has cells: [4, 6, 8] -
+        // z has 8 cells, not 1.
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail"),
+        };
+        assert!(err.contains("empty"), "{err}");
+        assert!(err.contains('8'), "{err}");
+        assert!(err.contains("za") || err.contains("zmin"), "{err}");
+    }
 
+    /// SPEC-LIT §34.1: a per-field BC on a CONSTRAINT rule (`empty` or
+    /// `symmetry`) is a §13.4 error naming the field - the constraint
+    /// decides every field, so a rule that also sets one has misunderstood
+    /// something the reader can catch. Checked for one representative field
+    /// of each per-field family (`U`, a plain [`ScalarBc`]; `k`, a
+    /// [`TurbBc`]) - `validate_constraint_rules` handles the rest of the
+    /// eleven identically.
+    #[test]
+    fn a_per_field_bc_on_a_constraint_rule_is_refused_naming_the_field() {
+        let _g = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
 
-        let lowered = lowered.expect("-permissive keeps the first pair and continues");
-        assert_eq!(lowered.block.cyclic, Some(0));
-        assert_eq!(lowered.block.patch_type[0], "cyclic");
-        assert_eq!(lowered.block.patch_type[2], "wall", "the second pair must not have won");
+        let u_case = case_with_mesh_and_patches(
+            "",
+            r#"[
+                { "match": "(za|zb)", "kind": "empty", "U": { "type": "zeroGradient" } },
+                { "match": ".*", "kind": "wall" }
+            ]"#,
+        )
+        .expect("parse");
+        let err = match u_case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail on a U entry"),
+        };
+        assert!(err.contains("empty"), "{err}");
+        assert!(err.contains('U'), "{err}");
+
+        let k_case = case_with_mesh_and_patches(
+            "",
+            r#"[
+                { "match": "(ya|yb)", "kind": "symmetry", "k": { "type": "zeroGradient" } },
+                { "match": ".*", "kind": "wall" }
+            ]"#,
+        )
+        .expect("parse");
+        let err = match k_case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail on a k entry"),
+        };
+        assert!(err.contains("symmetry"), "{err}");
+        assert!(err.contains('k'), "{err}");
+    }
+
+    /// SPEC-LIT §34.2: "a pair and a constraint patch on the same slot is a
+    /// §13.4 error naming both" - here `xa`/`xb` are both a cyclic pair AND
+    /// (via the mandatory-catch-all-preceding rule) named `empty`, which is
+    /// a direct contradiction about the same faces.
+    #[test]
+    fn a_cyclic_pair_naming_an_empty_patch_is_an_error_naming_both() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        let case = case_with_mesh_and_patches(
+            r#", "cyclic": [ { "a": "xa", "b": "xb", "transform": "translate" } ]"#,
+            r#"[ { "match": "xa", "kind": "empty" }, { "match": ".*", "kind": "wall" } ]"#,
+        )
+        .expect("parse");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to fail"),
+        };
+        assert!(err.contains("xa"), "{err}");
+        assert!(err.contains("xb"), "{err}");
     }
 
     /// `blockgen`'s own cases spell this exact shape

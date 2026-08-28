@@ -890,6 +890,43 @@ mod tests {
         }
     }
 
+    /// SPEC-LIT §34.2's own 34.3-table check: the same test as
+    /// [`a_uniform_field_survives_a_generated_cyclic_pair`], on a mesh with
+    /// TWO cyclic pairs (a plane channel periodic in x and y) - a uniform
+    /// field must return to itself through both couples at once, not just
+    /// whichever one an implementation happened to wire up first.
+    #[test]
+    fn a_uniform_field_survives_two_generated_cyclic_pairs() {
+        let mut b = crate::blockgen::BlockSpec::default();
+        b.x.hi = 2.0;
+        b.x.n = 6;
+        b.y.hi = 1.0;
+        b.y.n = 4;
+        b.z.hi = 0.5;
+        b.z.n = 3;
+        b.set_cyclic_axis(0).expect("axis 0 is x");
+        b.set_cyclic_axis(1).expect("axis 1 is y");
+        let hm = crate::blockgen::build_mesh(&b).expect("build_mesh");
+
+        let Some((gpu, m, k)) = ctx(&hm) else { return };
+
+        const T0: Scalar = -7.25;
+        let mut f = GpuScalarField::zeros(&gpu, &m, "T").expect("field");
+        gpu.write(&mut f.f, &vec![T0; hm.n_cells]).expect("T");
+
+        correct_boundary_conditions(&gpu, &k, &mut f, &m).expect("correctBcs");
+        gpu.sync().expect("sync");
+
+        let got = gpu.download(&f.bf).expect("bf");
+        for (i, &v) in got.iter().enumerate() {
+            assert!(
+                (v - T0).abs() < 1e-10,
+                "boundary face {i}: {v} != uniform {T0} - two periodic pairs together \
+                 must not perturb a field that had nothing to advect"
+            );
+        }
+    }
+
     #[test]
     fn a_calculated_face_is_left_alone() {
         let hm = chain_mesh();

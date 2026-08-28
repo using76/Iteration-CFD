@@ -131,13 +131,19 @@ pub struct BlockSpec {
     pub patch_type: [String; 6],
     /// Optionally split one slot in two; see [`PatchWindow`].
     pub window: Option<PatchWindow>,
-    /// SPEC-LIT §31.1: the two opposite slots of this axis (0=x, 1=y, 2=z)
-    /// are a cyclic pair - `constant/polyMesh/boundary` gets `neighbourPatch`
-    /// on each, and the in-memory [`build_mesh`] path resolves the pairing
-    /// directly, with no boundary file to read it back from. Set through
+    /// SPEC-LIT §31.1/§34.2: the axes (0=x, 1=y, 2=z) whose two opposite
+    /// slots are a cyclic pair - `constant/polyMesh/boundary` gets
+    /// `neighbourPatch` on each, and the in-memory [`build_mesh`] path
+    /// resolves the pairing directly, with no boundary file to read it back
+    /// from. A plane channel needs two axes here, a fully periodic box three
+    /// - §34.2 generalised this from the single `Option<usize>` slot §31.1
+    /// shipped with, because a `Vec` of axes is already the whole
+    /// generalisation a pair needs: each axis has exactly two opposite
+    /// slots, so "one pair per axis" and "one pair per patch" are the same
+    /// constraint once pairing is expressed this way. Set through
     /// [`BlockSpec::set_cyclic_axis`], which also fixes up `patch_type` -
     /// this field on its own is not enough to make a slot cyclic.
-    pub cyclic: Option<usize>,
+    pub cyclic: Vec<usize>,
 }
 
 /// A rectangular window of one slot's faces, carved out into a patch of its
@@ -175,29 +181,44 @@ impl Default for BlockSpec {
             patch_name: ["xMin", "xMax", "yMin", "yMax", "zMin", "zMax"].map(String::from),
             patch_type: ["patch", "patch", "wall", "wall", "empty", "empty"].map(String::from),
             window: None,
-            cyclic: None,
+            cyclic: Vec::new(),
         }
     }
 }
 
 impl BlockSpec {
     /// Declare the two opposite slots of `axis` (0=x, 1=y, 2=z) a cyclic
-    /// pair (SPEC-LIT §31.1): both slots' `patch_type` become `cyclic` and
-    /// `cyclic` itself is set, which is what [`build_patches`] reads to wire
+    /// pair (SPEC-LIT §31.1, generalised to more than one axis by §34.2):
+    /// both slots' `patch_type` become `cyclic` and `axis` is appended to
+    /// `cyclic`, which is what [`build_patches`] reads to wire
     /// `neighbourPatch` between them. There is no rotational form - a §13.4
     /// error naming `translate` is [`crate::io::case_json`]'s job, one layer
     /// up, before a `BlockSpec` is even built; by the time one gets here the
     /// only transform this method (or this whole module) knows how to do is
     /// the one implied by the block's own extent along `axis`.
+    ///
+    /// SPEC-LIT §34.2's "an axis may appear in at most one pair" is enforced
+    /// HERE rather than only by the JSONC reader, so a caller that builds a
+    /// `BlockSpec` directly (as `write_case_cyclic` and this module's own
+    /// tests do) gets the same guarantee: calling this twice for the same
+    /// axis is an error, not a silent no-op or a double-cyclic slot.
     pub fn set_cyclic_axis(&mut self, axis: usize) -> Result<()> {
         if axis > 2 {
             return Err(Error::Config(format!(
                 "blockgen: cyclic axis {axis} is not x, y or z (0, 1 or 2)"
             )));
         }
+        if self.cyclic.contains(&axis) {
+            return Err(Error::Config(format!(
+                "blockgen: axis {axis} ('{}'/'{}') is already a cyclic pair - an axis \
+                 may appear in at most one cyclic pair",
+                self.patch_name[2 * axis],
+                self.patch_name[2 * axis + 1],
+            )));
+        }
         self.patch_type[2 * axis] = "cyclic".to_string();
         self.patch_type[2 * axis + 1] = "cyclic".to_string();
-        self.cyclic = Some(axis);
+        self.cyclic.push(axis);
         Ok(())
     }
 }
@@ -734,12 +755,13 @@ fn build_patches(
         None => None,
     };
 
-    // SPEC-LIT §31.1: `set_cyclic_axis` is the only supported way to get
-    // here, but the field itself is public, so a caller that poked `cyclic`
-    // directly without also setting both `patch_type` entries gets an error
-    // naming the mismatch rather than a boundary file that claims `cyclic`
-    // pairing for a patch whose own `type` says something else.
-    if let Some(axis) = b.cyclic {
+    // SPEC-LIT §31.1/§34.2: `set_cyclic_axis` is the only supported way to
+    // get here, but the field itself is public, so a caller that poked
+    // `cyclic` directly without also setting both `patch_type` entries gets
+    // an error naming the mismatch rather than a boundary file that claims
+    // `cyclic` pairing for a patch whose own `type` says something else.
+    // Checked per axis, since `cyclic` may now name more than one.
+    for &axis in &b.cyclic {
         if axis > 2 {
             return Err(Error::Mesh(format!(
                 "blockgen: BlockSpec.cyclic axis {axis} is not x, y or z (0, 1 or 2)"
@@ -765,13 +787,11 @@ fn build_patches(
         }
     }
     let nbr_name = |p: usize| -> Option<String> {
-        let axis = b.cyclic?;
+        let axis = b.cyclic.iter().copied().find(|&a| p == 2 * a || p == 2 * a + 1)?;
         if p == 2 * axis {
             Some(b.patch_name[2 * axis + 1].clone())
-        } else if p == 2 * axis + 1 {
-            Some(b.patch_name[2 * axis].clone())
         } else {
-            None
+            Some(b.patch_name[2 * axis].clone())
         }
     };
 
@@ -3502,24 +3522,27 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
 /// directory whose fields are real per-cell profiles rather than a uniform
 /// guess.
 pub fn write_case(case_dir: &Path, kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, WallTreatment::Standard, None, false, None)
+    write_case_impl(case_dir, kind, nx, ny, nz, None, WallTreatment::Standard, None, false, &[])
         .map(|_| ())
 }
 
-/// [`write_case`], with the two opposite patches of `axis` (0=x, 1=y, 2=z)
-/// declared a cyclic pair instead of whatever `kind`'s own preset would put
-/// there (SPEC-LIT §31.1) - `ofgpu-generate-mesh <case> <dir> -cyclic <axis>`.
+/// [`write_case`], with the two opposite patches of each of `axes` (0=x,
+/// 1=y, 2=z) declared a cyclic pair instead of whatever `kind`'s own preset
+/// would put there (SPEC-LIT §31.1, more than one axis per §34.2) -
+/// `ofgpu-generate-mesh <case> <dir> -cyclic <axis>` repeatable.
 /// `channel`'s own comment in [`case_block_spec`] names exactly this gap: "a
 /// streamwise cyclic pair would be the physical choice but cyclics need a
-/// coupled patch pair" - `-cyclic 0` on `channel` is that pair, turning
-/// `inlet`/`outlet` into a periodic streamwise direction instead.
+/// coupled patch pair" - `-cyclic x` on `channel` is that pair, turning
+/// `inlet`/`outlet` into a periodic streamwise direction instead; `-cyclic x
+/// -cyclic z` on `channel` (already `empty` front/back per §34.1) makes it a
+/// plane channel periodic in both wall-parallel directions.
 pub fn write_case_cyclic(
     case_dir: &Path,
     kind: CaseKind,
     nx: usize,
     ny: usize,
     nz: usize,
-    axis: usize,
+    axes: &[usize],
 ) -> Result<()> {
     write_case_impl(
         case_dir,
@@ -3531,7 +3554,7 @@ pub fn write_case_cyclic(
         WallTreatment::Standard,
         None,
         false,
-        Some(axis),
+        axes,
     )
     .map(|_| ())
 }
@@ -3546,11 +3569,11 @@ pub fn write_case_cyclic_with_wall_model(
     nx: usize,
     ny: usize,
     nz: usize,
-    axis: usize,
+    axes: &[usize],
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, Some(axis))
+    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, axes)
         .map(|_| ())
 }
 
@@ -3569,7 +3592,7 @@ pub fn write_case_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, None).map(|_| ())
+    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, &[]).map(|_| ())
 }
 
 /// Build a complete runnable case's mesh and `0/` fields entirely in memory -
@@ -3620,7 +3643,7 @@ pub fn write_carved_case(
     surface: &Surface,
 ) -> Result<CarveSummary> {
     match write_case_impl(
-        case_dir, kind, nx, ny, nz, Some(surface), WallTreatment::Standard, None, false, None,
+        case_dir, kind, nx, ny, nz, Some(surface), WallTreatment::Standard, None, false, &[],
     )? {
         Some(s) => Ok(s),
         // Unreachable: the impl returns a summary whenever a surface went in.
@@ -3642,7 +3665,7 @@ pub fn write_carved_case_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<CarveSummary> {
-    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), wall, roughness, true, None)? {
+    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), wall, roughness, true, &[])? {
         Some(s) => Ok(s),
         None => Err(Error::Mesh("carve produced no summary".to_string())),
     }
@@ -3659,7 +3682,7 @@ fn write_case_impl(
     wall: WallTreatment,
     roughness: Option<Roughness>,
     thermal_wall: bool,
-    cyclic: Option<usize>,
+    cyclic: &[usize],
 ) -> Result<Option<CarveSummary>> {
     if nx < 1 || ny < 1 || nz < 1 {
         return Err(Error::Config(format!(
@@ -3668,11 +3691,13 @@ fn write_case_impl(
     }
 
     let mut b = case_block_spec(kind, nx, ny, nz);
-    // SPEC-LIT §31.1: only reachable through `write_case_cyclic`, which never
-    // carries a `surface` - carving and cyclic pairing together is a
+    // SPEC-LIT §31.1/§34.2: only reachable through `write_case_cyclic`, which
+    // never carries a `surface` - carving and cyclic pairing together is a
     // combination nothing has asked for yet, so it stays unreachable through
-    // the public API rather than half-supported here.
-    if let Some(axis) = cyclic {
+    // the public API rather than half-supported here. `set_cyclic_axis`
+    // itself refuses a repeated axis, so passing the same axis twice here is
+    // an error rather than a silent no-op.
+    for &axis in cyclic {
         b.set_cyclic_axis(axis)?;
     }
     let block = Block::new(&b)?;
@@ -6151,6 +6176,86 @@ mod tests {
         assert!(
             (flux_a + flux_b).abs() < 1e3 * EPS * flux_a.abs().max(1.0),
             "flux_a {flux_a} and flux_b {flux_b} are not equal and opposite"
+        );
+    }
+
+    /// SPEC-LIT §34.2, the 34.3 table's "two cyclic pairs close": a plane
+    /// channel periodic in x AND y (z stays the block's default `wall`).
+    /// Every one of the two pairs' four patches must come back
+    /// `PatchKind::Cyclic`, and each pair must independently carry equal and
+    /// opposite total flux for a uniform field - exactly
+    /// `a_cyclic_pair_carries_equal_and_opposite_total_flux` above, run
+    /// twice, on the SAME mesh, to show the two pairs do not interfere with
+    /// each other.
+    #[test]
+    fn two_cyclic_pairs_each_carry_equal_and_opposite_total_flux() {
+        let mut b = spec(6, 5, 3);
+        b.set_cyclic_axis(0).expect("axis 0 is x");
+        b.set_cyclic_axis(1).expect("axis 1 is y");
+        let hm = build_mesh(&b).expect("build_mesh");
+
+        assert_eq!(
+            hm.patches.iter().filter(|p| p.kind == PatchKind::Cyclic).count(),
+            4,
+            "both pairs' four patches must all be PatchKind::Cyclic"
+        );
+        // z was never touched - `spec`'s default patch_type keeps it `empty`.
+        assert!(hm.patches.iter().any(|p| p.kind == PatchKind::Empty));
+
+        let u = Vec3::new(1.3, -0.4, 0.2);
+        let flux_of = |p: &crate::mesh::PatchInfo| -> Scalar {
+            (0..p.size).map(|k| u.dot(hm.b_sf[p.start + k])).sum()
+        };
+
+        for axis_names in [["xMin", "xMax"], ["yMin", "yMax"]] {
+            let get = |name: &str| hm.patches.iter().find(|p| p.name == name).expect(name);
+            let (fa, fb) = (flux_of(get(axis_names[0])), flux_of(get(axis_names[1])));
+            assert!(fa.abs() > 1e-6, "{axis_names:?}: flux_a suspiciously near zero: {fa}");
+            assert!(
+                (fa + fb).abs() < 1e3 * EPS * fa.abs().max(1.0),
+                "{axis_names:?}: flux_a {fa} and flux_b {fb} are not equal and opposite"
+            );
+        }
+    }
+
+    /// SPEC-LIT §34.2, the 34.3 table's "three pairs (a periodic box) close
+    /// with zero net flux through every pair": every one of the six patches
+    /// is cyclic, and each of the three axis pairs independently balances a
+    /// uniform field's flux to round-off.
+    #[test]
+    fn three_cyclic_pairs_close_a_periodic_box_with_zero_net_flux_per_pair() {
+        let mut b = spec(6, 5, 4);
+        b.set_cyclic_axis(0).expect("axis 0 is x");
+        b.set_cyclic_axis(1).expect("axis 1 is y");
+        b.set_cyclic_axis(2).expect("axis 2 is z");
+        let hm = build_mesh(&b).expect("build_mesh");
+
+        assert_eq!(hm.patches.len(), 6);
+        assert!(hm.patches.iter().all(|p| p.kind == PatchKind::Cyclic));
+
+        let u = Vec3::new(0.7, 1.1, -0.9);
+        let flux_of = |p: &crate::mesh::PatchInfo| -> Scalar {
+            (0..p.size).map(|k| u.dot(hm.b_sf[p.start + k])).sum()
+        };
+
+        for axis_names in [["xMin", "xMax"], ["yMin", "yMax"], ["zMin", "zMax"]] {
+            let get = |name: &str| hm.patches.iter().find(|p| p.name == name).expect(name);
+            let (fa, fb) = (flux_of(get(axis_names[0])), flux_of(get(axis_names[1])));
+            assert!(fa.abs() > 1e-6, "{axis_names:?}: flux_a suspiciously near zero: {fa}");
+            assert!(
+                (fa + fb).abs() < 1e3 * EPS * fa.abs().max(1.0),
+                "{axis_names:?}: flux_a {fa} and flux_b {fb} are not equal and opposite"
+            );
+        }
+
+        // The whole box, all three pairs at once: a uniform field's net
+        // flux over the ENTIRE boundary must also vanish to round-off - the
+        // mesh-closure claim (SPEC-LIT §10) specialised to a fully periodic
+        // domain, where the boundary is nothing but cyclic pairs.
+        let total: Scalar = hm.patches.iter().map(flux_of).sum();
+        assert!(
+            total.abs() < 1e3 * EPS * u.mag() * hm.n_boundary_faces as Scalar,
+            "total boundary flux over a periodic box must vanish: {total}"
         );
     }
 

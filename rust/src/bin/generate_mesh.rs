@@ -40,6 +40,11 @@
 //! §24.2/§24.4) and `-thetaMin X` the small-cell merge threshold (default
 //! 0.2, §24.5). Castellation stays the default when `-cutcell` is absent.
 //!
+//! `-cyclic x|y|z` may be given more than once (SPEC-LIT §34.2: a plane
+//! channel needs two axes, a fully periodic box three) - each names a
+//! DIFFERENT axis; naming the same axis twice is refused by
+//! `BlockSpec::set_cyclic_axis` itself.
+//!
 //! `-wallModel <standard|spalding|rough|lowRe> [-Ks x [-Cs y]]` - SPEC-LIT
 //! §29.1 route (c): expands the named preset into the `k`/`epsilon`/`omega`/
 //! `nut` (and, for a case that solves `T`, the thermal wall function of
@@ -159,9 +164,10 @@ fn run(args: &[String]) -> Result<()> {
     let mut wall_model: Option<WallTreatment> = None;
     let mut ks: Option<ofgpu::Scalar> = None;
     let mut cs: Option<ofgpu::Scalar> = None;
-    // SPEC-LIT §31.1: `None` means "no cyclic pair" - the ordinary case every
-    // other flag combination already produces.
-    let mut cyclic: Option<usize> = None;
+    // SPEC-LIT §31.1/§34.2: empty means "no cyclic pair" - the ordinary case
+    // every other flag combination already produces. Repeatable so a plane
+    // channel (two axes) or a fully periodic box (three) can be named.
+    let mut cyclic: Vec<usize> = Vec::new();
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -173,7 +179,7 @@ fn run(args: &[String]) -> Result<()> {
                     usage();
                     return Err(Error::Config("-cyclic needs an axis: x, y or z".to_string()));
                 };
-                cyclic = Some(parse_cyclic_axis(v)?);
+                cyclic.push(parse_cyclic_axis(v)?);
             }
             "-wallModel" => {
                 i += 1;
@@ -277,7 +283,7 @@ fn run(args: &[String]) -> Result<()> {
     // SPEC-LIT §31.1: cyclic pairing is a plain-block feature - carving picks
     // its own wall patches out of the cut surface, and there is no coupled
     // pair left to declare once that has happened.
-    if cyclic.is_some() && !stl_args.is_empty() {
+    if !cyclic.is_empty() && !stl_args.is_empty() {
         return Err(Error::Config(
             "-cyclic cannot be combined with -stl: carving replaces the block's own \
              patches with new wall patches, leaving no cyclic pair to declare"
@@ -293,14 +299,14 @@ fn run(args: &[String]) -> Result<()> {
         .flatten();
 
     if stl_args.is_empty() {
-        return match (wall_model, cyclic) {
-            (None, None) => write_case(Path::new(dir), kind, nx, ny, nz),
-            (Some(wt), None) => {
+        return match (wall_model, cyclic.is_empty()) {
+            (None, true) => write_case(Path::new(dir), kind, nx, ny, nz),
+            (Some(wt), true) => {
                 write_case_with_wall_model(Path::new(dir), kind, nx, ny, nz, wt, roughness)
             }
-            (None, Some(axis)) => write_case_cyclic(Path::new(dir), kind, nx, ny, nz, axis),
-            (Some(wt), Some(axis)) => write_case_cyclic_with_wall_model(
-                Path::new(dir), kind, nx, ny, nz, axis, wt, roughness,
+            (None, false) => write_case_cyclic(Path::new(dir), kind, nx, ny, nz, &cyclic),
+            (Some(wt), false) => write_case_cyclic_with_wall_model(
+                Path::new(dir), kind, nx, ny, nz, &cyclic, wt, roughness,
             ),
         };
     }

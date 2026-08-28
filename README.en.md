@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 790 unit tests, 250 numerical checks |
+| Validation | 801 unit tests, 253 numerical checks |
 
 ---
 
@@ -133,7 +133,8 @@ applied on faces rather than interpolated from cell values.
 | STL obstacles | Binary and ASCII STL carve the block into a castellated mesh — closure validation (refused with the open-edge count; `-permissive` proceeds on parity voting), column-parity classification with a 3-axis majority vote, new wall patches receive the existing wall boundary conditions (`-stl [name=]path`, Aftosmis et al. 1998; Barill et al. 2018) |
 | Cut cells | The next stage past castellation — intersected cells keep reduced volume/area fractions and a closure-defined cut face instead of being removed (supersampling, default 16³, SPEC-LIT §24); slivers below `theta_min` merge into the fluid neighbour sharing the largest shared face |
 | Gmsh `.msh` | v4.1 tetrahedron/hexahedron/prism/pyramid elements, `$PhysicalNames` patches — read from the published format specification |
-| Cyclic patches | One pair of opposite block faces coupled instead of left as boundaries — `ofgpu-generate-mesh -cyclic x\|y\|z` or a JSONC `mesh.cyclic` entry naming both sides and the transform (`translate` only; `rotate` is refused by name). Face matching by nearest translated centroid, checked against two invariants — every face matches exactly once, and `Sf_a == -Sf_b` after the transform to a stated tolerance — either failing names the patch pair and the worst offending face rather than building a mesh that silently fails to conserve |
+| Cyclic patches | Any number of opposite block-face pairs coupled instead of left as boundaries (SPEC-LIT §31.1, generalised to multiple pairs by §34.2 — a plane channel periodic in two directions, or a fully periodic box in three, can be declared today) — `ofgpu-generate-mesh -cyclic x\|y\|z` (repeatable) or a JSONC `mesh.cyclic` array, each entry naming both sides and the transform (`translate` only; `rotate` is refused by name). Face matching by nearest translated centroid, checked against two invariants per pair — every face matches exactly once, and `Sf_a == -Sf_b` after the transform to a stated tolerance — either failing names the patch pair and the worst offending face rather than building a mesh that silently fails to conserve; an axis named by two pairs, or a pair sharing a slot with a constraint patch (below), is refused by name rather than silently resolved |
+| Constraint patches (`empty`/`symmetry`) | `PatchKind::Empty` and `PatchKind::Symmetry` (SPEC-LIT §4's BC triple, the operator branches and vector reflection every driver already carries) newly nameable from JSONC (`"kind": "empty"`/`"symmetry"`, SPEC-LIT §34.1) — a case that needs a genuinely 2-D domain no longer has to be written in the OpenFOAM case-directory format only. A CONSTRAINT, not a boundary condition: a rule of either kind may not also set a per-field BC (refused by name), and `empty` is refused on any axis with more than one cell (naming the slot and its actual cell count) |
 
 ### Fire physics (low-Mach variable density, combustion, radiation)
 
@@ -329,7 +330,8 @@ Jayatilleke thermal wall function:
 | The `thermalWallFunction` Robin triple encodes exactly the analytic Jayatilleke flux (the one-cell conductance identity) | 0 (round-off) |
 | Werner-Wengle: both branches agree at the branch point, and each branch's own closed form reproduces a manufactured `tau_w` to round-off | 0 (round-off) |
 | Coupled-solver selection: `kOmegaSST` via `ofgpu-buoyant`'s `build_coupled`, on a buoyant case, yields a different `nut` FNV hash than `kEpsilon` on the identical case | hashes differ (decisive) |
-| Thermal wall-function gate, Nusselt verdict (replayed measurement) — `cases/channelPeriodicFluxWF.jsonc`'s own numbers, against Dittus-Boelter/Gnielinski | +2% / −4% (inside both ±10% / ±20–25% bands) |
+| Thermal wall-function gate, Nusselt verdict (replayed measurement) — `cases/channelPeriodicFluxWF.jsonc`'s own numbers, against Dittus-Boelter/Gnielinski | −4.5% / −11.5% (inside both ±10% / ±20–25% bands) |
+| Resolved-leg mesh resolution (replayed measurement) — `cases/channelPeriodicFluxLowRe.jsonc`'s worst wall-adjacent y+ and cells-below-y+-20 count | y+ = 0.00175, 192/400 cells (both requirements met) |
 
 These establish that the rough-wall law collapses to the existing smooth one
 at `Ks = 0` — the case that never mentions roughness — that the thermal wall
@@ -343,41 +345,57 @@ checkable at all: three earlier fixed-wall-temperature attempts (ratios
 different problems (a fixed `T_w` lets the bulk temperature float, so two
 meshes with different near-wall conductances settle at different ΔT).
 
-**Validated.** Fixing the SAME wall heat flux `q_w` on both meshes instead —
-letting each predict its own ΔT — and comparing the result as a Nusselt
-number against Dittus & Boelter (1930) and Gnielinski (1976) closes the
-wall-function leg. `cases/channelPeriodicFluxWF.jsonc` (`standard`
-wallTreatment, y+ ≈ 41.7): `q_w` = 500 W/m², `T_w` = 501.99 K (diagnosed by
-the thermal wall function), `T_b` = 453.97 K, `U_b` = 3.512 m/s. On the
-heated-perimeter hydraulic diameter (`D_h` = 0.08 m, the convention these
-correlations were derived under, for a duct heated on two of its four
-walls), Re = 18 731 and the measured Nu = 50.41 sits at **+2% of Gnielinski**
-(±10%) and **−4% of Dittus-Boelter** (±20–25%) — inside both bands. A
-force-balance cross-check gives `U_b/u_tau` = 12.6 against the 15–17 a fully
-developed plane channel gives, a real caveat (this duct's side walls add
-drag a plane-channel correlation does not know about), reported rather than
-buried. `ofgpu-validate`'s `check_thermal_wall_function_gate_verdict_replay`
-replays this exact measurement on every run, permanently.
+**Validated, and rebuilt as a genuine 2-D plane channel per SPEC-LIT §34.**
+Fixing the SAME wall heat flux `q_w` on both meshes — letting each predict
+its own ΔT — and comparing the result as a Nusselt number against
+Dittus & Boelter (1930) and Gnielinski (1976) closes the wall-function leg.
+The gate used to run on a 3-D duct only because JSONC could not say `empty`;
+now that it can (§34.1), `cases/channelPeriodicFluxWF.jsonc` is
+streamwise-cyclic, `empty` front/back, hot walls top and bottom, and nothing
+else — rerun, not carried over, and converges to a bit-identical fixed point
+(`standard` wallTreatment, y+ ≈ 57.7): `q_w` = 500 W/m², `T_w` = 316.86 K
+(diagnosed by the thermal wall function), `T_b` = 292.92 K,
+`U_b` = 5.3696 m/s. For a genuine plane channel the heated-perimeter and
+wetted-perimeter conventions COINCIDE (both walls are hot, no third or
+fourth wall to argue about), so `D_h` = 2H = 0.08 m is the only number on
+the table: Re = 28 638 and the measured Nu = 65.24 sits at
+**−4.5% of Gnielinski** (±10%) and **−11.5% of Dittus-Boelter** (±20–25%) —
+inside both bands. A force-balance cross-check gives `U_b/u_tau` = 19.23
+against the 15–17 a fully developed plane channel gives — no side-wall-drag
+caveat needed this time, since there is no longer a third or fourth wall.
+`ofgpu-validate`'s `check_thermal_wall_function_gate_verdict_replay` replays
+this rebuilt measurement on every run, permanently.
 
-**Still open, and for a different reason now that `LaunderSharmaKE` has
-landed (SPEC-LIT §33).** The model itself checks out: its damping-function
-limits are exact (`ofgpu-validate`), and run on a clean, wall-resolved
-periodic channel it reproduces the viscous sublayer `u+ = y+` to under 1%
-and the log law within 1% at y+ ≈ 30–35 — the law-of-the-wall check SPEC-LIT
-§33.3 asks for. But the matching resolved mesh, `cases/channelPeriodicFluxLowRe.jsonc`
-(identical `q_w`, graded to y+ ~ 1), still does not converge to a usable
-state on its own three-dimensional duct geometry: bulk velocity collapses to
-~0.24 m/s against the wall-function twin's 3.51 m/s and a laminar solve of
-the identical mesh's own 14.8 m/s, and temperature never reaches steady
-state. The collapse survives removing the wall-row mismatch, removing the
-`lowRe` Dirichlet condition, and relaxing the mesh grading, so it is not any
-one of those — the leading, untested lead is the `E`-term's `grad(grad U)`
-boundary extrapolation at the duct's corners, where two wall-adjacent
-boundary layers meet. Ofgpu now accepts `wallTreatment lowRe` under
-`LaunderSharmaKE` (`kEpsilon`/`kOmega`/`kOmegaSST` still refuse it, §13.4)
-rather than leaving any of them to diverge silently. See
-`docs/07-fire-solver.md` §1.1 for the full numbers, including the superseded
-attempts and the law-of-the-wall table.
+**Still open, and for a genuinely new, third reason.** `LaunderSharmaKE`
+(SPEC-LIT §33) checks out on every front now available: its damping-function
+limits are exact (`ofgpu-validate`), it reproduces the viscous sublayer
+`u+ = y+` to under 1% and the log law within 1% on a clean periodic channel,
+and — the point SPEC-LIT §34's rebuild was FOR — its own resolved leg,
+`cases/channelPeriodicFluxLowRe.jsonc` rebuilt the same way (`empty`
+front/back, no side walls at all), converges its velocity field to
+round-off (`|U|` residual `2×10⁻¹²`) with `U_b/u_tau` = 17.35, matching
+the 15–17 plane-channel target more closely than the wall-function leg's
+own 19.23. **The duct-corner hypothesis the previous round of work left
+untested is CONFIRMED**: removing the corners fixed the velocity collapse.
+What did NOT get fixed is the ENERGY equation: `T_b`/`T_w` drift upward at a
+small, linear, apparently UNDAMPED rate for as long as the run is extended
+(checked out to 150 000 iterations, 10x the first checkpoint, with `U_b`
+and the mesh's own y+/cells-below-y+-20 count bit-stable throughout) — Nu
+starts inside Dittus-Boelter's band at 15 000 iterations and drifts to
+**+31% of Dittus-Boelter and +41% of Gnielinski, outside BOTH bands, by
+150 000**. Four causes are ruled out directly (swapping in `kEpsilon`
+reproduces the same drift; a far milder grading still drifts; tightening
+the energy solve's tolerance to exact changes nothing; `-sealed` changes
+nothing, since the imposed flux and the compensating sink are exactly equal
+by construction) — the leading explanation is that `q_w` and the
+volumetric sink are both exactly temperature-independent, buoyancy is off,
+and `T` is Dirichlet nowhere in this domain, leaving the domain-mean
+temperature with no restoring term in the discrete energy balance; why the
+coarse wall-function mesh nonetheless lands on an exact fixed point while
+the fine resolved mesh does not is a genuinely new, previously-invisible
+limitation, reported rather than tuned away. See `docs/07-fire-solver.md`
+§1.1 for the full numbers, including the superseded duct-era attempts and
+the law-of-the-wall table.
 
 ---
 
@@ -553,9 +571,11 @@ Convert binary-format cases to ASCII before use.
   discrete ordinates) is more accurate at optically thin fire margins but is
   the documented next step; asking for it is refused by name per the §13.4
   contract.
-- **Only one cyclic pair.** Periodicity can be declared on a single axis, so
-  a true plane channel - periodic in two directions - cannot yet be
-  expressed.
+- ~~Only one cyclic pair.~~ **Fixed (SPEC-LIT §34.2).** `BlockSpec::cyclic`
+  is a list now, and a JSONC case's `mesh.cyclic` accepts any number of
+  pairs (one per axis) — a plane channel periodic in two directions, or a
+  fully periodic box in three, can be declared today. See "Cyclic patches"
+  above.
 
 ---
 

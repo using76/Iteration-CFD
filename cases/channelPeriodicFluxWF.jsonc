@@ -1,9 +1,27 @@
 // meteor-cfd case - SPEC-LIT S32's redesigned thermal-wall-function gate,
-// mesh (a): the SAME streamwise-cyclic plane channel/duct as
-// `channelPeriodicWF.jsonc` (identical geometry, cross-section, momentum
-// source, `standard` wallTreatment, six wall-normal cells at y+ target
-// 30-60) - but the top and bottom walls now carry a FIXED HEAT FLUX
-// (`fixedFluxTemperature`, SPEC-LIT S32.2) instead of a fixed temperature.
+// rebuilt per SPEC-LIT S34 as a genuine 2-D PLANE channel rather than a
+// 3-D duct: streamwise-cyclic in x, `empty` front/back in z (S34.1 -
+// PatchKind::Empty, newly nameable in JSONC), hot walls top and bottom in
+// y. There are no side walls left to confound anything - the whole point
+// of this rebuild (see `channelPeriodicFluxLowRe.jsonc`'s own header for
+// why the OLD 3-D duct version of this pair could not close the S32
+// gate's resolved leg).
+//
+// mesh (a): `standard` wallTreatment, six wall-normal cells at y+ target
+// 30-60 - unchanged from the duct version except the z axis, which is now
+// `empty` (`cells: [8, 6, 1]`, was `[8, 6, 4]` with real `wallSide.*`
+// walls there).
+//
+// STATUS (SPEC-LIT S34, RUN and REPORTED - docs/07-fire-solver.md S1.1 has
+// the full table): converges to a bit-identical fixed point (`|U|` residual
+// 1.4e-10, T unchanged in its last printed digit from iteration 5 000
+// through 40 000). Measured y+ 56.8/57.7/58.5, T_w = 316.861 K,
+// T_b = 292.92 K, U_b = 5.3696 m/s. For a plane channel D_h = 2H = 0.08 m
+// (heated- and wetted-perimeter conventions coincide, unlike the old duct's
+// two different numbers): Re = 28 638, Nu = 65.24 - Gnielinski -4.5%,
+// Dittus-Boelter -11.5%, both inside their own band (**GATE CLOSES**).
+// U_b/u_tau = 19.23 against the 15-17 a developed plane channel gives - no
+// side-wall-drag caveat needed this time, since there is no side wall left.
 //
 // S32.1 diagnoses why the fixed-T version of this gate (`channelThermalWF`/
 // `channelThermalLowRe`/`channelPeriodicWF`/`channelPeriodicLowRe`, four
@@ -18,33 +36,43 @@
 // Dittus-Boelter/Gnielinski correlations (S32.3) - the same shape every
 // other validation in this project already has, per S32.3's own point.
 //
-// q_w = 500 W/m^2 on each of the two hot walls, chosen (not calibrated) to
-// give a bulk-to-wall delta-T of order 30 K at this duct's expected
-// Re ~ 1.6e4 (Nu ~ 46 from Dittus-Boelter, h = Nu k/Dh ~ 15 W/m2K,
-// delta-T = q_w/h ~ 33 K) - moderate enough that the low-Mach constant-
-// property assumption stays comfortable, large enough to measure precisely.
-// The compensating sink is `-2 q_w A_wall` (S32.2), with A_wall the area of
-// ONE hot wall (the "2" already counts both): A_wall = 0.08 m * 0.04 m =
-// 0.0032 m2, so the sink is -2*500*0.0032 = -3.2 W, ONE number, IDENTICAL
-// for this mesh and `channelPeriodicFluxLowRe.jsonc` - unlike the fixed-T
-// gate's two DIFFERENT calibrated sinks (-6 W and -60 W), this number is
-// closed-form from q_w and the (shared) geometry alone, no calibration and
-// nothing to get wrong between the two meshes.
+// D_h for a plane channel (S32.2, S34): parallel plates separated by the
+// full gap H give D_h = 2H, and the heated perimeter IS the wetted
+// perimeter (both walls, nothing else) - the two conventions the old duct
+// had to distinguish now coincide. H = 0.04 m (the y extent below), so
+// D_h = 0.08 m - the SAME number the duct's own "heated perimeter"
+// convention already used, kept on purpose so this rebuild is comparable
+// to the duct numbers on record in docs/07-fire-solver.md S1.1.
 //
-// Momentum, turbulence and mesh are otherwise byte-for-byte
-// `channelPeriodicWF.jsonc` - see that file's own header for the body-force
-// derivation (3.9 m/s^2, Blasius estimate for Re_Dh ~ 8000, tau_w ~ 0.045 Pa)
-// and for why a periodic domain needs `sources[]` `momentumSource` in place
-// of an inlet.
+// q_w = 500 W/m^2 on each of the two hot walls (unchanged from the duct
+// version - a property of the wall, not the cross-section). The
+// compensating sink is `-2 q_w A_wall` (S32.2), with A_wall the area of
+// ONE hot wall over the domain's streamwise length and its (nominal, unit)
+// z depth: A_wall = 0.08 m * 0.04 m = 0.0032 m2 - the z depth is a single
+// `empty` cell's width, carried only so the volume/area bookkeeping has a
+// concrete number; it cancels in every per-unit-depth quantity this gate
+// reports (T_b, U_b, Nu) the same way it always would in a true 2-D
+// problem. Sink = -2*500*0.0032 = -3.2 W, IDENTICAL to
+// `channelPeriodicFluxLowRe.jsonc`'s own, unchanged from the duct version
+// since neither q_w nor A_wall changed.
+//
+// Momentum source unchanged (3.9 m/s^2, the duct version's own Blasius
+// estimate for Re_Dh ~ 8000) - removing the duct's side-wall drag is
+// EXPECTED to raise U_b (see the run report in docs/07-fire-solver.md
+// S1.1), not something recalibrated away; the sanity checks in SPEC-LIT
+// S34's own task (U_b below a laminar solve of the same mesh, U_b/u_tau in
+// 15-17 for a genuinely developed plane channel) are what this rebuild is
+// FOR.
 //
 // A fixed-FLUX wall over a domain with no other Dirichlet condition on T
-// anywhere (cyclic streamwise pair, adiabatic side walls, adiabatic-by-
-// construction net energy balance) leaves T's own absolute LEVEL undetermined
-// by the discrete equation - only its gradients are - so the converged field
-// sits at whatever level the initial condition put it at (293.15 K here);
-// only Tw - Tb, the difference Nu actually needs, is well-posed. This is the
-// same null-space situation SPEC-LIT documents for pressure in a periodic
-// domain (`src/simple.rs`'s own note on a `p` with no Dirichlet boundary
+// anywhere (cyclic streamwise pair, adiabatic-by-construction net energy
+// balance, and now no side walls at all to be adiabatic on) leaves T's own
+// absolute LEVEL undetermined by the discrete equation - only its
+// gradients are - so the converged field sits at whatever level the
+// initial condition put it at (293.15 K here); only Tw - Tb, the
+// difference Nu actually needs, is well-posed. This is the same null-space
+// situation SPEC-LIT documents for pressure in a periodic domain
+// (`src/simple.rs`'s own note on a `p` with no Dirichlet boundary
 // anywhere), read for T rather than p, not a new numerical device.
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
@@ -53,12 +81,12 @@
   "mesh": {
     "kind": "cartesian",
     "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.08, 0.04, 0.04] },
-    "cells":  [8, 6, 4],
+    "cells":  [8, 6, 1],
 
     "boundaries": {
       "xmin": "streamwiseMin", "xmax": "streamwiseMax",
       "ymin": "wallHot0", "ymax": "wallHot1",
-      "zmin": "wallSideMin", "zmax": "wallSideMax",
+      "zmin": "back", "zmax": "front",
     },
 
     "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
@@ -83,11 +111,10 @@
 
   "patches": [
     {
-      "match": "wallSide.*",
-      "kind": "wall",
-      "U": { "type": "fixedValue", "value": [0, 0, 0] },
-      "p": { "type": "zeroGradient" },
-      "T": { "type": "zeroGradient" },
+      // SPEC-LIT S34.1: the 2-D constraint, not a boundary condition - no
+      // per-field BC may be named alongside it (checked and refused).
+      "match": "(back|front)",
+      "kind": "empty",
     },
     {
       // The hot walls - SPEC-LIT S32.2's fixed-flux condition, named
