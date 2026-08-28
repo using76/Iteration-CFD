@@ -2456,3 +2456,62 @@ combinations sane:
 | three cyclic pairs (periodic box) | closes; total flux through every pair is zero |
 | an axis in two pairs | refused, naming the axis |
 | **the §32 resolved leg, as a 2-D plane channel** | the case that could not be written before |
+
+---
+
+## 35. Pinning the bulk temperature in a closed periodic domain
+
+§34's resolved leg drifts because the case is thermally ILL-POSED, and the
+evidence is a two-run experiment rather than an inference: starting the same
+case at 293.15 K and at 400 K gives bulk temperatures of 291.96 K and
+396.37 K — the level simply keeps whatever it was given.
+
+Both walls are fixed-flux, the streamwise direction is cyclic, front and back
+are `empty`: there is no Dirichlet condition on `T` anywhere in the domain.
+The steady temperature equation is therefore pure Neumann, and its solution
+is determined only up to an additive constant — the same null space a
+pure-Neumann pressure Poisson problem has, and which §8.5 already zeroes the
+constant mode to handle. Because the fluid properties depend on temperature
+(`rho = p0/(R_s T)`, and `k = rho cp nu/Pr` with it), that free constant does
+not stay harmless: it changes `k`, which changes `Nu = q_w D_h/(k dT)`.
+
+### 35.1 The thermostat
+
+*DESIGN.* Replace the fixed compensating power with a proportional
+controller on the domain-mean temperature:
+
+```
+T_mean = (1/V) integral T dV                       volume mean, not mixed-mean
+q_thermostat = -rho cp (T_mean - T_target) / tau    [W/m^3], uniform
+```
+
+`tau` is a relaxation time with the dimensions of the problem, defaulted to
+the domain's own flow-through time and overridable. The controller is a SINK
+when the domain is too hot and a SOURCE when it is too cold, so it removes
+the null direction without imposing a temperature anywhere: the PROFILE is
+still entirely the model's own prediction, only its offset is fixed.
+
+At steady state `T_mean = T_target` and the controller settles at exactly the
+net heat the walls put in — which is what the fixed `-2 q_w A_wall` power was
+trying to be, computed rather than assumed.
+
+Selection: a `thermostat` source in the §18 registry, spelled in a case as
+
+```
+"sources": [ { "type": "thermostat", "target": 350.0, "tau": 0.02 } ]
+```
+
+A closed domain (no `inlet`/`open` patch) with no Dirichlet `T` anywhere and
+NO thermostat is exactly the ill-posed case above. The reader should say so —
+a §13.4 warning naming the condition and the thermostat, not an error, since
+a transient run of such a domain is perfectly legitimate and it is only the
+steady solve that is singular.
+
+### 35.2 What must hold
+
+| Check | Expected |
+|---|---|
+| two different initial temperatures | the SAME converged `T_mean`, `dT` and `Nu` — the experiment that exposed the problem, run again as the regression |
+| steady state | the thermostat's integrated power equals the wall heat input to round-off |
+| `T_target` unreachable (walls colder than target) | the controller saturates at a sensible value, and says so |
+| **§32's resolved leg** | converges, and its `Nu` compared against Dittus-Boelter and Gnielinski on the same `D_h = 2H` the wall-function leg used |
