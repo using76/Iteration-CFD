@@ -105,15 +105,44 @@ struct Checks {
     total: usize,
     failures: usize,
     skipped: usize,
+    /// How many of [`Self::total`] were judged against a RECORDED
+    /// measurement - a number this binary did not produce, on this machine,
+    /// on this run - rather than against something it computed live.
+    ///
+    /// Three functions here are replays (SPEC-LIT §32.4/§33.2/§34/§35):
+    /// [`check_thermal_wall_function_gate_verdict_replay`],
+    /// [`check_resolved_leg_mesh_resolution_replay`] and
+    /// [`check_resolved_leg_gate_verdict_replay`]. Their INPUTS are frozen
+    /// constants copied out of `docs/07-fire-solver.md` §1.1; everything done
+    /// WITH those inputs - the correlations, the friction-factor
+    /// conversions, the band arithmetic - is computed live, which is the
+    /// whole point of replaying them. Counting them separately keeps the
+    /// headline `N/N checks passed` meaning one thing only.
+    replayed: usize,
+    /// Set for the duration of [`Self::replaying`].
+    in_replay: bool,
 }
 
 impl Checks {
     fn new() -> Self {
-        Self { total: 0, failures: 0, skipped: 0 }
+        Self { total: 0, failures: 0, skipped: 0, replayed: 0, in_replay: false }
+    }
+
+    /// Run `f` with every check it makes counted as REPLAYED. Not nestable,
+    /// and not meant to be: a replay function calling another one would be
+    /// hiding a second recorded measurement inside the first.
+    fn replaying(&mut self, f: impl FnOnce(&mut Self)) {
+        assert!(!self.in_replay, "replaying() does not nest");
+        self.in_replay = true;
+        f(self);
+        self.in_replay = false;
     }
 
     fn check(&mut self, what: &str, err: Scalar, tol: Scalar) {
         self.total += 1;
+        if self.in_replay {
+            self.replayed += 1;
+        }
 
         // A NaN fails every comparison, so it would sail through `err <= tol`
         // as a pass if the finiteness test were dropped.
@@ -2011,7 +2040,8 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== the thermal wall-function gate, redesigned (SPEC-LIT 32) ===");
     check_fixed_flux_identity(c);
     check_nu_correlations(c);
-    check_thermal_wall_function_gate_verdict_replay(c);
+    check_realised_friction_factor(c)?;
+    c.replaying(check_thermal_wall_function_gate_verdict_replay);
 
     // ---- Launder-Sharma low-Re k-epsilon: the damping functions
     //      (SPEC-LIT 33.3) -------------------------------------------------
@@ -2036,7 +2066,7 @@ fn run(c: &mut Checks) -> Result<()> {
     // ---- the plane-channel resolved leg's mesh resolution (SPEC-LIT
     //      §33.2/§34) --------------------------------------------------
     println!("\n=== resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) ===");
-    check_resolved_leg_mesh_resolution_replay(c);
+    c.replaying(check_resolved_leg_mesh_resolution_replay);
 
     // ---- SPEC-LIT §35: the bulk-temperature thermostat -------------------
     //
@@ -2051,7 +2081,13 @@ fn run(c: &mut Checks) -> Result<()> {
     // that it has an actual steady state to measure.
     println!("\n=== the bulk-temperature thermostat (SPEC-LIT 35) ===");
     check_thermostat_sign_and_steady_offset(c, &gpu)?;
-    check_resolved_leg_gate_verdict_replay(c);
+    c.replaying(check_resolved_leg_gate_verdict_replay);
+
+    // SPEC-LIT §35.3.2's uniform-vs-massFlux experiment, on both meshes -
+    // the measurement that decided whether the uniform sink's distribution
+    // defect was real and how big it is.
+    println!("\n=== thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2) ===");
+    c.replaying(check_thermostat_weighting_experiment_replay);
 
     Ok(())
 }
@@ -3438,6 +3474,14 @@ fn main() -> ExitCode {
     }
 
     println!("\n{}/{} checks passed", c.total - c.failures, c.total);
+    println!(
+        "{} computed live, {} replayed from recorded measurements \
+         (docs/07-fire-solver.md S1.1: the wall-function gate verdict, the resolved leg's \
+         mesh resolution, the resolved leg's gate verdict, and the thermostat-weighting \
+         experiment)",
+        c.total - c.replayed,
+        c.replayed,
+    );
     if c.skipped > 0 {
         println!("{} checks skipped", c.skipped);
     }
@@ -3966,6 +4010,501 @@ fn check_nu_correlations(c: &mut Checks) {
     );
 }
 
+/// SPEC-LIT §32.5, LIVE - not a replay. The friction factor a run realises,
+/// measured from the wall-face traction by
+/// [`ofgpu::wallfunctions::wall_shear`], checked against TWO independent
+/// closed forms on the gate cases' own geometry (`0.08 x 0.04 x 0.04 m`,
+/// walls top and bottom, `empty` front and back - `cases/
+/// channelPeriodicFluxWF.jsonc`'s block exactly):
+///
+/// 1. **The force balance itself** (§32.5.2). A fully developed channel
+///    driven by a uniform body force `g_x` per unit mass balances
+///    `g_x sum(rho V)` against the wall traction's own integral, so
+///    `tau_w = rho g_x V/A_wall = rho g_x H/2`. The one-cell wall gradient
+///    of the analytic parabola under-reads that by EXACTLY `dy/(2H) = 1/(2
+///    n_y)` - a closed form, so this is checked to round-off at two mesh
+///    densities rather than to a tolerance, and the first-order convergence
+///    is checked with it.
+/// 2. **Plane-Poiseuille's own `f Re = 96`** (Shah & London, *Laminar Flow
+///    Forced Convection in Ducts*, Academic Press (1978), the parallel-plate
+///    row - the same table §34's laminar sanity check already used for the
+///    duct). This is what says [`ofgpu::wallfunctions::darcy_friction_factor`]
+///    is the DARCY convention and not the Fanning one four times smaller.
+///
+/// Also checks `D_h = 4V/A_wall`, the definition `ofgpu-fire` reports from,
+/// against `2H` on this same block - the reduction SPEC-LIT §32.2 asserts
+/// for a plane channel is here computed, not assumed.
+fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
+    use ofgpu::wallfunctions::{
+        darcy_friction_factor, gnielinski_f, gnielinski_nu, gnielinski_nu_at_f, wall_shear,
+        u_tau_of, WallShearForm,
+    };
+
+    // The gate cases' own block (SPEC-LIT §34): H = 0.04 m across, hot walls
+    // at ymin/ymax, `empty` front and back so no third pair of walls exists.
+    let h: Scalar = 0.04;
+    let (g_x, nu, rho): (Scalar, Scalar, Scalar) = (3.9, 1.5e-5, 1.2);
+
+    let mut ratios: Vec<(usize, Scalar)> = Vec::new();
+    for ny in [20usize, 200] {
+        let spec = MeshSpec {
+            n: [4, ny, 1],
+            l: [0.08, h, 0.04],
+            two_d: true,
+            ..Default::default()
+        };
+        let m = make_mesh(&scratch_dir("friction"), &spec)?;
+        let nbf = m.n_boundary_faces;
+
+        // Plane Poiseuille, the analytic solution of this exact forcing:
+        // u(y) = (g_x/(2 nu)) y (H - y), so U_b = g_x H^2/(12 nu).
+        let u_i: Vec<Vec3> = (0..m.n_cells)
+            .map(|cell| {
+                let y = m.c[cell].y;
+                Vec3::new(g_x / (2.0 * nu) * y * (h - y), 0.0, 0.0)
+            })
+            .collect();
+        let ws = wall_shear(
+            &m,
+            Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &vec![Vec3::ZERO; nbf],
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            nu,
+            0.09,
+        );
+
+        // The force balance, from the mesh's own volume and wall area - the
+        // same two reductions `ofgpu-fire` does at the end of a run.
+        let volume: Scalar = m.v.iter().sum();
+        let tau_force = g_x * rho * volume / ws.area;
+
+        if ny == 20 {
+            c.check(
+                "wall_shear finds every wall face of the gate cases' own block",
+                if ws.n_faces == 2 * 4 { 0.0 } else { 1.0 },
+                0.0,
+            );
+            c.check(
+                "D_h = 4V/A_wall reduces to 2H on a plane channel (SPEC-LIT 32.2/32.5)",
+                ((4.0 * volume / ws.area) - 2.0 * h).abs() / (2.0 * h),
+                1e-12,
+            );
+            c.require(
+                "a lowRe wall takes the viscous tau_w form (SPEC-LIT 32.5.1)",
+                ws.forms() == vec![WallShearForm::Viscous],
+            );
+            // Shah & London's parallel-plate `f Re = 96`, from the ANALYTIC
+            // wall shear (the force balance) rather than the discrete one -
+            // the closed form is what is being checked here, not the mesh.
+            let u_b = g_x * h * h / (12.0 * nu);
+            let re = u_b * (2.0 * h) / nu;
+            let f = darcy_friction_factor(tau_force, rho, u_b);
+            c.note(&format!(
+                "laminar plane Poiseuille: U_b = {} m/s, Re_Dh = {}, f = {}, f*Re = {}",
+                sci(u_b, 4),
+                sci(re, 4),
+                sci(f, 4),
+                sci(f * re, 6),
+            ));
+            c.check(
+                "darcy_friction_factor gives Shah & London's f*Re = 96 for parallel plates",
+                (f * re - 96.0).abs() / 96.0,
+                1e-12,
+            );
+        }
+
+        ratios.push((ny, ws.tau_w / tau_force));
+
+        // SPEC-LIT §32.5.2's CORRECTED cross-check quantity, live on the same
+        // field: `drag_kin` is `sum nu_eff |dU_par| deltaCoeffs |Sf|`, the
+        // term the momentum matrix itself carries, and this crate's momentum
+        // equation has no density in it. So on a uniform-density field it
+        // must be `drag / rho` exactly, and it must balance the KINEMATIC
+        // body force `g_x V` up to the same one-cell error - with no density
+        // anywhere in either statement. This is the identity that closed to
+        // `+0.001 %` on the real wall-function channel run (§32.5.3).
+        c.check(
+            &format!(
+                "drag_kin = drag/rho exactly at uniform density, ny = {ny} (SPEC-LIT 32.5.2)"
+            ),
+            (ws.drag_kin - ws.drag / rho).abs() / (ws.drag / rho).abs(),
+            1e-14,
+        );
+        c.check(
+            &format!(
+                "drag_kin balances the KINEMATIC body force g_x V, ny = {ny} (SPEC-LIT 32.5.2)"
+            ),
+            (ws.drag_kin / (g_x * volume) - (1.0 - 1.0 / (2.0 * ny as Scalar))).abs(),
+            1e-12,
+        );
+    }
+
+    // The one-cell gradient of a parabola under-reads the wall shear by
+    // exactly dy/(2H): u(dy/2) = (g_x/(2 nu))(dy/2)(H - dy/2), and dividing
+    // by dy/2 leaves (g_x/(2 nu))(H - dy/2) against the analytic
+    // (g_x/(2 nu)) H.
+    for (ny, ratio) in &ratios {
+        let want = 1.0 - 1.0 / (2.0 * *ny as Scalar);
+        c.check(
+            &format!(
+                "measured tau_w / force balance = 1 - 1/(2 ny) exactly, ny = {ny} (SPEC-LIT 32.5.2)"
+            ),
+            (ratio - want).abs() / want,
+            1e-12,
+        );
+    }
+    c.note(&format!(
+        "the measurement approaches the force balance first order in the wall cell: \
+         {:+.2}% at ny = {}, {:+.2}% at ny = {}",
+        (ratios[0].1 - 1.0) * 100.0,
+        ratios[0].0,
+        (ratios[1].1 - 1.0) * 100.0,
+        ratios[1].0,
+    ));
+
+    // A wall-function face takes the wall function's OWN tau_w = rho u_tau^2
+    // instead - SPEC-LIT §32.5.1's second form, on the same block.
+    {
+        let spec = MeshSpec {
+            n: [4, 6, 1],
+            l: [0.08, h, 0.04],
+            two_d: true,
+            ..Default::default()
+        };
+        let m = make_mesh(&scratch_dir("frictionWf"), &spec)?;
+        let nbf = m.n_boundary_faces;
+        let (k0, cmu): (Scalar, Scalar) = (0.35, 0.09);
+        let ws = wall_shear(
+            &m,
+            Vec3::new(1.0, 0.0, 0.0),
+            &vec![Vec3::new(5.0, 0.0, 0.0); m.n_cells],
+            &vec![Vec3::ZERO; nbf],
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            Some(&vec![k0; m.n_cells]),
+            &vec![true; nbf],
+            nu,
+            cmu,
+        );
+        let u_tau = u_tau_of(k0, cmu);
+        c.require(
+            "a wall-function face takes the wall-function tau_w form (SPEC-LIT 32.5.1)",
+            ws.forms() == vec![WallShearForm::WallFunctionK],
+        );
+        c.check(
+            "wall-function tau_w is rho (Cmu^1/4 sqrt(k_P))^2 (SPEC-LIT 29.3/32.5.1)",
+            (ws.tau_w_mag - rho * u_tau * u_tau).abs() / (rho * u_tau * u_tau),
+            1e-12,
+        );
+        c.require(
+            "the unused viscous form is reported alongside it, not averaged in",
+            ws.by_patch.iter().all(|r| r.tau_w_other.is_some()),
+        );
+
+        // SPEC-LIT §32.5.1's selector is NOT "does this face carry a nut wall
+        // function": a VELOCITY-based one (§15.1 `nutU`, §30.1
+        // Werner-Wengle) must fall to the viscous form, because for those the
+        // viscous form IS their own tau_w and `Cmu^1/4 sqrt(k_P)` would be a
+        // different model's friction velocity. Same mesh, same k field, flag
+        // cleared - the form must change with the flag and nothing else.
+        let ws_u = wall_shear(
+            &m,
+            Vec3::new(1.0, 0.0, 0.0),
+            &vec![Vec3::new(5.0, 0.0, 0.0); m.n_cells],
+            &vec![Vec3::ZERO; nbf],
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            Some(&vec![k0; m.n_cells]),
+            &vec![false; nbf],
+            nu,
+            cmu,
+        );
+        c.require(
+            "a velocity-based wall function falls to the viscous form (SPEC-LIT 32.5.1)",
+            ws_u.forms() == vec![WallShearForm::Viscous],
+        );
+        c.check(
+            "and the k-based value is then the CROSS-CHECK, not the reported one",
+            (ws_u.by_patch[0].tau_w_other.expect("k is available") - rho * u_tau * u_tau).abs()
+                / (rho * u_tau * u_tau),
+            1e-12,
+        );
+    }
+
+    // Gnielinski at a supplied `f` (SPEC-LIT §32.5): it must reduce to the
+    // published pipe form at the Petukhov `f`, and it must MOVE with `f`, or
+    // §32.4's two verdicts would be the same verdict under two names.
+    {
+        let (re, pr): (Scalar, Scalar) = (25_834.0, 0.71);
+        let f_pipe = gnielinski_f(re);
+        c.check(
+            "gnielinski_nu_at_f at the Petukhov f reproduces gnielinski_nu exactly",
+            (gnielinski_nu_at_f(f_pipe, re, pr) - gnielinski_nu(re, pr)).abs(),
+            0.0,
+        );
+        let hi = gnielinski_nu_at_f(f_pipe * 1.08, re, pr);
+        let lo = gnielinski_nu_at_f(f_pipe, re, pr);
+        c.note(&format!(
+            "Re = {}: Petukhov pipe f = {} gives Nu_Gn = {}; an 8% higher (plane-channel) f \
+             gives {} - {:+.1}%, comparable with Gnielinski's whole +-10% band",
+            sci(re, 4),
+            sci(f_pipe, 4),
+            sci(lo, 4),
+            sci(hi, 4),
+            (hi / lo - 1.0) * 100.0,
+        ));
+        c.require(
+            "Nu_Gn rises with f, so 'at the realised f' is a DIFFERENT verdict (SPEC-LIT 32.4)",
+            hi > lo * 1.05,
+        );
+    }
+
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §32.4/§32.5: the two channel legs, judged both ways
+// ==========================================================================
+//
+// `cases/channelPeriodicFluxWF.jsonc` and `channelPeriodicFluxLowRe.jsonc`
+// differ ONLY in mesh and wall treatment (SPEC-LIT §34), so every case input
+// below is common to both and is read off the case files - not off a run.
+
+/// `sources[].bodyForce`, m/s² per unit mass.
+const CHANNEL_G_X: Scalar = 3.9;
+/// `0.08 x 0.04 x 0.04 m`.
+const CHANNEL_VOLUME: Scalar = 1.28e-4;
+/// The two hot walls, `0.08 x 0.04 m` each. Front and back are `empty`
+/// (§34.1) and the streamwise pair is cyclic, so these are the only walls.
+const CHANNEL_WALL_AREA: Scalar = 6.4e-3;
+const CHANNEL_NU: Scalar = 1.5e-5;
+const CHANNEL_PR: Scalar = 0.71;
+const CHANNEL_CP: Scalar = 1006.0;
+/// The `sources[].thermostat` both cases carry (SPEC-LIT §35.1).
+const CHANNEL_T_TARGET: Scalar = 293.15;
+const CHANNEL_THERMOSTAT_TAU: Scalar = 0.02;
+
+/// One channel leg, judged under BOTH of SPEC-LIT §32.4's verdicts.
+struct LegVerdict {
+    d_h: Scalar,
+    re: Scalar,
+    nu_measured: Scalar,
+    /// Volume-mean `T`, from the thermostat's own steady law (§35.1):
+    /// `P = -rho cp (T_mean - T_target) V/tau`.
+    t_mean: Scalar,
+    rho_b: Scalar,
+    rho_bar: Scalar,
+    /// The traction `ofgpu-fire` MEASURED at the wall, in whichever of
+    /// §32.5.1's two forms is correct for this leg's own wall treatment
+    /// (`rho u_tau^2` on the wall-function leg, viscous on the resolved one).
+    tau_w_measured: Scalar,
+    f_measured: Scalar,
+    /// The VISCOUS form on the same faces - the term the momentum matrix
+    /// itself carries, §32.5.2. Equal to [`Self::tau_w_measured`] on a
+    /// resolved leg; the second, different number on a wall-function one.
+    tau_w_viscous: Scalar,
+    f_viscous: Scalar,
+    /// `g_x rho_bar V / A_wall` - the body-force INFERENCE this project
+    /// quoted before either leg was rerun with the measurement. SUPERSEDED
+    /// and kept only so the size of its error is on the record.
+    tau_w_inferred: Scalar,
+    f_inferred: Scalar,
+    /// `sum_walls nu_eff |dU_par| deltaCoeffs |Sf|`, m^4/s^2, as printed by
+    /// the run - the kinematic wall sink §32.5.2's corrected cross-check
+    /// compares against `(g . e_hat) V`.
+    kin_sink: Scalar,
+    /// `|thermostat power| / (q_w A_wall) - 1` - the leg's own energy-balance
+    /// gap, which §32.4 requires to be quoted as an uncertainty on `Nu`.
+    energy_gap: Scalar,
+    f_pipe: Scalar,
+    nu_gn_pipe: Scalar,
+    nu_gn_realised: Scalar,
+    nu_gn_viscous: Scalar,
+    nu_db: Scalar,
+}
+
+/// `(g . e_hat) V`, m^4/s^2 - the body force in the KINEMATIC units this
+/// crate's momentum equation is written in (SPEC-LIT §32.5.2's correction).
+const CHANNEL_KIN_FORCE: Scalar = CHANNEL_G_X * CHANNEL_VOLUME;
+
+/// Everything §32.4's table needs for one leg, from its recorded measurement
+/// plus the case inputs above - no constant here that is not either recorded
+/// in `docs/07-fire-solver.md` §1.1 or written in the case file.
+///
+/// `rho_b` is recovered from the recorded `k_thermal = rho cp nu/Pr` rather
+/// than recomputed from `p0/(R_s T_b)`, so the density in the friction factor
+/// is BY CONSTRUCTION the same one the recorded Nusselt number was built
+/// with; `rho_bar` follows from it by the ideal-gas law at fixed `p0`,
+/// `rho_bar/rho_b = T_b/T_mean`.
+#[allow(clippy::too_many_arguments)]
+fn channel_leg_verdict(
+    q_w: Scalar,
+    t_w: Scalar,
+    t_b: Scalar,
+    u_b: Scalar,
+    k_thermal: Scalar,
+    thermostat_power: Scalar,
+    tau_w_measured: Scalar,
+    tau_w_viscous: Scalar,
+    kin_sink: Scalar,
+) -> LegVerdict {
+    use ofgpu::wallfunctions::{
+        darcy_friction_factor, dittus_boelter_nu, gnielinski_f, gnielinski_nu_at_f,
+    };
+
+    let d_h = 4.0 * CHANNEL_VOLUME / CHANNEL_WALL_AREA;
+    let re = u_b * d_h / CHANNEL_NU;
+    let nu_measured = q_w * d_h / (k_thermal * (t_w - t_b));
+
+    let rho_b = k_thermal * CHANNEL_PR / (CHANNEL_CP * CHANNEL_NU);
+    // SPEC-LIT §35.1's steady law, inverted for the volume mean the
+    // controller settled at. The gain is rho(T_target) cp, and rho(T_target)
+    // = rho_b T_b/T_target at fixed p0.
+    let rho_cp = rho_b * (t_b / CHANNEL_T_TARGET) * CHANNEL_CP;
+    let t_mean = CHANNEL_T_TARGET
+        + thermostat_power.abs() * CHANNEL_THERMOSTAT_TAU / (rho_cp * CHANNEL_VOLUME);
+    let rho_bar = rho_b * t_b / t_mean;
+
+    let tau_w_inferred = CHANNEL_G_X * rho_bar * CHANNEL_VOLUME / CHANNEL_WALL_AREA;
+    let f_inferred = darcy_friction_factor(tau_w_inferred, rho_b, u_b);
+    let f_pipe = gnielinski_f(re);
+
+    let f_measured = darcy_friction_factor(tau_w_measured, rho_b, u_b);
+    let f_viscous = darcy_friction_factor(tau_w_viscous, rho_b, u_b);
+
+    LegVerdict {
+        d_h,
+        re,
+        nu_measured,
+        t_mean,
+        rho_b,
+        rho_bar,
+        tau_w_measured,
+        f_measured,
+        tau_w_viscous,
+        f_viscous,
+        tau_w_inferred,
+        f_inferred,
+        kin_sink,
+        energy_gap: thermostat_power.abs() / (q_w * CHANNEL_WALL_AREA) - 1.0,
+        f_pipe,
+        nu_gn_pipe: gnielinski_nu_at_f(f_pipe, re, CHANNEL_PR),
+        // SPEC-LIT §32.4's Reynolds-analogy verdict, at the f the wall
+        // actually MEASURES - not at the body-force inference this used to
+        // be taken at, which was wrong on both legs (§32.5.3).
+        nu_gn_realised: gnielinski_nu_at_f(f_measured, re, CHANNEL_PR),
+        nu_gn_viscous: gnielinski_nu_at_f(f_viscous, re, CHANNEL_PR),
+        nu_db: dittus_boelter_nu(re, CHANNEL_PR),
+    }
+}
+
+/// Print one leg's two verdicts, in the form SPEC-LIT §32.4 now requires:
+/// every band statement names the `f` it was judged at.
+fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
+    c.note(&format!(
+        "{leg}: D_h = {} m, Re = {}, Nu_measured = {}, T_mean (from the thermostat's own law) \
+         = {} K, rho_b = {} kg/m3, rho_bar = {} kg/m3",
+        sci(v.d_h, 4),
+        sci(v.re, 5),
+        sci(v.nu_measured, 4),
+        sci(v.t_mean, 6),
+        sci(v.rho_b, 5),
+        sci(v.rho_bar, 5),
+    ));
+    c.note(&format!(
+        "{leg}: f MEASURED at the wall = {} (tau_w = {} Pa) | viscous form on the same faces = \
+         {} (tau_w = {} Pa) | Petukhov smooth-PIPE f = {} - the measurement is {:+.1}% of it",
+        sci(v.f_measured, 4),
+        sci(v.tau_w_measured, 4),
+        sci(v.f_viscous, 4),
+        sci(v.tau_w_viscous, 4),
+        sci(v.f_pipe, 4),
+        (v.f_measured / v.f_pipe - 1.0) * 100.0,
+    ));
+    c.note(&format!(
+        "{leg}: the SUPERSEDED body-force inference was f = {} (tau_w = {} Pa) - {:+.1}% of the \
+         measurement. Every Reynolds-analogy verdict once quoted at it was too generous \
+         (SPEC-LIT 32.5.3)",
+        sci(v.f_inferred, 4),
+        sci(v.tau_w_inferred, 4),
+        (v.f_inferred / v.f_measured - 1.0) * 100.0,
+    ));
+    c.note(&format!(
+        "{leg}: kinematic force balance (S32.5.2's correction): wall sink {} m4/s2 against \
+         (g.e_hat) V = {} m4/s2 - {:+.3}%",
+        sci(v.kin_sink, 5),
+        sci(CHANNEL_KIN_FORCE, 5),
+        (v.kin_sink / CHANNEL_KIN_FORCE - 1.0) * 100.0,
+    ));
+    c.note(&format!(
+        "{leg}: ABSOLUTE-PREDICTION verdict (Gnielinski at the Petukhov pipe f): Nu_Gn = {} \
+         ({:+.1}%) | REYNOLDS-ANALOGY verdict (Gnielinski at the MEASURED f): Nu_Gn = {} \
+         ({:+.1}%), and at the viscous f {} ({:+.1}%) | Dittus-Boelter: Nu_DB = {} ({:+.1}%) \
+         | energy-balance uncertainty on Nu: +-{:.1}% (S32.4)",
+        sci(v.nu_gn_pipe, 4),
+        (v.nu_measured / v.nu_gn_pipe - 1.0) * 100.0,
+        sci(v.nu_gn_realised, 4),
+        (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
+        sci(v.nu_gn_viscous, 4),
+        (v.nu_measured / v.nu_gn_viscous - 1.0) * 100.0,
+        sci(v.nu_db, 4),
+        (v.nu_measured / v.nu_db - 1.0) * 100.0,
+        v.energy_gap.abs() * 100.0,
+    ));
+}
+/// The WALL-FUNCTION leg's recorded measurement -
+/// `cases/channelPeriodicFluxWF.jsonc`, `docs/07-fire-solver.md` §1.1, a run
+/// to `|U|` residual 1.4e-10 that is bit-identical from 5 000 through 40 000
+/// iterations. Every number here is a printed output of that run; nothing is
+/// derived.
+fn wall_function_leg() -> LegVerdict {
+    channel_leg_verdict(
+        500.0,          // q_w, W/m2, imposed on both hot walls
+        317.567,        // T_w, K, diagnosed by the thermal wall function
+        293.256,        // T_b, K, mixed-mean
+        5.366_59,       // U_b, m/s
+        0.025_582_058,  // k_thermal = rho(T_b) cp nu/Pr
+        -3.203_35,      // thermostat power, W (the sink)
+        0.074_737_2,    // tau_w MEASURED, Pa - S32.5.1's wall-function form here
+        0.086_491_1,    // the viscous form on the same faces, Pa
+        4.986_38e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
+    )
+}
+
+/// The RESOLVED leg's recorded measurement -
+/// `cases/channelPeriodicFluxLowRe.jsonc`, `docs/07-fire-solver.md` §1.1, the
+/// state both initial temperatures (293.15 K and 400 K) converge to, every
+/// digit identical from either start (SPEC-LIT §35.2's regression).
+fn resolved_leg() -> LegVerdict {
+    channel_leg_verdict(
+        500.0,          // q_w, W/m2
+        314.909,        // T_w, K
+        292.759,        // T_b, K
+        4.835_70,       // U_b, m/s
+        0.025_625_487,  // k_thermal = rho(T_b) cp nu/Pr
+        -3.304_25,      // thermostat power, W
+        0.084_123_8,    // tau_w MEASURED, Pa - the viscous form on a lowRe wall
+        0.084_123_8,    // ... which IS the viscous form, so the two coincide
+        4.802_96e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
+    )
+}
+
+/// The DECISIVE EXPERIMENT of SPEC-LIT §35.3.2, replayed: the same two cases,
+/// the same 40 000 iterations, `"weighting"` the only token that differs.
+/// `(Nu, T_w - T_b)` for each of the four runs, exactly as `ofgpu-fire`
+/// printed them. The `uniform` pair reproduce, to the last printed digit, the
+/// numbers `docs/07-fire-solver.md` §1.1 recorded before §35.3 existed - which
+/// is what makes the comparison controlled rather than two different states.
+const WEIGHTING_EXPERIMENT: [(&str, Scalar, Scalar, Scalar, Scalar); 2] = [
+    // leg,             Nu uniform, Nu massFlux, dT uniform, dT massFlux
+    ("resolved", 73.4006, 70.4707, 21.2703, 22.1503),
+    ("wall function", 65.2386, 64.3168, 23.9696, 24.3109),
+];
+
 /// SPEC-LIT §32.4's VERDICT, LOCKED AGAINST REGRESSION - this REPLAYS A
 /// RECORDED MEASUREMENT, it does not run the case. The numbers below are the
 /// wall-function leg of the redesigned gate, `cases/channelPeriodicFluxWF.jsonc`,
@@ -3990,58 +4529,66 @@ fn check_nu_correlations(c: &mut Checks) {
 /// outside the correlations' own stated bands, this fails on every commit,
 /// not only on the next multi-second re-run someone remembers to do by hand.
 fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
-    use ofgpu::wallfunctions::{dittus_boelter_nu, gnielinski_nu};
+    let v = wall_function_leg();
+    note_leg_verdict(c, "wall-function leg", &v);
 
-    // ---- the recorded measurement (docs/07-fire-solver.md S1.1) -----------
-    let q_w: Scalar = 500.0; // W/m2, imposed on both hot walls
-    let delta_t: Scalar = 317.253 - 293.283; // K, T_w - T_b, the model's OWN prediction
-    let u_b: Scalar = 5.3696; // m/s, bulk velocity
-    let nu: Scalar = 1.5e-5; // m2/s, the case's constant molecular nu
-    let pr: Scalar = 0.71;
-    let d_h: Scalar = 0.08; // m, = 2H for this plane channel (SPEC-LIT S32.2/S34)
-    // rho(T_b) cp nu / Pr, T_b = 293.283 K, rho = p0/(R_s T_b) - unchanged
-    // formula, recomputed at the SPEC-LIT S35 measurement's own T_b.
-    let k_thermal: Scalar = 0.025_579_7;
-
-    let re = u_b * d_h / nu;
-    let nu_measured = q_w * d_h / (k_thermal * delta_t);
-
-    let nu_db = dittus_boelter_nu(re, pr);
-    let nu_gn = gnielinski_nu(re, pr);
-
-    c.note(&format!(
-        "Re = {} (plane-channel D_h = 2H = 0.08 m), Nu_measured = {}, Nu_DB = {}, Nu_Gn = {}",
-        sci(re, 4),
-        sci(nu_measured, 4),
-        sci(nu_db, 4),
-        sci(nu_gn, 4)
-    ));
-    c.note(&format!(
-        "Nu_measured / Nu_DB = {} ({:+.1}%), Nu_measured / Nu_Gn = {} ({:+.1}%)",
-        sci(nu_measured / nu_db, 4),
-        (nu_measured / nu_db - 1.0) * 100.0,
-        sci(nu_measured / nu_gn, 4),
-        (nu_measured / nu_gn - 1.0) * 100.0,
-    ));
-
-    // Gnielinski is quoted at +-10%; the measurement replayed here sits at
-    // about -4.5%.
+    // SPEC-LIT §35.2's energy balance for this leg: the thermostat's power IS
+    // the wall heat. At the `uniform` default it closed to 2.8e-7 W; the
+    // shipped `massFlux` configuration leaves 0.105 %, which §32.4 then makes
+    // this leg's own uncertainty on `Nu` (and it is far smaller than the band
+    // margin below, which is why the verdict is not undecided here).
     c.check(
-        "wall-function Nu within Gnielinski's own +-10% band (replayed measurement, S32.4)",
-        (nu_measured - nu_gn).abs() / nu_gn,
+        "WF leg: thermostat power = q_w A_wall to better than 0.2% (S35.2)",
+        v.energy_gap.abs(),
+        2e-3,
+    );
+
+    // SPEC-LIT §32.5.2's force balance, in the kinematic units the momentum
+    // equation is actually written in. This leg is where that identity was
+    // MEASURED - `+0.001 %` at the `uniform` default, `-0.113 %` here - and
+    // it is what says `wall_shear`'s viscous form is the discrete momentum
+    // sink on a real flow and not only on the analytic field
+    // [`check_realised_friction_factor`] manufactures.
+    c.check(
+        "WF leg: kinematic wall sink = (g.e_hat) V to better than 0.2% (S32.5.2)",
+        (v.kin_sink - CHANNEL_KIN_FORCE).abs() / CHANNEL_KIN_FORCE,
+        2e-3,
+    );
+
+    // SPEC-LIT §32.4, verdict 1: the ABSOLUTE-PREDICTION question, Gnielinski
+    // at the Petukhov smooth-PIPE `f`. Quoted at +-10%; this leg sits at
+    // about -5.8%.
+    c.check(
+        "WF Nu in Gnielinski's +-10% band at the PIPE f (absolute prediction, S32.4)",
+        (v.nu_measured - v.nu_gn_pipe).abs() / v.nu_gn_pipe,
         0.10,
     );
-    // Dittus-Boelter is quoted at +-20-25%; the measurement replayed here
-    // sits at about -11.5%.
+    // Verdict 2, the REYNOLDS-ANALOGY question, is NOT asserted any more, and
+    // the reason is the whole point of §32.5.3: it used to be checked at an
+    // `f` INFERRED from the body force, it passed at +6.4%, and the inference
+    // was 25% high. At the `f` this leg's wall actually measures it is +33.8%
+    // - outside the band - and at the viscous form of the same measurement
+    // +14.4%, also outside. Reported, not hidden, and not asserted as a pass
+    // it is not.
+    c.note(&format!(
+        "OPEN (Reynolds analogy): WF Nu is {:+.1}% of Gnielinski at the MEASURED f and {:+.1}% \
+         at the viscous form of it - OUTSIDE the +-10% band on both. The +6.4% this check used \
+         to assert was taken at an INFERRED f that was 25% high (SPEC-LIT 32.5.3)",
+        (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
+        (v.nu_measured / v.nu_gn_viscous - 1.0) * 100.0,
+    ));
+    // Dittus-Boelter takes no `f` argument, so it has ONE verdict only, and
+    // it is an absolute-prediction one. Quoted at +-20-25%; this leg sits at
+    // about -11.5%.
     c.check(
         "wall-function Nu within Dittus-Boelter's own +-25% band (replayed measurement, S32.4)",
-        (nu_measured - nu_db).abs() / nu_db,
+        (v.nu_measured - v.nu_db).abs() / v.nu_db,
         0.25,
     );
 
     // The y+ this measurement was taken at - SPEC-LIT §32.4's own "both
     // meshes land in their regime" row, for the wall-function leg.
-    let y_plus_mean: Scalar = 57.6931;
+    let y_plus_mean: Scalar = 57.6571;
     c.check(
         "wall-function mesh's own y+ mean sits inside the 30-60 target (replayed measurement)",
         if (30.0..=60.0).contains(&y_plus_mean) { 0.0 } else { 1.0 },
@@ -4133,18 +4680,18 @@ fn check_launder_sharma_damping_functions(c: &mut Checks) {
 /// `ofgpu-fire`'s own end-of-run report (`ofgpu::models::mesh_resolution_report`,
 /// over a REAL Poisson wall distance and the converged `k` field, not the
 /// duct version's hot-wall-only approximation) measured
-/// `max_first_cell_y_plus = 0.00174585` and `cells_below_y_plus_20 = 192` of
-/// 400 cells at 40 000 iterations, bit-identical whether the run started at
-/// T0 = 293.15 K or T0 = 400 K (SPEC-LIT §35.2's own regression) - both
-/// numbers are fully converged and stable well before that, so replaying
-/// them here is not vulnerable to the (now fixed - see
-/// [`check_resolved_leg_gate_verdict_replay`]) energy-equation drift SPEC-LIT
-/// §34 first reported this replay against. The last three digits moved by
-/// 0.00174716 -> 0.00174585 (0.03%) from the pre-thermostat measurement -
-/// the thermostat's own converged sink (-3.29 W) is very slightly stronger
-/// than the fixed `-heaterPower -3.2 W` it replaces (SPEC-LIT §35.2's own
-/// energy-balance gap, `docs/07-fire-solver.md` §1.1), which couples back
-/// into `U_b` through the low-Mach `rho(T)` term at exactly this scale.
+/// `max_first_cell_y_plus = 0.00174051` and `cells_below_y_plus_20 = 192` of
+/// 400 cells at 40 000 iterations. The cell count is unmoved by every change
+/// this measurement has been through; the `y+` itself has drifted only in its
+/// last three digits, 0.00174716 (pre-thermostat) -> 0.00174585 (thermostat,
+/// uniform sink) -> 0.00174051 (thermostat, `massFlux` weighting, the shipped
+/// case), each step being the converged sink getting very slightly stronger
+/// and coupling back into `U_b` through the low-Mach `rho(T)` term at exactly
+/// that scale. Both numbers are fully converged and stable well before 40 000
+/// and are bit-identical from either initial temperature (SPEC-LIT §35.2's
+/// own regression), so replaying them here is not vulnerable to the (now
+/// fixed - see [`check_resolved_leg_gate_verdict_replay`]) energy-equation
+/// drift SPEC-LIT §34 first reported this replay against.
 ///
 /// This locks §33.2's own pass/fail rule - first-cell y+ < 1, at least 10
 /// cells at y+ < 20 - against regression on every commit.
@@ -4152,7 +4699,7 @@ fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
     use ofgpu::models::MeshResolutionReport;
 
     let report = MeshResolutionReport {
-        max_first_cell_y_plus: 0.001_745_85,
+        max_first_cell_y_plus: 0.001_740_51,
         cells_below_y_plus_20: 192,
         n_wall_faces: 16,
     };
@@ -4286,53 +4833,140 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
 /// number is visible without failing the whole suite over an already-known,
 /// reported gap.
 fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
-    use ofgpu::wallfunctions::{dittus_boelter_nu, gnielinski_nu};
+    let v = resolved_leg();
+    let w = wall_function_leg();
+    note_leg_verdict(c, "resolved leg", &v);
 
-    // ---- the recorded measurement (docs/07-fire-solver.md S1.1) -----------
-    let q_w: Scalar = 500.0; // W/m2, imposed on both hot walls
-    let delta_t: Scalar = 314.087 - 292.817; // K, T_w - T_b
-    let u_b: Scalar = 4.843_88; // m/s, bulk velocity
-    let nu: Scalar = 1.5e-5;
-    let pr: Scalar = 0.71;
-    let d_h: Scalar = 0.08; // m, = 2H (SPEC-LIT S32.2/S34)
-    // rho(T_b) cp nu / Pr at T_b = 292.817 K.
-    let k_thermal: Scalar = 0.025_620_4;
-
-    let re = u_b * d_h / nu;
-    let nu_measured = q_w * d_h / (k_thermal * delta_t);
-    let nu_db = dittus_boelter_nu(re, pr);
-    let nu_gn = gnielinski_nu(re, pr);
-
-    c.note(&format!(
-        "resolved leg: Re = {} (D_h = 2H = 0.08 m), Nu_measured = {}, Nu_DB = {}, Nu_Gn = {}",
-        sci(re, 4),
-        sci(nu_measured, 4),
-        sci(nu_db, 4),
-        sci(nu_gn, 4),
-    ));
-    c.note(&format!(
-        "Nu_measured / Nu_DB = {} ({:+.1}%), Nu_measured / Nu_Gn = {} ({:+.1}%) - two-mesh \
-         ratio Nu_resolved / Nu_wallFunction = {}",
-        sci(nu_measured / nu_db, 4),
-        (nu_measured / nu_db - 1.0) * 100.0,
-        sci(nu_measured / nu_gn, 4),
-        (nu_measured / nu_gn - 1.0) * 100.0,
-        sci(nu_measured / 65.237_372, 4),
-    ));
+    // The derivation of `T_mean` from the thermostat's own steady law is
+    // checked against the value `docs/07-fire-solver.md` §1.1 RECORDS for
+    // this leg (293.574 K, identical from either initial temperature). That
+    // is what licenses using the same derivation on the wall-function leg,
+    // whose `T_mean` is not separately recorded anywhere.
+    c.check(
+        "T_mean from the thermostat law matches the recorded 293.576 K (S35.1/S35.2)",
+        (v.t_mean - 293.576).abs(),
+        5e-3,
+    );
 
     c.check(
         "resolved leg Nu within Dittus-Boelter's own +-25% band (replayed measurement, S32.4)",
-        (nu_measured - nu_db).abs() / nu_db,
+        (v.nu_measured - v.nu_db).abs() / v.nu_db,
         0.25,
     );
-    // NOT asserted with c.check: this is honestly outside the band (+16.3%
-    // against +-10%) and is reported, not hidden - SPEC-LIT §32.4's OWN
-    // point about what a real finding looks like.
+
+    // SPEC-LIT §35.2's energy balance does NOT close on this leg, and §32.4
+    // makes that gap this leg's own uncertainty on `Nu`. Reported, never
+    // asserted, and never dropped from a band statement.
     c.note(&format!(
-        "OPEN: resolved leg Nu is {:+.1}% of Gnielinski's own +-10% band - the gate does NOT \
-         close on this leg under SPEC-LIT 32.4's rule (both correlations, both meshes); see \
-         docs/07-fire-solver.md S1.1 for what this now implicates",
-        (nu_measured / nu_gn - 1.0) * 100.0,
+        "resolved leg energy balance (S35.2): thermostat power 3.30425 W against q_w A_wall = \
+         {} W - a {:+.2}% gap. S32.4: that is +-{:.2}% of uncertainty ON Nu, and it is quoted \
+         with every band statement below",
+        sci(500.0 * CHANNEL_WALL_AREA, 4),
+        v.energy_gap * 100.0,
+        v.energy_gap.abs() * 100.0,
+    ));
+    c.note(&format!(
+        "resolved leg force balance (S32.5.2): kinematic wall sink {} m4/s2 against (g.e_hat) \
+         V = {} m4/s2 - {:+.2}%, on a run whose |U| residual is 2.8e-12. NOT a convergence \
+         gap, and NOT the mesh either: the same mesh with the heat removed closes it to \
+         -0.00% (S32.5.3's control)",
+        sci(v.kin_sink, 5),
+        sci(CHANNEL_KIN_FORCE, 5),
+        (v.kin_sink / CHANNEL_KIN_FORCE - 1.0) * 100.0,
+    ));
+
+    // SPEC-LIT §32.4, verdict 1 - the ABSOLUTE-PREDICTION question. NOT
+    // asserted with `c.check`: this is honestly outside the band (+11.8%
+    // against +-10%) and is reported, not hidden - §32.4's OWN point about
+    // what a real finding looks like. The mass-flux weighting of §35.3 moved
+    // it from +16.3%, so a third of the old excess was the thermostat's own
+    // distribution defect and the rest is not.
+    c.note(&format!(
+        "OPEN (absolute prediction): resolved leg Nu is {:+.1}% of Gnielinski at the Petukhov \
+         smooth-PIPE f (was +16.3% with the uniform thermostat sink) - outside its own +-10% \
+         band, though by less than the leg's own {:.2}% energy-balance uncertainty is wide, so \
+         the gate does NOT close and the miss is not decisive either (SPEC-LIT 32.4)",
+        (v.nu_measured / v.nu_gn_pipe - 1.0) * 100.0,
+        v.energy_gap.abs() * 100.0,
+    ));
+
+    // Verdict 2 - the REYNOLDS-ANALOGY question, at this leg's own friction
+    // factor. It used to be asserted as a pass at +6.8%; that rested on an
+    // `f` inferred from the body force, which the direct measurement then
+    // showed to be 11% high. At the measured `f` it is +15.2% - outside.
+    c.note(&format!(
+        "OPEN (Reynolds analogy): resolved leg Nu is {:+.1}% of Gnielinski at the MEASURED f \
+         = {} - outside the +-10% band. The +6.8% once asserted here was taken at an INFERRED \
+         f of {} (SPEC-LIT 32.5.3)",
+        (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
+        sci(v.f_measured, 4),
+        sci(v.f_inferred, 4),
+    ));
+
+    // The two-mesh ratio §32.4's table asks for, and what the MEASURED
+    // friction factors say about it. Reported, not asserted: it is a
+    // decomposition through a correlation, not an independent measurement,
+    // and the two legs' `tau_w` are not even taken in the same form.
+    c.note(&format!(
+        "two-mesh ratio Nu_resolved/Nu_wallFunction = {} (was 1.125 with the uniform sink) \
+         against the ratio Gnielinski predicts from the two legs' own MEASURED viscous-form \
+         friction factors, {} - the meshes measure f = {} and {} at the SAME body force",
+        sci(v.nu_measured / w.nu_measured, 4),
+        sci(v.nu_gn_viscous / w.nu_gn_viscous, 4),
+        sci(v.f_viscous, 4),
+        sci(w.f_viscous, 4),
+    ));
+}
+
+/// SPEC-LIT §35.3.2's DECISIVE EXPERIMENT, replayed: on each mesh, the same
+/// case run twice with `"weighting"` the only difference. §35.3.2 PREDICTED,
+/// before either run, that the mass-flux weighting would widen `(T_w - T_b)`
+/// and LOWER `Nu`, and that it would do so MORE on the resolved mesh than on
+/// the wall-function one (the bias lives in the near-wall velocity deficit,
+/// which one mesh resolves and the other hides inside a wall function). This
+/// asserts exactly those three statements against the four measured numbers,
+/// so a future change that reverses the sign of the effect - or flattens the
+/// difference between the meshes - fails on the commit that makes it.
+fn check_thermostat_weighting_experiment_replay(c: &mut Checks) {
+    let mut shift = [0.0 as Scalar; 2];
+    for (i, (leg, nu_uniform, nu_massflux, dt_uniform, dt_massflux)) in
+        WEIGHTING_EXPERIMENT.iter().enumerate()
+    {
+        shift[i] = 1.0 - nu_massflux / nu_uniform;
+        c.note(&format!(
+            "{leg}: Nu {} -> {} ({:+.2}%), dT {} -> {} K ({:+.2}%) on the uniform -> massFlux \
+             thermostat weighting alone (SPEC-LIT 35.3.2)",
+            sci(*nu_uniform, 6),
+            sci(*nu_massflux, 6),
+            (nu_massflux / nu_uniform - 1.0) * 100.0,
+            sci(*dt_uniform, 6),
+            sci(*dt_massflux, 6),
+            (dt_massflux / dt_uniform - 1.0) * 100.0,
+        ));
+        c.require(
+            &format!("{leg}: massFlux weighting LOWERS Nu, as S35.3.2 predicted"),
+            nu_massflux < nu_uniform,
+        );
+        c.require(
+            &format!("{leg}: massFlux weighting WIDENS (T_w - T_b), as S35.3.2 predicted"),
+            dt_massflux > dt_uniform,
+        );
+    }
+    c.require(
+        "the shift is LARGER on the resolved mesh than on the wall-function one (S35.3.2)",
+        shift[0] > shift[1],
+    );
+    c.note(&format!(
+        "so the two-mesh ratio falls from {} to {}: this mechanism accounts for {:.3} of the \
+         0.125 excess, about {:.0}% of it, measured rather than argued",
+        sci(WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1, 4),
+        sci(WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2, 4),
+        WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1
+            - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2,
+        100.0
+            * (WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1
+                - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2)
+            / (WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1 - 1.0),
     ));
 }
 

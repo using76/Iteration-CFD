@@ -95,6 +95,112 @@
 // the molecular conductivity alone: no Jayatilleke correction is invoked, or
 // needed, because the resolved sublayer supplies its own resistance exactly
 // as SPEC-LIT S32.2 asks.
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S32.4/S32.5, WHICH FRICTION FACTOR - comments only; the
+// case itself is byte-for-byte the one every number above was measured with):
+// the "+16.3%, OUTSIDE Gnielinski's band" verdict above was taken with
+// Gnielinski evaluated at Petukhov's SMOOTH-PIPE friction factor
+// f = (0.79 ln Re - 1.64)^-2 = 0.02452. Gnielinski is explicitly a function
+// of f, and this case is a plane CHANNEL: parallel plates run a higher f
+// than a pipe at the same Re_Dh (Jones, ASME J. Fluids Eng. 98 (1976) 173).
+// S32.4 now requires every verdict to NAME the f it used, because there are
+// two of them and they are different claims:
+//
+//   * ABSOLUTE PREDICTION, at the pipe f = 0.02452: Nu_Gn = 63.10, measured
+//     73.40 is +16.3% - OUTSIDE the +-10% band. THE GATE IS STILL OPEN ON
+//     THIS VERDICT. Nothing below changes that.
+//   * REYNOLDS ANALOGY, at the f THIS LEG realises, 0.02653 (+8.2% over the
+//     pipe correlation): Nu_Gn = 68.72, measured 73.40 is +6.8% - inside the
+//     band. The WF twin lands at +6.4% on the same verdict, so BOTH legs
+//     pass it, within 0.4 points of each other.
+//
+// The Reynolds-analogy verdict is the WEAKER claim - it is handed the
+// momentum instead of predicting it - and may never be quoted as an
+// absolute-prediction pass (S32.4's own rule).
+//
+// The two legs realise f 22.7% apart at the SAME body force (U_b 4.844 vs
+// 5.370 m/s, f ~ 1/U_b^2), and Gnielinski at those two f predicts a two-mesh
+// Nu ratio of 1.121 against the measured 1.125 - so most of the 1.125 ratio
+// this header attributes to Launder-Sharma's near-wall THERMAL prediction is
+// accounted for by a MOMENTUM difference instead. Hypothesis, not finding.
+//
+// BOTH friction factors above are INFERRED from the steady force balance on
+// this file's own `bodyForce` plus the recorded U_b - not measured at the
+// wall. S32.5.1 specifies the direct measurement (wall-face viscous
+// traction, the `lowRe` form on this leg and the wall-function form on the
+// WF twin); `ofgpu-fire` now measures it, prints it next to the body-force
+// inference with their disagreement, and prints Gnielinski BOTH ways.
+// NEITHER CASE HAS BEEN RERUN WITH IT. See docs/07-fire-solver.md S1.1.
+// SUPERSEDED: both cases have since been rerun with it, and the measurement
+// retired the Reynolds-analogy verdicts above - see the S32.5.3/S35.3 block
+// at the end of this header.
+// ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S32.5.3/S35.3 - THE DECISIVE EXPERIMENT, and THIS FILE
+// CHANGED): the thermostat above now carries `"weighting": "massFlux"`. Every
+// number in the blocks above was measured with the UNIFORM sink and is kept
+// as the record; the numbers below are what this file, as it now stands,
+// produces.
+//
+// THE EXPERIMENT S35.3 EXISTS FOR, run on THIS mesh with nothing else
+// changed - the same case, 40 000 iterations, twice, with `"weighting"` the
+// only token that differs. The uniform run reproduces every recorded number
+// above to the last printed digit (T_b = 292.817 K, T_w = 314.087 K,
+// U_b = 4.84388 m/s, Nu = 73.4006, power -3.28977 W, y+ 0.00174585,
+// 192/400 cells), so this is a controlled comparison:
+//
+//              uniform      massFlux     change
+//   T_w        314.087 K    314.909 K    +0.822 K
+//   T_b        292.817 K    292.759 K    -0.058 K
+//   T_w - T_b   21.2703 K    22.1503 K   +4.14%
+//   Nu          73.4006      70.4707     -3.99%
+//   U_b          4.84388      4.8357     -0.17%
+//
+// S35.3.2's PREDICTION IS CONFIRMED, in sign and in mechanism: the uniform
+// sink over-cools the near-wall fluid, so replacing it WIDENS (T_w - T_b) and
+// LOWERS Nu. The WF twin moves only -1.41% on the same change, 2.8x less,
+// which is the other half of that prediction (the bias lives in the near-wall
+// velocity deficit, which this mesh resolves and the WF mesh hides inside a
+// wall function). Two-mesh ratio 1.125 -> 1.096: this mechanism accounts for
+// 24% of the two-mesh disagreement, measured rather than argued.
+//
+// THIS FILE AS SHIPPED (massFlux, 40 000 iterations): Re = 25,790,
+// Nu = 70.4707, y+ 0.00174, 192/400 cells at y+ < 20, |U| residual 2.8e-12,
+// thermostat power -3.30425 W against 3.2 W of wall heat (+3.26%).
+//
+// VERDICTS (S32.4 - every band statement names its f and carries this leg's
+// own energy-balance gap as an uncertainty on Nu):
+//   * ABSOLUTE PREDICTION, Gnielinski at the Petukhov smooth-PIPE
+//     f = 0.024532: Nu_Gn = 63.021, measured is +11.8% - still OUTSIDE
+//     +-10%, but the weighting took it there from +16.3%, and the +-3.26%
+//     this leg's energy imbalance puts on Nu is wider than the 1.8 points it
+//     misses by. THE GATE DOES NOT CLOSE ON THIS LEG - and for the first
+//     time the miss is not decisive either.
+//   * Dittus-Boelter 67.8262: +3.9% - inside its own +-20-25% band (it was
+//     +8.1%).
+//   * REYNOLDS ANALOGY, at the f this leg's WALL now MEASURES, 0.023870:
+//     Nu_Gn = 61.1812, measured is +15.2% - OUTSIDE. The "+6.8%, inside" this
+//     header used to report was taken at f = 0.02653, INFERRED from the body
+//     force; the inference was 11% high. The measured f is also 2.7% BELOW
+//     the smooth-pipe correlation, where Jones (1976) says parallel plates
+//     should run ABOVE it - under-predicted wall friction is now an open
+//     MOMENTUM finding of this gate in its own right.
+//
+// FORCE BALANCE (S32.5.2's correction, in KINEMATIC units): body force
+// (g.e_hat) V = 4.9920e-4 m4/s2 against a wall sink of 4.80296e-4 - -3.787%
+// (-3.461% at the uniform default), on a run converged to |U| 2.8e-12. That
+// is NOT a convergence gap, and it is NOT this mesh: rerunning THIS case with
+// the heat removed (walls zeroGradient, thermostat deleted, everything else
+// identical) closes the same balance to -0.00%. The imbalance appears only
+// when the energy equation is coupled in, and it appears beside an energy
+// imbalance of the same size - two symptoms, one defect, and S32.5.3 names a
+// mechanism for it (S3.1's bounded convection correction, whose domain
+// integral is zero only when div(phi) is) that has not yet been tested.
+//
+// See docs/07-fire-solver.md S1.1's last subsection for the full account.
+// ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
   "name": "channelPeriodicFluxLowRe",
@@ -140,7 +246,7 @@
     // T_b/T_w drifting upward without decay was exactly the symptom of the
     // free additive constant S35 diagnoses; a domain-mean thermostat is
     // what removes it.
-    { "type": "thermostat", "target": 293.15, "tau": 0.02 },
+    { "type": "thermostat", "target": 293.15, "tau": 0.02, "weighting": "massFlux" },
   ],
 
   "patches": [

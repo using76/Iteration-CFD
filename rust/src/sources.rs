@@ -12,8 +12,18 @@
 //!     `S_p <= 0`
 //!   J. C. Ward, *J. Hydraul. Div. ASCE* 90 (1964) 1-12 - the
 //!     Darcy-Forchheimer resistance of a porous medium
-//!   ofgpu `SPEC-LIT.md` §3.4 and §18. The geometric cell-set selection §18
-//!     marks *DESIGN* is ours, and so is the dictionary that expresses it.
+//!   W. M. Kays & M. E. Crawford, *Convective Heat and Mass Transfer*,
+//!     3rd ed., McGraw-Hill (1993), ch. 9 - the thermally fully developed
+//!     duct at constant wall flux, and the `T = beta x + theta`
+//!     decomposition SPEC-LIT §35.3's mass-flux weighting rests on
+//!   S. V. Patankar, C. H. Liu & E. M. Sparrow, *ASME J. Heat Transfer* 99
+//!     (1977) 180-186 - the periodic-fully-developed idea: solve one
+//!     streamwise module for the PERIODIC part and carry the rest as an
+//!     explicit source of known total
+//!   ofgpu `SPEC-LIT.md` §3.4, §18, §35.1 and §35.3. The geometric cell-set
+//!     selection §18 marks *DESIGN* is ours, and so is the dictionary that
+//!     expresses it, the discrete weighting of §35.3.3, its degenerate
+//!     guard, and the direction rule of §35.3.5.
 //! No GPL-licensed source was consulted.
 //!
 //! # Why this module exists
@@ -238,6 +248,8 @@ pub struct SourceKernels {
     darcy: CudaFunction,
     flag_fixed: CudaFunction,
     zone_weight: CudaFunction,
+    /// SPEC-LIT §35.3's `w_c = (rho u)_c . e_hat` and `|w_c|`, in one pass.
+    thermostat_mass_flux_weight: CudaFunction,
 }
 
 impl SourceKernels {
@@ -251,6 +263,7 @@ impl SourceKernels {
             darcy: k.func("srcDarcyForchheimer")?,
             flag_fixed: k.func("srcFlagFixed")?,
             zone_weight: k.func("srcZoneWeight")?,
+            thermostat_mass_flux_weight: k.func("srcThermostatMassFluxWeight")?,
         })
     }
 }
@@ -296,7 +309,14 @@ pub enum SourceTerm {
 
     /// SPEC-LIT §35.1's bulk-temperature thermostat: `target` (K) and,
     /// optionally, `tau` (s) - `None` means "default to the domain's own
-    /// flow-through time" ([`flow_through_time`]).
+    /// flow-through time" ([`flow_through_time`]) - plus SPEC-LIT §35.3's
+    /// `weighting` and, for [`ThermostatWeighting::MassFlux`], the
+    /// streamwise direction `e_hat`. `direction: None` on a `MassFlux`
+    /// thermostat means "take it from the mesh's single cyclic pair"
+    /// ([`resolve_streamwise_direction`]); `direction: Some(..)` on a
+    /// `Uniform` one is refused by [`SourceTerm::validate`], since uniform
+    /// has no direction to use and reading it and ignoring it is exactly
+    /// the silent drop SPEC-LIT §13.4 forbids.
     ///
     /// A DATA CARRIER only - unlike every other variant here, this is never
     /// applied through [`SourceSet::apply`]/[`SourceSet::apply_component`]
@@ -306,7 +326,52 @@ pub enum SourceTerm {
     /// into a [`Thermostat`] - the object that actually recomputes and
     /// registers it - and never reaches the generic per-cell kernels this
     /// enum otherwise drives.
-    Thermostat { target: Scalar, tau: Option<Scalar> },
+    Thermostat {
+        target: Scalar,
+        tau: Option<Scalar>,
+        weighting: ThermostatWeighting,
+        direction: Option<Vec3>,
+    },
+}
+
+/// SPEC-LIT §35.3: how a [`Thermostat`] DISTRIBUTES the total power its
+/// proportional law asks for.
+///
+/// The two are one formula with two weights, `q_c = Q w_c / sum_c w_c V_c`:
+/// [`Self::Uniform`] is `w_c = 1` and [`Self::MassFlux`] is
+/// `w_c = (rho u)_c . e_hat`. Uniform is the slug-flow limit of the mass-flux
+/// form, and is the DEFAULT (SPEC-LIT §35.3.6) so that every measurement
+/// already recorded in `docs/07-fire-solver.md` §1.1 stays reproducible
+/// bit for bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThermostatWeighting {
+    /// `w_c = 1` - SPEC-LIT §35.1's uniform volumetric sink.
+    #[default]
+    Uniform,
+    /// `w_c = (rho u)_c . e_hat` - SPEC-LIT §35.3's periodic-fully-developed
+    /// compensating source.
+    MassFlux,
+}
+
+impl ThermostatWeighting {
+    /// The case-file spelling, in both routes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Uniform => "uniform",
+            Self::MassFlux => "massFlux",
+        }
+    }
+
+    /// Parse a case-file spelling. `None` for anything else - the CALLER
+    /// raises the SPEC-LIT §13.4 error, because only the caller knows which
+    /// route's name to put in it.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "uniform" => Some(Self::Uniform),
+            "massFlux" => Some(Self::MassFlux),
+            _ => None,
+        }
+    }
 }
 
 impl SourceTerm {
@@ -349,6 +414,39 @@ impl SourceTerm {
                      a usable relaxation time"
                 )))
             }
+            // SPEC-LIT §35.3.5: `direction` on a UNIFORM thermostat is a
+            // §13.4 error, not a harmless extra - uniform has no direction
+            // to use, so reading it and ignoring it is the silent drop
+            // §13.4 exists to prevent.
+            SourceTerm::Thermostat {
+                weighting: ThermostatWeighting::Uniform,
+                direction: Some(d),
+                ..
+            } => Err(Error::Config(format!(
+                "source \"{name}\": thermostat direction ({} {} {}) was given \
+                 with weighting \"uniform\", which has no direction to use. \
+                 Either say `weighting massFlux` (SPEC-LIT §35.3) or drop the \
+                 direction - it must not be read and ignored (SPEC-LIT §13.4)",
+                d.x, d.y, d.z
+            ))),
+            // SPEC-LIT §35.3.5 point 1: an explicit direction has to be a
+            // direction. Zero-magnitude or non-finite is an ERROR - it is
+            // not "no direction given", which is a different, legal case
+            // (take the mesh's single cyclic pair's axis).
+            SourceTerm::Thermostat {
+                weighting: ThermostatWeighting::MassFlux,
+                direction: Some(d),
+                ..
+            } if !(d.x.is_finite() && d.y.is_finite() && d.z.is_finite())
+                || !(d.mag() > 0.0) =>
+            {
+                Err(Error::Config(format!(
+                    "source \"{name}\": thermostat direction ({} {} {}) is not \
+                     a usable direction - it must be finite and non-zero \
+                     (SPEC-LIT §35.3.5)",
+                    d.x, d.y, d.z
+                )))
+            }
             _ => Ok(()),
         }
     }
@@ -365,12 +463,28 @@ impl SourceTerm {
             SourceTerm::BodyForce(b) => {
                 format!("body force ({} {} {}) m/s2 per unit mass", b.x, b.y, b.z)
             }
-            SourceTerm::Thermostat { target, tau } => match tau {
-                Some(tau) => format!("thermostat target {target} K, tau = {tau} s"),
-                None => format!(
-                    "thermostat target {target} K, tau = domain flow-through time (default)"
-                ),
-            },
+            SourceTerm::Thermostat {
+                target,
+                tau,
+                weighting,
+                direction,
+            } => {
+                let tau = match tau {
+                    Some(tau) => format!("tau = {tau} s"),
+                    None => "tau = domain flow-through time (default)".to_string(),
+                };
+                let dir = match direction {
+                    Some(d) => format!(", direction ({} {} {})", d.x, d.y, d.z),
+                    None if weighting == ThermostatWeighting::MassFlux => {
+                        ", direction from the mesh's cyclic pair".to_string()
+                    }
+                    None => String::new(),
+                };
+                format!(
+                    "thermostat target {target} K, {tau}, weighting {}{dir}",
+                    weighting.as_str()
+                )
+            }
         }
     }
 }
@@ -735,6 +849,100 @@ pub fn flow_through_time(total_volume: Scalar, u_ref: Scalar) -> Result<Scalar> 
     Ok(total_volume.cbrt() / u_ref)
 }
 
+/// SPEC-LIT §35.3.5: resolve the mass-flux weighting's streamwise direction
+/// `e_hat`, ONCE, at construction.
+///
+/// 1. `explicit` given → normalised and returned. Zero-magnitude or
+///    non-finite is an ERROR - it is not "no direction given", which is a
+///    different and legal case.
+/// 2. `explicit` absent, EXACTLY ONE cyclic pair in the mesh → that pair's
+///    own axis, taken as the unit normal of its coupled faces. The SIGN is
+///    immaterial (§35.3.4 - `q_c` is invariant under `e_hat -> -e_hat`), so
+///    the vector returned is the one pointing from the LOWER-indexed patch
+///    of the pair INTO the domain, purely so a standard `xmin`/`xmax` pair
+///    reads as `(1 0 0)` rather than `(-1 0 0)`.
+/// 3. `explicit` absent, NO cyclic pair → §13.4 error.
+/// 4. `explicit` absent, TWO OR MORE cyclic pairs → §13.4 error naming every
+///    candidate. Picking one would be a guess.
+///
+/// `name` is the source's own name, for the error messages.
+pub fn resolve_streamwise_direction(
+    m: &HostMesh,
+    name: &str,
+    explicit: Option<Vec3>,
+) -> Result<Vec3> {
+    if let Some(d) = explicit {
+        if !(d.x.is_finite() && d.y.is_finite() && d.z.is_finite()) || !(d.mag() > 0.0) {
+            return Err(Error::Config(format!(
+                "source \"{name}\": thermostat direction ({} {} {}) is not a \
+                 usable direction - it must be finite and non-zero \
+                 (SPEC-LIT §35.3.5)",
+                d.x, d.y, d.z
+            )));
+        }
+        return Ok(d.normalised());
+    }
+
+    // Every cyclic PAIR, each recorded once, at its lower-indexed patch.
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for (i, p) in m.patches.iter().enumerate() {
+        if p.kind != crate::mesh::PatchKind::Cyclic {
+            continue;
+        }
+        let Some(j) = p.nbr_patch else { continue };
+        if i < j {
+            pairs.push((i, j));
+        }
+    }
+
+    let describe = |i: usize, j: usize| -> String {
+        format!("'{}'/'{}'", m.patches[i].name, m.patches[j].name)
+    };
+
+    match pairs.len() {
+        0 => Err(Error::Config(format!(
+            "source \"{name}\": the thermostat's massFlux weighting needs a \
+             streamwise direction, and this mesh has no cyclic pair to take \
+             one from. Give `direction` explicitly (SPEC-LIT §35.3.5)"
+        ))),
+        1 => {
+            let (i, j) = pairs[0];
+            let p = &m.patches[i];
+            // sum(Sf) over a planar patch, normalised, is its outward unit
+            // normal exactly. Negated so it points INTO the domain at the
+            // lower-indexed patch - a sign convention only (§35.3.4).
+            let mut s = Vec3::ZERO;
+            for f in p.start..p.start + p.size {
+                s = s + m.b_sf[f];
+            }
+            let e = (-s).normalised();
+            if !(e.mag() > 0.0) {
+                return Err(Error::Config(format!(
+                    "source \"{name}\": the thermostat's massFlux weighting \
+                     took its direction from the cyclic pair {}, whose face \
+                     areas sum to zero - the patch is not planar, so it has no \
+                     single axis. Give `direction` explicitly \
+                     (SPEC-LIT §35.3.5)",
+                    describe(i, j)
+                )));
+            }
+            Ok(e)
+        }
+        _ => {
+            let names: Vec<String> = pairs.iter().map(|&(i, j)| describe(i, j)).collect();
+            Err(Error::Config(format!(
+                "source \"{name}\": the thermostat's massFlux weighting needs \
+                 ONE streamwise direction and this mesh has {} cyclic pairs \
+                 ({}) - which is the streamwise one is not something this \
+                 reader may guess. Give `direction` explicitly \
+                 (SPEC-LIT §35.3.5, §13.4)",
+                pairs.len(),
+                names.join(", ")
+            )))
+        }
+    }
+}
+
 /// How far past the plain proportional law [`Thermostat::correct`] will go
 /// before it saturates instead - SPEC-LIT §35.2's "`T_target` unreachable
 /// ... the controller saturates at a sensible value, and says so".
@@ -754,7 +962,19 @@ const THERMOSTAT_SATURATION_DELTA_T: Scalar = 1000.0;
 
 const THERMOSTAT_REDUCE_PARTIALS: usize = 1024;
 
-/// SPEC-LIT §35.1: a uniform volumetric proportional controller on the
+/// SPEC-LIT §35.3.4's degenerate-guard threshold on `|W| / W_abs`.
+///
+/// *DESIGN.* `W_abs/|W|` is exactly the factor by which
+/// `q_c = Q w_c / W` amplifies a cell's own weight relative to the mean
+/// weight MAGNITUDE, so this bounds that amplification at 1000. A
+/// `direction` PERPENDICULAR to the flow lands here and nowhere else - it
+/// makes `W` a residue of near-total cancellation, which a plain `W != 0`
+/// test would pass and would then multiply the mesh's own round-off into a
+/// violent, sign-alternating `q_c` field that still integrates to `Q`. Any
+/// real driven periodic flow has `|W|/W_abs` of order 0.1 to 1.
+const THERMOSTAT_MIN_NET_FLUX_FRACTION: Scalar = 1.0e-3;
+
+/// SPEC-LIT §35.1 and §35.3: a volumetric proportional controller on the
 /// domain-mean (volume-mean, NOT the mixed-mean SPEC-LIT §32.2's `T_b`
 /// uses) temperature.
 ///
@@ -767,15 +987,40 @@ const THERMOSTAT_REDUCE_PARTIALS: usize = 1024;
 /// [`crate::simple::Simple::pressure_is_pinned`]) - its solution is fixed up
 /// to an additive constant, which the case never said. This term removes
 /// that null direction by pinning the ONE number the equation cannot supply
-/// on its own - `T_mean` - without imposing a value anywhere: the PROFILE is
-/// still entirely `Energy`'s own prediction.
+/// on its own: `T_mean`.
+///
+/// It does NOT leave the profile alone, and SPEC-LIT §35.1 used to claim it
+/// did. A uniform volumetric sink is the SLUG-FLOW limit of the correct
+/// compensating source, which is proportional to the local streamwise mass
+/// flux `rho u . e_hat`; against the correct distribution it removes too
+/// much heat where `u . e_hat < U_b` (the near-wall layer) and too little in
+/// the core, which shrinks `(T_w - T_b)` and biases `Nu` high. SPEC-LIT
+/// §35.3 derives that and specifies [`ThermostatWeighting::MassFlux`], which
+/// this type implements as an explicit opt-in.
 ///
 /// # The value it registers
 ///
 /// ```text
 /// T_mean         = (1/V) integral T dV                     over the WHOLE mesh
-/// q_thermostat   = -rho_cp (T_mean - T_target) / tau        W/m3, uniform
+/// q_thermostat   = -rho_cp (T_mean - T_target) / tau        W/m3
+/// Q              = q_thermostat * V_total                   W, the TOTAL power
 /// ```
+///
+/// and then distributes `Q` by SPEC-LIT §35.3.3's one formula with two
+/// weights,
+///
+/// ```text
+/// w_c = 1                    (Uniform)   or   (rho u)_c . e_hat  (MassFlux)
+/// W   = sum_c w_c V_c
+/// q_c = Q w_c / W                          so that sum_c q_c V_c = Q exactly
+/// ```
+///
+/// `Uniform` is `w_c = 1`, for which `W = V_total` and `q_c = Q/V_total =
+/// q_thermostat`. That branch is NOT routed through the formula: it writes
+/// `q_thermostat` directly, exactly as before, because a device reduction of
+/// `V_c` differs from the mesh's own stored `total_volume` in the last bits
+/// and every measurement in `docs/07-fire-solver.md` §1.1 was made with the
+/// direct fill (SPEC-LIT §35.3.6).
 ///
 /// `rho_cp` is fixed at construction, `rho(T_target) c_p` - not recomputed
 /// from the CURRENT `T_mean` every iteration, which would make the
@@ -797,19 +1042,46 @@ pub struct Thermostat {
     total_volume: Scalar,
     n: usize,
 
-    /// `[n_cells]`, every entry the same `q_thermostat` - what
-    /// [`crate::energy::EnergySources::register_explicit`] wants.
-    uniform: DevBuf<Scalar>,
+    /// SPEC-LIT §35.3: which weight `w_c` this controller distributes its
+    /// total power `Q` by.
+    weighting: ThermostatWeighting,
+    /// `e_hat`, already normalised and already resolved
+    /// ([`resolve_streamwise_direction`]) - `Vec3::ZERO` when
+    /// `weighting` is [`ThermostatWeighting::Uniform`], which has no
+    /// direction.
+    e_hat: Vec3,
+
+    /// `[n_cells]`, the `q_c` field
+    /// [`crate::energy::EnergySources::register_explicit`] wants - every
+    /// entry the same `q_thermostat` under `Uniform`, and `Q w_c / W` under
+    /// `MassFlux`.
+    q: DevBuf<Scalar>,
+    /// `[n_cells]` `w_c` and `|w_c|` - allocated only for `MassFlux`, so a
+    /// uniform thermostat costs exactly the memory it did before §35.3.
+    w: DevBuf<Scalar>,
+    w_abs: DevBuf<Scalar>,
     dot_out: DevBuf<Scalar>,
     partials: DevBuf<Scalar>,
     fldk: FieldKernels,
     solk: SolverKernels,
+    /// Only `MassFlux` needs the weight kernel; a uniform thermostat never
+    /// loads the module.
+    srck: Option<SourceKernels>,
 
     last_t_mean: Scalar,
     /// `q_thermostat * V_total`, W - the integrated power SPEC-LIT §35.2's
-    /// energy-balance check compares against the wall heat input.
+    /// energy-balance check compares against the wall heat input. Under
+    /// `MassFlux` this is unchanged: §35.3.3's redistribution preserves it
+    /// exactly.
     last_power: Scalar,
     last_saturated: bool,
+    /// SPEC-LIT §35.3.4: the last `correct_with_flow` found the weighting
+    /// degenerate and fell back to the uniform fill.
+    last_fell_back: bool,
+    /// `W = sum_c w_c V_c` and `W_abs = sum_c |w_c| V_c`, as last measured -
+    /// `(0, 0)` for a uniform thermostat, which forms neither.
+    last_net_flux: Scalar,
+    last_gross_flux: Scalar,
 }
 
 impl Thermostat {
@@ -851,24 +1123,115 @@ impl Thermostat {
             rho_cp,
             total_volume: m.total_volume,
             n,
-            uniform: gpu.zeros(one(n))?,
+            weighting: ThermostatWeighting::Uniform,
+            e_hat: Vec3::ZERO,
+            q: gpu.zeros(one(n))?,
+            w: gpu.zeros(0)?,
+            w_abs: gpu.zeros(0)?,
             dot_out: gpu.zeros(1)?,
             partials: gpu.zeros(THERMOSTAT_REDUCE_PARTIALS)?,
             fldk: FieldKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
+            srck: None,
             last_t_mean: target,
             last_power: 0.0,
             last_saturated: false,
+            last_fell_back: false,
+            last_net_flux: 0.0,
+            last_gross_flux: 0.0,
         })
     }
 
-    /// Measure `T_mean`, form `q_thermostat`, and refresh the uniform buffer
-    /// [`Self::uniform_buf`] hands to `EnergySources::register_explicit`.
+    /// SPEC-LIT §35.3: the same controller, distributing its total power by
+    /// the LOCAL streamwise mass flux instead of by volume.
+    ///
+    /// `e_hat` is the streamwise direction, ALREADY resolved - see
+    /// [`resolve_streamwise_direction`], which is what turns a case's
+    /// `direction` (or its single cyclic pair) into one. It is normalised
+    /// here, and refused if it is not a direction.
+    ///
+    /// [`Self::correct`] does NOT work on a thermostat built this way: the
+    /// weights need `rho` and `U`, so the driver has to call
+    /// [`Self::correct_with_flow`] instead, and `correct` says so rather
+    /// than quietly producing the uniform field (SPEC-LIT §13.4).
+    pub fn new_mass_flux(
+        gpu: &Gpu,
+        m: &GpuMesh,
+        target: Scalar,
+        tau: Scalar,
+        rho_cp: Scalar,
+        e_hat: Vec3,
+    ) -> Result<Self> {
+        if !(e_hat.x.is_finite() && e_hat.y.is_finite() && e_hat.z.is_finite())
+            || !(e_hat.mag() > 0.0)
+        {
+            return Err(Error::Config(format!(
+                "thermostat: the massFlux weighting's direction is ({} {} {}), \
+                 which is not a usable direction - it must be finite and \
+                 non-zero (SPEC-LIT §35.3.5)",
+                e_hat.x, e_hat.y, e_hat.z
+            )));
+        }
+
+        let mut th = Self::new(gpu, m, target, tau, rho_cp)?;
+        let n = th.n.max(1);
+        th.weighting = ThermostatWeighting::MassFlux;
+        th.e_hat = e_hat.normalised();
+        th.w = gpu.zeros(n)?;
+        th.w_abs = gpu.zeros(n)?;
+        th.srck = Some(SourceKernels::new(gpu)?);
+        Ok(th)
+    }
+
+    /// Measure `T_mean`, form `q_thermostat`, and refresh the buffer
+    /// [`Self::source_buf`] hands to `EnergySources::register_explicit`.
     ///
     /// Call once per outer iteration, right after
     /// `EnergySources::clear` - the same moment the heater and combustion
     /// register their own contributions.
+    ///
+    /// UNIFORM weighting only. A [`ThermostatWeighting::MassFlux`]
+    /// thermostat needs `rho` and `U` to form its weights, so this is an
+    /// ERROR on one rather than a silent fall back to the uniform field
+    /// (SPEC-LIT §13.4) - call [`Self::correct_with_flow`].
     pub fn correct(&mut self, gpu: &Gpu, m: &GpuMesh, t: &DevBuf<Scalar>) -> Result<Scalar> {
+        if self.weighting != ThermostatWeighting::Uniform {
+            return Err(Error::Config(format!(
+                "thermostat: weighting \"{}\" needs rho and U to form its \
+                 per-cell weights, and `Thermostat::correct` has neither - \
+                 call `correct_with_flow` instead (SPEC-LIT §35.3)",
+                self.weighting.as_str()
+            )));
+        }
+        self.correct_impl(gpu, m, t, None)
+    }
+
+    /// SPEC-LIT §35.3: [`Self::correct`], with the `rho` and `U` a mass-flux
+    /// weighting needs.
+    ///
+    /// Both fields are read at the CURRENT outer iteration's lag - whatever
+    /// the previous unit of work left behind - which is the same segregated
+    /// lag every other coupling coefficient in this crate runs at. Harmless
+    /// on a [`ThermostatWeighting::Uniform`] thermostat, which ignores them
+    /// and takes the identical code path [`Self::correct`] does.
+    pub fn correct_with_flow(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        t: &DevBuf<Scalar>,
+        rho: &DevBuf<Scalar>,
+        u: &DevBuf<Vec3>,
+    ) -> Result<Scalar> {
+        self.correct_impl(gpu, m, t, Some((rho, u)))
+    }
+
+    fn correct_impl(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        t: &DevBuf<Scalar>,
+        flow: Option<(&DevBuf<Scalar>, &DevBuf<Vec3>)>,
+    ) -> Result<Scalar> {
         solver::device_dot(
             gpu,
             &self.solk,
@@ -889,6 +1252,9 @@ impl Thermostat {
             (raw, false)
         };
         self.last_saturated = saturated;
+        // SPEC-LIT §35.3.3: the TOTAL is `q * V_total` whichever weighting
+        // distributes it - the redistribution preserves it exactly, which is
+        // what keeps §35.1's pinning of `T_mean`.
         self.last_power = q * self.total_volume;
 
         if saturated {
@@ -903,14 +1269,159 @@ impl Thermostat {
             );
         }
 
-        field_ops::set_field(gpu, &self.fldk, &mut self.uniform, q, self.n)?;
+        match self.weighting {
+            // SPEC-LIT §35.3.6: NOT routed through `Q w_c / W`. `w_c = 1`
+            // gives `W = sum_c V_c`, which differs from the mesh's own
+            // `total_volume` in the last bits, and every measurement in
+            // `docs/07-fire-solver.md` §1.1 was made with this direct fill.
+            ThermostatWeighting::Uniform => {
+                self.last_fell_back = false;
+                self.last_net_flux = 0.0;
+                self.last_gross_flux = 0.0;
+                field_ops::set_field(gpu, &self.fldk, &mut self.q, q, self.n)?;
+            }
+            ThermostatWeighting::MassFlux => {
+                let Some((rho, u)) = flow else {
+                    return Err(Error::Config(
+                        "thermostat: the massFlux weighting needs rho and U \
+                         and was given neither (SPEC-LIT §35.3)"
+                            .to_string(),
+                    ));
+                };
+                self.correct_mass_flux(gpu, m, rho, u, q)?;
+            }
+        }
         Ok(q)
     }
 
-    /// `[n_cells]`, every entry the last `q_thermostat` [`Self::correct`]
-    /// computed - feed straight to `EnergySources::register_explicit`.
-    pub fn uniform_buf(&self) -> &DevBuf<Scalar> {
-        &self.uniform
+    /// SPEC-LIT §35.3.3's `q_c = Q w_c / W`, with §35.3.4's guard.
+    fn correct_mass_flux(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        rho: &DevBuf<Scalar>,
+        u: &DevBuf<Vec3>,
+        q_uniform: Scalar,
+    ) -> Result<()> {
+        let n = self.n;
+        if n == 0 {
+            self.last_fell_back = false;
+            self.last_net_flux = 0.0;
+            self.last_gross_flux = 0.0;
+            return Ok(());
+        }
+        if rho.len() != n || u.len() != n {
+            return Err(Error::Config(format!(
+                "thermostat: the massFlux weighting was given rho[{}] and \
+                 U[{}] on a mesh of {n} cells",
+                rho.len(),
+                u.len()
+            )));
+        }
+
+        let k = self
+            .srck
+            .as_ref()
+            .expect("new_mass_flux always builds the source kernels")
+            .thermostat_mass_flux_weight
+            .clone();
+        let nl = n as Label;
+        let (ex, ey, ez) = (self.e_hat.x, self.e_hat.y, self.e_hat.z);
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k)
+                .arg(&mut self.w)
+                .arg(&mut self.w_abs)
+                .arg(rho)
+                .arg(u)
+                .arg(&ex)
+                .arg(&ey)
+                .arg(&ez)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+
+        // W = sum_c w_c V_c, and the gross flux W_abs = sum_c |w_c| V_c the
+        // §35.3.4 guard compares it against.
+        solver::device_dot(
+            gpu,
+            &self.solk,
+            &mut self.dot_out,
+            &self.w,
+            &m.v,
+            &mut self.partials,
+            n,
+        )?;
+        let net = gpu.download(&self.dot_out)?[0];
+        solver::device_dot(
+            gpu,
+            &self.solk,
+            &mut self.dot_out,
+            &self.w_abs,
+            &m.v,
+            &mut self.partials,
+            n,
+        )?;
+        let gross = gpu.download(&self.dot_out)?[0];
+        self.last_net_flux = net;
+        self.last_gross_flux = gross;
+
+        // SPEC-LIT §35.3.4. The SIGN of `net` is not a fallback condition:
+        // `q_c = Q(-w_c)/(-W) = Q w_c/W` is invariant under `e_hat -> -e_hat`
+        // bit for bit, so a direction pointing upstream gives the identical
+        // field. It gets its own warning and then proceeds.
+        let degenerate = !net.is_finite()
+            || !gross.is_finite()
+            || !(gross > 0.0)
+            || net.abs() < THERMOSTAT_MIN_NET_FLUX_FRACTION * gross;
+        if degenerate {
+            self.last_fell_back = true;
+            crate::io::contract::warn_once(
+                "thermostat-massflux-degenerate",
+                &format!(
+                    "thermostat: the massFlux weighting's normalisation is \
+                     degenerate along direction ({} {} {}) - the net flux \
+                     sum_c (rho u . e_hat)_c V_c is {net} against a gross \
+                     sum_c |rho u . e_hat|_c V_c of {gross}, below the {} \
+                     fraction SPEC-LIT §35.3.4 requires. Falling back to the \
+                     uniform distribution for this iteration; check that the \
+                     direction is the flow direction",
+                    self.e_hat.x, self.e_hat.y, self.e_hat.z,
+                    THERMOSTAT_MIN_NET_FLUX_FRACTION
+                ),
+            );
+            field_ops::set_field(gpu, &self.fldk, &mut self.q, q_uniform, n)?;
+            return Ok(());
+        }
+        self.last_fell_back = false;
+
+        if net < 0.0 {
+            crate::io::contract::warn_once(
+                "thermostat-massflux-upstream",
+                &format!(
+                    "thermostat: the massFlux direction ({} {} {}) points \
+                     UPSTREAM - the net flux along it is {net}, negative. The \
+                     weighting is invariant under e_hat -> -e_hat (SPEC-LIT \
+                     §35.3.4) so the field is unaffected, but the case \
+                     probably meant the other sign",
+                    self.e_hat.x, self.e_hat.y, self.e_hat.z
+                ),
+            );
+        }
+
+        // q_c = Q w_c / W. `Q = q_uniform * V_total` (§35.3.3), so the scale
+        // is `q_uniform * V_total / W`, applied to a copy of `w`.
+        field_ops::copy_field(gpu, &self.fldk, &mut self.q, &self.w, n)?;
+        let scale = q_uniform * self.total_volume / net;
+        field_ops::scale_field(gpu, &self.fldk, &mut self.q, scale, n)?;
+        Ok(())
+    }
+
+    /// `[n_cells]`, the `q_c` field [`Self::correct`] /
+    /// [`Self::correct_with_flow`] last computed - feed straight to
+    /// `EnergySources::register_explicit`.
+    pub fn source_buf(&self) -> &DevBuf<Scalar> {
+        &self.q
     }
 
     pub fn target(&self) -> Scalar {
@@ -921,19 +1432,41 @@ impl Thermostat {
         self.tau
     }
 
+    /// SPEC-LIT §35.3: which weight this controller distributes by.
+    pub fn weighting(&self) -> ThermostatWeighting {
+        self.weighting
+    }
+
+    /// `e_hat` - `Vec3::ZERO` under [`ThermostatWeighting::Uniform`].
+    pub fn direction(&self) -> Vec3 {
+        self.e_hat
+    }
+
     /// The volume-mean `T` [`Self::correct`] last measured.
     pub fn t_mean(&self) -> Scalar {
         self.last_t_mean
     }
 
     /// `q_thermostat * V_total`, W - positive is heating, negative is
-    /// cooling.
+    /// cooling. The same number under either weighting (SPEC-LIT §35.3.3).
     pub fn power(&self) -> Scalar {
         self.last_power
     }
 
     pub fn saturated(&self) -> bool {
         self.last_saturated
+    }
+
+    /// SPEC-LIT §35.3.4: the last correction found the mass-flux
+    /// normalisation degenerate and used the uniform fill instead.
+    pub fn fell_back_to_uniform(&self) -> bool {
+        self.last_fell_back
+    }
+
+    /// `W = sum_c w_c V_c` and `W_abs = sum_c |w_c| V_c`, as last measured.
+    /// `(0, 0)` under [`ThermostatWeighting::Uniform`], which forms neither.
+    pub fn net_and_gross_flux(&self) -> (Scalar, Scalar) {
+        (self.last_net_flux, self.last_gross_flux)
     }
 }
 
@@ -1117,7 +1650,34 @@ pub fn read_sources(case_dir: &std::path::Path) -> Result<Vec<SourceSpec>> {
                 } else {
                     None
                 };
-                (Some(SourceTerm::Thermostat { target, tau }), None)
+                // SPEC-LIT §35.3.7. `weighting` omitted is `uniform`, the
+                // default §35.3.6 keeps deliberately; any other spelling is
+                // a §13.4 error naming the two that exist.
+                let spelled = d.get_or(&key("weighting"), "uniform").to_string();
+                let weighting = match ThermostatWeighting::parse(&spelled) {
+                    Some(w) => w,
+                    None => crate::io::contract::unsupported(
+                        &format!("{name}/weighting"),
+                        &spelled,
+                        &["uniform", "massFlux"],
+                        "uniform, SPEC-LIT §35.1's volume-weighted form",
+                        ThermostatWeighting::Uniform,
+                    )?,
+                };
+                let direction = if d.has(&key("direction")) {
+                    Some(vector(&d, &key("direction"), &name)?)
+                } else {
+                    None
+                };
+                (
+                    Some(SourceTerm::Thermostat {
+                        target,
+                        tau,
+                        weighting,
+                        direction,
+                    }),
+                    None,
+                )
             }
             other => {
                 return Err(Error::Config(format!(
@@ -1730,6 +2290,444 @@ mod tests {
         assert!(Thermostat::new(&gpu, &gm, 350.0, 0.02, 0.0).is_err());
     }
 
+    // ---- SPEC-LIT §35.3: the mass-flux weighting ---------------------------
+
+    /// A block periodic on ONE axis, so `resolve_streamwise_direction` has
+    /// exactly one cyclic pair to take `e_hat` from.
+    fn cyclic_block(axes: &[usize]) -> HostMesh {
+        use crate::blockgen::{build_mesh, BlockSpec, GradedAxis};
+        let ax = |lo: Scalar, hi: Scalar, n: usize| GradedAxis {
+            lo,
+            hi,
+            n,
+            expansion: 1.0,
+            two_sided: false,
+        };
+        let mut b = BlockSpec {
+            x: ax(0.0, 2.0, 4),
+            y: ax(-1.0, 1.0, 4),
+            z: ax(0.0, 0.5, 3),
+            ..BlockSpec::default()
+        };
+        for &a in axes {
+            b.set_cyclic_axis(a).expect("cyclic axis");
+        }
+        build_mesh(&b).expect("build_mesh")
+    }
+
+    /// Upload a per-cell `rho` and `U` for the weighted correction.
+    fn upload_flow(
+        gpu: &Gpu,
+        rho: &[Scalar],
+        u: &[Vec3],
+    ) -> (DevBuf<Scalar>, DevBuf<Vec3>) {
+        (gpu.upload(rho).expect("rho"), gpu.upload(u).expect("U"))
+    }
+
+    /// SPEC-LIT §35.3.8, the first row: the weighting REDISTRIBUTES the
+    /// controller's total power and never alters it -
+    /// `sum_c q_c V_c = Q = q_uniform V_total` to round-off. This is the
+    /// invariant that keeps §35.1's pinning of `T_mean` intact, so it is the
+    /// one thing that must not break.
+    #[test]
+    fn the_mass_flux_weighting_integrates_to_the_same_total_power_as_uniform() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let (target, tau, rho_cp): (Scalar, Scalar, Scalar) = (350.0, 0.02, 1206.0);
+        let t = gpu.upload(&vec![300.0 as Scalar; m.n_cells]).expect("T");
+
+        // A genuinely non-uniform mass flux: rho and u_x both vary cell to
+        // cell, so a uniform field could not possibly pass this by accident.
+        let rho: Vec<Scalar> = (0..m.n_cells)
+            .map(|c| 1.0 + 0.3 * ((c % 7) as Scalar))
+            .collect();
+        let u: Vec<Vec3> = (0..m.n_cells)
+            .map(|c| {
+                let y = m.c[c].y;
+                // A parabola in y, plus a cross-flow the weighting must ignore.
+                Vec3::new(4.0 * y * (1.0 - y) + 0.05, 0.7, -0.2)
+            })
+            .collect();
+        let (rho_d, u_d) = upload_flow(&gpu, &rho, &u);
+
+        let mut uni = Thermostat::new(&gpu, &gm, target, tau, rho_cp).expect("uniform");
+        let q_uniform = uni.correct(&gpu, &gm, &t).expect("uniform correct");
+        let total_power = uni.power();
+
+        let mut wt = Thermostat::new_mass_flux(
+            &gpu, &gm, target, tau, rho_cp, Vec3::new(1.0, 0.0, 0.0),
+        )
+        .expect("massFlux");
+        let q_returned = wt
+            .correct_with_flow(&gpu, &gm, &t, &rho_d, &u_d)
+            .expect("weighted correct");
+        assert!(!wt.fell_back_to_uniform(), "this flow is not degenerate");
+
+        // The RETURNED scalar is still the uniform-equivalent q (the
+        // controller's own proportional law), and so is the reported power.
+        assert_eq!(q_returned, q_uniform);
+        assert_eq!(wt.power(), total_power);
+
+        // And the FIELD integrates to it.
+        let q_cells = gpu.download(wt.source_buf()).expect("q");
+        let integrated: Scalar = (0..m.n_cells).map(|c| q_cells[c] * m.v[c]).sum();
+        assert!(
+            (integrated - total_power).abs() <= 1e-10 * total_power.abs(),
+            "sum_c q_c V_c = {integrated}, Q = {total_power}"
+        );
+
+        // The field is genuinely NOT the uniform one - otherwise the check
+        // above would be vacuous.
+        let spread = q_cells[..m.n_cells]
+            .iter()
+            .fold((Scalar::MAX, Scalar::MIN), |(lo, hi), &q| (lo.min(q), hi.max(q)));
+        assert!(
+            (spread.1 - spread.0).abs() > 0.1 * q_uniform.abs(),
+            "the weighted field is essentially uniform: {spread:?}"
+        );
+    }
+
+    /// SPEC-LIT §35.3.8: SLUG FLOW - a spatially uniform `rho u . e_hat` -
+    /// must reproduce the uniform form to round-off. This is the test that
+    /// the weighting is the right GENERALISATION of §35.1 and not merely a
+    /// different field that happens to carry the same total: §35.3.1's own
+    /// claim is that uniform IS the slug-flow limit.
+    #[test]
+    fn slug_flow_reproduces_the_uniform_thermostat_to_round_off() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let (target, tau, rho_cp): (Scalar, Scalar, Scalar) = (350.0, 0.02, 1206.0);
+        let t = gpu.upload(&vec![420.0 as Scalar; m.n_cells]).expect("T");
+
+        // rho u . e_hat = 1.2 * 3.0 everywhere. The transverse components are
+        // deliberately non-zero and non-uniform, to show the weighting takes
+        // the STREAMWISE component and nothing else.
+        let rho: Vec<Scalar> = vec![1.2; m.n_cells];
+        let u: Vec<Vec3> = (0..m.n_cells)
+            .map(|c| Vec3::new(3.0, 0.9 * (c as Scalar), -1.4 * (c as Scalar)))
+            .collect();
+        let (rho_d, u_d) = upload_flow(&gpu, &rho, &u);
+
+        let mut uni = Thermostat::new(&gpu, &gm, target, tau, rho_cp).expect("uniform");
+        uni.correct(&gpu, &gm, &t).expect("uniform correct");
+        let want = gpu.download(uni.source_buf()).expect("uniform q");
+
+        let mut wt = Thermostat::new_mass_flux(
+            &gpu, &gm, target, tau, rho_cp, Vec3::new(1.0, 0.0, 0.0),
+        )
+        .expect("massFlux");
+        wt.correct_with_flow(&gpu, &gm, &t, &rho_d, &u_d)
+            .expect("weighted correct");
+        assert!(!wt.fell_back_to_uniform(), "slug flow is not degenerate");
+        let got = gpu.download(wt.source_buf()).expect("weighted q");
+
+        for c in 0..m.n_cells {
+            assert!(
+                (got[c] - want[c]).abs() <= 1e-12 * want[c].abs(),
+                "cell {c}: weighted {} vs uniform {}",
+                got[c],
+                want[c]
+            );
+        }
+    }
+
+    /// SPEC-LIT §35.3.4: a direction PERPENDICULAR to the flow makes `W` a
+    /// cancellation residue, so the weighting is undefined - the controller
+    /// falls back to the uniform fill AND says so. The fallback field must be
+    /// the uniform one exactly, not something near it.
+    #[test]
+    fn a_perpendicular_direction_falls_back_to_uniform_and_warns() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let (target, tau, rho_cp): (Scalar, Scalar, Scalar) = (350.0, 0.02, 1206.0);
+        let t = gpu.upload(&vec![300.0 as Scalar; m.n_cells]).expect("T");
+
+        // A strong streamwise flow along x, plus an alternating transverse
+        // wobble in z. Told to weight by z, the controller sees a large GROSS
+        // flux and a net one that is nothing but the residue of that
+        // cancellation - which is exactly the failure mode a plain `W != 0`
+        // test would let through, so `gross` is deliberately far from zero.
+        let rho: Vec<Scalar> = vec![1.2; m.n_cells];
+        let u: Vec<Vec3> = (0..m.n_cells)
+            .map(|c| {
+                let wobble = if c % 2 == 0 { 1.0 } else { -1.0 };
+                Vec3::new(3.0, 0.0, wobble + 1.0e-6)
+            })
+            .collect();
+        let (rho_d, u_d) = upload_flow(&gpu, &rho, &u);
+
+        let mut uni = Thermostat::new(&gpu, &gm, target, tau, rho_cp).expect("uniform");
+        uni.correct(&gpu, &gm, &t).expect("uniform correct");
+        let want = gpu.download(uni.source_buf()).expect("uniform q");
+
+        let mut wt = Thermostat::new_mass_flux(
+            &gpu, &gm, target, tau, rho_cp, Vec3::new(0.0, 0.0, 1.0),
+        )
+        .expect("massFlux");
+        wt.correct_with_flow(&gpu, &gm, &t, &rho_d, &u_d)
+            .expect("a degenerate weighting falls back, it does not fail");
+
+        assert!(wt.fell_back_to_uniform(), "a perpendicular e_hat must fall back");
+        assert!(
+            crate::io::contract::warned("thermostat-massflux-degenerate"),
+            "the fallback must WARN - SPEC-LIT §13.4 forbids the silent kind"
+        );
+        let (net, gross) = wt.net_and_gross_flux();
+        assert!(gross > 0.1, "the gross flux must be substantial: {gross}");
+        assert!(
+            net.abs() < 1e-3 * gross,
+            "net {net} against gross {gross} should be a cancellation residue"
+        );
+
+        let got = gpu.download(wt.source_buf()).expect("q");
+        for c in 0..m.n_cells {
+            assert_eq!(got[c], want[c], "cell {c}: the fallback must be the uniform fill");
+        }
+    }
+
+    /// SPEC-LIT §35.3.4: NO FLOW AT ALL - `W_abs` itself is zero, so there is
+    /// nothing to normalise by and the same fallback fires. The transient
+    /// start-from-rest case the guard exists for.
+    #[test]
+    fn a_motionless_domain_falls_back_to_uniform() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let t = gpu.upload(&vec![300.0 as Scalar; m.n_cells]).expect("T");
+        let (rho_d, u_d) = upload_flow(
+            &gpu,
+            &vec![1.2 as Scalar; m.n_cells],
+            &vec![Vec3::ZERO; m.n_cells],
+        );
+
+        let mut wt =
+            Thermostat::new_mass_flux(&gpu, &gm, 350.0, 0.02, 1206.0, Vec3::new(1.0, 0.0, 0.0))
+                .expect("massFlux");
+        let q = wt
+            .correct_with_flow(&gpu, &gm, &t, &rho_d, &u_d)
+            .expect("no flow falls back, it does not fail");
+        assert!(wt.fell_back_to_uniform());
+        assert!(crate::io::contract::warned("thermostat-massflux-degenerate"));
+
+        let got = gpu.download(wt.source_buf()).expect("q");
+        for c in 0..m.n_cells {
+            assert_eq!(got[c], q, "cell {c}");
+        }
+    }
+
+    /// SPEC-LIT §35.3.4: `q_c = Q(-w_c)/(-W)` is invariant under
+    /// `e_hat -> -e_hat`, BIT FOR BIT - so a direction that points upstream
+    /// gives the identical field and is warned about rather than refused.
+    #[test]
+    fn reversing_the_direction_gives_the_identical_field() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+
+        let (target, tau, rho_cp): (Scalar, Scalar, Scalar) = (350.0, 0.02, 1206.0);
+        let t = gpu.upload(&vec![300.0 as Scalar; m.n_cells]).expect("T");
+        let rho: Vec<Scalar> = (0..m.n_cells).map(|c| 1.0 + 0.2 * (c as Scalar)).collect();
+        let u: Vec<Vec3> = (0..m.n_cells)
+            .map(|c| Vec3::new(2.0 + 0.1 * (c as Scalar), 0.3, 0.0))
+            .collect();
+        let (rho_d, u_d) = upload_flow(&gpu, &rho, &u);
+
+        let run = |e: Vec3| -> Vec<Scalar> {
+            let mut th =
+                Thermostat::new_mass_flux(&gpu, &gm, target, tau, rho_cp, e).expect("massFlux");
+            th.correct_with_flow(&gpu, &gm, &t, &rho_d, &u_d).expect("correct");
+            assert!(!th.fell_back_to_uniform());
+            gpu.download(th.source_buf()).expect("q")
+        };
+
+        let fwd = run(Vec3::new(1.0, 0.0, 0.0));
+        let rev = run(Vec3::new(-1.0, 0.0, 0.0));
+        for c in 0..m.n_cells {
+            assert_eq!(fwd[c].to_bits(), rev[c].to_bits(), "cell {c}");
+        }
+        assert!(
+            crate::io::contract::warned("thermostat-massflux-upstream"),
+            "an upstream direction is not refused, but it IS said out loud"
+        );
+    }
+
+    /// SPEC-LIT §13.4: a `massFlux` thermostat reached through the plain
+    /// `correct` - which has no `rho` and no `U` - is an ERROR naming
+    /// `correct_with_flow`, never a quiet uniform field.
+    #[test]
+    fn a_mass_flux_thermostat_refuses_the_flowless_correct() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+        let t = gpu.upload(&vec![300.0 as Scalar; m.n_cells]).expect("T");
+        let mut wt =
+            Thermostat::new_mass_flux(&gpu, &gm, 350.0, 0.02, 1206.0, Vec3::new(1.0, 0.0, 0.0))
+                .expect("massFlux");
+        let err = wt.correct(&gpu, &gm, &t).unwrap_err().to_string();
+        assert!(err.contains("correct_with_flow"), "{err}");
+    }
+
+    /// A uniform thermostat driven through `correct_with_flow` takes the
+    /// identical path `correct` does and ignores both fields - SPEC-LIT
+    /// §35.3.6's bit-for-bit reproducibility requirement, checked directly.
+    #[test]
+    fn a_uniform_thermostat_ignores_the_flow_it_is_handed() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+        let t = gpu.upload(&vec![300.0 as Scalar; m.n_cells]).expect("T");
+        let (rho_d, u_d) = upload_flow(
+            &gpu,
+            &(0..m.n_cells).map(|c| 1.0 + c as Scalar).collect::<Vec<Scalar>>(),
+            &(0..m.n_cells)
+                .map(|c| Vec3::new(c as Scalar, 1.0, 2.0))
+                .collect::<Vec<Vec3>>(),
+        );
+
+        let mut a = Thermostat::new(&gpu, &gm, 350.0, 0.02, 1206.0).expect("uniform");
+        a.correct(&gpu, &gm, &t).expect("correct");
+        let want = gpu.download(a.source_buf()).expect("q");
+
+        let mut b = Thermostat::new(&gpu, &gm, 350.0, 0.02, 1206.0).expect("uniform");
+        b.correct_with_flow(&gpu, &gm, &t, &rho_d, &u_d).expect("correct");
+        let got = gpu.download(b.source_buf()).expect("q");
+
+        assert_eq!(b.weighting(), ThermostatWeighting::Uniform);
+        assert_eq!(b.net_and_gross_flux(), (0.0, 0.0));
+        for c in 0..m.n_cells {
+            assert_eq!(got[c].to_bits(), want[c].to_bits(), "cell {c}");
+        }
+    }
+
+    /// SPEC-LIT §35.3.5 point 1: an explicit direction is normalised and
+    /// used, and a degenerate one is refused.
+    #[test]
+    fn an_explicit_direction_is_normalised_and_a_degenerate_one_refused() {
+        let m = boxed();
+        let e = resolve_streamwise_direction(&m, "th", Some(Vec3::new(0.0, 3.0, 4.0)))
+            .expect("an explicit direction needs no cyclic pair");
+        assert!((e.x).abs() < 1e-15);
+        assert!((e.y - 0.6).abs() < 1e-12, "{e:?}");
+        assert!((e.z - 0.8).abs() < 1e-12, "{e:?}");
+
+        assert!(resolve_streamwise_direction(&m, "th", Some(Vec3::ZERO)).is_err());
+        assert!(resolve_streamwise_direction(
+            &m,
+            "th",
+            Some(Vec3::new(Scalar::NAN, 0.0, 0.0))
+        )
+        .is_err());
+    }
+
+    /// SPEC-LIT §35.3.5 point 2: with EXACTLY ONE cyclic pair and no
+    /// `direction`, `e_hat` is that pair's own axis.
+    #[test]
+    fn one_cyclic_pair_supplies_the_direction() {
+        let m = cyclic_block(&[0]);
+        let e = resolve_streamwise_direction(&m, "th", None).expect("one pair");
+        // The sign is immaterial (§35.3.4) but the convention is documented:
+        // a standard xMin/xMax pair reads as +x.
+        assert!((e.x - 1.0).abs() < 1e-12, "{e:?}");
+        assert!(e.y.abs() < 1e-12 && e.z.abs() < 1e-12, "{e:?}");
+
+        let my = cyclic_block(&[1]);
+        let ey = resolve_streamwise_direction(&my, "th", None).expect("one pair");
+        assert!((ey.y - 1.0).abs() < 1e-12, "{ey:?}");
+    }
+
+    /// SPEC-LIT §35.3.5 points 3 and 4: no pair, or several, is a §13.4
+    /// ERROR - picking one would be a guess.
+    #[test]
+    fn no_pair_or_several_refuses_rather_than_guessing() {
+        let none = boxed();
+        let err = resolve_streamwise_direction(&none, "th", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no cyclic pair"), "{err}");
+        assert!(err.contains("direction"), "{err}");
+
+        let two = cyclic_block(&[0, 1]);
+        let err = resolve_streamwise_direction(&two, "th", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2 cyclic pairs"), "{err}");
+        // and it names them, so the case author can pick
+        assert!(err.contains("xMin") || err.contains("xmin"), "{err}");
+    }
+
+    /// SPEC-LIT §35.3.5: `direction` alongside `weighting uniform` is a
+    /// §13.4 error - uniform has no direction to use, so reading it and
+    /// ignoring it is exactly the silent drop §13.4 forbids.
+    #[test]
+    fn a_direction_on_a_uniform_thermostat_is_refused() {
+        let ok = SourceTerm::Thermostat {
+            target: 350.0,
+            tau: Some(0.02),
+            weighting: ThermostatWeighting::Uniform,
+            direction: None,
+        };
+        assert!(ok.validate("th").is_ok());
+
+        let bad = SourceTerm::Thermostat {
+            target: 350.0,
+            tau: Some(0.02),
+            weighting: ThermostatWeighting::Uniform,
+            direction: Some(Vec3::new(1.0, 0.0, 0.0)),
+        };
+        let err = bad.validate("th").unwrap_err().to_string();
+        assert!(err.contains("uniform"), "{err}");
+        assert!(err.contains("massFlux"), "{err}");
+    }
+
+    /// The same validation on the massFlux side: an explicit direction has to
+    /// BE a direction (SPEC-LIT §35.3.5 point 1). `None` is a different and
+    /// legal thing - "take it from the mesh".
+    #[test]
+    fn a_degenerate_direction_on_a_mass_flux_thermostat_is_refused() {
+        let mk = |d: Option<Vec3>| SourceTerm::Thermostat {
+            target: 350.0,
+            tau: Some(0.02),
+            weighting: ThermostatWeighting::MassFlux,
+            direction: d,
+        };
+        assert!(mk(None).validate("th").is_ok());
+        assert!(mk(Some(Vec3::new(1.0, 0.0, 0.0))).validate("th").is_ok());
+        assert!(mk(Some(Vec3::ZERO)).validate("th").is_err());
+        assert!(mk(Some(Vec3::new(Scalar::INFINITY, 0.0, 0.0)))
+            .validate("th")
+            .is_err());
+    }
+
+    /// `Thermostat::new_mass_flux` refuses the same degenerate directions its
+    /// case-file validation does, so the error cannot be routed around by
+    /// building one directly.
+    #[test]
+    fn new_mass_flux_refuses_a_degenerate_direction() {
+        let m = boxed();
+        let Some((gpu, gm)) = gpu_mesh(&m) else { return };
+        assert!(
+            Thermostat::new_mass_flux(&gpu, &gm, 350.0, 0.02, 1206.0, Vec3::ZERO).is_err()
+        );
+        assert!(Thermostat::new_mass_flux(
+            &gpu,
+            &gm,
+            350.0,
+            0.02,
+            1206.0,
+            Vec3::new(0.0, Scalar::NAN, 0.0)
+        )
+        .is_err());
+    }
+
     // ---- read_sources: the OpenFOAM `constant/fvSources` route -------------
 
     fn write_fv_sources(body: &str) -> std::path::PathBuf {
@@ -1756,9 +2754,17 @@ mod tests {
         assert_eq!(specs[0].field, "T");
         assert_eq!(specs[0].selector, CellSelector::All);
         match specs[0].term {
-            Some(SourceTerm::Thermostat { target, tau }) => {
+            Some(SourceTerm::Thermostat {
+                target,
+                tau,
+                weighting,
+                direction,
+            }) => {
                 assert_eq!(target, 350.0);
                 assert_eq!(tau, Some(0.02));
+                // SPEC-LIT §35.3.6: `weighting` omitted is `uniform`.
+                assert_eq!(weighting, ThermostatWeighting::Uniform);
+                assert_eq!(direction, None);
             }
             ref other => panic!("expected Some(Thermostat), got {other:?}"),
         }
@@ -1791,6 +2797,113 @@ mod tests {
         };
         assert!(err.contains("thermostat"), "{err}");
         assert!(err.contains("\"all\""), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §35.3.7: the OpenFOAM route reads `weighting` and
+    /// `direction`.
+    #[test]
+    fn read_sources_parses_a_mass_flux_thermostat() {
+        let dir = write_fv_sources(
+            "thermostat
+{
+    type thermostat;
+    target 293.15;
+    tau 0.02;
+                 weighting massFlux;
+    direction (1 0 0);
+}
+",
+        );
+        let specs = read_sources(&dir).expect("read_sources");
+        match specs[0].term {
+            Some(SourceTerm::Thermostat {
+                weighting,
+                direction,
+                ..
+            }) => {
+                assert_eq!(weighting, ThermostatWeighting::MassFlux);
+                assert_eq!(direction, Some(Vec3::new(1.0, 0.0, 0.0)));
+            }
+            ref other => panic!("expected Some(Thermostat), got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `direction` omitted stays `None` - SPEC-LIT §35.3.5 point 2 resolves
+    /// it from the mesh, which this reader has not got.
+    #[test]
+    fn read_sources_leaves_an_absent_direction_to_the_mesh() {
+        let dir = write_fv_sources(
+            "thermostat
+{
+    type thermostat;
+    target 293.15;
+                 weighting massFlux;
+}
+",
+        );
+        let specs = read_sources(&dir).expect("read_sources");
+        match specs[0].term {
+            Some(SourceTerm::Thermostat {
+                weighting,
+                direction,
+                ..
+            }) => {
+                assert_eq!(weighting, ThermostatWeighting::MassFlux);
+                assert_eq!(direction, None);
+            }
+            ref other => panic!("expected Some(Thermostat), got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §13.4: a `weighting` this solver does not have is refused,
+    /// naming the two it does.
+    #[test]
+    fn read_sources_refuses_an_unknown_weighting() {
+        let _g = crate::io::contract::permissive_test_guard();
+        let dir = write_fv_sources(
+            "thermostat
+{
+    type thermostat;
+    target 350.0;
+                 weighting bulkVelocity;
+}
+",
+        );
+        let err = match read_sources(&dir) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected an unknown weighting to be refused"),
+        };
+        assert!(err.contains("bulkVelocity"), "{err}");
+        assert!(err.contains("uniform"), "{err}");
+        assert!(err.contains("massFlux"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §35.3.5: `direction` on a uniform thermostat is refused at
+    /// `build` time, where the term is validated - the reader itself only
+    /// records what the case said.
+    #[test]
+    fn read_sources_refuses_a_direction_on_a_uniform_thermostat() {
+        let dir = write_fv_sources(
+            "thermostat
+{
+    type thermostat;
+    target 350.0;
+                 direction (1 0 0);
+}
+",
+        );
+        let specs = read_sources(&dir).expect("read_sources");
+        let err = specs[0]
+            .term
+            .expect("a term")
+            .validate("thermostat")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("uniform"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

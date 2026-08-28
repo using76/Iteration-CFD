@@ -95,6 +95,71 @@
 // (293.574 K, every printed digit) from either start - see that file's own
 // header and `docs/07-fire-solver.md` S1.1 for the full table.
 // ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S32.4/S32.5, WHICH FRICTION FACTOR - comments only; the
+// case itself is byte-for-byte the one every number above was measured with):
+// the Gnielinski -4.5% above is an ABSOLUTE-PREDICTION verdict, taken at
+// Petukhov's SMOOTH-PIPE f = 0.02391. This leg also passes the REYNOLDS-
+// ANALOGY verdict - Gnielinski at the f this leg itself realises, 0.02162
+// (-9.6% BELOW the pipe correlation), gives Nu_Gn = 61.30 and +6.4%. S32.4
+// requires every band statement to name which f it used; the two are
+// different claims and the second is the weaker one. That f is INFERRED from
+// the force balance on this file's own `bodyForce`, not measured at the wall
+// - `ofgpu-fire` now measures the wall traction directly and prints both,
+// but this case has NOT been rerun. See docs/07-fire-solver.md S1.1.
+// SUPERSEDED: it has since been rerun, and the measured f retired the
+// Reynolds-analogy verdict above - see the S32.5.3/S35.3 block at the end of
+// this header.
+// ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S32.5.3/S35.3 - THE GATE RERUN, and THIS FILE CHANGED):
+// the thermostat above now carries `"weighting": "massFlux"`. Every number
+// in the blocks above was measured with the UNIFORM sink and is kept as the
+// record; the numbers below are what this file, as it now stands, produces.
+//
+// CONTROL FIRST: rerunning this case with the token set back to "uniform"
+// reproduces every recorded number above to the last printed digit
+// (T_b = 293.283 K, T_w = 317.253 K, U_b = 5.3696 m/s, Nu = 65.2386,
+// thermostat power -3.2 W, y+ 56.80/57.69/58.50). That is what makes the
+// pair below a controlled comparison and not two different states.
+//
+// THIS FILE AS SHIPPED (massFlux, 40 000 iterations):
+//   T_b = 293.256 K | T_w = 317.567 K | dT = 24.3109 K | U_b = 5.36659 m/s
+//   Re = 28,622 | Nu = 64.3168 (was 65.2386: -1.41%)
+//   y+ 56.77/57.66/58.46 | thermostat power -3.20335 W against 3.2 W of wall
+//   heat, a +0.105% gap (the uniform sink closed it to 2.8e-7 W)
+//
+// VERDICTS (S32.4 - every band statement names its f, and carries this leg's
+// own energy-balance gap as an uncertainty on Nu):
+//   * ABSOLUTE PREDICTION, Gnielinski at the Petukhov smooth-PIPE
+//     f = 0.023911: Nu_Gn = 68.2975, measured is -5.8% - INSIDE +-10%.
+//     Dittus-Boelter 73.7206, -12.8% - inside its own band. This leg still
+//     CLOSES on both correlations, and its 0.105% energy gap is far narrower
+//     than either margin.
+//   * REYNOLDS ANALOGY, at the f this leg's WALL now MEASURES: f = 0.017247
+//     (S32.5.1's wall-function form, rho u_tau^2 with u_tau = Cmu^1/4
+//     sqrt(k_P)), Nu_Gn = 48.0673, measured is +33.8% - OUTSIDE. At the
+//     VISCOUS form of the same measurement (0.019960) it is +14.4%, also
+//     outside. The "+6.4%, inside the band" this header used to report was
+//     taken at f = 0.02162, INFERRED from the body force - the inference was
+//     8-25% high and the verdict it produced does not survive measurement.
+//
+// FORCE BALANCE (S32.5.2's correction - this crate's momentum equation
+// carries no density, so the balance is taken in KINEMATIC units): body force
+// (g.e_hat) V = 4.9920e-4 m4/s2 against a viscous wall sink of 4.98638e-4 -
+// -0.113%, and +0.001% on the uniform control. THIS leg is where that
+// identity was measured: `wall_shear`'s viscous form IS the discrete momentum
+// sink, on a real turbulent flow. The rho u_tau^2 form misses the same
+// balance by -13.6%, which is this wall function's own distance from local
+// equilibrium, quantified for the first time.
+//
+// See docs/07-fire-solver.md S1.1's last subsection for the full account,
+// including the isothermal controls and a S13.4 defect found on the way
+// (ofgpu-fire does not read numerics.div["div(phi,U)"] or
+// numerics.relaxation.U at all).
+// ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
   "name": "channelPeriodicFluxWF",
@@ -140,7 +205,7 @@
     // `channelPeriodicFluxLowRe.jsonc`'s own copy) - the two legs are now
     // compared at the SAME bulk state, which S32/S34's fixed-sink versions
     // were not (S35's own point).
-    { "type": "thermostat", "target": 293.15, "tau": 0.02 },
+    { "type": "thermostat", "target": 293.15, "tau": 0.02, "weighting": "massFlux" },
   ],
 
   "patches": [

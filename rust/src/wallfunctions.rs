@@ -30,6 +30,15 @@
 //!   ofgpu `SPEC-LIT.md` §15.3/§29.2 - the downshift itself, and `E_eff`, the
 //!     single substitution every relation containing `ln(E y+)` shifts
 //!     through; `Ks+` iterates with `u_tau` in the Newton above
+//!   Dittus & Boelter, *Univ. Calif. Publ. Eng.* 2 (1930) 443, and
+//!     Gnielinski, *Int. Chem. Eng.* 16 (1976) 359 - SPEC-LIT §32.3's two
+//!     independent Nusselt-number references
+//!   R. C. Jones Jr., *ASME J. Fluids Eng.* 98 (1976) 173 - why a
+//!     parallel-plate channel's friction factor is NOT a smooth pipe's at
+//!     the same `Re_Dh`, which is what SPEC-LIT §32.5 and
+//!     [`gnielinski_nu_at_f`] exist for
+//!   ofgpu `SPEC-LIT.md` §32.5 - the realised friction factor, measured
+//!     ([`wall_shear`]) rather than inferred
 //! No GPL-licensed source was consulted.
 //!
 //! # The two design decisions, in one paragraph each
@@ -1308,9 +1317,320 @@ pub fn gnielinski_f(re: Scalar) -> Scalar {
 
 #[inline]
 pub fn gnielinski_nu(re: Scalar, pr: Scalar) -> Scalar {
-    let f = gnielinski_f(re);
+    gnielinski_nu_at_f(gnielinski_f(re), re, pr)
+}
+
+// ==========================================================================
+//  §32.5  The friction factor the run REALISES
+// ==========================================================================
+//
+// Gnielinski above is a function of TWO arguments, not one: `Re` and the
+// duct's friction factor `f`. [`gnielinski_f`] supplies the second from
+// Petukhov's SMOOTH-PIPE correlation, which is the right choice only when
+// the duct being judged is a pipe. A parallel-plate channel compared at the
+// same `Re_Dh` runs a measurably HIGHER `f` than a pipe does (Jones, *ASME
+// J. Fluids Eng.* 98 (1976) 173 - the laminar-equivalent-diameter analysis
+// and the turbulent data behind it), so Gnielinski evaluated at the pipe `f`
+// is not Gnielinski evaluated for this geometry.
+//
+// The two evaluations answer DIFFERENT questions, and SPEC-LIT §32.4 now
+// requires a verdict to say which it used:
+//
+//   * at the correlation `f`  -> the ABSOLUTE-PREDICTION question: from `Re`
+//     alone, is the heat transfer right?
+//   * at the `f` the run itself realises -> the REYNOLDS-ANALOGY question:
+//     given the momentum this model actually transports, does it transport
+//     heat consistently with it?
+//
+// Neither subsumes the other, and the second is the weaker claim. What makes
+// it a claim at all rather than a tautology is that `f` and `Nu` are
+// measured from DIFFERENT fields - the velocity gradient at the wall, and
+// the temperature difference across the duct - and are connected only by a
+// published correlation neither of them was fitted to.
+//
+// The point of this section is that `f` must be MEASURED, not inferred.
+// [`wall_shear`] measures it from the wall-face traction the solver's own
+// matrix is assembled from; [`darcy_friction_factor`] converts. The
+// body-force balance is retained as an INDEPENDENT cross-check, never as a
+// substitute - SPEC-LIT §32.5.2.
+
+/// Gnielinski's Nusselt number at a SUPPLIED Darcy friction factor -
+/// SPEC-LIT §32.5. [`gnielinski_nu`] is this function at
+/// [`gnielinski_f`]`(re)`, and is therefore the smooth-PIPE evaluation; a
+/// non-circular duct's own measured `f` goes in here instead.
+///
+/// `f` is the DARCY (Moody) friction factor, four times the Fanning one -
+/// the same convention Petukhov's `(0.79 ln Re - 1.64)^-2` is written in and
+/// the same one [`darcy_friction_factor`] returns.
+#[inline]
+pub fn gnielinski_nu_at_f(f: Scalar, re: Scalar, pr: Scalar) -> Scalar {
     let f8 = f / 8.0;
     (f8 * (re - 1000.0) * pr) / (1.0 + 12.7 * f8.sqrt() * (pr.powf(2.0 / 3.0) - 1.0))
+}
+
+/// `f = 8 tau_w / (rho U_b^2)` - the DARCY friction factor, SPEC-LIT §32.5.
+///
+/// `rho` is the BULK density, the one paired with `U_b` in the reference
+/// dynamic pressure, so that two `tau_w` estimates fed through this function
+/// differ only in `tau_w` and their comparison isolates the wall shear
+/// itself.
+#[inline]
+pub fn darcy_friction_factor(tau_w: Scalar, rho: Scalar, u_b: Scalar) -> Scalar {
+    8.0 * tau_w / (rho * u_b * u_b)
+}
+
+/// Which of the two `tau_w` forms one wall patch's traction was taken from -
+/// SPEC-LIT §32.5.1. Reported per patch, never averaged over: a mesh with a
+/// resolved wall and a modelled wall in it is a legitimate case, and a single
+/// headline number that hid which form produced it would be exactly the
+/// ambiguity this enum exists to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallShearForm {
+    /// `tau_w = mu_eff |dU_par/dn|` at the wall face, with `mu_eff = rho (nu
+    /// + nu_t,w)` and `dU_par/dn` built from the SAME `b_delta_coeffs` the
+    /// momentum matrix's own wall diffusion term is assembled from.
+    ///
+    /// EXACT wherever `nu_t,w` is either pinned to zero by a resolved
+    /// sublayer (`lowRe`, SPEC-LIT §15.2) or DEFINED as the value that
+    /// reproduces that model's own `tau_w` through this very expression -
+    /// which is what §15.1's `nutU` family and §30.1's Werner-Wengle both
+    /// do: substituting their `nu_t,w = u_tau^2 y/|U_P| - nu` back in leaves
+    /// `rho u_tau^2` identically. Those treatments therefore belong HERE and
+    /// not under [`Self::WallFunctionK`], even though they are wall
+    /// functions.
+    Viscous,
+    /// `tau_w = rho u_tau^2` with `u_tau = C_mu^{1/4} sqrt(k_P)`
+    /// ([`u_tau_of`]) - the equilibrium wall function's OWN friction
+    /// velocity, SPEC-LIT §29.3, the same one the `nutk` family builds `y+`,
+    /// `nu_t,w` and `T+` from. Used on a face whose `nut` treatment is
+    /// k-based, on a mesh that solves a `k`.
+    WallFunctionK,
+}
+
+impl WallShearForm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Viscous => "viscous (mu_eff dU_par/dn)",
+            Self::WallFunctionK => "wall function (rho u_tau^2, u_tau = Cmu^1/4 sqrt(k_P))",
+        }
+    }
+}
+
+/// One wall patch's row of [`wall_shear`]'s report - SPEC-LIT §32.5.1.
+#[derive(Debug, Clone)]
+pub struct WallShearPatch {
+    /// Index into [`HostMesh::patches`].
+    pub patch: usize,
+    /// Which form [`Self::tau_w`] and [`Self::tau_w_mag`] were taken from.
+    pub form: WallShearForm,
+    pub area: Scalar,
+    /// Area-mean traction projected on `e_hat`, positive when the wall
+    /// RETARDS a flow running along `+e_hat`.
+    pub tau_w: Scalar,
+    /// Area-mean traction MAGNITUDE - direction-free, so its excess over
+    /// [`Self::tau_w`] is the cross-flow the projection dropped.
+    pub tau_w_mag: Scalar,
+    /// The OTHER form's area-mean magnitude on the same faces, where it could
+    /// be evaluated at all: `None` when there is no `k` field for the
+    /// wall-function form to read. Never mixed into the totals - it is a
+    /// cross-check to print, and its disagreement with [`Self::tau_w_mag`] is
+    /// a finding about the wall treatment, not a number to average away.
+    pub tau_w_other: Option<Scalar>,
+}
+
+/// [`wall_shear`]'s whole-domain totals - SPEC-LIT §32.5.1.
+#[derive(Debug, Clone)]
+pub struct WallShear {
+    pub area: Scalar,
+    /// `sum_f (tau_f . e_hat) A_f`, N - the streamwise force the walls take
+    /// out of the fluid, in the form each patch's own wall treatment defines
+    /// it (SPEC-LIT §32.5.1).
+    pub drag: Scalar,
+    /// The same sum in the KINEMATIC units this crate's momentum equation is
+    /// actually written in, and always from the VISCOUS form:
+    /// `sum_f nu_eff,f |dU_par| deltaCoeffs_f |Sf|_f cos_f`, m^4/s^2.
+    ///
+    /// This - not [`Self::drag`] - is the term the assembled momentum matrix
+    /// carries, so this is the one SPEC-LIT §32.5.2's body-force cross-check
+    /// compares against `(g . e_hat) V`. `crate::momentum` assembles
+    /// `ddt(U) + div(phi,U) - laplacian(nu_eff,U) = g` with no density
+    /// anywhere in it, so a comparison made in newtons (against
+    /// `(g . e_hat) sum_c rho_c V_c`) carries a systematic
+    /// `rho_bar/rho_wall` error - 7.6 % on §32.5.3's own wall-function leg,
+    /// where it hid the fact that the kinematic balance closes to
+    /// `+0.000 %`.
+    ///
+    /// The VISCOUS form is used on every patch, wall-function ones included,
+    /// because it is the discrete sink there too: a `nutk` wall function
+    /// enters the momentum matrix through its `nu_t,w`, not through
+    /// `rho u_tau^2`. [`Self::drag`] keeps whichever form §32.5.1 selects for
+    /// reporting; these two are never mixed.
+    pub drag_kin: Scalar,
+    /// [`Self::drag`] / [`Self::area`].
+    pub tau_w: Scalar,
+    /// Area-mean traction magnitude over every wall face.
+    pub tau_w_mag: Scalar,
+    pub n_faces: usize,
+    pub by_patch: Vec<WallShearPatch>,
+}
+
+impl WallShear {
+    /// Every form that appears in [`Self::by_patch`], in first-appearance
+    /// order - what a report prints so a reader is never left guessing which
+    /// `tau_w` definition a headline number came from.
+    pub fn forms(&self) -> Vec<WallShearForm> {
+        let mut out: Vec<WallShearForm> = Vec::new();
+        for r in &self.by_patch {
+            if !out.contains(&r.form) {
+                out.push(r.form);
+            }
+        }
+        out
+    }
+}
+
+/// Measure `tau_w` at every `wall`-kind boundary face - SPEC-LIT §32.5.1.
+///
+/// The wall-parallel relative velocity is `dU_par = (U_P - U_w) - ((U_P -
+/// U_w).n) n` with `n` the OUTWARD unit normal; the wall's own velocity is
+/// read from `u_bf` rather than assumed zero, so a moving wall is measured
+/// correctly without a second code path. The traction direction is
+/// `dU_par`'s own, and its magnitude is one of the two [`WallShearForm`]s:
+///
+/// * a face flagged in `k_based_wall_function` takes
+///   [`WallShearForm::WallFunctionK`] when there is a `k` field to read;
+/// * every other face takes [`WallShearForm::Viscous`], which is EXACT for
+///   all of them - `lowRe` and laminar walls because `nu_t,w = 0` makes
+///   `mu_eff` molecular, and the velocity-based wall functions (§15.1's
+///   `nutU`, §30.1's Werner-Wengle) because their `nu_t,w` is defined as the
+///   value that reproduces their own `tau_w` through this very expression.
+///
+/// Both forms are evaluated wherever both can be, and the unused one is
+/// reported per patch as [`WallShearPatch::tau_w_other`]. Nothing here is
+/// averaged between them.
+///
+/// `k_based_wall_function[bf]` is the caller's answer to "does this face's
+/// `nut` treatment derive `nu_t,w` from `k`?" - one `bool` per boundary
+/// face, in [`HostMesh::b_face_cells`] order. For a case read through
+/// `field_setup` that is
+/// [`crate::field_setup::WallFaces::nut`]`[bf] && !`[`crate::field_setup::NutRoughness::u_based`]`[bf]`:
+/// a `nut` wall function that is not one of the velocity-based ones.
+#[allow(clippy::too_many_arguments)]
+pub fn wall_shear(
+    m: &HostMesh,
+    e_hat: crate::Vec3,
+    u_internal: &[crate::Vec3],
+    u_bf: &[crate::Vec3],
+    rho_bf: &[Scalar],
+    nut_bf: &[Scalar],
+    k_internal: Option<&[Scalar]>,
+    k_based_wall_function: &[bool],
+    nu: Scalar,
+    cmu: Scalar,
+) -> WallShear {
+    let mut total_area = 0.0f64;
+    let mut total_drag = 0.0f64;
+    let mut total_drag_kin = 0.0f64;
+    let mut total_mag = 0.0f64;
+    let mut n_faces = 0usize;
+    let mut by_patch: Vec<WallShearPatch> = Vec::new();
+
+    for (pi, patch) in m.patches.iter().enumerate() {
+        if patch.kind != crate::mesh::PatchKind::Wall || patch.size == 0 {
+            continue;
+        }
+        let mut area = 0.0f64;
+        let mut drag = 0.0f64;
+        let mut mag = 0.0f64;
+        let mut other = 0.0f64;
+        let mut other_ok = true;
+        // One patch carries one wall treatment in every route this crate
+        // reads a case from (SPEC-LIT §29.1 resolves the row PER PATCH), so
+        // the form is settled by the patch's faces and they agree by
+        // construction; taking it per face anyway costs nothing and cannot be
+        // wrong if that ever stops being true.
+        let mut form = WallShearForm::Viscous;
+
+        for i in 0..patch.size {
+            let bf = patch.start + i;
+            let cell = m.b_face_cells[bf] as usize;
+            let a = f64::from(m.b_mag_sf[bf]);
+            let n = if m.b_mag_sf[bf] > 0.0 {
+                m.b_sf[bf] / m.b_mag_sf[bf]
+            } else {
+                crate::Vec3::ZERO
+            };
+            let du = u_internal[cell] - u_bf[bf];
+            let du_par = du - n * du.dot(n);
+            let speed = f64::from(du_par.mag());
+            // The cosine between the near-wall slip and `e_hat`. A face with
+            // no slip at all - a stagnation point, or a motionless domain -
+            // carries zero traction in BOTH forms, which is what `speed == 0`
+            // gives here without a special case.
+            let cos = if speed > 0.0 {
+                f64::from(du_par.dot(e_hat)) / speed
+            } else {
+                0.0
+            };
+
+            let rho = f64::from(rho_bf[bf]);
+            let mu_eff = rho * (f64::from(nu) + f64::from(nut_bf[bf]));
+            let tau_visc = mu_eff * speed * f64::from(m.b_delta_coeffs[bf]);
+            let tau_wf = k_internal.map(|k| {
+                let u_tau = f64::from(u_tau_of(k[cell].max(0.0), cmu));
+                rho * u_tau * u_tau
+            });
+
+            let (tau, tau_other) = match (k_based_wall_function[bf], tau_wf) {
+                (true, Some(t)) => {
+                    form = WallShearForm::WallFunctionK;
+                    (t, Some(tau_visc))
+                }
+                (true, None) | (false, _) => (tau_visc, tau_wf),
+            };
+
+            n_faces += 1;
+            area += a;
+            drag += tau * cos * a;
+            // SPEC-LIT §32.5.2's cross-check quantity: the viscous form,
+            // divided by the same `rho` it was just multiplied by, which is
+            // `nu_eff |dU_par| deltaCoeffs |Sf|` - the momentum matrix's own
+            // wall term. Written this way rather than recomputed so the two
+            // cannot drift apart.
+            if rho > 0.0 {
+                total_drag_kin += tau_visc / rho * cos * a;
+            }
+            mag += tau * a;
+            match tau_other {
+                Some(t) => other += t * a,
+                None => other_ok = false,
+            }
+        }
+
+        total_area += area;
+        total_drag += drag;
+        total_mag += mag;
+        let inv = if area > 0.0 { 1.0 / area } else { 0.0 };
+        by_patch.push(WallShearPatch {
+            patch: pi,
+            form,
+            area: area as Scalar,
+            tau_w: (drag * inv) as Scalar,
+            tau_w_mag: (mag * inv) as Scalar,
+            tau_w_other: if other_ok { Some((other * inv) as Scalar) } else { None },
+        });
+    }
+
+    let inv = if total_area > 0.0 { 1.0 / total_area } else { 0.0 };
+    WallShear {
+        area: total_area as Scalar,
+        drag: total_drag as Scalar,
+        drag_kin: total_drag_kin as Scalar,
+        tau_w: (total_drag * inv) as Scalar,
+        tau_w_mag: (total_mag * inv) as Scalar,
+        n_faces,
+        by_patch,
+    }
 }
 
 /// The `ref_grad` that rewrites a fixed-T wall's Robin triple to encode the
@@ -3241,5 +3561,406 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §32.5: the friction factor the run REALISES
+    // ----------------------------------------------------------------------
+
+    /// A wall-normal-in-`y` channel: `box_mesh`'s `ymin`/`ymax` are its only
+    /// two `wall` patches (`xmin`/`xmax` are `Generic`, `zmin`/`zmax` are
+    /// `Empty`), which is exactly the plane-channel layout SPEC-LIT §34
+    /// rebuilt the two gate cases into.
+    fn channel_mesh(ny: usize, h: Scalar) -> HostMesh {
+        let d = crate::Vec3::new(1.0, h / ny as Scalar, 1.0);
+        let (mut m, points, faces) = crate::mesh::topology::tests::box_mesh([1, ny, 1], d);
+        m.compute_geometry(&points, &faces).expect("box geometry");
+        m.build_cell_face_maps();
+        m
+    }
+
+    /// A LINEAR profile makes the one-cell wall-normal gradient EXACT, so
+    /// `mu_eff dU_par/dn` has a closed form to check against rather than a
+    /// discretisation error to tolerate. Couette between a wall at rest and a
+    /// wall moving at `S H`: both walls carry `tau = mu S`, and the two
+    /// tractions OPPOSE each other, so the streamwise total is zero while the
+    /// magnitude mean is `mu S`. That the totals differ is the whole point of
+    /// reporting both.
+    #[test]
+    fn wall_shear_viscous_form_is_exact_on_a_linear_profile() {
+        let (ny, h): (usize, Scalar) = (4, 1.0);
+        let m = channel_mesh(ny, h);
+        let nbf = m.n_boundary_faces;
+
+        let (nu, rho, s): (Scalar, Scalar, Scalar) = (2.0, 1.5, 3.0);
+        let dy = h / ny as Scalar;
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|c| crate::Vec3::new(s * m.c[c].y, 0.0, 0.0))
+            .collect();
+        // The moving wall's own velocity, read from the boundary field - the
+        // reason `wall_shear` subtracts `u_bf` instead of assuming zero.
+        let mut u_bf = vec![crate::Vec3::ZERO; nbf];
+        for p in &m.patches {
+            if p.name == "ymax" {
+                for i in 0..p.size {
+                    u_bf[p.start + i] = crate::Vec3::new(s * h, 0.0, 0.0);
+                }
+            }
+        }
+
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &u_bf,
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            nu,
+            0.09,
+        );
+
+        let want = rho * nu * s; // mu * dU/dy, exact for a linear profile
+        assert_eq!(ws.n_faces, 2, "one face per wall on a 1 x ny x 1 mesh");
+        assert!(
+            (ws.area - 2.0).abs() < 1e-12,
+            "two 1 x 1 walls, got area {}",
+            ws.area
+        );
+        assert!(
+            (ws.tau_w_mag - want).abs() < 1e-12 * want,
+            "tau_w magnitude {} against the closed form {want}",
+            ws.tau_w_mag
+        );
+        // ymin retards the fluid (+e_hat), ymax drives it (-e_hat): equal and
+        // opposite, so the streamwise total cancels exactly.
+        assert!(
+            ws.drag.abs() < 1e-12 * want,
+            "Couette's two tractions must cancel in the streamwise total, got {}",
+            ws.drag
+        );
+        assert_eq!(ws.by_patch.len(), 2);
+        for r in &ws.by_patch {
+            assert_eq!(r.form, WallShearForm::Viscous);
+            assert!((r.tau_w_mag - want).abs() < 1e-12 * want);
+            assert!(
+                r.tau_w_other.is_none(),
+                "no k field, so the wall-function form has nothing to read"
+            );
+        }
+        let (lo, hi) = (&ws.by_patch[0], &ws.by_patch[1]);
+        assert!(lo.tau_w > 0.0 && hi.tau_w < 0.0, "opposite streamwise signs");
+        // `dy` is what makes the gradient exact; keep the reader's eye on it.
+        assert!(dy > 0.0);
+    }
+
+    /// SPEC-LIT §32.5.2's corrected cross-check quantity. `drag_kin` is the
+    /// term the momentum matrix itself carries -
+    /// `sum nu_eff |dU_par| deltaCoeffs |Sf| cos` - so on a uniform-density
+    /// field it must be exactly `drag / rho`, and on a plane Poiseuille field
+    /// it must reproduce the body force that drives it, up to the ONE-CELL
+    /// error of the wall gradient (`1 - 1/(2 n_y)`, the closed form
+    /// `ofgpu-validate`'s own live check uses).
+    #[test]
+    fn wall_shear_kinematic_drag_is_the_momentum_matrix_s_own_wall_term() {
+        let (ny, h): (usize, Scalar) = (8, 1.0);
+        let m = channel_mesh(ny, h);
+        let nbf = m.n_boundary_faces;
+
+        let (nu, rho, g_x): (Scalar, Scalar, Scalar) = (2.0, 1.5, 3.0);
+        // u(y) = (g_x/(2 nu)) y (h - y): the exact solution of
+        // `-laplacian(nu, U) = g_x` between two no-slip walls, which is the
+        // equation `crate::momentum` assembles - no density in it anywhere.
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|c| {
+                let y = m.c[c].y;
+                crate::Vec3::new(g_x / (2.0 * nu) * y * (h - y), 0.0, 0.0)
+            })
+            .collect();
+
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &vec![crate::Vec3::ZERO; nbf],
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            nu,
+            0.09,
+        );
+
+        // 1. On a uniform-density field the kinematic total is the newton
+        //    total divided by that one density, exactly.
+        assert!(
+            (ws.drag_kin - ws.drag / rho).abs() <= 1e-14 * (ws.drag / rho).abs(),
+            "drag_kin {} against drag/rho {}",
+            ws.drag_kin,
+            ws.drag / rho
+        );
+
+        // 2. And it reproduces the KINEMATIC body force `g_x V` up to the
+        //    one-cell error of a parabola's wall gradient. `rho` must not
+        //    appear in that statement - which is the whole point of §32.5.2's
+        //    correction, since the compressible form would need one.
+        let volume: Scalar = m.v.iter().sum();
+        let want = g_x * volume * (1.0 - 1.0 / (2.0 * ny as Scalar));
+        assert!(
+            (ws.drag_kin - want).abs() <= 1e-12 * want,
+            "drag_kin {} against g_x V (1 - 1/(2 n_y)) = {want}",
+            ws.drag_kin
+        );
+    }
+
+    /// A face carrying a `nut` wall function takes the wall function's OWN
+    /// `tau_w = rho u_tau^2`, `u_tau = Cmu^{1/4} sqrt(k_P)` - not the viscous
+    /// gradient, which is reported alongside it as `tau_w_other` and never
+    /// averaged in.
+    #[test]
+    fn wall_shear_wall_function_form_uses_u_tau_of_k() {
+        let (ny, h): (usize, Scalar) = (4, 1.0);
+        let m = channel_mesh(ny, h);
+        let nbf = m.n_boundary_faces;
+
+        let (nu, rho, cmu, k0): (Scalar, Scalar, Scalar, Scalar) = (2.0, 1.5, 0.09, 0.4);
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|_| crate::Vec3::new(5.0, 0.0, 0.0))
+            .collect();
+
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &vec![crate::Vec3::ZERO; nbf],
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            Some(&vec![k0; m.n_cells]),
+            &vec![true; nbf],
+            nu,
+            cmu,
+        );
+
+        let u_tau = u_tau_of(k0, cmu);
+        let want = rho * u_tau * u_tau;
+        assert!(
+            (ws.tau_w_mag - want).abs() < 1e-12 * want,
+            "wall-function tau_w {} against rho (Cmu^1/4 sqrt(k))^2 = {want}",
+            ws.tau_w_mag
+        );
+        assert_eq!(ws.forms(), vec![WallShearForm::WallFunctionK]);
+        for r in &ws.by_patch {
+            assert_eq!(r.form, WallShearForm::WallFunctionK);
+            let other = r.tau_w_other.expect("the viscous cross-check is available here");
+            assert!(other > 0.0 && (other - want).abs() > 1e-6 * want,
+                "the cross-check must be the OTHER form's number, not a copy of this one");
+        }
+    }
+
+    /// A VELOCITY-based wall function (SPEC-LIT §15.1 `nutU`, §30.1
+    /// Werner-Wengle) is not flagged k-based, so it falls to the viscous
+    /// form even with a `k` field present - correct, because substituting its
+    /// own `nu_t,w` back into `rho (nu + nu_t,w) |U_P|/y` returns that
+    /// treatment's own `rho u_tau^2`, whereas `Cmu^{1/4} sqrt(k_P)` would be
+    /// a different model's friction velocity.
+    #[test]
+    fn wall_shear_velocity_based_wall_function_takes_the_viscous_form() {
+        let m = channel_mesh(4, 1.0);
+        let nbf = m.n_boundary_faces;
+        let (nu, rho, cmu, k0): (Scalar, Scalar, Scalar, Scalar) = (2.0, 1.5, 0.09, 0.4);
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|_| crate::Vec3::new(5.0, 0.0, 0.0))
+            .collect();
+        let run = |k_based: bool| {
+            wall_shear(
+                &m,
+                crate::Vec3::new(1.0, 0.0, 0.0),
+                &u_i,
+                &vec![crate::Vec3::ZERO; nbf],
+                &vec![rho; nbf],
+                &vec![0.0 as Scalar; nbf],
+                Some(&vec![k0; m.n_cells]),
+                &vec![k_based; nbf],
+                nu,
+                cmu,
+            )
+        };
+        let u_based = run(false);
+        let k_based = run(true);
+        assert_eq!(u_based.forms(), vec![WallShearForm::Viscous]);
+        assert_eq!(k_based.forms(), vec![WallShearForm::WallFunctionK]);
+        // The flag swaps which number is REPORTED and which is the
+        // cross-check; it does not change either number. Compared PER PATCH,
+        // because the whole-domain means average over both walls and would
+        // differ from a single patch's value in the last bits.
+        for (i, (u, k)) in u_based.by_patch.iter().zip(k_based.by_patch.iter()).enumerate() {
+            assert_eq!(u.tau_w_mag, k.tau_w_other.expect("cross-check"), "patch {i}");
+            assert_eq!(k.tau_w_mag, u.tau_w_other.expect("cross-check"), "patch {i}");
+        }
+    }
+
+    /// One resolved wall and one modelled wall in the SAME mesh: each patch
+    /// keeps its own form, and `forms()` reports both rather than a single
+    /// headline that hides which produced what.
+    #[test]
+    fn wall_shear_keeps_each_patch_to_its_own_form() {
+        let (ny, h): (usize, Scalar) = (4, 1.0);
+        let m = channel_mesh(ny, h);
+        let nbf = m.n_boundary_faces;
+
+        let mut wf = vec![false; nbf];
+        let ymax = m.patches.iter().find(|p| p.name == "ymax").expect("ymax").clone();
+        for i in 0..ymax.size {
+            wf[ymax.start + i] = true;
+        }
+
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|c| crate::Vec3::new(3.0 * m.c[c].y, 0.0, 0.0))
+            .collect();
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &vec![crate::Vec3::ZERO; nbf],
+            &vec![1.0 as Scalar; nbf],
+            &vec![0.0 as Scalar; nbf],
+            Some(&vec![0.4 as Scalar; m.n_cells]),
+            &wf,
+            2.0,
+            0.09,
+        );
+
+        let forms = ws.forms();
+        assert_eq!(forms.len(), 2, "two treatments, two forms: {forms:?}");
+        let by_name: Vec<(&str, WallShearForm)> = ws
+            .by_patch
+            .iter()
+            .map(|r| (m.patches[r.patch].name.as_str(), r.form))
+            .collect();
+        assert!(by_name.contains(&("ymin", WallShearForm::Viscous)));
+        assert!(by_name.contains(&("ymax", WallShearForm::WallFunctionK)));
+    }
+
+    /// Reversing `e_hat` flips the streamwise total's SIGN and leaves the
+    /// magnitude mean untouched - the projection is the only thing the
+    /// direction enters.
+    #[test]
+    fn wall_shear_streamwise_total_follows_e_hat() {
+        let (ny, h): (usize, Scalar) = (4, 1.0);
+        let m = channel_mesh(ny, h);
+        let nbf = m.n_boundary_faces;
+
+        // A plug profile: both walls retard the fluid, so the streamwise
+        // total is genuinely non-zero (unlike the Couette case above).
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|_| crate::Vec3::new(4.0, 0.0, 0.0))
+            .collect();
+        let run = |e: crate::Vec3| {
+            wall_shear(
+                &m,
+                e,
+                &u_i,
+                &vec![crate::Vec3::ZERO; nbf],
+                &vec![1.2 as Scalar; nbf],
+                &vec![0.0 as Scalar; nbf],
+                None,
+                &vec![false; nbf],
+                1.5e-5,
+                0.09,
+            )
+        };
+        let fwd = run(crate::Vec3::new(1.0, 0.0, 0.0));
+        let rev = run(crate::Vec3::new(-1.0, 0.0, 0.0));
+
+        assert!(fwd.drag > 0.0, "both walls retard a +x plug flow");
+        assert!((fwd.drag + rev.drag).abs() < 1e-12 * fwd.drag);
+        assert!((fwd.tau_w_mag - rev.tau_w_mag).abs() < 1e-15 * fwd.tau_w_mag);
+        // A wall-normal `e_hat` projects the traction away entirely, which is
+        // a report of "no streamwise drag along THIS axis", not an error.
+        let perp = run(crate::Vec3::new(0.0, 1.0, 0.0));
+        assert!(perp.drag.abs() < 1e-12 * fwd.drag);
+        assert!((perp.tau_w_mag - fwd.tau_w_mag).abs() < 1e-15 * fwd.tau_w_mag);
+    }
+
+    /// A motionless domain has no traction and, in particular, no division by
+    /// a zero slip speed.
+    #[test]
+    fn wall_shear_is_zero_and_finite_in_a_motionless_domain() {
+        let m = channel_mesh(4, 1.0);
+        let nbf = m.n_boundary_faces;
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &vec![crate::Vec3::ZERO; m.n_cells],
+            &vec![crate::Vec3::ZERO; nbf],
+            &vec![1.2 as Scalar; nbf],
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            1.5e-5,
+            0.09,
+        );
+        assert_eq!(ws.drag, 0.0);
+        assert_eq!(ws.tau_w, 0.0);
+        assert_eq!(ws.tau_w_mag, 0.0);
+        assert!(ws.area > 0.0);
+    }
+
+    /// `f = 8 tau_w/(rho U_b^2)` inverted, and the plane-channel operating
+    /// point of SPEC-LIT §32.5.2 checked against the arithmetic by hand.
+    #[test]
+    fn darcy_friction_factor_inverts_its_own_definition() {
+        let (tau, rho, u_b): (Scalar, Scalar, Scalar) = (0.0936, 1.2055, 4.84388);
+        let f = darcy_friction_factor(tau, rho, u_b);
+        assert!(
+            (tau - f * rho * u_b * u_b / 8.0).abs() < 1e-12 * tau,
+            "f = {f} does not invert back to tau_w = {tau}"
+        );
+        // The gate case's own scale: a plane channel at Re ~ 2.6e4 sits near
+        // 0.026, not near the 0.024 the smooth-PIPE correlation gives.
+        assert!((0.02..0.03).contains(&f), "f = {f}");
+    }
+
+    /// Gnielinski at a SUPPLIED `f` must reduce to the published pipe form
+    /// when the `f` supplied IS the pipe form - bit for bit, since
+    /// `gnielinski_nu` is now literally that call and every number
+    /// `docs/07-fire-solver.md` §1.1 records came out of it.
+    #[test]
+    fn gnielinski_at_a_supplied_f_reduces_to_the_pipe_form() {
+        for re in [4.0e3 as Scalar, 1.6e4, 2.5834e4, 2.8638e4, 1.0e6] {
+            let pr: Scalar = 0.71;
+            assert_eq!(
+                gnielinski_nu_at_f(gnielinski_f(re), re, pr),
+                gnielinski_nu(re, pr),
+                "Re = {re}"
+            );
+        }
+    }
+
+    /// `Nu` is monotone increasing in `f` at fixed `Re`/`Pr` - the property
+    /// that makes "judged at the realised `f`" a DIFFERENT verdict from
+    /// "judged at the correlation `f`" and not a relabelling of the same one
+    /// (SPEC-LIT §32.4).
+    #[test]
+    fn gnielinski_nu_rises_with_the_friction_factor() {
+        let (re, pr): (Scalar, Scalar) = (25_834.0, 0.71);
+        let mut prev = 0.0 as Scalar;
+        for f in [0.018 as Scalar, 0.020, 0.0245, 0.0265, 0.030] {
+            let nu = gnielinski_nu_at_f(f, re, pr);
+            assert!(nu > prev, "Nu({f}) = {nu} did not rise above {prev}");
+            prev = nu;
+        }
+        // A plane channel's ~8% friction excess over the smooth pipe moves
+        // the target by several percent - enough to matter against a +-10%
+        // band, which is the whole reason §32.4 now makes a verdict say which
+        // `f` it used.
+        let pipe = gnielinski_nu_at_f(gnielinski_f(re), re, pr);
+        let channel = gnielinski_nu_at_f(gnielinski_f(re) * 1.08, re, pr);
+        assert!(
+            channel / pipe > 1.05 && channel / pipe < 1.12,
+            "an 8% friction excess moved Nu by {}x",
+            channel / pipe
+        );
     }
 }

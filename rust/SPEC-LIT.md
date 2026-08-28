@@ -2294,12 +2294,457 @@ correlation is what says either of them is right.
 | the wall-function mesh against the correlation | within the same band |
 | the two meshes against each other | Nu ratio reported |
 | energy balance | wall heat in = sink out, to round-off |
+| **which `f` Gnielinski was evaluated at** | **named, every time, in every verdict** — see below |
+| **the friction factor each mesh realises** | **measured (§32.5), reported next to Re and Nu, and cross-checked against the body-force balance** |
+| **the energy-balance gap carried into the `Nu` verdict** | **quoted as an uncertainty ON `Nu`, in the same sentence as the band** — see below |
 
 The gate CLOSES when both meshes sit inside the correlation band. If the
 resolved mesh does and the wall-function mesh does not, the wall function
 is wrong and that is a real finding. If NEITHER does, the channel case is
 wrong — and the resolved mesh, which models nothing at the wall, is the one
 that says so.
+
+**The rule about `f`.** Gnielinski (§32.3) is a function of TWO arguments,
+`Re` and the duct's Darcy friction factor `f`, and the choice of `f` is not
+a detail of the correlation: it is what the verdict is about. Two
+evaluations are legitimate and they are DIFFERENT claims:
+
+| Verdict | `f` used | What it tests | Strength |
+|---|---|---|---|
+| **absolute prediction** | Petukhov's smooth-PIPE `f = (0.79 ln Re − 1.64)^{-2}` | from `Re` alone, is the heat transfer right? | stronger — it is a prediction, from the Reynolds number and nothing else |
+| **Reynolds analogy** | the `f` this run itself realises, measured per §32.5 | given the momentum this model actually transports, does it transport heat consistently with it? | weaker — it is handed one of the two quantities |
+
+Both are legitimate, neither subsumes the other, and **they are not
+interchangeable**. A verdict that quotes a band without naming the `f` behind
+it is not a verdict; it is two different claims left ambiguous, and it is
+forbidden here. Specifically:
+
+* **Every** statement of the form "within Gnielinski's ±10 % band" MUST name
+  the `f` — in the check's own name, in the doc's own table, in the case
+  file's own header. `ofgpu-validate`'s check names carry `at the PIPE f` or
+  `at the REALISED f`; `ofgpu-fire` prints the two lines labelled
+  `ABSOLUTE-PREDICTION verdict` and `REYNOLDS-ANALOGY verdict`.
+* **A verdict quoting the realised `f` is a REYNOLDS-ANALOGY verdict, and
+  must say so.** It may not be reported as, summarised as, or promoted to an
+  absolute-prediction pass. "The gate closes" with no qualifier means the
+  absolute-prediction verdict; anything else is spelled out.
+* Dittus–Boelter takes no `f` argument. It therefore has ONE verdict, an
+  absolute-prediction one, and no realised-`f` counterpart exists to quote.
+* The two verdicts may disagree, and when they do that disagreement is the
+  finding. A leg that fails the absolute-prediction band and passes the
+  Reynolds-analogy band is saying something specific: its heat transfer is
+  consistent with its OWN wall shear, and its wall shear is not the
+  correlation's. That is a momentum result, not a thermal one, and it must be
+  reported as such rather than as a thermal pass.
+* **A leg's own energy-balance gap is an uncertainty on its `Nu`, and must be
+  stated with the band.** `Nu = q_w D_h / (k (T_w - T_b))` is built from the
+  IMPOSED `q_w` and the MEASURED `(T_w - T_b)`. If the domain's steady energy
+  bookkeeping does not close - if the thermostat's integrated power and the
+  wall heat input differ by `eps` - then the temperature field the run settled
+  at is not the one `q_w` alone produced, and `(T_w - T_b)`, hence `Nu`, is
+  uncertain by of order `eps` in the same sense. A leg whose energy balance
+  closes to round-off (§35.2) carries no such uncertainty and its band
+  statement is unqualified; a leg that misses by 3 % may not be reported as
+  "inside" or "outside" a ±10 % band without that ±3 % beside it. This is not
+  a licence to widen a band until a number fits: the gap is quoted as measured,
+  the verdict is stated at the central value, and a result that lands within
+  the gap of a band edge is reported as UNDECIDED, not as a pass.
+
+**Why this is not a way of moving a goalpost.** The Reynolds-analogy verdict
+would be circular if `f` and `Nu` came from the same measurement. They do
+not: `f` is the wall-normal gradient of the VELOCITY field at the wall, `Nu`
+is the temperature difference across the duct, and the only thing connecting
+them is a published correlation neither was fitted to. What makes it the
+weaker claim is not circularity but scope — it cannot catch a model that gets
+the momentum wrong, because it is handed the wrong momentum as an input.
+That is exactly why the absolute-prediction verdict is not retired.
+
+**The `f` must be MEASURED.** Supplying a channel `f` from a correlation, or
+inferring one from the case's own body force, and then calling the result a
+measurement is the failure mode this rule exists to prevent. §32.5 specifies
+the measurement; the body-force balance is retained as an independent
+cross-check on it and is never a substitute for it.
+
+### 32.5 The friction factor the run realises, measured
+
+**R. C. Jones Jr., *ASME J. Fluids Eng.* 98 (1976) 173–180** — why a
+non-circular duct's turbulent friction factor is not a pipe's at the same
+`Re_Dh`, and the laminar-equivalent-diameter correction that collapses the
+two; parallel plates are the reference case of that paper and run ABOVE the
+smooth-pipe correlation at the same `Re_Dh`. **Shah & London, *Laminar Flow
+Forced Convection in Ducts*, Academic Press (1978)** — the parallel-plate
+laminar closed form `f Re_Dh = 96`, used here as the unit check on the
+conversion. No GPL source was consulted.
+
+This section is numbered AFTER §32.4 even though §32.4's rule depends on it.
+§32.4 is referenced by name throughout the code, the docs and both case
+files, and renumbering it to put the measurement first would break every one
+of those references for a presentational gain.
+
+#### 32.5.1 What is measured
+
+At every `wall`-kind boundary face, the viscous traction the fluid exerts on
+the wall. The wall-parallel relative velocity is
+
+```
+dU_par = (U_P - U_w) - ((U_P - U_w).n) n              n the OUTWARD unit normal
+```
+
+with `U_w` read from the wall's own boundary value rather than assumed zero,
+so a moving wall needs no second code path. The traction's DIRECTION is
+`dU_par`'s; its MAGNITUDE is one of two forms, and **which form is used is
+decided per patch by that patch's own wall treatment, and is reported**:
+
+| Form | `tau_w` | Correct where |
+|---|---|---|
+| viscous | `mu_eff * mag(dU_par) * deltaCoeffs`, with `mu_eff = rho (nu + nu_t,w)` | `nu_t,w` is pinned to zero by a resolved sublayer (`lowRe`, §15.2 — `mu_eff` is then molecular and this is the exact wall gradient), **or** is DEFINED as the value that reproduces that model's own `tau_w` through this very expression |
+| wall function | `rho u_tau^2`, `u_tau = C_mu^{1/4} sqrt(k_P)` (§29.3's `u_tau_of`) | a face whose `nut` treatment derives `nu_t,w` from `k` — the `nutk` family — on a mesh that solves a `k` |
+
+`deltaCoeffs` is the mesh's own boundary delta coefficient — the SAME
+wall-normal spacing the momentum matrix's wall diffusion term is assembled
+from, so the viscous form is built out of the same two quantities the solver
+itself used, not out of a second, independently derived gradient.
+
+The selector is per face, and it is NOT simply "does this face carry a `nut`
+wall function". The VELOCITY-based wall functions — §15.1's `nutU` family and
+§30.1's Werner-Wengle — belong in the VISCOUS row, because substituting their
+own `nu_t,w = u_tau^2 y/|U_P| - nu` into `rho (nu + nu_t,w) |U_P|/y` leaves
+`rho u_tau^2` identically: for them the viscous form IS the model's own
+`tau_w`, and evaluating `C_mu^{1/4} sqrt(k_P)` there would substitute a
+DIFFERENT model's friction velocity for the one that treatment actually used.
+So the flag is
+
+```
+k_based = WallFaces::nut[bf] && !NutRoughness::u_based[bf]
+```
+
+and `nutLowReWallFunction` is not in `WallFaces::nut` at all (§15.2), so it
+takes the viscous row too.
+
+*DESIGN.* Both forms are evaluated wherever both can be, and the unused one
+is reported per patch beside the used one. **Nothing is averaged between
+them.** A mesh with a resolved wall and a modelled wall in it is a legitimate
+case, and a single headline `tau_w` that hid which definition produced it
+would be the ambiguity §32.4's rule exists to remove, moved one level down.
+
+Two totals are reported, and they are different numbers:
+
+```
+tau_w (streamwise) = sum_f (tau_f . e_hat) A_f / sum_f A_f
+tau_w (magnitude)  = sum_f |tau_f| A_f / sum_f A_f
+```
+
+The first is what enters `f` — it is the quantity the streamwise force
+balance is about. The second is direction-free, and its excess over the first
+is the cross-flow the projection dropped. `e_hat` is the case's own
+streamwise axis: the direction a §35.3 `massFlux` thermostat already
+resolved, or otherwise the mesh's single cyclic pair's axis, through the SAME
+`resolve_streamwise_direction` §35.3.5 specifies. A mesh with neither is not
+an error — a burner plume has no streamwise axis and wants none — but the
+streamwise quantities are then SKIPPED and said to be skipped, never guessed.
+
+#### 32.5.2 The friction factor, and the body-force cross-check
+
+```
+f = 8 tau_w / (rho_b U_b^2)               DARCY (Moody), four times Fanning
+```
+
+`rho_b` is the bulk density `rho(T_b)`, paired with `U_b` in the reference
+dynamic pressure. The same `rho_b` is used for every `tau_w` estimate, so a
+comparison between two of them isolates the wall shear and nothing else.
+
+The INDEPENDENT cross-check, for a streamwise-periodic domain driven by a
+body force (§31.1's case for existing — no inlet, so a momentum source is the
+only drive):
+
+```
+F_body = (g . e_hat) sum_c rho_c V_c              over the cells the source acts on
+tau_w(force balance) = F_body / A_wall
+```
+
+At a converged, fully developed state every newton the body force puts in
+leaves through the walls, so the wall traction's streamwise integral must
+equal `F_body`. **Where it does not, that disagreement is the finding.** It is
+reported as a percentage next to both numbers and the two are NEVER averaged:
+a gap says either the run is not converged, or the domain has a momentum sink
+the balance does not know about, or the reported `tau_w` form is not the one
+the momentum equation actually applied — and averaging would destroy exactly
+the information that distinguishes those. Which of §32.5.1's two forms is
+required to close this balance, and which is not, is the paragraph after
+next.
+
+*DESIGN.* The gap is flagged in the driver's output above 2 %. That threshold
+is a reporting cue, not a tolerance — nothing is refused on it, because a
+legitimately unconverged diagnostic run should still print its numbers.
+
+**CORRECTION, forced by the first run of this cross-check on a real case: in
+this crate the balance is KINEMATIC.** The form written just above —
+`F_body = (g . e_hat) sum_c rho_c V_c`, in newtons, against the traction's own
+integral in newtons — is the balance a COMPRESSIBLE momentum equation
+satisfies. This crate does not assemble one. `crate::momentum` assembles
+
+```
+ddt(U) + div(phi, U) - laplacian(nu_eff, U) = g + stress
+```
+
+in which no density appears anywhere — `phi` is a VOLUMETRIC flux, `nu_eff` is
+a kinematic viscosity, a `momentumSource` enters the matrix as `g_cmpt V_c`
+with no density factor, and the low-Mach density reaches the solver only as
+the pressure equation's prescribed divergence (`target_div`, §25.3). The
+balance the DISCRETE equation therefore satisfies, integrated over a closed
+streamwise-periodic domain at a converged steady state, is
+
+```
+(g . e_hat) V_total  =  sum_walls nu_eff,f |dU_par| deltaCoeffs |Sf|
+                     =  sum_walls (tau_visc / rho_f) cos |Sf|        [m^4/s^2]
+```
+
+and nothing else can appear in it: the convective term telescopes to exactly
+zero over such a domain (each internal face is counted twice with opposite
+sign, the cyclic pair cancels, and a no-slip wall face carries both `U_f = 0`
+and `phi_f = 0`), so at convergence the wall diffusion term is the ONLY sink
+left to balance the source.
+
+Comparing a compressible `F_body` against `sum tau_w A` therefore carries a
+systematic `rho_bar/rho_wall` error even on a perfectly converged run — 8 % on
+§32.5.3's wall-function leg, whose wall runs 24 K hotter than its bulk — and
+that error is indistinguishable, in the printed percentage, from the physical
+finding the cross-check exists to expose. **The cross-check is therefore taken
+in KINEMATIC units**: the body force as `(g . e_hat) V`, the sink as
+`sum (tau_visc/rho_f) cos |Sf|`, both in `m^4/s^2`, and the disagreement
+between them as a percentage. The viscous form is used for the sink on EVERY
+wall patch, including wall-function ones, because it is the discrete sink
+there too — which is the same statement the two paragraphs below already make,
+now carried into the arithmetic rather than only into the prose. §32.5.3
+records what this closes to on the two channel legs, and it is the identity
+that licenses reading any residual gap as a finding.
+
+**The cross-check does NOT mean the same thing on the two legs, and a reader
+must not read a gap the same way on both.**
+
+* On a **resolved (`lowRe`) leg** the viscous form IS the discrete momentum
+  sink — the same `mu_eff` and the same `deltaCoeffs` the matrix's wall
+  diffusion term was assembled from — so at a converged state it must equal
+  the force balance up to the solver's own residual. A gap there is a
+  statement about CONVERGENCE, and about nothing else.
+* On a **wall-function leg** the reported form is `rho u_tau^2` with
+  `u_tau = C_mu^{1/4} sqrt(k_P)`, which is NOT the discrete momentum sink:
+  the sink is the viscous form evaluated with the wall function's own
+  `nu_t,w`, and the two coincide only in local equilibrium, where
+  `C_mu^{1/4} sqrt(k_P)` and the velocity-based friction velocity are the
+  same number. A gap there is a statement about how far from equilibrium the
+  wall-adjacent cell actually is — a physical finding about the wall
+  function, not a convergence artefact.
+
+This is exactly why both forms are evaluated on every face and the unused one
+is printed beside the used one: the wall-function leg's gap can be attributed
+only by having both numbers. The viscous cross-check on that leg is the one
+that should close on the force balance at convergence; the `rho u_tau^2`
+number is the one the wall function itself believes. Where they differ, both
+are reported and neither is corrected into the other.
+
+The hydraulic diameter is `D_h = 4V/A_wall`, computed rather than assumed:
+`V/L` is the periodic cross-section's area and `A_wall/L` its wetted
+perimeter, so this is the definition itself. On §34's plane channel — hot
+walls top and bottom, `empty` front and back, so no other wall contributes —
+it reduces to `2H`, which is the `D_h` §32.2 names. That reduction is checked
+numerically, not asserted.
+
+#### 32.5.3 What the two channel legs realise, MEASURED
+
+Both legs have now been rerun with the measurement above — 40 000 iterations
+each, `cases/channelPeriodicFluxWF.jsonc` and `channelPeriodicFluxLowRe.jsonc`
+as shipped, which since this rerun means with the thermostat's
+`"weighting": "massFlux"` (§35.3), the form a streamwise-periodic
+constant-flux duct actually calls for. Each leg was also rerun with the
+`uniform` weighting first, as a control: those runs reproduce every number
+`docs/07-fire-solver.md` §1.1 had on record — `T_b`, `U_b`, `T_w`,
+`Nu`, the thermostat power, the mesh-resolution counts — to the last
+printed digit, which is what says the rerun changed one thing and measured the
+change.
+
+**What the wall measures** (the `massFlux` runs, i.e. the shipped cases):
+
+| Leg | `Re` | `Nu` | form used | `tau_w` used | `f` used | viscous `tau_w` | `f` viscous | Petukhov pipe `f` |
+|---|---|---|---|---|---|---|---|---|
+| wall function | 28 622 | 64.32 | `rho u_tau^2` | 0.074737 Pa | 0.017247 | 0.086491 Pa | 0.019960 | 0.023911 |
+| resolved | 25 790 | 70.47 | viscous | 0.084124 Pa | 0.023870 | (the same) | 0.023870 | 0.024532 |
+
+**The force balance, in §32.5.2's kinematic units.** The body force is
+`(g . e_hat) V = 3.9 x 1.28e-4 = 4.9920e-4 m^4/s^2` on both legs. Against it:
+
+| Leg | kinematic wall sink, viscous form | disagreement | the same for the `rho u_tau^2` form |
+|---|---|---|---|
+| wall function, `uniform` | 4.99203e-4 | **+0.001 %** | −13.58 % |
+| wall function, `massFlux` | 4.98638e-4 | **−0.113 %** | −13.69 % |
+| resolved, `uniform` | 4.81922e-4 | **−3.461 %** | not applicable (`nu_t,w = 0`) |
+| resolved, `massFlux` | 4.80296e-4 | **−3.787 %** | not applicable |
+
+Three things follow, and the first two are the ones that matter.
+
+**1. The viscous form IS the discrete momentum sink, confirmed on a real
+flow.** On the wall-function leg it reproduces the body force to five
+significant figures — `4.99203e-4` against `4.99200e-4`, `+0.001 %`, on the
+run whose continuity residual is `6.6e-16`. That is the identity §32.5.1 asserted and §32.5.4 could
+previously only check against an analytic Poiseuille field on a manufactured
+mesh. It also settles §32.5.2's density question empirically: the
+kinematic comparison closes and the compressible one (`sum_c rho_c V_c`
+against `sum tau_visc A`) misses the same run by −7.59 %, which is exactly
+`rho_wall/rho_bar - 1` (1.11119/1.20249) and nothing else.
+
+**2. The resolved leg does NOT close it — by 3.46 % with the uniform sink
+and 3.79 % with the weighted one — and it is not a convergence gap.** That
+leg's `|U|` residual is `2.8e-12` and its state is bit-identical from
+iteration 5 000 on. §32.5.2's expectation ("a gap on a resolved leg is a
+statement about CONVERGENCE, and about nothing else") is therefore FALSIFIED
+by this measurement, and the row in §32.5.4 that stated it has been
+corrected. Something removes 3.5–3.8 % of the streamwise momentum without
+it appearing in the wall's own viscous traction. The same leg, in the same
+runs, also fails its ENERGY balance by 2.8 % (`uniform`) and 3.3 %
+(`massFlux`) — §35.2's own check — while the wall-function leg
+closes that one to `2.8e-7 W`. Two conservation statements, two independent
+equations, the same runs, the same few per cent, the same sign (the discrete
+domain is short of what its source put in).
+
+**A control run says what it is NOT: the mesh.** Both cases were rerun with
+the heat removed and nothing else changed — hot walls to `zeroGradient`,
+thermostat deleted, same mesh, same grading, same `LaunderSharmaKE`/`lowRe`
+and `standard` treatments, same body force. (The wall-function control
+converges, `|U|` residual `1.7e-10`; the resolved control does NOT — its
+`|U|` residual oscillates in 0.11–0.24 for 40 000 iterations, which is
+§31.1's periodic-pressure null space showing through once the low-Mach
+dilatation is no longer there to fix it. That is a pointwise residual: it is
+dominated by a pressure mode whose gradient integrates to zero over a
+periodic domain, so it does not enter the force balance, and the balance is
+the only thing quoted from that run.) `T` then stays at 293.15 K
+everywhere, `rho` is uniform at 1.2041 kg/m^3, the low-Mach dilatation is
+identically zero, and the kinematic and compressible forms of the balance
+coincide. Result:
+
+| Control (isothermal), same mesh | body force | measured viscous drag | disagreement |
+|---|---|---|---|
+| resolved, `expansion: 200`, 50 cells | 6.010850e-4 N | 6.010850e-4 N | **−0.00 %** |
+| wall function, 6 cells | 6.010850e-4 N | 6.010893e-4 N | **+0.0007 %** |
+
+So the graded mesh, the grading severity, the low-Reynolds model and the
+wall-normal resolution are all cleared: with a constant density the identical
+resolved mesh balances its own momentum exactly. **The 3.5–3.9 % gap
+appears only when the energy equation is coupled in**, and it appears
+alongside an energy imbalance of the same size on the same runs. Across all
+five runs the two imbalances track the continuity residual the run settles at,
+monotonically:
+
+| Run | `contErr` floor | momentum gap | energy gap |
+|---|---|---|---|
+| isothermal, resolved | 1.1e-19 | −0.00 % | n/a (no heat) |
+| isothermal, wall function | 9.4e-16 | +0.0007 % | n/a (no heat) |
+| wall function, `uniform` | 6.6e-16 | +0.001 % | 2.8e-7 W |
+| wall function, `massFlux` | 2.8e-8 | −0.113 % | +0.105 % |
+| resolved, `uniform` | 9.2e-8 | −3.461 % | +2.81 % |
+| resolved, `massFlux` | 1.1e-7 | −3.787 % | +3.26 % |
+
+The mechanism that would produce exactly this pairing is named and NOT yet
+demonstrated: both equations are assembled with the `bounded` convection
+correction of §3.1, which subtracts `phi_field . (div phi)` from the
+transported quantity's own equation. Integrated over a closed periodic domain
+that correction is `-sum_c field_c (div phi)_c V_c`, which is identically zero
+only when `div phi` is — true of the isothermal control by construction,
+true of the wall-function leg to `1e-16`, and not true of the resolved leg,
+whose 21 K interior temperature span is five times the wall-function leg's
+4 K and whose pressure solve floors at `9.2e-8` rather than at `6.6e-16`. That
+is a hypothesis with a mechanism and a correlation behind it. It has not been
+tested by switching the correction off, and until it is, the resolved leg
+carries a 3–4 % momentum imbalance and a 3 % energy imbalance as
+MEASURED, uncorrected, and named as the uncertainty on its own `Nu`
+(§32.4's rule).
+
+**A §13.4 violation found while judging this gate, reported and not
+fixed here.** `ofgpu-fire` builds its `MomentumControls` from
+`MomentumControls::default()` and overrides only `nu`, `steady`, `delta_t` and
+`ddt`. It therefore never reads `numerics.div["div(phi,U)"]` or
+`numerics.relaxation.U` from the case at all: both channel cases ask for
+`Gauss linearUpwind grad(U)` and `U: 0.5` and both get `Gauss upwind` and
+`0.7`. Demonstrated, not inferred: two 500-iteration runs of the
+wall-function case differing only in `div(phi,U)` (`Gauss linearUpwind
+grad(U)` against `Gauss upwind`) print BIT-IDENTICAL residual and bulk-state
+lines, and so do two differing only in `relaxation.U` (0.5 against 0.9). Under
+§13.4 a named scheme may not be silently substituted, so this is a
+defect, and it is a defect that touches every velocity field this gate
+measures: the momentum convection scheme is first order where the case asked
+for second. It is NOT fixed in this round — fixing it moves every number
+`ofgpu-fire` has ever recorded, on every case, and that is its own job with
+its own reruns. It is named here because the friction factors above are its
+downstream measurements, and because "the resolved leg under-predicts `f`" and
+"the momentum equation is running a more diffusive scheme than the case asked
+for" are two statements that must be weighed together.
+
+**3. The `f` this project has been quoting was an inference, and the inference
+was wrong on both legs.** The superseded table, kept because the verdicts
+downstream of it were published:
+
+| Leg | `f` INFERRED (superseded) | `f` MEASURED | the inference's error |
+|---|---|---|---|
+| wall function | 0.02162 | 0.017247 (`rho u_tau^2`) / 0.019960 (viscous) | +25 % / +8 % |
+| resolved | 0.02653 | 0.023870 | +11 % |
+
+The inference assumed the compressible force balance closes. It does not close
+in that form on either leg (§32.5.2's correction), and on the resolved leg
+it does not close in the kinematic form either. Both quoted friction factors
+were therefore too high, and every REYNOLDS-ANALOGY verdict taken at them was
+too generous.
+
+**What that does to the two verdicts** (§32.4; `Nu_Gn` at each `f`,
+`Pr` = 0.71):
+
+| Leg | absolute prediction, at the pipe `f` | Reynolds analogy, at the MEASURED `f` | Dittus–Boelter |
+|---|---|---|---|
+| wall function | Nu_Gn = 68.30, **−5.8 %** — inside ±10 % | Nu_Gn = 48.07, **+33.8 %** — OUTSIDE (56.21, **+14.4 %**, at the viscous `f`) | 73.72, −12.8 % — inside |
+| resolved | Nu_Gn = 63.02, **+11.8 %** — outside ±10 % | Nu_Gn = 61.18, **+15.2 %** — OUTSIDE | 67.83, +3.9 % — inside |
+
+The previously published Reynolds-analogy verdict — "+6.4 % and +6.8 %,
+closes on both legs, the two legs within 0.4 points of each other" — was an
+artefact of the inferred `f`. **At the measured `f` the Reynolds-analogy
+verdict closes on NEITHER leg**, and the near-coincidence of the two legs
+disappears with it. So does the decomposition built on top of it: the two
+legs' measured friction factors are 0.01725 and 0.02387 (`rho u_tau^2` against
+viscous — not the same form, so not a like-for-like ratio at all), or
+0.01996 and 0.02387 taken in the viscous form on both, and Gnielinski at that
+second pair predicts a two-mesh `Nu` ratio of 1.088 against a measured 1.096.
+That is still a large fraction of the ratio — but it now rests on a
+wall-function leg whose two `tau_w` forms disagree by 13.6 %, so it is quoted
+as an observation, not as the decomposition §35.3.2 was told to weigh
+against its own mechanism.
+
+**The measured `f` also contradicts Jones.** Parallel plates should run ABOVE
+the smooth-pipe correlation at the same `Re_Dh` (Jones 1976). Both legs
+measure BELOW it: −2.7 % on the resolved leg (viscous form, the discrete
+sink) and −16.5 % on the wall-function leg (viscous form) or −27.9 %
+(`rho u_tau^2`). Under-predicted wall friction is therefore an open finding of
+this gate in its own right, on both meshes, and it is a MOMENTUM finding
+— §33.3's territory, not §29.3's.
+
+#### 32.5.4 What must hold
+
+| Check | Expected |
+|---|---|
+| a linear near-wall profile | the viscous form reproduces `mu dU/dn` exactly — the one-cell gradient is exact there, so this is a round-off check, not a tolerance |
+| laminar plane Poiseuille, analytic wall shear | `f Re_Dh = 96` (Shah & London) — what says the conversion is Darcy and not Fanning |
+| the discrete measurement against the force balance, same flow | ratio `1 − 1/(2 n_y)` exactly, and first order in the wall cell |
+| the kinematic sink at uniform density | exactly `drag/rho`, and it balances `g_x V` with no density in the statement — checked live at two mesh densities and in `wall_shear`'s own unit tests |
+| `D_h = 4V/A_wall` on §34's plane channel | `2H`, to round-off |
+| a `nutk`-family wall-function face | `rho (C_mu^{1/4} sqrt(k_P))^2`, and the viscous form reported beside it, unmixed |
+| a velocity-based wall-function face (`nutU`, Werner-Wengle) | the VISCOUS form — which is that model's own `tau_w` identically — not the `k`-based one |
+| a mesh with one resolved and one modelled wall | each patch keeps its own form; both forms named in the report |
+| the force balance, taken in KINEMATIC units (§32.5.2's correction) | the only form that can close at all — this crate's momentum equation carries no density |
+| the VISCOUS form against the kinematic force balance, converged | closes: measured at `+0.001 %` on §32.5.3's wall-function leg. That is the identity, and it holds whatever the wall treatment is |
+| the same on the RESOLVED `expansion: 200` leg, converged | MEASURED at −3.46 %/−3.79 %. The earlier expectation — "closes; a gap there is about convergence and nothing else" — is FALSIFIED: that leg's velocity residual is `2.8e-12`. A gap of this size is a real, open finding about that mesh's discretisation, reported beside its own 2.8–3.3 % ENERGY imbalance and never separately from it |
+| the `rho u_tau^2` form against the same balance on a WALL-FUNCTION leg | need NOT close — it is not the discrete sink. Measured at −13.6 %, which is the near-wall-equilibrium finding §32.5.2 predicts, quantified |
+| `e_hat` reversed | the streamwise total changes sign; the magnitude mean does not move |
+| `e_hat` perpendicular to the flow | streamwise total zero, magnitude mean unchanged — a report, not an error |
+| a motionless domain | zero traction, no division by a zero slip speed |
+| no cyclic pair and no thermostat `direction` | `f`, `Re` and `Nu` SKIPPED with a line saying so, never computed along a guessed axis |
+| Gnielinski at the Petukhov `f` | reproduces the published pipe form bit for bit — every number already recorded came out of it |
+| Gnielinski at a supplied `f` | monotone increasing in `f`, so the two verdicts of §32.4 are genuinely two |
 
 ---
 
@@ -2488,8 +2933,25 @@ q_thermostat = -rho cp (T_mean - T_target) / tau    [W/m^3], uniform
 `tau` is a relaxation time with the dimensions of the problem, defaulted to
 the domain's own flow-through time and overridable. The controller is a SINK
 when the domain is too hot and a SOURCE when it is too cold, so it removes
-the null direction without imposing a temperature anywhere: the PROFILE is
-still entirely the model's own prediction, only its offset is fixed.
+the null direction without imposing a temperature at any point of the
+boundary.
+
+It does not, however, leave the PROFILE alone, and an earlier revision of
+this paragraph claimed that it did ("the PROFILE is still entirely the
+model's own prediction, only its offset is fixed"). That claim is FALSE and
+is corrected here rather than deleted. A uniform volumetric sink pins the
+offset AND perturbs the profile: the compensating source that makes a
+streamwise-periodic constant-flux duct's temperature field periodic is
+proportional to the LOCAL streamwise mass flux `rho u.e_hat`, not to volume,
+and the uniform form is that source evaluated in the SLUG-FLOW limit
+`rho u.e_hat -> rho_bar U_b`. Measured against the correct distribution, a
+uniform sink removes MORE heat than the physics asks wherever
+`u.e_hat < U_b` - which is the near-wall layer - and LESS in the core. That
+over-cools the near-wall fluid, shrinks `(T_w - T_b)`, and therefore biases
+`Nu` HIGH, by an amount that grows with how well the mesh resolves the
+near-wall velocity deficit. §35.3 derives all of this, specifies the
+weighted form that removes the bias, and says why `uniform` is nevertheless
+still the default.
 
 At steady state `T_mean = T_target` and the controller settles at exactly the
 net heat the walls put in — which is what the fixed `-2 q_w A_wall` power was
@@ -2512,9 +2974,384 @@ steady solve that is singular.
 | Check | Expected |
 |---|---|
 | two different initial temperatures | the SAME converged `T_mean`, `dT` and `Nu` — the experiment that exposed the problem, run again as the regression |
-| steady state | the thermostat's integrated power equals the wall heat input to round-off |
+| steady state | the thermostat's integrated power equals the wall heat input to round-off. MEASURED: it does on §32's wall-function leg (`2.8e-7 W` at the `uniform` default, `0.105 %` at `massFlux`) and does NOT on the resolved leg (`+2.81 %`/`+3.26 %`), where it tracks that leg's own momentum imbalance and its continuity floor — §32.5.3's table, and §32.4's rule that the gap is then quoted as an uncertainty on `Nu` |
 | `T_target` unreachable (walls colder than target) | the controller saturates at a sensible value, and says so |
 | **§32's resolved leg** | converges, and its `Nu` compared against Dittus-Boelter and Gnielinski on the same `D_h = 2H` the wall-function leg used |
+
+---
+
+### 35.3 The mass-flux-weighted thermostat
+
+**W. M. Kays & M. E. Crawford, *Convective Heat and Mass Transfer*, 3rd ed.,
+McGraw-Hill (1993), ch. 9** — the thermally fully developed duct at constant
+wall heat flux, and the `T = beta x + theta` decomposition it turns on.
+**S. V. Patankar, C. H. Liu & E. M. Sparrow, *ASME J. Heat Transfer* 99
+(1977) 180-186** — the periodic-fully-developed idea itself: solve one
+streamwise module for the PERIODIC part of a field and carry the
+non-periodic part as an explicit source of known total. The mathematics
+below is taken from those two; the discrete form, the guards, the direction
+rule and the case syntax are ours. No GPL-licensed source was consulted.
+
+§35.1's uniform sink pins `T_mean` correctly and distributes the pinning
+incorrectly. This section derives the correct distribution, specifies it as
+an opt-in `weighting`, and keeps `uniform` as the default.
+
+#### 35.3.1 The compensating source is proportional to the local mass flux
+
+Take the case §35 exists for: a duct or channel, cyclic along a unit vector
+`e_hat`, every wall a fixed heat flux `q_w`, steady, hydrodynamically and
+thermally fully developed. Write `x = r . e_hat` for the streamwise
+coordinate. The energy equation this crate assembles is, in `W/m3`,
+
+```
+rho cp (u . grad T) = div(k_eff grad T) + q
+```
+
+At a thermally fully developed state with constant wall flux the exact
+solution is NOT periodic in `x` — it rises linearly — and separates as
+
+```
+T(r) = beta x + theta(r)          theta periodic along e_hat
+beta = dT_b/dx = q_w P / (mdot cp)                              [K/m]
+```
+
+`P` the heated perimeter, `mdot = integral_A rho (u . e_hat) dA` the mass
+flow, and `beta` a CONSTANT — the 1-D enthalpy balance
+`mdot cp dT_b = q_w P dx` is what fixes it (Kays & Crawford ch. 9). Note
+`d2T/dx2 = 0`: the streamwise part is linear in `x`, so it contributes
+nothing to the streamwise diffusion.
+
+Substitute. `grad T = beta e_hat + grad theta`, so
+
+```
+u . grad T          = beta (u . e_hat) + u . grad theta
+div(k_eff grad T)   = div(k_eff grad theta) + beta (e_hat . grad k_eff)
+                    = div(k_eff grad theta)
+```
+
+the last term vanishing because a fully developed field has no streamwise
+variation of `k_eff` (`grad k_eff` is orthogonal to `e_hat`). The periodic
+part therefore obeys
+
+```
+rho cp (u . grad theta) = div(k_eff grad theta) - rho cp beta (u . e_hat)
+```
+
+and the compensating source that makes `theta` periodic — the whole content
+of Patankar, Liu & Sparrow's treatment, transposed to temperature — is
+
+```
+q_compensate(r) = -cp beta (rho u . e_hat)                      [W/m3]
+```
+
+**Proportional to the LOCAL streamwise mass flux `rho u . e_hat`, not to
+volume.**
+
+Its total is already right. Over a module of length `L` and cross-section
+`A`, `integral (rho u . e_hat) dV = L mdot`, so
+
+```
+integral q_compensate dV = -cp beta L mdot
+                         = -cp L mdot q_w P/(mdot cp)
+                         = -q_w P L  =  -q_w A_wall
+```
+
+exactly minus the wall heat input — which is precisely what §35.1's
+controller settles at by measurement. §35.1 gets the TOTAL right and the
+DISTRIBUTION wrong, and this section changes only the second.
+
+**Uniform is the slug-flow limit.** Put `rho u . e_hat -> rho_bar U_b`, a
+plug profile, and
+
+```
+q_compensate -> -cp beta rho_bar U_b = -q_w A_wall / V = constant
+```
+
+which is §35.1's uniform sink exactly. `uniform` is not a different model;
+it is this model evaluated on a velocity profile the case does not have.
+
+#### 35.3.2 The sign and the size of the error
+
+Normalise both forms to the same total power `Q` — which is what §35.1's
+controller measures, and what §35.3.3 preserves exactly. For a heated
+channel `Q < 0` (the thermostat is a sink) and
+
+```
+q_uniform  = Q / V
+q_weighted = Q (rho u . e_hat) / integral (rho u . e_hat) dV
+           ~ q_uniform * (rho u_x)/(rho_bar U_b)
+```
+
+so `|q_uniform| > |q_weighted|` wherever `rho u_x < rho_bar U_b` — the
+near-wall layer — and `|q_uniform| < |q_weighted|` in the core. The uniform
+form OVER-COOLS the near-wall fluid and UNDER-COOLS the core. Both errors
+push the same way on the gate quantity: `T_w` falls (the wall temperature
+follows the fluid next to it, the flux being fixed) and `T_b` rises, so
+`(T_w - T_b)` shrinks and
+
+```
+Nu = q_w D_h / (k (T_w - T_b))
+```
+
+is biased HIGH.
+
+The bias lives in the near-wall velocity deficit, so its size is set by how
+much of that deficit the mesh actually resolves. On a wall-function mesh
+(§32, 6 cells across the half-channel, first cell centre in the log layer)
+the deficit is mostly inside the wall function and mostly absent from the
+cell values a weighting would see; on the resolved `lowRe` mesh (50 cells,
+`expansion: 200`) it is resolved in full. The two legs therefore carry
+DIFFERENT amounts of this same error, which makes it a candidate
+explanation for the two-mesh ratio `Nu_resolved/Nu_wallFunction = 1.125`
+that `docs/07-fire-solver.md` §1.1 currently attributes to Launder-Sharma's
+own near-wall thermal prediction. That is a HYPOTHESIS this section makes
+testable, not a measurement: nothing here has rerun either leg, and the
+attribution in `docs/07-fire-solver.md` stands until something does.
+
+**MEASURED — the experiment this section was written to make possible, run
+on the resolved leg with nothing else changed.** `cases/
+channelPeriodicFluxLowRe.jsonc`, 40 000 iterations, twice: once with
+`"weighting": "uniform"` and once with `"massFlux"`, the two files differing in
+that one token and in nothing else. The `uniform` run reproduces every recorded
+number of that leg to the last printed digit, which is what makes the pair a
+controlled comparison:
+
+| Resolved leg | `uniform` | `massFlux` | change |
+|---|---|---|---|
+| `T_w` | 314.087 K | 314.909 K | +0.822 K |
+| `T_b` | 292.817 K | 292.759 K | −0.058 K |
+| `T_w − T_b` | 21.2703 K | 22.1503 K | **+4.14 %** |
+| `Nu` | 73.4006 | 70.4707 | **−3.99 %** |
+| `U_b` | 4.84388 m/s | 4.8357 m/s | −0.17 % |
+
+**The prediction of this section is CONFIRMED in sign and quantified in
+size.** The uniform sink does over-cool the near-wall fluid: replacing it with
+the correct weighting raises `T_w`, lowers `T_b`, widens `(T_w − T_b)` by
+4.1 % and lowers `Nu` by 4.0 %. It is a real effect and it is not the whole
+story — that leg's absolute-prediction miss against Gnielinski moves from
++16.3 % to +11.8 %, so the weighting accounts for about a third of a 6.3-point
+excess and leaves 1.8 points still outside the band.
+
+**And the split between the two meshes is confirmed too.** The same pair was
+run on the wall-function leg:
+
+| Leg | `Nu` at `uniform` | `Nu` at `massFlux` | change |
+|---|---|---|---|
+| resolved, 50 cells, `expansion: 200` | 73.4006 | 70.4707 | **−3.99 %** |
+| wall function, 6 cells | 65.2386 | 64.3168 | **−1.41 %** |
+
+The resolved mesh carries 2.8 times as much of this error as the
+wall-function mesh, which is exactly the argument two paragraphs up: the bias
+lives in the near-wall velocity deficit, and one mesh resolves that deficit
+while the other hides it inside a wall function. The two-mesh ratio
+`Nu_resolved/Nu_wallFunction` therefore falls from **1.125 to 1.096** — so
+this mechanism accounts for 0.029 of the 0.125, about 23 % of the two-mesh
+disagreement, measured rather than argued.
+
+**A THIRD candidate, added later, and the one with a number behind it.**
+§32.5.3 accounts for the same 1.125 ratio from the two legs' realised
+FRICTION FACTORS alone: they differ by 22.7 % at the same body force, and
+Gnielinski evaluated at each leg's own `f` predicts a two-mesh Nusselt ratio
+of 1.121 against the measured 1.125. That is a momentum explanation for a
+number this section offered a thermal explanation for, and it is quantitative
+where this one is directional. It does not retire the mechanism derived above
+- the uniform sink really does perturb the profile, really does bias `Nu`
+high, and really does bias it more on the resolved mesh - it changes how much
+of the 1.125 is left for that mechanism to explain.
+
+**Both have now been rerun, and the momentum account did not survive it.**
+§32.5.3's decomposition rested on friction factors INFERRED from the body-force
+balance. Measured directly, both were wrong (the wall-function leg's by 8-25 %,
+the resolved leg's by 11 %), the "+6.4 %/+6.8 %, both legs pass the Reynolds
+analogy" verdict it rested on does not survive either, and what is left of the
+momentum account predicts a two-mesh ratio of 1.088 against a measured 1.096.
+The mechanism derived in THIS section, meanwhile, was measured to move the
+ratio from 1.125 to 1.096 on its own. The two accounts overlap and neither is
+now cleanly separable from the other; both are reported, at their measured
+sizes, and the arithmetic that once appeared to hand the whole 1.125 to
+momentum is withdrawn.
+
+#### 35.3.3 The discrete form
+
+One weight per cell, and one normalisation:
+
+```
+w_c = (rho u)_c . e_hat                              kg/(m2 s)
+W   = sum_c w_c V_c                                  kg m/s
+q_c = Q w_c / W                                      W/m3
+```
+
+`Q = q_thermostat V_total` is §35.1's own measured total power, formed from
+`T_mean` by §35.1's proportional law (and §35.2's saturation clamp) with
+nothing changed. The weighting REDISTRIBUTES `Q` and never alters it:
+
+```
+sum_c q_c V_c = (Q/W) sum_c w_c V_c = Q
+```
+
+exactly. That identity is the invariant this whole design rests on — the
+null direction §35 removes is pinned by the TOTAL power, so a
+redistribution that preserves the total preserves the pinning, and
+`T_mean -> T_target` still holds, with the same `tau`.
+
+**Uniform is `w_c = 1`.** Then `W = sum_c V_c = V_total` and
+`q_c = Q/V_total`, which is §35.1's field. The two forms are one formula
+with two weights, and that is the sense in which `massFlux` is a
+generalisation rather than a replacement.
+
+**No clamping.** `w_c` is negative wherever the flow reverses along `e_hat`,
+and the term is then a local SOURCE while the controller is on balance a
+sink. That is what the derivation gives — a parcel moving upstream is moving
+toward colder fluid, and the periodic decomposition must add heat to it —
+and clamping `w_c` at zero would destroy the `sum_c q_c V_c = Q` identity
+above, which is the one thing that must not break.
+
+**`rho` and `u` are read at the same lag as every other coefficient.** The
+weights are rebuilt from the CURRENT `rho` and `U` once per outer iteration,
+at the moment §35.1's `T_mean` is measured, from the fields left by the
+previous unit of work — the same segregated lag the turbulence production,
+the buoyancy coefficient and P1's wall temperature already run at.
+
+#### 35.3.4 The degenerate guard
+
+`W` is a NET flux: a difference of positive and negative contributions,
+which can cancel. Dividing by it is safe only when it is a flux and not a
+cancellation residue, so define the gross flux alongside it,
+
+```
+W_abs = sum_c |w_c| V_c
+```
+
+and fall back to `uniform` — with a `warn_once` naming the condition and the
+measured `W`, `W_abs` and `e_hat` — when any of:
+
+| Condition | What it means |
+|---|---|
+| `W_abs` zero or not finite | no flow at all, or a `rho`/`U` field that has already gone bad |
+| `W` not finite | the same, caught on the signed sum |
+| `abs(W) < 1e-3 * W_abs` | `e_hat` is not a flow direction — the net flux is a cancellation residue |
+
+*DESIGN*, the `1e-3`. `W_abs/abs(W)` is exactly the factor by which the
+normalisation amplifies a cell's own weight relative to the mean weight
+MAGNITUDE, so the test bounds that amplification at 1000. A direction
+PERPENDICULAR to the flow lands here and nowhere else: it makes `W` a
+residue of near-total cancellation, which a plain `W != 0` test would pass
+and would then multiply the mesh's own round-off up into a violent,
+sign-alternating `q_c` field that still integrates to `Q`. Any real driven
+periodic flow has `abs(W)/W_abs` of order 0.1 to 1, orders above the test.
+
+A WARNING and not an error, deliberately, and consistent with §13.4 rather
+than an exception to it: the fallback is the DEFAULT form of a supported
+setting, announced, not a silent substitution for something the case cannot
+have — and a transient run legitimately passes through zero net flux on its
+way out of rest. `warn_once`, so a start-up transient says it once rather
+than every iteration.
+
+**The sign of `e_hat` is immaterial, and is therefore NOT a fallback
+condition.** Replacing `e_hat` by `-e_hat` sends `w_c -> -w_c` and
+`W -> -W`, so
+
+```
+q_c = Q (-w_c)/(-W) = Q w_c / W
+```
+
+is unchanged — bit for bit, since IEEE-754 negation only flips a sign bit
+and the reduction sums the negated terms in the same order. A `direction`
+that points upstream therefore produces the IDENTICAL field, and refusing it
+or falling back on it would reject a well-posed case over a convention. It
+is still worth saying out loud, because it usually means the case author had
+a different picture of the flow than the flow does: `W < 0` emits its own
+`warn_once` — naming the direction, the sign, and the fact that the result
+is unaffected — and then proceeds.
+
+#### 35.3.5 Where `e_hat` comes from
+
+Resolved ONCE, at construction, never re-derived from the running solution:
+
+1. `"direction"` given → normalised and used. A zero-magnitude or non-finite
+   direction is a §13.4 ERROR.
+2. `"direction"` absent, and the mesh has EXACTLY ONE cyclic pair → that
+   pair's own axis, as the unit normal of its coupled faces. The sign is
+   immaterial (§35.3.4), so the vector reported is the one pointing from the
+   lower-indexed patch of the pair INTO the domain, purely so that a
+   standard `xmin`/`xmax` pair prints as `(1 0 0)` rather than `(-1 0 0)`.
+3. `"direction"` absent, and the mesh has NO cyclic pair → §13.4 ERROR: a
+   mass-flux weighting needs a streamwise direction and this mesh offers
+   none; give `direction` explicitly.
+4. `"direction"` absent, and the mesh has TWO OR MORE cyclic pairs → §13.4
+   ERROR naming every candidate axis. Picking one would be a guess, and a
+   guess is what §13.4 forbids.
+
+`direction` on a `uniform` thermostat is a §13.4 ERROR, not a harmless
+extra: uniform has no direction to use, so reading it and ignoring it is
+exactly the silent drop §13.4 exists to prevent.
+
+#### 35.3.6 The default is `uniform`, deliberately
+
+`"weighting"` omitted means `"uniform"`, and the uniform code path is not
+re-expressed through §35.3.3's formula — it stays the literal
+`q_c = -rho cp (T_mean - T_target)/tau` fill §35.1 already specified.
+
+The reason is reproducibility, not doubt. Routing uniform through
+`q_c = Q * 1 / sum_c (1 * V_c)` would compute `V_total` by a device
+reduction instead of reading the mesh's own stored total, and would move
+every number ever recorded with the uniform form in the last bits for no
+physical reason at all. `massFlux` is an explicit opt-in so that the existing
+record stays bit-for-bit reproducible, and so that any change in it is
+attributable to the setting that caused it.
+
+**That reproducibility was then used, and it paid for itself.** Both channel
+legs were rerun at the default first and reproduced their whole recorded state
+to the last printed digit; the `massFlux` runs beside them are therefore a
+controlled comparison and not a coincidence of two different states. Since
+that experiment, `cases/channelPeriodicFluxWF.jsonc` and
+`channelPeriodicFluxLowRe.jsonc` name `"weighting": "massFlux"` explicitly,
+because it is the form a streamwise-periodic constant-flux duct calls for
+(§35.3.1) and because §32's gate must be judged on the physics it means to
+test. The DEFAULT is unchanged: a case that omits `weighting` still gets the
+uniform sink, still through §35.1's own literal fill, still bit for bit.
+
+#### 35.3.7 Case syntax
+
+JSONC (§31.1's route):
+
+```
+"sources": [
+  { "type": "thermostat", "target": 293.15, "tau": 0.02,
+    "weighting": "massFlux", "direction": [1, 0, 0] }
+]
+```
+
+`constant/fvSources` (§18's route):
+
+```
+thermostat
+{
+    type        thermostat;
+    target      293.15;
+    tau         0.02;
+    weighting   massFlux;      // or uniform, the default
+    direction   (1 0 0);       // omit to take the single cyclic pair's axis
+}
+```
+
+`weighting` accepts `uniform` and `massFlux`. Any other spelling is a §13.4
+error naming those two.
+
+#### 35.3.8 What must hold
+
+| Check | Expected |
+|---|---|
+| the weighted field's integrated power | equal to the uniform form's total `Q`, to round-off — `sum_c q_c V_c = Q` is what keeps §35.1's pinning |
+| slug flow (`rho u . e_hat` uniform over the mesh) | reproduces the uniform form to round-off — the test that the weighting is the right GENERALISATION and not merely a different field |
+| a direction perpendicular to the flow, or no flow | falls back to `uniform`, and warns |
+| `e_hat` reversed | the identical field, bit for bit, plus one warning |
+| two cyclic pairs, no `direction` | refused, naming the candidate axes |
+| no cyclic pair, no `direction` | refused |
+| `direction` on a `uniform` thermostat | refused |
+| `weighting` misspelled | refused, naming `uniform` and `massFlux` |
+| the two channel cases of §32/§34, run at the DEFAULT | bit-for-bit the numbers `docs/07-fire-solver.md` §1.1 recorded before this section existed — MEASURED, on both legs, and it is what makes the pair below a controlled comparison |
+| the same two cases at `massFlux` | `Nu` LOWER and `(T_w − T_b)` WIDER on both legs, and the shift larger on the resolved mesh than on the wall-function one — MEASURED at −3.99 %/−1.41 % in `Nu` (§35.3.2) |
 
 ---
 

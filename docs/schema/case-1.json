@@ -1007,9 +1007,22 @@
           ]
         },
         {
-          "description": "SPEC-LIT §35.1: the bulk-temperature thermostat, a uniform volumetric\nproportional controller on the domain's own volume-mean `T`. Always\ncorrects `T` and always acts over the whole mesh - see\n[`crate::sources::Thermostat`]'s own doc for why. `tau` omitted\ndefaults to the domain's flow-through time\n([`crate::sources::flow_through_time`]).",
+          "description": "SPEC-LIT §35.1: the bulk-temperature thermostat, a volumetric\nproportional controller on the domain's own volume-mean `T`. Always\ncorrects `T` and always acts over the whole mesh - see\n[`crate::sources::Thermostat`]'s own doc for why. `tau` omitted\ndefaults to the domain's flow-through time\n([`crate::sources::flow_through_time`]).\n\n`weighting` (SPEC-LIT §35.3) says how the controller DISTRIBUTES the\ntotal power it asks for: `\"uniform\"`, the default, spreads it by\nvolume, and `\"massFlux\"` spreads it by the local streamwise mass flux\n`rho u . e_hat`, which is what the periodic-fully-developed\ndecomposition actually calls for. `direction` gives `e_hat`; omitted,\nit is taken from the mesh's single cyclic pair, and a mesh with none\nor with several is a §13.4 error rather than a guess.",
           "type": "object",
           "properties": {
+            "direction": {
+              "description": "SPEC-LIT §35.3.5's `e_hat`. Only meaningful with\n`\"weighting\": \"massFlux\"`; given alongside `\"uniform\"` it is a\n§13.4 error, since uniform has no direction to use and reading it\nand ignoring it is exactly the silent drop §13.4 forbids.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
             "target": {
               "type": "number",
               "format": "double"
@@ -1024,6 +1037,13 @@
             "type": {
               "type": "string",
               "const": "thermostat"
+            },
+            "weighting": {
+              "description": "SPEC-LIT §35.3. Omitted is `\"uniform\"` - deliberately, so every\nmeasurement already recorded with the uniform form stays\nreproducible bit for bit (§35.3.6).",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "additionalProperties": false,

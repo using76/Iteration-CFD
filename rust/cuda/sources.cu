@@ -12,10 +12,15 @@
       the S = S_u + S_p psi linearisation and the requirement S_p <= 0
     Ward, J. Hydraul. Div. ASCE 90 (1964) 1-12 - the Darcy-Forchheimer
       resistance of a porous medium
-    ofgpu SPEC-LIT.md sections 3.4 and 18. The geometric cell-set selection
-      of section 18 is marked *DESIGN* there and is ours; it lives on the
-      host, in src/sources.rs, and reaches these kernels as a list of cell
-      indices.
+    Kays & Crawford, "Convective Heat and Mass Transfer", 3rd ed. (1993)
+      ch. 9, and Patankar, Liu & Sparrow, ASME J. Heat Transfer 99 (1977)
+      180-186 - the periodic-fully-developed decomposition whose
+      compensating source is proportional to the LOCAL streamwise mass flux,
+      which is what srcThermostatMassFluxWeight forms (SPEC-LIT 35.3)
+    ofgpu SPEC-LIT.md sections 3.4, 18 and 35.3. The geometric cell-set
+      selection of section 18 is marked *DESIGN* there and is ours; it lives
+      on the host, in src/sources.rs, and reaches these kernels as a list of
+      cell indices. The discrete weighting of section 35.3.3 is ours too.
   No GPL-licensed source was consulted.
 
   ------------------------------------------------------------------------
@@ -253,4 +258,42 @@ extern "C" __global__ void srcZoneWeight
 
     const oflabel c = cells[i];
     out[c] = v[c]*su;
+}
+
+
+// ==========================================================================
+//  SPEC-LIT section 35.3: the mass-flux weight of the thermostat.
+//
+//      w[c]    = (rho u)_c . e_hat            kg/(m2 s)
+//      wAbs[c] = |w[c]|
+//
+//  Both are written in one pass because the host needs BOTH reductions -
+//  the signed sum W = sum_c w_c V_c is the normalisation, and the gross sum
+//  W_abs = sum_c |w_c| V_c is what section 35.3.4's degenerate guard
+//  compares it against. One launch, one read of rho and U, two writes.
+//
+//  Whole-mesh, not zone-indexed: a thermostat always selects `all`
+//  (section 35.1), so there is no cell list to gather through and one thread
+//  per cell is exactly one thread per selected cell.
+// ==========================================================================
+
+extern "C" __global__ void srcThermostatMassFluxWeight
+(
+    ofscalar* __restrict__ w,
+    ofscalar* __restrict__ wAbs,
+    const ofscalar* __restrict__ rho,
+    const ofvec3* __restrict__ u,
+    ofscalar ex,
+    ofscalar ey,
+    ofscalar ez,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+
+    const ofvec3 uc = u[c];
+    const ofscalar wc = rho[c]*(uc.x*ex + uc.y*ey + uc.z*ez);
+    w[c] = wc;
+    wAbs[c] = wc < (ofscalar)0 ? -wc : wc;
 }

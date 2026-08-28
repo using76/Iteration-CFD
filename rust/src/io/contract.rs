@@ -74,6 +74,14 @@ pub fn reset_warnings() {
     }
 }
 
+/// Has [`warn_once`] fired for this setting? Tests only - a warning printed
+/// on stderr is otherwise invisible to an assertion, and SPEC-LIT §13.4's
+/// "warned, not silently ignored" is a claim a test has to be able to check.
+#[cfg(test)]
+pub fn warned(setting: &str) -> bool {
+    WARNED.lock().map(|w| w.contains(setting)).unwrap_or(false)
+}
+
 /// The standard usage line for the switch, so every driver spells it the same.
 pub const PERMISSIVE_USAGE: &str =
     "  -permissive     downgrade unsupported-setting errors to warnings and\n\

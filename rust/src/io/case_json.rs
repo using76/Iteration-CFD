@@ -139,16 +139,35 @@ pub enum JsonSource {
         body_force: [f64; 3],
     },
 
-    /// SPEC-LIT §35.1: the bulk-temperature thermostat, a uniform volumetric
+    /// SPEC-LIT §35.1: the bulk-temperature thermostat, a volumetric
     /// proportional controller on the domain's own volume-mean `T`. Always
     /// corrects `T` and always acts over the whole mesh - see
     /// [`crate::sources::Thermostat`]'s own doc for why. `tau` omitted
     /// defaults to the domain's flow-through time
     /// ([`crate::sources::flow_through_time`]).
+    ///
+    /// `weighting` (SPEC-LIT §35.3) says how the controller DISTRIBUTES the
+    /// total power it asks for: `"uniform"`, the default, spreads it by
+    /// volume, and `"massFlux"` spreads it by the local streamwise mass flux
+    /// `rho u . e_hat`, which is what the periodic-fully-developed
+    /// decomposition actually calls for. `direction` gives `e_hat`; omitted,
+    /// it is taken from the mesh's single cyclic pair, and a mesh with none
+    /// or with several is a §13.4 error rather than a guess.
     Thermostat {
         target: f64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tau: Option<f64>,
+        /// SPEC-LIT §35.3. Omitted is `"uniform"` - deliberately, so every
+        /// measurement already recorded with the uniform form stays
+        /// reproducible bit for bit (§35.3.6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weighting: Option<String>,
+        /// SPEC-LIT §35.3.5's `e_hat`. Only meaningful with
+        /// `"weighting": "massFlux"`; given alongside `"uniform"` it is a
+        /// §13.4 error, since uniform has no direction to use and reading it
+        /// and ignoring it is exactly the silent drop §13.4 forbids.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<[f64; 3]>,
     },
 }
 
@@ -2416,7 +2435,12 @@ impl JsonCase {
                         heat_release: None,
                     });
                 }
-                JsonSource::Thermostat { target, tau } => {
+                JsonSource::Thermostat {
+                    target,
+                    tau,
+                    weighting,
+                    direction,
+                } => {
                     if !target.is_finite() {
                         return Err(Error::Config(format!(
                             "sources[{i}] (thermostat): target {target} is not \
@@ -2431,6 +2455,20 @@ impl JsonCase {
                             )));
                         }
                     }
+                    // SPEC-LIT §35.3.7. Absent is `uniform`, the default
+                    // §35.3.6 keeps deliberately; any other spelling is a
+                    // §13.4 error naming the two that exist.
+                    let spelled = weighting.as_deref().unwrap_or("uniform");
+                    let weighting = match crate::sources::ThermostatWeighting::parse(spelled) {
+                        Some(w) => w,
+                        None => unsupported(
+                            &format!("sources[{i}].weighting"),
+                            spelled,
+                            &["uniform", "massFlux"],
+                            "uniform, SPEC-LIT §35.1's volume-weighted form",
+                            crate::sources::ThermostatWeighting::Uniform,
+                        )?,
+                    };
                     sources.push(crate::sources::SourceSpec {
                         name: format!("thermostat{i}"),
                         field: "T".to_string(),
@@ -2438,6 +2476,8 @@ impl JsonCase {
                         term: Some(crate::sources::SourceTerm::Thermostat {
                             target: *target as Scalar,
                             tau: tau.map(|t| t as Scalar),
+                            weighting,
+                            direction: direction.map(to_vec3),
                         }),
                         heat_release: None,
                     });
@@ -3992,9 +4032,17 @@ mod tests {
         assert_eq!(spec.field, "T");
         assert_eq!(spec.selector, crate::sources::CellSelector::All);
         match spec.term {
-            Some(crate::sources::SourceTerm::Thermostat { target, tau }) => {
+            Some(crate::sources::SourceTerm::Thermostat {
+                target,
+                tau,
+                weighting,
+                direction,
+            }) => {
                 assert_eq!(target, 350.0);
                 assert_eq!(tau, Some(0.02));
+                // SPEC-LIT §35.3.6: `weighting` omitted is `uniform`.
+                assert_eq!(weighting, crate::sources::ThermostatWeighting::Uniform);
+                assert_eq!(direction, None);
             }
             other => panic!("expected SourceTerm::Thermostat, got {other:?}"),
         }
@@ -4039,6 +4087,90 @@ mod tests {
             Ok(_) => panic!("expected lower() to fail for tau -1.0"),
         };
         assert!(err.contains("tau"), "{err}");
+    }
+
+    /// SPEC-LIT §35.3.7: the JSONC route carries `weighting` and
+    /// `direction` through to the registry.
+    #[test]
+    fn a_mass_flux_thermostat_lowers_with_its_direction() {
+        let case = minimal_case_with_sources(
+            r#"{ "type": "thermostat", "target": 293.15, "tau": 0.02,
+                 "weighting": "massFlux", "direction": [1, 0, 0] }"#,
+        )
+        .expect("parses");
+        let lowered = case.lower().expect("a massFlux thermostat must lower");
+        match lowered.sources[0].term {
+            Some(crate::sources::SourceTerm::Thermostat {
+                weighting,
+                direction,
+                ..
+            }) => {
+                assert_eq!(weighting, crate::sources::ThermostatWeighting::MassFlux);
+                assert_eq!(direction, Some(crate::Vec3::new(1.0, 0.0, 0.0)));
+            }
+            other => panic!("expected SourceTerm::Thermostat, got {other:?}"),
+        }
+    }
+
+    /// `direction` omitted stays `None` - SPEC-LIT §35.3.5 point 2 resolves
+    /// it from the mesh's single cyclic pair, in the DRIVER, where a mesh
+    /// exists.
+    #[test]
+    fn a_mass_flux_thermostat_may_leave_its_direction_to_the_mesh() {
+        let case = minimal_case_with_sources(
+            r#"{ "type": "thermostat", "target": 293.15, "weighting": "massFlux" }"#,
+        )
+        .expect("parses");
+        let lowered = case.lower().expect("must lower");
+        match lowered.sources[0].term {
+            Some(crate::sources::SourceTerm::Thermostat {
+                weighting,
+                direction,
+                ..
+            }) => {
+                assert_eq!(weighting, crate::sources::ThermostatWeighting::MassFlux);
+                assert_eq!(direction, None);
+            }
+            other => panic!("expected SourceTerm::Thermostat, got {other:?}"),
+        }
+    }
+
+    /// SPEC-LIT §13.4: a `weighting` this solver does not have is refused at
+    /// `lower`, naming the two it does.
+    #[test]
+    fn an_unknown_thermostat_weighting_is_an_error() {
+        let _g = crate::io::contract::permissive_test_guard();
+        let case = minimal_case_with_sources(
+            r#"{ "type": "thermostat", "target": 350.0, "weighting": "bulkVelocity" }"#,
+        )
+        .expect("parses");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to refuse an unknown weighting"),
+        };
+        assert!(err.contains("bulkVelocity"), "{err}");
+        assert!(err.contains("uniform"), "{err}");
+        assert!(err.contains("massFlux"), "{err}");
+    }
+
+    /// SPEC-LIT §35.3.5: `direction` alongside the default `uniform`
+    /// weighting is refused - by `SourceTerm::validate`, which `build` runs
+    /// once a mesh exists. The lowering itself records what the case said.
+    #[test]
+    fn a_direction_on_a_uniform_thermostat_is_refused() {
+        let case = minimal_case_with_sources(
+            r#"{ "type": "thermostat", "target": 350.0, "direction": [1, 0, 0] }"#,
+        )
+        .expect("parses");
+        let lowered = case.lower().expect("lowers; the refusal is in validate");
+        let err = lowered.sources[0]
+            .term
+            .expect("a term")
+            .validate("thermostat0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("uniform"), "{err}");
+        assert!(err.contains("massFlux"), "{err}");
     }
 
     /// A `bodyForce` component past `f64`'s range is refused when the case

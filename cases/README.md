@@ -204,9 +204,23 @@ patches" 행을 보십시오. 실제로 켜서 쓰는 예는 아래
 걸립니다. 닫힌 주기 도메인에서 모든 열 경계가 Neumann이면(양쪽 벽
 fixed-flux, 스트림방향 cyclic, 앞뒤 empty) 정상상태 온도 방정식이 순수
 Neumann이 되어 더하는 상수만큼 부정확해지는데(§8.5가 압력에 대해 이미
-하는 것과 같은 null space, `T`로 읽은 것), 이 제어기가 프로파일은 그대로
-두고 그 상수만 고정합니다. `tau`는 생략하면 도메인 자체의 flow-through
-시간(`V^(1/3)/U_ref`)으로 기본값이 잡히고, 명시적으로 줄 수도 있습니다.
+하는 것과 같은 null space, `T`로 읽은 것), 이 제어기가 그 상수를 고정합니다.
+`tau`는 생략하면 도메인 자체의 flow-through 시간(`V^(1/3)/U_ref`)으로
+기본값이 잡히고, 명시적으로 줄 수도 있습니다.
+
+`weighting`(SPEC-LIT §35.3): 제어기가 요구하는 TOTAL 파워를 어떻게
+분배하는가. 균일 체적 싱크는 상수만 고정하는 것이 아니라 프로파일까지
+바꿉니다 — 주기 완전발달 덕트에서 온도장을 주기적으로 만드는 보정항은
+국소 스트림방향 질량유속 `rho u . e_hat`에 비례하고, 균일 형태는 그 항의
+슬러그류 극한(`rho u . e_hat -> rho_bar U_b`)입니다. 균일 싱크는 근벽
+(`u . e_hat < U_b`)에서 필요보다 많은 열을 빼고 코어에서는 적게 빼므로
+`(T_w - T_b)`를 줄이고 `Nu`를 높게 편향시킵니다. `"weighting": "massFlux"`가
+올바른 분배이고, `"direction"`이 스트림방향 `e_hat`입니다(생략하면 메쉬의
+단 하나뿐인 cyclic 쌍의 축에서 가져오고, cyclic 쌍이 없거나 둘 이상이면
+추측하지 않고 §13.4 오류). 기본값은 의도적으로 `"uniform"`입니다 —
+`docs/07-fire-solver.md` §1.1에 기록된 모든 측정이 균일 형태로 이루어졌고
+비트 단위로 재현되어야 하므로, `massFlux`는 명시적 opt-in입니다. `uniform`에
+`direction`을 같이 주는 것은 읽고 무시하는 셈이라 §13.4 오류입니다.
 두 종류 모두 같은 `crate::sources::SourceSpec` 레지스트리로 내려가지만
 (OpenFOAM 형식 케이스의 `constant/fvSources`는 box/sphere 선택과 함께 이
 둘을 포함해 일곱 종류의 항을 지원), 이 배열은 그 전체 표면을 복제하지
@@ -216,6 +230,9 @@ Neumann이 되어 더하는 상수만큼 부정확해지는데(§8.5가 압력�
 "sources": [
   { "type": "momentumSource", "field": "U", "bodyForce": [3.9, 0, 0] },
   { "type": "thermostat", "target": 293.15, "tau": 0.02 },
+  // SPEC-LIT §35.3의 질량유속 가중 (opt-in):
+  // { "type": "thermostat", "target": 293.15, "tau": 0.02,
+  //   "weighting": "massFlux", "direction": [1, 0, 0] },
 ],
 ```
 
@@ -228,8 +245,8 @@ Neumann이 되어 더하는 상수만큼 부정확해지는데(§8.5가 압력�
 | `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, `mesh.grading`으로 벽법선 방향을 양쪽 벽 모두를 향해 two-sided grading(`expansion: 200`, 50칸, 첫 셀 높이 ≈ 2×10⁻⁵ m)하여 y+ 목표 ≈ 1(측정 0.43/0.89/1.02)을 노리는 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다"). 두 케이스의 벽 열유입 비율은 0.381(첫 시도의 0.095에서 4배 개선, 여전히 게이트는 열려 있음) — 자세한 내용은 `docs/07-fire-solver.md` §1.1 |
 | `channelPeriodicWF.jsonc` | `ofgpu-fire` | SPEC-LIT §31의 페리오딕 재시도, 메쉬 (a): 위 두 케이스와 같은 단면(0.04 m × 0.04 m)·`Tw`를 스트림방향 **cyclic**(`mesh.cyclic`, 0.08 m, 8칸)으로 바꾸고, 유입 대신 `sources[]` `momentumSource`(체적력 3.9 m/s²)로, 에너지는 `-heaterPower -6`(균일 도메인 열싱크)로 구동 — 벽법선 균일 6칸, `standard`/`thermalWallFunction`. 측정 y+ 40.25/41.73/43.41, 완전 수렴(`\|U\|` 잔차 1.3e-10) |
 | `channelPeriodicLowRe.jsonc` | `ofgpu-fire` | 위와 같은 페리오딕 덕트, 벽법선만 `channelThermalLowRe.jsonc`와 같은 two-sided grading(`expansion: 200`, 50칸) — `lowRe`/`fixedValue`. 같은 체적력, 그러나 **다른** 열싱크(`-heaterPower -60`) — 해상된 y+~0.3 서브레이어가 같은 싱크로는 `Tw` 근처까지 데워질 만큼 전도가 좋아서(§1.1의 상세 설명 참고), `-900`까지 올려 두 메쉬를 같은 ΔT로 맞춰 보려 했으나 도메인 코어가 160 K까지 식는 비물리적 결과가 나와 포기 — 측정 y+ 0.302/0.310/0.318, `\|U\|` 잔차는 ~1e-5에서 정체(양은 안정) |
-| `channelPeriodicFluxWF.jsonc` | `ofgpu-fire` | SPEC-LIT §32의 재설계된 게이트, SPEC-LIT §34로 진짜 2차원 평면 채널로 재구성한 메쉬 (a): 스트림방향 cyclic, 앞뒤 `empty`(옆벽 없음), 위아래 가열벽만 — 고정 열유속(`fixedFluxTemperature`, `q = 500 W/m2`, 양쪽 가열벽), SPEC-LIT §35.1의 `sources[]` thermostat(`target 293.15`, `tau 0.02`, 예전 `-heaterPower -3.2`를 대체)으로 균형을 맞춤(§32.2). `standard`/`thermalWallFunction`, 측정 y+ 56.8/57.7/58.5, bit 단위로 고정된 상태로 수렴(`\|U\|` 잔차 1.4e-10). 평면 채널이라 가열-둘레와 젖은-둘레가 일치하여 `D_h` = 2H = 0.08 m 하나뿐 — Re = 28,638, Nu = 65.24(변화 없음) — Gnielinski −4.5%, Dittus-Boelter −11.5%, 둘 다 안쪽(**게이트 닫힘, 유지**). 열평형: thermostat 출력 −3.2 W 대 측정 벽열 3.2 W, 차이 2.8e-7 W(반올림 수준) |
-| `channelPeriodicFluxLowRe.jsonc` | `ofgpu-fire` | `channelPeriodicFluxWF.jsonc`의 해상 짝, 같은 방식으로 재구성 — 동일 `q_w`, 동일 thermostat(`target 293.15`, `tau 0.02`), 앞뒤 `empty`, 벽법선만 y+ ~ 1을 노리는 two-sided grading(`expansion: 200`, 50칸). `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행: 옛 덕트의 속도 붕괴는 완전히 사라짐. **SPEC-LIT §35의 thermostat 적용 후: 에너지 방정식의 표류가 완전히 사라짐** — T0 = 293.15 K와 T0 = 400 K에서 각각 40,000 반복을 돌리면 T_mean(293.574 K)·T_b(292.817 K)·U_b(4.84388 m/s)·thermostat 출력(−3.28977 W)까지 마지막 출력 자릿수까지 동일하게 수렴(§35.2가 요구하는 바로 그 회귀 검증). 열평형은 반올림 수준이 아니라 2.8%의 차이(−3.28977 W 대 3.2 W) — 이 메쉬 고유의 압력 솔버 허용오차 바닥(`contErr` 9.2e-8, `relTol`을 1e-4로 조이면 3,317 반복째에 NaN으로 발산)에서 비롯된 것으로 추적, 조정하지 않고 그대로 보고. 게이트: Re = 25,834, Nu = 73.40 — Dittus-Boelter +8.1%(±20-25% 밴드 안쪽), Gnielinski +16.3%(±10% 밴드 밖) — 두 상관식 모두를 요구하는 §32.4 기준으로는 **게이트가 완전히 닫히지 않음**(WF 짝은 완전히 닫힘), 두 메쉬 Nu 비율 1.125. 예전의 "+31%/+41%, 표류 계속"과는 질적으로 다른, 훨씬 작은 미스 — Launder-Sharma의 근벽 열전달 예측 자체를(§33.3이 검증한 것은 운동량 로그법칙뿐) 시사. 파일 자체 헤더와 `docs/07-fire-solver.md` §1.1에 전체 진단이 있음 |
+| `channelPeriodicFluxWF.jsonc` | `ofgpu-fire` | SPEC-LIT §32의 재설계된 게이트, SPEC-LIT §34로 진짜 2차원 평면 채널로 재구성한 메쉬 (a): 스트림방향 cyclic, 앞뒤 `empty`(옆벽 없음), 위아래 가열벽만 — 고정 열유속(`fixedFluxTemperature`, `q = 500 W/m2`, 양쪽 가열벽), SPEC-LIT §35.1의 `sources[]` thermostat(`target 293.15`, `tau 0.02`, 예전 `-heaterPower -3.2`를 대체)으로 균형을 맞춤(§32.2). `standard`/`thermalWallFunction`, 측정 y+ 56.8/57.7/58.5, bit 단위로 고정된 상태로 수렴(`\|U\|` 잔차 1.4e-10). 평면 채널이라 가열-둘레와 젖은-둘레가 일치하여 `D_h` = 2H = 0.08 m 하나뿐 — Re = 28,638, Nu = 65.24(변화 없음) — Gnielinski −4.5%, Dittus-Boelter −11.5%, 둘 다 안쪽(**게이트 닫힘, 유지**). 열평형: thermostat 출력 −3.2 W 대 측정 벽열 3.2 W, 차이 2.8e-7 W(반올림 수준). **나중 보정(SPEC-LIT §32.4/§32.5)**: 위 Gnielinski 값은 Petukhov의 매끄러운 **원관** 마찰계수 `f`로 평가한 것이므로 §32.4가 말하는 **절대 예측** 판정이다. 이 leg가 실제로 실현하는 `f` = 0.02162(원관 상관식보다 −9.6%)로 평가하면 Nu_Gn = 61.30, +6.4% — **레이놀즈 유사** 판정으로도 밴드 안쪽. 단, 이 `f`는 아직 벽면 전단력의 직접 측정이 아니라 체적력 균형에서 추론한 값이다(§32.5.3) **재실행(SPEC-LIT §32.5.3/§35.3)**: 이 케이스는 이제 thermostat에 `"weighting": "massFlux"`를 명시한다. `uniform`으로의 통제 재실행은 위 숫자를 마지막 자릿수까지 그대로 재현했고, `massFlux`에서는 Nu = 64.32(−1.41%), T_w = 317.567 K, T_b = 293.256 K, Re = 28,622, thermostat 출력 −3.20335 W(에너지 불균형 0.105%). 절대 예측 판정은 여전히 닫힌다 — Gnielinski −5.8%, Dittus-Boelter −12.8%. 하지만 `f`를 벽에서 직접 측정하자 0.017247(`rho u_tau^2` 형태) / 0.019960(점성 형태)로, 예전에 추론했던 0.02162보다 8–25% 낮다 — **레이놀즈 유사 판정은 더 이상 닫히지 않는다**(+33.8%, 점성 `f`로도 +14.4%). 예전의 “+6.4%, 두 leg 모두 통과”는 추론된 `f`가 만든 허상이었다. 힘 균형은 이 leg에서 운동학적 단위로 +0.000% 정확히 닫힌다(SPEC-LIT §32.5.2의 보정) |
+| `channelPeriodicFluxLowRe.jsonc` | `ofgpu-fire` | `channelPeriodicFluxWF.jsonc`의 해상 짝, 같은 방식으로 재구성 — 동일 `q_w`, 동일 thermostat(`target 293.15`, `tau 0.02`), 앞뒤 `empty`, 벽법선만 y+ ~ 1을 노리는 two-sided grading(`expansion: 200`, 50칸). `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행: 옛 덕트의 속도 붕괴는 완전히 사라짐. **SPEC-LIT §35의 thermostat 적용 후: 에너지 방정식의 표류가 완전히 사라짐** — T0 = 293.15 K와 T0 = 400 K에서 각각 40,000 반복을 돌리면 T_mean(293.574 K)·T_b(292.817 K)·U_b(4.84388 m/s)·thermostat 출력(−3.28977 W)까지 마지막 출력 자릿수까지 동일하게 수렴(§35.2가 요구하는 바로 그 회귀 검증). 열평형은 반올림 수준이 아니라 2.8%의 차이(−3.28977 W 대 3.2 W) — 이 메쉬 고유의 압력 솔버 허용오차 바닥(`contErr` 9.2e-8, `relTol`을 1e-4로 조이면 3,317 반복째에 NaN으로 발산)에서 비롯된 것으로 추적, 조정하지 않고 그대로 보고. 게이트: Re = 25,834, Nu = 73.40 — Dittus-Boelter +8.1%(±20-25% 밴드 안쪽), Gnielinski +16.3%(±10% 밴드 밖) — 두 상관식 모두를 요구하는 §32.4 기준으로는 **게이트가 완전히 닫히지 않음**(WF 짝은 완전히 닫힘), 두 메쉬 Nu 비율 1.125. 예전의 "+31%/+41%, 표류 계속"과는 질적으로 다른, 훨씬 작은 미스 — Launder-Sharma의 근벽 열전달 예측 자체를(§33.3이 검증한 것은 운동량 로그법칙뿐) 시사. **나중 보정(SPEC-LIT §32.4/§32.5)**: 위 +16.3%는 Petukhov의 매끄러운 **원관** 마찰계수 `f`로 평가한 **절대 예측** 판정이며, 그 판정에서 게이트는 여전히 열려 있다. 이 leg가 실제로 실현하는 `f` = 0.02653(원관 상관식보다 +8.2%)로 평가하면 Nu_Gn = 68.72, +6.8% — **레이놀즈 유사** 판정으로는 두 leg 모두 밴드 안쪽이다. 두 메쉬는 같은 체적력에서 서로 22.7% 다른 `f`를 실현하며, 그 두 `f`로 Gnielinski가 예측하는 Nu 비는 1.121로 측정값 1.125와 거의 일치한다 — 즉 1.125라는 두 메쉬 비율의 대부분은 열전달이 아니라 **운동량** 차이로 설명된다(재실행 전의 가설이지 측정 결과가 아님). 두 `f` 모두 체적력 균형에서 추론한 값이고, 벽면 전단력의 직접 측정은 `ofgpu-fire`에 구현·단위시험됐으나 두 케이스 중 어느 쪽도 아직 재실행하지 않았다. 파일 자체 헤더와 `docs/07-fire-solver.md` §1.1에 전체 진단이 있음 **재실행(SPEC-LIT §32.5.3/§35.3, 결정적 실험)**: 이 케이스도 이제 `"weighting": "massFlux"`를 명시한다. 같은 메쉬에서 토큰 하나만 바꿔 40,000 반복씩 두 번 돌렸다(`uniform` 쪽은 위 기록을 마지막 자릿수까지 재현). 결과: `T_w − T_b`가 21.2703 → 22.1503 K(+4.14%)로 **넓어지고** Nu는 73.4006 → 70.4707(**−3.99%**)로 **낮아졌다** — §35.3.2의 예측 방향과 정확히 일치하며, WF 쌍둥이는 같은 변경에 −1.41%만 움직여 오차가 해상 메쉬에 더 많이 실린다는 예측까지 확인됐다(두 메쉬 Nu 비 1.125 → 1.096). 그래도 게이트는 열려 있다: 절대 예측 판정 +16.3% → **+11.8%**(±10% 밴드 밖 — 단 이 leg의 에너지 불균형 3.26%가 Nu에 그대로 불확실성으로 실린다), Dittus-Boelter +3.9%(밴드 안). 직접 측정한 `f` = 0.023870은 추론값 0.02653보다 11% 낮고 원관 상관식보다도 2.7% 낮아 레이놀즈 유사 판정도 +15.2%로 **닫히지 않는다**. 또 이 leg은 힘 균형이 −3.9% 어긋나는데(WF 쌍둥이는 +0.000%), 가열을 끄고 같은 메쉬를 돌리면 −0.00%로 정확히 닫힌다 — 메쉬나 모델이 아니라 에너지 방정식과의 결합이 원인이라는 뜻이다 |
 
 ```powershell
 cd ..\rust
@@ -252,12 +269,28 @@ cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicLowRe.jsonc -ite
 # SPEC-LIT §32의 재설계된 게이트 — 고정 열유속. -heaterPower는 SPEC-LIT §35.1의
 # sources[] thermostat(target 293.15, tau 0.02, 두 케이스 동일)로 대체됐으므로
 # CLI 플래그가 필요 없습니다.
-cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxWF.jsonc    -iters 3000  -check 1000
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxWF.jsonc    -iters 40000 -check 5000
 cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxLowRe.jsonc -iters 40000 -check 5000
 # SPEC-LIT §35: thermostat 덕에 에너지 방정식의 표류가 사라졌습니다 - T0 = 293.15 K와
 # T0 = 400 K에서 각각 위 LowRe 명령을 돌리면(초기 T만 바꿔서) 이제 마지막 출력
 # 자릿수까지 동일한 T_mean/T_b/U_b/thermostat 출력으로 수렴합니다(§35.2의 회귀
-# 검증). 게이트 자체는 Dittus-Boelter는 통과, Gnielinski는 6포인트 벗어남 -
+# 검증).
+#
+# 재실행(SPEC-LIT §32.5.3/§35.3): 두 케이스 모두 thermostat에
+# "weighting": "massFlux" 를 명시하게 바뀌었으므로 위 두 명령은 이제
+# 올바른 분포의 보상 소스로 동작합니다. 예전 기록을 그대로 재현하려면
+# 그 토큰을 "uniform"으로만 바꾸면 되며, 그것이 이번 재판정에 쓴 통제
+# 실험입니다(마지막 자릿수까지 예전 기록과 일치).
+#
+# 판정(자세한 것은 docs/07-fire-solver.md §1.1):
+#   * WF leg    - 절대 예측 판정에서 닫힌다(Gnielinski -5.8%, Dittus-Boelter -12.8%)
+#   * LowRe leg - Dittus-Boelter는 통과(+3.9%), Gnielinski는 +11.8%로 밴드 밖(열림)
+#   * f를 벽에서 직접 측정한 뒤로는 레이놀즈 유사 판정이 두 leg 모두
+#     닫히지 않습니다(+33.8%, +15.2%) - 예전의 "+6.4%/+6.8%"는 추론된 f가
+#     만든 허상이었습니다.
+# ofgpu-fire는 이제 벽면 전단력에서 f를 직접 측정하고, 힘 균형을 이 크레이트가
+# 실제로 조립하는 운동량 방정식과 같은 운동학적 단위(m4/s2)로 비교해
+# 출력합니다(SPEC-LIT §32.5.2의 보정).
 # docs/07-fire-solver.md §1.1에 전체 표와 진단이 있습니다.
 ```
 
