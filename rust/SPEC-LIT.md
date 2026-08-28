@@ -2390,3 +2390,69 @@ model on a wall-function mesh is as wrong as the reverse, and silently so.
 | flat plate / channel, y+ < 1 | `k`, `epsilon` bounded; no runaway |
 | **the §32 resolved leg** | runs, converges, and its Nu lands in the same correlation band the wall-function leg already sits in |
 | law of the wall | the computed `u+` against `y+` reproduces the viscous sublayer `u+ = y+` below y+ 5 and the log law above y+ 30 — the profile is the model's real output and the only check that says the damping is right |
+
+---
+
+## 34. Mesh expressiveness: constraint patches and multiple cyclic pairs
+
+Two limits of the case FORMATS, not of the solver. Both were found the same
+way — by a gate that could not be built because the case could not be
+written.
+
+### 34.1 Constraint patch kinds in JSONC
+
+The solver has carried `PatchKind::Empty` and `PatchKind::Symmetry` since the
+beginning (§4's BC triple, the `OFPATCH_EMPTY` branches in every operator,
+the vector reflection for symmetry). JSONC offers `wall`, `inlet`, `open` and
+nothing else, so a 2-D case cannot be written in it at all: §33's
+law-of-the-wall channel had to be built in the OpenFOAM format for exactly
+this reason, and §32's resolved leg is a duct — rather than the plane channel
+it should be — for the same one.
+
+```
+"boundaries": { ..., "zmin": "back", "zmax": "front" },
+"patches": [ { "match": "(back|front)", "kind": "empty" }, ... ]
+```
+
+Add `empty` and `symmetry` as patch kinds. They are CONSTRAINTS, not boundary
+conditions, and the difference is worth enforcing rather than documenting:
+
+- an `empty` or `symmetry` rule carrying a per-field BC (`U`, `p`, `T`, …) is
+  a §13.4 error naming the field — the constraint decides every field, and a
+  case that sets one is expressing a misunderstanding the reader can catch;
+- `empty` is legal only on a slot with exactly one cell across, and the
+  reader must check it rather than let the mesh builder produce something
+  meaningless (this is already `blockgen`'s own rule; it is now the case
+  format's too);
+- the mesh's own topology wins, as §4 already specifies for the field
+  reader — this only makes the case file able to SAY it.
+
+### 34.2 More than one cyclic pair
+
+`BlockSpec` carries a single cyclic axis slot, so §31.1's pairing can be
+declared once. A plane channel is periodic in two directions, and a fully
+periodic box in three; both are standard verification geometries, and neither
+can be written today.
+
+Generalise the slot to a list. The §31.1 invariants (bijection after the
+translation, `Sf_a = -Sf_b`) apply per pair, unchanged. Two rules keep the
+combinations sane:
+
+- an axis may appear in at most one pair, and a patch in at most one pair —
+  otherwise the pairing is ambiguous and the mesh silently loses faces;
+- a pair and a constraint patch on the same slot is a §13.4 error naming
+  both, because `empty` and `cyclic` are contradictory statements about the
+  same faces.
+
+### 34.3 What must hold
+
+| Check | Expected |
+|---|---|
+| 2-D JSONC case | mesh closes, and matches the OpenFOAM-format twin cell for cell |
+| `empty` on a multi-cell slot | refused, naming the slot and its cell count |
+| a per-field BC on an `empty`/`symmetry` rule | refused, naming the field |
+| symmetry plane | a symmetric flow stays symmetric to round-off |
+| two cyclic pairs | mesh closes; a uniform field advected through both returns to itself |
+| three cyclic pairs (periodic box) | closes; total flux through every pair is zero |
+| an axis in two pairs | refused, naming the axis |
+| **the §32 resolved leg, as a 2-D plane channel** | the case that could not be written before |
