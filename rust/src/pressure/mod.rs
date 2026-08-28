@@ -3,6 +3,7 @@
 // free; commercial and non-academic research require a licence.
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
+// Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! Pressure-equation backends, and the selector that decides between them by
 //! measurement.

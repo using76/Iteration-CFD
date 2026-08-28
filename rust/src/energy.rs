@@ -128,6 +128,120 @@ use crate::wallfunctions::{ThermalWallData, WallFunctionCoeffs};
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
+//  §37  The turbulent Prandtl number: constant, or Kays-Crawford
+// ==========================================================================
+
+/// Which closure supplies `Pr_t` in S26's `k_eff = k + rho cp nu_t/Pr_t` -
+/// SPEC-LIT S37.
+///
+/// The DEFAULT is [`Self::Constant`], deliberately: every measurement this
+/// project has recorded through `ofgpu-fire` was made with a single case-wide
+/// `Pr_t`, and a default that changed would move all of them at once. A case
+/// opts in by naming `KaysCrawford`; anything else is a S13.4 error naming
+/// both spellings (see [`Self::parse`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrtModel {
+    /// `Pr_t = Pr_t_inf` everywhere - [`GasProperties::pr_t`] as written.
+    #[default]
+    Constant,
+    /// Kays-Crawford: `Pr_t` a function of the local turbulent Peclet number,
+    /// rising to `2 Pr_t_inf` through the conduction sublayer - SPEC-LIT S37,
+    /// [`kays_crawford_prt`].
+    KaysCrawford,
+}
+
+impl PrtModel {
+    /// The spelling a case file uses, and what [`Self::parse`] prints.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Constant => "constant",
+            Self::KaysCrawford => "KaysCrawford",
+        }
+    }
+
+    /// Every spelling a case may name, for a S13.4 menu.
+    pub const NAMES: [&'static str; 2] = ["constant", "KaysCrawford"];
+
+    /// SPEC-LIT S13.4: a recognised spelling selects the model; anything else
+    /// is an error that NAMES the alternatives (`-permissive` substitutes
+    /// `constant`, the default, and says so).
+    ///
+    /// `setting` is the dictionary entry as the user wrote it, so the message
+    /// points at `physics.fluid.PrtModel` for a JSONC case and at
+    /// `thermophysicalProperties/PrtModel` for an OpenFOAM one.
+    pub fn parse(setting: &str, value: &str) -> Result<Self> {
+        match value {
+            "constant" | "Constant" => Ok(Self::Constant),
+            "KaysCrawford" | "kaysCrawford" => Ok(Self::KaysCrawford),
+            other => contract::unsupported(
+                setting,
+                other,
+                &Self::NAMES,
+                "constant (a single case-wide Pr_t)",
+                Self::Constant,
+            ),
+        }
+    }
+}
+
+/// Kays-Crawford's `C` - SPEC-LIT S37.1. Kays, *ASME J. Heat Transfer* 116
+/// (1994) 284-295, and Kays & Crawford, *Convective Heat and Mass Transfer*,
+/// 4th ed., ch. 13. Not a case setting: it is one of the two numbers that
+/// define the correlation, and a case that wants a different one wants a
+/// different correlation.
+pub const KAYS_CRAWFORD_C: Scalar = 0.3;
+
+/// `Pr_t(Pe_t)` - SPEC-LIT S37.1, evaluated in the rearranged form S37.2
+/// derives, which is the SAME function and is the one that survives floating
+/// point:
+///
+/// ```text
+/// Pe_t = (nu_t/nu) Pr                       turbulent Peclet number
+/// u    = 1/(C Pe_t sqrt(Pr_t_inf))
+/// h(u) = (exp(-u) + u - 1)/u^2
+/// Pr_t = Pr_t_inf / (1/2 + h(u))
+/// ```
+///
+/// Both limits are one line in this form and are asserted as tests below:
+/// `h(0) = 1/2` gives `Pr_t -> Pr_t_inf` as `Pe_t -> inf` (the free stream),
+/// and `h(inf) = 0` gives `Pr_t -> 2 Pr_t_inf` as `Pe_t -> 0` (the conduction
+/// sublayer).
+///
+/// Two branches, one at each end, both derived in S37.2 rather than tuned:
+///
+/// * `Pe_t` at or below the point where `2 C Pe_t sqrt(Pr_t_inf)` - the whole
+///   correction to the limit - falls under [`Scalar::EPSILON`], including
+///   `Pe_t = 0` exactly, returns `2 Pr_t_inf`. Without it `u` is `+inf`,
+///   `u*u` is `+inf`, and `h` evaluates `inf/inf = NaN` at the one input a
+///   resolved mesh's own wall face hands it.
+/// * `u` small (`Pe_t` large) evaluates `h` by its Taylor series, because
+///   `exp(-u) + u - 1` is a difference of numbers near 1 whose true value is
+///   `u^2/2`: at `u = 1e-3` the direct form has already lost ten digits.
+#[inline]
+pub fn kays_crawford_prt(pe_t: Scalar, c: Scalar, pr_t_inf: Scalar) -> Scalar {
+    let a = pr_t_inf.sqrt();
+    let x = c * pe_t;
+
+    // The Pe_t -> 0 branch. Written as a NOT of the positive test so a NaN
+    // `pe_t` takes it too rather than propagating.
+    if !(2.0 * x * a > Scalar::EPSILON) {
+        return 2.0 * pr_t_inf;
+    }
+
+    let u = 1.0 / (x * a);
+    let h = if u < 1e-2 {
+        // h(u) = sum_{k>=0} (-u)^k/(k+2)! - the series S37.2 derives.
+        // Truncated after u^4/720, whose first dropped term is u^5/5040
+        // < 4e-14 of h at the switch-over point.
+        0.5 - u / 6.0 + u * u / 24.0 - u * u * u / 120.0 + u * u * u * u / 720.0
+    } else {
+        ((-u).exp() + u - 1.0) / (u * u)
+    };
+
+    pr_t_inf / (0.5 + h)
+}
+
+// ==========================================================================
 //  §25.2  Gas properties and the ideal-gas state
 // ==========================================================================
 
@@ -158,6 +272,12 @@ pub struct GasProperties {
     /// `k` directly. 0.71 is air at ambient conditions, the same default
     /// [`crate::scalar_transport::ScalarTransportCoeffs::pr`] carries.
     pub pr: Scalar,
+    /// Which closure supplies `Pr_t` - SPEC-LIT S37. [`PrtModel::Constant`]
+    /// (this struct's own [`Self::pr_t`] everywhere) unless a case names
+    /// otherwise; [`PrtModel::KaysCrawford`] reads [`Self::pr_t`] as
+    /// `Pr_t_inf`, the free-stream asymptote, and varies `Pr_t` between that
+    /// and `2 Pr_t_inf` with the local turbulent Peclet number.
+    pub pr_t_model: PrtModel,
 }
 
 impl Default for GasProperties {
@@ -175,6 +295,7 @@ impl Default for GasProperties {
             k: 0.026,
             pr_t: 0.85,
             pr: 0.71,
+            pr_t_model: PrtModel::Constant,
         }
     }
 }
@@ -231,6 +352,13 @@ impl GasProperties {
         c.k = d.scalar("k", c.k);
         c.pr_t = d.scalar("Prt", c.pr_t);
         c.pr = d.scalar("Pr", c.pr);
+        // SPEC-LIT S37.4, the OpenFOAM route's own spelling. Absent keeps
+        // `constant`, which is what every case written before S37 existed
+        // means; a spelling this solver does not know is a S13.4 error
+        // naming both, not a silent fall-back to the default.
+        if let Some(w) = d.get("PrtModel") {
+            c.pr_t_model = PrtModel::parse("thermophysicalProperties/PrtModel", w)?;
+        }
         Ok(c)
     }
 }
@@ -263,6 +391,12 @@ pub fn flux_to_grad(q_w: Scalar, k_eff: Scalar) -> Scalar {
 struct EnergyKernels {
     accumulate: CudaFunction,
     k_eff: CudaFunction,
+    /// SPEC-LIT S37.3 - the `k_eff` pass with a LOCAL `Pr_t`. Loaded
+    /// unconditionally beside [`Self::k_eff`] (one `cuModuleGetFunction`
+    /// against a module already resident) rather than lazily behind the
+    /// model selection, so a case that switches models mid-life cannot
+    /// discover a missing symbol at the first `correct()`.
+    k_eff_kays_crawford: CudaFunction,
     target_divergence: CudaFunction,
     fixed_flux: CudaFunction,
 }
@@ -273,6 +407,7 @@ impl EnergyKernels {
         Ok(Self {
             accumulate: k.func("energyAccumulate")?,
             k_eff: k.func("energyKEff")?,
+            k_eff_kays_crawford: k.func("energyKEffKaysCrawford")?,
             target_divergence: k.func("energyTargetDivergence")?,
             fixed_flux: k.func("energyFixedFluxTemperature")?,
         })
@@ -324,6 +459,48 @@ impl EnergyKernels {
                 .arg(nut_f)
                 .arg(&k_mol)
                 .arg(&cp_over_prt)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// SPEC-LIT S37.3's `k_eff` pass: the same face loop as [`Self::k_eff`],
+    /// with `Pr_t` evaluated per face from the local turbulent Peclet number
+    /// instead of divided into `cp` once on the host.
+    #[allow(clippy::too_many_arguments)]
+    fn k_eff_kays_crawford(
+        &self,
+        gpu: &Gpu,
+        dst: &mut DevBuf<Scalar>,
+        rho_f: &DevBuf<Scalar>,
+        nut_f: &DevBuf<Scalar>,
+        k_mol: Scalar,
+        cp: Scalar,
+        nu: Scalar,
+        pr: Scalar,
+        pr_t_inf: Scalar,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as Label;
+        let c = KAYS_CRAWFORD_C;
+        let eps = Scalar::EPSILON;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.k_eff_kays_crawford)
+                .arg(&mut *dst)
+                .arg(rho_f)
+                .arg(nut_f)
+                .arg(&k_mol)
+                .arg(&cp)
+                .arg(&nu)
+                .arg(&pr)
+                .arg(&pr_t_inf)
+                .arg(&c)
+                .arg(&eps)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }
@@ -1104,30 +1281,70 @@ impl<'m> Energy<'m> {
     /// to faces by linear interpolation (S25.3's DESIGN note: "rho_f by
     /// linear interpolation of cell rho" - the same convention this crate
     /// already uses for every other face diffusivity).
-    fn update_k_eff(&mut self, gpu: &Gpu, nut: &GpuScalarField, gas: &GasState) -> Result<()> {
+    fn update_k_eff(
+        &mut self,
+        gpu: &Gpu,
+        nut: &GpuScalarField,
+        gas: &GasState,
+        nu: Scalar,
+    ) -> Result<()> {
         let m = self.m;
         fv::interpolate_linear(gpu, &self.fvk, &mut self.rho_face, gas.rho(), m)?;
         fv::interpolate_linear(gpu, &self.fvk, &mut self.nut_face, nut, m)?;
 
-        let cp_over_prt = self.props.cp / self.props.pr_t;
-        self.ek.k_eff(
-            gpu,
-            &mut self.k_eff_face.f,
-            &self.rho_face.f,
-            &self.nut_face.f,
-            self.props.k,
-            cp_over_prt,
-            m.n_internal_faces,
-        )?;
-        self.ek.k_eff(
-            gpu,
-            &mut self.k_eff_face.bf,
-            &self.rho_face.bf,
-            &self.nut_face.bf,
-            self.props.k,
-            cp_over_prt,
-            m.n_boundary_faces,
-        )?;
+        // SPEC-LIT S37.3. The two branches differ in nothing but where `Pr_t`
+        // comes from: one number divided into `cp` once on the host, or one
+        // evaluation of the correlation per face on the device. `Constant` is
+        // the default and is bit-for-bit the pass this module has always run.
+        match self.props.pr_t_model {
+            PrtModel::Constant => {
+                let cp_over_prt = self.props.cp / self.props.pr_t;
+                self.ek.k_eff(
+                    gpu,
+                    &mut self.k_eff_face.f,
+                    &self.rho_face.f,
+                    &self.nut_face.f,
+                    self.props.k,
+                    cp_over_prt,
+                    m.n_internal_faces,
+                )?;
+                self.ek.k_eff(
+                    gpu,
+                    &mut self.k_eff_face.bf,
+                    &self.rho_face.bf,
+                    &self.nut_face.bf,
+                    self.props.k,
+                    cp_over_prt,
+                    m.n_boundary_faces,
+                )?;
+            }
+            PrtModel::KaysCrawford => {
+                self.ek.k_eff_kays_crawford(
+                    gpu,
+                    &mut self.k_eff_face.f,
+                    &self.rho_face.f,
+                    &self.nut_face.f,
+                    self.props.k,
+                    self.props.cp,
+                    nu,
+                    self.props.pr,
+                    self.props.pr_t,
+                    m.n_internal_faces,
+                )?;
+                self.ek.k_eff_kays_crawford(
+                    gpu,
+                    &mut self.k_eff_face.bf,
+                    &self.rho_face.bf,
+                    &self.nut_face.bf,
+                    self.props.k,
+                    self.props.cp,
+                    nu,
+                    self.props.pr,
+                    self.props.pr_t,
+                    m.n_boundary_faces,
+                )?;
+            }
+        }
 
         field_ops::copy_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.f, &self.k_eff_face.f, m.n_internal_faces)?;
         field_ops::multiply_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.f, &m.mag_sf, m.n_internal_faces)?;
@@ -1343,11 +1560,15 @@ impl<'m> Energy<'m> {
     /// `nut` is the eddy viscosity the momentum/turbulence equations solved
     /// with this iteration, the same segregated lag every other equation in
     /// this crate reads it with. `k` (the turbulence kinetic energy's cell
-    /// field) and `nu` (the molecular kinematic viscosity) are read ONLY by
-    /// [`Self::update_thermal_wall`] - SPEC-LIT S29.3 - and only where
-    /// [`Self::set_thermal_wall`] has been called; a case with no thermal
-    /// wall function may pass any field of the right length (it is never
-    /// dereferenced) and any `nu`.
+    /// field) is read ONLY by [`Self::update_thermal_wall`] - SPEC-LIT S29.3
+    /// - and only where [`Self::set_thermal_wall`] has been called; a case
+    /// with no thermal wall function may pass any field of the right length
+    /// (it is never dereferenced). `nu`, the molecular kinematic viscosity,
+    /// is read by that same wall function AND - since SPEC-LIT S37 - by
+    /// [`Self::update_k_eff`] whenever [`GasProperties::pr_t_model`] is
+    /// [`PrtModel::KaysCrawford`], which forms the turbulent Peclet number
+    /// `Pe_t = (nu_t/nu) Pr` from it. Under [`PrtModel::Constant`] it reaches
+    /// nothing but the wall function, exactly as before.
     pub fn correct(
         &mut self,
         gpu: &Gpu,
@@ -1366,7 +1587,7 @@ impl<'m> Energy<'m> {
         field_ops::store_old_time(gpu, &self.fldk, &mut self.t)?;
 
         self.refresh_rho_cp(gpu, gas)?;
-        self.update_k_eff(gpu, nut, gas)?;
+        self.update_k_eff(gpu, nut, gas, nu)?;
         self.update_thermal_wall(gpu, k, &gas.rho().f, nu)?;
         self.update_fixed_flux(gpu)?;
         self.update_conv_flux(gpu, phi)?;
@@ -1409,6 +1630,171 @@ mod tests {
     // ----------------------------------------------------------------------
     //  GasProperties / GasState
     // ----------------------------------------------------------------------
+
+    // ----------------------------------------------------------------------
+    //  §37  Kays-Crawford's variable turbulent Prandtl number
+    // ----------------------------------------------------------------------
+
+    /// The literature form of SPEC-LIT S37.1, written out exactly as the
+    /// papers print it, so the rearrangement [`kays_crawford_prt`] evaluates
+    /// can be CHECKED against it rather than merely asserted to equal it.
+    /// Not used by the solver - it is the thing being checked, and it is the
+    /// form that loses precision (see the test that measures where).
+    fn kays_crawford_prt_literature(pe_t: f64, c: f64, pr_t_inf: f64) -> f64 {
+        let x = c * pe_t;
+        let a = pr_t_inf.sqrt();
+        1.0 / (1.0 / (2.0 * pr_t_inf) + x / a - x * x * (1.0 - (-1.0 / (x * a)).exp()))
+    }
+
+    /// SPEC-LIT S37.2's first limit, DERIVED there and asserted here:
+    /// `Pe_t -> 0` gives `Pr_t -> 2 Pr_t_inf`, the conduction-sublayer value.
+    /// Exact, not approximate, because the small-`Pe_t` branch returns the
+    /// limit itself.
+    #[test]
+    fn kays_crawford_at_zero_peclet_is_exactly_twice_the_free_stream_value() {
+        for pr_t_inf in [0.7 as Scalar, 0.85, 0.9, 1.0] {
+            let got = kays_crawford_prt(0.0, KAYS_CRAWFORD_C, pr_t_inf);
+            assert_eq!(got, 2.0 * pr_t_inf, "Pe_t = 0, Pr_t_inf = {pr_t_inf}");
+        }
+        // The number this project's own air cases land on at a wall where a
+        // low-Re model has pinned nu_t to zero.
+        assert_eq!(kays_crawford_prt(0.0, KAYS_CRAWFORD_C, 0.85), 1.7);
+    }
+
+    /// The branch exists because `Pe_t` can be positive and still send the
+    /// formula's inner argument to infinity. SPEC-LIT S37.2's own worked
+    /// case: at `Pe_t = 1e-300` the literature bracket's third term is
+    /// `0 * (1 - exp(-huge))` and the rearranged form's `u*u` overflows -
+    /// both have to come out at the limit rather than at NaN.
+    #[test]
+    fn kays_crawford_at_1e_300_is_still_the_sublayer_limit() {
+        let got = kays_crawford_prt(1e-300, KAYS_CRAWFORD_C, 0.85);
+        assert!(got.is_finite(), "Pe_t = 1e-300 gave {got}");
+        assert_eq!(got, 1.7);
+    }
+
+    /// SPEC-LIT S37.2's second limit: `Pe_t -> inf` gives `Pr_t -> Pr_t_inf`,
+    /// the free-stream value, approached FROM ABOVE at the rate S37.2
+    /// derives - `Pr_t = Pr_t_inf (1 + 1/(6 sqrt(Pr_t_inf) C Pe_t)) + O(Pe_t^-2)`.
+    #[test]
+    fn kays_crawford_at_large_peclet_approaches_the_free_stream_value_from_above() {
+        let (c, p_inf) = (KAYS_CRAWFORD_C, 0.85 as Scalar);
+        for pe_t in [1e3 as Scalar, 1e4, 1e5, 1e6] {
+            let got = kays_crawford_prt(pe_t, c, p_inf);
+            assert!(got > p_inf, "Pe_t = {pe_t}: {got} is not above {p_inf}");
+            let want = p_inf * (1.0 + 1.0 / (6.0 * p_inf.sqrt() * c * pe_t));
+            // The next term is O(Pe_t^-2), so the first-order estimate has to
+            // agree to better than that.
+            assert!(
+                (got - want).abs() < 10.0 / (pe_t * pe_t),
+                "Pe_t = {pe_t}: {got} against the asymptote {want}"
+            );
+        }
+        assert!((kays_crawford_prt(1e9, c, p_inf) - p_inf).abs() < 1e-9);
+    }
+
+    /// The rearrangement is the SAME function, not an approximation to it -
+    /// SPEC-LIT S37.2. Checked against the literature form everywhere the
+    /// literature form is still trustworthy.
+    #[test]
+    fn the_rearranged_form_reproduces_the_literature_form() {
+        let (c, p_inf) = (0.3_f64, 0.85_f64);
+        let mut worst: f64 = 0.0;
+        // 1e-4 .. 1e3 in Pe_t. The upper end is where the LITERATURE form's
+        // own cancellation first shows (it is already 3e-10 out at Pe_t = 1e4
+        // and 4% out at 1e8), so past it the two forms disagree because the
+        // reference is wrong, not the implementation - the next test measures
+        // exactly that.
+        for i in 0..=140 {
+            let pe_t: f64 = 10.0_f64.powf(-4.0 + 0.05 * f64::from(i));
+            let want = kays_crawford_prt_literature(pe_t, c, p_inf);
+            let got =
+                f64::from(kays_crawford_prt(pe_t as Scalar, c as Scalar, p_inf as Scalar));
+            worst = worst.max((got - want).abs() / want);
+        }
+        assert!(worst < 1e-10, "worst relative disagreement {worst:e}");
+    }
+
+    /// Why the rearrangement is not cosmetic: at large `Pe_t` the literature
+    /// form subtracts two numbers of order `C Pe_t/sqrt(Pr_t_inf)` to leave
+    /// one of order `1/Pr_t_inf`, and the digits go with them. Measured here
+    /// rather than asserted in a comment.
+    #[test]
+    fn the_literature_form_is_the_one_that_loses_the_digits() {
+        let (c, p_inf) = (0.3_f64, 0.85_f64);
+        // The true answer at Pe_t = 1e8 is p_inf to eight decimal places.
+        let literature = kays_crawford_prt_literature(1e8, c, p_inf);
+        let rearranged =
+            f64::from(kays_crawford_prt(1e8 as Scalar, c as Scalar, p_inf as Scalar));
+        assert!(
+            (rearranged - p_inf).abs() < 1e-7,
+            "the rearranged form should sit at the asymptote; it gave {rearranged}"
+        );
+        assert!(
+            (literature - p_inf).abs() > 1e-3,
+            "the literature form was expected to have lost its digits by \
+             Pe_t = 1e8; it gave {literature}"
+        );
+    }
+
+    /// The physical statement the correlation exists to make: `Pr_t` falls
+    /// MONOTONICALLY from `2 Pr_t_inf` at the wall to `Pr_t_inf` in the free
+    /// stream, and never leaves that interval. SPEC-LIT S37.5's own row.
+    #[test]
+    fn kays_crawford_is_monotone_between_its_two_limits() {
+        let (c, p_inf) = (KAYS_CRAWFORD_C, 0.85 as Scalar);
+        let mut prev = kays_crawford_prt(0.0, c, p_inf);
+        for i in 0..=200 {
+            let pe_t: Scalar = 10.0_f64.powf(-8.0 + 0.075 * f64::from(i)) as Scalar;
+            let got = kays_crawford_prt(pe_t, c, p_inf);
+            assert!(got.is_finite(), "Pe_t = {pe_t} gave {got}");
+            assert!(
+                got >= p_inf - 1e-12 && got <= 2.0 * p_inf + 1e-12,
+                "Pe_t = {pe_t}: {got} is outside [{p_inf}, {}]",
+                2.0 * p_inf
+            );
+            assert!(got <= prev + 1e-12, "Pe_t = {pe_t}: {got} rose above {prev}");
+            prev = got;
+        }
+    }
+
+    /// Nothing in the sweep - denormals, zero and infinity included - comes
+    /// back as NaN or as a diffusivity a `k_eff` could not use.
+    #[test]
+    fn kays_crawford_is_finite_and_positive_everywhere_it_can_be_called() {
+        let (c, p_inf) = (KAYS_CRAWFORD_C, 0.85 as Scalar);
+        let inputs: [Scalar; 10] =
+            [0.0, Scalar::MIN_POSITIVE, 1e-300, 1e-30, 1e-8, 1.0, 1e8, 1e30, 1e300, Scalar::MAX];
+        for pe_t in inputs {
+            let got = kays_crawford_prt(pe_t, c, p_inf);
+            assert!(got.is_finite() && got > 0.0, "Pe_t = {pe_t:e} gave {got}");
+        }
+        assert_eq!(kays_crawford_prt(Scalar::INFINITY, c, p_inf), p_inf);
+    }
+
+    /// SPEC-LIT S13.4 on the selector itself: both spellings are recognised,
+    /// anything else is an error that NAMES the menu.
+    #[test]
+    fn an_unrecognised_prt_model_is_a_13_4_error_naming_the_alternatives() {
+        assert_eq!(PrtModel::parse("x", "constant").unwrap(), PrtModel::Constant);
+        assert_eq!(PrtModel::parse("x", "KaysCrawford").unwrap(), PrtModel::KaysCrawford);
+
+        let e = PrtModel::parse("physics.fluid.PrtModel", "kaysCrawfordJischa")
+            .expect_err("an unknown spelling has to be refused");
+        let msg = e.to_string();
+        assert!(msg.contains("physics.fluid.PrtModel"), "{msg}");
+        assert!(msg.contains("kaysCrawfordJischa"), "{msg}");
+        assert!(msg.contains("constant") && msg.contains("KaysCrawford"), "{msg}");
+    }
+
+    /// The default has to stay `constant`: every measurement `ofgpu-fire`
+    /// has recorded was made with one, and a default that moved would move
+    /// all of them at once (SPEC-LIT S37.4).
+    #[test]
+    fn the_default_prt_model_is_the_constant_one() {
+        assert_eq!(GasProperties::default().pr_t_model, PrtModel::Constant);
+        assert_eq!(PrtModel::default(), PrtModel::Constant);
+    }
 
     #[test]
     fn default_air_properties_validate_and_give_the_textbook_r_s() {
@@ -1621,6 +2007,88 @@ mod tests {
         gpu.write(&mut t.bc_kind, &kind)?;
         gpu.write(&mut t.fr, &fr)?;
         gpu.write(&mut t.ref_value, &rv)?;
+        Ok(())
+    }
+
+    /// SPEC-LIT S37.3: `energyKEffKaysCrawford` has to reproduce the host
+    /// [`kays_crawford_prt`] on every face, INCLUDING the two end branches -
+    /// the same discipline `wallfunctions::thermal_wall_device_agrees_with_the_host_law`
+    /// holds the thermal wall function to. `nu_t` is seeded across fourteen
+    /// decades plus an exact zero, so both branches and the whole span
+    /// between them are exercised on the device, not only on the host.
+    #[test]
+    fn kays_crawford_device_agrees_with_the_host_correlation() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 16;
+        let h: Scalar = 0.01;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+
+        let nu: Scalar = 1.5e-5;
+        let props = GasProperties {
+            pr: 0.71,
+            pr_t: 0.85,
+            pr_t_model: PrtModel::KaysCrawford,
+            ..GasProperties::default()
+        };
+        let (mut e, mut nut, _phi) = laminar_slab_energy(&g, &hm, &m, props, true, 1.0)?;
+
+        // nu_t/nu from 0 (a resolved wall under a low-Re model) up through
+        // the log layer and past it, one cell per decade.
+        let nut_cells: Vec<Scalar> = (0..N)
+            .map(|i| {
+                if i == 0 {
+                    0.0
+                } else {
+                    nu * (10.0 as Scalar).powf(-7.0 + i as Scalar)
+                }
+            })
+            .collect();
+        g.write(&mut nut.f, &nut_cells)?;
+        field_ops::correct_boundary_conditions(&g, &FieldKernels::new(&g)?, &mut nut, &m)?;
+
+        let gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+        e.initialise(&g)?;
+        let mut gas = gas;
+        gas.update_density(&g, e.field())?;
+
+        e.update_k_eff(&g, &nut, &gas, nu)?;
+
+        // Rebuild the face fields the kernel was handed, so the comparison is
+        // against the SAME interpolated rho_f/nu_t_f rather than against a
+        // second interpolation that could differ in the last bit.
+        let rho_f = g.download(&e.rho_face.f)?;
+        let nut_f = g.download(&e.nut_face.f)?;
+        let k_eff_f = g.download(&e.k_eff_face.f)?;
+
+        let mut worst: f64 = 0.0;
+        let mut saw_sublayer_limit = false;
+        let mut saw_free_stream = false;
+        for i in 0..m.n_internal_faces {
+            let pe_t = (nut_f[i] / nu) * props.pr;
+            let prt = kays_crawford_prt(pe_t, KAYS_CRAWFORD_C, props.pr_t);
+            saw_sublayer_limit |= (prt - 2.0 * props.pr_t).abs() < 1e-6;
+            saw_free_stream |= (prt - props.pr_t).abs() < 1e-3;
+            let want = props.k + rho_f[i] * nut_f[i] * props.cp / prt;
+            let got = f64::from(k_eff_f[i]);
+            worst = worst.max((got - f64::from(want)).abs() / f64::from(want).abs().max(1e-300));
+        }
+        assert!(worst < 1e-12, "worst relative host/device disagreement {worst:e}");
+        assert!(saw_sublayer_limit, "the sweep never reached the 2*Pr_t_inf branch");
+        assert!(saw_free_stream, "the sweep never reached the Pr_t_inf asymptote");
+
+        // And the CONSTANT model on the identical field is the old formula,
+        // exactly - the default has to be bit-for-bit what it always was.
+        let props_c = GasProperties { pr_t_model: PrtModel::Constant, ..props };
+        let (mut ec, _n2, _p2) = laminar_slab_energy(&g, &hm, &m, props_c, true, 1.0)?;
+        ec.initialise(&g)?;
+        ec.update_k_eff(&g, &nut, &gas, nu)?;
+        let k_eff_c = g.download(&ec.k_eff_face.f)?;
+        for i in 0..m.n_internal_faces {
+            let want = props_c.k + rho_f[i] * nut_f[i] * props_c.cp / props_c.pr_t;
+            assert_eq!(k_eff_c[i], want, "face {i}: the constant branch moved");
+        }
         Ok(())
     }
 

@@ -1250,25 +1250,24 @@ pub fn relaxation_factor(d: &FoamDict, var: &str, fallback: Scalar) -> Result<Sc
     }
 }
 
-fn read_fv_solution(turb: &mut TurbulenceControls, d: &FoamDict) -> Result<()> {
+fn read_fv_solution(
+    turb: &mut TurbulenceControls,
+    d: &FoamDict,
+    dissipation: &str,
+) -> Result<()> {
     read_solver_controls(&mut turb.k_solver, d, "k")?;
 
-    // epsilon and omega share one slot; whichever the case defines wins.
-    // Asked through `resolve`, so a `"(k|epsilon)"` key counts as defining
-    // epsilon - which it does.
-    if d.resolve("solvers", "epsilon")?.is_some() {
-        read_solver_controls(&mut turb.epsilon_solver, d, "epsilon")?;
-    } else {
-        read_solver_controls(&mut turb.epsilon_solver, d, "omega")?;
-    }
+    // epsilon and omega share one slot, and which one fills it is the
+    // MODEL's answer, not "whichever the case defines" - `dissipation_key`
+    // records what the latter used to cost on `cases/channelKW`, whose
+    // fvSolution names both. Asked through `resolve`, so a `"(k|epsilon)"`
+    // key still counts as defining epsilon - which it does.
+    read_solver_controls(&mut turb.epsilon_solver, d, dissipation)?;
 
     // `relaxationFactors { equations { ".*" 0.7; } }` is as common an idiom as
     // the regex solver key, and misses for exactly the same reason.
     turb.k_relax = relaxation_factor(d, "k", turb.k_relax)?;
-    turb.eps_relax = match relaxation_factor(d, "epsilon", Scalar::NAN)? {
-        v if v.is_nan() => relaxation_factor(d, "omega", turb.eps_relax)?,
-        v => v,
-    };
+    turb.eps_relax = relaxation_factor(d, dissipation, turb.eps_relax)?;
 
     // A CORRECTOR COUNT, and nothing else. It used to double as the on/off
     // switch for the correction itself, so writing 0 - the normal setting on
@@ -1309,15 +1308,70 @@ pub fn resolve_sn_grad(sch: &FvSchemes, key: &str) -> Result<SnGradScheme> {
     Ok(if named { lap } else { sn })
 }
 
+/// Which dissipation variable this case's model transports - `"omega"` for
+/// the k-omega family, `"epsilon"` for everything else.
+///
+/// SPEC-LIT §13.4.1(a), and one more instance of it. `epsilon` and `omega`
+/// share one slot in [`TurbulenceControls`] because a model has one
+/// dissipation variable, and the reader used to pick which dictionary entry
+/// filled that slot by asking WHICH ENTRY THE CASE HAPPENED TO WRITE:
+///
+/// ```text
+/// if divSchemes has div(phi,omega) and not div(phi,epsilon) -> omega
+/// otherwise                                                 -> epsilon
+/// ```
+///
+/// The comment beside it said "epsilon and omega never coexist". They do:
+/// `blockgen::write_case` writes BOTH entries into every case it generates,
+/// so that one case directory can be run with `ofgpu-k-epsilon` or with
+/// `ofgpu-k-omega`, and `cases/channelKW` - this repository's own published
+/// k-omega case - carries both. A k-omega run therefore took
+/// `div(phi,epsilon)` and `relaxationFactors/equations/epsilon` for its
+/// OMEGA equation, and `div(phi,omega)` was inert: two runs of
+/// `ofgpu-k-omega` differing only in it wrote bit-identical fields.
+///
+/// The MODEL decides, which is the only thing that can: `model_name` is read
+/// from `constant/momentumTransport` before either scheme reader runs. Where
+/// the case names no model the old "whichever entry is present" rule stands,
+/// because there is then nothing better to go on.
+pub fn dissipation_key(model_name: &str, sch: &FvSchemes) -> &'static str {
+    if let Some(k) = dissipation_from_model(model_name) {
+        return k;
+    }
+    // No model named: fall back to whichever entry the case actually wrote.
+    let d = sch.dict();
+    if d.has("divSchemes/div(phi,omega)") && !d.has("divSchemes/div(phi,epsilon)") {
+        "omega"
+    } else {
+        "epsilon"
+    }
+}
+
+/// [`dissipation_key`]'s first half on its own - `None` where the model name
+/// does not decide, so a caller with no `fvSchemes` (the JSONC path) can
+/// supply its own fallback.
+pub fn dissipation_from_model(model_name: &str) -> Option<&'static str> {
+    let n = model_name.to_ascii_lowercase();
+    if n.contains("omega") {
+        Some("omega")
+    } else if n.contains("epsilon") || n.contains("ke") {
+        Some("epsilon")
+    } else {
+        None
+    }
+}
+
 /// One equation's convection entry, for a driver that assembles a term
 /// [`read_case_controls`] knows nothing about - `div(phi,U)`, `div(phi,T)`.
 pub fn div_entry(c: &CaseControls, key: &str) -> Result<DivEntry> {
     c.schemes.div(key)
 }
 
-fn read_fv_schemes(turb: &mut TurbulenceControls, sch: &FvSchemes) -> Result<()> {
-    let d = sch.dict();
-
+fn read_fv_schemes(
+    turb: &mut TurbulenceControls,
+    sch: &FvSchemes,
+    model_name: &str,
+) -> Result<()> {
     // Every equation reads ITS OWN entry. The reader this replaced took the
     // first of div(phi,k) / div(phi,epsilon) / div(phi,omega) / default that
     // matched and used it for the whole case, momentum included - so a case
@@ -1327,18 +1381,11 @@ fn read_fv_schemes(turb: &mut TurbulenceControls, sch: &FvSchemes) -> Result<()>
     turb.div_scheme = ke.scheme;
     turb.bounded_convection = ke.bounded;
 
-    // epsilon and omega never coexist. Asking for the absent one would raise a
-    // missing-entry error for an equation nothing is solving, so the key that
-    // is present decides which is looked up; when neither is, the lookup goes
-    // under `div(phi,epsilon)` so the diagnostic names something real.
-    let eps_key = if d.has("divSchemes/div(phi,omega)")
-        && !d.has("divSchemes/div(phi,epsilon)")
-    {
-        "div(phi,omega)"
-    } else {
-        "div(phi,epsilon)"
-    };
-    let ee = sch.div(eps_key)?;
+    // The dissipation variable this case's MODEL transports decides which
+    // entry fills the one dissipation slot - see `dissipation_key`, which
+    // records what asking the DICTIONARY instead used to cost.
+    let eps_key = format!("div(phi,{})", dissipation_key(model_name, sch));
+    let ee = sch.div(&eps_key)?;
     turb.eps_div_scheme = ee.scheme;
     turb.eps_bounded_convection = ee.bounded;
 
@@ -1377,6 +1424,27 @@ fn read_fv_schemes(turb: &mut TurbulenceControls, sch: &FvSchemes) -> Result<()>
 
 fn read_control_dict(c: &mut CaseControls, d: &FoamDict) -> Result<()> {
     c.turb.delta_t = d.scalar("deltaT", c.turb.delta_t);
+
+    // SPEC-LIT 13.4. `adjustTimeStep yes;` asks the run to choose its own
+    // step from a Courant number, and no driver that goes through
+    // `read_case_controls` has such a loop: `ofgpu-plume`, `ofgpu-buoyant`,
+    // `ofgpu-k-epsilon`, `ofgpu-k-omega` and `ofgpu-fire` all march on a
+    // fixed `deltaT`. `ofgpu-vof` DOES adapt, and reads this entry itself
+    // (`VofControls::from_case`) without coming through here.
+    //
+    // Read and refused rather than read and dropped, which is what happened
+    // to it for the whole life of this reader - a case asking for an
+    // adaptive step got a fixed one and nothing said so.
+    if d.bool("adjustTimeStep", false) {
+        crate::io::contract::unsupported_note(
+            "controlDict/adjustTimeStep",
+            "yes",
+            &["no"],
+            "the driver this case is being run with marches on a fixed deltaT. ofgpu-vof is the one adaptive loop in this crate (controlDict maxCo + adjustTimeStep, or -maxCo on its command line); every other driver takes the step from controlDict/deltaT or -deltaT",
+            "a fixed time step of controlDict/deltaT",
+            (),
+        )?;
+    }
 
     // Local time stepping reads its Courant number and its ceiling from the
     // same two entries an adaptive-dt transient run would (SPEC-LIT 13.2).
@@ -1504,7 +1572,11 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
     let fv_sol = case_dir.join("system").join("fvSolution");
     if fv_sol.exists() {
         let d = FoamDict::read(&fv_sol)?;
-        read_fv_solution(&mut c.turb, &d)?;
+        // The model is already known here - `constant/momentumTransport` is
+        // read above - so the dissipation slot is filled from the entry the
+        // MODEL names (SPEC-LIT 13.4.1(a); see `dissipation_key`).
+        let diss = dissipation_key(&c.model_name, &c.schemes);
+        read_fv_solution(&mut c.turb, &d, diss)?;
         read_solver_controls(&mut c.p_solver, &d, "p")?;
         read_solver_controls(&mut c.u_solver, &d, "U")?;
         c.residual_control = ResidualControl::read(&d);
@@ -1518,7 +1590,7 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
     }
     // Runs even with no file: it is what fills in the documented defaults, and
     // `ddtSchemes` has to be resolved before controlDict counts `endTime`.
-    read_fv_schemes(&mut c.turb, &c.schemes)?;
+    read_fv_schemes(&mut c.turb, &c.schemes, &c.model_name)?;
 
     // ---- controlDict ------------------------------------------------------
     let ctrl_d = case_dir.join("system").join("controlDict");
@@ -2051,7 +2123,7 @@ mod tests {
     fn each_equation_gets_its_own_scheme() {
         let sch = schemes_of(FV_SCHEMES);
         let mut turb = TurbulenceControls::default();
-        read_fv_schemes(&mut turb, &sch).unwrap();
+        read_fv_schemes(&mut turb, &sch, "kEpsilon").unwrap();
 
         assert_eq!(turb.div_scheme, DivScheme::Limited(Limiter::Sweby(1.0)));
         assert_eq!(turb.eps_div_scheme, DivScheme::Limited(Limiter::VanLeer));
@@ -2078,14 +2150,14 @@ mod tests {
     #[test]
     fn sn_grad_schemes_reaches_the_controls() {
         let mut turb = TurbulenceControls::default();
-        read_fv_schemes(&mut turb, &schemes_of(FV_SCHEMES)).unwrap();
+        read_fv_schemes(&mut turb, &schemes_of(FV_SCHEMES), "kEpsilon").unwrap();
         assert_eq!(turb.sn_grad, SnGradScheme::Uncorrected);
 
         let mut turb = TurbulenceControls::default();
         read_fv_schemes(
             &mut turb,
-            &schemes_of("divSchemes { default Gauss upwind; } \
-                         laplacianSchemes { default Gauss linear limited 0.5; }"),
+            &schemes_of("divSchemes { default Gauss upwind; } laplacianSchemes { default Gauss linear limited 0.5; }"),
+            "kEpsilon",
         )
         .unwrap();
         assert_eq!(turb.sn_grad, SnGradScheme::Limited(0.5));
@@ -2098,7 +2170,7 @@ mod tests {
             divSchemes { default Gauss upwind; }
         "#;
         let mut turb = TurbulenceControls::default();
-        read_fv_schemes(&mut turb, &schemes_of(src)).unwrap();
+        read_fv_schemes(&mut turb, &schemes_of(src), "kEpsilon").unwrap();
 
         // Default is true, so this only passes if the entry was really read.
         assert!(!turb.bounded_convection);
@@ -2106,10 +2178,17 @@ mod tests {
         assert_eq!(turb.div_scheme, DivScheme::Upwind);
     }
 
-    /// k-omega cases name `div(phi,omega)` and never `div(phi,epsilon)`.
+    /// The MODEL decides which entry fills the one dissipation slot.
+    ///
+    /// SPEC-LIT 13.4.1(a). This test used to assert only the first half -
+    /// a case naming `div(phi,omega)` alone - and the reader passed it by
+    /// asking which entry the DICTIONARY happened to carry. The second half
+    /// is the one that was failing in the field: `blockgen::write_case`
+    /// writes BOTH entries into every case it generates, `cases/channelKW`
+    /// among them, and there `div(phi,epsilon)` won for a k-omega run.
     #[test]
     fn omega_fills_the_epsilon_scheme_slot() {
-        let src = r#"
+        let only_omega = r#"
             divSchemes
             {
                 default        none;
@@ -2118,8 +2197,44 @@ mod tests {
             }
         "#;
         let mut turb = TurbulenceControls::default();
-        read_fv_schemes(&mut turb, &schemes_of(src)).unwrap();
+        read_fv_schemes(&mut turb, &schemes_of(only_omega), "kOmega").unwrap();
         assert_eq!(turb.eps_div_scheme, DivScheme::Limited(Limiter::VanLeer));
+
+        // A case naming BOTH, which is what this repository's own generator
+        // writes. The model decides, not the dictionary.
+        let both = r#"
+            divSchemes
+            {
+                default          none;
+                div(phi,k)       Gauss upwind;
+                div(phi,epsilon) Gauss upwind;
+                div(phi,omega)   Gauss vanLeer;
+            }
+        "#;
+        let mut kw = TurbulenceControls::default();
+        read_fv_schemes(&mut kw, &schemes_of(both), "kOmega").unwrap();
+        assert_eq!(
+            kw.eps_div_scheme,
+            DivScheme::Limited(Limiter::VanLeer),
+            "a kOmega run must read div(phi,omega), not div(phi,epsilon)"
+        );
+
+        let mut ke = TurbulenceControls::default();
+        read_fv_schemes(&mut ke, &schemes_of(both), "kEpsilon").unwrap();
+        assert_eq!(
+            ke.eps_div_scheme,
+            DivScheme::Upwind,
+            "and a kEpsilon run on the SAME case must read div(phi,epsilon)"
+        );
+
+        // The SST spelling and the low-Re k-epsilon one route the same way.
+        let mut sst = TurbulenceControls::default();
+        read_fv_schemes(&mut sst, &schemes_of(both), "kOmegaSST").unwrap();
+        assert_eq!(sst.eps_div_scheme, DivScheme::Limited(Limiter::VanLeer));
+
+        let mut ls = TurbulenceControls::default();
+        read_fv_schemes(&mut ls, &schemes_of(both), "LaunderSharmaKE").unwrap();
+        assert_eq!(ls.eps_div_scheme, DivScheme::Upwind);
     }
 
     #[test]
@@ -2151,7 +2266,7 @@ mod tests {
         "#;
         let d = FoamDict::parse(src, "fvSolution").unwrap();
         let mut turb = TurbulenceControls::default();
-        read_fv_solution(&mut turb, &d).unwrap();
+        read_fv_solution(&mut turb, &d, "epsilon").unwrap();
 
         assert_eq!(turb.k_solver.precon, Preconditioner::Dilu);
         assert_eq!(turb.k_solver.max_iter, 50);
@@ -2199,7 +2314,7 @@ mod tests {
         };
 
         let mut turb = TurbulenceControls::default();
-        read_fv_solution(&mut turb, &d).expect("reads");
+        read_fv_solution(&mut turb, &d, "epsilon").expect("reads");
 
         assert_eq!(turb.k_solver.max_iter, 42, "the pattern must govern k");
         assert!((turb.k_solver.tolerance - 1e-9).abs() < 1e-20);
@@ -2228,7 +2343,7 @@ mod tests {
         };
 
         let mut turb = TurbulenceControls::default();
-        read_fv_solution(&mut turb, &d).expect("reads");
+        read_fv_solution(&mut turb, &d, "epsilon").expect("reads");
 
         assert_eq!(turb.epsilon_solver.max_iter, 99);
         assert_eq!(turb.k_solver.max_iter, 10);
@@ -2271,11 +2386,11 @@ mod tests {
         assert!((v - 1.5e-5).abs() < 1e-20, "{v}");
     }
 
+    /// The solver and relaxation half of the same rule.
     #[test]
     fn omega_fills_the_epsilon_slot() {
-        // k-omega cases never define solvers/epsilon; if the fallback lookup
-        // is dropped the omega equation silently runs at the default
-        // tolerance instead of the one the case asked for.
+        // A case that names only omega, which is what the old "whichever the
+        // case defines" rule was written for.
         let src = r#"
             solvers
             {
@@ -2285,18 +2400,60 @@ mod tests {
         "#;
         let d = FoamDict::parse(src, "fvSolution").unwrap();
         let mut turb = TurbulenceControls::default();
-        read_fv_solution(&mut turb, &d).unwrap();
+        read_fv_solution(&mut turb, &d, "omega").unwrap();
 
         assert!((turb.epsilon_solver.tolerance - 1e-10).abs() < 1e-22);
         assert_eq!(turb.epsilon_solver.precon, Preconditioner::Dilu);
         assert!((turb.eps_relax - 0.3).abs() < 1e-12);
+
+        // And one that names BOTH - `blockgen::write_case`'s own shape, and
+        // `cases/channelKW`'s. A k-omega run took epsilon's numbers here.
+        let both = r#"
+            solvers
+            {
+                epsilon { solver PBiCGStab; preconditioner DIC;  tolerance 1e-06; }
+                omega   { solver PBiCGStab; preconditioner DILU; tolerance 1e-10; }
+            }
+            relaxationFactors { equations { epsilon 0.9; omega 0.3; } }
+        "#;
+        let d = FoamDict::parse(both, "fvSolution").unwrap();
+
+        let mut kw = TurbulenceControls::default();
+        read_fv_solution(&mut kw, &d, "omega").unwrap();
+        assert!((kw.epsilon_solver.tolerance - 1e-10).abs() < 1e-22);
+        assert!((kw.eps_relax - 0.3).abs() < 1e-12);
+
+        let mut ke = TurbulenceControls::default();
+        read_fv_solution(&mut ke, &d, "epsilon").unwrap();
+        assert!((ke.epsilon_solver.tolerance - 1e-06).abs() < 1e-18);
+        assert!((ke.eps_relax - 0.9).abs() < 1e-12);
+    }
+
+    /// `dissipation_key` itself, on the names the model registry can produce.
+    #[test]
+    fn the_dissipation_key_follows_the_model_and_not_the_dictionary() {
+        let both = schemes_of(
+            "divSchemes { default none; div(phi,epsilon) Gauss upwind; div(phi,omega) Gauss upwind; }",
+        );
+        for m in ["kOmega", "kOmegaSST"] {
+            assert_eq!(dissipation_key(m, &both), "omega", "{m}");
+        }
+        for m in ["kEpsilon", "LaunderSharmaKE"] {
+            assert_eq!(dissipation_key(m, &both), "epsilon", "{m}");
+        }
+
+        // No model named: fall back to whichever entry the case wrote.
+        let only_omega =
+            schemes_of("divSchemes { default none; div(phi,omega) Gauss upwind; }");
+        assert_eq!(dissipation_key("", &only_omega), "omega");
+        assert_eq!(dissipation_key("", &both), "epsilon");
     }
 
     #[test]
     fn missing_non_orth_entry_keeps_the_default() {
         let d = FoamDict::parse("solvers { k { tolerance 1e-8; } }", "fvSolution").unwrap();
         let mut turb = TurbulenceControls::default();
-        let _ = read_fv_solution(&mut turb, &d);
+        let _ = read_fv_solution(&mut turb, &d, "epsilon");
         assert_eq!(turb.n_non_orth_correctors, 0);
         assert_eq!(turb.sn_grad, SnGradScheme::Corrected);
     }
@@ -2416,7 +2573,7 @@ mod tests {
         ] {
             let full = format!("{src} divSchemes {{ default Gauss upwind; }}");
             let mut turb = TurbulenceControls::default();
-            read_fv_schemes(&mut turb, &schemes_of(&full)).unwrap();
+            read_fv_schemes(&mut turb, &schemes_of(&full), "kEpsilon").unwrap();
             assert_eq!(turb.ddt, want, "{src}");
             assert_eq!(turb.steady, want.is_steady(), "{src}");
         }
@@ -2432,7 +2589,7 @@ mod tests {
         let src = "ddtSchemes { default CoEuler rDeltaT; } \
                    divSchemes { default Gauss upwind; }";
         let mut turb = TurbulenceControls::default();
-        let e = read_fv_schemes(&mut turb, &schemes_of(src)).unwrap_err().to_string();
+        let e = read_fv_schemes(&mut turb, &schemes_of(src), "kEpsilon").unwrap_err().to_string();
         assert!(e.contains("CoEuler"), "{e}");
     }
 

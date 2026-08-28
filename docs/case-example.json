@@ -50,7 +50,22 @@
   },
 
   "physics": {
+    // Gravity reaches the momentum equation of every buoyant driver, and
+    // SPEC-LIT §17's turbulence buoyancy production G_b in ofgpu-plume,
+    // ofgpu-buoyant and ofgpu-fire. ofgpu-k-epsilon and ofgpu-k-omega solve
+    // the two turbulence equations on a FROZEN U and read no temperature, so
+    // G_b has nothing to be built from there: a non-zero gravity is a §13.4
+    // error naming those three drivers (`-permissive` substitutes no
+    // buoyancy production, which is what those runs silently did before).
     "gravity": [0, 0, -9.81],
+    // "PrtModel" (SPEC-LIT S37) is optional and defaults to "constant", where
+    // "Prt" above IS Pr_t everywhere. "KaysCrawford" re-reads the SAME "Prt" as
+    // Pr_t_inf, the free-stream asymptote, and varies Pr_t with the local
+    // turbulent Peclet number between it and 2*Prt (the conduction-sublayer
+    // value). It reaches the energy equation's k_eff only - the S29.3 thermal
+    // wall function keeps Pr_t_inf by derivation - and it is refused with
+    // gravity on, because S17's buoyancy production still takes the constant.
+    // Any other spelling is a S13.4 error naming both.
     "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
     "buoyancy": "densityRatio",   // b = g (TRef/T - 1); Boussinesq is wrong at dT/T ~ 3
   },
@@ -97,6 +112,11 @@
       "div(phi,T)": "Gauss limitedLinear 1",
     },
     "grad": "Gauss linear",
+    // nonOrthogonalCorrectors reaches the equations a driver ASSEMBLES:
+    // U and p (ofgpu-buoyant, ofgpu-fire, ofgpu-vof) and T (ofgpu-plume,
+    // ofgpu-buoyant, ofgpu-fire). No turbulence model in this crate loops
+    // over it, so in ofgpu-k-epsilon and ofgpu-k-omega — which solve nothing
+    // else — it would reach no equation at all and is a §13.4 error there.
     "laplacian": { "snGrad": "limited 0.33", "nonOrthogonalCorrectors": 1 },
     "relaxation": { "U": 0.7, "p": 0.3 },
     "solvers": [
@@ -106,12 +126,50 @@
   },
 
   "run": {
+    // endTime and deltaT are honoured: both case readers turn them into an
+    // outer-iteration count (steady) or a step count (transient).
+    // ofgpu-fire takes its run MODE from -endTime/-deltaT on the command
+    // line instead, and prints which of the two is in force.
     "endTime": 20.0,
     "deltaT": 0.005,
+
+    // >>> The two lines below are SPEC-LIT §13.4 ERRORS as this file stands,
+    // and they are left in deliberately: this is the documented example, and
+    // a documented example that quietly disagrees with the solver is the
+    // documentation half of §13.4.1's defect. Run this case with
+    // `-permissive` to see exactly what is substituted, or delete the two
+    // lines to run it as written.
+    //
+    // No driver that reads a JSONC case adjusts its own time step, so
+    // "adjustTimeStep": true names a loop that does not exist here (false,
+    // the default, IS what every such driver does and is honoured). "maxCo"
+    // only means anything to such a loop. ofgpu-vof is the one adaptive
+    // stepper in this crate — controlDict's adjustTimeStep + maxCo +
+    // maxDeltaT, or -maxCo on its command line — and it takes an OpenFOAM
+    // case DIRECTORY, not a .jsonc file.
     "adjustTimeStep": true,
     "maxCo": 0.8,
   },
 
+  // >>> The whole "output" block is a SPEC-LIT §13.4 ERROR today: NO driver
+  // in this crate reads any of it (`common::refuse_unimplemented_blocks`).
+  // It is kept here, and in docs/schema/case-1.json, because it is what the
+  // format will grow into — but it is not a set of settings that do
+  // something, and it was documented at length as though it were.
+  //
+  // What a run writes is decided by the command line:
+  //   -output foam,vtu,nvdb,vdb,usda   the format(s)
+  //   -writeInterval W                 how often
+  //   -restartWrite N / -restartFrom F checkpoints
+  // `-permissive` substitutes exactly that and prints the substitution.
+  //
+  // Three of the knobs below have no implementation ANYWHERE in the crate:
+  // visualisation.fields (every writer writes a fixed field set),
+  // visualisation.precision (NanoVDB output is fp32), and restart.keep
+  // (checkpoints are not rotated). Honouring "format" and "interval" because
+  // they happen to exist, and dropping those three in silence, would be
+  // §13.4.1's own defect manufactured inside its fix — so the block is
+  // refused whole.
   "output": {
     // Visualisation: .vdb files (built as NanoVDB on the GPU), plus a USD
     // scene that references them — Blender and Omniverse both read this.

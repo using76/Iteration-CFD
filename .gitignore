@@ -23,6 +23,10 @@ reference/
 cases/*
 !cases/README.md
 !cases/*.jsonc
+# Retired case definitions - kept as dated records of measurements that were
+# taken before a later SPEC-LIT rule made the cases themselves unrunnable.
+# They are records, not cases; cases/retired/README.md says what replaced each.
+!cases/retired/
 
 # ------------------------------------------------------------- results -----
 *.png

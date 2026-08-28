@@ -3,6 +3,7 @@
 // free; commercial and non-academic research require a licence.
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
+// Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! ofgpu - GPU-native finite-volume CFD, resident on the device.
 //!
@@ -101,3 +102,107 @@ pub type Scalar = f64;
 /// A mesh index. `i32` matches what the ASCII case format carries and
 /// is what the kernels index with.
 pub type Label = i32;
+
+/// The provenance surface, checked by test rather than asserted in prose.
+///
+/// `NOTICE` and `PROVENANCE.md` both claim that EVERY source file under
+/// `rust/` carries the copyright header and the line "No GPL-licensed source
+/// was consulted", and both quote a file count. Those were manual claims, and
+/// a manual claim drifts: at the time this module was written 85 of 105 files
+/// carried the line while both documents said 105. An acquirer auditing file
+/// by file would have found the gap before we did.
+///
+/// So the claim is now a test. It walks the same four roots the documents
+/// name (`src/`, `cuda/`, `tests/`, `build.rs`), and it reads the count back
+/// out of `NOTICE` and `PROVENANCE.md` so that adding a file without updating
+/// them fails here rather than in an audit.
+#[cfg(test)]
+mod provenance_audit {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const GPL_LINE: &str = "No GPL-licensed source was consulted";
+    const COPYRIGHT: &str = "Meteo Simulation Co., Ltd.";
+
+    fn root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+    }
+
+    /// Every `.rs`/`.cu`/`.cuh` under the roots `NOTICE` names, sorted.
+    fn sources() -> Vec<PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if matches!(
+                    p.extension().and_then(|s| s.to_str()),
+                    Some("rs") | Some("cu") | Some("cuh")
+                ) {
+                    out.push(p);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for d in ["src", "cuda", "tests"] {
+            walk(&root().join(d), &mut out);
+        }
+        out.push(root().join("build.rs"));
+        out.sort();
+        out
+    }
+
+    fn rel(p: &Path) -> String {
+        let s = p.strip_prefix(root()).unwrap_or(p).display().to_string();
+        s.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+
+    #[test]
+    fn every_source_file_declares_its_provenance() {
+        let mut missing_gpl = Vec::new();
+        let mut missing_copyright = Vec::new();
+        for p in sources() {
+            let t = fs::read_to_string(&p).unwrap_or_default();
+            if !t.contains(GPL_LINE) {
+                missing_gpl.push(rel(&p));
+            }
+            if !t.contains(COPYRIGHT) {
+                missing_copyright.push(rel(&p));
+            }
+        }
+        assert!(
+            missing_gpl.is_empty(),
+            "{} source file(s) do not carry \"{GPL_LINE}\", which NOTICE and \
+             PROVENANCE.md both claim every file carries:\n  {}",
+            missing_gpl.len(),
+            missing_gpl.join("\n  ")
+        );
+        assert!(
+            missing_copyright.is_empty(),
+            "{} source file(s) do not carry the copyright header:\n  {}",
+            missing_copyright.len(),
+            missing_copyright.join("\n  ")
+        );
+    }
+
+    /// The COUNT both documents publish has to be the count on disk. This is
+    /// what stops the next added file from making the published number stale.
+    #[test]
+    fn notice_and_provenance_quote_the_real_file_count() {
+        let n = sources().len();
+        for (name, path) in [
+            ("NOTICE", root().join("../NOTICE")),
+            ("PROVENANCE.md", root().join("PROVENANCE.md")),
+        ] {
+            let t = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+            assert!(
+                t.contains(&format!("{n} source files"))
+                    || t.contains(&format!("{n}/{n}")),
+                "{name} does not quote the real source-file count {n}; update it \
+                 (it is the number an acquirer checks first)"
+            );
+        }
+    }
+}

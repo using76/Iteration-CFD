@@ -2097,6 +2097,13 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5) ===");
     c.replaying(check_bounded_convection_experiment_replay);
 
+    // SPEC-LIT §37: the variable turbulent Prandtl number. The correlation
+    // itself is arithmetic and is checked LIVE; the experiment that put it on
+    // the two channel legs is a 40 000-iteration pair per leg and is replayed.
+    println!("\n=== Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2) ===");
+    check_kays_crawford_prt(c);
+    c.replaying(check_kays_crawford_experiment_replay);
+
     Ok(())
 }
 
@@ -3486,7 +3493,8 @@ fn main() -> ExitCode {
         "{} computed live, {} replayed from recorded measurements \
          (docs/07-fire-solver.md S1.1: the wall-function gate verdict, the resolved leg's \
          mesh resolution, the resolved leg's gate verdict, the thermostat-weighting \
-         experiment, and the bounded-convection isolation)",
+         experiment, the bounded-convection isolation, and the Kays-Crawford Prt \
+         experiment)",
         c.total - c.replayed,
         c.replayed,
     );
@@ -3841,7 +3849,7 @@ fn check_radiative_equilibrium(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 /// bijection, and `Sf_a == -Sf_b` to a stated tolerance - against a small
 /// cyclic block [`blockgen::build_mesh`] itself produced, rather than
 /// trusting the SAME matching code path the reader uses. `cases/README.md`'s
-/// `channelPeriodicWF.jsonc`/`channelPeriodicLowRe.jsonc` exercise the real
+/// `channelPeriodicWF.jsonc` and `channelPeriodicFluxWF.jsonc` exercise the real
 /// reader path end to end; this is the fast, permanent geometric gate behind
 /// it.
 fn check_cyclic_pair(c: &mut Checks) -> Result<()> {
@@ -5025,6 +5033,359 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
         sci(v.nu_gn_viscous / w.nu_gn_viscous, 4),
         sci(v.f_viscous, 4),
         sci(w.f_viscous, 4),
+    ));
+}
+
+/// SPEC-LIT §37's Kays-Crawford `Pr_t(Pe_t)`, checked LIVE (this is arithmetic,
+/// not a run - it costs microseconds and belongs in the always-run suite).
+///
+/// The two limits are what make the correlation trustworthy without a table to
+/// copy from, so they are asserted rather than trusted: `Pe_t -> 0` has to give
+/// the conduction-sublayer value `2 Pr_t_inf = 1.70`, which is inside the
+/// 1.5-1.9 Kays (1994) reports for air, and `Pe_t -> inf` has to give back
+/// exactly the constant `Pr_t_inf = 0.85` every measurement this project has
+/// recorded was made with - a model that did not would be changing the free
+/// stream as a side effect of correcting the wall.
+///
+/// The remaining rows guard the two numerical branches SPEC-LIT §37.2 derives.
+/// Neither is decoration: a resolved `lowRe` wall face hands this function
+/// `Pe_t = 0` exactly on every outer iteration, where the literature form's
+/// own arithmetic is `inf/inf`.
+fn check_kays_crawford_prt(c: &mut Checks) {
+    use ofgpu::energy::{kays_crawford_prt, KAYS_CRAWFORD_C as C};
+
+    // The literature form of §37.1, written out as the papers print it, so
+    // this checks the implementation against the SOURCE rather than against
+    // itself.
+    fn literature(pe_t: f64, c: f64, p_inf: f64) -> f64 {
+        let (x, a) = (c * pe_t, p_inf.sqrt());
+        1.0 / (1.0 / (2.0 * p_inf) + x / a - x * x * (1.0 - (-1.0 / (x * a)).exp()))
+    }
+
+    let p_inf: Scalar = 0.85;
+
+    c.note(&format!(
+        "Kays-Crawford C = {}, Pr_t_inf = {} -> sublayer limit 2*Pr_t_inf = {} \
+         (Kays 1994 reports 1.5-1.9 for air)",
+        sci(C, 3),
+        sci(p_inf, 3),
+        sci(2.0 * p_inf, 4),
+    ));
+
+    // ---- limit 1: Pe_t -> 0, the conduction sublayer --------------------
+    let mut worst_sublayer: Scalar = 0.0;
+    for pi in [0.7 as Scalar, 0.85, 0.9, 1.0] {
+        for pe in [0.0 as Scalar, 1e-300, Scalar::MIN_POSITIVE] {
+            worst_sublayer = worst_sublayer.max((kays_crawford_prt(pe, C, pi) - 2.0 * pi).abs());
+        }
+    }
+    c.check(
+        "Pe_t -> 0 gives Pr_t = 2*Pr_t_inf exactly, at Pe_t = 0 and 1e-300 (S37.2)",
+        worst_sublayer,
+        0.0,
+    );
+
+    // ---- limit 2: Pe_t -> inf, the free stream, approached FROM ABOVE ----
+    //
+    // S37.2's expansion is `Pr_t = Pr_t_inf (1 + u/6 - u^2/72 + ...)` with
+    // `u = 1/(C Pe_t sqrt(Pr_t_inf))`, so the FIRST-order rate is checked
+    // directly and the SECOND-order coefficient falls out as
+    // `-Pr_t_inf/(72 Pr_t_inf C^2) = -1/(72 C^2)` - independent of
+    // `Pr_t_inf`, which is what makes it worth asserting: an implementation
+    // that had the algebra subtly wrong would not reproduce a coefficient it
+    // was never given.
+    let mut worst_first_order: Scalar = 0.0;
+    let mut from_above = true;
+    let first_order = |pe: Scalar| p_inf * (1.0 + 1.0 / (6.0 * p_inf.sqrt() * C * pe));
+    for e in 3..=6 {
+        let pe: Scalar = (10.0 as Scalar).powi(e);
+        let got = kays_crawford_prt(pe, C, p_inf);
+        from_above &= got > p_inf;
+        worst_first_order = worst_first_order.max((got - first_order(pe)).abs() * pe * pe);
+    }
+    c.require("Pr_t approaches Pr_t_inf FROM ABOVE, never below it (S37.2)", from_above);
+    c.check(
+        "Pe_t -> inf matches Pr_t_inf(1 + 1/(6 sqrt(Pr_t_inf) C Pe_t)) to O(Pe_t^-2)",
+        worst_first_order,
+        0.2,
+    );
+    let c2_measured = (kays_crawford_prt(1e6, C, p_inf) - first_order(1e6)) * 1e12;
+    c.check(
+        "...and the O(Pe_t^-2) coefficient IS the derived -1/(72 C^2) (S37.2)",
+        (c2_measured + 1.0 / (72.0 * C * C)).abs(),
+        1e-6,
+    );
+    c.check(
+        "Pr_t(1e9) is the free-stream constant to 1e-9 (S37.2)",
+        (kays_crawford_prt(1e9, C, p_inf) - p_inf).abs(),
+        1e-9,
+    );
+
+    // ---- the rearrangement is the SAME function, and the better one ------
+    let (mut worst_rel, mut lo, mut hi, mut monotone) = (0.0_f64, Scalar::MAX, 0.0 as Scalar, true);
+    let mut prev = kays_crawford_prt(0.0, C, p_inf);
+    for i in 0..=220 {
+        let pe: Scalar = 10.0_f64.powf(-8.0 + 0.05 * f64::from(i)) as Scalar;
+        let got = kays_crawford_prt(pe, C, p_inf);
+        monotone &= got <= prev + 1e-12 && got.is_finite();
+        prev = got;
+        lo = lo.min(got);
+        hi = hi.max(got);
+        if pe <= 1e3 {
+            let want = literature(f64::from(pe), f64::from(C), f64::from(p_inf));
+            worst_rel = worst_rel.max((f64::from(got) - want).abs() / want);
+        }
+    }
+    c.require("Pr_t falls monotonically as Pe_t rises, and stays finite (S37.5)", monotone);
+    c.require(
+        "Pr_t never leaves [Pr_t_inf, 2 Pr_t_inf] over Pe_t = 1e-8 .. 1e3 (S37.5)",
+        lo >= p_inf - 1e-12 && hi <= 2.0 * p_inf + 1e-12,
+    );
+    c.check(
+        "S37.2's rearrangement reproduces S37.1's literature form (relative, Pe_t <= 1e3)",
+        worst_rel as Scalar,
+        1e-10,
+    );
+
+    // ...and is the one that keeps the digits where the literature form does
+    // not. This is the row that says the rearrangement earns its place.
+    let lit_1e8 = literature(1e8, f64::from(C), f64::from(p_inf));
+    let ours_1e8 = f64::from(kays_crawford_prt(1e8, C, p_inf));
+    c.note(&format!(
+        "at Pe_t = 1e8 the literature form returns {} against the true {}, an error of {:.2}% \
+         from cancellation alone; S37.2's form returns {}",
+        sci(lit_1e8 as Scalar, 6),
+        sci(p_inf, 6),
+        100.0 * (lit_1e8 / f64::from(p_inf) - 1.0).abs(),
+        sci(ours_1e8 as Scalar, 6),
+    ));
+    c.require(
+        "the literature form HAS lost its digits by Pe_t = 1e8 (which is why S37.2 rearranges it)",
+        (lit_1e8 - f64::from(p_inf)).abs() > 1e-3,
+    );
+
+    // ---- nothing anywhere in the domain of definition is a NaN -----------
+    let mut all_usable = kays_crawford_prt(Scalar::INFINITY, C, p_inf) == p_inf;
+    for pe in [0.0 as Scalar, Scalar::MIN_POSITIVE, 1e-300, 1e-30, 1.0, 1e30, 1e300, Scalar::MAX] {
+        let got = kays_crawford_prt(pe, C, p_inf);
+        all_usable &= got.is_finite() && got > 0.0;
+    }
+    c.require(
+        "Pr_t is finite and positive at every representable Pe_t, +inf included (S37.5)",
+        all_usable,
+    );
+
+    // ---- and what it is worth on the two meshes S32's gate uses ----------
+    //
+    // Not an assertion - a statement of scale, so a reader of the summary can
+    // see WHY the wall-function leg is a near-control and the resolved leg is
+    // not. `nu_t/nu` is the range each leg's own converged field reported;
+    // the `Pr_t` pair below is what this function computes from it, and the
+    // replay that follows is what the runs actually used.
+    for (leg, r_lo, r_hi) in [
+        ("wall function (y+ 58)", 16.8627 as Scalar, 28.6496),
+        ("resolved (y+ 0.0019)", 3.91576e-7, 35.5161),
+    ] {
+        c.note(&format!(
+            "{leg}: nu_t/nu in [{}, {}] gives Pr_t in [{}, {}] against the constant {}",
+            sci(r_lo, 4),
+            sci(r_hi, 4),
+            sci(kays_crawford_prt(r_hi * 0.71, C, p_inf), 5),
+            sci(kays_crawford_prt(r_lo * 0.71, C, p_inf), 5),
+            sci(p_inf, 3),
+        ));
+    }
+}
+
+/// SPEC-LIT §37's EXPERIMENT, replayed: `cases/channelPeriodicFluxWF.jsonc`
+/// and `channelPeriodicFluxLowRe.jsonc`, 40 000 iterations each, run twice
+/// with `physics.fluid.PrtModel` the only token that differs. These are the
+/// numbers `ofgpu-fire` printed, all four on the same binary (the first
+/// wall-function `KaysCrawford` run was discarded: the driver's own
+/// wall-heat report recomputed `k_eff,wall` with the constant `Pr_t` and so
+/// claimed 580 W/m2 on a wall imposing 500 - see `docs/07-fire-solver.md`
+/// §1.1's last subsection).
+///
+/// The `constant` pair are the CONTROL and reproduce this section's own
+/// published record to every printed digit, which is what makes the pair a
+/// controlled comparison rather than two different states -
+/// [`check_thermal_wall_function_gate_verdict_replay`] and
+/// [`check_resolved_leg_gate_verdict_replay`] hold those same numbers
+/// independently, so a drift in either would fail there first.
+struct PrtRun {
+    leg: &'static str,
+    model: &'static str,
+    nu_measured: Scalar,
+    d_t: Scalar,
+    u_b: Scalar,
+    /// `|thermostat power| / (q_w A_wall) - 1`, the same construction every
+    /// other energy-balance number in this file uses.
+    energy_gap: Scalar,
+    /// The `Pr_t` the run actually used, min and max over the domain, as
+    /// `ofgpu-fire`'s own §37.5 report printed them.
+    prt_min: Scalar,
+    prt_max: Scalar,
+}
+
+const PRT_EXPERIMENT: [PrtRun; 4] = [
+    PrtRun { leg: "wall function", model: "constant", nu_measured: 64.5257, d_t: 24.2318,
+        u_b: 5.39720, energy_gap: 0.001_062, prt_min: 0.85, prt_max: 0.85 },
+    PrtRun { leg: "wall function", model: "KaysCrawford", nu_measured: 63.5900, d_t: 24.5874,
+        u_b: 5.39738, energy_gap: 0.001_100, prt_min: 0.874803, prt_max: 0.891685 },
+    PrtRun { leg: "resolved", model: "constant", nu_measured: 72.9988, d_t: 21.3862,
+        u_b: 4.92909, energy_gap: 0.031_134, prt_min: 0.85, prt_max: 0.85 },
+    PrtRun { leg: "resolved", model: "KaysCrawford", nu_measured: 68.0305, d_t: 22.9439,
+        u_b: 4.92984, energy_gap: 0.033_541, prt_min: 0.870064, prt_max: 1.7 },
+];
+
+/// SPEC-LIT §37's experiment, replayed - THIS REPLAYS A RECORDED
+/// MEASUREMENT, it does not run the case.
+///
+/// §37 named three things before either pair of runs, and this asserts
+/// exactly those three, so a future change that reverses the sign of the
+/// effect, or flattens the difference between the two meshes, fails on the
+/// commit that makes it:
+///
+/// 1. `Nu` FALLS on both legs (a higher `Pr_t` moves less heat).
+/// 2. `(T_w - T_b)` WIDENS on both, by the same token.
+/// 3. The shift is much larger on the RESOLVED mesh, because `Pr_t` departs
+///    from `Pr_t_inf` only where `Pe_t` is small - which is the sublayer one
+///    mesh resolves and the other replaces with a wall function.
+///
+/// It also records the two verdicts the experiment moved, and the one it did
+/// not: leg (b)'s absolute-prediction verdict crosses INTO Gnielinski's band
+/// (+14.1 % -> +6.4 %), and leg (a)'s Reynolds-analogy miss does not move at
+/// all, because that is a friction finding and §37 is a thermal model.
+fn check_kays_crawford_experiment_replay(c: &mut Checks) {
+    use ofgpu::wallfunctions::{gnielinski_f, gnielinski_nu_at_f};
+
+    for r in &PRT_EXPERIMENT {
+        c.note(&format!(
+            "{} leg, PrtModel {}: Nu = {}, dT = {} K, U_b = {} m/s, energy balance {:+.3}%, \
+             Pr_t in [{}, {}]",
+            r.leg,
+            r.model,
+            sci(r.nu_measured, 6),
+            sci(r.d_t, 6),
+            sci(r.u_b, 6),
+            r.energy_gap * 100.0,
+            sci(r.prt_min, 6),
+            sci(r.prt_max, 6),
+        ));
+    }
+
+    let pick = |leg: &str, model: &str| -> &PrtRun {
+        PRT_EXPERIMENT.iter().find(|r| r.leg == leg && r.model == model).expect("run present")
+    };
+
+    // The resolved mesh reaches the Pe_t -> 0 limit exactly, at the wall,
+    // because LaunderSharma pins nu_t there; the wall-function mesh never
+    // gets near it. That asymmetry IS the mechanism, and it is a measurement.
+    let (rc, rk) = (pick("resolved", "constant"), pick("resolved", "KaysCrawford"));
+    let (wc, wk) = (pick("wall function", "constant"), pick("wall function", "KaysCrawford"));
+    c.check(
+        "resolved mesh reaches the S37.2 sublayer limit 2*Pr_t_inf exactly at the wall",
+        (rk.prt_max - 1.7).abs(),
+        0.0,
+    );
+    c.require(
+        "wall-function mesh never leaves the log-layer neighbourhood of Pr_t_inf (< 0.90)",
+        wk.prt_max < 0.90,
+    );
+
+    let mut shift = [0.0 as Scalar; 2];
+    for (i, (leg, before, after)) in [("resolved", rc, rk), ("wall function", wc, wk)]
+        .iter()
+        .enumerate()
+    {
+        shift[i] = 1.0 - after.nu_measured / before.nu_measured;
+        c.note(&format!(
+            "{leg}: Nu {} -> {} ({:+.2}%), dT {} -> {} K ({:+.2}%) on the PrtModel token alone",
+            sci(before.nu_measured, 6),
+            sci(after.nu_measured, 6),
+            (after.nu_measured / before.nu_measured - 1.0) * 100.0,
+            sci(before.d_t, 6),
+            sci(after.d_t, 6),
+            (after.d_t / before.d_t - 1.0) * 100.0,
+        ));
+        c.require(
+            &format!("{leg}: Kays-Crawford LOWERS Nu, as S37 predicted"),
+            after.nu_measured < before.nu_measured,
+        );
+        c.require(
+            &format!("{leg}: Kays-Crawford WIDENS (T_w - T_b), as S37 predicted"),
+            after.d_t > before.d_t,
+        );
+        // A thermal-diffusivity model must not move the momentum field.
+        c.require(
+            &format!("{leg}: U_b moves by less than 0.05% - S37 is a THERMAL model"),
+            (after.u_b / before.u_b - 1.0).abs() < 5e-4,
+        );
+    }
+    c.note(&format!(
+        "the shift is {:.2}x larger on the resolved mesh ({:.2}% against {:.2}%) - S37.3's \
+         asymmetry, measured",
+        shift[0] / shift[1],
+        shift[0] * 100.0,
+        shift[1] * 100.0,
+    ));
+    c.require(
+        "the Nu shift is at least 3x larger on the resolved mesh than on the wall-function one",
+        shift[0] > 3.0 * shift[1],
+    );
+
+    // The verdict this moved, at each leg's own pipe `f` - computed live from
+    // the replayed Nu, not quoted.
+    for (leg, before, after, re) in [
+        ("resolved", rc, rk, 26288.5 as Scalar),
+        ("wall function", wc, wk, 28785.1),
+    ] {
+        let f_pipe = gnielinski_f(re);
+        let nu_gn = gnielinski_nu_at_f(f_pipe, re, 0.71);
+        c.note(&format!(
+            "{leg}: absolute-prediction verdict (Gnielinski at the pipe f = {}) moves from \
+             {:+.1}% to {:+.1}% of Nu_Gn = {}",
+            sci(f_pipe, 5),
+            (before.nu_measured / nu_gn - 1.0) * 100.0,
+            (after.nu_measured / nu_gn - 1.0) * 100.0,
+            sci(nu_gn, 6),
+        ));
+    }
+    let f_pipe_b = gnielinski_f(26288.5 as Scalar);
+    let nu_gn_b = gnielinski_nu_at_f(f_pipe_b, 26288.5 as Scalar, 0.71);
+    c.require(
+        "resolved leg is OUTSIDE Gnielinski's +-10% band under PrtModel constant (the shipped \
+         default, and the gate's own record)",
+        (rc.nu_measured / nu_gn_b - 1.0).abs() > 0.10,
+    );
+    c.require(
+        "resolved leg is INSIDE Gnielinski's +-10% band under PrtModel KaysCrawford (S37)",
+        (rk.nu_measured / nu_gn_b - 1.0).abs() < 0.10,
+    );
+    // ...and it stays inside across its own energy-balance uncertainty, which
+    // is what S32.4 requires before a band statement may be called a pass.
+    let worst = rk.nu_measured * (1.0 + rk.energy_gap) / nu_gn_b - 1.0;
+    c.note(&format!(
+        "carrying this leg's own {:+.2}% energy-balance gap as an uncertainty on Nu, the far \
+         edge of the band statement is {:+.2}% - still inside +-10% (S32.4)",
+        rk.energy_gap * 100.0,
+        worst * 100.0,
+    ));
+    c.require(
+        "resolved leg stays inside +-10% across its own energy-balance uncertainty (S32.4)",
+        worst.abs() < 0.10,
+    );
+
+    // And what it did NOT move: the two-mesh ratio now sits BELOW what the two
+    // legs' own momentum difference implies, which qualifies S32.5.5's
+    // decomposition rather than confirming it.
+    c.note(&format!(
+        "two-mesh ratio Nu_b/Nu_a falls from {} to {}; Gnielinski at the two legs' own \
+         viscous-form measured f implies 1.119 and 1.127 respectively, so the KaysCrawford \
+         ratio is BELOW its momentum-implied value - S32.5.5's momentum decomposition of the \
+         two-mesh gap does not survive applying the same thermal correction to both legs",
+        sci(rc.nu_measured / wc.nu_measured, 5),
+        sci(rk.nu_measured / wk.nu_measured, 5),
     ));
 }
 

@@ -12,10 +12,12 @@
 //
 // ============================================================================
 // >>> READ THIS FIRST: every number in this STATUS block and in the first
-// >>> three UPDATE blocks below is SUPERSEDED. The last UPDATE block at the
-// >>> end of this header (SPEC-LIT S13.4.1/S32.5.5) is the current
-// >>> measurement; the blocks in between are kept, in order, as the record of
-// >>> how this gate got there.
+// >>> three UPDATE blocks below is SUPERSEDED. The S13.4.1/S32.5.5 UPDATE
+// >>> block is the current measurement of this file AS SHIPPED; the S37 block
+// >>> after it is a separate experiment run on scratchpad COPIES with one
+// >>> token added (`PrtModel`, which defaults to `constant` and is absent
+// >>> here), so it changes nothing in this file. The blocks in between are
+// >>> kept, in order, as the record of how this gate got there.
 // STATUS (SPEC-LIT S34 rebuild, RUN and REPORTED - docs/07-fire-solver.md
 // S1.1 has the full table): the previous ("mesh b") version of this file was
 // a DUCT - real `wallSide.*` walls at only 4 spanwise cells - and collapsed
@@ -264,6 +266,50 @@
 // hypothesis with a mechanism and the right sign, measured by nothing yet.
 //
 // See docs/07-fire-solver.md S1.1's last subsection for the full account.
+// ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S37 - THE NAMED CANDIDATE, MEASURED; comments only, THIS
+// FILE IS UNCHANGED): the block above ends by naming the case-wide constant
+// Prt = 0.85 as the one remaining candidate for this leg's +14.1% Gnielinski
+// miss - a hypothesis with a mechanism and the right sign and no measurement.
+// S37 implements Kays-Crawford's variable Prt(Pe_t) (Kays, ASME J. Heat
+// Transfer 116 (1994) 284; Kays & Crawford 4th ed. ch. 13) as a SELECTABLE
+// model, `physics.fluid.PrtModel`, DEFAULTING TO `constant` precisely so this
+// file does not move and every number above stays reproducible.
+//
+// THE EXPERIMENT: this case and its WF twin, 40 000 iterations each, run
+// twice on scratchpad copies with `"PrtModel": "KaysCrawford"` added and
+// NOTHING else changed. The `constant` runs reproduce every number above to
+// the last printed digit.
+//
+//   THIS MESH        constant        KaysCrawford     change
+//   T_w              314.186 K       315.692 K
+//   T_b              292.800 K       292.748 K
+//   T_w - T_b         21.3862 K       22.9439 K       +7.28%
+//   Nu                72.9988         68.0305         -6.81%
+//   U_b                4.92909 m/s     4.92984 m/s    +0.015%  (a THERMAL model)
+//   Prt in use         0.85            [0.8701, 1.7000], volume-mean 0.9042,
+//                                      wall-adjacent cells EXACTLY 1.7000
+//   energy balance    +3.11%          +3.35%
+//   drag balance      -0.000%         +0.000%
+//
+// The wall-adjacent 1.7000 is S37.2's derived Pe_t -> 0 limit, reached
+// because LaunderSharmaKE pins nu_t/nu to 3.9e-7 there. The WF twin's Prt
+// never leaves [0.8748, 0.8917] - six cells, the nearest at y+ 58 - and its
+// Nu moves only -1.45%, 4.7x less. That asymmetry is the mechanism, measured.
+//
+// VERDICT: at the shipped default this file's verdict above is UNCHANGED
+// (+14.1%, OUTSIDE Gnielinski's +-10%). At `KaysCrawford` it is +6.4%,
+// INSIDE - and inside across the whole of this leg's own +-3.35%
+// energy-balance uncertainty ([+2.8%, +9.9%]) - with Dittus-Boelter at -1.2%
+// and the Reynolds-analogy verdict at +9.3%. NOTHING WAS TUNED: C = 0.3 and
+// Pr_t_inf = 0.85 are the published constants and Pr_t_inf is this file's own
+// `Prt`. The predicted fall was 10-14%; the measured fall is 6.8%, about
+// half, and that is reported rather than rounded.
+//
+// See docs/07-fire-solver.md S1.1's last subsection for the four runs, the
+// two-mesh consequence, and what this does NOT establish.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

@@ -9,6 +9,14 @@ it summarises. This script does not: every component in the data becomes
 exactly one row.
 
     python docs/_build_catalog.py <journal.jsonl> [more.jsonl ...]
+
+NOTE: the journal.jsonl inputs are NOT committed to this repository, so this
+script cannot be re-run from a fresh clone. It is kept as the record of how
+01-model-catalog.md and 02-gpu-portability.md were produced, not as a build
+step. What CAN be checked from the repository is that both tables are
+internally consistent - every subsystem count equals the number of rows under
+it, and each total equals the sum of its column. See the note under the Census
+table in 02-gpu-portability.md for the one deliberate difference between them.
 """
 
 import html

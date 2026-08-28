@@ -3,6 +3,7 @@
 // free; commercial and non-academic research require a licence.
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
+// Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! `ofgpu-bench` - how fast do the two models actually run, and how much of
 //! the card do they use?

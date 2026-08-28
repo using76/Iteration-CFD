@@ -253,6 +253,16 @@ fn sub_frac(idx: usize, s: usize) -> Scalar {
 /// face (24.3). `cut_tri` is left `0`; the caller fills it in because it
 /// needs the shared [`TriIndex`] for a query this function has no other use
 /// for.
+// The six cube faces below are written with one index expression shape,
+// `fluid[ii + s * (jj + s * kk)]`, and the fixed coordinate substituted in
+// place: `0` for the low face and `s - 1` for the high one. That leaves
+// literal `0 +` and `* 0` terms, which clippy reads as an identity and an
+// erasing operation - correctly, in isolation. They are kept because the
+// symmetry is the point: each low/high pair sits on adjacent lines and
+// differs only in the substituted coordinate, so a transposed axis is
+// visible by eye. Folding the constants away would make the six faces read
+// as six different expressions and hide exactly that class of bug.
+#[allow(clippy::erasing_op, clippy::identity_op)]
 fn classify_one_cell(
     idx: &TriIndex,
     xn: &[Scalar],

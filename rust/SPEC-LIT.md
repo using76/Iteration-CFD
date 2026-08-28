@@ -10,7 +10,9 @@ This is the only specification implementers may work from.
 
 ## 0. Why this document exists, and the rules that follow from it
 
-ofgpu is to be released under the **MIT licence**. Mathematics is not
+ofgpu is released under the **Meteor Simulation Source-Available License,
+Version 1.1** (`../LICENSE`); this document was first written when the target
+was MIT, and the change of licence changes nothing below. Mathematics is not
 copyrightable and coefficients are facts, so any published model may be
 implemented freely. What may not be copied is another program's *expression* of
 it — its code, its structure, and the implementation choices that are the
@@ -591,7 +593,7 @@ scheme needs the gradient available during assembly.
 | Limiter | `Psi(r)` | Source |
 |---|---|---|
 | minmod | `max(0, min(1, r))` | Roe (1986) |
-| van Leer | `(r + |r|)/(1 + |r|)` | van Leer, *JCP* 23 (1977) |
+| van Leer | `(r + \|r\|)/(1 + \|r\|)` | van Leer, *JCP* 23 (1977) |
 | van Albada | `(r² + r)/(r² + 1)` | van Albada et al., *A&A* 108 (1982) |
 | Superbee | `max(0, max(min(2r,1), min(r,2)))` | Roe (1986) |
 | MUSCL | `max(0, min(2r, (r+1)/2, 2))` | van Leer (1979) |
@@ -696,7 +698,7 @@ No test in this project may compare against another CFD code.
 
 | Check | Method | Expected |
 |---|---|---|
-| Mesh closure | `max|Σ_f s·Sf| / V^{2/3}` | round-off |
+| Mesh closure | `max\|Σ_f s·Sf\| / V^{2/3}` | round-off |
 | Volume | `Σ V_P` vs analytic | round-off |
 | Gradient | Gauss gradient of a linear field | exact |
 | Divergence | `∇·u` of a uniform field | zero |
@@ -1051,7 +1053,7 @@ about the other, quieter failure: a setting the solver *can* honour, that the
 case states, that parses without complaint — and that never reaches the
 equation it names.
 
-**It has now happened four times in this project, in the same shape every
+**It has now happened five times in this project, in the same shape every
 time.** A driver builds a control struct from `::default()`, overrides the two
 or three fields it happens to be thinking about, and closes the initialiser
 with `..Default::default()`. Everything the case said about every other field
@@ -1063,6 +1065,66 @@ is discarded, and nothing prints:
 | 2 | the same reader, `ddtSchemes` | reduced to a steady/transient boolean, so `backward`, `CrankNicolson <c>` and `localEuler` all became first-order Euler |
 | 3 | `ofgpu-buoyant` (`read_simple_controls`) | `solvers/U`, `solvers/p`, `relaxationFactors`, `nNonOrthogonalCorrectors`, `consistent`, and — the line its own comment records — `div(phi,U)`, which was being read from the TURBULENCE equation's entry |
 | 4 | `ofgpu-fire` (`fire_controls`) | every `numerics.div` entry, every `numerics.relaxation` entry, `numerics.grad`, `numerics.laplacian.snGrad`, `nonOrthogonalCorrectors`, the `solvers` rule for `T`, `numerics.ddt`, `numerics.algorithm.correctors`/`momentumPredictor` and `physics.fluid.Pr`/`Prt` |
+| 5 | `ofgpu-plume` (`read_t_controls`) | `div(phi,T)` and `gradSchemes/grad(T)`, so the ENERGY equation was assembled with `div(phi,k)`'s scheme and `bounded` flag and with `gradSchemes/default`; plus `laplacianSchemes` for its own laplacian and `SIMPLE/residualControl` |
+
+**What the five have in common**, stated once because it is the thing to
+recognise rather than the five stories:
+
+1. **The discard is at a READER, never at a kernel.** In all five the physics
+   was correct for whatever settings it was handed; what was wrong was which
+   settings it was handed. No amount of testing the numerics finds this.
+2. **The case file parses perfectly.** Every one of the five would pass any
+   parsing test, and instances 1, 3 and 5 had one.
+3. **It is invisible wherever the two entries agree**, and the cases in a
+   repository are exactly the cases whose entries were written together and
+   therefore agree. Instance 5 is the sharpest example: every case in this
+   tree writes `div(phi,T)` and `div(phi,k)` as the same `bounded Gauss
+   upwind`, so `ofgpu-plume` produced bit-for-bit correct output on every one
+   of them while reading the wrong entry.
+4. **The substituted value is plausible**, so nothing downstream looks wrong.
+   Instance 4's substitution was `bounded Gauss upwind`, which is a perfectly
+   ordinary scheme, and it moved a published Nusselt number by 3.6 %.
+5. **The fix is one reader per equation, asked by the equation's own name.**
+   `common::CaseNumerics` is that reader for the drivers; `dissipation_key`
+   is the same idea for the one slot `epsilon` and `omega` share.
+
+**Instance 5, measured.** Two runs of `ofgpu-plume` on a generated 8×8×8 plume,
+12 iterations, differing in one `fvSchemes` line:
+
+| turned | `T` mass-weighted mean, before the fix | after |
+|---|---|---|
+| `div(phi,T)`: `bounded Gauss upwind` → `Gauss linear` | 409.334 → **409.334** (bit-identical `T` file) | 409.334 → **400.936** |
+| `div(phi,k)`: `bounded Gauss upwind` → `Gauss linear` | 409.334 → **511.336** | 409.334 → **417.473** |
+
+Before the fix the entry naming `T` moved nothing and the entry naming `k`
+moved `T` by a quarter. After it, `div(phi,T)` bites and `div(phi,k)` reaches
+`T` only through `nu_t` feeding `alpha_eff` — which is the physical coupling,
+not a leaked discretisation.
+
+**Two more instances the standing test found by itself**, both narrower than
+the five above and both recorded here because "the test found them" is the
+argument for the test:
+
+* **No turbulence model in this crate loops over `nNonOrthogonalCorrectors`.**
+  `energy.rs`, `momentum.rs`, `scalar_transport.rs` and `simple.rs` each carry
+  `for _pass in 0..=ctrl.n_non_orth_correctors` around their assemble-and-solve;
+  `models/*.rs` carry none, so the `k` and `epsilon`/`omega` equations always
+  make exactly one pass. §2.4's correction is still APPLIED — what is lost is
+  its re-evaluation against a fresher solution (Jasak §3.4.3), so this is a
+  smaller thing than the five. It is honoured where a driver has another
+  equation (`T`, `U`, `p`) and refused by name in `ofgpu-k-epsilon` and
+  `ofgpu-k-omega`, where the turbulence equations are the only ones and the
+  entry would therefore reach nothing at all.
+* **`epsilon` and `omega` share one slot, and the DICTIONARY was choosing
+  which entry filled it.** The rule was "the key that is present wins, with
+  `epsilon` as the tie-break", under a comment reading "epsilon and omega never
+  coexist". They do: `blockgen::write_case` writes both entries into every
+  case it generates so that one directory can be run with either driver, and
+  `cases/channelKW` — this repository's own published k-omega case — carries
+  both. A k-omega run therefore took `div(phi,epsilon)`,
+  `solvers/epsilon` and `relaxationFactors/equations/epsilon` for its OMEGA
+  equation. The MODEL now decides (`io::case::dissipation_key`), which is the
+  only thing that can, and both case formats route through it.
 
 Two rules follow, and they are requirements on new code, not advice.
 
@@ -1089,9 +1151,42 @@ the one that becomes the standing requirement:
 > bit-identical, the setting is inert.**
 
 Every setting a case can express and a driver claims to honour owes such a
-pair. `ofgpu-fire`'s is `every_wired_setting_changes_what_the_run_writes` in
-`src/bin/fire.rs`, which runs the driver's own `run` on generated case files
-and compares every field written.
+pair, **and every driver owes one**. There are now six, one per driver, all
+named `every_wired_setting_changes_what_the_run_writes`:
+
+| driver | case the pair is built on | settings turned |
+|---|---|---|
+| `ofgpu-fire` | generated JSONC text | 13 |
+| `ofgpu-plume` | `blockgen::write_case(Plume, 8×8×8)` | 11 |
+| `ofgpu-buoyant` | `blockgen::write_case(Plume, 8×8×8)` | 17 |
+| `ofgpu-vof` | `blockgen::write_case(DamBreak, 20×30×1)` | 15 |
+| `ofgpu-k-epsilon` | `blockgen::write_case(Channel, 16×10×1)` | 11 |
+| `ofgpu-k-omega` | the same, with `RAS { model kOmega; }` | 11 |
+
+Each runs the driver's own `parse` + `run` — never a re-derivation of the
+control structs, which is exactly the shortcut that let five instances
+through — and compares every field file written.
+
+Three pieces of the harness are shared, in `src/bin/common/mod.rs`'s
+`knobs` module, and each exists because of a way such a test can pass while
+measuring nothing:
+
+* **`Knob::apply` asserts that the text it is replacing is still there.** A
+  knob whose `from` has drifted out of the generator would turn nothing, and
+  the pair would then compare two identical runs with each other and pass. The
+  assertion turns that into a failure naming the knob.
+* **`Knob::pre` applies an enabling edit to BOTH sides.** Some entries bite
+  only through another — `gradSchemes` is read by a convection scheme carrying
+  a limiter or a deferred correction and by nothing else, so in a case whose
+  `div(phi,k)` is first-order upwind no gradient is ever formed and turning
+  `gradSchemes` alone is inert *by arithmetic*. The enabling entry goes in
+  `pre` rather than being folded into the knob, so the two sides still differ
+  in exactly one setting.
+* **`written_time_dirs` compares only the TIME DIRECTORIES.** A driver that
+  writes into `<case>/<time>/` cannot be compared on the case root, because
+  the root also holds the dictionary the knob just edited — the two sides
+  would then differ *by the knob itself*, which is a green test for a setting
+  that never reached the solver.
 
 **The one admissible exception, and what it owes instead.** A setting whose
 effect is *identically zero* on every mesh the test can build cannot be shown
@@ -1131,11 +1226,71 @@ exactly what may have been overridden. `print_effective_settings`
 makes it independent of which case format the run came from.
 
 A block of the case format that NO driver reads is not exempt from §13.4
-either. Where such a block exists and closing it is a feature rather than a
-fix, the driver says so in one line rather than letting the case file sit
-there looking honoured — `ofgpu-fire` does this for `run.endTime`/`run.deltaT`
-(its run mode comes from `-endTime`/`-deltaT`) and for the whole `output`
-block, which no driver in this crate reads.
+either — and the treatment it gets is a **refusal**, not a printed note.
+
+This paragraph used to say the opposite: that a driver may say so in one line
+and continue, and `ofgpu-fire` did that for the whole `output` block. Three
+things settled it the other way:
+
+1. **A note is per driver, and drivers drift.** `ofgpu-fire` printed one;
+   `ofgpu-k-epsilon`, which reads the same JSONC format, printed nothing — so
+   the same `output` block was silently ignored by one of the two drivers that
+   can read it. One shared refusal (`common::refuse_unimplemented_blocks`)
+   cannot drift that way.
+2. **Half-honouring is a fresh instance of §13.4.1 inside the fix.** Three of
+   the `output` block's knobs — `visualisation.fields`,
+   `visualisation.precision`, `restart.keep` — have no implementation anywhere
+   in this crate. Wiring `format` and `interval` because they happen to exist
+   and dropping the other three is precisely the defect this section is about.
+3. **`-permissive` is the documented way through**, and it prints what it
+   substituted, which is what §13.4 asks of a case migrated from elsewhere.
+
+So, format-wide:
+
+| setting | treatment |
+|---|---|
+| `output` (all three sub-blocks) | **refused**; the message names `-output`, `-writeInterval`, `-restartWrite N`, `-restartFrom FILE` |
+| `run.adjustTimeStep: true` | **refused**; names `-deltaT`, and `ofgpu-vof` as the one adaptive loop in this crate |
+| `run.maxCo` | **refused**, whenever present, for the same reason |
+| `run.adjustTimeStep: false` | honoured — it is what every driver does |
+| `run.endTime`, `run.deltaT` | honoured: both readers turn them into `TurbulenceControls::n_outer_iterations`/`delta_t`. `ofgpu-fire` takes its run MODE from `-endTime`/`-deltaT` instead and prints which of the two is in force |
+| `controlDict/adjustTimeStep yes` (OpenFOAM) | **refused** in `read_control_dict`, which covers every driver that goes through it |
+| `controlDict/adjustTimeStep`, `maxCo`, `maxDeltaT` under `ofgpu-vof` | **honoured** — it is the one driver whose step is adaptive, and it reads them itself |
+
+`RunControl::max_co` was a `Scalar` defaulted to zero and read by nobody; it
+is now an `Option<Scalar>`, because "the case did not say" and "the case said
+zero" are different states and a refusal has to tell them apart.
+
+Two more settings a case can name that a driver cannot honour, refused the
+same way rather than dropped:
+
+* **`physics.gravity` / `constant/g` under `ofgpu-k-epsilon` or
+  `ofgpu-k-omega`.** Both models have had a `set_buoyancy` all along and
+  nothing was calling it; §17's `G_b = (nu_t/Pr_t) g·∇T/T` needs a temperature
+  field and these two drivers read none. The refusal names `ofgpu-plume`,
+  `ofgpu-buoyant` and `ofgpu-fire`, which do transport `T` and do wire `G_b`
+  in. It fires only where the CASE named gravity — `constant/g` present, or
+  JSONC, where `physics.gravity` is a required field — because
+  `BuoyancyCoeffs::default()` is `(0 0 −9.81)` and refusing on that would
+  refuse every case in this repository over a number no case file contains.
+* **`residualControl` with `-fixedIters` or `-graph` under `ofgpu-plume`.**
+  The entry IS honoured by that driver, on the initial residuals; but both
+  flags turn `SolverControls::report_residuals` off, so every residual the
+  test would see is a hard zero and it would be met on the second iteration of
+  any run. A setting that is read, stored and cannot be tested is the inert
+  setting of §13.4.1, so the COMBINATION is refused by name.
+
+`ofgpu-vof` acquired five refusals of the ordinary "recognised, not
+implemented" kind at the same time, all of which used to parse and vanish:
+`ddtSchemes` other than `Euler` (§20 assembles no other), `nOuterCorrectors > 1`
+(its step is PISO), `relaxationFactors/fields/p_rgh` (PISO applies the whole
+correction), `residualControl` (no outer loop to stop) and — the interesting
+one — a **`bounded` prefix on `div(rhoPhi,U)`**. There the substituted answer
+was the RIGHT one: §20.3's conservative form must not subtract `Σ_f rhoPhi_f`
+from the diagonal, because that quantity is `−(ρ − ρ⁰)V/Δt` exactly and is the
+other half of `d(ρψ)/dt`, not a spurious source. Being right is not a licence
+to be silent; a case asking for the correction is asking for an equation that
+is neither conservative nor non-conservative, and has to be told.
 
 #### 13.4.3 Refreshing what the defect already published
 
@@ -1176,17 +1331,59 @@ are the reason the rule is stated in this form:
   through a driver's controls. A gate that reaches the physics without passing
   through a case file cannot be moved by a case file being misread — which is
   an argument for having such gates, not only replayed ones.
-* **Two cases could not be rerun at all**, and are marked rather than quietly
-  left: `cases/channelThermalLowRe.jsonc` and `cases/channelPeriodicLowRe.jsonc`
-  name `wallTreatment lowRe` with `turbulence.model kEpsilon`, which §33's own
-  rule — added AFTER those runs — now refuses as a §13.4 error. Their published
-  numbers (the 0.095/0.381/0.107 ratio series) are pre-§33 AND pre-§13.4.1, the
-  attempt itself was retired by §32's redesigned gate, and `-permissive` does
-  not reproduce them either (it substitutes `standard`, a different flow). The
-  case files, `cases/README.md` and the commands it publishes all say so.
+* **Two cases could not be rerun at all**, and have now been RETIRED rather
+  than left in place: `cases/retired/channelThermalLowRe.jsonc` and
+  `cases/retired/channelPeriodicLowRe.jsonc` name `wallTreatment lowRe` with
+  `turbulence.model kEpsilon`, which §33's own rule — added AFTER those runs —
+  refuses as a §13.4 error. Their published numbers (the 0.095/0.381/0.107
+  ratio series) are pre-§33 AND pre-§13.4.1, the attempt itself was retired by
+  §32's redesigned gate, and `-permissive` does not reproduce them either (it
+  substitutes `standard`, a different flow).
+
+  Marking them in place was the first answer and it was not good enough. They
+  are now moved under `cases/retired/`, which carries a README naming the live
+  successor for each (`cases/channelPeriodicFluxLowRe.jsonc` for both) and the
+  conditions their numbers were taken under; the failing commands are DELETED
+  from `cases/README.md` rather than commented out, and the one in
+  `docs/07-fire-solver.md` is reduced to a record of what was run.
   **A published command that no longer runs is a reproducibility defect even
   when the case it runs is obsolete**, because a reader cannot tell the two
-  apart from the outside.
+  apart from the outside — and a commented-out command is still published.
+  Retiring them also makes the set testable: every `.jsonc` at the top level of
+  `cases/` is a case that runs, with nothing to except.
+
+**The sweep for instance 5, and for the four other drivers fixed with it.**
+The rule above says every published measurement the affected driver produced
+is suspect until it is rerun or marked. It was rerun. **Nothing moved**, and
+the reason is worth stating because it is the same reason the defect survived
+five times: every case in this tree writes the entries that were confused with
+each other as the SAME value.
+
+| driver | case | result |
+|---|---|---|
+| `ofgpu-plume` | `cases/plume`, 200 iterations | every field file in the written time directory **bit-identical** across the fix |
+| `ofgpu-k-epsilon` | `cases/channel`, 400 iterations | **bit-identical** |
+| `ofgpu-k-omega` | `cases/channelKW`, 400 iterations | **bit-identical** |
+| `ofgpu-buoyant` | `cases/plumeB` and a generated plume, 60 iterations | **bit-identical** |
+| `ofgpu-vof` | generated `damBreak` 60×100, `-endTime 0.05 -surge` | **bit-identical** |
+
+Diffed as whole written time directories, not as printed summaries. The only
+difference in the logs is the new §13.4.2 disclosure lines. Independently:
+all seventeen OpenFOAM cases in `cases/` were checked to carry identical
+`div(phi,epsilon)`/`div(phi,omega)` entries, identical `solvers` blocks for
+the two and identical relaxation factors, which is what makes
+`dissipation_key` provably a no-op on the published record rather than merely
+measured to be one; and every JSONC case names a `kEpsilon`-family model, so
+the same change on that path cannot bite either.
+
+**What the sweep did change is which commands RUN.** `cases/plume.jsonc` and
+`cases/plumeB` both name gravity, and `cases/README.md` published
+`ofgpu-k-epsilon` as a driver to run them with. That command is now a §13.4
+error, and the documented form carries `-permissive` — which prints the
+substitution and reproduces the previous numbers exactly. `docs/case-example.json`
+carries an `output` block, `adjustTimeStep: true` and `maxCo`, all three now
+refused; the file says so, in place, rather than continuing to document them
+as settings that do something.
 
 ---
 
@@ -2293,7 +2490,7 @@ by the registry from the case. Requirements that come with it:
 
 | Check | Expected |
 |---|---|
-| WW viscous limit | `tau_w -> nu |u_p|/ (h/2)`-form continuous at the branch point (evaluate both sides) |
+| WW viscous limit | `tau_w -> nu \|u_p\|/ (h/2)`-form continuous at the branch point (evaluate both sides) |
 | WW power branch | inverting the integrated law reproduces a manufactured tau_w to round-off |
 | coupled SST | buoyant plume runs NaN-free; nut differs from the k-epsilon run (not bit-identical) |
 | coupled LES (Deardorff) | room/plume case runs NaN-free; mean nut < RAS nut on the same mesh (reported) |
@@ -3058,6 +3255,14 @@ and §32.4's "reported as UNDECIDED" clause, which §32.5.3's verdict invoked,
 no longer applies. It passes Dittus-Boelter at +6.0 %. The Reynolds-analogy
 verdict closes on neither leg. **The gate remains OPEN on the resolved leg,
 and the miss is now decisive where it previously was not.**
+
+*Still the record at the SHIPPED DEFAULT, and now conditional on one setting.*
+The candidate this verdict ends by naming — the case-wide constant `Pr_t` — is
+§37, and it has since been implemented and measured. Selecting
+`PrtModel KaysCrawford` on both legs takes the resolved leg from +14.1 % to
++6.4 % and closes the absolute-prediction verdict on BOTH; the default is
+unchanged, so every number in the table above still stands as written. See
+§37 and `docs/07-fire-solver.md` §1.1's last subsection.
 
 **What the remaining discrepancy implicates, with three suspects retired.**
 The uniform thermostat sink (§35.3), the inferred friction factor (§32.5.3)
@@ -4005,3 +4210,258 @@ iteration, which is already possible without new plumbing.
 | `cases/burnerPlume.jsonc` | run with `radiationModel P1` and `radiationModel fvDOM`; report the radiated fraction from both |
 
 **MEASURED**, `cases/burnerPlume.jsonc` and its `_fvDOM` twin, 32 768 cells, 1200 steps at `deltaT = 0.005 s`, RTX 5070 Ti, at the §13.4.1 numerics: radiated fraction **14.98 %** (P1) against **13.83 %** (fvDOM) of the domain heat release; wall time **19.08 s** against **124.6 s**, a factor 6.5 on 24 ordinates — §36.6's `N_ordinates`-times-cost statement confirmed by measurement. *Previously recorded as 15.08 / 13.35 % and 18.8 / 119 s, from runs made by a driver that read none of the case's `numerics` block (§13.4.3). Both models were rerun on the fixed driver; because both legs of the comparison were affected identically, the P1-vs-fvDOM conclusion is unchanged in substance — fvDOM radiates less, by 1.15 points instead of 1.73.*
+
+---
+
+## 37. The turbulent Prandtl number: constant, or Kays-Crawford
+
+**Kays, *ASME J. Heat Transfer* 116 (1994) 284–295** ("Turbulent Prandtl
+number — where are we?"); **Kays & Crawford, *Convective Heat and Mass
+Transfer*, 4th ed., ch. 13** — the correlation, its two constants, and the
+experimental review behind them. No GPL-licensed source was consulted.
+
+§26 closes the turbulent heat flux with a single number:
+
+```
+k_eff = k + rho cp nu_t / Pr_t,        Pr_t = 0.85 everywhere
+```
+
+and §32's thermal gate has arrived, after four rounds of removing defects
+from the COMPARISON rather than the model, at a leg that gets the momentum
+very nearly right (measured `f` within 2 % of the pipe correlation, kinematic
+drag balance closing to −0.000 %) and the heat 14 % too high. That is a
+purely THERMAL statement, and `Pr_t` is the one thermal constant in the
+closure that is not measured by anything.
+
+The evidence Kays reviews is that `Pr_t` is not constant: it is close to 0.85
+in the fully turbulent region, where turbulent transport of momentum and of
+heat are carried by the same eddies, and RISES towards the wall — of order
+1.5–1.9 for air in the conduction sublayer, where the eddies are too weak to
+carry heat as effectively as molecular conduction carries it. The resolved
+leg's first cell sits at `y+ = 0.0019`. A `Pr_t` that is too LOW makes
+`alpha_t = nu_t/Pr_t` too LARGE, transports too much heat, narrows
+`(T_w − T_b)` and biases `Nu` HIGH. That is the right sign for the miss, and
+this section specifies the model that tests it.
+
+### 37.1 The correlation
+
+```
+Pe_t = (nu_t / nu) Pr                                turbulent Peclet number
+
+Pr_t = 1 / [   1/(2 Pr_t_inf)
+             + C Pe_t / sqrt(Pr_t_inf)
+             − (C Pe_t)^2 (1 − exp(−1/(C Pe_t sqrt(Pr_t_inf)))) ]
+
+C = 0.3,   Pr_t_inf = 0.85
+```
+
+`C` and `Pr_t_inf` are the two numbers that DEFINE this correlation, not case
+settings: a case that wants a different `C` wants a different correlation.
+`Pr_t_inf` is spelled as the case's existing `Prt` entry, re-read as the
+free-stream asymptote — see §37.4.
+
+### 37.2 The two limits, derived, and the form that survives floating point
+
+The limits matter more than the algebra, because they are what make the
+formula trustworthy without a table to copy: one has to be the sublayer value
+Kays reports, the other has to be the constant this project has been using.
+Both fall out of one substitution.
+
+Write `a = sqrt(Pr_t_inf)`, `x = C Pe_t`, and `u = 1/(x a)`. Then `x = 1/(u a)`,
+and the bracket of §37.1 is
+
+```
+B  = 1/(2a^2) + 1/(u a^2) − (1/(u^2 a^2))(1 − e^{−u})
+   = (1/Pr_t_inf) [ 1/2 + (e^{−u} + u − 1)/u^2 ]
+```
+
+so, defining `h(u) = (e^{−u} + u − 1)/u^2`,
+
+```
+Pr_t = Pr_t_inf / (1/2 + h(u)),        u = 1/(C Pe_t sqrt(Pr_t_inf))
+```
+
+which is the SAME function, written so both limits are one line:
+
+* **`Pe_t -> infinity`** (the free stream) sends `u -> 0`. Expanding
+  `e^{−u} = 1 − u + u^2/2 − u^3/6 + ...` gives `e^{−u} + u − 1 = u^2/2 − u^3/6 + ...`,
+  so `h(0) = 1/2` and **`Pr_t -> Pr_t_inf = 0.85`**. The next term gives the
+  approach: `h(u) = 1/2 − u/6 + O(u^2)`, hence
+  `Pr_t = Pr_t_inf (1 + 1/(6 sqrt(Pr_t_inf) C Pe_t)) + O(Pe_t^{−2})` — the free-stream
+  value is approached FROM ABOVE, at `O(1/Pe_t)`.
+* **`Pe_t -> 0`** (the conduction sublayer) sends `u -> infinity`. `e^{−u} -> 0`
+  and `(u − 1)/u^2 -> 0`, so `h(infinity) = 0` and
+  **`Pr_t -> 2 Pr_t_inf = 1.70`** — inside the 1.5–1.9 Kays reports for air,
+  which is the check that the formula transcribed here is the one the paper
+  states.
+
+`h` is monotonically decreasing from `1/2` to `0`, so `Pr_t` rises
+monotonically from `Pr_t_inf` to `2 Pr_t_inf` as `Pe_t` falls. It never
+leaves that interval.
+
+**Two branches, one at each end, both derived rather than tuned.** Neither is
+a numerical nicety; each is the only thing standing between this correlation
+and a NaN or a lost answer at an input a real mesh hands it every iteration.
+
+* **`Pe_t -> 0`.** At `Pe_t = 0` exactly — which is what a resolved wall face
+  under a low-Re model produces, `nu_t` pinned to zero — the literature form
+  evaluates `0 * (1 − exp(−inf))`, i.e. `0 * 1`, and the rearranged form
+  evaluates `(0 + inf − 1)/inf = NaN`. The branch returns the limit,
+  `2 Pr_t_inf`, whenever the whole correction to it, `2 C Pe_t sqrt(Pr_t_inf)`,
+  is at or below the working precision's own epsilon — at which point the two
+  cannot be distinguished anyway. It is written as the NOT of the positive
+  test, so a NaN `Pe_t` takes it too rather than propagating.
+* **`Pe_t` large.** `e^{−u} + u − 1` is a difference of numbers near 1 whose
+  true value is `u^2/2`, so it loses `2 eps/u^2` of relative accuracy. Below
+  `u = 1e-2` it is summed as the series the expansion above already gives,
+  `h(u) = sum_{k>=0} (−u)^k/(k+2)!`, truncated after `u^4/720`; the first
+  dropped term is `u^5/5040 < 4e-14` of `h` at the switch-over.
+
+The rearrangement is not cosmetic, and §37.5's table makes that a test rather
+than a claim: the LITERATURE form of §37.1 subtracts two quantities of order
+`C Pe_t/sqrt(Pr_t_inf)` to leave one of order `1/Pr_t_inf`, and at
+`Pe_t = 1e8` it returns 0.819 where the answer is 0.850 — a 3.6 % error in a
+formula with no approximation in it.
+
+### 37.3 Where `Pr_t` enters, and — as important — where it does not
+
+The model supplies `Pr_t` to ONE closure: §26's
+
+```
+k_eff = k + rho cp nu_t / Pr_t(Pe_t)
+```
+
+evaluated per FACE, on the same interpolated `rho_f`/`nu_t,f` the constant
+form already used, in the same `update_k_eff` pass. `Pe_t` is formed from the
+same molecular `nu` the momentum equation runs with. Nothing else about the
+energy equation changes.
+
+Two other places in this solver carry a turbulent Prandtl number. §13.4
+forbids either being a surprise, so both are stated here and both are
+announced by the driver at start-up.
+
+**§29.3's Jayatilleke thermal wall function keeps `Pr_t_inf`, by DERIVATION
+rather than by omission.** Its law is
+
+```
+T+ = Pr_t (u+ + P(Pr/Pr_t)),   P = 9.24[(Pr/Pr_t)^0.75 − 1][1 + 0.28 exp(−0.007 Pr/Pr_t)]
+```
+
+and the `Pr_t` in it is the LOG-LAYER value: `P` is the integrated sublayer
+resistance, obtained once, analytically, under an assumed near-wall `Pr_t`
+profile, and `Pr_t(u+ + P)` is the log branch that resistance is added to.
+Kays-Crawford's own `Pe_t -> infinity` limit (§37.2) IS that log-layer value.
+Feeding a local sublayer `Pr_t` into a correlation that already carries its
+own sublayer integral would count the same physics twice, and would do it
+with a `Pr_t` that is not the one `P` was calibrated against. So the wall
+function is untouched: `ThermalWallData::update` and its device kernel are
+handed `Pr_t_inf` under every `PrtModel`, and so is the postprocessing `T_w`
+diagnosis built on the same host functions.
+
+**How far that makes a wall-function mesh a CONTROL — stated exactly, because
+§37's whole experiment turns on it.** Three separate statements, and only the
+first two are exact:
+
+1. A `fixedFluxTemperature` wall's IMPOSED flux does not move at all.
+   §32.2's condition writes `ref_grad = q_w/k_eff,wall`, so the product
+   `k_eff,wall * ref_grad` is `q_w` whatever `k_eff,wall` is. On a `lowRe`
+   wall `nu_t,w = 0` besides, so `Pr_t` there multiplies nothing.
+2. A `thermalWallFunction` wall's flux does not move either, because its law
+   takes `Pr_t_inf` by the paragraph above.
+3. But `k_eff,wall` ITSELF does move on a wall-function mesh, where
+   `nu_t,w > 0`, and it is not inert. The `fr = 0` triple sets the boundary
+   VALUE of `T` by extrapolating `ref_grad` over the standoff, so a smaller
+   `k_eff,wall` places that boundary value further from the cell; the wall-face
+   DENSITY is read off it, and `rho` appears in the Jayatilleke flux
+   `q_w = rho cp u_tau (T_w - T_P)/T+`. Measured on §32's own wall-function
+   leg it widens `(T_w - T_P)` by 1.15 %, which is +0.97 % of the driving
+   `(T_w - T_b)`; the interior profile adds a further +0.50 % of the same
+   quantity. Together they are the whole of that leg's 1.47 % widening and its
+   −1.45 % of `Nu` — against −6.81 % on the resolved leg.
+
+So a wall-function mesh is a NEAR-control with two identified channels, not
+an inert one, and any report of §37's experiment has to say which. Neither
+channel is the sublayer effect the model exists to correct, and both are
+small because a mesh whose first cell sits at y+ 58 has no cell anywhere near
+the region where `Pr_t` departs from `Pr_t_inf` at all.
+
+*And note what §32's gate does NOT exercise*: both channel cases name
+`fixedFluxTemperature` on their hot walls explicitly, which by §15.5's rule
+beats the `wallTreatment` preset, so no `thermalWallFunction` face runs in
+that gate. Statement 2 above is the general contract; statement 1 is the one
+the gate actually uses.
+
+**§17's buoyancy production `G_b = (nu_t/Pr_t) g.grad(T)/T` keeps the constant,
+and that is a §13.4 ERROR, not a note, when gravity is on.** It is a
+different closure, this section has not specified it, and a buoyant case
+selecting `KaysCrawford` would silently run two different `Pr_t` at once. The
+driver refuses that combination, naming `PrtModel constant` and "gravity
+`[0,0,0]`" as the alternatives; `-permissive` substitutes the constant in
+`G_b` and says so. Wiring §17 to a per-cell `Pr_t` is a further piece of work
+and is named here rather than left implicit.
+
+**A defect this section found in the driver's own REPORT, fixed here.**
+`ofgpu-fire` integrates the wall heat flux as `k_eff,wall * snGrad(T)` off the
+same Robin triple the matrix was assembled from, and recomputes `k_eff,wall`
+on the host from the downloaded `rho`/`nu_t` boundary fields. That
+recomputation used the constant `Pr_t` unconditionally. On a wall-function
+mesh under `KaysCrawford` the wall face's own `Pe_t` is `O(2)`, so the true
+`k_eff,wall` is about 16 % smaller than the constant-`Pr_t` value — and the
+report duly claimed 580 W/m^2 of wall heat on a `fixedFluxTemperature` wall
+imposing 500, together with a wall temperature inflated by the same ratio.
+The IMPOSED flux was never wrong (§32.2's condition writes
+`ref_grad = q_w/k_eff,wall`, so the product is `q_w` whatever `k_eff,wall`
+is); the REPORT was, by exactly the ratio of the two `Pr_t`. A report that
+disagrees with the matrix it claims to be reading is worse than no report, so
+the recomputation now takes the same model, and it is recorded here rather
+than quietly corrected — it is the only way a reader can tell that this
+section's first wall-function measurement was discarded.
+
+Also stated because it is a scope limit and not an oversight: this section
+reaches `ofgpu-fire`'s energy equation. `ofgpu-buoyant` and `ofgpu-plume`
+carry their own `Prt` in `ScalarTransportCoeffs` and do not implement §37;
+neither reads a JSONC case, so neither can be handed the setting and ignore
+it.
+
+### 37.4 Selection, and why the default does not move
+
+*DESIGN.* A per-case selector, under §13.4's contract:
+
+| route | entry | values |
+|---|---|---|
+| JSONC | `physics.fluid.PrtModel` | `"constant"` (default), `"KaysCrawford"` |
+| OpenFOAM | `constant/thermophysicalProperties`'s `PrtModel` | the same two |
+
+Absent means `constant`, which is what every case written before this section
+existed means. An unrecognised spelling is an error NAMING both alternatives;
+`-permissive` substitutes `constant` and prints the substitution.
+
+**The default stays `constant`, deliberately.** Every measurement
+`ofgpu-fire` has recorded — §32's whole gate history, §35's thermostat
+experiments, §36's radiated fractions — was made with a single case-wide
+`Pr_t`, and a default that changed would move all of them at once, silently,
+on the next rerun. The opt-in is one token in the case file; the reproducible
+record is worth more than the convenience.
+
+`Prt` is not renamed. Under `constant` it is `Pr_t`; under `KaysCrawford` it
+is `Pr_t_inf`, the free-stream asymptote, and the sublayer value is `2 Prt`
+by §37.2 rather than a second entry a case could set inconsistently. The
+driver prints which reading is in force.
+
+### 37.5 What must hold
+
+| Test | Expected |
+|---|---|
+| `Pe_t -> 0` limit | `Pr_t = 2 Pr_t_inf` EXACTLY (the small-`Pe_t` branch returns the limit), at `Pe_t = 0` and at `Pe_t = 1e-300`, for every `Pr_t_inf` tried |
+| `Pe_t -> infinity` limit | `Pr_t -> Pr_t_inf` from ABOVE, matching `Pr_t_inf(1 + 1/(6 sqrt(Pr_t_inf) C Pe_t))` over `Pe_t = 1e3 .. 1e6`, and reproducing the DERIVED second-order coefficient `-1/(72 C^2)` (independent of `Pr_t_inf`) to `1e-6`; `Pr_t(1e9)` within `1e-9` of `Pr_t_inf` |
+| rearrangement is the same function | §37.2's form against §37.1's literature form, `Pe_t = 1e-4 .. 1e3`: agreement to `1e-10` relative |
+| and is the one that keeps the digits | at `Pe_t = 1e8` the literature form is more than `1e-3` from `Pr_t_inf`; §37.2's is within `1e-7` |
+| monotone, bounded | `Pr_t` falls monotonically over `Pe_t = 1e-8 .. 1e7` and stays inside `[Pr_t_inf, 2 Pr_t_inf]` |
+| no NaN anywhere it can be called | finite and positive at `0`, `MIN_POSITIVE`, `1e-300`, `1e300`, `MAX`; `Pr_t_inf` exactly at `+inf` |
+| device twin | `energyKEffKaysCrawford` reproduces the host `kays_crawford_prt` to `1e-12` relative over `nu_t/nu = 0 .. 1e8`, both branches exercised on the device |
+| the default does not move | under `PrtModel constant` the `k_eff` pass is bit-for-bit the pre-§37 formula on the identical face fields |
+| §13.4 | an unrecognised `PrtModel` errors, naming both spellings; `KaysCrawford` with gravity on errors, naming §17 |
+| the experiment | §32's two legs, 40 000 iterations, `constant` against `KaysCrawford`, nothing else changed: report `Nu`, `T_w`, `T_b`, both balances, and the measured `Pr_t` range on each mesh |
+
+**MEASURED** — see `docs/07-fire-solver.md` §1.1's last subsection for the
+four runs and the verdict.

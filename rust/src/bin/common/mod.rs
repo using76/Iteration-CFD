@@ -3,6 +3,7 @@
 // free; commercial and non-academic research require a licence.
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
+// Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! Bits every ofgpu executable needs, and nothing a library user would.
 //!
@@ -21,9 +22,14 @@
 //! `CaseNumerics`, the one reader that answers a driver's OWN equations'
 //! scheme, relaxation and linear-solver entries for BOTH case formats, per
 //! equation and by that equation's own key (SPEC-LIT.md S13.4.1;
-//! `PROVENANCE.md`'s *DESIGN* table carries the row). Argument parsing, case
-//! loading and reporting loops are this project's own throughout. No
-//! GPL-licensed source was consulted.
+//! `PROVENANCE.md`'s *DESIGN* table carries the row); the shared S13.4
+//! refusals for the case-format blocks NO driver implements
+//! (`refuse_unimplemented_blocks`, `refuse_buoyancy_without_temperature`,
+//! `refuse_non_orth_correctors_without_another_equation`); and the `knobs`
+//! test scaffolding that gives every driver S13.4.1's standing
+//! "two runs must differ" pair. Argument parsing, case loading and reporting
+//! loops are this project's own throughout. No GPL-licensed source was
+//! consulted.
 
 #![allow(dead_code)]
 
@@ -291,6 +297,240 @@ impl<'a> CaseNumerics<'a> {
             }
         }
     }
+}
+
+// ==========================================================================
+//  The blocks of the case format NO driver implements - SPEC-LIT 13.4
+// ==========================================================================
+//
+// 13.4.1's four instances were all settings a driver COULD honour and did
+// not. These are the other half of the same sweep: whole blocks of the case
+// format that no driver in this crate implements at all, and that
+// `docs/case-example.json` documents at length as meaningful.
+//
+// The choice made here is REFUSAL, not a printed note, and the reasoning is
+// worth stating because 13.4.2 previously blessed the note:
+//
+//   1. A note is per driver. `ofgpu-fire` printed one for `output`;
+//      `ofgpu-k-epsilon`, which reads the same format, printed nothing - so
+//      the same case file was silently ignored by one of the two drivers
+//      that can read it. One shared refusal cannot drift that way.
+//   2. Three of the `output` block's knobs (`visualisation.fields`,
+//      `visualisation.precision`, `restart.keep`) have NO implementation
+//      anywhere in this crate. Honouring the two that do exist
+//      (`format`, `interval`) and dropping the other three would manufacture
+//      a fresh instance of 13.4.1's defect inside the fix.
+//   3. `-permissive` is the documented escape and prints what it
+//      substituted, which is exactly what 13.4 asks of a case migrated from
+//      elsewhere.
+
+/// Refuse the case-format blocks no driver in this crate reads.
+///
+/// Call once, straight after [`load_case`], from every driver that accepts a
+/// JSONC case. `None` - an OpenFOAM case directory - is a no-op, because the
+/// OpenFOAM format has no such blocks; the equivalent `controlDict` entries
+/// are refused by `read_control_dict` in the library.
+///
+/// What is refused, and what the message names instead:
+///
+/// * the whole `output` block -> `-output`, `-writeInterval`,
+///   `-restartWrite N`, `-restartFrom FILE`
+/// * `run.adjustTimeStep: true` -> `-deltaT` for a fixed step, `ofgpu-vof`
+///   for the one adaptive loop this crate has
+/// * `run.maxCo` -> the same
+///
+/// `run.endTime`/`run.deltaT` are NOT refused: both formats' readers already
+/// turn them into `TurbulenceControls::n_outer_iterations`/`delta_t`
+/// (`JsonCase::lower`, `read_control_dict`), so they reach the solver. A
+/// driver whose run mode comes from the command line instead says so in its
+/// own banner - `ofgpu-fire` does.
+pub fn refuse_unimplemented_blocks(json: Option<&LoweredCase>) -> Result<()> {
+    let Some(l) = json else { return Ok(()) };
+
+    if let Some(o) = &l.output {
+        let mut named: Vec<&str> = Vec::new();
+        if o.visualisation.is_some() {
+            named.push("visualisation");
+        }
+        if o.exact.is_some() {
+            named.push("exact");
+        }
+        if o.restart.is_some() {
+            named.push("restart");
+        }
+        if named.is_empty() {
+            named.push("(empty)");
+        }
+        ofgpu::io::contract::unsupported_note(
+            "output",
+            &named.join(", "),
+            &[],
+            "no ofgpu driver reads the output block. What is written is decided by the command line: -output foam,vtu,nvdb,vdb,usda for the format(s), -writeInterval for how often, -restartWrite N / -restartFrom FILE for checkpoints. output.visualisation.fields, output.visualisation.precision and output.restart.keep have no implementation at all",
+            "the command line's own -output / -writeInterval / -restartWrite",
+            (),
+        )?;
+    }
+
+    if l.run.adjust_time_step {
+        ofgpu::io::contract::unsupported_note(
+            "run.adjustTimeStep",
+            "true",
+            &["false"],
+            "no driver that reads a JSONC case adjusts its own time step; the step is run.deltaT, or -deltaT on the command line. ofgpu-vof is the one adaptive loop in this crate (-maxCo, or controlDict/adjustTimeStep + maxCo) and it takes an OpenFOAM case directory",
+            "a fixed time step of run.deltaT",
+            (),
+        )?;
+    }
+
+    if let Some(co) = l.run.max_co {
+        ofgpu::io::contract::unsupported_note(
+            "run.maxCo",
+            &g(f64::from(co)),
+            &[],
+            "run.maxCo only means anything to a loop that adjusts its step, and no driver that reads a JSONC case has one - see run.adjustTimeStep",
+            "a fixed time step of run.deltaT",
+            (),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Refuse `nNonOrthogonalCorrectors` to a driver whose ONLY equations are
+/// the turbulence ones.
+///
+/// SPEC-LIT §13.4, and a finding OF the standing pair test rather than of
+/// the audit that prompted it: **no turbulence model in this crate loops over
+/// `n_non_orth_correctors`.** `energy.rs`, `momentum.rs`,
+/// `scalar_transport.rs` and `simple.rs` each carry
+/// `for _pass in 0..=ctrl.n_non_orth_correctors` around their
+/// assemble-and-solve; `models/*.rs` carry none, so the `k` and
+/// `epsilon`/`omega` equations always make exactly one pass.
+///
+/// The correction ITSELF is applied - `RasCore::assemble_after_diffusivity`
+/// calls `fvm_laplacian_non_orth_correction` - so what a case loses is the
+/// re-evaluation of that explicit term against a fresher solution
+/// (Jasak §3.4.3), not the term. That is a smaller thing than §13.4.1's five
+/// instances, and it is still a setting the case states and the solver drops.
+///
+/// Refused HERE and not in `RasCore::new`, and the line is exact: in
+/// `ofgpu-plume`, `ofgpu-buoyant` and `ofgpu-fire` the same entry reaches
+/// `T`, `U` and `p`, so it is NOT inert there and a blanket refusal would be
+/// telling a user "not supported" about a setting three of their four
+/// equations honour - both of those drivers' pair tests carry it and both
+/// pass. In `ofgpu-k-epsilon` and `ofgpu-k-omega` there is no other
+/// equation, so it is inert in the full sense §13.4.1 means, which is
+/// exactly what `every_wired_setting_changes_what_the_run_writes` measured
+/// before this refusal existed.
+pub fn refuse_non_orth_correctors_without_another_equation(
+    cc: &CaseControls,
+    driver: &str,
+) -> Result<()> {
+    if cc.turb.n_non_orth_correctors == 0 {
+        return Ok(());
+    }
+    ofgpu::io::contract::unsupported_note(
+        "nNonOrthogonalCorrectors",
+        &cc.turb.n_non_orth_correctors.to_string(),
+        &["0"],
+        &format!(
+            "no turbulence model in ofgpu loops over the non-orthogonal corrector count: the k and epsilon/omega equations make one pass, with SPEC-LIT 2.4's correction applied once and not refreshed. {driver} solves nothing else, so the entry would reach no equation at all. ofgpu-plume, ofgpu-buoyant and ofgpu-fire do honour it, on their T, U and p equations"
+        ),
+        "one pass - the correction applied once, exactly as nNonOrthogonalCorrectors 0",
+        (),
+    )
+}
+
+/// Refuse a case that names gravity to a driver with no temperature to build
+/// SPEC-LIT §17's `G_b = (nu_t/Pr_t) g.grad(T)/T` from.
+///
+/// `ofgpu-k-epsilon` and `ofgpu-k-omega` solve the two turbulence transport
+/// equations on a FROZEN `U` and `phi` and read no `T` at all, so gravity
+/// cannot reach their `k` and `epsilon`/`omega` equations - and both models
+/// have a `set_buoyancy` that nothing was calling. A case naming
+/// `physics.gravity` (or `constant/g`) therefore got a run with `G_b`
+/// identically zero and was not told, which is §13.4's silent substitution
+/// with a named term missing from the equations.
+///
+/// Both case formats reach this through `CaseControls::buoyancy`, so one
+/// call covers a JSONC case and an OpenFOAM one alike.
+///
+/// **The `named` test is not optional and not a nicety.**
+/// `BuoyancyCoeffs::default()` is `(0 0 -9.81)`, deliberately - see its own
+/// doc comment - so `cc.buoyancy.is_active()` is TRUE for every OpenFOAM case
+/// that has no `constant/g` at all, `cases/channel` included. Refusing on
+/// `is_active()` alone would refuse every case in this repository over a
+/// number no case file contains, which is §13.4 read backwards: an error
+/// about a setting the user never wrote is as wrong as silence about one
+/// they did.
+///
+/// So the refusal fires only where the CASE named gravity: `constant/g`
+/// present on the OpenFOAM path, and always on the JSONC path, where
+/// `physics.gravity` is a required field and `[0, 0, 0]` is how a case says
+/// "none".
+pub fn refuse_buoyancy_without_temperature(
+    case_path: &Path,
+    cc: &CaseControls,
+    json: Option<&LoweredCase>,
+    driver: &str,
+) -> Result<()> {
+    let named = match json {
+        Some(_) => true,
+        None => case_path.join("constant").join("g").exists(),
+    };
+    if !named || !cc.buoyancy.is_active() {
+        return Ok(());
+    }
+    let gv = cc.buoyancy.g;
+    ofgpu::io::contract::unsupported_note(
+        "physics.gravity (constant/g)",
+        &format!("({} {} {})", g(f64::from(gv.x)), g(f64::from(gv.y)), g(f64::from(gv.z))),
+        &["(0 0 0)"],
+        &format!(
+            "{driver} solves the turbulence transport equations on a frozen U and phi and reads no temperature field, so SPEC-LIT §17's buoyancy production G_b = (nu_t/Pr_t) g.grad(T)/T has nothing to be built from. ofgpu-plume, ofgpu-buoyant and ofgpu-fire transport T and do wire G_b into k and epsilon/omega"
+        ),
+        "no buoyancy production - G_b identically zero, exactly as gravity (0 0 0)",
+        (),
+    )
+}
+
+/// The SPEC-LIT §13.4.2 disclosure line for ONE equation a driver assembles
+/// itself, spelled the way the case's own entries spell it.
+///
+/// `print_effective_settings` (`src/io/case.rs`) prints what
+/// [`CaseControls`] carries, which is the turbulence equations plus whichever
+/// `divSchemes` keys the case happens to name; it cannot print what a driver
+/// resolved for an equation `CaseControls` knows nothing about, and in
+/// particular it prints `gradSchemes/default` where the equation may have
+/// been given `gradSchemes/grad(T)`. This is that missing line, written once
+/// so two drivers cannot spell the same disclosure differently.
+///
+/// `field` is the equation's own field name - `"T"`, `"U"` - and every key
+/// printed is derived from it, because §13.4.1(a) is exactly the rule that
+/// the entry and the equation must carry the same name.
+pub fn equation_settings_line(
+    field: &str,
+    laplacian_key: &str,
+    div: DivEntry,
+    grad: GradScheme,
+    sn: SnGradScheme,
+    n_non_orth: usize,
+    relax: Scalar,
+    solver: &SolverControls,
+) -> String {
+    format!(
+        "{field} equation: div(phi,{field}) {}{} | grad({field}) {} | {laplacian_key} snGrad {}, {n_non_orth} corrector(s) | relax {} | solvers/{field} {} + {}, tol {:e}, relTol {}, maxIter {}",
+        if div.bounded { "bounded " } else { "" },
+        div.scheme.describe(),
+        grad.describe(),
+        sn.describe(),
+        g(f64::from(relax)),
+        solver.solver.name(),
+        solver.precon.name(),
+        solver.tolerance,
+        solver.rel_tol,
+        solver.max_iter,
+    )
 }
 
 /// The output ROOT a driver should write into - the case directory itself
@@ -636,6 +876,177 @@ pub fn atoi(s: &str) -> i64 {
     }
 
     sign * v
+}
+
+// ==========================================================================
+//  Test scaffolding for SPEC-LIT 13.4.1's standing requirement
+// ==========================================================================
+//
+// > Two short runs of the driver, differing in exactly one setting of the
+// > case file and nothing else, must write DIFFERENT output. If they are
+// > bit-identical, the setting is inert.
+//
+// `ofgpu-fire` has had such a test since instance 4
+// (`every_wired_setting_changes_what_the_run_writes`), built on generated
+// JSONC case TEXT. The other five drivers take an OpenFOAM case DIRECTORY,
+// so theirs is built on `blockgen::write_case` plus a textual edit of one
+// dictionary entry - which is the same idea and, if anything, a stricter one:
+// the edit is applied to a case this repository itself ships the generator
+// for, so a knob that stops matching is a knob whose spelling changed.
+//
+// Shared here rather than copied into five test modules because every
+// `[[bin]]` includes this file, and five copies of a test harness is five
+// chances for one of them to stop checking what it claims to.
+#[cfg(test)]
+pub mod knobs {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A private directory per call - `cargo test` is multi-threaded, and
+    /// every one of these lets a driver write a time directory into it.
+    pub fn scratch_dir(tag: &str) -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "ofgpu_13_4_1_{}_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d
+    }
+
+    /// Every file under `root`, as `(relative path, contents)`, sorted.
+    ///
+    /// The whole written state rather than one number: a setting that moves
+    /// only `k`, or only `T`, is still a setting that reached the solver.
+    pub fn written_state(root: &Path) -> Vec<(String, String)> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().to_string();
+                let rel = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                if p.is_dir() {
+                    walk(&p, &rel, out);
+                } else if let Ok(s) = std::fs::read_to_string(&p) {
+                    out.push((rel, s));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, "", &mut out);
+        out.sort();
+        out
+    }
+
+    /// Every TIME DIRECTORY a run wrote, as `(relative path, contents)`.
+    ///
+    /// A driver that writes into `<case>/<time>/` rather than one fixed
+    /// directory cannot be compared with [`written_state`] on the case root:
+    /// the root also holds `system/` and `constant/`, and a knob that edits
+    /// `system/fvSchemes` would then make the two sides differ BY THE KNOB
+    /// ITSELF - a test that passes without the setting ever reaching the
+    /// solver, which is the precise failure 13.4.1 is about.
+    ///
+    /// `0` is excluded because it is the start time, i.e. an input.
+    pub fn written_time_dirs(case: &Path) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir(case) else { return out };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !e.path().is_dir() {
+                continue;
+            }
+            match name.parse::<f64>() {
+                Ok(t) if t != 0.0 => {}
+                _ => continue,
+            }
+            for (rel, text) in written_state(&e.path()) {
+                out.push((format!("{name}/{rel}"), text));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// One setting turned: which dictionary FILE it lives in, the text as
+    /// `blockgen::write_case` writes it, and the text to put there instead.
+    ///
+    /// A textual edit rather than a struct field, because the point of the
+    /// test is that the CASE FILE reaches the solver - patching a control
+    /// struct would skip exactly the reader under test.
+    pub struct Knob {
+        /// What is being turned, for the failure message.
+        pub label: &'static str,
+        /// Relative to the case root - `"system/fvSchemes"`.
+        pub file: &'static str,
+        pub from: &'static str,
+        pub to: &'static str,
+        /// An edit applied to BOTH sides of the pair, before the one above.
+        ///
+        /// Some entries bite only through another. `gradSchemes` is read by
+        /// a convection scheme that carries a limiter or a deferred
+        /// correction and by nothing else, so in a case whose `div(phi,k)` is
+        /// first-order upwind no gradient is ever formed and turning
+        /// `gradSchemes` alone is inert BY ARITHMETIC, whatever the reader
+        /// does. Putting the enabling entry here rather than folding it into
+        /// `to` keeps the two sides differing in exactly one setting, which
+        /// is what makes the result a statement about THAT setting.
+        ///
+        /// `NO_PRE` - the common case - is no prerequisite.
+        pub pre: (&'static str, &'static str, &'static str),
+    }
+
+    /// No prerequisite edit, for the `pre` field of a plain knob.
+    pub const NO_PRE: (&str, &str, &str) = ("", "", "");
+
+    /// Apply one knob to a freshly generated case, and fail loudly if the
+    /// text it was written against is no longer there.
+    ///
+    /// The `assert` is the part that matters: a knob whose `from` has drifted
+    /// out of `blockgen`'s generator would silently turn NOTHING, and the
+    /// test would then pass by comparing two identical runs against
+    /// themselves - a green test measuring nothing, which is the failure mode
+    /// this whole subsection exists to prevent.
+    pub fn apply(case: &Path, k: &Knob, side: bool) {
+        let (pre_file, pre_from, pre_to) = k.pre;
+        if !pre_file.is_empty() {
+            edit(case, k.label, pre_file, pre_from, pre_to);
+        }
+        if !side {
+            return;
+        }
+        edit(case, k.label, k.file, k.from, k.to);
+    }
+
+    fn edit(case: &Path, label: &str, file: &str, from: &str, to: &str) {
+        let p = case.join(file);
+        let text =
+            std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        assert!(
+            text.contains(from),
+            "knob {label:?} no longer matches {file}: the generator's text for {from:?} has changed, so this knob turns nothing and the pair it is in would pass vacuously"
+        );
+        std::fs::write(&p, text.replacen(from, to, 1))
+            .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    }
+
+    /// The message every driver's pair test fails with, so all six read the
+    /// same and name SPEC-LIT the same.
+    pub fn assert_none_inert(inert: &[&str]) {
+        assert!(
+            inert.is_empty(),
+            "these settings are INERT - two runs of the driver differing only in \
+             them wrote bit-identical fields, so a case can ask for them and the \
+             solver will not honour them (SPEC-LIT 13.4.1): {inert:?}"
+        );
+    }
 }
 
 // ==========================================================================

@@ -5,7 +5,7 @@
 // 40.25/41.73/43.41), total wall heat input 6.00555 W against the -6 W sink
 // (SPEC-LIT S31's energy balance still closes), T_b = 314.243 K,
 // U_b = 3.53146 m/s, |U| residual 1.0e-9. Nothing this file claims moved.
-// NOTE that its resolved twin, `channelPeriodicLowRe.jsonc`, no longer runs
+// NOTE that its resolved twin, `retired/channelPeriodicLowRe.jsonc`, no longer runs
 // at all (see that file's header), so the two-mesh comparison this pair was
 // built for cannot be remeasured. Superseded by
 // `cases/channelPeriodicFluxWF.jsonc` (SPEC-LIT S32).
@@ -66,7 +66,7 @@
 // setting, because `-heaterPower` already existed as one and nothing
 // SPEC-LIT S18 asks for lives in the case file instead.
 //
-// `channelPeriodicLowRe.jsonc`'s OWN sink is a DIFFERENT number, not this
+// `retired/channelPeriodicLowRe.jsonc`'s OWN sink is a DIFFERENT number, not this
 // same 6 W - see that file's header for why, and for the honest limit that
 // discovery puts on comparing the two runs' raw wall-heat numbers directly.
 //
@@ -75,7 +75,7 @@
 // streamwise direction and how the flow is driven are different. Six
 // wall-normal cells, uniform: the `standard` wallTreatment row is asked to
 // do its actual job on a deliberately coarse near-wall cell (y+ target
-// 30-60), exactly as before. `channelPeriodicLowRe.jsonc` is the resolved
+// 30-60), exactly as before. `retired/channelPeriodicLowRe.jsonc` is the resolved
 // (y+ ~ 1) twin - see that file and `docs/07-fire-solver.md` S1.1 for the
 // measured y+, the two wall heat fluxes and their ratio.
 {

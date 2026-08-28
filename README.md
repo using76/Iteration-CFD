@@ -25,7 +25,7 @@ CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 �
 | 정밀도 | 배정밀도 기본, `single` 기능으로 단정밀도 |
 | 대상 | NVIDIA GPU |
 | 의존성 | cudarc, thiserror (선택적 AMGX) |
-| 검증 | 801개 단위 시험, 253개 수치 검증 항목 |
+| 검증 | 단위 시험 905개(모든 타깃, lib 814개), `ofgpu-validate` 314개 항목 |
 
 ---
 
@@ -59,6 +59,8 @@ meteor-cfd, 주식회사 메테오시뮬레이션, https://github.com/using76/me
 
 **라이선스 문의: simul@msimul.com**
 
+적용 라이선스는 **Meteor Simulation Source-Available License, Version 1.1**이며
+라이선서는 주식회사 메테오시뮬레이션(Meteo Simulation Co., Ltd.)입니다.
 2036년 8월 23일 이후, 해당 시점에 공개된 버전은 Apache License 2.0으로
 전환됩니다. 전문은 [`LICENSE`](LICENSE), 서드파티 고지는 [`NOTICE`](NOTICE)를
 참조하십시오.
@@ -99,7 +101,7 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | 결합 솔버(`ofgpu-buoyant`, `ofgpu-fire`)의 난류 선택 | `ofgpu-buoyant`: `CoupledTurbulence` 트레이트로 케이스의 `RAS { model ...; }`/`simulationType`을 그대로 반영 — k-ε, k-ω, k-ω SST(벽거리 자동 계산), LES(Smagorinsky/WALE/Deardorff, §16 여과폭·van Driest 포함) 전부 실제로 그 모형을 구성함, 부력 생성 `G_b`도 모형별로 올바른 방정식에 배선됨(§17, §30.2). `ofgpu-fire`: 아직 k-ε만 지원 — 연소 혼합시간 종결식과 열 벽함수가 `epsilon`을 직접 요구하므로 다른 모형은 이름을 밝힌 §13.4 오류로 거부(조용한 대체 없음) |
 | 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1). `lowRe`는 추가로 벽 근처를 해석할 수 있는 난류 모형을 요구함 — 그 목록에 있는 모형은 `LaunderSharmaKE`(SPEC-LIT §33) 하나뿐이며, `kEpsilon`/`kOmega`/`kOmegaSST`는 여전히 해당하지 않으므로 이 셋 아래에서 `lowRe`는 발산하도록 두는 대신 이름을 명시해 거부함 (SPEC-LIT §32) |
-| 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨. 고정 열유속 주기 **평면 채널**에서 Dittus-Boelter/Gnielinski 대비 검증(SPEC-LIT §32/§34): **벽함수 leg는 닫힘** — Petukhov 매끄러운 원관 `f`에서 Gnielinski −5.9%(±10%), Dittus-Boelter −12.9%(±20–25%) — **해상 `lowRe` leg는 닫히지 않음**(Gnielinski +14.1%, Dittus-Boelter +6.0%). 각 leg가 벽에서 직접 **측정한** `f`로 평가하는 레이놀즈 유사 판정은 두 leg 모두 닫히지 않음(+34.4%, +16.6%). 숫자는 SPEC-LIT §13.4.1 numerics로 재실행한 값이며, 전체 내용은 `docs/07-fire-solver.md` §1.1 |
+| 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨. 고정 열유속 주기 **평면 채널**에서 Dittus-Boelter/Gnielinski 대비 검증(SPEC-LIT §32/§34): **벽함수 leg는 닫힘** — Petukhov 매끄러운 원관 `f`에서 Gnielinski −5.9%(±10%), Dittus-Boelter −12.9%(±20–25%) — **해상 `lowRe` leg는 닫히지 않음**(Gnielinski +14.1%, Dittus-Boelter +6.0%). 각 leg가 벽에서 직접 **측정한** `f`로 평가하는 레이놀즈 유사 판정은 두 leg 모두 닫히지 않음(+34.4%, +16.6%). 숫자는 SPEC-LIT §13.4.1 numerics로 재실행한 값이며, 배포 기본값 `PrtModel constant`에서의 기록이다. SPEC-LIT §37의 Kays-Crawford 가변 `Pr_t`를 선택하면(옵인 방식, 토큰 하나, 튜닝 없음) 해상 leg가 +14.1%에서 **+6.4%**로 이동해 절대 예측 판정이 **두 leg 모두에서 닫힌다**. 대조군인 벽함수 leg는 `Nu`가 −1.45%만 움직이며, 벽함수 leg의 레이놀즈 유사 판정은 +34.1%로 그대로다(열이 아니라 마찰 측의 결과이기 때문). 전체 내용과 이것이 증명하지 못하는 범위는 `docs/07-fire-solver.md` §1.1 |
 | 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
 | 부력 생성 | G_b 항 (Rodi 1987, Henkes et al. 1991) |
 
@@ -231,15 +233,38 @@ error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
   (run with -permissive to substitute PIMPLE with one outer corrector and continue)
 ```
 
+**어떤 드라이버도 구현하지 않는 케이스 블록도 예외가 아닙니다** (SPEC-LIT
+§13.4.2). 이전에는 `ofgpu-fire`가 `output` 블록에 대해 "이건 아무도 안 읽는다"는
+한 줄을 출력하고 계속 진행했지만, 같은 형식을 읽는 `ofgpu-k-epsilon`은 아무 말도
+하지 않았습니다 — 안내문은 드라이버마다 어긋납니다. 지금은 공유된 거부 하나로
+처리합니다:
+
+| 설정 | 처리 |
+|---|---|
+| `output` 블록 전체 | **거부** — `-output` / `-writeInterval` / `-restartWrite N` / `-restartFrom FILE`를 이름으로 안내. `visualisation.fields`·`visualisation.precision`·`restart.keep`는 크레이트 어디에도 구현이 없어, 있는 둘만 배선하고 셋을 조용히 버리는 것이야말로 §13.4.1의 결함을 그 수정 안에서 다시 만드는 일입니다 |
+| `run.adjustTimeStep: true`, `run.maxCo` | **거부** — JSONC를 읽는 드라이버 중 스텝을 조절하는 것은 없습니다. `ofgpu-vof`가 이 크레이트의 유일한 적응 스텝(디렉터리 케이스의 `controlDict` `adjustTimeStep` + `maxCo` + `maxDeltaT`, 또는 `-maxCo`)이며 이제 그 세 항목을 실제로 읽습니다 |
+| `controlDict/adjustTimeStep yes` (OpenFOAM) | **거부** — `read_control_dict`에서 한 번에, 이 함수를 거치는 모든 드라이버에 대해 |
+| `physics.gravity` / `constant/g` (단, `ofgpu-k-epsilon`·`ofgpu-k-omega`에서) | **거부** — 두 모형 모두 `set_buoyancy`를 가지고 있었으나 아무도 부르지 않았습니다. §17의 `G_b`는 온도장을 필요로 하는데 이 두 드라이버는 온도를 읽지 않습니다. 오류가 `ofgpu-plume`/`ofgpu-buoyant`/`ofgpu-fire`를 안내합니다 |
+
+`-permissive`는 이 모두에 대해 무엇으로 대체했는지 출력하고 계속 진행합니다.
+
 ---
 
 ## 검증
 
 ```
-cargo test        724 passed, 0 failed (lib 크레이트 기준; 각 바이너리의 소소한 CLI 파싱 스위트까지
-                  전부 합치면 776)
-ofgpu-validate    240 / 240 checks passed
+cargo test        814 passed, 0 failed, 2 ignored (lib 크레이트 기준)
+                  905 passed, 0 failed, 4 ignored (모든 타깃 합계 — 각 바이너리의 CLI 파싱
+                  스위트와 SPEC-LIT §13.4.1의 드라이버별 "두 실행은 달라야 한다" 쌍 검사 포함)
+ofgpu-validate    314 / 314 checks passed (279개는 실시간 계산, 35개는 기록된 측정값 재생)
 ```
+
+**SPEC-LIT §13.4.1의 상시 요구사항**: 케이스 파일의 설정 하나만 다르고 나머지는
+바이트 단위로 같은 두 번의 짧은 실행은 **서로 다른 결과를 써야 한다**. 비트 단위로
+같다면 그 설정은 죽은 설정입니다. 이 쌍 검사는 이제 여섯 드라이버 모두가 가지고
+있으며(`ofgpu-fire` 13개, `ofgpu-buoyant` 17개, `ofgpu-vof` 15개, `ofgpu-plume` 11개,
+`ofgpu-k-epsilon`/`ofgpu-k-omega` 각 11개 설정), 드라이버 자신의 `parse` + `run`을
+그대로 호출해 기록된 모든 필드 파일을 비교합니다.
 
 ### 수렴 차수 — 인위해법 (MMS)
 
@@ -508,7 +533,7 @@ CUDA 13의 CCCL 헤더가 MSVC 전통 전처리기에서 `fatal error C1189`를 
 
 | 실행 파일 | 용도 |
 |---|---|
-| `ofgpu-validate` | 수치 검증 (228개 항목) |
+| `ofgpu-validate` | 수치 검증 (314개 항목) |
 | `ofgpu-bench` | 처리량 및 메모리 벤치마크 |
 | `ofgpu-graph-bench` | CUDA Graph 대 개별 실행 비교 |
 | `ofgpu-dispatch-bench` | 실행시간 분기 비용 측정 |

@@ -13,10 +13,12 @@
 // walls there).
 //
 // >>> READ THIS FIRST: every number in this STATUS block and in the first
-// >>> three UPDATE blocks below is SUPERSEDED. The last UPDATE block at the
-// >>> end of this header (SPEC-LIT S13.4.1/S32.5.5) is the current
-// >>> measurement; the blocks in between are kept, in order, as the record of
-// >>> how this gate got there.
+// >>> three UPDATE blocks below is SUPERSEDED. The S13.4.1/S32.5.5 UPDATE
+// >>> block is the current measurement of this file AS SHIPPED; the S37 block
+// >>> after it is a separate experiment run on scratchpad COPIES with one
+// >>> token added (`PrtModel`, which defaults to `constant` and is absent
+// >>> here), so it changes nothing in this file. The blocks in between are
+// >>> kept, in order, as the record of how this gate got there.
 // STATUS (SPEC-LIT S34, RUN and REPORTED - docs/07-fire-solver.md S1.1 has
 // the full table): converges to a bit-identical fixed point (`|U|` residual
 // 1.4e-10, T unchanged in its last printed digit from iteration 5 000
@@ -29,7 +31,7 @@
 // side-wall-drag caveat needed this time, since there is no side wall left.
 //
 // S32.1 diagnoses why the fixed-T version of this gate (`channelThermalWF`/
-// `channelThermalLowRe`/`channelPeriodicWF`/`channelPeriodicLowRe`, four
+// `retired/channelThermalLowRe`/`channelPeriodicWF`/`retired/channelPeriodicLowRe`, four
 // attempts, ratios 0.095/0.381/0.107) could never have converged on
 // anything: with `Tw` imposed, the bulk temperature is a FREE output that
 // settles wherever the wall conductance and the domain sink happen to
@@ -214,6 +216,42 @@
 // S32.5.5 has the four-run isolation.
 //
 // See docs/07-fire-solver.md S1.1's last subsection for the full account.
+// ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S37 - THIS LEG AS THE CONTROL; comments only, THIS FILE IS
+// UNCHANGED): S37 adds a selectable variable turbulent Prandtl number
+// (Kays-Crawford), defaulting to `constant`, and this leg is the control for
+// the experiment that measures it - see `channelPeriodicFluxLowRe.jsonc`'s
+// own header and docs/07-fire-solver.md S1.1's last subsection.
+//
+//   THIS MESH        constant        KaysCrawford     change
+//   T_w              317.483 K       317.828 K
+//   T_b              293.251 K       293.241 K
+//   T_w - T_b         24.2318 K       24.5874 K       +1.47%
+//   Nu                64.5257         63.5900         -1.45%
+//   Prt in use         0.85            [0.8748, 0.8917], volume-mean 0.8817
+//   energy balance    +0.106%         +0.110%
+//   drag balance      -0.005%         -0.005%
+//
+// -1.45% against the resolved twin's -6.81%: a factor of 4.7, which is the
+// asymmetry S37.3 predicted. This mesh's six wall-normal cells never reach
+// the sublayer where Prt departs from 0.85, so there is almost nothing here
+// for the model to correct.
+//
+// This leg is a NEAR-control, not an inert one, and its 1.45% decomposes
+// exactly: +0.234 K of the 0.3556 K widening is (T_w - T_P), through the
+// wall-face density read off the boundary value the (fr = 0) fixed-flux
+// triple extrapolates through k_eff,wall; +0.121 K is (T_P - T_b), the
+// interior profile responding to a core Prt 3.7% higher. The IMPOSED flux
+// does not move - 500 W/m2 exactly in both runs, since `fixedFluxTemperature`
+// writes ref_grad = q/k_eff,wall.
+//
+// Both verdicts are unchanged in substance: Gnielinski at the pipe f -5.9% ->
+// -7.3% (inside +-10% either way), Dittus-Boelter -12.9% -> -14.1%, and the
+// Reynolds-analogy miss +34.4% -> +34.1% - that one is a FRICTION finding
+// (this mesh's rho u_tau^2 form sits 13.6% below the viscous form on the same
+// faces) and S37 neither touches nor moves it.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

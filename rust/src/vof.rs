@@ -285,12 +285,44 @@ pub struct VofControls {
     /// `div(rho phi, U)`.
     pub div_scheme: fv::DivScheme,
 
+    /// `gradSchemes/grad(U)` - the gradient the momentum equation's deferred
+    /// correction and TVD limiter read (SPEC-LIT §11.1, §11.2, §12.1).
+    ///
+    /// Three separate entries rather than one, because SPEC-LIT §13.4.1(a)
+    /// is exactly the rule that each equation reads the entry named for ITS
+    /// OWN field. Every one of them used to be `GradScheme::GAUSS`
+    /// unconditionally: `gradSchemes` was not read by this module at all.
+    pub grad_u: fv::GradScheme,
+
+    /// `gradSchemes/grad(p_rgh)` - the gradient the pressure equation's
+    /// non-orthogonal correction reads (§20.5, §2.4).
+    pub grad_p: fv::GradScheme,
+
+    /// `gradSchemes/grad(alpha.<phase1>)` - the gradient the interface
+    /// normal `n_hat` of §20.1/§20.4 is built from.
+    pub grad_alpha: fv::GradScheme,
+
     /// The `snGrad` correction, §12.3. Applies to the momentum laplacian and
     /// to the pressure equation alike.
     pub sn_grad: fv::SnGradScheme,
 
     pub u_solver: SolverControls,
     pub p_solver: SolverControls,
+
+    /// `controlDict/adjustTimeStep` - SPEC-LIT §20.2. `ofgpu-vof` is the one
+    /// driver in this crate whose step is adaptive, so the case's own entry
+    /// is honoured here rather than refused; `read_control_dict` refuses it
+    /// for every driver that has no such loop.
+    pub adjust_time_step: bool,
+
+    /// `controlDict/maxCo` - the material Courant number the adaptive step
+    /// holds. Zero means "the case named none", which leaves the step fixed
+    /// even under `adjustTimeStep yes`.
+    pub max_co: Scalar,
+
+    /// `controlDict/maxDeltaT` - the ceiling the adaptive step may not rise
+    /// past. Infinite means "the case named none".
+    pub max_delta_t: Scalar,
 
     /// Print nothing; the driver does the printing. Kept so a caller can ask
     /// for the continuity error without paying for it in a timed run.
@@ -309,9 +341,15 @@ impl Default for VofControls {
             momentum_predictor: true,
             u_relax: 1.0,
             div_scheme: fv::DivScheme::Upwind,
+            grad_u: fv::GradScheme::GAUSS,
+            grad_p: fv::GradScheme::GAUSS,
+            grad_alpha: fv::GradScheme::GAUSS,
             sn_grad: fv::SnGradScheme::Corrected,
             u_solver: SolverControls::default(),
             p_solver: SolverControls::default(),
+            adjust_time_step: false,
+            max_co: 0.0,
+            max_delta_t: Scalar::INFINITY,
             report_continuity: true,
         }
     }
@@ -946,8 +984,8 @@ impl<'m> Vof<'m> {
         let eps = self.eps_n;
 
         {
-            let Self { fvk, grad_alpha, alpha, .. } = self;
-            fv::fvc_grad_scalar(gpu, fvk, grad_alpha, alpha, m)?;
+            let Self { fvk, grad_alpha, alpha, ctrl, .. } = self;
+            fv::fvc_grad_scalar_scheme(gpu, fvk, grad_alpha, alpha, m, ctrl.grad_alpha)?;
         }
 
         let nif = m.n_internal_faces;
@@ -1447,8 +1485,8 @@ impl<'m> Vof<'m> {
 
         if self.ctrl.sn_grad.applies() {
             {
-                let Self { fvk, grad_p, p_rgh, .. } = self;
-                fv::fvc_grad_scalar(gpu, fvk, grad_p, p_rgh, m)?;
+                let Self { fvk, grad_p, p_rgh, ctrl, .. } = self;
+                fv::fvc_grad_scalar_scheme(gpu, fvk, grad_p, p_rgh, m, ctrl.grad_p)?;
             }
             let Self { fvk, sn_grad_p, p_rgh, grad_p, ctrl, .. } = self;
             fv::sn_grad_flux_correction(
@@ -1549,8 +1587,8 @@ impl<'m> Vof<'m> {
                 launch_mag(gpu, &vk.mag, &mut u_mag.bf, &u.bf, nbf)?;
             }
             {
-                let Self { fvk, grad_u_mag, u_mag, .. } = self;
-                fv::fvc_grad_scalar(gpu, fvk, grad_u_mag, u_mag, m)?;
+                let Self { fvk, grad_u_mag, u_mag, ctrl, .. } = self;
+                fv::fvc_grad_scalar_scheme(gpu, fvk, grad_u_mag, u_mag, m, ctrl.grad_u)?;
             }
 
             let Self { fvk, w, bw, u_mag, grad_u_mag, rho_phi, .. } = self;
@@ -1618,8 +1656,8 @@ impl<'m> Vof<'m> {
         let scheme = self.ctrl.div_scheme;
         if scheme.correction().is_some() {
             {
-                let Self { fvk, grad_uc, uc, .. } = self;
-                fv::fvc_grad_scalar(gpu, fvk, grad_uc, uc, m)?;
+                let Self { fvk, grad_uc, uc, ctrl, .. } = self;
+                fv::fvc_grad_scalar_scheme(gpu, fvk, grad_uc, uc, m, ctrl.grad_u)?;
             }
             let Self { fvk, a, grad_uc, rho_phi, .. } = self;
             fv::fvm_div_correction(gpu, fvk, a, m, rho_phi, grad_uc, scheme, 1.0)?;
@@ -1632,8 +1670,8 @@ impl<'m> Vof<'m> {
 
         if self.ctrl.sn_grad.applies() {
             {
-                let Self { fvk, grad_uc, uc, .. } = self;
-                fv::fvc_grad_scalar(gpu, fvk, grad_uc, uc, m)?;
+                let Self { fvk, grad_uc, uc, ctrl, .. } = self;
+                fv::fvc_grad_scalar_scheme(gpu, fvk, grad_uc, uc, m, ctrl.grad_u)?;
             }
             let Self { fvk, a, uc, mu_mag_sf, grad_uc, ctrl, .. } = self;
             fv::fvm_laplacian_non_orth_correction(
@@ -1831,8 +1869,8 @@ impl<'m> Vof<'m> {
         let n = m.n_cells;
 
         if self.ctrl.sn_grad.applies() {
-            let Self { fvk, grad_p, p_rgh, .. } = self;
-            fv::fvc_grad_scalar(gpu, fvk, grad_p, p_rgh, m)?;
+            let Self { fvk, grad_p, p_rgh, ctrl, .. } = self;
+            fv::fvc_grad_scalar_scheme(gpu, fvk, grad_p, p_rgh, m, ctrl.grad_p)?;
         }
 
         self.a_p.zero(gpu)?;
@@ -2723,22 +2761,43 @@ impl VofControls {
     /// ```text
     /// solvers/p_rgh/...                  §8    the pressure linear solver
     /// solvers/U/...                      §8    the momentum linear solver
-    /// PIMPLE/nCorrectors                 §5.4  PISO correctors
-    /// PIMPLE/nNonOrthogonalCorrectors    §3.2
-    /// PIMPLE/momentumPredictor           §5.4  *DESIGN*, see the field
-    /// PIMPLE/maxAlphaCo                  §20.2 the sub-cycle Courant limit
-    /// PIMPLE/maxAlphaSubCycles           §20.2
-    /// PIMPLE/nAlphaLimiterIters          §20.2 *DESIGN*, three
-    /// divSchemes/div(rhoPhi,U)           §20.3 the MASS flux, not phi
-    /// snGradSchemes/default              §12.3
-    /// relaxationFactors/equations/U      §5.2
+    /// <algo>/nCorrectors                §5.4  PISO correctors
+    /// <algo>/nNonOrthogonalCorrectors   §3.2
+    /// <algo>/momentumPredictor          §5.4  *DESIGN*, see the field
+    /// <algo>/maxAlphaCo                 §20.2 the sub-cycle Courant limit
+    /// <algo>/maxAlphaSubCycles          §20.2
+    /// <algo>/nAlphaLimiterIters         §20.2 *DESIGN*, three
+    /// ddtSchemes/default                §3.3  Euler, and only Euler
+    /// divSchemes/div(rhoPhi,U)          §20.3 the MASS flux, not phi
+    /// gradSchemes/grad(U)               §12.1 the momentum gradient
+    /// gradSchemes/grad(p_rgh)           §12.1 the pressure gradient
+    /// gradSchemes/grad(alpha.<phase1>)  §20.1 the interface normal
+    /// laplacianSchemes / snGradSchemes  §12.3 through `resolve_sn_grad`
+    /// relaxationFactors/equations/U     §5.2
     /// controlDict/deltaT
+    /// controlDict/adjustTimeStep, maxCo, maxDeltaT   §20.2, the alpha step
     /// ```
+    ///
+    /// `<algo>` is whichever of `SIMPLE`/`PISO`/`PIMPLE` the case wrote, via
+    /// [`crate::io::case::AlgorithmControls::read`]. This module used to look
+    /// up the literal `PIMPLE/...` spellings only, so a two-phase case whose
+    /// entries sat in a `PISO` dictionary - which is what this solver's loop
+    /// actually is - ran on [`VofControls::default`]'s numbers with nothing
+    /// printed.
     ///
     /// `deltaT` is read here so a driver with no `-deltaT` on its command line
     /// still has the case's own step rather than a number this file invented.
+    ///
+    /// **SPEC-LIT §13.4.1, instance 5.** Everything in the table above except
+    /// the solvers, the three `<algo>` alpha entries and `deltaT` was read by
+    /// nobody until this sweep; the settings this solver CANNOT honour
+    /// (`ddtSchemes` other than `Euler`, `nOuterCorrectors > 1`,
+    /// `relaxationFactors/fields/p_rgh`, a `bounded` prefix on the momentum
+    /// convection, `residualControl`) are now §13.4 errors naming the
+    /// alternative rather than entries that parse and vanish.
     pub fn from_case(case_dir: &Path) -> Result<Self> {
         let mut c = Self::default();
+        let names = phase_names(case_dir)?;
 
         let fvs = case_dir.join("system").join("fvSolution");
         if fvs.exists() {
@@ -2747,16 +2806,74 @@ impl VofControls {
             read_solver_controls(&mut c.p_solver, &d, "p_rgh")?;
             read_solver_controls(&mut c.u_solver, &d, "U")?;
 
-            c.n_correctors = d.label("PIMPLE/nCorrectors", c.n_correctors);
-            c.n_non_orth_correctors =
-                d.label("PIMPLE/nNonOrthogonalCorrectors", c.n_non_orth_correctors);
-            c.momentum_predictor = d.bool("PIMPLE/momentumPredictor", c.momentum_predictor);
-            c.max_alpha_co = d.scalar("PIMPLE/maxAlphaCo", c.max_alpha_co);
-            c.max_sub_cycles = d.label("PIMPLE/maxAlphaSubCycles", c.max_sub_cycles);
-            c.n_limiter_iters = d.label("PIMPLE/nAlphaLimiterIters", c.n_limiter_iters);
+            // Whichever algorithm dictionary the case wrote, not the literal
+            // `PIMPLE` spelling - SPEC-LIT §14, and the same reader every
+            // other driver uses.
+            let algo = crate::io::case::AlgorithmControls::read(&d);
+            c.n_correctors = algo.n_correctors as Label;
+            c.n_non_orth_correctors = algo.n_non_orth_correctors as Label;
+            c.momentum_predictor = algo.momentum_predictor;
 
-            if let Some(k) = d.resolve("relaxationFactors/equations", "U")? {
-                c.u_relax = d.scalar(&format!("relaxationFactors/equations/{k}"), c.u_relax);
+            // SPEC-LIT §13.4, "recognised, not implemented". §20's step is
+            // PISO: one alpha sub-cycle sequence, one momentum predictor and
+            // `nCorrectors` pressure correctors, with no outer
+            // re-linearisation. `nOuterCorrectors > 1` asks for a loop that
+            // does not exist here.
+            if algo.n_outer_correctors > 1 {
+                crate::io::contract::unsupported(
+                    &format!("{}/nOuterCorrectors", algo.dict),
+                    &algo.n_outer_correctors.to_string(),
+                    &["1"],
+                    "one outer corrector - ofgpu-vof's step is PISO, and nCorrectors is the corrector count it does have",
+                    (),
+                )?;
+            }
+
+            // The alpha-equation entries live in the same dictionary. Looked
+            // up under whichever one carried the rest, falling back to
+            // `PIMPLE` for a case that names none.
+            let dict = if algo.dict.is_empty() { "PIMPLE" } else { algo.dict };
+            c.max_alpha_co = d.scalar(&format!("{dict}/maxAlphaCo"), c.max_alpha_co);
+            c.max_sub_cycles = d.label(&format!("{dict}/maxAlphaSubCycles"), c.max_sub_cycles);
+            c.n_limiter_iters = d.label(&format!("{dict}/nAlphaLimiterIters"), c.n_limiter_iters);
+
+            // Through the pattern resolver, so `equations { ".*" 1; }` reaches
+            // `U` (SPEC-LIT §13.4.1 and `relaxation_factor`'s own doc).
+            c.u_relax = crate::io::case::relaxation_factor(&d, "U", c.u_relax)?;
+
+            // SPEC-LIT §13.4. `p_rgh` is corrected, not relaxed: §5.4's PISO
+            // applies the whole correction because the equation is solved
+            // afresh inside every corrector, and there is no `p_relax` in
+            // this module to put the number in. A case asking for one is
+            // asking for SIMPLE's pressure relaxation in a PISO loop.
+            for spelling in ["fields", "equations"] {
+                let key = format!("relaxationFactors/{spelling}/p_rgh");
+                if d.has(&key) {
+                    crate::io::contract::unsupported_note(
+                        &key,
+                        d.get_or(&key, "").trim(),
+                        &[],
+                        "ofgpu-vof's step is PISO (SPEC-LIT §5.4): the pressure correction is applied whole, so there is no under-relaxation of p_rgh to set. relaxationFactors/equations/U is the one relaxation this loop has",
+                        "no pressure relaxation - the correction is applied whole",
+                        (),
+                    )?;
+                }
+            }
+
+            // SPEC-LIT §13.4. `residualControl` stops an OUTER loop on the
+            // initial residuals; this driver marches to `-endTime` and has no
+            // outer loop for it to stop.
+            let rc = crate::io::case::ResidualControl::read(&d);
+            if !rc.is_empty() {
+                let list: Vec<String> = rc.iter().map(|(f, t)| format!("{f} {t:e}")).collect();
+                crate::io::contract::unsupported_note(
+                    "residualControl",
+                    &list.join(", "),
+                    &[],
+                    "ofgpu-vof marches to -endTime and has no outer loop for a residual test to stop; ofgpu-buoyant, ofgpu-plume, ofgpu-k-epsilon and ofgpu-k-omega do honour it",
+                    "no residual-based stopping - the run ends on -endTime",
+                    (),
+                )?;
             }
         }
 
@@ -2775,14 +2892,81 @@ impl VofControls {
             } else {
                 "div(phi,U)"
             };
-            c.div_scheme = s.div(key)?.scheme;
-            c.sn_grad = s.sn_grad("default")?;
+            let conv = s.div(key)?;
+            c.div_scheme = conv.scheme;
+
+            // SPEC-LIT §13.4. The `bounded` prefix used to be parsed and
+            // dropped, which is the silent substitution §13.4 forbids - and
+            // here the substituted answer is the RIGHT one, which makes it
+            // worse rather than better, because nothing tells the user their
+            // entry was overruled. `assemble_component`'s own comment derives
+            // why the conservative form must NOT subtract `Σ_f rho_phi_f`
+            // from the diagonal: §20.3 makes that quantity equal
+            // `-(rho - rho0) V/dt` exactly, which is the other half of
+            // `d(rho psi)/dt`, not a spurious source. A case asking for the
+            // correction is asking for an equation that is neither
+            // conservative nor non-conservative, and has to be told.
+            if conv.bounded {
+                crate::io::contract::unsupported_note(
+                    &format!("divSchemes/{key}"),
+                    &format!("bounded {}", conv.scheme.describe()),
+                    &[],
+                    "the two-phase momentum equation is in CONSERVATIVE form (SPEC-LIT §20.3): its ddt carries rho/rho0 and the face sum of rhoPhi is exactly -(rho - rho0)V/dt, not a spurious source, so the bounded correction would cancel the ddt term's own density weight. Write the same entry without the bounded prefix",
+                    "the same scheme UNbounded, which is what §20.3 requires",
+                    (),
+                )?;
+            }
+
+            // Each field's own gradient - SPEC-LIT §13.4.1(a). `gradSchemes`
+            // was not read by this module at all, so every one of the six
+            // `fvc_grad_scalar` call sites ran plain Gauss linear whatever
+            // the case asked for.
+            c.grad_u = s.grad("grad(U)")?;
+            c.grad_p = s.grad("grad(p_rgh)")?;
+            c.grad_alpha = s.grad(&format!("grad(alpha.{})", names[0]))?;
+
+            // `laplacianSchemes` where the case names one, `snGradSchemes`
+            // otherwise - `resolve_sn_grad`'s own rule, and the reason it
+            // exists. This module used to read `snGradSchemes/default` only,
+            // so a case writing `laplacianSchemes { default Gauss linear
+            // corrected; }` beside `snGradSchemes { default uncorrected; }`
+            // ran its laplacians uncorrected and said nothing.
+            c.sn_grad = crate::io::case::resolve_sn_grad(&s, "laplacian(muEff,U)")?;
+
+            // SPEC-LIT §13.4 and §3.3. `fvm_ddt_euler` is the only time
+            // derivative §20 assembles, and `assemble_component`'s density
+            // weighting is written for it specifically: `backward` would need
+            // a second old-time level of `rho U`, which this module does not
+            // keep, and `steadyState` would drop the term a moving interface
+            // is entirely made of.
+            let raw = s.dict().get_or("ddtSchemes/default", "Euler");
+            let ddt = crate::timescheme::DdtScheme::parse(raw)
+                .unwrap_or(crate::timescheme::DdtScheme::Euler);
+            if ddt != crate::timescheme::DdtScheme::Euler {
+                crate::io::contract::unsupported(
+                    "ddtSchemes/default",
+                    raw.trim(),
+                    &["Euler"],
+                    "Euler - the only time derivative SPEC-LIT §20 assembles",
+                    (),
+                )?;
+            }
         }
 
         let cd = case_dir.join("system").join("controlDict");
         if cd.exists() {
             let d = FoamDict::read(&cd)?;
             c.delta_t = d.scalar("deltaT", c.delta_t);
+
+            // SPEC-LIT §13.4 and §20.2. `ofgpu-vof` is the one driver in this
+            // crate that DOES adapt its step, so these three are honoured here
+            // rather than refused. `-maxCo`/`-maxDeltaT` on the command line
+            // still win; the case's own entries are what a run with neither
+            // flag gets. `read_control_dict` refuses `adjustTimeStep yes` for
+            // every driver that has no such loop.
+            c.adjust_time_step = d.bool("adjustTimeStep", c.adjust_time_step);
+            c.max_co = d.scalar("maxCo", c.max_co);
+            c.max_delta_t = d.scalar("maxDeltaT", c.max_delta_t);
         }
 
         c.validate()?;

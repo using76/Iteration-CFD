@@ -403,10 +403,28 @@ fn run(o: &Options) -> Result<()> {
     } else {
         cd.scalar("writeInterval", end_time)
     };
+    // SPEC-LIT §13.4 and §20.2. `maxDeltaT`/`maxCo`/`adjustTimeStep` come off
+    // `VofControls` rather than being re-read from `controlDict` here, so
+    // there is ONE reader of the case's adaptive-step settings and not two -
+    // the flags still win where they are given, and the case's own numbers
+    // are what a run with neither gets. `-maxCo` used to be the ONLY way to
+    // reach the adaptive branch: `controlDict/maxCo` and `adjustTimeStep`
+    // were read by nothing, so a case asking for an adaptive step ran fixed.
     let max_delta_t = if o.max_delta_t > 0.0 {
         o.max_delta_t as Scalar
     } else {
-        cd.scalar("maxDeltaT", Scalar::INFINITY)
+        ctrl.max_delta_t
+    };
+    // `-maxCo` wins; otherwise the case's own `maxCo`, and only when it also
+    // wrote `adjustTimeStep yes` - writing a Courant ceiling and switching
+    // adaptation off is a case saying "not now", and honouring the number
+    // anyway would be this driver overruling it.
+    let max_co = if o.max_co > 0.0 {
+        o.max_co as Scalar
+    } else if ctrl.adjust_time_step {
+        ctrl.max_co
+    } else {
+        0.0
     };
 
     println!("\n{}", props.describe(&names));
@@ -425,7 +443,35 @@ fn run(o: &Options) -> Result<()> {
         ctrl.n_limiter_iters,
         g(f64::from(props.c_alpha))
     );
-    println!("div(rhoPhi,U) {}", ctrl.div_scheme.describe());
+    // SPEC-LIT §13.4.2: the numerics this run will actually use, per entry
+    // and by that entry's own key. Everything but the first line here was
+    // read by nobody before this sweep - see `VofControls::from_case`.
+    println!(
+        "div(rhoPhi,U) {} (unbounded - SPEC-LIT §20.3) | ddt Euler | grad(U) {} | \
+         grad(p_rgh) {} | grad({alpha_key}) {} | laplacian snGrad {} | relax U {}",
+        ctrl.div_scheme.describe(),
+        ctrl.grad_u.describe(),
+        ctrl.grad_p.describe(),
+        ctrl.grad_alpha.describe(),
+        ctrl.sn_grad.describe(),
+        g(f64::from(ctrl.u_relax)),
+        alpha_key = format!("alpha.{}", names[0]),
+    );
+    println!(
+        "time step: deltaT {}{} | endTime {} | writeInterval {}",
+        g(f64::from(ctrl.delta_t)),
+        if max_co > 0.0 {
+            format!(
+                ", adaptive to maxCo {} (ceiling maxDeltaT {})",
+                g(f64::from(max_co)),
+                g(f64::from(max_delta_t))
+            )
+        } else {
+            ", fixed".to_string()
+        },
+        g(f64::from(end_time)),
+        g(f64::from(write_interval))
+    );
 
     // ---- fields -----------------------------------------------------------
     let start = find_start_time(case)?;
@@ -619,8 +665,8 @@ fn run(o: &Options) -> Result<()> {
         // hold: the momentum equation is implicit and does not need it, but a
         // VOF interface moving more than a cell a step is a VOF interface
         // whose sub-cycling is doing all the work.
-        if o.max_co > 0.0 && perf.alpha_courant > 0.0 {
-            let want = dt * (o.max_co as Scalar) / perf.alpha_courant;
+        if max_co > 0.0 && perf.alpha_courant > 0.0 {
+            let want = dt * max_co / perf.alpha_courant;
             // Never more than a 20 % rise in one step: an adaptive step that
             // doubles lands on a state the previous one has not settled into.
             dt = want.min(1.2 * dt).min(max_delta_t);
@@ -795,5 +841,364 @@ fn main() -> ExitCode {
             eprintln!("\nofgpu-vof: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+// ==========================================================================
+//  Tests - SPEC-LIT 13.4.1's standing requirement
+// ==========================================================================
+//
+// Named `vof_tests` rather than `tests` because `common/mod.rs` is included
+// by `#[path]` and already contributes a `tests` module to this crate.
+//
+// Before this sweep `VofControls::from_case` read nine entries and this
+// driver read `controlDict` for three more; everything else a two-phase case
+// can write - `gradSchemes` in its entirety, `laplacianSchemes`, the
+// `bounded` prefix on the momentum convection, `ddtSchemes`,
+// `nOuterCorrectors`, `relaxationFactors/fields/p_rgh`, `residualControl`,
+// `adjustTimeStep`/`maxCo`, and every entry a case wrote in a `SIMPLE` or
+// `PISO` dictionary rather than a `PIMPLE` one - parsed perfectly and
+// reached nothing.
+
+#[cfg(test)]
+mod vof_tests {
+    use super::*;
+    use common::knobs::{apply, assert_none_inert, scratch_dir, written_time_dirs, Knob, NO_PRE};
+    use ofgpu::blockgen::{write_case, CaseKind};
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        std::iter::once("ofgpu-vof".to_string())
+            .chain(v.iter().map(|s| (*s).to_string()))
+            .collect()
+    }
+
+    fn dam_break(tag: &str) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let case = dir.join("case");
+        write_case(&case, CaseKind::DamBreak, 20, 30, 1).expect("generate the damBreak case");
+        case
+    }
+
+    /// Build a fresh case, apply `k` if `side` is set, run `ofgpu-vof`'s own
+    /// `parse` + `run`, and return every TIME DIRECTORY it wrote.
+    ///
+    /// Deliberately not `written_state(&case)`: the case root also holds the
+    /// dictionaries the knob edits, so comparing it would compare the knob
+    /// with itself.
+    fn run_knob(k: &Knob, side: bool, tag: &str) -> Vec<(String, String)> {
+        let case = dam_break(tag);
+        apply(&case, k, side);
+
+        let args = argv(&[
+            case.to_string_lossy().as_ref(),
+            "-endTime",
+            "0.004",
+            "-deltaT",
+            "0.0005",
+            "-reportEvery",
+            "1000",
+        ]);
+        let o = parse(&args).expect("the knob command line must parse");
+        run(&o).expect("the knob case must run");
+
+        let out = written_time_dirs(&case);
+        assert!(!out.is_empty(), "the run wrote nothing to compare");
+        out
+    }
+
+    /// **The standing test SPEC-LIT 13.4.1 requires of every setting this
+    /// driver claims to honour.**
+    ///
+    /// `gradSchemes/grad(p_rgh)`, `laplacianSchemes` and `snGradSchemes` are
+    /// absent for 13.4.1's one admissible reason: §2.4's correction is
+    /// `k = Sf - |Sf|^2/(Sf.d) d`, identically zero on the rectangular
+    /// Cartesian box `blockgen` builds, so the entries that scale it cannot
+    /// change a single bit here whatever the reader does. They are asserted
+    /// on `VofControls` instead, in
+    /// `the_pressure_gradient_and_the_laplacian_entry_reach_the_controls`.
+    #[test]
+    fn every_wired_setting_changes_what_the_run_writes() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+
+        let cases: Vec<Knob> = vec![
+            Knob {
+                label: "divSchemes/div(rhoPhi,U)",
+                file: "system/fvSchemes",
+                from: "div(rhoPhi,U)    Gauss upwind;",
+                to: "div(rhoPhi,U)    Gauss linear;",
+                pre: NO_PRE,
+            },
+            // The interface normal reads `grad(alpha.water)` on every step,
+            // unconditionally (§20.1/§20.4), so this knob turns ONE entry.
+            Knob {
+                label: "gradSchemes/grad(alpha.water)",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}",
+                to: "gradSchemes\n{\n    default         Gauss linear;\n    grad(alpha.water) cellLimited Gauss linear 1;\n}",
+                pre: NO_PRE,
+            },
+            // `grad(U)` is read only by a scheme that carries a deferred
+            // correction, so the knob turns the convection entry with it.
+            Knob {
+                label: "gradSchemes/grad(U)",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}\n\ndivSchemes\n{\n    default         none;\n// The convecting flux of the two-phase momentum equation is the MASS\n// flux rhoPhi (SPEC-LIT S20.3), and it is not phi.\n    div(rhoPhi,U)    Gauss upwind;",
+                to: "gradSchemes\n{\n    default         Gauss linear;\n    grad(U)         cellLimited Gauss linear 1;\n}\n\ndivSchemes\n{\n    default         none;\n    div(rhoPhi,U)    Gauss linearUpwind grad(U);",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "PIMPLE/nCorrectors",
+                file: "system/fvSolution",
+                from: "    nCorrectors     3;",
+                to: "    nCorrectors     1;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "PIMPLE/momentumPredictor",
+                file: "system/fvSolution",
+                from: "    momentumPredictor yes;",
+                to: "    momentumPredictor no;",
+                pre: NO_PRE,
+            },
+            // 0.01 rather than a round fraction of 0.5: over the four
+            // 0.5 ms steps this test runs, the released column reaches an
+            // alpha Courant number of about 0.024, so anything above that is
+            // below BOTH limits and one sub-cycle satisfies them equally -
+            // the pair would be bit-identical for a reason that has nothing
+            // to do with whether the entry is read. 0.01 forces three
+            // sub-cycles, comfortably inside maxAlphaSubCycles.
+            Knob {
+                label: "PIMPLE/maxAlphaCo",
+                file: "system/fvSolution",
+                from: "    maxAlphaCo      0.5;",
+                to: "    maxAlphaCo      0.01;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "PIMPLE/nAlphaLimiterIters",
+                file: "system/fvSolution",
+                from: "    nAlphaLimiterIters 3;",
+                to: "    nAlphaLimiterIters 0;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "PIMPLE/cAlpha",
+                file: "system/fvSolution",
+                from: "    cAlpha          1;",
+                to: "    cAlpha          0;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "relaxationFactors/equations/U",
+                file: "system/fvSolution",
+                from: "        U               1;",
+                to: "        U               0.4;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "solvers/p_rgh/tolerance",
+                file: "system/fvSolution",
+                from: "        tolerance       1e-09;\n        relTol          0.001;",
+                to: "        tolerance       1e-02;\n        relTol          0.5;",
+                pre: NO_PRE,
+            },
+            // The whole algorithm dictionary under its OTHER legal name.
+            // `AlgorithmControls::read` accepts all three; this module used
+            // to look up the literal `PIMPLE/...` strings, so every entry
+            // below moved to `PISO` fell back to `VofControls::default()`.
+            Knob {
+                label: "the algorithm dictionary spelled PISO rather than PIMPLE",
+                file: "system/fvSolution",
+                from: "PIMPLE\n{\n    momentumPredictor yes;\n    nCorrectors     3;",
+                to: "PISO\n{\n    momentumPredictor no;\n    nCorrectors     1;",
+                pre: NO_PRE,
+            },
+            // Honoured as of this sweep: `controlDict` used to be read for
+            // `deltaT` and `maxDeltaT` only, so a case asking for an adaptive
+            // step ran fixed unless `-maxCo` was typed.
+            Knob {
+                label: "controlDict/adjustTimeStep + maxCo",
+                file: "system/controlDict",
+                from: "deltaT          0.0002;",
+                to: "deltaT          0.0002;\nadjustTimeStep  yes;\nmaxCo           0.02;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/transportProperties sigma",
+                file: "constant/transportProperties",
+                from: "sigma           [1 0 -2 0 0 0 0] 0.0728;",
+                to: "sigma           [1 0 -2 0 0 0 0] 0.5;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/transportProperties mu (water)",
+                file: "constant/transportProperties",
+                from: "    mu              [1 -1 -1 0 0 0 0] 1.002e-03;",
+                to: "    mu              [1 -1 -1 0 0 0 0] 1.002e-01;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/g",
+                file: "constant/g",
+                from: "(0 -9.81 0)",
+                to: "(0 -1.62 0)",
+                pre: NO_PRE,
+            },
+        ];
+
+        let mut inert: Vec<&str> = Vec::new();
+        for k in &cases {
+            let a = run_knob(k, false, "a");
+            let b = run_knob(k, true, "b");
+            if a == b {
+                inert.push(k.label);
+            }
+        }
+        assert_none_inert(&inert);
+    }
+
+    /// 13.4.1's one admissible exception, on the controls the solver is
+    /// CONSTRUCTED from and through the same `from_case` the driver calls.
+    ///
+    /// `laplacianSchemes` must WIN over `snGradSchemes` where the case names
+    /// one - `resolve_sn_grad`'s rule, which this module bypassed by reading
+    /// `snGradSchemes/default` directly.
+    #[test]
+    fn the_pressure_gradient_and_the_laplacian_entry_reach_the_controls() {
+        let case = dam_break("lap");
+        apply(
+            &case,
+            &Knob {
+                label: "gradSchemes/grad(p_rgh) and laplacianSchemes/default",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}",
+                to: "gradSchemes\n{\n    default         Gauss linear;\n    grad(p_rgh)     leastSquares;\n}",
+                pre: NO_PRE,
+            },
+            true,
+        );
+        apply(
+            &case,
+            &Knob {
+                label: "laplacianSchemes/default",
+                file: "system/fvSchemes",
+                from: "    default         Gauss linear uncorrected;",
+                to: "    default         Gauss linear corrected;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let c = VofControls::from_case(&case).expect("controls");
+        assert_eq!(c.grad_p.describe(), "leastSquares");
+        assert_eq!(
+            c.grad_u.describe(),
+            "Gauss linear",
+            "grad(p_rgh) must not move the momentum equation's gradient"
+        );
+        assert_eq!(
+            c.sn_grad,
+            ofgpu::fv::SnGradScheme::Corrected,
+            "laplacianSchemes must win over snGradSchemes/default uncorrected"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT 13.4: recognised, not implemented -> a named error
+    // ----------------------------------------------------------------------
+
+    fn refusal(k: Knob, tag: &str) -> String {
+        let case = dam_break(tag);
+        apply(&case, &k, true);
+        let e = VofControls::from_case(&case)
+            .err()
+            .unwrap_or_else(|| panic!("{} must be refused", k.label));
+        format!("{e}")
+    }
+
+    /// The `bounded` prefix used to be parsed and dropped. The substituted
+    /// answer is the RIGHT one here (§20.3), which is exactly why it has to
+    /// be said out loud rather than applied in silence.
+    #[test]
+    fn a_bounded_prefix_on_the_momentum_convection_is_a_named_error() {
+        let msg = refusal(
+            Knob {
+                label: "divSchemes/div(rhoPhi,U) bounded",
+                file: "system/fvSchemes",
+                from: "div(rhoPhi,U)    Gauss upwind;",
+                to: "div(rhoPhi,U)    bounded Gauss upwind;",
+                pre: NO_PRE,
+            },
+            "bnd",
+        );
+        assert!(msg.contains("div(rhoPhi,U)"), "must name the entry: {msg}");
+        assert!(msg.contains("bounded"), "must name what was written: {msg}");
+        assert!(msg.contains("20.3") || msg.contains("§20.3"), "must name the section: {msg}");
+    }
+
+    #[test]
+    fn a_ddt_scheme_other_than_euler_is_a_named_error() {
+        let msg = refusal(
+            Knob {
+                label: "ddtSchemes/default",
+                file: "system/fvSchemes",
+                from: "ddtSchemes\n{\n    default         Euler;\n}",
+                to: "ddtSchemes\n{\n    default         backward;\n}",
+                pre: NO_PRE,
+            },
+            "ddt",
+        );
+        assert!(msg.contains("ddtSchemes"), "must name the entry: {msg}");
+        assert!(msg.contains("Euler"), "must name what IS available: {msg}");
+    }
+
+    #[test]
+    fn more_than_one_outer_corrector_is_a_named_error() {
+        let msg = refusal(
+            Knob {
+                label: "PIMPLE/nOuterCorrectors",
+                file: "system/fvSolution",
+                from: "    nCorrectors     3;",
+                to: "    nCorrectors     3;\n    nOuterCorrectors 2;",
+                pre: NO_PRE,
+            },
+            "outer",
+        );
+        assert!(msg.contains("nOuterCorrectors"), "must name the entry: {msg}");
+        assert!(msg.contains("nCorrectors"), "must name what IS available: {msg}");
+    }
+
+    #[test]
+    fn relaxing_the_pressure_is_a_named_error() {
+        let msg = refusal(
+            Knob {
+                label: "relaxationFactors/fields/p_rgh",
+                file: "system/fvSolution",
+                from: "relaxationFactors\n{\n    equations\n    {",
+                to: "relaxationFactors\n{\n    fields\n    {\n        p_rgh           0.3;\n    }\n\n    equations\n    {",
+                pre: NO_PRE,
+            },
+            "prelax",
+        );
+        assert!(msg.contains("p_rgh"), "must name the entry: {msg}");
+        assert!(msg.contains("PISO"), "must say why: {msg}");
+    }
+
+    #[test]
+    fn residual_control_is_a_named_error() {
+        let msg = refusal(
+            Knob {
+                label: "PIMPLE/residualControl",
+                file: "system/fvSolution",
+                from: "    nCorrectors     3;",
+                to: "    nCorrectors     3;\n    residualControl { p_rgh 1e-4; U 1e-4; }",
+                pre: NO_PRE,
+            },
+            "rc",
+        );
+        assert!(msg.contains("residualControl"), "must name the entry: {msg}");
+        assert!(msg.contains("-endTime"), "must name what stops the run: {msg}");
     }
 }

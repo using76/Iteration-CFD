@@ -5,7 +5,7 @@
 // 40.29), total wall heat input 157.035 W, T_b = 308.039 K,
 // U_b = 3.00469 m/s, |U| residual 9.4e-10. The y+ this file exists to place
 // in the 30-60 band did not move. NOTE that this case's RESOLVED twin,
-// `channelThermalLowRe.jsonc`, no longer runs at all (see its own header),
+// `retired/channelThermalLowRe.jsonc`, no longer runs at all (see its own header),
 // so the wall-heat RATIO this pair was built to produce cannot be remeasured
 // - the retired 0.381 stands as a pre-S33, pre-S13.4.1 record and nothing
 // more. This whole fixed-T attempt is superseded by
@@ -20,7 +20,7 @@
 // the STANDARD wallTreatment row, i.e. the Jayatilleke `thermalWallFunction`
 // correction (SPEC-LIT S29.3) actually has to do its job (no grading is
 // needed here - a wall FUNCTION mesh deliberately does not resolve the
-// sublayer, unlike `channelThermalLowRe.jsonc` below). Side (z) walls are
+// sublayer, unlike `retired/channelThermalLowRe.jsonc` below). Side (z) walls are
 // explicit `zeroGradient` on T - adiabatic, so every watt the domain gains
 // comes from the two hot walls and nowhere else.
 //
@@ -33,7 +33,7 @@
 // build from this format), so a longer duct is the honest substitute for a
 // periodic one, not a periodic domain itself.
 //
-// `channelThermalLowRe.jsonc` is the same duct, wall-normal mesh GRADED
+// `retired/channelThermalLowRe.jsonc` is the same duct, wall-normal mesh GRADED
 // (SPEC-LIT S29/S30's grading gap, closed by Task G.1's `mesh.grading`) to
 // y+ ~ 1 and the hot walls switched to plain `fixedValue` (SPEC-LIT S29.3:
 // "lowRe... pins the molecular resistance the resolved mesh already

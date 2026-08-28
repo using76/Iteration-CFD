@@ -219,6 +219,19 @@ fn run(o: &Options) -> Result<()> {
 
     ofgpu::io::case::print_effective_settings(&cc);
 
+    // SPEC-LIT §13.4. `constant/g` is read by `read_case_controls` into
+    // `cc.buoyancy` and was consulted by nothing here, while `KOmega` has had
+    // a `set_buoyancy` all along: a case naming gravity ran with §17's `G_b`
+    // identically zero and was not told. This driver reads no temperature, so
+    // the term cannot be built - the refusal names the drivers that can.
+    //
+    // `ofgpu-k-omega` takes an OpenFOAM case DIRECTORY only, so there is no
+    // `output`/`run` block for `common::refuse_unimplemented_blocks` to see;
+    // the equivalent `controlDict/adjustTimeStep` is refused in
+    // `read_control_dict`, which this driver went through above.
+    common::refuse_buoyancy_without_temperature(&o.case_dir, &cc, None, "ofgpu-k-omega")?;
+    common::refuse_non_orth_correctors_without_another_equation(&cc, "ofgpu-k-omega")?;
+
     let selection = select_turbulence_model(&cc)?;
     match selection.model {
         RasModel::KOmega | RasModel::Laminar => {}
@@ -535,5 +548,254 @@ fn main() -> ExitCode {
             eprintln!("\nerror: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+// ==========================================================================
+//  Tests - SPEC-LIT 13.4.1's standing requirement
+// ==========================================================================
+//
+// Named `k_omega_tests` rather than `tests` because `common/mod.rs` is included by
+// `#[path]` and already contributes a `tests` module to this crate.
+
+#[cfg(test)]
+mod k_omega_tests {
+    use super::*;
+    use common::knobs::{apply, assert_none_inert, scratch_dir, written_state, Knob, NO_PRE};
+    use ofgpu::blockgen::{write_case, CaseKind};
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        std::iter::once("ofgpu-k-omega".to_string())
+            .chain(v.iter().map(|s| (*s).to_string()))
+            .collect()
+    }
+
+    fn channel(tag: &str) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Channel, 16, 10, 1).expect("generate the channel case");
+        // `write_case` writes `RAS { model kEpsilon; }` for every case kind;
+        // this driver builds kOmega and refuses anything else by name.
+        apply(
+            &case,
+            &Knob {
+                label: "RAS/model",
+                file: "constant/momentumTransport",
+                from: "    model           kEpsilon;",
+                to: "    model           kOmega;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+        case
+    }
+
+    /// Build a fresh channel case, apply `k` if `side` is set, run this
+    /// driver's own `parse` + `run`, and return everything it wrote.
+    fn run_knob(k: &Knob, side: bool, tag: &str) -> Vec<(String, String)> {
+        let case = channel(tag);
+        apply(&case, k, side);
+
+        let args = argv(&[
+            case.to_string_lossy().as_ref(),
+            "-iters",
+            "20",
+            "-check",
+            "2",
+        ]);
+        let o = parse(&args).expect("the knob command line must parse");
+        run(&o).expect("the knob case must run");
+
+        // `controlDict`'s endTime is 1, so the run writes `<case>/1`.
+        let out = written_state(&case.join("1"));
+        assert!(!out.is_empty(), "the run wrote nothing to compare");
+        out
+    }
+
+    /// **The standing test SPEC-LIT 13.4.1 requires of every setting this
+    /// driver claims to honour.**
+    ///
+    /// `laplacianSchemes`/`snGradSchemes` is absent for 13.4.1's one
+    /// admissible reason - §2.4's correction vanishes identically on the
+    /// orthogonal box `blockgen` builds.
+    #[test]
+    fn every_wired_setting_changes_what_the_run_writes() {
+        if ofgpu::Gpu::new(0).is_err() {
+            return;
+        }
+
+        let cases: Vec<Knob> = vec![
+            Knob {
+                label: "divSchemes/div(phi,k)",
+                file: "system/fvSchemes",
+                from: "div(phi,k)       bounded Gauss upwind;",
+                to: "div(phi,k)       Gauss linear;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "divSchemes/div(phi,omega)",
+                file: "system/fvSchemes",
+                from: "div(phi,omega)   bounded Gauss upwind;",
+                to: "div(phi,omega)   Gauss linear;",
+                pre: NO_PRE,
+            },
+            // `gradSchemes` is read by a convection scheme that carries a
+            // limiter or a deferred correction and by nothing else, and the
+            // generated case's `div(phi,k) bounded Gauss upwind` carries
+            // neither - so the gradient-reading entry goes in `pre`, on BOTH
+            // sides, and the pair differs in `gradSchemes` alone.
+            Knob {
+                label: "gradSchemes/default",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}",
+                to: "gradSchemes\n{\n    default         cellLimited Gauss linear 1;\n}",
+                pre: (
+                    "system/fvSchemes",
+                    "div(phi,k)       bounded Gauss upwind;",
+                    "div(phi,k)       Gauss limitedLinear 1;",
+                ),
+            },
+            Knob {
+                label: "relaxationFactors/equations/k",
+                file: "system/fvSolution",
+                from: "        k               0.7;",
+                to: "        k               0.3;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "relaxationFactors/equations/omega",
+                file: "system/fvSolution",
+                from: "        omega           0.7;",
+                to: "        omega           0.3;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "solvers/k/tolerance",
+                file: "system/fvSolution",
+                from: "    k\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-08;\n        relTol          0.01;",
+                to: "    k\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-02;\n        relTol          0.5;",
+                pre: NO_PRE,
+            },
+            // SPEC-LIT 15.6: one constant, reaching both the model and the
+            // wall functions.
+            Knob {
+                label: "RAS/betaStar",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    betaStar             0.12;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "RAS/kappa (wall functions)",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    kappa           0.38;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "RAS/turbulence off",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      off;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties nu",
+                file: "constant/physicalProperties",
+                from: "nu              [0 2 -1 0 0 0 0] 1e-05;",
+                to: "nu              [0 2 -1 0 0 0 0] 1e-04;",
+                pre: NO_PRE,
+            },
+            // A LOOSE tolerance on purpose: what is being demonstrated is
+            // that the entry reaches the loop and stops it early, not that
+            // twenty iterations of a channel converge. The `pre` drops the
+            // check interval to 2, because at the default 25 the residual
+            // test only ever runs on iteration 1, where `it > 1` blocks it -
+            // the entry would then be untestable rather than unread.
+            Knob {
+                label: "SIMPLE/residualControl",
+                file: "system/fvSolution",
+                from: "    nNonOrthogonalCorrectors 0;",
+                to: "    nNonOrthogonalCorrectors 0;\n    residualControl { k 0.5; omega 0.5; }",
+                pre: NO_PRE,
+            },
+        ];
+
+        let mut inert: Vec<&str> = Vec::new();
+        for k in &cases {
+            let a = run_knob(k, false, "a");
+            let b = run_knob(k, true, "b");
+            if a == b {
+                inert.push(k.label);
+            }
+        }
+        assert_none_inert(&inert);
+    }
+
+    /// SPEC-LIT 13.4 and 17. `constant/g` is read into `cc.buoyancy` by
+    /// `read_case_controls` and was consulted by nothing here, while
+    /// `KOmega::set_buoyancy` has existed all along: a case naming
+    /// gravity ran with `G_b` identically zero and was not told. This driver
+    /// reads no temperature, so the term cannot be built - the refusal names
+    /// the drivers that can.
+    #[test]
+    fn a_case_that_names_gravity_is_refused_by_name() {
+        let case = channel("grav");
+        std::fs::write(
+            case.join("constant").join("g"),
+            "FoamFile\n{\n    version 2.0;\n    format ascii;\n    class uniformDimensionedVectorField;\n    location \"constant\";\n    object g;\n}\ndimensions [0 1 -2 0 0 0 0];\nvalue (0 0 -9.81);\n",
+        )
+        .expect("write constant/g");
+
+        let cc = read_case_controls(&case).expect("controls");
+        assert!(cc.buoyancy.is_active(), "the knob must actually put gravity in the case");
+
+        let e = common::refuse_buoyancy_without_temperature(&case, &cc, None, "ofgpu-k-omega")
+            .expect_err("a case naming gravity must be refused");
+        let msg = format!("{e}");
+        assert!(msg.contains("gravity"), "the error must name the setting: {msg}");
+        assert!(msg.contains("ofgpu-plume"), "the error must name an alternative: {msg}");
+        assert!(msg.contains("9.81"), "the error must quote what the case said: {msg}");
+    }
+
+    /// SPEC-LIT 13.4, found BY the pair test above rather than by the audit
+    /// that prompted it.
+    ///
+    /// `nNonOrthogonalCorrectors 2` used to be read into
+    /// `TurbulenceControls::n_non_orth_correctors`, printed by
+    /// `print_effective_settings`, and looped over by nothing: no turbulence
+    /// model in this crate carries the `for _pass in 0..=..` that
+    /// `energy.rs`, `momentum.rs`, `scalar_transport.rs` and `simple.rs` each
+    /// do. Two runs of this driver differing only in it wrote bit-identical
+    /// fields - the definition of inert - and this driver has no other
+    /// equation for it to reach, so it is refused by name.
+    #[test]
+    fn a_non_orthogonal_corrector_count_that_reaches_no_equation_is_a_named_error() {
+        let case = channel("nonorth");
+        apply(
+            &case,
+            &Knob {
+                label: "SIMPLE/nNonOrthogonalCorrectors",
+                file: "system/fvSolution",
+                from: "    nNonOrthogonalCorrectors 0;",
+                to: "    nNonOrthogonalCorrectors 2;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = ofgpu::io::case::read_case_controls(&case).expect("controls");
+        assert_eq!(cc.turb.n_non_orth_correctors, 2, "the knob must reach the controls");
+
+        let e = common::refuse_non_orth_correctors_without_another_equation(&cc, "DRIVER")
+            .expect_err("a corrector count that reaches no equation must be refused");
+        let msg = format!("{e}");
+        assert!(msg.contains("nNonOrthogonalCorrectors"), "must name the setting: {msg}");
+        assert!(msg.contains("ofgpu-plume"), "must name where it IS honoured: {msg}");
+
+        // Zero - what every case in this tree writes - is silent.
+        let mut zero = cc;
+        zero.turb.n_non_orth_correctors = 0;
+        assert!(common::refuse_non_orth_correctors_without_another_equation(&zero, "D").is_ok());
     }
 }

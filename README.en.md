@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 801 unit tests, 253 numerical checks |
+| Validation | 905 unit tests across all targets (814 in the lib), 314 `ofgpu-validate` checks |
 
 ---
 
@@ -63,8 +63,10 @@ is not commercial in substance, no-cost or reduced-cost terms are available.
 
 **Licence enquiries: simul@msimul.com**
 
-On 23 August 2036 the version published as of that date becomes available under
-the Apache License 2.0. See [`LICENSE`](LICENSE) for the full text and
+The governing licence is the **Meteor Simulation Source-Available License,
+Version 1.1**; the licensor is 주식회사 메테오시뮬레이션 (Meteo Simulation Co.,
+Ltd.). On 23 August 2036 the version published as of that date becomes available
+under the Apache License 2.0. See [`LICENSE`](LICENSE) for the full text and
 [`NOTICE`](NOTICE) for third-party notices.
 
 > This licence borrows the structure of the Business Source License 1.1 but is
@@ -103,7 +105,7 @@ applied on faces rather than interpolated from cell values.
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | Turbulence selection in the coupled solvers (`ofgpu-buoyant`, `ofgpu-fire`) | `ofgpu-buoyant`: the `CoupledTurbulence` trait dispatches on the case's own `RAS { model ...; }`/`simulationType`, exactly as the standalone drivers do — k-ε, k-ω, k-ω SST (wall distance computed automatically) and LES (Smagorinsky/WALE/Deardorff, with §16's filter widths and van Driest damping) all construct the ACTUAL model asked for, and buoyancy production `G_b` is wired into the right equation for each (§17, §30.2). `ofgpu-fire`: still k-ε only — its combustion mixing-time closure and thermal wall function need `epsilon` directly, so any other model is refused by name, a §13.4 error, not a silent substitution |
 | Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — `LaunderSharmaKE` (SPEC-LIT §33) is the one model on that menu, `kEpsilon`/`kOmega`/`kOmegaSST` still are not, so `lowRe` under any of the latter three is refused by name rather than left to diverge (SPEC-LIT §32) |
-| Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. Validated against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic PLANE CHANNEL (SPEC-LIT §32/§34): the **wall-function leg CLOSES** — Gnielinski at Petukhov's smooth-pipe `f` −5.9% (±10%), Dittus-Boelter −12.9% (±20–25%) — and the **resolved `lowRe` leg does NOT** (+14.1% Gnielinski, +6.0% Dittus-Boelter). At each leg's own MEASURED wall friction factor the Reynolds-analogy verdict closes on neither (+34.4%, +16.6%). Numbers rerun at the SPEC-LIT §13.4.1 numerics; full account in `docs/07-fire-solver.md` §1.1 |
+| Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. Validated against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic PLANE CHANNEL (SPEC-LIT §32/§34): the **wall-function leg CLOSES** — Gnielinski at Petukhov's smooth-pipe `f` −5.9% (±10%), Dittus-Boelter −12.9% (±20–25%) — and the **resolved `lowRe` leg does NOT** (+14.1% Gnielinski, +6.0% Dittus-Boelter). At each leg's own MEASURED wall friction factor the Reynolds-analogy verdict closes on neither (+34.4%, +16.6%). Numbers rerun at the SPEC-LIT §13.4.1 numerics, and they are the record at the SHIPPED DEFAULT `PrtModel constant`. Selecting SPEC-LIT §37's Kays-Crawford variable `Pr_t` (opt-in, one token, nothing tuned) moves the resolved leg from +14.1% to **+6.4%** and closes the absolute-prediction verdict on BOTH legs, while moving the wall-function control only −1.45% of `Nu`; the Reynolds-analogy verdict on the wall-function leg is untouched at +34.1%, being a friction finding rather than a thermal one. Full account, including what it does NOT establish, in `docs/07-fire-solver.md` §1.1 |
 | Wall distance | Poisson method (Tucker 1998) |
 | Buoyancy production | G_b term (Rodi 1987, Henkes et al. 1991) |
 
@@ -239,14 +241,40 @@ error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
   (run with -permissive to substitute PIMPLE with one outer corrector and continue)
 ```
 
+**A block of the case format that no driver implements is not exempt either**
+(SPEC-LIT §13.4.2). `ofgpu-fire` used to print a one-line "nobody reads this"
+note for the `output` block and continue; `ofgpu-k-epsilon`, which reads the
+same format, printed nothing — a note is per driver, and drivers drift. One
+shared refusal now covers all of them:
+
+| Setting | Treatment |
+|---|---|
+| the whole `output` block | **refused**, naming `-output` / `-writeInterval` / `-restartWrite N` / `-restartFrom FILE`. `visualisation.fields`, `visualisation.precision` and `restart.keep` have no implementation anywhere in the crate, so wiring the two that do exist and dropping those three in silence would be §13.4.1's defect manufactured inside its own fix |
+| `run.adjustTimeStep: true`, `run.maxCo` | **refused** — no driver that reads a JSONC case adjusts its own step. `ofgpu-vof` is the one adaptive loop in this crate (an OpenFOAM directory's `controlDict` `adjustTimeStep` + `maxCo` + `maxDeltaT`, or `-maxCo`) and it now actually reads all three |
+| `controlDict/adjustTimeStep yes` (OpenFOAM) | **refused** in `read_control_dict`, once, for every driver that goes through it |
+| `physics.gravity` / `constant/g` under `ofgpu-k-epsilon` or `ofgpu-k-omega` | **refused** — both models have had a `set_buoyancy` all along and nothing called it; §17's `G_b` needs a temperature field and these two drivers read none. The error names `ofgpu-plume`, `ofgpu-buoyant` and `ofgpu-fire` |
+
+`-permissive` prints what it substituted for each of these and continues.
+
 ---
 
 ## Validation
 
 ```
-cargo test        724 passed, 0 failed (lib; 776 across every target, including the small per-binary CLI-parsing suites)
-ofgpu-validate    240 / 240 checks passed
+cargo test        814 passed, 0 failed, 2 ignored (lib)
+                  905 passed, 0 failed, 4 ignored (every target — including the
+                  per-binary CLI-parsing suites and SPEC-LIT §13.4.1's per-driver
+                  "two runs must differ" pair tests)
+ofgpu-validate    314 / 314 checks passed (279 computed live, 35 replayed from recorded measurements)
 ```
+
+**SPEC-LIT §13.4.1's standing requirement**: two short runs of a driver,
+differing in exactly one setting of the case file and nothing else, must write
+DIFFERENT output. If they are bit-identical the setting is inert. All six
+drivers now carry such a pair test — `ofgpu-fire` 13 settings, `ofgpu-buoyant`
+17, `ofgpu-vof` 15, `ofgpu-plume` 11, `ofgpu-k-epsilon` and `ofgpu-k-omega` 11
+each — each running the driver's own `parse` + `run` and comparing every field
+file written.
 
 ### Order of convergence — method of manufactured solutions
 
@@ -528,7 +556,7 @@ raise `fatal error C1189` under the traditional MSVC preprocessor.
 
 | Executable | Purpose |
 |---|---|
-| `ofgpu-validate` | Numerical validation (228 checks) |
+| `ofgpu-validate` | Numerical validation (314 checks) |
 | `ofgpu-bench` | Throughput and memory benchmarks |
 | `ofgpu-graph-bench` | CUDA graph against per-launch execution |
 | `ofgpu-dispatch-bench` | Runtime dispatch cost |

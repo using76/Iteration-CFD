@@ -238,6 +238,7 @@
       ]
     },
     "JsonExact": {
+      "description": "Part of [`JsonOutput`], which no driver reads - see that type.",
       "type": "object",
       "properties": {
         "format": {
@@ -291,6 +292,13 @@
         "Prt": {
           "type": "number",
           "format": "double"
+        },
+        "PrtModel": {
+          "description": "SPEC-LIT S37.4: which closure supplies `Pr_t` in S26's\n`k_eff = k + rho cp nu_t/Pr_t` - `\"constant\"` (the default, and what\n`Prt` above means on its own) or `\"KaysCrawford\"` (where `Prt` above\nis read as `Pr_t_inf`, the free-stream asymptote). A free string\nrather than an enum, for the same reason `turbulence.model` is one:\nan unrecognised spelling has to reach [`crate::energy::PrtModel::parse`]\nand come back as a S13.4 error NAMING the alternatives, not as\nserde's \"unknown variant\".",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "TRef": {
           "type": "number",
@@ -559,6 +567,7 @@
       ]
     },
     "JsonOutput": {
+      "description": "**Not implemented by any driver in this crate, and therefore a SPEC-LIT\nS13.4 error whenever a case carries it** - see\n`common::refuse_unimplemented_blocks`, which every driver that reads this\nformat calls.\n\nThe block is kept in the format, and in the schema, because it is what the\nformat will grow into; what it is not is a set of settings that do\nsomething today. Three of its knobs - `visualisation.fields`,\n`visualisation.precision` and `restart.keep` - have no implementation\nanywhere in the crate at all, so honouring the two that DO exist\n(`format`, `interval`) and dropping the rest would be S13.4.1's defect\nmanufactured inside its own fix.\n\nWhat decides what a run writes is the command line: `-output\nfoam,vtu,nvdb,vdb,usda` for the format(s), `-writeInterval` for how often,\n`-restartWrite N` / `-restartFrom FILE` for checkpoints. `-permissive`\nsubstitutes exactly that and prints it.",
       "type": "object",
       "properties": {
         "exact": {
@@ -852,6 +861,7 @@
       ]
     },
     "JsonRestart": {
+      "description": "Part of [`JsonOutput`], which no driver reads - see that type.",
       "type": "object",
       "properties": {
         "interval": {
@@ -874,18 +884,22 @@
       "type": "object",
       "properties": {
         "adjustTimeStep": {
+          "description": "`false` (the default) is honoured, because a fixed step is what every\ndriver that reads a JSONC case does.\n\n`true` is a SPEC-LIT S13.4 ERROR naming the alternatives: no such\ndriver adjusts its own step. `ofgpu-vof` is the one adaptive loop in\nthis crate (`controlDict` `adjustTimeStep` + `maxCo`, or `-maxCo`) and\nit takes an OpenFOAM case directory. `-permissive` substitutes a fixed\nstep of `deltaT` and says so.",
           "type": "boolean",
           "default": false
         },
         "deltaT": {
+          "description": "The time step. Honoured; `-deltaT` on the command line overrides it.",
           "type": "number",
           "format": "double"
         },
         "endTime": {
+          "description": "The end time the case asks for. Honoured: both case readers turn it\ninto `TurbulenceControls::n_outer_iterations` (steady) or a step count\n(transient). `ofgpu-fire` takes its run MODE from `-endTime`/`-deltaT`\ninstead and prints which of the two is in force (SPEC-LIT S13.4.2).",
           "type": "number",
           "format": "double"
         },
         "maxCo": {
+          "description": "The Courant ceiling an adaptive step would hold. A SPEC-LIT S13.4\nERROR whenever present, for the same reason as `adjustTimeStep`: it\nonly means anything to a loop that adjusts its step, and no driver\nreading this format has one.",
           "type": [
             "number",
             "null"
@@ -1081,6 +1095,7 @@
       ]
     },
     "JsonVisualisation": {
+      "description": "Part of [`JsonOutput`], which no driver reads - see that type.",
       "type": "object",
       "properties": {
         "fields": {

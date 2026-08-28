@@ -3,7 +3,7 @@
 **Goal: ship meteor-cfd under a licence 주식회사 메테오시뮬레이션 controls.**
 
 > This audit was written while the target was the MIT licence. The target has
-> since changed to the Meteor Simulation Source-Available License 1.0 — source
+> since changed to the Meteor Simulation Source-Available License 1.1 — source
 > public, education free, research and commercial paid. **The analysis below is
 > unchanged and remains the reason the rewrite happened**: GPL-derived code
 > cannot be relicensed under MIT *or* under a proprietary licence. Removing it
@@ -131,8 +131,9 @@ is the specification.
 | `upstream/_caseClashRecovered/` | recovered GPL-3.0 source files |
 | `gpu/` | the transcribed C++ |
 
-Shipping any of these inside an MIT-licensed repository would relicense GPL
-code, which is exactly the thing to avoid. Keep them in a separate,
+Shipping any of these inside a repository licensed by us — the target was MIT
+when this was written and is now the Meteor Simulation Source-Available License
+1.1 — would relicense GPL code, which is exactly the thing to avoid. Keep them in a separate,
 clearly-GPL working tree for reference, or delete them from the published one.
 
 ### 3e. The documentation
@@ -237,11 +238,11 @@ reference available for this project.
 
 | Phase | Work | Gate | Status |
 |---|---|---|---|
-| 0 | This audit. Remove every GPL file from the tree. | the MIT tree contains no GPL file | **done** |
+| 0 | This audit. Remove every GPL file from the tree. | the published tree contains no GPL file | **done** |
 | 1 | Write `rust/SPEC-LIT.md`: every equation cited to a paper, verified against it. | no OpenFOAM path appears anywhere in it | **done** |
 | 2 | Reimplement §3a from `SPEC-LIT.md` only, with no GPL source in reach. | builds and passes §10 validation | **done** |
 | 3 | Rebuild validation on MMS, analytical solutions and published benchmarks. | second-order convergence shown without reference to any other code | **done** |
-| 4 | `LICENSE` = MIT. Per-file provenance. `NOTICE` for BSD dependencies. | ready to publish | **done** — see `rust/PROVENANCE.md` |
+| 4 | `LICENSE`, per-file provenance, `NOTICE` for third-party dependencies. | ready to publish | **done** — `LICENSE` is the Meteor Simulation Source-Available License 1.1, not the MIT this row originally planned; see `rust/PROVENANCE.md` and `NOTICE` |
 
 ### What phases 2 and 3 produced
 
@@ -253,6 +254,13 @@ source was consulted."*
 ofgpu-validate     168 / 168 checks passed
 cargo test         321 tests passed, 0 failed
 ```
+
+**These two numbers are the state AT THE END OF PHASE 3, not the current
+state, and this whole section is a record of what those phases produced.** The
+tree has grown a great deal since: 105 source files, `ofgpu-validate` 314 / 314
+and `cargo test` 905 across all targets. The current figures live in
+`README.md` and `rust/README.md`, which are the documents that are kept up to
+date; this one is dated by construction and is not.
 
 Observed order of convergence, method of manufactured solutions: **2.10** on a
 3-D graded mesh, **1.91** sheared, **2.07** in 2-D with empty patches.

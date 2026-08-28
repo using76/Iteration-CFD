@@ -144,8 +144,8 @@ fn run() -> Result<()> {
     let per_launch_ns = (dyn_s - static_s) / launches as f64 * 1e9;
 
     println!(
-        "\n{} cells, {} launches of one elementwise kernel\n",
-        n, launches
+        "\n{} cells, {} launches of one elementwise kernel ({})\n",
+        n, launches, op.name()
     );
     println!(
         "  {:<34} {:>9.4} s   {:>8.3} us / launch",

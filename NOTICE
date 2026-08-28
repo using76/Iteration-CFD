@@ -18,6 +18,18 @@ line "No GPL-licensed source was consulted." All 105 source files under
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
 
+That is not a claim you have to take on trust. It is a test:
+
+    cd rust && cargo test --release --lib provenance_audit
+
+`provenance_audit::every_source_file_declares_its_provenance` walks the four
+roots named above and fails naming any file that is missing either line;
+`provenance_audit::notice_and_provenance_quote_the_real_file_count` reads the
+count back out of this file and out of `rust/PROVENANCE.md`, so adding a
+source file without updating them fails in CI rather than in an audit. The
+count was wrong once — 85 of 105 files carried the line while both documents
+said 105 — which is why it is checked mechanically now.
+
 meteor-cfd reads and writes the OpenFOAM ASCII case format so that existing
 pre- and post-processing tools can be used with it. A file format is not a work
 of authorship: the reader and writer here were written from the format as it
@@ -25,7 +37,8 @@ appears in data files. meteor-cfd links against no part of OpenFOAM, contains
 no OpenFOAM source, and is neither derived from nor affiliated with OpenFOAM,
 the OpenFOAM Foundation, or OpenCFD Ltd.
 
-`rust/PROVENANCE.md` is the per-file record.
+`rust/PROVENANCE.md` is the per-file record. `LICENSING.md` records what was
+removed from this repository's history, and why.
 
 ================================================================================
 Third-party components
@@ -34,37 +47,75 @@ Third-party components
 These remain under their own licences. Nothing in the meteor-cfd licence
 restricts any right you have in them under their own terms.
 
+--------------------------------------------------------------------------------
+Cargo dependencies — GENERATED, do not edit by hand
+--------------------------------------------------------------------------------
+
+The table below is produced from the resolved lock file, not typed out. To
+regenerate it after any dependency change, and to replace the block between
+the two markers:
+
+    python tools/deps_licences.py
+
+To verify that this file still agrees with `rust/Cargo.lock` without editing
+anything (exit status 1 if it does not):
+
+    python tools/deps_licences.py --check
+
+The tool reads `cargo metadata --format-version 1 --locked`, so it reports the
+graph Cargo.lock actually resolves rather than whatever is newest on crates.io,
+and it exits non-zero if any package in that graph declares a GPL, LGPL or
+AGPL licence. As of the generated block below there are none: every licence in
+the graph is MIT, Apache-2.0, ISC (libloading), Unlicense (memchr) or
+Unicode-3.0 (unicode-ident, alongside MIT/Apache-2.0). `ofgpu` itself is this
+crate, under `LICENSE` at the repository root — it is not a third-party
+component and is listed only because it is a node in its own graph.
+
+<!-- BEGIN GENERATED: cargo metadata --locked -->
+Resolved dependency graph: 27 packages (this crate plus 26).
+
+PACKAGE                  VERSION    LICENCE
+------------------------ ---------- ------------------------------
+anyhow                   1.0.104    MIT OR Apache-2.0
+cfg-if                   1.0.4      MIT OR Apache-2.0
+cudarc                   0.19.9     MIT OR Apache-2.0
+dyn-clone                1.0.20     MIT OR Apache-2.0
+itoa                     1.0.18     MIT OR Apache-2.0
+jsonc-parser             0.33.1     MIT
+libloading               0.9.0      ISC
+memchr                   2.8.3      Unlicense OR MIT
+ofgpu                    0.1.0      see ../LICENSE
+proc-macro2              1.0.107    MIT OR Apache-2.0
+quote                    1.0.47     MIT OR Apache-2.0
+ref-cast                 1.0.27     MIT OR Apache-2.0
+ref-cast-impl            1.0.27     MIT OR Apache-2.0
+schemars                 1.2.2      MIT
+schemars_derive          1.2.2      MIT
+serde                    1.0.229    MIT OR Apache-2.0
+serde_core               1.0.229    MIT OR Apache-2.0
+serde_derive             1.0.229    MIT OR Apache-2.0
+serde_derive_internals   0.30.0     MIT OR Apache-2.0
+serde_json               1.0.151    MIT OR Apache-2.0
+serde_path_to_error      0.1.20     MIT OR Apache-2.0
+syn                      3.0.3      MIT OR Apache-2.0
+thiserror                2.0.20     MIT OR Apache-2.0
+thiserror-impl           2.0.20     MIT OR Apache-2.0
+unicode-ident            1.0.24     (MIT OR Apache-2.0) AND Unicode-3.0
+windows-link             0.2.1      MIT OR Apache-2.0
+zmij                     1.0.23     MIT
+
+<!-- END GENERATED -->
+
+--------------------------------------------------------------------------------
+Not on crates.io
+--------------------------------------------------------------------------------
+
 AMGX
   Copyright (c) 2011-2024, NVIDIA CORPORATION
   BSD 3-Clause License.
-  Optional; built only with the `amgx` Cargo feature, which is off by default.
-  Bundled under third_party/amgx when present; see its LICENSE.
-
-cudarc
-  MIT OR Apache-2.0. Cargo dependency.
-
-serde, serde_json, serde_path_to_error
-  MIT OR Apache-2.0. Cargo dependencies.
-
-schemars
-  MIT. Cargo dependency — generates the JSON Schema for the JSONC case format
-  from the reader's own types, so the schema and the reader cannot disagree.
-
-jsonc-parser
-  MIT. Cargo dependency — the JSONC (JSON-with-comments) reader.
-
-thiserror
-  MIT OR Apache-2.0. Cargo dependency.
-
-anyhow
-  MIT OR Apache-2.0. Build dependency.
-
-Transitive dependencies
-  The full graph in rust/Cargo.lock is 27 packages (this crate plus 26).
-  Verified against the lock file: every licence in it is MIT, Apache-2.0,
-  ISC (libloading), Unlicense (memchr), Unicode-3.0 (unicode-ident) or
-  BSD-3-Clause (AMGX, optional). There is no GPL, LGPL or AGPL dependency
-  anywhere in the graph, direct or transitive.
+  Optional; built only with the `amgx` Cargo feature, which is OFF by default,
+  so it is absent from the generated table above (which reports the default
+  feature set). Bundled under `third_party/AMGX` when present; see its LICENSE.
 
 NVIDIA CUDA Toolkit, cuFFT, cuBLAS
   Used under the NVIDIA CUDA Toolkit End User License Agreement, which permits
@@ -74,6 +125,9 @@ NVIDIA CUDA Toolkit, cuFFT, cuBLAS
 ================================================================================
 Reference material
 ================================================================================
+
+Neither of these is redistributed in this repository. `reference/` is git-
+ignored and must be cloned separately; nothing in the build depends on it.
 
 Fire Dynamics Simulator (FDS)
   Developed by the National Institute of Standards and Technology (NIST).
@@ -85,7 +139,15 @@ Fire Dynamics Simulator (FDS)
   not endorse meteor-cfd, and provides the FDS software "AS IS" with no
   warranty of any kind.
 
-  FDS is not redistributed in this repository.
+PyFR
+  Copyright (c) Imperial College London and the PyFR authors.
+  BSD 3-Clause License.
+
+  Consulted once, as a permissively licensed cross-check while implementing the
+  Gmsh `.msh` 4.1 reader (`rust/src/io/msh.rs`): the Gmsh format is published in
+  the Gmsh manual and is not copyrightable, and PyFR's own BSD-3 reader was used
+  to confirm the interpretation of blocked element ordering. No PyFR source is
+  copied into this repository. See `rust/PROVENANCE.md`, "Permissive references".
 
 ================================================================================
 Published sources
@@ -98,7 +160,9 @@ citation list is `rust/SPEC-LIT.md`; the principal sources are:
   Patankar (1980); Patankar & Spalding (1972); Van Doormaal & Raithby (1984)
   Issa (1986); Rhie & Chow (1983)
   Launder & Spalding (1974); Wilcox; Menter (1994, 2003)
-  Spalding (1961); Cebeci & Bradshaw (1977)
+  Launder & Sharma (1974)
+  Spalding (1961); Cebeci & Bradshaw (1977); Jayatilleke (1969)
+  Kays & Crawford (1993); Kays (1994)
   Smagorinsky (1963); Deardorff (1970, 1980); Nicoud & Ducros (1999)
   van Driest (1956); Scotti, Meneveau & Lilly (1993)
   Sweby (1984); van Leer (1977, 1979); Roe (1986); van Albada et al. (1982)

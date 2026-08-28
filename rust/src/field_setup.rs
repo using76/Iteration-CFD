@@ -1653,7 +1653,7 @@ pub fn validate_wall_rows(
         };
         let corrected = validate_wall_row(pname, row)?;
 
-        let mut write_back =
+        let write_back =
             |f: &mut Option<&mut RawScalarField>, before: Option<BcKind>, after: Option<BcKind>| {
                 if before == after {
                     return;

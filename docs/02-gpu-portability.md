@@ -29,6 +29,22 @@ The bar is not "can a GPU help here" - almost anything can be accelerated someho
 | Mesh: Core mesh data structures | 70 | 3 | 0 | 18 | 113 | 0 | 204 |
 | **Total** | **899** | **85** | **7** | **214** | **619** | **0** | **1824** |
 
+> **Why this total is 1824 and `01-model-catalog.md`'s is 1823.** The two
+> documents catalogue the same OpenFOAM-12 component set and agree row for row
+> in eight of the nine subsystems. The ninth, finiteVolume, carries one extra
+> entry here: `extendedCellToFaceStencil::weightedSum`, the shared runtime
+> kernel behind all the fit schemes. It is not runtime-selectable, so it is not
+> a component in `01`'s sense and `01` does not list it; it *is* a distinct unit
+> of porting work, which is what this document counts, so it is listed here.
+> The difference is deliberate and is the whole of the discrepancy — verified by
+> diffing the two finiteVolume tables entry by entry.
+>
+> Neither table can currently be regenerated: `_build_catalog.py` takes the
+> `journal.jsonl` files the cataloguing pass produced, and those are not
+> committed. Both tables are internally consistent (every subsystem count
+> equals its own rows, and the totals equal the sums), which is what can be
+> checked from the repository as it stands.
+
 ## Recommended porting order
 
 속도 향상 대비 노력이 큰 순서입니다.

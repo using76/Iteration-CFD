@@ -151,7 +151,7 @@ mod common;
 use common::{
     atoi, build_writers, device_banner, find_restart_field, from_restart_scalars,
     from_restart_vectors, g, mean, next_arg, parse_output_formats, restart_scalar, restart_shell,
-    restart_surface, restart_vector, sci, OutputFormat,
+    restart_surface, restart_vector, sci, CaseNumerics, OutputFormat,
 };
 use ofgpu::restart::{self, RestartData};
 
@@ -524,24 +524,38 @@ fn read_prandtl(case_dir: &Path, cc: &CaseControls) -> Result<ScalarTransportCoe
     Ok(c)
 }
 
-/// `fvSolution`'s `solvers/T` and `relaxationFactors/equations/T`, folded into
-/// the copy of the controls the temperature equation will use.
+/// Everything the case says about the TEMPERATURE equation, by the entries
+/// that name `T` and no other.
 ///
-/// [`ScalarTransport`] reads its linear solver out of `k_solver` and its
-/// relaxation out of `k_relax`, because `TurbulenceControls` has no slot for a
-/// passive scalar. Overwriting exactly those two on a *copy* is how a case
-/// gives `T` its own settings without disturbing the model's.
-fn read_t_controls(case_dir: &Path, base: &TurbulenceControls) -> Result<TurbulenceControls> {
+/// [`ScalarTransport`] reads its linear solver out of `k_solver`, its
+/// relaxation out of `k_relax` and its gradient and `snGrad` out of the same
+/// [`TurbulenceControls`] the turbulence models use, because that struct has
+/// no slot for a passive scalar. Overwriting exactly those fields on a *copy*
+/// is how a case gives `T` its own settings without disturbing the model's.
+///
+/// SPEC-LIT §13.4.1(a). `div(phi,T)` has been read by its own name since
+/// instance 3 was fixed - `read_simple_controls`'s comment is the record of
+/// it - but `grad(T)` was not: the deferred correction of a `div(phi,T)
+/// Gauss linearUpwind grad(T)` entry, and the limiter of a TVD one, both read
+/// `ctrl.grad_scheme`, which was still `gradSchemes/default`. A case writing
+/// `gradSchemes { default Gauss linear; grad(T) cellLimited Gauss linear 1; }`
+/// got the unlimited gradient in its energy equation and was not told.
+fn read_t_controls(
+    num: &CaseNumerics<'_>,
+    base: &TurbulenceControls,
+) -> Result<TurbulenceControls> {
+    let t_div = num.div("div(phi,T)")?;
+
     let mut t = *base;
-
-    let p = case_dir.join("system").join("fvSolution");
-    if !p.exists() {
-        return Ok(t);
-    }
-    let d = FoamDict::read(&p)?;
-
-    read_solver(&mut t.k_solver, &d, "T")?;
-    t.k_relax = d.scalar("relaxationFactors/equations/T", t.k_relax);
+    t.k_solver = num.solver("T", base.k_solver)?;
+    t.k_relax = num.relax("T", base.k_relax)?;
+    t.grad_scheme = num.grad("grad(T)")?;
+    t.sn_grad = num.sn_grad("laplacian(alphaEff,T)")?;
+    // The struct must not disagree with the equation it is used for: these
+    // two are what `ScalarTransport::new` seeds `conv` from, before `run`
+    // calls `set_convection` with the same entry.
+    t.div_scheme = t_div.scheme;
+    t.bounded_convection = t_div.bounded;
 
     Ok(t)
 }
@@ -1828,8 +1842,15 @@ fn run(o: &Options) -> Result<()> {
         }
     }
 
+    // SPEC-LIT §13.4.1: one reader, per equation, by that equation's own key.
+    // `ofgpu-buoyant` takes an OpenFOAM case directory only, so the JSONC half
+    // is `None`. Scoped, because `CaseNumerics` borrows the controls and the
+    // `-fixedIters` block below writes to them.
     let mut simple_ctrl = read_simple_controls(&o.case_dir, &cc)?;
-    let mut t_ctrl = read_t_controls(&o.case_dir, &cc.turb)?;
+    let (mut t_ctrl, t_div) = {
+        let num = CaseNumerics::read(&o.case_dir, &cc, None)?;
+        (read_t_controls(&num, &cc.turb)?, num.div("div(phi,T)")?)
+    };
 
     // `-nCorrectors N` is the OUTER corrector count: N re-linearisations of
     // the momentum-pressure system per unit of work, which is PIMPLE's outer
@@ -2195,8 +2216,10 @@ fn run(o: &Options) -> Result<()> {
     };
 
     let mut heat = ScalarTransport::new(&gpu, &hm, &mesh, "T", t_coeffs, t_ctrl)?;
-    // `div(phi,T)`, by its own name - see `read_simple_controls`.
-    heat.set_convection(cc.schemes.div("div(phi,T)")?);
+    // `div(phi,T)`, by its own name - see `read_simple_controls`. Through
+    // `CaseNumerics` rather than `cc.schemes` directly, so this driver asks
+    // the same reader every other one does (SPEC-LIT §13.4.1).
+    heat.set_convection(t_div);
     setup_scalar_field(&gpu, heat.field_mut(), &raw_t, &hm)?;
 
     for (fname, field) in turb.output_fields_mut() {
@@ -2305,6 +2328,22 @@ fn run(o: &Options) -> Result<()> {
 
     // ---- what will actually run --------------------------------------------
     ofgpu::io::case::print_effective_settings(&cc);
+    // SPEC-LIT §13.4.2 for the equation `print_effective_settings` cannot
+    // report: it prints `gradSchemes/default`, and the energy equation may
+    // have been given `gradSchemes/grad(T)`.
+    println!(
+        "    {}",
+        common::equation_settings_line(
+            "T",
+            "laplacian(alphaEff,T)",
+            t_div,
+            t_ctrl.grad_scheme,
+            t_ctrl.sn_grad,
+            t_ctrl.n_non_orth_correctors,
+            t_ctrl.k_relax,
+            &t_ctrl.k_solver,
+        )
+    );
 
     // ---- the schedule -------------------------------------------------------
     let dt = f64::from(cc.turb.delta_t);
@@ -2672,5 +2711,263 @@ mod buoyant_tests {
         let hm = column(4);
         assert!(stratification(&[300.0, 300.0], &hm, Vec3::new(0.0, 0.0, 1.0), 293.15).is_err());
         assert!(stratification(&[], &column(0), Vec3::new(0.0, 0.0, 1.0), 293.15).is_err());
+    }
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT 13.4.1's standing requirement, for this driver
+    // ----------------------------------------------------------------------
+    //
+    // This driver is INSTANCE 3 - `read_simple_controls`'s own comment
+    // records the `div(phi,U)` line that used to read the TURBULENCE
+    // equation's entry. The pair test below is what would have caught it,
+    // and is now what stops the next one: `gradSchemes/grad(T)` was still
+    // unread here after instance 3 was fixed, because a parsing test cannot
+    // tell a setting that is read from a setting that is read and dropped.
+
+    use common::knobs::{apply, assert_none_inert, scratch_dir, written_state, Knob, NO_PRE};
+    use ofgpu::blockgen::{write_case, CaseKind};
+
+    /// Build a fresh 8x8x8 plume case, apply `k` if `side` is set, run
+    /// `ofgpu-buoyant`'s own `parse` + `run`, and return everything it wrote.
+    fn run_knob(k: &Knob, side: bool, tag: &str) -> Vec<(String, String)> {
+        let dir = scratch_dir(tag);
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 8, 8, 8).expect("generate the plume case");
+        apply(&case, k, side);
+
+        let args = argv(&[
+            case.to_string_lossy().as_ref(),
+            "-iters",
+            "6",
+            "-check",
+            "100",
+            // The measured backend selector prints a table and can pick a
+            // different backend on the two sides of a pair for reasons that
+            // have nothing to do with the knob; pinning it is what makes the
+            // comparison a comparison of the SETTING.
+            "-backend",
+            "pbicgstab",
+        ]);
+        let o = parse(&args).expect("the knob command line must parse");
+        run(&o).expect("the knob case must run");
+
+        let out = written_state(&case.join("1"));
+        assert!(!out.is_empty(), "the run wrote nothing to compare");
+        out
+    }
+
+    /// **The standing test SPEC-LIT 13.4.1 requires of every setting this
+    /// driver claims to honour.**
+    ///
+    /// `laplacianSchemes`/`snGradSchemes` is absent for the arithmetic reason
+    /// 13.4.1 states as its one admissible exception; it is asserted on the
+    /// controls in `sn_grad_for_t_comes_from_the_laplacian_entry`.
+    #[test]
+    fn every_wired_setting_changes_what_the_run_writes() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+
+        let cases: Vec<Knob> = vec![
+            Knob {
+                label: "divSchemes/div(phi,U)",
+                file: "system/fvSchemes",
+                from: "div(phi,U)       Gauss linearUpwind grad(U);",
+                to: "div(phi,U)       Gauss upwind;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "divSchemes/div(phi,T)",
+                file: "system/fvSchemes",
+                from: "div(phi,T)       bounded Gauss upwind;",
+                to: "div(phi,T)       Gauss linear;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "divSchemes/div(phi,k)",
+                file: "system/fvSchemes",
+                from: "div(phi,k)       bounded Gauss upwind;",
+                to: "div(phi,k)       Gauss linear;",
+                pre: NO_PRE,
+            },
+            // `grad(U)` is READ by `div(phi,U) Gauss linearUpwind grad(U)`,
+            // which the generated case already writes, so this knob turns one
+            // entry and one only.
+            Knob {
+                label: "gradSchemes/grad(U)",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}",
+                to: "gradSchemes\n{\n    default         Gauss linear;\n    grad(U)         cellLimited Gauss linear 1;\n}",
+                pre: NO_PRE,
+            },
+            // `grad(T)` needs a `div(phi,T)` entry that reads a gradient, so
+            // the knob turns both - see the companion controls-level
+            // assertion `grad_t_reaches_the_energy_equation_and_not_the_k_equation`.
+            Knob {
+                label: "gradSchemes/grad(T)",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}\n\ndivSchemes\n{\n    default         none;\n    div(phi,U)       Gauss linearUpwind grad(U);\n    div(phi,T)       bounded Gauss upwind;",
+                to: "gradSchemes\n{\n    default         Gauss linear;\n    grad(T)         cellLimited Gauss linear 1;\n}\n\ndivSchemes\n{\n    default         none;\n    div(phi,U)       Gauss linearUpwind grad(U);\n    div(phi,T)       Gauss linearUpwind grad(T);",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "relaxationFactors/fields/p",
+                file: "system/fvSolution",
+                from: "        p               0.3;",
+                to: "        p               0.7;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "relaxationFactors/equations/U",
+                file: "system/fvSolution",
+                from: "        U               0.7;",
+                to: "        U               0.3;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "relaxationFactors/equations/T",
+                file: "system/fvSolution",
+                from: "        T               0.7;",
+                to: "        T               0.3;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "SIMPLE/nNonOrthogonalCorrectors",
+                file: "system/fvSolution",
+                from: "    nNonOrthogonalCorrectors 0;",
+                to: "    nNonOrthogonalCorrectors 2;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "SIMPLE/consistent (SIMPLEC)",
+                file: "system/fvSolution",
+                from: "    nNonOrthogonalCorrectors 0;",
+                to: "    nNonOrthogonalCorrectors 0;\n    consistent      yes;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "solvers/U/tolerance",
+                file: "system/fvSolution",
+                from: "    U\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-08;\n        relTol          0.1;",
+                to: "    U\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-02;\n        relTol          0.5;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "solvers/T/tolerance",
+                file: "system/fvSolution",
+                from: "    T\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-08;\n        relTol          0.01;",
+                to: "    T\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-02;\n        relTol          0.5;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties Prt",
+                file: "constant/physicalProperties",
+                from: "Prt             0.85;",
+                to: "Prt             0.45;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties Pr",
+                file: "constant/physicalProperties",
+                from: "Pr              0.71;",
+                to: "Pr              0.21;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties TRef",
+                file: "constant/physicalProperties",
+                from: "TRef            293.15;",
+                to: "TRef            353.15;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/g",
+                file: "constant/g",
+                from: "(0 0 -9.81)",
+                to: "(0 0 -1.62)",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties nu",
+                file: "constant/physicalProperties",
+                from: "nu              [0 2 -1 0 0 0 0] 1.5e-05;",
+                to: "nu              [0 2 -1 0 0 0 0] 1.5e-04;",
+                pre: NO_PRE,
+            },
+        ];
+
+        let mut inert: Vec<&str> = Vec::new();
+        for k in &cases {
+            let a = run_knob(k, false, "a");
+            let b = run_knob(k, true, "b");
+            if a == b {
+                inert.push(k.label);
+            }
+        }
+        assert_none_inert(&inert);
+    }
+
+    /// Rule (a) of 13.4.1 on the controls: `gradSchemes/grad(T)` reaches the
+    /// ENERGY equation and moves neither the momentum equation's gradient
+    /// nor the turbulence equations'. This is the entry that was still
+    /// unread here after instance 3 was fixed.
+    #[test]
+    fn grad_t_reaches_the_energy_equation_and_not_the_k_equation() {
+        let dir = scratch_dir("gradT");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate");
+        apply(
+            &case,
+            &Knob {
+                label: "gradSchemes/grad(T)",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}",
+                to: "gradSchemes\n{\n    default         Gauss linear;\n    grad(T)         leastSquares;\n}",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = read_case_controls(&case).expect("controls");
+        let num = CaseNumerics::read(&case, &cc, None).expect("numerics");
+        let t_ctrl = read_t_controls(&num, &cc.turb).expect("T controls");
+        let simple = read_simple_controls(&case, &cc).expect("SIMPLE controls");
+
+        assert_eq!(t_ctrl.grad_scheme.describe(), "leastSquares");
+        assert_eq!(
+            simple.momentum.grad_scheme.describe(),
+            "Gauss linear",
+            "grad(T) must not move the MOMENTUM equation's gradient"
+        );
+        assert_eq!(
+            cc.turb.grad_scheme.describe(),
+            "Gauss linear",
+            "grad(T) must not move the k/epsilon equations' gradient"
+        );
+    }
+
+    /// 13.4.1's one admissible exception: `snGrad` vanishes identically on
+    /// every mesh `blockgen` builds, so it is asserted on the controls the
+    /// solver is CONSTRUCTED from, through the same function `run` calls.
+    #[test]
+    fn sn_grad_for_t_comes_from_the_laplacian_entry() {
+        let dir = scratch_dir("snT");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate");
+        apply(
+            &case,
+            &Knob {
+                label: "laplacianSchemes/default",
+                file: "system/fvSchemes",
+                from: "    default         Gauss linear corrected;",
+                to: "    default         Gauss linear uncorrected;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = read_case_controls(&case).expect("controls");
+        let num = CaseNumerics::read(&case, &cc, None).expect("numerics");
+        let t_ctrl = read_t_controls(&num, &cc.turb).expect("T controls");
+        assert_eq!(t_ctrl.sn_grad, ofgpu::fv::SnGradScheme::Uncorrected);
     }
 }

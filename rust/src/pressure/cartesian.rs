@@ -3,6 +3,7 @@
 // free; commercial and non-academic research require a licence.
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
+// Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! Recognising a uniform Cartesian box in an unstructured mesh, and the
 //! per-side boundary conditions a separable solve needs.

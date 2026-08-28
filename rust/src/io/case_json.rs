@@ -72,6 +72,7 @@ use crate::momentum::BuoyancyCoeffs;
 use crate::scalar_transport::ScalarTransportCoeffs;
 use crate::timescheme::DdtScheme;
 use crate::combustion::CombustionCoeffs;
+use crate::energy::PrtModel;
 use crate::radiation::{RadiationConfig, RadiationModel};
 use crate::{Label, Scalar, Vec3};
 
@@ -315,6 +316,16 @@ pub struct JsonFluid {
     pub pr: f64,
     #[serde(rename = "Prt")]
     pub prt: f64,
+    /// SPEC-LIT S37.4: which closure supplies `Pr_t` in S26's
+    /// `k_eff = k + rho cp nu_t/Pr_t` - `"constant"` (the default, and what
+    /// `Prt` above means on its own) or `"KaysCrawford"` (where `Prt` above
+    /// is read as `Pr_t_inf`, the free-stream asymptote). A free string
+    /// rather than an enum, for the same reason `turbulence.model` is one:
+    /// an unrecognised spelling has to reach [`crate::energy::PrtModel::parse`]
+    /// and come back as a S13.4 error NAMING the alternatives, not as
+    /// serde's "unknown variant".
+    #[serde(rename = "PrtModel", default, skip_serializing_if = "Option::is_none")]
+    pub prt_model: Option<String>,
     #[serde(rename = "TRef")]
     pub t_ref: f64,
 }
@@ -787,12 +798,29 @@ pub struct JsonNumerics {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JsonRun {
+    /// The end time the case asks for. Honoured: both case readers turn it
+    /// into `TurbulenceControls::n_outer_iterations` (steady) or a step count
+    /// (transient). `ofgpu-fire` takes its run MODE from `-endTime`/`-deltaT`
+    /// instead and prints which of the two is in force (SPEC-LIT S13.4.2).
     #[serde(rename = "endTime")]
     pub end_time: f64,
+    /// The time step. Honoured; `-deltaT` on the command line overrides it.
     #[serde(rename = "deltaT")]
     pub delta_t: f64,
+    /// `false` (the default) is honoured, because a fixed step is what every
+    /// driver that reads a JSONC case does.
+    ///
+    /// `true` is a SPEC-LIT S13.4 ERROR naming the alternatives: no such
+    /// driver adjusts its own step. `ofgpu-vof` is the one adaptive loop in
+    /// this crate (`controlDict` `adjustTimeStep` + `maxCo`, or `-maxCo`) and
+    /// it takes an OpenFOAM case directory. `-permissive` substitutes a fixed
+    /// step of `deltaT` and says so.
     #[serde(rename = "adjustTimeStep", default)]
     pub adjust_time_step: bool,
+    /// The Courant ceiling an adaptive step would hold. A SPEC-LIT S13.4
+    /// ERROR whenever present, for the same reason as `adjustTimeStep`: it
+    /// only means anything to a loop that adjusts its step, and no driver
+    /// reading this format has one.
     #[serde(rename = "maxCo", default, skip_serializing_if = "Option::is_none")]
     pub max_co: Option<f64>,
 }
@@ -801,6 +829,7 @@ pub struct JsonRun {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Part of [`JsonOutput`], which no driver reads - see that type.
 pub struct JsonVisualisation {
     pub format: String,
     pub interval: f64,
@@ -812,6 +841,7 @@ pub struct JsonVisualisation {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Part of [`JsonOutput`], which no driver reads - see that type.
 pub struct JsonExact {
     pub format: String,
     pub interval: f64,
@@ -819,11 +849,29 @@ pub struct JsonExact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+/// Part of [`JsonOutput`], which no driver reads - see that type.
 pub struct JsonRestart {
     pub interval: f64,
     pub keep: usize,
 }
 
+/// **Not implemented by any driver in this crate, and therefore a SPEC-LIT
+/// S13.4 error whenever a case carries it** - see
+/// `common::refuse_unimplemented_blocks`, which every driver that reads this
+/// format calls.
+///
+/// The block is kept in the format, and in the schema, because it is what the
+/// format will grow into; what it is not is a set of settings that do
+/// something today. Three of its knobs - `visualisation.fields`,
+/// `visualisation.precision` and `restart.keep` - have no implementation
+/// anywhere in the crate at all, so honouring the two that DO exist
+/// (`format`, `interval`) and dropping the rest would be S13.4.1's defect
+/// manufactured inside its own fix.
+///
+/// What decides what a run writes is the command line: `-output
+/// foam,vtu,nvdb,vdb,usda` for the format(s), `-writeInterval` for how often,
+/// `-restartWrite N` / `-restartFrom FILE` for checkpoints. `-permissive`
+/// substitutes exactly that and prints it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JsonOutput {
@@ -952,8 +1000,15 @@ pub struct RunControl {
     pub end_time: Scalar,
     pub delta_t: Scalar,
     pub adjust_time_step: bool,
-    /// Only meaningful when [`Self::adjust_time_step`] is set.
-    pub max_co: Scalar,
+    /// Only meaningful when [`Self::adjust_time_step`] is set, and `None`
+    /// where the case named none.
+    ///
+    /// An `Option` rather than a `Scalar` defaulted to zero, because "the
+    /// case did not say" and "the case said zero" are different states and
+    /// the refusal in `common::refuse_unimplemented_blocks` has to tell them
+    /// apart - SPEC-LIT §13.4. Collapsing them with `unwrap_or(0.0)` is what
+    /// this field used to do, and it was read by nobody at all.
+    pub max_co: Option<Scalar>,
 }
 
 /// A window region, resolved to cell indices against the block's own node
@@ -1036,6 +1091,13 @@ pub struct LoweredCase {
 
     pub nu: Scalar,
     pub fluid: ScalarTransportCoeffs,
+    /// `physics.fluid.PrtModel`, resolved - SPEC-LIT S37.4. Kept beside
+    /// [`Self::fluid`] rather than inside it because
+    /// [`ScalarTransportCoeffs`] is also what `ofgpu-buoyant`/`ofgpu-plume`
+    /// carry, and neither implements S37: a field there would be a setting
+    /// those two accepted and ignored, which is the S13.4 defect this
+    /// project keeps finding.
+    pub prt_model: PrtModel,
     pub buoyancy: BuoyancyCoeffs,
     pub wall: WallFunctionCoeffs,
     pub turbulence_model: Option<String>,
@@ -2070,6 +2132,14 @@ impl JsonCase {
             pr: self.physics.fluid.pr as Scalar,
             prt: self.physics.fluid.prt as Scalar,
         };
+        // SPEC-LIT S37.4. Absent is `constant`, which is what every case
+        // written before S37 existed means; an unrecognised spelling is a
+        // S13.4 error naming both, resolved HERE rather than at the point of
+        // use so a case that names it is refused before any GPU work starts.
+        let prt_model = match &self.physics.fluid.prt_model {
+            Some(w) => PrtModel::parse("physics.fluid.PrtModel", w)?,
+            None => PrtModel::Constant,
+        };
         let buoyancy = match self.physics.buoyancy {
             BuoyancyModel::DensityRatio => BuoyancyCoeffs {
                 g: to_vec3(self.physics.gravity),
@@ -2173,18 +2243,34 @@ impl JsonCase {
             .map(|t| t.wall_treatment)
             .unwrap_or_default();
 
+        // Which dissipation variable this case's MODEL transports fills the
+        // one dissipation slot of `TurbulenceControls` - the same rule, and
+        // the same reason, as `crate::io::case::dissipation_key`. This used
+        // to be `"epsilon"` unconditionally for the solver and
+        // epsilon-then-omega for the relaxation, so a `kOmega` JSONC case
+        // took `solvers[match=epsilon]` for its omega equation.
+        let model_name = self
+            .turbulence
+            .as_ref()
+            .map(|t| t.model.as_str())
+            .unwrap_or("");
+        let diss = crate::io::case::dissipation_from_model(model_name).unwrap_or_else(|| {
+            if self.numerics.div.contains_key("div(phi,omega)")
+                && !self.numerics.div.contains_key("div(phi,epsilon)")
+            {
+                "omega"
+            } else {
+                "epsilon"
+            }
+        });
+
         let mut turb = TurbulenceControls::default();
         turb.k_solver = solver_for(&self.numerics.solvers, "k")?;
-        turb.epsilon_solver = solver_for(&self.numerics.solvers, "epsilon")?;
+        turb.epsilon_solver = solver_for(&self.numerics.solvers, diss)?;
         if let Some(v) = self.numerics.relaxation.get("k") {
             turb.k_relax = *v as Scalar;
         }
-        if let Some(v) = self
-            .numerics
-            .relaxation
-            .get("epsilon")
-            .or_else(|| self.numerics.relaxation.get("omega"))
-        {
+        if let Some(v) = self.numerics.relaxation.get(diss) {
             turb.eps_relax = *v as Scalar;
         }
 
@@ -2219,18 +2305,13 @@ impl JsonCase {
         turb.div_scheme = kk.scheme;
         turb.bounded_convection = kk.bounded;
 
-        // epsilon and omega never coexist - same reasoning and same
-        // fallback order as `read_fv_schemes`'s `eps_key`: the key that is
-        // PRESENT decides which is looked up, `div(phi,epsilon)` when
-        // neither is (so a case solving neither still gets a real key name
-        // in its own error rather than a silently-picked default).
-        let eps_key = if div.contains_key("div(phi,omega)") && !div.contains_key("div(phi,epsilon)")
-        {
-            "div(phi,omega)"
-        } else {
-            "div(phi,epsilon)"
-        };
-        let ee = div.get(eps_key).copied().unwrap_or(default_div);
+        // The MODEL decides which entry fills the one dissipation slot -
+        // `crate::io::case::dissipation_key` records what asking the
+        // dictionary instead used to cost. `cases/plume.jsonc` names BOTH
+        // `div(phi,epsilon)` and `div(phi,omega)`, exactly as the OpenFOAM
+        // case it mirrors does.
+        let eps_key = format!("div(phi,{diss})");
+        let ee = div.get(&eps_key).copied().unwrap_or(default_div);
         turb.eps_div_scheme = ee.scheme;
         turb.eps_bounded_convection = ee.bounded;
 
@@ -2274,7 +2355,7 @@ impl JsonCase {
             end_time: self.run.end_time as Scalar,
             delta_t: self.run.delta_t as Scalar,
             adjust_time_step: self.run.adjust_time_step,
-            max_co: self.run.max_co.unwrap_or(0.0) as Scalar,
+            max_co: self.run.max_co.map(|v| v as Scalar),
         };
 
         // ---- fields ---------------------------------------------------
@@ -2539,6 +2620,7 @@ impl JsonCase {
             windows,
             nu,
             fluid,
+            prt_model,
             buoyancy,
             wall,
             turbulence_model,
@@ -3936,37 +4018,24 @@ mod tests {
             if path.extension().and_then(|e| e.to_str()) == Some("jsonc") {
                 let case = read_case_jsonc(&path)
                     .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                if let Err(e) = case.lower() {
-                    // SPEC-LIT §32's own open item: `channelPeriodicLowRe`
-                    // and `channelThermalLowRe` still name `wallTreatment
-                    // lowRe` under `kEpsilon` (`channelPeriodicFluxLowRe`
-                    // moved to `LaunderSharmaKE`, SPEC-LIT §33, and lowers
-                    // cleanly on the first try), which
-                    // `crate::io::case::validate_low_re_wall_treatment` now
-                    // correctly refuses in strict mode (§32's second finding
-                    // - no model this solver implements is valid at `lowRe`
-                    // today; see `docs/07-fire-solver.md` §1.1's own "OPEN"
-                    // subsection). That is a DIFFERENT contract from the one
-                    // THIS test exercises, so a case blocked on exactly that
-                    // finding is retried under `-permissive` and must still
-                    // lower cleanly; any OTHER failure is the transient-
-                    // algorithm regression this test exists to catch, and is
-                    // not swallowed.
-                    let msg = e.to_string();
-                    assert!(
-                        msg.contains("wallTreatment (\"lowRe\" together with turbulence.model)"),
-                        "{}: {e}",
-                        path.display()
-                    );
-                    crate::io::contract::set_permissive(true);
-                    let retry = case.lower();
-                    crate::io::contract::set_permissive(false);
-                    retry.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                }
+                // STRICT mode, with nothing excepted. Two cases used to be
+                // retried under `-permissive` here because they named
+                // `wallTreatment lowRe` with `kEpsilon`, which SPEC-LIT §33
+                // refuses; they have since been retired to `cases/retired/`
+                // (SPEC-LIT §13.4.3), which this walk does not descend into.
+                // The escape hatch went with them, so this test now says what
+                // `cases/README.md` says: every `.jsonc` at the top level of
+                // `cases/` lowers cleanly as shipped. A new case that does not
+                // fails here rather than in a licensee's fresh clone.
+                case.lower().unwrap_or_else(|e| panic!("{}: {e}", path.display()));
                 checked += 1;
             }
         }
-        assert!(checked >= 4, "expected several .jsonc cases under {}, found {checked}", cases_dir.display());
+        assert!(
+            checked >= 4,
+            "expected several .jsonc cases under {}, found {checked}",
+            cases_dir.display()
+        );
     }
 
     // ---- SPEC-LIT §18/§31.1: sources[] --------------------------------------
@@ -4016,6 +4085,86 @@ mod tests {
         let case = read_case_jsonc(&path);
         let _ = std::fs::remove_file(&path);
         case
+    }
+
+    /// SPEC-LIT §37.4 through the JSONC route, end to end: the entry is
+    /// recognised, absent means `constant`, and an unrecognised spelling comes
+    /// back as a §13.4 error NAMING the alternatives rather than as serde's
+    /// "unknown variant" - which is why it is a `String` in [`JsonFluid`] and
+    /// not an enum.
+    #[test]
+    fn the_prt_model_lowers_and_an_unknown_spelling_names_the_alternatives() {
+        let _g = crate::io::contract::permissive_test_guard();
+
+        fn case_with_fluid(fluid: &str) -> Result<JsonCase> {
+            let text = format!(
+                r#"{{
+                    "name": "prtModelTest",
+                    "mesh": {{
+                        "kind": "cartesian",
+                        "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                        "cells": [4, 6, 8],
+                        "boundaries": {{
+                            "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                            "ymax": "yb", "zmin": "za", "zmax": "zb"
+                        }}
+                    }},
+                    "physics": {{
+                        "gravity": [0,0,0],
+                        "fluid": {fluid},
+                        "buoyancy": "densityRatio"
+                    }},
+                    "patches": [ {{ "match": ".*", "kind": "wall" }} ],
+                    "initial": {{ "U": [0,0,0], "p": 0.0 }},
+                    "numerics": {{
+                        "algorithm": {{ "kind": "SIMPLE" }},
+                        "ddt": "steadyState",
+                        "div": {{ "default": "Gauss upwind" }},
+                        "grad": "Gauss linear",
+                        "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                        "solvers": []
+                    }},
+                    "run": {{ "endTime": 1.0, "deltaT": 1.0 }}
+                }}"#
+            );
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("case_json_prt_test_{}_{n}.jsonc", std::process::id()));
+            std::fs::write(&path, text).unwrap();
+            let case = read_case_jsonc(&path);
+            let _ = std::fs::remove_file(&path);
+            case
+        }
+
+        // Absent: `constant`, which is what every case written before S37 means.
+        let plain = case_with_fluid(r#"{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }"#)
+            .expect("parses")
+            .lower()
+            .expect("lowers");
+        assert_eq!(plain.prt_model, PrtModel::Constant);
+
+        // Named: selected.
+        let kc = case_with_fluid(
+            r#"{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "PrtModel": "KaysCrawford", "TRef": 293.15 }"#,
+        )
+        .expect("parses")
+        .lower()
+        .expect("lowers");
+        assert_eq!(kc.prt_model, PrtModel::KaysCrawford);
+
+        // Misspelled: a S13.4 error, naming the entry, the value and the menu.
+        let case = case_with_fluid(
+            r#"{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "PrtModel": "kaysCrawfordJischa", "TRef": 293.15 }"#,
+        )
+        .expect("parses");
+        let err = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to refuse an unknown PrtModel"),
+        };
+        assert!(err.contains("physics.fluid.PrtModel"), "{err}");
+        assert!(err.contains("kaysCrawfordJischa"), "{err}");
+        assert!(err.contains("constant") && err.contains("KaysCrawford"), "{err}");
     }
 
     /// No `sources` key at all lowers to an empty list - every case this

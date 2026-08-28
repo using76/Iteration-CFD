@@ -58,6 +58,23 @@
 //! `-noPotential`, and the `max |sum_f phi|` line printed at start-up is the
 //! difference between the two: 1e-18 against 1e-2 on the plume case.
 //!
+//! # What the case decides, and what the command line does
+//!
+//! The temperature equation is discretised by the entries that NAME `T` -
+//! `divSchemes/div(phi,T)`, `gradSchemes/grad(T)`,
+//! `laplacianSchemes/laplacian(alphaEff,T)` (falling back to
+//! `snGradSchemes`), `relaxationFactors/equations/T` and `solvers/T` - all
+//! through `common::CaseNumerics`, and all printed at start-up beside
+//! `print_effective_settings`'s turbulence block. Until this was fixed the
+//! first three were `div(phi,k)`'s and `gradSchemes/default`: SPEC-LIT
+//! S13.4.1's fifth instance, see `read_t_controls`.
+//!
+//! `SIMPLE`/`PIMPLE`/`PISO` `residualControl` is honoured, on the INITIAL
+//! residuals of `k`, `epsilon` and `T`; in transient mode it stops the OUTER
+//! correctors of a step rather than the run. It is refused in combination
+//! with `-fixedIters` or `-graph`, where no residual is read back at all and
+//! the test would therefore be met by a field of zeros.
+//!
 //! One outer iteration is `KEpsilon::correct` followed by
 //! `ScalarTransport::correct`, and neither touches the host. `-graph` exploits
 //! that: it records the work once and replays the recording, so the driver
@@ -112,10 +129,11 @@ use ofgpu::field_setup::{
 };
 use ofgpu::io::case::{
     find_start_time, format_time_name, model_coeff, read_case_controls, CaseControls,
-    SolverControls, TurbulenceControls,
+    ResidualControl, SolverControls, TurbulenceControls,
 };
 use ofgpu::io::dict::FoamDict;
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
+use ofgpu::io::schemes::DivEntry;
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::models::{KEpsilon, KEpsilonCoeffs};
 use ofgpu::turbulence::{BuoyancyProduction, C3Mode};
@@ -129,7 +147,7 @@ use ofgpu::{Error, Gpu, GpuMesh, Graph, HostMesh, Label, Result, Scalar};
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{atoi, device_banner, g, next_arg, sci};
+use common::{atoi, device_banner, g, next_arg, sci, CaseNumerics};
 
 /// Units of work run the ordinary way before a graph is captured.
 ///
@@ -517,27 +535,52 @@ fn read_prandtl(case_dir: &Path, cc: &CaseControls) -> Result<ScalarTransportCoe
     Ok(c)
 }
 
-/// `fvSolution`'s `solvers/T` and `relaxationFactors/equations/T`, folded into
-/// the copy of the controls the temperature equation will use.
+/// Everything the case says about the TEMPERATURE equation, by the entries
+/// that name `T` and no other.
 ///
-/// [`ScalarTransport`] reads its linear solver out of `k_solver` and its
-/// relaxation out of `k_relax`, because `TurbulenceControls` has no slot for a
-/// passive scalar. Overwriting exactly those two on a *copy* is how a case
-/// gives `T` its own settings without disturbing the model's.
-fn read_t_controls(case_dir: &Path, base: &TurbulenceControls) -> Result<TurbulenceControls> {
+/// [`ScalarTransport`] reads its linear solver out of `k_solver`, its
+/// relaxation out of `k_relax` and its gradient and `snGrad` out of the same
+/// [`TurbulenceControls`] the turbulence models use, because that struct has
+/// no slot for a passive scalar. Overwriting exactly those fields on a *copy*
+/// is how a case gives `T` its own settings without disturbing the model's.
+///
+/// **This function is the FIFTH instance of SPEC-LIT §13.4.1's defect, fixed.**
+/// It used to read `solvers/T` and `relaxationFactors/equations/T` and stop,
+/// so `t.div_scheme`/`t.bounded_convection` were still `div(phi,k)`'s and
+/// `t.grad_scheme` was still `gradSchemes/default`. The temperature equation
+/// was therefore discretised by the TURBULENCE equation's entry - rule (a) of
+/// §13.4.1, the same line `read_simple_controls` in `src/bin/buoyant.rs`
+/// records as instance 3 - and `div(phi,T)` was inert: two runs of this driver
+/// differing only in it wrote a bit-identical `T`, while turning `div(phi,k)`
+/// moved `T`'s mass-weighted mean by a quarter.
+///
+/// The convection entry comes back separately rather than through
+/// `t.div_scheme`, because [`ScalarTransport::set_convection`] is the seam the
+/// library provides for exactly this and `RasCore` never looks at
+/// `ctrl.div_scheme` for a scalar it was given a `DivEntry` for.
+fn read_t_controls(
+    num: &CaseNumerics<'_>,
+    base: &TurbulenceControls,
+) -> Result<(TurbulenceControls, DivEntry)> {
+    let t_div = num.div("div(phi,T)")?;
+
     let mut t = *base;
+    t.k_solver = num.solver("T", base.k_solver)?;
+    t.k_relax = num.relax("T", base.k_relax)?;
+    // The ENERGY equation's gradient and laplacian, by their own keys. The
+    // gradient is read by any `div(phi,T)` scheme that carries a deferred
+    // correction or a limiter (SPEC-LIT §11.1, §11.2); the `snGrad` is §2.4's
+    // non-orthogonal correction on `laplacian(alphaEff,T)`.
+    t.grad_scheme = num.grad("grad(T)")?;
+    t.sn_grad = num.sn_grad("laplacian(alphaEff,T)")?;
+    // Kept in step deliberately: `div_scheme`/`bounded_convection` on this
+    // copy are what `ScalarTransport::new` seeds `conv` from before
+    // `set_convection` is called, and leaving them on the k equation's entry
+    // would make the struct disagree with the equation it is used for.
+    t.div_scheme = t_div.scheme;
+    t.bounded_convection = t_div.bounded;
 
-    let p = case_dir.join("system").join("fvSolution");
-    if !p.exists() {
-        return Ok(t);
-    }
-    let d = FoamDict::read(&p)?;
-
-    ofgpu::io::case::read_solver_controls(&mut t.k_solver, &d, "T")?;
-
-    t.k_relax = d.scalar("relaxationFactors/equations/T", t.k_relax);
-
-    Ok(t)
+    Ok((t, t_div))
 }
 
 /// Every linear solver switched into the transfer-free mode.
@@ -640,6 +683,9 @@ struct Transient {
     /// old single-directory habit still works in transient mode; the interval
     /// writes are always named by their own time.
     final_name: String,
+    /// `SIMPLE`/`PIMPLE`/`PISO` `residualControl`. In transient mode it stops
+    /// the OUTER correctors of a step (§14), never the run.
+    residual_control: ResidualControl,
 }
 
 /// What the summary block needs out of the loop.
@@ -709,10 +755,18 @@ fn one_step(
     heat: &mut ScalarTransport<'_>,
     flow: &FlowState,
     outer: Label,
+    rc: &ResidualControl,
 ) -> Result<Residuals> {
     let mut r = Residuals::default();
     for _ in 0..outer.max(1) {
         r = one_iteration(gpu, model, heat, flow)?;
+        // SPEC-LIT §13.4 and §14: in a transient run `residualControl` stops
+        // the OUTER correctors of the step, which is what PIMPLE's own entry
+        // means; the run itself still ends on `-endTime`. Empty - every case
+        // in this tree - leaves the loop exactly as it was.
+        if !rc.is_empty() && rc.all_satisfied(&r.by_field()) {
+            break;
+        }
     }
     Ok(r)
 }
@@ -727,6 +781,16 @@ struct Residuals {
     k_iters: usize,
     t_res: Scalar,
     t_iters: usize,
+}
+
+impl Residuals {
+    /// The three INITIAL residuals, keyed by the field each belongs to -
+    /// exactly the shape `ResidualControl::all_satisfied` tests. `T` is in
+    /// the list because `ofgpu-plume` solves for it: a case writing
+    /// `residualControl { T 1e-6; }` names an equation this driver has.
+    fn by_field(&self) -> [(&'static str, Scalar); 3] {
+        [("k", self.k_res), ("epsilon", self.eps_res), ("T", self.t_res)]
+    }
 }
 
 fn print_residuals(it: Label, r: &Residuals, change: Scalar) {
@@ -754,6 +818,7 @@ fn run_per_launch(
     heat: &mut ScalarTransport<'_>,
     flow: &FlowState,
     ctrl: &TurbulenceControls,
+    rc: &ResidualControl,
     n_iters: Label,
 ) -> Result<Label> {
     let every = ctrl.convergence_check_every.max(1);
@@ -767,8 +832,21 @@ fn run_per_launch(
             let change = model.convergence_measure(gpu)?;
             print_residuals(it, &r, change);
 
-            if it > 1 && change < ctrl.convergence_tol {
-                println!("converged");
+            // SPEC-LIT §13.4 / the case's own `residualControl`, on the
+            // INITIAL residuals - the residual of the system as it stood
+            // before this iteration's solve, which is what measures the OUTER
+            // iteration. `ofgpu-k-epsilon` and `ofgpu-k-omega` test exactly
+            // these two entries; this driver adds `T`, because it solves for
+            // one. Where the case gives no `residualControl` the run falls
+            // back to the max-relative-change measure it always used, and
+            // says which of the two stopped it.
+            if !rc.is_empty() {
+                if it > 1 && rc.all_satisfied(&r.by_field()) {
+                    println!("converged: every residualControl entry met");
+                    break;
+                }
+            } else if it > 1 && change < ctrl.convergence_tol {
+                println!("converged: max relative change below {}", g(f64::from(ctrl.convergence_tol)));
                 break;
             }
         }
@@ -896,7 +974,7 @@ fn run_transient(
                 let m = &mut *model;
                 let h = &mut *heat;
                 gpu.capture(move |_| {
-                    one_step(gpu, m, h, flow, tr.outer_iters)?;
+                    one_step(gpu, m, h, flow, tr.outer_iters, &ResidualControl::default())?;
                     Ok(())
                 })?
             };
@@ -924,7 +1002,7 @@ fn run_transient(
                 gr.launch()?;
                 Residuals::default()
             }
-            None => one_step(gpu, model, heat, flow, tr.outer_iters)?,
+            None => one_step(gpu, model, heat, flow, tr.outer_iters, &tr.residual_control)?,
         };
 
         let t = step as f64 * tr.dt;
@@ -1078,7 +1156,13 @@ fn run(o: &Options) -> Result<()> {
         }
     }
 
-    let mut t_ctrl = read_t_controls(&o.case_dir, &cc.turb)?;
+    // SPEC-LIT §13.4.1: ONE reader, answering per equation and by that
+    // equation's own key. `ofgpu-plume` takes an OpenFOAM case directory
+    // only, so the JSONC half is `None`; the point of going through
+    // `CaseNumerics` anyway is that the day it takes both, this call site
+    // does not change.
+    let num = CaseNumerics::read(&o.case_dir, &cc, None)?;
+    let (mut t_ctrl, t_div) = read_t_controls(&num, &cc.turb)?;
 
     if o.fixed_iters > 0 {
         // The genuinely transfer-free mode, so the residual read-back goes
@@ -1092,6 +1176,37 @@ fn run(o: &Options) -> Result<()> {
             make_fixed(sc, o.fixed_iters);
         }
     }
+
+    // SPEC-LIT §13.4: `residualControl` IS honoured by this driver (see
+    // `run_per_launch` and `one_step`), and it is tested on the INITIAL
+    // residual of each linear solve. `-fixedIters` turns `report_residuals`
+    // off and `-graph` never reads one back at all, so under either flag
+    // every residual `all_satisfied` would see is a hard zero - the test
+    // would pass on iteration two of every run. A setting that is read,
+    // stored and cannot be tested is precisely the inert setting §13.4.1 is
+    // about, so the COMBINATION is refused by name rather than silently
+    // producing a converged-looking run.
+    if !cc.residual_control.is_empty() && (o.fixed_iters > 0 || o.graph) {
+        let flag = if o.fixed_iters > 0 { "-fixedIters" } else { "-graph" };
+        let list: Vec<String> =
+            cc.residual_control.iter().map(|(f, t)| format!("{f} {t:e}")).collect();
+        ofgpu::io::contract::unsupported_note(
+            "residualControl",
+            &list.join(", "),
+            &[],
+            &format!(
+                "{flag} leaves every initial residual at zero (SolverControls::report_residuals is off), so a residual test would be met on the second iteration of any run. Drop {flag}, or drop residualControl and stop on -iters"
+            ),
+            "no residual-based stopping - the run ends on -iters/-endTime",
+            (),
+        )?;
+    }
+
+    // SPEC-LIT §13.4.2: the settings this run will use, per equation, before
+    // any of them is used. `ofgpu-k-epsilon`, `ofgpu-k-omega` and
+    // `ofgpu-buoyant` have printed this block for as long as it has existed;
+    // `ofgpu-plume` - the driver with the extra equation - did not.
+    ofgpu::io::case::print_effective_settings(&cc);
 
     let d = KEpsilonCoeffs::default();
     let coeffs = KEpsilonCoeffs {
@@ -1119,6 +1234,24 @@ fn run(o: &Options) -> Result<()> {
         g(f64::from(t_coeffs.pr)),
         g(f64::from(t_coeffs.prt)),
         g(f64::from(cc.nu / t_coeffs.pr))
+    );
+
+    // SPEC-LIT §13.4.2: say what the ENERGY equation will actually be
+    // discretised with, per entry and by that entry's own key. Printed
+    // separately from `print_effective_settings`'s turbulence block precisely
+    // because the two used to be the same numbers - see `read_t_controls`.
+    println!(
+        "{}",
+        common::equation_settings_line(
+            "T",
+            "laplacian(alphaEff,T)",
+            t_div,
+            t_ctrl.grad_scheme,
+            t_ctrl.sn_grad,
+            t_ctrl.n_non_orth_correctors,
+            t_ctrl.k_relax,
+            &t_ctrl.k_solver,
+        )
     );
 
     // ---- fields -----------------------------------------------------------
@@ -1249,6 +1382,10 @@ fn run(o: &Options) -> Result<()> {
     }
 
     let mut heat = ScalarTransport::new(&gpu, &hm, &mesh, "T", t_coeffs, t_ctrl)?;
+    // SPEC-LIT §11.7 and §13.4.1(a): the ENERGY equation's own `divSchemes`
+    // entry. Without this line `ScalarTransport::new`'s seed stands, which is
+    // `div(phi,k)` - one equation's entry driving another.
+    heat.set_convection(t_div);
     setup_scalar_field(&gpu, heat.field_mut(), &raw_t, &hm)?;
 
     update_inlet_outlet(&gpu, model.k_mut(), &phi, &hm)?;
@@ -1294,6 +1431,7 @@ fn run(o: &Options) -> Result<()> {
             } else {
                 o.write_time.clone()
             },
+            residual_control: cc.residual_control.clone(),
         };
 
         println!(
@@ -1369,7 +1507,7 @@ fn run(o: &Options) -> Result<()> {
     let done = if o.graph {
         run_graph(&gpu, &mut model, &mut heat, &flow, &cc.turb, n_iters)?
     } else {
-        run_per_launch(&gpu, &mut model, &mut heat, &flow, &cc.turb, n_iters)?
+        run_per_launch(&gpu, &mut model, &mut heat, &flow, &cc.turb, &cc.residual_control, n_iters)?
     };
 
     gpu.sync()?;
@@ -1525,5 +1663,307 @@ mod plume_tests {
         assert!(o.do_write);
         assert!(!o.graph);
         assert!(o.write_time.is_empty());
+    }
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT 13.4.1's standing requirement, for this driver
+    // ----------------------------------------------------------------------
+    //
+    // This driver is INSTANCE 5. `read_t_controls` read `solvers/T` and
+    // `relaxationFactors/equations/T` and stopped, so the temperature
+    // equation was assembled with `div(phi,k)`'s scheme and `bounded` flag
+    // and with `gradSchemes/default` - one equation's entry read for another,
+    // rule (a) of 13.4.1 and the exact mistake `read_simple_controls` in
+    // `src/bin/buoyant.rs` records as instance 3.
+    //
+    // Measured on a generated 8x8x8 plume before the fix, 12 iterations:
+    //
+    //   div(phi,T) bounded Gauss upwind -> Gauss linear   T mean 409.334 both
+    //   div(phi,k) bounded Gauss upwind -> Gauss linear   T mean 409.334 -> 511.336
+    //
+    // The entry naming `T` moved nothing; the entry naming `k` moved `T` by
+    // a quarter. After the fix the first pair differs (409.334 -> 400.936)
+    // and the second moves `T` only through `nu_t` feeding `alpha_eff`,
+    // which is the physical coupling rather than a leaked discretisation.
+
+    use common::knobs::{apply, assert_none_inert, scratch_dir, written_state, Knob, NO_PRE};
+    use ofgpu::blockgen::{write_case, CaseKind};
+
+    /// Build a fresh 8x8x8 plume case, apply `k` if `side` is set, run
+    /// `ofgpu-plume`'s own `run`, and return everything it wrote.
+    ///
+    /// The DRIVER's `parse` + `run`, not a re-derivation of them: a test that
+    /// reconstructs the control structs itself is exactly the test that
+    /// passed through all five instances of this defect.
+    fn run_knob(k: &Knob, side: bool, tag: &str) -> Vec<(String, String)> {
+        let dir = scratch_dir(tag);
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 8, 8, 8).expect("generate the plume case");
+        apply(&case, k, side);
+
+        let args = argv(&[
+            case.to_string_lossy().as_ref(),
+            "-iters",
+            "12",
+            "-check",
+            "100",
+        ]);
+        let o = parse(&args).expect("the knob command line must parse");
+        run(&o).expect("the knob case must run");
+
+        // `controlDict`'s endTime is 1 and `-iters` does not move the write
+        // name, so the run writes `<case>/1`.
+        let out = written_state(&case.join("1"));
+        assert!(!out.is_empty(), "the run wrote nothing to compare");
+        out
+    }
+
+    /// **The standing test SPEC-LIT 13.4.1 requires of every setting this
+    /// driver claims to honour.**
+    ///
+    /// `laplacianSchemes`/`snGradSchemes` is deliberately absent and the
+    /// reason is arithmetic, not convenience: 2.4's correction is
+    /// `k = Sf - |Sf|^2/(Sf.d) d`, identically the zero vector on an
+    /// orthogonal mesh, and every mesh `blockgen` builds is a rectangular
+    /// Cartesian box. `sn_grad_for_t_comes_from_the_laplacian_entry` asserts
+    /// it on the controls instead, which is 13.4.1's one admissible
+    /// exception.
+    #[test]
+    fn every_wired_setting_changes_what_the_run_writes() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+
+        let cases: Vec<Knob> = vec![
+            Knob {
+                label: "divSchemes/div(phi,T)",
+                file: "system/fvSchemes",
+                from: "div(phi,T)       bounded Gauss upwind;",
+                to: "div(phi,T)       Gauss linear;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "divSchemes/div(phi,k)",
+                file: "system/fvSchemes",
+                from: "div(phi,k)       bounded Gauss upwind;",
+                to: "div(phi,k)       Gauss linear;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "divSchemes/div(phi,epsilon)",
+                file: "system/fvSchemes",
+                from: "div(phi,epsilon) bounded Gauss upwind;",
+                to: "div(phi,epsilon) Gauss linear;",
+                pre: NO_PRE,
+            },
+            // `grad(T)` bites only through a scheme that READS a gradient, so
+            // the knob turns two entries at once - which is legitimate: what
+            // is being demonstrated is that `gradSchemes/grad(T)` is not
+            // inert, and a limiter on a scheme with no gradient could not
+            // demonstrate anything at all. The companion assertion that it
+            // reaches `T` and not `k` is
+            // `grad_t_reaches_the_energy_equation_and_not_the_k_equation`.
+            Knob {
+                label: "gradSchemes/grad(T)",
+                file: "system/fvSchemes",
+                from: "    default         Gauss linear;\n}\n\ndivSchemes\n{\n    default         none;\n    div(phi,U)       Gauss linearUpwind grad(U);\n    div(phi,T)       bounded Gauss upwind;",
+                to: "    default         Gauss linear;\n    grad(T)         cellLimited Gauss linear 1;\n}\n\ndivSchemes\n{\n    default         none;\n    div(phi,U)       Gauss linearUpwind grad(U);\n    div(phi,T)       Gauss linearUpwind grad(T);",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "relaxationFactors/equations/T",
+                file: "system/fvSolution",
+                from: "        T               0.7;",
+                to: "        T               0.3;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "relaxationFactors/equations/k",
+                file: "system/fvSolution",
+                from: "        k               0.7;",
+                to: "        k               0.3;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "solvers/T/tolerance",
+                file: "system/fvSolution",
+                from: "    T\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-08;\n        relTol          0.01;",
+                to: "    T\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-02;\n        relTol          0.5;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "SIMPLE/nNonOrthogonalCorrectors",
+                file: "system/fvSolution",
+                from: "    nNonOrthogonalCorrectors 0;",
+                to: "    nNonOrthogonalCorrectors 2;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties Prt",
+                file: "constant/physicalProperties",
+                from: "Prt             0.85;",
+                to: "Prt             0.45;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties Pr",
+                file: "constant/physicalProperties",
+                from: "Pr              0.71;",
+                to: "Pr              0.21;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "constant/physicalProperties nu",
+                file: "constant/physicalProperties",
+                from: "nu              [0 2 -1 0 0 0 0] 1.5e-05;",
+                to: "nu              [0 2 -1 0 0 0 0] 1.5e-04;",
+                pre: NO_PRE,
+            },
+        ];
+
+        let mut inert: Vec<&str> = Vec::new();
+        for k in &cases {
+            let a = run_knob(k, false, "a");
+            let b = run_knob(k, true, "b");
+            if a == b {
+                inert.push(k.label);
+            }
+        }
+        assert_none_inert(&inert);
+    }
+
+    /// Rule (a) of 13.4.1, on the controls rather than on two runs: the
+    /// ENERGY equation's entries must come from the keys that name `T`, and
+    /// moving one must not move the turbulence equations'.
+    ///
+    /// The same `read_t_controls` `run` calls, never a re-derivation.
+    #[test]
+    fn grad_t_reaches_the_energy_equation_and_not_the_k_equation() {
+        let dir = scratch_dir("gradT");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate");
+        apply(
+            &case,
+            &Knob {
+                label: "gradSchemes/grad(T)",
+                file: "system/fvSchemes",
+                from: "gradSchemes\n{\n    default         Gauss linear;\n}",
+                to: "gradSchemes\n{\n    default         Gauss linear;\n    grad(T)         leastSquares;\n}",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = read_case_controls(&case).expect("controls");
+        let num = CaseNumerics::read(&case, &cc, None).expect("numerics");
+        let (t_ctrl, _t_div) = read_t_controls(&num, &cc.turb).expect("T controls");
+
+        assert_eq!(
+            t_ctrl.grad_scheme.describe(),
+            "leastSquares",
+            "gradSchemes/grad(T) must reach the ENERGY equation's gradient"
+        );
+        assert_eq!(
+            cc.turb.grad_scheme.describe(),
+            "Gauss linear",
+            "grad(T) must NOT move the k/epsilon equations' gradient"
+        );
+    }
+
+    /// The other half of rule (a): `div(phi,T)` reaches `T` and `div(phi,k)`
+    /// does not, which is the line this driver got wrong.
+    #[test]
+    fn div_phi_t_reaches_the_energy_equation_by_its_own_name() {
+        let dir = scratch_dir("divT");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate");
+        apply(
+            &case,
+            &Knob {
+                label: "divSchemes/div(phi,T)",
+                file: "system/fvSchemes",
+                from: "div(phi,T)       bounded Gauss upwind;",
+                to: "div(phi,T)       Gauss linear;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = read_case_controls(&case).expect("controls");
+        let num = CaseNumerics::read(&case, &cc, None).expect("numerics");
+        let (_t_ctrl, t_div) = read_t_controls(&num, &cc.turb).expect("T controls");
+
+        assert_eq!(t_div.scheme, ofgpu::fv::DivScheme::Central);
+        assert!(!t_div.bounded, "the T entry lost its bounded prefix, so T must be unbounded");
+        assert_eq!(
+            cc.turb.k_conv(),
+            DivEntry { scheme: ofgpu::fv::DivScheme::Upwind, bounded: true },
+            "moving div(phi,T) must not move the k equation's entry"
+        );
+    }
+
+    /// 13.4.1's one admissible exception, stated: `snGrad` is identically
+    /// zero on every mesh `blockgen` builds, so the two-runs pair is an
+    /// arithmetic impossibility and the assertion is on the controls the
+    /// solver is CONSTRUCTED from - reached through the same function `run`
+    /// calls.
+    #[test]
+    fn sn_grad_for_t_comes_from_the_laplacian_entry() {
+        let dir = scratch_dir("snT");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate");
+        // `laplacianSchemes` names one and must WIN over `snGradSchemes` -
+        // `resolve_sn_grad`'s own rule, which this driver used to bypass by
+        // inheriting `cc.turb.sn_grad`.
+        apply(
+            &case,
+            &Knob {
+                label: "laplacianSchemes/default",
+                file: "system/fvSchemes",
+                from: "    default         Gauss linear corrected;",
+                to: "    default         Gauss linear uncorrected;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = read_case_controls(&case).expect("controls");
+        let num = CaseNumerics::read(&case, &cc, None).expect("numerics");
+        let (t_ctrl, _) = read_t_controls(&num, &cc.turb).expect("T controls");
+        assert_eq!(t_ctrl.sn_grad, ofgpu::fv::SnGradScheme::Uncorrected);
+    }
+
+    /// SPEC-LIT 13.4: `residualControl` IS honoured by this driver, and the
+    /// combination with `-fixedIters`/`-graph` - where no residual is ever
+    /// read back - is refused by name rather than silently converging on a
+    /// field of zeros.
+    #[test]
+    fn residual_control_with_fixed_iters_is_a_named_error() {
+        let dir = scratch_dir("rc");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate");
+        apply(
+            &case,
+            &Knob {
+                label: "SIMPLE/residualControl",
+                file: "system/fvSolution",
+                from: "    nNonOrthogonalCorrectors 0;",
+                to: "    nNonOrthogonalCorrectors 0;\n    residualControl { k 1e-6; epsilon 1e-6; T 1e-6; }",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = read_case_controls(&case).expect("controls");
+        assert!(
+            !cc.residual_control.is_empty(),
+            "the knob must actually put a residualControl in the case"
+        );
+
+        let args = argv(&[case.to_string_lossy().as_ref(), "-fixedIters", "3"]);
+        let o = parse(&args).expect("parse");
+        let e = run(&o).expect_err("residualControl with -fixedIters must be refused");
+        let msg = format!("{e}");
+        assert!(msg.contains("residualControl"), "the error must name the setting: {msg}");
+        assert!(msg.contains("-fixedIters"), "the error must name the conflict: {msg}");
     }
 }

@@ -69,6 +69,97 @@ extern "C" __global__ void energyKEff
     dst[i] = kMol + rhoF[i]*nutF[i]*cpOverPrt;
 }
 
+//- Kays-Crawford's variable turbulent Prandtl number, SPEC-LIT S37.
+//
+//  Written from:
+//    W. M. Kays, "Turbulent Prandtl number - where are we?", ASME J. Heat
+//      Transfer 116 (1994) 284-295, and Kays & Crawford, Convective Heat and
+//      Mass Transfer, 4th ed., ch. 13 - the correlation itself.
+//  No GPL-licensed source was consulted.
+//
+//  This is the DEVICE TWIN of src/energy.rs's `kays_crawford_prt`, evaluated
+//  in the rearranged form S37.2 derives (the same function, and the one that
+//  survives floating point):
+//
+//      Pe_t = (nu_t/nu) Pr
+//      u    = 1/(C Pe_t sqrt(Pr_t_inf))
+//      h(u) = (exp(-u) + u - 1)/u^2          -> 1/2 as u -> 0, 0 as u -> inf
+//      Pr_t = Pr_t_inf/(1/2 + h(u))
+//
+//  with the same two end branches, for the same two reasons: at Pe_t = 0
+//  (a resolved wall face under a low-Re model, where nu_t is pinned to zero)
+//  `u` is +inf and the direct form evaluates inf/inf = NaN; at small `u`
+//  (large Pe_t) `exp(-u) + u - 1` is a difference of numbers near 1 whose
+//  true value is u^2/2, so it is summed as its Taylor series instead.
+#ifdef OFGPU_SINGLE
+OFGPU_DEV ofscalar keffExp_(ofscalar a)  { return expf(a); }
+OFGPU_DEV ofscalar keffSqrt_(ofscalar a) { return sqrtf(a); }
+#else
+OFGPU_DEV ofscalar keffExp_(ofscalar a)  { return exp(a); }
+OFGPU_DEV ofscalar keffSqrt_(ofscalar a) { return sqrt(a); }
+#endif
+
+OFGPU_DEV ofscalar kaysCrawfordPrt
+(
+    ofscalar peT,
+    ofscalar c,
+    ofscalar prtInf,
+    ofscalar eps
+)
+{
+    const ofscalar a = keffSqrt_(prtInf);
+    const ofscalar x = c*peT;
+
+    // The Pe_t -> 0 branch, written as the NOT of the positive test so a NaN
+    // takes it too rather than propagating.
+    if (!((ofscalar)2*x*a > eps)) return (ofscalar)2*prtInf;
+
+    const ofscalar u = (ofscalar)1/(x*a);
+    ofscalar h;
+    if (u < (ofscalar)1e-2)
+    {
+        // h(u) = sum_{k>=0} (-u)^k/(k+2)!
+        h = (ofscalar)0.5 - u/(ofscalar)6 + u*u/(ofscalar)24
+          - u*u*u/(ofscalar)120 + u*u*u*u/(ofscalar)720;
+    }
+    else
+    {
+        h = (keffExp_(-u) + u - (ofscalar)1)/(u*u);
+    }
+    return prtInf/((ofscalar)0.5 + h);
+}
+
+//- k_eff on a face with a LOCAL Pr_t (SPEC-LIT S37.3):
+//
+//      k_eff = kMol + rho_f cp nu_t_f / Pr_t(Pe_t),   Pe_t = (nu_t_f/nu) Pr
+//
+//  Same two passes as energyKEff above (internal faces, then boundary faces),
+//  same inputs plus the three numbers the correlation needs - `nu` to form
+//  Pe_t, `pr`, and `prtInf` which is the case's own `Prt` read as the
+//  free-stream asymptote. `cp` arrives whole rather than as `cp/Pr_t`,
+//  because there is no longer one `Pr_t` to fold it into.
+extern "C" __global__ void energyKEffKaysCrawford
+(
+    ofscalar* __restrict__ dst,
+    const ofscalar* __restrict__ rhoF,
+    const ofscalar* __restrict__ nutF,
+    ofscalar kMol,
+    ofscalar cp,
+    ofscalar nu,
+    ofscalar pr,
+    ofscalar prtInf,
+    ofscalar c,
+    ofscalar eps,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofscalar nut = nutF[i];
+    const ofscalar prt = kaysCrawfordPrt(nut*pr/nu, c, prtInf, eps);
+    dst[i] = kMol + rhoF[i]*nut*cp/prt;
+}
+
 //- The target divergence of SPEC-LIT S25.1:
 //
 //      (div u)_target = Q/(rho*cp*T) - (1/(gamma*p0))*dp0dt
