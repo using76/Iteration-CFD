@@ -4,23 +4,27 @@
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
 
-//! Turbulence models - SPEC-LIT §6.1 and §6.2.
+//! Turbulence models - SPEC-LIT §6.1, §6.2 and §33.
 //!
 //! Written from:
 //!   Launder & Spalding, *Comput. Methods Appl. Mech. Eng.* 3 (1974) 269-289
 //!   Wilcox, *Turbulence Modeling for CFD*, DCW Industries - the 1988 form
-//!   ofgpu `SPEC-LIT.md` §6
+//!   Launder & Sharma, *Letters in Heat and Mass Transfer* 1 (1974) 131-138 -
+//!     the low-Reynolds-number extension of the first, SPEC-LIT §33
+//!   ofgpu `SPEC-LIT.md` §6, §33
 //! No GPL-licensed source was consulted.
 //!
-//! Each model is its own type, and the two share no trait. That is
-//! deliberate: a `dyn` dispatch has no place in a solver's inner loop, and
-//! the two models do not have the same interface anyway - one carries
-//! `epsilon` and the other `omega`, and pretending otherwise would mean a
-//! `dissipation_field()` accessor that means two different things. Where a
-//! caller genuinely wants uniformity - `src/bin/bench.rs` times them side by
-//! side - it declares a two-method trait of its own and pays one virtual call
-//! per *outer iteration*, which disappears into the hundred kernel launches
-//! it wraps.
+//! Each model is its own type, and none of them share a trait with each
+//! other. That is deliberate: a `dyn` dispatch has no place in a solver's
+//! inner loop, and the models do not have the same interface anyway - one
+//! carries `epsilon`, another `omega`, and pretending otherwise would mean a
+//! `dissipation_field()` accessor that means different things depending on
+//! which model answers it (`LaunderSharmaKE` carries `epsilon` too, but the
+//! quantity under that name is `epsilon_tilde` - see its own module doc).
+//! Where a caller genuinely wants uniformity - `src/bin/bench.rs` times them
+//! side by side - it declares a two-method trait of its own and pays one
+//! virtual call per *outer iteration*, which disappears into the hundred
+//! kernel launches it wraps.
 //!
 //! Which of them a case gets is [`registry`]'s job, and it is a real
 //! dispatch: `RAS { model ...; }` used to be read and thrown away, so the
@@ -36,15 +40,17 @@ pub mod coupled;
 pub mod k_epsilon;
 pub mod k_omega;
 pub mod k_omega_sst;
+pub mod launder_sharma;
 pub mod les;
 pub mod registry;
 
 pub use coupled::{
     BuoyancySettings, CombustionMixing, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst,
-    CoupledLaminar, CoupledLes, CoupledTurbulence, ThermalCtx,
+    CoupledLaminar, CoupledLaunderSharmaKE, CoupledLes, CoupledTurbulence, ThermalCtx,
 };
 pub use k_epsilon::{KEpsilon, KEpsilonCoeffs};
 pub use k_omega::{KOmega, KOmegaCoeffs};
+pub use launder_sharma::{f2, f_mu, mesh_resolution_report, LaunderSharmaKE, MeshResolutionReport};
 pub use k_omega_sst::{KOmegaSst, KOmegaSstCoeffs};
 pub use les::{Les, LesCoeffs, LesModel};
 pub use registry::{

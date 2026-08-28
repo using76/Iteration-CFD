@@ -187,6 +187,8 @@ cyclic 패치에는 적용되지 않습니다 — 모든 필드가 자동으로 
 | `channelThermalLowRe.jsonc` | `ofgpu-fire` | 위와 동일한 형상·유입 조건·벽온도, `mesh.grading`으로 벽법선 방향을 양쪽 벽 모두를 향해 two-sided grading(`expansion: 200`, 50칸, 첫 셀 높이 ≈ 2×10⁻⁵ m)하여 y+ 목표 ≈ 1(측정 0.43/0.89/1.02)을 노리는 `lowRe` 프리셋 — 벽은 순수 분자 저항의 평범한 `fixedValue`(SPEC-LIT §29.3: "lowRe는 해상된 서브레이어 자체의 분자 저항을 그대로 둔다"). 두 케이스의 벽 열유입 비율은 0.381(첫 시도의 0.095에서 4배 개선, 여전히 게이트는 열려 있음) — 자세한 내용은 `docs/07-fire-solver.md` §1.1 |
 | `channelPeriodicWF.jsonc` | `ofgpu-fire` | SPEC-LIT §31의 페리오딕 재시도, 메쉬 (a): 위 두 케이스와 같은 단면(0.04 m × 0.04 m)·`Tw`를 스트림방향 **cyclic**(`mesh.cyclic`, 0.08 m, 8칸)으로 바꾸고, 유입 대신 `sources[]` `momentumSource`(체적력 3.9 m/s²)로, 에너지는 `-heaterPower -6`(균일 도메인 열싱크)로 구동 — 벽법선 균일 6칸, `standard`/`thermalWallFunction`. 측정 y+ 40.25/41.73/43.41, 완전 수렴(`\|U\|` 잔차 1.3e-10) |
 | `channelPeriodicLowRe.jsonc` | `ofgpu-fire` | 위와 같은 페리오딕 덕트, 벽법선만 `channelThermalLowRe.jsonc`와 같은 two-sided grading(`expansion: 200`, 50칸) — `lowRe`/`fixedValue`. 같은 체적력, 그러나 **다른** 열싱크(`-heaterPower -60`) — 해상된 y+~0.3 서브레이어가 같은 싱크로는 `Tw` 근처까지 데워질 만큼 전도가 좋아서(§1.1의 상세 설명 참고), `-900`까지 올려 두 메쉬를 같은 ΔT로 맞춰 보려 했으나 도메인 코어가 160 K까지 식는 비물리적 결과가 나와 포기 — 측정 y+ 0.302/0.310/0.318, `\|U\|` 잔차는 ~1e-5에서 정체(양은 안정) |
+| `channelPeriodicFluxWF.jsonc` | `ofgpu-fire` | SPEC-LIT §32의 재설계된 게이트, 메쉬 (a): 위 페리오딕 덕트와 같은 형상·체적력이지만, 고정 벽온도 대신 고정 열유속(`fixedFluxTemperature`, `q = 500 W/m2`, 양쪽 가열벽)으로 바꾸고 `-heaterPower -3.2`(닫힌 형태 `-2 q_w A_wall`, 계산으로 나오는 값이지 맞춘 값이 아님)로 균형을 맞춤 — 이러면 두 메쉬가 각자의 ΔT를 스스로 예측하게 되어 Nu를 Dittus-Boelter/Gnielinski와 비교할 수 있음(§32.2). `standard`/`thermalWallFunction`, 측정 y+ 40.3/41.7/43.4, Nu = 50.41 — Gnielinski +2%, Dittus-Boelter −4%, 둘 다 안쪽(**게이트 닫힘**) |
+| `channelPeriodicFluxLowRe.jsonc` | `ofgpu-fire` | `channelPeriodicFluxWF.jsonc`의 해상 짝 — 동일 `q_w`, 동일 `-heaterPower -3.2`, 벽법선만 y+ ~ 1을 노리는 two-sided grading(`expansion: 200`, 50칸). `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행: 벽 근처 폭주(옛 진단, k가 336 m²/s²까지 발산)는 사라졌지만, 이 특정 3차원 덕트에서는 여전히 수렴하지 않음 — 벌크 속도가 0.24 m/s로 무너지고(짝 케이스는 3.51 m/s, 동일 메쉬의 층류 해는 14.8 m/s), 온도가 정상상태에 이르지 못함. 모형 자체의 벽법칙(u+ = y+, 로그 법칙)은 별도의 2차원 채널에서 1% 이내로 검증됨 — 파일 자체 헤더와 `docs/07-fire-solver.md` §1.1에 전체 진단이 있음 (**게이트 열려 있음, 새로운 이유**) |
 
 ```powershell
 cd ..\rust
@@ -201,6 +203,10 @@ cargo run --release --bin ofgpu-fire -- ..\cases\channelThermalLowRe.jsonc -iter
 # cases/channelPeriodicLowRe.jsonc 헤더와 docs/07-fire-solver.md §1.1을 보십시오.
 cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicWF.jsonc    -iters 3000  -check 3000 -heaterPower -6
 cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicLowRe.jsonc -iters 40000 -check 5000 -heaterPower -60
+
+# SPEC-LIT §32의 재설계된 게이트 — 고정 열유속, 두 케이스 모두 같은 -heaterPower.
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxWF.jsonc    -iters 3000  -check 1000 -heaterPower -3.2
+cargo run --release --bin ofgpu-fire -- ..\cases\channelPeriodicFluxLowRe.jsonc -iters 20000 -check 2000 -heaterPower -3.2
 ```
 
 자세한 화재 솔버 설명과 네 채널 케이스가 실제로 낸 벽 열유속·비율은

@@ -25,7 +25,7 @@ CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 �
 | 정밀도 | 배정밀도 기본, `single` 기능으로 단정밀도 |
 | 대상 | NVIDIA GPU |
 | 의존성 | cudarc, thiserror (선택적 AMGX) |
-| 검증 | 725개 단위 시험, 228개 수치 검증 항목 |
+| 검증 | 790개 단위 시험, 250개 수치 검증 항목 |
 
 ---
 
@@ -92,13 +92,13 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 
 | 구분 | 모형 |
 |---|---|
-| RANS | 표준 k-ε, Wilcox k-ω, Menter k-ω SST |
+| RANS | 표준 k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma 저레이놀즈수 k-ε (SPEC-LIT §33 — `wallTreatment lowRe`가 유효한 유일한 모형; 감쇠함수가 점성 서브레이어까지 적분되며, 해석적 `Re_t` 극한과 실제 채널 유동의 `u+`/`y+` 벽법칙 양쪽으로 검증됨) |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES 여과폭 | 체적 세제곱근, 최대 모서리 길이, Scotti 이방성 보정, van Driest 감쇠 |
 | LES 벽모형 | Werner–Wengle (1991) — 첫 셀 평균 속도로부터 적분·역해한 멱법칙, Newton 반복 없음; `standard`/`spalding` 프리셋이 LES에서는 이 모형 하나로 수렴, `lowRe`는 `nu_t,w = 0`, `rough`는 아직 없음(§13.4 오류로 명시) |
 | 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | 결합 솔버(`ofgpu-buoyant`, `ofgpu-fire`)의 난류 선택 | `ofgpu-buoyant`: `CoupledTurbulence` 트레이트로 케이스의 `RAS { model ...; }`/`simulationType`을 그대로 반영 — k-ε, k-ω, k-ω SST(벽거리 자동 계산), LES(Smagorinsky/WALE/Deardorff, §16 여과폭·van Driest 포함) 전부 실제로 그 모형을 구성함, 부력 생성 `G_b`도 모형별로 올바른 방정식에 배선됨(§17, §30.2). `ofgpu-fire`: 아직 k-ε만 지원 — 연소 혼합시간 종결식과 열 벽함수가 `epsilon`을 직접 요구하므로 다른 모형은 이름을 밝힌 §13.4 오류로 거부(조용한 대체 없음) |
-| 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1). `lowRe`는 추가로 벽 근처를 해석할 수 있는 난류 모형을 요구함 — `kEpsilon`/`kOmega`/`kOmegaSST` 어느 것도 그런 능력이 없으므로, 발산하도록 두는 대신 이름을 명시해 거부함 (SPEC-LIT §32) |
+| 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1). `lowRe`는 추가로 벽 근처를 해석할 수 있는 난류 모형을 요구함 — 그 목록에 있는 모형은 `LaunderSharmaKE`(SPEC-LIT §33) 하나뿐이며, `kEpsilon`/`kOmega`/`kOmegaSST`는 여전히 해당하지 않으므로 이 셋 아래에서 `lowRe`는 발산하도록 두는 대신 이름을 명시해 거부함 (SPEC-LIT §32) |
 | 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨. 고정 열유속 주기 덕트에서 Dittus-Boelter/Gnielinski 대비 **검증 완료** — 두 밴드 모두 안쪽인 +2%/−4% (SPEC-LIT §32) |
 | 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
 | 부력 생성 | G_b 항 (Rodi 1987, Henkes et al. 1991) |
@@ -349,15 +349,24 @@ Gnielinski (1976) 대비 Nusselt 수로 비교하면 벽함수 쪽 게이트가 
 `check_thermal_wall_function_gate_verdict_replay`가 이 측정치를 매 실행마다
 영구적으로 재현합니다.
 
-**다른 이유로 여전히 열려 있음.** 대응하는 해상 메쉬
-`cases/channelPeriodicFluxLowRe.jsonc`(동일한 `q_w`, y+ ~ 1까지 격자 조정)는
-수렴하지 않습니다 — 벽함수가 틀려서가 아니라, 표준 k-epsilon이 벽 근처
-감쇠가 전혀 없는 고Reynolds수 모형이라 메쉬 해상도와 무관하게 y+ ~ 30 아래에서
-무효하기 때문입니다. ofgpu는 이제 솔버가 발산하도록 조용히 두는 대신 실행
-전에 이를 잡아냅니다(`kEpsilon`/`kOmega`/`kOmegaSST` 모두 `lowRe` 벽 처리를
-이름을 밝혀 거부, §13.4) — 저Reynolds수 RAS 모형(`LaunderSharmaKE`, 인식은
-되지만 아직 미구현)에 막혀 있습니다. 전체 추적 과정(앞선 세 번의 이제는
-대체된 시도 포함)은 `docs/07-fire-solver.md` §1.1을 보십시오.
+**`LaunderSharmaKE`가 도입된 지금(SPEC-LIT §33), 다른 이유로 여전히 열려
+있음.** 모형 자체는 검증을 통과합니다 — 감쇠함수의 해석적 극한은
+정확하며(`ofgpu-validate`), 벽이 해상된 페리오딕 채널에서 실제로 돌려 보면
+점성 서브레이어 `u+ = y+`를 1% 이내로, 로그 법칙을 y+ ≈ 30–35에서 1% 이내로
+재현합니다 — SPEC-LIT §33.3이 요구하는 벽법칙 검증입니다. 하지만 대응하는
+해상 메쉬 `cases/channelPeriodicFluxLowRe.jsonc`(동일한 `q_w`, y+ ~ 1까지
+격자 조정)는 자신의 3차원 덕트 형상 위에서는 여전히 쓸 만한 상태로 수렴하지
+않습니다: 벌크 속도가 ~0.24 m/s로 무너지는데, 벽함수 짝은 3.51 m/s, 동일
+메쉬의 층류 해는 14.8 m/s이고, 온도는 정상상태에 도달하지 못합니다. 이
+붕괴는 벽 처리 행(row) 불일치를 제거해도, `lowRe`의 디리클레 조건을
+제거해도, 격자 조정을 완화해도 사라지지 않으므로 그중 어느 하나가 원인은
+아닙니다 — 가장 유력하지만 아직 검증되지 않은 단서는 `E`항의
+`grad(grad U)` 경계 외삽이 두 벽인접 경계층이 만나는 덕트 모서리에서
+일으키는 문제입니다. ofgpu는 이제 `LaunderSharmaKE` 아래에서 `wallTreatment
+lowRe`를 받아들이며(`kEpsilon`/`kOmega`/`kOmegaSST`는 여전히 이름을 밝혀
+거부, §13.4), 어느 쪽도 조용히 발산하도록 두지 않습니다. 전체 수치(앞선
+대체된 시도들과 벽법칙 표 포함)는 `docs/07-fire-solver.md` §1.1을
+보십시오.
 
 ---
 
@@ -617,6 +626,12 @@ ASCII로 변환한 뒤 사용하십시오.
 - Menter, F. R., Kuntz, M., & Langtry, R. (2003). Ten years of industrial
   experience with the SST turbulence model. *Turbulence, Heat and Mass Transfer*,
   4, 625–632. — §6.3
+- Launder, B. E., & Sharma, B. I. (1974). Application of the energy-dissipation
+  model of turbulence to the calculation of flow near a spinning disc. *Letters
+  in Heat and Mass Transfer*, 1(2), 131–138. — §33
+- Patel, V. C., Rodi, W., & Scheuerer, G. (1985). Turbulence models for
+  near-wall and low Reynolds number flows: a review. *AIAA Journal*, 23(9),
+  1308–1319. — §33
 
 ### 난류 모형 — LES
 

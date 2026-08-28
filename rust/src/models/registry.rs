@@ -54,10 +54,12 @@ use crate::les::{BaseDelta, DeltaSpec, SmoothSpec};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::models::coupled::{
     BuoyancySettings, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst, CoupledLaminar,
-    CoupledLes, CoupledTurbulence,
+    CoupledLaunderSharmaKE, CoupledLes, CoupledTurbulence,
 };
 use crate::models::les::{Les, LesCoeffs, LesModel};
-use crate::models::{KEpsilon, KEpsilonCoeffs, KOmega, KOmegaCoeffs, KOmegaSst, KOmegaSstCoeffs};
+use crate::models::{
+    KEpsilon, KEpsilonCoeffs, KOmega, KOmegaCoeffs, KOmegaSst, KOmegaSstCoeffs, LaunderSharmaKE,
+};
 use crate::turbulence::C3Mode;
 use crate::{Scalar, Vec3};
 
@@ -69,6 +71,13 @@ pub enum RasModel {
     Laminar,
     /// Standard k-epsilon - SPEC-LIT §6.1, Launder & Spalding (1974).
     KEpsilon,
+    /// Launder-Sharma low-Reynolds-number k-epsilon - SPEC-LIT §33, Launder
+    /// & Sharma (1974). The only model `wallTreatment lowRe` is valid under
+    /// (`io::case::validate_low_re_wall_treatment`'s `LOW_RE_VALID`): it
+    /// integrates through the viscous sublayer instead of assuming a log
+    /// layer, which is what `lowRe`'s "no wall model, the mesh resolves it"
+    /// requires and neither `KEpsilon` nor `KOmega`/`KOmegaSST` can provide.
+    LaunderSharmaKE,
     /// Wilcox k-omega, the 1988 form - SPEC-LIT §6.2.
     KOmega,
     /// Menter k-omega SST, the 2003 revision - SPEC-LIT §6.3. Needs the wall
@@ -95,6 +104,7 @@ impl RasModel {
         match self {
             Self::Laminar => "laminar",
             Self::KEpsilon => "kEpsilon",
+            Self::LaunderSharmaKE => "LaunderSharmaKE",
             Self::KOmega => "kOmega",
             Self::KOmegaSST => "kOmegaSST",
             Self::Les => "LES",
@@ -103,10 +113,16 @@ impl RasModel {
 
     /// The dissipation variable's field name, which is also the `0/` file a
     /// driver has to find.
+    ///
+    /// `LaunderSharmaKE` answers `epsilon`, the same name `KEpsilon` does -
+    /// the field it transports is `epsilon_tilde`, but there is no separate
+    /// `epsilonTilde` file; see [`crate::models::launder_sharma`]'s module
+    /// doc for why.
     pub fn dissipation_field(self) -> Option<&'static str> {
         match self {
             Self::Laminar => None,
             Self::KEpsilon => Some("epsilon"),
+            Self::LaunderSharmaKE => Some("epsilon"),
             Self::KOmega => Some("omega"),
             Self::KOmegaSST => Some("omega"),
             // An algebraic subgrid model solves for nothing, so there is no
@@ -126,6 +142,7 @@ const REGISTRY: &[(&str, RasModel)] = &[
     ("laminar", RasModel::Laminar),
     ("kEpsilon", RasModel::KEpsilon),
     ("KEpsilon", RasModel::KEpsilon),
+    ("LaunderSharmaKE", RasModel::LaunderSharmaKE),
     ("kOmega", RasModel::KOmega),
     ("KOmega", RasModel::KOmega),
     ("kOmegaSST", RasModel::KOmegaSST),
@@ -145,7 +162,6 @@ const RECOGNISED_NOT_IMPLEMENTED: &[&str] = &[
     "SpalartAllmaras",
     "realizableKE",
     "RNGkEpsilon",
-    "LaunderSharmaKE",
     "kEpsilonPhitF",
     "v2f",
     "LRR",
@@ -209,7 +225,8 @@ const DELTA_RECOGNISED_NOT_IMPLEMENTED: &[&str] = &[
 
 /// The menu a rejected name is shown.
 pub fn available_models() -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = vec!["kEpsilon", "kOmega", "kOmegaSST", "laminar"];
+    let mut v: Vec<&'static str> =
+        vec!["kEpsilon", "LaunderSharmaKE", "kOmega", "kOmegaSST", "laminar"];
     v.dedup();
     v
 }
@@ -679,6 +696,32 @@ pub fn build_coupled<'m>(
                 model.freeze_nut(gpu)?;
             }
             Ok(Box::new(CoupledKEpsilon::new(model, buoy)))
+        }
+
+        // SPEC-LIT §33: the coefficients are §6.1's own, unchanged -
+        // `KEpsilonCoeffs` reused rather than a second, near-identical
+        // struct (see `models::launder_sharma`'s module doc). `wall_faces`/
+        // `roughness` should be the empty ones here: SPEC-LIT §33.2 needs no
+        // wall-function machinery at all, and a caller that built non-empty
+        // ones from `epsilon`'s/`nut`'s patch types under `wallTreatment
+        // lowRe` will find them already empty by construction (`lowRe`
+        // pins no wall-function BcKind on either field).
+        RasModel::LaunderSharmaKE => {
+            let d = KEpsilonCoeffs::default();
+            let coeffs = KEpsilonCoeffs {
+                cmu: model_coeff(cc, "Cmu", d.cmu),
+                c1: model_coeff(cc, "C1", d.c1),
+                c2: model_coeff(cc, "C2", d.c2),
+                c3: model_coeff(cc, "C3", d.c3),
+                sigmak: model_coeff(cc, "sigmak", d.sigmak),
+                sigma_eps: model_coeff(cc, "sigmaEps", d.sigma_eps),
+            };
+            let mut model =
+                LaunderSharmaKE::new(gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, roughness)?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledLaunderSharmaKE::new(model, buoy)))
         }
 
         RasModel::KOmega => {

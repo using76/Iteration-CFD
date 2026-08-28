@@ -252,8 +252,18 @@ impl Default for WallFunctionCoeffs {
 ///   standard   nut: nutkWallFunction        k: kqRWallFunction   eps/omega: *WallFunction
 ///   spalding   nut: nutUWallFunction        k: kqRWallFunction   eps/omega: *WallFunction
 ///   rough      nut: nutkRoughWallFunction   k: kqRWallFunction   eps/omega: *WallFunction
-///   lowRe      nut: nutLowReWallFunction    k: kLowReWallFunction eps/omega: zeroGradient
+///   lowRe      nut: nutLowReWallFunction    k: kLowReWallFunction epsilon: fixedValue (0)
+///                                                                 omega: zeroGradient
 /// ```
+///
+/// `epsilon`'s `lowRe` entry is `fixedValue` with no `value` (0 by
+/// construction - SPEC-LIT §33.2's homogeneous Dirichlet on `epsilon_tilde`),
+/// not `zeroGradient`: the only model this row is valid under
+/// (`LaunderSharmaKE`, SPEC-LIT §33) needs the wall FACE value pinned at
+/// zero, not merely left unconstrained. `omega` keeps `zeroGradient` because
+/// no low-Re `kOmega`/`kOmegaSST` variant exists yet for it to be wrong
+/// about - `validate_low_re_wall_treatment` refuses `lowRe` under both before
+/// this table is ever consulted for a live run.
 ///
 /// Precedence (most specific wins), the same for every route this crate
 /// reads a case from: an explicit per-field patch type on a patch overrides
@@ -325,13 +335,20 @@ impl WallTreatment {
         }
     }
 
-    /// `epsilon`'s patch type under this row. `lowRe` pins NO wall model
-    /// (SPEC-LIT §15.2/§29.1), which this row completes as plain
-    /// `zeroGradient` - there is no distinct low-Re-named `epsilon` wall
-    /// condition in this solver, only the absence of the constraining one.
+    /// `epsilon`'s patch type under this row.
+    ///
+    /// `lowRe` pins NO wall FUNCTION (SPEC-LIT §15.2/§29.1), but it does pin
+    /// a wall VALUE: SPEC-LIT §33.2's homogeneous Dirichlet,
+    /// `epsilon_tilde = 0`, which is what makes the only model this row is
+    /// valid under (`LaunderSharmaKE`) correct at the wall rather than
+    /// merely unconstrained there. `fixedValue` with no `value` entry is `0`
+    /// by construction (`apply_wall_treatment_defaults` writes no `value`,
+    /// and an absent one defaults to zero) - there is still no distinct
+    /// low-Re-NAMED `epsilon` wall condition in this solver, only a plain
+    /// one asked to hold a specific value.
     pub fn epsilon_type(self) -> &'static str {
         match self {
-            Self::LowRe => "zeroGradient",
+            Self::LowRe => "fixedValue",
             _ => "epsilonWallFunction",
         }
     }
@@ -467,22 +484,22 @@ pub fn read_wall_treatment(d: &FoamDict) -> Result<(WallTreatment, Option<Roughn
 }
 
 /// SPEC-LIT §32's second finding, promoted to a standing rule: the `lowRe`
-/// row of §29.1's table pins NO wall model at all on `nut`/`k` (plain
-/// `zeroGradient` on `epsilon`/`omega` too), which is only physically sound
-/// when the turbulence model itself integrates through the viscous sublayer.
-/// Neither RAS model this solver implements does - `kEpsilon` and `kOmega`
-/// (and `kOmegaSST`, which shares k-omega's near-wall behaviour) are all
+/// row of §29.1's table pins NO wall model at all on `nut`/`k` (homogeneous
+/// Dirichlet on `epsilon` too, under `LaunderSharmaKE` - SPEC-LIT §33.2),
+/// which is only physically sound when the turbulence model itself
+/// integrates through the viscous sublayer. `kEpsilon` and `kOmega` (and
+/// `kOmegaSST`, which shares k-omega's near-wall behaviour) are all
 /// high-Reynolds-number closures with no near-wall damping function, invalid
 /// below y+ ~ 30 REGARDLESS of what the mesh does there. This is exactly the
 /// §32 gate's own second finding: `cases/channelPeriodicFluxLowRe.jsonc`
 /// still blew `k` up to 160 m2/s2 at y+ 1.4-6.4 on its hot walls even after
 /// its under-resolved side walls were given the correct (`standard`) row -
-/// the mesh was never the problem, the model was. The low-Re variant that
-/// would make `lowRe` valid under a k-epsilon-family model,
-/// `LaunderSharmaKE` (Launder & Sharma 1974), is a recognised-but-not-
-/// implemented model (`models::registry::RECOGNISED_NOT_IMPLEMENTED`) - so
-/// the honest menu of models `lowRe` is valid under, today, is empty, and
-/// that is what gets printed rather than a placeholder name.
+/// the mesh was never the problem, the model was. `LaunderSharmaKE`
+/// (Launder & Sharma 1974, SPEC-LIT §33) is the low-Re variant that fixes
+/// this - `f_mu`, `f_2`, the `D` and `E` terms are exactly what makes
+/// `epsilon = 0` and `k = 0` at the wall a correct boundary condition rather
+/// than a high-Re model with the wall model removed - and it is the only
+/// entry `LOW_RE_VALID` below carries.
 ///
 /// `treatment` passes through unchanged when it is not `lowRe`, and
 /// `model_name` empty or `"laminar"` is left alone too - a laminar run has
@@ -492,7 +509,7 @@ pub fn read_wall_treatment(d: &FoamDict) -> Result<(WallTreatment, Option<Roughn
 /// have already arranged not to reach it for, e.g. an LES case) or the
 /// model-name error `models::registry::select_turbulence_model` raises on
 /// its own is the one that should fire, not this one. Otherwise a §13.4
-/// error naming the (empty) menu of low-Re-valid models and the alternative
+/// error naming the menu of low-Re-valid models and the alternative
 /// (`standard`); under `-permissive`, `standard` is substituted and the
 /// substitution is printed, once per distinct `setting`.
 pub fn validate_low_re_wall_treatment(
@@ -508,8 +525,11 @@ pub fn validate_low_re_wall_treatment(
         return Ok(treatment);
     }
 
-    // Empty today, and honestly so - see this function's own doc comment.
-    const LOW_RE_VALID: &[&str] = &[];
+    // SPEC-LIT §33: LaunderSharmaKE integrates through the viscous sublayer
+    // (f_mu, f_2, D and E - the damping functions that make `lowRe` a real
+    // treatment rather than a high-Re model with no wall model at all), so
+    // it is the one entry this list carries.
+    const LOW_RE_VALID: &[&str] = &["LaunderSharmaKE"];
     if LOW_RE_VALID.contains(&name) {
         return Ok(treatment);
     }
@@ -521,8 +541,9 @@ pub fn validate_low_re_wall_treatment(
         "kEpsilon, kOmega and kOmegaSST are high-Reynolds-number closures \
          with no near-wall damping function - invalid below y+ ~ 30 \
          regardless of the mesh's own resolution there (SPEC-LIT S32's \
-         second finding); the low-Re variant that would fix this, \
-         LaunderSharmaKE, is recognised but not yet implemented",
+         second finding); the low-Re variant that fixes this, \
+         LaunderSharmaKE (SPEC-LIT S33), is implemented and is what \
+         `wallTreatment lowRe` needs here",
         "standard (the full wall-function row)",
         WallTreatment::Standard,
     )
@@ -1771,11 +1792,108 @@ mod tests {
 
         assert_eq!(LowRe.nut_type(), "nutLowReWallFunction");
         assert_eq!(LowRe.k_type(), "kLowReWallFunction");
-        assert_eq!(LowRe.epsilon_type(), "zeroGradient");
+        assert_eq!(LowRe.epsilon_type(), "fixedValue");
         assert_eq!(LowRe.omega_type(), "zeroGradient");
         // §29.3: lowRe pins the molecular resistance already there - no
         // thermal wall function.
         assert_eq!(LowRe.thermal_type(), None);
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §33: the validity gate for `wallTreatment lowRe`
+    // ------------------------------------------------------------------
+
+    /// `lowRe` is now accepted under `LaunderSharmaKE` - SPEC-LIT §33 is
+    /// exactly what makes the homogeneous-Dirichlet/no-wall-model row
+    /// physically sound.
+    #[test]
+    fn low_re_is_accepted_under_launder_sharma_ke() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let wt = validate_low_re_wall_treatment(
+            "test",
+            "LaunderSharmaKE",
+            WallTreatment::LowRe,
+        )
+        .expect("LaunderSharmaKE must be accepted under lowRe");
+        assert_eq!(wt, WallTreatment::LowRe);
+    }
+
+    /// `lowRe` is still refused under `kEpsilon` - SPEC-LIT §32's second
+    /// finding stands: the standard model has no near-wall damping function,
+    /// LaunderSharmaKE existing elsewhere does not change that.
+    #[test]
+    fn low_re_is_still_refused_under_k_epsilon() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let err = validate_low_re_wall_treatment("test", "kEpsilon", WallTreatment::LowRe)
+            .expect_err("kEpsilon must still be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("kEpsilon"), "{msg}");
+        assert!(msg.contains("LaunderSharmaKE"), "{msg}");
+        assert!(msg.contains("standard"), "{msg}");
+    }
+
+    /// Same refusal for `kOmega` and `kOmegaSST` - neither carries a low-Re
+    /// variant, so the menu naming `LaunderSharmaKE` is the same either way.
+    #[test]
+    fn low_re_is_still_refused_under_k_omega_family() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        for name in ["kOmega", "kOmegaSST"] {
+            let err = validate_low_re_wall_treatment("test", name, WallTreatment::LowRe)
+                .unwrap_err();
+            assert!(err.to_string().contains(name), "{name}: {err}");
+        }
+    }
+
+    /// `-permissive` substitutes `standard` for the refused models and says
+    /// so, exactly as every other §13.4 refusal does.
+    #[test]
+    fn low_re_under_k_epsilon_is_permissive_downgradable() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+        crate::io::contract::set_permissive(true);
+
+        let wt = validate_low_re_wall_treatment("test", "kEpsilon", WallTreatment::LowRe)
+            .expect("-permissive continues");
+        assert_eq!(wt, WallTreatment::Standard);
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// An LES case's `lowRe` is untouched by this gate entirely: `read_wall_
+    /// treatment` never passes a RAS model name in for `simulationType LES;`,
+    /// so an empty `model_name` reaches this function and is left alone -
+    /// LES's own `lowRe` row (`les_nut_type`) is always valid, checked
+    /// separately.
+    #[test]
+    fn low_re_is_left_alone_for_an_empty_les_model_name() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let wt = validate_low_re_wall_treatment("test", "", WallTreatment::LowRe)
+            .expect("an empty model name (the LES route) must not be refused");
+        assert_eq!(wt, WallTreatment::LowRe);
+    }
+
+    /// A non-`lowRe` treatment is untouched under every model name - the
+    /// gate only has an opinion about `lowRe` itself.
+    #[test]
+    fn non_low_re_treatments_pass_every_model_name_through() {
+        for name in ["kEpsilon", "LaunderSharmaKE", "kOmega", "kOmegaSST", ""] {
+            for wt in [
+                WallTreatment::Standard,
+                WallTreatment::Spalding,
+                WallTreatment::Rough,
+            ] {
+                let got = validate_low_re_wall_treatment("test", name, wt).unwrap();
+                assert_eq!(got, wt, "{name}/{wt:?}");
+            }
+        }
     }
 
     /// SPEC-LIT §30.1: `standard`/`spalding` both collapse to Werner-Wengle

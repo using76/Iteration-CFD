@@ -80,7 +80,7 @@ use crate::device::{DevBuf, Gpu};
 use crate::error::Result;
 use crate::field::GpuScalarField;
 use crate::models::les::Les;
-use crate::models::{KEpsilon, KOmega, KOmegaSst};
+use crate::models::{KEpsilon, KOmega, KOmegaSst, LaunderSharmaKE};
 use crate::solver::SolverPerformance;
 use crate::turbulence::{BuoyancyProduction, C3Mode, FlowState};
 use crate::{Scalar, Vec3};
@@ -297,6 +297,74 @@ impl<'m> CoupledTurbulence for CoupledKEpsilon<'m> {
         self.model.named_fields_mut()
     }
     fn combustion_mixing(&self) -> CombustionMixing<'_> {
+        CombustionMixing::Epsilon {
+            k: self.model.k(),
+            epsilon: self.model.epsilon(),
+        }
+    }
+}
+
+// ==========================================================================
+//  LaunderSharmaKE - SPEC-LIT §33
+// ==========================================================================
+
+/// [`LaunderSharmaKE`] behind [`CoupledTurbulence`].
+pub struct CoupledLaunderSharmaKE<'m> {
+    model: LaunderSharmaKE<'m>,
+    buoy: Option<BuoyancySettings>,
+}
+
+impl<'m> CoupledLaunderSharmaKE<'m> {
+    pub fn new(model: LaunderSharmaKE<'m>, buoy: Option<BuoyancySettings>) -> Self {
+        Self { model, buoy }
+    }
+
+    pub fn model(&self) -> &LaunderSharmaKE<'m> {
+        &self.model
+    }
+    pub fn model_mut(&mut self) -> &mut LaunderSharmaKE<'m> {
+        &mut self.model
+    }
+}
+
+impl<'m> CoupledTurbulence for CoupledLaunderSharmaKE<'m> {
+    fn initialise(&mut self, gpu: &Gpu, flow: &FlowState) -> Result<()> {
+        self.model.initialise(gpu, flow)
+    }
+
+    fn correct(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        thermal: Option<&ThermalCtx>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        match (self.buoy, thermal) {
+            (Some(settings), Some(ctx)) => {
+                self.model.set_buoyancy(settings.production(ctx))?;
+                self.model.correct_buoyant(gpu, flow, Some(ctx.t))
+            }
+            _ => self.model.correct(gpu, flow),
+        }
+    }
+
+    fn nut(&self) -> &GpuScalarField {
+        self.model.nut()
+    }
+    fn name(&self) -> &str {
+        "LaunderSharmaKE"
+    }
+    fn output_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        self.model.named_fields()
+    }
+    fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        self.model.named_fields_mut()
+    }
+    fn combustion_mixing(&self) -> CombustionMixing<'_> {
+        // epsilon_tilde stands in for epsilon here (see the model's own
+        // module doc): the difference is D = 2 nu |grad(sqrt k)|^2, an O(nu)
+        // near-wall correction that a combustion mixing-time estimate - which
+        // is never evaluated inside the viscous sublayer to begin with - does
+        // not need resolved any more finely than that.
         CombustionMixing::Epsilon {
             k: self.model.k(),
             epsilon: self.model.epsilon(),

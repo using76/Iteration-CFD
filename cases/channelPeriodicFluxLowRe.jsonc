@@ -6,40 +6,37 @@
 // y+ ~ 1 - `lowRe`, a resolved sublayer.
 //
 // ============================================================================
-// STATUS: CANNOT converge - kept as the regression that will pass once a
-// low-Reynolds-number RAS model exists. Do not delete it; do not calibrate
-// it into passing.
-//
-// docs/07-fire-solver.md S1.1 has the full trace. Short version, three steps:
-//
-//   1. Switching the model to kOmega made it WORSE (k -> 942 m2/s2), so the
-//      model FAMILY is not the cause.
-//   2. This is a DUCT: the `wallSide.*` patches have only 4 spanwise cells
-//      and are not resolved, yet the case-wide `lowRe` preset told the
-//      solver to apply NO wall model there. The `"treatment": "standard"`
-//      override below (SPEC-LIT S29.1 route b) fixes exactly that - side-wall
-//      k fell from 4125-y+ nonsense to 5.85 m2/s2.
-//   3. Even with the side walls corrected, the HOT walls (still `lowRe`,
-//      correctly - they ARE the resolved sublayer this mesh exists to
-//      provide) blow k up to 160 m2/s2 at y+ 1.4-6.4. That is the real cause:
-//      standard k-epsilon is a HIGH-REYNOLDS-NUMBER model with no near-wall
-//      damping function, invalid below y+ ~ 30 whatever the mesh does. The
-//      variant that would fix it, `LaunderSharmaKE`, is registered but not
-//      implemented (`models::registry::RECOGNISED_NOT_IMPLEMENTED`).
-//
-// `crate::io::case::validate_low_re_wall_treatment` (SPEC-LIT S32's second
-// finding) now catches this BEFORE the solver ever runs: `wallTreatment
-// lowRe` under `kEpsilon` (or `kOmega`/`kOmegaSST`) is refused with a S13.4
-// error naming the model, rather than left to blow up silently at run time.
-// Running this case as shipped therefore fails FAST with that error, which
-// is the intended, loud outcome - not a regression in the harness. Add
-// `-permissive` to see it actually run (and diverge, per the trace above);
-// the case becomes runnable-and-correct only once a low-Re model is
-// implemented and named here.
+// STATUS (updated once LaunderSharmaKE landed, SPEC-LIT S33): the model
+// FIXES the failure this file used to be kept for - standard k-epsilon's
+// unbounded near-wall k (160-336 m2/s2) is GONE, on every configuration
+// tried, with `RAS { model LaunderSharmaKE; }` below. That is not nothing:
+// SPEC-LIT S33.3's own damping-function limits and the law-of-the-wall
+// profile (u+ = y+ below y+ 5 to <1%, the log law within ~1% at y+ 30-35 -
+// run separately on a clean periodic 2-D channel; see
+// docs/07-fire-solver.md S1.1) both check out. But THIS case - the actual
+// S32 resolved leg, on ITS OWN 3-D duct mesh - does NOT converge to a
+// physically sensible state: U_b collapses to ~0.24 m/s (WF's twin gets
+// 3.51 m/s on the identical body force; a LAMINAR solve of this exact mesh
+// gets 14.7 m/s - both checked directly), and T never reaches a steady
+// state in 20 000 iterations. This is a NEW, DIFFERENT diagnosis from the
+// old one - not "no damping function" (the damping functions are proven
+// correct in isolation) but something about THIS geometry: the collapse
+// persists whether the `wallSide.*` patches are overridden to `standard`
+// or left at the case-wide `lowRe` default, and persists at a much less
+// extreme grading (`expansion: 20` instead of `200`) - so it is not the
+// wall-row mismatch alone, and not the grading's aspect ratio alone. It
+// does NOT reproduce on a 2-D (empty-z) periodic channel with a similar
+// near-wall resolution, which does converge to the expected law of the
+// wall. The most specific remaining lead is the `E`-term's `grad(grad U)`
+// boundary extrapolation (SPEC-LIT S33.1's own DESIGN note) at the DUCT
+// CORNERS, where two wall-adjacent boundary layers meet and the mesh has
+// no `empty` direction to fall back on - untested, not tuned, stated as a
+// lead and not a fix. Do not calibrate this case into passing; report what
+// it does. docs/07-fire-solver.md S1.1 has the full numbers.
 // ============================================================================
 //
 // The only physical difference from `channelPeriodicFluxWF.jsonc` is the
-// mesh and the `lowRe` wallTreatment; q_w = 500 W/m2 and the -6.4 W sink are
+// mesh and the `lowRe` wallTreatment; q_w = 500 W/m2 and the -3.2 W sink are
 // IDENTICAL - see that file's own header for both derivations. SPEC-LIT
 // S29.3: "lowRe... pins the molecular resistance the resolved mesh already
 // provides", so the hot walls here are `fixedFluxTemperature` with the SAME
@@ -78,7 +75,7 @@
 
   "turbulence": {
     "kind": "RAS",
-    "model": "kEpsilon",
+    "model": "LaunderSharmaKE",
     "wallFunctions": { "kappa": 0.41, "E": 9.8 },
     "wallTreatment": "lowRe",
   },

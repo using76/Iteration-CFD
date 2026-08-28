@@ -473,9 +473,14 @@ fn scalar_patch(
             // reaches a turbulence model still reads zero at the wall.
             BcKind::NutLowReWallFunction => (1.0, 0.0, 0.0),
 
-            BcKind::KqRWallFunction | BcKind::KLowReWallFunction | BcKind::ZeroGradient => {
-                (0.0, 0.0, 0.0)
-            }
+            // SPEC-LIT §33.2: homogeneous Dirichlet, `k = 0` at the wall -
+            // no-slip means no velocity fluctuation either. This used to be
+            // grouped with `kqRWallFunction`'s zeroGradient below, which was
+            // right for a model that pinned nothing here and wrong the
+            // moment one existed that does (`LaunderSharmaKE`, SPEC-LIT §33).
+            BcKind::KLowReWallFunction => (1.0, 0.0, 0.0),
+
+            BcKind::KqRWallFunction | BcKind::ZeroGradient => (0.0, 0.0, 0.0),
 
             // SPEC-LIT 29.3: the Jayatilleke thermal wall function rewrites
             // the triple itself once u_tau and y+ are known - see
@@ -1365,10 +1370,13 @@ impl NutRoughness {
 /// construction the more specific of the two. Only `nut`/`k`/`epsilon`/
 /// `omega`/`T` have a preset row; `field` naming anything else is a no-op.
 ///
-/// The synthesised entry carries no `value` - every wall-function [`BcKind`]
-/// this can produce already falls back to the wall cell's own internal value
-/// when `value` is empty (see [`scalar_patch`]), the same default an
-/// explicit entry with no `value` would get.
+/// The synthesised entry carries no `value`. Every wall-FUNCTION [`BcKind`]
+/// this can produce falls back to the wall cell's own internal value when
+/// `value` is empty (see [`scalar_patch`]), the same default an explicit
+/// entry with no `value` would get - except `epsilon`'s `lowRe` completion,
+/// `fixedValue`, which is a plain Dirichlet condition and therefore falls
+/// back to a literal `0` instead (SPEC-LIT §33.2's homogeneous Dirichlet on
+/// `epsilon_tilde` - see [`crate::io::case::WallTreatment::epsilon_type`]).
 pub fn apply_wall_treatment_defaults(
     raw: &mut RawScalarField,
     field: &str,
@@ -1494,9 +1502,13 @@ fn k_family(k: BcKind) -> Option<WallRowFamily> {
 
 /// `epsilon`'s and `omega`'s own patch types can only ever DECLARE `Full`
 /// (`epsilonWallFunction`/`omegaWallFunction` - SPEC-LIT §6.4); there is no
-/// distinct low-Re-named condition for either. SPEC-LIT §29.1's `lowRe` row
-/// completes them with plain `zeroGradient`, which reads as "no opinion"
-/// here, not a second family - exactly the completion the table asks for.
+/// distinct low-Re-NAMED condition for either. SPEC-LIT §29.1's `lowRe` row
+/// completes `omega` with plain `zeroGradient` and `epsilon` with plain
+/// `fixedValue` (0 - SPEC-LIT §33.2's homogeneous Dirichlet), and EITHER
+/// reads as "no opinion" here, not a second family: `constrains_wall_cell`
+/// is false for both, exactly as it is for `zeroGradient` - a `lowRe` row's
+/// `epsilon` never conflicts with another field's `Full` opinion, it simply
+/// never has one of its own to conflict with.
 fn eps_omega_family(k: BcKind) -> Option<WallRowFamily> {
     if k.constrains_wall_cell() {
         Some(WallRowFamily::Full)
@@ -1535,7 +1547,9 @@ fn completion_for(field: &str, family: WallRowFamily) -> &'static str {
         ("k", WallRowFamily::Full) => "kqRWallFunction",
         ("k", WallRowFamily::LowRe) => "kLowReWallFunction",
         ("epsilon", WallRowFamily::Full) => "epsilonWallFunction",
-        ("epsilon", WallRowFamily::LowRe) => "zeroGradient",
+        // SPEC-LIT §33.2: `fixedValue` (0 by construction - see
+        // `WallTreatment::epsilon_type`'s own doc), not `zeroGradient`.
+        ("epsilon", WallRowFamily::LowRe) => "fixedValue",
         ("omega", WallRowFamily::Full) => "omegaWallFunction",
         ("omega", WallRowFamily::LowRe) => "zeroGradient",
         _ => "zeroGradient",
@@ -1549,7 +1563,7 @@ fn family_kind(field: &str, family: WallRowFamily) -> BcKind {
         ("k", WallRowFamily::Full) => BcKind::KqRWallFunction,
         ("k", WallRowFamily::LowRe) => BcKind::KLowReWallFunction,
         ("epsilon", WallRowFamily::Full) => BcKind::EpsilonWallFunction,
-        ("epsilon", WallRowFamily::LowRe) => BcKind::ZeroGradient,
+        ("epsilon", WallRowFamily::LowRe) => BcKind::FixedValue,
         ("omega", WallRowFamily::Full) => BcKind::OmegaWallFunction,
         _ => BcKind::ZeroGradient,
     }
@@ -2564,7 +2578,7 @@ mod tests {
         for (field, treatment, want) in [
             ("nut", crate::io::case::WallTreatment::Spalding, "nutUWallFunction"),
             ("k", crate::io::case::WallTreatment::LowRe, "kLowReWallFunction"),
-            ("epsilon", crate::io::case::WallTreatment::LowRe, "zeroGradient"),
+            ("epsilon", crate::io::case::WallTreatment::LowRe, "fixedValue"),
             ("omega", crate::io::case::WallTreatment::Standard, "omegaWallFunction"),
         ] {
             let mut raw = RawScalarField {
@@ -2734,7 +2748,7 @@ mod tests {
         assert!(msg.contains("wall1"), "{msg}");
         assert!(msg.contains("nutLowReWallFunction"), "{msg}");
         assert!(msg.contains("epsilonWallFunction"), "{msg}");
-        assert!(msg.contains("zeroGradient"), "{msg} (epsilon's lowRe completion)");
+        assert!(msg.contains("fixedValue"), "{msg} (epsilon's lowRe completion)");
         assert!(msg.contains("nutkWallFunction"), "{msg} (nut's full completion)");
     }
 
@@ -2753,7 +2767,7 @@ mod tests {
         };
         let corrected = validate_wall_row("wall1", row).expect("permissive resolves it");
         assert_eq!(corrected.nut, Some(BcKind::NutLowReWallFunction));
-        assert_eq!(corrected.epsilon, Some(BcKind::ZeroGradient));
+        assert_eq!(corrected.epsilon, Some(BcKind::FixedValue));
 
         crate::io::contract::set_permissive(false);
     }

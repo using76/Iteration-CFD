@@ -3061,8 +3061,15 @@ fn build_cutcell_fields(
             } else if pk == PatchKind::Cyclic {
                 patch_spec("cyclic")
             } else if pk == PatchKind::Wall {
-                let mut s = patch_spec(wall_row_type(name, wall));
-                s.value = vec![value];
+                let type_name = wall_row_type(name, wall);
+                let mut s = patch_spec(type_name);
+                // SPEC-LIT §33.2: `epsilon`'s `lowRe` completion is
+                // `fixedValue`, and the value it fixes is the homogeneous
+                // Dirichlet the model needs (0), not the domain's
+                // equilibrium epsilon - every other row's value here is a
+                // wall-function seed a model overwrites, so the domain
+                // value is the right seed for THOSE, and wrong for this one.
+                s.value = vec![if type_name == "fixedValue" { 0.0 } else { value }];
                 apply_roughness(&mut s, name, wall, roughness);
                 s
             } else if name == "nut" {
@@ -4744,8 +4751,13 @@ fn build_initial_fields(
                 // field, `standard` by default - `wall_row_type` reproduces
                 // today's hardcoded strings exactly when `wall` is
                 // `WallTreatment::Standard`.
-                let mut s = patch_spec(wall_row_type(name, wall));
-                s.value = vec![value];
+                let type_name = wall_row_type(name, wall);
+                let mut s = patch_spec(type_name);
+                // SPEC-LIT §33.2: see the twin branch above (`build_plume...`)
+                // for why `lowRe`'s `epsilon` (the only "fixedValue" this
+                // table produces) gets a literal 0 rather than the domain's
+                // equilibrium value.
+                s.value = vec![if type_name == "fixedValue" { 0.0 } else { value }];
                 apply_roughness(&mut s, name, wall, roughness);
                 s
             } else if name == "nut" {
@@ -5793,7 +5805,7 @@ mod tests {
         for (wt, nut_want, k_want, eps_want) in [
             (WallTreatment::Standard, "nutkWallFunction", "kqRWallFunction", "epsilonWallFunction"),
             (WallTreatment::Spalding, "nutUWallFunction", "kqRWallFunction", "epsilonWallFunction"),
-            (WallTreatment::LowRe, "nutLowReWallFunction", "kLowReWallFunction", "zeroGradient"),
+            (WallTreatment::LowRe, "nutLowReWallFunction", "kLowReWallFunction", "fixedValue"),
         ] {
             let dir = temp_dir(&format!("wall_model_row_{}", wt.name()));
             write_case_with_wall_model(&dir, CaseKind::Plume, 20, 12, 6, wt, None).expect("write");
@@ -5825,6 +5837,17 @@ mod tests {
                     "{wt:?} {wall_patch} epsilon: {}",
                     patch_entry(&eps, wall_patch)
                 );
+                // SPEC-LIT §33.2: `lowRe`'s `fixedValue` on `epsilon` must
+                // hold the homogeneous Dirichlet value, not the domain's
+                // equilibrium epsilon - the whole reason it is `fixedValue`
+                // rather than `zeroGradient` in the first place.
+                if wt == WallTreatment::LowRe {
+                    assert!(
+                        patch_entry(&eps, wall_patch).contains("uniform 0;"),
+                        "{wt:?} {wall_patch} epsilon should hold 0, not the domain value: {}",
+                        patch_entry(&eps, wall_patch)
+                    );
+                }
                 assert!(
                     patch_entry(&omega, wall_patch).contains(omega_want),
                     "{wt:?} {wall_patch} omega: {}",

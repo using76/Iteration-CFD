@@ -2883,7 +2883,7 @@ mod tests {
             (WallTreatmentKind::Standard, "nutkWallFunction", "kqRWallFunction", "epsilonWallFunction", "omegaWallFunction"),
             (WallTreatmentKind::Spalding, "nutUWallFunction", "kqRWallFunction", "epsilonWallFunction", "omegaWallFunction"),
             (WallTreatmentKind::Rough, "nutkRoughWallFunction", "kqRWallFunction", "epsilonWallFunction", "omegaWallFunction"),
-            (WallTreatmentKind::LowRe, "nutLowReWallFunction", "kLowReWallFunction", "zeroGradient", "zeroGradient"),
+            (WallTreatmentKind::LowRe, "nutLowReWallFunction", "kLowReWallFunction", "fixedValue", "zeroGradient"),
         ] {
             let mut case = plume_case();
             case.turbulence.as_mut().unwrap().wall_treatment = wt;
@@ -3145,7 +3145,7 @@ mod tests {
         let p = a_wall_patch_name(&lowered);
         assert_eq!(
             lowered.epsilon_field.unwrap().boundary[&p].type_name,
-            "zeroGradient",
+            "fixedValue",
             "epsilon must be corrected to the row nut implied"
         );
 
@@ -3434,9 +3434,11 @@ mod tests {
                 let case = read_case_jsonc(&path)
                     .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
                 if let Err(e) = case.lower() {
-                    // SPEC-LIT §32's own open item: `channelPeriodicFluxLowRe`,
-                    // `channelPeriodicLowRe` and `channelThermalLowRe` all
-                    // name `wallTreatment lowRe` under `kEpsilon`, which
+                    // SPEC-LIT §32's own open item: `channelPeriodicLowRe`
+                    // and `channelThermalLowRe` still name `wallTreatment
+                    // lowRe` under `kEpsilon` (`channelPeriodicFluxLowRe`
+                    // moved to `LaunderSharmaKE`, SPEC-LIT §33, and lowers
+                    // cleanly on the first try), which
                     // `crate::io::case::validate_low_re_wall_treatment` now
                     // correctly refuses in strict mode (§32's second finding
                     // - no model this solver implements is valid at `lowRe`

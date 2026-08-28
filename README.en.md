@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 725 unit tests, 228 numerical checks |
+| Validation | 790 unit tests, 250 numerical checks |
 
 ---
 
@@ -96,13 +96,13 @@ applied on faces rather than interpolated from cell values.
 
 | | |
 |---|---|
-| RANS | Standard k-ε, Wilcox k-ω, Menter k-ω SST |
+| RANS | Standard k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma low-Re k-ε (SPEC-LIT §33 — the only model `wallTreatment lowRe` is valid under; its damping functions integrate through the viscous sublayer, checked against the analytic `Re_t` limits and against a live channel's own `u+`/`y+` law of the wall) |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES filter widths | Cube root of volume, maximum edge length, Scotti anisotropy correction, van Driest damping |
 | LES wall model | Werner–Wengle (1991) — an analytically invertible power law integrated over the first cell's wall-parallel average speed, no Newton iteration; the `standard`/`spalding` presets both collapse to this one model under LES, `lowRe` gives `nu_t,w = 0`, and `rough` is refused by name (§13.4) since no rough LES wall model exists yet |
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | Turbulence selection in the coupled solvers (`ofgpu-buoyant`, `ofgpu-fire`) | `ofgpu-buoyant`: the `CoupledTurbulence` trait dispatches on the case's own `RAS { model ...; }`/`simulationType`, exactly as the standalone drivers do — k-ε, k-ω, k-ω SST (wall distance computed automatically) and LES (Smagorinsky/WALE/Deardorff, with §16's filter widths and van Driest damping) all construct the ACTUAL model asked for, and buoyancy production `G_b` is wired into the right equation for each (§17, §30.2). `ofgpu-fire`: still k-ε only — its combustion mixing-time closure and thermal wall function need `epsilon` directly, so any other model is refused by name, a §13.4 error, not a silent substitution |
-| Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — none of `kEpsilon`/`kOmega`/`kOmegaSST` have one, so it is refused by name rather than left to diverge (SPEC-LIT §32) |
+| Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — `LaunderSharmaKE` (SPEC-LIT §33) is the one model on that menu, `kEpsilon`/`kOmega`/`kOmegaSST` still are not, so `lowRe` under any of the latter three is refused by name rather than left to diverge (SPEC-LIT §32) |
 | Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. **Validated** against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic duct, +2%/−4% inside both bands (SPEC-LIT §32) |
 | Wall distance | Poisson method (Tucker 1998) |
 | Buoyancy production | G_b term (Rodi 1987, Henkes et al. 1991) |
@@ -359,16 +359,25 @@ drag a plane-channel correlation does not know about), reported rather than
 buried. `ofgpu-validate`'s `check_thermal_wall_function_gate_verdict_replay`
 replays this exact measurement on every run, permanently.
 
-**Still open, and for a different reason now.** The matching resolved mesh,
-`cases/channelPeriodicFluxLowRe.jsonc` (identical `q_w`, graded to y+ ~ 1),
-does not converge — not because the wall function is wrong, but because
-standard k-epsilon is a high-Reynolds-number model with no near-wall damping,
-invalid below y+ ~ 30 regardless of mesh resolution. Ofgpu now catches this
-before the solver runs (`kEpsilon`/`kOmega`/`kOmegaSST` all refuse a `lowRe`
-wall treatment, §13.4) rather than letting it diverge silently; it stays
-blocked on a low-Reynolds-number RAS model (`LaunderSharmaKE`, recognised but
-not implemented). See `docs/07-fire-solver.md` §1.1 for the full trace,
-including the three superseded attempts.
+**Still open, and for a different reason now that `LaunderSharmaKE` has
+landed (SPEC-LIT §33).** The model itself checks out: its damping-function
+limits are exact (`ofgpu-validate`), and run on a clean, wall-resolved
+periodic channel it reproduces the viscous sublayer `u+ = y+` to under 1%
+and the log law within 1% at y+ ≈ 30–35 — the law-of-the-wall check SPEC-LIT
+§33.3 asks for. But the matching resolved mesh, `cases/channelPeriodicFluxLowRe.jsonc`
+(identical `q_w`, graded to y+ ~ 1), still does not converge to a usable
+state on its own three-dimensional duct geometry: bulk velocity collapses to
+~0.24 m/s against the wall-function twin's 3.51 m/s and a laminar solve of
+the identical mesh's own 14.8 m/s, and temperature never reaches steady
+state. The collapse survives removing the wall-row mismatch, removing the
+`lowRe` Dirichlet condition, and relaxing the mesh grading, so it is not any
+one of those — the leading, untested lead is the `E`-term's `grad(grad U)`
+boundary extrapolation at the duct's corners, where two wall-adjacent
+boundary layers meet. Ofgpu now accepts `wallTreatment lowRe` under
+`LaunderSharmaKE` (`kEpsilon`/`kOmega`/`kOmegaSST` still refuse it, §13.4)
+rather than leaving any of them to diverge silently. See
+`docs/07-fire-solver.md` §1.1 for the full numbers, including the superseded
+attempts and the law-of-the-wall table.
 
 ---
 
@@ -634,6 +643,12 @@ Sources for the numerical methods and models. Section numbers refer to
 - Menter, F. R., Kuntz, M., & Langtry, R. (2003). Ten years of industrial
   experience with the SST turbulence model. *Turbulence, Heat and Mass Transfer*,
   4, 625–632. — §6.3
+- Launder, B. E., & Sharma, B. I. (1974). Application of the energy-dissipation
+  model of turbulence to the calculation of flow near a spinning disc. *Letters
+  in Heat and Mass Transfer*, 1(2), 131–138. — §33
+- Patel, V. C., Rodi, W., & Scheuerer, G. (1985). Turbulence models for
+  near-wall and low Reynolds number flows: a review. *AIAA Journal*, 23(9),
+  1308–1319. — §33
 
 ### Turbulence — LES
 

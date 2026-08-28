@@ -74,12 +74,21 @@
 //  its value written by a model, exactly like CALCULATED.
 #define OFGPU_BC_WALLFN_FIRST 20
 
+//- PatchKind (mesh b_kind), NOT BcKind (field bc_kind) - the two are never
+//  compared across each other. This is the mesh-level "empty" patch (a 2-D
+//  prismatic mesh's front/back plane), the same constant fv.cu's own
+//  OFPATCH_EMPTY names; turbLsGradGradUMagSqr below needs it for the same
+//  reason fvGradScalar/fvGradVector do - see their own definitions.
+#define OFPATCH_EMPTY 2
+
 #ifdef OFGPU_SINGLE
 OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrtf(a); }
 OFGPU_DEV ofscalar oftanh_(ofscalar a) { return tanhf(a); }
+OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return expf(a); }
 #else
 OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrt(a); }
 OFGPU_DEV ofscalar oftanh_(ofscalar a) { return tanh(a); }
+OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return exp(a); }
 #endif
 
 
@@ -384,6 +393,310 @@ extern "C" __global__ void turbEpsilonSources
     su[c] = c1*rTau*g[c];
     sp[c] = c2*rTau;
     susp[c] = (((ofscalar)2/(ofscalar)3)*c1 - c3)*divU[c];
+}
+
+
+// ==========================================================================
+//  SPEC-LIT section 33 - Launder-Sharma low-Reynolds-number k-epsilon
+//
+//  Written from:
+//    Launder & Sharma, "Application of the energy-dissipation model of
+//      turbulence to the calculation of flow near a spinning disc", Letters
+//      in Heat and Mass Transfer 1 (1974) 131-138
+//    Patel, Rodi & Scheuerer, "Turbulence models for near-wall and low
+//      Reynolds number flows: a review", AIAA J. 23 (1985) 1308-1319
+//    ofgpu SPEC-LIT.md section 33
+//  No GPL-licensed source was consulted.
+//
+//  The model solves for epsilon_tilde, the ISOTROPIC dissipation, which
+//  (unlike epsilon) is exactly zero at a solid wall:
+//
+//      epsilon      = epsilon_tilde + D,     D = 2 nu |grad(sqrt k)|^2
+//      nu_t         = C_mu f_mu k^2 / epsilon_tilde
+//      Re_t         = k^2 / (nu epsilon_tilde)
+//      f_mu         = exp( -3.4 / (1 + Re_t/50)^2 )
+//      f_2          = 1 - 0.3 exp(-Re_t^2)
+//      E            = 2 nu nu_t |grad(grad U)|^2
+//
+//      Dk/Dt  = div((nu + nu_t/sigma_k) grad k)   + G - epsilon_tilde - D
+//      De~/Dt = div((nu + nu_t/sigma_e) grad e~)  + C_1 (e~/k) G
+//                                                  - C_2 f_2 e~^2/k + E
+//
+//  C_mu, C_1, C_2, sigma_k, sigma_eps are UNCHANGED from section 6.1 - the
+//  model modifies section 6.1 with f_mu, f_2, D and E, not with new
+//  constants, and the two sections are checked against each other for
+//  exactly that reason (turbNutLaunderSharma/turbLsEpsilonSources reduce to
+//  turbNutKEpsilon/turbEpsilonSources's shear-production term at
+//  f_mu, f_2 -> 1). Section 33.1 gives no dilatation term for this model -
+//  unlike section 6.1's Favre-averaged extension - so none is added here;
+//  the k equation's Sp = epsilon_tilde/k sink is exactly turbKSources's own
+//  formula (called with epsilon_tilde standing in for epsilon), and the
+//  model's own doc says why that reuse is exact rather than approximate.
+//
+//  DESIGN - grad(grad U). SPEC-LIT section 33.1 marks the second-derivative
+//  term as *DESIGN*: take the Gauss gradient of the ALREADY-COMPUTED cell
+//  velocity gradient (fvGradVector's own output), once per outer iteration,
+//  reused by both the k and epsilon_tilde equations. turbLsGradGradUMagSqr
+//  below is that gradient, specialised to emit only the scalar magnitude
+//  the E term needs (27 second-derivative components per cell, squared and
+//  summed) rather than materialising the full third-order tensor - same
+//  gather cost as one more fvGradVector-shaped pass, three times the
+//  arithmetic per face for the extra six components, paid once per outer
+//  iteration. grad U carries no boundary field of its own (unlike U), so
+//  the boundary contribution extrapolates the owner cell's gradient
+//  (zero-gradient) rather than reading one that does not exist; this is
+//  exact wherever grad U is itself uniform near the face, which is what
+//  `E = 0 on a linear velocity field` (SPEC-LIT section 33.3) checks.
+// ==========================================================================
+
+//- nu_t = C_mu f_mu k^2 / epsilon_tilde   (Launder & Sharma 1974)
+//
+//  Same cap-rather-than-guard *DESIGN* as turbNutKEpsilon; f_mu <= 1 always,
+//  so this nu_t never exceeds the standard model's for the same k and
+//  epsilon_tilde, and the epsilon_tilde bound turbBoundEpsilon already
+//  enforces (reused unchanged - SPEC-LIT 33.1's coefficients are the same)
+//  is conservative for the capped nu_t here too.
+extern "C" __global__ void turbNutLaunderSharma
+(
+    ofscalar* __restrict__ nut,
+    const ofscalar* __restrict__ k,
+    const ofscalar* __restrict__ epsTilde,
+    ofscalar nu,
+    ofscalar cmu,
+    ofscalar nutMax,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar kc = ofmax_(k[c], (ofscalar)0);
+    const ofscalar ec = epsTilde[c];
+
+    if (!(ec > (ofscalar)0))
+    {
+        nut[c] = (ofscalar)0;
+        return;
+    }
+
+    const ofscalar reT   = kc*kc/(nu*ec);
+    const ofscalar denom = (ofscalar)1 + reT/(ofscalar)50;
+    const ofscalar fmu   = ofexp_(-(ofscalar)3.4/(denom*denom));
+
+    const ofscalar v = cmu*fmu*kc*kc/ec;
+    nut[c] = ofmin_(v, nutMax);
+}
+
+
+//- out = sqrt(max(in, 0)), elementwise - the scratch `sqrt(k)` field the D
+//  term's gradient is taken of, built once for the interior cells and once
+//  for the boundary faces (two launches, one kernel: see
+//  turbulence::ls_sqrt_positive).
+extern "C" __global__ void turbLsSqrtPositive
+(
+    ofscalar* __restrict__ out,
+    const ofscalar* __restrict__ in,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    out[i] = ofsqrt_(ofmax_(in[i], (ofscalar)0));
+}
+
+
+//- D = 2 nu |grad(sqrt k)|^2 - the extra sink in the k equation that
+//  survives the epsilon -> epsilon_tilde substitution (SPEC-LIT 33.1).
+//  `gradSqrtK` is the Gauss gradient of the field turbLsSqrtPositive built;
+//  see `fv::fvc_grad_scalar`.
+extern "C" __global__ void turbLsDTerm
+(
+    ofscalar* __restrict__ d,
+    const ofvec3* __restrict__ gradSqrtK,
+    ofscalar nu,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofvec3 g = gradSqrtK[c];
+    d[c] = (ofscalar)2*nu*dot3(g, g);
+}
+
+
+//- |grad(grad U)|^2 - the Gauss gradient of the cell velocity-gradient
+//  TENSOR field, specialised to its scalar magnitude squared (27
+//  second-derivative components, summed) rather than the full third-order
+//  tensor. See this section's own header for the boundary DESIGN note and
+//  the cost this pays once per outer iteration.
+//
+//  Structurally this is fvGradVector's gather with 9 field components
+//  instead of 3: three accumulators (a*, b*, c*), one per differentiation
+//  direction x/y/z, each a 3x3 running sum over the SAME 9 components of
+//  gradU that fvGradVector accumulates 3 of.
+extern "C" __global__ void turbLsGradGradUMagSqr
+(
+    ofscalar* __restrict__ out,
+    const oftensor* __restrict__ gradU,
+    const ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ Sf,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ V,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    const oflabel* __restrict__ bcfOffset,
+    const oflabel* __restrict__ bcfFace,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    // d(gradU_**)/dx
+    ofscalar axx=0,axy=0,axz=0, ayx=0,ayy=0,ayz=0, azx=0,azy=0,azz=0;
+    // d(gradU_**)/dy
+    ofscalar bxx=0,bxy=0,bxz=0, byx=0,byy=0,byz=0, bzx=0,bzy=0,bzz=0;
+    // d(gradU_**)/dz
+    ofscalar bcxx=0,bcxy=0,bcxz=0, bcyx=0,bcyy=0,bcyz=0, bczx=0,bczy=0,bczz=0;
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+        const ofscalar wf = w[f];
+        const ofscalar omw = (ofscalar)1 - wf;
+
+        const oftensor go = gradU[owner[f]];
+        const oftensor gn = gradU[neighbour[f]];
+
+        const ofscalar txx = wf*go.xx + omw*gn.xx;
+        const ofscalar txy = wf*go.xy + omw*gn.xy;
+        const ofscalar txz = wf*go.xz + omw*gn.xz;
+        const ofscalar tyx = wf*go.yx + omw*gn.yx;
+        const ofscalar tyy = wf*go.yy + omw*gn.yy;
+        const ofscalar tyz = wf*go.yz + omw*gn.yz;
+        const ofscalar tzx = wf*go.zx + omw*gn.zx;
+        const ofscalar tzy = wf*go.zy + omw*gn.zy;
+        const ofscalar tzz = wf*go.zz + omw*gn.zz;
+
+        const ofvec3 s0 = Sf[f];
+        const ofscalar sg = cfOwn[j] ? (ofscalar)1 : (ofscalar)-1;
+        const ofscalar sx = sg*s0.x, sy = sg*s0.y, sz = sg*s0.z;
+
+        axx += sx*txx; axy += sx*txy; axz += sx*txz;
+        ayx += sx*tyx; ayy += sx*tyy; ayz += sx*tyz;
+        azx += sx*tzx; azy += sx*tzy; azz += sx*tzz;
+
+        bxx += sy*txx; bxy += sy*txy; bxz += sy*txz;
+        byx += sy*tyx; byy += sy*tyy; byz += sy*tyz;
+        bzx += sy*tzx; bzy += sy*tzy; bzz += sy*tzz;
+
+        bcxx += sz*txx; bcxy += sz*txy; bcxz += sz*txz;
+        bcyx += sz*tyx; bcyy += sz*tyy; bcyz += sz*tyz;
+        bczx += sz*tzx; bczy += sz*tzy; bczz += sz*tzz;
+    }
+
+    for (oflabel j = bcfOffset[c]; j < bcfOffset[c + 1]; ++j)
+    {
+        const oflabel b = bcfFace[j];
+        if (bKind[b] == OFPATCH_EMPTY) continue;
+
+        // DESIGN: zero-gradient extrapolation - see this section's header.
+        const oftensor t = gradU[bFaceCells[b]];
+        const ofvec3 s = bSf[b];
+
+        axx += s.x*t.xx; axy += s.x*t.xy; axz += s.x*t.xz;
+        ayx += s.x*t.yx; ayy += s.x*t.yy; ayz += s.x*t.yz;
+        azx += s.x*t.zx; azy += s.x*t.zy; azz += s.x*t.zz;
+
+        bxx += s.y*t.xx; bxy += s.y*t.xy; bxz += s.y*t.xz;
+        byx += s.y*t.yx; byy += s.y*t.yy; byz += s.y*t.yz;
+        bzx += s.y*t.zx; bzy += s.y*t.zy; bzz += s.y*t.zz;
+
+        bcxx += s.z*t.xx; bcxy += s.z*t.xy; bcxz += s.z*t.xz;
+        bcyx += s.z*t.yx; bcyy += s.z*t.yy; bcyz += s.z*t.yz;
+        bczx += s.z*t.zx; bczy += s.z*t.zy; bczz += s.z*t.zz;
+    }
+
+    const ofscalar rv = 1/V[c];
+    axx*=rv; axy*=rv; axz*=rv; ayx*=rv; ayy*=rv; ayz*=rv; azx*=rv; azy*=rv; azz*=rv;
+    bxx*=rv; bxy*=rv; bxz*=rv; byx*=rv; byy*=rv; byz*=rv; bzx*=rv; bzy*=rv; bzz*=rv;
+    bcxx*=rv; bcxy*=rv; bcxz*=rv; bcyx*=rv; bcyy*=rv; bcyz*=rv; bczx*=rv; bczy*=rv; bczz*=rv;
+
+    out[c] =
+        axx*axx + axy*axy + axz*axz + ayx*ayx + ayy*ayy + ayz*ayz + azx*azx + azy*azy + azz*azz +
+        bxx*bxx + bxy*bxy + bxz*bxz + byx*byx + byy*byy + byz*byz + bzx*bzx + bzy*bzy + bzz*bzz +
+        bcxx*bcxx + bcxy*bcxy + bcxz*bcxz + bcyx*bcyx + bcyy*bcyy + bcyz*bcyz +
+        bczx*bczx + bczy*bczy + bczz*bczz;
+}
+
+
+//- E = 2 nu nu_t |grad(grad U)|^2 (SPEC-LIT 33.1) - `gradGradUMagSqr` is
+//  turbLsGradGradUMagSqr's output, `nut` the PREVIOUS outer iteration's eddy
+//  viscosity (the same production-term lag every source in this crate uses).
+extern "C" __global__ void turbLsETerm
+(
+    ofscalar* __restrict__ e,
+    const ofscalar* __restrict__ gradGradUMagSqr,
+    const ofscalar* __restrict__ nut,
+    ofscalar nu,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    e[c] = (ofscalar)2*nu*nut[c]*gradGradUMagSqr[c];
+}
+
+
+//- The epsilon_tilde equation's linearised sources (SPEC-LIT 33.1):
+//
+//      Su = C_1 (e~/k) G + E
+//      Sp = C_2 f_2 e~/k
+//
+//  f_2 = 1 - 0.3 exp(-Re_t^2) is computed inline rather than cached: it is
+//  three flops given Re_t, and Re_t itself needs epsilon_tilde, which this
+//  kernel already reads. `ec <= 0` defaults f_2 to its Re_t -> infinity
+//  limit (1), which is the value bounding epsilon_tilde away from zero
+//  would otherwise have produced - not a special case, the limit itself.
+//  No dilatation term: SPEC-LIT 33.1 gives none for this model - see this
+//  section's own header.
+extern "C" __global__ void turbLsEpsilonSources
+(
+    ofscalar* __restrict__ su,
+    ofscalar* __restrict__ sp,
+    const ofscalar* __restrict__ g,
+    const ofscalar* __restrict__ k,
+    const ofscalar* __restrict__ epsTilde,
+    const ofscalar* __restrict__ eTerm,
+    ofscalar nu,
+    ofscalar c1,
+    ofscalar c2,
+    ofscalar kMin,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar kc = ofmax_(k[c], kMin);
+    const ofscalar ec = epsTilde[c];
+    const ofscalar rTau = ec/kc;
+
+    ofscalar f2 = (ofscalar)1;
+    if (ec > (ofscalar)0)
+    {
+        const ofscalar reT = kc*kc/(nu*ec);
+        f2 = (ofscalar)1 - (ofscalar)0.3*ofexp_(-reT*reT);
+    }
+
+    su[c] = c1*rTau*g[c] + eTerm[c];
+    sp[c] = c2*f2*rTau;
 }
 
 

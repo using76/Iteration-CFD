@@ -140,6 +140,14 @@ pub struct TurbKernels {
     k_omega_k_sources: CudaFunction,
     omega_sources: CudaFunction,
 
+    // SPEC-LIT §33 - Launder-Sharma low-Reynolds-number k-epsilon.
+    nut_launder_sharma: CudaFunction,
+    ls_sqrt_positive: CudaFunction,
+    ls_d_term: CudaFunction,
+    ls_grad_grad_u_mag_sqr: CudaFunction,
+    ls_e_term: CudaFunction,
+    ls_epsilon_sources: CudaFunction,
+
     abs_diff: CudaFunction,
     strain_rate: CudaFunction,
 
@@ -173,6 +181,13 @@ impl TurbKernels {
             epsilon_sources: k.func("turbEpsilonSources")?,
             k_omega_k_sources: k.func("turbKOmegaKSources")?,
             omega_sources: k.func("turbOmegaSources")?,
+
+            nut_launder_sharma: k.func("turbNutLaunderSharma")?,
+            ls_sqrt_positive: k.func("turbLsSqrtPositive")?,
+            ls_d_term: k.func("turbLsDTerm")?,
+            ls_grad_grad_u_mag_sqr: k.func("turbLsGradGradUMagSqr")?,
+            ls_e_term: k.func("turbLsETerm")?,
+            ls_epsilon_sources: k.func("turbLsEpsilonSources")?,
 
             abs_diff: k.func("turbAbsDiff")?,
             strain_rate: k.func("turbStrainRateMag")?,
@@ -1000,6 +1015,222 @@ pub fn omega_sources(
             .arg(omega)
             .arg(&gamma)
             .arg(&beta)
+            .arg(&k_min)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §33 - Launder-Sharma low-Reynolds-number k-epsilon
+// ==========================================================================
+
+/// `nu_t = C_mu f_mu k²/epsilon_tilde`, capped at `nut_max` - Launder &
+/// Sharma (1974), SPEC-LIT §33.1. `f_mu` is computed inline from
+/// `Re_t = k²/(nu epsilon_tilde)`; [`models::launder_sharma::f_mu`] is the
+/// same formula on the host, for the analytic limits SPEC-LIT §33.3 asks
+/// for.
+#[allow(clippy::too_many_arguments)]
+pub fn nut_launder_sharma(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    nut: &mut DevBuf<Scalar>,
+    k: &DevBuf<Scalar>,
+    epsilon_tilde: &DevBuf<Scalar>,
+    nu: Scalar,
+    cmu: Scalar,
+    nut_max: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let f = kern.nut_launder_sharma.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(nut)
+            .arg(k)
+            .arg(epsilon_tilde)
+            .arg(&nu)
+            .arg(&cmu)
+            .arg(&nut_max)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `out[i] = sqrt(max(in[i], 0))`, elementwise - the scratch `sqrt(k)` field
+/// SPEC-LIT §33.1's `D` term is gradiented from. Call once for the interior
+/// (`n = mesh.n_cells`) and once for the boundary faces
+/// (`n = mesh.n_boundary_faces`); the two calls are what fill in a
+/// [`crate::field::GpuScalarField`]'s `.f` and `.bf` so
+/// [`crate::fv::fvc_grad_scalar`] can be handed it directly.
+pub fn ls_sqrt_positive(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    out: &mut DevBuf<Scalar>,
+    input: &DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let f = kern.ls_sqrt_positive.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(out)
+            .arg(input)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `D = 2 nu |grad(sqrt k)|²` (SPEC-LIT §33.1) - the extra sink the
+/// `epsilon -> epsilon_tilde` substitution leaves in the `k` equation.
+pub fn ls_d_term(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    d: &mut DevBuf<Scalar>,
+    grad_sqrt_k: &DevBuf<Vec3>,
+    nu: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let f = kern.ls_d_term.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(d)
+            .arg(grad_sqrt_k)
+            .arg(&nu)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `|grad(grad U)|²` (SPEC-LIT §33.1's *DESIGN* note) - the Gauss gradient of
+/// the already-computed cell velocity-gradient tensor `grad_u`, specialised
+/// to the scalar magnitude the `E` term needs. See `turbLsGradGradUMagSqr`
+/// in `cuda/turbulence.cu` for the boundary treatment (`grad U` carries no
+/// boundary field of its own, so the boundary contribution extrapolates the
+/// owner cell's gradient) and the cost this pays once per outer iteration.
+#[allow(clippy::too_many_arguments)]
+pub fn ls_grad_grad_u_mag_sqr(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    out: &mut DevBuf<Scalar>,
+    grad_u: &DevBuf<Tensor>,
+    m: &GpuMesh,
+) -> Result<()> {
+    let n = m.n_cells;
+    expect_len(out, n, "out")?;
+    expect_len(grad_u, n, "grad_u")?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let f = kern.ls_grad_grad_u_mag_sqr.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(out)
+            .arg(grad_u)
+            .arg(&m.weights)
+            .arg(&m.sf)
+            .arg(&m.b_sf)
+            .arg(&m.v)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.b_face_cells)
+            .arg(&m.b_kind)
+            .arg(&m.cf_offset)
+            .arg(&m.cf_face)
+            .arg(&m.cf_own)
+            .arg(&m.bcf_offset)
+            .arg(&m.bcf_face)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `E = 2 nu nu_t |grad(grad U)|²` (SPEC-LIT §33.1). `nut` is the PREVIOUS
+/// outer iteration's eddy viscosity - the same production-term lag every
+/// source in this module uses for `G`.
+pub fn ls_e_term(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    e: &mut DevBuf<Scalar>,
+    grad_grad_u_mag_sqr: &DevBuf<Scalar>,
+    nut: &DevBuf<Scalar>,
+    nu: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let f = kern.ls_e_term.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(e)
+            .arg(grad_grad_u_mag_sqr)
+            .arg(nut)
+            .arg(&nu)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `Su = C_1 (e~/k) G + E`, `Sp = C_2 f_2 e~/k` - the `epsilon_tilde`
+/// equation's sources (SPEC-LIT §33.1). No dilatation `susp` term: §33.1
+/// gives none for this model, unlike §6.1's Favre-averaged extension.
+#[allow(clippy::too_many_arguments)]
+pub fn ls_epsilon_sources(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    su: &mut DevBuf<Scalar>,
+    sp: &mut DevBuf<Scalar>,
+    g: &DevBuf<Scalar>,
+    k: &DevBuf<Scalar>,
+    epsilon_tilde: &DevBuf<Scalar>,
+    e_term: &DevBuf<Scalar>,
+    nu: Scalar,
+    c1: Scalar,
+    c2: Scalar,
+    k_min: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let f = kern.ls_epsilon_sources.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(su)
+            .arg(sp)
+            .arg(g)
+            .arg(k)
+            .arg(epsilon_tilde)
+            .arg(e_term)
+            .arg(&nu)
+            .arg(&c1)
+            .arg(&c2)
             .arg(&k_min)
             .arg(&nl)
             .launch(cfg_for(n))?;
