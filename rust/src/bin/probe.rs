@@ -6,6 +6,11 @@
 
 //! Vertical slice: nvcc -> PTX -> cudarc -> launch -> read back, on the exact
 //! gather pattern the solver depends on. Verifies against a CPU computation.
+//!
+//! Provenance: ORIGINAL - the toolchain probe: the smallest program that proves
+//! nvcc -> CUBIN -> cudarc -> launch -> read-back works and reproduces the CPU
+//! answer bit for bit. No external source (`PROVENANCE.md`, `src/bin/*`). No
+//! GPL-licensed source was consulted.
 
 use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::Ptx;

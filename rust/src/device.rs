@@ -16,6 +16,12 @@
 //! * a `Graph` is `!Send`/`!Sync`, so the "graph objects are not internally
 //!   synchronised" rule in the CUDA docs becomes a compile error rather than
 //!   a race.
+//!
+//! Provenance: ORIGINAL - the cudarc wrapper (context, dedicated non-blocking
+//! stream, `DevBuf`, `KernelSet`, CUDA-graph capture). No external source: this
+//! is ownership plumbing over the CUDA driver API, with no CFD analogue
+//! anywhere. `PROVENANCE.md`, *GPU plumbing and tooling - original*. No
+//! GPL-licensed source was consulted.
 
 use std::sync::Arc;
 

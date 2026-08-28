@@ -55,6 +55,13 @@
 //!
 //! A fast wrong solver is the worst outcome available here, and the selector
 //! is built so that it is not reachable.
+//!
+//! Provenance: ORIGINAL - the `PressureBackend` trait and the measuring
+//! selector (hard applicability filter, then an accuracy check against the
+//! reference solve, then measured timing). The selection POLICY is designed
+//! here; each backend's own method is cited in its own file. `PROVENANCE.md`,
+//! *GPU plumbing and tooling - original*. No GPL-licensed source was
+//! consulted.
 
 use std::time::Instant;
 

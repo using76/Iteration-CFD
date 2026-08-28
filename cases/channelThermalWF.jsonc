@@ -1,3 +1,17 @@
+// ============================================================================
+// RERUN (SPEC-LIT S13.4.1): every number below was measured by a driver that
+// read none of this file's `numerics` block. Rerun on the fixed driver,
+// `-iters 6000`: y+ at the hot walls 21.95/37.76/40.31 (was 21.95/37.90/
+// 40.29), total wall heat input 157.035 W, T_b = 308.039 K,
+// U_b = 3.00469 m/s, |U| residual 9.4e-10. The y+ this file exists to place
+// in the 30-60 band did not move. NOTE that this case's RESOLVED twin,
+// `channelThermalLowRe.jsonc`, no longer runs at all (see its own header),
+// so the wall-heat RATIO this pair was built to produce cannot be remeasured
+// - the retired 0.381 stands as a pre-S33, pre-S13.4.1 record and nothing
+// more. This whole fixed-T attempt is superseded by
+// `cases/channelPeriodicFluxWF.jsonc` (SPEC-LIT S32).
+// ============================================================================
+//
 // meteor-cfd case - SPEC-LIT S29.3/S30.3's deferred thermal-wall-function
 // gate, mesh (a): a plane channel/duct, inlet-driven, hot top and bottom
 // walls at Tw = 373.15 K against a 293.15 K inflow, gravity zero (forced

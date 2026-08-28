@@ -68,6 +68,12 @@
 //! all of them show up as a mismatch and the solve refuses rather than
 //! returning a smooth wrong field. [`Verify::FirstSolveOnly`] trades that
 //! per-solve check for a cheaper read; the default does not.
+//!
+//! Provenance: ORIGINAL plumbing over a LITERATURE method - the cuFFT direct
+//! Poisson solve. Method: Swarztrauber, *SIAM Review* 19 (1977) 490; Press et
+//! al., *Numerical Recipes*, S19.4. cuFFT is NVIDIA's, used through its public
+//! API and not vendored. `PROVENANCE.md` carries the row. No GPL-licensed
+//! source was consulted.
 
 use std::f64::consts::PI;
 

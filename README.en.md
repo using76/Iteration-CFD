@@ -103,7 +103,7 @@ applied on faces rather than interpolated from cell values.
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | Turbulence selection in the coupled solvers (`ofgpu-buoyant`, `ofgpu-fire`) | `ofgpu-buoyant`: the `CoupledTurbulence` trait dispatches on the case's own `RAS { model ...; }`/`simulationType`, exactly as the standalone drivers do — k-ε, k-ω, k-ω SST (wall distance computed automatically) and LES (Smagorinsky/WALE/Deardorff, with §16's filter widths and van Driest damping) all construct the ACTUAL model asked for, and buoyancy production `G_b` is wired into the right equation for each (§17, §30.2). `ofgpu-fire`: still k-ε only — its combustion mixing-time closure and thermal wall function need `epsilon` directly, so any other model is refused by name, a §13.4 error, not a silent substitution |
 | Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — `LaunderSharmaKE` (SPEC-LIT §33) is the one model on that menu, `kEpsilon`/`kOmega`/`kOmegaSST` still are not, so `lowRe` under any of the latter three is refused by name rather than left to diverge (SPEC-LIT §32) |
-| Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. **Validated** against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic duct, +2%/−4% inside both bands (SPEC-LIT §32) |
+| Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. Validated against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic PLANE CHANNEL (SPEC-LIT §32/§34): the **wall-function leg CLOSES** — Gnielinski at Petukhov's smooth-pipe `f` −5.9% (±10%), Dittus-Boelter −12.9% (±20–25%) — and the **resolved `lowRe` leg does NOT** (+14.1% Gnielinski, +6.0% Dittus-Boelter). At each leg's own MEASURED wall friction factor the Reynolds-analogy verdict closes on neither (+34.4%, +16.6%). Numbers rerun at the SPEC-LIT §13.4.1 numerics; full account in `docs/07-fire-solver.md` §1.1 |
 | Wall distance | Poisson method (Tucker 1998) |
 | Buoyancy production | G_b term (Rodi 1987, Henkes et al. 1991) |
 
@@ -145,7 +145,7 @@ applied on faces rather than interpolated from cell values.
 | Low-Mach formulation | `p = p0(t) + p~(x,t)` split, the divergence constraint, `p0(t)` integration in a sealed or open compartment (Rehm & Baum 1978) |
 | Energy equation | Sensible enthalpy, `k_eff = k + rho cp nu_t/Prt`, fixed-flux and fixed-temperature wall conditions, the Jayatilleke thermal wall function on `thermalWallFunction` walls (SPEC-LIT §29.3) |
 | Combustion | Mixing-controlled single-step EDM (Magnussen & Hjertager 1977) — `Y_F`/`Y_O2`/`Y_P` transport, a fuel-depletion clip, fuel mass consumed and heat released agreeing exactly (to round-off) |
-| Radiation | Gray P1 approximation (Modest), Marshak wall condition, a `chi_r` radiant-fraction floor — `fvDOM` is refused by name per the §13.4 contract |
+| Radiation | Gray P1 approximation (Modest ch. 15), Marshak wall condition, a `chi_r` radiant-fraction floor — **and gray fvDOM** (Modest ch. 16; Fiveland 1984; Truelove 1987 — SPEC-LIT §36): the same RTE along 24 level-symmetric S4 ordinates, `radiationModel` selects between them. Measured on `cases/burnerPlume.jsonc` (32,768 cells, 1,200 steps, RTX 5070 Ti): radiated fraction 14.98% (P1) vs 13.83% (fvDOM), wall time 19.08 s vs 124.6 s |
 | Validation gates | Sealed-box `dp0/dt` ramp (analytic), exact burner heat release, radiative equilibrium, cut-cell closure, msh hex closure — all permanent `ofgpu-validate` checks |
 | Field output & restart | `-output foam,vtu,nvdb,vdb,usda` and `-writeInterval` write `U`, `p`, `T`, the turbulence closure and any species fields the same way `ofgpu-buoyant`/`ofgpu-vof` do; `-restartWrite N`/`-restartFrom FILE` checkpoint and resume — `p0`, `dp0dt` and the species mass fractions are carried across the restart, not only `U`/`p`/`T`, because a low-Mach run's thermodynamic state is more than those three fields. 40 steps continuous vs. 20+restart+20 agree on the first post-restart pressure residual, `p0` and total enthalpy |
 | Volumetric sources | `sources[]` (JSONC) or `constant/fvSources` (OpenFOAM case directories) register a source on the momentum equation — a uniform body force over the whole domain, the one a periodic (cyclic-patch) case needs since it has no inlet to prescribe a mass flow from |
@@ -330,9 +330,11 @@ Jayatilleke thermal wall function:
 | The `thermalWallFunction` Robin triple encodes exactly the analytic Jayatilleke flux (the one-cell conductance identity) | 0 (round-off) |
 | Werner-Wengle: both branches agree at the branch point, and each branch's own closed form reproduces a manufactured `tau_w` to round-off | 0 (round-off) |
 | Coupled-solver selection: `kOmegaSST` via `ofgpu-buoyant`'s `build_coupled`, on a buoyant case, yields a different `nut` FNV hash than `kEpsilon` on the identical case | hashes differ (decisive) |
-| Thermal wall-function gate, Nusselt verdict (replayed measurement, post SPEC-LIT §35 thermostat) — `cases/channelPeriodicFluxWF.jsonc`'s own numbers, against Dittus-Boelter/Gnielinski | −4.5% / −11.5% (inside both ±10% / ±20–25% bands) |
-| Resolved-leg mesh resolution (replayed measurement) — `cases/channelPeriodicFluxLowRe.jsonc`'s worst wall-adjacent y+ and cells-below-y+-20 count | y+ = 0.00175, 192/400 cells (both requirements met) |
-| Resolved-leg Nusselt verdict (replayed measurement, SPEC-LIT §35) — same case, against Dittus-Boelter/Gnielinski | +8.1% / +16.3% (inside the DB band, outside Gnielinski's — gate partially closes) |
+| Thermal wall-function gate, Nusselt verdict (replayed measurement) — `cases/channelPeriodicFluxWF.jsonc`'s own numbers, against Gnielinski at the Petukhov pipe `f` / Dittus-Boelter | −5.9% / −12.9% (inside both ±10% / ±20–25% bands — **closes**) |
+| Resolved-leg mesh resolution (replayed measurement) — `cases/channelPeriodicFluxLowRe.jsonc`'s worst wall-adjacent y+ and cells-below-y+-20 count | y+ = 0.00185, 192/400 cells (both requirements met) |
+| Resolved-leg Nusselt verdict (replayed measurement) — same case, same two correlations | +14.1% / +6.0% (inside the DB band, outside Gnielinski's, and its own ±3.1% energy-balance uncertainty no longer reaches the band edge — **does not close**) |
+| Thermostat weighting, the decisive experiment (replayed) — four runs, `"weighting"` the only token changed | `massFlux` lowers `Nu` and widens `T_w − T_b` on both legs, and moves the resolved mesh 2.7× more than the wall-function one (−3.54% vs −1.32%) |
+| Bounded convection on momentum, the isolation experiment (replayed) — seven runs over `div(phi,U)` ∈ {`Gauss upwind`, `Gauss linearUpwind grad(U)`} × {plain, `bounded`} | dropping `bounded` closes the kinematic drag balance on both legs (−3.787% → −0.000%, −0.112% → −0.005%); the scheme's ORDER is worth < 0.3% of `Nu` |
 | Thermostat sign and steady-state offset — source when cold, sink when hot, matches the closed form `target + Q·tau/rho_cp` | 0 (round-off) |
 
 These establish that the rough-wall law collapses to the existing smooth one
@@ -347,67 +349,94 @@ checkable at all: three earlier fixed-wall-temperature attempts (ratios
 different problems (a fixed `T_w` lets the bulk temperature float, so two
 meshes with different near-wall conductances settle at different ΔT).
 
-**Validated, and rebuilt as a genuine 2-D plane channel per SPEC-LIT §34.**
-Fixing the SAME wall heat flux `q_w` on both meshes — letting each predict
-its own ΔT — and comparing the result as a Nusselt number against
-Dittus & Boelter (1930) and Gnielinski (1976) closes the wall-function leg.
+**Validated, and rebuilt as a genuine 2-D plane channel per SPEC-LIT §34 —
+then rerun three times as three separate defects in the COMPARISON were
+found and removed.** Fixing the SAME wall heat flux `q_w` on both meshes —
+letting each predict its own ΔT — and comparing the result as a Nusselt
+number against Dittus & Boelter (1930) and Gnielinski (1976) is the gate.
 The gate used to run on a 3-D duct only because JSONC could not say `empty`;
 now that it can (§34.1), `cases/channelPeriodicFluxWF.jsonc` is
 streamwise-cyclic, `empty` front/back, hot walls top and bottom, and nothing
-else — rerun, not carried over, and converges to a bit-identical fixed point
-(`standard` wallTreatment, y+ ≈ 57.7): `q_w` = 500 W/m², `T_w` = 316.86 K
-(diagnosed by the thermal wall function), `T_b` = 292.92 K,
-`U_b` = 5.3696 m/s. For a genuine plane channel the heated-perimeter and
-wetted-perimeter conventions COINCIDE (both walls are hot, no third or
-fourth wall to argue about), so `D_h` = 2H = 0.08 m is the only number on
-the table: Re = 28 638 and the measured Nu = 65.24 sits at
-**−4.5% of Gnielinski** (±10%) and **−11.5% of Dittus-Boelter** (±20–25%) —
-inside both bands. A force-balance cross-check gives `U_b/u_tau` = 19.23
-against the 15–17 a fully developed plane channel gives — no side-wall-drag
-caveat needed this time, since there is no longer a third or fourth wall.
-`ofgpu-validate`'s `check_thermal_wall_function_gate_verdict_replay` replays
-this rebuilt measurement on every run, permanently.
+else. The three defects, each fixed and each followed by a full rerun of
+both legs, were: a UNIFORM domain heat sink where the compensation should be
+mass-flux weighted (§35.3); a friction factor INFERRED from the body force
+rather than MEASURED at the wall (§32.5); and — the one that moved the
+verdict — a driver that read **none** of the case's own `numerics` block, so
+the momentum equation ran `bounded Gauss upwind` on two cases asking for
+`Gauss linearUpwind grad(U)` (§13.4.1, §32.5.5). The current numbers, both
+legs at 40 000 iterations on the settings the case files actually name:
 
-**The velocity field checks out; the resolved leg's ENERGY equation used to
-drift, and SPEC-LIT §35 fixed it.** `LaunderSharmaKE` (SPEC-LIT §33) checks
-out on every front now available: its damping-function limits are exact
-(`ofgpu-validate`), it reproduces the viscous sublayer `u+ = y+` to under 1%
-and the log law within 1% on a clean periodic channel, and — the point
-SPEC-LIT §34's rebuild was FOR — its own resolved leg,
-`cases/channelPeriodicFluxLowRe.jsonc` rebuilt the same way (`empty`
-front/back, no side walls at all), converges its velocity field to
-round-off (`|U|` residual `2×10⁻¹²`) with `U_b/u_tau` = 17.35, matching
-the 15–17 plane-channel target more closely than the wall-function leg's
-own 19.23. **The duct-corner hypothesis the previous round of work left
-untested is CONFIRMED**: removing the corners fixed the velocity collapse.
-What did NOT check out was the ENERGY equation: `T_b`/`T_w` drifted upward
-at a small, linear, apparently UNDAMPED rate for as long as the run was
-extended. SPEC-LIT §35 diagnosed why: a closed, streamwise-periodic domain
-whose every thermal boundary is Neumann has a steady temperature equation
-that is pure Neumann and singular up to an additive constant — the level
-simply kept whatever it was given (two initial temperatures, 293.15 K and
-400 K, converged to different bulk states). §35.1's fix is a proportional
-controller on the domain's own volume-mean `T`, replacing the old fixed
-`-heaterPower` sink; both channel cases now carry it in `sources[]`. The
-regression this diagnosis needed now passes decisively: rerunning the
-resolved leg from T0 = 293.15 K and T0 = 400 K converges to the IDENTICAL
-state — `T_mean`, `T_b`, `U_b`, thermostat power, all to the last printed
-digit — and the drift itself is gone, not merely slower (`T` bit-identical
-from iteration 5 000 through 39 999). The energy balance closes to
-round-off on the wall-function leg (thermostat power vs. measured wall
-heat, 2.8×10⁻⁷ W) and to 2.8% on the resolved leg — traced to this graded
-mesh's own pressure-solve tolerance floor (tightening it diverges the run),
-not tuned away. **The gate itself: the wall-function leg still closes on
-both correlations (Nu = 65.24, unchanged); the resolved leg now has an
-actual steady Nu = 73.40 — inside Dittus-Boelter's ±20-25% band (+8.1%) but
-outside Gnielinski's tighter ±10% band (+16.3%), a six-point miss.** This is
-a categorically smaller and different question than the runaway drift it
-replaces, and most plausibly implicates Launder-Sharma's own near-wall
-THERMAL prediction (SPEC-LIT §33.3 validated its momentum law of the wall
-independently; nothing has validated its temperature sublayer the same
-way), not another energy-accounting defect. See `docs/07-fire-solver.md`
-§1.1 for the full numbers, including the superseded duct-era attempts, the
-law-of-the-wall table, and the full SPEC-LIT §35 diagnosis and fix.
+| | wall-function leg | resolved `lowRe` leg |
+|---|---|---|
+| y+ (wall-adjacent) | 56.89 / 57.78 / 58.59 | 0.00185 (192 of 400 cells below y+ 20) |
+| `T_w` (diagnosed) / `T_b` (mixed-mean) | 317.483 K / 293.251 K | 314.186 K / 292.800 K |
+| `U_b` / Re | 5.3972 m/s / 28 785 | 4.92909 m/s / 26 288 |
+| **Nu (measured)** | **64.5257** | **72.9988** |
+| Gnielinski at Petukhov's smooth-pipe `f` (ABSOLUTE PREDICTION) | −5.9% — **inside ±10%** | +14.1% — **outside** |
+| Dittus-Boelter | −12.9% — inside ±20–25% | +6.0% — inside |
+| Gnielinski at this leg's own MEASURED `f` (REYNOLDS ANALOGY) | +34.4% — outside | +16.6% — outside |
+| energy balance (thermostat power vs measured wall heat) | +0.106% | +3.11% |
+| kinematic force balance (§32.5.2) | −0.005% | −0.000% |
+
+`D_h = 2H = 0.08 m` is the only hydraulic diameter on the table: for a
+genuine plane channel the heated and wetted perimeters COINCIDE, so there is
+no convention to choose. `ofgpu-validate` replays both legs' measurements on
+every run, permanently.
+
+**The verdict, stated once.** The wall-function leg CLOSES under §32.4's
+absolute-prediction verdict and the resolved leg does NOT — and the resolved
+leg's miss is now decisive rather than marginal, because its own ±3.1%
+energy-balance uncertainty (Nu ∈ [70.7, 75.3]) no longer reaches Gnielinski's
+band edge. Under the REYNOLDS-ANALOGY verdict, taken at the friction factor
+each leg's own wall measures, the gate closes on NEITHER leg; the "+6.4% /
++6.8%, both legs pass" once published here rested on friction factors
+inferred from the body force, which measurement showed to be 8–25% wrong.
+
+**What the remainder implicates.** Removing the `bounded` token from the
+momentum equation closed the resolved leg's kinematic drag imbalance
+outright, from −3.787% to −0.000%, and a seven-run isolation over
+`div(phi,U)` shows why: the scheme's ORDER is worth less than 0.3% of `Nu`,
+while `bounded` alone carries the whole imbalance. SPEC-LIT §3.1 records the
+rule that came out of it — a driver may not default a momentum equation to
+the bounded form, because §25.1 makes `div u` a prescribed physical quantity
+in a low-Mach flow, not a convergence error to be subtracted away. That
+leaves the resolved leg getting MOMENTUM very nearly right and HEAT 14% too
+high, with the uniform sink, the inferred `f` and the momentum bounded
+correction all off the list. The leading named candidate is now the constant
+`Pr_t = 0.85` reaching a first cell at y+ = 0.0019 (Kays 1994 reports `Pr_t`
+rising to ~1.5–1.9 in the sublayer) — right sign, carried by the resolved
+mesh and not the wall-function one. **That is a hypothesis, measured by
+nothing.** The +3.11% energy imbalance on the same leg is the other open
+item; `Energy::assemble` applies its bounded correction unconditionally
+(§26), so no case setting can isolate it and the next experiment there needs
+code.
+
+**The velocity field checks out, on both legs.** `LaunderSharmaKE` (SPEC-LIT
+§33) checks out on every front now available: its damping-function limits are
+exact (`ofgpu-validate`), it reproduces the viscous sublayer `u+ = y+` to
+under 1% and the log law within 1% on a clean periodic channel, and its own
+resolved leg converges its velocity field to round-off (`|U|` residual
+`4×10⁻¹²`). `U_b/u_tau`, formed from each rerun's own printed `tau_w` and
+`rho(T_b)`, is **18.3** on the resolved leg and **20.1** on the wall-function
+one (viscous `tau_w`; 21.6 at that leg's `rho u_tau²` form) — the resolved
+leg sits closer to the 15–17 a fully developed plane channel gives, as it did
+before, but at the corrected numerics **neither leg is inside that range any
+more** (they were 17.35 and 19.23 at the substituted `bounded Gauss upwind`).
+That is reported, not explained. The duct-corner hypothesis an
+earlier round left untested is CONFIRMED: removing the corners fixed the
+velocity collapse. The energy equation's earlier undamped DRIFT is fixed too
+— SPEC-LIT §35 diagnosed it as a pure-Neumann null space (every thermal
+boundary in a streamwise-periodic closed domain is Neumann, so the steady
+temperature equation is singular up to an additive constant) and replaced the
+old fixed `-heaterPower` sink with a proportional controller on the domain's
+own volume-mean `T`. The regression that diagnosis needed passes decisively:
+the resolved leg run from T0 = 293.15 K and from T0 = 400 K converges to the
+IDENTICAL state, every printed digit.
+
+See `docs/07-fire-solver.md` §1.1 for the full numbers in order — the
+superseded duct-era attempts, the law-of-the-wall table, the SPEC-LIT §35
+diagnosis and fix, the friction-factor measurement, and the §13.4.1 rerun
+that is the current statement.
 
 ---
 
@@ -579,10 +608,12 @@ Convert binary-format cases to ASCII before use.
 - **No compressible or transonic capability.** Density-weighted time derivatives
   are implemented and used by VOF, but the pressure equation is incompressible.
 - **Combustion is mixing-controlled single-step (EDM) only.** No finite-rate
-  chemistry mechanism. **Radiation is gray P1 only.** `fvDOM` (finite-volume
-  discrete ordinates) is more accurate at optically thin fire margins but is
-  the documented next step; asking for it is refused by name per the §13.4
-  contract.
+  chemistry mechanism. ~~**Radiation is gray P1 only.**~~ **Fixed (SPEC-LIT
+  §36).** `fvDOM` (finite-volume discrete ordinates, 24-ordinate level-symmetric
+  S4) is implemented and selected by `radiationModel`; both models share one
+  `EnergySources` registration and the same `chi_r` floor. Radiation is still
+  GRAY on both — no spectral (WSGG) band model, and the absorption coefficient
+  does not vary with local soot/CO2/H2O.
 - ~~Only one cyclic pair.~~ **Fixed (SPEC-LIT §34.2).** `BlockSpec::cyclic`
   is a list now, and a JSONC case's `mesh.cyclic` accepts any number of
   pairs (one per axis) — a plane channel periodic in two directions, or a

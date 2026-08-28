@@ -30,6 +30,12 @@
   2. The (base, stride) of a line is computed from the batch index by
      cartIndex below rather than read from a table, so a direction costs four
      integers instead of an array.
+
+  Provenance: ORIGINAL plumbing over a LITERATURE method. The DCT/DST-from-FFT
+  constructions above are the standard ones: Swarztrauber, SIAM Review 19
+  (1977) 490, and Press et al., Numerical Recipes S19.4. cuFFT is NVIDIA's,
+  used through its public API and not vendored. PROVENANCE.md carries the row.
+  No GPL-licensed source was consulted.
 \*---------------------------------------------------------------------------*/
 #include "ofgpu_device.cuh"
 

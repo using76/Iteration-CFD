@@ -78,6 +78,10 @@
 //! equations consume; `U` is what the model differentiates. Interpolating this
 //! `U` back onto the faces would not return the flux it came from, which is
 //! precisely why nothing here does.
+//!
+//! Provenance: LITERATURE - Ferziger & Peric, *Computational Methods for Fluid
+//! Dynamics*, S7.1 (the potential/Laplace initialisation), via SPEC-LIT.md.
+//! `PROVENANCE.md` carries the row. No GPL-licensed source was consulted.
 
 use crate::device::Gpu;
 use crate::error::{Error, Result};

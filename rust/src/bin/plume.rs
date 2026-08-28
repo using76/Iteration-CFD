@@ -91,6 +91,12 @@
 //! means lifting `store_old_time` out of `correct` into a new
 //! `store_time_level` on both models, which is a library change and not this
 //! driver's to make.
+//!
+//! Provenance: ORIGINAL driver code over LITERATURE numerics. The buoyancy
+//! treatment and the transport equations it drives are cited in the library
+//! modules and SPEC-LIT.md; this file is argument parsing, case loading, the
+//! iteration order and the reporting loop, which are this project's own
+//! (`PROVENANCE.md`, `src/bin/*`). No GPL-licensed source was consulted.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

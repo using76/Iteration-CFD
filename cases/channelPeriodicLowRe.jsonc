@@ -1,3 +1,21 @@
+// ============================================================================
+// !! NOT RUNNABLE AS SHIPPED, and NOT RERUN. This file names `wallTreatment
+// !! lowRe` together with `turbulence.model kEpsilon`. SPEC-LIT S33's rule,
+// !! added AFTER the numbers in this header were measured, refuses that
+// !! combination as a S13.4 error and names `LaunderSharmaKE` as what
+// !! `lowRe` needs. `ofgpu-fire` therefore exits on this case today, and
+// !! `-permissive` does not reproduce the record either - it substitutes
+// !! `standard` (the wall-function row), which is a different flow.
+// !!
+// !! Every number below was measured BEFORE that rule AND before SPEC-LIT
+// !! S13.4.1 (the driver read none of this file's `numerics` block: momentum
+// !! ran `bounded Gauss upwind` where this file's `div(phi,U)` asks for
+// !! something else). Both defects are on the record; neither is corrected
+// !! here, because this whole fixed-wall-temperature attempt was RETIRED by
+// !! `cases/channelPeriodicFluxWF.jsonc`/`...LowRe.jsonc` (SPEC-LIT S32's
+// !! redesigned gate). The file is kept as the historical record it is.
+// ============================================================================
+//
 // meteor-cfd case - SPEC-LIT S31's periodic rerun of the S29.3/S30.3 gate,
 // mesh (b): the SAME streamwise-cyclic duct as `channelPeriodicWF.jsonc`
 // (identical cross-section, streamwise length, hot-wall temperature,

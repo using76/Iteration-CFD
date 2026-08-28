@@ -23,6 +23,12 @@
 //!    patch offset table, so one kernel covers all patches.
 //!
 //! This file defines the types. The geometry itself is in `mesh/geometry.rs`.
+//!
+//! Provenance: ORIGINAL - the mesh types and the LDU -> CSR inversion. The
+//! addressing CONVENTION it stores (upper-triangular face order) is a property
+//! of the case format it reads, not of anyone's source; the inversion itself is
+//! designed here. `PROVENANCE.md`, *GPU plumbing and tooling - original*. No
+//! GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
 use crate::error::Result;

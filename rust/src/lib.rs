@@ -31,6 +31,12 @@
 //!   `1 - sum`, all advected by the one conservative flux
 //! * [`blockgen`] - a structured mesh generator, so test cases need no OpenFOAM
 //! * [`reference`] - an independent CPU transcription used only to validate
+//!
+//! Provenance: ORIGINAL - the crate root. Module declarations, the crate-wide
+//! `Scalar` alias and the re-exports; it carries no numerics of its own, and
+//! each module named above declares its own provenance in its own header.
+//! `PROVENANCE.md` is the per-file record for the whole tree. No GPL-licensed
+//! source was consulted.
 
 pub mod device;
 pub mod error;

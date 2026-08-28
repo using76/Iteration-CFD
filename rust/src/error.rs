@@ -11,6 +11,10 @@
 //! sprinkle `.map_err()` everywhere, everything funnels through this enum -
 //! which is also where the domain errors (a malformed polyMesh, a field whose
 //! size does not match the mesh) belong.
+//!
+//! Provenance: ORIGINAL - the crate's error type. No external source.
+//! `PROVENANCE.md`, *GPU plumbing and tooling - original*. No GPL-licensed
+//! source was consulted.
 
 use thiserror::Error;
 

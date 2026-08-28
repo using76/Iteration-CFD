@@ -41,6 +41,12 @@
 //! alongside `k_epsilon.rs`: the two drivers differ only in which dissipation
 //! variable they read, name and write, and holding everything else still is
 //! what makes that visible.
+//!
+//! Provenance: ORIGINAL driver code over LITERATURE numerics. The k-omega model
+//! itself is cited in `src/turbulence.rs`/`src/models/*` and SPEC-LIT.md S6.2;
+//! this file is argument parsing, case loading, the iteration order and the
+//! reporting loop, which are this project's own (`PROVENANCE.md`, `src/bin/*`).
+//! No GPL-licensed source was consulted.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

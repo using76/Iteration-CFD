@@ -24,6 +24,11 @@
 //! (2) vs (3) is the honest measure of what the graph saves. (1) is there so
 //! the cost of going fixed-iteration is visible too, because that trade is
 //! part of the decision.
+//!
+//! Provenance: ORIGINAL - a benchmark harness for CUDA-graph capture against
+//! per-launch execution. It measures this crate's own kernels; there is no
+//! external source for it (`PROVENANCE.md`, `src/bin/*`). No GPL-licensed
+//! source was consulted.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

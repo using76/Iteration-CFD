@@ -10,6 +10,12 @@
 //! a `HostMesh` reference plus a flat list of named fields. Defining the type
 //! here, once, is what lets the writers be built in parallel and the output
 //! seam unify them without touching their internals.
+//!
+//! Provenance: ORIGINAL - the one input type every result writer consumes.
+//! Designed here so the writers can be built independently behind one seam; it
+//! describes no external format of its own (each writer names its own).
+//! `PROVENANCE.md`, *New I/O formats and machinery*. No GPL-licensed source was
+//! consulted.
 
 use crate::{Scalar, Vec3};
 

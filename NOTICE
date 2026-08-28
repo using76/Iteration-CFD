@@ -13,7 +13,10 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted."
+line "No GPL-licensed source was consulted." All 105 source files under
+`rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
+copyright header, and every one of them is classified in `rust/PROVENANCE.md`
+— checked in both directions.
 
 meteor-cfd reads and writes the OpenFOAM ASCII case format so that existing
 pre- and post-processing tools can be used with it. A file format is not a work
@@ -40,11 +43,28 @@ AMGX
 cudarc
   MIT OR Apache-2.0. Cargo dependency.
 
+serde, serde_json, serde_path_to_error
+  MIT OR Apache-2.0. Cargo dependencies.
+
+schemars
+  MIT. Cargo dependency — generates the JSON Schema for the JSONC case format
+  from the reader's own types, so the schema and the reader cannot disagree.
+
+jsonc-parser
+  MIT. Cargo dependency — the JSONC (JSON-with-comments) reader.
+
 thiserror
   MIT OR Apache-2.0. Cargo dependency.
 
 anyhow
   MIT OR Apache-2.0. Build dependency.
+
+Transitive dependencies
+  The full graph in rust/Cargo.lock is 27 packages (this crate plus 26).
+  Verified against the lock file: every licence in it is MIT, Apache-2.0,
+  ISC (libloading), Unlicense (memchr), Unicode-3.0 (unicode-ident) or
+  BSD-3-Clause (AMGX, optional). There is no GPL, LGPL or AGPL dependency
+  anywhere in the graph, direct or transitive.
 
 NVIDIA CUDA Toolkit, cuFFT, cuBLAS
   Used under the NVIDIA CUDA Toolkit End User License Agreement, which permits

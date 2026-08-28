@@ -104,6 +104,13 @@
 //! printed. `-backend NAME` skips the measurement and takes the named one -
 //! and still refuses it if the probe says it cannot represent this system,
 //! because applicability is a hard constraint and not a preference.
+//!
+//! Provenance: ORIGINAL driver code over LITERATURE numerics. The equations it
+//! assembles live in the library modules it calls, each cited there and in
+//! SPEC-LIT.md; this file is argument parsing, case loading, the coupled
+//! outer-iteration order and the reporting loop, all of which are this
+//! project's own (`PROVENANCE.md`, *GPU plumbing and tooling - original*,
+//! `src/bin/*`). No GPL-licensed source was consulted.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

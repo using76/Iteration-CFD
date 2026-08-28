@@ -21,6 +21,11 @@
 //! produces a smooth, plausible, completely wrong pressure field. Hence the
 //! checks, and hence the fact that the FFT backend additionally verifies the
 //! assembled matrix against the operator it thinks it is inverting.
+//!
+//! Provenance: ORIGINAL - detecting whether a mesh is a uniform Cartesian
+//! block, which is what makes the FFT path applicable at all. No external
+//! source. `PROVENANCE.md`, *GPU plumbing and tooling - original*. No
+//! GPL-licensed source was consulted.
 
 use crate::mesh::{HostMesh, PatchKind};
 use crate::{Label, Scalar, Vec3};

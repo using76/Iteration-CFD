@@ -199,6 +199,34 @@ restores boundedness (Moukalled et al. §15.4):
 diag[P] -= Σ_f (±phi_f)          i.e. subtract V_P·(∇·u)_P
 ```
 
+**When the flux is not SUPPOSED to be solenoidal, this correction is wrong,
+and it must not be applied by default.** The justification above is that
+`Σ_f phi_f` is an ERROR which vanishes at convergence. That is true of an
+incompressible solver and FALSE of the low-Mach solver of §25: there
+`div(u) = Q/(rho cp T)` is a prescribed CONSTRAINT, the pressure equation
+solves for exactly it (§25.3's `target_div`), and it is nonzero at
+convergence by construction. Subtracting `V_P (∇·u)_P` from a MOMENTUM
+equation in that setting removes a real, converged amount of momentum which
+then does not appear at any wall, and the domain force balance of §32.5.2
+fails by that amount. Measured: −3.787 % of the streamwise body force on
+§32.5.5's resolved channel leg, closing to −0.000 % on the same case with the
+`bounded` prefix dropped and nothing else changed — the isolation is in
+§32.5.5's own table. Rules, both binding:
+
+* A driver that has to choose a convection entry for a case that did not name
+  one MUST NOT default a MOMENTUM equation to the bounded form. `bounded` is
+  honoured when the case asks for it and applied when it does, per §13.4;
+  it is never the silent fall back for momentum. (`MomentumControls::default()`
+  was `bounded Gauss upwind` and reached two channel cases that asked for
+  `Gauss linearUpwind grad(U)` — §13.4.1's fourth instance, and the reason the
+  whole of §32's thermal gate had to be rerun.)
+* Where the correction IS physics rather than stabilisation — §26's
+  temperature-form energy equation, whose `-T div(u)` term is a term of the
+  equation — it is applied unconditionally, the `bounded` flag on that
+  equation's own entry is NOT read, and the code says so at the point of
+  application. That is not a violation of §13.4: the flag is not silently
+  substituted, it is documented as not being a setting there.
+
 ### 3.2 Diffusion — Gauss laplacian
 
 ```
@@ -1015,6 +1043,150 @@ not recognised               -> Error naming the setting
 printed once per setting and falls back to a documented default. It exists so a
 case migrated from elsewhere can be run at all, and it must print what it
 substituted, every time, on stderr.
+
+#### 13.4.1 A setting must REACH the solver, and it must be shown to
+
+§13.4 above is about a setting the solver *cannot* honour. This subsection is
+about the other, quieter failure: a setting the solver *can* honour, that the
+case states, that parses without complaint — and that never reaches the
+equation it names.
+
+**It has now happened four times in this project, in the same shape every
+time.** A driver builds a control struct from `::default()`, overrides the two
+or three fields it happens to be thinking about, and closes the initialiser
+with `..Default::default()`. Everything the case said about every other field
+is discarded, and nothing prints:
+
+| # | Where | What was discarded |
+|---|---|---|
+| 1 | the turbulence reader (`read_fv_schemes`) | ONE `divSchemes` entry was taken for the whole case, so `div(phi,U) Gauss linearUpwind; div(phi,k) bounded Gauss upwind;` ran the momentum equation first order |
+| 2 | the same reader, `ddtSchemes` | reduced to a steady/transient boolean, so `backward`, `CrankNicolson <c>` and `localEuler` all became first-order Euler |
+| 3 | `ofgpu-buoyant` (`read_simple_controls`) | `solvers/U`, `solvers/p`, `relaxationFactors`, `nNonOrthogonalCorrectors`, `consistent`, and — the line its own comment records — `div(phi,U)`, which was being read from the TURBULENCE equation's entry |
+| 4 | `ofgpu-fire` (`fire_controls`) | every `numerics.div` entry, every `numerics.relaxation` entry, `numerics.grad`, `numerics.laplacian.snGrad`, `nonOrthogonalCorrectors`, the `solvers` rule for `T`, `numerics.ddt`, `numerics.algorithm.correctors`/`momentumPredictor` and `physics.fluid.Pr`/`Prt` |
+
+Two rules follow, and they are requirements on new code, not advice.
+
+**(a) Each equation reads the entry named for ITS OWN field.** Momentum reads
+`div(phi,U)` and `grad(U)`; energy reads `div(phi,T)` and `grad(T)`; each
+turbulence equation reads its own. Reading one equation's entry for another is
+instance 1 and half of instance 3, and it is invisible in any case file where
+the two entries happen to agree. A driver taking either case format asks
+through one reader that answers per equation and per format
+(`common::CaseNumerics`), so there is one place to get this right rather than
+one per driver.
+
+**(b) A control initialiser that a case feeds must be written out field by
+field, not closed with `..Default::default()`.** The next field added to the
+struct is then a compile error at every such site — someone has to decide what
+the case says about it — instead of a default nobody reviewed.
+
+**The test that closes it.** Parsing tests do not close this: the case parsed
+perfectly in all four instances. The demonstration that found instance 4 is
+the one that becomes the standing requirement:
+
+> **Two short runs of the driver, differing in exactly one setting of the case
+> file and nothing else, must write DIFFERENT output. If they are
+> bit-identical, the setting is inert.**
+
+Every setting a case can express and a driver claims to honour owes such a
+pair. `ofgpu-fire`'s is `every_wired_setting_changes_what_the_run_writes` in
+`src/bin/fire.rs`, which runs the driver's own `run` on generated case files
+and compares every field written.
+
+**The one admissible exception, and what it owes instead.** A setting whose
+effect is *identically zero* on every mesh the test can build cannot be shown
+this way, and demanding it would be demanding an arithmetic impossibility.
+`laplacianSchemes`/`snGradSchemes` is the case in point: §2.4's correction is
+`k = Sf - |Sf|² / (Sf·d) d`, which vanishes exactly on an orthogonal mesh, and
+every mesh `blockgen` builds from a JSONC case is a rectangular Cartesian box.
+Such a setting is asserted instead on the control struct the solver is
+*constructed from* — reached through the same function the driver calls, never
+re-derived in the test — and the test states why the run-level pair does not
+exist. Nothing else qualifies.
+
+**What instance 4 cost, measured.** Instance 4 is the only one of the four
+whose cost has been quantified, because the settings it discarded feed a
+published validation gate. The substituted default was
+`MomentumControls::default()`, whose convection entry is **`bounded Gauss
+upwind`** — and the `bounded` half of that, not the first-order half, is what
+mattered: honouring the cases' own `Gauss linearUpwind grad(U)` closed a
+−3.787 % momentum-conservation imbalance in §32's thermal gate to −0.000 %,
+moved the resolved leg's Nusselt number by +3.6 % (further OUTSIDE its
+correlation band, not into it), and retired a published causal reading of two
+anomalies. §32.5.5 has the isolation; §3.1 has the rule the isolation forced.
+The lesson for this subsection is the one it already states, sharpened: an
+unread setting is not a small error that averages out — it silently changes
+which EQUATION the solver is solving, and every measurement downstream of it
+is a measurement of something else.
+
+#### 13.4.2 Saying what was used
+
+The refusal rule has a second half: print the settings the run will actually
+use, per equation, once at start-up. A user reading a log has to be able to
+see which scheme, which relaxation factor and which linear solver were in
+force without inferring it from the case files, because the case files are
+exactly what may have been overridden. `print_effective_settings`
+(`src/io/case.rs`) does this from an OpenFOAM `CaseControls`;
+`FireControls::print` does it from the controls themselves, which is what
+makes it independent of which case format the run came from.
+
+A block of the case format that NO driver reads is not exempt from §13.4
+either. Where such a block exists and closing it is a feature rather than a
+fix, the driver says so in one line rather than letting the case file sit
+there looking honoured — `ofgpu-fire` does this for `run.endTime`/`run.deltaT`
+(its run mode comes from `-endTime`/`-deltaT`) and for the whole `output`
+block, which no driver in this crate reads.
+
+#### 13.4.3 Refreshing what the defect already published
+
+A setting that never reached the solver did not only mislead the next run — it
+misled every number already in the repository that the affected driver
+produced. Fixing the driver is half the work; the other half is a **sweep**,
+and it is a requirement, not a courtesy:
+
+> **When an unread-setting defect is fixed, every published measurement the
+> affected driver produced is suspect until it is either RERUN or explicitly
+> marked as pre-fix. A stale number left standing without a marker is the same
+> failure this section exists to prevent, one step downstream.**
+
+The sweep for instance 4 (`ofgpu-fire`) covered `README.md`, `README.en.md`,
+`docs/07-fire-solver.md`, `cases/README.md`, every `cases/*.jsonc` header, this
+file, and the replayed constants in `src/bin/validate.rs`. Its results, which
+are the reason the rule is stated in this form:
+
+* **The two channel-gate legs were rerun** — §32.5.5, and they are the
+  headline. Reported there and in `docs/07-fire-solver.md` §1.1.
+* **The demonstration case moved much further than the gate did.**
+  `cases/burnerPlume.jsonc` at the same 1200 steps: combustion efficiency
+  96.0 % → **35.5 %**, domain heat release 20.1 → **7.45 kW**, net radiated
+  power 6.3 → **1.12 kW**, radiated fraction 31.3 → **15.0 %**, peak
+  temperature ~1600 → **819 K**, centreline decay exponent +0.03 → **−0.59**.
+  The reason is §3.1's, amplified: in a fire, §25.1 makes `div u` LARGE — the
+  thermal expansion IS the plume's drive — so a `bounded` correction that
+  subtracts a momentum sink proportional to it is not a small perturbation.
+  Quasi-steadiness confirmed by extending to 2400 steps (35.48 %, 14.99 %).
+* **The P1-vs-fvDOM comparison of §36.7's last row survived it.** Radiated
+  fractions 15.08 / 13.35 % → **14.98 / 13.83 %**, wall times 18.8 / 119 s →
+  **19.08 / 124.6 s**. fvDOM still radiates less than P1 on the same fire, at
+  ~6.5× the cost. **A comparison between two models run under the SAME
+  discarded settings is the one kind of claim this defect does not
+  invalidate**, and saying so explicitly is part of the sweep.
+* **`check_burner_heat_release` is untouched, and the reason is structural.**
+  It builds its own mesh, constructs `Combustion` directly and never goes
+  through a driver's controls. A gate that reaches the physics without passing
+  through a case file cannot be moved by a case file being misread — which is
+  an argument for having such gates, not only replayed ones.
+* **Two cases could not be rerun at all**, and are marked rather than quietly
+  left: `cases/channelThermalLowRe.jsonc` and `cases/channelPeriodicLowRe.jsonc`
+  name `wallTreatment lowRe` with `turbulence.model kEpsilon`, which §33's own
+  rule — added AFTER those runs — now refuses as a §13.4 error. Their published
+  numbers (the 0.095/0.381/0.107 ratio series) are pre-§33 AND pre-§13.4.1, the
+  attempt itself was retired by §32's redesigned gate, and `-permissive` does
+  not reproduce them either (it substitutes `standard`, a different flow). The
+  case files, `cases/README.md` and the commands it publishes all say so.
+  **A published command that no longer runs is a reproducibility defect even
+  when the case it runs is obsolete**, because a reader cannot tell the two
+  apart from the outside.
 
 ---
 
@@ -2552,6 +2724,19 @@ numerically, not asserted.
 
 #### 32.5.3 What the two channel legs realise, MEASURED
 
+> **Superseded in part by §32.5.5.** Every run recorded here was produced by
+> a driver that ignored the case's own `numerics` block — the §13.4 violation
+> this section itself reports below, unfixed at the time — so its momentum
+> equation ran `bounded Gauss upwind` where both cases ask for
+> `Gauss linearUpwind grad(U)`. §32.5.5 reruns both legs on the settings the
+> cases name, reproduces every number here to five significant figures when
+> the substituted entry is put back by hand, and shows that the `bounded`
+> half of that substitution is the WHOLE of the momentum imbalance recorded
+> below. What survives unchanged: the friction MEASUREMENT itself and its two
+> forms, the isothermal control, and the retirement of the inferred `f`. What
+> does not: the momentum-imbalance rows, the `contErr` reading, the
+> "one defect with two symptoms" pairing, and the verdicts.
+
 Both legs have now been rerun with the measurement above — 40 000 iterations
 each, `cases/channelPeriodicFluxWF.jsonc` and `channelPeriodicFluxLowRe.jsonc`
 as shipped, which since this rerun means with the thermostat's
@@ -2643,6 +2828,15 @@ monotonically:
 | resolved, `uniform` | 9.2e-8 | −3.461 % | +2.81 % |
 | resolved, `massFlux` | 1.1e-7 | −3.787 % | +3.26 % |
 
+**RETIRED by §32.5.5.** The `contErr` column above is a correlation, not a
+cause: `contErr` is unchanged to three significant figures across four runs of
+the resolved leg that differ only in `div(phi,U)`, while the momentum gap in
+those same four runs switches between −3.79 % and 0.000 %. Both quantities
+scale with how much heat is in the domain — hence with the dilatation the
+mechanism below integrates against — which is why they appeared to track. The
+mechanism named below IS the momentum half's cause, now demonstrated by
+isolation; the energy half is NOT the same defect and did not move with it.
+
 The mechanism that would produce exactly this pairing is named and NOT yet
 demonstrated: both equations are assembled with the `bounded` convection
 correction of §3.1, which subtracts `phi_field . (div phi)` from the
@@ -2658,13 +2852,26 @@ carries a 3–4 % momentum imbalance and a 3 % energy imbalance as
 MEASURED, uncorrected, and named as the uncertainty on its own `Nu`
 (§32.4's rule).
 
+**TESTED, in §32.5.5, by switching it off.** The case files never asked for
+`bounded` on `div(phi,U)`; the driver was supplying it. Removing it — which is
+all that honouring the case does — closes the resolved leg's momentum
+imbalance from −3.787 % to −0.000 % and the wall-function leg's from −0.112 %
+to +0.002 %, and moves the energy imbalance by 0.14 points. So the hypothesis
+is CONFIRMED for the momentum equation and REFUTED as a joint explanation:
+see §32.5.5's table, and §3.1's new rule, which is what the confirmation
+buys.
+
 **A §13.4 violation found while judging this gate, reported and not
-fixed here.** `ofgpu-fire` builds its `MomentumControls` from
-`MomentumControls::default()` and overrides only `nu`, `steady`, `delta_t` and
-`ddt`. It therefore never reads `numerics.div["div(phi,U)"]` or
-`numerics.relaxation.U` from the case at all: both channel cases ask for
-`Gauss linearUpwind grad(U)` and `U: 0.5` and both get `Gauss upwind` and
-`0.7`. Demonstrated, not inferred: two 500-iteration runs of the
+fixed here — FIXED SINCE (§13.4.1), and both legs rerun in §32.5.5, which
+supersedes the verdicts in this section.** `ofgpu-fire` builds its
+`MomentumControls` from `MomentumControls::default()` and overrides only `nu`,
+`steady`, `delta_t` and `ddt`. It therefore never reads
+`numerics.div["div(phi,U)"]` or `numerics.relaxation.U` from the case at all:
+both channel cases ask for `Gauss linearUpwind grad(U)` and `U: 0.5` and both
+get **`bounded Gauss upwind`** — the correction in the `bounded` half is what
+§32.5.5 then measures as the entire momentum imbalance, and this paragraph's
+original wording, "`Gauss upwind`", understated the substitution by leaving it
+out — and `0.7`. Demonstrated, not inferred: two 500-iteration runs of the
 wall-function case differing only in `div(phi,U)` (`Gauss linearUpwind
 grad(U)` against `Gauss upwind`) print BIT-IDENTICAL residual and bulk-state
 lines, and so do two differing only in `relaxation.U` (0.5 against 0.9). Under
@@ -2732,19 +2939,164 @@ this gate in its own right, on both meshes, and it is a MOMENTUM finding
 | the discrete measurement against the force balance, same flow | ratio `1 − 1/(2 n_y)` exactly, and first order in the wall cell |
 | the kinematic sink at uniform density | exactly `drag/rho`, and it balances `g_x V` with no density in the statement — checked live at two mesh densities and in `wall_shear`'s own unit tests |
 | `D_h = 4V/A_wall` on §34's plane channel | `2H`, to round-off |
+| the `bounded` prefix on a MOMENTUM `div` entry | honoured when named, never supplied by default (§3.1) — toggling it moves the resolved leg's drag balance by 3.8 points and the wall-function leg's by 0.11 |
 | a `nutk`-family wall-function face | `rho (C_mu^{1/4} sqrt(k_P))^2`, and the viscous form reported beside it, unmixed |
 | a velocity-based wall-function face (`nutU`, Werner-Wengle) | the VISCOUS form — which is that model's own `tau_w` identically — not the `k`-based one |
 | a mesh with one resolved and one modelled wall | each patch keeps its own form; both forms named in the report |
 | the force balance, taken in KINEMATIC units (§32.5.2's correction) | the only form that can close at all — this crate's momentum equation carries no density |
-| the VISCOUS form against the kinematic force balance, converged | closes: measured at `+0.001 %` on §32.5.3's wall-function leg. That is the identity, and it holds whatever the wall treatment is |
-| the same on the RESOLVED `expansion: 200` leg, converged | MEASURED at −3.46 %/−3.79 %. The earlier expectation — "closes; a gap there is about convergence and nothing else" — is FALSIFIED: that leg's velocity residual is `2.8e-12`. A gap of this size is a real, open finding about that mesh's discretisation, reported beside its own 2.8–3.3 % ENERGY imbalance and never separately from it |
-| the `rho u_tau^2` form against the same balance on a WALL-FUNCTION leg | need NOT close — it is not the discrete sink. Measured at −13.6 %, which is the near-wall-equilibrium finding §32.5.2 predicts, quantified |
+| the VISCOUS form against the kinematic force balance, converged | closes: measured at `-0.005 %` on the wall-function leg as shipped and `-0.000 %` on the resolved leg as shipped (§32.5.5), once the momentum equation stopped carrying a `bounded` correction the cases never asked for. That is the identity, and it holds whatever the wall treatment is |
+| the same on the RESOLVED `expansion: 200` leg, converged | closes — measured **−0.000 %** on the case as shipped (§32.5.5). The −3.46 %/−3.79 % §32.5.3 recorded was §3.1's `bounded` correction, applied to momentum by a driver that ignored the case; it is reproduced exactly by restoring `bounded Gauss upwind` by hand and it is not a property of the mesh. §32.5.2's "a gap on a resolved leg is about convergence and nothing else" stays FALSIFIED as written — a third possibility, a term in the assembled equation that no wall carries, is what it was |
+| the `rho u_tau^2` form against the same balance on a WALL-FUNCTION leg | need NOT close — it is not the discrete sink. Measured at −13.3 % on the case as shipped (−13.6 % before §32.5.5's rerun), which is the near-wall-equilibrium finding §32.5.2 predicts, quantified |
 | `e_hat` reversed | the streamwise total changes sign; the magnitude mean does not move |
 | `e_hat` perpendicular to the flow | streamwise total zero, magnitude mean unchanged — a report, not an error |
 | a motionless domain | zero traction, no division by a zero slip speed |
 | no cyclic pair and no thermostat `direction` | `f`, `Re` and `Nu` SKIPPED with a line saying so, never computed along a guessed axis |
 | Gnielinski at the Petukhov `f` | reproduces the published pipe form bit for bit — every number already recorded came out of it |
 | Gnielinski at a supplied `f` | monotone increasing in `f`, so the two verdicts of §32.4 are genuinely two |
+
+#### 32.5.5 The §13.4 rerun: what the cases actually asked for
+
+Every measurement in §32.5.3 — and every number §32's gate had produced
+before it — was taken by a driver that read none of the case's own `numerics`
+block. `ofgpu-fire` built its `MomentumControls` and `EnergyControls` from
+`::default()`, so both channel cases, which ask for
+`div(phi,U) Gauss linearUpwind grad(U)`, ran the substituted default instead.
+That default is **`bounded Gauss upwind`**, not the `Gauss upwind` §32.5.3's
+own report of the defect names: `MomentumControls::default().bounded_convection`
+is `true`. §13.4.1 records the defect class and its fix; this section records
+what the fix did to this gate, because the answer is not the one the fix was
+expected to produce.
+
+**The control.** Each case, as shipped, with `div(phi,U)` set back by hand to
+`bounded Gauss upwind` and nothing else changed, reproduces §32.5.3's record
+to five significant figures — resolved `Nu` 70.4709 against 70.4707, drag
+balance −3.787 % against −3.787 %, thermostat power −3.30423 W against
+−3.30425 W; wall-function `Nu` 64.3136 against 64.3168, drag balance
+−0.112 % against −0.113 %. The relaxation factors and linear-solver
+tolerances the driver was also ignoring are therefore worth less than `1e-4`
+of the converged answer on these cases, and the entire difference is the
+convection entry.
+
+**The isolation.** Seven runs: all four combinations of
+`{Gauss upwind, Gauss linearUpwind grad(U)} × {plain, bounded}` on the
+resolved leg, and three of them on the wall-function leg (the fourth adds
+nothing there — the resolved pair already shows the order and the `bounded`
+token to be independent), 40 000 iterations each, nothing else changed:
+
+| Leg | `div(phi,U)` | `Nu` | `U_b` | drag balance | energy balance | `contErr` |
+|---|---|---|---|---|---|---|
+| resolved | `bounded Gauss upwind` | 70.4709 | 4.83570 | **−3.787 %** | +3.257 % | 1.10205e−07 |
+| resolved | `bounded Gauss linearUpwind grad(U)` | 70.5193 | 4.83723 | **−3.788 %** | +3.255 % | 1.10205e−07 |
+| resolved | `Gauss upwind` | 72.9508 | 4.92755 | **+0.000 %** | +3.116 % | 1.10101e−07 |
+| resolved | `Gauss linearUpwind grad(U)` (shipped) | 72.9988 | 4.92909 | **−0.000 %** | +3.114 % | 1.10100e−07 |
+| wall function | `bounded Gauss upwind` | 64.3136 | 5.36687 | **−0.112 %** | +0.1047 % | 2.80e−08 |
+| wall function | `Gauss upwind` | 64.3815 | 5.37326 | **+0.002 %** | +0.1048 % | 2.81e−08 |
+| wall function | `Gauss linearUpwind grad(U)` (shipped) | 64.5257 | 5.39720 | **−0.005 %** | +0.1062 % | 2.90e−08 |
+
+**1. §32.5.3's suspected mechanism is CONFIRMED, and it is the `bounded`
+token, not the scheme's order.** The correction §3.1 describes was the whole
+of the resolved leg's momentum imbalance: dropping it closes −3.787 % to
+−0.000 % on that leg and −0.112 % to +0.002 % on the wall-function leg.
+Raising the order from `Gauss upwind` to `Gauss linearUpwind grad(U)` — the
+part of the substitution that looked like it should matter, being a first-
+against second-order convection scheme on the very velocity field this gate
+measures — is worth +0.07 % of `Nu` on the resolved leg, +0.22 % on the
+wall-function leg, and nothing at all to either balance. §3.1 now carries the
+rule this establishes.
+
+**2. §32.5.3's `contErr` reading is RETIRED.** That section tabulated the two
+imbalances against the continuity residual and reported that they track it
+monotonically. They do not: `contErr` is unchanged to three significant
+figures across all four resolved-leg runs above while the drag imbalance
+switches between −3.79 % and 0.000 %. The correlation was real and the causal
+reading of it was wrong.
+
+**What is NOT established, and must not be read into the above: the SIZE.**
+The mechanism accounts for the existence and the sign of the imbalance on both
+legs. It does not, as measured here, account for the 34:1 ratio between them
+(−3.787 % resolved against −0.112 % wall function). A hand estimate of the
+correction's domain integral,
+`Σ_c U_c (div phi)_c V_c = (1/(rho cp T)) Σ_c U_c Q_c V_c` with
+`rho cp T = p0 cp/R_s` constant at fixed `p0`, taking the wall-adjacent
+velocity and the mass-flux-weighted mean as the two weights, gives −9.5 % on
+the resolved leg and −3.1 % on the wall-function leg — the right sign twice, a
+factor of 2.5 out on one and 28 out on the other. The total heat is therefore
+not what sets the size; the LOCAL distribution of `div u`, which is
+`div(k_eff grad T)` and not a domain-integrated wattage, is. That distribution
+has not been measured, and the estimate is recorded WITH its failure rather
+than dropped, because it is the first thing a reader will try.
+
+**3. The two imbalances are NOT one defect.** The energy imbalance moves from
++3.26 % to +3.11 % on a change that closed 3.79 points of momentum imbalance.
+§32.5.3's "one defect with two symptoms, two conservation statements, the
+same few per cent" is therefore refuted as stated: the momentum symptom is
+entirely §3.1's correction on the momentum equation, and the energy symptom
+survives its removal. The energy equation's own bounded correction is applied
+unconditionally and on the MASS flux (§26, §3.1's second rule), so no case
+setting can switch it off and this rerun could not test it. **The experiment
+that would**, specified here and not yet run: instrument
+`fvm_div_bounded_correction`'s domain integral `-Σ_c cp T_c (div phi_m)_c V_c`
+on the energy equation and compare it against the 0.0996 W by which the
+resolved leg's balance is short. If they agree, the mechanism is the same one
+in both equations and only its momentum half was ever a case-settable defect.
+
+**What the gate now reads** (both cases as shipped; `Pr` = 0.71,
+`D_h` = 0.08 m):
+
+| Leg | Re | `T_w` | `T_b` | `Nu` | `f` measured | pipe `f` | Nu_Gn at pipe `f` | Nu_Gn at measured `f` | Nu_DB | energy gap |
+|---|---|---|---|---|---|---|---|---|---|---|
+| wall function | 28 785 | 317.483 K | 293.251 K | 64.526 | 0.017129 (`rho u_tau^2`) / 0.019760 (viscous) | 0.023878 | 68.598 (**−5.9 %**) | 47.996 (+34.4 %) | 74.057 (−12.9 %) | +0.106 % |
+| resolved | 26 288 | 314.186 K | 292.800 K | 72.999 | 0.023936 (viscous) | 0.024416 | 63.959 (**+14.1 %**) | 62.599 (+16.6 %) | 68.872 (+6.0 %) | +3.11 % |
+
+**The verdict, under §32.4's rule.** The wall-function leg CLOSES on the
+absolute-prediction verdict (−5.9 % against ±10 %, carrying ±0.11 % of
+energy-balance uncertainty) and on Dittus-Boelter (−12.9 %). The resolved leg
+does NOT, and has moved further out: +14.1 % at the pipe `f`, carrying
+±3.1 % of energy-balance uncertainty — `Nu` ∈ [70.7, 75.3], i.e. +10.6 % to
++17.7 % of Gnielinski, so the band edge now lies OUTSIDE its own uncertainty
+and §32.4's "reported as UNDECIDED" clause, which §32.5.3's verdict invoked,
+no longer applies. It passes Dittus-Boelter at +6.0 %. The Reynolds-analogy
+verdict closes on neither leg. **The gate remains OPEN on the resolved leg,
+and the miss is now decisive where it previously was not.**
+
+**What the remaining discrepancy implicates, with three suspects retired.**
+The uniform thermostat sink (§35.3), the inferred friction factor (§32.5.3)
+and now the momentum bounded-convection correction are all off the list:
+
+* The resolved leg's measured `f` is **−2.0 %** of Petukhov's pipe `f` and
+  its drag balance closes exactly, so it transports very nearly the right
+  momentum and 14 % too much heat. That is a THERMAL statement, and for the
+  first time in this gate's history nothing on the momentum side is left to
+  carry it.
+* **`Pr_t` is the leading named candidate.** §26's `k_eff = k + rho cp nu_t/Pr_t`
+  takes a single case-wide `Pr_t = 0.85` down to a first cell at y+ = 0.0019.
+  **Kays, *ASME J. Heat Transfer* 116 (1994) 284–295** reviews the evidence
+  that `Pr_t` rises towards a wall, of order 1.5–1.9 for air in the sublayer;
+  a constant 0.85 therefore over-predicts near-wall turbulent heat transport,
+  narrows `(T_w − T_b)` and raises `Nu` — the right sign for this miss,
+  carried in full by the resolved mesh and hardly at all by a wall-function
+  mesh whose first cell sits at y+ 58 and whose wall heat goes through
+  Jayatilleke's own thermal law. A hypothesis with a mechanism and a
+  direction; nothing here has measured it, and §29.3's own `Pr_t` handling
+  would be where a fix went.
+* The +3.11 % energy imbalance, now a single anomaly rather than half of a
+  pair, quoted as this leg's uncertainty on `Nu` per §32.4.
+* The two-mesh disagreement remains a MOMENTUM result: `U_b` = 5.397 against
+  4.929 m/s at the same body force, viscous-form `f` 21.1 % apart, and
+  Gnielinski at that pair predicts a two-mesh `Nu` ratio of 1.119 against a
+  measured 1.131 — about 91 % of it, the same fraction as before on a larger
+  ratio. §33.3's territory.
+
+**What must hold** (added to §32.5.4's table by reference):
+
+| Check | Expected |
+|---|---|
+| a case naming `Gauss linearUpwind grad(U)` for `div(phi,U)` | runs it, and `ofgpu-fire` prints which scheme, relaxation, solver and corrector count each equation will use, before iterating |
+| a MOMENTUM equation whose case named no `div` entry | falls back to an UNBOUNDED entry, never to `bounded` (§3.1) |
+| the resolved leg's kinematic drag balance, as shipped | closes — measured −0.000 %, against −3.787 % with `bounded` restored |
+| the wall-function leg's kinematic drag balance, as shipped | closes — measured −0.005 % |
+| the `bounded` token toggled on either leg, everything else fixed | changes the drag balance by ~3.8 points (resolved) / ~0.11 points (wall function) and the energy balance by <0.15 points |
+| the convection scheme's ORDER toggled on either leg | changes `Nu` by less than 0.3 % |
 
 ---
 
@@ -3170,6 +3522,28 @@ ratio from 1.125 to 1.096 on its own. The two accounts overlap and neither is
 now cleanly separable from the other; both are reported, at their measured
 sizes, and the arithmetic that once appeared to hand the whole 1.125 to
 momentum is withdrawn.
+
+**RE-MEASURED at the corrected §13.4 numerics (§32.5.5), and this section's
+prediction survives it.** Every run above was produced by a driver that
+ignored the case's `div(phi,U)` entry and ran `bounded Gauss upwind` instead.
+All four runs of the pair have been repeated with that fixed — same cases,
+same 40 000 iterations, `"weighting"` still the only token that differs
+within each pair:
+
+| Leg | `Nu` at `uniform` | `Nu` at `massFlux` | change | `(T_w − T_b)` change |
+|---|---|---|---|---|
+| resolved, 50 cells, `expansion: 200` | 75.6765 | 72.9988 | **−3.54 %** | 20.633 → 21.3862 K (**+3.65 %**) |
+| wall function, 6 cells | 65.3886 | 64.5257 | **−1.32 %** | 23.9143 → 24.2318 K (**+1.33 %**) |
+
+All three predictions of this section hold, at very nearly the same sizes:
+`Nu` falls on both legs, `(T_w − T_b)` widens on both, and the resolved mesh
+carries 2.7 times as much of the effect as the wall-function mesh (was 2.8).
+The two-mesh ratio now falls from **1.157 to 1.131**, so this mechanism
+accounts for 0.026 of a 0.157 excess, about 17 % of the two-mesh
+disagreement — a slightly smaller share of a larger disagreement. The third,
+MOMENTUM candidate above survives too and grows: at the two legs' measured
+viscous-form friction factors, now 21.1 % apart, Gnielinski predicts a
+two-mesh ratio of 1.119 against the measured 1.131, about 91 % of it.
 
 #### 35.3.3 The discrete form
 
@@ -3629,3 +4003,5 @@ iteration, which is already possible without new plumbing.
 | optically thin limit | fvDOM vs. an analytic thin-medium result vs. P1 vs. the same analytic result — report all three, and how far P1's error is from fvDOM's, which is the reason this section exists |
 | energy budget | domain `integral(emission - absorption) dV` equals net boundary radiative flux, to round-off — §28's own check, unchanged by which model produced `emission`/`absorption` |
 | `cases/burnerPlume.jsonc` | run with `radiationModel P1` and `radiationModel fvDOM`; report the radiated fraction from both |
+
+**MEASURED**, `cases/burnerPlume.jsonc` and its `_fvDOM` twin, 32 768 cells, 1200 steps at `deltaT = 0.005 s`, RTX 5070 Ti, at the §13.4.1 numerics: radiated fraction **14.98 %** (P1) against **13.83 %** (fvDOM) of the domain heat release; wall time **19.08 s** against **124.6 s**, a factor 6.5 on 24 ordinates — §36.6's `N_ordinates`-times-cost statement confirmed by measurement. *Previously recorded as 15.08 / 13.35 % and 18.8 / 119 s, from runs made by a driver that read none of the case's `numerics` block (§13.4.3). Both models were rerun on the fixed driver; because both legs of the comparison were affected identically, the P1-vs-fvDOM conclusion is unchanged in substance — fvDOM radiates less, by 1.15 points instead of 1.73.*

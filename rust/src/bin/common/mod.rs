@@ -16,6 +16,14 @@
 //! printed number part of the interface, and `std::ostream`'s default is not
 //! Rust's — `1e-05` versus `0.00001`, `1.500e-07` versus `1.5e-7`. The two
 //! formatters below close that gap.
+//!
+//! Provenance: ORIGINAL - the drivers' shared case-reading seam, including
+//! `CaseNumerics`, the one reader that answers a driver's OWN equations'
+//! scheme, relaxation and linear-solver entries for BOTH case formats, per
+//! equation and by that equation's own key (SPEC-LIT.md S13.4.1;
+//! `PROVENANCE.md`'s *DESIGN* table carries the row). Argument parsing, case
+//! loading and reporting loops are this project's own throughout. No
+//! GPL-licensed source was consulted.
 
 #![allow(dead_code)]
 
@@ -83,6 +91,205 @@ pub fn load_case(case_path: &Path) -> Result<(HostMesh, CaseControls, Option<Low
         let hm = build_host_mesh(&raw)?;
         let cc = ofgpu::io::case::read_case_controls(case_path)?;
         Ok((hm, cc, None))
+    }
+}
+
+// ==========================================================================
+//  The numerics seam - SPEC-LIT 13.4.1
+// ==========================================================================
+//
+// `load_case` gives every driver the same `CaseControls` from either format,
+// and `CaseControls` carries the settings the TURBULENCE equations need
+// because that is what `read_case_controls` was written for. It does NOT
+// carry `div(phi,U)`, `div(phi,T)`, `relaxationFactors/equations/U`,
+// `solvers/T` or anything else belonging to an equation a driver assembles
+// itself - and on the JSONC path `CaseControls::schemes` is empty, because a
+// JSONC case has no `fvSchemes` dictionary at all.
+//
+// Every driver that solves such an equation therefore has to reach past
+// `CaseControls` for it, and a driver that does not simply runs on
+// `MomentumControls::default()`. That has now been the SAME defect four
+// times (SPEC-LIT 13.4.1). This type is the one place a driver asks, so
+// there is nothing left to forget: it answers for BOTH case formats, and it
+// answers **per equation, by that equation's own name**.
+
+use ofgpu::fv::{GradScheme, SnGradScheme};
+use ofgpu::io::case::{
+    read_solver_controls, relaxation_factor, resolve_sn_grad, SolverControls,
+};
+use ofgpu::io::dict::FoamDict;
+use ofgpu::io::schemes::DivEntry;
+
+/// Everything `system/fvSchemes`/`system/fvSolution` (OpenFOAM) or the
+/// `numerics` block (JSONC) says about the equations a DRIVER assembles,
+/// from either format.
+///
+/// Held rather than re-read per lookup because the OpenFOAM branch needs
+/// `system/fvSolution` for its per-field solver and relaxation entries and
+/// `CaseControls` does not keep it; reading it once here is also what stops
+/// a driver from growing its own private copy of `read_solver_controls`
+/// that predates `solver` being honoured.
+///
+/// Every accessor takes the entry's own key. `div("div(phi,U)")` is the
+/// MOMENTUM equation's scheme and `div("div(phi,T)")` the ENERGY equation's;
+/// asking one for the other is the exact mistake this type exists to make
+/// hard - see `read_simple_controls` in `src/bin/buoyant.rs`, whose comment
+/// records what it cost the third time.
+pub struct CaseNumerics<'a> {
+    cc: &'a CaseControls,
+    json: Option<&'a LoweredCase>,
+    /// The OpenFOAM `system/fvSolution`, or an empty dictionary - for a JSONC
+    /// case, and for an OpenFOAM case that has no such file (which gets the
+    /// documented defaults, exactly as `read_case_controls` does).
+    fv_solution: FoamDict,
+}
+
+impl<'a> CaseNumerics<'a> {
+    /// Read whatever the format needs. `json` is [`load_case`]'s own third
+    /// return value: `Some` for a JSONC case, `None` for an OpenFOAM one.
+    pub fn read(
+        case_path: &Path,
+        cc: &'a CaseControls,
+        json: Option<&'a LoweredCase>,
+    ) -> Result<Self> {
+        let fv_solution = if json.is_some() {
+            FoamDict::default()
+        } else {
+            let p = case_path.join("system").join("fvSolution");
+            if p.exists() {
+                FoamDict::read(&p)?
+            } else {
+                FoamDict::default()
+            }
+        };
+        Ok(Self { cc, json, fv_solution })
+    }
+
+    /// This equation's convection entry - `"div(phi,U)"`, `"div(phi,T)"`,
+    /// `"div(phi,k)"`, ... - scheme AND `bounded` prefix together, since a
+    /// case may bound one equation and not another.
+    pub fn div(&self, key: &str) -> Result<DivEntry> {
+        match self.json {
+            Some(l) => Ok(l.div_for(key)),
+            None => self.cc.schemes.div(key),
+        }
+    }
+
+    /// [`Self::div`] restricted to entries the case NAMED - `None` where it
+    /// did not, with no fall back to the case's `default`.
+    ///
+    /// For an equation whose driver-side default is deliberately stricter
+    /// than a case's catch-all: `ofgpu-fire`'s species convection is bounded
+    /// upwind by SPEC-LIT S19, and a case's `divSchemes/default Gauss upwind`
+    /// is upwind and NOT bounded, so falling back there would quietly unbound
+    /// an equation the case never mentioned.
+    pub fn div_named(&self, key: &str) -> Result<Option<DivEntry>> {
+        match self.json {
+            Some(l) => Ok(l.div_named(key)),
+            None => {
+                if self.cc.schemes.dict().has(&format!("divSchemes/{key}")) {
+                    Ok(Some(self.cc.schemes.div(key)?))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// This equation's `gradSchemes` entry - `"grad(U)"`, `"grad(T)"`.
+    ///
+    /// JSONC has one `numerics.grad` for the whole case (the format does not
+    /// spell a per-field gradient), so the key only discriminates on the
+    /// OpenFOAM path. It is still taken, and still named for the field,
+    /// because the day the JSONC format grows per-field gradients this call
+    /// site must not have to change.
+    pub fn grad(&self, key: &str) -> Result<GradScheme> {
+        match self.json {
+            Some(l) => Ok(l.grad),
+            None => self.cc.schemes.grad(key),
+        }
+    }
+
+    /// How much of SPEC-LIT 2.4's non-orthogonal correction this equation's
+    /// laplacian applies - `laplacianSchemes` where the case names one,
+    /// `snGradSchemes` otherwise (`resolve_sn_grad`'s own rule), or
+    /// `numerics.laplacian.snGrad`.
+    pub fn sn_grad(&self, key: &str) -> Result<SnGradScheme> {
+        match self.json {
+            Some(l) => Ok(l.laplacian_sn_grad),
+            None => resolve_sn_grad(&self.cc.schemes, key),
+        }
+    }
+
+    /// How many EXTRA passes each laplacian makes -
+    /// `nNonOrthogonalCorrectors`. One number for the whole case in both
+    /// formats, and already folded into `CaseControls::algorithm` by both
+    /// readers, so this is a naming convenience rather than a second source.
+    pub fn n_non_orth_correctors(&self) -> usize {
+        self.cc.algorithm.n_non_orth_correctors
+    }
+
+    /// This equation's under-relaxation factor, by the equation's own name.
+    ///
+    /// `fallback` is what the case gets when it names none - the control
+    /// struct's own default, so this never invents a number the caller did
+    /// not already have.
+    pub fn relax(&self, var: &str, fallback: Scalar) -> Result<Scalar> {
+        match self.json {
+            Some(l) => Ok(l.relax_for(var, fallback)),
+            None => relaxation_factor(&self.fv_solution, var, fallback),
+        }
+    }
+
+    /// [`Self::relax`] for a field relaxed as a FIELD rather than as an
+    /// equation - the pressure (Patankar 1980 6.7): the correction is applied
+    /// to the solution, not folded into the matrix, so OpenFOAM puts it under
+    /// `relaxationFactors/fields`. The `equations` spelling is accepted too,
+    /// because cases in the wild carry it; JSONC has one `numerics.relaxation`
+    /// map and no such split.
+    pub fn relax_field(&self, var: &str, fallback: Scalar) -> Result<Scalar> {
+        match self.json {
+            Some(l) => Ok(l.relax_for(var, fallback)),
+            // Exact keys, not the pattern resolver: an OpenFOAM
+            // `relaxationFactors { equations { ".*" 0.7; } }` relaxes the
+            // EQUATIONS it matches, and the pressure is not one of them - it
+            // is relaxed as a field. Widening the p lookup to that pattern
+            // would be this module inventing a relaxation the case did not
+            // ask for, which is §13.4 read backwards.
+            None => {
+                let eq = self
+                    .fv_solution
+                    .scalar(&format!("relaxationFactors/equations/{var}"), fallback);
+                Ok(self
+                    .fv_solution
+                    .scalar(&format!("relaxationFactors/fields/{var}"), eq))
+            }
+        }
+    }
+
+    /// This equation's linear-solver settings, by the equation's own name.
+    ///
+    /// `fallback` is the starting point every entry the case does NOT name
+    /// keeps, which is how a driver gives one equation a tighter default
+    /// than `SolverControls::default` without losing the case's own
+    /// `tolerance`/`relTol`/`maxIter` where it gave them.
+    pub fn solver(&self, var: &str, fallback: SolverControls) -> Result<SolverControls> {
+        match self.json {
+            // A JSONC rule is all-or-nothing by construction - every field of
+            // `JsonSolverRule` but `relTol`/`maxIter` is required - so a
+            // matched rule replaces the fallback outright, and an unmatched
+            // `var` (which `solver_for` answers with `SolverControls::default`)
+            // leaves the caller's own fallback standing.
+            Some(l) => {
+                let sc = l.solver_for(var)?;
+                Ok(if sc == SolverControls::default() { fallback } else { sc })
+            }
+            None => {
+                let mut sc = fallback;
+                read_solver_controls(&mut sc, &self.fv_solution, var)?;
+                Ok(sc)
+            }
+        }
     }
 }
 

@@ -15,6 +15,11 @@
 //! Tensor index convention: component `(i, j)` of `grad(U)` is `dU_j/dx_i`.
 //! This is not arbitrary - it falls out of the Gauss gradient accumulating
 //! `Sf (x) Uf`, where the area vector supplies the first index.
+//!
+//! Provenance: ORIGINAL - `Vec3`/`Tensor` and their `#[repr(C)]` mirrors of the
+//! device structs, with the layout test below. No external source.
+//! `PROVENANCE.md`, *GPU plumbing and tooling - original*. No GPL-licensed
+//! source was consulted.
 
 use crate::Scalar;
 use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign};

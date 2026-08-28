@@ -17,6 +17,11 @@
 //! ```
 //!
 //! Carried across from this project's own earlier C++ benchmark driver.
+//!
+//! Provenance: ORIGINAL - a benchmark harness. It measures this crate's own
+//! kernels and reports; there is no external source for it (`PROVENANCE.md`,
+//! *GPU plumbing and tooling - original*, `src/bin/*`). No GPL-licensed source
+//! was consulted.
 
 use std::process::ExitCode;
 use std::time::Instant;

@@ -1236,7 +1236,14 @@ pub fn read_solver_controls(
 }
 
 /// One equation's under-relaxation factor, through the pattern resolver.
-fn relaxation_factor(d: &FoamDict, var: &str, fallback: Scalar) -> Result<Scalar> {
+///
+/// Public because a DRIVER has equations `read_case_controls` knows nothing
+/// about - `U`, `p`, `T` - and each of them needs the entry named for ITSELF.
+/// A driver that re-implements this lookup is a driver that will re-implement
+/// it without the pattern resolver, and `relaxationFactors { equations {
+/// ".*" 0.5; } }` will silently miss for exactly the equation it was written
+/// for.
+pub fn relaxation_factor(d: &FoamDict, var: &str, fallback: Scalar) -> Result<Scalar> {
     match d.resolve("relaxationFactors/equations", var)? {
         Some(key) => Ok(d.scalar(&format!("relaxationFactors/equations/{key}"), fallback)),
         None => Ok(fallback),

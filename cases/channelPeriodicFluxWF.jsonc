@@ -12,6 +12,11 @@
 // `empty` (`cells: [8, 6, 1]`, was `[8, 6, 4]` with real `wallSide.*`
 // walls there).
 //
+// >>> READ THIS FIRST: every number in this STATUS block and in the first
+// >>> three UPDATE blocks below is SUPERSEDED. The last UPDATE block at the
+// >>> end of this header (SPEC-LIT S13.4.1/S32.5.5) is the current
+// >>> measurement; the blocks in between are kept, in order, as the record of
+// >>> how this gate got there.
 // STATUS (SPEC-LIT S34, RUN and REPORTED - docs/07-fire-solver.md S1.1 has
 // the full table): converges to a bit-identical fixed point (`|U|` residual
 // 1.4e-10, T unchanged in its last printed digit from iteration 5 000
@@ -159,6 +164,56 @@
 // including the isothermal controls and a S13.4 defect found on the way
 // (ofgpu-fire does not read numerics.div["div(phi,U)"] or
 // numerics.relaxation.U at all).
+// ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S13.4.1/S32.5.5 - THE GATE RERUN ON THE SETTINGS THIS FILE
+// ACTUALLY ASKS FOR; comments only, the case itself is unchanged): every
+// number in every block above was produced by a driver that read NONE of this
+// file's `numerics` block. `ofgpu-fire` built its MomentumControls from
+// `::default()`, whose convection entry is `bounded Gauss upwind` - so the
+// momentum equation ran a first-order scheme WITH S3.1's bounded correction
+// where this file asks for `Gauss linearUpwind grad(U)` with no `bounded`
+// prefix at all. That is the S13.4 defect the S32.5.3 block above reports and
+// leaves unfixed; it is fixed now, and both legs are rerun.
+//
+// CONTROL: setting `div(phi,U)` back to `bounded Gauss upwind` by hand and
+// changing nothing else reproduces the record above to five significant
+// figures (T_b = 293.256 K, T_w = 317.568 K, U_b = 5.36687 m/s, Nu = 64.3136,
+// thermostat power -3.20335 W, drag balance -0.112%). The relaxation factors
+// and solver tolerances this file names, which were also being ignored, are
+// worth less than 1e-4 of the converged answer here.
+//
+// THIS FILE AS SHIPPED, at the settings it names (40 000 iterations):
+//   T_b = 293.251 K | T_w = 317.483 K | dT = 24.2318 K | U_b = 5.3972 m/s
+//   Re = 28,785 | Nu = 64.5257 (was 64.3168: +0.32%)
+//   y+ 56.89/57.78/58.59 | thermostat power -3.2034 W against 3.2 W of wall
+//   heat, a +0.106% gap | contErr 2.9e-8
+//   f MEASURED = 0.017129 (rho u_tau^2) / 0.019760 (viscous)
+//   kinematic force balance -0.005% (was -0.113%)
+//
+// VERDICTS (S32.4), all essentially unmoved on this leg:
+//   * ABSOLUTE PREDICTION, Gnielinski at the Petukhov smooth-PIPE
+//     f = 0.023878: Nu_Gn = 68.5979, measured is -5.9% - INSIDE +-10%.
+//     Dittus-Boelter 74.0568, -12.9% - inside its own band. **THIS LEG STILL
+//     CLOSES on both**, with a +0.106% energy-balance uncertainty far narrower
+//     than either margin.
+//   * REYNOLDS ANALOGY, at the f this leg's wall MEASURES: Nu_Gn = 47.9960 at
+//     f = 0.017129 (+34.4%), 55.9339 at the viscous f = 0.019760 (+15.4%) -
+//     OUTSIDE on both, unchanged.
+//
+// WHAT THE RERUN FOUND, which is not what it was expected to find: the
+// first-order-vs-second-order half of the substitution is worth +0.22% of Nu
+// on this leg and nothing to either conservation balance. The `bounded` half
+// is worth the whole of the drag imbalance (-0.112% -> +0.002% on this leg,
+// -3.787% -> -0.000% on the resolved twin). S3.1's bounded correction
+// subtracts V_P (div u)_P on the argument that div u is an ERROR; in this
+// low-Mach solver S25.1 makes it a prescribed CONSTRAINT, so on a MOMENTUM
+// equation the correction removes real, converged momentum that never reaches
+// a wall. SPEC-LIT S3.1 now forbids defaulting a momentum equation to it, and
+// S32.5.5 has the four-run isolation.
+//
+// See docs/07-fire-solver.md S1.1's last subsection for the full account.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

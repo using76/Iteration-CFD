@@ -14,6 +14,11 @@
 
   The layouts here are mirrored by #[repr(C)] structs in src/types.rs. If you
   change one, change the other.
+
+  Provenance: ORIGINAL - the shared device header. Types, the device-side
+  helpers and the #[repr(C)] layouts mirrored by src/types.rs. There is no
+  external source for it; PROVENANCE.md classifies it under GPU plumbing and
+  tooling - original. No GPL-licensed source was consulted.
 \*---------------------------------------------------------------------------*/
 #pragma once
 

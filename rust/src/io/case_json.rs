@@ -1072,6 +1072,17 @@ pub struct LoweredCase {
     /// `crate::io::schemes::FvSchemes::div` falls back to
     /// `divSchemes/default`.
     div: BTreeMap<String, DivEntry>,
+    /// `numerics.solvers`, verbatim and ORDERED - the rules themselves, not
+    /// just the four equations this layer happened to resolve them for.
+    ///
+    /// [`Self::p_solver`], [`Self::u_solver`] and `turb.k_solver`/
+    /// `turb.epsilon_solver` are the four `lower` resolves eagerly, because
+    /// those are the four `CaseControls` has slots for. A driver solving an
+    /// equation with no slot - `T` in `ofgpu-fire`, `Y_F`, anything a later
+    /// model adds - had NO way to reach its rule at all, so a case writing
+    /// `{ "match": "T", ... }` got `SolverControls::default()` and no
+    /// diagnostic. [`Self::solver_for`] is that way.
+    pub solvers: Vec<JsonSolverRule>,
     pub grad: GradScheme,
     pub laplacian_sn_grad: SnGradScheme,
 
@@ -1129,6 +1140,43 @@ impl LoweredCase {
             .or_else(|| self.div.get("default"))
             .copied()
             .unwrap_or(DivEntry::UPWIND)
+    }
+
+    /// The `numerics.div` entry for `key` **only if the case named it**, with
+    /// no fall back to `"default"`.
+    ///
+    /// [`Self::div_for`] is right for an equation the case is expected to
+    /// have an opinion about; this is for one where the DRIVER's own
+    /// documented default is better than the case's catch-all `default`
+    /// entry - `ofgpu-fire`'s species convection, whose SPEC-LIT S19 default
+    /// is bounded upwind while a case's `"default": "Gauss upwind"` is not
+    /// bounded. Falling back there would change the physics of every case
+    /// that never mentioned species at all.
+    pub fn div_named(&self, key: &str) -> Option<DivEntry> {
+        self.div.get(key).copied()
+    }
+
+    /// The `numerics.solvers` rule that governs `var`, resolved with the
+    /// SAME first-match-wins order [`resolve_patch_rule`] uses - the JSONC
+    /// twin of `crate::io::case::read_solver_controls`.
+    ///
+    /// A `var` no rule matches keeps [`SolverControls::default`], exactly as
+    /// an OpenFOAM case with no `solvers/<var>` entry does. Use it for every
+    /// equation a driver actually assembles, by that equation's OWN name:
+    /// handing the energy equation `p_solver` because `p_solver` was the one
+    /// already resolved is the substitution SPEC-LIT §13.4 forbids.
+    pub fn solver_for(&self, var: &str) -> Result<SolverControls> {
+        solver_for(&self.solvers, var)
+    }
+
+    /// `numerics.relaxation`'s entry for `var`, or `fallback`.
+    ///
+    /// By the field's OWN name, for the same reason [`Self::solver_for`] is:
+    /// `numerics.relaxation` is a map keyed per equation, and a driver
+    /// reading `U`'s factor for `T` would be reading one equation's setting
+    /// for another.
+    pub fn relax_for(&self, var: &str, fallback: Scalar) -> Scalar {
+        self.relaxation.get(var).copied().unwrap_or(fallback)
     }
 
     /// The solver's own [`CaseControls`], field for field the same as
@@ -2509,6 +2557,7 @@ impl JsonCase {
                 .map(|(k, v)| (k.clone(), *v as Scalar))
                 .collect(),
             div,
+            solvers: self.numerics.solvers.clone(),
             grad,
             laplacian_sn_grad,
             run,

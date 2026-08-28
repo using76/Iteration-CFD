@@ -23,6 +23,15 @@
 //!
 //! Binary-format files are refused up front, before tokenising, with the
 //! `foamFormatConvert` incantation that fixes them.
+//!
+//! Provenance: FORMAT, and carried across from this project's own earlier C++
+//! I/O layer when the crate moved to Rust. That C++ was written from the case
+//! format as it appears in DATA FILES - not from any CFD code's source - and
+//! the format itself, not another program, is the specification here. A file
+//! format is not a work of authorship and interoperability is the whole
+//! purpose. See `PROVENANCE.md`, *Case format interoperability - format*, and
+//! its note on what "carried over" means. No GPL-licensed source was
+//! consulted.
 
 pub mod case;
 pub mod contract;

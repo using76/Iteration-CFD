@@ -1,3 +1,16 @@
+// ============================================================================
+// RERUN (SPEC-LIT S13.4.1): every number below was measured by a driver that
+// read none of this file's `numerics` block. Rerun on the fixed driver,
+// `-iters 3000 -heaterPower -6`: y+ at the hot walls 40.14/41.80/43.64 (was
+// 40.25/41.73/43.41), total wall heat input 6.00555 W against the -6 W sink
+// (SPEC-LIT S31's energy balance still closes), T_b = 314.243 K,
+// U_b = 3.53146 m/s, |U| residual 1.0e-9. Nothing this file claims moved.
+// NOTE that its resolved twin, `channelPeriodicLowRe.jsonc`, no longer runs
+// at all (see that file's header), so the two-mesh comparison this pair was
+// built for cannot be remeasured. Superseded by
+// `cases/channelPeriodicFluxWF.jsonc` (SPEC-LIT S32).
+// ============================================================================
+//
 // meteor-cfd case - SPEC-LIT S31's rerun of the S29.3/S30.3 thermal-wall-
 // function gate, mesh (a): a STREAMWISE-CYCLIC plane channel/duct (SPEC-LIT
 // S31.1's cyclic-pair pairing, `mesh.cyclic`), hot top and bottom walls at

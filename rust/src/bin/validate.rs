@@ -109,10 +109,12 @@ struct Checks {
     /// measurement - a number this binary did not produce, on this machine,
     /// on this run - rather than against something it computed live.
     ///
-    /// Three functions here are replays (SPEC-LIT §32.4/§33.2/§34/§35):
-    /// [`check_thermal_wall_function_gate_verdict_replay`],
-    /// [`check_resolved_leg_mesh_resolution_replay`] and
-    /// [`check_resolved_leg_gate_verdict_replay`]. Their INPUTS are frozen
+    /// Five functions here are replays (SPEC-LIT §3.1/§32.4/§32.5.5/§33.2/
+    /// §34/§35): [`check_thermal_wall_function_gate_verdict_replay`],
+    /// [`check_resolved_leg_mesh_resolution_replay`],
+    /// [`check_resolved_leg_gate_verdict_replay`],
+    /// [`check_thermostat_weighting_experiment_replay`] and
+    /// [`check_bounded_convection_experiment_replay`]. Their INPUTS are frozen
     /// constants copied out of `docs/07-fire-solver.md` §1.1; everything done
     /// WITH those inputs - the correlations, the friction-factor
     /// conversions, the band arithmetic - is computed live, which is the
@@ -2089,6 +2091,12 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2) ===");
     c.replaying(check_thermostat_weighting_experiment_replay);
 
+    // SPEC-LIT §32.5.5's isolation: what the `bounded` prefix on `div(phi,U)`
+    // was worth once §13.4.1's fix made the cases' own entry reach the
+    // momentum equation, and what the scheme's ORDER was worth beside it.
+    println!("\n=== bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5) ===");
+    c.replaying(check_bounded_convection_experiment_replay);
+
     Ok(())
 }
 
@@ -3477,8 +3485,8 @@ fn main() -> ExitCode {
     println!(
         "{} computed live, {} replayed from recorded measurements \
          (docs/07-fire-solver.md S1.1: the wall-function gate verdict, the resolved leg's \
-         mesh resolution, the resolved leg's gate verdict, and the thermostat-weighting \
-         experiment)",
+         mesh resolution, the resolved leg's gate verdict, the thermostat-weighting \
+         experiment, and the bounded-convection isolation)",
         c.total - c.replayed,
         c.replayed,
     );
@@ -4457,39 +4465,60 @@ fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
     ));
 }
 /// The WALL-FUNCTION leg's recorded measurement -
-/// `cases/channelPeriodicFluxWF.jsonc`, `docs/07-fire-solver.md` §1.1, a run
-/// to `|U|` residual 1.4e-10 that is bit-identical from 5 000 through 40 000
-/// iterations. Every number here is a printed output of that run; nothing is
-/// derived.
+/// `cases/channelPeriodicFluxWF.jsonc`, `docs/07-fire-solver.md` §1.1's LAST
+/// subsection, a 40 000-iteration run to `|U|` residual 2.1e-8 whose state is
+/// unchanged in every printed digit from iteration 5 000 on. Every number here
+/// is a printed output of that run; nothing is derived.
+///
+/// **These numbers changed with SPEC-LIT §13.4.1/§32.5.5** - the run that
+/// produced the previous set was made by a driver that ignored this case's own
+/// `div(phi,U)` entry and ran `bounded Gauss upwind` in place of the
+/// `Gauss linearUpwind grad(U)` the case asks for. Restoring that substitution
+/// by hand reproduces the old numbers to five significant figures (`Nu`
+/// 64.3136 against the 64.3168 once recorded here), which is what says this is
+/// a rerun of the same case and not a different one.
 fn wall_function_leg() -> LegVerdict {
     channel_leg_verdict(
         500.0,          // q_w, W/m2, imposed on both hot walls
-        317.567,        // T_w, K, diagnosed by the thermal wall function
-        293.256,        // T_b, K, mixed-mean
-        5.366_59,       // U_b, m/s
-        0.025_582_058,  // k_thermal = rho(T_b) cp nu/Pr
-        -3.203_35,      // thermostat power, W (the sink)
-        0.074_737_2,    // tau_w MEASURED, Pa - S32.5.1's wall-function form here
-        0.086_491_1,    // the viscous form on the same faces, Pa
-        4.986_38e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
+        317.483,        // T_w, K, diagnosed by the thermal wall function
+        293.251_2,      // T_b, K, mixed-mean (T_w - the printed dT 24.2318)
+        5.397_20,       // U_b, m/s
+        0.025_582_477,  // k_thermal = rho(T_b) cp nu/Pr
+        -3.203_40,      // thermostat power, W (the sink)
+        0.075_073_4,    // tau_w MEASURED, Pa - S32.5.1's wall-function form here
+        0.086_606_2,    // the viscous form on the same faces, Pa
+        4.991_74e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
     )
 }
 
 /// The RESOLVED leg's recorded measurement -
-/// `cases/channelPeriodicFluxLowRe.jsonc`, `docs/07-fire-solver.md` §1.1, the
-/// state both initial temperatures (293.15 K and 400 K) converge to, every
-/// digit identical from either start (SPEC-LIT §35.2's regression).
+/// `cases/channelPeriodicFluxLowRe.jsonc`, `docs/07-fire-solver.md` §1.1's
+/// LAST subsection, a 40 000-iteration run to `|U|` residual 4.1e-12.
+///
+/// **These numbers changed with SPEC-LIT §13.4.1/§32.5.5**, for the same
+/// reason [`wall_function_leg`]'s did, and by much more: restoring the
+/// substituted `bounded Gauss upwind` by hand reproduces the previous record
+/// exactly (`Nu` 70.4709 against 70.4707, drag balance -3.787 % against
+/// -3.787 %), and honouring the case's own unbounded
+/// `Gauss linearUpwind grad(U)` closes that drag imbalance to -0.000 % and
+/// raises `Nu` by 3.6 %.
 fn resolved_leg() -> LegVerdict {
     channel_leg_verdict(
         500.0,          // q_w, W/m2
-        314.909,        // T_w, K
-        292.759,        // T_b, K
-        4.835_70,       // U_b, m/s
-        0.025_625_487,  // k_thermal = rho(T_b) cp nu/Pr
-        -3.304_25,      // thermostat power, W
-        0.084_123_8,    // tau_w MEASURED, Pa - the viscous form on a lowRe wall
-        0.084_123_8,    // ... which IS the viscous form, so the two coincide
-        4.802_96e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
+        314.186,        // T_w, K
+        292.799_8,      // T_b, K (T_w - the printed dT 21.3862)
+        4.929_09,       // U_b, m/s
+        0.025_621_917,  // k_thermal = rho(T_b) cp nu/Pr
+        -3.299_63,      // thermostat power, W
+        0.087_636_0,    // tau_w MEASURED, Pa - the viscous form on a lowRe wall
+        0.087_636_0,    // ... which IS the viscous form, so the two coincide
+        // The driver reported this as `0.0004992 m4/s2, disagreement -0.000 %`
+        // - i.e. it closes to better than the +-0.0005 % its own 3-decimal
+        // format can resolve. Recorded at the body force exactly, which is what
+        // that measurement says to the precision it was printed at. The
+        // SUPERSEDED value, taken with the `bounded` correction the driver was
+        // supplying, was 4.80296e-4 - a -3.787 % gap (SPEC-LIT §32.5.5).
+        4.992_00e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
     )
 }
 
@@ -4501,8 +4530,44 @@ fn resolved_leg() -> LegVerdict {
 /// is what makes the comparison controlled rather than two different states.
 const WEIGHTING_EXPERIMENT: [(&str, Scalar, Scalar, Scalar, Scalar); 2] = [
     // leg,             Nu uniform, Nu massFlux, dT uniform, dT massFlux
-    ("resolved", 73.4006, 70.4707, 21.2703, 22.1503),
-    ("wall function", 65.2386, 64.3168, 23.9696, 24.3109),
+    ("resolved", 75.6765, 72.9988, 20.6330, 21.3862),
+    ("wall function", 65.3886, 64.5257, 23.9143, 24.2318),
+];
+
+/// SPEC-LIT §32.5.5's ISOLATION, replayed: the `div(phi,U)` entry the driver
+/// used to substitute for the case's own, varied over all four combinations of
+/// `{Gauss upwind, Gauss linearUpwind grad(U)} x {plain, bounded}` on the
+/// resolved leg and three of them on the wall-function leg, 40 000 iterations
+/// each, nothing else changed. These are the numbers `ofgpu-fire` printed.
+///
+/// `energy_gap` here is `|thermostat power| / (q_w A_wall) - 1`, formed from
+/// the same printed thermostat power as everywhere else; `drag_gap` is the
+/// driver's own kinematic force-balance disagreement (SPEC-LIT §32.5.2).
+struct BoundedRun {
+    leg: &'static str,
+    div_entry: &'static str,
+    bounded: bool,
+    second_order: bool,
+    nu_measured: Scalar,
+    drag_gap: Scalar,
+    energy_gap: Scalar,
+}
+
+const BOUNDED_EXPERIMENT: [BoundedRun; 7] = [
+    BoundedRun { leg: "resolved", div_entry: "bounded Gauss upwind", bounded: true,
+        second_order: false, nu_measured: 70.4709, drag_gap: -0.03787, energy_gap: 0.032_573 },
+    BoundedRun { leg: "resolved", div_entry: "bounded Gauss linearUpwind grad(U)", bounded: true,
+        second_order: true, nu_measured: 70.5193, drag_gap: -0.03788, energy_gap: 0.032_547 },
+    BoundedRun { leg: "resolved", div_entry: "Gauss upwind", bounded: false,
+        second_order: false, nu_measured: 72.9508, drag_gap: 0.0, energy_gap: 0.031_160 },
+    BoundedRun { leg: "resolved", div_entry: "Gauss linearUpwind grad(U)", bounded: false,
+        second_order: true, nu_measured: 72.9988, drag_gap: 0.0, energy_gap: 0.031_136 },
+    BoundedRun { leg: "wall function", div_entry: "bounded Gauss upwind", bounded: true,
+        second_order: false, nu_measured: 64.3136, drag_gap: -0.00112, energy_gap: 0.001_047 },
+    BoundedRun { leg: "wall function", div_entry: "Gauss upwind", bounded: false,
+        second_order: false, nu_measured: 64.3815, drag_gap: 0.00002, energy_gap: 0.001_048 },
+    BoundedRun { leg: "wall function", div_entry: "Gauss linearUpwind grad(U)", bounded: false,
+        second_order: true, nu_measured: 64.5257, drag_gap: -0.00005, energy_gap: 0.001_062 },
 ];
 
 /// SPEC-LIT §32.4's VERDICT, LOCKED AGAINST REGRESSION - this REPLAYS A
@@ -4512,15 +4577,23 @@ const WEIGHTING_EXPERIMENT: [(&str, Scalar, Scalar, Scalar, Scalar); 2] = [
 /// `empty` front/back, hot walls top and bottom - no side walls at all, unlike
 /// the duct this case used to be) and, since SPEC-LIT §35, driven by the
 /// bulk-temperature thermostat in place of the old fixed `-heaterPower -3.2`,
-/// as reported in `docs/07-fire-solver.md` §1.1 (a run to `\|U\|` residual
-/// 1.4e-10, bit-identical from 5 000 through 40 000 iterations - a true fixed
-/// point, not merely a small residual): `q_w = 500 W/m2` on both hot walls,
-/// `y+` 56.8/57.7/58.5 (min/mean/max), `T_w = 317.253 K` (diagnosed by the
-/// thermal wall function), `T_b = 293.283 K` (mixed-mean), `U_b = 5.3696
-/// m/s`. The thermostat's own energy balance closes to round-off here
-/// (power -3.2 W against 3.2 W of measured wall heat, difference 2.8e-7 W) -
-/// see [`check_thermostat_sign_and_steady_offset`] for the controller's own
-/// law, checked directly rather than only through this replay.
+/// as reported in `docs/07-fire-solver.md` §1.1's LAST subsection (a run to
+/// `\|U\|` residual 2.1e-8, unchanged in every printed digit from iteration
+/// 5 000 on - a true fixed point, not merely a small residual):
+/// `q_w = 500 W/m2` on both hot walls, `y+` 56.89/57.78/58.59 (min/mean/max),
+/// `T_w = 317.483 K` (diagnosed by the thermal wall function),
+/// `T_b = 293.251 K` (mixed-mean), `U_b = 5.39720 m/s`. The thermostat's own
+/// energy balance leaves +0.106 % here (power -3.2034 W against 3.2 W of
+/// measured wall heat), which §32.4 carries as an uncertainty on `Nu` - see
+/// [`check_thermostat_sign_and_steady_offset`] for the controller's own law,
+/// checked directly rather than only through this replay.
+///
+/// **The prose above was itself stale once.** It used to quote
+/// `T_w = 317.253 K`, `T_b = 293.283 K`, `U_b = 5.3696 m/s` and an energy
+/// balance closing to 2.8e-7 W - the UNIFORM-thermostat run, superseded twice
+/// over (by §35.3's mass-flux weighting and then by §13.4.1's numerics fix)
+/// while [`wall_function_leg`] below was updated and this comment was not.
+/// Both now name the same measurement.
 ///
 /// A live GPU run to statistical steady state has no place in `cargo test` -
 /// see this module's own `published_benchmarks` for why. What this check
@@ -4533,10 +4606,14 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     note_leg_verdict(c, "wall-function leg", &v);
 
     // SPEC-LIT §35.2's energy balance for this leg: the thermostat's power IS
-    // the wall heat. At the `uniform` default it closed to 2.8e-7 W; the
-    // shipped `massFlux` configuration leaves 0.105 %, which §32.4 then makes
-    // this leg's own uncertainty on `Nu` (and it is far smaller than the band
-    // margin below, which is why the verdict is not undecided here).
+    // the wall heat. The shipped `massFlux` configuration leaves 0.106 %,
+    // which §32.4 then makes this leg's own uncertainty on `Nu` (and it is far
+    // smaller than the band margin below, which is why the verdict is not
+    // undecided here). The `2.4e-7 W` this comment used to quote for the
+    // `uniform` control is a PRE-§13.4.1 number, from the same runs §32.5.5
+    // superseded; the `uniform` leg was rerun for `WEIGHTING_EXPERIMENT` but
+    // its thermostat power was not re-recorded, so no current figure is
+    // claimed for it here.
     c.check(
         "WF leg: thermostat power = q_w A_wall to better than 0.2% (S35.2)",
         v.energy_gap.abs(),
@@ -4545,10 +4622,13 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
 
     // SPEC-LIT §32.5.2's force balance, in the kinematic units the momentum
     // equation is actually written in. This leg is where that identity was
-    // MEASURED - `+0.001 %` at the `uniform` default, `-0.113 %` here - and
-    // it is what says `wall_shear`'s viscous form is the discrete momentum
-    // sink on a real flow and not only on the analytic field
-    // [`check_realised_friction_factor`] manufactures.
+    // MEASURED - `-0.005 %` on the case as shipped, and `-0.005 %` again at
+    // the `uniform` default - and it is what says `wall_shear`'s viscous form
+    // is the discrete momentum sink on a real flow and not only on the
+    // analytic field [`check_realised_friction_factor`] manufactures. The
+    // `-0.113 %` this comment used to record was §3.1's `bounded` correction,
+    // applied to momentum by a driver that ignored the case (SPEC-LIT
+    // §32.5.5); it is reproduced exactly by restoring that entry by hand.
     c.check(
         "WF leg: kinematic wall sink = (g.e_hat) V to better than 0.2% (S32.5.2)",
         (v.kin_sink - CHANNEL_KIN_FORCE).abs() / CHANNEL_KIN_FORCE,
@@ -4557,7 +4637,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
 
     // SPEC-LIT §32.4, verdict 1: the ABSOLUTE-PREDICTION question, Gnielinski
     // at the Petukhov smooth-PIPE `f`. Quoted at +-10%; this leg sits at
-    // about -5.8%.
+    // about -5.9%.
     c.check(
         "WF Nu in Gnielinski's +-10% band at the PIPE f (absolute prediction, S32.4)",
         (v.nu_measured - v.nu_gn_pipe).abs() / v.nu_gn_pipe,
@@ -4568,7 +4648,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     // `f` INFERRED from the body force, it passed at +6.4%, and the inference
     // was 25% high. At the `f` this leg's wall actually measures it is +33.8%
     // - outside the band - and at the viscous form of the same measurement
-    // +14.4%, also outside. Reported, not hidden, and not asserted as a pass
+    // +15.4%, also outside. Reported, not hidden, and not asserted as a pass
     // it is not.
     c.note(&format!(
         "OPEN (Reynolds analogy): WF Nu is {:+.1}% of Gnielinski at the MEASURED f and {:+.1}% \
@@ -4579,7 +4659,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     ));
     // Dittus-Boelter takes no `f` argument, so it has ONE verdict only, and
     // it is an absolute-prediction one. Quoted at +-20-25%; this leg sits at
-    // about -11.5%.
+    // about -12.9%.
     c.check(
         "wall-function Nu within Dittus-Boelter's own +-25% band (replayed measurement, S32.4)",
         (v.nu_measured - v.nu_db).abs() / v.nu_db,
@@ -4588,7 +4668,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
 
     // The y+ this measurement was taken at - SPEC-LIT §32.4's own "both
     // meshes land in their regime" row, for the wall-function leg.
-    let y_plus_mean: Scalar = 57.6571;
+    let y_plus_mean: Scalar = 57.7793;
     c.check(
         "wall-function mesh's own y+ mean sits inside the 30-60 target (replayed measurement)",
         if (30.0..=60.0).contains(&y_plus_mean) { 0.0 } else { 1.0 },
@@ -4699,7 +4779,12 @@ fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
     use ofgpu::models::MeshResolutionReport;
 
     let report = MeshResolutionReport {
-        max_first_cell_y_plus: 0.001_740_51,
+        // SPEC-LIT §32.5.5's rerun: 0.00174051 -> 0.00185363, the wall-adjacent
+        // cell's y+ following `U_b` up 1.9 % when the momentum equation stopped
+        // carrying a `bounded` correction the case never asked for. The cell
+        // COUNT is unmoved, as it has been through every change this
+        // measurement has seen.
+        max_first_cell_y_plus: 0.001_853_63,
         cells_below_y_plus_20: 192,
         n_wall_faces: 16,
     };
@@ -4811,7 +4896,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
         sci(q_forcing, 4),
         sci(q_forcing * tau / rho_cp, 4),
         sci(3.2, 2),
-        sci(0.424, 3),
+        sci(0.426, 3),
     ));
 
     Ok(())
@@ -4825,13 +4910,19 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
 ///
 /// UNLIKE [`check_thermal_wall_function_gate_verdict_replay`], this does
 /// NOT close on both correlations, and is not asserted as if it did:
-/// Dittus-Boelter's wider ±20-25% band is met (+8.1%), Gnielinski's tighter
-/// ±10% band is not (+16.3%, six points over). SPEC-LIT §32.4's own rule -
+/// Dittus-Boelter's wider ±20-25% band is met (+6.0%), Gnielinski's tighter
+/// ±10% band is not (+14.1%, four points over). SPEC-LIT §32.4's own rule -
 /// "the gate closes when both meshes sit inside the correlation band" -
 /// is honestly NOT met, so only the Dittus-Boelter comparison is asserted;
 /// the Gnielinski comparison is a NOTE, so a future change that moves this
 /// number is visible without failing the whole suite over an already-known,
 /// reported gap.
+///
+/// **SPEC-LIT §32.5.5 moved this leg FURTHER out**, from +11.8 % to +14.1 %,
+/// when the driver stopped substituting `bounded Gauss upwind` for the
+/// `Gauss linearUpwind grad(U)` the case asks for. The same change CLOSED this
+/// leg's kinematic drag imbalance, from -3.787 % to -0.000 %; that is the
+/// finding the rerun produced, and it did not close the Nusselt gate.
 fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     let v = resolved_leg();
     let w = wall_function_leg();
@@ -4839,7 +4930,8 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
 
     // The derivation of `T_mean` from the thermostat's own steady law is
     // checked against the value `docs/07-fire-solver.md` §1.1 RECORDS for
-    // this leg (293.574 K, identical from either initial temperature). That
+    // this leg (293.576 K at the S13.4.1 numerics, identical from either
+    // initial temperature; it was 293.574 K before that rerun). That
     // is what licenses using the same derivation on the wall-function leg,
     // whose `T_mean` is not separately recorded anywhere.
     c.check(
@@ -4858,22 +4950,32 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     // makes that gap this leg's own uncertainty on `Nu`. Reported, never
     // asserted, and never dropped from a band statement.
     c.note(&format!(
-        "resolved leg energy balance (S35.2): thermostat power 3.30425 W against q_w A_wall = \
-         {} W - a {:+.2}% gap. S32.4: that is +-{:.2}% of uncertainty ON Nu, and it is quoted \
-         with every band statement below",
+        "resolved leg energy balance (S35.2): thermostat power 3.29963 W against q_w A_wall = \
+         {} W - a {:+.2}% gap (+3.26% before S32.5.5's rerun: the momentum fix moved it by only \
+         0.14 points, which is what says the two imbalances were never one defect). S32.4: that \
+         is +-{:.2}% of uncertainty ON Nu, and it is quoted with every band statement below",
         sci(500.0 * CHANNEL_WALL_AREA, 4),
         v.energy_gap * 100.0,
         v.energy_gap.abs() * 100.0,
     ));
     c.note(&format!(
         "resolved leg force balance (S32.5.2): kinematic wall sink {} m4/s2 against (g.e_hat) \
-         V = {} m4/s2 - {:+.2}%, on a run whose |U| residual is 2.8e-12. NOT a convergence \
-         gap, and NOT the mesh either: the same mesh with the heat removed closes it to \
-         -0.00% (S32.5.3's control)",
+         V = {} m4/s2 - {:+.3}%. CLOSED by S32.5.5: the -3.787% once recorded here was S3.1's \
+         `bounded` convection correction, applied to the momentum equation by a driver that \
+         ignored this case's own div(phi,U) entry, and restoring that entry by hand reproduces \
+         it exactly",
         sci(v.kin_sink, 5),
         sci(CHANNEL_KIN_FORCE, 5),
         (v.kin_sink / CHANNEL_KIN_FORCE - 1.0) * 100.0,
     ));
+    // The balance closes now, so it is ASSERTED rather than only noted - which
+    // is what makes a future reintroduction of the same defect fail on the
+    // commit that makes it, instead of being read off a note nobody diffs.
+    c.check(
+        "resolved leg: kinematic wall sink = (g.e_hat) V to better than 0.2% (S32.5.2/S32.5.5)",
+        (v.kin_sink - CHANNEL_KIN_FORCE).abs() / CHANNEL_KIN_FORCE,
+        2e-3,
+    );
 
     // SPEC-LIT §32.4, verdict 1 - the ABSOLUTE-PREDICTION question. NOT
     // asserted with `c.check`: this is honestly outside the band (+11.8%
@@ -4881,12 +4983,16 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     // what a real finding looks like. The mass-flux weighting of §35.3 moved
     // it from +16.3%, so a third of the old excess was the thermostat's own
     // distribution defect and the rest is not.
+    let miss = (v.nu_measured / v.nu_gn_pipe - 1.0) * 100.0;
     c.note(&format!(
-        "OPEN (absolute prediction): resolved leg Nu is {:+.1}% of Gnielinski at the Petukhov \
-         smooth-PIPE f (was +16.3% with the uniform thermostat sink) - outside its own +-10% \
-         band, though by less than the leg's own {:.2}% energy-balance uncertainty is wide, so \
-         the gate does NOT close and the miss is not decisive either (SPEC-LIT 32.4)",
-        (v.nu_measured / v.nu_gn_pipe - 1.0) * 100.0,
+        "OPEN (absolute prediction): resolved leg Nu is {miss:+.1}% of Gnielinski at the \
+         Petukhov smooth-PIPE f (+16.3% at the uniform thermostat sink, +11.8% at massFlux but \
+         with the substituted `bounded Gauss upwind` momentum entry, and {miss:+.1}% now that \
+         the case's own entry is honoured) - outside its own +-10% band by {:.1} points, MORE \
+         than the leg's own {:.2}% energy-balance uncertainty is wide, so the gate does NOT \
+         close and - unlike the previous reading - the miss is now DECISIVE (S32.4's UNDECIDED \
+         clause no longer applies)",
+        miss - 10.0,
         v.energy_gap.abs() * 100.0,
     ));
 
@@ -4897,10 +5003,13 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     c.note(&format!(
         "OPEN (Reynolds analogy): resolved leg Nu is {:+.1}% of Gnielinski at the MEASURED f \
          = {} - outside the +-10% band. The +6.8% once asserted here was taken at an INFERRED \
-         f of {} (SPEC-LIT 32.5.3)",
+         f of {} (SPEC-LIT 32.5.3). That measured f is only {:+.1}% of the Petukhov pipe f, so \
+         this leg now transports very nearly the right MOMENTUM and too much HEAT - a THERMAL \
+         finding, with nothing left on the momentum side to carry it (SPEC-LIT 32.5.5)",
         (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
         sci(v.f_measured, 4),
         sci(v.f_inferred, 4),
+        (v.f_measured / v.f_pipe - 1.0) * 100.0,
     ));
 
     // The two-mesh ratio §32.4's table asks for, and what the MEASURED
@@ -4908,7 +5017,8 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     // decomposition through a correlation, not an independent measurement,
     // and the two legs' `tau_w` are not even taken in the same form.
     c.note(&format!(
-        "two-mesh ratio Nu_resolved/Nu_wallFunction = {} (was 1.125 with the uniform sink) \
+        "two-mesh ratio Nu_resolved/Nu_wallFunction = {} (1.125 at the uniform sink; 1.096 \
+         at massFlux with the substituted momentum entry) \
          against the ratio Gnielinski predicts from the two legs' own MEASURED viscous-form \
          friction factors, {} - the meshes measure f = {} and {} at the SAME body force",
         sci(v.nu_measured / w.nu_measured, 4),
@@ -4956,18 +5066,168 @@ fn check_thermostat_weighting_experiment_replay(c: &mut Checks) {
         "the shift is LARGER on the resolved mesh than on the wall-function one (S35.3.2)",
         shift[0] > shift[1],
     );
+    let r_uniform = WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1;
     c.note(&format!(
         "so the two-mesh ratio falls from {} to {}: this mechanism accounts for {:.3} of the \
-         0.125 excess, about {:.0}% of it, measured rather than argued",
-        sci(WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1, 4),
+         {:.3} excess, about {:.0}% of it, measured rather than argued",
+        sci(r_uniform, 4),
         sci(WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2, 4),
-        WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1
-            - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2,
-        100.0
-            * (WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1
-                - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2)
-            / (WEIGHTING_EXPERIMENT[0].1 / WEIGHTING_EXPERIMENT[1].1 - 1.0),
+        r_uniform - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2,
+        r_uniform - 1.0,
+        100.0 * (r_uniform - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2)
+            / (r_uniform - 1.0),
     ));
+}
+
+/// SPEC-LIT §32.5.5's ISOLATION, replayed: what the `bounded` prefix on
+/// `div(phi,U)` was worth, and what the convection scheme's ORDER was worth,
+/// separated by running all four combinations on the resolved leg and three on
+/// the wall-function leg.
+///
+/// This exists because a §13.4 defect - `ofgpu-fire` building
+/// `MomentumControls` from `::default()`, whose convection entry is
+/// `bounded Gauss upwind`, on two cases that ask for
+/// `Gauss linearUpwind grad(U)` - produced every number §32's gate had ever
+/// recorded. The rerun that fixed it found something the fix was not expected
+/// to find, and these are the three statements it establishes:
+///
+/// 1. Dropping `bounded` CLOSES the kinematic drag balance on BOTH legs. That
+///    confirms, by isolation, the mechanism §32.5.3 named as a hypothesis and
+///    could not test: §3.1's bounded correction subtracts `V_P (div u)_P`, and
+///    in this low-Mach solver `div u` is a PRESCRIBED constraint (§25.1), not
+///    an error that vanishes at convergence.
+/// 2. The scheme's ORDER is worth less than 0.3 % of `Nu` on either leg - so
+///    the first-order-vs-second-order half of the substitution, which is the
+///    half that looked like it should matter, did not.
+/// 3. The ENERGY imbalance moves with NEITHER. That is what retires §32.5.3's
+///    "one defect with two symptoms" reading: the momentum symptom is entirely
+///    §3.1's correction, and the energy symptom survives its removal.
+fn check_bounded_convection_experiment_replay(c: &mut Checks) {
+    for r in &BOUNDED_EXPERIMENT {
+        c.note(&format!(
+            "{} leg, div(phi,U) = `{}`: Nu = {}, drag balance {:+.3}%, energy balance {:+.3}%",
+            r.leg,
+            r.div_entry,
+            sci(r.nu_measured, 6),
+            r.drag_gap * 100.0,
+            r.energy_gap * 100.0,
+        ));
+    }
+
+    // 1. `bounded` is the whole of the drag imbalance, on BOTH legs.
+    for leg in ["resolved", "wall function"] {
+        let worst_bounded = BOUNDED_EXPERIMENT
+            .iter()
+            .filter(|r| r.leg == leg && r.bounded)
+            .map(|r| r.drag_gap.abs())
+            .fold(0.0 as Scalar, Scalar::max);
+        let worst_plain = BOUNDED_EXPERIMENT
+            .iter()
+            .filter(|r| r.leg == leg && !r.bounded)
+            .map(|r| r.drag_gap.abs())
+            .fold(0.0 as Scalar, Scalar::max);
+        c.note(&format!(
+            "{leg} leg: worst drag imbalance {:.3}% WITH `bounded` against {:.3}% without - the \
+             correction is the whole of it (SPEC-LIT 3.1, 32.5.5)",
+            worst_bounded * 100.0,
+            worst_plain * 100.0,
+        ));
+        c.require(
+            &format!("{leg} leg: dropping `bounded` closes the drag balance to under 0.05% (S32.5.5)"),
+            worst_plain < 5e-4,
+        );
+        c.require(
+            &format!("{leg} leg: `bounded` leaves a LARGER drag imbalance than dropping it (S3.1)"),
+            worst_bounded > worst_plain,
+        );
+    }
+    // ... and on the resolved leg it is a big number, not a rounding one. This
+    // is the row that says the rerun found something, not nothing.
+    let resolved_bounded = BOUNDED_EXPERIMENT
+        .iter()
+        .filter(|r| r.leg == "resolved" && r.bounded)
+        .map(|r| r.drag_gap.abs())
+        .fold(0.0 as Scalar, Scalar::max);
+    c.check(
+        "resolved leg: the `bounded` correction is worth 3.7-3.9% of the streamwise body force",
+        if (0.037..=0.039).contains(&resolved_bounded) { 0.0 } else { 1.0 },
+        0.0,
+    );
+
+    // 2. The scheme's ORDER is worth almost nothing, on either leg. Compared
+    //    at FIXED `bounded`, so this is the order and nothing else.
+    let mut worst_order_shift: Scalar = 0.0;
+    for leg in ["resolved", "wall function"] {
+        for bounded in [true, false] {
+            let pair: Vec<&BoundedRun> = BOUNDED_EXPERIMENT
+                .iter()
+                .filter(|r| r.leg == leg && r.bounded == bounded)
+                .collect();
+            if pair.len() != 2 {
+                continue;
+            }
+            let (a, b) = (pair[0], pair[1]);
+            let (first, second) = if a.second_order { (b, a) } else { (a, b) };
+            let shift = second.nu_measured / first.nu_measured - 1.0;
+            worst_order_shift = worst_order_shift.max(shift.abs());
+            c.note(&format!(
+                "{leg} leg, `bounded` = {bounded}: first order -> second order moves Nu by \
+                 {:+.2}% ({} -> {})",
+                shift * 100.0,
+                sci(first.nu_measured, 6),
+                sci(second.nu_measured, 6),
+            ));
+        }
+    }
+    c.check(
+        "the convection scheme's ORDER is worth less than 0.3% of Nu on either leg (S32.5.5)",
+        worst_order_shift,
+        3e-3,
+    );
+
+    // 3. The ENERGY imbalance moves with neither - which is what refutes
+    //    §32.5.3's joint reading of the two imbalances.
+    for leg in ["resolved", "wall function"] {
+        let gaps: Vec<Scalar> =
+            BOUNDED_EXPERIMENT.iter().filter(|r| r.leg == leg).map(|r| r.energy_gap).collect();
+        let lo = gaps.iter().copied().fold(Scalar::INFINITY, Scalar::min);
+        let hi = gaps.iter().copied().fold(Scalar::NEG_INFINITY, Scalar::max);
+        c.note(&format!(
+            "{leg} leg: energy balance spans {:+.3}% to {:+.3}% across every div(phi,U) entry - \
+             a span of {:.3} points, against the {:.2} points of drag imbalance the same token \
+             switches",
+            lo * 100.0,
+            hi * 100.0,
+            (hi - lo) * 100.0,
+            BOUNDED_EXPERIMENT
+                .iter()
+                .filter(|r| r.leg == leg)
+                .map(|r| r.drag_gap.abs())
+                .fold(0.0 as Scalar, Scalar::max)
+                * 100.0,
+        ));
+    }
+    let resolved_energy_span = {
+        let gaps: Vec<Scalar> = BOUNDED_EXPERIMENT
+            .iter()
+            .filter(|r| r.leg == "resolved")
+            .map(|r| r.energy_gap)
+            .collect();
+        gaps.iter().copied().fold(Scalar::NEG_INFINITY, Scalar::max)
+            - gaps.iter().copied().fold(Scalar::INFINITY, Scalar::min)
+    };
+    c.check(
+        "resolved leg: the energy imbalance moves under 0.2 points on a change worth 3.8 points \
+         of momentum imbalance - the two are NOT one defect (S32.5.5)",
+        resolved_energy_span,
+        2e-3,
+    );
+    c.note(
+        "so the resolved leg's +3.11% ENERGY imbalance is a single open anomaly, not half of a \
+         pair. The energy equation's own bounded correction is applied unconditionally and on \
+         the MASS flux (S26, S3.1), so no case setting can switch it off and this experiment \
+         could not test it - S32.5.5 specifies the instrumented run that would",
+    );
 }
 
 // ==========================================================================

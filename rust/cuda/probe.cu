@@ -12,6 +12,10 @@
   this compiles to PTX, loads through cudarc and reproduces the CPU answer
   bit for bit, then the whole toolchain (nvcc -> PTX -> cudarc -> launch ->
   read back) is proven and the rest of the port is transcription.
+
+  Provenance: ORIGINAL - the toolchain probe. No external source;
+  PROVENANCE.md classifies it under GPU plumbing and tooling - original. No
+  GPL-licensed source was consulted.
 \*---------------------------------------------------------------------------*/
 
 #include "ofgpu_device.cuh"

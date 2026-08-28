@@ -40,6 +40,12 @@
 //! Provenance: the driver - argument parsing, case loading, the reporting
 //! loop - was carried across from this project's own earlier C++ driver. The
 //! model it drives was rewritten from SPEC-LIT.md; see src/models/k_epsilon.rs.
+//!
+//! Provenance: ORIGINAL driver code over LITERATURE numerics. The k-epsilon
+//! model itself is cited in `src/turbulence.rs`/`src/models/*` and SPEC-LIT.md
+//! S6.1; this file is argument parsing, case loading, the iteration order and
+//! the reporting loop, which are this project's own (`PROVENANCE.md`,
+//! `src/bin/*`). No GPL-licensed source was consulted.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

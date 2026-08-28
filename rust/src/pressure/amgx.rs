@@ -67,6 +67,11 @@
 //! would hand AMGX a *different matrix* from the one PBiCGStab solves.
 //! [`AmgxBackend::setup`] refuses in that case rather than producing an answer
 //! that would then be silently one boundary term short.
+//!
+//! Provenance: ORIGINAL - the AMGX backend, behind the `amgx` feature. AMGX
+//! itself is NVIDIA's and BSD-3-Clause; it is linked, not vendored, and is
+//! recorded in `../NOTICE`. Nothing of its source is reproduced here.
+//! `PROVENANCE.md` carries the row. No GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};

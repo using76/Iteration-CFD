@@ -49,16 +49,36 @@ it, with the provenance documented.
 
 ## 2. Dependency licences — all clear
 
-| Dependency | Licence | MIT-compatible |
+**Re-verified against `rust/Cargo.lock` as it stands, not against memory.**
+27 packages in the lock file (the crate itself plus 26 dependencies, direct
+and transitive), every licence read from the crate's own `Cargo.toml` in the
+local registry:
+
+| Dependency (from `Cargo.lock`) | Licence | MIT-compatible |
 |---|---|---|
-| AMGX (NVIDIA) | BSD-3-Clause | yes |
 | cudarc | MIT OR Apache-2.0 | yes |
+| serde, serde_core, serde_derive, serde_derive_internals, serde_json, serde_path_to_error | MIT OR Apache-2.0 | yes |
+| schemars, schemars_derive | MIT | yes |
+| jsonc-parser | MIT | yes |
+| thiserror, thiserror-impl, anyhow | MIT OR Apache-2.0 | yes |
+| proc-macro2, quote, syn, cfg-if, dyn-clone, itoa, ref-cast, ref-cast-impl, windows-link | MIT OR Apache-2.0 | yes |
+| zmij | MIT | yes |
+| libloading | ISC | yes |
+| memchr | Unlicense OR MIT | yes |
+| unicode-ident | (MIT OR Apache-2.0) AND Unicode-3.0 | yes |
+| AMGX (NVIDIA) | BSD-3-Clause | yes — optional, `amgx` feature, off by default |
 | CUDA toolkit, cuFFT, cuBLAS | NVIDIA EULA, linking permitted | yes — same as any CUDA program |
-| thiserror, anyhow | MIT OR Apache-2.0 | yes |
 | **OpenFOAM** | **GPL-3.0** | **no** |
 
-Only one dependency is a problem, and we do not link against it — we copied
-from it. That is worse, and it is also entirely fixable.
+**No GPL, LGPL or AGPL dependency appears anywhere in the graph, direct or
+transitive.** The whole set is MIT / Apache-2.0 / ISC / Unlicense /
+Unicode-3.0 / BSD-3-Clause. There is no release blocker here.
+
+The one entry that IS a problem is OpenFOAM, and it was never linked against
+— it was copied from. That is worse, and it was fixed: the derived numerical
+core is gone (§"What phase 0 actually removed"), and every one of the 105
+source files in `rust/` now carries the line *"No GPL-licensed source was
+consulted."*
 
 ---
 
@@ -117,16 +137,18 @@ clearly-GPL working tree for reference, or delete them from the published one.
 
 ### 3e. The documentation
 
-`docs/01`–`docs/04` describe OpenFOAM: what components exist, how they classify
+`docs/01`–`docs/03` describe OpenFOAM: what components exist, how they classify
 for GPU porting, and their equations. Facts about a work are not the work, and
 a catalogue of names and a portability analysis are original commentary.
 
-`docs/04-porting-roadmap.md` is the one to be careful with: it contains
-equations whose stated provenance is *"transcribed from the original source"*.
+`docs/04-porting-roadmap.md` was the one to be careful with: it contained
+equations whose stated provenance was *"transcribed from the original source"*.
 Most of that content is published mathematics and would be identical if taken
 from the papers — but the citation must point at the paper, not at
-`upstream/.../kEpsilon.C`. **Re-source every entry before publishing it.**
-Done properly it becomes the reimplementation specification.
+`upstream/.../kEpsilon.C`. **DONE, by removal rather than re-sourcing.** That
+file is no longer in this tree (see §"What phase 0 actually removed" below,
+and `docs/README.md`); `rust/SPEC-LIT.md`, in which every equation is cited to
+a paper or textbook, is the reimplementation specification instead.
 
 ---
 

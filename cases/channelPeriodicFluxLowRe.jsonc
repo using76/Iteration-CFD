@@ -11,6 +11,11 @@
 // here since neither q_w nor the geometry changed.
 //
 // ============================================================================
+// >>> READ THIS FIRST: every number in this STATUS block and in the first
+// >>> three UPDATE blocks below is SUPERSEDED. The last UPDATE block at the
+// >>> end of this header (SPEC-LIT S13.4.1/S32.5.5) is the current
+// >>> measurement; the blocks in between are kept, in order, as the record of
+// >>> how this gate got there.
 // STATUS (SPEC-LIT S34 rebuild, RUN and REPORTED - docs/07-fire-solver.md
 // S1.1 has the full table): the previous ("mesh b") version of this file was
 // a DUCT - real `wallSide.*` walls at only 4 spanwise cells - and collapsed
@@ -198,6 +203,65 @@
 // imbalance of the same size - two symptoms, one defect, and S32.5.3 names a
 // mechanism for it (S3.1's bounded convection correction, whose domain
 // integral is zero only when div(phi) is) that has not yet been tested.
+//
+// See docs/07-fire-solver.md S1.1's last subsection for the full account.
+// ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S13.4.1/S32.5.5 - THE GATE RERUN ON THE SETTINGS THIS FILE
+// ACTUALLY ASKS FOR; comments only, the case itself is unchanged): every
+// number in every block above was produced by a driver that read NONE of this
+// file's `numerics` block - it ran `bounded Gauss upwind` on the momentum
+// equation where this file asks for `Gauss linearUpwind grad(U)` with no
+// `bounded` prefix. Fixed (S13.4.1), and both legs rerun.
+//
+// CONTROL: setting `div(phi,U)` back to `bounded Gauss upwind` by hand
+// reproduces the record above exactly - T_b = 292.759 K, T_w = 314.909 K,
+// U_b = 4.83570 m/s, Nu = 70.4709, thermostat power -3.30423 W, drag balance
+// -3.787%.
+//
+// THIS FILE AS SHIPPED, at the settings it names (40 000 iterations,
+// |U| residual 4.1e-12):
+//   T_b = 292.800 K | T_w = 314.186 K | dT = 21.3862 K | U_b = 4.92909 m/s
+//   Re = 26,288 | Nu = 72.9988 (was 70.4707: +3.59%)
+//   worst y+ 0.00185363 | 192/400 cells at y+ < 20 | contErr 1.10e-7
+//   thermostat power -3.29963 W against 3.2 W of wall heat, a +3.11% gap
+//   f MEASURED = 0.023936 (viscous - the discrete sink on a lowRe wall)
+//   kinematic force balance -0.000% (WAS -3.787%)
+//
+// TWO RESULTS, pointing opposite ways:
+//
+// 1. THE DRAG IMBALANCE IS CLOSED, and the mechanism S32.5.3 named as an
+//    untested suspect is CONFIRMED by isolation. Four runs of this case
+//    differing only in `div(phi,U)`:
+//      bounded Gauss upwind              Nu 70.4709  drag -3.787%  energy +3.257%
+//      bounded Gauss linearUpwind grad(U) Nu 70.5193  drag -3.788%  energy +3.255%
+//      Gauss upwind                      Nu 72.9508  drag +0.000%  energy +3.116%
+//      Gauss linearUpwind grad(U)        Nu 72.9988  drag -0.000%  energy +3.114%
+//    contErr is 1.101e-7 in all four. So it was never the scheme's ORDER
+//    (worth +0.07% of Nu) and never contErr (unchanged): it was the `bounded`
+//    token, which in a low-Mach solver subtracts a PRESCRIBED dilatation
+//    (S25.1) from the momentum equation as if it were an error. SPEC-LIT S3.1
+//    now forbids defaulting a momentum equation to the bounded form.
+//    The ENERGY imbalance moved 0.14 points on that same change, so
+//    S32.5.3's "one defect with two symptoms" is refuted: the momentum
+//    symptom is gone and the energy symptom is not.
+//
+// 2. THE NUSSELT GATE MOVED FURTHER OUT, and is now decisively open.
+//    * ABSOLUTE PREDICTION, Gnielinski at the Petukhov pipe f = 0.024416:
+//      Nu_Gn = 63.9587, measured is +14.1% (was +11.8%) - OUTSIDE +-10% by
+//      4.1 points, MORE than this leg's own +-3.11% energy-balance
+//      uncertainty is wide. S32.4's UNDECIDED clause no longer applies.
+//    * Dittus-Boelter 68.8722, +6.0% - inside its own band.
+//    * REYNOLDS ANALOGY at the measured f: Nu_Gn = 62.5988, +16.6% - OUTSIDE.
+//
+// WHAT IS LEFT. This leg's measured f is only -2.0% of the Petukhov pipe f
+// and its drag balance closes exactly, so it now transports very nearly the
+// right MOMENTUM and 14% too much HEAT - a thermal finding with nothing left
+// on the momentum side to carry it. The leading named candidate is the
+// case-wide constant Prt = 0.85 reaching a first cell at y+ = 0.0019, where
+// Kays (ASME J. Heat Transfer 116 (1994) 284) puts Prt at 1.5-1.9; a
+// hypothesis with a mechanism and the right sign, measured by nothing yet.
 //
 // See docs/07-fire-solver.md S1.1's last subsection for the full account.
 // ============================================================================

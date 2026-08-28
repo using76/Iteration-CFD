@@ -33,7 +33,7 @@ The bar is not "can a GPU help here" - almost anything can be accelerated someho
 
 속도 향상 대비 노력이 큰 순서입니다.
 
-1. **Mesh + LDU addressing on the device** (tier A). 모든 것의 전제조건입니다. `lduAddressing`의 `lowerAddr`/`upperAddr`, `V`, `Sf`, `magSf`, `deltaCoeffs`, `weights`, `nonOrthCorrectionVectors`를 한 번 올리고 끝냅니다. 이미 `gpu/common/src/ofgpu_mesh.cu`에 있습니다.
+1. **Mesh + LDU addressing on the device** (tier A). 모든 것의 전제조건입니다. `lduAddressing`의 `lowerAddr`/`upperAddr`, `V`, `Sf`, `magSf`, `deltaCoeffs`, `weights`, `nonOrthCorrectionVectors`를 한 번 올리고 끝냅니다. 이미 `gpu/common/src/ofgpu_mesh.cu`에 있습니다. *(경로 주석: 이 문서가 쓰인 뒤 `gpu/` 트리 전체가 저장소에서 제거되었습니다 — `LICENSING.md`의 "What phase 0 actually removed" 참고. 지금 이 역할을 하는 파일은 `rust/src/mesh.rs`·`rust/src/mesh/`와 `rust/cuda/`의 커널들입니다.)*
 2. **`fvm::` / `fvc::` Gauss operators** (tier A). 면 루프 하나가 커널 하나입니다. OpenFOAM의 scatter를 cell->face CSR gather로 뒤집는 것이 핵심입니다.
 3. **The linear solver** (tier B). 난류 모델은 반복당 두 번의 sparse solve로 시간을 씁니다. 자체 PBiCGStab로도 충분하고, 압력 방정식이 들어오면 AMGX가 필요합니다.
 4. **Eddy-viscosity RAS models** (tier A + B). k-epsilon, k-omega, kOmegaSST, realizableKE, RNGkEpsilon, SpalartAllmaras - 전부 같은 골격입니다. k-epsilon과 k-omega는 `gpu/kEpsilon`, `gpu/kOmega`에 구현되어 있습니다.

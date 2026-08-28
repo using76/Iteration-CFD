@@ -58,6 +58,11 @@
 //! decision the C++ `main` made — extents, grading, patch names and types,
 //! the initial profiles — lives in [`ofgpu::blockgen`] in this port, so what
 //! is left here really is only the command line.
+//!
+//! Provenance: ORIGINAL - the command-line front end to `src/blockgen.rs`. The
+//! generator and the case format it writes are covered by that file's own
+//! header; this one is argument parsing (`PROVENANCE.md`, `src/bin/*`). No
+//! GPL-licensed source was consulted.
 
 use std::path::Path;
 use std::process::ExitCode;

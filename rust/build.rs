@@ -16,6 +16,11 @@
 //! bugs actually live.
 //!
 //! `cargo build` is the only command a user runs; nvcc is invoked from here.
+//!
+//! Provenance: ORIGINAL - the MSVC/nvcc build glue (`vcvars64.bat` capture,
+//! CUBIN emission, `/Zc:preprocessor`), designed here. There is no external
+//! source for it, permissive or otherwise. `PROVENANCE.md` classifies it under
+//! *GPU plumbing and tooling - original*. No GPL-licensed source was consulted.
 
 use std::env;
 use std::fs;

@@ -25,6 +25,10 @@
 //! where the cliff is, because "dynamic dispatch is slow" is true at one
 //! granularity and false at the other, and the difference is four orders of
 //! magnitude.
+//!
+//! Provenance: ORIGINAL - a benchmark harness for the cost of runtime dispatch.
+//! It measures this crate's own code; there is no external source for it
+//! (`PROVENANCE.md`, `src/bin/*`). No GPL-licensed source was consulted.
 
 use std::hint::black_box;
 use std::process::ExitCode;
