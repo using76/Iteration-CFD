@@ -2300,3 +2300,93 @@ resolved mesh does and the wall-function mesh does not, the wall function
 is wrong and that is a real finding. If NEITHER does, the channel case is
 wrong — and the resolved mesh, which models nothing at the wall, is the one
 that says so.
+
+---
+
+## 33. Low-Reynolds-number k-epsilon
+
+**Launder & Sharma, *Letters in Heat and Mass Transfer* 1 (1974) 131–138.**
+Background: Patel, Rodi & Scheuerer, *AIAA J.* 23 (1985) 1308, which reviews
+the low-Re family and is the standard reference for which damping functions
+survive scrutiny.
+
+§32's resolved leg cannot be run because standard k-epsilon (§6.1) is a
+HIGH-Reynolds closure: its coefficients are calibrated for the log layer and
+it carries no mechanism to suppress `nu_t` as the wall is approached, so on a
+y+ ~ 1 mesh it produces turbulence without bound — measured at k = 160 m²/s²
+in a 1 m/s flow. Damping functions are what a wall-resolving mesh requires,
+and they are the whole content of this section.
+
+### 33.1 The equations
+
+Launder–Sharma solves for `epsilon_tilde`, the ISOTROPIC dissipation, which
+unlike `epsilon` goes to zero at the wall — that substitution is what makes
+the wall boundary condition homogeneous and the equations integrable:
+
+```
+epsilon = epsilon_tilde + D,        D = 2 nu |grad(sqrt(k))|²
+nu_t    = C_mu f_mu k² / epsilon_tilde
+
+Dk/Dt   = div((nu + nu_t/sigma_k) grad k)   + G - epsilon_tilde - D
+De~/Dt  = div((nu + nu_t/sigma_e) grad e~)
+          + C_1 (e~/k) G  -  C_2 f_2 e~²/k  +  E
+```
+
+with the damping functions and the extra source:
+
+```
+Re_t = k²/(nu epsilon_tilde)
+f_mu = exp( -3.4 / (1 + Re_t/50)² )
+f_2  = 1 - 0.3 exp( -Re_t² )
+E    = 2 nu nu_t ( d²U/dy² )²      -> in tensor form,
+       E = 2 nu nu_t |grad(grad U)|²   (the second-derivative magnitude)
+```
+
+Coefficients as §6.1: `C_mu = 0.09, C_1 = 1.44, C_2 = 1.92, sigma_k = 1.0,
+sigma_eps = 1.3`. They are unchanged on purpose — Launder–Sharma modifies the
+model with `f_mu`, `f_2`, `D` and `E`, not with new constants.
+
+Limits worth checking in the implementation, because they are what make the
+model reduce correctly:
+
+```
+Re_t -> infinity :  f_mu -> exp(0) = 1,  f_2 -> 1,  D -> small, E -> small
+                    => the standard model of section 6.1, exactly
+Re_t -> 0        :  f_mu -> exp(-3.4),  which is ~0.033: nu_t is suppressed
+                    by a factor of 30 at the wall
+```
+
+*DESIGN — the second-derivative term.* `E` needs `grad(grad U)`, which the
+operator set does not carry. Compute it as the Gauss gradient of the already
+available cell gradient — one extra gradient pass per outer iteration,
+evaluated once and reused. State the cost in the model doc.
+
+### 33.2 Wall and initial conditions
+
+```
+k = 0              at the wall (no-slip: no fluctuation)
+epsilon_tilde = 0  at the wall (the whole point of the tilde form)
+nu_t = 0           at the wall (this is nutLowRe, section 15.2, and it is
+                   now CORRECT rather than merely quiet)
+```
+
+Homogeneous Dirichlet on both, which is why this model needs no special wall
+treatment at all — the mesh does the work. `wallTreatment lowRe` becomes
+valid for this model and only for it (§29.1, §32's validity gate).
+
+Mesh requirement, stated as a check rather than a hope: the first cell centre
+must satisfy `y+ < 1`, with at least 10 cells inside `y+ < 20`. The solver
+should MEASURE and report both, and warn when they are not met — a low-Re
+model on a wall-function mesh is as wrong as the reverse, and silently so.
+
+### 33.3 What must hold
+
+| Check | Expected |
+|---|---|
+| `f_mu`, `f_2` at large `Re_t` | 1 to round-off; the model reduces to §6.1 |
+| `f_mu` at `Re_t = 0` | `exp(-3.4)`, and monotone in between |
+| `D` on a uniform `k` field | zero |
+| `E` on a linear velocity field | zero (second derivative vanishes) |
+| flat plate / channel, y+ < 1 | `k`, `epsilon` bounded; no runaway |
+| **the §32 resolved leg** | runs, converges, and its Nu lands in the same correlation band the wall-function leg already sits in |
+| law of the wall | the computed `u+` against `y+` reproduces the viscous sublayer `u+ = y+` below y+ 5 and the log law above y+ 30 — the profile is the model's real output and the only check that says the damping is right |
