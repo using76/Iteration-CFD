@@ -4478,24 +4478,28 @@ fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
 /// unchanged in every printed digit from iteration 5 000 on. Every number here
 /// is a printed output of that run; nothing is derived.
 ///
-/// **These numbers changed with SPEC-LIT §13.4.1/§32.5.5** - the run that
-/// produced the previous set was made by a driver that ignored this case's own
-/// `div(phi,U)` entry and ran `bounded Gauss upwind` in place of the
-/// `Gauss linearUpwind grad(U)` the case asks for. Restoring that substitution
-/// by hand reproduces the old numbers to five significant figures (`Nu`
-/// 64.3136 against the 64.3168 once recorded here), which is what says this is
-/// a rerun of the same case and not a different one.
+/// **These numbers changed twice.** With SPEC-LIT §13.4.1/§32.5.5, because the
+/// run that produced the set before them was made by a driver that ignored
+/// this case's own `div(phi,U)` entry and ran `bounded Gauss upwind` in place
+/// of the `Gauss linearUpwind grad(U)` the case asks for (restoring that
+/// substitution by hand reproduced the old numbers to five significant
+/// figures, `Nu` 64.3136 against 64.3168, which is what said it was a rerun of
+/// the same case and not a different one). And again with **SPEC-LIT §26.1**,
+/// which folded §25.1's own conduction term into the low-Mach divergence
+/// constraint: on this leg that is worth -0.06 % of `Nu` (64.5257 -> 64.4894)
+/// and takes the energy balance from +0.106 % to +0.0174 %. This leg is the
+/// CONTROL, and it behaved like one.
 fn wall_function_leg() -> LegVerdict {
     channel_leg_verdict(
         500.0,          // q_w, W/m2, imposed on both hot walls
-        317.483,        // T_w, K, diagnosed by the thermal wall function
-        293.251_2,      // T_b, K, mixed-mean (T_w - the printed dT 24.2318)
-        5.397_20,       // U_b, m/s
-        0.025_582_477,  // k_thermal = rho(T_b) cp nu/Pr
-        -3.203_40,      // thermostat power, W (the sink)
-        0.075_073_4,    // tau_w MEASURED, Pa - S32.5.1's wall-function form here
-        0.086_606_2,    // the viscous form on the same faces, Pa
-        4.991_74e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
+        317.497,        // T_w, K, diagnosed by the thermal wall function
+        293.251_6,      // T_b, K, mixed-mean (T_w - the printed dT 24.2454)
+        5.394_07,       // U_b, m/s
+        0.025_582_438,  // k_thermal = rho(T_b) cp nu/Pr
+        -3.200_56,      // thermostat power, W (the sink)
+        0.075_035_8,    // tau_w MEASURED, Pa - S32.5.1's wall-function form here
+        0.086_602_7,    // the viscous form on the same faces, Pa
+        4.991_75e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
     )
 }
 
@@ -4505,21 +4509,33 @@ fn wall_function_leg() -> LegVerdict {
 ///
 /// **These numbers changed with SPEC-LIT §13.4.1/§32.5.5**, for the same
 /// reason [`wall_function_leg`]'s did, and by much more: restoring the
-/// substituted `bounded Gauss upwind` by hand reproduces the previous record
+/// substituted `bounded Gauss upwind` by hand reproduced the previous record
 /// exactly (`Nu` 70.4709 against 70.4707, drag balance -3.787 % against
 /// -3.787 %), and honouring the case's own unbounded
-/// `Gauss linearUpwind grad(U)` closes that drag imbalance to -0.000 % and
-/// raises `Nu` by 3.6 %.
+/// `Gauss linearUpwind grad(U)` closed that drag imbalance to -0.000 % and
+/// raised `Nu` by 3.6 %.
+///
+/// **And again with SPEC-LIT §26.1**, which is the one that mattered here.
+/// §25.1's `Q` was implemented without its conduction term `div(k_eff grad T)`,
+/// so the pressure equation was prescribing a dilatation of about -0.07 s^-1
+/// on a thermally fully developed periodic channel whose true `div(u)` is
+/// ZERO. With `Q` complete: `Nu` 72.9988 -> 71.6830, `T_w` 314.186 -> 314.549,
+/// `U_b` 4.92909 -> 4.93682, `contErr` 1.101e-7 -> 6.7253e-14, and the energy
+/// balance this leg had carried as a +3.11 % uncertainty on every band
+/// statement it makes closes to **-2.84e-06 W of 3.2 W**. The state is a fixed
+/// point: 80 000 iterations reproduce all of the above in every printed
+/// digit.
 fn resolved_leg() -> LegVerdict {
     channel_leg_verdict(
         500.0,          // q_w, W/m2
-        314.186,        // T_w, K
-        292.799_8,      // T_b, K (T_w - the printed dT 21.3862)
-        4.929_09,       // U_b, m/s
-        0.025_621_917,  // k_thermal = rho(T_b) cp nu/Pr
-        -3.299_63,      // thermostat power, W
-        0.087_636_0,    // tau_w MEASURED, Pa - the viscous form on a lowRe wall
-        0.087_636_0,    // ... which IS the viscous form, so the two coincide
+        314.549,        // T_w, K
+        292.772_3,      // T_b, K (T_w - the printed dT 21.7767)
+        4.936_82,       // U_b, m/s
+        0.025_624_308,  // k_thermal = rho(T_b) cp nu/Pr
+        -3.200_00,      // thermostat power, W - S26.1 closed this to the
+                        // wall heat: the printed gap is -2.83972e-06 W
+        0.087_534_9,    // tau_w MEASURED, Pa - the viscous form on a lowRe wall
+        0.087_534_9,    // ... which IS the viscous form, so the two coincide
         // The driver reported this as `0.0004992 m4/s2, disagreement -0.000 %`
         // - i.e. it closes to better than the +-0.0005 % its own 3-decimal
         // format can resolve. Recorded at the body force exactly, which is what
@@ -4533,13 +4549,20 @@ fn resolved_leg() -> LegVerdict {
 /// The DECISIVE EXPERIMENT of SPEC-LIT §35.3.2, replayed: the same two cases,
 /// the same 40 000 iterations, `"weighting"` the only token that differs.
 /// `(Nu, T_w - T_b)` for each of the four runs, exactly as `ofgpu-fire`
-/// printed them. The `uniform` pair reproduce, to the last printed digit, the
-/// numbers `docs/07-fire-solver.md` §1.1 recorded before §35.3 existed - which
-/// is what makes the comparison controlled rather than two different states.
+/// printed them. Each pair differs in one token and nothing else, which is
+/// what makes the comparison controlled rather than two different states.
+/// **Re-measured after SPEC-LIT S26.1**, all four runs, because that section's
+/// completion of S25.1's `Q` moves every state on these two cases. The three
+/// statements S35.3.2 predicted survive: `massFlux` lowers `Nu` on both legs,
+/// widens `(T_w - T_b)` on both, and shifts the resolved mesh 2.7x more than
+/// the wall-function one - the same factor the superseded set gave. The
+/// SUPERSEDED set, kept because the verdicts taken at it were published:
+/// 75.6765 / 72.9988 / 20.6330 / 21.3862 and 65.3886 / 64.5257 / 23.9143 /
+/// 24.2318.
 const WEIGHTING_EXPERIMENT: [(&str, Scalar, Scalar, Scalar, Scalar); 2] = [
     // leg,             Nu uniform, Nu massFlux, dT uniform, dT massFlux
-    ("resolved", 75.6765, 72.9988, 20.6330, 21.3862),
-    ("wall function", 65.3886, 64.5257, 23.9143, 24.2318),
+    ("resolved", 74.4529, 71.6830, 20.9704, 21.7767),
+    ("wall function", 65.3942, 64.4894, 23.9122, 24.2454),
 ];
 
 /// SPEC-LIT §32.5.5's ISOLATION, replayed: the `div(phi,U)` entry the driver
@@ -4547,6 +4570,18 @@ const WEIGHTING_EXPERIMENT: [(&str, Scalar, Scalar, Scalar, Scalar); 2] = [
 /// `{Gauss upwind, Gauss linearUpwind grad(U)} x {plain, bounded}` on the
 /// resolved leg and three of them on the wall-function leg, 40 000 iterations
 /// each, nothing else changed. These are the numbers `ofgpu-fire` printed.
+///
+/// **These seven runs are a PRE-§26.1 record and are kept as one.** They were
+/// made with §25.1's `Q` implemented without its conduction term, which was
+/// prescribing a dilatation of about -0.07 s^-1 on a channel whose true
+/// `div(u)` is zero - and §3.1's correction integrates against exactly that
+/// dilatation. On the fixed solver the same experiment gives a different
+/// answer, and BOTH are recorded: see [`BOUNDED_AFTER_S261`] below, which is
+/// what this check asserts about the solver as it now stands. What the seven
+/// runs ESTABLISHED is not affected and is still asserted here: the imbalance
+/// was the `bounded` token and not the scheme's ORDER, and the energy
+/// imbalance moved with neither, which is what refuted §32.5.3's "one defect
+/// with two symptoms".
 ///
 /// `energy_gap` here is `|thermostat power| / (q_w A_wall) - 1`, formed from
 /// the same printed thermostat power as everywhere else; `drag_gap` is the
@@ -4676,7 +4711,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
 
     // The y+ this measurement was taken at - SPEC-LIT §32.4's own "both
     // meshes land in their regime" row, for the wall-function leg.
-    let y_plus_mean: Scalar = 57.7793;
+    let y_plus_mean: Scalar = 57.7661;
     c.check(
         "wall-function mesh's own y+ mean sits inside the 30-60 target (replayed measurement)",
         if (30.0..=60.0).contains(&y_plus_mean) { 0.0 } else { 1.0 },
@@ -4787,12 +4822,12 @@ fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
     use ofgpu::models::MeshResolutionReport;
 
     let report = MeshResolutionReport {
-        // SPEC-LIT §32.5.5's rerun: 0.00174051 -> 0.00185363, the wall-adjacent
-        // cell's y+ following `U_b` up 1.9 % when the momentum equation stopped
-        // carrying a `bounded` correction the case never asked for. The cell
-        // COUNT is unmoved, as it has been through every change this
-        // measurement has seen.
-        max_first_cell_y_plus: 0.001_853_63,
+        // 0.00174051 -> 0.00185363 at §32.5.5's rerun (the wall-adjacent
+        // cell's y+ following `U_b` up 1.9 % when the momentum equation
+        // stopped carrying a `bounded` correction the case never asked for),
+        // and 0.00185363 -> 0.00179449 at §26.1's. The cell COUNT is unmoved,
+        // as it has been through every change this measurement has seen.
+        max_first_cell_y_plus: 0.001_794_49,
         cells_below_y_plus_20: 192,
         n_wall_faces: 16,
     };
@@ -4938,13 +4973,13 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
 
     // The derivation of `T_mean` from the thermostat's own steady law is
     // checked against the value `docs/07-fire-solver.md` §1.1 RECORDS for
-    // this leg (293.576 K at the S13.4.1 numerics, identical from either
-    // initial temperature; it was 293.574 K before that rerun). That
-    // is what licenses using the same derivation on the wall-function leg,
-    // whose `T_mean` is not separately recorded anywhere.
+    // this leg (293.563 K after S26.1; 293.576 K at the S13.4.1 numerics,
+    // 293.574 K before that). Since S26.1 the two legs settle at the SAME
+    // `T_mean`, because both thermostats now settle at the same -3.2 W - which
+    // is the balance closing, seen from the controller's side.
     c.check(
-        "T_mean from the thermostat law matches the recorded 293.576 K (S35.1/S35.2)",
-        (v.t_mean - 293.576).abs(),
+        "T_mean from the thermostat law matches the recorded 293.563 K (S35.1/S35.2)",
+        (v.t_mean - 293.563).abs(),
         5e-3,
     );
 
@@ -4954,18 +4989,71 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
         0.25,
     );
 
-    // SPEC-LIT §35.2's energy balance does NOT close on this leg, and §32.4
-    // makes that gap this leg's own uncertainty on `Nu`. Reported, never
-    // asserted, and never dropped from a band statement.
+    // SPEC-LIT §35.2's energy balance NOW CLOSES on this leg - §26.1 - and
+    // that is asserted rather than only noted, so a reintroduction of the
+    // defect fails on the commit that makes it. The history is kept in the
+    // note beside it because every band statement this gate ever published
+    // carried the old gap as an uncertainty.
+    // SPEC-LIT §26.1's own before/after, replayed beside the verdicts it
+    // moved. This is the pair that says the balance CLOSED rather than merely
+    // being reported smaller: the correction's own domain integral collapses
+    // by 1126x on the resolved leg and 6.1x on the wall-function one, and its
+    // PRESCRIBED half - which the mechanism §32.5.5 proposed said was the
+    // culprit - is round-off before AND after, on both legs.
+    for (leg, gap_before, gap_after, corr_before, corr_after, presc_before, presc_after) in [
+        ("resolved", -0.099_634_2, -2.840_06e-6, -0.099_631_3, 8.853_03e-8, -2.060_05e-13, -2.538_78e-14),
+        ("wall function", -3.399_63e-3, -5.571_18e-4, -3.399_37e-3, -5.568_69e-4, 1.966_45e-13, 9.781_02e-14),
+    ] {
+        c.note(&format!(
+            "{leg} leg (S26.1): balance gap {} W -> {} W; the bounded correction's own domain \
+             integral {} W -> {} W ({:.0}x smaller); its PRESCRIBED half {} W -> {} W, round-off \
+             both times - which is the measurement that refuted \"the correction removes the \
+             prescribed dilatation\"",
+            sci(gap_before as Scalar, 6),
+            sci(gap_after as Scalar, 6),
+            sci(corr_before as Scalar, 6),
+            sci(corr_after as Scalar, 6),
+            (corr_before as Scalar / corr_after as Scalar).abs(),
+            sci(presc_before as Scalar, 3),
+            sci(presc_after as Scalar, 3),
+        ));
+        c.require(
+            &format!("{leg} leg: the correction's PRESCRIBED half is round-off BEFORE the fix \
+                      (S26.1's refutation)"),
+            (presc_before as Scalar).abs() < 1e-9,
+        );
+        c.require(
+            &format!("{leg} leg: the correction's own integral shrank by at least 6x (S26.1)"),
+            (corr_before as Scalar / corr_after as Scalar).abs() > 6.0,
+        );
+        c.require(
+            &format!("{leg} leg: the energy-balance gap shrank by at least 6x (S26.1)"),
+            (gap_before as Scalar / gap_after as Scalar).abs() > 6.0,
+        );
+    }
+    c.note(
+        "S26.1 also RETIRES this leg's contErr reading: contErr is max_c |sum_f phi_f|, which \
+         with S25.3's target divergence reports the PRESCRIBED dilatation and not a solver \
+         residual. It fell from 1.101e-7 to 6.7253e-14 at the same relTol, because a thermally \
+         fully developed periodic channel's true div(u) is ZERO and an incomplete Q was \
+         prescribing -0.07 s^-1",
+    );
+
     c.note(&format!(
-        "resolved leg energy balance (S35.2): thermostat power 3.29963 W against q_w A_wall = \
-         {} W - a {:+.2}% gap (+3.26% before S32.5.5's rerun: the momentum fix moved it by only \
-         0.14 points, which is what says the two imbalances were never one defect). S32.4: that \
-         is +-{:.2}% of uncertainty ON Nu, and it is quoted with every band statement below",
+        "resolved leg energy balance (S35.2): thermostat power 3.20000 W against q_w A_wall = \
+         {} W - a {:+.5}% gap, the printed difference being -2.84e-06 W. HISTORY: +2.81% at the \
+         uniform sink, +3.26% at massFlux, +3.11% after S32.5.5's momentum fix, +3.35% under \
+         S37's KaysCrawford - all of it S25.1's `Q` implemented without its conduction term, \
+         and all of it closed by S26.1. S32.4's uncertainty on Nu is now +-{:.5}%",
         sci(500.0 * CHANNEL_WALL_AREA, 4),
         v.energy_gap * 100.0,
         v.energy_gap.abs() * 100.0,
     ));
+    c.check(
+        "resolved leg: thermostat power = q_w A_wall to better than 0.05% (S35.2/S26.1)",
+        v.energy_gap.abs(),
+        5e-4,
+    );
     c.note(&format!(
         "resolved leg force balance (S32.5.2): kinematic wall sink {} m4/s2 against (g.e_hat) \
          V = {} m4/s2 - {:+.3}%. CLOSED by S32.5.5: the -3.787% once recorded here was S3.1's \
@@ -4994,12 +5082,13 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     let miss = (v.nu_measured / v.nu_gn_pipe - 1.0) * 100.0;
     c.note(&format!(
         "OPEN (absolute prediction): resolved leg Nu is {miss:+.1}% of Gnielinski at the \
-         Petukhov smooth-PIPE f (+16.3% at the uniform thermostat sink, +11.8% at massFlux but \
-         with the substituted `bounded Gauss upwind` momentum entry, and {miss:+.1}% now that \
-         the case's own entry is honoured) - outside its own +-10% band by {:.1} points, MORE \
-         than the leg's own {:.2}% energy-balance uncertainty is wide, so the gate does NOT \
-         close and - unlike the previous reading - the miss is now DECISIVE (S32.4's UNDECIDED \
-         clause no longer applies)",
+         Petukhov smooth-PIPE f (+16.3% at the uniform thermostat sink, +11.8% at massFlux with \
+         the substituted `bounded Gauss upwind` momentum entry, +14.1% once the case's own \
+         entry was honoured, and {miss:+.1}% since S26.1 completed S25.1's Q) - outside its own \
+         +-10% band by {:.1} points, against an energy-balance uncertainty of {:.5}% which is \
+         now round-off, so the gate does NOT close and the miss is DECISIVE with nothing left \
+         to hide any of it behind (S32.4's UNDECIDED clause does not apply). Under PrtModel \
+         KaysCrawford the same leg is +4.3% and INSIDE - see the S37 replay below",
         miss - 10.0,
         v.energy_gap.abs() * 100.0,
     ));
@@ -5227,15 +5316,22 @@ struct PrtRun {
     prt_max: Scalar,
 }
 
+/// **Re-measured after SPEC-LIT §26.1**, which closed the energy imbalance
+/// these four runs used to carry (+3.11 %/+3.35 % on the resolved leg). Every
+/// statement §37 asserted below survives the remeasurement; what changed is
+/// that `energy_gap` is now round-off on all four, so the band statements no
+/// longer need an error bar quoted beside them. The SUPERSEDED set, kept here
+/// because the verdicts taken at it were published: `Nu` 64.5257 / 63.5900 /
+/// 72.9988 / 68.0305, `energy_gap` 0.001062 / 0.001100 / 0.031134 / 0.033541.
 const PRT_EXPERIMENT: [PrtRun; 4] = [
-    PrtRun { leg: "wall function", model: "constant", nu_measured: 64.5257, d_t: 24.2318,
-        u_b: 5.39720, energy_gap: 0.001_062, prt_min: 0.85, prt_max: 0.85 },
-    PrtRun { leg: "wall function", model: "KaysCrawford", nu_measured: 63.5900, d_t: 24.5874,
-        u_b: 5.39738, energy_gap: 0.001_100, prt_min: 0.874803, prt_max: 0.891685 },
-    PrtRun { leg: "resolved", model: "constant", nu_measured: 72.9988, d_t: 21.3862,
-        u_b: 4.92909, energy_gap: 0.031_134, prt_min: 0.85, prt_max: 0.85 },
-    PrtRun { leg: "resolved", model: "KaysCrawford", nu_measured: 68.0305, d_t: 22.9439,
-        u_b: 4.92984, energy_gap: 0.033_541, prt_min: 0.870064, prt_max: 1.7 },
+    PrtRun { leg: "wall function", model: "constant", nu_measured: 64.4894, d_t: 24.2454,
+        u_b: 5.39407, energy_gap: 0.000_174_1, prt_min: 0.85, prt_max: 0.85 },
+    PrtRun { leg: "wall function", model: "KaysCrawford", nu_measured: 63.5527, d_t: 24.6019,
+        u_b: 5.39426, energy_gap: 0.000_185_1, prt_min: 0.874934, prt_max: 0.891895 },
+    PrtRun { leg: "resolved", model: "constant", nu_measured: 71.6830, d_t: 21.7767,
+        u_b: 4.93682, energy_gap: 0.000_000_887_4, prt_min: 0.85, prt_max: 0.85 },
+    PrtRun { leg: "resolved", model: "KaysCrawford", nu_measured: 66.8107, d_t: 23.3605,
+        u_b: 4.93761, energy_gap: 0.000_000_940_9, prt_min: 0.871299, prt_max: 1.7 },
 ];
 
 /// SPEC-LIT §37's experiment, replayed - THIS REPLAYS A RECORDED
@@ -5254,8 +5350,9 @@ const PRT_EXPERIMENT: [PrtRun; 4] = [
 ///
 /// It also records the two verdicts the experiment moved, and the one it did
 /// not: leg (b)'s absolute-prediction verdict crosses INTO Gnielinski's band
-/// (+14.1 % -> +6.4 %), and leg (a)'s Reynolds-analogy miss does not move at
-/// all, because that is a friction finding and §37 is a thermal model.
+/// (+11.9 % -> +4.3 %; it was +14.1 % -> +6.4 % before §26.1), and leg (a)'s
+/// Reynolds-analogy miss does not move at all, because that is a friction
+/// finding and §37 is a thermal model.
 fn check_kays_crawford_experiment_replay(c: &mut Checks) {
     use ofgpu::wallfunctions::{gnielinski_f, gnielinski_nu_at_f};
 
@@ -5337,8 +5434,8 @@ fn check_kays_crawford_experiment_replay(c: &mut Checks) {
     // The verdict this moved, at each leg's own pipe `f` - computed live from
     // the replayed Nu, not quoted.
     for (leg, before, after, re) in [
-        ("resolved", rc, rk, 26288.5 as Scalar),
-        ("wall function", wc, wk, 28785.1),
+        ("resolved", rc, rk, 26329.7 as Scalar),
+        ("wall function", wc, wk, 28768.4),
     ] {
         let f_pipe = gnielinski_f(re);
         let nu_gn = gnielinski_nu_at_f(f_pipe, re, 0.71);
@@ -5351,8 +5448,8 @@ fn check_kays_crawford_experiment_replay(c: &mut Checks) {
             sci(nu_gn, 6),
         ));
     }
-    let f_pipe_b = gnielinski_f(26288.5 as Scalar);
-    let nu_gn_b = gnielinski_nu_at_f(f_pipe_b, 26288.5 as Scalar, 0.71);
+    let f_pipe_b = gnielinski_f(26329.7 as Scalar);
+    let nu_gn_b = gnielinski_nu_at_f(f_pipe_b, 26329.7 as Scalar, 0.71);
     c.require(
         "resolved leg is OUTSIDE Gnielinski's +-10% band under PrtModel constant (the shipped \
          default, and the gate's own record)",
@@ -5381,9 +5478,9 @@ fn check_kays_crawford_experiment_replay(c: &mut Checks) {
     // decomposition rather than confirming it.
     c.note(&format!(
         "two-mesh ratio Nu_b/Nu_a falls from {} to {}; Gnielinski at the two legs' own \
-         viscous-form measured f implies 1.119 and 1.127 respectively, so the KaysCrawford \
-         ratio is BELOW its momentum-implied value - S32.5.5's momentum decomposition of the \
-         two-mesh gap does not survive applying the same thermal correction to both legs",
+         viscous-form measured f implies about 1.12 either way, so the KaysCrawford ratio is \
+         BELOW its momentum-implied value - S32.5.5's momentum decomposition of the two-mesh \
+         gap does not survive applying the same thermal correction to both legs",
         sci(rc.nu_measured / wc.nu_measured, 5),
         sci(rk.nu_measured / wk.nu_measured, 5),
     ));
@@ -5584,12 +5681,71 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
         2e-3,
     );
     c.note(
-        "so the resolved leg's +3.11% ENERGY imbalance is a single open anomaly, not half of a \
-         pair. The energy equation's own bounded correction is applied unconditionally and on \
-         the MASS flux (S26, S3.1), so no case setting can switch it off and this experiment \
-         could not test it - S32.5.5 specifies the instrumented run that would",
+        "so the resolved leg's +3.11% ENERGY imbalance was a single open anomaly, not half of a \
+         pair - which is what sent S32.5.5's specified instrumented run after it, and S26.1 is \
+         where it ended",
+    );
+
+    // ---- and the same two runs on the FIXED solver (SPEC-LIT 26.1) ------
+    //
+    // The seven runs above are a record of the solver as it was. This pair is
+    // the solver as it is: the `bounded` token, on each leg, at the corrected
+    // `Q`. The point is not that the token became harmless in general - S3.1's
+    // rule is unchanged and a fire plume still has a real dilatation for the
+    // correction to eat - but that on THIS case the dilatation it was eating
+    // was itself the defect, so the -3.787 % does not reproduce.
+    for r in &BOUNDED_AFTER_S261 {
+        c.note(&format!(
+            "{} leg AFTER S26.1, div(phi,U) = `{}`: Nu = {}, drag balance {:+.3}%, energy \
+             balance {:+.4}%",
+            r.leg,
+            r.div_entry,
+            sci(r.nu_measured, 6),
+            r.drag_gap * 100.0,
+            r.energy_gap * 100.0,
+        ));
+    }
+    let after_resolved = BOUNDED_AFTER_S261
+        .iter()
+        .find(|r| r.leg == "resolved" && r.bounded)
+        .expect("resolved bounded run present");
+    c.require(
+        "resolved leg AFTER S26.1: `bounded` leaves the drag balance inside 0.05% - the -3.787% \
+         above was the fictitious dilatation an incomplete Q was prescribing (S26.1)",
+        after_resolved.drag_gap.abs() < 5e-4,
+    );
+    c.check(
+        "resolved leg AFTER S26.1: `bounded` reproduces the shipped case's own Nu to 0.01%",
+        (after_resolved.nu_measured / 71.6830 - 1.0).abs(),
+        1e-4,
+    );
+    let after_wf = BOUNDED_AFTER_S261
+        .iter()
+        .find(|r| r.leg == "wall function" && r.bounded)
+        .expect("wall-function bounded run present");
+    c.require(
+        "wall-function leg AFTER S26.1: `bounded` still costs the drag balance something, and \
+         a fifth of what it did (0.020% against 0.112%)",
+        after_wf.drag_gap.abs() > 1e-4 && after_wf.drag_gap.abs() < 4e-4,
+    );
+    c.note(
+        "S3.1's rule is unchanged by any of this: subtracting V_P (div u)_P from a MOMENTUM \
+         equation is wrong wherever div(u) is genuinely nonzero, which a fire plume is and a \
+         thermally fully developed channel - once its Q is right - is not",
     );
 }
+
+/// The same `bounded` token, on the same two cases, on the solver SPEC-LIT
+/// §26.1 left behind. 40 000 iterations each, `div(phi,U)` set by hand to
+/// `bounded Gauss upwind` and nothing else changed - so each row differs from
+/// its shipped case in the token AND in the scheme's order, exactly as
+/// [`BOUNDED_EXPERIMENT`]'s corresponding rows did.
+const BOUNDED_AFTER_S261: [BoundedRun; 2] = [
+    BoundedRun { leg: "resolved", div_entry: "bounded Gauss upwind", bounded: true,
+        second_order: false, nu_measured: 71.6830, drag_gap: 0.0, energy_gap: 0.000_000_887_6 },
+    BoundedRun { leg: "wall function", div_entry: "bounded Gauss upwind", bounded: true,
+        second_order: false, nu_measured: 64.3411, drag_gap: -2.0e-4, energy_gap: 0.000_193_7 },
+];
 
 // ==========================================================================
 //  Published benchmarks

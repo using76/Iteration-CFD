@@ -170,19 +170,19 @@ extern "C" __global__ void energyKEffKaysCrawford
 //  derivative are single numbers the whole domain shares - there is nothing
 //  per-cell about them, so there is nothing to interpolate.
 //
-//  *DESIGN* (documented in src/energy.rs): `q` here is exactly what
-//  EnergySources has accumulated - combustion's q'''_c and radiation's
-//  -div(q_r) once those modules register - and does NOT include the
-//  conduction divergence div(k_eff grad T) that SPEC-LIT S25.1's `Q` also
-//  names. See src/energy.rs's module documentation for why that term is
-//  deferred and what it costs to omit: nothing, for a domain with adiabatic
-//  walls, because its volume integral over the whole domain is then exactly
-//  zero by the divergence theorem - which is exactly the case the S25.2
-//  sealed-box gate tests.
+//  `q` is the S18 registry - combustion's q'''_c, radiation's -div(q_r), the
+//  S35 thermostat - and `qCond` is the CONDUCTION half of S25.1's own `Q`,
+//  div(k_eff grad T), which Energy::update_conduction_source forms off the
+//  same face flux fvm_laplacian assembles. The two are separate arguments
+//  rather than one summed field because they are accumulated by different
+//  owners and because a reader of this kernel should be able to see that
+//  BOTH halves of S25.1's `Q` are here: leaving `qCond` out prescribes the
+//  wrong dilatation, and SPEC-LIT S26.1 measures what that cost.
 extern "C" __global__ void energyTargetDivergence
 (
     ofscalar* __restrict__ dst,
     const ofscalar* __restrict__ q,
+    const ofscalar* __restrict__ qCond,
     const ofscalar* __restrict__ rho,
     const ofscalar* __restrict__ t,
     ofscalar cp,
@@ -193,7 +193,7 @@ extern "C" __global__ void energyTargetDivergence
 {
     const oflabel i = OFGPU_TID;
     if (i >= n) return;
-    dst[i] = q[i]/(rho[i]*cp*t[i]) - invGammaP0*dp0dt;
+    dst[i] = (q[i] + qCond[i])/(rho[i]*cp*t[i]) - invGammaP0*dp0dt;
 }
 
 //- SPEC-LIT S32.2's fixed wall heat flux: rewrite the fixedGradient-shaped

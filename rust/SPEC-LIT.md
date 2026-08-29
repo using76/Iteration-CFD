@@ -221,13 +221,37 @@ fails by that amount. Measured: −3.787 % of the streamwise body force on
   it is never the silent fall back for momentum. (`MomentumControls::default()`
   was `bounded Gauss upwind` and reached two channel cases that asked for
   `Gauss linearUpwind grad(U)` — §13.4.1's fourth instance, and the reason the
-  whole of §32's thermal gate had to be rerun.)
-* Where the correction IS physics rather than stabilisation — §26's
-  temperature-form energy equation, whose `-T div(u)` term is a term of the
-  equation — it is applied unconditionally, the `bounded` flag on that
-  equation's own entry is NOT read, and the code says so at the point of
-  application. That is not a violation of §13.4: the flag is not silently
-  substituted, it is documented as not being a setting there.
+  whole of §32's thermal gate had to be rerun.) **The −3.787 % above is a
+  measurement of the solver AS IT WAS, and §26.1 has since made it
+  unreproducible on that case**: the dilatation it was integrating against was
+  itself an artefact of §25.1's `Q` being implemented without its conduction
+  term, and with `Q` complete the same channel's true `∇·u` is zero, the same
+  `bounded` run closes the drag balance to +0.000 %, and the token is worth
+  nothing there. The RULE is unchanged and is not weakened by that: the
+  correction is wrong wherever `∇·u` is genuinely nonzero — a fire plume,
+  where the expansion is the drive — and a channel is simply not such a case.
+  §26.1 records both measurements side by side.
+* **§26's energy equation applies the correction unconditionally, the
+  `bounded` flag on its own entry is NOT read, and the code says so at the
+  point of application** — no violation of §13.4, since the flag is not
+  silently substituted but documented as not being a setting there. The REASON
+  stated here until §26.1 was measured — "the correction IS physics rather
+  than stabilisation, because `-T div(u)` is a term of the equation" — is
+  **WRONG for the form the code assembles, and is replaced.** That equation is
+  written on the MASS flux, and the ideal gas at fixed `p0` makes
+  `cp rho T = γ p0/(γ-1)` a CONSTANT, so the part of `Σ_f (rho phi)_f` that
+  §25.1 prescribes contributes *exactly zero* to the correction's domain
+  integral — measured at `-2.06e-13 W` of a `-0.0996 W` total on §32.5.5's own
+  resolved leg. It is §3.1 stabilisation of a discrete continuity residual,
+  neither more nor less. It is applied unconditionally because dropping it
+  leaves the CONSERVATIVE form `div(rho cp phi, T)`, which for an ideal gas at
+  fixed `p0` is identically `(γ/(γ-1)) p0 div(u)` and carries no information
+  about `T` at all — measured on the same leg at `Nu` **7092** against 71.68,
+  the whole channel isothermal to 0.22 K with 500 W/m² going into both walls.
+  §26.1 has the derivation, the two refuted candidate fixes with their
+  measurements at both values of `Q`, and what the defect behind that leg's
+  `+3.11 %` energy imbalance actually was (§25.1's `Q`, implemented without its
+  conduction term).
 
 ### 3.2 Diffusion — Gauss laplacian
 
@@ -1321,8 +1345,9 @@ are the reason the rule is stated in this form:
   subtracts a momentum sink proportional to it is not a small perturbation.
   Quasi-steadiness confirmed by extending to 2400 steps (35.48 %, 14.99 %).
 * **The P1-vs-fvDOM comparison of §36.7's last row survived it.** Radiated
-  fractions 15.08 / 13.35 % → **14.98 / 13.83 %**, wall times 18.8 / 119 s →
-  **19.08 / 124.6 s**. fvDOM still radiates less than P1 on the same fire, at
+  fractions 15.08 / 13.35 % → **14.98 / 13.83 %** → (after §26.1)
+  **14.97 / 13.79 %**, wall times 18.8 / 119 s → 18.96 / 124.5 s →
+  **19.22 / 121.5 s**. fvDOM still radiates less than P1 on the same fire, at
   ~6.5× the cost. **A comparison between two models run under the SAME
   discarded settings is the one kind of claim this defect does not
   invalidate**, and saying so explicitly is part of the sweep.
@@ -2172,6 +2197,14 @@ Q   = q'''_c + ∇·(k_eff ∇T) − ∇·q_r          (combustion §27, radiati
 
 Check the limit: `Q = 0`, sealed, gives `∇·u = 0` — incompressible recovered.
 
+**All three terms of `Q`, in BOTH places `Q` is used** (this field, and §25.2's
+`p0` ODE). The CONDUCTION term was implemented late — the crate ran for several
+rounds with `Q` = the §18 registry alone, an omission that was documented but
+whose cost was accounted only against `p0`. It also prescribes the wrong
+dilatation, and that was the whole of §32's resolved-leg energy imbalance:
+§26.1 derives it, measures it, and is where a reader should go before touching
+this line.
+
 ### 25.2 p0 evolution
 
 Integrate the constraint over the domain. Boundary volume flux `Φ_b`:
@@ -2219,8 +2252,10 @@ k_eff = k + rho cp nu_t / Pr_t
 
 Assembly with existing machinery: ddt and convection carry the weight
 `rho cp` (the rho-weighted kernels with rho' = rho·cp); the `−T∇·u` term is
-the bounded-convection correction of §3.1 — with a nonzero target divergence
-it is PHYSICS, not stabilisation. Sources arrive through the §18 registry:
+the bounded-convection correction of §3.1, **written on the MASS flux, where
+it is §3.1 STABILISATION of a discrete continuity residual and not the physics
+term this sentence used to claim** — §26.1, which also says why it is
+nevertheless applied unconditionally. Sources arrive through the §18 registry:
 combustion and radiation REGISTER energy sources; the energy module must not
 know their internals (the hook keeps §27/§28 out of this file).
 
@@ -2235,6 +2270,382 @@ Wall heat transfer: fixed-T and fixed-flux walls via the §4 Robin triple
 | sealed heated box | §25.2 p0 ramp, analytic |
 | uniform flow advecting a T front | no new extrema with a limited scheme |
 | Boussinesq consistency | at ΔT→0 matches the §9 buoyant solver |
+
+### 26.1 `Q` must be `Q`: completing §25.1's constraint, and what the bounded correction on the MASS flux actually is
+
+**Sources.** Moukalled, Mangani & Darwish, *The Finite Volume Method in
+Computational Fluid Dynamics*, Springer (2016), §15.4 — the bounded-convection
+correction itself — and §12.4 on the requirement that the flux a scalar
+equation convects with satisfy the same discrete continuity its
+non-conservative form assumes; Patankar, *Numerical Heat Transfer and Fluid
+Flow* (1980), §5.2 (the conservative/non-conservative pair) and §4.2's first
+basic rule (consistency at control-volume faces); Ferziger & Perić,
+*Computational Methods for Fluid Dynamics*, 3rd ed. (2002), §5.3. The
+constraint being completed is §25's own — Rehm & Baum (1978), and the FDS
+Technical Reference Guide (NIST, public domain), acknowledged per §0. No
+GPL-licensed source was consulted.
+
+#### The defect
+
+§25.1 defines the low-Mach divergence constraint's source as
+
+```
+∇·u = Q / (rho cp T) − (1/(γ p0)) dp0/dt
+Q   = q'''_c + ∇·(k_eff ∇T) − ∇·q_r
+```
+
+and this crate supplied the §18 registry alone — `q'''_c − ∇·q_r`. The
+CONDUCTION term `∇·(k_eff ∇T)` was left out. The omission was documented
+rather than hidden (`src/energy.rs`, DESIGN choice 2), and its cost was
+accounted as being to §25.2's `p0` ramp: *"a case with an actual imposed wall
+heat flux would be missing that contribution"*.
+
+**That accounting named one consumer of `Q`, and there are two.** The same `Q`
+builds `(∇·u)_target`, which §25.3's pressure equation solves for. An
+incomplete `Q` therefore prescribes the wrong dilatation in every cell that
+conducts heat — and §32's two channel legs are precisely "a case with an
+actual imposed wall heat flux", where the omitted term is the entire 3.2 W the
+walls put in.
+
+#### Why the symptom was an ENERGY-BALANCE error, and could be nothing else
+
+Take §32's steady, closed domain (cyclic pairs and walls, no through-flow).
+§26 is assembled on the MASS flux, so its convection is
+`Σ_f (±cp rho_f phi_f T_f)` and §3.1's correction is
+`−cp T_P Σ_f (±rho_f phi_f)`. Sum the assembled equation over every cell:
+
+* `ddt` is zero in a steady run;
+* the convection telescopes to **zero** — every internal face and every cyclic
+  pair appears twice with opposite sign, and a wall face carries no flux;
+* the laplacian telescopes to the wall heat `q_wall`;
+* the §18 sources integrate to the registry's power `P_src`.
+
+What is left is an identity:
+
+```
+−cp Σ_c T_c (Σ_f ±rho_f phi_f)_c  =  q_wall + P_src            (26.1-a)
+```
+
+**The bounded correction's domain integral IS the energy-balance gap, and no
+other term of §26 is structurally capable of carrying any part of it.** That is
+why §32.5.5's instrumented measurement found the ratio 0.99997 on both legs: it
+is an identity, not a coincidence, and it localises the defect without yet
+naming it.
+
+Now split the flux divergence at the CELL density:
+
+```
+Σ_f (±rho_f phi_f)_P  =  rho_P Σ_f (±phi_f)_P  +  Σ_f (±(rho_f − rho_P) phi_f)_P
+                         \___ PRESCRIBED ___/    \___ discrete u·∇rho ___/
+```
+
+The first half is exactly what §25.1 prescribes and §25.3's pressure equation
+solves for — `rho_P V_P (∇·u)_target,P`, nonzero at convergence by
+construction. **It contributes exactly ZERO to (26.1-a)**, because the ideal
+gas at fixed `p0` makes
+
+```
+cp rho_P T_P = cp p0 / R_s = γ p0/(γ − 1)          a CONSTANT              (26.1-b)
+```
+
+so that half of the sum is a constant times `Σ_c Σ_f (±phi_f)`, which
+telescopes to zero on a closed domain **whatever `(∇·u)_target` is**.
+MEASURED on §32's resolved leg: `−2.06e-13 W` of a `−0.0996313 W` total. The
+second half — the discrete `u·∇rho`, which no equation in this solver
+constrains — is the whole of it.
+
+**This is where the momentum-side diagnosis of §3.1 stops transferring.** There
+the correction removed the prescribed dilatation in full, and the drag balance
+failed by exactly that amount. Here the prescribed dilatation is annihilated by
+(26.1-b) before it can do any harm, and the damage is done by the OTHER half.
+§32.5.5's own proposed mechanism — "the correction subtracts `T_P (div phi)_P`
+while §25.1 prescribes `div phi`, so it removes real energy by the same
+mechanism the momentum side suffered from" — is therefore **refuted by
+measurement**, and so is the fix that follows from it. Both are recorded below,
+run rather than argued.
+
+#### What the residual half is, and what makes it vanish
+
+At a steady state, continuity is `∇·(rho u) = 0`, and with `rho = p0/(R_s T)`
+
+```
+∇·(rho u) = rho ∇·u + u·∇rho = rho (∇·u)_target − (rho/T) u·∇T
+```
+
+while §26 itself gives `rho cp u·∇T = Q_true`, with `Q_true` the COMPLETE `Q`
+of §25.1. Substituting,
+
+```
+∇·(rho u) = [ Q_code − Q_true ] / (cp T)                                  (26.1-c)
+```
+
+With `Q_code = Q_true` the converged mass flux is divergence-free to truncation
+error, and the correction is what §3.1 says a correction is. With the
+conduction term missing, `∇·(rho u) = −∇·(k_eff ∇T)/(cp T)` — a FIRST-ORDER
+quantity, which (26.1-a) then multiplies by the ABSOLUTE temperature and sums.
+The lever is `T/(T_w − T_b) ≈ 14` on §32's resolved leg: a discrete
+mass-conservation error of 0.13 % of the through-flow becomes a 3.11 %
+energy-balance error.
+
+#### The corrected form
+
+**`Q` is `Q`.** The §18 registry's `q'''_c − ∇·q_r` PLUS `∇·(k_eff ∇T)`, in
+both places §25 uses `Q`: the `(∇·u)_target` field of §25.1, and the `p0` ODE
+of §25.2. The conduction term is formed as
+
+```
+(∇·(k_eff ∇T))_P = (1/V_P) Σ_f (±k_eff,f |Sf|_f snGrad(T)_f)
+```
+
+that is, as the explicit divergence of **exactly the face flux `fvm_laplacian`
+assembles implicitly** (`fv::sn_grad_flux` then `fv::fvc_div_surface`), plus
+the same non-orthogonal correction the case asked that operator for. No new
+discretisation is introduced; the number folded into `Q` is the same conduction
+the energy equation itself transports, face for face. Its domain integral
+therefore telescopes to the boundary heat exactly, and a `fixedFluxTemperature`
+face (§32.2's `fr = 0`, `refGrad = q_w/k_eff,wall`) contributes exactly
+`q_w |Sf|` whatever `k_eff,wall` is.
+
+**The term must not be read off carried-over state, and the restart gate is
+what says so.** `k_eff` and `T`'s Robin triple have to be a self-consistent
+PAIR for a `fixedFluxTemperature` face to contribute exactly `q_w |Sf|` — a
+fresh `k_eff` against a stale `refGrad` would not. The obvious implementation
+reads both as the previous `Energy::correct` left them, which is
+self-consistent and is the same segregated lag every other coupling
+coefficient in this crate runs at. It is also WRONG at a restart: a resumed
+`Energy` has no previous `correct`, so `k_eff` is zero, the conduction term is
+zero, and the first pressure system after the restart is not the one the
+continuous run solved. `ofgpu-fire`'s own restart gate catches it — the first
+post-restart pressure residual missed the continuous run's step-21 residual by
+4.8 %, against a 0.1 % tolerance.
+
+So the coefficient prologue (`rho cp`, `k_eff`, §29.3's thermal wall triple,
+§32.2's fixed-flux rewrite) is factored out and run by
+`update_target_divergence` as well as by `correct`. It is idempotent by
+construction — every step is a pure function of `nu_t`, `k`, `nu` and the gas
+state — so running it twice per outer iteration costs a few small kernels and
+changes nothing else. `store_old_time`, which is NOT idempotent, stays in
+`correct`. The term then has no start-up lag and no restart lag: it does not
+depend on what any previous call left behind.
+
+**The old form simply goes.** It is not reachable by any setting and it is not
+kept behind one. An incomplete `Q` is not a modelling choice anybody would
+want — it is §25.1 half-implemented — and §13.4 has nothing to arbitrate,
+because no case ever named it.
+
+#### MEASURED
+
+Both §32 cases exactly as shipped, 40 000 iterations, at the shipped default
+`PrtModel constant`, nothing else changed:
+
+| | resolved, before | resolved, AFTER | wall function, before | wall function, AFTER |
+|---|---|---|---|---|
+| thermostat power | −3.29963 W | **−3.20000 W** | −3.20340 W | **−3.20056 W** |
+| energy balance gap | −0.0996342 W (**+3.11 %**) | **−2.83972e-06 W (+0.000089 %)** | −0.00339963 W (**+0.106 %**) | **−0.000557118 W (+0.0174 %)** |
+| the correction's own integral | −0.0996313 W | **+8.85245e-08 W** | −0.00339937 W | **−0.000556869 W** |
+| — its PRESCRIBED half, (26.1-b) | −2.06005e-13 W | −2.53878e-14 W | +1.96645e-13 W | +9.78102e-14 W |
+| `contErr` floor | 1.10100e-07 | **6.7253e-14** | 2.89888e-08 | **1.99200e-08** |
+| kinematic drag balance | −0.000 % | −0.000 % | −0.005 % | −0.005 % |
+| wall time, 40 000 iterations | 164 s | 385 s | 170 s | 219 s |
+
+The correction falls by **1126×** on the resolved leg and **6.1×** on the
+wall-function leg, and the continuity residual by **seven orders of magnitude**
+on the resolved leg — which retires §32.5.3's reading of that leg's `contErr`
+floor as a property of the graded mesh and of the loose `relTol` it needs. It
+was the missing term.
+
+The cost is real and is reported. On an RTX 5070 Ti, 40 000 iterations: the
+resolved leg goes 164 s → 385 s, the wall-function leg 170 s → 219 s. Two
+separate charges, and neither is the three added kernels of the conduction
+term itself. The first is the pressure solve, which now carries a near-wall
+target divergence it did not have and works for the seven orders of magnitude
+(measured on its own, before the prologue was shared: 164 s → 302 s). The
+second is that prologue running twice per outer iteration — about 1.2 ms on
+BOTH legs, which on meshes of 48 and 400 cells is kernel-launch overhead and
+nothing else, and is what buys the restart fidelity above. On a mesh where the
+work per kernel is not negligible it is small: `cases/burnerPlume.jsonc`,
+32 768 cells, 1 200 steps, goes **18.96 s → 19.22 s (+1.4 %)**.
+
+#### Two candidate fixes that were RUN, and are refutations
+
+Both are the obvious readings of "fix it the way the momentum side was fixed".
+They are recorded with their measurements rather than dropped, because they are
+the first two things a reader will try.
+
+**1. Drop the correction — i.e. assemble the CONSERVATIVE form
+`div(rho cp phi, T)`.** This closes the balance perfectly *and destroys the
+answer*, and it does so twice, more completely the second time:
+
+| §32's resolved leg, correction DROPPED | at the incomplete `Q` | at the CORRECTED `Q` |
+|---|---|---|
+| energy balance gap | −1.63e-06 W | −1.01e-04 W |
+| `T_w − T_b` | 12.17 K (true: 21.78) | **0.2207 K** |
+| `Nu` | 128.526 (true: 71.68) | **7091.96** |
+| `T` across the channel | [292.6, 305.2] K | **[293.483, 293.675] K** |
+| `\|U\|` residual | 1.2e-11 | 1.8e-07 |
+
+The reason is (26.1-b) again. Since `rho cp T` is a constant at fixed `p0`,
+
+```
+∇·(rho cp u T) ≡ (γ/(γ−1)) p0 (∇·u)                                       (26.1-d)
+```
+
+— **the conservative form of a temperature equation, for an ideal gas at fixed
+`p0`, carries no information about `T` at all.** It is a constant times the
+divergence the pressure equation already imposes. Only the discrete,
+scheme-dependent mismatch `rho_f T_f − rho_P T_P` breaks the degeneracy, and
+with linear interpolation that mismatch is `O((δT)²/T)`. To leading order the
+solver would be left solving `∇·(k_eff ∇T) = 0` against a net wall flux of
+3.2 W, which has no steady solution at all.
+
+**The second column is the cleaner demonstration, and it is the one that
+matters.** At the incomplete `Q` the degeneracy was itself broken — by the
+fictitious dilatation — so the run still transported *some* heat and landed at
+`Nu` 128.5. With `Q` complete the degeneracy is exact, and the converged field
+is isothermal to 0.19 K across a channel whose walls are pushing 500 W/m²
+into it: the equation has stopped seeing the temperature. That is (26.1-d)
+measured rather than argued, and it is why the correction is not optional.
+
+**So the correction STAYS, and it is required rather than optional.** §26's
+original justification for applying it unconditionally — "with a nonzero target
+divergence it is PHYSICS, not stabilisation" — is measured false on the mass
+flux, where its prescribed half integrates to `2e-13 W`. The correct
+justification is (26.1-d): without it there is no convection operator left. The
+`bounded` token on a case's own `div(phi,T)` entry is still NOT the switch, is
+still documented as not being one at the point of application, and §13.4 is
+still satisfied by saying so rather than by silently honouring it.
+
+**2. Subtract only the part that is not prescribed — the literal transfer of
+§3.1's momentum rule** — i.e. correct on
+`Σ_f (±rho_f phi_f)_P − rho_P V_P (∇·u)_target,P`. Measured twice, and it fails
+both times, in the two ways the algebra says it must:
+
+| §32's resolved leg, prescribed half SUBTRACTED | at the incomplete `Q` | at the CORRECTED `Q` |
+|---|---|---|
+| `T` across the channel | runs to **605 K** | **exactly 293.15 K, uniform** |
+| thermostat power | −2420.16 W | **2.6e-10 W** |
+| energy balance gap | −2416.96 W | **+3.2 W — the whole wall input** |
+| `Nu` | 1212 | 8039 |
+| `contErr` | 1.3e-04 | 5.4e-07 |
+
+The reason is (26.1-b) once more. The subtracted term's own domain integral is
+`−∫Q dV`, so removing it does not remove zero: it puts `∫Q dV` into (26.1-a)
+with the wrong sign, and the fixed point moves to where the ENERGY EQUATION
+absorbs the wall heat entirely and the thermostat does nothing. At the
+incomplete `Q` that `∫Q dV` was −3.29963 W and the run simply ran away; at the
+corrected `Q` it is `q_wall + P_src`, and the solution the system settles on is
+`P_src = 0` with `T ≡ T_target` and the 3.2 W of wall heat vanishing into the
+correction. **The prescribed half of the mass-flux divergence must be left
+exactly where it is**, and the task that proposed removing it — §32.5.5's own
+hypothesis — is refuted at both values of `Q`.
+
+#### What else collapsed: §32's channel dilatation was FICTITIOUS
+
+`ofgpu-fire` reports `contErr` = `max_c |Σ_f (±phi_f)|`, m³/s. In an
+incompressible solver that is a convergence residual. In THIS one it is not:
+§25.3's pressure equation drives `Σ_f (±phi_f)_P` to `V_P (∇·u)_target,P`, so
+`contErr` measures the PRESCRIBED dilatation, and it is only a residual to the
+extent the target is zero. §32's resolved leg read `1.101e-07`; that mesh's
+largest cell is `1.591127e-06 m³` and the leg's volume-mean `(∇·u)_target` was
+`−0.0726 s⁻¹` (from the driver's own `−∫Q dV` line, 3.29963 W), whose product
+is `1.155e-07` — the reading to within 5 %. It was never a tolerance floor.
+
+**And the correct dilatation for these two cases is exactly zero.** A
+thermally fully developed, streamwise-periodic channel at steady state has
+`∂T/∂x = 0` and a streamwise `u`, so `Dρ/Dt = u·∇ρ → 0` and `∇·u = −(1/rho)
+Dρ/Dt → 0` everywhere — not merely in integral. §26 says the same thing from
+the other side: `rho cp u·∇T = Q` with `u·∇T → 0` forces `Q → 0` POINTWISE.
+With `Q` complete that is what the solver realises: `contErr` falls from
+`1.101e-07` to **`6.7253e-14`**, six and a half orders of magnitude, and the
+uniform `−0.07 s⁻¹` expansion the old `Q` imposed on every cell of a channel
+that is not expanding is revealed as an artefact of the missing conduction
+term.
+
+Three things follow, all measured, and the first two RETIRE published readings.
+
+**1. `contErr` as this leg's "pressure-solve tolerance floor" is RETIRED.**
+§32.5.3 and `cases/channelPeriodicFluxLowRe.jsonc`'s own header both read the
+`9.2e-08`/`1.1e-07` floor as a property of the graded mesh, supported by the
+observation that tightening `p`'s `relTol` from 0.01 to 1e-4 diverges the run
+at iteration 3317. The divergence is real and the case still ships the looser
+tolerance; the FLOOR was not a tolerance, it was the target divergence being
+reported, and the run now sits six orders below it at the same `relTol`.
+
+**2. §3.1's `bounded`-on-momentum defect no longer reproduces ON THIS CASE,
+and §3.1's rule is unchanged.** Rerun with `div(phi,U)` set back by hand to
+`bounded Gauss upwind`, 40 000 iterations, nothing else changed:
+
+| leg, `div(phi,U)` = `bounded Gauss upwind` | drag balance at the OLD `Q` | at the corrected `Q` |
+|---|---|---|
+| resolved | **−3.787 %** | **+0.000 %** |
+| wall function | **−0.112 %** | **−0.020 %** |
+
+On the resolved leg the bounded run reproduces the shipped run in every
+printed digit — `Nu` 71.683, `U_b` 4.93682 m/s, ΔT 21.7767 K — and the two
+report the same streamwise drag, `0.000560223 N`, bit for bit. That is what a
+correction proportional to a dilatation of `6.7e-14` looks like.
+
+**The rule stays exactly as §3.1 states it.** Subtracting `V_P (∇·u)_P` from a
+momentum equation is still wrong wherever `∇·u` is genuinely nonzero — a fire
+plume, where the thermal expansion IS the drive, is such a case and §32's
+channel, once its `Q` is right, is not. What IS retired is the SIZE: §32.5.5's
+"What is NOT established: the SIZE" paragraph, whose hand estimate of the
+correction's domain integral missed by a factor 2.5 on one leg and 28 on the
+other, was estimating against a dilatation field that should not have been
+there. The −3.787 % is a real, reproducible measurement OF THE OLD `Q`, and it
+is kept as that.
+
+**3. The pinned pressure equation's compatibility fix-up now has nothing to
+absorb.** A closed domain forces `Σ_c Σ_f (±phi_f) = 0` by telescoping, so
+§25.3's source is solvable only if `Σ_c V_c (∇·u)_target,c = 0`; when it is
+not, `smpSubScalar` removes the mean of the source and the incompatibility is
+spread as a per-CELL-uniform offset — which on a mesh graded 200 : 1 is 40
+times the mean dilatation in the smallest, wall-adjacent cells. That
+incompatibility is `∫Q dV`, and the driver prints it (as `−cp Σ_c rho_c T_c
+V_c (∇·u)_target,c`, which equals `−∫Q dV` exactly by (26.1-b)): it falls from
+**3.29963 W** to **2.83972e-06 W**, a factor of 1.16e6. The fix-up is
+unchanged and is now doing nothing on these cases. On a closed domain with a
+complete `Q`, `∫Q dV = q_wall + P_src` — so the compatibility condition IS the
+energy balance, and that is the deepest reason the balance now closes.
+
+#### Relationship to §3.1 and §25.1
+
+* **§3.1's FIRST rule is unchanged, and is now satisfied on the energy side
+  too.** The correction subtracts a CONVERGENCE RESIDUAL and nothing else — not
+  because a prescribed part was taken out of it (measurement says there was
+  nothing to take out: `2e-13 W`), but because completing §25.1's `Q` is what
+  makes `Σ_f (±rho_f phi_f)` a residual in the first place. Fixing what
+  "residual" MEANS was the fix. Fixing the correction was not.
+* **§3.1's SECOND rule was wrong, and is replaced.** It said the energy
+  equation's `−T ∇·u` is physics rather than stabilisation *because* the target
+  divergence is nonzero. On the VOLUMETRIC flux that would be true; the code
+  writes it on the MASS flux, where `cp rho T` is constant and the prescribed
+  dilatation cancels identically. The correction is §3.1 stabilisation, and the
+  reason it is applied unconditionally is (26.1-d), not physics.
+* **§25.1 is unchanged** — it always specified the complete `Q`. What changed is
+  that it is now implemented. §25.2's `p0` ODE takes the same complete `Q`, so
+  the two consumers can no longer disagree; the decisive sealed-box gate is
+  untouched, because `∫ ∇·(k_eff ∇T) dV = 0` exactly on an adiabatic boundary.
+* **§32.5.3's "one defect with two symptoms" is settled both ways.** They were
+  genuinely two defects — §3.1's `bounded` token on the momentum equation, and
+  §25.1's incomplete `Q` — but they share one root: in a solver where `∇·u` is a
+  PRESCRIBED constraint rather than zero, every operator that treats a flux
+  divergence as an error has to be asked which divergence, and of which flux.
+
+#### What must hold
+
+| Check | Expected |
+|---|---|
+| `∫ ∇·(k_eff ∇T) dV` on a sealed box with adiabatic walls | zero to round-off — the divergence theorem, and the reason §25.2's decisive `p0` gate never saw the omission |
+| the same on a domain with a `fixedFluxTemperature` wall | exactly `Σ q_w |Sf|`, whatever `k_eff,wall` is, because §32.2's triple makes that product exact |
+| the conduction field against a laplacian-only matrix's own `A·T − b` | equal to round-off — both are formed off the same face flux |
+| §32's resolved leg, as shipped | the energy balance closes: measured `−2.84e-06 W` against 3.2 W of wall heat, where it was `−0.0996 W` |
+| §32's wall-function leg, as shipped | closes further: `−5.57e-04 W`, where it was `−3.40e-03 W` |
+| the correction's PRESCRIBED half (26.1-b), any closed domain | zero to round-off, BEFORE and AFTER the fix — it is a constant times a telescoping sum |
+| the correction dropped | the balance closes and `Nu` is wrong by ~80 % — (26.1-d). NOT a fix |
+| the prescribed half subtracted from the correction | the case diverges. NOT a fix |
+| a case with no heat anywhere | `(∇·u)_target` is identically zero and nothing above moves any number — §32.5.3's isothermal controls |
+| a case whose `Q` is a volumetric release only, no wall flux, sealed | `dp0/dt` unchanged from before this section, to round-off |
 
 ---
 
@@ -2921,6 +3332,12 @@ numerically, not asserted.
 
 #### 32.5.3 What the two channel legs realise, MEASURED
 
+> **Superseded again by §26.1**, which closes the energy imbalance this
+> section reports (+2.81 %/+3.26 %) and retires the `contErr` column
+> altogether — that column is the PRESCRIBED dilatation being reported, not a
+> convergence floor, and with §25.1's `Q` complete it falls six orders of
+> magnitude on the resolved leg.
+>
 > **Superseded in part by §32.5.5.** Every run recorded here was produced by
 > a driver that ignored the case's own `numerics` block — the §13.4 violation
 > this section itself reports below, unfixed at the time — so its momentum
@@ -3152,6 +3569,22 @@ this gate in its own right, on both meshes, and it is a MOMENTUM finding
 | Gnielinski at a supplied `f` | monotone increasing in `f`, so the two verdicts of §32.4 are genuinely two |
 
 #### 32.5.5 The §13.4 rerun: what the cases actually asked for
+
+> **Superseded in its NUMBERS by §26.1, and load-bearing in everything else.**
+> Every run in this section was made with §25.1's `Q` implemented without its
+> conduction term, which §26.1 shows was prescribing a dilatation of about
+> −0.07 s⁻¹ on a channel whose true `∇·u` is zero. Three consequences, all
+> measured: the +3.11 %/+0.106 % energy imbalances this section ends by
+> quoting as uncertainties on `Nu` are now +0.000089 % and +0.0174 %; the
+> `contErr` column is not a solver floor but that fictitious dilatation being
+> reported, and it falls to 6.7e-14; and the seven-run `bounded` isolation
+> below does not reproduce on the fixed solver — the resolved leg's −3.787 %
+> becomes +0.000 %. What this section ESTABLISHED stands: that the momentum
+> imbalance was the `bounded` token and not the scheme's order, that
+> `contErr` and the imbalances were correlated and not causally linked, and
+> that the momentum and energy symptoms were two defects rather than one.
+> §26.1 identifies the second of those two defects, which this section could
+> only localise. The gate's current numbers are in §26.1's own table.
 
 Every measurement in §32.5.3 — and every number §32's gate had produced
 before it — was taken by a driver that read none of the case's own `numerics`
@@ -3531,7 +3964,7 @@ steady solve that is singular.
 | Check | Expected |
 |---|---|
 | two different initial temperatures | the SAME converged `T_mean`, `dT` and `Nu` — the experiment that exposed the problem, run again as the regression |
-| steady state | the thermostat's integrated power equals the wall heat input to round-off. MEASURED: it does on §32's wall-function leg (`2.8e-7 W` at the `uniform` default, `0.105 %` at `massFlux`) and does NOT on the resolved leg (`+2.81 %`/`+3.26 %`), where it tracks that leg's own momentum imbalance and its continuity floor — §32.5.3's table, and §32.4's rule that the gap is then quoted as an uncertainty on `Nu` |
+| steady state | the thermostat's integrated power equals the wall heat input to round-off. **It now does, on BOTH legs** — measured `-2.84e-06 W` (resolved) and `-5.57e-04 W` (wall function) of 3.2 W, i.e. `+0.000089 %` and `+0.0174 %`, once §26.1 completed §25.1's `Q`. HISTORY, kept because the verdicts downstream of it were published: it did NOT close on the resolved leg (`+2.81 %` at the `uniform` sink, `+3.26 %` at `massFlux`, `+3.11 %` after §32.5.5's momentum fix, `+3.35 %` under §37's `KaysCrawford`), and §32.4's rule quoted that gap as an uncertainty on `Nu`. It was never the thermostat: §26.1 shows the whole of it was the CONDUCTION term missing from the low-Mach divergence constraint |
 | `T_target` unreachable (walls colder than target) | the controller saturates at a sensible value, and says so |
 | **§32's resolved leg** | converges, and its `Nu` compared against Dittus-Boelter and Gnielinski on the same `D_h = 2H` the wall-function leg used |
 
@@ -4209,7 +4642,7 @@ iteration, which is already possible without new plumbing.
 | energy budget | domain `integral(emission - absorption) dV` equals net boundary radiative flux, to round-off — §28's own check, unchanged by which model produced `emission`/`absorption` |
 | `cases/burnerPlume.jsonc` | run with `radiationModel P1` and `radiationModel fvDOM`; report the radiated fraction from both |
 
-**MEASURED**, `cases/burnerPlume.jsonc` and its `_fvDOM` twin, 32 768 cells, 1200 steps at `deltaT = 0.005 s`, RTX 5070 Ti, at the §13.4.1 numerics: radiated fraction **14.98 %** (P1) against **13.83 %** (fvDOM) of the domain heat release; wall time **19.08 s** against **124.6 s**, a factor 6.5 on 24 ordinates — §36.6's `N_ordinates`-times-cost statement confirmed by measurement. *Previously recorded as 15.08 / 13.35 % and 18.8 / 119 s, from runs made by a driver that read none of the case's `numerics` block (§13.4.3). Both models were rerun on the fixed driver; because both legs of the comparison were affected identically, the P1-vs-fvDOM conclusion is unchanged in substance — fvDOM radiates less, by 1.15 points instead of 1.73.*
+**MEASURED**, `cases/burnerPlume.jsonc` and its `_fvDOM` twin, 32 768 cells, 1200 steps at `deltaT = 0.005 s`, RTX 5070 Ti, at the §13.4.1 numerics: radiated fraction **14.97 %** (P1) against **13.79 %** (fvDOM) of the domain heat release; wall time **19.22 s** against **121.5 s**, a factor 6.3 on 24 ordinates *(rerun after §26.1, which moved the fractions by less than 0.05 points: previously 14.98 / 13.83 % at 18.96 / 124.5 s, a factor 6.6)* — §36.6's `N_ordinates`-times-cost statement confirmed by measurement. *Previously recorded as 15.08 / 13.35 % and 18.8 / 119 s, from runs made by a driver that read none of the case's `numerics` block (§13.4.3). Both models were rerun on the fixed driver; because both legs of the comparison were affected identically, the P1-vs-fvDOM conclusion is unchanged in substance — fvDOM radiates less, by 1.15 points instead of 1.73.*
 
 ---
 
@@ -4465,3 +4898,16 @@ driver prints which reading is in force.
 
 **MEASURED** — see `docs/07-fire-solver.md` §1.1's last subsection for the
 four runs and the verdict.
+
+> **The four runs were repeated after §26.1** and every conclusion §37 draws
+> survives: `Nu` falls on both legs, `(T_w − T_b)` widens on both, the shift is
+> 30× larger on the resolved mesh (−1.79 % against −0.06 %), `U_b` moves less
+> than 0.02 %, and the resolved mesh still reaches the derived `Pe_t → 0` limit
+> of exactly 1.7000 in its wall-adjacent cells. What improved is what may be
+> CLAIMED: the absolute-prediction verdict on the resolved leg moves from
+> +6.4 % to **+4.3 %**, and the ±3.35 % energy-balance uncertainty §32.4
+> required to be quoted beside it becomes ±0.000094 %, so the pass no longer
+> needs its own error bar. The Reynolds-analogy verdict on that leg — which
+> §37 could only report "as closing at the measured value only", its ±3.35 %
+> band straddling the edge — is **+7.7 % with no band at all** and closes
+> outright.

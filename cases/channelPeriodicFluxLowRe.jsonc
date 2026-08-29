@@ -11,13 +11,14 @@
 // here since neither q_w nor the geometry changed.
 //
 // ============================================================================
-// >>> READ THIS FIRST: every number in this STATUS block and in the first
-// >>> three UPDATE blocks below is SUPERSEDED. The S13.4.1/S32.5.5 UPDATE
-// >>> block is the current measurement of this file AS SHIPPED; the S37 block
-// >>> after it is a separate experiment run on scratchpad COPIES with one
-// >>> token added (`PrtModel`, which defaults to `constant` and is absent
-// >>> here), so it changes nothing in this file. The blocks in between are
-// >>> kept, in order, as the record of how this gate got there.
+// >>> READ THIS FIRST: every number in this STATUS block and in every UPDATE
+// >>> block except the LAST is SUPERSEDED. The S26.1 block at the end is the
+// >>> current measurement of this file AS SHIPPED. The S37 block before it is
+// >>> a separate experiment run on scratchpad COPIES with one token added
+// >>> (`PrtModel`, which defaults to `constant` and is absent here), so it
+// >>> changes nothing in this file; S26.1 reruns it too. The blocks in
+// >>> between are kept, in order, as the record of how this gate got there,
+// >>> including two candidate fixes that were RUN and refuted.
 // STATUS (SPEC-LIT S34 rebuild, RUN and REPORTED - docs/07-fire-solver.md
 // S1.1 has the full table): the previous ("mesh b") version of this file was
 // a DUCT - real `wallSide.*` walls at only 4 spanwise cells - and collapsed
@@ -310,6 +311,81 @@
 //
 // See docs/07-fire-solver.md S1.1's last subsection for the four runs, the
 // two-mesh consequence, and what this does NOT establish.
+// ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S26.1 - THE ENERGY IMBALANCE IS CLOSED; comments only, THIS
+// FILE IS UNCHANGED): every block above ends by naming the same leftover -
+// this leg's steady energy bookkeeping is short by +3.11% (+3.35% under
+// KaysCrawford), quoted as an uncertainty on Nu under S32.4. S32.5.5 specified
+// the experiment that would localise it and it was run: the energy equation's
+// own bounded-convection correction carries the WHOLE shortfall, to five
+// significant figures, on both legs.
+//
+// THE MECHANISM THAT LOCALISATION SUGGESTED IS REFUTED, AND BOTH REFUTATIONS
+// WERE RUN. The correction was supposed to be removing the PRESCRIBED
+// dilatation of S25.1. It is not: cp*rho*T = gamma*p0/(gamma-1) is a CONSTANT
+// at fixed p0, so the prescribed half of the mass-flux divergence contributes
+// exactly -2.06e-13 W of the -0.0996313 W total - it telescopes away. Each
+// candidate was then run at BOTH values of Q. Dropping the correction (the
+// conservative form) closes the balance and gives Nu = 128.5 at the old Q and
+// Nu = 7092 at the corrected one - there the whole channel is isothermal to
+// 0.22 K with 500 W/m2 going into both walls, because cp*rho*T is a constant
+// at fixed p0 and the conservative form is then identically
+// (gamma/(gamma-1))*p0*div(u). Subtracting the prescribed part diverges the
+// case to T = 605 K at the old Q, and at the corrected one pins T at exactly
+// 293.15 K with the thermostat at 2.6e-10 W and the full 3.2 W of wall heat
+// disappearing into the correction. Neither is a fix.
+//
+// WHAT IT WAS: S25.1 defines Q = q'''_c + div(k_eff grad T) - div(q_r), and
+// this crate implemented Q as the S18 registry alone. The CONDUCTION term was
+// missing, and the same Q builds (div u)_target. On this case the omitted term
+// is the entire 3.2 W the walls put in, so the pressure equation was being
+// handed a fictitious dilatation of about -0.07 s^-1 on a thermally fully
+// developed periodic channel whose true div(u) is ZERO.
+//
+// THIS FILE AS SHIPPED, on the fixed solver (40 000 iterations):
+//   T_b = 292.773 K | T_w = 314.549 K | dT = 21.7767 K | U_b = 4.93682 m/s
+//   Re = 26,330 | Nu = 71.6830 (was 72.9988: -1.80%)
+//   worst y+ 0.00179449 | 192/400 cells at y+ < 20
+//   thermostat power -3.20000 W against 3.2 W of wall heat, a -2.84e-06 W gap
+//     (+3.11% -> +0.000089%)
+//   f MEASURED = 0.023832 | kinematic force balance -0.000% (unchanged)
+//   contErr 1.101e-7 -> 6.7253e-14
+//   40 000 iterations now cost 385 s against 164 s. Two charges, neither of
+//   them the three added kernels: the pressure solve earning those seven
+//   orders of magnitude (164 -> 302 s), and the coefficient prologue running
+//   twice per outer iteration so the target divergence never reads stale
+//   state (302 -> 385 s). The second is ~1.2 ms/iteration of kernel-launch
+//   overhead on a 400-cell mesh and +1.4% on cases/burnerPlume.jsonc's 32768
+//
+// The state is a FIXED POINT, not a slow drift: at 80 000 iterations every
+// reported quantity above is identical in every printed digit. The |U|
+// residual now plateaus at ~1e-7 rather than 4e-12, because the conduction
+// term is read at one outer iteration of lag; the STATE does not move.
+//
+// VERDICTS: absolute prediction +14.1% -> +11.9% (Gnielinski at the pipe
+// f = 0.0244066 -> 64.0361) - still OUTSIDE +-10%, and now decisively so,
+// because this leg no longer has an energy-balance uncertainty to hide any of
+// it behind. Dittus-Boelter 68.9586, +4.0%. Reynolds analogy +14.9%.
+// At PrtModel KaysCrawford: Nu 66.8107, absolute prediction +6.4% -> +4.3%,
+// Dittus-Boelter -3.1%, Reynolds analogy +9.3% -> +7.7% - and that last one
+// now closes outright, where S37 could only report it "as closing at the
+// measured value only" because its +-3.35% band straddled the edge.
+//
+// TWO THINGS ABOVE ARE RETIRED BY THIS. (1) This header's own "traced to this
+// mesh's own pressure-solve tolerance floor: contErr plateaus at 9.2e-8" was
+// wrong: contErr is max_c |sum_f phi_f|, which in a low-Mach solver reports
+// the PRESCRIBED dilatation, not a solver residual. The divergence at
+// relTol 1e-4 is real and this file still ships relTol 0.01; the FLOOR was
+// the fictitious dilatation being printed. (2) The four-run div(phi,U)
+// isolation above does not reproduce: with Q complete, `bounded Gauss upwind`
+// on the momentum equation gives Nu 71.683, U_b 4.93682 and a force balance
+// of +0.000% - the same numbers as shipped, to every printed digit. SPEC-LIT
+// S3.1's RULE is unchanged; a channel whose true div(u) is zero is simply not
+// a case where it bites, and a fire plume still is.
+//
+// See docs/07-fire-solver.md S1.1's last subsection and SPEC-LIT S26.1.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

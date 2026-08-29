@@ -253,6 +253,34 @@
 // (this mesh's rho u_tau^2 form sits 13.6% below the viscous form on the same
 // faces) and S37 neither touches nor moves it.
 // ============================================================================
+//
+// ============================================================================
+// UPDATE (SPEC-LIT S26.1 - THE ENERGY IMBALANCE IS CLOSED; comments only, THIS
+// FILE IS UNCHANGED): S25.1 defines Q = q'''_c + div(k_eff grad T) - div(q_r)
+// and this crate implemented Q as the S18 registry alone, leaving out the
+// CONDUCTION term. The same Q builds (div u)_target, so the pressure equation
+// was prescribing the wrong dilatation wherever the fluid conducts heat. On
+// the resolved twin that was the whole of a +3.11% energy imbalance; on THIS
+// leg it was +0.106%, which is why this leg was always the control.
+//
+// THIS FILE AS SHIPPED, on the fixed solver (40 000 iterations):
+//   T_b = 293.251 K | T_w = 317.497 K | dT = 24.2454 K | U_b = 5.39407 m/s
+//   Re = 28,768 | Nu = 64.4894 (was 64.5257: -0.06%)
+//   y+ 56.88/57.77/58.57 | contErr 2.90e-8 -> 1.99e-8
+//   thermostat power -3.20056 W against 3.2 W of wall heat (+0.106% ->
+//     +0.0174%)
+//   f MEASURED = 0.017140 (rho u_tau^2); the viscous form on the same faces
+//     is tau_w 0.0866027 Pa, i.e. f = 0.019782
+//   kinematic force balance -0.005% (unchanged)
+//   40 000 iterations in 168 s, against 170 s before
+//
+// VERDICTS UNCHANGED: absolute prediction -5.9% (Gnielinski at the pipe
+// f = 0.0238816 -> 68.5672), Dittus-Boelter -12.9%, Reynolds analogy +34.3%
+// (still OPEN, still a FRICTION finding and not a thermal one). At PrtModel
+// KaysCrawford: Nu 63.5527, -7.3% / -14.1% / +34.0%.
+//
+// See docs/07-fire-solver.md S1.1's last subsection and SPEC-LIT S26.1.
+// ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
   "name": "channelPeriodicFluxWF",

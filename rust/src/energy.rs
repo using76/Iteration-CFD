@@ -75,21 +75,30 @@
 //! Boussinesq-style buoyant solver (`ofgpu-buoyant`), and is not touched by
 //! this simplification.
 //!
-//! **2. `Q` for both the S25.2 `p0` ODE and the S25.1 target-divergence field
-//! is exactly what [`EnergySources`] has accumulated** - combustion's
-//! `q'''_c` and radiation's `-div(q_r)`, once those modules exist and
-//! register. `S25.1`'s own `Q` also names `div(k_eff grad T)`, the
-//! CONDUCTION term, which this module does not fold in: doing so needs an
-//! explicit divergence-of-diffusive-flux operator this crate does not
-//! otherwise have. What is lost by leaving it out: nothing, for the decisive
-//! S25.2 gate, because a sealed box with adiabatic walls has
-//! `integral(div(k_eff grad T)) dV = 0` exactly (divergence theorem - the
-//! conduction term only ever redistributes heat, and a closed, insulated
-//! boundary redistributes none of it out), which is exactly the box the gate
-//! tests. A case with an actual imposed wall heat flux would be missing that
-//! contribution to `p0`'s ramp - flagged here rather than silently wrong, per
-//! `SPEC-LIT` S13.4's own rule applied to a gap in this module rather than in
-//! a case setting.
+//! **2. `Q` is S25.1's `Q`, complete - RESOLVED, and it was not free.**
+//! Until SPEC-LIT S26.1 this module took `Q` to be exactly what
+//! [`EnergySources`] had accumulated (combustion's `q'''_c`, radiation's
+//! `-div(q_r)`, the S35 thermostat) and left out the CONDUCTION term
+//! `div(k_eff grad T)` that S25.1's own `Q` also names, on the argument that
+//! it costs nothing for the decisive S25.2 sealed-box gate (a sealed box with
+//! adiabatic walls has `integral(div(k_eff grad T)) dV = 0` exactly, by the
+//! divergence theorem) and that folding it in needs an explicit
+//! divergence-of-diffusive-flux operator. The note flagged the cost as being
+//! to `p0`'s ramp on "a case with an actual imposed wall heat flux".
+//!
+//! It was not only `p0`. The SAME `Q` drives S25.1's `(div u)_target`, so an
+//! incomplete `Q` prescribes the wrong dilatation, the converged mass flux
+//! `Sum_f (rho phi)_f` is then NOT the zero that steady continuity requires,
+//! and S3.1's bounded correction on the energy equation - which multiplies
+//! that residual by the ABSOLUTE temperature - turns it into a first-order
+//! energy-balance error. Measured on S32's resolved channel leg: the balance
+//! was short by 0.0996 W of 3.2 W (+3.11 %) and closes to 2.8e-6 W
+//! (+0.00009 %) when the term is folded in; the continuity floor falls from
+//! 1.10e-7 to 6.7e-14. [`Self::update_conduction_source`] is the operator,
+//! built out of [`fv::sn_grad_flux`] (the flux [`fv::fvm_laplacian`] already
+//! assembles) and [`fv::fvc_div_surface`], so no new discretisation was
+//! invented for it. SPEC-LIT S26.1 has the derivation and the four measured
+//! candidate fixes, two of which are refutations.
 //!
 //! **3. The T-equation wall function - SPEC-LIT S29.3, the Jayatilleke
 //! correction - is now implemented.** `crate::field::BcKind::ThermalWallFunction`
@@ -513,6 +522,7 @@ impl EnergyKernels {
         gpu: &Gpu,
         dst: &mut DevBuf<Scalar>,
         q: &DevBuf<Scalar>,
+        q_cond: &DevBuf<Scalar>,
         rho: &DevBuf<Scalar>,
         t: &DevBuf<Scalar>,
         cp: Scalar,
@@ -529,6 +539,7 @@ impl EnergyKernels {
                 .launch_builder(&self.target_divergence)
                 .arg(&mut *dst)
                 .arg(q)
+                .arg(q_cond)
                 .arg(rho)
                 .arg(t)
                 .arg(&cp)
@@ -1009,6 +1020,105 @@ fn reconcile_ddt(scheme: DdtScheme) -> Result<DdtScheme> {
 /// Also exposes [`Energy::target_divergence`], S25.1's `(div u)_target`,
 /// which is the one number [`crate::simple::Simple`]'s pressure equation
 /// needs from this module.
+/// Which of [`Energy::assemble`]'s terms an assembly stops after.
+///
+/// [`AssemblyStage::All`] is the whole equation and is the ONLY variant the
+/// solver itself ever uses; the shorter prefixes exist so
+/// [`Energy::assembly_budget`] can difference them and get one term's domain
+/// integral at a time (SPEC-LIT S32.5.5's specified experiment). The order of
+/// the variants is the order [`Energy::assemble_prefix`] adds the terms in,
+/// and the derived `Ord` is what the prefix test compares against - moving a
+/// variant moves the assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AssemblyStage {
+    /// `ddt(rho cp, T)` alone.
+    Ddt,
+    /// ... plus `div(phi_m, T)`.
+    Convection,
+    /// ... plus SPEC-LIT S26's `-T div(u)`, `fvm_div_bounded_correction`.
+    BoundedCorrection,
+    /// ... plus the convection scheme's own deferred correction, if it has one.
+    SchemeCorrection,
+    /// ... plus `laplacian(k_eff, T)` and its non-orthogonal correction.
+    Laplacian,
+    /// ... plus the S18 source registry, `fvm_su`/`fvm_sp`.
+    Sources,
+    /// ... plus `dp0/dt`. The complete equation - what [`Energy::assemble`]
+    /// builds.
+    All,
+}
+
+/// SPEC-LIT S26's energy equation, term by term, as domain integrals in
+/// WATTS - what [`Energy::assembly_budget`] measures. See that function for
+/// the sign convention (an entry `+x` is `x` watts the assembled left-hand
+/// side takes out of the domain) and for how each entry is formed.
+///
+/// DIAGNOSTIC. Nothing in the solver reads this.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EnergyBudget {
+    /// `rho cp ddt(T)` - identically zero in a steady run.
+    pub ddt_w: f64,
+    /// `div(phi_m, T)`, the implicit convection, with its boundary faces.
+    /// Zero to round-off on a domain closed by walls and cyclic pairs, where
+    /// the face fluxes telescope.
+    pub convection_w: f64,
+    /// **The term S32.5.5 asked for**: `-Sum_c cp T_c (div phi_m)_c V_c`,
+    /// S3.1's bounded correction written on the MASS flux. On a steady closed
+    /// domain this IS the energy-balance gap (S26.1), because every other
+    /// entry above telescopes.
+    pub bounded_correction_w: f64,
+    /// The deferred correction of a scheme above first order - explicit, so
+    /// it lands in the source; also telescopes.
+    pub scheme_correction_w: f64,
+    /// `-laplacian(k_eff, T)`, i.e. MINUS the conductive heat the walls put
+    /// in, which is why a heated domain shows this negative.
+    pub laplacian_w: f64,
+    /// Minus the S18 registry's integrated power - a thermostat REMOVING
+    /// heat therefore shows here as positive.
+    pub sources_w: f64,
+    /// Minus `dp0/dt` integrated over the domain; zero in an open domain.
+    pub dp0dt_w: f64,
+    /// The sum of every entry above: the domain row-sum residual of the
+    /// equation the solver actually solved. Round-off, or the split above is
+    /// not a split of anything.
+    pub residual_w: f64,
+    /// [`Self::bounded_correction_w`] formed a second, independent way -
+    /// straight off a matrix holding only that correction - as a check that
+    /// differencing two prefixes measured what it claims to.
+    pub bounded_correction_direct_w: f64,
+    /// `Sum_c (div phi_m)_c V_c / cp`, the domain net MASS outflow in kg/s.
+    /// The unweighted version of the same defect: zero iff the discrete mass
+    /// flux is conservative.
+    pub net_mass_flux_kg_per_s: f64,
+    /// `Sum_c |(div phi_m)_c| V_c / cp`, kg/s. What
+    /// [`Self::net_mass_flux_kg_per_s`] cancels: a flux can be globally
+    /// conservative and still leave every cell individually out of balance,
+    /// and it is the LOCAL imbalance that
+    /// [`Self::bounded_correction_w`] weights by `T`.
+    pub mass_flux_divergence_l1_kg_per_s: f64,
+    /// `max_c |(div phi_m)_c| V_c / cp`, kg/s - the worst single cell.
+    pub mass_flux_divergence_max_kg_per_s: f64,
+
+    /// The PRESCRIBED half of [`Self::bounded_correction_w`]:
+    /// `-cp Sum_c rho_c T_c (Sum_f +-phi_f)_c`, the part of the mass-flux
+    /// divergence that is `rho_P` times the VOLUMETRIC divergence the S25.3
+    /// pressure equation solves for. `cp rho T = gamma p0/(gamma-1)` is a
+    /// CONSTANT at fixed `p0` (ideal gas), so this is that constant times a
+    /// telescoping sum and is ZERO to round-off on a closed domain, whatever
+    /// `(div u)_target` is.
+    pub bounded_correction_prescribed_w: f64,
+    /// The RESIDUAL half: `-cp Sum_c T_c (Sum_f +-(rho_f - rho_c) phi_f)_c`,
+    /// the discrete `-T u.grad(rho)`. [`Self::bounded_correction_w`] minus
+    /// [`Self::bounded_correction_prescribed_w`].
+    pub bounded_correction_residual_w: f64,
+    /// `-cp Sum_c rho_c T_c V_c (div u)_target,c`, i.e. the same prescribed
+    /// half evaluated on the target field itself rather than on the flux the
+    /// pressure solve realised. Its difference from
+    /// [`Self::bounded_correction_prescribed_w`] is what the pinned
+    /// (singular) pressure equation's compatibility fix-up absorbed.
+    pub target_divergence_w: f64,
+}
+
 pub struct Energy<'m> {
     m: &'m GpuMesh,
     ctrl: EnergyControls,
@@ -1043,6 +1153,13 @@ pub struct Energy<'m> {
 
     /// `cp * rho_f * phi` - the mass flux this equation convects with.
     phi_conv: GpuSurfaceScalarField,
+
+    /// SPEC-LIT S26.1: the conduction face flux `k_eff |Sf| snGrad(T)`,
+    /// exactly the flux [`fv::fvm_laplacian`] assembles implicitly.
+    cond_flux: GpuSurfaceScalarField,
+    /// SPEC-LIT S26.1: `div(k_eff grad T)` per cell, W/m3 - the term S25.1's
+    /// `Q` names and which [`Self::update_target_divergence`] folds in.
+    cond_div: DevBuf<Scalar>,
 
     w: DevBuf<Scalar>,
     bw: DevBuf<Scalar>,
@@ -1112,6 +1229,8 @@ impl<'m> Energy<'m> {
             k_eff_mag_sf: GpuSurfaceScalarField::zeros(gpu, m, "kEffMagSf")?,
 
             phi_conv: GpuSurfaceScalarField::zeros(gpu, m, "phiEnergy")?,
+            cond_flux: GpuSurfaceScalarField::zeros(gpu, m, "qCondEnergy")?,
+            cond_div: gpu.zeros(one(n))?,
 
             w: gpu.zeros(one(nif))?,
             bw: gpu.zeros(one(nbf))?,
@@ -1464,13 +1583,25 @@ impl<'m> Energy<'m> {
     /// 1. `ddt(rho cp, T)` - rho*cp-weighted, whichever of Euler/backward
     ///    `ddtSchemes` named ([`Self::add_ddt`]).
     /// 2. `div(phi_m, T)` - Gauss convection on the mass flux.
-    /// 3. the bounded correction, UNCONDITIONALLY (S26: "with a nonzero
-    ///    target divergence it is PHYSICS, not stabilisation").
+    /// 3. the bounded correction, UNCONDITIONALLY - but as S3.1
+    ///    STABILISATION of the discrete continuity residual, not as S26's
+    ///    `-T div(u)` physics, which on the mass flux it is not (S26.1).
     /// 4. the scheme's own deferred correction, if it has one.
     /// 5. `laplacian(k_eff, T)`, plus its non-orthogonal correction if the
     ///    case asked for one.
     /// 6. the S18 registry (`fvm_su`/`fvm_sp`) and `dp0/dt`, both explicit.
     fn assemble(&mut self, gpu: &Gpu, gas: &GasState) -> Result<()> {
+        self.assemble_prefix(gpu, gas, AssemblyStage::All)
+    }
+
+    /// [`Self::assemble`], stopped after `stage`.
+    ///
+    /// The solver only ever calls this with [`AssemblyStage::All`], which is
+    /// every line below in the order [`Self::assemble`]'s own doc comment
+    /// lists them - byte for byte the assembly that function used to inline.
+    /// The shorter prefixes exist for [`Self::assembly_budget`] and are
+    /// reached from nowhere else.
+    fn assemble_prefix(&mut self, gpu: &Gpu, gas: &GasState, stage: AssemblyStage) -> Result<()> {
         self.a.zero(gpu)?;
         let m = self.m;
         let scheme: DivScheme = self.ctrl.div_scheme.scheme.into();
@@ -1491,12 +1622,39 @@ impl<'m> Energy<'m> {
         )?;
 
         self.add_ddt(gpu)?;
+        if stage < AssemblyStage::Convection {
+            return Ok(());
+        }
 
         fv::fvm_div_gauss(gpu, &self.fvk, &mut self.a, m, &self.phi_conv, &self.w, &self.bw, &self.t, 1.0)?;
+        if stage < AssemblyStage::BoundedCorrection {
+            return Ok(());
+        }
+
+        // SPEC-LIT S26.1. On the MASS flux this is NOT S26's `-T div(u)`
+        // physics: `cp rho T = gamma p0/(gamma-1)` is a constant at fixed
+        // `p0`, so the part of `Sum_f (rho phi)_f` that IS S25.1's prescribed
+        // dilatation contributes exactly zero to this term's domain integral
+        // (measured: -2.06e-13 W of a -0.0996 W total). What is left is the
+        // discrete continuity residual, which is what S3.1's correction is
+        // for - and it is a residual only because S25.1's `Q` is now
+        // complete (`update_target_divergence`). Applied unconditionally,
+        // and NOT because the case wrote `bounded`: without it the equation
+        // is the conservative `div(rho cp phi, T)`, which for an ideal gas
+        // at fixed `p0` is identically `(gamma/(gamma-1)) p0 div(u)` and
+        // carries no information about `T` at all - S26.1's degeneracy,
+        // measured on S32's resolved leg at `Nu` 7092 against 71.68, the
+        // channel isothermal to 0.22 K with 500 W/m2 into both walls.
         fv::fvm_div_bounded_correction(gpu, &self.fvk, &mut self.a, m, &self.phi_conv, 1.0)?;
+        if stage < AssemblyStage::SchemeCorrection {
+            return Ok(());
+        }
 
         if scheme.correction().is_some() {
             fv::fvm_div_correction(gpu, &self.fvk, &mut self.a, m, &self.phi_conv, &self.grad_t, scheme, 1.0)?;
+        }
+        if stage < AssemblyStage::Laplacian {
+            return Ok(());
         }
 
         fv::fvm_laplacian(gpu, &self.fvk, &mut self.a, m, &self.k_eff_mag_sf.f, &self.k_eff_mag_sf.bf, &self.t, -1.0)?;
@@ -1516,15 +1674,180 @@ impl<'m> Energy<'m> {
                 -1.0,
             )?;
         }
+        if stage < AssemblyStage::Sources {
+            return Ok(());
+        }
 
         fv::fvm_su(gpu, &self.fvk, &mut self.a, m, self.sources.q(), 1.0)?;
         // sp is stored as the true, non-positive S_p (SPEC-LIT S3.4/S18); a
         // sink strengthens the diagonal, which is `sign = -1` against
         // `fvm_sp`'s own "sign*sp >= 0 stabilises" convention.
         fv::fvm_sp(gpu, &self.fvk, &mut self.a, m, self.sources.sp(), -1.0)?;
+        if stage < AssemblyStage::All {
+            return Ok(());
+        }
 
         field_ops::set_field(gpu, &self.fldk, &mut self.dp0dt_su, gas.dp0dt(), m.n_cells)?;
         fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &self.dp0dt_su, 1.0)
+    }
+
+    // ----------------------------------------------------------------------
+    //  S32.5.5's specified experiment - DIAGNOSTIC, changes no behaviour
+    // ----------------------------------------------------------------------
+
+    /// The domain integral of every term this equation assembles, in watts.
+    ///
+    /// SPEC-LIT S32.5.5 names one experiment and does not run it:
+    /// "instrument `fvm_div_bounded_correction`'s domain integral
+    /// `-Sum_c cp T_c (div phi_m)_c V_c` on the energy equation and compare
+    /// it against the 0.0996 W by which the resolved leg's balance is
+    /// short". This is that instrument. It reports the WHOLE budget rather
+    /// than the one term, so a reader can see what the other terms carry
+    /// instead of taking the one on trust.
+    ///
+    /// Method: assemble each PREFIX of [`Self::assemble_prefix`], fold the
+    /// boundary pair exactly as the solver folds it, and form the domain sum
+    /// `Sum_c (A T - b)_c` - [`crate::ldu_ops::amul`] supplying the coupled
+    /// (cyclic) coefficient that the fold deliberately leaves in the matrix.
+    /// The DIFFERENCE between consecutive prefixes is one term's own domain
+    /// integral, its boundary contribution included, in the sign convention
+    /// of the assembled left-hand side: an entry `+x` is `x` watts the
+    /// left-hand side takes OUT of the domain. The entries sum to
+    /// [`EnergyBudget::residual_w`], the row-sum residual of the equation
+    /// the solver actually solved, which must be round-off beside the terms
+    /// or none of the rest means anything.
+    ///
+    /// Under-relaxation is deliberately NOT applied: `relax` adds
+    /// `(diag' - diag) T` to `A T` and to `b` with the SAME `T` this
+    /// function reads, so it cancels out of every entry exactly, and leaving
+    /// it out keeps these numbers independent of `t_relax`.
+    ///
+    /// Reads the state the last [`Self::correct`] left - `phi_conv`, `T`,
+    /// `k_eff`, the source registry - and restores [`Self::matrix`]
+    /// untouched. Intended to be called once, after a run has converged: it
+    /// re-assembles seven times and downloads two cell fields per prefix, so
+    /// it has no business inside an iteration loop.
+    pub fn assembly_budget(&mut self, gpu: &Gpu, gas: &GasState) -> Result<EnergyBudget> {
+        let m = self.m;
+        if m.n_cells == 0 {
+            return Ok(EnergyBudget::default());
+        }
+        let mut scratch = GpuLduMatrix::new(gpu, m)?;
+        std::mem::swap(&mut self.a, &mut scratch);
+        let out = self.assembly_budget_impl(gpu, gas);
+        std::mem::swap(&mut self.a, &mut scratch);
+        out
+    }
+
+    fn assembly_budget_impl(&mut self, gpu: &Gpu, gas: &GasState) -> Result<EnergyBudget> {
+        let m = self.m;
+        let n = m.n_cells;
+        let mut apsi: DevBuf<Scalar> = gpu.zeros(n)?;
+
+        const STAGES: [AssemblyStage; 7] = [
+            AssemblyStage::Ddt,
+            AssemblyStage::Convection,
+            AssemblyStage::BoundedCorrection,
+            AssemblyStage::SchemeCorrection,
+            AssemblyStage::Laplacian,
+            AssemblyStage::Sources,
+            AssemblyStage::All,
+        ];
+        let mut cum = [0.0f64; 7];
+        for (i, stage) in STAGES.iter().enumerate() {
+            self.assemble_prefix(gpu, gas, *stage)?;
+            ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
+            ldu_ops::amul(gpu, &self.lduk, &mut apsi, &self.t.f, &self.a, m)?;
+            let at = gpu.download(&apsi)?;
+            let b = gpu.download(&self.a.source)?;
+            cum[i] = at
+                .iter()
+                .zip(b.iter())
+                .map(|(&x, &y)| f64::from(x) - f64::from(y))
+                .sum();
+        }
+
+        // The same term a second, independent way: the correction's OWN
+        // matrix, with nothing else in it. `fvm_div_bounded_correction`
+        // writes `diag[c] -= Sum_f (+-phi_conv_f)` and touches no other
+        // coefficient, so `Sum_c diag_c T_c` IS
+        // `-Sum_c cp T_c (div phi_m)_c V_c` - the expression S32.5.5 asks
+        // for, formed without differencing two prefixes. If the two
+        // disagree, one of them is wrong and neither should be reported.
+        self.a.zero(gpu)?;
+        fv::fvm_div_bounded_correction(gpu, &self.fvk, &mut self.a, m, &self.phi_conv, 1.0)?;
+        let diag = gpu.download(&self.a.diag)?;
+        let t = gpu.download(&self.t.f)?;
+        let direct: f64 = diag
+            .iter()
+            .zip(t.iter())
+            .map(|(&d, &tv)| f64::from(d) * f64::from(tv))
+            .sum();
+        // `phi_conv = cp rho_f phi`, so the same diagonal divided by `cp` is
+        // the net MASS outflow of each cell, kg/s: zero for a discretely
+        // conservative mass flux, and NOT what S25.3's pressure equation
+        // constrains - that one prescribes the VOLUMETRIC divergence.
+        // The SPLIT S26.1 turns on: the same pass, but on the VOLUMETRIC
+        // flux, weighted by the CELL density. `cp rho_c T_c` is constant at
+        // fixed `p0`, so this half is that constant times a telescoping sum
+        // and is ZERO on a closed domain however large `(div u)_target` is -
+        // which is the measurement that refuted "the correction removes the
+        // PRESCRIBED dilatation".
+        //
+        // `phi_vol = phi_conv/(cp rho_f)` recovers the volumetric flux the
+        // pressure equation constrained, rather than keeping a second copy
+        // of it live through every outer iteration for a diagnostic that
+        // runs once.
+        let mut phi_vol = GpuSurfaceScalarField::zeros(gpu, m, "phiVolBudget")?;
+        field_ops::copy_field(gpu, &self.fldk, &mut phi_vol.f, &self.phi_conv.f, m.n_internal_faces)?;
+        field_ops::divide_field(gpu, &self.fldk, &mut phi_vol.f, &self.rho_face.f, m.n_internal_faces)?;
+        field_ops::scale_field(gpu, &self.fldk, &mut phi_vol.f, 1.0 / self.props.cp, m.n_internal_faces)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut phi_vol.bf, &self.phi_conv.bf, m.n_boundary_faces)?;
+        field_ops::divide_field(gpu, &self.fldk, &mut phi_vol.bf, &self.rho_face.bf, m.n_boundary_faces)?;
+        field_ops::scale_field(gpu, &self.fldk, &mut phi_vol.bf, 1.0 / self.props.cp, m.n_boundary_faces)?;
+
+        self.a.zero(gpu)?;
+        fv::fvm_div_bounded_correction(gpu, &self.fvk, &mut self.a, m, &phi_vol, 1.0)?;
+        let vdiag = gpu.download(&self.a.diag)?;
+        let rho = gpu.download(&gas.rho().f)?;
+        let vol = gpu.download(&m.v)?;
+        let tdiv = gpu.download(&self.target_div)?;
+        let cpf = f64::from(self.props.cp);
+        let prescribed: f64 = (0..n)
+            .map(|i| cpf * f64::from(rho[i]) * f64::from(t[i]) * f64::from(vdiag[i]))
+            .sum();
+        let target_w: f64 = -(0..n)
+            .map(|i| {
+                cpf * f64::from(rho[i]) * f64::from(t[i]) * f64::from(vol[i]) * f64::from(tdiv[i])
+            })
+            .sum::<f64>();
+
+        let inv_cp = 1.0 / f64::from(self.props.cp);
+        let net_mass: f64 = -diag.iter().map(|&d| f64::from(d)).sum::<f64>() * inv_cp;
+        let l1_mass: f64 = diag.iter().map(|&d| f64::from(d).abs()).sum::<f64>() * inv_cp;
+        let max_mass: f64 = diag
+            .iter()
+            .map(|&d| f64::from(d).abs())
+            .fold(0.0f64, f64::max)
+            * inv_cp;
+
+        Ok(EnergyBudget {
+            ddt_w: cum[0],
+            convection_w: cum[1] - cum[0],
+            bounded_correction_w: cum[2] - cum[1],
+            scheme_correction_w: cum[3] - cum[2],
+            laplacian_w: cum[4] - cum[3],
+            sources_w: cum[5] - cum[4],
+            dp0dt_w: cum[6] - cum[5],
+            residual_w: cum[6],
+            bounded_correction_direct_w: direct,
+            net_mass_flux_kg_per_s: net_mass,
+            mass_flux_divergence_l1_kg_per_s: l1_mass,
+            mass_flux_divergence_max_kg_per_s: max_mass,
+            bounded_correction_prescribed_w: prescribed,
+            bounded_correction_residual_w: direct - prescribed,
+            target_divergence_w: target_w,
+        })
     }
 
     /// SPEC-LIT S25.1: `(div u)_target = Q/(rho cp T) - dp0/dt/(gamma p0)`,
@@ -1533,16 +1856,33 @@ impl<'m> Energy<'m> {
     /// `T` here is the CURRENT (pre-solve) field, matching the same lag
     /// `nu_t` and every other coupling coefficient in this crate already
     /// runs at.
-    pub fn update_target_divergence(&mut self, gpu: &Gpu, gas: &GasState) -> Result<()> {
+    pub fn update_target_divergence(
+        &mut self,
+        gpu: &Gpu,
+        gas: &GasState,
+        nut: &GpuScalarField,
+        k: &DevBuf<Scalar>,
+        nu: Scalar,
+    ) -> Result<()> {
         let n = self.m.n_cells;
         if n == 0 {
             return Ok(());
         }
+        // S26.1's conduction term is read off `k_eff` and `T`'s Robin triple,
+        // so both have to BE there and have to be a self-consistent pair.
+        // Building them here rather than reading what the last `correct` left
+        // is what makes this function independent of call order - and what
+        // makes a RESTART reproduce the continuous run's own first pressure
+        // system, which reading stale state does not (`fire.rs`'s restart
+        // gate). The prologue is idempotent and `correct` runs it again.
+        self.prepare_coefficients(gpu, nut, k, nu, gas)?;
+        self.update_conduction_source(gpu)?;
         let inv_gamma_p0 = 1.0 / (self.props.gamma * gas.p0());
         self.ek.target_divergence(
             gpu,
             &mut self.target_div,
             self.sources.q(),
+            &self.cond_div,
             &gas.rho().f,
             &self.t.f,
             self.props.cp,
@@ -1550,6 +1890,103 @@ impl<'m> Energy<'m> {
             gas.dp0dt(),
             n,
         )
+    }
+
+    /// The domain integral of [`Self::update_conduction_source`]'s field, W -
+    /// the CONDUCTION half of S25.1/S25.2's `Q`, which telescopes to the net
+    /// heat crossing the boundary. `ofgpu-fire` adds it to
+    /// [`EnergySources::total_q`] before S25.2's `p0` ODE, so the ONE `Q`
+    /// S25 defines drives both the divergence constraint and the `p0` ramp.
+    /// Zero to round-off on a sealed box with adiabatic walls - which is why
+    /// S25.2's decisive gate never saw the omission.
+    ///
+    /// Valid after [`Self::update_target_divergence`], which is what fills
+    /// the field.
+    pub fn total_conduction_q(&mut self, gpu: &Gpu) -> Result<Scalar> {
+        let n = self.m.n_cells;
+        if n == 0 {
+            return Ok(0.0);
+        }
+        solver::device_dot(
+            gpu,
+            &self.solk,
+            &mut self.ws.num,
+            &self.cond_div,
+            &self.m.v,
+            &mut self.ws.partials,
+            n,
+        )?;
+        Ok(gpu.download(&self.ws.num)?[0])
+    }
+
+    /// The coefficient prologue both [`Self::update_target_divergence`] and
+    /// [`Self::correct`] need: `rho cp`, `k_eff` (and with it `rho_f`), the
+    /// S29.3 thermal wall function's triple, and S32.2's fixed-flux rewrite.
+    ///
+    /// Idempotent by construction - every step is a pure function of `nut`,
+    /// `k`, `nu` and `gas` - so running it twice in one outer iteration costs
+    /// a few small kernels and changes nothing. It deliberately does NOT
+    /// include `store_old_time`, which is not idempotent and stays in
+    /// [`Self::correct`] where it belongs.
+    fn prepare_coefficients(
+        &mut self,
+        gpu: &Gpu,
+        nut: &GpuScalarField,
+        k: &DevBuf<Scalar>,
+        nu: Scalar,
+        gas: &GasState,
+    ) -> Result<()> {
+        self.refresh_rho_cp(gpu, gas)?;
+        self.update_k_eff(gpu, nut, gas, nu)?;
+        self.update_thermal_wall(gpu, k, &gas.rho().f, nu)?;
+        self.update_fixed_flux(gpu)
+    }
+
+    /// SPEC-LIT S26.1: `div(k_eff grad T)` per cell, W/m3 - the CONDUCTION
+    /// half of S25.1's `Q`, which this module omitted until S26.1 measured
+    /// what the omission cost.
+    ///
+    /// Formed as `fvc_div(k_eff |Sf| snGrad(T))`, i.e. off exactly the face
+    /// flux [`fv::fvm_laplacian`] assembles implicitly, plus the same
+    /// non-orthogonal correction the case asked that operator for - so the
+    /// number folded into `Q` is the same conduction the energy equation
+    /// itself transports, face for face, and its domain integral telescopes
+    /// to the boundary heat exactly.
+    ///
+    /// Reads `k_eff_mag_sf` and `T`'s Robin triple, which
+    /// [`Self::prepare_coefficients`] has just rebuilt - a self-consistent
+    /// PAIR, which is what makes a `fixedFluxTemperature` face contribute
+    /// exactly `q_w |Sf|` whatever `k_eff,wall` is (S32.2's triple is
+    /// `fr = 0`, `ref_grad = q_w/k_eff,wall`; a fresh `k_eff` against a stale
+    /// `ref_grad` would NOT). There is therefore no start-up or restart lag on
+    /// this term: it does not depend on what a previous [`Self::correct`]
+    /// left behind, which is what `fire.rs`'s restart gate checks.
+    fn update_conduction_source(&mut self, gpu: &Gpu) -> Result<()> {
+        let m = self.m;
+        fv::sn_grad_flux(
+            gpu,
+            &self.fvk,
+            &mut self.cond_flux,
+            &self.t,
+            &self.k_eff_mag_sf.f,
+            &self.k_eff_mag_sf.bf,
+            m,
+        )?;
+        if self.ctrl.sn_grad.applies() {
+            fv::fvc_grad_scalar_scheme(gpu, &self.fvk, &mut self.grad_t, &self.t, m, self.ctrl.grad_scheme)?;
+            fv::sn_grad_flux_correction(
+                gpu,
+                &self.fvk,
+                &mut self.cond_flux,
+                &self.t,
+                &self.k_eff_mag_sf.f,
+                &self.k_eff_mag_sf.bf,
+                &self.grad_t,
+                self.ctrl.sn_grad,
+                m,
+            )?;
+        }
+        fv::fvc_div_surface(gpu, &self.fvk, &mut self.cond_div, &self.cond_flux, m)
     }
 
     /// One implicit step, or one outer iteration if the run is steady.
@@ -1586,10 +2023,7 @@ impl<'m> Energy<'m> {
 
         field_ops::store_old_time(gpu, &self.fldk, &mut self.t)?;
 
-        self.refresh_rho_cp(gpu, gas)?;
-        self.update_k_eff(gpu, nut, gas, nu)?;
-        self.update_thermal_wall(gpu, k, &gas.rho().f, nu)?;
-        self.update_fixed_flux(gpu)?;
+        self.prepare_coefficients(gpu, nut, k, nu, gas)?;
         self.update_conv_flux(gpu, phi)?;
 
         let alpha = self.ctrl.t_relax;
@@ -2088,6 +2522,170 @@ mod tests {
         for i in 0..m.n_internal_faces {
             let want = props_c.k + rho_f[i] * nut_f[i] * props_c.cp / props_c.pr_t;
             assert_eq!(k_eff_c[i], want, "face {i}: the constant branch moved");
+        }
+        Ok(())
+    }
+
+    /// SPEC-LIT S26.1: the CONDUCTION half of S25.1's `Q` telescopes to the
+    /// heat crossing the boundary, exactly, and for ANY temperature field -
+    /// which is what makes it safe to fold into `(div u)_target`.
+    ///
+    /// Two identities, both independent of convergence:
+    ///
+    /// * every boundary face adiabatic (`zeroGradient`) - the domain integral
+    ///   is ZERO. That is the divergence theorem, and it is why S25.2's
+    ///   decisive sealed-box gate never saw the omission S26.1 closes.
+    /// * ONE `fixedFluxTemperature` face and the rest adiabatic - the domain
+    ///   integral is EXACTLY `q_w |Sf|`, whatever `k_eff,wall` and whatever
+    ///   `T` are, because S32.2's triple (`fr = 0`,
+    ///   `refGrad = q_w/k_eff,wall`) makes that product exact.
+    ///
+    /// A deliberately LUMPY `T` and a cell-varying `nu_t` are seeded in both,
+    /// so a term that happened to vanish on a smooth field with a uniform
+    /// `k_eff` cannot pass by accident. The second case also checks the field
+    /// CELL BY CELL against the laplacian matrix's own operator.
+    #[test]
+    fn the_conduction_source_telescopes_to_the_boundary_heat() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 12;
+        let h: Scalar = 0.02;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+        let props = GasProperties { k: 0.5, cp: 1000.0, ..GasProperties::default() };
+        let nbf = hm.n_boundary_faces;
+
+        let lumpy: Vec<Scalar> = (0..N)
+            .map(|i| 300.0 + 40.0 * ((i * 7 % 5) as Scalar) - 3.0 * (i as Scalar))
+            .collect();
+        let nut_cell: Vec<Scalar> = (0..N).map(|i| 1e-3 * (1.0 + (i % 3) as Scalar)).collect();
+
+        // ---- 1. every face adiabatic: the integral is zero ---------------
+        {
+            let (mut e, mut nut, _phi) = laminar_slab_energy(&g, &hm, &m, props, true, 1.0)?;
+            g.write(&mut nut.f, &nut_cell)?;
+            g.write(&mut nut.bf, &vec![1e-3 as Scalar; nbf])?;
+            {
+                let f = e.field_mut();
+                let mut kind = vec![BcKind::Empty as Label; nbf];
+                for (p, pi) in hm.patches.iter().enumerate() {
+                    if p < 2 {
+                        for k in 0..pi.size {
+                            kind[pi.start + k] = BcKind::ZeroGradient as Label;
+                        }
+                    }
+                }
+                g.write(&mut f.bc_kind, &kind)?;
+                g.write(&mut f.fr, &vec![0.0 as Scalar; nbf])?;
+                g.write(&mut f.ref_value, &vec![0.0 as Scalar; nbf])?;
+                g.write(&mut f.ref_grad, &vec![0.0 as Scalar; nbf])?;
+                g.write(&mut f.f, &lumpy)?;
+            }
+            e.initialise(&g)?;
+            let mut gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+            gas.update_density(&g, e.field())?;
+            let k_cell = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+            e.update_target_divergence(&g, &gas, &nut, &k_cell, 1.5e-5)?;
+            let q_cond = f64::from(e.total_conduction_q(&g)?);
+            // Judged against the largest single face flux in the same field,
+            // so this is a cancellation test and not a statement about small
+            // numbers.
+            let flux = g.download(&e.cond_flux.f)?;
+            let scale = flux.iter().map(|v| f64::from(*v).abs()).fold(1.0f64, f64::max);
+            assert!(
+                q_cond.abs() < 1e-10 * scale,
+                "adiabatic box: integral(div(k_eff grad T)) dV = {q_cond}, \
+                 face-flux scale {scale}"
+            );
+        }
+
+        // ---- 2. one fixed-flux face, the rest adiabatic ------------------
+        let q_w: Scalar = 250.0;
+        {
+            let (mut e, mut nut, _phi) = laminar_slab_energy(&g, &hm, &m, props, true, 1.0)?;
+            g.write(&mut nut.f, &nut_cell)?;
+            g.write(&mut nut.bf, &vec![1e-3 as Scalar; nbf])?;
+            {
+                let f = e.field_mut();
+                let mut kind = vec![BcKind::Empty as Label; nbf];
+                let mut rv = vec![0.0 as Scalar; nbf];
+                for (p, pi) in hm.patches.iter().enumerate() {
+                    match p {
+                        0 => {
+                            for k in 0..pi.size {
+                                kind[pi.start + k] = BcKind::FixedFluxTemperature as Label;
+                                rv[pi.start + k] = q_w;
+                            }
+                        }
+                        1 => {
+                            for k in 0..pi.size {
+                                kind[pi.start + k] = BcKind::ZeroGradient as Label;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                g.write(&mut f.bc_kind, &kind)?;
+                g.write(&mut f.fr, &vec![0.0 as Scalar; nbf])?;
+                g.write(&mut f.ref_value, &rv)?;
+                g.write(&mut f.ref_grad, &vec![0.0 as Scalar; nbf])?;
+                g.write(&mut f.f, &lumpy)?;
+            }
+            let mut faces = vec![false; nbf];
+            for k in 0..hm.patches[0].size {
+                faces[hm.patches[0].start + k] = true;
+            }
+            e.set_fixed_flux_walls(&g, &faces)?;
+            e.initialise(&g)?;
+            let mut gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+            gas.update_density(&g, e.field())?;
+            let k_cell = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+            e.update_target_divergence(&g, &gas, &nut, &k_cell, 1.5e-5)?;
+
+            let area: f64 = (0..hm.patches[0].size)
+                .map(|k| f64::from(hm.b_mag_sf[hm.patches[0].start + k]))
+                .sum();
+            let want = f64::from(q_w) * area;
+            let got = f64::from(e.total_conduction_q(&g)?);
+            assert!(
+                (got - want).abs() < 1e-9 * want.abs(),
+                "fixed-flux wall: integral(div(k_eff grad T)) dV = {got}, want q_w*A = {want}"
+            );
+
+            // ---- 3. and per CELL it is the laplacian's own operator ------
+            //
+            // `Energy::assemble` adds `fvm_laplacian(..., -1.0)`, so a matrix
+            // holding only that term reports
+            // `(A T - b)_c = -V_c div(k_eff grad T)_c`. Same face flux, two
+            // assemblies; if they disagree, the explicit form is not the
+            // implicit one and S26.1's `Q` is not the conduction the equation
+            // itself transports.
+            let mut a = GpuLduMatrix::new(&g, &m)?;
+            fv::fvm_laplacian(
+                &g,
+                &e.fvk,
+                &mut a,
+                &m,
+                &e.k_eff_mag_sf.f,
+                &e.k_eff_mag_sf.bf,
+                e.field(),
+                -1.0,
+            )?;
+            ldu_ops::add_boundary_contributions(&g, &e.lduk, &mut a, &m)?;
+            let mut at: DevBuf<Scalar> = g.zeros(hm.n_cells)?;
+            ldu_ops::amul(&g, &e.lduk, &mut at, &e.field().f, &a, &m)?;
+            let at_h = g.download(&at)?;
+            let b_h = g.download(&a.source)?;
+            let cond = g.download(&e.cond_div)?;
+            for c in 0..hm.n_cells {
+                let from_matrix = -(f64::from(at_h[c]) - f64::from(b_h[c])) / f64::from(hm.v[c]);
+                let from_flux = f64::from(cond[c]);
+                assert!(
+                    (from_matrix - from_flux).abs() <= 1e-9 * (1.0 + from_matrix.abs()),
+                    "cell {c}: explicit div(k_eff grad T) {from_flux} against the \
+                     laplacian matrix's own {from_matrix}"
+                );
+            }
         }
         Ok(())
     }
