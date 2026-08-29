@@ -197,6 +197,54 @@
           ],
           "format": "double"
         },
+        "TAIT": {
+          "description": "SPEC-LIT §43.4's `TAIT`, the auto-ignition temperature, K. `0` (the\ndefault) means \"no auto-ignition rule\", which is FDS's own default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "TOI": {
+          "description": "SPEC-LIT §43.4's `TOI`, the critical flame temperature, K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "Tfb": {
+          "description": "SPEC-LIT §43.4's `Tfb`, the free-burn temperature, K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "Tinf": {
+          "description": "SPEC-LIT §43.4's `Tinf`, ambient, K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "XOI": {
+          "description": "SPEC-LIT §43.4's `XOI`, the limiting oxygen index as a VOLUME\nfraction. Refused unless `extinctionModel` is `\"oxygen\"`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "dh1": {
+          "description": "SPEC-LIT §42.4's `dh1`, J per kg of fuel released in step 1. Optional;\ndefaults to the Huggett split `dhc*s1/s`, which the banner prints.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "dhc": {
           "description": "Heat of combustion, J/kg. Propane's `46.45e6` by default.",
           "type": [
@@ -205,8 +253,38 @@
           ],
           "format": "double"
         },
+        "extinctionModel": {
+          "description": "SPEC-LIT §43.4's `extinctionModel`: `\"none\"` (the default) or\n`\"oxygen\"` (the FDS EXTINCTION 1 predicate).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "s": {
           "description": "Stoichiometric O2/fuel MASS ratio `s`. Propane's `3.63` by default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "s1": {
+          "description": "SPEC-LIT §42.4's `s1`, the O2/fuel MASS ratio of step 1. Required\nunder `serialTwoStep`, refused under `singleStep`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "scheme": {
+          "description": "SPEC-LIT §42.4's `scheme`: `\"singleStep\"` (§27, the default) or\n`\"serialTwoStep\"` (§42, McGrattan/McDermott/Floyd). Anything else is a\n§13.4 error naming both.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "yCO": {
+          "description": "SPEC-LIT (42.5)'s `yCO`, kg of CO per kg of fuel reacted at zero\nstep-2 conversion. Required under `serialTwoStep`.",
           "type": [
             "number",
             "null"
@@ -238,21 +316,32 @@
       ]
     },
     "JsonExact": {
-      "description": "Part of [`JsonOutput`], which no driver reads - see that type.",
+      "description": "Interchange with the polyhedra preserved - SPEC-LIT S44.1.",
       "type": "object",
       "properties": {
         "format": {
+          "description": "`vtu` or `openfoam` (`foam`), or a comma list. A volume format is an\nerror naming `visualisation`.",
           "type": "string"
         },
         "interval": {
-          "type": "number",
+          "description": "Seconds of physical time between writes; absent is \"once, at the\nend\" - SPEC-LIT S44.4.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
+        },
+        "precision": {
+          "description": "**Always a SPEC-LIT S44.3 error.** Present as a field, rather than\nleft to `deny_unknown_fields`, so the message can say *why* - a lossy\n\"exact\" format is a contradiction in the name - and name\n`visualisation.precision`, where reduced precision belongs.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "format",
-        "interval"
+        "format"
       ]
     },
     "JsonFire": {
@@ -307,6 +396,17 @@
         "nu": {
           "type": "number",
           "format": "double"
+        },
+        "rheology": {
+          "description": "SPEC-LIT §38.7: which closure supplies the LAMINAR viscosity, and its\ncoefficients. Absent means `Newtonian`, which is `nu` above and is\nbitwise the pre-§38 momentum equation.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRheology"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -567,7 +667,7 @@
       ]
     },
     "JsonOutput": {
-      "description": "**Not implemented by any driver in this crate, and therefore a SPEC-LIT\nS13.4 error whenever a case carries it** - see\n`common::refuse_unimplemented_blocks`, which every driver that reads this\nformat calls.\n\nThe block is kept in the format, and in the schema, because it is what the\nformat will grow into; what it is not is a set of settings that do\nsomething today. Three of its knobs - `visualisation.fields`,\n`visualisation.precision` and `restart.keep` - have no implementation\nanywhere in the crate at all, so honouring the two that DO exist\n(`format`, `interval`) and dropping the rest would be S13.4.1's defect\nmanufactured inside its own fix.\n\nWhat decides what a run writes is the command line: `-output\nfoam,vtu,nvdb,vdb,usda` for the format(s), `-writeInterval` for how often,\n`-restartWrite N` / `-restartFrom FILE` for checkpoints. `-permissive`\nsubstitutes exactly that and prints it.",
+      "description": "What this run writes: three sub-blocks, three purposes - SPEC-LIT S44.\n\nThis block was a S13.4 refusal in its entirety until S44, and the reason\nis worth keeping: three of its knobs (`visualisation.fields`,\n`visualisation.precision`, `restart.keep`) had no implementation anywhere\nin the crate, so honouring `format` and `interval` because they happened\nto exist and dropping the other three in silence would have manufactured\nS13.4.1's own defect inside its fix. S44 builds all three\n([`crate::io::output_plan::FieldSelection`],\n[`crate::io::nvdb::Precision`] on both volume writers, and\n[`crate::restart::Checkpoints`]) and then honours the block whole.\n\nResolution, and every S13.4 refusal, is\n[`crate::io::output_plan::OutputPlan::from_json`]. A case that carries\nthis block must NOT also name `-output`/`-writeInterval`/`-restartWrite`\non the command line: those are the same settings said twice, and naming\nboth is an error rather than a silent winner (S44.6).",
       "type": "object",
       "properties": {
         "exact": {
@@ -861,23 +961,159 @@
       ]
     },
     "JsonRestart": {
-      "description": "Part of [`JsonOutput`], which no driver reads - see that type.",
+      "description": "This solver's own state, to resume from - SPEC-LIT S44.1/S44.5.",
       "type": "object",
       "properties": {
         "interval": {
-          "type": "number",
+          "description": "Seconds of physical time between checkpoints; absent is \"once, at\nthe end\".",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
         "keep": {
+          "description": "How many checkpoints to retain. `0` keeps every one of them -\nSPEC-LIT S44.5, and the safe reading of a zero is the one that\ndeletes nothing.",
           "type": "integer",
           "format": "uint",
           "minimum": 0
+        },
+        "precision": {
+          "description": "**Always a SPEC-LIT S44.3 error**, for a sharper reason than\n`exact`'s: S5.1's argument for carrying `phi` in a checkpoint is that\na re-derived flux is not the conservative one, and a rounded one is\nnot either.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "interval",
         "keep"
+      ]
+    },
+    "JsonRheology": {
+      "description": "`physics.fluid.rheology` - SPEC-LIT §38.\n\nEvery coefficient is in the literature's DYNAMIC units and the block\ncarries its own `rho` [kg/m³], because §5's momentum equation is\nKINEMATIC and the conversion cannot be guessed (§38.4). `rho` is required\nfor every non-Newtonian model.\n\nThe coefficients are `Option` and the model is a free string on purpose.\nThe string has to reach [`crate::rheology::RheologyModel::parse`] and come\nback as a §13.4 error NAMING the six spellings, not as serde's \"unknown\nvariant\"; and the options are what let [`JsonCase::lower`] tell \"the case\nwrote tau0\" from \"the case did not\", so a coefficient the named model does\nnot read is REFUSED rather than dropped. That check is\n[`crate::rheology::RheologyCoeffs::read_keys`], shared verbatim with the\nOpenFOAM reader so there is one §13.4 contract and not two.",
+      "type": "object",
+      "properties": {
+        "K": {
+          "description": "Consistency [Pa s^n].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "a": {
+          "description": "Cross's exponent, or Carreau-Yasuda's `a` [-].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "gammaDotFloor": {
+          "description": "Floor on `gdot` before any divide or power [1/s] - §38.3.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "lambda": {
+          "description": "Time constant [s].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "m": {
+          "description": "Papanastasiou's regularisation parameter [s] - §38.3. A NUMERICAL\nparameter, and printed as one.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`Newtonian`, `powerLaw`, `CrossPowerLaw`, `BirdCarreau`,\n`HerschelBulkley` or `Casson`.",
+          "type": "string"
+        },
+        "mu0": {
+          "description": "Zero-shear viscosity [Pa s].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "muC": {
+          "description": "Casson's plastic viscosity [Pa s].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "muInf": {
+          "description": "Infinite-shear viscosity [Pa s].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "muMax": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "muMin": {
+          "description": "Clip on the apparent viscosity [Pa s].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "n": {
+          "description": "Power-law index [-].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "relax": {
+          "description": "Elementwise relaxation of the viscosity fixed point - §38.5(iv).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "rho": {
+          "description": "Density [kg/m³] - required for every non-Newtonian model (§38.4).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tau0": {
+          "description": "Yield stress [Pa].",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
       ]
     },
     "JsonRun": {
@@ -1095,36 +1331,47 @@
       ]
     },
     "JsonVisualisation": {
-      "description": "Part of [`JsonOutput`], which no driver reads - see that type.",
+      "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these five entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
       "type": "object",
       "properties": {
         "fields": {
-          "type": "array",
+          "description": "Which cell fields to write, and in what order. Absent is every field\nthe run has - SPEC-LIT S44.2.",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
           }
         },
         "format": {
+          "description": "`vdb`, `nvdb`, or a comma list of them. A format from `exact`'s\ncolumn (`vtu`, `openfoam`) is an error naming `exact`; `usda` is an\nerror naming `usdScene`.",
           "type": "string"
         },
         "interval": {
-          "type": "number",
+          "description": "Seconds of physical time between writes. Absent (or `0`) is\n\"the final state, once\" - SPEC-LIT S44.4. Was REQUIRED before S44.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
         "precision": {
-          "type": "string"
+          "description": "`fp32` (the default) or `fp16` - SPEC-LIT S44.3. This is the ONE\nplace in the case format where reduced precision is legitimate.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "usdScene": {
+          "description": "Also write a `.usda` scene referencing the volume files.",
           "type": "boolean",
           "default": false
         }
       },
       "additionalProperties": false,
       "required": [
-        "format",
-        "interval",
-        "fields",
-        "precision"
+        "format"
       ]
     },
     "JsonWallFunctions": {

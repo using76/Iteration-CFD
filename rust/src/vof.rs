@@ -144,6 +144,7 @@ use crate::io::schemes::FvSchemes;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh};
+use crate::contact_angle::{self, ContactAngleDevice, ContactAngleFaces};
 use crate::momentum::BuoyancyCoeffs;
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Vec3};
@@ -574,6 +575,18 @@ pub struct Vof<'m> {
     grad_alpha: DevBuf<Vec3>,
     n_hatf: DevBuf<Scalar>,
     b_n_hatf: DevBuf<Scalar>,
+
+    /// SPEC-LIT §39: the contact angle, or `None` when no patch names one -
+    /// in which case `vofFaceUnitNormalBoundary` is told `enabled = 0` and
+    /// writes the literal zero it always wrote, which is what makes every
+    /// pre-§39 VOF result bit-identical. The arrays are allocated only for a
+    /// case that asks, so a plain dam break pays nothing for §39 at all.
+    contact_angle: Option<ContactAngleDevice>,
+    /// One-element placeholders, so the boundary-normal kernel has arrays to
+    /// be handed even with the model off. Never read there: `caEnabled` is
+    /// zero and the kernel returns before it touches them.
+    ca_null_cos: DevBuf<Scalar>,
+    ca_null_applies: DevBuf<Label>,
     phir: DevBuf<Scalar>,
     phi_l: DevBuf<Scalar>,
     b_phi_l: DevBuf<Scalar>,
@@ -689,6 +702,9 @@ impl<'m> Vof<'m> {
             grad_alpha: gpu.zeros(one(n))?,
             n_hatf: gpu.zeros(one(nif))?,
             b_n_hatf: gpu.zeros(one(nbf))?,
+            contact_angle: None,
+            ca_null_cos: gpu.zeros(1)?,
+            ca_null_applies: gpu.zeros(1)?,
             phir: gpu.zeros(one(nif))?,
             phi_l: gpu.zeros(one(nif))?,
             b_phi_l: gpu.zeros(one(nbf))?,
@@ -988,6 +1004,11 @@ impl<'m> Vof<'m> {
             fv::fvc_grad_scalar_scheme(gpu, fvk, grad_alpha, alpha, m, ctrl.grad_alpha)?;
         }
 
+        // SPEC-LIT 39: the angle is computed from the gradient just built and
+        // from the PREVIOUS iterate's velocity, and written before the
+        // boundary normal reads it. A no-op when no patch named one.
+        self.update_contact_angle(gpu)?;
+
         let nif = m.n_internal_faces;
         if nif > 0 {
             let nl = nif as Label;
@@ -1011,6 +1032,15 @@ impl<'m> Vof<'m> {
         if nbf > 0 {
             let nl = nbf as Label;
             let f = self.vk.face_unit_normal_boundary.clone();
+            // SPEC-LIT 39.2. `enabled` is the guard the `cos(pi/2)` trap
+            // forces: with no model configured the kernel writes a LITERAL
+            // zero and never looks at the two arrays below, so every VOF
+            // result recorded before 39 is bit-identical.
+            let ca_enabled: Label = if self.contact_angle.is_some() { 1 } else { 0 };
+            let (ca_cos, ca_applies) = match &self.contact_angle {
+                Some(d) => (&d.cos_theta, &d.applies),
+                None => (&self.ca_null_cos, &self.ca_null_applies),
+            };
             unsafe {
                 gpu.stream()
                     .launch_builder(&f)
@@ -1021,6 +1051,10 @@ impl<'m> Vof<'m> {
                     .arg(&m.b_face_cells)
                     .arg(&m.b_nbr_cell)
                     .arg(&m.b_kind)
+                    .arg(ca_cos)
+                    .arg(ca_applies)
+                    .arg(&m.b_mag_sf)
+                    .arg(&ca_enabled)
                     .arg(&eps)
                     .arg(&nl)
                     .launch(cfg_for(nbf))?;
@@ -1028,6 +1062,76 @@ impl<'m> Vof<'m> {
         }
 
         Ok(())
+    }
+
+    /// Give the wall patches a contact angle - SPEC-LIT §39.
+    ///
+    /// `faces` is one entry per boundary face, built by the driver from the
+    /// `alpha` field's own `boundaryField` (that is where the angle belongs:
+    /// it is a property of the wall, and the wall is named there). A `faces`
+    /// with nothing owned turns the model OFF entirely rather than switching
+    /// on a model that does nothing, which is what keeps the default path
+    /// bitwise - see the `enabled` guard in `update_face_normal`.
+    ///
+    /// Called once, before the run. The angle itself is recomputed every
+    /// outer iteration; only the per-patch configuration is fixed here.
+    pub fn set_contact_angle(&mut self, gpu: &Gpu, faces: &ContactAngleFaces) -> Result<()> {
+        if faces.is_empty() {
+            self.contact_angle = None;
+            return Ok(());
+        }
+        if faces.owns.len() != self.m.n_boundary_faces {
+            return Err(Error::Config(format!(
+                "contact angle: {} face entries for a mesh with {} boundary faces",
+                faces.owns.len(),
+                self.m.n_boundary_faces
+            )));
+        }
+        self.contact_angle = Some(ContactAngleDevice::upload(gpu, faces)?);
+        Ok(())
+    }
+
+    /// How many boundary faces a contact-angle condition owns - `0` when the
+    /// model is off. For the run banner, and for a test that needs to know
+    /// the model is actually on.
+    pub fn n_contact_angle_faces(&self) -> usize {
+        self.contact_angle.as_ref().map(|d| d.n_owned).unwrap_or(0)
+    }
+
+    /// `cos(theta)` per boundary face as of the last update, for a test or a
+    /// diagnostic. Empty when the model is off.
+    pub fn contact_angle_cos(&self, gpu: &Gpu) -> Result<Vec<Scalar>> {
+        match &self.contact_angle {
+            Some(d) => Ok(gpu.download(&d.cos_theta)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// SPEC-LIT §39.4, §39.5: `cos(theta)` per boundary face, and `alpha`'s
+    /// rewritten `ref_grad`.
+    ///
+    /// Runs between `grad(alpha)` and the boundary normal, which is the
+    /// ordering §20.4 already enforces one step earlier - "a stale normal is
+    /// a wrong curvature", and a stale angle is a stale normal.
+    fn update_contact_angle(&mut self, gpu: &Gpu) -> Result<()> {
+        let Some(d) = self.contact_angle.as_ref() else {
+            return Ok(());
+        };
+        let m = self.m;
+        contact_angle::update_cos_theta(
+            gpu,
+            d,
+            &self.alpha.bf,
+            &self.grad_alpha,
+            &self.u.f,
+            &self.u.bf,
+            self.props.mu1,
+            self.props.sigma,
+            m,
+        )?;
+        let Self { contact_angle, alpha, grad_alpha, .. } = self;
+        let d = contact_angle.as_ref().expect("checked above");
+        contact_angle::update_alpha_ref_grad(gpu, d, &mut alpha.ref_grad, grad_alpha, m)
     }
 
     /// `phi_r = c_alpha |phi_f/|Sf|| (n_f · Sf)` (§20.1).
@@ -2693,6 +2797,30 @@ impl VofProperties {
                 0.0,
                 "zero, i.e. no surface tension at all",
             )?;
+
+            // SPEC-LIT 13.4. S38 gives the single-phase momentum equation a
+            // generalised-Newtonian viscosity; this one has TWO phases and
+            // mixes their viscosities by S20.3, so `viscosityModel` here
+            // would be an entry no kernel in this module reads. Per-phase
+            // rheology is real work (the mixture has to be of the two
+            // APPARENT viscosities, not of the model parameters) and is not
+            // implemented, so it is refused BY NAME rather than dropped.
+            if let Some(raw) = d.get("viscosityModel") {
+                let name = raw.split_whitespace().next().unwrap_or("");
+                let m = crate::rheology::RheologyModel::parse(
+                    &format!("constant/{nm}: viscosityModel"),
+                    name,
+                )?;
+                if m != crate::rheology::RheologyModel::Newtonian {
+                    unsupported(
+                        &format!("constant/{nm}: viscosityModel"),
+                        name,
+                        &["Newtonian", "constant"],
+                        "Newtonian - SPEC-LIT 38's five closures apply to the                          SINGLE-phase momentum equation of S5 (ofgpu-buoyant,                          ofgpu-fire). This solver mixes two phases' viscosities                          by S20.3 and has no per-phase rheology",
+                        (),
+                    )?;
+                }
+            }
             break;
         }
 
@@ -2987,6 +3115,55 @@ impl VofControls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPEC-LIT §13.4. §38's five closures are for the SINGLE-phase momentum
+    /// equation of §5; this module mixes two phases' viscosities by §20.3 and
+    /// has no per-phase rheology, so a `viscosityModel` here would be an
+    /// entry no kernel reads. Refused by name, with the drivers that DO apply
+    /// it named.
+    #[test]
+    fn a_non_newtonian_viscosity_model_in_a_two_phase_case_is_refused_by_name() {
+        use std::fs;
+        crate::io::contract::reset_warnings();
+
+        let dir = std::env::temp_dir().join(format!(
+            "ofgpuVofRheo_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("constant")).expect("scratch");
+
+        let write = |model: &str| {
+            fs::write(
+                dir.join("constant").join("transportProperties"),
+                format!(
+                    "phases (water air);\n\nwater {{ rho 998.2; mu 1.002e-3; }}\n\
+                     air {{ rho 1.2; mu 1.8e-5; }}\n\nsigma 0.0728;\n\
+                     viscosityModel {model};\n"
+                ),
+            )
+            .expect("write");
+        };
+
+        write("constant");
+        VofProperties::from_case(&dir)
+            .expect("Newtonian is what every two-phase case written so far means");
+
+        write("powerLaw");
+        let e = VofProperties::from_case(&dir)
+            .expect_err("a non-Newtonian model here would be read by nothing");
+        let msg = e.to_string();
+        assert!(msg.contains("viscosityModel"), "{msg}");
+        assert!(msg.contains("ofgpu-fire") || msg.contains("SINGLE-phase"), "{msg}");
+
+        write("Bingham");
+        let e = VofProperties::from_case(&dir)
+            .expect_err("and an unrecognised one is refused too");
+        assert!(e.to_string().contains("HerschelBulkley"), "{}", e);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
     use crate::io::case::{LinearSolverKind, Preconditioner};
     use crate::mesh::PatchKind;
     use crate::GpuMesh;

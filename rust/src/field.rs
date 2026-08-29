@@ -195,6 +195,29 @@ pub enum BcKind {
     /// `crate::wallfunctions`'s module doc on the fixed-q form "falling out
     /// of the same function".
     FixedFluxTemperature = 31,
+
+    /// The contact angle on `alpha` at a wall - SPEC-LIT §39.3.
+    ///
+    /// A plain FIXED-GRADIENT condition in §4's triple: `fr = 0`,
+    /// `refValue` carries `cos(theta0)` (the equilibrium angle, in the form
+    /// every consumer wants it), and `refGrad` is rewritten every outer
+    /// iteration to `|grad(alpha)_P| cos(theta)` by
+    /// `vofAlphaContactAngleGrad` - exactly as
+    /// [`Self::FixedFluxTemperature`] rewrites its own from `q`.
+    ///
+    /// **No new device branch.** `cuda/field.cu` consults `bcKind` for
+    /// `calculated`, `cyclic` and vector `symmetry` only, and this is none of
+    /// those, so it is evaluated by the same `fldMixed` every other condition
+    /// is. The discriminant exists so the READER can tell which faces the
+    /// model owns and what angle each was given; until the model writes
+    /// `refGrad` it degenerates to zero-gradient, which is what a wall
+    /// carried before §39 and what a wall function does too.
+    ///
+    /// `constantAlphaContactAngle` and `dynamicAlphaContactAngle` both map
+    /// here; which one a patch named is carried by
+    /// [`crate::contact_angle::ContactAnglePatch`], read out of the same
+    /// entry.
+    ContactAngle = 32,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -252,6 +275,8 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "nutURoughWallFunction",
     "wernerWengleWallFunction",
     "fixedFluxTemperature",
+    "constantAlphaContactAngle",
+    "dynamicAlphaContactAngle",
 ];
 
 impl BcKind {
@@ -333,6 +358,35 @@ impl BcKind {
             // function or a resolved (lowRe) mesh - see the variant's own
             // doc for why one condition serves both.
             "fixedFluxTemperature" => Self::FixedFluxTemperature,
+
+            // SPEC-LIT 39.3: the contact angle on `alpha`. Both spellings map
+            // to one BcKind because both ARE one condition in S4's triple -
+            // fixedGradient with a rewritten refGrad. What differs is how
+            // theta is computed, which `contact_angle::ContactAnglePatch`
+            // reads out of the same entry, and which is why the two names are
+            // kept distinct here rather than aliased into one: a patch that
+            // says `constantAlphaContactAngle` and then writes `thetaA` is
+            // refused by name (39.6), and it can only be refused if the
+            // reader knows which of the two the case wrote.
+            //
+            // ONLY on a phase fraction. Nothing but `crate::vof` rewrites the
+            // `ref_grad` this condition is defined by, so on any other field
+            // it would be zero-gradient wearing a contact angle's name - a
+            // setting the case can express and the solver silently ignores,
+            // which is the S13.4 defect this project keeps finding. It is an
+            // error naming the field it belongs on instead.
+            "constantAlphaContactAngle" | "dynamicAlphaContactAngle" => {
+                if !field.starts_with("alpha") {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["zeroGradient", "fixedGradient", "fixedValue"],
+                        "zeroGradient - but note that a contact angle belongs on the                          phase fraction `alpha.<phase>`, which is the only field                          SPEC-LIT 39 rewrites the gradient of; on any other field                          nothing would ever compute the angle",
+                        Self::ZeroGradient,
+                    );
+                }
+                Self::ContactAngle
+            }
 
             // SPEC-LIT 29.3: OpenFOAM spells the Jayatilleke thermal wall
             // function on `alphat`, a field this solver does not carry (its
@@ -457,6 +511,15 @@ impl BcKind {
     #[inline]
     pub fn is_werner_wengle_wall_function(self) -> bool {
         matches!(self, Self::WernerWengleWallFunction)
+    }
+
+    /// True where SPEC-LIT §39's contact angle owns the face and rewrites
+    /// `alpha`'s `ref_grad` every outer iteration. Asked of `alpha`'s OWN
+    /// patch type, the same discipline [`Self::is_fixed_flux_temperature`]
+    /// uses.
+    #[inline]
+    pub fn is_contact_angle(self) -> bool {
+        matches!(self, Self::ContactAngle)
     }
 }
 
@@ -624,6 +687,42 @@ mod tests {
 
     fn gpu() -> Option<Gpu> {
         Gpu::new(0).ok()
+    }
+
+    /// SPEC-LIT §39.3: the contact angle is a condition on the PHASE
+    /// FRACTION, and nothing but `crate::vof` rewrites the `ref_grad` it is
+    /// defined by. On any other field it would be zero-gradient wearing a
+    /// contact angle's name - a setting the case can express and the solver
+    /// silently ignores - so it is an error naming the field it belongs on.
+    #[test]
+    fn a_contact_angle_belongs_on_a_phase_fraction_and_nowhere_else() {
+        crate::io::contract::reset_warnings();
+        for name in ["constantAlphaContactAngle", "dynamicAlphaContactAngle"] {
+            assert_eq!(
+                BcKind::from_name(name, "alpha.water", "walls").expect("alpha accepts it"),
+                BcKind::ContactAngle
+            );
+            let e = BcKind::from_name(name, "T", "walls")
+                .expect_err("a contact angle on T must be refused");
+            let msg = e.to_string();
+            assert!(msg.contains("alpha"), "the message must name the field: {msg}");
+            assert!(msg.contains(name), "{msg}");
+        }
+    }
+
+    /// And the discriminant is outside both device-consulted ranges, so
+    /// `cuda/field.cu` evaluates it with the same `fldMixed` as everything
+    /// else - SPEC-LIT §39.3's "no new device branch".
+    #[test]
+    fn the_contact_angle_kind_needs_no_device_branch() {
+        let v = BcKind::ContactAngle as Label;
+        assert_eq!(v, 32);
+        assert_ne!(v, BcKind::Calculated as Label);
+        assert_ne!(v, BcKind::Cyclic as Label);
+        assert_ne!(v, BcKind::Symmetry as Label);
+        assert!(!(FLUX_SWITCHED_FIRST..=FLUX_SWITCHED_LAST).contains(&v));
+        assert!(BcKind::ContactAngle.is_contact_angle());
+        assert!(!BcKind::ZeroGradient.is_contact_angle());
     }
 
     fn boxed_gpu_mesh(gpu: &Gpu) -> GpuMesh {

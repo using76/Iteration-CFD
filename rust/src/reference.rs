@@ -1371,7 +1371,7 @@ mod tests {
                 n: n[2],
                 ..Default::default()
             },
-            window: None,
+            windows: Vec::new(),
             patch_name: BlockSpec::default().patch_name,
             patch_type: [
                 "patch",

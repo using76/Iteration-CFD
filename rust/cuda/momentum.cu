@@ -182,7 +182,16 @@ extern "C" __global__ void momCopyLabel
 //  Small elementwise helpers
 // ==========================================================================
 
-//- out = in + c. Used for nuEff = nu + nut on cells and on boundary faces.
+//- out = in + c.
+//
+//  This BUILT nuEff = nu + nut, on cells and on boundary faces, until
+//  SPEC-LIT S38.5(i) made the laminar viscosity a field and momAdd below took
+//  over. It is deliberately still here, and still compiled: it is the
+//  REFERENCE the regression test measures against.
+//  `the_uniform_buffer_is_the_scalar_bitwise` in src/momentum.rs launches
+//  both and requires the two results to be bit-identical, which is the whole
+//  claim that a Newtonian case keeps every measurement it had before S38.
+//  Delete it and that claim becomes an assertion again.
 extern "C" __global__ void momAddConst
 (
     ofscalar* __restrict__ out,
@@ -194,6 +203,29 @@ extern "C" __global__ void momAddConst
     const oflabel i = OFGPU_TID;
     if (i >= n) return;
     out[i] = in[i] + c;
+}
+
+
+//- out = a + b, elementwise - SPEC-LIT S38.5(i).
+//
+//  This replaced `momAddConst(out, in, c)` when the laminar viscosity became
+//  a FIELD. It is deliberately the same arithmetic in the same order:
+//  `a[i] + b[i]` with every `b[i]` equal to the old scalar `c` is BITWISE
+//  `in[i] + c`, because IEEE-754 addition does not care how the second
+//  operand was delivered. `the_uniform_buffer_is_the_scalar_bitwise` in
+//  src/momentum.rs measures exactly that, which is what lets a Newtonian
+//  case keep every result it had before S38.
+extern "C" __global__ void momAdd
+(
+    ofscalar* __restrict__ out,
+    const ofscalar* __restrict__ a,
+    const ofscalar* __restrict__ b,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    out[i] = a[i] + b[i];
 }
 
 

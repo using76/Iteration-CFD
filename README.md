@@ -94,13 +94,13 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 
 | 구분 | 모형 |
 |---|---|
-| RANS | 표준 k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma 저레이놀즈수 k-ε (SPEC-LIT §33 — `wallTreatment lowRe`가 유효한 유일한 모형; 감쇠함수가 점성 서브레이어까지 적분되며, 해석적 `Re_t` 극한과 실제 채널 유동의 `u+`/`y+` 벽법칙 양쪽으로 검증됨) |
+| RANS | 표준 k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma 저레이놀즈수 k-ε (SPEC-LIT §33 — `wallTreatment lowRe`가 유효한 유일한 모형; 감쇠함수가 점성 서브레이어까지 적분되며, 해석적 `Re_t` 극한과 실제 채널 유동의 `u+`/`y+` 벽법칙 양쪽으로 검증됨), **realizable k-ε** (Shih 등, SPEC-LIT §40 — `C_mu`가 필드가 되어 Boussinesq 수직응력이 음수가 될 수 없음; 채널이 아니라 바로 그 성질과 균질전단 고정점으로 게이트함)과 **RNG k-ε** (Yakhot & Orszag, SPEC-LIT §41 — `R` 항을 셀별 `C_e2*`에 흡수하고, 확산계수는 `ν + ν_t/σ`가 아닌 `α(ν + ν_t)`) |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES 여과폭 | 체적 세제곱근, 최대 모서리 길이, Scotti 이방성 보정, van Driest 감쇠 |
 | LES 벽모형 | Werner–Wengle (1991) — 첫 셀 평균 속도로부터 적분·역해한 멱법칙, Newton 반복 없음; `standard`/`spalding` 프리셋이 LES에서는 이 모형 하나로 수렴, `lowRe`는 `nu_t,w = 0`, `rough`는 아직 없음(§13.4 오류로 명시) |
 | 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | 결합 솔버(`ofgpu-buoyant`, `ofgpu-fire`)의 난류 선택 | `ofgpu-buoyant`: `CoupledTurbulence` 트레이트로 케이스의 `RAS { model ...; }`/`simulationType`을 그대로 반영 — k-ε, k-ω, k-ω SST(벽거리 자동 계산), LES(Smagorinsky/WALE/Deardorff, §16 여과폭·van Driest 포함) 전부 실제로 그 모형을 구성함, 부력 생성 `G_b`도 모형별로 올바른 방정식에 배선됨(§17, §30.2). `ofgpu-fire`: 아직 k-ε만 지원 — 연소 혼합시간 종결식과 열 벽함수가 `epsilon`을 직접 요구하므로 다른 모형은 이름을 밝힌 §13.4 오류로 거부(조용한 대체 없음) |
-| 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1). `lowRe`는 추가로 벽 근처를 해석할 수 있는 난류 모형을 요구함 — 그 목록에 있는 모형은 `LaunderSharmaKE`(SPEC-LIT §33) 하나뿐이며, `kEpsilon`/`kOmega`/`kOmegaSST`는 여전히 해당하지 않으므로 이 셋 아래에서 `lowRe`는 발산하도록 두는 대신 이름을 명시해 거부함 (SPEC-LIT §32) |
+| 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1). `lowRe`는 추가로 벽 근처를 해석할 수 있는 난류 모형을 요구함 — 그 목록에 있는 모형은 `LaunderSharmaKE`(SPEC-LIT §33) 하나뿐이며, `kEpsilon`/`kOmega`/`kOmegaSST`/`realizableKE`/`RNGkEpsilon`는 여전히 해당하지 않으므로 이 셋 아래에서 `lowRe`는 발산하도록 두는 대신 이름을 명시해 거부함 (SPEC-LIT §32) |
 | 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨. 고정 열유속 주기 **평면 채널**에서 Dittus-Boelter/Gnielinski 대비 검증(SPEC-LIT §32/§34): **벽함수 leg는 닫힘** — Petukhov 매끄러운 원관 `f`에서 Gnielinski −5.9%(±10%), Dittus-Boelter −12.9%(±20–25%) — **해상 `lowRe` leg는 닫히지 않음**(Gnielinski +11.9%, Dittus-Boelter +4.0%). 각 leg가 벽에서 직접 **측정한** `f`로 평가하는 레이놀즈 유사 판정은 두 leg 모두 닫히지 않음(+34.3%, +14.9%). 숫자는 배포 기본값 `PrtModel constant`에서의 기록이며, SPEC-LIT §26.1 이후 재실행한 값이다. SPEC-LIT §37의 Kays-Crawford 가변 `Pr_t`를 선택하면(옵인 방식, 토큰 하나, 튜닝 없음) 해상 leg가 +11.9%에서 **+4.3%**로 이동해 절대 예측 판정이 **두 leg 모두에서 닫힌다**. 대조군인 벽함수 leg는 `Nu`가 −0.06%만 움직이며, 벽함수 leg의 레이놀즈 유사 판정은 +34.0%로 그대로다(열이 아니라 마찰 측의 결과이기 때문). **SPEC-LIT §26.1은 이 게이트가 모든 숫자에 불확실성으로 달고 다니던 에너지 불균형을 닫았다**: §25.1의 발산 구속조건이 전도항 `div(k_eff grad T)` 없이 구현되어 있어서 해상 leg의 정상 상태 에너지 수지가 +3.11%(Kays-Crawford에서 +3.35%) 부족했고, 지금은 +0.000089%라서 해상 leg의 Kays-Crawford 통과 판정에 더 이상 오차 범위를 붙일 필요가 없다. 전체 내용과 이것이 증명하지 못하는 범위는 `docs/07-fire-solver.md` §1.1 |
 | 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
 | 부력 생성 | G_b 항 (Rodi 1987, Henkes et al. 1991) |
@@ -142,9 +142,11 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 |---|---|
 | 저-마하 정식화 | `p = p0(t) + p~(x,t)` 분리, 발산 구속조건, 밀폐/개방 공간의 `p0(t)` 적분 (Rehm & Baum 1978) |
 | 에너지 방정식 | 현열 엔탈피, `k_eff = k + rho cp nu_t/Prt`, 벽 열유속·고정온도 경계, `thermalWallFunction` 벽의 Jayatilleke 열 벽함수 (SPEC-LIT §29.3) |
-| 연소 | 혼합제어 단일 스텝 EDM (Magnussen & Hjertager 1977) — `Y_F`, `Y_O2`, `Y_P` 수송, 연료 고갈 방지 클리핑, 소모된 연료질량과 방출열이 정확히 일치 (반올림 오차 수준) |
+| 연소 | 혼합제어 단일 스텝 EDM (Magnussen & Hjertager 1977, **기본값**) — `Y_F`, `Y_O2`, `Y_P` 수송, 연료 고갈 방지 클리핑, 소모된 연료질량과 방출열이 정확히 일치 (반올림 오차 수준). **그리고 직렬 2단계 혼합제어 스킴** (McGrattan, McDermott & Floyd, ISFEH10 2022 — SPEC-LIT §42, `scheme serialTwoStep`으로 선택): 같은 혼합제어 속도를 한 시간스텝 안에서 **직렬로** 두 번 적용해, 1단계가 남긴 산소가 1단계가 만든 CO를 산화시킵니다. 아레니우스 속도식도, 야코비안도, ODE 적분기도, 경직성도 없습니다. 중간생성물 `Y_I`가 추가 수송되고 `Y_CO = f_CO Y_I`가 출력됩니다 |
+| 국소 소염 | FDS `EXTINCTION 1` 임계화염온도 판정 (SPEC-LIT §43, `extinctionModel oxygen`) — 셀 온도에 대한 구간선형 한계산소지수, 자유연소 온도 차단, 자연발화온도 규칙. 기본값은 `none`이므로 기존 결과는 그대로입니다 |
 | 복사 | 회색 P1 근사 (Modest ch. 15), Marshak 벽 경계, `chi_r` 복사분율 하한, **그리고 회색 fvDOM** (Modest ch. 16; Fiveland 1984; Truelove 1987 — SPEC-LIT §36): 같은 RTE를 24개 level-symmetric S4 종좌표로 풀며 `radiationModel`로 선택. `cases/burnerPlume.jsonc` 실측(32,768셀, 1,200스텝, RTX 5070 Ti): 복사 분율 14.97%(P1) 대 13.79%(fvDOM), 벽시계 19.22 s 대 121.5 s |
 | 검증 게이트 | 밀폐 상자 `dp0/dt` 램프(해석해), 버너 정확 열방출, 복사 평형, 컷셀 닫힘, msh 육면체 닫힘 — 전부 `ofgpu-validate`의 상시 항목 |
+| 케이스 파일이 출력을 지시함 (SPEC-LIT §44) | `output.visualisation`(`format`·`interval`·`fields`·`precision`·`usdScene`), `output.exact`(`format`·`interval`), `output.restart`(`interval`·`keep`)를 JSONC 케이스를 읽는 모든 드라이버가 읽습니다. `fields`는 필드를 고르고 순서를 정하며, 이 실행에 없는 이름은 있는 이름들을 열거하며 거부합니다. `precision`은 두 볼륨 라이터에 대해 `fp16`/`fp32`이고 그 밖의 어디서도 오류입니다. `keep`은 최근 N개의 체크포인트를 남기고 더 오래된 것을 지우되, **이 실행이 쓴 파일만** 지우며 디렉터리의 다른 무엇도 건드리지 않습니다 |
 | 필드 출력·재시작 | `-output foam,vtu,nvdb,vdb,usda`·`-writeInterval`이 `ofgpu-buoyant`/`ofgpu-vof`와 같은 방식으로 `U`·`p`·`T`·난류 완결식·화학종 필드를 씀; `-restartWrite N`/`-restartFrom FILE`이 체크포인트를 쓰고 재개 — `U`/`p`/`T`뿐 아니라 `p0`, `dp0dt`, 화학종 질량분율까지 재시작에서 그대로 이어받습니다(저-마하 실행의 열역학 상태는 그 세 필드만이 아니므로). 연속 40스텝 실행과 20스텝+재시작+20스텝 실행이 재시작 직후 첫 압력 잔차·`p0`·전체 엔탈피에서 일치합니다 |
 | 체적 소스 | `sources[]`(JSONC) 또는 `constant/fvSources`(OpenFOAM 케이스 디렉터리)로 운동량 방정식에 소스를 등록 — 전체 도메인에 걸친 균일 체적력으로, 유입 경계가 없어 질량유량을 지정할 수 없는 periodic(cyclic 패치) 케이스가 필요로 하는 바로 그것입니다 |
 
@@ -241,7 +243,7 @@ error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
 
 | 설정 | 처리 |
 |---|---|
-| `output` 블록 전체 | **거부** — `-output` / `-writeInterval` / `-restartWrite N` / `-restartFrom FILE`를 이름으로 안내. `visualisation.fields`·`visualisation.precision`·`restart.keep`는 크레이트 어디에도 구현이 없어, 있는 둘만 배선하고 셋을 조용히 버리는 것이야말로 §13.4.1의 결함을 그 수정 안에서 다시 만드는 일입니다 |
+| `output` 블록 전체 | **구현됨** — SPEC-LIT §44. 그전까지는 거부였고, 그 이유는 그대로 남길 가치가 있습니다: `visualisation.fields`·`visualisation.precision`·`restart.keep`는 크레이트 어디에도 구현이 없었으므로, 있는 둘(`format`·`interval`)만 배선하고 셋을 조용히 버리는 것이야말로 §13.4.1의 결함을 그 수정 안에서 다시 만드는 일이었습니다. §44는 셋을 먼저 만들었습니다. 지금도 거부되는 것은 *조합*입니다: 케이스가 이 블록을 담고 명령줄이 `-output`/`-writeInterval`/`-restartWrite`를 함께 이름하면 같은 말을 두 번 한 것이므로, 조용한 승자 대신 양쪽을 모두 이름한 오류입니다 |
 | `run.adjustTimeStep: true`, `run.maxCo` | **거부** — JSONC를 읽는 드라이버 중 스텝을 조절하는 것은 없습니다. `ofgpu-vof`가 이 크레이트의 유일한 적응 스텝(디렉터리 케이스의 `controlDict` `adjustTimeStep` + `maxCo` + `maxDeltaT`, 또는 `-maxCo`)이며 이제 그 세 항목을 실제로 읽습니다 |
 | `controlDict/adjustTimeStep yes` (OpenFOAM) | **거부** — `read_control_dict`에서 한 번에, 이 함수를 거치는 모든 드라이버에 대해 |
 | `physics.gravity` / `constant/g` (단, `ofgpu-k-epsilon`·`ofgpu-k-omega`에서) | **거부** — 두 모형 모두 `set_buoyancy`를 가지고 있었으나 아무도 부르지 않았습니다. §17의 `G_b`는 온도장을 필요로 하는데 이 두 드라이버는 온도를 읽지 않습니다. 오류가 `ofgpu-plume`/`ofgpu-buoyant`/`ofgpu-fire`를 안내합니다 |
@@ -253,10 +255,10 @@ error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
 ## 검증
 
 ```
-cargo test        814 passed, 0 failed, 2 ignored (lib 크레이트 기준)
-                  905 passed, 0 failed, 4 ignored (모든 타깃 합계 — 각 바이너리의 CLI 파싱
+cargo test        946 passed, 0 failed, 2 ignored (lib 크레이트 기준)
+                  1057 passed, 0 failed, 4 ignored (모든 타깃 합계 — 각 바이너리의 CLI 파싱
                   스위트와 SPEC-LIT §13.4.1의 드라이버별 "두 실행은 달라야 한다" 쌍 검사 포함)
-ofgpu-validate    314 / 314 checks passed (279개는 실시간 계산, 35개는 기록된 측정값 재생)
+ofgpu-validate    449 / 449 checks passed (401개는 실시간 계산, 48개는 기록된 측정값 재생)
 ```
 
 **SPEC-LIT §13.4.1의 상시 요구사항**: 케이스 파일의 설정 하나만 다르고 나머지는
@@ -631,8 +633,12 @@ ASCII로 변환한 뒤 사용하십시오.
   사유를 오류로 보고합니다.
 - **압축성 및 천음속 해석을 지원하지 않습니다.** 밀도 가중 시간미분은 구현되어
   VOF에서 사용되나, 압력 방정식은 비압축성입니다.
-- **연소는 혼합제어 단일 스텝(EDM)만 지원합니다.** 유한율 화학반응 메커니즘은
-  없습니다. ~~**복사는 회색 P1 근사만 지원합니다.**~~ **해결됨 (SPEC-LIT §36).**
+- ~~**연소는 혼합제어 단일 스텝(EDM)만 지원합니다.**~~ **부분 해결 (SPEC-LIT
+  §42/§43).** 직렬 2단계 혼합제어 스킴과 국소 소염 판정이 구현되어 CO·불완전
+  연소·소염을 예측합니다. 다만 **유한율(아레니우스) 화학반응 메커니즘은 여전히
+  없습니다** — Westbrook–Dryer도, Jones–Lindstedt도, 강직 ODE 적분기도 없습니다.
+  또한 §42는 분자량 `W̄`와 비열 `c_p`를 **일정하게** 유지하므로, CO2와 CO를
+  구분한 뒤에도 밀도와 팽창은 공기 값으로 계산됩니다. ~~**복사는 회색 P1 근사만 지원합니다.**~~ **해결됨 (SPEC-LIT §36).**
   `fvDOM`(유한체적 이산종좌표법, 24개 level-symmetric S4 종좌표)이 구현되어
   `radiationModel`로 선택됩니다 — 두 모델이 하나의 `EnergySources` 등록과 같은
   `chi_r` 하한을 공유합니다. 다만 두 모델 모두 여전히 **회색**입니다: 스펙트럼
@@ -736,6 +742,21 @@ ASCII로 변환한 뒤 사용하십시오.
 - Patel, V. C., Rodi, W., & Scheuerer, G. (1985). Turbulence models for
   near-wall and low Reynolds number flows: a review. *AIAA Journal*, 23(9),
   1308–1319. — §33
+- Shih, T.-H., Liou, W. W., Shabbir, A., Yang, Z., & Zhu, J. (1995). A new
+  k-epsilon eddy viscosity model for high Reynolds number turbulent flows.
+  *Computers & Fluids*, 24(3), 227–238. Read as **NASA TM-106721 /
+  ICOMP-94-21** (1994), a US government work in the public domain; the journal
+  version is paywalled and was not read. — §40
+- Yakhot, V., Orszag, S. A., Thangam, S., Gatski, T. B., & Speziale, C. G.
+  (1992). Development of turbulence models for shear flows by a double
+  expansion technique. *Physics of Fluids A*, 4(7), 1510–1520. Read as
+  **ICASE Report 91-65 / NASA CR-187611** (1991). — §41
+- Yakhot, V., & Orszag, S. A. (1986). Renormalization group analysis of
+  turbulence. I. Basic theory. *Journal of Scientific Computing*, 1(1), 3–51.
+  — §41
+- Reynolds, W. C. (1987). *Fundamentals of turbulence for turbulence modeling
+  and simulation.* AGARD Report No. 755. — §40 (the realizability
+  constraints the variable `C_mu` is constructed to satisfy)
 
 ### 난류 모형 — LES
 

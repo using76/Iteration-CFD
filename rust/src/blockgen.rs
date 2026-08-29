@@ -129,8 +129,16 @@ pub struct BlockSpec {
     pub z: GradedAxis,
     pub patch_name: [String; 6],
     pub patch_type: [String; 6],
-    /// Optionally split one slot in two; see [`PatchWindow`].
-    pub window: Option<PatchWindow>,
+    /// Split slots in two; see [`PatchWindow`]. At most ONE window per slot -
+    /// a slot with two would have to emit three patches whose faces interleave,
+    /// and OpenFOAM records a patch as nothing but a `startFace`/`nFaces` pair,
+    /// so it cannot be expressed. `boundary_patches` refuses it by name.
+    ///
+    /// SPEC-LIT §42.8 Gate 2 is what generalised this from the single slot it
+    /// shipped with: a compartment fire needs a burner window in the floor AND
+    /// a doorway window in a wall, and one window is not enough for the case
+    /// the whole two-step scheme exists to answer.
+    pub windows: Vec<PatchWindow>,
     /// SPEC-LIT §31.1/§34.2: the axes (0=x, 1=y, 2=z) whose two opposite
     /// slots are a cyclic pair - `constant/polyMesh/boundary` gets
     /// `neighbourPatch` on each, and the in-memory [`build_mesh`] path
@@ -180,7 +188,7 @@ impl Default for BlockSpec {
             z: GradedAxis::default(),
             patch_name: ["xMin", "xMax", "yMin", "yMax", "zMin", "zMax"].map(String::from),
             patch_type: ["patch", "patch", "wall", "wall", "empty", "empty"].map(String::from),
-            window: None,
+            windows: Vec::new(),
             cyclic: Vec::new(),
         }
     }
@@ -750,10 +758,24 @@ fn build_patches(
 
     // Validated once, up front: a window naming a slot outside 0..6 would
     // otherwise match nothing in the loop and be dropped without a word.
-    let win = match &b.window {
-        Some(w) => Some((w, window_rect(g, w)?)),
-        None => None,
-    };
+    // One entry per slot, so the per-slot logic below is unchanged and a
+    // second window on the same slot is refused rather than silently dropped.
+    let mut win: [Option<(&PatchWindow, [usize; 4])>; 6] = [None; 6];
+    for w in &b.windows {
+        if w.slot > 5 {
+            return Err(Error::Mesh(format!(
+                "blockgen: patch window '{}' names slot {}, which is not one of                  the six (-x +x -y +y -z +z)",
+                w.name, w.slot
+            )));
+        }
+        if let Some((prev, _)) = win[w.slot] {
+            return Err(Error::Mesh(format!(
+                "blockgen: patch windows '{}' and '{}' both split slot {} - a                  slot can carry at most one window, because OpenFOAM records a                  patch as one contiguous startFace/nFaces run and three patches                  cut from one slot cannot be laid out without interleaving",
+                prev.name, w.name, w.slot
+            )));
+        }
+        win[w.slot] = Some((w, window_rect(g, w)?));
+    }
 
     // SPEC-LIT §31.1/§34.2: `set_cyclic_axis` is the only supported way to
     // get here, but the field itself is public, so a caller that poked
@@ -776,7 +798,7 @@ fn build_patches(
                 b.patch_name[lo], b.patch_name[hi], b.patch_type[lo], b.patch_type[hi]
             )));
         }
-        if let Some(w) = &b.window {
+        for w in &b.windows {
             if w.slot == lo || w.slot == hi {
                 return Err(Error::Mesh(format!(
                     "blockgen: patch window '{}' splits slot {}, which is half of the \
@@ -796,8 +818,8 @@ fn build_patches(
     };
 
     for p in 0..6 {
-        match win {
-            Some((w, rect)) if w.slot == p => {
+        match win[p] {
+            Some((w, rect)) => {
                 let n_win = (rect[1] - rect[0]) * (rect[3] - rect[2]);
 
                 out.push(OutPatch {
@@ -3472,10 +3494,10 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
 
     // Needs the axes to be sized first: the opening is snapped to whole cells.
     if kind == CaseKind::Plume {
-        b.window = Some(plume_inlet_window(&b));
+        b.windows = vec![plume_inlet_window(&b)];
     }
     if kind == CaseKind::Room {
-        b.window = Some(room_door_window(&b));
+        b.windows = vec![room_door_window(&b)];
     }
 
     b
@@ -3489,7 +3511,7 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
     // Air for the plume; every other case keeps the 1e-5 it has always had.
     let nu: Scalar = if buoyant_case(kind) { 1.5e-5 } else { 1e-5 };
 
-    let inlet = b.window.as_ref().map(|w| window_extent(&block.g, w));
+    let inlet = b.windows.first().map(|w| window_extent(&block.g, w));
     let (u_ref, half_height): (Scalar, Scalar) = match kind {
         CaseKind::Channel => (1.0, 1.0),
         CaseKind::Step => (10.0, 1.0),
@@ -3758,7 +3780,7 @@ fn write_case_impl(
 
     // Air for the plume; every other case keeps the 1e-5 it has always had.
     let (nu, u_ref, half_height) = case_run_params(kind, &b, &block);
-    let inlet = b.window.as_ref().map(|w| window_extent(&block.g, w));
+    let inlet = b.windows.first().map(|w| window_extent(&block.g, w));
 
     // Only the plume carries a temperature equation, so only its dictionary
     // gets the two Prandtl numbers that equation reads. Writing them into the
@@ -3794,7 +3816,7 @@ fn write_case_impl(
         case_dir, kind, &block, carve, nu, u_ref, half_height, 1, wall, roughness, thermal_wall,
     )?;
 
-    if let (Some(w), Some((fx, fy))) = (b.window.as_ref(), inlet) {
+    if let (Some(w), Some((fx, fy))) = (b.windows.first(), inlet) {
         println!(
             "  {}: {} x {} m over x [{}, {}] y [{}, {}] - {} of the {} {} faces",
             w.name,
@@ -4853,13 +4875,13 @@ mod tests {
         let mut b = spec(nx, ny, nz);
         b.patch_name[4] = "floor".to_string();
         b.patch_type[4] = "wall".to_string();
-        b.window = Some(PatchWindow {
+        b.windows = vec![PatchWindow {
             slot: 4,
             lo: [1, 1],
             hi: [3, 3],
             name: "burner".to_string(),
             type_name: "patch".to_string(),
-        });
+        }];
         b
     }
 
@@ -5359,7 +5381,7 @@ mod tests {
         let b = split_spec(5, 6, 3);
         let block = Block::new(&b).expect("block");
         let g = &block.g;
-        let w = b.window.as_ref().expect("window");
+        let w = b.windows.first().expect("window");
 
         let inlet = &block.patches[4];
         assert_eq!(inlet.name, "burner");
@@ -5389,19 +5411,92 @@ mod tests {
         }
     }
 
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §42.8 Gate 2: more than one window
+    // ----------------------------------------------------------------------
+
+    /// Two windows on DIFFERENT slots both get carved, and each slot's
+    /// remainder keeps its own name. This is what a compartment fire needs -
+    /// a burner in the floor and a doorway in a wall - and what `BlockSpec`
+    /// could not express until §42.8's gate needed it.
+    #[test]
+    fn two_windows_on_different_slots_are_both_carved() {
+        let mut b = split_spec(6, 6, 4);
+        // `split_spec` already put `burner` in the floor (slot 4); add a
+        // doorway in the -y wall (slot 2).
+        b.patch_name[2] = "wallFront".to_string();
+        b.patch_type[2] = "wall".to_string();
+        b.windows.push(PatchWindow {
+            slot: 2,
+            lo: [1, 0],
+            hi: [4, 2],
+            name: "door".to_string(),
+            type_name: "patch".to_string(),
+        });
+        let block = Block::new(&b).expect("two windows on two slots");
+
+        let by_name = |n: &str| block.patches.iter().find(|p| p.name == n).expect(n);
+        assert_eq!(by_name("burner").size, 4, "burner is 2x2 floor faces");
+        assert_eq!(by_name("door").size, 6, "door is 3x2 wall faces");
+        assert_eq!(by_name("burner").part, SlotPart::Window);
+        assert_eq!(by_name("door").part, SlotPart::Window);
+        assert_eq!(by_name("floor").part, SlotPart::Rest);
+        assert_eq!(by_name("wallFront").part, SlotPart::Rest);
+
+        // Eight patches now - six slots, two of them split - and every one of
+        // them is still an unbroken run, which is the invariant a boundary
+        // file cannot express if it is broken.
+        assert_eq!(block.patches.len(), 8);
+        let mut runs: Vec<(usize, usize)> =
+            block.patches.iter().map(|p| (p.start, p.size)).collect();
+        runs.sort_unstable();
+        // `start` is a GLOBAL face index, so the run begins at the first
+        // boundary face, not at zero.
+        let mut next = runs[0].0;
+        let first = next;
+        for (start, size) in runs {
+            assert_eq!(start, next, "patches must tile the boundary face list");
+            next += size;
+        }
+        assert_eq!(next - first, block.patch_size.iter().sum::<usize>());
+    }
+
+    /// TWO windows on the SAME slot is refused by name. A slot split three
+    /// ways cannot be laid out as contiguous `startFace`/`nFaces` runs, and a
+    /// boundary file that claimed otherwise would be read back as a different
+    /// mesh with no error anywhere.
+    #[test]
+    fn two_windows_on_the_same_slot_are_refused_by_name() {
+        let mut b = split_spec(6, 6, 4);
+        b.windows.push(PatchWindow {
+            slot: 4,
+            lo: [4, 4],
+            hi: [5, 5],
+            name: "secondBurner".to_string(),
+            type_name: "patch".to_string(),
+        });
+        let Err(e) = Block::new(&b) else {
+            panic!("two windows on one slot must be refused");
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("burner"), "{msg}");
+        assert!(msg.contains("secondBurner"), "{msg}");
+        assert!(msg.contains("at most one window"), "{msg}");
+    }
+
     /// A window whose fast direction spans the whole slot leaves the middle
     /// run of `Rest` empty - the one arithmetic case that would divide by zero
     /// if it were reached.
     #[test]
     fn a_full_width_window_leaves_no_punched_rows() {
         let mut b = spec(4, 5, 3);
-        b.window = Some(PatchWindow {
+        b.windows = vec![PatchWindow {
             slot: 4,
             lo: [0, 1],
             hi: [4, 3],
             name: "strip".to_string(),
             type_name: "patch".to_string(),
-        });
+        }];
 
         let block = Block::new(&b).expect("block");
         let (na, nb) = slot_dims(&block.g, 4);
@@ -5458,13 +5553,13 @@ mod tests {
     #[test]
     fn a_window_that_swallows_its_slot_is_refused() {
         let mut b = spec(4, 5, 3);
-        b.window = Some(PatchWindow {
+        b.windows = vec![PatchWindow {
             slot: 4,
             lo: [0, 0],
             hi: [4, 5],
             name: "all".to_string(),
             type_name: "patch".to_string(),
-        });
+        }];
         assert!(Block::new(&b).is_err());
 
         // Out of range, empty, and colliding with the host patch's name.
@@ -5474,13 +5569,13 @@ mod tests {
             ([0, 0], [2, 2], "zMin"),
         ] {
             let mut b = spec(4, 5, 3);
-            b.window = Some(PatchWindow {
+            b.windows = vec![PatchWindow {
                 slot: 4,
                 lo,
                 hi,
                 name: name.to_string(),
                 type_name: "patch".to_string(),
-            });
+            }];
             assert!(Block::new(&b).is_err(), "accepted {lo:?}..{hi:?} '{name}'");
         }
     }
@@ -5492,7 +5587,7 @@ mod tests {
         for k in [CaseKind::Channel, CaseKind::Cavity, CaseKind::Step, CaseKind::Big] {
             let (nx, ny, nz) = k.default_resolution();
             assert!(
-                case_block_spec(k, nx, ny, nz).window.is_none(),
+                case_block_spec(k, nx, ny, nz).windows.is_empty(),
                 "{} grew a window",
                 k.as_str()
             );
@@ -5566,7 +5661,7 @@ mod tests {
         let (nx, ny, nz) = CaseKind::Plume.default_resolution();
         let b = case_block_spec(CaseKind::Plume, nx, ny, nz);
         let block = Block::new(&b).expect("block");
-        let w = b.window.as_ref().expect("window");
+        let w = b.windows.first().expect("window");
 
         let (fx, fy) = window_extent(&block.g, w);
         let dx = (b.x.hi - b.x.lo) / nx as Scalar;
@@ -5606,7 +5701,7 @@ mod tests {
 
         let b = case_block_spec(CaseKind::Plume, nx, ny, nz);
         let block = Block::new(&b).expect("block");
-        let w = b.window.as_ref().expect("window");
+        let w = b.windows.first().expect("window");
 
         let poly = dir.join("constant").join("polyMesh");
         let owner = read_list(&poly.join("owner"));
@@ -5683,7 +5778,7 @@ mod tests {
 
         let b = case_block_spec(CaseKind::Plume, nx, ny, nz);
         let block = Block::new(&b).expect("block");
-        let w = b.window.as_ref().expect("window");
+        let w = b.windows.first().expect("window");
 
         let inlet = m.patches.iter().find(|p| p.name == "inlet").expect("inlet");
         let floor = m.patches.iter().find(|p| p.name == "floor").expect("floor");
@@ -6772,7 +6867,7 @@ mod tests {
     fn room_spec_has_a_floor_mounted_door_on_plus_x() {
         let (nx, ny, nz) = CaseKind::Room.default_resolution();
         let b = case_block_spec(CaseKind::Room, nx, ny, nz);
-        let w = b.window.as_ref().expect("room has a door window");
+        let w = b.windows.first().expect("room has a door window");
         assert_eq!(w.slot, 1);
         assert_eq!(w.name, "outlet");
         let ynodes = graded_nodes(&b.y);

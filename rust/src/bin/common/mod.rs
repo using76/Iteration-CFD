@@ -37,9 +37,8 @@ use std::path::{Path, PathBuf};
 
 use ofgpu::io::case::CaseControls;
 use ofgpu::io::case_json::{read_case_jsonc, LoweredCase};
-use ofgpu::io::nvdb::Precision as NvdbPrecision;
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
-use ofgpu::io::{FoamWriter, NvdbWriter, ResultWriter, UsdaWriter, VdbWriter, VtuWriter};
+use ofgpu::models::RasModel;
 use ofgpu::{Error, Gpu, HostMesh, Result, Scalar};
 
 // ==========================================================================
@@ -316,13 +315,21 @@ impl<'a> CaseNumerics<'a> {
 //      the same case file was silently ignored by one of the two drivers
 //      that can read it. One shared refusal cannot drift that way.
 //   2. Three of the `output` block's knobs (`visualisation.fields`,
-//      `visualisation.precision`, `restart.keep`) have NO implementation
-//      anywhere in this crate. Honouring the two that do exist
-//      (`format`, `interval`) and dropping the other three would manufacture
-//      a fresh instance of 13.4.1's defect inside the fix.
+//      `visualisation.precision`, `restart.keep`) had NO implementation
+//      anywhere in this crate. Honouring the two that did exist
+//      (`format`, `interval`) and dropping the other three would have
+//      manufactured a fresh instance of 13.4.1's defect inside the fix.
 //   3. `-permissive` is the documented escape and prints what it
 //      substituted, which is exactly what 13.4 asks of a case migrated from
 //      elsewhere.
+//
+// **Point 2 no longer applies, and the `output` block is no longer refused.**
+// SPEC-LIT S44 built the three missing pieces - `FieldSelection`,
+// `Precision` on both volume writers, `restart::Checkpoints` - and then wired
+// the whole block through `ofgpu::io::output_plan`. What is left here is the
+// `run` half, which is a different claim: no driver reading this format
+// adjusts its own time step, and `ofgpu-vof` (the one that does) takes an
+// OpenFOAM case directory.
 
 /// Refuse the case-format blocks no driver in this crate reads.
 ///
@@ -333,11 +340,13 @@ impl<'a> CaseNumerics<'a> {
 ///
 /// What is refused, and what the message names instead:
 ///
-/// * the whole `output` block -> `-output`, `-writeInterval`,
-///   `-restartWrite N`, `-restartFrom FILE`
 /// * `run.adjustTimeStep: true` -> `-deltaT` for a fixed step, `ofgpu-vof`
 ///   for the one adaptive loop this crate has
 /// * `run.maxCo` -> the same
+///
+/// **The `output` block is no longer here.** SPEC-LIT S44 implemented it;
+/// [`output_plan`] resolves it and `ofgpu::io::output_plan` carries its own
+/// S13.4 refusals, which are about individual entries rather than the block.
 ///
 /// `run.endTime`/`run.deltaT` are NOT refused: both formats' readers already
 /// turn them into `TurbulenceControls::n_outer_iterations`/`delta_t`
@@ -346,30 +355,6 @@ impl<'a> CaseNumerics<'a> {
 /// own banner - `ofgpu-fire` does.
 pub fn refuse_unimplemented_blocks(json: Option<&LoweredCase>) -> Result<()> {
     let Some(l) = json else { return Ok(()) };
-
-    if let Some(o) = &l.output {
-        let mut named: Vec<&str> = Vec::new();
-        if o.visualisation.is_some() {
-            named.push("visualisation");
-        }
-        if o.exact.is_some() {
-            named.push("exact");
-        }
-        if o.restart.is_some() {
-            named.push("restart");
-        }
-        if named.is_empty() {
-            named.push("(empty)");
-        }
-        ofgpu::io::contract::unsupported_note(
-            "output",
-            &named.join(", "),
-            &[],
-            "no ofgpu driver reads the output block. What is written is decided by the command line: -output foam,vtu,nvdb,vdb,usda for the format(s), -writeInterval for how often, -restartWrite N / -restartFrom FILE for checkpoints. output.visualisation.fields, output.visualisation.precision and output.restart.keep have no implementation at all",
-            "the command line's own -output / -writeInterval / -restartWrite",
-            (),
-        )?;
-    }
 
     if l.run.adjust_time_step {
         ofgpu::io::contract::unsupported_note(
@@ -490,6 +475,35 @@ pub fn refuse_buoyancy_without_temperature(
             "{driver} solves the turbulence transport equations on a frozen U and phi and reads no temperature field, so SPEC-LIT §17's buoyancy production G_b = (nu_t/Pr_t) g.grad(T)/T has nothing to be built from. ofgpu-plume, ofgpu-buoyant and ofgpu-fire transport T and do wire G_b into k and epsilon/omega"
         ),
         "no buoyancy production - G_b identically zero, exactly as gravity (0 0 0)",
+        (),
+    )
+}
+
+/// SPEC-LIT §13.4 for `constant/physicalProperties`' `viscosityModel` in a
+/// driver that solves NO momentum equation.
+///
+/// §38 makes the laminar viscosity a function of the local strain-rate
+/// magnitude, and the strain rate comes from `grad(U)`. A driver that holds
+/// `U` frozen and solves only the turbulence transport equations reads that
+/// entry and can do nothing with it - which is precisely the defect §13.4.1's
+/// standing test exists to catch, and precisely how `viscosityModel` sat in
+/// every generated case, read by nothing at all, until §38.
+///
+/// So it is refused BY NAME, and the refusal says which drivers do solve
+/// momentum. `Newtonian`/`constant` is not refused: that is the case's own
+/// single `nu`, which this driver does read.
+pub fn refuse_rheology_without_momentum(cc: &CaseControls, driver: &str) -> Result<()> {
+    if cc.rheology.is_newtonian() {
+        return Ok(());
+    }
+    ofgpu::io::contract::unsupported_note(
+        "constant/physicalProperties: viscosityModel",
+        cc.rheology.model.name(),
+        &["Newtonian", "constant"],
+        &format!(
+            "{driver} solves the turbulence transport equations on a frozen U and assembles no momentum equation, so SPEC-LIT 38's nu(gdot) has no strain rate to be evaluated at and would be read by nothing. ofgpu-buoyant and ofgpu-fire assemble momentum and do apply it"
+        ),
+        "Newtonian - the case's own single nu",
         (),
     )
 }
@@ -655,83 +669,39 @@ pub fn resident_mib(gpu: &Gpu) -> Result<(usize, usize)> {
 //  The output seam - `-output foam|vtu|nvdb|vdb|usda`, comma list
 // ==========================================================================
 
-/// One entry off `-output`. `ofgpu::io` supplies the writer each maps to;
-/// this only names the menu SPEC-LIT 13.4 requires a rejection to print.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
-    Foam,
-    Vtu,
-    Nvdb,
-    Vdb,
-    Usda,
-}
-
-pub const OUTPUT_FORMAT_NAMES: [&str; 5] = ["foam", "vtu", "nvdb", "vdb", "usda"];
-
-/// Parse a comma list (`"foam,vtu"`) into the formats it names, in the order
-/// given. An unrecognised name is a hard error naming the menu - SPEC-LIT
-/// 13.4 - never a silent drop.
-pub fn parse_output_formats(s: &str) -> Result<Vec<OutputFormat>> {
-    s.split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(|tok| match tok {
-            "foam" => Ok(OutputFormat::Foam),
-            "vtu" => Ok(OutputFormat::Vtu),
-            "nvdb" => Ok(OutputFormat::Nvdb),
-            "vdb" => Ok(OutputFormat::Vdb),
-            "usda" => Ok(OutputFormat::Usda),
-            other => Err(Error::Config(format!(
-                "-output: \"{other}\" is not a format ofgpu writes; available: {}",
-                OUTPUT_FORMAT_NAMES.join(", ")
-            ))),
-        })
-        .collect()
-}
-
-/// One boxed [`ResultWriter`] per requested format, ready for a driver's
-/// write loop to call `write_step` on in order.
-///
-/// `case_dir` is the OpenFOAM case root (where `FoamWriter` writes its time
-/// directories); the other formats get their own `<case_dir>/<subdir>/`
-/// so a case directory run with several `-output` formats does not mix an
-/// OpenFOAM time directory named `"0.1"` with a `.vtu` file of the same stem.
-pub fn build_writers(
-    case_dir: &Path,
-    stem: &str,
-    formats: &[OutputFormat],
-) -> Result<Vec<Box<dyn ResultWriter>>> {
-    let mut out: Vec<Box<dyn ResultWriter>> = Vec::with_capacity(formats.len());
-    for f in formats {
-        let w: Box<dyn ResultWriter> = match f {
-            OutputFormat::Foam => Box::new(FoamWriter::new(case_dir.to_path_buf())),
-            OutputFormat::Vtu => Box::new(VtuWriter::new(vtk_dir(case_dir), stem)?),
-            OutputFormat::Nvdb => {
-                Box::new(NvdbWriter::new(vdb_dir(case_dir), stem, NvdbPrecision::F32)?)
-            }
-            OutputFormat::Vdb => Box::new(VdbWriter::new(vdb_dir(case_dir), stem)?),
-            OutputFormat::Usda => Box::new(UsdaWriter::new(
-                case_dir.join(format!("{stem}.usda")),
-                "VDB",
-                stem,
-                "vdb",
-            )),
-        };
-        out.push(w);
-    }
-    Ok(out)
-}
-
-fn vtk_dir(case_dir: &Path) -> PathBuf {
-    case_dir.join("VTK")
-}
-fn vdb_dir(case_dir: &Path) -> PathBuf {
-    case_dir.join("VDB")
-}
+// `OutputFormat`, `OUTPUT_FORMAT_NAMES`, `parse_output_formats` and
+// `build_writers` used to live here. SPEC-LIT S44 moved them into
+// `ofgpu::io::output_plan` UNCHANGED and re-exports them from here, so no
+// driver's `use common::{...}` line had to change. The reason for the move is
+// the whole point of S44: the case file's `output` block and the command
+// line's `-output` must build the SAME writers in the SAME order, and two
+// copies of that mapping is one copy too many.
+// Not every binary uses every one of these - `ofgpu-k-omega` reads no JSONC
+// case and so never sees an `OutputPlan` - and each `[[bin]]` compiles this
+// file separately, so an unqualified re-export warns in five of the six.
+#[allow(unused_imports)]
+pub use ofgpu::io::output_plan::{
+    build_writers, parse_output_formats, refuse_output_named_twice, OutputFormat, OutputPipeline,
+    OutputPlan, OUTPUT_FORMAT_NAMES,
+};
 
 /// The usage line every driver that supports `-output` prints.
 pub const OUTPUT_USAGE: &str =
     "  -output LIST     comma list of foam,vtu,nvdb,vdb,usda (default: foam)";
+
+/// The case's `output` block, resolved - SPEC-LIT S44.
+///
+/// `None` on the OpenFOAM path (that format has no such block) and for a
+/// JSONC case that names none, which is every case written before S44 and
+/// which keeps the command-line route bitwise what it was.
+pub fn output_plan(json: Option<&LoweredCase>) -> Result<Option<OutputPlan>> {
+    let Some(l) = json else { return Ok(None) };
+    let Some(o) = &l.output else { return Ok(None) };
+    let plan = OutputPlan::from_json(o)?;
+    // Under `-permissive` every sub-block can be substituted away; an empty
+    // plan is no plan, and the driver falls back to its command line.
+    Ok(if plan.is_empty() { None } else { Some(plan) })
+}
 
 // ==========================================================================
 //  Restart (`.mcr`) - shared helpers for ofgpu-buoyant and ofgpu-vof
@@ -876,6 +846,32 @@ pub fn atoi(s: &str) -> i64 {
     }
 
     sign * v
+}
+
+// ==========================================================================
+//  Which driver builds which model - SPEC-LIT 13.4's "name the alternative"
+// ==========================================================================
+
+/// Which binary builds a given model, so a refusal can point somewhere real.
+///
+/// Written out rather than derived from the name: `RasModel::name()` is what a
+/// CASE FILE writes, and mangling it into a binary name gave
+/// `ofgpu-laundersharmake` and `ofgpu-realizableke` - neither of which exists.
+/// A table of six entries the compiler checks for exhaustiveness cannot drift
+/// the way a `to_lowercase().replace(..)` chain did.
+pub fn driver_for(m: RasModel) -> &'static str {
+    match m {
+        // All three k-epsilon variants live in one driver: same two fields,
+        // same two `0/` files, same three outputs.
+        RasModel::KEpsilon | RasModel::RealizableKE | RasModel::RNGkEpsilon => "ofgpu-k-epsilon",
+        // SPEC-LIT §33 needs `wallTreatment lowRe` and a wall-resolving mesh,
+        // which is a different CASE, not a different coefficient set - the
+        // coupled drivers are where it is reachable.
+        RasModel::LaunderSharmaKE => "ofgpu-buoyant or ofgpu-fire",
+        RasModel::KOmega | RasModel::KOmegaSST => "ofgpu-k-omega",
+        RasModel::Les => "ofgpu-buoyant or ofgpu-fire",
+        RasModel::Laminar => "any driver",
+    }
 }
 
 // ==========================================================================

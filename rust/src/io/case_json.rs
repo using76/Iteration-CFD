@@ -326,8 +326,140 @@ pub struct JsonFluid {
     /// serde's "unknown variant".
     #[serde(rename = "PrtModel", default, skip_serializing_if = "Option::is_none")]
     pub prt_model: Option<String>,
+    /// SPEC-LIT §38.7: which closure supplies the LAMINAR viscosity, and its
+    /// coefficients. Absent means `Newtonian`, which is `nu` above and is
+    /// bitwise the pre-§38 momentum equation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rheology: Option<JsonRheology>,
     #[serde(rename = "TRef")]
     pub t_ref: f64,
+}
+
+/// `physics.fluid.rheology` - SPEC-LIT §38.
+///
+/// Every coefficient is in the literature's DYNAMIC units and the block
+/// carries its own `rho` [kg/m³], because §5's momentum equation is
+/// KINEMATIC and the conversion cannot be guessed (§38.4). `rho` is required
+/// for every non-Newtonian model.
+///
+/// The coefficients are `Option` and the model is a free string on purpose.
+/// The string has to reach [`crate::rheology::RheologyModel::parse`] and come
+/// back as a §13.4 error NAMING the six spellings, not as serde's "unknown
+/// variant"; and the options are what let [`JsonCase::lower`] tell "the case
+/// wrote tau0" from "the case did not", so a coefficient the named model does
+/// not read is REFUSED rather than dropped. That check is
+/// [`crate::rheology::RheologyCoeffs::read_keys`], shared verbatim with the
+/// OpenFOAM reader so there is one §13.4 contract and not two.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonRheology {
+    /// `Newtonian`, `powerLaw`, `CrossPowerLaw`, `BirdCarreau`,
+    /// `HerschelBulkley` or `Casson`.
+    pub model: String,
+    /// Density [kg/m³] - required for every non-Newtonian model (§38.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rho: Option<f64>,
+    /// Zero-shear viscosity [Pa s].
+    #[serde(default, rename = "mu0", skip_serializing_if = "Option::is_none")]
+    pub mu0: Option<f64>,
+    /// Infinite-shear viscosity [Pa s].
+    #[serde(default, rename = "muInf", skip_serializing_if = "Option::is_none")]
+    pub mu_inf: Option<f64>,
+    /// Casson's plastic viscosity [Pa s].
+    #[serde(default, rename = "muC", skip_serializing_if = "Option::is_none")]
+    pub mu_c: Option<f64>,
+    /// Consistency [Pa s^n].
+    #[serde(default, rename = "K", skip_serializing_if = "Option::is_none")]
+    pub k: Option<f64>,
+    /// Power-law index [-].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<f64>,
+    /// Time constant [s].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lambda: Option<f64>,
+    /// Cross's exponent, or Carreau-Yasuda's `a` [-].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a: Option<f64>,
+    /// Yield stress [Pa].
+    #[serde(default, rename = "tau0", skip_serializing_if = "Option::is_none")]
+    pub tau0: Option<f64>,
+    /// Papanastasiou's regularisation parameter [s] - §38.3. A NUMERICAL
+    /// parameter, and printed as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m: Option<f64>,
+    /// Clip on the apparent viscosity [Pa s].
+    #[serde(default, rename = "muMin", skip_serializing_if = "Option::is_none")]
+    pub mu_min: Option<f64>,
+    #[serde(default, rename = "muMax", skip_serializing_if = "Option::is_none")]
+    pub mu_max: Option<f64>,
+    /// Floor on `gdot` before any divide or power [1/s] - §38.3.
+    #[serde(default, rename = "gammaDotFloor", skip_serializing_if = "Option::is_none")]
+    pub gamma_dot_floor: Option<f64>,
+    /// Elementwise relaxation of the viscosity fixed point - §38.5(iv).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relax: Option<f64>,
+}
+
+impl JsonRheology {
+    /// The key/value pairs the case actually wrote, in the vocabulary
+    /// [`crate::rheology::RheologyCoeffs::read_keys`] speaks.
+    fn stated(&self) -> Vec<(&'static str, f64)> {
+        let mut v = Vec::new();
+        let mut push = |k: &'static str, o: Option<f64>| {
+            if let Some(x) = o {
+                v.push((k, x));
+            }
+        };
+        push("rho", self.rho);
+        push("mu0", self.mu0);
+        push("muInf", self.mu_inf);
+        push("muC", self.mu_c);
+        push("K", self.k);
+        push("n", self.n);
+        push("lambda", self.lambda);
+        push("a", self.a);
+        push("tau0", self.tau0);
+        push("m", self.m);
+        push("muMin", self.mu_min);
+        push("muMax", self.mu_max);
+        push("gammaDotFloor", self.gamma_dot_floor);
+        push("relax", self.relax);
+        v
+    }
+
+    /// Resolve to [`crate::rheology::RheologyCoeffs`] under §13.4's contract.
+    pub fn lower(&self) -> Result<crate::rheology::RheologyCoeffs> {
+        use crate::rheology::RheologyCoeffs;
+
+        let mut c = RheologyCoeffs {
+            model: crate::rheology::RheologyModel::parse(
+                "physics.fluid.rheology.model",
+                &self.model,
+            )?,
+            ..RheologyCoeffs::default()
+        };
+        let stated = self.stated();
+
+        if c.is_newtonian() {
+            if let Some((k, _)) = stated.first() {
+                return Err(Error::Config(format!(
+                    "physics.fluid.rheology.{k} is set but the model is \
+                     `{}`, so it would be read by nothing (SPEC-LIT 13.4). \
+                     Name one of: {}",
+                    self.model,
+                    crate::rheology::RheologyModel::NAMES[1..].join(", ")
+                )));
+            }
+            return Ok(c);
+        }
+
+        let present: Vec<String> = stated.iter().map(|(k, _)| (*k).to_string()).collect();
+        c.read_keys(&present, "physics.fluid.rheology", |key| {
+            stated.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
+        })?;
+        c.validate("physics.fluid.rheology")?;
+        Ok(c)
+    }
 }
 
 /// `b = g·(TRef/T - 1)` (density-ratio, `SPEC-LIT` §9) is the only model this
@@ -367,6 +499,44 @@ pub struct JsonCombustion {
     /// Heat of combustion, J/kg. Propane's `46.45e6` by default.
     #[serde(rename = "dhc", default, skip_serializing_if = "Option::is_none")]
     pub dh_c: Option<f64>,
+    /// SPEC-LIT §42.4's `scheme`: `"singleStep"` (§27, the default) or
+    /// `"serialTwoStep"` (§42, McGrattan/McDermott/Floyd). Anything else is a
+    /// §13.4 error naming both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// SPEC-LIT §42.4's `s1`, the O2/fuel MASS ratio of step 1. Required
+    /// under `serialTwoStep`, refused under `singleStep`.
+    #[serde(rename = "s1", default, skip_serializing_if = "Option::is_none")]
+    pub s1: Option<f64>,
+    /// SPEC-LIT §42.4's `dh1`, J per kg of fuel released in step 1. Optional;
+    /// defaults to the Huggett split `dhc*s1/s`, which the banner prints.
+    #[serde(rename = "dh1", default, skip_serializing_if = "Option::is_none")]
+    pub dh1: Option<f64>,
+    /// SPEC-LIT (42.5)'s `yCO`, kg of CO per kg of fuel reacted at zero
+    /// step-2 conversion. Required under `serialTwoStep`.
+    #[serde(rename = "yCO", default, skip_serializing_if = "Option::is_none")]
+    pub y_co: Option<f64>,
+    /// SPEC-LIT §43.4's `extinctionModel`: `"none"` (the default) or
+    /// `"oxygen"` (the FDS EXTINCTION 1 predicate).
+    #[serde(rename = "extinctionModel", default, skip_serializing_if = "Option::is_none")]
+    pub extinction_model: Option<String>,
+    /// SPEC-LIT §43.4's `XOI`, the limiting oxygen index as a VOLUME
+    /// fraction. Refused unless `extinctionModel` is `"oxygen"`.
+    #[serde(rename = "XOI", default, skip_serializing_if = "Option::is_none")]
+    pub x_oi: Option<f64>,
+    /// SPEC-LIT §43.4's `TOI`, the critical flame temperature, K.
+    #[serde(rename = "TOI", default, skip_serializing_if = "Option::is_none")]
+    pub t_oi: Option<f64>,
+    /// SPEC-LIT §43.4's `Tfb`, the free-burn temperature, K.
+    #[serde(rename = "Tfb", default, skip_serializing_if = "Option::is_none")]
+    pub t_fb: Option<f64>,
+    /// SPEC-LIT §43.4's `Tinf`, ambient, K.
+    #[serde(rename = "Tinf", default, skip_serializing_if = "Option::is_none")]
+    pub t_inf: Option<f64>,
+    /// SPEC-LIT §43.4's `TAIT`, the auto-ignition temperature, K. `0` (the
+    /// default) means "no auto-ignition rule", which is FDS's own default.
+    #[serde(rename = "TAIT", default, skip_serializing_if = "Option::is_none")]
+    pub t_ait: Option<f64>,
 }
 
 /// SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by
@@ -829,49 +999,89 @@ pub struct JsonRun {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Part of [`JsonOutput`], which no driver reads - see that type.
+/// The dense voxel grid a renderer reads - SPEC-LIT S44.1.
+///
+/// Resolved by [`crate::io::output_plan::OutputPlan::from_json`], which is
+/// where every S13.4 refusal about these five entries lives; nothing here
+/// validates, exactly as nothing else in this file does.
 pub struct JsonVisualisation {
+    /// `vdb`, `nvdb`, or a comma list of them. A format from `exact`'s
+    /// column (`vtu`, `openfoam`) is an error naming `exact`; `usda` is an
+    /// error naming `usdScene`.
     pub format: String,
-    pub interval: f64,
-    pub fields: Vec<String>,
-    pub precision: String,
+    /// Seconds of physical time between writes. Absent (or `0`) is
+    /// "the final state, once" - SPEC-LIT S44.4. Was REQUIRED before S44.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<f64>,
+    /// Which cell fields to write, and in what order. Absent is every field
+    /// the run has - SPEC-LIT S44.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+    /// `fp32` (the default) or `fp16` - SPEC-LIT S44.3. This is the ONE
+    /// place in the case format where reduced precision is legitimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<String>,
+    /// Also write a `.usda` scene referencing the volume files.
     #[serde(rename = "usdScene", default)]
     pub usd_scene: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Part of [`JsonOutput`], which no driver reads - see that type.
+/// Interchange with the polyhedra preserved - SPEC-LIT S44.1.
 pub struct JsonExact {
+    /// `vtu` or `openfoam` (`foam`), or a comma list. A volume format is an
+    /// error naming `visualisation`.
     pub format: String,
-    pub interval: f64,
+    /// Seconds of physical time between writes; absent is "once, at the
+    /// end" - SPEC-LIT S44.4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<f64>,
+    /// **Always a SPEC-LIT S44.3 error.** Present as a field, rather than
+    /// left to `deny_unknown_fields`, so the message can say *why* - a lossy
+    /// "exact" format is a contradiction in the name - and name
+    /// `visualisation.precision`, where reduced precision belongs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Part of [`JsonOutput`], which no driver reads - see that type.
+/// This solver's own state, to resume from - SPEC-LIT S44.1/S44.5.
 pub struct JsonRestart {
-    pub interval: f64,
+    /// Seconds of physical time between checkpoints; absent is "once, at
+    /// the end".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<f64>,
+    /// How many checkpoints to retain. `0` keeps every one of them -
+    /// SPEC-LIT S44.5, and the safe reading of a zero is the one that
+    /// deletes nothing.
     pub keep: usize,
+    /// **Always a SPEC-LIT S44.3 error**, for a sharper reason than
+    /// `exact`'s: S5.1's argument for carrying `phi` in a checkpoint is that
+    /// a re-derived flux is not the conservative one, and a rounded one is
+    /// not either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<String>,
 }
 
-/// **Not implemented by any driver in this crate, and therefore a SPEC-LIT
-/// S13.4 error whenever a case carries it** - see
-/// `common::refuse_unimplemented_blocks`, which every driver that reads this
-/// format calls.
+/// What this run writes: three sub-blocks, three purposes - SPEC-LIT S44.
 ///
-/// The block is kept in the format, and in the schema, because it is what the
-/// format will grow into; what it is not is a set of settings that do
-/// something today. Three of its knobs - `visualisation.fields`,
-/// `visualisation.precision` and `restart.keep` - have no implementation
-/// anywhere in the crate at all, so honouring the two that DO exist
-/// (`format`, `interval`) and dropping the rest would be S13.4.1's defect
-/// manufactured inside its own fix.
+/// This block was a S13.4 refusal in its entirety until S44, and the reason
+/// is worth keeping: three of its knobs (`visualisation.fields`,
+/// `visualisation.precision`, `restart.keep`) had no implementation anywhere
+/// in the crate, so honouring `format` and `interval` because they happened
+/// to exist and dropping the other three in silence would have manufactured
+/// S13.4.1's own defect inside its fix. S44 builds all three
+/// ([`crate::io::output_plan::FieldSelection`],
+/// [`crate::io::nvdb::Precision`] on both volume writers, and
+/// [`crate::restart::Checkpoints`]) and then honours the block whole.
 ///
-/// What decides what a run writes is the command line: `-output
-/// foam,vtu,nvdb,vdb,usda` for the format(s), `-writeInterval` for how often,
-/// `-restartWrite N` / `-restartFrom FILE` for checkpoints. `-permissive`
-/// substitutes exactly that and prints it.
+/// Resolution, and every S13.4 refusal, is
+/// [`crate::io::output_plan::OutputPlan::from_json`]. A case that carries
+/// this block must NOT also name `-output`/`-writeInterval`/`-restartWrite`
+/// on the command line: those are the same settings said twice, and naming
+/// both is an error rather than a silent winner (S44.6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JsonOutput {
@@ -1098,6 +1308,9 @@ pub struct LoweredCase {
     /// those two accepted and ignored, which is the S13.4 defect this
     /// project keeps finding.
     pub prt_model: PrtModel,
+    /// `physics.fluid.rheology`, resolved - SPEC-LIT §38. Newtonian unless
+    /// the case named a closure.
+    pub rheology: crate::rheology::RheologyCoeffs,
     pub buoyancy: BuoyancyCoeffs,
     pub wall: WallFunctionCoeffs,
     pub turbulence_model: Option<String>,
@@ -1180,6 +1393,12 @@ pub struct LoweredCase {
     pub y_f_field: Option<LoweredScalarField>,
     pub o2_field: Option<LoweredScalarField>,
     pub products_field: Option<LoweredScalarField>,
+    /// SPEC-LIT §42.3's lumped intermediate `Y_I` - CO, soot, H2 and the
+    /// step-1 water vapour together. `Some` only under
+    /// `scheme: "serialTwoStep"`, because §27's single step has no
+    /// intermediate to transport and a field nothing reads is exactly the
+    /// §13.4 defect this crate keeps finding.
+    pub intermediate_field: Option<LoweredScalarField>,
 
     pub output: Option<JsonOutput>,
 
@@ -1254,6 +1473,7 @@ impl LoweredCase {
     pub fn to_case_controls(&self) -> CaseControls {
         let mut c = CaseControls {
             nu: self.nu,
+            rheology: self.rheology,
             turb: self.turb,
             wall: self.wall,
             buoyancy: self.buoyancy,
@@ -1628,18 +1848,12 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
         windows.push(WindowRegionSpec { name: region.name.clone(), on: region.on.clone(), window });
     }
 
-    if let Some(first) = windows.first() {
-        if windows.len() > 1 {
-            unsupported::<()>(
-                "mesh.regions",
-                &format!("{} regions", windows.len()),
-                &["exactly one region (blockgen::BlockSpec has a single window slot)"],
-                "the first region only; the rest are resolved but not carved",
-                (),
-            )?;
-        }
-        block.window = Some(first.window.clone());
-    }
+    // SPEC-LIT §42.8 Gate 2 generalised this from one region to one per SLOT:
+    // a compartment fire needs a burner window in the floor and a doorway
+    // window in a wall. Two regions on the SAME slot are still refused, by
+    // `blockgen::boundary_patches` and by name, because a slot split three
+    // ways cannot be written as contiguous startFace/nFaces runs.
+    block.windows = windows.iter().map(|w| w.window.clone()).collect();
 
     Ok((block, windows))
 }
@@ -2074,7 +2288,7 @@ fn turb_field_spec(
 /// [`LoweredVectorField::boundary`] must cover.
 fn mesh_patch_names(block: &BlockSpec) -> Vec<String> {
     let mut names: Vec<String> = block.patch_name.to_vec();
-    if let Some(w) = &block.window {
+    for w in &block.windows {
         names.push(w.name.clone());
     }
     names
@@ -2140,6 +2354,14 @@ impl JsonCase {
             Some(w) => PrtModel::parse("physics.fluid.PrtModel", w)?,
             None => PrtModel::Constant,
         };
+        // SPEC-LIT S38.7. Absent is `Newtonian`, which is what every case
+        // written before S38 existed means, and resolving it HERE means an
+        // unrecognised model, or a coefficient no model reads, is refused
+        // before any GPU work starts.
+        let rheology = match &self.physics.fluid.rheology {
+            Some(r) => r.lower()?,
+            None => crate::rheology::RheologyCoeffs::default(),
+        };
         let buoyancy = match self.physics.buoyancy {
             BuoyancyModel::DensityRatio => BuoyancyCoeffs {
                 g: to_vec3(self.physics.gravity),
@@ -2179,6 +2401,77 @@ impl JsonCase {
                 if let Some(v) = c.dh_c {
                     coeffs.dh_c = v as Scalar;
                 }
+
+                // ---- SPEC-LIT §42.4: the scheme and its split ------------
+                coeffs.scheme = crate::twostep::CombustionScheme::from_name(
+                    c.scheme.as_deref().unwrap_or(crate::twostep::CombustionScheme::NAMES[0]),
+                )?;
+                if c.s1.is_some() || c.y_co.is_some() || c.dh1.is_some() {
+                    let (Some(s1), Some(y_co)) = (c.s1, c.y_co) else {
+                        return Err(Error::Config(format!(
+                            "physics.fire.combustion gives {}{}{}but SPEC-LIT \
+                             §42.4 needs BOTH s1 and yCO: s1 is the O2/fuel \
+                             mass ratio of step 1, yCO is the CO produced per \
+                             kg of fuel, and neither can be derived from the \
+                             other. Propane under ISFEH10 Eq. (2) is \
+                             s1 = 1.451255, yCO = 1.270381",
+                            if c.s1.is_some() { "s1 " } else { "" },
+                            if c.y_co.is_some() { "yCO " } else { "" },
+                            if c.dh1.is_some() { "dh1 " } else { "" },
+                        )));
+                    };
+                    let s1 = s1 as Scalar;
+                    coeffs.two_step = Some(crate::twostep::TwoStepCoeffs {
+                        s1,
+                        dh1: c.dh1.map(|v| v as Scalar).unwrap_or_else(|| {
+                            crate::twostep::TwoStepCoeffs::huggett_dh1(coeffs.s, coeffs.dh_c, s1)
+                        }),
+                        y_co: y_co as Scalar,
+                    });
+                }
+
+                // ---- SPEC-LIT §43.4: extinction --------------------------
+                let model = crate::twostep::ExtinctionModel::from_name(
+                    c.extinction_model
+                        .as_deref()
+                        .unwrap_or(crate::twostep::ExtinctionModel::NAMES[0]),
+                )?;
+                let named: Vec<&str> = [
+                    ("XOI", c.x_oi.is_some()),
+                    ("TOI", c.t_oi.is_some()),
+                    ("Tfb", c.t_fb.is_some()),
+                    ("Tinf", c.t_inf.is_some()),
+                    ("TAIT", c.t_ait.is_some()),
+                ]
+                .into_iter()
+                .filter_map(|(k, present)| present.then_some(k))
+                .collect();
+                match model {
+                    crate::twostep::ExtinctionModel::None => {
+                        if !named.is_empty() {
+                            return Err(Error::Config(format!(
+                                "physics.fire.combustion names {} but \
+                                 extinctionModel is \"none\" (the default), \
+                                 which reads none of them - SPEC-LIT §43.4. \
+                                 Write \"extinctionModel\": \"oxygen\" to \
+                                 select the model those coefficients belong \
+                                 to, or remove them",
+                                named.join(", ")
+                            )));
+                        }
+                    }
+                    crate::twostep::ExtinctionModel::Oxygen => {
+                        let d = crate::twostep::ExtinctionCoeffs::default();
+                        coeffs.extinction = Some(crate::twostep::ExtinctionCoeffs {
+                            x_oi: c.x_oi.map(|v| v as Scalar).unwrap_or(d.x_oi),
+                            t_oi: c.t_oi.map(|v| v as Scalar).unwrap_or(d.t_oi),
+                            t_fb: c.t_fb.map(|v| v as Scalar).unwrap_or(d.t_fb),
+                            t_inf: c.t_inf.map(|v| v as Scalar).unwrap_or(d.t_inf),
+                            t_ait: c.t_ait.map(|v| v as Scalar).unwrap_or(d.t_ait),
+                        });
+                    }
+                }
+
                 coeffs.validate()?;
                 Ok::<_, Error>(coeffs)
             })
@@ -2413,7 +2706,9 @@ impl JsonCase {
         });
 
         // ---- species (SPEC-LIT S19/S27) --------------------------------
-        let (y_f_field, o2_field, products_field) = if let Some(y_f0) = self.initial.y_f {
+        let (y_f_field, o2_field, products_field, intermediate_field) = if let Some(y_f0) =
+            self.initial.y_f
+        {
             let mut y_f_boundary = BTreeMap::new();
             let mut o2_boundary = BTreeMap::new();
             let mut p_boundary_sp = BTreeMap::new();
@@ -2443,9 +2738,32 @@ impl JsonCase {
                     internal_uniform: 0.0,
                     boundary: p_boundary_sp,
                 }),
+                // SPEC-LIT §42.3: the intermediate carries the same
+                // ambient-zero shape as the products and is built ONLY under
+                // the two-step scheme.
+                matches!(
+                    combustion.as_ref().map(|c| c.scheme),
+                    Some(crate::twostep::CombustionScheme::SerialTwoStep)
+                )
+                .then(|| {
+                    let mut b = BTreeMap::new();
+                    for name in &names {
+                        // `resolve_patch_rule` already succeeded for every
+                        // name in the loop above, so this cannot fail here.
+                        if let Ok(rule) = resolve_patch_rule(&self.patches, name) {
+                            b.insert(name.clone(), oxidiser_product_spec_for(rule, 0.0));
+                        }
+                    }
+                    LoweredScalarField {
+                        name: "Y_I".to_string(),
+                        dimensions: dims.to_string(),
+                        internal_uniform: 0.0,
+                        boundary: b,
+                    }
+                }),
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
         // ---- turbulence closure fields ---------------------------------
@@ -2621,6 +2939,7 @@ impl JsonCase {
             nu,
             fluid,
             prt_model,
+            rheology,
             buoyancy,
             wall,
             turbulence_model,
@@ -2654,6 +2973,7 @@ impl JsonCase {
             y_f_field,
             o2_field,
             products_field,
+            intermediate_field,
             output: self.output.clone(),
             sources,
         })
@@ -2697,8 +3017,8 @@ mod tests {
         assert_eq!(lowered.block.z.n, 20);
         assert_eq!(lowered.block.patch_name[4], "floor");
         assert_eq!(lowered.block.patch_type[4], "wall");
-        assert!(lowered.block.window.is_some(), "the burner window should be carved");
-        let w = lowered.block.window.as_ref().unwrap();
+        assert!(!lowered.block.windows.is_empty(), "the burner window should be carved");
+        let w = lowered.block.windows.first().unwrap();
         assert_eq!(w.name, "inlet");
         assert_eq!(w.type_name, "patch");
 
@@ -3394,6 +3714,35 @@ mod tests {
 
         assert!(err.contains("mesh.grading.y"), "{err}");
         assert!(err.contains("bogus"), "{err}");
+    }
+
+    /// **The shipped schema has to BE the generated one.**
+    ///
+    /// `docs/schema/case-1.json` is what a case file's `$schema` points a
+    /// human's editor at, and it is a copy of [`emit_schema`]'s output. A
+    /// copy drifts: when SPEC-LIT S44 regenerated it, the shipped file was
+    /// still missing every field S42 and S43 had added months earlier -
+    /// `s1`, `yCO`, `dh1`, `extinctionModel`, `XOI`, `TAIT`, `TOI`, `Tfb`,
+    /// `Tinf` - so an editor validating against it flagged a valid case as
+    /// invalid. That is the documentation half of S13.4.1's defect, and this
+    /// is the test that stops it recurring.
+    ///
+    /// Line endings are normalised because git may check the file out with
+    /// CRLF; nothing else is.
+    #[test]
+    fn the_shipped_schema_is_the_generated_one() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/schema/case-1.json");
+        let shipped = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let norm = |s: &str| s.replace("
+", "
+").trim_end().to_string();
+        assert_eq!(
+            norm(&shipped),
+            norm(&emit_schema()),
+            "docs/schema/case-1.json has drifted from emit_schema(); regenerate it"
+        );
     }
 
     #[test]

@@ -231,14 +231,17 @@ fn run(o: &Options) -> Result<()> {
     // `read_control_dict`, which this driver went through above.
     common::refuse_buoyancy_without_temperature(&o.case_dir, &cc, None, "ofgpu-k-omega")?;
     common::refuse_non_orth_correctors_without_another_equation(&cc, "ofgpu-k-omega")?;
+    common::refuse_rheology_without_momentum(&cc, "ofgpu-k-omega")?;
 
     let selection = select_turbulence_model(&cc)?;
     match selection.model {
         RasModel::KOmega | RasModel::Laminar => {}
         other => {
             return Err(Error::Config(format!(
-                "this case asks for the {} model; ofgpu-k-omega builds only kOmega",
-                other.name()
+                "this case asks for the {} model; run it with {} \
+                 (ofgpu-k-omega builds only kOmega)",
+                other.name(),
+                common::driver_for(other),
             )));
         }
     }
@@ -515,7 +518,7 @@ fn run(o: &Options) -> Result<()> {
             fields: &vis_fields,
             foam: &foam_fields,
         };
-        let mut writers = build_writers(&o.case_dir, "kOmega", &o.output)?;
+        let mut writers = build_writers(&o.case_dir, "kOmega", &o.output, ofgpu::io::nvdb::Precision::F32)?;
         for w in &mut writers {
             w.write_step(&ctx)?;
         }
@@ -797,5 +800,52 @@ mod k_omega_tests {
         let mut zero = cc;
         zero.turb.n_non_orth_correctors = 0;
         assert!(common::refuse_non_orth_correctors_without_another_equation(&zero, "D").is_ok());
+    }
+
+    /// SPEC-LIT 13.4, the same shape one section later.
+    ///
+    /// `viscosityModel` has been written into every case `blockgen`
+    /// generates since that generator existed and was read by NOTHING until
+    /// S38. S38 reads it - but only a driver that assembles a momentum
+    /// equation can act on it, because `nu(gdot)` needs `grad(U)` and this
+    /// driver holds `U` frozen. So it is refused BY NAME here rather than
+    /// read, printed and dropped, which is the defect the sweep above found.
+    #[test]
+    fn a_non_newtonian_viscosity_model_that_reaches_no_momentum_equation_is_a_named_error() {
+        let case = channel("rheology");
+        apply(
+            &case,
+            &Knob {
+                label: "physicalProperties/viscosityModel",
+                file: "constant/physicalProperties",
+                from: "viscosityModel  constant;",
+                to: "viscosityModel  powerLaw;
+
+rheology
+{
+    rho 1;
+                         K 1e-05;
+    n 0.8;
+}",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = ofgpu::io::case::read_case_controls(&case).expect("controls");
+        assert!(!cc.rheology.is_newtonian(), "the knob must reach the controls");
+        assert_eq!(cc.rheology.k, 1e-5, "and so must its coefficients");
+
+        let e = common::refuse_rheology_without_momentum(&cc, "DRIVER")
+            .expect_err("a viscosity model that reaches no momentum equation is refused");
+        let msg = format!("{e}");
+        assert!(msg.contains("viscosityModel"), "must name the setting: {msg}");
+        assert!(msg.contains("powerLaw"), "must quote what the case said: {msg}");
+        assert!(msg.contains("ofgpu-fire"), "must name where it IS honoured: {msg}");
+
+        // `constant` - what every case in this tree writes - is silent.
+        let mut newtonian = cc;
+        newtonian.rheology = ofgpu::rheology::RheologyCoeffs::default();
+        assert!(common::refuse_rheology_without_momentum(&newtonian, "D").is_ok());
     }
 }

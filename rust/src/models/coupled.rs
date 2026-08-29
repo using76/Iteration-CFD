@@ -80,7 +80,7 @@ use crate::device::{DevBuf, Gpu};
 use crate::error::Result;
 use crate::field::GpuScalarField;
 use crate::models::les::Les;
-use crate::models::{KEpsilon, KOmega, KOmegaSst, LaunderSharmaKE};
+use crate::models::{KEpsilon, KOmega, KOmegaSst, LaunderSharmaKE, RealizableKe, RngKe};
 use crate::solver::SolverPerformance;
 use crate::turbulence::{BuoyancyProduction, C3Mode, FlowState};
 use crate::{Scalar, Vec3};
@@ -365,6 +365,139 @@ impl<'m> CoupledTurbulence for CoupledLaunderSharmaKE<'m> {
         // near-wall correction that a combustion mixing-time estimate - which
         // is never evaluated inside the viscous sublayer to begin with - does
         // not need resolved any more finely than that.
+        CombustionMixing::Epsilon {
+            k: self.model.k(),
+            epsilon: self.model.epsilon(),
+        }
+    }
+}
+
+// ==========================================================================
+//  realizableKE - SPEC-LIT §40
+// ==========================================================================
+
+/// [`RealizableKe`] behind [`CoupledTurbulence`].
+///
+/// No `buoy` field, unlike every other wrapper here, and that absence is the
+/// point: SPEC-LIT §40.5 has no `G_b` term for the `C_1 S epsilon` production
+/// form, Shih et al. specify none, and inventing `C_1 (eps/k) C_3 G_b` for a
+/// model whose `epsilon` production is not proportional to `G` would be the
+/// silent substitution §13.4 forbids. `registry::build_coupled` therefore
+/// REFUSES a buoyant case under this model by name, so a `ThermalCtx` can
+/// never reach here in the first place - and if one did, the `correct` below
+/// would still not read it, which is why there is no field for it to be read
+/// from.
+pub struct CoupledRealizableKe<'m> {
+    model: RealizableKe<'m>,
+}
+
+impl<'m> CoupledRealizableKe<'m> {
+    pub fn new(model: RealizableKe<'m>) -> Self {
+        Self { model }
+    }
+
+    pub fn model(&self) -> &RealizableKe<'m> {
+        &self.model
+    }
+    pub fn model_mut(&mut self) -> &mut RealizableKe<'m> {
+        &mut self.model
+    }
+}
+
+impl<'m> CoupledTurbulence for CoupledRealizableKe<'m> {
+    fn initialise(&mut self, gpu: &Gpu, flow: &FlowState) -> Result<()> {
+        self.model.initialise(gpu, flow)
+    }
+
+    fn correct(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        _thermal: Option<&ThermalCtx>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        self.model.correct(gpu, flow)
+    }
+
+    fn nut(&self) -> &GpuScalarField {
+        self.model.nut()
+    }
+    fn name(&self) -> &str {
+        "realizableKE"
+    }
+    fn output_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        self.model.named_fields()
+    }
+    fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        self.model.named_fields_mut()
+    }
+    fn combustion_mixing(&self) -> CombustionMixing<'_> {
+        CombustionMixing::Epsilon {
+            k: self.model.k(),
+            epsilon: self.model.epsilon(),
+        }
+    }
+}
+
+// ==========================================================================
+//  RNGkEpsilon - SPEC-LIT §41
+// ==========================================================================
+
+/// [`RngKe`] behind [`CoupledTurbulence`].
+///
+/// Buoyancy IS carried here (SPEC-LIT §41.5): `C_e1 (eps/k) G` is §6.1's
+/// production form exactly, so §17's `C_1 (eps/k) C_3 G_b` transfers with
+/// `C_1 = C_e1` and no new physics is invented.
+pub struct CoupledRngKe<'m> {
+    model: RngKe<'m>,
+    buoy: Option<BuoyancySettings>,
+}
+
+impl<'m> CoupledRngKe<'m> {
+    pub fn new(model: RngKe<'m>, buoy: Option<BuoyancySettings>) -> Self {
+        Self { model, buoy }
+    }
+
+    pub fn model(&self) -> &RngKe<'m> {
+        &self.model
+    }
+    pub fn model_mut(&mut self) -> &mut RngKe<'m> {
+        &mut self.model
+    }
+}
+
+impl<'m> CoupledTurbulence for CoupledRngKe<'m> {
+    fn initialise(&mut self, gpu: &Gpu, flow: &FlowState) -> Result<()> {
+        self.model.initialise(gpu, flow)
+    }
+
+    fn correct(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        thermal: Option<&ThermalCtx>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        match (self.buoy, thermal) {
+            (Some(settings), Some(ctx)) => {
+                self.model.set_buoyancy(settings.production(ctx))?;
+                self.model.correct_buoyant(gpu, flow, Some(ctx.t))
+            }
+            _ => self.model.correct(gpu, flow),
+        }
+    }
+
+    fn nut(&self) -> &GpuScalarField {
+        self.model.nut()
+    }
+    fn name(&self) -> &str {
+        "RNGkEpsilon"
+    }
+    fn output_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        self.model.named_fields()
+    }
+    fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        self.model.named_fields_mut()
+    }
+    fn combustion_mixing(&self) -> CombustionMixing<'_> {
         CombustionMixing::Epsilon {
             k: self.model.k(),
             epsilon: self.model.epsilon(),

@@ -98,13 +98,13 @@ applied on faces rather than interpolated from cell values.
 
 | | |
 |---|---|
-| RANS | Standard k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma low-Re k-ε (SPEC-LIT §33 — the only model `wallTreatment lowRe` is valid under; its damping functions integrate through the viscous sublayer, checked against the analytic `Re_t` limits and against a live channel's own `u+`/`y+` law of the wall) |
+| RANS | Standard k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma low-Re k-ε (SPEC-LIT §33 — the only model `wallTreatment lowRe` is valid under; its damping functions integrate through the viscous sublayer, checked against the analytic `Re_t` limits and against a live channel's own `u+`/`y+` law of the wall), **realizable k-ε** (Shih et al., SPEC-LIT §40 — `C_mu` a field, so the Boussinesq normal stress cannot go negative; gated on that directly rather than on a channel, and on the homogeneous-shear fixed point its own coefficients imply) and **RNG k-ε** (Yakhot & Orszag, SPEC-LIT §41 — the `R` term absorbed into a per-cell `C_e2*`, diffusivities `α(ν + ν_t)` rather than `ν + ν_t/σ`) |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES filter widths | Cube root of volume, maximum edge length, Scotti anisotropy correction, van Driest damping |
 | LES wall model | Werner–Wengle (1991) — an analytically invertible power law integrated over the first cell's wall-parallel average speed, no Newton iteration; the `standard`/`spalding` presets both collapse to this one model under LES, `lowRe` gives `nu_t,w = 0`, and `rough` is refused by name (§13.4) since no rough LES wall model exists yet |
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | Turbulence selection in the coupled solvers (`ofgpu-buoyant`, `ofgpu-fire`) | `ofgpu-buoyant`: the `CoupledTurbulence` trait dispatches on the case's own `RAS { model ...; }`/`simulationType`, exactly as the standalone drivers do — k-ε, k-ω, k-ω SST (wall distance computed automatically) and LES (Smagorinsky/WALE/Deardorff, with §16's filter widths and van Driest damping) all construct the ACTUAL model asked for, and buoyancy production `G_b` is wired into the right equation for each (§17, §30.2). `ofgpu-fire`: still k-ε only — its combustion mixing-time closure and thermal wall function need `epsilon` directly, so any other model is refused by name, a §13.4 error, not a silent substitution |
-| Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — `LaunderSharmaKE` (SPEC-LIT §33) is the one model on that menu, `kEpsilon`/`kOmega`/`kOmegaSST` still are not, so `lowRe` under any of the latter three is refused by name rather than left to diverge (SPEC-LIT §32) |
+| Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — `LaunderSharmaKE` (SPEC-LIT §33) is the one model on that menu, `kEpsilon`/`kOmega`/`kOmegaSST`/`realizableKE`/`RNGkEpsilon` still are not, so `lowRe` under any of the latter three is refused by name rather than left to diverge (SPEC-LIT §32) |
 | Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. Validated against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic PLANE CHANNEL (SPEC-LIT §32/§34): the **wall-function leg CLOSES** — Gnielinski at Petukhov's smooth-pipe `f` −5.9% (±10%), Dittus-Boelter −12.9% (±20–25%) — and the **resolved `lowRe` leg does NOT** (+11.9% Gnielinski, +4.0% Dittus-Boelter). At each leg's own MEASURED wall friction factor the Reynolds-analogy verdict closes on neither (+34.3%, +14.9%). Numbers are the record at the SHIPPED DEFAULT `PrtModel constant`, rerun after SPEC-LIT §26.1. Selecting SPEC-LIT §37's Kays-Crawford variable `Pr_t` (opt-in, one token, nothing tuned) moves the resolved leg from +11.9% to **+4.3%** and closes the absolute-prediction verdict on BOTH legs, while moving the wall-function control only −0.06% of `Nu`; the Reynolds-analogy verdict on the wall-function leg is untouched at +34.0%, being a friction finding rather than a thermal one. **SPEC-LIT §26.1 closed the energy imbalance this gate carried as an uncertainty on every one of those numbers**: §25.1's divergence constraint was implemented without its conduction term `div(k_eff grad T)`, so the resolved leg's steady bookkeeping was short by +3.11% (+3.35% under Kays-Crawford); it is now +0.000089%, and the resolved leg's Kays-Crawford pass no longer needs an error bar quoted beside it. Full account, including what it does NOT establish, in `docs/07-fire-solver.md` §1.1 |
 | Wall distance | Poisson method (Tucker 1998) |
 | Buoyancy production | G_b term (Rodi 1987, Henkes et al. 1991) |
@@ -146,7 +146,8 @@ applied on faces rather than interpolated from cell values.
 |---|---|
 | Low-Mach formulation | `p = p0(t) + p~(x,t)` split, the divergence constraint, `p0(t)` integration in a sealed or open compartment (Rehm & Baum 1978) |
 | Energy equation | Sensible enthalpy, `k_eff = k + rho cp nu_t/Prt`, fixed-flux and fixed-temperature wall conditions, the Jayatilleke thermal wall function on `thermalWallFunction` walls (SPEC-LIT §29.3) |
-| Combustion | Mixing-controlled single-step EDM (Magnussen & Hjertager 1977) — `Y_F`/`Y_O2`/`Y_P` transport, a fuel-depletion clip, fuel mass consumed and heat released agreeing exactly (to round-off) |
+| Combustion | Mixing-controlled single-step EDM (Magnussen & Hjertager 1977, **the default**) — `Y_F`/`Y_O2`/`Y_P` transport, a fuel-depletion clip, fuel mass consumed and heat released agreeing exactly (to round-off). **And the serial two-step mixing-controlled scheme** (McGrattan, McDermott & Floyd, ISFEH10 2022 — SPEC-LIT §42, selected by `scheme serialTwoStep`): the SAME mixing-controlled rate applied twice **serially** inside one time step, so the oxygen step 1 left over oxidises the CO step 1 made. No Arrhenius rate, no Jacobian, no ODE integrator, no stiffness. One extra transported species `Y_I`, and `Y_CO = f_CO Y_I` written out |
+| Local extinction | The FDS `EXTINCTION 1` critical-flame-temperature predicate (SPEC-LIT §43, `extinctionModel oxygen`) — a piecewise-linear limiting oxygen index against cell temperature, a free-burn cut-off and an auto-ignition rule. Defaults to `none`, so every recorded result is unmoved |
 | Radiation | Gray P1 approximation (Modest ch. 15), Marshak wall condition, a `chi_r` radiant-fraction floor — **and gray fvDOM** (Modest ch. 16; Fiveland 1984; Truelove 1987 — SPEC-LIT §36): the same RTE along 24 level-symmetric S4 ordinates, `radiationModel` selects between them. Measured on `cases/burnerPlume.jsonc` (32,768 cells, 1,200 steps, RTX 5070 Ti): radiated fraction 14.97% (P1) vs 13.79% (fvDOM), wall time 19.22 s vs 121.5 s |
 | Validation gates | Sealed-box `dp0/dt` ramp (analytic), exact burner heat release, radiative equilibrium, cut-cell closure, msh hex closure — all permanent `ofgpu-validate` checks |
 | Field output & restart | `-output foam,vtu,nvdb,vdb,usda` and `-writeInterval` write `U`, `p`, `T`, the turbulence closure and any species fields the same way `ofgpu-buoyant`/`ofgpu-vof` do; `-restartWrite N`/`-restartFrom FILE` checkpoint and resume — `p0`, `dp0dt` and the species mass fractions are carried across the restart, not only `U`/`p`/`T`, because a low-Mach run's thermodynamic state is more than those three fields. 40 steps continuous vs. 20+restart+20 agree on the first post-restart pressure residual, `p0` and total enthalpy |
@@ -158,7 +159,8 @@ applied on faces rather than interpolated from cell values.
 |---|---|
 | JSONC case | One JSON file (comments and trailing commas allowed) naming mesh, physics, boundaries, numerics, sources and the fire block — the schema is generated by `schemars` from the same types the reader uses, so the two cannot disagree |
 | Restart (`.mcr`) | Full double precision, `phi` included, refused on a mesh-hash mismatch, versioned |
-| Visualisation/interchange output | VTU (appended binary, polyhedra preserved), NanoVDB/OpenVDB (`.vdb`/`.nvdb`), a USD (`.usda`) scene referencing them |
+| Visualisation/interchange output | VTU (appended binary, polyhedra preserved), NanoVDB/OpenVDB (`.vdb`/`.nvdb`, `fp32` or `fp16` voxels), a USD (`.usda`) scene referencing them |
+| The case file drives them (SPEC-LIT §44) | `output.visualisation` (`format`, `interval`, `fields`, `precision`, `usdScene`), `output.exact` (`format`, `interval`) and `output.restart` (`interval`, `keep`) are read by every driver that reads a JSONC case. `fields` selects and orders and refuses a name the run does not have, listing what it does; `precision` is `fp16`/`fp32` on the two volume writers and an error anywhere else; `keep` retains the N most recent checkpoints and deletes older ones — only ones **this run wrote**, never anything else in the directory |
 
 ---
 
@@ -249,7 +251,7 @@ shared refusal now covers all of them:
 
 | Setting | Treatment |
 |---|---|
-| the whole `output` block | **refused**, naming `-output` / `-writeInterval` / `-restartWrite N` / `-restartFrom FILE`. `visualisation.fields`, `visualisation.precision` and `restart.keep` have no implementation anywhere in the crate, so wiring the two that do exist and dropping those three in silence would be §13.4.1's defect manufactured inside its own fix |
+| the whole `output` block | **implemented** — SPEC-LIT §44. It was refused until then, and the reason is worth keeping: `visualisation.fields`, `visualisation.precision` and `restart.keep` had no implementation anywhere in the crate, so wiring the two that did exist (`format`, `interval`) and dropping those three in silence would have been §13.4.1's defect manufactured inside its own fix. §44 built all three first. What is still refused is the *combination*: a case that carries the block **and** a command line naming `-output`/`-writeInterval`/`-restartWrite` says the same thing twice, and that is an error naming both rather than a silent winner |
 | `run.adjustTimeStep: true`, `run.maxCo` | **refused** — no driver that reads a JSONC case adjusts its own step. `ofgpu-vof` is the one adaptive loop in this crate (an OpenFOAM directory's `controlDict` `adjustTimeStep` + `maxCo` + `maxDeltaT`, or `-maxCo`) and it now actually reads all three |
 | `controlDict/adjustTimeStep yes` (OpenFOAM) | **refused** in `read_control_dict`, once, for every driver that goes through it |
 | `physics.gravity` / `constant/g` under `ofgpu-k-epsilon` or `ofgpu-k-omega` | **refused** — both models have had a `set_buoyancy` all along and nothing called it; §17's `G_b` needs a temperature field and these two drivers read none. The error names `ofgpu-plume`, `ofgpu-buoyant` and `ofgpu-fire` |
@@ -261,11 +263,11 @@ shared refusal now covers all of them:
 ## Validation
 
 ```
-cargo test        814 passed, 0 failed, 2 ignored (lib)
-                  905 passed, 0 failed, 4 ignored (every target — including the
+cargo test        946 passed, 0 failed, 2 ignored (lib)
+                  1057 passed, 0 failed, 4 ignored (every target — including the
                   per-binary CLI-parsing suites and SPEC-LIT §13.4.1's per-driver
                   "two runs must differ" pair tests)
-ofgpu-validate    314 / 314 checks passed (279 computed live, 35 replayed from recorded measurements)
+ofgpu-validate    449 / 449 checks passed (401 computed live, 48 replayed from recorded measurements)
 ```
 
 **SPEC-LIT §13.4.1's standing requirement**: two short runs of a driver,
@@ -656,8 +658,14 @@ Convert binary-format cases to ASCII before use.
   Rather than silently falling back to Euler, the solver reports the reason.
 - **No compressible or transonic capability.** Density-weighted time derivatives
   are implemented and used by VOF, but the pressure equation is incompressible.
-- **Combustion is mixing-controlled single-step (EDM) only.** No finite-rate
-  chemistry mechanism. ~~**Radiation is gray P1 only.**~~ **Fixed (SPEC-LIT
+- ~~**Combustion is mixing-controlled single-step (EDM) only.**~~ **Partly
+  fixed (SPEC-LIT §42/§43).** The serial two-step mixing-controlled scheme and
+  a local-extinction predicate are implemented, and predict CO, incomplete
+  combustion and where the flame goes out. There is still **no finite-rate
+  (Arrhenius) mechanism** — no Westbrook–Dryer, no Jones–Lindstedt, no stiff
+  ODE integrator. §42 also keeps the molar mass `W̄` and the specific heat
+  `c_p` CONSTANT, so density and thermal expansion are still computed with
+  air's values even once CO2 and CO are distinguished. ~~**Radiation is gray P1 only.**~~ **Fixed (SPEC-LIT
   §36).** `fvDOM` (finite-volume discrete ordinates, 24-ordinate level-symmetric
   S4) is implemented and selected by `radiationModel`; both models share one
   `EnergySources` registration and the same `chi_r` floor. Radiation is still
@@ -761,6 +769,21 @@ Sources for the numerical methods and models. Section numbers refer to
 - Patel, V. C., Rodi, W., & Scheuerer, G. (1985). Turbulence models for
   near-wall and low Reynolds number flows: a review. *AIAA Journal*, 23(9),
   1308–1319. — §33
+- Shih, T.-H., Liou, W. W., Shabbir, A., Yang, Z., & Zhu, J. (1995). A new
+  k-epsilon eddy viscosity model for high Reynolds number turbulent flows.
+  *Computers & Fluids*, 24(3), 227–238. Read as **NASA TM-106721 /
+  ICOMP-94-21** (1994), a US government work in the public domain; the journal
+  version is paywalled and was not read. — §40
+- Yakhot, V., Orszag, S. A., Thangam, S., Gatski, T. B., & Speziale, C. G.
+  (1992). Development of turbulence models for shear flows by a double
+  expansion technique. *Physics of Fluids A*, 4(7), 1510–1520. Read as
+  **ICASE Report 91-65 / NASA CR-187611** (1991). — §41
+- Yakhot, V., & Orszag, S. A. (1986). Renormalization group analysis of
+  turbulence. I. Basic theory. *Journal of Scientific Computing*, 1(1), 3–51.
+  — §41
+- Reynolds, W. C. (1987). *Fundamentals of turbulence for turbulence modeling
+  and simulation.* AGARD Report No. 755. — §40 (the realizability
+  constraints the variable `C_mu` is constructed to satisfy)
 
 ### Turbulence — LES
 

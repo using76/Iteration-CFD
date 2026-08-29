@@ -4911,3 +4911,2065 @@ four runs and the verdict.
 > §37 could only report "as closing at the measured value only", its ±3.35 %
 > band straddling the edge — is **+7.7 % with no band at all** and closes
 > outright.
+
+---
+
+## 38. Generalised-Newtonian viscosity
+
+**Ostwald, *Kolloid-Z.* 36 (1925) 99–117** and **de Waele (1923)** — the power
+law; **Cross, *J. Colloid Sci.* 20 (1965) 417–437**; **Carreau, *Trans. Soc.
+Rheol.* 16 (1972) 99–127** and **Yasuda, Armstrong & Cohen, *Rheol. Acta* 20
+(1981) 163–178**; **Herschel & Bulkley, *Kolloid-Z.* 39 (1926) 291–300**;
+**Casson, in Mill (ed.), *Rheology of Disperse Systems*, Pergamon (1959)
+84–104**; **Papanastasiou, *J. Rheol.* 31 (1987) 385–404** — the
+regularisation; **Bercovier & Engelman, *J. Comput. Phys.* 36 (1980) 313–326**
+— the alternative regularisation; **Frigaard & Nouar, *J. Non-Newtonian Fluid
+Mech.* 127 (2005) 1–26** — what regularisation costs; **Bird, Armstrong &
+Hassager, *Dynamics of Polymeric Liquids* vol. 1, 2nd ed., Wiley (1987)** — the
+family; **Chhabra & Richardson, *Non-Newtonian Flow and Applied Rheology*, 2nd
+ed. (2008)** — Buckingham–Reiner. No GPL-licensed source was consulted.
+
+§5 assembles momentum with `nu_eff = nu + nu_t` built from a single case-wide
+`nu`. This section replaces the FIRST term by a field: a *generalised Newtonian
+fluid*, whose stress is still instantaneously and isotropically proportional to
+the rate of deformation, with the proportionality a function of one cell-local
+scalar. No memory, no elasticity, no extra transported tensor. (Viscoelasticity
+— Oldroyd-B, Giesekus, PTT — is a different model class and is NOT specified
+here.)
+
+### 38.1 The invariant, and why no new kernel computes it
+
+```
+D     = 1/2 (grad(u) + grad(u)^T)                 rate of deformation
+gdot  = sqrt(2 D:D)                               [1/s]
+tau   = 2 mu(gdot) D                              deviatoric stress [Pa]
+```
+
+For simple shear `u = (gdot y, 0, 0)` this returns exactly `gdot`, which is the
+convention every closure in §38.2 is fitted in.
+
+`sqrt(2 symm(grad U) : symm(grad U))` is already computed by
+`turbulence::strain_rate_mag` / `turbStrainRateMag` (§6.3, §6.5), which had no
+caller. It is `gdot` verbatim, and this section is its first user. The cell
+gradient it consumes is `fv::fvc_grad_vector`, a Green–Gauss gather over the
+cell→face CSR, so the whole chain is gather-shaped and atomic-free.
+
+### 38.2 The five closures
+
+`mu_0` zero-shear viscosity, `mu_inf` infinite-shear viscosity, `K`
+consistency [Pa s^n], `n` power-law index, `lam` time constant [s], `a`
+Yasuda exponent, `tau_0` yield stress [Pa], `mu_c` Casson plastic viscosity.
+
+```
+ (1) power law                mu = K gdot^(n-1)
+
+ (2) Cross                    mu = mu_inf + (mu_0 - mu_inf)/(1 + (lam gdot)^m)
+
+ (3) Bird-Carreau             mu = mu_inf + (mu_0 - mu_inf)[1 + (lam gdot)^a]^((n-1)/a)
+                              a = 2 is Bird-Carreau proper; general a is
+                              Carreau-Yasuda, and ONE formula serves both
+
+ (4) Herschel-Bulkley         tau = tau_0 + K gdot^n above yield, rigid below
+                              mu  = tau_0/gdot + K gdot^(n-1)    SINGULAR at 0
+
+ (5) Casson                   sqrt(tau) = sqrt(tau_0) + sqrt(mu_c gdot)
+                              mu  = (sqrt(tau_0/gdot) + sqrt(mu_c))^2  SINGULAR
+```
+
+(1) is (3) without its two plateaux and is kept separate because it is the
+model a case actually names. (2) and (3) are bounded everywhere and need no
+regularisation.
+
+### 38.3 Regularisation, and why it is not optional
+
+(4) and (5) are ideal viscoplastic models: below yield the material is rigid,
+which is a constraint, not a viscosity. A segregated finite-volume solver
+cannot express a rigid region, so `mu` must be made finite at `gdot = 0`.
+*DESIGN*: Papanastasiou, in the **product** form, which is the one that stays
+bounded for `n < 1` as well:
+
+```
+ Herschel-Bulkley, regularised:
+
+     mu(gdot) = (1 - exp(-m gdot)) (tau_0 + K gdot^n) / gdot
+
+     gdot -> 0    =>  mu -> m tau_0                      finite plug viscosity
+     gdot -> inf  =>  mu -> tau_0/gdot + K gdot^(n-1)    the exact HB law
+
+ Casson, regularised the same way:
+
+     mu(gdot) = ( sqrt(mu_c) + sqrt(tau_0) sqrt((1 - exp(-m gdot))/gdot) )^2
+
+     gdot -> 0    =>  mu -> (sqrt(mu_c) + sqrt(m tau_0))^2   finite
+```
+
+The naive form `mu = K gdot^(n-1) + (tau_0/gdot)(1 - exp(-m gdot))` regularises
+only the yield term and **still diverges** through `K gdot^(n-1)` for `n < 1`.
+It is not what this section specifies.
+
+`m` [s] is a NUMERICAL parameter, not a fluid property. Frigaard & Nouar show
+regularisation systematically misrepresents the yield surface and that true
+rigid plugs are not recoverable at any finite `m`. The alternative — augmented
+Lagrangian with an inner saddle-point iteration and a host-visible convergence
+test — would break CUDA-Graph capture and is NOT specified here. So: regularise,
+clip, and PRINT `m`, `mu_min` and `mu_max` in the run banner.
+
+Two further guards, both *DESIGN*:
+
+```
+ gdot_floor   gdot is replaced by max(gdot, gdot_floor) before any pow or
+              divide, so a uniform field on the first iteration (gdot = 0
+              exactly) gives a finite viscosity rather than 0^(n-1) = inf.
+              Same discipline as §9's temperature floor.
+
+ clip         mu <- min(mu_max, max(mu_min, mu)), applied to EVERY model,
+              including the two that need no regularisation, so a case can
+              always bound the viscosity ratio the linear solver sees.
+```
+
+### 38.4 Kinematic units, and the density a case must state
+
+§5 solves the KINEMATIC momentum equation: `nu` is m^2/s and there is no
+density anywhere in it. Every closure in §38.2 is fitted in DYNAMIC units.
+Both are true at once and the conversion cannot be guessed, so:
+
+*DESIGN.* Every rheology parameter a case writes is in the literature's
+DYNAMIC units, and the block carries its own `rho` [kg/m^3]. The reader
+divides once, on the host, before anything reaches the device:
+
+```
+ nu_0 = mu_0/rho    nu_inf = mu_inf/rho    k = K/rho     [m^2 s^(n-2)]
+ t_0  = tau_0/rho   [m^2/s^2]              nu_c = mu_c/rho
+ nu_min = mu_min/rho                       nu_max = mu_max/rho
+```
+
+`rho` is REQUIRED whenever a non-Newtonian model is named, and is refused by
+name if absent — a rheology block without it is exactly the §13.4 defect this
+project keeps finding, because `K = 0.35` means two viscosities a thousand
+apart depending on which unit was meant.
+
+### 38.5 Discretisation
+
+Only two things change in §5's assembly.
+
+**(i) `nu` becomes a field.** `nu_eff = nu + nu_t` is evaluated per cell and
+per boundary face from a device buffer rather than a scalar:
+
+```
+ nu_eff[i] = nu_lam[i] + nu_t[i]
+```
+
+With `nu_lam[i] = nu` for every `i` this is BIT-IDENTICAL to the scalar form,
+because `a + b` in IEEE-754 does not depend on how `b` was delivered. That is
+the regression gate of §38.8 and it is checked, not argued.
+
+Nothing downstream changes: the face product `nu_eff_f |Sf|` and
+`fvm_laplacian(nu_eff_mag_sf, ., -1)` are untouched. `fv::fvm_laplacian`
+recomputes its own face coefficient in the diagonal pass rather than reading
+`upper` back — the property `operators_do_not_couple_through_the_diagonal`
+pins — which is exactly what makes a face-varying coefficient safe to drop in.
+
+**(ii) The deviatoric completion stops being optional.**
+
+```
+ div(2 mu D) = div(mu grad u) + div(mu grad(u)^T)
+
+ [div(mu grad(u)^T)]_i = d_j(mu d_i u_j)
+                       = (grad mu)_j (grad u)_ij  +  mu d_i(d_j u_j)
+                       = (grad mu) . grad(u)^T          for div(u) = 0
+```
+
+Identically zero for constant `mu`; NOT zero for a shear-thinning fluid. §5
+already carries it as `MomentumControls::variable_viscosity_stress`
+(default `true`), so a non-Newtonian case needs it on and the reader
+**refuses** a non-Newtonian model with it off, naming both.
+
+**Honest scope note.** This term vanishes identically in fully developed
+plane or pipe flow — with `u = (u(y), 0, 0)` and `mu = mu(y)`,
+`d_j(mu d_i u_j) = 0` for every `i`, because nothing varies along `x`. §38.9's
+Gate 1 therefore does NOT exercise it, whatever a reading of "it matters near
+walls" suggests, and this specification says so rather than claiming a gate it
+does not have.
+
+**(iii) Boundary faces get their own `gdot`.** `grad(U)` is not stored on
+boundary faces, and copying the owner cell's `mu` is a first-order error that
+lands directly in the wall shear. The wall-normal derivative of the tangential
+velocity is face-local:
+
+```
+ s      = Delta_b (U_b - U_P)              snGrad(U) at the boundary face
+ nhat   = Sf/|Sf|
+ s_t    = s - nhat (nhat . s)              tangential part
+ gdot_b = |s_t|
+ mu_b   = mu_model(gdot_b)
+```
+
+Two loads and a normalise, one thread per boundary face, pure gather. A
+CYCLIC face is an interior face in disguise and takes the owner cell's `mu`
+instead, because its "boundary value" is the neighbour across the couple and
+the two-point difference above is not its normal derivative.
+
+**(iv) Under-relaxation.** `mu` depends on `u`, so this is a fixed-point
+iteration nested inside SIMPLE/PISO. Updated once per outer iteration and
+relaxed elementwise:
+
+```
+ mu^(k+1) = (1 - w) mu^(k) + w mu_model(gdot^(k))       0 < w <= 1
+```
+
+No host branch and no convergence test read back, so CUDA-Graph capture is
+untouched. `w = 1` is no relaxation and is the default.
+
+### 38.6 Reproducibility
+
+`pow`, `exp` and `sqrt` now appear in the inner loop. They are deterministic
+for a given build on a given device, which is what this crate's reproducibility
+claim has always meant; `pow(x, y)` for non-integer `y` is **not** bit-stable
+across compute capabilities or across `-use_fast_math`. `-use_fast_math` is off
+and must stay off. Nothing here is order-dependent and nothing wants an atomic.
+
+### 38.7 Selection
+
+*DESIGN.* Under §13.4's contract:
+
+| route | entry | values |
+|---|---|---|
+| JSONC | `physics.fluid.rheology.model` | `Newtonian` (default), `powerLaw`, `CrossPowerLaw`, `BirdCarreau`, `HerschelBulkley`, `Casson` |
+| OpenFOAM | `constant/physicalProperties`'s `viscosityModel` | the same six |
+
+Absent means `Newtonian`, which is what every case written before this section
+existed means, and under `Newtonian` the momentum equation is bit-for-bit the
+pre-§38 one. An unrecognised spelling is an error NAMING all six;
+`-permissive` substitutes `Newtonian` and prints the substitution.
+
+Each model reads its own coefficients and **refuses a coefficient it does not
+use**: `powerLaw` with a `tau0` entry is a §13.4 error, not a silently ignored
+number. Parameter validity is checked at read time, not at the first NaN:
+`rho > 0`, `k > 0`, `n > 0`, `lam >= 0`, `a > 0`, `tau_0 >= 0`, `m > 0`,
+`0 < mu_min <= mu_max`, `0 < w <= 1`, `gdot_floor > 0`.
+
+### 38.8 What must hold
+
+| Test | Expected |
+|---|---|
+| the default does not move | `nu_lam` uniform at `ctrl.nu` reproduces the scalar `nu_eff = nu + nu_t` pass BIT-FOR-BIT, cells and boundary faces, on the identical `nu_t` field |
+| and end to end | a full driver run under `Newtonian` writes bit-identical fields to the pre-§38 binary's |
+| Newtonian is a fixed point | `powerLaw` with `n = 1, K = mu` returns `mu` for EVERY `gdot`, to round-off |
+| and so is each reduction | Cross with `mu_0 = mu_inf`; Bird-Carreau with `n = 1`; Herschel-Bulkley with `tau_0 = 0, n = 1`; Casson with `tau_0 = 0` — all constant in `gdot` to round-off |
+| shear-thinning is monotone | `n < 1` power law, Cross, Bird-Carreau: `mu` strictly decreasing over `gdot = 1e-6 .. 1e6` |
+| plateaux | Bird-Carreau and Cross reach `mu_0` at `gdot -> 0` and `mu_inf` at `gdot -> inf`, both to `1e-9` relative |
+| the regularisation is bounded | regularised HB and Casson finite and positive at `gdot = 0`, `1e-300`, `1e300`; HB `-> m tau_0` and Casson `-> (sqrt(mu_c) + sqrt(m tau_0))^2` as `gdot -> 0`, to `1e-6` |
+| and converges to the ideal law | regularised HB `-> tau_0/gdot + K gdot^(n-1)` as `m gdot -> inf`, relative error falling monotonically as `m` rises through `1e2, 1e3, 1e4, 1e5` |
+| the naive form is rejected | `K gdot^(n-1) + (tau_0/gdot)(1 - exp(-m gdot))` DIVERGES as `gdot -> 0` for `n < 1` while the product form does not — checked, so the two are never confused |
+| device twin | `rheoApparentViscosity` reproduces the host `apparent_viscosity` to `1e-12` relative, all five models, `gdot = 0 .. 1e8`, both regularisation branches |
+| wall faces | on a manufactured linear-shear field the boundary `gdot_b` equals the analytic `du/dy` to `1e-10`; a cyclic face takes the owner cell's value |
+| gather-shaped | no atomic anywhere; two identical runs bitwise equal |
+| §13.4 | an unrecognised `viscosityModel` errors naming all six; a coefficient the named model does not use errors naming it; a missing `rho` errors naming it; a yield-stress model with `variableViscosityStress false` errors naming both |
+| the setting is not inert | two runs differing only in `viscosityModel`, and two differing only in one coefficient of the SAME model, write different fields (§13.4.1) |
+
+### 38.9 Validation
+
+**Gate 1 — Herschel–Bulkley plane Poiseuille, closed form.** Fully developed
+flow between plates at `y = 0, H` driven by a uniform body force `G` per unit
+mass, walls at both ends, yield half-width `y_0 = t_0/G` measured from the
+centreline. Derived here from `tau(Y) = G Y` and the HB law, with
+`Y = |y - H/2|` and `h = H/2`:
+
+```
+ Y >= y_0 :  u = (n/(n+1)) (G/k)^(1/n) [ (h - y_0)^((n+1)/n) - (Y - y_0)^((n+1)/n) ]
+ Y <= y_0 :  u = (n/(n+1)) (G/k)^(1/n)   (h - y_0)^((n+1)/n)
+```
+
+Reductions that must hold to round-off, and are checked as sub-tests:
+`t_0 = 0` gives the power law
+`u = (n/(n+1))(G/k)^(1/n)[h^((n+1)/n) - Y^((n+1)/n)]`;
+`t_0 = 0, n = 1, k = nu` gives `u = G(h^2 - Y^2)/(2 nu)`, the Newtonian
+parabola §32.5 already uses.
+
+Run `n` in `{0.4, 0.7, 1.0, 1.4}` at `t_0 = 0` and require the L2 velocity
+error to fall at second order under refinement. This one gate catches a wrong
+`gdot` convention, a wrong wall viscosity, and a wrong power-law exponent.
+
+**Gate 2 — Buckingham–Reiner, a named correlation, one number.** Bingham
+(`n = 1`) flow in a circular pipe:
+
+```
+ Q = (pi R^4 dP)/(8 mu_p L) [ 1 - (4/3)(tau_0/tau_w) + (1/3)(tau_0/tau_w)^4 ]
+ tau_w = dP R/(2L),   valid for tau_w > tau_0
+```
+
+Checked as a closed form against the numerical integral of the Bingham
+velocity profile, and then against the REGULARISED constitutive law: as the
+Papanastasiou `m` rises the regularised flow rate must approach the ideal `Q`
+and the error must fall MONOTONICALLY. That trend is the evidence the
+regularisation works, and it is worth more than any single tuned tolerance.
+
+**Not attempted here, and stated so:** Mitsoulis & Zisis's lid-driven Bingham
+cavity (*J. Non-Newtonian Fluid Mech.* 101 (2001) 173–180) and the Casson
+blood profiles of Boyd, Buick & Green (*Phys. Fluids* 19 (2007) 093103) with
+Cho & Kensey's parameters. The blood parameter sets in wide circulation are
+NOT reproduced from memory here; they must be read out of those tables before
+any test pins them.
+
+---
+
+## 39. The contact angle in the volume-of-fluid interface
+
+**Young, *Phil. Trans. R. Soc.* 95 (1805) 65–87** — the equilibrium angle;
+**Huh & Scriven, *J. Colloid Interface Sci.* 35 (1971) 85–101** — the moving
+contact-line singularity; **Voinov, *Fluid Dyn.* 11 (1976) 714–721** and
+**Cox, *J. Fluid Mech.* 168 (1986) 169–194** — the asymptotic matching;
+**Hoffman, *J. Colloid Interface Sci.* 50 (1975) 228–241** — the master curve;
+**Jiang, Oh & Slattery, *J. Colloid Interface Sci.* 69 (1979) 74–77** — the
+explicit correlation used here; **Afkhami, Zaleski & Bussmann, *J. Comput.
+Phys.* 228 (2009) 5370–5389** — the mesh-dependent angle; **Sui, Ding & Spelt,
+*Annu. Rev. Fluid Mech.* 46 (2014) 97–119** — the review; **Washburn, *Phys.
+Rev.* 17 (1921) 273–283** — capillary rise. No GPL-licensed source was
+consulted.
+
+### 39.1 What §20 does today, and why that is the hook
+
+`vofFaceUnitNormalBoundary` writes `nHatf = 0` on every non-cyclic boundary
+face. That is `n_hat . Sf = 0`: the interface normal is tangential to the
+boundary, i.e. the interface meets the wall at ninety degrees. §20 specifies no
+contact-angle model, so that is the one choice that adds no unstated physics —
+and it is exactly the line this section replaces.
+
+### 39.2 The angle, and the one scalar the curvature gather needs
+
+Young's equation, `sigma_sv - sigma_sl = sigma cos(theta_e)`, with `theta_e`
+measured THROUGH the liquid (phase 1, `alpha = 1`).
+
+Derivation, in 2-D with the wall at `y = 0` and the domain at `y > 0`. A
+boundary `Sf` points OUT of the domain, so `Sf = -|Sf| yhat`. With `theta`
+through the liquid the interface tangent leaving the contact point is
+`(-cos theta, sin theta)`, so the unit normal pointing INTO the liquid is
+`nhat = (-sin theta, -cos theta)`, and
+
+```
+ nhat . Sf = (-cos theta)(-|Sf|) = |Sf| cos(theta)
+```
+
+so the entire model, as far as §20.4's curvature gather is concerned, is
+
+```
+ bNHatf[i] = |Sf[i]| cos(theta_i)                (was: 0)
+```
+
+The 3-D case is the same scalar: the tangential part of `nhat` is orthogonal
+to `Sf` by construction, so only `cos theta` survives. Checks:
+`theta = 90 deg` gives `0`, the current code; `theta = 0` gives `|Sf|`, the
+normal pointing straight into the wall, correct for a fully spread film;
+`theta = 180 deg` gives `-|Sf|`, a perfectly non-wetting bead.
+
+**The `cos(pi/2)` trap, and the rule it forces.** `cos(pi/2)` in double
+precision is `6.123233995736766e-17`, not zero. Writing `|Sf| cos(theta)`
+unconditionally would move every recorded VOF measurement by that much times
+`|Sf|`, silently, for a case that asked for nothing. *DESIGN*, and
+non-negotiable: **the kernel takes an `enabled` flag and writes a literal `0`
+when no contact-angle model is configured**, and the host maps `theta` in
+degrees to `cos theta` with `90` special-cased to exactly `0.0`. Both halves
+are checked in §39.6.
+
+### 39.3 The `alpha` boundary condition
+
+Fixing `bNHatf` alone is not enough: the wall-adjacent CELL gradient must tilt
+too, or the internal faces of that cell still see a ninety-degree interface.
+From `nhat . nhat_wall = cos theta` with `nhat_wall = Sf/|Sf|` outward,
+
+```
+ d(alpha)/dn |_b = |grad(alpha)_P| cos(theta)
+```
+
+which is a plain fixed-gradient condition in §4's triple:
+
+```
+ fr = 0 ,  refValue unused ,  refGrad = |grad(alpha)_P| cos(theta_face)
+```
+
+so `valueInternalCoeffs = 1`, `valueBoundaryCoeffs = refGrad/Delta_b`,
+`gradientBoundaryCoeffs = refGrad`, straight out of §4's table. `refGrad` is
+rewritten every outer iteration, exactly as §32.2's fixed-flux temperature
+rewrites its own. **No new device branch:** `cuda/field.cu` consults `bcKind`
+for `calculated`, `cyclic` and vector `symmetry` only, and a contact-angle face
+is none of those, so it is evaluated by the same `fldMixed` every other
+condition is. The new `BcKind` discriminant exists so the READER can tell which
+faces the model owns and what `theta` each was given; it degenerates to
+zero-gradient until the model writes `refGrad`, which is what a wall function
+already does.
+
+### 39.4 The dynamic angle
+
+`theta` need not be the equilibrium angle. The contact-line capillary number is
+
+```
+ t_hat = normalise( grad(alpha)_P - nhat_w (nhat_w . grad(alpha)_P) )
+ U_cl  = ( 1/2 (U_P + U_b) ) . t_hat        ( = 1/2 U_P . t_hat with no slip )
+ Ca    = mu_1 U_cl / sigma                  ( mu of the LIQUID phase )
+```
+
+`Ca > 0` advancing. One cell load, one face normal, one normalise: pure gather,
+no atomics, no search.
+
+*DESIGN, and the honest limitation.* A contact LINE is a codimension-2 curve;
+in 3-D it is where the interface meets the wall, and there is no exact
+face-local definition of its speed. The estimate above is first-order and
+mesh-dependent. A true reconstruction would need a connected-component search
+over the wall patch, which on a GPU is a scatter or a multi-pass label
+propagation. It is NOT specified here and should not be attempted.
+
+Two closures over `Ca`, both explicit in `theta_d`:
+
+```
+ (A) Jiang, Oh & Slattery
+
+     (cos theta_e - cos theta_d)/(cos theta_e + 1) = tanh(4.96 |Ca|^0.702)
+
+     solved directly:
+        cos theta_d = cos theta_e - sign(Ca) (1 + cos theta_e) tanh(4.96 |Ca|^0.702)
+
+     clipped to [-1, 1]. Ca = 0 returns cos theta_e EXACTLY, so the dynamic
+     model reduces to the static one at zero contact-line speed to the last
+     bit — the reduction gate of 39.6.
+
+ (B) Cox-Voinov
+
+     theta_d^3 = theta_e^3 + 9 Ca ln(L/L_m)
+
+     with theta in radians, L the macroscopic length and L_m the microscopic
+     cut-off. Clipped to (0, pi). Ca = 0 returns theta_e exactly.
+```
+
+Kistler's fit to Hoffman's master curve is NOT specified here: its four
+constants come from a book chapter this project has not read, and §0 forbids
+pinning numbers on recollection. Jiang, Oh & Slattery has a resolved DOI, is
+explicit in `theta_d`, and is the cheapest of the three to evaluate.
+
+**Hysteresis**, one predicate per face:
+
+```
+ theta_ref = theta_a   if Ca > 0        advancing
+           = theta_r   if Ca < 0        receding
+           = theta_e   if Ca = 0        the line is not moving
+```
+
+`theta_ref` is then what the correlation above is evaluated at, so hysteresis
+and the dynamic correlation compose rather than compete. `theta_a >= theta_e
+>= theta_r` is required at read time. With `theta_a = theta_r = theta_e` this
+is the static model to the last bit, and that reduction is checked.
+
+*DESIGN.* The branch is on the SIGN of `Ca` and not on a pinning band. A band
+would be a third number with no source in the literature to fix it, and a case
+that wants "no motion over a range" gets it exactly by writing
+`thetaA = thetaR`.
+
+**Honest scope note.** Hoffman's data, and therefore both correlations fitted
+to it, are ADVANCING. Applying either with the sign of `Ca` to a receding line
+is an extrapolation of a correlation outside the data it was fitted to. It is
+the standard practical choice and it is what this section specifies, but it is
+an extrapolation and is labelled one here rather than in a footnote nobody
+reads.
+
+**Contact-line detection.** A wall face participates only where there is an
+interface to orient: `eps < alpha_b < 1 - eps`. Faces failing the test keep
+`bNHatf = 0` — the pre-§39 behaviour, and the right answer there, since a dry
+or fully wet face has no interface. *DESIGN*: `eps = 1e-3`.
+
+### 39.5 Ordering, and what it costs
+
+`theta` must be computed from the PREVIOUS iterate's `U` and `grad(alpha)` and
+written BEFORE the curvature gather runs — the same discipline §20.4 already
+enforces in `update_body_force`, where "a stale normal is a wrong curvature".
+The sequence is `grad(alpha)` → `cos theta` per boundary face → `bNHatf` →
+`kappa`, all inside one graph capture, no host round trip.
+
+`tanh` and `cbrt` are the same transcendental-reproducibility footnote as
+§38.6.
+
+### 39.6 What must hold
+
+| Test | Expected |
+|---|---|
+| the `cos(pi/2)` trap | `cos(pi/2) != 0` in the crate's `Scalar`, checked explicitly, so the special case is justified by measurement and not by assertion |
+| the default does not move | with no contact-angle model configured, `vofFaceUnitNormalBoundary` writes a LITERAL `0` and every VOF field is bit-identical to the pre-§39 binary's |
+| and neither does `theta = 90` | `theta0 90` gives `bNHatf` exactly `0.0` on every owned face — the host maps 90 degrees to exactly `0.0`, checked bitwise |
+| the geometry | `bNHatf = magSf cos theta` at `theta = 0, 45, 90, 135, 180` against the hand-derived values, to `1e-12`; the sign is checked at both ends (`theta < 90` wetting, `theta > 90` non-wetting) |
+| the `alpha` triple | `refGrad = magGradAlpha cos theta`, and §4's `valueBoundaryCoeffs = refGrad/Delta_b`; `theta = 90` gives `refGrad = 0` exactly, i.e. zero-gradient, i.e. today |
+| the dynamic model reduces | Jiang and Cox-Voinov both return `theta_e` EXACTLY at `Ca = 0`; hysteresis with `theta_a = theta_r = theta_e` is the static model bitwise |
+| and is monotone and bounded | `theta_d` rises with `Ca` for advancing, falls for receding, stays in `[0, pi]` over `Ca = -10 .. 10`, no NaN at `Ca = 0`, `+-1e-300`, `+-1e300` |
+| device twin | the boundary kernel reproduces the host `cos_theta_dynamic` to `1e-12` over the same range |
+| §13.4 | an unrecognised `alpha` wall type errors naming both contact-angle spellings; a missing `theta0` errors naming it; `thetaA < thetaR` errors; an angle outside `[0, 180]` errors |
+| the setting is not inert | two runs differing only in `theta0`, and two differing only in the static/dynamic spelling, write different fields (§13.4.1) |
+
+### 39.7 Validation
+
+**Gate 0 — regression, non-negotiable.** With no contact angle configured,
+every existing VOF result (the Zalesak disc, the Laplace jump, the curvature
+convergence, the dam break) is bit-identical to the pre-§39 binary's. This is
+the gate the `cos(pi/2)` trap would break, and it is checked end to end
+through the driver, not only in a kernel unit test.
+
+**Gate 1 — Jurin's height, closed form.** A vertical capillary of radius `R`
+rises to
+
+```
+ h_inf = 2 sigma cos(theta_e) / (rho g R)
+```
+
+Sweeping `theta_e` over `{0, 30, 60, 90, 120, 150}` degrees this is the
+cleanest possible check that `cos theta` enters with the right sign and
+magnitude: `theta_e > 90` must give DEPRESSION, `theta_e = 90` exactly zero
+rise. The Lucas–Washburn viscous-regime transient
+`h(t) = sqrt(sigma R cos(theta_e) t/(2 mu))` is the same statement in time.
+
+**Gate 2 — Hoffman's master curve, as fitted by Jiang, Oh & Slattery.**
+The correlation itself is checked as a closed form: its `Ca -> 0` limit
+returns `theta_e`, its `Ca -> inf` limit returns `theta_d -> 180 deg` (complete
+dewetting of the displaced phase), and it is monotone in between. A live
+displacement run measuring the apparent angle against it over three decades of
+`Ca` at two mesh resolutions is the gate this section would need to CLAIM the
+dynamic model, and it is **not** claimed here — see §39.8.
+
+**Gate 3 — Tanner's law**, `R(t) ~ t^(1/10)` for a completely wetting
+spreading drop, and **Gate 4 — Sikalo et al.**'s drop impact on glass and wax
+(*Phys. Fluids* 17 (2005) 062103), are the transient gates. Neither is run
+here.
+
+### 39.8 What is claimed, and what is not
+
+**Claimed and measured:** the geometry (`bNHatf = magSf cos theta`), the
+bit-identical default, the `alpha` fixed-gradient triple, the closed-form
+behaviour of both dynamic correlations and of hysteresis, and Jurin's height
+as a closed form with the sign checked at both ends.
+
+**Not claimed:** that a live capillary-rise or drop-impact run reproduces a
+published `theta_d(t)`. That needs the two-resolution displacement experiment
+of Gate 2, and until it is run this section specifies a contact angle that is
+GEOMETRICALLY correct and DYNAMICALLY plausible, not a validated moving
+contact line. The mesh-dependent (numerical-slip) correction of Afkhami,
+Zaleski & Bussmann, `theta_num^3 = theta_d^3 - 9 Ca ln(dx/L_m)`, is the natural
+next term and is deliberately NOT implemented until Gate 2 exists to show it
+does what it is for.
+
+---
+
+## 40. Realizable k-epsilon
+
+**Shih, Liou, Shabbir, Yang & Zhu, *Computers & Fluids* 24 (1995) 227–238**,
+and the copy actually read: **NASA TM-106721 / ICOMP-94-21 (August 1994)**,
+<https://ntrs.nasa.gov/citations/19950005029> — a US government work in the
+public domain, unrestricted distribution. Background: **Reynolds, AGARD Report
+755 (1987)** — the realizability constraints (positivity of the normal
+stresses, the Schwarz inequality) that the variable `C_mu` is constructed to
+satisfy; **Lumley, *Adv. Appl. Mech.* 18 (1978) 123–176** — realizability as a
+modelling principle; **Pope, *Turbulent Flows* (2000) §10.4**. No GPL-licensed
+source was consulted.
+
+§6.1's standard k-epsilon carries `C_mu = 0.09` as a constant. That constant is
+calibrated in the equilibrium log layer and is **wrong by construction**
+everywhere else: it makes the Boussinesq normal stress
+`<u_a u_a> = (2/3)k - 2 nu_t lambda_a`, with `lambda_a` a principal value of
+the deviatoric strain, go NEGATIVE once the strain is strong enough — which is
+not a small error but an impossible one. This section is the
+same two transport equations with (a) `C_mu` a field, (b) the `epsilon`
+production written as `C_1 S epsilon` rather than `C_1 (epsilon/k) G`, and (c)
+the `epsilon` sink denominator `k + sqrt(nu epsilon)` rather than `k`.
+
+### 40.1 The equations
+
+```
+nu_t     = C_mu k^2/epsilon                                          (40.1)
+
+Dk/Dt    = div((nu + nu_t/sigma_k) grad k)   + G - epsilon           (40.2)
+
+De/Dt    = div((nu + nu_t/sigma_e) grad e)
+             + C_1 S e
+             - C_2 e^2/(k + sqrt(nu e))                              (40.3)
+```
+
+`G` is §6's own production, unchanged. `sigma_k = 1.0`, `sigma_e = 1.2`,
+`C_2 = 1.9`.
+
+### 40.2 The variable `C_mu`, and the two invariants that are not the same
+
+With `g_ij = dU_j/dx_i` — the layout `RasCore::grad_u` already holds:
+
+```
+S_ij  = (g_ij + g_ji)/2 ,      W_ij = (g_ij - g_ji)/2
+Sd_ij = S_ij - (1/3) S_kk delta_ij             the DEVIATORIC strain
+
+S     = sqrt(2 S_ij S_ij)                      what turbStrainRateMag returns
+Stil  = sqrt(Sd_ij Sd_ij)                      the UNFACTORED second invariant
+Ustar = sqrt(Sd_ij Sd_ij + W_ij W_ij)  inertial frame; = Stil only when W = 0
+
+W6    = sqrt(6) Sd_ij Sd_jk Sd_ki / Stil^3     clipped to [-1, +1]
+phi   = (1/3) arccos(W6)                       phi in [0, pi/3]
+A_s   = sqrt(6) cos(phi)                       A_s in [sqrt(6)/2, sqrt(6)]
+
+C_mu  = 1/(A_0 + A_s Ustar k/epsilon)                                (40.4)
+
+C_1   = max(0.43, eta/(eta + 5)) ,   eta = S k/epsilon               (40.5)
+```
+
+*DESIGN — the `dev`, and why it is not cosmetic.* Shih et al. write `S_ij`
+throughout, deriving for incompressible flow where `S_kk = 0`. The whole
+realizability construction stands on
+
+```
+lambda_max = sqrt(2/3) Stil cos(phi)                                 (40.4a)
+```
+
+being the largest eigenvalue of the strain tensor, and (40.4a) is an identity
+for a TRACELESS symmetric tensor and false for any other. So the invariants
+here are taken of `Sd`, not of `S_ij`: on a solenoidal field the two are the
+same tensor and this is Shih et al.'s formula unchanged, and on a field with a
+divergence — §25's low-Mach path has one — it is the version that is still
+about the normal stress. This crate's own Boussinesq stress already carries the
+same `dev` (`G = nu_t (dev(2 symm(g)) : g)`, §6), so the two now agree about
+which tensor is being modelled.
+
+`S` deliberately does NOT carry it: `S` is `turbStrainRateMag`'s own
+expression, bit for bit, so that (40.5)'s `eta` and §41's are the same number
+computed the same way. `S^2/2 - Stil^2 = (div u)^2/3`, which is zero on every
+field a pressure equation produced, and that identity is what the test checks
+rather than the equality.
+
+**`S`, `Stil` and `Ustar` are three different numbers and confusing them is the
+classic realizable-k-epsilon bug.** They differ by `sqrt(2)` (the first two)
+and by the rotation content (the third), and §40.7's realizability margin is
+the check that separates them: only the correct combination makes the margin
+*asymptotically tight*, and a `sqrt(2)` in the wrong place leaves it loose by
+exactly that factor without ever failing.
+
+*Correction to the usual statement.* The quantity that must be clipped before
+`arccos` is `sqrt(6) W`, not `W`: `cos(3 phi) = sqrt(6) W` is the identity, so
+`W` itself lies in `[-1/sqrt(6), +1/sqrt(6)]` analytically. Clipping `W` to
+`[-1, +1]` clips nothing. This implementation clips the **argument of
+`arccos`**.
+
+Two guards, both *DESIGN*:
+
+1. `Stil -> 0` (uniform flow) makes `W` a `0/0`. Set `W6 = 0` there, giving
+   `phi = pi/6` and `A_s = sqrt(6) cos(pi/6) = 3/sqrt(2) = 2.1213203`, the
+   isotropic value. Guarded on `Stil < tiny`, never on `== 0`.
+2. `C_mu -> 1/A_0 = 0.2475` as `S -> 0`, nearly three times 0.09. Harmless (a
+   quiescent free stream has a small `k`), but §6.1's `nut_max = nutMaxCoeff·nu`
+   ceiling stays applied, and `bound_epsilon` is called with `1/A_0` — the
+   SUPREMUM of (40.4) — so the bound that keeps `nu_t <= nut_max` through the
+   `epsilon` field remains conservative for every cell.
+
+### 40.3 `A_0` — the value is DERIVED here, not chosen
+
+The NASA TM prints `A_0 = 4.0`; most codes and most secondary literature use
+`4.04`. The journal version is paywalled and was not read. **The discrepancy is
+settled by derivation rather than by preference**, as follows.
+
+In the equilibrium log layer, production equals dissipation, so `C_mu eta^2 = 1`
+and `eta = 1/sqrt(C_mu)`. The flow there is simple shear, for which
+
+```
+S_ij S_ij = W_ij W_ij = S^2/2   =>   Ustar = S ,  Stil = S/sqrt(2)
+tr(S^3) = 0                     =>   W6 = 0, phi = pi/6, A_s = 3/sqrt(2)
+```
+
+so (40.4) becomes `C_mu = 1/(A_0 + A_s eta)`. Writing `c = sqrt(C_mu)` and
+eliminating `eta = 1/c`:
+
+```
+A_0 c^2 + A_s c - 1 = 0                                              (40.6)
+```
+
+The model is calibrated to reproduce the log-layer value `C_mu = 0.09`, i.e.
+`c = 0.3`. Substituting:
+
+```
+A_0 = (1 - A_s c)/c^2 = 100/9 - 10/sqrt(2) = 4.0400433...            (40.7)
+```
+
+**`4.04` is the calibrated value to five significant figures; `4.0` is not.**
+With `A_0 = 4.04` the log-layer `C_mu` comes out `0.09000051`; with `A_0 = 4.0`
+it comes out `0.09047858`, 0.53% high. Both pass a "within 1%" test, which is
+why the test in §40.7 is stated at `1e-4`.
+
+**Default: `A_0 = 4.04`, case-settable as `RAS { A0 ...; }`.** The NASA TM's
+`4.0` remains reachable, and (40.7) is what the file header cites for the
+default. This is a deliberate departure from the design note that specified
+this section, which recommended defaulting to the value in the source read; the
+source read prints a number that its own calibration contradicts.
+
+### 40.4 The log law the constants imply
+
+The `epsilon` equation in the log layer, with `U = (u_tau/kappa) ln(y/y_0)`,
+`k = u_tau^2/sqrt(C_mu)`, `epsilon = u_tau^3/(kappa y)`, `nu_t = kappa u_tau y`,
+and `sqrt(nu epsilon) << k`:
+
+```
+diffusion  =  u_tau^4/(sigma_e y^2)
+sources    =  (u_tau^4/(kappa^2 y^2)) [C_1 - C_2 sqrt(C_mu)]
+
+  =>   kappa^2 = sigma_e [ C_2 sqrt(C_mu) - C_1 ]                    (40.8)
+```
+
+At `C_mu = 0.09`, `eta = 10/3`, so `eta/(eta+5) = 0.4 < 0.43` and the floor in
+(40.5) binds: `C_1 = 0.43`. Then
+
+```
+kappa^2 = 1.2 (1.9 x 0.3 - 0.43) = 0.168      =>   kappa = 0.409880
+```
+
+against the accepted 0.41 — **0.03%**. The same derivation applied to §6.1
+(`kappa^2 = sigma_e (C_2 - C_1) sqrt(C_mu)`, the standard form, because there
+the `epsilon` production is `C_1 (epsilon/k) G`) gives
+`kappa^2 = 1.3 x 0.48 x 0.3 = 0.1872`, `kappa = 0.432666` — 5.5% high. That
+gap is a real, checkable statement about the two coefficient sets and it is
+§40.7's second gate.
+
+### 40.5 Discretisation — what changes, and what does not
+
+| Term | Operator | LDU contribution |
+|---|---|---|
+| `ddt`, `div(phi, psi)`, laplacian | `RasCore::assemble_transport` | unchanged |
+| `+G` in `k` | `fvm_su(G)` | unchanged, `turbKSources` reused verbatim |
+| `-epsilon` in `k` | `fvm_sp(epsilon/k)` | unchanged |
+| `+C_1 S e` in `e` | **`fvm_susp(-C_1 S)`** | `C_1 S >= 0` always, so Patankar sends it to the SOURCE. It is a source proportional to the unknown; a `Sp` would put a negative number on the diagonal, which is exactly what `fvm_susp` exists to avoid |
+| `-C_2 e^2/(k + sqrt(nu e))` | `fvm_sp(C_2 e/(k + sqrt(nu e)))` | strictly positive; unconditionally stabilising |
+
+The `k` equation is §6.1's, kernel for kernel. Only `nu_t` and the `epsilon`
+sources differ, which is the whole content of the model.
+
+**Dilatation.** §6.1 carries the Favre terms `-(2/3)(div u)k` and
+`-((2/3)C_1 - C_3)(div u)e`. The first is a property of the `k` equation and is
+kept. The second has no counterpart here — `C_1 S e` is not proportional to `G`
+— so it is **not** invented, and `RAS { C3 ...; }` under `realizableKE` is
+refused by name (§40.6).
+
+**Wall functions — *DESIGN*.** §6.4's `epsilon_P = C_mu^{3/4} k^{3/2}/(kappa y)`
+and `nutkWallFunction` use a CONSTANT `C_mu`, and this section keeps it that
+way. The justification is (40.7): the model's own `C_mu` in an equilibrium wall
+cell IS 0.09, to `5.7e-6` relative, so the local and the constant value agree
+exactly where a wall function is valid at all. They differ in a
+strongly-strained wall cell, where the local value is smaller. Using the local
+value would need a per-cell variant of every kernel in
+`cuda/wallfunctions.cu`; the constant is documented, measured (§40.7) and not
+substituted for anything.
+
+**Buoyancy.** §17's `G_b` reaches the `k` equation model-independently, but its
+`epsilon` counterpart `C_1 (epsilon/k) C_3 G_b` presupposes the standard
+production form. Shih et al. specify no buoyancy extension, and inventing one
+is exactly what §13.4 forbids. **A case with gravity and a temperature is
+refused by name under `realizableKE`**, naming §6.1, §33, §6.2, §6.3 and §41 as
+the models that have one.
+
+### 40.6 What the case can say
+
+```
+RAS
+{
+    model       realizableKE;
+    A0          4.04;      // (40.7); 4.0 is the NASA TM's printed value
+    C2          1.9;
+    sigmak      1.0;
+    sigmaEps    1.2;
+    Cmu         0.09;      // the WALL FUNCTION and epsilon-bound constant only
+}
+```
+
+`Cmu` is read and is not inert — it reaches §6.4's wall relation and §6.1's
+`bound_epsilon` — but it does **not** set `nu_t`, and the banner says so on its
+own line. `C1` and `C3` are **refused by name**: `C_1` is (40.5), computed per
+cell, and there is no dilatation term for `C_3` to multiply. A case that writes
+either would otherwise have it read and thrown away, which is the failure this
+whole contract exists to stop.
+
+### 40.7 What must hold
+
+| Check | Expected |
+|---|---|
+| `A_s` at `W6 = 0` | `3/sqrt(2) = 2.1213203`, exactly the isotropic value |
+| `A_s` at `W6 = +1` (axisymmetric expansion) | `sqrt(6) = 2.4494897`; at `W6 = -1`, `sqrt(6)/2` |
+| `Stil` on a dilating field | `sqrt(S^2/2 - (div u)^2/3)`, exactly - the `dev` cannot be dropped without failing this |
+| `lambda_max = sqrt(2/3) Stil cos(phi)` | equals the largest eigenvalue of `Sd_ij` from a cyclic Jacobi diagonalisation - a different algorithm, not a rearrangement - to `1e-10`; and all THREE closed-form roots must be the whole spectrum |
+| **realizability, `C_mu lambda_max k/e < 1/3`** | holds for EVERY strain state and every `k/e`. This is the model's reason to exist |
+| the ASYMPTOTE of that quantity as `k/e -> inf` | exactly `(1/3)(Stil/Ustar)` — `1/3` in an irrotational strain, below it by the rotation content otherwise. This is the sharp form: `C_mu lambda_max k/e -> lambda_max/(A_s Ustar)` and `lambda_max = sqrt(2/3) Stil cos(phi)`, `A_s = sqrt(6) cos(phi)`, so `cos(phi)` cancels and what is left is a ratio of two of the three invariants. A misplaced `sqrt(2)` moves it by `sqrt(2)`; reading `Stil` where (40.4) wants `Ustar` makes it `1/3` everywhere. **Neither error breaks the bound** — which is exactly why the gate is stated on the asymptote and not on the inequality |
+| the same quantity with `C_mu = 0.09` | **VIOLATED** for `lambda_max k/e > 1/(3 x 0.09) = 3.7037`, which is Shih et al.'s own published threshold |
+| `Ustar` in solid-body rotation | `sqrt(W_ij W_ij)`, NOT the rotation rate: `Omega = 5` gives `Ustar = sqrt(50)`. `Ustar` is a Frobenius norm, and reading it as a rotation rate is the same class of error as reading `Stil` for `S` |
+| log-layer `C_mu` at `A_0 = 4.04` | `0.09` to `1e-4` relative (it is `0.09000051`) |
+| implied `kappa`, (40.8) | `0.409880`; §6.1's own is `0.432666` |
+| homogeneous shear, live | `S k/e` reaches the fixed point of `C_mu(eta) eta^2 = C_1(eta) eta - (C_2 - 1)`, which is `eta = 5.333096`, `P/e = 1.852507`, `C_mu = 0.0651330` — against §6.1's own `eta = 4.819992`, `P/e = 2.090909` |
+| `C_mu` monotone decreasing in `k/e` | at fixed strain state, for every state |
+| a two-run bit-for-bit repeat | identical `f64` bits in `k`, `epsilon`, `nut` |
+
+**What is NOT checked here.** Reynolds' realizability conditions are two: the
+positivity of the normal stresses, gated above, and the **Schwarz inequality**
+`<u_i u_j>^2 <= <u_i^2><u_j^2>`, which is not. Shih et al. cite both, and the
+`C_mu` of (40.4) is constructed against the first; whether this implementation
+also satisfies the second at every strain state is untested and is not claimed.
+
+**Validation, stated honestly.** The design note names Driver & Seegmiller
+(*AIAA J.* 23 (1985) 163–171), backward-facing step, `x_r/h = 6.26 ± 0.10`.
+That gate is **NOT run here** and this section does not claim it: `blockgen`
+builds one rectangular block, its `CaseKind::Step` is documented in its own
+source as "NOT a true backward-facing step", and no harness in this tree
+couples SIMPLE momentum-pressure to a RANS closure on a separating mesh. What
+IS run is the realizability sweep and the homogeneous-strain experiments above,
+which are the model's own defining property and are sharper than a
+reattachment length: a wrong `Ustar`, a wrong `A_s`, a wrong `A_0` or a
+confused `S`/`Stil` each change them by a measurable amount, while a
+reattachment length can be right for the wrong reason.
+
+---
+
+## 41. RNG k-epsilon
+
+**Yakhot, Orszag, Thangam, Gatski & Speziale, *Physics of Fluids A* 4 (1992)
+1510–1520**, and the copy actually read: **ICASE Report 91-65 / NASA CR-187611
+(1991)**, <https://ntrs.nasa.gov/citations/19910021152> — US
+government-sponsored, public domain via NTRS. Background: **Yakhot & Orszag,
+*J. Sci. Comput.* 1 (1986) 3–51** — the original renormalisation-group
+derivation the 1992 paper extends. No GPL-licensed source was consulted.
+
+Structurally §6.1, with one extra strain-dependent sink in the `epsilon`
+equation and a different coefficient set. The extra term is what makes RNG
+respond to rapid strain: where §6.1's `epsilon` equation cannot tell a strained
+flow from an unstrained one, RNG's destroys `epsilon` less (hence `epsilon`
+higher, hence `nu_t` lower) as the strain rises past a threshold.
+
+### 41.1 The equations
+
+```
+nu_t     = C_mu k^2/epsilon ,   C_mu = 0.0845                        (41.1)
+
+Dk/Dt    = div( alpha_k  nu_eff grad k )   + G - epsilon             (41.2)
+
+De/Dt    = div( alpha_e  nu_eff grad e )
+             + C_e1 (e/k) G  -  C_e2 e^2/k  -  R                     (41.3)
+
+R        = C_mu eta^3 (1 - eta/eta_0)/(1 + beta eta^3) . e^2/k       (41.4)
+
+eta      = S k/epsilon ,  S = sqrt(2 S_ij S_ij) ,  nu_eff = nu + nu_t
+```
+
+`C_e1 = 1.42`, `C_e2 = 1.68`, `alpha_k = alpha_e = 1.39`, `eta_0 = 4.38`,
+`beta = 0.012`. The ICASE report writes `C_mu ~ 0.085`; `0.0845` is the value
+universally implemented and is the default here, settable.
+
+**Implemented in the absorbed form.** `R` is folded into an effective `C_e2`:
+
+```
+C_e2* = C_e2 + C_mu eta^3 (1 - eta/eta_0)/(1 + beta eta^3)           (41.5)
+De/Dt = ... + C_e1 (e/k) G  -  C_e2* e^2/k
+```
+
+because then the whole destruction is a single per-cell coefficient and cannot
+change the matrix's sign structure cell by cell.
+
+There is a second, equivalent absorption in circulation — into the PRODUCTION
+coefficient, `C_e1* = C_e1 - eta(1 - eta/eta_0)/(1 + beta eta^3)`. It follows
+from (41.4) by dividing `R` through by `(e/k) G`, and it is exact **only where
+`G = nu_t S^2`**. That holds for a solenoidal field and fails by
+`(2/3)(div u)^2 nu_t` for one with a divergence, because this crate's `G`
+carries a `dev` (§6). (41.5) needs no `G` at all — only `S`, `k` and
+`epsilon` — so it is the faithful form and it is the one implemented.
+
+**`C_e2*` is not sign-definite, and it changes sign much sooner than is
+generally realised.** For `eta > eta_0` the correction is negative, and at the
+published constants `C_e2*` crosses zero at **`eta = 5.8581`** — barely a third
+above the homogeneous-shear equilibrium `eta_0 = 4.38`, not the `eta ~ 32` a
+linear-asymptote estimate suggests. Past that it falls away linearly,
+`C_e2* -> C_e2 - C_mu eta/(beta eta_0) = 1.68 - 1.6076 eta`, so a strongly
+strained cell carries a large NEGATIVE destruction coefficient — which is the
+model working as intended (`epsilon` is produced, `nu_t` collapses) and is also
+exactly why the routing below is not optional.
+
+The term is therefore emitted through **`fvm_susp` with coefficient
+`C_e2* e/k`**, never `fvm_sp`: Patankar's split sends the negative branch to
+the right-hand side instead of putting a negative number on the diagonal. That
+is precisely the situation `fvm_susp` exists for, and it is the one structural
+difference from §6.1's `sp`.
+
+### 41.2 `alpha` multiplies `nu_eff`, not `nu_t` — and that needs a new kernel
+
+`turbulence::face_diffusivity` computes `Gamma_eff = nu + r_sigma nu_t`. RNG
+wants `Gamma_eff = alpha (nu + nu_t)`: the inverse Prandtl number multiplies
+the EFFECTIVE viscosity, molecular part included. At high Reynolds number the
+difference is negligible; in the first cell off a wall it is not, and folding
+`alpha` into `r_sigma` to get `nu + alpha nu_t` would be wrong there and
+silently so.
+
+*DESIGN.* One new face kernel, `face_diffusivity_affine(a, b)`, computing
+`Gamma_eff = a nu + b nu_t`. It is a strict generalisation:
+`face_diffusivity(r_sigma)` is `affine(1, r_sigma)` and §41.6 measures that the
+two agree **bit for bit**, so it is used by BOTH sections here — §40 through
+`affine(1, 1/sigma)`, §41 through `affine(alpha, alpha)` — rather than added
+for one caller. The Langtry–Menter transition model, if it is ever written,
+needs the same kernel for `sigma_tt (nu + nu_t)`.
+
+*And the bit-for-bit claim is not free, which is recorded here because the test
+FOUND it rather than confirming it.* Written the obvious way,
+`a*nu + b*nut[P]` has TWO multiplies and one add; nvcc contracts one of them
+into an FMA and it picks the wrong one, rounding the `b*nut` product before
+adding and landing **one ULP** from `nu + r_sigma*nut[P]`'s answer. Hoisting
+`a*nu` onto its own line does not fix it — that was tried and measured. What
+does is naming the fused operation: `fma(b, nut[P], a*nu)`, which removes the
+compiler's discretion, is exact at `a = 1`, and is the single instruction the
+plain kernel is itself compiled to.
+
+One ULP matters here because §6.1, §6.2 and §6.3's recorded results are stated
+against `face_diffusivity`, so the two remain **separate kernels held together
+by the test** rather than one kernel with the plain path routed through it: a
+future compiler that re-contracts either then fails that test instead of
+silently moving every existing k-epsilon, k-omega and SST answer.
+
+`alpha_k` and `alpha_e` are, in the full RNG theory, solutions of a
+differential relation that reduces to 1.39 at high Reynolds number. **The
+high-Re constant is what is implemented**, which is why `wallTreatment lowRe`
+is refused for this model exactly as it is for everything but
+`LaunderSharmaKE` (§29.1, §33.2).
+
+### 41.3 The two closed forms the constants imply
+
+**Homogeneous shear.** With no transport, `dk/dt = P - e` and
+`de/dt = C_e1 (e/k)P - C_e2* e^2/k`, so `d(k/e)/dt = 0` gives
+
+```
+P/e = (C_e2*(eta) - 1)/(C_e1 - 1) ,   and   P/e = C_mu eta^2
+=>  C_mu (C_e1 - 1) eta^2  =  C_e2*(eta) - 1                         (41.6)
+```
+
+The root is `eta = 4.379236`, which is `eta_0 = 4.38` to three figures. **That is
+not a coincidence: `eta_0` is the fixed-point value of `eta` in homogeneous
+shear**, and (41.6) evaluated at `eta = eta_0` — where `R` vanishes identically
+— reduces to `C_mu (C_e1 - 1) eta_0^2 = C_e2 - 1`, i.e.
+`0.0845 x 0.42 x 19.1844 = 0.680855` against `0.68`. The residual `8.6e-4` is
+the whole distance between the published `eta_0` and the value its own
+coefficient set implies, and §41.6 measures it rather than assuming it.
+
+**The log law.** `eta` is constant in the log layer at `1/sqrt(C_mu) = 3.440105`,
+so `C_e2*` is constant there too:
+
+```
+C_e2*_log = 1.68 + 0.495927 = 2.175927
+kappa^2   = (C_e2*_log - C_e1) sqrt(C_mu)/alpha_e  =  0.158086
+kappa     = 0.397600
+```
+
+against the accepted 0.41 — 3.0% low, where §6.1 is 5.5% HIGH and §40 is 0.03%
+off. Reported as a derived diagnostic, not as a defect: it is what the
+published constants say, and the wall functions carry their own `kappa`.
+
+### 41.4 What the case can say
+
+```
+RAS
+{
+    model      RNGkEpsilon;
+    Cmu        0.0845;
+    C1         1.42;      // C_e1
+    C2         1.68;      // C_e2
+    alphak     1.39;
+    alphaEps   1.39;
+    eta0       4.38;
+    beta       0.012;
+    C3         0;         // the Favre dilatation coefficient, as in 6.1
+}
+```
+
+`sigmak` and `sigmaEps` are **refused by name**: this model's diffusivity is
+`alpha (nu + nu_t)`, not `nu + nu_t/sigma`, and a case that writes
+`sigmaEps 1.3` here would have it read and discarded. The refusal names
+`alphak`/`alphaEps` and says `alpha = 1/sigma` is the relation between them.
+
+### 41.5 Buoyancy
+
+`C_e1 (epsilon/k) G` is §6.1's production form exactly, so §17's
+`C_1 (epsilon/k) C_3 G_b` transfers unchanged with `C_1 = C_e1`. Buoyancy is
+therefore SUPPORTED here (unlike §40.5), through the same
+`add_buoyancy_to_k`/`add_buoyancy_to_epsilon` kernels.
+
+### 41.6 What must hold
+
+| Check | Expected |
+|---|---|
+| `C_e2*(eta_0)` | exactly `C_e2 = 1.68`; the `R` term is identically zero there |
+| `C_e2*` at `eta < eta_0` | `> C_e2` (more destruction, larger `nu_t`) |
+| `C_e2*` at `eta > eta_0` | `< C_e2`, crossing zero at `eta = 5.8581` and falling linearly after |
+| `C_e2*` continuous and finite as `eta -> 0` and `eta -> inf` | exactly `C_e2` at `eta = 0`, and `-> C_e2 - C_mu eta/(beta eta_0)` (linear, negative) as `eta -> inf`; finite at `eta = 1e120`, where the naive form overflows to `NaN` |
+| homogeneous-shear fixed point (41.6) | `eta = 4.379236` with `P/e = 1.62052`, and `eta_0` misses it by `8.5436e-4` in the residual |
+| implied `kappa`, §41.3 | `0.397600` |
+| `face_diffusivity_affine(1, r)` vs `face_diffusivity(r)` | **bit-identical**, every face, over five `r_sigma` and a `nu_t` spanning eight decades — and the test first shows the claim is not vacuous, by measuring that the fused and unfused roundings of `nu + r_sigma nu_t` DO differ on that data |
+| `face_diffusivity_affine(alpha, alpha)` vs `face_diffusivity(alpha)` | must DIFFER, by exactly `(alpha - 1) nu` per unit area on every boundary face. A reduction test alone would pass on a kernel that ignored `a` |
+| **at `eta = eta_0` in every cell**, RNG with `alpha = 1`, `C_e1 = 1.44`, `C_e2 = 1.92`, `C_mu = 0.09` vs §6.1 with `sigma = 1` | **bit-identical output**, one full `correct` — the "plumbing is right" test, separated from "the physics is right" |
+| a two-run bit-for-bit repeat | identical `f64` bits |
+
+**Validation, stated honestly.** As §40.7: the Driver–Seegmiller gate is not
+run, for the same reason, and this section claims the closed forms above and
+the live homogeneous-strain experiments, not a separated-flow reattachment
+length.
+
+---
+
+## 42. The serial two-step mixing-controlled scheme — CO and incomplete combustion
+
+**K. McGrattan, R. McDermott, J. E. Floyd, "A simple two-step reaction scheme
+for soot and CO", *Proc. Tenth International Seminar on Fire and Explosion
+Hazards (ISFEH10)*, Oslo, 23–27 May 2022** — a NIST work, US public domain;
+the PDF at <https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=927294> was
+fetched and read in full for this section, and its Eqs. (1)–(5) are the model
+below. Background, all public domain and read locally from
+`reference/fds/Manuals/` (`reference/fds/LICENSE.md`: *"software developed by
+NIST employees is not subject to copyright protection within the United
+States"*): the **FDS Technical Reference Guide** Combustion chapter (lumped
+species, `tau_mix`, the batch reactor, both extinction models) and the **FDS
+Validation Guide** Experiment chapter (the UMD line burner's two-step
+stoichiometry, the NIST RSE geometry). Prior art acknowledged by [L21] but not
+implemented here: Westbrook & Dryer, *Combust. Sci. Technol.* 27 (1981) 31–43;
+Andersen et al., *Energy & Fuels* 23 (2009) 1379–1389. No GPL-licensed source
+was consulted. **No FDS source code was read** — the manuals and the ISFEH10
+paper needed none of it.
+
+§27's single global step answers none of the three questions fire safety
+actually asks — how much CO is in an under-ventilated compartment, what the
+combustion efficiency is, and where the flame goes out — because it has one
+reaction, no intermediate, and a heat release that is a fixed multiple of the
+fuel consumed. This section adds the second step. **It adds no kinetics, no
+Arrhenius rate, no Jacobian, no ODE integrator and no stiffness**: both steps
+use §27's own mixing-controlled rate, and the whole model is the decision to
+run them *serially inside one time step* instead of in parallel. [L21] states
+why that is the right trade at fire resolutions:
+
+> "A typical large-scale fire simulation is performed on a numerical grid with
+> cells on the order of 10 cm or greater, and the resolved temperature field is
+> too coarse to allow detailed kinetic modeling of products of incomplete
+> combustion."
+
+An `exp(-E/(R_u T))` evaluated on a cell mean `T` that is several hundred
+kelvin low because the flame occupies one per cent of the cell is not a better
+answer than a mixing-controlled one; the exponential amplifies the resolution
+error. §27's model stays the **default**, and every recorded measurement made
+with it is unmoved (§42.8).
+
+### 42.1 The two reactions
+
+[L21] Eq. (2)–(3), written for propane to show the idea, are quoted here
+because they are also this section's worked example:
+
+```
+C3H8 + 2 O2  ->  2 CO + C + 2 H2 + 2 H2O                             (42.1)
+
+2 CO + C + 2 H2 + 3 O2  ->  3 CO2 + 2 H2O                            (42.2)
+```
+
+and generalised ([L21] Eqs. (4)-(5)) to an arbitrary fuel `CxHyOzNv` reacting
+to a lumped **intermediate** (CO, soot, H2, H2O) and then to final products.
+This crate transports mass fractions, not moles, so the model is stated on a
+**mass basis** — which is what makes the arithmetic below exact rather than
+approximate:
+
+```
+Fuel  +  s1 O2   ->  (1 + s1) Int                    releases dh1 per kg fuel
+Int   +  r2 O2   ->  (1 + r2) Prod                   releases dh2I per kg Int
+```
+
+with, per unit mass of FUEL,
+
+```
+s1 + s2  = s              s is S27's own stoichiometric O2/fuel mass ratio
+dh1 + dh2 = dhc           dhc is S27's own heat of combustion
+r2   = s2 / (1 + s1)                                                 (42.3)
+dh2I = dh2 / (1 + s1)                                                (42.4)
+```
+
+Mass is conserved in each step by construction: `1 + s1` in, `1 + s1` out;
+`(1 + s1) + s2` in, `(1 + s1) + s2` out. Both steps to completion consume
+`s1 + s2 = s` kg of O2 per kg of fuel, produce `1 + s` kg of products, and
+release `dh1 + dh2 = dhc` — **§27's global step, exactly, with no residue**.
+That identity is what makes §42.8's energy-closure gate an identity of the
+scheme rather than a numerical near-miss, and it holds however the case splits
+`s` and `dhc` between the steps.
+
+### 42.2 The serialisation — which IS the model
+
+Both steps use the same mixing-controlled rate `1/tau_mix` that §27 already
+builds (`C_EDM eps/k` in RANS, `C_EDM beta* omega` in a k-omega family, `C_EDM'
+|S|` in LES). Inside one time step, in one cell, in this order:
+
+```
+step 1   minY1 = min(Y_F, Y_O2 / s1)
+         omega1 = rate rho minY1,  clipped to rho minY1 / dt
+         Y_F'   = Y_F / (1 + omega1 dt / (rho Y_F))     Patankar, as S27
+         dY_F   = Y_F - Y_F'
+         q1     = rho dY_F dh1 / dt
+
+         Y_O2'  = Y_O2 - s1 dY_F           <-- the LEFTOVER oxygen
+         Y_I'   = Y_I + (1 + s1) dY_F      <-- including what step 1 just made
+
+step 2   minY2 = min(Y_I', Y_O2' / r2)
+         omega2 = rate rho minY2,  clipped to rho minY2 / dt
+         Y_I''  = Y_I' / (1 + omega2 dt / (rho Y_I'))
+         dY_I   = Y_I' - Y_I''
+         q2     = rho dY_I dh2I / dt
+```
+
+and the cell's outputs are `Y_F'`, `Y_O2' - r2 dY_I`, `Y_I''`,
+`Y_P + (1 + r2) dY_I`, the inert closure `1 - sum`, and `q = q1 + q2`.
+
+**The two lines marked with arrows are the entire model.** Step 2 sees the
+oxygen step 1 did not use and the intermediate step 1 just made. [L21]:
+
+> "in a given discrete time step, the available oxygen first reacts with any
+> fuel present, forming soot precursors, CO, and water vapor. If any oxygen
+> remains, it is free to oxidize the soot, CO, and H2. It is the availability
+> of oxygen and rate of mixing that determine the progression of the reaction,
+> not temperature."
+
+Each step keeps §27's two guards unchanged: the availability clip
+`omega <= rho min(...)/dt`, reported as a clipped-cell count, and Patankar's
+implicit sink, which keeps the reactant positive for any `dt`. The extent of
+reaction is computed ONCE per step and every consequence — the oxidiser, the
+intermediate, the products, the inert closure and the heat release — is derived
+from that one number, never from a second independently-rounded evaluation of
+the rate. That is §27's own `dY_F`-once rule, applied twice.
+
+*DESIGN, stated because it is a real limitation.* Patankar's implicit map means
+step 1 does not run to completion within one step even when oxygen is abundant,
+so the two-step scheme is **not** bit-identical to §27's single step in the
+well-ventilated limit — it is asymptotically the same as `rate dt -> inf`,
+which is [L21]'s own "essentially the one-step, mixing-controlled model", not
+an equality. The exact statements this section does make are in §42.8.
+
+### 42.3 The species set
+
+Five: `Y_F`, `Y_O2`, `Y_I`, `Y_P` solved on §19's machinery, `N2` closed by
+`1 - sum`. `Y_I` is the ONE new transported field, and it is one more
+`ScalarTransport` on the same conservative `phi` — no new operator, no new
+boundary condition, no new matrix. `Combustion::new` refuses any other set by
+name, generalising §27's "exactly three plus inert" to "exactly the scheme's
+own non-inert set", because the device kernel recomputes the inert species as
+`1 - sum(solved)` and that is correct only for the exact set.
+
+`Y_I` is a LUMPED species — CO, soot, H2 and the step-1 water vapour together —
+which is why it needs (42.3)'s mass-basis coefficients and not a molar
+stoichiometry. The reportable carbon monoxide mass fraction is a fixed multiple
+of it:
+
+```
+Y_CO = f_CO Y_I ,       f_CO = yCO / (1 + s1)                        (42.5)
+```
+
+where `yCO` is [L21]'s own definition (FDS TRG's `y_CO`) — kilograms of CO
+produced per kilogram of fuel reacted, at zero step-2 conversion. `Y_CO` is
+written as an output field; it feeds nothing back into the solve, so (42.5) is
+a diagnostic scaling and is exact for whatever the case states.
+
+Volume fraction, which is what every published compartment measurement reports:
+
+```
+X_CO = Y_CO Wbar / W_CO ,       X_O2 = Y_O2 Wbar / W_O2              (42.6)
+```
+
+*DESIGN, and the size of the error is stated.* §25's v1 gas state carries a
+CONSTANT molar mass (air, `Wbar = 28.96`), so (42.6) uses it. The design note
+for this work argues that `Wbar(Y)` is forced once CO2 and CO are distinguished
+from a lumped "Products", and it is right; it is not implemented here and this
+section does not claim it. What can be checked is the ambient anchor: `W_air /
+W_O2 = 0.905057`, so this crate's own `AMBIENT_Y_O2 = 0.232` maps to
+`X_O2 = 0.209973` against dry air's 0.2095 — **0.2 % high**, which is the scale
+of the error (42.6) carries in an air-like cell and NOT the scale it carries in
+a product-rich upper layer, where `Wbar` genuinely moves.
+
+### 42.4 What the case must say, and what it must not be made to guess
+
+```
+combustionProperties
+{
+    scheme   serialTwoStep;   // or singleStep (the default, S27)
+    s        3.628138;        // total O2/fuel mass ratio,   as S27
+    dhc      46.45e6;         // total heat of combustion,   as S27
+    s1       1.451255;        // REQUIRED: O2/fuel mass ratio of step 1
+    yCO      1.270381;        // REQUIRED: kg CO per kg fuel, step 1 complete
+    dh1      1.858e7;         // optional; defaults to dhc*s1/s (see below)
+}
+```
+
+`s2 = s - s1` and `dh2 = dhc - dh1` are DERIVED, never stated, so the totals
+§27 already published cannot drift. `s1 <= 0`, `s1 >= s`, `dh1 <= 0`,
+`dh1 >= dhc`, `yCO <= 0` are each refused by name. `s1` or `yCO` absent under
+`scheme serialTwoStep` is refused by name with the derivation quoted, and
+`s1`/`yCO`/`dh1` present under `scheme singleStep` is refused by name too —
+a coefficient that the selected scheme does not read is §13.4's defect in the
+other direction.
+
+**The worked derivation, from [L21] Eq. (42.1)-(42.2) and standard atomic
+masses.** Propane, `W = 44.0970`:
+
+| quantity | from | value |
+|---|---|---|
+| `n_O2` step 1 / step 2 | (42.1)/(42.2) | 2 / 3 |
+| `s1` | `2 W_O2 / W` | **1.451255** |
+| `s2` | `3 W_O2 / W` | **2.176883** |
+| `s` | `5 W_O2 / W` | **3.628138** (§27's `3.63`) |
+| `s1/s` | | **exactly 2/5** |
+| `yCO` | `2 W_CO / W` | **1.270381** |
+| soot yield | `1 W_C / W` | 0.272377 |
+| `1 + s1` | mass of Int per kg fuel | 2.451255 |
+| `f_CO` | (42.5) | 0.518257 |
+
+Methane under the scheme the FDS Validation Guide states for the UMD line
+burner (`CH4 + 1.333 Air -> 2/3 CO + 1/3 C + 2 H2O`, i.e. two moles of CO per
+mole of soot carbon — [L21]'s own choice for every compartment case in it):
+`W = 16.0430`, `n_O2 = 1.3333 / 0.6667`, `s1 = 2.659353`, `s2 = 1.329676`,
+`s = 3.989029`, `s1/s = 2/3`, `yCO = 1.163955`, `f_CO = 0.318077`.
+
+**The carbon split.** [L21] gives the fraction of the fuel's carbon that forms
+CO in step 1 as a range by sooting propensity — **0.9-1.0** for clean fuels
+(methane, methanol, ethanol), **0.8-0.9** for lightly sooting (acetone),
+**0.7-0.8** for moderately sooting (propane), and **0.6-0.7** for dirty fuels
+(toluene, heavy hydrocarbons) — and then uses **2/3** for every compartment
+case it reports. It also says plainly why the choice does not decide the
+compartment answer:
+
+> "the concentration of CO in an under-ventilated compartment fire is limited
+> by the supply of oxygen, not carbon; thus, the exact distribution of the
+> carbon atoms in the fuel is not a critical input parameter for compartment
+> fire simulations."
+
+§42.5 turns that sentence into a closed form, and §42.8 Gate 1 measures it.
+
+**`dh1`, and why the default is what it is.** *DESIGN.* The default split is
+`dh1 = dhc s1/s` — heat released in proportion to oxygen consumed. That is
+Huggett's principle, which the FDS TRG states as
+
+> "`ΔH/r_O2` has a relatively constant value of approximately 13100 kJ/kg for
+> most fuels of interest in fire applications"
+
+and uses to build its own extinction model (§43). This crate's §27 propane
+carries `dhc/s = 12.803` MJ per kg O2, which is 2.3 % below Huggett's constant
+— an independent check that the default is not arbitrary. **It is nonetheless
+an approximation, and the direction of the error is known**: CO oxidation
+releases more energy per kilogram of oxygen than the fuel-to-CO step does, so
+the proportional split gives step 2 too little heat and step 1 too much. The
+thermochemically exact split needs a table of standard enthalpies of formation;
+none was read while writing this section, and §0 does not allow one to be
+pinned from recollection, so the exact split is **not implemented** and `dh1`
+is left settable by any case that has such a table. Combustion efficiency in
+§42.5 therefore inherits the approximation; the CO prediction does not, because
+CO comes out of the oxygen bookkeeping and not out of the heat.
+
+### 42.5 The oxygen-limit law — the scheme's own closed form
+
+Consider a well-stirred control volume fed fuel at `mdot_F` and air at
+`mdot_a`, air carrying `Y_O2a`, in the fast-chemistry limit where every
+reaction that can proceed does. Write the oxygen supplied per unit fuel and the
+global equivalence ratio as
+
+```
+beta = mdot_a Y_O2a / mdot_F ,          phi = s / beta                (42.7)
+```
+
+Then the steady state of §42.2 is, exactly, three regimes:
+
+```
+phi <= 1                (beta >= s):      both steps complete
+                                          yCO_out = 0,  eta = 1
+
+1 < phi <= s/s1         (s1 <= beta < s): step 1 completes, step 2 partial
+      xi = (beta - s1)/s2 = 1 - (s/s2)(1 - 1/phi)
+      yCO_out = yCO (s/s2) (1 - 1/phi)                                (42.8)
+      eta = (dh1 + xi dh2)/dhc  ->  1/phi  under the Huggett split
+
+phi > s/s1              (beta < s1):      step 1 itself is O2-limited
+      yCO_out = yCO s/(s1 phi)                                        (42.9)
+      eta = (beta/s1)(dh1/dhc)  ->  1/phi  under the Huggett split
+```
+
+Three things in (42.7)-(42.9) are worth stating as predictions, because each
+one is falsifiable and each one fails under a different implementation error:
+
+1. **CO switches on exactly at `phi = 1`** and rises linearly in `1 - 1/phi`.
+   A scheme that let step 2 see step 1's oxygen twice switches on at the wrong
+   `phi` and under-predicts CO by a large factor (§42.5a).
+2. **CO peaks at `phi = s/s1`** — `2.5` for propane under (42.1), `1.5` for
+   methane — and *falls* beyond it, because past that point there is not even
+   enough oxygen to make CO and the fuel leaves unburnt. The peak value is
+   `yCO`, and only the peak height depends on the carbon split; the POSITION of
+   both features is set by `s1/s` alone. This is [L21]'s "limited by the supply
+   of oxygen, not carbon", quantified.
+3. **`eta = 1/phi` for every `phi > 1`, under the Huggett split, in both
+   regimes** — a single straight line in `1/phi` through the whole
+   under-ventilated range, with no discontinuity at `phi = s/s1`. That is not a
+   coincidence: it is oxygen-consumption calorimetry, and it is the sharpest
+   available test that the heat split and the mass split are consistent with
+   each other.
+
+### 42.5a A correction to this section's first draft, and what replaced it
+
+This section was first written claiming that a PARALLEL two-step — both steps
+reading the same entry `Y_O2` — "never accumulates CO at all", and that this
+was the control that isolates the serialisation. **That is false, and the
+measurement that showed it is worth recording**, because the true statement is
+sharper.
+
+A parallel two-step does accumulate CO: the intermediate that survived earlier
+steps is still there for step 2 to read, so it still runs out of oxygen when
+`phi > 1`. What it does instead is **conjure oxygen**. Both steps compute their
+own extent against the SAME `Y_O2`, so their combined demand can exceed what
+the cell holds, and the boundedness clamp `Y_O2 >= 0` — which is a correctness
+guard, not a licence — silently absorbs the difference. Measured in the
+well-stirred reactor of §42.5, per kg of fuel fed:
+
+| `phi` | serial: O2 conjured | parallel: O2 conjured | serial `eta`·`phi` | parallel `eta`·`phi` |
+|---|---|---|---|---|
+| 1.2 | **0** | 0.599 | 1.000 | 1.198 |
+| 1.6 | **0** | 1.336 | 1.000 | 1.589 |
+| 2.0 | **0** | 1.444 | 1.000 | 1.796 |
+| 2.5 | **0** | 1.418 | 1.000 | 1.977 |
+| 3.5 | **0** | 1.034 | 1.000 | 1.998 |
+| 6.0 | **0** | 0.604 | 1.000 | 1.999 |
+
+The parallel scheme releases up to **twice** the heat its oxygen supply can pay
+for — `eta -> 2/phi`, the factor being exactly the number of reactions each
+independently draining the same pool — and correspondingly under-predicts CO by
+a factor of 3 to 40. The serial scheme conjures nothing: the clamp never fires,
+because step 2 is handed only what step 1 left.
+
+*The one qualification, measured rather than assumed.* "Nothing" means an exact
+`0.0` at every `phi` in the reactor above, and at worst the round-off of the
+extent subtraction elsewhere. That floor is not `eps` times the RESULT:
+`dY_I = Y_I' - Y_I''` is a difference of two numbers of order `Y_I` that can
+differ by `1e-9`, so `dY_I` carries an absolute error of order `eps Y_I` and
+`r2 dY_I` over-draws by that much. On an adversarial per-cell sweep the worst
+case is **1.9e-19 kg O2 per kg of mixture against a `Y_I` of 1e-2** — 0.086 ULP
+of the input — which is twelve orders of magnitude below what the parallel
+scheme invents. The test asserts `8 eps` times the largest input mass fraction
+and says why.
+
+So the control that isolates the serialisation is not "the parallel scheme
+makes no CO"; it is **"the parallel scheme does not conserve oxygen, and the
+serial scheme does, exactly"**. §42.8's Gate 1 measures that, and it is a
+stronger statement than the one it replaced: a CO count can be argued about,
+an invented kilogram of oxygen cannot.
+
+### 42.6 Where it sits in the solve — nothing new
+
+Operator-split, exactly as §27: `Species::correct` transports, then the
+reaction pass rewrites the mass fractions in place, then
+`EnergySources::register_explicit` takes `q`. The reaction never enters a
+matrix, so `SourceSet`'s uniform-per-zone restriction (§18) is untouched, and
+the fuel-consumed/heat-released identity stays exact rather than becoming
+approximate. §26 does not learn that a second reaction exists.
+
+One fused elementwise kernel, `cmbReactSerial`, one thread per cell, no face
+stencil, no atomic, no reduction, no host branch, the same fixed instruction
+count for every thread on the mesh. Every output buffer is distinct from every
+input buffer, so there is no aliasing hazard within or across threads, and the
+result is bitwise reproducible by construction — cell `i`'s answer is a
+function of cell `i`'s own state and nothing else.
+
+### 42.7 What the drivers do
+
+`ofgpu-fire` is the only driver that reacts. `ofgpu-buoyant`, `ofgpu-plume`,
+`ofgpu-k-epsilon` and `ofgpu-k-omega` do not construct a `Combustion` at all,
+so there is nothing for them to ignore. A case naming `scheme serialTwoStep`
+without the species set is refused where the species set is built, by name.
+
+### 42.8 What must hold
+
+| Check | Expected |
+|---|---|
+| default path, `scheme singleStep` | **bit-identical** to §27 — the same `cmbReact` kernel with the same arguments; `cases/burnerPlume.jsonc` re-run and its recorded numbers unmoved |
+| mass closure, per cell, per step | all five mass fractions sum to `1` to `4 eps`; every species in `[0, 1]` |
+| oxygen closure | `dY_O2 == s1 dY_F + r2 dY_I` exactly, from the two extents, not from a re-evaluated rate |
+| **energy closure over a complete burn** | `int q dV dt == m_F dhc` to `1e-9` relative, INDEPENDENT of the split — every kg of fuel contributes `dh1` on leaving the fuel pool and `(1+s1) dh2I = dh2` on leaving the intermediate pool |
+| step 2 starved | `Y_O2 = 0` at entry: step 1 does nothing, step 2 does nothing, `q = 0`, nothing moves |
+| step 2 abundant | `Y_O2` large: `Y_I` decreases monotonically every step, `Y_P` increases, `Y_CO -> 0` |
+| **Gate 1 (live) — the oxygen-limit law (42.8)/(42.9)** | a well-stirred cell driven to steady state on the GPU with every §42 kernel in the loop reproduces the three regimes: CO exactly zero for `phi <= 1`, linear in `1 - 1/phi` above it, peak at `phi = s/s1`, and `eta = 1/phi`. Because the closed form is the infinitely-fast limit and the reactor is finite-rate, the gate is a CONVERGENCE study, not a band: `theta = dt/tau_res` is halved twice and the live CO has to approach the closed form at first order, with the first-order extrapolation landing on it |
+| a PARALLEL two-step, same coefficients | must **conjure oxygen** — `eta > 1/phi`, tending to `2/phi`, with up to 1.4 kg of O2 per kg of fuel appearing out of the boundedness clamp (§42.5a) — and must under-predict CO by a factor of 3 to 40. This is the control that shows the serialisation is what is being measured |
+| §27, same case | must produce **zero** CO at every `phi` — it has no CO field; the pass/fail is categorical before it is quantitative |
+| **Gate 2 — NIST RSE 1994** | ceiling CO volume fraction against Bryner, Johnsson & Pitts, NISTIR 5568 (1994), swept 50-600 kW: measured below `0.0005` under 100 kW, rising to `0.02-0.035` at 400-640 kW. [L21]'s own published statistics for this model over the NIST RSE 1994 / RSE 2007 / FSE 2008 compartment set are **model bias factor 1.08, model relative standard deviation 0.50** against an experimental relative standard deviation of 0.19 — that is the bar, and claiming better would be dishonest |
+| a two-run bit-for-bit repeat | identical `f64` bits |
+
+### 42.8a What Gate 1 measured
+
+Live on an RTX 5070 Ti, 64 cells (24 operating points, each replicated, every
+replica bitwise identical), propane, 14 000 steps:
+
+| `phi` | closed form | `theta = 0.02` | `0.01` | `0.005` | order | `eta·phi` |
+|---|---|---|---|---|---|---|
+| 0.50 | 0 | — | — | — | 1.0 | 1.0 |
+| 1.20 | 0.3529 | 0.3125 | 0.3322 | 0.3424 | ~1.0 | 1.0000 |
+| 2.00 | 1.0587 | 0.9370 | 0.9889 | 1.0206 | ~0.9 | 1.0000 |
+| **2.50** | 1.2704 | 1.0083 | 1.0780 | 1.1306 | **0.46** | 1.0000 |
+| 3.50 | 0.9074 | 0.8445 | 0.8732 | 0.8895 | ~0.9 | 1.0000 |
+| 6.00 | 0.5293 | 0.5172 | 0.5233 | 0.5262 | ~1.0 | 1.0000 |
+
+* **First order in `theta` everywhere except at `phi = s/s1` exactly**, and the
+  first-order extrapolation of the two finest lands within **0.5 % of `yCO`**
+  of the closed form.
+* At `phi = s/s1 = 2.5` the order is **0.46** — `sqrt(theta)`, not `theta`.
+  That is not a defect and it is not excused: it is the knife-edge where step
+  1's two reactants are *precisely* co-limiting, so Patankar's implicit map
+  leaves a residue of unburnt fuel that scales as the square root of the step.
+  The gate names the point and asserts the half order rather than widening a
+  band until it fits.
+* **`eta * phi = 1.0000` at every `phi > 1`**, to five figures — the heat split
+  and the mass split agree exactly, which is (42.5)'s third prediction.
+* **The serial scheme conjured `0.000e0` kg of oxygen**; the parallel control
+  conjured at least `0.411` and reached `eta * phi = 1.987`.
+* §27's single step scored **exactly zero** CO on the same sweep.
+
+**Validation, stated honestly, before it is run.** Gate 1 tests the *scheme*
+and is decisive about it: it isolates the serialisation, the mass split and the
+heat split from every transport error, and there is no tuned parameter that
+could rescue a wrong answer. Gate 2 tests the scheme *plus* the compartment
+ventilation that sets `phi`, and this crate has never validated a doorway flow
+(Steckler, Quintiere & Rinkinen 1982 is not run). A Gate 2 miss is therefore
+ambiguous between the two halves by construction, so Gate 2 reports the
+predicted upper-layer OXYGEN alongside the CO, against the same experiment's
+own measured oxygen, so a reader can tell which half moved.
+
+### 42.8b Gate 2 was run, and it MISSES
+
+`cases/nistRSE1994.jsonc` is the compartment: 0.98 x 1.46 x 0.98 m, a
+0.48 x 0.81 m doorway, an area-matched burner window in the floor, 6144 cells
+(`D*/dx ~ 10` at 400 kW), k-epsilon, radiation off, adiabatic walls, 30 s of
+physical time at `dt = 0.005`. Two mesh regions - a burner in the floor AND a
+doorway in a wall - is what generalised `blockgen::BlockSpec` from one window
+to one per slot; it could not be expressed before.
+
+**Two things landed and one did not.**
+
+* **The oxygen crossover is roughly right.** The upper layer goes from
+  ventilated to starved between 200 and 300 kW in the measurement and at about
+  200 kW in the model - within one step of the swept heat release rate.
+* **The doorway velocity boundary condition turned out to matter enormously,
+  and it was measured rather than assumed.** `inletOutlet` with
+  `inletValue [0,0,0]` - the shape every other open patch in this tree uses -
+  clamps the VELOCITY to zero on every INFLOW face, and a doorway is the one
+  boundary where that is fatal, because the inflow is half of what the boundary
+  is for. At 400 kW it halves the combustion efficiency (11.5 % against 24.0 %)
+  and leaves the upper layer about 1000 K too hot. The case uses
+  `zeroGradient`, and the header says why.
+* **The ceiling CO is low by a factor of up to 20**, and it does not close the
+  gap as the fire grows. Front-probe volume fraction, measured (NISTIR 5568 bin
+  means) against predicted:
+
+  | kW | 50 | 100 | 200 | 300 | 400 | 500 | 600 |
+  |---|---|---|---|---|---|---|---|
+  | measured | 0.00023 | 0.00157 | 0.01080 | 0.02085 | 0.02567 | 0.02874 | 0.02944 |
+  | model | 0.0000005 | 0.00010 | 0.00080 | 0.00195 | 0.00147 | 0.00257 | 0.00145 |
+  | measured O2 | 0.166 | 0.082 | 0.026 | 0.0057 | 0.0025 | 0.0020 | 0.0028 |
+  | model O2 | 0.126 | 0.092 | 0.00003 | 0.00002 | 0.00048 | 0.000004 | 0.00002 |
+
+  [L21]'s own published statistic for this model on this experiment is a bias
+  factor of 1.08 at a model relative standard deviation of 0.50. This is
+  nowhere near it, and the numbers are recorded in `ofgpu-validate` so the miss
+  stays on the screen.
+
+**The diagnosis, from the runs and not from the model.** The predicted
+combustion efficiency is 15-58 %, so most of the fuel leaves the compartment
+unburnt rather than becoming CO, and the implied doorway air flow is roughly a
+tenth of what a 400 kW fire in this room draws. That is a VENTILATION failure,
+not a chemistry failure - and §42.8 named it as the ambiguous half before the
+run. Gate 1 validates the chemistry half decisively and independently.
+Steckler, Quintiere & Rinkinen (1982) is the prerequisite this miss names, and
+it is still not run.
+
+Two further gaps push the same way and are stated rather than corrected: the
+walls are adiabatic and radiation is off (the experiment's Marinite liner is a
+conjugate-heat-transfer problem this solver does not have, and at 120 s the
+adiabatic layer runs to 2475 K against a measured 925-1157 K), and the burner
+is a window in the floor rather than an obstruction 15 cm above it.
+
+---
+
+## 43. Local extinction — the critical flame temperature
+
+**FDS Technical Reference Guide, Combustion chapter, "Extinction"** (McGrattan,
+Hostikka, McDermott, Floyd, Weinschenk & Overholt, NIST SP 1018, 6th ed.), read
+locally at `reference/fds/Manuals/FDS_Technical_Reference_Guide/Combustion_Chapter.tex`
+— NIST, US public domain, licence read. The critical-flame-temperature values
+and the auto-ignition temperatures below are those of **C. Beyler, "Flammability
+limits of premixed and diffusion flames", ch. in *SFPE Handbook of Fire
+Protection Engineering*, 5th ed. (2016)**, as quoted by two independent NIST
+sources both read here: the ISFEH10 paper [L21] and the FDS Validation Guide's
+UMD Line Burner section. The self-extinction bracket is **Morehart, Zukoski &
+Kubota, NIST-GCR-90-585 (1991)**, as quoted by the FDS TRG. Huggett's
+`ΔH/r_O2 ≈ 13100 kJ/kg` is the FDS TRG's own statement. No GPL-licensed source
+was consulted; no FDS source code was read.
+
+§27 and §42 both assume fuel and oxygen react on contact, whatever the
+temperature. The FDS TRG names the exact limitation:
+
+> "A limitation of the default mixing-controlled reaction model described above
+> is that it assumes fuel and oxygen always react regardless of the local
+> temperature, reactant concentration, or strain rate. For large-scale,
+> well-ventilated fires, this approximation is usually sufficient. However, if
+> a fire is in an under-ventilated compartment, or if a suppression agent like
+> water mist or CO2 is introduced, or if the strain between the fuel and
+> oxidizing streams is high, burning may not occur."
+
+An under-ventilated compartment does not behave like one until the flame is
+allowed to go out. This section is the predicate that lets it.
+
+### 43.1 The critical flame temperature, and why the two published numbers agree
+
+Complete combustion of the oxygen in a control volume of mass `m` releases
+`Q = m Y_O2 (ΔH/r_O2)`, and under adiabatic conditions raises the bulk
+temperature to `T_f`, so `Y_O2 = cbar_p (T_f - T)/(ΔH/r_O2)` (FDS TRG). Taking
+`T_f` at the **limiting oxygen index** `X_OI` — the oxidiser-stream oxygen
+volume fraction at which a diffusion flame extinguishes — defines the CFT:
+
+```
+T_OI = T_inf + Y_OI (ΔH/r_O2) / cbar_p                               (43.1)
+
+Y_OI = X_OI W_O2 / ( X_OI W_O2 + (1 - X_OI) W_N2 )                   (43.2)
+```
+
+Two numbers are published independently and this crate takes both: FDS's
+default `X_OI = 0.135` at `T_inf = 20 °C`, and Beyler's tabulated
+`T_OI = 1447 °C` for propane and `1507 °C` for methane. **They are not
+independent claims — (43.1) ties them — and the tie is a usable check.**
+(43.2) at `X_OI = 0.135` gives `Y_OI = 0.151294`; inverting (43.1) at Huggett's
+`13.1 MJ/kg` gives the mean product specific heat each CFT implies:
+
+| fuel | `T_OI` | implied `cbar_p` |
+|---|---|---|
+| propane | 1720.15 K | **1388.9 J/(kg·K)** |
+| methane | 1780.15 K | **1332.9 J/(kg·K)** |
+
+Both are plausible means for a combustion-product mixture between 293 K and
+1750 K, and they bracket each other within 4 %. So the pair `(X_OI = 0.135,
+T_OI = Beyler)` is self-consistent, and this section records the check rather
+than asserting the numbers on trust.
+
+*DESIGN, and it is a real gap.* This crate's §26 gas state carries a CONSTANT
+`c_p = 1006 J/(kg·K)` (air at ambient). Feeding **that** into (43.1) gives
+`T_OI = 2263.3 K = 1990 °C`, 500 K above every published CFT — because 1006 is
+the cold-air value, not the hot-product mean the derivation needs. So `T_OI` is
+**not** derived from this crate's `c_p`; it defaults to Beyler's tabulated
+value for the case's fuel and is settable. When §26 grows `c_p(T, Y)` — the
+design note's item 5 — (43.1) becomes derivable here and the default should
+move to it. Until then the derived route is documented and unused, and the
+reason is stated rather than hidden.
+
+### 43.2 The predicate — FDS `EXTINCTION 1`
+
+The limiting oxygen volume fraction is a piecewise-linear function of the cell
+bulk temperature (FDS TRG):
+
+```
+                { X_OI (T_OI - T)/(T_OI - T_inf)      T <  T_fb
+X_O2,lim(T)  =  {                                                    (43.3)
+                { 0                                   T >= T_fb
+```
+
+and, with `X_O2 = Y_O2 Wbar/W_O2` from (42.6),
+
+```
+X_O2 < X_O2,lim(T)   =>   the cell does not react this step:
+                          mdot''' = 0 for every species, q''' = 0    (43.4)
+```
+
+The FDS TRG on why the free-burn cut-off exists, which is the sentence that
+makes this the right model for THIS solver:
+
+> "The `EXTINCTION 1` model is intended for relatively coarse fire simulations
+> where the grid cell cannot resolve details of the flame structure or capture
+> flame temperatures. The 'free-burn' temperature, `T_fb`, in
+> Eq. (`extinction_model`) is needed for simulations in which the
+> characteristic grid cell size `dx` is much larger than 1 cm. In such cases,
+> the combustion occurs within a fraction of the grid cell and its energy
+> cannot raise the cell bulk temperature to the critical value."
+
+`T_fb` defaults to 600 °C, the TRG's own default, justified there by
+measurements of Pitts and Bundy showing upper-layer oxygen falling to zero
+above roughly that temperature in flashover experiments. Note the consequence
+of (43.3): with `T_OI = 1720.15 K` and `T_fb = 873.15 K`, `X_O2,lim` falls from
+`0.135` at ambient to **`0.080130`** just below `T_fb` and then steps
+discontinuously to zero. The discontinuity is the model's, not this
+implementation's, and it is deliberate — above the free-burn temperature the
+cell is taken to be burning whatever oxygen it has.
+
+A third suppression rule, also the TRG's and also one comparison:
+
+```
+T < T_AIT   =>   the cell does not react this step                   (43.5)
+```
+
+`T_AIT` defaults to **0 K — no suppression, fuel and oxygen burn on contact**,
+which is FDS's own default and is what keeps this section opt-in in a second,
+independent way. [L21] uses 540 °C for methane and 450 °C for propane in the
+UMD line-burner simulations. FDS additionally exempts a small volume just above
+the burner to stand in for a spark igniter; **that exemption is a spatial zone
+and is NOT implemented here** — a case that sets `TAIT` gets it applied to
+every cell.
+
+### 43.3 Why it is a rate mask, and what that buys
+
+(43.4) says the reaction rate is zero, and in both §27 and §42 every
+consequence — `dY_F`, `dY_O2`, `dY_I`, `dY_P`, the inert closure and `q` — is
+derived from `omega`, which is `rate * rho * min(...)`. So extinction is
+implemented as **one elementwise kernel that zeroes `rate` where the predicate
+fires**, upstream of the reaction kernel, and:
+
+* `cmbReact` is **not touched at all**, so §27's default path is bit-identical
+  to what it was before this section existed — not by argument but because the
+  kernel and its arguments are unchanged;
+* the same predicate serves §27 and §42 with no duplicated arithmetic and no
+  second copy to keep in step;
+* `rate = 0` gives `omega = 0`, `clip = false`, `dY = 0`, `q = 0` — exactly
+  (43.4), with no separate branch inside the reaction kernel and therefore no
+  extra divergence;
+* it is elementwise: one thread per cell, reading only that cell's `T` and
+  `Y_O2`. No atomic, no reduction, no neighbour.
+
+The kernel also writes a per-cell `extinguished` flag which is reduced with
+`solver::device_sum` — the same deterministic tree reduction the clipped-cell
+count already uses — so the run reports how many cells went out, the way §27
+reports how many were availability-clipped. A model that silently extinguishes
+is as bad as a setting that is silently ignored.
+
+### 43.4 What the case can say
+
+```
+combustionProperties
+{
+    extinctionModel   oxygen;    // or none (the default)
+    XOI               0.135;     // limiting oxygen index, volume fraction
+    TOI               1720.15;   // critical flame temperature, K (Beyler)
+    Tfb               873.15;    // free-burn temperature, K
+    Tinf              293.15;    // ambient, K
+    TAIT              0.0;       // auto-ignition temperature, K (0 = off)
+}
+```
+
+`extinctionModel none` is the default and every coefficient above is refused by
+name under it — a case that writes `XOI 0.12` and no `extinctionModel` is
+asking for something that will not happen. `oxygen` is the only implemented
+model; anything else errors naming `none` and `oxygen`, and the error also
+names FDS's `EXTINCTION 2` as the documented next step and says why it is not
+here (§43.6). Ranges: `0 < XOI < 1`, `T_inf < T_fb < T_OI`, `TAIT >= 0`.
+
+### 43.5 What must hold
+
+| Check | Expected |
+|---|---|
+| default, `extinctionModel none` | `rate` untouched; §27 and §42 bit-identical to the same run without this section |
+| (43.3) at `T = T_inf` | exactly `X_OI` |
+| (43.3) at `T -> T_fb^-` | `0.080130` at the propane defaults; a step to `0` at `T_fb` |
+| (43.3) monotone | strictly decreasing in `T` on `[T_inf, T_fb)`, never negative |
+| (43.1)/(43.2) round trip | `X_OI = 0.135` implies `Y_OI = 0.151294`; propane's and methane's published CFTs imply `cbar_p = 1388.9` and `1332.9 J/(kg·K)` |
+| a cell at ambient `T`, `X_O2 = 0.21` | burns |
+| a cell at ambient `T`, `X_O2 = 0.13` | out — below `X_OI` |
+| a cell at `T = 700 °C`, `X_O2 = 0.05` | burns — above `T_fb` |
+| `T < T_AIT` with abundant oxygen | out, whatever the oxygen |
+| extinguished cell | `q == 0.0` exactly and every mass fraction bitwise unchanged |
+| **Gate (live) — UMD line burner** | combustion efficiency against **White, Link, Trouvé, Sunderland, Marshall, Sheffel, Corn, Colket, Chaos & Yu, *Fire Safety Journal* 76 (2015) 74-84**, measured data from the MaCFP database: methane `eta = 1.00` for `X_O2 >= 0.15`, `0.93` at `0.14`, `0.55` at `0.13`, `0.04` at `0.12`; propane `eta ~ 0.97` down to `0.14` and `0.78` at `0.13`. The anchors are unarguable at both ends and the LOI is bracketed independently by Morehart et al.'s measured self-extinction range of **12.4 %-14.3 %** oxygen by volume |
+
+### 43.5a What the gate measured
+
+Live on an RTX 5070 Ti, 96 cells (92 operating points, every replica bitwise
+identical), methane, an adiabatic well-stirred reactor with the cell
+temperature evolving from the heat §42 actually released, 8 000 steps:
+
+| lean `phi` | threshold `X_O2` (eta drops below 0.5) | `eta` at 0.21 | at 0.15 | at 0.12 |
+|---|---|---|---|---|
+| 0.10 | **0.1350** | 0.9868 | 0.9868 | 0.0000 |
+| 0.15 | **0.1350** | 0.9868 | 0.9868 | 0.0000 |
+| 0.20 | **0.1300** | 0.9868 | 0.9868 | 0.0000 |
+| 0.30 | **0.1300** | 0.9868 | 0.9868 | 0.0000 |
+
+The model's extinction threshold spans **`X_O2 = 0.130` to `0.135`** across
+these lean conditions — inside Morehart, Zukoski & Kubota's measured
+self-extinction range of **0.124-0.143**, and at the UMD line burner's own
+50 %-efficiency point, which the measured methane record puts at about
+**0.130** (measured `eta` is 0.5552 at 0.13 and 0.9296 at 0.14).
+
+Against the measured curve, methane:
+
+| `X_O2` | measured `eta` | model |
+|---|---|---|
+| 0.12 | 0.0412 | 0.0000 |
+| 0.13 | 0.5552 | **0.0000** |
+| 0.14 | 0.9296 | 0.9868 |
+| 0.15 | 1.0016 | 0.9868 |
+| 0.18 | 1.0047 | 0.9868 |
+| 0.21 | 0.9804 | 0.9868 |
+
+Both ends land: fully burning above the limit, out below it. **The one bin
+where the model misses is 0.13**, where the measurement is halfway through the
+transition and the model has already switched off — the model's transition is
+one bin (0.005 in `X_O2`) wide and the measurement's is about 0.02 wide.
+
+**What this section does NOT claim.** That a live LES of the UMD line burner
+reproduces the measured `eta(X_O2)` curve. What is run is the model's own
+`eta(X_O2)` in the well-stirred limit, which is where the extinction predicate
+and the §42 oxygen bookkeeping meet and where a wrong `X_OI`, a wrong `T_fb` or
+a wrong mass-fraction/volume-fraction conversion each move the curve in a
+different, distinguishable way. The measured curve's *slope* through the
+transition is set by turbulent intermittency at the flame base, which a
+well-stirred model does not have, and the report says so rather than tuning a
+constant until the slope matches.
+
+### 43.6 `EXTINCTION 2`, deliberately not implemented
+
+The FDS TRG's second model tests an enthalpy inequality — whether the potential
+heat release can raise the mixed portion of the cell above `T_CFT`, with excess
+fuel counted as a diluent and excess air removed from the balance. It is
+strictly better than (43.3) where the flame temperature is resolved. It is not
+implemented here for one stated reason: it needs `h_alpha(T)` — a per-species
+chemical-plus-sensible enthalpy, i.e. the NASA-polynomial table and the
+composition-dependent `c_p` that §26 does not have (the same gap §43.1 names).
+Building it on this crate's constant `c_p = 1006` would produce a criterion
+that looks like the TRG's and is not, which is worse than not having it.
+`extinctionModel extinction2` is therefore refused BY NAME, and the refusal
+says what is missing.
+
+---
+
+## 44. The `output` block: letting the case say what a run writes
+
+No external source. `docs/05-io-redesign.md` §6 (the `ResultWriter` seam),
+§4.6 (the `.mcr` restart format) and §8 Q4 (why a vector field becomes four
+scalar grids) are this project's own design notes; the formats themselves are
+cited where each writer is (`io/vtu.rs`, `io/vdb.rs`, `io/nvdb.rs`,
+`io/usda.rs`). No GPL-licensed source was consulted.
+
+`docs/case-example.json` has documented an `output` block at length since the
+JSONC format was designed:
+
+```jsonc
+"output": {
+  "visualisation": { "format": "vdb", "interval": 2.0,
+                     "fields": ["U","T","p"], "precision": "fp16",
+                     "usdScene": true },
+  "exact":   { "format": "vtu", "interval": 10.0 },
+  "restart": { "interval": 10.0, "keep": 2 },
+}
+```
+
+**No driver read a byte of it.** §13.4.2 made the whole block a refusal, and
+that was the right call for a reason worth preserving verbatim, because it is
+the reason this section exists:
+
+> Three of the block's knobs — `visualisation.fields`,
+> `visualisation.precision` and `restart.keep` — have no implementation
+> anywhere in the crate. Honouring `format` and `interval` because they happen
+> to exist, and dropping those three in silence, would manufacture §13.4.1's
+> own defect inside its fix.
+
+So this section builds the three missing pieces first and then honours the
+block whole. A solver that cannot be told what to write is not a product; a
+solver that can be told and does something else is worse than one that
+refuses.
+
+### 44.1 What each sub-block names
+
+The three sub-blocks are three different *purposes*, not three copies of one
+switch, and each takes only the formats that serve its purpose:
+
+| sub-block | purpose | `format` accepts | writer |
+|---|---|---|---|
+| `visualisation` | a dense voxel grid a renderer reads | `vdb`, `nvdb` | `io::vdb`, `io::nvdb` |
+| `exact` | interchange with the polyhedra preserved | `vtu`, `openfoam` (`foam`) | `io::vtu`, `io::fields` |
+| `restart` | this solver's own state, to resume from | — (always `.mcr`) | `restart::write_restart` |
+
+`format` takes a comma list, so `"vdb,nvdb"` is one visualisation stage
+writing both. Naming a format from the wrong column is a §13.4 error that says
+which column it belongs in — `"visualisation": { "format": "vtu" }` names
+`exact`, `"exact": { "format": "vdb" }` names `visualisation` — because
+"vtu is not a format ofgpu writes" would be a lie.
+
+`usdScene: true` adds the `.usda` scene that *references* the volume files;
+it belongs to `visualisation` because that is the only thing it can point at.
+The scene's `filePath` extension is derived from the volume format actually
+selected (`.vdb` if `vdb` is in the list, otherwise `.nvdb`), which is a
+correction: `common::build_writers` hard-coded `"vdb"`, so `-output nvdb,usda`
+has always produced a scene pointing at files that do not exist.
+
+### 44.2 `visualisation.fields` — write only these, in this order
+
+```
+fields absent          every cell field the run has, in the driver's own order
+fields: [a, b, c]      exactly a, b, c, in that order
+```
+
+The list is a *selection and an ordering*, applied to the `OutputField` slice
+the driver has already built — so it reaches `vdb`, `nvdb` and the `usda`
+scene alike, all three of which name their grids after that slice. It does
+NOT reach `exact`: that sub-block has no `fields` key, because "exact,
+polyhedra-preserving interchange" and "a subset of the fields" are
+contradictory, and the restart path is not negotiable at all (§44.5).
+
+Three things are refused by name, and the third is the one that matters:
+
+| written | refused because |
+|---|---|
+| `"fields": []` | a write with no fields is not a write; `vdb::write` would fail four levels down with "no fields to write" |
+| `"fields": ["T","T"]` | two grids of the same name in one file; the duplicate is named |
+| `"fields": ["Y_CO"]` on a run with no combustion | **the field does not exist in this run** — the error lists every field that does |
+
+The third is checked TWICE, deliberately: once before the time loop, against
+the names the driver is about to build, so a six-hour run does not fail at its
+first write; and again at every write, inside `FieldSelection::apply`, because
+the early list is a second statement of the same thing and two statements can
+drift. The second check is what makes the first one safe to trust.
+
+### 44.3 `visualisation.precision` — and nowhere else
+
+```
+precision: "fp32"   IEEE binary32 voxels (the default, and what every
+                    recorded .vdb/.nvdb in this repository is)
+precision: "fp16"   IEEE binary16 voxels
+```
+
+`fp16` halves the file and loses about three decimal digits. That is a
+legitimate trade **for a visualisation artefact and for nothing else**, so:
+
+* `exact.precision` is a §13.4 error naming `visualisation.precision`. VTU
+  and the OpenFOAM writer carry the solver's own `Scalar`, and a lossy
+  "exact" format is a contradiction in the name.
+* `restart.precision` is the same error, more so: §5.1's whole argument for
+  carrying `phi` in a checkpoint is that a *re-derived* flux is not the
+  conservative one, and a *rounded* one is not either.
+
+Both are refused as explicit `Option<String>` fields rather than left to
+`deny_unknown_fields`, so the message says why rather than "unknown field".
+
+`fp16` on the NanoVDB path is `nvdb::Precision::F16`, which has existed since
+that writer was written (`GridType::Half`, round-trip-tested bit-exact). On
+the OpenVDB path it did not exist and is built here — §45.
+
+### 44.4 `interval` — physical seconds, and what a steady run does with it
+
+```
+interval absent or 0    write the final state, once
+interval: W  (W > 0)    write every W seconds of physical time
+```
+
+`interval` is optional (it was required before this section; a case that wants
+one final write should not have to invent a number). The schedule is the one
+`ofgpu-fire`/`ofgpu-buoyant` already run for `-writeInterval`, to the line:
+
+```
+next = t0 + W;      due(t) := (t + 1e-9 >= next),  and then  next += W
+```
+
+with a final write forced after the loop regardless — so a case that names an
+interval landing exactly on the end time gets one write there, not two.
+
+**A steady run refuses a positive `interval` by name.** `ofgpu-k-epsilon` and
+`ofgpu-fire -iters N` advance an iteration counter, not a clock; "every 2.0
+seconds" names a schedule they have no clock for. The error names `-endTime`
+/`-deltaT` (`ofgpu-fire`) and says the driver writes its final state once.
+`interval` absent runs everywhere.
+
+### 44.5 `restart.keep` — retain N, delete older, and delete nothing else
+
+Every driver in this crate writes its checkpoint to one fixed path,
+`<out>/restart.mcr`, and overwrites it. That is a rotation of exactly one, and
+`keep: 2` has nothing to be honoured against. So the case route writes a
+*series*:
+
+```
+<out>/restart_<time>.mcr        one per interval, the driver's own time label
+```
+
+and retains the `keep` most recent.
+
+```
+keep: 0     keep every checkpoint (delete nothing)
+keep: N>0   after each write, delete the oldest until N remain
+```
+
+**Deleting files is the one genuinely destructive thing this section does**,
+and it is constrained by construction rather than by a pattern match:
+`restart::Checkpoints` deletes only paths that are in its own `written` list —
+paths *this* `Checkpoints` returned from *this* run's `write`. A file that
+matches `restart_*.mcr` exactly, sitting in the same directory, written by an
+earlier run or by a human, is never a candidate, because it was never in the
+list. A directory scan with a glob would delete it; this cannot. §44.7's
+table pins that with a decoy.
+
+The command-line route (`-restartWrite N`, in STEPS) is untouched: it still
+writes and overwrites `restart.mcr`. The two are genuinely different settings
+— one counts steps, one counts seconds — and §44.6 makes a case pick one.
+
+### 44.6 Precedence: the case, or the command line, never both
+
+`-output`, `-writeInterval` and `-restartWrite` say the same things the
+`output` block says. A case that carries the block AND a command line that
+names any of those three is a §13.4 error naming both sides, rather than a
+silent winner:
+
+```
+error: output (case file): "visualisation, exact, restart" is not supported
+       by ofgpu
+  note: the case's output block and the command line's -output /
+        -writeInterval / -restartWrite are two ways to say the same thing
+        and this run names both; drop one
+```
+
+*DESIGN.* The alternative — "the command line wins, and a line is printed" —
+is what `ofgpu-fire` does for `run.endTime`, and it is right there because the
+case's `endTime` still reaches §31.3's transient/algorithm contract at
+lowering time. Nothing in the `output` block reaches anything else, so a
+printed note would be the same "documented example that quietly disagrees with
+the solver" §13.4.2 removed.
+
+**A case with no `output` block is bitwise what it was.** The command-line
+pipeline is one stage, every field, `nvdb::Precision::F32`, the same writers
+in the same order with the same names — the same `build_writers` call, now
+routed through one type instead of three call sites.
+
+### 44.7 What must hold
+
+| Test | Expected |
+|---|---|
+| the block is read at all | a `.jsonc` case naming `output` runs; `common::refuse_unimplemented_blocks` no longer mentions it |
+| `visualisation.format` | `vdb` writes `.vdb`, `nvdb` writes `.nvdb`, `vdb,nvdb` writes both |
+| wrong column | `visualisation.format: "vtu"` errors naming `exact`; `exact.format: "vdb"` errors naming `visualisation`; `"usda"` in either errors naming `usdScene` |
+| unrecognised format | errors listing that sub-block's own menu |
+| `fields` selects | a run with `fields: ["T","U"]` writes exactly those grids, named `T` and `U.x/.y/.z/.mag`, in that order |
+| `fields` refuses | an unknown name errors listing every field the run has; `[]` and a duplicate each error by name |
+| `fields` is checked early | the error is raised before the first step, not at the first write |
+| `precision` | `fp16` and `fp32` produce different bytes; `fp32` is bitwise the pre-§44 file |
+| `precision` elsewhere | `exact.precision` and `restart.precision` each error naming `visualisation.precision` |
+| `interval` | `W` and `2W` write different numbers of files; absent writes once |
+| steady + `interval` | errors by name, naming `-endTime`/`-deltaT` |
+| `keep` | 5 checkpoints with `keep: 2` leave the 2 most recent; `keep: 0` leaves all 5 |
+| **`keep` deletes nothing else** | a directory seeded with an unrelated file, a decoy `restart_0.9.mcr` this run did not write, and a subdirectory: after 5 writes with `keep: 1`, all three are still there and exactly one run-written checkpoint remains |
+| precedence | case block + `-output` errors naming both; case block alone runs; command line alone is bitwise unchanged |
+| non-Cartesian mesh | a `visualisation` block on a mesh `cartesian::detect` refuses errors BEFORE the loop, naming `exact` |
+| `output.restart` in `ofgpu-k-epsilon` | errors by name — that driver has no checkpoint at all — naming the three that do |
+| **§13.4.1 pair** | ten pairs — `output` present/absent, `visualisation.format`, `.interval`, `.fields`, `.precision`, `.usdScene`, `exact.format`, `exact.interval`, `restart.interval`, `restart.keep` — each two runs identical in every byte but one, each REQUIRED to write different bytes. Compared as BYTES, not text: `.vdb`/`.nvdb` are binary and `read_to_string` silently skips them |
+| the default does not move | `cargo test`, `ofgpu-validate` and `cases/burnerPlume.jsonc`'s three recorded numbers unchanged |
+
+
+### 44.8 What the documented example turned out to be
+
+`docs/case-example.json` is the file this section exists because of, so it was
+run. Verbatim, with only `-endTime`/`-deltaT` on the command line, it does not
+start — and **for two reasons that have nothing to do with `output` and are
+older than this section**:
+
+```
+error: blockgen: two patches are both called 'outlet'
+error: ofgpu-fire needs `initial.k` - ... this case runs kEpsilon on top of it
+```
+
+The first is deliberate in the file: four box faces share the name `outlet`,
+and the `mesh.cyclic` comment uses that fact as its example of what a cyclic
+pair may *not* be given. The second is an omission — the example never grew a
+`k`/`epsilon` initial condition or the per-patch conditions to go with them.
+Neither is repaired here, because repairing the first would delete the thing
+the cyclic comment points at; instead the file now **says at the top that it
+is an illustration and not a runnable case**, and names both reasons. A
+documented example that quietly disagrees with the solver is §13.4.2's defect
+in the documentation, and the fix for it is the same as everywhere else: say
+so, by name.
+
+The `output` block itself was run, verbatim, on a copy of that file with those
+two repaired (four distinct `outlet*` names, `initial.k`/`initial.epsilon` and
+their patch conditions, a 24x12x8 mesh):
+
+```
+output visualisation (case output block): vdb, usda | every 2 s |
+    fields: U, T, p, k, epsilon, nut | precision fp16
+output exact (case output block): vtu | every 10 s | fields: every field | precision fp32
+output restart (case output block): .mcr checkpoints | every 10 s | keep 2
+```
+
+and it wrote `VDB/fire_000000.vdb`, `fire.usda`, `VTK/fire_000000.vtu`,
+`VTK/fire.pvd` and `restart_0.02.mcr`. Measured on the `.vdb`: **nine grids,
+every one of them `Tree_float_5_4_3_HalfFloat`, none plain**; the grid names
+are `U.x/.y/.z/.mag`, `T`, `p`, `k`, `epsilon`, `nut`; `rho` is **absent**,
+because the case's `fields` list did not name it; `is_saved_as_half_float` is
+present. The `.usda` carries nine `def Volume` prims and points at
+`./VDB/fire_000000.vdb`. That is every one of §44.1, §44.2, §44.3 and §45
+doing what this section says, on the documented example's own text.
+
+---
+
+## 45. Half-precision voxels in the OpenVDB writer
+
+**AcademySoftwareFoundation/openvdb, Apache-2.0, at the `v13.0.0` tag** —
+`openvdb/openvdb/io/GridDescriptor.cc` (`writeHeader`,
+`HALF_FLOAT_TYPENAME_SUFFIX`), `io/Compression.h`
+(`writeCompressedValues`, `HalfWriter`, `RealToHalf`, `truncateRealToHalf`),
+`tree/RootNode.h`, `tree/InternalNode.h`, `tree/LeafNode.h`
+(`writeTopology`/`writeBuffers`'s `toHalf` argument), `io/Archive.cc`
+(`writeGrid`), `Grid.cc` (`GridBase::setSaveFloatAsHalf`,
+`META_SAVE_HALF_FLOAT`) and `Metadata.h` (`Metadata::write`,
+`TypedMetadata<bool>`). Apache-2.0 is a permissive licence; the citations are
+inline in `io/vdb.rs` exactly as that file's existing fp32 citations are. No
+GPL-licensed source was consulted.
+
+§44.3 needs `fp16` on both volume paths. `io::nvdb` has had it since it was
+written. `io::vdb` wrote `Tree_float_5_4_3` and said so in a comment — `(no
+"_HalfFloat" suffix: fp32 only)`. This section removes that comment.
+
+### 45.1 What changes in the byte stream, and what does not
+
+OpenVDB does not have a half-float *grid type*. It has a per-grid **save
+preference**: the tree stays a `FloatTree` in memory, and four things change
+on the way out.
+
+```
+(1) GridDescriptor::writeHeader
+        gridType = "Tree_float_5_4_3" + "_HalfFloat"
+(2) InternalNode::writeTopology -> io::writeCompressedValues(..., toHalf)
+        NUM_VALUES entries, 2 bytes each instead of 4
+(3) LeafNode::writeBuffers      -> io::writeCompressedValues(..., toHalf)
+        512 entries, 2 bytes each instead of 4
+(4) Grid metadata gains  "is_saved_as_half_float" (bool) = 1
+```
+
+and two things pointedly do NOT:
+
+```
+(5) RootNode::writeTopology's background stays sizeof(ValueType) = 4 bytes.
+    It is passed through io::truncateRealToHalf - rounded to half precision
+    and written back as a float. This writer's background is 0.0, for which
+    that rounding is the identity, so the four bytes are unchanged.
+(6) The value MASKS, the child masks, the transform (f64 Mat4), the
+    stream-position offsets and the compression word are all unchanged.
+```
+
+(2) is the one a plausible implementation gets wrong. An internal node's value
+array is written by `writeTopology`, not `writeBuffers`, and `toHalf` is
+threaded through *both* — so a writer that halves only the leaf buffers
+produces a file whose every offset past the first internal node is wrong. In
+this writer that array is `NUM_VALUES` zeros (no constant tiles in a dense
+box), and binary16 zero is `0x0000`, so the *contents* are unchanged either
+way: **only the length changes, from `slots*4` to `slots*2`.** A test that
+compared voxel values would pass on a wrong length; the round-trip reader
+below fails on it.
+
+Under `COMPRESS_NONE` — which this writer always emits — `writeCompressedValues`
+takes its simplest branch unchanged by `toHalf`: one metadata byte,
+`NO_MASK_AND_ALL_VALS` (`6`), then the whole array. `toHalf` selects
+`HalfWriter<true, float>` for that array and nothing else.
+
+### 45.2 The conversion is `nvdb.rs`'s, not a second one
+
+`f32_to_f16_bits` already exists in `io/nvdb.rs`, written from the IEEE
+754-2008 binary16 definition (round-to-nearest-even, subnormals, the
+overflow-to-infinity rule) and tested against its own inverse. OpenVDB's
+`math::half` is Imath's, which is that same definition. §0's rule against
+redefining a shared type applies to a shared *function* at least as strongly:
+`vdb.rs` calls `nvdb`'s, so the two writers cannot round differently, and one
+test pins that they do not.
+
+### 45.3 What must hold
+
+| Test | Expected |
+|---|---|
+| fp32 is untouched | every byte of an fp32 `.vdb` is what it was before §45 — `vdb::tests`' structural and round-trip tests pass unchanged, and the recorded file size formula still holds |
+| the type name | an fp16 grid's type string is `Tree_float_5_4_3_HalfFloat`; an fp32 grid's is `Tree_float_5_4_3` |
+| the metadata bool | fp16 carries `is_saved_as_half_float = true`; fp32 carries no such entry |
+| **the internal-node array shrinks** | the fp16 file is smaller than the fp32 one by *exactly* `2 * (n_leaf*512 + n_lower*4096 + n_upper*32768)` bytes — leaf buffers AND internal value arrays, counted separately, so halving only the leaves fails |
+| round trip | this module's own reader, extended to read the suffix and the 2-byte values, recovers every voxel to `f16` precision, and recovers the grid dimensions and transform exactly |
+| the conversion is shared | `vdb`'s fp16 voxels equal `nvdb::f32_to_f16_bits` applied to the same input, bit for bit, over a sweep including subnormals, `+-0` and overflow |
+| background | the fp16 file's background word is still 4 bytes and still `0.0f` |
+| externally unverified | unchanged and restated: no OpenVDB build, Blender or ParaView is available here. `fp16` is validated against this module's own reader, as `fp32` is. Mark it "structurally validated, externally unverified" |

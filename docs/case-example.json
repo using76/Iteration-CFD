@@ -1,6 +1,28 @@
 // meteor-cfd case — the whole of cases/plumeB, which today is 13 files,
 // 705 lines and a 13 MB polyMesh. JSONC: JSON plus comments plus trailing
 // commas, nothing else.
+//
+// >>> THIS FILE IS AN ILLUSTRATION, NOT A RUNNABLE CASE, and saying so is
+// SPEC-LIT §13.4.2's own rule applied to the documentation: a documented
+// example that quietly disagrees with the solver is the same defect as a
+// setting the solver quietly ignores. Two things stop it running, both of
+// them older than the §44 rewrite of the "output" block below and both
+// deliberate here:
+//
+//   1. FOUR box faces are named "outlet", so blockgen refuses it - "two
+//      patches are both called 'outlet'". The duplicate name is the point of
+//      the mesh.cyclic comment further down, which uses it as the example of
+//      what a cyclic pair may NOT be given.
+//   2. There is no "initial.k"/"initial.epsilon", and no per-patch k/epsilon
+//      condition, so a kEpsilon run is refused by name - "ofgpu-fire needs
+//      `initial.k`".
+//
+// It is also deliberately carrying two §13.4 ERRORS in "run" (see there).
+//
+// For a case that RUNS, see cases/plume.jsonc and the other files in
+// cases/. Every block below is nevertheless exactly what the reader
+// accepts - the "output" block at the bottom was run verbatim, on a copy of
+// this file with (1) and (2) repaired, while §44 was written.
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
   "name": "plumeB",
@@ -151,43 +173,73 @@
     "maxCo": 0.8,
   },
 
-  // >>> The whole "output" block is a SPEC-LIT §13.4 ERROR today: NO driver
-  // in this crate reads any of it (`common::refuse_unimplemented_blocks`).
-  // It is kept here, and in docs/schema/case-1.json, because it is what the
-  // format will grow into — but it is not a set of settings that do
-  // something, and it was documented at length as though it were.
+  // >>> SPEC-LIT §44. This block was a §13.4 REFUSAL until §44, because three
+  // of its knobs — visualisation.fields, visualisation.precision and
+  // restart.keep — had no implementation anywhere in the crate, and wiring
+  // the two that did (format, interval) while dropping those three in
+  // silence would have been §13.4.1's own defect manufactured inside its
+  // fix. §44 built all three, and the block is now READ, by every driver
+  // that reads this format (ofgpu-fire and ofgpu-k-epsilon).
   //
-  // What a run writes is decided by the command line:
+  // The command line still says the same things:
   //   -output foam,vtu,nvdb,vdb,usda   the format(s)
   //   -writeInterval W                 how often
   //   -restartWrite N / -restartFrom F checkpoints
-  // `-permissive` substitutes exactly that and prints the substitution.
+  // A run that names BOTH this block and any of those three flags is a
+  // §13.4 error naming both — they are two ways to say one thing and there
+  // is no defensible winner (§44.6). Use one.
   //
-  // Three of the knobs below have no implementation ANYWHERE in the crate:
-  // visualisation.fields (every writer writes a fixed field set),
-  // visualisation.precision (NanoVDB output is fp32), and restart.keep
-  // (checkpoints are not rotated). Honouring "format" and "interval" because
-  // they happen to exist, and dropping those three in silence, would be
-  // §13.4.1's own defect manufactured inside its fix — so the block is
-  // refused whole.
+  // The three sub-blocks are three PURPOSES, and each takes only the formats
+  // that serve its purpose (§44.1):
+  //   visualisation  a dense voxel grid a renderer reads    vdb, nvdb
+  //   exact          interchange, polyhedra preserved       vtu, openfoam
+  //   restart        this solver's own state                (always .mcr)
+  // Naming a format from the wrong column is an error that says which
+  // column it belongs in, rather than "ofgpu does not write vtu".
   "output": {
-    // Visualisation: .vdb files (built as NanoVDB on the GPU), plus a USD
-    // scene that references them — Blender and Omniverse both read this.
-    // ".nvdb" is deliberately not a distribution format: Blender cannot
-    // read it and its layout tracks the NanoVDB ABI.
+    // Visualisation: .vdb files (OpenVDB), plus a USD scene that references
+    // them — Blender and Omniverse both read this. "nvdb" (NanoVDB) is also
+    // accepted, and then the scene points at the .nvdb files instead; it is
+    // deliberately not a DISTRIBUTION format, since Blender cannot read it
+    // and its layout tracks the NanoVDB ABI.
     "visualisation": {
+      // A comma list is allowed: "vdb,nvdb" writes both.
       "format": "vdb",
+      // Seconds of PHYSICAL time between writes. Optional: absent (or 0) is
+      // "the final state, once". A positive value on a STEADY run — every
+      // ofgpu-k-epsilon run, and ofgpu-fire under -iters — is a §13.4 error
+      // naming -endTime/-deltaT, because those runs advance an iteration
+      // counter and have no clock (§44.4).
       "interval": 2.0,
+      // Write only these cell fields, in this order (§44.2). Optional:
+      // absent is every field the run has. A name the run does NOT have is
+      // an error listing every name it does — so this is checked before the
+      // first step, not at the first write.
       "fields": ["U", "T", "p", "k", "epsilon", "nut"],
+      // fp32 (the default) or fp16 (§44.3). This is the ONE place in the
+      // case format where reduced precision is legitimate: a visualisation
+      // artefact can afford three fewer decimal digits. output.exact and
+      // output.restart have a "precision" key too, and it is ALWAYS an
+      // error there, naming this one — a lossy "exact" format is a
+      // contradiction in the name, and §5.1's argument for carrying phi
+      // across a restart rules out a rounded one just as much as a
+      // re-derived one.
       "precision": "fp16",
       "usdScene": true,
     },
     // Exact, polyhedra-preserving interchange. VTU is read by ParaView and
     // by NVIDIA's cae-openusd-plugins (Kit-CAE / Omniverse).
-    // "openfoam" is also accepted here.
+    // "openfoam" (or "foam") is also accepted here. No "fields" key: a
+    // subset of the fields is not an exact interchange.
     "exact": { "format": "vtu", "interval": 10.0 },
     // Restart is its own file, not a visualisation artefact: full f64,
     // includes phi, refuses to load onto a mesh with a different hash.
+    //
+    // "keep" retains the N most recent checkpoints of the series
+    // <case>_jsonc/restart_<time>.mcr and DELETES the older ones (§44.5).
+    // 0 keeps every one of them. The delete set is the files THIS RUN
+    // wrote and nothing else — a restart_*.mcr left by an earlier run, or
+    // put there by hand, is never a candidate.
     "restart": { "interval": 10.0, "keep": 2 },
   },
 }

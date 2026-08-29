@@ -29,7 +29,7 @@ use std::process::Command;
 
 /// Every translation unit in `cuda/` that holds device code.
 /// Each becomes one module loaded at run time.
-const KERNEL_UNITS: &[&str] = &["fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "combustion.cu", "radiation.cu", "fvdom.cu"];
+const KERNEL_UNITS: &[&str] = &["fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "combustion.cu", "radiation.cu", "fvdom.cu", "rheology.cu", "ke_variants.cu", "twostep.cu"];
 
 fn cuda_root() -> PathBuf {
     // CUDA_PATH is set by the Windows installer; CUDA_HOME and /usr/local/cuda
@@ -268,7 +268,11 @@ fn main() {
             .arg(format!("--gpu-architecture=sm_{arch}"))
             .arg("-std=c++17")
             // No --use_fast_math: the point of this port is to reproduce
-            // IEEE-754 double arithmetic, and fast math would quietly change it.
+            // IEEE-754 double arithmetic, and fast math would quietly change
+            // it. SPEC-LIT S38.6 states the consequence for the rheology
+            // kernels specifically - `pow(x, y)` for non-integer `y` is not
+            // bit-stable across compute capabilities OR across this flag - so
+            // this is not folklore, it is a requirement with a section number.
             .arg("-lineinfo")
             // C4819: MSVC complains that NVIDIA's own headers contain bytes
             // it cannot represent in the console codepage. Nothing to do with

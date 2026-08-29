@@ -88,6 +88,7 @@ use crate::io::dict::FoamDict;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::GpuMesh;
+use crate::rheology::{self, RheologyCoeffs, RheologyKernels};
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Tensor, Vec3};
 
@@ -295,6 +296,15 @@ pub struct MomentumControls {
     /// diagonal - see `momRatU` in `cuda/momentum.cu` for why one is needed at
     /// all. `0.1` caps `rAtU` at ten times `rAU`.
     pub simplec_floor: Scalar,
+
+    /// Which closure supplies the LAMINAR viscosity - SPEC-LIT 38.
+    ///
+    /// [`crate::rheology::RheologyModel::Newtonian`] (the default) means
+    /// [`Self::nu`] everywhere and is bitwise the pre-38 momentum equation:
+    /// no rheology kernel is launched at all and `nu_lam` stays at the
+    /// uniform buffer it was filled with. Anything else makes `nu` a field
+    /// of the local strain-rate magnitude.
+    pub rheology: RheologyCoeffs,
 }
 
 impl Default for MomentumControls {
@@ -315,6 +325,7 @@ impl Default for MomentumControls {
             variable_viscosity_stress: true,
             simplec: false,
             simplec_floor: 0.1,
+            rheology: RheologyCoeffs::default(),
         }
     }
 }
@@ -354,6 +365,25 @@ impl MomentumControls {
                 self.simplec_floor
             )));
         }
+        self.rheology.validate("viscosityModel")?;
+
+        // SPEC-LIT §38.5(ii). `div(nu grad(U)^T)` is identically zero for a
+        // uniform viscosity and is NOT zero for any of the five closures, so
+        // running one of them with the term switched off is a first-order
+        // modelling error concentrated exactly where the physics is - at the
+        // wall, and at the yield surface. §13.4 says that is refused BY NAME
+        // rather than quietly accepted.
+        if !self.rheology.is_newtonian() && !self.variable_viscosity_stress {
+            return Err(Error::Config(format!(
+                "viscosityModel {} needs the variable-viscosity stress term \
+                 div(nu_eff grad(U)^T), which this case has switched off \
+                 (SPEC-LIT 38.5 ii): for a non-uniform viscosity that term is \
+                 not zero, and dropping it is a first-order error at every \
+                 wall. Either leave the term on, or name viscosityModel \
+                 Newtonian",
+                self.rheology.model.name()
+            )));
+        }
         Ok(())
     }
 }
@@ -366,7 +396,7 @@ struct MomentumKernels {
     vec_component: CudaFunction,
     set_component: CudaFunction,
     copy_label: CudaFunction,
-    add_const: CudaFunction,
+    add: CudaFunction,
     mul: CudaFunction,
     correct_velocity: CudaFunction,
     mag: CudaFunction,
@@ -394,7 +424,7 @@ impl MomentumKernels {
             vec_component: k.func("momVecComponent")?,
             set_component: k.func("momSetComponent")?,
             copy_label: k.func("momCopyLabel")?,
-            add_const: k.func("momAddConst")?,
+            add: k.func("momAdd")?,
             mul: k.func("momMul")?,
             correct_velocity: k.func("momCorrectVelocity")?,
             mag: k.func("momMag")?,
@@ -472,6 +502,23 @@ pub struct Momentum<'m> {
     grad_nu: DevBuf<Vec3>,
     grad_p: DevBuf<Vec3>,
 
+    /// The LAMINAR viscosity, per cell and per boundary face - SPEC-LIT 38.5(i).
+    ///
+    /// Filled once with the uniform `ctrl.nu` and left alone under
+    /// [`crate::rheology::RheologyModel::Newtonian`], which is what makes the
+    /// default path bitwise what it was. A non-Newtonian model rewrites it
+    /// once per outer iteration from the strain-rate magnitude.
+    nu_lam: DevBuf<Scalar>,
+    b_nu_lam: DevBuf<Scalar>,
+    /// `gdot = sqrt(2 D:D)`, per cell and per boundary face - SPEC-LIT 38.1,
+    /// 38.5(iii). Allocated whatever the model, so selecting one is a launch
+    /// rather than an allocation.
+    gdot: DevBuf<Scalar>,
+    b_gdot: DevBuf<Scalar>,
+    /// `None` under a Newtonian case: the module is never loaded and no
+    /// kernel of it is ever launched.
+    rheok: Option<RheologyKernels>,
+
     /// `nu + nu_t`, with boundary values, so both a gradient and a face
     /// interpolation can be taken of it.
     nu_eff: GpuScalarField,
@@ -525,6 +572,21 @@ impl<'m> Momentum<'m> {
         let mut ones = gpu.zeros::<Scalar>(one(n))?;
         gpu.write(&mut ones, &vec![1.0 as Scalar; one(n)])?;
 
+        // SPEC-LIT 38.5(i): the laminar viscosity is a FIELD, seeded with the
+        // case's own uniform `nu`. Under a Newtonian model nothing ever
+        // rewrites it, and `nu_lam[i] + nu_t[i]` is then the same IEEE-754
+        // addition `nu_t[i] + nu` was.
+        let mut nu_lam = gpu.zeros::<Scalar>(one(n))?;
+        gpu.write(&mut nu_lam, &vec![ctrl.nu; one(n)])?;
+        let mut b_nu_lam = gpu.zeros::<Scalar>(one(nbf))?;
+        gpu.write(&mut b_nu_lam, &vec![ctrl.nu; one(nbf)])?;
+
+        let rheok = if ctrl.rheology.is_newtonian() {
+            None
+        } else {
+            Some(RheologyKernels::new(gpu)?)
+        };
+
         Ok(Self {
             m,
             ctrl,
@@ -570,6 +632,12 @@ impl<'m> Momentum<'m> {
             grad_u: gpu.zeros(one(n))?,
             grad_nu: gpu.zeros(one(n))?,
             grad_p: gpu.zeros(one(n))?,
+
+            nu_lam,
+            b_nu_lam,
+            gdot: gpu.zeros(one(n))?,
+            b_gdot: gpu.zeros(one(nbf))?,
+            rheok,
 
             nu_eff: GpuScalarField::zeros(gpu, m, "nuEff")?,
             nu_eff_face: GpuSurfaceScalarField::zeros(gpu, m, "nuEfff")?,
@@ -748,13 +816,73 @@ impl<'m> Momentum<'m> {
 
     // ---- viscosity --------------------------------------------------------
 
-    /// `nu_eff = nu + nu_t`, its face product `nu_eff_f·|Sf|`, and - when
+    /// The LAMINAR viscosity field, from the local strain-rate magnitude -
+    /// SPEC-LIT §38.
+    ///
+    /// A no-op under [`crate::rheology::RheologyModel::Newtonian`]: nothing
+    /// is launched, `nu_lam` keeps the uniform `ctrl.nu` it was filled with,
+    /// and `update_viscosity` is then bitwise the pre-§38 pass. That is not a
+    /// happy accident, it is the whole selection rule of §38.7, and
+    /// [`Self::the_uniform_buffer_is_the_scalar_bitwise`] measures it.
+    ///
+    /// The chain is §38.1's, and every link of it already existed:
+    ///
+    /// ```text
+    /// grad(U)  fvc_grad_vector   Green-Gauss gather over the cell->face CSR
+    /// gdot     turbStrainRateMag sqrt(2 symm(grad U):symm(grad U))
+    /// nu       rheoApparentViscosity
+    /// gdot_b   rheoStrainRateBoundary   the wall-normal derivative of the
+    ///                                   tangential velocity, face-local
+    /// nu_b     rheoApparentViscosity    on the SAME formula, so a wall face
+    ///                                   is not the owner cell's viscosity
+    /// ```
+    ///
+    /// Called once per outer iteration, BEFORE [`Self::update_viscosity`],
+    /// which is what makes §38.5(iv)'s relaxation a fixed-point iteration
+    /// nested inside SIMPLE rather than a second inner loop.
+    pub fn update_rheology(&mut self, gpu: &Gpu, u: &GpuVectorField) -> Result<()> {
+        let Some(rheok) = self.rheok.as_ref() else {
+            return Ok(());
+        };
+        let m = self.m;
+        let (n, nbf) = (m.n_cells, m.n_boundary_faces);
+        let kin = self.ctrl.rheology.kinematic();
+
+        {
+            let Self { fvk, grad_u, .. } = self;
+            fv::fvc_grad_vector(gpu, fvk, grad_u, u, m)?;
+        }
+        rheology::strain_rate_mag(gpu, rheok, &mut self.gdot, &self.grad_u, n)?;
+
+        // The boundary strain rate is taken from the CURRENT `gdot` field, so
+        // it has to be read before the cell viscosity overwrites nothing -
+        // they are separate buffers, but the ORDER still matters for the
+        // cyclic branch, which falls back to the owner cell's `gdot`.
+        rheology::strain_rate_boundary(gpu, rheok, &mut self.b_gdot, &u.f, &u.bf, &self.gdot, m)?;
+
+        rheology::apparent_viscosity_field(gpu, rheok, &mut self.nu_lam, &self.gdot, &kin, n)?;
+        rheology::apparent_viscosity_field(
+            gpu,
+            rheok,
+            &mut self.b_nu_lam,
+            &self.b_gdot,
+            &kin,
+            nbf,
+        )
+    }
+
+    /// `nu_eff = nu_lam + nu_t`, its face product `nu_eff_f·|Sf|`, and - when
     /// asked for - the variable-viscosity stress term.
     ///
     /// `nut` carries its own boundary values (a wall function writes them), so
     /// the boundary half of `nu_eff` is the wall's effective viscosity and the
     /// laplacian's boundary coefficient is the wall shear stress the wall
     /// function asked for.
+    ///
+    /// `nu_lam` used to be the scalar `ctrl.nu` and became a field in
+    /// SPEC-LIT §38.5(i). The addition is deliberately the same one in the
+    /// same order - `a[i] + b[i]` against `b[i] + c` with every `b[i] == c` -
+    /// so a Newtonian case is bit-for-bit what it was.
     pub fn update_viscosity(
         &mut self,
         gpu: &Gpu,
@@ -765,12 +893,11 @@ impl<'m> Momentum<'m> {
         let n = m.n_cells;
         let nif = m.n_internal_faces;
         let nbf = m.n_boundary_faces;
-        let nu = self.ctrl.nu;
 
         {
-            let Self { mk, nu_eff, .. } = self;
-            launch_add_const(gpu, &mk.add_const, &mut nu_eff.f, &nut.f, nu, n)?;
-            launch_add_const(gpu, &mk.add_const, &mut nu_eff.bf, &nut.bf, nu, nbf)?;
+            let Self { mk, nu_eff, nu_lam, b_nu_lam, .. } = self;
+            launch_add(gpu, &mk.add, &mut nu_eff.f, nu_lam, &nut.f, n)?;
+            launch_add(gpu, &mk.add, &mut nu_eff.bf, b_nu_lam, &nut.bf, nbf)?;
         }
 
         fv::interpolate_linear(gpu, &self.fvk, &mut self.nu_eff_face, &self.nu_eff, m)?;
@@ -980,6 +1107,9 @@ impl<'m> Momentum<'m> {
             return Ok([SolverPerformance::default(); 3]);
         }
 
+        // SPEC-LIT 38: the laminar viscosity first, then nu_eff = nu_lam +
+        // nu_t. Under a Newtonian case the first call launches nothing.
+        self.update_rheology(gpu, u)?;
         self.update_viscosity(gpu, u, nut)?;
         self.update_div_weights(gpu, u, phi)?;
 
@@ -1021,6 +1151,7 @@ impl<'m> Momentum<'m> {
         if n == 0 {
             return Ok(());
         }
+        self.update_rheology(gpu, u)?;
         self.update_viscosity(gpu, u, nut)?;
         self.update_div_weights(gpu, u, phi)?;
         for c in 0..3 {
@@ -1602,12 +1733,13 @@ fn launch_mul(
     Ok(())
 }
 
-fn launch_add_const(
+/// `out = a + b`, elementwise - SPEC-LIT S38.5(i).
+fn launch_add(
     gpu: &Gpu,
     k: &CudaFunction,
     out: &mut DevBuf<Scalar>,
-    src: &DevBuf<Scalar>,
-    c: Scalar,
+    a: &DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
     n: usize,
 ) -> Result<()> {
     if n == 0 {
@@ -1619,8 +1751,8 @@ fn launch_add_const(
         gpu.stream()
             .launch_builder(&f)
             .arg(out)
-            .arg(src)
-            .arg(&c)
+            .arg(a)
+            .arg(b)
             .arg(&nl)
             .launch(cfg_for(n))?;
     }
@@ -1752,5 +1884,130 @@ mod tests {
 
         let c = MomentumControls { steady: false, delta_t: 0.1, ..Default::default() };
         assert!((c.r_delta_t() - 10.0).abs() < 1e-12);
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §38.5(i) - the laminar viscosity became a field
+    // ----------------------------------------------------------------------
+
+    /// **The regression gate of SPEC-LIT §38.8.**
+    ///
+    /// `nu_eff = nu + nu_t` used to be `momAddConst(out, nut, nu)` with a
+    /// scalar `nu`. §38 makes `nu` a device buffer, and the entire claim that
+    /// a Newtonian case keeps every measurement this project has recorded
+    /// rests on the two being the same IEEE-754 addition: `a[i] + b[i]` with
+    /// every `a[i]` exactly the old scalar is bitwise `b[i] + c`.
+    ///
+    /// That is an obvious claim and this test exists because obvious claims
+    /// about floating point are how a default moves silently. Both kernels
+    /// are launched on the same input and the results compared BIT FOR BIT,
+    /// not to a tolerance - a tolerance here would pass for a formula that
+    /// had genuinely changed.
+    #[test]
+    fn the_uniform_buffer_is_the_scalar_bitwise() {
+        let Some(gpu) = Gpu::new(0).ok() else { return };
+        let k = KernelSet::new(&gpu, crate::kernels::MOMENTUM).expect("the momentum module");
+        let add = k.func("momAdd").expect("momAdd");
+        let add_const = k.func("momAddConst").expect("momAddConst - see cuda/momentum.cu");
+
+        // A `nu_t` field with the awkward magnitudes a real one has: many
+        // orders below `nu`, comparable to it, and far above it, plus the
+        // exact zero a laminar cell carries.
+        let n = 4096usize;
+        let mut nut: Vec<Scalar> = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = i as Scalar / n as Scalar;
+            nut.push(match i % 4 {
+                0 => 0.0,
+                1 => 1e-12 * (1.0 + x),
+                2 => 1.7e-5 * (0.3 + x),
+                _ => 1.3e-2 * (1.0 + 7.0 * x),
+            });
+        }
+        let d_nut = gpu.upload(&nut).expect("upload");
+
+        for nu in [1e-5 as Scalar, 1.5e-5, 1.002e-3, 0.0, 7.0] {
+            let d_nu_lam = gpu.upload(&vec![nu; n]).expect("upload");
+
+            let mut a = gpu.zeros::<Scalar>(n).expect("alloc");
+            let mut b = gpu.zeros::<Scalar>(n).expect("alloc");
+            let nl = n as Label;
+
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&add)
+                    .arg(&mut a)
+                    .arg(&d_nu_lam)
+                    .arg(&d_nut)
+                    .arg(&nl)
+                    .launch(cfg_for(n))
+                    .expect("momAdd");
+                gpu.stream()
+                    .launch_builder(&add_const)
+                    .arg(&mut b)
+                    .arg(&d_nut)
+                    .arg(&nu)
+                    .arg(&nl)
+                    .launch(cfg_for(n))
+                    .expect("momAddConst");
+            }
+            gpu.sync().expect("sync");
+
+            let ga = gpu.download(&a).expect("download");
+            let gb = gpu.download(&b).expect("download");
+            for i in 0..n {
+                assert_eq!(
+                    ga[i].to_bits(),
+                    gb[i].to_bits(),
+                    "nu = {nu}, nu_t = {}: the field form gave {} and the scalar \
+                     form {} - SPEC-LIT 38.5(i)'s bit-identity does not hold",
+                    nut[i],
+                    ga[i],
+                    gb[i]
+                );
+            }
+        }
+    }
+
+    /// SPEC-LIT §38.5(ii)'s §13.4 refusal: a non-Newtonian model with the
+    /// variable-viscosity stress term switched off is an ERROR naming both,
+    /// because dropping `div(nu grad(U)^T)` for a non-uniform `nu` is a
+    /// first-order error at every wall.
+    #[test]
+    fn a_yield_stress_model_without_the_transpose_term_is_refused() {
+        use crate::rheology::{RheologyCoeffs, RheologyModel};
+
+        let rheology = RheologyCoeffs {
+            model: RheologyModel::HerschelBulkley,
+            rho: 1000.0,
+            tau0: 2.0,
+            k: 0.35,
+            n: 0.6,
+            m_reg: 1000.0,
+            ..RheologyCoeffs::default()
+        };
+
+        // With the term on, it is a legal case.
+        let ok = MomentumControls {
+            rheology,
+            variable_viscosity_stress: true,
+            ..MomentumControls::default()
+        };
+        ok.validate().expect("HerschelBulkley with the stress term on is legal");
+
+        let bad = MomentumControls { variable_viscosity_stress: false, ..ok };
+        let e = bad.validate().expect_err("with it off it must be refused");
+        let msg = e.to_string();
+        assert!(msg.contains("HerschelBulkley"), "{msg}");
+        assert!(msg.contains("Newtonian"), "the message must name the way out: {msg}");
+        assert!(msg.contains("38.5"), "the message must cite the section: {msg}");
+
+        // And a NEWTONIAN case may still switch it off - it is identically
+        // zero there, which is exactly why the refusal is model-conditional.
+        let newtonian = MomentumControls {
+            variable_viscosity_stress: false,
+            ..MomentumControls::default()
+        };
+        newtonian.validate().expect("a uniform viscosity has no transpose term to lose");
     }
 }

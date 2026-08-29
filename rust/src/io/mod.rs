@@ -63,9 +63,14 @@ pub mod vdb;
 pub mod case_json;
 pub mod output_types;
 pub mod writer;
+pub mod output_plan;
 
 pub use writer::{
     cartesian_info, CartesianInfo, FoamField, FoamPayload, FoamWriter, NvdbWriter, ResultWriter,
     UsdaWriter, VdbWriter, VtuWriter, WriteCtx,
 };
 pub use output_types::{FieldValues, OutputField};
+pub use output_plan::{
+    build_writers, parse_output_formats, refuse_output_named_twice, ExactSpec, FieldSelection,
+    OutputFormat, OutputPipeline, OutputPlan, RestartSpec, VisSpec, OUTPUT_FORMAT_NAMES,
+};

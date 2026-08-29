@@ -273,19 +273,30 @@ impl ResultWriter for NvdbWriter {
 
 /// Writes one OpenVDB (`.vdb`) file per step. Same Cartesian-only refusal as
 /// [`NvdbWriter`].
+///
+/// `precision` is SPEC-LIT S44.3's `output.visualisation.precision`:
+/// `F32` is the plain `FloatTree` and the default everywhere, `F16` is
+/// OpenVDB's `_HalfFloat` save preference (S45). It is carried the same way
+/// [`NvdbWriter`] already carried its own, so the two volume writers take
+/// the setting through the same door.
 pub struct VdbWriter {
     dir: PathBuf,
     stem: String,
+    precision: nvdb::Precision,
 }
 
 impl VdbWriter {
-    pub fn new(dir: impl Into<PathBuf>, stem: impl Into<String>) -> Result<Self> {
+    pub fn new(
+        dir: impl Into<PathBuf>,
+        stem: impl Into<String>,
+        precision: nvdb::Precision,
+    ) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir).map_err(|e| crate::Error::Io {
             path: dir.display().to_string(),
             source: e,
         })?;
-        Ok(Self { dir, stem: stem.into() })
+        Ok(Self { dir, stem: stem.into(), precision })
     }
 }
 
@@ -301,7 +312,7 @@ impl ResultWriter for VdbWriter {
             );
         };
         let path = self.dir.join(format!("{}_{:06}.vdb", self.stem, ctx.step));
-        vdb::write(&path, cart, ctx.fields)
+        vdb::write(&path, cart, ctx.fields, self.precision)
     }
 }
 

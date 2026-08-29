@@ -1207,6 +1207,7 @@ fn run(o: &Options) -> Result<()> {
     // `ofgpu-buoyant` have printed this block for as long as it has existed;
     // `ofgpu-plume` - the driver with the extra equation - did not.
     ofgpu::io::case::print_effective_settings(&cc);
+    common::refuse_rheology_without_momentum(&cc, "ofgpu-plume")?;
 
     let d = KEpsilonCoeffs::default();
     let coeffs = KEpsilonCoeffs {

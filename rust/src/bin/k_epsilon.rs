@@ -4,7 +4,16 @@
 // Enquiries: simul@msimul.com
 // See LICENSE at the repository root.
 
-//! `ofgpu-k-epsilon` - run the GPU-native k-epsilon model on a case.
+//! `ofgpu-k-epsilon` - run a GPU-native k-epsilon model on a case.
+//!
+//! THREE models, not one: standard k-epsilon (SPEC-LIT §6.1), realizable
+//! (§40) and RNG (§41). All three transport the same two fields under the
+//! same two names, read the same `0/k` and `0/epsilon`, and write the same
+//! three outputs, so which one runs is a line in
+//! `constant/momentumTransport` and nothing else about the run changes.
+//! `LaunderSharmaKE` is deliberately NOT here: it needs `wallTreatment
+//! lowRe` and a wall-resolving mesh, which is a different case, not a
+//! different coefficient set.
 //!
 //! `<case>` is either an OpenFOAM case DIRECTORY (`constant/polyMesh` + `0/`,
 //! as always) or a single `.jsonc`/`.json` case FILE - told apart by
@@ -51,7 +60,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use ofgpu::field::{GpuSurfaceScalarField, GpuVectorField};
+use ofgpu::field::{GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field, max_div_phi,
@@ -61,14 +70,18 @@ use ofgpu::field_setup::{
 };
 use ofgpu::io::case::{find_start_time, model_coeff};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
-use ofgpu::models::{select_turbulence_model, KEpsilon, KEpsilonCoeffs, RasModel};
+use ofgpu::models::{
+    realizable_ke_coeffs, rng_ke_coeffs, select_turbulence_model, KEpsilon, KEpsilonCoeffs,
+    RasModel, RealizableKe, RealizableKeCoeffs, RngKe, RngKeCoeffs,
+};
+use ofgpu::solver::SolverPerformance;
 use ofgpu::turbulence::FlowState;
 use ofgpu::{Error, GpuMesh, Label, Result, Scalar};
 
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{atoi, build_writers, device_banner, g, next_arg, parse_output_formats, sci, OutputFormat};
+use common::{atoi, device_banner, g, next_arg, parse_output_formats, sci, OutputFormat};
 
 /// Everything the command line can change.
 struct Options {
@@ -83,6 +96,11 @@ struct Options {
     permissive: bool,
     /// `-output foam|vtu|nvdb|vdb|usda`, comma list - see `common::build_writers`.
     output: Vec<OutputFormat>,
+    /// Whether the command line NAMED `-output` - SPEC-LIT §44.6. Not the
+    /// same question as what it is set to: it defaults to `foam`, so every
+    /// run has a value. A case with an `output` block and a command line
+    /// with `-output` name the same thing twice, and that is an error.
+    output_flags: Vec<&'static str>,
 }
 
 fn usage() {
@@ -107,6 +125,7 @@ fn parse(args: &[String]) -> Result<Options> {
         write_time: String::new(),
         permissive: false,
         output: vec![OutputFormat::Foam],
+        output_flags: Vec::new(),
     };
 
     let mut i = 2;
@@ -118,7 +137,10 @@ fn parse(args: &[String]) -> Result<Options> {
             "-write" => o.write_time = next_arg(args, &mut i)?,
             "-noWrite" => o.do_write = false,
             "-permissive" => o.permissive = true,
-            "-output" => o.output = parse_output_formats(&next_arg(args, &mut i)?)?,
+            "-output" => {
+                o.output = parse_output_formats(&next_arg(args, &mut i)?)?;
+                o.output_flags.push("-output");
+            }
             other => {
                 usage();
                 return Err(Error::Config(format!("unknown option {other}")));
@@ -229,7 +251,13 @@ fn run(o: &Options) -> Result<()> {
     //
     //   * `physics.gravity` / `constant/g` - §17's `G_b` needs a temperature
     //     field, and this driver reads none.
-    //   * the whole `output` block, `run.adjustTimeStep`, `run.maxCo`.
+    //   * `run.adjustTimeStep`, `run.maxCo`.
+    //
+    // The `output` block used to be on that list and is not any more:
+    // SPEC-LIT §44 implemented it, and this driver honours everything in it
+    // that a STEADY single-write run can honour - the formats, the field
+    // selection, the voxel precision. What it cannot honour it refuses by
+    // name, immediately below.
     //
     // And two it CAN name and this driver simply has no equation for:
     // `physics.fluid.Pr`/`Prt` are required fields of the JSONC format, so
@@ -237,7 +265,44 @@ fn run(o: &Options) -> Result<()> {
     // half - one printed line - instead.
     common::refuse_buoyancy_without_temperature(&o.case_dir, &cc, json.as_ref(), "ofgpu-k-epsilon")?;
     common::refuse_non_orth_correctors_without_another_equation(&cc, "ofgpu-k-epsilon")?;
+    common::refuse_rheology_without_momentum(&cc, "ofgpu-k-epsilon")?;
     common::refuse_unimplemented_blocks(json.as_ref())?;
+
+    // SPEC-LIT §44, resolved before the mesh is uploaded so a case that asks
+    // for something this driver cannot do fails before any kernel launches.
+    let mut output_plan = common::output_plan(json.as_ref())?;
+    if let Some(plan) = &mut output_plan {
+        // Under `-permissive` this answers `false`, and the warning it just
+        // printed ("substituting the command line") is then this driver's
+        // job to make TRUE rather than a guess about it.
+        if !common::refuse_output_named_twice(plan, &o.output_flags)? {
+            output_plan = None;
+        }
+    }
+    if let Some(plan) = &mut output_plan {
+        // §44.4: this driver advances an iteration counter, not a clock.
+        plan.refuse_interval_when_steady(
+            "ofgpu-k-epsilon",
+            "it writes its converged state once, into the time directory -write names",
+        )?;
+        // §44.1: and it writes no checkpoint of any kind - there is no
+        // -restartWrite here either.
+        plan.refuse_restart(
+            "ofgpu-k-epsilon",
+            "ofgpu-fire, ofgpu-buoyant and ofgpu-vof do write .mcr checkpoints, and ofgpu-fire honours output.restart",
+        )?;
+        plan.refuse_visualisation_on_a_non_cartesian_mesh(
+            ofgpu::pressure::cartesian::detect(&hm).is_ok(),
+        )?;
+        // §44.2's early half. This driver's cell fields are these three and
+        // only these three; `phi` is a SURFACE field and goes only to the
+        // OpenFOAM writer, which is why it is not on the menu.
+        plan.check_fields(&["k", "epsilon", "nut"])?;
+        if plan.is_empty() {
+            output_plan = None;
+        }
+    }
+
     if let Some(l) = &json {
         println!(
             "    physics.fluid         Pr and Prt are not read by ofgpu-k-epsilon: it \
@@ -256,13 +321,16 @@ solves k and epsilon on a frozen U and transports no scalar for them to diffuse 
     // model kOmegaSST; }` ran standard k-epsilon here and said nothing.
     let selection = select_turbulence_model(&cc)?;
     match selection.model {
-        RasModel::KEpsilon | RasModel::Laminar => {}
+        RasModel::KEpsilon
+        | RasModel::RealizableKE
+        | RasModel::RNGkEpsilon
+        | RasModel::Laminar => {}
         other => {
             return Err(Error::Config(format!(
-                "this case asks for the {} model; run it with ofgpu-{} \
-                 (ofgpu-k-epsilon builds only kEpsilon)",
+                "this case asks for the {} model; run it with {} \
+                 (ofgpu-k-epsilon builds kEpsilon, realizableKE and RNGkEpsilon)",
                 other.name(),
-                other.name().to_lowercase().replace("kepsilon", "k-epsilon").replace("komega", "k-omega")
+                common::driver_for(other),
             )));
         }
     }
@@ -279,25 +347,81 @@ solves k and epsilon on a frozen U and transports no scalar for them to diffuse 
         );
     }
 
-    let d = KEpsilonCoeffs::default();
-    let coeffs = KEpsilonCoeffs {
-        cmu: model_coeff(&cc, "Cmu", d.cmu),
-        c1: model_coeff(&cc, "C1", d.c1),
-        c2: model_coeff(&cc, "C2", d.c2),
-        c3: model_coeff(&cc, "C3", d.c3),
-        sigmak: model_coeff(&cc, "sigmak", d.sigmak),
-        sigma_eps: model_coeff(&cc, "sigmaEps", d.sigma_eps),
+    // One coefficient set per model, and ONLY the selected one is read: each
+    // reader refuses, by name, the entries its own model does not consult
+    // (SPEC-LIT §40.6, §41.4), so reading all three would refuse a perfectly
+    // good `kEpsilon` case for carrying a `C1`.
+    let variant = match selection.model {
+        RasModel::RealizableKE => {
+            let c = realizable_ke_coeffs(&cc)?;
+            println!(
+                "nu = {} | realizableKE (SPEC-LIT S40): A0 {} C2 {} sigmak {} sigmaEps {}",
+                g(f64::from(cc.nu)),
+                g(f64::from(c.a0)),
+                g(f64::from(c.c2)),
+                g(f64::from(c.sigmak)),
+                g(f64::from(c.sigma_eps))
+            );
+            println!(
+                "    C_mu is a FIELD here (S40.4): log-layer value {}, kappa implied by \
+these coefficients {} (S40.8). `Cmu {}` reaches the WALL FUNCTIONS and the \
+epsilon bound - not nu_t",
+                g(f64::from(c.log_layer_cmu())),
+                g(f64::from(c.implied_kappa())),
+                g(f64::from(cc.wall.cmu)),
+            );
+            Variant::Realizable(c)
+        }
+        RasModel::RNGkEpsilon => {
+            let c = rng_ke_coeffs(&cc)?;
+            println!(
+                "nu = {} | RNGkEpsilon (SPEC-LIT S41): Cmu {} C1 {} C2 {} alphak {} \
+alphaEps {} eta0 {} beta {}",
+                g(f64::from(cc.nu)),
+                g(f64::from(c.cmu)),
+                g(f64::from(c.c1)),
+                g(f64::from(c.c2)),
+                g(f64::from(c.alpha_k)),
+                g(f64::from(c.alpha_eps)),
+                g(f64::from(c.eta0)),
+                g(f64::from(c.beta))
+            );
+            println!(
+                "    diffusivity is alpha (nu + nu_t), NOT nu + nu_t/sigma (S41.2); \
+kappa implied by these coefficients {} (S41.3)",
+                g(f64::from(c.implied_kappa()))
+            );
+            Variant::Rng(c)
+        }
+        _ => {
+            let d = KEpsilonCoeffs::default();
+            let c = KEpsilonCoeffs {
+                cmu: model_coeff(&cc, "Cmu", d.cmu),
+                c1: model_coeff(&cc, "C1", d.c1),
+                c2: model_coeff(&cc, "C2", d.c2),
+                c3: model_coeff(&cc, "C3", d.c3),
+                sigmak: model_coeff(&cc, "sigmak", d.sigmak),
+                sigma_eps: model_coeff(&cc, "sigmaEps", d.sigma_eps),
+            };
+            println!(
+                "nu = {} | Cmu {} C1 {} C2 {} sigmak {} sigmaEps {}",
+                g(f64::from(cc.nu)),
+                g(f64::from(c.cmu)),
+                g(f64::from(c.c1)),
+                g(f64::from(c.c2)),
+                g(f64::from(c.sigmak)),
+                g(f64::from(c.sigma_eps))
+            );
+            Variant::Standard(c)
+        }
     };
 
-    println!(
-        "nu = {} | Cmu {} C1 {} C2 {} sigmak {} sigmaEps {}",
-        g(f64::from(cc.nu)),
-        g(f64::from(coeffs.cmu)),
-        g(f64::from(coeffs.c1)),
-        g(f64::from(coeffs.c2)),
-        g(f64::from(coeffs.sigmak)),
-        g(f64::from(coeffs.sigma_eps))
-    );
+    // The `C_mu` the INLET boundary conditions are built from -
+    // `turbulentMixingLengthDissipationRateInlet` is `C_mu^{3/4} k^{3/2}/L`,
+    // which follows from `nu_t = C_mu k^2/eps` and therefore has to be the
+    // model's own constant. Realizable's `C_mu` is not a constant at all, so
+    // it takes the log-layer value the wall functions use (SPEC-LIT §40.5).
+    let bc_cmu = variant.inlet_cmu(cc.wall.cmu);
 
     // ---- fields -------------------------------------------------------------
     // JSONC has no `0/` directory: every field comes off `json`'s own
@@ -386,16 +510,18 @@ solves k and epsilon on a frozen U and transports no scalar for them to diffuse 
 
     let flow = FlowState::new(&u, &phi, cc.nu);
 
-    let mut model = KEpsilon::new(
-        &gpu,
-        &hm,
-        &mesh,
-        coeffs,
-        cc.turb,
-        wall_coeffs_from_case(&cc.wall),
-        &wf_faces,
-        &roughness,
-    )?;
+    let wall = wall_coeffs_from_case(&cc.wall);
+    let mut model = match variant {
+        Variant::Standard(c) => KeModel::Standard(KEpsilon::new(
+            &gpu, &hm, &mesh, c, cc.turb, wall, &wf_faces, &roughness,
+        )?),
+        Variant::Realizable(c) => KeModel::Realizable(RealizableKe::new(
+            &gpu, &hm, &mesh, c, cc.turb, wall, &wf_faces, &roughness,
+        )?),
+        Variant::Rng(c) => KeModel::Rng(RngKe::new(
+            &gpu, &hm, &mesh, c, cc.turb, wall, &wf_faces, &roughness,
+        )?),
+    };
 
     // `turbulentIntensityKineticEnergyInlet` is 3/2 (I |U|)^2 and
     // `turbulentMixingLengthDissipationRateInlet` is C_mu^{3/4} k^{3/2}/L, so
@@ -409,7 +535,7 @@ solves k and epsilon on a frozen U and transports no scalar for them to diffuse 
         &hm,
         BcInputs {
             u_b: Some(&u_b),
-            cmu: Some(coeffs.cmu),
+            cmu: Some(bc_cmu),
             ..Default::default()
         },
     )?;
@@ -423,7 +549,7 @@ solves k and epsilon on a frozen U and transports no scalar for them to diffuse 
         BcInputs {
             u_b: Some(&u_b),
             k_b: Some(&k_b),
-            cmu: Some(coeffs.cmu),
+            cmu: Some(bc_cmu),
             ..Default::default()
         },
     )?;
@@ -591,10 +717,23 @@ solves k and epsilon on a frozen U and transports no scalar for them to diffuse 
         // FILE in that case, not a directory `FoamWriter`/`VtuWriter`/... can
         // write time directories under.
         let out_root = common::output_root(&o.case_dir);
-        let mut writers = build_writers(&out_root, "kEpsilon", &o.output)?;
-        for w in &mut writers {
-            w.write_step(&ctx)?;
-        }
+        // SPEC-LIT §44: the case's `output` block, or the command line's
+        // `-output`, never both (§44.6 refused that above). `force` is set
+        // because this driver writes exactly once, at the end - which is
+        // also why every `interval` in the block was refused above.
+        let mut pipeline = match &output_plan {
+            Some(plan) => {
+                ofgpu::io::OutputPipeline::from_plan(plan, &out_root, model.tag(), "restart")?
+            }
+            None => ofgpu::io::OutputPipeline::from_command_line(
+                &out_root,
+                model.tag(),
+                &o.output,
+                0.0,
+            )?,
+        };
+        println!("{}", pipeline.describe());
+        pipeline.write(&ctx, 0.0, true)?;
 
         println!("written to {}", out_root.join(&wt).display());
     }
@@ -609,6 +748,133 @@ solves k and epsilon on a frozen U and transports no scalar for them to diffuse 
 /// them into one explicit entry per patch.
 fn seed_types(src: &RawScalarField) -> RawScalarField {
     src.types_only()
+}
+
+/// Which coefficient set the case named, before the mesh exists.
+///
+/// Separate from [`KeModel`] because the coefficients are read (and their
+/// §13.4 refusals raised) at the top of `run`, while the models themselves
+/// cannot be built until the mesh and the wall faces are.
+enum Variant {
+    Standard(KEpsilonCoeffs),
+    Realizable(RealizableKeCoeffs),
+    Rng(RngKeCoeffs),
+}
+
+impl Variant {
+    /// The `C_mu` the `turbulentMixingLengthDissipationRateInlet` and
+    /// `turbulentIntensityKineticEnergyInlet` triples are evaluated with.
+    ///
+    /// `fallback` is the wall functions' own (`RAS { Cmu; }`, default 0.09),
+    /// which is what realizable takes: SPEC-LIT §40.4 shows its own `C_mu` in
+    /// an equilibrium shear layer IS 0.09, and an inlet has no strain history
+    /// for the variable form to read anyway.
+    fn inlet_cmu(&self, fallback: Scalar) -> Scalar {
+        match self {
+            Self::Standard(c) => c.cmu,
+            Self::Realizable(_) => fallback,
+            Self::Rng(c) => c.cmu,
+        }
+    }
+}
+
+/// The three models this driver builds, behind one match.
+///
+/// An enum rather than a trait object: `src/models/mod.rs` argues at length
+/// against a turbulence trait, and the argument applies here - this driver
+/// KNOWS the three concrete types it can build, so the dispatch is a `match`
+/// the compiler can see through rather than a virtual call. (The coupled
+/// drivers are the other case, and they have `CoupledTurbulence` for exactly
+/// the reason `coupled.rs`'s own doc gives.)
+enum KeModel<'m> {
+    Standard(KEpsilon<'m>),
+    Realizable(RealizableKe<'m>),
+    Rng(RngKe<'m>),
+}
+
+impl<'m> KeModel<'m> {
+    fn k(&self) -> &GpuScalarField {
+        match self {
+            Self::Standard(m) => m.k(),
+            Self::Realizable(m) => m.k(),
+            Self::Rng(m) => m.k(),
+        }
+    }
+    fn k_mut(&mut self) -> &mut GpuScalarField {
+        match self {
+            Self::Standard(m) => m.k_mut(),
+            Self::Realizable(m) => m.k_mut(),
+            Self::Rng(m) => m.k_mut(),
+        }
+    }
+    fn epsilon(&self) -> &GpuScalarField {
+        match self {
+            Self::Standard(m) => m.epsilon(),
+            Self::Realizable(m) => m.epsilon(),
+            Self::Rng(m) => m.epsilon(),
+        }
+    }
+    fn epsilon_mut(&mut self) -> &mut GpuScalarField {
+        match self {
+            Self::Standard(m) => m.epsilon_mut(),
+            Self::Realizable(m) => m.epsilon_mut(),
+            Self::Rng(m) => m.epsilon_mut(),
+        }
+    }
+    fn nut(&self) -> &GpuScalarField {
+        match self {
+            Self::Standard(m) => m.nut(),
+            Self::Realizable(m) => m.nut(),
+            Self::Rng(m) => m.nut(),
+        }
+    }
+    fn nut_mut(&mut self) -> &mut GpuScalarField {
+        match self {
+            Self::Standard(m) => m.nut_mut(),
+            Self::Realizable(m) => m.nut_mut(),
+            Self::Rng(m) => m.nut_mut(),
+        }
+    }
+    fn initialise(&mut self, gpu: &ofgpu::Gpu, flow: &FlowState) -> Result<()> {
+        match self {
+            Self::Standard(m) => m.initialise(gpu, flow),
+            Self::Realizable(m) => m.initialise(gpu, flow),
+            Self::Rng(m) => m.initialise(gpu, flow),
+        }
+    }
+    fn freeze_nut(&mut self, gpu: &ofgpu::Gpu) -> Result<()> {
+        match self {
+            Self::Standard(m) => m.freeze_nut(gpu),
+            Self::Realizable(m) => m.freeze_nut(gpu),
+            Self::Rng(m) => m.freeze_nut(gpu),
+        }
+    }
+    fn correct(
+        &mut self,
+        gpu: &ofgpu::Gpu,
+        flow: &FlowState,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        match self {
+            Self::Standard(m) => m.correct(gpu, flow),
+            Self::Realizable(m) => m.correct(gpu, flow),
+            Self::Rng(m) => m.correct(gpu, flow),
+        }
+    }
+    fn convergence_measure(&mut self, gpu: &ofgpu::Gpu) -> Result<Scalar> {
+        match self {
+            Self::Standard(m) => m.convergence_measure(gpu),
+            Self::Realizable(m) => m.convergence_measure(gpu),
+            Self::Rng(m) => m.convergence_measure(gpu),
+        }
+    }
+    /// The name the writer stamps on the output directory.
+    fn tag(&self) -> &'static str {
+        match self {
+            Self::Standard(_) => "kEpsilon",
+            Self::Realizable(_) => "realizableKE",
+            Self::Rng(_) => "RNGkEpsilon",
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -756,6 +1022,87 @@ mod k_epsilon_tests {
                 to: "    k\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-02;\n        relTol          0.5;",
                 pre: NO_PRE,
             },
+            // SPEC-LIT §40 and §41. `realizableKE` and `RNGkEpsilon` were
+            // RECOGNISED-AND-REFUSED names until this batch; now they select
+            // models, and these knobs are what says they select DIFFERENT
+            // ones. Two per model, as §38.7 established: the selector itself,
+            // and one coefficient OF the selected model - a reader can wire
+            // the selector and still drop the numbers.
+            Knob {
+                label: "RAS/model realizableKE (SPEC-LIT 40)",
+                file: "constant/momentumTransport",
+                from: "    model           kEpsilon;",
+                to: "    model           realizableKE;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "RAS/model RNGkEpsilon (SPEC-LIT 41)",
+                file: "constant/momentumTransport",
+                from: "    model           kEpsilon;",
+                to: "    model           RNGkEpsilon;",
+                pre: NO_PRE,
+            },
+            // The SAME model on both sides, differing in `A0` alone - the
+            // constant SPEC-LIT §40.3 derives, and the one a case would set
+            // to reach the NASA TM's printed 4.0.
+            Knob {
+                label: "RAS/A0 (realizableKE, SPEC-LIT 40.3)",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    A0              4.0;",
+                pre: (
+                    "constant/momentumTransport",
+                    "    model           kEpsilon;",
+                    "    model           realizableKE;",
+                ),
+            },
+            Knob {
+                label: "RAS/C2 (realizableKE)",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    C2              1.7;",
+                pre: (
+                    "constant/momentumTransport",
+                    "    model           kEpsilon;",
+                    "    model           realizableKE;",
+                ),
+            },
+            // §41.2's inverse Prandtl number - the one that multiplies
+            // `nu + nu_t` rather than `nu_t`, and needed the new affine
+            // face-diffusivity kernel to be expressible at all.
+            Knob {
+                label: "RAS/alphaEps (RNGkEpsilon, SPEC-LIT 41.2)",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    alphaEps        1.1;",
+                pre: (
+                    "constant/momentumTransport",
+                    "    model           kEpsilon;",
+                    "    model           RNGkEpsilon;",
+                ),
+            },
+            Knob {
+                label: "RAS/eta0 (RNGkEpsilon)",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    eta0            3.0;",
+                pre: (
+                    "constant/momentumTransport",
+                    "    model           kEpsilon;",
+                    "    model           RNGkEpsilon;",
+                ),
+            },
+            Knob {
+                label: "RAS/beta (RNGkEpsilon)",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    beta            0.05;",
+                pre: (
+                    "constant/momentumTransport",
+                    "    model           kEpsilon;",
+                    "    model           RNGkEpsilon;",
+                ),
+            },
             // SPEC-LIT 15.6: one constant, reaching both the model and the
             // wall functions.
             Knob {
@@ -810,6 +1157,236 @@ mod k_epsilon_tests {
             }
         }
         assert_none_inert(&inert);
+    }
+
+
+    // ======================================================================
+    //  SPEC-LIT S44 - the `output` block, on the OTHER driver that reads it
+    // ======================================================================
+    //
+    // `ofgpu-k-epsilon`'s own pair test above runs on an OpenFOAM case
+    // DIRECTORY, which has no `output` block at all. This one runs on a
+    // `.jsonc` case, because that is the only format that carries one - and
+    // it is here, in the second driver, for exactly the reason S13.4.2 gives
+    // for one shared refusal: a block honoured by `ofgpu-fire` and silently
+    // ignored by the other driver that reads the same format is the defect
+    // this whole subsection exists to prevent.
+
+    /// A complete `ofgpu-k-epsilon` JSONC case: a small Cartesian duct with
+    /// a frozen inlet-driven `U`, `k`, `epsilon` and `nut`. `output` is
+    /// spliced in verbatim (with its leading comma) or empty.
+    fn ke_json_case(output: &str) -> String {
+        format!(
+            r#"{{
+  "name": "outputBlockTest",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.4, 0.05, 0.05] }},
+    "cells":  [10, 5, 3],
+    "boundaries": {{
+      "xmin": "inlet", "xmax": "outlet",
+      "ymin": "wallLo", "ymax": "wallHi",
+      "zmin": "sideLo", "zmax": "sideHi"
+    }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "turbulence": {{
+    "kind": "RAS",
+    "model": "kEpsilon",
+    "wallFunctions": {{ "kappa": 0.41, "E": 9.8 }},
+    "wallTreatment": "standard"
+  }},
+  "patches": [
+    {{
+      "match": "inlet", "kind": "inlet",
+      "U": {{ "type": "fixedValue", "value": [3.0, 0, 0] }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "fixedValue", "value": 293.15 }},
+      "k": {{ "type": "fixedValue", "value": 0.03 }},
+      "epsilon": {{ "type": "fixedValue", "value": 0.3 }},
+      "nut": {{ "type": "calculated", "value": 0 }}
+    }},
+    {{
+      "match": "outlet", "kind": "open",
+      "U": {{ "type": "inletOutlet", "inletValue": [0, 0, 0] }},
+      "p": {{ "type": "fixedValue", "value": 0.0 }},
+      "T": {{ "type": "inletOutlet", "inletValue": 293.15 }},
+      "k": {{ "type": "zeroGradient" }},
+      "epsilon": {{ "type": "zeroGradient" }},
+      "nut": {{ "type": "calculated", "value": 0 }}
+    }},
+    {{
+      "match": ".*", "kind": "wall",
+      "U": {{ "type": "fixedValue", "value": [0, 0, 0] }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "zeroGradient" }}
+    }}
+  ],
+  "initial": {{
+    "U": [3.0, 0, 0], "T": 293.15, "p": 0.0,
+    "k": 0.03, "epsilon": 0.3, "nut": 0.0
+  }},
+  "numerics": {{
+    "algorithm": {{ "kind": "SIMPLE" }},
+    "ddt": "steadyState",
+    "div": {{
+      "default": "Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind"
+    }},
+    "grad": "Gauss linear",
+    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+    "relaxation": {{ "k": 0.7, "epsilon": 0.7 }},
+    "solvers": [
+      {{ "match": ".*", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 }}
+    ]
+  }},
+  "run": {{ "endTime": 0.0, "deltaT": 0.001 }}{output}
+}}"#
+        )
+    }
+
+    /// Everything a JSONC run wrote, as `(relative path, BYTES)` - binary,
+    /// for the reason `ofgpu-fire`'s own `written_bytes` gives: `.vdb` and
+    /// `.nvdb` are not text, and a text walker skips them in silence.
+    fn json_written_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().to_string();
+                let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+                if p.is_dir() {
+                    walk(&p, &rel, out);
+                } else if let Ok(b) = std::fs::read(&p) {
+                    out.push((rel, b));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, "", &mut out);
+        out.sort();
+        out
+    }
+
+    fn run_json_case(output: &str, tag: &str, extra: &[&str]) -> Result<Vec<(String, Vec<u8>)>> {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, ke_json_case(output)).expect("write case");
+        let mut args: Vec<String> =
+            vec!["ofgpu-k-epsilon".to_string(), path.to_string_lossy().to_string()];
+        args.extend(["-iters".to_string(), "6".to_string(), "-check".to_string(), "100".to_string()]);
+        args.extend(extra.iter().map(|s| (*s).to_string()));
+        let o = parse(&args)?;
+        run(&o)?;
+        Ok(json_written_bytes(&common::json_case_output_dir(&path)))
+    }
+
+    /// SPEC-LIT S44.7's pair table, for this driver: the four entries a
+    /// STEADY single-write run can honour. `interval` is not among them
+    /// because a steady run refuses it - which is the next test.
+    #[test]
+    fn every_output_setting_changes_what_the_run_writes() {
+        if ofgpu::Gpu::new(0).is_err() {
+            return;
+        }
+        let pairs: [(&str, &str, &str); 5] = [
+            (
+                "output (the block itself)",
+                "",
+                r#", "output": { "visualisation": { "format": "vdb" } }"#,
+            ),
+            (
+                "output.visualisation.format",
+                r#", "output": { "visualisation": { "format": "vdb" } }"#,
+                r#", "output": { "visualisation": { "format": "nvdb" } }"#,
+            ),
+            (
+                "output.visualisation.fields",
+                r#", "output": { "visualisation": { "format": "vdb", "fields": ["k"] } }"#,
+                r#", "output": { "visualisation": { "format": "vdb", "fields": ["k", "nut"] } }"#,
+            ),
+            (
+                "output.visualisation.precision",
+                r#", "output": { "visualisation": { "format": "vdb" } }"#,
+                r#", "output": { "visualisation": { "format": "vdb", "precision": "fp16" } }"#,
+            ),
+            (
+                "output.exact.format",
+                r#", "output": { "exact": { "format": "vtu" } }"#,
+                r#", "output": { "exact": { "format": "openfoam" } }"#,
+            ),
+        ];
+
+        let mut inert: Vec<&str> = Vec::new();
+        for (label, a, b) in pairs {
+            let ra = run_json_case(a, "outa", &[]).expect("side a must run");
+            let rb = run_json_case(b, "outb", &[]).expect("side b must run");
+            if ra == rb {
+                inert.push(label);
+            }
+        }
+        assert_none_inert(&inert);
+    }
+
+    /// SPEC-LIT S44.1/S44.4/S44.6/S44.2 - the four things this driver
+    /// refuses by name, each naming what to do instead.
+    #[test]
+    fn the_output_block_entries_this_driver_cannot_honour_are_refused_by_name() {
+        if ofgpu::Gpu::new(0).is_err() {
+            return;
+        }
+
+        // S44.4 - a steady run has no clock.
+        let e = run_json_case(
+            r#", "output": { "visualisation": { "format": "vdb", "interval": 2.0 } }"#,
+            "interval",
+            &[],
+        )
+        .expect_err("a steady driver must refuse a physical-time interval");
+        let m = format!("{e}");
+        assert!(m.contains("output.visualisation.interval"), "{m}");
+        assert!(m.contains("steady"), "{m}");
+
+        // S44.1 - and it writes no checkpoint at all.
+        let e = run_json_case(
+            r#", "output": { "restart": { "keep": 2 } }"#,
+            "restart",
+            &[],
+        )
+        .expect_err("a driver with no checkpoint must refuse output.restart");
+        let m = format!("{e}");
+        assert!(m.contains("output.restart"), "{m}");
+        assert!(m.contains("ofgpu-fire"), "the error must name a driver that does: {m}");
+
+        // S44.6 - the case and the command line both naming the output.
+        let e = run_json_case(
+            r#", "output": { "visualisation": { "format": "vdb" } }"#,
+            "twice",
+            &["-output", "vtu"],
+        )
+        .expect_err("naming the output twice must be refused");
+        let m = format!("{e}");
+        assert!(m.contains("output (case file)") && m.contains("-output"), "{m}");
+
+        // S44.2 - a field this driver does not have. It solves k and
+        // epsilon on a frozen U, so `U` itself is not one of its outputs -
+        // which makes it the sharpest name to try.
+        let e = run_json_case(
+            r#", "output": { "visualisation": { "format": "vdb", "fields": ["k", "U"] } }"#,
+            "nofield",
+            &[],
+        )
+        .expect_err("a field this driver does not write must be refused");
+        let m = format!("{e}");
+        assert!(m.contains("\"U\""), "{m}");
+        for have in ["k", "epsilon", "nut"] {
+            assert!(m.contains(have), "the error must list {have}: {m}");
+        }
     }
 
     /// SPEC-LIT 13.4 and 17. `constant/g` is read into `cc.buoyancy` by

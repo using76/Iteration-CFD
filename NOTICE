@@ -13,7 +13,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 105 source files under
+line "No GPL-licensed source was consulted." All 113 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -148,6 +148,20 @@ PyFR
   the Gmsh manual and is not copyrightable, and PyFR's own BSD-3 reader was used
   to confirm the interpretation of blocked element ordering. No PyFR source is
   copied into this repository. See `rust/PROVENANCE.md`, "Permissive references".
+
+OpenVDB / NanoVDB
+  Copyright (c) DreamWorks Animation LLC and Contributors to the OpenVDB
+  Project. Apache License 2.0.
+
+  The `.vdb` archive format has no published byte-layout document, so the
+  Apache-2.0 implementation is the only authority for it. It was read - at the
+  `v13.0.0` tag, file by file, cited inline in `rust/src/io/vdb.rs` - to write
+  an INDEPENDENT writer for that format, first at `fp32` and, for SPEC-LIT
+  S45, for the `_HalfFloat` save preference as well. The NanoVDB layout in
+  `rust/src/io/nvdb.rs` comes from the Apache-2.0 PNanoVDB/NanoVDB headers the
+  same way. No OpenVDB source is copied into this repository and meteor-cfd
+  links against no part of it. See `rust/PROVENANCE.md`, "Permissive
+  references".
 
 ================================================================================
 Published sources

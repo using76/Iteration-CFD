@@ -498,6 +498,23 @@ fn run(o: &Options) -> Result<()> {
     setup_vector_field(&gpu, vof.u_mut(), &raw_u, &hm)?;
     setup_scalar_field(&gpu, vof.p_rgh_mut(), &raw_p, &hm)?;
 
+    // SPEC-LIT S39: the contact angle, out of the SAME alpha field entries
+    // `setup_scalar_field` just read. A case naming neither
+    // `constantAlphaContactAngle` nor `dynamicAlphaContactAngle` on any patch
+    // leaves the model off, and `vofFaceUnitNormalBoundary` then writes the
+    // literal zero it always wrote - which is what makes every VOF result
+    // recorded before S39 bit-identical.
+    let (ca_faces, ca_banner) =
+        ofgpu::contact_angle::ContactAngleFaces::from_alpha_field(&raw_alpha, &hm)?;
+    vof.set_contact_angle(&gpu, &ca_faces)?;
+    if vof.n_contact_angle_faces() > 0 {
+        println!(
+            "contact angle (SPEC-LIT 39): {} faces | {}",
+            vof.n_contact_angle_faces(),
+            ca_banner.join(" | ")
+        );
+    }
+
     if let Some(rd) = &restart_data {
         // Overwrite only the INTERNAL cell values with the restart's numbers.
         // The boundary condition TYPES just read from `dir` above
@@ -815,7 +832,7 @@ fn write_time(
         fields: &vis_fields,
         foam: &foam_fields,
     };
-    let mut writers = build_writers(case, "vof", output)?;
+    let mut writers = build_writers(case, "vof", output, ofgpu::io::nvdb::Precision::F32)?;
     for w in &mut writers {
         w.write_step(&ctx)?;
     }
@@ -916,6 +933,94 @@ mod vof_tests {
     /// change a single bit here whatever the reader does. They are asserted
     /// on `VofControls` instead, in
     /// `the_pressure_gradient_and_the_laplacian_entry_reach_the_controls`.
+
+    /// What the two sides of the §39.6 regression gate may be compared on.
+    ///
+    /// The knob edits `0/alpha.water`'s patch TYPE, and this driver writes
+    /// the type back out with the solution, so the two runs' `alpha` files
+    /// differ by the knob itself whatever the solver did - and by more than
+    /// the token, because the writer emits a `value` list for a
+    /// `constantAlphaContactAngle` patch and not for a `zeroGradient` one.
+    /// Comparing them raw would compare the knob with itself, which is the
+    /// failure `written_time_dirs` warns about one level up.
+    ///
+    /// So `alpha.water` is compared on its INTERNAL field alone, and every
+    /// other written file - `U`, `p_rgh`, `phi` - in full, boundary values
+    /// included. Those are what carry the physics a wrong contact angle would
+    /// change, and none of them is touched by the knob.
+    fn solution_only(files: Vec<(String, String)>) -> Vec<(String, String)> {
+        files
+            .into_iter()
+            .map(|(name, text)| {
+                if name.ends_with("alpha.water") {
+                    let cut = text.find("boundaryField").unwrap_or(text.len());
+                    (name, text[..cut].to_string())
+                } else {
+                    (name, text)
+                }
+            })
+            .collect()
+    }
+
+    /// **SPEC-LIT §39.6's regression gate, end to end.**
+    ///
+    /// `theta = 90` is what the pre-§39 solver applied to every wall - it is
+    /// what `n_hat . Sf = 0` MEANS. So a case that names
+    /// `constantAlphaContactAngle; theta0 90;` on every wall must write
+    /// exactly what a case that names `zeroGradient` writes, BIT FOR BIT.
+    ///
+    /// This is the test the `cos(pi/2)` trap breaks. `cos(pi/2)` in double
+    /// precision is `6.123233995736766e-17`; `|Sf|` times that is far too
+    /// small to see in a plot and far too large to be nothing, so a solver
+    /// that wrote `|Sf| cos(theta)` unconditionally would move every recorded
+    /// VOF measurement and no test would say why. Two guards stop it - the
+    /// `enabled` flag in `vofFaceUnitNormalBoundary` and the exact-90 case in
+    /// `contact_angle::cos_deg` - and this is what proves BOTH of them,
+    /// through the driver, on a real dam break.
+    #[test]
+    fn a_ninety_degree_contact_angle_is_bit_identical_to_no_model() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let k = Knob {
+            label: "0/alpha.water theta0 90",
+            file: "0/alpha.water",
+            from: "    leftWall\n    {\n        type            zeroGradient;\n    }\n    lowerWall\n    {\n        type            zeroGradient;\n    }\n    rightWall\n    {\n        type            zeroGradient;\n    }",
+            to: "    leftWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          90;\n    }\n    lowerWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          90;\n    }\n    rightWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          90;\n    }",
+            pre: NO_PRE,
+        };
+        let none = solution_only(run_knob(&k, false, "ca90a"));
+        let ninety = solution_only(run_knob(&k, true, "ca90b"));
+        assert_eq!(
+            none, ninety,
+            "a contact angle of ninety degrees is the no-wall-adhesion angle the \
+             solver applied before SPEC-LIT 39, so the two runs must be \
+             bit-identical - cos(pi/2) is 6.1e-17 and not zero, and this is what \
+             catches a kernel that forgot to special-case it (SPEC-LIT 39.6)"
+        );
+    }
+
+    /// And the same pair with a real angle must NOT be bit-identical, or the
+    /// test above would pass for a model that is simply never called.
+    #[test]
+    fn a_forty_five_degree_contact_angle_is_not_bit_identical_to_no_model() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let k = Knob {
+            label: "0/alpha.water theta0 45",
+            file: "0/alpha.water",
+            from: "    leftWall\n    {\n        type            zeroGradient;\n    }\n    lowerWall\n    {\n        type            zeroGradient;\n    }\n    rightWall\n    {\n        type            zeroGradient;\n    }",
+            to: "    leftWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    lowerWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    rightWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }",
+            pre: NO_PRE,
+        };
+        assert_ne!(
+            solution_only(run_knob(&k, false, "ca45a")),
+            solution_only(run_knob(&k, true, "ca45b")),
+            "a 45-degree contact angle wrote the same fields as no model at all"
+        );
+    }
+
     #[test]
     fn every_wired_setting_changes_what_the_run_writes() {
         if Gpu::new(0).is_err() {
@@ -975,6 +1080,39 @@ mod vof_tests {
                 from: "    maxAlphaCo      0.5;",
                 to: "    maxAlphaCo      0.01;",
                 pre: NO_PRE,
+            },
+            // SPEC-LIT 39. The contact angle is the only wall setting an
+            // `alpha` file can carry, and before 39 the solver had no model
+            // for it at all: `vofFaceUnitNormalBoundary` wrote a literal zero
+            // on every wall face, which IS ninety degrees. Two knobs, because
+            // a reader can wire the condition and still drop the angle.
+            Knob {
+                label: "0/alpha.water walls constantAlphaContactAngle",
+                file: "0/alpha.water",
+                from: "    leftWall\n    {\n        type            zeroGradient;\n    }\n    lowerWall\n    {\n        type            zeroGradient;\n    }\n    rightWall\n    {\n        type            zeroGradient;\n    }",
+                to: "    leftWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    lowerWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    rightWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }",
+                pre: NO_PRE,
+            },
+            // The SAME condition on both sides, differing in one angle. The
+            // condition goes in through `pre`, so the pair differs in
+            // leftWall's `theta0` alone.
+            Knob {
+                label: "0/alpha.water theta0",
+                file: "0/alpha.water",
+                from: "        type            constantAlphaContactAngle;\n        theta0          45;",
+                to: "        type            constantAlphaContactAngle;\n        theta0          135;",
+                pre: ("0/alpha.water", "    leftWall\n    {\n        type            zeroGradient;\n    }\n    lowerWall\n    {\n        type            zeroGradient;\n    }\n    rightWall\n    {\n        type            zeroGradient;\n    }", "    leftWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    lowerWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    rightWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }"),
+            },
+            // Static against dynamic, on the lowerWall - where the surge
+            // front runs, so there is a contact line actually moving for the
+            // correlation to see. Anchored on the patch NAME because `edit`
+            // replaces the first match and leftWall comes first in the file.
+            Knob {
+                label: "0/alpha.water dynamicAlphaContactAngle",
+                file: "0/alpha.water",
+                from: "    lowerWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }",
+                to: "    lowerWall\n    {\n        type            dynamicAlphaContactAngle;\n        theta0          45;\n        correlation     JiangOhSlattery;\n    }",
+                pre: ("0/alpha.water", "    leftWall\n    {\n        type            zeroGradient;\n    }\n    lowerWall\n    {\n        type            zeroGradient;\n    }\n    rightWall\n    {\n        type            zeroGradient;\n    }", "    leftWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    lowerWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }\n    rightWall\n    {\n        type            constantAlphaContactAngle;\n        theta0          45;\n    }"),
             },
             Knob {
                 label: "PIMPLE/nAlphaLimiterIters",

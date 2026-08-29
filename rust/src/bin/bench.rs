@@ -69,7 +69,7 @@ fn build_flow(gpu: &Gpu, fk: &FieldKernels, nx: usize, ny: usize, nz: usize) -> 
             two_sided: true,
         },
         z: GradedAxis { lo: 0.0, hi: 0.5, n: nz, ..Default::default() },
-        window: None,
+        windows: Vec::new(),
         patch_name: ["inlet", "outlet", "lowerWall", "upperWall", "zMin", "zMax"]
             .map(String::from),
         patch_type: [

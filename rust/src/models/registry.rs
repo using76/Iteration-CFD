@@ -48,17 +48,18 @@ use crate::device::Gpu;
 use crate::error::{Error, Result};
 use crate::field_setup::{wall_coeffs_from_case, NutRoughness, WallFaces};
 use crate::io::case::{model_coeff, CaseControls};
-use crate::io::contract::unsupported;
+use crate::io::contract::{unsupported, unsupported_note};
 use crate::io::dict::FoamDict;
 use crate::les::{BaseDelta, DeltaSpec, SmoothSpec};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::models::coupled::{
     BuoyancySettings, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst, CoupledLaminar,
-    CoupledLaunderSharmaKE, CoupledLes, CoupledTurbulence,
+    CoupledLaunderSharmaKE, CoupledLes, CoupledRealizableKe, CoupledRngKe, CoupledTurbulence,
 };
 use crate::models::les::{Les, LesCoeffs, LesModel};
 use crate::models::{
     KEpsilon, KEpsilonCoeffs, KOmega, KOmegaCoeffs, KOmegaSst, KOmegaSstCoeffs, LaunderSharmaKE,
+    RealizableKe, RealizableKeCoeffs, RngKe, RngKeCoeffs,
 };
 use crate::turbulence::C3Mode;
 use crate::{Scalar, Vec3};
@@ -78,6 +79,17 @@ pub enum RasModel {
     /// layer, which is what `lowRe`'s "no wall model, the mesh resolves it"
     /// requires and neither `KEpsilon` nor `KOmega`/`KOmegaSST` can provide.
     LaunderSharmaKE,
+    /// Shih, Liou, Shabbir, Yang & Zhu's realizable k-epsilon - SPEC-LIT
+    /// §40. §6.1's two equations with `C_mu` a FIELD, the `epsilon`
+    /// production written `C_1 S eps`, and the sink denominator
+    /// `k + sqrt(nu eps)`. It has no buoyancy production of its own
+    /// ([`refuse_realizable_ke_buoyancy`] says why), which is the one thing
+    /// that stops it being a drop-in replacement for `kEpsilon` everywhere.
+    RealizableKE,
+    /// Yakhot & Orszag's RNG k-epsilon - SPEC-LIT §41. §6.1's two equations
+    /// with the `R` term absorbed into a per-cell `C_e2*`, and diffusivities
+    /// `alpha (nu + nu_t)` rather than `nu + nu_t/sigma`.
+    RNGkEpsilon,
     /// Wilcox k-omega, the 1988 form - SPEC-LIT §6.2.
     KOmega,
     /// Menter k-omega SST, the 2003 revision - SPEC-LIT §6.3. Needs the wall
@@ -105,6 +117,8 @@ impl RasModel {
             Self::Laminar => "laminar",
             Self::KEpsilon => "kEpsilon",
             Self::LaunderSharmaKE => "LaunderSharmaKE",
+            Self::RealizableKE => "realizableKE",
+            Self::RNGkEpsilon => "RNGkEpsilon",
             Self::KOmega => "kOmega",
             Self::KOmegaSST => "kOmegaSST",
             Self::Les => "LES",
@@ -123,6 +137,10 @@ impl RasModel {
             Self::Laminar => None,
             Self::KEpsilon => Some("epsilon"),
             Self::LaunderSharmaKE => Some("epsilon"),
+            // Both variants transport the same two fields §6.1 does, under
+            // the same two names - which is the whole reason they are cheap.
+            Self::RealizableKE => Some("epsilon"),
+            Self::RNGkEpsilon => Some("epsilon"),
             Self::KOmega => Some("omega"),
             Self::KOmegaSST => Some("omega"),
             // An algebraic subgrid model solves for nothing, so there is no
@@ -143,6 +161,10 @@ const REGISTRY: &[(&str, RasModel)] = &[
     ("kEpsilon", RasModel::KEpsilon),
     ("KEpsilon", RasModel::KEpsilon),
     ("LaunderSharmaKE", RasModel::LaunderSharmaKE),
+    ("realizableKE", RasModel::RealizableKE),
+    ("RealizableKE", RasModel::RealizableKE),
+    ("RNGkEpsilon", RasModel::RNGkEpsilon),
+    ("RNGKEpsilon", RasModel::RNGkEpsilon),
     ("kOmega", RasModel::KOmega),
     ("KOmega", RasModel::KOmega),
     ("kOmegaSST", RasModel::KOmegaSST),
@@ -160,8 +182,6 @@ const RECOGNISED_NOT_IMPLEMENTED: &[&str] = &[
     "kOmegaSSTLM",
     "kOmegaSSTSAS",
     "SpalartAllmaras",
-    "realizableKE",
-    "RNGkEpsilon",
     "kEpsilonPhitF",
     "v2f",
     "LRR",
@@ -225,8 +245,15 @@ const DELTA_RECOGNISED_NOT_IMPLEMENTED: &[&str] = &[
 
 /// The menu a rejected name is shown.
 pub fn available_models() -> Vec<&'static str> {
-    let mut v: Vec<&'static str> =
-        vec!["kEpsilon", "LaunderSharmaKE", "kOmega", "kOmegaSST", "laminar"];
+    let mut v: Vec<&'static str> = vec![
+        "kEpsilon",
+        "LaunderSharmaKE",
+        "realizableKE",
+        "RNGkEpsilon",
+        "kOmega",
+        "kOmegaSST",
+        "laminar",
+    ];
     v.dedup();
     v
 }
@@ -634,6 +661,177 @@ pub fn buoyancy_settings(c: &CaseControls) -> Option<BuoyancySettings> {
     })
 }
 
+// ==========================================================================
+//  §40 / §41 - the coefficients of the two k-epsilon variants, and the
+//  entries each of them does NOT read
+// ==========================================================================
+
+/// Every key `realizableKE` reads out of `RAS { ... }`.
+///
+/// The list is here rather than inline because it is what the refusal below
+/// prints, and a menu that has drifted from the code is worse than no menu -
+/// the same argument [`REGISTRY`]'s own doc makes.
+const REALIZABLE_KE_KEYS: &[&str] =
+    &["A0", "C2", "sigmak", "sigmaEps", "Cmu", "kappa", "E", "nutMaxCoeff"];
+
+/// Keys a case might plausibly write under `realizableKE` that the model does
+/// not read, with what to write instead.
+///
+/// SPEC-LIT §40.6. `C_1` is (40.5) - `max(0.43, eta/(eta+5))`, computed per
+/// cell from the local strain - and there is no dilatation term in (40.3) for
+/// `C_3` to multiply, so both would be read into a struct field and thrown
+/// away. That is the sixth instance of the failure this project has now found
+/// five times, and the fix is the same one: refuse by name.
+const REALIZABLE_KE_INERT: &[(&str, &str)] = &[
+    (
+        "C1",
+        "realizableKE computes C_1 = max(0.43, eta/(eta+5)) per cell from the \
+         local strain (SPEC-LIT 40.5); it is not a constant. Set A0 to move \
+         C_mu, or run `kEpsilon`, whose C_1 IS a constant",
+    ),
+    (
+        "C3",
+        "realizableKE's epsilon production is C_1 S eps, which is not \
+         proportional to G, so there is no Favre dilatation term for C_3 to \
+         multiply (SPEC-LIT 40.5). `kEpsilon` and `RNGkEpsilon` both have one",
+    ),
+];
+
+/// Every key `RNGkEpsilon` reads.
+const RNG_KE_KEYS: &[&str] = &[
+    "Cmu", "C1", "C2", "C3", "alphak", "alphaEps", "eta0", "beta", "kappa", "E", "nutMaxCoeff",
+];
+
+/// SPEC-LIT §41.4: this model's diffusivity is `alpha (nu + nu_t)`, not
+/// `nu + nu_t/sigma`, so a case that writes `sigmaEps 1.3` here has written a
+/// number nothing reads.
+const RNG_KE_INERT: &[(&str, &str)] = &[
+    (
+        "sigmak",
+        "RNGkEpsilon diffuses k with alphak (nu + nu_t), where the inverse \
+         Prandtl number multiplies the EFFECTIVE viscosity (SPEC-LIT 41.2). \
+         Write `alphak 1.39` instead. The two are NOT the same setting with \
+         two names: alphak (nu + nu_t) against nu + nu_t/sigmak differ by \
+         (alphak - 1) nu on every face, which is nothing in the free stream \
+         and is the whole diffusivity in the first cell off a wall",
+    ),
+    (
+        "sigmaEps",
+        "RNGkEpsilon diffuses epsilon with alphaEps (nu + nu_t) (SPEC-LIT \
+         41.2). Write `alphaEps 1.39` instead - numerically 1/0.71942, but \
+         multiplying nu + nu_t rather than nu_t alone, which is a different \
+         diffusivity near a wall and the same one far from it",
+    ),
+    (
+        "A0",
+        "A0 is realizableKE's (SPEC-LIT 40.3). RNGkEpsilon's C_mu is the \
+         constant 0.0845",
+    ),
+];
+
+/// Refuse, by name, every `RAS { ... }` entry the named model does not read -
+/// SPEC-LIT §13.4.
+///
+/// `model_coeff` is a silent lookup: it returns the fallback for a key that is
+/// not there and says nothing about a key that IS there and is never asked
+/// for. That asymmetry is how five settings in this project's history came to
+/// be written by a generator, parsed by a reader and consulted by nobody. The
+/// two new models close it for themselves by listing what they read and
+/// refusing the rest.
+///
+/// Only keys in `inert` are refused, not every unrecognised key: a case
+/// dictionary legitimately carries `printCoeffs`, `turbulence`,
+/// `wallTreatment`, `roughness` and whatever else the rest of the reader
+/// consumes, and refusing those would refuse every real case. What is refused
+/// is the specific set of coefficient names that BELONG to a sibling model and
+/// would look, to a reader of the case file, as though they were in force.
+fn refuse_inert_coefficients(
+    c: &CaseControls,
+    model: &str,
+    read: &[&str],
+    inert: &[(&str, &str)],
+) -> Result<()> {
+    for (key, why) in inert {
+        let direct = format!("RAS/{key}");
+        let in_coeffs = format!("RAS/{model}Coeffs/{key}");
+        let d = &c.momentum_transport;
+        if d.has(&direct) || d.has(&in_coeffs) {
+            let value = d
+                .get(&direct)
+                .or_else(|| d.get(&in_coeffs))
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            unsupported_note::<()>(
+                &format!("momentumTransport/RAS/{key} (under `model {model}`)"),
+                &value,
+                read,
+                why,
+                "nothing - the entry is not read by this model",
+                (),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// SPEC-LIT §40.6, read from the case with every entry §40 does not use
+/// refused by name first.
+pub fn realizable_ke_coeffs(c: &CaseControls) -> Result<RealizableKeCoeffs> {
+    refuse_inert_coefficients(c, "realizableKE", REALIZABLE_KE_KEYS, REALIZABLE_KE_INERT)?;
+    let d = RealizableKeCoeffs::default();
+    Ok(RealizableKeCoeffs {
+        a0: model_coeff(c, "A0", d.a0),
+        c2: model_coeff(c, "C2", d.c2),
+        sigmak: model_coeff(c, "sigmak", d.sigmak),
+        sigma_eps: model_coeff(c, "sigmaEps", d.sigma_eps),
+    })
+}
+
+/// SPEC-LIT §41.4, same discipline.
+pub fn rng_ke_coeffs(c: &CaseControls) -> Result<RngKeCoeffs> {
+    refuse_inert_coefficients(c, "RNGkEpsilon", RNG_KE_KEYS, RNG_KE_INERT)?;
+    let d = RngKeCoeffs::default();
+    Ok(RngKeCoeffs {
+        cmu: model_coeff(c, "Cmu", d.cmu),
+        c1: model_coeff(c, "C1", d.c1),
+        c2: model_coeff(c, "C2", d.c2),
+        alpha_k: model_coeff(c, "alphak", d.alpha_k),
+        alpha_eps: model_coeff(c, "alphaEps", d.alpha_eps),
+        eta0: model_coeff(c, "eta0", d.eta0),
+        beta: model_coeff(c, "beta", d.beta),
+        c3: model_coeff(c, "C3", d.c3),
+    })
+}
+
+/// SPEC-LIT §40.5: `realizableKE` has no buoyancy production, so a case that
+/// names gravity AND runs a coupled driver is refused by name rather than run
+/// with `G_b` silently at zero.
+///
+/// Shih et al. specify no buoyant extension. The one every code uses,
+/// `C_1 (eps/k) C_3 G_b`, presupposes that the `epsilon` production is
+/// proportional to `G`; §40's is `C_1 S eps` and is not. Writing it anyway
+/// would be inventing a model and attributing it to a paper, which is what
+/// §13.4 and §0 between them forbid.
+pub fn refuse_realizable_ke_buoyancy(c: &CaseControls) -> Result<()> {
+    if !c.buoyancy.is_active() {
+        return Ok(());
+    }
+    unsupported_note::<()>(
+        "momentumTransport/RAS/model (`realizableKE` in a case with gravity)",
+        "realizableKE",
+        &["kEpsilon", "LaunderSharmaKE", "kOmega", "kOmegaSST", "RNGkEpsilon"],
+        "SPEC-LIT 40.5: realizableKE's epsilon production is C_1 S eps, which \
+         is not proportional to G, so section 17's buoyancy term \
+         C_1 (eps/k) C_3 G_b has nothing to attach to. Shih et al. (NASA \
+         TM-106721) specify no buoyant extension and this solver will not \
+         invent one. RNGkEpsilon keeps section 6.1's production form exactly \
+         and DOES carry G_b (SPEC-LIT 41.5)",
+        "nothing - a buoyant realizableKE run is refused",
+        (),
+    )
+}
+
 /// Build the turbulence closure a coupled solver (`ofgpu-buoyant`,
 /// `ofgpu-fire`) drives, from the case's own `constant/momentumTransport` -
 /// SPEC-LIT §30.2.
@@ -722,6 +920,33 @@ pub fn build_coupled<'m>(
                 model.freeze_nut(gpu)?;
             }
             Ok(Box::new(CoupledLaunderSharmaKE::new(model, buoy)))
+        }
+
+        // SPEC-LIT §40. `buoy` is refused rather than ignored: §40.5 has no
+        // G_b term for the `C_1 S eps` production form, and a coupled driver
+        // that ran this model with the buoyancy silently at zero would be
+        // producing exactly the plausible wrong answer §13.4 exists to stop.
+        RasModel::RealizableKE => {
+            refuse_realizable_ke_buoyancy(cc)?;
+            let coeffs = realizable_ke_coeffs(cc)?;
+            let mut model =
+                RealizableKe::new(gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, roughness)?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledRealizableKe::new(model)))
+        }
+
+        // SPEC-LIT §41. Buoyancy IS carried here - `C_e1 (eps/k) G` is §6.1's
+        // production form exactly, so §17's term transfers unchanged.
+        RasModel::RNGkEpsilon => {
+            let coeffs = rng_ke_coeffs(cc)?;
+            let mut model =
+                RngKe::new(gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, roughness)?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledRngKe::new(model, buoy)))
         }
 
         RasModel::KOmega => {
@@ -885,17 +1110,169 @@ mod tests {
     /// `kOmegaSST` was the headline example here and has been removed from the
     /// list because it is now implemented -
     /// `k_omega_sst_now_selects_a_model` is what took its place, and the two
-    /// must not both be true.
+    /// must not both be true. `realizableKE` and `RNGkEpsilon` left the list
+    /// the same way, for `the_two_k_epsilon_variants_now_select_a_model`.
     #[test]
     fn an_unimplemented_model_errors_and_names_the_alternatives() {
-        for name in ["kOmegaSSTLM", "SpalartAllmaras", "realizableKE"] {
+        for name in ["kOmegaSSTLM", "SpalartAllmaras", "v2f"] {
             let e = select_turbulence_model(&case(&format!("RAS {{ model {name}; }}")))
                 .expect_err("must not silently substitute");
             let s = e.to_string();
             assert!(s.contains(name), "{s}");
             assert!(s.contains("kEpsilon"), "{s}");
             assert!(s.contains("kOmega"), "{s}");
+            // The menu grew when the two variants landed; a refusal that
+            // still printed the old menu would send a user looking for a
+            // model this solver now has.
+            assert!(s.contains("realizableKE"), "{s}");
+            assert!(s.contains("RNGkEpsilon"), "{s}");
         }
+    }
+
+    /// SPEC-LIT §40 and §41: the two names that used to be
+    /// RECOGNISED-AND-REFUSED now select real models, and the refusal list
+    /// and the menu moved together.
+    #[test]
+    fn the_two_k_epsilon_variants_now_select_a_model() {
+        for (name, want) in [
+            ("realizableKE", RasModel::RealizableKE),
+            ("RealizableKE", RasModel::RealizableKE),
+            ("RNGkEpsilon", RasModel::RNGkEpsilon),
+            ("RNGKEpsilon", RasModel::RNGkEpsilon),
+        ] {
+            let s = select_turbulence_model(&case(&format!("RAS {{ model {name}; }}")))
+                .expect("the variant is implemented");
+            assert_eq!(s.model, want);
+            assert_eq!(s.model.dissipation_field(), Some("epsilon"));
+            assert!(s.active);
+        }
+
+        // Both halves of the §13.4 bookkeeping, checked rather than assumed:
+        // out of the refusal list, into the menu.
+        assert!(!RECOGNISED_NOT_IMPLEMENTED.contains(&"realizableKE"));
+        assert!(!RECOGNISED_NOT_IMPLEMENTED.contains(&"RNGkEpsilon"));
+        assert!(available_models().contains(&"realizableKE"));
+        assert!(available_models().contains(&"RNGkEpsilon"));
+
+        // And every name still refused must be one the registry cannot build,
+        // or the menu is lying in the other direction.
+        for name in RECOGNISED_NOT_IMPLEMENTED {
+            assert!(
+                REGISTRY.iter().all(|(n, _)| n != name),
+                "{name} is in both the refusal list and the registry"
+            );
+        }
+        for name in available_models() {
+            assert!(
+                REGISTRY.iter().any(|(n, _)| *n == name),
+                "the menu offers {name}, which the registry cannot build"
+            );
+        }
+    }
+
+    /// SPEC-LIT §40.6 and §41.4 - **the test that stops the sixth instance.**
+    ///
+    /// `model_coeff` returns the fallback for an absent key and says nothing
+    /// about a present key nobody asks for. So `RAS { model realizableKE; C1
+    /// 1.44; }` would parse, run, and use `max(0.43, eta/(eta+5))` anyway.
+    /// Each of these is refused by name, with the reason and the alternative.
+    #[test]
+    fn a_coefficient_the_named_model_does_not_read_is_refused_by_name() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        for (model, key, must_mention) in [
+            ("realizableKE", "C1", "40.5"),
+            ("realizableKE", "C3", "40.5"),
+            ("RNGkEpsilon", "sigmak", "alphak"),
+            ("RNGkEpsilon", "sigmaEps", "alphaEps"),
+            ("RNGkEpsilon", "A0", "realizableKE"),
+        ] {
+            let cc = case(&format!("RAS {{ model {model}; {key} 1.5; }}"));
+            let e = match model {
+                "realizableKE" => realizable_ke_coeffs(&cc).err(),
+                _ => rng_ke_coeffs(&cc).err(),
+            }
+            .unwrap_or_else(|| panic!("{model}: `{key}` must not be read and discarded"));
+            let m = e.to_string();
+            assert!(m.contains(key), "{m}");
+            assert!(m.contains(must_mention), "{m}");
+        }
+
+        // The keys each model DOES read must not be refused, or the check is
+        // simply an allow-nothing list.
+        assert!(realizable_ke_coeffs(&case(
+            "RAS { model realizableKE; A0 4.0; C2 1.9; sigmak 1.0; sigmaEps 1.2; Cmu 0.09; }"
+        ))
+        .is_ok());
+        assert!(rng_ke_coeffs(&case(
+            "RAS { model RNGkEpsilon; Cmu 0.0845; C1 1.42; C2 1.68; alphak 1.39; alphaEps 1.39; eta0 4.38; beta 0.012; C3 0; }"
+        ))
+        .is_ok());
+    }
+
+    /// SPEC-LIT §40.6: the coefficients a case writes must REACH the struct.
+    #[test]
+    fn the_variant_coefficients_are_read_from_the_case() {
+        let c = realizable_ke_coeffs(&case(
+            "RAS { model realizableKE; A0 4.0; C2 1.85; sigmaEps 1.25; }",
+        ))
+        .expect("reads");
+        assert_eq!(c.a0, 4.0);
+        assert_eq!(c.c2, 1.85);
+        assert_eq!(c.sigma_eps, 1.25);
+        // The default is the DERIVED value, not the NASA TM's printed 4.0 -
+        // SPEC-LIT §40.3.
+        assert_eq!(
+            realizable_ke_coeffs(&case("RAS { model realizableKE; }")).expect("reads").a0,
+            4.04
+        );
+
+        let r = rng_ke_coeffs(&case(
+            "RAS { model RNGkEpsilon; alphaEps 1.2; eta0 4.0; beta 0.02; }",
+        ))
+        .expect("reads");
+        assert_eq!(r.alpha_eps, 1.2);
+        assert_eq!(r.eta0, 4.0);
+        assert_eq!(r.beta, 0.02);
+        assert_eq!(r.alpha_k, 1.39, "alphak must keep its own default");
+
+        // And the <model>Coeffs sub-dictionary route, which is the other
+        // place OpenFOAM cases put these.
+        let c = realizable_ke_coeffs(&case(
+            "RAS { model realizableKE; realizableKECoeffs { A0 4.2; } }",
+        ))
+        .expect("reads");
+        assert_eq!(c.a0, 4.2);
+    }
+
+    /// SPEC-LIT §40.5: a buoyant `realizableKE` case is refused by name, and
+    /// the refusal names `RNGkEpsilon` - which DOES have the term.
+    #[test]
+    fn a_buoyant_realizable_case_is_refused_and_names_a_model_that_has_gb() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        // `CaseControls::default()` carries `BuoyancyCoeffs::default()`, which
+        // is Earth gravity - a case with no `constant/g` gets a zeroed one
+        // from `read_case_controls`, so that is what "no gravity" means here.
+        let mut cc = case("RAS { model realizableKE; }");
+        cc.buoyancy.g = Vec3::ZERO;
+        assert!(refuse_realizable_ke_buoyancy(&cc).is_ok(), "no gravity, no refusal");
+
+        cc.buoyancy.g = Vec3::new(0.0, 0.0, -9.81);
+        assert!(cc.buoyancy.is_active(), "the knob must reach the controls");
+        let e = refuse_realizable_ke_buoyancy(&cc)
+            .expect_err("a buoyant realizableKE run must be refused");
+        let m = e.to_string();
+        assert!(m.contains("realizableKE"), "{m}");
+        assert!(m.contains("RNGkEpsilon"), "{m}");
+        assert!(m.contains("40.5"), "{m}");
+
+        // RNG in the same case is fine.
+        assert!(rng_ke_coeffs(&cc).is_ok());
     }
 
     #[test]

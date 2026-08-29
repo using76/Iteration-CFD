@@ -564,7 +564,7 @@ fn is_absolute(p: &str) -> bool {
 }
 
 /// The last whitespace-separated token that parses as a number.
-fn last_number(raw: &str) -> Option<f64> {
+pub(crate) fn last_number(raw: &str) -> Option<f64> {
     let mut found = None;
     for tok in raw.split_whitespace() {
         if let Ok(v) = tok.parse::<f64>() {

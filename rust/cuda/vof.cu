@@ -194,20 +194,281 @@ extern "C" __global__ void vofFaceUnitNormal
 }
 
 
+
+// ==========================================================================
+//  S39  The contact angle
+//
+//  Written from:
+//    T. Young, Phil. Trans. R. Soc. 95 (1805) 65-87 - the equilibrium angle
+//    C. Huh, L. E. Scriven, J. Colloid Interface Sci. 35 (1971) 85-101 - the
+//      moving contact-line singularity
+//    O. V. Voinov, Fluid Dyn. 11 (1976) 714-721; R. G. Cox, J. Fluid Mech.
+//      168 (1986) 169-194 - the asymptotic matching
+//    R. L. Hoffman, J. Colloid Interface Sci. 50 (1975) 228-241 - the master
+//      curve
+//    T.-S. Jiang, S.-G. Oh, J. C. Slattery, J. Colloid Interface Sci. 69
+//      (1979) 74-77 - the explicit fit used here
+//    ofgpu SPEC-LIT.md S39 (all of it)
+//  No GPL-licensed source was consulted.
+//
+//  S39.2 derives the whole coupling into the curvature gather:
+//
+//      bNHatf[i] = |Sf[i]| cos(theta_i)             (was: 0)
+//
+//  and vofFaceUnitNormalBoundary below is where it lands. THE TRAP, from
+//  S39.2: cos(pi/2) is 6.123233995736766e-17, not zero, so writing
+//  |Sf| cos(theta) unconditionally would move every recorded VOF measurement
+//  for a case that asked for nothing. Hence the `enabled` flag - when no
+//  contact-angle model is configured the kernel writes a LITERAL 0 - and the
+//  host-side special case in `contact_angle::cos_deg`, which maps ninety
+//  degrees to exactly 0.0 so a case that DOES name it is also unchanged.
+// ==========================================================================
+
+//- Correlation codes, mirroring ContactAngleCorrelation in
+//  src/contact_angle.rs. `correlation_codes_match_the_device` pins them.
+#define OFCA_STATIC 0
+#define OFCA_JIANG  1
+#define OFCA_COX    2
+
+//- Jiang, Oh & Slattery's two constants - NOT case settings, they are what
+//  define the correlation.
+#define OFCA_JIANG_A ((ofscalar)4.96)
+#define OFCA_JIANG_B ((ofscalar)0.702)
+
+#ifdef OFGPU_SINGLE
+OFGPU_DEV ofscalar vofSqrt(ofscalar a)  { return sqrtf(a); }
+OFGPU_DEV ofscalar vofTanh(ofscalar a)  { return tanhf(a); }
+OFGPU_DEV ofscalar vofAcos(ofscalar a)  { return acosf(a); }
+OFGPU_DEV ofscalar vofCos(ofscalar a)   { return cosf(a); }
+OFGPU_DEV ofscalar vofCbrt(ofscalar a)  { return cbrtf(a); }
+OFGPU_DEV ofscalar vofPow(ofscalar a, ofscalar b) { return powf(a, b); }
+#else
+OFGPU_DEV ofscalar vofSqrt(ofscalar a)  { return sqrt(a); }
+OFGPU_DEV ofscalar vofTanh(ofscalar a)  { return tanh(a); }
+OFGPU_DEV ofscalar vofAcos(ofscalar a)  { return acos(a); }
+OFGPU_DEV ofscalar vofCos(ofscalar a)   { return cos(a); }
+OFGPU_DEV ofscalar vofCbrt(ofscalar a)  { return cbrt(a); }
+OFGPU_DEV ofscalar vofPow(ofscalar a, ofscalar b) { return pow(a, b); }
+#endif
+
+OFGPU_DEV ofscalar vofClamp(ofscalar x, ofscalar lo, ofscalar hi)
+{
+    return ofmin_(hi, ofmax_(lo, x));
+}
+
+#define OFCA_PI ((ofscalar)3.14159265358979323846)
+
+
+//- cos(theta_d) from the equilibrium/advancing/receding cosines and the
+//  contact-line capillary number - S39.4. The device twin of
+//  `contact_angle::cos_theta_dynamic`; the two are written to be read side by
+//  side and `the_device_agrees_with_the_host_contact_angle` measures them
+//  against each other.
+//
+//  Ca > 0 is ADVANCING. Hysteresis picks the reference angle FIRST and the
+//  correlation is then evaluated at it, so the two compose rather than
+//  compete. Ca = 0 returns the reference cosine bit for bit, which is what
+//  makes a dynamic case with a stationary line the static case exactly.
+OFGPU_DEV ofscalar vofDynamicCosTheta
+(
+    oflabel corr,
+    ofscalar cosE,
+    ofscalar cosA,
+    ofscalar cosR,
+    ofscalar ca,
+    ofscalar lnRatio
+)
+{
+    const ofscalar cosRef = (ca > (ofscalar)0) ? cosA
+                          : (ca < (ofscalar)0) ? cosR
+                          : cosE;
+
+    //- `!(ca == ca)` is the NaN test without <cmath>; a NaN Ca can only come
+    //  from a corrupted field and must not become a NaN normal.
+    if (ca == (ofscalar)0 || !(ca == ca)) return cosRef;
+
+    if (corr == OFCA_JIANG)
+    {
+        const ofscalar a = (ca < (ofscalar)0) ? -ca : ca;
+        const ofscalar t = vofTanh(OFCA_JIANG_A*vofPow(a, OFCA_JIANG_B));
+        const ofscalar d = (ca > (ofscalar)0) ? -t : t;
+        return vofClamp(cosRef + d*((ofscalar)1 + cosRef), (ofscalar)-1, (ofscalar)1);
+    }
+
+    if (corr == OFCA_COX)
+    {
+        const ofscalar th = vofAcos(vofClamp(cosRef, (ofscalar)-1, (ofscalar)1));
+        const ofscalar cubed = th*th*th + (ofscalar)9*ca*lnRatio;
+        if (cubed <= (ofscalar)0) return (ofscalar)1;      // theta -> 0
+        return vofCos(ofmin_(vofCbrt(cubed), OFCA_PI));
+    }
+
+    return cosRef;
+}
+
+
+//- cos(theta) per boundary face, and the flag saying where the model applies
+//  - SPEC-LIT S39.4, S39.5.
+//
+//  The contact-line speed is S39.4's face-local estimate:
+//
+//      t_hat = normalise( grad(alpha)_P - n_w (n_w . grad(alpha)_P) )
+//      U_cl  = -( 1/2 (U_P + U_b) ) . t_hat
+//      Ca    = mu_1 U_cl / sigma
+//
+//  The MINUS sign is derived, not chosen. `grad(alpha)` points toward the
+//  liquid, so `t_hat` points INTO the liquid along the wall. A spreading
+//  (advancing) contact line moves toward the DRY side, i.e. along -t_hat, and
+//  so does the wall-adjacent fluid. `Ca > 0` therefore has to mean advancing,
+//  which is the convention every correlation in S39.4 is written in.
+//
+//  A contact line is a codimension-2 curve and this is a face-local estimate
+//  of its speed, first-order and mesh-dependent - S39.4 says so plainly. A
+//  true reconstruction needs a connected-component search over the wall
+//  patch, which on a GPU is a scatter or a multi-pass label propagation, and
+//  is deliberately not attempted.
+//
+//  A face participates only where there IS an interface,
+//  eps < alpha_b < 1 - eps. A dry or fully wet wall face has no interface to
+//  orient and keeps the pre-S39 zero, which there is not a fallback but the
+//  right answer.
+extern "C" __global__ void vofContactAngleCos
+(
+    ofscalar* __restrict__ cosTheta,
+    oflabel*  __restrict__ applies,
+    const oflabel*  __restrict__ owns,
+    const ofscalar* __restrict__ cosE,
+    const ofscalar* __restrict__ cosA,
+    const ofscalar* __restrict__ cosR,
+    const oflabel*  __restrict__ corr,
+    const ofscalar* __restrict__ lnRatio,
+    const ofscalar* __restrict__ alphaB,
+    const ofvec3*   __restrict__ gradAlpha,
+    const ofvec3*   __restrict__ u,
+    const ofvec3*   __restrict__ bu,
+    const ofvec3*   __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel*  __restrict__ bFaceCells,
+    ofscalar muLiquid,
+    ofscalar sigma,
+    ofscalar alphaEps,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    cosTheta[i] = 0;
+    applies[i]  = 0;
+    if (owns[i] == 0) return;
+
+    //- Is there an interface at this face at all?
+    const ofscalar ab = alphaB[i];
+    if (!(ab > alphaEps) || !(ab < (ofscalar)1 - alphaEps)) return;
+
+    const oflabel P = bFaceCells[i];
+    const ofscalar mag = bMagSf[i];
+    if (!(mag > (ofscalar)0)) return;
+
+    //- Ca. With no surface tension there is no capillary number and no
+    //  contact-angle dynamics; the STATIC angle still applies, so this falls
+    //  through to Ca = 0 rather than skipping the face.
+    ofscalar ca = 0;
+    if (sigma > (ofscalar)0)
+    {
+        const ofvec3 sf = bSf[i];
+        const ofvec3 nw = mkvec(sf.x/mag, sf.y/mag, sf.z/mag);
+        const ofvec3 g  = gradAlpha[P];
+        const ofscalar gn = dot3(nw, g);
+        const ofvec3 t = mkvec(g.x - nw.x*gn, g.y - nw.y*gn, g.z - nw.z*gn);
+        const ofscalar tm = vofSqrt(dot3(t, t));
+        if (tm > (ofscalar)0)
+        {
+            const ofvec3 up = u[P];
+            const ofvec3 ub = bu[i];
+            const ofvec3 um = mkvec
+            (
+                (ofscalar)0.5*(up.x + ub.x),
+                (ofscalar)0.5*(up.y + ub.y),
+                (ofscalar)0.5*(up.z + ub.z)
+            );
+            const ofscalar ucl = -(um.x*t.x + um.y*t.y + um.z*t.z)/tm;
+            ca = muLiquid*ucl/sigma;
+        }
+    }
+
+    cosTheta[i] = vofDynamicCosTheta(corr[i], cosE[i], cosA[i], cosR[i], ca, lnRatio[i]);
+    applies[i]  = 1;
+}
+
+
+//- refGrad(alpha) = |grad(alpha)_P| cos(theta) on the faces the model owns -
+//  SPEC-LIT S39.3.
+//
+//  A plain fixed-gradient condition in S4's triple, rewritten every outer
+//  iteration exactly as S32.2's fixed wall heat flux rewrites its own. The
+//  point of it is that fixing bNHatf alone is not enough: the wall-adjacent
+//  CELL gradient has to tilt too, or the internal faces of that cell still
+//  see a ninety-degree interface.
+//
+//  An owned face with no interface gets refGrad = 0, i.e. zero-gradient,
+//  i.e. exactly the condition a wall carried before S39. A face the model
+//  does NOT own is left alone - whatever the case wrote there stands.
+extern "C" __global__ void vofAlphaContactAngleGrad
+(
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ cosTheta,
+    const oflabel*  __restrict__ applies,
+    const oflabel*  __restrict__ owns,
+    const ofvec3*   __restrict__ gradAlpha,
+    const oflabel*  __restrict__ bFaceCells,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    if (owns[i] == 0) return;
+
+    if (applies[i] == 0)
+    {
+        refGrad[i] = 0;
+        return;
+    }
+
+    const ofvec3 g = gradAlpha[bFaceCells[i]];
+    refGrad[i] = vofSqrt(dot3(g, g))*cosTheta[i];
+}
+
+
 //- The same on a boundary face.
 //
 //  A cyclic face is an interior face in disguise and gets the full treatment
-//  across the couple. Every other boundary face gets ZERO, and that is a
-//  modelling statement, not a shortcut: n_hat . Sf = 0 says the interface
-//  normal is tangential to the boundary, i.e. the interface meets it at ninety
-//  degrees. That is the no-wall-adhesion contact angle, and it is *DESIGN* -
-//  SPEC-LIT S20 specifies no contact-angle model, so this solver makes the one
-//  choice that adds no unstated physics. A case needing a real contact angle
-//  needs a model this file does not have.
+//  across the couple. Every other boundary face gets ZERO, and that WAS a
+//  modelling statement rather than a shortcut: n_hat . Sf = 0 says the
+//  interface normal is tangential to the boundary, i.e. the interface meets it
+//  at ninety degrees - the no-wall-adhesion contact angle, *DESIGN*, and the
+//  one choice that adds no unstated physics when no model is configured.
+//
+//  SPEC-LIT S39 supplies the model. S39.2 derives
+//
+//      n_hat . Sf = |Sf| cos(theta)
+//
+//  from the geometry alone (2-D wall at y = 0, Sf pointing OUT of the domain,
+//  theta measured through the liquid), and notes that the 3-D case is the same
+//  scalar because the tangential part of n_hat is orthogonal to Sf by
+//  construction. theta = 90 gives 0, which is the line below.
+//
+//  THE TRAP, and why `enabled` exists at all: cos(pi/2) in double precision is
+//  6.123233995736766e-17, NOT zero. Writing |Sf| cos(theta) unconditionally
+//  would move every recorded VOF measurement by that much times |Sf| for a
+//  case that asked for nothing. So `enabled == 0` writes a literal 0, exactly
+//  as this kernel always did, and the host maps ninety degrees to exactly 0.0
+//  for the case that does ask. `the_cosine_of_ninety_degrees_is_not_zero` in
+//  src/contact_angle.rs measures the premise rather than asserting it.
 //
 //  It also keeps the curvature gather honest: a wall-adjacent interface cell
-//  then sees curvature from its interior faces alone rather than from a normal
-//  the boundary cannot define.
+//  with no contact-angle model then sees curvature from its interior faces
+//  alone rather than from a normal the boundary cannot define.
 extern "C" __global__ void vofFaceUnitNormalBoundary
 (
     ofscalar* __restrict__ bNHatf,
@@ -217,6 +478,10 @@ extern "C" __global__ void vofFaceUnitNormalBoundary
     const oflabel* __restrict__ bFaceCells,
     const oflabel* __restrict__ bNbrCell,
     const oflabel* __restrict__ bKind,
+    const ofscalar* __restrict__ caCosTheta,
+    const oflabel* __restrict__ caApplies,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel caEnabled,
     ofscalar epsN,
     oflabel nbf
 )
@@ -226,7 +491,17 @@ extern "C" __global__ void vofFaceUnitNormalBoundary
 
     if (bKind[i] != OFPATCH_CYCLIC)
     {
-        bNHatf[i] = 0;
+        //- SPEC-LIT S39.2. Only a face the model OWNS and where an interface
+        //  is actually present takes the contact angle; everything else takes
+        //  the literal zero this kernel has always written.
+        if (caEnabled != 0 && caApplies[i] != 0)
+        {
+            bNHatf[i] = bMagSf[i]*caCosTheta[i];
+        }
+        else
+        {
+            bNHatf[i] = 0;
+        }
         return;
     }
 

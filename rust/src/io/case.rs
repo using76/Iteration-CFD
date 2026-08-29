@@ -538,10 +538,15 @@ pub fn validate_low_re_wall_treatment(
         setting,
         name,
         LOW_RE_VALID,
-        "kEpsilon, kOmega and kOmegaSST are high-Reynolds-number closures \
+        "kEpsilon, kOmega, kOmegaSST, realizableKE and RNGkEpsilon are all \
+         high-Reynolds-number closures \
          with no near-wall damping function - invalid below y+ ~ 30 \
          regardless of the mesh's own resolution there (SPEC-LIT S32's \
-         second finding); the low-Re variant that fixes this, \
+         second finding). RNGkEpsilon in particular carries \
+         alphak = alphaEps = 1.39, the HIGH-Reynolds limit of the RNG \
+         differential relation (SPEC-LIT S41.2), so it is no more valid \
+         in the sublayer than the others. The low-Re variant that fixes \
+         this, \
          LaunderSharmaKE (SPEC-LIT S33), is implemented and is what \
          `wallTreatment lowRe` needs here",
         "standard (the full wall-function row)",
@@ -695,6 +700,14 @@ impl TurbulenceControls {
 /// The whole case, as far as a turbulence solver is concerned.
 pub struct CaseControls {
     pub nu: Scalar,
+    /// `constant/physicalProperties`' `viscosityModel` and its `rheology`
+    /// block - SPEC-LIT §38. Newtonian unless the case names one of the five
+    /// closures, and Newtonian is bitwise the pre-§38 momentum equation.
+    ///
+    /// `viscosityModel` has been written into every generated case since
+    /// `blockgen` existed and was read by NOTHING before §38: it is the sixth
+    /// instance of the defect §13.4.1's standing test exists to catch.
+    pub rheology: crate::rheology::RheologyCoeffs,
     pub turb: TurbulenceControls,
     pub wall: WallFunctionCoeffs,
 
@@ -758,6 +771,7 @@ impl Default for CaseControls {
     fn default() -> Self {
         Self {
             nu: 1e-5,
+            rheology: crate::rheology::RheologyCoeffs::default(),
             turb: TurbulenceControls::default(),
             wall: WallFunctionCoeffs::default(),
             wall_treatment: WallTreatment::Standard,
@@ -1510,6 +1524,11 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
                     c.nu
                 )));
             }
+            // SPEC-LIT 38.7: `viscosityModel`, out of the same file, under
+            // the same 13.4 contract `nu` is already under. `constant` is
+            // Newtonian and is what every case written before 38 says.
+            c.rheology =
+                crate::rheology::RheologyCoeffs::from_dict(&d, &format!("constant/{nm}"))?;
             break;
         }
     }

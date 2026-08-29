@@ -556,9 +556,16 @@ fn mask_bit(b: &[u8], mask_off: usize, n: u32) -> bool {
 //  Pure applied arithmetic from the IEEE 754 bit layout (1 sign / 5 exponent
 //  / 10 mantissa bits, bias 15), not derived from any codebase's half-float
 //  routine. See tests below for round-trip and rounding-boundary coverage.
+//
+//  `pub(crate)` for SPEC-LIT S45.2: `io::vdb`'s own `fp16` path calls THIS
+//  function rather than carrying a second one. OpenVDB's `math::half` is
+//  Imath's, i.e. the same IEEE 754-2008 binary16 this implements, so two
+//  copies could only ever differ by being wrong - and S0's rule against
+//  redefining a shared type applies to a shared conversion at least as
+//  strongly. `vdb::tests::the_half_conversion_is_nvdb_s_own` pins it.
 // ============================================================================
 
-fn f32_to_f16_bits(f: f32) -> u16 {
+pub(crate) fn f32_to_f16_bits(f: f32) -> u16 {
     let bits = f.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exp = ((bits >> 23) & 0xff) as i32;
@@ -629,12 +636,17 @@ fn round_shift_rne(value: u32, shift: u32) -> u32 {
 /// Only the reader and the half-conversion tests need the reverse
 /// direction - the writer only ever narrows - so this is `#[cfg(test)]`.
 #[cfg(test)]
-fn f16_bits_to_f32(bits: u16) -> f32 {
+pub(crate) fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign: f64 = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = ((bits >> 10) & 0x1f) as i32;
     let mant = (bits & 0x3ff) as f64;
     let value = if exp == 0 {
-        if mant == 0.0 { 0.0 } else { sign * mant * 2f64.powi(-24) }
+        // `sign * 0.0`, not `0.0`: binary16 has a signed zero and this
+        // reader must not quietly turn -0 into +0. Found by SPEC-LIT S45's
+        // `vdb::tests::the_half_conversion_is_nvdb_s_own`, whose +-0 leg
+        // compares BITS - `-0.0 == 0.0` is true, so a value comparison
+        // would never have caught it.
+        if mant == 0.0 { sign * 0.0 } else { sign * mant * 2f64.powi(-24) }
     } else if exp == 31 {
         if mant == 0.0 { sign * f64::INFINITY } else { f64::NAN }
     } else {

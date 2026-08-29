@@ -85,10 +85,12 @@
 OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrtf(a); }
 OFGPU_DEV ofscalar oftanh_(ofscalar a) { return tanhf(a); }
 OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return expf(a); }
+OFGPU_DEV ofscalar offma_(ofscalar a, ofscalar b, ofscalar c) { return fmaf(a, b, c); }
 #else
 OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrt(a); }
 OFGPU_DEV ofscalar oftanh_(ofscalar a) { return tanh(a); }
 OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return exp(a); }
+OFGPU_DEV ofscalar offma_(ofscalar a, ofscalar b, ofscalar c) { return fma(a, b, c); }
 #endif
 
 
@@ -895,6 +897,92 @@ extern "C" __global__ void turbGammaBoundaryCell
     if (i >= nBoundaryFaces) return;
 
     bGammaMagSf[i] = (nu + rSigma[faceCells[i]]*nutB[i])*bMagSf[i];
+}
+
+
+// ==========================================================================
+//  Affine diffusivity - SPEC-LIT 41.2
+//
+//  Extended from:
+//    V. Yakhot, S. A. Orszag, S. Thangam, T. B. Gatski, C. G. Speziale,
+//      ICASE Report 91-65 / NASA CR-187611 (1991); Phys. Fluids A 4 (1992)
+//      1510-1520 - the RNG inverse Prandtl numbers alpha_k, alpha_eps
+//    ofgpu SPEC-LIT.md section 41.2
+//  No GPL-licensed source was consulted.
+//
+//  turbGammaInternal computes Gamma_eff = nu + rSigma nu_t: the coefficient
+//  multiplies the TURBULENT viscosity alone. The RNG model (section 41) wants
+//  Gamma_eff = alpha (nu + nu_t) - the inverse Prandtl number multiplies the
+//  EFFECTIVE viscosity, molecular part included. At high Reynolds number the
+//  two are indistinguishable; in the first cell off a wall they are not, and
+//  folding alpha into rSigma to get nu + alpha nu_t would be wrong there and
+//  silently so.
+//
+//  So: one kernel taking BOTH coefficients, Gamma_eff = a nu + b nu_t.
+//  turbGammaInternal is the a = 1 case of it, and multiplication by an exact
+//  1.0 is exact in IEEE-754, so the two agree BIT FOR BIT - which is what
+//  `the_affine_diffusivity_reduces_to_the_plain_one_bitwise` in
+//  src/turbulence.rs measures rather than assumes. Section 40 calls it with
+//  (1, 1/sigma) and section 41 with (alpha, alpha), so the kernel added here
+//  once is used by both.
+// ==========================================================================
+
+extern "C" __global__ void turbGammaInternalAffine
+(
+    ofscalar* __restrict__ gammaMagSf,
+    const ofscalar* __restrict__ nut,
+    const ofscalar* __restrict__ weights,
+    const ofscalar* __restrict__ magSf,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    ofscalar nu,
+    ofscalar a,
+    ofscalar b,
+    oflabel nInternalFaces
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= nInternalFaces) return;
+
+    const ofscalar w = weights[f];
+
+    //- EXPLICIT fma, not `a*nu + b*nut[P]`. Written the obvious way the
+    //  expression has TWO multiplies and one add, nvcc is free to fuse either,
+    //  and it fuses the wrong one - which rounds the `b*nut` product before
+    //  adding and leaves the answer ONE ULP from turbGammaInternal's. One ULP
+    //  is enough to make `affine(1, r)` a different kernel from
+    //  `face_diffusivity(r)`, and sections 6.1, 6.2 and 6.3's recorded results
+    //  are stated against the latter. Hoisting `a*nu` onto its own line is not
+    //  enough either (measured). Naming the fused operation removes the
+    //  compiler's discretion entirely: `a*nu` is exact at a = 1, and what is
+    //  left is the single fused multiply-add nvcc emits for the plain kernel's
+    //  `nu + rSigma*nut[P]`.
+    //  `the_affine_diffusivity_reduces_to_the_plain_one_bitwise` in
+    //  src/turbulence.rs is what found this and is what keeps it true.
+    const ofscalar aNu = a*nu;
+    const ofscalar gP = offma_(b, nut[owner[f]], aNu);
+    const ofscalar gN = offma_(b, nut[neighbour[f]], aNu);
+
+    gammaMagSf[f] = (w*gP + ((ofscalar)1 - w)*gN)*magSf[f];
+}
+
+
+extern "C" __global__ void turbGammaBoundaryAffine
+(
+    ofscalar* __restrict__ bGammaMagSf,
+    const ofscalar* __restrict__ nutB,
+    const ofscalar* __restrict__ bMagSf,
+    ofscalar nu,
+    ofscalar a,
+    ofscalar b,
+    oflabel nBoundaryFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nBoundaryFaces) return;
+
+    const ofscalar aNu = a*nu;
+    bGammaMagSf[i] = offma_(b, nutB[i], aNu)*bMagSf[i];
 }
 
 

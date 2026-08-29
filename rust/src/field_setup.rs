@@ -362,6 +362,17 @@ fn scalar_patch(
         }
         _ => None,
     };
+    // SPEC-LIT 39.3: the contact angle, read here on the same convention -
+    // a missing or unreadable `theta0` is reported against the condition that
+    // wanted it. `cos_deg` is what maps ninety degrees to EXACTLY zero, which
+    // is the whole of 39.2's trap: cos(pi/2) is 6.1e-17 and would move every
+    // recorded VOF measurement for a case that asked for nothing.
+    let cos_theta0 = match kind {
+        BcKind::ContactAngle => Some(crate::contact_angle::cos_deg(
+            spec.required_number("theta0", patch, &spec.type_name)?,
+        )),
+        _ => None,
+    };
 
     let cmu = aux.inputs.cmu();
 
@@ -508,6 +519,14 @@ fn scalar_patch(
             // runs before the very first assembly, exactly like every wall
             // function above.
             BcKind::FixedFluxTemperature => (0.0, q_flux.unwrap_or(0.0), 0.0),
+
+            // SPEC-LIT 39.3. Fixed-gradient, with `cos(theta0)` parked in the
+            // slot the triple does not otherwise read - the same trick
+            // `fixedFluxTemperature` above plays with `q`. `ref_grad` starts
+            // at ZERO, i.e. zero-gradient, i.e. exactly the condition a wall
+            // carried before 39; `vofAlphaContactAngleGrad` rewrites it every
+            // outer iteration once `grad(alpha)` exists to build it from.
+            BcKind::ContactAngle => (0.0, cos_theta0.unwrap_or(0.0), 0.0),
 
             // Vector-only conditions on a scalar field. Naming one is a
             // mistake in the case, not something to guess at.
@@ -832,7 +851,10 @@ fn vector_patch(
             | BcKind::KLowReWallFunction
             | BcKind::ThermalWallFunction
             | BcKind::WernerWengleWallFunction
-            | BcKind::FixedFluxTemperature => {
+            | BcKind::FixedFluxTemperature
+            // SPEC-LIT 39.3: the contact angle is a condition on `alpha`, a
+            // scalar. On a vector field it is a mistake in the case.
+            | BcKind::ContactAngle => {
                 return Err(Error::Field {
                     field: field.to_string(),
                     msg: format!(
@@ -2062,7 +2084,14 @@ mod tests {
         use crate::field::IMPLEMENTED_BC_NAMES;
 
         for name in IMPLEMENTED_BC_NAMES {
-            let k = BcKind::from_name(name, "psi", "inlet")
+            // SPEC-LIT 39.3: the two contact-angle spellings are legal on the
+            // PHASE FRACTION and refused anywhere else, because nothing but
+            // `crate::vof` rewrites the gradient they are defined by. So the
+            // round trip is asked of them on the field they belong to - and
+            // the refusal on any other field is its own test,
+            // `field::tests::a_contact_angle_belongs_on_a_phase_fraction_and_nowhere_else`.
+            let field = if name.ends_with("AlphaContactAngle") { "alpha.water" } else { "psi" };
+            let k = BcKind::from_name(name, field, "inlet")
                 .unwrap_or_else(|e| panic!("{name} is on the menu but rejected: {e}"));
 
             // The one thing that must never happen: a name on the menu
@@ -2092,6 +2121,16 @@ mod tests {
         assert_eq!(k("nutLowReWallFunction"), BcKind::NutLowReWallFunction);
         assert_eq!(k("thermalWallFunction"), BcKind::ThermalWallFunction);
         assert_eq!(k("fixedFluxTemperature"), BcKind::FixedFluxTemperature);
+        assert_eq!(
+            BcKind::from_name("constantAlphaContactAngle", "alpha.water", "walls")
+                .expect("known"),
+            BcKind::ContactAngle
+        );
+        assert_eq!(
+            BcKind::from_name("dynamicAlphaContactAngle", "alpha.water", "walls")
+                .expect("known"),
+            BcKind::ContactAngle
+        );
     }
 
     /// SPEC-LIT §29.3: OpenFOAM's `alphat` name for the Jayatilleke wall

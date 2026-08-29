@@ -126,6 +126,8 @@ impl<'a> FlowState<'a> {
 pub struct TurbKernels {
     gamma_internal: CudaFunction,
     gamma_boundary: CudaFunction,
+    gamma_internal_affine: CudaFunction,
+    gamma_boundary_affine: CudaFunction,
 
     nut_k_epsilon: CudaFunction,
     nut_k_omega: CudaFunction,
@@ -168,6 +170,8 @@ impl TurbKernels {
         Ok(Self {
             gamma_internal: k.func("turbGammaInternal")?,
             gamma_boundary: k.func("turbGammaBoundary")?,
+            gamma_internal_affine: k.func("turbGammaInternalAffine")?,
+            gamma_boundary_affine: k.func("turbGammaBoundaryAffine")?,
 
             nut_k_epsilon: k.func("turbNutKEpsilon")?,
             nut_k_omega: k.func("turbNutKOmega")?,
@@ -273,6 +277,79 @@ pub fn face_diffusivity(
                 .arg(&m.b_mag_sf)
                 .arg(&nu)
                 .arg(&r_sigma)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// `Gamma_eff·|Sf| = (a·nu + b·nu_t)·|Sf|` on every face - SPEC-LIT §41.2.
+///
+/// [`face_diffusivity`] generalised so that the molecular part carries its own
+/// coefficient. RNG k-epsilon (SPEC-LIT §41) needs `alpha (nu + nu_t)`, where
+/// the inverse Prandtl number multiplies the EFFECTIVE viscosity rather than
+/// the turbulent one; folding `alpha` into `r_sigma` would give
+/// `nu + alpha nu_t`, which is wrong in the first cell off a wall and silently
+/// so.
+///
+/// `face_diffusivity(r_sigma)` is exactly this with `a = 1`, and
+/// multiplication by an exact `1.0` is exact in IEEE-754, so the two agree bit
+/// for bit - `tests::the_affine_diffusivity_reduces_to_the_plain_one_bitwise`
+/// measures that rather than assuming it. §40 calls this with `(1, 1/sigma)`
+/// and §41 with `(alpha, alpha)`: one kernel, two callers.
+#[allow(clippy::too_many_arguments)]
+pub fn face_diffusivity_affine(
+    gpu: &Gpu,
+    k: &TurbKernels,
+    gamma: &mut DevBuf<Scalar>,
+    b_gamma: &mut DevBuf<Scalar>,
+    nut: &GpuScalarField,
+    m: &GpuMesh,
+    nu: Scalar,
+    a: Scalar,
+    b: Scalar,
+) -> Result<()> {
+    expect_len(gamma, m.n_internal_faces, "gamma")?;
+    expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
+    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_len(&nut.bf, m.n_boundary_faces, "nut.bf")?;
+
+    if m.n_internal_faces > 0 {
+        let n = m.n_internal_faces;
+        let nl = n as Label;
+        let f = k.gamma_internal_affine.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(gamma)
+                .arg(&nut.f)
+                .arg(&m.weights)
+                .arg(&m.mag_sf)
+                .arg(&m.owner)
+                .arg(&m.neighbour)
+                .arg(&nu)
+                .arg(&a)
+                .arg(&b)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+    }
+
+    if m.n_boundary_faces > 0 {
+        let n = m.n_boundary_faces;
+        let nl = n as Label;
+        let f = k.gamma_boundary_affine.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(b_gamma)
+                .arg(&nut.bf)
+                .arg(&m.b_mag_sf)
+                .arg(&nu)
+                .arg(&a)
+                .arg(&b)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }
@@ -1598,6 +1675,39 @@ impl<'m> RasCore<'m> {
         self.assemble_after_diffusivity(gpu, flow, psi, conv)
     }
 
+    /// [`Self::assemble_transport`] with the diffusivity `a·nu + b·nu_t` -
+    /// SPEC-LIT §41.2.
+    ///
+    /// `assemble_transport(r_sigma)` is `assemble_transport_affine(1, r_sigma)`
+    /// bit for bit (see [`face_diffusivity_affine`]), so §40 reaches the same
+    /// arithmetic through this entry point as §6.1 does through the other, and
+    /// §41 reaches `alpha (nu + nu_t)` - which the other cannot express at all.
+    pub fn assemble_transport_affine(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        psi: &GpuScalarField,
+        conv: DivEntry,
+        a: Scalar,
+        b: Scalar,
+    ) -> Result<()> {
+        self.a.zero(gpu)?;
+
+        face_diffusivity_affine(
+            gpu,
+            &self.turb,
+            &mut self.gamma,
+            &mut self.b_gamma,
+            &self.nut,
+            self.mesh,
+            flow.nu,
+            a,
+            b,
+        )?;
+
+        self.assemble_after_diffusivity(gpu, flow, psi, conv)
+    }
+
     /// [`Self::assemble_transport`] with `sigma` read per cell rather than
     /// passed as a constant - SPEC-LIT §6.3.
     ///
@@ -1960,6 +2070,144 @@ mod tests {
             c_i.iter().zip(&ha_i).any(|(x, y)| (x - y).abs() > 1e-12 * y.abs()),
             "doubling sigma changed no face diffusivity"
         );
+
+        Ok(())
+    }
+
+    /// SPEC-LIT §41.2 and §41.6: `face_diffusivity_affine(1, r)` must be
+    /// [`face_diffusivity`] **bit for bit**, or the one kernel §40 and §41
+    /// both go through is not the kernel §6.1 has been validated with.
+    ///
+    /// `a·nu` with `a` an exact `1.0` is exact in IEEE-754, so this is a
+    /// statement about the arithmetic ORDER as much as about the value - the
+    /// two kernels form `w·gP + (1-w)·gN` in the same order and multiply by
+    /// `|Sf|` at the same point, which is the part that would drift if one of
+    /// them were rewritten.
+    ///
+    /// And the second half: `affine(alpha, alpha)` must NOT equal
+    /// `face_diffusivity(alpha)`, because `alpha(nu + nu_t)` is not
+    /// `nu + alpha nu_t`. That is the whole reason the kernel exists, and a
+    /// test that only checked the reduction would pass on a kernel that
+    /// ignored `a` entirely.
+    #[test]
+    fn the_affine_diffusivity_reduces_to_the_plain_one_bitwise() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+
+        let (mut hm, points, faces) =
+            crate::mesh::topology::tests::box_mesh([4, 4, 1], Vec3::new(0.25, 0.3, 0.2));
+        hm.compute_geometry(&points, &faces).expect("geometry");
+        hm.build_cell_face_maps();
+        let m = GpuMesh::upload(&gpu, &hm)?;
+
+        let kern = TurbKernels::new(&gpu)?;
+        let mut nut = GpuScalarField::zeros(&gpu, &m, "nut")?;
+
+        // Awkward magnitudes on purpose: a nu_t that is sometimes far above
+        // and sometimes far below nu, so `a*nu` cannot be lost in the sum.
+        let cells: Vec<Scalar> = (0..hm.n_cells)
+            .map(|c| 1e-7 * (1.0 + 37.0 * c as Scalar).powi(3))
+            .collect();
+        let bfaces: Vec<Scalar> = (0..hm.n_boundary_faces)
+            .map(|b| 2e-6 + 5e-5 * (b % 13) as Scalar)
+            .collect();
+        gpu.write(&mut nut.f, &cells)?;
+        gpu.write(&mut nut.bf, &bfaces)?;
+
+        let nu: Scalar = 1.5e-5;
+        let nif = hm.n_internal_faces.max(1);
+        let nbf = hm.n_boundary_faces.max(1);
+
+        let mut a_i: DevBuf<Scalar> = gpu.zeros(nif)?;
+        let mut a_b: DevBuf<Scalar> = gpu.zeros(nbf)?;
+        let mut b_i: DevBuf<Scalar> = gpu.zeros(nif)?;
+        let mut b_b: DevBuf<Scalar> = gpu.zeros(nbf)?;
+
+        for r_sigma in [1.0 as Scalar, 1.0 / 1.2, 1.0 / 1.3, 1.39, 0.769_230_769_230_769_2] {
+            face_diffusivity(&gpu, &kern, &mut a_i, &mut a_b, &nut, &m, nu, r_sigma)?;
+            face_diffusivity_affine(&gpu, &kern, &mut b_i, &mut b_b, &nut, &m, nu, 1.0, r_sigma)?;
+            gpu.sync()?;
+
+            // The bit-identity asserted below is a claim about nvcc's FMA
+            // CONTRACTION as much as about arithmetic, so the claim is first
+            // shown to be non-vacuous: the two roundings of
+            // `nu + r_sigma nu_t` - fused and unfused - must actually DIFFER
+            // somewhere in this data, or a kernel that contracted differently
+            // from the plain one would pass anyway.
+            //
+            // The boundary faces are the clean probe: `Gamma * |Sf|` with no
+            // interpolation weight, so the rounding is visible undiluted.
+            {
+                let mut worst_ulp = 0i64;
+                for (b, ntb) in bfaces.iter().enumerate() {
+                    let sf = hm.b_mag_sf[b];
+                    let unfused = (nu + r_sigma * ntb) * sf;
+                    let fused = r_sigma.mul_add(*ntb, nu) * sf;
+                    let d = (unfused.to_bits() as i64 - fused.to_bits() as i64).abs();
+                    worst_ulp = worst_ulp.max(d);
+                }
+                if r_sigma == 1.0 {
+                    assert_eq!(
+                        worst_ulp, 0,
+                        "at r_sigma = 1 the product is exact, so the two roundings \
+                         must agree - if they do not, the probe is wrong"
+                    );
+                } else {
+                    assert!(
+                        worst_ulp > 0,
+                        "r_sigma {r_sigma}: the fused and unfused roundings agree on \
+                         every face, so the bit-identity below would pass on a kernel \
+                         that contracted the wrong way. Pick harder numbers."
+                    );
+                }
+                println!(
+                    "r_sigma {r_sigma}: the fused and unfused roundings of \
+                     nu + r_sigma nu_t differ by up to {worst_ulp} ULP on this data; \
+                     the two KERNELS must still agree exactly"
+                );
+            }
+
+            let (ha_i, hb_i) = (gpu.download(&a_i)?, gpu.download(&b_i)?);
+            let (ha_b, hb_b) = (gpu.download(&a_b)?, gpu.download(&b_b)?);
+            for (f, (x, y)) in ha_i.iter().zip(&hb_i).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "r_sigma {r_sigma}, internal face {f}: {x} against {y}"
+                );
+            }
+            for (f, (x, y)) in ha_b.iter().zip(&hb_b).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "r_sigma {r_sigma}, boundary face {f}: {x} against {y}"
+                );
+            }
+        }
+
+        // alpha(nu + nu_t) is NOT nu + alpha nu_t, and the difference is
+        // exactly (alpha - 1) nu on every face - which is what makes this a
+        // measurement of the molecular part rather than of nothing.
+        let alpha: Scalar = 1.39;
+        face_diffusivity(&gpu, &kern, &mut a_i, &mut a_b, &nut, &m, nu, alpha)?;
+        face_diffusivity_affine(&gpu, &kern, &mut b_i, &mut b_b, &nut, &m, nu, alpha, alpha)?;
+        gpu.sync()?;
+        let (ha_b, hb_b) = (gpu.download(&a_b)?, gpu.download(&b_b)?);
+        let want = (alpha - 1.0) * nu;
+        for (f, (x, y)) in ha_b.iter().zip(&hb_b).enumerate() {
+            // The boundary face is the clean one: Gamma·|Sf| with no
+            // interpolation, so the difference divides out exactly.
+            let sf = hm.b_mag_sf[f];
+            if sf <= 0.0 {
+                continue;
+            }
+            let d = (y - x) / sf;
+            assert!(
+                (d - want).abs() <= 1e-12 * want,
+                "boundary face {f}: affine - plain = {d}, expected (alpha-1)nu = {want}"
+            );
+        }
 
         Ok(())
     }

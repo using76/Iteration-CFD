@@ -428,6 +428,13 @@ fn read_simple_controls(case_dir: &Path, cc: &CaseControls) -> Result<SimpleCont
             lts: cc.lts,
             steady: cc.turb.steady,
             delta_t: cc.turb.delta_t,
+            // SPEC-LIT 38.7: `constant/physicalProperties`' `viscosityModel`,
+            // already resolved - and, if unrecognised, already refused - by
+            // `read_case_controls`. Newtonian unless the case names a
+            // closure, and Newtonian launches no rheology kernel at all.
+            // Left out of this struct, `viscosityModel` would be a setting
+            // the reader parses and the solver drops: instance 3 again.
+            rheology: cc.rheology,
             ..MomentumControls::default()
         },
         n_non_orth_correctors: cc.turb.n_non_orth_correctors,
@@ -1044,7 +1051,7 @@ impl FieldWriter<'_> {
             fields: &vis_fields,
             foam: &foam_fields,
         };
-        let mut writers = build_writers(self.case_dir, "buoyant", self.output)?;
+        let mut writers = build_writers(self.case_dir, "buoyant", self.output, ofgpu::io::nvdb::Precision::F32)?;
         for w in &mut writers {
             w.write_step(&ctx)?;
         }
@@ -1890,6 +1897,9 @@ fn run(o: &Options) -> Result<()> {
     let buoy: BuoyancyCoeffs = cc.buoyancy;
 
     println!("nu = {} | turbulence model requested: {}", g(f64::from(cc.nu)), selection.model.name());
+    // SPEC-LIT S38.3: `m`, `muMin` and `muMax` are required to be printed,
+    // and the rest is printed with them.
+    println!("viscosityModel = {}", cc.rheology.describe());
     println!(
         "T: Pr {} Prt {} -> alphaEff = nu/Pr + nut/Prt, laminar part {}",
         g(f64::from(t_coeffs.pr)),
@@ -2886,6 +2896,58 @@ mod buoyant_tests {
                 to: "(0 0 -1.62)",
                 pre: NO_PRE,
             },
+            // SPEC-LIT 38.7. `viscosityModel` has been written into every
+            // case `blockgen` generates since that generator existed, and was
+            // read by NOTHING until 38 - the sixth instance of the defect
+            // this test exists to catch, and the reason it is now two knobs:
+            // the model selector itself, and one coefficient OF the selected
+            // model, because a reader can wire the selector and still drop
+            // the numbers.
+            Knob {
+                label: "constant/physicalProperties viscosityModel",
+                file: "constant/physicalProperties",
+                from: "viscosityModel  constant;",
+                to: "viscosityModel  powerLaw;\n\nrheology\n{\n    rho             1;\n    K               1.5e-05;\n    n               0.8;\n}",
+                pre: NO_PRE,
+            },
+            // The SAME model on both sides, differing in one coefficient. The
+            // block goes in through `pre`, so the pair differs in `n` alone.
+            Knob {
+                label: "constant/physicalProperties rheology/n",
+                file: "constant/physicalProperties",
+                from: "    n               0.8;",
+                to: "    n               0.5;",
+                pre: (
+                    "constant/physicalProperties",
+                    "viscosityModel  constant;",
+                    "viscosityModel  powerLaw;\n\nrheology\n{\n    rho             1;\n    K               1.5e-05;\n    n               0.8;\n}",
+                ),
+            },
+            // SPEC-LIT §41. `RNGkEpsilon` reaches the COUPLED drivers
+            // through `registry::build_coupled`, which is a different route
+            // from `ofgpu-k-epsilon`'s own dispatch and has to be turned
+            // separately. (`realizableKE` is NOT here: §40.5 has no buoyancy
+            // production, and a plume case has gravity, so it is refused by
+            // name - `a_buoyant_realizable_case_is_refused_by_name` below is
+            // that half.)
+            Knob {
+                label: "RAS/model RNGkEpsilon (SPEC-LIT 41, via build_coupled)",
+                file: "constant/momentumTransport",
+                from: "    model           kEpsilon;",
+                to: "    model           RNGkEpsilon;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "RAS/alphak (RNGkEpsilon, SPEC-LIT 41.2)",
+                file: "constant/momentumTransport",
+                from: "    turbulence      on;",
+                to: "    turbulence      on;\n    alphak          1.1;",
+                pre: (
+                    "constant/momentumTransport",
+                    "    model           kEpsilon;",
+                    "    model           RNGkEpsilon;",
+                ),
+            },
             Knob {
                 label: "constant/physicalProperties nu",
                 file: "constant/physicalProperties",
@@ -2904,6 +2966,48 @@ mod buoyant_tests {
             }
         }
         assert_none_inert(&inert);
+    }
+
+    /// SPEC-LIT §40.5, the other half of the `RNGkEpsilon` knob above:
+    /// `realizableKE` is refused here BY NAME, because a plume case has
+    /// gravity and §40 has no buoyancy production.
+    ///
+    /// Shih et al. specify none. The extension every code uses,
+    /// `C_1 (eps/k) C_3 G_b`, presupposes an `epsilon` production
+    /// proportional to `G`, and §40's is `C_1 S eps`. Running the model with
+    /// `G_b` silently at zero in a 1173 K plume would be a leading-order
+    /// omission dressed as a converged answer - so it is an error naming the
+    /// models that DO have the term.
+    #[test]
+    fn a_buoyant_realizable_case_is_refused_by_name() {
+        let dir = scratch_dir("realizableBuoyant");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate the plume case");
+        apply(
+            &case,
+            &Knob {
+                label: "RAS/model realizableKE",
+                file: "constant/momentumTransport",
+                from: "    model           kEpsilon;",
+                to: "    model           realizableKE;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let cc = read_case_controls(&case).expect("controls");
+        assert!(cc.buoyancy.is_active(), "a plume case must carry gravity");
+
+        let e = ofgpu::models::refuse_realizable_ke_buoyancy(&cc)
+            .expect_err("a buoyant realizableKE run must be refused, not run with G_b = 0");
+        let m = format!("{e}");
+        assert!(m.contains("realizableKE"), "the error must name the setting: {m}");
+        assert!(m.contains("RNGkEpsilon"), "and an alternative that HAS the term: {m}");
+        assert!(m.contains("40.5"), "and the section that says why: {m}");
+
+        // The same case under RNGkEpsilon is not refused - which is what makes
+        // the refusal about §40 and not about buoyancy in general.
+        assert!(ofgpu::models::rng_ke_coeffs(&cc).is_ok());
     }
 
     /// Rule (a) of 13.4.1 on the controls: `gradSchemes/grad(T)` reaches the

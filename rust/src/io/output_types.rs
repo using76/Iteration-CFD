@@ -21,12 +21,19 @@
 use crate::{Scalar, Vec3};
 
 /// Borrowed cell-centred data for one field.
+///
+/// `Copy` because both halves are already references: SPEC-LIT S44.2's
+/// `output.visualisation.fields` builds a SELECTION of an existing
+/// `[OutputField]` slice, and copying two words per selected field is the
+/// whole cost of that.
+#[derive(Clone, Copy)]
 pub enum FieldValues<'a> {
     Scalar(&'a [Scalar]),
     Vector(&'a [Vec3]),
 }
 
 /// One named output field.
+#[derive(Clone, Copy)]
 pub struct OutputField<'a> {
     pub name: &'a str,
     pub values: FieldValues<'a>,

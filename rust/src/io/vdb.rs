@@ -59,7 +59,8 @@
 //! exactly rather than approximated). Every LeafNode is written in full
 //! (`NO_MASK_AND_ALL_VALS`, §"Compression" below), so the file is large but
 //! requires no compression codec, matching what "uncompressed" was asked
-//! for. [`UniformGrid`] is `nvdb`'s type, reused rather than redefined - see
+//! for. Voxels are `f32` by default and `f16` under
+//! [`crate::io::nvdb::Precision::F16`] - see the `fp16` section below. [`UniformGrid`] is `nvdb`'s type, reused rather than redefined - see
 //! its own doc for the coordinate convention.
 //!
 //! # Compression: always `COMPRESS_NONE`, and what that byte format is
@@ -93,11 +94,45 @@
 //! Upper children are enumerated in that packed order, not sorted-by-
 //! coordinate, matching `cbeginChildOn()`'s traversal.
 //!
+//! # `fp16`: the `_HalfFloat` save preference - SPEC-LIT S45
+//!
+//! OpenVDB has no half-float grid TYPE. It has a per-grid save preference
+//! (`GridBase::setSaveFloatAsHalf`, `Grid.cc`), and four things change on the
+//! way out when it is set - transcribed from the same `v13.0.0` sources as
+//! everything above:
+//!
+//! 1. `GridDescriptor::writeHeader` appends `HALF_FLOAT_TYPENAME_SUFFIX`
+//!    (`"_HalfFloat"`, `GridDescriptor.cc`) to the grid type string. That
+//!    suffix is the ONLY thing a reader keys on: `GridDescriptor::read`
+//!    strips it and calls `io::setHalfFloat(is, ...)` before a single node is
+//!    parsed.
+//! 2. `InternalNode::writeTopology(os, toHalf)` passes `toHalf` into
+//!    `io::writeCompressedValues` for its own `NUM_VALUES` value array, so
+//!    that array becomes 2 bytes per entry.
+//! 3. `LeafNode::writeBuffers(os, toHalf)` does the same for its 512 values.
+//! 4. `GridBase::setSaveFloatAsHalf` inserts `META_SAVE_HALF_FLOAT`
+//!    (`"is_saved_as_half_float"`, a `BoolMetadata`) into the grid's metadata
+//!    map, so `Grid::writeMeta` emits it - sorted after `"class"`, since
+//!    `MetaMap` is a `std::map<Name, ...>`.
+//!
+//! What does NOT change: `RootNode::writeTopology` writes its background
+//! through `io::truncateRealToHalf` and then as `sizeof(ValueType)` - four
+//! bytes still, rounded to half precision, which for this writer's `0.0`
+//! background is the identity. Masks, the `AffineMap` transform, the
+//! stream-position triple and the `COMPRESS_NONE` word are all untouched.
+//!
+//! Point 2 is the trap: an internal node's value array is written by
+//! `writeTopology`, not `writeBuffers`, and it is easy to halve only the leaf
+//! buffers. The contents there are all zero either way (binary16 zero is
+//! `0x0000`, and this writer places no constant tiles), so only the LENGTH
+//! changes - which a value-comparing test cannot see and [`reader`]'s
+//! position asserts can.
+//!
 //! # Externally unverified
 //!
 //! No OpenVDB build, Blender, or ParaView is available in this environment
-//! to open the files this module writes. [`tests`] verifies the writer
-//! against [`reader`], an internal reader built from the same source
+//! to open the files this module writes. [`tests`] verifies both precisions
+//! of the writer against [`reader`], an internal reader built from the same source
 //! citations above, independently walking `RootNode`/`InternalNode`/
 //! `LeafNode` topology and buffers rather than re-deriving node existence
 //! from the same formulas the writer used - so it is a genuine structural
@@ -110,7 +145,7 @@
 //! No GPL-licensed source was consulted.
 
 use crate::error::{Error, IoContext, Result};
-use crate::io::nvdb::UniformGrid;
+use crate::io::nvdb::{f32_to_f16_bits, Precision, UniformGrid};
 use crate::io::output_types::{FieldValues, OutputField};
 use crate::Scalar;
 use std::path::Path;
@@ -137,6 +172,38 @@ const COMPRESS_NONE: u32 = 0;
 /// the anonymous `enum` documented as "> 2 inactive vals, so no mask
 /// compression at all"). The only one this writer ever emits.
 const NO_MASK_AND_ALL_VALS: i8 = 6;
+/// `io::HALF_FLOAT_TYPENAME_SUFFIX` (`GridDescriptor.cc`), appended to the
+/// grid type string by `GridDescriptor::writeHeader` when the grid's
+/// `saveFloatAsHalf` preference is set. SPEC-LIT S45.1(1).
+const HALF_FLOAT_TYPENAME_SUFFIX: &str = "_HalfFloat";
+/// `GridBase::META_SAVE_HALF_FLOAT` (`Grid.cc`) - the `BoolMetadata` entry
+/// `setSaveFloatAsHalf` inserts, which `Grid::writeMeta` then emits.
+/// SPEC-LIT S45.1(4).
+const META_SAVE_HALF_FLOAT: &str = "is_saved_as_half_float";
+/// The base grid type: OpenVDB's own default `FloatTree` configuration.
+const TREE_TYPE: &str = "Tree_float_5_4_3";
+
+/// Bytes per voxel on disk, per SPEC-LIT S45.1: `f32` normally, `f16` under
+/// the `_HalfFloat` save preference. `Precision::width` is private to
+/// `nvdb` and describes NanoVDB's own node layout, which has nothing in
+/// common with this one beyond the number, so it is stated here.
+fn value_width(p: Precision) -> usize {
+    match p {
+        Precision::F32 => 4,
+        Precision::F16 => 2,
+    }
+}
+
+/// One voxel, in whichever of the two on-disk widths is in force.
+///
+/// The `f16` conversion is `nvdb`'s own (SPEC-LIT S45.2) - not a second
+/// implementation of IEEE 754 binary16 living in this file.
+fn put_value(b: &mut [u8], at: usize, v: f32, p: Precision) {
+    match p {
+        Precision::F32 => b[at..at + 4].copy_from_slice(&v.to_le_bytes()),
+        Precision::F16 => b[at..at + 2].copy_from_slice(&f32_to_f16_bits(v).to_le_bytes()),
+    }
+}
 
 const LEAF_LOG2DIM: u32 = 3;
 const LOWER_LOG2DIM: u32 = 4;
@@ -158,7 +225,17 @@ fn ceil_div(a: usize, b: usize) -> usize {
 /// module doc. A `FieldValues::Vector` field becomes four grids (`name.x`,
 /// `name.y`, `name.z`, `name.mag`); a `FieldValues::Scalar` field becomes
 /// one.
-pub fn write(path: impl AsRef<Path>, grid: &UniformGrid, fields: &[OutputField]) -> Result<()> {
+///
+/// `precision` is SPEC-LIT S44.3's `output.visualisation.precision`:
+/// [`Precision::F32`] is the plain `FloatTree` every `.vdb` this crate has
+/// ever written, [`Precision::F16`] is OpenVDB's `_HalfFloat` save
+/// preference (S45).
+pub fn write(
+    path: impl AsRef<Path>,
+    grid: &UniformGrid,
+    fields: &[OutputField],
+    precision: Precision,
+) -> Result<()> {
     let path = path.as_ref();
     if grid.nx == 0 || grid.ny == 0 || grid.nz == 0 {
         return Err(Error::Config(format!(
@@ -195,7 +272,7 @@ pub fn write(path: impl AsRef<Path>, grid: &UniformGrid, fields: &[OutputField])
     put_i32(&mut buf, segments.len() as i32); // grid count
 
     for (name, values) in &segments {
-        write_grid(&mut buf, grid, name, values);
+        write_grid(&mut buf, grid, name, values, precision);
     }
 
     std::fs::write(path, &buf).path(path)
@@ -287,9 +364,23 @@ fn write_header(b: &mut Vec<u8>) {
 /// One grid: `GridDescriptor::writeHeader` + `writeStreamPos` (patched) +
 /// `Archive::writeGrid`'s body (`setGridCompression`, `writeMeta`,
 /// `writeTransform`, `writeTopology`, `writeBuffers`), in that order.
-fn write_grid(b: &mut Vec<u8>, grid: &UniformGrid, name: &str, values: &[Scalar]) {
+fn write_grid(
+    b: &mut Vec<u8>,
+    grid: &UniformGrid,
+    name: &str,
+    values: &[Scalar],
+    precision: Precision,
+) {
     put_string(b, name); // GridDescriptor::mUniqueName
-    put_string(b, "Tree_float_5_4_3"); // grid type (no "_HalfFloat" suffix: fp32 only)
+    // `GridDescriptor::writeHeader`: the tree type, plus HALF_FLOAT_TYPENAME_
+    // SUFFIX when the grid's saveFloatAsHalf preference is set. SPEC-LIT
+    // S45.1(1) - this suffix is the whole of what tells a reader the node
+    // buffers below are two bytes wide.
+    let grid_type = match precision {
+        Precision::F32 => TREE_TYPE.to_string(),
+        Precision::F16 => format!("{TREE_TYPE}{HALF_FLOAT_TYPENAME_SUFFIX}"),
+    };
+    put_string(b, &grid_type);
     put_string(b, ""); // instance parent name: never an instance here
 
     let offset_pos = b.len();
@@ -300,11 +391,11 @@ fn write_grid(b: &mut Vec<u8>, grid: &UniformGrid, name: &str, values: &[Scalar]
 
     put_u32(b, COMPRESS_NONE); // Archive::setGridCompression's stream word
 
-    write_grid_metadata(b);
+    write_grid_metadata(b, precision);
     write_transform(b, grid);
-    write_topology(b, grid, values);
+    write_topology(b, grid, values, precision);
     let block_pos = b.len() as i64;
-    write_buffers(b, grid, values);
+    write_buffers(b, grid, values, precision);
     let end_pos = b.len() as i64;
 
     patch_i64(b, offset_pos, grid_pos);
@@ -320,13 +411,32 @@ fn write_grid(b: &mut Vec<u8>, grid: &UniformGrid, name: &str, values: &[Scalar]
 /// = "fog volume" (`Grid.cc`) - *DESIGN*, same choice `nvdb.rs` makes and
 /// for the same reason (a plain scalar/component field renders sensibly as
 /// a volume/fog density by default).
-fn write_grid_metadata(b: &mut Vec<u8>) {
-    put_u32(b, 1); // metaCount
+fn write_grid_metadata(b: &mut Vec<u8>, precision: Precision) {
+    // `MetaMap` is a `std::map<Name, Metadata::Ptr>`, so entries come out in
+    // ascending name order: "class" before "is_saved_as_half_float".
+    let n = match precision {
+        Precision::F32 => 1,
+        Precision::F16 => 2,
+    };
+    put_u32(b, n); // metaCount
     put_string(b, "class");
     put_string(b, "string");
     let value = b"fog volume";
     put_u32(b, value.len() as u32); // StringMetadata::size()
     put_bytes(b, value);
+
+    // SPEC-LIT S45.1(4). `GridBase::setSaveFloatAsHalf` (`Grid.cc`) inserts
+    // this `BoolMetadata`; `TypedMetadata<bool>` uses the generic
+    // `size() = sizeof(bool) = 1` and `writeValue` = one raw byte
+    // (`Metadata.h`). An fp32 grid never had `setSaveFloatAsHalf` called on
+    // it and so carries no such entry at all - which is what keeps the fp32
+    // byte stream exactly what it was before S45.
+    if precision == Precision::F16 {
+        put_string(b, META_SAVE_HALF_FLOAT);
+        put_string(b, "bool");
+        put_u32(b, 1); // TypedMetadata<bool>::size()
+        put_u8(b, 1);
+    }
 }
 
 /// `Grid::writeTransform` -> `Transform::write`: `writeString(map->type())`
@@ -377,7 +487,7 @@ fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
 /// `numChildren`(u32), then, per child (`std::map<Coord,_>` order -
 /// lexicographic by `(x,y,z)`, see the module doc): `origin`(3x`i32`) +
 /// the child's own `writeTopology`.
-fn write_topology(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar]) {
+fn write_topology(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], precision: Precision) {
     let (_n_leaf, n_lower, n_upper) = node_counts(grid);
     put_f32(b, 0.0); // background
     put_u32(b, 0); // numTiles
@@ -391,7 +501,9 @@ fn write_topology(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar]) {
                 put_i32(b, origin[0] as i32);
                 put_i32(b, origin[1] as i32);
                 put_i32(b, origin[2] as i32);
-                write_internal_topology(b, grid, values, origin, UPPER_LOG2DIM, LOWER_DIM, n_lower, true);
+                write_internal_topology(
+                    b, grid, values, origin, UPPER_LOG2DIM, LOWER_DIM, n_lower, true, precision,
+                );
             }
         }
     }
@@ -415,6 +527,7 @@ fn write_internal_topology(
     child_span: usize,
     n_child: [usize; 3], // child-grid dimensions in the CHILD's own units (Lower or Leaf)
     is_upper: bool,
+    precision: Precision,
 ) {
     let slots = 1usize << (3 * log2dim);
     let mask_words = slots / 64;
@@ -423,7 +536,11 @@ fn write_internal_topology(
     put_bytes(b, &vec![0u8; mask_words * 8]); // mValueMask: always zero
 
     put_u8(b, NO_MASK_AND_ALL_VALS as u8);
-    put_bytes(b, &vec![0u8; slots * 4]); // NUM_VALUES x f32, all zero (no tiles)
+    // NUM_VALUES entries, all zero (no tiles) - and `toHalf` reaches THIS
+    // array too, through `InternalNode::writeTopology`'s own
+    // `io::writeCompressedValues` call, so under fp16 it is half as long.
+    // Binary16 zero is 0x0000, so only the length changes. SPEC-LIT S45.1(2).
+    put_bytes(b, &vec![0u8; slots * value_width(precision)]);
 
     let (n_leaf, _, _) = node_counts(grid);
     let fan = 1usize << log2dim;
@@ -448,6 +565,7 @@ fn write_internal_topology(
                 if is_upper {
                     write_internal_topology(
                         b, grid, values, child_origin, LOWER_LOG2DIM, LEAF_DIM, n_leaf, false,
+                        precision,
                     );
                 } else {
                     write_leaf_topology(b, grid, child_origin);
@@ -492,13 +610,16 @@ fn write_leaf_topology(b: &mut Vec<u8>, grid: &UniformGrid, origin: [usize; 3]) 
 
 /// `RootNode::writeBuffers`: recurse into children only (a root has no
 /// buffer of its own), same order as `write_topology`.
-fn write_buffers(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar]) {
+fn write_buffers(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], precision: Precision) {
     let (n_leaf, n_lower, n_upper) = node_counts(grid);
     for ux in 0..n_upper[0] {
         for uy in 0..n_upper[1] {
             for uz in 0..n_upper[2] {
                 let origin = [ux * UPPER_DIM, uy * UPPER_DIM, uz * UPPER_DIM];
-                write_internal_buffers(b, grid, values, origin, UPPER_LOG2DIM, LOWER_DIM, n_lower, true, n_leaf);
+                write_internal_buffers(
+                    b, grid, values, origin, UPPER_LOG2DIM, LOWER_DIM, n_lower, true, n_leaf,
+                    precision,
+                );
             }
         }
     }
@@ -517,6 +638,7 @@ fn write_internal_buffers(
     n_child: [usize; 3],
     is_upper: bool,
     n_leaf: [usize; 3],
+    precision: Precision,
 ) {
     let fan = 1usize << log2dim;
     for a in 0..fan {
@@ -537,10 +659,11 @@ fn write_internal_buffers(
                 let child_origin = [cx * child_span, cy * child_span, cz * child_span];
                 if is_upper {
                     write_internal_buffers(
-                        b, grid, values, child_origin, LOWER_LOG2DIM, LEAF_DIM, n_leaf, false, n_leaf,
+                        b, grid, values, child_origin, LOWER_LOG2DIM, LEAF_DIM, n_leaf, false,
+                        n_leaf, precision,
                     );
                 } else {
-                    write_leaf_buffers(b, grid, values, child_origin);
+                    write_leaf_buffers(b, grid, values, child_origin, precision);
                 }
             }
         }
@@ -552,12 +675,19 @@ fn write_internal_buffers(
 /// traversals, and the mask happens to be needed, and written, in both) +
 /// `io::writeCompressedValues`: metadata byte `NO_MASK_AND_ALL_VALS` + all
 /// 512 values raw, background (`0.0`) where inactive.
-fn write_leaf_buffers(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], origin: [usize; 3]) {
+fn write_leaf_buffers(
+    b: &mut Vec<u8>,
+    grid: &UniformGrid,
+    values: &[Scalar],
+    origin: [usize; 3],
+    precision: Precision,
+) {
+    let w = value_width(precision);
     let mask_off = b.len();
     put_bytes(b, &[0u8; 64]);
     let values_off = b.len();
     put_u8(b, NO_MASK_AND_ALL_VALS as u8);
-    put_bytes(b, &[0u8; 512 * 4]);
+    put_bytes(b, &vec![0u8; 512 * w]);
 
     for lx in 0..LEAF_DIM {
         let gx = origin[0] + lx;
@@ -577,8 +707,8 @@ fn write_leaf_buffers(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], or
                 let n = ((lx as u32) << 6) | ((ly as u32) << 3) | (lz as u32);
                 set_mask_bit(b, mask_off, n);
                 let v = values[grid.idx(gx, gy, gz)] as f32;
-                let at = values_off + 1 + (n as usize) * 4;
-                b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+                let at = values_off + 1 + (n as usize) * w;
+                put_value(b, at, v, precision);
             }
         }
     }
@@ -602,8 +732,15 @@ mod reader {
 
     pub struct ReadGrid {
         pub name: String,
+        /// As written, `_HalfFloat` suffix and all - so a test can assert
+        /// the suffix rather than infer it.
         pub grid_type: String,
+        /// What the reader DERIVED from that suffix, exactly as
+        /// `GridDescriptor::read` does before parsing a single node.
+        pub precision: Precision,
         pub class_metadata: Option<String>,
+        /// `is_saved_as_half_float`, when the grid carries it.
+        pub half_metadata: Option<bool>,
         pub voxel_size: [f64; 3],
         pub origin: [f64; 3],
         pub nx: usize,
@@ -630,6 +767,18 @@ mod reader {
     }
     fn get_f32(b: &[u8], off: usize) -> f32 {
         f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+    }
+    fn get_u16(b: &[u8], off: usize) -> u16 {
+        u16::from_le_bytes([b[off], b[off + 1]])
+    }
+    /// One voxel at `off`, in whichever width the grid type's suffix said.
+    /// The `f16` direction is `nvdb`'s own inverse, for the same reason the
+    /// writer's forward direction is (SPEC-LIT S45.2).
+    fn get_value(b: &[u8], off: usize, p: Precision) -> f64 {
+        match p {
+            Precision::F32 => get_f32(b, off) as f64,
+            Precision::F16 => crate::io::nvdb::f16_bits_to_f32(get_u16(b, off)) as f64,
+        }
     }
     fn get_f64(b: &[u8], off: usize) -> f64 {
         let mut a = [0u8; 8];
@@ -676,6 +825,15 @@ mod reader {
         for _ in 0..grid_count {
             let name = get_string(bytes, &mut pos);
             let grid_type = get_string(bytes, &mut pos);
+            // `GridDescriptor::read`: strip HALF_FLOAT_TYPENAME_SUFFIX and
+            // set the stream's half flag from it, BEFORE anything else about
+            // the grid is parsed. SPEC-LIT S45.1(1).
+            let (base_type, precision) = match grid_type.strip_suffix(HALF_FLOAT_TYPENAME_SUFFIX) {
+                Some(base) => (base.to_string(), Precision::F16),
+                None => (grid_type.clone(), Precision::F32),
+            };
+            assert_eq!(base_type, TREE_TYPE, "reader only handles {TREE_TYPE}");
+            let width = value_width(precision);
             let _instance_parent = get_string(bytes, &mut pos);
 
             let grid_pos = get_i64(bytes, pos) as usize;
@@ -691,17 +849,29 @@ mod reader {
             let meta_count = get_u32(bytes, pos);
             pos += 4;
             let mut class_metadata = None;
+            let mut half_metadata = None;
             for _ in 0..meta_count {
                 let mname = get_string(bytes, &mut pos);
                 let mtype = get_string(bytes, &mut pos);
-                assert_eq!(mtype, "string", "reader only handles string grid metadata");
                 let len = get_u32(bytes, pos) as usize;
                 pos += 4;
-                let value = String::from_utf8_lossy(&bytes[pos..pos + len]).into_owned();
-                pos += len;
-                if mname == "class" {
-                    class_metadata = Some(value);
+                match mtype.as_str() {
+                    "string" => {
+                        let value =
+                            String::from_utf8_lossy(&bytes[pos..pos + len]).into_owned();
+                        if mname == "class" {
+                            class_metadata = Some(value);
+                        }
+                    }
+                    "bool" => {
+                        assert_eq!(len, 1, "TypedMetadata<bool>::size() is sizeof(bool)");
+                        if mname == META_SAVE_HALF_FLOAT {
+                            half_metadata = Some(bytes[pos] != 0);
+                        }
+                    }
+                    other => panic!("reader does not handle {other} grid metadata"),
                 }
+                pos += len;
             }
 
             let map_type = get_string(bytes, &mut pos);
@@ -714,7 +884,11 @@ mod reader {
             let voxel_size = [m[0], m[5], m[10]];
             let origin = [m[12], m[13], m[14]];
 
-            let _background = get_f32(bytes, pos);
+            // SPEC-LIT S45.1(5): the background stays `sizeof(ValueType)`
+            // even under `toHalf` - `RootNode::writeTopology` truncates the
+            // VALUE to half precision and writes it back as a float.
+            let background = get_f32(bytes, pos);
+            assert_eq!(background, 0.0, "this writer's background is always 0");
             pos += 4;
             let num_tiles = get_u32(bytes, pos);
             pos += 4;
@@ -728,8 +902,9 @@ mod reader {
                 let child_origin =
                     [get_i32(bytes, pos), get_i32(bytes, pos + 4), get_i32(bytes, pos + 8)];
                 pos += 12;
-                let (node, new_pos) =
-                    read_internal_topology(bytes, pos, UPPER_LOG2DIM, child_origin, &mut max_xyz);
+                let (node, new_pos) = read_internal_topology(
+                    bytes, pos, UPPER_LOG2DIM, child_origin, &mut max_xyz, width,
+                );
                 pos = new_pos;
                 roots.push(node);
             }
@@ -741,13 +916,14 @@ mod reader {
 
             let mut bpos = block_pos;
             for node in &roots {
-                bpos = read_buffers(bytes, bpos, node, nx, ny, &mut values);
+                bpos = read_buffers(bytes, bpos, node, nx, ny, &mut values, precision);
             }
             assert_eq!(bpos, end_pos, "buffers must end exactly at endPos");
 
             pos = end_pos;
             out.push(ReadGrid {
-                name, grid_type, class_metadata, voxel_size, origin, nx, ny, nz, values,
+                name, grid_type, precision, class_metadata, half_metadata, voxel_size, origin,
+                nx, ny, nz, values,
             });
         }
         out
@@ -764,6 +940,7 @@ mod reader {
         log2dim: u32,
         origin: [i32; 3],
         max_xyz: &mut [i32; 3],
+        width: usize,
     ) -> (Node, usize) {
         let slots = 1usize << (3 * log2dim);
         let mask_words = slots / 8;
@@ -771,7 +948,10 @@ mod reader {
         let value_off = pos + 2 * mask_words;
         let metadata = bytes[value_off];
         assert_eq!(metadata, NO_MASK_AND_ALL_VALS as u8, "this reader only handles NO_MASK_AND_ALL_VALS");
-        let mut cursor = value_off + 1 + slots * 4;
+        // SPEC-LIT S45.1(2): `width`, not 4. Halving only the leaf buffers
+        // lands here as a position mismatch, which is what the `assert_eq!`
+        // on `blockPos` in `read_all` then reports.
+        let mut cursor = value_off + 1 + slots * width;
 
         let fan = 1u32 << log2dim;
         let child_span = if log2dim == UPPER_LOG2DIM { LOWER_DIM } else { LEAF_DIM } as i32;
@@ -789,8 +969,9 @@ mod reader {
                 origin[2] + c as i32 * child_span,
             ];
             if log2dim == UPPER_LOG2DIM {
-                let (node, new_cursor) =
-                    read_internal_topology(bytes, cursor, LOWER_LOG2DIM, child_origin, max_xyz);
+                let (node, new_cursor) = read_internal_topology(
+                    bytes, cursor, LOWER_LOG2DIM, child_origin, max_xyz, width,
+                );
                 children.push(node);
                 cursor = new_cursor;
             } else {
@@ -831,12 +1012,20 @@ mod reader {
     /// own; `LeafNode::writeBuffers` repeats the value mask then the
     /// `NO_MASK_AND_ALL_VALS` value array) and scattering active values
     /// into the dense `values` array.
-    fn read_buffers(bytes: &[u8], pos: usize, node: &Node, nx: usize, ny: usize, values: &mut [f64]) -> usize {
+    fn read_buffers(
+        bytes: &[u8],
+        pos: usize,
+        node: &Node,
+        nx: usize,
+        ny: usize,
+        values: &mut [f64],
+        precision: Precision,
+    ) -> usize {
         match node {
             Node::Internal { children } => {
                 let mut cursor = pos;
                 for child in children {
-                    cursor = read_buffers(bytes, cursor, child, nx, ny, values);
+                    cursor = read_buffers(bytes, cursor, child, nx, ny, values, precision);
                 }
                 cursor
             }
@@ -865,10 +1054,11 @@ mod reader {
                     let gx = (origin[0] + lx) as usize;
                     let gy = (origin[1] + ly) as usize;
                     let gz = (origin[2] + lz) as usize;
-                    let v = get_f32(bytes, values_start + (n as usize) * 4) as f64;
+                    let w = value_width(precision);
+                    let v = get_value(bytes, values_start + (n as usize) * w, precision);
                     values[gx + nx * (gy + ny * gz)] = v;
                 }
-                values_start + 512 * 4
+                values_start + 512 * value_width(precision)
             }
         }
     }
@@ -916,7 +1106,7 @@ mod tests {
         let grid = make_grid(5, 4, 3);
         let field = ramp_field(&grid);
         let path = scratch("small");
-        write(&path, &grid, &[OutputField::scalar("T", &field)]).expect("write");
+        write(&path, &grid, &[OutputField::scalar("T", &field)], Precision::F32).expect("write");
 
         let bytes = std::fs::read(&path).expect("read back");
         let grids = read_all(&bytes);
@@ -943,7 +1133,7 @@ mod tests {
         let grid = make_grid(37, 21, 17); // crosses several Leaf and Lower boundaries
         let field = ramp_field(&grid);
         let path = scratch("multi");
-        write(&path, &grid, &[OutputField::scalar("rho", &field)]).expect("write");
+        write(&path, &grid, &[OutputField::scalar("rho", &field)], Precision::F32).expect("write");
 
         let bytes = std::fs::read(&path).expect("read back");
         let g = &read_all(&bytes)[0];
@@ -971,7 +1161,7 @@ mod tests {
             }
         }
         let path = scratch("vector");
-        write(&path, &grid, &[OutputField::vector("U", &u)]).expect("write");
+        write(&path, &grid, &[OutputField::vector("U", &u)], Precision::F32).expect("write");
 
         let bytes = std::fs::read(&path).expect("read back");
         let grids = read_all(&bytes);
@@ -998,7 +1188,7 @@ mod tests {
         let grid = make_grid(6, 5, 4);
         let field = ramp_field(&grid);
         let path = scratch("transform");
-        write(&path, &grid, &[OutputField::scalar("p", &field)]).expect("write");
+        write(&path, &grid, &[OutputField::scalar("p", &field)], Precision::F32).expect("write");
 
         let bytes = std::fs::read(&path).expect("read back");
         let g = &read_all(&bytes)[0];
@@ -1011,7 +1201,7 @@ mod tests {
     fn rejects_a_field_length_that_does_not_match_the_grid() {
         let grid = make_grid(3, 3, 3);
         let field = vec![0.0 as Scalar; 5];
-        let err = write("x.vdb", &grid, &[OutputField::scalar("bad", &field)]).unwrap_err();
+        let err = write("x.vdb", &grid, &[OutputField::scalar("bad", &field)], Precision::F32).unwrap_err();
         assert!(err.to_string().contains("bad"));
     }
 
@@ -1021,9 +1211,169 @@ mod tests {
         let empty_grid = UniformGrid {
             nx: 0, ny: 1, nz: 1, origin: crate::Vec3::ZERO, spacing: crate::Vec3::new(1.0, 1.0, 1.0),
         };
-        assert!(write("x.vdb", &empty_grid, &[OutputField::scalar("a", &field)]).is_err());
+        assert!(write("x.vdb", &empty_grid, &[OutputField::scalar("a", &field)], Precision::F32).is_err());
 
         let grid = make_grid(2, 2, 2);
-        assert!(write("x.vdb", &grid, &[]).is_err());
+        assert!(write("x.vdb", &grid, &[], Precision::F32).is_err());
+    }
+
+    // ========================================================================
+    //  SPEC-LIT S45 - the `_HalfFloat` save preference
+    // ========================================================================
+
+    /// S45.3: the type-name suffix and the metadata bool, in BOTH
+    /// directions - because "fp32 carries no such entry" is what keeps every
+    /// `.vdb` this crate wrote before S45 byte-identical.
+    #[test]
+    fn the_half_float_preference_is_the_suffix_and_the_metadata_bool() {
+        let grid = make_grid(9, 5, 4);
+        let field = ramp_field(&grid);
+
+        let p32 = scratch("half_off");
+        write(&p32, &grid, &[OutputField::scalar("T", &field)], Precision::F32).expect("write");
+        let g32 = read_all(&std::fs::read(&p32).unwrap()).remove(0);
+        assert_eq!(g32.grid_type, "Tree_float_5_4_3");
+        assert_eq!(g32.precision, Precision::F32);
+        assert_eq!(g32.half_metadata, None, "fp32 must carry no is_saved_as_half_float entry");
+
+        let p16 = scratch("half_on");
+        write(&p16, &grid, &[OutputField::scalar("T", &field)], Precision::F16).expect("write");
+        let g16 = read_all(&std::fs::read(&p16).unwrap()).remove(0);
+        assert_eq!(g16.grid_type, "Tree_float_5_4_3_HalfFloat");
+        assert_eq!(g16.precision, Precision::F16);
+        assert_eq!(g16.half_metadata, Some(true));
+        assert_eq!(g16.class_metadata.as_deref(), Some("fog volume"), "class survives");
+        assert_eq!((g16.nx, g16.ny, g16.nz), (grid.nx, grid.ny, grid.nz));
+
+        let _ = std::fs::remove_file(&p32);
+        let _ = std::fs::remove_file(&p16);
+    }
+
+    /// **The test that catches halving only the leaves.** SPEC-LIT S45.1(2):
+    /// `toHalf` reaches an InternalNode's own `NUM_VALUES` array through
+    /// `writeTopology`, not only the LeafNode buffers through `writeBuffers`.
+    /// Both arrays are all-zero here, so nothing about the VALUES can tell
+    /// the two apart - only the total length can, and this is the length,
+    /// derived rather than recorded:
+    ///
+    /// ```text
+    /// shrink = 2 * (n_leaf*512 + n_lower*4096 + n_upper*32768)
+    /// growth = 10  ("_HalfFloat" appended to the type string)
+    ///        + 39  (the is_saved_as_half_float BoolMetadata entry:
+    ///               4+22 name, 4+4 type, 4 size, 1 value)
+    /// ```
+    ///
+    /// A writer that halved only the leaf buffers would come out
+    /// `2*(n_lower*4096 + n_upper*32768)` bytes too large and fail here.
+    #[test]
+    fn fp16_shrinks_the_internal_node_arrays_as_well_as_the_leaves() {
+        // A Lower node spans 128 cells per axis, so a grid has to be LONGER
+        // than that for the Lower term to be non-degenerate - 37x21x17
+        // (this file's other multi-node case) fits inside a single one, and
+        // the first version of this test asserted `n_lower > 1` on it and
+        // failed. That assert stays, below, for exactly that reason.
+        let grid = make_grid(130, 9, 9);
+        let field = ramp_field(&grid);
+
+        let p32 = scratch("size32");
+        let p16 = scratch("size16");
+        write(&p32, &grid, &[OutputField::scalar("T", &field)], Precision::F32).expect("write");
+        write(&p16, &grid, &[OutputField::scalar("T", &field)], Precision::F16).expect("write");
+        let n32 = std::fs::metadata(&p32).unwrap().len() as i64;
+        let n16 = std::fs::metadata(&p16).unwrap().len() as i64;
+
+        let (n_leaf, n_lower, n_upper) = node_counts(&grid);
+        let prod = |a: [usize; 3]| (a[0] * a[1] * a[2]) as i64;
+        let leaf_values = prod(n_leaf) * 512;
+        let lower_values = prod(n_lower) * (1 << (3 * LOWER_LOG2DIM));
+        let upper_values = prod(n_upper) * (1 << (3 * UPPER_LOG2DIM));
+        assert!(prod(n_lower) > 1, "the grid must span more than one Lower node");
+
+        let shrink = 2 * (leaf_values + lower_values + upper_values);
+        let growth = 10 + 39;
+        assert_eq!(
+            n32 - n16,
+            shrink - growth,
+            "fp16 must halve the LeafNode buffers ({leaf_values} values), the Lower              InternalNode arrays ({lower_values}) and the Upper ones ({upper_values}) -              halving only the leaves would leave the file {} bytes too large",
+            2 * (lower_values + upper_values)
+        );
+
+        let _ = std::fs::remove_file(&p32);
+        let _ = std::fs::remove_file(&p16);
+    }
+
+    /// Every voxel comes back at half precision - and the grid geometry
+    /// comes back EXACTLY, because the transform is `f64` either way.
+    #[test]
+    fn fp16_round_trips_every_voxel_at_half_precision() {
+        let grid = make_grid(11, 9, 6);
+        let field = ramp_field(&grid);
+        let path = scratch("half_round");
+        write(&path, &grid, &[OutputField::scalar("T", &field)], Precision::F16).expect("write");
+
+        let g = read_all(&std::fs::read(&path).unwrap()).remove(0);
+        assert_eq!(g.voxel_size, [0.1f64, 0.2, 0.05]);
+        assert_eq!(g.origin, [1.5f64, -2.0, 0.25]);
+        for k in 0..grid.nz {
+            for j in 0..grid.ny {
+                for i in 0..grid.nx {
+                    let v = field[grid.idx(i, j, k)] as f32;
+                    let want = crate::io::nvdb::f16_bits_to_f32(f32_to_f16_bits(v)) as f64;
+                    let got = g.values[i + grid.nx * (j + grid.ny * k)];
+                    assert_eq!(got, want, "voxel ({i},{j},{k})");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// SPEC-LIT S45.2: `vdb`'s fp16 voxels are `nvdb::f32_to_f16_bits`'s
+    /// output, not a second binary16 implementation living in this file.
+    ///
+    /// The sweep is the part that makes this a test rather than a
+    /// restatement: `+-0` (told apart by BITS, since `-0.0 == 0.0`),
+    /// subnormals below `2^-14`, the largest finite half, the first value
+    /// that overflows to infinity, and a round-to-nearest-EVEN tie.
+    #[test]
+    fn the_half_conversion_is_nvdb_s_own() {
+        let sweep: [f32; 12] = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            1.0009766,      // 1 + 2^-10, exactly representable
+            1.0004883,      // a tie, halfway between 1 and 1 + 2^-10
+            6.0e-8,         // below the smallest subnormal -> 0
+            6.0e-5,         // subnormal
+            65504.0,        // the largest finite half
+            65520.0,        // the first value that rounds to infinity
+            -65520.0,
+            2.7182817, // an ordinary value with a full 24-bit mantissa
+        ];
+        let grid = UniformGrid {
+            nx: sweep.len(), ny: 1, nz: 1,
+            origin: crate::Vec3::ZERO,
+            spacing: crate::Vec3::new(1.0, 1.0, 1.0),
+        };
+        let field: Vec<Scalar> = sweep.iter().map(|&v| v as Scalar).collect();
+        let path = scratch("half_sweep");
+        write(&path, &grid, &[OutputField::scalar("s", &field)], Precision::F16).expect("write");
+
+        let g = read_all(&std::fs::read(&path).unwrap()).remove(0);
+        for (i, &v) in sweep.iter().enumerate() {
+            let want = crate::io::nvdb::f16_bits_to_f32(f32_to_f16_bits(v as Scalar as f32)) as f64;
+            assert_eq!(
+                g.values[i].to_bits(),
+                want.to_bits(),
+                "{v} must round exactly as nvdb::f32_to_f16_bits rounds it"
+            );
+        }
+        // The sign of zero is a real bit and the writer must not lose it.
+        assert_eq!(g.values[0].to_bits(), 0.0f64.to_bits());
+        assert_eq!(g.values[1].to_bits(), (-0.0f64).to_bits());
+        assert!(g.values[9].is_infinite() && g.values[9] > 0.0, "65520 overflows to +inf");
+        assert!(g.values[10].is_infinite() && g.values[10] < 0.0);
+
+        let _ = std::fs::remove_file(&path);
     }
 }
