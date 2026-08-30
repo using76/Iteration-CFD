@@ -51,7 +51,7 @@
 //! A driver that wants `T` to have its own `fvSolution` entries overwrites
 //! exactly those two fields on a copy of the controls.
 
-use crate::device::Gpu;
+use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
 use crate::field::GpuScalarField;
 use crate::field_ops;
@@ -328,6 +328,28 @@ impl<'m> ScalarTransport<'m> {
         flow: &FlowState,
         nut: &GpuScalarField,
     ) -> Result<SolverPerformance> {
+        self.correct_with_source(gpu, flow, nut, None)
+    }
+
+    /// [`Self::correct`] with one extra whole-field explicit source,
+    /// `fvm_su(su, +1)` - SPEC-LIT §61.2's soot formation/oxidation term.
+    ///
+    /// `SourceSet` (SPEC-LIT §18) carries CONSTANT-per-zone terms and is the
+    /// right shape for a heater or a fixed-value constraint; a soot source is
+    /// a whole field recomputed every iteration from the local state, which
+    /// has no zone and no constant. Rather than widen `SourceTerm` with a
+    /// variant only one caller can build, this takes the array directly.
+    ///
+    /// `None` is [`Self::correct`], and the two share this body, so the
+    /// no-source path is the same arithmetic it always was - the `if let`
+    /// below is the whole difference.
+    pub fn correct_with_source(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        nut: &GpuScalarField,
+        su: Option<&DevBuf<Scalar>>,
+    ) -> Result<SolverPerformance> {
         let m = self.core.mesh;
         let n = m.n_cells;
         if n == 0 {
@@ -388,6 +410,13 @@ impl<'m> ScalarTransport<'m> {
                 let ScalarTransport { sources, srck, core, psi, .. } = self;
                 sources.apply(gpu, srck, &mut core.a, &m.v, Some(&psi.f), None)?;
                 sources.flag_constraints(gpu, srck, &mut core.a)?;
+            }
+
+            // SPEC-LIT §61.2's soot source, in the same place and with the
+            // same sign convention every other source in this solver uses.
+            if let Some(su) = su {
+                let crate::turbulence::RasCore { fv, a, .. } = &mut self.core;
+                crate::fv::fvm_su(gpu, fv, a, m, su, 1.0)?;
             }
 
             perf = self.core.solve_equation_with(

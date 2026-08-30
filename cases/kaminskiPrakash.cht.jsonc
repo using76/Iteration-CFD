@@ -1,0 +1,123 @@
+// meteor-cfd case - SPEC-LIT §59/§60, run by `ofgpu-cht`.
+//
+// CONJUGATE NATURAL CONVECTION IN A SQUARE ENCLOSURE WITH ONE CONDUCTING
+// VERTICAL WALL - the configuration of Kaminski & Prakash (1986),
+// Int. J. Heat Mass Transfer 29(12) 1979-1988, DOI 10.1016/0017-9310(86)90017-7,
+// which SPEC-LIT §47.12 names as Gate 5 and §47.14 recorded as NOT RUN.
+//
+// THE GEOMETRY. A 1 x 1 enclosure. The solid wall occupies 0 <= x <= 0.2, the
+// air 0.2 <= x <= 1. The wall's outer face is held at T_h, the air's far face
+// at T_c, and both horizontal boundaries are adiabatic across solid and fluid
+// alike. This is Belazizia et al.'s reading of the configuration - the TOTAL
+// width is the unit length - and SPEC-LIT §60.5 records both that reading and
+// the one other citing papers use, because the primary paper is paywalled and
+// the ambiguity could not be resolved from it.
+//
+// THE ONE PARAMETER. `regions[1].material.kappa` is the solid conductivity,
+// and with `regions[0].fluid.kappa = 1` it IS the conductivity ratio Kr. It is
+// the only thing the benchmark varies, which is why §47.12 chose it: it
+// isolates the interface treatment from everything else.
+//
+// THE NON-DIMENSIONALISATION. rho = cp = kappa_f = 1 makes alpha = 1 exactly;
+// mu = 0.71 makes Pr = mu cp/kappa = 0.71, air's. Then
+//
+//     Ra = g beta dT L^3/(nu alpha),   beta = 1/TRef
+//        = g * (1/300) * 0.1 / 0.71
+//
+// so `buoyancy.g[1] = -2130 * Ra`. Written out: Ra = 1e5 here.
+// dT/TRef = 3.3e-4, so SPEC-LIT §9's g(TRef/T - 1) differs from the Boussinesq
+// g beta dT by 3.3e-4 - quoted rather than assumed (SPEC-LIT §59.9).
+//
+// WHAT IT REPORTS. `ofgpu-cht` prints the heat flow through every named patch
+// and through the interface. The average Nusselt number of (S60.1) is
+//
+//     Nu = |q(cold)| / (kappa_f * dT * dz),   dz = 1/n
+//
+// and the same number comes out of the hot wall and out of the interface, to
+// the convergence of the run. Those three agreeing is this case's own energy
+// balance, and it is checked rather than assumed.
+//
+// MEASURED, on an RTX 5070 Ti in f64, as shipped (Ra = 1e5, Kr = 1, 80x80):
+// Nu = 2.24840 (cold wall) / 2.24823 (hot wall) / 2.24824 (interface) - the
+// three agree to 7.6e-5 - in 6043 outer iterations. Change `material.kappa`
+// to 0.1 or 10 and the same mesh gives 0.42507 and 4.21565. Against Belazizia
+// et al. (2012) that is -7.79 %, -4.32 % and -0.81 %; SPEC-LIT 60.5 has the
+// whole table, the diagnosis (the disagreement tracks how much of the answer
+// is CONDUCTION, and the analytic conduction limit is reproduced to 1e-8 by
+// SPEC-LIT's Gate 59-B), and the disclosure that Kaminski & Prakash's own
+// paper is paywalled and its table was never read.
+{
+  "name": "kaminskiPrakash",
+
+  "regions": [
+    {
+      "name": "air",
+      "kind": "fluid",
+      "mesh": {
+        "bounds": { "min": [0.2, 0.0, 0.0], "max": [1.0, 1.0, 0.0125] },
+        "cells": [64, 80, 1],
+        "boundaries": {
+          "xmin": "airToWall", "xmax": "cold",
+          "ymin": "airBottom", "ymax": "airTop",
+          "zmin": "airFront",  "zmax": "airBack"
+        }
+      },
+      // alpha = kappa/(rho cp) = 1, nu = mu/rho = 0.71, Pr = 0.71.
+      "fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },
+      "patches": [
+        { "match": "cold",      "T": { "type": "fixedValue", "value": 299.95 } },
+        { "match": "airBottom", "T": { "type": "zeroGradient" } },
+        { "match": "airTop",    "T": { "type": "zeroGradient" } },
+        { "match": "airFront",  "T": { "type": "empty" } },
+        { "match": "airBack",   "T": { "type": "empty" } }
+      ]
+    },
+    {
+      "name": "wall",
+      "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.2, 1.0, 0.0125] },
+        "cells": [16, 80, 1],
+        "boundaries": {
+          "xmin": "hot",         "xmax": "wallToAir",
+          "ymin": "wallBottom",  "ymax": "wallTop",
+          "zmin": "wallFront",   "zmax": "wallBack"
+        }
+      },
+      // kappa IS the conductivity ratio Kr, because kappa_f = 1.
+      "material": { "rho": 1.0, "c": 1.0, "kappa": 1.0 },
+      "patches": [
+        { "match": "hot",        "T": { "type": "fixedValue", "value": 300.05 } },
+        { "match": "wallBottom", "T": { "type": "zeroGradient" } },
+        { "match": "wallTop",    "T": { "type": "zeroGradient" } },
+        { "match": "wallFront",  "T": { "type": "empty" } },
+        { "match": "wallBack",   "T": { "type": "empty" } }
+      ]
+    }
+  ],
+
+  // Perfect contact: Kaminski & Prakash's own assumption. Adding an `Rc` here
+  // is the §13.4.1 pair test on this case - the interface temperature and the
+  // wall heat flow both move.
+  "interfaces": [
+    { "regionA": "air", "patchA": "airToWall", "regionB": "wall", "patchB": "wallToAir" }
+  ],
+
+  // Ra = 1e5.
+  "buoyancy": { "g": [0.0, -2.13e8, 0.0], "TRef": 300.0 },
+
+  "initial": { "T": 300.0 },
+  "run": { "steady": true, "iterations": 12000 },
+
+  "numerics": {
+    "solver": "PBiCGStab", "preconditioner": "DILU",
+    "tolerance": 1e-16, "maxIter": 500,
+    "flow": {
+      "relaxU": 0.7, "relaxP": 0.3, "relaxT": 0.7,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear",
+      "residual": 1e-7,
+      "uTolerance": 1e-14, "pTolerance": 1e-14,
+      "uMaxIter": 200, "pMaxIter": 800
+    }
+  }
+}

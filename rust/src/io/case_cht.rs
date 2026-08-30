@@ -22,16 +22,28 @@
 //! SPEC-LIT §46 plus §47's interface, and it is what
 //! [`crate::cht::ConjugateHeat`] solves.
 //!
-//! It is **not** a fluid case. There is no `physics.fluid`, no momentum, no
-//! turbulence: a region whose `kind` is anything but `solid` is refused by
-//! name. The fluid side of a conjugate problem - the `k_eff Delta` or
-//! wall-function conductance of §47.6 - is implemented in `crate::cht` and
-//! exercised by its tests, but no *case format* reaches it yet, and this file
-//! deliberately does not pretend otherwise. §47.9's `coupledTemperature` is
-//! likewise refused as a patch entry here, because on this format an
-//! interface is declared by the `interfaces` block, and a patch that named
-//! the condition without an interface behind it would be a setting the case
-//! can say and the solver ignores - the §13.4.1 defect.
+//! **SPEC-LIT §60 added the fluid region this used to refuse.** A region may
+//! now say `"kind": "fluid"`, and it then carries a `fluid` block (four
+//! constant properties) instead of a `material` one, the case carries a
+//! `buoyancy` block and a `numerics.flow` block, and the whole thing is
+//! solved by `crate::cht::flow::run_flow_case` - §26's energy equation over
+//! §47.4's concatenated mesh (§59) beside §5's SIMPLE loop on the fluid
+//! block alone.
+//!
+//! **The fluid region is a CLOSED CAVITY** and that is the one restriction
+//! worth reading before anything else: every non-`empty` patch of it is a
+//! no-slip wall. There is no inlet and no outlet, because the moment a case
+//! can name one it also needs `inletOutlet` on `T`, a flux-establishment pass
+//! and an outflow treatment, none of which this format carries - and a
+//! setting the format carries but the solver ignores is the §13.4.1 defect
+//! this whole file is arranged around. SPEC-LIT §60.6 records what that
+//! costs: Qu & Mudawar's micro-channel is forced convection and cannot be
+//! expressed here at all.
+//!
+//! §47.9's `coupledTemperature` is still refused as a patch entry, because on
+//! this format an interface is declared by the `interfaces` block, and a patch
+//! that named the condition without an interface behind it would be a setting
+//! the case can say and the solver ignores.
 //!
 //! # The rule that shapes it
 //!
@@ -48,9 +60,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::blockgen::{self, BlockSpec, GradedAxis};
+use crate::cht::flow::{Buoyancy, FlowCase, FlowControls, FlowRegion, FluidMaterial};
 use crate::cht::{
     Conductivity, InterfaceRequest, PairingTolerances, RegionKind, SolidMaterial,
 };
+use crate::fv::DivScheme;
 use crate::error::{Error, Result};
 use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner, SolverControls};
@@ -75,10 +89,26 @@ pub struct ChtCase {
     pub regions: Vec<ChtRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<ChtInterface>,
+    /// SPEC-LIT §9's face body force. **Required by a fluid region and
+    /// refused without one** - a body force on a stack of solids is a setting
+    /// the solver would ignore, which is the §13.4.1 defect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buoyancy: Option<ChtBuoyancy>,
     pub initial: ChtInitial,
     pub run: ChtRun,
     #[serde(default)]
     pub numerics: ChtNumerics,
+}
+
+/// SPEC-LIT §9's `constant/g` and `TRef`, as a conjugate case states them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtBuoyancy {
+    /// Gravitational acceleration, m/s^2.
+    pub g: [f64; 3],
+    /// The reference temperature of `b = g(TRef/T - 1)`, K.
+    #[serde(rename = "TRef")]
+    pub t_ref: f64,
 }
 
 /// One region: a block of cells, one material, its own boundary conditions.
@@ -86,11 +116,21 @@ pub struct ChtCase {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ChtRegion {
     pub name: String,
-    /// `"solid"`. Anything else is a §13.4 error - see the module doc.
+    /// `"solid"` or `"fluid"` - SPEC-LIT §60.2. Anything else is a §13.4
+    /// error listing both. A fluid region must be the FIRST region and there
+    /// can be at most one (§47.4's numbering invariant).
     #[serde(default = "solid_kind")]
     pub kind: String,
     pub mesh: ChtRegionMesh,
-    pub material: ChtMaterial,
+    /// A **solid** region's material - SPEC-LIT §46.5. Required on a solid
+    /// region and refused on a fluid one, which carries [`Self::fluid`]
+    /// instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<ChtMaterial>,
+    /// A **fluid** region's four constant properties - SPEC-LIT §60.2.
+    /// Required on a fluid region and refused on a solid one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fluid: Option<ChtFluid>,
     /// Uniform volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1). The
     /// die's own dissipation, in the case this format exists for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +190,25 @@ pub struct ChtMaterial {
     pub kappa: ChtKappa,
 }
 
+/// A fluid region's constant properties - SPEC-LIT §60.2.
+///
+/// Four numbers, and `Pr = mu cp/kappa` is DERIVED from them and printed
+/// rather than stated: a case that stated both could contradict itself, and
+/// the reader would have to pick a winner.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtFluid {
+    /// `rho_f` at `buoyancy.TRef`, kg/m^3.
+    pub rho: f64,
+    /// `c_p`, J/(kg K).
+    pub cp: f64,
+    /// `k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not
+    /// a thing, and three or nine components are a §13.4 error.
+    pub kappa: f64,
+    /// Dynamic viscosity, Pa s.
+    pub mu: f64,
+}
+
 /// `kappa` written either way. A user with an isotropic material should not
 /// have to type a one-element list, and one with an anisotropic material
 /// should not have to type three separate entries.
@@ -196,6 +255,18 @@ pub enum ChtScalarBc {
     /// SPEC-LIT §32.2.
     #[serde(rename = "fixedFluxTemperature")]
     FixedFluxTemperature { q: f64 },
+    /// The 2-D front/back plane: the patch contributes to no surface integral
+    /// at all.
+    ///
+    /// Spelled as a `T` condition rather than as a mesh flag because the
+    /// format's one rule is that **every patch is named exactly once** (module
+    /// doc), and a mesh flag that silently claimed two patches would be
+    /// exactly the "adiabatic unless you say otherwise" default that rule
+    /// exists to stop. `empty` patches come in opposite pairs and the axis
+    /// they lie on must have one cell; `blockgen` refuses anything else,
+    /// naming the axis.
+    #[serde(rename = "empty")]
+    Empty,
 }
 
 /// One conformal interface between two regions - SPEC-LIT §47.4/§47.5.
@@ -244,6 +315,11 @@ pub struct ChtRun {
     pub end_time: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta_t: Option<f64>,
+    /// Outer SIMPLE iterations. **Required by a fluid region and refused
+    /// without one**; meaningless on a pure-conduction case, where the
+    /// coupled system is solved in one pass (SPEC-LIT §47.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -260,6 +336,56 @@ pub struct ChtNumerics {
     /// orthogonal mesh, where the correction is identically zero.
     #[serde(default)]
     pub n_non_orthogonal_correctors: u32,
+    /// The outer loop's own settings. **Required by a fluid region and
+    /// refused without one**, for the same §13.4.1 reason as `buoyancy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<ChtFlow>,
+}
+
+/// SPEC-LIT §60.1's `numerics.flow` block - the SIMPLE loop's own settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChtFlow {
+    /// Momentum's implicit under-relaxation, SPEC-LIT §5.2.
+    pub relax_u: f64,
+    /// The pressure FIELD's explicit relaxation. Patankar §6.7 pairs it with
+    /// `relaxU` as `alpha_p ~ 1 - alpha_U`; SIMPLEC permits `1.0`.
+    pub relax_p: f64,
+    /// `T`'s implicit under-relaxation.
+    pub relax_t: f64,
+    /// SIMPLEC (SPEC-LIT §5.3) rather than plain SIMPLE.
+    #[serde(default)]
+    pub simplec: bool,
+    /// `div(phi,U)`, a `divSchemes` entry - SPEC-LIT §11.
+    #[serde(default = "linear_scheme")]
+    pub div_scheme_u: String,
+    /// `div(phi,T)`.
+    #[serde(default = "linear_scheme")]
+    pub div_scheme_t: String,
+    /// Stop when all three initial residuals are below this. `0` runs the
+    /// full `run.iterations`.
+    #[serde(default)]
+    pub residual: f64,
+    #[serde(default = "default_flow_tolerance")]
+    pub u_tolerance: f64,
+    #[serde(default = "default_flow_tolerance")]
+    pub p_tolerance: f64,
+    #[serde(default = "default_flow_max_iter")]
+    pub u_max_iter: u32,
+    #[serde(default = "default_flow_max_iter")]
+    pub p_max_iter: u32,
+}
+
+fn linear_scheme() -> String {
+    "Gauss linear".to_string()
+}
+
+fn default_flow_tolerance() -> f64 {
+    1e-14
+}
+
+fn default_flow_max_iter() -> u32 {
+    1000
 }
 
 impl Default for ChtNumerics {
@@ -270,6 +396,7 @@ impl Default for ChtNumerics {
             tolerance: 1e-12,
             max_iter: 2000,
             n_non_orthogonal_correctors: 0,
+            flow: None,
         }
     }
 }
@@ -317,8 +444,19 @@ impl LoweredBc {
 pub struct LoweredChtCase {
     pub name: String,
     pub region_names: Vec<String>,
+    pub kinds: Vec<RegionKind>,
     pub meshes: Vec<HostMesh>,
+    /// `[n_regions]` the conduction entry for every region. A **fluid**
+    /// region's entry is a placeholder built from its own `rho`/`cp`/`kappa`
+    /// - SPEC-LIT (S59.3) masks every coefficient it produces on a fluid face
+    /// away, because a fluid face carries the LIVE `k_eff`.
     pub materials: Vec<SolidMaterial>,
+    /// `[n_regions]`, `Some` exactly on the fluid region - SPEC-LIT §60.2.
+    pub fluids: Vec<Option<FluidMaterial>>,
+    /// SPEC-LIT §9's body force. `Some` exactly when there is a fluid region.
+    pub buoyancy: Option<Buoyancy>,
+    /// The outer loop's settings. `Some` exactly when there is a fluid region.
+    pub flow: Option<FlowControls>,
     /// `[n_regions]` uniform volumetric source, W/m^3.
     pub sources: Vec<Scalar>,
     pub interfaces: Vec<InterfaceRequest>,
@@ -335,11 +473,60 @@ pub struct LoweredChtCase {
 }
 
 impl LoweredChtCase {
-    /// The region kinds, in order - all `Solid` on this format.
+    /// The region kinds, in order.
     pub fn kinds(&self) -> Vec<RegionKind> {
-        vec![RegionKind::Solid; self.meshes.len()]
+        self.kinds.clone()
+    }
+
+    /// Does this case carry a fluid region - i.e. is it
+    /// `crate::cht::flow::run_flow_case`'s business rather than
+    /// `crate::cht::run_case`'s?
+    pub fn has_fluid(&self) -> bool {
+        self.kinds.iter().any(|k| *k == RegionKind::Fluid)
+    }
+
+    /// The conjugate fluid/solid case, borrowed out of this one - SPEC-LIT
+    /// §60. `None` on a pure-conduction case.
+    pub fn flow_case(&self) -> Option<FlowCase<'_>> {
+        let (buoyancy, flow) = (self.buoyancy?, self.flow.clone()?);
+        Some(FlowCase {
+            name: self.name.clone(),
+            regions: self
+                .region_names
+                .iter()
+                .zip(&self.kinds)
+                .zip(&self.materials)
+                .zip(&self.fluids)
+                .zip(&self.sources)
+                .map(|((((name, kind), mat), fl), src)| FlowRegion {
+                    name: name.clone(),
+                    kind: *kind,
+                    solid: (*kind == RegionKind::Solid).then(|| mat.clone()),
+                    fluid: fl.clone(),
+                    source: *src,
+                })
+                .collect(),
+            meshes: &self.meshes,
+            interfaces: self.interfaces.clone(),
+            patch_bcs: self.patch_bcs.clone(),
+            buoyancy,
+            initial_t: self.initial_t,
+            flow,
+            t_solver: self.solver,
+            n_non_orthogonal_correctors: self.n_non_orthogonal_correctors,
+            tolerances: self.tolerances,
+            p0: AMBIENT_PRESSURE,
+        })
     }
 }
+
+/// The ambient pressure SPEC-LIT §25's gas state is pinned at, Pa.
+///
+/// Not a case entry. `p0` and the molar mass are the SAME one-parameter
+/// family in `rho = p0/(R_s T)` (see `FluidMaterial::gas_properties`), so a
+/// case that could set both could contradict its own `fluid.rho` - and the
+/// density is the number a reader checks. One standard atmosphere.
+pub const AMBIENT_PRESSURE: Scalar = 101_325.0;
 
 impl ChtCase {
     /// Resolve every name, build every block, and refuse everything §13.4
@@ -364,53 +551,172 @@ impl ChtCase {
         }
 
         let mut region_names = Vec::new();
+        let mut kinds = Vec::new();
         let mut meshes = Vec::new();
         let mut materials = Vec::new();
+        let mut fluids: Vec<Option<FluidMaterial>> = Vec::new();
         let mut sources = Vec::new();
         // Which patches of which region have been spoken for, and by what.
         let mut claimed: Vec<BTreeMap<String, &'static str>> = Vec::new();
 
-        for r in &self.regions {
-            if r.kind != "solid" {
-                return crate::io::contract::unsupported(
-                    &format!("regions/{}/kind", r.name),
-                    &r.kind,
-                    &["solid"],
-                    "solid - this case format solves SPEC-LIT 46's SOLID energy \
-                     equation over a stack of conducting regions. A fluid region \
-                     needs momentum, turbulence and a flux, none of which this \
-                     format carries; the conjugate interface itself (SPEC-LIT 47) \
-                     is implemented and tested in `crate::cht`, but no case format \
-                     reaches its fluid side yet",
-                    (),
-                )
-                .map(|()| unreachable!());
+        for (i, r) in self.regions.iter().enumerate() {
+            let kind = match r.kind.as_str() {
+                "solid" => RegionKind::Solid,
+                "fluid" => RegionKind::Fluid,
+                other => {
+                    // `-permissive` cannot substitute here, and the code
+                    // says so rather than reaching an `unreachable!()`: a
+                    // region is solid or fluid, and there is no third
+                    // thing to run instead of the one the case named.
+                    crate::io::contract::unsupported(
+                        &format!("regions/{}/kind", r.name),
+                        other,
+                        &["solid", "fluid"],
+                        "solid (SPEC-LIT 46's conducting region) or fluid \
+                         (SPEC-LIT 60.2's closed buoyant cavity). There is no \
+                         third kind",
+                        (),
+                    )?;
+                    return Err(Error::Config(format!(
+                        "regions/{}/kind: \"{other}\" is not solid or fluid, \
+                         and cannot be substituted even under -permissive - \
+                         there is no third thing to run instead",
+                        r.name
+                    )));
+                }
+            };
+
+            // SPEC-LIT 47.4's numbering invariant, checked here so the message
+            // names the case's own region rather than a cell index.
+            if kind == RegionKind::Fluid && i != 0 {
+                return Err(Error::Config(format!(
+                    "regions/{}: the fluid region is region {i}; it must be the \
+                     FIRST region so the fluid block keeps its own cell and \
+                     boundary-face numbering in the concatenated thermal mesh \
+                     (SPEC-LIT 47.4)",
+                    r.name
+                )));
             }
 
-            let mesh = build_region_mesh(r)?;
-            let names = r.mesh.boundaries.names();
+            // Every patch of every region, listed before anything claims one.
             let mut seen: BTreeMap<String, &'static str> = BTreeMap::new();
-            for n in names {
+            for n in r.mesh.boundaries.names() {
                 seen.entry(n.to_string()).or_insert("unnamed");
             }
 
-            let mat = SolidMaterial {
-                name: r.name.clone(),
-                rho: r.material.rho as Scalar,
-                c: r.material.c as Scalar,
-                k: Conductivity::parse(
-                    &r.material.kappa.values(),
-                    &format!("regions/{}/material/kappa", r.name),
-                )?,
+            // Which patches are `empty` has to be known BEFORE the block is
+            // built, because it is the mesh's patch TYPE and not a condition
+            // written onto it afterwards.
+            let empties: Vec<&str> = r
+                .patches
+                .iter()
+                .filter(|p| matches!(p.t, ChtScalarBc::Empty))
+                .map(|p| p.match_.as_str())
+                .collect();
+            let mesh = build_region_mesh(r, &empties)?;
+
+            let (mat, fluid) = match (kind, &r.material, &r.fluid) {
+                (RegionKind::Solid, Some(m), None) => {
+                    let mat = SolidMaterial {
+                        name: r.name.clone(),
+                        rho: m.rho as Scalar,
+                        c: m.c as Scalar,
+                        k: Conductivity::parse(
+                            &m.kappa.values(),
+                            &format!("regions/{}/material/kappa", r.name),
+                        )?,
+                    };
+                    mat.validate()?;
+                    (mat, None)
+                }
+                (RegionKind::Fluid, None, Some(f)) => {
+                    let fl = FluidMaterial {
+                        name: r.name.clone(),
+                        rho: f.rho as Scalar,
+                        cp: f.cp as Scalar,
+                        kappa: f.kappa as Scalar,
+                        mu: f.mu as Scalar,
+                    };
+                    fl.validate()?;
+                    // The conduction entry a fluid region still needs; every
+                    // coefficient it produces on a fluid face is masked away
+                    // by SPEC-LIT (S59.3).
+                    let mat = SolidMaterial {
+                        name: r.name.clone(),
+                        rho: fl.rho,
+                        c: fl.cp,
+                        k: Conductivity::Isotropic(fl.kappa),
+                    };
+                    (mat, Some(fl))
+                }
+                (RegionKind::Solid, None, _) => {
+                    return Err(Error::Config(format!(
+                        "regions/{}: a solid region needs a `material` block \
+                         (rho, c, kappa) - SPEC-LIT 46.5",
+                        r.name
+                    )))
+                }
+                (RegionKind::Solid, Some(_), Some(_)) => {
+                    return Err(Error::Config(format!(
+                        "regions/{}: a SOLID region carries `material`, not \
+                         `fluid`. The two name different physics (SPEC-LIT 46.5 \
+                         against 60.2) and this reader will not choose between \
+                         them",
+                        r.name
+                    )))
+                }
+                (RegionKind::Fluid, _, None) => {
+                    return Err(Error::Config(format!(
+                        "regions/{}: a fluid region needs a `fluid` block (rho, \
+                         cp, kappa, mu) - SPEC-LIT 60.2",
+                        r.name
+                    )))
+                }
+                (RegionKind::Fluid, Some(_), Some(_)) => {
+                    return Err(Error::Config(format!(
+                        "regions/{}: a FLUID region carries `fluid`, not \
+                         `material`. The two name different physics (SPEC-LIT \
+                         60.2 against 46.5) and this reader will not choose \
+                         between them",
+                        r.name
+                    )))
+                }
             };
-            mat.validate()?;
+
+            // SPEC-LIT 60.3: SPEC-LIT 18's registry is not wired to this
+            // format's fluid side, and a source that is read and dropped is
+            // exactly the 13.4.1 defect.
+            if kind == RegionKind::Fluid && r.source.is_some() {
+                return Err(Error::Config(format!(
+                    "regions/{}/source: a volumetric heat source on a FLUID \
+                     region is not implemented on this format. SPEC-LIT 18's \
+                     registry is what would carry it, and this reader does not \
+                     reach it - so the entry is refused rather than read and \
+                     dropped (SPEC-LIT 13.4.1). Put the source in a solid \
+                     region, or use `ofgpu-fire`",
+                    r.name
+                )));
+            }
 
             region_names.push(r.name.clone());
+            kinds.push(kind);
             meshes.push(mesh);
             materials.push(mat);
+            fluids.push(fluid);
             sources.push(r.source.unwrap_or(0.0) as Scalar);
             claimed.push(seen);
         }
+
+        if kinds.iter().filter(|k| **k == RegionKind::Fluid).count() > 1 {
+            return Err(Error::Config(
+                "regions: more than one fluid region. Multiple fluid regions \
+                 coupled through a solid are not implemented (SPEC-LIT 47.4); \
+                 mesh them as one fluid region, or couple them through a solid \
+                 whose two faces are separate interfaces"
+                    .to_string(),
+            ));
+        }
+        let has_fluid = kinds.iter().any(|k| *k == RegionKind::Fluid);
 
         // ---- interfaces --------------------------------------------------
         let mut interfaces = Vec::new();
@@ -530,6 +836,87 @@ impl ChtCase {
             )));
         }
 
+        // ---- the fluid-only blocks, and SPEC-LIT 60.3's refusals ---------
+        //
+        // Each of these is a setting the case could write and the solver would
+        // ignore, which is the 13.4.1 defect six instances of have been found
+        // in this project. Refused in BOTH directions: present without a fluid
+        // region, and absent with one.
+        for (what, present) in [
+            ("buoyancy", self.buoyancy.is_some()),
+            ("numerics/flow", self.numerics.flow.is_some()),
+            ("run/iterations", self.run.iterations.is_some()),
+        ] {
+            if present && !has_fluid {
+                return Err(Error::Config(format!(
+                    "{what} was given but no region has `\"kind\": \"fluid\"`. \
+                     Nothing in a stack of conducting solids reads it, and a \
+                     setting the solver ignores is exactly what SPEC-LIT 13.4.1 \
+                     exists to stop - delete it, or make a region fluid"
+                )));
+            }
+            if !present && has_fluid {
+                return Err(Error::Config(format!(
+                    "a fluid region needs `{what}`. SPEC-LIT 60.2: a closed \
+                     cavity is driven by SPEC-LIT 9's body force and solved by \
+                     an outer SIMPLE loop, and neither has a default this \
+                     reader is entitled to invent"
+                )));
+            }
+        }
+
+        let buoyancy = match &self.buoyancy {
+            Some(b) => {
+                let b = Buoyancy {
+                    g: crate::Vec3::new(b.g[0] as Scalar, b.g[1] as Scalar, b.g[2] as Scalar),
+                    t_ref: b.t_ref as Scalar,
+                };
+                b.validate()?;
+                Some(b)
+            }
+            None => None,
+        };
+
+        let flow = match (&self.numerics.flow, self.run.iterations) {
+            (Some(f), Some(n)) => {
+                let c = FlowControls {
+                    iterations: n as usize,
+                    residual: f.residual as Scalar,
+                    relax_u: f.relax_u as Scalar,
+                    relax_p: f.relax_p as Scalar,
+                    relax_t: f.relax_t as Scalar,
+                    div_u: lower_div("numerics/flow/divSchemeU", &f.div_scheme_u)?,
+                    div_t: crate::io::schemes::DivEntry {
+                        scheme: lower_div("numerics/flow/divSchemeT", &f.div_scheme_t)?,
+                        bounded: true,
+                    },
+                    u_solver: SolverControls {
+                        solver: LinearSolverKind::PBiCGStab,
+                        precon: Preconditioner::Dilu,
+                        tolerance: f.u_tolerance as Scalar,
+                        rel_tol: 0.01,
+                        max_iter: f.u_max_iter as Label,
+                        check_interval: 10,
+                        ..SolverControls::default()
+                    },
+                    p_solver: SolverControls {
+                        solver: LinearSolverKind::PCG,
+                        precon: Preconditioner::Dic,
+                        tolerance: f.p_tolerance as Scalar,
+                        rel_tol: 0.001,
+                        max_iter: f.p_max_iter as Label,
+                        check_interval: 10,
+                        ..SolverControls::default()
+                    },
+                    n_non_orth_correctors: self.numerics.n_non_orthogonal_correctors as usize,
+                    simplec: f.simplec,
+                };
+                c.validate()?;
+                Some(c)
+            }
+            _ => None,
+        };
+
         // ---- run and numerics --------------------------------------------
         let (end_time, delta_t) = if self.run.steady {
             if self.run.end_time.is_some() || self.run.delta_t.is_some() {
@@ -555,6 +942,17 @@ impl ChtCase {
             }
             (end as Scalar, dt as Scalar)
         };
+        if has_fluid && !self.run.steady {
+            return Err(Error::Config(
+                "run: a case with a fluid region must be `steady`. SPEC-LIT \
+                 59.6: the (rho c) ratio across a fluid/solid interface is \
+                 O(1e3) and nothing in this tree gates the time accuracy of a \
+                 conjugate FLUID transient - SPEC-LIT 47.12's Gate 3 gates the \
+                 solid/solid one and stops there. It is refused rather than run \
+                 and believed"
+                    .to_string(),
+            ));
+        }
 
         let solver = SolverControls {
             solver: lower_solver(&self.numerics.solver)?,
@@ -568,8 +966,12 @@ impl ChtCase {
         Ok(LoweredChtCase {
             name: self.name.clone(),
             region_names,
+            kinds,
             meshes,
             materials,
+            fluids,
+            buoyancy,
+            flow,
             sources,
             interfaces,
             patch_bcs,
@@ -589,7 +991,17 @@ fn lower_bc(bc: &ChtScalarBc) -> LoweredBc {
         ChtScalarBc::FixedValue { value } => LoweredBc::FixedValue(*value as Scalar),
         ChtScalarBc::ZeroGradient => LoweredBc::ZeroGradient,
         ChtScalarBc::FixedFluxTemperature { q } => LoweredBc::FixedFlux(*q as Scalar),
+        // An `empty` patch contributes to no surface integral, so the triple
+        // written on it is never read. `run_flow_case` skips those faces by
+        // the mesh's own `PatchKind`, which is where the fact lives.
+        ChtScalarBc::Empty => LoweredBc::ZeroGradient,
     }
+}
+
+/// A `divSchemes` entry, through the same reader every other case uses -
+/// SPEC-LIT §11.7, so the menu in the refusal is the crate's one menu.
+fn lower_div(setting: &str, text: &str) -> Result<DivScheme> {
+    crate::io::schemes::parse_div(setting, text).map(|e| e.scheme)
 }
 
 fn lower_solver(name: &str) -> Result<LinearSolverKind> {
@@ -624,7 +1036,19 @@ fn lower_precon(name: &str) -> Result<Preconditioner> {
 }
 
 /// One region's block, through the same `blockgen` every other case uses.
-fn build_region_mesh(r: &ChtRegion) -> Result<HostMesh> {
+///
+/// `empties` is the patch names the case gave `"T": { "type": "empty" }` -
+/// SPEC-LIT §60.2's 2-D front and back. They have to be known here rather than
+/// written on afterwards, because `empty` is the mesh's patch TYPE: an
+/// `empty` face contributes to no surface integral at all, which is a
+/// property of the topology and not a boundary condition.
+///
+/// A solid region's other faces stay plain `patch`, which is what §47.14's
+/// format has always done and what a conduction stack wants. A **fluid**
+/// region's become `wall`, because they are no-slip walls in the momentum
+/// sense (SPEC-LIT §60.2) and `momFluxIsPrescribed` asks the mesh, not the
+/// case.
+fn build_region_mesh(r: &ChtRegion, empties: &[&str]) -> Result<HostMesh> {
     let b = &r.mesh.bounds;
     let axis = |i: usize| -> Result<GradedAxis> {
         let (lo, hi) = (b.min[i] as Scalar, b.max[i] as Scalar);
@@ -657,16 +1081,47 @@ fn build_region_mesh(r: &ChtRegion) -> Result<HostMesh> {
     };
 
     let names = r.mesh.boundaries.names();
+    let base = if r.kind == "fluid" { "wall" } else { "patch" };
+    let n_empty = names.iter().filter(|n| empties.contains(n)).count();
+    // `empty` faces come in OPPOSITE pairs, and blockgen's own check
+    // ("an empty patch is only legal with a single cell in that direction")
+    // catches the cell count. What it cannot catch is a case that made one of
+    // a pair empty and left the other a wall, which would put a real wall on
+    // one side of a one-cell-thick domain and nothing on the other.
+    if n_empty != 0 && n_empty != 2 {
+        return Err(Error::Config(format!(
+            "regions/{}: {n_empty} patch(es) are `empty`. They come in opposite \
+             pairs - both faces of the thin direction, or neither",
+            r.name
+        )));
+    }
+    if n_empty == 2 {
+        let axis_of = |i: usize| i / 2;
+        let mut axes: Vec<usize> = (0..6)
+            .filter(|i| empties.contains(&names[*i]))
+            .map(axis_of)
+            .collect();
+        axes.dedup();
+        if axes.len() != 1 {
+            return Err(Error::Config(format!(
+                "regions/{}: the two `empty` patches are not the two faces of \
+                 one axis. An empty pair is the front and back of a 2-D case",
+                r.name
+            )));
+        }
+    }
     let spec = BlockSpec {
         x: axis(0)?,
         y: axis(1)?,
         z: axis(2)?,
         patch_name: std::array::from_fn(|i| names[i].to_string()),
-        // Every face is a plain `patch`. A conduction region has no walls in
-        // the momentum sense and no empties: an `empty` patch contributes
-        // nothing to any surface integral, which for a conduction case would
-        // silently make one direction adiabatic whatever the case said.
-        patch_type: std::array::from_fn(|_| "patch".to_string()),
+        patch_type: std::array::from_fn(|i| {
+            if empties.contains(&names[i]) {
+                "empty".to_string()
+            } else {
+                base.to_string()
+            }
+        }),
         windows: Vec::new(),
         cyclic: Vec::new(),
     };

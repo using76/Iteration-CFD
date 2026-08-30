@@ -367,6 +367,17 @@
               "type": "null"
             }
           ]
+        },
+        "soot": {
+          "description": "SPEC-LIT §61.5's soot block. Absent means no soot equation at all,\nwhich is what every case did before §61 existed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonSoot"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -899,8 +910,19 @@
       "type": "object",
       "properties": {
         "a": {
-          "description": "Gray absorption coefficient `a`, 1/m. Constant, case-supplied\n(SPEC-LIT §28/§36 v1; WSGG is later work). Required by both models.",
-          "type": "number",
+          "description": "Gray absorption coefficient `a`, 1/m. Constant, case-supplied\n(SPEC-LIT §28/§36).\n\n**Required under `spectralModel` `gray` and `grayBanded`, and REFUSED\nunder `wsgg`**, where every band's coefficient is computed per cell\nfrom the local composition and nothing would read this one - SPEC-LIT\n§62.11. A number read and discarded is the §13.4.1 defect itself.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ambientT": {
+          "description": "The surroundings' temperature, K - `coldSurroundings` only.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
         "chiR": {
@@ -911,9 +933,48 @@
           ],
           "format": "double"
         },
+        "fuelC": {
+          "description": "Carbon atoms per fuel molecule - `wsgg` only, SPEC-LIT (62.7).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "fuelH": {
+          "description": "Hydrogen atoms per fuel molecule - `wsgg` only, SPEC-LIT (62.7).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "kappaMin": {
+          "description": "P1's `kappa` floor, 1/m - `wsgg` + `P1` only, SPEC-LIT §62.5(ii).\nRefused under fvDOM, which never forms `Gamma = 1/(3 kappa)`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "model": {
           "description": "`\"P1\"` or `\"fvDOM\"`; see [`RadiationModel::from_name`] for what\nhappens with anything else, and this struct's own doc for why\n`\"viewFactor\"` is refused here in particular.",
           "type": "string"
+        },
+        "openBoundary": {
+          "description": "SPEC-LIT §63.3's `openBoundary`: `\"zeroGradient\"` (the default, §28 and\n§36 unchanged - and a PERFECTLY REFLECTING open domain) or\n`\"coldSurroundings\"` (a black body at `ambientT` outside every\nnon-wall face).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pressure": {
+          "description": "Total pressure, Pa - `wsgg` only. Reaches `p_a` in (62.10) and\ntherefore every band's absorption coefficient.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "sigmaS": {
           "description": "Gray scattering coefficient `sigma_s`, 1/m - fvDOM only (SPEC-LIT\n§36.1's isotropic-scattering term); ignored, and normally absent,\nunder `model: \"P1\"`. Defaults to `0.0` (non-scattering).",
@@ -923,6 +984,22 @@
           ],
           "format": "double"
         },
+        "spectralModel": {
+          "description": "SPEC-LIT §62.11's `spectralModel`: `\"gray\"` (the default, §28/§36\nunchanged), `\"grayBanded\"` (one band, bitwise identical to `gray` -\n§62.8) or `\"wsgg\"` (Bordbar et al. 2014). Anything else is a §13.4\nerror naming all three **and saying why that set is not here**.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updateInterval": {
+          "description": "SPEC-LIT §62.10: outer iterations between radiation solves. `1` (the\ndefault) is what every case did before §62 existed; at 120 solves per\ncall it is the difference between a case that runs and one that does\nnot.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "wallEmissivity": {
           "description": "Marshak wall emissivity, applied to every `wall`-kind patch. Defaults\nto `1.0` (black wall) when absent.",
           "type": [
@@ -930,12 +1007,18 @@
             "null"
           ],
           "format": "double"
+        },
+        "windowTreatment": {
+          "description": "SPEC-LIT §62.5's `windowTreatment`: `\"dropped\"` or `\"floored\"`.\n**Required** with `wsgg` + `P1` and refused everywhere else - there is\nno honest default, because both values lose something and the case has\nto say which loss it is taking.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "model",
-        "a"
+        "model"
       ]
     },
     "JsonRegion": {
@@ -1223,6 +1306,60 @@
         "solver",
         "preconditioner",
         "tolerance"
+      ]
+    },
+    "JsonSoot": {
+      "description": "SPEC-LIT §61.5's `physics.fire.soot`.\n\nEvery entry only one model reads is REFUSED under the other\n([`crate::soot::refuse_unread`], shared with the OpenFOAM-dictionary\nroute so the two cannot drift apart).",
+      "type": "object",
+      "properties": {
+        "fuelMolarMass": {
+          "description": "`M_F`, kg/kmol - `laminarSmokePoint` only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "fuelStreamY": {
+          "description": "`Y_F,1`, the fuel stream's own fuel mass fraction. Read by BOTH models:\nit sets `Z_st` in (61.6) and scales (61.5).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`\"none\"` (default), `\"prescribedYield\"` or `\"laminarSmokePoint\"`.\nMoss-Brookes and the sectional models are recognised and refused **with\nthe reason** - SPEC-LIT §61.1.",
+          "type": "string"
+        },
+        "oxidationPeak": {
+          "description": "`omega_so,P`, kg/(m3 s) - `laminarSmokePoint` only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "smokePointHeight": {
+          "description": "`l_s`, the measured laminar smoke-point height, m -\n`laminarSmokePoint` only. Propane 0.162, ethylene 0.106.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "yield": {
+          "description": "`y_s`, kg soot per kg fuel - `prescribedYield` only. Tewarson Table\nA.40: propane 0.024, heptane 0.015.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
       ]
     },
     "JsonSource": {

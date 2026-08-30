@@ -114,6 +114,21 @@
 //! every other scalar in this crate uses, with [`flux_to_grad`] doing the one
 //! conversion a fixed-flux wall needs (`g_ref = q_w/k_eff`); a case that never
 //! calls [`Self::set_thermal_wall`] behaves exactly as before.
+//!
+//! **4. SPEC-LIT S59: this equation can be retargeted at S47.4's concatenated
+//! fluid+solid thermal mesh, and it is OPT-IN.** [`Energy::attach_conjugate`]
+//! is the only way in; until it is called, the `cht` field is `None` and
+//! every statement S59 added is behind a `let Some(..) = .. else { return }`.
+//! On that path not one kernel launch, not one arithmetic operation and not
+//! one array read changes, which is the FIRST of the three things S59.5 owes
+//! in place of S47.11's "energy.rs is not modified at all". The second is a
+//! full-run bitwise comparison, and the third is that `ofgpu-validate`
+//! re-runs that comparison live on every run. Retargeted, the equation is
+//! S26's assembly with three elementwise blends and one mask (S59.1):
+//! `rho cp -> rho_s c_s`, `k_eff|Sf| -> Dhat/Delta` and `phi -> 0` in the
+//! solid half. The convective term then vanishes there in EVERY BIT, because
+//! every convection kernel's contribution is a product with `phi_f` (S59.2) -
+//! not to round-off, exactly.
 
 use std::path::Path;
 
@@ -130,6 +145,7 @@ use crate::io::dict::FoamDict;
 use crate::io::schemes::DivEntry;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
+use crate::cht::{Conduction, ConjugateInterfaces, InterfaceFlux, RegionKind, ThermalMesh};
 use crate::mesh::GpuMesh;
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::timescheme::{Ddt, DdtScheme, TimeKernels};
@@ -1002,6 +1018,105 @@ fn reconcile_ddt(scheme: DdtScheme) -> Result<DdtScheme> {
 }
 
 // ==========================================================================
+//  §59  The conjugate retarget - opt-in, and everything it needs
+// ==========================================================================
+
+/// What [`Energy`] needs in order to run over SPEC-LIT §47.4's concatenated
+/// fluid+solid thermal mesh - SPEC-LIT §59.
+///
+/// **Every array here is a blend operand or a mask.** There is no second
+/// assembly path: §26's term list, term order and kernel launches are
+/// untouched, and the whole of §59 is (S59.3)'s four elementwise blends plus
+/// the interface kernel §47.2 already owns.
+///
+/// `None` on an [`Energy`] that was never handed one, which is the *first*
+/// of the three things SPEC-LIT §59.5 owes in place of §47.11's
+/// "`energy.rs` is not modified at all".
+pub struct ConjugateEnergy {
+    /// `[n_cells]` exactly `1.0` in a fluid cell, exactly `0.0` in a solid
+    /// one. Not a fraction and never anything between: (S59.3)'s claim that
+    /// the blend is bitwise the identity on the side it keeps rests on this
+    /// being exactly one.
+    cell_fluid: DevBuf<Scalar>,
+    /// `[n_cells]` `rho_s c_s` in a solid cell, exactly `0.0` in a fluid one.
+    solid_rho_c: DevBuf<Scalar>,
+
+    /// `[n_if]` `1.0` on an internal face whose two cells are both fluid,
+    /// `0.0` otherwise. A fluid/solid internal face does not exist - the two
+    /// regions are separate blocks and the interface is a boundary face on
+    /// each side (§47.4) - so this really is a clean split.
+    face_fluid: DevBuf<Scalar>,
+    /// `[n_bf]` `1.0` on a fluid boundary face, INCLUDING the fluid side of
+    /// an interface, whose conductance is `k_eff Delta` (§47.6). `0.0` on
+    /// every solid boundary face.
+    b_face_fluid: DevBuf<Scalar>,
+    /// `[n_bf]` [`Self::b_face_fluid`] with the interface faces taken out.
+    ///
+    /// The two masks differ on exactly the interface faces, and they have to.
+    /// The CONDUCTANCE blend keeps a fluid interface face, because §47.6's
+    /// `C_A` there IS `k_eff Delta`; the CONVECTIVE mask drops it, because no
+    /// mass crosses a fluid/solid interface and a flux that appeared there
+    /// would convect heat through a wall. Using one mask for both would
+    /// either make the interface adiabatic or leave that hole open, and this
+    /// is the second one closed - `Energy` enforces it rather than trusting
+    /// the driver to hand over a `phi` that is already zero there.
+    b_face_conv: DevBuf<Scalar>,
+
+    /// `[n_if]` §46's `Dhat_f/Delta_f` on a solid face, exactly `0.0` on a
+    /// fluid one.
+    solid_gamma: DevBuf<Scalar>,
+    /// `[n_bf]` the same on the boundary.
+    b_solid_gamma: DevBuf<Scalar>,
+    /// `[n_bf]` §46's cell-to-face conductance `Dhat_b/|Sf|` on a solid face,
+    /// exactly `0.0` on a fluid one - the other half of (S59.5).
+    b_solid_cond: DevBuf<Scalar>,
+
+    /// `[n_bf]` the blended conductance (S59.5) the interface triple is built
+    /// from, rebuilt from the live `k_eff` every [`Energy::update_k_eff`].
+    b_cond: DevBuf<Scalar>,
+
+    /// §47.2's one kernel, writing both sides of every pair.
+    interfaces: ConjugateInterfaces,
+
+    /// Cell and boundary-face counts of the FLUID block, for the prefix copy
+    /// of §59.4.
+    n_fluid_cells: usize,
+    n_fluid_boundary_faces: usize,
+    /// `[n_bf]` true on an interface face - kept on the host, for the
+    /// one-condition-per-face refusals of §59.6.
+    interface_face: Vec<bool>,
+}
+
+impl ConjugateEnergy {
+    /// The per-boundary-face conductance `C`, W/(m^2 K), as of the last
+    /// [`Energy::correct`] - SPEC-LIT (S59.5). Exposed for the gates.
+    pub fn conductance(&self) -> &DevBuf<Scalar> {
+        &self.b_cond
+    }
+
+    pub fn interfaces(&self) -> &ConjugateInterfaces {
+        &self.interfaces
+    }
+
+    pub fn interfaces_mut(&mut self) -> &mut ConjugateInterfaces {
+        &mut self.interfaces
+    }
+
+    /// Cells `[0, n)` of the concatenated mesh are the fluid block - §47.4.
+    pub fn n_fluid_cells(&self) -> usize {
+        self.n_fluid_cells
+    }
+
+    pub fn n_fluid_boundary_faces(&self) -> usize {
+        self.n_fluid_boundary_faces
+    }
+
+    pub fn is_interface_face(&self, bf: usize) -> bool {
+        self.interface_face.get(bf).copied().unwrap_or(false)
+    }
+}
+
+// ==========================================================================
 //  §26  The energy equation
 // ==========================================================================
 
@@ -1185,6 +1300,17 @@ pub struct Energy<'m> {
     /// `None` until then, same "nothing to do" convention as [`Self::twd`].
     ffq_faces: Option<DevBuf<Label>>,
     ffq_n: usize,
+
+    /// SPEC-LIT §59's retarget onto §47.4's concatenated thermal mesh.
+    ///
+    /// `None` until [`Self::attach_conjugate`] is called, and that is the
+    /// whole of §59.5's first claim: every statement §59 added to this file
+    /// is behind a test of this field, so on the single-region path not one
+    /// kernel launch, not one arithmetic operation and not one array read
+    /// changes. The claim is not argued, it is measured - see
+    /// `tests::a_one_region_fluid_retarget_is_bitwise_the_plain_energy`,
+    /// which compares a whole run's `T`, `T_b` and all six matrix arrays.
+    cht: Option<ConjugateEnergy>,
 }
 
 impl<'m> Energy<'m> {
@@ -1243,6 +1369,7 @@ impl<'m> Energy<'m> {
             twd: None,
             ffq_faces: None,
             ffq_n: 0,
+            cht: None,
         })
     }
 
@@ -1346,6 +1473,7 @@ impl<'m> Energy<'m> {
                 self.m.n_boundary_faces
             )));
         }
+        self.check_not_interface(faces, "the Jayatilleke thermal wall function")?;
         self.wall = wall;
         self.twd = Some(ThermalWallData::build(gpu, faces)?);
         Ok(())
@@ -1371,6 +1499,7 @@ impl<'m> Energy<'m> {
                 self.m.n_boundary_faces
             )));
         }
+        self.check_not_interface(faces, "SPEC-LIT 32.2's fixedFluxTemperature")?;
         let list: Vec<Label> = faces
             .iter()
             .enumerate()
@@ -1393,6 +1522,295 @@ impl<'m> Energy<'m> {
         self.ddt.advance(next_dt);
     }
 
+    // ---- §59 the conjugate retarget --------------------------------------
+
+    /// Retarget this equation at SPEC-LIT §47.4's concatenated fluid+solid
+    /// thermal mesh - SPEC-LIT §59, and the piece §47.14 deferred.
+    ///
+    /// The `GpuMesh` this [`Energy`] was built on must already BE the thermal
+    /// mesh: this call adds the blend operands (S59.3), not the mesh. `cond`
+    /// is [`crate::cht::Conduction`] built over that same mesh, whose solid
+    /// half supplies `Dhat/Delta`, `Dhat/|Sf|` and `rho_s c_s`; its fluid half
+    /// is computed and then masked away, because on a fluid face the
+    /// coefficient is the LIVE `k_eff` and not a static one (S59.5).
+    ///
+    /// **Call this before [`Self::set_thermal_wall`] and
+    /// [`Self::set_fixed_flux_walls`].** §47.6 says a face carries one
+    /// condition, and the two setters check their faces against this mesh's
+    /// interface faces; calling them first would leave nothing to check
+    /// against, so this function refuses that order by name rather than
+    /// letting a face quietly end up with two conditions.
+    ///
+    /// Until this is called the `cht` field is `None` and this file behaves
+    /// exactly as §26 left it - SPEC-LIT §59.5's first claim, and the reason
+    /// the retarget is a method rather than a constructor argument.
+    pub fn attach_conjugate(
+        &mut self,
+        gpu: &Gpu,
+        tm: &ThermalMesh,
+        cond: &Conduction,
+    ) -> Result<()> {
+        let m = self.m;
+        let h = &tm.host;
+        if h.n_cells != m.n_cells
+            || h.n_internal_faces != m.n_internal_faces
+            || h.n_boundary_faces != m.n_boundary_faces
+        {
+            return Err(Error::Config(format!(
+                "Energy::attach_conjugate: this Energy was built on a mesh with \
+                 ({}, {}, {}) cells/internal faces/boundary faces and the thermal \
+                 mesh has ({}, {}, {}). The Energy must be constructed on the \
+                 CONCATENATED mesh itself (SPEC-LIT 47.4), not on the fluid one",
+                m.n_cells,
+                m.n_internal_faces,
+                m.n_boundary_faces,
+                h.n_cells,
+                h.n_internal_faces,
+                h.n_boundary_faces
+            )));
+        }
+        match tm.regions.first() {
+            Some(r) if r.kind == RegionKind::Fluid => {}
+            Some(r) => {
+                return Err(Error::Config(format!(
+                    "Energy::attach_conjugate: region 0 is '{}', a SOLID region. \
+                     This equation is the fluid half of SPEC-LIT 47's coupling and \
+                     needs the fluid block first (SPEC-LIT 47.4's numbering \
+                     invariant). A stack with no fluid in it is what \
+                     `crate::cht::ConjugateHeat` solves, and it needs no Energy at \
+                     all",
+                    r.name
+                )))
+            }
+            None => {
+                return Err(Error::Config(
+                    "Energy::attach_conjugate: the thermal mesh has no regions"
+                        .to_string(),
+                ))
+            }
+        }
+        if self.twd.is_some() || self.ffq_faces.is_some() {
+            return Err(Error::Config(
+                "Energy::attach_conjugate: set_thermal_wall / \
+                 set_fixed_flux_walls was called first. SPEC-LIT 47.6: a face \
+                 carries ONE condition, and the check that no face is both a wall \
+                 function (or a fixed-flux wall) and a conjugate interface can \
+                 only run if the interface is attached first. Attach, then set the \
+                 walls"
+                    .to_string(),
+            ));
+        }
+
+        let n = h.n_cells;
+        let nif = h.n_internal_faces;
+        let nbf = h.n_boundary_faces;
+
+        // A cell's region, and from it the two masks. Exactly 1.0 and exactly
+        // 0.0 - (S59.3)'s "the blend is bitwise the identity on the side it
+        // keeps" is a statement about these being exact.
+        let mut is_fluid_cell = vec![false; n];
+        for block in &tm.regions {
+            if block.kind == RegionKind::Fluid {
+                for c in block.cells() {
+                    is_fluid_cell[c] = true;
+                }
+            }
+        }
+
+        let cell_fluid: Vec<Scalar> = is_fluid_cell
+            .iter()
+            .map(|f| if *f { 1.0 } else { 0.0 })
+            .collect();
+        let solid_rho_c: Vec<Scalar> = (0..n)
+            .map(|c| if is_fluid_cell[c] { 0.0 } else { cond.rho_c[c] })
+            .collect();
+
+        // An internal face lies wholly inside one region: the regions are
+        // separate blocks and the interface is a BOUNDARY face on each side
+        // (SPEC-LIT 47.4). That is an invariant worth checking rather than
+        // assuming, because if it ever broke the mask would be silently
+        // half-right.
+        let mut face_fluid = vec![0.0 as Scalar; nif];
+        for f in 0..nif {
+            let o = h.owner[f] as usize;
+            let nb = h.neighbour[f] as usize;
+            if is_fluid_cell[o] != is_fluid_cell[nb] {
+                return Err(Error::Mesh(format!(
+                    "Energy::attach_conjugate: internal face {f} joins cell {o} \
+                     (fluid = {}) to cell {nb} (fluid = {}). A fluid/solid \
+                     INTERNAL face cannot exist - SPEC-LIT 47.4 concatenates the \
+                     regions as separate blocks and couples them through paired \
+                     BOUNDARY faces",
+                    is_fluid_cell[o], is_fluid_cell[nb]
+                )));
+            }
+            face_fluid[f] = if is_fluid_cell[o] { 1.0 } else { 0.0 };
+        }
+
+        let mut b_face_fluid = vec![0.0 as Scalar; nbf];
+        for bf in 0..nbf {
+            let c = h.b_face_cells[bf] as usize;
+            b_face_fluid[bf] = if is_fluid_cell[c] { 1.0 } else { 0.0 };
+        }
+        let interface_face = tm.interface_faces();
+        let b_face_conv: Vec<Scalar> = (0..nbf)
+            .map(|bf| if interface_face[bf] { 0.0 } else { b_face_fluid[bf] })
+            .collect();
+
+        let solid_gamma: Vec<Scalar> = (0..nif)
+            .map(|f| if face_fluid[f] > 0.0 { 0.0 } else { cond.gamma_mag_sf[f] })
+            .collect();
+        let b_solid_gamma: Vec<Scalar> = (0..nbf)
+            .map(|bf| {
+                if b_face_fluid[bf] > 0.0 {
+                    0.0
+                } else {
+                    cond.b_gamma_mag_sf[bf]
+                }
+            })
+            .collect();
+        let b_solid_cond: Vec<Scalar> = (0..nbf)
+            .map(|bf| {
+                if b_face_fluid[bf] > 0.0 {
+                    0.0
+                } else {
+                    cond.b_conductance[bf]
+                }
+            })
+            .collect();
+
+        self.cht = Some(ConjugateEnergy {
+            cell_fluid: gpu.upload(&cell_fluid)?,
+            solid_rho_c: gpu.upload(&solid_rho_c)?,
+            face_fluid: gpu.upload(&face_fluid)?,
+            b_face_fluid: gpu.upload(&b_face_fluid)?,
+            b_face_conv: gpu.upload(&b_face_conv)?,
+            solid_gamma: gpu.upload(&solid_gamma)?,
+            b_solid_gamma: gpu.upload(&b_solid_gamma)?,
+            b_solid_cond: gpu.upload(&b_solid_cond)?,
+            b_cond: gpu.zeros(nbf.max(1))?,
+            interfaces: ConjugateInterfaces::new(gpu, tm)?,
+            n_fluid_cells: tm.regions[0].n_cells,
+            n_fluid_boundary_faces: tm.regions[0].n_boundary_faces,
+            interface_face,
+        });
+        Ok(())
+    }
+
+    /// SPEC-LIT §59's retarget, or `None` on the single-region path.
+    pub fn conjugate(&self) -> Option<&ConjugateEnergy> {
+        self.cht.as_ref()
+    }
+
+    pub fn conjugate_mut(&mut self) -> Option<&mut ConjugateEnergy> {
+        self.cht.as_mut()
+    }
+
+    /// The interface heat balance - SPEC-LIT §47.12 Gate 4, with a fluid on
+    /// one side. Zero when nothing is attached.
+    pub fn interface_flux(&mut self, gpu: &Gpu) -> Result<InterfaceFlux> {
+        let m = self.m;
+        let Self { cht, t, .. } = self;
+        let Some(cht) = cht.as_mut() else {
+            return Ok(InterfaceFlux::default());
+        };
+        let ConjugateEnergy { interfaces, b_cond, .. } = cht;
+        interfaces.flux(gpu, t, m, b_cond)
+    }
+
+    /// SPEC-LIT §59.6: refuse a face that would carry two conditions.
+    fn check_not_interface(&self, faces: &[bool], what: &str) -> Result<()> {
+        let Some(cht) = &self.cht else { return Ok(()) };
+        for (bf, on) in faces.iter().enumerate() {
+            if *on && cht.is_interface_face(bf) {
+                return Err(Error::Config(format!(
+                    "boundary face {bf} is a conjugate interface face AND asks for \
+                     {what}. SPEC-LIT 47.6: the two rewrite the same (fr, refValue, \
+                     refGrad) triple on the same face, so a face carries ONE of \
+                     them. Put `coupledTemperature` on the interface and the other \
+                     condition somewhere else"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// (S59.3)'s first blend: `rho_cp := rho_cp * m_cell + rho_s c_s`, on all
+    /// three time levels. A no-op while nothing is attached.
+    fn blend_rho_cp(&mut self, gpu: &Gpu) -> Result<()> {
+        let n = self.m.n_cells;
+        let Self { cht, fldk, rho_cp, rho_cp0, rho_cp00, .. } = self;
+        let Some(cht) = cht.as_ref() else { return Ok(()) };
+        for level in [rho_cp, rho_cp0, rho_cp00] {
+            field_ops::multiply_field(gpu, fldk, level, &cht.cell_fluid, n)?;
+            field_ops::add_field(gpu, fldk, level, &cht.solid_rho_c, n)?;
+        }
+        Ok(())
+    }
+
+    /// (S59.3)'s second blend and (S59.5)'s conductance, both off the `k_eff`
+    /// [`Self::update_k_eff`] has just written. A no-op while nothing is
+    /// attached.
+    fn blend_k_eff(&mut self, gpu: &Gpu) -> Result<()> {
+        let m = self.m;
+        let (nif, nbf) = (m.n_internal_faces, m.n_boundary_faces);
+        let Self { cht, fldk, k_eff_mag_sf, k_eff_face, .. } = self;
+        let Some(cht) = cht.as_mut() else { return Ok(()) };
+
+        field_ops::multiply_field(gpu, fldk, &mut k_eff_mag_sf.f, &cht.face_fluid, nif)?;
+        field_ops::add_field(gpu, fldk, &mut k_eff_mag_sf.f, &cht.solid_gamma, nif)?;
+        field_ops::multiply_field(gpu, fldk, &mut k_eff_mag_sf.bf, &cht.b_face_fluid, nbf)?;
+        field_ops::add_field(gpu, fldk, &mut k_eff_mag_sf.bf, &cht.b_solid_gamma, nbf)?;
+
+        // C_b = k_eff,b Delta_b on a fluid face, Dhat_b/|Sf| on a solid one -
+        // (S59.5). Rebuilt from scratch every call, so it carries no lag and
+        // cannot accumulate.
+        field_ops::copy_field(gpu, fldk, &mut cht.b_cond, &k_eff_face.bf, nbf)?;
+        field_ops::multiply_field(gpu, fldk, &mut cht.b_cond, &m.b_delta_coeffs, nbf)?;
+        field_ops::multiply_field(gpu, fldk, &mut cht.b_cond, &cht.b_face_fluid, nbf)?;
+        field_ops::add_field(gpu, fldk, &mut cht.b_cond, &cht.b_solid_cond, nbf)
+    }
+
+    /// §47.2's triple on both sides, and (S47.9)'s coefficient override
+    /// written straight into `k_eff_mag_sf.bf` - which [`Self::update_k_eff`]
+    /// rebuilds from scratch every call, so the override cannot compound
+    /// (SPEC-LIT §59.3). A no-op while nothing is attached.
+    fn update_conjugate_interface(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.cht.is_none() {
+            return Ok(());
+        }
+        let m = self.m;
+        {
+            let Self { cht, t, k_eff_mag_sf, .. } = self;
+            let Some(cht) = cht.as_ref() else { return Ok(()) };
+            cht.interfaces
+                .update(gpu, t, m, &cht.b_cond, &mut k_eff_mag_sf.bf)?;
+        }
+        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)
+    }
+
+    /// (S59.3)'s mask on the convected flux - the one line that makes
+    /// SPEC-LIT §59.2's "the convective term vanishes in the solid in every
+    /// bit" a property of THIS equation rather than of whatever driver built
+    /// `phi`. A no-op while nothing is attached.
+    fn mask_conv_flux(&mut self, gpu: &Gpu) -> Result<()> {
+        let m = self.m;
+        let Self { cht, fldk, phi_conv, .. } = self;
+        let Some(cht) = cht.as_ref() else { return Ok(()) };
+        field_ops::multiply_field(gpu, fldk, &mut phi_conv.f, &cht.face_fluid, m.n_internal_faces)?;
+        field_ops::multiply_field(gpu, fldk, &mut phi_conv.bf, &cht.b_face_conv, m.n_boundary_faces)
+    }
+
+    /// (S59.3)'s mask on `dp0/dt`: a solid does not have a thermodynamic
+    /// pressure, so §25.2's term is exactly zero there. A no-op while nothing
+    /// is attached.
+    fn mask_dp0dt(&mut self, gpu: &Gpu) -> Result<()> {
+        let n = self.m.n_cells;
+        let Self { cht, fldk, dp0dt_su, .. } = self;
+        let Some(cht) = cht.as_ref() else { return Ok(()) };
+        field_ops::multiply_field(gpu, fldk, dp0dt_su, &cht.cell_fluid, n)
+    }
+
     /// Evaluate the boundary faces and seed both old time levels from the
     /// initial field - call once, before the first [`GasState::update_density`].
     pub fn initialise(&mut self, gpu: &Gpu) -> Result<()> {
@@ -1413,7 +1831,10 @@ impl<'m> Energy<'m> {
         field_ops::scale_field(gpu, &self.fldk, &mut self.rho_cp0, cp, n)?;
 
         field_ops::copy_field(gpu, &self.fldk, &mut self.rho_cp00, &gas.rho().f00, n)?;
-        field_ops::scale_field(gpu, &self.fldk, &mut self.rho_cp00, cp, n)
+        field_ops::scale_field(gpu, &self.fldk, &mut self.rho_cp00, cp, n)?;
+
+        // SPEC-LIT (S59.3), and a no-op on the single-region path.
+        self.blend_rho_cp(gpu)
     }
 
     /// `k_eff` on every face (S26), from the CURRENT `gas.rho()` interpolated
@@ -1489,7 +1910,10 @@ impl<'m> Energy<'m> {
         field_ops::multiply_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.f, &m.mag_sf, m.n_internal_faces)?;
 
         field_ops::copy_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.bf, &self.k_eff_face.bf, m.n_boundary_faces)?;
-        field_ops::multiply_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.bf, &m.b_mag_sf, m.n_boundary_faces)
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.k_eff_mag_sf.bf, &m.b_mag_sf, m.n_boundary_faces)?;
+
+        // SPEC-LIT (S59.3)/(S59.5), and a no-op on the single-region path.
+        self.blend_k_eff(gpu)
     }
 
     /// SPEC-LIT S29.3: rewrite `T`'s Robin triple on every
@@ -1565,7 +1989,14 @@ impl<'m> Energy<'m> {
 
         field_ops::copy_field(gpu, &self.fldk, &mut self.phi_conv.bf, &phi.bf, m.n_boundary_faces)?;
         field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_conv.bf, &self.rho_face.bf, m.n_boundary_faces)?;
-        field_ops::scale_field(gpu, &self.fldk, &mut self.phi_conv.bf, cp, m.n_boundary_faces)
+        field_ops::scale_field(gpu, &self.fldk, &mut self.phi_conv.bf, cp, m.n_boundary_faces)?;
+
+        // SPEC-LIT (S59.3)'s mask, and SPEC-LIT §59.2's whole guarantee: on a
+        // solid or interface face `phi_conv` becomes an exact +-0.0, and every
+        // convection kernel's contribution is a PRODUCT with it, so the solid
+        // block of the matrix is §46's conduction matrix in every bit. A no-op
+        // on the single-region path.
+        self.mask_conv_flux(gpu)
     }
 
     fn add_ddt(&mut self, gpu: &Gpu) -> Result<()> {
@@ -1708,6 +2139,9 @@ impl<'m> Energy<'m> {
         }
 
         field_ops::set_field(gpu, &self.fldk, &mut self.dp0dt_su, gas.dp0dt(), m.n_cells)?;
+        // SPEC-LIT (S59.3): a solid has no thermodynamic pressure, so §25.2's
+        // term is exactly zero there. A no-op on the single-region path.
+        self.mask_dp0dt(gpu)?;
         fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &self.dp0dt_su, 1.0)
     }
 
@@ -1888,6 +2322,20 @@ impl<'m> Energy<'m> {
         if n == 0 {
             return Ok(());
         }
+        // SPEC-LIT S59.6. On a conjugate mesh this quantity is not defined by
+        // anything in this tree: S25.1's `(div u)_target` is a property of the
+        // GAS, it is consumed by a pressure equation that runs on the fluid
+        // mesh alone, and `update_conduction_source` below would read
+        // `k_eff_mag_sf` on the interface faces - where (S47.9) has put
+        // `h_G |Sf|` (W/K) rather than `kappa |Sf|` - and form a flux with the
+        // wrong units. Zeroing it in the solid would not fix that; refusing
+        // does, and names what would have to be built.
+        if self.cht.is_some() {
+            return Err(Error::Config(
+                "Energy::update_target_divergence on a CONJUGATE mesh (SPEC-LIT                  59.6). S25.1's target divergence is a property of the gas and is                  consumed by a pressure equation that runs on the FLUID mesh                  alone, and S26.1's conduction term would read the interface                  faces' bGammaMagSf, which (S47.9) has overwritten with h_G|Sf|                  in W/K. A low-Mach conjugate driver needs a fluid-prefix view                  of `target_div` and a conduction source that skips the                  interface; neither is built. `crate::cht::flow::run_flow_case`                  runs Simple's INCOMPRESSIBLE pressure equation instead, which                  needs none of it"
+                    .to_string(),
+            ));
+        }
         // S26.1's conduction term is read off `k_eff` and `T`'s Robin triple,
         // so both have to BE there and have to be a self-consistent pair.
         // Building them here rather than reading what the last `correct` left
@@ -1959,7 +2407,12 @@ impl<'m> Energy<'m> {
         self.refresh_rho_cp(gpu, gas)?;
         self.update_k_eff(gpu, nut, gas, nu)?;
         self.update_thermal_wall(gpu, k, &gas.rho().f, nu)?;
-        self.update_fixed_flux(gpu)
+        self.update_fixed_flux(gpu)?;
+        // SPEC-LIT §47.2's triple on both sides of every interface, from the
+        // conductance `update_k_eff` has just rebuilt. A no-op on the
+        // single-region path, where it does not even evaluate its guard's
+        // right-hand side.
+        self.update_conjugate_interface(gpu)
     }
 
     /// SPEC-LIT S26.1: `div(k_eff grad T)` per cell, W/m3 - the CONDUCTION
@@ -2060,6 +2513,17 @@ impl<'m> Energy<'m> {
 
             field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)?;
         }
+
+        // SPEC-LIT §47.2: the interface triple assembled with was built from
+        // the PREVIOUS iterate's `T_Q`, which is right for the assembly -
+        // `fvLapBoundary`'s interface branch never reads `refValue`, it
+        // multiplies `psi[nbr]` implicitly - but leaves the REPORTED face
+        // value one iterate stale. Refreshing costs one launch and makes
+        // `t.bf`, the interface flux report and the contact-resistance jump
+        // consistent with the solution just computed. It is not a second
+        // coupling iteration: `T` is not touched. A no-op on the
+        // single-region path.
+        self.update_conjugate_interface(gpu)?;
 
         Ok(perf)
     }

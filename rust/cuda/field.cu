@@ -393,6 +393,26 @@ extern "C" __global__ void fldMultiply
 }
 
 
+//- dst += src. The partner of fldMultiply, and the second half of SPEC-LIT
+//  S59.1's blend `dst = dst*mask + other`: on the side the mask keeps, the
+//  pair is `x*1 + 0`, which is x in every bit; on the side it drops, it is
+//  `x*0 + y`, which is y in every bit. That exactness is the whole reason the
+//  blend is written as two elementwise kernels rather than as one fused one
+//  with a branch - a branch would be a second code path, and S59.5 has to
+//  prove there is only one.
+extern "C" __global__ void fldAdd
+(
+    ofscalar* __restrict__ dst,
+    const ofscalar* __restrict__ src,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    dst[i] += src[i];
+}
+
+
 //- dst /= src. No epsilon in the denominator: a zero divisor here means the
 //  caller handed over a field it should have bounded first, and hiding that
 //  behind a regularisation would hide the bug with it.

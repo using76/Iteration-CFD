@@ -63,6 +63,7 @@ pub struct FieldKernels {
     bound: CudaFunction,
     clamp: CudaFunction,
     multiply: CudaFunction,
+    add: CudaFunction,
     divide: CudaFunction,
     scale: CudaFunction,
 }
@@ -82,6 +83,7 @@ impl FieldKernels {
             bound: k.func("fldBound")?,
             clamp: k.func("fldClamp")?,
             multiply: k.func("fldMultiply")?,
+            add: k.func("fldAdd")?,
             divide: k.func("fldDivide")?,
             scale: k.func("fldScale")?,
         })
@@ -623,6 +625,40 @@ pub fn multiply_field(
     let nl = n as Label;
 
     let func = k.multiply.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(&mut *dst)
+            .arg(src)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dst += src`, elementwise.
+///
+/// The partner of [`multiply_field`], and the second half of SPEC-LIT
+/// (S59.3)'s blend `dst = dst*mask + other`. Written as two elementwise
+/// kernels rather than one fused one with a branch on purpose: a branch would
+/// be a second code path, and SPEC-LIT §59.5 has to prove there is only one.
+/// On the side the mask keeps, the pair is `x*1.0 + 0.0`, which is `x` in
+/// every bit.
+pub fn add_field(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    dst: &mut DevBuf<Scalar>,
+    src: &DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    check_len("add_field", dst.len(), n, "dst")?;
+    check_len("add_field", src.len(), n, "src")?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+
+    let func = k.add.clone();
     unsafe {
         gpu.stream()
             .launch_builder(&func)

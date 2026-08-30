@@ -209,8 +209,26 @@ fn the_layer_lists_lower_to_the_series_resistance() {
 
 /// A fluid region is not something this format can express, and saying so is
 /// better than building a solid one and calling it a fluid.
+/// SPEC-LIT §60.3: `kind` takes exactly two values, and a third is a §13.4
+/// error listing both. (The fluid region itself is implemented - SPEC-LIT
+/// §59/§60 - and its own refusals are the block below.)
 #[test]
-fn a_fluid_region_is_refused_naming_what_is_implemented() {
+fn an_unknown_region_kind_is_refused_listing_both() {
+    crate::io::contract::reset_warnings();
+    let text = default_slab().replace(
+        r#""name": "metal","#,
+        r#""name": "metal", "kind": "porous","#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("solid") && msg.contains("fluid"), "{msg}");
+}
+
+/// SPEC-LIT §47.4's numbering invariant, refused where the case can say it:
+/// the fluid block keeps its own cell and boundary-face indices only if it is
+/// region 0.
+#[test]
+fn a_fluid_region_that_is_not_first_is_refused_naming_it() {
     crate::io::contract::reset_warnings();
     let text = default_slab().replace(
         r#""name": "metal","#,
@@ -218,8 +236,8 @@ fn a_fluid_region_is_refused_naming_what_is_implemented() {
     );
     let e = read(&text).expect("parse").lower().expect_err("must refuse");
     let msg = e.to_string();
-    assert!(msg.contains("solid"), "{msg}");
-    assert!(msg.contains("SOLID energy equation") || msg.contains("momentum"), "{msg}");
+    assert!(msg.contains("metal") && msg.contains("FIRST"), "{msg}");
+    assert!(msg.contains("47.4"), "{msg}");
 }
 
 /// A mistyped entry is a parse error, not something quietly dropped -
@@ -622,4 +640,517 @@ fn every_shipped_cht_case_lowers() {
         checked += 1;
     }
     assert!(checked > 0, "no *.cht.jsonc case was found under {}", dir.display());
+}
+
+// ==========================================================================
+//  SPEC-LIT §60 - the fluid region: what it says, what is refused, and the
+//  §13.4.1 pair tests
+//
+//  The refusals below are host-only and cost microseconds. The pair tests
+//  RUN, because a pair test that did not run would only prove the two
+//  documents parse differently.
+// ==========================================================================
+
+/// The Kaminski & Prakash configuration as a case document - SPEC-LIT §60.1.
+///
+/// `n` is the cell count across the whole `1 x 1` enclosure; the wall gets
+/// `0.2 n` columns and the air `0.8 n`, which makes every cell square.
+/// Everything a pair test varies is a parameter, so the two documents it
+/// writes differ in exactly one substring.
+#[allow(clippy::too_many_arguments)]
+fn kp_case(
+    n: usize,
+    kappa_solid: &str,
+    fluid: &str,
+    g: &str,
+    t_ref: &str,
+    rc: &str,
+    iterations: usize,
+    residual: &str,
+    relax_u: &str,
+) -> String {
+    let dz = 1.0 / n as f64;
+    let n_solid = (0.2 * n as f64).round() as usize;
+    format!(
+        r#"{{
+  "name": "kaminskiPrakash",
+  "regions": [
+    {{
+      "name": "air", "kind": "fluid",
+      "mesh": {{
+        "bounds": {{ "min": [0.2, 0.0, 0.0], "max": [1.0, 1.0, {dz}] }},
+        "cells": [{}, {n}, 1],
+        "boundaries": {{
+          "xmin": "airToWall", "xmax": "cold",
+          "ymin": "airBottom", "ymax": "airTop",
+          "zmin": "airFront",  "zmax": "airBack"
+        }}
+      }},
+      "fluid": {fluid},
+      "patches": [
+        {{ "match": "cold",      "T": {{ "type": "fixedValue", "value": 299.95 }} }},
+        {{ "match": "airBottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "airTop",    "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "airFront",  "T": {{ "type": "empty" }} }},
+        {{ "match": "airBack",   "T": {{ "type": "empty" }} }}
+      ]
+    }},
+    {{
+      "name": "wall", "kind": "solid",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.2, 1.0, {dz}] }},
+        "cells": [{n_solid}, {n}, 1],
+        "boundaries": {{
+          "xmin": "hot",        "xmax": "wallToAir",
+          "ymin": "wallBottom", "ymax": "wallTop",
+          "zmin": "wallFront",  "zmax": "wallBack"
+        }}
+      }},
+      "material": {{ "rho": 1.0, "c": 1.0, "kappa": {kappa_solid} }},
+      "patches": [
+        {{ "match": "hot",        "T": {{ "type": "fixedValue", "value": 300.05 }} }},
+        {{ "match": "wallBottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallTop",    "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallFront",  "T": {{ "type": "empty" }} }},
+        {{ "match": "wallBack",   "T": {{ "type": "empty" }} }}
+      ]
+    }}
+  ],
+  "interfaces": [
+    {{ "regionA": "air", "patchA": "airToWall",
+       "regionB": "wall", "patchB": "wallToAir"{rc} }}
+  ],
+  "buoyancy": {{ "g": [0.0, {g}, 0.0], "TRef": {t_ref} }},
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": {iterations} }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU",
+    "tolerance": 1e-16, "maxIter": 400,
+    "flow": {{
+      "relaxU": {relax_u}, "relaxP": 0.3, "relaxT": 0.7,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear",
+      "residual": {residual},
+      "uTolerance": 1e-14, "pTolerance": 1e-14,
+      "uMaxIter": 150, "pMaxIter": 500
+    }}
+  }}
+}}"#,
+        n - n_solid
+    )
+}
+
+/// The pair tests' base document: coarse, and run only far enough that two
+/// answers can differ. `Ra = 1e4` with `Kr = 1`.
+fn kp_pair_base() -> String {
+    kp_case(20, "1.0", r#"{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }"#,
+            "-2.13e7", "300.0", "", 600, "0.0", "0.7")
+}
+
+fn run_flow(gpu: &Gpu, text: &str) -> crate::cht::flow::ChtFlowSolution {
+    let low = read(text)
+        .unwrap_or_else(|e| panic!("parse: {e}"))
+        .lower()
+        .unwrap_or_else(|e| panic!("lower: {e}"));
+    let case = low.flow_case().expect("a fluid case lowers to a FlowCase");
+    crate::cht::flow::run_flow_case(gpu, &case).expect("run")
+}
+
+/// The §13.4.1 pair test itself, factored: two documents differing in one
+/// substring must produce different temperature fields.
+fn pair_differs(gpu: &Gpu, from: &str, to: &str, what: &str) {
+    let a = kp_pair_base();
+    let b = a.replace(from, to);
+    assert_ne!(a, b, "the pair test's own substitution '{from}' -> '{to}' changed nothing");
+    let sa = run_flow(gpu, &a);
+    let sb = run_flow(gpu, &b);
+    let gap = sa
+        .t
+        .iter()
+        .zip(&sb.t)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+    assert!(
+        gap > 1e-12,
+        "changing {what} moved the temperature field by {gap} K. Two cases \
+         differing in one entry produced the SAME answer, which means the case \
+         said {what} and the solver ignored it (SPEC-LIT 13.4.1)"
+    );
+}
+
+#[test]
+fn the_shipped_kaminski_prakash_case_reads_and_lowers_as_a_flow_case() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cases/kaminskiPrakash.cht.jsonc");
+    let case = super::read_cht_case(&path).expect("read");
+    let low = case.lower().expect("lower");
+    assert!(low.has_fluid(), "the shipped case has a fluid region");
+    assert_eq!(low.kinds(), vec![RegionKind::Fluid, RegionKind::Solid]);
+    let flow = low.flow_case().expect("flow case");
+    assert_eq!(flow.regions.len(), 2);
+    assert!(flow.regions[0].fluid.is_some() && flow.regions[0].solid.is_none());
+    assert!(flow.regions[1].solid.is_some() && flow.regions[1].fluid.is_none());
+    // Pr = mu cp/kappa, the number a reader checks the case by.
+    let pr = flow.regions[0].fluid.as_ref().expect("fluid").pr();
+    assert!((pr - 0.71).abs() < 1e-12, "Pr = {pr}");
+}
+
+/// SPEC-LIT §60.3, both directions. Every one of these is a setting the case
+/// could write and the solver would ignore, or one the solver needs and the
+/// case did not write - the §13.4.1 defect on either side.
+#[test]
+fn the_fluid_only_blocks_are_refused_in_both_directions() {
+    crate::io::contract::reset_warnings();
+
+    // Present with no fluid region.
+    for (name, extra) in [
+        ("buoyancy", r#", "buoyancy": { "g": [0,-9.81,0], "TRef": 300.0 }"#),
+        (
+            "numerics/flow",
+            "", // handled below - it lives INSIDE numerics
+        ),
+    ] {
+        if extra.is_empty() {
+            continue;
+        }
+        let text = slab_case("1.4", "148.0", "", "", extra);
+        let e = read(&text).expect("parse").lower().expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(msg.contains(name), "{msg}");
+        assert!(msg.contains("13.4.1"), "{msg}");
+    }
+
+    let text = default_slab().replace(
+        r#""tolerance": 1e-30, "maxIter": 4000"#,
+        r#""tolerance": 1e-30, "maxIter": 4000,
+    "flow": { "relaxU": 0.7, "relaxP": 0.3, "relaxT": 0.7 }"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    assert!(e.to_string().contains("numerics/flow"), "{e}");
+
+    let text = default_slab().replace(
+        r#""run": { "steady": true }"#,
+        r#""run": { "steady": true, "iterations": 100 }"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    assert!(e.to_string().contains("run/iterations"), "{e}");
+
+    // Absent with one.
+    for (name, from, to) in [
+        (
+            "buoyancy",
+            r#""buoyancy": { "g": [0.0, -2.13e7, 0.0], "TRef": 300.0 },"#,
+            "",
+        ),
+        (
+            "run/iterations",
+            r#""run": { "steady": true, "iterations": 600 }"#,
+            r#""run": { "steady": true }"#,
+        ),
+    ] {
+        let text = kp_pair_base().replace(from, to);
+        assert!(text != kp_pair_base(), "the substitution for {name} matched nothing");
+        let e = read(&text).expect("parse").lower().expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(msg.contains(name), "{msg}");
+        assert!(msg.contains("60.2"), "{msg}");
+    }
+}
+
+/// SPEC-LIT §60.3: a solid region carries `material`, a fluid one `fluid`,
+/// and the reader will not choose between them.
+#[test]
+fn the_wrong_material_block_for_a_kind_is_refused_naming_both() {
+    crate::io::contract::reset_warnings();
+
+    // A fluid region with a `material` block as well.
+    let text = kp_pair_base().replace(
+        r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },"#,
+        r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },
+      "material": { "rho": 1.0, "c": 1.0, "kappa": 1.0 },"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    assert!(e.to_string().contains("FLUID region carries `fluid`"), "{e}");
+
+    // A fluid region with no `fluid` block at all.
+    let text = kp_pair_base().replace(
+        r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },"#,
+        "",
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    assert!(e.to_string().contains("needs a `fluid` block"), "{e}");
+
+    // A solid region with a `fluid` block.
+    let text = kp_pair_base().replace(
+        r#""material": { "rho": 1.0, "c": 1.0, "kappa": 1.0 },"#,
+        r#""material": { "rho": 1.0, "c": 1.0, "kappa": 1.0 },
+      "fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    assert!(e.to_string().contains("SOLID region carries `material`"), "{e}");
+}
+
+/// SPEC-LIT §59.6: a conjugate fluid transient is refused, because nothing in
+/// this tree gates its time accuracy.
+#[test]
+fn a_transient_fluid_case_is_refused_naming_what_is_not_gated() {
+    crate::io::contract::reset_warnings();
+    let text = kp_pair_base().replace(
+        r#""run": { "steady": true, "iterations": 600 }"#,
+        r#""run": { "endTime": 1.0, "deltaT": 0.01, "iterations": 600 }"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("steady"), "{msg}");
+    assert!(msg.contains("59.6"), "{msg}");
+}
+
+/// SPEC-LIT §60.3: a volumetric source on a fluid region would be read and
+/// dropped, which is the §13.4.1 defect.
+#[test]
+fn a_source_on_a_fluid_region_is_refused_rather_than_dropped() {
+    crate::io::contract::reset_warnings();
+    let text = kp_pair_base().replace(
+        r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },"#,
+        r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },
+      "source": 1000.0,"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("source"), "{msg}");
+    assert!(msg.contains("13.4.1"), "{msg}");
+}
+
+/// SPEC-LIT §60.3: `empty` patches come in opposite pairs.
+#[test]
+fn a_lone_empty_patch_is_refused() {
+    crate::io::contract::reset_warnings();
+    let text = kp_pair_base().replace(
+        r#"{ "match": "airBack",   "T": { "type": "empty" } }"#,
+        r#"{ "match": "airBack",   "T": { "type": "zeroGradient" } }"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    assert!(e.to_string().contains("opposite"), "{e}");
+}
+
+/// A fluid case is not `cht::run_case`'s business, and it says so rather than
+/// building the fluid as a conducting solid.
+#[test]
+fn run_case_refuses_a_fluid_case_naming_the_function_that_solves_it() {
+    let Some(gpu) = gpu() else { return };
+    let low = read(&kp_pair_base()).expect("parse").lower().expect("lower");
+    let msg = match crate::cht::run_case(&gpu, &low) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("cht::run_case must refuse a fluid case (SPEC-LIT 60)"),
+    };
+    assert!(msg.contains("run_flow_case"), "{msg}");
+}
+
+// ---- the §13.4.1 pair tests, run ---------------------------------------
+
+/// **The pair test for the whole of SPEC-LIT §59/§60**: if `kind` were
+/// ignored, the fluid region would be solved as a conducting solid and the
+/// answer would be the pure-conduction one - which is precisely the defect
+/// §47.14's refusal existed to prevent, now that the refusal is gone.
+///
+/// This is the ONE pair in §60.4 whose two documents cannot differ in a single
+/// entry, and that is a property of the format rather than a weakness of the
+/// test: §60.3 requires `buoyancy`, `numerics.flow` and `run.iterations` with
+/// a fluid region and REFUSES all three without one, so a document with
+/// `kind: solid` and a `buoyancy` block does not lower at all. The two
+/// documents below are therefore the minimal pair that both lower, and the
+/// test asserts that the solid twin really is a pure-conduction case
+/// (`has_fluid() == false`) before comparing.
+#[test]
+fn pair_the_region_kind_itself_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let fluid = run_flow(&gpu, &kp_pair_base());
+
+    let low = read(&kp_solid_twin(20))
+        .expect("parse")
+        .lower()
+        .expect("lower");
+    assert!(!low.has_fluid(), "the twin must be a pure-conduction case");
+    let solid = crate::cht::run_case(&gpu, &low).expect("run");
+
+    let gap = fluid
+        .t
+        .iter()
+        .zip(&solid.t)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+    assert!(
+        gap > 1e-9,
+        "the same geometry solved with `kind: fluid` and with `kind: solid`          gave the same temperature field (worst difference {gap} K). The case          said `fluid` and the solver ignored it - SPEC-LIT 13.4.1"
+    );
+
+    // And the direction is the one the physics demands: convection carries
+    // MORE heat than conduction alone, so the fluid run's cold wall takes
+    // more out.
+    let q_fluid = -fluid.patch_heat_flow(0, "cold").expect("cold");
+    let h = &solid.mesh.host;
+    let mut q_solid = 0.0 as Scalar;
+    for bf in solid.mesh.patch_range(0, "cold").expect("cold") {
+        let c = h.b_face_cells[bf] as usize;
+        // kappa_f = 1 in the twin, so C_b = Delta_b.
+        q_solid -= h.b_mag_sf[bf] * h.b_delta_coeffs[bf] * (solid.bt[bf] - solid.t[c]);
+    }
+    assert!(
+        q_fluid > 1.001 * q_solid,
+        "convection must carry more than conduction: {q_fluid} W against          {q_solid} W"
+    );
+}
+
+/// The pure-conduction twin of [`kp_pair_base`]: the same geometry and the
+/// same materials with `kind: solid` on region 0 and, necessarily, none of
+/// §60.3's fluid-only blocks.
+fn kp_solid_twin(n: usize) -> String {
+    let dz = 1.0 / n as f64;
+    let n_solid = (0.2 * n as f64).round() as usize;
+    format!(
+        r#"{{
+  "name": "kaminskiPrakashConductionTwin",
+  "regions": [
+    {{
+      "name": "air", "kind": "solid",
+      "mesh": {{
+        "bounds": {{ "min": [0.2, 0.0, 0.0], "max": [1.0, 1.0, {dz}] }},
+        "cells": [{}, {n}, 1],
+        "boundaries": {{
+          "xmin": "airToWall", "xmax": "cold",
+          "ymin": "airBottom", "ymax": "airTop",
+          "zmin": "airFront",  "zmax": "airBack"
+        }}
+      }},
+      "material": {{ "rho": 1.0, "c": 1.0, "kappa": 1.0 }},
+      "patches": [
+        {{ "match": "cold",      "T": {{ "type": "fixedValue", "value": 299.95 }} }},
+        {{ "match": "airBottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "airTop",    "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "airFront",  "T": {{ "type": "empty" }} }},
+        {{ "match": "airBack",   "T": {{ "type": "empty" }} }}
+      ]
+    }},
+    {{
+      "name": "wall", "kind": "solid",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.2, 1.0, {dz}] }},
+        "cells": [{n_solid}, {n}, 1],
+        "boundaries": {{
+          "xmin": "hot",        "xmax": "wallToAir",
+          "ymin": "wallBottom", "ymax": "wallTop",
+          "zmin": "wallFront",  "zmax": "wallBack"
+        }}
+      }},
+      "material": {{ "rho": 1.0, "c": 1.0, "kappa": 1.0 }},
+      "patches": [
+        {{ "match": "hot",        "T": {{ "type": "fixedValue", "value": 300.05 }} }},
+        {{ "match": "wallBottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallTop",    "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallFront",  "T": {{ "type": "empty" }} }},
+        {{ "match": "wallBack",   "T": {{ "type": "empty" }} }}
+      ]
+    }}
+  ],
+  "interfaces": [
+    {{ "regionA": "air", "patchA": "airToWall",
+       "regionB": "wall", "patchB": "wallToAir" }}
+  ],
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true }},
+  "numerics": {{
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 4000
+  }}
+}}"#,
+        n - n_solid
+    )
+}
+
+#[test]
+fn pair_the_solid_conductivity_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    // SPEC-LIT §47.12 Gate 5's own parameter: the conductivity ratio.
+    pair_differs(
+        &gpu,
+        r#""material": { "rho": 1.0, "c": 1.0, "kappa": 1.0 }"#,
+        r#""material": { "rho": 1.0, "c": 1.0, "kappa": 10.0 }"#,
+        "the solid conductivity (the conductivity ratio Kr)",
+    );
+}
+
+#[test]
+fn pair_the_body_force_and_the_reference_temperature_change_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    pair_differs(&gpu, r#""g": [0.0, -2.13e7, 0.0]"#, r#""g": [0.0, -2.13e6, 0.0]"#, "buoyancy/g");
+    pair_differs(&gpu, r#""TRef": 300.0"#, r#""TRef": 600.0"#, "buoyancy/TRef");
+}
+
+#[test]
+fn pair_every_fluid_property_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let base = r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }"#;
+    for (to, what) in [
+        (r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 1.42 }"#, "fluid/mu"),
+        (r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 2.0, "mu": 0.71 }"#, "fluid/kappa"),
+        (r#""fluid": { "rho": 2.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }"#, "fluid/rho"),
+        (r#""fluid": { "rho": 1.0, "cp": 2.0, "kappa": 1.0, "mu": 0.71 }"#, "fluid/cp"),
+    ] {
+        pair_differs(&gpu, base, to, what);
+    }
+}
+
+#[test]
+fn pair_the_contact_resistance_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    pair_differs(
+        &gpu,
+        r#""patchB": "wallToAir" }"#,
+        r#""patchB": "wallToAir", "Rc": 0.05 }"#,
+        "the interface contact resistance Rc",
+    );
+}
+
+/// A relaxation factor that reached nothing would leave the SEQUENCE of
+/// iterates identical, so the two runs are stopped at a fixed count rather
+/// than at a residual - the only way this pair can be tested at all.
+#[test]
+fn pair_the_relaxation_factor_changes_the_iterate() {
+    let Some(gpu) = gpu() else { return };
+    pair_differs(&gpu, r#""relaxU": 0.7"#, r#""relaxU": 0.4"#, "numerics/flow/relaxU");
+}
+
+/// SPEC-LIT §60.4's note on pairs 7 and 8, made a test rather than a claim.
+///
+/// `rho` and `cp` enter (S59.1) only through `nu = mu/rho`, through
+/// `alpha = kappa/(rho cp)` and through the product `cp rho_f` that multiplies
+/// the flux. Change all three of `rho`, `cp` and `mu` together so that every
+/// one of those is unchanged, and the answer must not move - which is what
+/// makes pairs 7 and 8 evidence rather than an accident of scaling: they move
+/// the answer because they move a dimensionless group, not because the reader
+/// happened to pass the number through.
+#[test]
+fn changing_rho_cp_and_mu_together_at_fixed_nu_alpha_and_rho_cp_leaves_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = kp_pair_base();
+    // rho 1 -> 2, cp 1 -> 0.5, mu 0.71 -> 1.42: nu = mu/rho stays 0.71,
+    // alpha = kappa/(rho cp) stays 1, and cp*rho stays 1.
+    let b = a.replace(
+        r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }"#,
+        r#""fluid": { "rho": 2.0, "cp": 0.5, "kappa": 1.0, "mu": 1.42 }"#,
+    );
+    assert_ne!(a, b);
+    let sa = run_flow(&gpu, &a);
+    let sb = run_flow(&gpu, &b);
+    let gap = sa
+        .t
+        .iter()
+        .zip(&sb.t)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+    // Not bitwise: the two runs multiply different constants in different
+    // orders. Round-off on a 300 K field over 600 iterations.
+    assert!(
+        gap < 1e-9,
+        "holding nu, alpha and rho*cp fixed while moving rho, cp and mu moved \
+         the temperature field by {gap} K. Those three numbers enter the \
+         equations ONLY through those three groups (SPEC-LIT S59.1), so \
+         something else is reading one of them"
+    );
 }

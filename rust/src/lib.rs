@@ -73,6 +73,8 @@ pub mod energy;
 pub mod fvdom;
 pub mod radiation;
 pub mod s2s;
+pub mod soot;
+pub mod wsgg;
 pub mod precon;
 pub mod pressure;
 pub mod scalar_transport;

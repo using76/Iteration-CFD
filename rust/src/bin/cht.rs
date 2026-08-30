@@ -24,15 +24,21 @@
 //! resistances and mesh-axis-diagonal anisotropic conductivities. That is
 //! `cases/dieStack.cht.jsonc`, and it is the semiconductor-package problem.
 //!
-//! It does **not** solve a fluid. `crate::cht` implements and tests the fluid
-//! side of §47's interface - the `k_eff Delta` and wall-function conductances
-//! of §47.6 - but no case format reaches it, so this driver has no fluid
-//! region and `crate::io::case_cht` refuses one by name rather than building
-//! a solid and calling it a fluid.
+//! **It now also solves a conjugate FLUID/solid case** - SPEC-LIT §59 and
+//! §60. A region that says `"kind": "fluid"` gets §26's energy equation over
+//! §47.4's concatenated mesh and §5's SIMPLE loop on the fluid block, driven
+//! by §9's body force. That is `cases/kaminskiPrakash.cht.jsonc`, and it is
+//! §47.12's Gate 5.
+//!
+//! The fluid region is a **closed cavity**: every non-`empty` patch of it is a
+//! no-slip wall. An inlet or an outlet is refused by name (SPEC-LIT §60.2),
+//! which is also why §47.12's Gate 6 - Qu & Mudawar's forced-convection
+//! micro-channel - still cannot be expressed here (§60.6).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ofgpu::cht::flow::{run_flow_case, ChtFlowSolution};
 use ofgpu::cht::{run_case, ChtSolution};
 use ofgpu::error::{IoContext, Result};
 use ofgpu::io::case_cht::{read_cht_case, LoweredChtCase};
@@ -86,15 +92,38 @@ fn main() -> ExitCode {
 const USAGE: &str = "\
 ofgpu-cht <case.jsonc> [-csv <out.csv>]
 
-Multi-region solid conduction with conjugate interfaces - SPEC-LIT 46/47.
+Multi-region conduction with conjugate interfaces - SPEC-LIT 46/47 - and,
+when a region says \"kind\": \"fluid\", conjugate natural convection in a
+closed cavity - SPEC-LIT 59/60.
 Writes a per-cell temperature CSV when -csv is given.";
 
 fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
     let case = read_cht_case(case_path)?;
     let low = case.lower()?;
 
-    println!("ofgpu-cht | case '{}' | {}", low.name, if low.steady { "steady" } else { "transient" });
+    println!(
+        "ofgpu-cht | case '{}' | {} | {}",
+        low.name,
+        if low.steady { "steady" } else { "transient" },
+        if low.has_fluid() { "conjugate fluid/solid (SPEC-LIT 59/60)" } else { "conduction (SPEC-LIT 46/47)" }
+    );
     for (i, name) in low.region_names.iter().enumerate() {
+        if let Some(f) = &low.fluids[i] {
+            println!(
+                "  region {i} '{name}': {} cells, FLUID rho = {:.4} kg/m^3, cp = {:.4} J/(kg K), \
+                 k = {:.4e} W/(m K), mu = {:.4e} Pa s -> nu = {:.4e}, alpha = {:.4e} m^2/s, \
+                 Pr = {:.4}",
+                low.meshes[i].n_cells,
+                f64::from(f.rho),
+                f64::from(f.cp),
+                f64::from(f.kappa),
+                f64::from(f.mu),
+                f64::from(f.nu()),
+                f64::from(f.alpha()),
+                f64::from(f.pr()),
+            );
+            continue;
+        }
         let m = &low.materials[i];
         let (kmin, kmax) = m.k.range();
         println!(
@@ -111,9 +140,32 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
             println!("    source {:.4e} W/m^3", f64::from(low.sources[i]));
         }
     }
+    if let Some(b) = &low.buoyancy {
+        println!(
+            "  buoyancy: g = ({:.4e}, {:.4e}, {:.4e}) m/s^2, TRef = {:.4} K \
+             (SPEC-LIT 9's b = g(TRef/T - 1))",
+            f64::from(b.g.x),
+            f64::from(b.g.y),
+            f64::from(b.g.z),
+            f64::from(b.t_ref)
+        );
+    }
 
     let gpu = Gpu::new(0)?;
     println!("  device {}", gpu.ctx().name()?);
+
+    if low.has_fluid() {
+        let case = low
+            .flow_case()
+            .expect("has_fluid implies buoyancy and numerics/flow, which lower() enforces");
+        let sol = run_flow_case(&gpu, &case)?;
+        report_flow(&low, &sol);
+        if let Some(path) = csv {
+            write_flow_csv(path, &sol)?;
+            println!("  wrote {}", path.display());
+        }
+        return Ok(());
+    }
 
     let sol = run_case(&gpu, &low)?;
     report(&low, &sol);
@@ -123,6 +175,101 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
         println!("  wrote {}", path.display());
     }
     Ok(())
+}
+
+/// SPEC-LIT §59/§60's own report.
+fn report_flow(low: &LoweredChtCase, sol: &ChtFlowSolution) {
+    let m = &sol.mesh;
+    println!(
+        "\n  thermal mesh: {} cells, {} internal faces, {} boundary faces, {} interface face pairs",
+        m.host.n_cells,
+        m.host.n_internal_faces,
+        m.host.n_boundary_faces,
+        m.pairs.len()
+    );
+    if !m.pairs.is_empty() {
+        println!(
+            "  interface: area {:.6e} m^2, worst non-orthogonality {:.4} deg",
+            f64::from(m.report.total_area),
+            f64::from(m.report.non_orth_deg()),
+        );
+    }
+    println!(
+        "\n  {} outer iterations, converged {} | residuals U {:.3e} p {:.3e} T {:.3e} | \
+         continuity {:.3e} m^3/s | max |U| {:.4e} m/s",
+        sol.iterations,
+        sol.converged,
+        f64::from(sol.residuals.0),
+        f64::from(sol.residuals.1),
+        f64::from(sol.residuals.2),
+        f64::from(sol.continuity),
+        f64::from(sol.max_speed()),
+    );
+    for (i, name) in low.region_names.iter().enumerate() {
+        let (lo, hi) = sol.region_range(i);
+        println!(
+            "  region '{name}': T = {:.6} .. {:.6} K, volume mean {:.6} K",
+            f64::from(lo),
+            f64::from(hi),
+            f64::from(sol.region_mean(i))
+        );
+    }
+
+    // Every patch that is not an interface, so a reader can close the energy
+    // balance from the output alone.
+    println!("\n  patch heat flow, W (positive = INTO the domain):");
+    for (region, patch, _) in &low.patch_bcs {
+        if let Ok(q) = sol.patch_heat_flow(*region, patch) {
+            println!(
+                "    {}:{patch}: {:+.6e}",
+                low.region_names[*region],
+                f64::from(q)
+            );
+        }
+    }
+
+    if !m.pairs.is_empty() {
+        println!("\n  interface heat flow, W (positive = INTO that side):");
+        for (name, into_a, into_b) in sol.interface_flows() {
+            println!("    {name}: {:+.6e} / {:+.6e}", f64::from(into_a), f64::from(into_b));
+        }
+        println!(
+            "  conservation imbalance |sum q_A + sum q_B|/sum|q_A| = {:.3e}  (SPEC-LIT 47.12 Gate 4)",
+            f64::from(sol.interface.imbalance())
+        );
+        let mut worst_jump: Scalar = 0.0;
+        for p in &m.pairs {
+            worst_jump = worst_jump.max((sol.bt[p.bf_a as usize] - sol.bt[p.bf_b as usize]).abs());
+        }
+        println!("  largest interface temperature JUMP: {:.6e} K", f64::from(worst_jump));
+    }
+}
+
+fn write_flow_csv(path: &Path, sol: &ChtFlowSolution) -> Result<()> {
+    use std::fmt::Write as _;
+
+    let m = &sol.mesh;
+    let mut out = String::with_capacity(96 * m.host.n_cells);
+    out.push_str("region,cell,x,y,z,T,Ux,Uy,Uz\n");
+    for (r, block) in m.regions.iter().enumerate() {
+        for c in block.cells() {
+            let p = m.host.c[c];
+            let u = sol.u.get(c).copied().unwrap_or(ofgpu::Vec3::ZERO);
+            let _ = writeln!(
+                out,
+                "{},{c},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e}",
+                m.regions[r].name,
+                f64::from(p.x),
+                f64::from(p.y),
+                f64::from(p.z),
+                f64::from(sol.t[c]),
+                f64::from(u.x),
+                f64::from(u.y),
+                f64::from(u.z),
+            );
+        }
+    }
+    std::fs::write(path, out).path(path)
 }
 
 fn report(low: &LoweredChtCase, sol: &ChtSolution) {

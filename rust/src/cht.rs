@@ -1845,6 +1845,21 @@ impl ChtSolution {
 pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result<ChtSolution> {
     use crate::io::case_cht::LoweredBc;
 
+    // SPEC-LIT §60: a case with a fluid region belongs to
+    // `crate::cht::flow::run_flow_case`, which solves §26's energy equation
+    // over the concatenated mesh beside §5's SIMPLE loop. Running it here
+    // would build the fluid as a conducting solid and call it a fluid - the
+    // exact substitution §13.4 forbids.
+    if case.has_fluid() {
+        return Err(Error::Config(format!(
+            "{}: this case has a fluid region, and `cht::run_case` solves \
+             conduction only. Call `cht::flow::run_flow_case` (SPEC-LIT 59/60) \
+             - `ofgpu-cht` dispatches on `LoweredChtCase::has_fluid` and does it \
+             for you",
+            case.name
+        )));
+    }
+
     let regions: Vec<RegionInput<'_>> = case
         .region_names
         .iter()
@@ -1972,6 +1987,8 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
 
     Ok(ChtSolution { mesh: tm, t, bt, interface, pair_flux, steps, residual })
 }
+
+pub mod flow;
 
 #[cfg(test)]
 mod tests;
