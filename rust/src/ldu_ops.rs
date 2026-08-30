@@ -425,11 +425,13 @@ pub fn set_fixed_cells(
 /// this is a pure permutation write and the matrix reaches AMGX (or cuSPARSE,
 /// or cuDSS) without the host seeing a coefficient.
 ///
-/// The CSR has one column per incident internal face plus the diagonal, so a
-/// coupled face's `boundary_coeffs` - an off-diagonal against a cell that is
-/// not a face neighbour - has nowhere to go. On a mesh with cyclic patches the
-/// exported matrix is therefore NOT the operator [`amul`] applies; the AMGX
-/// backend refuses such a mesh up front for exactly this reason.
+/// Since SPEC-LIT §48.2 the pattern also carries one column per COUPLED
+/// boundary face, and this fills it with `-boundary_coeffs[bf]` - the sign
+/// [`amul`] implies, since it applies the coupled term as
+/// `sum -= boundaryCoeffs*psi[nbr]`. The exported matrix is therefore the
+/// operator [`amul`] applies on a cyclic or conjugate mesh too, which it was
+/// not before: the AMGX backend used to refuse such meshes for exactly that
+/// reason.
 pub fn csr_fill(
     gpu: &Gpu,
     k: &LduKernels,
@@ -442,21 +444,32 @@ pub fn csr_fill(
             csr.n_rows, a.n_cells
         )));
     }
-
-    let expected = a.n_cells + 2 * a.n_internal_faces;
-    if csr.nnz != expected {
+    if csr.n_boundary_faces != a.n_boundary_faces {
         return Err(Error::Config(format!(
-            "csr_fill: the CSR holds {} non-zeros; an LDU matrix with {} cells \
-             and {} internal faces needs exactly {}",
-            csr.nnz, a.n_cells, a.n_internal_faces, expected
+            "csr_fill: the CSR was built for {} boundary faces but the matrix \
+             has {}",
+            csr.n_boundary_faces, a.n_boundary_faces
         )));
     }
 
-    let n = a.n_cells.max(a.n_internal_faces);
+    // n_cells + 2 n_internal_faces + one column per coupled boundary face.
+    // The pattern knows how many that is; a mismatch here means the pattern
+    // and the matrix came from different meshes.
+    let base = a.n_cells + 2 * a.n_internal_faces;
+    if csr.nnz < base {
+        return Err(Error::Config(format!(
+            "csr_fill: the CSR holds {} non-zeros; an LDU matrix with {} cells \
+             and {} internal faces needs at least {}",
+            csr.nnz, a.n_cells, a.n_internal_faces, base
+        )));
+    }
+
+    let n = a.n_cells.max(a.n_internal_faces).max(a.n_boundary_faces);
     if n == 0 {
         return Ok(());
     }
     let (ncl, nfl) = (a.n_cells as Label, a.n_internal_faces as Label);
+    let nbl = a.n_boundary_faces as Label;
 
     let f = k.csr_fill.clone();
     unsafe {
@@ -466,11 +479,14 @@ pub fn csr_fill(
             .arg(&a.diag)
             .arg(&a.upper)
             .arg(&a.lower)
+            .arg(&a.boundary_coeffs)
             .arg(&csr.diag_slot)
             .arg(&csr.upper_slot)
             .arg(&csr.lower_slot)
+            .arg(&csr.coupled_slot)
             .arg(&ncl)
             .arg(&nfl)
+            .arg(&nbl)
             .launch(cfg_for(n))?;
     }
     Ok(())
@@ -557,6 +573,9 @@ pub(crate) mod tests {
             b_delta_coeffs: vec![8.0, 4.0, 2.0, 16.0],
             b_y: vec![0.5 * dx; 4],
             b_nbr_cell: vec![-1, -1, 3, 0],
+            // SPEC-LIT 48.3: the FACE pairing, which is what the coupled
+            // symmetry check compares across. bf2 and bf3 are the couple.
+            b_nbr_face: vec![-1, -1, 3, 2],
             b_weights: vec![1.0, 1.0, 0.35, 0.65],
             b_kind: vec![
                 PatchKind::Generic as Label,
@@ -1173,8 +1192,16 @@ pub(crate) mod tests {
     //  csrFill
     // ----------------------------------------------------------------------
 
+    /// **SPEC-LIT §48.2/§48.4.** The exported CSR is the operator [`amul`]
+    /// applies - on a CYCLIC mesh too, which it was not before §48.
+    ///
+    /// This test used to assert the opposite: it zeroed the coupled entry out
+    /// of the dense reference before comparing, and recorded `nnz = n_cells +
+    /// 2 n_internal_faces`. That was an accurate description of a matrix that
+    /// was silently missing a term, and it is why `pressure::amgx` had to
+    /// refuse every periodic mesh.
     #[test]
-    fn csr_fill_reproduces_the_uncoupled_operator() {
+    fn csr_fill_reproduces_the_full_operator_including_the_couple() {
         let Some((gpu, hm, m, k)) = ctx() else { return };
 
         let mut a = GpuLduMatrix::new(&gpu, &m).expect("matrix");
@@ -1182,7 +1209,11 @@ pub(crate) mod tests {
         fill(&gpu, &mut a);
         add_boundary_contributions(&gpu, &k, &mut a, &m).expect("fold");
 
-        let pattern = CsrPattern::build(&hm);
+        let pattern = CsrPattern::build(&hm).expect("pattern");
+        let n_coupled = hm.b_nbr_cell.iter().filter(|c| **c >= 0).count();
+        assert!(n_coupled > 0, "the chain mesh has a cyclic pair to exercise");
+        assert_eq!(pattern.n_coupled, n_coupled);
+
         let mut csr = pattern.upload(&gpu).expect("upload the pattern");
         csr_fill(&gpu, &k, &mut csr, &a).expect("csrFill");
         gpu.sync().expect("sync");
@@ -1191,17 +1222,9 @@ pub(crate) mod tests {
         let col_ind = gpu.download(&csr.col_ind).expect("colInd");
         let val = gpu.download(&csr.val).expect("val");
 
-        // The CSR carries diag/upper/lower and has no column for a coupled
-        // face, so the operator it represents is the dense one with the
-        // couple removed. Anything else would mean the permutation is wrong.
-        let mut dense = dense_from_device(&gpu, &a, &hm);
-        for bf in 0..hm.n_boundary_faces {
-            let nbr = hm.b_nbr_cell[bf];
-            if nbr >= 0 {
-                dense[hm.b_face_cells[bf] as usize][nbr as usize] = 0.0;
-            }
-        }
-
+        // The dense reference INCLUDES the couple, so this compares the CSR
+        // against the whole operator and not against a truncation of it.
+        let dense = dense_from_device(&gpu, &a, &hm);
         let want = dense_mul(&dense, &PSI);
         let got: Vec<Scalar> = (0..4)
             .map(|r| {
@@ -1212,7 +1235,64 @@ pub(crate) mod tests {
             .collect();
 
         assert!(max_diff(&got, &want) < 1e-13, "{got:?} vs {want:?}");
-        assert_eq!(csr.nnz, hm.n_cells + 2 * hm.n_internal_faces);
+        assert_eq!(
+            csr.nnz,
+            hm.n_cells + 2 * hm.n_internal_faces + n_coupled,
+            "one column per coupled boundary face"
+        );
+
+        // And against `amul` itself, which is the operator that actually runs.
+        let psi = gpu.upload(&PSI).expect("psi");
+        let mut apsi: DevBuf<Scalar> = gpu.zeros(hm.n_cells).expect("apsi");
+        amul(&gpu, &k, &mut apsi, &psi, &a, &m).expect("amul");
+        let from_amul = gpu.download(&apsi).expect("apsi");
+        assert!(
+            max_diff(&got, &from_amul) < 1e-13,
+            "the CSR must apply what amul applies: {got:?} vs {from_amul:?}"
+        );
+
+        // Every column is still ascending within its row - what cuSPARSE and
+        // AMGX require, and the thing an inserted column could break.
+        for r in 0..hm.n_cells {
+            let (lo, hi) = (row_ptr[r] as usize, row_ptr[r + 1] as usize);
+            for j in lo + 1..hi {
+                assert!(col_ind[j - 1] < col_ind[j], "row {r} is not sorted");
+            }
+        }
+    }
+
+    /// §48.4's "no false positives" row: on a mesh with no coupled face the
+    /// pattern is byte-for-byte what it always was.
+    #[test]
+    fn an_uncoupled_mesh_gets_exactly_the_pattern_it_always_had() {
+        let mut hm = chain_mesh();
+        for bf in 0..hm.n_boundary_faces {
+            hm.b_nbr_cell[bf] = -1;
+            hm.b_nbr_face[bf] = -1;
+        }
+        let p = CsrPattern::build(&hm).expect("pattern");
+        assert_eq!(p.n_coupled, 0);
+        assert_eq!(p.nnz, hm.n_cells + 2 * hm.n_internal_faces);
+        assert!(p.coupled_slot.iter().all(|s| *s < 0));
+    }
+
+    /// §48.2's one refusal. Two cells joined by BOTH an internal face and a
+    /// coupled boundary face would put the same column in a row twice, and
+    /// `amul` sums both terms while a CSR entry can hold only one.
+    #[test]
+    fn two_cells_joined_twice_are_refused_naming_the_cell() {
+        let mut hm = chain_mesh();
+        // Point the cyclic pair at cells 0 and 1, which an internal face
+        // already joins.
+        hm.b_face_cells = vec![0, 3, 0, 1];
+        hm.b_nbr_cell = vec![-1, -1, 1, 0];
+        hm.b_nbr_face = vec![-1, -1, 3, 2];
+        hm.build_cell_face_maps();
+
+        let e = CsrPattern::build(&hm).expect_err("a duplicated column must be refused");
+        let msg = e.to_string();
+        assert!(msg.contains("two"), "{msg}");
+        assert!(msg.contains("amul") || msg.contains("SUMS"), "{msg}");
     }
 
     #[test]
@@ -1225,7 +1305,7 @@ pub(crate) mod tests {
         let mut smaller = hm.clone();
         smaller.n_cells = 3;
         smaller.cf_offset.truncate(4);
-        let mut csr = CsrPattern::build(&smaller).upload(&gpu).expect("upload");
+        let mut csr = CsrPattern::build(&smaller).expect("pattern").upload(&gpu).expect("upload");
 
         assert!(csr_fill(&gpu, &k, &mut csr, &a).is_err());
     }

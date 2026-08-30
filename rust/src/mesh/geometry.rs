@@ -430,6 +430,10 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
             .collect();
         m.b_nbr_cell = nbr;
     }
+    // SPEC-LIT §48.3: keep the face pairing, not only the cell it implies.
+    // Recomputed rather than derived-if-absent, because it IS `pair` and
+    // there is nothing for a reader to have supplied instead.
+    m.b_nbr_face = pair.clone();
     // An uncoupled boundary face interpolates to the boundary value itself, so
     // the owner's weight is 1 (SPEC-LIT section 2). Cyclic faces overwrite
     // theirs from the geometry below.

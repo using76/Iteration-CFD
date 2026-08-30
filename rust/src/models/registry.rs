@@ -54,15 +54,18 @@ use crate::les::{BaseDelta, DeltaSpec, SmoothSpec};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::models::coupled::{
     BuoyancySettings, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst, CoupledLaminar,
-    CoupledLaunderSharmaKE, CoupledLes, CoupledRealizableKe, CoupledRngKe, CoupledTurbulence,
+    CoupledLaunderSharmaKE, CoupledLes, CoupledRealizableKe, CoupledRngKe,
+    CoupledSpalartAllmaras, CoupledTurbulence,
 };
+use crate::models::des::{DesBranch, DesCoeffs, HybridBackground, HybridDelta};
 use crate::models::les::{Les, LesCoeffs, LesModel};
+use crate::models::spalart_allmaras::{SaCoeffs, SaVariant};
 use crate::models::{
     KEpsilon, KEpsilonCoeffs, KOmega, KOmegaCoeffs, KOmegaSst, KOmegaSstCoeffs, LaunderSharmaKE,
-    RealizableKe, RealizableKeCoeffs, RngKe, RngKeCoeffs,
+    RealizableKe, RealizableKeCoeffs, RngKe, RngKeCoeffs, SpalartAllmaras,
 };
 use crate::turbulence::C3Mode;
-use crate::{Scalar, Vec3};
+use crate::{Label, Scalar, Vec3};
 
 /// A model ofgpu implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +98,21 @@ pub enum RasModel {
     /// Menter k-omega SST, the 2003 revision - SPEC-LIT §6.3. Needs the wall
     /// distance of §6.6, which a driver must compute before constructing it.
     KOmegaSST,
+    /// Spalart-Allmaras - SPEC-LIT §56. ONE transport equation, for `nuTilda`,
+    /// which is not a dissipation rate and not an eddy viscosity; and no wall
+    /// function at all, because `nu~ = 0` is an exact Dirichlet condition.
+    /// Needs the wall distance of §6.6.
+    SpalartAllmaras,
+    /// A detached-eddy hybrid on the Spalart-Allmaras background - SPEC-LIT
+    /// §57. Which of DES97/DDES/IDDES, which filter width and which
+    /// calibration are on [`TurbulenceSelection::des`]; this variant carries
+    /// only "the background is SA", which is what decides the `0/` files and
+    /// the model a driver builds.
+    HybridSa,
+    /// A detached-eddy hybrid on the k-omega SST background - SPEC-LIT §57.
+    /// `sst_k_sources` is untouched: the hybrid overwrites `sp` afterwards
+    /// with (57.4), and a pure SST run does not launch that kernel at all.
+    HybridSst,
     /// Not a RANS model at all: the case said `simulationType LES;` and
     /// [`TurbulenceSelection::les`] carries which subgrid model and which
     /// filter width.
@@ -121,6 +139,12 @@ impl RasModel {
             Self::RNGkEpsilon => "RNGkEpsilon",
             Self::KOmega => "kOmega",
             Self::KOmegaSST => "kOmegaSST",
+            Self::SpalartAllmaras => "SpalartAllmaras",
+            // The branch is on `TurbulenceSelection::des`; a bare
+            // `RasModel` cannot name it, and `TurbulenceSelection::describe`
+            // is what the run banner prints.
+            Self::HybridSa => "SpalartAllmaras (hybrid)",
+            Self::HybridSst => "kOmegaSST (hybrid)",
             Self::Les => "LES",
         }
     }
@@ -143,10 +167,40 @@ impl RasModel {
             Self::RNGkEpsilon => Some("epsilon"),
             Self::KOmega => Some("omega"),
             Self::KOmegaSST => Some("omega"),
+            // SPEC-LIT §58.1, following the design note's own recommendation:
+            // `nu~` is NOT a dissipation rate, and returning `Some("nuTilda")`
+            // here would make this accessor mean two different things
+            // depending on who answers it - the exact overloading
+            // `models/mod.rs` argues against at length. The honest answer is
+            // `None`, and [`RasModel::transported_fields`] is the accessor
+            // that says what a driver actually wants to know.
+            Self::SpalartAllmaras | Self::HybridSa => None,
+            Self::HybridSst => Some("omega"),
             // An algebraic subgrid model solves for nothing, so there is no
             // `0/` file to find. Deardorff reports a `k_sgs`, but it is an
             // estimate the model makes rather than a field it transports.
             Self::Les => None,
+        }
+    }
+
+    /// Every field this model TRANSPORTS, which is also the set of `0/` files
+    /// a driver has to find - SPEC-LIT §58.1.
+    ///
+    /// Added rather than overloading [`Self::dissipation_field`], for the
+    /// reason that accessor's own doc gives: `nu~` is not a dissipation rate,
+    /// and an accessor that meant "the dissipation variable" for four models
+    /// and "the working variable" for a fifth would be exactly the drift
+    /// `models/mod.rs` warns about. **Two accessors that mean two different
+    /// things, and both honest.**
+    pub fn transported_fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Laminar | Self::Les => &[],
+            Self::KEpsilon
+            | Self::LaunderSharmaKE
+            | Self::RealizableKE
+            | Self::RNGkEpsilon => &["k", "epsilon"],
+            Self::KOmega | Self::KOmegaSST | Self::HybridSst => &["k", "omega"],
+            Self::SpalartAllmaras | Self::HybridSa => &["nuTilda"],
         }
     }
 }
@@ -169,6 +223,23 @@ const REGISTRY: &[(&str, RasModel)] = &[
     ("KOmega", RasModel::KOmega),
     ("kOmegaSST", RasModel::KOmegaSST),
     ("KOmegaSST", RasModel::KOmegaSST),
+    ("SpalartAllmaras", RasModel::SpalartAllmaras),
+    ("SpalartAllmarras", RasModel::SpalartAllmaras),
+];
+
+/// The hybrid RANS-LES models - SPEC-LIT §57, §58.2.
+///
+/// Reachable through `simulationType LES; LES { model ...; }` and through
+/// `simulationType DES|DDES|IDDES; DES { model ...; }` alike; both spellings
+/// go through the same reader, and where `simulationType` names a branch it
+/// must AGREE with the one the model name carries (§58.1).
+const HYBRID_REGISTRY: &[(&str, DesBranch, HybridBackground)] = &[
+    ("SpalartAllmarasDES", DesBranch::Des97, HybridBackground::Sa),
+    ("SpalartAllmarasDDES", DesBranch::Ddes, HybridBackground::Sa),
+    ("SpalartAllmarasIDDES", DesBranch::Iddes, HybridBackground::Sa),
+    ("kOmegaSSTDES", DesBranch::Des97, HybridBackground::Sst),
+    ("kOmegaSSTDDES", DesBranch::Ddes, HybridBackground::Sst),
+    ("kOmegaSSTIDDES", DesBranch::Iddes, HybridBackground::Sst),
 ];
 
 /// Names this solver RECOGNISES but does not implement.
@@ -178,14 +249,45 @@ const REGISTRY: &[(&str, RasModel)] = &[
 /// model ofgpu has not got is a different message from telling them
 /// `kepsilon` is not a model at all, and the second one is a typo they can fix
 /// in five seconds once they are told.
-const RECOGNISED_NOT_IMPLEMENTED: &[&str] = &[
-    "kOmegaSSTLM",
-    "kOmegaSSTSAS",
-    "SpalartAllmaras",
-    "kEpsilonPhitF",
-    "v2f",
-    "LRR",
-    "SSG",
+const RECOGNISED_NOT_IMPLEMENTED: &[(&str, &str)] = &[
+    (
+        "kOmegaSSTLM",
+        "Langtry & Menter's four-equation gamma-Re_theta transition model \
+         (AIAA J. 47 (2009) 2894-2906, the paper that finally published the \
+         previously proprietary correlations - the 2006 pair withholds them \
+         and is not enough to write the model). ofgpu has neither it nor \
+         Menter et al. (2015)'s one-equation gamma successor, so a TRANSITION \
+         prediction is not available from any model here. Running kOmegaSST \
+         in its place gives a fully turbulent boundary layer from the leading \
+         edge - a plausible converged wrong answer (SPEC-LIT 58.3)",
+    ),
+    (
+        "kOmegaSSTSAS",
+        "a scale-adaptive model, which reads the von Karman length scale from \
+         the SECOND velocity derivative rather than switching on the grid. \
+         ofgpu's grid-switched hybrids are kOmegaSSTDDES and kOmegaSSTIDDES \
+         (SPEC-LIT 57)",
+    ),
+    (
+        "kEpsilonPhitF",
+        "four equations with an elliptic relaxation whose wall boundary \
+         condition couples two of them. `LaunderSharmaKE` is the low-Reynolds \
+         model ofgpu has (SPEC-LIT 33)",
+    ),
+    (
+        "v2f",
+        "as kEpsilonPhitF: an elliptic-relaxation model. `LaunderSharmaKE` is \
+         the low-Reynolds model ofgpu has (SPEC-LIT 33)",
+    ),
+    (
+        "LRR",
+        "Reynolds-stress transport: six coupled equations and a redistribution \
+         model, not an eddy-viscosity closure. Nothing in ofgpu is close",
+    ),
+    (
+        "SSG",
+        "as LRR: Reynolds-stress transport. Nothing in ofgpu is close",
+    ),
 ];
 
 /// Names that ARE implemented, but in the other branch of `simulationType`.
@@ -216,10 +318,6 @@ const LES_RECOGNISED_NOT_IMPLEMENTED: &[&str] = &[
     "dynamicLagrangian",
     "DeardorffDiffStress",
     "Vreman",
-    "SpalartAllmarasDES",
-    "SpalartAllmarasDDES",
-    "SpalartAllmarasIDDES",
-    "kOmegaSSTDES",
 ];
 
 /// Filter widths this solver implements - SPEC-LIT §16.
@@ -238,9 +336,23 @@ const DELTA_NAMES: &[&str] = &[
 /// Filter widths this solver recognises and has not got.
 const DELTA_RECOGNISED_NOT_IMPLEMENTED: &[&str] = &[
     "PrandtlDelta",
-    "IDDESDelta",
     "maxDeltaxyzCubeRootLES",
     "cubeRootVolDelta",
+];
+
+/// Filter widths that exist here but ONLY inside a hybrid - SPEC-LIT §58.2.
+///
+/// (57.17) reads the wall distance and the wall-normal grid step and is
+/// defined only inside IDDES's own length-scale blend, so it does not join
+/// [`DELTA_NAMES`]: a pure-LES case naming it is refused with a message
+/// saying where it does live, the same shape as [`LES_MODEL_UNDER_RAS`]'s.
+const DELTA_HYBRID_ONLY: &[&str] = &["IDDESDelta", "IDDESDeltaSimple"];
+
+/// The filter widths a hybrid may name - SPEC-LIT §57.4, §57.10.
+const HYBRID_DELTA_NAMES: &[(&str, HybridDelta)] = &[
+    ("maxDeltaxyz", HybridDelta::MaxEdge),
+    ("IDDESDelta", HybridDelta::IddesFull),
+    ("IDDESDeltaSimple", HybridDelta::IddesSimple),
 ];
 
 /// The menu a rejected name is shown.
@@ -252,10 +364,21 @@ pub fn available_models() -> Vec<&'static str> {
         "RNGkEpsilon",
         "kOmega",
         "kOmegaSST",
+        "SpalartAllmaras",
         "laminar",
     ];
     v.dedup();
     v
+}
+
+/// The menu a rejected hybrid name is shown - SPEC-LIT §58.2.
+pub fn available_hybrid_models() -> Vec<&'static str> {
+    HYBRID_REGISTRY.iter().map(|(n, _, _)| *n).collect()
+}
+
+/// The menu a rejected `DES { delta ...; }` is shown.
+pub fn available_hybrid_deltas() -> Vec<&'static str> {
+    HYBRID_DELTA_NAMES.iter().map(|(n, _)| *n).collect()
 }
 
 /// The menu a rejected `LES { model ...; }` is shown.
@@ -287,6 +410,50 @@ pub struct TurbulenceSelection {
     /// `Some` exactly when `model == RasModel::Les`: which subgrid model, its
     /// coefficient, and the filter width of SPEC-LIT §16.
     pub les: Option<LesSelection>,
+
+    /// `Some` exactly when `model` is `HybridSa` or `HybridSst` - SPEC-LIT
+    /// §57. Which branch, which filter width, and the per-background
+    /// calibration.
+    pub des: Option<HybridSelection>,
+}
+
+/// What a hybrid case asked for - SPEC-LIT §57, §58.1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HybridSelection {
+    pub branch: DesBranch,
+    pub background: HybridBackground,
+    pub delta: HybridDelta,
+    pub coeffs: DesCoeffs,
+    /// The background model's own constants. Only the SA background reads
+    /// this; the SST one takes its coefficients through `KOmegaSstCoeffs` as
+    /// it always has.
+    pub sa: SaCoeffs,
+}
+
+impl HybridSelection {
+    /// The run banner's line - SPEC-LIT §57.5 requires the calibration in use
+    /// to be visible, because the same three names carry different numbers on
+    /// the two backgrounds.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "{} on {} ({} branch), delta {}, {}",
+            self.model_name(),
+            self.background.name(),
+            self.branch.name(),
+            self.delta.name(),
+            self.coeffs.describe(self.background)
+        )
+    }
+
+    /// The name a case writes to get exactly this hybrid.
+    #[must_use]
+    pub fn model_name(&self) -> &'static str {
+        HYBRID_REGISTRY
+            .iter()
+            .find(|(_, b, g)| *b == self.branch && *g == self.background)
+            .map_or("<unnamed hybrid>", |(n, _, _)| *n)
+    }
 }
 
 /// What an LES case asked for - SPEC-LIT §6.5 and §16.
@@ -304,6 +471,22 @@ impl TurbulenceSelection {
             model: RasModel::Laminar,
             active: false,
             les: None,
+            des: None,
+        }
+    }
+
+    /// Every `0/` file this selection needs - SPEC-LIT §58.1.
+    #[must_use]
+    pub fn transported_fields(&self) -> &'static [&'static str] {
+        self.model.transported_fields()
+    }
+
+    /// The run banner's model line, branch included.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match &self.des {
+            Some(h) => h.describe(),
+            None => self.model.name().to_string(),
         }
     }
 }
@@ -364,19 +547,26 @@ pub fn select_turbulence_model(c: &CaseControls) -> Result<TurbulenceSelection> 
                     (),
                 )?;
             }
+            // A hybrid written under `simulationType LES;` is the OpenFOAM
+            // spelling and is honoured here - SPEC-LIT §58.1. The name alone
+            // says which branch, so there is nothing for it to disagree with.
+            if let Some(n) = les_block_model_name(d) {
+                if HYBRID_REGISTRY.iter().any(|(m, _, _)| *m == n) {
+                    return select_hybrid(c, d, None);
+                }
+            }
             return select_les(d);
         }
         // A detached-eddy hybrid is a RANS model and an LES model with a
-        // switch between them, and the switch is the model. Refused by name
-        // rather than run as either half.
+        // switch between them, and the switch is the model - which is now
+        // `models::des`, and is what this arm reaches (SPEC-LIT §57, §58.2).
+        //
+        // The branch `simulationType` names must AGREE with the one the model
+        // name carries: `simulationType DDES;` beside
+        // `model SpalartAllmarasIDDES;` is a case that says two things, and
+        // taking either would be the silent substitution §13.4 forbids.
         "DES" | "DDES" | "IDDES" => {
-            return unsupported(
-                "momentumTransport/simulationType",
-                &sim,
-                &["RAS", "LES", "laminar"],
-                "laminar (nu_t = 0)",
-                TurbulenceSelection::laminar(),
-            );
+            return select_hybrid(c, d, Some(sim.as_str()));
         }
         other => {
             return unsupported(
@@ -404,10 +594,18 @@ pub fn select_turbulence_model(c: &CaseControls) -> Result<TurbulenceSelection> 
             let menu = available_models();
             let hint = if LES_MODEL_UNDER_RAS.contains(&name) {
                 "an LES model; ofgpu has it, but it needs `simulationType LES;`"
-            } else if RECOGNISED_NOT_IMPLEMENTED.contains(&name) {
-                "a published model ofgpu has not got"
+                    .to_string()
+            } else if HYBRID_REGISTRY.iter().any(|(n, _, _)| *n == name) {
+                "a hybrid RANS-LES model; ofgpu has it, but it needs \
+                 `simulationType LES;` or `simulationType DES|DDES|IDDES;` and \
+                 its own block"
+                    .to_string()
+            } else if let Some((_, why)) =
+                RECOGNISED_NOT_IMPLEMENTED.iter().find(|(n, _)| *n == name)
+            {
+                format!("a published model ofgpu has not got - {why}")
             } else {
-                "not a model name ofgpu knows"
+                "not a model name ofgpu knows".to_string()
             };
             return unsupported(
                 &format!("momentumTransport/RAS/model ({hint})"),
@@ -433,6 +631,7 @@ pub fn select_turbulence_model(c: &CaseControls) -> Result<TurbulenceSelection> 
         model,
         active,
         les: None,
+        des: None,
     })
 }
 
@@ -516,7 +715,455 @@ fn select_les(d: &FoamDict) -> Result<TurbulenceSelection> {
             coeffs,
             delta,
         }),
+        des: None,
     })
+}
+
+// ==========================================================================
+//  Section 57 / 58 - the hybrid RANS-LES family
+// ==========================================================================
+
+/// Read a hybrid out of `DES { ... }` (or `LES { ... }`, the OpenFOAM
+/// spelling) - SPEC-LIT §57, §58.1.
+///
+/// `sim_branch` is the branch `simulationType` named, when it named one. The
+/// model name carries a branch too, and the two must agree: a case that says
+/// `simulationType DDES;` beside `model SpalartAllmarasIDDES;` has said two
+/// different things, and taking either would be exactly the silent
+/// substitution SPEC-LIT §13.4 forbids.
+///
+/// Four guards run before anything is built, and they are what keep this
+/// capability honest rather than merely present (SPEC-LIT §57.10): a steady
+/// run, an upwind-biased `div(phi,U)`, `cubeRootVol` as the width, and the
+/// two LES width WRAPPERS are each refused by name. The 2-D refusal needs the
+/// mesh and lives in [`build_coupled`].
+fn select_hybrid(
+    c: &CaseControls,
+    d: &FoamDict,
+    sim_branch: Option<&str>,
+) -> Result<TurbulenceSelection> {
+    // Which block: `DES { ... }` if the case wrote one, else `LES { ... }`.
+    let prefix = if d.has("DES/model") || d.has("DES/DESModel") {
+        "DES"
+    } else {
+        "LES"
+    };
+    let raw = first_word(d.get_or(
+        &format!("{prefix}/model"),
+        d.get_or(&format!("{prefix}/{prefix}Model"), ""),
+    ));
+
+    if raw.is_empty() {
+        return unsupported(
+            &format!("momentumTransport/{prefix}/model"),
+            "<missing>",
+            &available_hybrid_models(),
+            "laminar (nu_t = 0)",
+            TurbulenceSelection::laminar(),
+        );
+    }
+
+    let Some((_, branch, background)) =
+        HYBRID_REGISTRY.iter().find(|(n, _, _)| *n == raw).copied()
+    else {
+        let hint = if LES_REGISTRY.iter().any(|(n, _)| *n == raw) {
+            "an ALGEBRAIC subgrid model, not a hybrid; it needs \
+             `simulationType LES;` with no DES block"
+        } else if LES_RECOGNISED_NOT_IMPLEMENTED.contains(&raw.as_str()) {
+            "a published subgrid model ofgpu has not got"
+        } else {
+            "not a hybrid model name ofgpu knows"
+        };
+        return unsupported(
+            &format!("momentumTransport/{prefix}/model ({hint})"),
+            &raw,
+            &available_hybrid_models(),
+            "laminar (nu_t = 0)",
+            TurbulenceSelection::laminar(),
+        );
+    };
+
+    // SPEC-LIT §58.1: the two spellings of the branch must agree.
+    if let Some(sim) = sim_branch {
+        if sim != branch.name() {
+            return unsupported_note(
+                "momentumTransport/simulationType (against the model name)",
+                sim,
+                &[branch.name()],
+                &format!(
+                    "`{prefix} {{ model {raw}; }}` is the {} branch; \
+                     `simulationType {sim};` names another. The case says two \
+                     different things and this solver will not pick one \
+                     (SPEC-LIT 58.1)",
+                    branch.name()
+                ),
+                "laminar (nu_t = 0)",
+                TurbulenceSelection::laminar(),
+            );
+        }
+    }
+
+    // ---- guard 1: a steady run ------------------------------------------
+    // DES is unsteady by construction; a steady DES is a RANS model with a
+    // corrupted length scale (SPEC-LIT §57.10).
+    if c.turb.steady {
+        return unsupported_note(
+            "ddtSchemes/default (under a DES-family model)",
+            "steadyState",
+            &["Euler", "backward", "CrankNicolson <theta>"],
+            "a detached-eddy hybrid is UNSTEADY by construction: its LES branch \
+             represents resolved turbulence, and a steady solve has none. A \
+             steady run of this model is a RANS model whose destruction term \
+             has been divided by the wrong length (SPEC-LIT 57.10). Run one of \
+             the RANS models instead, or write a time scheme",
+            "laminar (nu_t = 0)",
+            TurbulenceSelection::laminar(),
+        );
+    }
+
+    // ---- guard 2: an upwind-biased convection scheme ---------------------
+    let u_conv = c.schemes.div("div(phi,U)")?;
+    if !hybrid_scheme_is_low_dissipation(u_conv.scheme) {
+        return unsupported_note(
+            "divSchemes/div(phi,U) (under a DES-family model)",
+            &format!("{:?}", u_conv.scheme),
+            &[
+                "Gauss linear",
+                "Gauss cubic",
+                "Gauss linearUpwindBlended 0.75 (LUST)",
+                "Gauss blended <gamma >= 0.5>",
+            ],
+            "an upwind-biased scheme damps the resolved content the LES branch \
+             exists to produce, and the run then looks converged and plausible \
+             and is wrong - the same class of silent substitution SPEC-LIT 13.4 \
+             forbids, which is why this is an error and not a warning. Travin \
+             et al. (2002) publish a scheme-blending function for a case that \
+             genuinely wants an upwind-biased RANS region; ofgpu has NOT got it \
+             (SPEC-LIT 57.10)",
+            "laminar (nu_t = 0)",
+            TurbulenceSelection::laminar(),
+        );
+    }
+
+    // ---- guard 3 and 4: the filter width ---------------------------------
+    let delta_raw = first_word(d.get_or(
+        &format!("{prefix}/delta"),
+        &HybridDelta::default_for(branch, background).name().to_string(),
+    ));
+    let Some((_, delta)) = HYBRID_DELTA_NAMES
+        .iter()
+        .find(|(n, _)| *n == delta_raw)
+        .copied()
+    else {
+        let note = match delta_raw.as_str() {
+            "cubeRootVol" | "cubeRootVolDelta" | "Scotti" => {
+                "C_DES = 0.65 is calibrated with Delta = h_max (Shur et al. \
+                 1999). On an anisotropic mesh V^(1/3) is smaller than h_max by \
+                 the cell aspect ratio, so accepting this would run a DES with \
+                 an uncalibrated constant - a refusal, not a preference \
+                 (SPEC-LIT 57.10)"
+            }
+            "vanDriest" | "smooth" => {
+                "both are WRAPPERS that damp or smooth a base width for a pure \
+                 LES. Neither is defined for a hybrid, whose RANS branch \
+                 already carries the near-wall treatment (SPEC-LIT 57.10)"
+            }
+            _ => {
+                "a hybrid takes h_max, or one of IDDES's two published widths - \
+                 SPEC-LIT (57.17) and (57.18)"
+            }
+        };
+        return unsupported_note(
+            &format!("momentumTransport/{prefix}/delta"),
+            &delta_raw,
+            &available_hybrid_deltas(),
+            note,
+            "laminar (nu_t = 0)",
+            TurbulenceSelection::laminar(),
+        );
+    };
+
+    let coeffs = des_coeffs(d, prefix, background)?;
+    let sa = sa_coeffs_from(d, &format!("{prefix}/"))?;
+    let active = d.bool(&format!("{prefix}/turbulence"), true);
+
+    Ok(TurbulenceSelection {
+        model: match background {
+            HybridBackground::Sa => RasModel::HybridSa,
+            HybridBackground::Sst => RasModel::HybridSst,
+        },
+        active,
+        les: None,
+        des: Some(HybridSelection {
+            branch,
+            background,
+            delta,
+            coeffs,
+            sa,
+        }),
+    })
+}
+
+/// SPEC-LIT §57.10's guard 3: a 2-D mesh.
+///
+/// The LES branch of a hybrid is a three-dimensional turbulence model. A 2-D
+/// DES resolves nothing at all - it produces a plausible converged answer with
+/// no resolved content, which is exactly the failure the whole guard set
+/// exists to stop. `PatchKind::Empty` is what a 2-D mesh has and a 3-D one
+/// does not.
+pub fn refuse_two_dimensional_hybrid(
+    hm: &HostMesh,
+    sel: &HybridSelection,
+) -> Result<()> {
+    let empty = crate::mesh::PatchKind::Empty as Label;
+    if !hm.b_kind.iter().any(|&k| k == empty) {
+        return Ok(());
+    }
+    unsupported_note::<()>(
+        "the mesh (under a DES-family model)",
+        "a 2-D mesh: it has `empty` patches",
+        &["a 3-D mesh"],
+        &format!(
+            "{} is a hybrid RANS-LES model, and its LES branch is a \
+             three-dimensional turbulence model: in two dimensions there is no \
+             vortex stretching and nothing for it to resolve. A 2-D run of this \
+             model converges, plots and means nothing (SPEC-LIT 57.10). Run a \
+             RANS model on this mesh, or extrude it",
+            sel.model_name()
+        ),
+        "nothing - a 2-D hybrid is refused",
+        (),
+    )
+}
+
+/// SPEC-LIT §57.10's guard 2: is this `div(phi,U)` low-dissipation enough for
+/// the LES branch to have anything to resolve?
+///
+/// Central and cubic are the unbounded second- and fourth-order schemes;
+/// `linearUpwindBlended` is the usual LES choice (LUST is that blend at
+/// `0.75`); a plain `blended` counts once the central half is at least half.
+/// Everything else is upwind-biased.
+fn hybrid_scheme_is_low_dissipation(sch: crate::fv::DivScheme) -> bool {
+    use crate::fv::DivScheme as D;
+    match sch {
+        D::Central | D::Cubic | D::LinearUpwindBlended(_) => true,
+        D::Blended(g) => g >= 0.5,
+        _ => false,
+    }
+}
+
+/// Every key a hybrid reads out of its own block, per background.
+const DES_KEYS_SA: &[&str] = &["CDES", "Cdt1", "Cdt2", "ct", "cl", "Cw", "kappa", "delta"];
+const DES_KEYS_SST: &[&str] =
+    &["CDES1", "CDES2", "Cdt1", "Cdt2", "ct", "cl", "Cw", "kappa", "delta"];
+
+/// SPEC-LIT §57.5's per-background refusals, read from the hybrid's own
+/// block.
+fn des_coeffs(
+    d: &FoamDict,
+    prefix: &str,
+    background: HybridBackground,
+) -> Result<DesCoeffs> {
+    let def = DesCoeffs::for_background(background);
+
+    let inert: &[(&str, &str)] = match background {
+        HybridBackground::Sa => &[
+            (
+                "CDES1",
+                "CDES1 and CDES2 are the SST background's, where C_DES is \
+                 blended by F1 (SPEC-LIT 57.5). The SA background has ONE \
+                 C_DES; write `CDES 0.65`",
+            ),
+            (
+                "CDES2",
+                "as CDES1: the SA background has one C_DES, not two blended by \
+                 F1. Write `CDES 0.65`",
+            ),
+        ],
+        HybridBackground::Sst => &[(
+            "CDES",
+            "the SST background's C_DES is C_DES1 F1 + C_DES2 (1 - F1), a FIELD \
+             (SPEC-LIT 57.5 and arXiv:2603.08875 eq. 15) - a single value \
+             cannot express it. Write `CDES1 0.78; CDES2 0.61;`",
+        )],
+    };
+    for (key, why) in inert {
+        let path = format!("{prefix}/{key}");
+        if d.has(&path) {
+            let read = match background {
+                HybridBackground::Sa => DES_KEYS_SA,
+                HybridBackground::Sst => DES_KEYS_SST,
+            };
+            unsupported_note::<()>(
+                &format!("momentumTransport/{prefix}/{key} (on the {} background)", background.name()),
+                d.get(&path).unwrap_or("").trim(),
+                read,
+                why,
+                "nothing - the entry is not read by this background",
+                (),
+            )?;
+        }
+    }
+
+    let g = |k: &str, fallback: Scalar| d.scalar(&format!("{prefix}/{k}"), fallback);
+    let c = DesCoeffs {
+        cdes: g("CDES", def.cdes),
+        cdes1: g("CDES1", def.cdes1),
+        cdes2: g("CDES2", def.cdes2),
+        cdt1: g("Cdt1", def.cdt1),
+        cdt2: g("Cdt2", def.cdt2),
+        ct: g("ct", def.ct),
+        cl: g("cl", def.cl),
+        cw: g("Cw", def.cw),
+        kappa: g("kappa", def.kappa),
+    };
+    c.check()?;
+    Ok(c)
+}
+
+// ==========================================================================
+//  Section 56 - Spalart-Allmaras's coefficients, and what it does NOT read
+// ==========================================================================
+
+/// Every key `SpalartAllmaras` reads out of `RAS { ... }`.
+const SA_KEYS: &[&str] = &[
+    "variant", "Cb1", "Cb2", "Cv1", "Cv2", "Cv3", "Cw2", "Cw3", "Ct3", "Ct4", "Cn1",
+    "sigmaNut", "kappa", "rlim", "nutMaxCoeff",
+];
+
+/// Keys a case might plausibly carry from a k-epsilon or k-omega setup that
+/// Spalart-Allmaras does not read - SPEC-LIT §56.8.
+///
+/// `Cw1` is the interesting one and it is refused for a reason no other entry
+/// in this file has: it is DERIVED, and the derivation IS the log layer.
+const SA_INERT: &[(&str, &str)] = &[
+    (
+        "Cw1",
+        "c_w1 = Cb1/kappa^2 + (1 + Cb2)/sigmaNut is DERIVED, not read (SPEC-LIT \
+         (56.6)). That identity is exactly what makes the log layer an exact \
+         solution of the model (SPEC-LIT 56.4), so a case that could set c_w1 \
+         independently could ask for a Spalart-Allmaras with no log layer. \
+         Change Cb1, Cb2, kappa or sigmaNut and c_w1 moves with them",
+    ),
+    (
+        "Cmu",
+        "SpalartAllmaras has no C_mu: nu_t = nu~ f_v1, not C_mu k^2/eps \
+         (SPEC-LIT (56.1)). `kEpsilon`, `realizableKE` and `RNGkEpsilon` have \
+         one",
+    ),
+    (
+        "C1",
+        "SpalartAllmaras has no epsilon equation for C_1 to appear in \
+         (SPEC-LIT 56.1)",
+    ),
+    (
+        "C2",
+        "SpalartAllmaras has no epsilon equation for C_2 to appear in \
+         (SPEC-LIT 56.1)",
+    ),
+    (
+        "C3",
+        "the Favre dilatation coefficient belongs to the epsilon equation \
+         SpalartAllmaras has not got. There is also no buoyancy term here: a \
+         case with gravity naming this model is refused by name (SPEC-LIT 56.8)",
+    ),
+    (
+        "sigmak",
+        "SpalartAllmaras transports nu~, not k. Its own diffusivity constant is \
+         `sigmaNut` (2/3), which multiplies (nu + nu~ f_n) (SPEC-LIT (56.2))",
+    ),
+    (
+        "sigmaEps",
+        "SpalartAllmaras has no epsilon equation. Its diffusivity constant is \
+         `sigmaNut` (SPEC-LIT (56.2))",
+    ),
+    (
+        "alphak",
+        "alphak and alphaEps are RNGkEpsilon's inverse Prandtl numbers \
+         (SPEC-LIT 41.2). SpalartAllmaras's is `sigmaNut`",
+    ),
+    (
+        "alphaEps",
+        "as alphak: RNGkEpsilon's. SpalartAllmaras's is `sigmaNut`",
+    ),
+    (
+        "betaStar",
+        "betaStar belongs to the k-omega family (SPEC-LIT 6.2, 6.3). \
+         SpalartAllmaras has no omega equation",
+    ),
+    (
+        "A0",
+        "A0 is realizableKE's variable-C_mu constant (SPEC-LIT 40.3). \
+         SpalartAllmaras has no C_mu",
+    ),
+];
+
+/// SPEC-LIT §56.8, read from the case with every entry §56 does not use
+/// refused by name first.
+pub fn sa_coeffs(c: &CaseControls) -> Result<SaCoeffs> {
+    refuse_inert_coefficients(c, "SpalartAllmaras", SA_KEYS, SA_INERT)?;
+    sa_coeffs_from(&c.momentum_transport, "RAS/")
+}
+
+/// [`sa_coeffs`]'s dictionary half, so a hybrid can read the same constants
+/// out of `DES { ... }` and there is ONE transcription of them.
+fn sa_coeffs_from(d: &FoamDict, prefix: &str) -> Result<SaCoeffs> {
+    let def = SaCoeffs::default();
+    let g = |k: &str, fallback: Scalar| d.scalar(&format!("{prefix}{k}"), fallback);
+
+    let raw = first_word(d.get_or(&format!("{prefix}variant"), def.variant.name()));
+    let Some(variant) = SaVariant::parse(&raw) else {
+        return unsupported(
+            &format!("momentumTransport/{}variant", prefix.trim_end_matches('/')),
+            &raw,
+            &SaVariant::menu(),
+            "noft2",
+            def,
+        );
+    };
+
+    let c = SaCoeffs {
+        variant,
+        cb1: g("Cb1", def.cb1),
+        cb2: g("Cb2", def.cb2),
+        cv1: g("Cv1", def.cv1),
+        cv2: g("Cv2", def.cv2),
+        cv3: g("Cv3", def.cv3),
+        cw2: g("Cw2", def.cw2),
+        cw3: g("Cw3", def.cw3),
+        ct3: g("Ct3", def.ct3),
+        ct4: g("Ct4", def.ct4),
+        cn1: g("Cn1", def.cn1),
+        sigma: g("sigmaNut", def.sigma),
+        kappa: g("kappa", def.kappa),
+        rlim: g("rlim", def.rlim),
+    };
+    c.check()?;
+    Ok(c)
+}
+
+/// SPEC-LIT §56.8: `SpalartAllmaras` has no buoyancy production, so a case
+/// that names gravity AND runs a coupled driver is refused by name rather
+/// than run with `G_b` silently at zero.
+///
+/// §17's `G_b` enters a `k` equation and there is none here. Spalart &
+/// Allmaras specify no buoyant extension and this solver will not invent one
+/// - the same refusal §40.5 makes for `realizableKE`, one model further.
+pub fn refuse_sa_buoyancy(c: &CaseControls) -> Result<()> {
+    if !c.buoyancy.is_active() {
+        return Ok(());
+    }
+    unsupported_note::<()>(
+        "momentumTransport/RAS/model (`SpalartAllmaras` in a case with gravity)",
+        "SpalartAllmaras",
+        &["kEpsilon", "LaunderSharmaKE", "kOmega", "kOmegaSST", "RNGkEpsilon"],
+        "SPEC-LIT 56.8: section 17's buoyancy production G_b enters a k \
+         equation, and SpalartAllmaras has none - it transports nu~, which is \
+         not an energy. Spalart & Allmaras specify no buoyant extension and \
+         this solver will not invent one",
+        "nothing - a buoyant SpalartAllmaras run is refused",
+        (),
+    )
 }
 
 /// `LES/<model>Coeffs/<name>`, then `LES/<name>`.
@@ -594,7 +1241,12 @@ fn parse_delta(d: &FoamDict, name: String, depth: usize) -> Result<DeltaSpec> {
             }
         }
         other => {
-            let hint = if DELTA_RECOGNISED_NOT_IMPLEMENTED.contains(&other) {
+            let hint = if DELTA_HYBRID_ONLY.contains(&other) {
+                "a filter width ofgpu HAS, but only inside a hybrid: SPEC-LIT \
+                 (57.17) reads the wall distance and the wall-normal grid step \
+                 and is defined only inside IDDES's own length-scale blend. \
+                 Write it under `DES { delta ...; }` with an IDDES model"
+            } else if DELTA_RECOGNISED_NOT_IMPLEMENTED.contains(&other) {
                 "a published filter width ofgpu has not got"
             } else {
                 "not a filter width ofgpu knows"
@@ -999,6 +1651,108 @@ pub fn build_coupled<'m>(
             Ok(Box::new(CoupledKOmegaSst::new(model, buoy)))
         }
 
+        // SPEC-LIT §56. One transport equation and one solve, and no
+        // wall-function machinery at all on `nu~` - which is why
+        // `wall_faces.constrained_cells` is never read here. `nut`'s own set
+        // still is, because `nu_t`'s wall value is `nut`'s business whichever
+        // model computed the interior (§15.5).
+        //
+        // Buoyancy is REFUSED rather than ignored, exactly as §40.5 refuses it
+        // for `realizableKE`: §17's `G_b` enters a `k` equation and this model
+        // has none.
+        RasModel::SpalartAllmaras => {
+            refuse_sa_buoyancy(cc)?;
+            let coeffs = sa_coeffs(cc)?;
+            let wd = crate::walldistance::wall_distance(
+                gpu,
+                hm,
+                mesh,
+                &cc.p_solver,
+                cc.turb.n_non_orth_correctors,
+            )?;
+            let mut model = SpalartAllmaras::new(
+                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, roughness, &wd.y.f,
+            )?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledSpalartAllmaras::new(model)))
+        }
+
+        // SPEC-LIT §57. The hybrids, on either background. The three guards
+        // `select_hybrid` could apply without a mesh have already fired; the
+        // fourth - a 2-D mesh - needs one and fires here.
+        RasModel::HybridSa | RasModel::HybridSst => {
+            let sel = selection.des.as_ref().ok_or_else(|| {
+                Error::Config(
+                    "momentumTransport: a hybrid was selected with no DES record \
+                     - an internal registry error (select_turbulence_model should \
+                     have refused this case before build_coupled ever saw it), \
+                     not a setting this case file can fix"
+                        .to_string(),
+                )
+            })?;
+            refuse_two_dimensional_hybrid(hm, sel)?;
+
+            let wd = crate::walldistance::wall_distance(
+                gpu,
+                hm,
+                mesh,
+                &cc.p_solver,
+                cc.turb.n_non_orth_correctors,
+            )?;
+            let des = crate::models::des::DesLengthScale::new(
+                gpu,
+                mesh,
+                &wd.y.f,
+                &wd.grad_y,
+                sel.branch,
+                sel.delta,
+                sel.background,
+                sel.coeffs,
+            )?;
+
+            match sel.background {
+                HybridBackground::Sa => {
+                    refuse_sa_buoyancy(cc)?;
+                    let mut model = SpalartAllmaras::new(
+                        gpu, hm, mesh, sel.sa, cc.turb, wall, wall_faces, roughness,
+                        &wd.y.f,
+                    )?;
+                    model.set_des(Some(des));
+                    if !selection.active {
+                        model.freeze_nut(gpu)?;
+                    }
+                    Ok(Box::new(CoupledSpalartAllmaras::new(model)))
+                }
+                HybridBackground::Sst => {
+                    let d = KOmegaSstCoeffs::default();
+                    let coeffs = KOmegaSstCoeffs {
+                        sigma_k1: model_coeff(cc, "sigmaK1", d.sigma_k1),
+                        sigma_w1: model_coeff(cc, "sigmaOmega1", d.sigma_w1),
+                        beta_1: model_coeff(cc, "beta1", d.beta_1),
+                        gamma_1: model_coeff(cc, "gamma1", d.gamma_1),
+                        sigma_k2: model_coeff(cc, "sigmaK2", d.sigma_k2),
+                        sigma_w2: model_coeff(cc, "sigmaOmega2", d.sigma_w2),
+                        beta_2: model_coeff(cc, "beta2", d.beta_2),
+                        gamma_2: model_coeff(cc, "gamma2", d.gamma_2),
+                        beta_star: model_coeff(cc, "betaStar", d.beta_star),
+                        a1: model_coeff(cc, "a1", d.a1),
+                        b1: model_coeff(cc, "b1", d.b1),
+                        c1: model_coeff(cc, "c1", d.c1),
+                    };
+                    let mut model = KOmegaSst::new(
+                        gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f,
+                    )?;
+                    model.set_des(Some(des));
+                    if !selection.active {
+                        model.freeze_nut(gpu)?;
+                    }
+                    Ok(Box::new(CoupledKOmegaSst::new(model, buoy)))
+                }
+            }
+        }
+
         // SPEC-LIT §30.2: the LES family, over `CoupledLes`/`Les`. `wall_faces`
         // means something different here than it does for the RAS arms above
         // - `select_les`/`select_turbulence_model` never populate it (an LES
@@ -1088,6 +1842,388 @@ mod tests {
         }
     }
 
+    /// A case whose `fvSchemes` names a scheme, so the hybrid guards of
+    /// SPEC-LIT §57.10 have something to read.
+    fn hybrid_case(momentum: &str, div_u: &str, steady: bool) -> CaseControls {
+        let d = FoamDict::parse(momentum, "momentumTransport").expect("momentumTransport");
+        let sch = FoamDict::parse(
+            &format!("divSchemes {{ div(phi,U) {div_u}; default Gauss linear; }}"),
+            "fvSchemes",
+        )
+        .expect("fvSchemes");
+        let name = d
+            .get_or("RAS/model", d.get_or("RAS/RASModel", ""))
+            .to_string();
+        let mut c = CaseControls {
+            model_name: name,
+            momentum_transport: d,
+            schemes: crate::io::schemes::FvSchemes::from_dict(sch),
+            ..Default::default()
+        };
+        c.turb.steady = steady;
+        c
+    }
+
+    /// A hybrid case with everything the four guards want.
+    fn good_hybrid(momentum: &str) -> CaseControls {
+        hybrid_case(momentum, "Gauss linear", false)
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §56 / §57 / §58 - the refusals that became capabilities
+    // ------------------------------------------------------------------
+
+    /// `SpalartAllmaras` used to be in `RECOGNISED_NOT_IMPLEMENTED`. It now
+    /// selects a model, and both lists say so.
+    #[test]
+    fn spalart_allmaras_now_selects_a_model() {
+        let s = select_turbulence_model(&case("RAS { model SpalartAllmaras; }"))
+            .expect("SpalartAllmaras is implemented");
+        assert_eq!(s.model, RasModel::SpalartAllmaras);
+        assert!(s.active);
+        assert!(s.des.is_none());
+        // SPEC-LIT §58.1: two accessors, two meanings, both honest.
+        assert_eq!(s.model.dissipation_field(), None);
+        assert_eq!(s.model.transported_fields(), &["nuTilda"]);
+    }
+
+    /// Every hybrid name selects the branch and background it carries, under
+    /// BOTH spellings - SPEC-LIT §58.1.
+    #[test]
+    fn every_hybrid_name_selects_its_own_branch_under_both_spellings() {
+        for (name, branch, background) in HYBRID_REGISTRY {
+            // `simulationType LES;` with the hybrid name in the LES block.
+            let c = good_hybrid(&format!(
+                "simulationType LES; LES {{ model {name}; }}"
+            ));
+            let s = select_turbulence_model(&c).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let h = s.des.expect("a hybrid selection");
+            assert_eq!(h.branch, *branch, "{name}");
+            assert_eq!(h.background, *background, "{name}");
+            assert_eq!(h.model_name(), *name);
+
+            // `simulationType <branch>;` with a DES block.
+            let c = good_hybrid(&format!(
+                "simulationType {}; DES {{ model {name}; }}",
+                branch.name()
+            ));
+            let s = select_turbulence_model(&c).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let h = s.des.expect("a hybrid selection");
+            assert_eq!(h.branch, *branch, "{name}");
+            assert_eq!(h.background, *background, "{name}");
+
+            // The `0/` files follow the background, not the branch.
+            let want: &[&str] = match background {
+                HybridBackground::Sa => &["nuTilda"],
+                HybridBackground::Sst => &["k", "omega"],
+            };
+            assert_eq!(s.model.transported_fields(), want, "{name}");
+        }
+    }
+
+    /// SPEC-LIT §58.2's bookkeeping, in both directions and for all four
+    /// lists - the drift those lists' own doc comments warn about, checked.
+    #[test]
+    fn the_refusal_lists_and_the_registries_do_not_overlap() {
+        for (name, _, _) in HYBRID_REGISTRY {
+            assert!(
+                !LES_RECOGNISED_NOT_IMPLEMENTED.contains(name),
+                "{name} is both implemented and refused"
+            );
+            assert!(
+                RECOGNISED_NOT_IMPLEMENTED.iter().all(|(n, _)| n != name),
+                "{name} is both implemented and refused"
+            );
+            assert!(available_hybrid_models().contains(name));
+        }
+        for name in available_hybrid_models() {
+            assert!(HYBRID_REGISTRY.iter().any(|(n, _, _)| *n == name));
+        }
+        // `IDDESDelta` left the delta refusal list, and did NOT join the
+        // pure-LES menu: (57.17) is defined only inside IDDES.
+        for name in DELTA_HYBRID_ONLY {
+            assert!(!DELTA_RECOGNISED_NOT_IMPLEMENTED.contains(name));
+            assert!(!DELTA_NAMES.contains(name), "{name} must not be a pure-LES width");
+            assert!(available_hybrid_deltas().contains(name));
+        }
+        // Every still-refused RAS name names an alternative that IS
+        // implemented, or says plainly that none is close - SPEC-LIT §58.2.
+        // The task that produced §56 asked for exactly this to be checked in
+        // both directions, and "a published model ofgpu has not got" - the
+        // one bare hint every name carried before - passes neither half.
+        let menu: Vec<&str> = available_models()
+            .into_iter()
+            .chain(available_hybrid_models())
+            .collect();
+        for (name, why) in RECOGNISED_NOT_IMPLEMENTED {
+            assert!(why.len() > 40, "{name}'s refusal says nothing useful: {why}");
+            let names_one = menu.iter().any(|m| why.contains(m));
+            let says_none = why.contains("Nothing in ofgpu is close");
+            assert!(
+                names_one || says_none,
+                "{name}'s refusal names no implemented alternative and does not say                  that none is close: {why}"
+            );
+        }
+    }
+
+    /// **SPEC-LIT §58.3: `kOmegaSSTLM` stays refused, and the message says
+    /// what that costs.**
+    #[test]
+    fn the_transition_model_is_refused_by_name_and_names_its_successor() {
+        let e = select_turbulence_model(&case("RAS { model kOmegaSSTLM; }"))
+            .expect_err("kOmegaSSTLM is not implemented");
+        let m = e.to_string();
+        assert!(m.contains("kOmegaSSTLM"), "{m}");
+        assert!(m.contains("2894"), "the refusal does not cite Langtry & Menter (2009): {m}");
+        assert!(m.contains("2015"), "the refusal does not name the successor: {m}");
+        assert!(
+            m.contains("fully turbulent"),
+            "the refusal does not say how kOmegaSST would be wrong here: {m}"
+        );
+    }
+
+    /// SPEC-LIT §57.10's guard 1: a steady run is refused by name.
+    ///
+    /// DES is unsteady by construction, and a steady DES is a RANS model
+    /// whose destruction term has been divided by the wrong length.
+    #[test]
+    fn a_steady_hybrid_is_refused_by_name() {
+        let m = "simulationType LES; LES { model SpalartAllmarasDDES; }";
+        let e = select_turbulence_model(&hybrid_case(m, "Gauss linear", true))
+            .expect_err("a steady hybrid must be refused");
+        let t = e.to_string();
+        assert!(t.contains("ddtSchemes"), "{t}");
+        assert!(t.contains("UNSTEADY") || t.contains("unsteady"), "{t}");
+        assert!(t.contains("Euler"), "the menu is missing: {t}");
+        // And the same case with a time scheme is accepted.
+        select_turbulence_model(&hybrid_case(m, "Gauss linear", false))
+            .expect("a transient hybrid is fine");
+    }
+
+    /// The upwind refusal, separated out so its message is checked once.
+    #[test]
+    fn an_upwind_biased_momentum_scheme_is_refused_under_a_hybrid() {
+        let m = "simulationType LES; LES { model SpalartAllmarasDDES; }";
+        for sch in ["Gauss upwind", "Gauss linearUpwind grad(U)", "Gauss blended 0.2"] {
+            let e = select_turbulence_model(&hybrid_case(m, sch, false))
+                .expect_err("an upwind-biased scheme under a hybrid must be refused");
+            let t = e.to_string();
+            assert!(t.contains("div(phi,U)"), "{sch}: {t}");
+            assert!(t.contains("Travin"), "{sch}: the refusal does not name the fix: {t}");
+        }
+        // And the low-dissipation ones are accepted.
+        for sch in ["Gauss linear", "Gauss cubic", "Gauss linearUpwindBlended 0.75"] {
+            select_turbulence_model(&hybrid_case(m, sch, false))
+                .unwrap_or_else(|e| panic!("{sch} should be accepted under a hybrid: {e}"));
+        }
+    }
+
+    /// `cubeRootVol`, `Scotti` and the two LES width WRAPPERS are refused
+    /// under a hybrid, each with its own reason - SPEC-LIT §57.10.
+    #[test]
+    fn the_hybrid_width_refusals_say_why() {
+        for (delta, needle) in [
+            ("cubeRootVol", "calibrated"),
+            ("vanDriest", "WRAPPER"),
+            ("smooth", "WRAPPER"),
+            ("Scotti", "calibrated"),
+        ] {
+            let c = good_hybrid(&format!(
+                "simulationType LES; LES {{ model SpalartAllmarasDDES; delta {delta}; }}"
+            ));
+            let e = select_turbulence_model(&c).expect_err("must be refused");
+            let t = e.to_string();
+            assert!(t.contains(delta), "{delta}: {t}");
+            assert!(t.contains(needle), "{delta}: the reason is missing: {t}");
+            assert!(t.contains("maxDeltaxyz"), "{delta}: no menu: {t}");
+        }
+    }
+
+    /// `IDDESDelta` under a PURE LES is refused with a message saying where
+    /// it does live - SPEC-LIT §58.2.
+    #[test]
+    fn the_iddes_width_under_a_pure_les_names_where_it_lives() {
+        let c = case("simulationType LES; LES { model WALE; delta IDDESDelta; }");
+        let e = select_turbulence_model(&c).expect_err("IDDESDelta is not a pure-LES width");
+        let t = e.to_string();
+        assert!(t.contains("IDDESDelta"), "{t}");
+        assert!(t.contains("IDDES"), "{t}");
+        assert!(t.contains("HAS"), "the message does not say ofgpu has it: {t}");
+    }
+
+    /// **SPEC-LIT §58.1: the branch `simulationType` names and the branch the
+    /// model name carries must AGREE.**
+    #[test]
+    fn a_branch_mismatch_between_the_two_spellings_is_refused() {
+        let c = good_hybrid("simulationType DDES; DES { model SpalartAllmarasIDDES; }");
+        let e = select_turbulence_model(&c).expect_err("a branch mismatch must be refused");
+        let t = e.to_string();
+        assert!(t.contains("DDES"), "{t}");
+        assert!(t.contains("IDDES"), "{t}");
+        assert!(t.contains("two different things"), "{t}");
+
+        // And the matching pair is fine.
+        select_turbulence_model(&good_hybrid(
+            "simulationType IDDES; DES { model SpalartAllmarasIDDES; }",
+        ))
+        .expect("a matching pair is not a conflict");
+    }
+
+    /// SPEC-LIT §56.8's inert-coefficient refusals, `Cw1` first because it is
+    /// refused for a reason no other entry has: it is DERIVED.
+    #[test]
+    fn spalart_allmaras_refuses_the_coefficients_it_does_not_read() {
+        for (key, needle) in [
+            ("Cw1", "DERIVED"),
+            ("Cmu", "no C_mu"),
+            ("sigmak", "sigmaNut"),
+            ("sigmaEps", "sigmaNut"),
+            ("alphak", "RNGkEpsilon"),
+            ("betaStar", "k-omega"),
+            ("A0", "realizableKE"),
+            ("C1", "epsilon equation"),
+        ] {
+            let c = case(&format!("RAS {{ model SpalartAllmaras; {key} 1.0; }}"));
+            let e = sa_coeffs(&c).expect_err("an inert coefficient must be refused");
+            let t = e.to_string();
+            assert!(t.contains(key), "{key}: {t}");
+            assert!(t.contains(needle), "{key}: the reason is missing: {t}");
+        }
+        // The keys it DOES read are not refused.
+        let c = case(
+            "RAS { model SpalartAllmaras; Cb1 0.1355; Cb2 0.622; Cv1 7.1; \
+             sigmaNut 0.6666666666; kappa 0.41; Cn1 16; }",
+        );
+        let got = sa_coeffs(&c).expect("the keys SA reads must be accepted");
+        assert_eq!(got.cv1, 7.1);
+    }
+
+    /// An unknown `variant` is refused with the menu - SPEC-LIT §56.8.
+    #[test]
+    fn an_unknown_sa_variant_is_refused_with_the_menu() {
+        let c = case("RAS { model SpalartAllmaras; variant SA-noft3; }");
+        let e = sa_coeffs(&c).expect_err("an unknown variant must be refused");
+        let t = e.to_string();
+        assert!(t.contains("SA-noft3"), "{t}");
+        assert!(t.contains("noft2-neg"), "the menu is missing: {t}");
+
+        for (spelling, want) in [
+            ("noft2", SaVariant::Noft2),
+            ("SA-noft2-neg", SaVariant::Noft2Neg),
+            ("SA-neg", SaVariant::Ft2Neg),
+            ("ft2", SaVariant::Ft2),
+        ] {
+            let c = case(&format!(
+                "RAS {{ model SpalartAllmaras; variant {spelling}; }}"
+            ));
+            assert_eq!(sa_coeffs(&c).expect("a known variant").variant, want);
+        }
+    }
+
+    /// SPEC-LIT §57.5: the calibrations are per-background, and mixing them
+    /// is refused by name.
+    #[test]
+    fn the_per_background_des_constants_are_refused_on_the_wrong_background() {
+        // CDES under an SST hybrid.
+        let c = good_hybrid("simulationType LES; LES { model kOmegaSSTDDES; CDES 0.65; }");
+        let e = select_turbulence_model(&c).expect_err("CDES under SST must be refused");
+        let t = e.to_string();
+        assert!(t.contains("CDES"), "{t}");
+        assert!(t.contains("CDES1"), "the alternative is missing: {t}");
+
+        // CDES1 under an SA hybrid.
+        let c =
+            good_hybrid("simulationType LES; LES { model SpalartAllmarasDDES; CDES1 0.78; }");
+        let e = select_turbulence_model(&c).expect_err("CDES1 under SA must be refused");
+        let t = e.to_string();
+        assert!(t.contains("CDES1"), "{t}");
+        assert!(t.contains("ONE C_DES") || t.contains("one C_DES"), "{t}");
+    }
+
+    /// **SPEC-LIT §58.4's case-document pairs: two documents differing in one
+    /// entry, REQUIRED to select something different.**
+    #[test]
+    fn the_hybrid_case_document_pairs_each_change_the_selection() {
+        let base = "simulationType LES; LES { model SpalartAllmarasDDES; delta maxDeltaxyz; \
+                    CDES 0.65; Cdt1 8; Cw 0.15; }";
+        let read = |src: &str| {
+            select_turbulence_model(&good_hybrid(src))
+                .unwrap_or_else(|e| panic!("{src}: {e}"))
+                .des
+                .expect("a hybrid")
+        };
+        let b = read(base);
+
+        for (from, to, what) in [
+            ("SpalartAllmarasDDES", "SpalartAllmarasDES", "model (branch)"),
+            ("SpalartAllmarasDDES", "SpalartAllmarasIDDES", "model (branch)"),
+            ("SpalartAllmarasDDES", "kOmegaSSTDDES", "model (background)"),
+            ("CDES 0.65", "CDES 0.30", "CDES"),
+            ("Cdt1 8", "Cdt1 2", "Cdt1"),
+            ("Cw 0.15", "Cw 0.30", "Cw"),
+            ("delta maxDeltaxyz", "delta IDDESDeltaSimple", "delta"),
+        ] {
+            let src = base.replacen(from, to, 1);
+            assert_ne!(src, base, "the pair did not change one entry: {what}");
+            // A background swap drops `CDES`, which the SST arm refuses.
+            let src = if to == "kOmegaSSTDDES" {
+                src.replacen("CDES 0.65; ", "", 1)
+            } else {
+                src
+            };
+            // `IDDESDeltaSimple` is only meaningful under IDDES, and the
+            // branch must not change with it.
+            let other = read(&src);
+            assert_ne!(
+                (b.branch, b.background, b.delta, b.coeffs),
+                (other.branch, other.background, other.delta, other.coeffs),
+                "`{what}` was read and thrown away: the two selections are \
+                 identical (SPEC-LIT §13.4.1)"
+            );
+        }
+    }
+
+    /// The same for `RAS { variant ...; }` and the SA coefficients.
+    #[test]
+    fn the_sa_case_document_pairs_each_change_the_coefficients() {
+        let base = "RAS { model SpalartAllmaras; variant noft2; Cb1 0.1355; Cv1 7.1; \
+                    Cn1 16; }";
+        let b = sa_coeffs(&case(base)).expect("the base case");
+        for (from, to, what) in [
+            ("variant noft2", "variant noft2-neg", "variant"),
+            ("variant noft2", "variant ft2", "variant"),
+            ("Cb1 0.1355", "Cb1 0.14", "Cb1"),
+            ("Cv1 7.1", "Cv1 8.0", "Cv1"),
+            ("Cn1 16", "Cn1 12", "Cn1"),
+        ] {
+            let src = base.replacen(from, to, 1);
+            assert_ne!(src, base);
+            let other = sa_coeffs(&case(&src)).unwrap_or_else(|e| panic!("{src}: {e}"));
+            assert_ne!(
+                b, other,
+                "`{what}` was read and thrown away (SPEC-LIT §13.4.1)"
+            );
+        }
+    }
+
+    /// **SPEC-LIT §58.1's seventh instance: `div(phi,nuTilda)`,
+    /// `solvers/nuTilda` and `relaxationFactors/equations/nuTilda` reach the
+    /// `nu~` equation, and they did not before.**
+    #[test]
+    fn the_nutilda_dictionary_entries_reach_the_nutilda_equation() {
+        use crate::io::case::dissipation_from_model;
+        assert_eq!(dissipation_from_model("SpalartAllmaras"), Some("nuTilda"));
+        assert_eq!(dissipation_from_model("SpalartAllmarasDDES"), Some("nuTilda"));
+        // The SST-background hybrids contain "omega" and are caught by the
+        // first arm, which is right: they transport k and omega.
+        assert_eq!(dissipation_from_model("kOmegaSSTIDDES"), Some("omega"));
+        // And nothing that already answered has moved.
+        assert_eq!(dissipation_from_model("kEpsilon"), Some("epsilon"));
+        assert_eq!(dissipation_from_model("realizableKE"), Some("epsilon"));
+        assert_eq!(dissipation_from_model("kOmegaSST"), Some("omega"));
+        assert_eq!(dissipation_from_model("laminar"), None);
+    }
+
     #[test]
     fn the_name_selects_the_model() {
         assert_eq!(
@@ -1112,9 +2248,10 @@ mod tests {
     /// `k_omega_sst_now_selects_a_model` is what took its place, and the two
     /// must not both be true. `realizableKE` and `RNGkEpsilon` left the list
     /// the same way, for `the_two_k_epsilon_variants_now_select_a_model`.
+    /// So did `SpalartAllmaras`, for `spalart_allmaras_now_selects_a_model`.
     #[test]
     fn an_unimplemented_model_errors_and_names_the_alternatives() {
-        for name in ["kOmegaSSTLM", "SpalartAllmaras", "v2f"] {
+        for name in ["kOmegaSSTLM", "LRR", "v2f"] {
             let e = select_turbulence_model(&case(&format!("RAS {{ model {name}; }}")))
                 .expect_err("must not silently substitute");
             let s = e.to_string();
@@ -1149,14 +2286,14 @@ mod tests {
 
         // Both halves of the §13.4 bookkeeping, checked rather than assumed:
         // out of the refusal list, into the menu.
-        assert!(!RECOGNISED_NOT_IMPLEMENTED.contains(&"realizableKE"));
-        assert!(!RECOGNISED_NOT_IMPLEMENTED.contains(&"RNGkEpsilon"));
-        assert!(available_models().contains(&"realizableKE"));
-        assert!(available_models().contains(&"RNGkEpsilon"));
+        for gone in ["realizableKE", "RNGkEpsilon", "SpalartAllmaras"] {
+            assert!(RECOGNISED_NOT_IMPLEMENTED.iter().all(|(n, _)| *n != gone));
+            assert!(available_models().contains(&gone));
+        }
 
         // And every name still refused must be one the registry cannot build,
         // or the menu is lying in the other direction.
-        for name in RECOGNISED_NOT_IMPLEMENTED {
+        for (name, _) in RECOGNISED_NOT_IMPLEMENTED {
             assert!(
                 REGISTRY.iter().all(|(n, _)| n != name),
                 "{name} is in both the refusal list and the registry"
@@ -1548,13 +2685,24 @@ mod tests {
         assert!(!s.active);
     }
 
+    /// `simulationType DES;` used to be a hard refusal. It is now a
+    /// capability (SPEC-LIT §57, §58.2) - but one that still refuses a case
+    /// naming no model, with the hybrid menu rather than the LES one.
     #[test]
-    fn des_is_still_refused_and_names_les() {
+    fn simulation_type_des_now_reaches_the_hybrids_and_still_needs_a_model() {
         let e = select_turbulence_model(&case("simulationType DES;"))
-            .expect_err("DES is not implemented");
+            .expect_err("a hybrid with no model named is still an error");
         let m = e.to_string();
-        assert!(m.contains("DES"), "{m}");
-        assert!(m.contains("LES"), "{m}");
+        assert!(m.contains("missing"), "{m}");
+        assert!(m.contains("SpalartAllmarasDDES"), "the hybrid menu is missing: {m}");
+
+        // And with a model it selects one.
+        let s = select_turbulence_model(&good_hybrid(
+            "simulationType DES; DES { model SpalartAllmarasDES; }",
+        ))
+        .expect("simulationType DES now reaches the hybrid family");
+        assert_eq!(s.model, RasModel::HybridSa);
+        assert_eq!(s.des.expect("a hybrid").branch, DesBranch::Des97);
     }
 
     // ------------------------------------------------------------------
@@ -1657,6 +2805,128 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    /// SPEC-LIT §56/§57: `build_coupled` really builds Spalart-Allmaras and
+    /// both hybrid backgrounds - the whole point of turning a refusal into a
+    /// capability.
+    #[test]
+    fn build_coupled_constructs_spalart_allmaras_and_both_hybrids() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+        // Three-dimensional AND free of `empty` patches, because SPEC-LIT
+        // §57.10's guard 3 refuses a 2-D hybrid and reads the patch KINDS
+        // rather than the cell count - `box_mesh` marks front and back
+        // `empty` whatever `nz` is. That the first two drafts of this test
+        // tripped over its own guard is the guard working.
+        let hm = {
+            let mut spec = crate::blockgen::BlockSpec {
+                x: crate::blockgen::GradedAxis { n: 4, ..Default::default() },
+                y: crate::blockgen::GradedAxis { n: 4, ..Default::default() },
+                z: crate::blockgen::GradedAxis { n: 4, ..Default::default() },
+                ..Default::default()
+            };
+            spec.patch_type[4] = "patch".to_string();
+            spec.patch_type[5] = "patch".to_string();
+            crate::blockgen::build_mesh(&spec)?
+        };
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm)?;
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+        // Plain RANS SA. Gravity is zeroed because `CaseControls::default()`
+        // carries OpenFOAM's own `g` and SPEC-LIT §56.8 refuses a buoyant SA
+        // run by name - which is why `ofgpu-sa` exists and is the driver
+        // `common::driver_for` points at.
+        let mut cc = case("RAS { model SpalartAllmaras; }");
+        cc.buoyancy.g = Vec3::ZERO;
+        let sel = select_turbulence_model(&cc)?;
+        let turb = build_coupled(&gpu, &hm, &mesh, &cc, &sel, &no_walls, &no_roughness)?;
+        assert_eq!(turb.name(), "SpalartAllmaras");
+        let names: Vec<&str> = turb.output_fields().iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"nuTilda") && names.contains(&"nut"), "{names:?}");
+        // §27: a one-equation model carries no mixing time scale, and this
+        // says so rather than inventing one.
+        assert!(matches!(
+            turb.combustion_mixing(),
+            crate::models::coupled::CombustionMixing::None
+        ));
+
+        // Both hybrid backgrounds, all three branches.
+        for name in available_hybrid_models() {
+            let mut cc = good_hybrid(&format!(
+                "simulationType LES; LES {{ model {name}; }}"
+            ));
+            cc.buoyancy.g = Vec3::ZERO;
+            let sel = select_turbulence_model(&cc)?;
+            let turb = build_coupled(&gpu, &hm, &mesh, &cc, &sel, &no_walls, &no_roughness)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(turb.name().contains("hybrid"), "{name}: {}", turb.name());
+            assert_eq!(turb.nut().f.len(), hm.n_cells);
+        }
+        Ok(())
+    }
+
+    /// **SPEC-LIT §57.10's guard 3, which needs a mesh: a 2-D hybrid is
+    /// refused by name.**
+    ///
+    /// The LES branch of a hybrid is a three-dimensional turbulence model; in
+    /// two dimensions there is no vortex stretching and nothing to resolve.
+    /// The run would converge, plot and mean nothing.
+    #[test]
+    fn a_two_dimensional_hybrid_is_refused_by_name() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+        // `blockgen`'s default block has `empty` front and back - a 2-D mesh.
+        let hm = crate::blockgen::build_mesh(&crate::blockgen::BlockSpec {
+            x: crate::blockgen::GradedAxis { n: 4, ..Default::default() },
+            y: crate::blockgen::GradedAxis { n: 4, ..Default::default() },
+            z: crate::blockgen::GradedAxis { n: 1, ..Default::default() },
+            ..Default::default()
+        })?;
+        assert!(
+            hm.b_kind
+                .iter()
+                .any(|&k| k == crate::mesh::PatchKind::Empty as Label),
+            "the test mesh is not 2-D"
+        );
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm)?;
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+        let cc = good_hybrid("simulationType LES; LES { model SpalartAllmarasDDES; }");
+        let sel = select_turbulence_model(&cc)?;
+        let t = match build_coupled(&gpu, &hm, &mesh, &cc, &sel, &no_walls, &no_roughness) {
+            Ok(_) => panic!("a 2-D hybrid must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(t.contains("2-D"), "{t}");
+        assert!(t.contains("SpalartAllmarasDDES"), "{t}");
+        assert!(t.contains("vortex stretching"), "{t}");
+        Ok(())
+    }
+
+    /// SPEC-LIT §56.8: a buoyant `SpalartAllmaras` case is refused by name,
+    /// exactly as §40.5 refuses a buoyant `realizableKE`.
+    #[test]
+    fn a_buoyant_spalart_allmaras_case_is_refused_by_name() {
+        let mut cc = case("RAS { model SpalartAllmaras; }");
+        cc.buoyancy.g = Vec3::new(0.0, -9.81, 0.0);
+        assert!(cc.buoyancy.is_active(), "the test case has no gravity");
+        let e = refuse_sa_buoyancy(&cc).expect_err("a buoyant SA run must be refused");
+        let t = e.to_string();
+        assert!(t.contains("SpalartAllmaras"), "{t}");
+        assert!(t.contains("kEpsilon"), "the alternatives are missing: {t}");
+        assert!(t.contains("not an energy"), "the reason is missing: {t}");
+        // And with no gravity it passes - `CaseControls::default()` carries
+        // OpenFOAM's own `g`, so the negative half has to zero it explicitly
+        // or the test would be vacuous in the other direction.
+        let mut quiet = case("RAS { model SpalartAllmaras; }");
+        quiet.buoyancy.g = Vec3::ZERO;
+        assert!(!quiet.buoyancy.is_active());
+        assert!(refuse_sa_buoyancy(&quiet).is_ok());
     }
 
     /// SPEC-LIT §30.3: Deardorff, built through the SAME registry path a

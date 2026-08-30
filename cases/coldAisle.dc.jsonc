@@ -1,0 +1,171 @@
+// meteor-cfd - Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+// Source-available, not Open Source. See LICENSE at the repository root.
+//
+// A small raised-floor data-centre room - SPEC-LIT S52 to S55.
+//
+// Run:  ofgpu-datacentre cases/coldAisle.dc.jsonc -csv coldAisle.csv
+//
+// WHAT THIS CASE EXERCISES, and where each number comes from:
+//
+//   * S53 - the raised floor as a POROUS JUMP against a plenum at a
+//     prescribed pressure. That is the half of S53 a room-only model needs:
+//     the plenum is not meshed, so the tile is a boundary condition rather
+//     than an internal face (S53.3).
+//   * S52 - the ceiling return as an EXHAUST fan with a quadratic
+//     pressure-flow curve. The floor tile and the fan are opposite ends of
+//     one system, and the solver finds where the fan curve crosses the
+//     system curve - which is the whole point of S52.
+//   * S53 again - a corridor grille on the west wall, given as an
+//     openAreaRatio rather than a loss coefficient, so (S53.6)'s conversion
+//     runs and is PRINTED. The two tiles use the two parameterisations.
+//   * S54 - the plenum air's relative humidity is converted to a
+//     water-vapour mass fraction at setup by (S54.2)/(S54.4), printed, and
+//     transported; (S54.7)'s virtual temperature feeds the buoyancy.
+//   * S55 - RCI over three sample points per rack (Herrlin's own
+//     convention), RTI from FLUX-weighted supply and return means, SHI/RHI,
+//     the fan's shaft power, and the PUE INPUTS - which are not a PUE.
+//
+// EVERY PATCH IS NAMED EXACTLY ONCE. Removing any one entry below is an
+// error listing what was named and what was not; that is the S13.4.1 rule
+// this format is built around.
+//
+// ON THE SIZE OF THE FAN CURVE, because it is the one number that will look
+// wrong to an HVAC engineer. A real CRAH develops 300-500 Pa, and it develops
+// it against the under-floor plenum, the coil, the ductwork and the racks'
+// own internal resistance - almost none of which is in a ROOM-ONLY model. The
+// curve here is the curve of the residual system this mesh actually contains,
+// and the tile's K is scaled for the same reason (see below). A user with a
+// nameplate CRAH curve should mesh the plenum and put the tiles on internal
+// faces, which is the other half of S53.2.
+{
+  "name": "coldAisle",
+
+  "room": {
+    "bounds": { "min": [0.0, 0.0, 0.0], "max": [4.8, 2.4, 3.0] },
+    "cells": [24, 12, 15],
+    "boundaries": {
+      "xMin": "westWall",
+      "xMax": "corridorGrille",
+      "yMin": "southWall",
+      "yMax": "northWall",
+      "zMin": "floorSupply",   // raised-floor tiles, fed from the plenum
+      "zMax": "ceilingReturn"  // the CRAH's return, drawn by its fan
+    }
+  },
+
+  "air": {
+    "nu": 1.5e-5,       // m^2/s, air at ~22 C
+    "rho": 1.2,         // kg/m^3 - divides the manufacturer's curve (S52.2)
+    "cp": 1005.0,       // J/kg/K
+    "pr": 0.71,
+    "prt": 0.85,
+    "tRef": 295.15,     // K, the buoyancy reference
+    "gravity": [0.0, 0.0, -9.81]
+  },
+
+  // ---- S52: the flow machine --------------------------------------------
+  "fans": [
+    {
+      "patch": "ceilingReturn",
+      "direction": "outflow",         // an exhaust: sigma = +1 in (S52.3)
+      "curve": {
+        "type": "quadratic",          // dp = dpMax [1 - Q|Q|/QMax^2] (S52.5)
+        "dpMax": 8.0,                 // Pa at shut-off (see the note above)
+        "QMax": 4.0,                  // m^3/s free delivery
+        "rhoCurve": 1.2,              // AMCA 210: what it was MEASURED at
+        "speedCurve": 1.0,
+        "speed": 1.0,
+        "efficiency": 0.62            // divides (S55.5)'s shaft power
+      },
+      "ambientPressure": 0.0,         // Pa gauge on the far side
+      "relaxation": 0.5               // (S52.14)
+    }
+  ],
+
+  // ---- S53: the raised floor, and a corridor grille ---------------------
+  "tiles": [
+    {
+      "patch": "floorSupply",
+      // A 25 %-open tile has K ~ 30.7 (S53.6). Real tiles cover only part of
+      // the floor - here about 2.16 m^2 of the 11.52 m^2 patch - and the same
+      // pressure drop at the same TOTAL flow needs K scaled by the area ratio
+      // squared: 30.7 x (11.52/2.16)^2 = 873. That scaling is a modelling
+      // choice and is written out rather than folded into a round number.
+      "K": 873.0,
+      "plenumPressure": 2.0,           // Pa gauge under the floor
+      "plenumTemperature": 291.15,     // 18 C supply
+      "plenumRelativeHumidity": 0.45   // converted by (S54.2)/(S54.4)
+    },
+    {
+      "patch": "corridorGrille",
+      // A mostly-closed corridor door: 6 % open over the 7.2 m^2 wall, which
+      // (S53.6) turns into K = 738.7. Given as an open-area ratio rather than
+      // a loss coefficient on purpose - the two tiles here use the two
+      // parameterisations, and the conversion is PRINTED so it is checkable.
+      "openAreaRatio": 0.06,           // (S53.6) converts; the reader PRINTS K
+      "plenumPressure": 0.0,           // the corridor, at ambient
+      "plenumTemperature": 295.15,
+      "plenumRelativeHumidity": 0.40
+    }
+  ],
+
+  // ---- the IT load ------------------------------------------------------
+  //
+  // A rack is a heat-release zone with a stated flow, plus the box its inlet
+  // temperature is sampled in. It is NOT a flow-through device with its own
+  // patches - a block mesh has no patch inside the room, and S55.2's
+  // dT_equipment is therefore the DERIVED Q_IT/(mdot cp). The report says so.
+  "racks": [
+    {
+      "name": "rackA",
+      "zone":         { "min": [1.2, 0.4, 0.1], "max": [1.8, 2.0, 2.0] },
+      "power": 8000.0,
+      "flow": 0.62,
+      "inletSamples": { "min": [1.0, 0.4, 0.1], "max": [1.2, 2.0, 2.0] }
+    },
+    {
+      "name": "rackB",
+      "zone":         { "min": [3.0, 0.4, 0.1], "max": [3.6, 2.0, 2.0] },
+      "power": 6500.0,
+      "flow": 0.50,
+      "inletSamples": { "min": [3.6, 0.4, 0.1], "max": [3.8, 2.0, 2.0] }
+    }
+  ],
+
+  // ---- the remaining patches -------------------------------------------
+  "patches": [
+    { "patch": "southWall", "kind": "adiabaticWall" },
+    { "patch": "northWall", "kind": "adiabaticWall" },
+    { "patch": "westWall",  "kind": "adiabaticWall" }
+  ],
+
+  // ---- S54 --------------------------------------------------------------
+  "humidity": {
+    "d": 2.5e-5,                  // m^2/s, H2O in air at 25 C, 1 atm
+    "scT": 0.7,
+    "barometricPressure": 101325.0,
+    "virtualTemperature": true    // (S54.7); false is a legitimate comparison
+  },
+
+  // ---- S55 --------------------------------------------------------------
+  "metrics": {
+    "ashraeClass": "A1",          // recommended 18-27 C, allowable 15-32 C
+    "rciSamples": "thirds",       // Herrlin's own convention, mesh-independent
+    "supplyPatch": "floorSupply",
+    "returnPatch": "ceilingReturn"
+  },
+
+  "run": {
+    "iterations": 600,
+    "reportEvery": 100,
+    "initialTemperature": 295.15
+  },
+
+  "numerics": {
+    "uRelax": 0.7,
+    "pRelax": 0.3,
+    "tRelax": 0.7,
+    "tolerance": 1e-8,
+    "maxIterations": 400
+  }
+}

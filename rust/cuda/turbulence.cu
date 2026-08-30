@@ -828,6 +828,81 @@ extern "C" __global__ void turbStrainRateMag
 
 
 // ==========================================================================
+//  Two more invariants of grad U - SPEC-LIT S56.2
+//
+//  turbStrainRateMag above gives S = sqrt(2 S_ij S_ij). The Spalart-Allmaras
+//  model (S56) is calibrated on the VORTICITY magnitude, and the DES-family
+//  shielding functions (S57) read the Frobenius norm of the FULL gradient.
+//  Three different numbers, and confusing any pair of them is a silent error,
+//  so all three live together here rather than being rederived where they are
+//  used:
+//
+//      S     = sqrt(2 S_ij S_ij)          turbStrainRateMag
+//      Omega = sqrt(2 W_ij W_ij)          turbVorticityMag
+//      F     = sqrt(sum_ij g_ij^2)        turbGradFrobenius
+//
+//  They satisfy F^2 = (S^2 + Omega^2)/2 identically, because S_ij : W_ij = 0
+//  for a symmetric tensor contracted with an antisymmetric one. F is
+//  nevertheless written out from the nine components below, NOT rebuilt from
+//  the other two, so that the identity stays something to check rather than
+//  something assumed twice (SPEC-LIT S56.10).
+//
+//  There is no `dev` here. S40.2's deviatoric correction belongs to the
+//  realizability construction, which is about the normal stresses; a
+//  vorticity and a norm of the raw gradient are neither, and subtracting a
+//  trace from either would be wrong.
+//
+//  Written from:
+//    ofgpu SPEC-LIT.md S56.2, S57.3
+//    P. R. Spalart, S. R. Allmaras, AIAA Paper 92-0439 (1992) - Omega
+//    P. R. Spalart et al., Theor. Comput. Fluid Dyn. 20 (2006) 181-195 - the
+//      full-gradient norm in r_d
+//  No GPL-licensed source was consulted.
+// ==========================================================================
+
+extern "C" __global__ void turbVorticityMag
+(
+    ofscalar* __restrict__ out,
+    const oftensor* __restrict__ gradU,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const oftensor g = gradU[c];
+
+    //- 2 W_ij = g_ij - g_ji, three independent components. Then
+    //  W_ij W_ij = (wxy^2 + wxz^2 + wyz^2)/2, so Omega^2 = 2 W_ij W_ij is
+    //  exactly that sum.
+    const ofscalar wxy = g.xy - g.yx;
+    const ofscalar wxz = g.xz - g.zx;
+    const ofscalar wyz = g.yz - g.zy;
+
+    out[c] = ofsqrt_(wxy*wxy + wxz*wxz + wyz*wyz);
+}
+
+
+extern "C" __global__ void turbGradFrobenius
+(
+    ofscalar* __restrict__ out,
+    const oftensor* __restrict__ gradU,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const oftensor g = gradU[c];
+
+    out[c] = ofsqrt_(
+        g.xx*g.xx + g.xy*g.xy + g.xz*g.xz
+      + g.yx*g.yx + g.yy*g.yy + g.yz*g.yz
+      + g.zx*g.zx + g.zy*g.zy + g.zz*g.zz);
+}
+
+
+// ==========================================================================
 //  Blended diffusivity - SPEC-LIT 6.3
 //
 //  Extended from:

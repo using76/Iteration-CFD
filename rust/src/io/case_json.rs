@@ -540,13 +540,21 @@ pub struct JsonCombustion {
 }
 
 /// SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by
-/// [`RadiationModel::from_name`] - the §13.4 gate that names both as what is
+/// [`RadiationModel::from_name`] - the §13.4 gate that names what is
 /// available and anything else as an error.
+///
+/// **This block cannot express §49/§50's surface-to-surface model**, and
+/// naming `viewFactor` here is an error rather than a silent substitution:
+/// that model needs an ENCLOSURE - which patches radiate, at what emissivity,
+/// and how the openings close - and there is nowhere here to say it. It is
+/// read from `constant/radiationProperties` instead (SPEC-LIT §51.1), and
+/// §50.12 records the missing fluid-side driver.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JsonRadiation {
     /// `"P1"` or `"fvDOM"`; see [`RadiationModel::from_name`] for what
-    /// happens with anything else.
+    /// happens with anything else, and this struct's own doc for why
+    /// `"viewFactor"` is refused here in particular.
     pub model: String,
     /// Gray absorption coefficient `a`, 1/m. Constant, case-supplied
     /// (SPEC-LIT §28/§36 v1; WSGG is later work). Required by both models.
@@ -1174,13 +1182,31 @@ fn jsonc_to_serde(v: jsonc_parser::JsonValue) -> Result<serde_json::Value> {
 /// give: WHERE in the file, as a JSON path (`patches[3].kind`), rather than
 /// just what.
 pub fn read_case_jsonc(path: &Path) -> Result<JsonCase> {
-    let text = std::fs::read_to_string(path).path(path)?;
+    parse_jsonc_file(path)
+}
 
-    let parsed = jsonc_parser::parse_to_value(&text, &parse_options())
-        .map_err(|e| Error::Parse { path: path.display().to_string(), msg: e.to_string() })?;
+/// Parse any JSONC document into any `serde` type, with the same comment and
+/// trailing-comma handling, the same number-literal rules and the same
+/// `serde_path_to_error` diagnostics [`read_case_jsonc`] gets.
+///
+/// Exists so a SECOND case format (SPEC-LIT §47.4's multi-region conduction
+/// case, `crate::io::case_cht`) reads exactly the way this one does rather
+/// than growing a second parser with its own quirks. `deny_unknown_fields` on
+/// the target type is what turns a mistyped entry into an error instead of a
+/// silently ignored one, and both formats set it.
+pub fn parse_jsonc_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let text = std::fs::read_to_string(path).path(path)?;
+    parse_jsonc_str(&text, &path.display().to_string())
+}
+
+/// [`parse_jsonc_file`] on text already in memory - what a test that writes
+/// two cases differing in one byte needs.
+pub fn parse_jsonc_str<T: serde::de::DeserializeOwned>(text: &str, what: &str) -> Result<T> {
+    let parsed = jsonc_parser::parse_to_value(text, &parse_options())
+        .map_err(|e| Error::Parse { path: what.to_string(), msg: e.to_string() })?;
     let Some(value) = parsed else {
         return Err(Error::Parse {
-            path: path.display().to_string(),
+            path: what.to_string(),
             msg: "empty JSONC document".to_string(),
         });
     };
@@ -1190,7 +1216,7 @@ pub fn read_case_jsonc(path: &Path) -> Result<JsonCase> {
     serde_path_to_error::deserialize(value).map_err(|e| {
         let json_path = e.path().to_string();
         Error::Parse {
-            path: path.display().to_string(),
+            path: what.to_string(),
             msg: format!("{json_path}: {}", e.into_inner()),
         }
     })
@@ -2508,6 +2534,40 @@ impl JsonCase {
                         }
                         props.validate()?;
                         RadiationConfig::FvDom(props)
+                    }
+
+                    // SPEC-LIT S50.12: the model exists and is gated, but the
+                    // `physics.fire.radiation` block has no way to say WHICH
+                    // patches form the enclosure, what emissivity each
+                    // carries, or how the openings are closed - and a
+                    // surface-to-surface model is nothing without that. Naming
+                    // `viewFactor` here and quietly building a participating
+                    // medium instead is precisely the S13.4 defect this
+                    // project keeps finding, so it is an error naming the two
+                    // models this block CAN express and where the third one
+                    // lives.
+                    RadiationModel::ViewFactor => {
+                        crate::io::contract::unsupported_note(
+                            "physics.fire.radiation.model",
+                            &r.model,
+                            &["P1", "fvDOM"],
+                            "surface-to-surface radiation (SPEC-LIT 49/50) needs an \
+                             ENCLOSURE - which patches radiate, at what emissivity, and \
+                             how the openings are closed - and this block has no way to \
+                             say any of it. Read it from constant/radiationProperties \
+                             (SPEC-LIT 51.1) and build crate::s2s::S2s directly; \
+                             SPEC-LIT 50.12 records this as the boundary the fluid side \
+                             has not crossed yet",
+                            "P1 with this block's own absorptionCoefficient",
+                            (),
+                        )?;
+                        // -permissive only: the substitution the message named.
+                        let mut props = crate::radiation::RadiationProps::new(a)?;
+                        if let Some(v) = chi_r {
+                            props.chi_r = v;
+                        }
+                        props.validate()?;
+                        RadiationConfig::P1(props)
                     }
                 };
                 (Some(config), r.wall_emissivity.unwrap_or(1.0) as Scalar)
@@ -4364,6 +4424,23 @@ mod tests {
         let mut checked = 0usize;
         for entry in entries {
             let path = entry.expect("dir entry").path();
+            // SPEC-LIT §47.14: a `*.cht.jsonc` is a MULTI-REGION CONDUCTION
+            // case (`crate::io::case_cht`), a different document with no
+            // `physics`, no `U` and no algorithm at all. It is not this
+            // reader's to lower, and its own shipped-case scan is
+            // `io::case_cht::tests::every_shipped_cht_case_lowers`.
+            if path.file_name().and_then(|f| f.to_str()).is_some_and(|f| f.ends_with(".cht.jsonc")) {
+                continue;
+            }
+            // SPEC-LIT S55.6: and a `*.dc.jsonc` is a DATA-CENTRE ROOM case
+            // (`crate::io::case_dc`) - again a different document, with its
+            // own `room`, `fans`, `tiles` and `racks` blocks and no `physics`.
+            // Its own shipped-case scan is
+            // `io::case_dc::tests::the_base_case_lowers`, which reads
+            // `cases/coldAisle.dc.jsonc` and lowers it.
+            if path.file_name().and_then(|f| f.to_str()).is_some_and(|f| f.ends_with(".dc.jsonc")) {
+                continue;
+            }
             if path.extension().and_then(|e| e.to_str()) == Some("jsonc") {
                 let case = read_case_jsonc(&path)
                     .unwrap_or_else(|e| panic!("{}: {e}", path.display()));

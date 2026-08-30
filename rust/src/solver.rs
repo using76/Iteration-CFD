@@ -115,6 +115,17 @@ fn reduce_geometry(n: usize) -> (LaunchConfig, usize) {
     )
 }
 
+/// How many partial sums [`device_sum`] and its siblings produce for `n`
+/// values - i.e. how long a caller's `partials` buffer has to be.
+///
+/// Exposed because a module that owns its own reduction buffer (SPEC-LIT
+/// §47.8's interface-flux total is one) must size it the same way, and
+/// because the fact that this is a **pure function of `n`** is exactly what
+/// makes the reduction order-independent and therefore bitwise reproducible.
+pub fn reduce_partitions(n: usize) -> usize {
+    reduce_geometry(n).1
+}
+
 /// One block: the second stage of every reduction.
 fn one_block() -> LaunchConfig {
     LaunchConfig {
@@ -156,6 +167,8 @@ pub struct SolverKernels {
     pub max_mag1: CudaFunction,
     pub norm_factor1: CudaFunction,
     pub sym_defect1: CudaFunction,
+    /// SPEC-LIT §48.3: the coupled half of the same question.
+    pub coupled_sym_defect1: CudaFunction,
     // reductions, stage two
     pub sum2: CudaFunction,
     pub sum2_pair: CudaFunction,
@@ -195,6 +208,7 @@ impl SolverKernels {
             max_mag1: k.func("solMaxMagStage1")?,
             norm_factor1: k.func("solNormFactorStage1")?,
             sym_defect1: k.func("solSymDefectStage1")?,
+            coupled_sym_defect1: k.func("solCoupledSymDefectStage1")?,
 
             sum2: k.func("solSumStage2")?,
             sum2_pair: k.func("solSum2Stage2")?,
@@ -782,45 +796,141 @@ pub fn matrix_is_symmetric(
     k: &SolverKernels,
     w: &mut SolverWorkspace,
     a: &GpuLduMatrix,
+    m: &GpuMesh,
 ) -> Result<bool> {
+    Ok(symmetry_defects(gpu, k, w, a, m)?.is_symmetric())
+}
+
+/// The two ways an LDU matrix can fail to be symmetric, measured separately -
+/// SPEC-LIT §48.3.
+///
+/// Separately, because a failure has to name which one it was: "upper != lower"
+/// is a bug in a face term and "the two coupled coefficients differ" is a bug
+/// in a boundary term, and they are found in completely different places.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SymmetryDefects {
+    /// `max |upper - lower|` over the internal faces.
+    pub face: Scalar,
+    /// `max |upper|, |lower|`, the scale `face` is judged against.
+    pub face_scale: Scalar,
+    /// `max |boundary_coeffs[bf] - boundary_coeffs[pair(bf)]|` over the
+    /// COUPLED boundary faces - the half `matrix_is_symmetric` was blind to
+    /// before §48.3.
+    pub coupled: Scalar,
+    pub coupled_scale: Scalar,
+}
+
+impl SymmetryDefects {
+    /// The same threshold `pressure::probe` uses on the host, and for the same
+    /// reason: "these two floats came out of the same arithmetic", scaled off
+    /// the working epsilon so a single-precision build means the same thing by
+    /// it rather than rejecting every matrix.
+    pub fn tolerance() -> Scalar {
+        1.0e3 * Scalar::EPSILON
+    }
+
+    pub fn face_is_symmetric(&self) -> bool {
+        self.face_scale == 0.0 || self.face <= Self::tolerance() * self.face_scale
+    }
+
+    pub fn coupled_is_symmetric(&self) -> bool {
+        self.coupled_scale == 0.0 || self.coupled <= Self::tolerance() * self.coupled_scale
+    }
+
+    pub fn is_symmetric(&self) -> bool {
+        self.face_is_symmetric() && self.coupled_is_symmetric()
+    }
+
+    /// Which half failed, for the diagnostic a refusal carries.
+    pub fn what_failed(&self) -> &'static str {
+        match (self.face_is_symmetric(), self.coupled_is_symmetric()) {
+            (false, false) => "both the face coefficients and the coupled boundary pair",
+            (false, true) => "the face coefficients (upper != lower)",
+            (true, false) => {
+                "the COUPLED BOUNDARY pair - the two faces of one couple carry \
+                 different coefficients, so A(P,Q) != A(Q,P)"
+            }
+            (true, true) => "nothing",
+        }
+    }
+}
+
+/// Measure both halves of [`matrix_is_symmetric`]'s question.
+pub fn symmetry_defects(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+) -> Result<SymmetryDefects> {
+    let mut out = SymmetryDefects::default();
+
     let nf = a.n_internal_faces;
-    if nf == 0 {
-        // No off-diagonals at all: the matrix is diagonal, hence symmetric.
-        return Ok(true);
+    if nf > 0 {
+        let nl = to_label(nf)?;
+        let (cfg, nparts) = reduce_geometry(nf);
+        let np = to_label(nparts)?;
+
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.sym_defect1)
+                .arg(&mut w.partials)
+                .arg(&mut w.partials_b)
+                .arg(&a.upper)
+                .arg(&a.lower)
+                .arg(&nl)
+                .launch(cfg)?;
+
+            gpu.stream()
+                .launch_builder(&k.max2_pair)
+                .arg(&mut w.num)
+                .arg(&mut w.den)
+                .arg(&w.partials)
+                .arg(&w.partials_b)
+                .arg(&np)
+                .launch(one_block())?;
+        }
+
+        out.face = gpu.download(&w.num)?.first().copied().unwrap_or(0.0);
+        out.face_scale = gpu.download(&w.den)?.first().copied().unwrap_or(0.0);
     }
-    let nl = to_label(nf)?;
-    let (cfg, nparts) = reduce_geometry(nf);
-    let np = to_label(nparts)?;
 
-    unsafe {
-        gpu.stream()
-            .launch_builder(&k.sym_defect1)
-            .arg(&mut w.partials)
-            .arg(&mut w.partials_b)
-            .arg(&a.upper)
-            .arg(&a.lower)
-            .arg(&nl)
-            .launch(cfg)?;
+    // SPEC-LIT §48.3. `b_nbr_face` is `-1` everywhere on a mesh with no
+    // coupled patch, so this stage measures zero there and the result is
+    // exactly what it was before §48.3 - which is the "no false positives"
+    // half of §48.4.
+    let nbf = a.n_boundary_faces;
+    if nbf > 0 && m.n_boundary_faces == nbf {
+        let nl = to_label(nbf)?;
+        let (cfg, nparts) = reduce_geometry(nbf);
+        let np = to_label(nparts)?;
 
-        gpu.stream()
-            .launch_builder(&k.max2_pair)
-            .arg(&mut w.num)
-            .arg(&mut w.den)
-            .arg(&w.partials)
-            .arg(&w.partials_b)
-            .arg(&np)
-            .launch(one_block())?;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.coupled_sym_defect1)
+                .arg(&mut w.partials)
+                .arg(&mut w.partials_b)
+                .arg(&a.boundary_coeffs)
+                .arg(&m.b_nbr_cell)
+                .arg(&m.b_nbr_face)
+                .arg(&nl)
+                .launch(cfg)?;
+
+            gpu.stream()
+                .launch_builder(&k.max2_pair)
+                .arg(&mut w.num)
+                .arg(&mut w.den)
+                .arg(&w.partials)
+                .arg(&w.partials_b)
+                .arg(&np)
+                .launch(one_block())?;
+        }
+
+        out.coupled = gpu.download(&w.num)?.first().copied().unwrap_or(0.0);
+        out.coupled_scale = gpu.download(&w.den)?.first().copied().unwrap_or(0.0);
     }
 
-    let defect = gpu.download(&w.num)?.first().copied().unwrap_or(0.0);
-    let scale = gpu.download(&w.den)?.first().copied().unwrap_or(0.0);
-
-    // The same threshold `pressure::probe` uses on the host, and for the same
-    // reason: "these two floats came out of the same arithmetic", scaled off
-    // the working epsilon so a single-precision build means the same thing by
-    // it rather than rejecting every matrix.
-    let tol = 1.0e3 * Scalar::EPSILON;
-    Ok(scale == 0.0 || defect <= tol * scale)
+    Ok(out)
 }
 
 // ==========================================================================
@@ -1692,24 +1802,28 @@ pub fn solve(
     let needs_symmetry =
         ctrl.solver == LinearSolverKind::PCG || ctrl.precon == Preconditioner::Dic;
 
-    if needs_symmetry && !matrix_is_symmetric(gpu, k, w, a)? {
-        if ctrl.solver == LinearSolverKind::PCG {
-            return Err(Error::Config(
-                "solver PCG was requested for a matrix whose upper and lower \
-                 coefficients differ, i.e. an asymmetric system. Conjugate \
-                 gradients are defined only for symmetric positive definite \
-                 matrices (SPEC-LIT 8.2); on this one they are not guaranteed \
-                 to converge at all. Use PBiCGStab."
-                    .to_string(),
-            ));
+    if needs_symmetry {
+        let d = symmetry_defects(gpu, k, w, a, m)?;
+        if !d.is_symmetric() {
+            if ctrl.solver == LinearSolverKind::PCG {
+                return Err(Error::Config(format!(
+                    "solver PCG was requested for an asymmetric system: {} \
+                     disagree. Conjugate gradients are defined only for \
+                     symmetric positive definite matrices (SPEC-LIT 8.2); on \
+                     this one they are not guaranteed to converge at all. Use \
+                     PBiCGStab.",
+                    d.what_failed()
+                )));
+            }
+            return Err(Error::Config(format!(
+                "preconditioner DIC was requested for an asymmetric matrix: {} \
+                 disagree. DIC is the incomplete CHOLESKY factorisation \
+                 (SPEC-LIT 21) and an asymmetric matrix has no Cholesky factor \
+                 to approximate. Use DILU, which is the asymmetric case of the \
+                 same algorithm.",
+                d.what_failed()
+            )));
         }
-        return Err(Error::Config(
-            "preconditioner DIC was requested for an asymmetric matrix. DIC is \
-             the incomplete CHOLESKY factorisation (SPEC-LIT 21) and an \
-             asymmetric matrix has no Cholesky factor to approximate. Use \
-             DILU, which is the asymmetric case of the same algorithm."
-                .to_string(),
-        ));
     }
 
     match ctrl.solver {
@@ -2914,11 +3028,85 @@ mod tests {
     fn symmetry_is_detected_both_ways() {
         let Some(sym) = structured([4, 3, 3], true) else { return };
         let mut w = SolverWorkspace::for_mesh(&sym.gpu, &sym.m).expect("workspace");
-        assert!(matrix_is_symmetric(&sym.gpu, &sym.k, &mut w, &sym.a).expect("check"));
+        assert!(matrix_is_symmetric(&sym.gpu, &sym.k, &mut w, &sym.a, &sym.m).expect("check"));
 
         let Some(asym) = structured([4, 3, 3], false) else { return };
         let mut w = SolverWorkspace::for_mesh(&asym.gpu, &asym.m).expect("workspace");
-        assert!(!matrix_is_symmetric(&asym.gpu, &asym.k, &mut w, &asym.a).expect("check"));
+        assert!(
+            !matrix_is_symmetric(&asym.gpu, &asym.k, &mut w, &asym.a, &asym.m).expect("check")
+        );
+    }
+
+    /// SPEC-LIT §48.3, the "no false positives" half. On an UNCOUPLED mesh the
+    /// coupled stage measures exactly zero, so the verdict and the reported
+    /// face defect are what they were before §48.3 extended the check.
+    #[test]
+    fn the_coupled_stage_is_silent_on_an_uncoupled_mesh() {
+        let Some(sym) = structured([4, 3, 3], true) else { return };
+        let mut w = SolverWorkspace::for_mesh(&sym.gpu, &sym.m).expect("workspace");
+        let d = symmetry_defects(&sym.gpu, &sym.k, &mut w, &sym.a, &sym.m).expect("defects");
+        assert_eq!(d.coupled, 0.0, "an uncoupled mesh has no coupled pair");
+        assert_eq!(d.coupled_scale, 0.0);
+        assert!(d.coupled_is_symmetric());
+        assert!(d.is_symmetric());
+        assert_eq!(d.what_failed(), "nothing");
+    }
+
+    /// SPEC-LIT §48.3, the half that was a blind spot. A matrix whose two
+    /// coupled boundary coefficients differ is asymmetric, and used to be
+    /// reported symmetric because nothing looked at them.
+    #[test]
+    fn unequal_coupled_boundary_coefficients_are_asymmetric() {
+        use crate::ldu_ops::tests as ldut;
+
+        let Some(gpu) = crate::Gpu::new(0).ok() else { return };
+        let hm = ldut::chain_mesh();
+        let m = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("upload");
+        let k = SolverKernels::new(&gpu).expect("kernels");
+        let mut w = SolverWorkspace::for_mesh(&gpu, &m).expect("workspace");
+        let mut a = GpuLduMatrix::new(&gpu, &m).expect("matrix");
+
+        // A symmetric face part, so only the coupled pair is in question.
+        let up = vec![-1.0 as Scalar; hm.n_internal_faces];
+        gpu.write(&mut a.upper, &up).expect("upper");
+        gpu.write(&mut a.lower, &up).expect("lower");
+
+        // The two faces of the couple, equal first.
+        let mut bc = vec![0.0 as Scalar; hm.n_boundary_faces];
+        let mut pair = None;
+        for bf in 0..hm.n_boundary_faces {
+            if hm.b_nbr_face[bf] >= 0 {
+                pair = Some((bf, hm.b_nbr_face[bf] as usize));
+                break;
+            }
+        }
+        let (i, j) = pair.expect("the chain mesh has a cyclic pair");
+        bc[i] = -3.0;
+        bc[j] = -3.0;
+        gpu.write(&mut a.boundary_coeffs, &bc).expect("bc");
+        let d = symmetry_defects(&gpu, &k, &mut w, &a, &m).expect("defects");
+        assert!(d.is_symmetric(), "equal coupled coefficients are symmetric");
+
+        // Now make them differ. Nothing else about the matrix changes.
+        bc[j] = -3.5;
+        gpu.write(&mut a.boundary_coeffs, &bc).expect("bc");
+        let d = symmetry_defects(&gpu, &k, &mut w, &a, &m).expect("defects");
+        assert!(
+            d.face_is_symmetric(),
+            "upper and lower are still equal: face defect {}",
+            d.face
+        );
+        assert!(
+            !d.coupled_is_symmetric(),
+            "A(P,Q) = -3 and A(Q,P) = -3.5 is not a symmetric matrix; defect {}",
+            d.coupled
+        );
+        assert!(!d.is_symmetric());
+        assert!(
+            d.what_failed().contains("COUPLED"),
+            "the message must name which half failed: {}",
+            d.what_failed()
+        );
     }
 
     /// The point of the whole exercise: `solver PCG;` on an asymmetric system

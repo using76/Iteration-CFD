@@ -41,6 +41,7 @@
 //! which is exactly what a model *is*.
 
 pub mod coupled;
+pub mod des;
 pub mod k_epsilon;
 pub mod ke_variants;
 pub mod k_omega;
@@ -48,20 +49,24 @@ pub mod k_omega_sst;
 pub mod launder_sharma;
 pub mod les;
 pub mod registry;
+pub mod spalart_allmaras;
 
 pub use coupled::{
     BuoyancySettings, CombustionMixing, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst,
     CoupledLaminar, CoupledLaunderSharmaKE, CoupledLes, CoupledRealizableKe, CoupledRngKe,
-    CoupledTurbulence, ThermalCtx,
+    CoupledSpalartAllmaras, CoupledTurbulence, ThermalCtx,
 };
+pub use des::{DesBranch, DesCoeffs, DesLengthScale, HybridBackground, HybridDelta};
 pub use k_epsilon::{KEpsilon, KEpsilonCoeffs};
 pub use ke_variants::{RealizableKe, RealizableKeCoeffs, RngKe, RngKeCoeffs};
 pub use k_omega::{KOmega, KOmegaCoeffs};
 pub use launder_sharma::{f2, f_mu, mesh_resolution_report, LaunderSharmaKE, MeshResolutionReport};
 pub use k_omega_sst::{KOmegaSst, KOmegaSstCoeffs};
 pub use les::{Les, LesCoeffs, LesModel};
+pub use spalart_allmaras::{SaCoeffs, SaVariant, SpalartAllmaras};
 pub use registry::{
-    available_models, build_coupled, buoyancy_settings, realizable_ke_coeffs,
-    refuse_realizable_ke_buoyancy, rng_ke_coeffs, select_turbulence_model, RasModel,
-    TurbulenceSelection,
+    available_hybrid_deltas, available_hybrid_models, available_models, build_coupled,
+    buoyancy_settings, realizable_ke_coeffs, refuse_realizable_ke_buoyancy,
+    refuse_sa_buoyancy, refuse_two_dimensional_hybrid, rng_ke_coeffs, sa_coeffs,
+    select_turbulence_model, HybridSelection, RasModel, TurbulenceSelection,
 };

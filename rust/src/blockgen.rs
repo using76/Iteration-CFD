@@ -1491,9 +1491,27 @@ fn poly_mesh_raw(block: &Block) -> Result<PolyMeshRaw> {
 /// [`write_block_mesh`]; this is for a solver or benchmark that only ever
 /// wanted the mesh in memory.
 pub fn build_mesh(b: &BlockSpec) -> Result<HostMesh> {
-    let block = Block::new(b)?;
-    let raw = poly_mesh_raw(&block)?;
-    build_host_mesh(&raw)
+    build_host_mesh(&raw_mesh(b)?)
+}
+
+/// The same block as [`build_mesh`], stopping one step earlier: the RAW
+/// points, faces, owner/neighbour and patches, before `compute_geometry`
+/// consumes them.
+///
+/// SPEC-LIT S49.3: `HostMesh` retains `n_points` and nothing else about the
+/// point set, but surface-to-surface radiation needs the face polygons - for
+/// quadrature, for ray casting and for agglomeration. Rather than extend
+/// `HostMesh` (which is `Clone`, `Default`, built by `io::polymesh`, by this
+/// module and by a dozen tests, and consumed by `reference.rs`), the S2S
+/// model is handed the raw geometry at construction, which every
+/// construction path already has in hand at that moment. This is the one
+/// path that did not previously expose it: `io::polymesh::build_host_mesh`
+/// already takes `&PolyMeshRaw`, so `raw` outlives it there.
+///
+/// This is `poly_mesh_raw` under a public name; `build_mesh` now goes
+/// through it, so the two cannot drift.
+pub fn raw_mesh(b: &BlockSpec) -> Result<PolyMeshRaw> {
+    poly_mesh_raw(&Block::new(b)?)
 }
 
 // ==========================================================================
@@ -3913,7 +3931,8 @@ fn write_system(case_dir: &Path) -> Result<()> {
          \x20   div(phi,T)       bounded Gauss upwind;\n\
          \x20   div(phi,k)       bounded Gauss upwind;\n\
          \x20   div(phi,epsilon) bounded Gauss upwind;\n\
-         \x20   div(phi,omega)   bounded Gauss upwind;\n}\n\n\
+         \x20   div(phi,omega)   bounded Gauss upwind;\n\
+         \x20   div(phi,nuTilda) bounded Gauss upwind;\n}\n\n\
          laplacianSchemes\n{\n    default         Gauss linear corrected;\n}\n\n\
          interpolationSchemes\n{\n    default         linear;\n}\n\n\
          snGradSchemes\n{\n    default         corrected;\n}",
@@ -3982,6 +4001,13 @@ fn write_system(case_dir: &Path) -> Result<()> {
          \x20       tolerance       1e-08;\n\
          \x20       relTol          0.01;\n\
          \x20       maxIter         200;\n\
+         \x20   }\n\n\
+         \x20   nuTilda\n    {\n\
+         \x20       solver          PBiCGStab;\n\
+         \x20       preconditioner  diagonal;\n\
+         \x20       tolerance       1e-08;\n\
+         \x20       relTol          0.01;\n\
+         \x20       maxIter         200;\n\
          \x20   }\n}\n\n\
          SIMPLE\n{\n    nNonOrthogonalCorrectors 0;\n}\n\n\
          // U 0.7 with p 0.3 is what OpenFOAM's buoyant cases use, and the two\n\
@@ -3995,6 +4021,7 @@ fn write_system(case_dir: &Path) -> Result<()> {
          \x20       k               0.7;\n\
          \x20       epsilon         0.7;\n\
          \x20       omega           0.7;\n\
+         \x20       nuTilda         0.7;\n\
          \x20   }\n}",
     )
 }
@@ -4252,14 +4279,21 @@ fn patch_spec(type_name: &str) -> PatchFieldSpec {
 
 /// SPEC-LIT §29.1's table: the `wallTreatment` row's type name for one
 /// turbulence-closure field. `field` is one of `"k"`/`"epsilon"`/`"omega"`/
-/// `"nut"`; anything else falls back to `zeroGradient`, which nothing here
-/// calls this with.
+/// `"nut"`/`"nuTilda"`; anything else falls back to `zeroGradient`, which
+/// nothing here calls this with.
 fn wall_row_type(field: &str, wall: WallTreatment) -> &'static str {
     match field {
         "nut" => wall.nut_type(),
         "k" => wall.k_type(),
         "epsilon" => wall.epsilon_type(),
         "omega" => wall.omega_type(),
+        // SPEC-LIT §56.7: Spalart-Allmaras has NO wall function on `nu~`.
+        // `nu~ = 0` is an exact Dirichlet condition at a no-slip wall, on a
+        // wall-resolving mesh and a wall-function mesh alike, so this row is
+        // the same string whatever `wallTreatment` says - which is the one
+        // row of §29.1's table that does not vary, and is most of why SA is
+        // cheaper than it looks.
+        "nuTilda" => "fixedValue",
         _ => "zeroGradient",
     }
 }
@@ -4769,10 +4803,19 @@ fn build_initial_fields(
     }
 
     // ---- scalars ---------------------------------------------------------
-    let specs: [(&str, &str, Scalar); 4] = [
+    //
+    // `nuTilda` is here so that `ofgpu-generate-mesh` and `ofgpu-sa` compose:
+    // without it a generated case is not a runnable Spalart-Allmaras case and
+    // the model would be reachable only by hand-writing a field file
+    // (SPEC-LIT §58.1). It is seeded at `3 nu`, the low end of the far-field
+    // range the NASA/TMBWG Turbulence Modeling Resource recommends, which
+    // gives `nu_t/nu = 0.210438` - a genuinely laminar free stream rather
+    // than a number chosen to look plausible.
+    let specs: [(&str, &str, Scalar); 5] = [
         ("k", "[0 2 -2 0 0 0 0]", k0),
         ("epsilon", "[0 2 -3 0 0 0 0]", eps0),
         ("omega", "[0 0 -1 0 0 0 0]", omega0),
+        ("nuTilda", "[0 2 -1 0 0 0 0]", 3.0 * nu),
         ("nut", "[0 2 -1 0 0 0 0]", 0.0),
     ];
 
@@ -4801,9 +4844,10 @@ fn build_initial_fields(
                 let type_name = wall_row_type(name, wall);
                 let mut s = patch_spec(type_name);
                 // SPEC-LIT §33.2: see the twin branch above (`build_plume...`)
-                // for why `lowRe`'s `epsilon` (the only "fixedValue" this
-                // table produces) gets a literal 0 rather than the domain's
-                // equilibrium value.
+                // for why `lowRe`'s `epsilon` gets a literal 0 rather than the
+                // domain's equilibrium value. §56.7's `nuTilda` wall is a
+                // `fixedValue` too and wants exactly the same literal 0, so
+                // the two share this branch rather than needing a second one.
                 s.value = vec![if type_name == "fixedValue" { 0.0 } else { value }];
                 apply_roughness(&mut s, name, wall, roughness);
                 s
@@ -4830,11 +4874,12 @@ fn build_initial_fields(
     }
 
     println!(
-        "  0/ fields: Uref {}  k {}  epsilon {}  omega {}  (nu {})",
+        "  0/ fields: Uref {}  k {}  epsilon {}  omega {}  nuTilda {}  (nu {})",
         fmt_g(u_ref),
         fmt_g(k0),
         fmt_g(eps0),
         fmt_g(omega0),
+        fmt_g(3.0 * nu),
         fmt_g(nu)
     );
 

@@ -152,6 +152,11 @@ pub struct TurbKernels {
 
     abs_diff: CudaFunction,
     strain_rate: CudaFunction,
+    /// SPEC-LIT §56.2 - the other two invariants of `grad U`. `Omega` is what
+    /// Spalart-Allmaras is calibrated on; `F` is what the DES-family
+    /// shielding functions read. Neither is `S` and neither is the other.
+    vorticity: CudaFunction,
+    grad_frobenius: CudaFunction,
 
     gamma_internal_cell: CudaFunction,
     gamma_boundary_cell: CudaFunction,
@@ -195,6 +200,8 @@ impl TurbKernels {
 
             abs_diff: k.func("turbAbsDiff")?,
             strain_rate: k.func("turbStrainRateMag")?,
+            vorticity: k.func("turbVorticityMag")?,
+            grad_frobenius: k.func("turbGradFrobenius")?,
 
             gamma_internal_cell: k.func("turbGammaInternalCell")?,
             gamma_boundary_cell: k.func("turbGammaBoundaryCell")?,
@@ -1371,6 +1378,72 @@ pub fn strain_rate_mag(
     Ok(())
 }
 
+/// `sqrt(2 |skew(grad U)|²)`, the vorticity magnitude - SPEC-LIT §56.2.
+///
+/// **Not** [`strain_rate_mag`], and the difference is not a factor: in a pure
+/// shear the two agree, and in an irrotational strain this is zero while `S`
+/// is not. Spalart-Allmaras's production term (SPEC-LIT (56.3)) takes this
+/// one, and taking `S` there is a silent error a log-layer test cannot catch.
+pub fn vorticity_mag(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    out: &mut DevBuf<Scalar>,
+    grad_u: &DevBuf<Tensor>,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    expect_len(out, n, "out")?;
+    expect_len(grad_u, n, "grad_u")?;
+
+    let nl = n as Label;
+    let f = kern.vorticity.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(out)
+            .arg(grad_u)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `sqrt(sum_ij (dU_j/dx_i)²)`, the Frobenius norm of the FULL velocity
+/// gradient - SPEC-LIT §56.2, and the denominator of SPEC-LIT (57.7)'s `r_d`,
+/// `r_dt` and `r_dl`.
+///
+/// A third invariant, distinct from both [`strain_rate_mag`] and
+/// [`vorticity_mag`], satisfying `F² = (S² + Omega²)/2` identically. It is
+/// computed from the nine components rather than from that identity so the
+/// identity remains something `tests` can check.
+pub fn grad_frobenius(
+    gpu: &Gpu,
+    kern: &TurbKernels,
+    out: &mut DevBuf<Scalar>,
+    grad_u: &DevBuf<Tensor>,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    expect_len(out, n, "out")?;
+    expect_len(grad_u, n, "grad_u")?;
+
+    let nl = n as Label;
+    let f = kern.grad_frobenius.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(out)
+            .arg(grad_u)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
 // ==========================================================================
 //  RasCore
 // ==========================================================================
@@ -1738,6 +1811,36 @@ impl<'m> RasCore<'m> {
             flow.nu,
         )?;
 
+        self.assemble_after_diffusivity(gpu, flow, psi, conv)
+    }
+
+    /// [`Self::assemble_transport`] with the face diffusivity supplied by
+    /// the CALLER - SPEC-LIT §56.6.
+    ///
+    /// The three entry points above all build `Gamma_eff` from `nu_t`.
+    /// Spalart-Allmaras's is `(nu + nu~ f_n)/sigma`, built from the
+    /// TRANSPORTED field, which none of them can express. Rather than adding
+    /// a fourth `face_diffusivity_*` here - the coefficient belongs to that
+    /// model, not to this shared core - the caller fills the two face buffers
+    /// through `fill` and everything downstream is literally the same code,
+    /// because it is the same equation.
+    ///
+    /// `fill` is handed `(gamma, b_gamma, mesh)`: `[n_internal_faces]` and
+    /// `[n_boundary_faces]` of `Gamma_eff·|Sf|`, the product
+    /// [`crate::fv::fvm_laplacian`] takes.
+    pub fn assemble_transport_with_face_diffusivity<F>(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        psi: &GpuScalarField,
+        conv: DivEntry,
+        fill: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut DevBuf<Scalar>, &mut DevBuf<Scalar>, &GpuMesh) -> Result<()>,
+    {
+        self.a.zero(gpu)?;
+        fill(&mut self.gamma, &mut self.b_gamma, self.mesh)?;
         self.assemble_after_diffusivity(gpu, flow, psi, conv)
     }
 

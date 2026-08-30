@@ -13,7 +13,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 113 source files under
+line "No GPL-licensed source was consulted." All 139 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -185,6 +185,11 @@ citation list is `rust/SPEC-LIT.md`; the principal sources are:
   Hirt & Nichols (1981); Zalesak (1979); Brackbill, Kothe & Zemach (1992)
   Saad (2003); van der Vorst (1992); Hestenes & Stiefel (1952)
   Swarztrauber (1977); Tucker (1998); Rehm & Baum (1978); Rodi (1987)
+  Walton, NISTIR 6925 (2002, NIST, public domain); Shapiro, UCID-19887
+    (1983, LLNL, public domain); Mitalas & Stephenson, DBR-25 (1966)
+  Howell, A Catalog of Radiation Heat Transfer Configuration Factors, 3rd ed.
+  Hottel & Sarofim (1967); Modest (2013); van Leersum (1989); Sinkhorn (1964)
+  Amanatides & Woo (1987); Woop, Benthin & Wald (2013)
 
   Validation data: Ghia, Ghia & Shin (1982); Moser, Kim & Mansour (1999);
   Driver & Seegmiller (1985); McCaffrey (1979); Martin & Moyce (1952).

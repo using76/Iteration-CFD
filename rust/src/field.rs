@@ -66,7 +66,7 @@
 
 use crate::device::{DevBuf, Gpu};
 use crate::error::Result;
-use crate::io::contract::unsupported;
+use crate::io::contract::{unsupported, unsupported_note};
 use crate::mesh::GpuMesh;
 use crate::{Label, Scalar, Vec3};
 
@@ -218,6 +218,129 @@ pub enum BcKind {
     /// [`crate::contact_angle::ContactAnglePatch`], read out of the same
     /// entry.
     ContactAngle = 32,
+
+    /// The conjugate fluid/solid interface - SPEC-LIT S47.
+    ///
+    /// A Robin triple like every other condition in S4, with `fr = h_G/C_A`,
+    /// `refValue = T_Q` (the cell across the interface, read through the
+    /// mesh's `b_nbr_cell`) and `refGrad = 0`, rewritten every outer
+    /// iteration by [`crate::cht::ConjugateInterfaces::update`]. That one
+    /// kernel writes BOTH sides of a pair from one `h_G` and one `|Sf|`, which
+    /// is what makes the two fluxes cancel bitwise (S47.2 consequence 2).
+    ///
+    /// **No new device branch**, for the same reason
+    /// [`Self::ContactAngle`] needs none: the discriminant is outside every
+    /// range `cuda/field.cu` consults, so `fldCorrectBcScalar` evaluates it
+    /// with the same `fldMixed` as everything else, and
+    /// `fldMixed(fr, T_Q, 0, T_P, Delta) = T_P - fr (T_P - T_Q)` is exactly
+    /// (S47.7)'s face value - the only form that can carry the contact
+    /// resistance's temperature JUMP. The cyclic branch, which interpolates
+    /// `psi[nbr]` geometrically, cannot.
+    ///
+    /// **This condition CONTAINS the thermal wall function.** SPEC-LIT S47.6:
+    /// on a wall-function fluid mesh the cell-to-face conductance is
+    /// `rho c_p u_tau/T+`, not `k_eff Delta`, so a face cannot be both
+    /// `thermalWallFunction` and `coupledTemperature` - they rewrite the same
+    /// triple. Which conductance law a given interface face uses is selected
+    /// from the `nut` patch type on that face, S15.5's rule extended once
+    /// more.
+    CoupledTemperature = 33,
+
+    /// The surface-to-surface radiating wall - SPEC-LIT S50.3.
+    ///
+    /// A Robin triple like every other condition in S4, rewritten every
+    /// outer iteration by [`crate::s2s::S2s::update`] from (S50.12):
+    ///
+    /// ```text
+    /// h        = 4 eps sigma T0^3
+    /// fr       = h/(h + k_eff Delta_b)
+    /// refValue = (3/4) T0 + H_b/(4 sigma T0^3)
+    /// refGrad  = q_ext/k_eff
+    /// ```
+    ///
+    /// The local emission is IMPLICIT through `fr` (Patankar's `Sp <= 0`
+    /// rule, satisfied unconditionally because `T` is absolute); the
+    /// incoming irradiation `H_b` is lagged into `refValue`.
+    ///
+    /// **The emissivity does not appear in `refValue`.** That is not
+    /// bookkeeping luck: it is what makes `eps -> 0` collapse **bitwise**
+    /// onto [`Self::FixedFluxTemperature`] - `fr` exactly `0.0` and
+    /// `refGrad` exactly `q_ext/k_eff` - which is a S22-style "reproduces
+    /// the simpler model" gate obtained for free. Choosing `refGrad = 0`
+    /// instead of `q_ext/k_eff` would put `eps` back into `refValue` and
+    /// destroy it.
+    ///
+    /// **No new device branch**, for the same reason [`Self::ContactAngle`]
+    /// and [`Self::CoupledTemperature`] need none: the discriminant is
+    /// outside every range `cuda/field.cu` consults, so `fldCorrectBcScalar`
+    /// evaluates it with the same `fldMixed` as everything else. Until
+    /// `crate::s2s` writes the triple it degenerates to zero-gradient -
+    /// adiabatic, the safe default.
+    ///
+    /// `q_ext` and `eps` live in the S2S module's own buffers rather than in
+    /// `ref_value` (where [`Self::FixedFluxTemperature`] keeps its `q`),
+    /// because the stamp OVERWRITES `ref_value` every update.
+    S2sWall = 34,
+
+    /// The fan / blower patch on the PRESSURE - SPEC-LIT S52.
+    ///
+    /// A Robin triple like every other condition in S4, rewritten once per
+    /// pressure corrector by [`crate::fan::FlowDevices::update`] from
+    /// (S52.10)/(S52.11):
+    ///
+    /// ```text
+    /// fr       = 1/(1 + S SIGMA_D)
+    /// refValue = c + S Phi ,   c = p_a - sigma F* - S Q*
+    /// refGrad  = 0
+    /// ```
+    ///
+    /// `S = -dF/dQ_dev >= 0` is the fan-curve slope at the current operating
+    /// point, `SIGMA_D = SUM_f rAU_f a_f Delta_f` and
+    /// `Phi = SUM_f phi_HbyA,f` are two patch reductions, and `sigma` is the
+    /// direction. **One triple for the whole patch** - the fan sets one
+    /// pressure, not a profile, which is (S52.7)'s own content.
+    ///
+    /// **This is a symmetric rank-1 downdate, lumped.** S52.2 shows the
+    /// patch-integral coupling is `A = diag(D) - kappa d d^T`, exactly
+    /// symmetric, and S52.3 shows that lumping it onto the diagonal
+    /// preserving the row sum gives exactly the triple above. Symmetry
+    /// survives, the M-matrix property survives (the diagonal gains
+    /// `fr D_f >= 0`), and no new storage or matrix kernel is needed.
+    ///
+    /// **`S = 0` is `fixedValue`, BITWISE.** `S SIGMA_D` is exactly `0.0`, so
+    /// `fr = 1.0/1.0 = 1.0` and `refValue = c + 0.0*Phi = c`. A flat curve
+    /// reproduces the existing condition bit for bit, which is the
+    /// regression gate for the whole section (S52.4).
+    ///
+    /// **No new device branch**, for the same reason [`Self::ContactAngle`]
+    /// and [`Self::S2sWall`] need none: the discriminant is outside every
+    /// range `cuda/field.cu` consults, so `fldCorrectBcScalar` evaluates it
+    /// with the same `fldMixed` as everything else. Until `crate::fan` writes
+    /// the triple it degenerates to zero-gradient.
+    FanPressure = 35,
+
+    /// A porous jump against a prescribed plenum pressure - SPEC-LIT S53.3.
+    ///
+    /// The SAME algebra as [`Self::FanPressure`] with `S SIGMA_D -> R D_f`:
+    ///
+    /// ```text
+    /// fr       = 1/(1 + R D_f)
+    /// refValue = p_plenum
+    /// refGrad  = 0
+    /// ```
+    ///
+    /// `R = (nu t_m/alpha + C2 t_m |phi_f|/(2 a_f))/a_f >= 0` is the sheet's
+    /// resistance, evaluated from the previous iterate (a Picard
+    /// linearisation of the Forchheimer half). `R = 0` gives `fr = 1.0`
+    /// exactly - a plain `fixedValue` at the plenum pressure, bitwise - and
+    /// `R -> infinity` gives `fr -> 0` with `refGrad = 0`, which is a wall.
+    ///
+    /// The INTERNAL form of the same jump is not a `BcKind` at all: it is a
+    /// per-face division of `rAU_f`, `rAU_f|Sf|` and `phi_HbyA,f` by the same
+    /// `(1 + R D_f)`, with `fvm_laplacian` called unmodified (S53.2).
+    ///
+    /// **No new device branch**, for the same reason as above.
+    PorousJumpPressure = 36,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -277,6 +400,14 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "fixedFluxTemperature",
     "constantAlphaContactAngle",
     "dynamicAlphaContactAngle",
+    "coupledTemperature",
+    "thermalContactResistance",
+    "greyDiffusiveRadiationViewFactor",
+    "s2sWall",
+    "fanPressure",
+    "fan",
+    "porousJumpPressure",
+    "porousBafflePressure",
 ];
 
 impl BcKind {
@@ -386,6 +517,180 @@ impl BcKind {
                     );
                 }
                 Self::ContactAngle
+            }
+
+            // SPEC-LIT 47.9: the conjugate interface. Both spellings are ONE
+            // condition - `thermalContactResistance` is `coupledTemperature`
+            // with a non-zero `Rc`, and the resistance is read from the
+            // interface entry, not from the name - but both are kept in the
+            // table so a case that writes either is understood without a
+            // substitution warning.
+            //
+            // ONLY on a temperature. Nothing but `crate::cht` rewrites the
+            // triple this condition is defined by, so on any other field it
+            // would be zeroGradient wearing a conjugate interface's name -
+            // the S13.4 defect this project keeps finding. Refused naming the
+            // field it belongs on, exactly as `constantAlphaContactAngle` on
+            // a non-`alpha` field is.
+            "coupledTemperature" | "thermalContactResistance" => {
+                if !is_temperature_field(field) {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["zeroGradient", "fixedValue", "fixedFluxTemperature"],
+                        "zeroGradient - but note that a conjugate interface belongs on \
+                         the TEMPERATURE field `T`, which is the only field SPEC-LIT 47 \
+                         rewrites the Robin triple of; on any other field nothing would \
+                         ever compute the interface conductance",
+                        Self::ZeroGradient,
+                    );
+                }
+                Self::CoupledTemperature
+            }
+
+            // SPEC-LIT 47.9: OpenFOAM's own spelling of the same condition.
+            // Accepted as an alias rather than rejected, and the substitution
+            // is printed once - the same treatment
+            // `compressible::alphatJayatillekeWallFunction` gets below.
+            "compressible::turbulentTemperatureCoupledBaffleMixed" => {
+                if !is_temperature_field(field) {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["zeroGradient", "fixedValue", "fixedFluxTemperature"],
+                        "zeroGradient - a conjugate interface belongs on the TEMPERATURE \
+                         field",
+                        Self::ZeroGradient,
+                    );
+                }
+                crate::io::contract::warn_once(
+                    &format!("{field}: compressible::turbulentTemperatureCoupledBaffleMixed"),
+                    &format!(
+                        "{field}: boundaryField/{patch}/type \
+                         `compressible::turbulentTemperatureCoupledBaffleMixed` (OpenFOAM's \
+                         spelling of the conjugate interface) mapped to `coupledTemperature`"
+                    ),
+                );
+                Self::CoupledTemperature
+            }
+
+            // SPEC-LIT 50.8: this name asks for S47's conjugate coupling AND
+            // S50's radiative exchange ON THE SAME FACE, and those two
+            // conditions rewrite the same three numbers - exactly as S47.6
+            // says `thermalWallFunction` and `coupledTemperature` do.
+            // Surface-to-surface view factors now EXIST (SPEC-LIT S49/S50),
+            // so the refusal names both conditions rather than only the
+            // conjugate one; what is still missing is a face that is both at
+            // once. S47.10 used to say the view factors were "a search
+            // problem and tier D"; S49.2 is that search made deterministic,
+            // and this message is the part of S47.10 that had to change.
+            "compressible::turbulentTemperatureRadCoupledMixed" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &[
+                        "coupledTemperature",
+                        "thermalContactResistance",
+                        "greyDiffusiveRadiationViewFactor",
+                    ],
+                    "a face carries the conjugate interface OR the radiating wall, never \
+                     both - they rewrite the same (fr, refValue, refGrad) (SPEC-LIT 50.8)",
+                    "coupledTemperature - the conjugate coupling WITHOUT the radiative \
+                     exchange term",
+                    Self::CoupledTemperature,
+                );
+            }
+
+            // SPEC-LIT 50.8: the surface-to-surface radiating wall. Both the
+            // OpenFOAM spelling and the native one map to one BcKind.
+            //
+            // ONLY on a temperature. Nothing but `crate::s2s` rewrites the
+            // triple this condition is defined by, so on any other field it
+            // would be zeroGradient wearing a radiating wall's name - the
+            // S13.4 defect this project keeps finding. Refused naming the
+            // field it belongs on, exactly as `coupledTemperature` on a
+            // non-temperature field is.
+            "greyDiffusiveRadiationViewFactor" | "s2sWall" => {
+                if !is_temperature_field(field) {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["zeroGradient", "fixedValue", "fixedFluxTemperature"],
+                        "zeroGradient - but note that a surface-to-surface radiating wall \
+                         belongs on the TEMPERATURE field `T`, which is the only field \
+                         SPEC-LIT 50 rewrites the Robin triple of; on any other field \
+                         nothing would ever compute the irradiation",
+                        Self::ZeroGradient,
+                    );
+                }
+                Self::S2sWall
+            }
+
+            // SPEC-LIT 52.5: the fan / blower patch. Both spellings are ONE
+            // condition - the curve is read from the fan entry, not from the
+            // name - but both are kept in the table so a case that writes
+            // either is understood without a substitution warning.
+            //
+            // ONLY on the pressure. Nothing but `crate::fan` rewrites the
+            // triple this condition is defined by, so on any other field it
+            // would be zeroGradient wearing a fan's name - the S13.4.1
+            // defect this project keeps finding. Refused naming the field it
+            // belongs on, exactly as `coupledTemperature` on a
+            // non-temperature field is.
+            "fanPressure" | "fan" => {
+                if !is_pressure_field(field) {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["zeroGradient", "fixedValue", "pressureInletOutletVelocity"],
+                        "zeroGradient - but note that a fan curve belongs on the \
+                         PRESSURE field `p`, which is the only field SPEC-LIT 52 \
+                         rewrites the Robin triple of; on any other field nothing \
+                         would ever compute the operating point. The VELOCITY side \
+                         of a fan patch needs no new condition either, but it is \
+                         `zeroGradient` and NOT `pressureInletOutletVelocity`: this \
+                         solver seeds kind 12 at fr = 1 and never refreshes it from \
+                         the flux, so `momFluxIsPrescribed` would pin an inflow face \
+                         at zero and the fan could move no air (SPEC-LIT S52.10)",
+                        Self::ZeroGradient,
+                    );
+                }
+                Self::FanPressure
+            }
+
+            // SPEC-LIT 53.3: the porous jump against a plenum. Same rule, and
+            // `porousBafflePressure` is accepted as an alias for the name
+            // OpenFOAM users will reach for - the condition here is a jump on
+            // the pressure-flux relation, and S53.5 says in as many words
+            // that INSERTING the baffle topology is refused rather than
+            // silently answered with an internal face.
+            "porousJumpPressure" | "porousBafflePressure" => {
+                if !is_pressure_field(field) {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["zeroGradient", "fixedValue"],
+                        "zeroGradient - but note that a porous jump belongs on the \
+                         PRESSURE field `p`, which is the only field SPEC-LIT 53 \
+                         rewrites the Robin triple of; on any other field nothing \
+                         would ever compute the resistance",
+                        Self::ZeroGradient,
+                    );
+                }
+                Self::PorousJumpPressure
+            }
+
+            // SPEC-LIT 47.9: an external heat-transfer-coefficient/ambient
+            // wall. Not implemented; the two conditions that ARE are named.
+            "externalWallHeatFluxTemperature" => {
+                return unsupported(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &["fixedFluxTemperature", "coupledTemperature"],
+                    "fixedFluxTemperature (a prescribed wall heat flux) or \
+                     coupledTemperature (a real conjugate solid region)",
+                    Self::FixedFluxTemperature,
+                );
             }
 
             // SPEC-LIT 29.3: OpenFOAM spells the Jayatilleke thermal wall
@@ -521,6 +826,74 @@ impl BcKind {
     pub fn is_contact_angle(self) -> bool {
         matches!(self, Self::ContactAngle)
     }
+
+    /// True where SPEC-LIT S47's conjugate interface owns the face and
+    /// rewrites `T`'s Robin triple every outer iteration. Asked of `T`'s OWN
+    /// patch type, the same discipline [`Self::is_thermal_wall_function`]
+    /// uses - and note that the two are mutually exclusive by construction
+    /// (S47.6): a face carries one or the other, never both, because they
+    /// rewrite the same three numbers.
+    #[inline]
+    pub fn is_coupled_temperature(self) -> bool {
+        matches!(self, Self::CoupledTemperature)
+    }
+
+    /// True where SPEC-LIT S52's fan curve owns the face and rewrites `p`'s
+    /// Robin triple once per pressure corrector. Asked of `p`'s OWN patch
+    /// type, the same S15.5 discipline [`Self::is_coupled_temperature`] uses.
+    #[inline]
+    pub fn is_fan_pressure(self) -> bool {
+        matches!(self, Self::FanPressure)
+    }
+
+    /// True where SPEC-LIT S53.3's porous jump owns the face. Asked of `p`'s
+    /// OWN patch type - and note that a face carries one of this and
+    /// [`Self::is_fan_pressure`], never both, because they rewrite the same
+    /// three numbers.
+    #[inline]
+    pub fn is_porous_jump_pressure(self) -> bool {
+        matches!(self, Self::PorousJumpPressure)
+    }
+
+    /// True where SPEC-LIT S50's surface-to-surface radiating wall owns the
+    /// face and rewrites `T`'s Robin triple every outer iteration. Asked of
+    /// `T`'s OWN patch type, the same S15.5 discipline
+    /// [`Self::is_coupled_temperature`] uses - and note the two are mutually
+    /// exclusive by construction (S50.8), because they rewrite the same
+    /// three numbers.
+    #[inline]
+    pub fn is_s2s_wall(self) -> bool {
+        matches!(self, Self::S2sWall)
+    }
+}
+
+/// Is `field` the temperature? SPEC-LIT S47.9's "on a field that is not a
+/// temperature" refusal needs to know, and nothing else does - which is why
+/// it is a free function next to the match rather than a method.
+///
+/// `T` is this solver's temperature; `T.<region>` is what a multi-region case
+/// writes per region (S47.4), so the prefix is accepted with a separator after
+/// it. `Tref`, `Twall` and friends are NOT temperatures in the sense that
+/// matters here - they are parameters - so a bare `starts_with("T")` would be
+/// wrong.
+/// Is `field` the pressure? SPEC-LIT S52.5's "on a field that is not the
+/// pressure" refusal needs to know, and it is the exact analogue of
+/// [`is_temperature_field`] - `p` is this solver's kinematic pressure and
+/// `p_rgh` / `p.<region>` are the spellings a case may write, while `pRef`
+/// and `p0` are PARAMETERS and must not match.
+fn is_pressure_field(field: &str) -> bool {
+    field == "p"
+        || field == "p_rgh"
+        || field
+            .strip_prefix('p')
+            .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('_'))
+}
+
+fn is_temperature_field(field: &str) -> bool {
+    field == "T"
+        || field
+            .strip_prefix('T')
+            .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('_'))
 }
 
 /// A cell field plus its boundary state.
@@ -672,6 +1045,10 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
             PatchKind::Empty => BcKind::Empty,
             PatchKind::Cyclic | PatchKind::Processor => BcKind::Cyclic,
             PatchKind::Symmetry => BcKind::Symmetry,
+            // SPEC-LIT S47.4: an `Interface` patch is topologically coupled
+            // but is NOT seeded `Cyclic` - see `topology_override` in
+            // `field_setup.rs` for the reasoning. It stays zero-gradient
+            // (adiabatic, the safe default) until `crate::cht` claims it.
             _ => BcKind::ZeroGradient,
         } as Label;
         for i in 0..p.size {

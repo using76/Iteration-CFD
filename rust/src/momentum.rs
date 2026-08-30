@@ -737,6 +737,28 @@ impl<'m> Momentum<'m> {
         (&self.rauf_mag_sf.f, &self.rauf_mag_sf.bf)
     }
 
+    /// The three surface fields SPEC-LIT §53.2's porous jump divides by
+    /// `(1 + R D_f)`: `phi_HbyA`, `rAU_f` and `rAU_f|Sf|`, mutably and in one
+    /// borrow.
+    ///
+    /// **Computes nothing.** It exists because (S53.4) says all three carry
+    /// the same face conductance into the pressure equation and must be
+    /// scaled together - the matrix coefficient, the flux corrector's
+    /// coefficient and the right-hand side - and because handing out three
+    /// separate `&mut` would not compile. Nothing in this file reads or
+    /// writes them differently because it exists, which is why §53's default
+    /// is unmoved by construction: this accessor is the whole of the change
+    /// to `momentum.rs`.
+    pub fn jump_targets(
+        &mut self,
+    ) -> (
+        &mut GpuSurfaceScalarField,
+        &mut GpuSurfaceScalarField,
+        &mut GpuSurfaceScalarField,
+    ) {
+        (&mut self.phi_hbya, &mut self.rauf, &mut self.rauf_mag_sf)
+    }
+
     /// The gradient of `p`, as of the last [`Momentum::update_p_gradient`].
     pub fn grad_p(&self) -> &DevBuf<Vec3> {
         &self.grad_p

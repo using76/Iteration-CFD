@@ -1,0 +1,200 @@
+// meteor-cfd case - SPEC-LIT §46/§47, run by `ofgpu-cht`.
+//
+// A four-layer semiconductor package, in section: a silicon die dissipating
+// 100 W over a 10 x 10 mm footprint, a solder TIM1, a copper heat spreader,
+// and a grease TIM2 to an isothermal cold plate. Everything here is
+// conduction: the interfaces carry SPEC-LIT §47.5's contact resistances, and
+// the die's metallisation is a mesh-axis-diagonal anisotropic conductivity
+// (§46.3's Wiener pair for a layered stack).
+//
+// WHAT THIS CASE IS FOR. It is the semiconductor thermal-analysis problem the
+// §47 work opens, reduced to the part that has a closed form. The whole stack
+// is one-dimensional in z, so the junction temperature is a series sum:
+//
+//   q = 100 W / 1e-4 m^2 = 1e6 W/m^2
+//
+//   below the die's bottom face, m^2 K/W:
+//     Rc(die/solder)      1.0e-5
+//     solder    5e-5/57   8.771930e-7
+//     Rc(solder/spreader) 2.5e-5
+//     spreader  2e-3/398  5.025126e-6
+//     Rc(spreader/grease) 4.0e-5      (written as thicknessLayers/kappaLayers)
+//     grease    9e-4/3.5  2.571429e-4
+//                         ----------
+//                         3.380452e-4   ->  338.0452 K
+//
+//   inside the die, where the source is lumped per cell (this is the FINITE
+//   VOLUME die, not the analytic one - with a uniform source the two differ
+//   at second order, and what this case gates is that the solver reproduces
+//   its own discretisation exactly):
+//     q (h/2)/k_z  +  (g h^2/k_z)(1 + 2 + 3)   with h = 0.7 mm / 4, k_z = 30
+//     = 2.9167 + 8.7500                        ->   11.6667 K
+//
+//   T_junction = 300 + 338.0452 + 11.6667 = 649.7118 K
+//
+// MEASURED, on an RTX 5070 Ti in f64: T_junction = 649.7118 K, each of the
+// three interfaces carries exactly -100.000000 / +100.000000 W, the §47.12
+// Gate 4 conservation imbalance is 0.000e0, and the largest interface
+// temperature JUMP is 40.000000 K = q * 4e-5 - the third contact resistance,
+// visible in the reported face values because §47.3's Robin triple can carry
+// a discontinuity and a cyclic interpolation could not.
+// `io::case_cht::tests::the_shipped_die_stack_case_matches_its_closed_form`
+// asserts all of that against the formula above, rebuilt from these numbers
+// rather than transcribed.
+//
+// WHAT IT IS NOT. There is no air, no water and no flow: the cold plate is an
+// isothermal boundary, not a fluid region. SPEC-LIT §47's fluid side is
+// implemented and tested in `crate::cht` (the wall-function conductance of
+// §47.6, the two limits of §47.12's Gate 2) but no case format reaches it
+// yet, and `ofgpu-cht` refuses a `"kind": "fluid"` region by name rather than
+// building a solid and calling it one.
+{
+  "name": "dieStack",
+
+  "regions": [
+    {
+      // The die. 10 x 10 x 0.7 mm of silicon, dissipating 100 W uniformly:
+      // 100 W / (1e-2 * 1e-2 * 7e-4 m^3) = 1.428571e9 W/m^3.
+      //
+      // kappa is ANISOTROPIC and diagonal in the mesh axes - SPEC-LIT §46.3's
+      // layered homogenisation. In-plane the metallisation raises the
+      // effective conductivity; through-plane the dielectric layers lower it.
+      // The stack axis is z, so the through-plane value is the z component.
+      // §46.4 accepts this because the mesh is axis-aligned: `K Sf` is then
+      // parallel to `Sf` and the anisotropy residual is identically zero.
+      "name": "die",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.00295], "max": [0.010, 0.010, 0.00365] },
+        "cells": [10, 10, 4],
+        "boundaries": {
+          "xmin": "dieSideXMin", "xmax": "dieSideXMax",
+          "ymin": "dieSideYMin", "ymax": "dieSideYMax",
+          "zmin": "dieToSolder", "zmax": "dieTop"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 700.0, "kappa": [120.0, 120.0, 30.0] },
+      "source": 1.428571428571429e9,
+      "patches": [
+        // The package lid is not modelled; the die's top and edges are
+        // adiabatic, which is the conservative assumption for a
+        // junction-temperature estimate.
+        { "match": "dieTop",       "T": { "type": "zeroGradient" } },
+        { "match": "dieSideXMin",  "T": { "type": "zeroGradient" } },
+        { "match": "dieSideXMax",  "T": { "type": "zeroGradient" } },
+        { "match": "dieSideYMin",  "T": { "type": "zeroGradient" } },
+        { "match": "dieSideYMax",  "T": { "type": "zeroGradient" } }
+      ]
+    },
+
+    {
+      // TIM1: a 50 um solder layer. Meshed as its own region rather than
+      // folded into a contact resistance, because SPEC-LIT (S47.13)'s
+      // zero-thickness test - Fo = alpha t / t_TIM^2 >> 1 - is what decides
+      // between the two, and a solder joint has enough heat capacity to
+      // matter in a transient.
+      "name": "solder",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0029], "max": [0.010, 0.010, 0.00295] },
+        "cells": [10, 10, 2],
+        "boundaries": {
+          "xmin": "solderSideXMin", "xmax": "solderSideXMax",
+          "ymin": "solderSideYMin", "ymax": "solderSideYMax",
+          "zmin": "solderToSpreader", "zmax": "solderToDie"
+        }
+      },
+      "material": { "rho": 7400.0, "c": 220.0, "kappa": 57.0 },
+      "patches": [
+        { "match": "solderSideXMin", "T": { "type": "zeroGradient" } },
+        { "match": "solderSideXMax", "T": { "type": "zeroGradient" } },
+        { "match": "solderSideYMin", "T": { "type": "zeroGradient" } },
+        { "match": "solderSideYMax", "T": { "type": "zeroGradient" } }
+      ]
+    },
+
+    {
+      // The copper heat spreader, 2 mm.
+      "name": "spreader",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0009], "max": [0.010, 0.010, 0.0029] },
+        "cells": [10, 10, 8],
+        "boundaries": {
+          "xmin": "spreaderSideXMin", "xmax": "spreaderSideXMax",
+          "ymin": "spreaderSideYMin", "ymax": "spreaderSideYMax",
+          "zmin": "spreaderToGrease", "zmax": "spreaderToSolder"
+        }
+      },
+      "material": { "rho": 8960.0, "c": 385.0, "kappa": 398.0 },
+      "patches": [
+        { "match": "spreaderSideXMin", "T": { "type": "zeroGradient" } },
+        { "match": "spreaderSideXMax", "T": { "type": "zeroGradient" } },
+        { "match": "spreaderSideYMin", "T": { "type": "zeroGradient" } },
+        { "match": "spreaderSideYMax", "T": { "type": "zeroGradient" } }
+      ]
+    },
+
+    {
+      // TIM2: 0.9 mm of thermal grease down to the cold plate, whose face is
+      // held at 300 K.
+      "name": "grease",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.010, 0.010, 0.0009] },
+        "cells": [10, 10, 3],
+        "boundaries": {
+          "xmin": "greaseSideXMin", "xmax": "greaseSideXMax",
+          "ymin": "greaseSideYMin", "ymax": "greaseSideYMax",
+          "zmin": "coldPlate", "zmax": "greaseToSpreader"
+        }
+      },
+      "material": { "rho": 2600.0, "c": 900.0, "kappa": 3.5 },
+      "patches": [
+        { "match": "coldPlate",       "T": { "type": "fixedValue", "value": 300.0 } },
+        { "match": "greaseSideXMin",  "T": { "type": "zeroGradient" } },
+        { "match": "greaseSideXMax",  "T": { "type": "zeroGradient" } },
+        { "match": "greaseSideYMin",  "T": { "type": "zeroGradient" } },
+        { "match": "greaseSideYMax",  "T": { "type": "zeroGradient" } }
+      ]
+    }
+  ],
+
+  // SPEC-LIT §47.5. `Rc` is what ASTM D5470 reports as the intercept of its
+  // R_total-versus-thickness line: the two mating surfaces' contact
+  // resistances, with the layer's own bulk resistance already carried by the
+  // meshed region.
+  "interfaces": [
+    {
+      "regionA": "die",      "patchA": "dieToSolder",
+      "regionB": "solder",   "patchB": "solderToDie",
+      "Rc": 1.0e-5
+    },
+    {
+      "regionA": "solder",   "patchA": "solderToSpreader",
+      "regionB": "spreader", "patchB": "spreaderToSolder",
+      "Rc": 2.5e-5
+    },
+    {
+      // The same number, written the other way: a 40 um bond line of a
+      // k = 1.0 W/(m K) adhesive is R = 4e-5 m^2 K/W, which SPEC-LIT (S47.11)
+      // sums for you. Writing both `Rc` AND these is refused - they are two
+      // spellings of one number.
+      "regionA": "spreader", "patchA": "spreaderToGrease",
+      "regionB": "grease",   "patchB": "greaseToSpreader",
+      "thicknessLayers": [4.0e-5],
+      "kappaLayers": [1.0]
+    }
+  ],
+
+  "initial": { "T": 300.0 },
+  "run": { "steady": true },
+
+  "numerics": {
+    // A pure conduction matrix is symmetric INCLUDING its coupled interface
+    // entries (SPEC-LIT §47.2 writes both sides from one h_G and one |Sf|),
+    // and §48.3's extended check now verifies both halves - so PCG with an
+    // incomplete-Cholesky preconditioner is legal here and is the right
+    // choice.
+    "solver": "PCG",
+    "preconditioner": "DIC",
+    "tolerance": 1e-14,
+    "maxIter": 5000
+  }
+}

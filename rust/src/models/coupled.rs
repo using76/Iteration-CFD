@@ -80,7 +80,9 @@ use crate::device::{DevBuf, Gpu};
 use crate::error::Result;
 use crate::field::GpuScalarField;
 use crate::models::les::Les;
-use crate::models::{KEpsilon, KOmega, KOmegaSst, LaunderSharmaKE, RealizableKe, RngKe};
+use crate::models::{
+    KEpsilon, KOmega, KOmegaSst, LaunderSharmaKE, RealizableKe, RngKe, SpalartAllmaras,
+};
 use crate::solver::SolverPerformance;
 use crate::turbulence::{BuoyancyProduction, C3Mode, FlowState};
 use crate::{Scalar, Vec3};
@@ -439,6 +441,86 @@ impl<'m> CoupledTurbulence for CoupledRealizableKe<'m> {
 }
 
 // ==========================================================================
+//  SpalartAllmaras, and its hybrids - SPEC-LIT §56, §57
+// ==========================================================================
+
+/// [`SpalartAllmaras`] behind [`CoupledTurbulence`], hybrid or not.
+///
+/// **No buoyancy.** SPEC-LIT §56.8: §17's `G_b` enters a `k` equation and
+/// this model has none - it transports `nu~`, which is not an energy. A case
+/// with gravity naming `SpalartAllmaras` is refused by name in
+/// [`crate::models::registry::refuse_sa_buoyancy`], so this wrapper carries
+/// no `BuoyancySettings` at all rather than a field that is always `None`.
+///
+/// Whether §57's hybrid length scale is attached is a property of the model
+/// itself, not of this wrapper: `d_tilde` is an argument to one kernel, so a
+/// hybrid and a pure RANS run go down the same code path.
+pub struct CoupledSpalartAllmaras<'m> {
+    model: SpalartAllmaras<'m>,
+}
+
+impl<'m> CoupledSpalartAllmaras<'m> {
+    pub fn new(model: SpalartAllmaras<'m>) -> Self {
+        Self { model }
+    }
+
+    pub fn model(&self) -> &SpalartAllmaras<'m> {
+        &self.model
+    }
+    pub fn model_mut(&mut self) -> &mut SpalartAllmaras<'m> {
+        &mut self.model
+    }
+}
+
+impl<'m> CoupledTurbulence for CoupledSpalartAllmaras<'m> {
+    fn initialise(&mut self, gpu: &Gpu, flow: &FlowState) -> Result<()> {
+        self.model.initialise(gpu, flow)
+    }
+
+    fn correct(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        _thermal: Option<&ThermalCtx>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        self.model.correct(gpu, flow)
+    }
+
+    fn nut(&self) -> &GpuScalarField {
+        self.model.nut()
+    }
+    fn name(&self) -> &str {
+        if self.model.des().is_some() {
+            "SpalartAllmaras (hybrid)"
+        } else {
+            "SpalartAllmaras"
+        }
+    }
+    fn output_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        self.model.named_fields()
+    }
+    fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        self.model.named_fields_mut()
+    }
+
+    /// SPEC-LIT §27's mixing rate, and the one place a one-equation model
+    /// genuinely has nothing to offer.
+    ///
+    /// The eddy-break-up rate needs an inverse time scale. k-epsilon has
+    /// `epsilon/k`; k-omega has `beta* omega`. Spalart-Allmaras transports
+    /// **neither an energy nor a frequency** - `nu~` is a viscosity - so
+    /// there is no identity that recovers one, and constructing a plausible
+    /// substitute (say `nu_t/d^2`, or a strain rate) would be inventing a
+    /// combustion model and attributing it to Spalart & Allmaras. §13.4 and
+    /// §0 between them forbid that, so this answers `None` and a driver that
+    /// wanted `-combustion` under this model is refused by name - the same
+    /// treatment `CoupledLaminar` gets, and for the same reason.
+    fn combustion_mixing(&self) -> CombustionMixing<'_> {
+        CombustionMixing::None
+    }
+}
+
+// ==========================================================================
 //  RNGkEpsilon - SPEC-LIT §41
 // ==========================================================================
 
@@ -617,7 +699,14 @@ impl<'m> CoupledTurbulence for CoupledKOmegaSst<'m> {
         self.model.nut()
     }
     fn name(&self) -> &str {
-        "kOmegaSST"
+        // SPEC-LIT §57.7: a hybrid SST run says so on its own banner line.
+        // The pure-SST answer is unchanged, which is what keeps §30.3's
+        // selection test reading what it always read.
+        if self.model.des().is_some() {
+            "kOmegaSST (hybrid)"
+        } else {
+            "kOmegaSST"
+        }
     }
     fn output_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
         self.model.named_fields()

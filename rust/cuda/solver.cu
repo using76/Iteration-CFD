@@ -390,6 +390,64 @@ extern "C" __global__ void solSymDefectStage1
 }
 
 
+//- The COUPLED half of the same question - SPEC-LIT S48.3.
+//
+//  solSymDefectStage1 above compares upper against lower and NOTHING ELSE.
+//  A boundary face whose bNbrCell names a real cell carries an off-diagonal
+//  too - amul applies it as -boundaryCoeffs[bf]*psi[nbr] - and the two faces
+//  of one couple are the two halves of the pair A(P,Q), A(Q,P). If they
+//  differ the matrix is asymmetric, and before S48.3 the check said
+//  "symmetric" anyway, so PCG and DIC - which this function exists to guard,
+//  and which are defined only for symmetric systems - would have been chosen
+//  for a matrix that has no symmetry at all.
+//
+//  Nothing in the tree makes them differ today: fvLapBoundary's coupled
+//  branch writes both from one `coef`, and S47.2's interface kernel writes
+//  both sides from one h_G and one |Sf| deliberately. The hazard is a future
+//  one-sided term - a radiative interface flux (S47.10), a one-sided source,
+//  an AMI weight - and closing it costs this one kernel.
+//
+//  An unpaired face contributes nothing: it is either uncoupled, or coupled
+//  by a mesh that never recorded its pairing, and in neither case is there a
+//  second coefficient to compare against.
+extern "C" __global__ void solCoupledSymDefectStage1
+(
+    ofscalar* __restrict__ partialsDefect,
+    ofscalar* __restrict__ partialsScale,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bNbrFace,
+    oflabel n
+)
+{
+    const oflabel stride = (oflabel)(blockDim.x*gridDim.x);
+    ofscalar defect = 0;
+    ofscalar scale = 0;
+    for (oflabel i = (oflabel)OFGPU_TID; i < n; i += stride)
+    {
+        if (bNbrCell[i] < 0) continue;
+
+        const oflabel j = bNbrFace[i];
+        if (j < 0 || j >= n) continue;
+
+        const ofscalar a = boundaryCoeffs[i];
+        const ofscalar b = boundaryCoeffs[j];
+        defect = ofmax_(defect, ofabs_(a - b));
+        scale = ofmax_(scale, ofmax_(ofabs_(a), ofabs_(b)));
+    }
+
+    defect = blockMax_(defect);
+    __syncthreads();
+    scale = blockMax_(scale);
+
+    if (threadIdx.x == 0)
+    {
+        partialsDefect[blockIdx.x] = defect;
+        partialsScale[blockIdx.x] = scale;
+    }
+}
+
+
 //- Second stage of solSymDefectStage1: two maxima, one launch.
 extern "C" __global__ void solMax2Stage2
 (

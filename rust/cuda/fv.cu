@@ -93,6 +93,14 @@
 #define OFPATCH_SYMMETRY  3
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
+//- SPEC-LIT S47.4: a conformal conjugate interface. Topologically a cyclic
+//  couple with a zero transform, so fvLapBoundary treats it EXACTLY as one
+//  (the coupled coefficient of S47.9). Everywhere else it deliberately falls
+//  into the UNCOUPLED branch and is read from the evaluated face value, which
+//  is the only representation that can carry the contact-resistance jump -
+//  the cyclic branch's geometric interpolation of psi[nbr] cannot. And
+//  fvLapNonOrth skips it outright; see the note there.
+#define OFPATCH_INTERFACE 6
 
 // --------------------------------------------------------------------------
 //  The single mixed boundary form - SPEC-LIT S4, which is our own design.
@@ -1113,6 +1121,37 @@ extern "C" __global__ void fvLapBoundary
         return;
     }
 
+    if (kind == OFPATCH_INTERFACE)
+    {
+        // SPEC-LIT S47.3. Structurally the same coupled entry as the cyclic
+        // branch above, with the series conductance h_G |Sf| of (S47.9) in
+        // place of a harmonic interpolation - and taken DIRECTLY, not as
+        // g*delta.
+        //
+        // WHY THE DELTA IS NOT APPLIED HERE, and it is not a shortcut.
+        // S47.2 consequence 2 requires the two faces of a couple to carry the
+        // BITWISE SAME coefficient, or the matrix is asymmetric and PCG and
+        // DIC - which S48.3's check exists to guard - are being run on a
+        // system that has no symmetry. Writing bGammaMagSf as h_G|Sf|/Delta_i
+        // and multiplying it back by Delta_i here is a division and a
+        // multiplication by two DIFFERENT numbers on the two sides, and
+        // x/y*y is not x in floating point: measured, the two entries then
+        // differed by about one ulp. Passing the coefficient itself removes
+        // the round trip and makes the equality exact by construction, which
+        // is what the design claimed and what `ofgpu-validate` checks.
+        //
+        // So on an interface face bGammaMagSf holds h_G |Sf| (W/K) - the
+        // coefficient - rather than gamma |Sf|. That is a different quantity
+        // from every other face's, and it is safe because exactly one thing
+        // reads it there: this branch. fvLapNonOrth skips interface faces
+        // outright (see the note there), and nothing else in the crate is
+        // handed a conjugate mesh's bGammaMagSf.
+        const ofscalar coef = sign*g;
+        internalCoeffs[i] += -coef;
+        boundaryCoeffs[i] += -coef;
+        return;
+    }
+
     const ofscalar f0 = fr[i];
     internalCoeffs[i] += sign*g*bcGradInternal(f0, delta);
     boundaryCoeffs[i] += -sign*g*bcGradBoundary(f0, refValue[i], refGrad[i], delta);
@@ -1214,6 +1253,19 @@ extern "C" __global__ void fvLapNonOrth
         const oflabel b = bcfFace[j];
         const oflabel kind = bKind[b];
         if (kind == OFPATCH_EMPTY) continue;
+
+        //- SPEC-LIT S47.3. A conjugate interface is SKIPPED, deliberately and
+        //  with the accuracy cost stated. Across it `kappa` is discontinuous
+        //  and, with a contact resistance, so is `T` itself: interpolating
+        //  the two cells' gradients - what the cyclic branch below does - has
+        //  no physical meaning there, and using only the owner-side gradient
+        //  is inconsistent with the two-point flux the interface assembles.
+        //  Neither is defensible, so v1 computes neither: the host reports
+        //  the interface non-orthogonality at setup and REFUSES above a
+        //  threshold rather than adding a term that is wrong. On an
+        //  orthogonal interface - the only kind S47.4's pairing accepts - the
+        //  correction is zero anyway, so this changes no supported answer.
+        if (kind == OFPATCH_INTERFACE) continue;
 
         ofscalar corr;
         ofscalar orth;

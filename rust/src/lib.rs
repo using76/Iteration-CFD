@@ -30,6 +30,12 @@
 //!   set: heat release, body forces, Darcy-Forchheimer porous drag
 //! * [`species`] - N-1 transported mass fractions with the inert one closed by
 //!   `1 - sum`, all advected by the one conservative flux
+//! * [`s2s`] - surface-to-surface radiation: deterministic view factors, the
+//!   enclosure radiosity system, and the one rewritten Robin triple that is
+//!   the whole of its contact with the finite-volume solver
+//! * [`cht`] - conjugate heat transfer: solid regions, anisotropic
+//!   conduction, contact resistance, and the concatenated thermal mesh whose
+//!   fluid/solid interface is a cyclic couple with a zero transform
 //! * [`blockgen`] - a structured mesh generator, so test cases need no OpenFOAM
 //! * [`reference`] - an independent CPU transcription used only to validate
 //!
@@ -56,12 +62,17 @@ pub mod models;
 pub mod potential_flow;
 pub mod restart;
 pub mod rheology;
+pub mod cht;
+pub mod dcmetrics;
+pub mod fan;
+pub mod psychro;
 pub mod combustion;
 pub mod twostep;
 pub mod contact_angle;
 pub mod energy;
 pub mod fvdom;
 pub mod radiation;
+pub mod s2s;
 pub mod precon;
 pub mod pressure;
 pub mod scalar_transport;

@@ -1289,6 +1289,26 @@ impl<'m> Energy<'m> {
     /// SPEC-LIT S25.1's `(div u)_target`, as of the last
     /// [`Energy::update_target_divergence`] - what
     /// [`crate::simple::Simple`]'s pressure equation subtracts.
+    /// The boundary effective conductivity `k_eff` at each boundary face,
+    /// as [`Self::update_k_eff`] last computed it - SPEC-LIT S50.7.
+    ///
+    /// **This accessor is the ONLY change SPEC-LIT S49/S50 makes to this
+    /// file, and it computes nothing.** `crate::s2s`'s Robin triple (S50.12)
+    /// needs `k_eff` at the wall because `fr = h/(h + k_eff Delta_b)` is a
+    /// function of it (unlike S32.2's fixed-flux condition, where `fr = 0`
+    /// makes `q/k_eff` exact whatever `k_eff` is). Handing the value out
+    /// rather than letting the S2S model live inside `Energy` is what makes
+    /// "the default is unmoved" provable from the diff rather than from an
+    /// argument: no existing code path reads this, and nothing here writes
+    /// anything new.
+    ///
+    /// It is zero until the first [`Self::correct`]; the S2S stamp guards on
+    /// that, the same "degenerate until the kernel can run" convention
+    /// `energyFixedFluxTemperature` follows.
+    pub fn k_eff_wall(&self) -> &DevBuf<Scalar> {
+        &self.k_eff_face.bf
+    }
+
     pub fn target_divergence(&self) -> &DevBuf<Scalar> {
         &self.target_div
     }

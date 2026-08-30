@@ -53,6 +53,26 @@ pub enum PatchKind {
     Cyclic = 4,
     /// Coupled across MPI. Unused in this single-GPU build.
     Processor = 5,
+    /// A conformal fluid/solid (or solid/solid) conjugate interface -
+    /// SPEC-LIT S47.4. Topologically a `Cyclic` couple with a zero transform:
+    /// `b_nbr_cell` names the cell on the other side, in the CONCATENATED
+    /// thermal-mesh numbering, so `lduAmul` and
+    /// `lduAddBoundaryContributions` - which test `bNbrCell >= 0`, never
+    /// "cyclic" - solve it implicitly with no new matrix code.
+    ///
+    /// It is a SEPARATE discriminant from [`Self::Cyclic`] for two reasons,
+    /// both in S47.3. `fvLapNonOrth`'s cyclic branch interpolates the two
+    /// cells' gradients across the couple, which is meaningless where `kappa`
+    /// and `grad T` are both discontinuous, so an interface face is skipped
+    /// there instead. And every OTHER kernel's cyclic branch reads
+    /// `psi[nbr]` in place of the evaluated face value, which cannot
+    /// represent the `R_c` temperature jump; an interface face falls into the
+    /// uncoupled branch and is read from `bf[bf]`, the Robin face value of
+    /// (S47.5), which can.
+    ///
+    /// No mesh this crate read before SPEC-LIT S47 carries it, so every
+    /// existing case is unmoved by construction.
+    Interface = 6,
 }
 
 impl PatchKind {
@@ -76,6 +96,7 @@ impl PatchKind {
             Self::Symmetry => "symmetry",
             Self::Cyclic => "cyclic",
             Self::Processor => "processor",
+            Self::Interface => "interface",
         }
     }
 }
@@ -143,6 +164,16 @@ pub struct HostMesh {
     pub b_y: Vec<Scalar>,
     /// `[n_bf]` cyclic: the cell across the couple; `-1` otherwise
     pub b_nbr_cell: Vec<Label>,
+    /// `[n_bf]` coupled: the boundary FACE on the other side of the couple;
+    /// `-1` otherwise - SPEC-LIT §48.3.
+    ///
+    /// The pairing has always existed (`mesh/geometry.rs::cyclic_pairing`
+    /// computes it, and `b_nbr_cell` is derived from it); it was thrown away
+    /// after that one use. It is kept now because a coupled face's two
+    /// `boundary_coeffs` are the two halves of ONE matrix entry pair, and
+    /// `solver::matrix_is_symmetric` cannot compare them without knowing
+    /// which face is which - which is the blind spot §48.3 closes.
+    pub b_nbr_face: Vec<Label>,
     /// `[n_bf]` cyclic: interpolation weight; `1` otherwise
     pub b_weights: Vec<Scalar>,
     /// `[n_bf]` `PatchKind` of the owning patch, as `i32`
@@ -263,6 +294,8 @@ pub struct GpuMesh {
     pub b_non_orth_corr: DevBuf<Vec3>,
     pub b_y: DevBuf<Scalar>,
     pub b_nbr_cell: DevBuf<Label>,
+    /// `[n_bf]` the face across the couple, `-1` otherwise - SPEC-LIT §48.3.
+    pub b_nbr_face: DevBuf<Label>,
     pub b_weights: DevBuf<Scalar>,
     pub b_kind: DevBuf<Label>,
     pub b_patch: DevBuf<Label>,
@@ -306,6 +339,14 @@ impl GpuMesh {
             b_non_orth_corr: gpu.upload(&m.b_non_orth_corr)?,
             b_y: gpu.upload(&m.b_y)?,
             b_nbr_cell: gpu.upload(&m.b_nbr_cell)?,
+            // A mesh built before §48.3, or by hand in a test, may have no
+            // pairing array at all. `-1` everywhere is "no couple", which is
+            // what every consumer already means by it.
+            b_nbr_face: if m.b_nbr_face.len() == m.n_boundary_faces {
+                gpu.upload(&m.b_nbr_face)?
+            } else {
+                gpu.upload(&vec![-1 as Label; m.n_boundary_faces])?
+            },
             b_weights: gpu.upload(&m.b_weights)?,
             b_kind: gpu.upload(&m.b_kind)?,
             b_patch: gpu.upload(&m.b_patch)?,

@@ -1677,6 +1677,54 @@ pub fn thermal_wall_ref_grad(
     Some(q_w / k_eff_wall)
 }
 
+/// The wall-function CONDUCTANCE `C_A = rho c_p u_tau / T+`, W/(m^2 K) -
+/// SPEC-LIT S47.6.
+///
+/// The conjugate interface of S47.2 needs the cell-centre-to-wall conductance
+/// as one resistance in a series with the solid's, and on a wall-function
+/// mesh that is NOT `k_eff Delta`. This is the same Jayatilleke law
+/// [`thermal_wall_ref_grad`] uses, factored so the conductance can be read
+/// out on its own; the device twin is `wfThermalConductance` in
+/// `cuda/wallfunctions.cu`, built from the same two device inlines.
+///
+/// `None` under the same conditions as [`thermal_wall_ref_grad`] minus the
+/// `k_eff_wall` test, which a conductance has no use for: no standoff
+/// (`y <= 0`), or `T+ <= 0` (only at `y+ = 0` itself).
+///
+/// **[`thermal_wall_ref_grad`] is deliberately not re-expressed through
+/// this.** It computes `q_w = rho c_p u_tau (T_w - T_P)/T+` as one
+/// expression, and `C_A (T_w - T_P)` is the same number only to round-off, so
+/// routing the old function through the new one would move an answer this
+/// crate has already recorded. `tests::the_conductance_and_the_ref_grad_are_the_same_law`
+/// pins the two together instead.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn thermal_wall_conductance(
+    k_p: Scalar,
+    y: Scalar,
+    nu: Scalar,
+    rho: Scalar,
+    cp: Scalar,
+    pr: Scalar,
+    prt: Scalar,
+    kappa: Scalar,
+    e: Scalar,
+    cmu: Scalar,
+    k_min: Scalar,
+) -> Option<Scalar> {
+    if !(y > 0.0) {
+        return None;
+    }
+    let kc = k_p.max(k_min);
+    let y_plus = y_plus_of(kc, y, nu, cmu);
+    let tp = t_plus(y_plus, pr, prt, kappa, e, jayatilleke_p(pr, prt));
+    if !(tp > 0.0) {
+        return None;
+    }
+    let u_tau = u_tau_of(kc, cmu);
+    Some(rho * cp * u_tau / tp)
+}
+
 /// [`thermal_wall_ref_grad`]'s twin for a wall model that computes `u_tau`
 /// DIRECTLY rather than through `k` - SPEC-LIT §30.1: LES's Werner-Wengle
 /// substitutes `u_tau = sqrt(tau_w)` ([`u_tau_werner_wengle`]) for the RAS

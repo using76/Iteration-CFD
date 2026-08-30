@@ -1018,3 +1018,73 @@ extern "C" __global__ void wfThermalWallTauW
     fr[bf] = (ofscalar)0;
     refGrad[bf] = qw/keff;
 }
+
+
+// ==========================================================================
+//  S47.6  The wall-function CONDUCTANCE, for the conjugate interface
+// ==========================================================================
+
+//- C_A = rho c_p u_tau / T+, W/(m^2 K).
+//
+//  SPEC-LIT S47.6. On a high-Re fluid mesh the cell-centre-to-wall
+//  conductance is NOT k_eff*Delta - it is the sublayer resistance the
+//  Jayatilleke-corrected thermal log law describes - and the conjugate
+//  interface of S47.2 needs that number as ONE resistance in a series with
+//  the solid's. This kernel is the only new thing S47 needs from the wall
+//  functions, and it is built from the SAME wfYPlusOf and wfTPlus device
+//  inlines wfThermalWall above uses, so there is one Jayatilleke law in this
+//  tree and not two.
+//
+//  wfThermalWall is deliberately NOT re-expressed through this. It computes
+//  q_w = rho c_p u_tau (T_w - T_P)/T+ as one expression; C_A*(T_w - T_P) with
+//  C_A = rho c_p u_tau/T+ is the same number only to round-off, and
+//  rewriting it would move an answer this crate has already recorded. A test
+//  pins the two to agree instead.
+//
+//  ZERO, not "left alone", where the law cannot be evaluated - no standoff,
+//  or T+ <= 0 (only at y+ = 0 itself). A zero conductance is what
+//  chtInterfaceTriples reads as "this side conducts nothing", and it turns
+//  the face exactly adiabatic, which is the right answer on a face with no
+//  standoff and is the S47.8 limit the k_solid -> 0 gate rests on.
+//
+//  There is no kEffWall argument and there is deliberately no division by
+//  one: a conductance is not a gradient. That the interface assembly then
+//  multiplies by an OVERRIDDEN bGammaMagSf (S47.9) rather than by k_eff is
+//  the whole point of S47.6.
+extern "C" __global__ void wfThermalConductance
+(
+    ofscalar* __restrict__ cond,
+    const ofscalar* __restrict__ k,
+    const ofscalar* __restrict__ rho,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ bY,
+    const oflabel* __restrict__ wfFace,
+    ofscalar nu,
+    ofscalar cp,
+    ofscalar pr,
+    ofscalar prt,
+    ofscalar jayP,
+    ofscalar kappa,
+    ofscalar E,
+    ofscalar cmu25,
+    ofscalar kMin,
+    oflabel nWallFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nWallFaces) return;
+
+    const oflabel bf = wfFace[i];
+    const ofscalar y = bY[bf];
+    if (!(y > (ofscalar)0)) { cond[bf] = (ofscalar)0; return; }
+
+    const oflabel c = bFaceCells[bf];
+    const ofscalar kc = ofmax_(k[c], kMin);
+    const ofscalar yPlus = wfYPlusOf(kc, y, nu, cmu25);
+    const ofscalar tPlus = wfTPlus(yPlus, pr, prt, kappa, E, jayP);
+    if (!(tPlus > (ofscalar)0)) { cond[bf] = (ofscalar)0; return; }
+
+    const ofscalar uTau = cmu25*ofsqrt_(kc);
+
+    cond[bf] = rho[c]*cp*uTau/tPlus;
+}

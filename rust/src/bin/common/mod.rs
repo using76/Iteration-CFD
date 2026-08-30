@@ -869,6 +869,15 @@ pub fn driver_for(m: RasModel) -> &'static str {
         // coupled drivers are where it is reachable.
         RasModel::LaunderSharmaKE => "ofgpu-buoyant or ofgpu-fire",
         RasModel::KOmega | RasModel::KOmegaSST => "ofgpu-k-omega",
+        // SPEC-LIT S56/S57: SA and both hybrid backgrounds are reachable
+        // through `models::registry::build_coupled`, which is what the
+        // coupled drivers use - there is no standalone `ofgpu-sa`.
+        // SPEC-LIT §56.8 refuses SA in a buoyant solver - §17's G_b enters a
+        // k equation and it has none - so `ofgpu-sa` is the driver that runs
+        // it, and its SA-background hybrids with it. The SST-background
+        // hybrids go through `build_coupled` like SST itself.
+        RasModel::SpalartAllmaras | RasModel::HybridSa => "ofgpu-sa",
+        RasModel::HybridSst => "ofgpu-buoyant or ofgpu-fire",
         RasModel::Les => "ofgpu-buoyant or ofgpu-fire",
         RasModel::Laminar => "any driver",
     }

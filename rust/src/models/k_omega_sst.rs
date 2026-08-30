@@ -265,6 +265,22 @@ pub struct KOmegaSst<'m> {
     g_lim: DevBuf<Scalar>,
 
     f1_override: Option<Scalar>,
+
+    /// SPEC-LIT §57: the hybrid length scale, when the case asked for one.
+    ///
+    /// **`None` is the whole of "the default is unmoved by construction".**
+    /// With no hybrid attached, the code this field adds to `correct` is a
+    /// single failed `if let`: not one kernel launch and not one
+    /// floating-point operation changes, and `cuda/sst.cu` is byte-for-byte
+    /// what it was. That is the same pattern §43's extinction rate mask and
+    /// §54.4's virtual temperature both use, and it is why "SST is unmoved"
+    /// is provable from the diff rather than argued from a tolerance.
+    des: Option<crate::models::des::DesLengthScale>,
+
+    /// `[n_cells]` the Frobenius norm of the full velocity gradient, which
+    /// (57.7)'s `r_d` reads. Allocated always (one buffer), written only
+    /// when a hybrid is attached.
+    grad_frob: DevBuf<Scalar>,
 }
 
 impl<'m> KOmegaSst<'m> {
@@ -344,6 +360,8 @@ impl<'m> KOmegaSst<'m> {
             g_lim: gpu.zeros(nc)?,
 
             f1_override: None,
+            des: None,
+            grad_frob: gpu.zeros(nc)?,
         })
     }
 
@@ -409,6 +427,17 @@ impl<'m> KOmegaSst<'m> {
     /// `RAS { turbulence off; }` and `simulationType laminar;` ask for.
     pub fn freeze_nut(&mut self, gpu: &Gpu) -> Result<()> {
         self.core.freeze_nut(gpu)
+    }
+
+    /// Attach SPEC-LIT §57's hybrid length scale. `None` - the default - is a
+    /// pure SST run and costs one failed `if let` per outer iteration.
+    pub fn set_des(&mut self, des: Option<crate::models::des::DesLengthScale>) {
+        self.des = des;
+    }
+
+    #[must_use]
+    pub fn des(&self) -> Option<&crate::models::des::DesLengthScale> {
+        self.des.as_ref()
     }
 
     /// Replace the computed `F_1` with a constant, or `None` to compute it.
@@ -723,6 +752,41 @@ impl<'m> KOmegaSst<'m> {
             c.c1,
             n,
         )?;
+
+        // SPEC-LIT §57.1/(57.4): a hybrid OVERWRITES the `sp` that
+        // `sstKSources` has just written, with
+        // `beta* omega (l_RANS/l_DES)`. `cuda/sst.cu` is untouched, and with
+        // no hybrid attached this is one failed `if let` - not one kernel
+        // launch and not one arithmetic operation is added to a pure SST run
+        // (§57.7).
+        //
+        // The ratio form rather than `sqrt(k)/l_DES` is what makes RANS mode
+        // reproduce `beta* omega` BIT FOR BIT: multiplication by an exact
+        // `1.0` is exact in IEEE-754, and two roundings through a square root
+        // are not.
+        if self.des.is_some() {
+            crate::turbulence::grad_frobenius(
+                gpu,
+                &self.core.turb,
+                &mut self.grad_frob,
+                &self.core.grad_u,
+                n,
+            )?;
+            let Self { des, core, k, omega, f1, grad_frob, .. } = self;
+            let des = des.as_mut().expect("checked just above");
+            des.update_sst(
+                gpu,
+                &k.f,
+                &omega.f,
+                f1,
+                &core.nut.f,
+                grad_frob,
+                flow.nu,
+                c.beta_star,
+                n,
+            )?;
+            des.stamp_sst_k_sink(gpu, &mut core.sp, &omega.f, c.beta_star, n)?;
+        }
 
         fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.g_lim, 1.0)?;
 

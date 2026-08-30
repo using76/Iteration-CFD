@@ -6973,3 +6973,5308 @@ test pins that they do not.
 | the conversion is shared | `vdb`'s fp16 voxels equal `nvdb::f32_to_f16_bits` applied to the same input, bit for bit, over a sweep including subnormals, `+-0` and overflow |
 | background | the fp16 file's background word is still 4 bytes and still `0.0f` |
 | externally unverified | unchanged and restated: no OpenVDB build, Blender or ParaView is available here. `fp16` is validated against this module's own reader, as `fp32` is. Mark it "structurally validated, externally unverified" |
+
+---
+
+## 46. The solid energy equation, multi-material and anisotropic conduction
+
+Written from:
+
+* H. S. Carslaw, J. C. Jaeger, *Conduction of Heat in Solids*, 2nd ed., Oxford
+  University Press (1959), ch. I — the anisotropic solid and the affine
+  transformation that reduces `div(K grad T)` to `lap T`. ISBN 0-19-853368-3.
+* S. V. Patankar, *Numerical Heat Transfer and Fluid Flow*, Hemisphere (1980),
+  §4.2.3 — the **harmonic** interface conductivity for a control volume whose
+  two neighbours are different materials. ISBN 0-89116-522-3.
+* H. Jasak, *Error Analysis and Estimation for the Finite Volume Method*, PhD
+  thesis, Imperial College London (1996), §3.4.2–3.4.3 — the over-relaxed
+  non-orthogonal split this section generalises from a scalar `gamma` to a
+  tensor `K`. `http://hdl.handle.net/10044/1/8335`.
+* I. Aavatsmark, "An introduction to multipoint flux approximations for
+  quadrilateral grids", *Computational Geosciences* **6** (2002) 405–432.
+  DOI `10.1023/A:1021291114475` — the rigorous full-tensor treatment, and
+  therefore the *reason* §46.4 refuses instead of approximating.
+* K. Lipnikov, M. Shashkov, D. Svyatskiy, Yu. Vassilevski, *J. Comput. Phys.*
+  **227** (2007) 492–512. DOI `10.1016/j.jcp.2007.08.008` — the nonlinear
+  monotone alternative, named in the same refusal.
+* M. M. Yovanovich, *IEEE Trans. Comp. Packag. Technol.* **28** (2005) 182–206.
+  DOI `10.1109/TCAPT.2005.848483` — the layered-stack conductivities the
+  Wiener pair of §46.3 is used to homogenise.
+* ofgpu `SPEC-LIT.md` §2.4 (the over-relaxed split), §3.2 (the Gauss
+  laplacian), §3.4 (`fvm_su`/`fvm_sp`), §13.3 (`ddt` schemes), §13.4 (the
+  unsupported-setting contract) and §26 (the fluid energy equation this one
+  is the partner of).
+
+No GPL-licensed source was consulted.
+
+### 46.1 The equation
+
+For a solid region `Omega_s` there is no advection and no pressure work:
+
+```
+(rho_s c_s)(x) dT/dt  =  div( K_s(x) . grad T )  +  q'''_s(x, t)        (S46.1)
+```
+
+with `K_s` symmetric positive definite. The isotropic material `K_s = k_s I`
+collapses (S46.1) to `rho_s c_s dT/dt = div(k_s grad T) + q'''_s`.
+
+Every term is an operator this crate already has, in the order
+`Energy::assemble_prefix` already uses:
+
+| Term | Call | Note |
+|---|---|---|
+| `(rho_s c_s) dT/dt` | `timescheme::fvm_ddt_rho` | the weight array is `rho_s c_s`, exactly as the fluid passes `rho c_p` |
+| `-div(K_s grad T)` | `fv::fvm_laplacian(..., sign = -1)` | §46.2/§46.3 supply the face coefficient |
+| `q'''_s` | `fv::fvm_su(..., +1)` | §18's registry shape |
+| linearised sink | `fv::fvm_sp(..., -1)` | e.g. a temperature-dependent leakage-power model |
+| convection | **not called** | equivalently called with `phi ≡ 0`, which contributes exactly zero |
+
+**Quasi-steady solid.** Dropping `dT/dt` and solving a steady Poisson problem
+in the solid each outer iteration is the "quasi steady-state solid" of Errera
+& Chemin (2013). It is the same assembly with `DdtCoeffs::ZERO`, which
+`fvm_ddt_rho` already returns early on — a control flag, not a second code
+path.
+
+### 46.2 Face conductivity in a multi-material solid — harmonic, not linear
+
+Two adjacent cells of different materials do not have a linearly interpolated
+face conductivity. Patankar §4.2.3: what is conserved across the face is the
+**flux**, so what interpolates is the **resistance**.
+
+In this crate's weight convention (`weights[f] = w` is the OWNER's weight,
+`psi_f = w psi_P + (1-w) psi_N`, so the P-to-face distance is `(1-w)|d|` and
+the face-to-N distance is `w|d|` — `mesh/geometry.rs::weight_from_offsets`):
+
+```
+1/k_f  =  (1 - w)/k_P  +  w/k_N                                         (S46.2)
+```
+
+The linear form is wrong by a factor that does **not** vanish under mesh
+refinement: for a two-material slab with `k_N/k_P = r`, the linearly
+interpolated face conductivity over-predicts the face conductance by
+`(1+r)^2/(4r)` at `w = 1/2`, which at `r = 100` is a factor of 25 whatever the
+mesh. (S46.2) costs one elementwise kernel over internal faces.
+
+`k_f` is then multiplied by `|Sf|` before it reaches `fvm_laplacian`, whose
+argument is `gammaMagSf`, i.e. `gamma_f |Sf|_f` already multiplied together.
+
+### 46.3 Anisotropic conductivity — the effective area vector
+
+**Where the tensor comes from.** A layered stack (die / underfill /
+substrate / TIM / spreader; or a die with many metallisation levels) with
+layer normal `m` homogenises to the classical Wiener pair — parallel
+(arithmetic) in plane, series (harmonic) through plane:
+
+```
+k_par  = SUM_i f_i k_i                    in-plane
+k_perp = ( SUM_i f_i / k_i )^{-1}         through-plane                 (S46.3)
+K_s    = R . diag(k_par, k_par, k_perp) . R^T
+```
+
+with `f_i` the volume fraction of layer `i` and `R` the rotation from layer
+frame to mesh frame. For a silicon BEOL stack `k_par/k_perp` is routinely
+5–20; for pyrolytic graphite spreaders it exceeds 100.
+
+**The discretisation.** For face `f` with area vector `Sf` and cell-centre
+separation `d = C_N - C_P`, the exact flux is
+
+```
+Phi_f = -Sf . (K_f grad T)_f = -(K_f Sf) . (grad T)_f       (K symmetric)
+```
+
+so define the **effective area vector** and apply §2.4's over-relaxed split to
+it against `d` rather than to `Sf`:
+
+```
+E_f    = K_f . Sf                                                       (S46.4)
+
+Dhat_f = (E_f . E_f) / (E_f . d)          implicit face conductance, W/K
+kcor_f = E_f - Dhat_f d                   explicit correction vector    (S46.5)
+
+Phi_f  = -[ Dhat_f (T_N - T_P) + kcor_f . (grad T)_f ]
+```
+
+`Dhat_f` has already absorbed `|Sf|`: it is the whole face coefficient.
+
+**Why this needs no new laplacian kernel.** `fvLapFaces` computes
+`coef = sign gammaMagSf[f] deltaCoeffs[f]`, and `deltaCoeffs[f] = 1/(nf . d)`
+(§2.4). So passing
+
+```
+gammaMagSf_aniso[f] := Dhat_f / deltaCoeffs[f]                          (S46.6)
+```
+
+makes `fvLapFaces` produce `sign Dhat_f` exactly. It is not an approximation
+to the anisotropic operator, it *is* the anisotropic operator, assembled by
+the isotropic kernel. The same substitution works on boundary faces with
+`E_b = K_b Sf_b`, `d_b = Cf_b - C_P`, `Dhat_b = (E_b.E_b)/(E_b.d_b)`,
+`bGammaMagSf[b] := Dhat_b/bDeltaCoeffs[b]`.
+
+**The isotropic limit is exact, not approximate.** With `K = k I`,
+`E = k Sf`, so `Dhat = k|Sf|^2/(Sf.d) = k |Sf| deltaCoeffs`, and (S46.6)
+returns `k|Sf|` — the isotropic argument, unchanged. Likewise
+`kcor = k(Sf - |Sf|^2/(Sf.d) d) = k|Sf|(nf - d/(nf.d))` = `gammaMagSf` times
+the mesh's own `non_orth_corr`.
+
+**In exact arithmetic, and only in exact arithmetic.** The two expressions
+evaluate in different orders — the tensor path normalises `Sf`, forms `E.E`
+and `E.d`, and divides; the scalar path multiplies `k` by `|Sf|` — so the
+agreement is round-off, not bitwise, and it is measured rather than asserted.
+**Measured: `2.4e-16` relative, worst over every internal and boundary face of
+a 6x5x4 graded block.** A "bitwise" claim here would have been wrong, and this
+document has had to correct one of those before.
+
+### 46.4 What is refused, and by name
+
+(S46.5) is a two-point flux approximation with deferred correction. The
+implicit part `Dhat_f` is always right; the explicit part `kcor_f` is carried
+by `m.non_orth_corr`, which is a *scalar-conductivity* correction vector.
+Multiplying it by the anisotropic `gammaMagSf_aniso` of (S46.6) delivers
+
+```
+(Dhat/Delta)(nf - d Delta)  =  Dhat( nf (nf.d) - d )
+```
+
+whereas the exact correction is `E - Dhat d`. The difference is the
+**anisotropy residual**
+
+```
+r_f  =  E_f  -  Dhat_f  nf (nf . d)                                     (S46.7)
+```
+
+`r_f` vanishes identically when `E_f` is parallel to the face normal — i.e.
+**exactly when the face normal is an eigenvector of `K`**. That is sharper
+than "an axis-aligned mesh" in both directions, and both directions matter:
+
+* an **isotropic** `K` has every direction as an eigenvector, so `r_f` is zero
+  on **any** mesh, however skewed. The refusal is about anisotropy, not about
+  shear;
+* a **diagonal** `K` on an axis-aligned hexahedral mesh (the semiconductor
+  stack, and the data centre) gives `K Sf = k_nn Sf`, so `r_f` is zero there
+  too — that is the supported tier-A configuration;
+* an anisotropic `K` whose two EQUAL principal values span the plane a mesh is
+  sheared in is **also** fine, because the tilted normal still lies in an
+  eigenspace. A criterion phrased as "axis-aligned mesh" would refuse that case
+  unnecessarily, and the test suite pins it.
+
+Zero **in exact arithmetic**. In `f64` the normalise-and-rescale round trip
+leaves a few ulp: **measured at `1.8e-16` for an isotropic `K` on a graded
+block and `2.3e-16` for a diagonal one**, which is why the threshold below is
+`1e-10` and not `0`. And the threshold is not delicate. Rotate
+`K = diag(k_par, k_perp, k_par)` by `theta` about `z` on an axis-aligned mesh;
+on the face whose normal is the LOW-conductivity axis the decomposition gives
+exactly
+
+```
+Q = sin(theta) cos(theta) (k_par - k_perp)
+S = sin^2(theta) k_par + cos^2(theta) k_perp
+residual = |Q| / sqrt(S^2 + Q^2)      ->   theta (k_par - k_perp)/k_perp
+```
+
+**Divided by the THROUGH-plane conductivity, not the in-plane one.** This
+section's first draft said `/k_par`, which is what the *other* face sees and
+is 180x smaller — and the refusal reads the WORST face. Corrected by the test
+that measures it: at one degree on a 1500/8 pyrolytic-graphite stack the
+residual is `0.951`, not the `1.7e-2` that estimate implied, and even a
+thousandth of a degree gives `3.3e-3`. Nothing lands between the noise floor
+and that, which is what makes `1e-10` a safe place to draw the line.
+
+Off the eigenvector configuration `r_f` is a term this discretisation
+has no place to put, `E_f . d` can approach zero or change sign, the
+coefficient loses positivity, and the deferred-correction iteration is not
+guaranteed to converge. This is the classical monotonicity failure of TPFA for
+full tensors; the rigorous fixes (Aavatsmark's MPFA, Lipnikov *et al.*'s
+nonlinear monotone FV) both break the one-off-diagonal-per-face LDU structure
+the whole solver is built on.
+
+**Therefore, per §13.4, it is measured and refused, not approximated.** At
+setup the implementation computes, over every face carrying an anisotropic
+`K`:
+
+```
+alignment  =  min_f  (E_f . d) / (|E_f| |d|)          must be > 0
+residual   =  max_f  |r_f| / (Dhat_f |d|)             must be <= 1e-10
+```
+
+and refuses with a message naming `alignment`, `residual`, the worst face, and
+the two alternatives that *are* available — an isotropic `k_s`, or a mesh
+aligned with the conductivity axes. Full-tensor `K` on a skewed mesh is tier D
+and is **not implemented**; a case that asks for one is an error naming
+`kappaSolid` as a scalar or as a mesh-axis-diagonal triple.
+
+### 46.5 What the case can say
+
+| Entry | Meaning | Refusal |
+|---|---|---|
+| `kappaSolid <k>` | isotropic `k_s`, W/(m K) | `k_s <= 0` is an error |
+| `kappaSolid [kx ky kz]` | `diag(kx,ky,kz)` in **mesh axes** | any component `<= 0` is an error |
+| `kappaSolid [9 components]` | full tensor | **§13.4 error** naming the two above, per §46.4 |
+| `rhoSolid`, `cSolid` | `rho_s`, `c_s` | both `> 0`; a steady solve does not ignore them, it uses `DdtCoeffs::ZERO` |
+
+### 46.6 What must hold
+
+| Test | Expected |
+|---|---|
+| the isotropic limit | `diag(k,k,k)` through the anisotropic path reproduces scalar `k` through `fvm_laplacian` to **round-off**, and the number is measured rather than asserted — `2.4e-16` relative on a 6x5x4 graded block. Not bitwise: the two paths evaluate in different orders |
+| the anisotropic pair test (§13.4.1) | two cases identical but for `kappaSolid [1 1 1]` vs `[1 1 10]` produce **different** temperature fields, failing by name if they do not |
+| harmonic face conductivity | on a two-material slab the computed flux equals `dT/(L_1/k_1 + L_2/k_2)` to round-off; the linearly-interpolated conductivity does not, and the test asserts the gap so a regression to linear cannot pass |
+| the harmonic pair test | changing the second material's `k` changes the answer |
+| the alignment/residual gate | a diagonal `K` on an axis-aligned hex mesh gives `residual` at round-off (`2.3e-16` measured, threshold `1e-10`); an **isotropic** `K` on a sheared mesh is likewise at round-off and is accepted; an anisotropic `K` whose unequal axes span the sheared plane is **refused**, naming the number, MPFA, Lipnikov and the two ways out |
+| the full-tensor refusal | a nine-component `kappaSolid` is an error naming the scalar and diagonal forms |
+| a steady solid | `k lap T = 0` between two fixed-temperature faces gives the exact linear profile to round-off |
+| a transient solid | `rho_s c_s` and `k_s` enter only through `alpha = k/(rho c)`: two materials with the same `alpha` and different `rho c` give the same transient, and the test measures it |
+
+### 46.7 Validation
+
+**Gate 46-A, exact.** A two-material 1-D slab, ends held at `T_hot`/`T_cold`.
+`q = dT/(L_1/k_1 + L_2/k_2)`, `T` piecewise linear. Error is round-off, not
+truncation, because the two-point flux is exact in 1-D.
+
+**Gate 46-B, exact, second order.** Carslaw & Jaeger ch. I: for
+`K = diag(k_x,k_y,k_z)` the substitution `x' = x/sqrt(k_x)` etc. maps (S46.1)
+onto the isotropic equation. A manufactured solution on the transformed
+problem must converge at second order with `k_x : k_y : k_z = 1 : 10 : 100`.
+
+**Gate 46-C, bitwise.** The isotropic limit of §46.6, run through the tensor
+path.
+
+---
+
+## 47. Conjugate heat transfer — the fluid/solid interface
+
+Written from:
+
+* M. B. Giles, *Int. J. Numer. Meth. Fluids* **25** (1997) 421–436.
+  DOI `10.1002/(SICI)1097-0363(19970830)25:4<421::AID-FLD557>3.0.CO;2-J` —
+  the Godunov–Ryabenkii normal-mode analysis that produced the classical
+  "Dirichlet on the fluid, Neumann on the solid" rule.
+* F. Meng, J. W. Banks, W. D. Henshaw, D. W. Schwendeman, "A stable and
+  accurate partitioned algorithm for conjugate heat transfer", *J. Comput.
+  Phys.* **344** (2017) 51–85. DOI `10.1016/j.jcp.2017.04.052`. **Theorem 1**
+  is the amplification factor quoted in §47.7 as the reason Dirichlet–Neumann
+  is not implemented here.
+* W. D. Henshaw, K. K. Chand, *J. Comput. Phys.* **228** (2009) 3708–3741.
+  DOI `10.1016/j.jcp.2009.02.007` — Robin coefficients can always be chosen so
+  the sub-time-step iteration converges.
+* T. Verstraete, S. Scholl, *Int. J. Heat Mass Transfer* **101** (2016)
+  852–869. DOI `10.1016/j.ijheatmasstransfer.2016.05.041` — the numerical Biot
+  number, and FFTB's instability above `Bi = 1`.
+* M. J. Gander, "Optimized Schwarz methods", *SIAM J. Numer. Anal.* **44**
+  (2006) 699–731. DOI `10.1137/S0036142903425409` — the physical series
+  conductance is the zeroth-order optimised-Schwarz weight, and the optimal
+  weight is a non-local operator. §47.7 says what that means here.
+* M. G. Cooper, B. B. Mikic, M. M. Yovanovich, "Thermal contact conductance",
+  *Int. J. Heat Mass Transfer* **12** (1969) 279–300.
+  DOI `10.1016/0017-9310(69)90011-8` — the plastic-deformation contact
+  conductance correlation (S47.12).
+* M. M. Yovanovich, *IEEE Trans. Comp. Packag. Technol.* **28** (2005)
+  182–206. DOI `10.1109/TCAPT.2005.848483` — the review, and the gas-gap and
+  elastic regimes (S47.12) omits.
+* ASTM D5470-17 — the measurement whose `R_total` versus thickness intercept
+  is `R_c1 + R_c2`, i.e. the number a user actually types.
+* **Nek5000** (BSD-3, UChicago Argonne LLC; licence fetched and read) —
+  *documentation only*, `nek5000.github.io/NekDoc/theory.html`, which poses
+  conjugate heat transfer as **one** energy equation over `Omega_f ∪ Omega_s`.
+  That framing is adopted in §47.4 and is acknowledged here as §0 requires. No
+  Nek5000 source was read.
+* **FDS** (NIST, US Government public domain; `reference/fds/LICENSE.md` read
+  verbatim) — `Source/wall.f90`'s `HT3D_TEMPERATURE_EXCHANGE`. What is taken
+  is the *discipline* that a solid/gas coupling must be built from
+  **resistances** and must exchange **enthalpy** (FDS weights its node
+  exchange by `RHO_C_S`), never temperature directly. What is deliberately not
+  taken: the direction splitting, which is a consequence of FDS's Cartesian
+  1-D-stack solid representation, and the `!$OMP CRITICAL` write-back, which is
+  precisely the scatter this architecture forbids.
+* ofgpu `SPEC-LIT.md` §2.4, §3.2, §4 (the universal Robin triple), §13.4,
+  §15.5 (a condition is asked of that field's OWN patch type), §26, §29.3 (the
+  Jayatilleke thermal wall function whose conductance §47.6 reuses), §31 (the
+  cyclic couple this reuses verbatim), §32.2 (`fixedFluxTemperature`) and §46.
+
+**OpenFOAM, SU2, preCICE, Code_Saturne, deal.II and MOOSE are GPL or LGPL and
+were not opened.** No permissively-licensed unstructured finite-volume
+conjugate-heat-transfer implementation with a Robin-triple interface was
+found to compare against; the derivation in §47.2 is therefore made from the
+literature above and from §4, and its correctness rests on that proof and on
+§47.12's gates. No GPL-licensed source was consulted.
+
+### 47.1 The interface conditions
+
+Across an interface `G` between regions A and B, `n` pointing A → B, the
+interface storing no energy:
+
+```
+flux continuity:      n . q_A|_G  =  n . q_B|_G  =  q_G                (S47.1)
+perfect contact:      T_A|_G      =  T_B|_G                            (S47.2)
+imperfect contact:    T_A|_G - T_B|_G  =  R_c q_G                      (S47.3)
+```
+
+(S47.3) reduces to (S47.2) at `R_c = 0`; everything below is written for
+(S47.3) and perfect contact needs no separate code.
+
+**Symbols.** `C_A`, `C_B` are the cell-centre-to-face conductances on each
+side, W/(m^2 K); `R_c` is the interface resistance per unit area, m^2 K/W;
+`P` is the cell on side A, `Q` the cell on side B.
+
+### 47.2 The Robin triple on both sides — the central derivation
+
+```
+C_A  = kappa_A Delta_A     resolved fluid or solid: conductivity x bDeltaCoeffs
+     = Dhat_b / |Sf|       anisotropic solid, from (S46.5)
+     = rho c_p u_tau / T+  wall-function fluid, from S29.3 - see S47.6
+C_B  likewise on side B
+                                                                       (S47.4)
+h_G  = ( 1/C_A + R_c + 1/C_B )^{-1}      cell-P-to-cell-Q conductance
+```
+
+`h_G (T_P - T_Q)` is the exact 1-D series-resistance flux. Recall §4's
+universal representation,
+
+```
+psi_b    = fr refValue + (1 - fr)(psi_P + refGrad/Delta)
+snGrad_b = fr Delta (refValue - psi_P) + (1 - fr) refGrad
+```
+
+**Claim.** The triple
+
+```
+side A (bfA):   fr_A = h_G/C_A,   refValue_A = T_Q,   refGrad_A = 0
+side B (bfB):   fr_B = h_G/C_B,   refValue_B = T_P,   refGrad_B = 0   (S47.5)
+```
+
+reproduces (S47.1) and (S47.3) **exactly at every iterate**, not at
+convergence.
+
+*Proof.* On side A, `snGrad_A = fr_A Delta_A (T_Q - T_P)`, so the diffusive
+flux the assembly builds per unit area is
+
+```
+kappa_A snGrad_A = (kappa_A Delta_A) fr_A (T_Q - T_P)
+                 = C_A (h_G/C_A) (T_Q - T_P)  =  h_G (T_Q - T_P)      (S47.6)
+```
+
+and symmetrically `kappa_B snGrad_B = h_G (T_P - T_Q)`. The outward normals
+are opposite, so the two fluxes are equal and opposite — (S47.1) holds
+identically. For the temperature,
+`psi_b,A = T_P - fr_A(T_P - T_Q) = T_P - q_G/C_A` and
+`psi_b,B = T_Q + q_G/C_B`, hence
+
+```
+psi_b,A - psi_b,B = (T_P - T_Q) - q_G/C_A - q_G/C_B
+                  = q_G (1/h_G - 1/C_A - 1/C_B) = q_G R_c             (S47.7)
+```
+
+which is (S47.3). At `R_c = 0` the two face values are the *same number*, so
+(S47.2) also holds exactly. ∎
+
+Three consequences, each of which is a design constraint and not a remark:
+
+1. **`fr ∈ (0, 1]` always**, because `h_G <= C_A` and `h_G <= C_B` by the
+   series law. The row stays diagonally dominant and nothing downstream that
+   assumes `fr ∈ [0,1]` breaks.
+2. **Conservation is structural, not iterative — but only if ONE kernel writes
+   both triples.** Both sides read the same `h_G` and the same `(T_P, T_Q)`.
+   If each region's kernel recomputed `h_G` from its own copies of the
+   conductances, floating-point non-associativity could differ in the last bit
+   and leak a non-conservative flux. **One launch over one interface-pair
+   list, writing both sides.** This is a hard requirement.
+   The same argument applies to the face **area**: `|Sf|_A` and `|Sf|_B` are
+   computed independently by the geometry sweep from two different point
+   orderings and may differ in the last bit, so *the pair uses side A's area
+   on both sides* and the host refuses a pair whose two areas differ by more
+   than a conformality tolerance.
+
+   And it applies once more, one level down, where the first draft of this
+   section got it wrong. Writing `bGammaMagSf = h_G|Sf|/Delta_i` and letting
+   the assembly multiply `Delta_i` back in is a divide and a multiply **by two
+   different numbers on the two sides**, and `x/y*y` is not `x` in floating
+   point: measured, the two coupled entries then differed by about one ulp -
+   inside `matrix_is_symmetric`'s tolerance, and still a claim that was false.
+   `ofgpu-validate`'s bitwise check is what caught it. The assembly's
+   interface branch therefore takes the coefficient **directly** (S47.9), one
+   number written into both faces, and the equality is exact by construction
+   rather than by argument - which is what §48.3 needs.
+3. **`refGrad` is the wrong carrier for an interface heat source.** `snGrad`
+   weights `refGrad` by `(1 - fr)`, so `refGrad = q_s/kappa` delivers only
+   `(1-fr) q_s` and vanishes as `fr -> 1`. An interface source (Joule heating
+   in a bond layer, a net radiative flux) goes in the **cell** source of the
+   two adjacent cells, `fvm_su` with `q_s |Sf| / V_P`. The obvious mimicry of
+   a mixed BC's `refGradient` entry is quietly wrong by a factor of `(1-fr)`.
+
+**Numerical form.** (S47.4) is evaluated in **resistances**, not
+conductances, so that the two limits are exact rather than merely
+representable:
+
+```
+R_A   = 1/C_A  (C_A > 0),   R_B = 1/C_B  (C_B > 0)
+h_G   = 1/(R_A + R_c + R_B)
+fr_A  = h_G R_A ,   fr_B = h_G R_B                                    (S47.8)
+```
+
+and, when **either** conductance is non-positive, the face is set exactly
+adiabatic (`fr = 0`, `refGrad = 0`, `bGammaMagSf = 0`). The face's
+contribution to the matrix is then **bitwise zero** — `internalCoeffs` and
+`boundaryCoeffs` both come out as exactly `0.0` — which is bitwise what a
+`fixedFluxTemperature` with `q = 0` contributes. It is the same "degenerate
+until the kernel can run" convention every wall function in
+`wallfunctions.cu` already follows.
+
+Note what that claim is and is not. The *matrix contribution* is bitwise
+identical; the *solved field* on a two-region mesh is not bitwise identical to
+the same field solved on the fluid region alone, because the two are
+different-sized linear systems whose Krylov iterates are different numbers.
+The gate asserts the first exactly and the second to solver tolerance.
+
+### 47.3 Why this needs no new matrix code
+
+`cuda/ldu.cu`'s `lduAmul`, `lduAddBoundaryContributions`, `lduRelax` and
+`lduSetValues` do **not** test for "cyclic". They test `bNbrCell[bf] >= 0`:
+
+```
+lduAddBoundaryContributions:  d += internalCoeffs[bf];
+                              if (bNbrCell[bf] < 0) s += boundaryCoeffs[bf];
+lduAmul:                      nbr = bNbrCell[bf];
+                              if (nbr >= 0) sum -= boundaryCoeffs[bf]*psi[nbr];
+```
+
+So a boundary face whose `b_nbr_cell` names a real cell — in *any* numbering,
+including a concatenated fluid+solid one — is already solved implicitly
+against that cell. And `fvLapBoundary`'s coupled branch writes exactly
+
+```
+coef = sign bGammaMagSf[i] bDeltaCoeffs[i];
+internalCoeffs[i] += -coef;   boundaryCoeffs[i] += -coef;
+```
+
+The interface is the same structure with the series conductance in place of a
+harmonic interpolation:
+
+```
+bGammaMagSf[bf]  :=  h_G |Sf|_A                                       (S47.9)
+coef             =   sign bGammaMagSf[bf]        (the INTERFACE branch)
+```
+
+**A conformal fluid/solid interface is a cyclic couple with a zero
+transform**, and the coupling costs no new matrix kernel.
+
+Note what (S47.9) is *not*: it is not `h_G|Sf|/Delta` fed through the cyclic
+branch's `g*delta`. That form keeps `bGammaMagSf`'s usual units and is one ulp
+away from bitwise on the two sides — see §47.2 consequence 2. The interface
+branch takes the coefficient itself, so on an interface face `bGammaMagSf`
+holds `h_G|Sf|` (W/K) rather than `gamma|Sf|`. That is a different quantity
+from every other face's, and it is safe for exactly one reason: one thing
+reads it there, `fvLapBoundary`'s own interface branch. `fvLapNonOrth` skips
+interface faces outright, and nothing else in the crate is handed a conjugate
+mesh's `bGammaMagSf`.
+
+Two kernel edits, and only two, are needed:
+
+* `fvLapBoundary` gains an `OFPATCH_INTERFACE` branch, structurally the cyclic
+  one with the coefficient taken directly.
+* `fvLapNonOrth` **skips** interface faces. Across a fluid/solid interface
+  `grad T` is genuinely discontinuous (different `kappa`; with `R_c` even `T`
+  jumps), so interpolating the two cells' gradients — what the cyclic branch
+  does — has no physical meaning, and using only the owner-side gradient is
+  inconsistent. This is a real accuracy limitation and is treated as one:
+  v1 suppresses the term, reports the interface non-orthogonality at setup and
+  **refuses above a threshold** rather than computing something wrong.
+
+Everywhere else an `OFPATCH_INTERFACE` face falls into the *uncoupled* branch
+and is evaluated from `bf[bf]` — the Robin face value of (S47.5) — which is
+exactly right, and is the only representation that can carry the `R_c` jump at
+all. `PatchKind::Interface` is a new discriminant no existing mesh carries, so
+every existing case is unmoved **by construction**.
+
+`BcKind::CoupledTemperature` is likewise chosen outside every range
+`cuda/field.cu` consults, so `fldCorrectBcScalar` evaluates it with the same
+`fldMixed` as every other condition and needs no branch. `fldMixed(fr_A, T_Q,
+0, T_P, Delta_A) = T_P - fr_A(T_P - T_Q)`, which is (S47.7)'s `psi_b,A`.
+
+### 47.4 The concatenated thermal mesh
+
+Nek5000 poses conjugate heat transfer as one energy equation over
+`Omega_f ∪ Omega_s`. Adopted here:
+
+```
+(rho c)_cell dT/dt + div(rho c_p phi T)|fluid - div(kappa_eff grad T)
+        =  q'''  +  (fluid-only terms)                              (S47.10)
+
+(rho c)_cell = rho c_p    in fluid cells,   rho_s c_s  in solid cells
+phi          = the mass flux on fluid faces,  0 on solid and interface faces
+```
+
+Every array in (S47.10) is per-cell or per-face; the fluid-only terms
+(`-T div u`, `dp0/dt`, `-div q_r`) are simply zero on the solid part. **The
+coupling is not extra physics — it is one array concatenation and one face
+coefficient.**
+
+The thermal mesh is built by concatenating the fluid mesh and every solid
+mesh:
+
+```
+cells     : [ fluid 0..Nf ) [ solid_1 Nf..Nf+Ns1 ) [ solid_2 ... )
+int.faces : [ fluid ] [ solid_1 + offset ] ...
+bnd.faces : [ fluid ] [ solid_1 + offset ] ...
+```
+
+Because region `r`'s cells occupy a contiguous ascending range and each
+region's own faces are already in upper-triangular `(owner, neighbour)` order,
+**the concatenation in region order is globally upper-triangular** — the LDU
+addressing invariant every gather kernel assumes is preserved without a
+re-sort. The fluid block keeps its existing numbering unchanged, so every
+fluid-mesh boundary-face index (hence every wall-function face list, every
+`nut` patch) means the same thing in both meshes.
+
+For each matched interface face pair:
+
+```
+thermal.b_kind[bfA]     = PatchKind::Interface
+thermal.b_nbr_cell[bfA] = Q + cell_offset(region_B)
+thermal.b_kind[bfB]     = PatchKind::Interface
+thermal.b_nbr_cell[bfB] = P + cell_offset(region_A)
+```
+
+and nothing else. In particular the geometry sweep runs on each region
+**before** the patches are marked `Interface`, so `b_delta_coeffs[bf]` stays
+the honest **one-sided** `1/(nf . (Cf - C_P))` that `C_A = kappa_A Delta_A`
+wants, and `b_non_orth_corr[bf]` stays zero. Both are properties of the
+construction, not of a later correction.
+
+**Pairing.** Conformal, matched patches only. Faces are paired by centroid
+proximity (a host sort, once, at setup), and the pairing is refused —
+naming the patch, the face and the number — if any of these fails:
+
+```
+|Cf_A - Cf_B|  <=  tol_x sqrt(|Sf|)          coincident face centres
+| |Sf|_A - |Sf|_B |  <=  tol_a |Sf|_A        equal areas
+n_A . n_B  <=  -1 + tol_n                    opposed normals
+1 - (n_A . d_A)/|d_A|  <=  tol_o             interface non-orthogonality
+```
+
+Non-conformal (AMI) interfaces are **tier D and not implemented**: the natural
+formulation scatters partial-face fluxes from the fine side onto the coarse
+side, which needs `f64` atomics and is order-dependent. The gather-shaped
+alternative — a host-built AMI CSR of `(source face, overlap weight)` pairs,
+sorted by source-face index — is recorded here as the design to use when it is
+implemented, and refused by name until then.
+
+### 47.5 Contact resistance
+
+`R_c` is a per-interface-face array, so it may be uniform, zonal, or a field.
+For a real TIM stack it is a series sum,
+
+```
+R_c = R_c1 + t_TIM/k_TIM + R_c2                                       (S47.11)
+```
+
+— a contact resistance at each mating surface plus the bulk of the TIM. This
+is exactly what ASTM D5470's `R_total` versus thickness line measures, with
+`R_c1 + R_c2` its intercept.
+
+`R_c1`, `R_c2` for conforming rough metallic surfaces follow the
+Cooper–Mikic–Yovanovich plastic-deformation correlation:
+
+```
+h_c = 1.25 k_h (m_a/sigma) (P/H_c)^0.95                               (S47.12)
+
+k_h   = 2 k_1 k_2/(k_1 + k_2)          harmonic-mean conductivity
+sigma = sqrt(sigma_1^2 + sigma_2^2)    combined RMS roughness
+m_a   = sqrt(m_1^2 + m_2^2)            combined mean absolute asperity slope
+P     = apparent contact pressure,  H_c = microhardness of the softer solid
+```
+
+(S47.12) is a pure function of five scalars: a kernel, not a model. It covers
+the plastic regime with no interstitial gas; the elastic regime and gas-gap
+conduction are in Yovanovich (2005) and are **not** implemented — a case that
+asks for them is a §13.4 error naming `Rc` directly.
+
+**When the zero-thickness assumption fails.** (S47.3) treats the interface as
+massless, which is valid while
+
+```
+Fo_TIM = alpha_TIM t / t_TIM^2  >>  1                                 (S47.13)
+```
+
+For a 50 um TIM with `alpha ~ 1e-6 m^2/s`, `t_TIM^2/alpha ~ 2.5 ms` —
+negligible for a data-centre or fire transient, marginal for a switching
+transient in a power device. When (S47.13) fails, mesh the TIM as its own thin
+solid region; nothing else changes.
+
+### 47.6 The fluid side on a wall-function mesh, and why this is ONE condition
+
+On a high-Re fluid mesh the conductance from the first cell centre to the wall
+is **not** `k_eff Delta`. It is the wall-function conductance, which §29.3
+already computes:
+
+```
+q_w = rho c_p u_tau (T_w - T_P)/T+     so     C_A = rho c_p u_tau / T+ (S47.14)
+```
+
+with `T+` the Jayatilleke-corrected thermal log law and `u_tau` from `k`
+(`nutk` family), from §15.1's Newton solve (`nutU` family), or from
+Werner–Wengle under LES (§30.1) — whichever the `nut` patch type on that face
+already selects, per §15.5's rule.
+
+`C_A` is then decoupled from `kappa_eff Delta_A`, so `fr_A = h_G/(kappa_eff
+Delta_A)` could exceed 1 and break consequence 1 of §47.2. (S47.9) is what
+removes the problem: the interface branch never multiplies by `kappa_eff` or
+by `Delta_A` at all — it assembles `h_G |Sf| (T_Q - T_P)` from the conductance
+the triple was built from — so `fr_A = h_G/C_A ∈ (0,1]` whatever the fluid's
+molecular conductivity happens to be.
+
+**Consequence: the conjugate interface condition and the thermal wall function
+are ONE boundary kind, not two.** They rewrite the same triple on the same
+face, so a face cannot be both. `coupledTemperature` *contains* the
+wall-function branch and selects `C_A` by (S47.14) or by `kappa_eff Delta_A`
+according to the `nut` patch type on that face — §15.5's discipline extended
+once more. The conductance itself is computed by
+`wfThermalConductance`, a new kernel in `cuda/wallfunctions.cu` built from the
+**same** `wfYPlusOf`/`wfTPlus` device inlines `wfThermalWall` uses, so there is
+one Jayatilleke law in the tree and not two.
+
+`thermalWallFunction` is left byte-for-byte alone. It computes
+`q_w = rho c_p u_tau (T_w - T_P)/T+` as one expression;
+`C_A (T_w - T_P)` with `C_A = rho c_p u_tau/T+` is the same number only to
+round-off, so re-expressing the old kernel through the new one would move the
+default. It is not re-expressed; a test pins the two to agree to round-off
+instead.
+
+### 47.7 Dirichlet–Neumann is not implemented, and why
+
+Meng *et al.* (2017), Theorem 1, give the amplification factor of the
+classical partition (Dirichlet on the fluid, Neumann on the solid) exactly:
+
+```
+|A_DN| ~ (1/theta) sqrt(beta) = (K_R/K_L) sqrt(D_L/D_R)   low wavenumber
+       ~  1/theta             =  K_R/K_L                  high wavenumber
+                                                                      (S47.15)
+```
+
+with `L` the domain receiving Neumann and `R` the domain receiving Dirichlet.
+So DN converges only when the Neumann side is the more conductive one, and it
+has two failure modes that both matter here: `theta ~ 1` (air against a
+moulding compound, `theta ~ 8`; water against FR-4) makes `|A_DN| ~ 1` and the
+iteration stall; and when `1/theta < 1` but `sqrt(beta)/theta > 1`, *neither*
+DN nor ND is stable. Verstraete & Scholl reach the same conclusion through
+their numerical Biot number.
+
+The Robin–Robin form (S47.5) costs nothing extra — it is the same triple with
+a different `fr` — and DN is its `fr ∈ {0,1}` corner. **DN is therefore never
+implemented.** If the implicit form of §47.3 is ever demoted to a partitioned
+outer loop, that loop is block Gauss–Seidel on the same matrix, whose steady
+two-cell amplification is
+
+```
+|A_RR| = h_G^2 / [ (C_0 + h_G)(D_0 + h_G) ]  <  1     always           (S47.16)
+```
+
+— unconditionally convergent, though the rate degrades toward 1 when
+`h_G >> C_0, D_0`, i.e. when the near-interface cells are much thinner than
+the rest of their regions.
+
+**What (S47.5) is not.** Its weights are the *physical* series conductances,
+which is the zeroth-order optimised-Schwarz choice (Gander 2006). The
+genuinely optimal weight depends on the tangential wavenumber; CHAMP's
+`h L_beta` operator is a local Taylor approximation to that dependence. On a
+general polyhedral mesh there is no cheap gather-shaped surrogate for the
+tangential Laplacian at a boundary face, and none is proposed. Errera's
+adaptive scalar coupling coefficients are cheaper but need a per-interface
+reduction, which §47.8 declines. This limitation is stated, not papered over.
+
+### 47.8 Atomics and order-dependent reductions — the audit
+
+| Step | Wants an atomic or an order-dependent reduction? | What is done instead |
+|---|---|---|
+| interface triple update | **No.** One thread per face pair, reading `T[b_nbr_cell]`. A cross-region read is a second index, not a second kernel. | — |
+| matrix assembly, all terms | **No.** Unchanged gather over `cf_offset`/`bcf_offset`. | — |
+| `bGammaMagSf` override | **No.** Each thread writes its own two faces. | — |
+| interface heat-flux total | Yes, a reduction. | `solver::device_sum`'s two-stage reduction over a contiguous range. Deterministic **because `reduce_geometry(n)` is a pure function of `n`**, not of scheduling. The two sides are summed separately and the imbalance reported. |
+| a patch-**averaged** heat-transfer coefficient (Verstraete & Scholl's `hFTB`) | Yes, and it introduces a global coupling that makes the answer depend on reduction order. | **Declined on architectural grounds.** (S47.4)'s local per-face conductance is strictly more accurate and needs no reduction at all. |
+| non-conformal (AMI) interfaces | **Yes** — the one real problem. | Out of v1; refused by name. The gather-shaped design is recorded in §47.4. |
+
+There is nothing else. The coupling introduces **no** atomics and **no** order
+dependence, because the coupled direction is one extra gather per boundary
+face — the exact shape the mesh already carries for a cyclic patch.
+
+### 47.9 What the case can say, per §13.4
+
+| Name | Action |
+|---|---|
+| `coupledTemperature` | **implemented** — `BcKind::CoupledTemperature` |
+| `thermalContactResistance` | the same condition with a non-zero `Rc`; accepted as its own spelling |
+| `compressible::turbulentTemperatureCoupledBaffleMixed` | accepted as an **alias**, printed once by `contract::warn_once`, exactly as `compressible::alphatJayatillekeWallFunction` is |
+| `compressible::turbulentTemperatureRadCoupledMixed` | **§13.4 error** naming `coupledTemperature` AND `greyDiffusiveRadiationViewFactor` — a face carries one or the other, never both, because they rewrite the same triple (§47.10, §50.8) |
+| `externalWallHeatFluxTemperature` | **§13.4 error** naming `fixedFluxTemperature` and `coupledTemperature` |
+| `coupledTemperature` on a field that is not a temperature | **§13.4 error** naming `T`, exactly as `constantAlphaContactAngle` on a non-`alpha` field is |
+| interface entries | `Rc` (m^2 K/W), or `thicknessLayers` + `kappaLayers` which are summed by (S47.11); both `>= 0` |
+
+`PatchKind::Interface` is added alongside `Cyclic`. `PatchKind::from_type`
+continues to map `mappedWall -> Wall`, which is right for the **fluid** mesh's
+copy of the patch (momentum and turbulence still see a wall); the **thermal**
+mesh's copy is what becomes `Interface`. Those are two different mesh objects
+and §47.4 explains why.
+
+### 47.10 Out of scope, and recorded as such
+
+Radiative exchange across the interface adds
+`q_rad = sigma eps (T_b^4 - T_env^4)` to (S47.1). A per-region P1/fvDOM
+treatment (§28/§36) with a Marshak wall is tier A/B and needs only an
+emissivity per interface face; **surface-to-surface view factors are tier D**
+(all-pairs visibility, `O(n_f^2)` plus ray occlusion) and are not attempted
+here. If a radiative interface flux is added it must go through the *cell*
+source route of §47.2 consequence 3, and it makes the two sides' boundary
+coefficients unequal — which is exactly the hazard §48.3 closes.
+
+**Superseded in part by §49/§50, and the part that changed is worth being
+precise about.** Surface-to-surface view factors are now implemented, and the
+"tier D" rating above was about the *search*, which §49.2 makes deterministic
+and sub-second. What §47.10 says that is still true is the rest: a face cannot
+carry the conjugate interface AND the radiating wall at once, because they
+rewrite the same `(fr, refValue, refGrad)` — the same reason §47.6 gives for
+`thermalWallFunction`. So `compressible::turbulentTemperatureRadCoupledMixed`
+is still a §13.4 error; its message now names **both** conditions that exist
+and says a face carries one or the other (§50.8). A genuinely radiating
+conjugate interface — the cell-source route above — remains unbuilt.
+
+### 47.11 What must hold
+
+| Test | Expected |
+|---|---|
+| **flux continuity at every iterate** | on a not-yet-converged field, `sum q_A |Sf| + sum q_B |Sf|` over the interface is zero to `1e-12` relative, with each side computed independently from its own evaluated face value |
+| **the two coupled matrix entries are equal** | `A(P,Q) == A(Q,P)` **bitwise**, because one kernel writes one number into both faces and the assembly takes it directly. Checked on a six-face interface, not a one-face one — the first draft, which divided by each side's own `Delta` and multiplied it back, passed a one-face check and failed this one by about an ulp |
+| **the `Rc` pair test (§13.4.1)** | two cases identical but for `Rc` produce **different** interface temperatures, failing by name if they do not |
+| **the `kappaSolid` pair test** | two cases identical but for `kappaSolid` produce different fields |
+| `k_solid -> 0` | the interface's contribution to the matrix is **bitwise zero** (`fr`, `refGrad`, `internalCoeffs`, `boundaryCoeffs` all exactly `0.0`), which is bitwise what `fixedFluxTemperature` with `q = 0` contributes; the solved field then matches the adiabatic-wall run to solver tolerance, not bitwise, because the two are different-sized systems |
+| `k_solid -> infinity` | reproduces the existing `thermalWallFunction` answer at the solid's temperature, to several digits at the common fixed point |
+| `fr` stays a convex combination | `0 <= fr <= 1` on every interface face, for conductance ratios from `1e-6` to `1e6` and `R_c` from `0` to `1e3` |
+| `refGrad` is not the carrier | a test asserts that an interface source placed in `refGrad` under-delivers by exactly `(1-fr)`, so the trap cannot be reintroduced silently |
+| the CMY correlation | reproduces hand-computed values across the pressure range, and `h_c` scales as `P^0.95` exactly |
+| the §13.4 names | every row of §47.9's table, including the two refusals, checked by name |
+| pairing refusals | a non-conformal pair, a mismatched area, a non-opposed normal and an over-non-orthogonal interface are each refused naming the face |
+| **`Energy` is unmoved** | `src/energy.rs` is not modified by this work at all, so every existing thermal answer is unchanged by construction rather than by argument |
+
+### 47.12 Validation
+
+**Gate 1 — two-layer slab with contact resistance. Exact.** Materials `k_1`,
+`k_2`, thicknesses `L_1`, `L_2`, resistance `R_c`, ends at `T_hot`, `T_cold`:
+
+```
+q  =  (T_hot - T_cold) / ( L_1/k_1 + R_c + L_2/k_2 )
+Delta T across the interface  =  q R_c
+```
+
+Because (S47.5) is exact for a 1-D orthogonal face the expected error is
+round-off, not truncation: `|q/q_exact - 1| < 1e-13`. The discrete series
+resistance of `n` uniform cells is exactly `L/k` (`h/2 + (n-1)h + h/2 = nh`),
+so the discrete answer IS the analytic one. **The coupling is implicit, so
+this holds after ONE assembly and ONE linear solve — there is no outer
+coupling iteration to converge.** *Measured: `3.4e-14`, worst over `R_c = 0, 1e-4, 5e-3`, on a six-face
+interface.*
+
+Separately, the two sides' fluxes must agree on the *initial, unconverged*
+field, which is the part of the claim a partitioned scheme cannot satisfy.
+*Measured: `1.8e-16`.* The gate is `1e-12` rather than `1e-14`, and the reason
+is worth recording: the flux is measured as `C fr |Sf| (T_nbr - T_own)` and
+**not** as `C |Sf| (T_b - T_own)`. The second form is the more direct
+statement of what the boundary condition does, but it subtracts two absolute
+temperatures — at 350 K an `f64` ulp is 6e-14 — and on the stiff side of a
+large conductance ratio, where `fr` is `1e-15` and the drop across the face is
+genuinely below one ulp of `T`, that difference is pure round-off multiplied
+by an enormous `C`. Measured on the `k_solid = 1e12` case it reports an
+imbalance of `2e-2`, all of it in the diagnostic and none of it in the
+coupling. The face VALUES are checked separately, by the contact-resistance
+jump `T_b,A - T_b,B = q R_c` (*measured: `8.1e-16` of the applied `dT`*),
+which is what they are actually for.
+
+**Gate 2 — the two free limits, no external data.** `k_solid -> infinity` must
+reproduce the existing `fixedValue`/`thermalWallFunction` wall answer;
+`k_solid -> 0` must reproduce `fixedFluxTemperature` with `q = 0`. Any CHT
+implementation that fails these is broken, and they cost two runs of an
+existing case.
+
+**Gate 3 — transient interface temperature. Exact, and it is the one that
+catches a lagged coupling.** Two semi-infinite bodies at `T_1`, `T_2` brought
+into perfect contact at `t = 0` (Carslaw & Jaeger ch. II): the interface
+temperature is **constant in time** at the effusivity-weighted mean
+
+```
+T_i = (e_1 T_1 + e_2 T_2)/(e_1 + e_2),      e = sqrt(rho c k)          (S47.17)
+```
+
+An explicit or lagged interface gets the early-time behaviour wrong and
+drifts; the implicit form has no coupling transient to relax.
+
+**Two things the gate has to avoid, and both were found by running it.**
+
+1. *The tautology in the mesh.* The two diffusivities differ by up to 800x, so
+   each region must be meshed to its own diffusion length or one side is
+   unresolved. But with `h_i = sqrt(alpha_i dt)` on **both** sides the
+   cell-to-face conductance is `C_i = 2 k_i/h_i = 2 e_i/sqrt(dt)`, so
+   `C_A/C_B` is *exactly* `e_A/e_B` and the first step's face value comes out
+   at the effusivity mean **by construction** — the gate would be measuring
+   the mesh generator. The two cell sizes are therefore multiplied by 0.50 and
+   0.85, which breaks that identity and leaves both sides resolved.
+2. *The first step is not the right place to test constancy.* A step change is
+   under-resolved at `t = dt` on any finite grid. **Measured departure from
+   the effusivity mean at the first step: `4.5e-3`, `1.3e-2`, `8.2e-6` of `dT`
+   at effusivity ratios `0.102`, `1.000` and `1.5e-4`.** So the gate is in two
+   parts: within `5%` of `dT` at every step (*measured `1.3e-2`*), and
+   **constant in time** once the front is resolved — the spread over the
+   second half of the run (*measured `1.1e-11` of `dT`*), which is the number
+   a lagged coupling could not produce.
+
+**Gate 4 — conservation, always on.** `imbalance = |sum_G q_A |Sf| + sum_G q_B
+|Sf|| / sum_G |q_A||Sf|`, both sums by `device_sum` over the interface range.
+§47.2 proves this is round-off. It is a hard assertion at `1e-12`, not a
+printed diagnostic — the cheapest possible detector for a mis-paired face, a
+sign error, or the two sides having computed `h_G` separately. *Measured:
+`3.4e-16` over a six-face interface, converged; `1.8e-16` unconverged.* The
+interface is deliberately more than one face wide, because a one-face
+interface makes the reduction trivial and the gate weaker than it looks.
+
+**Gate 5 — Kaminski & Prakash (1986), the primary published benchmark.**
+*Int. J. Heat Mass Transfer* **29**(12) 1979–1988,
+DOI `10.1016/0017-9310(86)90017-7`. Conjugate natural convection in a square
+enclosure with one vertical wall of finite thickness conducting, the opposite
+wall isothermal, horizontal walls adiabatic. The paper tabulates the average
+Nusselt number against the solid-to-fluid conductivity ratio. **Gate:
+reproduce the tabulated `Nu` to within 3 % at each ratio, on a mesh refined
+until the level-to-level change is under 0.5 %.** This is the right primary
+benchmark because the conductivity ratio is the only parameter varied, which
+isolates the interface treatment from everything else.
+
+**Gate 6 — Qu & Mudawar (2002)**, *Int. J. Heat Mass Transfer* **45**
+3973–3985, DOI `10.1016/S0017-9310(02)00101-1`: a silicon micro-channel heat
+sink with measured substrate temperatures — the semiconductor gate. Run with
+`R_c = 0` (the paper's own assumption), then perturb `R_c` to confirm the
+sensitivity's direction and magnitude.
+
+**Gate 7 — Flageul *et al.* (2015)**, *Int. J. Heat Fluid Flow* **55** 34–44,
+open access `https://hal.science/hal-01321586v1`: DNS of a channel at
+`Re_tau = 150`, `Pr = 0.71` with four thermal wall treatments. The turbulent
+gate. Flageul *et al.* (2017) additionally document a discontinuity in the
+temperature-variance dissipation rate at the interface; do **not** gate a RANS
+or coarse-LES model on it.
+
+### 47.13 What is claimed, and what is not
+
+Claimed: the interface condition is exact at every iterate for a conformal,
+orthogonal-enough interface; conservation is structural; the two limits are
+reproduced, one of them bitwise; contact resistance is exact in 1-D.
+
+Not claimed: any accuracy statement for a strongly non-orthogonal interface
+(the correction is suppressed and the case refused above a threshold); any
+statement about Krylov conditioning across a conductivity ratio of `5e3` and a
+`(rho c)` ratio of `1e3` in one matrix — `precon.cu` factors `diag`/`upper`/
+`lower` only and drops the interface off-diagonals, exactly as it already does
+for a cyclic patch, and no published measurement for this
+preconditioner/ratio combination was found. The diagnostic is the iteration
+count against the fluid-only and solid-only solves, and the fallback is
+§47.7's block Gauss–Seidel on the same data structures.
+
+### 47.14 The multi-region case, and exactly where it stops
+
+The interface of §47.2 is a library capability until a case can ask for one.
+The case format that does is `crate::io::case_cht`, read by `ofgpu-cht`, and
+it is deliberately **solid-only**.
+
+```jsonc
+{
+  "name": "dieStack",
+  "regions": [ { "name": "die",
+                 "mesh":     { "bounds": {...}, "cells": [...], "boundaries": {...} },
+                 "material": { "rho": 2330, "c": 700, "kappa": [120, 120, 30] },
+                 "source":   1.4286e9,
+                 "patches":  [ { "match": "dieTop", "T": { "type": "zeroGradient" } } ] } ],
+  "interfaces": [ { "regionA": "die",    "patchA": "dieToSolder",
+                    "regionB": "solder", "patchB": "solderToDie",
+                    "Rc": 1.0e-5 } ],
+  "initial": { "T": 300.0 },
+  "run": { "steady": true },
+  "numerics": { "solver": "PCG", "preconditioner": "DIC", ... }
+}
+```
+
+**The rule the format is built around.** Every patch of every region must be
+named **exactly once**, by a `patches` rule or by an `interfaces` entry. Not
+defaulted to adiabatic, not inferred. An unnamed patch is an error listing it
+by `region:patch`, because "adiabatic unless you say otherwise" is precisely
+how a case comes to say something the solver ignores — and a patch named by
+both is an error too, because §47.6 says a face carries one condition.
+
+**What it refuses, by name.** A `"kind": "fluid"` region (see below); a
+nine-component `kappa` (§46.4, naming the scalar and diagonal forms and the
+two schemes that would be needed instead); `Rc` **and**
+`thicknessLayers`/`kappaLayers` together, since they are two spellings of one
+number (S47.11) and this reader has no business choosing; one of that pair
+without the other; a solver or preconditioner it does not implement; an
+interface naming a patch that does not exist, with the ones that do listed;
+`steady` alongside `endTime`. Every field is `deny_unknown_fields`, so a
+mistyped entry is a parse error naming the path rather than a silently
+dropped setting.
+
+**Where it stops, said plainly.** There is no fluid region. §47.6's fluid-side
+conductances — `k_eff Delta` on a resolved mesh, `rho c_p u_tau/T+` on a
+wall-function one — are implemented in `crate::cht` and gated by §47.12's Gate
+2 in both limits, but **no case format reaches them**, and this format refuses
+a fluid region by name rather than building a solid and calling it one. The
+consequence is that §47.12's Gate 5 (Kaminski & Prakash), Gate 6 (Qu &
+Mudawar) and Gate 7 (Flageul *et al.*) are **not run**: each needs a flow
+field over the concatenated mesh, which needs `crate::energy::Energy`
+retargeted at the thermal mesh — item 10 of the design note's own table, and
+the piece this pass deliberately did not touch so that every existing thermal
+answer stays unmoved by construction.
+
+What IS reached, end to end and from a case document: multi-region conduction
+with contact resistance, anisotropic `K`, volumetric sources, steady and
+transient, and every §13.4.1 pair test run on two case documents differing in
+one entry — `Rc`, `kappa`, the anisotropy, the source — each required to
+produce different output and failing by name if it does not.
+
+**The shipped case, `cases/dieStack.cht.jsonc`, and what it measured.** A
+silicon die dissipating 100 W through a solder TIM, a copper spreader and a
+grease TIM to an isothermal plate, with three contact resistances and an
+anisotropic die. The stack is one-dimensional, so it has an exact discrete
+closed form, and the run reproduces it:
+
+| Quantity | Closed form | Measured |
+|---|---|---|
+| junction temperature | `300 + q(3.380452e-4) + 11.6667` = `649.7118 K` | `649.7118 K`, to `1e-8` relative |
+| heat across each of the three interfaces | `100 W` | `-100.000000 / +100.000000 W` |
+| §47.12 Gate 4 imbalance | round-off | `0.000e0` |
+| the largest interface jump | `q R_c = 40 K` | `40.000000 K` |
+| perturbing one `R_c` by `5e-5` | `q dR_c = 50 K` | `50 K`, to `1e-7` relative |
+
+The last row is the §13.4.1 pair test on the shipped case itself: the two
+documents differ in one number and the junction moves by exactly what that
+number predicts.
+
+---
+
+## 48. Coupled boundary entries in the CSR export, and the symmetry check's blind spot
+
+Two defects that §47 makes reachable and that were already latent. Both are
+closed here, and both are independently testable without any conjugate case.
+
+### 48.1 `CsrPattern::build` silently drops the coupled entries
+
+`CsrPattern::build` gives each row the diagonal plus one column per incident
+**internal** face. A coupled boundary face's `boundary_coeffs` is an
+off-diagonal against a cell that is not a face neighbour, so it has nowhere to
+go, and `lduCsrFill` never writes it. The exported CSR is therefore **not the
+operator `lduAmul` applies** on any mesh with `b_nbr_cell >= 0`.
+
+`pressure/amgx.rs::setup` refuses such a mesh for exactly this reason, which
+means **AMGX is unavailable on every cyclic (periodic) mesh today**, and would
+have become unavailable on every conjugate mesh.
+
+### 48.2 The extension
+
+Each coupled boundary face adds one column, `b_nbr_cell[bf]`, to its own
+cell's row:
+
+```
+row_len[c] = 1 + deg_internal(c) + #{ bf in c : b_nbr_cell[bf] >= 0 }
+```
+
+The columns are collected, sorted ascending as before, and a new
+`coupled_slot[n_bf]` array records where each coupled boundary face landed
+(`-1` on an uncoupled face). `lduCsrFill` gains one guarded write:
+
+```
+if (t < nbf && coupledSlot[t] >= 0)  val[coupledSlot[t]] = -boundaryCoeffs[t];
+```
+
+The **sign** is the one thing to get right and it follows from `lduAmul`,
+which applies the coupled term as `sum -= boundaryCoeffs[bf]*psi[nbr]`. So the
+matrix entry is `-boundaryCoeffs[bf]`, and the export must negate.
+
+Two cells can be joined by *both* an internal face and a coupled boundary
+face — a two-cell periodic mesh does exactly that — which would make the same
+column appear twice in one row. The builder detects a duplicated column and
+refuses, naming the cell: merging them would be silently wrong, because
+`lduAmul` sums both terms and a single CSR entry can hold only one.
+
+`nnz` is no longer `n_cells + 2 n_internal_faces`, so `csr_fill`'s size check
+becomes `n_cells + 2 n_internal_faces + n_coupled`, and the AMGX guard on
+`b_nbr_cell >= 0` is removed.
+
+### 48.3 `matrix_is_symmetric` is blind to the coupled coefficients
+
+`solver::matrix_is_symmetric` compares `upper` against `lower` and **nothing
+else**. A matrix whose two coupled boundary coefficients differ is asymmetric
+and this function still says "symmetric", so PCG and DIC — both of which
+require symmetry, and both of which this function exists to guard — would be
+selected for a system that has none.
+
+Nothing in the tree makes them differ *today*: `fvLapBoundary`'s coupled
+branch writes `internalCoeffs` and `boundaryCoeffs` from the same `coef`, and
+§47.2's interface kernel deliberately writes both sides from one `h_G` and one
+`|Sf|`. The hazard is a future one-sided term — a radiative interface flux
+(§47.10), a one-sided source, an AMI weight — and the cost of closing it now
+is one kernel and one array.
+
+The check is extended: a second stage compares, over the boundary faces,
+`|boundary_coeffs[bf] - boundary_coeffs[pair(bf)]|` against the same scale,
+where `pair` is the coupled-face pairing the mesh already carries. A face with
+no pair contributes nothing. The two defects are then reported separately, so
+a failure names which one it was.
+
+### 48.4 What must hold
+
+| Test | Expected |
+|---|---|
+| CSR on an uncoupled mesh | `nnz`, `row_ptr`, `col_ind` and every slot are **unchanged**, and the existing tests pass untouched |
+| CSR on a cyclic mesh | the filled CSR applied densely reproduces `lduAmul` to round-off, which it did **not** before |
+| CSR on a conjugate mesh | the same, across the region boundary |
+| the duplicate-column refusal | a two-cell mesh joined by both an internal face and a periodic pair is refused, naming the cell |
+| AMGX | accepts a cyclic mesh; the guard that refused it is gone and its removal is what the cyclic test above licenses |
+| symmetry, paired coefficients | a matrix with deliberately unequal paired `boundary_coeffs` is reported **asymmetric**; the same matrix with equal ones is symmetric |
+| symmetry, no false positives | every existing symmetric matrix in the test suite is still symmetric, and the reported defect on an uncoupled mesh is exactly what it was |
+
+---
+
+## 49. Surface-to-surface radiation — deterministic view factors
+
+Written from:
+
+* G. N. Walton, *Calculation of Obstructed View Factors by Adaptive
+  Integration*, NISTIR 6925, National Institute of Standards and Technology,
+  November 2002 — **US Government, public domain**. The double area integral
+  (2AI) and its dot-product form, the Gaussian-vs-uniform accuracy comparison,
+  the relative-separation criterion, the obstruction-elimination tests, the
+  row-sum figure of merit, and the `BB104` benchmark.
+  `https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir6925.pdf`
+* A. B. Shapiro, *FACET — A Radiation View Factor Computer Code for
+  Axisymmetric, 2D Planar and 3D Geometries with Shadowing*, UCID-19887,
+  Lawrence Livermore National Laboratory, 1983. DOI `10.2172/5607653` —
+  **US DOE, public domain.** The shadowed-configuration benchmark
+  `F_12 = 0.115621` and the centroid-plus-corner occlusion test.
+* J. R. Howell, *A Catalog of Radiation Heat Transfer Configuration Factors*,
+  3rd ed., `https://www.thermalradiation.net/` — entries **C-11** (identical
+  parallel directly-opposed rectangles) and **C-14** (two rectangles of equal
+  length sharing an edge at 90 degrees), both tracing to Hottel (1931) and
+  Hamilton & Morgan (1952). The two analytic gates of §49.8.
+* G. P. Mitalas, D. G. Stephenson, *FORTRAN IV Programs to Calculate Radiant
+  Interchange Factors*, DBR-25, Division of Building Research, National
+  Research Council of Canada, Ottawa, 1966 — the **analytic inner contour
+  integral** (1LI) of (S49.12), which is what makes §49.8's near-field gate
+  reachable at all. NISTIR 6925 §3 derives the same formulation.
+* J. Amanatides, A. Woo, "A Fast Voxel Traversal Algorithm for Ray Tracing",
+  *Proc. Eurographics '87* 3–10 — the uniform-grid DDA of §49.4.
+* S. Woop, C. Benthin, I. Wald, "Watertight Ray/Triangle Intersection",
+  *Journal of Computer Graphics Techniques* **2**(1) (2013) 65–82 — the
+  intersection test of §49.4, chosen over Möller–Trumbore for the reason
+  §49.4 states.
+* J. van Leersum, "A method for determining a consistent set of radiation view
+  factors from a set generated by a nonexact method", *Int. J. Heat and Fluid
+  Flow* **10**(1) (1989) 83–85. DOI `10.1016/0142-727X(89)90058-1` — the
+  iterative scaling of §49.5.
+* R. Sinkhorn, "A Relationship Between Arbitrary Positive Matrices and Doubly
+  Stochastic Matrices", *Ann. Math. Statist.* **35**(2) (1964) 876–879.
+  DOI `10.1214/aoms/1177703591` — its convergence theory.
+* M. E. Larsen, J. R. Howell, *ASME J. Heat Transfer* **108**(1) (1986)
+  239–242. DOI `10.1115/1.3246898`; R. I. Loehrke, J. S. Dolaghan, P. J. Burns,
+  *ASME J. Heat Transfer* **117**(2) (1995) 524–526. DOI `10.1115/1.2822557`;
+  R. P. Taylor, R. Luck, *J. Thermophys. Heat Transfer* **9**(4) (1995)
+  660–666. DOI `10.2514/3.721` — the least-squares smoothing family, **named
+  and not implemented** (§49.5).
+* M. F. Cohen, D. P. Greenberg, *ACM SIGGRAPH Computer Graphics* **19**(3)
+  (1985) 31–40. DOI `10.1145/325165.325171` — the hemicube, **rejected**
+  (§49.2).
+* J. K. Salmon, M. A. Moraes, R. O. Dror, D. E. Shaw, *Proc. SC '11* 1–12.
+  DOI `10.1145/2063384.2063405` — counter-based RNG, cited only because it is
+  the counter-argument §49.2 has to answer before rejecting Monte Carlo.
+* M. R. Vujičić, N. P. Lavery, S. G. R. Brown, *Proc. IMechE Part C*
+  **220**(5) (2006) 697–702. DOI `10.1243/09544062JMES139` — Monte-Carlo
+  view-factor sensitivity.
+* T. Karras, "Maximizing Parallelism in the Construction of BVHs, Octrees and
+  k-d Trees", *High Performance Graphics 2012* — the linear BVH named in
+  §49.4 as the escalation and not built.
+* ofgpu `SPEC-LIT.md` §2.1 (the face fan about the vertex average, which
+  §49.3 must match exactly), §8.4 (the fixed-partition reduction whose
+  determinism argument §49.2 reuses), §13.4 (the unsupported-setting
+  contract), §28 (P1, the model this one is *not*), §36 (fvDOM, likewise),
+  §47 (the conjugate interface this one composes with).
+
+No GPL-licensed source was consulted. In particular
+`github.com/jasondegraw/View3D` was **not** opened: its README states that the
+originally-public-domain NIST code was relicensed GPL-3.0. The algorithm it
+implements is published in full in NISTIR 6925, which is public domain and
+which *was* read. OpenFOAM's `radiationModels/viewFactor` was not opened
+either; its formulation (S50.5) appears here only through this repository's
+own `docs/01-model-catalog.md`, written during the earlier survey.
+
+### 49.1 What is being computed, and the three identities
+
+For two surface elements `i`, `j` with unit outward normals `n_i`, `n_j`, and
+`r` the vector from a point on `i` to a point on `j`:
+
+```
+             1     /    /     cos(th_i) cos(th_j)
+    F_ij =  ---   |    |     ---------------------  b_ij  dA_j dA_i      (S49.1)
+            A_i   /A_i /A_j          pi r^2
+```
+
+with `b_ij` the blockage factor: `1` if the segment is unobstructed, `0`
+otherwise. No trigonometric function is ever needed, because
+
+```
+    cos(th_i) cos(th_j)        -(r . n_i)(r . n_j)
+    ------------------  =     ---------------------                      (S49.2)
+           r^2                       (r . r)^2
+```
+
+— five dot products, one division, no `acos` and no `sqrt` (NISTIR 6925
+eq. 1–3). The minus sign is because `r` points *toward* `j`, against `n_j`.
+
+The **exchange area** `G_ij = A_i F_ij` (m^2) is the quantity this section
+actually stores, for the reason §49.5 gives. The three identities that follow
+from (S49.1) are the numerical contract:
+
+```
+    reciprocity:   A_i F_ij = A_j F_ji,   i.e.   G = G^T                 (S49.3)
+    closure:       SUM_j F_ij = 1  for a CLOSED enclosure                (S49.4)
+    positivity:    F_ij >= 0,  and F_ii = 0 for a planar element         (S49.5)
+```
+
+**No numerical method satisfies all three.** §49.5 says which enforcement is
+used and §49.7 says what it moved.
+
+### 49.2 The method, and why it is deterministic
+
+**The choice: deterministic Gauss–Legendre quadrature, with the order taken
+from a fixed table keyed on the relative separation, on TWO paths chosen per
+pair by geometry alone.** The default is the double-area integral (2AI) of
+(S49.1): both faces are fan-triangulated (§49.3), each triangle carries a
+collapsed-coordinate (Duffy) tensor rule, and the pair sum runs over triangle
+pairs in ascending fan order and over quadrature points in a fixed nested
+loop. **That alone does not reach the near-field gate** — §49.2b is the
+measurement that says so and the contour path that fixes it. Read §49.2b
+before §49.3; the determinism argument below applies to both paths unchanged,
+which is why it comes first.
+
+**Why it is deterministic — the claim stated so it can be checked:**
+
+1. The **op count and the summation order for a pair `(i,j)` are a pure
+   function of the geometry**. The only data-dependent quantity is the
+   quadrature order `nq`, and that comes from a *bucketed* relative separation
+
+   ```
+   s_ij = |C_i - C_j| / (R_i + R_j),   R_i = max over vertices |x - C_i|   (S49.6)
+   ```
+
+   which is symmetric in `i,j` and is compared against compile-time constants.
+   Nothing is adaptive, nothing recurses, nothing consults a residual.
+2. **One thread owns the whole pair.** `G_ij` is written by exactly one thread
+   and read by nobody until the kernel has finished. There is no atomic, no
+   scatter and no cross-thread reduction inside the quadrature.
+3. **The full `N^2` is computed, not the triangle.** Computing only `i<j` and
+   scattering `A_i F_ij` into both `G_ij` and `G_ji` would need an atomic or a
+   second pass with a different summation order. Two times the flops buys a
+   pure-gather kernel; §49.3's cost table shows the flops are not the
+   constraint.
+4. **Row sums and mat-vecs are one block per row**, block-strided load into a
+   fixed-shape shared-memory tree whose depth is `log2(blockDim)` and whose
+   partition is a pure function of `n`. That is the same argument
+   `solver::reduce_partitions` already carries (§8.4).
+5. **Occlusion is an any-hit boolean.** Boolean OR is exactly associative, so
+   traversal order cannot change the answer even for a ray that grazes a
+   shared edge. A *closest*-hit query would be order-sensitive at ties; this
+   one is not, and that distinction is free.
+6. **The acceleration structure is built on the host**, by counting sort, at
+   setup. No device atomics, no `DeviceScan`, and therefore no exposure to
+   CUB's across-version stability (which is guaranteed run-to-run for a fixed
+   binary, not across library versions).
+
+#### What was rejected, and why
+
+| Method | Rejected because |
+|---|---|
+| **Monte-Carlo ray tracing** | **Not for reproducibility — for accuracy.** MCRT *can* be made bitwise reproducible: key a counter-based RNG (Philox, Salmon et al. 2011) on `(pair_id, sample_id)` so sample `k` is a pure function of its indices, and accumulate with a fixed-shape tree instead of an atomic. The claim "MC is not reproducible" is therefore false as stated, and this specification refuses to lean on it. What survives is the accuracy: NISTIR 6925 Table 2 measures random sampling still at `2.7e-4` error with **1 000 000 samples per pair** on the Shapiro configuration, where deterministic integration reaches `4e-6` with 18 525 points. Being bitwise reproducible does not turn `2.7e-4` into `1e-6`; and that noise breaks (S49.3), (S49.4) and (S49.5) *simultaneously*, which is what forces the whole smoothing literature into existence. Reproducibility across sample counts is also not reproducibility: the answer changes with `M`, so there is no converged value for a refinement study to approach. |
+| **Hemicube** (Cohen & Greenberg) | It satisfies (S49.4) **by construction and (S49.3) not at all** — every pixel is assigned to exactly one surface, so row sums are exactly 1 and reciprocity absorbs the entire discretisation error with no way to see how much. That is the worse failure mode: a model that always looks converged. It also needs a rasteriser and a depth buffer with a pinned tie-break rule, its error *grows* with separation through grid aliasing, and NISTIR 6925 Table 5 puts its speed advantage above ~1000 surfaces — a threshold §49.3 shows the quadrature route already passes on a GPU. **Named as the escalation path above `N_c ~ 50 000`, not built.** |
+| **Recursive adaptive subdivision** (NISTIR 6925's own algorithm) | A natural GPU implementation uses a persistent work queue, and the per-pair sum then depends on the order work items retire. It *can* be made deterministic by fixing the depth as a function of the geometry and summing in Morton order — which is what the `s`-bucketed fixed-order table is a cheap approximation to. The honest cost is that the fixed table pays for the worst pair in each bucket. |
+| **RT cores / OptiX** | RT-core traversal and intersection run at a hardware-defined reduced precision and NVIDIA does not guarantee bitwise-identical hit results across driver versions. **Refused, not offered behind a flag**, because a flag that voids the project's central guarantee is a reproducibility hole with a switch on it. |
+| **Shadow-polygon projection** (NISTIR 6925's accurate obstructed method) | Deterministic if blockers are clipped in ascending index order with a fixed vertex cap, but the per-thread work and memory are wildly divergent and no warp-friendly formulation was found. Tier D; it is the accuracy ceiling on obstructed pairs, and §49.8's G3 tolerance is set from that fact. |
+
+#### The order table
+
+```
+    s_ij >= 3.0    ->  nq = 2
+    s_ij >= 1.5    ->  nq = 3
+    s_ij >= 0.75   ->  nq = 4
+    s_ij >= 0.30   ->  nq = 6
+    otherwise      ->  nq = 8
+```
+
+NISTIR 6925 §5: "relative separations greater than three quickly produce very
+accurate view factors"; below that the integrations need more divisions. The
+same document's Fig. 8 measures Gauss–Legendre 2AI below `1e-6` at four
+divisions per edge on two opposed unit squares and *not* below `1e-3` at ten
+divisions with uniform sampling. **Uniform sampling is never used.**
+
+The table governs the **area** path. The contour path of §49.2b costs
+`9 nq` closed-form evaluations per triangle pair against `nq^4` kernel
+evaluations, so when the table is in charge it simply takes the highest order
+the table holds — buying the accuracy there is free.
+
+#### 49.2b The measurement that changed this section, and the second path
+
+**The design note recommended Gauss–Legendre 2AI, and 2AI alone. Measured, it
+fails the near-field gate by 40 % and barely converges.** On two unit squares
+sharing an edge at 90 degrees (§49.8's Gate 49-B, closed form `0.2000438`),
+2AI over the fan triangulation gives
+
+| `nq` | 2 | 3 | 4 | 6 | 8 | 10 |
+|---|---|---|---|---|---|---|
+| 2AI error | `9.2e-2` | `9.8e-2` | `9.4e-2` | `8.0e-2` | `6.9e-2` | `6.1e-2` |
+
+— decreasing, but like `nq^-0.54`. Reaching `1e-5` that way would need `nq`
+around `10^7`. This is not a bug: it is exactly what NISTIR 6925 Figs. 9–10
+report, and what §49.2's own table already said by calling 2AI "the worst
+convergence order". The design note anticipated it — *"if one thing in this
+design fails, it is this"* — and named the escape hatch. What it did not
+anticipate is the size: 40 %, not a few per cent.
+
+The integrand is the reason. Along the shared edge `r -> 0` while
+`cos(th_i) cos(th_j)` does not, so (S49.1)'s integrand behaves like `1/r^2`.
+The 4-D integral converges, but Gaussian quadrature loses its spectral rate
+against an unbounded integrand, and the collapsed-coordinate map clusters
+points at the face CENTRE — precisely where the integrand is smallest.
+
+**The fix is the contour form with the inner integral done analytically —
+1LI, Mitalas & Stephenson (DBR-25, 1966).** Stokes' theorem turns (S49.1)
+into
+
+```
+    G_ij = A_i F_ij = (1/2pi) INT_Ci INT_Cj ln(r) dv_i . dv_j            (S49.11)
+```
+
+(NISTIR 6925 eq. 2), whose integrand is only **logarithmically** singular. For
+a point `x` and an edge `y(t) = q0 + t d` on `[0,1]`, with `w = q0 - x`,
+`A = d.d`, `B = w.d`, `C = w.w` and `k^2 = C/A - (B/A)^2`, the inner integral
+is closed:
+
+```
+    INT_0^1 ln|y(t) - x| dt
+        = (1/2)[ u ln(A(u^2+k^2)) - 2u + 2k atan(u/k) ]_{B/A}^{1+B/A}    (S49.12)
+```
+
+so only the OUTER integral is quadratured — one Gauss–Legendre loop instead of
+four. It is both cheaper and better:
+
+| `nq` | 2 | 3 | 4 | 6 | 8 | 10 |
+|---|---|---|---|---|---|---|
+| 1LI error, C-14 | `2.7e-3` | `5.8e-4` | `2.1e-4` | `4.6e-5` | `1.6e-5` | `6.6e-6` |
+| 1LI error, C-11 | `2.5e-4` | `4.5e-6` | `1.3e-10` | `1.9e-10` | `4.6e-14` | `4.7e-16` |
+
+At the table's own order the far-field gate lands at `4.7e-16` and the
+near-field one at `6.6e-6`, against gates of `1e-6` and `1e-5`.
+
+**Where 1LI may NOT be used, and what happens there instead.** Stokes' theorem
+needs the integrand smooth over the surface, and (S49.11) carries no
+`cos > 0` clamp. So the model tests each pair and dispatches:
+
+| pair | path | why |
+|---|---|---|
+| unobstructed, and each face strictly in front of the other's plane | **1LI** | (S49.11) is exact and equals the clamped area form |
+| **obstructed** | **2AI** with per-point `b_ij` | the contour form has no blockage factor at all; this is the only one of the five formulations that admits one |
+| either face partly **behind** the other's plane | **2AI** | the clamp is doing real work there and the contour form would ignore it |
+| **coplanar** (neither face leaves the other's plane) | `G_ij = 0`, exactly | `r` lies in the common plane, so `cos(th) = 0` |
+
+The last row was also found by measurement, not by inspection: the Shapiro
+configuration's two back-to-back coincident plates were sent down the 1LI path
+and came back with a large non-zero exchange area, which showed up as a row sum
+that missed 1 by `0.79` *after* the closure surface had supposedly made it
+exact. It is stated as exact geometry rather than left to a tolerance because
+every face pair on the same wall of an agglomerated enclosure is that case.
+
+`method[]` records which path each pair took, and the report prints the split,
+so "the near-field pairs went through 1LI" is a measurement rather than an
+assumption.
+
+**Both paths are deterministic in the same way**: the trip count is a pure
+function of the geometry, one thread owns each pair, the only data-dependent
+quantity is a bucketed relative separation compared against compile-time
+constants, and there is no atomic anywhere.
+
+### 49.3 The face polygons the mesh does not keep
+
+`HostMesh` retains `n_points` and nothing else about the point set:
+`mesh::geometry::compute` takes `points: &[Vec3]` and `faces: &[Vec<Label>]`,
+computes `Sf`, `Cf`, `magSf` and throws both away. Every part of this section
+needs the polygons — quadrature needs the face, ray casting needs it
+triangulated, agglomeration (§50.5) needs shared vertices.
+
+**`HostMesh` is not extended.** It is `Clone`, `Default`, built by
+`io::polymesh`, by `blockgen` and by a dozen tests, and consumed by
+`reference.rs`; a retained vertex CSR would touch all of them. Instead the
+model is handed the raw geometry at construction, which every construction
+path already has in hand at that moment:
+
+```
+    SurfaceGeometry::build(&host_mesh, points, faces, &selection)
+```
+
+`io::polymesh::build_host_mesh` takes `&PolyMeshRaw` by reference, so `raw`
+outlives it. `blockgen` gains `raw_mesh(&BlockSpec) -> Result<PolyMeshRaw>`,
+which is the function `build_mesh` already called internally under the private
+name `poly_mesh_raw`; nothing else about `blockgen` changes.
+
+**Triangulation must be the fan about the vertex average `x_avg`, exactly as
+`mesh::geometry::face_geometry` does it (§2.1) — not about the area-weighted
+centroid `Cf`.** Polyhedral faces are generally non-planar, `face_geometry`'s
+fan is the decomposition the whole finite-volume geometry already assumes, and
+a different one would make the radiating area disagree with `b_mag_sf` at the
+`1e-3` level on a warped mesh. That shows up later as a reciprocity residual
+nobody can explain.
+
+The model copies out **only the radiating boundary faces'** polygons, into a
+CSR of its own: `vtx_offset[n+1]`, `vtx[...]` as `Vec3`.
+
+**And it copies them REVERSED.** `b_sf` points out of the domain — out of the
+fluid, into the wall, which is §50.3's convention for the Robin triple — but
+an enclosure radiates *inward*: the `cos(theta)` of (S49.1) is measured from
+the normal facing the cavity, `-Sf`. Reversing the vertex list is what makes
+the fan produce it, and it is done once here rather than by negating a normal
+later, so the fan, the contour orientation §49.2b's path depends on, and the
+corner rays all see one winding. The visible consequence is the one that
+matters: a closed box mesh then has `SUM_j F_ij = 1` on every face. With the
+mesh winding, every face would look away from the cavity, every view factor
+would be zero, and the model would run, converge, and compute nothing.
+
+**Memory, at realistic face counts.** Per radiating fine face: one `Vec3` per
+corner (24 B) plus the CSR offset (4 B), so **100 B/face** for a hex mesh's
+quadrilateral faces, plus 88 B/face for centroid, normal, area, enclosing
+radius and cluster index. At 10^5 radiating fine faces that is **19 MB**; at
+10^6, 190 MB. Both are irrelevant beside the view-factor matrix itself.
+
+**What is not irrelevant is `F`.** It is dense `N_c x N_c` and resident for
+the whole run:
+
+| `N_c` | `F` in f64 | one row-per-block mat-vec at 1 TB/s |
+|---|---|---|
+| 1 000 | 7.6 MB | 0.008 ms |
+| 2 000 | 30 MB | 0.03 ms |
+| 4 000 | 122 MB | 0.13 ms |
+| 8 000 | 488 MB | 0.51 ms |
+| 16 000 | 1.91 GB | 2.0 ms |
+| 32 000 | 7.63 GB | 8.2 ms |
+| 50 000 | 18.6 GB | exceeds a 16 GB card |
+
+The mat-vec is memory-bound, so its time is `8 N^2 / BW` and the table is a
+floor rather than an estimate. The quadrature is not the bottleneck: at
+`N_c = 4000` and `nq = 3` it is `~1.6e10` flop, about 0.02 s at a conservative
+1 TFLOP/s f64; at `N_c = 16 000` and `nq = 4`, `~7.9e11` flop, under a second.
+**Memory is the bottleneck, and occlusion is.**
+
+**Clustering (§50.5) becomes mandatory the moment `N_c` — the number of
+COARSE faces — would exceed a few thousand**, and that is a statement about
+the boundary mesh, not the volume mesh: a 10^6-cell cabinet with 10^5 boundary
+faces needs an agglomeration ratio of about 25 to reach `N_c = 4000`, which is
+5x5 patches. Below `N_c = 4000` the whole radiosity solve costs a few
+milliseconds and can run every outer iteration; at `N_c = 16 000` it is tens
+of milliseconds and wants a lower update frequency. §50.6 states the refusal
+that fires instead of a silent 8 GB allocation.
+
+### 49.4 Occlusion
+
+Three levels, built in this order, chosen at setup, never mixed within a run.
+
+**Level 0 — proved unnecessary.** NISTIR 6925 eq. (11): *a surface cannot
+obstruct if every other surface lies on or in front of its plane*. One dot
+product per (blocker candidate, vertex) pair. If no surface survives, the
+enclosure is convex with no internal blockers, `b_ij == 1` identically, and no
+ray is ever cast. This is the shoebox cabinet, and it is every validation case
+in §49.8 except the Shapiro configuration. **It is proved, not assumed**: the
+test is run and its result reported.
+
+**Level 1 — pairwise visibility.** Five rays per pair: centroid-to-centroid
+plus the four corner-to-corner rays FACET UCID-19887 adds. If all five agree,
+that answer is taken for the whole pair.
+
+**Level 2 — per-quadrature-point blockage**, i.e. `b_ij` inside (S49.1) —
+NISTIR 6925 eq. (10). Run **only** on pairs whose Level-1 rays disagreed,
+which is typically a small fraction; a fully-visible or fully-blocked pair
+costs five rays, not `nq^4`.
+
+**The honest catch, which no amount of GPU throughput fixes.** `b_ij` is a
+discontinuous integrand, so Gaussian quadrature loses its spectral convergence
+on obstructed pairs and degrades to roughly `O(1/n)`. NISTIR 6925 Table 2
+shows 2AI-with-blockage still at `3e-4` with 250 000 samples per pair on the
+Shapiro configuration, against `6e-8` for adaptive shadow projection at 125
+points. **Obstructed pairs are where the entire accuracy budget goes.**
+
+**And Level 2 is therefore NOT uniformly better than Level 1 — measured, and
+against expectation.** Only the area form can carry a per-point `b_ij`
+(§49.2b), so `perPoint` puts *every* blockable pair on it, including pairs
+that no ray ever hits. On a box enclosure the adjacent-wall pairs are exactly
+the C-14 configuration where the area form is 40 % wrong, and the closure
+residual degrades from `8.8e-3` at Level 1 to `0.16` at Level 2 — past §49.6's
+threshold, so the model refuses it rather than shipping that `F`. The design
+note assumed Level 2 was the accurate-but-expensive option; on this geometry
+it is the inaccurate-and-expensive one. **`pairwise` is the default not
+because it is cheap but because it keeps the near-field pairs on the contour
+form**, and `perPoint` earns its keep only where the blocker is small relative
+to the surfaces and the near field is not in play — the Shapiro configuration,
+where it is the only thing that gets `F_12` at all.
+
+**The acceleration structure: a uniform grid with 3-D DDA traversal
+(Amanatides & Woo 1987), built on the host.** Not a BVH, for three reasons.
+The build is a counting sort — count triangles per cell, exclusive scan, fill
+— which is milliseconds of one-off host work for 10^5 triangles and **removes
+every atomics question from the build**. The repository already contains this
+exact structure in `surface::TriIndex` (a uniform grid over a triangle soup
+with a watertight line/triangle test, built for the cut-cell classifier); that
+one is hard-wired to x-direction lines and is not reused directly, but it is
+the pattern and the discipline — *the grid is an accelerator, not a truth*,
+which §49.7 turns into a test. And enclosures are the good case for a grid:
+boards, heat sinks and lids are roughly uniformly distributed and axis-aligned.
+
+A grid degenerates on "teapot in a stadium" geometry, which is when a linear
+BVH (Karras 2012) becomes the escalation. That build is also bitwise
+reproducible, for reasons worth stating because they are the kind that get
+waved through: Morton codes are a pure function of the geometry; ties are
+impossible once the primitive index is appended, so any correct sort produces
+one unique permutation; the radix-tree topology is a closed-form function of
+the sorted key array; and the bottom-up refit's `atomicCAS` is on an `int32`
+counter while the merged quantity is `min`/`max` on floats, which **is**
+exactly commutative and associative, so the scheduling nondeterminism is
+provably invisible in the output. The project's prohibition is on **f64
+atomics**, because floating-point *summation* is not associative — not on
+atomics as such. **The BVH is named, not built.**
+
+**Blocker-set reduction comes first, always.** NISTIR 6925 measures two thirds
+of View3D's runtime on its largest case in obstruction processing, and
+grouping the 600 unit squares of an obstructing cube into 6 faces cut its
+total from 762 s to 264 s. In an enclosure the *walls are never blockers* —
+only internal components are. The Level-0 test builds the blocker set `B`
+once; typically `|B| << N`.
+
+**The intersection test is Woop, Benthin & Wald (2013) watertight, in f64**,
+not Möller–Trumbore. Faces are fan-triangulated, so a non-watertight test lets
+rays leak through the shared edges of the fan and produces `b_ij` values that
+flicker under geometry perturbation — a bitwise-reproducible flicker, which is
+worse, because it is stable enough to be believed.
+
+### 49.5 Reciprocity and closure: which enforcement, in which order
+
+**Step 1 — reciprocity, exactly, by symmetrising the exchange areas.**
+Working in `G_ij = A_i F_ij`, (S49.3) is just `G = G^T`:
+
+```
+    G  <-  (G + G^T)/2                                                   (S49.7)
+```
+
+One elementwise pass. Reciprocity is then exact — it is an elementwise average
+of two numbers, so `G_ij - G_ji` is *exactly zero*, not merely small — and it
+stays exact under every subsequent operation, because they are all symmetric.
+
+**Step 2 — closure, by symmetric Sinkhorn scaling.** Require
+`SUM_j G_ij = A_i`:
+
+```
+    d_i  <-  sqrt( A_i / SUM_j G_ij ),        G_ij  <-  d_i G_ij d_j     (S49.8)
+```
+
+`D G D` is symmetric whenever `G` is, so **(S49.8) preserves reciprocity
+exactly**; it preserves non-negativity exactly; and it converges geometrically
+for a non-negative matrix with total support (Sinkhorn 1964). This is van
+Leersum's (1989) scheme in its symmetric form. It is a row reduction plus an
+elementwise scale — the two kernels §49.2 already needs — at a **fixed trip
+count**, hence graph-capturable and deterministic.
+
+**That count is 60, and it was measured rather than assumed.** The scaling
+converges linearly at a rate the matrix's own structure sets. On a convex
+enclosure, whose `G` has few exact zeros, 20 sweeps take the row-sum residual
+from `6.6e-6` to `2.8e-14`. On one whose blocked and coplanar pairs put many
+exact zeros in `G`, the same 20 sweeps reach only `1.4e-6` from `8.8e-3` —
+about a factor of two per sweep, not the factor of ten the first case
+suggests. 60 clears `1e-12` on both, and it is `60 N^2` reads at SETUP, once,
+outside the CUDA graph.
+
+It is strictly better behaved than the naive fix, which is to set
+`F_ii = 1 - SUM_{j!=i} F_ij` and dump the whole closure defect on the
+self-view factor: for a planar face `F_ii` must be zero, and the naive fix
+cheerfully makes it negative. That non-negativity failure is the one van
+Leersum's paper exists to solve.
+
+**Step 3 — least-squares smoothing (Larsen & Howell 1986, weights
+`w_ij = G_ij` per Loehrke et al. 1995, compared head-to-head against the
+scaling methods by Taylor & Luck 1995) is NAMED AND NOT IMPLEMENTED.** It buys
+a statistically better *distribution* of a large correction, which is what
+MCRT needs. With deterministic quadrature the correction is `1e-6`-sized and
+how it is distributed does not matter; it also costs a dense solve. Revisit
+only if §49.8's G4 row-sum gate cannot be met by quadrature refinement.
+
+**The residual is the model's quality metric and is printed.** NISTIR 6925's
+figure of merit,
+
+```
+    rowsum error  =  max_i | SUM_j F_ij - 1 |                            (S49.9)
+```
+
+is reported **before** enforcement — after it, it is zero by construction and
+tells you nothing. Alongside it: `max_ij |A_i F_ij - A_j F_ji| / A_i` (zero
+after (S49.7), so it measures the raw quadrature when taken before),
+`min_ij F_ij` (must be `>= 0`), and **what the enforcement moved**,
+`max_ij |G_after - G_before| / A_i`. `HostMesh::check` prints its closure error
+at startup for the same reason: a mesh that does not close is not worth
+solving on, and an `F` that does not close is not worth solving with.
+
+### 49.6 An open enclosure
+
+A CFD domain with an inlet and an outlet is not a closed enclosure, so
+`SUM_j F_ij < 1` and (S49.4) fails **by construction**, not by numerical
+error. Two ways out, and the case must pick one:
+
+* **List the openings as radiating surfaces.** An inlet patch is meshed; it has
+  faces, an area and a centroid. Declared with `epsilon 1` and a prescribed
+  `T`, it is an ordinary black surface in the radiosity system that simply
+  receives no boundary condition back. The enclosure is then geometrically
+  closed and (S49.4) is a *measurement* again.
+* **Declare an ambient closure surface.** `ambientTemperature <T>` adds one
+  black pseudo-surface carrying the deficit,
+
+  ```
+      G_i,amb = max( A_i - SUM_j G_ij , 0 )                             (S49.10)
+  ```
+
+  which makes every row sum exactly `A_i` by construction, participates in
+  (S50.3) as an ordinary black surface at a fixed temperature, and receives no
+  boundary condition. This removes the whole "open enclosure" special case
+  from the constraint machinery, which the literature otherwise has to treat
+  as a distinct and much harder problem.
+
+**With no `ambientTemperature`, the case has claimed the enclosure is closed,
+and that claim is checked.** If the pre-enforcement row-sum error exceeds
+`5e-2` the run is refused, naming the measured deficit, the worst surface, and
+the ways out. Sinkhorn scaling would otherwise smear a large *geometric* error
+uniformly over every pair and produce a closed, reciprocal, entirely
+fictitious `F`. This is §13.4 applied to geometry rather than to a dictionary
+entry.
+
+**The threshold sits between two measured populations, and it moved once.**
+A genuinely open enclosure misses by a lot: two opposed unit squares by
+`0.80`, and a box whose internal blocker was declared `occlusion none` by
+`0.42` — that second one is worth noting on its own, because it means
+switching occlusion off on a geometry that needs it is *caught* rather than
+silently producing row sums above 1. A genuinely closed enclosure whose only
+defect is numerical misses by far less: the quadrature alone by `6.6e-6` on a
+96-face box, and the worst measured Level-1 all-or-nothing visibility error by
+`1.7e-2`. The first draft put the threshold at `1e-2` and refused a
+legitimately closed enclosure at `1.7e-2`. `5e-2` leaves a factor of three
+above the worst occlusion error and a factor of eight below the smallest
+geometric deficit, and nothing was measured in between. The message names the
+occlusion cause as well as the geometric one, because at that magnitude it is
+usually the occlusion.
+
+### 49.7 What must hold
+
+| Test | Expected |
+|---|---|
+| the C-11 gate | two opposed unit squares at unit separation give `F = 0.19982490` to `< 1e-6` at the table's own `nq` — **measured `4.7e-16`** on the 1LI path |
+| the C-14 gate | two unit squares sharing an edge at 90 degrees give `F = 0.20004378` to `< 1e-5` — **measured `6.6e-6`**. The looser tolerance is deliberate: `r -> 0` along the shared edge, and this is the gate that 2AI misses by 40 % (§49.2b) |
+| monotone refinement | raising `nq` moves the near-field gate toward the closed form and never away, at every order in the table |
+| the Shapiro gate | the obstructed `F_12 = 0.11562061` to `1e-3` — **measured `6.8e-4`**, improving with `nq`; the four unobstructed factors around it to `1e-8` |
+| which path each pair took | reported, and the near-field pairs really are on the contour path |
+| coplanar surfaces | exchange **exactly** zero, and it is set rather than integrated |
+| reciprocity after (S49.7) | `max_ij \|G_ij - G_ji\|` is **exactly zero**, not small |
+| closure after (S49.8) | `max_i \|SUM_j F_ij - 1\| <= 1e-12` |
+| positivity | `min_ij G_ij >= 0` before and after enforcement |
+| the self-view factor | `F_ii = 0` exactly for a planar face — it is not computed, it is not stored, and the diagonal is zeroed |
+| what enforcement moved | reported. On the **Sinkhorn** path it is what the scaling had to shift: **`1.9e-6`** of `A_i` on a 96-face box. On the **ambient** path it necessarily includes the deficit column, which is the closure itself rather than a correction (`0.80` on two opposed squares), and the field's own doc says so |
+| the two steps do not fight | (S49.7) then (S49.8) leaves `G` symmetric to **exactly zero** |
+| grid == linear scan | the same kernel, the same blockers, once walking the uniform grid and once scanning every blocker triangle, produce **bitwise identical** `G` — the grid is an accelerator, not a truth. Run on the device, not against a host transcription of the walker |
+| the counting sort | every blocker triangle appears in every grid cell its bounding box overlaps |
+| the convexity proof | a closed box reports "no blockers"; the same box with a plate inside reports the plate and nothing else |
+| determinism | two `ViewFactors::build` calls on the same geometry produce **bitwise identical** `G` |
+| the `s` bucket is symmetric | `nq(i,j) == nq(j,i)` for every pair, by construction from (S49.6) |
+| an open enclosure with no `ambientTemperature` | refused, naming the deficit, the worst surface, and both ways out |
+
+### 49.8 Validation
+
+**Gate 49-A — C-11, analytic, unobstructed, far field.** Two identical unit
+squares, parallel, directly opposed, unit separation. The closed form
+
+```
+    F = (2/(pi X Y)) { ln[ ((1+X^2)(1+Y^2)/(1+X^2+Y^2))^(1/2) ]
+                     + X sqrt(1+Y^2) atan(X/sqrt(1+Y^2))
+                     + Y sqrt(1+X^2) atan(Y/sqrt(1+X^2))
+                     - X atan X - Y atan Y }
+```
+
+evaluates at `X = Y = 1` to `F = 0.1998248957`, reproducing NISTIR 6925's
+quoted `0.19982490` to all published digits. **The test evaluates the closed
+form itself rather than quoting the constant**, so a transcription error in
+the formula shows up as a failure rather than as agreement.
+
+**Gate 49-B — C-14, analytic, unobstructed, near field.** Two unit squares
+sharing an edge at 90 degrees; the Hottel / Hamilton–Morgan closed form
+evaluates at `H = W = 1` to `F = 0.2000437761`. This is the canary for the
+whole quadrature choice: it is the hardest unobstructed configuration for an
+area integral.
+
+**Gate 49-C — Shapiro, analytic, obstructed.** FACET UCID-19887 Fig. 12 /
+NISTIR 6925's "Analytic Test": two directly-opposed unit squares at unit
+separation with a pair of back-to-back 0.5 x 0.5 squares parallel to them,
+centred on the axis, at 3/4 of the distance from surface 1. Published values,
+each of which the test checks:
+
+```
+    F_31 = 0.33681717      F_13 = 0.084204294
+    F_42 = 0.79445272      F_24 = 0.19861318
+    F*_12 = 0.19982490     (unobstructed)
+    F_12  = F*_12 - F_13 = 0.11562061        <- the gate
+```
+
+Three internal consistency checks make this a strong gate rather than one
+number: `F_13 = F_31 x 0.25` and `F_24 = F_42 x 0.25` verify reciprocity at
+`A_3/A_1 = 0.25` exactly, and `0.19982490 - 0.084204294 = 0.115620606`
+reproduces the published `0.11562061`.
+
+**Gate 49-D — closure at scale, on the `BB104` construction.** NISTIR 6925's
+benchmark is 696 unit squares — a 4x4x4 cube of them centred inside a 10x10x10
+cube of them — and the gate here runs the same construction at a size the
+always-run suite can afford: a 2-cube inside a 4-cube, 120 surfaces, of which
+24 (20 %) are potential obstructions and none of the enclosing cube's are,
+which exercises the blocker-set elimination directly. Published comparison
+points (NISTIR 6925 Figs. 16–17, Table 5): View3D at tolerance `1e-4` reaches
+`< 1e-3` row-sum error in 15.98 s on an 866 MHz Pentium; Chaparral's adaptive
+method `~3e-3` in 39.60 s; its hemicube `~1e-2` in 24.55 s.
+
+**The three error sources are measured separately, because a bare residual
+cannot be attributed.**
+
+| what | measured |
+|---|---|
+| the QUADRATURE alone, same 96-face enclosure with nothing in it | **`6.6e-6`**, all 7 680 ordered pairs on the 1LI path, **0.014 s** — against View3D's 15.98 s for 696 surfaces on a 2002 single core, and the whole 120-surface blocked build takes 0.066 s |
+| `occlusion none` on the blocked enclosure | **refused** — the row sums reach `1.415`, because a wall then sees the far wall *and* the blocker in front of it. Switching occlusion off where it is needed is caught, not silently wrong |
+| Level 1 (five rays per pair) | **`8.8e-3`** — entirely the occlusion's, since the quadrature is at `6.6e-6` on the same geometry |
+| Level 2 (per quadrature point) | **`0.16`, and REFUSED.** Not a regression: `perPoint` forces every blockable pair onto the area form, and a box's adjacent-wall pairs are the C-14 configuration where that form is 40 % wrong (§49.2b, §49.4) |
+| reciprocity after (S49.7) | exactly `0` |
+| closure after (S49.8) | `<= 1e-12` |
+| `min G` | `>= 0` |
+
+The Level-1 number is the one quantity in §49 with no published bound behind
+it: a coarse face half-shadowed by a fin gets an all-or-nothing decision, and
+the design note flagged exactly that as the thing it was least sure about. It
+is now a measurement rather than an instinct, and it is what set §49.6's
+closure threshold.
+
+---
+
+## 50. Enclosure radiosity, and the surface-to-surface wall
+
+Written from:
+
+* H. C. Hottel, A. F. Sarofim, *Radiative Transfer*, McGraw-Hill (1967) ch. 3
+  — the net-radiation exchange method (S50.1)–(S50.4) are; ch. 5, the method
+  of images for specular surfaces, named in §50.9's refusal.
+* M. F. Modest, *Radiative Heat Transfer*, 3rd ed., Academic Press (2013)
+  ch. 5 — surface exchange between grey diffuse surfaces, and the closed forms
+  of §50.11. Already this crate's reference for §28 and §36.
+* B. Gebhart, *Int. J. Heat Mass Transfer* **3**(4) (1961) 341–346.
+  DOI `10.1016/0017-9310(61)90048-5` — the absorption-factor alternative to
+  (S50.3), **named and not used** (§50.2).
+* S. V. Patankar, *Numerical Heat Transfer and Fluid Flow* (1980) §4.2 — the
+  `S = Su + Sp psi`, `Sp <= 0` rule the `T^4` linearisation of (S50.10) obeys
+  unconditionally, because `T` is an absolute temperature.
+* A. F. Emery, O. Johansson, M. Lobo, A. Abrous, *ASME J. Heat Transfer*
+  **113**(2) (1991) 413–422. DOI `10.1115/1.2910577` — the specular
+  alternatives surveyed in §50.9's refusal.
+* R. Sinkhorn (1964), as §49.
+* S. F. Potter, S. Bertone, N. Schörghofer, E. Mazarico, *Fast hierarchical
+  low-rank view factor matrices for thermal irradiance on planetary surfaces*,
+  arXiv:2209.07632 — HODLR-style compression whose storage and mat-vec both
+  scale linearly; the documented next step above `N_c ~ 32 000`, **not built**.
+* C. Balaji, S. P. Venkateshan, *Int. J. Heat and Fluid Flow* **14**(3) (1993)
+  260–267, DOI `10.1016/0142-727X(93)90057-T`, and **15**(3) (1994) 249–251,
+  DOI `10.1016/0142-727X(94)90046-9`; M. Akiyama, Q. P. Chong, *Numer. Heat
+  Transfer A* **32**(4) (1997) 419–433, DOI `10.1080/10407789708913899` — the
+  coupled convection-plus-surface-radiation cavity gate, **named and NOT
+  RUN**; §50.12 says why.
+* ofgpu `SPEC-LIT.md` §4 (the universal Robin triple this whole model reduces
+  to), §26 (the energy equation), §28 (the Marshak wall this triple is
+  compared against), §32.2 (`fixedFluxTemperature`, which the `eps -> 0` limit
+  collapses onto **bitwise**), §47 (the conjugate interface), §13.4 and
+  §13.4.1.
+
+No GPL-licensed source was consulted.
+
+### 50.1 The radiosity system
+
+For an opaque, grey, diffusely emitting and diffusely reflecting surface, with
+`J` the radiosity (total flux leaving) and `H` the irradiation (total flux
+arriving):
+
+```
+    J_i = eps_i sigma T_i^4 + (1 - eps_i) H_i                            (S50.1)
+    H_i = SUM_j F_ij J_j                                                 (S50.2)
+```
+
+Substituting (S50.2) into (S50.1) gives the system this section solves:
+
+```
+    J_i - (1 - eps_i) SUM_j F_ij J_j  =  eps_i sigma T_i^4               (S50.3)
+
+    equivalently   [ I - (I - E) F ] J = E E_b,     E = diag(eps_i)
+```
+
+and the net radiative flux **leaving** surface `i` is recovered as
+
+```
+    q_r,i = J_i - H_i = eps_i ( sigma T_i^4 - H_i )                      (S50.4)
+```
+
+(S50.4) is the single most useful identity here: the net radiative loss of a
+grey diffuse surface is `eps` times the difference between what it would
+radiate as a black body and what actually lands on it. **No reflection
+bookkeeping survives into the boundary condition.**
+
+**The equivalent `q`-form is NOT used.** Eliminating `J` instead of `q` gives
+the form this repository's `docs/01-model-catalog.md` records for OpenFOAM's
+`viewFactor` model,
+
+```
+    SUM_j [ d_ij/eps_j - (1/eps_j - 1) F_ij ] q_j
+        = SUM_j ( d_ij - F_ij ) sigma T_j^4                              (S50.5)
+```
+
+whose matrix is non-symmetric, has no useful diagonal dominance, is singular
+as `eps -> 0`, and which OpenFOAM solves with a dense direct `LUsolve` on a
+single rank — the reason `docs/02-gpu-portability.md` rated that component
+**XL**. Form (S50.3) is diagonally dominant with a convergence rate computable
+before the solve starts, and needs no factorisation at all.
+
+### 50.2 Solving it: a Neumann series with a trip count known in advance
+
+Write (S50.3) as `J = E E_b + (I - E) F J`. The iteration
+
+```
+    J^(k+1) = E E_b + (I - E) F J^(k)                                    (S50.6)
+```
+
+has iteration matrix `(I - E) F` with
+
+```
+    || (I - E) F ||_inf  =  max_i (1 - eps_i) SUM_j F_ij  <=  1 - eps_min  (S50.7)
+```
+
+using (S49.4). Convergence is geometric at a rate **known from the
+emissivities alone, before any arithmetic**:
+
+| `eps_min` | `rho <= 1 - eps_min` | sweeps for `1e-12` |
+|---|---|---|
+| 0.95 | 0.05 | 10 |
+| 0.90 | 0.10 | 12 |
+| 0.80 | 0.20 | 18 |
+| 0.50 | 0.50 | 40 |
+| 0.30 | 0.70 | 78 |
+| 0.10 | 0.90 | 263 |
+| 0.05 | 0.95 | 539 |
+
+Painted and anodised electronics surfaces sit at `eps ~ 0.85–0.95`; bare
+polished aluminium and gold-plated packages at `eps ~ 0.03–0.1`, so both ends
+have to work. The sweep count is
+
+```
+    n_sweeps = ceil( ln(tol) / ln(1 - eps_min) ),   tol = 1e-12          (S50.8)
+```
+
+computed **once, at setup**, and never revised. That makes the solve:
+
+* **fixed trip count** — no residual is ever read, so the whole block is
+  CUDA-graph capturable, which a residual-checked Krylov solve is not without
+  the `-fixedIters` treatment the rest of the crate uses;
+* **factorisation-free** — no `LUsolve`, no `cuSOLVER`, no pivoting and
+  therefore no pivot-order dependence;
+* **one kernel** — the row-per-block dense mat-vec of §49.2, plus one
+  elementwise combine;
+* **bitwise reproducible**, because the mat-vec's reduction tree shape is
+  fixed by `N` and not by scheduling.
+
+The natural preconditioner is the diagonal of `I - (I-E)F`, which for
+`F_ii = 0` is exactly `I` — i.e. the unpreconditioned Neumann series **is**
+the Jacobi iteration, and there is no cheap better preconditioner available.
+A Krylov wrapper (`crate::solver`'s PBiCGStab is written against
+`GpuLduMatrix`/`amul` and does not fit a dense operator) would buy the usual
+`sqrt(rho)`-ish acceleration and bring back a residual check; below
+`eps_min = 0.3` that is worth revisiting and above it, it is not.
+
+Below `eps_min = 0.02` (S50.8) asks for more than 1300 sweeps and the run is
+**refused by name**, quoting `eps_min`, the sweep count and the arithmetic —
+not silently truncated to a wrong answer. A specular treatment is what such a
+surface actually needs, and §50.9 says so.
+
+**`cublasDgemv` is not used.** Its result can depend on
+`cublasSetAtomicsMode` and it is not contractually bitwise-stable across
+library versions. A hand-written row-per-block mat-vec is twenty lines,
+removes the question, and is not slower — the operation is bandwidth-bound.
+
+**Gebhart's absorption factors** (`B = (I - (I-E)F)^{-1} E`, applied once) are
+attractive when `eps` is fixed for the whole run, and are **named and not
+used**: building them is a dense inverse (`N^3`) and a temperature-dependent
+`eps` would invalidate it.
+
+**Where the porting survey's tier system breaks.** The four tiers are
+A-trivial / B-sparse-solve / C-fft / D-hard. This is none of them: it is
+dominated by a solve, like tier B, but the operator is dense, so nothing in
+the tier-B toolbox applies — AMGX has no sparsity to coarsen, cuDSS has no
+fill-in to worry about, `GpuLduMatrix` cannot represent it, `DIC`/`DILU` have
+nothing to factor. The honest classification is **"B-shaped, dense
+operator"**, and the practical consequence is that this component depends on
+*none* of the existing linear-algebra stack and brings its own — which is a
+smaller cost than it sounds, because a fixed-count Neumann series is one
+kernel.
+
+### 50.3 The load-bearing derivation: one rewritten Robin triple
+
+**Surface-to-surface radiation through a non-participating medium contributes
+no volumetric term to any equation.** There is no medium; `div(q_r) = 0`
+everywhere in the fluid. There is no `fvm_*` call, no `EnergySources`
+registration and no new LDU assembly. `RadiationKernels::energy_coupling`
+computes `a(G - 4 sigma T^4)`, which is identically zero at `a = 0`, and is
+not used. The entire model enters the solver through **one rewritten Robin
+triple on `T`**. This is a *smaller* change to the solver than P1 was, and the
+whole cost of the model is in building `F` (§49) and inverting (S50.3),
+neither of which is a finite-volume operation at all.
+
+Let `n` be the **mesh** outward face normal (out of the fluid, into the wall)
+and `q_w` the heat flux **into the fluid** — this crate's existing convention,
+`energy::flux_to_grad(q, k) = q/k`. Steady energy balance on a thin,
+zero-heat-capacity surface element:
+
+```
+    q_ext + q_conv,fluid->surface = q_r
+  ==>  q_w = q_ext - q_r = q_ext - eps ( sigma T_b^4 - H_b )             (S50.9)
+```
+
+using (S50.4). Newton-linearise about the lagged face temperature `T0` (the
+previous outer iterate's `t.bf`) — the same linearisation §28 already uses and
+the same Patankar `Sp <= 0` rule:
+
+```
+    sigma T_b^4 ~= 4 sigma T0^3 T_b - 3 sigma T0^4
+  ==>  q_w ~= a - h T_b,   h = 4 eps sigma T0^3,
+                           a = q_ext + eps H_b + 3 eps sigma T0^4       (S50.10)
+```
+
+`h` is the radiative heat transfer coefficient, W/(m^2 K), and it is `>= 0`
+always. Matching (S50.10) to §4's universal form
+
+```
+    T_b      = fr refValue + (1 - fr)(T_P + refGrad/Delta_b)
+    snGrad_b = fr Delta_b (refValue - T_P) + (1 - fr) refGrad
+```
+
+and requiring `k_eff snGrad_b = a - h T_b` *identically in `T_P`*: the `T_P`
+coefficient gives
+
+```
+    -k_eff fr Delta_b = -h (1 - fr)     ==>   fr = h/(h + k_eff Delta_b)  (S50.11)
+```
+
+and the constant term, using `(1 - fr)(k_eff Delta_b + h)/Delta_b = k_eff`,
+gives `refValue = (a - k_eff g)/h` with `g = refGrad` still free. Choosing
+`g = q_ext/k_eff` — the existing `FixedFluxTemperature` value — makes **the
+emissivity cancel out of `refValue` entirely**:
+
+```
+  +--------------------------------------------------------------------+
+  |   h        = 4 eps sigma T0^3                                       |
+  |   fr       = h / ( h + k_eff Delta_b )                              |
+  |   refValue = (3/4) T0  +  H_b / (4 sigma T0^3)                      |   (S50.12)
+  |   refGrad  = q_ext / k_eff                                          |
+  +--------------------------------------------------------------------+
+```
+
+### 50.4 Four checks on (S50.12)
+
+1. **`fr` is in `[0,1)` unconditionally.** `h >= 0` and `k_eff Delta_b > 0`,
+   so no clamp, no branch, no special case. Strictly better behaved than the
+   Marshak triple of §28, which needed a sign argument to land in range.
+2. **`eps -> 0` is exact, not a limit.** `h -> 0` gives `fr -> 0` and
+   `refGrad = q_ext/k_eff`, and `refValue` stays *finite* — `(3/4)T0 +
+   H_b/(4 sigma T0^3)` contains no `eps`, which is why `g = q_ext/k_eff` and
+   not `g = 0` is the right choice. The condition collapses **bitwise** onto
+   `FixedFluxTemperature`. That is a §22-style "reproduces the simpler model"
+   gate obtained for free — and it is the shape this project prefers, unmoved
+   *by construction* rather than by argument.
+3. **Mesh refinement does not lose the radiation.** Unlike Marshak, where
+   `Delta_b -> inf` drives `fr -> 0` and the condition degenerates, the
+   quantity that reaches the matrix here is `fr Delta_b = h/(h/Delta_b +
+   k_eff) -> h/k_eff`, a finite radiative conductance, and
+   `k_eff snGrad_b -> a - h T_b` exactly. The condition is
+   resolution-consistent.
+4. **Radiative equilibrium.** In a black isothermal enclosure at `T_inf` with
+   `q_ext = 0`: `H = sigma T_inf^4`, `refGrad = 0`,
+   `refValue = (3/4)T0 + T_inf^4/(4 T0^3)`, whose fixed point is
+   `T0 = T_b = T_inf`.
+
+**The one dependence that is not free: `fr` contains `k_eff`.** Unlike
+§32.2's fixed-flux condition — where `fr = 0` makes `q/k_eff` exact *whatever*
+`k_eff` is, because the ratio cancels against the same `k_eff` the assembly
+multiplies by — here `fr` is a function of the conductivity, so the stamp must
+use the `k_eff` the assembly will use. §50.7 states the lag this implies and
+what it costs.
+
+### 50.5 Fine faces and coarse faces
+
+`F` is `N^2`, so the radiating surface is **agglomerated**: fine boundary faces
+are grouped into `N_c` coarse faces, `F` is built at the coarse level, and the
+coupling maps back down. All three mappings are gather-shaped:
+
+```
+  coarse <- fine  (reduction):   cluster->face CSR, the exact shape of
+                                 mesh.bcf_offset / mesh.bcf_face
+                                 A_c   = SUM_{bf in c} |Sf|_bf
+                                 E_b,c = (SUM |Sf| sigma T_b^4) / A_c
+                                 eps_c = (SUM |Sf| eps_bf) / A_c
+  fine <- coarse  (broadcast):   H_bf = H[cluster_of[bf]]  -- a pure read
+```
+
+**The area-weighted average of `sigma T^4`, not of `T`.** What must be
+conserved is *power*, not temperature. Averaging `T` and then raising to the
+fourth power understates the emission of a non-isothermal cluster by Jensen's
+inequality, and the error grows with the temperature spread inside the
+cluster — which is exactly what a coarse cluster has.
+
+The reduction is **one thread per coarse face, looping its members in
+ascending fine-face index**, never one thread per fine face with an
+`atomicAdd` into its cluster. Same construction as `HostMesh`'s
+`bcf_offset`/`bcf_face`, built on the host at setup.
+
+**The agglomeration itself.** A greedy merge on boundary-face vertex
+adjacency, faces visited in ascending index, merging only within one patch,
+only where the two normals agree to within `maxClusterAngle` (default 20
+degrees), and stopping at `agglomerate` members. Deterministic by
+construction: the visit order, the neighbour order and the acceptance test are
+all pure functions of the mesh, and the search is breadth-first from the seed
+with the frontier held in ascending face index. `agglomerate 1` (the default)
+is the identity map — one cluster per boundary face — and is what every gate
+in §49.8 and §50.11 runs at, so agglomeration cannot silently change a
+validated answer.
+
+**A cluster must not straddle a narrow gap.** If it does, the relative
+separation `s` of (S49.6) collapses at the coarse level and §49.2's order
+table pays for it with accuracy rather than with work. The normal-agreement
+test prevents the common case (merging across a fin); the general case is an
+honest gap, recorded in §50.10.
+
+**`maxClusterAngle` cannot be tested on a box, and its pair test says so.**
+Every face of a flat patch agrees with every other to zero degrees, so the
+angle limit never binds there whatever it is set to — the first draft of
+§51.2's pair test used a box and read *6 clusters against 6*, which would have
+passed a solver that ignored the entry entirely. That is precisely the defect
+§13.4.1 exists to catch, caught in the test rather than in the code. The
+fixture is a twelve-sided prism's side wall instead: one patch, adjacent faces
+30 degrees apart, which is also what a curved radiating surface — a duct, a
+cylindrical shield — actually looks like.
+
+### 50.6 Memory, and the refusal
+
+`8 N_c^2` bytes are reserved for `G` for the whole run, competing with the flow
+solver's allocation. Before allocating, the model reads `Gpu::mem_info` and
+refuses if `G` would take more than **60%** of free device memory, with a
+message naming `N_c`, the byte count, the free memory, the agglomeration level
+that would fix it, and the arithmetic. There is no silent 8 GB allocation
+followed by an out-of-memory failure in the pressure solve three minutes
+later. `N_c > 32 768` is refused outright regardless of memory, naming
+hierarchical low-rank compression (Potter et al. 2022) as the documented next
+step and the hemicube as the escalation for the view-factor build itself.
+
+Storing `F` in f32 would halve everything and would still be deterministic —
+f32 *arithmetic* is deterministic; it is unordered *summation* that is not —
+but it caps the achievable row-sum residual at about `1e-7` and would break
+§49.8's G4 gate. **It is not offered.**
+
+### 50.7 The lag, the under-relaxation, and what is honest about both
+
+(S50.12) treats the local emission **implicitly** (`h` on the diagonal through
+`fr`, the Patankar rule) and the incoming irradiation `H_b` **explicitly**.
+That is the same splitting §28's Marshak wall already uses and it is
+structurally sound, but the off-diagonal sensitivity `dH_i/dT_j` is entirely
+lagged. There is **no convergence proof and no bound on the lagged operator's
+spectral radius**; the bad case is intermediate emissivity with a large
+wall-to-wall temperature difference — plausibly a hot chip facing a cold lid.
+An under-relaxation factor on `H` is therefore built in from the start
+(`radiationRelaxation`, default `1.0` so the default is unmoved) rather than
+discovered later:
+
+```
+    H_b^(k) <- w H_b,new + (1 - w) H_b^(k-1)                            (S50.13)
+```
+
+**`k_eff` is lagged by one outer iteration**, because the stamp runs before
+`Energy::correct` and reads the `k_eff_face.bf` that `Energy::update_k_eff`
+computed on the *previous* iteration. This is deliberate and it is what keeps
+`src/energy.rs` free of any S2S state: the only change to that file is one
+read-only accessor, so the default path is provably unmoved by inspection of
+the diff rather than by argument. At convergence the two `k_eff` values are
+the same number and the condition is exact; away from convergence the stamp is
+consistent with a slightly stale conductivity, which is the lag every other
+coupling coefficient in this crate already carries. On the first outer
+iteration `k_eff` is still zero and the stamp leaves the triple untouched —
+the same "degenerate until the kernel can run" convention
+`energyFixedFluxTemperature` follows on its own guard.
+
+### 50.8 The wall condition itself
+
+```rust
+/// Surface-to-surface radiation coupled wall - SPEC-LIT S50.3.
+S2sWall = 34,
+```
+
+`q_ext` cannot live in `ref_value` (as `FixedFluxTemperature`'s `q` does)
+because the S2S stamp overwrites `ref_value` every update; it lives in the
+S2S module's own `DevBuf<Scalar>`, exactly as `Radiation` owns `epsilon_w`,
+and so does `eps`. **No new device branch is needed**, for the same reason
+`ContactAngle` and `CoupledTemperature` need none: the discriminant is outside
+every range `cuda/field.cu` consults, so `fldCorrectBcScalar` evaluates it
+with the same `fldMixed` as everything else.
+
+The condition is accepted under the OpenFOAM spelling
+`greyDiffusiveRadiationViewFactor` and the native `s2sWall`, **only on a
+temperature field** — on any other field nothing would ever rewrite the triple
+it is defined by, which is the §13.4 defect this project keeps finding, and it
+is refused naming the field it belongs on. `radiationModel viewFactor` (or
+`s2s`) joins `P1` and `fvDOM` in the §13.4 selector.
+
+**And it is refused in the three places it does not belong**, each naming
+where it does. `RadiationSolver::new` dispatches the two participating-medium
+models and has neither the enclosure geometry nor a `G` field to give this
+one, so it names `crate::s2s::S2s::new`. The JSONC `physics.fire.radiation`
+block can say a model name and an absorption coefficient and nothing about
+which patches radiate, so it names `constant/radiationProperties`.
+`ofgpu-fire`'s `-radiationModel` flag has the same gap, and its medium is
+participating anyway. None of the three substitutes silently.
+
+`compressible::turbulentTemperatureRadCoupledMixed` stays **refused**, and its
+message is updated rather than deleted: it asks for the conjugate coupling of
+§47 *and* radiative exchange on the same face, and those two conditions
+rewrite the same three numbers, exactly as §47.6 says `thermalWallFunction`
+and `coupledTemperature` do. The refusal now names `coupledTemperature` and
+`greyDiffusiveRadiationViewFactor` as the two conditions that exist and says
+that a face carries one or the other.
+
+### 50.9 What is refused by name
+
+| Asked for | Answer |
+|---|---|
+| **Specular reflection** | The entire radiosity formulation (S50.1)–(S50.4) assumes *diffuse* reflection. Polished aluminium and gold plating — common in exactly the target application — are strongly specular. Hottel & Sarofim ch. 5's method of images handles a small specular fraction and Emery et al. (1991) survey the alternatives, but there is no view-factor-shaped answer: it is a different model. **Refused**, rather than letting a user set `emissivity 0.05` on a mirror and believe the result. |
+| **A participating medium** | This model has no absorption, emission or scattering in the volume. A case that sets `absorptionCoefficient` non-zero under `radiationModel viewFactor` is refused naming `P1` (§28) and `fvDOM` (§36). |
+| **Non-grey / spectral bands** | Not implemented; refused naming the grey model. |
+| **`eps_min < 0.02`** | §50.2's sweep-count refusal. |
+| **`N_c > 32 768`, or `G` above 60% of free memory** | §50.6's refusal. |
+| **Monte-Carlo view factors** | §49.2. Refused on *accuracy*, and the reproducibility counter-argument is answered rather than ignored. |
+| **RT-core traversal** | §49.2. Refused rather than offered behind a flag. |
+| **An open enclosure with no `ambientTemperature`** | §49.6. |
+
+### 50.10 What must hold
+
+| Test | Expected |
+|---|---|
+| the triple's range | `fr` in `[0,1)` for every `eps` in `[0,1]`, every `T0 > 0` and every `k_eff Delta_b > 0` — swept, not argued |
+| the `eps -> 0` collapse | at `eps = 0` the triple is **bitwise** `FixedFluxTemperature`: `fr` exactly `0.0`, `refGrad` exactly `q_ext/k_eff` |
+| the emissivity does not reach `refValue` | `refValue` is bitwise identical for `eps = 0.1` and `eps = 0.9` at the same `T0`, `H_b` |
+| refinement consistency | `fr Delta_b -> h/k_eff` as `Delta_b -> inf`, measured over four decades |
+| radiative equilibrium | a black isothermal enclosure at `T_inf` has `T0 = T_inf` as an exact fixed point — checked twice: as a fixed point of the formula, and END TO END through the kernels (gather, solve, broadcast, stamp), where `H` must come back as `sigma T_inf^4`, `refValue` as `T_inf`, `refGrad` exactly `0` and every `q_r` at round-off |
+| the coarse areas | the irradiation divides by the SAME `A_i` that `G_ij = A_i F_ij` was built from — the triangulated one — not by the `SUM |Sf|` the gather recomputes. They agree to round-off on a planar face and by the warp otherwise, and keeping them separate is what stops a warped mesh from quietly breaking closure |
+| the radiosity solve | (S50.6) at the (S50.8) sweep count reproduces the two-surface closed forms to `1e-10` relative for `eps` in {0.1, 0.5, 0.9} and `A_1/A_2` in {0.25, 1} |
+| the sweep count is sufficient | the measured residual `max_i \|J_i - eps_i E_b,i - (1-eps_i)(F J)_i\|` after `n_sweeps` is below `1e-12` relative at `eps_min = 0.1`, where the count is 263 |
+| power balance | `SUM_i A_i q_r,i = 0` in a closed enclosure at any temperatures, to round-off |
+| `sigma T^4` averaging | a two-temperature cluster's coarse `E_b` equals the area-weighted `sigma T^4` and **not** `sigma <T>^4`, and the test measures the gap so a regression to averaging `T` cannot pass |
+| the coarse/fine round trip | at `agglomerate 1` the coarse gather followed by the broadcast is the identity, bitwise |
+| determinism | two full `S2s::update` calls on the same state produce bitwise identical `fr`, `refValue`, `refGrad` |
+| default unmoved | `src/energy.rs` gains one read-only accessor and no behaviour; every existing energy test is untouched and passes |
+| the §13.4.1 pair tests | §51 |
+
+### 50.11 Validation
+
+**Gate 50-A — infinite parallel grey plates, analytic.** Modest ch. 5:
+
+```
+    q_net = sigma (T_1^4 - T_2^4) / (1/eps_1 + 1/eps_2 - 1)
+```
+
+**Gate 50-B — concentric grey bodies, analytic.** The better test, because it
+exercises unequal areas and therefore reciprocity:
+
+```
+    q_1 = sigma (T_1^4 - T_2^4) / [ 1/eps_1 + (A_1/A_2)(1/eps_2 - 1) ]
+```
+
+Both are pure linear-algebra checks on (S50.3) against a closed form, so both
+are gated at `1e-10` relative rather than at a physical tolerance, and both
+double as the check that (S50.8)'s sweep count is sufficient at `eps = 0.1`.
+
+**Gate 50-C — the three-surface enclosure with a re-radiating wall**, whose
+series-parallel resistance network gives a closed form with no symmetry to
+hide an error in. The re-radiating surface is adiabatic (`q_R = 0`), which is
+imposed by iterating its emissive power to the fixed point `E_b,R = H_R` —
+exactly the condition the network reduction assumes:
+
+```
+    q_1 = sigma (T_1^4 - T_2^4) /
+          [ (1-e1)/(e1 A1) + 1/( A1 F12 + (1/(A1 F1R) + 1/(A2 F2R))^-1 )
+            + (1-e2)/(e2 A2) ]
+```
+
+**The first transcription of that network was wrong, and the solver caught
+it.** Two parallel branches add **conductances**, not resistances: the direct
+path contributes `A F12` and the path through the re-radiating surface is two
+resistances in series. Writing `1/(A F12)` in the parallel sum predicted
+`26139 W/m^2` against the solver's `15368`, a 41 % gap — and the solver was
+right. It is recorded here because a gate whose reference formula is wrong is
+worse than no gate: it would have been "fixed" by loosening the tolerance.
+
+**Gate 50-D — radiative equilibrium**, §50.4 check 4, run END TO END through
+the kernels rather than through the formula: a closed black box mesh, every
+wall at `T_inf`, and the whole chain executed — the coarse gather of
+`sigma T^4`, the radiosity solve, the broadcast, the stamp. What must come out
+is `H = sigma T_inf^4`, `refValue = T_inf`, `refGrad` exactly `0`, and every
+`q_r` at round-off. It is the one gate that catches a sign error or a
+mis-plumbed buffer anywhere between `t.bf` and `t.ref_value` — and it did
+catch one: the `s2sStamp` launch was one argument short, which is a
+`CUDA_ERROR_INVALID_VALUE` rather than a wrong number, but nothing before this
+gate exercised that kernel.
+
+**Its power balance has to be scaled by `sigma T^4 A`, not by the gross
+exchanged power** the other gates use, because at equilibrium the gross power
+is itself zero: a relative test against it compares two round-off numbers and
+demands one be a billionth of the other. The first draft did exactly that and
+failed on a correct answer.
+
+### 50.12 What is NOT run, and why — stated rather than omitted
+
+**The coupled cavity gate (Balaji & Venkateshan 1993/1994; Akiyama & Chong
+1997) is NOT run.** It is the right coupled gate — a differentially heated
+square cavity with all four walls participating in surface radiation, on a
+geometry whose view factors are C-11 and C-14 in closed form, so a failure
+localises to the coupling rather than to the geometry — and it exercises the
+whole chain: the buoyant solver, the energy equation, (S50.12), the radiosity
+solve and the Picard lag between them.
+
+Two things stand between here and it, and both are structural rather than
+incidental:
+
+1. **The tabulated `Nu_conv`/`Nu_rad` values could not be obtained.** Both
+   papers are behind Elsevier's paywall and no open-access reproduction of the
+   tables was reachable in the session that wrote this section. Writing the
+   gate against "compare with experiment" instead of against their own
+   tabulated numbers with their stated band would be the wrong shape of gate
+   for this project.
+2. **The fluid side has no case format for a radiating enclosure.** The model
+   is fully wired and gated as a *library* — `S2s::update` writes the triple,
+   and §51's pair tests drive it from a case document — but no driver binary
+   reads an enclosure definition out of a case directory and runs
+   `ofgpu-buoyant` with it. That is the same boundary §47.14 records for the
+   conjugate model's fluid side, and it is the next step for both.
+
+`ofgpu-validate` prints this omission on every run rather than leaving it
+silent, in the same way §42.8b prints its miss.
+
+**Three more, smaller, recorded here so nobody has to rediscover them.**
+
+* **The Level-1 visibility error has no published bound**, and §49.8 now
+  measures it at `8.8e-3` on a 20 %-blocked enclosure. That is the one number
+  in §49/§50 that rests on nothing but this project's own measurement.
+* **The Picard lag between the radiosity system and the energy equation has no
+  convergence proof** (§50.7). `radiationRelaxation` exists because of that,
+  and it has never been exercised against a case that actually needs it — only
+  against the requirement that it changes the answer.
+* **Specular reflection, non-grey bands and a radiating conjugate interface
+  are all refused by name** (§50.9, §47.10) rather than approximated. The
+  first of those is not a tolerance question: polished aluminium and gold
+  plating are exactly the surfaces this model's target application is full of,
+  and (S50.1) does not describe them at all.
+
+---
+
+## 51. What an enclosure case says, and the pair tests
+
+Written from ofgpu `SPEC-LIT.md` §13.4 (the contract) and §13.4.1 (the pair
+test). No GPL-licensed source was consulted.
+
+### 51.1 The dictionary
+
+Read from `constant/radiationProperties`, alongside the `radiationModel`
+selector §28 and §36 already share.
+
+| Entry | Meaning | Default | Refusal |
+|---|---|---|---|
+| `radiationModel viewFactor` | selects this model | — | anything else is §13.4's existing error, now naming three models |
+| `emissivity <e>` | grey hemispherical total emissivity on every radiating face | — | **required**; outside `[0,1]` is an error; `eps_min < 0.02` is §50.2's refusal |
+| `viewFactorQuadrature <n>` | override §49.2's order table with a fixed `nq` | `0` = use the table | outside `[2,10]` is an error naming the table |
+| `occlusion none\|pairwise\|perPoint` | §49.4's three levels | `pairwise` | any other name is an error naming the three |
+| `agglomerate <n>` | maximum fine faces per coarse face | `1` (identity) | `< 1` is an error |
+| `maxClusterAngle <deg>` | normal-agreement limit for a merge | `20` | outside `(0,90)` is an error |
+| `ambientTemperature <T>` | close an open enclosure with a black pseudo-surface at `T` | absent | `<= 0` is an error; **absent plus an unclosed enclosure** is §49.6's refusal |
+| `radiationRelaxation <w>` | (S50.13)'s under-relaxation of `H` | `1.0` | outside `(0,1]` is an error |
+| `radiositySweeps <n>` | override (S50.8) | `0` = use (S50.8) | `< 0` is an error |
+| `absorptionCoefficient` non-zero | a participating medium | — | §50.9's refusal naming `P1` and `fvDOM` |
+
+Boundary side: `T`'s patch entry says `greyDiffusiveRadiationViewFactor` (or
+`s2sWall`), optionally with its own `emissivity` and a `q` (the external flux
+`q_ext`, W/m^2, default `0`).
+
+**What this dictionary does NOT do yet, said here rather than discovered.**
+It configures the model; it does not run one. No driver binary reads an
+enclosure out of a case directory and steps a flow with it — the library API
+(`RadiantFaces`, `S2s::new`, `S2s::update`) is what the gates drive, and
+§50.12 records that boundary. `radiationModel viewFactor` in the JSONC
+`physics.fire.radiation` block is refused for the same reason and says so.
+
+### 51.2 The pair tests
+
+Every one of these is **two case documents differing in exactly one entry,
+REQUIRED to produce different output, failing by name if they do not.** Six
+instances of "a case could say it and the solver ignored it" have been found
+in this project; the pair test is what stops the seventh.
+
+| Entry | The pair | What must differ |
+|---|---|---|
+| `emissivity` | `0.2` vs `0.8`, everything else byte-identical | the radiosity `J`, the net flux `q_r`, and the stamped `fr` |
+| `q` (external flux) | `0` vs `500` on one patch | the stamped `refGrad`, and hence `T_b` |
+| `ambientTemperature` | `300` vs `600` | `H_b`, `refValue` and `q_r` |
+| `radiationRelaxation` | `1.0` vs `0.3` | the irradiation after one update |
+| `viewFactorQuadrature` | table vs `2` | `F` itself |
+| `occlusion` | `none` vs `pairwise` on the Shapiro geometry | `F_12` — `0.19982` unobstructed against `0.11562` obstructed |
+| `agglomerate` | `1` vs `4` | `N_c`, and `F` |
+| `maxClusterAngle` | `20` vs `89` on a box corner | `N_c` |
+| `radiositySweeps` | `1` vs the (S50.8) count | `J` |
+| `radiationModel` | `P1` vs `viewFactor` | which model is constructed at all |
+
+### 51.3 What must hold
+
+| Test | Expected |
+|---|---|
+| every entry above | its pair test passes, failing by name if the two cases agree |
+| every refusal above | fires by name, naming the alternatives, and is not a silent substitution |
+| a recognised-but-unimplemented BC name | error, not `Calculated` |
+| `greyDiffusiveRadiationViewFactor` on a non-temperature field | refused, naming `T` |
+| the same name on the `IMPLEMENTED_BC_NAMES` round trip | reaches `S2sWall`, not `Calculated` — §15.5's rule, extended a third time |
+| `radiationModel viewFactor` in the JSONC `physics.fire.radiation` block | **refused**, naming `P1` and `fvDOM` and saying where the enclosure is read from instead — that block has no way to say which patches radiate, and accepting the name there would build a participating medium under a surface model's name |
+| `RadiationSolver::new` with a surface-to-surface config | refused, naming `crate::s2s::S2s::new` — S2S has no `G` field and registers no energy source, so it is not a third member of that family |
+| the case-directory round trip | two `constant/radiationProperties` files differing in one word build **different models**, and the `viewFactor` one carries its own `emissivity` and `agglomerate` through |
+| the provenance audit | `NOTICE` and `PROVENANCE.md` quote the new file count |
+
+---
+
+## 52. The fan boundary condition — a pressure–flow curve as a Robin triple
+
+Written from:
+
+* AMCA 210 / ASHRAE 51, *Laboratory Methods of Testing Fans for Certified
+  Aerodynamic Performance Rating* — what a manufacturer's curve **is**: a
+  static-pressure rise against volumetric flow, measured at a stated air
+  density `rho_curve` and a stated shaft speed `N_curve`. That is why §52.5
+  carries a density and a speed correction rather than treating the table as
+  absolute.
+* FDS 6, `Verification/HVAC/fan_test.fds`, `qfan_test.fds` and their published
+  `.csv` reference values — **US Government public domain** (NIST;
+  `reference/fds/LICENSE.md` read verbatim: "software developed by NIST
+  employees is not subject to copyright protection within the United States").
+  The **case files and their reference numbers** are the external cross-check
+  of §52.12 Gate 52-B. `Source/hvac.f90` was read for the DISCIPLINE only —
+  that a fan curve is scaled by `rho/rho_curve` at every evaluation, and that
+  its tabulated branch resolves the operating point by a bisection with
+  `IF (FAN_ITER==20) EXIT`, a **data-dependent trip count** which is correct
+  for a CPU code and uncapturable here (§52.7).
+* B. L. Buzbee, F. W. Dorr, J. A. George, G. H. Golub, "The direct solution of
+  the discrete Poisson equation on irregular regions", *SIAM J. Numer. Anal.*
+  **8**(4) (1971) 722–736. DOI `10.1137/0708066` — the capacitance-matrix
+  method, which is the way to keep the cuFFT path alive under a fan patch.
+  **Named and not implemented** (§52.9).
+* W. W. Hager, "Updating the inverse of a matrix", *SIAM Review* **31**(2)
+  (1989) 221–239. DOI `10.1137/1031049` — Sherman–Morrison/Woodbury with its
+  stability caveats; the same refusal.
+* I. E. Vignon-Clementel, C. A. Figueroa, K. E. Jansen, C. A. Taylor,
+  *Comput. Methods Appl. Mech. Engrg.* **195**(29–32) (2006) 3776–3796.
+  DOI `10.1016/j.cma.2005.04.014` — the coupled-multidomain outflow condition:
+  structurally the *same problem*, a boundary condition relating a
+  patch-integrated flow rate to the patch pressure.
+* M. Esmaily Moghadam, I. E. Vignon-Clementel, R. Figliola, A. L. Marsden,
+  *J. Comput. Phys.* **244** (2013) 63–79. DOI `10.1016/j.jcp.2012.07.035` —
+  the rank-1 dense block a flow-rate-dependent pressure BC creates, and why
+  the explicit (Picard) version diverges when the downstream impedance is
+  large. The closest published analysis of §52.2's numerics; the source of
+  §52.6's under-relaxation default and of the refusal in §52.6.
+* C. M. Rhie, W. L. Chow, *AIAA J.* **21** (1983) 1525–1532 — already cited by
+  §5; relevant because the condition is expressed on `phi_HbyA`, the
+  Rhie–Chow flux.
+* W. H. Press, S. A. Teukolsky, W. T. Vetterling, B. P. Flannery, *Numerical
+  Recipes*, 3rd ed., §3.3 — the Hermite cubic already carried by
+  `crate::fv`'s `cubic` convection scheme, reused for the curve (§52.5).
+* F. N. Fritsch, R. E. Carlson, "Monotone piecewise cubic interpolation",
+  *SIAM J. Numer. Anal.* **17**(2) (1980) 238–246. DOI `10.1137/0717021` —
+  the slope limiter that makes that Hermite cubic **monotone**, which is what
+  a fan curve needs and what a plain Catmull–Rom spline does not give.
+* ofgpu `SPEC-LIT.md` §4 (the universal Robin triple this condition rewrites),
+  §5 (the pressure equation it rewrites the boundary row of), §8.4 (the
+  fixed-partition reduction whose determinism argument §52.7 reuses), §13.4
+  (the unsupported-setting contract), §18 (`PorousDrag`, the volumetric
+  sibling of §53), §47.2 (the precedent that a Robin triple can carry a
+  coupling), §53 (the porous jump, which is the same kernel).
+
+No GPL-licensed source was consulted. OpenFOAM's `fanPressure` and `fan`
+were **not** opened; SU2, COMSOL and Fluent likewise. Where this section says
+what a commercial code does, it comes from that product's **user
+documentation** (ANSYS Fluent User's Guide, "Fan Boundary Conditions"; COMSOL
+CFD Module User's Guide, "Fan and Grille Boundary Conditions"), which is
+documentation and not source. The derivation of §52.2 is done here from first
+principles against §4's own Robin contract; there is no permissive prior art
+for a 3-D face-based fan-curve boundary condition and none was leaned on.
+
+### 52.1 What a fan is, in this solver's units
+
+A flow machine delivers a static-pressure rise that depends on the flow
+through it:
+
+```
+    dp_fan = dp_fan(Q) ,     Q = SUM_{f in Gamma} phi_f              (S52.1)
+```
+
+with `phi_f` the conservative face volume flux (m^3/s) and `S_f` **outward**,
+so `Q > 0` is flow leaving the domain. This solver carries **kinematic**
+pressure (§1), so the curve enters as
+
+```
+    F(Q) = dp_fan(Q) / rho_ref                            [m^2/s^2] (S52.2)
+```
+
+Four parameterisations, all reducing to the same numerics:
+
+| name | form | note |
+|---|---|---|
+| `constantPressure` | `dp = dp_0` | already: `fixedValue` on `p` |
+| `constantFlow` | `Q = Q_0` | already: `flowRateInletVelocity` + `fixedFluxPressure` |
+| `quadratic` | `dp = dp_max [1 - Q\|Q\|/Q_max^2]` | FDS `FAN_TYPE 2`, written **odd** — see below; the closed-form gate of §52.12 |
+| `table` | monotone Hermite through `(Q_i, dp_i)` | manufacturer data (§52.5) |
+
+The first two are the two **endpoints** of the third and fourth, not separate
+conditions — §52.4 is that statement made exact.
+
+**`Q|Q|`, not `Q^2`, and this had to be corrected.** The textbook quadratic
+`dp_max[1 - (Q/Q_max)^2]` is **even** in `Q`, so on the reverse branch it
+*falls*: `dp' = -2 dp_max Q/Q_max^2` is positive there, `S = -dp'` is
+**negative**, and a machine being driven backwards develops ever more pressure
+pushing the reversal along. That is a positive feedback loop, and it is the
+same defect §52.5 refuses a non-monotone *table* for — a curve form cannot be
+allowed to smuggle it back in. Measured on `cases/coldAisle.dc.jsonc` with the
+even form: `Q` went `3.0, -4.6, -33, -90, -1692 m^3/s` in five outer
+iterations. `Q|Q|` is identical to `Q^2` for `Q >= 0`, so the forward branch
+and every gate written against it (§52.12's closed form, the FDS cross-check)
+are **unchanged**; on the reverse branch `dp` now grows, which is a fan
+opposing a flow forced through it, and `S = 2 dp_max |Q|/Q_max^2 >= 0` on the
+whole line.
+
+A fan patch may face either way. Write `sigma = +1` for a patch the device
+**discharges through** (an exhaust: the fan pushes air out across `Gamma`) and
+`sigma = -1` for one it **draws through** (a supply blower: the fan pushes air
+in). The flow through the device in its own positive sense is
+`Q_dev = sigma Q`, and the patch face value is
+
+```
+    p_b = p_a - sigma F(Q_dev)                                       (S52.3)
+```
+
+*Check the two signs.* Exhaust: the fan raises the pressure from `p_b` inside
+to ambient `p_a` outside, so `p_a = p_b + F`, i.e. `p_b = p_a - F`, and
+`sigma = +1`. Supply: the fan raises ambient `p_a` to `p_b` at the patch, so
+`p_b = p_a + F` and `sigma = -1`. Both are (S52.3).
+
+### 52.2 The problem, and why it is not the problem it looks like
+
+The fan couples a **patch integral** `Q` to **every** face's pressure. Written
+naively that is a dense `n_Gamma x n_Gamma` block. An LDU matrix (§3) holds one
+coefficient per *mesh* face, and there is no mesh face between two different
+patch cells, so the block cannot be stored at all; if it could, it would break
+the symmetry PCG and DIC rely on (§8).
+
+It is neither dense nor asymmetric. Linearise (S52.3) about the previous outer
+iteration's operating point `(Q*, F* = F(sigma Q*))`, with
+
+```
+    S := -dF/dQ_dev  evaluated at Q_dev = sigma Q*   ,    S >= 0     (S52.4)
+```
+
+on the useful (falling) branch. Differentiating (S52.3),
+`dp_b/dQ = -sigma F'(sigma Q) sigma = -F'(Q_dev) = S`, so **`S >= 0` whichever
+way the patch faces** and the direction enters only through the constant:
+
+```
+    p_b ~= c + S Q ,        c := p_a - sigma F* - S Q*               (S52.5)
+```
+
+The pressure equation's own flux relation at a boundary face is
+
+```
+    phi_f = phi_HbyA,f - D_f (p_b,f - p_P(f)) ,
+    D_f   = rAU_f a_f Delta_f > 0                                    (S52.6)
+```
+
+`D_f` (m^3/s per m^2/s^2) is exactly `pressure_laplacian_coeffs().1[bf]`
+times `b_delta_coeffs[bf]` — the boundary Laplacian conductance the assembly
+already builds. The right-hand side of (S52.5) has **no `f` dependence**: the
+fan sets one number for the whole patch. Write it `pi`. Then
+
+```
+    Q  = Phi - pi SIGMA_D + SUM_g D_g p_P(g) ,
+    SIGMA_D := SUM_{g in Gamma} D_g ,   Phi := SUM_{g in Gamma} phi_HbyA,g
+```
+
+and substituting into (S52.5),
+
+```
+    pi = (c + S Phi)/(1 + S SIGMA_D) + SUM_g w_g p_P(g) ,
+    w_g = S D_g/(1 + S SIGMA_D)                                      (S52.7)
+```
+
+Folding (S52.7) back into the boundary Laplacian row of cell `P(f)` gives, for
+the patch's whole contribution to the operator,
+
+```
+    A_Gamma = diag(D) - kappa d d^T ,
+    kappa   = S/(1 + S SIGMA_D) ,   d = (D_f)_{f in Gamma}           (S52.8)
+```
+
+**Three consequences.**
+
+1. **`A_Gamma` is exactly symmetric.** Row `P(f)` gains `-kappa D_f D_g` at
+   column `P(g)`; row `P(g)` gains `-kappa D_g D_f` at column `P(f)`.
+   Identical numbers, not merely equal ones. A fan curve does **not** break
+   the symmetry of the pressure matrix; PCG and DIC remain valid.
+
+   **In f64 that survives only under one association, and this had to be
+   corrected.** `kappa*(D_f D_g)` is bitwise symmetric, because IEEE-754
+   multiplication is commutative — `D_f*D_g` and `D_g*D_f` are the same
+   number to the bit. `(kappa*D_f)*D_g` is **not**: it rounds twice, in a
+   different order for each half. Measured on
+   `D = (0.3, 1.7, 0.55, 2.2, 0.9)` at `S = 0.7`, the naive association gives
+   `-0.023309788092835522` against `-0.02330978809283552` — one ulp apart, and
+   `matrix_is_symmetric` would report it. Nothing in the shipped solver builds
+   this operator; §52.3's lumped triple gets its symmetry from
+   `fvm_laplacian` writing `upper[f] == lower[f]`, which is unconditional. But
+   the reference implementation §52.12 Gate 52-D measures against does build
+   it, and a gate whose reference has lost the property it is testing for is
+   worse than no gate.
+
+2. **It is a bounded rank-1 downdate.** Row `f` sums to
+
+   ```
+       SUM_g A_Gamma[f,g] = D_f (1 - kappa SIGMA_D) = D_f/(1 + S SIGMA_D)
+                                                                     (S52.9)
+   ```
+
+   which is `D_f` (full Dirichlet) at `S = 0` and tends to `0` (pure Neumann)
+   as `S -> infinity`. It never overshoots into indefiniteness. **The design
+   note this section was written from states this row sum as
+   `SIGMA_D/(1 + S SIGMA_D)`, and that is wrong**: at `S = 0` a
+   `fixedValue` face contributes `D_f` to its own row, not the patch total.
+   The note's own numerical check (uniform `D = 0.8`, `N = 5`, `S = 0.7`,
+   row sum `0.21052631578947367 = 0.8/3.8`) is `D_f/(1 + S SIGMA_D)` and
+   contradicts its prose. (S52.9) is the corrected statement and §52.12 gates
+   both limits.
+
+3. **The two textbook fan idealisations are the two endpoints of one
+   expression.** A flat curve is a fixed-pressure BC, a vertical curve is a
+   fixed-flow BC, and the slope interpolates. §52.4.
+
+### 52.3 The lumping, and the one place this section departs from its note
+
+Lump the off-diagonals onto the diagonal **preserving the row sum**. The
+Robin triple of §4 with `refGrad = 0` contributes exactly `fr D_f` to the
+diagonal of row `P(f)` and `fr D_f refValue` to its source, so (S52.9) fixes
+`fr` uniquely:
+
+```
+    fr D_f = D_f/(1 + S SIGMA_D)   =>   fr = 1/(1 + S SIGMA_D)      (S52.10)
+```
+
+— **one number for the whole patch**, and exactly row-sum preserving for any
+`D_f` distribution whatever. The design note gives instead
+
+```
+    beta_f = S A rAU_f Delta_f ,   fr = 1/(1 + beta_f)      [the note]
+```
+
+with `A = SUM_g a_g`. The two agree **only when `rAU_f Delta_f` is uniform
+across the patch**, because then `SIGMA_D = rAU Delta SUM_g a_g = rAU Delta A`
+— and even there they agree to **round-off and not to the bit**, because
+`S SIGMA_D` sums `N` terms where `S A rAU Delta` multiplies: on the note's own
+five-face example the two `beta` come out `2.8000000000000003` and `2.8`. That
+distinction is worth keeping straight, because every *other* bitwise claim in
+§52 is exact. They are not the same at all otherwise, and the note's form is
+not row-sum preserving: on a five-face patch with `D = (0.3, 1.7, 0.55, 2.2, 0.9)`, equal
+face areas and `S = 0.7`, the note's `beta_0 = 5 S D_0 = 1.05` gives a row-sum
+contribution of `0.1463` where (S52.9) requires `0.0605` — **142 % high on
+that row**. (S52.10) costs nothing extra: `SIGMA_D` is a reduction this
+section performs anyway (§52.7), and it removes the note's own §7.3 worry
+("the row sums differ by a few percent for non-uniform `D_f`") by
+construction rather than by tolerance.
+
+The constant is settled the same way. The note writes
+`ref_value = c + (S A/a_f) phi_HbyA,f`, which is `c + S Phi` only under the
+further assumption that `phi_HbyA,f/a_f` is uniform — a uniform face velocity
+across the fan patch, which is exactly what a fan patch with a real inflow
+profile does **not** have. (S52.7)'s own constant term is `c + S Phi`, so:
+
+```
+    fr        = 1/(1 + S SIGMA_D)
+    refValue  = c + S Phi                                           (S52.11)
+    refGrad   = 0
+```
+
+with `beta = S SIGMA_D >= 0`, hence `fr` in `(0, 1]`. Three device scalars per
+patch — `Q`, `Phi`, `SIGMA_D` — and no per-face quantity at all.
+
+**Why the lumping is not an approximation of the thing that matters.** Under
+(S52.11) the patch flow rate comes out
+
+```
+    Q_lumped = Phi - fr SIGMA_D (c + S Phi - p_bar) ,
+    p_bar := (SUM_f D_f p_P(f)) / SIGMA_D                           (S52.12)
+```
+
+and the *exact* operator (S52.7) gives, after substituting `pi`,
+
+```
+    Q_exact  = Phi - SIGMA_D (c + S Phi - p_bar)/(1 + S SIGMA_D)
+```
+
+which is **the same expression**. So the lumped triple and the exact rank-1
+operator impose *identically the same relation between the patch flow rate and
+the `D`-weighted mean adjacent-cell pressure* — for any `D_f`, any `p_P`
+distribution, uniform or not. They differ only in how `p_b` is distributed
+**across** the patch faces (one number `pi` versus a face-varying value), which
+is a second-order effect on the interior. The flow rate — the whole reason the
+boundary condition exists — is exact under lumping. §52.12 gates (S52.12) at
+`0` in exact arithmetic and reports what f64 actually delivers.
+
+**And it is a better matrix.** The diagonal gains `fr D_f >= 0`, so the
+pressure operator stays an M-matrix and the solve gets *easier*, not harder,
+than the pure-Neumann limit. §52.12 measures the iteration count at both
+endpoints.
+
+### 52.4 The two endpoints, and the bitwise one
+
+**`S = 0` (a flat curve) is `fixedValue`, bitwise.** `S SIGMA_D` is exactly
+`0.0`, so `fr = 1.0/(1.0 + 0.0) = 1.0` exactly; `refValue = c + 0.0*Phi = c`
+exactly; `refGrad = 0.0`. The triple is bit-for-bit the triple a
+`fixedValue p = c` patch carries, so **the assembled system — `diag`, `upper`,
+`lower` and `source` — is bit-for-bit that of the existing condition**. That
+is the exact half of the claim and it is checked as an equality.
+
+The **solved field** is bitwise too, but only under the same solve sequence.
+A Krylov solve is a fixed point of its own iteration only to the tolerance it
+stopped at, so one solve from zero and three solves from each other's output
+land on two equally-converged vectors that are not bit-identical — the same
+observation §47.11 records for a two-region mesh, arrived at again here. The
+gate therefore drives both legs through an identical sequence and requires
+bit-equality; stated without that qualification the claim would be false, and
+a first draft of the test found it so.
+
+**This is the regression gate for the whole section**: a flat curve must
+reproduce the existing `fixedValue` answer exactly, not nearly.
+
+**And it is why the SEED is `fr = 1`, not `fr = 0`.** `fr = 1/(1 + beta)` with
+`beta >= 0`, so `fr` is in `(0, 1]` for every finite curve slope: **a fan patch
+always pins the pressure level.** `Simple::initialise` decides whether the
+Poisson operator is singular by reading `fr`
+(`pressure_has_a_dirichlet`), and it does that *before* `crate::fan` has
+written anything. A zero seed tells it the problem is unpinned; it then pins a
+reference cell as well, and `fix_pressure_level` subtracts that cell's value
+after every solve — fighting the absolute pressure the curve is imposing. §47
+and §50 both seed their coupled conditions at `fr = 0` because there is
+nothing sensible to be Dirichlet *at* until the other region exists; here
+there is, and the seed says so. The same argument holds verbatim for §53.3's
+plenum-side jump.
+
+**`S -> infinity` (a vertical curve) is a prescribed flow.** With
+`c = pi* - S Q*`,
+
+```
+    fr (c + S Phi) = (pi* - S Q* + S Phi)/(1 + S SIGMA_D) -> (Phi - Q*)/SIGMA_D
+```
+
+so `p_b -> p_P + (Phi - Q*)/SIGMA_D`, `phi_f -> phi_HbyA,f - D_f (Phi - Q*)/SIGMA_D`
+and `Q -> Q*`: the patch delivers exactly the prescribed flow through a
+`fr = 0` (fixed-gradient) pressure condition, which is `fixedFluxPressure`
+plus `flowRateInletVelocity`.
+
+**The limit needs `pi*` to stay bounded while `S` runs away**, and that is a
+real condition, not a formality: the residual is `pi*/(1 + S SIGMA_D)`, which
+vanishes only if `pi*` grows more slowly than `S`. A curve made steep by
+shrinking `Q_max` and then evaluated far past free delivery has `F*` growing
+*with* `S`, and the limit is missed by exactly that residual — measured at
+`0.258` against the limit's `0.236`, the difference being
+`1.008e15/4.583e16 = 0.022`, when a first draft of the gate was set up that
+way. A steep curve evaluated **at** its own free delivery has `F* = 0` and
+reaches the limit. Both endpoints already exist and are already
+tested, so this is a §22-style "the new thing degenerates to the old thing"
+gate at both ends of one expression.
+
+### 52.5 The curve, its corrections, and what is refused
+
+**Representation.** Manufacturer data is a table. Piecewise-linear gives a
+discontinuous `S` at every breakpoint, which makes the outer iteration
+chatter. The table is interpolated by a **monotone Hermite cubic**: the
+Hermite basis `crate::fv` already carries for the `cubic` convection scheme
+(*Numerical Recipes* §3.3), with the interior slopes taken as the
+three-point difference and then limited by **Fritsch & Carlson (1980)** — if
+`d_k` is the secant slope of interval `k` and `m_k` the node slope, rescale
+`(m_k, m_{k+1})` so that `(alpha, beta) = (m_k/d_k, m_{k+1}/d_k)` lies inside
+the circle of radius 3, and set `m_k = 0` wherever `d_{k-1} d_k <= 0`. Without
+the limiter a Catmull-Rom spline through four monotone points overshoots and
+produces `S < 0` between breakpoints — a **negative slope on a curve the case
+declared monotone**, which is a stall branch the case did not ask for.
+
+**Corrections, applied at every evaluation.** A curve is measured at a stated
+density and shaft speed (AMCA 210):
+
+```
+    dp(rho, N) = dp_curve(Q N_curve/N) * (rho/rho_curve) * (N/N_curve)^2
+                                                                    (S52.13)
+```
+
+The density ratio is the one that is easy to omit and embarrassing to get
+wrong on a hot-aisle return: a 40 C return is 6.4 % less dense than the
+20 C the curve was measured at, so a curve applied without it overstates the
+pressure rise by 6.4 %. FDS applies it at every fan evaluation
+(`DU%RHO_D/RHO_CURVE`); so does this.
+
+**Extrapolation: one expression, both tails.** Outside the table,
+
+```
+    dp = dp_end + m_end d - k d|d| ,   d = Q - Q_end ,   k > 0
+    S  = -m_end + 2 k |d|
+```
+
+The linear part carries the join slope, so `dp'` is continuous at the end
+point; the `-k d|d|` part adds curvature of the *same sign* in both
+directions, so `dp` falls faster above free delivery and **rises** below
+shut-off. Both give `S > 0` and growing, which is what bounds an excursion.
+
+The first draft held `dp(Q_min)` below the table instead — `S = 0` there — and
+that is wrong for the same reason the even quadratic is: `S = 0` makes the
+patch a **`fixedValue` at the shut-off pressure**, the stiffest condition the
+curve has, exactly where the iterate is furthest from the operating point.
+
+**Refusals (§13.4).** Each names the setting, what was wrong with it, and the
+alternatives:
+
+| what the case said | what happens |
+|---|---|
+| a table with fewer than two points | error naming `constantPressure` |
+| a table whose `Q` is not strictly increasing | error, naming the offending pair |
+| a table that is **not monotonically non-increasing in `dp`** over the requested range | error naming the rising pair and both the `quadratic` and `constantPressure` alternatives, because a rising branch is a **stall** branch: a real machine on it is unstable, and a solver that silently picked one of the two intersections would be reporting a fixed point the machine does not have |
+| `dp_max <= 0` or `Q_max <= 0` on a `quadratic` curve | error naming both |
+| `rho_curve <= 0`, `N_curve <= 0`, `N <= 0` | error naming (S52.13) |
+| `efficiency` outside `(0, 1]` | error — it divides the shaft power of §55.4 |
+| `direction` other than `inflow`/`outflow` | error naming both |
+| a fan condition on any field but the **pressure** | error naming `p`, exactly as §47.9 refuses `coupledTemperature` off `T` — nothing but `crate::fan` rewrites this triple, so on any other field it would be `fixedValue` wearing a fan's name |
+| the **Woodbury / capacitance-matrix** FFT path (§52.9) | refused by name, with the cost of the fallback printed |
+
+### 52.6 The outer iteration
+
+`S` and `c` are re-evaluated once per outer iteration from the current `Q`.
+That is a Picard map whose contraction factor is the ratio of the fan-curve
+slope to the system-curve slope at the operating point; it converges when the
+fan curve is steeper than the system curve, **which is also the physical
+stability criterion for a fan operating point**. A machine sitting on the
+rising branch of its own curve is unstable, and a solver oscillating there is
+telling the truth — which is why §52.5 refuses a non-monotone curve rather
+than picking a branch.
+
+**The first update linearises about FREE DELIVERY, not about the measured
+`Q`.** On the first pass there is no flux yet, so `Q = 0`; and `Q = 0` is
+shut-off, where the pressure is maximal and where a quadratic curve has
+`S = 0` — so the patch would start life as a `fixedValue` at the full shut-off
+pressure, which is the most violent linearisation available. Free delivery
+starts at `dp = 0` and the iteration walks *down*. Measured on
+`cases/coldAisle.dc.jsonc`: the shut-off seed put `Q = 135 m^3/s` through a
+35 m^3 room on the second iteration; the free-delivery seed put `3.0`. Where a
+flux *does* exist the measured `Q` is used, because then there is a real
+operating point to linearise about. The branch is on a value, not a trip
+count, so the launch shape is unchanged and the kernel stays capturable.
+
+The operating point is under-relaxed,
+
+```
+    Q* <- Q*_old + alpha_fan (Q - Q*_old) ,   alpha_fan = 0.5 default
+                                                                    (S52.14)
+```
+
+`alpha_fan = 1` is allowed and is a §13.4.1 setting: two cases differing only
+in `fanRelaxation` must produce different iterate histories. Moghadam et al.
+(2013) find that the explicit version of exactly this coupling diverges when
+the downstream impedance is large, and several CRACs on a shared under-floor
+plenum is precisely a large shared impedance. **What is not built:** the small
+dense Newton on the `k` operating points simultaneously that would fix it.
+It is refused by name if a case asks for it; the diagnostic prints the
+per-patch operating-point history so a non-converging set of fans is visible
+rather than silently averaged.
+
+### 52.7 Determinism: three reductions and no atomics
+
+Per fan patch, per outer iteration:
+
+```
+    Q       = SUM_{f in Gamma} phi_f
+    Phi     = SUM_{f in Gamma} phi_HbyA,f
+    SIGMA_D = SUM_{f in Gamma} rAU_f a_f Delta_f
+```
+
+The naive form is `atomicAdd(&Q, phi[bf])`. **Forbidden**: no f64 atomics
+anywhere in this project, and the result would be order-dependent. The gather
+form is the one §47.8 already uses: one thread per patch face writes its own
+contribution into a compact scratch buffer of length `size_j`, and
+`solver::device_sum` reduces that buffer. `reduce_geometry` fixes the grid at
+`min(ceil(n/BLOCK), MAX_REDUCE_BLOCKS)` blocks with a grid-stride first stage
+and a single-block second stage, so **the summation tree is a pure function of
+`n`** and the result is bitwise reproducible whatever the scheduler does. No
+new reduction is written and no offset entry point is needed: the gather
+writes exactly `size_j` values at the front of the buffer and `device_sum` is
+asked for `size_j`.
+
+The curve evaluation, the slope, the under-relaxation and the triple rewrite
+are **kernels reading device scalars**, never a host readback. Every loop in
+them has a **fixed trip count** — the table scan is `n_points` iterations
+whatever the answer, and `n_points <= 64` — so the whole fan update is CUDA-Graph
+capturable. This is where FDS's bisection (`IF (FAN_ITER==20) EXIT`) is
+deliberately not followed.
+
+**The rank-1 term is not put inside `amul`.** The exact operator (S52.8) would
+need `Apsi[P(f)] -= kappa D_f (SUM_g D_g psi[P(g)])`, whose inner sum is the
+same deterministic patch reduction — reproducible, but a device-wide
+reduction inside every Krylov iteration, serialising the matrix-vector
+product. §52.3's lumping is row-sum-identical and needs the reduction once per
+outer iteration, outside `amul`.
+
+### 52.8 The cost, stated in the decision table and not hidden
+
+`pressure/cartesian.rs::separable()` rejects any boundary face that is
+"neither uniformly Dirichlet nor uniformly Neumann", i.e. any `0 < fr < 1`. A
+genuine fan curve therefore **disables the cuFFT direct Poisson backend**,
+which is precisely the backend a rectangular data-centre room would otherwise
+get. That is a real regression and the selector must **print why** rather than
+quietly falling back. §52.11 gates the printed reason, not merely the
+fallback: a diagnostic nobody can test is a diagnostic that rots.
+
+Note that `S = 0` does **not** cost the FFT path: `fr` is exactly `1.0`, the
+face is uniformly Dirichlet, and `separable()` accepts it. The FFT path is
+lost exactly when the fan curve is doing something a fixed pressure could not.
+
+### 52.9 Refused by name: the Woodbury path, and the reason
+
+(S52.8) is a *rank-1 symmetric* modification of an operator which, with
+`Gamma` treated as pure Dirichlet, **is** separable. That is textbook
+Sherman–Morrison/Woodbury (Hager 1989) and, in the PDE setting, the
+capacitance-matrix method of Buzbee et al. (1971):
+
+```
+    L        = the separable operator with Gamma fully Dirichlet (FFT-solvable)
+    A        = L - kappa d d^T
+    A^-1 b   = L^-1 b + kappa (L^-1 d)(d^T L^-1 b)/(1 - kappa d^T L^-1 d)
+```
+
+— one extra FFT solve per outer iteration for `z = L^-1 d`, plus two dot
+products, everything device-resident and deterministic. **It is not built.**
+Three reasons, and the third is the one that decides it:
+
+1. The rank-1 form requires the fan patch to be a whole *side* of the
+   Cartesian box, because `L` must stay separable. A patch covering part of a
+   side needs the full capacitance matrix, rank = number of patch faces, which
+   is a research project.
+2. `1 - kappa d^T L^-1 d` is the quantity Hager's stability caveats are
+   about, and it approaches zero exactly where the fan is stiffest.
+3. The correction changes the answer the selector's agreement check compares.
+   That check (`pressure/mod.rs`) requires the direct backend and PBiCGStab
+   to agree to `1e-8`; a corrected direct solve that agrees is a *new* claim
+   needing its own gate, and shipping the correction without it would put a
+   second, differently-conditioned pressure solve behind a flag.
+
+A case naming the capacitance/Woodbury path gets a §13.4 error naming
+`pbicgstab`, `pcg` and `amgx`, saying that (S52.8) is what would make the
+direct path possible and that it is not implemented. Nothing is silently
+substituted; the fallback is chosen and printed.
+
+### 52.10 What is not modelled
+
+Swirl, the discharge jet profile, and blade passing. A pressure-jump fan gets
+the **flow rate** right and the **jet** wrong. For a CRAC discharging into a
+plenum that is fine and is the case this exists for. For an in-row cooler
+blowing directly into a cold aisle it is not, and the honest answer is a
+prescribed discharge profile on the patch — `flowRateInletVelocity`, which
+already exists — not a better fan curve. The report says which patches carry a
+curve and which carry a prescribed profile, so a reader can tell which of the
+two claims is being made.
+
+**The velocity side needs no new condition, but it is not the one the design
+note names, and this is a correction.** The note says
+`pressureInletOutletVelocity` (`BcKind` 12) is "exactly right — the flux sets
+the normal component on inflow". In *this* solver it is not.
+`field_setup` seeds kind 12's `refValue` from the interior velocity **once**,
+nothing refreshes it from the flux, and `momFluxIsPrescribed` treats any face
+with `fr >= 1` as a prescribed velocity — so an inflow face is pinned at
+whatever it was seeded with, which on a room starting from rest is **zero**,
+and the fan's pressure can move no air through it at all. Measured on
+`cases/coldAisle.dc.jsonc`: every inflow face of the floor tile carried
+exactly `0.0` flux, and the whole-boundary continuity residual sat at
+`5.7e-3` of the largest opening.
+
+The condition that *is* right is a plain **`zeroGradient` on `U`**, `fr = 0`.
+That makes `momFluxIsPrescribed` false, so
+`phi = phi_HbyA - rAU_f snGrad(p)` and **the pressure equation owns the
+flux** — which is the entire point of putting a fan or a jump on `p`. With it,
+the same case closes continuity to `4.2e-10` and the converged network
+reproduces its own closed form to 2 % (§52.12 Gate 52-E).
+
+The cost is real and is stated: on inflow the velocity is the extrapolated
+interior one, so the near-opening jet is wrong. That is the same limitation
+§53.6 records for a pressure-jump tile, for the same reason, and a case with
+a fan or a jump gets told.
+
+**The fan condition still lives entirely on `p`.**
+
+### 52.11 What must hold
+
+| Test | Expected |
+|---|---|
+| `S = 0` reproduces `fixedValue` | **bitwise**: `fr == 1.0`, `refValue == c`, `refGrad == 0.0`, and the assembled system (`diag`, `upper`, `lower`, `source`) is bit-for-bit that of an existing `fixedValue` patch. The solved field too, under an identical solve sequence — see §52.4 |
+| `S -> infinity` reproduces a prescribed flow | `Q -> Q*` to solver tolerance, through an `fr -> 0` face |
+| symmetry | `A_Gamma = A_Gamma^T` **exactly** under the `kappa*(D_f D_g)` association (§52.2); the naive `(kappa*D_f)*D_g` is one ulp asymmetric and the gate checks that it still is, so the note does not become decoration. `solver::matrix_is_symmetric` stays true with a fan patch |
+| the M-matrix property | `fr` in `(0, 1]`, so the diagonal gains `fr D_f >= 0`; the pressure solve takes **no more** iterations than the pure-Neumann case |
+| row sums, uniform patch | exact operator and lumped triple agree to round-off; the note's `beta` and (S52.10)'s agree to round-off and **not** to the bit (§52.3) |
+| row sums, non-uniform patch | agree to round-off, and the note's `1/(1 + S A rAU_f Delta_f)` does **not** — **142 % high on the worst row**, measured, and the gate fails if that ever stops being true |
+| the flow-rate identity (S52.12) | `Q_exact - Q_lumped == 0` in exact arithmetic; the f64 residual is reported |
+| the closed-form operating point | `Q* = Q_max/sqrt(1 + K Q_max^2/dp_max)` to `1e-10` relative |
+| the FDS cross-check | §52.12 Gate 52-B |
+| a non-monotone table | **refused**, naming the rising pair |
+| a `Q` table that is not strictly increasing | refused, naming the pair |
+| the Hermite curve is monotone | no `S < 0` anywhere between breakpoints of a monotone table, tested on a table a Catmull-Rom spline overshoots |
+| density and speed scaling | (S52.13) reproduced independently on the host |
+| a fan condition on a non-pressure field | refused, naming `p` |
+| the quadratic on the reverse branch | `S >= 0` for **every** `Q`, positive and negative — the even form gives `S < 0` and the gate checks that the odd form does not |
+| the curve's two tails | `S > 0` and growing in **both** directions; `dp` rises below shut-off and falls above free delivery |
+| the first-iterate seed | free delivery when there is no flux, the measured `Q` when there is |
+| the seed of `fr` | **1**, not 0 — a fan patch always pins the pressure level, and `Simple::initialise` reads `fr` before the model runs |
+| the velocity side | `zeroGradient`, not `pressureInletOutletVelocity` — §52.10. A rig with kind 12 on a fan patch must carry **zero** flux on inflow, which is what makes the correction a measurement |
+| the capacitance/Woodbury path | refused, naming the three iterative backends and (S52.8) |
+| the FFT fallback | `separable()` returns false **and names the face and its value fraction** |
+| `S = 0` does not cost the FFT path | `separable()` returns **true** with a flat curve |
+| determinism | two runs of the same fan case are **bitwise identical** |
+| every reduction | `solver::device_sum`; no f64 atomic anywhere in `cuda/fan.cu` |
+| the §13.4.1 pair tests | §55.6 |
+
+### 52.12 Validation
+
+**Gate 52-A — the closed-form operating point, exact.** A quadratic fan
+against a quadratic system has an exact intersection:
+
+```
+    dp_fan(Q) = dp_max [1 - (Q/Q_max)^2] ,   dp_sys(Q) = K Q^2
+    =>  Q* = Q_max / sqrt(1 + K Q_max^2/dp_max)                     (S52.15)
+```
+
+With FDS's own `FAN2` parameters (`dp_max = 3048 Pa`, `Q_max = 2.4094 m^3/s`)
+and `K = 400`:
+
+```
+    Q*     = 1.8152058157833744  m^3/s
+    dp_fan = 1317.9888614615143  Pa
+    dp_sys = 1317.9888614615143  Pa      <- they match; this is the point
+```
+
+The test **evaluates (S52.15) itself** rather than quoting the constant, and
+then requires the solver's converged operating point on a straight duct with a
+known loss coefficient to reproduce it to `1e-10` relative. This is a numerics
+gate, not a physics gate, and it needs no mesh larger than a few hundred cells.
+
+**Gate 52-B — FDS `fan_test` and `qfan_test`, public-domain reference
+numbers.** `reference/fds/Verification/HVAC/fan_test.fds` is two sealed
+compartments joined by two ducts: the first carries a quadratic fan
+(`MAX_FLOW = 0.16 m^3/s`, `MAX_PRESSURE = 10 Pa`) and **zero** loss, the
+second carries loss only. FDS's own `fan_test.csv` reports the steady state
+
+```
+    pres_1 = 4.51513 Pa    pres_2 = -4.51513 Pa    vflow = 0.0498253 m^3/s
+```
+
+With zero loss in the fan duct, the fan's rise must equal the compartment
+pressure difference exactly. Evaluating the quadratic curve at FDS's own flow
+rate,
+
+```
+    10 [1 - (0.0498253/0.16)^2] = 9.030250 Pa   vs   2 x 4.51513 = 9.03026 Pa
+```
+
+— agreement to **1.1e-6 relative**, all of FDS's published digits. The
+companion `qfan_test.csv` (`LOSS = 5,5` on both ducts, `HVAC_QFAN=T`) reports
+`vflow = 0.04911`, `pres = 2.2592`; the loss-only duct's own relation
+`dp = (1/2) rho K (Q/A)^2` with `rho = p M_a/(R T) = 1.199338 kg/m^3` at FDS's
+default 20 C and `M_a = 28.85034 g/mol` gives `4.519615 Pa` against FDS's
+`4.5184 Pa` — **2.7e-4 relative**. Both are computed live in the test from
+constants read out of the vendored case files; **no FDS source is read**, only
+its input decks and its published CSVs, which are data.
+
+The closed form for the whole loop, `Q = 0.0491559`, sits between the two FDS
+answers (`0.04911` and `0.0498253`) — the two differ from each other by 1.4 %
+because they use FDS's two different HVAC solvers on the same network, which
+is itself worth recording: the reference is not tighter than that.
+
+**Gate 52-C — the two endpoints.** `S = 0` bitwise against `fixedValue`;
+`S = 1e12` against a prescribed flow. Both are existing, already-tested
+conditions, so this is §22's "reproduces the simpler model" gate at both ends.
+
+**Gate 52-D — the rank-1 identity.** The exact operator (S52.8) built densely
+on the host, against the lumped triple (S52.11): symmetry exact, row sums
+(S52.9), the flow-rate identity (S52.12), and the two limits `S -> 0`,
+`S -> infinity`. Run on the **device-assembled matrix**, not only on a host
+transcription, so a kernel that disagrees with the algebra fails here.
+
+**Gate 52-E — the whole chain, against its own network closed form.**
+`cases/coldAisle.dc.jsonc` is a 4.8 x 2.4 x 3.0 m room with a raised-floor
+tile (`K = 873` over 11.52 m^2) against a 2 Pa plenum, a corridor grille
+(`openAreaRatio 0.06`, `K = 738.7`, over 7.2 m^2) at ambient, and a quadratic
+exhaust fan (`dp_max = 8 Pa`, `Q_max = 4 m^3/s`) on the ceiling. Solved, it
+gives
+
+```
+    floor  -1.390   corridor  -0.827   ceiling  +2.217   NET  4.2e-10
+    fan:  Q = 2.203 m^3/s,  dp = +5.56 Pa,  shaft power 19.8 W
+```
+
+and the hand-solved network — `dp_tile = (1/2) rho K (Q/A)^2` at each opening
+and `dp_fan(Q) = dp_max[1 - Q|Q|/Q_max^2]` at the fan — puts the room at
+`2 - 7.63 = -5.63 Pa` against the fan's `-5.56 Pa`, and predicts a corridor
+flow of `0.811` against the solver's `0.827`. **Two per cent on both**, on a
+network the solver was never told about: the fan curve, the two jump
+resistances, the pressure equation and continuity all have to be right
+together for that to come out. Whole-boundary continuity closes to `4.2e-10`
+of the largest opening, which is the hard half of the gate.
+
+**What is NOT run, and why.** The perforated-tile flow-split gate of §53.8 and
+the room-metric gate of §55.8 both want published data-centre CFD data.
+Wibron, Ljung & Lundström, *Energies* **12**(8) (2019) 1473,
+DOI `10.3390/en12081473`, is **CC-BY-4.0 — licence verified live through the
+Crossref REST API** — and publishes RCI and RTI for six containment
+configurations of a fully specified geometry. **Its full text could not be
+fetched from this environment**: MDPI returns HTTP 403 to the fetcher used
+here, the Internet Archive is unreachable from it, and the web-search budget
+for the session was already spent. What *was* recoverable is the abstract, via
+the Luleå University DiVA record (`diva2:1326523`), and §55.8 gates on the one
+quantitative relation it states. This is recorded rather than glossed: the
+data exists, it is openly licensed, and it was not reachable from here.
+
+---
+
+## 53. The porous jump — a resistive face
+
+Written from:
+
+* J. C. Ward, "Turbulent flow in porous media", *J. Hydraulics Division, ASCE*
+  **90**(5) (1964) 1–12. DOI `10.1061/JYCEAJ.0001096` — already the cited
+  basis of §18's `SourceTerm::PorousDrag`. The jump is that same
+  Darcy–Forchheimer law integrated through a slab instead of over a cell.
+* I. E. Idelchik, *Handbook of Hydraulic Resistance*, 4th ed., Begell House
+  (2007), ISBN 978-1-56700-251-5, Diagrams 8-1 to 8-6 — perforated plates and
+  screens, the source of `K(sigma)`. **Not opened for this section**; the
+  thin-plate form of (S53.6) is the one published in the open literature and
+  §53.7 gates it against its own limits and against the two values the design
+  note quotes, one of which it contradicts.
+* K. C. Karki, A. Radmehr, S. V. Patankar, "Use of computational fluid
+  dynamics for calculating flow rates through perforated tiles in raised-floor
+  data centers", *HVAC&R Research* **9**(2) (2003) 153–166.
+  DOI `10.1080/10789669.2003.10391062` — the per-tile flow-rate validation,
+  and the reverse-flow phenomenon of §53.8.
+* K. C. Karki, S. V. Patankar, "Airflow distribution through perforated tiles
+  in raised-floor data centers", *Building and Environment* **41**(6) (2006)
+  734–744. DOI `10.1016/j.buildenv.2005.03.005`.
+* W. A. Abdelmaksoud, H. E. Khalifa, T. Q. Dang, B. Elhadidi, R. R. Schmidt,
+  M. Iyengar, "Experimental and computational study of perforated floor tile
+  in data centers", *2010 12th IEEE ITherm* 1–10.
+  DOI `10.1109/ITHERM.2010.5501413` — the **measured vena contracta** a
+  pressure-jump model cannot produce (§53.6).
+* V. K. Arghode, Y. Joshi, "Modeling strategies for air flow through
+  perforated tiles in a data center", *IEEE Trans. CPMT* **3**(5) (2013)
+  800–810. DOI `10.1109/TCPMT.2013.2251058` — the direct comparison of
+  body-force / pressure-jump / momentum-source tile models, and the source of
+  §53.6's statement of what each is good for.
+* S. V. Patankar, "Airflow and cooling in a data center", *ASME J. Heat
+  Transfer* **132**(7) (2010) 073001. DOI `10.1115/1.4000703`.
+* ANSYS Fluent User's Guide, "Porous Jump Boundary Conditions" — the
+  `(alpha, C2, t_m)` parameterisation of (S53.1). **Documentation, not
+  source.**
+* ofgpu `SPEC-LIT.md` §5 (where `rAU_f` is built), §3.2 (`fvm_laplacian`,
+  called unmodified), §18 (the volumetric sibling), §52 (the same Robin
+  triple, with `S SIGMA_D -> R D_f`), §34 (the cyclic pairing an internal
+  baffle would need).
+
+No GPL-licensed source was consulted. OpenFOAM's `porousBafflePressure` and
+`explicitPorositySource` were **not** opened.
+
+### 53.1 The jump condition
+
+A thin resistive sheet coincident with a mesh face. Integrating the
+Darcy–Forchheimer momentum sink through a slab of thickness `t_m`:
+
+```
+    dp_jump = -( mu/alpha + C2 (1/2) rho |u_n| ) t_m u_n      [Pa]   (S53.1)
+```
+
+Kinematic, and expressed on the face flux `phi_f = u_n a_f`:
+
+```
+    dp_kin = -R(|phi_f|) phi_f ,
+    R = ( r_visc + r_inert |phi_f|/a_f ) / a_f ,
+    r_visc  = nu t_m/alpha      [m/s]                                (S53.2)
+    r_inert = (1/2) C2 t_m      [-]
+```
+
+`R >= 0` always, which is what makes §53.2 unconditionally stable — by exactly
+the argument §18 already makes for the volumetric drag, and with no sign
+branch for the same reason.
+
+For a perforated tile the practical parameterisation is not `(alpha, C2, t_m)`
+but a single loss coefficient on the **approach** velocity,
+
+```
+    dp = K (1/2) rho u_n |u_n|   <=>   r_inert = K/2 ,  r_visc = 0   (S53.3)
+```
+
+so the two forms are one, and the case may write either.
+
+### 53.2 The internal face: three arrays divided by one number
+
+The jump reduces the pressure difference available to drive the flux. The
+solver's own face relation is `phi_f = phi_HbyA,f - D_f (p_N - p_P)`; with a
+resistance in the face,
+
+```
+    phi_f = phi_HbyA,f - D_f (p_N - p_P + R phi_f)
+    =>  phi_f (1 + R D_f) = phi_HbyA,f - D_f (p_N - p_P)
+    =>  phi_f = phi_HbyA,f/(1 + R D_f) - D_eff (p_N - p_P) ,
+        D_eff = D_f/(1 + R D_f)                                      (S53.4)
+```
+
+**So a porous jump is exactly a per-face division by `(1 + R D_f)` of the
+three quantities that carry `rAU_f` into the pressure equation**, and nothing
+else changes:
+
+```
+    rauf_mag_sf[f] <- rauf_mag_sf[f] / (1 + R D_f)      the matrix coefficient
+    rauf[f]        <- rauf[f]        / (1 + R D_f)      the flux corrector
+    phi_hbya[f]    <- phi_hbya[f]    / (1 + R D_f)      the right-hand side
+```
+
+with `D_f = rauf_mag_sf[f] Delta_f` evaluated from the **unmodified** array,
+once, in one kernel that writes all three. The design note names only the
+first; leaving `phi_HbyA` alone would mean the sheet resisted the pressure
+gradient but not the momentum flux through it, which is not (S53.4) and which
+shows up as a flow rate too high by exactly the ratio the omitted division
+would have removed.
+
+`fvm_laplacian` is called **unmodified**. `upper[f]` and `lower[f]` both get
+the same reduced coefficient, so **symmetry is preserved identically**.
+`R >= 0` gives `D_eff` in `(0, D_f]`, so the matrix stays an M-matrix for
+*any* resistance, including infinite — which gives a wall.
+
+The Forchheimer half makes `R` depend on `|phi_f|`, so `R` is evaluated from
+the previous iterate: a Picard linearisation, updated in the same pass that
+rewrites the fan triple, and under-relaxed by the same `alpha_fan` when the
+case asks.
+
+**`R = 0` is bitwise inert.** `x/(1 + 0*D) = x/1.0 = x` exactly, for all three
+arrays. A jump list with zero resistance leaves the pressure equation
+bit-for-bit unchanged, which is the §22 gate for this half of the section.
+
+### 53.3 The boundary face: the same triple as §52
+
+Where the plenum is not meshed — a raised floor modelled as a room only, which
+is the case this half exists for — the same algebra with `p_N` replaced by a
+prescribed plenum pressure lands as a Robin triple:
+
+```
+    beta = R D_f ,   fr = 1/(1 + beta) ,   refValue = p_plenum ,
+    refGrad = 0                                                      (S53.5)
+```
+
+and **only** the boundary `phi_HbyA` divided by the same `(1 + R D_f)`. Then
+`phi_f = phi_HbyA,f/(1+beta) - D_eff (p_plenum - p_P)`, which is (S53.4) with
+the plenum on the far side.
+
+**`bGammaMagSf` and `rAU_b` are NOT divided here, and that is the whole
+difference from §53.2.** At a boundary the resistance is carried by `fr`, and
+`fr` is already a factor in both places the coefficient reaches: the assembly
+forms `bGammaMagSf * bDeltaCoeffs * fr` and the flux corrector forms
+`rAU_b |Sf| fr Delta`. Dividing the coefficient as well applies
+`1/(1 + R D_f)` **twice** and gives an effective conductance of
+`D_f/(1 + R D_f)^2` — a tile more restrictive than the case asked for, by
+exactly the factor `1 + R D_f`. An early draft did that. §53.7's series-law
+gate for the **boundary** form is what catches it; the gate for the internal
+form cannot, because there `fr` does not exist and all three arrays genuinely
+must be divided. This is **the same shape as §52's fan triple with
+`S SIGMA_D -> R D_f`**: one kernel, two entry points, and it is worth building
+as one thing. `R = 0` gives `fr = 1.0` exactly — a plain `fixedValue` at
+`p_plenum`, bitwise.
+
+### 53.4 Two parameterisations of a tile, and one contradiction recorded
+
+For a thin perforated plate of open-area ratio `sigma`, referred to the
+approach velocity, the published thin-plate form is
+
+```
+    K(sigma) = [ 0.707 (1-sigma)^0.375 + (1-sigma) ]^2 / sigma^2     (S53.6)
+```
+
+Evaluated here:
+
+| `sigma` | 0.25 | 0.50 | 0.56 | 0.75 | 0.90 |
+|---|---|---|---|---|---|
+| `K` | **30.68** | 4.370 | **2.937** | 0.799 | 0.196 |
+
+The design note quotes "`K ~= 30` at `sigma = 0.25`" — reproduced, `30.68` —
+and "`K ~= 4` at `sigma = 0.56`", which (S53.6) **contradicts**: it gives
+`2.94` there, and `4.37` at `sigma = 0.50`. The note's second value looks like
+it belongs to a different open-area ratio. (S53.6) is gated on its two limits
+instead of on either quoted number — `K -> 0` as `sigma -> 1` and
+`K -> infinity` as `sigma -> 0`, both exactly — and the case may always write
+`K` directly, which is what a tile datasheet gives and what avoids the
+question. A case that writes `openAreaRatio` gets `K` **printed**, so the
+conversion is never invisible.
+
+### 53.5 The topology, named and refused
+
+An internal jump on an **ordinary internal face** needs no new topology at
+all: (S53.4) is a statement about the face's pressure–flux relation, and every
+internal face already has one. Scalars (`T`, `Y_v`) stay continuous across it,
+which is right for a perforated tile — air passes through carrying its
+temperature and humidity with it.
+
+A jump across which the *scalars* must also jump needs a **baffle**: two
+coincident boundary faces with `b_nbr_cell` pointing at each other, a
+zero-separation cyclic pair. `io/polymesh.rs` builds those from a `cyclic`
+patch and its `neighbourPatch` face by face, so a mesh that arrives with the
+pair works today. **Splitting an existing internal face into a baffle pair
+inside `ofgpu` is a topology mutation and is refused by name.** A case asking
+for it gets a §13.4 error naming the two routes that exist: emit the cyclic
+pair at mesh-generation time, or use the boundary form of §53.3 with the
+plenum as a separate region. Nothing is silently substituted, and in
+particular a request for a baffle is **not** quietly answered with an internal
+face — the two differ in exactly what the requester was asking about.
+
+### 53.6 What the model gets wrong, said in the report
+
+A pure pressure-jump tile gets the **flow rate** right and the **jet** wrong.
+That is the whole content of the perforated-tile literature: Abdelmaksoud et
+al. (2010) measured the flow above a tile and showed the vena contracta and the
+off-tile jet that a body-force model cannot produce; Arghode & Joshi (2013)
+compared the modelling strategies and concluded that a momentum-source or
+prescribed-velocity model is needed when the *jet* matters, while a
+pressure-jump model is adequate when only the *tile flow split* matters.
+
+**The solver prints this on every run that has a jump**, naming the patches or
+face count concerned, so a customer cannot read a cold-aisle velocity field off
+a pressure-jump tile without being told not to. Gating on matching
+Abdelmaksoud's profiles is not attempted; gating on *reporting the
+discrepancy* is, and §53.8 tests the report.
+
+### 53.7 What must hold
+
+| Test | Expected |
+|---|---|
+| `R = 0` | all three arrays **bitwise unchanged**; the solved field bit-for-bit the no-jump one |
+| `R -> infinity` | the face carries zero flux — a wall — and the matrix stays positive-definite |
+| resistances in series | a 1-D chain with a jump on face `j` delivers `Q = dp/(SUM_i 1/D_i + R)` to round-off, **one assembly and one solve** |
+| symmetry | `upper[f] == lower[f]` on a jump face, and `solver::matrix_is_symmetric` stays true |
+| M-matrix | `D_eff` in `(0, D_f]` for every `R >= 0`, including `R` at the largest finite double |
+| the boundary form | the same series law with the plenum on the far side, and `fr = 1.0` exactly at `R = 0`. **This is the gate that caught the double application of §53.3**, and it is separate from the internal one for that reason |
+| the boundary form does NOT scale its coefficient | `bGammaMagSf` and `rAU_b` come out of the jump kernel **bitwise unchanged**; only `phi_HbyA` is divided |
+| the Forchheimer half | `R` grows linearly with `\|phi_f\|/a_f`, and the converged `dp` matches `K (1/2) u_n\|u_n\|` |
+| both parameterisations | `(alpha, C2, t_m)` and `K` give the same `R` when `C2 t_m = K` and `alpha -> infinity` |
+| `K(sigma)` limits | `K -> 0` as `sigma -> 1`, `K -> infinity` as `sigma -> 0`; `K(0.25) = 30.68` |
+| reverse flow | a jump face reverses sign when the pressure difference does — **the property a prescribed-flow tile lacks by construction**, and the reason §53.8's gate is what it is |
+| a baffle insertion request | **refused** by name, listing the two routes that exist |
+| a jump condition on a non-pressure field | refused, naming `p` |
+| the near-tile velocity caveat | **printed**, and the print is tested |
+| the cuFFT backend | disabled with a named reason on a mesh carrying a jump, because the pressure coefficient stops being constant |
+| determinism | two runs bitwise identical; no f64 atomic in the jump kernel |
+
+### 53.8 Validation
+
+**Gate 53-A — resistances in series, exact.** A 1-D chain of `N` cells,
+Dirichlet at both ends, pure Laplacian: the flux is `dp/SUM_i (1/D_i)`.
+Inserting a jump of resistance `R` on face `j` replaces `1/D_j` by
+`1/D_j + R`, so
+
+```
+    Q = dp / ( SUM_i 1/D_i + R )                                     (S53.7)
+```
+
+exactly, for every `R >= 0`. Checked on **one assembly and one solve**, at
+`R = 0` (bitwise against no jump), at `R` comparable to the chain resistance,
+and at `R = 1e12` (a wall).
+
+**Gate 53-B — the tile flow split, and the sign change.** The headline gate
+the design note names is Karki, Radmehr & Patankar (2003): per-tile volumetric
+flow rates against measurement across a tile row, for plenum depths in
+0.3–0.9 m, within 10 %; and — "the real test" — **the model must reproduce
+reverse flow through the tiles nearest the CRAC at shallow plenum depth**,
+which a prescribed-flow tile model cannot produce by construction.
+
+**The paper's data could not be fetched from this environment** (Taylor &
+Francis, no open-access reproduction reachable, web-search budget spent), so
+the *quantitative* half is not run and says so. The *structural* half is run
+and is the one that decides whether the feature is real: a meshed under-floor
+plenum with a fan at one end and a row of jump-tiles along it, in which
+
+* total tile flow equals fan flow to round-off (conservation);
+* the tile flow distribution is **non-uniform** — a prescribed-flow model
+  would give a uniform one by construction;
+* the sign of an individual tile's flow follows the sign of its own local
+  plenum-to-room pressure difference, tile by tile;
+* and, at high enough plenum velocity, at least one tile flows **backwards**.
+
+The last is reported as measured, whichever way it comes out: it depends on
+the plenum's dynamic-pressure recovery being resolved, and a mesh too coarse
+to resolve it will not produce it. §53.8's output states the plenum condition
+at which the sign changed, or that it did not change over the range swept.
+
+**Gate 53-C — the jet caveat is reported, not gated.** Abdelmaksoud et al.
+(2010) measured velocity profiles above a perforated tile that a pressure-jump
+model cannot reproduce. The gate is on the **report**: a run with a jump must
+print the caveat. A model that quietly hands a customer a near-tile velocity
+field is the failure mode; the test is that it cannot.
+
+---
+
+## 54. Humidity, psychrometrics and moist-air buoyancy
+
+Written from:
+
+* ASHRAE, *ASHRAE Handbook—Fundamentals*, Chapter 1, "Psychrometrics",
+  ASHRAE (2021) — the equation numbering of §54.2 is this chapter's, and its
+  Table 2 is the external comparison of §54.8.
+* R. W. Hyland, A. Wexler, "Formulations for the thermodynamic properties of
+  the saturated phases of H2O from 173.15 K to 473.15 K", *ASHRAE
+  Transactions* **89**(2A) (1983) 500–519 — the `C1`–`C13` coefficients of
+  (S54.3).
+* S. Herrmann, H.-J. Kretzschmar, D. P. Gatley, "Thermodynamic properties of
+  real moist air, dry air, steam, water, and ice (RP-1485)", *HVAC&R Research*
+  **15**(5) (2009) 961–986. DOI `10.1080/10789669.2009.10390874` — the
+  real-gas formulation and the enhancement factor that makes the ideal
+  relations 0.44 % low in `W_s` at 25 C (§54.3). **Named and not
+  implemented.**
+* D. P. Gatley, S. Herrmann, H.-J. Kretzschmar, "A twenty-first century molar
+  mass for dry air", *HVAC&R Research* **14**(5) (2008) 655–662.
+  DOI `10.1080/10789669.2008.10391032` — where `M_a = 28.966 g/mol` and hence
+  `eps = 0.621945` come from.
+* EnergyPlus, `src/EnergyPlus/Psychrometrics.hh` — **BSD-3-clause style**
+  (UIUC / UC Regents / DOE; `LICENSE.txt` fetched and read). Taken from it:
+  the **naming convention**, which HVAC engineers already read
+  (`PsyWFnTdbRhPb`, `PsyHFnTdbW`, `PsyTdpFnWPb`, `PsyTwbFnTdbWPb` —
+  "property, from these arguments"), and the *negative* lesson that its
+  `PsyPsatFnTemp` / `PsyTsatFnPb` caches and its 1651-entry `Tsat(p)` spline
+  table exist because those functions are hot on a CPU. **On a GPU the answer
+  is the other way round: the polynomial is cheaper than the table lookup, so
+  this module computes and does not cache.** Its wet-bulb function is an
+  iterative solve, which is the confirmation §54.5 needed.
+* CoolProp — **MIT** (`LICENSE` fetched and read). `HumidAirProp` implements
+  RP-1485 real moist air including the enhancement factor: the right reference
+  to check against if the 0.44 % bias ever needs removing, and not something
+  to port — it is a host-side equation-of-state library, not a kernel.
+* FDS 6, `Source/func.f90` — **US public domain**. Its
+  `WATER_VAPOR_MASS_FRACTION` and `RELATIVE_HUMIDITY` are built on a
+  Clausius–Clapeyron integral with a tabulated `H_V_H2O` rather than the
+  ASHRAE polynomial. Simpler than ASHRAE and adequate for fire; **deliberately
+  not used here**, because a data-centre customer checks the number against a
+  psychrometric chart.
+* ofgpu `SPEC-LIT.md` §19 (species transport, which carries `Y_v` verbatim),
+  §9 (buoyancy, whose kernel §54.4 leaves untouched), §25 (the low-Mach
+  divergence constraint and the `p0` ODE, whose molar mass §54.4 discusses),
+  §26 (`energy.rs`, where `p_atm` lives), §13.4.
+
+No GPL-licensed source was consulted.
+
+### 54.1 Humidity is one more species
+
+Water vapour is a transported scalar and `crate::species` already solves
+exactly this shape (§19):
+
+```
+    dY_v/dt + div(phi Y_v) - div(D_eff grad Y_v) = S_v
+    D_eff = D_v + nu_t/Sc_t ,  D_v = 2.5e-5 m^2/s (H2O in air, 25 C, 1 atm),
+                               Sc_t ~= 0.7
+    0 <= Y_v <= 1                                                    (S54.1)
+```
+
+`Y_v` is the water-vapour **mass fraction** of moist air, i.e. the specific
+humidity. `S_v` is zero everywhere except at a humidifier or a dehumidifying
+coil, where it is a §18 `CellZone` explicit source in kg/(m^3 s) divided by
+`rho` — the same unit conversion `heat_release_source` already does in one
+place. There is no new transport equation and no new solver: humidity costs
+**one extra sparse solve per outer iteration**, exactly the cost of one more
+species.
+
+### 54.2 The psychrometric relations
+
+Pure algebra on `(T, Y_v, p_atm)`, cell by cell, closed form, one thread per
+cell. `eps = M_w/M_a = 18.015268/28.966 = 0.621945`.
+
+```
+    W    = Y_v/(1 - Y_v)          kg vapour / kg DRY air             (S54.2a)
+    Y_v  = W/(1 + W)
+    p_w  = p_atm W/(eps + W)                                         (S54.2b)
+```
+
+Saturation pressure — Hyland & Wexler (1983), ASHRAE eq. (5)/(6), `T` in K,
+`p_ws` in Pa:
+
+```
+    T < 273.15 K   (over ice)
+      ln p_ws = C1/T + C2 + C3 T + C4 T^2 + C5 T^3 + C6 T^4 + C7 ln T
+        C1 = -5.6745359e3   C2 = 6.3925247     C3 = -9.677843e-3
+        C4 =  6.2215701e-7  C5 = 2.0747825e-9  C6 = -9.484024e-13
+        C7 =  4.1635019
+    T >= 273.15 K  (over liquid water)
+      ln p_ws = C8/T + C9 + C10 T + C11 T^2 + C12 T^3 + C13 ln T
+        C8  = -5.8002206e3   C9  = 1.3914993     C10 = -4.8640239e-2
+        C11 =  4.1764768e-5  C12 = -1.4452093e-8 C13 = 6.5459673     (S54.3)
+```
+
+and then
+
+```
+    rh   = p_w/p_ws(T)
+    W_s  = eps p_ws/(p_atm - p_ws)                                   (S54.4)
+    h    = 1.006 t + W (2501 + 1.86 t)    kJ/kg dry air, t = T - 273.15
+    v    = 0.287042 T (1 + 1.607858 W)/p_kPa    m^3/kg dry air
+```
+
+Dew point (ASHRAE eq. 37/38, `p_w` in **kPa**, `a = ln p_w`):
+
+```
+    0 <= t_d <= 93 C : t_d = 6.54 + 14.526 a + 0.7389 a^2 + 0.09486 a^3
+                             + 0.4569 p_w^0.1984
+    t_d < 0 C        : t_d = 6.09 + 12.608 a + 0.4959 a^2            (S54.5)
+```
+
+Wet bulb `t*` is the root of
+
+```
+    W = [ (2501 - 2.326 t*) W_s(t*) - 1.006 (t - t*) ]
+        / (2501 + 1.86 t - 4.186 t*)                                 (S54.6)
+```
+
+— see §54.5.
+
+### 54.3 The ideal-gas bias, quantified rather than hidden
+
+(S54.2)–(S54.5) are the **ideal-gas** psychrometrics. The ASHRAE tables
+include the real-gas enhancement factor `f_e(T, p) ~= 1.0044` at
+25 C / 101.325 kPa. Computing `W_s(25 C)` from (S54.4) gives **0.0200811
+kg/kg**; the ASHRAE Table 2 value is **~0.020169**. That is a **0.44 % low
+bias in `W_s`**, hence in relative humidity, and it grows with pressure and
+temperature.
+
+For a data centre (15–40 C, one atmosphere) 0.44 % is far inside any
+measurement uncertainty and inside the ASHRAE envelope margins, so this
+section uses the ideal relations **and the report prints the bias**.
+Herrmann, Kretzschmar & Gatley (2009), RP-1485, is the reference to move to if
+a customer ever needs better, and CoolProp's `HumidAirProp` (MIT) is the
+implementation to check against. **The ideal relations are not presented as
+the ASHRAE tables.** §54.8's gate is two-sided for exactly this reason: `1e-6`
+relative against the *formula* (a host-mirror test that catches a
+transcription error in the thirteen coefficients) and `0.5 %` absolute against
+the *table*, with the residual attributed to the missing enhancement factor
+and printed. Quietly widening one tolerance around a known bias is the failure
+mode this two-sided form exists to prevent.
+
+### 54.4 Virtual temperature, and why the default is unmoved by construction
+
+Moist air is **lighter** than dry air at the same `T` and `p`, because
+`M_w < M_a`. §9's buoyancy uses `b = g(T_ref/T - 1)`, exact for an ideal gas
+of **fixed** molar mass. With humidity the composition is no longer fixed.
+The correction is exact, not a linearisation:
+
+```
+    T_v = T (1 + (1/eps - 1) Y_v) = T (1 + 0.607858 Y_v)
+    b   = g (T_v,ref/T_v - 1)                                        (S54.7)
+```
+
+*Why it is exact.* For mass fractions `Y_v` water and `1 - Y_v` dry air,
+`1/M_mix = Y_v/M_w + (1-Y_v)/M_a`, so `M_a/M_mix = 1 + (1/eps - 1) Y_v`
+**identically**. Then
+
+```
+    rho_ref/rho = (M_ref/M_mix)(T/T_ref) = T_v/T_v,ref
+```
+
+exactly — the same identity §26 already relies on, with `T` replaced by `T_v`.
+The existing test `buoyancy_matches_the_density_ratio_at_any_deltat`
+generalises to it directly.
+
+**"Exactly" is a statement about the ratio, and it is limited by one
+constant's last digit.** `eps` is ASHRAE's published `0.621945`, a six-figure
+rounding of `M_w/M_a = 0.6219453152` from Gatley et al. (2008)'s own molar
+masses. That rounding is `5.07e-7` relative, and it is the **entire** residual
+of the identity: checked against `rho = p M_mix/(R T)` built from the
+published masses, `T_v/T_v,ref` and `rho_ref/rho` agree to `3.2e-8` (the
+`5.07e-7` weighted down by `Y_v`), and rebuilt from masses *consistent* with
+the rounded `eps` they agree to round-off. §54.8 Gate 54-D checks both halves,
+because "exact" and "exact to 3e-8 because of a published constant's sixth
+digit" are different statements and only one of them is true.
+
+*Magnitude.* At 25 C, going from `rh = 20 %` to `80 %`: `Y_v` goes
+`0.003900 -> 0.015711`, so `dY_v = 0.011811` and `dT_v = 2.141 K` —
+**equivalent to a 2.1 K temperature difference**. In a room whose design `dT`
+across a rack is 11–15 K, that is a 15–20 % effect on the buoyancy of a
+humidified plume. Not negligible; not dominant.
+
+**How the default stays bitwise identical, by construction rather than by
+argument.** `momentum::Momentum::update_buoyancy(gpu, t, u)` already takes the
+temperature field as an argument. The virtual temperature is computed into a
+**separate field** and that field is handed to the same, unmodified function.
+Consequences, in the order they matter:
+
+1. **`src/momentum.rs`'s buoyancy path is not modified at all.** There is no
+   new branch, no new kernel argument, nothing to regress. The default is
+   unmoved because nothing on the default path changed — the same way §43's
+   extinction became a rate mask upstream of an untouched `cmbReact`.
+2. A driver that never builds a humidity field never calls the virtual-
+   temperature kernel: it passes `T` exactly as it always did.
+3. Where the kernel *is* called with `Y_v == 0` everywhere, it computes
+   `T (1.0 + c*0.0) = T*1.0 = T` — **bitwise**, because multiplication by
+   `1.0` is exact in IEEE 754.
+
+**`GasProperties::w` stays a scalar.** Humidity makes the mixture molar mass a
+*field*, and §26 uses `w` for `rho = p0/(R_s T)` in the divergence constraint
+and the `p0` ODE as well as for buoyancy. For a data centre at 20–40 C and
+`Y_v < 0.03` the effect on `rho` is under 2 % and on `(div u)_target` less
+still, so `T_v` is used there too rather than making `w` a field. **This is
+said in the code and in the report, not left implicit**: a case whose `Y_v`
+exceeds 0.05 anywhere gets a printed warning naming the assumption and the
+maximum `Y_v` reached.
+
+### 54.5 Wet bulb: out of the loop, and why
+
+(S54.6) is a scalar root-find per cell. It is embarrassingly parallel, but the
+*iteration count* varies per cell, which is warp divergence and — worse — makes
+the kernel's trip count **data-dependent**, so it is not CUDA-Graph
+capturable. The `report_continuity` flag already documents this constraint for
+the flow solver and the same rule binds here.
+
+**Wet bulb is a reporting quantity; nothing in the physics needs it.** It is
+therefore computed **on the host, in the report, from downloaded fields**, by
+a Newton iteration with a convergence test and a named error if it fails —
+which a host function may have and a captured kernel may not. A case asking
+for wet bulb as an in-loop field gets a §13.4 error naming the report and
+saying why: the alternative, a fixed 3-step Newton from
+`t*_0 = t_d + (t-t_d)/3`, is accurate to about 0.3 K over the data-centre
+range, and 0.3 K is not accurate enough for a number a customer reads off a
+chart.
+
+**Field-level condensation (fog) is refused by name.** A saturation-constrained
+source with its own iteration is a different model, it is not needed for this
+market, and a `Y_v` that exceeds `Y_v,sat` is *reported* — with the cell count
+and the worst supersaturation — rather than silently clipped or silently
+condensed.
+
+### 54.6 What a humid boundary says
+
+| condition (field) | `fr` | `refValue` | `refGrad` | note |
+|---|---|---|---|---|
+| `humidityInlet` (`Y_v`) | reuse `InletOutlet` (kind 8) | `Y_v(T_supply, rh_supply)` | `0` | the value is set from (S54.2)/(S54.4) **at setup**, on the host, and printed |
+| coil surface (`Y_v`) | `1` | `Y_v,sat(T_coil)` | `0` | saturated air at the coil face — the simplest honest dehumidification model, and it is labelled as such |
+| everything else | `zeroGradient` | – | – | a dry wall neither adds nor removes vapour |
+
+No new `BcKind` is needed on `Y_v`: every one of these is a condition §4
+already carries. What is new is that a case may write `rh` and a temperature
+and have the solver convert — and that conversion is **printed**, because a
+silent psychrometric conversion is a number a customer cannot check.
+
+### 54.7 What must hold
+
+| Test | Expected |
+|---|---|
+| host mirror | the device kernel and the host function agree to `1e-14` relative on every one of `p_ws`, `W`, `Y_v`, `rh`, `W_s`, `h`, `v`, `t_d` |
+| `p_ws` against the formula | `1e-6` relative, evaluating (S54.3) independently — a transcription error in the thirteen coefficients fails here |
+| `p_ws(0 C)` | `611.213 Pa` (ASHRAE: 0.6112 kPa) |
+| `p_ws(25 C)` | `3169.216 Pa` (ASHRAE: 3.1690 kPa) |
+| `p_ws(50 C)` | `12349.856 Pa` (ASHRAE: 12.3499 kPa) |
+| `p_ws(100 C)` | `101418.7 Pa` — reproduces IAPWS's 101.42 kPa, an **independent** check of the liquid branch against a source that is not ASHRAE |
+| the ice branch | `p_ws(-20 C) = 103.26 Pa`, and the two branches meet at 273.15 K |
+| `W_s(25 C)` ideal | `0.0200811`, `0.44 %` below the table's `0.020169`, **and the gap is printed and attributed** |
+| `W(25 C, 50 % rh)` | `0.0098810` |
+| `h(25 C, 50 % rh)` | `50.322 kJ/kg` dry air (table `~50.4`) |
+| `v(25 C, 50 % rh)` | `0.858043 m^3/kg` dry air (table `~0.8586`) |
+| `t_d(25 C, 50 % rh)` | `13.893 C` (table `~13.85`) |
+| `W <-> Y_v` round trip | exact to round-off both ways |
+| `rh = 1` | `W == W_s` to round-off, at every temperature in 5–45 C |
+| virtual temperature at `Y_v = 0` | `T_v == T` **bitwise** |
+| buoyancy with `Y_v = 0` | the buoyancy flux is **bit-for-bit** the dry one |
+| (S54.7) against the density ratio | `T_v/T_v,ref == rho_ref/rho` to **round-off** with masses consistent with `eps`, and to `3.2e-8` with the published masses — the gap attributed to `eps`'s sixth digit, not tolerated |
+| the 2.1 K figure | reproduced from the formulas, not quoted |
+| humidity transport | `Y_v` stays in `[0,1]`; the species machinery is called unmodified |
+| wet bulb in the loop | **refused** by name, pointing at the report |
+| fog / condensation | **refused** by name; supersaturation reported with a cell count |
+| `Y_v > 0.05` | the fixed-molar-mass warning fires, naming the maximum reached |
+| `src/momentum.rs` | **unmodified** on the buoyancy path — the diff is the proof |
+
+### 54.8 Validation
+
+**Gate 54-A — the thirteen coefficients, against the formula.** The host
+mirror evaluates (S54.3) from its own transcription of the coefficients and
+compares against the module's; `1e-6` relative catches a digit. This is the
+`reference.rs` pattern and it is the gate that matters most, because every
+other psychrometric quantity is downstream of `p_ws`.
+
+**Gate 54-B — ASHRAE Handbook—Fundamentals (2021) Ch. 1, Table 2, at
+101.325 kPa.** The eight quantities in §54.7's table, at `0.5 %` absolute,
+with the `W_s` residual attributed explicitly to the missing enhancement
+factor and **printed**. The 0.44 % gap is a known, quantified, documented bias
+— not a bug, and not something to quietly widen a tolerance around.
+
+**Gate 54-C — IAPWS at the boiling point, independent of ASHRAE.**
+`p_ws(100 C) = 101418.7 Pa` reproduces the IAPWS value 101.42 kPa. This is the
+one psychrometric check in the section whose reference is not ASHRAE, which is
+what makes it worth having: a systematic error in the ASHRAE transcription
+would pass Gate 54-B's table comparison only if it also passed this one.
+
+**Gate 54-D — buoyancy, exact.** `T_v/T_v,ref = rho_ref/rho` for the ideal
+mixture, checked directly against `rho = p M_mix/(R T)` computed from the mole
+fractions, over `T` in 283–313 K and `rh` in 0–100 %. And the `Y_v = 0`
+bitwise gate, which is what makes "the default is unmoved" a measurement.
+
+---
+
+## 55. The data-centre metrics, and what a case says
+
+Written from:
+
+* M. K. Herrlin, "Rack cooling effectiveness in data centers and telecom
+  central offices: the Rack Cooling Index (RCI)", *ASHRAE Transactions*
+  **111**(2) (2005) 725–731 — RCI. *(ASHRAE Transactions of this vintage
+  carries no DOI; stable record
+  `https://www.semanticscholar.org/paper/99b942df4aa448a1e06f77d36b48d5d52a40c6e0`.)*
+* M. K. Herrlin, "Airflow and cooling performance of data centers: two
+  performance metrics", *ASHRAE Transactions* **114**(2) (2008) 182–187 —
+  RTI. *(No DOI; same caveat.)*
+* R. K. Sharma, C. E. Bash, C. D. Patel, "Dimensionless parameters for
+  evaluation of thermal design and performance of large-scale data centers",
+  AIAA 2002-3091 (2002). DOI `10.2514/6.2002-3091` — SHI and RHI, the
+  original.
+* ASHRAE Technical Committee 9.9, *Thermal Guidelines for Data Processing
+  Environments*, 5th ed., ASHRAE (2021), ISBN 978-1-947192-90-4 — the Class
+  A1–A4 **recommended** (18–27 C) and **allowable** envelopes RCI is measured
+  against.
+* E. Wibron, A.-L. Ljung, T. S. Lundström, *Energies* **12**(8) (2019) 1473.
+  DOI `10.3390/en12081473` — **CC-BY-4.0, licence verified live via the
+  Crossref REST API**; publishes RCI and RTI for six containment
+  configurations. **Full text not reachable from this environment** (§52.12);
+  the abstract, recovered through the Luleå DiVA record `diva2:1326523`, is
+  what §55.8 gates on.
+* E. Wibron, A.-L. Ljung, T. S. Lundström, *Energies* **11**(3) (2018) 644.
+  DOI `10.3390/en11030644` — CC-BY, measured airflow in a real facility with a
+  turbulence-model comparison. Same reachability problem.
+* ISO/IEC 30134-2, *Data centres — Key performance indicators — Part 2: Power
+  usage effectiveness (PUE)*; European equivalent EN 50600-4-2; The Green
+  Grid, *PUE: A Comprehensive Examination of the Metric* (2012). **The current
+  edition was not verifiable from here** (the ISO catalogue returns HTTP 403),
+  so no standard number is printed in a report as if it had been checked —
+  see §55.4.
+* ofgpu `SPEC-LIT.md` §8.4 (the reduction), §18 (the heat-release zones that
+  are the denominator), §44 (the `output` block this extends), §52 (the fan
+  power), §54 (humidity, which the envelope also constrains).
+
+No GPL-licensed source was consulted.
+
+### 55.1 RCI — how far outside the envelope the rack inlets are
+
+Over `n` rack-inlet sample temperatures `T_x`, with the ASHRAE recommended
+range `[T_lo_rec, T_hi_rec] = [18, 27] C` and the class's allowable range
+`[T_lo_all, T_hi_all]`:
+
+```
+    RCI_HI = [ 1 - SUM_x max(0, T_x - T_hi_rec)
+                   / ((T_hi_all - T_hi_rec) n) ] x 100 %
+    RCI_LO = [ 1 - SUM_x max(0, T_lo_rec - T_x)
+                   / ((T_lo_rec - T_lo_all) n) ] x 100 %             (S55.1)
+```
+
+100 % means no inlet is outside the recommended range at all. The class is a
+**setting**: A1–A4 have different allowable envelopes (A1 15–32 C, A2
+10–35 C, A3 5–40 C, A4 5–45 C) and a case that names a class and gets A1's
+numbers is the §13.4.1 defect, so the class is read, the four temperatures are
+**printed**, and two cases differing only in the class must produce different
+indices.
+
+**The sample set is a setting too, and this is not a detail.** RCI is defined
+over *rack-inlet sample points*, and its value depends on which points those
+are. Two sample sets are offered and both are printed:
+
+| `samples` | what it is |
+|---|---|
+| `faces` | every rack-inlet face sample, unweighted — mesh-dependent, and the report says so |
+| `thirds` | three points per rack at 1/6, 1/2 and 5/6 of rack height, Herrlin's own convention — mesh-independent |
+
+A case that says nothing gets **`thirds`**, because that is the convention the
+index was defined with, and because a mesh-dependent index that silently
+changes when the mesh is refined is worse than one that is explicit about its
+sample set. `n` is reported either way.
+
+### 55.2 RTI — bypass and recirculation in one number
+
+```
+    RTI = (T_return - T_supply) / dT_equipment x 100 %               (S55.2)
+```
+
+(Herrlin 2008). `< 100 %` is bypass, `> 100 %` is recirculation, `= 100 %` is
+perfect air management. `T_return` and `T_supply` are **flux-weighted** patch
+means — `SUM |phi_f| T_f / SUM |phi_f|` — not area means: the return
+temperature that matters is the one the returning *air* carries, and an area
+mean over a patch with a non-uniform velocity profile is a different number.
+
+`dT_equipment` is the rise across the IT equipment. Where the racks are
+modelled as flow-through devices it is measured; where they are heat-release
+zones with a stated flow it is `Q_IT/(rho c_p mdot_IT)`. Which of the two was
+used is **printed**, because they are not the same measurement.
+
+**The identity that makes (S55.2) checkable.** At steady state with all the IT
+heat leaving through the CRAC return,
+
+```
+    RTI = mdot_IT / mdot_supply                                      (S55.3)
+```
+
+exactly: both numerator and denominator are the same heat divided by a mass
+flow. So **halving the supply flow exactly doubles RTI**, whatever the
+geometry, and that is a gate the solver can be held to without any external
+data (§55.8).
+
+### 55.3 SHI and RHI — where the cold air was spoiled
+
+```
+    SHI = dQ/(Q + dQ) ,     RHI = Q/(Q + dQ) = 1 - SHI
+    dQ = SUM_racks mdot c_p (T_in,rack - T_supply)     pre-heat of cold air
+    Q  = SUM_racks mdot c_p (T_out,rack - T_in,rack)   useful IT heat pickup
+                                                                     (S55.4)
+```
+
+(Sharma, Bash & Patel 2002). `SHI -> 0` is ideal. `SHI + RHI == 1` is an
+identity and is checked as one, not as an approximation: both are computed
+from the same two reductions, so the sum is `(dQ + Q)/(Q + dQ)`, exactly 1 in
+floating point as long as neither is formed twice. That is a constraint on the
+**implementation**, and §55.7 gates it.
+
+### 55.4 Fan power, and the PUE inputs — labelled as inputs
+
+PUE is a facility energy ratio and **CFD cannot compute it**. What the solver
+can and should report, honestly labelled as PUE *inputs*:
+
+```
+    W_fan = Q dp_fan(Q)/eta_total                                    (S55.5)
+```
+
+per fan at the converged operating point and summed — the number the fan-curve
+work of §52 exists to produce, and the part of PUE that layout changes
+actually move; the **total IT heat** as assembled from §18's `CellZone` heat
+releases, which is the denominator; and **the highest supply temperature at
+which `RCI_HI` stays at 100 %**, from a short parametric sweep. That last is
+the single most valuable number in a data-centre report, because supply
+temperature is what buys free-cooling hours and free-cooling hours are what
+move PUE.
+
+**No standard number is printed as if it had been checked.** The ISO/IEC
+30134-2 edition could not be verified from this environment, so the report
+names The Green Grid's 2012 white paper as the readable background, states the
+three quantities above as inputs, and does **not** compute a PUE. A solver
+that printed a PUE would be printing a facility number from a room model.
+
+### 55.5 The reductions
+
+Every metric is a sum of per-face or per-cell contributions:
+
+| metric | contribution | where |
+|---|---|---|
+| `RCI_HI`/`RCI_LO` | `max(0, T_x - T_hi_rec)` / `max(0, T_lo_rec - T_x)` | rack-inlet samples |
+| `RTI` | `\|phi_f\| T_f` and `\|phi_f\|` | supply and return patches |
+| `SHI`/`RHI` | `mdot_f c_p (T_f - T_supply)` and `mdot_f c_p dT_rack` | rack inlet/outlet patches |
+| `W_fan` | one scalar per fan | §52's operating point |
+| IT heat | `V_P q'''_P` | §18's zones |
+
+All of them go through `solver::device_sum` on a gathered contribution buffer,
+by §52.7's argument, unchanged. **No atomic, no order-dependent reduction, no
+new reduction kernel.**
+
+A "rack" whose faces are scattered across several patches would want a
+**segmented** reduction over a sorted index list — deterministic, but not
+`device_sum`'s shape. That is not built: a rack is a **contiguous face list**
+built once on the host at setup, and the reduction over it is `device_sum` on
+the gathered buffer exactly as a patch is. The list is sorted at setup so the
+gather order is fixed, which is the same determinism argument §2 makes for
+`build_cell_face_maps`. A case whose rack definition would need a segmented
+reduction is refused by name, with the contiguous-list alternative stated.
+
+### 55.6 The pair tests
+
+Every setting this tranche adds, with the two inputs that differ in one entry
+and the output that must differ:
+
+| setting | two cases differ in | required to differ |
+|---|---|---|
+| `fanCurve` `dp_max` | one number | the converged patch flow rate |
+| `fanCurve` `Q_max` | one number | the converged patch flow rate |
+| `fanCurve` table point | one number | the operating point and `S` |
+| `fanCurve` `type` (`quadratic` vs `table`) | one word | the operating point |
+| `ambientPressure` | one number | the patch face pressure |
+| `direction` (`inflow`/`outflow`) | one word | the **sign** of the patch flow |
+| `rhoCurve` | one number | the pressure rise, by exactly `rho/rho_curve` |
+| `speed` / `speedCurve` | one number | the pressure rise, by exactly `(N/N_curve)^2` |
+| `efficiency` | one number | the reported fan shaft power |
+| `fanRelaxation` | one number | the iterate history |
+| `porousJump` `K` | one number | the face flux |
+| `porousJump` `alpha` | one number | the face flux |
+| `porousJump` `C2` | one number | the face flux |
+| `porousJump` `thickness` | one number | the face flux |
+| `openAreaRatio` | one number | the derived `K` and the face flux |
+| `plenumPressure` | one number | the face flux |
+| humidity `Sc_t` | one number | the `Y_v` field |
+| humidity `D_v` | one number | the `Y_v` field |
+| inlet `rh` | one number | the inlet `Y_v` |
+| `virtualTemperature` on/off | one word | the buoyancy force |
+| `ashraeClass` (A1–A4) | one word | `RCI_LO` and `RCI_HI` |
+| `samples` (`faces`/`thirds`) | one word | `RCI` and the reported `n` |
+| `supplyTemperature` / `plenumTemperature` | one number | the inlet temperature, hence `RTI` and `SHI` |
+
+Each is a test that **fails by name** if the two runs agree. That is the
+§13.4.1 contract, and it matters more than any individual feature here: six
+instances of "a case could say it and the solver ignored it" have now been
+found in this project, and every one of them would have been caught by the
+corresponding pair test.
+
+### 55.7 What must hold
+
+| Test | Expected |
+|---|---|
+| `RCI_HI` at every inlet inside the recommended range | exactly `100 %` |
+| `RCI_HI` at every inlet exactly at `T_hi_all` | exactly `0 %` |
+| `RCI_HI` linearity | the index is exactly linear in a uniform inlet-temperature offset above `T_hi_rec` |
+| `RCI_LO` | the mirror of `RCI_HI` about the recommended band, on a mirrored field |
+| the class changes the answer | A1 and A4 allowable envelopes give different indices on the same field |
+| the sample set changes the answer | `faces` and `thirds` differ, and both report their own `n` |
+| `RTI = mdot_IT/mdot_supply` (S55.3) | to round-off on a constructed field where the heat balance closes |
+| halving the supply flow | exactly doubles `RTI` |
+| `SHI + RHI == 1` | **exactly**, in floating point |
+| `SHI = 0` | when every rack inlet is at `T_supply` — exactly |
+| `W_fan` | `Q dp/eta` reproduced independently on the host; `eta` outside `(0,1]` refused |
+| the IT heat total | equals the sum of §18's zone releases to round-off |
+| PUE | **not computed**; the three inputs are printed and labelled |
+| every reduction | `solver::device_sum`; no atomic |
+| determinism | two runs bitwise identical |
+| the pair tests of §55.6 | all of them, each failing by name |
+
+### 55.8 Validation
+
+**Gate 55-A — the identities, exact.** (S55.3), `SHI + RHI = 1`, `RCI = 100 %`
+inside the band, `RCI = 0 %` at the allowable limit, and the linearity of the
+index in a uniform offset. Every one of these is a closed form and each is
+checked against the formula rather than a stored number, so a transcription
+error fails rather than agrees.
+
+**Gate 55-B — the one external number that was reachable.** Wibron, Ljung &
+Lundström (2019), abstract: the RCI was 100 % for both the raised-floor and
+the hard-floor configuration at the design operating point, while the
+Return Temperature Index for the hard-floor cases was "around 40 %", rising to
+"over 80 %" when the supply flow was **decreased by 50 %**. That last is
+(S55.3) stated as an experiment: halving `mdot_supply` doubles `RTI`, and
+`2 x 40 % = 80 %`. The gate reproduces the doubling exactly on this solver's
+own field and reports the paper's two numbers beside it.
+
+**This is a thin gate and is labelled as one.** The paper's six-configuration
+RCI/RTI table — the ranking gate the design note asks for, "reproduce the
+ranking of all six configurations by `RCI_HI` exactly, and each metric within
+5 percentage points" — is **not run**, because the full text was not reachable
+from this environment even though it is CC-BY-4.0 (§52.12). What is run is
+every identity the metrics satisfy by construction, plus the one relation the
+abstract states. The honest summary is that **public data-centre CFD
+validation data is thin and what exists is mostly behind publisher walls**;
+the openly licensed exception that *was* usable is NIST's FDS HVAC
+verification suite, which validates the fan-curve algebra (§52.12 Gate 52-B)
+and nothing about room airflow.
+
+`ofgpu-validate` prints the omission on every run rather than leaving it
+silent.
+
+---
+
+## 56. Spalart-Allmaras, and the negative continuation
+
+**Spalart & Allmaras, *AIAA Paper* 92-0439 (1992)**, and *La Recherche
+Aerospatiale* 1 (1994) 5-21 - the original. The copy actually read, and the
+implementation reference: **Allmaras, Johnson & Spalart, "Modifications and
+Clarifications for the Implementation of the Spalart-Allmaras Turbulence
+Model", ICCFD7-1902 (2012)**,
+<https://www.iccfd.org/iccfd7/assets/pdf/papers/ICCFD7-1902_paper.pdf> - a
+freely distributed conference paper. Also read, and quoted here to the printed
+digit: **NASA / Turbulence Modeling Benchmarking Working Group, *Turbulence
+Modeling Resource - The Spalart-Allmaras Turbulence Model***,
+<https://tmbwg.github.io/turbmodels/spalart.html> - US government-authored
+DOCUMENTATION, not source. Background: **Rumsey & Spalart, *AIAA J.* 47
+(2009) 982-993** - why the free-stream `nu~/nu` matters; **Patankar,
+*Numerical Heat Transfer and Fluid Flow* (1980) S4.2** - the linearisation
+every source below is emitted through. No GPL-licensed source was consulted;
+OpenFOAM and SU2 were not opened, searched or quoted.
+
+One transport equation, for a working variable `nu~` that is **not** the eddy
+viscosity. It is the cheapest closure in this tree - one linear solve per
+outer iteration where S6.1 needs two - and it is the one model here whose wall
+condition is exact: `nu~ = 0` at a no-slip wall is a plain Dirichlet
+condition, with no `y+`-dependent blending and **no new `BcKind` of any kind**
+(S56.7).
+
+It is also the gateway to S57: DES97, DDES and IDDES are each one substituted
+length scale on top of this section, and nothing else.
+
+### 56.1 The equation
+
+```
+nu_t = nu~ f_v1 ,      f_v1 = chi^3/(chi^3 + c_v1^3) ,   chi = nu~/nu   (56.1)
+
+D nu~/Dt =  c_b1 (1 - f_t2) Stil nu~                         production
+          - ( c_w1 f_w - (c_b1/kappa^2) f_t2 ) (nu~/dtil)^2  destruction
+          + (1/sigma) [ div((nu + nu~) grad nu~)
+                        + c_b2 (grad nu~).(grad nu~) ]       diffusion   (56.2)
+```
+
+with
+
+```
+Stil  = Omega + Sbar ,     Sbar = (nu~/(kappa^2 d^2)) f_v2              (56.3)
+f_v2  = 1 - chi/(1 + chi f_v1)
+Omega = sqrt(2 W_ij W_ij)                     the VORTICITY magnitude
+
+r     = min( nu~/(Stil kappa^2 d^2) , r_lim ) ,   r_lim = 10            (56.4)
+g     = r + c_w2 (r^6 - r)
+f_w   = g [ (1 + c_w3^6)/(g^6 + c_w3^6) ]^(1/6)
+
+f_t2  = c_t3 exp(-c_t4 chi^2)                                           (56.5)
+```
+
+Constants, from the TMR page and ICCFD7-1902 alike: `c_b1 = 0.1355`,
+`sigma = 2/3`, `c_b2 = 0.622`, `kappa = 0.41`, `c_w2 = 0.3`, `c_w3 = 2`,
+`c_v1 = 7.1`, `c_t3 = 1.2`, `c_t4 = 0.5`, `r_lim = 10`, and
+
+```
+c_w1 = c_b1/kappa^2 + (1 + c_b2)/sigma = 3.2390678...                   (56.6)
+```
+
+`c_w1` is **derived, never read from a case**: (56.6) is exactly the condition
+that makes the log layer an exact solution (S56.4), so a case that could set
+`c_w1` independently of `c_b1`, `c_b2`, `kappa` and `sigma` could ask for a
+model that does not have a log layer. `RAS { Cw1 ...; }` is refused by name,
+naming (56.6).
+
+`dtil` in the destruction term is the wall distance `d` for a pure RANS run
+and S57's hybrid length scale otherwise. It appears **only there**: `Stil` and
+`r` read the true `d` in every variant. That single substitution is the whole
+of DES.
+
+**Which variant is the default.** `SA-noft2` - `c_t3 = 0`, so `f_t2 = 0` and
+the `(c_b1/kappa^2) f_t2` term in the destruction vanishes - because that is
+what the TMR treats as the baseline for verification, and because the trip
+terms `f_t1` that `f_t2` accompanies need a trip location the case format has
+no way to express. The other three combinations are reachable by name
+(S56.8); nothing is substituted silently.
+
+### 56.2 Three invariants of `grad u`, and none of them is the other two
+
+`RasCore::grad_u` holds `g_ij = dU_j/dx_i`. Three scalars are built from it in
+this section and the next, and confusing any pair of them is a silent error:
+
+```
+S     = sqrt(2 S_ij S_ij)     strain-rate magnitude - turbStrainRateMag  (56.7)
+Omega = sqrt(2 W_ij W_ij)     vorticity magnitude   - NEW, turbVorticityMag
+F     = sqrt( sum_ij g_ij^2 ) Frobenius norm of the FULL gradient
+```
+
+`S_ij = (g_ij + g_ji)/2`, `W_ij = (g_ij - g_ji)/2`. (56.2) takes **`Omega`**,
+not `S`: the model is calibrated on the vorticity and in a strongly strained
+irrotational region the two differ without bound. S57's `r_d`, `r_dt` and
+`r_dl` take **`F`**, which is neither.
+
+`F` is not a third pass over `grad_u`. Because `S_ij W_ij = 0` identically
+(a symmetric tensor contracted with an antisymmetric one),
+
+```
+sum_ij g_ij^2 = S_ij S_ij + W_ij W_ij = S^2/2 + Omega^2/2                (56.8)
+```
+
+so `F = sqrt((S^2 + Omega^2)/2)`, exactly, from two numbers already computed.
+S56.10 measures (56.8) against a direct sum over the nine components on a
+random tensor, because "exactly" is the kind of claim that is wrong when the
+`dev` of S40.2 has been left in by accident.
+
+*Correction to the design note.* The note states (56.8) as
+`sum_ij g_ij^2 = S^2/2 + Omega^2/2` and it is right - this section records the
+derivation rather than the assertion, because S40 found that the same note's
+`S`/`Stil` statements needed a `dev` the note did not carry. **There is no
+`dev` here.** `Omega` and `F` are taken of the full tensor; the trace of `W`
+is zero by construction, and `F` is a norm of the raw gradient, which is what
+Spalart et al. (2006) write. Applying S40's deviatoric correction here would
+be wrong.
+
+### 56.3 The `Stil` positivity fix, and the two ways it could be got wrong
+
+`f_v2 = 1 - chi/(1 + chi f_v1)` is **negative** over a range of `chi` -
+measured, its minimum is **`-1.5465` at `chi = 3.497`**, which is not a small
+excursion - so `Sbar < 0` there and `Stil = Omega + Sbar` can reach zero or go
+negative discretely. That poisons `r`, `g` and `f_w`: `r = nu~/(Stil kappa^2 d^2)`
+changes sign, `g^6` explodes, and the model produces `NaN` on a coarse mesh.
+
+Allmaras et al. S3.1 replace (56.3) with the C1-continuous form, restated
+verbatim on the TMR page:
+
+```
+Stil = Omega + Sbar                                if Sbar >= -c_v2 Omega
+
+Stil = Omega + Omega (c_v2^2 Omega + c_v3 Sbar)
+                    / ((c_v3 - 2 c_v2) Omega - Sbar)  if Sbar < -c_v2 Omega
+                                                                        (56.9)
+c_v2 = 0.7 ,   c_v3 = 0.9
+```
+
+Three properties, each a gate rather than a claim:
+
+1. **C0 at the join.** At `Sbar = -c_v2 Omega` the second branch evaluates to
+   `Omega c_v2 (c_v2 - c_v3)/(c_v3 - c_v2) = -c_v2 Omega`, so
+   `Stil = (1 - c_v2) Omega = 0.3 Omega` from both sides.
+2. **C1 at the join.** Differentiating the second branch with respect to
+   `Sbar` at the join gives `Omega (c_v3 D + N)/D^2` with
+   `D = (c_v3 - c_v2) Omega = 0.2 Omega` and
+   `N = (c_v2^2 - c_v3 c_v2) Omega = -0.14 Omega`, i.e.
+   `(0.18 - 0.14)/0.04 = 1` - exactly the first branch's slope. The join is
+   smooth to first order and the constants `0.7`/`0.9` are what make it so;
+   S56.10 measures a one-sided finite difference on both sides.
+3. **The asymptote.** As `Sbar/Omega -> -inf` the second branch tends to
+   `-c_v3 Omega`, so `Stil -> (1 - c_v3) Omega = 0.1 Omega`. `Stil` is
+   therefore **strictly positive wherever `Omega > 0`**, which is what makes
+   `r` finite and `f_w` real.
+
+It is identical to the unmodified (56.3) wherever `Stil > 0.3 Omega`, so it is
+not a different model on any flow the original could handle. **It is not
+optional** and it supersedes the older, unpublished `f_v3` patch, which this
+implementation does not carry.
+
+**The `Omega = 0` corner, which the design note does not mention and the TMR
+does.** When `Omega` is identically zero and `Sbar < 0`, (56.9)'s second
+branch gives `Stil = 0` exactly, and `r = nu~/(0 . kappa^2 d^2)` is `0/0`. The
+TMR states the rule: **set `r = 10`** there. This implementation does exactly
+that - `r = (Stil > 0) ? min(nu~/(Stil kappa^2 d^2), 10) : 10` - and S56.10
+pins it, because it is a one-line guard whose absence is a `NaN` in a
+quiescent cell and whose *wrong* value (say `0`) is a silent loss of
+destruction.
+
+### 56.4 The log layer is an exact solution, and that is the verification
+
+This is the sharpest statement available about a Spalart-Allmaras
+implementation, and it is what this section is gated on instead of a
+flat-plate drag coefficient (S56.11).
+
+In an equilibrium log layer at high Reynolds number, `nu~ = kappa u_tau y`
+and `Omega = u_tau/(kappa y)`. Then, in the limit `nu -> 0` (`chi -> inf`):
+
+```
+f_v1 -> 1 ,   f_v2 = 1 - chi/(1 + chi f_v1) -> 0    so  Stil = Omega
+```
+
+and every remaining function collapses to a number:
+
+```
+r    = nu~/(Stil kappa^2 y^2)
+     = (kappa u_tau y) (kappa y) / (u_tau kappa^2 y^2)      =  1  exactly
+g    = r + c_w2 (r^6 - r)                                   =  1  exactly
+f_w  = g [(1 + c_w3^6)/(g^6 + c_w3^6)]^(1/6) = [65/65]^(1/6) =  1  exactly
+```
+
+so the three terms of (56.2) are
+
+```
+production   =  c_b1 Omega nu~            =  c_b1 u_tau^2
+destruction  = -c_w1 f_w (nu~/y)^2        = -c_w1 kappa^2 u_tau^2
+diffusion    =  (1/sigma) [ d/dy( nu~ dnu~/dy ) + c_b2 (dnu~/dy)^2 ]
+             =  ((1 + c_b2)/sigma) kappa^2 u_tau^2
+```
+
+and their sum vanishes **identically** if and only if
+
+```
+c_w1 = c_b1/kappa^2 + (1 + c_b2)/sigma                                 (56.10)
+```
+
+which is (56.6). **The definition of `c_w1` IS the log layer.** So a numerical
+gate exists that needs no reference data at all: build `nu~ = kappa u_tau y`,
+`Omega = u_tau/(kappa y)`, evaluate the model's own source kernel and its own
+diffusion, and require the residual to be zero to round-off. Every one of
+`f_v2`, (56.9), `r`, `g`, `f_w`, `c_b2`, `sigma` and `c_w1` is exercised, and
+each of them moves the residual by a measurable amount if it is wrong. S56.10
+states the numbers; S56.11 says what it does and does not replace.
+
+At finite `nu` the identity is approached rather than met: `f_v2` is
+`O(1/chi)` away from zero and `f_v1` is `O(1/chi^3)` away from one, so the
+residual is `O(1/chi)` and vanishes as the wall distance grows. That
+convergence RATE is itself a gate, and it is the one that separates "the
+functions are right" from "the functions happen to cancel".
+
+### 56.5 The negative continuation, and where its C1 claim actually holds
+
+Allmaras et al. S3.2. For `nu~ < 0` the model is replaced wholesale - this is
+a *continuation*, not a clip:
+
+```
+D nu~/Dt =  c_b1 (1 - c_t3) Omega nu~                       P_n  (>= 0)
+          + c_w1 (nu~/dtil)^2                               (a SOURCE)
+          + (1/sigma) [ div((nu + nu~ f_n) grad nu~)
+                        + c_b2 (grad nu~).(grad nu~) ]              (56.11)
+
+f_n  = (c_n1 + chi^3)/(c_n1 - chi^3) ,   c_n1 = 16                  (56.12)
+nu_t = 0                                       wherever nu~ < 0     (56.13)
+```
+
+Three things differ from the positive branch: production uses `Omega`, not
+`Stil`; the destruction term **changes sign** and becomes a source pushing
+`nu~` back up toward zero; and the diffusivity carries `f_n`.
+
+*DESIGN, and named as ours.* (56.11) as published writes `d`, not `dtil`, in
+the destruction term, because Allmaras et al. are describing a RANS model.
+Under S57 this implementation substitutes `dtil` in **both** branches, so that
+the model's behaviour does not change discontinuously with the sign of `nu~`.
+It is immaterial in practice - `nu_t` is identically zero wherever the branch
+is active - and it is recorded rather than left to be discovered.
+
+**`P_n >= 0` requires `c_t3 > 1`.** With `nu~ < 0`, `c_b1 (1 - c_t3) Omega nu~`
+is non-negative exactly when `1 - c_t3 <= 0`. So the negative branch uses
+`c_t3 = 1.2` **even when the positive branch is SA-noft2 with `c_t3 = 0`**.
+This is the one place in the model where the two branches must not share a
+constant, and it is exactly the kind of thing that goes silently wrong; a
+sweep over negative `nu~` pins `P_n >= 0` in S56.10.
+
+**`c_n1 = 16` is a bound, and this section derives where the bound is.** The
+diffusivity `nu + nu~ f_n` must stay positive for every `nu~ < 0`. Writing
+`x = -chi > 0`,
+
+```
+nu + nu~ f_n = nu . N(x)/(c_n1 + x^3) ,   N(x) = x^4 + x^3 - c_n1 x + c_n1
+```
+
+`N > 0` for all `x > 0` fails first where `N = N' = 0` simultaneously.
+`N' = 4x^3 + 3x^2 - c_n1 = 0` gives `c_n1 = 4x^3 + 3x^2`; substituting into
+`N = 0` and dividing by `x^2` leaves `3x^2 - 2x - 3 = 0`, so
+
+```
+x* = (1 + sqrt(10))/3 = 1.3874259 ,   c_n1* = 4 x*^3 + 3 x*^2 = 16.4577569
+                                                                       (56.14)
+```
+
+**`c_n1 = 16` is below `16.4577569` and the margin is `0.458`.** The design
+note says the diffusivity "first goes negative at `c_n1 ~ 16.46`"; (56.14) is
+that number derived in closed form, and S56.10 gates both halves - `min_x N(x)`
+is positive at `c_n1 = 16`, and `N(x*) = 0` at `c_n1 = 16.4577569` to `4e-15`.
+
+*A correction to this section's own first draft.* It said `16.457746`, from
+hand arithmetic. The closed form evaluates to **`16.4577569`**, and the test
+that quotes it is what found the difference - which is the argument for gating
+on the DERIVED expression rather than on a transcribed number.
+
+**Where the C1 claim holds, and where it does not - a correction.** Allmaras
+et al. list "the PDE functions are C1 continuous at `nu~ = 0`" among the
+design goals of the negative model, and the design note carries that claim
+forward unqualified. It is true term by term for the FULL model
+(`c_t3 = 1.2` on both sides) and it is **false for the production term under
+SA-noft2**, which is this implementation's default:
+
+| term | value at `nu~ = 0` | slope from `nu~ > 0` | slope from `nu~ < 0` |
+|---|---|---|---|
+| production | `0` both | `c_b1 (1 - c_t3) Omega` | `c_b1 (1 - c_t3) Omega` |
+| production, SA-**noft2** | `0` both | `c_b1 Omega` (`f_t2 == 0`) | `-0.2 c_b1 Omega` |
+| destruction | `0` both | `0` (it is `O(nu~^3)`: `f_w = O(r) = O(nu~)`) | `0` (it is `O(nu~^2)`) |
+| diffusivity `nu + nu~ f_n` | `nu` both | `1` | `f_n(0) = 1` |
+| `nu_t` | `0` both | `0` (it is `O(nu~^4/nu^3)`) | `0` |
+
+So four of the five are C1 under either variant and the production slope
+**jumps by `1.2 c_b1 Omega`** at `nu~ = 0` under SA-noft2 - a factor of `-0.2`
+against `+1`. That is not a defect in this implementation; it is what
+combining the TMR's two named variants `SA-noft2` and `SA-neg` produces, and
+the TMR carries `SA-noft2-neg` under exactly that name. It is recorded here
+because the design note's unqualified "C1 continuous" would otherwise be read
+as a property the default has. S56.10 measures the jump and requires it to be
+`1.2 c_b1 Omega` - the discontinuity is *pinned*, not tolerated, so a future
+change to `c_t3` cannot move it unnoticed.
+
+**Which branch a case gets.** Without the negative continuation, `nu~` is
+bounded below at `0` after every solve - `bound_nu_tilda`, a *DESIGN* choice
+of the same kind as S6.1's `bound_k`, and named as ours. With it, `nu~` is not
+bounded at all and (56.11) does the work. The two are different models and the
+case says which (S56.8).
+
+**The passivity property, and why it is proved by construction.** On a field
+where `nu~ >= 0` everywhere, the negative variant must be *bit for bit* the
+positive one. That is not argued here, it is arranged: `saSources` evaluates
+one branch or the other per thread and the positive branch's arithmetic is
+character-for-character the arithmetic the non-negative variant runs, the
+`bound_nu_tilda` launch being the only thing the variant switch adds or
+removes. S56.10 measures the identity on a field with no negative cell, and
+also measures that the two DIFFER on a field with one.
+
+### 56.6 Discretisation - what changes, and what does not
+
+Everything goes through `RasCore` exactly as S6.1, S40 and S41 do.
+
+| Term | Operator | LDU contribution |
+|---|---|---|
+| `ddt(nu~)`, `div(phi, nu~)` | `RasCore::assemble_transport*` | unchanged |
+| `-(1/sigma) div((nu + nu~ f_n) grad nu~)` | `fvm_laplacian` with a **new** face-diffusivity pair | see below |
+| `+(c_b2/sigma) (grad nu~)^2` | `fvm_su` | explicit, non-negative, always a source |
+| production **and** destruction | **one** `fvm_susp` | see below |
+
+**The diffusivity is built from the transported field, not from `nu_t`.**
+`turbulence::face_diffusivity` and its two variants all read `nut`; (56.2)
+wants `(nu + nu~ f_n)/sigma` interpolated to the face. That is a genuinely new
+kernel pair, `saGammaInternal`/`saGammaBoundary`, written in the same shape as
+`turbGammaInternal`/`turbGammaBoundary`: interpolate the DIFFUSIVITY, not the
+field, and multiply by `|Sf|` in the kernel because that product is what
+`fvm_laplacian` takes. `f_n` is evaluated inline from the cell's own `nu~` and
+is exactly `1` for `nu~ >= 0`, so the positive-only variant and the negative
+continuation run the *same* kernel and the branch costs one comparison.
+
+**Production and destruction are one `susp`, and that is the design.**
+Writing the whole right-hand side as a coefficient multiplying the unknown,
+
+```
+RHS = A nu~ ,   A =  c_b1 (1 - f_t2) Stil
+                   - (c_w1 f_w - (c_b1/kappa^2) f_t2) nu~/dtil^2   (nu~ >= 0)
+
+                A =  c_b1 (1 - c_t3) Omega
+                   + c_w1 nu~/dtil^2                                (nu~ < 0)
+                                                                       (56.15)
+```
+
+and emitting `susp = -A` lets Patankar's rule (`fvm_susp`) decide which side
+of the equation each cell's term belongs on. Four sign cases arise and all
+four are handled by that one line:
+
+* `nu~ > 0`, destruction dominant: `A < 0`, `susp > 0`, diagonal. The ordinary
+  case, and identical to what a separate `fvm_sp(c_w1 f_w nu~/dtil^2)` would
+  have done.
+* `nu~ > 0`, production dominant: `A > 0`, `susp < 0`, right-hand side.
+* `nu~ < 0`: **both** terms of `A` are negative-signed against a negative
+  `nu~`, so `susp > 0` and both go on the diagonal, which drives `nu~` toward
+  zero. That is the "energy stable" property Allmaras et al. name as a design
+  goal of the negative model, and it comes out of the standard split rather
+  than out of a special case.
+* `f_t2` active and `c_w1 f_w < (c_b1/kappa^2) f_t2`: the destruction bracket
+  is negative and the term is a source. `fvm_susp` moves it. A `fvm_sp` would
+  have put a negative number on the diagonal.
+
+Emitting the pair through two launchers with a host-side branch would put a
+data-dependent decision outside the kernel and break CUDA-graph capture. **The
+branch never changes which launcher runs, only which number the kernel
+writes** - S56.9.
+
+**`c_b2 (grad nu~)^2` is the non-conservative form, deliberately.** Allmaras
+et al. give an equivalent conservative rearrangement; it carries a
+`grad(rho).grad(nu~)` term that buys nothing in a kinematic incompressible
+solver, and the non-conservative form maps directly onto `fvm_laplacian` plus
+an explicit `Su` built from the cell gradient `RasCore::grad_psi` already
+computes for the limited schemes and the non-orthogonal correction. Said out
+loud rather than left implicit.
+
+**No wall constraint on the `nu~` row.** `RasCore::solve_equation` is called
+with `constrain_walls = false`: there is no wall function on `nu~` to pin a
+near-wall cell to, which is S56.7's whole point.
+
+### 56.7 Boundary conditions - the Robin triple, and no new `BcKind`
+
+The triple is S4's, `psi_b = fr ref_value + (1 - fr)(psi_P + ref_grad dx)`.
+
+| Patch | `fr` | `ref_value` | `ref_grad` | `BcKind` |
+|---|---|---|---|---|
+| no-slip wall | `1` | `0` | `0` | `FixedValue` |
+| symmetry / slip | `0` | - | `0` | `Symmetry` |
+| inlet | `1` | `3 nu` to `5 nu` | `0` | `FixedValue` |
+| outlet | `0` | - | `0` | `ZeroGradient` / `InletOutlet` |
+| wall on a wall-function mesh | `1` | `0` | `0` | `FixedValue` - the same |
+
+**SA needs no new boundary condition at all**, which is unusual enough to say
+out loud and is most of why it is cheaper than it looks. The last row is the
+one worth explaining: SA's log-layer solution is `nu~ = kappa u_tau y`, so a
+wall-function mesh gets the right near-wall balance from the `nu~ = 0`
+Dirichlet plus the first cell's own equation. Where a `nutkWallFunction`-style
+override of `nu_t` is wanted it belongs on `nut` - which SA *computes* rather
+than solves - and the existing `NutkWallFunction` triple applies unchanged
+through `WallData::update_nut`.
+
+**The far-field value, and the two numbers the TMR publishes.** The TMR states
+`nu~_farfield = 3 nu_inf to 5 nu_inf`, and - this is the useful part -
+states what that means for the eddy viscosity: `nu_t/nu` between
+**`0.210438`** and **`1.294234`**. Those are `chi f_v1(chi)` at `chi = 3` and
+`chi = 5` with `c_v1 = 7.1`, to six significant figures, and S56.10 gates
+(56.1) against both. It is the only place in this section where a published
+number can be reproduced without a flow solve, and it pins `c_v1` and the
+whole of `f_v1` at one stroke.
+
+### 56.8 What the case can say
+
+```
+RAS
+{
+    model      SpalartAllmaras;
+    variant    noft2;     // noft2 | noft2-neg | ft2 | ft2-neg
+    Cb1        0.1355;
+    Cb2        0.622;
+    Cv1        7.1;
+    Cw2        0.3;
+    Cw3        2;
+    Ct3        1.2;       // the NEGATIVE branch's, always; the positive
+                          // branch's f_t2 is switched by `variant`
+    Ct4        0.5;
+    Cn1        16;
+    sigmaNut   0.666666666666667;
+    kappa      0.41;
+    rlim       10;
+}
+```
+
+`variant` is **ours** and is marked *DESIGN*; the four values are the TMR's own
+nomenclature (`SA`, `SA-noft2`, `SA-neg`, `SA-noft2-neg`), and each of those
+four spellings is accepted as an alias. Anything else is refused by name with
+the menu, per S13.4.
+
+`Cmu`, `C1`, `C2`, `C3`, `sigmak`, `sigmaEps`, `alphak`, `alphaEps`, `betaStar`
+and `A0` are **refused by name** under this model: SA has no `C_mu`, no
+`epsilon` equation and no `k`. A case that carried them from a k-epsilon setup
+would otherwise have them read and thrown away, which is the failure S13.4.1
+exists to stop. `Cw1` is refused separately with (56.6) quoted, for the reason
+S56.1 gives.
+
+**`0/nuTilda` is a field file like any other**, read through the same
+`RawScalarField` reader every other scalar uses. The dictionary keys the
+`nu~` equation reads - and which used to be read for a *different* field -
+are the subject of S58.1.
+
+**Buoyancy is refused by name under SA.** S17's `G_b` enters a `k` equation
+and SA has none; Spalart & Allmaras specify no buoyant extension, and
+inventing one is what S13.4 and S0 between them forbid. A case with gravity
+and a temperature naming `SpalartAllmaras` is refused, naming `kEpsilon`,
+`LaunderSharmaKE`, `kOmega`, `kOmegaSST` and `RNGkEpsilon` as the models that
+carry one. This is S40.5's refusal, one model further.
+
+**And that refusal is exactly why `ofgpu-sa` exists.** The two drivers that
+call `models::registry::build_coupled` - `ofgpu-buoyant` and `ofgpu-fire` -
+both solve a temperature under gravity, and `BuoyancyCoeffs::default()`
+carries `g` whether or not the case has a `constant/g`. So without an
+ISOTHERMAL driver, Spalart-Allmaras would be a model the registry can select,
+the tests can exercise and **no binary can run** - a capability that stops at
+the case reader. `ofgpu-sa` is `ofgpu-k-omega` with one transport equation
+instead of two, and it is where SA and its SA-background hybrids are reachable
+(`common::driver_for` says so, and a case naming another model is refused
+there by name pointing at the binary that does build it).
+
+`blockgen::write_case` now writes `0/nuTilda` with this section's own boundary
+table, `divSchemes/div(phi,nuTilda)`, `solvers/nuTilda` and
+`relaxationFactors/equations/nuTilda`, so
+`ofgpu-generate-mesh channel case && ofgpu-sa case` runs. It did not before:
+`divSchemes { default none; }` makes a missing entry a S13.4 error, which is
+the reader looking for the right key and finding nothing - correct, and
+useless. The seed is `3 nu`, the low end of the TMR's own far-field range.
+
+### 56.9 Determinism
+
+Nothing here introduces an `f64` atomic, an unordered reduction, or a
+host-side branch inside the time loop.
+
+| Quantity | Shape |
+|---|---|
+| `grad u`, `grad nu~` | `fvc_grad_*`, already a cell->face CSR **gather** |
+| `Omega`, `F`, `chi`, `f_v1`, `f_v2`, `Stil`, `r`, `g`, `f_w`, `f_t2`, `f_n` | cell-local, one thread per cell |
+| `(grad nu~)^2` | cell-local, reads the gathered gradient |
+| the sign branch, the (56.9) branch | per-thread branches **inside one kernel** |
+| the face diffusivity | one thread per face, gather from `owner`/`neighbour` |
+| `RasCore::convergence_measure` | unchanged; the one reduction, already ordered |
+
+Every launch is at `cfg_for(n)`, the launch *sequence* is identical every
+outer iteration whatever the data, and the whole `correct` is therefore
+CUDA-graph capturable. `grep -c atomic cuda/sa.cu` returns `0` and a test
+enforces it.
+
+### 56.10 What must hold
+
+| Check | Expected |
+|---|---|
+| `f_v1(chi) chi` at `chi = 3` and `chi = 5` | **`0.210438`** and **`1.294234`** - the TMR's own published far-field `nu_t/nu`. Gated as "our value ROUNDS to the printed one at six decimals", which is the only statement a six-decimal number supports: the exact values are `0.21043826` and `1.29423434`, and a `1e-6` RELATIVE tolerance on the first is tighter than its own printed precision |
+| `f_v1 -> 1`, `f_v2 -> 0` as `chi -> inf` | `1 - f_v1 = O(chi^-3)`, `f_v2 = O(chi^-1)`, both measured against the RATE |
+| `f_v2 < 0` over a range of `chi` | yes - the reason (56.9) exists; the minimum is located and reported |
+| (56.9) at the join `Sbar = -c_v2 Omega` | `Stil = 0.3 Omega` from both branches, to round-off |
+| (56.9)'s slope at the join | `1` from both sides (one-sided finite differences) |
+| (56.9) as `Sbar/Omega -> -inf` | `Stil -> 0.1 Omega` |
+| (56.9) vs the unmodified form where `Sbar >= -c_v2 Omega` | **bitwise identical** |
+| `Stil > 0` wherever `Omega > 0` | over a sweep of `Sbar/Omega` spanning ten decades of both signs |
+| `r = 10` when `Omega == 0` and `Stil == 0` | the TMR's rule, exactly; not `0`, not `NaN` |
+| `f_w(r = 1)` | **exactly `1`** |
+| `f_w` supremum | `(1 + c_w3^6)^(1/6) = 65^(1/6) = 2.0051747` as `r -> inf`, and `f_w` bounded by it everywhere. **The first draft of this row said `2.0033543`; the test found it** |
+| `c_w1` from (56.6) | `3.2390678` |
+| **the log-layer identity (S56.4)** | production + destruction + diffusion `= 0` at `nu~ = kappa u_tau y`, `Omega = u_tau/(kappa y)`, in the `nu -> 0` limit - **the model's own defining balance** |
+| the same identity under a perturbed `c_w1` | **breaks**, and by how much is measured. It does NOT break under a consistent change of `c_b1`, `c_b2`, `kappa` or `sigma`, because (56.6) moves `c_w1` with them - the identity is a statement about `c_w1` ALONE, which is the sharpest argument for deriving it |
+| the same at finite `nu` | residual `O(1/chi)`, measured as a RATE over a decade of `chi` |
+| `r = 1`, `g = 1`, `f_w = 1` in that layer | each exactly, to round-off |
+| **live, on a mesh:** the DEVICE source kernel at the log-layer field | the same balance, from the kernels rather than the host closed forms |
+| `P_n >= 0` for `nu~ < 0` | over a sweep, and **fails** if the negative branch is given `c_t3 = 0` |
+| `nu + nu~ f_n > 0` at `c_n1 = 16` | `min_x N(x) > 0`, located and reported |
+| the bound (56.14) | `N(x*) = 0` at `c_n1 = 16.4577569`, to `4e-15`, and `min_x N < 0` just above |
+| C1 at `nu~ = 0` | destruction, diffusivity and `nu_t` C1 from both sides; production C1 for the full model and **discontinuous by exactly `1.2 c_b1 Omega`** under SA-noft2 |
+| `nu_t = 0` for `nu~ < 0` | exactly `0.0`, not a small number |
+| **passivity**: negative variant vs positive variant on a field with `nu~ >= 0` everywhere | **bit for bit identical**, one full `correct` |
+| the same two on a field with one negative cell | **must differ**, failing by name if they do not |
+| (56.8) `F^2 = (S^2 + Omega^2)/2` | against a direct nine-component sum, to round-off, on a random tensor |
+| `Omega` in solid-body rotation at rate `w` | `2 w` |
+| `Omega` in pure shear `dU/dy = G` | `G`, and `S = G` too - the one state where they agree, which is why a test that used only shear would not separate them |
+| a two-run bit-for-bit repeat | identical `f64` bits in `nuTilda` and `nut` |
+| `Cn1` at or past (56.14)'s bound | refused by name under a `-neg` variant, the message quoting `16.4577569` |
+| `Ct3 <= 1` under a `-neg` variant | refused by name, the message saying that `P_n` would drive `nu~` FURTHER from zero |
+| `cuda/sa.cu` calls no atomic | comments stripped first, because the file's own header says the word while promising not to use one |
+
+### 56.11 Validation, stated honestly
+
+The design note names the **NASA TMR 2-D zero-pressure-gradient flat plate**,
+five systematically refined grids from 137x97 to 545x385, `M = 0.2`,
+`Re = 5e6` per unit length, with a grid-converged `C_d = 0.00286` and the
+`u+ = ln(y+)/0.41 + 5.0` log law over `30 < y+ < 300`.
+
+**That gate is NOT run here and this section does not claim it.** The reasons
+are structural, not a shortage of effort:
+
+* the case is compressible at `M = 0.2` and this is an incompressible
+  kinematic solver;
+* the TMR grid family is a curvilinear grid supplied as CGNS/Plot3D, and
+  `blockgen` builds axis-aligned graded blocks;
+* the tabulated `C_d` values live in downloadable data files rather than on
+  the page, and the page itself publishes only the convergence *trends* and an
+  uncertainty table (CFL3D apparent order `p = 1.75`, relative fine-grid error
+  `0.051 %`; FUN3D `p = 0.80`, `0.159 %`) - which was checked, live, while
+  writing this section.
+
+What the TMR page **does** publish to the printed digit, and what IS gated
+above, is `nu_t/nu = 0.210438` and `1.294234` at the two ends of the
+recommended far-field range, and the log-law constants `kappa = 0.41`,
+`B = 5.0` (attributed there to White, *Viscous Fluid Flow*, 1974, p. 472).
+
+**What is run instead, and why it is sharper than a drag coefficient.**
+S56.4's log-layer identity is an *exact* property of the model, not a
+reference measurement with an error bar: it holds to round-off or it does not
+hold. A flat-plate `C_d` can be right for the wrong reason - a compensating
+error in `f_w` and `c_w1` moves the near-wall balance and the far field
+scarcely at all - whereas the identity fails immediately and *says which term*
+failed, because each term is reported separately. Alongside it:
+
+* the two TMR `nu_t/nu` numbers, which pin `c_v1` and `f_v1`;
+* `r = 1`, `g = 1`, `f_w = 1` in the log layer, each exactly;
+* the closed-form bound (56.14) on `c_n1`, derived here and checked;
+* the SA-neg passivity identity, which is bitwise.
+
+**Also not claimed.** Nothing here says SA predicts separation, transition or
+a pressure-gradient boundary layer correctly; the model is verified against
+its own published definition, not validated against an experiment. S56.10's
+rows and S58's pair tests say what the code does; they do not say what the
+physics does.
+
+**What IS end to end.** `ofgpu-generate-mesh channel case && ofgpu-sa case`
+runs the model on a real mesh with a real wall-distance solve, and eight of
+S58.4's pair tests are two such runs differing in one dictionary line and
+compared on everything they wrote. That is a statement about the plumbing -
+the case reader, the model and the writer - and it is a different statement
+from the two above.
+
+---
+
+## 57. DES97, DDES and IDDES - the shielded length scale
+
+**Spalart, Jou, Strelets & Allmaras, "Comments on the feasibility of LES for
+wings, and on a hybrid RANS/LES approach", in *Advances in DNS/LES*, Greyden
+Press (1997) 137-147** - DES97. **Shur, Spalart, Strelets & Travin,
+*Engineering Turbulence Modelling and Experiments 4* (1999) 669-678** - the
+calibration `C_DES = 0.65` on the SA background. **Strelets, *AIAA Paper*
+2001-0879** - SST-DES, the `k`-equation dissipation form. **Spalart, Deck,
+Shur, Squires, Strelets & Travin, *Theor. Comput. Fluid Dyn.* 20 (2006)
+181-195** - DDES, `r_d`, `f_d`, and the grid-induced separation they fix.
+**Shur, Spalart, Strelets & Travin, *Int. J. Heat Fluid Flow* 29 (2008)
+1638-1649** - IDDES; **paywalled and NOT read**. **Gritskevich, Garbaruk,
+Schuetze & Menter, *Flow Turbul. Combust.* 88 (2012) 431-449** - the
+SST-background recalibration; **paywalled and NOT read**. **Nikitin, Nicoud,
+Wasistho, Squires & Spalart, *Phys. Fluids* 12 (2000) 1629-1632** - the
+log-layer mismatch `f_e` exists to remove. **Spalart, *Annu. Rev. Fluid Mech.*
+41 (2009) 181-202** - the review.
+
+The two IDDES restatements actually read, both open access, both fetched and
+read in full while writing this section:
+
+* **Herr, Radespiel & Probst, "Improved Delayed Detached Eddy Simulation with
+  Reynolds-Stress Background Modeling", arXiv:2301.07223v2 (2023)**, published
+  in *Computers & Fluids* 265 (2023) 106014. **Appendix A is a complete
+  restatement of the IDDES formulation** and is where (57.9)-(57.16) below come
+  from, equation by equation.
+* **Savino, Griffin, Lee, Vijayakumar, Wu & Sprague, "Improving boundary-layer
+  separation prediction by an IDDES turbulence model using a pressure-gradient
+  sensor", arXiv:2603.08875 (2026)**, arXiv non-exclusive distribution licence.
+  **Section 2 states SST-IDDES**, and is where `C_DES1 = 0.78`,
+  `C_DES2 = 0.61`, `C_w = 0.15` and the simplified filter width (57.18) come
+  from.
+
+No GPL-licensed source was consulted. OpenFOAM's and SU2's DES implementations
+were not opened, searched or quoted.
+
+**All three of DES97, DDES and IDDES replace exactly one length scale in an
+existing model and change nothing else.** That is the whole trick, and it is
+why this section adds no equation, no boundary condition and no matrix
+contribution. What it adds is one elementwise kernel per background, one grid
+metric the crate did not have (S57.6), and a set of refusals that stop the
+capability from lying (S57.10).
+
+### 57.1 The one substitution, on each background
+
+On **Spalart-Allmaras** (S56), the wall distance `d` appears in three places:
+`Sbar`, `r` and the destruction term. DES replaces it in the **destruction
+term only**:
+
+```
+destruction = ( c_w1 f_w - (c_b1/kappa^2) f_t2 ) (nu~/dtil)^2         (57.1)
+```
+
+`Stil` and `r` keep the true `d`. Nothing else in S56 changes, and in
+particular `dtil == d` (bitwise, the same buffer) is what a pure RANS run
+passes, so **plain SA is not a special case of the hybrid: it is the hybrid
+with the substitution not made**, and the two share one kernel.
+
+On **k-omega SST** (S6.3), the length scale is not a distance but the ratio
+that turns `k` into a dissipation. Strelets writes the `k`-equation sink as
+
+```
+l_RANS = sqrt(k)/(beta* omega)                                        (57.2)
+D_k    = k^(3/2)/l_DES        replacing   beta* k omega               (57.3)
+```
+
+`beta* k omega = k^(3/2)/l_RANS` identically, so (57.3) can be written
+
+```
+D_k = beta* k omega . (l_RANS/l_DES)                                  (57.4)
+```
+
+and it is (57.4), not (57.3), that is implemented. **The reason is bitwise.**
+`sqrt(k)/l_DES` evaluated with `l_DES == l_RANS` is `sqrt(k)/(sqrt(k)/(beta*
+omega))`, two roundings away from `beta* omega`; (57.4) with `l_RANS == l_DES`
+computes `beta* omega * 1.0`, and multiplication by an exact `1.0` is exact in
+IEEE-754. So in RANS mode the hybrid reproduces S6.3's own `sp` **bit for
+bit**, and the reproduction is a property of the formula rather than of a
+tolerance. This is a departure from the design note, which specifies (57.3);
+S57.11 measures both forms and records the difference.
+
+The three branches then differ only in how `l_DES` (or `dtil`) is formed.
+
+### 57.2 The three branches
+
+```
+DES97   dtil  = min( d , C_DES Delta )                                (57.5)
+        l_DES = min( l_RANS , C_DES Delta )
+
+DDES    dtil  = d      - f_d max( 0 , d      - C_DES Delta )          (57.6)
+        l_DES = l_RANS - f_d max( 0 , l_RANS - C_DES Delta )
+
+IDDES   dtil  = l_hyb  (S57.4)
+        l_DES = l_hyb
+```
+
+with, on the SA background, `Delta = h_max = max(h_x, h_y, h_z)` for (57.5)
+and (57.6), and `C_DES = 0.65`.
+
+`h_max` is the componentwise maximum of the cell extents `les::LesDelta`
+already carries, and `BaseDelta::MaxEdge` (`maxDeltaxyz`) is exactly it. **The
+design note's claim that `lesCellExtents` already solves the per-cell `h_max`
+problem as a cell->face CSR gather with a deterministic maximum order is
+VERIFIED**: `cuda/les.cu`'s `lesCellExtents` loops `cfOffset`/`cfFace` and
+`bcfOffset`/`bcfFace`, one thread per cell, taking `2 max_f |Cf_i - C_i|` in
+fixed CSR order. There is no atomic in it, the naive `atomicMax` form this
+project forbids is not present, and nothing new was needed. S57.11 pins the
+absence.
+
+### 57.3 `f_d`, and the identity that makes the shielding provable
+
+DDES exists to fix one failure of DES97, and it is worth naming precisely.
+DES97's (57.5) is a pure grid criterion: wherever `C_DES h_max < d` the model
+switches to LES mode, **whether or not there is any resolved turbulence
+there**. Refine a mesh in the streamwise direction inside an attached boundary
+layer - which is exactly what a mesh designer does around a geometric feature
+- and `h_max` falls below `d/C_DES` while the flow is still fully modelled.
+The destruction term is then amplified by `(d/dtil)^2`, the modelled stress
+collapses, nothing resolved replaces it, and the boundary layer separates. That
+is **grid-induced separation**, and it is a failure caused by the mesh alone.
+
+DDES's shielding function is
+
+```
+r_d = (nu_t + nu) / ( kappa^2 d^2 sqrt( sum_ij (du_i/dx_j)^2 ) )       (57.7)
+f_d = 1 - tanh( (C_dt1 r_d)^C_dt2 ) ,   C_dt1 = 8 , C_dt2 = 3          (57.8)
+```
+
+Three things about (57.7) are easy to get wrong and each is gated separately:
+
+1. **It is `nu_t + nu`, not `nu_t`.** In the viscous sublayer `nu_t -> 0` and
+   the molecular term is the whole of it.
+2. **The denominator is the Frobenius norm `F` of the FULL velocity
+   gradient** - not `S`, not `Omega`. In a pure shear the three coincide, so a
+   test that used only a log-layer profile cannot tell them apart; S57.11's
+   check therefore uses a state where `S`, `Omega` and `F` are three different
+   numbers.
+3. `d` is the true wall distance, never `dtil`.
+
+**The log-layer identity.** In an equilibrium log layer, `nu_t = kappa u_tau y`
+and the only non-zero gradient component is `dU/dy = u_tau/(kappa y)`, so
+`F = u_tau/(kappa y)` and
+
+```
+r_d = (kappa u_tau y + nu) . (kappa y) / (kappa^2 y^2 u_tau)
+    = 1 + nu/(kappa u_tau y)  =  1 + 1/(kappa y+)                      (57.9)
+```
+
+**`r_d = 1` exactly in the high-Reynolds log layer**, independent of `y`,
+`u_tau` and `kappa`, and larger than 1 everywhere closer to the wall. The same
+calculation without the molecular term gives `r_dt = 1` exactly, and
+arXiv:2301.07223 states that identity in words - "`r_dt` and `r_dl` are markers
+of the turbulent boundary layer and characterise the log layer (`r_dt = 1`) and
+the laminar sublayer (`r_dl = 1`)" - which is independent published
+corroboration of a derivation done here from scratch.
+
+**And that makes the shielding BITWISE, not approximate.** `tanh(x)` rounds to
+exactly `1.0` in IEEE-754 double precision once `1 - tanh(x) = 2 exp(-2x)`
+falls within HALF the spacing of the doubles just below 1, i.e. once
+`2 exp(-2x) <= 2^-54`, which is `x >= -0.5 ln(eps/8) = 19.0615475`.
+`(C_dt1 r_d)^C_dt2 = (8 r_d)^3` exceeds that for every `r_d > 0.333910`. In an
+attached boundary layer `r_d >= 1`, so
+
+*Corrected from this section's first draft, by the test that bisects for the
+switch point.* It said `2 exp(-2x) < 2^-53`, `x > 18.714`, `r_d > 0.33206` -
+the FULL ulp rather than the half. At `x = 18.714` `tanh` is still one ulp
+below 1, and the test found `f_d` non-zero just above the threshold that
+number implies. The derived expression now bisects to the switch point
+exactly.
+
+
+```
+f_d == 0.0     exactly, every cell of an attached equilibrium boundary layer
+dtil = d - 0.0 * max(0, d - C_DES Delta) == d      BITWISE                (57.10)
+```
+
+**DDES therefore reproduces plain SA bit for bit inside an attached boundary
+layer, on any mesh whatever.** That is the shielding property, and it is
+provable rather than measurable: it does not depend on a tolerance, on the
+mesh, or on how far the streamwise spacing has been refined. S57.11 gates it
+as a bitwise identity and S57.8 turns it into the grid-induced-separation
+experiment the design note asks for.
+
+The same arithmetic gives the SST branch's `f_d` its own bitwise RANS mode
+through (57.4), because `l_RANS - 0.0 * x == l_RANS`.
+
+### 57.4 IDDES, in full
+
+From arXiv:2301.07223 Appendix A, equation by equation (their (A.1)-(A.17)):
+
+```
+l_RANS = d_w                            (SA background)
+l_RANS = sqrt(k)/(beta* omega)          (SST background)
+l_LES  = C_DES Delta_IDDES                                            (57.11)
+
+l_hyb  = fdt~ (1 + f_e) l_RANS  +  (1 - fdt~) l_LES                   (57.12)
+
+fdt~   = max( 1 - f_dt , f_B )                                        (57.13)
+f_dt   = 1 - tanh( (C_dt1 r_dt)^C_dt2 )                               (57.14)
+f_B    = min( 2 exp(-9 alpha^2) , 1.0 ) ,   alpha = 0.25 - d_w/h_max  (57.15)
+
+r_dt   = nu_t / ( kappa^2 d_w^2 F ) ,   r_dl = nu / ( kappa^2 d_w^2 F )
+
+f_e    = f_e2 max( f_e1 - 1 , 0 )                                     (57.16)
+f_e1   = 2 exp(-11.09 alpha^2)   if alpha >= 0
+       = 2 exp(- 9.00 alpha^2)   if alpha <  0
+f_e2   = 1 - max( f_t , f_l )
+f_t    = tanh( (c_t^2 r_dt)^3 )
+f_l    = tanh( (c_l^2 r_dl)^10 )
+
+Delta_IDDES = min( max( C_w d_w , C_w h_max , h_wn ) , h_max )        (57.17)
+              C_w = 0.15
+```
+
+`f_B` is the WMLES branch switch: RANS for the inner layer, LES for the outer.
+`f_e` is the elevating function that removes the log-layer mismatch plain
+DDES-as-WMLES suffers from. `fdt~` selects **automatically** between the DDES
+branch (no resolved turbulence at the inlet, so `nu_t` is at RANS level,
+`r_dt = 1`, `f_dt = 0`, `1 - f_dt = 1`, `fdt~ = 1`) and the WMLES branch
+(resolved turbulence present, `nu_t` collapsed, `r_dt << 1`, `f_dt -> 1`).
+
+Four closed forms fall out and all four are gated:
+
+* **The RANS inner layer is `d_w < 0.5275183 h_max`.** `f_B = 1` exactly when
+  `2 exp(-9 alpha^2) >= 1`, i.e. `|alpha| <= sqrt(ln 2/9) = 0.2775183`. Since
+  `alpha = 0.25 - d_w/h_max <= 0.25` always, the binding side is
+  `alpha >= -0.2775183`, which is `d_w/h_max <= 0.5275183`.
+* **`f_e1 > 1` for every `alpha` in `[0, 0.25]`, but only just.** `f_e1 = 1`
+  at `alpha = sqrt(ln 2/11.09) = 0.250004`, which is `4e-6` ABOVE the largest
+  `alpha` the geometry can produce. At the wall (`d_w = 0`, `alpha = 0.25`)
+  `f_e1 - 1 = 2.218e-5`: the elevating function is calibrated to switch off at
+  the wall to five decimal places rather than by a branch. That is a
+  deliberate calibration and it is worth pinning, because a transcription
+  error in `11.09` moves it by orders of magnitude.
+* **`f_e` vanishes in an attached log layer, and the two backgrounds get there
+  differently - MEASURED, and the measurement is more interesting than either
+  guess.** With RANS-level `nu_t`, `r_dt = 1` and `f_t = tanh((c_t^2)^3)`. On
+  the SST background `c_t = 1.87` gives `1.87^6 = 42.76`, far past the
+  `19.0615` at which `tanh` saturates: `f_t == 1.0`, `f_e2 == 0.0` and
+  `f_e == 0.0`, all exactly. On the SA background `c_t = 1.63` gives
+  `1.63^6 = 18.7554`, **`0.31` SHORT of saturation** - so `f_t` lands one ulp
+  below 1 and `f_e` is exactly `2^-53 = 1.1102e-16`.
+
+  **And it does not matter, for a reason worth stating:** `(1 + f_e)` with
+  `f_e = 2^-53` rounds back to exactly `1.0` (it is the tie, and
+  round-half-to-even takes the even mantissa), so (57.12) still returns
+  `l_RANS` **bitwise**. SA-IDDES's RANS mode is bitwise by rounding where
+  SST-IDDES's is bitwise by construction, and S57.11 gates both halves of that
+  sentence rather than either alone.
+* **`f_e` is active exactly where `f_B = 1`.** For `alpha < 0`, `f_e1 > 1`
+  requires `|alpha| < 0.2775183` - the same threshold. So the elevating
+  function lives in the RANS inner layer and nowhere else, which is what
+  arXiv:2301.07223 says of it in words.
+
+**Two filter widths, both published, one per background - and a finding
+about where they actually differ.** (57.17) is arXiv:2301.07223's (A.1) and is
+the SA-background default. arXiv:2603.08875's (14) states the SST-background
+width as
+
+```
+Delta = min( C_w max( d_w , h_max ) , h_max )                         (57.18)
+```
+
+which drops `h_wn` entirely. **Both are implemented and each background
+defaults to the width its own source publishes**, `IDDESDelta` for (57.17) and
+`IDDESDeltaSimple` for (57.18); a case may ask for either on either background
+by name, and S58 makes that a pair test. Nothing is substituted: a case that
+names one gets that one.
+
+*Where they differ, measured.* `h_wn` enters (57.17) only through
+`max(C_w d_w, C_w h_max, h_wn)`, so it binds only when `h_wn > C_w h_max`,
+i.e. when the wall-normal step exceeds **15 %** of the largest edge. On the
+anisotropic boundary-layer meshes IDDES is used on it is a small fraction of
+that, and **the two widths are then identical bit for bit**. They part company
+on a nearly ISOTROPIC cell, where (57.17) gives the LARGER width and hence the
+more RANS-like length scale. The first draft of S58.4's pair test looked for
+the difference in a boundary-layer cell and found none; that is a property of
+(A.1), not a defect, and the pair now runs on a near-isotropic block. It is
+also the honest answer to "does dropping `h_wn` matter": on a boundary-layer
+mesh, not at all.
+
+### 57.5 The constants are calibrations, not universals
+
+| | SA background | SST background |
+|---|---|---|
+| `C_DES` | `0.65` | `C_DES1 F1 + C_DES2 (1 - F1)`, `C_DES1 = 0.78`, `C_DES2 = 0.61` |
+| `C_dt1` | `8` | `20` |
+| `C_dt2` | `3` | `3` |
+| `c_t` | `1.63` | `1.87` |
+| `c_l` | `3.55` | `5.0` |
+| `C_w` | `0.15` | `0.15` |
+| default `Delta_IDDES` | (57.17) | (57.18) |
+
+**What was verified against a source read, and what was not.** `C_DES1 = 0.78`,
+`C_DES2 = 0.61`, `C_w = 0.15`, the blend (15) and the simplified width (57.18)
+were read directly in arXiv:2603.08875 S2. `C_w = 0.15` and (57.17) were read
+directly in arXiv:2301.07223 Appendix A, which also gives `c_l = 5` and
+`c_t = 1.87` for its Reynolds-stress background and `C_dt1 = 16` for the same -
+**a third calibration**, which is how it is known that these numbers travel with
+the background model rather than being universal. **`C_dt1 = 20`, `c_t = 1.87`
+and `c_l = 5.0` for the SST background come from the design note's reading of
+Gritskevich et al. (2012), which is paywalled and was NOT read here.** They are
+carried, defaulted, printed in the banner and settable; they are not
+independently verified and this section says so rather than implying otherwise.
+
+`C_DES = 0.65` on the SA background is Shur et al. (1999)'s calibration, and
+arXiv:2301.07223 quotes the same value for its own model.
+
+**The constants are per-background, and mixing them is refused.** Writing
+`CDES` under an SST background is refused by name (the SST `C_DES` is blended
+from two constants and a single value cannot express it); writing `CDES1` or
+`CDES2` under an SA background is refused by name (SA has one). Both refusals
+name the entry that IS read.
+
+**A low-Reynolds-number correction is NOT implemented.** Shur et al. (2008)
+carry a function `Psi` multiplying `C_DES Delta` in `l_LES`, taken from
+Spalart et al. (2006)'s appendix. **Neither open-access restatement read here
+carries it**: arXiv:2301.07223's (A.7) is `l_LES = c_DES Delta` and
+arXiv:2603.08875's (13) is `l_LES = C_DES Delta`, both without `Psi`. This
+implementation follows what was read. The omission is named here, named in the
+model's own file header, and named in `ofgpu-validate`'s report, rather than
+being silently absent - a case running IDDES at a low cell Reynolds number in
+the LES region is running a model this solver has not got the correction for.
+
+### 57.6 `h_wn` - the metric the crate did not have, and the note's gift
+
+`h_wn` is the grid step in the **wall-normal** direction, and (57.17) is the
+only place in this section that needs it. On an anisotropic boundary-layer
+mesh it is the *smallest* spacing where `h_max` is the *largest*, and their
+ratio is exactly what (57.17) exploits to steepen `Delta`'s growth away from
+the wall.
+
+The obstacle is that `h_wn` is not a property of the cell alone: it needs to
+know which direction is wall-normal, and a generic unstructured code answers
+that by walking a face-normal chain out from the wall - a search, and tier D.
+
+**It is not needed.** `walldistance::WallDistance` already carries
+
+```rust
+/// `grad y`. Near a wall this is the outward unit wall normal - `y` is a
+/// distance function there, so `|grad y| = 1`
+pub grad_y: DevBuf<Vec3>,
+```
+
+computed once at setup by the Poisson solve S6.6 already runs for SST. So
+
+```
+n_w  = grad_y / max(|grad_y|, tiny)          unit wall normal, per cell
+h_wn = dx . |n_w| = dx_x |n_x| + dx_y |n_y| + dx_z |n_z|              (57.19)
+```
+
+using the componentwise extents `dx` that `lesCellExtents` already writes.
+(57.19) is the width of the cell's axis-aligned bounding box measured along
+`n_w`, and `dx >= 0` componentwise, so the absolute values are on the normal's
+components alone.
+
+**One elementwise kernel, one `DevBuf<Scalar>`, computed once at setup. No
+atomics, no search, no new mesh connectivity. Tier A.** The wall-distance
+Poisson solve the crate already runs hands IDDES its missing metric for free.
+
+Where there is no wall - `WallDistance` fills `y = NO_WALL` and `grad_y = 0` -
+`|grad_y| < tiny` and `h_wn` falls back to `h_max`. That is not a fudge: with
+`d_w = 1e10`, `C_w d_w` dominates the `max` in (57.17) and the outer `min`
+against `h_max` returns `h_max` whatever `h_wn` was, so the fallback is the
+value (57.17) would have produced anyway.
+
+**A correction to the design note's own stated uncertainty.** The note says it
+is unsure whether `|dx . n_w|` is faithful on a *stretched* mesh, reasoning
+that "the extent at the cell's two wall-normal faces differs by the stretching
+ratio, and `lesCellExtents`'s `2 max_f |Cf - C|` takes the larger", biasing
+`h_wn` up. **That is wrong, and the reason is that the two faces belong to the
+same cell.** For an axis-aligned hexahedron the centroid is the midpoint of
+its own two wall-normal faces, so `|Cf_y - C_y| = h/2` for BOTH of them
+whatever the grading between neighbours, and `2 max_f |Cf_y - C_y| = h`
+**exactly**. Grading changes `h` from cell to cell, not within a cell.
+
+Measured on a block graded 10:1, with the real wall-distance solve behind it:
+`h_wn` is the cell height to **`2.8e-12`** relative, and the residue is not
+(57.19) but the wall normal's own departure from axis-alignment in the Poisson
+solution - the largest off-axis component of `n_w` is `2.0e-13`. What IS
+biased is a **sheared** or otherwise non-axis-aligned cell, where the bounding
+box is larger than the cell; there (57.19) inherits `lesCellExtents`'s own
+documented bias, which biases `Delta` **down** and hence `nu_t` down - the
+conservative direction.
+
+**And a second correction, this one to the note's `|grad y| = 1`.** The note
+writes, and `walldistance.rs`'s own doc comment repeats, that `grad y` near a
+wall IS the unit wall normal. Near the wall that is what is measured -
+`||grad y| - 1|` is **`3.2e-3`** within five wall-adjacent cell heights on the
+graded block. Over the WHOLE block it is **`0.495`**: half. Tucker's algebraic
+recovery is a distance function near the wall and not far from one. **(57.19)
+does not care**, because it normalises: only the DIRECTION is load-bearing,
+and that is exact to `2e-13`. The claim is recorded here in the form the
+measurement supports rather than the form the note states it in.
+
+### 57.7 The SST background, and why the default is unmoved BY CONSTRUCTION
+
+`sst_k_sources` writes `sp = beta* omega`, and that line is **not touched**.
+`cuda/sst.cu` is byte-for-byte unmodified by this section.
+
+What a hybrid SST run does instead is launch one more kernel, `desSstKSink`,
+*after* `sstKSources`, which overwrites `sp` with (57.4). A pure SST run does
+not launch it at all: the model carries an `Option<DesLengthScale>` and the
+added code in `KOmegaSst::correct` is a single failed `if let`. **Not one
+kernel launch and not one floating-point operation changes INSIDE `correct`
+for a case that did not ask for a hybrid**, which is how "the default is
+unmoved" is proved from the diff rather than argued from a tolerance - the
+pattern S43's rate mask and S54.4's virtual temperature both use.
+
+**The diff is `+64 -0`**: not one line of `src/models/k_omega_sst.rs` is
+changed or deleted, only inserted, and `cuda/sst.cu` has a **zero-line diff**.
+What a pure SST run does pay is one `[n_cells]` buffer allocated at
+construction, for the Frobenius norm (57.7) reads. That is stated rather than
+glossed, because "not one arithmetic operation changes" is a claim about
+`correct`, and `correct` is where it is true.
+
+And the half a diff cannot show is gated instead: **a hybrid that IS attached
+and in RANS mode reproduces plain SST bit for bit** in `k`, `omega` and `nut`
+over three full `correct` steps (S57.11), which is (57.4)'s ratio form doing
+what it was chosen to do.
+
+The SA side needs even less: `dtil` is an *argument* to `saSources`, and a
+RANS run passes the wall distance itself. There is no second code path.
+
+### 57.8 The grid-induced-separation gate, and why it cannot be passed by accident
+
+The design note asks for the periodic hill (Frohlich et al., *JFM* 526 (2005)
+19-66) at `Re_b = 10 595`, reattachment at `x/h = 4.7 +- 10 %`, resolved TKE
+within 20 % at `x/h = 2`, and - the one it calls "the important one" - the same
+case on two meshes differing only by streamwise refinement inside the attached
+boundary layer, with DES97 separating earlier on the refined mesh and DDES
+not.
+
+**The periodic-hill run is NOT performed, for the structural reasons S57.12
+sets out.** What IS performed is the shielding experiment itself, on the
+mechanism rather than on the separation point, and it is *sharper*:
+
+> **Gate 57-C.** One boundary-layer state - a real 3-D block mesh, the real
+> wall-distance solve, an analytic equilibrium profile giving `nu_t`, `grad u`
+> and hence `F` - evaluated on **two meshes identical in every respect except
+> the streamwise cell count**, which changes `h_max` inside the attached
+> boundary layer and nothing else. For each of DES97, DDES and IDDES, count the
+> boundary-layer cells for which `dtil < d` (LES mode) and report
+> `max(d/dtil)`, the factor by which the destruction term is amplified.
+>
+> **DES97 must switch a substantial and mesh-dependent fraction of the attached
+> boundary layer into LES mode, and switch MORE of it on the refined mesh -
+> that is grid-induced separation, reproduced. DDES and IDDES must switch
+> ZERO cells on either mesh, with `dtil == d` BITWISE.**
+
+It cannot be passed by accident, and here is why for each way of getting it
+wrong:
+
+* A DDES that forgot `f_d` entirely is DES97 and fails the "zero cells" half.
+* A DDES that computed `f_d` from `S` or from `Omega` instead of `F` still
+  passes in the log layer, because a pure shear has `S = Omega = F`. So the
+  invariant is gated **separately**, on a strain state where the three are
+  three different numbers (S57.11).
+* A DDES that used `nu_t` where (57.7) says `nu_t + nu` still passes in the
+  log layer, because both give `r_d >= 1`. So that too is gated separately, on
+  a state with `nu_t = 0`, where `r_d` is finite and `r_dt` is exactly zero.
+* A DDES that used `dtil` in place of `d` inside `r_d` would feed back on
+  itself. Gated by construction: `saSources` takes both and reads `d` for
+  `Stil` and `r`.
+
+The second half of the note's gate - "DES97 on the same mesh pair shows the
+shift" - is what makes the first half meaningful, and it is reproduced
+verbatim: the same experiment, the same two meshes, the branch changed.
+
+### 57.9 Determinism and the audit
+
+Everything in this section is cell-local given `grad_u`, `nu_t`, `d`, `dx` and
+`grad_y`, all of which already exist as fields.
+
+| Quantity | Naive shape | What is done instead |
+|---|---|---|
+| `h_max` per cell | face loop with an `atomicMax` | `lesCellExtents`: one thread per cell, cell->face CSR **gather**, fixed order. **Verified, unchanged, nothing new needed.** |
+| `h_wn` per cell | walk a face-normal chain from the wall - a SEARCH | (57.19): one elementwise kernel over `dx` and `grad_y`, both already fields |
+| `F` | a third pass over `grad_u` | `sqrt((S^2 + Omega^2)/2)`, (56.8) |
+| `r_d`, `r_dt`, `r_dl`, `f_d`, `f_dt`, `f_B`, `f_e*`, `f_t`, `f_l` | - | cell-local closed forms |
+| `dtil`, `l_hyb`, `l_DES` | - | cell-local |
+| the `alpha >= 0` branch in `f_e1` | - | a per-thread branch inside one kernel |
+
+**No `f64` atomic, no unordered reduction, no host-side branch inside the time
+loop.** `grep -c atomic cuda/des.cu` returns `0` and a test enforces it. Every
+launch is at `cfg_for(n_cells)` with a fixed sequence, so the whole hybrid
+`correct` is CUDA-graph capturable.
+
+**One fixed point, named rather than iterated.** `Delta_IDDES` depends on
+`d_w` and the grid only, but `l_hyb` depends on `nu_t` through `r_dt`, and
+`nu_t` depends on `l_hyb` through the destruction term. That is a fixed point
+in the OUTER iteration, not an order dependence inside a kernel: `nu_t` is
+lagged by one outer iteration exactly as `F_2` is lagged inside SST's `nu_t`
+today, and the result is a deterministic function of the iteration count.
+Iterating to convergence inside `correct` would make the inner count depend on
+a floating-point comparison, which a CUDA graph cannot capture; it is not
+done, and this paragraph is why.
+
+### 57.10 What is refused, and by name
+
+A DES-family model that runs but is quietly wrong is worse than a refusal,
+because the refusal is honest. Four guards, each a S13.4 error naming the
+setting and the alternatives.
+
+1. **A steady run.** `ddtSchemes/default steadyState;` under any hybrid is
+   refused. DES is unsteady by construction; a steady DES is a RANS model with
+   a corrupted length scale. Named alternatives: `Euler`, `backward`,
+   `CrankNicolson`, or the RANS model the case presumably wants.
+2. **A 2-D mesh.** A case with an `empty` patch pair is refused. The LES branch
+   of a hybrid is a three-dimensional turbulence model and a 2-D DES resolves
+   nothing; it produces a plausible converged answer with no resolved content.
+3. **An upwind-biased convection scheme on momentum.** (Guard 2 in the code,
+   because it needs no mesh; the 2-D guard needs one and runs in
+   `build_coupled` and in `ofgpu-sa`.) `div(phi,U)` set to
+   `upwind`, `limitedLinear`, `vanLeer`, `linearUpwind` or any other
+   upwind-biased scheme is refused, naming `linear` (central) and `LUST`.
+   Travin et al. (2002) publish a blending function for exactly this reason:
+   an over-dissipative scheme damps the resolved content the LES branch exists
+   to produce, and the run looks converged and plausible and is wrong.
+   **That is the same class of silent substitution S13.4 forbids, so a DES
+   implementation that ignored it would be a S13.4 violation in itself.** The
+   blending function is NOT implemented; the refusal names it as what a case
+   that genuinely wants an upwind-biased RANS region would need.
+4. **`cubeRootVol` as the DES filter width.** Refused, naming `maxDeltaxyz`.
+   `C_DES = 0.65` is calibrated with `Delta = h_max` (Shur et al. 1999); on an
+   anisotropic mesh `V^(1/3)` is smaller than `h_max` by the cell aspect ratio,
+   so accepting it silently would run a DES with an uncalibrated constant. It
+   is a refusal rather than a preference for that reason and the message says
+   so.
+
+Refused for a different reason, and named:
+
+5. **`vanDriest` and `smooth` as the hybrid filter width.** Both are wrappers
+   that damp or smooth a base width for a pure LES; neither is defined for a
+   hybrid, whose RANS branch already carries the near-wall treatment. Refused
+   naming `maxDeltaxyz`, `IDDESDelta` and `IDDESDeltaSimple`.
+6. **`Psi`, the low-Reynolds correction** (S57.5) - not a refusal but a
+   documented absence, printed by `ofgpu-validate` on every run.
+
+### 57.11 What must hold
+
+| Check | Expected |
+|---|---|
+| `lesCellExtents` is a gather | `grep -c atomic cuda/les.cu` is `0`; the kernel loops `cfOffset`/`cfFace` and `bcfOffset`/`bcfFace` in fixed order - **the design note's claim, verified** |
+| `h_max` from `BaseDelta::MaxEdge` on a graded block | the exact cell edge lengths |
+| **(57.19) `h_wn` on an axis-aligned graded block, 10:1** | the cell height `y_(j+1/2) - y_(j-1/2)` to **`2.8e-12`** relative - **the design note's stretching worry is unfounded and this measures why** |
+| `n_w` on that block | largest off-axis component **`2.0e-13`**; the wall normal is `+-e_y` |
+| `\| \|grad_y\| - 1 \|` | **`3.2e-3`** within five wall-adjacent cell heights, **`0.495`** over the whole block - the note's `\|grad y\| = 1` claim, MEASURED, and true only where it says |
+| `h_wn` with no wall in the domain | `h_max`, and `Delta_IDDES` then `h_max` whatever `h_wn` was |
+| (57.9) `r_d = 1 + 1/(kappa y+)` | to round-off, over four decades of `y+` |
+| `r_dt = 1` in the same layer | exactly - and it is what arXiv:2301.07223 states in words |
+| **`f_d == 0.0` exactly for `r_d > 0.333910`** | and `f_d > 0` just below. The saturation argument is DERIVED (`-0.5 ln(eps/8) = 19.0615475`) and then BISECTED for, and the two must agree bitwise |
+| **`dtil == d` BITWISE under DDES in an attached boundary layer** | every cell, on both meshes of the S57.8 pair |
+| **Gate 57-C, DES97** | MEASURED: **`0` of 704** attached cells in LES mode on the coarse mesh, **`2048` of 5632** on the streamwise-refined one, with the destruction term amplified by up to **`5.66`**. That is grid-induced separation, reproduced from the mesh alone |
+| **Gate 57-C, DDES and IDDES** | **zero cells**, both meshes, and `dtil == d` **bitwise** in every attached cell |
+| `r_d` reads `F`, not `S` or `Omega` | on a strain state where the three differ, the computed `r_d` matches the `F` form and not the other two |
+| `r_d` reads `nu_t + nu` | at `nu_t = 0`, `r_d = nu/(kappa^2 d^2 F) != 0` while `r_dt == 0.0` exactly |
+| `f_B = 1` threshold | `d_w/h_max = 0.5275183`, located to `1e-9` |
+| `f_e1 - 1` at `alpha = 0.25` | `2.218e-5`; the crossing is at `alpha = 0.250004`, `4e-6` out of reach; `f_e1 > 1` for every `alpha` in `[0, 0.25]` |
+| `f_e1`'s two branches at `alpha = 0` | both `2`, continuous |
+| **`f_e` at `r_dt = 1`, SST background** | `f_t == 1.0` exactly (`1.87^6 = 42.76`), so `f_e == 0.0` exactly |
+| **`f_e` at `r_dt = 1`, SA background** | MEASURED: `1.63^6 = 18.7554` is `0.31` SHORT of saturation, so `f_e` is exactly one ulp, `2^-53 = 1.1102e-16`. **`(1 + f_e)` rounds back to `1.0`**, so (57.12) still returns `l_RANS` bitwise - both halves gated |
+| the state the `f_e` gate is taken at | `alpha = 0`, where `f_e1 = 2` and `max(f_e1 - 1, 0) = 1`, so what is measured is `f_e2` alone. The first draft used `alpha = -1`, where `f_e1 < 1` makes `f_e` zero for a reason unrelated to the subject - it measured nothing |
+| **SST-DES/DDES/IDDES in RANS mode vs plain SST** | `sp` **bit for bit** identical, through (57.4)'s `beta* omega * 1.0` |
+| the same through the note's (57.3) form | MEASURED: `sqrt(k)/l_DES` differs from `beta* omega` on **308 of 2000** states (15 %) where the ratio form differs on none. That is why (57.4) is implemented and (57.3) is not |
+| `l_DES == l_RANS` bitwise in RANS mode | all three branches: `min` returns its argument, `x - f_d*0`, and `1*(1+0)*x + 0*y` |
+| **no DES attached: `KOmegaSst::correct`** | one failed `if let`; not one kernel launch and not one arithmetic operation added - proved from the diff |
+| **a hybrid ATTACHED and in RANS mode vs plain SST** | `k`, `omega` and `nut` **bit for bit** over three full `correct` steps - the gate with teeth behind the by-construction argument, and it is not vacuous: the run is required to have moved `k` |
+| `cuda/sst.cu` | carries no length-scale name at all (`lDes`, `l_DES`, `lIDDES`, `desSst`), checked - a bare "DES" search would be satisfied by deleting a `*DESIGN*` comment |
+| `grep -c atomic cuda/des.cu` | `0` |
+| a two-run bit-for-bit repeat of a hybrid `correct` | identical `f64` bits |
+
+### 57.12 Validation - what is run, and what is NOT
+
+**NOT run: the periodic hill (Frohlich, Mellen, Rodi, Temmerman & Leschziner,
+*JFM* 526 (2005) 19-66), `Re_b = 10 595`, separation at `x/h = 0.22`,
+reattachment at `x/h = 4.7`, and the Reynolds-stress profiles at
+`x/h = 0.05, 0.5, 2, 4, 6, 8`.** The design note names it as the right first
+DES gate for a code with no inflow-turbulence generator - it is streamwise-
+and spanwise-periodic, so none is needed - and that reasoning is correct. Four
+things stand between here and it, and none of them is a turbulence model:
+
+1. **There is no low-dissipation convection blending.** Travin et al. (2002)
+   publish one; S57.10 refuses the schemes that would silently damp the
+   resolved content instead of implementing it. A periodic-hill run made with
+   `linear` everywhere would be a central-difference LES with a RANS wall
+   treatment, not the published DES.
+2. **There is no time-averaging seam.** Every number in the reference database
+   is a time average over a statistically stationary sample, and this crate has
+   no `fieldAverage` equivalent - S44's `output` block writes instantaneous
+   fields.
+3. **The hill geometry is not a block.** `blockgen` builds graded axis-aligned
+   blocks; the periodic-hill mesh is a body-fitted curvilinear grid.
+4. **A run long enough to produce a statistically stationary sample on that
+   mesh is hours, not the seconds this repository's always-run gates take.**
+
+**Also NOT run: any resolved-turbulence case at all.** IDDES's WMLES branch is
+only meaningful when the inflow carries resolved turbulence, and there is no
+synthetic-turbulence inlet generator. Without one, `fdt~` selects the DDES
+branch everywhere and IDDES reduces to DDES with extra arithmetic. **That is
+correct behaviour** - it is what (57.13) is for - but it means the
+IDDES-specific machinery `f_e`, `f_B` and `h_wn` is exercised here as closed
+forms and as a length-scale field, not as a simulation.
+
+**What IS run** is every identity above: the bitwise shielding (57.10), the
+grid-induced-separation experiment 57-C on a real mesh pair, `h_wn` against
+the exact cell height, the four IDDES closed forms, the bitwise SST
+reproduction through (57.4), and the three-invariant and `nu_t + nu`
+separations that stop a wrong `r_d` passing on a log-layer profile alone.
+
+**What is therefore claimed, and what is not.** Claimed: the length scales are
+the published ones; the shielding function shields, provably; the hybrid
+reduces to its background model bit for bit in RANS mode; and the metric
+IDDES needs is computed correctly and deterministically. **Not claimed: that
+this solver reproduces a published separated-flow statistic.** No DES number
+in the literature has been reproduced here, and until one is, what this
+section delivers is a correct implementation of a published model rather than
+a validated DES capability. `ofgpu-validate` prints that distinction on every
+run rather than leaving it to be inferred.
+
+---
+
+## 58. What a Spalart-Allmaras or hybrid case says, the refusal list that shrank, and the pair tests
+
+S56 and S57 are the models. This section is the contract: what a case writes,
+what is refused, what moved from "recognised and refused" to "available", and
+the S13.4.1 pair tests that prove every one of those entries reaches the
+solver.
+
+`No GPL-licensed source was consulted.`
+
+### 58.1 The dictionary
+
+**RANS Spalart-Allmaras**, `constant/momentumTransport`:
+
+```
+simulationType  RAS;
+RAS
+{
+    model     SpalartAllmaras;
+    variant   noft2;          // noft2 | noft2-neg | ft2 | ft2-neg
+    turbulence on;
+    // every constant of S56.8 is settable here
+}
+```
+
+**A hybrid**, either spelling:
+
+```
+simulationType  LES;              |   simulationType  DDES;
+LES                               |   DES
+{                                 |   {
+    model  SpalartAllmarasDDES;   |       model  SpalartAllmarasDDES;
+    delta  maxDeltaxyz;           |       delta  maxDeltaxyz;
+    CDES   0.65;                  |       CDES   0.65;
+    Cdt1   8;  Cdt2  3;           |       Cdt1   8;  Cdt2  3;
+    ct     1.63;  cl  3.55;       |       ct     1.63;  cl  3.55;
+    Cw     0.15;                  |       Cw     0.15;
+    variant noft2;                |       variant noft2;
+}                                 |   }
+```
+
+Both are read by the same reader. The four hybrid names are
+`SpalartAllmarasDES`, `SpalartAllmarasDDES`, `SpalartAllmarasIDDES` and
+`kOmegaSSTDES`/`kOmegaSSTDDES`/`kOmegaSSTIDDES`; `simulationType DES|DDES|IDDES`
+selects the same reader and **the branch the model name carries must agree with
+the one `simulationType` names**, or it is a S13.4 error saying which two
+disagreed. `simulationType LES;` with a hybrid model name imposes no such
+constraint, because the name alone says which branch.
+
+**The `0/` files.** SA and its hybrids need `0/nuTilda` and `0/nut`. SST and
+its hybrids need `0/k`, `0/omega` and `0/nut`, exactly as S6.3 already does.
+`blockgen::write_case` writes `0/nuTilda` for every case it generates, with
+S56.7's boundary table: `fixedValue 0` at every wall - the ONE row of S29.1's
+`wallTreatment` table that does not vary with the treatment, because SA has no
+wall function - `fixedValue 3 nu` at an inlet, `zeroGradient` elsewhere.
+`RasModel::transported_fields()` answers the list; `dissipation_field()` is
+left exactly as it was and answers `None` for SA, because `nu~` is not a
+dissipation rate and overloading the accessor to say it is would be the same
+mistake `models/mod.rs` already argues against at length. **Two accessors that
+mean two different things, and both honest** - the design note's own
+recommendation, followed.
+
+**The seventh instance of the S13.4.1 failure, found here.**
+`io::case::dissipation_from_model` decides which `fvSchemes`/`fvSolution`
+entries fill the single dissipation slot in `TurbulenceControls`. It answers
+`"omega"` for a name containing `omega`, `"epsilon"` for one containing
+`epsilon` or `ke`, and **`None` otherwise - whereupon the reader falls back to
+"whichever entry the case happened to write"**. `"SpalartAllmaras"` contains
+none of those substrings. So without a fix, an SA case's `nu~` equation would
+have taken `div(phi,epsilon)`, `solvers/epsilon` and
+`relaxationFactors/equations/epsilon`, and
+
+```
+divSchemes { div(phi,nuTilda) Gauss linearUpwind grad(nuTilda); }
+solvers    { nuTilda { tolerance 1e-10; } }
+relaxationFactors { equations { nuTilda 0.5; } }
+```
+
+would every one of them have been read and thrown away. That is exactly the
+failure S13.4.1 exists to catch and it is the sixth-plus-one instance found in
+this project. The fix is one arm: `dissipation_from_model` answers
+`"nuTilda"` for the SA family, and every downstream reader follows, because
+they all go through that one function. Three pair tests below are the proof.
+
+### 58.2 The refusal list that shrank, and the one that did not
+
+`models/registry.rs` publishes four lists and their own doc comments say the
+menu and the code must not drift. Six names move at once here, which is
+exactly the hazard those comments name, so this section states the before and
+after and S58.5 gates both directions.
+
+| List | Removed | Added |
+|---|---|---|
+| `RECOGNISED_NOT_IMPLEMENTED` (RAS model names) | `SpalartAllmaras` | - |
+| `LES_RECOGNISED_NOT_IMPLEMENTED` (LES model names) | `SpalartAllmarasDES`, `SpalartAllmarasDDES`, `SpalartAllmarasIDDES`, `kOmegaSSTDES` | - |
+| `REGISTRY` (RAS names that select) | - | `SpalartAllmaras` |
+| `HYBRID_REGISTRY` (new) | - | the six hybrid names |
+| `available_models()` | - | `SpalartAllmaras` |
+| `available_hybrid_models()` (new) | - | the six |
+| `DELTA_RECOGNISED_NOT_IMPLEMENTED` | `IDDESDelta` | - |
+| `DELTA_HYBRID_ONLY` (new) | - | `IDDESDelta`, `IDDESDeltaSimple` |
+| `simulationType` refusal | `DES`, `DDES`, `IDDES` | - |
+| `common::driver_for` | - | `SpalartAllmaras` and `HybridSa` -> **`ofgpu-sa`** (S56.8), `HybridSst` -> the coupled drivers |
+
+**`IDDESDelta` does not join `DELTA_NAMES`.** `DELTA_NAMES` is the menu for
+`LES { delta ...; }` under a pure LES, and (57.17) needs `d_w` and `h_wn` and
+is defined only inside IDDES's own length-scale blend. A pure-LES case naming
+it is refused with a message saying it exists and where - the same shape as
+the existing `LES_MODEL_UNDER_RAS` hint, which tells a user asking for
+`Smagorinsky` under `RAS` that ofgpu has it and where to write it.
+
+**The `simulationType DES|DDES|IDDES` refusal carried a comment worth keeping:**
+*"a detached-eddy hybrid is a RANS model and an LES model with a switch between
+them, and the switch is the model."* That is correct, it is the whole content
+of S57, and it survives as the module doc of `models/des.rs` rather than being
+deleted with the refusal it justified.
+
+**Still refused, and now with a reason each.** `RECOGNISED_NOT_IMPLEMENTED`
+kept a bare hint - "a published model ofgpu has not got" - for every name in
+it. Six names remain and each now carries its own sentence naming what ofgpu
+has instead, because the difference between "we have not got it" and "we have
+not got it, here is the nearest thing and here is why they are not the same"
+is the difference between a dead end and a decision:
+
+| Name | What the refusal now says |
+|---|---|
+| `kOmegaSSTLM` | S58.3 |
+| `kOmegaSSTSAS` | a scale-adaptive model, not a hybrid with a grid-dependent switch: it reads the von Karman length scale from the second velocity derivative. `kOmegaSSTDDES`/`kOmegaSSTIDDES` are the grid-switched hybrids ofgpu has |
+| `kEpsilonPhitF`, `v2f` | four equations with an elliptic relaxation whose wall boundary condition couples two of them; `LaunderSharmaKE` is the low-Reynolds model ofgpu has (S33) |
+| `LRR`, `SSG` | Reynolds-stress transport: six coupled equations and a redistribution model, not an eddy-viscosity closure. Nothing here is close |
+
+### 58.3 `kOmegaSSTLM` stays refused, and this section says why plainly
+
+The task that produced S56 and S57 asked for the gamma-Re_theta transition
+model "if it fits in the pass, and if not, leave it refused and say so". **It
+did not fit, it is left refused, and this is the saying so.**
+
+What it would have taken, from the design note's own accounting: two more
+transport equations (`gamma` and `Re_theta~`), about twelve correlation
+fields, roughly 1100 lines of Rust and 500 of CUDA of which ~150 are piecewise
+polynomials that must be transcribed digit-perfect, one new `BcKind` in the
+middle of `field.rs`'s **flux-switched block** - whose own comment says the
+block must stay contiguous, which forces either a renumbering that touches
+every persisted `BcKind` integer including `.mcr` restart files, or a
+second disjoint range test in `cuda/field.cu` - and one bounded fixed-point
+iteration per cell for `Re_theta_eq`, which appears inside its own argument.
+That is a tranche, not a corner of one.
+
+**And the note itself argues the four-equation model is the wrong one to
+build.** Menter et al. (2015)'s one-equation `gamma` model has no
+`Re_theta~` equation, hence no implicit `Re_theta_eq` fixed point at all, and
+is Galilean-invariant where LM2009 is not - LM2009's `Re_theta_eq` uses
+`U = sqrt(u_k u_k)`, an ABSOLUTE velocity magnitude, so its answer changes if
+the frame is translated. That is a real defect and it is the one Menter's
+group fixed. The TMR carries the 2015 model with verification data under
+`SST-2003-Menter-Gamma-2015`.
+
+So the refusal message now says: `kOmegaSSTLM` is Langtry & Menter's
+four-equation gamma-Re_theta model (*AIAA J.* 47 (2009) 2894-2906, the paper
+that finally published the previously proprietary correlations - the 2006 pair
+withholds them and is not enough to write the model); ofgpu has neither it nor
+the 2015 one-equation `gamma` model; a transition prediction is not available
+from any model in this solver, and running `kOmegaSST` in its place would
+produce a fully turbulent boundary layer from the leading edge, which is a
+plausible converged wrong answer of exactly the kind S13.4 exists to stop.
+
+A refusal that names the model, the paper, the successor and the specific way
+the nearest available model would be wrong is a far better message than
+"a published model ofgpu has not got", and it costs one table entry.
+
+### 58.4 The pair tests
+
+S13.4.1: for every setting added, two cases identical in every byte but one,
+REQUIRED to produce different output, failing by name if they do not.
+**Twenty-nine**, of which twenty are two case documents differing in one entry.
+
+**Case-document pairs, read through the registry** - built by replacing one
+substring in one base document, so the two really do differ in one place and
+nowhere else:
+
+| # | The one entry | What must differ |
+|---|---|---|
+| 1 | `LES { model SpalartAllmarasDDES; }` -> `SpalartAllmarasDES` | the branch |
+| 2 | `LES { model SpalartAllmarasDDES; }` -> `SpalartAllmarasIDDES` | the branch |
+| 3 | `LES { model SpalartAllmarasDDES; }` -> `kOmegaSSTDDES` | the background, and hence `transported_fields()` |
+| 4 | `DES { CDES 0.65; }` -> `0.30` | the calibration |
+| 5 | `DES { Cdt1 8; }` -> `2` | the calibration |
+| 6 | `DES { Cw 0.15; }` -> `0.30` | the calibration |
+| 7 | `DES { delta maxDeltaxyz; }` -> `IDDESDeltaSimple` | the filter width |
+| 8 | `RAS { variant noft2; }` -> `noft2-neg` | the variant |
+| 9 | `RAS { variant noft2; }` -> `ft2` | the variant |
+| 10 | `RAS { Cb1 0.1355; }` -> `0.14` | the coefficients |
+| 11 | `RAS { Cv1 7.1; }` -> `8.0` | the coefficients |
+| 12 | `RAS { Cn1 16; }` -> `12` | the coefficients |
+
+**Case-document pairs, run through `ofgpu-sa` end to end** - a whole run of
+the driver on a `blockgen`-generated case, differing in one dictionary line,
+compared on everything the run WROTE. These are the sharpest of the set,
+because they go through the case reader, the model and the writer:
+
+| # | The one entry | Why it is here |
+|---|---|---|
+| 13 | `divSchemes/div(phi,nuTilda)` | **S58.1's seventh instance.** Inert before S56, because `dissipation_from_model` answered `None` and the reader fell back to `epsilon` |
+| 14 | `relaxationFactors/equations/nuTilda` | same route, same fix |
+| 15 | `solvers/nuTilda/maxIter` | same route, same fix |
+| 16 | `RAS { variant ...; }` | the variant, end to end |
+| 17 | `RAS { Cb1 ...; }` | |
+| 18 | `RAS { sigmaNut ...; }` | |
+| 19 | `RAS { Cv1 ...; }` | reaches `nut` and nothing else - see the rig pair below |
+| 20 | `RAS { turbulence off; }` | S6.1's own switch, on this model |
+
+**Rig-level pairs**, where a case document cannot reach the quantity directly:
+
+| # | The one setting | What must differ |
+|---|---|---|
+| 21 | the branch, DES97 -> DDES | `dtil` |
+| 22 | the branch, DDES -> IDDES | `dtil` |
+| 23 | `Cdt1` `8` -> `2` | `f_d`, hence `dtil` |
+| 24 | `CDES` `0.65` -> `0.30` | `dtil` |
+| 25 | `Cw` `0.15` -> `0.30` | `Delta_IDDES` |
+| 26 | `ct` `1.63` -> `1.87` | `f_e` |
+| 27 | `IDDESDelta` -> `IDDESDeltaSimple` | `Delta_IDDES` - **on a nearly ISOTROPIC block**, because S57.4's own finding is that the two widths cannot differ on an anisotropic one |
+| 28 | `variant noft2` -> `noft2-neg`, one cell seeded negative | `nuTilda` after one `correct` |
+| 29 | `Cv1` `7.1` -> `8.0` | `nut` - and `nuTilda` must **NOT** move, because `c_v1` does not appear in the `nu~` equation at all |
+
+Pair 29's second half is a correction the test itself forced: its first draft
+compared `nuTilda`, found the two runs bit-identical - correctly - and would
+have reported a real setting as inert. `c_v1` reaches `nu_t` and nothing else.
+
+**Refusals fired by name**, each a separate test asserting the message names
+the setting: `Cw1` under SA (56.6), and `Cmu`, `C1`, `C2`, `C3`, `sigmak`,
+`sigmaEps`, `alphak`, `alphaEps`, `betaStar` and `A0` beside it; `variant`
+with an unknown value, with the menu; `Cn1` at or past (56.14)'s bound;
+`Ct3 <= 1` under a `-neg` variant; `CDES` under an SST hybrid and
+`CDES1`/`CDES2` under an SA one; gravity under SA; `steadyState` under a
+hybrid; a 2-D mesh under a hybrid; `div(phi,U)` upwind-biased under a hybrid
+(four spellings, with the three low-dissipation ones accepted in the same
+test); `cubeRootVol`, `Scotti`, `vanDriest` and `smooth` as a hybrid width;
+`IDDESDelta` under a pure LES; `simulationType DDES;` with
+`model SpalartAllmarasIDDES;`; a model `ofgpu-sa` does not build, whose
+refusal must name a binary that exists; and `kOmegaSSTLM`, whose message must
+name Langtry & Menter (2009), Menter et al. (2015) and the specific way
+`kOmegaSST` would be wrong in its place.
+
+### 58.5 What must hold
+
+| Check | Expected |
+|---|---|
+| every name removed from a refusal list is in a registry | and reachable: selecting it returns the model it names |
+| every name in a registry is in the matching `available_*()` menu | and vice versa - the drift the lists' own doc comments warn about |
+| every name still in a refusal list is NOT in any registry | `kOmegaSSTLM`, `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` |
+| every still-refused name's message | names an alternative that IS implemented, or says plainly that none is close |
+| `dissipation_from_model("SpalartAllmaras")` | `Some("nuTilda")`, and `Some("omega")` for `kOmegaSSTDDES`, and unchanged for every name that already answered |
+| `RasModel::transported_fields()` | `[]`, `["k","epsilon"]`, `["k","omega"]`, `["nuTilda"]` per model; `dissipation_field()` unchanged and `None` for SA |
+| the twenty-nine pairs | each DIFFERENT, each failing by name |
+| pair 29's second half | `nuTilda` must NOT differ - `c_v1` does not appear in the `nu~` equation |
+| `ofgpu-generate-mesh` + `ofgpu-sa` | compose: a generated case runs Spalart-Allmaras with no hand-written file |
+| the refusals | each fires, each names the setting and the menu |
+| S6.1, S6.2, S6.3, S33, S40, S41 outputs | **unchanged, bit for bit**, on a case that names none of this |

@@ -895,7 +895,7 @@
       ]
     },
     "JsonRadiation": {
-      "description": "SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by\n[`RadiationModel::from_name`] - the §13.4 gate that names both as what is\navailable and anything else as an error.",
+      "description": "SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by\n[`RadiationModel::from_name`] - the §13.4 gate that names what is\navailable and anything else as an error.\n\n**This block cannot express §49/§50's surface-to-surface model**, and\nnaming `viewFactor` here is an error rather than a silent substitution:\nthat model needs an ENCLOSURE - which patches radiate, at what emissivity,\nand how the openings close - and there is nowhere here to say it. It is\nread from `constant/radiationProperties` instead (SPEC-LIT §51.1), and\n§50.12 records the missing fluid-side driver.",
       "type": "object",
       "properties": {
         "a": {
@@ -912,7 +912,7 @@
           "format": "double"
         },
         "model": {
-          "description": "`\"P1\"` or `\"fvDOM\"`; see [`RadiationModel::from_name`] for what\nhappens with anything else.",
+          "description": "`\"P1\"` or `\"fvDOM\"`; see [`RadiationModel::from_name`] for what\nhappens with anything else, and this struct's own doc for why\n`\"viewFactor\"` is refused here in particular.",
           "type": "string"
         },
         "sigmaS": {

@@ -501,25 +501,36 @@ extern "C" __global__ void lduSetValues
 //  conflicts - which is what lets an external solver (AMGX, cuSPARSE, cuDSS)
 //  be handed the matrix without the host ever seeing a coefficient.
 //
-//  Only diag/upper/lower go in. A coupled face's boundaryCoeffs is an
-//  off-diagonal for which the CSR pattern has no column - the pattern holds
-//  the diagonal plus one entry per incident internal face - so a matrix with
-//  live couplings cannot be exported this way. The caller checks for that.
+//  SPEC-LIT S48.2. A COUPLED boundary face's boundaryCoeffs is an
+//  off-diagonal against a cell that is not a face neighbour, and the pattern
+//  now carries a column for it (`coupledSlot`, -1 on an uncoupled face). The
+//  SIGN is the one thing to get right, and it follows from lduAmul, which
+//  applies the coupled term as
 //
-//  One launch covers both loops: the grid is sized to the larger of the two
-//  counts and each write is guarded, which costs one predicate and saves a
-//  kernel launch.
+//      sum -= boundaryCoeffs[bf]*psi[nbr]
+//
+//  so the matrix ENTRY is -boundaryCoeffs[bf] and the export negates. Before
+//  S48 this write did not exist at all, and the exported matrix was therefore
+//  a different operator from the one amul applies on every mesh with a cyclic
+//  patch - which is why the AMGX backend refused them.
+//
+//  One launch covers all three loops: the grid is sized to the largest of the
+//  three counts and each write is guarded, which costs two predicates and
+//  saves two kernel launches.
 extern "C" __global__ void lduCsrFill
 (
     ofscalar* __restrict__ val,
     const ofscalar* __restrict__ diag,
     const ofscalar* __restrict__ upper,
     const ofscalar* __restrict__ lower,
+    const ofscalar* __restrict__ boundaryCoeffs,
     const oflabel* __restrict__ diagSlot,
     const oflabel* __restrict__ upperSlot,
     const oflabel* __restrict__ lowerSlot,
+    const oflabel* __restrict__ coupledSlot,
     oflabel nCells,
-    oflabel nFaces
+    oflabel nFaces,
+    oflabel nbf
 )
 {
     const oflabel t = OFGPU_TID;
@@ -533,5 +544,11 @@ extern "C" __global__ void lduCsrFill
     {
         val[upperSlot[t]] = upper[t];
         val[lowerSlot[t]] = lower[t];
+    }
+
+    if (t < nbf)
+    {
+        const oflabel s = coupledSlot[t];
+        if (s >= 0) val[s] = -boundaryCoeffs[t];
     }
 }

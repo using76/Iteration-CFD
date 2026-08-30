@@ -78,6 +78,14 @@ name = "ofgpu-k-omega"
 path = "src/bin/k_omega.rs"
 
 [[bin]]
+name = "ofgpu-sa"
+path = "src/bin/sa.rs"
+
+[[bin]]
+name = "ofgpu-datacentre"
+path = "src/bin/datacentre.rs"
+
+[[bin]]
 name = "ofgpu-validate"
 path = "src/bin/validate.rs"
 
@@ -108,3 +116,7 @@ path = "src/bin/vof.rs"
 [[bin]]
 name = "ofgpu-fire"
 path = "src/bin/fire.rs"
+
+[[bin]]
+name = "ofgpu-cht"
+path = "src/bin/cht.rs"

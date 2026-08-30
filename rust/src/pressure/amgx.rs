@@ -265,14 +265,14 @@ impl PressureBackend for AmgxBackend {
         m: &GpuMesh,
         _probe: &SystemProbe,
     ) -> Result<()> {
-        if hm.b_nbr_cell.iter().any(|c| *c >= 0) {
-            return Err(Error::Config(
-                "AMGX backend: this mesh has a coupled (cyclic) patch, whose \
-                 boundaryCoeffs live outside the CSR - AMGX would be solving a \
-                 different matrix from the reference"
-                    .into(),
-            ));
-        }
+        // SPEC-LIT §48.2 removed the guard that used to stand here. A coupled
+        // patch's `boundaryCoeffs` now has a column in the CSR and
+        // `lduCsrFill` writes it, so the exported matrix IS the operator
+        // `amul` applies - which it was not before, and which is why every
+        // periodic mesh was refused. `CsrPattern::build` still refuses the one
+        // case it cannot represent (two cells joined by both an internal face
+        // and a coupled boundary face), and that refusal arrives from
+        // `Session::new` below.
         self.inner = Some(imp::Session::new(gpu, hm, m, &self.config)?);
         Ok(())
     }
@@ -424,7 +424,7 @@ mod imp {
 
     impl Session {
         pub fn new(gpu: &Gpu, hm: &HostMesh, _m: &GpuMesh, config: &str) -> Result<Self> {
-            let pattern = CsrPattern::build(hm);
+            let pattern = CsrPattern::build(hm)?;
             let csr = pattern.upload(gpu)?;
             let lduk = LduKernels::new(gpu)?;
 

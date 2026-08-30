@@ -248,6 +248,14 @@ fn topology_override(kind: PatchKind) -> Option<BcKind> {
         PatchKind::Empty => Some(BcKind::Empty),
         PatchKind::Cyclic | PatchKind::Processor => Some(BcKind::Cyclic),
         PatchKind::Symmetry => Some(BcKind::Symmetry),
+        // SPEC-LIT S47.4: a conjugate interface is topologically coupled, but
+        // WHICH condition it carries is the field's business - `T` gets
+        // `CoupledTemperature` from `crate::cht`, and any other field on the
+        // thermal mesh gets whatever it asked for. Forcing `BcKind::Cyclic`
+        // here would route the face through `fldCorrectBcScalar`'s cyclic
+        // branch, which interpolates `psi[nbr]` and cannot represent the
+        // `R_c` jump (S47.3).
+        PatchKind::Interface => None,
         PatchKind::Wall | PatchKind::Generic => None,
     }
 }
@@ -527,6 +535,52 @@ fn scalar_patch(
             // carried before 39; `vofAlphaContactAngleGrad` rewrites it every
             // outer iteration once `grad(alpha)` exists to build it from.
             BcKind::ContactAngle => (0.0, cos_theta0.unwrap_or(0.0), 0.0),
+
+            // SPEC-LIT 47.9: the conjugate interface. Seeded ADIABATIC -
+            // `fr = 0`, `refGrad = 0` - not as a degenerate Dirichlet, because
+            // there is nothing sensible to be Dirichlet AT until the other
+            // region's temperature exists. `ConjugateInterfaces::update`
+            // rewrites all three numbers from the series conductance before
+            // the first assembly, the same "degenerate until the kernel can
+            // run" convention `fixedFluxTemperature` and every wall function
+            // above use; and if a case marks a face `coupledTemperature` and
+            // never builds a thermal mesh for it, adiabatic is the honest
+            // answer rather than a silent fixed value.
+            BcKind::CoupledTemperature => (0.0, 0.0, 0.0),
+
+            // SPEC-LIT 50.8: the surface-to-surface radiating wall. Seeded
+            // ADIABATIC for the same reason the conjugate interface above is:
+            // there is nothing sensible to be Dirichlet at until the
+            // irradiation exists, and `S2s::update` rewrites all three
+            // numbers from (S50.12) before the first assembly. If a case
+            // marks a face `greyDiffusiveRadiationViewFactor` and never
+            // builds an enclosure for it, adiabatic is the honest answer
+            // rather than a silent fixed value.
+            BcKind::S2sWall => (0.0, 0.0, 0.0),
+
+            // SPEC-LIT 52.4/53.3: the fan patch and the plenum-side porous
+            // jump, seeded as a FIXED VALUE at zero - and unlike the three
+            // conditions above, that is not a convenience.
+            //
+            // Both conditions have `fr = 1/(1 + beta)` with `beta >= 0`, so
+            // `fr` is in `(0, 1]` for EVERY finite curve slope and every
+            // finite resistance: a fan patch always PINS THE PRESSURE LEVEL.
+            // `Simple::initialise` decides whether the Poisson operator is
+            // singular by reading `fr` (`pressure_has_a_dirichlet`), and it
+            // does that BEFORE `crate::fan::FlowDevices::update` has run, so
+            // a zero seed would tell it the problem is unpinned. It would
+            // then pin a reference cell as well, and `fix_pressure_level`
+            // would subtract that cell's value after every solve - fighting
+            // the absolute pressure the fan curve is trying to impose. The
+            // symptom is a diverging outer iteration, and it is what a first
+            // draft of `ofgpu-datacentre` did.
+            //
+            // `fr = 1` at `refValue = 0` is also the physically right seed:
+            // S52.4 shows a fan at `S = 0` IS a `fixedValue`, so the seed is
+            // the shut-off point of whatever curve the patch turns out to
+            // carry. `crate::fan` overwrites all three numbers with the real
+            // ones before the first assembly.
+            BcKind::FanPressure | BcKind::PorousJumpPressure => (1.0, 0.0, 0.0),
 
             // Vector-only conditions on a scalar field. Naming one is a
             // mistake in the case, not something to guess at.
@@ -854,7 +908,22 @@ fn vector_patch(
             | BcKind::FixedFluxTemperature
             // SPEC-LIT 39.3: the contact angle is a condition on `alpha`, a
             // scalar. On a vector field it is a mistake in the case.
-            | BcKind::ContactAngle => {
+            | BcKind::ContactAngle
+            // SPEC-LIT 47.9: and so is a conjugate interface, which
+            // `BcKind::from_name` already refuses on any field but `T`. This
+            // arm is what makes that refusal total rather than a name check.
+            | BcKind::CoupledTemperature
+            // SPEC-LIT 50.8: and so is a radiating wall, which
+            // `BcKind::from_name` already refuses on any field but `T`.
+            | BcKind::S2sWall
+            // SPEC-LIT 52.5/53.3: the fan and the porous jump are conditions
+            // on the PRESSURE, a scalar. `BcKind::from_name` already refuses
+            // them on any field but `p`; this arm is what makes that refusal
+            // total rather than a name check - and note S52.10: the VELOCITY
+            // side of a fan patch needs no new condition at all, because
+            // `pressureInletOutletVelocity` is exactly right.
+            | BcKind::FanPressure
+            | BcKind::PorousJumpPressure => {
                 return Err(Error::Field {
                     field: field.to_string(),
                     msg: format!(
@@ -2090,7 +2159,41 @@ mod tests {
             // round trip is asked of them on the field they belong to - and
             // the refusal on any other field is its own test,
             // `field::tests::a_contact_angle_belongs_on_a_phase_fraction_and_nowhere_else`.
-            let field = if name.ends_with("AlphaContactAngle") { "alpha.water" } else { "psi" };
+            //
+            // SPEC-LIT 47.9 extends the same rule once more: the two conjugate
+            // interface spellings are legal on the TEMPERATURE and refused
+            // anywhere else, because nothing but `crate::cht` rewrites the
+            // triple they are defined by. Their refusal on any other field is
+            // `cht::tests::a_coupled_temperature_on_any_other_field_is_an_error_naming_t`.
+            let field = if name.ends_with("AlphaContactAngle") {
+                "alpha.water"
+            } else if matches!(
+                *name,
+                "coupledTemperature"
+                    | "thermalContactResistance"
+                    // SPEC-LIT 50.8 extends the same rule a third time: the
+                    // surface-to-surface radiating wall is legal on the
+                    // TEMPERATURE and refused anywhere else, because nothing
+                    // but `crate::s2s` rewrites the triple it is defined by.
+                    // Its refusal on any other field is
+                    // `s2s::tests::a_radiating_wall_belongs_on_a_temperature_and_nowhere_else`.
+                    | "greyDiffusiveRadiationViewFactor"
+                    | "s2sWall"
+            ) {
+                "T"
+            } else if matches!(
+                *name,
+                // SPEC-LIT 52.5/53.3 extend the same rule to the PRESSURE:
+                // a fan curve and a porous jump are legal on `p` and refused
+                // anywhere else, because nothing but `crate::fan` rewrites the
+                // triple they are defined by. Their refusal on any other field
+                // is `fan::tests::a_fan_condition_on_a_field_that_is_not_the_pressure_is_refused_by_name`.
+                "fanPressure" | "fan" | "porousJumpPressure" | "porousBafflePressure"
+            ) {
+                "p"
+            } else {
+                "psi"
+            };
             let k = BcKind::from_name(name, field, "inlet")
                 .unwrap_or_else(|e| panic!("{name} is on the menu but rejected: {e}"));
 

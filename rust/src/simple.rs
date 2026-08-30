@@ -310,6 +310,17 @@ pub struct Simple<'m> {
     pinned: bool,
     reference_cell: usize,
 
+    /// SPEC-LIT §52/§53's fan patches and porous jumps, when a driver
+    /// attached any.
+    ///
+    /// `None` for every driver that existed before §52, and the ONLY thing
+    /// this field does on that path is fail one `if let` in
+    /// [`Self::correct_outer_impl`]. That is how "the default is bitwise
+    /// unmoved" is provable from the diff rather than argued: with no flow
+    /// devices attached, not one kernel launch or arithmetic operation in
+    /// this file changes.
+    flow_devices: Option<crate::fan::FlowDevices>,
+
     fvk: FvKernels,
     lduk: LduKernels,
     fldk: FieldKernels,
@@ -355,6 +366,7 @@ impl<'m> Simple<'m> {
             residual_control: None,
             pinned: false,
             reference_cell: 0,
+            flow_devices: None,
 
             fvk: FvKernels::new(gpu)?,
             lduk: LduKernels::new(gpu)?,
@@ -392,6 +404,27 @@ impl<'m> Simple<'m> {
 
     pub fn controls(&self) -> &SimpleControls {
         &self.ctrl
+    }
+
+    /// Attach SPEC-LIT §52's fan patches and §53's porous jumps.
+    ///
+    /// Once attached, [`Self::correct_outer`] runs the device update of
+    /// [`crate::fan::FlowDevices::update`] once per pressure corrector,
+    /// immediately after `rhie_chow` has written `rAU_f`, `rAU_f|Sf|` and
+    /// `phi_HbyA` and immediately before the pressure assembly reads them.
+    /// That order is not a convenience: the fan's `SIGMA_D` must be the
+    /// conductance the matrix is actually assembled with, or the flow rate
+    /// the triple imposes is not the flow rate the matrix delivers.
+    pub fn set_flow_devices(&mut self, devices: crate::fan::FlowDevices) {
+        self.flow_devices = Some(devices);
+    }
+
+    pub fn flow_devices(&self) -> Option<&crate::fan::FlowDevices> {
+        self.flow_devices.as_ref()
+    }
+
+    pub fn flow_devices_mut(&mut self) -> Option<&mut crate::fan::FlowDevices> {
+        self.flow_devices.as_mut()
     }
 
     /// Give the outer loop a stopping criterion.
@@ -686,6 +719,18 @@ impl<'m> Simple<'m> {
             // `H` is re-evaluated from the velocity the PREVIOUS corrector
             // produced, with the momentum matrix held frozen (Issa 1986).
             self.momentum.rhie_chow(gpu, &self.u)?;
+
+            // SPEC-LIT §52/§53: the fan triples and the porous-jump
+            // coefficient division, between `rhie_chow` writing the face
+            // coefficients and `assemble_pressure` reading them. `None` for
+            // every driver that does not use them, in which case this is one
+            // failed test and nothing else.
+            if let Some(fd) = &mut self.flow_devices {
+                let Self { momentum, phi, p, .. } = self;
+                let (phi_hbya, rauf, rauf_mag_sf) = momentum.jump_targets();
+                fd.update(gpu, m, phi, phi_hbya, rauf, rauf_mag_sf, p)?;
+                field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
+            }
 
             // The non-orthogonal correctors: the same `phi_HbyA`, the
             // explicit correction re-evaluated against the latest `p`
