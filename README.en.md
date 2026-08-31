@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 1,595 unit tests across all targets (1,447 in the lib), 747 `ofgpu-validate` checks |
+| Validation | 1,608 unit tests across all targets (1,460 in the lib), 747 `ofgpu-validate` checks |
 
 ---
 
@@ -246,17 +246,91 @@ partitioners, runs them in one process and compares every cell:
 | `cases/burnerPlume.jsonc` | 32,768 | **9/9** |
 | `cases/plume` | 82,320 | **9/9** |
 
-**Still one process and one GPU.** There is no MPI, no NCCL and no second
-device; the parts exchange through a device-to-device copy on one card. What
-the gate runs is a fixed-iteration Jacobi sweep over a matrix assembled on the
-whole mesh — which is the most that *can* be gated today, because a cross-part
-reduction is not partition-invariant and the sixteen assembly kernels of §70.5
-are not either. Both are refused by name in §71.7, along with the multi-colour
-preconditioner, the FFT pressure backend, decomposed I/O and Lagrangian
-parcels. **METIS 5.2.x is Apache-2.0** (verified from its `LICENSE`) and is
-deliberately not linked: §71.2 gives the three reasons, the deciding one being
-that its output depends on its build, which would make the partition a property
-of the linked library rather than of the mesh.
+SPEC-LIT §72 removes the next obstacle: the **cross-part reduction**. Every dot
+product, residual, volume mean and patch total in the crate is a sum over a set
+that a partition splits differently every time, and floating-point addition is
+not associative. The cheap answer — run each part's existing reduction and
+*gather* the `P` partials into the one-block kernel this project already owns —
+is implemented, and it is **not** enough: it is reproducible run to run for a
+fixed cut and it moved in 20 of 108 relabelled decompositions on the solver's
+own output, and 75 of 108 on an adversarial field. What is enough is an
+accumulator in which addition *is* associative. Every term is split exactly
+into four 30-bit integer limbs against one **global** anchor, the limbs are
+summed as `i64`, and the result is converted back once — so the answer is a
+function of the multiset of terms and of nothing else. Over the four cases
+above, at 2, 3 and 4 parts, three partitioners, **and every relabelling of every
+cut — 108 decompositions — the exact sum and dot product are bitwise identical,
+every time.** It costs a measured **four to five times** the plain reduction, and
+because of that number **nothing calls it yet**; §72.6 and §72.7 say so rather
+than implying otherwise.
+
+SPEC-LIT §73 puts the two together and runs a real solve: **PCG and PBiCGStab
+over a decomposed mesh**, to a tolerance rather than for a fixed count, with one
+halo exchange per matrix product and none anywhere else — every other step of
+both recurrences is elementwise on a cell's own values. `ofgpu-decompose` gates
+that too, and the criterion is stricter than §71's, because the convergence test
+now reads a residual the exact accumulator did not move: the field must be
+bit-identical **and the solve must stop on the same iteration**.
+
+| Case | Cells | PCG / PBiCGStab, whole mesh | Decomposed |
+|---|---|---|---|
+| `cases/channelPeriodicWF.jsonc` (cyclic) | 192 | 29 / 20 iterations | **18/18 bitwise identical** |
+| `cases/channel` | 24,000 | 124 / 79 | **18/18** |
+| `cases/burnerPlume.jsonc` | 32,768 | 97 / 62 | **18/18** |
+| `cases/plume` | 82,320 | 125 / 78 | **18/18** |
+| `cases/gb_800000` | 800,000 | 286 / 174 | **6/6** |
+
+**78 of 78**, at 2, 3 and 4 parts under three partitioners, every cell and every
+iteration count.
+
+The preconditioner is where the cost is, and §73.5 measures it rather than
+arguing it. A **diagonal** preconditioner is elementwise, and a part's diagonal
+is bitwise the whole mesh's, so it is partition-invariant *for free*: its
+iteration count is the same integer at every part count on every case — 1.00×,
+not approximately. **DIC and DILU are not.** The factorisation is sequential
+across colours and the sequence crosses cuts, so what runs is each part's own
+submatrix with the couplings across every cut dropped — **block Jacobi, not
+restricted additive Schwarz**, because the halo is read by the matrix product
+and by nothing in the preconditioner, so there is no overlap to restrict. Its
+cost at 16 parts, over the five cases above: **1.03× to 1.84× the whole-mesh
+iteration count**, cheapest on the largest mesh, where the whole-mesh DIC is
+worth 2.0× over Jacobi and the block-local one still buys 1.95×. Two results
+contradict the obvious expectation and both are reported: the degradation is a
+**step function of which direction the cut crosses**, not a smooth function of
+the part count (`cases/channel` holds at 62 iterations through 4 parts and jumps
+to 101 at 8), and it is **not monotone** — on the 800,000-cell mesh the
+block-local DILU takes *fewer* iterations at 8 parts than on the whole mesh,
+because BiCGStab's count is not a monotone functional of preconditioner quality.
+This project's own test asserted that it was, and had to be corrected.
+
+**Still one process and one GPU, and no strong-scaling number is published.**
+There is no MPI and no NCCL: this machine has one device, and the installed CUDA
+13.3 toolkit contains no NCCL at all — NVIDIA ships it for Linux only. Running
+`P` parts as `P` processes on one card would measure context switching, so that
+number is refused rather than invented. What §73.6 publishes instead is
+measured: the per-cell cost of an iteration (0.90 ns at 800,000 cells), the
+collective count per iteration (one exchange and two reductions for PCG, two and
+four for PBiCGStab), and the cells-per-GPU at which communication overtakes
+arithmetic for a *named* range of collective latencies. It also reports where
+the communication volume **stops improving** — at 8 parts on two of the five
+cases — and diagnoses that it is the **partitioner**, not the solver: the
+Hilbert index normalises each axis to its own extent, so on a 2-D mesh it sorts
+by the `z = 0` slice of a three-dimensional curve and fragments, and on a mesh
+four cells deep it spends a top-level bit on the thin direction. On
+`cases/channel` at 8 parts the plain linear cut is measured 14× better. That is
+named in §73.7 and **not fixed here**.
+
+The sixteen assembly kernels of §70.5 are still not partition-invariant, so a
+decomposed run is handed a matrix assembled on the whole mesh; they are refused
+by name in §71.7 along with the FFT pressure backend, decomposed I/O and
+Lagrangian parcels, §72.7 adds the decomposed enclosure and the cut fan patch,
+and §73.7 adds the pipelined Krylov variants (on the strength of Cools 2019's
+accuracy result), the exact per-colour distributed factorisation, and
+communication/computation overlap. **Nothing in the crate calls any of it yet**,
+so no default can move. **METIS 5.2.x is Apache-2.0** (verified from its
+`LICENSE`) and is deliberately not linked: §71.2 gives the three reasons, the
+deciding one being that its output depends on its build, which would make the
+partition a property of the linked library rather than of the mesh.
 
 ---
 
@@ -739,7 +813,7 @@ raise `fatal error C1189` under the traditional MSVC preprocessor.
 | `ofgpu-graph-bench` | CUDA graph against per-launch execution |
 | `ofgpu-dispatch-bench` | Runtime dispatch cost |
 | `ofgpu-probe` | Device properties |
-| `ofgpu-decompose` | Cut a case into parts, run them in one process, and report whether any bit moved (SPEC-LIT §71) |
+| `ofgpu-decompose` | Cut a case into parts, run them in one process, and report whether any bit moved (SPEC-LIT §71); reduce over every relabelling of the cut and report whether the reduction moved (§72); then solve it with distributed PCG and PBiCGStab and report whether the field or the iteration count moved, with the block-local DIC/DILU iteration ladder and the per-iteration cost (§73) |
 | `ofgpu-generate-mesh` | Case generation |
 | `ofgpu-k-epsilon`, `ofgpu-k-omega` | Turbulence models, standalone |
 | `ofgpu-sa` | Spalart-Allmaras and the DES97/DDES/IDDES family, standalone (SPEC-LIT §56–§58) |
@@ -812,7 +886,11 @@ Convert binary-format cases to ASCII before use.
 
 ## Limitations
 
-- **No MPI or multi-GPU support.** Single GPU only.
+- **No MPI or multi-GPU support.** Single GPU only. The decomposition, the
+  halo, the partition-invariant reduction and a distributed PCG/PBiCGStab all
+  exist and are gated (SPEC-LIT §71–§73), but they run `P` parts in one
+  process on one card; no communication library is linked and no
+  strong-scaling number is published.
 - **AMGX is provided behind the `amgx` Cargo feature and is off by default.**
   NVIDIA's Windows support is limited and the newest verified toolkit is CUDA
   12.2, against 13.3 on the development machine. With the feature off, the

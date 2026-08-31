@@ -100,10 +100,10 @@ const MAX_REDUCE_BLOCKS: usize = 1024;
 /// perturb a real norm, and it cannot produce a spurious huge ratio either:
 /// `norm == 0` forces `b == A·x_ref == A·psi`, so the numerator is exactly
 /// zero at the same time.
-const NORM_EPS: Scalar = Scalar::MIN_POSITIVE;
+pub(crate) const NORM_EPS: Scalar = Scalar::MIN_POSITIVE;
 
 /// Grid for a reduction over `n` items, and the number of partials it writes.
-fn reduce_geometry(n: usize) -> (LaunchConfig, usize) {
+pub(crate) fn reduce_geometry(n: usize) -> (LaunchConfig, usize) {
     let blocks = n.div_ceil(BLOCK as usize).clamp(1, MAX_REDUCE_BLOCKS);
     (
         LaunchConfig {
@@ -127,7 +127,7 @@ pub fn reduce_partitions(n: usize) -> usize {
 }
 
 /// One block: the second stage of every reduction.
-fn one_block() -> LaunchConfig {
+pub(crate) fn one_block() -> LaunchConfig {
     LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (BLOCK, 1, 1),
@@ -136,7 +136,7 @@ fn one_block() -> LaunchConfig {
 }
 
 /// One thread: every scalar update.
-fn one_thread() -> LaunchConfig {
+pub(crate) fn one_thread() -> LaunchConfig {
     LaunchConfig {
         grid_dim: (1, 1, 1),
         block_dim: (1, 1, 1),
@@ -144,7 +144,7 @@ fn one_thread() -> LaunchConfig {
     }
 }
 
-fn to_label(n: usize) -> Result<Label> {
+pub(crate) fn to_label(n: usize) -> Result<Label> {
     Label::try_from(n)
         .map_err(|_| Error::Config(format!("solver: {n} does not fit in a label")))
 }
@@ -602,7 +602,7 @@ pub fn device_max_mag(
     Ok(())
 }
 
-fn finish_sum(
+pub(crate) fn finish_sum(
     gpu: &Gpu,
     k: &SolverKernels,
     out: &mut DevBuf<Scalar>,
@@ -680,7 +680,7 @@ pub fn amul(
     Ok(())
 }
 
-fn vec_copy(
+pub(crate) fn vec_copy(
     gpu: &Gpu,
     k: &SolverKernels,
     dst: &mut DevBuf<Scalar>,
@@ -727,7 +727,7 @@ pub fn vec_sub(
     Ok(())
 }
 
-fn set_scalar(
+pub(crate) fn set_scalar(
     gpu: &Gpu,
     k: &SolverKernels,
     dst: &mut DevBuf<Scalar>,
@@ -743,7 +743,7 @@ fn set_scalar(
     Ok(())
 }
 
-fn copy_scalar(
+pub(crate) fn copy_scalar(
     gpu: &Gpu,
     k: &SolverKernels,
     dst: &mut DevBuf<Scalar>,
@@ -761,7 +761,7 @@ fn copy_scalar(
 
 /// `q = num/den`, both operands and the result device-resident. Guarded
 /// against a zero denominator on the device; see `cuda/solver.cu`.
-fn divide_scalar(
+pub(crate) fn divide_scalar(
     gpu: &Gpu,
     k: &SolverKernels,
     q: &mut DevBuf<Scalar>,
@@ -1026,7 +1026,7 @@ pub fn build_preconditioner(
 /// `y = M^-1 x`. With no preconditioner this is a copy, which keeps the two
 /// solvers branch-free at the cost of one bandwidth-bound pass.
 #[allow(clippy::too_many_arguments)]
-fn precondition_parts(
+pub(crate) fn precondition_parts(
     gpu: &Gpu,
     k: &SolverKernels,
     y: &mut DevBuf<Scalar>,
@@ -1200,7 +1200,7 @@ pub fn device_norm_factor(
 /// flag. No host arithmetic: the tolerance is multiplied by the norm factor on
 /// the device rather than the residual being divided by it.
 #[allow(clippy::too_many_arguments)]
-fn convergence_test(
+pub(crate) fn convergence_test(
     gpu: &Gpu,
     k: &SolverKernels,
     flag: &mut DevBuf<Label>,

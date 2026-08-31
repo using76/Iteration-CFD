@@ -18588,3 +18588,1107 @@ not a measurement:
   is a guard, not an audit.
 
 ---
+
+## 72. Reductions that do not move when the mesh is cut
+
+§70 made the order a row of `A psi` is summed in a property of the mesh; §71
+cut the mesh and moved data across the cuts. Both stopped in the same place,
+and both said so by name: **a cross-part reduction is not partition-invariant,
+and until it is, nothing that contains one can be decomposed.** That is every
+Krylov solve, every SIMPLE loop, every residual, `contErr`'s denominator, the
+thermostat's volume mean, the fan curve's patch flow rate and the enclosure's
+row sums. This section supplies the reduction.
+
+The gate is one sentence, and it has two halves. **The same terms, dealt out to
+1, 2, 3 and 4 parts under every partitioner this repository has, must reduce to
+the same bits — and must still do so when the part labels are permuted.** The
+second half is the one that matters: an accumulator can be deterministic for
+one labelling and still be a function of the labelling, and only a permutation
+finds that out.
+
+This section also does something the previous two did not have to. The
+instruction it was written against — and the design note it came from — says to
+build the cheap construction: run each part's existing reduction and *gather*
+the `P` partials into the one-block kernel this project already owns. That
+construction is real, it is four lines, it is implemented here as
+`ExactReduction::gathered_sum`, and **it does not pass the gate above.** §72.5
+says why in one line of algebra and §72.9 measures how often it fails on real
+cases. What passes the gate is an accumulator in which addition is associative,
+which means integers.
+
+**Sources.** Every DOI below was checked against Crossref on 2026-08-31, and
+the author list and pagination each returned are what is quoted.
+
+* Demmel, J. & Nguyen, H. D. "Fast Reproducible Floating-Point Summation."
+  *2013 IEEE 21st Symposium on Computer Arithmetic*, 163–172 (2013).
+  DOI 10.1109/ARITH.2013.9 — the statement of the problem and the first
+  binned answer.
+* Demmel, J. & Nguyen, H. D. "Parallel Reproducible Summation." *IEEE Trans.
+  Computers* **64**(7), 2060–2070 (2015). DOI 10.1109/TC.2014.2345391 — the
+  same thing made a reduction operator, which is the shape needed here.
+* Ahrens, W., Demmel, J. & Nguyen, H. D. "Algorithms for Efficient
+  Reproducible Floating Point Summation." *ACM Trans. Math. Softw.* **46**(3),
+  1–49 (2020). DOI 10.1145/3389360 — the definitive treatment of indexed
+  (binned) floating point, and the source of the "a few bins below the
+  maximum" idea §72.2 specialises.
+* Collange, C., Defour, D., Graillat, S. & Iakymchuk, R. "Numerical
+  reproducibility for the parallel reduction on multi- and many-core
+  architectures." *Parallel Computing* **49**, 83–97 (2015).
+  DOI 10.1016/j.parco.2015.09.001 — the long-accumulator approach on a GPU,
+  with measured overheads. (Crossref records the first author as *Caroline*
+  Collange; older citations, including the design note this work was written
+  against, give *S.* Collange.)
+* Kulisch, U. *Computer Arithmetic and Validity: Theory, Implementation, and
+  Applications.* 2nd ed., De Gruyter (2013). DOI 10.1515/9783110301793 — the
+  exact dot product and the long accumulator, of which §72.2's four limbs are
+  a short fixed-width relative.
+* Iakymchuk, R., Barreda, M., Wiesenberger, M., Aliaga, J. I. &
+  Quintana-Ortí, E. S. "Reproducibility strategies for parallel Preconditioned
+  Conjugate Gradient." *J. Comput. Appl. Math.* **371**, 112697 (2020).
+  DOI 10.1016/j.cam.2019.112697 — the closest published work: reproducibility
+  carried through a Krylov solver. It does not address the row ordering of
+  §70, because in its setting the matrix is given and the sparse format fixes
+  the row order; here the row order was a property of the cut until §70.
+* Balaji, P. & Kimpe, D. "On the Reproducibility of MPI Reduction Operations."
+  *2013 IEEE 10th International Conference on High Performance Computing and
+  Communications & 2013 IEEE International Conference on Embedded and
+  Ubiquitous Computing*, 407–414 (2013). DOI 10.1109/HPCC.and.EUC.2013.65 —
+  why `MPI_Allreduce` is not a reproducibility primitive. NVIDIA's NCCL
+  documentation makes no reduction-order promise either: `NCCL_ALGO`,
+  `NCCL_PROTO` and `NCCL_MAX_CTAS` are documented as performance knobs.
+* IEEE Std 754-2019 for the arithmetic facts used throughout: addition is
+  commutative and **not** associative; `max` over non-NaN operands is exact
+  and order-independent; scaling by a power of two moves only the exponent;
+  a subtraction whose exact difference is representable is exact.
+
+No GPL-licensed source was consulted for this section. No source of any
+licence was read for the accumulator: ExBLAS and ReproBLAS are BSD-3-Clause
+and could have been, and were not — the four-limb decomposition below is
+derived from the published algebra in the papers above, and the limb width,
+the limb count, the single global anchor and the gather-not-reduce collective
+are this repository's own choices, argued where they are made.
+
+---
+
+### 72.1 Every reduction in the crate, and which of them a cut moves
+
+The instruction was to audit all of them rather than the expected ones, so the
+enumeration below is mechanical: every kernel in `rust/cuda/` that collapses
+more than one thread's value into one, plus every host-side aggregate over a
+whole-mesh array. A **sum** is a hazard; a **maximum** is not, because `max` is
+exactly order-independent; an **integer** sum is not, because integer addition
+is associative.
+
+**The solver's own reductions — `cuda/solver.cu`.** These are the ones every
+other module reaches through, so converting the shapes converts the callers.
+
+| Shape | Entry points | Kind | Status |
+|---|---|---|---|
+| `sum(x)` | `solSumStage1` + `solSumStage2` | sum | **converted** — `ExactReduction::sum` |
+| `sum|x|` | `solSumMagStage1` | sum | **converted** — `::sum_mag` |
+| `(a,b)` | `solDotStage1` | sum | **converted** — `::dot` |
+| `(a,b)` and `(a,a)` fused | `solDot2Stage1` + `solSum2Stage2` | sum | **converted by construction** — two `::dot` calls. The exact answer is a function of the multiset of terms, so fusing two sums into one kernel cannot change either of them; the fusion is a performance choice and nothing more, which is exactly the property being sold |
+| `normFactor` (§8.4) | `solNormFactorStage1` | sum | **converted** — `::norm_factor`, `eps` in the same argument slot `solSumStage2` takes it |
+| `max|x|` | `solMaxMagStage1` + `solMaxStage2` | max | **no accumulator needed.** Gathered by `::max_mag`, and both kernels are reused unchanged by everything above |
+| `max|upper-lower|`, `max|coeff|` (§48.3) | `solSymDefectStage1`, `solCoupledSymDefectStage1`, `solMax2Stage2` | max | order-free. `matrix_is_symmetric` is what asks, and a decomposed build needs only the gather |
+
+**The callers — 43 of them, counted mechanically outside the tests and the
+definitions: 35 sums and 8 maxima.** Every summing reduction in the crate is
+one of the five shapes above; there is no sixth. Listed by what a cut does to
+it:
+
+| Caller | Reduces | Under a cut |
+|---|---|---|
+| `solver.rs` PBiCGStab, PCG — `rho`, `den`, `(t,s)`, `(t,t)`, `initial_res`, `final_res`, `normFactor` | cells | cross-part sums, **the** reason a decomposed solve is refused today |
+| `pressure/mod.rs` — `normFactor`, `final_res` | cells | cross-part sum |
+| `energy.rs` — `total_q`, `total_conduction_q` (`(Q, V)`) | cells | cross-part sum |
+| `sources.rs` — the thermostat's volume mean `(T, V)`, and §35.3's `(w, V)` / `(|w|, V)` | cells | cross-part sum. Its divisor `mesh.total_volume` is a host sum, below |
+| `simple.rs`, `vof.rs` — the pinned system's mean source `sum(b)/n` | cells | cross-part sum, **and `n` becomes the global cell count** |
+| `vof.rs` — `phase_volume` = `sum(alpha V)` | cells | cross-part sum |
+| `fan.rs` §52.7 — three `device_sum` per fan patch | one patch's faces | cross-part sum **only if that patch is cut**, which a partitioner is free to do |
+| `cht.rs` §47 — interface flux into A, into B, and its scale | interface face pairs | cross-part sum if the interface is cut |
+| `dcmetrics.rs` §55 — every SHI/RTI/RCI numerator and denominator | cells or rack faces | cross-part sum |
+| `combustion.rs` clip and extinction counts, `wsgg.rs` floored-band count, `soot.rs` clip counts | 0/1 flags over cells | sums of **exact integers below 2^53**, so already partition-invariant. Recorded because "it is a `device_sum`, therefore it is a hazard" would have been the easy wrong answer |
+| `simple.rs`, `vof.rs` — `contErr` = `max_c |sum_f phi_f|`; `vof.rs` Courant; `psychro.rs`, `species.rs`, `turbulence.rs`, `soot.rs` maxima | cells | **maxima. Already partition-invariant**, and the brief's list of hazards names `contErr` as one when it is not |
+
+**Reductions outside `solver.cu`.**
+
+| Where | What | Under a cut |
+|---|---|---|
+| `s2sRowSum`, `s2sIrradiation` (`cuda/s2s.cu`) | one block per row, a fixed-shape shared-memory tree over all `n` columns of the view-factor matrix | **cross-part sums if the enclosure is distributed.** Not converted; §72.7 refuses a decomposed enclosure by name |
+| the max/min diagnostic at `cuda/s2s.cu:924` | reciprocity and closure defects | maxima and minima; order-free |
+| `wfEpsilonWallCell`, `wfOmegaWallCell` (`cuda/wallfunctions.cu`) | **one thread per wall CELL**, area-averaging over that cell's own wall faces through a CSR | **not a cross-part reduction at all.** A cell is wholly owned by one part, so the average is local for every partition. This is worth stating flatly because the design note this work was written against describes the same code as "a patch-level average" that "must go through the same exact accumulator" and warns that "a rank with no faces on the patch must still enter the collective, or it deadlocks". There is no patch-level average here and no collective to deadlock in |
+| `ofsScanReduce`, `ofsScanBlockSums` (`cuda/parcelsort.cu`) | the parcel sort's prefix scan | **integer**; associative, order-free |
+| `parcelIntegrate`, `parcelCoupleCellIntegral`, the per-cell parcel sums (§67.4) | one thread per cell over that cell's own parcels | per-cell gathers, not cross-part |
+| `smpFaceFluxSum`, `lduNegSumDiag`, `desHmax`, the LES face sums (§16), the Green–Gauss gradient | one thread per cell over that cell's own faces | per-cell gathers. §70 fixed their *order*; a cut does not make them global |
+| `energyAccumulate`, `spcAccumulate`, `vofAccumulate`, `wsggFmaAccumulate`, `spcSumError` | `dst[i] += ...` | elementwise. Named because "Accumulate" reads like a reduction and is not |
+
+**Host-side aggregates.**
+
+| Where | What | Under a cut |
+|---|---|---|
+| `HostMesh::total_volume` (`mesh/geometry.rs:606`), and `mesh.rs:436`'s `m.v.iter().sum()` | a sequential sum of every cell volume in ascending cell order | **not a distributed reduction in this build**, and that is a property of §71's design rather than luck: a decomposition here is *derived from an already-computed whole mesh*, so the whole mesh's total volume is computed once, on the host, before any cut, and shipped. A build that read a polyMesh in pieces would have this problem for real, and §71.3 already records that limit |
+| `pressure/mod.rs:207` — `is_symmetric(upper, lower)` | a host `all()` over every face | a conjunction, not a sum; order-free, and it is a property of the matrix rather than of the cut |
+| `src/bin/common/mod.rs:789`, the drivers' report means, `validate.rs`'s norms | host arrays a driver already downloaded | reports, not solver state |
+
+**What is converted, in one sentence.** All five summing shapes, therefore all
+35 summing call sites by shape; the maxima needed only the gather and got it; the two
+`s2s` row sums are refused by name; and one thing the design note listed as a
+hazard — the wall function's average — turned out not to be one.
+
+---
+
+### 72.2 The limb decomposition, written out
+
+Let the terms be `t_0 … t_{n-1}` and let `M` be an integer with `|t_i| < 2^M`
+for every `i`. Fix a limb width `W` and a limb count `K`. Scale once,
+
+```
+s  =  t * 2^(W - M) ,          so  |s| < 2^W
+```
+
+and iterate `K` times
+
+```
+q     =  trunc(s)              an integer,  |q| <= 2^W - 1
+m_k  +=  q
+s     =  (s - q) * 2^W
+```
+
+so that
+
+```
+t  =  2^(M-W) * SUM_{k=0}^{K-1} m_k 2^(-kW)  +  r ,      |r| < 2^(M - K W)
+```
+
+**Both steps are exact**, which is what makes the decomposition a fact about
+`t` rather than an approximation to it.
+
+* `s - q` is exact. `s` is an integer multiple of `ulp(s) = 2^(E_s - p + 1)`
+  for a `p`-bit significand. If `E_s <= p - 1` then `1` is also a multiple of
+  that ulp, so `q` is, so `s - q` is, and `|s - q| < 1` needs at most `p`
+  bits — representable, and IEEE 754 subtraction of two representable numbers
+  whose exact difference is representable returns it exactly. If `E_s > p - 1`
+  then `s` is itself an integer, `q = s`, and `s - q` is zero.
+* `(s - q) * 2^W` is exact because multiplication by a power of two moves only
+  the exponent, and it restores `|s| < 2^W`, so the argument repeats.
+
+**The residue `r` is discarded.** That is a loss of accuracy and *not* a loss
+of reproducibility: `r` is a function of `t` and `M` alone, so every part
+discards the same thing.
+
+**`W = 30`, `K = 4`, and why not the literature's `W = 40`, `K = 3`.**
+
+| Requirement | Consequence |
+|---|---|
+| exactness of `s - q` | `W <= p - 1`. Satisfied by a wide margin in double (`p = 53`) and satisfied in single (`p = 24`) as well, because `q` is then either `s` itself or zero |
+| coverage | `K W = 120` binades below the largest term. A double's significand is 53 bits, so a term is dropped only when it is more than 120 binades below the biggest one — 67 binades below the last bit that could have mattered. The absolute error of a sum of `n` terms is at most `n 2^(M - 120)` |
+| **no overflow, with no carry pass** | each term adds at most `2^W - 1` to a limb, so `n` terms need `n (2^30 - 1) < 2^63`, i.e. `n < 2^33`. `oflabel` is a 32-bit signed integer, so **no mesh this crate can index can overflow a limb**, and there is no carry-normalisation pass anywhere in the hot path. At the literature's `W = 40` the bound is `n < 2^23 = 8.4 M` and a periodic carry pass becomes necessary; trading ten bits of limb width for the removal of a whole pass is the right trade here, where the accumulator is bandwidth-bound and 120 binades is already far more coverage than a `double` can use |
+| both precisions run the same code | `2^30` is exactly representable as a `float` as well as a `double`, so the `single` build takes the identical path rather than a second one nobody exercises |
+
+`EXACT_MAX_TERMS = 2^32` is enforced in `ExactReduction::new` with a named
+refusal, a full binade below the bound, because the one way an integer
+accumulator can be wrong is silently.
+
+**The conversion back.** `exToScalar` carries from the least significant limb
+upward, which puts every limb but the top one into `[0, 2^W)` so that it
+converts to a float exactly, then evaluates the Horner form from the bottom.
+The only roundings in the whole path are the top limb's conversion and the
+final add, and both are a fixed sequence of operations on integers that are
+themselves order-free. **The result is therefore reproducible, and within a
+couple of ulps of the exactly rounded sum rather than equal to it.** That is
+enough: reproducibility is the claim, and the accumulator is already more
+accurate than the tree it replaces —
+`the_accumulator_keeps_what_a_running_double_sum_throws_away` exhibits the
+smallest case, `1 + 4·2^-53`, which a running `double` sum answers as `1`.
+
+**Non-finite terms, and the word that was missing.** The limbs have no
+representation for an infinity or a NaN, and two things go wrong without a
+deliberate answer for them. `ilogb(inf)` is `INT_MAX`, so `W - M` would
+overflow a signed `int` — undefined behaviour rather than a wrong number; the
+anchor is therefore clamped to ±1100, past every exponent a double can carry,
+so the clamp cannot bite on finite data.
+
+The second is worse and was found by test rather than by reading. **The anchor
+comes from a maximum, and `ofmax_(a, b)` is `a > b ? a : b`, so a NaN operand
+is discarded** — the comparison is false and the other operand wins. A single
+NaN term therefore leaves the anchor finite, the limbs are formed from garbage,
+and the first version of this section answered `1.93e25` for a field containing
+a NaN. `device_sum` has no such problem: `acc += NaN` is NaN and it propagates.
+Replacing a reduction that shows a poisoned field with one that hides it would
+be a **regression**, whatever else it bought.
+
+So the accumulator carries `K + 1` words, not `K`: the extra one **counts the
+terms it could not represent**, and `exToScalar` answers NaN whenever that
+count is non-zero. Integer counting is order-free like everything else here, so
+the poison flag is as partition-invariant as the value.
+`a_non_finite_term_poisons_the_answer_visibly` asserts all three of `+inf`,
+`-inf` and `NaN`, and asserts that a field of exact zeros still answers zero.
+
+**What is not claimed.** This is not an exact *dot* product. `a[i]*b[i]` is
+rounded once before the accumulator ever sees it, and no error-free
+transformation recovers the tail. That rounding is deterministic, so it costs
+nothing in reproducibility, and `TwoProduct` would buy accuracy this project
+has no use for. The code says so at the point where somebody would be tempted
+to improve it.
+
+---
+
+### 72.3 The anchor must be global — and the design note's way of avoiding a second collective is wrong
+
+`M` comes from `amax = max_i |t_i|` as `M = ilogb(amax) + 1`. A maximum over
+non-NaN operands is **exactly** order-independent, so `amax` is the same number
+on every part for every partition, and `M` is the same integer. That single
+fact is what the guarantee rests on: the limbs of a term depend on the term and
+on `M`, so if `M` is global then the limbs are a function of the term alone,
+the limb sums are order-free integer sums, and the total is a function of the
+**multiset** of terms.
+
+Getting `M` costs a collective of its own — one `max` before the limb pass —
+so a reduction is two round trips, not one. The design note this section was
+written against proposes avoiding that:
+
+> **The anchor `M`.** … (i) **fuse it** — the `AllGather` already carries `K`
+> limbs, so carry each rank's own anchor `M_r` alongside as the `(K+1)`-th
+> word and have the stage-2 kernel right-shift each rank's limbs to `max_r M_r`
+> before adding. Right-shifting int64 is exact if you keep a guard limb, so
+> take `K = 4`. … **Take (i).** One extra limb, no extra collective.
+
+**That is correct for run invariance and wrong for partition invariance, and
+this section refuses it.** The shift *is* exact; the problem is upstream of it.
+If part `r` forms its limbs against its own anchor `M_r`, it truncates its
+terms at `2^(M_r - K W)`. Move one cell to another part and `M_r` changes, so
+the same term is truncated at a different place, so the total changes. The
+fusion preserves everything except the property the section exists to deliver.
+
+Two collectives it is, and the cost is stated rather than hidden: a Krylov
+iteration with two reductions becomes four round trips instead of two. §72.7
+records the two ways out that were not taken — a data-independent anchor with
+an overflow flag, which needs the host and so breaks CUDA-graph capture, and
+reusing the previous iteration's anchor, which makes the answer a function of
+the iteration history.
+
+---
+
+### 72.4 The collective is a gather, never a reduce
+
+Every cross-part step in `src/exactsum.rs` is one of exactly two things.
+
+```
+1. move    memcpy_dtod of one part's result into slot r of a gathered buffer
+           - the stand-in for ncclAllGather. It moves bytes and does no
+             arithmetic, so it is exact by construction.
+2. combine one block, fixed shape, over the gathered values:
+             solMaxStage2  for the anchor   (an EXISTING kernel, unchanged)
+             exCombine     for the limbs    (integer adds, order-free anyway)
+```
+
+There is no `ncclAllReduce` and there must never be one. Balaji & Kimpe (2013)
+is the analysis for MPI; for NCCL, NVIDIA's own environment-variable
+documentation offers `NCCL_ALGO`, `NCCL_PROTO` and `NCCL_MAX_CTAS` as
+performance knobs and **documents no reduction-order guarantee at all**, so an
+all-reduce would make the answer a property of the fabric and of the message
+size. An all-gather is pure data movement and has nothing to promise.
+
+`exCombine` is deliberately the same kernel at both levels — over a part's
+per-block partials, and over the `P` parts' totals. Only the length differs.
+The cross-part combine is not new code, which is the same economy §71.4 made
+when it removed the unpack kernel.
+
+**One part is not a special case.** `ExactReduction::new(gpu, &[n])` runs the
+identical path with `P = 1`: one gather of one value, one combine over one
+part. The serial path *is* the parallel path, so it cannot drift away from it
+untested.
+
+---
+
+### 72.5 Two constructions, and one line of algebra separating them
+
+```
+Run invariance:        same binary, same case, same P, same partition
+                         =>  bit-identical
+Partition invariance:  same binary, same case, ANY P, ANY partition, ANY
+                       relabelling  =>  bit-identical, and equal to P = 1
+```
+
+**The gathered partial buys the first.** `sigma_r = fl(sum_{i in C_r} t_i)` is
+one rounded double per part; `ncclAllGather` moves the `P` of them exactly;
+`solSumStage2` finishes them in a fixed order. Nothing in that chain depends on
+anything but the partition, so it repeats run to run. It is four lines of glue
+and it is implemented, as `ExactReduction::gathered_sum` and `::gathered_dot`.
+
+**It cannot buy the second, and no care over the combine can rescue it.** The
+loss has already happened when `sigma_r` is formed:
+
+```
+sigma_r  =  fl( ... fl(fl(t_a + t_b) + t_c) ... )
+```
+
+is a function of *which* terms landed on part `r`, and `fl` is not associative.
+Whatever order the `P` partials are then combined in, the combine is a function
+of `P` numbers that already depend on the cut. A partition-invariant answer
+needs the *terms* to be combined order-freely, not the partials.
+
+The two are implemented side by side so that the claim is a measurement rather
+than an argument: `the_gathered_partial_construction_moves_and_the_exact_one_does_not`
+runs both over identical data across nine partitions and asserts that the first
+moves and the second does not — and it asserts that the first *moved*, so that
+if the test data ever goes benign the test fails loudly instead of passing for
+the wrong reason. It did go benign once, during development: the first version
+of the adversarial field used terms of the form `(1 + k/8) 2^e` with `|e| <= 20`,
+which are all multiples of `2^-23`, so every partial sum a partition can form
+is exactly representable and the gathered construction reproduced the whole
+mesh's answer in all nine partitions. It passed a gate it does not deserve to
+pass. The field now has a 52-bit mantissa spread over a hundred binades, which
+is the regime a real residual lives in.
+
+**Which one a distributed run should use** is not decided here, because nothing
+in this repository is distributed yet. What is decided is that both exist, both
+are named, and the difference between them is measured rather than asserted.
+
+---
+
+### 72.6 What it costs — measured, not quoted
+
+The literature quotes roughly 1.1–2× on the reduction *kernel* for binned and
+long-accumulator schemes (Collange et al. 2015; Ahrens, Demmel & Nguyen 2020),
+and the design note repeats that range while saying plainly that it measured
+nothing. This is measured. `ofgpu-decompose <case>` times 200 dot products over
+the whole mesh both ways, on the same two arrays, on an RTX 5070 Ti:
+
+| Cells | plain `device_dot` | `ExactReduction::dot` | ratio |
+|---|---|---|---|
+| 192 | 9.4 µs | 45.4 µs | 4.85× |
+| 24,000 | 12.5 µs | 49.4 µs | 3.94× |
+| 32,768 | 11.2 µs | 50.3 µs | 4.48× |
+| 82,320 | 12.8 µs | 52.3 µs | 4.09× |
+| 800,000 | 20.1 µs | 90.6 µs | 4.50× |
+
+**Roughly 4–5×, not 1.1–2×, and the gap is not the arithmetic.** These are
+microsecond figures and they move a few per cent run to run; a second pass over
+all five gave ratios between 3.8 and 5.0, so the number to carry is "four to
+five", not any one cell of the table.
+
+The plain dot is two launches. The exact dot at `P = 1` is **seven launches and
+two copies** — a term-magnitude stage one, its stage two, the gather, the
+global-anchor combine, the limb stage one, its combine, the gather, the
+cross-part combine, and the conversion — and it makes **two passes over the
+data** rather than one, because the anchor has to be known before the limbs can
+be formed. The small-mesh row says the rest: at 192 cells there is no data to
+speak of, and 9.4 µs / 2 operations is 4.7 µs while 45.4 µs / 9 operations is
+5.0 µs — **the ratio there is the operation count and nothing else**. At
+800,000 cells the extra 70 µs splits into roughly 32 µs of second pass
+(12.8 MB) and roughly 38 µs of five extra launches and two copies.
+
+**What that means for a solve.** PBiCGStab has two reductions per iteration and
+this project reports 150 iterations at 2 M cells for a 13.3 ms pressure solve.
+Substituting the exact reduction at that size would add roughly `2 × 150 × 70`
+µs ≈ 21 ms — of the same order as the solve. **That is a large enough number
+that wiring it in unconditionally would be the wrong thing to do**, and §72.7
+says so as a refusal rather than leaving it implied. The obvious reductions —
+fusing the anchor pass into the previous kernel that already touched the data,
+and batching the two reductions of one iteration into one pair of collectives —
+are not done here.
+
+The measurement is at `P = 1` because that is the only configuration this
+machine can run. A distributed run adds two network round trips per reduction
+where the current code has two `memcpy_dtod`s, and nothing here measures that.
+
+---
+
+### 72.7 What a decomposed reduction still cannot do — the §13.4 list
+
+| Refused | Why | What to do instead |
+|---|---|---|
+| **Wiring the exact accumulator into any solver, driver or case** | it produces different bits from the tree it replaces — that is the point of it — so switching a call site would move a default. And at 4–5× per reduction (§72.6) the choice is a real one, not a free upgrade | the API is public and the shapes match `device_sum`/`device_dot`/`device_sum_mag`/`device_norm_factor` one for one. Nothing calls it yet, exactly as `HaloExchange::vector` was left in §71 |
+| **Fusing the anchor into one collective** (the design note's §7.3(i)) | a per-part anchor truncates each part's terms at a different place, so the total becomes partition-dependent again. §72.3 | two collectives: one `max`, one gather of limbs |
+| **A data-independent anchor with an overflow flag** | reacting to the flag needs the host, and a host round trip inside the time loop breaks CUDA-graph capture — which is the constraint `-graph` already lives under | the global `max`, which is order-free and capturable |
+| **Reusing the previous iteration's anchor** | it would make the answer a function of the iteration history, so a restart would not reproduce a continuous run | the same |
+| **A decomposed surface-to-surface enclosure** | `s2sRowSum` and `s2sIrradiation` sum a whole row of an `n × n` view-factor matrix in a block-shaped tree; distributing the columns is a cross-part sum of a different shape from any of the five, and the matrix itself is dense and global | keep the enclosure whole. §49's cost model already assumes it |
+| **A cut fan patch, conjugate interface or data-centre metric region** | each is a `device_sum` over a subset of faces, so each needs its own gathered plan keyed on the patch **name** rather than the local patch index — a rank that owns no face of the patch must still enter the collective | not written. The shapes are converted; the per-patch plumbing is not |
+| **`sum(b)/n` on a pinned system** | `n` is `mesh.n_cells`, which is a part's count after a cut, not the mesh's | the global cell count, which a decomposed build must carry |
+| **An exactly rounded dot product** | the product `a[i]*b[i]` is rounded before the accumulator sees it | nothing. It is deterministic, and §72.2 says why recovering it is not wanted |
+| **Anything distributed** | no MPI, no NCCL, no second device — unchanged from §71.7 | one process, one device, `memcpy_dtod` in place of `ncclAllGather` |
+
+**§13.4.1, and why no pair test is owed.** This section adds **no case-file
+setting**: no `.jsonc` key, no `fvSolution` entry, nothing a case can say, and
+no driver argument either — `ofgpu-decompose` gained the reduction gate but no
+new option. §13.4.1 exists to catch a setting that never reaches the code it
+names, and the test for that is that the setting changes something. There is
+nothing here for a case to set. What there *is* is a claim that a reduction
+does not change when the partition does, and that claim is the gate itself,
+asserted in both directions: the gate test requires a real halo at every
+`P > 1` so the cut cannot pass by being inert, and it requires the answer to be
+bit-identical anyway.
+
+---
+
+### 72.8 What must hold
+
+| Test | Expected |
+|---|---|
+| `the_limb_layout_matches_the_device` | one term equal to `1.0` puts `2^(W-1)` in the top limb and nothing in the others, so `W` and `K` are read off the device rather than asserted to match it |
+| `the_accumulator_agrees_with_an_independent_host_implementation` | eight fields, up to 77,777 terms, bitwise equal to a host `i128` twin written independently of the kernel |
+| `the_accumulator_keeps_what_a_running_double_sum_throws_away` | `1 + 4·2^-53` sums to `1` in a running `double` and to `1 + 2^-51` here |
+| `an_exact_sum_is_the_same_number_however_the_terms_are_dealt_out` | 20,000 terms, `P = 1…4`, contiguous / round robin / shuffled: same limbs and same bits, twelve times |
+| **`the_gathered_partial_construction_moves_and_the_exact_one_does_not`** | over nine partitions of the same data, the exact accumulator does not move **and the gathered-partial construction does** — the second half asserted so the test cannot pass by the data going benign. `gathered_dot` runs alongside so the cheap construction's dot twin is exercised too |
+| `relabelling_the_parts_changes_nothing` | every rotation of the part labels, `P = 2…4`: same limbs, same bits |
+| `a_part_that_owns_nothing_contributes_nothing` | three empty parts among five give the whole's limbs exactly; an empty part takes the same path, not a branch |
+| `a_maximum_needs_none_of_the_accumulator` | `max|x|` equals the host maximum and is unmoved by every partition — the assertion behind §72.1's claim that `contErr` was never a hazard |
+| `the_dot_the_magnitude_sum_and_the_normalisation_factor_survive_the_cut_too` | all three equal their host twins on the whole mesh, and all three are unmoved at `P = 2…4` under three maps. `dot` and `norm_factor` carry their own anchor kernels, so neither is covered by `sum`'s gate |
+| **`a_reduction_over_a_decomposed_mesh_is_the_undecomposed_reduction`** | **the gate.** A real mesh, plain and cyclic, cut by the real partitioner at `P = 1…4` under three methods **and every relabelling of each** — 30 decompositions per mesh — with the field distributed by `split_field` and **the halo poisoned with `1e30`**: same limbs, same bits every time |
+| `an_impossible_reduction_is_refused_by_name` | zero parts, more terms than a limb can hold (naming §72.2), a buffer count that does not match the part count, and a buffer shorter than its part owns — each named, with both numbers, and the accumulator still works afterwards |
+| `a_non_finite_term_poisons_the_answer_visibly` | `+inf`, `-inf` and `NaN` each make the whole reduction NaN, and each is counted once in the flag word; the host twin says the same. A field of exact zeros still answers zero. **This test failed on its first run** and is why the accumulator carries `K + 1` words rather than `K` — §72.2 |
+| `the_host_scaling_helpers_are_exact` | `ldexp` and `anchor_exponent` over 121 binades, including the powers of two where `ilogb` is off by one if it is written wrong |
+| `ofgpu-decompose <case>` | the same gate on the meshes in `cases/`, plus the cost measurement of §72.6. **PASS means every relabelling reduced to the same bits**; a tolerance is not accepted |
+
+---
+
+### 72.9 Validation: what was measured
+
+The claim is bitwise identity, so the measurement is a bit comparison.
+
+**The gate, on shipped cases.** `ofgpu-decompose <case> -method all` at
+`P = 2, 3, 4` under all three partitioners, and **every rotation of the part
+labels of each** — 27 relabelled decompositions per case:
+
+| Case | Cells | Exact `sum` and `dot`, over every relabelling |
+|---|---|---|
+| `cases/channelPeriodicWF.jsonc` | 192 (cyclic) | **27/27 bitwise identical** |
+| `cases/channel` | 24,000 | **27/27** |
+| `cases/burnerPlume.jsonc` | 32,768 | **27/27** |
+| `cases/plume` | 82,320 | **27/27** |
+
+Each row is `P = 2, 3, 4` × three partitioners × every rotation of the part
+labels of that cut, which is `3 × (2 + 3 + 4) = 27`.
+
+**108 of 108**, over two fields each — the run's own solved `psi` reduced
+against the cell volumes, and an adversarial field with a 52-bit mantissa
+spread over a hundred binades — and with each part's halo poisoned with `1e30`
+before the reduction, so a reduction that read one ghost cell could not have
+agreed to within twenty orders of magnitude, let alone bitwise.
+
+**The same runs, for the gathered-partial construction.** This is the number
+this section exists to publish:
+
+| Case | Gathered partial moved (run field) | (adversarial field) |
+|---|---|---|
+| `cases/channelPeriodicWF.jsonc` | 8 of 27 | 13 of 27 |
+| `cases/channel` | 2 of 27 | 18 of 27 |
+| `cases/burnerPlume.jsonc` | 2 of 27 | 17 of 27 |
+| `cases/plume` | 8 of 27 | 27 of 27 |
+
+**20 of 108 on the solver's own output, 75 of 108 on the adversarial field**,
+worst relative displacement `1.1e-15`. Both columns are reported because the
+first alone would understate the problem and the second alone would overstate
+it: on a well-conditioned box the cheap construction survives most cuts, and
+"most" is not what bitwise means. Note also that the failures are not monotone
+in the part count or in how bad the partition is — `roundrobin` at `P = 3` on
+the small cyclic case happened to agree in all three relabellings while
+`hilbert` at `P = 4` disagreed in all four. A construction that fails
+*unpredictably* is worse to live with than one that fails always.
+
+**The gate, in the library test suite.** Thirteen tests, listed in §72.8. The
+mesh-level gate runs a `6 × 5 × 4` box twice — once plain and once with its
+`xmin`/`xmax` patches made a cyclic couple, which is the only mesh whose
+`b_nbr_cell` is already non-negative before the cut — at `P = 1…4` under three
+partitioners with every part relabelling: **30 decompositions per mesh, 60 in
+all**, comparing the **limb totals** as well as the converted float, so a
+failure names the accumulator rather than the conversion.
+
+**Regression, and it was measured rather than argued.** Nothing in this section
+is reachable from any existing code path: `ExactReduction` is constructed
+nowhere but the new tests and the new gate in `ofgpu-decompose`, and
+`cuda/exactsum.cu` is a new translation unit that no other kernel unit links
+against. The edits to shared files are one `pub mod` line, one filename in
+`build.rs`'s kernel list, and **three `fn` in `src/solver.rs` turned
+`pub(crate)`** (`reduce_geometry`, `one_block`, `to_label`) so that the new
+module launches with the *same* geometry function the old reductions use rather
+than a transcription of it. Additions and visibility; no changed statement
+anywhere. That argument was still checked against a real A/B, because §70.3's
+rule is that an argument is not a measurement:
+
+| Comparison | Result |
+|---|---|
+| `ofgpu-validate` | **747/747, 699 computed live and 48 replayed** — the recorded figure, reproduced |
+| `ofgpu-fire cases/channelPeriodicWF.jsonc` (7 fields, cyclic), `ofgpu-plume cases/plume` (5), `ofgpu-k-epsilon cases/channel` (4) | **all 16 field files SHA-256 identical** between a build with this section's module removed and a build with it in |
+| the three drivers' console logs | identical except the wall-clock lines |
+| `cargo clippy --release --all-targets` | exit 0; no warning names a file added here |
+
+**What this does not establish.**
+
+* **Nothing here is distributed.** One process, one device; `memcpy_dtod`
+  stands in for `ncclAllGather`, and a copy inside one context is a weaker
+  thing than a network collective in exactly one respect — it cannot deadlock.
+  A distributed build must still get the collective *participation* right, and
+  nothing here tests that.
+* **Nothing calls it.** No solver, no driver and no case reaches the exact
+  accumulator; §72.7 refuses the wiring by name and §72.6 gives the cost that
+  makes the refusal a real decision rather than a deferral.
+* **The cost is measured at one part on one card**, up to 800,000 cells — the
+  largest mesh in `cases/`. Over that range the ratio is flat at four to five
+  and is dominated by the operation count, so the bandwidth-bound regime — in
+  which the second pass over the data, not the launch count, would decide the
+  number — was never reached. What the accumulator costs on a 10 M-cell
+  partition is not known from this.
+* **The two `s2s` row sums are not converted**, and a cut fan patch, conjugate
+  interface or metric region has no gathered plan. The shapes are done; the
+  per-patch plumbing is not.
+* **Partition invariance of a reduction is not partition invariance of a
+  solve.** A decomposed Krylov solve additionally needs §70's row order (done),
+  §71's halo (done), the sixteen assembly kernels of §70.5 (not done) and a
+  partition-invariant preconditioner (not done). This section removes one of
+  the four, and says which.
+
+---
+
+---
+
+## 73. The distributed Krylov solve, and the preconditioner a cut changes
+
+§71 cut the mesh and moved data across the cuts. §72 made a reduction a
+function of the multiset of its terms rather than of the partition. Neither ran
+a solver, and §71.7 said why in as many words: *"any Krylov solve, SIMPLE loop
+or time loop, decomposed"* was refused, because every one of them contains a
+reduction and no partition-invariant reduction existed yet. One does now, so
+this section runs the two Krylov methods the crate already has — PCG and
+PBiCGStab — over a decomposition, with the DIC/DILU and multi-colour
+preconditioners, and says exactly what each of them costs.
+
+The gate is one sentence, and it is §71's with one word changed. **A real
+Krylov solve, run to a tolerance rather than for a fixed count, over a mesh cut
+into 2, 3 and 4 parts, must produce the undecomposed run's field bit for bit
+AND stop on the same iteration.** Not "agrees to `1e-13`". Equal, and equal in
+the number of steps it took to get there. §73.9 is what was measured against
+it.
+
+The second half of this section is the honest half, and it is the reason the
+first half is worth having. A **block-local** DIC or DILU — each part's own
+submatrix factorised with the couplings across every cut dropped — is a
+*different preconditioner for every partition*, and no amount of care over the
+reduction changes that. §73.5 measures what it costs in iterations on five
+meshes and reports two results that contradict the obvious expectation,
+including one that this section's own test asserted before it was measured and
+had to be corrected.
+
+**Sources.** Every DOI below was verified against Crossref on 2026-09-01 by
+fetching `api.crossref.org/works/<doi>` and checking the title, authors,
+journal, volume and pages against what is printed here. Where a work is cited
+to be *distinguished from* rather than *followed*, that is said at the entry.
+
+* Hestenes, M. R. & Stiefel, E. "Methods of conjugate gradients for solving
+  linear systems." *Journal of Research of the National Bureau of Standards*
+  **49**(6), 409 (1952). DOI 10.6028/jres.049.044 — the PCG recurrence.
+  A **US Government work, public domain**.
+* van der Vorst, H. A. "Bi-CGSTAB: A Fast and Smoothly Converging Variant of
+  Bi-CG for the Solution of Nonsymmetric Linear Systems." *SIAM J. Sci. Stat.
+  Comput.* **13**(2), 631–644 (1992). DOI 10.1137/0913035 — the PBiCGStab
+  recurrence.
+* Saad, Y. *Iterative Methods for Sparse Linear Systems*, 2nd ed. SIAM (2003).
+  DOI 10.1137/1.9780898718003 — §6.7 (PCG), §7.4.2 (BiCGStab), §12.4
+  (multicolour ILU, which §21 already follows), and **ch. 14**, which is where
+  block Jacobi and additive Schwarz are defined and which is what §73.5 names
+  the block-local factorisation as.
+* Cai, X.-C. & Sarkis, M. "A Restricted Additive Schwarz Preconditioner for
+  General Sparse Linear Systems." *SIAM J. Sci. Comput.* **21**(2), 792–797
+  (1999). DOI 10.1137/S106482759732678X — **cited to be distinguished from.**
+  §73.5 explains why what is built here is not RAS.
+* Ghysels, P. & Vanroose, W. "Hiding global synchronization latency in the
+  preconditioned Conjugate Gradient algorithm." *Parallel Computing* **40**(7),
+  224–238 (2014). DOI 10.1016/j.parco.2013.06.001 — pipelined CG, **refused by
+  name in §73.7**.
+* Cools, S. & Vanroose, W. "The communication-hiding pipelined BiCGstab method
+  for the parallel solution of large unsymmetric linear systems." *Parallel
+  Computing* **65**, 1–20 (2017). DOI 10.1016/j.parco.2017.04.005 — likewise.
+* Cools, S. "Analyzing and improving maximal attainable accuracy in the
+  communication hiding pipelined BiCGStab method." *Parallel Computing* **86**,
+  16–35 (2019). DOI 10.1016/j.parco.2019.05.002 — the paper that documents the
+  accuracy loss of the previous entry, and the reason §73.7 refuses it.
+* Amdahl, G. M. "Validity of the single processor approach to achieving large
+  scale computing capabilities." *AFIPS '67 (Spring)*, 483 (1967).
+  DOI 10.1145/1465482.1465560 — the shape of the strong-scaling statement
+  §73.6 makes, and of the one it declines to make.
+* Iakymchuk, R., Barreda, M., Wiesenberger, M., Aliaga, J. I. &
+  Quintana-Ortí, E. S. "Reproducibility strategies for parallel Preconditioned
+  Conjugate Gradient." *J. Comput. Appl. Math.* **371**, 112697 (2020).
+  DOI 10.1016/j.cam.2019.112697 — already cited at §72; the closest published
+  work to this section, and it addresses the reduction only, not the
+  preconditioner.
+* Balaji, P. & Kimpe, D. "On the Reproducibility of MPI Reduction Operations."
+  *2013 IEEE HPCC/EUC*, 407–414. DOI 10.1109/HPCC.and.EUC.2013.65 — already
+  cited at §72; why the collective in §73 is still a gather.
+
+No GPL-licensed source was consulted for this section or any other.
+
+---
+
+### 73.1 What a Krylov method needs that a fixed sweep did not
+
+The §71 gate ran `relax -> set_values -> fold -> N Jacobi sweeps`, and it ran
+that pipeline because it is the largest one containing **no reduction**. A
+Krylov method is the opposite: it is *defined* by its reductions. Both methods
+below are written exactly as `src/solver.rs` already implements them, because
+`src/distsolve.rs` launches the same kernels on the same buffers in the same
+order.
+
+**PCG** (Hestenes & Stiefel 1952; Saad §6.7, Algorithm 6.18):
+
+```
+r = b - A psi ;  z = M^-1 r ;  p = z ;  rho = (r,z)
+repeat
+    q      = A p                            <- crosses the cut
+    alpha  = rho / (p,q)                    <- REDUCTION
+    psi   += alpha p
+    r     -= alpha q
+    z      = M^-1 r                         <- crosses the cut, if M is not diagonal
+    rho'   = (r,z)                          <- REDUCTION
+    beta   = rho'/rho ;  p = z + beta p ;  rho = rho'
+```
+
+**PBiCGStab** (van der Vorst 1992; Saad §7.4.2):
+
+```
+r = b - A psi ;  rTilde = r ;  p = v = 0 ;  rho = alpha = omega = 1
+repeat
+    rho'  = (rTilde, r)                     <- REDUCTION
+    beta  = (rho'/rho)(alpha/omega)
+    p     = r + beta (p - omega v)
+    pHat  = M^-1 p ;  v = A pHat            <- crosses the cut
+    alpha = rho' / (rTilde, v)              <- REDUCTION
+    s     = r - alpha v
+    sHat  = M^-1 s ;  t = A sHat            <- crosses the cut
+    omega = (t,s)/(t,t)                     <- TWO REDUCTIONS
+    psi  += alpha pHat + omega sHat
+    r     = s - omega t
+```
+
+Three quantities in each are global and none of them is a field:
+`alpha`, `beta`, `omega` are single numbers formed from cross-part sums. That
+is the whole of what §72 was built for, and this is where it is spent.
+
+| Per iteration | PCG | PBiCGStab |
+|---|---|---|
+| matrix products, hence **halo exchanges** | 1 | 2 |
+| inner products | 2 | 4 |
+| residual `sum\|r\|` when the tolerance is being tested | 1 | 1 |
+| **cross-part reductions**, tolerance mode | **3** | **5** |
+| **cross-part reductions**, `-fixedIters` | **2** | **4** |
+
+Both counts are asserted, not stated:
+`an_exchange_happens_once_per_matrix_product_and_no_more` runs each solver at
+1, 5 and 11 fixed iterations and requires the exchange count to be exactly
+`k + 3` for PCG and `2k + 3` for PBiCGStab, and the reduction count exactly
+`2k + 5` and `4k + 4`. An exchange that crept into an elementwise kernel would
+cost latency on every iteration forever and would never show up as a wrong
+answer, which is precisely why it is counted rather than reviewed.
+
+---
+
+### 73.2 Where the exchange goes, and where it does not
+
+`lduAmul` reads `psi[b_nbr_cell[bf]]` at a coupled boundary face, and after a
+cut that index points into the halo (§71.4). So the matrix product is the only
+operator in either recurrence whose stencil leaves a cell, and the exchange
+goes immediately before it and nowhere else.
+
+| Step | Reads across a cut? | Exchange owed |
+|---|---|---|
+| `q = A p` | **yes** — `psi` at a cut face's neighbour | one, on `p` |
+| `z = M^-1 r`, diagonal | no — `z_i = r_i / diag_i` | none |
+| `z = M^-1 r`, block-local DIC/DILU | no — the sweeps walk `cf_offset`, which on a part holds that part's **interior** faces only, so a cut face is absent from the recurrence altogether | none. §73.5 is what that absence costs |
+| `psi += alpha p`, `r -= alpha q` | no | none |
+| BiCGStab `p`, `s`, `x`, `r` updates | no | none |
+| `alpha = rho/den`, `beta`, `omega` | no — one-thread kernels on values that are already global | none |
+| the convergence test | no — one-thread kernel on two global scalars | none |
+
+The halo values of every vector other than the one being multiplied are
+therefore **stale for most of an iteration, and that is correct**: nothing
+reads them. `gather_field` ignores halo entries for the same reason (§71.6), so
+a stale ghost cannot reach the answer even by accident.
+
+**What this section does not do is overlap.** The design note's §6.1 splits the
+owned cells into interior and interface-adjacent and runs two `lduAmul`
+launches so the interior rows compute while the halo is in flight. That split
+changes no bit — each row is still computed by one thread from one list in one
+order — but it is worth nothing without a real network to hide, and there is no
+network here (§73.7). It is refused by name rather than written untested.
+
+---
+
+### 73.3 The two guarantees, arriving at a solver
+
+`DistReduce` selects the cross-part reduction and is the only knob:
+
+| Mode | Construction | Guarantee |
+|---|---|---|
+| `DistReduce::Exact` | §72's limb accumulator | **partition-invariant**: the same bits at every part count, under every partition map and every relabelling, equal to the one-part answer |
+| `DistReduce::Gathered` | each part's own `device_dot`, gathered, combined by the fixed one-block kernel | **run-invariant only** |
+
+A *solve* is partition-invariant when **both** halves hold — the reduction and
+the preconditioner:
+
+```
+partition_invariant(precon) =  reduce == Exact
+                            && precon in { None, Diagonal }
+```
+
+That is a function in the code (`DistWorkspace::partition_invariant`), not a
+comment, and the gate consults it. Adding a preconditioner without deciding
+which side of that line it falls on will not compile past the match.
+
+**Why `Diagonal` is free.** `z_i = r_i / diag_i` is elementwise on a cell's own
+values, and a part's `diag` is bitwise the whole mesh's `diag` — §71.6 proves
+that, because `split_matrix` copies the diagonal and sets `internal_coeffs = 0`
+on a cut face so the fold cannot double it. So the preconditioner costs nothing
+at all to make partition-invariant: no exchange, no colouring, no reordering.
+
+**The pin, and what it caught.** At `P = 1` with the gathered reduction, this
+module launches the identical kernels on identical buffers in identical order
+to `solver::solve_pcg` and `solver::solve_pbicgstab`, so the answer must be
+identical **to the bit** — and
+`a_one_part_gathered_solve_is_the_serial_solver` requires exactly that, on a
+plain and a cyclic mesh, with `None`, `Diagonal`, `Dic` and `Dilu`. Nothing
+weaker would catch a transposed argument: a swapped `alpha`/`omega` still
+converges, just differently.
+
+That test also **proves a claim that would otherwise have been a comment**.
+`solve_pbicgstab` fuses `(t,s)` and `(t,t)` into `device_dot2`, which reads `t`
+once for both; the distributed path takes them as two separate reductions,
+because the exact accumulator's dot already makes two passes (the anchor must
+precede the limbs, §72.3) and a fused exact `dot2` would save nothing.
+`solDot2Stage1` accumulates `ab` and `aa` with the identical grid-stride walk
+and the identical `blockSum_` that `solDotStage1` uses, and `solSum2Stage2`
+combines each with the identical loop `solSumStage2` uses, so the fused and
+unfused constructions are bitwise equal — and the P = 1 pin passing on
+PBiCGStab is the measurement that says so.
+
+---
+
+### 73.4 Two numbers a cut would have moved, and where they are taken from
+
+**The normalisation factor's mean.** §8.4 measures the residual against
+`x_ref = mean(psi)`, and `solver::device_norm_factor` forms it as
+`device_sum(psi) * (1/n)` with `n = a.n_cells`. On a part that is the *part's*
+cell count. §72.7 listed this as open — *"`sum(b)/n` on a pinned system: `n` is
+`mesh.n_cells`, which is a part's count after a cut"* — and it is closed here:
+`dist_norm_factor` divides by `Decomposition::n_global_cells`, which the
+`DistSystem` carries from the cut. Had it not, `x_ref` would be a different
+constant on every part, `A x_ref` a different field, the norm a different
+number, and the **stopping iteration** a function of the partition — a solve
+that agreed to `1e-13` and disagreed on when to stop.
+
+**The constrained cells.** `lduSetValues` reads `is_fixed` and `fixed_value`
+at a coupled face's neighbour, which on a part is a ghost cell.
+`DistSystem::split` fills those two halos **through the exchange**, not from
+the host's whole-mesh copy, because a genuinely distributed build has no such
+copy. A reference cell is therefore pinned by its global identity and by
+nothing local.
+
+**The convergence test itself.** It is a one-thread kernel over `final_res`,
+`initial_res` and `norm_factor`, all three of which come out of the exact
+accumulator. So the iteration at which it fires is partition-invariant, and
+that is asserted rather than hoped: the gate compares **iteration counts as
+well as fields**, and a run that reached the same answer one iteration later
+fails it.
+
+---
+
+### 73.5 The preconditioner: what block-local costs, measured
+
+The no-fill diagonal-based incomplete factorisation (§21) is
+
+```
+Dt_v = A_vv  -  SUM_{u < v}  A_vu A_uv / Dt_u
+```
+
+with `<` the colour order. The `u < v` is the only sequential thing about it,
+and under a cut the sequence crosses parts: a cell of colour `c` on part `r`
+needs `Dt_u` for lower-coloured neighbours that may live on part `s`. §5.3 of
+the design note looked for a gather-shaped formulation that removes that
+dependence and did not find one; neither did this section. The choices are an
+exchange of `Dt` **between every colour, in the factorisation and in both
+sweeps of every application**, or dropping the off-part couplings.
+
+**What is built is the second, and it is block Jacobi — not restricted additive
+Schwarz.** The distinction is not pedantry, it is the difference between two
+different predicted iteration counts. RAS (Cai & Sarkis 1999) is additive
+Schwarz on *overlapping* subdomains with the overlap discarded on the update,
+and its convergence improves with the overlap width. Here the halo is read by
+`lduAmul` and by **nothing in `precon.rs`** — mechanically: the factor and
+sweep kernels index `cf_offset`/`cf_face`/`cf_own`, which on a part cover that
+part's interior faces only, and a cut face is a *boundary* face there. Zero
+overlap. With zero overlap RAS degenerates to block Jacobi (Saad ch. 14), and
+block Jacobi is what this is. The design note calls it "standard restricted
+additive Schwarz"; that is wrong, and it would predict an improvement with
+overlap width that this construction has no way to deliver.
+
+Two further things move with the cut, and both are recorded rather than
+excused: the greedy colouring runs in each part's **local** cell order, and a
+part's colour count is its own (2 on a structured hex part, up to 4 on the
+irregular pieces the Hilbert cut leaves).
+
+**The measurement.** `ofgpu-decompose <case>` solves the same SPD Poisson
+system to `1e-10` at `P = 1, 2, 4, 8, 16` under the Hilbert cut with the exact
+reduction, and reports the iteration count. The diagonal rows are the control:
+they **cannot** move, and they do not.
+
+| Case | cells | method | P=1 | P=2 | P=4 | P=8 | P=16 | P=16 / P=1 |
+|---|---|---|---|---|---|---|---|---|
+| `channelPeriodicWF.jsonc` | 192 | PCG diagonal | 29 | 29 | 29 | 29 | 29 | **1.00×** |
+| | | PCG DIC block-local | 17 | 17 | 21 | 22 | 24 | **1.41×** |
+| | | BiCG diagonal | 20 | 20 | 20 | 20 | 20 | **1.00×** |
+| | | BiCG DILU block-local | 10 | 10 | 13 | 14 | 16 | **1.60×** |
+| `channel` | 24,000 | PCG diagonal | 124 | 124 | 124 | 124 | 124 | **1.00×** |
+| | | PCG DIC block-local | 62 | 62 | 62 | 101 | 103 | **1.66×** |
+| | | BiCG diagonal | 79 | 79 | 79 | 79 | 79 | **1.00×** |
+| | | BiCG DILU block-local | 43 | 43 | 43 | 80 | 79 | **1.84×** |
+| `burnerPlume.jsonc` | 32,768 | PCG diagonal | 97 | 97 | 97 | 97 | 97 | **1.00×** |
+| | | PCG DIC block-local | 53 | 56 | 60 | 62 | 64 | **1.21×** |
+| | | BiCG diagonal | 62 | 62 | 62 | 62 | 62 | **1.00×** |
+| | | BiCG DILU block-local | 40 | 42 | 44 | 45 | 46 | **1.15×** |
+| `plume` | 82,320 | PCG diagonal | 125 | 125 | 125 | 125 | 125 | **1.00×** |
+| | | PCG DIC block-local | 62 | 65 | 69 | 70 | 71 | **1.15×** |
+| | | BiCG diagonal | 78 | 78 | 78 | 78 | 78 | **1.00×** |
+| | | BiCG DILU block-local | 45 | 48 | 48 | 50 | 51 | **1.13×** |
+| `gb_800000` | 800,000 | PCG diagonal | 286 | 286 | 286 | 286 | 286 | **1.00×** |
+| | | PCG DIC block-local | 143 | 144 | 144 | 145 | 147 | **1.03×** |
+| | | BiCG diagonal | 174 | 174 | 174 | 174 | 174 | **1.00×** |
+| | | BiCG DILU block-local | 97 | 101 | 97 | 87 | 88 | **0.91×** |
+
+**The plain answer to "which preconditioner degrades and by how much".**
+`Diagonal` and `None` degrade by **exactly nothing**, at every part count, on
+every case — not approximately, bitwise: they are elementwise, so the iterate
+sequence is the undecomposed one and the count is the same integer. `DIC` and
+`DILU` degrade, and on the five cases measured the P = 16 penalty runs from
+**1.03× to 1.84×**. On the largest case it is **1.03×** for DIC — the cheapest
+place to lose anything — and the whole-mesh factorisation there is worth 2.0×
+over Jacobi (143 against 286), so a block-local DIC at P = 16 still buys 1.95×.
+**On these meshes the block-local factorisation is the right default and the
+per-colour exchange is not worth its latency.** That is the opposite of what
+the design note's §7.5 arithmetic predicted would be the interesting question,
+and it is the opposite for a reason the note did not consider: the note costed
+the *exchange* and never measured the *iteration count*, which is the term that
+decides.
+
+**Two results that contradict the obvious expectation.**
+
+*(a) The degradation is not a function of `P`. It is a function of which
+direction the cut crosses.* On `cases/channel` the count is flat at 62 through
+`P = 4` and then steps to **101 at `P = 8`** — a 63 % jump at one doubling,
+with nothing between. The mesh is 200 × 120 × 1, and up to `P = 4` the Hilbert
+cut is four clean slabs (320 cut faces, two neighbours per part); at `P = 8` it
+fragments (19,641 cut faces, five neighbours per part — §73.6 diagnoses why).
+The factorisation loses what the cut takes away, and what the cut takes away is
+a step function of the geometry, not a smooth function of the part count. A
+model that interpolates a "per-rank penalty" from `P = 2` would have predicted
+64 and been wrong by 58 %.
+
+*(b) The count is not monotone in `P`, and this section's own test asserted
+that it was.* On `gb_800000` the block-local DILU takes **97 iterations on the
+whole mesh and 87 at `P = 8`** — *fewer*, at 0.91×. The first version of
+`the_iteration_count_of_a_block_local_factorisation_only_grows` asserted
+`count(P) >= count(1)`, passed on the small test mesh, and is false. BiCGStab's
+iteration count is not a monotone functional of preconditioner quality: it is a
+two-term recurrence whose `omega` can stagnate, and a different preconditioner
+is a *different path*, not a longer one. The test is now
+`a_block_local_factorisation_still_preconditions_at_every_part_count` and
+asserts the bracket that is actually guaranteed:
+
+> the block-local count never exceeds the diagonal count, because at
+> `P = n_cells` every part has no interior faces at all and the "factorisation"
+> *is* the diagonal — so no cut can be worse than the case the sequence ends at.
+
+That holds on every row of the table above.
+
+---
+
+### 73.6 Strong scaling: what one GPU can say, and what it cannot
+
+**The refusal first.** This machine has one GPU (`cuDeviceGetCount` returns 1,
+checked). A strong-scaling number — the same problem on more devices, wall time
+against device count — cannot be measured on it, and **none is invented here**.
+Running `P` parts as `P` processes time-sharing one card would measure context
+switching, not scaling, and would be a number that looks like the one the gate
+asked for while meaning something else.
+
+**What is measured.** Four things, all on one device, all reported by
+`ofgpu-decompose`:
+
+| Measured | Where it comes from |
+|---|---|
+| `t_1`, the cost of one PCG iteration on the whole mesh | 20 fixed iterations, timed, warm |
+| `t_cell = t_1 / n`, the per-cell cost | division |
+| `t_P`, the cost of one iteration run as `P` parts **in sequence on the same device** | the same, at each `P` |
+| the communication volume of the cut, `sum_r h_r / n` | `Decomposition::report` |
+
+| Case | cells | `t_1` | `t_cell` | `t_2/t_1` | `t_4/t_1` | `t_8/t_1` | `t_16/t_1` |
+|---|---|---|---|---|---|---|---|
+| `channel` | 24,000 | 174.9 µs | 7.29 ns | 1.66× | 2.97× | 6.14× | 12.72× |
+| `plume` | 82,320 | 200.6 µs | 2.44 ns | 1.59× | 2.75× | 5.15× | 10.38× |
+| `gb_800000` | 800,000 | 718.9 µs | 0.90 ns | 1.26× | 1.67× | 2.80× | 4.53× |
+
+`t_P/t_1` is **not** a scaling number and must not be read as one: it is the
+cost of doing the same work as `P` separate kernel launch sequences on one
+card, so it is dominated by launch overhead and it *rises*. It is reported
+because it is the honest measurement available, and because its shape says
+something useful — at 24,000 cells the ratio is 12.7× at `P = 16` and at
+800,000 cells it is 4.5×, which is the launch-bound / bandwidth-bound crossover
+this project already reports around half a million cells, seen from a new
+direction.
+
+**The Amdahl statement, with the unmeasurable term named.** PCG spends, per
+iteration, one halo exchange and two cross-part reductions (§73.1). Write `L`
+for the latency of one collective between two GPUs — **this is the one input
+that cannot be measured on this machine, and it is left as a free parameter
+rather than assumed.** Then per iteration, per GPU:
+
+```
+compute   ~  t_cell x (cells per GPU) x (iters(P)/iters(1))
+communicate  ~  3 L                       (PCG; PBiCGStab is 6 L)
+```
+
+and the two are equal at `cells per GPU = 3 L / t_cell`:
+
+| | `L = 3 µs` | `L = 5 µs` | `L = 10 µs` |
+|---|---|---|---|
+| `plume`'s `t_cell` (2.44 ns) | 3,690 cells/GPU | 6,150 | 12,300 |
+| `gb_800000`'s `t_cell` (0.90 ns) | 10,000 cells/GPU | 16,700 | 33,400 |
+
+Below those counts a GPU costs more in synchronisation than it saves in
+arithmetic. Two caveats, both load-bearing: the crossover is only meaningful
+where an iteration is **bandwidth** bound, so the 24,000-cell row's 7.29 ns/cell
+is an overhead figure and its crossover is not a limit; and the exchange
+measured here is a `memcpy_dtod` and the gather a one-block kernel, so both are
+**lower bounds** on what a fabric costs.
+
+**Where it stops scaling, measured — and the reason is not the solver.** The
+communication volume of the Hilbert cut stops improving at `P = 8` on two of
+the five cases, and it stops badly:
+
+| Case | shape | `P = 4` cut faces | `P = 8` cut faces | best cut available at `P = 8` |
+|---|---|---|---|---|
+| `channel` | 200 × 120 × 1 | 320 (2 neighbours/part) | **19,641** (5 neighbours/part) | 1,400, which the **linear** cut achieves — measured, not estimated |
+| `gb_800000` | 500 × 400 × 4 | 3,600 | **203,600** | 6,800 (a 4 × 2 column cut), against linear's 602,000 |
+
+At `P = 8` on `cases/channel`, 41 % of all 47,680 internal faces are cut and
+each part's halo (≈ 2,500 cells) is nearly its own cell count (3,000).
+
+**The diagnosis, mechanically.** `decompose::lattice` normalises **each axis to
+its own extent** before indexing, so the curve is blind to the mesh's aspect
+ratio, and a degenerate axis is collapsed to 0. Two consequences, one per case:
+
+* On a 2-D mesh (`channel`, `nz = 1`) every cell has lattice `z = 0`, so the
+  sort is the **`z = 0` slice of a three-dimensional Hilbert curve**, which is
+  not a two-dimensional Hilbert curve — it is a set of disconnected arcs. The
+  top-level octants happen to keep the `z = 0` half contiguous, which is why
+  `P <= 4` is clean; the first recursion re-orients and the slice fragments,
+  which is why `P = 8` is not.
+* On a thin 3-D mesh (`gb_800000`, four cells deep) the per-axis normalisation
+  gives the four-cell direction the same 21 bits as the 500-cell one, so the
+  `P = 8` cut is octants and one of the three cut planes is the 200,000-face
+  mid-plane of the thin direction. That single plane is 56× the entire `P = 4`
+  cut.
+
+Both are the same root cause wearing different clothes, and the fix is the same
+shape — index all three axes against one common physical scale, and use a
+two-dimensional curve when an axis is degenerate. **It is not fixed here**, and
+§73.7 says so by name: it is §71's partitioner, changing it moves §71's
+published communication-volume numbers, and it needs its own gate. What matters
+for this section is that the answer to "where does it stop scaling" on these
+meshes is `P = 8`, and the reason is the partition, not the Krylov method, not
+the halo and not the reduction.
+
+---
+
+### 73.7 What a distributed Krylov solve still cannot do — the §13.4 list
+
+Stated by name, with the alternative, because a distributed solve that quietly
+did any of these would produce a plausible wrong answer or a plausible wrong
+number.
+
+| Refused | Why | What to do instead |
+|---|---|---|
+| **MPI, NCCL, more than one process, more than one device** | **checked mechanically on this machine, and one of the three things I expected to find was not true.** (1) `cuDeviceGetCount` returns **1**: there is nowhere to put a second rank, and two ranks time-sharing one card would measure context switching. (2) The installed CUDA 13.3 toolkit contains **no NCCL** — a recursive search of the toolkit tree finds no `nccl` header or library, because NVIDIA distributes NCCL for Linux only — so the design note's §6.4 conclusion, "use NCCL for everything inside the time loop", is not available here at all. (3) I expected CUDA IPC to be the third blocker and **it is not**: `cuIpcGetMemHandle` returns `CUDA_SUCCESS` on this device (`HANDLE_TYPE_WIN32_HANDLE_SUPPORTED = 1`, `HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED = 0`), so the cross-process device path is *not* categorically closed on this platform and that claim is withdrawn rather than published | one process, one device. `HaloExchange` moves data with `memcpy_dtod` and `ExactReduction` gathers with `memcpy_dtod`; both are the stand-ins §71.4 and §72.4 named, and both are one call away from `ncclSend`/`ncclRecv` and `ncclAllGather`. **The exchange and the gather are the only two places a communication library would appear**, which is the whole point of having built them separately first |
+| **A measured strong-scaling number** | needs a second GPU (above) | §73.6's measured inputs and the named free parameter `L`. No efficiency figure is published |
+| **Interior / interface-adjacent overlap** (the design note's §6.1) | it changes no bit — each row is still one thread, one list, one order — but it buys nothing without a network to hide, and shipping an untested optimisation for an absent fabric is how untested code gets believed | one launch per part. The reordering it needs would also change the greedy colouring, which is a second reason to do it with the colouring fix and not before |
+| **Pipelined PCG and pipelined BiCGStab** (Ghysels & Vanroose 2014; Cools & Vanroose 2017) | they compute *different recurrences*, so they are not bitwise comparable to the classical methods this crate gates on; and Cools (2019) documents that pipelined BiCGStab's maximal attainable accuracy is worse, sometimes badly. For a solver whose selling point is reproducibility that is the wrong trade | the classical recurrences, with the two reductions per iteration paid for honestly |
+| **An exact (non-block-local) distributed DIC/DILU** | the factorisation is sequential across colours and the sequence crosses cuts; making it exact needs a `Dt` exchange between every colour, in the factorisation and in **both sweeps of every application** — `2 n_col` exchanges per preconditioner call | the block-local form, whose cost §73.5 measures at 1.03×–1.84× in iterations. On the largest case measured that is 3 %, which is cheaper than the exchanges would be at any plausible latency |
+| **A globally consistent colouring** (Jones–Plassmann priority by global cell id) | not written. The colouring is greedy in each part's local order, so it is one of the two things a cut changes about DIC/DILU | nothing. It would not make the block-local form partition-invariant on its own — dropping the couplings would still do that — so it is only worth doing together with the per-colour exchange |
+| **Re-assembling an equation on a part** | unchanged from §71.7: the sixteen gather kernels of §70.5 sum in local order | assemble on the whole mesh, distribute with `DistSystem::split` |
+| **The FFT and AMGX pressure backends, decomposed** | a distributed FFT is a different butterfly network, and AMGX makes no bitwise claim at all | `dist_solve` refuses `GAMG` by name; the pressure backends have no decomposed form |
+| **The Hilbert partitioner's degenerate and thin axes** (§73.6) | diagnosed here, not fixed here: it is §71's code, a fix moves §71's published communication-volume numbers, and it needs its own gate | use `-method linear` on a 2-D or thin mesh above `P = 4`, where it is measured to be 14× better |
+| **CUDA-graph capture of a distributed solve** | the convergence test reads a device flag back to the host once per check, exactly as the serial solver does. `-fixedIters` removes that in the serial path and would here too, but capture across `P` parts has not been tried | `-fixedIters` and no graph |
+| **Decomposed I/O, restart, parcels, VOF, SIMPLE, the time loop** | unchanged from §71.7 | the whole mesh is read and written; parts exist only in memory |
+| **Anything in the crate calling this** | nothing does. `distsolve` is reachable from the library API and from `ofgpu-decompose` and from nowhere else | as with `HaloExchange::vector` in §71 and the whole of §72's accumulator, the module is built, gated and left uncalled, so **no default can move** |
+
+**§13.4.1, and why no pair test is owed.** This section adds **no case-file
+setting**: no `.jsonc` key, no `fvSolution` entry, nothing a case can say, and
+no new driver argument — `ofgpu-decompose` gained the Krylov gate and the
+preconditioner ladder but not one new option. §13.4.1 exists to catch a setting
+that never reaches the code it names. What there *is* is a claim that a solve
+does not change when the partition does, and that claim is the gate itself,
+asserted in both directions: the gate requires `n_cut_faces > 0` and a real
+halo at every `P > 1` so the cut cannot pass by being inert, it requires the
+preconditioner that *is* allowed to move to demonstrably move
+(`the_block_local_factorisation_moves_the_answer_and_says_so`), and it requires
+the answer and the iteration count to be bit-identical anyway.
+
+---
+
+### 73.8 What must hold
+
+| Test | Expected |
+|---|---|
+| **`a_one_part_gathered_solve_is_the_serial_solver`** | at `P = 1` with the gathered reduction, `dist_pcg` and `dist_pbicgstab` are **bitwise** `solver::solve_pcg` and `solver::solve_pbicgstab`, on a plain and a cyclic mesh, with `None`, `Diagonal`, `Dic` and `Dilu` — the pin on every kernel argument, and the proof that `device_dot2` equals two `device_dot`s |
+| **`a_decomposed_krylov_solve_is_the_undecomposed_solve`** | **the gate.** PCG and PBiCGStab, `Diagonal` and `None`, exact reduction, solved to a tolerance at `P = 1…4` under three partitioners on a plain and a cyclic mesh: every cell bit-identical to `P = 1` **and the same iteration count**. Each cut is required to have cut faces and a non-empty halo first |
+| `relabelling_the_parts_changes_no_bit_of_the_solve` | every rotation of the part labels, `P = 2…4` |
+| `a_distributed_solve_reaches_the_serial_solvers_answer` | the decomposed answer agrees with `solver::solve` to `1e-6` relative and the final residual is below `1e-8` — because a solve that reproduced itself perfectly while computing nonsense would pass every other test here |
+| `the_block_local_factorisation_moves_the_answer_and_says_so` | `partition_invariant` is `false` for `Dic`/`Dilu` and for the gathered reduction, the answer really does move under a cut, and it still converges to the same solution to `1e-6` |
+| `a_block_local_factorisation_still_preconditions_at_every_part_count` | the block-local count never exceeds the diagonal count, at every `P`. **The monotonicity this test first asserted is false and §73.5(b) is the counter-example** |
+| `the_gathered_reduction_moves_where_the_exact_one_does_not` | over nine cuts of a 336-cell mesh the exact solve does not move and the gathered one does — the second half asserted so the test cannot pass by the problem going benign |
+| `the_new_gathered_shapes_are_the_serial_reductions_at_one_part` | `gathered_sum_mag` is `device_sum_mag` and `gathered_norm_factor` is `device_norm_factor`, bitwise, at `P = 1` |
+| `an_exchange_happens_once_per_matrix_product_and_no_more` | exactly `k + 3` / `2k + 3` exchanges and `2k + 5` / `4k + 4` reductions at `k` fixed iterations |
+| `a_field_buffer_without_room_for_the_halo_is_refused_by_name` | an `n_cells`-long buffer is named with the length it should have had and with `lduAmul`; so is the wrong number of buffers |
+| `an_uncoloured_workspace_refuses_dic_by_name` | `Dic` and `Dilu` on an uncoloured workspace are refused with the setting, the value, the alternative and `DistWorkspace::colour`; after colouring both are available and every part reports at least two colours |
+| `gamg_is_refused_by_name_on_the_distributed_path` | the setting, the value and `PBiCGStab` |
+| `a_workspace_from_another_decomposition_is_refused_by_name` | both part counts, at the solve and at the split |
+| `ofgpu-decompose <case>` | the same gate on the meshes in `cases/`, plus the §73.5 ladder and the §73.6 cost. **PASS means `worst == 0` and the same iteration count**; a tolerance is not accepted |
+
+---
+
+### 73.9 Validation: what was measured
+
+The claim is bitwise identity, so the measurement is a bit comparison.
+
+**The gate, on shipped cases.** `ofgpu-decompose <case> -method all` at
+`P = 2, 3, 4` under all three partitioners, PCG and PBiCGStab, solved to
+`1e-10` with the diagonal preconditioner and the exact reduction:
+
+| Case | cells | mesh | PCG on the whole mesh | PBiCGStab | Result |
+|---|---|---|---|---|---|
+| `cases/channelPeriodicWF.jsonc` | 192 | JSONC/blockgen, **cyclic** | 29 iterations | 20 | **18/18 bitwise identical** |
+| `cases/channel` | 24,000 | polyMesh, 2-D | 124 | 79 | **18/18** |
+| `cases/burnerPlume.jsonc` | 32,768 | JSONC/blockgen | 97 | 62 | **18/18** |
+| `cases/plume` | 82,320 | polyMesh, 240,044 internal faces | 125 | 78 | **18/18** |
+| `cases/gb_800000` | 800,000 | polyMesh, 2,196,400 internal faces | 286 | 174 | **6/6** (Hilbert only) |
+
+**78 of 78**, every cell bit-for-bit the undecomposed solve's and every run
+stopping on the same iteration as the undecomposed solve. The cyclic case is in
+the list for the same reason §71.9 put it there: it is the only one whose mesh
+has coupled boundary faces before it is cut. `cases/gb_800000` is in it because
+it is the largest mesh that fits, and because it is the one whose result
+contradicts the expected trend (§73.5(b)).
+
+**The iteration counts, and the degradation.** §73.5's table, on all five
+cases. `Diagonal` and `None`: **1.00× at every part count on every case, by
+construction** — the iterates are bit-identical, so the count is the same
+integer, not a similar one. `DIC`/`DILU`: **1.03× to 1.84× at `P = 16`**, worst
+on `cases/channel` where the `P = 8` cut fragments, best on `cases/gb_800000`
+where it barely moves.
+
+**The cost.** §73.6's table. One device, so no scaling figure is published and
+none is implied.
+
+**What was checked and refused.** One CUDA device; no NCCL in the CUDA 13.3
+toolkit; `cuIpcGetMemHandle` succeeding, which withdrew a refusal I had
+intended to publish before checking it.

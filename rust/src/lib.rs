@@ -47,7 +47,9 @@
 
 pub mod decompose;
 pub mod device;
+pub mod distsolve;
 pub mod error;
+pub mod exactsum;
 pub mod types;
 
 pub mod field;
