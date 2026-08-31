@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 1,608 unit tests across all targets (1,460 in the lib), 747 `ofgpu-validate` checks |
+| Validation | 1,621 unit tests across all targets (1,473 in the lib), 747 `ofgpu-validate` checks |
 
 ---
 
@@ -281,7 +281,10 @@ bit-identical **and the solve must stop on the same iteration**.
 | `cases/gb_800000` | 800,000 | 286 / 174 | **6/6** |
 
 **78 of 78**, at 2, 3 and 4 parts under three partitioners, every cell and every
-iteration count.
+iteration count. Then every one of those cuts again under **every rotation of
+its part labels** — the same cells in the same groups owned by a different rank,
+which is the permutation a rank-indexed reduction would fail while passing
+everything else: **156 of 156**, bits and iteration count.
 
 The preconditioner is where the cost is, and §73.5 measures it rather than
 arguing it. A **diagonal** preconditioner is elementwise, and a part's diagonal
@@ -292,8 +295,10 @@ across colours and the sequence crosses cuts, so what runs is each part's own
 submatrix with the couplings across every cut dropped — **block Jacobi, not
 restricted additive Schwarz**, because the halo is read by the matrix product
 and by nothing in the preconditioner, so there is no overlap to restrict. Its
-cost at 16 parts, over the five cases above: **1.03× to 1.84× the whole-mesh
-iteration count**, cheapest on the largest mesh, where the whole-mesh DIC is
+cost at 16 parts, over the ten DIC/DILU rows of the five cases above: **0.91× to
+1.84× the whole-mesh iteration count** — nine of the ten are a penalty and those
+nine run 1.03× to 1.84×, and the tenth is the speed-up described below.
+It is cheapest on the largest mesh, where the whole-mesh DIC is
 worth 2.0× over Jacobi and the block-local one still buys 1.95×. Two results
 contradict the obvious expectation and both are reported: the degradation is a
 **step function of which direction the cut crosses**, not a smooth function of
@@ -308,7 +313,7 @@ There is no MPI and no NCCL: this machine has one device, and the installed CUDA
 13.3 toolkit contains no NCCL at all — NVIDIA ships it for Linux only. Running
 `P` parts as `P` processes on one card would measure context switching, so that
 number is refused rather than invented. What §73.6 publishes instead is
-measured: the per-cell cost of an iteration (0.90 ns at 800,000 cells), the
+measured: the per-cell cost of an iteration (0.84 ns at 800,000 cells), the
 collective count per iteration (one exchange and two reductions for PCG, two and
 four for PBiCGStab), and the cells-per-GPU at which communication overtakes
 arithmetic for a *named* range of collective latencies. It also reports where
@@ -813,7 +818,7 @@ raise `fatal error C1189` under the traditional MSVC preprocessor.
 | `ofgpu-graph-bench` | CUDA graph against per-launch execution |
 | `ofgpu-dispatch-bench` | Runtime dispatch cost |
 | `ofgpu-probe` | Device properties |
-| `ofgpu-decompose` | Cut a case into parts, run them in one process, and report whether any bit moved (SPEC-LIT §71); reduce over every relabelling of the cut and report whether the reduction moved (§72); then solve it with distributed PCG and PBiCGStab and report whether the field or the iteration count moved, with the block-local DIC/DILU iteration ladder and the per-iteration cost (§73) |
+| `ofgpu-decompose` | Cut a case into parts, run them in one process, and report whether any bit moved (SPEC-LIT §71); reduce over every relabelling of the cut and report whether the reduction moved (§72); then solve it with distributed PCG and PBiCGStab — under each partitioner and under every relabelling of each cut — and report whether the field or the iteration count moved, with the block-local DIC/DILU iteration ladder and the per-iteration cost (§73) |
 | `ofgpu-generate-mesh` | Case generation |
 | `ofgpu-k-epsilon`, `ofgpu-k-omega` | Turbulence models, standalone |
 | `ofgpu-sa` | Spalart-Allmaras and the DES97/DDES/IDDES family, standalone (SPEC-LIT §56–§58) |

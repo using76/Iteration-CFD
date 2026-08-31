@@ -33,8 +33,11 @@
 //! It then runs the third gate, SPEC-LIT §73.8: a real PCG and a real
 //! PBiCGStab **over the decomposition**, solved to a tolerance rather than for
 //! a fixed count, must produce the whole mesh's field bit for bit AND stop on
-//! the same iteration. After that it measures what the block-local DIC/DILU
-//! costs in iterations, which is the number §73.5 publishes.
+//! the same iteration - and then must do it again under every rotation of the
+//! part labels, which is the same cells in the same groups owned by a
+//! different rank and is the permutation a rank-indexed reduction would fail
+//! while passing everything else. After that it measures what the block-local
+//! DIC/DILU costs in iterations, which is the number §73.5 publishes.
 //!
 //! It also runs the second gate, SPEC-LIT §72.8: the same cut, and every
 //! relabelling of its parts, must reduce to the same bits. Three reductions
@@ -595,6 +598,8 @@ fn main() -> Result<()> {
     let mut worst_gathered = 0.0 as Scalar;
     let mut kry_runs = 0usize;
     let mut kry_failed = 0usize;
+    let mut rel_runs = 0usize;
+    let mut rel_failed = 0usize;
 
     // ---- SPEC-LIT §73: the whole-mesh reference solve ---------------------
     // A separate, symmetric positive definite operator: the Jacobi gate's
@@ -807,6 +812,54 @@ fn main() -> Result<()> {
                 }
             }
 
+            // ---- SPEC-LIT §73: the same cut, RELABELLED ----------------
+            // The gate above changes the cut. This changes only the NAMES of
+            // the parts: the same cells, in the same groups, owned by a
+            // different rank. It is the purest permutation there is, and it
+            // is the one a rank-indexed reduction or a rank-ordered gather
+            // would fail while passing everything above - which is exactly
+            // what §72.5 measured the gathered construction doing. The whole
+            // orbit is covered: `shift = 0` is the identity, which is the
+            // gate immediately above, and the other `P - 1` rotations are
+            // here.
+            let rel_bad_before = rel_failed;
+            for shift in 1..np {
+                let rotated: Vec<Label> = d
+                    .cell_part
+                    .iter()
+                    .map(|&r| ((r as usize + shift) % np) as Label)
+                    .collect();
+                let dr = Decomposition::from_map(&m, np, rotated)?;
+                let mut rrig = DistRig::new(&gpu, &m, &dr, &a_spd)?;
+                for (kind, label, want, want_iters) in &krylov_want {
+                    let ctrl = krylov_controls(*kind, Preconditioner::Diagonal, None);
+                    let (got, perf) =
+                        rrig.solve(&gpu, &sk, &dr, &psi_in, &ctrl, DistReduce::Exact)?;
+                    rel_runs += 1;
+                    let bad = got
+                        .iter()
+                        .zip(want.iter())
+                        .filter(|(g, w)| g.to_bits() != w.to_bits())
+                        .count();
+                    if bad > 0 || perf.n_iterations != *want_iters {
+                        rel_failed += 1;
+                        println!(
+                            "P = {np}  {name:<11} {label:<10} RELABEL FAIL - \
+                             rotation {shift}: {bad} of {} cells differ, {} \
+                             iterations against {want_iters}",
+                            m.n_cells, perf.n_iterations
+                        );
+                    }
+                }
+            }
+            if np > 1 && rel_failed == rel_bad_before {
+                println!(
+                    "P = {np}  {name:<11} RELABEL PASS - the solve is bitwise \
+                     unmoved by all {} rotation(s) of the part labels",
+                    np - 1
+                );
+            }
+
             if !args.quiet {
                 println!();
             }
@@ -1003,6 +1056,12 @@ fn main() -> Result<()> {
         kry_runs
     );
     println!(
+        "{}/{} relabelled decompositions solve to the same bits and the same \
+         iteration count",
+        rel_runs - rel_failed,
+        rel_runs
+    );
+    println!(
         "{}/{} relabelled decompositions reduce to the same bits with the exact accumulator",
         red_runs - red_failed,
         red_runs
@@ -1012,7 +1071,7 @@ fn main() -> Result<()> {
          {red_runs} (run field) and {gathered_moved_hard} of {red_runs} \
          (adversarial field), worst |d|/|s| {worst_gathered:e} - SPEC-LIT §72.9"
     );
-    if failed > 0 || red_failed > 0 || kry_failed > 0 {
+    if failed > 0 || red_failed > 0 || kry_failed > 0 || rel_failed > 0 {
         std::process::exit(1);
     }
     Ok(())

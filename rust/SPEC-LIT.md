@@ -19459,10 +19459,15 @@ they **cannot** move, and they do not.
 `Diagonal` and `None` degrade by **exactly nothing**, at every part count, on
 every case — not approximately, bitwise: they are elementwise, so the iterate
 sequence is the undecomposed one and the count is the same integer. `DIC` and
-`DILU` degrade, and on the five cases measured the P = 16 penalty runs from
-**1.03× to 1.84×**. On the largest case it is **1.03×** for DIC — the cheapest
-place to lose anything — and the whole-mesh factorisation there is worth 2.0×
-over Jacobi (143 against 286), so a block-local DIC at P = 16 still buys 1.95×.
+`DILU` move, and on the ten `DIC`/`DILU` rows above the P = 16 ratio runs from
+**0.91× to 1.84×** — nine of the ten are a penalty, and *those* nine run from
+**1.03× to 1.84×**; the tenth is a speed-up and is §73.5(b) below. Quoting the
+range as "1.03× to 1.84×" without that sentence would be quoting the penalties
+and silently dropping the row that does not fit, which is the shape of error
+this section exists to avoid. On the largest case it is **1.03×** for DIC —
+the cheapest place to lose anything — and the whole-mesh factorisation there is
+worth 2.0× over Jacobi (143 against 286), so a block-local DIC at P = 16 still
+buys 1.95×.
 **On these meshes the block-local factorisation is the right default and the
 per-colour exchange is not worth its latency.** That is the opposite of what
 the design note's §7.5 arithmetic predicted would be the interesting question,
@@ -19523,16 +19528,28 @@ asked for while meaning something else.
 
 | Case | cells | `t_1` | `t_cell` | `t_2/t_1` | `t_4/t_1` | `t_8/t_1` | `t_16/t_1` |
 |---|---|---|---|---|---|---|---|
-| `channel` | 24,000 | 174.9 µs | 7.29 ns | 1.66× | 2.97× | 6.14× | 12.72× |
-| `plume` | 82,320 | 200.6 µs | 2.44 ns | 1.59× | 2.75× | 5.15× | 10.38× |
-| `gb_800000` | 800,000 | 718.9 µs | 0.90 ns | 1.26× | 1.67× | 2.80× | 4.53× |
+| `channel` | 24,000 | 186.7 µs | 7.78 ns | 1.72× | 2.83× | 6.00× | 11.99× |
+| `plume` | 82,320 | 204.8 µs | 2.49 ns | 1.52× | 2.77× | 5.17× | 10.25× |
+| `gb_800000` | 800,000 | 668.2 µs | 0.84 ns | 1.31× | 1.76× | 2.93× | 4.79× |
+
+**This is the one table in this section that does not reproduce to the digit,
+and it says so rather than being quoted as if it did.** It is a wall-clock
+measurement on a desktop card and it was taken twice, on separate runs of the
+same binary on the same idle machine. The first run's `t_1` was 174.9, 200.6
+and 718.9 µs against the 186.7, 204.8 and 668.2 µs above — a spread of up to
+7 %, and every ratio agreed to better than 6 %. Both runs are the same
+measurement and neither is more right than the other; the numbers published are
+the second, because that is the run this section was signed off against.
+§73.5's iteration counts, by contrast, reproduced **exactly, integer for
+integer, on all five cases and all four preconditioner rows**, because they are
+integers produced by a deterministic recurrence and not times.
 
 `t_P/t_1` is **not** a scaling number and must not be read as one: it is the
 cost of doing the same work as `P` separate kernel launch sequences on one
 card, so it is dominated by launch overhead and it *rises*. It is reported
 because it is the honest measurement available, and because its shape says
-something useful — at 24,000 cells the ratio is 12.7× at `P = 16` and at
-800,000 cells it is 4.5×, which is the launch-bound / bandwidth-bound crossover
+something useful — at 24,000 cells the ratio is 12.0× at `P = 16` and at
+800,000 cells it is 4.8×, which is the launch-bound / bandwidth-bound crossover
 this project already reports around half a million cells, seen from a new
 direction.
 
@@ -19551,12 +19568,12 @@ and the two are equal at `cells per GPU = 3 L / t_cell`:
 
 | | `L = 3 µs` | `L = 5 µs` | `L = 10 µs` |
 |---|---|---|---|
-| `plume`'s `t_cell` (2.44 ns) | 3,690 cells/GPU | 6,150 | 12,300 |
-| `gb_800000`'s `t_cell` (0.90 ns) | 10,000 cells/GPU | 16,700 | 33,400 |
+| `plume`'s `t_cell` (2.49 ns) | 3,617 cells/GPU | 6,029 | 12,057 |
+| `gb_800000`'s `t_cell` (0.84 ns) | 10,776 cells/GPU | 17,959 | 35,919 |
 
 Below those counts a GPU costs more in synchronisation than it saves in
 arithmetic. Two caveats, both load-bearing: the crossover is only meaningful
-where an iteration is **bandwidth** bound, so the 24,000-cell row's 7.29 ns/cell
+where an iteration is **bandwidth** bound, so the 24,000-cell row's 7.78 ns/cell
 is an overhead figure and its crossover is not a limit; and the exchange
 measured here is a `memcpy_dtod` and the gather a one-block kernel, so both are
 **lower bounds** on what a fabric costs.
@@ -19568,7 +19585,7 @@ the five cases, and it stops badly:
 | Case | shape | `P = 4` cut faces | `P = 8` cut faces | best cut available at `P = 8` |
 |---|---|---|---|---|
 | `channel` | 200 × 120 × 1 | 320 (2 neighbours/part) | **19,641** (5 neighbours/part) | 1,400, which the **linear** cut achieves — measured, not estimated |
-| `gb_800000` | 500 × 400 × 4 | 3,600 | **203,600** | 6,800 (a 4 × 2 column cut), against linear's 602,000 |
+| `gb_800000` | 500 × 400 × 4 | 3,600 | **203,600** | 6,800 — **arithmetic, not measured**: a 4 × 2 column cut is three `x`-planes of 400 × 4 plus one `y`-plane of 500 × 4. Linear's cut, which *is* measured, is 602,000 |
 
 At `P = 8` on `cases/channel`, 41 % of all 47,680 internal faces are cut and
 each part's halo (≈ 2,500 cells) is nearly its own cell count (3,000).
@@ -19587,7 +19604,11 @@ ratio, and a degenerate axis is collapsed to 0. Two consequences, one per case:
   gives the four-cell direction the same 21 bits as the 500-cell one, so the
   `P = 8` cut is octants and one of the three cut planes is the 200,000-face
   mid-plane of the thin direction. That single plane is 56× the entire `P = 4`
-  cut.
+  cut. **The measured face counts decompose exactly and confirm the
+  diagnosis**: the `P = 4` cut is 3,600 = 1,600 (one `x`-plane, 400 × 4) +
+  2,000 (one `y`-plane, 500 × 4), and the `P = 8` cut is 203,600 = those same
+  two planes plus 200,000 = 500 × 400, which is the entire `z` mid-plane. Not
+  approximately — to the face.
 
 Both are the same root cause wearing different clothes, and the fix is the same
 shape — index all three axes against one common physical scale, and use a
@@ -19641,7 +19662,7 @@ the answer and the iteration count to be bit-identical anyway.
 |---|---|
 | **`a_one_part_gathered_solve_is_the_serial_solver`** | at `P = 1` with the gathered reduction, `dist_pcg` and `dist_pbicgstab` are **bitwise** `solver::solve_pcg` and `solver::solve_pbicgstab`, on a plain and a cyclic mesh, with `None`, `Diagonal`, `Dic` and `Dilu` — the pin on every kernel argument, and the proof that `device_dot2` equals two `device_dot`s |
 | **`a_decomposed_krylov_solve_is_the_undecomposed_solve`** | **the gate.** PCG and PBiCGStab, `Diagonal` and `None`, exact reduction, solved to a tolerance at `P = 1…4` under three partitioners on a plain and a cyclic mesh: every cell bit-identical to `P = 1` **and the same iteration count**. Each cut is required to have cut faces and a non-empty halo first |
-| `relabelling_the_parts_changes_no_bit_of_the_solve` | every rotation of the part labels, `P = 2…4` |
+| `relabelling_the_parts_changes_no_bit_of_the_solve` | every rotation of the part labels, `P = 2…4` — and `ofgpu-decompose` runs the same rotation orbit on the shipped meshes, for both solvers, requiring the same bits **and** the same iteration count |
 | `a_distributed_solve_reaches_the_serial_solvers_answer` | the decomposed answer agrees with `solver::solve` to `1e-6` relative and the final residual is below `1e-8` — because a solve that reproduced itself perfectly while computing nonsense would pass every other test here |
 | `the_block_local_factorisation_moves_the_answer_and_says_so` | `partition_invariant` is `false` for `Dic`/`Dilu` and for the gathered reduction, the answer really does move under a cut, and it still converges to the same solution to `1e-6` |
 | `a_block_local_factorisation_still_preconditions_at_every_part_count` | the block-local count never exceeds the diagonal count, at every `P`. **The monotonicity this test first asserted is false and §73.5(b) is the counter-example** |
@@ -19652,7 +19673,7 @@ the answer and the iteration count to be bit-identical anyway.
 | `an_uncoloured_workspace_refuses_dic_by_name` | `Dic` and `Dilu` on an uncoloured workspace are refused with the setting, the value, the alternative and `DistWorkspace::colour`; after colouring both are available and every part reports at least two colours |
 | `gamg_is_refused_by_name_on_the_distributed_path` | the setting, the value and `PBiCGStab` |
 | `a_workspace_from_another_decomposition_is_refused_by_name` | both part counts, at the solve and at the split |
-| `ofgpu-decompose <case>` | the same gate on the meshes in `cases/`, plus the §73.5 ladder and the §73.6 cost. **PASS means `worst == 0` and the same iteration count**; a tolerance is not accepted |
+| `ofgpu-decompose <case>` | the same gate on the meshes in `cases/`, under three partitioners **and under every rotation of the part labels**, plus the §73.5 ladder and the §73.6 cost. **PASS means `worst == 0` and the same iteration count**; a tolerance is not accepted |
 
 ---
 
@@ -19679,16 +19700,48 @@ has coupled boundary faces before it is cut. `cases/gb_800000` is in it because
 it is the largest mesh that fits, and because it is the one whose result
 contradicts the expected trend (§73.5(b)).
 
+**The gate again, relabelled.** Changing the cut is one permutation; changing
+only *which rank owns which group* is the other, and it is the one a
+rank-indexed reduction or a rank-ordered gather would fail while passing
+everything above — which is exactly what §72.5 measured the gathered
+construction doing. So every cut above is run again under every rotation of its
+part labels, both solvers, same criterion:
+
+| Case | rotations run | Result |
+|---|---|---|
+| `cases/channelPeriodicWF.jsonc` | 3 partitioners × (1 + 2 + 3) × 2 solvers | **36/36** |
+| `cases/channel` | as above | **36/36** |
+| `cases/burnerPlume.jsonc` | as above | **36/36** |
+| `cases/plume` | as above | **36/36** |
+| `cases/gb_800000` | Hilbert × (1 + 2 + 3) × 2 solvers | **12/12** |
+
+**156 of 156**, bits and iteration count. `shift = 0` is the identity and is
+the 78 above, so the orbit is covered and not sampled.
+
 **The iteration counts, and the degradation.** §73.5's table, on all five
-cases. `Diagonal` and `None`: **1.00× at every part count on every case, by
-construction** — the iterates are bit-identical, so the count is the same
-integer, not a similar one. `DIC`/`DILU`: **1.03× to 1.84× at `P = 16`**, worst
-on `cases/channel` where the `P = 8` cut fragments, best on `cases/gb_800000`
-where it barely moves.
+cases, reproduced integer for integer on a second run. `Diagonal` and `None`:
+**1.00× at every part count on every case, by construction** — the iterates are
+bit-identical, so the count is the same integer, not a similar one.
+`DIC`/`DILU`: **0.91× to 1.84× at `P = 16`** over the ten rows, nine of them a
+penalty of 1.03× to 1.84× and the tenth a speed-up; worst on `cases/channel`
+where the `P = 8` cut fragments, cheapest on `cases/gb_800000` where it barely
+moves.
 
-**The cost.** §73.6's table. One device, so no scaling figure is published and
-none is implied.
+**The cost.** §73.6's table, re-measured, with its 7 % run-to-run spread stated
+there rather than hidden. One device, so no scaling figure is published and
+none is implied. The two cut-face claims §73.6 calls measured **are**: on
+`cases/channel` at `P = 8` the Hilbert cut is 19,641 faces against the linear
+cut's 1,400 (14.0×), and on `cases/gb_800000` at `P = 8` it is 203,600 against
+linear's 602,000. The third number in that table, `gb_800000`'s 6,800, is
+arithmetic and is labelled as arithmetic.
 
-**What was checked and refused.** One CUDA device; no NCCL in the CUDA 13.3
-toolkit; `cuIpcGetMemHandle` succeeding, which withdrew a refusal I had
-intended to publish before checking it.
+**What was checked and refused.** One CUDA device (`nvidia-smi` lists exactly
+one, an RTX 5070 Ti); no NCCL anywhere in the installed CUDA toolkit tree;
+`cuIpcGetMemHandle` succeeding, which withdrew a refusal that had been intended
+for publication before it was checked. The first two were re-checked at
+sign-off. The third was not: it is carried from the run that first made it, and
+it is recorded that way because it only ever **removed** a refusal — a stale
+`cuIpcGetMemHandle` result cannot make this section claim something it does
+not do. There is no MPI path in this crate and none is faked: §73.7 refuses it
+by name, and what ships is the single-process `P`-partition path with every
+gate above run on it.
