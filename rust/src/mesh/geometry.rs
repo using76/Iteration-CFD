@@ -56,6 +56,26 @@ use crate::{Label, Scalar, Vec3};
 /// coefficient finite.
 const NON_ORTH_FLOOR: Scalar = 0.05;
 
+/// SPEC-LIT 2.5. A face whose skewness vector is shorter than this fraction of
+/// `|d|` is treated as UNSKEWED and gets exactly `Vec3::ZERO`.
+///
+/// This is not cosmetic. `s_f = Cf - C_P - (1-w) d` is a difference of two
+/// nearly equal computed positions, and `Cf`, `C_P` and `w` all come out of the
+/// decomposition sweeps above carrying round-off. When the true value is zero
+/// the computed one has NO significant digits: measured, a uniform `4 x 3 x 2`
+/// box of `0.5 x 0.25 x 2.0` hexahedra comes out at `6.9e-18` on some faces and
+/// at exactly zero on others, and which is which depends on the cell
+/// dimensions. Correcting for that is correcting noise, and - worse - it would
+/// make "an unskewed mesh gives the same bits" a property of the numbers in the
+/// case file rather than of the code.
+///
+/// The floor is `eps |C| / |d|` with room: for a mesh a thousand cells across
+/// that noise is about `2e-13`, four orders below this, while a 2:1 refinement
+/// interface sits at `0.1421` - eight orders ABOVE it. Nothing real lies
+/// between, which is what makes a floor here safe and a floor on `Delta`
+/// (`NON_ORTH_FLOOR`, above) a trade-off.
+const SKEW_FLOOR: Scalar = 1.0e-9;
+
 /// Smallest magnitude this module will divide by.
 ///
 /// Roughly the square root of the smallest normal `Scalar`, so that `x/SMALL`
@@ -377,17 +397,35 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     let mut weights = vec![0.0 as Scalar; n_if];
     let mut delta_coeffs = vec![0.0 as Scalar; n_if];
     let mut non_orth_corr = vec![Vec3::ZERO; n_if];
+    let mut skew_corr = vec![Vec3::ZERO; n_if];
 
     for f in 0..n_if {
         let p = m.owner[f] as usize;
         let nb = m.neighbour[f] as usize;
         let sf = f_sf[f];
         let cf = f_cf[f];
+        let d = m.c[nb] - m.c[p];
 
         mag_sf[f] = sf.mag();
         weights[f] = interp_weight(sf, cf, m.c[p], m.c[nb]);
 
-        let (delta, k) = non_orth_split(sf, m.c[nb] - m.c[p]);
+        // SPEC-LIT 2.5. The weight above places psi_f where the face PLANE
+        // cuts the line P-N; every consumer of psi_f - Green-Gauss above all -
+        // needs it at the face CENTROID. `skew_corr` is the offset between
+        // those two points, and it is written from the weight rather than
+        // from a second projection so that the two cannot disagree: the point
+        // the weight implies is exactly `C_P + (1 - w) d`, and this is
+        // exactly the vector from there to `Cf`. Below `SKEW_FLOOR |d|` that
+        // vector is round-off in the two centroids rather than geometry and is
+        // zeroed - see the constant for the measurement that forced it.
+        let sk = cf - m.c[p] - d * (1.0 - weights[f]);
+        skew_corr[f] = if sk.mag() > SKEW_FLOOR * d.mag() {
+            sk
+        } else {
+            Vec3::ZERO
+        };
+
+        let (delta, k) = non_orth_split(sf, d);
         delta_coeffs[f] = delta;
         non_orth_corr[f] = k;
     }
@@ -398,6 +436,7 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     m.weights = weights;
     m.delta_coeffs = delta_coeffs;
     m.non_orth_corr = non_orth_corr;
+    m.skew_corr = skew_corr;
 
     // ---- 5. boundary metrics, cyclic couples last -------------------------
     let pair = cyclic_pairing(m)?;
@@ -1104,6 +1143,71 @@ mod tests {
             );
             assert!(k.mag() > 0.1, "face {f}: no correction on a sheared mesh");
         }
+    }
+
+    // ---- 2.5  skewness ----------------------------------------------------
+
+    /// SPEC-LIT 2.5. Skewness is a DIFFERENT defect from non-orthogonality and
+    /// from grading, and this is what says so: on a uniform box, on a GRADED
+    /// box whose weights are nowhere 1/2, and on a SHEARED box whose faces are
+    /// 19 degrees off normal, `skew_corr` is `Vec3::ZERO` on every internal
+    /// face - exactly, not nearly.
+    ///
+    /// That is the whole reason `skewCorrected` can be `corrected` bit for bit
+    /// on every mesh this crate shipped before section 74: the extra term is a
+    /// sum of products with zero.
+    ///
+    /// "Exactly" is `SKEW_FLOOR`'s doing and not arithmetic luck. The FIRST
+    /// version of this test had no floor and asserted the same thing; it
+    /// passed on a `6 x 5 x 4` box of `0.3 x 0.25 x 0.2` cells and failed on
+    /// this `4 x 3 x 2` box of `0.5 x 0.25 x 2.0` ones, at `6.9e-18`. Both
+    /// boxes are unskewed. See the constant.
+    #[test]
+    fn a_mesh_of_stacked_hexahedra_has_no_skewness_however_graded_or_sheared() {
+        let n = [4usize, 3, 2];
+        let d = Vec3::new(0.5, 0.25, 2.0);
+
+        for (what, tweak) in [
+            ("uniform", None::<fn(&mut [Vec3])>),
+            ("graded", Some((|p: &mut [Vec3]| grade_x(p, 2.0, 1.7)) as fn(&mut [Vec3]))),
+            ("sheared", Some((|p: &mut [Vec3]| shear_x_with_y(p, 0.35)) as fn(&mut [Vec3]))),
+        ] {
+            let (mut m, mut points, faces) = box_mesh(n, d);
+            if let Some(f) = tweak {
+                f(&mut points);
+            }
+            m.compute_geometry(&points, &faces).expect("geometry");
+
+            assert_eq!(m.skew_corr.len(), m.n_internal_faces);
+            for f in 0..m.n_internal_faces {
+                assert_eq!(
+                    m.skew_corr[f],
+                    Vec3::ZERO,
+                    "{what} mesh, face {f}: skew_corr is {} and must be exactly zero",
+                    m.skew_corr[f]
+                );
+            }
+        }
+
+        // And the two defects really are separate on those meshes: the graded
+        // one has weights away from 1/2 and the sheared one has k away from 0,
+        // so "skewness is zero" is a statement about skewness and not about a
+        // mesh that has no defects at all.
+        let (mut g, mut gp, gf) = box_mesh(n, d);
+        grade_x(&mut gp, 2.0, 1.7);
+        g.compute_geometry(&gp, &gf).expect("geometry");
+        assert!(
+            g.weights.iter().any(|w| (*w - 0.5).abs() > 0.02),
+            "the graded mesh's weights are all 1/2"
+        );
+
+        let (mut sh, mut sp, sf) = box_mesh(n, d);
+        shear_x_with_y(&mut sp, 0.35);
+        sh.compute_geometry(&sp, &sf).expect("geometry");
+        assert!(
+            sh.non_orth_corr.iter().any(|k| k.mag() > 0.1),
+            "the sheared mesh is orthogonal"
+        );
     }
 
     // ---- closure and ordering ---------------------------------------------

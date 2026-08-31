@@ -628,6 +628,45 @@ mod tests {
         assert!(why.contains("+x"), "{why}");
     }
 
+    /// SPEC-LIT S74.8: what a 2:1 refinement interface does to the direct
+    /// cuFFT Poisson path.
+    ///
+    /// The answer is settled by MEASUREMENT rather than by assertion: build
+    /// the mesh, run the detector the backend chooser actually runs, and
+    /// record the sentence it prints. `detect` refuses on the FIRST thing that
+    /// fails, and on a refined mesh that is the cell volumes - a refined leaf
+    /// is one eighth of a base cell - so the refusal never even reaches the
+    /// face areas or the spacings.
+    ///
+    /// This is the reason the FFT path is EXCLUDED and not merely untested:
+    /// the transform-divide-transform solve needs the operator to be a
+    /// Kronecker sum of three one-dimensional operators, which is a property
+    /// of a uniform grid and not of this one. Nothing in S74 changes that, and
+    /// no capacitance-matrix repair of the kind S52.9 already refused for a
+    /// fan patch would either - a refined block is O(N^(2/3)) modified rows,
+    /// not the O(1) that trick needs.
+    #[test]
+    fn a_2to1_refined_mesh_is_refused_by_the_cartesian_detector() {
+        let r = crate::mesh::refined::refined_core([8, 8, 8], Vec3::new(0.125, 0.125, 0.125), 0.25, 1)
+            .expect("refined box");
+        assert!(!r.interface_faces().is_empty(), "the mesh has no 2:1 interface");
+
+        let why = detect(&r.mesh).expect_err("a 2:1 mesh must not pass as Cartesian");
+        println!("  S74.8 cuFFT on a 2:1 mesh: {why}");
+        assert!(
+            why.contains("cell volumes are not uniform"),
+            "the detector refused a refined mesh for the wrong reason: {why}"
+        );
+
+        // And the unrefined base grid of the same box IS accepted, so the
+        // refusal is about the refinement and not about this generator.
+        let flat =
+            crate::mesh::refined::build([8, 8, 8], Vec3::new(0.125, 0.125, 0.125), &[0u32; 512])
+                .expect("flat box");
+        let g = detect(&flat.mesh).expect("the unrefined box must still be Cartesian");
+        assert_eq!((g.nx, g.ny, g.nz), (8, 8, 8));
+    }
+
     #[test]
     fn a_genuinely_mixed_face_is_not_separable() {
         let m = built([3, 2, 2], Vec3::new(1.0, 1.0, 1.0));

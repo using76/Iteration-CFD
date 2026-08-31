@@ -911,6 +911,76 @@ pub fn fvm_laplacian_non_orth_correction(
     }
 }
 
+/// The explicit SKEWNESS correction of the laplacian (SPEC-LIT section 74.4),
+/// the CPU mirror of `fv::fvm_laplacian_skew_correction`:
+///
+/// ```text
+/// source[P] -= sign sum_f (+-1) gamma_f |Sf| Delta_f
+///                    ( s_f . [ (grad psi)_N - (grad psi)_P ] )
+/// ```
+///
+/// `s_f = Cf - (C_P + (1 - w) d)` is the skewness vector of section 2.5: the
+/// offset from the point the interpolation weight actually places a face value
+/// at - where the face plane cuts the line P-N - to the face CENTROID, which
+/// is where the midpoint rule assumes it is. Zero on an unskewed mesh, so this
+/// writes nothing there; `0.1421 |d|` at a 2:1 refinement interface.
+///
+/// Written as a face loop that scatters into both cells, where the kernel
+/// gathers one row per thread - which is the whole point of this module.
+///
+/// Internal faces only, exactly as the kernel: an uncoupled boundary
+/// condition is imposed AT the face, so there is nothing to move, and a
+/// cyclic couple is refused rather than half-corrected (section 74.7).
+pub fn fvm_laplacian_skew_correction(
+    a: &mut CpuLdu,
+    m: &HostMesh,
+    gamma_mag_sf: &[Scalar],
+    grad_psi: &[Vec3],
+    sign: Scalar,
+) {
+    let mut acc = vec![0.0 as Scalar; m.n_cells];
+
+    for f in 0..m.n_internal_faces {
+        let p = m.owner[f] as usize;
+        let n = m.neighbour[f] as usize;
+        let jump = m.skew_corr[f].dot(grad_psi[n] - grad_psi[p]);
+        let t = gamma_mag_sf[f] * m.delta_coeffs[f] * jump;
+        acc[p] += t;
+        acc[n] -= t;
+    }
+
+    for c in 0..m.n_cells {
+        a.source[c] -= sign * acc[c];
+    }
+}
+
+/// The deferred SKEWNESS correction of a Green-Gauss scalar gradient
+/// (SPEC-LIT section 74.4), the CPU mirror of
+/// `fv::fvc_grad_scalar_skew_correction`:
+///
+/// ```text
+/// (grad psi)_P += (1/V_P) sum_f (+-Sf) [ (grad psi)_f . s_f ]
+/// ```
+///
+/// ADDS to `out`, and reads `grad_prev`, which must not be `out`.
+pub fn fvc_grad_scalar_skew_correction(out: &mut [Vec3], grad_prev: &[Vec3], m: &HostMesh) {
+    let mut acc = vec![Vec3::ZERO; m.n_cells];
+
+    for f in 0..m.n_internal_faces {
+        let p = m.owner[f] as usize;
+        let n = m.neighbour[f] as usize;
+        let w = m.weights[f];
+        let gf = grad_prev[p] * w + grad_prev[n] * (1.0 - w);
+        let contrib = m.sf[f] * gf.dot(m.skew_corr[f]);
+        acc[p] += contrib;
+        acc[n] -= contrib;
+    }
+
+    for c in 0..m.n_cells {
+        out[c] += acc[c] / m.v[c];
+    }
+}
+
 /// The explicit half of a deferred-correction convection scheme
 /// (SPEC-LIT section 11.1), the CPU mirror of `fv::fvm_div_correction`.
 ///

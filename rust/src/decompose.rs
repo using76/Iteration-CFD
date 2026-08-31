@@ -717,6 +717,17 @@ impl PartBuild<'_> {
             .iter()
             .map(|&f| m.non_orth_corr[f as usize])
             .collect();
+        // SPEC-LIT S2.5. Carried face by face like everything above, so a part
+        // is skewed exactly where the whole mesh was. Tolerated absent: a mesh
+        // built before S74 - or by hand in a test - has no skewness array, and
+        // zero is what an unskewed mesh's skewness vector IS, which is the same
+        // convention `GpuMesh::upload` uses. Silently dropping it would turn
+        // `skewCorrected` off on a decomposed run and say nothing.
+        pm.skew_corr = if m.skew_corr.len() == m.n_internal_faces {
+            interior.iter().map(|&f| m.skew_corr[f as usize]).collect()
+        } else {
+            vec![Vec3::ZERO; n_if]
+        };
 
         // ---- boundary faces: inherited patches, then processor patches -----
         let mut b_face_cells = Vec::with_capacity(n_bf);
@@ -1443,6 +1454,7 @@ pub(crate) mod tests {
             assert_eq!(p.mesh.weights, m.weights);
             assert_eq!(p.mesh.delta_coeffs, m.delta_coeffs);
             assert_eq!(p.mesh.non_orth_corr, m.non_orth_corr);
+            assert_eq!(p.mesh.skew_corr, m.skew_corr);
             assert_eq!(p.mesh.b_face_cells, m.b_face_cells);
             assert_eq!(p.mesh.b_nbr_cell, m.b_nbr_cell);
             assert_eq!(p.mesh.b_nbr_face, m.b_nbr_face);

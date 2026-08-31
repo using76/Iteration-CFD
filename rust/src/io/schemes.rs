@@ -138,7 +138,8 @@ pub const GRAD_AVAILABLE: &[&str] = &[
     "faceLimited[<BarthJespersen|Venkatakrishnan>] <base> <coeff>",
 ];
 
-pub const SNGRAD_AVAILABLE: &[&str] = &["corrected", "uncorrected", "orthogonal", "limited <alpha>"];
+pub const SNGRAD_AVAILABLE: &[&str] =
+    &["corrected", "uncorrected", "orthogonal", "limited <alpha>", "skewCorrected"];
 
 pub const INTERP_AVAILABLE: &[&str] = &["linear"];
 
@@ -177,8 +178,9 @@ const GRAD_KNOWN_UNIMPLEMENTED: &[&str] = &[
     "extendedLeastSquares",
 ];
 
-const SNGRAD_KNOWN_UNIMPLEMENTED: &[&str] =
-    &["faceCorrected", "quadraticFit", "linearFit", "skewCorrected"];
+// `skewCorrected` left this list in SPEC-LIT S74: it is implemented, it is in
+// SNGRAD_AVAILABLE above, and `parse_sn_grad` returns it.
+const SNGRAD_KNOWN_UNIMPLEMENTED: &[&str] = &["faceCorrected", "quadraticFit", "linearFit"];
 
 // ==========================================================================
 //  The reader
@@ -579,6 +581,11 @@ pub fn parse_sn_grad(setting: &str, raw: &str) -> Result<SnGradScheme> {
     match head {
         "corrected" => Ok(SnGradScheme::Corrected),
 
+        // SPEC-LIT S74.4. `corrected` PLUS the face-centroid skewness term.
+        // The two are independent corrections and this is the entry that
+        // asks for both; on an unskewed mesh it is `corrected` bit for bit.
+        "skewCorrected" => Ok(SnGradScheme::SkewCorrected),
+
         // `orthogonal` asserts the mesh is orthogonal, so the correction is
         // zero by assumption - the same discretisation `uncorrected` gives.
         "uncorrected" | "orthogonal" => Ok(SnGradScheme::Uncorrected),
@@ -904,6 +911,39 @@ mod tests {
         );
         assert!(parse_sn_grad("s", "limited").is_err());
         assert!(parse_sn_grad("s", "faceCorrected").is_err());
+    }
+
+    /// SPEC-LIT §74. `skewCorrected` moved out of the
+    /// "recognised, not implemented" list, so the §13.4 contract has to move
+    /// with it: the name parses, it round-trips through `describe`, it is
+    /// offered in the refusal's alternatives, and the two names still in that
+    /// list are still refused as unimplemented rather than as typos.
+    #[test]
+    fn skew_corrected_is_a_supported_sn_grad_scheme() {
+        let _g = strict();
+        assert_eq!(
+            parse_sn_grad("s", "skewCorrected").unwrap(),
+            SnGradScheme::SkewCorrected
+        );
+        assert_eq!(
+            parse_laplacian("l", "Gauss linear skewCorrected").unwrap(),
+            SnGradScheme::SkewCorrected
+        );
+        assert_eq!(SnGradScheme::SkewCorrected.describe(), "skewCorrected");
+        assert_eq!(
+            parse_sn_grad("s", &SnGradScheme::SkewCorrected.describe()).unwrap(),
+            SnGradScheme::SkewCorrected
+        );
+        assert!(SNGRAD_AVAILABLE.contains(&"skewCorrected"));
+        assert!(!SNGRAD_KNOWN_UNIMPLEMENTED.contains(&"skewCorrected"));
+
+        // §13.4: an unimplemented name is still refused BY NAME, and the
+        // refusal still offers the alternatives - now including this one.
+        let e = parse_sn_grad("s", "quadraticFit").unwrap_err().to_string();
+        assert!(
+            e.contains("recognised, not implemented") && e.contains("skewCorrected"),
+            "the refusal for an unimplemented snGrad scheme reads: {e}"
+        );
     }
 
     /// SPEC-LIT §12.3: `limited 0` is `uncorrected`, and the alpha the kernel

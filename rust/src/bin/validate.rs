@@ -68,7 +68,8 @@ use ofgpu::field_ops::{
 use ofgpu::fv::{
     div_scheme_weights, fvc_div_surface, fvc_grad_scalar, fvc_grad_vector, fvc_reconstruct,
     fvm_ddt_euler, fvm_div_bounded_correction, fvm_div_gauss, fvm_laplacian,
-    fvm_laplacian_non_orth_correction, fvm_sp, fvm_su, fvm_susp, interpolate_linear,
+    fvc_grad_scalar_skew_correction, fvm_laplacian_non_orth_correction,
+    fvm_laplacian_skew_correction, fvm_sp, fvm_su, fvm_susp, interpolate_linear,
     sn_grad_flux, turbulence_production, DivScheme, FvKernels, Limiter, SnGradScheme,
 };
 use ofgpu::io::case::{LinearSolverKind, Preconditioner, SolverControls, WallFunctionCoeffs};
@@ -796,6 +797,194 @@ fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: Scalar) {
 // ==========================================================================
 //  2. Explicit operators
 // ==========================================================================
+
+/// SPEC-LIT section 74.4, on a mesh that HAS skewed faces: the skewness
+/// correction, device gather against host scatter, plus the two claims that
+/// make it worth having.
+///
+/// The gradient the correction consumes is the one the DEVICE computed, so
+/// what is compared is the correction and not the gradient - that is checked
+/// on its own in `check_explicit_operators`.
+fn check_skew_correction(
+    c: &mut Checks,
+    gpu: &Gpu,
+    k: &Kernels,
+    m: &HostMesh,
+    gm: &GpuMesh,
+) -> Result<()> {
+    c.require(
+        "the mesh really is skewed, or nothing below is measuring anything",
+        m.skew_corr.iter().any(|s| s.mag() > 1e-3),
+    );
+
+    // A field with curvature, so the skewness term - which differences the
+    // two cells' GRADIENTS - is not identically zero.
+    let a0 = Vec3::new(1.1, -0.7, 0.4);
+    let quad = |p: Vec3| a0.dot(p) + 0.35 * p.x * p.y - 0.2 * p.z * p.z;
+
+    let f: Vec<Scalar> = (0..m.n_cells).map(|cc| quad(m.c[cc])).collect();
+    let bfv: Vec<Scalar> = (0..m.n_boundary_faces).map(|i| quad(m.b_cf[i])).collect();
+
+    let mut psi = GpuScalarField::zeros(gpu, gm, "psi")?;
+    gpu.write(&mut psi.f, &f)?;
+    let bc = cpu::CpuScalarBc::dirichlet(&bfv);
+    upload_bc(gpu, &mut psi, &bc, m, BcKind::Mixed)?;
+    correct_boundary_conditions(gpu, &k.field, &mut psi, gm)?;
+    gpu.sync()?;
+
+    let mut d_grad: DevBuf<Vec3> = gpu.zeros(m.n_cells)?;
+    fvc_grad_scalar(gpu, &k.fv, &mut d_grad, &psi, gm)?;
+    gpu.sync()?;
+    let grad_h = gpu.download(&d_grad)?;
+
+    // ---- (0) the two things that are WRONG here, stated as such ----------
+    //
+    //      `check_explicit_operators` asserts both of these hold. On a mesh
+    //      with skewed faces neither does, and the size of the failure does
+    //      not shrink with h - it is set by the interface geometry alone.
+    //      That is the whole case for S74.4, so it is measured rather than
+    //      avoided.
+    {
+        let lin = Vec3::new(1.7, -0.9, 0.35);
+        let lf: Vec<Scalar> = (0..m.n_cells).map(|cc| lin.dot(m.c[cc]) + 0.42).collect();
+        let lbf: Vec<Scalar> =
+            (0..m.n_boundary_faces).map(|i| lin.dot(m.b_cf[i]) + 0.42).collect();
+        let mut lpsi = GpuScalarField::zeros(gpu, gm, "lin")?;
+        gpu.write(&mut lpsi.f, &lf)?;
+        let lbc = cpu::CpuScalarBc::dirichlet(&lbf);
+        upload_bc(gpu, &mut lpsi, &lbc, m, BcKind::Mixed)?;
+        correct_boundary_conditions(gpu, &k.field, &mut lpsi, gm)?;
+
+        // (i) Green-Gauss of a LINEAR field, which is exact on an unskewed
+        //     mesh and is not exact here.
+        let mut g0: DevBuf<Vec3> = gpu.zeros(m.n_cells)?;
+        fvc_grad_scalar(gpu, &k.fv, &mut g0, &lpsi, gm)?;
+        gpu.sync()?;
+        let e0 = max_abs_diff_vec3(&gpu.download(&g0)?, &vec![lin; m.n_cells]) / lin.mag();
+
+        // (ii) and the fixed point of the skewness correction, which IS.
+        let mut gk = g0.try_clone()?;
+        for _ in 0..30 {
+            let prev = gk;
+            gk = g0.try_clone()?;
+            fvc_grad_scalar_skew_correction(gpu, &k.fv, &mut gk, &prev, gm)?;
+        }
+        gpu.sync()?;
+        let ek = max_abs_diff_vec3(&gpu.download(&gk)?, &vec![lin; m.n_cells]) / lin.mag();
+
+        // (iii) linear interpolation places psi_f where the face PLANE cuts
+        //       P-N, not at the face centroid. The gap is the skewness.
+        let mut phi = GpuSurfaceScalarField::zeros(gpu, gm, "phi")?;
+        interpolate_linear(gpu, &k.fv, &mut phi, &lpsi, gm)?;
+        gpu.sync()?;
+        let got = gpu.download(&phi.f)?;
+        let want: Vec<Scalar> = (0..m.n_internal_faces)
+            .map(|f| lin.dot(m.cf[f]) + 0.42)
+            .collect();
+        let ei = rel(max_abs_diff(&got, &want), &want);
+
+        c.note(&format!(
+            "on this mesh Green-Gauss is off by {:.2} % on a LINEAR field, and              linear interpolation misses the face centroid by {:.2} % - neither              shrinks with h",
+            f64::from(e0) * 100.0,
+            f64::from(ei) * 100.0
+        ));
+        c.require(
+            "Green-Gauss of a linear field is NOT exact at a 2:1 interface",
+            e0 > 0.05,
+        );
+        c.require(
+            "linear interpolation does NOT land on the face centroid there",
+            ei > 1e-3,
+        );
+        c.check(
+            "the iterated skewness correction restores Green-Gauss exactness",
+            ek,
+            1e-11,
+        );
+    }
+
+    // ---- (a) the gradient half -------------------------------------------
+    let mut d_g2 = d_grad.try_clone()?;
+    fvc_grad_scalar_skew_correction(gpu, &k.fv, &mut d_g2, &d_grad, gm)?;
+    gpu.sync()?;
+    let g2 = gpu.download(&d_g2)?;
+
+    let mut g2_ref = grad_h.clone();
+    cpu::fvc_grad_scalar_skew_correction(&mut g2_ref, &grad_h, m);
+
+    c.check(
+        "gradient skewness correction device vs host reference",
+        max_abs_diff_vec3(&g2, &g2_ref) / max_abs_diff_vec3(&grad_h, &vec![Vec3::ZERO; m.n_cells]),
+        1e-12,
+    );
+    c.require(
+        "the gradient skewness correction is not a no-op on a skewed mesh",
+        max_abs_diff_vec3(&g2, &grad_h) > 1e-3,
+    );
+
+    // ---- (b) the laplacian half ------------------------------------------
+    let gamma: Vec<Scalar> = m.mag_sf.clone();
+    let d_gamma = gpu.upload(&gamma)?;
+
+    let mut a = GpuLduMatrix::new(gpu, gm)?;
+    a.zero(gpu)?;
+    fvm_laplacian_skew_correction(gpu, &k.fv, &mut a, gm, &d_gamma, &d_grad, -1.0)?;
+    gpu.sync()?;
+    let src = gpu.download(&a.source)?;
+
+    let mut r = cpu::CpuLdu::new(m);
+    cpu::fvm_laplacian_skew_correction(&mut r, m, &gamma, &grad_h, -1.0);
+
+    c.check(
+        "laplacian skewness correction device vs host reference",
+        rel(max_abs_diff(&src, &r.source), &r.source),
+        1e-12,
+    );
+
+    // ---- (c) skewCorrected IS corrected plus that term, bit for bit ------
+    let b_gamma: Vec<Scalar> = m.b_mag_sf.clone();
+    let d_b_gamma = gpu.upload(&b_gamma)?;
+
+    let mut both = GpuLduMatrix::new(gpu, gm)?;
+    both.zero(gpu)?;
+    fvm_laplacian_non_orth_correction(
+        gpu, &k.fv, &mut both, gm, &d_gamma, &d_b_gamma, &psi, &d_grad,
+        SnGradScheme::SkewCorrected, -1.0,
+    )?;
+
+    let mut apart = GpuLduMatrix::new(gpu, gm)?;
+    apart.zero(gpu)?;
+    fvm_laplacian_non_orth_correction(
+        gpu, &k.fv, &mut apart, gm, &d_gamma, &d_b_gamma, &psi, &d_grad,
+        SnGradScheme::Corrected, -1.0,
+    )?;
+    fvm_laplacian_skew_correction(gpu, &k.fv, &mut apart, gm, &d_gamma, &d_grad, -1.0)?;
+    gpu.sync()?;
+
+    let s_both = gpu.download(&both.source)?;
+    let s_apart = gpu.download(&apart.source)?;
+    c.require(
+        "snGrad skewCorrected == corrected + the skewness term, bit for bit",
+        s_both == s_apart,
+    );
+
+    let s_plain = {
+        let mut plain = GpuLduMatrix::new(gpu, gm)?;
+        plain.zero(gpu)?;
+        fvm_laplacian_non_orth_correction(
+            gpu, &k.fv, &mut plain, gm, &d_gamma, &d_b_gamma, &psi, &d_grad,
+            SnGradScheme::Corrected, -1.0,
+        )?;
+        gpu.sync()?;
+        gpu.download(&plain.source)?
+    };
+    c.require(
+        "and it is NOT corrected on a skewed mesh - the setting changes the answer",
+        s_both != s_plain,
+    );
+
+    Ok(())
+}
 
 fn check_explicit_operators(
     c: &mut Checks,
@@ -2182,6 +2371,42 @@ fn run(c: &mut Checks) -> Result<()> {
     check_explicit_operators(c, &gpu, &k, &msh, &gmsh)?;
     check_assembly(c, &gpu, &k, &msh, &gmsh, DivScheme::Limited(Limiter::MinMod))?;
     drop(gmsh);
+
+    // ---- a block with 2:1 refinement interfaces --------------------------
+    //
+    //      SPEC-LIT section 74. This mesh is not adapted into that state - it
+    //      is BORN with it - so what is under test here is the discretisation
+    //      at a coarse-fine interface and nothing else.
+    println!("\n=== 3-D block with 2:1 refinement interfaces ===");
+    let rb = ofgpu::mesh::refined::refined_core([8, 8, 8], Vec3::new(0.125, 0.125, 0.125), 0.25, 1)?;
+    let mref = rb.mesh.clone();
+    let rep_ref = mref.check();
+    c.note(&format!(
+        "{} cells, {} of its {} internal faces are 2:1 interfaces, max \
+         non-orthogonality {:.2} deg",
+        mref.n_cells,
+        rb.interface_faces().len(),
+        mref.n_internal_faces,
+        f64::from(rep_ref.max_non_orth_deg)
+    ));
+    c.require(
+        "a 2:1 hex interface carries 25.24 degrees of non-orthogonality",
+        (rep_ref.max_non_orth_deg - 25.2394).abs() < 1e-3,
+    );
+    c.require("the refined mesh is 2:1 balanced", rb.max_level_jump() == 1);
+    let gmref = GpuMesh::upload(&gpu, &mref)?;
+
+    check_mesh(c, &mref, 1.0);
+    // NOT `check_explicit_operators`. Two of its checks - "grad(linear field)
+    // == analytic" and "interpolate(linear field) == the value at the face
+    // centre" - are FALSE on a skewed mesh, and that is not a bug in them: it
+    // is precisely what SPEC-LIT S74.4 exists to fix. Running them here would
+    // report a failure for a known and quantified property. The same two
+    // facts are asserted below, with their sign the right way round and their
+    // size printed.
+    check_assembly(c, &gpu, &k, &mref, &gmref, DivScheme::Upwind)?;
+    check_skew_correction(c, &gpu, &k, &mref, &gmref)?;
+    drop(gmref);
 
     // ---- a 2-D block with empty front and back ---------------------------
     println!("\n=== 2-D block with empty front and back ===");

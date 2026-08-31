@@ -1306,6 +1306,72 @@ extern "C" __global__ void fvLapNonOrth
 }
 
 
+//- The explicit SKEWNESS correction of the laplacian - SPEC-LIT S74.4.
+//
+//      source_P -= sign * sum_f (+-1) gamma_f |Sf| Delta_f
+//                         ( s_f . [ (grad psi)_N - (grad psi)_P ] )
+//
+//  with s_f = Cf - (C_P + (1 - w) d) the skewness vector of SPEC-LIT S2.5.
+//
+//  WHY this is the term. `fvLapFaces` differences psi along d and `fvLapNonOrth`
+//  rotates the result onto the face normal; between them they give the normal
+//  gradient on the line P-N, which pierces the face plane at C_P + (1 - w) d.
+//  On a skewed face that is NOT the face centroid, and the midpoint rule the
+//  whole finite-volume statement rests on wants the centroid. Shifting BOTH
+//  cell values onto a line through the centroid, psi_P -> psi_P + s.(grad psi)_P
+//  and psi_N -> psi_N + s.(grad psi)_N - Ferziger & Peric S8.6 - changes the
+//  differenced pair by exactly the expression above and leaves d, Delta and k
+//  alone. It is therefore additive on top of the non-orthogonal correction and
+//  not a replacement for it.
+//
+//  Internal faces ONLY. An uncoupled boundary face's value is imposed AT the
+//  face, at Cf, so there is nothing to move; a cyclic couple can be skewed and
+//  is NOT corrected here - SPEC-LIT S74.7 refuses that combination by name.
+//
+//  Unlimited on purpose: `skewCorrected` is the unlimited member of S12.3's
+//  family, and a limiter on a term whose orthogonal counterpart is a different
+//  face's would have nothing to compare against.
+extern "C" __global__ void fvLapSkew
+(
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ gammaMagSf,
+    const ofvec3* __restrict__ skewCorr,
+    const ofscalar* __restrict__ deltaCoeffs,
+    const ofvec3* __restrict__ gradPsi,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar acc = 0;
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+
+        const ofvec3 s  = skewCorr[f];
+        const ofvec3 gO = gradPsi[owner[f]];
+        const ofvec3 gN = gradPsi[neighbour[f]];
+
+        const ofscalar jump =
+            s.x*(gN.x - gO.x) + s.y*(gN.y - gO.y) + s.z*(gN.z - gO.z);
+
+        const ofscalar t = gammaMagSf[f]*deltaCoeffs[f]*jump;
+
+        acc += cfOwn[j] ? t : -t;
+    }
+
+    source[c] -= sign*acc;
+}
+
+
 // ==========================================================================
 //  S3.4  Source terms - Patankar's linearisation
 // ==========================================================================
@@ -1440,6 +1506,137 @@ extern "C" __global__ void fvGradScalar
 
     const ofscalar rv = 1/V[c];
     g[c] = mkvec(ax*rv, ay*rv, az*rv);
+}
+
+
+//- The deferred SKEWNESS correction of a Green-Gauss SCALAR gradient -
+//  SPEC-LIT S74.4.
+//
+//      (grad psi)_P += (1/V_P) sum_f (+-Sf) [ (grad psi)_f . s_f ]
+//
+//  Green-Gauss is exact for a linear field only when psi_f is the value at the
+//  face CENTROID. `fvGradScalar` places it where the face plane cuts P-N, so
+//  on a skewed face it is short by (grad psi).s_f. Adding that back is a
+//  deferred correction - it reads a gradient to compute a gradient - and one
+//  pass is enough for a linear field, which is the property the correction
+//  exists to restore.
+//
+//  ADDS to `g`; it does not overwrite it. Boundary faces contribute nothing,
+//  for the same reason as in `fvLapSkew`.
+extern "C" __global__ void fvGradScalarSkew
+(
+    ofvec3* __restrict__ g,
+    const ofvec3* __restrict__ gradPrev,
+    const ofvec3* __restrict__ skewCorr,
+    const ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ Sf,
+    const ofscalar* __restrict__ V,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar ax = 0, ay = 0, az = 0;
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+
+        const ofvec3 gf =
+            faceGrad(gradPrev[owner[f]], gradPrev[neighbour[f]], w[f]);
+
+        const ofscalar dpsi = dot3(gf, skewCorr[f]);
+
+        const ofvec3 s = Sf[f];
+        const ofscalar v = cfOwn[j] ? dpsi : -dpsi;
+
+        ax += s.x*v; ay += s.y*v; az += s.z*v;
+    }
+
+    const ofscalar rv = 1/V[c];
+    const ofvec3 g0 = g[c];
+    g[c] = mkvec(g0.x + ax*rv, g0.y + ay*rv, g0.z + az*rv);
+}
+
+
+//- The same for a cell VECTOR field, whose gradient is a tensor.
+//
+//  The face value is short by (s_f . grad U), a VECTOR whose j-th component is
+//  s_i (grad U)_ij - the area vector supplies the first index, SPEC-LIT S1 -
+//  and the correction to the tensor is Sf (x) that vector.
+extern "C" __global__ void fvGradVectorSkew
+(
+    oftensor* __restrict__ g,
+    const oftensor* __restrict__ gradPrev,
+    const ofvec3* __restrict__ skewCorr,
+    const ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ Sf,
+    const ofscalar* __restrict__ V,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    oftensor t;
+    t.xx = 0; t.xy = 0; t.xz = 0;
+    t.yx = 0; t.yy = 0; t.yz = 0;
+    t.zx = 0; t.zy = 0; t.zz = 0;
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+        const ofscalar wf = w[f];
+
+        const oftensor a = gradPrev[owner[f]];
+        const oftensor b = gradPrev[neighbour[f]];
+        const ofvec3 sk = skewCorr[f];
+
+        const ofscalar gxx = wf*a.xx + (1 - wf)*b.xx;
+        const ofscalar gxy = wf*a.xy + (1 - wf)*b.xy;
+        const ofscalar gxz = wf*a.xz + (1 - wf)*b.xz;
+        const ofscalar gyx = wf*a.yx + (1 - wf)*b.yx;
+        const ofscalar gyy = wf*a.yy + (1 - wf)*b.yy;
+        const ofscalar gyz = wf*a.yz + (1 - wf)*b.yz;
+        const ofscalar gzx = wf*a.zx + (1 - wf)*b.zx;
+        const ofscalar gzy = wf*a.zy + (1 - wf)*b.zy;
+        const ofscalar gzz = wf*a.zz + (1 - wf)*b.zz;
+
+        const ofvec3 du = mkvec
+        (
+            sk.x*gxx + sk.y*gyx + sk.z*gzx,
+            sk.x*gxy + sk.y*gyy + sk.z*gzy,
+            sk.x*gxz + sk.y*gyz + sk.z*gzz
+        );
+
+        const ofvec3 s0 = Sf[f];
+        const ofscalar sg = cfOwn[j] ? (ofscalar)1 : (ofscalar)-1;
+        const ofvec3 s = mkvec(sg*s0.x, sg*s0.y, sg*s0.z);
+
+        t.xx += s.x*du.x; t.xy += s.x*du.y; t.xz += s.x*du.z;
+        t.yx += s.y*du.x; t.yy += s.y*du.y; t.yz += s.y*du.z;
+        t.zx += s.z*du.x; t.zy += s.z*du.y; t.zz += s.z*du.z;
+    }
+
+    const ofscalar rv = 1/V[c];
+    oftensor g0 = g[c];
+
+    g0.xx += t.xx*rv; g0.xy += t.xy*rv; g0.xz += t.xz*rv;
+    g0.yx += t.yx*rv; g0.yy += t.yy*rv; g0.yz += t.yz*rv;
+    g0.zx += t.zx*rv; g0.zy += t.zy*rv; g0.zz += t.zz*rv;
+
+    g[c] = g0;
 }
 
 
@@ -2469,6 +2666,39 @@ extern "C" __global__ void fvSnGradCorrBoundary
 //  the unresolved direction, and without them the 3x3 system is singular.
 //  Their flux is zero, so what they contribute is precisely the constraint
 //  U . n = 0 in that direction.
+//- The SKEWNESS correction of the diffusive face flux - SPEC-LIT S74.4, the
+//  face-indexed twin of `fvLapSkew`. Written in the same multiplication order,
+//  so a flux read off after a skewCorrected solve matches the row the matrix
+//  enforced to the last bit.
+//
+//  Internal faces only, and there is deliberately no boundary twin: neither
+//  `fvLapSkew` nor this one touches a boundary face.
+extern "C" __global__ void fvSnGradSkewInternal
+(
+    ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ gammaMagSf,
+    const ofvec3* __restrict__ skewCorr,
+    const ofscalar* __restrict__ deltaCoeffs,
+    const ofvec3* __restrict__ gradPsi,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    oflabel nFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nFaces) return;
+
+    const ofvec3 s  = skewCorr[i];
+    const ofvec3 gO = gradPsi[owner[i]];
+    const ofvec3 gN = gradPsi[neighbour[i]];
+
+    const ofscalar jump =
+        s.x*(gN.x - gO.x) + s.y*(gN.y - gO.y) + s.z*(gN.z - gO.z);
+
+    phi[i] += gammaMagSf[i]*deltaCoeffs[i]*jump;
+}
+
+
 extern "C" __global__ void fvReconstruct
 (
     ofvec3* __restrict__ u,

@@ -158,6 +158,67 @@ Jasak discusses the trade-off between the over-relaxed, minimum-correction and
 orthogonal-correction splittings in §3.4.2. On an orthogonal mesh `k = 0` and
 `Delta = 1/|d|`.
 
+### 2.5 Skewness vector
+
+§2.3's weight places `psi_f` at the point where the face **plane** cuts the line
+`P–N`. Every consumer of `psi_f` wants it at the face **centroid**: Green–Gauss
+(§3.5) is exact for a linear field only if `psi_f = psi(Cf)`, and the midpoint
+rule the whole finite-volume statement rests on evaluates its integrand at `Cf`.
+On a mesh whose faces are not skewed the two points coincide and there is
+nothing to say. At a 2:1 refinement interface they are `0.142·|d|` apart, and
+§74 is what that costs.
+
+The offset between them is carried per internal face:
+
+```
+x_w   = C_P + (1 - w)·d              the point the weight w of §2.3 implies
+s_f   = Cf - x_w                     the SKEWNESS vector
+```
+
+*DESIGN*, two points, both ours.
+
+**(a)** `s_f` is written from `w` rather than from a second projection of `Cf`
+onto `P–N`. The two are the same number in exact arithmetic — for a planar face
+`1 - w = Sf·(Cf - C_P) / (Sf·d)` — but writing it from `w` makes it impossible
+for the correction and the interpolation it corrects to disagree about where the
+uncorrected value was placed.
+
+**(b)** A **floor**, `SKEW_FLOOR = 1e-9`:
+
+```
+s_f = 0                                if |Cf - C_P - (1-w)d| <= 1e-9·|d|
+```
+
+and this one was forced by a measurement rather than chosen. `s_f` is a
+difference of two nearly equal *computed* positions, and `Cf`, `C_P` and `w` all
+carry round-off out of the decomposition sweeps of §2.1–§2.3. When the true
+value is zero the computed one has **no significant digits**: a uniform
+`4 × 3 × 2` box of `0.5 × 0.25 × 2.0` hexahedra comes out at `6.9e-18` on some
+faces and at *exactly* zero on others, and which is which depends on the cell
+dimensions. Without the floor, "an unskewed mesh gives the same bits" would be a
+property of the numbers in the case file rather than of the code — and this
+project's own first version of the test passed on one box and failed on another
+for exactly that reason. The floor is `eps·|C|/|d|` with room: for a mesh a
+thousand cells across that noise is about `2e-13`, four orders below the floor,
+while a 2:1 refinement interface sits at `0.1421`, eight orders above it.
+Nothing real lies between, which is what makes this floor safe where §2.4's
+`0.05·|d|` is a trade-off.
+
+With it, `s_f = 0` **exactly** on a mesh whose faces are unskewed — a uniform
+box, a graded one whose weights are nowhere `1/2`, a sheared one 19 degrees off
+normal — so every operator that reads it is a no-op there, and
+`snGradSchemes skewCorrected` gives `corrected` bit for bit. Boundary faces carry no skewness vector: an uncoupled
+condition is imposed **at** the face, at `Cf`, so there is nothing to move. A
+cyclic couple *can* be skewed and is not corrected — §74.7 refuses that
+combination by name rather than half-correcting it.
+
+`decompose` (§71) carries `s_f` face by face like every other geometric array,
+so a part is skewed exactly where the whole mesh was. It tolerates the array
+being absent — a mesh built before §74, or written out by hand in a test, has
+none — and substitutes zero, which is the same "absent means unskewed"
+convention `GpuMesh::upload` uses. Silently dropping it would switch
+`skewCorrected` off on a decomposed run and say nothing.
+
 ---
 
 ## 3. Discrete operators
@@ -19745,3 +19806,507 @@ it is recorded that way because it only ever **removed** a refusal — a stale
 not do. There is no MPI path in this crate and none is faked: §73.7 refuses it
 by name, and what ships is the single-process `P`-partition path with every
 gate above run on it.
+
+---
+
+## 74. The 2:1 refinement interface, and the skewness correction it forces
+
+Adaptive mesh refinement is **not implemented and not started**. This section
+does the thing that has to come first and that can be settled on its own: build
+a mesh that is *born* with 2:1 refinement interfaces, put the existing operators
+on it, and measure whether they are still second order across one. If they are
+not, no adaptation machinery would fix it, and the AMR question is closed before
+any of it is written.
+
+The gate is one sentence. **A manufactured-solution convergence study on a
+statically refined mesh must recover second order — the same bar §10 holds the
+uniform-mesh operators to.** §74.5 is what was measured against it.
+
+Three things came out of that measurement that the design note of record did not
+say, and one of them changes the answer:
+
+1. **In L2 the unmodified code already passes.** Plain `corrected` reaches
+   observed order 1.985 in L2 across a 2:1 interface. A volume-weighted L2 norm
+   gives an interface — a two-dimensional set inside a three-dimensional mesh —
+   only its own share of the norm, so a local defect at the interface can be a
+   full order worse than the interior and still not move L2 off 2.0. **The gate
+   as originally stated would have been passed by doing nothing.** §74.5
+   therefore measures L-infinity as well, and that is where the question is
+   actually decided.
+2. **In L-infinity the load-bearing piece is the GRADIENT, not the snGrad
+   scheme.** With a plain Green–Gauss gradient the pointwise error stops
+   converging altogether — observed order **−0.07** on the finest pair. The
+   reason is §74.4: Green–Gauss on a cell with an unbalanced set of skewed faces
+   is wrong at **zeroth** order in `h`, by **30.17 %** of the gradient on the
+   gate mesh, and that error is fed straight into the non-orthogonal correction.
+3. **`leastSquares` — already in this crate, unchanged — is a complete fix for
+   that half.** It differences cell centres and never touches a face value, so
+   it is exact for a linear field on any mesh, skewed or not. `corrected` with
+   `leastSquares` reaches L-infinity order **1.931** with no new code at all.
+
+So the honest summary is: the skewness correction implemented here is worth
+having and is measured to be worth having — it removes 27 % of the L2 error and
+51 % of the L-infinity error at fixed order — but the thing that *decides*
+whether a 2:1 interface is second order is which gradient the deferred
+correction is handed.
+
+**Sources.** Each DOI below was verified against Crossref on 2026-09-01 by
+fetching `api.crossref.org/works/<doi>` and checking title, authors, journal,
+volume, issue, pages and year against what is printed here.
+
+* Berger, M. J. & Colella, P. "Local adaptive mesh refinement for shock
+  hydrodynamics." *Journal of Computational Physics* **82**(1), 64–84 (1989).
+  DOI 10.1016/0021-9991(89)90035-1 — the origin of the flux-register /
+  refluxing construction, **cited to be distinguished from**: §74.1 argues a
+  face-based cell-centred code does not need it and says why.
+* Muzaferija, S. & Gosman, D. "Finite-Volume CFD Procedure and Adaptive Error
+  Control Strategy for Grids of Arbitrary Topology." *Journal of Computational
+  Physics* **138**(2), 766–787 (1997). DOI 10.1006/jcph.1997.5853 — the earliest
+  treatment of locally refined FV on arbitrary polyhedra, which is the mesh
+  model this crate already has.
+* McCorquodale, P. & Colella, P. "A high-order finite-volume method for
+  conservation laws on locally refined grids." *Communications in Applied
+  Mathematics and Computational Science* **6**(1), 1–25 (2011).
+  DOI 10.2140/camcos.2011.6.1 — the reference for what order of accuracy to
+  *expect* across a refinement boundary, and for the practice of reporting it in
+  more than one norm.
+* Isaac, T., Burstedde, C. & Ghattas, O. "Low-Cost Parallel Algorithms for 2:1
+  Octree Balance." *2012 IEEE 26th International Parallel and Distributed
+  Processing Symposium*, 426–437 (2012). DOI 10.1109/IPDPS.2012.47 — the 2:1
+  balance condition. Its O(1)-ripple algorithm is **named and not implemented**;
+  §74.2 uses the obvious fixed-point sweep, because the base grid here is small
+  and static.
+* Ferziger, J. H. & Perić, M. *Computational Methods for Fluid Dynamics*, 3rd
+  ed., Springer (2002), §8.6 — the deferred skewness correction of §74.4:
+  shifting both cell values onto a line through the face centroid.
+* Jasak, H. *Error Analysis and Estimation for the Finite Volume Method with
+  Applications to Fluid Flows*, PhD thesis, Imperial College London (1996),
+  §3.3.1 and §3.4.2 — the interpolation weight of §2.3 and the over-relaxed
+  split of §2.4, both of which the skewness term is additive on top of.
+* Moukalled, F., Mangani, L. & Darwish, M. *The Finite Volume Method in
+  Computational Fluid Dynamics*, Springer (2016), §8.6.4 and §9.3 — the same
+  split, and the inverse-distance least-squares gradient §74.6 finds is the
+  cheaper answer.
+
+**Nothing was read from p4est (GPL-2.0-or-later), libsc (LGPL-2.1), t8code
+(GPL-2.0), OpenFOAM (GPL-3.0) or SU2 (LGPL).** p4est's licence was checked
+before anything was opened and it is not BSD, contrary to what the brief that
+commissioned this work assumed; the p4est line of papers is readable and is
+cited above, the code is not.
+
+### 74.1 What a 2:1 interface is on a face-based mesh
+
+A hanging node is a difficulty for **node-based** discretisations. A
+cell-centred finite-volume code on a face-based polyMesh has no such object.
+When a hexahedron's neighbour is one level finer, what happens to the mesh is:
+
+```
+one face  ->  four faces, each a whole face of one finer cell
+one cell  ->  a polyhedron with up to 24 faces instead of 6
+```
+
+and nothing else. Every operator in §3 already loops over "the faces of this
+cell" through `cf_offset`/`cf_face`/`cf_own` with no assumption about how many
+there are. The LDU contribution at an interface sub-face is the ordinary one:
+
+```
+upper[f] = lower[f] = sign · Gamma_f·|Sf|·Delta_f
+diag[P] -= sign · Sum_{f in P} Gamma_f·|Sf|·Delta_f
+```
+
+with four such `f` incident on the coarse cell from that direction instead of
+one, each carrying a quarter of the coarse face's area.
+
+**There is therefore no flux register and no refluxing.** The Berger–Colella
+apparatus exists because block-structured AMR keeps a *separate* coarse-level
+flux across the interface which then disagrees with the sum of the fine fluxes.
+Here there is one flux per face, written into `upper[f]` and `lower[f]` for the
+same `f` and picked up with opposite signs by the two cells' gathers.
+Conservation is exact by construction, in exactly the sense it is on a uniform
+mesh, and `Sum_4 |Sf| = |Sf_coarse|` holds to the last bit for a hex split.
+`mesh::refined::tests::a_refined_box_closes_and_is_ldu_ordered` is the machine
+statement of that: `max_f Sum Sf` per cell is below `1e-14` and the volumes sum
+to the analytic box.
+
+A node hanging on the coarse cell's *other* faces is simply a point that face's
+polygon does not list. The face is still planar; its area vector and centroid
+(§2.1) are still exact.
+
+### 74.2 The static generator
+
+`rust/src/mesh/refined.rs`. A base grid of `n = [nx, ny, nz]` hexahedra of size
+`d`, each carrying an integer refinement level; a base cell at level `l` becomes
+`(2^l)^3` leaves.
+
+**2:1 balance** is enforced on the base levels before anything is emitted:
+
+```
+repeat until nothing changes:
+    for every base cell P:
+        l(P) <- max( l(P), max_{N face-adjacent to P} l(N) - 1 )
+```
+
+Levels only rise and integer `max` is associative and exact, so the fixed point
+does not depend on the order the cells are visited; the sweep terminates in at
+most `max l` passes.
+`mesh::refined::tests::balancing_is_idempotent_and_order_independent` runs it
+twice and runs it on the mirrored problem and requires the mirrored answer.
+
+**Neighbour search is a lookup, not a walk.** Each leaf owns a box of voxels on
+the finest grid; a `Vec<Label>` maps voxel to leaf, and a leaf's `+axis`
+neighbours are read off the voxels of that face. No tree, no Morton hash, no
+`HashMap` in the emitted order (a `BTreeMap` groups the face's voxels by
+neighbour so the emission order is the neighbour's cell order and never a hash
+order).
+
+**Ordering.** Cells are numbered base-cell-major, leaves within a base cell in
+`(z, y, x)` order. Every `+x`, `+y`, `+z` neighbour of a leaf is then strictly
+later in the numbering, so every emitted internal face already has
+`owner < neighbour` and the upper-triangular order of §1 is a sort by
+`(owner, neighbour)` and nothing more. The generator **asserts** this rather
+than assuming it, and errors by name if it is ever false.
+
+This is a generator, not an adapt: **nothing in this module changes a mesh after
+it is built.**
+
+### 74.3 What a 2:1 hex interface costs, in numbers
+
+Coarse hex of side `h` at the origin, `+z` neighbour refined one level; the
+shared sub-face has centroid `(h/4, h/4, h/2)` and the fine cell's centre is at
+`(h/4, h/4, 3h/4)`, so `d = (h/4, h/4, 3h/4)`. Feeding that through §2.1–§2.5:
+
+| quantity | uniform face | 2:1 sub-face |
+|---|---|---|
+| `\|d\|` | `h` | `0.82916·h` |
+| `nf·d` | `h` | `0.75·h` |
+| non-orthogonality `acos(nf·d/\|d\|)` | `0°` | **`25.239401820678103°`** |
+| `Delta` (§2.4) | `1/h` | `4/(3h)` |
+| `\|k\|` (§2.4) | `0` | **`0.4714045207910317`** |
+| owner (coarse) weight `w` (§2.3) | `0.5` | **`1/3`** |
+| `\|s_f\|/\|d\|` (§2.5) | `0` | **`0.14213381090374028`** |
+
+Every one of those is **measured**, not derived on paper:
+`mesh::refined::tests::a_2to1_hex_interface_carries_the_numbers_section_74_tabulates`
+builds the mesh and asserts each to `1e-12`, and asserts that every face which
+is *not* an interface face has `k = 0` and `s_f = 0` to `1e-14`, so the numbers
+above are the interface's alone. `ofgpu-validate` prints the same
+25.24 degrees on a different refined mesh.
+
+Four consequences, in descending order of importance:
+
+1. **The `0.05·|d|` floor of §2.4 never engages** — `nf·d = 0.75h` — so nothing
+   pathological happens to `Delta`.
+2. **The non-orthogonal correction is mandatory.** `|k| = 0.47` means the
+   explicit correction is 47 % of the implicit part. §74.5 measures
+   `uncorrected` at observed order **0.994** in L2 and **0.774** in
+   L-infinity: a full order lost, on a mesh where `k` is exactly zero
+   everywhere except the interface.
+3. **Skewness of 0.142 is what §2.5 and §74.4 are for**, and it is what this
+   section adds to the crate.
+4. **Cell degree rises from 6 to at most 24** — a hard cap under 2:1 balance, and
+   `mesh::refined::tests::the_cell_degree_is_bounded_by_twenty_four` holds it.
+   That bound is what a multi-colour preconditioner (§21) would pay for on an
+   adapted mesh; nothing in this section pays it, because nothing here adapts.
+
+### 74.4 The skewness correction
+
+Two independent corrections, on top of each other. §2.4's `k` rotates the
+difference onto the face normal. The skewness term moves it onto the face
+centroid. Neither replaces the other.
+
+**The snGrad half.** §2.4's `snGrad` differences `psi` along `d`, and `d` meets
+the face plane at `x_w = C_P + (1-w)·d`, not at `Cf`. Shift both cell values
+onto a line through `Cf` — Ferziger & Perić §8.6 — using each cell's own
+gradient:
+
+```
+psi_P* = psi_P + s_f·(grad psi)_P ,   psi_N* = psi_N + s_f·(grad psi)_N
+snGrad_skew|_f = Delta·(psi_N* - psi_P*) + k·(grad psi)_f
+               = snGrad|_f + Delta·( s_f · [ (grad psi)_N - (grad psi)_P ] )
+```
+
+so the term is additive and leaves `d`, `Delta`, `w` and `k` untouched:
+
+```
+source[P] -= sign · Sum_f (±1)·Gamma_f·|Sf|·Delta_f·( s_f · [ (grad psi)_N - (grad psi)_P ] )
+```
+
+`fv::fvm_laplacian_skew_correction` (kernel `fvLapSkew`), gathered over the cell
+→ face CSR, one thread per cell, no atomic. `fv::sn_grad_flux_correction` writes
+the same expression in the same multiplication order onto the faces (kernel
+`fvSnGradSkewInternal`), so a flux read off after a `skewCorrected` solve matches
+the row the matrix enforced to the last bit. Unlimited on purpose: `skewCorrected`
+is the unlimited member of §12.3's family, and a limiter comparing this term
+against "the orthogonal part" would be comparing it against a different face's
+quantity.
+
+**The Green–Gauss half, and why it is the one that matters.** §3.5's gradient is
+exact for a linear field only if `psi_f = psi(Cf)`. It is not, and the
+consequence is worse than first order — it is **zeroth**:
+
+> On the fine side of a 2:1 interface a cell has one skewed face and five
+> unskewed ones. The Green–Gauss error `(1/V_P)·Sum_f (±Sf)·(grad psi · (x_w - Cf))`
+> does not cancel, and its size is set by the interface geometry alone. **On the
+> gate mesh a plain Green–Gauss gradient of a LINEAR field is off by 30.17 %,
+> and refining the mesh does not reduce it.** On the coarse side the four
+> sub-faces of one coarse face carry skew vectors that sum to zero, so the
+> coarse cell's gradient *is* exact — which is precisely why a single flat
+> interface is the benign case (§74.6).
+
+The correction is the deferred one:
+
+```
+psi_f* = w·psi_P + (1-w)·psi_N + (grad psi)_f · s_f
+(grad psi)_P += (1/V_P)·Sum_f (±Sf)·[ (grad psi)_f · s_f ]
+```
+
+`fv::fvc_grad_scalar_skew_correction` and
+`fv::fvc_grad_vector_skew_correction` (kernels `fvGradScalarSkew`,
+`fvGradVectorSkew`). For a vector field the face value is short by `(s_f·grad U)`,
+whose `j`-th component is `s_i·(grad U)_ij` because the area vector supplies the
+first index (§1), and the correction to the tensor is `Sf (x)` that vector.
+
+**One pass is not enough, and this is a measurement, not a caveat.** The
+correction uses a gradient that is itself uncorrected, so what survives is the
+correction of the correction. It is a Picard iteration and it contracts:
+
+| passes | relative error in `grad(linear field)` on the gate mesh |
+|---|---|
+| 0 | `3.0169e-1` |
+| 1 | `6.5166e-2` |
+| 2 | `1.4375e-2` |
+| converged (30) | `2.2822e-15` |
+
+with a measured contraction factor of **0.221**. The fixed point *is* exact: a
+linear field reconstructed at `Cf` is the exact face value, and Green–Gauss on
+exact face values is exact. `ofgpu-validate` re-measures the converged figure on
+a different refined mesh and gets `3.243e-15`.
+
+**Both halves are cross-checked against a host twin that scatters** where the
+kernel gathers — `reference::fvm_laplacian_skew_correction` and
+`reference::fvc_grad_scalar_skew_correction`, agreeing to `8.2e-17` and
+`1.3e-16` respectively in `ofgpu-validate`.
+
+### 74.5 The gate: MMS across a 2:1 interface
+
+`-laplacian(psi) = 3·pi^2·psi_exact` with
+`psi = sin(pi x)·sin(pi y)·sin(pi z)` on the unit cube, homogeneous Dirichlet on
+all six patches, twelve non-orthogonal corrector passes, solved with a host CG
+so that a sign error in the boundary fold shows up as a failure to converge
+rather than as agreement with an equally wrong twin. Mesh: `N^3` base cells with
+the block `[0.25, 0.75]^3` one level finer, so the coarse–fine interface has
+**faces, edges and corners** — not one flat plane. `frac = 0.25` snaps the block
+onto base-cell boundaries exactly for every `N` divisible by 4, so all four
+resolutions discretise the same geometry and the measured order is an order and
+not a wobble.
+
+`N = 8, 16, 24, 32` (960, 7 680, 25 920 and 61 440 cells). Errors are against
+`psi_exact(C_P)`; the three order columns are the consecutive pairs.
+
+**L2 (volume-weighted):**
+
+| snGrad / gradient | `N=8` | `N=16` | `N=24` | `N=32` | orders |
+|---|---|---|---|---|---|
+| `uncorrected` / Gauss | 2.9477e-3 | 1.2987e-3 | 8.5357e-4 | 6.4135e-4 | 1.183 1.035 0.994 |
+| `corrected` / Gauss | 2.5314e-3 | 6.1262e-4 | 2.7286e-4 | 1.5414e-4 | 2.047 1.995 1.985 |
+| `skewCorrected` / Gauss | 1.8626e-3 | 4.5116e-4 | 2.0042e-4 | 1.1297e-4 | 2.046 2.001 1.993 |
+| `skewCorrected` / Gauss+skew | 2.0269e-3 | 4.7835e-4 | 2.0991e-4 | 1.1749e-4 | 2.083 2.031 2.017 |
+| `corrected` / leastSquares | 2.5152e-3 | 6.0234e-4 | 2.6499e-4 | 1.4845e-4 | 2.062 2.025 2.014 |
+| `skewCorrected` / leastSquares | 1.8294e-3 | 4.4321e-4 | 1.9593e-4 | 1.1004e-4 | 2.045 2.013 2.005 |
+
+**L-infinity:**
+
+| snGrad / gradient | `N=8` | `N=16` | `N=24` | `N=32` | orders |
+|---|---|---|---|---|---|
+| `uncorrected` / Gauss | 2.2261e-2 | 1.5575e-2 | 1.1665e-2 | 9.3372e-3 | 0.515 0.713 0.774 |
+| `corrected` / Gauss | 7.3642e-3 | 1.6055e-3 | 1.0169e-3 | 1.0375e-3 | 2.198 1.126 **−0.070** |
+| `skewCorrected` / Gauss | 3.8720e-3 | 1.1821e-3 | 5.5590e-4 | 5.0383e-4 | 1.712 1.861 **0.342** |
+| `skewCorrected` / Gauss+skew | 6.9733e-3 | 1.7990e-3 | 8.1888e-4 | 4.6868e-4 | 1.955 1.941 **1.940** |
+| `corrected` / leastSquares | 1.1887e-2 | 3.1546e-3 | 1.4437e-3 | 8.2842e-4 | 1.914 1.928 **1.931** |
+| `skewCorrected` / leastSquares | 6.5664e-3 | 1.7929e-3 | 8.3178e-4 | 4.8092e-4 | 1.873 1.894 **1.904** |
+
+**Read the two tables together and the finding is unambiguous.** Every treatment
+except `uncorrected` reads ~2.0 in L2. Only two of them reach 1.9 in
+L-infinity, and both of them are exactly the ones whose *gradient* is
+linear-exact. The two that use a plain Green–Gauss gradient stall dead: the
+pointwise error at `N = 32` is no better than at `N = 24`.
+
+`fv::tests::a_statically_refined_mesh_recovers_second_order` runs all six at all
+four resolutions in about 5 seconds and asserts: order ≥ 1.9 **in both norms**
+for `skewCorrected`/Gauss+skew and for `corrected`/leastSquares; L2 order < 1.5
+for `uncorrected`; L-infinity order < 1.5 for `corrected`/Gauss; and that the
+snGrad skewness term beats plain `corrected` on the finest mesh in **both**
+norms with the same gradient (1.1297e-4 vs 1.5414e-4 in L2, 5.0383e-4 vs
+1.0169e-3 in L-infinity — 27 % and 51 %).
+
+**The gate is met.** Second order across a static 2:1 interface, in L2 and in
+L-infinity, by two routes.
+
+### 74.6 What the measurement contradicts
+
+**(a) "Skewness correction becomes mandatory because a 2:1 interface carries
+25.24 degrees of non-orthogonality" conflates two different corrections.** The
+25.24 degrees are what the *non-orthogonal* correction handles, and that
+correction already existed; without it the scheme is first order (0.994 in L2)
+and with it, it is second (1.985). The skewness is a separate 0.142 of `|d|` and
+buys a constant factor at fixed order, not the order itself.
+
+**(b) The predicted "≈1.5 order without the skewness correction" is not what
+happens in L2 — it is 1.985 — and it is far worse than that in L-infinity, where
+it is −0.07.** Both halves of the prediction were wrong, in opposite directions,
+and only measuring two norms shows it.
+
+**(c) The flat 2:1 interface the design note analysed is the benign case, and
+quoting it alone would overstate how well the uncorrected scheme does.** On a
+mesh with one flat interface at `x = Lx/2`
+(`fv::tests::the_flat_2to1_interface_is_the_benign_case`, `N = 8, 16`),
+`corrected` gives L2 `3.8036e-3 -> 9.5500e-4`, order 1.994, and the skewness
+term buys **11.7 %** of the error. On the block-refined mesh the same term buys
+**27 %**. The reason is symmetry, and it is exact rather than approximate:
+
+* on the coarse side, the four sub-faces of one coarse face carry skew vectors
+  `(±h/12, ±h/12, 0)` which sum to zero, so the coarse cell's Green–Gauss
+  gradient is exact for a linear field even uncorrected;
+* on the fine side the surviving gradient error is `(1/6)(g_x + g_y)·z_hat` —
+  parallel to the face normal — while `k = (−1/3, −1/3, 0)` is purely
+  tangential, so `k·(gradient error) = 0` exactly.
+
+A refined *block* has corners and edges where a fine cell has two or three
+skewed faces, neither cancellation holds, and the error appears.
+
+**(d) The cheapest complete fix for the gradient half is a scheme this crate
+already shipped.** `leastSquares` (§12.1) fits `psi_N - psi_P ≈ g·d` over the
+cell-centre differences and never forms a face value at all, so it is exact for
+a linear field on **any** mesh. `corrected`/`leastSquares` reaches L-infinity
+order 1.931 with zero new code. That is the recommendation for an adapted mesh,
+and it is recorded here rather than buried, because it makes most of §74.4's
+second half optional.
+
+**(e) What §74.4's gradient correction is still for.** Two things. A case that
+wants Green–Gauss for its other properties (it is conservative in a sense
+least-squares is not, and it is what every `Gauss` scheme name in `fvSchemes`
+means) gets a route to a linear-exact gradient at an interface. And the vector
+form has no `leastSquares` equivalent gap: `fvc_grad_vector_scheme` already
+offers both, so the same choice exists there.
+
+### 74.7 §13.4 contract
+
+**Supported.**
+
+| `fvSchemes` entry | effect |
+|---|---|
+| `snGradSchemes { default skewCorrected; }` | §2.4's over-relaxed correction **plus** §74.4's skewness term, both unlimited |
+| `laplacianSchemes { default Gauss linear skewCorrected; }` | the same, through `parse_laplacian` |
+
+`skewCorrected` left `SNGRAD_KNOWN_UNIMPLEMENTED`, is in `SNGRAD_AVAILABLE`,
+round-trips through `SnGradScheme::describe`, and appears in the alternatives
+any refusal prints. `io::schemes::tests::skew_corrected_is_a_supported_sn_grad_scheme`
+checks all five statements.
+
+**Refused by name, with the alternative.**
+
+| asked for | answer |
+|---|---|
+| `gradSchemes { default skewCorrected ...; }` | Not a `gradSchemes` entry here. The operator exists (`fvc_grad_*_skew_correction`) but is not reachable from `fvSchemes`, because wiring it into `GradScheme` needs a scratch gradient per call — an allocation inside a captured CUDA graph (§43) — and that is a separate decision. **Use `leastSquares`**, which §74.6(d) measures as at least as good on this problem. |
+| `divSchemes { ... skewCorrected; }` | Still "recognised, not implemented". The convection face value is a different quantity from the diffusive one and §11's deferred correction has its own limiter structure. |
+| `interpolationSchemes { skewCorrected; }` | Still refused; `linear` is the only supported entry. |
+| `snGradSchemes { skewCorrected; }` **on a mesh with a skewed CYCLIC couple** | The skewness term is internal-face only. A cyclic couple can be skewed and is **not** corrected — the boundary half of `fvLapNonOrth` gets `k` but no `s_f`. Not detected and not refused at run time; recorded here as a limitation. |
+| `skewCorrected` **combined with `limited <alpha>`** | Not expressible. The two are separate members of `SnGradScheme`; there is no `limited skewCorrected`. |
+| adaptive refinement of any kind | Not implemented, not started. §74.2 builds a mesh that *has* 2:1 interfaces; nothing changes one. |
+
+**Bit-identical defaults, by construction.** `skewCorrected` is not the default
+and no shipped case names it, so no existing answer moves — the extra kernel is
+never launched. Beyond that: `skew_corr` is **exactly** `Vec3::ZERO` on a mesh
+whose faces are unskewed, so even a case that *does* name it on an unskewed mesh
+gets `corrected` bit for bit — the extra term is a sum of products with zero.
+That second guarantee holds because of §2.5(b)'s floor and not otherwise: the
+raw difference is round-off-sized rather than zero, and this project's own first
+version of the pair test passed on one uniform box and failed on another before
+the floor existed. Both halves of that
+are asserted:
+`fv::tests::skew_corrected_differs_from_corrected_only_where_the_mesh_is_skewed`
+requires `assert_eq!` on the whole source vector on a uniform box and
+`assert_ne!` on a refined one, and `ofgpu-validate` requires
+`skewCorrected == corrected + the skewness term` bit for bit on the refined
+mesh.
+
+### 74.8 The cuFFT direct Poisson path: excluded, and the exclusion measured
+
+§43's direct Poisson solve transforms, divides and transforms back. That works
+because on a uniform Cartesian box the discrete operator is a Kronecker sum of
+three one-dimensional operators. **A mesh with a 2:1 interface is not such a
+box, and the FFT path is excluded from it — not untested, excluded.**
+
+This is settled by running the detector the backend chooser actually runs rather
+than by asserting it. `pressure::cartesian::detect` refuses on the first thing
+that fails, and on a refined mesh that is the very first check:
+
+```
+cell volumes are not uniform (cell 146 is 2.441406e-4, cell 0 is 1.953125e-3)
+```
+
+— a refined leaf is one eighth of a base cell, so the refusal never even reaches
+the face areas or the spacings.
+`pressure::cartesian::tests::a_2to1_refined_mesh_is_refused_by_the_cartesian_detector`
+records that sentence and also checks that the **unrefined** base grid of the
+same box still passes as an 8×8×8 Cartesian grid, so the refusal is about the
+refinement and not about the generator.
+
+No repair is offered. The capacitance-matrix / Woodbury correction §52.9 already
+refused for a fan patch does not apply either: it needs O(1) modified rows, and
+a refined block is O(N^(2/3)) of them. A case is therefore either a uniform box
+with the FFT solve, or a refined mesh with PCG/PBiCGStab. The decision table
+already prints the reason, and it now prints it for this reason too.
+
+### 74.9 What must hold
+
+| # | Statement | Where it is checked |
+|---|---|---|
+| 1 | A 2:1 hex interface carries exactly `25.239401820678103°`, `w = 1/3`, `Delta = 4/(3h)`, `\|k\| = 0.4714045207910317`, `\|s\|/\|d\| = 0.14213381090374028` | `mesh::refined::tests::a_2to1_hex_interface_carries_the_numbers_section_74_tabulates`; `ofgpu-validate` |
+| 2 | Every face that is not an interface face has `k = 0` and `s = 0` to `1e-14` | same test |
+| 3 | A refined box closes (`\|Sum_f Sf\| < 1e-14` per cell), its volumes sum to the analytic box, and its faces are upper-triangular | `mesh::refined::tests::a_refined_box_closes_and_is_ldu_ordered` |
+| 4 | No cell has more than 24 faces, and some cell has more than 6 | `mesh::refined::tests::the_cell_degree_is_bounded_by_twenty_four` |
+| 5 | 2:1 balance is idempotent and independent of sweep direction | `mesh::refined::tests::balancing_is_idempotent_and_order_independent` |
+| 6 | `skew_corr` is exactly `Vec3::ZERO` on an unskewed mesh, and `skewCorrected` is then `corrected` **bit for bit** | `fv::tests::skew_corrected_differs_from_corrected_only_where_the_mesh_is_skewed` |
+| 7 | On a skewed mesh the two schemes **differ** — the setting can change an answer | same test; `ofgpu-validate` |
+| 8 | Green–Gauss of a linear field is **not** exact at a 2:1 interface (30.17 % off), and the converged skewness iteration restores exactness to `< 1e-11` | `fv::tests::the_skew_correction_makes_green_gauss_exact_at_a_2to1_interface`; `ofgpu-validate` |
+| 9 | The skewness iteration contracts, by a factor below 0.5 | same test (measured 0.221) |
+| 10 | Device gather == host scatter for both skewness operators, to `1e-12` relative | `ofgpu-validate`, `check_skew_correction` |
+| 11 | `snGrad skewCorrected` == `corrected` + `fvm_laplacian_skew_correction`, bit for bit | `ofgpu-validate` |
+| 12 | **THE GATE.** MMS across a 2:1 interface reaches observed order ≥ 1.9 in **L2 and L-infinity** | `fv::tests::a_statically_refined_mesh_recovers_second_order` |
+| 13 | `uncorrected` does **not** reach it (L2 < 1.5), and plain Green–Gauss does not reach it in L-infinity (< 1.5) — or the gate is measuring nothing | same test |
+| 14 | The snGrad skewness term beats plain `corrected` on the finest mesh in both norms | same test |
+| 15 | A 2:1 mesh is refused by the Cartesian detector, and the unrefined base grid of the same box is not | `pressure::cartesian::tests::a_2to1_refined_mesh_is_refused_by_the_cartesian_detector` |
+| 16 | Assembly on a refined polyhedral mesh (9–24 faces per cell) matches the host reference | `ofgpu-validate`, `check_assembly` on the refined block |
+| 17 | A decomposed part's `skew_corr` is the whole mesh's, face for face | `decompose::tests`, the single-part identity comparison |
+
+### 74.10 Validation
+
+Everything in §74.9 is a test, and everything printed in §74.3, §74.4 and §74.5
+is a number this section's own tests produced on this machine (RTX 5070 Ti,
+`Scalar = f64`). Two of them are re-measured independently by `ofgpu-validate`
+on a different refined mesh (960 cells, 384 interface faces): the 25.24 degrees,
+and the converged Green–Gauss exactness.
+
+`ofgpu-validate` gains a new mesh section, `3-D block with 2:1 refinement
+interfaces`, which runs `check_mesh`, `check_assembly` and the new
+`check_skew_correction`. It deliberately does **not** run
+`check_explicit_operators` there, and the reason is worth stating: two of that
+function's checks — "grad(linear field) == analytic" and "interpolate(linear
+field) == the value at the face centre" — are **false** on a skewed mesh, by
+30.17 % and 1.20 % respectively. That is not a bug in them; it is exactly what
+§74.4 exists to fix. Running them would report a failure for a known and
+quantified property, so the same two facts are asserted in
+`check_skew_correction` with their sign the right way round and their size
+printed.
+
+**What is NOT validated here, and is not claimed:**
+
+* nothing adapts, so there is no conservation-across-an-adapt test, no
+  restriction/prolongation, no flux prolongation and no post-adapt projection;
+* the physics gates (§10, §22) are unchanged and were not re-run on a refined
+  mesh — no fire or plume case uses one;
+* the skewness correction is measured on the Poisson equation only. Its effect
+  on convection, on the pressure–velocity coupling, or on a turbulence model has
+  not been measured and no claim is made about it;
+* only `L_max = 1` and `L_max = 2` were exercised, and only on hexahedra.

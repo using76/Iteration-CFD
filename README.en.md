@@ -339,6 +339,107 @@ partition a property of the linked library rather than of the mesh.
 
 ---
 
+### A mesh with 2:1 refinement interfaces — and the norm that decides it
+
+Adaptive mesh refinement is **not implemented and not started.** SPEC-LIT §74
+does the part that has to come first and can be settled on its own: build a mesh
+that is *born* with 2:1 refinement interfaces, put the existing operators on it,
+and measure whether they are still second order across one. If they are not, no
+adaptation machinery would fix it.
+
+On a face-based polyMesh a 2:1 interface is **not** the problem the AMR
+literature says it is. A hanging node is a difficulty for node-based
+discretisations; here a coarse cell's face onto a finer neighbour is simply
+*four faces where there was one*, the coarse cell becomes a polyhedron with up
+to 24 faces, and every operator already loops over "the faces of this cell"
+without caring how many there are. **There is no flux register and no
+refluxing** — the Berger–Colella apparatus exists because block-structured AMR
+keeps a separate coarse-level flux that then disagrees with the sum of the fine
+ones, and in an LDU/polyMesh formulation there is one flux per face picked up
+with opposite signs by the two cells' gathers. Conservation is exact by
+construction, and the four sub-areas sum to the parent area to the last bit.
+
+What a 2:1 hex interface *does* carry is measured, not derived on paper:
+**25.239401820678103°** of non-orthogonality, an owner weight of `1/3` instead
+of `1/2`, `|k| = 0.4714`, and a relative skewness of **0.1421** — every one of
+them asserted to `1e-12` by a test that builds the mesh, and re-measured by
+`ofgpu-validate` on a different one.
+
+**The gate, and the correction to it.** The brief was "an MMS convergence study
+on a statically refined mesh must recover second order". Measured in a
+volume-weighted L2 norm, **the unmodified code already passes** — plain
+`corrected` reaches observed order 1.985 across a 2:1 interface. That is not a
+success, it is a defective gate: a refinement interface is a two-dimensional set
+inside a three-dimensional mesh, so L2 gives a local defect there only its own
+share of the norm. Measured in L-infinity on the same four meshes (`N` = 8, 16,
+24, 32 with the middle block one level finer, so the interface has faces, edges
+**and** corners), the same run stalls dead — observed order **−0.070** on the
+finest pair, the pointwise error at `N = 32` no better than at `N = 24`.
+
+| snGrad / gradient | L2 orders | L∞ orders |
+|---|---|---|
+| `uncorrected` / Gauss | 1.183 1.035 0.994 | 0.515 0.713 0.774 |
+| `corrected` / Gauss | 2.047 1.995 **1.985** | 2.198 1.126 **−0.070** |
+| `skewCorrected` / Gauss | 2.046 2.001 1.993 | 1.712 1.861 **0.342** |
+| `skewCorrected` / Gauss + skew-corrected gradient | 2.083 2.031 **2.017** | 1.955 1.941 **1.940** |
+| `corrected` / `leastSquares` | 2.062 2.025 **2.014** | 1.914 1.928 **1.931** |
+| `skewCorrected` / `leastSquares` | 2.045 2.013 2.005 | 1.873 1.894 1.904 |
+
+**The load-bearing piece is the gradient, not the snGrad scheme.** Green–Gauss
+places a face value where the face plane cuts the line `P–N`, not at the face
+centroid; on the fine side of a 2:1 interface that error does not cancel and
+does not shrink with `h`. On the gate mesh a Green–Gauss gradient of a **linear**
+field is off by **30.17 %**, at any resolution, and that error is fed straight
+into the non-orthogonal correction. Only the two treatments whose gradient is
+linear-exact clear 1.9 in L-infinity.
+
+Both routes to that are shipped and both are measured. `snGradSchemes
+skewCorrected` (new — SPEC-LIT §2.5 and §74.4) adds the face-centroid skewness
+term to the diffusive flux and to the matching flux read-back, in the same
+multiplication order, so the two agree to the last bit; it is worth **27 % of
+the L2 error and 51 % of the L-infinity error** at fixed order. The gradient
+half is a deferred Picard iteration with a measured contraction of 0.221, whose
+fixed point reproduces a linear field to `2.3e-15`. And the cheapest complete fix
+for that half is a scheme **this crate already shipped**: `leastSquares`
+differences cell centres and never forms a face value, so it is exact for a
+linear field on any mesh, and `corrected`/`leastSquares` reaches L-infinity order
+1.931 with no new code at all. §74.6 records that rather than burying it,
+because it makes most of the new gradient machinery optional.
+
+**Defaults do not move, by construction.** `skewCorrected` is not the default
+and no shipped case names it, so the extra kernel is never launched. Beyond that,
+the skewness vector is **exactly** `Vec3::ZERO` on a mesh whose faces are
+unskewed, so even a case that does name it on a uniform mesh gets `corrected`
+bit for bit — asserted with `assert_eq!` on the whole source vector, and with
+`assert_ne!` on a refined one so the setting is not a no-op everywhere. That
+second guarantee needed a **floor** that a measurement forced: the skewness
+vector is a difference of two nearly-equal *computed* positions, so where the
+true value is zero the computed one has no significant digits — a uniform box
+came out at `6.9e-18` on some faces and at exactly zero on others depending on
+its cell dimensions, and this project's own first version of the test passed on
+one box and failed on another. Below `1e-9·|d|` the vector is zeroed; real
+skewness at a 2:1 interface is `0.1421`, eight orders above that.
+
+**The cuFFT direct Poisson path is excluded from a refined mesh by name, and the
+exclusion is measured** rather than asserted: the detector the backend chooser
+actually runs is run on one, and what it says is recorded —
+`cell volumes are not uniform (cell 146 is 2.441406e-4, cell 0 is 1.953125e-3)`
+— together with a check that the *unrefined* base grid of the same box still
+passes, so the refusal is about the refinement and not about the generator. No
+capacitance-matrix repair is offered: that trick needs O(1) modified rows and a
+refined block is O(N^(2/3)) of them.
+
+**What is not claimed.** Nothing adapts, so there is no conservation-across-an-
+adapt test, no restriction or prolongation, no flux prolongation and no
+post-adapt projection. The skewness correction is measured on the Poisson
+equation only — not on convection, not on the pressure–velocity coupling, not on
+a turbulence model. A skewed *cyclic* couple is not corrected, and that is
+recorded as a limitation rather than detected. **p4est is GPL-2.0-or-later, not
+BSD-2** as the brief assumed; its licence was checked before anything was
+opened, and neither it nor libsc, t8code or OpenFOAM's refinement code was read.
+
+---
+
 ## Case settings: honoured or refused
 
 An unsupported setting is never quietly replaced with something else. Every

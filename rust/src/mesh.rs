@@ -147,6 +147,16 @@ pub struct HostMesh {
     /// snGrad use. Coincides with `1/|d|` on an orthogonal mesh.
     pub delta_coeffs: Vec<Scalar>,
     pub non_orth_corr: Vec<Vec3>,
+    /// `[n_if]` the SKEWNESS vector of SPEC-LIT S74.4,
+    /// `s_f = Cf - (C_P + (1 - w) d)`: the offset from the point the
+    /// interpolation weight actually places `psi_f` at - where the face plane
+    /// cuts the line `P-N` - to the face CENTROID, which is the point
+    /// Green-Gauss and the midpoint rule both assume it is.
+    ///
+    /// Exactly zero on a mesh whose faces are unskewed, because there `w` is
+    /// `1/2` and `Cf` is the midpoint of `C_P C_N`. Non-zero at a 2:1
+    /// refinement interface, where it is `0.1421 |d|`.
+    pub skew_corr: Vec<Vec3>,
 
     // ---- boundary faces, all patches flattened ---------------------------
     pub b_face_cells: Vec<Label>,
@@ -316,6 +326,9 @@ pub struct GpuMesh {
     pub weights: DevBuf<Scalar>,
     pub delta_coeffs: DevBuf<Scalar>,
     pub non_orth_corr: DevBuf<Vec3>,
+    /// SPEC-LIT S74.4. Zero everywhere on an unskewed mesh, and read only by
+    /// the `skewCorrected` path, which is not the default.
+    pub skew_corr: DevBuf<Vec3>,
 
     pub b_face_cells: DevBuf<Label>,
     pub b_sf: DevBuf<Vec3>,
@@ -401,6 +414,16 @@ impl GpuMesh {
             weights: gpu.upload(&m.weights)?,
             delta_coeffs: gpu.upload(&m.delta_coeffs)?,
             non_orth_corr: gpu.upload(&m.non_orth_corr)?,
+            // A mesh written out by hand in a test may never have run the
+            // geometry sweep. Zero is what an unskewed mesh's skewness vector
+            // IS, so an absent array and a uniform mesh give the same answer -
+            // and a buffer of the right length, which the kernels index
+            // unconditionally.
+            skew_corr: if m.skew_corr.len() == m.n_internal_faces {
+                gpu.upload(&m.skew_corr)?
+            } else {
+                gpu.upload(&vec![Vec3::ZERO; m.n_internal_faces])?
+            },
 
             b_face_cells: gpu.upload(&m.b_face_cells)?,
             b_sf: gpu.upload(&m.b_sf)?,
@@ -439,4 +462,5 @@ impl GpuMesh {
 }
 
 pub mod geometry;
+pub mod refined;
 pub mod topology;

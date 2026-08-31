@@ -551,6 +551,17 @@ pub enum SnGradScheme {
     /// orthogonal part - SPEC-LIT §12.3, our own expression. `alpha = 0` is
     /// `uncorrected` bit for bit; large `alpha` tends to `corrected`.
     Limited(Scalar),
+    /// `skewCorrected`: `corrected`, **plus** the face-centroid skewness term
+    /// of SPEC-LIT §74.4. The two corrections are independent - one rotates
+    /// the difference onto the face normal, the other moves it onto the face
+    /// centroid - and this is the only entry that applies both.
+    ///
+    /// On a mesh whose faces are unskewed it is `corrected` bit for bit,
+    /// because `skew_corr` is then exactly zero and the extra term is a sum of
+    /// products with zero. It is not the default, so an existing case is
+    /// unaffected by construction: no case that does not name it launches the
+    /// extra kernel at all.
+    SkewCorrected,
 }
 
 impl SnGradScheme {
@@ -558,9 +569,15 @@ impl SnGradScheme {
     pub fn alpha(self) -> Scalar {
         match self {
             Self::Uncorrected => 0.0,
-            Self::Corrected => -1.0,
+            Self::Corrected | Self::SkewCorrected => -1.0,
             Self::Limited(a) => a.max(0.0),
         }
+    }
+
+    /// Whether the skewness term of SPEC-LIT §74.4 is applied on top of the
+    /// non-orthogonal one. True for `skewCorrected` and nothing else.
+    pub fn skew(self) -> bool {
+        matches!(self, Self::SkewCorrected)
     }
 
     /// The scheme, spelled the way an `snGradSchemes` entry spells it.
@@ -569,6 +586,7 @@ impl SnGradScheme {
             Self::Uncorrected => "uncorrected".to_string(),
             Self::Corrected => "corrected".to_string(),
             Self::Limited(a) => format!("limited {a}"),
+            Self::SkewCorrected => "skewCorrected".to_string(),
         }
     }
 
@@ -607,6 +625,7 @@ pub struct FvKernels {
     lap_diag: CudaFunction,
     lap_boundary: CudaFunction,
     lap_non_orth: CudaFunction,
+    lap_skew: CudaFunction,
 
     sp: CudaFunction,
     susp: CudaFunction,
@@ -614,6 +633,8 @@ pub struct FvKernels {
 
     grad_scalar: CudaFunction,
     grad_vector: CudaFunction,
+    grad_scalar_skew: CudaFunction,
+    grad_vector_skew: CudaFunction,
     grad_scalar_ls: CudaFunction,
     grad_vector_ls: CudaFunction,
     grad_limit_scalar: CudaFunction,
@@ -627,6 +648,7 @@ pub struct FvKernels {
     sn_grad_boundary: CudaFunction,
     sn_grad_corr_internal: CudaFunction,
     sn_grad_corr_boundary: CudaFunction,
+    sn_grad_skew_internal: CudaFunction,
     reconstruct: CudaFunction,
     production: CudaFunction,
 }
@@ -656,6 +678,7 @@ impl FvKernels {
             lap_diag: k.func("fvLapDiag")?,
             lap_boundary: k.func("fvLapBoundary")?,
             lap_non_orth: k.func("fvLapNonOrth")?,
+            lap_skew: k.func("fvLapSkew")?,
 
             sp: k.func("fvSp")?,
             susp: k.func("fvSusp")?,
@@ -663,6 +686,8 @@ impl FvKernels {
 
             grad_scalar: k.func("fvGradScalar")?,
             grad_vector: k.func("fvGradVector")?,
+            grad_scalar_skew: k.func("fvGradScalarSkew")?,
+            grad_vector_skew: k.func("fvGradVectorSkew")?,
             grad_scalar_ls: k.func("fvGradScalarLeastSquares")?,
             grad_vector_ls: k.func("fvGradVectorLeastSquares")?,
             grad_limit_scalar: k.func("fvGradLimitScalar")?,
@@ -676,6 +701,7 @@ impl FvKernels {
             sn_grad_boundary: k.func("fvSnGradFluxBoundary")?,
             sn_grad_corr_internal: k.func("fvSnGradCorrInternal")?,
             sn_grad_corr_boundary: k.func("fvSnGradCorrBoundary")?,
+            sn_grad_skew_internal: k.func("fvSnGradSkewInternal")?,
             reconstruct: k.func("fvReconstruct")?,
             production: k.func("fvProduction")?,
         })
@@ -1585,6 +1611,78 @@ pub fn fvm_laplacian_non_orth_correction(
             .launch(cfg_for(n))?;
     }
 
+    if sn_grad.skew() {
+        fvm_laplacian_skew_correction(gpu, k, a, m, gamma_mag_sf, grad_psi, sign)?;
+    }
+
+    Ok(())
+}
+
+/// The explicit **skewness** correction of the laplacian - SPEC-LIT §74.4.
+///
+/// ```text
+/// source[P] -= sign · Σ_f (±1) γ_f |Sf| Δ_f ( s_f · [ (∇ψ)_N - (∇ψ)_P ] )
+/// ```
+///
+/// with `s_f = Cf - (C_P + (1-w) d)` the skewness vector of SPEC-LIT §2.5.
+///
+/// [`fvm_laplacian`] differences `ψ` along `d` and
+/// [`fvm_laplacian_non_orth_correction`] rotates that onto the face normal;
+/// between them they give the normal gradient **on the line P-N**, which meets
+/// the face plane at `C_P + (1-w) d`. On a skewed face that is not the face
+/// centroid, and the midpoint rule the whole finite-volume statement rests on
+/// wants the centroid. Shifting both cell values onto a line through the
+/// centroid - Ferziger & Peric §8.6 - changes the differenced pair by exactly
+/// the term above and leaves `d`, `Δ` and `k` untouched, so this is additive
+/// on top of the non-orthogonal correction and not a replacement for it.
+///
+/// Internal faces only. An uncoupled boundary condition is imposed **at** the
+/// face, at `Cf`, so there is nothing to move; a cyclic couple can be skewed
+/// and is deliberately not corrected - SPEC-LIT §74.7 refuses that combination
+/// by name rather than half-correcting it.
+///
+/// [`fvm_laplacian_non_orth_correction`] calls this for you whenever the
+/// scheme is [`SnGradScheme::SkewCorrected`]; it is public because
+/// `ofgpu-validate` and the order-of-accuracy tests need to run the two halves
+/// apart to say which one is doing the work.
+pub fn fvm_laplacian_skew_correction(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    gamma_mag_sf: &DevBuf<Scalar>,
+    grad_psi: &DevBuf<Vec3>,
+    sign: Scalar,
+) -> Result<()> {
+    check_matrix(a, m)?;
+    expect_len(gamma_mag_sf, m.n_internal_faces, "gamma_mag_sf")?;
+    expect_len(grad_psi, m.n_cells, "grad_psi")?;
+
+    let n = m.n_cells;
+    if n == 0 || m.n_internal_faces == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+
+    let f = k.lap_skew.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.source)
+            .arg(gamma_mag_sf)
+            .arg(&m.skew_corr)
+            .arg(&m.delta_coeffs)
+            .arg(grad_psi)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.cf_offset)
+            .arg(&m.cf_face)
+            .arg(&m.cf_own)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+
     Ok(())
 }
 
@@ -1968,6 +2066,109 @@ pub fn fvc_grad_vector(
     fvc_grad_vector_scheme(gpu, k, out, u, m, GradScheme::GAUSS)
 }
 
+/// The deferred **skewness** correction of a Green-Gauss scalar gradient -
+/// SPEC-LIT §74.4.
+///
+/// ```text
+/// (grad psi)_P += (1/V_P) Σ_f (±Sf) [ (grad psi)_f · s_f ]
+/// ```
+///
+/// Green-Gauss is exact for a linear field only when `psi_f` is the value at
+/// the face **centroid**. [`fvc_grad_scalar`] places it where the face plane
+/// cuts `P-N`, which on a skewed face is a different point, and the gradient
+/// is then wrong at **zeroth** order in `h` - not first, zeroth - for a cell
+/// with an unbalanced set of skewed faces. SPEC-LIT §74.5 measures it.
+///
+/// Deferred: it reads a gradient to correct a gradient. `grad_prev` is
+/// normally a copy of the uncorrected gradient. It cannot be the same buffer
+/// as `out` - the kernel would read cells other threads are writing - and
+/// nothing has to check that, because `&mut` and `&` to one `DevBuf` cannot
+/// coexist. The borrow checker is the guard.
+///
+/// **Adds** to `out`. One pass restores exactness for a linear field, which
+/// is the property the correction exists for; further passes chase the
+/// quadratic remainder and are not needed by anything this crate ships.
+pub fn fvc_grad_scalar_skew_correction(
+    gpu: &Gpu,
+    k: &FvKernels,
+    out: &mut DevBuf<Vec3>,
+    grad_prev: &DevBuf<Vec3>,
+    m: &GpuMesh,
+) -> Result<()> {
+    expect_len(out, m.n_cells, "out")?;
+    expect_len(grad_prev, m.n_cells, "grad_prev")?;
+    let n = m.n_cells;
+    if n == 0 || m.n_internal_faces == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+
+    let f = k.grad_scalar_skew.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut *out)
+            .arg(grad_prev)
+            .arg(&m.skew_corr)
+            .arg(&m.weights)
+            .arg(&m.sf)
+            .arg(&m.v)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.cf_offset)
+            .arg(&m.cf_face)
+            .arg(&m.cf_own)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+
+    Ok(())
+}
+
+/// The same for a cell vector field, whose gradient is a tensor - SPEC-LIT
+/// §74.4.
+///
+/// The face value is short by `(s_f · grad U)`, a vector whose `j`-th
+/// component is `s_i (grad U)_ij` because the area vector supplies the first
+/// index (SPEC-LIT §1), and the correction to the tensor is `Sf ⊗` that
+/// vector.
+pub fn fvc_grad_vector_skew_correction(
+    gpu: &Gpu,
+    k: &FvKernels,
+    out: &mut DevBuf<Tensor>,
+    grad_prev: &DevBuf<Tensor>,
+    m: &GpuMesh,
+) -> Result<()> {
+    expect_len(out, m.n_cells, "out")?;
+    expect_len(grad_prev, m.n_cells, "grad_prev")?;
+    let n = m.n_cells;
+    if n == 0 || m.n_internal_faces == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+
+    let f = k.grad_vector_skew.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut *out)
+            .arg(grad_prev)
+            .arg(&m.skew_corr)
+            .arg(&m.weights)
+            .arg(&m.sf)
+            .arg(&m.v)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.cf_offset)
+            .arg(&m.cf_face)
+            .arg(&m.cf_own)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+
+    Ok(())
+}
+
 /// Divergence of a face flux: `(div phi)_P = (1/V_P) Σ_f (±phi_f)`.
 ///
 /// Volumetric, i.e. divided by the cell volume, so that feeding the result to
@@ -2273,6 +2474,28 @@ pub fn sn_grad_flux_correction(
                 .arg(&m.b_face_cells)
                 .arg(&m.b_kind)
                 .arg(&alpha)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+    }
+
+    // The flux and the matrix have to agree face for face, so the skewness
+    // term follows the scheme here exactly as it does in
+    // `fvm_laplacian_non_orth_correction`, in the same multiplication order.
+    if sn_grad.skew() && m.n_internal_faces > 0 {
+        let n = m.n_internal_faces;
+        let nl = n as Label;
+        let f = k.sn_grad_skew_internal.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(&mut phi.f)
+                .arg(gamma_mag_sf)
+                .arg(&m.skew_corr)
+                .arg(&m.delta_coeffs)
+                .arg(grad_psi)
+                .arg(&m.owner)
+                .arg(&m.neighbour)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }
@@ -4066,6 +4289,564 @@ mod tests {
         Ok(())
     }
 
+    // ----------------------------------------------------------------------
+    //  74  The 2:1 refinement interface, and the skewness correction
+    // ----------------------------------------------------------------------
+
+    fn refined_fixture(hm: HostMesh) -> Option<Fixture> {
+        let gpu = gpu()?;
+        let k = FvKernels::new(&gpu).ok()?;
+        let m = GpuMesh::upload(&gpu, &hm).ok()?;
+        Some(Fixture { gpu, k, hm, m })
+    }
+
+    /// The gradient a caller would use: Green-Gauss, then - if asked - the
+    /// deferred skewness correction of SPEC-LIT 74.4 on top of it.
+    ///
+    /// `passes` is a PICARD iteration and not decoration. One pass corrects
+    /// the face value with a gradient that is itself uncorrected, so what
+    /// survives is the correction of the correction; SPEC-LIT 74.4 measures
+    /// the contraction factor, and
+    /// `the_skew_correction_makes_green_gauss_exact_at_a_2to1_interface` pins
+    /// it.
+    fn grad_with_skew(
+        fx: &Fixture,
+        psi: &GpuScalarField,
+        passes: usize,
+    ) -> Result<DevBuf<Vec3>> {
+        grad_for(fx, psi, GradKind::GaussSkew(passes))
+    }
+
+    /// The three ways this crate can produce a cell gradient on a mesh with a
+    /// 2:1 interface. SPEC-LIT 74.6 measures all three, because which one is
+    /// used turns out to matter more than the snGrad scheme does.
+    #[derive(Clone, Copy)]
+    enum GradKind {
+        Gauss,
+        GaussSkew(usize),
+        LeastSquares,
+    }
+
+    fn grad_for(fx: &Fixture, psi: &GpuScalarField, kind: GradKind) -> Result<DevBuf<Vec3>> {
+        let (gpu, k, m) = (&fx.gpu, &fx.k, &fx.m);
+        let mut base: DevBuf<Vec3> = gpu.zeros(m.n_cells)?;
+        if let GradKind::LeastSquares = kind {
+            fvc_grad_scalar_scheme(
+                gpu,
+                k,
+                &mut base,
+                psi,
+                m,
+                GradScheme { base: GradBase::LeastSquares, limit: GradLimit::None },
+            )?;
+            return Ok(base);
+        }
+        fvc_grad_scalar(gpu, k, &mut base, psi, m)?;
+        let passes = match kind {
+            GradKind::GaussSkew(n) => n,
+            _ => 0,
+        };
+        let mut g = base.try_clone()?;
+        for _ in 0..passes {
+            let prev = g;
+            g = base.try_clone()?;
+            fvc_grad_scalar_skew_correction(gpu, k, &mut g, &prev, m)?;
+        }
+        Ok(g)
+    }
+
+    /// Green-Gauss is exact for a linear field only if the face value sits at
+    /// the face CENTROID. At a 2:1 interface it does not, and the error does
+    /// not shrink with `h`: it is a fixed fraction of the gradient, set by the
+    /// geometry of the interface alone.
+    ///
+    /// So this test is not "the correction improves things". It is: without
+    /// it the gradient is wrong at ZEROTH order on the fine side, and with it
+    /// the gradient is exact - which is the property every deferred correction
+    /// in SPEC-LIT 3.2 assumes of the gradient it is handed.
+    #[test]
+    fn the_skew_correction_makes_green_gauss_exact_at_a_2to1_interface() -> Result<()> {
+        let r = crate::mesh::refined::refined_core([6, 6, 6], Vec3::new(0.2, 0.2, 0.2), 0.25, 1)?;
+        let Some(fx) = refined_fixture(r.mesh.clone()) else {
+            return Ok(());
+        };
+        let (gpu, hm, m) = (&fx.gpu, &fx.hm, &fx.m);
+
+        let a0 = Vec3::new(1.7, -0.9, 0.35);
+        let b0: Scalar = 0.42;
+        let f: Vec<Scalar> = (0..hm.n_cells).map(|c| a0.dot(hm.c[c]) + b0).collect();
+        let bf: Vec<Scalar> = (0..hm.n_boundary_faces)
+            .map(|i| a0.dot(hm.b_cf[i]) + b0)
+            .collect();
+        let psi = dirichlet_field(gpu, m, hm, &f, &bf)?;
+
+        let plain = gpu.download(&grad_with_skew(&fx, &psi, 0)?)?;
+        let once = gpu.download(&grad_with_skew(&fx, &psi, 1)?)?;
+        let twice = gpu.download(&grad_with_skew(&fx, &psi, 2)?)?;
+        let fixed = gpu.download(&grad_with_skew(&fx, &psi, 30)?)?;
+        gpu.sync()?;
+
+        let worst = |g: &[Vec3]| {
+            g.iter().fold(0.0 as Scalar, |w, v| w.max((*v - a0).mag())) / a0.mag()
+        };
+        let (e_plain, e_once, e_twice, e_fixed) =
+            (worst(&plain), worst(&once), worst(&twice), worst(&fixed));
+        println!(
+            "  74.4 linear field on a 2:1 mesh: Green-Gauss is off by {e_plain:.4e} \
+             relative; 1 skew pass {e_once:.4e}; 2 passes {e_twice:.4e}; converged \
+             {e_fixed:.4e} (contraction {:.3})",
+            e_twice / e_once
+        );
+
+        assert!(
+            e_plain > 0.05,
+            "the uncorrected Green-Gauss gradient was only off by {e_plain:e}; either \
+             the mesh has no skewed faces or the test proves nothing"
+        );
+        // ONE pass is not exact and this is the honest statement of why: the
+        // face value is corrected with a gradient that is itself uncorrected,
+        // so what survives is the correction of the correction. The iteration
+        // is a contraction with a factor the interface geometry sets, and its
+        // fixed point IS exact - a linear field reconstructed at Cf is the
+        // exact face value, and Green-Gauss on exact face values is exact.
+        assert!(
+            e_once > 1e-3 && e_once < 0.3 * e_plain,
+            "one skew pass went from {e_plain:e} to {e_once:e}; SPEC-LIT 74.4 claims \
+             it neither finishes the job nor fails to contract"
+        );
+        assert!(
+            e_twice / e_once < 0.5,
+            "the skew iteration is not contracting: {e_once:e} -> {e_twice:e}"
+        );
+        assert!(
+            e_fixed < 1e-11,
+            "the ITERATED skew-corrected gradient is still off by {e_fixed:e} on a \
+             LINEAR field, whose face value it reconstructs exactly"
+        );
+        Ok(())
+    }
+
+    /// The same manufactured Poisson problem as `poisson_error`, on the unit
+    /// cube, on a mesh that already carries 2:1 interfaces. `sn_grad` chooses
+    /// the scheme; `skew_grad` says whether the Green-Gauss gradient the
+    /// deferred correction consumes is itself skew-corrected.
+    fn refined_poisson_error(
+        fx: &Fixture,
+        n_non_orth: usize,
+        sn_grad: SnGradScheme,
+        grad_kind: GradKind,
+    ) -> Result<(Scalar, Scalar)> {
+        let (gpu, k, hm, m) = (&fx.gpu, &fx.k, &fx.hm, &fx.m);
+
+        let pi = std::f64::consts::PI as Scalar;
+        let exact = |p: Vec3| -> Scalar { (pi * p.x).sin() * (pi * p.y).sin() * (pi * p.z).sin() };
+        let lam = 3.0 * pi * pi;
+
+        let ex: Vec<Scalar> = (0..hm.n_cells).map(|c| exact(hm.c[c])).collect();
+        let ex_b: Vec<Scalar> = (0..hm.n_boundary_faces).map(|i| exact(hm.b_cf[i])).collect();
+        let su_h: Vec<Scalar> = ex.iter().map(|v| lam * *v).collect();
+
+        let d_gamma = gpu.upload(&hm.mag_sf)?;
+        let d_b_gamma = gpu.upload(&hm.b_mag_sf)?;
+        let d_su = gpu.upload(&su_h)?;
+
+        let zeros_c = vec![0.0 as Scalar; hm.n_cells];
+        let mut psi = dirichlet_field(gpu, m, hm, &zeros_c, &ex_b)?;
+
+        let mut grad: DevBuf<Vec3> = gpu.zeros(hm.n_cells)?;
+        let mut a = GpuLduMatrix::new(gpu, m)?;
+        let mut got = zeros_c.clone();
+
+        for pass in 0..=n_non_orth {
+            a.zero(gpu)?;
+            fvm_laplacian(gpu, k, &mut a, m, &d_gamma, &d_b_gamma, &psi, -1.0)?;
+            if pass > 0 {
+                fvm_laplacian_non_orth_correction(
+                    gpu, k, &mut a, m, &d_gamma, &d_b_gamma, &psi, &grad, sn_grad, -1.0,
+                )?;
+            }
+            fvm_su(gpu, k, &mut a, m, &d_su, 1.0)?;
+            gpu.sync()?;
+
+            let mut diag = gpu.download(&a.diag)?;
+            let up = gpu.download(&a.upper)?;
+            let lo = gpu.download(&a.lower)?;
+            let mut src = gpu.download(&a.source)?;
+            let ic = gpu.download(&a.internal_coeffs)?;
+            let bc = gpu.download(&a.boundary_coeffs)?;
+            fold_boundary(hm, &mut diag, &mut src, &ic, &bc);
+
+            got = cg(hm, &diag, &up, &lo, &src);
+
+            gpu.write(&mut psi.f, &got)?;
+            grad = grad_for(fx, &psi, grad_kind)?;
+            gpu.sync()?;
+        }
+
+        let mut l2: Scalar = 0.0;
+        let mut vol: Scalar = 0.0;
+        let mut linf: Scalar = 0.0;
+        for c in 0..hm.n_cells {
+            let e = got[c] - ex[c];
+            l2 += e * e * hm.v[c];
+            vol += hm.v[c];
+            linf = linf.max(e.abs());
+        }
+        // L2 AND L-infinity. A volume-weighted L2 gives an interface - a
+        // two-dimensional set inside a three-dimensional mesh - only its own
+        // share of the norm, so the interface treatment could be a whole order
+        // worse than the interior and still leave L2 near 2. L-infinity is the
+        // norm that cannot hide that, and it is where the skewness question is
+        // actually decided.
+        Ok(((l2 / vol).sqrt(), linf))
+    }
+
+    fn order_between(e1: Scalar, h1: Scalar, e2: Scalar, h2: Scalar) -> Scalar {
+        (e1 / e2).ln() / (h1 / h2).ln()
+    }
+
+    /// SPEC-LIT 74.5, the gate this whole section exists for.
+    ///
+    /// Four treatments, three resolutions, on a mesh with a refined BLOCK -
+    /// interface faces, interface edges and interface corners.
+    ///
+    /// The gate: `skewCorrected` with a skew-corrected gradient must reach
+    /// observed order 1.9, the same bar SPEC-LIT 10 holds the uniform-mesh
+    /// operators to. Everything else here is printed so that the reason can be
+    /// read off rather than guessed at.
+    #[test]
+    fn a_statically_refined_mesh_recovers_second_order() -> Result<()> {
+        let Some(g0) = gpu() else { return Ok(()) };
+        drop(g0);
+
+        // frac = 0.25 lands the refined block on [0.25, 0.75] EXACTLY for
+        // every N divisible by 4, so all three resolutions discretise the same
+        // geometry and the order is an order rather than a wobble.
+        let ns = [8usize, 16, 24, 32];
+        let names = [
+            "uncorrected  /Gauss",
+            "corrected    /Gauss",
+            "skewCorrected/Gauss",
+            "skewCorrected/Gauss+skew",
+            "corrected    /leastSquares",
+            "skewCorrected/leastSquares",
+        ];
+        let nc = names.len();
+        let mut l2: Vec<Vec<Scalar>> = vec![Vec::new(); nc];
+        let mut li: Vec<Vec<Scalar>> = vec![Vec::new(); nc];
+        let mut hs: Vec<Scalar> = Vec::new();
+
+        for &n in &ns {
+            let h = 1.0 / n as Scalar;
+            hs.push(h);
+            let r = crate::mesh::refined::refined_core([n, n, n], Vec3::new(h, h, h), 0.25, 1)?;
+            assert_eq!(r.max_level_jump(), 1);
+            assert!(!r.interface_faces().is_empty());
+            let Some(fx) = refined_fixture(r.mesh.clone()) else {
+                return Ok(());
+            };
+
+            let runs = [
+                refined_poisson_error(&fx, 0, SnGradScheme::Uncorrected, GradKind::Gauss)?,
+                refined_poisson_error(&fx, 12, SnGradScheme::Corrected, GradKind::Gauss)?,
+                refined_poisson_error(&fx, 12, SnGradScheme::SkewCorrected, GradKind::Gauss)?,
+                refined_poisson_error(
+                    &fx,
+                    12,
+                    SnGradScheme::SkewCorrected,
+                    GradKind::GaussSkew(12),
+                )?,
+                refined_poisson_error(&fx, 12, SnGradScheme::Corrected, GradKind::LeastSquares)?,
+                refined_poisson_error(
+                    &fx,
+                    12,
+                    SnGradScheme::SkewCorrected,
+                    GradKind::LeastSquares,
+                )?,
+            ];
+            for (i, (a, b)) in runs.iter().enumerate() {
+                l2[i].push(*a);
+                li[i].push(*b);
+            }
+        }
+
+        let last = ns.len() - 1;
+        let mut o_l2 = vec![0.0 as Scalar; nc];
+        let mut o_li = vec![0.0 as Scalar; nc];
+        for i in 0..nc {
+            o_l2[i] = order_between(l2[i][last - 1], hs[last - 1], l2[i][last], hs[last]);
+            o_li[i] = order_between(li[i][last - 1], hs[last - 1], li[i][last], hs[last]);
+            let show = |e: &Vec<Scalar>| -> (String, String) {
+                (
+                    e.iter().map(|v| format!("{v:.4e}")).collect::<Vec<_>>().join(" "),
+                    (1..ns.len())
+                        .map(|j| format!("{:.3}", order_between(e[j - 1], hs[j - 1], e[j], hs[j])))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            };
+            let (e2, p2) = show(&l2[i]);
+            let (ei, pi) = show(&li[i]);
+            println!(
+                "  74.5 block-refined MMS, {:>26}: L2 {e2} -> {p2} | Linf {ei} -> {pi}",
+                names[i]
+            );
+        }
+
+        // THE GATE. Both norms, because the whole worry is a local defect at a
+        // two-dimensional interface, and L2 is exactly the norm that hides
+        // one: every treatment below reaches 2.0 in L2, and only two of the
+        // six reach it in L-infinity.
+        for winner in [3usize, 4] {
+            assert!(
+                o_l2[winner] >= 1.9 && o_li[winner] >= 1.9,
+                "THE GATE of 74.5: {} reaches order {:.3} in L2 and {:.3} in Linf \
+                 across a 2:1 interface, and must reach 1.9 in both",
+                names[winner],
+                o_l2[winner],
+                o_li[winner]
+            );
+        }
+        // And the ones that must NOT, or the gate is measuring nothing. On
+        // this mesh the correction vector k is exactly zero on every face
+        // except the interface, so these runs differ from the winners THERE
+        // and nowhere else.
+        assert!(
+            o_l2[0] < 1.5,
+            "`uncorrected` reached L2 order {:.3} on a mesh with 25 degrees of \
+             non-orthogonality at its interface; then nothing here is measuring the \
+             interface",
+            o_l2[0]
+        );
+        assert!(
+            o_li[1] < 1.5,
+            "a plain Green-Gauss gradient reached Linf order {:.3}; SPEC-LIT 74.6 \
+             says the pointwise error stalls, and if it does not, the whole \
+             skewness argument is unnecessary",
+            o_li[1]
+        );
+        // The snGrad skewness term must earn its own place, separately from
+        // the gradient: same gradient, better answer.
+        assert!(
+            l2[2][last] < l2[1][last] && li[2][last] < li[1][last],
+            "the snGrad skewness term did not beat plain `corrected` on the finest \
+             mesh: L2 {:.4e} vs {:.4e}, Linf {:.4e} vs {:.4e}",
+            l2[2][last],
+            l2[1][last],
+            li[2][last],
+            li[1][last]
+        );
+        Ok(())
+    }
+
+    /// The design note analysed ONE flat 2:1 interface. This measures that
+    /// mesh too, because it is the case where the skewness error CANCELS by
+    /// symmetry: the four sub-faces of a coarse face carry skew vectors that
+    /// sum to zero, and on the fine side the surviving Green-Gauss error is
+    /// parallel to the face normal while `k` is purely tangential.
+    ///
+    /// It is therefore the easy case, and quoting it alone would overstate how
+    /// well the uncorrected scheme does on a real adapted mesh. SPEC-LIT 74.5
+    /// records both.
+    #[test]
+    fn the_flat_2to1_interface_is_the_benign_case() -> Result<()> {
+        let Some(g0) = gpu() else { return Ok(()) };
+        drop(g0);
+
+        let ns = [8usize, 16];
+        let mut plain = Vec::new();
+        let mut skewed = Vec::new();
+        let mut hs = Vec::new();
+
+        for &n in &ns {
+            let h = 1.0 / n as Scalar;
+            hs.push(h);
+            let r = crate::mesh::refined::refined_half([n, n, n], Vec3::new(h, h, h), 1)?;
+            let Some(fx) = refined_fixture(r.mesh.clone()) else {
+                return Ok(());
+            };
+            plain.push(refined_poisson_error(&fx, 12, SnGradScheme::Corrected, GradKind::Gauss)?.0);
+            skewed.push(refined_poisson_error(&fx, 12, SnGradScheme::SkewCorrected, GradKind::Gauss)?.0);
+        }
+
+        let o_plain = order_between(plain[0], hs[0], plain[1], hs[1]);
+        let o_skew = order_between(skewed[0], hs[0], skewed[1], hs[1]);
+        println!(
+            "  74.5 flat-interface MMS: corrected {:.4e} -> {:.4e} (order {o_plain:.3}); \
+             skewCorrected {:.4e} -> {:.4e} (order {o_skew:.3}); the skewness term \
+             buys {:.1}% of the error on the finer mesh",
+            plain[0],
+            plain[1],
+            skewed[0],
+            skewed[1],
+            100.0 * (1.0 - skewed[1] / plain[1])
+        );
+
+        assert!(
+            o_skew >= 1.9,
+            "skewCorrected reaches only order {o_skew:.3} on ONE flat 2:1 interface, \
+             which is the easiest refined mesh there is"
+        );
+        Ok(())
+    }
+
+    /// The VECTOR half of SPEC-LIT 74.4, which has its own kernel and would
+    /// otherwise have no test: the same statement as the scalar one, one
+    /// component at a time. `(grad U)_ij = dU_j/dx_i`, so a linear
+    /// `U = A x + b` has `(grad U) = A^T` in this crate's index convention
+    /// (SPEC-LIT 1), and Green-Gauss must reproduce it - which at a 2:1
+    /// interface it does not until the skewness iteration has converged.
+    #[test]
+    fn the_vector_skew_correction_makes_green_gauss_exact_too() -> Result<()> {
+        let r = crate::mesh::refined::refined_core([6, 6, 6], Vec3::new(0.2, 0.2, 0.2), 0.25, 1)?;
+        let Some(fx) = refined_fixture(r.mesh.clone()) else {
+            return Ok(());
+        };
+        let (gpu, k, hm, m) = (&fx.gpu, &fx.k, &fx.hm, &fx.m);
+
+        let rows = [
+            Vec3::new(1.7, -0.9, 0.35),
+            Vec3::new(-0.4, 0.8, 1.1),
+            Vec3::new(0.25, 0.6, -1.3),
+        ];
+        let at = |p: Vec3| Vec3::new(rows[0].dot(p), rows[1].dot(p), rows[2].dot(p));
+        let want = Tensor {
+            xx: rows[0].x, xy: rows[1].x, xz: rows[2].x,
+            yx: rows[0].y, yy: rows[1].y, yz: rows[2].y,
+            zx: rows[0].z, zy: rows[1].z, zz: rows[2].z,
+        };
+
+        let f: Vec<Vec3> = (0..hm.n_cells).map(|c| at(hm.c[c])).collect();
+        let bf: Vec<Vec3> = (0..hm.n_boundary_faces).map(|i| at(hm.b_cf[i])).collect();
+
+        let mut u = GpuVectorField::zeros(gpu, m, "U")?;
+        gpu.write(&mut u.f, &f)?;
+        gpu.write(&mut u.bf, &bf)?;
+        gpu.write(&mut u.fr, &vec![1.0 as Scalar; hm.n_boundary_faces])?;
+        gpu.write(&mut u.ref_value, &bf)?;
+        gpu.write(&mut u.ref_grad, &vec![Vec3::ZERO; hm.n_boundary_faces])?;
+        gpu.write(
+            &mut u.bc_kind,
+            &vec![BcKind::FixedValue as Label; hm.n_boundary_faces],
+        )?;
+
+        let mut base: DevBuf<Tensor> = gpu.zeros(hm.n_cells)?;
+        fvc_grad_vector(gpu, k, &mut base, &u, m)?;
+        gpu.sync()?;
+
+        let worst = |g: &[Tensor]| {
+            g.iter().fold(0.0 as Scalar, |w, t| {
+                let d = [
+                    t.xx - want.xx, t.xy - want.xy, t.xz - want.xz,
+                    t.yx - want.yx, t.yy - want.yy, t.yz - want.yz,
+                    t.zx - want.zx, t.zy - want.zy, t.zz - want.zz,
+                ];
+                w.max(d.iter().fold(0.0 as Scalar, |a, v| a.max(v.abs())))
+            })
+        };
+
+        let e_plain = worst(&gpu.download(&base)?);
+
+        let mut g = base.try_clone()?;
+        for _ in 0..30 {
+            let prev = g;
+            g = base.try_clone()?;
+            fvc_grad_vector_skew_correction(gpu, k, &mut g, &prev, m)?;
+        }
+        gpu.sync()?;
+        let e_fixed = worst(&gpu.download(&g)?);
+
+        println!(
+            "  74.4 linear VECTOR field on a 2:1 mesh: Green-Gauss off by \
+             {e_plain:.4e}, converged skew correction {e_fixed:.4e}"
+        );
+        assert!(
+            e_plain > 0.05,
+            "the uncorrected vector gradient was only off by {e_plain:e}"
+        );
+        assert!(
+            e_fixed < 1e-11,
+            "the converged vector skew correction is still off by {e_fixed:e} on a \
+             LINEAR field"
+        );
+        Ok(())
+    }
+
+    /// SPEC-LIT 13.4.1's pair test for `snGradSchemes ... skewCorrected`.
+    ///
+    /// Two claims, and they are opposite claims on purpose:
+    ///
+    /// 1. On a mesh with NO skewed face, `skewCorrected` is `corrected` BIT
+    ///    FOR BIT. Not nearly - the assembled source compares equal on every
+    ///    word, because `skew_corr` is exactly zero there and the extra term is
+    ///    a sum of products with zero.
+    /// 2. On a mesh WITH skewed faces, the two differ. A setting that cannot
+    ///    change an answer is a lie, and this is what stops it being one.
+    #[test]
+    fn skew_corrected_differs_from_corrected_only_where_the_mesh_is_skewed() -> Result<()> {
+        let Some(g0) = gpu() else { return Ok(()) };
+        drop(g0);
+
+        let plain_mesh = uniform_box([6, 5, 4], Vec3::new(0.3, 0.25, 0.2), true);
+        assert!(
+            plain_mesh.skew_corr.iter().all(|s| *s == Vec3::ZERO),
+            "a uniform box has a non-zero skewness vector"
+        );
+
+        let refined =
+            crate::mesh::refined::refined_core([6, 6, 6], Vec3::new(0.2, 0.2, 0.2), 0.25, 1)?.mesh;
+        assert!(
+            refined.skew_corr.iter().any(|s| s.mag() > 1e-3),
+            "the refined mesh has no skewed face; the pair test would be vacuous"
+        );
+
+        let mut differed = false;
+        for hm in [plain_mesh, refined] {
+            let skewed_mesh = hm.skew_corr.iter().any(|s| s.mag() > 1e-14);
+            let Some(fx) = refined_fixture(hm) else {
+                return Ok(());
+            };
+            let (gpu, k, hm, m) = (&fx.gpu, &fx.k, &fx.hm, &fx.m);
+
+            let a0 = Vec3::new(0.9, -1.3, 0.6);
+            let quad = |p: Vec3| a0.dot(p) + 0.3 * p.x * p.y;
+            let f: Vec<Scalar> = (0..hm.n_cells).map(|c| quad(hm.c[c])).collect();
+            let bf: Vec<Scalar> = (0..hm.n_boundary_faces).map(|i| quad(hm.b_cf[i])).collect();
+            let psi = dirichlet_field(gpu, m, hm, &f, &bf)?;
+            let grad = grad_with_skew(&fx, &psi, 0)?;
+            let d_gamma = gpu.upload(&hm.mag_sf)?;
+            let d_b_gamma = gpu.upload(&hm.b_mag_sf)?;
+
+            let mut source = Vec::new();
+            for scheme in [SnGradScheme::Corrected, SnGradScheme::SkewCorrected] {
+                let mut a = GpuLduMatrix::new(gpu, m)?;
+                a.zero(gpu)?;
+                fvm_laplacian_non_orth_correction(
+                    gpu, k, &mut a, m, &d_gamma, &d_b_gamma, &psi, &grad, scheme, -1.0,
+                )?;
+                gpu.sync()?;
+                source.push(gpu.download(&a.source)?);
+            }
+
+            if skewed_mesh {
+                assert_ne!(
+                    source[0], source[1],
+                    "skewCorrected and corrected agreed bit for bit on a SKEWED mesh; \
+                     the setting cannot change any answer"
+                );
+                differed = true;
+            } else {
+                assert_eq!(
+                    source[0], source[1],
+                    "skewCorrected changed the source on a mesh with no skewed face, \
+                     where `skew_corr` is exactly zero"
+                );
+            }
+        }
+        assert!(differed, "the skewed half of the pair test never ran");
+        Ok(())
+    }
+
     /// The same MMS again, but on a mesh `poisson_error`'s hand-rolled `boxed`
     /// geometry cannot build at all: a SHEARED mesh with a CYCLIC pair of
     /// patches, i.e. a periodic channel. This is what exercises the fix to
@@ -4364,7 +5145,22 @@ mod tests {
     fn the_flux_and_the_matrix_are_the_same_operator() -> Result<()> {
         let hm = boxed([4, 4, 3], Vec3::new(0.3, 0.4, 0.25), true, (0.35, 0.2));
         assert_closes(&hm);
+        flux_matches_matrix(hm, SnGradScheme::Corrected)
+    }
 
+    /// The same equality with the SKEWNESS term switched on, on a mesh that
+    /// has skewed faces - SPEC-LIT 74.4. `fvLapSkew` gathers per cell and
+    /// `fvSnGradSkewInternal` writes per face, so this is the only thing that
+    /// says the two are the same operator, and SIMPLE's flux correction leans
+    /// on that being true for whatever scheme the case named.
+    #[test]
+    fn the_flux_and_the_matrix_agree_with_the_skewness_term_too() -> Result<()> {
+        let r = crate::mesh::refined::refined_core([6, 6, 6], Vec3::new(0.2, 0.2, 0.2), 0.25, 1)?;
+        assert!(r.mesh.skew_corr.iter().any(|v| v.mag() > 1e-3));
+        flux_matches_matrix(r.mesh, SnGradScheme::SkewCorrected)
+    }
+
+    fn flux_matches_matrix(hm: HostMesh, sn_grad: SnGradScheme) -> Result<()> {
         let Some(gpu) = gpu() else { return Ok(()) };
         let k = FvKernels::new(&gpu)?;
         let m = GpuMesh::upload(&gpu, &hm)?;
@@ -4421,7 +5217,7 @@ mod tests {
             &b_gamma,
             &psi,
             &grad,
-            SnGradScheme::Corrected,
+            sn_grad,
             1.0,
         )?;
 
@@ -4435,7 +5231,7 @@ mod tests {
             &gamma,
             &b_gamma,
             &grad,
-            SnGradScheme::Corrected,
+            sn_grad,
             &m,
         )?;
         gpu.sync()?;
