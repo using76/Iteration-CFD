@@ -17439,3 +17439,1152 @@ coupled stream is thrown further than the uncoupled one.
 * **Model a turbulent dispersion of the coupled source.** The deposited force is
   the resolved one; a sub-grid model for the fluctuating part needs the
   counter-based generator §66.14 still refuses.
+
+## 69. The gate registry — making the run say all of what it knows
+
+The last four lines of `ofgpu-validate` are the ones most people read. Until
+this section they said, in order: how many checks passed, how many of them were
+replayed rather than computed, and then **a hand-written sentence naming the
+gates that miss**. That sentence was wrong three ways at once, and every one of
+the three was the same defect: a list maintained by hand beside a run that
+already knew the answer.
+
+* it named **four** gates as missing. **Six** report a miss on the screen above
+  it;
+* the fifth, §42.8b's Gate 2, appeared only inside the *replayed-measurements*
+  parenthetical, as an aside to a sentence about counting;
+* the sixth, §68.12's Gate 68-C, appeared **nowhere** in the summary. Its
+  verdict was printed in the parcel block and stopped there, and
+  `README.en.md` said so in as many words rather than fixing it;
+* and the sentence asserted that both fire verdicts — §61.8's Gate 61-A and
+  §62.12's Gate 4 — "are noted in the soot/WSGG block above". Gate 61-A's was.
+  **Gate 4's was not, and never had been**: no line this binary printed
+  mentioned the NIST 37 cm burner at all. The claim was false on the commit
+  that introduced it and nothing could have caught it, because nothing read
+  what the run printed.
+
+Two previous passes over this file found the first two of those and fixed them
+by editing the sentence. That is what produced the third. **This section stops
+editing the sentence and deletes it.**
+
+There is no new physics here and no outside source is consulted; this is
+bookkeeping, and it is in SPEC-LIT because the honesty of the output is a
+specified property of this project and not a matter of care. The precedent is
+this crate's own `provenance_audit` (`src/lib.rs`): `NOTICE` and
+`PROVENANCE.md` claimed a file count, the count drifted to 85 of 105 while both
+documents said 105, and the fix was not a more careful edit but a test that
+reads the count back out of the documents. §69 is that move applied to the
+validation summary. **No GPL-licensed source was consulted**; nothing was
+consulted.
+
+### 69.1 The defect, stated exactly
+
+At HEAD (442ddd2), with `ofgpu-validate` run to completion:
+
+| gate | where its verdict is printed | named in the summary line? |
+|---|---|---|
+| §42.8b Gate 2 — NIST Reduced Scale Enclosure | the replayed compartment block | **only inside the replay parenthetical** |
+| §60.5 Gate 5 — Kaminski & Prakash | the conjugate-fluid block, live | yes |
+| §62.12 Gate 1-E — WSGG emissivity vs RADCAL | the soot/WSGG block, live | yes |
+| §61.8 Gate 61-A — post-flame soot yield | the soot/WSGG block, as a note | yes |
+| §62.12 Gate 4 — NIST 37 cm burner `chi_r` | **nowhere** | yes — and the summary said it was printed above, which was false |
+| §68.12 Gate 68-C — Theobald hose streams | the parcel block, live | **no** |
+
+Three further verdicts print the word `OPEN`, all of them §32.4's channel
+gates against Gnielinski, and none of them was named in the summary either.
+§69.5 is why they are a second category rather than a seventh, eighth and
+ninth miss.
+
+### 69.2 The rule
+
+Let a **verdict word** be one of the two upper-case words this binary shouts at
+a published comparison, `MISSES` and `OPEN`, or an inflection of the first.
+Lower case is ordinary prose and is not a verdict, and the run depends on the
+distinction: §42.8b's own diagnosis note ends "the prerequisite this miss
+names", and a §67 check row is titled "CSR entries misplaced, missing or
+duplicated". Neither is a verdict, neither is registered, and neither is
+caught — `lower_case_prose_is_not_a_verdict` holds that.
+
+For one run, write
+
+```
+  P = { lines the run printed that contain a verdict word }              (69.1)
+  R = { lines Checks::report printed }                                   (69.2)
+  G = { GateReports the run registered }                                 (69.3)
+  S = the summary's gate list, generated from G                          (69.4)
+```
+
+The section's whole content is three relations:
+
+```
+  P  subset of  R                                                        (69.5)
+  for every g in G,  name(g) occurs in S                                 (69.6)
+  S is a function of G alone                                             (69.7)
+```
+
+(69.5) says nothing can announce a verdict except the registry. (69.6) says the
+registry reaches the summary. (69.7) is what makes the pair sufficient rather
+than merely reassuring: if `S` were written by hand and merely *checked*
+against `G`, the check would be one more thing to maintain. It is generated, so
+there is nothing to keep in step.
+
+**One call does both halves.** `Checks::report(GateReport { .. })` prints the
+verdict at the point the gate reached it *and* pushes it onto `Checks::gates`.
+There is no `print a verdict` and no `register a verdict`; there is one
+function and it is not decomposable at the call site.
+
+### 69.3 Three enforcements, at two different times
+
+**(a) Compile time — the word is owned.** `Verdict::word` is the only place in
+`validate.rs` where either upper-case token is spelled, and it spells both on
+one line:
+
+```rust
+fn word(self) -> &'static str {
+    if matches!(self, Verdict::Misses) { "MISSES" } else { "OPEN" }
+}
+```
+
+`verdict_registry::only_the_registry_spells_a_verdict_word` reads the file's own
+text back through `include_str!` — compile time, so it cannot read a different
+copy than the one built — and asserts that **exactly one non-comment line**
+contains a verdict word, and that it is that one. Comments are exempt, this
+paragraph's neighbours in the source being full of them. Consequence: writing
+`c.note("** GATE 70-A MISSES **")` still compiles — Rust has no way to forbid
+a string literal — but it fails `cargo test` on that test and fails
+`ofgpu-validate` on (b) below. Two mechanical failures, no convention to
+remember.
+
+**(b) Run time — the transcript.** Every line `Checks` prints goes through one
+`emit`, which records it with a flag saying whether `report` wrote it. Before
+the summary, `audit_and_summarise` scans the transcript for (69.1)'s set and
+fails the run if any member is unflagged. This is the row
+
+```
+  ok   every verdict word this run printed came from the gate registry (S69.2)
+```
+
+and it is (69.5).
+
+**(c) Run time — the derivation.** The same function generates `S` from `G` and
+then asserts (69.6) against the string it is about to print, which is the row
+
+```
+  ok   the summary's gate list names every gate in the registry (S69.3)
+```
+
+That one is a tautology as `gate_summary` is written today, and it is asserted
+anyway, because the failure it guards is not a bug in today's code — it is
+somebody rewriting `gate_summary` back into a hand-maintained list, which is
+exactly what happened twice before this section existed.
+
+**Why (a) as well as (b).** The transcript covers every line `Checks` prints,
+which is every check row, every skip and every note. It does **not** cover the
+**32** bare `println!` section banners `run()` writes, nor the two dozen more
+elsewhere in the file, because those never touch `Checks`. (a) closes that hole
+at the source level rather than leaving it open and describing it, and it
+closes it for `#[cfg(test)]` blocks and doc strings too. Neither enforcement
+alone is enough; the pair is.
+
+### 69.4 What the summary prints now
+
+```
+747/747 checks passed
+699 computed live, 48 replayed from recorded measurements (...)
+
+6 gates carry the verdict MISSES, and 3 the verdict OPEN. This list is
+GENERATED from the registry each of them entered at the point it reported
+(SPEC-LIT S69): printing a verdict and registering one are the same call, and
+the two rows above hold the two halves of that ...
+  [1] SPEC-LIT S42.8b Gate 2 - replayed above - MISSES
+      against the NIST Reduced Scale Enclosure 1994 compartment sweep (...):
+      above 200 kW the predicted ceiling CO is low by a factor of up to 20,
+      which is nowhere near that bar
+  ...
+  [9] SPEC-LIT S32.4 verdict 2 (Reynolds analogy), resolved leg - replayed
+      above - OPEN
+      against Gnielinski (1976) evaluated at this leg's own MEASURED wall
+      friction factor, +-10 % band: resolved leg Nu is +14.9% of it at the
+      MEASURED f = 2.3832e-02 - outside the band
+```
+
+Each entry carries four things and no more: SPEC-LIT's own **name** for the
+gate, **how** the number beside it was obtained on this run (`run live above`,
+`replayed above`, `NOT run here`), the **verdict word**, and the **published
+measurement or correlation** it is held against with the verdict in one clause.
+The diagnosis — why it misses, what it does and does not establish, what the
+next measurement is — stays beside the table it came from, in the block, where
+the numbers that support it are. Repeating a diagnosis in a summary is how a
+summary becomes something nobody reads.
+
+**`NOT run here` is a first-class value, not a gap.** Two of the six are
+multi-minute fires that do not belong inside a harness that has to finish
+(§61.8 Gate 61-A, §62.12 Gate 4). Before §69 that fact was the mechanism by
+which Gate 4's verdict went missing: a gate nothing runs is a gate nothing
+prints, unless printing is a deliberate act. It now is.
+
+### 69.5 Two verdict words, and why `OPEN` is not `MISSES`
+
+`MISSES` is reserved for **a comparison against a published measurement that
+this solver does not reproduce**. That is the sentence `README.en.md`'s
+"Gates that miss" table is built on, and there are six.
+
+`OPEN` is **a comparison against a correlation that does not close at the
+shipped default**. §32.4's three channel verdicts are all of this kind:
+Gnielinski (1976) and Dittus–Boelter (1930) are correlations fitted to other
+people's pipes, the resolved leg sits `+11.9 %` against a `±10 %` band, and
+§37's Kays–Crawford `Pr_t` — one token, opt-in, nothing tuned — moves the same
+leg to `+4.3 %` and inside. A miss against a measurement and a
+band-not-met against a correlation with a named opt-in that meets it are
+different findings, and collapsing them into one count would make the honest
+number six into a dishonest nine.
+
+They are in one registry and one list because the defect §69 exists to kill is
+not "a miss went unlisted" but "**a verdict printed on the screen was absent
+from the summary**", and all nine were. The list separates them, counts them
+separately, and says which is which on every row.
+
+### 69.6 What must hold
+
+| # | Claim | How it is held |
+|---|---|---|
+| 1 | (69.5): every verdict word printed came from `Checks::report` | live row `S69.2` in every `ofgpu-validate` run, over the whole transcript |
+| 2 | (69.5) again, at the source | `only_the_registry_spells_a_verdict_word` — **exactly one** non-comment line of `validate.rs` spells either token, and it is `Verdict::word`'s body |
+| 3 | (69.6): every registered gate is named in the summary | live row `S69.3`, against the very string that is then printed |
+| 4 | (69.7): the list is generated | `gate_summary` reads `Checks::gates` and nothing else; `a_registered_verdict_passes_and_reaches_the_summary` and `misses_and_open_verdicts_are_counted_and_grouped_separately` |
+| 5 | an unregistered verdict **fails** | `an_unregistered_verdict_fails_the_audit` — a `note` that shouts a verdict without registering takes `Checks::failures` from 0 to 1 |
+| 6 | lower-case prose is not a verdict | `lower_case_prose_is_not_a_verdict` — "misses it by 3.8 %" and "OPENED by the driver" are not caught; the two shouted forms are |
+| 7 | a verdict moves **no tally** | `registering_a_verdict_moves_no_tally` — `total`, `failures`, `replayed`, `skipped` are untouched by `report`, so `N/N checks passed` means exactly what it meant before §69 and can sit above a list of misses without contradicting it |
+| 8 | no measurement moved | §69.7's diff |
+
+### 69.7 What was measured
+
+`ofgpu-validate`, RTX 5070 Ti, `--release`, before and after, diffed line by
+line.
+
+| | before | after |
+|---|---|---|
+| checks | `745 / 745` | `747 / 747` |
+| computed live | 697 | **699** — the two new rows are rows 1 and 3 of §69.6 |
+| replayed | 48 | 48, unchanged |
+| exit code | 0 | 0 |
+| gates named in the summary | 4, plus one aside | **9: 6 `MISSES` and 3 `OPEN`** |
+
+The full-output diff is **nine verdict lines reformatted, two rows added, the
+summary replaced, and one wall-clock readout** (`0.013 s` → `0.014 s`, the S2S
+quadrature timing, which is a stopwatch and not a measurement). **Every
+measured number is bit-identical**: `20`, `7.11 %`, `0.07 %`, `58 of 108`,
+`30.5234 %`, `0.000` against `0.024`, `226 %`, `61.2858 %`, `198.651 %`,
+`+34.4 %`, `+15.2 %`, `+11.9 %`, `+14.9 %`, `2.3832e-02`, `2.5534e-02`,
+`-2.4 %`. That is the point of the section: it changes what the run *says about
+itself* and nothing about what it computes.
+
+One verdict is **new text on the screen and not a new measurement**: §62.12
+Gate 4's, which SPEC-LIT §62.13 has carried in full since the WSGG work and
+which the summary already claimed was printed. The numbers in it — `chi_r`
+0.23 / 0.30 / 0.33 at 20 / 34 / 50 kW measured, 226 % combustion efficiency
+predicted, 74.7 % on the gray leg — are §62.13's own, transcribed, not rerun.
+
+### 69.8 The §13.4 contract, and §13.4.1
+
+**Nothing is added to a case file.** §69 introduces no dictionary key, no
+model name and no switch, so there is nothing for §13.4 to accept or refuse by
+name, and §13.4.1's pair test has no pair of settings to run: a case file
+cannot turn this on, off, or sideways, and a run has no way to produce a
+summary that is not derived.
+
+The claim §13.4.1 exists to protect — *the default did not move* — is asserted
+in the form this change can move it: row 7 of §69.6, that registering a verdict
+touches no counter. The verdict list is printed **after** `N/N checks passed`
+and is not part of it.
+
+### 69.9 What this section does not do
+
+* **Decide whether a gate should miss.** It moves no bar and re-runs no case.
+  Six gates missed at HEAD and six miss now; the difference is that the run
+  says so in one place.
+* **Cover the other binaries.** The audit and the source test are
+  `validate.rs`-only. Measured, not assumed: `grep` over every other file in
+  `src/bin/` finds **no** occurrence of either verdict word, so today there is
+  nothing there to have gone missing — the drivers report residuals and
+  banners, not verdicts against published measurements. It is a gap rather than
+  a defect for that reason, and it stops being one the moment a driver prints a
+  gate verdict of its own.
+* **Cover `README.en.md`'s table by test.** The six rows there are still
+  maintained by hand against the six the registry holds, and nothing compares
+  the two files. That is the next honest step and it is named here rather than
+  quietly left: a test that parses the "Gates that miss" table and holds it
+  against a registry the binary can dump. It is not done, so the READMEs are
+  still a hand-maintained list — one that is now easy to check against a run
+  and was not before.
+* **Wrap prose it did not write.** `gate_summary`'s word wrap is greedy and
+  ASCII-width; the gate *names* are never wrapped, which is what keeps (69.6)'s
+  substring test meaningful.
+
+---
+
+## 70. The global-face-ordered row, and why it must land before any collective
+
+A row of `A psi` is summed today in an order that is a property of the
+**partition**, not of the mesh. Nothing in this section adds parallelism, and
+nothing in it changes a single bit of any answer this repository produces. It
+changes what the summation order *is a function of*, so that a later section
+can cut the mesh without moving the answer, and it is done first and proved
+first precisely because the proof is only available while there is still
+exactly one answer to compare against.
+
+**Sources.** The only mathematics this section uses is IEEE 754's: addition is
+commutative but not associative, and the default rounding is
+round-to-nearest, ties-to-even. Both are in *IEEE Standard for Floating-Point
+Arithmetic*, IEEE Std 754-2019; Higham, *Accuracy and Stability of Numerical
+Algorithms*, 2nd ed., SIAM (2002), ch. 4 is the standard treatment of what the
+summation order costs. Nothing else is cited because nothing else is used —
+the merge is a data-structure decision, marked *DESIGN*, and its correctness
+argument is §70.3, not a reference.
+
+### 70.1 The defect, written out
+
+`lduAmul` (`cuda/ldu.cu`) and `solAmul` (`cuda/solver.cu`) both accumulate a
+row as
+
+```
+(A psi)_c  =  diag[c] psi[c]
+           +  SUM over j in [cfOffset[c],  cfOffset[c+1])    ascending LOCAL internal-face id
+           +  SUM over j in [bcfOffset[c], bcfOffset[c+1])   ascending LOCAL boundary-face id
+```
+
+and `mesh/topology.rs` states the ordering as a contract: the fill "walks faces
+in ascending index and appends... and that fixed order is exactly what makes
+the gathered `Amul` bitwise reproducible run to run."
+
+Now cut the mesh between cells `P` and `N`. The face `f` joining them is an
+internal face of the whole mesh and a **boundary** face of both pieces. Two
+things move:
+
+1. **The list changes.** `f`'s term leaves the `cfOffset` loop and joins the
+   **end** of the `bcfOffset` loop.
+2. **The numbering changes.** Local face ids are a renumbering of global ones,
+   so every face after `f` shifts.
+
+Floating-point addition is commutative but not associative,
+
+```
+(a (+) b) (+) c   !=   a (+) (b (+) c)      in general,
+```
+
+so a row whose terms are added in a different order is a different number. The
+smallest instance is three terms - two are commutative and therefore safe - and
+it is the one §70.4's test uses. With `u` the unit in the last place of 1
+(`Scalar::EPSILON`; `2^-52` in double, `2^-23` in single):
+
+```
+(1 (+) u/2) (+) u   =  1 + u          1 (+) u/2 is a tie and rounds to even, to 1
+(1 (+) u) (+) u/2   =  1 + 2u         1 + 1.5u is a tie and rounds to even, to 1 + 2u
+```
+
+Those are the same three terms in the two orders, and they differ by a whole
+ulp. **`A psi` therefore differs in bits between a mesh and its own
+decomposition before any collective exists**, which means the distributed dot
+product - the hazard the multi-GPU literature spends its time on - is not the
+first thing to fix here. It is the second.
+
+### 70.2 The fix: one list per row, keyed on the global face id
+
+Give every face a **global** id. In the polyMesh numbering the whole mesh's
+faces are internal first, then boundary, so on an undecomposed mesh the global
+id of internal face `f` is `f` and of boundary face `bf` is
+`n_internal_faces + bf`. Store that as one array indexed by SLOT:
+
+```
+global_face[n_internal_faces + n_boundary_faces]
+    slot f                      -> global id of internal face f
+    slot n_internal_faces + bf  -> global id of boundary face bf
+```
+
+and build one merged row map ordered by it:
+
+```
+rf_offset[n_cells + 1]
+rf_face  [2 n_if + n_bf]    the face's index in its OWN array: f, or bf
+rf_flags [2 n_if + n_bf]    bit 0 RF_OWNS      this cell owns the face
+                            bit 1 RF_BOUNDARY  read the boundary arrays
+```
+
+The row sum becomes one loop:
+
+```
+(A psi)_c = diag[c] psi[c]
+          + SUM over j in [rf_offset[c], rf_offset[c+1]), with f = rf_face[j]:
+
+              RF_BOUNDARY, b_nbr_cell[f] >= 0   ->  - boundary_coeffs[f] psi[b_nbr_cell[f]]
+              RF_BOUNDARY, b_nbr_cell[f] <  0   ->    nothing; already folded into diag and source
+              RF_OWNS                           ->  + upper[f] psi[neighbour[f]]
+              otherwise                         ->  + lower[f] psi[owner[f]]
+```
+
+`RF_OWNS` is always set on a boundary face - a boundary face has exactly one
+adjacent cell and that cell is its owner - so the bit discriminates only on an
+internal face. Two bits, two arrays, one predicated branch per gather step, and
+no atomics: the entries of a row are still written by exactly one thread and
+read in a fixed order.
+
+### 70.3 Why the default cannot move, by construction
+
+The claim is not "we measured no change". It is that no change is
+*representable*.
+
+With `global_face` the identity, every internal face's key is below every
+boundary face's, because `f < n_internal_faces <= n_internal_faces + bf`. The
+builder appends entries in ascending key, so cell `c`'s merged slice is
+
+```
+[ its internal faces, ascending f ]  ++  [ its boundary faces, ascending bf ]
+```
+
+which is, element for element and flag for flag, the concatenation of the two
+old slices. The merged loop then performs the same floating-point operations on
+the same operands in the same sequence. **There is no tolerance in this
+argument and none is accepted.**
+`merged_row_is_the_two_old_lists_concatenated` asserts exactly that equality on
+three structured boxes - a 3×2×2, a 4×1×1 chain, and a 1×1×1 whose single cell
+has six boundary faces and no internal one - so the argument is checked rather
+than believed.
+
+Two smaller consequences of the same construction:
+
+* The builder skips the sort entirely when the global ids are already ascending
+  in slot order, which is every mesh this repository can currently read. The
+  general path exists and is tested, but the shipped path does not enter it.
+* Because the identity is implied by an **empty** `global_face`, every mesh
+  built before this section, and every `HostMesh` written by hand in a test,
+  gets the right map with no edit. `GpuMesh::upload` builds the map for itself
+  when the host mesh does not carry one, so a mesh assembled by hand cannot
+  silently upload a row map that gathers nothing.
+
+### 70.4 What the merge buys, demonstrated in serial
+
+`a_cut_internal_face_keeps_its_place_in_the_row` builds a four-cell chain twice.
+
+* **Uncut.** Internal faces `f0 = (0,1)`, `f1 = (1,2)`, `f2 = (2,3)`; boundary
+  faces `bf0` on cell 0 and `bf1` on cell 3. Global ids `0,1,2` and `3,4`.
+* **Cut.** The same four cells, with `f1` re-expressed as a **coupled boundary
+  pair** - one boundary face on cell 1 naming cell 2, one on cell 2 naming
+  cell 1 - which is exactly the shape a processor patch has. Local internal
+  faces are now `(0,1)` and `(2,3)`; the coupled pair carries the global id `1`
+  that `f1` had, so `global_face` is `[0, 2, 3, 4, 1, 1]` and is not ascending,
+  which sends the builder down the sorting path.
+
+`boundary_coeffs` is set to `-upper[f1]` and `-lower[f1]`, because `amul`
+applies a coupled term as `sum -= boundary_coeffs psi_N` and IEEE negation is
+exact, so `sum - ((-x) y)` and `sum + (x y)` are the same operation on the same
+bits. `psi` is uniform, which also removes any question of whether the compiler
+contracted the multiply-add: `fma(x, 1, s)` and `x + s` are the same value.
+
+Row 2 is the interesting one. Its two off-diagonal terms carry global ids 1 and
+2, and in the cut mesh the id-1 term lives in the boundary arrays:
+
+| | order of row 2 | value |
+|---|---|---|
+| uncut, either scheme | `diag`, then id 1, then id 2 | `1 + u` |
+| cut, merged (this section) | `diag`, then id 1, then id 2 | `1 + u` |
+| cut, the two old loops | `diag`, then id 2, then id 1 | `1 + 2u` |
+
+with `diag[2] psi[2] = 1`, the id-1 term `u/2` and the id-2 term `u`. The test
+asserts the first two are equal **bit for bit**, and asserts the third value is
+different - so it cannot pass by both orders happening to agree, which is the
+way such a test usually rots.
+
+Cell 2 is also the only cell in the chain that shows it. Every other cell's
+faces are already in global order under the old scheme, which is the general
+case: the defect is invisible on any cell whose cut face happens to carry the
+largest global id in its row, and a mesh's *first* decomposition may well have
+no such cell at all.
+
+### 70.5 Where it is applied, and where it deliberately is not
+
+| Kernel | Accumulates | Converted here |
+|---|---|---|
+| `solAmul` (`cuda/solver.cu`) | `A psi`, internal **and** boundary into one accumulator | **yes** - the product every PBiCGStab and PCG iteration calls |
+| `lduAmul` (`cuda/ldu.cu`) | the same, for the energy, conjugate and residual paths | **yes** |
+| `lduRelax` | `sumOff` over internal **and** coupled boundary faces | **yes** - one accumulator, both lists |
+| `lduSetValues` | `source[c]` over eliminated columns, internal **and** coupled | **yes** - one accumulator, both lists |
+| `lduNegSumDiag` | internal faces only | no |
+| `lduAddBoundaryContributions` | boundary faces only | no |
+| `fvDivBoundedDiag`, `fvDivCorrection`, `fvLapNonOrth`, `fvGradScalar`, `fvGradVector`, `fvGradScalarLeastSquares`, `fvGradVectorLeastSquares`, `fvDivSurface`, `fvReconstruct` (`cuda/fv.cu`); `lesTestFilterVector` (`cuda/les.cu`); `smpFaceFluxSum` (`cuda/simple.cu`); `tsLtsRDeltaT` (`cuda/timescheme.cu`); `turbLsGradGradUMagSqr` (`cuda/turbulence.cu`); `vofCurvature`, `vofAdvance`, `vofCourant` (`cuda/vof.cu`) | assembly, gradient and flux sums, internal **and** boundary into one accumulator - **16 kernels** | no |
+| `lesCellExtents` (`cuda/les.cu`), `fvGradLimitScalar`, `fvGradLimitVector` (`cuda/fv.cu`) | walk both lists, but accumulate only through `min`/`max` | **not needed** - `min` and `max` are exactly order-independent for non-NaN operands, so these are partition-invariant already |
+| the parcel mesh walk (`cuda/parcels.cu`) | walks both lists to find the first face crossed, `lam < lamMin` | **not needed, and not an accumulation** - but see below |
+
+**The rule that draws the line.** The four kernels converted here *apply* a
+matrix that already exists. For them, ordering is the whole problem: on a cut
+face the operands are the same numbers moved into different arrays, and putting
+them back in global order restores the exact sequence.
+
+The kernels not converted here *assemble* - they compute the coefficient from
+the geometry. On a cut face the internal-face path and the boundary-face path
+are **different arithmetic**: `mesh/geometry.rs` forms the cell-to-cell
+separation as `C_N - C_P` on an internal face and as `d_own + d_nbr` on a
+coupled one, which are algebraically equal and one subtraction apart in bits.
+Re-ordering their loops would therefore buy nothing: the sequence would match
+and the operands would not. **Ordering alone cannot make an assembly kernel
+partition-invariant**, and converting them before an interface-geometry
+authority rule exists would be motion without progress. They are enumerated
+above so that the surface is a list rather than a memory, and they are the first
+item of the section that ships the halo.
+
+`lduNegSumDiag` and `lduAddBoundaryContributions` are a third case: each walks
+one list, so there is no order to merge. A cut face moves its diagonal
+contribution from `-lower[f]` in the first kernel to `+internal_coeffs[bf]` in
+the second - again an assembly question, and again not one an ordering can
+answer.
+
+**The parcel walk is a fourth case, and it is recorded because it is a real
+sensitivity of a different kind.** `parcelWalk` takes the smallest positive
+`lam` over a cell's faces, internal list first and boundary list second, with a
+strict `<` so the first face examined wins a tie. That is not floating-point
+rounding - it is a discrete tie-break, and it changes only when a parcel
+crosses an edge or a vertex exactly, where two faces give the same `lam`. Under
+a cut, an internal face that ties with a boundary face would swap places in the
+examination order and the walk could pick the other face. The remedy is the
+same global key, but the failure it guards against is a measure-zero coincidence
+rather than an ulp, so it is left for the section that decomposes the mesh and
+recorded here so that it is not discovered there.
+
+### 70.6 What it costs
+
+`rf_face` and `rf_flags` hold `2 n_if + n_bf` labels each, about six entries per
+cell on a hexahedral mesh, so the merged map adds roughly **52 bytes per cell**
+on top of the two maps it does not replace. Against this project's own measured
+footprint - `README.en.md`'s 4.0 GB at 2 M cells, i.e. 2 kB/cell - that is
+about 2.5 %. It is built once, on the host, at set-up, in two linear passes and
+- on every mesh this repository can currently read - no sort at all.
+
+The duplication is stated here so that it is not discovered later as a surprise,
+but it should not be read as temporary: the two older maps keep genuine readers
+that the merged one cannot serve. The single-list kernels want exactly one list
+(`lduNegSumDiag`, `lduAddBoundaryContributions`, `fvDivDiag`, `fvLapDiag`,
+`lesSmoothDelta`, `tsLtsSmooth`, `vofLimiterRoom`, the three `precon.cu`
+colour sweeps, `probeAmul`), `io/vtu.rs` walks both on the host to write cell
+connectivity, and `precon.rs`'s colouring is built from `cf_*`. Moving the 16
+summing kernels of §70.5 across would remove most of the *hot* traffic on the
+old maps but not the maps, so **the honest statement of the cost is 52 bytes
+per cell added and not recovered**, not a temporary duplication.
+
+### 70.7 What this does not do
+
+Stated plainly, because this section's value is entirely in what it makes
+possible later and it would be easy to read it as more than it is.
+
+* It adds **no** parallelism, no communication, no halo, no partitioner.
+  `global_face` is the identity on every mesh this repository can read, and
+  nothing can currently produce anything else. There is no setting to turn,
+  which is why §13.4.1 owes no pair here: a pair test requires the setting to
+  change the output, and the entire point of this one is that it cannot. A
+  switch between the old and new orderings would be inert by construction and
+  is therefore refused rather than shipped.
+* It does **not** make the solver partition-invariant. It removes the first of
+  four hazards; the multi-colour DIC/DILU preconditioner, the FFT pressure
+  backend and the interface geometry are untouched, and each moves bits on its
+  own.
+* It does **not** claim the §70.5 audit is complete. It is complete for a
+  mechanical enumeration - split every `.cu` on `extern "C" __global__ void`,
+  and classify each body by whether it indexes `cfOffset[`, `bcfOffset[`, or
+  both, with a word boundary so that `bcfOffset` is not counted as a hit for
+  `cfOffset` (it is, without one, and that mis-classified
+  `lduAddBoundaryContributions` on the first pass). **23 kernels walked both
+  lists before this section; 4 are converted and 19 remain**, and all 19 are in
+  §70.5's table — 16 that sum and 3 that take only `min`/`max`. A gather that
+  walks a cell's faces without going through those two names would not appear
+  in the enumeration at all.
+
+### 70.8 What must hold
+
+| Test | Expected |
+|---|---|
+| `merged_row_is_the_two_old_lists_concatenated` | on a 3×2×2, a 4×1×1 and a 1×1×1 box, cell `c`'s merged slice is its `cf` slice followed by its `bcf` slice, face for face and flag for flag |
+| `every_face_appears_exactly_once_in_the_merged_map` | `rf_offset[n_cells]` is `2 n_if + n_bf`; every internal face appears once as owner and once as neighbour, every boundary face once |
+| `the_merged_row_is_ascending_in_global_face_id` | strictly ascending within every cell, under the identity map and under a permuted one |
+| `a_permuted_global_face_map_reorders_the_row` | a non-ascending `global_face` sends the builder down the sorting path and the rows come out in the permuted order |
+| `an_out_of_range_face_is_dropped_from_the_merged_map_too` | a corrupt `owner` leaves no live slot holding the `-1` fill, exactly as for the two old maps |
+| `a_cut_internal_face_keeps_its_place_in_the_row` | §70.4: uncut and cut `A psi` agree **bitwise** on every cell, and the value the old ordering would have produced differs |
+| `the_solver_amul_keeps_a_cut_faces_place_too` | the same, through `solAmul` - the *other* implementation of the row sum, and the one every Krylov iteration calls |
+| `an_uploaded_mesh_always_carries_a_row_map` | a `HostMesh` that never called `build_cell_face_maps` still uploads a correct merged map |
+| every existing test, `ofgpu-validate`, and the shipped cases | **bit-for-bit unchanged.** This is the gate. A tolerance is not accepted, and a difference means the merge is wrong |
+
+### 70.9 Validation: what was measured, not what was argued
+
+§70.3's argument is that the default cannot move. An argument is not a
+measurement, so the same runs were made on both sides of the change and
+compared as bytes.
+
+| Artefact | Comparison | Result |
+|---|---|---|
+| `ofgpu-validate`, whole run | full stdout, 1178 lines, every printed number | **identical**, 747/747 checks, 699 computed live and 48 replayed. The one run-to-run difference is two wall-clock figures inside the §49-D view-factor report (`0.066 s` against `0.067 s`, `0.069 s` against `0.071 s`); with `<digits>.<digits> s` masked the `diff` is empty. On one of the two before/after pairs it was empty unmasked as well |
+| `ofgpu-fire cases/channelPeriodicWF.jsonc -iters 25` | the seven fields it writes | SHA-256 identical, all seven |
+| `ofgpu-plume cases/plume -iters 40` | the five fields it writes | SHA-256 identical, all five |
+| `ofgpu-k-epsilon cases/channel -iters 40` | the four fields it writes | SHA-256 identical, all four |
+| the four drivers' console logs | line by line | identical **except** the wall-clock lines (`mesh uploaded in ...`, `N iterations in ... s`, `done in ... s`), which are timings and not results |
+
+The cyclic case is in the list deliberately: it is the only one of the three
+whose mesh has coupled boundary faces at all, so it is the only one in which
+`amul`'s boundary branch does any arithmetic. Without it the comparison would
+be exercising the merged map's internal half and nothing else.
+
+**What this does not establish.** Nothing here measures a decomposed run,
+because none exists. §70.4's test is the only evidence that the merge does what
+it is for, and it does it on a mesh cut in one place by hand. The claim proved
+here is the narrower one the gate asks for: *nothing moved*.
+
+---
+
+## 71. Cutting the mesh: the partition, the ghost layer, and the exchange
+
+§70 made the order a row of `A psi` is summed in a property of the mesh rather
+than of the partition, and said plainly that it added no parallelism because
+there was no partition to be a property of. This section supplies one. It cuts
+a mesh into `P` pieces, gives each piece a one-cell-deep ghost layer, and moves
+data across the cuts — **all inside one process, through device-to-device
+copies**, with no MPI, no NCCL and no second GPU. That ordering is deliberate:
+the decomposition and the halo are the parts that decide whether the answer
+moves, and they are gated here, before a communication library is introduced
+that could be blamed for it.
+
+The gate is one sentence. **A case decomposed into 2, 3 and 4 parts and run in
+one process must produce output that is bit-for-bit the undecomposed run's.**
+Not "agrees to `1e-13`". Equal. §71.9 is what was measured against it.
+
+**Sources.** Every reference below was verified against Crossref on
+2026-08-31; the DOI is given so the next reader can repeat the check rather
+than trust this list.
+
+* Skilling, J. "Programming the Hilbert curve." *AIP Conf. Proc.* **707**,
+  381–387 (2004). DOI 10.1063/1.1751381 — the `n`-dimensional Gray-code
+  construction the partitioner uses.
+* Butz, A. R. "Alternative Algorithm for Hilbert's Space-Filling Curve."
+  *IEEE Trans. Computers* **C-20**(4), 424–426 (1971).
+  DOI 10.1109/T-C.1971.223258 — the original of the same construction.
+* Aluru, S. & Sevilgen, F. E. "Parallel domain decomposition and load
+  balancing using space-filling curves." *Proc. 4th Int. Conf. on
+  High-Performance Computing*, 230–235 (1997). DOI 10.1109/HIPC.1997.634498 —
+  why an SFC sort is a usable partitioner at all.
+* Karypis, G. & Kumar, V. "A Fast and High Quality Multilevel Scheme for
+  Partitioning Irregular Graphs." *SIAM J. Sci. Comput.* **20**(1), 359–392
+  (1998). DOI 10.1137/S1064827595287997 — METIS, the alternative §71.2
+  declines and says why.
+* Catalyurek, U. V. & Aykanat, C. "Hypergraph-partitioning-based decomposition
+  for parallel sparse-matrix vector multiplication." *IEEE Trans. Parallel
+  Distrib. Syst.* **10**(7), 673–693 (1999). DOI 10.1109/71.780863 — the
+  connectivity-1 metric, which is what the halo actually costs, as against the
+  edge cut, which is what an SFC or a graph partitioner minimises.
+* Weller, H. G., Tabor, G., Jasak, H. & Fureby, C. "A tensorial approach to
+  computational continuum mechanics using object-oriented techniques."
+  *Computers in Physics* **12**(6), 620–631 (1998). DOI 10.1063/1.168744 — a
+  **paper**, which `LICENSING.md` permits; the zero-halo-layer style, in which
+  a cut face becomes an ordinary coupled boundary face, is described there. No
+  GPL source was opened for this section or any other.
+* IEEE Std 754-2019 for the arithmetic facts used below: negation and `|·|`
+  are exact and change no other bit; `x - y` is defined as `x + (-y)`;
+  `x + 0` is `x` except that `-0 + 0` is `+0`; addition is commutative and
+  **not** associative.
+
+---
+
+### 71.1 The three things a cut moves, and which two are here
+
+Number the cells `C = {0 … N-1}` and let `pi : C -> {0 … P-1}` be the
+**partition map**. For part `r`:
+
+```
+C_r      = { c : pi(c) = r }                       owned cells,  n_r = |C_r|
+F_r^int  = { f : pi(own f) = pi(nbr f) = r }       interior faces
+F_r^cut  = { f : pi(own f) = r  XOR  pi(nbr f) = r }
+H_r      = { c not in C_r : c is across some f in F_r^cut }   the HALO, h_r
+L_r      = C_r  (disjoint union)  H_r              the local index space
+```
+
+**`F_r^cut` is not only internal faces.** A mesh may already have coupled
+*boundary* faces before it is cut — a cyclic patch, or a conjugate interface
+(§47) — and a couple whose two halves land on different parts puts a cell in
+the halo exactly as a cut internal face does. It is easy to define `H_r` from
+the internal faces alone and be right on every mesh without a periodic
+direction, so the size of the omission is worth quoting: on
+`cases/channelPeriodicWF.jsonc` cut into two by the Hilbert partitioner there
+are **24 cut internal faces and 48 cut couples**, so two thirds of the halo
+comes from the patch. Missing it does not degrade an answer; it puts a
+`b_nbr_cell` past the end of the field array on the first periodic case.
+
+Ordering the unknowns by part turns `A x = b` into, for each part,
+
+```
+A_rr x_r  +  A_rG xG_r  =  b_r ,        xG_r = G_r x ,   G_r in {0,1}^{h_r x N}
+```
+
+with exactly one `1` per row of `G_r`. `G_r` is a **gather**. Its transpose
+would be a scatter and nothing in this design ever needs it — which is the
+same property the cell→face CSR bought on one GPU (§1), arriving again for
+free.
+
+Three things change when the mesh is cut, and they fail independently:
+
+1. **The order the row is summed in.** A cut face's term leaves the internal
+   list and joins the boundary list, and local face ids renumber. §70 fixed
+   this, with the merged row map keyed on the global face id. Nothing here
+   repeats that argument; this section is the first thing that exercises it,
+   because a part's `global_face` is the first non-identity map this
+   repository can produce.
+2. **The coefficients themselves**, if each part derives a shared face's
+   geometry from its own copy of the points. §71.3.
+3. **The value on the other side of the cut**, which is no longer in this
+   part's field array. §71.4.
+
+This section does 2 and 3. It does **not** touch the fourth hazard — the
+cross-part reduction — and §71.7 says so by name, because a distributed dot
+product is not partition-invariant and nothing here pretends otherwise.
+
+---
+
+### 71.2 The partition, and the licence audit that goes with it
+
+**The objectives.** With `w_c` the work weight of cell `c` and `eps` the
+imbalance tolerance, a partition must satisfy
+
+```
+max_r  SUM_{c in C_r} w_c   <=   (1 + eps)/P  *  SUM_{c in C} w_c
+```
+
+and should minimise what it costs to communicate. Two measures of that cost,
+and they are not the same:
+
+```
+cut(pi)   =  | { f in F_int : pi(own f) != pi(nbr f) } |          edge cut
+comm(pi)  =  SUM_{c in C} ( lambda_c - 1 )                        connectivity-1
+```
+
+where `lambda_c` is the number of distinct parts that touch cell `c`'s face
+neighbourhood. Catalyurek & Aykanat (1999) is the statement that
+`comm(pi)` is *exactly* the number of values sent per exchange while `cut(pi)`
+merely correlates with it: a cell cut by three parts is counted three times by
+the edge cut and sent twice. This implementation reports `comm(pi)` directly —
+it is `sum_r h_r`, printed by `ofgpu-decompose` as `halo/cells` — and does not
+optimise it, which is honest for 2–16 parts and would not be at 500.
+
+**Three methods, all pure functions of the mesh.**
+
+| Method | What it does |
+|---|---|
+| `Linear` | cell `c` to part `floor(cP/n)`. On any mesh numbered in a sweep this is a slab cut along the slowest index. It exists because it is the one map a reader can verify by eye |
+| `Hilbert` (default) | sort the cells by the Hilbert index of their centre, cut the sorted list into `P` equal runs |
+| `Explicit` | a map supplied by the caller. The tests use round robin, `c -> c mod P`, which is the worst partition there is |
+
+Determinism is a requirement, not a nicety: a decomposed run is reproducible
+run to run only if its decomposition is, so no method may consult a random
+seed, a hash-map iteration order, or an unstable sort without a tie-break.
+`Hilbert` breaks ties on the global cell id for exactly that reason.
+
+**The curve.** Skilling (2004) gives the construction in three steps — undo
+the per-level reflections, Gray-encode, interleave most-significant bit first
+— and it is written out in `src/decompose.rs` rather than pulled from a crate
+so that the reason each step is there is on the page. The property that
+matters is not the bijection but the **unit step**: consecutive indices are
+lattice neighbours, so nearby indices are nearby in space and equal runs of the
+sorted list are compact.
+`the_hilbert_curve_visits_every_point_and_never_jumps` asserts both, over every
+point of the lattice for one, two, three and four bits per axis.
+
+**Measured, on `cases/plume` (82,320 cells, 240,044 internal faces).** Halo
+cells summed over parts, as a fraction of the mesh — the communication volume
+of one exchange:
+
+| P | Hilbert | Linear | round robin |
+|---|---|---|---|
+| 4 | **0.068** (2,800 cut faces) | 0.300 (12,348) | 2.980 (161,840) |
+| 8 | **0.168** (6,916 cut faces) | 0.700 (29,204) | 4.932 (240,044) |
+
+The curve is worth 4.2× against the slab cut at both counts, on a case this
+repository already ships. Load balance is exact for all three (`imbalance
+0.000`), because all three cut a list into equal runs.
+
+**The licences, checked today rather than remembered.**
+
+| Tool | Licence | How verified | Usable |
+|---|---|---|---|
+| **METIS 5.2.x** (`github.com/KarypisLab/METIS`) | **Apache-2.0** | `LICENSE` fetched 2026-08-31: *"Licensed under the Apache License, Version 2.0"*, Regents of the University of Minnesota 1995–2013 | **Yes, commercially.** The old research-only `glaros.dtc.umn.edu` METIS 5.1.0 licence no longer applies |
+| **ParMETIS** (`github.com/KarypisLab/ParMETIS`) | proprietary, non-commercial | `LICENSE` fetched 2026-08-31: *"educational and research purposes by non-profit institutions and US government agencies only"* | **No** |
+
+**METIS is usable and is deliberately not used.** Three reasons, and the third
+is the one that decides it:
+
+1. It is a C library. This crate's only dependencies are pure Rust plus the
+   CUDA toolkit it already needs; linking METIS means either a vendored copy
+   or a system install, and a `cargo build` that can fail for a reason that has
+   nothing to do with CFD.
+2. Partition quality is a *performance* question. This section's gate is
+   bitwise identity, and a **worse** partition is a harder test of it — which
+   is why the tests run round robin rather than anything sensible.
+3. METIS's output depends on its version and its internal randomisation. The
+   partition would then be a property of the linked library rather than of the
+   mesh, and §71.2's determinism requirement would be gone. Adding it means
+   pinning a build, not adding a dependency.
+
+If a future section wants it, the door is open and the licence is recorded
+above. `PartitionMethod` is the seam: a `Metis` variant behind a Cargo feature
+would change nothing else in this section.
+
+---
+
+### 71.3 Interface geometry: derive it, never recompute it
+
+This is the hazard that would have cost the gate, and it is worth stating in
+its sharpest form.
+
+Suppose part `r` and part `s` each read the points and each compute the metrics
+of the face they share. The face's point list is traversed in **opposite
+windings** on the two sides, so the cross products that build `Sf` are summed in
+a different order and the two parts get answers that agree to round-off and not
+to the bit. One ulp in `Sf` is one ulp in `upper[f]`, and the decomposed matrix
+is then not the serial matrix. There is a second, smaller instance of the same
+thing already visible in `mesh/geometry.rs`: the cell-to-cell separation is
+formed as
+
+```
+internal face :  d = C_N - C_P                       one subtraction
+coupled face  :  d = (Cf - C_P) + (C_N - Cf_nbr)     two subtractions and an add
+```
+
+which are algebraically equal on a processor face, where `Cf_nbr == Cf`, and
+are not equal in bits.
+
+**The rule adopted here.** A decomposition is a *derivation* from a mesh whose
+geometry has already been computed as a whole. There is therefore exactly one
+authority — the whole mesh — and every metric of a cut face is a copy of one of
+its numbers, an exact negation of one, or the same function applied to the same
+operands:
+
+| Metric, owner side | Metric, neighbour side | Why it is exact |
+|---|---|---|
+| `b_sf = sf[f]` | `-sf[f]` | IEEE negation flips one bit and changes nothing else |
+| `b_mag_sf = mag_sf[f]` | the same | `\|-Sf\| = \|Sf\|`: the squares are identical |
+| `b_cf = cf[f]`, `b_delta_coeffs = delta_coeffs[f]` | the same | `Delta = 1/max(nf·d, 0.05\|d\|)` and `(-nf)·(-d) = nf·d` term for term |
+| `b_non_orth_corr = non_orth_corr[f]` | `-non_orth_corr[f]` | `k = nf - d Delta`, so flipping both `nf` and `d` flips `k` and nothing else |
+| `b_weights = weights[f]` | `weight_from_offsets(b, a)` | see below |
+| `b_y` | `floor_along(nf·(Cf - C_here), Cf - C_here)` | the same function `geometry::compute` uses, called through `pub(crate)` rather than transcribed |
+
+**The weight is the trap.** The owner's share is `w = b/(a+b)` with
+`a = |Sf·(Cf - C_P)|` and `b = |Sf·(C_N - Cf)|`. The neighbour's own share, as
+local owner of the same face, is `a/(a+b)` — and that is **not** `1 - w`.
+Sterbenz's lemma makes `1 - w` exact only for `w` in `[1/2, 2]`; below a half it
+rounds, and every interpolation across every cut would carry that ulp. So the
+neighbour side calls the same `weight_from_offsets` with the two projections
+swapped. `a + b` and `b + a` are identical, so the quotient is exact.
+`a_cut_face_carries_the_whole_meshs_metrics_exactly` asserts each line of the
+table above with `==` on the bits, on a round-robin cut where nearly every face
+is a cut face.
+
+**The limit of this argument, stated because it will be reached.** All of the
+above is true *because the geometry is computed on the whole mesh and then
+distributed*. A future build that reads a polyMesh in pieces, one part per
+process, and computes each part's geometry from its own points, has the real
+§71.3 problem back, and must then ship the metrics across the cut at set-up
+with the owner of the global owner cell as authority. This section does not
+solve that; it makes it unnecessary, for as long as the whole mesh fits on one
+host.
+
+---
+
+### 71.4 The ghost layer and the exchange
+
+**Local numbering.** Owned cells first, ascending in global cell id; halo cells
+after, ascending in **(owning part, global cell id)**:
+
+```
+0 .. n_r              owned
+n_r .. n_r + h_r      halo
+```
+
+Every field buffer on a part is `n_r + h_r` long. Every kernel still launches
+`n_r` threads and still guards `if (c >= nCells) return;`, so **no kernel that
+writes only owned cells changes at all** — which is why `lduAmul` needed no
+edit for this section: its one line
+
+```
+sum -= boundaryCoeffs[bf]*psi[bNbrCell[bf]]
+```
+
+already indexes `psi` at whatever `b_nbr_cell` names, and what it now names is
+a ghost cell.
+
+**The exchange is two steps and only one of them is a kernel.**
+
+```
+1. pack     sendBuf[k] = psi[sendIndex[k]]                   a GATHER
+2. move     sendBuf[send_offset[i] .. ]  ->  psi_q[n_q + recv_offset[j] .. ]
+3. unpack   THERE IS NONE
+```
+
+Step 3 does not exist because of the halo ordering: each neighbour's cells are
+one contiguous run, so the copy lands directly in place. That removes the only
+scatter the exchange could have had. Step 1 writes one address per thread and
+no address twice. Step 2 performs no arithmetic at all. **There is no
+floating-point operation anywhere in the halo path**, so a ghost cell holds,
+bit for bit, the value its owner holds, for every `P` and every `pi`.
+`an_exchanged_halo_is_bit_for_bit_the_owner` asserts that directly rather than
+inferring it from a solve that happened to agree.
+
+**The plan is symmetric with no handshake.** Part `r` packs its cells for `s`
+in ascending global cell id, and part `s` receives them in ascending global
+cell id, because both lists are built from the *same* sorted halo list: `r`'s
+send list to `s` is read off `s`'s halo. Nothing is negotiated and nothing can
+disagree. The build still checks — a mesh with a one-sided coupling would
+deadlock a real exchange rather than give a wrong answer, so it is named on the
+host where it is cheap.
+
+**Why a copy and not a cross-part gather.** Every part here lives in one
+process on one device, so the exchange could read the neighbour's field array
+directly and skip the pack. It deliberately does not. `pack`-then-`copy` is the
+shape `ncclSend`/`ncclRecv` replaces line for line, and reading another rank's
+memory is the one thing a distributed run cannot do; writing it the short way
+now would mean discovering that later. The copy is `cudarc`'s `memcpy_dtod`,
+which dispatches to `cuMemcpyPeerAsync` when the two buffers belong to
+different contexts — so the same loop is what a one-process, several-device run
+will use. **That peer path is untested here: this machine has one GPU.**
+
+Three payloads are carried: `Scalar`, `Vec3` and `Label`. The last is not a
+field in the physical sense — it carries the integer masks a kernel tests at a
+coupled face's *neighbour*. `lduSetValues`'s `isFixed` is the one this tree has
+today, and the gate uses the exchange for it rather than filling it from the
+host's whole-mesh copy, because a distributed build has no such copy.
+
+---
+
+### 71.5 A processor patch is a cyclic patch — and `PatchKind::Processor` is refused by name
+
+`PatchKind::Processor` exists (`mesh.rs`), `PatchKind::from_type` already maps
+`"processor"` and `"processorCyclic"` to it, and `field_setup.rs` and
+`field.rs` already route it to `BcKind::Cyclic`. It is tempting to conclude
+that a processor patch is already supported. **On the host it is. On the device
+it is not, and using it would produce a silently wrong answer.**
+
+Every coupled branch in `cuda/*.cu` is written as
+
+```
+if (bKind[i] != OFPATCH_CYCLIC) ...          // fv.cu:576, 623, 949, 1944, 1984, 2062, ...
+```
+
+and there are **19 such comparison sites**. `OFPATCH_PROCESSOR` is `5`, not
+`4` — and, checked mechanically, it is **`#define`d in three translation units
+(`fv.cu`, `momentum.cu`, `vof.cu`) and read by none of them**. A face marked
+`Processor` therefore takes the **uncoupled** path in every gradient,
+interpolation and flux kernel: it would read the boundary face value instead of
+the neighbouring cell, and integrate flux through a plane that is not a
+boundary. That is the same shape of hazard `LICENSING.md` already records for
+two enums whose `Empty` variants were numbered differently, and it is invisible
+in a residual.
+
+So, in §13.4's terms, stated as a refusal rather than left as a footnote:
+
+> **`PatchKind::Processor` is not used to mark a cut face.** A cut face is
+> given `PatchKind::Cyclic`, which every device kernel already honours, and the
+> patch records `type_name = "processor"` so the host can still tell the two
+> apart. `PartMesh::proc_patches` names which patch is which and what part is
+> on the other side. Marking the face `Processor` instead is refused because no
+> kernel would honour it; the alternative — renumbering `OFPATCH_PROCESSOR` to
+> `4` or adding a `Processor` arm to all thirty-odd comparisons — is a
+> device-visible change that belongs to whichever section actually needs the
+> distinction on the device, and no section does yet. Whichever section does
+should start by deleting the three unused `#define`s, since a constant that is
+defined and never read is exactly what makes this look supported.
+
+The physics agrees with the code. A processor face **is** a cyclic couple with
+a zero transform: the same Robin triple `(fr, ref, grad) = (0, 0, 0)`, the same
+`boundary_coeffs` carrying the coupling, the same `b_nbr_cell` naming the cell
+across it. This is not a new boundary condition and there is no new BC kernel
+in this section.
+
+**`processorCyclic` falls out for nothing.** A cyclic couple whose two halves
+land on different parts needs no new patch at all. It stays on its own patch,
+keeps its own metrics — which were computed through both halves with the
+periodic transform, exactly as §71.3 requires — and only its `b_nbr_cell` moves
+into the halo. The design note that preceded this work expected a new
+`PatchKind::ProcessorCyclic` and a `d`-formula switch;
+`a_cut_cyclic_couple_keeps_its_patch_and_its_geometry` shows neither is needed,
+and the reason is §71.3: nothing is recomputed, so there is no second formula
+to choose between.
+
+---
+
+### 71.6 Splitting a matrix that already exists
+
+The decomposed matrix is **not re-assembled**. It is derived from the whole
+mesh's matrix by three rules:
+
+```
+interior face  i  ->  upper[i] = upper[g] ,  lower[i] = lower[g]         g = global face
+inherited face j  ->  internal_coeffs[j], boundary_coeffs[j] copied
+CUT face       j  ->  boundary_coeffs[j] = -upper[g]   this part holds g's owner
+                      boundary_coeffs[j] = -lower[g]   it holds g's neighbour
+                      internal_coeffs[j] = 0
+```
+
+**The sign is a derivation, not a convention.** `lduAmul` applies an owned
+internal face as `sum += upper[f] psi_N` and a coupled boundary face as
+`sum -= boundary_coeffs[bf] psi_N`. IEEE negation is exact and `x - y` is
+*defined* as `x + (-y)`, so `sum - ((-u) psi)` and `sum + (u psi)` are the same
+operation on the same bits. The cut face therefore contributes the identical
+term it contributed before the cut — and, because §70 keys the row order on the
+global face id, in the identical **place** in the sum. Those two facts together
+are the whole of why the gate passes.
+
+`internal_coeffs` is zero on a cut face because the whole mesh already put that
+face's diagonal share in `diag`; adding it again would double it. Zero also
+makes `lduAddBoundaryContributions` a no-op there — it adds `+0` to a running
+sum that starts at `+0`, so not even the sign of a zero can differ — which
+means a part may be folded before or after it is split with the same result.
+
+The same three rules carry `relax` and `set_values` unchanged:
+
+* `lduRelax` accumulates `sumOff += |boundary_coeffs[bf]|` on a coupled face
+  and `sumOff += |upper[f]|` on an owned internal one. `|-u| = |u|` exactly, so
+  a cut face contributes the identical magnitude in the identical place, and
+  `internal_coeffs = 0` leaves the folded diagonal `d` untouched.
+* `lduSetValues` moves a known column to the right-hand side as
+  `s -= upper[f] * value` on an internal face and `s += boundary_coeffs[bf] *
+  value` on a coupled one. With `boundary_coeffs = -upper[f]` those are the
+  same operation. What it *does* need is `isFixed` and `fixedValue` at the halo
+  index, which is why the exchange carries a `Label` payload (§71.4).
+
+The matrix used by the gate is a Laplacian plus a `ddt`, assembled once on the
+host from the mesh's own metrics. Host-assembled deliberately: the sixteen
+assembly kernels of §70.5 are **not** partition-invariant, so a gate that
+re-assembled on each part would be testing a claim this section does not make.
+§71.7 says so as a refusal.
+
+---
+
+### 71.7 What a decomposed run cannot do yet — the §13.4 list
+
+Stated by name, with the alternative, because a decomposition that quietly did
+any of these would produce a plausible wrong answer.
+
+| Refused | Why | What to do instead |
+|---|---|---|
+| **Re-assembling an equation on a part** (`fvm_div`, `fvm_laplacian`, the sixteen gather kernels of §70.5) | those kernels sum internal and boundary faces into one accumulator in LOCAL order, and on a cut face the two paths use different operands (§70.5) | assemble on the whole mesh and distribute with `split_matrix`. Converting them is the next section's work and needs §71.3's rule applied inside `geometry.rs`, not only at the split |
+| **Any cross-part reduction** — dot products, `sum`, `sumMag`, `normFactor`, a wall function's patch average | `sum_i x_i` over a partition of the index set is a different summation tree for every partition, and floating-point addition is not associative. `max` is the one exception and is exactly order-independent | nothing yet. A partition-invariant reduction needs the exact (limb) accumulator; an `AllGather` of `P` partials into the existing one-block `solSum2Stage2` gives *run* invariance only |
+| **Therefore: any Krylov solve, SIMPLE loop or time loop, decomposed** | every one of them contains a reduction | the fixed-iteration Jacobi sweep of §71.9, which contains none, is what the gate runs |
+| **Gradients across a cut** | `grad psi` at a halo cell needs that cell's own face neighbours, which are two cells away | exchange the *gradient* as a second, vector-valued halo — `HaloExchange::vector` exists and is tested, and nothing calls it yet |
+| **Fields shorter than `n_cells + n_halo`** | a kernel reading `psi[b_nbr_cell[bf]]` would read past the end | the exchange refuses such a buffer by name, with both numbers in the message. **The audit of every buffer in the crate has NOT been done**, and it is the highest-volume risk in the whole distributed effort |
+| **`PatchKind::Processor` on a device-visible `b_kind`** | no kernel honours it (§71.5) | `PatchKind::Cyclic` with `type_name = "processor"` |
+| **Multi-colour DIC/DILU, decomposed** | the factorisation is sequential across colours and the sequence crosses parts | untouched. `precon.rs` colours in local cell order, which a partition changes |
+| **The cuFFT pressure backend, decomposed** | a distributed FFT is a different butterfly network | untouched |
+| **Lagrangian parcels, decomposed** | `parcelWalk` breaks ties on the first face examined, internal list before boundary; a cut swaps that order (§70.5) | untouched, and recorded twice now |
+| **Decomposed I/O** — writing per-part fields, restarting from them, reconstructing a VTU | not written | the whole mesh is read and written; parts exist only in memory |
+| **MPI, NCCL, more than one device** | not written. `memcpy_dtod` would dispatch to `cuMemcpyPeerAsync` across contexts, and that path is **untested** — this machine has one GPU | one process, one device |
+
+**§13.4.1, and why no pair test is owed for a case setting.** This section adds
+**no case-file setting**: no `.jsonc` key, no `fvSolution` entry, nothing a case
+can say. The decomposition is reachable only from the library API and from the
+new `ofgpu-decompose` driver, whose `-parts`, `-method`, `-sweeps` and `-alpha`
+are that driver's own arguments. §13.4.1 exists to catch a setting that never
+reaches the code it names, and the test for that is that the setting changes
+something. `-parts` and `-method` demonstrably do: `ofgpu-decompose` prints
+cells, halo, neighbour count, cut faces and imbalance for each, and the three
+methods differ by 4.2× in communication volume on the same mesh (§71.2). What
+they must **not** change is the answer, and that is the gate itself — so the
+pair here is inverted relative to §13.4.1's usual one, and
+`a_decomposed_run_is_bitwise_the_undecomposed_run` asserts both halves: that
+`n_cut_faces > 0` and every part has a halo for every `P > 1` (so the setting
+cannot be silently inert), and that the field is bit-identical anyway.
+
+---
+
+### 71.8 What must hold
+
+| Test | Expected |
+|---|---|
+| `the_hilbert_curve_visits_every_point_and_never_jumps` | at 1–4 bits per axis the index is a bijection on the lattice AND consecutive indices are lattice neighbours |
+| `every_partition_method_is_a_function_of_the_mesh_alone` | two calls agree; no part is empty; part sizes differ by at most one |
+| `an_impossible_partition_is_refused_by_name` | 0 parts, more parts than cells, an out-of-range explicit entry, an explicit map that leaves a part empty, and a short map — each named, with the offending number in the message |
+| `a_decomposition_accounts_for_every_cell_and_every_face` | cells sum to `N`; interior + cut = `n_internal_faces`; boundary faces = `n_boundary_faces + 2 * cut`; every local index in range; `owner < neighbour` still holds |
+| `a_one_part_decomposition_is_the_mesh_itself` | at `P = 1` every array equals the whole mesh's and `global_face` is the identity, so `P = 1` runs the same code as `P = 4` rather than a special case nobody exercises |
+| `the_exchange_plan_is_symmetric_in_global_cell_ids` | what `r` packs for `s` is, cell for cell and in order, what `s` expects from `r` — compared in GLOBAL ids, since the two number them differently |
+| `the_halo_is_grouped_by_owning_part_and_ascending_within_a_group` | one contiguous run per neighbour, ascending inside it; `recv_offset` has `nbr + 1` entries and ends at `n_halo` |
+| `a_cut_face_carries_the_whole_meshs_metrics_exactly` | every metric of §71.3's table, `==` on the bits, on a round-robin cut; `b_kind` is `Cyclic`; the neighbour is in the halo |
+| `a_cut_cyclic_couple_keeps_its_patch_and_its_geometry` | a split cyclic couple keeps its patch, its `PatchKind` and every metric; only `b_nbr_cell` moves |
+| `every_row_of_a_part_is_ascending_in_global_face_id` | strictly ascending in every row of every part, and at least one part's `global_face` is NOT ascending in slot order — so §70's sorting path is actually entered |
+| `splitting_a_field_and_gathering_it_back_is_the_identity` | round trip exact; the halo starts at zero, so a forgotten exchange cannot pass by luck |
+| `an_exchanged_halo_is_bit_for_bit_the_owner` | every ghost value equals its owner's, bit for bit, at `P = 1..4` on a plain and a cyclic mesh |
+| `a_vector_and_a_label_halo_cross_the_cut_too` | the same plan carries `Vec3` and `Label` |
+| `a_field_buffer_without_room_for_the_halo_is_refused_by_name` | an `n_cells`-long buffer is named, with the length it should have had |
+| `the_other_amul_survives_the_cut_too` | `ldu_ops::amul` — the second implementation of the row sum — agrees bit for bit as well as `solver::amul` |
+| **`a_decomposed_run_is_bitwise_the_undecomposed_run`** | **the gate.** `relax -> set_values -> fold -> 6 Jacobi sweeps` at `P = 1,2,3,4` under three partitioners on a plain and a cyclic mesh: every `diag`, `source`, `upper`, `lower` and boundary coefficient, and every value of the final field, bit-for-bit the whole mesh's |
+| `ofgpu-decompose <case>` | the same pipeline on the meshes in `cases/`. **PASS means `worst == 0`**; a tolerance is not accepted |
+
+---
+
+### 71.9 Validation: what was measured
+
+The claim is bitwise identity, so the measurement is a bit comparison and there
+is nothing to plot.
+
+**The gate, on shipped cases.** `ofgpu-decompose <case> -method all`, eight
+Jacobi sweeps, `alpha = 0.5`, at `P = 2, 3, 4` under all three partitioners:
+
+| Case | Cells | Mesh | Result |
+|---|---|---|---|
+| `cases/channelPeriodicWF.jsonc` | 192 | JSONC/blockgen, **cyclic** patches | **9/9 bitwise identical** |
+| `cases/channel` | 24,000 | polyMesh on disk | **9/9** |
+| `cases/burnerPlume.jsonc` | 32,768 | JSONC/blockgen | **9/9** |
+| `cases/plume` | 82,320 | polyMesh on disk, 240,044 internal faces | **9/9** |
+
+**36 of 36**, with `worst == 0.0` on every cell of every run. The cyclic case is
+in the list deliberately: it is the only one whose mesh has coupled boundary
+faces before it is cut, so it is the only one that exercises `processorCyclic`,
+the halo behind an already-coupled face, and `lduAmul`'s boundary branch doing
+arithmetic on both kinds of couple at once. The round-robin column is in the
+list deliberately too: at `P = 8` on `cases/plume` it cuts **every one of the
+240,044 internal faces**, so every off-diagonal term in the matrix has moved
+from `upper`/`lower` into `boundary_coeffs`, and the answer still does not
+move.
+
+**The gate, in the library test suite.** Two boxes (4×3×2 and a cyclic 5×4×3),
+`P = 1..4`, three partitioners, the full
+`relax -> set_values -> fold -> 6 sweeps` pipeline, with the matrix compared
+coefficient by coefficient as well as the field — so a failure names the stage
+rather than leaving the pipeline as the suspect. The comparison is `to_bits()`
+equality everywhere except on a coefficient that is exactly zero, where `+0`
+and `-0` are accepted as the same: `set_values` writes `+0` into a boundary
+coefficient where the whole mesh writes `+0` into `upper` and the split negates
+it, and `sum -= 0*psi` and `sum += (-0)*psi` are both `sum`.
+
+**Regression, and it was measured rather than argued.** Nothing in this section
+is reachable from any existing code path — `global_face` is still empty on every
+mesh anything else builds, and `Decomposition` is constructed nowhere but the
+new tests and the new driver — so the defaults are unmoved **by construction**,
+in the same sense §70.3 meant it. The three edits to shared files are a new
+`[[bin]]`, two `pub mod` lines, one filename in `build.rs`'s kernel list, one
+added type in `ldu.rs`, and two `fn` turned `pub(crate)` in `geometry.rs`:
+additions and visibility, no changed statement anywhere. That argument was
+still checked against a real A/B, because §70.3's rule is that an argument is
+not a measurement:
+
+| Comparison | Result |
+|---|---|
+| `ofgpu-validate` | **747/747, 699 computed live and 48 replayed**, 1178 lines — the recorded figure, reproduced |
+| `ofgpu-fire cases/channelPeriodicWF.jsonc -iters 25` (7 fields, cyclic), `ofgpu-plume cases/plume -iters 40` (5), `ofgpu-k-epsilon cases/channel -iters 40` (4) | **all 16 field files SHA-256 identical** between a build with this section's modules removed and a build with them in |
+| the three drivers' console logs | identical **except** `mesh uploaded in …`, `N iterations in …` and `done in …`, which are wall-clock times and not results |
+| `cargo clippy --release --all-targets` | exit 0; **no warning names any file added here** |
+
+**What this does not establish.**
+
+* **Nothing here is distributed.** One process, one device, `memcpy_dtod`
+  within one context. The peer-copy path is written and untested; MPI and NCCL
+  are not written at all.
+* **The answer that is preserved is not a physics answer.** It is a Jacobi
+  iteration on a Laplacian assembled on the host. That is the strongest thing
+  this section *can* gate, because every route to a physics answer runs through
+  either a reduction or an assembly kernel, and §71.7 refuses both by name. A
+  decomposed fire case is not close, and saying otherwise would be the fourth
+  instance of §13.4.1 in a different costume.
+* **The buffer-length audit is not done.** Every field a decomposed run touches
+  must be `n_cells + n_halo` long. The exchange refuses a short one, and that
+  is a guard, not an audit.
+
+---

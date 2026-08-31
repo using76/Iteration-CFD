@@ -103,6 +103,91 @@ impl GpuLduMatrix {
     }
 }
 
+/// The same coefficients, on the host.
+///
+/// The device is where the matrix lives and where every solve happens; this
+/// exists for the two jobs that are inherently host-side. One is a test that
+/// wants to read a coefficient back and say what it should have been. The
+/// other is SPEC-LIT §71: cutting a mesh into parts moves a cut face's
+/// coefficient from `upper`/`lower` into `boundary_coeffs`, and doing that
+/// **by copying the whole mesh's coefficient** rather than by re-assembling
+/// each part is what makes the decomposed matrix the serial matrix to the bit.
+/// `crate::decompose::split_matrix` is that operation and this is its
+/// currency.
+///
+/// `is_fixed` and `fixed_value` may be longer than `n_cells`: on a part of a
+/// decomposed mesh they run to `n_cells + n_halo`, because
+/// `lduSetValues` reads them at a coupled face's neighbour, which is a halo
+/// cell there.
+#[derive(Debug, Default, Clone)]
+pub struct HostLduMatrix {
+    pub n_cells: usize,
+    pub n_internal_faces: usize,
+    pub n_boundary_faces: usize,
+
+    pub diag: Vec<Scalar>,
+    pub upper: Vec<Scalar>,
+    pub lower: Vec<Scalar>,
+    pub source: Vec<Scalar>,
+    pub internal_coeffs: Vec<Scalar>,
+    pub boundary_coeffs: Vec<Scalar>,
+    pub is_fixed: Vec<Label>,
+    pub fixed_value: Vec<Scalar>,
+}
+
+impl HostLduMatrix {
+    /// Every coefficient zero, shaped for `m`.
+    pub fn zeros(m: &HostMesh) -> Self {
+        Self {
+            n_cells: m.n_cells,
+            n_internal_faces: m.n_internal_faces,
+            n_boundary_faces: m.n_boundary_faces,
+            diag: vec![0.0; m.n_cells],
+            upper: vec![0.0; m.n_internal_faces],
+            lower: vec![0.0; m.n_internal_faces],
+            source: vec![0.0; m.n_cells],
+            internal_coeffs: vec![0.0; m.n_boundary_faces],
+            boundary_coeffs: vec![0.0; m.n_boundary_faces],
+            is_fixed: vec![0; m.n_cells],
+            fixed_value: vec![0.0; m.n_cells],
+        }
+    }
+
+    /// Upload as-is. `is_fixed`/`fixed_value` keep whatever length they have,
+    /// so a part's halo-extended pair uploads unchanged.
+    pub fn upload(&self, gpu: &Gpu) -> Result<GpuLduMatrix> {
+        Ok(GpuLduMatrix {
+            n_cells: self.n_cells,
+            n_internal_faces: self.n_internal_faces,
+            n_boundary_faces: self.n_boundary_faces,
+            diag: gpu.upload(&self.diag)?,
+            upper: gpu.upload(&self.upper)?,
+            lower: gpu.upload(&self.lower)?,
+            source: gpu.upload(&self.source)?,
+            internal_coeffs: gpu.upload(&self.internal_coeffs)?,
+            boundary_coeffs: gpu.upload(&self.boundary_coeffs)?,
+            is_fixed: gpu.upload(&self.is_fixed)?,
+            fixed_value: gpu.upload(&self.fixed_value)?,
+        })
+    }
+
+    pub fn download(gpu: &Gpu, a: &GpuLduMatrix) -> Result<Self> {
+        Ok(Self {
+            n_cells: a.n_cells,
+            n_internal_faces: a.n_internal_faces,
+            n_boundary_faces: a.n_boundary_faces,
+            diag: gpu.download(&a.diag)?,
+            upper: gpu.download(&a.upper)?,
+            lower: gpu.download(&a.lower)?,
+            source: gpu.download(&a.source)?,
+            internal_coeffs: gpu.download(&a.internal_coeffs)?,
+            boundary_coeffs: gpu.download(&a.boundary_coeffs)?,
+            is_fixed: gpu.download(&a.is_fixed)?,
+            fixed_value: gpu.download(&a.fixed_value)?,
+        })
+    }
+}
+
 /// CSR export of the LDU structure.
 ///
 /// The sparsity pattern is fixed for a static mesh, so the pattern and the

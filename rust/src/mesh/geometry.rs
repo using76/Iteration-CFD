@@ -537,7 +537,7 @@ fn interp_weight(sf: Vec3, cf: Vec3, c_p: Vec3, c_n: Vec3) -> Scalar {
 /// Two coincident centres leave nothing to weight; a half-and-half split is
 /// the only unbiased answer and keeps the interpolation a convex combination.
 #[inline]
-fn weight_from_offsets(d_p: Scalar, d_n: Scalar) -> Scalar {
+pub(crate) fn weight_from_offsets(d_p: Scalar, d_n: Scalar) -> Scalar {
     let sum = d_p + d_n;
     if sum > SMALL {
         d_n / sum
@@ -548,7 +548,7 @@ fn weight_from_offsets(d_p: Scalar, d_n: Scalar) -> Scalar {
 
 /// Apply the SPEC-LIT 2.4 floor to a projection along `d`.
 #[inline]
-fn floor_along(proj: Scalar, d: Vec3) -> Scalar {
+pub(crate) fn floor_along(proj: Scalar, d: Vec3) -> Scalar {
     proj.max(NON_ORTH_FLOOR * d.mag())
 }
 

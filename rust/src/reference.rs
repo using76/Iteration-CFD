@@ -1039,6 +1039,14 @@ pub fn add_boundary_contributions(a: &mut CpuLdu, m: &HostMesh) {
 /// [`add_boundary_contributions`]: the coupled term is then the only boundary
 /// contribution left to apply, because it is the only one that is not
 /// constant.
+///
+/// This scatters over faces, deliberately the opposite loop structure to the
+/// kernel's gather, so agreement means something. Its per-cell summation order
+/// is nevertheless the same one - diagonal, then internal faces ascending,
+/// then boundary faces ascending - which under the identity global map is
+/// exactly the merged row order the device walks (SPEC-LIT §70.3). **On a
+/// decomposed mesh it would not be**: this reference has no `global_face` and
+/// would need one before it could be compared bitwise against a rank's `amul`.
 pub fn amul(out: &mut Vec<Scalar>, psi: &[Scalar], a: &CpuLdu, m: &HostMesh) {
     out.clear();
     out.resize(m.n_cells, 0.0);

@@ -57,6 +57,14 @@
   its own row in a register, in the fixed ascending-face order the CSR was
   built with. No atomics, and bitwise reproducible results.
 
+  Every kernel here that accumulates the internal AND the boundary faces into
+  ONE register - lduAmul, lduRelax, lduSetValues - walks the MERGED row map
+  (rfOffset/rfFace/rfFlags, SPEC-LIT S70) rather than the two separate CSRs,
+  so that its order is ascending in the GLOBAL face id and is therefore a
+  property of the mesh rather than of how the mesh was cut up. lduNegSumDiag
+  and lduAddBoundaryContributions each walk one list only and keep the CSR
+  they always had; there is no order between two lists for them to get wrong.
+
   Two kernels below (lduSetValues, lduCsrFill) do write face- or slot-indexed
   memory. Neither is a scatter: upper[f] is written only by the thread that
   owns f, lower[f] only by the thread that neighbours it, and the CSR slots
@@ -184,6 +192,17 @@ extern "C" __global__ void lduAddBoundaryContributions
 //  lduAddBoundaryContributions: the coupled term is the only boundary
 //  contribution left to apply here, because it is the only one that is not
 //  constant.
+//
+//  SPEC-LIT S70. The two sums are ONE loop over the merged row map, which
+//  visits a cell's internal and boundary faces together in ascending GLOBAL
+//  face id. That matters because a cut internal face becomes a boundary face
+//  on both sides of the cut: with two loops its term would move from the end
+//  of the first to the end of the second, and floating-point addition is not
+//  associative, so A.psi would move in its bits under decomposition before any
+//  communication existed. Under the identity global map - every mesh this
+//  crate can currently read - the merged list IS the two old lists
+//  concatenated, so the sequence of additions below is exactly the sequence
+//  the two loops performed and no default can move. See src/mesh/topology.rs.
 extern "C" __global__ void lduAmul
 (
     ofscalar* __restrict__ Apsi,
@@ -195,11 +214,9 @@ extern "C" __global__ void lduAmul
     const oflabel* __restrict__ owner,
     const oflabel* __restrict__ neighbour,
     const oflabel* __restrict__ bNbrCell,
-    const oflabel* __restrict__ cfOffset,
-    const oflabel* __restrict__ cfFace,
-    const oflabel* __restrict__ cfOwn,
-    const oflabel* __restrict__ bcfOffset,
-    const oflabel* __restrict__ bcfFace,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
     oflabel nCells
 )
 {
@@ -208,34 +225,30 @@ extern "C" __global__ void lduAmul
 
     ofscalar sum = diag[c]*psi[c];
 
-    const oflabel begin = cfOffset[c];
-    const oflabel end   = cfOffset[c + 1];
+    const oflabel begin = rfOffset[c];
+    const oflabel end   = rfOffset[c + 1];
     for (oflabel j = begin; j < end; ++j)
     {
-        const oflabel f = cfFace[j];
-        if (f < 0) continue;
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;                 // dropped by a corrupt mesh
 
-        if (cfOwn[j])
+        const oflabel fl = rfFlags[j];
+
+        if (fl & OFGPU_RF_BOUNDARY)
+        {
+            const oflabel nbr = bNbrCell[f];
+            if (nbr >= 0)
+            {
+                sum -= boundaryCoeffs[f]*psi[nbr];
+            }
+        }
+        else if (fl & OFGPU_RF_OWNS)
         {
             sum += upper[f]*psi[neighbour[f]];
         }
         else
         {
             sum += lower[f]*psi[owner[f]];
-        }
-    }
-
-    const oflabel bbegin = bcfOffset[c];
-    const oflabel bend   = bcfOffset[c + 1];
-    for (oflabel j = bbegin; j < bend; ++j)
-    {
-        const oflabel bf = bcfFace[j];
-        if (bf < 0) continue;
-
-        const oflabel nbr = bNbrCell[bf];
-        if (nbr >= 0)
-        {
-            sum -= boundaryCoeffs[bf]*psi[nbr];
         }
     }
 
@@ -292,6 +305,12 @@ extern "C" __global__ void lduAmul
 //     row and turn relaxation into divergence. sign(diag)*max(|diag|,
 //     sum|off|) is identical on the intended convention and merely safe off
 //     it.
+//  4. The two loops are ONE loop over the merged row map (SPEC-LIT S70), for
+//     the reason lduAmul carries: `sumOff` is a single accumulator fed by both
+//     the internal and the coupled boundary faces, so a cut face moving
+//     between the two lists would change its rounding. Under the identity
+//     global map the merged order is the two old lists concatenated, so both
+//     `d` and `sumOff` accumulate exactly the sequence they did before.
 extern "C" __global__ void lduRelax
 (
     ofscalar* __restrict__ diag,
@@ -302,11 +321,9 @@ extern "C" __global__ void lduRelax
     const ofscalar* __restrict__ boundaryCoeffs,
     const ofscalar* __restrict__ psi,
     const oflabel* __restrict__ bNbrCell,
-    const oflabel* __restrict__ cfOffset,
-    const oflabel* __restrict__ cfFace,
-    const oflabel* __restrict__ cfOwn,
-    const oflabel* __restrict__ bcfOffset,
-    const oflabel* __restrict__ bcfFace,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
     ofscalar alpha,
     oflabel nCells
 )
@@ -318,26 +335,26 @@ extern "C" __global__ void lduRelax
     ofscalar d = diag[c];
     ofscalar sumOff = 0;
 
-    const oflabel begin = cfOffset[c];
-    const oflabel end   = cfOffset[c + 1];
+    const oflabel begin = rfOffset[c];
+    const oflabel end   = rfOffset[c + 1];
     for (oflabel j = begin; j < end; ++j)
     {
-        const oflabel f = cfFace[j];
+        const oflabel f = rfFace[j];
         if (f < 0) continue;
-        sumOff += lduAbs(cfOwn[j] ? upper[f] : lower[f]);
-    }
 
-    const oflabel bbegin = bcfOffset[c];
-    const oflabel bend   = bcfOffset[c + 1];
-    for (oflabel j = bbegin; j < bend; ++j)
-    {
-        const oflabel bf = bcfFace[j];
-        if (bf < 0) continue;
+        const oflabel fl = rfFlags[j];
 
-        d += internalCoeffs[bf];
-        if (bNbrCell[bf] >= 0)
+        if (fl & OFGPU_RF_BOUNDARY)
         {
-            sumOff += lduAbs(boundaryCoeffs[bf]);
+            d += internalCoeffs[f];
+            if (bNbrCell[f] >= 0)
+            {
+                sumOff += lduAbs(boundaryCoeffs[f]);
+            }
+        }
+        else
+        {
+            sumOff += lduAbs((fl & OFGPU_RF_OWNS) ? upper[f] : lower[f]);
         }
     }
 
@@ -385,7 +402,13 @@ extern "C" __global__ void lduRelax
 //
 //  Race freedom: thread c writes upper[f] only for faces it owns, lower[f]
 //  only for faces it neighbours, and boundary coefficients only on its own
-//  boundary faces. Every address has exactly one writer.
+//  boundary faces. The merged row map (SPEC-LIT S70) visits every (cell, face)
+//  pair exactly once, so that is as true of the one loop below as it was of
+//  the two it replaces: every address still has exactly one writer.
+//
+//  The merge is needed here for the same reason as in lduAmul: `s` is ONE
+//  accumulator fed by the eliminated columns of both the internal and the
+//  coupled boundary faces.
 extern "C" __global__ void lduSetValues
 (
     ofscalar* __restrict__ diag,
@@ -399,11 +422,9 @@ extern "C" __global__ void lduSetValues
     const oflabel* __restrict__ owner,
     const oflabel* __restrict__ neighbour,
     const oflabel* __restrict__ bNbrCell,
-    const oflabel* __restrict__ cfOffset,
-    const oflabel* __restrict__ cfFace,
-    const oflabel* __restrict__ cfOwn,
-    const oflabel* __restrict__ bcfOffset,
-    const oflabel* __restrict__ bcfFace,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
     oflabel nCells
 )
 {
@@ -413,55 +434,54 @@ extern "C" __global__ void lduSetValues
     const bool fixed = (isFixed[c] != 0);
     ofscalar s = source[c];
 
-    const oflabel begin = cfOffset[c];
-    const oflabel end   = cfOffset[c + 1];
+    const oflabel begin = rfOffset[c];
+    const oflabel end   = rfOffset[c + 1];
     for (oflabel j = begin; j < end; ++j)
     {
-        const oflabel f = cfFace[j];
+        const oflabel f = rfFace[j];
         if (f < 0) continue;
 
-        const bool own = (cfOwn[j] != 0);
+        const oflabel fl = rfFlags[j];
 
-        if (fixed)
+        if (fl & OFGPU_RF_BOUNDARY)
         {
-            // Drop this row's entry against its neighbour.
-            if (own) upper[f] = 0; else lower[f] = 0;
-        }
-        else
-        {
-            const oflabel other = own ? neighbour[f] : owner[f];
-            if (other >= 0 && isFixed[other] != 0)
+            if (fixed)
             {
-                // Known column: move it to the right-hand side and drop it.
-                const ofscalar a = own ? upper[f] : lower[f];
-                s -= a*fixedValue[other];
-                if (own) upper[f] = 0; else lower[f] = 0;
+                internalCoeffs[f] = 0;
+                boundaryCoeffs[f] = 0;
+            }
+            else
+            {
+                const oflabel nbr = bNbrCell[f];
+                if (nbr >= 0 && isFixed[nbr] != 0)
+                {
+                    // Amul applies this term as -boundaryCoeffs*psi_N, so
+                    // moving a known psi_N to the source ADDS it; see the sign
+                    // derivation in the file header.
+                    s += boundaryCoeffs[f]*fixedValue[nbr];
+                    boundaryCoeffs[f] = 0;
+                }
             }
         }
-    }
-
-    const oflabel bbegin = bcfOffset[c];
-    const oflabel bend   = bcfOffset[c + 1];
-    for (oflabel j = bbegin; j < bend; ++j)
-    {
-        const oflabel bf = bcfFace[j];
-        if (bf < 0) continue;
-
-        if (fixed)
-        {
-            internalCoeffs[bf] = 0;
-            boundaryCoeffs[bf] = 0;
-        }
         else
         {
-            const oflabel nbr = bNbrCell[bf];
-            if (nbr >= 0 && isFixed[nbr] != 0)
+            const bool own = (fl & OFGPU_RF_OWNS) != 0;
+
+            if (fixed)
             {
-                // Amul applies this term as -boundaryCoeffs*psi_N, so moving
-                // a known psi_N to the source ADDS it; see the sign
-                // derivation in the file header.
-                s += boundaryCoeffs[bf]*fixedValue[nbr];
-                boundaryCoeffs[bf] = 0;
+                // Drop this row's entry against its neighbour.
+                if (own) upper[f] = 0; else lower[f] = 0;
+            }
+            else
+            {
+                const oflabel other = own ? neighbour[f] : owner[f];
+                if (other >= 0 && isFixed[other] != 0)
+                {
+                    // Known column: move it to the right-hand side and drop it.
+                    const ofscalar a = own ? upper[f] : lower[f];
+                    s -= a*fixedValue[other];
+                    if (own) upper[f] = 0; else lower[f] = 0;
+                }
             }
         }
     }

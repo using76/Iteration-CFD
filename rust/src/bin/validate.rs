@@ -52,6 +52,7 @@
 //! Exit code 0 means every check passed, 1 that one did not, 2 that the run
 //! could not be completed at all.
 
+use std::cell::RefCell;
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -103,6 +104,76 @@ use common::sci;
 //  Bookkeeping
 // ==========================================================================
 
+/// What a gate's verdict IS, when it is not a pass.
+///
+/// **SPEC-LIT §69.** These two words are the only ones this binary shouts at a
+/// published comparison, and [`Verdict::word`] is the only place either of
+/// them is spelled. `verdict_registry::only_the_registry_spells_a_verdict_word`
+/// reads this file's own source back and holds exactly that: no other
+/// non-comment line contains either token. Which is what makes the summary's
+/// gate list complete BY CONSTRUCTION rather than by anyone remembering to
+/// extend it - to print a verdict you must build a [`GateReport`], a
+/// [`GateReport`] goes into [`Checks::gates`], and the summary is derived from
+/// [`Checks::gates`]. The hand-maintained list this replaced was wrong twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    /// A comparison against a PUBLISHED MEASUREMENT that this solver does not
+    /// reproduce.
+    Misses,
+    /// A comparison against a CORRELATION that does not close at the shipped
+    /// default. Reported, never asserted as a pass it is not.
+    Open,
+}
+
+impl Verdict {
+    /// The one line in this file that spells either word - both arms are on
+    /// it deliberately, and the test named on the type is what keeps it so.
+    fn word(self) -> &'static str {
+        if matches!(self, Verdict::Misses) { "MISSES" } else { "OPEN" }
+    }
+}
+
+/// How the number a verdict is quoted with was obtained on THIS run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum How {
+    /// Computed live, on this machine, on this run.
+    Live,
+    /// Judged against a recorded measurement replayed above - see
+    /// [`Checks::replayed`].
+    Replayed,
+    /// A multi-minute run that does not belong inside a validation harness
+    /// which has to finish. The verdict is registered here anyway, so that
+    /// "not run here" can never quietly become "not reported here".
+    NotRunHere,
+}
+
+impl How {
+    fn phrase(self) -> &'static str {
+        match self {
+            How::Live => "run live above",
+            How::Replayed => "replayed above",
+            How::NotRunHere => "NOT run here",
+        }
+    }
+}
+
+/// One gate's non-passing verdict, registered AT THE POINT IT IS REPORTED.
+struct GateReport {
+    verdict: Verdict,
+    how: How,
+    /// SPEC-LIT's own name for the gate. The summary's list is keyed on this
+    /// string, so it has to be stable and unique.
+    gate: &'static str,
+    /// The published measurement, or the correlation, it is held against.
+    against: &'static str,
+    /// The verdict in one clause, with its number in it. This is the part the
+    /// summary repeats, so keep it to a sentence.
+    headline: String,
+    /// The rest of the verdict. Printed where the gate is and NOT repeated in
+    /// the summary: a diagnosis belongs beside the table it came from.
+    detail: Vec<String>,
+}
+
 /// The running tally, and the one line each check prints.
 struct Checks {
     total: usize,
@@ -126,11 +197,30 @@ struct Checks {
     replayed: usize,
     /// Set for the duration of [`Self::replaying`].
     in_replay: bool,
+    /// Every gate that reported a verdict other than a pass, in the order the
+    /// run reached them. **The summary's gate list is BUILT from this vector**
+    /// (SPEC-LIT §69.3), which is the whole reason a gate cannot report a
+    /// verdict on this screen and be absent from the summary.
+    gates: Vec<GateReport>,
+    /// Every line this struct has printed, and whether the gate registry
+    /// printed it. [`Checks::audit_and_summarise`] is the only reason it is
+    /// kept: a verdict word on a line the registry did not print is a verdict
+    /// that would never reach the summary, and it FAILS the run (SPEC-LIT
+    /// §69.2). `note` takes `&self`, so the transcript needs the cell.
+    transcript: RefCell<Vec<(String, bool)>>,
 }
 
 impl Checks {
     fn new() -> Self {
-        Self { total: 0, failures: 0, skipped: 0, replayed: 0, in_replay: false }
+        Self {
+            total: 0,
+            failures: 0,
+            skipped: 0,
+            replayed: 0,
+            in_replay: false,
+            gates: Vec::new(),
+            transcript: RefCell::new(Vec::new()),
+        }
     }
 
     /// Run `f` with every check it makes counted as REPLAYED. Not nestable,
@@ -156,12 +246,15 @@ impl Checks {
             self.failures += 1;
         }
 
-        println!(
-            "{}{:<52}err {}  tol {}",
-            if ok { "  ok   " } else { "  FAIL " },
-            what,
-            sci(f64::from(err), 3),
-            sci(f64::from(tol), 3)
+        self.emit(
+            format!(
+                "{}{:<52}err {}  tol {}",
+                if ok { "  ok   " } else { "  FAIL " },
+                what,
+                sci(f64::from(err), 3),
+                sci(f64::from(tol), 3)
+            ),
+            false,
         );
     }
 
@@ -174,12 +267,172 @@ impl Checks {
     /// not a failure - reported so the summary line cannot quietly shrink.
     fn skip(&mut self, what: &str, why: &str) {
         self.skipped += 1;
-        println!("  skip  {what:<52}{why}");
+        self.emit(format!("  skip  {what:<52}{why}"), false);
     }
 
     fn note(&self, line: &str) {
-        println!("        {line}");
+        self.emit(format!("        {line}"), false);
     }
+
+    /// The one way a line reaches the screen from here. `from_registry` marks
+    /// the lines [`Self::report`] wrote, and is what
+    /// [`Self::audit_and_summarise`] tests against.
+    fn emit(&self, line: String, from_registry: bool) {
+        println!("{line}");
+        self.transcript.borrow_mut().push((line, from_registry));
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §69 - the gate registry
+    // ----------------------------------------------------------------------
+
+    /// Report a gate verdict that is NOT a pass, and register it.
+    ///
+    /// One call does both, and there is no way to do either alone: the words
+    /// [`Verdict::word`] returns are the only ones this file is allowed to
+    /// print at a comparison (§69.2), and the summary's list is generated
+    /// from what this pushed (§69.3). That is the whole mechanism. It replaces
+    /// a hand-written sentence in `main` that named four of the six gates
+    /// which missed, and named a fifth's verdict as printed in a block that
+    /// never printed it.
+    ///
+    /// It changes no tally: a verdict is a REPORT, not a check. What the gate
+    /// asserts - the transcription guards, the shapes, the brackets that hold
+    /// whatever the physics verdict is - is asserted beside it with
+    /// [`Self::check`] and [`Self::require`], exactly as before.
+    fn report(&mut self, g: GateReport) {
+        self.emit(
+            format!(
+                "        ** {} {} ** ({}): {}",
+                g.gate,
+                g.verdict.word(),
+                g.how.phrase(),
+                g.headline
+            ),
+            true,
+        );
+        for line in &g.detail {
+            self.emit(format!("        {line}"), true);
+        }
+        self.gates.push(g);
+    }
+
+    /// The summary's gate list, **built from [`Self::gates`]** (SPEC-LIT
+    /// §69.3). Misses first, then the open verdicts; within each group, the
+    /// order the run reached them.
+    fn gate_summary(&self) -> String {
+        let n_miss = self.gates.iter().filter(|g| g.verdict == Verdict::Misses).count();
+        let n_open = self.gates.len() - n_miss;
+        let mut out = format!(
+            "\n{n_miss} gates carry the verdict {}, and {n_open} the verdict {}. This list is \
+             GENERATED from the registry each of them entered at the point it reported \
+             (SPEC-LIT S69): printing a verdict and registering one are the same call, and the \
+             two rows above hold the two halves of that - no unregistered verdict was printed, \
+             and every registered gate is named here. SPEC-LIT and the READMEs carry each in \
+             full.\n",
+            Verdict::Misses.word(),
+            Verdict::Open.word(),
+        );
+        let mut n = 0;
+        for want in [Verdict::Misses, Verdict::Open] {
+            for g in self.gates.iter().filter(|g| g.verdict == want) {
+                n += 1;
+                out += &format!(
+                    "  [{n}] {} - {} - {}\n",
+                    g.gate,
+                    g.how.phrase(),
+                    g.verdict.word()
+                );
+                for line in wrap(&format!("against {}: {}", g.against, g.headline), 84) {
+                    out += &format!("      {line}\n");
+                }
+            }
+        }
+        out
+    }
+
+    /// SPEC-LIT §69.2 and §69.3, asserted rather than promised in prose, and
+    /// returning the summary text so `main` prints the very string that was
+    /// audited rather than a second one built the same way.
+    ///
+    /// Two rows, in the tally like any other:
+    ///
+    /// 1. every line this run printed that shouts a verdict word came from
+    ///    [`Self::report`]. A note saying a gate missed without registering it
+    ///    is the defect this section exists for, and it fails here;
+    /// 2. every gate in the registry is named in the text below. That one is a
+    ///    tautology as `gate_summary` is written today, and it is asserted
+    ///    anyway, because the failure it guards is somebody rewriting
+    ///    `gate_summary` back into a hand-maintained list.
+    fn audit_and_summarise(&mut self) -> String {
+        let summary = self.gate_summary();
+
+        let stray: Vec<String> = self
+            .transcript
+            .borrow()
+            .iter()
+            .filter(|(line, from_registry)| !*from_registry && has_verdict_word(line))
+            .map(|(line, _)| line.trim().to_string())
+            .collect();
+        for line in &stray {
+            println!("        unregistered verdict, S69.2: {line}");
+        }
+        self.require(
+            "every verdict word this run printed came from the gate registry (S69.2)",
+            stray.is_empty(),
+        );
+
+        let unnamed: Vec<&str> = self
+            .gates
+            .iter()
+            .map(|g| g.gate)
+            .filter(|name| !summary.contains(name))
+            .collect();
+        for name in &unnamed {
+            println!("        registered gate absent from the summary, S69.3: {name}");
+        }
+        self.require(
+            "the summary's gate list names every gate in the registry (S69.3)",
+            unnamed.is_empty(),
+        );
+
+        summary
+    }
+}
+
+/// Does `line` shout one of [`Verdict`]'s words?
+///
+/// The words are taken from [`Verdict::word`] and inflected here, so this
+/// function contains no literal of either - which is what lets
+/// `verdict_registry::only_the_registry_spells_a_verdict_word` demand that the
+/// whole file contain exactly one such literal. Case matters: the lower-case
+/// "miss" of ordinary prose is not a verdict, and several notes use it.
+fn has_verdict_word(line: &str) -> bool {
+    let plural = Verdict::Misses.word();
+    let stem = &plural[..plural.len() - 2];
+    let past = format!("{stem}ED");
+    let open = Verdict::Open.word();
+    line.split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|w| w == plural || w == stem || w == past || w == open)
+}
+
+/// Greedy word wrap, for the generated gate list only.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for w in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + w.chars().count() > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line += w;
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
 }
 
 // ==========================================================================
@@ -2325,21 +2578,31 @@ fn check_soot_and_wsgg(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         common::g(f64::from(100.0 * e_bias[4])),
         common::g(f64::from(100.0 * e_bias[5])),
     ));
-    c.note(&format!(
-        "S62.12 Gate 1-E VERDICT: MISSED. The bar is +-10 % at every point - two \
-         published models of one quantity, each claiming better than that on its own - \
-         and {} of {} points are outside it, the worst by {} %. The gate is NOT \
-         evidence that Bordbar's set is wrong: RADCAL is a narrow-band model on the \
-         band data of NASA SP-3080, Bordbar's is a fit to line-by-line HITEMP-2010, and \
-         at 2400 K both are extrapolating. What it IS evidence of is that the \
-         disagreement is STRUCTURED rather than scattered, so a fire's smoke layer \
-         (400-700 K, where most of the volume is) and its flame are the two places the \
-         choice of set moves the answer most - which is exactly where S62.2 said the \
-         range was thinnest",
-        e_out10,
-        e_n,
-        common::g(f64::from(100.0 * e_worst)),
-    ));
+    c.report(GateReport {
+        verdict: Verdict::Misses,
+        how: How::Live,
+        gate: "SPEC-LIT S62.12 Gate 1-E",
+        against: "RADCAL's total emissivity (Grosshandler, NIST TN 1402, US public domain, \
+                  compiled unmodified from reference/fds/Source/rcal.f90), 108 points, bar \
+                  +-10 % at every one",
+        headline: format!(
+            "{} of {} points are outside the bar, the worst by {} % - two published models \
+             of one quantity, each claiming better than that on its own",
+            e_out10,
+            e_n,
+            common::g(f64::from(100.0 * e_worst)),
+        ),
+        detail: vec![
+            "  The gate is NOT evidence that Bordbar's set is wrong: RADCAL is a narrow-band \
+             model on the band data of NASA SP-3080, Bordbar's is a fit to line-by-line \
+             HITEMP-2010, and at 2400 K both are extrapolating. What it IS evidence of is \
+             that the disagreement is STRUCTURED rather than scattered, so a fire's smoke \
+             layer (400-700 K, where most of the volume is) and its flame are the two \
+             places the choice of set moves the answer most - which is exactly where S62.2 \
+             said the range was thinnest"
+                .to_string(),
+        ],
+    });
     // What must hold is the TRANSCRIPTION guard, not the physics bar: a wrong
     // coefficient among the 168 would move the level by a factor, and it
     // would break the monotone temperature ladder long before that.
@@ -2437,14 +2700,54 @@ fn check_soot_and_wsgg(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         "S61 (61.7): nothing burning is a yield of zero, not a division",
         SootStats { formation_rate: 1.0, ..Default::default() }.predicted_yield(0.0) == 0.0,
     );
-    c.note(
-        "S61.8 Gate 61-A, NOT run here (a 1200-step fire; SPEC-LIT S61.8 and \
-         docs/07-fire-solver.md carry it) and it MISSES: on cases/burnerPlume.jsonc the \
-         laminarSmokePoint model's PREDICTED post-flame soot yield (61.7) is 0.000 kg/kg \
-         against Tewarson's measured 0.024 for propane, because 0 of 32768 cells reach \
-         that model's own 1375 K formation threshold (S61.7 predicted exactly this). The \
-         prescribedYield leg returns 0.024 on the same case and is an IDENTITY, not a pass",
-    );
+    c.report(GateReport {
+        verdict: Verdict::Misses,
+        how: How::NotRunHere,
+        gate: "SPEC-LIT S61.8 Gate 61-A",
+        against: "Tewarson's measured post-flame soot yield for propane, 0.024 kg/kg (SFPE \
+                  Handbook Table A.40), on cases/burnerPlume.jsonc",
+        headline: "the laminarSmokePoint model's PREDICTED post-flame soot yield (61.7) is \
+                   0.000 kg/kg against that measured 0.024, because 0 of 32768 cells reach \
+                   the model's own 1375 K formation threshold - S61.7 predicted exactly this"
+            .to_string(),
+        detail: vec![
+            "  a 1200-step fire, which is why it is not run inside this harness; SPEC-LIT \
+             S61.8 and docs/07-fire-solver.md carry it. The prescribedYield leg returns \
+             0.024 on the same case and is an IDENTITY, not a pass"
+                .to_string(),
+        ],
+    });
+
+    // S62.12's Gate 4 - the OTHER fire gate this block is answerable for, and
+    // until SPEC-LIT S69 the one gate of the six whose verdict this binary
+    // never printed at all. The summary line used to assert that both fire
+    // verdicts were "noted in the soot/WSGG block above"; Gate 61-A's was,
+    // Gate 4's was not, and nothing checked the claim. Registering it here is
+    // what makes the sentence true, and S69.2's audit is what would have
+    // caught it. The numbers are SPEC-LIT S62.13's own, unchanged.
+    c.report(GateReport {
+        verdict: Verdict::Misses,
+        how: How::NotRunHere,
+        gate: "SPEC-LIT S62.12 Gate 4",
+        against: "the NIST 37 cm propane burner's measured radiative fraction, chi_r = 0.23 \
+                  / 0.30 / 0.33 at 20 / 34 / 50 kW (Sung, Chen, Bundy, Fernandez & Hamins, \
+                  NIST TN 2162r1, 2021, via the FDS Validation Guide), on \
+                  cases/nistBurner37cm.jsonc",
+        headline: "the case never reaches a state in which a radiative fraction is a \
+                   meaningful quantity - it reports a combustion efficiency of 226 %, so the \
+                   domain is burning an accumulated fuel inventory rather than what enters, \
+                   and S62.12's own gate text named ~95 % efficiency as the precondition \
+                   before any of this ran"
+            .to_string(),
+        detail: vec![
+            "  a multi-minute fire per heat release rate, which is why it is not run inside \
+             this harness; SPEC-LIT S62.13 carries the configuration table and the \
+             diagnosis. The gray leg of the same case settles at 74.7 % efficiency, so what \
+             drives the fire past its own supply is the composition-dependent absorption, \
+             and the next measurement named there is a longer run or a smaller domain"
+                .to_string(),
+        ],
+    });
 
     // The S13.4 contract, both sections.
     c.require(
@@ -5117,13 +5420,23 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                 0.03,
             );
         } else {
-            c.note(&format!(
-                "  ** GATE 5 MISSES the 3 % bar against the SECONDARY table at the \
-                 CONDUCTION-DOMINATED end **: worst disagreement {:.2} %, and it is at the \
-                 SMALLEST conductivity ratio, shrinking to {:.2} % at Kr = 10",
-                f64::from(100.0 * worst),
-                f64::from(100.0 * (nu10 / pub10 - 1.0).abs()),
-            ));
+            c.report(GateReport {
+                verdict: Verdict::Misses,
+                how: How::Live,
+                gate: "SPEC-LIT S60.5 Gate 5",
+                against: "Kaminski & Prakash (1986), conjugate natural convection in a \
+                          square enclosure - through the open-access SECONDARY table of \
+                          Belazizia et al. (2012), the primary being paywalled and never \
+                          read - bar 3 % at every conductivity ratio",
+                headline: format!(
+                    "worst disagreement {:.2} %, and it is at the SMALLEST conductivity \
+                     ratio - the CONDUCTION-DOMINATED end - shrinking to {:.2} % at \
+                     Kr = 10",
+                    f64::from(100.0 * worst),
+                    f64::from(100.0 * (nu10 / pub10 - 1.0).abs()),
+                ),
+                detail: Vec::new(),
+            });
             c.note(
                 "  DIAGNOSIS, from the numbers above and not from the model: the disagreement \
                  tracks how much of the answer is CONDUCTION. At Kr = 10 the solid is 2 % of \
@@ -7014,6 +7327,16 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // SPEC-LIT S69. The last two rows of the run are the run auditing what
+    // it is about to say about itself, and they hand back the gate list the
+    // summary prints - so what is printed below is the very text that was
+    // audited, not a second one built the same way. Nothing here is a
+    // hand-maintained list any more; the four sentences that used to name
+    // four of the six gates that miss are gone, and with them the fifth
+    // gate's verdict that was claimed to be printed in a block which never
+    // printed it.
+    let gates = c.audit_and_summarise();
+
     println!("\n{}/{} checks passed", c.total - c.failures, c.total);
     println!(
         "{} computed live, {} replayed from recorded measurements \
@@ -7021,22 +7344,11 @@ fn main() -> ExitCode {
          mesh resolution, the resolved leg's gate verdict, the thermostat-weighting \
          experiment, the bounded-convection isolation, and the Kays-Crawford Prt \
          experiment; and SPEC-LIT S42.8b, the NIST Reduced Scale Enclosure \
-         compartment sweep, which MISSES and says so). SPEC-LIT S60.5's Gate 5 \
-         (Kaminski & Prakash 1986) is RUN LIVE above and MISSES its 3 % bar at \
-         the conduction-dominated end against a SECONDARY table - the primary is \
-         paywalled and was never read, and the diagnosis is on the screen with it. \
-         SPEC-LIT S62.12's Gate 1-E (the WSGG total emissivity against RADCAL, NIST \
-         TN 1402) is also RUN LIVE above and MISSES its +-10 % bar at 58 of 108 \
-         points, with the disagreement monotone in temperature rather than \
-         scattered - and neither model is truth, which the verdict line says. \
-         Two more gates MISS and are NOT run here, each being a multi-step fire: \
-         SPEC-LIT S61.8's Gate 61-A (the predicted post-flame soot yield against \
-         Tewarson's measured one) and S62.12's Gate 4 (the NIST 37 cm burner's \
-         radiative fraction). Both verdicts are noted in the soot/WSGG block above \
-         and carried in full by SPEC-LIT and docs/07-fire-solver.md",
+         compartment sweep, whose verdict is in the list below)",
         c.total - c.replayed,
         c.replayed,
     );
+    print!("{gates}");
     if c.skipped > 0 {
         println!("{} checks skipped", c.skipped);
     }
@@ -8183,13 +8495,23 @@ fn check_rse_compartment_replay(c: &mut Checks) {
     c.require("S42.8 Gate 2: measured CO rises with HRR", co_rising_meas);
     c.require("S42.8 Gate 2: predicted CO does not fall with HRR", co_rising_model);
 
-    // And the miss, stated as a number rather than as a caveat.
-    c.note(&format!(
-        "  ** GATE 2 MISSES **: above 200 kW the predicted ceiling CO is low by a factor of up \
-         to {worst_co_ratio:.0}. ISFEH10's own published statistic for this model on this \
-         experiment is a bias factor of 1.08 with a model relative standard deviation of 0.50; \
-         this is nowhere near it."
-    ));
+    // And the miss, stated as a number rather than as a caveat - and
+    // REGISTERED, so that SPEC-LIT S69's summary carries it whether or not
+    // anyone remembers to put it there.
+    c.report(GateReport {
+        verdict: Verdict::Misses,
+        how: How::Replayed,
+        gate: "SPEC-LIT S42.8b Gate 2",
+        against: "the NIST Reduced Scale Enclosure 1994 compartment sweep (Bryner, Johnsson \
+                  & Pitts, NISTIR 5568, NIST public domain), cases/nistRSE1994.jsonc, at the \
+                  bias factor 1.08 / model relative standard deviation 0.50 ISFEH10 \
+                  publishes for this model on this experiment",
+        headline: format!(
+            "above 200 kW the predicted ceiling CO is low by a factor of up to \
+             {worst_co_ratio:.0}, which is nowhere near that bar"
+        ),
+        detail: Vec::new(),
+    });
     c.note(
         "  DIAGNOSIS, from the runs themselves and not from the model: the combustion efficiency \
          is 15-58 %, so most of the fuel leaves the compartment unburnt, and the doorway admits \
@@ -9128,13 +9450,24 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     // - outside the band - and at the viscous form of the same measurement
     // +15.4%, also outside. Reported, not hidden, and not asserted as a pass
     // it is not.
-    c.note(&format!(
-        "OPEN (Reynolds analogy): WF Nu is {:+.1}% of Gnielinski at the MEASURED f and {:+.1}% \
-         at the viscous form of it - OUTSIDE the +-10% band on both. The +6.4% this check used \
-         to assert was taken at an INFERRED f that was 25% high (SPEC-LIT 32.5.3)",
-        (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
-        (v.nu_measured / v.nu_gn_viscous - 1.0) * 100.0,
-    ));
+    c.report(GateReport {
+        verdict: Verdict::Open,
+        how: How::Replayed,
+        gate: "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg",
+        against: "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction \
+                  factor, +-10 % band",
+        headline: format!(
+            "WF Nu is {:+.1}% of Gnielinski at the MEASURED f and {:+.1}% at the viscous \
+             form of it - outside the band on both",
+            (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
+            (v.nu_measured / v.nu_gn_viscous - 1.0) * 100.0,
+        ),
+        detail: vec![
+            "  The +6.4% this check used to assert was taken at an INFERRED f that was 25% \
+             high (SPEC-LIT 32.5.3)"
+                .to_string(),
+        ],
+    });
     // Dittus-Boelter takes no `f` argument, so it has ONE verdict only, and
     // it is an absolute-prediction one. Quoted at +-20-25%; this leg sits at
     // about -12.9%.
@@ -9515,34 +9848,54 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     // it from +16.3%, so a third of the old excess was the thermostat's own
     // distribution defect and the rest is not.
     let miss = (v.nu_measured / v.nu_gn_pipe - 1.0) * 100.0;
-    c.note(&format!(
-        "OPEN (absolute prediction): resolved leg Nu is {miss:+.1}% of Gnielinski at the \
-         Petukhov smooth-PIPE f (+16.3% at the uniform thermostat sink, +11.8% at massFlux with \
-         the substituted `bounded Gauss upwind` momentum entry, +14.1% once the case's own \
-         entry was honoured, and {miss:+.1}% since S26.1 completed S25.1's Q) - outside its own \
-         +-10% band by {:.1} points, against an energy-balance uncertainty of {:.5}% which is \
-         now round-off, so the gate does NOT close and the miss is DECISIVE with nothing left \
-         to hide any of it behind (S32.4's UNDECIDED clause does not apply). Under PrtModel \
-         KaysCrawford the same leg is +4.3% and INSIDE - see the S37 replay below",
-        miss - 10.0,
-        v.energy_gap.abs() * 100.0,
-    ));
+    c.report(GateReport {
+        verdict: Verdict::Open,
+        how: How::Replayed,
+        gate: "SPEC-LIT S32.4 verdict 1 (absolute prediction), resolved leg",
+        against: "Gnielinski (1976) evaluated at the Petukhov smooth-PIPE f, +-10 % band",
+        headline: format!(
+            "resolved leg Nu is {miss:+.1}% of it - outside the band by {:.1} points, \
+             against an energy-balance uncertainty of {:.5}% which is now round-off, so the \
+             gate does NOT close and the miss is DECISIVE with nothing left to hide any \
+             of it behind (S32.4's UNDECIDED clause does not apply)",
+            miss - 10.0,
+            v.energy_gap.abs() * 100.0,
+        ),
+        detail: vec![
+            format!(
+                "  the history of this one number: +16.3% at the uniform thermostat sink, \
+                 +11.8% at massFlux with the substituted `bounded Gauss upwind` momentum \
+                 entry, +14.1% once the case's own entry was honoured, and {miss:+.1}% \
+                 since S26.1 completed S25.1's Q. Under PrtModel KaysCrawford the same leg \
+                 is +4.3% and INSIDE - see the S37 replay below"
+            ),
+        ],
+    });
 
     // Verdict 2 - the REYNOLDS-ANALOGY question, at this leg's own friction
     // factor. It used to be asserted as a pass at +6.8%; that rested on an
     // `f` inferred from the body force, which the direct measurement then
     // showed to be 11% high. At the measured `f` it is +15.2% - outside.
-    c.note(&format!(
-        "OPEN (Reynolds analogy): resolved leg Nu is {:+.1}% of Gnielinski at the MEASURED f \
-         = {} - outside the +-10% band. The +6.8% once asserted here was taken at an INFERRED \
-         f of {} (SPEC-LIT 32.5.3). That measured f is only {:+.1}% of the Petukhov pipe f, so \
-         this leg now transports very nearly the right MOMENTUM and too much HEAT - a THERMAL \
-         finding, with nothing left on the momentum side to carry it (SPEC-LIT 32.5.5)",
-        (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
-        sci(v.f_measured, 4),
-        sci(v.f_inferred, 4),
-        (v.f_measured / v.f_pipe - 1.0) * 100.0,
-    ));
+    c.report(GateReport {
+        verdict: Verdict::Open,
+        how: How::Replayed,
+        gate: "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), resolved leg",
+        against: "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction \
+                  factor, +-10 % band",
+        headline: format!(
+            "resolved leg Nu is {:+.1}% of it at the MEASURED f = {} - outside the band",
+            (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
+            sci(v.f_measured, 4),
+        ),
+        detail: vec![format!(
+            "  The +6.8% once asserted here was taken at an INFERRED f of {} (SPEC-LIT \
+             32.5.3). That measured f is only {:+.1}% of the Petukhov pipe f, so this leg \
+             now transports very nearly the right MOMENTUM and too much HEAT - a THERMAL \
+             finding, with nothing left on the momentum side to carry it (SPEC-LIT 32.5.5)",
+            sci(v.f_inferred, 4),
+            (v.f_measured / v.f_pipe - 1.0) * 100.0,
+        )],
+    });
 
     // The two-mesh ratio §32.4's table asks for, and what the MEASURED
     // friction factors say about it. Reported, not asserted: it is a
@@ -11697,20 +12050,29 @@ fn theobald_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         c.check("68-C Theobald maximum throw, relative bias", (mean - 1.0).abs(), 0.10);
         c.check("68-C Theobald maximum throw, 2-sigma scatter", scatter, 0.30);
     } else {
-        c.note(&format!(
-            "  ** GATE 68-C MISSES **: with the gas at rest this solver throws the \
-             stream {} % of the measured distance on average. The bar it misses is the \
-             shape of the FDS Validation Guide's own metric for this quantity - \
-             +-10 % bias, 30 % scatter - and it is NOT a bar the still-air model was \
-             ever going to meet, for a reason the numbers above state: the vacuum \
-             bracket is {} % of the measurement, so between {} % and {} % of the throw \
-             is decided by what the AIR does, and with the air held still there is \
-             nothing left to decide it with",
-            common::g(f64::from(100.0 * mean)),
-            common::g(f64::from(100.0 * vac_mean)),
-            common::g(f64::from(100.0 * mean)),
-            common::g(f64::from(100.0 * vac_mean)),
-        ));
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT S68.12 Gate 68-C",
+            against: "Theobald (1981), 90 hose streams, maximum throw, at the shape of the \
+                      FDS Validation Guide's own metric for this quantity - +-10 % bias, \
+                      30 % scatter",
+            headline: format!(
+                "with the gas at rest this solver throws the stream {} % of the measured \
+                 distance on average",
+                common::g(f64::from(100.0 * mean)),
+            ),
+            detail: vec![format!(
+                "  and it is NOT a bar the still-air model was ever going to meet, for a \
+                 reason the numbers above state: the vacuum bracket is {} % of the \
+                 measurement, so between {} % and {} % of the throw is decided by what the \
+                 AIR does, and with the air held still there is nothing left to decide it \
+                 with",
+                common::g(f64::from(100.0 * vac_mean)),
+                common::g(f64::from(100.0 * mean)),
+                common::g(f64::from(100.0 * vac_mean)),
+            )],
+        });
     }
 
     // ---- how much air motion the measurement implies ------------------
@@ -14905,4 +15267,161 @@ fn check_parcel_deposition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §69 - the gate registry, tested rather than described
+//
+//  §69 exists because a hand-maintained sentence in `main` named four of the
+//  six gates that report a miss, and asserted a fifth's verdict was printed
+//  in a block that never printed it. The mechanism that replaced it is only
+//  worth anything if it cannot be quietly disabled, so each of its three
+//  claims is a test below.
+// ==========================================================================
+
+#[cfg(test)]
+mod verdict_registry {
+    use super::*;
+
+    /// This file's own text, taken at COMPILE time, so the test can never read
+    /// a different copy of `validate.rs` than the one it was built from.
+    const SOURCE: &str = include_str!("validate.rs");
+
+    fn a_report(gate: &'static str, verdict: Verdict) -> GateReport {
+        GateReport {
+            verdict,
+            how: How::NotRunHere,
+            gate,
+            against: "an invented measurement",
+            headline: "it is out".to_string(),
+            detail: Vec::new(),
+        }
+    }
+
+    /// **§69.2, at the source level.** The two verdict words may be spelled in
+    /// exactly one non-comment line of this file - the body of
+    /// [`Verdict::word`] - so there is no way to print either without building
+    /// a [`GateReport`], and no way to build one that the summary does not
+    /// then derive itself from. Comments are exempt: this very block is one.
+    #[test]
+    fn only_the_registry_spells_a_verdict_word() {
+        let hits: Vec<(usize, &str)> = SOURCE
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| has_verdict_word(l))
+            .map(|(i, l)| (i + 1, l.trim()))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "exactly one non-comment line of validate.rs may spell a verdict word, and it \
+             is the body of Verdict::word; {} do:\n  {}",
+            hits.len(),
+            hits.iter()
+                .map(|(n, l)| format!("{n}: {l}"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+        assert!(
+            hits[0].1.starts_with("if matches!(self, Verdict::Misses)"),
+            "the one line that spells a verdict word is not Verdict::word's body: {}",
+            hits[0].1
+        );
+    }
+
+    /// **§69.2, at run time.** A note that shouts a verdict without
+    /// registering it is the defect §69 exists for, and the run fails on it.
+    #[test]
+    fn an_unregistered_verdict_fails_the_audit() {
+        let mut c = Checks::new();
+        c.note(&format!("** GATE 99-Z {} **: invented", Verdict::Misses.word()));
+        assert_eq!(c.failures, 0, "the note itself is not a check");
+        c.audit_and_summarise();
+        assert_eq!(c.failures, 1, "an unregistered verdict has to fail S69.2's row");
+    }
+
+    /// **§69.3.** The same verdict, registered, passes the audit AND is in the
+    /// generated list - which is the claim the summary line makes.
+    #[test]
+    fn a_registered_verdict_passes_and_reaches_the_summary() {
+        let mut c = Checks::new();
+        c.report(a_report("SPEC-LIT S99.9 Gate 99-Z", Verdict::Misses));
+        let summary = c.audit_and_summarise();
+        assert_eq!(c.failures, 0, "a registered verdict must not fail either row");
+        assert!(summary.contains("SPEC-LIT S99.9 Gate 99-Z"), "{summary}");
+        assert!(summary.contains("against an invented measurement: it is out"), "{summary}");
+    }
+
+    /// The two verdicts are counted and grouped separately, and the misses
+    /// come first whatever order the run reached them in.
+    #[test]
+    fn misses_and_open_verdicts_are_counted_and_grouped_separately() {
+        let mut c = Checks::new();
+        c.report(a_report("S99.1 Gate A", Verdict::Misses));
+        c.report(a_report("S99.2 Gate B", Verdict::Open));
+        c.report(a_report("S99.3 Gate C", Verdict::Misses));
+        let summary = c.audit_and_summarise();
+        assert_eq!(c.failures, 0);
+        assert!(
+            summary.starts_with(&format!(
+                "\n2 gates carry the verdict {}, and 1 the verdict {}",
+                Verdict::Misses.word(),
+                Verdict::Open.word()
+            )),
+            "{summary}"
+        );
+        for (i, gate) in [(1, "S99.1 Gate A"), (2, "S99.3 Gate C"), (3, "S99.2 Gate B")] {
+            assert!(summary.contains(&format!("[{i}] {gate} ")), "{summary}");
+        }
+    }
+
+    /// A verdict is a REPORT, not a check. Registering one moves no counter,
+    /// so the run's headline tally means exactly what it meant before §69 -
+    /// which is what lets `N/N checks passed` sit above a list of misses
+    /// without contradicting it.
+    #[test]
+    fn registering_a_verdict_moves_no_tally() {
+        let mut c = Checks::new();
+        let before = (c.total, c.failures, c.replayed, c.skipped);
+        c.report(a_report("S99.1 Gate A", Verdict::Misses));
+        c.report(a_report("S99.2 Gate B", Verdict::Open));
+        assert_eq!((c.total, c.failures, c.replayed, c.skipped), before);
+        assert_eq!(c.gates.len(), 2);
+    }
+
+    /// Case is the whole discrimination: several notes in this file use the
+    /// lower-case word in ordinary prose and must not be caught by it.
+    #[test]
+    fn lower_case_prose_is_not_a_verdict() {
+        assert!(!has_verdict_word("the resolved leg misses it by 3.8 %"));
+        assert!(!has_verdict_word("a spray source that misses the mesh"));
+        assert!(!has_verdict_word("the window is OPENED by the driver"));
+        assert!(has_verdict_word(&format!(
+            "  ** GATE 5 {} the 3 % bar **",
+            Verdict::Misses.word()
+        )));
+        assert!(has_verdict_word(&format!(
+            "{} (Reynolds analogy): outside the band",
+            Verdict::Open.word()
+        )));
+    }
+
+    /// The generated list's only piece of formatting, held to keeping every
+    /// word and not exceeding the width it is given.
+    #[test]
+    fn the_wrap_keeps_every_word_within_the_width() {
+        let text = "against Theobald (1981), 90 hose streams, maximum throw: with the gas \
+                    at rest this solver throws the stream 61.2858 % of the measured \
+                    distance on average";
+        let lines = wrap(text, 40);
+        assert!(lines.len() > 1);
+        for l in &lines {
+            assert!(l.chars().count() <= 40, "{l:?}");
+        }
+        assert_eq!(
+            lines.join(" ").split_whitespace().collect::<Vec<_>>(),
+            text.split_whitespace().collect::<Vec<_>>()
+        );
+    }
 }

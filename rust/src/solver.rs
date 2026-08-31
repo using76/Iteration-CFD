@@ -629,11 +629,16 @@ fn finish_sum(
 
 /// `y = A·psi`, in the LDU form `src/ldu.rs` fixes.
 ///
-/// A gather over the cell->face CSR - one thread per cell walking its own
+/// A gather over the merged row map - one thread per cell walking its own
 /// faces - so there are no atomics on `f64`, the summation order per row is
 /// fixed and the product is bitwise reproducible. Cyclic boundary faces are
 /// the only boundary faces that reach the matrix; everything else has already
 /// been folded into `diag` and `source`.
+///
+/// SPEC-LIT §70: the map is ordered by the GLOBAL face id, so the order is a
+/// property of the mesh rather than of how the mesh was cut up. This is the
+/// product every Krylov iteration calls; `ldu_ops::amul` is the other
+/// implementation of the same row sum and walks the same map.
 pub fn amul(
     gpu: &Gpu,
     k: &SolverKernels,
@@ -664,11 +669,9 @@ pub fn amul(
             .arg(&a.lower)
             .arg(&m.owner)
             .arg(&m.neighbour)
-            .arg(&m.cf_offset)
-            .arg(&m.cf_face)
-            .arg(&m.cf_own)
-            .arg(&m.bcf_offset)
-            .arg(&m.bcf_face)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
             .arg(&a.boundary_coeffs)
             .arg(&m.b_nbr_cell)
             .arg(&nl)

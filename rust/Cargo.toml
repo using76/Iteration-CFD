@@ -120,3 +120,7 @@ path = "src/bin/fire.rs"
 [[bin]]
 name = "ofgpu-cht"
 path = "src/bin/cht.rs"
+
+[[bin]]
+name = "ofgpu-decompose"
+path = "src/bin/decompose.rs"

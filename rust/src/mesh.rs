@@ -196,6 +196,34 @@ pub struct HostMesh {
     pub bcf_offset: Vec<Label>,
     /// `[n_boundary_faces]`
     pub bcf_face: Vec<Label>,
+
+    // ---- the merged, GLOBAL-face-ordered row map - SPEC-LIT §70 ----------
+    /// `[n_internal_faces + n_boundary_faces]` the GLOBAL id of every face,
+    /// indexed by SLOT: slot `f` for internal face `f`, slot
+    /// `n_internal_faces + bf` for boundary face `bf` - the polyMesh face
+    /// numbering.
+    ///
+    /// **Empty means the identity**, which is what an undecomposed mesh has
+    /// and what every mesh this crate can currently read gets. It exists so
+    /// that the order a row of `A psi` is summed in is a property of the MESH
+    /// rather than of the partition: cut an internal face and it becomes a
+    /// boundary face on both sides, which moves its term between the two CSRs
+    /// above and renumbers everything after it. See §70.1.
+    pub global_face: Vec<Label>,
+
+    /// `[n_cells + 1]` offsets into [`Self::rf_face`] - SPEC-LIT §70.2.
+    pub rf_offset: Vec<Label>,
+    /// `[2 * n_internal_faces + n_boundary_faces]` the face's index in its OWN
+    /// array: an internal face id when [`Self::rf_flags`] has
+    /// [`topology::RF_BOUNDARY`] clear, a boundary face id when it is set.
+    ///
+    /// Every cell's slice is ascending in GLOBAL face id. Under the identity
+    /// map that is bit-for-bit `cf_face`'s slice followed by `bcf_face`'s, and
+    /// §70.3 is the argument that it must be.
+    pub rf_face: Vec<Label>,
+    /// `[2 * n_internal_faces + n_boundary_faces]`
+    /// [`topology::RF_OWNS`] | [`topology::RF_BOUNDARY`].
+    pub rf_flags: Vec<Label>,
 }
 
 /// What `HostMesh::check` found. Printing it is the first thing every binary
@@ -220,11 +248,14 @@ pub struct MeshReport {
 }
 
 impl HostMesh {
-    /// Invert `owner`/`neighbour` into the two CSR maps.
+    /// Invert `owner`/`neighbour` into the two CSR maps, and build the merged
+    /// global-face-ordered row map on top of them.
     ///
     /// Within each cell the faces are kept in ascending face index so the
     /// gather order is deterministic, which is what makes results bitwise
-    /// reproducible across runs.
+    /// reproducible across runs. The merged map (SPEC-LIT §70) additionally
+    /// makes that order a property of the MESH rather than of the partition,
+    /// by keying it on the global face id instead of the local one.
     pub fn build_cell_face_maps(&mut self) {
         crate::mesh::topology::build_cell_face_maps(self)
     }
@@ -306,6 +337,14 @@ pub struct GpuMesh {
     pub bcf_offset: DevBuf<Label>,
     pub bcf_face: DevBuf<Label>,
 
+    /// The merged, global-face-ordered row map - SPEC-LIT §70. One list per
+    /// cell covering its internal AND boundary faces, ascending in global face
+    /// id, so that the summation order of a row of `A psi` is a property of
+    /// the mesh and not of how it was cut up.
+    pub rf_offset: DevBuf<Label>,
+    pub rf_face: DevBuf<Label>,
+    pub rf_flags: DevBuf<Label>,
+
     /// Kept on the host for reporting only.
     pub patches: Vec<PatchInfo>,
     pub total_volume: Scalar,
@@ -313,6 +352,38 @@ pub struct GpuMesh {
 
 impl GpuMesh {
     pub fn upload(gpu: &Gpu, m: &HostMesh) -> Result<Self> {
+        // SPEC-LIT §70.3. Half the meshes in this crate's tests are written
+        // out by hand and never call `build_cell_face_maps`, so the merged row
+        // map may not be there. Uploading an empty one would give every row a
+        // slice of length zero and make `amul` return `diag*psi` - wrong, and
+        // wrong QUIETLY, which is the failure mode this project has been bitten
+        // by before. Build it here instead, from the addressing the mesh does
+        // carry. Three vectors, not a clone of the mesh.
+        let rebuilt = if m.rf_offset.len() == m.n_cells + 1
+            && m.rf_face.len() == 2 * m.n_internal_faces + m.n_boundary_faces
+            && m.rf_flags.len() == m.rf_face.len()
+        {
+            None
+        } else {
+            Some(topology::row_face_map(
+                m.n_cells,
+                m.n_internal_faces,
+                m.n_boundary_faces,
+                &m.owner,
+                &m.neighbour,
+                &m.b_face_cells,
+                &m.global_face,
+            ))
+        };
+        let (rf_offset, rf_face, rf_flags) = match &rebuilt {
+            Some((o, f, g)) => (o.as_slice(), f.as_slice(), g.as_slice()),
+            None => (
+                m.rf_offset.as_slice(),
+                m.rf_face.as_slice(),
+                m.rf_flags.as_slice(),
+            ),
+        };
+
         Ok(Self {
             n_cells: m.n_cells,
             n_internal_faces: m.n_internal_faces,
@@ -356,6 +427,10 @@ impl GpuMesh {
             cf_own: gpu.upload(&m.cf_own)?,
             bcf_offset: gpu.upload(&m.bcf_offset)?,
             bcf_face: gpu.upload(&m.bcf_face)?,
+
+            rf_offset: gpu.upload(rf_offset)?,
+            rf_face: gpu.upload(rf_face)?,
+            rf_flags: gpu.upload(rf_flags)?,
 
             patches: m.patches.clone(),
             total_volume: m.v.iter().copied().sum(),

@@ -65,3 +65,30 @@ OFGPU_DEV ofscalar ofmin_(ofscalar a, ofscalar b) { return a < b ? a : b; }
 
 //- Flat 1-D index for a grid-stride-free launch
 #define OFGPU_TID (blockIdx.x*blockDim.x + threadIdx.x)
+
+// --------------------------------------------------------------------------
+//  The merged, GLOBAL-face-ordered row map - SPEC-LIT S70
+//
+//  rfOffset[nCells+1] / rfFace[2*nIf + nBf] / rfFlags[2*nIf + nBf] give each
+//  cell ONE list of its incident faces, internal and boundary together, in
+//  ascending GLOBAL face id. The two older maps (cfOffset/bcfOffset) order a
+//  row by the LOCAL id, which is a property of how the mesh was cut up: a cut
+//  internal face becomes a boundary face on both sides and its term moves from
+//  one list to the other. Floating-point addition is not associative, so that
+//  changes the bits of A.psi before any communication exists.
+//
+//  rfFace holds the face's index in its OWN array - an internal face id, or a
+//  boundary face id when RF_BOUNDARY is set - so nothing here needs to know
+//  how many faces of each kind there are.
+//
+//  Mirrored on the host by RF_OWNS / RF_BOUNDARY in src/mesh/topology.rs.
+// --------------------------------------------------------------------------
+
+//- This cell is the face's OWNER. Always set on a boundary face, which has
+//  exactly one adjacent cell; it therefore discriminates only on an internal
+//  face, choosing upper/neighbour over lower/owner.
+#define OFGPU_RF_OWNS 1
+
+//- Read the BOUNDARY arrays (boundaryCoeffs, internalCoeffs, bNbrCell); clear
+//  means the internal-face arrays (upper, lower, owner, neighbour).
+#define OFGPU_RF_BOUNDARY 2

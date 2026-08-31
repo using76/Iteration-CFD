@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 1,561 unit tests across all targets (1,423 in the lib), 745 `ofgpu-validate` checks |
+| Validation | 1,595 unit tests across all targets (1,447 in the lib), 747 `ofgpu-validate` checks |
 
 ---
 
@@ -160,7 +160,7 @@ applied on faces rather than interpolated from cell values.
 | Soot (SPEC-LIT §61) | A transported mass fraction `rho Y_s` — `sootModel none` (the default), `prescribedYield` or `laminarSmokePoint`. The smoke-point model is Lautenberger, de Ris, Dembsey, Barnett & Baum (2005): a formation rate shaped on a cubic in mixture fraction between `Z_L` and `Z_H`, anchored on a measured laminar smoke-point height, with Magnussen-Hjertager oxidation and an availability clip. The cubic is checked back against the four conditions it was **solved from** (`2.4e-16` worst); propane's `Z_st = 0.0600725` to `1.3e-9`; the published peak rate `omega_sf,P = 0.45699 kg/(m³ s)` to `8.7e-8`; the prescribed-yield mass balance to `1e-14`; host closed forms against the device kernels to `1e-14`. Moss-Brookes and the sectional family are refused by name **with the reason**. §61's whole point is §62: `rho Y_s` reaches every WSGG band's `kappa` and therefore `T`. **Gate 61-A — the one number a published soot measurement can be held against — MISSES totally**; see “Gates that miss” below |
 | Spectral radiation — WSGG (SPEC-LIT §62) | `spectralModel gray` (default) / `grayBanded` / `wsgg`, for **both** P1 and fvDOM, through the one `EnergySources` registration §36 already used. `wsgg` is Bordbar, Węcel & Hyppänen (2014): four gray gases plus a transparent window, `kappa_j` built per cell per band from the local `X_H2O`, `X_CO2` and soot, `a_j` from the local `T`. `grayBanded` (one band, `a_1 = 1`, the case's own `a`) is **bitwise identical to `gray` through the whole driver**, checked on every byte of every file two runs write — so “the default is unmoved” is a measurement a case can repeat, not an assertion. **§64 and §65 solve the banded slab EXACTLY, band by band**, which is the only gate that measures the banded *answer* rather than an identity or another model, and both overturned something they were built to confirm. fvDOM's angular error is closed form — `E_2^S4(tau) = (1/4pi) sum_m w_m exp(-tau/\|mu_m\|)`, verified at `E_2^S4(0) - 1 = 3.3e-16` — which splits the measured error into an angular half needing no run and a spatial residue that does; **P1 has no such split**. fvDOM solves the transparent window exactly (`1.7e-15`) where banded P1 must floor it and pays `-0.039 %` with hot walls and **`+10.1 %`** with a hot gas; on the band P1 is worst at, fvDOM is better by up to **7.8×**. **What it costs, measured (§65.7)**, same case, same two passes: P1 + WSGG **93.64 / 94.01 s** (**4.12×** gray P1) at 172 MiB; **fvDOM + WSGG 527.06 / 536.42 s — 23.36× — at 332 MiB**. The bands cost 4.12× on P1 and 3.77× on fvDOM, on opposite sides of their own arithmetic. `updateInterval: 4` recovers **6.7×** of the fvDOM factor for **0.12 points** of radiated fraction. The physics beside the price: the spectral model roughly **triples** the radiated fraction on this case (14.97 → 47.28 % on P1, 13.79 → 43.76 % on fvDOM) where switching the angular method moves it by 1.2 points gray and 3.5 banded — a factor of nine larger effect. **Its emissivity gate MISSES**; see “Gates that miss” below |
 | Open radiative boundary (SPEC-LIT §63) | `openBoundary zeroGradient` (the default) or `coldSurroundings` with an `ambientT`. A zero-gradient `G` (P1) or `I_m` (fvDOM) on an open face says that whatever leaves comes straight back: **an open-sided fire domain with zero-gradient radiation boundaries is a perfectly reflecting enclosure**. It is also **singular** for WSGG's transparent band — under P1 that band is a pure-Neumann Laplace problem — and both models go non-finite on a WSGG open-domain fire without this condition, which is why §63 exists. An all-wall enclosure is **bitwise unmoved** by the setting, there being no open face for it to touch, and the refusal names both conditions and says what the default IS. Measured on the gray legs of `cases/burnerPlume.jsonc`: the radiated fraction goes 14.97 → 33.89 % (P1) and 13.79 → 25.07 % (fvDOM) once the radiation can leave |
-| Validation gates | Sealed-box `dp0/dt` ramp (analytic), exact burner heat release, radiative equilibrium, cut-cell closure, msh hex closure, the two-step scheme's derived stoichiometry, the soot cubic against the four conditions it was solved from, the WSGG coefficient set's own invariants and §64/§65's exact banded slab — all permanent `ofgpu-validate` checks. Four fire-side gates **miss**, and the summary line names every one of them; see “Gates that miss” below |
+| Validation gates | Sealed-box `dp0/dt` ramp (analytic), exact burner heat release, radiative equilibrium, cut-cell closure, msh hex closure, the two-step scheme's derived stoichiometry, the soot cubic against the four conditions it was solved from, the WSGG coefficient set's own invariants and §64/§65's exact banded slab — all permanent `ofgpu-validate` checks. Four fire-side gates **miss** — §42.8b Gate 2, §62.12 Gate 1-E, §61.8 Gate 61-A and §62.12 Gate 4 — and the summary **generates** the list it names them in from a registry each enters at the point it reports (SPEC-LIT §69), so they cannot go missing from it and a fifth could not be added without appearing; see “Gates that miss” below |
 | Field output & restart | `-output foam,vtu,nvdb,vdb,usda` and `-writeInterval` write `U`, `p`, `T`, the turbulence closure and any species fields the same way `ofgpu-buoyant`/`ofgpu-vof` do; `-restartWrite N`/`-restartFrom FILE` checkpoint and resume — `p0`, `dp0dt` and the species mass fractions are carried across the restart, not only `U`/`p`/`T`, because a low-Mach run's thermodynamic state is more than those three fields. 40 steps continuous vs. 20+restart+20 agree on the first post-restart pressure residual, `p0` and total enthalpy |
 | Volumetric sources | `sources[]` (JSONC) or `constant/fvSources` (OpenFOAM case directories) register a source on the momentum equation — a uniform body force over the whole domain, the one a periodic (cyclic-patch) case needs since it has no inlet to prescribe a mass flow from |
 
@@ -216,6 +216,47 @@ a whole time step be captured as a CUDA graph.
 Every operation that would accumulate into a diagonal by scattering over faces
 is instead a **gather** over a cell→face CSR. No double-precision atomics are
 needed, the summation order is fixed, and results are bitwise reproducible.
+
+Since SPEC-LIT §70 the matrix–vector product, the implicit under-relaxation and
+the value pinning walk a **merged row map ordered by the global face id** rather
+than two lists ordered by the local one. That is groundwork for multi-GPU and
+nothing else: cutting a mesh turns an internal face into a boundary face on both
+sides, which moves its term between the two lists, and floating-point addition
+is not associative — so `A·psi` would move in its bits under decomposition
+before any communication existed. On an undecomposed mesh the merged list is
+bit-for-bit the two old lists concatenated, so **nothing moved**: `ofgpu-validate`
+prints identical output apart from two wall-clock figures, and every field file
+the shipped cases write is byte-identical.
+
+SPEC-LIT §71 then cuts the mesh for real. A Hilbert space-filling-curve
+partitioner, a one-cell-deep ghost layer, and an exchange that is one gather
+kernel plus one device-to-device copy — no unpack kernel, and **no
+floating-point operation anywhere in it**, so a ghost cell holds bit for bit
+what its owner holds. A cut face's metrics are *copied* from the whole mesh
+rather than recomputed, which is what keeps the coefficients identical: two
+parts deriving a shared face's `Sf` from their own point lists traverse it in
+opposite windings and agree to round-off, not to the bit. `ofgpu-decompose
+<case> -method all` cuts a shipped case into 2, 3 and 4 parts by each of three
+partitioners, runs them in one process and compares every cell:
+
+| Case | Cells | 3 partitioners × 3 part counts |
+|---|---|---|
+| `cases/channelPeriodicWF.jsonc` (cyclic) | 192 | **9/9 bitwise identical** |
+| `cases/channel` | 24,000 | **9/9** |
+| `cases/burnerPlume.jsonc` | 32,768 | **9/9** |
+| `cases/plume` | 82,320 | **9/9** |
+
+**Still one process and one GPU.** There is no MPI, no NCCL and no second
+device; the parts exchange through a device-to-device copy on one card. What
+the gate runs is a fixed-iteration Jacobi sweep over a matrix assembled on the
+whole mesh — which is the most that *can* be gated today, because a cross-part
+reduction is not partition-invariant and the sixteen assembly kernels of §70.5
+are not either. Both are refused by name in §71.7, along with the multi-colour
+preconditioner, the FFT pressure backend, decomposed I/O and Lagrangian
+parcels. **METIS 5.2.x is Apache-2.0** (verified from its `LICENSE`) and is
+deliberately not linked: §71.2 gives the three reasons, the deciding one being
+that its output depends on its build, which would make the partition a property
+of the linked library rather than of the mesh.
 
 ---
 
@@ -291,11 +332,13 @@ shared refusal now covers all of them:
 ## Validation
 
 ```
-cargo test        1423 passed, 0 failed, 4 ignored (lib)
-                  1561 passed, 0 failed, 6 ignored (every target — including the
+cargo test        1447 passed, 0 failed, 4 ignored (lib)
+                  1595 passed, 0 failed, 6 ignored (every target — including the
                   per-binary CLI-parsing suites and SPEC-LIT §13.4.1's per-driver
                   "two runs must differ" pair tests)
-ofgpu-validate    745 / 745 checks passed (697 computed live, 48 replayed from recorded measurements)
+ofgpu-validate    747 / 747 checks passed (699 computed live, 48 replayed from recorded
+                  measurements), then a GENERATED list of the 6 gates that miss and the
+                  3 verdicts that are open (SPEC-LIT §69)
 ```
 
 **SPEC-LIT §13.4.1's standing requirement**: two short runs of a driver,
@@ -316,23 +359,40 @@ differ-list, because that list asserts the opposite of what they claim.
 
 ### Gates that miss
 
-Every check `ofgpu-validate` runs passes; that is what 745 / 745 means. It is
+Every check `ofgpu-validate` runs passes; that is what 747 / 747 means. It is
 a different statement from "every published benchmark this project compares
 itself against is reproduced", and the two are not allowed to be confused
 here. The gates below are **comparisons against published measurements that
-this solver does not reproduce**. `ofgpu-validate`'s own summary line names
-each of them on every run, and they are repeated here so that reading the
-binary's output is not the only way to find them out.
+this solver does not reproduce**. `ofgpu-validate`'s summary **generates** the
+list of them from a registry each gate enters at the point it reports
+(SPEC-LIT §69): printing a verdict and registering one are the same call, so
+all six are named on every run and a seventh could not be added without
+appearing there. Two of the run's own rows assert exactly that — that nothing
+printed a verdict outside the registry, and that every registered gate is
+named in the list. They are repeated here so that reading the binary's output
+is not the only way to find them out.
+
+That mechanism replaced a hand-written sentence, and the sentence was wrong
+three ways at once: it named four of the six, left the fifth (§42.8b) as an
+aside inside a parenthetical about replayed measurements, omitted the sixth
+(§68.12's Gate 68-C) altogether, and asserted that §62.12 Gate 4's verdict was
+"noted in the soot/WSGG block above" when **no line the binary printed
+mentioned that gate at all**. Two earlier passes fixed the sentence by editing
+it, which is what produced the third defect; this one deleted the sentence.
+**The table below is still maintained by hand against what the binary prints,
+and nothing yet compares the two files** — SPEC-LIT §69.9 names that as the
+next step rather than leaving it implied.
 
 | Gate | Verdict |
 |---|---|
 | **SPEC-LIT §60.5 Gate 5 — Kaminski & Prakash (1986)**, conjugate natural convection in a square enclosure. **Run live.** | **MISSES its 3 % bar at the conduction-dominated end.** The live 40² run at `Ra = 10⁴` reads `-7.11 %`, `-2.77 %`, `-0.07 %` at `Kr = 0.1, 1, 10` — worst at the SMALLEST conductivity ratio, shrinking to nothing at the largest. §60.5's mesh-converged sweep (eighteen runs on 40²/60²/80², every 60→80 change under 0.38 %) puts it at `-7.12 %`, `-3.00 %`, `-0.48 %` at `Ra = 10⁴` and `-7.79 %`, `-4.32 %`, `-0.81 %` at `Ra = 10⁵`. **The primary table was never read** — the paper is paywalled, and ScienceDirect, Scholar, Semantic Scholar, OpenAlex, Unpaywall, CORE, arXiv and two institutional repositories were all tried. The comparison is against Belazizia et al. (2012), open access, same configuration, **labelled a SECONDARY source** in the spec, in the case file and in the output. The disagreement tracks how much of the answer is conduction — 2 % of the series resistance at `Kr = 10`, 71 % at `Kr = 0.1` — and the secondary table's own `Ra = 500` column sits 3–7 % **above** the analytic conduction limit at a Rayleigh number whose fluid-layer value is `O(100)`, which is not physically possible. Gate 59-B reproduces that limit to `1e-8`. So the reference numbers appear to carry an offset where the miss is. **Nothing was tuned toward them** |
 | **SPEC-LIT §62.12 Gate 1-E — the WSGG total emissivity against RADCAL** (Grosshandler, NIST TN 1402, US public domain, compiled **unmodified** from `reference/fds/Source/rcal.f90` behind `tools/radcal_emissivity/`). **Run live.** | **MISSES its ±10 % bar at 58 of 108 points**, mean `\|d eps/eps\|` **11.4353 %**, worst **30.5234 %** at `M_r = 2`, `T = 400 K`, `p_a L = 0.03 atm.m`. Bordbar's own table could not be obtained, which is why the reference is RADCAL. **The shape is the finding**: the bias is a monotone ladder with exactly one sign change, `+20.84 %` at 400 K, `+14.11 %`, `+6.64 %`, `-1.31 %`, `-7.46 %`, `-12.28 %` at 2400 K, crossing zero near Bordbar's own `T_ref = 1200 K`. This is **not** evidence that Bordbar's set is wrong — RADCAL is a narrow-band model on NASA SP-3080 band data, Bordbar's is a fit to line-by-line HITEMP-2010, and at 2400 K both extrapolate. **Neither model is truth and the verdict line says so.** What it *is* evidence of is that the disagreement is structured rather than scattered, so a fire's smoke layer and its flame are the two places the choice of coefficient set moves the answer most |
-| **SPEC-LIT §61.8 Gate 61-A — the predicted post-flame soot yield** against Tewarson's measured one. A 1,200-step fire, so **not run inside `ofgpu-validate`**; the verdict is printed there as a note. | **MISSES totally: 0.000 kg/kg against a measured 0.024 for propane.** Not a small miss, and diagnosed: **0 of 32,768 cells** on `cases/burnerPlume.jsonc` sit above the model's own 1375 K formation threshold, so the burner mesh is too cold for the model to fire at all and the `laminarSmokePoint` run is bit-identical to having no soot. §61.7 predicted exactly this before any code was written. **The model is wired and the mesh is cold, which are different sentences**: the five smoke-point pair rows, run on a duct that *is* hot enough, pass. The `prescribedYield` leg returns `0.024` against `0.024` and is **labelled an IDENTITY on the line that prints it**, because it is handed the answer |
-| **SPEC-LIT §62.12 Gate 4 — the NIST 37 cm propane burner's radiative fraction** (Sung et al., NIST TN 2162r1, 2021: 0.23 / 0.30 / 0.33 at 20 / 34 / 50 kW). A multi-minute fire per heat release rate, so **not run inside `ofgpu-validate`**; the verdict is printed there as a note. | **MISSES.** `cases/nistBurner37cm.jsonc` never reaches a state in which a radiative fraction is a meaningful quantity: its combustion efficiency comes out at **226 %**, meaning the domain is consuming an accumulated fuel inventory rather than burning what enters, and §62.12's own gate text named `~95 %` efficiency as the precondition before any of this ran. **Gate 6 of the same family is NOT run at all** — Qu & Mudawar's forced-convection micro-channel — and that is a capability gap rather than an oversight: §60.2's fluid region is a closed cavity, so every non-empty patch is a no-slip wall and there is no inlet to name |
+| **SPEC-LIT §61.8 Gate 61-A — the predicted post-flame soot yield** against Tewarson's measured one. A 1,200-step fire, so **not run inside `ofgpu-validate`**; its verdict is registered and printed there anyway (SPEC-LIT §69). | **MISSES totally: 0.000 kg/kg against a measured 0.024 for propane.** Not a small miss, and diagnosed: **0 of 32,768 cells** on `cases/burnerPlume.jsonc` sit above the model's own 1375 K formation threshold, so the burner mesh is too cold for the model to fire at all and the `laminarSmokePoint` run is bit-identical to having no soot. §61.7 predicted exactly this before any code was written. **The model is wired and the mesh is cold, which are different sentences**: the five smoke-point pair rows, run on a duct that *is* hot enough, pass. The `prescribedYield` leg returns `0.024` against `0.024` and is **labelled an IDENTITY on the line that prints it**, because it is handed the answer |
+| **SPEC-LIT §62.12 Gate 4 — the NIST 37 cm propane burner's radiative fraction** (Sung et al., NIST TN 2162r1, 2021: 0.23 / 0.30 / 0.33 at 20 / 34 / 50 kW). A multi-minute fire per heat release rate, so **not run inside `ofgpu-validate`**; its verdict is registered and printed there anyway (SPEC-LIT §69). | **MISSES.** `cases/nistBurner37cm.jsonc` never reaches a state in which a radiative fraction is a meaningful quantity: its combustion efficiency comes out at **226 %**, meaning the domain is consuming an accumulated fuel inventory rather than burning what enters, and §62.12's own gate text named `~95 %` efficiency as the precondition before any of this ran. **Gate 6 of the same family is NOT run at all** — Qu & Mudawar's forced-convection micro-channel — and that is a capability gap rather than an oversight: §60.2's fluid region is a closed cavity, so every non-empty patch is a no-slip wall and there is no inlet to name |
 
-Two more comparisons miss and are recorded in the same voice rather than
-omitted.
+Two more comparisons miss. Both are in the generated list on every run —
+§42.8b as its entry `[1]` and §68.12's Gate 68-C as its `[6]` — and both are
+recorded here in the same voice rather than omitted.
 
 **SPEC-LIT §42.8b**, the NIST Reduced Scale Enclosure compartment sweep, misses
 and is replayed among the 48. Above 200 kW the predicted ceiling CO is low by a
@@ -346,8 +406,10 @@ doorway-flow gate, is the prerequisite this miss names, and it is still not
 run.
 
 **SPEC-LIT §68.12 Gate 68-C**, Theobald's ~90 hose streams, misses **with the
-gas held at rest** — the verdict is printed in the run's parcel block rather
-than in the summary line. The stream is thrown **61.29 %** of the measured
+gas held at rest**. Its verdict is printed in the run's parcel block and, since
+SPEC-LIT §69, in the summary's generated list beside the other five; before §69
+it was in the parcel block only, and the summary line did not know it existed.
+The stream is thrown **61.29 %** of the measured
 distance on average, against a `±10 %` bias and `30 %` scatter bar, and the
 number beside it says why rather than leaving it to be inferred: the vacuum
 bracket — the same launch with no drag at all — is **198.65 %** of the
@@ -358,6 +420,18 @@ with. Re-running the same 90 launches in a uniform co-flow shows that about
 and *tightens* the scatter from 0.359 to 0.271 — which says the still-air
 scatter is one missing mechanism seen ninety times, not ninety independent
 modelling errors. Having that number is worth more than a pass.
+
+**Three further verdicts are `OPEN` rather than missing**, and the generated
+list carries them as a second, separately counted group: SPEC-LIT §32.4's
+plane-channel comparisons against **Gnielinski (1976)**, which is a
+correlation and not a measurement. The wall-function leg is `+34.4 %` and
+`+15.2 %` of it at its own measured friction factor; the resolved leg is
+`+11.9 %` at the Petukhov pipe `f` and `+14.9 %` at its own — all outside the
+±10 % band. They are not counted among the six because a band not met against
+a fitted correlation, with a one-token opt-in (§37's Kays-Crawford `Pr_t`)
+that moves the resolved leg to `+4.3 %` and inside, is a different finding
+from a published measurement this solver does not reproduce. They were absent
+from the summary line before §69 for the same reason Gate 68-C was.
 
 ### Order of convergence — method of manufactured solutions
 
@@ -660,11 +734,12 @@ raise `fatal error C1189` under the traditional MSVC preprocessor.
 
 | Executable | Purpose |
 |---|---|
-| `ofgpu-validate` | Numerical validation (745 checks) |
+| `ofgpu-validate` | Numerical validation (747 checks) |
 | `ofgpu-bench` | Throughput and memory benchmarks |
 | `ofgpu-graph-bench` | CUDA graph against per-launch execution |
 | `ofgpu-dispatch-bench` | Runtime dispatch cost |
 | `ofgpu-probe` | Device properties |
+| `ofgpu-decompose` | Cut a case into parts, run them in one process, and report whether any bit moved (SPEC-LIT §71) |
 | `ofgpu-generate-mesh` | Case generation |
 | `ofgpu-k-epsilon`, `ofgpu-k-omega` | Turbulence models, standalone |
 | `ofgpu-sa` | Spalart-Allmaras and the DES97/DDES/IDDES family, standalone (SPEC-LIT §56–§58) |

@@ -487,7 +487,7 @@ extern "C" __global__ void solMax2Stage2
 //      A(owner[f], neighbour[f]) = upper[f]
 //      A(neighbour[f], owner[f]) = lower[f]
 //
-//  written as a GATHER over the cell->face CSR: one thread per cell walking
+//  written as a GATHER over the merged row map: one thread per cell walking
 //  its own faces. No atomics, no scatter, a fixed summation order per cell,
 //  and therefore bitwise reproducible.
 //
@@ -496,6 +496,15 @@ extern "C" __global__ void solMax2Stage2
 //  -boundaryCoeffs[bf]*psi[nbr] for each of them. bNbrCell[bf] < 0 marks
 //  every other kind of boundary face, whose contribution has already been
 //  folded into diag and source before the solve.
+//
+//  SPEC-LIT S70. This is the product every PBiCGStab and PCG iteration calls,
+//  and it is a SECOND implementation of the row sum - cuda/ldu.cu's lduAmul is
+//  the first. Both walk rfOffset/rfFace/rfFlags, which order a row by the
+//  GLOBAL face id, so a cut internal face - which becomes a boundary face on
+//  both sides and would otherwise move from the end of one loop to the end of
+//  another - keeps its place. Under the identity global map the merged list is
+//  the two old lists concatenated, so the additions below are in exactly the
+//  order they were and nothing moves.
 extern "C" __global__ void solAmul
 (
     ofscalar* __restrict__ Apsi,
@@ -505,11 +514,9 @@ extern "C" __global__ void solAmul
     const ofscalar* __restrict__ lower,
     const oflabel* __restrict__ owner,
     const oflabel* __restrict__ neighbour,
-    const oflabel* __restrict__ cfOffset,
-    const oflabel* __restrict__ cfFace,
-    const oflabel* __restrict__ cfOwn,
-    const oflabel* __restrict__ bcfOffset,
-    const oflabel* __restrict__ bcfFace,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
     const ofscalar* __restrict__ boundaryCoeffs,
     const oflabel* __restrict__ bNbrCell,
     oflabel nCells
@@ -520,18 +527,23 @@ extern "C" __global__ void solAmul
 
     ofscalar acc = diag[c]*psi[c];
 
-    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
     {
-        const oflabel f = cfFace[j];
-        acc += cfOwn[j] ? upper[f]*psi[neighbour[f]]
-                        : lower[f]*psi[owner[f]];
-    }
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;                 // dropped by a corrupt mesh
 
-    for (oflabel j = bcfOffset[c]; j < bcfOffset[c + 1]; ++j)
-    {
-        const oflabel bf = bcfFace[j];
-        const oflabel nc = bNbrCell[bf];
-        if (nc >= 0) acc -= boundaryCoeffs[bf]*psi[nc];
+        const oflabel fl = rfFlags[j];
+
+        if (fl & OFGPU_RF_BOUNDARY)
+        {
+            const oflabel nc = bNbrCell[f];
+            if (nc >= 0) acc -= boundaryCoeffs[f]*psi[nc];
+        }
+        else
+        {
+            acc += (fl & OFGPU_RF_OWNS) ? upper[f]*psi[neighbour[f]]
+                                        : lower[f]*psi[owner[f]];
+        }
     }
 
     Apsi[c] = acc;

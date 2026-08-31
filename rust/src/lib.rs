@@ -45,6 +45,7 @@
 //! `PROVENANCE.md` is the per-file record for the whole tree. No GPL-licensed
 //! source was consulted.
 
+pub mod decompose;
 pub mod device;
 pub mod error;
 pub mod types;
@@ -53,6 +54,7 @@ pub mod field;
 pub mod field_ops;
 pub mod field_setup;
 pub mod fv;
+pub mod halo;
 pub mod ldu;
 pub mod ldu_ops;
 pub mod les;

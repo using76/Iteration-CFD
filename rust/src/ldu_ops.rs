@@ -104,6 +104,30 @@ fn check_shape(a: &GpuLduMatrix, m: &GpuMesh, what: &str) -> Result<()> {
             m.n_boundary_faces
         )));
     }
+    // SPEC-LIT §70. Three of the five kernels below walk the merged row map
+    // instead of the two CSRs, so its shape is as load-bearing as the counts
+    // above. `GpuMesh::upload` builds it whenever the host mesh did not, so a
+    // mismatch here means the mesh was assembled by some route that bypassed
+    // both - worth a named error rather than an out-of-bounds gather.
+    if a.n_cells > 0
+        && (m.rf_offset.len() != m.n_cells + 1
+            || m.rf_face.len() != 2 * m.n_internal_faces + m.n_boundary_faces
+            || m.rf_flags.len() != m.rf_face.len())
+    {
+        return Err(Error::Config(format!(
+            "{what}: the mesh's merged row map is {}/{}/{} long, but {} cells, \
+             {} internal faces and {} boundary faces need {}/{}/{}",
+            m.rf_offset.len(),
+            m.rf_face.len(),
+            m.rf_flags.len(),
+            m.n_cells,
+            m.n_internal_faces,
+            m.n_boundary_faces,
+            m.n_cells + 1,
+            2 * m.n_internal_faces + m.n_boundary_faces,
+            2 * m.n_internal_faces + m.n_boundary_faces
+        )));
+    }
     Ok(())
 }
 
@@ -230,11 +254,9 @@ pub fn amul(
             .arg(&m.owner)
             .arg(&m.neighbour)
             .arg(&m.b_nbr_cell)
-            .arg(&m.cf_offset)
-            .arg(&m.cf_face)
-            .arg(&m.cf_own)
-            .arg(&m.bcf_offset)
-            .arg(&m.bcf_face)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
             .arg(&nl)
             .launch(cfg_for(n))?;
     }
@@ -312,11 +334,9 @@ pub fn relax(
             .arg(&a.boundary_coeffs)
             .arg(psi)
             .arg(&m.b_nbr_cell)
-            .arg(&m.cf_offset)
-            .arg(&m.cf_face)
-            .arg(&m.cf_own)
-            .arg(&m.bcf_offset)
-            .arg(&m.bcf_face)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
             .arg(&alpha)
             .arg(&nl)
             .launch(cfg_for(n))?;
@@ -365,11 +385,9 @@ pub fn set_values(gpu: &Gpu, k: &LduKernels, a: &mut GpuLduMatrix, m: &GpuMesh) 
             .arg(&m.owner)
             .arg(&m.neighbour)
             .arg(&m.b_nbr_cell)
-            .arg(&m.cf_offset)
-            .arg(&m.cf_face)
-            .arg(&m.cf_own)
-            .arg(&m.bcf_offset)
-            .arg(&m.bcf_face)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
             .arg(&nl)
             .launch(cfg_for(n))?;
     }
@@ -883,6 +901,244 @@ pub(crate) mod tests {
         // The arithmetic, spelled out once, so the dense literal above is not
         // simply believed either.
         assert!((got[0] - (3.55 * 1.1 + 0.5 * -2.3 - 0.4 * 4.2)).abs() < 1e-13);
+    }
+
+    // ----------------------------------------------------------------------
+    //  The global-face-ordered row - SPEC-LIT §70
+    // ----------------------------------------------------------------------
+
+    /// The four-cell chain of §70.4, in the two forms that section compares:
+    /// whole, and with the middle internal face re-expressed as a COUPLED
+    /// BOUNDARY PAIR, which is the shape a processor patch has.
+    ///
+    /// Only what `amul` reads carries meaning; the rest is sized so the mesh
+    /// uploads. `cut = false` gives internal faces `(0,1) (1,2) (2,3)` and one
+    /// boundary face each on cells 0 and 3. `cut = true` keeps the same four
+    /// cells but stores `(1,2)` as one boundary face on cell 1 naming cell 2
+    /// and one on cell 2 naming cell 1 - and gives the pair back the GLOBAL id
+    /// the internal face had, which is the whole mechanism §70 adds.
+    fn chain_cut_pair(cut: bool) -> HostMesh {
+        let mut m = if cut {
+            HostMesh {
+                n_cells: 4,
+                n_internal_faces: 2,
+                n_boundary_faces: 4,
+                owner: vec![0, 2],
+                neighbour: vec![1, 3],
+                b_face_cells: vec![0, 3, 1, 2],
+                b_nbr_cell: vec![-1, -1, 2, 1],
+                b_nbr_face: vec![-1, -1, 3, 2],
+                b_kind: vec![
+                    PatchKind::Generic as Label,
+                    PatchKind::Generic as Label,
+                    PatchKind::Processor as Label,
+                    PatchKind::Processor as Label,
+                ],
+                // Local internal face 0 is global 0 and local 1 is global 2;
+                // the two halves of the cut face both carry global 1, the id
+                // of the internal face they replace. NOT ascending in slot
+                // order, so the builder takes its sorting path.
+                global_face: vec![0, 2, 3, 4, 1, 1],
+                ..Default::default()
+            }
+        } else {
+            HostMesh {
+                n_cells: 4,
+                n_internal_faces: 3,
+                n_boundary_faces: 2,
+                owner: vec![0, 1, 2],
+                neighbour: vec![1, 2, 3],
+                b_face_cells: vec![0, 3],
+                b_nbr_cell: vec![-1, -1],
+                b_nbr_face: vec![-1, -1],
+                b_kind: vec![PatchKind::Generic as Label, PatchKind::Generic as Label],
+                ..Default::default()
+            }
+        };
+
+        let nb = m.n_boundary_faces;
+        m.b_sf = vec![Vec3::new(1.0, 0.0, 0.0); nb];
+        m.b_mag_sf = vec![1.0; nb];
+        m.b_cf = vec![Vec3::ZERO; nb];
+        m.b_delta_coeffs = vec![1.0; nb];
+        m.b_non_orth_corr = vec![Vec3::ZERO; nb];
+        m.b_y = vec![0.5; nb];
+        m.b_weights = vec![1.0; nb];
+        m.b_patch = (0..nb as Label).collect();
+        m.patches = (0..nb)
+            .map(|p| PatchInfo {
+                name: format!("p{p}"),
+                type_name: "patch".to_string(),
+                kind: PatchKind::Generic,
+                start: p,
+                size: 1,
+                nbr_patch: None,
+            })
+            .collect();
+
+        let nf = m.n_internal_faces;
+        m.v = vec![1.0; 4];
+        m.c = (0..4)
+            .map(|i| Vec3::new(i as Scalar, 0.0, 0.0))
+            .collect();
+        m.sf = vec![Vec3::new(1.0, 0.0, 0.0); nf];
+        m.mag_sf = vec![1.0; nf];
+        m.cf = vec![Vec3::ZERO; nf];
+        m.weights = vec![0.5; nf];
+        m.delta_coeffs = vec![1.0; nf];
+        m.non_orth_corr = vec![Vec3::ZERO; nf];
+
+        m.build_cell_face_maps();
+        m
+    }
+
+    /// The coefficients §70.4 chooses, written once for both `amul` kernels.
+    ///
+    /// Row 2 becomes a three-term sum whose two orders differ by a whole ulp:
+    /// `diag[2] psi[2] = 1`, the global-id-1 term `eps/2`, the global-id-2
+    /// term `eps`. `boundary_coeffs` on the cut pair is the NEGATED
+    /// off-diagonal, because `amul` applies a coupled term as
+    /// `sum -= boundary_coeffs psi_N` and IEEE negation is exact.
+    fn fill_cut_pair(gpu: &Gpu, a: &mut GpuLduMatrix, cut: bool) {
+        const E: Scalar = Scalar::EPSILON;
+
+        gpu.write(&mut a.diag, &[1.0 as Scalar; 4]).expect("diag");
+        if cut {
+            gpu.write(&mut a.upper, &[0.25 as Scalar, E]).expect("upper");
+            gpu.write(&mut a.lower, &[0.5 as Scalar, 0.75]).expect("lower");
+            gpu.write(
+                &mut a.boundary_coeffs,
+                &[0.0 as Scalar, 0.0, -0.125, -(E / 2.0)],
+            )
+            .expect("bc");
+        } else {
+            gpu.write(&mut a.upper, &[0.25 as Scalar, 0.125, E])
+                .expect("upper");
+            gpu.write(&mut a.lower, &[0.5 as Scalar, E / 2.0, 0.75])
+                .expect("lower");
+        }
+    }
+
+    /// SPEC-LIT §70.4. The mesh and its own one-face decomposition produce the
+    /// SAME BITS, and the answer the old two-loop ordering would have produced
+    /// is different - so the test cannot pass by the two orders agreeing,
+    /// which is how a test of this shape usually rots.
+    ///
+    /// `psi` is uniform, which settles the only other question a reader could
+    /// raise: whether the compiler contracted the multiply-add differently on
+    /// the two paths. `fma(x, 1, s)` and `x + s` are the same value.
+    #[test]
+    fn a_cut_internal_face_keeps_its_place_in_the_row() {
+        let Some(gpu) = Gpu::new(0).ok() else { return };
+        let k = LduKernels::new(&gpu).expect("load cuda/ldu.cu");
+
+        let mut out: Vec<Vec<Scalar>> = Vec::new();
+        for cut in [false, true] {
+            let hm = chain_cut_pair(cut);
+            let m = GpuMesh::upload(&gpu, &hm).expect("upload");
+            let mut a = GpuLduMatrix::new(&gpu, &m).expect("matrix");
+            a.zero(&gpu).expect("zero");
+            fill_cut_pair(&gpu, &mut a, cut);
+
+            let psi = gpu.upload(&[1.0 as Scalar; 4]).expect("psi");
+            let mut ap: DevBuf<Scalar> = gpu.zeros(4).expect("alloc");
+            amul(&gpu, &k, &mut ap, &psi, &a, &m).expect("amul");
+            gpu.sync().expect("sync");
+            out.push(gpu.download(&ap).expect("Apsi"));
+        }
+
+        // The two meshes really are different decompositions of one mesh.
+        assert_eq!(chain_cut_pair(false).n_internal_faces, 3);
+        assert_eq!(chain_cut_pair(true).n_internal_faces, 2);
+        assert_eq!(chain_cut_pair(true).n_boundary_faces, 4);
+
+        for (c, (whole, cut)) in out[0].iter().zip(&out[1]).enumerate() {
+            assert_eq!(
+                whole.to_bits(),
+                cut.to_bits(),
+                "cell {c}: whole {whole} and cut {cut} are not the same bits"
+            );
+        }
+
+        // Row 2 is the one that discriminates, and its value is stated rather
+        // than merely compared: 1 (+) eps/2 (+) eps, left to right.
+        const E: Scalar = Scalar::EPSILON;
+        let right = (1.0 as Scalar + E / 2.0) + E;
+        let wrong = (1.0 as Scalar + E) + E / 2.0;
+        assert_ne!(
+            right.to_bits(),
+            wrong.to_bits(),
+            "the two summation orders agree here, so this test measures nothing"
+        );
+        assert_eq!(out[0][2].to_bits(), right.to_bits(), "row 2, whole mesh");
+        assert_eq!(out[1][2].to_bits(), right.to_bits(), "row 2, cut mesh");
+    }
+
+    /// The same statement for `solAmul`, the product PBiCGStab and PCG
+    /// actually call - a SECOND implementation of the row sum, living in
+    /// `cuda/solver.cu`, and the one a reader following only `cuda/ldu.cu`
+    /// would miss.
+    #[test]
+    fn the_solver_amul_keeps_a_cut_faces_place_too() {
+        let Some(gpu) = Gpu::new(0).ok() else { return };
+        let sk = crate::solver::SolverKernels::new(&gpu).expect("load cuda/solver.cu");
+
+        let mut out: Vec<Vec<Scalar>> = Vec::new();
+        for cut in [false, true] {
+            let hm = chain_cut_pair(cut);
+            let m = GpuMesh::upload(&gpu, &hm).expect("upload");
+            let mut a = GpuLduMatrix::new(&gpu, &m).expect("matrix");
+            a.zero(&gpu).expect("zero");
+            fill_cut_pair(&gpu, &mut a, cut);
+
+            let psi = gpu.upload(&[1.0 as Scalar; 4]).expect("psi");
+            let mut ap: DevBuf<Scalar> = gpu.zeros(4).expect("alloc");
+            crate::solver::amul(&gpu, &sk, &mut ap, &psi, &a, &m).expect("solAmul");
+            gpu.sync().expect("sync");
+            out.push(gpu.download(&ap).expect("Apsi"));
+        }
+
+        const E: Scalar = Scalar::EPSILON;
+        for (c, (whole, cut)) in out[0].iter().zip(&out[1]).enumerate() {
+            assert_eq!(whole.to_bits(), cut.to_bits(), "solAmul, cell {c}");
+        }
+        assert_eq!(
+            out[0][2].to_bits(),
+            ((1.0 as Scalar + E / 2.0) + E).to_bits()
+        );
+    }
+
+    /// A `HostMesh` that never called `build_cell_face_maps` - which is how a
+    /// good half of this crate's test meshes are written - must still upload a
+    /// merged map that gathers the right faces, not an empty one that silently
+    /// gathers none and leaves `amul` returning `diag*psi`.
+    #[test]
+    fn an_uploaded_mesh_always_carries_a_row_map() {
+        let Some(gpu) = Gpu::new(0).ok() else { return };
+        let k = LduKernels::new(&gpu).expect("load cuda/ldu.cu");
+
+        let mut bare = chain_cut_pair(false);
+        bare.rf_offset.clear();
+        bare.rf_face.clear();
+        bare.rf_flags.clear();
+
+        let m = GpuMesh::upload(&gpu, &bare).expect("upload");
+        let mut a = GpuLduMatrix::new(&gpu, &m).expect("matrix");
+        a.zero(&gpu).expect("zero");
+        gpu.write(&mut a.diag, &[1.0 as Scalar; 4]).expect("diag");
+        gpu.write(&mut a.upper, &[0.25 as Scalar, 0.125, 0.5])
+            .expect("upper");
+        gpu.write(&mut a.lower, &[0.5 as Scalar, 0.25, 0.75])
+            .expect("lower");
+
+        let psi = gpu.upload(&[1.0 as Scalar; 4]).expect("psi");
+        let mut ap: DevBuf<Scalar> = gpu.zeros(4).expect("alloc");
+        amul(&gpu, &k, &mut ap, &psi, &a, &m).expect("amul");
+        gpu.sync().expect("sync");
+
+        let got = gpu.download(&ap).expect("Apsi");
+        let want: [Scalar; 4] = [1.25, 1.625, 1.75, 1.75];
+        assert!(max_diff(&got, &want) == 0.0, "{got:?} vs {want:?}");
     }
 
     // ----------------------------------------------------------------------
