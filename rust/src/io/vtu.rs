@@ -378,6 +378,120 @@ pub fn write_vtu(
     Ok(())
 }
 
+/// Write the live Lagrangian parcels as a serial `.vtp` (PolyData, appended
+/// raw binary, little endian, `header_type="UInt64"`) - SPEC-LIT §66.13.
+///
+/// One VTK vertex per live parcel, in slot order, with the parcel state as
+/// `PointData`. `.vtp` rather than `.vtu` because PolyData with a `Verts`
+/// section is the conventional VTK form for a particle cloud and is what
+/// ParaView's Glyph filter expects; it is the same appended-binary encoding
+/// this module already writes, from the same published Kitware "VTK File
+/// Formats" reference, so no new format was decoded.
+///
+/// **Dead slots are not written.** A parcel whose `cell` is negative has left
+/// the domain or was never filled; emitting it would put a stale position in
+/// the file and make the point count meaningless as a parcel count.
+///
+/// `uid` is emitted as `Float64` rather than as an integer array, because a
+/// 64-bit identity does not survive `Float64` exactly and a reader that
+/// silently rounds it would be worse than one that never had it: the
+/// low-order half is written as `uidLow` alongside, so the full identity is
+/// recoverable from the file. The identity is not a physical quantity - it is
+/// there to follow one parcel across output times.
+pub fn write_parcels_vtp(
+    path: &Path,
+    s: &crate::parcels::ParcelSnapshot,
+    time: Option<Scalar>,
+) -> Result<()> {
+    let live = s.live();
+    let n = live.len();
+
+    let mut app = AppendedWriter::default();
+
+    let off_points = app.push(Block::f64(
+        live.iter()
+            .flat_map(|&i| [s.x[i].x as f64, s.x[i].y as f64, s.x[i].z as f64]),
+    ));
+    let off_connectivity = app.push(Block::i64((0..n as i64).collect::<Vec<_>>()));
+    let off_offsets = app.push(Block::i64((1..=n as i64).collect::<Vec<_>>()));
+    let off_time = time.map(|t| app.push(Block::f64([t as f64])));
+
+    let off_u = app.push(Block::f64(
+        live.iter()
+            .flat_map(|&i| [s.u[i].x as f64, s.u[i].y as f64, s.u[i].z as f64]),
+    ));
+    let off_d = app.push(Block::f64(live.iter().map(|&i| s.d[i] as f64)));
+    let off_t = app.push(Block::f64(live.iter().map(|&i| s.temperature[i] as f64)));
+    let off_np = app.push(Block::f64(live.iter().map(|&i| s.n_p[i] as f64)));
+    let off_cell = app.push(Block::i64(live.iter().map(|&i| i64::from(s.cell[i]))));
+    let off_uid_hi = app.push(Block::f64(live.iter().map(|&i| (s.uid[i] >> 32) as f64)));
+    let off_uid_lo = app.push(Block::f64(
+        live.iter().map(|&i| (s.uid[i] & 0xffff_ffff) as f64),
+    ));
+
+    let mut xml = String::new();
+    xml.push_str("<VTKFile type=\"PolyData\" version=\"1.0\" byte_order=\"LittleEndian\" header_type=\"UInt64\">\n");
+    xml.push_str("  <PolyData>\n");
+    xml.push_str(&format!(
+        "    <Piece NumberOfPoints=\"{n}\" NumberOfVerts=\"{n}\" NumberOfLines=\"0\" \
+         NumberOfStrips=\"0\" NumberOfPolys=\"0\">\n"
+    ));
+
+    if let Some(off) = off_time {
+        xml.push_str("      <FieldData>\n");
+        xml.push_str(&format!(
+            "        <DataArray type=\"Float64\" Name=\"TIME\" NumberOfTuples=\"1\" format=\"appended\" offset=\"{off}\"/>\n"
+        ));
+        xml.push_str("      </FieldData>\n");
+    }
+
+    xml.push_str("      <Points>\n");
+    xml.push_str(&format!(
+        "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"appended\" offset=\"{off_points}\"/>\n"
+    ));
+    xml.push_str("      </Points>\n");
+
+    xml.push_str("      <Verts>\n");
+    xml.push_str(&format!(
+        "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"appended\" offset=\"{off_connectivity}\"/>\n"
+    ));
+    xml.push_str(&format!(
+        "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"appended\" offset=\"{off_offsets}\"/>\n"
+    ));
+    xml.push_str("      </Verts>\n");
+
+    xml.push_str("      <PointData Scalars=\"d\" Vectors=\"U\">\n");
+    for (name, comps, off) in [
+        ("U", 3, off_u),
+        ("d", 1, off_d),
+        ("T", 1, off_t),
+        ("nP", 1, off_np),
+        ("uidHigh", 1, off_uid_hi),
+        ("uidLow", 1, off_uid_lo),
+    ] {
+        xml.push_str(&format!(
+            "        <DataArray type=\"Float64\" Name=\"{name}\" NumberOfComponents=\"{comps}\" format=\"appended\" offset=\"{off}\"/>\n"
+        ));
+    }
+    xml.push_str(&format!(
+        "        <DataArray type=\"Int64\" Name=\"cell\" NumberOfComponents=\"1\" format=\"appended\" offset=\"{off_cell}\"/>\n"
+    ));
+    xml.push_str("      </PointData>\n");
+
+    xml.push_str("    </Piece>\n");
+    xml.push_str("  </PolyData>\n");
+    xml.push_str("  <AppendedData encoding=\"raw\">\n_");
+
+    let appended_bytes = app.into_bytes();
+
+    let mut out = std::fs::File::create(path).path(path)?;
+    out.write_all(xml.as_bytes()).path(path)?;
+    out.write_all(&appended_bytes).path(path)?;
+    out.write_all(b"\n  </AppendedData>\n</VTKFile>\n").path(path)?;
+
+    Ok(())
+}
+
 /// Write a ParaView `.pvd` "Collection" file listing a `.vtu` per time step.
 /// `series` pairs each output time with the path to its `.vtu` (written as
 /// given - relative paths are the caller's job if the two files must move

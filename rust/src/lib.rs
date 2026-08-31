@@ -59,6 +59,7 @@ pub mod les;
 pub mod mesh;
 pub mod momentum;
 pub mod models;
+pub mod parcels;
 pub mod potential_flow;
 pub mod restart;
 pub mod rheology;

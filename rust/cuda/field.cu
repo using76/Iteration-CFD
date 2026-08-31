@@ -416,6 +416,26 @@ extern "C" __global__ void fldAdd
 //- dst /= src. No epsilon in the denominator: a zero divisor here means the
 //  caller handed over a field it should have bounded first, and hiding that
 //  behind a regularisation would hide the bug with it.
+//- out += in, elementwise, on a vector field.
+//
+//  The vector twin of `fldAdd`, and the accumulate SPEC-LIT S18's whole-field
+//  registries are built out of: `MomentumSources` sums the contributions of
+//  everything that pushes a body force into one array before the assembly
+//  reads it once.
+extern "C" __global__ void fldAddVector
+(
+    ofvec3* __restrict__ out,
+    const ofvec3* __restrict__ in,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofvec3 a = out[i];
+    const ofvec3 b = in[i];
+    out[i] = mkvec(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
 extern "C" __global__ void fldDivide
 (
     ofscalar* __restrict__ dst,

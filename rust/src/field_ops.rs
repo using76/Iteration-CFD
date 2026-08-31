@@ -64,6 +64,7 @@ pub struct FieldKernels {
     clamp: CudaFunction,
     multiply: CudaFunction,
     add: CudaFunction,
+    add_vector: CudaFunction,
     divide: CudaFunction,
     scale: CudaFunction,
 }
@@ -84,6 +85,7 @@ impl FieldKernels {
             clamp: k.func("fldClamp")?,
             multiply: k.func("fldMultiply")?,
             add: k.func("fldAdd")?,
+            add_vector: k.func("fldAddVector")?,
             divide: k.func("fldDivide")?,
             scale: k.func("fldScale")?,
         })
@@ -659,6 +661,37 @@ pub fn add_field(
     let nl = n as Label;
 
     let func = k.add.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(&mut *dst)
+            .arg(src)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dst += src`, elementwise, on a vector field.
+///
+/// The vector twin of [`add_field`]. What SPEC-LIT S18's whole-field source
+/// registries accumulate into: several producers, one array, and an assembly
+/// that reads it once and asks nothing about where it came from.
+pub fn add_field_vector(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    dst: &mut DevBuf<Vec3>,
+    src: &DevBuf<Vec3>,
+    n: usize,
+) -> Result<()> {
+    check_len("add_field_vector", dst.len(), n, "dst")?;
+    check_len("add_field_vector", src.len(), n, "src")?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+
+    let func = k.add_vector.clone();
     unsafe {
         gpu.stream()
             .launch_builder(&func)

@@ -13260,6 +13260,38 @@ The clipped-cell count is reduced by the same deterministic tree reduction
 `CombustionStats::n_clipped` already uses (fixed-size partials, fixed order, no
 atomic), so the reported count is bitwise reproducible.
 
+**Every reported number is reduced on the device, and none of them is reduced
+per step.** `Soot::correct` is source kernel, transport solve, bound and
+`rho Y_s`, and adds **no host traffic of its own** - the linear solver's own
+round trips per inner product are §8's and are not this section's to remove.
+The six quantities §61.8 reports come from a separate `Soot::stats`, which the
+driver calls when it prints.
+
+*This is a correction of what this section shipped first, and the defect is
+worth naming because it is a class this project keeps finding.* The reductions
+used to run at the end of **every** `correct` call - and with them a download
+of `Y_s` and a download of `T`, two full-field host round trips per time step -
+while the only production caller threw the returned struct away and recomputed
+the same numbers on the host from five freshly downloaded fields at the end of
+the run. Two definitions of one quantity, and the device one dead. The split
+leaves exactly one definition of each and takes this section's own host
+traffic out of the step loop entirely.
+**It cannot move a solution value**, because nothing the report touches is read
+by the solve - the scratch buffer, the reduction partials and the
+single-element output are the soot module's own - so the default path is
+bitwise identical BY CONSTRUCTION rather than by measurement. Measured anyway,
+on the live fire: every printed digit unmoved (§61.8).
+
+What the split is **not** is a measured speed-up, and this paragraph exists so
+nobody quotes it as one. Four runs of the same 1200-step WSGG + soot case
+straddling the change came in at `99.3 s` **before** and `99.1`, `99.8`,
+`97.4 s` **after** - the before-value sits inside the after-values' own spread,
+so the measurement resolves nothing. The two transfers the split removes are
+`0.26 MB` each per step at 32 768 cells, which is below this case's
+run-to-run scatter of about `1 %` on a shared GPU. They scale with the mesh -
+`1.3 MB` each per step at 165 888 cells - and that was **not** measured. The
+justification is one definition of each number, not speed.
+
 ### 61.7 The measurement that decides which model a fire case can actually use
 
 The smoke-point model forms **no soot below 1375 K**. A resolved laminar flame
@@ -13275,6 +13307,31 @@ deliverable is prescribed yield.
 something rather than against nothing. If it collapses, the fallback is
 prescribed yield (shipped, for exactly this reason) or a subgrid
 temperature-PDF correction, which is a paper and not a task.
+
+**The quantity that carries the comparison is the predicted post-flame soot
+yield**, because that is the unit a measured soot number is published in:
+
+```
+y_s,pred = ( integral omega_sf dV - integral omega_so dV ) / mdot_F,burnt     (61.7)
+```
+
+with `mdot_F,burnt` the domain's own fuel consumption, `integral q'''_c dV /
+dh_c` - what §27 **burnt**, not what the inlet supplied, because a post-flame
+yield is per kilogram burnt. A non-positive denominator returns `0`: with
+nothing burning there is no yield, and dividing would manufacture one.
+
+Two readings of (61.7), and they are different readings:
+
+* under `prescribedYield` it returns the case's own `y_s` back to round-off,
+  **by construction** - (61.2) is `y_s q'''_c/dh_c` and its domain integral is
+  `y_s` times the fuel burnt identically. That is a **calibration of the
+  diagnostic**, not a test of the model, and the run says so on the same line
+  rather than leaving a reader to notice;
+* under `laminarSmokePoint` nothing in the source term knows what a yield is -
+  the model sees `Z` and `T` and a measured smoke-point height - so (61.7) is
+  a genuine prediction, and it is the only number a fire run produces that a
+  published soot measurement can be held against. §61.8's **Gate 61-A** is
+  that comparison.
 
 ### 61.8 What must hold, and what was measured
 
@@ -13292,6 +13349,72 @@ temperature-PDF correction, which is a paper and not a task.
 | every refusal of §61.5 | fires, and names the setting | pass - six of them, Moss-Brookes and the sectional family each refused WITH the reason |
 | §61.7's temperature window | fraction of cells above `1375 K` on the fire gate's mesh, REPORTED | **`0` of `32 768` cells (0 %)** on `cases/burnerPlume.jsonc` - and the `laminarSmokePoint` run is consequently **bit-identical to no soot at all**. §61.7's doubt is confirmed rather than dispelled; §62.13 carries the full row |
 | §61.2's mass approximation | `max Y_s` and the resident soot mass REPORTED | `max Y_s = 0.0397` in the near-burner stagnation cell, resident mass `0.303 g` - a domain-mean mass fraction of `6.3e-5`. The peak is what an unoxidised, undeposited tracer does in a slow inlet cell, and it is on the screen rather than in a footnote |
+| the device report against the host one (§61.6) | every printed number unmoved when the driver's host loops became device reductions | **unmoved in every printed digit** on the live fire: `max Y_s 0.0397`, resident mass `0.303409 g`, formation `0.00821579 g/s`, and with them combustion efficiency `75.8133 %` and radiated fraction `45.7607 %`. `max Y_s` is exact on both sides (a maximum does not round); the three integrals agree to the six digits the report prints |
+| (61.7) under `prescribedYield` | returns `y_s` back, to round-off | `<= 1e-12` relative on the unit gate; `0.024` against `0.024` on the live fire - and the run LABELS it an identity |
+| **Gate 61-A**, (61.7) under `laminarSmokePoint` against a measured yield | within a factor of two of Tewarson's `0.024 kg/kg` for propane | **MISSED: `0.000` against `0.024`.** See below |
+
+**Gate 61-A - the predicted post-flame soot yield against a measured one:
+MISSED, and the diagnosis is on the same screen.**
+
+The gate is the one the design note this section was written from asked for:
+run the model that *predicts* soot on a fire, and hold its predicted
+post-flame yield against a published measured one. Configuration:
+`cases/burnerPlume.jsonc`, 32 768 cells, 1200 steps at `deltaT = 0.005 s`,
+propane, `laminarSmokePoint` at `l_s = 0.162 m`, `M_F = 44.1`, `Y_F,1 = 1`,
+`omega_so,P = 0.85`, WSGG radiation with the window dropped. Target
+`y_s = 0.024 kg/kg` (Tewarson, SFPE Handbook Table A.40, as quoted for propane
+in `reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex` -
+NIST, public domain).
+
+| quantity | measured |
+|---|---|
+| predicted post-flame soot yield (61.7) | **`0` kg/kg, exactly** - formation and oxidation are both identically zero, so this is not a small number, it is the absence of one |
+| Tewarson's measured propane yield | `0.024 kg/kg` |
+| formation, oxidation | `0 g/s`, `0 g/s` |
+| resident soot mass, `max Y_s` | `0 g`, `0` |
+| cells above the model's own 1375 K threshold | **`0` of `32 768`** |
+| combustion efficiency, radiated fraction | `62.9911 %`, `47.2833 %` - **identical to the same case with no soot at all** |
+
+**The miss is total and it is not a calibration problem.** The smoke-point
+model's formation window is zero below 1375 K (§61.3) and no cell on this mesh
+reaches it, so `omega_sf` is identically zero everywhere and no choice of
+`l_s`, `M_F`, `Y_F,1` or `omega_so,P` can move the answer off zero. This is
+§61.7's collapse, predicted before any of this section was written, now
+carrying a number in the unit the measurement is published in.
+
+**What the gate does NOT show is that the model is unwired**, and the
+distinction matters because the two failures look identical from a fire run.
+§61.5's five smoke-point pair rows run on a duct at 1600 K walls, 1500 K
+ambient and `Y_F = 0.10` - inside the model's own windows - and every one of
+them REQUIRES the run to differ, failing by name if it does not. They pass. The model works and the
+mesh is too cold for it; those are different sentences and this document says
+which one it means.
+
+**The prescribed-yield leg is not a pass in disguise.** On the same case it
+returns `0.024` against `0.024`, and both the run and (61.7) above say why
+that is an identity: the source term is `y_s q'''_c/dh_c`, so integrating it
+and dividing by the fuel burnt gives `y_s` back whatever the flow does. A
+model that is handed the answer cannot be gated on producing it.
+
+**What would close it**, named rather than implied: a mesh that resolves the
+flame - the same refinement §62.12's Gate 4 already names as part of itself -
+or the Santoro, Semerjian & Dobbins (1983) laminar co-flow ethylene flame,
+which is the regime the model was calibrated in and where its own paper's soot
+volume fractions are measured, in the single-digit ppm range.
+
+That second case **cannot be built with what this crate has, and the crate says
+so itself**: `ofgpu-fire` REFUSES `-combustion` on a laminar case by name -
+*"needs a turbulence closure with a mixing time scale (k-epsilon's eps/k,
+k-omega/SST's beta_star*omega, or an LES's resolved strain rate); this case
+selects laminar, which has none (§13.4, §27, §30.2)"* - because §27's rate is
+mixing-limited and a laminar diffusion flame has no mixing time scale to give
+it. Running it under an LES closure instead would not fix that; it would hand a
+laminar flame a subgrid strain rate that is a numerical artefact and call the
+result a validation. **This is a capability gap and not an oversight**, in
+exactly the sense §60.6 uses for its own Gate 6: the model this crate has
+cannot be asked the question, and pretending otherwise would be the worse
+answer. Closing it needs a finite-rate or flamelet closure beside §27, which is
+a section of its own and not a task inside this one.
 
 ---
 
@@ -13320,7 +13443,9 @@ Mancini, *JQSRT* 219 (2018) 274**; **Sadeghi, Hostikka, Fraga & Bordbar,
 Soc. A* 430 (1990) 577**; **Widmann, *Combust. Sci. Technol.* 175 (2003)
 2299**; **Modest, *Radiative Heat Transfer*, 3rd ed., ch. 11**; **Grosshandler,
 *RADCAL*, NIST TN 1402 (1993)**, DOI `10.6028/NIST.TN.1402` - US public
-domain.
+domain, and **the reference §62.12's Gate 1-E measures the total emissivity
+against**: NIST's own implementation ships at `reference/fds/Source/rcal.f90`
+and `tools/radcal_emissivity/` compiles it unmodified.
 
 `reference/fds/Source/radi.f90` is **public domain** (NIST;
 `reference/fds/LICENSE.md`: *"software developed by NIST employees is not
@@ -13410,7 +13535,17 @@ evaluating the published polynomials over `T` in `[300, 2500] K` on a
 Fire conditions therefore sit inside the set's `M_r` window everywhere
 (0.01 <= 1.33 <= 4 for propane), inside its `p_a L` range on the evidence that
 FDS applies it without a guard, and inside its temperature range down to about
-323 K with a measured, bounded defect below that. **FDS's own User Guide calls
+323 K with a measured, bounded defect below that.
+
+**That is a statement about the fit's stated range, and §62.12's Gate 1-E now
+puts a number beside it.** Against RADCAL (NIST TN 1402, public domain, run
+from NIST's own source) over 108 points spanning this whole box, the total
+emissivity (62.1) is **14-21 % HIGH at 400-700 K**, agrees to a few per cent
+at 1500 K, and is **7-12 % LOW at 2000-2400 K** - a monotone ladder crossing
+zero near `T_ref = 1200 K`. Being inside a fit's range is not the same as
+agreeing with an independent model inside it, and most of a fire's volume sits
+at the end where the two agree least. §62.13 has the table and the reasons
+neither model is truth. **FDS's own User Guide calls
 its WSGG implementation "an experimental feature" with "very limited
 verification and validation that is focused mainly on simple fuels and
 geometric configurations"** - that is quoted rather than paraphrased, because
@@ -13576,7 +13711,7 @@ and `radiationModel` is `P1`** - no default, because there is no honest one:
 | value | what it does, and what it costs |
 |---|---|
 | `dropped` | bands `1..N_g` are solved; band 0 is not solved at all. Its contribution to `-div(q_r)` is `kappa_0 (G_0 - 4 a_0 sigma T^4)`, which is **identically zero when soot is off** - dropping it is then EXACT for the gas energy budget. What is lost either way is the transparent flux from hot surfaces to cold ones, i.e. wall heat flux and a radiometer at distance; `a_0` is 10-33 % of the blackbody power at fire temperatures (§62.2's sweep), so this is not a small correction. With soot on, `kappa_0 = kappa_soot` and the omitted emission `4 kappa_soot a_0 sigma T^4` is no longer zero: it is **integrated over the domain and REPORTED** so the size of the approximation is on the screen |
-| `floored` | band 0 is solved with `kappa_0 -> max(kappa_0, kappa_min)`. Determinate, band count fixed, no data dependence - and it is P1's diffusion approximation applied to a nearly transparent band, which is where P1 is least defensible. §62.12's Gate 3 measures it against fvDOM instead of arguing about it |
+| `floored` | band 0 is solved with `kappa_0 -> max(kappa_0, kappa_min)`. Determinate, band count fixed, no data dependence - and it is P1's diffusion approximation applied to a nearly transparent band, which READS like where P1 is least defensible. **§64 measured that, and it is not.** Between black walls the transparent limit is ISOTROPIC, which is P1's own closure, so the floored window lands closer to the exact slab solution than the worst band P1 solves - by a factor of 463 in §64.6's leg A. What the floor DOES cost is (64.7), a closed form: it admits `kappa_min L (E_m/E_w - 1)/(2h)` of the medium's own emission into a band that physically carries none, measured at `-0.04 %` with hot walls and `+10.1 %` with a hot gas in cold ones. §62.12's Gate 3 measures this treatment against fvDOM; §64 measures it against arithmetic |
 
 Naming `windowTreatment` under **fvDOM** is a §13.4 error: fvDOM solves
 `kappa = 0` as an ordinary pure-advection matrix with a well-conditioned
@@ -13584,7 +13719,13 @@ diagonal from the outgoing face fluxes, so there is nothing to treat, and
 accepting the entry there would be a setting read and discarded.
 
 **Recommendation, stated once and not hidden in a table: WSGG belongs with
-fvDOM.** WSGG-on-P1 is a documented compromise, not the same model.
+fvDOM.** WSGG-on-P1 is a documented compromise, not the same model. **§64.6
+gives that recommendation a number, and a different reason from the one this
+subsection gives**: measured against the exact slab, banded P1 is off by
+**-48 %** on the weakest band it solves and by `4.9e-4` on the strongest, and
+the window - the band this subsection is about - is not the problem. Half the
+bands of a WSGG medium sit in the regime P1 is worst at, and a spectral model
+is precisely a device for putting them there.
 
 *And after §62.13 ran it, it is stronger than a recommendation.* Neither
 treatment rescues P1 on an open-domain fire at practical resolution: with 94 %
@@ -13773,6 +13914,20 @@ know they are not a mistake.
 for it and gets the gray answer, which is what makes the identity something a
 user can check rather than something this document asserts.
 
+**And it is checked at BOTH levels, which it was not at first.**
+`radiation::tests` and `fvdom::tests` assert 0 ulp on `G`, `su`, `sp` and every
+matrix array across a handful of `correct()` calls - the arrays. What was
+missing was the other half of the claim §62.11's table makes, "on a full run":
+`fire::the_gray_limit_is_bit_identical_through_the_whole_driver` runs
+`ofgpu-fire` twice for twelve coupled outer iterations with combustion,
+buoyancy, the `chi_r` floor and Marshak walls all live, and compares **every
+byte of every file** the two runs wrote. It carries the `spectralModel` absent
+vs `"gray"` row as well, so the claim that the default is untouched is a test
+rather than a reading of the code. *That test did not exist when this section
+was first written and the constant for it did: `FIRE_RAD_GRAY_BANDED` was
+declared in `fire.rs` and never used, which the compiler had been saying all
+along.*
+
 **And the default is untouched by construction, not by argument.**
 `spectralModel` defaults to `gray`, under which `Radiation::correct` and
 `FvDom::correct` execute exactly the code they executed before this section
@@ -13901,7 +14056,7 @@ window forced.
 | the case says | what happens |
 |---|---|
 | `spectralModel` anything but the three names | error naming `gray`, `grayBanded`, `wsgg` |
-| `spectralModel: "smith"` / `"johansson"` / `"dorigon"` / `"cassol"` / `"sadeghi"` / `"slw"` / `"fsk"` | error naming the three **and why that set is not here** (§62.2's table row) |
+| `spectralModel: "hottel"` / `"coppalle"` / `"smith"` / `"johansson"` / `"dorigon"` / `"cassol"` / `"sadeghi"` / `"slw"` / `"fsk"` | error naming the three **and why that set is not here** (§62.2's table row). Every row of §62.2's survey is reachable by name; a set that appears in that table and not in this list would be a survey the code does not honour |
 | `a` together with `spectralModel: "wsgg"` | error: WSGG computes the absorption coefficient per cell per band and would read none of it |
 | no `a` with `gray` or `grayBanded` | error - §28's own message, unchanged |
 | `pressure`/`fuelC`/`fuelH` with `spectralModel` not `wsgg` | error, each naming the entry |
@@ -13915,8 +14070,8 @@ window forced.
 
 | pair | what it proves |
 |---|---|
-| `spectralModel` absent vs `"gray"` | the default really is gray - these two must be IDENTICAL, the one inverted row, and it is what §62.8 rests on |
-| `"gray"` vs `"grayBanded"` | **bitwise identical**, on a full run, every array - §62.8 |
+| `spectralModel` absent vs `"gray"` | the default really is gray - these two must be IDENTICAL, an inverted row, and it is what §62.8 rests on. Both inverted rows live in `fire::the_gray_limit_is_bit_identical_through_the_whole_driver`, NOT in the differ-list, because that list asserts the opposite of what they claim |
+| `"gray"` vs `"grayBanded"` | **bitwise identical**, on a full run, every byte of every file written - §62.8 |
 | `"gray"` vs `"wsgg"` | different, or the band model is not running |
 | `wsgg` + `fuelC: 3` vs `fuelC: 4` | the fuel formula reaches `M_r` reaches `kappa_j` |
 | `wsgg` + `fuelH: 8` vs `fuelH: 10` | the other half of (62.7) does too |
@@ -13932,8 +14087,64 @@ window forced.
 **Gate 1 - the coefficient set itself, no mesh.** `sum_j a_j = 1` to round-off
 and `a_j >= 0` (`j = 1..4`) over `T` in `[300, 2500] K` and `M_r` in
 `[0.005, 10]`; the emissivity (62.1) monotone increasing in `p_a L`, tending to
-`0` as `p_a L -> 0` and to `1 - a_0(T)` as `p_a L -> infinity`; and the
-emissivity in the right band against published H2O-CO2 total-emissivity charts.
+`0` as `p_a L -> 0` and to `1 - a_0(T)` as `p_a L -> infinity`.
+
+**Gate 1-E - the emissivity level, against a PUBLISHED reference.** Everything
+in Gate 1 above is a shape or an identity: every one of them would still pass
+with each `kappa_j` scaled by two, which is exactly the kind of transcription
+error a table of 168 numbers invites. The level needs an outside number, and §62.2
+records that Bordbar's own table could not be obtained. **The reference used
+here is RADCAL** - Grosshandler, *RADCAL: A Narrow-Band Model for Radiation
+Calculations in a Combustion Environment*, **NIST Technical Note 1402** (1993),
+DOI `10.6028/NIST.TN.1402` - which is US public domain, is NIST's own
+implementation, ships inside FDS at `reference/fds/Source/rcal.f90`, and is the
+model FDS's own gray absorption coefficients come from. `SUB_RADCAL` returns
+the Planck-weighted mean transmissivity of a path; set the wall temperature to
+the gas temperature and `1 - tau` **is** the total emissivity of an isothermal
+column, which is exactly what (62.1) fits and what Hottel's charts plot. The
+driver that compiles NIST's source unmodified and prints the table is
+`tools/radcal_emissivity/`; the 108 numbers it produced are recorded as
+`wsgg::RADCAL_EPS` and `ofgpu-validate` compares (62.1) against them live.
+
+Four things about this gate, stated before its verdict rather than after:
+
+* **RADCAL is an independent model, not truth.** It is a narrow-band
+  statistical model on the band data of NASA SP-3080; Bordbar's set is a fit to
+  line-by-line HITEMP-2010. A disagreement says which way and by how much. It
+  does not convict either.
+* **The spectral window has to be corrected for or the hot end is a lie.**
+  RADCAL integrates `50 <= w <= 10000 1/cm`. At 400 K that is `1 - 2.8e-4` of
+  the blackbody; at 2400 K it is **86 %**, because a seventh of a 2400 K
+  blackbody radiates below 1 micron, where RADCAL does not look and the gas
+  does not absorb. So the full-spectrum emissivity is `eps_win * f_win(T)`,
+  `f_win` is `wsgg::RADCAL_WINDOW_FRACTION`, and a unit test recomputes all six
+  entries from the Planck function. **Comparing against the uncorrected number
+  would have put the mean bias at 2400 K at `-24.6 %` where the honest figure
+  is `-12.3 %`** (and the whole-box mean at 14.5 % instead of 11.4 %). That
+  error was in this gate's first draft, and it is the only place the reference
+  is touched at all: `RADCAL_EPS` records RADCAL's own output verbatim, so the
+  correction can be checked, or dropped, by anyone reading it.
+* **`p_a L` is not a complete parameterisation, and that costs the comparison
+  a few per cent.** (62.1) makes `eps` a function of `p_a L`, `T` and `M_r`
+  alone; RADCAL's does not, because collision broadening depends on the
+  partial pressure and not only on the product. **Measured, not assumed**:
+  re-running the whole 108-point table at `X_H2O + X_CO2 = 0.10` and at `0.50`
+  instead of `0.271` moves `eps` at the SAME `p_a L` by a mean of `-2.4 %` and
+  `+2.4 %`, worst `-7.1 %` / `+7.2 %`, with a worst spread of **15.3 %** across
+  the three at a single point. So the numbers below are for a
+  stoichiometric propane-air product mixture and no other, and part of the
+  disagreement they report is the WSGG idealisation itself rather than the
+  coefficients. It is a few per cent of an 11.4 % mean and it does not touch
+  the monotone temperature structure, which is the actual result.
+* **The driver is checked against RADCAL's own second output.** At
+  `p_a L = 1e-6` the emissivity must collapse to `kappa_Planck L` with
+  `kappa_Planck` the Planck-mean coefficient `SUB_RADCAL` also returns. It
+  does, to four figures (`7.3214619 x 3.690e-6 = 2.702e-5` against a printed
+  `2.70e-5` at 400 K), which is what rules out a mis-set path length or a
+  mis-read return value.
+
+The bar is **±10 % at every point** - two published models of one quantity,
+each claiming better than that on its own.
 
 **Gate 2 - the gray limit, bitwise.** §62.8, for BOTH models, on a full
 multi-iteration run: `G`, `su`, `sp` and every matrix array identical in every
@@ -14014,6 +14225,22 @@ the smoke-point model was calibrated in, so it tests the soot model without
 Gate 4 fails, to tell "the soot model is wrong" from "the fire mesh is too
 coarse for the soot model".
 
+**Gate 5 - banded P1 against the EXACT slab, band by band: §64.** Gates 1 and
+1-E test the coefficient set with no mesh; Gate 2 is an identity (bitwise, and
+it would pass just as happily if every band were wrong the same way); Gate 3 is
+one model against another. None of them measures the banded P1 **answer**
+against arithmetic. §64 carries §36.7's own two references - the optically thin
+slab, solved exactly along every ray, and the optically thick diffusion limit -
+over to a banded medium one band at a time, and reports what P1 does to each of
+the five. It is the gate that found (i) that P1's per-band error is NOT
+monotone in optical thickness and peaks at `tau ~ 0.03-0.3`, reaching
+**-48 %** on the band a fire radiates through; (ii) that in EVERY leg the
+floored transparent band is closer to the exact answer than the worst band P1
+actually SOLVES, which is the opposite of what §62.5 assumed about it; and
+(iii) a closed form (64.7) for what the `kappa` floor does to the answer,
+confirmed to `1.5e-4` on two of its three legs. Its verdict is in §64.6
+rather than repeated here.
+
 ### 62.13 What must hold, and what was measured
 
 All of it on one machine (RTX 5070 Ti, `cargo test --release`,
@@ -14033,11 +14260,61 @@ ratios are what this table claims; the absolute seconds carry that offset.
 | `a_0` sign | reported, with where it turns | **`min a_0 = -6.805e-3`, negative below 324 K.** (62.18) is why it cannot reach `Sp`, and a unit gate holds the bound |
 | `eps(T, p_a L)` monotone in `p_a L` | exactly | **`0`** violation |
 | `eps -> 1 - a_0` as `p_a L -> inf` | to the exponential's own precision | **`< 1e-9`** |
-| `eps` against published H2O-CO2 charts | in band | propane-air (`M_r = 1.333`): **`0.213` at 1000 K, 0.1 atm.m; `0.495` at 1 atm.m; `0.290` at 2000 K, 1 atm.m** - the right band and the right temperature dependence. That is as far as this gate goes, and §62.2 says why: **Bordbar's own table could not be obtained** |
+| `eps` against a published reference | within 10 % (Gate 1-E) | **MISSED at 58 of 108 points**, mean **11.4 %**, worst **30.5 %** - and the disagreement is MONOTONE in temperature rather than scattered. The reference is RADCAL, not Bordbar's own table, which still could not be obtained; the whole comparison has its own subsection below |
 | the four gray gases ordered weak to strong | by construction of the fit | holds at every `M_r` tested |
 | (62.11) soot cross-check | `1.686e6 f_v` at 1500 K, `rho_s = 1800` | **`2.2e-4`** relative |
 | (62.7)/(62.8) composition | exact stoichiometry; ISFEH10 Eq. (2) reproduced | **`0`** and **`2.0e-5`** |
 | the S13.4 refusals | fire, and say WHY | pass - `smith` names its 600 K floor, `cassol` its 125 gray gases and the data-dependent band count, `mossBrookes` its missing acetylene |
+
+### Gate 1-E - the total emissivity against RADCAL: **MISSED**, and the miss has a shape
+
+`ofgpu-validate`, live. 3 molar ratios (`M_r = 1`, **1.333**, `2` - ethylene-,
+propane- and methane-air) x 6 temperatures in `[400, 2400] K` x 6 path lengths
+in `[0.01, 3] atm.m`, against RADCAL run on a 1 atm column with
+`X_H2O + X_CO2 = 0.271` (the stoichiometric propane-air product mixture), the
+balance N2, no soot, the window correction of §62.12 applied.
+
+| Check | Bar | Measured |
+|---|---|---|
+| mean relative deviation over the 108 points | 15 % | **11.44 %** |
+| worst point | 35 % (the transcription guard) | **30.52 %**, at `M_r = 2`, 400 K, 0.03 atm.m |
+| **points inside ±10 %** | **all 108** | **50 of 108 - the gate is MISSED** |
+| signed bias, 400 K | - | **+20.84 %** |
+| signed bias, 700 K | - | **+14.11 %** |
+| signed bias, 1000 K | - | **+6.64 %** |
+| signed bias, 1500 K | - | **-1.31 %** |
+| signed bias, 2000 K | - | **-7.46 %** |
+| signed bias, 2400 K | - | **-12.28 %** |
+| the bias falls monotonically, one sign change | required | holds |
+
+**The shape is the result, not the level.** The disagreement is not scatter: it
+is a monotone ladder, positive at the cold end and negative at the hot one,
+crossing zero **near Bordbar's own `T_ref = 1200 K`**. A fit anchored at 1200 K
+drifting away from an independent model in both directions is the most
+ordinary thing a fit can do, and it is the reason this gate's `require` is on
+the ladder rather than on the tolerance: a wrong coefficient among the 168
+would break the monotone ordering long before it broke ±35 %.
+
+**What it means for a fire, said plainly.** §62.2's own temperature census puts
+**most of a fire's volume below 1000 K** - smoke layer 350-700 K, buoyant plume
+500-1000 K. That is exactly where this measurement puts Bordbar's set **14 to
+21 % HIGH** against RADCAL, at every path length tested. The best agreement is
+at **1500 K**, where the mean deviation is `-1.3 %` (individual points spanning
+`-12.2 %` to `+8.4 %`), and past it the sign is negative everywhere. So the
+sentence §62.2 could not write before - "fire conditions sit inside the set's
+range" - can now be
+written with a number attached: they sit inside its *stated* range everywhere,
+and inside a ±10 % agreement with an independent published model only in a band
+around 1200-1800 K.
+
+**And the thing this gate cannot do.** It cannot say which model is right.
+RADCAL's band data predates HITEMP-2010 and at 2400 K both are extrapolating;
+Bordbar's paper claims a few per cent against its own LBL reference, which was
+not read here. What would settle it is Bordbar's own Table 1 or an LBL
+calculation, and neither is available in this environment. **No number in this
+subsection should be read as saying Bordbar's set is 11 % wrong.** It says two
+published models of the same quantity differ by that much, in a direction that
+depends on temperature, and it says where.
 
 ### Gate 2 - the gray limit, BITWISE
 
@@ -14398,3 +14675,2767 @@ against `0.00065` for the same case under gray radiation. `kappa_soot` is
 the feedback (more soot -> more emission -> a bigger, better-mixed fire ->
 more soot) is real rather than numerical. §62.13's Gate 4 verdict says what
 follows from that.
+
+---
+
+## 64. The banded slab, solved exactly — what P1 does to each band, and where the transparent window really sits
+
+§62 couples `N_g` P1 solves through the shared §26 `EnergySources`
+registration, and §62.12 gates it four ways: Gate 1 checks the coefficient
+set with no mesh, Gate 1-E checks its emissivity against RADCAL, Gate 2 checks
+that one band reproduces §28 **bitwise**, and Gate 3 compares banded P1
+against banded fvDOM. Not one of those measures the banded P1 **answer**
+against arithmetic. Gate 2 is an identity — it would pass just as happily if
+every band were wrong in the same way. Gate 3 is one model against another,
+and §36.7 already records that the two disagree by design.
+
+§36.7 does have references made of arithmetic — an optically thin slab and an
+optically thick one, both solved exactly — and this section carries them over
+to a **banded** medium, one band at a time. `No GPL-licensed source was
+consulted.`
+
+It exists because §62.5's account of the transparent window was a derivation
+with no number behind it, and the number turns out to point the other way.
+
+### 64.1 The reference, derived
+
+A plane slab of thickness `L`, filled with a non-scattering, **isothermal**
+medium at `T_m` of uniform composition, between two **black** walls at `T_A`
+(`y = 0`) and `T_B` (`y = L`). Per band `j` the RTE is linear and the bands do
+not talk to each other, so each is the ordinary gray slab with the band's own
+`kappa_j` and its own emissive powers. The walls are lettered rather than
+numbered so that nothing collides with the `E_2` of (64.2). Write
+
+```
+E_m,j = 4 a_j(T_m) sigma T_m^4        the medium's band emissive power, W/m2
+E_A,j = 4 a_j(T_A) sigma T_A^4        wall A's, at the WALL temperature      (64.1)
+E_B,j = 4 a_j(T_B) sigma T_B^4        wall B's
+```
+
+— and `a_j` at a wall is evaluated at that wall's temperature with the
+**gas**'s molar ratio, which is (62.14)'s own rule and not a new one.
+
+Along a ray of direction cosine `mu` in `(0, 1]` from wall A, the exact
+solution of `mu dI/dy = -kappa_j I + kappa_j E_m,j/(4 pi)` is
+
+```
+I_j(y, mu) = (E_A,j/4pi) exp(-kappa_j y/mu) + (E_m,j/4pi) (1 - exp(-kappa_j y/mu))
+```
+
+and the incident radiation is the full-sphere integral of it and of its mirror
+from wall B. With
+
+```
+E_2(x) = integral_0^1 exp(-x/mu) dmu                                          (64.2)
+```
+
+the second exponential integral, `integral_{2pi} I dOmega = 2 pi integral_0^1 I dmu`
+gives, at the midplane `y = L/2` where both paths are `tau_j = kappa_j L/2`,
+
+```
+G_j(L/2) = E_w,j E_2(tau_j) + E_m,j (1 - E_2(tau_j)) ,   E_w,j = (E_A,j + E_B,j)/2   (64.3)
+
+G(L/2)   = sum_{j=0..N_g} G_j(L/2)                                            (64.4)
+```
+
+Two limits are in the formula rather than in a comment, and they are the whole
+reason it can be trusted without a table:
+
+* `tau_j -> 0`: `E_2(0) = 1` and `G_j -> E_w,j`. A transparent band shows the
+  midplane **nothing but the walls**, and shows it their mean.
+* `tau_j -> infinity`: `E_2 -> 0` and `G_j -> E_m,j`. An opaque band hides the
+  walls completely.
+
+Setting `N_g = 1`, `a_1 = 1`, `E_A = E_B = 0` recovers §36.7's own thin-slab
+reference `4 sigma T_m^4 (1 - E_2(tau))` unchanged, which is what makes this a
+generalisation of that gate rather than a different one. `E_2` is evaluated by
+composite Simpson on `mu` rather than by a series, so no asymptotic constant
+is trusted from memory; `radiation::e2` is the one implementation and
+`fvdom`'s §36.7 gate now calls it instead of carrying a second copy.
+
+**The window's exact value, written out**, because it is the number §62.5
+could not put a figure on. With no soot `kappa_0 = 0` **exactly**, so
+
+```
+G_0(L/2) = E_w,0 = 2 sigma ( a_0(T_A) T_A^4 + a_0(T_B) T_B^4 )                (64.5)
+```
+
+with **no dependence on the medium at all**. The window is a pure wall-to-wall
+transmission, it is closed-form, and `windowTreatment dropped` replaces it
+with zero.
+
+### 64.2 What P1 can and cannot be right about, band by band
+
+P1 closes the RTE by assuming the intensity is `I = (G + 3 q.s)/(4 pi)` — a
+field that is isotropic plus a linear-in-direction correction. Both ends of
+(64.3) satisfy that assumption, and for different reasons:
+
+* **`tau_j -> infinity`.** Local radiative equilibrium: `I -> E_m,j/(4 pi)`,
+  isotropic, and the flux is the diffusion result §36.7 already gates. P1 is
+  the diffusion approximation, so this is the limit it was derived for.
+* **`tau_j -> 0` between black walls.** The exact field at the midplane is the
+  superposition of two half-ranges of *isotropic* wall emission, so it is
+  isotropic whenever the two walls emit alike, and its half-range flux is
+  exact whatever they do — which is precisely what §36.4's Marshak condition
+  is constructed to reproduce. So P1 gets `G_0` right at `tau = 0` **for this
+  geometry**, and the reason is a property of the slab and not of P1.
+* **In between**, neither holds, and nothing says the error is small.
+
+That is the prediction §64.6 measures, and it is the opposite of what §62.5
+assumed when it called the floored window "P1's diffusion approximation
+applied to a nearly transparent band, which is where P1 is least defensible".
+
+### 64.3 The optically thick end, and why one number cannot describe a spectral medium
+
+§36.7's other reference is the diffusion limit, and it carries over by the
+same substitution §62.5 makes in the operators — `T^4` becomes `a_j(T) T^4`:
+
+```
+q_r,j = -(4 sigma / (3 kappa_j)) d( a_j(T) T^4 )/dy                           (64.6)
+```
+
+This is what P1's own equation **reduces to** where `kappa_j L >> 1`, so a
+band that fails it is a defect in the operators rather than in the physics.
+The point of running it per band is the other half: `Gamma_j = 1/(3 kappa_j)`
+is **largest exactly where (64.6) is least valid**, so the band contributing
+least to the medium's opacity contributes most to the modelled flux. A gray
+medium has one optical thickness and this is a single number; a WSGG medium
+spans `tau = 0` to `tau = 29` at one composition (§64.5's table), and the gate
+is that the weakest band must be measurably **further** from (64.6) than the
+strongest — otherwise the band structure is not doing anything.
+
+### 64.4 What the `kappa` floor does to the answer, in closed form
+
+§62.5 floors `kappa` at `kappaMin` on the solved bands, and under
+`windowTreatment floored` band 0 is one of them. What that does is not a
+matter of opinion. Integrate the band-0 P1 equation over the slab. With
+`h = eps_w/(2(2 - eps_w))` the Marshak conductance and `kappa_min L` small,
+the two walls deliver `2 h (E_w,0 - G_0)` per unit area and the volumetric
+sink removes `kappa_min L (G_0 - E_m,0)`, so
+
+```
+G_0 = (2h E_w,0 + kappa_min L E_m,0) / (2h + kappa_min L)
+
+(G_0 - E_w,0)/E_w,0 = [kappa_min L / (2h + kappa_min L)] (E_m,0/E_w,0 - 1)    (64.7)
+```
+
+**The floor contaminates a band that physically carries no gas emission with
+the gas's own emission**, in proportion to `kappa_min L` and to the
+medium-to-wall emissive contrast. Three things follow and all three are
+measured in §64.6:
+
+1. it is **small when the walls dominate** and **large when the medium is much
+   hotter than the walls** — and a fire is the second case;
+2. it is **controllable**: the error is linear in `kappaMin`, so it can be
+   made as small as one likes — at the cost of `Gamma_0 = 1/(3 kappaMin)`,
+   which is what §62.13 measured going NaN on a fire mesh. The floor is a
+   monotone trade of accuracy against conditioning and neither end is free;
+3. it is **exact enough to assert**, which is why §64.5's gate checks the
+   formula rather than a magnitude. A floor applied to the wrong bands, or
+   before the conductances instead of after, breaks (64.7) immediately.
+
+**And what P1 cannot report for the window under either treatment.** The
+radiative flux in P1 is `q_r,j = -Gamma_j grad G_j`. Under `dropped` there is
+no band-0 equation and so no flux at all. On an *unfloored* window the
+expression is `(1/(3 x 0)) x 0` — an indeterminate form, not a large number.
+Under `floored` it is finite, but it is `1/(3 kappa_min)` multiplying a
+gradient that vanishes with `kappa_min`: a quantity whose limit is that same
+indeterminate form and whose value is set by the floor rather than by the
+physics. So the wall heat flux — the very quantity §62.5 says the window
+carries — has no trustworthy per-band P1 value, and that is a statement about
+the closure rather than about the discretisation. It is why §64.6 measures
+`G`, which is what enters the Marshak wall condition, and says so plainly
+rather than quoting a flux the model does not have. §64.8 names what would
+close it.
+
+### 64.5 What must hold
+
+| Check | Expected |
+|---|---|
+| `E_2(0) = 1`, `E_2` decreasing, `E_2(60) < 1e-25` | exactly / by inspection |
+| `integral_0^inf E_2 dx = integral_0^1 mu dmu = 1/2` | to the quadrature's own precision |
+| (64.3) at `tau = 0` and `tau -> inf` | `E_w` and `E_m` exactly |
+| (64.5): the exact window `G_0` equals the walls' mean band emissive power | to round-off, with `a_0` at the WALL temperatures |
+| the optically **thick** band against (64.3) | within 1 % — and §64.6 says why this row is weaker than it reads |
+| the optically **thick** band against §36.7's diffusion flux (64.6), banded | within 5 % — this is the thick row with content |
+| the distance from (64.6), band by band | must fall MONOTONICALLY with `tau` — a spectral medium has no single optical thickness |
+| (64.7): the floored window's error | the closed form, to 5 % of itself |
+| the worst band P1 **solves** against the error of the **window** | the solved band must be worse — §64.2 |
+| `floored` against `dropped` on the total `G` | `floored` closer, in every leg |
+| every wall weight `a_j(T_w)` against the closed form at `T_w` | to round-off, band by band |
+
+That last row is not decoration. §62.7's own one-line assertion is
+`sum_j refValue_j = 4 sigma T_w^4`, and `sum_j a_j(T) = 1` holds at **every**
+temperature — so the existing test would have passed unchanged if every wall
+weight had been evaluated at the near-wall **gas** temperature instead of the
+wall's, which is exactly the silent energy error (62.14) exists to prevent.
+It is now checked band by band against the closed form, with the wall and gas
+temperatures held far enough apart that the wrong one could not pass.
+
+**No case setting is added by this section**, so no §13.4.1 pair test is owed:
+every entry the gate touches — `spectralModel`, `windowTreatment`, `kappaMin`
+— is §62.11's, with its refusals and its pair rows already in place. What
+(64.7) does add is a sharper claim for one of them: §62.11's `kappaMin`
+pair row says only that "the floor reaches `Gamma`", and (64.7) now predicts
+by how much the floor moves the answer, which is the difference between a
+setting that demonstrably does something and a setting whose effect is
+understood.
+
+### 64.6 What was measured
+
+`cargo test --release` and `ofgpu-validate`, RTX 5070 Ti, **live in both** —
+nine `ofgpu-validate` rows and four new `radiation::tests`, plus the
+strengthening of §62.7's existing wall-weight test that §64.5's last row
+describes. One slab: `L = 4 m`, 40 cells across it (80 in all), `Y_P = 0.20` (`p_a = 0.199 atm`, `M_r = 4/3`,
+propane-air products), no soot, black walls (`eps_w = 1`), `chiR = 0` so §27's
+radiant-fraction floor cannot replace the emission the reference is written
+for. The five bands of §62 span the entire optical range **in one medium**:
+
+| band | `kappa_j`, 1/m | `tau_j = kappa_j L/2` |
+|---|---|---|
+| 0 (window) | **0 exactly** | **0** |
+| 1 | 1.32904e-2 | 0.0266 |
+| 2 | 1.45177e-1 | 0.290 |
+| 3 | 1.15055e0 | 2.301 |
+| 4 | 1.44496e1 | **28.90** |
+
+**Three legs, and the leg is the experiment.** The medium and the walls are
+put on opposite sides of each other, because (64.3)'s two limits pull in
+opposite directions and a single leg could satisfy either by accident.
+
+| | leg A: gas 900 K, walls 1800/1800 | leg B: gas 1800 K, walls 600/600 | leg C: gas 1200 K, walls 600/1800 |
+|---|---|---|---|
+| window's share of the exact `G(L/2)` | **22.74 %** | 0.18 % | **18.59 %** |
+| band 0, `floored` vs exact | **−0.039 %** | **+10.137 %** | −0.028 % |
+| band 1 (`tau` 0.027), vs exact | +6.042 % | **−48.255 %** | +4.439 % |
+| band 2 (`tau` 0.290), vs exact | **+17.894 %** | −18.477 % | +8.759 % |
+| band 3 (`tau` 2.301), vs exact | −5.115 % | +0.805 % | −0.238 % |
+| band 4 (`tau` 28.90), vs exact | −3.6e-12 % | +8.7e-13 % | −1.3e-13 % |
+| total `G`, `dropped` | −15.925 % | −14.207 % | −14.541 % |
+| total `G`, `floored` | **+6.805 %** | −14.014 % | **+4.041 %** |
+| (64.7) predicted / measured floor error | 1.000149 | 1.000150 | 0.974558 |
+
+**Finding 1 — the transparent window is not where P1's spectral error
+lives.** In every leg the floored window is closer to the exact answer than
+the worst band P1 actually **solves** — by a factor of **463** in leg A
+(0.0387 % against 17.894 %), **309** in leg C, and **4.8** in leg B. §64.2
+derives why: at `tau = 0` between black walls the exact intensity field is
+isotropic, which is P1's own closure assumption, so the band P1 supposedly
+cannot handle is the one whose exact solution its closure happens to
+represent. §62.5 reads the floored window as "P1's diffusion approximation
+applied to a nearly transparent band, which is where P1 is least defensible".
+The general half of that is right and §36 is built on it — P1 **is** worst in
+the optically thin limit. What the slab shows is that the transparent **end**
+of the spectrum is not where that bites; the bands just inside it are, and
+Finding 2 is that measurement. §62.5's table now carries a pointer to this
+section rather than the unqualified sentence.
+
+**Finding 2 — where the error does live: the middle of the spectrum, and it
+reaches 48 %.** P1's per-band error is **not monotone in `tau`** and it is
+small at both ends. It peaks at `tau` of order `0.03` to `0.3` — the bands
+that are optically thin but not empty, which no limit rescues. In the
+fire-relevant leg B (hot gas, cold walls, radiation escaping) band 1 is
+**−48.3 %** and band 2 is **−18.5 %**, while the window is +10.1 % and the
+opaque band sits `4.9e-4` from the diffusion limit (Finding 5). **That is a
+stronger statement of
+§62.5's own recommendation than §62.5 makes**: WSGG belongs with fvDOM not
+because of the window, but because half the bands of a WSGG medium are in the
+regime P1 is worst at, and a spectral model is precisely a device for putting
+them there.
+
+**Finding 3 — (64.7) is confirmed, on legs spanning three orders of
+magnitude of it.** The floored window's error is `−3.865e-4`, `+1.0137e-1` and
+`−2.833e-4` in the three legs; the closed form predicts `−3.865e-4`,
+`+1.0136e-1` and `−2.907e-4`. Ratios `1.000149`, `1.000150`, `0.974558` — the
+symmetric legs to 1.5e-4, the asymmetric one to 2.5 %, which is the
+leading-order truncation of (64.7) showing up where the band carries a
+gradient. **So "clamp `kappa_0` to a small number" now has a number attached:
+it admits `kappa_min L (E_m/E_w - 1)/(2h)` of the medium's own emission into a
+band that has none**, which is `−0.04 %` when the walls are hotter and
+`+10.1 %` when the gas is three times hotter than the walls.
+
+**Finding 4 — `floored` beats `dropped` on `G`, in all three legs, and that
+does not settle it.** `dropped` throws away 0.18 % to 22.7 % of the midplane
+incident radiation and puts zero in its place; its total error is `−15.9 %`,
+`−14.2 %`, `−14.5 %` against `floored`'s `+6.8 %`, `−14.0 %`, `+4.0 %`. On
+this evidence alone `floored` is the better treatment. **§62.13's fire
+measurement is the counterweight and it is not close**: on
+`cases/nistBurner37cm.jsonc`, 94 % of `(cell, band)` pairs sit at `kappa_min`
+and the run goes NaN. A 4 m slab with a Robin condition on both sides is the
+best case for `floored` and an open-domain fire is the worst, and this
+document now has both. Neither `windowTreatment` is a default and §62.5 is
+right to refuse to pick one.
+
+**Finding 5 — the band structure itself is wired correctly, and this is the
+first gate that could have said otherwise.** (64.5)'s identity holds to
+**`0` exactly** with the wall weights read at the wall temperatures, and the
+opaque band reproduces (64.3) to `3.6e-14` relative in all three legs.
+
+**That last figure is worth less than it looks, and the gate says so.** At
+`tau = 28.9` the exact solution *is* `E_m,4` to within `E_2(28.9) < 1e-15`,
+and the isothermal P1 solution is `E_m,4` too, because the wall's influence
+decays as `exp(-sqrt(3) kappa_4 y)` and the midplane is 50 e-foldings away.
+Two answers that both collapse to the same constant agree for free. **The
+thick check with content is the gradient one**, (64.6), which needs a
+temperature gradient to have a flux at all: on a linear leg from 700 K to
+1900 K the distance from §36.7's banded diffusion flux falls monotonically
+
+| `tau_j` | 0.027 | 0.290 | 2.301 | 28.90 |
+|---|---|---|---|---|
+| relative distance from (64.6) | **0.9485** | 0.6140 | 0.0458 | **4.898e-4** |
+
+which is both halves of the statement at once: the strongest band **is** in
+the diffusion limit (`4.9e-4`), and a WSGG medium has **no single optical
+thickness**, reduced to four numbers. `Gamma_j = 1/(3 kappa_j)` is largest
+exactly where (64.6) is least valid, which is §64.3's point measured rather
+than argued.
+
+### 64.7 The error this gate found in itself
+
+The first run of the gate compared `a_j(T_w)` taken from boundary face **0**
+of the slab mesh. Boundary face 0 is an `xMin` face — zero-gradient, not a
+wall — so it carries the **medium's** temperature, and every "exact" value in
+the first table was built with `a_j(T_m)` where (64.1) calls for `a_j(T_w)`.
+The window's exact value came out **1.873 times too small** (1.9887e5 against
+3.7248e5 in leg A), band 1's 1.47 times, and the exact total 25.5 % low —
+enough to make `floored` look 43 % high where it is 6.8 % high.
+
+Both the unit gate and the `ofgpu-validate` one now find their wall faces **by
+kind**, with a comment saying why, so the same index cannot be reached back
+for.
+
+It is worth recording for two reasons. It is **the identical mistake (62.14)
+warns about**, committed in the checker rather than in the model — the wall
+weights on the device were right all along. And it is the mistake §62.7's
+existing `sum_j refValue_j = 4 sigma T_w^4` assertion **cannot catch**, since
+`sum_j a_j = 1` at every temperature; §64.5's last row is that gap closed, and
+it was found by writing a reference that needed the individual weights rather
+than their sum.
+
+### 64.8 What is not measured here, and why
+
+* **fvDOM.** (64.3) is a reference for any RTE solver and §36.7 already runs
+  the gray form of it on fvDOM. Applying it band by band there is the obvious
+  next measurement and it is not in this section. **§65 takes it** - and it
+  found something this section could not have: fvDOM's angular error is
+  available in CLOSED FORM ((65.6)), so the measured per-band error splits into
+  an angular half that needs no run and a spatial residue that does. §65.6 also
+  overturns half of what this section's recommendation implied, by measuring
+  banded P1 BEATING fvDOM on the optically thick bands.
+* **A per-band wall flux.** §64.4 derives why P1 has none for a transparent
+  band (`q = -Gamma grad G` is `0 x infinity` there), so the quantity §62.5
+  says the window carries — wall heat flux — is measured here only through
+  `G`, which is what enters the Marshak wall condition. An enclosure gate that
+  compares total wall flux against a view-factor result (§49/§50 already has
+  the machinery) would close it.
+* **Scattering.** §28's P1 carries none, so (64.3)'s non-scattering
+  assumption costs this gate nothing. fvDOM's does, and a banded version of
+  this gate there would have to say so.
+* **A third `windowTreatment`.** §62.13 names two ways to remove the null
+  space properly — the §63 Dirichlet, which is now in, and a deflated or
+  fixed-reference PCG on the band equations, which is §8.5's machinery pointed
+  at a third instance of the same null space. (64.7) says what the floor costs
+  and §62.13 says what it costs in conditioning; neither argues that a third
+  option is unnecessary.
+
+## 65. Band coupling to fvDOM, and what the spectral model costs
+
+§62 built one band structure for two solvers and §64 measured what banded P1
+does to each band of it. This section does the other half. It carries §64's
+exact slab (64.3) over to the discrete ordinates band by band, and then it
+runs the four combinations of {P1, fvDOM} x {gray, WSGG} on
+`cases/burnerPlume.jsonc` and reports **measured** wall time, **measured**
+device memory and radiated fraction for each - because §62.10 stated that cost
+as arithmetic on a design, and arithmetic on a design is not a measurement of a
+program.
+
+**W. A. Fiveland, *Discrete-ordinates solutions of the radiative transport
+equation for rectangular enclosures*, J. Heat Transfer 106 (1984) 699**, DOI
+`10.1115/1.3246741`, and **J. S. Truelove, *Discrete-ordinate solutions of the
+radiation transport equation*, J. Heat Transfer 109 (1987) 1048**, DOI
+`10.1115/1.3248182` - the S_N sets and the two conditions §36.2 builds them
+from, which (65.7) and (65.8) below turn out to be the same two statements this
+section needs. **M. F. Modest, *Radiative Heat Transfer*, 3rd ed., ch. 16-17**
+- the discrete-ordinates method and its ray effects. **W. Grosshandler,
+*RADCAL*, NIST TN 1402 (1993)**, US public domain, is §62.12's Gate 1-E and is
+not re-used here. Everything below - the closed-form angular error, the
+cost model and its measurement - is derived or measured in this repository.
+
+`reference/fds/Source/radi.f90` (NIST, public domain) carries the same band
+loop over the same kind of angular set, and §65.4 quotes its **defaults** as
+corroboration of the cost trade rather than as source: no line of it was
+translated for this section.
+
+### 65.1 The band loop on fvDOM, and one property model for two solvers
+
+Per band `j` and ordinate `m`, §36's assembly with the band's own coefficient
+and weight - (62.3) written as the three operator calls the code makes:
+
+```
+fvm_div_gauss(phi_m, w_m, I_{j,m}, +1)     phi_m, w_m BAND-INDEPENDENT
+fvm_sp(kappa_j + sigma_s, +1)
+fvm_su(volSrc_j, +1)                       volSrc_j = a_j(T) kappa_j sigma T^4/pi
+                                                      + (sigma_s/4pi) G_j        (65.1)
+G_j = sum_m w_m I_{j,m} ,     G = sum_j G_j                                       (65.2)
+```
+
+`phi_m,f = s_m . Sf` and its upwind weights are built once at construction and
+never rebuilt, so **assembly** cost grows sub-linearly in `N_g` while the
+**solve** cost grows exactly linearly. The band loop is on the HOST in index
+order and the band sum is a sequence of `add_field` launches, so there is no
+atomic and no order-dependent reduction anywhere in it - §62.9(1), unchanged.
+
+The window needs no treatment on this solver and the entry is refused by name:
+`kappa_0 = 0` makes (65.1) a pure advection matrix whose diagonal comes from
+the outgoing face fluxes, which is well conditioned, so there is no null space
+to close and `windowTreatment` would be a setting read and discarded (§62.5,
+§62.11). `kappaMin` is refused for the same reason.
+
+**One property model, two solvers.** `wsgg::Bands` is built identically by
+`Radiation` and by `FvDom`; §65.5's first row asserts that the `kappa_j` and
+all three `a_j` (cell, and both walls) the two models construct for the same
+medium are **bitwise equal**, band 0 excepted, which `windowTreatment floored`
+moves on purpose. Without that row every number in §65.6 would be a comparison
+of two property models as much as of two angular methods.
+
+### 65.2 What each model can be right about, band by band
+
+§64.2 derived where P1's closure holds - the two ends of the optical range,
+`tau -> 0` between black walls (the exact field is isotropic, which is P1's own
+closure) and `tau -> infinity` (local radiative equilibrium, which is what P1
+was derived from) - and §64.6 measured the consequence: banded P1's error peaks
+**in between**, at 48 % on the band a hot gas in cold surroundings radiates
+through.
+
+fvDOM's error has a completely different origin, and that is the point of
+running the same reference on it. It makes no closure assumption about the
+angular distribution at all; it replaces the integral over direction by a
+24-point quadrature. So:
+
+* where P1 is **worst** - intermediate `tau`, where the intensity is neither
+  isotropic nor diffusive - fvDOM has nothing to be wrong about except the
+  quadrature, and §65.6 measures the gap;
+* where P1 is **best** - `tau` well above 1 - fvDOM's remaining error is not
+  angular at all. It is first-order upwind on `I` over cells of optical
+  thickness `kappa_j dy`, and §65.6 measures P1 **winning** there.
+
+That two-sidedness is the honest statement of §62.5's "WSGG belongs with
+fvDOM", and §65.5 requires both halves of it rather than the half that flatters
+the recommendation.
+
+### 65.3 The angular error in closed form, and which knob shrinks it
+
+Ordinate `m` crosses the slab of §64.1 at direction cosine
+`mu_m = |s_m . n|`, and along that one ray (65.1) is the ordinary linear
+first-order equation §64.1 already solves. At the midplane, where both paths
+are `tau_j = kappa_j L/2`,
+
+```
+I_{j,m}(L/2) = (E_w,j/4pi) exp(-tau_j/mu_m) + (E_m,j/4pi) (1 - exp(-tau_j/mu_m))  (65.3)
+```
+
+with `E_m,j`, `E_w,j` exactly (64.1)'s. Substituting (65.3) into the quadrature
+sum (65.2) gives (64.3) back with **one** substitution — the integral over `mu`
+replaced by the sum over ordinates:
+
+```
+E_2^S4(tau) = (1/4pi) sum_m w_m exp(-tau/|s_m . n|)                              (65.5)
+
+G_j^S4(L/2) = E_w,j E_2^S4(tau_j) + E_m,j (1 - E_2^S4(tau_j))                    (65.6)
+```
+
+so the measured error of a run **splits**, with no fitting and no free
+parameter:
+
+```
+G_j^fvDOM - G_j     =    (G_j^S4 - G_j)      +   (G_j^fvDOM - G_j^S4)            (65.4)
+  what a run reports    the ANGULAR half,          the SPATIAL residue
+                        closed form, no run        what the mesh costs
+```
+
+**The first term needs no run and the second needs no model.** That is the
+whole reason for carrying (64.3) to this solver rather than stopping at §64:
+P1 has no such split, because its closure is not a quadrature and there is
+nothing to evaluate it on.
+
+For the level-symmetric S4 set of §36.2, whose `y`-cosines are `a` on sixteen
+ordinates and `b` on eight with uniform weight `pi/6`, (65.5) is
+
+```
+E_2^S4(tau) = (2/3) exp(-tau/a) + (1/3) exp(-tau/b) ,   a = (6-sqrt6)/12, b = (3+sqrt6)/6
+```
+
+and two of its properties are **exactly** §36.2's own two conditions on the
+set, wearing different clothes:
+
+```
+E_2^S4(0) = (1/4pi) sum_m w_m = 1              <-  sum_m w_m = 4 pi              (65.7)
+integral_0^inf E_2^S4 dtau = (1/4pi) sum_m w_m |mu_m| = 1/2
+                                               <-  sum_(mu>0) w_m mu_m = pi      (65.8)
+```
+
+Both are exact in real arithmetic and round-off in IEEE-754, and §65.9 records
+that this section first asserted the evaluation rather than the identity and
+was corrected by its own gate.
+
+Three consequences, and all three are measured rather than asserted:
+
+* **(65.7): a transparent band has NO angular error.** `E_2^S4(0) = 1` is the
+  same statement as `E_2(0) = 1`, so (65.6) and (64.3) agree exactly at
+  `tau = 0`. fvDOM solves the window; it does not approximate it. P1 cannot
+  solve it at all and (64.7) is the price of its floor.
+* **(65.8): the angular error encloses zero area, so it must change sign.**
+  The true `E_2` and its S4 quadrature have the *same* integral, which is the
+  half-range-flux condition that makes §36.4's wall reflection an exact
+  isothermal fixed point. Where the sign changes is not fixed by the identity,
+  and §65.6 goes and finds out.
+* **The two halves of the error answer to different knobs.** The angular half
+  shrinks with the ordinate count (S6, S8); the spatial residue shrinks with
+  the mesh. §65.5 requires that the optically thin band is angular-dominated
+  and the optically thick ones spatial-dominated, which is what tells a user
+  which of the two to spend on.
+
+### 65.4 What it costs: solves, storage, and the wall-time model
+
+The band count multiplies the **solve**, and on fvDOM the solve is multiplied
+again by the ordinate count:
+
+```
+solves per correct() = N_g x N_ord            120 for WSGG on S4               (65.9)
+wall time            ~ X + N_g N_ord R_asym   X = non-radiation work per run
+                                              R_asym = one asymmetric ordinate solve
+```
+
+**Storage, and what §62.10 counted.** §62.10 put fvDOM's banded intensity
+storage at `N_g N_ord n` doubles - 960 B/cell for five bands on S4 - and that
+is the count of one array per `(j, m)`. What the program actually allocates per
+`(j, m)` is a `GpuScalarField`, which carries **three** `[n_cells]` arrays
+(`f`, `f0`, `f00` - §3.3's BDF2 levels) and five `[n_bf]` ones:
+
+```
+per (j, m) :  3 n x 8 B  +  4 n_bf x 8 B  +  n_bf x 4 B
+per m      :  2 surface fields (phi_m, w_m) over the internal faces, BAND-INDEPENDENT
+                                                                                  (65.10)
+```
+
+so the interior part alone is `3 N_g N_ord n` doubles - **2880 B/cell**, three
+times §62.10's figure - and `f0`/`f00` are **never read by this module**: the
+RTE is solved steady on every call and `fvdom.rs` contains no `ddt` term and no
+`store_old_time`. §65.7 measures the whole footprint and §65.10 says what a
+memory-lean variant would recover and why this section does not take it.
+
+**Public-domain corroboration of the trade, not of the numbers.** FDS's own
+defaults (`read.f90`, US-government public domain) run the gray gas with
+`NUMBER_SPECTRAL_BANDS = 1` and `ANGLE_INCREMENT = 5` - only a fifth of the
+angles updated per call - and, going spectral, set
+`NUMBER_SPECTRAL_BANDS = 5` and **abandon that trick entirely**
+(`ANGLE_INCREMENT = 1`). A factor 25 in radiation work, from a reference
+implementation's own choice of defaults. This repository's answer to the same
+problem is `updateInterval` (§62.10, §62.11), whose measured value is in
+§62.13's table and whose price is 0.12 points of radiated fraction.
+
+### 65.5 What must hold
+
+| Check | Expected |
+|---|---|
+| `kappa_j` and all three `a_j` built by `FvDom` and by `Radiation` on the same medium | **BITWISE equal**, band 0 excepted (`floored` moves it on purpose) |
+| (65.7) `E_2^S4(0) = 1` | exact in real arithmetic; round-off in double |
+| (65.8) `integral_0^inf E_2^S4 dtau = 1/2` | the true `E_2`'s own value, to round-off |
+| (65.8) `E_2^S4 - E_2` changes sign | at least once — and §65.6 reports where, which the identity does not fix |
+| the transparent band `G_0` against (64.5) | to round-off. There is no angular error at `tau = 0` and no floor on this solver |
+| (65.6): the measured `G_j` against `E_2^S4` | the SPATIAL residue alone, bar 3 % |
+| the optically THIN band | **angular**-dominated: more ordinates would shrink it |
+| the two optically THICK bands | **spatial**-dominated: a finer mesh would shrink them |
+| within one leg, every band with a measurable angular error | the SAME sign — the errors accumulate in the band sum, they do not cancel |
+| fvDOM against banded P1 on every band with `tau <= 1` | fvDOM closer, in every leg |
+| fvDOM against banded P1 on the band P1 is WORST at | fvDOM closer, in every leg |
+| fvDOM's TOTAL `G` against (64.4) | closer than banded P1's, in every leg |
+| **banded P1 against fvDOM on an optically thick band** | **P1 closer, somewhere** — fvDOM is not uniformly better and the gate says so |
+| the four combinations on `cases/burnerPlume.jsonc` | wall time and device memory MEASURED, not counted, with the radiated fraction beside them |
+| the DEFAULT path after all of it | combustion efficiency `35.4976 %`, radiated fraction `14.9724 %`, peak `T` `816.92 K` — every digit |
+
+**No case setting is added by this section**, so no §13.4.1 pair test is owed:
+every entry it touches — `model`, `spectralModel`, `windowTreatment`,
+`updateInterval` — is §62.11's, with its refusals and its pair rows already in
+place. The one thing this section adds to a run's output is a device-memory
+line, which is a report and not a control: it changes no field, and §65.8 is
+the assertion that it changed none.
+
+### 65.6 What was measured — the banded slab on ordinates (Gate 6)
+
+`ofgpu-validate`, **live**, twelve rows, plus two `fvdom::tests` (one of them
+host-only, so it runs with no GPU present). The slab is §64's, unchanged and
+now shared as one `SlabRig` so the two gates cannot drift apart: `L = 4 m`, 80
+cells, `Y_P = 0.20` (`p_a = 0.199 atm`, `M_r = 4/3`), no soot, BLACK walls,
+`chiR = 0`, three legs. fvDOM runs S4 (24 ordinates) with all five bands and
+nothing treated; banded P1 runs with the window `floored` so that band 0 has a
+value to compare at all.
+
+**The quadrature's own two identities**, before anything is measured against
+them:
+
+| Check | Bar | Measured |
+|---|---|---|
+| (65.7) `E_2^S4(0) - 1` | round-off | **`3.331e-16`** |
+| (65.8) `integral E_2^S4 dtau - 1/2` | round-off | **`1.110e-16`** |
+| (65.8) sign changes of `E_2^S4 - E_2` on `tau in [1e-3, 60]` | at least one | **three**, at `tau = 0.381 / 1.983 / 19.42` |
+
+**Where those crossings are is the result, not that they exist.** S4
+over-estimates `E_2` below `tau = 0.381` and again above `tau = 19.4`, and
+under-estimates it in between. The five bands of this WSGG set at `L = 4 m` sit
+at `tau = 0, 0.0266, 0.290, 2.301, 28.9` — so **two of the three crossings fall
+in the gap between band 2 and band 3**, the bands sample only the positive
+lobes, and the per-band angular errors **accumulate in the band sum instead of
+cancelling**. That is why fvDOM's total `G` below is no better than its own
+worst band, and it is a property of this coefficient set at this path length
+rather than of S4.
+
+**Band by band, relative to the exact (64.3), at the midplane** (`%`):
+
+| leg | band | `tau` | **fvDOM** | banded P1 | fvDOM ANGULAR (65.6) | fvDOM SPATIAL |
+|---|---|---|---|---|---|---|
+| gas 900 K, walls 1800 K | 0 window | 0 | **`-1.3e-13`** | `-0.0387` | `-3.1e-14` | `-9.4e-14` |
+| | 1 | 0.0266 | `+4.235` | `+6.042` | `+4.392` | `-0.150` |
+| | 2 | 0.290 | **`+2.297`** | **`+17.894`** | `+2.548` | `-0.245` |
+| | 3 | 2.301 | `+2.724` | `-5.115` | `+0.806` | `+1.903` |
+| | 4 | 28.90 | `+4.8e-7` | `-3.6e-12` | `-1.6e-12` | `+4.8e-7` |
+| | **total `G`** | | **`+2.788`** | **`+6.805`** | | |
+| gas 1800 K, walls 600 K | 0 window | 0 | **`-9.3e-14`** | `+10.137` | `+8.5e-12` | `-8.5e-12` |
+| | 1 | 0.0266 | **`-33.825`** | **`-48.255`** | `-35.079` | `+1.931` |
+| | 2 | 0.290 | `-2.371` | `-18.477` | `-2.631` | `+0.266` |
+| | 3 | 2.301 | `-0.429` | `+0.805` | `-0.127` | `-0.302` |
+| | 4 | 28.90 | `-1.2e-7` | `+8.7e-13` | `+3.9e-13` | `-1.2e-7` |
+| | **total `G`** | | **`-5.704`** | **`-14.014`** | | |
+| gas 1200 K, walls 600/1800 K | 0 window | 0 | **`-1.7e-13`** | `-0.0283` | `-1.6e-14` | `-1.6e-13` |
+| | 1 | 0.0266 | `+3.210` | `+4.439` | `+3.153` | `+0.056` |
+| | 2 | 0.290 | `+2.093` | `+8.759` | `+1.112` | `+0.970` |
+| | 3 | 2.301 | **`+0.550`** | **`-0.238`** | `+0.079` | `+0.471` |
+| | 4 | 28.90 | `+7.3e-8` | `-1.3e-13` | `-4.4e-14` | `+7.3e-8` |
+| | **total `G`** | | **`+1.986`** | **`+4.041`** | | |
+
+Five readings, and the last two are the ones a recommendation has to survive.
+
+**(1) fvDOM solves the transparent window exactly.** `1.7e-15` worst over the
+three legs, which is (65.7) confirmed: `E_2^S4(0) = 1`, so there is no angular
+error at `tau = 0`, and a pure wall-to-wall transmission is carried by the
+upwind scheme without loss. Banded P1 cannot solve that band at all — it floors
+it, and pays `-0.039 %` when the walls are hot and **`+10.1 %`** when the gas
+is, which is (64.7) exactly.
+
+**(2) On the band P1 is worst at, fvDOM is better by up to 7.8x.** Leg A's
+`tau = 0.290` band: `+17.894 %` against `+2.297 %`. Leg C's, the same band:
+`+8.759 %` against `+2.093 %`, a factor 4.2. Leg B's `tau = 0.0266` band:
+`-48.255 %` against `-33.825 %`, only 1.43 — a hot gas radiating through a
+nearly transparent band into cold surroundings is hard for **both** methods,
+and saying so is more useful than quoting the best of the three.
+
+**(3) The error split works.** Over all fifteen `(leg, band)` pairs the spatial
+residue after (65.6) removes the closed-form angular half is at most
+**`1.931 %`**, and on twelve of the fifteen it is under `0.5 %`. So the number
+a run reports is, to that accuracy, a number that could have been written down
+without running anything — which is what makes "buy more ordinates" a
+quantified decision rather than a hope.
+
+**(4) The two halves answer to different knobs, and the crossover is inside the
+band set.** On the `tau = 0.0266` band the error is `4.39 %` angular against
+`0.15 %` spatial; on `tau = 2.301` it is `0.81 %` angular against `1.90 %`
+spatial. The crossover sits on the `tau = 0.290` band, where leg C measures
+`1.11 %` angular against `0.97 %` spatial. **A WSGG medium is therefore
+simultaneously angular-limited and mesh-limited**, in different bands of the
+same cell, which is a thing a gray model cannot express and a reason a spectral
+run should not be refined in only one direction.
+
+**(5) fvDOM is NOT uniformly better, and here is where it loses.** On leg C's
+`tau = 2.301` band banded P1 is `-0.238 %` from the exact slab and fvDOM is
+`+0.550 %` — P1 wins by 2.3x. (65.6) says why without ambiguity: fvDOM's error
+there is `0.079 %` angular and `0.471 %` **spatial**, so it is first-order
+upwind on `I` over cells of optical thickness `kappa_3 dy = 0.115`, while
+`tau > 1` is precisely the regime P1's diffusion closure was derived for. The
+same reversal appears on the `tau = 28.9` band in all three legs, at the
+`1e-7 %` level where neither number matters. **So §62.5's "WSGG belongs with
+fvDOM" is right for a stated reason and not universally**: it is right because
+a spectral model *manufactures* bands at intermediate `tau`, which is the one
+regime P1 has no claim on — not because fvDOM is a better solver band for band.
+
+### 65.7 The cost, measured — four combinations, four wall times, four memories
+
+`cases/burnerPlume.jsonc`, 32 768 cells, 1200 steps at `deltaT = 0.005 s`,
+`ofgpu-fire cases/burnerPlume.jsonc -endTime 6.0 -deltaT 0.005`, RTX 5070 Ti
+(16 302 MiB), **run back to back twice with nothing else on the card** — the
+GPU carries this machine's desktop, which held 1 265 MiB and 0 % utilisation
+throughout, and the memory column is a DIFFERENCE from that baseline so it is
+this run's own allocation and nothing else's. The four cases are the shipped
+`cases/burnerPlume.jsonc` with the `physics.fire.radiation` block replaced by
+exactly one of
+
+```
+{ "model": "P1",    "a": 0.5, "chiR": 0.35 }                                    (the file itself)
+{ "model": "P1",    "chiR": 0.35, "spectralModel": "wsgg", "windowTreatment": "dropped" }
+{ "model": "fvDOM", "a": 0.5, "chiR": 0.35 }
+{ "model": "fvDOM", "chiR": 0.35, "spectralModel": "wsgg" }
+```
+
+and nothing else in any of the four files differs by a byte. **Soot is off in
+all four** and `updateInterval` is `1` in all four, so this is a clean 2x2 in
+the two tokens it is meant to be a 2x2 in — which is why the fvDOM + WSGG row
+here is not §62.13's, whose fvDOM legs carried soot.
+
+| configuration | solves per call | wall time, 2 passes | vs gray P1 | **peak device memory, this run** | B/cell | **radiated fraction** | combustion efficiency |
+|---|---|---|---|---|---|---|---|
+| **P1, gray** (the default) | 1 SPD | **22.93 / 22.60 s** | **1.00x** | **172 MiB** | 5 504 | **14.9724 %** | 35.4976 % |
+| **P1, WSGG**, window dropped | 4 SPD | **93.64 / 94.01 s** | **4.12x** | **172 MiB** | 5 504 | **47.2833 %** | 62.9911 % |
+| **fvDOM S4, gray** | 24 asym | **141.12 / 141.16 s** | **6.20x** | **236 MiB** | 7 552 | **13.7893 %** | 35.3028 % |
+| **fvDOM S4, WSGG** | 120 asym | **527.06 / 536.42 s** | **23.36x** | **332 MiB** | 10 624 | **43.7569 %** | 72.0828 % |
+
+Run-to-run scatter is **1.5 / 0.4 / 0.03 / 1.8 %** on the four rows, so every
+ratio above is quoted to three figures honestly and to two figures safely.
+
+**The band structure costs 4.12x on P1 and 3.77x on fvDOM, and the two numbers
+sit on OPPOSITE sides of their own arithmetic.** P1 solves four bands for one
+and pays **more** than four; fvDOM solves five for one and pays **less** than
+five. Both have a mechanism and both were predicted by something already in
+this document:
+
+* P1's excess is §62.13's own diagnosis, now confirmed on a leg with no soot in
+  it: a WSGG `kappa` spans orders of magnitude across the plume edge, so the
+  four Helmholtz systems are worse conditioned than the single gray one and
+  cost more than four times its iterations.
+* fvDOM's shortfall is what §62.6 predicted from (65.1): `phi_m` and the
+  upwind weights are **band-independent** and are built once, so only the
+  diagonal and the source are rebuilt per band — "assembly sub-linear in `N_g`,
+  solve exactly linear" — and the transparent band's matrix is pure advection
+  with no absorption on the diagonal at all. **What is measured is the total,
+  3.77x against five solves for one; the split of that shortfall between the
+  saved assembly and the cheap window is NOT measured here**, and it would take
+  a per-band iteration count to separate them.
+
+**Against gray P1, fvDOM + WSGG is 23.4x.** The design note this tranche was
+written from projected `~30x` by arithmetic on two measured points; §62.13
+measured `46.7x` for the same pair **with soot on**. Both are consistent with
+this row: soot raises `kappa` in every band, and the same configuration with
+soot is `933 s` against this `532 s`. That **~1.8x** is the one cross-session
+comparison in this table and it carries §62.13's own caveat — those runs were
+taken on a shared card and its gray legs read 5-9 % high — so read it as "soot
+costs something of order two on this configuration", not as a third
+significant figure. What is not in doubt is the direction: it belongs to soot
+and not to the band count. Quoting one of the three numbers without saying
+which soot setting it carries would be a mistake, and §62.13's table now says
+so where it stands.
+
+**The physics difference, beside the cost.** The radiated fraction on this case
+is `14.97 %` gray-P1, `13.79 %` gray-fvDOM (the `1.18`-point gap §36.7 already
+records — fvDOM radiates *less* on the same fire), and `47.28 %` / `43.76 %`
+with WSGG. **The spectral model triples the radiated fraction on this case**,
+and the reason is §62.7's own warning rather than a discovery: the gray legs
+run at the case's `a = 0.5`, under which the `chi_r = 0.35` floor is doing most
+of the work, while a WSGG `kappa` built from the local `X_H2O`, `X_CO2` at a
+6.25 cm cell is far larger in the plume. The 2x2 also shows that **the angular
+method and the spectral model do not commute in size**: gray-to-WSGG moves the
+radiated fraction by `+32.3` points on P1 and `+30.0` on fvDOM, while
+P1-to-fvDOM moves it by `-1.18` points gray and `-3.53` banded. The spectral
+model is the larger effect on this case by a factor of nine.
+
+**Memory, measured at three mesh sizes**, five steps each (nothing in the time
+loop allocates after the first iteration, so five steps and 1200 give the same
+peak — the 32^3 column below is the same 172/172/236/332 MiB the 1200-step runs
+above reported):
+
+| configuration | 32^3 = 32 768 | 48^3 = 110 592 | 64^3 = 262 144 | B/cell at 64^3 | **radiation's own share at 64^3** |
+|---|---|---|---|---|---|
+| P1, gray | 172 MiB | 524 MiB | **1 164 MiB** | 4 656 | — (the baseline) |
+| P1, WSGG | 172 MiB | 556 MiB | **1 260 MiB** | 5 040 | **+96 MiB = 384 B/cell** |
+| fvDOM S4, gray | 236 MiB | 716 MiB | **1 612 MiB** | 6 448 | **+448 MiB = 1 792 B/cell** |
+| fvDOM S4, WSGG | 332 MiB | 1 004 MiB | **2 316 MiB** | 9 264 | **+1 152 MiB = 4 608 B/cell** |
+
+**§62.10's `960 B/cell` is low by 4.8x, and (65.10) says exactly why.** The
+measured increment of fvDOM + WSGG over gray P1 at 64^3 is **4 608 B/cell**.
+Put (65.10)'s three terms in at `n = 262 144`, `n_bf = 24 576`,
+`n_faces = 774 144`:
+
+| term | arithmetic | measured |
+|---|---|---|
+| 24 intensity fields + 24 pairs of `(phi_m, w_m)` — i.e. gray fvDOM over P1 | `447.5 MiB` | **`448 MiB`** |
+| 96 more intensity fields + the band arrays — i.e. WSGG fvDOM over gray fvDOM | `689 MiB` | **`704 MiB`** |
+
+so the corrected count is right to **0.2 %** and **2 %** on the two increments,
+and §62.10's is wrong because it counted **one** `[n_cells]` array per
+`(band, ordinate)` where the program allocates **three** (`f`, `f0`, `f00`) —
+and then omitted the 24 band-independent surface fields entirely, which at this
+mesh are `283 MiB`, more than the intensities themselves.
+
+**So where does it actually stop?** Taking the 64^3 per-cell figures, which are
+the least distorted by the 1 MiB granularity of the allocator (the 32^3 column
+is inflated by it — 5 120 B/cell against 4 608):
+
+| mesh | fvDOM S4 + WSGG, whole solver | headroom on this 16 GB card |
+|---|---|---|
+| 10^6 cells | **9.3 GB** | fits, with 5.7 GB spare |
+| 1.6 x 10^6 cells | **~15 GB** | **the ceiling** |
+| 10^7 cells | 93 GB | no |
+
+**§62.10's "10^6 cells is the practical single-GPU ceiling" is right, and it is
+right for a bigger reason than it gave**: it put 960 MB of intensity there, and
+the measured requirement for the whole solver is **9.3 GB**. S6 (48 ordinates)
+doubles the fvDOM-attributable share and puts the ceiling at about
+**1.1 x 10^6 cells**. And the wall time arrives at the same place independently:
+see the per-step table below.
+
+**And the wall time at the same three meshes, MARGINALLY.** A 5-step and a
+20-step run of each configuration, differenced, so setup, mesh upload and
+module load fall out and what is left is the cost of one time step:
+
+| configuration | 32^3 | 48^3 | 64^3 | ns per cell per step at 64^3 | 32^3 -> 64^3 exponent |
+|---|---|---|---|---|---|
+| P1, gray | 26.7 ms | 38.0 ms | **72.2 ms** | 275 | **0.48** |
+| P1, WSGG | 80.9 ms | 130.1 ms | **270.3 ms** | 1 031 | 0.58 |
+| fvDOM S4, gray | 80.8 ms | 132.2 ms | **247.0 ms** | 942 | 0.54 |
+| **fvDOM S4, WSGG** | **389.4 ms** | **563.8 ms** | **1 091.6 ms** | **4 164** | **0.50** |
+
+**Eight times the cells costs between 2.7 and 3.3 times the time, not eight.**
+The exponent is about `0.5` on every row, which says plainly that
+`cases/burnerPlume.jsonc`'s 32 768 cells **do not fill this card**: the solver
+is launch- and latency-bound there, not bandwidth-bound, and the per-cell cost
+falls by a factor 2.9 on the way to 64^3. Two consequences, and the second is
+the one a user needs:
+
+* **The 2x2's wall times must not be extrapolated by multiplying by the cell
+  ratio.** Doing that from the 32^3 row would over-state a 10^6-cell run by
+  roughly 3x.
+* **From 64^3 the scaling has nearly caught up** — the `48^3 -> 64^3` exponent
+  on the fvDOM + WSGG row is `0.77`, not `0.50` — so a linear extrapolation
+  from `64^3` is the honest estimate and, if anything, a floor.
+
+**Where fvDOM + WSGG stops being practical, with the number.** At `64^3` one
+step costs `1.09 s`, so this case's own 1200 steps — **6 seconds of physics** —
+cost **22 minutes**. Scaling the `64^3` marginal rate linearly to 10^6 cells
+gives `1.39 h` for the same 6 seconds; the marginal rate is itself 14 % below
+the steady rate (the first twenty steps carry a colder flow and fewer solver
+iterations: 389 ms marginal against `532/1200 = 443 ms` sustained at 32^3), so
+call it **1.6 h per 6 s of physics at 10^6 cells**.
+
+| what a user wants | fvDOM S4 + WSGG, `updateInterval: 1`, at 10^6 cells |
+|---|---|
+| 6 s of fire | **~1.6 h** |
+| 60 s of fire | **~16 h** |
+| 600 s of fire (a compartment test) | **~1 week** |
+
+So the binding constraint at 10^6 cells is the **clock, not the memory**: the
+memory ceiling is at `1.6 x 10^6` cells and the clock has already made the run
+unreasonable at `10^6`. **The combination that is impractical is fvDOM + WSGG
+at `updateInterval: 1` above roughly 3 x 10^5 cells**, and the setting that
+fixes it is the one §62.10 introduced for exactly this reason:
+`updateInterval: 4`, measured in §62.13 at a **6.7x** recovery for **0.12
+points** of radiated fraction, which turns the 10^6-cell row above from 1.6 h
+into about 15 minutes. That single entry is the difference between a spectral
+fire that can be run at a useful mesh and one that cannot, and it is why §62.10
+made it a case setting instead of advice.
+
+### 65.8 The default path, re-run and unmoved
+
+Every number this section publishes was taken after the device-memory report of
+(65.10) was added to `ofgpu-fire`, so the last thing it must do is show that
+adding a report changed no answer. The shipped `cases/burnerPlume.jsonc` at its
+recorded settings, on the final tree:
+
+| quantity | recorded | re-run |
+|---|---|---|
+| combustion efficiency | `35.4976 %` | **`35.4976 %`** |
+| radiated fraction (P1) | `14.9724 %` | **`14.9724 %`** |
+| peak `T` | `816.92 K` | **`816.92 K`** |
+| net radiated power | `1.11473 kW` | **`1.11473 kW`** |
+| domain heat release | `7.44521 kW` | **`7.44521 kW`** |
+
+Every printed digit, in both passes. The memory line is a report and not a
+control: it reads `cuMemGetInfo` at three points and writes one line of stdout,
+and it is registered on nothing.
+
+### 65.9 The three errors this section found in itself
+
+**(1) `E_2^S4(0) == 1.0` was asserted as a floating-point equality, and it is
+false.** The identity is exact — it is `sum_m w_m = 4 pi`, §36.2's first
+condition on the set — but its *evaluation* is twenty-four copies of `pi/6`
+accumulated and divided by `4 pi`, and neither operand is representable. The
+gate FAILED on its first run at `3.331e-16`. It is now a round-off check that
+says which of the two statements it is testing. The existing
+`fvdom::tests::s4_weights_sum_to_4pi` had used a `1e-12` relative bar for
+exactly this reason since §36 was written; this section wrote a stronger claim
+without reading it first.
+
+**(2) "The angular error changes sign, so the bands see both signs" — wrong
+twice over, and the correction is the more interesting result.** The gate first
+asserted a SINGLE crossing bracketed by `tau = 0.5` and `tau = 60`. It FAILED,
+because `E_2^S4 - E_2` is already **negative** at `tau = 0.5`: there are
+**three** crossings, at `tau = 0.381 / 1.983 / 19.42`. The bisection that ran
+anyway converged on the third of them, at `tau = 19.4`, where `E_2` is
+`1.73e-10` — a number that would have been reported as "the sign change happens
+in the tail, so the error is effectively one-signed" and would have been right
+by accident and wrong in reasoning. What is actually true is sharper: **two of
+the three crossings fall in the gap between this set's band 2 (`tau = 0.290`)
+and band 3 (`tau = 2.301`)**, so the bands sample only the positive lobes, the
+per-band angular errors **accumulate rather than cancel** in the band sum, and
+fvDOM's total `G` is no more accurate than its own worst band. §65.6's table
+shows that directly: leg A's bands are `+4.24 / +2.30 / +2.72 %` and its total
+is `+2.79 %`, a weighted mean and not a cancellation. The gate now scans for
+every crossing and requires the one-signedness that is true.
+
+**(3) §62.10's `960 B/cell` is not what the program allocates, and it is low by
+more than 3x in the interior alone.** That figure is `N_g N_ord n` doubles: one
+array per `(band, ordinate)`. What is allocated per `(band, ordinate)` is a
+`GpuScalarField`, which carries `f`, `f0` and `f00` — §3.3's three BDF2 time
+levels — plus five boundary arrays, so the interior storage is **2880 B/cell**
+for five bands on S4. §65.7 measures the whole thing. The part worth saying out
+loud is that **`f0` and `f00` are never read by this module**: `fvdom.rs`
+contains no `ddt` term and no `store_old_time` call, because the RTE is solved
+steady on every call. Two thirds of the banded intensity storage is dead, and
+§65.10 says why removing it is not this section's work.
+
+### 65.10 What is not measured here, and why
+
+* **The memory-lean fvDOM.** (65.10) and §65.9(3) locate 2 `N_g N_ord n`
+  doubles of storage that no kernel reads — at 10^6 cells and five bands, 1.9
+  GB. Recovering it means a leaner field type across the whole of §36, and
+  every byte of §62.8's bitwise gray limit would have to be re-proved against
+  it. That is a unit of work, not a footnote, and §62.10's "memory-lean
+  variant" paragraph is where it belongs.
+* **A mesh above 64^3.** §65.7's per-cell slopes are measured on three meshes
+  and the 10^6-cell ceiling is arithmetic on a measured slope. That is better
+  than §62.10's arithmetic on a design and it is still not a measurement at
+  10^6 cells.
+* **S6 or S8.** (65.6) predicts what more ordinates buy, band by band, and
+  nothing here runs one: `N_ORDINATES` is a compile-time constant in this
+  module and adding a second set is §36's work, not §65's.
+* **`updateInterval` on the four combinations.** §62.13 measured it once, on
+  fvDOM + WSGG + soot, and found a 6.7x recovery for 0.12 points of radiated
+  fraction. §65.7's 2x2 deliberately runs every leg at `updateInterval: 1`, so
+  that the four rows differ only in the two tokens they are meant to differ in.
+* **Soot, in the 2x2.** All four rows run with soot off. §62.13's own table has
+  the soot legs on P1; what §65.7 adds is that the fvDOM + WSGG row **without**
+  soot is `527 s` against §62.13's `933 s` **with** it, so soot costs something
+  of order two more on that configuration and is not a free rider on the band
+  count. That one ratio crosses sessions - §62.13's runs were taken on a shared
+  card - so §65.7 quotes it as a direction rather than a third figure.
+* **Scattering**, and **a per-band wall flux** — §64.8's own two deferred
+  items, unchanged. All four rows run `sigma_s = 0`.
+
+
+## 66. Lagrangian parcels — the pool, the drag update, and the mesh walk
+
+Everything this crate has solved so far is Eulerian: a field per cell, a matrix
+per equation. A spray is not. It is a Monte-Carlo ensemble of moving points
+that carry their own state, are born and die every step, and have to know which
+cell they are in. `docs/02-gpu-portability.md` puts "Lagrangian particle
+tracking" at **tier D**, tenth in its recommended porting order, with the note
+*"cell search, dynamic lists, collisions — needs a GPU redesign."* This section
+is the first third of the answer, and its main claim is that **two of those
+three objections are wrong for this architecture**: there is no search at all,
+and the dynamic list needs no graph update. Collisions stay tier D, and so does
+the one thing that note did not name — the per-cell deposition, which is a
+scatter and is the subject of the section after this one.
+
+This section is **one-way coupled and inert**. Parcels feel the gas; the gas
+does not feel them, and no parcel state variable except position, velocity and
+cell changes over a step. That is not a simplification hidden in a footnote:
+`ParcelPhysics` has a one-item menu, so a case asking for evaporation is
+**refused by name** with what is missing printed (§66.11). (§68 adds the second
+menu item, `heating`, and the two-way sources; evaporation is still refused, by
+§68.13.) The per-cell
+deposition, the `(cell, uid)` sort that makes it gather-shaped, and the
+droplet-evaporation closure are later sections; §66.14 says exactly what each
+of them needs from this one.
+
+**J. K. Dukowicz, *A particle-fluid numerical model for liquid sprays*, J.
+Comput. Phys. 35 (1980) 229-253**, DOI `10.1016/0021-9991(80)90087-X` — the
+discrete droplet model: the parcel, and the real-valued weight `n_p`.
+**C. Crowe, M. Sommerfeld, Y. Tsuji, *Multiphase Flows with Droplets and
+Particles*, CRC Press (1998)**, ISBN 0-8493-9469-4 — the equation of motion of
+§66.2 and the regime argument for which of its terms survive.
+**M. R. Maxey, J. J. Riley, *Phys. Fluids* 26 (1983) 883**, DOI
+`10.1063/1.864230` — the derivation the added-mass coefficient comes from.
+**L. Schiller, A. Naumann**, *Z. Ver. Deutsch. Ing.* 77 (1933) 318, in the form
+compiled by **R. Clift, J. R. Grace, M. E. Weber, *Bubbles, Drops, and
+Particles*, Academic Press (1978)**, ISBN 0-12-176950-X — the drag correlation
+of §66.3. **K. McGrattan, S. Hostikka, R. McDermott, J. Floyd, M. Vanella et
+al., *Fire Dynamics Simulator Technical Reference Guide*, NIST SP 1018-1**
+(NIST, US-Government public domain; `reference/fds/LICENSE.md` read verbatim),
+chapter "Lagrangian Particles" and appendix "Fluid-Particle Momentum Transfer"
+— the **exponential** integration of §66.5 and the sub-step CFL bound of
+§66.7. **G. B. Macpherson, N. Nordin, H. G. Weller**, *Commun. Numer. Meth.
+Engng* 25 (2009) 263, DOI `10.1002/cnm.1128` — barycentric tracking, the named
+and *not implemented* fix for the one case §66.6's walk cannot do; the **paper**
+was read, and the OpenFOAM implementation of it is GPL-3.0 and was **not**
+opened. **G. L. Steele Jr., D. Lea, C. H. Flood**, *Fast splittable
+pseudorandom number generators*, OOPSLA 2014, ACM SIGPLAN Notices 49(10) 453,
+DOI `10.1145/2660193.2660195` — the SplitMix64 finalising mix of §66.9, used
+here as a bijection and not as a generator; Vigna's reference `splitmix64.c` is
+public domain (CC0). Named and not implemented, each with a section number:
+**Ranz & Marshall** (1952) and **Sazhin**, *Prog. Energy Combust. Sci.* 32
+(2006) 162 — evaporation, §66.11; **Bai & Gosman**, SAE 950283 (1995) and
+**Mundo, Sommerfeld & Tropea**, *Int. J. Multiphase Flow* 21 (1995) 151 — the
+four-outcome wall map, §66.10; **Chan**, *J. Fire Prot. Eng.* 6(2) (1994) 79
+and **Yu**, IAFSS 1 (1986) 1165 — the Rosin-Rammler size distribution and the
+`D_v50 ~ We^(-1/3)` correlation, §66.8; **Salmon, Moraes, Dror & Shaw**, SC '11
+article 16 — the counter-based RNG that §66.8 needs before either of those can
+be sampled. **No GPL-licensed source was consulted**, and in particular
+OpenFOAM's `src/lagrangian` tree — the obvious reference for every one of these
+— was not opened.
+
+### 66.1 What a parcel is, and what the pool is
+
+The exact object is the droplet number-density function `f(x, u, r, T, t)` of
+Williams' spray equation. Nobody solves it in seven dimensions. The discrete
+droplet model (Dukowicz 1980) represents it by a Monte-Carlo ensemble of delta
+functions,
+
+```
+  f(x, u, r, T, t)  ~=  sum_p  n_p d(x - x_p) d(u - u_p) d(r - r_p) d(T - T_p)   (66.1)
+```
+
+and each term is a **parcel**: a computational object standing for `n_p`
+identical physical droplets. `n_p` is real-valued, not integral, and that is
+the whole trick — the `10^12` real droplets of a sprinkler become `10^5`
+parcels each worth `10^7` droplets. Every per-droplet quantity that ever
+reaches the gas is multiplied by `n_p` first.
+
+**The statistics this buys, and costs, stated once.** Any Eulerian estimate
+from the ensemble converges as `1/N_P` in the number of **parcels** per cell,
+not the number of physical droplets, so a coupled calculation converges in
+three independent directions — mesh spacing, time step, and parcels per cell —
+and refining two of them is not convergence in any (Subramaniam, *Prog. Energy
+Combust. Sci.* 39 (2013) 215). Nothing in this section deposits anything, so
+`N_P` does not yet bite; it is recorded here because it is the dominant error
+source of the model this section is the first third of, and the section that
+adds the deposition owes a diagnostic for it.
+
+The pool is **structure of arrays, one fixed-capacity allocation at setup**:
+
+| array | type | meaning |
+|---|---|---|
+| `x`, `u` | `Vec3` | position, velocity |
+| `d` | `Scalar` | diameter |
+| `T` | `Scalar` | temperature — carried, never changed, until evaporation exists |
+| `nP` | `Scalar` | the weight `n_p` of (66.1) |
+| `cell` | `Label` | current cell, or `-1` for a free or dead slot |
+| `uid` | `u64` | the identity of §66.9 |
+| `flags` | `u32` | active, lost |
+
+plus four device-resident scalars — `nActive`, `step`, five integer counters,
+and this step's injection total — which are the subject of §66.7.
+
+`Vec3` is stored **interleaved**, as `DevBuf<Vec3>`, because that is what
+`GpuMesh` does for `c`, `sf` and `cf` and it keeps the `#[repr(C)]` mirror in
+`types.rs` doing the marshalling. *(The design note that preceded this section
+recommended three separate `f64` arrays "matching what `GpuMesh` already does".
+`GpuMesh` does not do that. Following the crate rather than the note is the
+smaller change and the one the layout test already covers.)*
+
+At about 90 bytes a slot, `10^6` parcels is ~90 MB and `10^7` is ~0.9 GB, so on
+a 16 GB card with a mesh resident the realistic ceiling is a few million.
+`capacity` is therefore a **hard configuration limit**, checked and refused
+(§66.11), not an out-of-memory at hour three.
+
+### 66.2 The equation of motion, and which terms are here
+
+The full statement, from Maxey & Riley (1983) as presented by Crowe et al.
+(1998):
+
+```
+  (m_p + C_am rho V_p) du_p/dt
+        = -(1/2) rho C_d A_pc |u_p - u| (u_p - u)      drag
+          + m_p g (1 - rho/rho_l)                      gravity + buoyancy
+          + (1 + C_am) rho V_p Du/Dt                   pressure gradient + added mass
+          + C_l rho V_p (u_p - u) x curl(u)            lift
+          - mdot_p (u_p - u)                           momentum carried off by vapour   (66.2)
+```
+
+**This section implements the first two lines and the `C_am` inertia, and
+nothing else.** For water in air `rho/rho_l ~ 1.2e-3`, so the pressure-gradient
+and lift terms are `O(1e-3)` of drag and gravity; `mdot_p` is identically zero
+while the parcels are inert. The Basset history integral is not in (66.2) at
+all and is not going to be: evaluating it needs the entire relative-velocity
+history of every parcel, `O(N x N_history)` memory plus a per-parcel reduction
+over history every step, and at spray parcel counts that is not affordable.
+**It is dropped, and this sentence is the record of the omission** rather than
+its absence being implicit.
+
+Dividing (66.2) by the added-mass inertia gives the relaxation form the rest of
+this section is written in:
+
+```
+  du_p/dt = -(u_p - u)/tau_p + a_g
+
+  tau_p = (4/3) (rho_l + C_am rho) d_p / ( rho C_d |u_p - u| )                    (66.3)
+
+  a_g   = g (1 - rho/rho_l) / (1 + C_am rho/rho_l)                                (66.4)
+```
+
+`C_am = 1/2` for a sphere when `addedMass` is on and `0` when it is off. Note
+the shape of (66.3) and (66.4): `a_g` carries `1/(1 + C_am rho/rho_l)` and
+`tau_p` carries `(rho_l + C_am rho)`, and the two **cancel exactly** in the
+product `a_g tau_p`. §66.4 is what that means.
+
+### 66.3 The drag coefficient, and the singularity that is not one
+
+Schiller-Naumann, with the continuity fix at `Re = 1`:
+
+```
+  C_d = 24 / Re_d                                  Re_d < 1
+      = 24 (0.85 + 0.15 Re_d^0.687) / Re_d         1 <= Re_d <= 1000              (66.5)
+      = 0.44                                       Re_d > 1000
+
+  Re_d = rho |u_p - u| d_p / mu
+```
+
+At `Re_d = 1` the middle branch gives `24(0.85 + 0.15)/1 = 24`, which is the
+first branch exactly — that is what "continuity fix" names, and the pair test
+of §66.12 measures it. **At `Re_d = 1000` the join is not exact**: the middle
+branch gives `C_d = 0.4349` against the third branch's `0.44`, a step of 1.2 %.
+That is a property of the published correlation, not of this implementation,
+and it is measured rather than smoothed over.
+
+**The removable singularity, and how it is removed.** `C_d = 24/Re_d` is
+infinite at `Re_d = 0`, and the product `rho C_d |u_rel|` that (66.3) actually
+needs is finite there. Written the textbook way it is computed as `inf * 0`.
+So the kernel never forms `C_d`. It forms
+
+```
+  K = rho C_d |u_p - u|          [kg/(m^2 s)]
+
+  K = 24 mu / d_p                                          Re_d < 1
+    = 24 mu (0.85 + 0.15 Re_d^0.687) / d_p                 1 <= Re_d <= 1000      (66.6)
+    = 0.44 rho |u_p - u|                                   Re_d > 1000
+```
+
+in which the creeping-flow branch is a **constant** with no division by a
+relative speed anywhere. There is no epsilon, no clamp and no branch on
+`|u_rel|` in the whole function; the limit is exact, and
+`the_drag_rate_is_finite_at_zero_relative_velocity` checks it *at* zero rather
+than near it. `tau_p = (4/3)(rho_l + C_am rho) d_p / K`.
+
+The middle branch calls `pow(Re, 0.687)`. §38.6 already records that `pow(x, y)`
+for non-integer `y` is not bit-stable across compute capabilities or across
+`--use_fast_math`; the crate's reproducibility contract is bitwise **on a fixed
+device and build**, and this branch inherits exactly that contract and no more.
+`dragModel stokes` exists partly so a case that knows it is Stokesian can avoid
+the call.
+
+### 66.4 The terminal velocity, in closed form
+
+Setting `du_p/dt = 0` in (66.3) with `u = 0` gives `u_t = a_g tau_p(u_t)`, i.e.
+
+```
+  K(u_t) u_t (3/4) / (rho_l d_p)  =  g (1 - rho/rho_l)                            (66.7)
+```
+
+a scalar fixed point solved on the host by damped iteration
+(`parcels::terminal_velocity`). Two things follow, and both are tested.
+
+**(a) It does not depend on `C_am`.** By the cancellation noted under (66.4),
+`a_g tau_p = g(1 - rho/rho_l) (4/3) rho_l d_p / K`, in which `C_am` does not
+appear. Added mass changes the *approach* to terminal velocity and never the
+destination. That is not a footnote: it means the §13.4.1 pair test for
+`addedMass` **must be measured on a transient**, and a pair taken at terminal
+velocity would report the setting inert and be wrong about why.
+
+**(b) The buoyancy factor is `(1 - rho/rho_l)`, and dropping it is not
+always small.** The design note that preceded this section quotes
+`u_t = sqrt(4 rho_l g d / (3 rho C_d))`, which drops it. For water in air that
+is a 0.06 % error in `u_t`; for a droplet in a *liquid* carrier — the
+microfluidic case the same note names — `rho/rho_l` is `O(1)` and the factor is
+the answer rather than a correction. `the_buoyancy_factor_the_design_note_
+dropped_is_measured` measures both.
+
+### 66.5 The exponential update
+
+Holding `u`, `tau_p` and `a_g` frozen over a sub-step `h`, (66.3) is linear and
+has an exact solution. Writing it the obvious way,
+
+```
+  u_p(t+h) = u + a_g tau_p + ( u_p(t) - u - a_g tau_p ) exp(-h/tau_p)
+```
+
+has two numerical faults: `a_g tau_p` overflows when there is no drag, and
+`1 - exp(-h/tau_p)` loses every significant digit when `h << tau_p`. The kernel
+uses the algebraically identical form
+
+```
+  beta = h/tau_p = h K / ( (4/3)(rho_l + C_am rho) d_p )
+
+  w    = 1 - exp(-beta)                     computed as -expm1(-beta)
+  q    = (1 - exp(-beta))/beta              = 1 - beta/2 + beta^2/6 for small beta
+
+  u_p(t+h) = u_p(t) + w ( u - u_p(t) ) + h q a_g                                  (66.8)
+
+  x_p(t+h) = x_p(t) + (h/2) ( u_p(t) + u_p(t+h) )                                 (66.9)
+```
+
+in which `beta` is formed without ever forming `tau_p`, so **`dragModel none`
+is the ordinary case `beta = 0`** (`w = 0`, `q = 1`, ballistic) rather than a
+division by zero, and no branch on the drag model appears in the update at all.
+(66.9) is the trapezoid, second order in `h`, as FDS integrates it.
+
+**Why the exponential and not an explicit Euler step.** For the 100 µm water
+droplet of §66.12's Gate 66-A, `tau_p = 28.6 ms`. An explicit step at
+`dt = 1 s` is thirty-five response times: its amplification factor is
+`1 - dt/tau_p = -34` and it diverges on the first step;
+(66.8) lands on `u_t` to `1e-15` relative. This is not an optimisation, it is
+the difference between a usable and an unusable model, and it is why `dt` may
+be chosen by the *gas* and not by the smallest droplet in the domain.
+
+**One honest caveat about "the same answer at every `dt`", which the
+literature's framing of this test obscures.** When `dt >> tau_p`,
+`exp(-dt/tau_p)` underflows and (66.8) collapses to `u^{n+1} = a_g
+tau_p(u^n)` — a **fixed-point iteration** for the terminal velocity, not a
+one-step answer. Its contraction ratio is `|d ln K / d ln u|`, which is `0` in
+the Stokes branch (converged in one step) and `0.147` at Gate 66-A's `Re_t =
+1.87`. So "run for eight seconds" is *eight iterations* at `dt = 1 s`, and that
+is a different statement from "run to steady state": eight steps leaves `1.1e-7`
+relative error, twenty-four leaves less than `1e-15`. Gate 66-A therefore runs
+`max(ceil(T/dt), 24)` steps and says why. Measured, not assumed — the first
+version of the gate ran eight and failed at `1.1e-7`.
+
+### 66.6 Cell location: the face-crossing walk
+
+The standing objection to Lagrangian tracking on a GPU is "cell search". **For
+this architecture that objection is wrong, and it is worth saying precisely
+why.** A global spatial search is needed only when a parcel's cell is unknown,
+and it never is, because of two rules:
+
+* **Every parcel is born in a known cell.** An injector is a fixed point; its
+  cell is located once, on the host, at setup (`parcels::locate_cell`, an
+  `O(n_cells x faces)` half-space test paid once per injector and never in the
+  time loop). Parcels appear on a stand-off sphere around it, at most a cell or
+  two away, and their birth cell is found by a short walk from the injector's.
+* **Every parcel keeps its cell up to date.** With the sub-step bound of §66.7
+  a parcel crosses at most one face per sub-step, so the update is a walk of
+  length one or two.
+
+The walk itself is a **gather over the cell→face CSR §1 already built**, the
+same structure the matrix assembly uses, plus the cell→boundary-face CSR beside
+it:
+
+```
+  given cell c, position x, target x1, displacement s = x1 - x:
+    lambda_min = 1 ; hit = none
+    for k in cfOffset[c] .. cfOffset[c+1]:
+        f    = cfFace[k]
+        Sf_o = (cfOwn[k] ? +1 : -1) * sf[f]        outward normal of THIS cell
+        den  = s . Sf_o
+        if den <= 0: continue                       not leaving through this face
+        lambda = (cf[f] - x) . Sf_o / den
+        if 0 <= lambda < lambda_min: lambda_min = lambda ; hit = f
+    for k in bcfOffset[c] .. bcfOffset[c+1]:       the same, with b_sf already outward
+        ...
+    if no hit: x = x1, done
+    x = x + lambda_min s
+    internal hit -> c = the other cell of f, repeat
+    boundary hit -> §66.10                                                        (66.10)
+```
+
+Per-thread work is `O(faces per cell)` — six for a hex — and the trip count is
+bounded by `maxWalk`, **never by a convergence test**, because a data-dependent
+trip count is exactly what a captured graph cannot express.
+
+**Where this is genuinely tier D, and what is done about it.** The plane test
+assumes every face planar and every cell convex. On the arbitrary polyhedra
+this crate ingests (`io/polymesh.rs`, `io/msh.rs`) neither holds: a warped quad
+makes `lambda` ambiguous, and a non-convex cell can produce a walk that
+oscillates. The published fix is **barycentric tracking on a static tetrahedral
+decomposition** (Macpherson, Nordin & Weller 2009), in which the crossing test
+is exact and a lost particle is impossible by construction; the decomposition
+is a cell→tet CSR with exactly the shape of the existing `cf_*` arrays, so it
+fits this crate's data model, and building it is host work.
+
+**It is not implemented.** Instead the walk has a hard iteration cap and a
+per-parcel `lost` flag, and lost parcels are counted into a device counter that
+`ParcelStats` reports. On hex and Cartesian meshes the counter reads zero and
+Gate 66-B asserts it. That converts an open-ended tier-D research item into **a
+measurable defect with a known fix**, which is the treatment §3.1 asks for.
+
+**Coupled patches are refused at setup, by name.** A parcel crossing a cyclic,
+processor or conjugate-interface face would have to be transported *and its
+velocity transformed* through the couple, and this section has no transform. A
+mesh carrying one is an error naming the patch, not a parcel that silently
+vanishes.
+
+### 66.7 Sub-stepping, and the kernel geometry that makes graph capture work
+
+**Sub-stepping.** The parcel step is subdivided so that no parcel crosses more
+than a fraction `cfl` of a cell per sub-step:
+
+```
+  h_c    = V_P^(1/3)
+  speed  = max(|u_p|, |u_P|) + |g| dt                 a bound over the whole step
+  n_sub  = clamp( ceil( speed dt / (h_c cfl) ), 1, maxSubSteps )                  (66.11)
+  h      = dt / n_sub
+```
+
+`speed` is an upper bound rather than the current speed, because drag can
+accelerate a parcel *towards* a fast gas and gravity can add to it within the
+step. *(The design note gives `dt_p = dt / ceil(0.9 CFL_p)`. That expression
+produces a sub-step CFL of `CFL/ceil(0.9 CFL)`, which tends to `1/0.9 = 1.11`
+for large `CFL` — above one, contradicting the bound it is introduced to
+enforce. (66.11) divides by the target instead, so the sub-step CFL is at most
+`cfl` by construction.)*
+
+**The graph problem, and the fix.** `nActive` changes every step: injection
+adds, escape and wall removal subtract. A kernel launched with
+`grid = ceil(nActive/block)` therefore has a launch geometry that changes step
+to step, and `Gpu::capture` (§8) records a **fixed** geometry — `Graph` exposes
+only `upload()` and `launch()`, with no `cudaGraphExecUpdate` path to patch it.
+
+The fix needs no graph update at all: **fixed-geometry grid-stride persistent
+kernels reading a device-resident count.**
+
+```
+  __global__ void parcelIntegrate(..., const int* nActive) {
+      const int n = *nActive;                          device read, not host
+      for (int i = blockIdx.x*blockDim.x + threadIdx.x; i < n;
+               i += gridDim.x*blockDim.x) { ... }
+  }
+```
+
+* The grid is a setup-time constant (`min(ceil(capacity/256), 1024)` blocks), so
+  the graph captures once and is never updated.
+* `nActive` is read *inside* the kernel, so there is no host round trip and
+  nothing in the step branches on a parcel count on the host.
+* Wasted work is `O(gridDim)` — one loop-bound check per thread — regardless of
+  how far below capacity the pool is running, unlike a launch-over-capacity
+  scheme whose waste is `O(capacity)`.
+
+**The same rule forces the step counter onto the device.** "Which injection
+event is this" must not be a kernel argument, because a captured graph freezes
+its arguments and would replay event zero for ever. `parcelBeginStep` reads
+`step` from device memory, `parcelEndStep` increments it there, and every event
+index is `step / stride` computed on the device in integer arithmetic.
+
+**Grid-stride assignment cannot change the answer**, because each slot is
+written by exactly one thread and reads no other slot. `persistentBlocks` is
+therefore a setting whose contract is the *opposite* of §13.4.1's — it is
+required to be inert — and `the_persistent_grid_geometry_does_not_change_the_
+answer` runs 1, 3, 17 and 64 blocks and asserts bitwise equality. That is
+§13.4.1's admissible exception, taken deliberately rather than by omission.
+
+**Death is marking, not deletion.** A parcel that leaves gets `cell = -1` and
+its active bit cleared; the slot is not reclaimed. Compaction needs a device
+exclusive scan, which this crate does not have and which the deposition section
+must add anyway, so the pool here grows monotonically to `capacity` and the
+high-water mark is what `ParcelStats::n_slots` reports. That is a real
+limitation for a long run with heavy turnover and it is stated rather than
+discovered.
+
+### 66.8 Injection: the ring, the weight, and the whole-step interval
+
+An injector is a device-resident descriptor, not a boundary condition — nothing
+in `field.rs` changes, and §2.3's observation that a one-way-coupled spray
+introduces *no new Eulerian boundary condition at all* holds here exactly.
+
+**Geometry.** Parcel `i` of `n` in an event leaves along
+
+```
+  phi_i = 2 pi (i + 1/2) / n
+  dir_i = cos(theta) a + sin(theta) ( cos(phi_i) t1 + sin(phi_i) t2 )             (66.12)
+  x_i   = x_nozzle + standoff * dir_i,   u_i = speed * dir_i
+```
+
+with `(t1, t2, a)` an orthonormal frame on the cone axis, built on the host so
+the kernel does no normalisation. This is a hollow cone sampled **regularly**,
+not randomly, and that is a deliberate limitation: this crate has **no random
+number generator** (`grep -rn "curand" rust/` returns nothing), and adding one
+correctly means a *counter-based* generator keyed on `(uid, stream)` — Philox
+or Threefry, Salmon et al. 2011 — because a stateful per-parcel generator would
+have to be checkpointed and would make a parcel's draws depend on how many
+times it had been visited. Until that exists, Rosin-Rammler stratified sampling
+(Chan 1994) and the FM `D_v50 ~ We^(-1/3)` correlation (Yu 1986) cannot be
+sampled, and a ring is what an unsampled hollow cone is. A regular ring is also
+exactly reproducible, which the whole of §66.9 depends on.
+
+**The weight, and why it makes the flow rate exact.** With the mass of one
+droplet `m_d = rho_l (pi/6) d^3`,
+
+```
+  n_p = mdot * dt * stride / ( n * m_d )                                          (66.13)
+```
+
+so the mass emitted per event, `n * n_p * m_d`, is `mdot dt stride`
+*identically* — the discharged mass is right to round-off however many parcels
+the case chose to represent it with, because `n_p` is derived from the flow
+rate rather than the other way round. `the_injector_discharges_exactly_the_mass
+_the_flow_rate_asks_for` measures it at 1, 8 and 37 parcels an event and two
+diameters; the worst residual is `1.6e-15` relative.
+
+**The interval is whole steps, on purpose.** `interval` is reduced at setup to
+`stride = round(interval/dt)`, an integer, and an injector fires when
+`step % stride == 0`. A floating-point `floor(t/interval)` would make the whole
+spray depend on how the accumulated time was summed, which is precisely the
+kind of dependence §66.9 exists to remove. The consequence is that `dt` is
+frozen into the pool: `Parcels::step` refuses a `dt` different from the one the
+pool was built with, naming both.
+
+**Capacity overflow is deterministic and refused.** Injectors are served in
+index order; whatever does not fit is counted into `n_dropped`. The host reads
+that counter **outside** the step loop and refuses, because a refusal belongs
+where a human can be told and not inside a graph. §13.4's philosophy — a case
+that means something else is an error — argues for the refusal rather than a
+warning: a spray that silently emits fewer parcels than the case asked for is a
+different case.
+
+### 66.9 Identity: a bijection, not a counter
+
+Every parcel carries a `uid` assigned at birth:
+
+```
+  uid = mix64( (injector << 52) | (event << 20) | index )                         (66.14)
+```
+
+with `injector` 12 bits (4095 reserved for a parcel placed directly by
+`Parcels::seed`), `event` 32 bits and `index` 20 bits, and `mix64` SplitMix64's
+finalising mix.
+
+**Why a hash and not an atomic counter.** An atomic counter hands out
+identities in *hardware scheduling order*, which is not reproducible. The
+deposition section's sort keys on `(cell, uid)` and is the canonicaliser that
+makes gather-shaped deposition possible at all; if `uid` is not a reproducible
+function of physical state, that argument collapses silently — the answer stays
+plausible and stops being the same twice. (66.14) is a pure function of
+`(injector, event, index)`, so it is identical across runs, across devices,
+across restarts, and independent of which slot the parcel happened to land in.
+
+**Why the mix is a bijection, and why that matters more than it looks.**
+`(cell, uid)` is a total order on live parcels only if `uid` is unique.
+SplitMix64's finaliser is three `x ^= x >> k` steps (each invertible) and two
+multiplications by odd constants (each invertible mod `2^64`), so it is a
+**bijection on `u64`**: distinct packed triples give distinct uids *exactly*.
+Uniqueness is by construction. The design note that preceded this section
+specified `uid` as `u32`, and a 32-bit identity over `10^6` parcels collides
+with near-certainty (about 116 expected collisions) — which would have broken
+the total order, and therefore the canonicalisation, and therefore the
+reproducibility claim, without breaking anything visible.
+`the_uid_mix_is_a_bijection` inverts the mix — the xor-shifts by fixed-point
+iteration, the multipliers by Newton's modular inverse — and checks the round
+trip; `no_two_parcels_can_share_an_identity` checks 131072 of them directly.
+
+### 66.10 Boundaries: the two outcomes, and the four that are refused
+
+When the walk of (66.10) meets a boundary face:
+
+| patch kind | outcome | governed by |
+|---|---|---|
+| `symmetry` | specular reflection | nothing — it is what symmetry *means* |
+| `empty` | specular reflection | nothing — a parcel leaving the 2-D plane is leaving the case |
+| generic `patch` | escape: stop at the face, `cell = -1`, count | nothing |
+| `wall` | `remove` (default) or `rebound` | `wallInteraction` |
+| `cyclic`, `processor`, `interface` | **refused at setup** (§66.6) | — |
+
+Reflection, with normal restitution `e` and tangential loss `f_t`, is applied to
+both the velocity and the remaining displacement so the trajectory stays
+consistent:
+
+```
+  u'  = (1 - f_t) u - [ (1 - f_t) + e ] (u . n) n                                 (66.15)
+```
+
+with `e = 1`, `f_t = 0` for symmetry and empty. At `e = 1` a wall is a mirror,
+so a parcel bouncing between two of them traces the **triangle-wave fold** of
+the straight line it would otherwise have flown — an analytic statement, which
+is why `a_rebounding_parcel_follows_the_folded_straight_line` can check the
+reflection without trusting the solver twice.
+
+**Four outcomes are refused by name**, each with the reason printed: `stick`,
+`spread` and `film` because a wall film is needed to receive the mass and this
+crate has none; `splash` because it multiplies one parcel into `N` at an
+unpredictable rate and no deterministic capacity policy for population growth
+is designed. The published map they belong to (Bai & Gosman 1995; Mundo et al.
+1995, whose splash parameter is `K = Oh^(-1/2) We^(3/4)` against `K_crit ~
+57.7`) is named so the refusal points somewhere.
+
+`wallInteraction remove` is not a physical model and is not presented as one:
+it is the bookkeeping default that says a parcel reaching a wall stops being an
+airborne parcel, and it stops it **at the face**, which is where a film would
+receive it.
+
+### 66.11 What a case can say, and what it is refused
+
+| setting | values | default |
+|---|---|---|
+| `physics` | `inert` (and, since §68.5, `heating`) | `inert` |
+| `dragModel` | `none`, `stokes`, `schillerNaumann` | `schillerNaumann` |
+| `wallInteraction` | `remove`, `rebound` | `remove` |
+| `restitution`, `tangentialLoss` | `[0, 1]` | `1`, `0` |
+| `capacity` | `1 .. i32::MAX` | 1024 |
+| `rhoLiquid`, `muGas` | finite, positive | 1000, 1.8e-5 |
+| `cLiquid`, `kGas`, `cpGas` (§68.5, read only when `physics heating`) | finite, positive | 4182, 0.026, 1005 |
+| `gravity` | finite `Vec3` | `(0, 0, -9.81)` |
+| `addedMass` | bool | `false` |
+| `cfl`, `maxSubSteps`, `maxWalk` | positive | 0.9, 64, 16 |
+| `persistentBlocks` | positive, or derived | derived |
+| injector | position, axis, `coneHalfAngle`, `standoff`, `speed`, `diameter`, `temperature`, `massFlow`, `parcelsPerEvent`, `interval` | — |
+
+**The §13.4 contract.** Every name above goes through a `from_name` that
+returns the value or an `Error` naming the setting, the value and the menu.
+Three refusals carry a `note` saying *why*, because "not supported" is the
+wrong summary when the feature is understood and simply not built:
+
+* `physics evaporating` / `heatAndMassTransfer` — *"evaporation needs the
+  semi-implicit 3x3 closure, liquid property tables and a species source, none
+  of which exist"*. This is the refusal this section is defined by. The model it
+  points at is Ranz & Marshall (1952) as re-derived by Sazhin (2006), with the
+  Spalding blowing correction `Sh = Sh_0 ln(1+B_M)/B_M`; the `d²` law is its
+  sanity check and the 56 named droplet experiments of Ranz & Marshall
+  Tables 1-4 are its gate. None of it is here. (**§68.5 added `heating`**, the
+  sensible-heat half of the same pair of papers, because an energy source is
+  only conservative if the droplet has a finite heat capacity; the refusal text
+  now says so and points at it.)
+* `wallInteraction stick|spread|film` and `splash` — §66.10.
+* `physics reacting` — needs evaporation first.
+
+`ParcelControls::validate` refuses every bad *number* by name, and
+`ParcelControls::describe` prints every setting the run will actually use in
+one line, which is §13.4.2's half of the contract.
+
+**`capacity` is a hard limit and overflowing it is an error, not a warning** —
+the mechanism is §66.8's, the refusal is `ParcelStats::check_capacity`, and it
+names the three things a user can do about it. It is checked outside the step
+loop because a refusal belongs where a human can be told.
+
+**No block is added to any case format by this section, and that is deliberate.**
+§13.4.2 is explicit that a block of the case format that *no driver reads* is a
+refusal, not a printed note. No driver reads parcels yet, so adding a `parcels`
+block now would create exactly the dead entry that rule forbids. The section
+that first drives a spray adds the block and the reader together.
+
+### 66.12 What must hold
+
+| # | claim | where it is checked | verdict |
+|---|---|---|---|
+| 1 | `K` of (66.6) is finite and equals `24 mu/d` at `u_rel = 0` | `the_drag_rate_is_finite_at_zero_relative_velocity` | exact |
+| 2 | (66.5) is continuous at `Re = 1` | `the_drag_law_joins_exactly_at_re_1_and_only_nearly_at_re_1000` | `< 1e-9` relative |
+| 3 | (66.5) steps by 1.2 % at `Re = 1000` | the same test | measured, published, not fixed |
+| 4 | (66.7)'s fixed point satisfies the balance it came from | `the_terminal_velocity_satisfies_the_force_balance_it_came_from`; Gate 66-A | `9.1e-16` |
+| 5 | **Gate 66-A**: a droplet reaches the analytic `u_t`, at every `dt` from `1e-3` to `1 s` | `gate_66a_terminal_velocity_is_the_analytic_one_at_every_time_step`; `ofgpu-validate` | `9.9e-16` worst of four |
+| 6 | the same in the nonlinear branch (`Re_t ~ 25`) | `gate_66a_holds_in_the_intermediate_reynolds_branch` | `< 1e-6` |
+| 7 | **Gate 66-B**: a ballistic parcel lands in the cell `i + nx(j + ny k)` names | `gate_66b_a_parcel_lands_in_the_cell_the_arithmetic_names`; `ofgpu-validate` | 0 of 5 wrong |
+| 8 | and at the position a straight line names | the same | `3.4e-16` m |
+| 9 | no parcel is lost by the walk on a Cartesian mesh | the same, and every GPU test in the module | `n_lost = 0` |
+| 10 | an escaping parcel stops **on** the face and is counted | `a_parcel_aimed_out_of_the_domain_escapes_at_the_face_and_is_counted` | `< 1e-13` m |
+| 11 | rebound at `e = 1` is the triangle-wave fold, over 40 steps | `a_rebounding_parcel_follows_the_folded_straight_line` | `< 1e-11` m |
+| 12 | **Gate 66-C**: two identical runs are bitwise identical | `gate_66c_two_identical_runs_are_bitwise_identical`; `ofgpu-validate` | every bit |
+| 13 | a graph captured **once** and replayed reproduces the eager path bitwise while the working set grows | `the_graph_is_captured_once_and_replayed`; `ofgpu-validate` | every bit; 160 parcels over 20 launches |
+| 14 | permuting the initial pool permutes the answer and changes nothing else | `a_permutation_of_the_pool_permutes_the_answer_and_nothing_else` | every bit |
+| 15 | the launch geometry is inert | `the_persistent_grid_geometry_does_not_change_the_answer` | every bit, 1/3/17/64 blocks |
+| 16 | (66.14) is a bijection, and 131072 identities collide zero times | `the_uid_mix_is_a_bijection`, `no_two_parcels_can_share_an_identity`; `ofgpu-validate` | exact |
+| 17 | the kernel's identity is the host's | `the_device_identity_matches_the_host_identity` | exact |
+| 18 | the kernel's drag branch is the one the case named | `the_device_enumerations_match_the_host` | `< 1e-12` |
+| 19 | (66.13) discharges `mdot t` exactly, at any parcel count | `the_injector_discharges_exactly_the_mass_the_flow_rate_asks_for`; `ofgpu-validate` | `1.6e-15` |
+| 20 | a full pool is refused by name, outside the step | `the_pool_refuses_by_name_when_it_overflows` | — |
+| 21 | a coupled patch is refused at setup, by name | `a_cyclic_mesh_is_refused_by_name` | — |
+| 22 | every unsupported setting is refused by name with the menu | `every_unsupported_setting_is_refused_by_name_with_the_menu` | — |
+| 23 | **every wired setting changes what the run writes** (§13.4.1) | `every_wired_setting_changes_what_the_run_writes`, 22 knobs | all 22 bite |
+
+**The three gates run in `ofgpu-validate` as well**, promoted out of the
+module's own tests on the same grounds as §23/§24/§25: a regression in the walk
+or in the identity should fail the validation binary and not only one module's
+`cargo test`.
+
+**§13.4.1's pair table, and the two entries that are not in it.** Twenty-two
+knobs — every control field and every injector field — each turned on one side
+of a pair that is otherwise identical, each required to change the written
+`.vtp`, each failing by its own name if it does not. Both sides call the same
+`run_case`, never a re-derived control struct, which is the shortcut §13.4.1
+records five instances of. Three knobs need an *enabling* edit applied to **both**
+sides (`restitution` and `tangentialLoss` need `wallInteraction rebound`;
+`maxWalk` needs the sub-step limiter relaxed, or the parcel never attempts a
+second crossing and the cap is inert by arithmetic), and those go in `pre`
+rather than being folded into the knob, so the two sides still differ in
+exactly one setting. Two entries are deliberately absent and say so:
+`persistentBlocks`, whose contract is inertness (row 15), and `physics`, whose
+menu has one item because its whole job is to refuse the others (row 22).
+
+### 66.13 Output
+
+`Parcels::write_vtp` writes the live parcels as VTK PolyData —
+`crate::io::vtu::write_parcels_vtp`, the same appended-binary encoding §24's
+`.vtu` writer already uses, from the same published Kitware format reference.
+One vertex per live parcel, with `U`, `d`, `T`, `nP`, `cell` and the identity
+as `PointData`; `write_pvd` gives the time series. Dead slots are not written,
+so the point count is a parcel count.
+
+The identity is split across `uidHigh` and `uidLow` because a 64-bit integer
+does not survive `Float64` exactly, and a reader that silently rounded it would
+be worse than one that never had it; both halves are exactly representable, so
+the full 64 bits are recoverable from the file. This is not cosmetic: without
+parcel output a spray cannot be debugged at all.
+
+### 66.14 What this section does not do
+
+Named, with what each needs, so the next section starts from a list rather than
+a survey:
+
+* **Deposition to the gas, and therefore two-way coupling.** *(§67 does the
+  half of this that is machinery: the sort, the scan, the CSR and a gather that
+  deposits four per-cell quantities. It still couples nothing into an
+  equation.)* Needs the per-cell CSR of parcel indices, which needs a **radix
+  sort on `(cell, uid)`**, which needs a **device exclusive scan** this crate
+  does not have. The sort is the
+  price of gather-only: constructing a per-cell grouping from an unsorted
+  parcel→cell map *is* a counting sort, and the atomics-free version of a
+  counting sort is a radix sort. There is no way round it that does not hide an
+  f64 atomic, which §3.4 forbids outright. Note also that the CUB *host*-side
+  device-wide algorithms are not reachable from this build — `build.rs` compiles
+  each `.cu` with `nvcc --cubin` and there is no host translation unit — so the
+  sort must be written as kernels, though block-scope CUB (`cub::BlockScan`) is
+  device code and is usable.
+* **Evaporation and heating.** Ranz-Marshall with the Spalding blowing
+  correction, integrated by the semi-implicit 3x3-in-registers closure, plus
+  liquid property tables. Its gate is the 56 droplet experiments of Ranz &
+  Marshall Tables 1-4 on `d(D²)/dt`. There is a modelling decision inside it
+  this section cannot dodge for the next one: the cell state `(T_g, Y_ag)` must
+  be **frozen** across the step and corrected by a cell-level limiter
+  afterwards, because updating it parcel-by-parcel is order-dependent by
+  construction — and that is a real difference from FDS's sequential update,
+  not a rearrangement.
+* **A counter-based RNG.** Philox or Threefry keyed on `(uid, stream_id)`.
+  Without it there is no turbulent dispersion, no Rosin-Rammler sampling, no
+  splash. With a *stateful* one there is no reproducibility, which is why the
+  requirement is counter-based and not merely "a generator".
+* **Compaction.** Dead slots are never reclaimed here; the same device scan the
+  sort needs is what reclaims them. *(§67.2 adds the scan; the compaction on
+  top of it is still not written.)*
+* **Barycentric tracking** (§66.6), gated behind the lost-parcel counter.
+* **Restart.** `restart.rs` must serialise a variable-length pool. (66.14)
+  already makes that restart-exact for injected parcels — the identity is
+  reconstructible from `(injector, event, index)` — which is most of the work.
+* **A driver and a case block** (§66.11). Nothing reads a spray from a file
+  yet, and adding the block before the driver would create the dead case entry
+  §13.4.2 forbids.
+
+## 67. The parcel sort, the per-cell CSR, and gather-shaped deposition
+
+§66 moves parcels and never touches a cell field, and said so as a promise
+rather than a hope: there is no code path from a parcel to a matrix. This
+section builds the path — and the whole difficulty is that the obvious way to
+build it destroys the property the rest of this crate is organised around.
+
+Every Lagrangian source term the gas will ever see is a **per-cell sum over the
+parcels in that cell**, the PSI-Cell construction of Crowe, Sharma & Stock
+(1977):
+
+```
+  phi_P = (1/V_P) sum_{p in P} n_p psi_p                                    (67.1)
+```
+
+Written one thread per parcel, `(67.1)` is `phi[cell[p]] += n_p psi_p`: a
+**scatter** with write conflicts, needing `atomicAdd(double*)`. Double-precision
+atomic addition is not associative, so the summation order — which is the
+hardware's scheduling order — changes the last bits of every coupled source,
+hence the matrix, hence the Krylov iteration count, hence the answer. This is
+exactly the failure the cell→face CSR of §1 was introduced to avoid, and
+`docs/02-gpu-portability.md` states the cure in one line: *"make a reverse map
+and a cell is a thread that only gathers its own faces, and the result is
+bit-for-bit reproducible."*
+
+So this section is the transpose. It sorts the pool on a **total order**, reads
+a per-cell CSR of parcel indices straight out of the sorted keys, and gathers
+one thread per cell — structurally identical to the face gather the matrix
+assembly already uses. **There is no f64 atomic anywhere in it.** It is still
+one-way coupled: nothing here writes a momentum, energy or species source, and
+`docs/02`'s tier-D verdict on Lagrangian tracking is now down to its last two
+items, collisions and the polyhedral walk.
+
+**N. Satish, M. Harris, M. Garland, *Designing efficient sorting algorithms for
+manycore GPUs*, IEEE IPDPS 2009**, DOI `10.1109/IPDPS.2009.5161005` — the
+three-phase radix pass of §67.4: a per-block digit histogram, one global
+exclusive scan over the block-by-digit counters, and a stable scatter whose
+destination is a closed form. The **paper** was read; no implementation of it
+was opened. **D. Merrill, A. Grimshaw**, *Parallel scan for stream
+architectures*, University of Virginia Technical Report CS2009-14 — the
+reduce-then-scan decomposition of §67.2. **G. E. Blelloch**, *Prefix sums and
+their applications*, CMU-CS-90-190 (1990) — the exclusive scan and its
+work-efficiency argument. **W. D. Hillis, G. L. Steele Jr.**, *Commun. ACM*
+29(12) (1986) 1170, DOI `10.1145/7902.7903` — the in-block scan network, chosen
+for a property that is not speed. **C. T. Crowe, M. P. Sharma, D. E. Stock**,
+*The particle-source-in-cell (PSI-CELL) model for gas-droplet flows*, J. Fluids
+Eng. 99 (1977) 325, DOI `10.1115/1.3448756` — equation (67.1) itself.
+**S. Elghobashi**, *On predicting particle-laden turbulent flows*, Appl. Sci.
+Res. 52 (1994) 309, DOI `10.1007/BF00936835` — the coupling map that says at
+which `alpha_p` the quantity §67.6 deposits starts to matter. **No GPL-licensed
+source was consulted**, and in particular OpenFOAM's `src/lagrangian` tree —
+which contains the obvious reference implementation of a per-cell parcel
+grouping — was not opened.
+
+### 67.1 The canonicalisation argument
+
+A gather is reproducible only if the CSR it walks is **a deterministic function
+of the physical state** and not of the array's current permutation. Slot order
+is not: it depends on the order parcels were injected in, on which slots were
+free, on whether the pool was ever compacted. So the CSR must be built from
+something that does not.
+
+Sort on the pair
+
+```
+  key(p) = ( cell_p , uid_p ),   compared lexicographically                 (67.2)
+```
+
+`uid` is the identity of (66.9) — a bijection of `(injector, event, index)`,
+assigned at birth, never from an atomic counter. Because `uid` is **unique**,
+`(67.2)` is a *total* order on live parcels, so the sorted sequence is a pure
+function of the set `{(cell_p, uid_p)}`. It does not depend on which slot a
+parcel occupies, on the order it was born, on the number of thread blocks, or
+on the device.
+
+**The sort is the canonicaliser**, and that is what makes everything else free:
+the free list, the compaction and the injection order may all be arbitrary,
+because the sort erases their influence. It also makes the answer
+**restart-invariant** — a run resumed from a checkpoint that stored
+`(cell, uid)` rebuilds the same order — which is why `SeedParcel` gained an
+explicit `uid` in this section rather than deriving one from the slot.
+
+Two consequences worth stating because they are load-bearing and easy to lose:
+
+* **A duplicate `uid` silently breaks the argument.** It does not crash: it
+  makes the order of two parcels' contributions depend on which slot they
+  happened to occupy. `Parcels::seed` therefore refuses duplicate explicit
+  identities at setup, by name. Injected identities are unique by construction
+  (66.9) and need no check.
+* **The gate for this is not "two runs agree".** Two identical runs agree for a
+  sort that is merely *stable on this input*. The gate has to be a run whose
+  parcel **set** is unchanged and whose **slot order** is not — §67.10 rows 11
+  and 12.
+
+### 67.2 The device exclusive scan
+
+The crate had no device-wide prefix sum: `cf_offset` is built on the host in
+`HostMesh`, and everything else that needed one had it at setup. The radix sort
+needs one *inside the time step*, so §67 adds `parcels::DeviceScan`:
+
+```
+  out[i] = sum_{j < i} in[j],       in, out : i32[n],  n fixed at setup     (67.3)
+```
+
+Three kernels, Merrill & Grimshaw's reduce-then-scan over tiles of
+`T = 256 x 4 = 1024`:
+
+```
+  ofsScanReduce      block b -> sums[b] = sum of tile b
+  ofsScanBlockSums   one block, looping over sums with a carry in shared memory
+  ofsScanDownsweep   block b -> out = sums[b] + (exclusive scan within tile b)
+```
+
+It reads the input **twice** where a decoupled-look-back scan reads it once.
+That is deliberate: look-back needs an atomically assigned tile order, and a
+tile order handed out by an atomic is exactly the scheduling dependence this
+section exists to keep out. The in-block network is Hillis–Steele, which is
+`O(n log n)` work rather than Blelloch's `O(n)` — chosen anyway, because its
+*shape* is a function of `blockDim` and of nothing else, so it is deterministic
+by construction. At 256 elements the difference is eight rounds against sixteen,
+inside shared memory.
+
+Integer addition is associative and there is no atomic, so `(67.3)` is exact:
+the device prefix sum equals the host prefix sum element for element, with no
+tolerance to state. §67.10 row 1 checks that at every size that straddles a tile
+boundary, including one large enough to make `ofsScanBlockSums` loop.
+
+### 67.3 The key, and why it is not sixty-four bits
+
+The design note that preceded this section proposed the 64-bit key
+`(cell << 32) | uid`. **That is wrong here**, and the reason is (66.9): §66
+found that a 32-bit identity over `10^6` parcels collides with near-certainty
+and made `uid` a full `u64`. Packing it back into 32 bits would reintroduce
+exactly the collisions §66 went to the trouble of eliminating — and the failure
+would be silent, because two parcels with equal keys still sort, just in an
+order decided by the input permutation.
+
+So the composite key is `64 + cellBits` wide, and it is sorted least-significant
+digit first in two phases:
+
+```
+  phase A   key = uid          8 passes of 8 bits            -> ordered by uid
+  phase B   key = cellKey      ceil(cellBits/8) passes       -> ordered by (cell, uid)
+                                                                            (67.4)
+```
+
+Phase B is stable, so it preserves phase A's order within each cell, which is
+the definition of lexicographic `(67.2)`. The cell key is
+
+```
+  cellKey(p) = cell_p          if 0 <= cell_p < nCells
+             = nCells          if the slot is dead, free or padding         (67.5)
+```
+
+The sentinel is `nCells` and not `INT_MAX` for two reasons: dead slots sort
+past every live one, **and** the lower bound of `nCells` in the sorted array is
+then exactly the number of live parcels, which §67.5 gets for nothing. It also
+bounds the key, so the pass count is `ceil(bits(nCells)/8)` — a 4096-cell mesh
+costs two passes, not four, and a 216-cell mesh costs one.
+
+`bits(nCells)` is the *sentinel's* width, not the largest cell index's: a
+256-cell mesh needs nine bits and therefore two passes, while a 216-cell mesh
+needs eight and one. That is not an off-by-one to be smoothed over; it is why
+the sentinel choice is stated here rather than buried in the kernel.
+
+**Total passes: nine for a `4^3` mesh, ten for a `10^3` one, eleven for the
+`262144`-cell mesh of §67.9.** Eight of them are the identity, and none of the
+eight can be skipped, because a bijection of 64 bits has 64 bits of range. That
+is what a total order costs, and §67.9 says what it costs in milliseconds.
+
+### 67.4 One radix pass
+
+Each pass is a histogram kernel, a scan, and a scatter kernel, over a **fixed,
+padded** item count `nPad = ceil(capacity/1024) * 1024` in `nb = nPad/1024`
+blocks. Padding slots carry the maximum key and sort to the end, which is what
+lets every launch cover whole tiles with no bounds test on the hot path.
+
+**The counter layout is digit-major**, `counters[d*nb + b]`, so that one
+exclusive scan over the whole array gives, at `(d, b)`, the number of items
+whose digit is smaller *plus* the number with the same digit in an earlier
+block:
+
+```
+  hist(d, b)  = |{ i in tile b : digit(key_i) = d }|
+  base(d, b)  = exclusive_scan( hist )(d, b)                                (67.6)
+```
+
+That is precisely the base a stable scatter needs, and it is why the layout is
+transposed rather than block-major. The histogram uses shared-memory **integer**
+atomics: an integer sum is order-independent, so a count is reproducible even
+though the order the increments arrive in is not.
+
+The scatter's destination is a closed form. For item `i` of digit `d`, in tile
+`b`, held by lane `l` of warp `w`:
+
+```
+  pos(i) = base(d, b) + blockOff(d) + warpPrefix(w, d) + rankInWarp(i)      (67.7)
+
+    blockOff(d)      items of digit d already placed by earlier sub-passes of
+                     this block
+    warpPrefix(w, d) items of digit d held by warps below w in THIS sub-pass
+    rankInWarp(i)    lanes of w below l carrying d
+```
+
+`warpPrefix` is an eight-deep serial scan, one thread per digit, over the eight
+per-warp counts — and it is where `blockOff` is advanced for the next
+sub-pass, so the two are computed in the same three lines.
+
+The warp match is eight `__ballot_sync` reductions rather than one
+`__match_any_sync` — the same answer, no compute-capability floor, and
+obviously a pure function of the lane values, which is the property the
+determinism argument needs. Nothing in `(67.7)` depends on which block or warp
+ran first, so the output is stable and the whole pass is a pure function of its
+input.
+
+The tile's four items per thread are handled in four **sequential** sub-passes,
+because stability is defined by the item's index within the tile and the striped
+index `j*256 + t` is ordered by `j` first. Ranking 1024 items at once would need
+a 1024-wide rank; ranking 256 at a time needs one ballot loop and one eight-deep
+scan over warps.
+
+### 67.5 The per-cell CSR, for the price of a binary search
+
+After the sort, the value array **is** `pc_index`: the parcel slots, grouped by
+cell and ascending in identity within each cell. The only thing missing is where
+each cell's run starts, and because the key array is sorted that is a lower
+bound:
+
+```
+  pc_offset[c] = min { i : cellKey_sorted[i] >= c },   c = 0 .. nCells      (67.8)
+```
+
+One thread per cell, a binary search over the sorted keys. No atomics, no scan,
+no scratch, and the answer for cell `c` depends on nothing but the key array.
+Cells with no parcels get `pc_offset[c] == pc_offset[c+1]` for free, and by
+(67.5) `pc_offset[nCells]` is the live parcel count.
+
+This is the same shape as the cell→face CSR of §1 — `cf_offset`/`cf_face` and
+`pc_offset`/`pc_index` are read by the same idiom — which is the point: the
+deposition is not a new kind of operation in this crate, it is the operation
+this crate is built out of.
+
+### 67.6 Deposition
+
+One thread per cell, walking its own segment:
+
+```
+  count[P]  = k1 - k0                                                       (67.9)
+  weight[P] = sum_{k=k0}^{k1-1} n_p(k)
+  alpha[P]  = (1/V_P) sum n_p(k) (pi/6) d(k)^3
+  mass[P]   = rho_l  sum n_p(k) (pi/6) d(k)^3
+```
+
+with `k0 = pc_offset[P]`, `k1 = pc_offset[P+1]`. Nothing is written twice and
+nothing is written by two threads, so there is no atomic and no
+order-dependence: the sum runs over `k` ascending, which after §67.4 is over
+`(cell, uid)` ascending, which is a function of the physical state alone.
+
+`alpha_p` is the quantity Elghobashi's map is drawn in — below `10^-6` one-way
+coupling suffices, between `10^-6` and `10^-3` two-way momentum and energy
+coupling is required, above `10^-3` collisions begin to matter — so a case can
+now be told which regime it is actually in. `count` is the parcels-per-cell
+statistic §66.1 argued should be *reported and not hidden*, because the
+Monte-Carlo variance of every deposited quantity falls as `1/count` and nothing
+else in the calculation makes that visible.
+
+`mass` is deliberately **not** `alpha * V_P * rho_l`. It is the conserved
+quantity the gates sum, and forming it by its own product keeps that sum free of
+the division by `V_P`.
+
+**What is not deposited yet, and why — three groups, not one.** §2.2 of the
+design note lists twelve per-cell arrays (fourteen `f64`, counting the vector
+as three).
+
+* **Two of them are here**: `alpha_p` and `n_parcels` (`count`). `weight` and
+  `mass` are not on the note's list at all and are added, because `sum n_p` and
+  the liquid mass in a cell are what §67.10's conservation gate is posed on and
+  neither is recoverable from the rest without a model.
+* **Six need a model this section does not have**: `drag_sp`, `drag_su`,
+  `heat_sp`, `heat_su`, `mdot_vap`, `q_latent` — a response time evaluated
+  against the gas the parcel sees, or an evaporation rate. Both belong with the
+  coupling.
+* **Three need nothing at all**: `a_pv = (1/V) sum n_p pi r^2`, `sum n_p r^2`
+  and `sum n_p r^3` are pure geometry, three more accumulators in the same
+  loop. They are absent only because **nothing reads them** until the spray
+  couples to `radiation.rs` and `fvdom.rs`, and §13.4.2's rule against adding
+  what no driver reads applies to a deposited field exactly as it does to a
+  case entry. That is a deliberate omission with one line of work behind it,
+  not a difficulty. The remaining one, `emit`, needs `T_p` to be doing
+  something, which under `ParcelPhysics::Inert` it is not.
+
+The gather loop is the same loop for all of them; adding accumulators is
+arithmetic, not architecture.
+
+**One thread per cell is the simple choice and it has a known pathology.** In a
+sprinkler core one cell may hold thousands of parcels while its neighbours hold
+none, a `1000:1` intra-warp imbalance. The published two-level fix — threshold
+on segment length, block-per-cell with a **fixed-shape** reduction tree for the
+long ones, both index lists built by the scan §67.2 already provides — is named
+in §67.12 and not implemented. §67.9 measures the case for it only halfway: on
+a real spray the longest segment is 710 parcels — the injector's own cell — and
+the gather costs 0.52 ms against 0.71 ms for the sort, so it is **not** the
+rounding error it would be pleasant to call it. How much of that 0.52 ms is the
+skew rather than the `nCells` sweep is **not measured**, and separating the two
+is the first thing anyone writing the two-level gather should do.
+
+### 67.7 What a captured graph freezes, and the parity that must not rotate
+
+Every launch geometry in this section is a setup constant: `nPad`, the radix
+block count `nb`, the scan tile count, `nCells + 1`, and `nCells`. Nothing
+allocates, synchronises or reads back inside `ParcelDeposition::update`, so the
+sort, the CSR build and the gather capture into a graph exactly as they stand,
+alongside §66's four kernels.
+
+One thing had to be got right for that to hold. The radix sort ping-pongs
+between two key/value buffer pairs, so which pair holds the result depends on
+the pass count. The obvious implementation swaps the two handles after each
+pass — and then the arrangement **rotates by one every rebuild** whenever the
+pass count is odd, so the second rebuild writes into the buffer the first one
+read. That is invisible eagerly, because every rebuild is self-consistent; it
+breaks the moment a graph freezes one rebuild's pointers and the host afterwards
+reads `self.key_a` expecting the other. So the parity is computed **once, at
+setup**, from the pass count, and the buffers never move. §67.10 row 17 is the
+test that would have caught it.
+
+`SORT_TILE`, `RADIX_BITS` and the persistent grid of §66.7 are all launch
+geometry, and their contract is §13.4.1's admissible exception: they are
+required to be *inert*. Row 18 runs the pool at 1, 5 and 64 blocks and asserts
+the deposited bits do not move.
+
+### 67.8 The four alternatives, and why each is not here
+
+**(a) `cub::DeviceRadixSort` and `cub::DeviceScan`.** They are host functions
+that launch kernels. `build.rs` compiles each `.cu` with `nvcc --cubin` and
+loads the CUBIN through `cudarc`; **there is no host-side translation unit
+anywhere in this project**, so there is nothing to link them into. Reaching them
+would mean adding a host `.cu`, linking it into the Rust binary, and mixing the
+CUDA *runtime* API into a process whose context is owned by the *driver* API
+through `cudarc` — a build change with a context-ownership hazard at the end of
+it, in exchange for a sort. Block-scope CUB (`cub::BlockScan`) is device code
+and *would* be usable, but `ofgpu_device.cuh` states in its own header that
+nothing there may include `<cub/cub.cuh>`, and the block scan of §67.2 is twenty
+lines. *(The design note says `nvcc --ptx` here; the build has used `--cubin`
+since it was written, for the PTX-version reason `build.rs` documents. The
+conclusion is the same either way — neither emits a host object.)*
+
+**(b) Deterministic fixed-point atomics.** `atomicAdd(unsigned long long*)` on
+`llrint(w S) + BIAS` is exactly order-independent, because integer addition is,
+and it needs no sort at all. The price is `S`: it must be chosen so that `w S`
+neither overflows 64 bits nor quantises away, which is a per-field and arguably
+per-case judgement, and a badly chosen one is a silent accuracy loss rather than
+a crash. It also gives a *different* answer from the sort — a different
+rounding — so the two are not interchangeable mid-project. It stays named as the
+escape hatch if §67.9's measurement ever stops being affordable.
+
+**(c) f64 atomics.** Fast, simple, and they silently break the invariant the
+whole crate is organised around. Not present, not behind a feature flag: a flag
+that changes reproducibility is a flag someone will leave on.
+
+**(d) A counting sort with atomic cursors, then a per-segment sort by uid.**
+`pos = pc_offset[cell] + atomicAdd(&cursor[cell], 1)` is two passes instead of
+eleven, and the *within-segment* order it produces is non-deterministic — but a
+subsequent per-cell insertion sort on `uid` would re-canonicalise it, and one
+thread per cell makes that a gather. It is genuinely cheaper for short segments.
+It is not here because its worst case is the case this model is *for*: a
+thousand parcels in a sprinkler-core cell is `5 x 10^5` comparisons in one
+thread, and a method whose cost explodes exactly where the physics is
+interesting is not a method. Recorded because it is a real option for a
+different workload, and because the reason to reject it is a measurement someone
+may later want to make.
+
+### 67.9 What it costs
+
+Nine to twelve passes — eleven on the mesh measured below — where a tuned
+library would use six or seven, no radix-digit auto-tuning, a fixed 8-bit
+digit, and a scan that reads its input twice. Against that: no host CUDA C++,
+no runtime/driver API mixing, no new build step, and a sort whose determinism
+is an argument about the code rather than a property of somebody's library
+version.
+
+Scratch, per parcel slot: two 8-byte keys, two 4-byte values, and
+`RADIX_DIGITS/SORT_TILE = 1/4` of a counter pair — **26 bytes per slot**, plus
+32 bytes per cell for the CSR row pointer and the four deposited fields.
+
+Measured on this machine - an RTX 5070 Ti, 16 GB, CUDA 13.3 - by the
+`#[ignore]`d `the_cost_of_the_sort_at_a_million_slots`, which prints these
+lines and is the only place they come from. One pool, one mesh, two
+occupancies:
+
+```
+  1 000 448 slots, 262 144 cells, 11 radix passes (3 over the cell key), scratch 32.8 MB
+
+   live parcels   sort + CSR    gather    one parcel step   longest segment
+        200 000     0.464 ms   0.229 ms          0.360 ms          710
+      1 000 000     0.707 ms   0.515 ms          1.196 ms          710
+```
+
+**The row that matters is the first one.** At a fifth of the occupancy the sort
+still costs two thirds of its full price, because its *work* is fixed by
+`capacity`: the launch geometry has to be a setup constant (§67.7), so every
+pass covers every slot whether or not it holds anything. A pool sized five
+times larger than the case needs pays for that every step, for ever. (The
+remaining difference between the two rows is not work but locality: at low
+occupancy most slots share the one sentinel key of (67.5) and the scatter's
+writes are largely contiguous, while a million parcels spread over 262 144
+cells are a near-random permutation. The longest segment is the injector's own
+cell in both rows, whose occupancy is set by the emission rate rather than by
+the pool size.) `ParcelDeposition::device_bytes` reports the memory before it
+is spent, for the same reason this table exists at all.
+
+**Against the design note's estimate.** The note predicted "~0.3 ms" for a
+`10^6`-parcel sort in six passes, and said plainly that this was a
+bandwidth-model hypothesis to be tested rather than a result. Scaled to the
+eleven passes a total order actually needs, its model says 0.55 ms; the measured
+number is 0.707 ms, so the model was optimistic by about 30 % - which for a
+bandwidth model with no measurement behind it is close. Its **other** claim is
+the one to be careful with: "the gather-shaped deposition costs roughly 30-50 %
+more than an atomics-based one" compares a sort against a *deposition*, and the
+deposition is the cheap half. Measured against what this crate actually does per
+step, the sort, the CSR and the gather come to 1.22 ms against 1.196 ms for the
+parcel step itself - so at a full million parcels **gather-shaped deposition
+roughly doubles the Lagrangian cost of a time step**. That is the price of exact
+reproducibility, in milliseconds, so that anyone can decide whether they want to
+pay it.
+
+### 67.10 What must hold
+
+| # | claim | where it is checked | verdict |
+|---|---|---|---|
+| 1 | (67.3) the device exclusive scan is the host prefix sum, element for element | `the_scan_is_exact_at_every_size_that_straddles_a_tile`; `ofgpu-validate` | exact, at ten sizes to `2 x 10^6` |
+| 2 | a zero-length scan is refused, not launched as a zero-block grid | `a_scan_of_nothing_is_refused_by_name` | — |
+| 3 | (67.4) the pass count is `8 + ceil(bits(nCells)/8)`, and both ping-pong parities occur | `the_cell_key_costs_only_the_passes_its_own_bits_need` | 9 at 8/64/216 cells, 10 at 343/1000 |
+| 4 | **Gate 67-A**: the CSR is a permutation of the live set, grouped by cell, ascending in identity within each cell | `gate_67a_the_csr_is_a_permutation_of_the_live_set`; `ofgpu-validate` | 0 defects, 300 parcels, both ping-pong parities, one tile and eight |
+| 5 | and it still is at **twenty thousand parcels over thirty-two tiles**, where the digit-major scan and the per-warp rank are actually loaded | `the_sort_holds_at_twenty_thousand_parcels_and_thirty_two_tiles` | 0 defects, 0 lost, 0 dropped, ~200 parcels per occupied cell; two runs bitwise |
+| 6 | **Gate 67-B**: `sum_P count[P]` is the live parcel count | `gate_67b_what_was_deposited_is_exactly_what_was_put_in`; `ofgpu-validate` | exact |
+| 7 | and `sum_P weight[P]` is bitwise the `sum_p n_p` that went in, at dyadic weights | the same | every bit |
+| 8 | and `alpha_p`, `mass` are the host gather over the same CSR | the same | `1.6e-16` relative, tolerance `1e-15` |
+| 9 | a twenty-step spray deposits `injected - escaped - removed`, exactly | `a_spray_deposits_every_live_parcel_exactly_once`; `ofgpu-validate` | exact, 32 of 160 |
+| 10 | and the liquid mass the live parcels carry | the same | `4.1e-16` relative |
+| 11 | **Gate 67-C**: permuting the slots with the parcel **set** unchanged moves not one bit | `gate_67c_permuting_the_slots_moves_not_one_bit`; `ofgpu-validate` | every bit, two permutations |
+| 12 | and the same claim on the path a case uses: a real spray whose every injected parcel is shifted into a different slot | `shifting_every_injected_parcel_into_a_different_slot_moves_no_bit` | every bit |
+| 13 | and the gate is not vacuous: the two slot orders' own sums differ, at any scalar width | the same | `1.0` against `1 + 1 ulp` |
+| 14 | and the deposited value is the identity-ascending sum, not either slot order's | the same | exact |
+| 15 | two identical runs deposit identical bits | `two_identical_runs_deposit_identical_bits` | every bit, 500 parcels |
+| 16 | **§13.4.1**: changing one identity changes the deposited bits | `changing_one_identity_changes_the_deposited_bits` | one ulp of 1.0 |
+| 17 | (67.7) the sort, the CSR build and the gather capture **once** and replay bitwise while the working set grows | `the_sort_and_the_gather_capture_once_and_replay`; `ofgpu-validate` | every bit, 15 and 20 launches |
+| 18 | the pool's launch geometry stays inert once the deposition reads it | `the_pool_grid_geometry_does_not_move_the_deposition` | every bit, 1/5/64 blocks |
+| 19 | an empty pool needs no host special case | `an_empty_pool_deposits_zero_and_needs_no_special_case` | zero everywhere |
+| 20 | a duplicate explicit identity is refused at setup, by name | `a_duplicate_seed_identity_is_refused_by_name` | — |
+| 21 | a deposition handed the wrong pool or the wrong mesh is refused by name | `a_deposition_sized_for_another_pool_is_refused_by_name` | — |
+| 22 | the scratch is reported before it is spent | `the_scratch_it_costs_is_reportable` | 26 B per slot |
+
+**Gates 67-A, 67-B and 67-C run in `ofgpu-validate` as well**, on the same
+grounds as §66's three: a regression in the canonicalisation would not fail a
+physics gate. It would fail nothing at all, until someone compared two runs a
+year later and could not explain the difference.
+
+**§13.4.1's pair table, and why it has one row.** This section adds **no case
+setting**: the sort is unconditional, and a knob that turned it off would be
+exactly the flag §67.8(c) refuses to have. The one new *input* is
+`SeedParcel::uid`, and row 16 is its pair — two runs identical in every byte
+but one identity, required to deposit different bits, failing by name if they
+do not. `SORT_TILE`, `RADIX_BITS` and §66.7's `persistentBlocks` are launch
+geometry, and their contract is §13.4.1's admissible exception: required to be
+*inert*, asserted inert by row 18.
+
+### 67.11 What was measured, and the seven things this section found in itself
+
+**1. The design note's sort key is wrong, and wrong in exactly the way §66 had
+already fixed once.** The note gives `key = (cell << 32) | uid`. §66 made `uid`
+a full `u64` precisely because a 32-bit identity over `10^6` parcels collides
+with near-certainty; the note's key packs it back into 32 bits and reintroduces
+those collisions — and silently, because two parcels with equal keys still
+sort, just in an order decided by the input permutation. The key here is
+`64 + cellBits` wide. The cost is eight identity passes instead of four, which
+is more than half the total, and it is the price of the property the section
+exists for.
+
+**2. A ping-pong that swaps handles rotates the buffers, and a captured graph
+does not.** The natural way to write an LSD radix sort is to swap the two
+buffer handles after every pass. Do that, and when the pass count is odd —
+which it is for every mesh under 257 cells and every mesh between 65537 and
+`2^24` — the arrangement rotates by one on every rebuild, so rebuild *n* writes
+into the buffer rebuild *n−1* read. Eagerly this is invisible: every rebuild is
+self-consistent. It breaks the first time a graph freezes one rebuild's
+pointers and the host afterwards reads the buffer it *thinks* holds the answer.
+The parity is now computed once, at setup, and the buffers never move. Row 17
+is the test that would have caught it.
+
+**3. The pass count is set by the sentinel's width, not the largest cell
+index's.** A 216-cell mesh needs eight bits and one pass; a 256-cell mesh needs
+nine and two, because the dead-slot key is `nCells` itself. The first version of
+row 3 asserted two passes at 216 cells, and the implementation was right and the
+expectation wrong.
+
+**4. `Parcels::seed` is `O(n_seeds x n_cells)` and cannot fill a large pool.**
+Found by writing §67.9's cost test to seed a million parcels; it did not
+finish. §66.6's `locate_cell` is a linear scan over cells, which is the right
+answer for a handful of injectors at setup and hopeless for a pool. The cost
+test injects instead. This is a real limit of §66 and it is recorded here
+rather than rediscovered.
+
+**5. The obvious gate is vacuous and had to be given teeth.** "Two runs agree"
+passes for a sort that merely groups by cell and is stable on the input — which
+is precisely the sort that would destroy reproducibility the moment the
+injection order changed. So gate 67-C permutes the slots with the parcel *set*
+held fixed, **and** asserts that the two slot orders' own sums differ
+(`1.0` against `1.0000000000000002`), so that a vacuous pass is impossible.
+Choosing weights that make floating-point addition visibly non-associative is
+not a trick; it is the only way to make the gate's subject observable, because
+IEEE addition is commutative and a two-element sum cannot see order at all.
+The weight is **a quarter of an ulp of 1.0**, not the literal `1e-16` first
+written: `1 + w` rounds back to `1` while `1 + 3w` rounds up by one ulp, in
+`f32` as well as `f64`. An `f64` literal would have made the whole gate pass
+vacuously under `--features single` — the build nobody runs, which is exactly
+where a vacuous gate survives longest.
+
+**6. An unrandomised spray occupies remarkably few cells, and that is
+(66.8)'s ring, not this section's sort.** The large-sort fixture of row 5 was
+written expecting twenty thousand parcels to reach most of a thousand cells.
+One injector reaches **sixteen**, and eight injectors reach **ninety-four**,
+because (66.8)'s cone is a deterministic ring — azimuth `(i + 1/2)/n` of a turn
+at a fixed half-angle — so every parcel of an event leaves on one circle at one
+speed and stays on it, and twenty events paint twenty concentric circles. There
+is nothing wrong: it is what a spray without a random number generator looks
+like. It is also the clearest argument yet for the counter-based generator
+§66.14 names as a prerequisite, because a Monte-Carlo estimator (66.1) whose
+samples lie on twenty circles is not sampling anything. Recorded here because
+it was found here, by a test that asserted the wrong number and said so.
+
+**7. Two of the four deposited fields cannot carry a bitwise claim, and the
+reason is one line of arithmetic.** `weight` accumulates `acc += n_p`, a sum of
+pure additions, and equals the host's sum **bit for bit** (row 7). `alpha_p`
+and `mass` accumulate `acc += n_p (pi/6) d^3`, and *that* nvcc is free to
+contract into a fused multiply-add where the host compiler is not — so they
+agree with the host to `1.6e-16` relative and not to the bit (row 8). Neither
+number is wrong and the gather order is identical in both; the difference is
+one rounding, in one operation, licensed by the C++ standard. The distinction
+is kept rather than smoothed over because rows 7 and 8 read almost the same and
+are not the same kind of statement: **the conservation gate is posed on
+`weight` and `count` precisely because those two can be exact.** The first
+draft of this section asserted the FMA had not happened, on one fixture where
+it happened not to show; a better-spread fixture found it immediately.
+
+**What `--features single` actually showed, since §67.11.5 leans on it.**
+`cuda/parcelsort.cu` compiles under `-DOFGPU_SINGLE` with no diagnostic, and
+`cargo check --release --features single --all-targets` reports **no error in
+any `parcels` file**, this section's or §66's — rustc lists every type error in
+a crate, so their absence is the result. The tests could not be *run*, because
+the single-precision build does not compile at all: three `f64`/`f32`
+mismatches in `src/io/case_dc.rs` (which is at `HEAD`, so this predates §66)
+and two in `src/wsgg/tests.rs`. **Neither was fixed here**, because neither is
+this section's file and one of them is in work that is still in progress; it is
+recorded so that the next person to want a single-precision build knows it is
+five lines away and knows where they are.
+
+### 67.12 What this section does not do
+
+* **Couple anything.** No momentum, energy, species or divergence source is
+  written. `EnergySources`, `fvm_sp`/`fvm_su` and `Energy::target_divergence()`
+  are untouched, so every Eulerian result in this crate is bitwise unchanged by
+  this section's presence — again by construction, not by measurement. (§68
+  writes the momentum and energy sources, and keeps the same claim for a case
+  with no parcels in it — §68.10.)
+* **The other ten cell arrays** (§67.6). Six need a response time or an
+  evaporation model and belong with the coupling; three are pure geometry and
+  are absent only because nothing reads them yet; one needs the parcel
+  temperature to be doing something.
+* **Compaction.** Dead slots are still never reclaimed. The scan §67.2 adds is
+  the piece that was missing; the flagged stream compaction on top of it is not
+  written, so a long run with heavy turnover still walks to `capacity`.
+* **The two-level gather** for skewed segments (§67.6).
+* **A wider digit or a fused pass.** 12-bit digits would cut eleven passes to
+  eight, at 16 KB of shared memory per block for the rank; whether that is
+  faster is a measurement nobody has made.
+* **Sorting only the live prefix.** The sort covers all `capacity` slots because
+  the launch geometry must be a setup constant, and §67.9 measures what that is
+  worth: two thirds of the full-occupancy cost at a fifth of the occupancy. The
+  fix — a conditional graph node, CUDA 12.4's `IF`, available on this toolkit —
+  is not worth its complexity until a case is actually hurt by it, and the
+  cheaper answer is to size the pool honestly.
+* **Give `Parcels::seed` a usable cost.** It is `O(n_seeds x n_cells)`, because
+  §66.6's `locate_cell` is a linear scan; it is right for a handful of
+  injectors and it cannot fill a large pool (§67.11.4). Anything that seeds
+  more than a few thousand parcels needs a spatial index on the host, and the
+  restart path will be the first thing to want one.
+* **Fix what §67.11.6 found.** An unrandomised spray occupies about a tenth of
+  the cells a randomised one would, because (66.8)'s cone is a ring. The fix is
+  §66.14's counter-based generator, and it is a §66 fix, not a §67 one.
+* **A case-format block.** Still nothing reads a spray from a file, and §13.4.2
+  forbids adding the block before the driver that would read it.
+
+## 68. Two-way coupling — giving the gas back what the parcels took
+
+§66 moves parcels and never touches a cell field. §67 sorts them onto the
+total order `(cell, uid)` and gathers per cell without an atomic, and ended by
+saying what it had deliberately not done: *"Couple anything. No momentum,
+energy, species or divergence source is written."* This section writes them.
+
+The physics is the PSI-Cell construction of Crowe, Sharma & Stock (1977): every
+source the gas sees is a per-cell sum over the parcels in that cell,
+
+```
+  phi_P = (1/V_P) sum_{p in P} n_p psi_p                                  (68.1)
+```
+
+which is (67.1) again, and §67 already built the machinery that evaluates it
+without a scatter. What is new here is **what `psi_p` is**, and the answer this
+section gives is not the one the design note recommends. The note (its §2.1)
+writes the momentum source as a re-linearisation,
+`A_P = (1/V_P) sum n_p m_p/tau_p` and `B_P = A_P u_p`, so that
+`f_b = B_P - A_P u_P`. That is the standard textbook form and it is a defensible
+approximation. It is **not conservative**: `tau_p` is re-evaluated, the gas
+velocity in it is a different one from the velocity the parcel actually saw
+during its sub-steps, and gravity's share of the drag is missing entirely — so
+the momentum the gas gains is not the momentum the parcels lost, and the
+difference is a modelling error nobody measures.
+
+This section deposits **the impulse the integrator actually applied**. §66's
+kernel already computes it; it now accumulates it. Everything else follows,
+including the gate.
+
+**C. T. Crowe, M. P. Sharma, D. E. Stock**, *The particle-source-in-cell
+(PSI-CELL) model for gas-droplet flows*, J. Fluids Eng. 99 (1977) 325,
+DOI `10.1115/1.3448756` — (68.1). **S. V. Patankar**, *Numerical Heat Transfer
+and Fluid Flow*, Hemisphere (1980), §4.2 and §7.2 — the `S_u + S_p psi`
+linearisation and the rule `S_p <= 0`, which (68.7) satisfies by construction
+rather than by a sign branch. **W. E. Ranz, W. R. Marshall**, *Evaporation from
+drops*, Chem. Eng. Prog. 48 (1952) 141 and 173 — `Nu = 2 + 0.6 Re^(1/2)
+Pr^(1/3)`, whose **sensible-heat half** is what (68.5) integrates. **S.
+Elghobashi**, *On predicting particle-laden turbulent flows*, Appl. Sci. Res.
+52 (1994) 309, DOI `10.1007/BF00936835` — the coupling map: below
+`alpha_p ~ 1e-6` one-way coupling suffices, between `1e-6` and `1e-3` this
+section is required, above `1e-3` collisions begin to matter and are not here.
+**R. C. Theobald**, *The effect of nozzle design on the stability and
+performance of turbulent water jets*, Fire Safety Journal 4 (1981) 1-13 — the
+~90 hose-stream experiments of §68.12. **M. R. Maxey, J. J. Riley**, *Phys.
+Fluids* 26 (1983) 883, DOI `10.1063/1.864230` — the equation of motion whose
+drag term is the one being returned. The FDS Technical Reference Guide's
+appendix *Fluid-Particle Momentum Transfer* (NIST, US-government public domain,
+vendored at `reference/fds`) states the same conservation principle — the gas
+receives the negative of the droplets' momentum change — and its
+`Validation/Theobald_Hose_Stream` input-deck generator is where §68.12's
+columns are transcribed from. **No GPL-licensed source was consulted**, and in
+particular OpenFOAM's `src/lagrangian` tree, which contains the obvious
+reference implementation of a parcel-to-cell source, was not opened.
+
+### 68.1 What conservation means here, exactly
+
+The parcel obeys (66.3):
+
+```
+  m_eff du_p/dt = F_drag + m_p g (1 - rho/rho_l),
+  m_eff = (rho_l + C_am rho) (pi/6) d^3                                   (68.2a)
+```
+
+so over any interval, whatever the integrator did,
+
+```
+  J_p = integral F_drag dt = m_eff ( u_p(t+h) - u_p(t) - a_g h )          (68.2b)
+```
+
+with `a_g` the buoyancy-corrected, added-mass-divided gravity §66 already
+forms. `J_p` is a **property of the trajectory**, not of a linearisation of it:
+it is exact for the exponential update, it is exact through a cell crossing, it
+is exact across a wall rebound, and it needs nothing recomputed. Newton's third
+law then says the gas receives `-J_p` per droplet and `-n_p J_p` per parcel, so
+the coupled force density is
+
+```
+  f_P = -(1/(V_P dt)) sum_{p in P} n_p J_p            [N/m^3]             (68.3)
+```
+
+and the conservation statement this section is gated on is an **identity**,
+not a tolerance:
+
+```
+  sum_P V_P f_P dt  +  sum_p n_p J_p  =  0                                (68.4)
+```
+
+Three things are worth saying about what (68.4) does and does not cover.
+
+* **It is not the gas's momentum balance.** It says the *source* is right. What
+  the gas then does with it is the momentum equation's business, and a closed
+  box also has wall stresses and a pressure field. The identity is the half of
+  the problem this section owns, and it is the half that catches a sign error,
+  a missing `V_P`, a dropped `n_p` and a `dt` that does not match the one the
+  impulse was accumulated over — which is every mistake this construction can
+  actually make.
+* **Only the drag is returned.** The buoyancy force `-m_p g rho/rho_l` is also
+  a force the gas exerts, and its reaction is not applied. For water in air it
+  is `1.2e-3` of gravity; for the liquid-carrier case §66.11 keeps
+  `addedMass` for, it is not, and §68.13 records it as a named omission rather
+  than a rounding.
+* **A parcel that dies takes its last impulse with it.** The gather walks the
+  CSR, and the CSR holds the parcels that are *alive at the end of the step*
+  (§67.5). A parcel that escaped through a patch or was removed at a wall
+  exchanged momentum on its way out and is no longer there to deposit it.
+  §68.11 row 9 measures exactly that gap on a spray that loses parcels rather
+  than defining it away; the fix, if a case ever needs one, is a per-patch
+  impulse counter, and it is not here.
+
+**Which cell.** A parcel that crossed cells during the step exchanged momentum
+in several of them, and a gather can only read it in one. §68 deposits into the
+cell the parcel **ends** in. The alternative — depositing per sub-step into the
+cell the parcel was in — is a scatter, which is the one thing §67 exists to
+avoid. The error is `O(CFL_p)` in position and identically zero in total, and
+(66.7) already bounds `CFL_p` below one cell per sub-step.
+
+### 68.2 What the parcel kernel accumulates
+
+Per sub-step, with `w = 1 - exp(-beta)` and `q = w/beta` as in (66.5):
+
+```
+  J_p += m_eff [ w (u_g - u_p) - h (1 - q) a_g ]                          (68.5)
+  A_p += m_eff w / dt                                     [kg/s]          (68.6)
+```
+
+(68.5) is `m_eff (Delta u_p - a_g h)`, written so that the `a_g` term appears as
+the small correction it is: `h q` **is** `tau_p (1 - e^-beta)`, so at terminal
+velocity `w (u_g - u_p) = -h q a_g` and the whole bracket collapses to
+`-h a_g` — the drag impulse is exactly minus the weight, and the gas is pushed
+down by exactly the weight it is holding up. A raining cloud drags air with it,
+and it does so here for the right reason. A re-linearised source drops that
+term and gets a stationary droplet cloud exerting no force at all.
+
+`A_p` of (68.6) is the **exchange rate**: the coefficient that reproduces the
+impulse when the gas is linearised about the velocity the parcel saw. It is
+`m_eff (1 - e^-beta)/dt >= 0`, a sum of non-negative terms, with no clamp and
+no `max()` anywhere — which is where (68.7)'s sign guarantee comes from.
+
+Both are written once per parcel per step, into two per-slot arrays, by the
+kernel that was already computing `w` and `q`. The cost is two stores and about
+eight flops per sub-step. The heating pair `(Q_p, A_T,p)` of (68.9) is written
+the same way, into arrays that are **allocated at length one** unless the
+parcels are heating.
+
+### 68.3 The gather
+
+One thread per cell, walking its own CSR segment in identity order — §67.6's
+kernel with a wider payload:
+
+```
+  f_P      = -(1/(V_P dt)) sum n_p J_p            [N/m^3]
+  beta_P   =  (1/V_P)      sum n_p A_p            [kg/(m^3 s)]
+  q_P      = -(1/(V_P dt)) sum n_p Q_p            [W/m^3]
+  alphaT_P =  (1/V_P)      sum n_p A_T,p          [W/(m^3 K)]             (68.7)
+```
+
+No f64 atomic, one register accumulator per thread, identity order fixed by the
+sort — so the coupled source is a pure function of the physical state and the
+reproducibility argument of §67.1 reaches all the way to the matrix.
+
+**An empty cell deposits `-0.0`, and that is not a defect.** With no parcels the
+sums are `+0.0` and `f_P = -(+0.0)/(V dt)` is negative zero. `x + (-0.0) == x`
+bitwise **for every `x`, including `x = -0.0`**, where `+0.0` would flip a
+stored negative zero to positive. The additive identity this arithmetic
+produces is the stronger of the two, which is worth knowing because §68.10's
+claim is about bits.
+
+### 68.4 Where it lands: §18's registry, twice
+
+The two gas equations take their sources through registries that know nothing
+about parcels, which is the whole point:
+
+| equation | registry | explicit | implicit |
+|---|---|---|---|
+| momentum (§5, KINEMATIC) | `MomentumSources` — **new** | `su`, m/s² | `sp`, 1/s, `<= 0` |
+| energy (§26) | `EnergySources` — existing | `q`, W/m³ | `sp`, W/(m³·K), `<= 0` |
+
+`EnergySources` already existed and is untouched. `MomentumSources` is new, and
+the reason it is new rather than a `SourceTerm` variant is worth recording,
+because the design note predicted the opposite (its §6.3: *"a new `SourceTerm`
+variant is required"*):
+
+* `SourceTerm` is `Copy` and its payload is a **constant over a geometric
+  zone**. A spray's source is a whole-mesh field that changes every step.
+  Putting a device buffer inside it would make the enum non-`Copy` and rewrite
+  every `match` on it in the crate — a large, risky, unrelated change.
+* `CellZone::new` **refuses an empty selection**, by design (§18): a box that
+  misses the mesh is a case that asked for something impossible. A spray source
+  that is zero everywhere for the first hundred steps is not that; it is
+  normal.
+
+So the registry pattern is specialised a second time, exactly as `energy.rs`
+already specialises it, and the two together are §18. The momentum equation is
+kinematic, so `f_P` is divided by the gas density the caller says the equation
+is normalised by, and `su` is an acceleration.
+
+**Nothing registered is nothing applied.** `MomentumSources::is_active()` is a
+**host-side count of registrations**, not a test on the data, and the assembly
+branches on it. A build in which nothing registers launches no kernel over the
+registry at all, so its matrix is bit for bit the matrix of a build without the
+registry. That is §68.10's first half, and it is a property of the source file
+rather than a measurement.
+
+### 68.5 Sensible heat, and why the physics had to change to get it
+
+An energy source is only conservative if the droplet is a **finite** heat
+capacity. §66's parcels are inert: `T_p` never moves. Coupling an inert parcel
+to the gas would make it an infinite heat bath — the gas would relax towards it
+for ever and the energy the run gained would come from nowhere. So this section
+adds `physics heating`, the lumped-capacity relaxation:
+
+```
+  m_p c_l dT_p/dt = A_p h_g (T_g - T_p),   h_g = Nu k_g / d,
+  Nu = 2 + 0.6 Re_d^(1/2) Pr^(1/3),        Pr = mu c_p / k_g              (68.8)
+```
+
+Integrated by the same exponential update the velocity gets, so it is
+unconditionally stable and exact at `Re -> 0`, where `Nu = 2` and the whole
+model collapses to the analytic `tau_T = rho_l c_l d^2 / (6 Nu k_g)`:
+
+```
+  beta_T = 6 h_s Nu k_g / (rho_l c_l d^2),   T_p += (1 - e^-beta_T)(T_g - T_p)
+  Q_p   += m_p c_l dT_p,      A_T,p += m_p c_l (1 - e^-beta_T)/dt         (68.9)
+```
+
+`beta_T` is formed **without** `tau_T`, so `k_g = 0` is `beta_T = 0` rather than
+a division by zero — the same construction (66.4) uses for the drag.
+
+**What this is not.** It is not evaporation. `d` and `n_p` do not move, there is
+no Spalding number, no `ln(1+B_M)/B_M` blowing correction, no vapour and
+therefore no species source and no `D_src`. §68.13 refuses all of it by name.
+It is also a **one-temperature droplet**: the Biot number `Bi = h_g (d/2)/(3
+k_l)` is `~1e-3` for a 300 µm water droplet in air at `Nu = 2`, so the internal
+gradient is negligible; a fuel droplet in a hot flow can reach `Bi ~ 0.1`, where
+it is not, and that is a limit of the model rather than of its implementation.
+
+**The gas temperature is now an input to the parcel step**, and §13.4 applies in
+both directions: a heating pool given no `T_g` is refused by name (it would
+freeze at its injection temperature and couple a constant heat source for
+ever); an inert pool given one is refused by name (it would be read and
+ignored).
+
+### 68.6 The three modes
+
+```
+  off           nothing registers; the equation is bitwise the uncoupled one
+  explicit      S_u = f_P/rho,               S_p = 0
+  semiImplicit  S_u = (f_P + beta_P u^n)/rho, S_p = -beta_P/rho           (68.10)
+```
+
+At `u = u^n` the two live modes are **identically the same source**: the split
+changes the linearisation, never the exchange. What `semiImplicit` buys is
+diagonal dominance, which is what keeps the momentum equation stable when the
+mass loading is heavy enough that `beta dt/rho >~ 1` — the regime a sprinkler
+core is in. What it costs is stated rather than hidden: the momentum the gas
+ends the solve with differs from the momentum the parcels lost by
+`V_P beta_P (u^{n+1} - u^n) dt`, which is zero at convergence of the outer
+iteration and is **reported** by `ParcelCoupling::linearisation_defect` when it
+is not.
+
+`beta_P >= 0` by construction, so `S_p <= 0` by construction, so Patankar's rule
+holds with no clamp and no sign branch anywhere. The energy pair is the same
+formula with `alphaT_P` and `T_g` in place of `beta_P` and `u`.
+
+The deposit `f_P`, `beta_P`, `q_P`, `alphaT_P` is written in **all three modes**,
+including `off`. A case that chooses one-way coupling can still write the force
+density it chose not to apply, which is the difference between a model that
+knows what it is not doing and one that does not.
+
+### 68.7 Order of operations
+
+```
+  1  parcel step         (66.5)  -> x, u, T, and the accumulators (68.5)/(68.9)
+  2  sort + CSR          (67.4)
+  3  deposit             (67.6)  -> alpha_p, count, weight, mass
+  4  coupling gather     (68.7)  -> f, beta, q, alphaT and the four registry fields
+  5  clear the registries, register
+  6  ---- the Eulerian step, which has learned nothing ----
+```
+
+Step 4 must come after step 2, because it walks the CSR step 2 built, and the
+CSR describes where the parcels **ended** while the accumulators describe what
+they exchanged getting there. Both are true of the same instant, which is why
+the pair is consistent.
+
+Step 5 is once per **registration cycle**, which for a spray is once per time
+step: the deposited field does not change between outer iterations, so the
+registry is filled once and read by all three momentum components and by every
+outer corrector.
+
+### 68.8 What it costs
+
+Eight per-cell arrays — `f` and `su` are vectors — is twelve `f64` per cell, and
+the read-back scratch of (68.4) is three more: **fifteen `f64`, 120 B**, so a
+million-cell mesh spends 120 MB here. That is the largest single
+allocation this three-section addition makes and it is stated at setup by
+`ParcelCoupling::device_bytes` rather than discovered as an OOM. Storing the
+raw deposit and the registry field separately is deliberate: (68.4) is posed on
+the raw deposit, and a round trip through `/rho` and back is not exact.
+
+Per-slot, the accumulators add 32 B (a `Vec3` and a `Scalar`) always, and 16 B
+more only when the parcels are heating.
+
+The gather is one launch of fixed geometry over `n_cells`, reading the same CSR
+§67.6 already reads. Against §67.9's measured 1.20 ms for sort + CSR + deposit
+at a million parcels it is a second pass over the same data.
+
+### 68.9 What must hold
+
+| # | claim | where it is checked | verdict |
+|---|---|---|---|
+| 1 | (68.5) the accumulated impulse is the closed form of the exponential update | `the_accumulated_impulse_is_the_closed_form` | `< 1e-14` relative |
+| 2 | and at terminal velocity it is exactly minus the weight the gas holds up | `at_terminal_velocity_the_impulse_is_the_weight` | `4.6e-16` measured; the test's own bar is `1e-6`, because the fixture is eight steps from terminal rather than at it and the residual is physical |
+| 3 | **Gate 68-A**: (68.4), momentum — the gas gains what the parcels lost, over five parameter sets (two drag laws, gravity on and off, added mass, one sub-step and many) with weights over four decades | `gate_68a_what_the_parcels_took_is_what_the_gas_is_given`; `ofgpu-validate` | `8.3e-16` worst, tolerance `1e-14` |
+| 4 | and on the path a case uses: an injected spray that crosses cells and **loses parcels** through a patch | `the_gate_holds_for_an_injected_spray_that_loses_parcels` | `<= 1e-13`, 60 steps, escapes non-zero, 0 lost |
+| 5 | **Gate 68-A**, energy — the gas gives exactly what the droplets take | `gate_68a_energy_is_conserved_between_the_phases`; `ofgpu-validate` | `3.1e-16` |
+| 6 | and the sign is right: hot gas loses, cold droplets gain | the same | 0 defects |
+| 7 | (68.8) a still droplet relaxes at the analytic lumped-capacity rate | `a_still_droplet_relaxes_at_the_lumped_capacity_rate` | `< 1e-9` of `dT` over 200 steps |
+| 8 | **Gate 68-B**, by construction: an unregistered registry launches nothing and moves not one bit of the momentum matrix | `gate_68b_an_unregistered_registry_moves_not_one_bit` | every bit |
+| 9 | **Gate 68-B**, measured: a pool that has never held a parcel deposits zero and, registered, moves not one bit | `gate_68b_an_empty_pool_couples_exactly_zero`; `ofgpu-validate` | every bit |
+| 10 | and the zero it deposits is `-0.0`, the stronger additive identity (§68.3) | the same | every cell |
+| 11 | and the gate is not vacuous: a coupled spray DOES move the matrix | `ofgpu-validate` | bits differ |
+| 12 | (68.10) at `u = u^n` the semi-implicit split is the explicit source | `the_semi_implicit_split_is_the_explicit_source_at_the_linearisation_point` | `<= 1e-12` relative |
+| 13 | and the DEPOSIT is bitwise identical in the two modes | the same | every bit |
+| 13a | (68.10)'s cost is what it says it is: zero at the linearisation point, and `sum_P V_P beta_P (u - u^n) dt` away from it | `the_linearisation_defect_is_what_the_split_moved` | exact at the point, `<= 1e-14` relative away from it |
+| 14 | Patankar: `beta_P >= 0` and `S_p <= 0` in every cell, with no clamp | the same; `ofgpu-validate` | 0 defects |
+| 15 | the new registry is the §18 zone source it sits beside: a uniform body force through the field path assembles what `SourceTerm::BodyForce` assembles | `a_field_body_force_is_the_zone_body_force_it_should_be` | every bit |
+| 16 | the registry accumulates, clears, and refuses a short contribution | `the_registry_accumulates_and_clears` | — |
+| 17 | `fvm_sp(-1)` on a non-positive `S_p` strengthens the diagonal | `the_implicit_half_strengthens_the_diagonal` | `<= 1e-15` relative |
+| 18 | §67's canonicalisation reaches the coupling: the same parcel SET in a different slot order couples the same bits | `the_coupling_is_bitwise_reproducible_under_a_slot_permutation`; `ofgpu-validate` | every bit |
+| 19 | pool, sort, CSR, gather and coupling capture **once** and replay bitwise while the working set grows | `the_coupling_captures_once_and_replays` | every bit, 12 launches |
+| 20 | the device mode and physics codes match the host, and the gather has no atomic | `the_device_modes_match_the_host` | — |
+| 21 | **Gate 68-C**: Theobald (1981), 90 hose streams | `ofgpu-validate` | **MISSED** — §68.12 |
+| 22 | energy coupling on inert parcels is refused by name | `energy_coupling_on_inert_parcels_is_refused_by_name` | — |
+| 23 | the gas temperature contract is refused in both directions | `the_gas_temperature_contract_is_refused_in_both_directions` | — |
+| 24 | a coupling handed the wrong pool, the wrong mesh or the wrong `dt` is refused by name | `a_coupling_handed_the_wrong_pool_or_dt_is_refused_by_name` | — |
+| 25 | evaporation, and every other mass coupling, is refused by name with what it would need | `evaporation_is_refused_by_name_with_what_it_would_need` | — |
+| 26 | the banner names every setting the run will use, and none it will not | `the_banner_names_every_setting` | — |
+| 27 | a nonsense heating property is refused at setup, whatever the physics | `a_nonsense_heating_property_is_refused_at_setup` | — |
+| 28 | what the coupling costs is reportable before it is spent | `the_memory_it_costs_is_reportable` | 120 B/cell |
+
+**§13.4.1's pair table.** Every setting this section adds, with the pair that
+proves it bites:
+
+| setting | values | pair test | verdict |
+|---|---|---|---|
+| `coupling/momentum` | `off`, `explicit`, `semiImplicit` | `the_momentum_coupling_mode_changes_the_matrix` | the diagonal AND the source differ, bitwise |
+| `coupling/momentum off` | | `momentum_off_registers_nothing` | registers nothing, and still deposits |
+| `coupling/energy` | `off`, `explicit`, `semiImplicit` | `every_heating_property_changes_what_is_deposited`; `the_energy_sink_is_non_positive_and_registers` | `off` deposits exactly zero heat, `on` does not |
+| `physics` | `inert`, `heating` | `every_heating_property_changes_what_is_deposited` | inert deposits no heat at all |
+| `cLiquid` | any positive | the same | bits differ |
+| `kGas` | any positive | the same | bits differ |
+| `cpGas` | any positive | the same | bits differ — and only because the fixture has `Re > 0`, since `cpGas` enters through `Pr` alone |
+| `coupling/mass` | `none` | `evaporation_is_refused_by_name_with_what_it_would_need` | a one-item menu, refused by name |
+
+### 68.10 Gate 68-B: no parcels, no change
+
+The claim is that adding this section to the crate changes no existing answer,
+and it is made twice on purpose.
+
+**By construction.** With nothing registered, `assemble_component` does not
+launch the component extraction, `fvm_su` or `fvm_sp` over the registry. There
+is no arithmetic to be wrong about. Every case in this repository that has no
+dispersed phase is in this state, so every measurement in `SPEC-LIT` and
+`docs/07-fire-solver.md` is unmoved, and it is unmoved because no code ran.
+
+**Measured.** The other half is the case where something registers and what it
+registers is zero — the parcel model present, no parcel yet injected. That is
+`+0.0` and `-0.0` added to a matrix, and §68.3 says why the sign that comes out
+of this arithmetic is the safe one. Asserted on the assembled diagonal and
+source, bitwise, in the test suite and again in `ofgpu-validate`, together with
+the check that a coupled spray *does* move the same matrix — without which the
+gate would pass for the wrong reason.
+
+### 68.11 What was measured, and the five things this section found in itself
+
+**1. The design note's momentum source is not conservative, and the fix is
+cheaper than the original.** The note's `A_P`, `B_P` split (its §2.1) rebuilds
+`m_p/tau_p` at deposition time from a gas velocity that is not the one the
+parcel integrated against, and has no term for the drag that balances gravity.
+Depositing `J_p` instead needs *fewer* operations — the kernel already has `w`,
+`q` and `m_eff` in registers — and turns the gate from a tolerance into an
+identity. The note's split survives as the **linearisation** (68.10), which is
+what it is actually good for.
+
+**2. An empty cell deposits negative zero, and negative zero is the better
+identity.** Found by a test that asserted `+0.0` and failed. `x + (-0.0) == x`
+for every `x`; `x + (+0.0)` flips `-0.0` to `+0.0`. The gate now asserts the
+sign it actually gets, and §68.3 records why it is the one to want.
+
+**3. `EnergySources` cannot be compared bitwise against what was registered.**
+The accumulator starts at `+0.0`, so an empty cell's `-0.0` sums to `+0.0`. The
+values are equal everywhere; the sign of the zero is not. The test asserts
+equality of values, which is the claim, and says why in the comment — a bitwise
+assertion there would have been a true statement about a different thing.
+
+**4. `assemble_only` leaves the source of the LAST component**, so a pair test
+on a gas velocity with `u_z = 0` compares the one component the semi-implicit
+split does not move, and passes for the wrong reason. Found by writing it that
+way first. The fixture now has a non-zero `u_z`.
+
+**5. The Theobald gate misses, and the *coupled* run misses too** — §68.12,
+which is the honest half of this section.
+
+**Measured, on an RTX 5070 Ti.** Gate 68-A: `8.3e-16` relative on 200 parcels
+whose weights span four decades, over five parameter sets, five steps each;
+`3.1e-16` on the energy twin. Gate 68-B: every bit, both halves. The graph
+claim: pool, sort, CSR, gather and coupling captured once and replayed twelve
+times, bit for bit against the eager path. `ofgpu-validate` grew by 13 checks
+and the suite by 28 tests.
+
+### 68.12 Gate 68-C: Theobald (1981), and where it misses
+
+**The case.** R. C. Theobald, *The effect of nozzle design on the stability and
+performance of turbulent water jets*, Fire Safety Journal 4 (1981) 1-13: about
+90 experiments, four nozzle types (6, 7, 9-Rouse, 10), bores 13 / 19 / 25.4 mm,
+hose pressures 2.1-6.2 bar, firing angles 20°-45°, measuring the **maximum
+throw**. The design note names it as the gate for this phase, and it is the
+right one: pure drag and ballistics at engineering scale, no fire, no
+evaporation, no turbulence model, and a single scalar per experiment.
+
+**The columns** are transcribed from the FDS validation suite's own input-deck
+generator (`Validation/Theobald_Hose_Stream/FDS_Input_Files/Build_Input_Files/
+paramfile.csv` and `build_input_files.py`, NIST, US-government public domain,
+vendored at `reference/fds`): efflux velocity `3.71 sqrt(dP[psi])` m/s, firing
+angle as `tan(theta)`, droplet diameter one tenth of the bore, the measured
+maximum throw, and `PRIMARY_BREAKUP_LENGTH` — twice Theobald's own Eq. (2)
+correlation for the length at which the jet is 50 % discontinuous.
+
+**The coherent core needs no new kernel.** FDS runs the breakup length with the
+drag switched off (`PRIMARY_BREAKUP_DRAG_REDUCTION_FACTOR = 0`), which makes
+that stretch a **vacuum parabola** — a closed form. So the injector is simply
+placed where the core ends, pointing where the core ends up pointing, and
+`cuda/parcels.cu` learns nothing about breakup lengths. The arc length is
+integrated on the host with a fixed 20 000-step trapezoid rule, a fixed trip
+count rather than a convergence test.
+
+**The result, with the gas at rest.** All 90 streams, one pool, `dt = 5 ms`, the
+throw measured where the trajectory crosses the plane 3 m below the nozzle (the
+FDS deck's own geometry):
+
+```
+  mean(predicted/measured) = 0.613,   2-sigma scatter = 0.359
+  vacuum bracket, same launch, no drag at all:  mean = 1.99
+```
+
+**VERDICT: MISSED.** The bar — `+-10 %` bias and `30 %` scatter, the shape of
+the FDS Validation Guide's own metric for this quantity group — is missed by a
+wide margin, and the two numbers together say why rather than leaving it to be
+inferred: **between 61 % and 199 % of the throw is decided by what the air
+does**, and with the air held still there is nothing left to decide it with.
+A hose stream at 2.7 kg/s and 20 m/s carries 54 N of momentum flux into
+initially still air; it entrains a jet, and the drops fly in that jet, not in
+the ambient. That is precisely the mechanism this section exists to model.
+
+**How much air motion the measurement implies.** Re-running the same 90 launches
+in a uniform horizontal co-flow — a one-parameter stand-in for the entrained
+jet, not the real field — gives
+
+```
+  co-flow   mean(pred/exp)   2-sigma scatter
+    0 m/s       0.613             0.359
+    3 m/s       0.817             0.306
+    6 m/s       1.023             0.271
+    9 m/s       1.229             0.265
+   12 m/s       off the far boundary of the fixture
+```
+
+so **about 6 m/s of entrained air, one to two tenths of the nozzle velocity,
+brings the mean throw to within 2.3 % of the measurement**. That is the number
+the two-way source has to produce, and having it is worth more than a pass.
+The scatter is the second half of that statement and is reported with it: one
+uniform velocity standing in for ninety different entrained jets not only
+centres the bias but **tightens the spread**, from 0.359 to 0.271 — which says
+the still-air scatter is not ninety independent modelling errors but one
+missing mechanism, seen ninety times.
+
+**And the coupled run misses too.** Test 3 (nozzle 7, 13 mm, 2.1 bar, 35°,
+measured 24.4 m), the same stream injected at its real 2.7 kg/s and coupled
+through (68.10) into a momentum equation carrying its `ddt`, its `laplacian`
+and this section's source and **nothing else** — no convection, no pressure
+equation, so no continuity opposing the entrained air:
+
+```
+  still air 11.6 m    coupled 15.4 m    MEASURED 24.4 m    vacuum 44.1 m
+  peak entrained gas speed 12.6 m/s, against an 18.8 m/s stream
+```
+
+The coupling moves the answer the right way by a third of the gap and stops.
+The reason is **resolution**, and it is a limit of the gate rather than of the
+conservation statement: a 13 mm jet deposits its momentum into 1 m cells, so the
+gas velocity the drops read is that momentum spread over `~1e6` times the volume
+the real air jet occupies. The peak cell velocity reaches 12.6 m/s, but most of
+the flight happens where it is much lower. Closing this needs a mesh that
+resolves the stream, a pressure-coupled solve so the entrained jet convects and
+continuity feeds it, the Rosin-Rammler size distribution of the design note's
+§1.10, and FDS's own drag reduction inside the core — none of which is §68's to
+add, and all of which §68.13 refuses by name.
+
+**What the gate DOES establish**, and it is checked rather than asserted: every
+one of the 90 predictions lies inside the vacuum bracket, which has no
+modelling in it at all; the measured ranges rise with hose pressure, which is
+the transcription guard; entrained air moves the throw the right way; and the
+coupled stream is thrown further than the uncoupled one.
+
+### 68.13 What this section does not do
+
+* **Evaporate.** No `dm_p/dt`, so no species source, no `D_src` in
+  `Energy::target_divergence`, no change in `d` or `n_p`. It needs the
+  semi-implicit 3×3 closure of the design note's §1.5, liquid property tables,
+  a species source that follows a moving spray, and the cell-level limiter that
+  stops one droplet's evaporation from depending on the order the parcels in
+  its cell were visited. `MassCoupling::from_name` refuses it by name and names
+  all four. **A sprinkler that does not evaporate is not a sprinkler**, and the
+  refusal is what tells a user that rather than letting them believe otherwise.
+* **Absorb radiation.** No `kappa_p`, no `sigmabar_p`, no Mie efficiencies, no
+  Sauter-mean cell closure, and `radiation.rs` still takes a constant `Gamma`
+  where a spray would make it a field. Water mist is a radiation *shield* and
+  that is most of its value in suppression; this section does not model it.
+* **Splash.** Wall interaction is still §66.10's stick-free menu — escape,
+  remove, rebound, specular. Splash is population growth at an unpredictable
+  rate and §66 has no capacity policy for it.
+* **Return the buoyancy or added-mass reaction.** Only the drag impulse is
+  coupled (§68.1). For water in air the omission is `1.2e-3` of gravity; for a
+  liquid carrier it is not.
+* **Deposit into more than one cell.** A parcel that crossed cells gives its
+  whole impulse to the cell it ended in (§68.1).
+* **Give back what an escaping parcel took.** §68.9 row 4 measures the gap.
+* **Couple to the pressure equation.** With no mass transfer the mixture volume
+  does not change, so `target_divergence` has nothing to receive - which is
+  true, and stops being true the moment evaporation exists.
+* **Read a spray from a case file.** Still nothing does, and §13.4.2 forbids
+  adding a block before the driver that would read it. `CouplingControls` is
+  built in code, and its `describe()` is the banner it will print when there is
+  one.
+* **Model a turbulent dispersion of the coupled source.** The deposited force is
+  the resolved one; a sub-grid model for the fluctuating part needs the
+  counter-based generator §66.14 still refuses.

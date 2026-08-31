@@ -118,6 +118,9 @@ applied on faces rather than interpolated from cell values.
 | Scalar transport | Temperature, multi-component species (sum-to-one enforced) |
 | Source terms | Volumetric heat release, momentum sources, Darcy–Forchheimer porous drag |
 | Buoyancy | Non-Boussinesq density ratio `b = g(T_ref/T − 1)` |
+| Lagrangian parcels (SPEC-LIT §66) | SoA pool, exponential drag update (Schiller–Naumann), face-crossing walk over the cell→face CSR, deterministic injection. **One-way coupled and inert**: parcels feel the gas, the gas does not feel them, and evaporation is refused by name |
+| Parcel deposition gather (SPEC-LIT §67) | Radix sort on the `(cell, uid)` total order, a device exclusive scan, the per-cell parcel CSR, and a one-thread-per-cell gather. **No f64 atomics**: the scatter is transposed into a gather so the result is bitwise reproducible |
+| Two-way coupling (SPEC-LIT §68) | The drag impulse the parcel integrator applied, handed back to the gas through §18's source registries — momentum (kinematic, explicit or Patankar-split) and sensible heat, with `physics heating` for the droplet side. **Conservative to round-off by construction**, and bitwise inert when no parcel has been injected. Evaporation, droplet radiation and wall splash are refused by name |
 
 ### Linear solvers
 

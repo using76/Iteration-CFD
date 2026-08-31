@@ -13,7 +13,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 147 source files under
+line "No GPL-licensed source was consulted." All 156 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -138,6 +138,15 @@ Fire Dynamics Simulator (FDS)
   its header. NIST is acknowledged as the source of that material. NIST does
   not endorse meteor-cfd, and provides the FDS software "AS IS" with no
   warranty of any kind.
+
+  Two uses are worth naming because they are data rather than approach. The 168
+  WSGG coefficients of `rust/src/wsgg.rs` and `rust/cuda/wsgg.cu` are
+  transcribed from `reference/fds/Source/radi.f90`, and the 108 reference total
+  emissivities of `RADCAL_EPS` were produced by compiling
+  `reference/fds/Source/rcal.f90` - NIST's own RADCAL, NIST TN 1402 - unmodified,
+  with the standalone driver in `tools/radcal_emissivity/`. Both are stated in
+  the files' own headers and in `rust/PROVENANCE.md`. Neither puts FDS source in
+  this repository or in the build.
 
 PyFR
   Copyright (c) Imperial College London and the PyFR authors.

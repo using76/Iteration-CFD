@@ -448,6 +448,135 @@ impl MomentumKernels {
 }
 
 // ==========================================================================
+//  S18  A whole-field source registry for the momentum equation
+// ==========================================================================
+
+/// The whole-field volumetric sources on the momentum equation - SPEC-LIT
+/// S18's registry pattern, specialised to S5's KINEMATIC units (`m/s^2`
+/// explicit, `1/s` implicit), exactly as [`crate::energy::EnergySources`]
+/// specialises it to S26's `W/m^3` and `W/(m^3 K)`.
+///
+/// *DESIGN.* [`crate::sources::SourceSet`] already carries S18's sources and
+/// is not this. A `SourceSet` entry is a CONSTANT over a geometric zone,
+/// fixed at setup; what a dispersed phase produces is a whole-mesh field that
+/// changes every step and is zero almost everywhere until the spray arrives.
+/// Putting a device buffer inside [`crate::sources::SourceTerm`] would make
+/// that enum non-`Copy` and rewrite every `match` on it in the crate, and
+/// `CellZone`'s "an empty zone is a configuration error" rule is exactly
+/// wrong for a source that is legitimately zero for the first hundred steps.
+/// So this is a second registry with the same shape as the energy one, and
+/// the two together are S18.
+///
+/// **Nothing here knows what produced the field.** A dispersed phase, a
+/// canopy drag model and an actuator disc all register the same two arrays;
+/// the assembly reads them without asking.
+///
+/// # Contract
+///
+/// * `su` is an ACCELERATION, `m/s^2`, added to the right-hand side.
+/// * `sp` is the true `S_p` of `S = S_u + S_p u`, `1/s`, and must be `<= 0`
+///   in every cell (Patankar S4.2 / SPEC-LIT S3.4). Nothing here can check
+///   that without a device-side reduction on every registration; the producer
+///   guarantees it, and [`crate::parcels::couple::ParcelCoupling`] - the
+///   first producer - does so by construction rather than by clamping.
+/// * Call [`Self::clear`] once at the top of every outer iteration, before
+///   anything registers, or a source from two iterations ago is still in.
+/// * **Nothing registered is nothing applied.** With no registration the
+///   assembly launches no kernel over these arrays at all, so a case with no
+///   field source is bitwise the case this struct did not exist in. That is
+///   S68.10's "no parcels, no change" property, and it is a property of this
+///   file rather than a measurement.
+pub struct MomentumSources {
+    su: DevBuf<Vec3>,
+    sp: DevBuf<Scalar>,
+    fldk: FieldKernels,
+    /// How many contributions the current outer iteration has taken. Host
+    /// side, and the only thing the assembly branches on.
+    registered: usize,
+    n: usize,
+}
+
+impl MomentumSources {
+    pub fn new(gpu: &Gpu, m: &GpuMesh) -> Result<Self> {
+        let n = m.n_cells;
+        let one = n.max(1);
+        Ok(Self {
+            su: gpu.zeros(one)?,
+            sp: gpu.zeros(one)?,
+            fldk: FieldKernels::new(gpu)?,
+            registered: 0,
+            n,
+        })
+    }
+
+    /// Zero both accumulators and forget every registration.
+    pub fn clear(&mut self, gpu: &Gpu) -> Result<()> {
+        let n = self.n;
+        let Self { su, sp, fldk, .. } = self;
+        field_ops::set_field_vector(gpu, fldk, su, Vec3::ZERO, n)?;
+        field_ops::set_field(gpu, fldk, sp, 0.0, n)?;
+        self.registered = 0;
+        Ok(())
+    }
+
+    fn check_len(&self, len: usize, who: &str) -> Result<()> {
+        if len < self.n {
+            return Err(Error::Config(format!(
+                "MomentumSources::{who}: contribution has {len} elements, the \
+                 mesh has {} cells",
+                self.n
+            )));
+        }
+        Ok(())
+    }
+
+    /// `su += contribution`, m/s2.
+    pub fn register_explicit(&mut self, gpu: &Gpu, contribution: &DevBuf<Vec3>) -> Result<()> {
+        self.check_len(contribution.len(), "register_explicit")?;
+        let n = self.n;
+        {
+            let Self { su, fldk, .. } = self;
+            field_ops::add_field_vector(gpu, fldk, su, contribution, n)?;
+        }
+        self.registered += 1;
+        Ok(())
+    }
+
+    /// `sp += contribution`, 1/s. The caller's `contribution` must be `<= 0`
+    /// in every cell.
+    pub fn register_implicit_sink(
+        &mut self,
+        gpu: &Gpu,
+        contribution: &DevBuf<Scalar>,
+    ) -> Result<()> {
+        self.check_len(contribution.len(), "register_implicit_sink")?;
+        let n = self.n;
+        {
+            let Self { sp, fldk, .. } = self;
+            field_ops::add_field(gpu, fldk, sp, contribution, n)?;
+        }
+        self.registered += 1;
+        Ok(())
+    }
+
+    /// The accumulated acceleration, m/s2.
+    pub fn su(&self) -> &DevBuf<Vec3> {
+        &self.su
+    }
+
+    /// The accumulated `S_p`, 1/s, `<= 0` by the producer's contract.
+    pub fn sp(&self) -> &DevBuf<Scalar> {
+        &self.sp
+    }
+
+    /// Whether anything registered since the last [`Self::clear`]. False
+    /// means the assembly touches neither array.
+    pub fn is_active(&self) -> bool {
+        self.registered > 0
+    }
+}
+
+// ==========================================================================
 //  Momentum
 // ==========================================================================
 
@@ -470,6 +599,10 @@ pub struct Momentum<'m> {
     /// Volumetric sources on this equation - SPEC-LIT 18. Empty by default,
     /// which is the momentum equation this struct used to assemble.
     sources: crate::sources::SourceSet,
+
+    /// The whole-field half of SPEC-LIT 18's registry - see
+    /// [`MomentumSources`]. Inert until something registers.
+    field_sources: MomentumSources,
 
     /// The `ddt(U)` term - SPEC-LIT 13.
     pub ddt: crate::timescheme::Ddt,
@@ -599,6 +732,7 @@ impl<'m> Momentum<'m> {
             mk: MomentumKernels::new(gpu)?,
             srck: crate::sources::SourceKernels::new(gpu)?,
             sources: crate::sources::SourceSet::new(),
+            field_sources: MomentumSources::new(gpu, m)?,
             // `relaxed = u_relax < 1.0`: a PISO/PIMPLE momentum equation left
             // at its default `relaxationFactors == 1` is exactly the
             // condition under which `CrankNicolson` is reachable
@@ -702,6 +836,17 @@ impl<'m> Momentum<'m> {
 
     pub fn sources(&self) -> &crate::sources::SourceSet {
         &self.sources
+    }
+
+    /// SPEC-LIT S18's whole-field source registry on this equation - what a
+    /// dispersed phase, a canopy or an actuator disc pushes into. Clear it
+    /// at the top of every outer iteration and register after.
+    pub fn field_sources_mut(&mut self) -> &mut MomentumSources {
+        &mut self.field_sources
+    }
+
+    pub fn field_sources(&self) -> &MomentumSources {
+        &self.field_sources
     }
 
     pub fn buoyancy(&self) -> &BuoyancyCoeffs {
@@ -1401,6 +1546,23 @@ impl<'m> Momentum<'m> {
                 launch_component(gpu, &mk.vec_component, tmp_cell, stress, cmpt, n)?;
             }
             fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &self.tmp_cell, 1.0)?;
+        }
+
+        // SPEC-LIT 18's whole-field registry, in the same place and for the
+        // same reason as the zone sources below it. `is_active()` is a host
+        // count of registrations, not a test on the data: with nothing
+        // registered neither kernel launches and the matrix is bit for bit
+        // the matrix of a build without this registry.
+        if self.field_sources.is_active() {
+            {
+                let Self { mk, tmp_cell, field_sources, .. } = self;
+                launch_component(gpu, &mk.vec_component, tmp_cell, field_sources.su(), cmpt, n)?;
+            }
+            fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &self.tmp_cell, 1.0)?;
+            // `sp` is the true, non-positive S_p, which is `sign = -1`
+            // against `fvm_sp`'s "sign*sp >= 0 stabilises" convention - the
+            // same call `energy.rs` makes for the same reason.
+            fv::fvm_sp(gpu, &self.fvk, &mut self.a, m, self.field_sources.sp(), -1.0)?;
         }
 
         // The volumetric sources of SPEC-LIT 18, component by component. Before
