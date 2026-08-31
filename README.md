@@ -25,7 +25,7 @@ CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 �
 | 정밀도 | 배정밀도 기본, `single` 기능으로 단정밀도 |
 | 대상 | NVIDIA GPU |
 | 의존성 | cudarc, thiserror (선택적 AMGX) |
-| 검증 | 단위 시험 905개(모든 타깃, lib 814개), `ofgpu-validate` 314개 항목 |
+| 검증 | 단위 시험 1,561개(모든 타깃, lib 1,423개), `ofgpu-validate` 745개 항목 |
 
 ---
 
@@ -95,13 +95,15 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 구분 | 모형 |
 |---|---|
 | RANS | 표준 k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma 저레이놀즈수 k-ε (SPEC-LIT §33 — `wallTreatment lowRe`가 유효한 유일한 모형; 감쇠함수가 점성 서브레이어까지 적분되며, 해석적 `Re_t` 극한과 실제 채널 유동의 `u+`/`y+` 벽법칙 양쪽으로 검증됨), **realizable k-ε** (Shih 등, SPEC-LIT §40 — `C_mu`가 필드가 되어 Boussinesq 수직응력이 음수가 될 수 없음; 채널이 아니라 바로 그 성질과 균질전단 고정점으로 게이트함)과 **RNG k-ε** (Yakhot & Orszag, SPEC-LIT §41 — `R` 항을 셀별 `C_e2*`에 흡수하고, 확산계수는 `ν + ν_t/σ`가 아닌 `α(ν + ν_t)`) |
+| Spalart-Allmaras (SPEC-LIT §56) | **단일 수송방정식**으로, 미지변수 `nu~`는 와도 점성계수가 아닙니다. 이 트리에서 가장 싼 종결식이며(k-ε가 바깥반복당 선형해 두 번을 필요로 하는 자리에서 한 번), 실제로 읽은 구현 기준은 Allmaras, Johnson & Spalart의 ICCFD7-1902 논문입니다. `variant`로 `noft2`/`ft2`와 Allmaras의 **음수 연장**(`noft2-neg`/`ft2-neg`)을 선택합니다. 벽 경계조건은 정확하며 **새 `BcKind`가 전혀 필요 없습니다**: 점착벽에서 `nu~ = 0`은 `y+` 블렌딩이 없는 순수 Dirichlet 조건입니다. 검증은 항력계수가 아니라 모형 자신의 발표된 정의에 대해 수행합니다 — 평판 `C_d`는 틀린 이유로 맞을 수 있기 때문입니다. §56.4의 대수층 항등식은 모형의 *정확한* 성질이므로 반올림 오차 수준에서 성립하고, 그곳에서 `r = g = f_w = 1`이 정확히 성립하며, `c_n1`의 닫힌 형태 경계는 여기서 유도해 검사했고, SA-neg 수동성 항등식은 비트 단위이며, NASA Turbulence Modeling Resource가 발표한 권장 자유류 범위 양끝의 `nu_t/nu = 0.210438`과 `1.294234`를 인쇄된 자릿수까지 재현합니다. **TMR 평판 `C_d` 게이트는 실행하지 않으며** §56.11이 그 이유를 밝힙니다 — 해당 케이스는 `M = 0.2`의 압축성이고, 그 격자군은 곡선좌표 CGNS/Plot3D인데 `blockgen`은 축정렬 블록만 만들며, 표로 된 값은 페이지가 아닌 데이터 파일에 있습니다. 이 절은 SA가 박리, 천이, 압력구배 경계층을 올바르게 예측한다고 주장하지 않습니다. `ofgpu-sa`로 도달합니다 |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES 여과폭 | 체적 세제곱근, 최대 모서리 길이, Scotti 이방성 보정, van Driest 감쇠 |
 | LES 벽모형 | Werner–Wengle (1991) — 첫 셀 평균 속도로부터 적분·역해한 멱법칙, Newton 반복 없음; `standard`/`spalding` 프리셋이 LES에서는 이 모형 하나로 수렴, `lowRe`는 `nu_t,w = 0`, `rough`는 아직 없음(§13.4 오류로 명시) |
+| 하이브리드 RANS-LES (SPEC-LIT §57) | **DES97, DDES, IDDES**를 Spalart-Allmaras 배경과 k-ω SST 배경 양쪽에서 지원합니다. 차폐(shielding)는 **비트 단위**이며, 주장이 아니라 여기서 유도한 결과입니다: 평형 대수층에서 `r_d >= 1`이고, f64 `tanh`는 `19.0615475`를 넘으면 정확히 `1.0`으로 포화되는데 `(8 r_d)^3`은 `r_d > 0.33391`인 모든 경우 이를 넘으므로 `f_d == 0.0`이 정확히 성립하고 `dtil`은 `d`를 비트 그대로 돌려줍니다 — SST 배경이 자기 자신을 비트 단위로 재현하고 기본값이 **구성상** 움직이지 않는 이유도 이것입니다. DDES가 고치려는 결함인 격자유발 박리를 **흐름방향 셀 개수만 다른 두 메쉬에서 실측으로** 재현합니다: DES97은 부착 셀 5,632개 중 2,048개를 LES 모드로 보내며 소멸항을 5.66배로 증폭시키고, DDES와 IDDES는 `dtil == d`를 비트 단위로 유지합니다. IDDES의 `h_wn`은 크레이트에 없던 벽법선 셀 높이입니다. `\|grad y\| = 1`은 벽 인접 다섯 셀 높이 이내에서만 `3.2e-3`로 성립하고 블록 전체에서는 `0.495`에 그치지만, (57.19)가 정규화하므로 방향만이 결정적이고 그것은 `2.0e-13`까지 정확합니다 — 주장은 측정이 뒷받침하는 형태로만 기록되어 있습니다. **발표된 박리 유동 통계를 재현한다고는 주장하지 않습니다.** 저소산 대류 혼합 스킴도, 시간평균 기능도, 합성난류 유입 생성기도 없으므로 periodic hill은 실행하지 않으며, IDDES의 WMLES 분기는 시뮬레이션이 아니라 닫힌 형태와 길이척도 필드로 검증됩니다(§57.12). `ofgpu-validate`가 실행마다 그 구분을 출력합니다 |
 | 벽함수 | nutk, nutU (Spalding 역해), nutLowRe, 조도벽 (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | 결합 솔버(`ofgpu-buoyant`, `ofgpu-fire`)의 난류 선택 | `ofgpu-buoyant`: `CoupledTurbulence` 트레이트로 케이스의 `RAS { model ...; }`/`simulationType`을 그대로 반영 — k-ε, k-ω, k-ω SST(벽거리 자동 계산), LES(Smagorinsky/WALE/Deardorff, §16 여과폭·van Driest 포함) 전부 실제로 그 모형을 구성함, 부력 생성 `G_b`도 모형별로 올바른 방정식에 배선됨(§17, §30.2). `ofgpu-fire`: 아직 k-ε만 지원 — 연소 혼합시간 종결식과 열 벽함수가 `epsilon`을 직접 요구하므로 다른 모형은 이름을 밝힌 §13.4 오류로 거부(조용한 대체 없음) |
 | 벽 모형 프리셋 (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — 설정 하나가 케이스 빌드 시점에 필드별(nut/k/epsilon/omega, 에너지 방정식을 풀 때는 T까지) 경계 타입의 일관된 한 행으로 전개됨; 서로 다른 행을 섞으면 이름을 명시해 거부, `-permissive`는 `nut` 선택이 함의하는 행으로 대체 (SPEC-LIT §29.1). `lowRe`는 추가로 벽 근처를 해석할 수 있는 난류 모형을 요구함 — 그 목록에 있는 모형은 `LaunderSharmaKE`(SPEC-LIT §33) 하나뿐이며, `kEpsilon`/`kOmega`/`kOmegaSST`/`realizableKE`/`RNGkEpsilon`는 여전히 해당하지 않으므로 이 셋 아래에서 `lowRe`는 발산하도록 두는 대신 이름을 명시해 거부함 (SPEC-LIT §32) |
-| 켤레 열전달 (SPEC-LIT §46/§47) | **고체 영역, 접촉저항, 유체/고체 계면.** 계면은 양쪽 모두에 직렬 컨덕턴스 `h_G = (1/C_A + R_c + 1/C_B)^-1`를 실은 Robin 삼중항입니다(§47.2): 열유속 연속성과 접촉저항에 의한 온도 점프가 **수렴 시점이 아니라 모든 반복에서 정확히** 성립합니다 — 커널 **하나**가 하나의 `h_G`와 하나의 `|Sf|`로 양쪽을 동시에 쓰기 때문입니다. **새 행렬 코드가 전혀 필요 없습니다**: `lduAmul`과 `lduAddBoundaryContributions`는 "cyclic"이 아니라 `bNbrCell >= 0`을 보므로, 유체+고체를 이어 붙인 셀 번호를 가리키는 정합 계면은 이미 음적으로 풀립니다 — 켤레 계면은 변환이 0인 cyclic 짝입니다(§47.3/§47.4). CUDA 두 줄과 새 커널 두 개가 전부였습니다. 고체 쪽은 `(rho_s c_s) dT/dt = div(K_s grad T) + q'''`, 다물질 면 전도도의 Patankar **조화평균**, 메쉬축 대각 이방성 `K`(§46)이며, 비틀린 메쉬 위의 **완전 텐서는 측정한 잔차·MPFA·두 가지 대안을 이름으로 밝히며 거부**합니다(대각 성분으로 조용히 근사하지 않습니다). Dirichlet-Neumann 분할은 **구현하지 않습니다**: Meng 등(2017) 정리 1이 그 증폭률을 `K_R/K_L`로 주는데, 공기/플라스틱에서 정확히 실패합니다. 게이트(전부 실측): 2층 슬래브 `q = dT/(L1/k1 + Rc + L2/k2)`를 **조립 1회·선형해 1회** 뒤 `4e-14`로, 아직 수렴하지 않은 **첫 반복**에서의 열유속 연속성 `1.8e-16`, 보존 불균형 `2.0e-16`, `k_solid -> 0`은 행렬에 **비트 단위로 아무것도 기여하지 않고**(= `fixedFluxTemperature`, `q = 0`), `k_solid -> infinity`는 `fixedValue`/`thermalWallFunction` 벽을 재현하며, 두 반무한체의 계면은 유효율 가중 평균에 앉아 `dT`의 `1.1e-11` 이내로 시간에 대해 일정합니다. 케이스 파일에서 `ofgpu-cht`로 도달합니다 — `cases/dieStack.cht.jsonc`, 접촉저항 3개를 거쳐 냉각판으로 100 W를 흘리는 다이, 접합부 온도 **649.7118 K**로 자기 자신의 닫힌 해와 일치 |
+| 켤레 열전달 (SPEC-LIT §46/§47/§59/§60) | **고체 영역, 접촉저항, 유체/고체 계면, 그리고 그 건너편의 유체.** 계면은 양쪽 모두에 직렬 컨덕턴스 `h_G = (1/C_A + R_c + 1/C_B)^-1`를 실은 Robin 삼중항입니다(§47.2): 열유속 연속성과 접촉저항에 의한 온도 점프가 **수렴 시점이 아니라 모든 반복에서 정확히** 성립합니다 — 커널 **하나**가 하나의 `h_G`와 하나의 `\|Sf\|`로 양쪽을 동시에 쓰기 때문입니다. **새 행렬 코드가 전혀 필요 없습니다**: `lduAmul`과 `lduAddBoundaryContributions`는 "cyclic"이 아니라 `bNbrCell >= 0`을 보므로, 유체+고체를 이어 붙인 셀 번호를 가리키는 정합 계면은 이미 음적으로 풀립니다 — 켤레 계면은 변환이 0인 cyclic 짝입니다(§47.3/§47.4). CUDA 두 줄과 새 커널 두 개가 전부였습니다. 고체 쪽은 `(rho_s c_s) dT/dt = div(K_s grad T) + q'''`, 다물질 면 전도도의 Patankar **조화평균**, 메쉬축 대각 이방성 `K`(§46)이며, 비틀린 메쉬 위의 **완전 텐서는 측정한 잔차·MPFA·두 가지 대안을 이름으로 밝히며 거부**합니다(대각 성분으로 조용히 근사하지 않습니다). Dirichlet-Neumann 분할은 **구현하지 않습니다**: Meng 등(2017) 정리 1이 그 증폭률을 `K_R/K_L`로 주는데, 공기/플라스틱에서 정확히 실패합니다. 게이트(전부 실측): 2층 슬래브 `q = dT/(L1/k1 + Rc + L2/k2)`를 **조립 1회·선형해 1회** 뒤 `4e-14`로, 아직 수렴하지 않은 **첫 반복**에서의 열유속 연속성 `1.8e-16`, 보존 불균형 `2.0e-16`, `k_solid -> 0`은 행렬에 **비트 단위로 아무것도 기여하지 않고**(= `fixedFluxTemperature`, `q = 0`), `k_solid -> infinity`는 `fixedValue`/`thermalWallFunction` 벽을 재현하며, 두 반무한체의 계면은 유효율 가중 평균에 앉아 `dT`의 `1.1e-11` 이내로 시간에 대해 일정합니다. 케이스 파일에서 `ofgpu-cht`로 도달합니다 — `cases/dieStack.cht.jsonc`, 접촉저항 3개를 거쳐 냉각판으로 100 W를 흘리는 다이, 접합부 온도 **649.7118 K**로 자기 자신의 닫힌 해와 일치. **유체 쪽 (SPEC-LIT §59/§60).** 이제 `Energy`가 유체+고체를 이어 붙인 열 메쉬 전체에서 동작하며, `attach_conjugate`로 옵인합니다: 재조준은 원소별 혼합 네 개와 §47.2의 계면 커널이 전부이고, `energy.rs`의 diff는 정확히 네 줄을 **지우며** 그 네 줄은 각각 어떤 함수의 마지막 문장이 가드된 호출로 바뀐 것입니다. 대류항은 고체에서 **정확히** 사라집니다 — 드라이버를 믿는 대신 `Energy`가 `phi_conv`를 직접 마스킹하기 때문입니다. 마스크는 하나가 아니라 **둘**이 필요합니다: 전도도 혼합은 유체 계면면을 남겨야 하고(그 면의 `C_A`는 `k_eff Δ`입니다) 대류 마스크는 그 면을 버려야 하기 때문입니다. 기본경로가 변하지 않음은 계수 하나가 아니라 **다섯 번의 반복을 모두 수행한 뒤 필드·`T_b`·행렬 배열 여섯 개 전부가 비트 단위로 동일**함으로 증명되며, `ofgpu-validate`가 그 비교를 매 실행 실측으로 다시 합니다. 통과하는 게이트(전부 실측): de Vahl Davis (1983)가 40²/60²/80²에서 **+0.06 / +0.34 / +0.59 %**이며 두 벽이 같은 열량을 `1.1e-7`로 운반하고, `Kr = 0.1, 1, 10`에서 해석적 전도 극한을 `2.5e-9`·`4.4e-8`·`7.1e-8`로 재현하며, 계면 보존은 `1.5e-16`입니다. **발표된 게이트 — Kaminski & Prakash (1986) — 는 실측으로 실행되고 빗나갑니다**. 아래 “빗나가는 게이트”를 보십시오. `ofgpu-cht`로 도달합니다 — `cases/kaminskiPrakash.cht.jsonc` |
 | 열 벽함수 | Jayatilleke의 열 대수법칙 하위층 저항 보정 (`thermalWallFunction`, 별칭 `compressible::alphatJayatillekeWallFunction`) — `lowRe`를 제외한 모든 프리셋 행이 벽의 `T`에 적용 (`lowRe`는 해상된 하위층 자체의 분자 저항을 그대로 둠, SPEC-LIT §29.3); `ofgpu-fire`의 에너지 방정식에 배선됨. 고정 열유속 주기 **평면 채널**에서 Dittus-Boelter/Gnielinski 대비 검증(SPEC-LIT §32/§34): **벽함수 leg는 닫힘** — Petukhov 매끄러운 원관 `f`에서 Gnielinski −5.9%(±10%), Dittus-Boelter −12.9%(±20–25%) — **해상 `lowRe` leg는 닫히지 않음**(Gnielinski +11.9%, Dittus-Boelter +4.0%). 각 leg가 벽에서 직접 **측정한** `f`로 평가하는 레이놀즈 유사 판정은 두 leg 모두 닫히지 않음(+34.3%, +14.9%). 숫자는 배포 기본값 `PrtModel constant`에서의 기록이며, SPEC-LIT §26.1 이후 재실행한 값이다. SPEC-LIT §37의 Kays-Crawford 가변 `Pr_t`를 선택하면(옵인 방식, 토큰 하나, 튜닝 없음) 해상 leg가 +11.9%에서 **+4.3%**로 이동해 절대 예측 판정이 **두 leg 모두에서 닫힌다**. 대조군인 벽함수 leg는 `Nu`가 −0.06%만 움직이며, 벽함수 leg의 레이놀즈 유사 판정은 +34.0%로 그대로다(열이 아니라 마찰 측의 결과이기 때문). **SPEC-LIT §26.1은 이 게이트가 모든 숫자에 불확실성으로 달고 다니던 에너지 불균형을 닫았다**: §25.1의 발산 구속조건이 전도항 `div(k_eff grad T)` 없이 구현되어 있어서 해상 leg의 정상 상태 에너지 수지가 +3.11%(Kays-Crawford에서 +3.35%) 부족했고, 지금은 +0.000089%라서 해상 leg의 Kays-Crawford 통과 판정에 더 이상 오차 범위를 붙일 필요가 없다. 전체 내용과 이것이 증명하지 못하는 범위는 `docs/07-fire-solver.md` §1.1 |
 | 벽거리 | Poisson 방정식 기반 (Tucker 1998) |
 | 부력 생성 | G_b 항 (Rodi 1987, Henkes et al. 1991) |
@@ -114,7 +116,9 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 스칼라 수송 | 온도, 다성분 화학종 (질량분율 합 = 1 강제) |
 | 소스 항 | 체적 열원, 운동량 소스, Darcy–Forchheimer 다공성 저항 |
 | 부력 | 비Boussinesq 밀도비 `b = g(T_ref/T − 1)` |
-| 라그랑주 파셀 (SPEC-LIT §66) | SoA 풀, 지수함수 항력 갱신 (Schiller–Naumann), 셀→면 CSR 기반 면 통과 워크, 결정론적 분사. **단방향 결합·비증발**: 파셀은 기체를 느끼지만 기체는 파셀을 느끼지 않으며, 증발은 이름을 들어 거부됩니다 |
+| 일반화 뉴턴 점성 (SPEC-LIT §38) | `nu`가 **필드**가 됩니다: 멱법칙, Cross, Bird-Carreau(`a = 2`)와 Carreau-Yasuda(일반 `a`)를 한 수식으로, Herschel-Bulkley, Casson. 변형률 불변량 `gdot = sqrt(2 D:D)`는 §6가 이미 계산하고 있었지만 아무도 부르지 않던 `turbStrainRateMag` 그대로이며, 이 절이 그 첫 호출자입니다 — 사슬 전체가 게더 형태로 유지되고 원자연산이 없습니다. 항복응력 모형 둘은 Papanastasiou **곱 형태**로 정칙화합니다 — `n < 1`에서도 유계를 유지하는 쪽입니다. 평면 Poiseuille 유동은 명세가 유도한 닫힌 해에 대해 **2.08 / 2.03 / 2.00 / 1.97**차로 수렴하며, 뉴턴 환원은 `4.5e-14`이고 모든 모형의 자체 환원이 `gdot`에 대해 반올림 오차 수준으로 일정합니다. Buckingham-Reiner의 `1, -4/3, +1/3` 괄호는 인용하지 않고 그것이 닫힌 해인 속도분포의 수치적분에 대해 검증합니다(`9.4e-11`). `physics.fluid.rheology.model`(JSONC) 또는 `viscosityModel`(`constant/physicalProperties`)로 선택하며, 모르는 이름은 여섯 개를 열거하면서 오류를 내고, 선택된 모형이 쓰지 않는 계수도 이름을 밝히며 오류입니다. **`U`를 고정해 두는 드라이버들은 비뉴턴 모형을 이름을 밝혀 거부합니다** — `blockgen`은 그 생성기가 생긴 이래 모든 생성 케이스에 `viscosityModel constant;`를 써 넣었고 아무도 읽지 않았습니다(계약 결함의 여섯 번째 사례). 거부 없이 읽기만 했다면 여섯 번째를 고치면서 일곱 번째를 만들었을 것입니다 |
+| 접촉각 (SPEC-LIT §39) | VOF 벽에서의 정적·이력(hysteresis)·동적 접촉각이 §20의 `nHatf = 0`을 대체합니다 — 그 자체가 이미 90도의 접촉각이었고, 명시되지 않은 물리를 더하지 않는 유일한 선택이었기 때문입니다. 동적 각은 Jiang-Oh-Slattery와 Cox-Voinov를 쓰며, **Kistler는 의도적으로 빠졌습니다** — 그 네 상수가 이 프로젝트가 읽지 않은 단행본 장에서 나오기 때문입니다. `theta = 90`은 모형이 없는 경우와 비트 단위로 같고 `theta = 45`는 그렇지 않으므로 두 시험 모두 공허하지 않으며, `cos(pi/2) != 0` 함정은 두 번 가드되고 시험은 그 전제를 단언하는 대신 **측정**합니다(`6.12e-17`). 기하(`bNHatf = magSf cos theta`를 0/45/90/135/180도에서, 부호는 양끝 모두 확인), `alpha` 고정기울기 삼중항, 두 상관식 모두 `Ca = 0`에서 `theta_e`를 정확히 돌려줌, 그리고 Jurin 높이를 닫힌 해로 게이트합니다 — `theta_e > 90`은 반드시 하강이어야 합니다. **주장하지 않는 것**: 실제 모세관 상승이나 액적 충돌 실행이 발표된 `theta_d(t)`를 재현한다는 것. Tanner 법칙, Sikalo 등의 액적 충돌, 두 해상도 치환 실험은 실행하지 않으며, Afkhami·Zaleski·Bussmann의 메쉬 의존 보정은 그것이 제 역할을 한다는 것을 보일 게이트가 생기기 전까지 의도적으로 보류됩니다(§39.8) |
+| 라그랑주 파셀 (SPEC-LIT §66) | SoA 풀, 지수함수 항력 갱신 (Schiller–Naumann), 셀→면 CSR 기반 면 통과 워크, 결정론적 분사. **단방향 결합·비증발**: 파셀은 기체를 느끼지만 기체는 파셀을 느끼지 않으며, 증발은 이름을 들어 거부됩니다. **아직 어느 드라이버도 케이스 파일에서 스프레이를 읽지 않으며**, §13.4.2는 그것을 읽을 드라이버보다 먼저 `parcels` 블록을 추가하는 것을 금지합니다. 따라서 풀은 라이브러리 API이며 `ofgpu-validate`의 게이트가 그것을 구동합니다 |
 | 파셀 침적 게더 (SPEC-LIT §67) | `(cell, uid)` 전순서 키에 대한 기수 정렬, 장치 배타 스캔, 셀별 파셀 CSR, 셀당 한 스레드 게더. **f64 원자연산 없음**: 흩뿌리기(scatter)를 모으기(gather)로 뒤집어 결과가 비트 단위로 재현됩니다 |
 | 양방향 결합 (SPEC-LIT §68) | 파셀 적분기가 실제로 가한 항력 임펄스를 §18 소스 레지스트리를 통해 기체에 그대로 돌려줍니다 — 운동량(운동학적, 명시적 또는 Patankar 분리)과 현열, 그리고 액적 온도를 위한 `physics heating`. **구성상 반올림 오차 수준으로 보존**되며, 파셀이 하나도 분사되지 않으면 비트 단위로 아무 영향이 없습니다. 증발, 액적의 복사 흡수, 벽면 스플래시는 이름을 들어 거부됩니다 |
 
@@ -148,11 +152,30 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 에너지 방정식 | 현열 엔탈피, `k_eff = k + rho cp nu_t/Prt`, 벽 열유속·고정온도 경계, `thermalWallFunction` 벽의 Jayatilleke 열 벽함수 (SPEC-LIT §29.3) |
 | 연소 | 혼합제어 단일 스텝 EDM (Magnussen & Hjertager 1977, **기본값**) — `Y_F`, `Y_O2`, `Y_P` 수송, 연료 고갈 방지 클리핑, 소모된 연료질량과 방출열이 정확히 일치 (반올림 오차 수준). **그리고 직렬 2단계 혼합제어 스킴** (McGrattan, McDermott & Floyd, ISFEH10 2022 — SPEC-LIT §42, `scheme serialTwoStep`으로 선택): 같은 혼합제어 속도를 한 시간스텝 안에서 **직렬로** 두 번 적용해, 1단계가 남긴 산소가 1단계가 만든 CO를 산화시킵니다. 아레니우스 속도식도, 야코비안도, ODE 적분기도, 경직성도 없습니다. 중간생성물 `Y_I`가 추가 수송되고 `Y_CO = f_CO Y_I`가 출력됩니다 |
 | 국소 소염 | FDS `EXTINCTION 1` 임계화염온도 판정 (SPEC-LIT §43, `extinctionModel oxygen`) — 셀 온도에 대한 구간선형 한계산소지수, 자유연소 온도 차단, 자연발화온도 규칙. 기본값은 `none`이므로 기존 결과는 그대로입니다 |
-| 복사 | 회색 P1 근사 (Modest ch. 15), Marshak 벽 경계, `chi_r` 복사분율 하한, **그리고 회색 fvDOM** (Modest ch. 16; Fiveland 1984; Truelove 1987 — SPEC-LIT §36): 같은 RTE를 24개 level-symmetric S4 종좌표로 풀며 `radiationModel`로 선택. `cases/burnerPlume.jsonc` 실측(32,768셀, 1,200스텝, RTX 5070 Ti): 복사 분율 14.97%(P1) 대 13.79%(fvDOM), 벽시계 19.22 s 대 121.5 s |
-| 검증 게이트 | 밀폐 상자 `dp0/dt` 램프(해석해), 버너 정확 열방출, 복사 평형, 컷셀 닫힘, msh 육면체 닫힘 — 전부 `ofgpu-validate`의 상시 항목 |
-| 케이스 파일이 출력을 지시함 (SPEC-LIT §44) | `output.visualisation`(`format`·`interval`·`fields`·`precision`·`usdScene`), `output.exact`(`format`·`interval`), `output.restart`(`interval`·`keep`)를 JSONC 케이스를 읽는 모든 드라이버가 읽습니다. `fields`는 필드를 고르고 순서를 정하며, 이 실행에 없는 이름은 있는 이름들을 열거하며 거부합니다. `precision`은 두 볼륨 라이터에 대해 `fp16`/`fp32`이고 그 밖의 어디서도 오류입니다. `keep`은 최근 N개의 체크포인트를 남기고 더 오래된 것을 지우되, **이 실행이 쓴 파일만** 지우며 디렉터리의 다른 무엇도 건드리지 않습니다 |
+| 복사 | 회색 P1 근사 (Modest ch. 15), Marshak 벽 경계, `chi_r` 복사분율 하한, **그리고 회색 fvDOM** (Modest ch. 16; Fiveland 1984; Truelove 1987 — SPEC-LIT §36): 같은 RTE를 24개 level-symmetric S4 종좌표로 풀며 `radiationModel`로 선택하며, **케이스가 아무 말도 하지 않으면 여전히 회색**입니다. 세 번째 모델 `viewFactor`는 여기서 이름을 밝혀 거부됩니다 — `ofgpu-fire`의 매질은 참여매질이므로 P1이나 fvDOM이 물리적으로 올바른 선택이고, 면대면 복사는 이 드라이버에 플래그가 없는 밀폐공간 정의를 필요로 합니다(§50.12). `cases/burnerPlume.jsonc` 실측(32,768셀, 1,200스텝, RTX 5070 Ti, 그을음 off, 연속 두 번 실행, §65.7): 복사 분율 **14.97 %**(P1) 대 **13.79 %**(fvDOM), 벽시계 **22.93 / 22.60 s** 대 **141.12 / 141.16 s**, 최대 장치 메모리 172 MiB 대 236 MiB |
+| 그을음 (SPEC-LIT §61) | 수송되는 질량분율 `rho Y_s` — `sootModel none`(기본값), `prescribedYield`, `laminarSmokePoint`. 연기점 모형은 Lautenberger, de Ris, Dembsey, Barnett & Baum (2005)입니다: `Z_L`과 `Z_H` 사이의 혼합분율 3차식으로 형성속도를 주고, 측정된 층류 연기점 높이에 고정하며, Magnussen-Hjertager 산화와 가용량 클립을 둡니다. 3차식은 그것을 **풀어낸** 네 조건에 대해 되돌려 검사되고(최악 `2.4e-16`), 프로판의 `Z_st = 0.0600725`는 `1.3e-9`, 발표된 최대속도 `omega_sf,P = 0.45699 kg/(m³ s)`는 `8.7e-8`, 지정수율 질량수지는 `1e-14`, 호스트 닫힌 해와 장치 커널은 `1e-14`로 일치합니다. Moss-Brookes와 sectional 계열은 **이유와 함께** 이름을 밝혀 거부됩니다. §61의 존재 이유는 §62입니다: `rho Y_s`가 모든 WSGG 밴드의 `kappa`에, 따라서 `T`에 도달합니다. **Gate 61-A — 이 모형이 내놓는, 발표된 그을음 측정값과 맞대볼 수 있는 유일한 숫자 — 는 완전히 빗나갑니다**. 아래 “빗나가는 게이트”를 보십시오 |
+| 스펙트럼 복사 — WSGG (SPEC-LIT §62) | `spectralModel gray`(기본값) / `grayBanded` / `wsgg`를 **P1과 fvDOM 모두**에 대해, §36이 이미 쓰던 하나의 `EnergySources` 등록을 그대로 통해 지원합니다. `wsgg`는 Bordbar, Węcel & Hyppänen (2014)입니다: 회색기체 네 개에 투명창 하나, `kappa_j`는 셀마다 밴드마다 국소 `X_H2O`·`X_CO2`·그을음으로 구성하고 `a_j`는 국소 `T`에서 옵니다. `grayBanded`(밴드 하나, `a_1 = 1`, 케이스 자신의 `a`)는 **드라이버 전체에 걸쳐 `gray`와 비트 단위로 동일**하며, 두 실행이 쓴 모든 파일의 모든 바이트로 확인됩니다 — 즉 “기본값은 움직이지 않는다”는 단언이 아니라 케이스가 직접 다시 해볼 수 있는 측정입니다. **§64와 §65는 밴드 슬랩을 밴드별로 정확히 푼니다**. 항등식이나 다른 모델이 아니라 밴드 P1의 *답*을 재는 유일한 게이트이며, 둘 다 자신이 확인하려고 만들어진 주장을 뒤집었습니다. fvDOM의 각도 오차는 닫힌 형태입니다 — `E_2^S4(tau) = (1/4pi) sum_m w_m exp(-tau/\|mu_m\|)`, `E_2^S4(0) - 1 = 3.3e-16`으로 검증 — 그 덕분에 측정된 오차가 실행이 필요 없는 각도 부분과 실행이 필요한 공간 잔여분으로 분리됩니다. **P1에는 그런 분리가 없습니다.** fvDOM은 투명창을 정확히 푸는 반면(`1.7e-15`) 밴드 P1은 그 밴드를 바닥값으로 대체해야 하며 벽이 뜨거울 때 `-0.039 %`, 기체가 뜨거울 때 **`+10.1 %`**를 치릅니다. P1이 가장 못하는 밴드에서는 fvDOM이 최대 **7.8배** 더 좋습니다. **비용, 실측(§65.7)**, 같은 케이스·같은 두 번의 실행: P1 + WSGG **93.64 / 94.01 s**(회색 P1 대비 **4.12배**), 172 MiB; **fvDOM + WSGG 527.06 / 536.42 s — 23.36배 — 332 MiB**. 밴드 구조는 P1에서 4.12배, fvDOM에서 3.77배를 쓰며, 각각 자신의 산술적 예상치의 반대편에 있습니다. `updateInterval: 4`는 복사 분율 **0.12점**을 대가로 fvDOM 배율의 **6.7배**를 되돌려줍니다. 가격 옆의 물리: 스펙트럼 모델은 이 케이스에서 복사 분율을 거의 **세 배**로 만듭니다(P1 14.97 → 47.28 %, fvDOM 13.79 → 43.76 %). 각도법을 바꿀 때의 이동은 회색에서 1.2점, 밴드에서 3.5점이므로 스펙트럼 쪽이 아홉 배 큰 효과입니다. **그 방사율 게이트는 빗나갑니다**. 아래 “빗나가는 게이트”를 보십시오 |
+| 개방 복사 경계 (SPEC-LIT §63) | `openBoundary zeroGradient`(기본값) 또는 `ambientT`를 가진 `coldSurroundings`. 개방면에서의 제로기울기 `G`(P1)나 `I_m`(fvDOM)는 나간 것이 그대로 되돌아온다고 말합니다: **제로기울기 복사 경계를 가진 개방형 화재 도메인은 완전 반사 밀폐공간입니다.** 또한 WSGG의 투명 밴드에 대해 **특이적**이기도 합니다 — P1에서 그 밴드는 순수 Neumann Laplace 문제입니다 — 그래서 이 조건 없이는 개방형 WSGG 화재에서 두 모델 모두 비유한값으로 발산합니다. §63이 존재하는 이유입니다. 벽으로만 둘러싸인 밀폐공간은 이 설정에 **비트 단위로 움직이지 않으며**(닿을 개방면이 없으므로), 거부는 두 조건을 모두 이름으로 밝히고 기본값이 무엇인지를 말합니다. `cases/burnerPlume.jsonc`의 회색 leg 실측: 복사가 빠져나갈 수 있게 되면 복사 분율이 14.97 → 33.89 %(P1), 13.79 → 25.07 %(fvDOM)로 오릅니다 |
+| 검증 게이트 | 밀폐 상자 `dp0/dt` 램프(해석해), 버너 정확 열방출, 복사 평형, 컷셀 닫힘, msh 육면체 닫힘, 2단계 스킴의 유도된 화학양론적 계수, 그을음 3차식을 그것이 풀린 네 조건에 대조한 검사, WSGG 계수 집합 자체의 불변량, §64/§65의 정확한 밴드 슬랩 — 전부 `ofgpu-validate`의 상시 항목. 화재 쪽 게이트 네 개는 **빗나가며** 요약 줄이 그 네 개를 모두 이름으로 부릅니다. 아래 “빗나가는 게이트”를 보십시오 |
 | 필드 출력·재시작 | `-output foam,vtu,nvdb,vdb,usda`·`-writeInterval`이 `ofgpu-buoyant`/`ofgpu-vof`와 같은 방식으로 `U`·`p`·`T`·난류 완결식·화학종 필드를 씀; `-restartWrite N`/`-restartFrom FILE`이 체크포인트를 쓰고 재개 — `U`/`p`/`T`뿐 아니라 `p0`, `dp0dt`, 화학종 질량분율까지 재시작에서 그대로 이어받습니다(저-마하 실행의 열역학 상태는 그 세 필드만이 아니므로). 연속 40스텝 실행과 20스텝+재시작+20스텝 실행이 재시작 직후 첫 압력 잔차·`p0`·전체 엔탈피에서 일치합니다 |
 | 체적 소스 | `sources[]`(JSONC) 또는 `constant/fvSources`(OpenFOAM 케이스 디렉터리)로 운동량 방정식에 소스를 등록 — 전체 도메인에 걸친 균일 체적력으로, 유입 경계가 없어 질량유량을 지정할 수 없는 periodic(cyclic 패치) 케이스가 필요로 하는 바로 그것입니다 |
+
+### 환기, 밀폐공간 복사, 데이터센터 기류
+
+`ofgpu-datacentre`가 SPEC-LIT §52–55를 하나의 실내 솔버로 결합합니다 —
+`cases/coldAisle.dc.jsonc`. 면대면 복사(§49–51)는 물리적으로 이들과 한 자리이지만
+그 드라이버의, 또 다른 어느 드라이버의 일부도 **아닙니다**: 라이브러리로서
+명세되고 게이트되고 쌍 검사까지 되어 있으며, 마지막 행이 그것을 말합니다.
+
+| 구분 | 지원 |
+|---|---|
+| 팬 경계조건 (SPEC-LIT §52) | 제조사의 압력–유량 성능곡선을 **Robin 삼중항**으로 다룹니다. 정확한 연산자는 랭크 1이며 조밀하지만, 면별 배열 셋으로 묶어내면 그 조밀 연산자가 부과하는 유량을 `1.7e-14`로 **동일하게** 부과합니다. 2차식·표·정유량 곡선을 지원하며, 표를 절대값으로 다루는 대신 AMCA 210의 밀도·회전수 보정을 겁니다. `dp = dp_max[1 - (Q/Q_max)^2]`는 `Q`에 대해 **짝함수**이므로 역류 팬은 밀릴수록 더 세게 밀어냅니다 — `Q`가 다섯 번의 반복 동안 3.0, −4.6, −33, −90, −1692로 갔고, 순방향 분기에서 동일한 `Q\|Q\|`가 그것을 대체했습니다. Woodbury/정전용량 행렬 경로는 이름을 밝혀 거부합니다. 게이트: 닫힌 형태의 운전점을 상수로 인용하지 않고 수식을 직접 평가해 `1e-10` 상대오차로 재현; NIST의 공유재산 FDS HVAC 덱 `fan_test`/`qfan_test`를 `1.1e-6`와 `2.7e-4` 상대오차로 재현(**그 입력 파일과 발표된 CSV만** 사용 — FDS 소스는 읽지 않음); `S = 0`은 `fixedValue`와 비트 단위로 동일, `S = 1e12`는 지정 유량과 일치; 그리고 `cases/coldAisle.dc.jsonc` 네트워크 전체를 손으로 푸는 닫힌 해와 비교해 **두 개구 모두 2 % 이내**, 전체 경계 연속성은 `4.2e-10` |
+| 다공성 점프 (SPEC-LIT §53) | §18의 Darcy–Forchheimer 법칙(Ward 1964)을 셀이 아니라 슬랩을 관통해 적분한 것 — 내부면이든 경계면이든 저항을 가진 **면**입니다: 내부면은 배열 셋을 숫자 하나로 나눈 것, 경계면은 §52의 삼중항입니다. 다공판과 스크린을 개구율로 다루며, 공개 문헌에 발표된 박판 `K(sigma)` 형태를 쓰고 그 자신의 극한과 설계 노트가 인용한 두 값에 대해 게이트합니다 — **그중 하나는 모순됩니다**. 역류를 클립하지 않고 모델링하며, 모델이 틀리는 부분은 보고서에 출력됩니다 |
+| 습공기·습도 (SPEC-LIT §54) | 절대습도를 하나의 수송 화학종으로, Hyland–Wexler 포화증기압, 그리고 **가온도**를 통한 습공기 부력 — 따라서 `Y_v = 0`은 건공기 기본값과 비트 단위로 같습니다. 게이트: `C1`–`C13` 열세 개 계수를 독립적인 호스트 전사로부터 수식에 대조 — 다른 모든 양이 `p_ws`의 하류이므로 가장 중요한 게이트입니다; ASHRAE Handbook—Fundamentals (2021) Ch. 1 Table 2를 0.5 % 절대오차로, **`W_s`의 0.44 % 잔차는 빠진 증강인자 탓으로 귀속시켜 출력**합니다(조용히 허용하지 않습니다); 그리고 끓는점에서 IAPWS(`p_ws(100 °C) = 101 418.7 Pa`) — 기준이 ASHRAE가 *아니라서* 가치가 있는 검사입니다. Herrmann·Kretzschmar·Gatley의 실제기체 정식화는 **이름을 밝히고 구현하지 않습니다** |
+| 데이터센터 지표 (SPEC-LIT §55) | RCI(Herrlin 2005), RTI(Herrlin 2008), SHI와 RHI(Sharma, Bash & Patel 2002)를 ASHRAE TC 9.9의 Class A1–A4 권장·허용 범위에 대해 장치에서 축약합니다. 모든 항등식을 저장된 숫자가 아니라 수식에 대조해 검사합니다 — `SHI + RHI = 1`, 밴드 안에서 `RCI = 100 %`, 허용 한계에서 `0 %`, 균일 오프셋에 대한 선형성. **여섯 구성 순위 게이트는 실행하지 않습니다**: Wibron, Ljung & Lundström (2019)는 CC-BY-4.0이고 라이선스를 Crossref REST API로 직접 확인했지만 전문을 이 환경에서 가져올 수 없었으므로, 초록이 명시한 한 가지 정량 관계만 게이트하고(공급유량을 반으로 줄이면 RTI가 두 배, 40 % → 80 %) 그 누락을 매 `ofgpu-validate` 실행에서 출력합니다. 공개된 데이터센터 CFD 검증 데이터는 양이 적고 대부분 출판사 장벽 뒤에 있습니다. 이는 얼버무리지 않고 기록합니다 |
+| 면대면 복사 (SPEC-LIT §49/§50/§51) | **비참여** 매질에 대한 결정론적 형상계수와 밀폐공간 방사도 방정식. 투명 매질은 체적적으로 아무것도 기여하지 않으므로, 모델 전체가 다시 쓴 Robin 삼중항 하나입니다. 몬테카를로는 재현성이 아니라 **정확도**를 이유로 거부합니다 — MCRT는 counter-based RNG로 비트 단위 재현성을 만들 수 *있고*, 그 반론에 대한 답이 NISTIR 6925 Table 2입니다: 쌍당 100만 표본에서 `2.7e-4`인데, 결정론적 적분은 18,525점에서 `4e-6`에 도달합니다. RT 코어도 스위치 달린 재현성 구멍으로 거부합니다. 설계 노트의 이중면적적분법은 **공유모서리 게이트를 40 % 빗나가고** `nq^-0.54`로 수렴하므로, 대신 단일 선적분을 만들었습니다 — `6.6e-6`. 게이트는 전부 닫힌 해 아니면 항등식이며 재생된 것은 하나도 없습니다: Howell C-11 `0.1998248957`과 C-14 `0.2000437761`을 상수로 인용하지 않고 **수식에서 직접 평가**하므로 전사 오류가 일치가 아니라 실패로 나타납니다; Shapiro/FACET의 차폐된 `F_12 = 0.11562061`을 `A_3/A_1 = 0.25`에서의 상호성과 함께; NISTIR 6925의 `BB104` 구성을 120면에서 — 구적법 자체는 0.014초에 `6.6e-6`, 상호성은 정확히 `0`, 닫힘은 `<= 1e-12`, `min G >= 0`; 그리드 탐색과 선형 스캔은 **비트 단위**로 같고, 같은 형상을 두 번 빌드해도 비트 단위로 같습니다. **설정까지만 되어 있고 아직 케이스에서 실행되지는 않습니다**: 사전과 거부 목록과 §51의 쌍 검사 열 개가 모두 존재하고 게이트가 라이브러리 API를 구동하지만, **어느 드라이버 바이너리도 케이스 디렉터리에서 밀폐공간 정의를 읽지 않습니다**(§50.12). JSONC 화재 블록의 `radiationModel viewFactor`도 같은 이유로 이름을 밝혀 거부됩니다. 결합 밀폐공간 게이트(Balaji & Venkateshan; Akiyama & Chong)도 그 이유와 유료 장벽 둘 다 때문에 실행하지 않으며, `ofgpu-validate`가 매 실행 그 누락을 출력합니다 |
+
+---
 
 ### 케이스 입력 형식과 재시작
 
@@ -160,7 +183,8 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 |---|---|
 | JSONC 케이스 | 주석·trailing comma를 허용하는 JSON 한 파일로 메쉬·물성·경계·수치·소스·화재 블록을 기술 — `schemars`로 스키마를 자동 생성해 리더와 스키마가 어긋날 수 없음 |
 | 재시작 (`.mcr`) | 전체 배정밀도, `phi` 포함, 메쉬 해시 불일치 시 거부, 버전 관리 |
-| 시각화/교환 출력 | VTU(부가 이진, 폴리헤드라 보존), NanoVDB/OpenVDB(`.vdb`/`.nvdb`), USD(`.usda`) 장면 참조 |
+| 시각화/교환 출력 | VTU(부가 이진, 폴리헤드라 보존), NanoVDB/OpenVDB(`.vdb`/`.nvdb`, `fp32` 또는 `fp16` 복셀), USD(`.usda`) 장면 참조 |
+| 케이스 파일이 출력을 지시함 (SPEC-LIT §44) | `output.visualisation`(`format`·`interval`·`fields`·`precision`·`usdScene`), `output.exact`(`format`·`interval`), `output.restart`(`interval`·`keep`)를 JSONC 케이스를 읽는 모든 드라이버가 읽습니다. `fields`는 필드를 고르고 순서를 정하며, 이 실행에 없는 이름은 있는 이름들을 열거하며 거부합니다. `precision`은 두 볼륨 라이터에 대해 `fp16`/`fp32`이고 그 밖의 어디서도 오류입니다. `keep`은 최근 N개의 체크포인트를 남기고 더 오래된 것을 지우되, **이 실행이 쓴 파일만** 지우며 디렉터리의 다른 무엇도 건드리지 않습니다 |
 
 ---
 
@@ -259,18 +283,65 @@ error: numerics/algorithm: "SIMPLE (ddt "Euler", endTime 6)" is a steady
 ## 검증
 
 ```
-cargo test        946 passed, 0 failed, 2 ignored (lib 크레이트 기준)
-                  1057 passed, 0 failed, 4 ignored (모든 타깃 합계 — 각 바이너리의 CLI 파싱
+cargo test        1423 passed, 0 failed, 4 ignored (lib 크레이트 기준)
+                  1561 passed, 0 failed, 6 ignored (모든 타깃 합계 — 각 바이너리의 CLI 파싱
                   스위트와 SPEC-LIT §13.4.1의 드라이버별 "두 실행은 달라야 한다" 쌍 검사 포함)
-ofgpu-validate    449 / 449 checks passed (401개는 실시간 계산, 48개는 기록된 측정값 재생)
+ofgpu-validate    745 / 745 checks passed (697개는 실시간 계산, 48개는 기록된 측정값 재생)
 ```
 
 **SPEC-LIT §13.4.1의 상시 요구사항**: 케이스 파일의 설정 하나만 다르고 나머지는
 바이트 단위로 같은 두 번의 짧은 실행은 **서로 다른 결과를 써야 한다**. 비트 단위로
-같다면 그 설정은 죽은 설정입니다. 이 쌍 검사는 이제 여섯 드라이버 모두가 가지고
-있으며(`ofgpu-fire` 13개, `ofgpu-buoyant` 17개, `ofgpu-vof` 15개, `ofgpu-plume` 11개,
-`ofgpu-k-epsilon`/`ofgpu-k-omega` 각 11개 설정), 드라이버 자신의 `parse` + `run`을
-그대로 호출해 기록된 모든 필드 파일을 비교합니다.
+같다면 그 설정은 죽은 설정입니다. **일곱 드라이버가 자신의 바이너리 안에 이 쌍
+검사를 가지고 있으며**(`ofgpu-fire` 41개, `ofgpu-buoyant` 21개, `ofgpu-vof` 18개,
+`ofgpu-k-epsilon` 18개, `ofgpu-plume`과 `ofgpu-k-omega` 각 11개, `ofgpu-sa` 8개 설정),
+드라이버 자신의 `parse` + `run`을 그대로 호출해 기록된 모든 필드 파일을
+비교합니다. 그 이후 추가된 모든 기능은 같은 검사를 자신의 **케이스 문서**에
+대해, 그것을 읽는 모듈 안에서 가집니다: 밀폐공간 사전은 §51.2, 데이터센터
+케이스는 §55.6(23개 설정), Spalart-Allmaras와 하이브리드는 §58.4, 켤레
+유체/고체 케이스는 §60.4, 그을음과 스펙트럼 모델은 §61.5 / §62.11입니다. 전체
+스위트에서 두 쌍만이 **반전된** 경우로, 달라야 하는 것이 아니라 동일해야
+합니다 — `spectralModel` 부재 대 `"gray"`, 그리고 `"gray"` 대 `"grayBanded"` —
+그 둘은 differ 목록 밖에 살며, 그 목록은 그들이 주장하는 것의 반대를
+단언하기 때문입니다.
+
+### 빗나가는 게이트
+
+`ofgpu-validate`가 실행하는 모든 항목은 통과합니다. 745 / 745는 그 뜻입니다.
+그것은 “이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다”는 진술과는
+다른 진술이며, 둘을 혼동해서는 안 됩니다. 아래는 **이 솔버가 재현하지 못하는
+발표된 측정값과의 비교**입니다. `ofgpu-validate`의 요약 줄이 매 실행 그 하나하나를
+이름으로 부르며, 바이너리 출력을 읽는 것만이 이를 알 수 있는 유일한 방법이 되지
+않도록 여기에 그대로 옮겨 적습니다.
+
+| 게이트 | 판정 |
+|---|---|
+| **SPEC-LIT §60.5 Gate 5 — Kaminski & Prakash (1986)**, 정사각 밀폐공간의 켤레 자연대류. **실측 실행.** | **전도 지배적인 쪽 끝에서 3 % 바를 빗나갑니다.** `Ra = 10⁴`에서의 실측 40² 실행은 `Kr = 0.1, 1, 10`에서 `-7.11 %`, `-2.77 %`, `-0.07 %`를 읽습니다 — 가장 작은 전도도비에서 최악이고 가장 큰 쪽에서는 사라집니다. §60.5의 메쉬 수렴 스윕(40²/60²/80² 열여덟 번의 실행, 60→80 변화량은 모두 0.38 % 미만)은 `Ra = 10⁴`에서 `-7.12 %`, `-3.00 %`, `-0.48 %`, `Ra = 10⁵`에서 `-7.79 %`, `-4.32 %`, `-0.81 %`로 둡니다. **1차 문헌의 표는 끝내 읽지 못했습니다** — 논문이 유료이며 ScienceDirect, Scholar, Semantic Scholar, OpenAlex, Unpaywall, CORE, arXiv과 두 기관 리포지토리를 모두 시도했습니다. 비교 대상은 같은 형상의 공개접근 논문인 Belazizia 등(2012)이며, 명세·케이스 파일·출력 모두에서 **2차 출처로 명시**됩니다. 불일치는 답의 얼마만큼이 전도인가에 비례합니다 — `Kr = 10`에서 고체는 직렬저항의 2 %, `Kr = 0.1`에서는 71 % — 그리고 2차 표 자신의 `Ra = 500` 열은 유체층 레일리수가 `O(100)`인 조건에서 해석적 전도 극한보다 3–7 % **높은데**, 이는 물리적으로 불가능합니다. Gate 59-B는 그 극한을 `1e-8`로 재현합니다. 즉 빗나가는 지점에서 기준값 자체가 오프셋을 가진 것으로 보입니다. **그쪽으로 튜닝한 것은 아무것도 없습니다** |
+| **SPEC-LIT §62.12 Gate 1-E — RADCAL에 대한 WSGG 전방사율**(Grosshandler, NIST TN 1402, 미국 공유재산. `reference/fds/Source/rcal.f90`을 `tools/radcal_emissivity/` 뒤에서 **무수정**으로 컴파일). **실측 실행.** | **108점 중 58점에서 ±10 % 바를 빗나갑니다.** 평균 `\|d eps/eps\|` **11.4353 %**, 최악 **30.5234 %**(`M_r = 2`, `T = 400 K`, `p_a L = 0.03 atm.m`). Bordbar 자신의 표를 구할 수 없었기 때문에 기준이 RADCAL입니다. **모양이 결과입니다**: 편향은 부호 변화가 정확히 한 번인 단조 사다리로, 400 K에서 `+20.84 %`, 이어 `+14.11 %`, `+6.64 %`, `-1.31 %`, `-7.46 %`, 2400 K에서 `-12.28 %`이며 Bordbar 자신의 `T_ref = 1200 K` 근처에서 영을 가로지릅니다. 이것은 Bordbar의 계수 집합이 틀렸다는 증거가 **아닙니다** — RADCAL은 NASA SP-3080 밴드 데이터에 기반한 협대모형이고 Bordbar는 line-by-line HITEMP-2010에 대한 피팅이며, 2400 K에서는 둘 다 외삽입니다. **어느 모형도 진실이 아니며 판정 줄이 그것을 말합니다.** 이것이 증명하는 것은 불일치가 흩어져 있는 것이 아니라 구조화되어 있다는 사실이며, 따라서 화재의 연기층과 화염이 계수 집합 선택이 답을 가장 크게 움직이는 두 장소라는 점입니다 |
+| **SPEC-LIT §61.8 Gate 61-A — 예측된 후염 그을음 수율**을 Tewarson의 측정값과 비교. 1,200스텝 화재이므로 **`ofgpu-validate` 안에서는 실행하지 않으며** 판정은 거기서 노트로 출력됩니다. | **완전히 빗나갑니다: 0.000 kg/kg 대 측정값 0.024(프로판).** 작은 빗나감이 아니고, 진단도 끝났습니다: `cases/burnerPlume.jsonc`에서 **32,768셀 중 0개**만이 모형 자신의 1375 K 형성 문턱값 위에 있으므로, 버너 메쉬가 모형을 점화시키기에 너무 차갑고 `laminarSmokePoint` 실행은 그을음이 아예 없는 경우와 비트 단위로 같습니다. §61.7은 코드가 쓰이기 전에 바로 이것을 예측했습니다. **모형은 배선되어 있고 메쉬가 차갑다는 것은 서로 다른 문장입니다**: 충분히 뜨거운 덕트에서 돌린 연기점 쌍 검사 다섯 행은 통과합니다. `prescribedYield` leg은 `0.024`에 `0.024`를 돌려주며, 답을 손에 쥐여준 것이므로 **그것을 출력하는 줄에서 항등식으로 불립니다** |
+| **SPEC-LIT §62.12 Gate 4 — NIST 37 cm 프로판 버너의 복사 분율**(Sung 등, NIST TN 2162r1, 2021: 20 / 34 / 50 kW에서 0.23 / 0.30 / 0.33). 열방출률마다 수 분이 걸리는 화재이므로 **`ofgpu-validate` 안에서는 실행하지 않으며** 판정은 거기서 노트로 출력됩니다. | **빗나갑니다.** `cases/nistBurner37cm.jsonc`는 복사 분율이 의미 있는 양이 되는 상태에 애초에 도달하지 못합니다: 연소 효율이 **226 %**로 나오는데, 이는 도메인이 들어오는 연료를 태우는 게 아니라 누적된 연료 재고를 소비하고 있다는 뜻이며, §62.12의 게이트 문구 자체가 이 모든 것이 돌기 전에 `~95 %` 효율을 전제로 명시했습니다. **같은 계열의 Gate 6은 아예 실행하지 않습니다** — Qu & Mudawar의 강제대류 마이크로채널 — 그리고 그것은 간과가 아니라 기능 공백입니다: §60.2의 유체 영역은 밀폐 공동이므로 비어 있지 않은 모든 패치가 점착벽이고 이름 붙일 유입구가 없습니다 |
+
+빗나가는 비교가 두 개 더 있으며, 빼놓지 않고 같은 어조로 기록합니다.
+
+**SPEC-LIT §42.8b**, NIST Reduced Scale Enclosure 구획 스윕은 빗나가며 48개의 재생
+측정값 안에 있습니다. 200 kW를 넘으면 예측된 천장 CO가 최대 20배까지 낮으며,
+ISFEH10이 이 실험에 대해 발표한 자체 통계는 편향인자 1.08입니다. 진단은 모형이
+아니라 실행 자체에서 나왔으며, 화학반응이 아니라 **환기**입니다 — 연소 효율이
+15–58 %라 연료 대부분이 미연소 상태로 구획을 빠져나가고, 출입구는 그 방의
+400 kW 화재가 빨아들일 공기의 대략 10분의 1만을 통과시킵니다. Steckler, Quintiere &
+Rinkinen (1982), 즉 출입구 유량 게이트가 이 빗나감이 지적하는 선행조건이며 아직
+실행되지 않았습니다.
+
+**SPEC-LIT §68.12 Gate 68-C**, Theobald의 약 90개 소방 수류 실험은 **기체를
+정지시킨 채로** 빗나갑니다 — 이 판정은 요약 줄이 아니라 실행 중 파셀 블록에
+출력됩니다. 평균적으로 측정 거리의 **61.29 %**만을 던지며, 바는 `±10 %` 편향과
+`30 %` 산포입니다. 그리고 옆의 숫자가 그 이유를 추측에 맡기지 않고 말해 줍니다:
+같은 발사에서 항력을 전혀 주지 않은 진공 괄호가 측정값의 **198.65 %**이므로,
+날아가는 거리의 61 %에서 199 % 사이가 **공기**가 하는 일로 결정되며, 공기를
+멈춰 두면 그것을 결정할 것이 남지 않습니다. 같은 90번의 발사를 균일 동방향
+기류 속에서 다시 돌리면 **약 6 m/s**의 유입 공기가 평균을 측정값의 2.3 % 이내로
+데려오고 산포를 0.359에서 0.271로 *좁힙니다* — 즉 정지공기에서의 산포는 서로
+독립적인 90개의 모델링 오차가 아니라 빠진 메커니즘 하나를 90번 본 것입니다.
+그 숫자를 가진 것이 통과보다 가치 있습니다.
 
 ### 수렴 차수 — 인위해법 (MMS)
 
@@ -558,16 +629,19 @@ CUDA 13의 CCCL 헤더가 MSVC 전통 전처리기에서 `fatal error C1189`를 
 
 | 실행 파일 | 용도 |
 |---|---|
-| `ofgpu-validate` | 수치 검증 (314개 항목) |
+| `ofgpu-validate` | 수치 검증 (745개 항목) |
 | `ofgpu-bench` | 처리량 및 메모리 벤치마크 |
 | `ofgpu-graph-bench` | CUDA Graph 대 개별 실행 비교 |
 | `ofgpu-dispatch-bench` | 실행시간 분기 비용 측정 |
 | `ofgpu-probe` | 장치 속성 조회 |
 | `ofgpu-generate-mesh` | 케이스 생성 |
 | `ofgpu-k-epsilon`, `ofgpu-k-omega` | 난류 모형 단독 실행 |
+| `ofgpu-sa` | Spalart-Allmaras와 DES97/DDES/IDDES 계열 단독 실행 (SPEC-LIT §56–58) |
 | `ofgpu-plume`, `ofgpu-buoyant` | 부력 플룸 |
 | `ofgpu-vof` | 2상 VOF |
-| `ofgpu-fire` | 저-마하 연소·복사 (SPEC-LIT §25–28) |
+| `ofgpu-fire` | 저-마하 연소·그을음·복사 (SPEC-LIT §25–28, §42/§43, §61–63) |
+| `ofgpu-cht` | 켤레 열전달 — 고체 영역, 접촉저항, 계면 건너편의 유체 (SPEC-LIT §46/§47/§59/§60) |
+| `ofgpu-datacentre` | 팬 성능곡선·다공성 점프·습공기와 랙 지표를 갖춘 실내 기류 (SPEC-LIT §52–55) |
 
 ---
 
@@ -581,6 +655,8 @@ cargo run --release --bin ofgpu-generate-mesh -- damBreak ..\cases\damBreak  60 
 cargo run --release --bin ofgpu-generate-mesh -- plume    ..\cases\plumeCol  60 40 30 -stl column=column.stl
 cargo run --release --bin ofgpu-vof           -- ..\cases\damBreak -endTime 0.25 -surge
 cargo run --release --bin ofgpu-fire          -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005
+cargo run --release --bin ofgpu-cht           -- ..\cases\dieStack.cht.jsonc
+cargo run --release --bin ofgpu-datacentre    -- ..\cases\coldAisle.dc.jsonc
 cargo run --release --bin ofgpu-validate
 ```
 
@@ -620,6 +696,10 @@ ASCII로 변환한 뒤 사용하십시오.
 | `docs/01-model-catalog.md` | CFD 구성요소 목록 (1,823항목) |
 | `docs/02-gpu-portability.md` | GPU 이식성 등급 분류 |
 | `docs/03-esi-vs-foundation.md` | 상류 배포판 간 모형 구성 차이 |
+| `docs/05-io-redesign.md` | 케이스 입출력 재설계 — JSONC 케이스 형식과 그 스키마 |
+| `docs/06-mesh-oss-2024.md` | 메쉬 관련 오픈소스 지형 조사 |
+| `docs/07-fire-solver.md` | `ofgpu-fire`의 정식화와 검증 게이트 — 벽 열전달 게이트의 전체 기록, 그을음·WSGG 게이트, 스펙트럼 복사의 실측 비용 |
+| `docs/schema/case-1.json` | JSONC 케이스 스키마. 리더가 쓰는 Rust 타입에서 `schemars`로 생성 |
 | `cases/README.md` | 시험 케이스 형상 설명 |
 
 ---
@@ -637,17 +717,73 @@ ASCII로 변환한 뒤 사용하십시오.
   사유를 오류로 보고합니다.
 - **압축성 및 천음속 해석을 지원하지 않습니다.** 밀도 가중 시간미분은 구현되어
   VOF에서 사용되나, 압력 방정식은 비압축성입니다.
-- ~~**연소는 혼합제어 단일 스텝(EDM)만 지원합니다.**~~ **부분 해결 (SPEC-LIT
-  §42/§43).** 직렬 2단계 혼합제어 스킴과 국소 소염 판정이 구현되어 CO·불완전
-  연소·소염을 예측합니다. 다만 **유한율(아레니우스) 화학반응 메커니즘은 여전히
-  없습니다** — Westbrook–Dryer도, Jones–Lindstedt도, 강직 ODE 적분기도 없습니다.
-  또한 §42는 분자량 `W̄`와 비열 `c_p`를 **일정하게** 유지하므로, CO2와 CO를
-  구분한 뒤에도 밀도와 팽창은 공기 값으로 계산됩니다. ~~**복사는 회색 P1 근사만 지원합니다.**~~ **해결됨 (SPEC-LIT §36).**
-  `fvDOM`(유한체적 이산종좌표법, 24개 level-symmetric S4 종좌표)이 구현되어
-  `radiationModel`로 선택됩니다 — 두 모델이 하나의 `EnergySources` 등록과 같은
-  `chi_r` 하한을 공유합니다. 다만 두 모델 모두 여전히 **회색**입니다: 스펙트럼
-  (WSGG) 밴드 모델은 없고, 흡수계수는 국소 그을음/CO2/H2O 농도에 따라 변하지
-  않습니다.
+- ~~**연소는 혼합제어 단일 스텝(EDM)만 지원합니다.**~~ **다시 서술합니다
+  (SPEC-LIT §42/§43).** 직렬 2단계 혼합제어 스킴과 FDS의 임계화염온도 소염 판정이
+  구현되어, CO·불완전 연소·소염 위치가 빠진 것이 아니라 예측됩니다. 여전히 없는
+  것은 **유한율(아레니우스) 메커니즘**입니다 — Westbrook–Dryer도, Jones–Lindstedt도,
+  경직 ODE 적분기도, 야코비안도 없습니다. 또한 §42는 분자량 `W̄`과 비열 `c_p`를
+  **일정하게** 유지하므로 CO2와 CO를 구분한 뒤에도 밀도와 팽창은 공기 값으로
+  계산되며, `dh1`의 정확한 분할은 읽지 않은 생성열 표를 필요로 합니다. 이 스킴을
+  위해 만들어진 구획 게이트(§42.8b, NIST Reduced Scale Enclosure 스윕)는 **빗나가며**,
+  진단은 화학반응이 아니라 환기입니다.
+- ~~**복사는 회색 P1 근사만 지원합니다.**~~ **해결됨 (SPEC-LIT §36, §61–§65).**
+  `fvDOM`(24개 level-symmetric S4 종좌표)은 `radiationModel`로 선택하고, **WSGG**(Bordbar,
+  Węcel & Hyppänen 2014 — 회색기체 네 개와 투명창 하나)는 `spectralModel`로 두 모델
+  모두에 대해 선택하며, `kappa_j`는 셀마다 밴드마다 국소 `X_H2O`·`X_CO2`·**그을음**(§61)에서
+  만들어집니다. §63의 `coldSurroundings`는 개방 도메인에 복사가 빠져나갈 곳을 줍니다.
+  켜기 전에 알아야 할 세 가지가 있습니다. **(a) 비싸며, 그 숫자는 실측값입니다**
+  (§65.7, `cases/burnerPlume.jsonc`, 32,768셀, 1,200스텝, RTX 5070 Ti, 두 번 실행):
+  WSGG는 P1에서 **4.12배**, fvDOM에서 **3.77배**를 쓰며, **fvDOM + WSGG는 회색 P1의
+  23.36배**입니다 — 527.06 / 536.42 s 대 22.93 / 22.60 s — 메모리는 332 MiB 대 172 MiB.
+  실측 저장은 fvDOM + WSGG에서 **셀당 +4,608 B**이므로 10⁶셀에는 §62.10이 산술로
+  예측했던 960 MB가 아니라 **9.3 GB**가 필요합니다. 16 GB 카드의 실질 한계는 약
+  1.6 × 10⁶셀이며, 그전에 시계가 먼저 도착합니다. **`updateInterval: 1`의 fvDOM + WSGG는
+  대략 3 × 10⁵셀을 넘으면 실용적이지 않으며**, `updateInterval: 4`가 복사 분율 0.12점을
+  대가로 그중 6.7배를 되돌려줍니다. **(b) 방사율 게이트가 빗나갑니다.** §62.12의
+  Gate 1-E는 RADCAL에 대해 **108점 중 58점**에서 ±10 % 바를 벗어나며, 평균 11.44 %,
+  최악 30.52 %이고 편향이 **온도에 대해 단조**입니다 — 400 K에서 `+20.84 %`, 2400 K에서
+  `-12.28 %`. Bordbar 자신의 표는 구할 수 없었고, 어느 모형도 진실이 아니며, 구조화된
+  모양은 계수 집합 선택이 화재의 연기층과 화염에서 답을 가장 크게 움직인다는 뜻입니다.
+  **(c) 그을음 수율 게이트는 완전히 빗나가며**, 배포된 버너에서 그 이유는 모형이
+  아니라 메쉬입니다: `laminarSmokePoint`은 프로판에 대해 Tewarson의 측정값 0.024에 맞서
+  **0.000 kg/kg**를 예측하는데, `cases/burnerPlume.jsonc`의 **32,768셀 중 0개**만이 모형
+  자신의 1375 K 형성 문턱값에 도달하기 때문이며, 따라서 그 실행은 그을음이 아예 없는
+  경우와 비트 단위로 같습니다. 모형을 점화시킬 만큼 뜨거운 덕트에서의 연기점 쌍
+  검사는 통과합니다.
+- **켤레 열전달의 발표된 게이트는 빗나가며, 1차 문헌은 끝내 읽지 못했습니다
+  (SPEC-LIT §60.5).** Kaminski & Prakash (1986)은 유료이며 공개본을 구하려고 아홉 경로를 시도했지만
+  — ScienceDirect, Scholar, Semantic Scholar, OpenAlex, Unpaywall, CORE, arXiv과
+  두 기관 리포지토리 — 어느 것도 되지 않았습니다. 그래서 비교는 같은 형상의 공개접근 논문인
+  Belazizia 등(2012)에 대해 이루어지며, 나타나는 모든 곳에서 2차 출처로 명시됩니다.
+  Gate 5는 전도 지배적인 쪽 끝에서 3 % 바를 빗나갑니다 — 실측 40² 실행에서
+  `Kr = 0.1`일 때 `-7.11 %`이고 `Kr = 10`에서 `-0.07 %`로 줄어들며, 메쉬 수렴 스윕에서는
+  `-7.12 / -3.00 / -0.48 %`입니다. 2차 표 자신의 `Ra = 500` 열은 물리적으로 불가능하게도
+  해석적 전도 극한보다 높으며, 이 솔버는 그 극한을 `1e-8`로 재현합니다. 기준값 쪽으로
+  튜닝한 것은 아무것도 없습니다.
+- **켤레 유체 영역은 밀폐 공동이므로 강제대류에 도달할 수 없습니다
+  (SPEC-LIT §60.2/§60.6).** `"kind": "fluid"` 영역에서 비어 있지 않은 모든 패치는
+  점착벽이므로 마이크로채널은 이름 붙일 유입구가 없고, §47.12의 Gate 6(Qu & Mudawar
+  2002)는 애초에 표현되지 않습니다. 이는 게이트를 조용히 빼놓은 것이 아니라 기능
+  공백이며, 그렇게 명시합니다.
+- **라그랑주 파셀은 증발하지 않고, 복사를 흡수하지 않으며, 스플래시하지 않습니다
+  (SPEC-LIT §68.13).** 세 가지 모두 빠진 것을 출력하면서 **이름을 밝혀** 거부되며,
+  그중 첫 번째가 가장 중요합니다: 증발하지 않는 스프링클러는 스프링클러가 아닙니다.
+  또한 없는 것: 기체에 돌려주는 부력·부가질량 반작용(항력 임펄스만 결합됩니다),
+  셀 경계를 넘는 동안의 분할 침적, 압력 방정식과의 결합(질량전달이 없으므로 받을 것이
+  없습니다), 결합 소스의 아격자 분산. 소방 수류 게이트(§68.12, Theobald 1981)는
+  **기체를 정지시킨 채로 빗나가며**, 측정값이 그 이유를 말합니다: 날아가는 거리의
+  61–199 %가 유입된 공기로 결정됩니다.
+- **면대면 복사와 라그랑주 파셀은 케이스 형식이 없는 라이브러리 기능입니다.**
+  둘 다 완전히 명세되고 게이트되고 쌍 검사까지 되어 있지만, **어느 드라이버
+  바이너리도 케이스 파일에서 밀폐공간이나 스프레이를 읽지 않습니다** — §13.4.2가
+  그것을 읽을 드라이버보다 먼저 블록을 추가하는 것을 금지하므로, JSONC 화재 블록의
+  `radiationModel viewFactor`는 이름을 밝혀 거부되고 `parcels` 블록은 아예 없습니다.
+  §50.12와 §68.13이 두 경계를 다음 단계로 기록합니다.
+- **DES 계열은 발표된 박리 유동 통계를 하나도 재현하지 않았으며, Spalart-Allmaras의
+  평판 게이트도 실행하지 않습니다.** §57.12와 §56.11이 가로막는 것을 이름으로 부릅니다 —
+  저소산 대류 혼합 스킴도, 시간평균 기능도, 합성난류 유입 생성기도, 곡선좌표 격자도
+  없고, TMR 케이스는 `M = 0.2`의 압축성입니다. 제공되는 것은 발표된 모형을 그 자신의
+  정의에 대해 검증한 올바른 구현이며, `ofgpu-validate`가 매 실행 그 구분을 출력합니다.
 - ~~다중 cyclic 쌍을 지원하지 않습니다.~~ **해결됨 (SPEC-LIT §34.2).**
   `BlockSpec::cyclic`이 이제 목록이고, JSONC 케이스의 `mesh.cyclic`도 축마다
   하나씩, 개수 제한 없이 받습니다 — 두 방향 모두 주기인 평면 채널, 세 방향
@@ -659,7 +795,10 @@ ASCII로 변환한 뒤 사용하십시오.
 ## 참고문헌
 
 수치 기법과 모형의 출처입니다. 절 번호는 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)
-기준입니다.
+기준입니다. 각 항목은 SPEC-LIT이 실제로 기록한 서지사항만을 담습니다. 제목·호수·면수가
+빠진 곳은 그곳에서도 그것 없이 인용되었기 때문이며, §0은 기억으로 보충하는 것을
+금지합니다. 읽지 **않은** 출처 — 유료, 접근 불가, 또는 의도적으로 열지 않은 것 — 는
+자기 줄에서 그렇다고 밝힙니다.
 
 ### 유한체적 이산화
 
@@ -761,6 +900,19 @@ ASCII로 변환한 뒤 사용하십시오.
 - Reynolds, W. C. (1987). *Fundamentals of turbulence for turbulence modeling
   and simulation.* AGARD Report No. 755. — §40 (the realizability
   constraints the variable `C_mu` is constructed to satisfy)
+- Lumley, J. L. (1978). *Advances in Applied Mechanics*, 18, 123–176. — §40
+  (realizability as a modelling principle)
+- Spalart, P. R., & Allmaras, S. R. (1992). *AIAA Paper 92-0439*; also
+  *La Recherche Aérospatiale*, 1 (1994), 5–21. — §56 (the original)
+- Allmaras, S. R., Johnson, F. T., & Spalart, P. R. (2012). Modifications and
+  clarifications for the implementation of the Spalart-Allmaras turbulence
+  model. *ICCFD7-1902.* A freely distributed conference paper — the copy
+  actually read, and the implementation reference. — §56
+- NASA / Turbulence Modeling Benchmarking Working Group. *Turbulence Modeling
+  Resource — The Spalart-Allmaras Turbulence Model.* US government-authored
+  DOCUMENTATION, not source; quoted here to the printed digit. — §56
+- Rumsey, C. L., & Spalart, P. R. (2009). *AIAA Journal*, 47, 982–993. — §56
+  (why the free-stream `nu~/nu` matters)
 
 ### 난류 모형 — LES
 
@@ -778,6 +930,46 @@ ASCII로 변환한 뒤 사용하십시오.
   Aeronautical Sciences*, 23(11), 1007–1011. — §16.4
 - Scotti, A., Meneveau, C., & Lilly, D. K. (1993). Generalized Smagorinsky model
   for anisotropic grids. *Physics of Fluids A*, 5(9), 2306–2308. — §16.3
+
+### 난류 모형 — 하이브리드 RANS-LES
+
+- Spalart, P. R., Jou, W.-H., Strelets, M., & Allmaras, S. R. (1997). Comments
+  on the feasibility of LES for wings, and on a hybrid RANS/LES approach. In
+  *Advances in DNS/LES*, Greyden Press, 137–147. — §57 (DES97)
+- Shur, M., Spalart, P. R., Strelets, M., & Travin, A. (1999). *Engineering
+  Turbulence Modelling and Experiments 4*, 669–678. — §57 (the
+  `C_DES = 0.65` calibration on the SA background)
+- Strelets, M. (2001). *AIAA Paper 2001-0879.* — §57 (SST-DES, the
+  `k`-equation dissipation form)
+- Spalart, P. R., Deck, S., Shur, M. L., Squires, K. D., Strelets, M. Kh., &
+  Travin, A. (2006). *Theoretical and Computational Fluid Dynamics*, 20,
+  181–195. — §57 (DDES, `r_d`, `f_d`, and the grid-induced separation they
+  fix)
+- Shur, M. L., Spalart, P. R., Strelets, M. Kh., & Travin, A. K. (2008).
+  *International Journal of Heat and Fluid Flow*, 29, 1638–1649 — IDDES.
+  **Paywalled and NOT read**, which is why §57's IDDES equations come from the
+  two open-access restatements below. — §57
+- Gritskevich, M. S., Garbaruk, A. V., Schütze, J., & Menter, F. R. (2012).
+  *Flow, Turbulence and Combustion*, 88, 431–449 — the SST-background
+  recalibration. **Paywalled and NOT read.** — §57
+- Herr, F., Radespiel, R., & Probst, A. (2023). Improved delayed detached eddy
+  simulation with Reynolds-stress background modeling. *arXiv:2301.07223v2*;
+  published in *Computers & Fluids*, 265, 106014. **Appendix A is a complete
+  restatement of the IDDES formulation**, and is where §57's IDDES equations
+  come from, equation by equation. — §57
+- Savino, A., Griffin, K., Lee, S., Vijayakumar, G., Wu, S., & Sprague, M.
+  (2026). Improving boundary-layer separation prediction by an IDDES turbulence
+  model using a pressure-gradient sensor. *arXiv:2603.08875.* Section 2 states
+  SST-IDDES, and is where `C_DES1 = 0.78`, `C_DES2 = 0.61`, `C_w = 0.15` and
+  the simplified filter width come from. — §57
+- Nikitin, N. V., Nicoud, F., Wasistho, B., Squires, K. D., & Spalart, P. R.
+  (2000). *Physics of Fluids*, 12, 1629–1632. — §57 (the log-layer mismatch
+  `f_e` exists to remove)
+- Spalart, P. R. (2009). *Annual Review of Fluid Mechanics*, 41, 181–202.
+  — §57 (the review)
+- Fröhlich, J., Mellen, C. P., Rodi, W., Temmerman, L., & Leschziner, M. A.
+  (2005). *Journal of Fluid Mechanics*, 526, 19–66. — §57.12 (the
+  periodic-hill gate, named and **NOT run**)
 
 ### 벽 처리
 
@@ -816,6 +1008,220 @@ ASCII로 변환한 뒤 사용하십시오.
   turbulence models. *International Journal of Heat and Mass Transfer*, 34(2),
   377–388. — §17
 
+### 켤레 열전달
+
+- Carslaw, H. S., & Jaeger, J. C. (1959). *Conduction of Heat in Solids*, 2nd
+  ed., Oxford University Press, ch. I. — §46 (the anisotropic solid, and the
+  affine transformation that reduces `div(K grad T)` to `lap T`)
+- Aavatsmark, I. (2002). An introduction to multipoint flux approximations for
+  quadrilateral grids. *Computational Geosciences*, 6, 405–432. — §46.4
+  (the rigorous full-tensor treatment, and therefore the reason a full tensor
+  on a skewed mesh is refused rather than approximated by its diagonal)
+- Lipnikov, K., Shashkov, M., Svyatskiy, D., & Vassilevski, Yu. (2007).
+  *Journal of Computational Physics*, 227, 492–512. — §46.4 (the nonlinear
+  monotone alternative, named in the same refusal)
+- Giles, M. B. (1997). *International Journal for Numerical Methods in Fluids*,
+  25, 421–436. — §47 (the Godunov–Ryabenkii normal-mode analysis behind the
+  classical "Dirichlet on the fluid, Neumann on the solid" rule)
+- Meng, F., Banks, J. W., Henshaw, W. D., & Schwendeman, D. W. (2017). A stable
+  and accurate partitioned algorithm for conjugate heat transfer. *Journal of
+  Computational Physics*, 344, 51–85. — §47.7 (**Theorem 1**, the
+  amplification factor `K_R/K_L` that is the reason Dirichlet–Neumann
+  partitioning is not implemented here)
+- Henshaw, W. D., & Chand, K. K. (2009). *Journal of Computational Physics*,
+  228, 3708–3741. — §47 (Robin coefficients can always be chosen so the
+  sub-time-step iteration converges)
+- Verstraete, T., & Scholl, S. (2016). *International Journal of Heat and Mass
+  Transfer*, 101, 852–869. — §47 (the numerical Biot number, and FFTB's
+  instability above `Bi = 1`)
+- Gander, M. J. (2006). Optimized Schwarz methods. *SIAM Journal on Numerical
+  Analysis*, 44, 699–731. — §47 (the physical series conductance)
+- de Vahl Davis, G. (1983). Natural convection of air in a square cavity: a
+  bench mark numerical solution. *International Journal for Numerical Methods in
+  Fluids*, 3, 249–264. — §59.8, the fluid-only anchor run first, because a
+  conjugate answer built on an unvalidated buoyant solver measures nothing. Its
+  four numbers are quoted here from Qi et al. (2013), *Nanoscale Research
+  Letters*, 8, 56, Table 3 (open access), the primary being paywalled.
+- Kaminski, D. A., & Prakash, C. (1986). *International Journal of Heat and
+  Mass Transfer*, 29(12), 1979–1988. **Paywalled; no open-access copy was
+  found and the primary table was never read**, so no title is asserted for it
+  here either. — §60.5
+- Belazizia, A., Benissaad, S., & Abboudi, S. (2012). Effect of wall
+  conductivity on conjugate natural convection in a square enclosure with finite
+  vertical wall thickness. *Advanced Theoretical and Applied Mechanics*, 5(4),
+  179–190. Open access; an independent published solution of the
+  Kaminski–Prakash configuration, itself validated against it. **The SECONDARY
+  source Gate 5 actually compares against.** — §60.5
+- Qu, W., & Mudawar, I. (2002). *International Journal of Heat and Mass
+  Transfer*, 45. — §47.12's Gate 6, **NOT run**: §60.2's fluid region is a
+  closed cavity, so a forced-convection micro-channel has no inlet to name.
+
+### 연소, 그을음, 복사
+
+- Magnussen, B. F., & Hjertager, B. H. (1977). *Proceedings of the Combustion
+  Institute*, 16, 719–729. — §27, §61.3
+- McGrattan, K., McDermott, R., & Floyd, J. E. (2022). A simple two-step reaction
+  scheme for soot and CO. *Proceedings of the Tenth International Seminar on Fire
+  and Explosion Hazards (ISFEH10)*, Oslo, 23–27 May 2022. A NIST work, US public
+  domain; fetched and read in full, and its Eqs. (1)–(5) are the model
+  implemented. — §42
+- McGrattan, K., Hostikka, S., McDermott, R., Floyd, J., Weinschenk, C., &
+  Overholt, K. *Fire Dynamics Simulator Technical Reference Guide*, NIST SP 1018
+  (NIST, US public domain; read locally from `reference/fds/Manuals/` — **no FDS
+  source code was read**). — §25, §42, §43, §66
+- Beyler, C. (2016). Flammability limits of premixed and diffusion flames. In
+  *SFPE Handbook of Fire Protection Engineering*, 5th ed. The
+  critical-flame-temperature and auto-ignition values, as quoted by two
+  independent NIST sources both read here. — §43
+- Morehart, J. H., Zukoski, E. E., & Kubota, T. (1991). NIST-GCR-90-585. — §43
+  (the self-extinction bracket, as quoted by the FDS Technical Reference Guide)
+- Lautenberger, C. W., de Ris, J. L., Dembsey, N. A., Barnett, J. R., & Baum,
+  H. R. (2005). A simplified model for soot formation and oxidation in CFD
+  simulation of non-premixed hydrocarbon flames. *Fire Safety Journal*, 40(2),
+  141–176. — §61 (the laminar-smoke-point model, and every constant in it)
+- Kent, J. H., & Honnery, D. (1990). *Combustion and Flame*, 79, 287. — §61
+  (the measured formation-rate map the smoke-point polynomials are shaped to)
+- Tewarson, A. *SFPE Handbook*, ch. 36, Table A.40, as quoted in the FDS
+  Validation Guide (NIST, public domain). — §61.8 (the measured post-flame
+  yield Gate 61-A misses)
+- Modest, M. F. (2013). *Radiative Heat Transfer*, 3rd ed., Academic Press,
+  ch. 5, 11, 15–17. — §28, §36, §50, §62, §65
+- Fiveland, W. A. (1984). Discrete-ordinates solutions of the radiative
+  transport equation for rectangular enclosures. *Journal of Heat Transfer*,
+  106, 699. — §36, §65
+- Truelove, J. S. (1987). Discrete-ordinate solutions of the radiation
+  transport equation. *Journal of Heat Transfer*, 109, 1048. — §36, §65
+- Hottel, H. C., & Sarofim, A. F. (1967). *Radiative Transfer*, McGraw-Hill.
+  — §50 (the net-radiation exchange method), §62 (the weighted-sum
+  construction itself)
+- Bordbar, M. H., Węcel, G., & Hyppänen, T. (2014). A line by line based
+  weighted sum of gray gases model for inhomogeneous CO2–H2O mixture in
+  oxy-fired combustion. *Combustion and Flame*, 161(9), 2435–2445. — §62 (the
+  coefficient set implemented). Its own tabulated emissivities could not be
+  obtained, which is why Gate 1-E measures against RADCAL instead.
+- Grosshandler, W. (1993). *RADCAL: A Narrow-Band Model for Radiation
+  Calculations in a Combustion Environment*, NIST Technical Note 1402. US
+  public domain; NIST's own implementation ships at `reference/fds/Source/rcal.f90` and
+  `tools/radcal_emissivity/` compiles it **unmodified** behind a standalone
+  driver. — §62.12 (the reference Gate 1-E measures the total emissivity
+  against)
+- Sung, Chen, Bundy, Fernandez & Hamins (2021). NIST Technical Note 2162r1 —
+  the 37 cm gas burner's measured radiative fractions, 0.23 / 0.30 / 0.33 at
+  20 / 34 / 50 kW. — §62.13 (Gate 4, which **misses**)
+- Steckler, Quintiere & Rinkinen (1982) — the compartment doorway-flow
+  measurements. Named in SPEC-LIT §42.8b as the prerequisite the Reduced Scale
+  Enclosure miss points to, and **NOT run**; the paper itself has not been read
+  here, so no report number or title is asserted for it.
+- Walton, G. N. (2002). *Calculation of Obstructed View Factors by Adaptive
+  Integration.* NISTIR 6925, National Institute of Standards and Technology. US
+  Government, public domain. — §49 (the area integral and its dot-product form,
+  the obstruction-elimination tests, the row-sum figure of merit, and the
+  `BB104` benchmark)
+- Shapiro, A. B. (1983). *FACET — A Radiation View Factor Computer Code for
+  Axisymmetric, 2D Planar and 3D Geometries with Shadowing.* UCID-19887, Lawrence
+  Livermore National Laboratory. US DOE, public domain. — §49.8 (the shadowed
+  configuration `F_12 = 0.115621`)
+- Howell, J. R. *A Catalog of Radiation Heat Transfer Configuration Factors*,
+  3rd ed. Entries **C-11** and **C-14**, both tracing to Hottel (1931) and
+  Hamilton & Morgan (1952). — §49.8 (the two analytic view-factor gates)
+- Gebhart, B. (1961). *International Journal of Heat and Mass Transfer*, 3(4),
+  341–346. — §50.2, the absorption-factor alternative, **named and not used**
+- Balaji & Venkateshan (1993, 1994); Akiyama & Chong (1997) — the coupled
+  convection-plus-surface-radiation cavity gate. — §50.12, **NOT run**: the
+  tabulated `Nu_conv`/`Nu_rad` are paywalled and the fluid side has no case
+  format for a radiating enclosure.
+
+### 유변학과 접촉각
+
+- Ostwald, W. (1925). *Kolloid-Zeitschrift*, 36, 99–117; de Waele, A. (1923).
+  — §38 (the power law)
+- Cross, M. M. (1965). *Journal of Colloid Science*, 20, 417–437. — §38
+- Carreau, P. J. (1972). *Transactions of the Society of Rheology*, 16,
+  99–127; Yasuda, K., Armstrong, R. C., & Cohen, R. E. (1981). *Rheologica
+  Acta*, 20, 163–178. — §38 (one formula serves both)
+- Herschel, W. H., & Bulkley, R. (1926). *Kolloid-Zeitschrift*, 39, 291–300.
+  — §38
+- Casson, N. (1959). In Mill, C. C. (ed.), *Rheology of Disperse Systems*,
+  Pergamon, 84–104. — §38
+- Papanastasiou, T. C. (1987). *Journal of Rheology*, 31, 385–404. — §38.3
+  (the regularisation, in the **product** form)
+- Bercovier, M., & Engelman, M. (1980). *Journal of Computational Physics*, 36,
+  313–326. — §38.3 (the alternative regularisation)
+- Frigaard, I. A., & Nouar, C. (2005). *Journal of Non-Newtonian Fluid
+  Mechanics*, 127, 1–26. — §38.3 (what regularisation costs)
+- Bird, R. B., Armstrong, R. C., & Hassager, O. (1987). *Dynamics of Polymeric
+  Liquids*, vol. 1, 2nd ed., Wiley. — §38 (the family)
+- Chhabra, R. P., & Richardson, J. F. (2008). *Non-Newtonian Flow and Applied
+  Rheology*, 2nd ed. — §38.9 (Buckingham–Reiner)
+- Young, T. (1805). *Philosophical Transactions of the Royal Society*, 95,
+  65–87. — §39 (the equilibrium angle)
+- Huh, C., & Scriven, L. E. (1971). *Journal of Colloid and Interface Science*,
+  35, 85–101. — §39 (the moving contact-line singularity)
+- Voinov, O. V. (1976). *Fluid Dynamics*, 11, 714–721; Cox, R. G. (1986).
+  *Journal of Fluid Mechanics*, 168, 169–194. — §39.4 (the asymptotic matching)
+- Hoffman, R. L. (1975). *Journal of Colloid and Interface Science*, 50,
+  228–241. — §39.4 (the master curve)
+- Jiang, T.-S., Oh, S.-G., & Slattery, J. C. (1979). *Journal of Colloid and
+  Interface Science*, 69, 74–77. — §39.4 (the explicit correlation used
+  here; Kistler's fit is **deliberately absent**, its four constants coming from
+  a book chapter this project has not read)
+- Afkhami, S., Zaleski, S., & Bussmann, M. (2009). *Journal of Computational
+  Physics*, 228, 5370–5389 — the mesh-dependent (numerical-slip) angle.
+  — §39.8, **named and deliberately not implemented** until the gate that would
+  show it works exists
+- Sui, Y., Ding, H., & Spelt, P. D. M. (2014). *Annual Review of Fluid
+  Mechanics*, 46, 97–119. — §39 (the review)
+- Washburn, E. W. (1921). *Physical Review*, 17, 273–283. — §39.7 (capillary
+  rise)
+
+### 라그랑주 입자
+
+- Dukowicz, J. K. (1980). A particle-fluid numerical model for liquid sprays.
+  *Journal of Computational Physics*, 35, 229–253. — §66 (the discrete
+  droplet model: the parcel, and the real-valued weight `n_p`)
+- Crowe, C. T., Sharma, M. P., & Stock, D. E. (1977). The
+  particle-source-in-cell (PSI-CELL) model for gas-droplet flows. *Journal of
+  Fluids Engineering*, 99, 325. — §67, §68 (the per-cell sum every coupled
+  source is)
+- Crowe, C., Sommerfeld, M., & Tsuji, Y. (1998). *Multiphase Flows with Droplets
+  and Particles*, CRC Press. — §66.2 (the equation of motion, and which of its
+  terms survive)
+- Maxey, M. R., & Riley, J. J. (1983). *Physics of Fluids*, 26, 883. — §66,
+  §68 (the equation of motion: the added-mass coefficient, and the drag term
+  §68 returns to the gas)
+- Schiller, L., & Naumann, A. (1933). *Zeitschrift des Vereines Deutscher
+  Ingenieure*, 77, 318, in the form compiled by Clift, R., Grace, J. R., &
+  Weber, M. E. (1978). *Bubbles, Drops, and Particles*, Academic Press. — §66.3
+  (the drag correlation)
+- Macpherson, G. B., Nordin, N., & Weller, H. G. (2009). *Communications in
+  Numerical Methods in Engineering*, 25, 263. — §66.6, barycentric tracking:
+  the **paper** was read and it is **not implemented** — the one case the
+  face-crossing walk cannot do. Its OpenFOAM implementation is GPL-3.0 and was
+  **not** opened
+- Elghobashi, S. (1994). On predicting particle-laden turbulent flows. *Applied
+  Scientific Research*, 52, 309. — §67, §68 (the coupling map: at which
+  `alpha_p` two-way coupling begins to matter, and where collisions do)
+- Satish, N., Harris, M., & Garland, M. (2009). Designing efficient sorting
+  algorithms for manycore GPUs. *IEEE IPDPS 2009.* The **paper** was read; no
+  implementation of it was opened. — §67.4 (the three-phase radix pass)
+- Merrill, D., & Grimshaw, A. *Parallel scan for stream architectures.*
+  University of Virginia Technical Report CS2009-14. — §67.2
+- Blelloch, G. E. (1990). *Prefix sums and their applications.* CMU-CS-90-190.
+  — §67.2 (the exclusive scan and its work-efficiency argument)
+- Hillis, W. D., & Steele, G. L., Jr. (1986). *Communications of the ACM*,
+  29(12), 1170. — §67.2 (the in-block scan network, chosen for a property that
+  is not speed)
+- Steele, G. L., Jr., Lea, D., & Flood, C. H. (2014). Fast splittable
+  pseudorandom number generators. *OOPSLA 2014*, ACM SIGPLAN Notices, 49(10),
+  453. — §66.9 (the SplitMix64 finalising mix, used as a **bijection** and not
+  as a generator)
+- Ranz, W. E., & Marshall, W. R. (1952). Evaporation from drops. *Chemical
+  Engineering Progress*, 48, 141 and 173. — §68.5 (the sensible-heat half of
+  `Nu = 2 + 0.6 Re^(1/2) Pr^(1/3)`; the evaporative half is **refused by name**)
+- Theobald, R. C. (1981). The effect of nozzle design on the stability and
+  performance of turbulent water jets. *Fire Safety Journal*, 4, 1–13.
+  — §68.12, Gate 68-C, which **misses with the gas held at rest**
+
 ### 다상 유동
 
 - Hirt, C. W., & Nichols, B. D. (1981). Volume of fluid (VOF) method for the
@@ -851,7 +1257,66 @@ ASCII로 변환한 뒤 사용하십시오.
 ### 다공성 매질
 
 - Ward, J. C. (1964). Turbulent flow in porous media. *Journal of the Hydraulics
-  Division, ASCE*, 90(5), 1–12. — §18
+  Division, ASCE*, 90(5), 1–12. — §18, §53 (the same law integrated through a
+  slab instead of over a cell)
+- Idelchik, I. E. (2007). *Handbook of Hydraulic Resistance*, 4th ed., Begell
+  House, Diagrams 8-1 to 8-6 — perforated plates and screens, the source of
+  `K(sigma)`. **Not opened for §53**; the thin-plate form used is the one
+  published in the open literature, and §53.7 gates it against its own limits.
+  — §53
+- Karki, K. C., Radmehr, A., & Patankar, S. V. (2003). Use of computational fluid
+  dynamics for calculating flow rates through perforated tiles in raised-floor
+  data centers. *HVAC&R Research*, 9(2), 153–166. — §53.8 (the per-tile
+  flow-rate gate, **NOT run** — the paper was not reachable from this
+  environment)
+- Karki, K. C., & Patankar, S. V. (2006). Airflow distribution through perforated
+  tiles in raised-floor data centers. *Building and Environment*, 41(6),
+  734–744. — §53
+
+### 환기, 습공기, 데이터센터 지표
+
+- AMCA 210 / ASHRAE 51, *Laboratory Methods of Testing Fans for Certified
+  Aerodynamic Performance Rating.* — §52 (what a manufacturer's curve **is**,
+  and therefore why §52.5 carries a density and a speed correction rather than
+  treating the table as absolute)
+- NIST, *Fire Dynamics Simulator* verification suite, `Verification/HVAC/
+  fan_test.fds` and `qfan_test.fds` with their published `.csv` reference values
+  — US Government public domain. **The input files and their published results
+  only**; no FDS source was read for the fan model. — §52.12 Gate 52-B
+- Buzbee, B. L., Dorr, F. W., George, J. A., & Golub, G. H. (1971). The direct
+  solution of the discrete Poisson equation on irregular regions. *SIAM Journal
+  on Numerical Analysis*, 8(4), 722–736. — §52.9 (the capacitance-matrix path,
+  **named and refused**)
+- ASHRAE (2021). *ASHRAE Handbook—Fundamentals*, Chapter 1, "Psychrometrics."
+  — §54.2 (whose equation numbering is used), §54.8 (Table 2, the external
+  comparison)
+- Hyland, R. W., & Wexler, A. (1983). Formulations for the thermodynamic
+  properties of the saturated phases of H2O from 173.15 K to 473.15 K. *ASHRAE
+  Transactions*, 89(2A), 500–519. — §54.2 (the `C1`–`C13` coefficients)
+- Herrmann, S., Kretzschmar, H.-J., & Gatley, D. P. (2009). Thermodynamic
+  properties of real moist air, dry air, steam, water, and ice (RP-1485).
+  *HVAC&R Research*, 15(5), 961–986. — §54.3, **named and not implemented**;
+  the enhancement factor it carries is what makes the ideal relations 0.44 % low
+  in `W_s` at 25 °C, which §54.8 prints rather than tolerates
+- Gatley, D. P., Herrmann, S., & Kretzschmar, H.-J. (2008). A twenty-first
+  century molar mass for dry air. *HVAC&R Research*, 14(5), 655–662. — §54
+  (where `M_a = 28.966 g/mol`, and hence `eps = 0.621945`, come from)
+- Herrlin, M. K. (2005). Rack cooling effectiveness in data centers and telecom
+  central offices: the Rack Cooling Index (RCI). *ASHRAE Transactions*, 111(2),
+  725–731. — §55.1
+- Herrlin, M. K. (2008). Airflow and cooling performance of data centers: two
+  performance metrics. *ASHRAE Transactions*, 114(2), 182–187. — §55.2 (RTI)
+- Sharma, R. K., Bash, C. E., & Patel, C. D. (2002). Dimensionless parameters for
+  evaluation of thermal design and performance of large-scale data centers.
+  *AIAA 2002-3091.* — §55.3 (SHI and RHI)
+- ASHRAE Technical Committee 9.9 (2021). *Thermal Guidelines for Data Processing
+  Environments*, 5th ed. — §55.1 (the Class A1–A4 recommended and allowable
+  envelopes RCI is measured against)
+- Wibron, E., Ljung, A.-L., & Lundström, T. S. (2019). *Energies*, 12(8), 1473. **CC-BY-4.0, licence verified live through the
+  Crossref REST API**, but the full text was not reachable from this environment,
+  so §55.8's six-configuration ranking gate is **NOT run** and only the one
+  relation the abstract states is gated. — §55.8
+
 
 ### 검증 데이터
 

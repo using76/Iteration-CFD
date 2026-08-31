@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 905 unit tests across all targets (814 in the lib), 314 `ofgpu-validate` checks |
+| Validation | 1,561 unit tests across all targets (1,423 in the lib), 745 `ofgpu-validate` checks |
 
 ---
 
@@ -99,14 +99,16 @@ applied on faces rather than interpolated from cell values.
 | | |
 |---|---|
 | RANS | Standard k-ε, Wilcox k-ω, Menter k-ω SST, Launder-Sharma low-Re k-ε (SPEC-LIT §33 — the only model `wallTreatment lowRe` is valid under; its damping functions integrate through the viscous sublayer, checked against the analytic `Re_t` limits and against a live channel's own `u+`/`y+` law of the wall), **realizable k-ε** (Shih et al., SPEC-LIT §40 — `C_mu` a field, so the Boussinesq normal stress cannot go negative; gated on that directly rather than on a channel, and on the homogeneous-shear fixed point its own coefficients imply) and **RNG k-ε** (Yakhot & Orszag, SPEC-LIT §41 — the `R` term absorbed into a per-cell `C_e2*`, diffusivities `α(ν + ν_t)` rather than `ν + ν_t/σ`) |
+| Spalart-Allmaras (SPEC-LIT §56) | **One transport equation**, for a working variable `nu~` that is not the eddy viscosity — the cheapest closure in this tree, one linear solve per outer iteration where k-ε needs two. Read from Allmaras, Johnson & Spalart's ICCFD7-1902 implementation paper, with `noft2`/`ft2` and Allmaras' **negative continuation** (`noft2-neg`/`ft2-neg`) selectable by `variant`. Its wall condition is exact and needs **no new `BcKind`**: `nu~ = 0` at a no-slip wall is a plain Dirichlet condition with no `y+`-dependent blending. Verified against the model's own published definition rather than a drag coefficient, because a flat-plate `C_d` can be right for the wrong reason: §56.4's log-layer identity is an *exact* property of the model and holds to round-off, `r = g = f_w = 1` there exactly, the closed-form bound on `c_n1` is derived here and checked, the SA-neg passivity identity is bitwise, and NASA's Turbulence Modeling Resource `nu_t/nu = 0.210438` and `1.294234` at the two ends of the recommended far-field range are reproduced to the printed digit. **The TMR flat-plate `C_d` gate is NOT run** and §56.11 says why — the case is compressible at `M = 0.2`, its grid family is curvilinear CGNS/Plot3D where `blockgen` builds axis-aligned blocks, and the tabulated values live in data files rather than on the page. Nothing here claims SA predicts separation, transition or a pressure-gradient boundary layer correctly. Reached by `ofgpu-sa` |
 | LES | Smagorinsky, WALE, Deardorff |
 | LES filter widths | Cube root of volume, maximum edge length, Scotti anisotropy correction, van Driest damping |
 | LES wall model | Werner–Wengle (1991) — an analytically invertible power law integrated over the first cell's wall-parallel average speed, no Newton iteration; the `standard`/`spalding` presets both collapse to this one model under LES, `lowRe` gives `nu_t,w = 0`, and `rough` is refused by name (§13.4) since no rough LES wall model exists yet |
+| Hybrid RANS-LES (SPEC-LIT §57) | **DES97, DDES and IDDES**, on the Spalart-Allmaras background and on k-ω SST. The shielding is **bitwise**, and derived here rather than argued: in an equilibrium log layer `r_d >= 1`, f64 `tanh` saturates to exactly `1.0` past `19.0615475`, which `(8 r_d)^3` clears for every `r_d > 0.33391`, so `f_d == 0.0` exactly and `dtil` returns `d` bit for bit — which is also why the SST background reproduces itself bitwise and the default is unmoved BY CONSTRUCTION. Grid-induced separation, the defect DDES exists to fix, is reproduced **live on two meshes differing only in streamwise cell count**: DES97 puts 2,048 of 5,632 attached cells into LES mode with a destruction amplification of 5.66, while DDES and IDDES leave `dtil == d` bitwise. IDDES's `h_wn` is the wall-normal cell height the crate did not have; `\|grad y\| = 1` holds to `3.2e-3` within five wall-adjacent cell heights and to only `0.495` over the whole block, but (57.19) normalises, so only the direction is load-bearing and that is exact to `2.0e-13` — the claim is recorded in the form the measurement supports. **Not claimed: that this solver reproduces a published separated-flow statistic.** There is no low-dissipation convection blending, no time-averaging seam and no synthetic-turbulence inlet, so the periodic hill is not run and IDDES's WMLES branch is exercised as closed forms and a length-scale field rather than as a simulation (§57.12). `ofgpu-validate` prints that distinction on every run |
 | Wall functions | nutk, nutU (inverse Spalding law), nutLowRe, rough walls (Cebeci–Bradshaw), epsilon, omega, kqR, kLowRe |
 | Turbulence selection in the coupled solvers (`ofgpu-buoyant`, `ofgpu-fire`) | `ofgpu-buoyant`: the `CoupledTurbulence` trait dispatches on the case's own `RAS { model ...; }`/`simulationType`, exactly as the standalone drivers do — k-ε, k-ω, k-ω SST (wall distance computed automatically) and LES (Smagorinsky/WALE/Deardorff, with §16's filter widths and van Driest damping) all construct the ACTUAL model asked for, and buoyancy production `G_b` is wired into the right equation for each (§17, §30.2). `ofgpu-fire`: still k-ε only — its combustion mixing-time closure and thermal wall function need `epsilon` directly, so any other model is refused by name, a §13.4 error, not a silent substitution |
 | Wall-model presets (`wallTreatment`) | `standard`/`spalding`/`rough`/`lowRe` — one setting expands to a CONSISTENT row of per-field patch types (nut/k/epsilon/omega, and T when the energy equation is solved) at case-build time; a hand-mixed row across families is refused by name, `-permissive` substitutes the row implied by the `nut` choice (SPEC-LIT §29.1). `lowRe` additionally requires a turbulence model with near-wall validity — `LaunderSharmaKE` (SPEC-LIT §33) is the one model on that menu, `kEpsilon`/`kOmega`/`kOmegaSST`/`realizableKE`/`RNGkEpsilon` still are not, so `lowRe` under any of the latter three is refused by name rather than left to diverge (SPEC-LIT §32) |
 | Thermal wall function | Jayatilleke's sublayer-resistance correction to the thermal log law (`thermalWallFunction`, alias `compressible::alphatJayatillekeWallFunction`) — every preset row applies it to `T` on walls except `lowRe`, which leaves the resolved sublayer's own molecular resistance alone (SPEC-LIT §29.3); wired into `ofgpu-fire`'s energy equation. Validated against Dittus-Boelter/Gnielinski on a fixed-heat-flux periodic PLANE CHANNEL (SPEC-LIT §32/§34): the **wall-function leg CLOSES** — Gnielinski at Petukhov's smooth-pipe `f` −5.9% (±10%), Dittus-Boelter −12.9% (±20–25%) — and the **resolved `lowRe` leg does NOT** (+11.9% Gnielinski, +4.0% Dittus-Boelter). At each leg's own MEASURED wall friction factor the Reynolds-analogy verdict closes on neither (+34.3%, +14.9%). Numbers are the record at the SHIPPED DEFAULT `PrtModel constant`, rerun after SPEC-LIT §26.1. Selecting SPEC-LIT §37's Kays-Crawford variable `Pr_t` (opt-in, one token, nothing tuned) moves the resolved leg from +11.9% to **+4.3%** and closes the absolute-prediction verdict on BOTH legs, while moving the wall-function control only −0.06% of `Nu`; the Reynolds-analogy verdict on the wall-function leg is untouched at +34.0%, being a friction finding rather than a thermal one. **SPEC-LIT §26.1 closed the energy imbalance this gate carried as an uncertainty on every one of those numbers**: §25.1's divergence constraint was implemented without its conduction term `div(k_eff grad T)`, so the resolved leg's steady bookkeeping was short by +3.11% (+3.35% under Kays-Crawford); it is now +0.000089%, and the resolved leg's Kays-Crawford pass no longer needs an error bar quoted beside it. Full account, including what it does NOT establish, in `docs/07-fire-solver.md` §1.1 |
-| Conjugate heat transfer (SPEC-LIT §46/§47) | **Solid regions, contact resistance and the fluid/solid interface.** The interface is a Robin triple on BOTH sides with the series conductance `h_G = (1/C_A + R_c + 1/C_B)^-1` (§47.2): flux continuity AND the contact-resistance jump hold **exactly at every iterate**, not at convergence, because ONE kernel writes both sides from one `h_G` and one `|Sf|`. It needs **no new matrix code** — `lduAmul` and `lduAddBoundaryContributions` key on `bNbrCell >= 0`, not on "cyclic", so a conformal interface in a concatenated fluid+solid cell numbering is already solved implicitly; a conjugate interface IS a cyclic couple with a zero transform (§47.3/§47.4). Two CUDA lines and one new kernel pair were all it took. Solid side: `(rho_s c_s) dT/dt = div(K_s grad T) + q'''`, Patankar's **harmonic** multi-material face conductivity, and mesh-axis-diagonal anisotropic `K` (§46) — a full tensor on a skewed mesh is **refused by name** with the measured residual, MPFA and the two ways out, never approximated by its diagonal. Dirichlet-Neumann partitioning is **never implemented**: Meng et al. (2017) Theorem 1 gives its amplification as `K_R/K_L`, which fails exactly at air/plastic. Gates, all live: the two-layer slab `q = dT/(L1/k1 + Rc + L2/k2)` to `4e-14` after ONE assembly and ONE solve; flux continuity on the FIRST unconverged iterate to `1.8e-16`; conservation `2.0e-16`; `k_solid -> 0` contributes **bitwise nothing** (= `fixedFluxTemperature`, `q = 0`) and `k_solid -> infinity` reproduces the `fixedValue`/`thermalWallFunction` wall; the two half-spaces' interface sits at the effusivity-weighted mean and is constant in time to `1.1e-11` of `dT`. Reached from a case file by `ofgpu-cht` — `cases/dieStack.cht.jsonc`, a 100 W die through three contact resistances to a cold plate, junction temperature **649.7118 K** against its own closed form |
+| Conjugate heat transfer (SPEC-LIT §46/§47/§59/§60) | **Solid regions, contact resistance, the fluid/solid interface, and the fluid on the far side of it.** The interface is a Robin triple on BOTH sides with the series conductance `h_G = (1/C_A + R_c + 1/C_B)^-1` (§47.2): flux continuity AND the contact-resistance jump hold **exactly at every iterate**, not at convergence, because ONE kernel writes both sides from one `h_G` and one `\|Sf\|`. It needs **no new matrix code** — `lduAmul` and `lduAddBoundaryContributions` key on `bNbrCell >= 0`, not on "cyclic", so a conformal interface in a concatenated fluid+solid cell numbering is already solved implicitly; a conjugate interface IS a cyclic couple with a zero transform (§47.3/§47.4). Two CUDA lines and one new kernel pair were all it took. Solid side: `(rho_s c_s) dT/dt = div(K_s grad T) + q'''`, Patankar's **harmonic** multi-material face conductivity, and mesh-axis-diagonal anisotropic `K` (§46) — a full tensor on a skewed mesh is **refused by name** with the measured residual, MPFA and the two ways out, never approximated by its diagonal. Dirichlet-Neumann partitioning is **never implemented**: Meng et al. (2017) Theorem 1 gives its amplification as `K_R/K_L`, which fails exactly at air/plastic. Gates, all live: the two-layer slab `q = dT/(L1/k1 + Rc + L2/k2)` to `4e-14` after ONE assembly and ONE solve; flux continuity on the FIRST unconverged iterate to `1.8e-16`; conservation `2.0e-16`; `k_solid -> 0` contributes **bitwise nothing** (= `fixedFluxTemperature`, `q = 0`) and `k_solid -> infinity` reproduces the `fixedValue`/`thermalWallFunction` wall; the two half-spaces' interface sits at the effusivity-weighted mean and is constant in time to `1.1e-11` of `dT`. Reached from a case file by `ofgpu-cht` — `cases/dieStack.cht.jsonc`, a 100 W die through three contact resistances to a cold plate, junction temperature **649.7118 K** against its own closed form. **The fluid side (SPEC-LIT §59/§60).** `Energy` now runs over the concatenated fluid+solid thermal mesh, opt-in through `attach_conjugate`: the retarget is four elementwise blends plus §47.2's interface kernel, and the diff on `energy.rs` REMOVES exactly four lines, each the last statement of a function turned into a guarded call. The convective term vanishes in the solid **exactly**, because `Energy` masks `phi_conv` itself rather than trusting the driver — and it needs TWO masks, not one, because the conductance blend keeps a fluid interface face whose `C_A` IS `k_eff Δ` while the convective mask drops it. The default is proved **bitwise identical** on a full five-iteration run — fields, `T_b` and all six matrix arrays, not one coefficient — and `ofgpu-validate` re-runs that comparison live. Gates that pass, all live: de Vahl Davis (1983) at **+0.06 / +0.34 / +0.59 %** on 40²/60²/80², the two walls carrying the same heat to `1.1e-7`; the analytic conduction limit at `Kr = 0.1, 1, 10` to `2.5e-9`, `4.4e-8` and `7.1e-8`; interface conservation `1.5e-16`. **Its published gate — Kaminski & Prakash (1986) — runs live and MISSES**; see “Gates that miss” below. Reached by `ofgpu-cht` — `cases/kaminskiPrakash.cht.jsonc` |
 | Wall distance | Poisson method (Tucker 1998) |
 | Buoyancy production | G_b term (Rodi 1987, Henkes et al. 1991) |
 
@@ -118,7 +120,9 @@ applied on faces rather than interpolated from cell values.
 | Scalar transport | Temperature, multi-component species (sum-to-one enforced) |
 | Source terms | Volumetric heat release, momentum sources, Darcy–Forchheimer porous drag |
 | Buoyancy | Non-Boussinesq density ratio `b = g(T_ref/T − 1)` |
-| Lagrangian parcels (SPEC-LIT §66) | SoA pool, exponential drag update (Schiller–Naumann), face-crossing walk over the cell→face CSR, deterministic injection. **One-way coupled and inert**: parcels feel the gas, the gas does not feel them, and evaporation is refused by name |
+| Generalised-Newtonian viscosity (SPEC-LIT §38) | `nu` becomes a **field**: power law, Cross, Bird-Carreau (`a = 2`) and Carreau-Yasuda (general `a`) from one formula, Herschel-Bulkley and Casson. The strain-rate invariant `gdot = sqrt(2 D:D)` is the `turbStrainRateMag` §6 already computed and nothing ever called; this is its first caller, and the whole chain stays gather-shaped and atomic-free. The two yield-stress models are Papanastasiou-regularised in the **product** form, the one that stays bounded for `n < 1` as well. Plane Poiseuille converges at order **2.08 / 2.03 / 2.00 / 1.97** against a closed form the spec derives; the Newtonian reduction is `4.5e-14` and every model's own reduction is constant in `gdot` to round-off; Buckingham-Reiner's `1, -4/3, +1/3` bracket is verified against the numerical integral of the profile it is the closed form of (`9.4e-11`) rather than quoted. Selected by `physics.fluid.rheology.model` (JSONC) or `viscosityModel` (`constant/physicalProperties`); an unrecognised name errors listing all six, and a coefficient the named model does not use errors naming it. **The drivers that hold `U` frozen refuse a non-Newtonian model by name** — `blockgen` had written `viscosityModel constant;` into every generated case since that generator existed and nothing ever read it, the sixth instance of that contract defect, and reading it without the refusal would have created the seventh while fixing the sixth |
+| Contact angle (SPEC-LIT §39) | Static, hysteresis and dynamic on the VOF wall, replacing §20's `nHatf = 0` — which was already a contact angle, of ninety degrees, chosen because it adds no unstated physics. Jiang-Oh-Slattery and Cox-Voinov for the dynamic angle; **Kistler is deliberately absent**, its four constants coming from a book chapter this project has not read. `theta = 90` is bit-identical to no model and `theta = 45` is not, so neither test is vacuous, and the `cos(pi/2) != 0` trap is guarded twice with the test **measuring** the premise (`6.12e-17`) rather than asserting it. Gated on the geometry (`bNHatf = magSf cos theta` at 0/45/90/135/180 degrees, sign checked at both ends), on the `alpha` fixed-gradient triple, on both correlations returning `theta_e` EXACTLY at `Ca = 0`, and on Jurin's height as a closed form — `theta_e > 90` must give depression. **Not claimed**: that a live capillary-rise or drop-impact run reproduces a published `theta_d(t)`. Tanner's law, Sikalo et al.'s drop impact and the two-resolution displacement experiment are not run, and Afkhami, Zaleski & Bussmann's mesh-dependent correction is deliberately withheld until the gate that would show it works exists (§39.8) |
+| Lagrangian parcels (SPEC-LIT §66) | SoA pool, exponential drag update (Schiller–Naumann), face-crossing walk over the cell→face CSR, deterministic injection. **One-way coupled and inert**: parcels feel the gas, the gas does not feel them, and evaporation is refused by name. **No driver reads a spray from a case file yet**, and §13.4.2 forbids adding a `parcels` block before the driver that would read it, so the pool is a library API and `ofgpu-validate`'s gates are what drive it |
 | Parcel deposition gather (SPEC-LIT §67) | Radix sort on the `(cell, uid)` total order, a device exclusive scan, the per-cell parcel CSR, and a one-thread-per-cell gather. **No f64 atomics**: the scatter is transposed into a gather so the result is bitwise reproducible |
 | Two-way coupling (SPEC-LIT §68) | The drag impulse the parcel integrator applied, handed back to the gas through §18's source registries — momentum (kinematic, explicit or Patankar-split) and sensible heat, with `physics heating` for the droplet side. **Conservative to round-off by construction**, and bitwise inert when no parcel has been injected. Evaporation, droplet radiation and wall splash are refused by name |
 
@@ -152,10 +156,30 @@ applied on faces rather than interpolated from cell values.
 | Energy equation | Sensible enthalpy, `k_eff = k + rho cp nu_t/Prt`, fixed-flux and fixed-temperature wall conditions, the Jayatilleke thermal wall function on `thermalWallFunction` walls (SPEC-LIT §29.3) |
 | Combustion | Mixing-controlled single-step EDM (Magnussen & Hjertager 1977, **the default**) — `Y_F`/`Y_O2`/`Y_P` transport, a fuel-depletion clip, fuel mass consumed and heat released agreeing exactly (to round-off). **And the serial two-step mixing-controlled scheme** (McGrattan, McDermott & Floyd, ISFEH10 2022 — SPEC-LIT §42, selected by `scheme serialTwoStep`): the SAME mixing-controlled rate applied twice **serially** inside one time step, so the oxygen step 1 left over oxidises the CO step 1 made. No Arrhenius rate, no Jacobian, no ODE integrator, no stiffness. One extra transported species `Y_I`, and `Y_CO = f_CO Y_I` written out |
 | Local extinction | The FDS `EXTINCTION 1` critical-flame-temperature predicate (SPEC-LIT §43, `extinctionModel oxygen`) — a piecewise-linear limiting oxygen index against cell temperature, a free-burn cut-off and an auto-ignition rule. Defaults to `none`, so every recorded result is unmoved |
-| Radiation | Gray P1 approximation (Modest ch. 15), Marshak wall condition, a `chi_r` radiant-fraction floor — **and gray fvDOM** (Modest ch. 16; Fiveland 1984; Truelove 1987 — SPEC-LIT §36): the same RTE along 24 level-symmetric S4 ordinates, `radiationModel` selects between them. Measured on `cases/burnerPlume.jsonc` (32,768 cells, 1,200 steps, RTX 5070 Ti): radiated fraction 14.97% (P1) vs 13.79% (fvDOM), wall time 19.22 s vs 121.5 s |
-| Validation gates | Sealed-box `dp0/dt` ramp (analytic), exact burner heat release, radiative equilibrium, cut-cell closure, msh hex closure — all permanent `ofgpu-validate` checks |
+| Radiation | Gray P1 approximation (Modest ch. 15), Marshak wall condition, a `chi_r` radiant-fraction floor — **and gray fvDOM** (Modest ch. 16; Fiveland 1984; Truelove 1987 — SPEC-LIT §36): the same RTE along 24 level-symmetric S4 ordinates, `radiationModel` selects between them, and **gray is still what a case gets when it says nothing**. A third model, `viewFactor`, is refused by name here — `ofgpu-fire`'s medium is participating, so P1 or fvDOM is the physically right choice, and surface-to-surface radiation needs an enclosure definition this driver has no flag for (§50.12). Measured on `cases/burnerPlume.jsonc` (32,768 cells, 1,200 steps, RTX 5070 Ti, soot off, run back to back twice, §65.7): radiated fraction **14.97 %** (P1) against **13.79 %** (fvDOM), wall time **22.93 / 22.60 s** against **141.12 / 141.16 s**, peak device memory 172 MiB against 236 MiB |
+| Soot (SPEC-LIT §61) | A transported mass fraction `rho Y_s` — `sootModel none` (the default), `prescribedYield` or `laminarSmokePoint`. The smoke-point model is Lautenberger, de Ris, Dembsey, Barnett & Baum (2005): a formation rate shaped on a cubic in mixture fraction between `Z_L` and `Z_H`, anchored on a measured laminar smoke-point height, with Magnussen-Hjertager oxidation and an availability clip. The cubic is checked back against the four conditions it was **solved from** (`2.4e-16` worst); propane's `Z_st = 0.0600725` to `1.3e-9`; the published peak rate `omega_sf,P = 0.45699 kg/(m³ s)` to `8.7e-8`; the prescribed-yield mass balance to `1e-14`; host closed forms against the device kernels to `1e-14`. Moss-Brookes and the sectional family are refused by name **with the reason**. §61's whole point is §62: `rho Y_s` reaches every WSGG band's `kappa` and therefore `T`. **Gate 61-A — the one number a published soot measurement can be held against — MISSES totally**; see “Gates that miss” below |
+| Spectral radiation — WSGG (SPEC-LIT §62) | `spectralModel gray` (default) / `grayBanded` / `wsgg`, for **both** P1 and fvDOM, through the one `EnergySources` registration §36 already used. `wsgg` is Bordbar, Węcel & Hyppänen (2014): four gray gases plus a transparent window, `kappa_j` built per cell per band from the local `X_H2O`, `X_CO2` and soot, `a_j` from the local `T`. `grayBanded` (one band, `a_1 = 1`, the case's own `a`) is **bitwise identical to `gray` through the whole driver**, checked on every byte of every file two runs write — so “the default is unmoved” is a measurement a case can repeat, not an assertion. **§64 and §65 solve the banded slab EXACTLY, band by band**, which is the only gate that measures the banded *answer* rather than an identity or another model, and both overturned something they were built to confirm. fvDOM's angular error is closed form — `E_2^S4(tau) = (1/4pi) sum_m w_m exp(-tau/\|mu_m\|)`, verified at `E_2^S4(0) - 1 = 3.3e-16` — which splits the measured error into an angular half needing no run and a spatial residue that does; **P1 has no such split**. fvDOM solves the transparent window exactly (`1.7e-15`) where banded P1 must floor it and pays `-0.039 %` with hot walls and **`+10.1 %`** with a hot gas; on the band P1 is worst at, fvDOM is better by up to **7.8×**. **What it costs, measured (§65.7)**, same case, same two passes: P1 + WSGG **93.64 / 94.01 s** (**4.12×** gray P1) at 172 MiB; **fvDOM + WSGG 527.06 / 536.42 s — 23.36× — at 332 MiB**. The bands cost 4.12× on P1 and 3.77× on fvDOM, on opposite sides of their own arithmetic. `updateInterval: 4` recovers **6.7×** of the fvDOM factor for **0.12 points** of radiated fraction. The physics beside the price: the spectral model roughly **triples** the radiated fraction on this case (14.97 → 47.28 % on P1, 13.79 → 43.76 % on fvDOM) where switching the angular method moves it by 1.2 points gray and 3.5 banded — a factor of nine larger effect. **Its emissivity gate MISSES**; see “Gates that miss” below |
+| Open radiative boundary (SPEC-LIT §63) | `openBoundary zeroGradient` (the default) or `coldSurroundings` with an `ambientT`. A zero-gradient `G` (P1) or `I_m` (fvDOM) on an open face says that whatever leaves comes straight back: **an open-sided fire domain with zero-gradient radiation boundaries is a perfectly reflecting enclosure**. It is also **singular** for WSGG's transparent band — under P1 that band is a pure-Neumann Laplace problem — and both models go non-finite on a WSGG open-domain fire without this condition, which is why §63 exists. An all-wall enclosure is **bitwise unmoved** by the setting, there being no open face for it to touch, and the refusal names both conditions and says what the default IS. Measured on the gray legs of `cases/burnerPlume.jsonc`: the radiated fraction goes 14.97 → 33.89 % (P1) and 13.79 → 25.07 % (fvDOM) once the radiation can leave |
+| Validation gates | Sealed-box `dp0/dt` ramp (analytic), exact burner heat release, radiative equilibrium, cut-cell closure, msh hex closure, the two-step scheme's derived stoichiometry, the soot cubic against the four conditions it was solved from, the WSGG coefficient set's own invariants and §64/§65's exact banded slab — all permanent `ofgpu-validate` checks. Four fire-side gates **miss**, and the summary line names every one of them; see “Gates that miss” below |
 | Field output & restart | `-output foam,vtu,nvdb,vdb,usda` and `-writeInterval` write `U`, `p`, `T`, the turbulence closure and any species fields the same way `ofgpu-buoyant`/`ofgpu-vof` do; `-restartWrite N`/`-restartFrom FILE` checkpoint and resume — `p0`, `dp0dt` and the species mass fractions are carried across the restart, not only `U`/`p`/`T`, because a low-Mach run's thermodynamic state is more than those three fields. 40 steps continuous vs. 20+restart+20 agree on the first post-restart pressure residual, `p0` and total enthalpy |
 | Volumetric sources | `sources[]` (JSONC) or `constant/fvSources` (OpenFOAM case directories) register a source on the momentum equation — a uniform body force over the whole domain, the one a periodic (cyclic-patch) case needs since it has no inlet to prescribe a mass flow from |
+
+### Ventilation, enclosure radiation and data-centre airflow
+
+`ofgpu-datacentre` wires SPEC-LIT §52–§55 together into a room solver —
+`cases/coldAisle.dc.jsonc`. Surface-to-surface radiation (§49–§51) belongs with
+them physically but is **not** part of that driver, or of any other: it is
+specified, gated and pair-tested as a library, and the last row says so.
+
+| | |
+|---|---|
+| Fan boundary (SPEC-LIT §52) | A manufacturer's pressure–flow curve as a **Robin triple**. The exact operator is rank-1 and dense; lumping it onto three per-face arrays imposes identically the flow rate the dense operator does, to `1.7e-14`. Quadratic, tabulated and constant-flow curves, with AMCA 210's density and speed corrections rather than the table treated as absolute. `dp = dp_max[1 - (Q/Q_max)^2]` is **even in `Q`**, so a reversed fan pushes harder the more it is pushed back — `Q` ran 3.0, −4.6, −33, −90, −1692 over five iterations before `Q\|Q\|` replaced it, which is identical on the forward branch. The Woodbury/capacitance-matrix path is refused by name. Gates: the closed-form operating point to `1e-10` relative, evaluated from the formula rather than quoted; NIST's public-domain FDS HVAC decks `fan_test`/`qfan_test` to `1.1e-6` and `2.7e-4` relative (their **input files and published CSVs only** — no FDS source read); `S = 0` bitwise against `fixedValue` and `S = 1e12` against a prescribed flow; and the whole `cases/coldAisle.dc.jsonc` network against its own hand-solved closed form, **within 2 % on both openings**, with whole-boundary continuity at `4.2e-10` |
+| Porous jump (SPEC-LIT §53) | §18's Darcy–Forchheimer law (Ward 1964) integrated through a slab instead of over a cell — a resistive **face**, internal or on a boundary: three arrays divided by one number on the internal side, §52's triple on the boundary side. Perforated tiles and screens by open-area ratio, on the thin-plate `K(sigma)` published in the open literature and gated against its own limits and against the two values the design note quotes, **one of which it contradicts**. Reverse flow is modelled rather than clipped, and what the model gets wrong is printed in the report |
+| Humidity and psychrometrics (SPEC-LIT §54) | Humidity ratio as one more transported species, Hyland–Wexler saturation pressure, and moist-air buoyancy through the **virtual temperature** — so `Y_v = 0` is bitwise the dry default. Gates: the thirteen `C1`–`C13` coefficients against the formula from an independent host transcription, which is the gate that matters most because everything else is downstream of `p_ws`; ASHRAE Handbook—Fundamentals (2021) Ch. 1 Table 2 at 0.5 % absolute, with the **0.44 % `W_s` residual attributed to the missing enhancement factor and PRINTED** rather than quietly tolerated; and IAPWS at the boiling point (`p_ws(100 °C) = 101 418.7 Pa`), whose reference is *not* ASHRAE, which is what makes it worth having. Herrmann, Kretzschmar & Gatley's real-gas formulation is **named and not implemented** |
+| Data-centre metrics (SPEC-LIT §55) | RCI (Herrlin 2005), RTI (Herrlin 2008), SHI and RHI (Sharma, Bash & Patel 2002), measured against ASHRAE TC 9.9's Class A1–A4 recommended and allowable envelopes, reduced on the device. Every identity is checked against its formula rather than a stored number — `SHI + RHI = 1`, `RCI = 100 %` inside the band, `0 %` at the allowable limit, linearity in a uniform offset. **The six-configuration ranking gate is NOT run**: Wibron, Ljung & Lundström (2019) is CC-BY-4.0 with its licence verified live through the Crossref REST API, but its full text was not reachable from this environment, so what is gated is the one quantitative relation the abstract states — halving the supply flow doubles RTI, 40 % → 80 % — and the omission is printed on every `ofgpu-validate` run. Public data-centre CFD validation data is thin and mostly behind publisher walls; that is recorded rather than glossed |
+| Surface-to-surface radiation (SPEC-LIT §49/§50/§51) | Deterministic view factors and enclosure radiosity for a **non-participating** medium. The whole model is one rewritten Robin triple, because a transparent medium contributes nothing volumetric. Monte Carlo is refused on **accuracy**, not on reproducibility — MCRT *can* be made bitwise reproducible with a counter-based RNG, and the answer to that counter-argument is NISTIR 6925 Table 2: `2.7e-4` at a million samples per pair, where deterministic integration reaches `4e-6` at 18,525 points. RT cores are refused too, as a reproducibility hole with a switch on it. The design note's double-area-integral method **misses the shared-edge gate by 40 %** and converges like `nq^-0.54`, so a single line integral was built instead — `6.6e-6`. Gates, all closed forms or identities, none replayed: Howell C-11 `0.1998248957` and C-14 `0.2000437761`, each **evaluated from the formula** so a transcription error fails rather than agrees; Shapiro/FACET's obstructed `F_12 = 0.11562061` with reciprocity checked at `A_3/A_1 = 0.25` exactly; NISTIR 6925's `BB104` construction at 120 surfaces — quadrature `6.6e-6` in 0.014 s, reciprocity exactly `0`, closure `<= 1e-12`, `min G >= 0`; grid against linear scan **bitwise**, and two builds of the same geometry bitwise. **Configured, not yet run from a case**: the dictionary, the refusals and §51's ten pair tests exist and the gates drive the library API, but **no driver binary reads an enclosure out of a case directory** (§50.12), and `radiationModel viewFactor` is refused by name in the JSONC fire block for the same reason. The coupled cavity gate (Balaji & Venkateshan; Akiyama & Chong) is not run for that reason **and** a paywall, and `ofgpu-validate` prints the omission on every run |
+
+---
 
 ### Case input formats and restart
 
@@ -267,20 +291,73 @@ shared refusal now covers all of them:
 ## Validation
 
 ```
-cargo test        946 passed, 0 failed, 2 ignored (lib)
-                  1057 passed, 0 failed, 4 ignored (every target — including the
+cargo test        1423 passed, 0 failed, 4 ignored (lib)
+                  1561 passed, 0 failed, 6 ignored (every target — including the
                   per-binary CLI-parsing suites and SPEC-LIT §13.4.1's per-driver
                   "two runs must differ" pair tests)
-ofgpu-validate    449 / 449 checks passed (401 computed live, 48 replayed from recorded measurements)
+ofgpu-validate    745 / 745 checks passed (697 computed live, 48 replayed from recorded measurements)
 ```
 
 **SPEC-LIT §13.4.1's standing requirement**: two short runs of a driver,
 differing in exactly one setting of the case file and nothing else, must write
-DIFFERENT output. If they are bit-identical the setting is inert. All six
-drivers now carry such a pair test — `ofgpu-fire` 13 settings, `ofgpu-buoyant`
-17, `ofgpu-vof` 15, `ofgpu-plume` 11, `ofgpu-k-epsilon` and `ofgpu-k-omega` 11
-each — each running the driver's own `parse` + `run` and comparing every field
-file written.
+DIFFERENT output. If they are bit-identical the setting is inert. **Seven
+drivers now carry such a pair test in their own binary** — `ofgpu-fire` 41
+settings, `ofgpu-buoyant` 21, `ofgpu-vof` 18, `ofgpu-k-epsilon` 18,
+`ofgpu-plume` and `ofgpu-k-omega` 11 each, `ofgpu-sa` 8 — each running the
+driver's own `parse` + `run` and comparing every field file written. Every
+capability added since carries the same test on its own **case document**, in
+the module that reads it: §51.2 for the enclosure dictionary, §55.6 for the
+data-centre case (23 settings), §58.4 for Spalart-Allmaras and the hybrids,
+§60.4 for a conjugate fluid/solid case, and §61.5 / §62.11 for soot and the
+spectral model. Two pairs in the whole suite are **inverted** and required to
+come back identical rather than different — `spectralModel` absent against
+`"gray"`, and `"gray"` against `"grayBanded"` — and they live outside the
+differ-list, because that list asserts the opposite of what they claim.
+
+### Gates that miss
+
+Every check `ofgpu-validate` runs passes; that is what 745 / 745 means. It is
+a different statement from "every published benchmark this project compares
+itself against is reproduced", and the two are not allowed to be confused
+here. The gates below are **comparisons against published measurements that
+this solver does not reproduce**. `ofgpu-validate`'s own summary line names
+each of them on every run, and they are repeated here so that reading the
+binary's output is not the only way to find them out.
+
+| Gate | Verdict |
+|---|---|
+| **SPEC-LIT §60.5 Gate 5 — Kaminski & Prakash (1986)**, conjugate natural convection in a square enclosure. **Run live.** | **MISSES its 3 % bar at the conduction-dominated end.** The live 40² run at `Ra = 10⁴` reads `-7.11 %`, `-2.77 %`, `-0.07 %` at `Kr = 0.1, 1, 10` — worst at the SMALLEST conductivity ratio, shrinking to nothing at the largest. §60.5's mesh-converged sweep (eighteen runs on 40²/60²/80², every 60→80 change under 0.38 %) puts it at `-7.12 %`, `-3.00 %`, `-0.48 %` at `Ra = 10⁴` and `-7.79 %`, `-4.32 %`, `-0.81 %` at `Ra = 10⁵`. **The primary table was never read** — the paper is paywalled, and ScienceDirect, Scholar, Semantic Scholar, OpenAlex, Unpaywall, CORE, arXiv and two institutional repositories were all tried. The comparison is against Belazizia et al. (2012), open access, same configuration, **labelled a SECONDARY source** in the spec, in the case file and in the output. The disagreement tracks how much of the answer is conduction — 2 % of the series resistance at `Kr = 10`, 71 % at `Kr = 0.1` — and the secondary table's own `Ra = 500` column sits 3–7 % **above** the analytic conduction limit at a Rayleigh number whose fluid-layer value is `O(100)`, which is not physically possible. Gate 59-B reproduces that limit to `1e-8`. So the reference numbers appear to carry an offset where the miss is. **Nothing was tuned toward them** |
+| **SPEC-LIT §62.12 Gate 1-E — the WSGG total emissivity against RADCAL** (Grosshandler, NIST TN 1402, US public domain, compiled **unmodified** from `reference/fds/Source/rcal.f90` behind `tools/radcal_emissivity/`). **Run live.** | **MISSES its ±10 % bar at 58 of 108 points**, mean `\|d eps/eps\|` **11.4353 %**, worst **30.5234 %** at `M_r = 2`, `T = 400 K`, `p_a L = 0.03 atm.m`. Bordbar's own table could not be obtained, which is why the reference is RADCAL. **The shape is the finding**: the bias is a monotone ladder with exactly one sign change, `+20.84 %` at 400 K, `+14.11 %`, `+6.64 %`, `-1.31 %`, `-7.46 %`, `-12.28 %` at 2400 K, crossing zero near Bordbar's own `T_ref = 1200 K`. This is **not** evidence that Bordbar's set is wrong — RADCAL is a narrow-band model on NASA SP-3080 band data, Bordbar's is a fit to line-by-line HITEMP-2010, and at 2400 K both extrapolate. **Neither model is truth and the verdict line says so.** What it *is* evidence of is that the disagreement is structured rather than scattered, so a fire's smoke layer and its flame are the two places the choice of coefficient set moves the answer most |
+| **SPEC-LIT §61.8 Gate 61-A — the predicted post-flame soot yield** against Tewarson's measured one. A 1,200-step fire, so **not run inside `ofgpu-validate`**; the verdict is printed there as a note. | **MISSES totally: 0.000 kg/kg against a measured 0.024 for propane.** Not a small miss, and diagnosed: **0 of 32,768 cells** on `cases/burnerPlume.jsonc` sit above the model's own 1375 K formation threshold, so the burner mesh is too cold for the model to fire at all and the `laminarSmokePoint` run is bit-identical to having no soot. §61.7 predicted exactly this before any code was written. **The model is wired and the mesh is cold, which are different sentences**: the five smoke-point pair rows, run on a duct that *is* hot enough, pass. The `prescribedYield` leg returns `0.024` against `0.024` and is **labelled an IDENTITY on the line that prints it**, because it is handed the answer |
+| **SPEC-LIT §62.12 Gate 4 — the NIST 37 cm propane burner's radiative fraction** (Sung et al., NIST TN 2162r1, 2021: 0.23 / 0.30 / 0.33 at 20 / 34 / 50 kW). A multi-minute fire per heat release rate, so **not run inside `ofgpu-validate`**; the verdict is printed there as a note. | **MISSES.** `cases/nistBurner37cm.jsonc` never reaches a state in which a radiative fraction is a meaningful quantity: its combustion efficiency comes out at **226 %**, meaning the domain is consuming an accumulated fuel inventory rather than burning what enters, and §62.12's own gate text named `~95 %` efficiency as the precondition before any of this ran. **Gate 6 of the same family is NOT run at all** — Qu & Mudawar's forced-convection micro-channel — and that is a capability gap rather than an oversight: §60.2's fluid region is a closed cavity, so every non-empty patch is a no-slip wall and there is no inlet to name |
+
+Two more comparisons miss and are recorded in the same voice rather than
+omitted.
+
+**SPEC-LIT §42.8b**, the NIST Reduced Scale Enclosure compartment sweep, misses
+and is replayed among the 48. Above 200 kW the predicted ceiling CO is low by a
+factor of up to 20, where ISFEH10's own published statistic for this model on
+this experiment is a bias factor of 1.08. The diagnosis comes from the runs
+rather than from the model, and it is the **ventilation** and not the
+chemistry: the combustion efficiency is 15–58 %, so most of the fuel leaves
+the compartment unburnt, and the doorway admits roughly a tenth of the air a
+400 kW fire in that room draws. Steckler, Quintiere & Rinkinen (1982), the
+doorway-flow gate, is the prerequisite this miss names, and it is still not
+run.
+
+**SPEC-LIT §68.12 Gate 68-C**, Theobald's ~90 hose streams, misses **with the
+gas held at rest** — the verdict is printed in the run's parcel block rather
+than in the summary line. The stream is thrown **61.29 %** of the measured
+distance on average, against a `±10 %` bias and `30 %` scatter bar, and the
+number beside it says why rather than leaving it to be inferred: the vacuum
+bracket — the same launch with no drag at all — is **198.65 %** of the
+measurement, so between 61 % and 199 % of the throw is decided by what the
+**air** does, and with the air held still there is nothing left to decide it
+with. Re-running the same 90 launches in a uniform co-flow shows that about
+**6 m/s** of entrained air brings the mean to within 2.3 % of the measurement
+and *tightens* the scatter from 0.359 to 0.271 — which says the still-air
+scatter is one missing mechanism seen ninety times, not ninety independent
+modelling errors. Having that number is worth more than a pass.
 
 ### Order of convergence — method of manufactured solutions
 
@@ -583,16 +660,19 @@ raise `fatal error C1189` under the traditional MSVC preprocessor.
 
 | Executable | Purpose |
 |---|---|
-| `ofgpu-validate` | Numerical validation (314 checks) |
+| `ofgpu-validate` | Numerical validation (745 checks) |
 | `ofgpu-bench` | Throughput and memory benchmarks |
 | `ofgpu-graph-bench` | CUDA graph against per-launch execution |
 | `ofgpu-dispatch-bench` | Runtime dispatch cost |
 | `ofgpu-probe` | Device properties |
 | `ofgpu-generate-mesh` | Case generation |
 | `ofgpu-k-epsilon`, `ofgpu-k-omega` | Turbulence models, standalone |
+| `ofgpu-sa` | Spalart-Allmaras and the DES97/DDES/IDDES family, standalone (SPEC-LIT §56–§58) |
 | `ofgpu-plume`, `ofgpu-buoyant` | Buoyant plume |
 | `ofgpu-vof` | Two-phase VOF |
-| `ofgpu-fire` | Low-Mach combustion and radiation (SPEC-LIT §25–28) |
+| `ofgpu-fire` | Low-Mach combustion, soot and radiation (SPEC-LIT §25–28, §42/§43, §61–63) |
+| `ofgpu-cht` | Conjugate heat transfer — solid regions, contact resistance, and a fluid on the far side of the interface (SPEC-LIT §46/§47/§59/§60) |
+| `ofgpu-datacentre` | Room airflow with fan curves, porous jumps, psychrometrics and the rack metrics (SPEC-LIT §52–55) |
 
 ---
 
@@ -606,6 +686,8 @@ cargo run --release --bin ofgpu-generate-mesh -- damBreak ..\cases\damBreak  60 
 cargo run --release --bin ofgpu-generate-mesh -- plume    ..\cases\plumeCol  60 40 30 -stl column=column.stl
 cargo run --release --bin ofgpu-vof           -- ..\cases\damBreak -endTime 0.25 -surge
 cargo run --release --bin ofgpu-fire          -- ..\cases\burnerPlume.jsonc -combustion -radiation -endTime 6.0 -deltaT 0.005
+cargo run --release --bin ofgpu-cht           -- ..\cases\dieStack.cht.jsonc
+cargo run --release --bin ofgpu-datacentre    -- ..\cases\coldAisle.dc.jsonc
 cargo run --release --bin ofgpu-validate
 ```
 
@@ -645,6 +727,10 @@ Convert binary-format cases to ASCII before use.
 | `docs/01-model-catalog.md` | Catalogue of CFD components (1,823 entries) |
 | `docs/02-gpu-portability.md` | GPU portability classification |
 | `docs/03-esi-vs-foundation.md` | Differences between upstream distributions |
+| `docs/05-io-redesign.md` | The case input/output redesign — the JSONC case format and its schema |
+| `docs/06-mesh-oss-2024.md` | Survey of open-source meshing |
+| `docs/07-fire-solver.md` | `ofgpu-fire`'s formulation and its validation gates — the full record of the wall heat-transfer gate, the soot and WSGG gates, and the measured cost of spectral radiation |
+| `docs/schema/case-1.json` | The JSONC case schema, generated by `schemars` from the reader's own types |
 | `cases/README.md` | Test case geometries |
 
 ---
@@ -662,19 +748,88 @@ Convert binary-format cases to ASCII before use.
   Rather than silently falling back to Euler, the solver reports the reason.
 - **No compressible or transonic capability.** Density-weighted time derivatives
   are implemented and used by VOF, but the pressure equation is incompressible.
-- ~~**Combustion is mixing-controlled single-step (EDM) only.**~~ **Partly
-  fixed (SPEC-LIT §42/§43).** The serial two-step mixing-controlled scheme and
-  a local-extinction predicate are implemented, and predict CO, incomplete
-  combustion and where the flame goes out. There is still **no finite-rate
-  (Arrhenius) mechanism** — no Westbrook–Dryer, no Jones–Lindstedt, no stiff
-  ODE integrator. §42 also keeps the molar mass `W̄` and the specific heat
-  `c_p` CONSTANT, so density and thermal expansion are still computed with
-  air's values even once CO2 and CO are distinguished. ~~**Radiation is gray P1 only.**~~ **Fixed (SPEC-LIT
-  §36).** `fvDOM` (finite-volume discrete ordinates, 24-ordinate level-symmetric
-  S4) is implemented and selected by `radiationModel`; both models share one
-  `EnergySources` registration and the same `chi_r` floor. Radiation is still
-  GRAY on both — no spectral (WSGG) band model, and the absorption coefficient
-  does not vary with local soot/CO2/H2O.
+- ~~**Combustion is mixing-controlled single-step (EDM) only.**~~ **Restated
+  (SPEC-LIT §42/§43).** The serial two-step mixing-controlled scheme and the FDS
+  critical-flame-temperature extinction predicate are implemented, so CO,
+  incomplete combustion and where the flame goes out are predicted rather than
+  absent. What is still missing is a **finite-rate (Arrhenius) mechanism** —
+  no Westbrook–Dryer, no Jones–Lindstedt, no stiff ODE integrator, no
+  Jacobian. §42 also keeps the molar mass `W̄` and the specific heat `c_p`
+  CONSTANT, so density and thermal expansion are still computed with air's
+  values even once CO2 and CO are distinguished, and `dh1`'s exact split needs
+  a heat-of-formation table that was not read. The compartment gate this
+  scheme was built for (§42.8b, the NIST Reduced Scale Enclosure sweep)
+  **misses**, and the diagnosis is the ventilation rather than the chemistry.
+- ~~**Radiation is gray P1 only.**~~ **Fixed (SPEC-LIT §36, §61–§65).** `fvDOM`
+  (24-ordinate level-symmetric S4) is selected by `radiationModel`; **WSGG**
+  (Bordbar, Węcel & Hyppänen 2014 — four gray gases plus a transparent window)
+  is selected by `spectralModel`, for both models, with `kappa_j` built per
+  cell per band from the local `X_H2O`, `X_CO2` and **soot** (§61); and §63's
+  `coldSurroundings` gives an open domain somewhere for the radiation to go.
+  Three things a reader should know before switching any of it on. **(a) It is
+  expensive, and the number is measured** (§65.7, `cases/burnerPlume.jsonc`,
+  32,768 cells, 1,200 steps, RTX 5070 Ti, two passes): WSGG costs **4.12×** on
+  P1 and **3.77×** on fvDOM, and **fvDOM + WSGG is 23.36× gray P1** —
+  527.06 / 536.42 s against 22.93 / 22.60 s — at 332 MiB against 172 MiB.
+  Measured storage is **+4,608 B/cell** for fvDOM + WSGG, so 10⁶ cells needs
+  **9.3 GB, not the 960 MB** §62.10 predicted as arithmetic; the practical
+  ceiling on a 16 GB card is about 1.6 × 10⁶ cells, and the clock gets there
+  first. **fvDOM + WSGG at `updateInterval: 1` is impractical above roughly
+  3 × 10⁵ cells**; `updateInterval: 4` recovers 6.7× of that for 0.12 points
+  of radiated fraction. **(b) The emissivity gate misses.** §62.12's Gate 1-E
+  is outside its ±10 % bar at **58 of 108 points**, mean 11.44 %, worst
+  30.52 %, with a **monotone temperature bias** — `+20.8 %` at 400 K to
+  `-12.3 %` at 2400 K — against RADCAL. Bordbar's own table could not be
+  obtained; neither model is truth, and the structured shape means the choice
+  of coefficient set moves the answer most in a fire's smoke layer and its
+  flame. **(c) The soot yield gate misses totally**, and on the shipped burner
+  the reason is the mesh, not the model: `laminarSmokePoint` predicts
+  **0.000 kg/kg** against Tewarson's measured 0.024 for propane because **0 of
+  32,768 cells** on `cases/burnerPlume.jsonc` reach the model's own 1375 K
+  formation threshold, so that run is bit-identical to having no soot at all.
+  The smoke-point pair tests, on a duct hot enough to fire the model, pass.
+- **Conjugate heat transfer's published gate misses, and its primary reference
+  was never read (SPEC-LIT §60.5).** Kaminski & Prakash (1986) is paywalled;
+  nine routes to an open copy were tried — ScienceDirect, Scholar, Semantic
+  Scholar, OpenAlex, Unpaywall, CORE, arXiv and two institutional
+  repositories — and none worked, so the comparison
+  is against Belazizia et al. (2012) — open access, same configuration —
+  labelled a SECONDARY source everywhere it appears. Gate 5 misses its 3 % bar
+  at the conduction-dominated end — `-7.11 %` at `Kr = 0.1` on the live 40² run,
+  shrinking to `-0.07 %` at `Kr = 10`, and `-7.12 / -3.00 / -0.48 %` across the
+  mesh-converged sweep. The secondary table's own
+  `Ra = 500` column sits above the analytic conduction limit, which is not
+  physically possible, and this solver reproduces that limit to `1e-8`;
+  nothing was tuned toward the reference.
+- **The conjugate fluid region is a closed cavity, so forced convection is
+  unreachable (SPEC-LIT §60.2/§60.6).** Every non-empty patch of a `"kind":
+  "fluid"` region is a no-slip wall, so a micro-channel has no inlet to name
+  and §47.12's Gate 6 (Qu & Mudawar 2002) cannot be expressed at all. That is
+  a capability gap, stated as one, rather than a gate left quietly unrun.
+- **Lagrangian parcels do not evaporate, do not absorb radiation and do not
+  splash (SPEC-LIT §68.13).** Each is refused **by name** with what is
+  missing printed, and the first of them matters most: a sprinkler that does
+  not evaporate is not a sprinkler. Also absent: buoyancy and added-mass
+  reaction on the gas (only the drag impulse is coupled), deposition into more
+  than one cell along a crossing, coupling to the pressure equation (there is
+  no mass transfer for it to receive), and sub-grid dispersion of the coupled
+  source. The hose-stream gate (§68.12, Theobald 1981) **misses with the gas
+  held at rest**, and the measurement says why: 61–199 % of the throw is
+  decided by the entrained air.
+- **Surface-to-surface radiation and Lagrangian parcels are library
+  capabilities with no case format.** Both are fully specified, gated and
+  pair-tested, but **no driver binary reads an enclosure or a spray out of a
+  case file** — §13.4.2 forbids adding a block before the driver that would
+  read it, so `radiationModel viewFactor` is refused by name in the JSONC fire
+  block and there is no `parcels` block at all. §50.12 and §68.13 record both
+  boundaries as the next step.
+- **No published separated-flow statistic is reproduced by the DES family, and
+  the Spalart-Allmaras flat-plate gate is not run.** §57.12 and §56.11 name
+  what stands in the way — no low-dissipation convection blending, no
+  time-averaging seam, no synthetic-turbulence inlet, no curvilinear grids,
+  and a TMR case that is compressible at `M = 0.2`. What is delivered is a
+  correct implementation of published models, verified against their own
+  definitions; `ofgpu-validate` prints that distinction on every run.
 - ~~Only one cyclic pair.~~ **Fixed (SPEC-LIT §34.2).** `BlockSpec::cyclic`
   is a list now, and a JSONC case's `mesh.cyclic` accepts any number of
   pairs (one per axis) — a plane channel periodic in two directions, or a
@@ -686,7 +841,11 @@ Convert binary-format cases to ASCII before use.
 ## References
 
 Sources for the numerical methods and models. Section numbers refer to
-[`rust/SPEC-LIT.md`](rust/SPEC-LIT.md).
+[`rust/SPEC-LIT.md`](rust/SPEC-LIT.md). Each entry carries the bibliographic
+detail SPEC-LIT itself records and no more: where a title, issue number or page
+range is missing it is because the source was cited there without one, and §0
+forbids supplying it from memory. Sources that were **not read** — paywalled,
+unreachable, or deliberately left closed — say so on their own line.
 
 ### Finite volume discretisation
 
@@ -788,6 +947,19 @@ Sources for the numerical methods and models. Section numbers refer to
 - Reynolds, W. C. (1987). *Fundamentals of turbulence for turbulence modeling
   and simulation.* AGARD Report No. 755. — §40 (the realizability
   constraints the variable `C_mu` is constructed to satisfy)
+- Lumley, J. L. (1978). *Advances in Applied Mechanics*, 18, 123–176. — §40
+  (realizability as a modelling principle)
+- Spalart, P. R., & Allmaras, S. R. (1992). *AIAA Paper 92-0439*; also
+  *La Recherche Aérospatiale*, 1 (1994), 5–21. — §56 (the original)
+- Allmaras, S. R., Johnson, F. T., & Spalart, P. R. (2012). Modifications and
+  clarifications for the implementation of the Spalart-Allmaras turbulence
+  model. *ICCFD7-1902.* A freely distributed conference paper — the copy
+  actually read, and the implementation reference. — §56
+- NASA / Turbulence Modeling Benchmarking Working Group. *Turbulence Modeling
+  Resource — The Spalart-Allmaras Turbulence Model.* US government-authored
+  DOCUMENTATION, not source; quoted here to the printed digit. — §56
+- Rumsey, C. L., & Spalart, P. R. (2009). *AIAA Journal*, 47, 982–993. — §56
+  (why the free-stream `nu~/nu` matters)
 
 ### Turbulence — LES
 
@@ -805,6 +977,46 @@ Sources for the numerical methods and models. Section numbers refer to
   Aeronautical Sciences*, 23(11), 1007–1011. — §16.4
 - Scotti, A., Meneveau, C., & Lilly, D. K. (1993). Generalized Smagorinsky model
   for anisotropic grids. *Physics of Fluids A*, 5(9), 2306–2308. — §16.3
+
+### Turbulence — hybrid RANS-LES
+
+- Spalart, P. R., Jou, W.-H., Strelets, M., & Allmaras, S. R. (1997). Comments
+  on the feasibility of LES for wings, and on a hybrid RANS/LES approach. In
+  *Advances in DNS/LES*, Greyden Press, 137–147. — §57 (DES97)
+- Shur, M., Spalart, P. R., Strelets, M., & Travin, A. (1999). *Engineering
+  Turbulence Modelling and Experiments 4*, 669–678. — §57 (the
+  `C_DES = 0.65` calibration on the SA background)
+- Strelets, M. (2001). *AIAA Paper 2001-0879.* — §57 (SST-DES, the
+  `k`-equation dissipation form)
+- Spalart, P. R., Deck, S., Shur, M. L., Squires, K. D., Strelets, M. Kh., &
+  Travin, A. (2006). *Theoretical and Computational Fluid Dynamics*, 20,
+  181–195. — §57 (DDES, `r_d`, `f_d`, and the grid-induced separation they
+  fix)
+- Shur, M. L., Spalart, P. R., Strelets, M. Kh., & Travin, A. K. (2008).
+  *International Journal of Heat and Fluid Flow*, 29, 1638–1649 — IDDES.
+  **Paywalled and NOT read**, which is why §57's IDDES equations come from the
+  two open-access restatements below. — §57
+- Gritskevich, M. S., Garbaruk, A. V., Schütze, J., & Menter, F. R. (2012).
+  *Flow, Turbulence and Combustion*, 88, 431–449 — the SST-background
+  recalibration. **Paywalled and NOT read.** — §57
+- Herr, F., Radespiel, R., & Probst, A. (2023). Improved delayed detached eddy
+  simulation with Reynolds-stress background modeling. *arXiv:2301.07223v2*;
+  published in *Computers & Fluids*, 265, 106014. **Appendix A is a complete
+  restatement of the IDDES formulation**, and is where §57's IDDES equations
+  come from, equation by equation. — §57
+- Savino, A., Griffin, K., Lee, S., Vijayakumar, G., Wu, S., & Sprague, M.
+  (2026). Improving boundary-layer separation prediction by an IDDES turbulence
+  model using a pressure-gradient sensor. *arXiv:2603.08875.* Section 2 states
+  SST-IDDES, and is where `C_DES1 = 0.78`, `C_DES2 = 0.61`, `C_w = 0.15` and
+  the simplified filter width come from. — §57
+- Nikitin, N. V., Nicoud, F., Wasistho, B., Squires, K. D., & Spalart, P. R.
+  (2000). *Physics of Fluids*, 12, 1629–1632. — §57 (the log-layer mismatch
+  `f_e` exists to remove)
+- Spalart, P. R. (2009). *Annual Review of Fluid Mechanics*, 41, 181–202.
+  — §57 (the review)
+- Fröhlich, J., Mellen, C. P., Rodi, W., Temmerman, L., & Leschziner, M. A.
+  (2005). *Journal of Fluid Mechanics*, 526, 19–66. — §57.12 (the
+  periodic-hill gate, named and **NOT run**)
 
 ### Wall treatment
 
@@ -843,6 +1055,220 @@ Sources for the numerical methods and models. Section numbers refer to
   turbulence models. *International Journal of Heat and Mass Transfer*, 34(2),
   377–388. — §17
 
+### Conjugate heat transfer
+
+- Carslaw, H. S., & Jaeger, J. C. (1959). *Conduction of Heat in Solids*, 2nd
+  ed., Oxford University Press, ch. I. — §46 (the anisotropic solid, and the
+  affine transformation that reduces `div(K grad T)` to `lap T`)
+- Aavatsmark, I. (2002). An introduction to multipoint flux approximations for
+  quadrilateral grids. *Computational Geosciences*, 6, 405–432. — §46.4
+  (the rigorous full-tensor treatment, and therefore the reason a full tensor
+  on a skewed mesh is refused rather than approximated by its diagonal)
+- Lipnikov, K., Shashkov, M., Svyatskiy, D., & Vassilevski, Yu. (2007).
+  *Journal of Computational Physics*, 227, 492–512. — §46.4 (the nonlinear
+  monotone alternative, named in the same refusal)
+- Giles, M. B. (1997). *International Journal for Numerical Methods in Fluids*,
+  25, 421–436. — §47 (the Godunov–Ryabenkii normal-mode analysis behind the
+  classical "Dirichlet on the fluid, Neumann on the solid" rule)
+- Meng, F., Banks, J. W., Henshaw, W. D., & Schwendeman, D. W. (2017). A stable
+  and accurate partitioned algorithm for conjugate heat transfer. *Journal of
+  Computational Physics*, 344, 51–85. — §47.7 (**Theorem 1**, the
+  amplification factor `K_R/K_L` that is the reason Dirichlet–Neumann
+  partitioning is not implemented here)
+- Henshaw, W. D., & Chand, K. K. (2009). *Journal of Computational Physics*,
+  228, 3708–3741. — §47 (Robin coefficients can always be chosen so the
+  sub-time-step iteration converges)
+- Verstraete, T., & Scholl, S. (2016). *International Journal of Heat and Mass
+  Transfer*, 101, 852–869. — §47 (the numerical Biot number, and FFTB's
+  instability above `Bi = 1`)
+- Gander, M. J. (2006). Optimized Schwarz methods. *SIAM Journal on Numerical
+  Analysis*, 44, 699–731. — §47 (the physical series conductance)
+- de Vahl Davis, G. (1983). Natural convection of air in a square cavity: a
+  bench mark numerical solution. *International Journal for Numerical Methods in
+  Fluids*, 3, 249–264. — §59.8, the fluid-only anchor run first, because a
+  conjugate answer built on an unvalidated buoyant solver measures nothing. Its
+  four numbers are quoted here from Qi et al. (2013), *Nanoscale Research
+  Letters*, 8, 56, Table 3 (open access), the primary being paywalled.
+- Kaminski, D. A., & Prakash, C. (1986). *International Journal of Heat and
+  Mass Transfer*, 29(12), 1979–1988. **Paywalled; no open-access copy was
+  found and the primary table was never read**, so no title is asserted for it
+  here either. — §60.5
+- Belazizia, A., Benissaad, S., & Abboudi, S. (2012). Effect of wall
+  conductivity on conjugate natural convection in a square enclosure with finite
+  vertical wall thickness. *Advanced Theoretical and Applied Mechanics*, 5(4),
+  179–190. Open access; an independent published solution of the
+  Kaminski–Prakash configuration, itself validated against it. **The SECONDARY
+  source Gate 5 actually compares against.** — §60.5
+- Qu, W., & Mudawar, I. (2002). *International Journal of Heat and Mass
+  Transfer*, 45. — §47.12's Gate 6, **NOT run**: §60.2's fluid region is a
+  closed cavity, so a forced-convection micro-channel has no inlet to name.
+
+### Combustion, soot and radiation
+
+- Magnussen, B. F., & Hjertager, B. H. (1977). *Proceedings of the Combustion
+  Institute*, 16, 719–729. — §27, §61.3
+- McGrattan, K., McDermott, R., & Floyd, J. E. (2022). A simple two-step reaction
+  scheme for soot and CO. *Proceedings of the Tenth International Seminar on Fire
+  and Explosion Hazards (ISFEH10)*, Oslo, 23–27 May 2022. A NIST work, US public
+  domain; fetched and read in full, and its Eqs. (1)–(5) are the model
+  implemented. — §42
+- McGrattan, K., Hostikka, S., McDermott, R., Floyd, J., Weinschenk, C., &
+  Overholt, K. *Fire Dynamics Simulator Technical Reference Guide*, NIST SP 1018
+  (NIST, US public domain; read locally from `reference/fds/Manuals/` — **no FDS
+  source code was read**). — §25, §42, §43, §66
+- Beyler, C. (2016). Flammability limits of premixed and diffusion flames. In
+  *SFPE Handbook of Fire Protection Engineering*, 5th ed. The
+  critical-flame-temperature and auto-ignition values, as quoted by two
+  independent NIST sources both read here. — §43
+- Morehart, J. H., Zukoski, E. E., & Kubota, T. (1991). NIST-GCR-90-585. — §43
+  (the self-extinction bracket, as quoted by the FDS Technical Reference Guide)
+- Lautenberger, C. W., de Ris, J. L., Dembsey, N. A., Barnett, J. R., & Baum,
+  H. R. (2005). A simplified model for soot formation and oxidation in CFD
+  simulation of non-premixed hydrocarbon flames. *Fire Safety Journal*, 40(2),
+  141–176. — §61 (the laminar-smoke-point model, and every constant in it)
+- Kent, J. H., & Honnery, D. (1990). *Combustion and Flame*, 79, 287. — §61
+  (the measured formation-rate map the smoke-point polynomials are shaped to)
+- Tewarson, A. *SFPE Handbook*, ch. 36, Table A.40, as quoted in the FDS
+  Validation Guide (NIST, public domain). — §61.8 (the measured post-flame
+  yield Gate 61-A misses)
+- Modest, M. F. (2013). *Radiative Heat Transfer*, 3rd ed., Academic Press,
+  ch. 5, 11, 15–17. — §28, §36, §50, §62, §65
+- Fiveland, W. A. (1984). Discrete-ordinates solutions of the radiative
+  transport equation for rectangular enclosures. *Journal of Heat Transfer*,
+  106, 699. — §36, §65
+- Truelove, J. S. (1987). Discrete-ordinate solutions of the radiation
+  transport equation. *Journal of Heat Transfer*, 109, 1048. — §36, §65
+- Hottel, H. C., & Sarofim, A. F. (1967). *Radiative Transfer*, McGraw-Hill.
+  — §50 (the net-radiation exchange method), §62 (the weighted-sum
+  construction itself)
+- Bordbar, M. H., Węcel, G., & Hyppänen, T. (2014). A line by line based
+  weighted sum of gray gases model for inhomogeneous CO2–H2O mixture in
+  oxy-fired combustion. *Combustion and Flame*, 161(9), 2435–2445. — §62 (the
+  coefficient set implemented). Its own tabulated emissivities could not be
+  obtained, which is why Gate 1-E measures against RADCAL instead.
+- Grosshandler, W. (1993). *RADCAL: A Narrow-Band Model for Radiation
+  Calculations in a Combustion Environment*, NIST Technical Note 1402. US
+  public domain; NIST's own implementation ships at `reference/fds/Source/rcal.f90` and
+  `tools/radcal_emissivity/` compiles it **unmodified** behind a standalone
+  driver. — §62.12 (the reference Gate 1-E measures the total emissivity
+  against)
+- Sung, Chen, Bundy, Fernandez & Hamins (2021). NIST Technical Note 2162r1 —
+  the 37 cm gas burner's measured radiative fractions, 0.23 / 0.30 / 0.33 at
+  20 / 34 / 50 kW. — §62.13 (Gate 4, which **misses**)
+- Steckler, Quintiere & Rinkinen (1982) — the compartment doorway-flow
+  measurements. Named in SPEC-LIT §42.8b as the prerequisite the Reduced Scale
+  Enclosure miss points to, and **NOT run**; the paper itself has not been read
+  here, so no report number or title is asserted for it.
+- Walton, G. N. (2002). *Calculation of Obstructed View Factors by Adaptive
+  Integration.* NISTIR 6925, National Institute of Standards and Technology. US
+  Government, public domain. — §49 (the area integral and its dot-product form,
+  the obstruction-elimination tests, the row-sum figure of merit, and the
+  `BB104` benchmark)
+- Shapiro, A. B. (1983). *FACET — A Radiation View Factor Computer Code for
+  Axisymmetric, 2D Planar and 3D Geometries with Shadowing.* UCID-19887, Lawrence
+  Livermore National Laboratory. US DOE, public domain. — §49.8 (the shadowed
+  configuration `F_12 = 0.115621`)
+- Howell, J. R. *A Catalog of Radiation Heat Transfer Configuration Factors*,
+  3rd ed. Entries **C-11** and **C-14**, both tracing to Hottel (1931) and
+  Hamilton & Morgan (1952). — §49.8 (the two analytic view-factor gates)
+- Gebhart, B. (1961). *International Journal of Heat and Mass Transfer*, 3(4),
+  341–346. — §50.2, the absorption-factor alternative, **named and not used**
+- Balaji & Venkateshan (1993, 1994); Akiyama & Chong (1997) — the coupled
+  convection-plus-surface-radiation cavity gate. — §50.12, **NOT run**: the
+  tabulated `Nu_conv`/`Nu_rad` are paywalled and the fluid side has no case
+  format for a radiating enclosure.
+
+### Rheology and the contact angle
+
+- Ostwald, W. (1925). *Kolloid-Zeitschrift*, 36, 99–117; de Waele, A. (1923).
+  — §38 (the power law)
+- Cross, M. M. (1965). *Journal of Colloid Science*, 20, 417–437. — §38
+- Carreau, P. J. (1972). *Transactions of the Society of Rheology*, 16,
+  99–127; Yasuda, K., Armstrong, R. C., & Cohen, R. E. (1981). *Rheologica
+  Acta*, 20, 163–178. — §38 (one formula serves both)
+- Herschel, W. H., & Bulkley, R. (1926). *Kolloid-Zeitschrift*, 39, 291–300.
+  — §38
+- Casson, N. (1959). In Mill, C. C. (ed.), *Rheology of Disperse Systems*,
+  Pergamon, 84–104. — §38
+- Papanastasiou, T. C. (1987). *Journal of Rheology*, 31, 385–404. — §38.3
+  (the regularisation, in the **product** form)
+- Bercovier, M., & Engelman, M. (1980). *Journal of Computational Physics*, 36,
+  313–326. — §38.3 (the alternative regularisation)
+- Frigaard, I. A., & Nouar, C. (2005). *Journal of Non-Newtonian Fluid
+  Mechanics*, 127, 1–26. — §38.3 (what regularisation costs)
+- Bird, R. B., Armstrong, R. C., & Hassager, O. (1987). *Dynamics of Polymeric
+  Liquids*, vol. 1, 2nd ed., Wiley. — §38 (the family)
+- Chhabra, R. P., & Richardson, J. F. (2008). *Non-Newtonian Flow and Applied
+  Rheology*, 2nd ed. — §38.9 (Buckingham–Reiner)
+- Young, T. (1805). *Philosophical Transactions of the Royal Society*, 95,
+  65–87. — §39 (the equilibrium angle)
+- Huh, C., & Scriven, L. E. (1971). *Journal of Colloid and Interface Science*,
+  35, 85–101. — §39 (the moving contact-line singularity)
+- Voinov, O. V. (1976). *Fluid Dynamics*, 11, 714–721; Cox, R. G. (1986).
+  *Journal of Fluid Mechanics*, 168, 169–194. — §39.4 (the asymptotic matching)
+- Hoffman, R. L. (1975). *Journal of Colloid and Interface Science*, 50,
+  228–241. — §39.4 (the master curve)
+- Jiang, T.-S., Oh, S.-G., & Slattery, J. C. (1979). *Journal of Colloid and
+  Interface Science*, 69, 74–77. — §39.4 (the explicit correlation used
+  here; Kistler's fit is **deliberately absent**, its four constants coming from
+  a book chapter this project has not read)
+- Afkhami, S., Zaleski, S., & Bussmann, M. (2009). *Journal of Computational
+  Physics*, 228, 5370–5389 — the mesh-dependent (numerical-slip) angle.
+  — §39.8, **named and deliberately not implemented** until the gate that would
+  show it works exists
+- Sui, Y., Ding, H., & Spelt, P. D. M. (2014). *Annual Review of Fluid
+  Mechanics*, 46, 97–119. — §39 (the review)
+- Washburn, E. W. (1921). *Physical Review*, 17, 273–283. — §39.7 (capillary
+  rise)
+
+### Lagrangian particles
+
+- Dukowicz, J. K. (1980). A particle-fluid numerical model for liquid sprays.
+  *Journal of Computational Physics*, 35, 229–253. — §66 (the discrete
+  droplet model: the parcel, and the real-valued weight `n_p`)
+- Crowe, C. T., Sharma, M. P., & Stock, D. E. (1977). The
+  particle-source-in-cell (PSI-CELL) model for gas-droplet flows. *Journal of
+  Fluids Engineering*, 99, 325. — §67, §68 (the per-cell sum every coupled
+  source is)
+- Crowe, C., Sommerfeld, M., & Tsuji, Y. (1998). *Multiphase Flows with Droplets
+  and Particles*, CRC Press. — §66.2 (the equation of motion, and which of its
+  terms survive)
+- Maxey, M. R., & Riley, J. J. (1983). *Physics of Fluids*, 26, 883. — §66,
+  §68 (the equation of motion: the added-mass coefficient, and the drag term
+  §68 returns to the gas)
+- Schiller, L., & Naumann, A. (1933). *Zeitschrift des Vereines Deutscher
+  Ingenieure*, 77, 318, in the form compiled by Clift, R., Grace, J. R., &
+  Weber, M. E. (1978). *Bubbles, Drops, and Particles*, Academic Press. — §66.3
+  (the drag correlation)
+- Macpherson, G. B., Nordin, N., & Weller, H. G. (2009). *Communications in
+  Numerical Methods in Engineering*, 25, 263. — §66.6, barycentric tracking:
+  the **paper** was read and it is **not implemented** — the one case the
+  face-crossing walk cannot do. Its OpenFOAM implementation is GPL-3.0 and was
+  **not** opened
+- Elghobashi, S. (1994). On predicting particle-laden turbulent flows. *Applied
+  Scientific Research*, 52, 309. — §67, §68 (the coupling map: at which
+  `alpha_p` two-way coupling begins to matter, and where collisions do)
+- Satish, N., Harris, M., & Garland, M. (2009). Designing efficient sorting
+  algorithms for manycore GPUs. *IEEE IPDPS 2009.* The **paper** was read; no
+  implementation of it was opened. — §67.4 (the three-phase radix pass)
+- Merrill, D., & Grimshaw, A. *Parallel scan for stream architectures.*
+  University of Virginia Technical Report CS2009-14. — §67.2
+- Blelloch, G. E. (1990). *Prefix sums and their applications.* CMU-CS-90-190.
+  — §67.2 (the exclusive scan and its work-efficiency argument)
+- Hillis, W. D., & Steele, G. L., Jr. (1986). *Communications of the ACM*,
+  29(12), 1170. — §67.2 (the in-block scan network, chosen for a property that
+  is not speed)
+- Steele, G. L., Jr., Lea, D., & Flood, C. H. (2014). Fast splittable
+  pseudorandom number generators. *OOPSLA 2014*, ACM SIGPLAN Notices, 49(10),
+  453. — §66.9 (the SplitMix64 finalising mix, used as a **bijection** and not
+  as a generator)
+- Ranz, W. E., & Marshall, W. R. (1952). Evaporation from drops. *Chemical
+  Engineering Progress*, 48, 141 and 173. — §68.5 (the sensible-heat half of
+  `Nu = 2 + 0.6 Re^(1/2) Pr^(1/3)`; the evaporative half is **refused by name**)
+- Theobald, R. C. (1981). The effect of nozzle design on the stability and
+  performance of turbulent water jets. *Fire Safety Journal*, 4, 1–13.
+  — §68.12, Gate 68-C, which **misses with the gas held at rest**
+
 ### Multiphase flow
 
 - Hirt, C. W., & Nichols, B. D. (1981). Volume of fluid (VOF) method for the
@@ -878,7 +1304,65 @@ Sources for the numerical methods and models. Section numbers refer to
 ### Porous media
 
 - Ward, J. C. (1964). Turbulent flow in porous media. *Journal of the Hydraulics
-  Division, ASCE*, 90(5), 1–12. — §18
+  Division, ASCE*, 90(5), 1–12. — §18, §53 (the same law integrated through a
+  slab instead of over a cell)
+- Idelchik, I. E. (2007). *Handbook of Hydraulic Resistance*, 4th ed., Begell
+  House, Diagrams 8-1 to 8-6 — perforated plates and screens, the source of
+  `K(sigma)`. **Not opened for §53**; the thin-plate form used is the one
+  published in the open literature, and §53.7 gates it against its own limits.
+  — §53
+- Karki, K. C., Radmehr, A., & Patankar, S. V. (2003). Use of computational fluid
+  dynamics for calculating flow rates through perforated tiles in raised-floor
+  data centers. *HVAC&R Research*, 9(2), 153–166. — §53.8 (the per-tile
+  flow-rate gate, **NOT run** — the paper was not reachable from this
+  environment)
+- Karki, K. C., & Patankar, S. V. (2006). Airflow distribution through perforated
+  tiles in raised-floor data centers. *Building and Environment*, 41(6),
+  734–744. — §53
+
+### Ventilation, psychrometrics and data-centre metrics
+
+- AMCA 210 / ASHRAE 51, *Laboratory Methods of Testing Fans for Certified
+  Aerodynamic Performance Rating.* — §52 (what a manufacturer's curve **is**,
+  and therefore why §52.5 carries a density and a speed correction rather than
+  treating the table as absolute)
+- NIST, *Fire Dynamics Simulator* verification suite, `Verification/HVAC/
+  fan_test.fds` and `qfan_test.fds` with their published `.csv` reference values
+  — US Government public domain. **The input files and their published results
+  only**; no FDS source was read for the fan model. — §52.12 Gate 52-B
+- Buzbee, B. L., Dorr, F. W., George, J. A., & Golub, G. H. (1971). The direct
+  solution of the discrete Poisson equation on irregular regions. *SIAM Journal
+  on Numerical Analysis*, 8(4), 722–736. — §52.9 (the capacitance-matrix path,
+  **named and refused**)
+- ASHRAE (2021). *ASHRAE Handbook—Fundamentals*, Chapter 1, "Psychrometrics."
+  — §54.2 (whose equation numbering is used), §54.8 (Table 2, the external
+  comparison)
+- Hyland, R. W., & Wexler, A. (1983). Formulations for the thermodynamic
+  properties of the saturated phases of H2O from 173.15 K to 473.15 K. *ASHRAE
+  Transactions*, 89(2A), 500–519. — §54.2 (the `C1`–`C13` coefficients)
+- Herrmann, S., Kretzschmar, H.-J., & Gatley, D. P. (2009). Thermodynamic
+  properties of real moist air, dry air, steam, water, and ice (RP-1485).
+  *HVAC&R Research*, 15(5), 961–986. — §54.3, **named and not implemented**;
+  the enhancement factor it carries is what makes the ideal relations 0.44 % low
+  in `W_s` at 25 °C, which §54.8 prints rather than tolerates
+- Gatley, D. P., Herrmann, S., & Kretzschmar, H.-J. (2008). A twenty-first
+  century molar mass for dry air. *HVAC&R Research*, 14(5), 655–662. — §54
+  (where `M_a = 28.966 g/mol`, and hence `eps = 0.621945`, come from)
+- Herrlin, M. K. (2005). Rack cooling effectiveness in data centers and telecom
+  central offices: the Rack Cooling Index (RCI). *ASHRAE Transactions*, 111(2),
+  725–731. — §55.1
+- Herrlin, M. K. (2008). Airflow and cooling performance of data centers: two
+  performance metrics. *ASHRAE Transactions*, 114(2), 182–187. — §55.2 (RTI)
+- Sharma, R. K., Bash, C. E., & Patel, C. D. (2002). Dimensionless parameters for
+  evaluation of thermal design and performance of large-scale data centers.
+  *AIAA 2002-3091.* — §55.3 (SHI and RHI)
+- ASHRAE Technical Committee 9.9 (2021). *Thermal Guidelines for Data Processing
+  Environments*, 5th ed. — §55.1 (the Class A1–A4 recommended and allowable
+  envelopes RCI is measured against)
+- Wibron, E., Ljung, A.-L., & Lundström, T. S. (2019). *Energies*, 12(8), 1473. **CC-BY-4.0, licence verified live through the
+  Crossref REST API**, but the full text was not reachable from this environment,
+  so §55.8's six-configuration ranking gate is **NOT run** and only the one
+  relation the abstract states is gated. — §55.8
 
 ### Validation data
 

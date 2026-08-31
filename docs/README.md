@@ -7,7 +7,10 @@
 | `03-esi-vs-foundation.md` | ESI v2606에만 있는 것 / Foundation 12에만 있는 것 |
 | `05-io-redesign.md` | 케이스 입출력 재설계 — JSONC 케이스 형식과 그 스키마 |
 | `06-mesh-oss-2024.md` | 메쉬 관련 오픈소스 지형 조사 |
-| `07-fire-solver.md` | `ofgpu-fire`의 정식화와 검증 게이트 (벽 열전달 게이트의 전체 기록) |
+| `07-fire-solver.md` | `ofgpu-fire`의 정식화와 검증 게이트 — 벽 열전달 게이트의 전체 기록, 그을음·WSGG 게이트와 빗나가는 게이트들, 스펙트럼 복사의 실측 비용 |
+| `case-example.json` | `05`가 예시로 드는 JSONC 케이스 한 개 |
+| `schema/case-1.json` | JSONC 케이스 스키마. 리더가 쓰는 Rust 타입에서 `schemars`로 생성합니다 — 손으로 쓴 것이 아니라 생성된 것이므로 리더와 어긋날 수 없습니다 |
+| `_build_catalog.py` | `01`과 `02`를 생성한 스크립트 (아래 설명 참조) |
 
 `01`과 `02`는 `_build_catalog.py`가 조사 에이전트들의 구조화된 출력에서
 **결정적으로** 생성한 것입니다. 요약이 아니라 전수입니다 — 데이터의 모든 항목이
