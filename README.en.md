@@ -27,7 +27,7 @@ comparison against another CFD code.
 | Precision | Double by default; single via the `single` feature |
 | Target | NVIDIA GPUs |
 | Dependencies | cudarc, thiserror (AMGX optional) |
-| Validation | 1,621 unit tests across all targets (1,473 in the lib), 747 `ofgpu-validate` checks |
+| Validation | 1,657 unit tests across all targets (1,509 in the lib), 813 `ofgpu-validate` checks |
 
 ---
 
@@ -341,8 +341,8 @@ partition a property of the linked library rather than of the mesh.
 
 ### A mesh with 2:1 refinement interfaces — and the norm that decides it
 
-Adaptive mesh refinement is **not implemented and not started.** SPEC-LIT §74
-does the part that has to come first and can be settled on its own: build a mesh
+Adaptive mesh refinement is **not wired into any solver** — §75 below is what
+exists and what it costs. SPEC-LIT §74 does the part that has to come first and can be settled on its own: build a mesh
 that is *born* with 2:1 refinement interfaces, put the existing operators on it,
 and measure whether they are still second order across one. If they are not, no
 adaptation machinery would fix it.
@@ -429,14 +429,107 @@ passes, so the refusal is about the refinement and not about the generator. No
 capacitance-matrix repair is offered: that trick needs O(1) modified rows and a
 refined block is O(N^(2/3)) of them.
 
-**What is not claimed.** Nothing adapts, so there is no conservation-across-an-
-adapt test, no restriction or prolongation, no flux prolongation and no
-post-adapt projection. The skewness correction is measured on the Poisson
+**What §74 does not claim.** Nothing in §74 adapts, so its own measurements say
+nothing about restriction, prolongation or a post-adapt projection; §75 below is
+where the mesh starts changing. The skewness correction is measured on the Poisson
 equation only — not on convection, not on the pressure–velocity coupling, not on
 a turbulence model. A skewed *cyclic* couple is not corrected, and that is
 recorded as a limitation rather than detected. **p4est is GPL-2.0-or-later, not
 BSD-2** as the brief assumed; its licence was checked before anything was
 opened, and neither it nor libsc, t8code or OpenFOAM's refinement code was read.
+
+---
+
+### The adapt: refine, coarsen, and what a rebuild really costs
+
+SPEC-LIT §75 makes the mesh change. A criterion marks cells, a plan turns marks
+into a new leaf set under 2:1 balance, the addressing is rebuilt from one sort
+and two binary searches, and the fields are moved across conservatively. **No
+solver calls any of it and no case file can reach it** — what is delivered is
+the adapt as an operation, with its gates, and the README says that here rather
+than in a footnote.
+
+The mesh state is a **linear octree**: a base grid with the leaves of an octree
+over each base cell, stored as a leaf set and nothing else. There is no free
+list. Every adapt re-sorts the whole set, so the cell numbering is a function of
+the leaf set and not of the order the adapt visited things in — which is what
+makes an adapt reproducible run to run. On any mesh the static generator of §74
+can also express, the two emitters produce **identical bits**, asserted on the
+points, the face lists, and every geometric array.
+
+**The gates, and what measuring them found.**
+
+| gate | result |
+|---|---|
+| `sum V`, `sum ρV`, `sum ρφV` across a refine | **exactly 0** drift |
+| the same across a coarsen | **exactly 0** drift |
+| no new extremum, either way | holds |
+| refine → coarsen round trip | `6.5e-16` on `φ`, `2.4e-16` on `ρ` |
+
+Exactly zero, not merely below `1e-14`: the integrals are summed exactly and the
+transferred masses are the same floating-point numbers, redistributed.
+
+**The round trip the brief asked for cannot fail for a scheme that conserves.**
+Restriction is the exact left inverse of prolongation into a complete family, so
+refine-then-coarsen returns the field to round-off *by construction* rather than
+to the interpolation error. The direction that actually loses information is the
+other one, and it is the one worth measuring:
+
+| prolongation | coarsen-then-refine, observed order |
+|---|---|
+| piecewise-constant | **0.993, 0.998** |
+| limited-linear (Barth–Jespersen) | **2.200, 2.115** |
+
+**The conservative rescale the design note prescribed is singular, and is not
+needed.** `λ = ρφV / Σ ρ φ̂ V` divides by zero for any field whose
+volume-weighted mean over the parent is zero — a velocity component in a
+recirculation, `p_rgh` itself. Recentring the reconstruction on the
+volume-weighted centroid of the children makes the conserved sum telescope
+exactly, is never singular, and preserves the reconstructed gradient. A test
+refines a cell where `φ` is exactly zero, requires every new value finite and
+the mass and energy conserved, then **measures the rescale's denominator on the
+same data** and requires it to have vanished.
+
+**The rebuild needs no prefix scan.** The design note specified "two binary
+searches plus an exclusive scan". There is no scan: a `lower_bound` over a
+sorted array already *is* the exclusive prefix sum of the per-cell counts, so
+`cf_offset[c] = lower_bound(owner, c) + lower_bound(nbrKey, c)` exactly — and
+that identity is asserted cell by cell against a direct count, on a generated
+mesh, a 2:1 mesh and one that has actually been adapted. The rebuilt CSR equals
+what the mesh builder makes, element for element, on host and on device. Nine
+kernels, every one a gather, no `atomicAdd` of any width.
+
+**And the finding that reorders the work.** A captured CUDA graph bakes every
+kernel argument, so an adapt invalidates it; the design note called that the
+blunt version of the AMR problem and proposed an invasive redesign to avoid the
+recapture. Measured on this machine:
+
+| cells | one step /ms | host mesh rebuild /ms | device transfer /ms | graph recapture /ms | adapt every N | N if only the recapture |
+|---|---|---|---|---|---|---|
+| 512 | 0.262 | 2.204 | 0.040 | 0.084 | 444 | **17** |
+| 4 096 | 0.271 | 12.944 | 0.052 | 0.082 | 2 414 | **16** |
+| 13 824 | 0.288 | 30.076 | 0.057 | 0.083 | 5 244 | **15** |
+
+**Capture and instantiate cost 0.083 ms and do not grow with the mesh** — a
+graph's cost is in its node count — so recapturing every 16 steps costs 2 % of
+the run and every 50 steps costs 0.6 %. The recapture-avoidance redesign is not
+needed for this reason, and is not implemented, and that is why. What an adapt
+actually costs is the **host** mesh-and-geometry rebuild: 362× the recapture at
+13 824 cells and growing linearly while the recapture stays flat. At 10⁶ cells
+that is of order two seconds against a step of a millisecond or two, and no
+cadence makes it affordable. The binding constraint on adaptive refinement here
+is `mesh/geometry.rs`, not the graph.
+
+**What is not claimed.** The face flux is not transferred at all — neither the
+area-weighted split of a parent face nor a divergence-free filling of a refined
+parent's new interior faces — and that is the largest single gap between this
+and a solver that can adapt. There is no post-adapt pressure projection. Only
+scalar fields are transferred. The mesh rebuild is on the host. The multi-colour
+preconditioner is not rebuilt, and an adapt raises the maximum cell degree from
+6 to 24. `restart.rs`, the polyMesh writer and `bin/probe.rs` are untouched and
+would all need work before an adapt could happen mid-run. The Jasak–Gosman
+residual estimator and the Pope LES resolution index are **refused by name**,
+with the Löhner indicator as the alternative in both cases.
 
 ---
 
@@ -512,11 +605,11 @@ shared refusal now covers all of them:
 ## Validation
 
 ```
-cargo test        1447 passed, 0 failed, 4 ignored (lib)
-                  1595 passed, 0 failed, 6 ignored (every target — including the
+cargo test        1509 passed, 0 failed, 4 ignored (lib)
+                  1657 passed, 0 failed, 6 ignored (every target — including the
                   per-binary CLI-parsing suites and SPEC-LIT §13.4.1's per-driver
                   "two runs must differ" pair tests)
-ofgpu-validate    747 / 747 checks passed (699 computed live, 48 replayed from recorded
+ofgpu-validate    813 / 813 checks passed (765 computed live, 48 replayed from recorded
                   measurements), then a GENERATED list of the 6 gates that miss and the
                   3 verdicts that are open (SPEC-LIT §69)
 ```
@@ -539,7 +632,7 @@ differ-list, because that list asserts the opposite of what they claim.
 
 ### Gates that miss
 
-Every check `ofgpu-validate` runs passes; that is what 747 / 747 means. It is
+Every check `ofgpu-validate` runs passes; that is what 813 / 813 means. It is
 a different statement from "every published benchmark this project compares
 itself against is reproduced", and the two are not allowed to be confused
 here. The gates below are **comparisons against published measurements that
@@ -914,7 +1007,7 @@ raise `fatal error C1189` under the traditional MSVC preprocessor.
 
 | Executable | Purpose |
 |---|---|
-| `ofgpu-validate` | Numerical validation (747 checks) |
+| `ofgpu-validate` | Numerical validation (813 checks) |
 | `ofgpu-bench` | Throughput and memory benchmarks |
 | `ofgpu-graph-bench` | CUDA graph against per-launch execution |
 | `ofgpu-dispatch-bench` | Runtime dispatch cost |

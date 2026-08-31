@@ -450,6 +450,23 @@ fn max_abs_diff(a: &[Scalar], b: &[Scalar]) -> Scalar {
         .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()))
 }
 
+/// The sup norm of the RELATIVE difference. The adapt gates measure a field
+/// against itself after a round trip, where an absolute difference would be
+/// read differently on a temperature and on a mass fraction.
+fn max_rel_diff(a: &[Scalar], b: &[Scalar]) -> Scalar {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = (x - y).abs();
+            if y.abs() > 0.0 {
+                d / y.abs()
+            } else {
+                d
+            }
+        })
+        .fold(0.0 as Scalar, Scalar::max)
+}
+
 fn max_abs_diff_vec3(a: &[Vec3], b: &[Vec3]) -> Scalar {
     a.iter()
         .zip(b.iter())
@@ -2407,6 +2424,14 @@ fn run(c: &mut Checks) -> Result<()> {
     check_assembly(c, &gpu, &k, &mref, &gmref, DivScheme::Upwind)?;
     check_skew_correction(c, &gpu, &k, &mref, &gmref)?;
     drop(gmref);
+
+    // ---- and one that is ADAPTED into that state -------------------------
+    //
+    //      SPEC-LIT S75. Everything above this line is measured on a mesh
+    //      that was BORN with 2:1 interfaces. Below it the mesh changes.
+    println!("
+=== the adapt: refine, coarsen, and what a rebuild costs ===");
+    check_adapt(c, &gpu, &k)?;
 
     // ---- a 2-D block with empty front and back ---------------------------
     println!("\n=== 2-D block with empty front and back ===");
@@ -7542,6 +7567,546 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ==========================================================================
+//  The adapt - SPEC-LIT S75
+// ==========================================================================
+
+/// A refine and a coarsen, run end to end, with the four things that decide
+/// whether an adapt is one: it conserves, it stays 2:1 balanced, its
+/// addressing rebuild is the one the mesh builder makes, and the device agrees
+/// with the host on every kernel.
+///
+/// **This is not a solver running.** Nothing here is inside a time loop; the
+/// adapt is driven directly, which is exactly the state SPEC-LIT S75.9
+/// records. What is measured is the adapt.
+fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
+    use ofgpu::adapt::rebuild;
+    use ofgpu::adapt::transfer::{self, Integrals, Prolongation};
+    use ofgpu::adapt::{
+        gpu_loehner_indicator, loehner_indicator, mark_with_hysteresis, plan, AdaptKernels,
+        Forest, Mark, LOEHNER_EPS,
+    };
+
+    let ak = AdaptKernels::new(gpu)?;
+    let d = Vec3::new(0.125, 0.125, 0.125);
+
+    // A base grid whose middle block starts one level finer, so the adapt
+    // begins on a mesh that already has 2:1 interfaces rather than on a
+    // uniform box where every question is easier.
+    let mut lev = vec![0u32; 512];
+    for kk in 3..5 {
+        for jj in 3..5 {
+            for ii in 3..5 {
+                lev[ii + 8 * (jj + 8 * kk)] = 1;
+            }
+        }
+    }
+    let f0 = Forest::from_base_levels([8, 8, 8], d, &lev)?;
+    let r0 = f0.build()?;
+    let m0 = &r0.mesh;
+    let gm0 = GpuMesh::upload(gpu, m0)?;
+    c.note(&format!(
+        "starting mesh: {} cells, {} internal faces, {} of them 2:1 interfaces",
+        m0.n_cells,
+        m0.n_internal_faces,
+        r0.interface_faces().len()
+    ));
+
+    // A blob that is smooth everywhere and steep somewhere, and a density that
+    // varies, so nothing in the transfer can hide behind a constant.
+    let blob = |p: Vec3| {
+        let rr = ((p.x - 0.55).powi(2) + (p.y - 0.5).powi(2) + (p.z - 0.45).powi(2)).sqrt();
+        0.2 + (-((rr / 0.18).powi(2))).exp()
+    };
+    let dens = |p: Vec3| 1.0 + 0.3 * p.x - 0.2 * p.y;
+    let phi: Vec<Scalar> = m0.c.iter().map(|&p| blob(p)).collect();
+    let bphi: Vec<Scalar> = m0.b_cf.iter().map(|&p| blob(p)).collect();
+    let rho: Vec<Scalar> = m0.c.iter().map(|&p| dens(p)).collect();
+
+    let mut grad = Vec::new();
+    cpu::fvc_grad_scalar(&mut grad, &phi, &bphi, m0);
+
+    // ---- 1. the criterion -------------------------------------------------
+    let mut e = Vec::new();
+    loehner_indicator(&mut e, &phi, &bphi, &grad, m0, LOEHNER_EPS);
+    c.require(
+        "the Loehner indicator lies in [0,1] on every cell",
+        e.iter().all(|x| (0.0..=1.0 + 1e-12).contains(x)),
+    );
+    {
+        let d_phi = gpu.upload(&phi)?;
+        let d_bphi = gpu.upload(&bphi)?;
+        let d_grad = gpu.upload(&grad)?;
+        let mut d_e: DevBuf<Scalar> = gpu.zeros(m0.n_cells)?;
+        gpu_loehner_indicator(gpu, &ak, &mut d_e, &d_phi, &d_bphi, &d_grad, &gm0, LOEHNER_EPS)?;
+        gpu.sync()?;
+        c.check(
+            "device Loehner indicator == host reference",
+            max_abs_diff(&gpu.download(&d_e)?, &e),
+            1e-12,
+        );
+    }
+    // A linear field has no second derivative, and a second-derivative
+    // indicator that fires on one would refine a uniform shear everywhere.
+    {
+        let lin = Vec3::new(1.3, -0.8, 0.4);
+        let lf: Vec<Scalar> = m0.c.iter().map(|&p| lin.dot(p)).collect();
+        let lb: Vec<Scalar> = m0.b_cf.iter().map(|&p| lin.dot(p)).collect();
+        let lg = vec![lin; m0.n_cells];
+        let mut le = Vec::new();
+        loehner_indicator(&mut le, &lf, &lb, &lg, m0, LOEHNER_EPS);
+        c.check(
+            "the indicator is blind to a linear field",
+            le.iter().cloned().fold(0.0 as Scalar, Scalar::max),
+            1e-12,
+        );
+    }
+
+    // ---- 2. the plan ------------------------------------------------------
+    let mark = mark_with_hysteresis(&e, &f0.levels(), 0.12, 0.02, 2)?;
+    let n_marked = mark.iter().filter(|m| **m == Mark::Refine).count();
+    c.require("the criterion marked something to refine", n_marked > 0);
+    let p = plan(&f0, m0, &mark, 2)?;
+    let m1 = p.mesh.mesh.clone();
+    c.note(&format!(
+        "refine: {} -> {} cells, {} marked, {} promoted by 2:1 balance, \
+         {} sweeps to the fixed point",
+        f0.len(),
+        p.after.len(),
+        n_marked,
+        p.promoted,
+        p.balance_sweeps
+    ));
+    c.require("the adapted mesh is still 2:1 balanced", p.mesh.max_level_jump() == 1);
+    {
+        let deg: Vec<usize> = (0..m1.n_cells)
+            .map(|cc| (m1.cf_offset[cc + 1] - m1.cf_offset[cc]) as usize)
+            .collect();
+        let hi = deg.iter().copied().max().unwrap_or(0);
+        c.note(&format!("cell degree after the adapt: {} to {hi}", deg.iter().min().unwrap()));
+        c.require("no cell has more than 24 faces, which 2:1 balance bounds it to", hi <= 24);
+    }
+
+    // ---- 3. the addressing rebuild ---------------------------------------
+    {
+        let (csr, boff, bface) = rebuild::rebuild_addressing(&m1)?;
+        c.require("host CSR rebuild == the mesh builder's cf_offset", csr.cf_offset == m1.cf_offset);
+        c.require("host CSR rebuild == the mesh builder's cf_face", csr.cf_face == m1.cf_face);
+        c.require("host CSR rebuild == the mesh builder's cf_own", csr.cf_own == m1.cf_own);
+        c.require("host CSR rebuild == the mesh builder's bcf maps", boff == m1.bcf_offset && bface == m1.bcf_face);
+
+        let gm1 = GpuMesh::upload(gpu, &m1)?;
+        let nbr = rebuild::neighbour_order(&m1.neighbour, m1.n_cells)?;
+        let bo = rebuild::boundary_order(&m1.b_face_cells, m1.n_cells)?;
+        let dnp = gpu.upload(&nbr.perm)?;
+        let dnk = gpu.upload(&nbr.key)?;
+        let dbp = gpu.upload(&bo.perm)?;
+        let dbk = gpu.upload(&bo.key)?;
+        let g = rebuild::gpu_rebuild_addressing(gpu, &ak, &gm1, &dnp, &dnk, &dbp, &dbk)?;
+        gpu.sync()?;
+        c.require(
+            "device CSR rebuild == host, element for element",
+            gpu.download(&g.cf_offset)? == m1.cf_offset
+                && gpu.download(&g.cf_face)? == m1.cf_face
+                && gpu.download(&g.cf_own)? == m1.cf_own
+                && gpu.download(&g.bcf_offset)? == m1.bcf_offset
+                && gpu.download(&g.bcf_face)? == m1.bcf_face,
+        );
+
+        // And the sort that has to run before any of it.
+        let perm = rebuild::ldu_permutation(&m1.owner, &m1.neighbour)?;
+        c.require(
+            "the LDU radix sort is the identity on a mesh already in LDU order",
+            perm == (0..m1.n_internal_faces as Label).collect::<Vec<_>>(),
+        );
+    }
+
+    // ---- 4. the transfer, and the conservation gate -----------------------
+    let tgt = transfer::parent_targets(&p.map, &m1.c)?;
+    c.check(
+        "the conservative weights sum to one on every old cell",
+        tgt.wsum.iter().map(|w| (w - 1.0).abs()).fold(0.0 as Scalar, Scalar::max),
+        1e-15,
+    );
+    let mut psi = Vec::new();
+    transfer::barth_jespersen(&mut psi, &phi, &bphi, &grad, &tgt, &p.map, &m1.c, m0);
+    let mut rho1 = Vec::new();
+    transfer::transfer_density(&mut rho1, &rho, &m0.v, &m1.v, &p.map)?;
+    let mut phi1 = Vec::new();
+    transfer::transfer_scalar(
+        &mut phi1,
+        &phi,
+        &rho,
+        &grad,
+        &psi,
+        &tgt,
+        &m0.v,
+        &m1.v,
+        &m1.c,
+        &p.map,
+        Prolongation::LimitedLinear,
+    )?;
+
+    let i0 = Integrals::of(&rho, &phi, &m0.v);
+    let i1 = Integrals::of(&rho1, &phi1, &m1.v);
+    let (dv, dm, de) = i1.drift(&i0);
+    c.check("volume survives a refine", dv, 1e-14);
+    c.check("mass survives a refine", dm, 1e-14);
+    c.check("energy survives a refine", de, 1e-14);
+    c.require(
+        "a refine invents no new extremum",
+        i1.max <= i0.max + 1e-14 && i1.min >= i0.min - 1e-14,
+    );
+
+    // The device does the same transfer.
+    {
+        let gm1 = GpuMesh::upload(gpu, &m1)?;
+        let gmap = transfer::GpuMap::upload(gpu, &p.map)?;
+        let d_phi = gpu.upload(&phi)?;
+        let d_bphi = gpu.upload(&bphi)?;
+        let d_rho = gpu.upload(&rho)?;
+        let d_grad = gpu.upload(&grad)?;
+        let d_vold = gpu.upload(&m0.v)?;
+        let d_vnew = gpu.upload(&m1.v)?;
+        let d_cnew = gpu.upload(&m1.c)?;
+        let mut d_xbar: DevBuf<Vec3> = gpu.zeros(p.map.n_old)?;
+        let mut d_wsum: DevBuf<Scalar> = gpu.zeros(p.map.n_old)?;
+        transfer::gpu_parent_targets(gpu, &ak, &mut d_xbar, &mut d_wsum, &gmap, &d_cnew)?;
+        let mut d_psi: DevBuf<Scalar> = gpu.zeros(p.map.n_old)?;
+        transfer::gpu_barth_jespersen(
+            gpu, &ak, &mut d_psi, &d_phi, &d_bphi, &d_grad, &d_xbar, &gmap, &d_cnew, &gm0,
+        )?;
+        let mut d_rho1: DevBuf<Scalar> = gpu.zeros(p.map.n_new)?;
+        transfer::gpu_transfer_density(gpu, &ak, &mut d_rho1, &d_rho, &d_vold, &d_vnew, &gmap)?;
+        let mut d_phi1: DevBuf<Scalar> = gpu.zeros(p.map.n_new)?;
+        transfer::gpu_transfer_scalar(
+            gpu,
+            &ak,
+            &mut d_phi1,
+            &d_phi,
+            &d_rho,
+            &d_grad,
+            &d_psi,
+            &d_xbar,
+            &d_vold,
+            &d_vnew,
+            &d_cnew,
+            &gmap,
+            Prolongation::LimitedLinear,
+        )?;
+        gpu.sync()?;
+        c.check(
+            "device Barth-Jespersen limiter == host reference",
+            max_abs_diff(&gpu.download(&d_psi)?, &psi),
+            1e-13,
+        );
+        c.check(
+            "device density transfer == host reference",
+            max_abs_diff(&gpu.download(&d_rho1)?, &rho1),
+            1e-14,
+        );
+        c.check(
+            "device scalar transfer == host reference",
+            max_abs_diff(&gpu.download(&d_phi1)?, &phi1),
+            1e-13,
+        );
+        drop(gm1);
+    }
+
+    // ---- 5. the coarsen, and the round trip -------------------------------
+    //
+    //      Coarsen back exactly what was refined. The mesh must return to the
+    //      one it started on, and the field to ROUND-OFF - not to the
+    //      interpolation error. That is the finding of S75.7: restriction is
+    //      the exact left inverse of any conservative prolongation into a
+    //      complete family, so this direction of the round trip cannot lose
+    //      anything, and the direction that does lose is coarsen-then-refine.
+    let lv1 = p.after.levels();
+    let lv0max = f0.levels();
+    let back: Vec<Mark> = (0..p.after.len())
+        .map(|cc| {
+            let parent = p.map.src_cell[p.map.src_offset[cc] as usize] as usize;
+            if lv1[cc] > lv0max[parent] {
+                Mark::Coarsen
+            } else {
+                Mark::Keep
+            }
+        })
+        .collect();
+    let p2 = plan(&p.after, &m1, &back, 2)?;
+    let m2 = p2.mesh.mesh.clone();
+    c.note(&format!("coarsen: {} -> {} cells", p.after.len(), p2.after.len()));
+    c.require("the round trip returns the original cell count", p2.after.len() == f0.len());
+
+    let mut grad1 = Vec::new();
+    let bphi1: Vec<Scalar> = m1.b_cf.iter().map(|&pp| blob(pp)).collect();
+    cpu::fvc_grad_scalar(&mut grad1, &phi1, &bphi1, &m1);
+    let tgt2 = transfer::parent_targets(&p2.map, &m2.c)?;
+    let mut psi2 = Vec::new();
+    transfer::barth_jespersen(&mut psi2, &phi1, &bphi1, &grad1, &tgt2, &p2.map, &m2.c, &m1);
+    let mut rho2 = Vec::new();
+    transfer::transfer_density(&mut rho2, &rho1, &m1.v, &m2.v, &p2.map)?;
+    let mut phi2 = Vec::new();
+    transfer::transfer_scalar(
+        &mut phi2,
+        &phi1,
+        &rho1,
+        &grad1,
+        &psi2,
+        &tgt2,
+        &m1.v,
+        &m2.v,
+        &m2.c,
+        &p2.map,
+        Prolongation::LimitedLinear,
+    )?;
+
+    let i2 = Integrals::of(&rho2, &phi2, &m2.v);
+    let (dv, dm, de) = i2.drift(&i1);
+    c.check("volume survives a coarsen", dv, 1e-14);
+    c.check("mass survives a coarsen", dm, 1e-14);
+    c.check("energy survives a coarsen", de, 1e-14);
+    c.require(
+        "a coarsen invents no new extremum",
+        i2.max <= i1.max + 1e-14 && i2.min >= i1.min - 1e-14,
+    );
+
+    let rt_phi = max_rel_diff(&phi2, &phi);
+    let rt_rho = max_rel_diff(&rho2, &rho);
+    c.note(&format!(
+        "refine-then-coarsen round trip: phi {}, rho {} (relative, sup norm)",
+        sci(f64::from(rt_phi), 2),
+        sci(f64::from(rt_rho), 2)
+    ));
+    c.check("the refine-then-coarsen round trip returns phi to round-off", rt_phi, 1e-13);
+    c.check("the refine-then-coarsen round trip returns rho to round-off", rt_rho, 1e-13);
+
+    // The other direction, where the loss is real and is the prolongation's
+    // own. Coarsen the whole mesh and refine it back; what does not come back
+    // is what an adapt costs a field, and it is measured, not assumed.
+    //
+    // The field here is a smooth low-frequency one and NOT the steep blob
+    // above, deliberately. On a field the coarse mesh cannot resolve the
+    // round trip is dominated by what the RESTRICTION threw away - which is
+    // the same for both prolongations - and the comparison measures nothing.
+    // That is not a hypothetical: the blob gives 8.65e-1 for both.
+    let mut loss = Vec::new();
+    for mode in [Prolongation::Constant, Prolongation::LimitedLinear] {
+        let smooth = |pp: Vec3| 1.0 + (2.0 * pp.x).sin() * (1.7 * pp.y).cos() + 0.4 * pp.z * pp.z;
+        let lev1 = vec![1u32; 64];
+        let fa = Forest::from_base_levels([4, 4, 4], Vec3::new(0.25, 0.25, 0.25), &lev1)?;
+        let ra = fa.build()?;
+        let ma = &ra.mesh;
+        let pa: Vec<Scalar> = ma.c.iter().map(|&pp| smooth(pp)).collect();
+        let ba: Vec<Scalar> = ma.b_cf.iter().map(|&pp| smooth(pp)).collect();
+        let ha = vec![1.0 as Scalar; ma.n_cells];
+        let down = adapt_step(ma, &fa, &ha, &pa, &ba, &vec![Mark::Coarsen; fa.len()], 1, mode)?;
+        let bb: Vec<Scalar> = down.2.mesh.b_cf.iter().map(|&pp| smooth(pp)).collect();
+        let up = adapt_step(
+            &down.2.mesh,
+            &down.3,
+            &down.0,
+            &down.1,
+            &bb,
+            &vec![Mark::Refine; down.3.len()],
+            1,
+            mode,
+        )?;
+        let err = max_rel_diff(&up.1, &pa);
+        c.note(&format!(
+            "coarsen-then-refine with {mode:?} prolongation loses {} (relative, sup norm)",
+            sci(f64::from(err), 3)
+        ));
+        loss.push(err);
+    }
+    c.require(
+        "the round trip loses something in the direction that destroys information",
+        loss[0] > 1e-4,
+    );
+    c.require(
+        "limited-linear prolongation loses less than half what piecewise-constant does",
+        loss[1] < 0.5 * loss[0],
+    );
+
+    // ---- 6. the cadence: what a recapture costs, measured ------------------
+    //
+    //      SPEC-LIT S75.8. A captured CUDA graph bakes every kernel argument
+    //      and every grid dimension, so an adapt invalidates it. The question
+    //      is not whether that is true - it is - but how often an adapt can
+    //      afford to happen. That is `t_adapt / (overhead * t_step)`, and both
+    //      terms are measured here rather than estimated.
+    println!("\n  the adapt cadence, measured on this machine:");
+    println!(
+        "  {:>7} {:>10} {:>11} {:>11} {:>11} {:>9} {:>10}",
+        "cells", "t_step/ms", "t_plan/ms", "t_xfer/ms", "t_graph/ms", "N at 2%", "N graph"
+    );
+    let mut any = false;
+    for nb in [8usize, 16, 24] {
+        let dd = Vec3::new(1.0 / nb as Scalar, 1.0 / nb as Scalar, 1.0 / nb as Scalar);
+        let fb = Forest::uniform([nb, nb, nb], dd)?;
+        let rb = fb.build()?;
+        let mb = &rb.mesh;
+        let gmb = GpuMesh::upload(gpu, mb)?;
+
+        let pb: Vec<Scalar> = mb.c.iter().map(|&pp| blob(pp)).collect();
+        let bb: Vec<Scalar> = mb.b_cf.iter().map(|&pp| blob(pp)).collect();
+        let mut fld = GpuScalarField::zeros(gpu, &gmb, "psi")?;
+        gpu.write(&mut fld.f, &pb)?;
+        let bc = cpu::CpuScalarBc::dirichlet(&bb);
+        upload_bc(gpu, &mut fld, &bc, mb, BcKind::Mixed)?;
+        correct_boundary_conditions(gpu, &k.field, &mut fld, &gmb)?;
+        let mut gout: DevBuf<Vec3> = gpu.zeros(mb.n_cells)?;
+
+        // The reference answer, launched one kernel at a time.
+        fvc_grad_scalar(gpu, &k.fv, &mut gout, &fld, &gmb)?;
+        gpu.sync()?;
+        let direct = gpu.download(&gout)?;
+
+        // Capture a fifty-launch graph - about what one outer iteration of a
+        // turbulence model costs - and time capture + instantiate.
+        //
+        // One throwaway capture first. The very first capture in a process
+        // pays for driver machinery that has nothing to do with the mesh, and
+        // timing it would put a millisecond of warm-up into the smallest case
+        // and make the table say the opposite of what it means.
+        {
+            let warm = gpu.capture(|_| {
+                for _ in 0..50 {
+                    fvc_grad_scalar(gpu, &k.fv, &mut gout, &fld, &gmb)?;
+                }
+                Ok(())
+            })?;
+            if let Some(mut w) = warm {
+                w.upload()?;
+            }
+            gpu.sync()?;
+        }
+        let t0 = std::time::Instant::now();
+        let graph = gpu.capture(|_| {
+            for _ in 0..50 {
+                fvc_grad_scalar(gpu, &k.fv, &mut gout, &fld, &gmb)?;
+            }
+            Ok(())
+        })?;
+        let Some(mut graph) = graph else {
+            c.skip("the adapt cadence", "the captured graph held no work");
+            continue;
+        };
+        graph.upload()?;
+        gpu.sync()?;
+        let t_graph = t0.elapsed().as_secs_f64() * 1e3;
+
+        graph.launch()?;
+        gpu.sync()?;
+        if nb == 8 {
+            c.require(
+                "the captured graph computes what the direct launches do, bit for bit",
+                gpu.download(&gout)? == direct,
+            );
+            any = true;
+        }
+        let reps = 20;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            graph.launch()?;
+        }
+        gpu.sync()?;
+        let t_step = t0.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        // What an adapt costs: the plan (which rebuilds the mesh and its
+        // geometry on the host) and the transfer (which does not).
+        let eb = {
+            let mut g = Vec::new();
+            cpu::fvc_grad_scalar(&mut g, &pb, &bb, mb);
+            let mut e = Vec::new();
+            loehner_indicator(&mut e, &pb, &bb, &g, mb, LOEHNER_EPS);
+            e
+        };
+        let mkb = mark_with_hysteresis(&eb, &fb.levels(), 0.12, 0.02, 1)?;
+        let t0 = std::time::Instant::now();
+        let pl = plan(&fb, mb, &mkb, 1)?;
+        let t_plan = t0.elapsed().as_secs_f64() * 1e3;
+
+        let nmb = &pl.mesh.mesh;
+        let gmap = transfer::GpuMap::upload(gpu, &pl.map)?;
+        let d_p = gpu.upload(&pb)?;
+        let d_b = gpu.upload(&bb)?;
+        let d_r = gpu.upload(&vec![1.0 as Scalar; mb.n_cells])?;
+        let d_g = {
+            let mut g = Vec::new();
+            cpu::fvc_grad_scalar(&mut g, &pb, &bb, mb);
+            gpu.upload(&g)?
+        };
+        let d_vo = gpu.upload(&mb.v)?;
+        let d_vn = gpu.upload(&nmb.v)?;
+        let d_cn = gpu.upload(&nmb.c)?;
+        let mut d_xb: DevBuf<Vec3> = gpu.zeros(pl.map.n_old)?;
+        let mut d_ws: DevBuf<Scalar> = gpu.zeros(pl.map.n_old)?;
+        let mut d_ps: DevBuf<Scalar> = gpu.zeros(pl.map.n_old)?;
+        let mut d_rn: DevBuf<Scalar> = gpu.zeros(pl.map.n_new)?;
+        let mut d_pn: DevBuf<Scalar> = gpu.zeros(pl.map.n_new)?;
+        gpu.sync()?;
+        let t0 = std::time::Instant::now();
+        transfer::gpu_parent_targets(gpu, &ak, &mut d_xb, &mut d_ws, &gmap, &d_cn)?;
+        transfer::gpu_barth_jespersen(
+            gpu, &ak, &mut d_ps, &d_p, &d_b, &d_g, &d_xb, &gmap, &d_cn, &gmb,
+        )?;
+        transfer::gpu_transfer_density(gpu, &ak, &mut d_rn, &d_r, &d_vo, &d_vn, &gmap)?;
+        transfer::gpu_transfer_scalar(
+            gpu, &ak, &mut d_pn, &d_p, &d_r, &d_g, &d_ps, &d_xb, &d_vo, &d_vn, &d_cn, &gmap,
+            Prolongation::LimitedLinear,
+        )?;
+        gpu.sync()?;
+        let t_xfer = t0.elapsed().as_secs_f64() * 1e3;
+
+        let n_amort = ((t_plan + t_xfer + t_graph) / (0.02 * t_step)).ceil();
+        let n_graph = (t_graph / (0.02 * t_step)).ceil();
+        println!(
+            "  {:>7} {:>10.3} {:>11.3} {:>11.3} {:>11.3} {:>9.0} {:>10.0}",
+            mb.n_cells, t_step, t_plan, t_xfer, t_graph, n_amort, n_graph
+        );
+        drop(gmb);
+    }
+    c.require("the cadence measurement ran", any);
+    println!(
+        "  t_step is one replay of the fifty-launch graph; t_plan is the HOST mesh and\n           geometry rebuild; t_xfer is the four device transfer kernels; t_graph is\n           capture + instantiate. \"N at 2%\" is how many steps an adapt must be spread\n           over to cost 2 % of the run; \"N graph\" is the same figure if the graph\n           recapture were the ONLY cost. The gap between the two columns is the finding\n           of S75.8: the recapture is not what makes an adapt expensive."
+    );
+
+    Ok(())
+}
+
+/// One adapt, host side, returning `(rho, phi, mesh, forest)`.
+///
+/// A helper for the round-trip measurements above, which need to chain adapts
+/// and would otherwise repeat eight lines each time.
+#[allow(clippy::type_complexity)]
+fn adapt_step(
+    m: &HostMesh,
+    f: &ofgpu::adapt::Forest,
+    rho: &[Scalar],
+    phi: &[Scalar],
+    bphi: &[Scalar],
+    mark: &[ofgpu::adapt::Mark],
+    l_max: u32,
+    mode: ofgpu::adapt::transfer::Prolongation,
+) -> Result<(Vec<Scalar>, Vec<Scalar>, ofgpu::mesh::refined::RefinedBox, ofgpu::adapt::Forest)> {
+    use ofgpu::adapt::transfer;
+    let p = ofgpu::adapt::plan(f, m, mark, l_max)?;
+    let nm = &p.mesh.mesh;
+    let tgt = transfer::parent_targets(&p.map, &nm.c)?;
+    let mut grad = Vec::new();
+    cpu::fvc_grad_scalar(&mut grad, phi, bphi, m);
+    let mut psi = Vec::new();
+    transfer::barth_jespersen(&mut psi, phi, bphi, &grad, &tgt, &p.map, &nm.c, m);
+    let mut rho_new = Vec::new();
+    transfer::transfer_density(&mut rho_new, rho, &m.v, &nm.v, &p.map)?;
+    let mut phi_new = Vec::new();
+    transfer::transfer_scalar(
+        &mut phi_new, phi, rho, &grad, &psi, &tgt, &m.v, &nm.v, &nm.c, &p.map, mode,
+    )?;
+    Ok((rho_new, phi_new, p.mesh, p.after))
 }
 
 fn main() -> ExitCode {

@@ -19967,7 +19967,8 @@ later in the numbering, so every emitted internal face already has
 than assuming it, and errors by name if it is ever false.
 
 This is a generator, not an adapt: **nothing in this module changes a mesh after
-it is built.**
+it is built.** §75 is where a mesh does change, and its emitter is required to
+agree with this one bit for bit on every mesh both can express.
 
 ### 74.3 What a 2:1 hex interface costs, in numbers
 
@@ -20310,3 +20311,675 @@ printed.
   on convection, on the pressure–velocity coupling, or on a turbulence model has
   not been measured and no claim is made about it;
 * only `L_max = 1` and `L_max = 2` were exercised, and only on hexahedra.
+
+## 75. The adapt: the criterion, the transfer that conserves, and what a rebuild really costs
+
+§74 built a mesh that is *born* with 2:1 interfaces and showed the operators
+survive one. **This section makes the mesh change.** A criterion marks cells, a
+plan turns marks into a new leaf set under 2:1 balance, the addressing is
+rebuilt from a sort and two binary searches, and the fields are moved across
+conservatively.
+
+The gates are the ones the work was commissioned against: **mass and energy
+across a refine and across a coarsen, to round-off — a refine that loses heat
+is not a refine — and a refine-then-coarsen round trip that returns the field,
+with the error measured rather than assumed.** All of them pass, and three
+things came out of them that the design note of record did not say.
+
+1. **The refine-then-coarsen round trip is exact to round-off, not to the
+   interpolation error — by construction, for any conservative prolongation.**
+   Restriction is the exact left inverse of prolongation into a complete
+   family, so the direction the brief named cannot lose anything: measured
+   `6.5e-16` on `phi` and `2.4e-16` on `rho`. The direction that *does* lose is
+   **coarsen-then-refine**, and §75.7 measures it: observed order **0.993,
+   0.998** for piecewise-constant prolongation and **2.200, 2.115** for the
+   limited-linear one.
+2. **The conservative rescale the design note prescribed is singular, and is
+   not needed.** `lambda_P = rho_P phi_P V_P / sum_c rho_c phihat_c V_c`
+   divides by zero for any field whose volume-weighted mean over the parent is
+   zero — a velocity component in a recirculation, `p_rgh` itself. **Recentring
+   the reconstruction on the volume-weighted centroid of the children** makes
+   the conserved sum telescope exactly, is never singular, and preserves the
+   reconstructed gradient. §75.6.
+3. **The CUDA graph is not the problem. The host mesh rebuild is, by two
+   orders of magnitude.** Measured on this machine: capture + instantiate of a
+   fifty-launch graph costs **0.082–0.084 ms and does not grow with the mesh**,
+   which amortises at **N = 16 steps**. The host mesh-and-geometry rebuild
+   costs **2.2 / 12.9 / 30.1 ms** at 512 / 4096 / 13824 cells, which amortises
+   at **N = 444 / 2414 / 5244**. The design note called the graph collision
+   "the blunt version" of the AMR problem and estimated `t_adapt ≈ 5–20 ms` at
+   10^6 cells giving `N ≈ 20–50`. The recapture half of that estimate is right
+   and the conclusion drawn from it is wrong: §75.8.
+
+**Sources.** Each DOI below was verified against Crossref on 2026-09-01 by
+fetching `api.crossref.org/works/<doi>` and checking title, authors, venue,
+volume, issue, pages and year against what is printed here.
+
+* Löhner, R. "An adaptive finite element scheme for transient problems in CFD."
+  *Computer Methods in Applied Mechanics and Engineering* **61**(3), 323–338
+  (1987). DOI 10.1016/0045-7825(87)90098-3 — the second-derivative error ratio.
+  Written there for nodal shape functions; §75.3(a) is a **DESIGN**
+  restatement of it as a surface integral on a cell-centred finite-volume mesh.
+* Barth, T. J. & Jespersen, D. C. "The design and application of upwind schemes
+  on unstructured meshes." *27th Aerospace Sciences Meeting*, AIAA 89-0366
+  (1989). DOI 10.2514/6.1989-366 — the monotone reconstruction limiter of
+  §75.6, which is what stops a prolongation inventing an extremum.
+* Isaac, T., Burstedde, C. & Ghattas, O. "Low-Cost Parallel Algorithms for 2:1
+  Octree Balance." *2012 IEEE 26th International Parallel and Distributed
+  Processing Symposium*, 426–437 (2012). DOI 10.1109/IPDPS.2012.47 — the 2:1
+  balance condition. Its O(1)-ripple algorithm is **named and not
+  implemented**; §75.4 uses the monotone fixed-point sweep and says what that
+  costs (two sweeps on the gate mesh).
+* Sundar, H., Sampath, R. S. & Biros, G. "Bottom-Up Construction and 2:1
+  Balance Refinement of Linear Octrees in Parallel." *SIAM Journal on
+  Scientific Computing* **30**(5), 2675–2708 (2008). DOI 10.1137/070681727 —
+  the linear-octree representation (a leaf set and nothing else) and the
+  sort-then-search shape the rebuild of §75.5 takes.
+* Muzaferija, S. & Gosman, D. "Finite-Volume CFD Procedure and Adaptive Error
+  Control Strategy for Grids of Arbitrary Topology." *Journal of Computational
+  Physics* **138**(2), 766–787 (1997). DOI 10.1006/jcph.1997.5853 — a locally
+  refined arbitrary-topology FV mesh is an ordinary polyhedral mesh, which is
+  why an adapt here emits a plain `HostMesh` with no new patch kind.
+* Jasak, H. & Gosman, A. D. "Automatic resolution control for the finite-volume
+  method, Part 1: A-posteriori error estimates." *Numerical Heat Transfer,
+  Part B: Fundamentals* **38**(3), 237–256 (2000).
+  DOI 10.1080/10407790050192753; and "Part 2: Adaptive mesh refinement and
+  coarsening", same issue, 257–271. DOI 10.1080/10407790050192762 — the
+  principled estimator, and the refine/coarsen driver built on it.
+  **Named and not implemented**; refused by name in §75.9 with the Löhner
+  indicator as the alternative, because the residual estimator needs the
+  assembled matrix of the equation being adapted for and this section adapts on
+  a field alone.
+* Berger, M. J. & Colella, P. "Local adaptive mesh refinement for shock
+  hydrodynamics." *Journal of Computational Physics* **82**(1), 64–84 (1989).
+  DOI 10.1016/0021-9991(89)90035-1 — the restriction/prolongation pair, and the
+  flux-register apparatus §74.1 argues a face-based cell-centred code does not
+  need. Nothing in §75 reinstates it.
+* Balsara, D. S. "Divergence-free adaptive mesh refinement for
+  magnetohydrodynamics." *Journal of Computational Physics* **174**(2),
+  614–648 (2001). DOI 10.1006/jcph.2001.6917 — locally divergence-free flux
+  prolongation. **Named and not implemented**: the face flux is not prolonged
+  here at all, and §75.11 records that as the largest single gap.
+* Knuth, D. E. *The Art of Computer Programming*, vol. 3, 2nd ed., Addison-Wesley
+  (1998), §5.2.5 — distribution (radix) sorting, and the stability that makes a
+  least-significant-digit pass composable, which is what makes the face sort of
+  §75.5 a function of its input alone.
+* McGrattan, K., Hostikka, S., McDermott, R., Floyd, J., Weinschenk, C. &
+  Overholt, K. *Fire Dynamics Simulator User's Guide*, NIST Special Publication
+  1019, "Mesh Resolution" — **US Government work, public domain**, present
+  locally at `reference/fds/Manuals/`. The characteristic fire diameter `D*`
+  and the `D*/dx` resolution measure of §75.3(b).
+
+**Nothing was read from p4est (GPL-2.0-or-later), libsc (LGPL-2.1), t8code
+(GPL-2.0), OpenFOAM (GPL-3.0) or SU2 (LGPL).** p4est's licence was checked
+before anything was opened, in the work that produced §74, and it is not BSD.
+
+### 75.1 The state: a leaf set, and no free list
+
+`rust/src/adapt.rs`. A `Forest` is the base grid of §74.2 with an octree over
+each base cell, stored as its **leaves and nothing else**:
+
+```
+Leaf = (base cell, level, octant coordinates at that level)
+```
+
+with `oct[a] < 2^level`. There is no tree to walk. Every question this module
+asks is answered by an integer index or by the cell → face CSR of the mesh the
+forest emits, which is the point §74 made about neighbour search and which
+carries over unchanged.
+
+**The canonical order** is base cell first, then `(z, y, x)` of the leaf's
+lower corner projected onto a common grid. The projection is a left shift by
+`LEVEL_MAX - level`, so the order does not depend on how deep the forest
+currently is: shifting both sides of a comparison by the same amount cannot
+reorder them.
+
+**Every adapt re-sorts the whole leaf set.** There is no free list and no gap
+bookkeeping. That is a deliberate disagreement with the block-pool design the
+design note surveyed: for a *cell*-granular mesh a free list fragments the
+numbering away from spatial locality with every adapt, and the sort costs one
+pass. The consequence that matters is that **the cell numbering is a function
+of the leaf SET and not of the order the adapt visited things in**, which is
+what makes an adapt reproducible run to run.
+
+`Forest::from_leaves` refuses a leaf set that is not a partition of the base
+grid, measured as a volume sum in **exact integer arithmetic** on the
+level-`LEVEL_MAX` grid — so it cannot be fooled by round-off — plus a duplicate
+check on the corners, because the volume sum alone sees only the difference
+between overlap and gap. Those two together still miss an overlap paid for by a
+gap elsewhere between leaves that do not share a corner, so `Forest::build`
+carries the third check: after the leaf-to-voxel map is filled, a voxel no leaf
+claimed is refused by name, rather than letting the face grouping read a `-1`
+and index the leaf arrays out of range.
+
+### 75.2 The emitter, and the bit-for-bit identity with §74.2
+
+`Forest::build` emits the polyMesh, and its traversal is deliberately the same
+one `mesh::refined::build` runs: cell-major, minus side then plus side, the
+same corner winding, the same `BTreeMap` grouping of a face's voxels by the
+leaf on the far side.
+
+There is exactly **one** difference. The static generator's ordering guarantees
+that a leaf's `+axis` neighbour is later in the numbering, and it asserts that.
+An adapted forest has no such guarantee — a fine leaf deep inside a base cell
+can have a coarse `+x` neighbour that sorts earlier — so the emitter normalises
+the pair to `owner < neighbour` and reverses the polygon when it swaps, and the
+sort at the end puts the whole list into upper-triangular order.
+
+On any mesh the static generator can also express, the two therefore produce
+**identical bits**:
+`adapt::tests::the_forest_emitter_reproduces_the_static_generator` requires
+`assert_eq!` on the points, the face point lists, `owner`, `neighbour`, `v`,
+`c`, `sf`, `weights`, `delta_coeffs`, `non_orth_corr`, `skew_corr`,
+`b_face_cells` and the CSR, on three level fields. That is the cross-check that
+this module has not quietly become a second, different mesh generator.
+
+A separate cross-check goes the other way:
+`the_forest_and_the_geometry_agree_on_where_every_cell_is` compares the centre
+the `Forest` computes from integer arithmetic on the base grid with the centre
+the geometry sweep computes from the emitted polygons, to `1e-14`, on a mesh
+with three levels. Two completely different routes to the same point.
+
+### 75.3 The criterion
+
+Four indicators were surveyed; two are implemented and two are refused by name
+in §75.9. All of them are cell scalars in `[0, 1]` after normalisation, so they
+combine.
+
+**(a) The Löhner second-derivative indicator, restated for finite volumes.**
+**DESIGN.** The ratio is Löhner's; the surface-integral form is this project's,
+because Löhner wrote his for nodal shape functions.
+
+```
+N_P = | sum_f  Sf . [ (grad phi)_nbr(f) - (grad phi)_own(f) ] |
+
+D_P = sum_f |Sf| ( |nf.(grad phi)_N| + |nf.(grad phi)_P| )
+    + eps sum_f |Sf| Delta_f ( |phi_N| + |phi_P| )
+
+E_P = N_P / max(D_P, tiny)
+```
+
+`eps = 0.01` is the noise filter that stops the indicator chasing round-off in
+a smooth region; below it a smooth mesh refines everywhere.
+
+Two things about the numerator are worth stating because both are easy to get
+wrong and one of them was got wrong here first.
+
+* **It carries no owner sign, and that is not an omission.** Written with the
+  *outward* area vector the term is `s_f (s_f Sf) . [grad_M - grad_P]`, and the
+  two sign flips cancel: on the owner side `s_f = +1` and `M = neighbour`, on
+  the neighbour side `s_f = -1` and `M = owner`, and both reduce to
+  `+Sf.(grad_nbr - grad_own)` — the stored orientation, **the same value for
+  both cells of the face**. The device kernel therefore reads `owner[f]` and
+  `neighbour[f]` directly and uses `cfOwn` only for the denominator's
+  neighbour lookup.
+* **Writing it as "this cell and the other one" negates it on the neighbour
+  side, and the result is a third-derivative measure that is blind to a
+  parabola.** In one dimension the correct form sums to
+  `A (g_{P+1} - g_{P-1}) ~ 2Ah phi''`, and the sign-flipped one to
+  `A (g_{P+1} + g_{P-1} - 2 g_P) ~ A h^2 phi'''`. This is not hypothetical: the
+  first version of the kernel here had the second form, and it was the
+  device-versus-host cross-check that caught it, not the linear-field test —
+  **which both versions pass**, because a linear field kills both.
+
+`E_P` lies in `[0, 1]` by construction: every term of the numerator is bounded
+by the matching pair in the denominator. That is what lets one threshold mean
+the same thing for every field, and it is asserted rather than argued.
+
+**(b) The fire resolution criterion, `D*/dx`.** FDS User's Guide, "Mesh
+Resolution", US Government work, public domain:
+
+```
+D* = ( Qdot / (rho_inf cp_inf T_inf sqrt(g)) )^(2/5)         [m]
+
+E_P = 1  where  qdot'''_P > 0  and  V_P^(1/3) > D*/n*
+    = 0  elsewhere
+```
+
+`Qdot` is the total heat release rate, `sum_P V_P qdot'''_P`, a global
+reduction the host supplies. `n* = 16` is the User's Guide's own well-resolved
+figure and is a default rather than a free parameter. `V_P^(1/3)` is the edge
+length for a cube and the equivalent edge length for anything else.
+`d_star(1.0e6, 1.2, 1005, 293, 9.81) = 0.961 m` against the published formula,
+checked to `5e-3`.
+
+**(c) Combination and hysteresis.** Indicators combine by weighted **maximum**
+and not by sum: two indicators that each say "smooth" must not add up to
+"refine", and one that says "refine" must not be outvoted. Then
+
+```
+mark(P) = REFINE   if E_P > tau_r  and  level(P) < L_max
+          COARSEN  if E_P < tau_c  and  level(P) > 0
+          KEEP     otherwise
+```
+
+**`tau_c <= tau_r/4` is required, not advised.** A narrower band is refused by
+name — `"the hysteresis band is too narrow: tau_c = ... must be at most
+tau_r/4 = ..., or a mesh on the threshold refines and coarsens on alternate
+adapts and every adapt costs a full rebuild"` — because §75.8 measures what a
+rebuild costs and a mesh oscillating on the threshold pays it every time.
+`adapt::tests::hysteresis_reaches_a_fixed_point_on_a_steady_field` runs six
+adapts on a field that does not change and requires the cell count to stop
+moving.
+
+### 75.4 2:1 balance, promotion and cancellation
+
+The condition is `|level(P) - level(N)| <= 1` across every internal face. The
+sweep is
+
+```
+target[P] <- max( target[P], max_{N face-adjacent to P} target[N] - 1 )
+```
+
+run to a fixed point. Levels only rise and integer `max` is associative and
+exact, so the fixed point does not depend on the order the cells are visited.
+`the_balance_fixed_point_is_order_independent` runs it on a mesh and on the same
+mesh with its face list reversed and requires the same levels.
+
+**The sweep runs on the PRE-adapt leaf graph, and that is exact rather than
+approximate.** Children of `P` can only be face-adjacent to children of `N` if
+`P` and `N` were themselves face-adjacent, because children tile their parents;
+a coarsened family's face neighbours are the union of its members'. So a
+balance condition established on the old adjacency transfers to the new mesh
+without a second pass.
+
+Two things fall out and both are counted and printed:
+
+* **Promotion.** A cell the criterion never marked can still be refined,
+  because a neighbour was. On the gate mesh, 358 cells were marked and **10
+  more were promoted**, in **2 sweeps**.
+* **Cancellation.** A coarsen is only a coarsen if all eight siblings are
+  leaves, at the same level, and all marked — detected with a `BTreeMap` on the
+  parent key, which is ordered and therefore deterministic, never a hash order.
+  Balance can then still refuse it: raising any member above `level - 1`
+  cancels the whole family, which is itself a raise, so the loop stays monotone
+  and terminates. `a_coarsen_needs_all_eight_siblings` requires seven of eight
+  to leave the mesh alone; `balance_promotes_and_cancels` builds a level-2
+  island, whose 2:1 balance forces a ring of level-1 base cells around it, and
+  requires that coarsening one of those families to level 0 — which would leave
+  a jump of two onto the island — is cancelled and the mesh left untouched.
+
+**A family is keyed on its parent's LEVEL as well as its corner**, and that is
+not decoration. The canonical key shifts a leaf's octant onto a common grid, so
+a level-1 parent at octant `(0,0,0)` and a level-0 parent at octant `(0,0,0)`
+have the *same corner*. Keying the family map on the corner alone merges those
+two buckets, and where three levels meet inside one base cell a legitimate
+eight-member family lands in a bucket of fifteen and is refused. The refusal is
+conservative rather than wrong — nothing bad is emitted, a coarsen simply never
+happens — which is exactly why it needs a test rather than a comment:
+`a_family_is_not_confused_with_its_grandparent` builds that mesh and requires
+the eight to coarsen.
+
+Because targets are `level ± 1` and the input is balanced, a raise can never
+push a target above `L_max`, and no cell moves more than one level per adapt.
+That is the standard cadence and it is a consequence here rather than a rule.
+
+### 75.5 The rebuild: one sort, two binary searches, and the scan that is not needed
+
+`rust/src/adapt/rebuild.rs` and the two kernels `adaptCellFaceCsr` /
+`adaptBoundaryCsr`.
+
+An adapt renumbers every cell and every face, so two things must be rebuilt
+before any operator can run: the **LDU order** (faces sorted by
+`(owner, neighbour)`, §1) and the **cell → face CSR**, whose within-cell
+ordering is what makes `A psi` bitwise reproducible.
+
+The obvious build of the second is a scatter histogram,
+`atomicAdd(&count[owner[f]], 1)`, which needs integer atomics and — far worse —
+makes the order of the faces *within* a cell depend on thread scheduling. That
+order is exactly what `mesh::topology` documents as the source of run-to-run
+reproducibility, so a scatter build would trade the project's central guarantee
+for a histogram.
+
+**The construction.** After the sort, `owner` is non-decreasing. The design
+note said "two binary searches **plus an exclusive scan**". **The scan is not
+needed.** `cf_offset[c]` is by definition the number of (cell, face) incidences
+belonging to cells before `c`, which is the number of faces whose owner is
+before `c` plus the number whose neighbour is before `c`:
+
+```
+cf_offset[c] = lower_bound(owner, c) + lower_bound(nbrKey, c)
+```
+
+A `lower_bound` over a sorted array **is** the exclusive prefix sum of the
+per-cell counts, already computed. Computing it again costs a whole extra
+device-wide primitive.
+`rebuild::tests::the_offset_is_two_binary_searches_and_no_scan` asserts the
+identity cell by cell against a direct count, on three meshes.
+
+**The within-cell order** is ascending in face id with owned and neighboured
+faces **interleaved** — not "owned faces first, then neighboured faces", which
+is what the design note described and which would not match
+`build_cell_face_maps`. Reproducing it is a two-pointer merge of two ascending
+runs, one thread per cell, no atomic:
+
+* the owned run is the face ids `[own_begin, own_end)` **themselves**, because
+  the faces are sorted by owner first, so all of `c`'s owned faces are
+  consecutive;
+* the neighboured run is `nbrPerm[nbr_begin .. nbr_end]`, ascending because the
+  neighbour sort is stable.
+
+**The sort** is eight stable least-significant-digit radix passes of eight bits
+over the packed key `(owner << 32) | neighbour` — deterministic, a function of
+its input alone, and exactly what `cub::DeviceRadixSort` computes, which is why
+a fully device-resident adapt can use the library primitive and get these bits.
+A face that arrives with `owner >= neighbour` is refused by name rather than
+sorted into something plausible.
+
+`the_rebuilt_csr_is_the_one_the_mesh_builder_makes` requires the host rebuild to
+equal `build_cell_face_maps` element for element on a uniform mesh, a 2:1
+refined one with three levels, and **a mesh that has actually been adapted** —
+so the rebuild is tested on the numbering an adapt produces and not only on a
+generator's. `ofgpu-validate` requires the same of the device kernels.
+
+### 75.6 The transfer: one formula, three cases, and the rescale that is singular
+
+`rust/src/adapt/transfer.rs`. Write `C(p)` for the new cells old cell `p` feeds
+and `S(q)` for the old cells new cell `q` draws from, and give every pair the
+weight
+
+```
+w_qp = V_q / sum_{q' in C(p)} V_q'        so that   sum_{q in C(p)} w_qp = 1
+```
+
+which is exactly `1` for a kept or coarsened cell (the sum has one term) and
+the child's volume share for a refined one. Then
+
+```
+rho_q V_q       = sum_{p in S(q)} w_qp rho_p V_p
+rho_q phi_q V_q = sum_{p in S(q)} w_qp rho_p V_p phihat_qp
+```
+
+**and that single pair of gathers is restriction, prolongation and the identity
+at once.** Summing the first over `q` gives
+`sum_p rho_p V_p sum_q w_qp = sum_p rho_p V_p`. **Mass is conserved with no
+rescale and no correction pass**, and the same argument with `phi` gives energy.
+
+**The reconstruction, and why it is recentred.**
+
+```
+phihat_qp = phi_p + Psi_p (grad phi)_p . (x_q - xbar_p)
+xbar_p    = sum_{q in C(p)} w_qp x_q
+```
+
+The reconstruction is centred on `xbar_p`, the weight-weighted centroid of the
+cells `p` feeds, and **not** on the parent's own centre. That one change makes
+the second sum telescope:
+
+```
+sum_q w_qp phihat_qp = phi_p + Psi_p (grad phi)_p . ( sum_q w_qp x_q - xbar_p )
+                     = phi_p                                          exactly
+```
+
+For a coarsened or kept cell `C(p)` has one member, so `x_q = xbar_p` and the
+gradient term vanishes identically — restriction is the mass-weighted average
+with no special case in the code.
+
+**What the design note prescribed instead, and why it cannot be used.** The
+note's prolongation is a multiplicative rescale,
+
+```
+lambda_p = rho_p phi_p V_p / sum_c rho_c phihat_c V_c ,   phi_c = lambda_p phihat_c
+```
+
+**which is singular.** Any field whose volume-weighted mean over the parent is
+zero divides by zero, and near-zero gives an arbitrarily large `lambda` that
+destroys monotonicity along the way. That is not an exotic case: a velocity
+component in a recirculation, a temperature written as a fluctuation, and
+`p_rgh` itself all pass through zero routinely.
+`transfer::tests::the_multiplicative_rescale_is_singular_where_the_recentred_form_is_not`
+refines a cell in which `phi` is exactly zero and the gradient is not, requires
+every new value to be finite and the mass and energy to be conserved, and then
+**measures the rescale's denominator** on the same data and requires it to be
+below `1e-14` of its own natural scale — i.e. requires it to have vanished.
+
+On an exact hexahedral split the children's volumes are equal and `xbar_p` is
+the parent's own centroid, so the recentring is arithmetically inert: measured
+below `1e-15` from the parent centre. It earns its place on the round-off the
+geometry sweep leaves behind, and on any future split whose children are not
+congruent.
+
+**Monotonicity.** `Psi_p` is the Barth–Jespersen limiter evaluated at the
+reconstruction points an adapt actually uses — the centres of the cells `p`
+feeds, not the faces:
+
+```
+phi_max/phi_min over p and its face neighbours (a boundary face contributes its
+                                                evaluated face value)
+D_q   = (grad phi)_p . (x_q - xbar_p)
+psi_q = 1                             |D_q| below the floor
+      = min(1, (phi_max - phi_p)/D)   D > 0
+      = min(1, (phi_min - phi_p)/D)   D < 0
+Psi_p = min_q psi_q
+```
+
+so `phihat_qp` lies between the neighbourhood extrema, hence between the global
+extrema. A prolongation cannot invent one, which is what stops a refine turning
+a bounded mass fraction into one outside `[0, 1]`.
+
+### 75.7 The gates
+
+Every number below was produced on this machine (RTX 5070 Ti, `Scalar = f64`).
+The conservation integrals are summed with `exactsum::host_exact_sum` and not
+by accumulation, so a gate at `1e-14` measures the transfer and not the
+summation order — which on 10^4 cells is itself worth `1e-14`.
+
+**(a) Conservation.** On the `ofgpu-validate` gate mesh (568 cells with 96 2:1
+interface faces, refined to 3144 and coarsened back), with a Gaussian blob for
+`phi` and a linearly varying `rho`:
+
+| quantity | across the refine | across the coarsen |
+|---|---|---|
+| `sum V` | **0** | **0** |
+| `sum rho V` | **0** | **0** |
+| `sum rho phi V` | **0** | **0** |
+
+Exactly zero, not merely below `1e-14`. That is what "conservative by
+construction" means when the sums are exact: the transferred masses are the
+same floating-point numbers, redistributed.
+
+**(b) Monotonicity.** `max phi` does not rise and `min phi` does not fall,
+across the refine and across the coarsen.
+
+**(c) The round trip the brief asked for — and the finding.** A refine followed
+by the coarsen that undoes it returns the field to
+
+```
+phi:  6.50e-16      rho:  2.42e-16       (relative, sup norm)
+```
+
+**Round-off, not interpolation error.** And it is not a property of this
+implementation but of any conservative one: restriction is the exact left
+inverse of prolongation into a complete family, because
+`sum_q w_qp phihat_qp = phi_p` is precisely what conservation demands, and the
+restriction that follows computes exactly that sum. **The gate as briefed
+therefore cannot fail for a scheme that conserves**, which makes it a check on
+the conservation and not on the interpolation.
+
+**(d) The direction that does lose, measured.** Coarsen a resolved field and
+refine it back. On a smooth field, three mesh pairs, volume-weighted L2:
+
+| prolongation | L2 errors | observed orders |
+|---|---|---|
+| piecewise-constant | 8.529e-2, 4.286e-2, 2.145e-2 | **0.993, 0.998** |
+| limited-linear | 8.337e-3, 1.814e-3, 4.189e-4 | **2.200, 2.115** |
+
+First order and second order, as the two reconstructions promise. On the
+`ofgpu-validate` mesh the same round trip loses `1.223e-1` with piecewise
+constant and `1.469e-2` with limited-linear — **8.3× better at the same cell
+count**, which is what the second-order prolongation buys.
+
+One caution is recorded because it cost a test: on a field the coarse mesh
+**cannot resolve**, the round trip is dominated by what the restriction threw
+away, which is the same for both prolongations. The steep blob gives `8.65e-1`
+for both, and a comparison run on it measures nothing. The measurement above
+uses a smooth low-frequency field deliberately.
+
+**(e) Device versus host.** Every kernel in `adapt.cu` against a host reference
+written in the opposite loop shape — the reference scatters over faces and over
+old cells, the kernels gather one thread per cell:
+
+| kernel | agreement |
+|---|---|
+| `adaptLoehner` | `0` |
+| `adaptFireResolution` | exact (`assert_eq!`) |
+| `adaptBalanceSweep` | exact — the same integer fixed point |
+| `adaptCellFaceCsr` / `adaptBoundaryCsr` | exact, element for element |
+| `adaptParentTargets` | `< 1e-14` on `xbar`, `< 1e-15` on `sum w` |
+| `adaptLimiter` | `1.11e-16` |
+| `adaptTransferDensity` | `0` |
+| `adaptTransferScalar` | `1.67e-16` |
+
+### 75.8 The cadence, measured — and the finding that the graph is not the cost
+
+A captured CUDA graph bakes every kernel argument and every grid dimension, so
+an adapt invalidates it. The design note called this "the blunt version" of the
+AMR problem, estimated `t_adapt ≈ 5–20 ms` at 10^6 cells and `N ≈ 20–50` for
+2 % overhead, and proposed an invasive redesign — over-allocated buffers,
+element counts passed by device pointer through ~40 kernel signatures, pinned
+colour counts — to avoid the recapture entirely. **It also said: these are
+estimates, not measurements; measure them.**
+
+Measured, on this machine, in `ofgpu-validate`. `t_step` is one replay of a
+fifty-launch graph (about one turbulence outer iteration); `t_plan` is the host
+mesh and geometry rebuild inside `plan`; `t_xfer` is the four device transfer
+kernels; `t_graph` is capture + instantiate, after a throwaway capture so that
+first-call driver warm-up is not being timed.
+
+| cells | `t_step` /ms | `t_plan` /ms | `t_xfer` /ms | `t_graph` /ms | N at 2 % | N if only the recapture |
+|---|---|---|---|---|---|---|
+| 512 | 0.262 | 2.204 | 0.040 | 0.084 | 444 | **17** |
+| 4096 | 0.271 | 12.944 | 0.052 | 0.082 | 2414 | **16** |
+| 13824 | 0.288 | 30.076 | 0.057 | 0.083 | 5244 | **15** |
+
+**The answer to the question asked is `N = 16`** — 15 to 17 across the three
+sizes. Capture and instantiate cost 0.082–0.084 ms and **do not grow with the
+mesh** — a graph's cost is in its node count, which is fixed at fifty here — so
+recapturing every 16 steps costs 2 % of the run, and every 50 steps costs
+0.6 %. The design note's own cadence references (four steps for one code, 2–10
+for another) are comfortably above that. **The recapture-avoidance redesign of
+the design note is not needed for this reason. Nothing in this section
+implements it, and that is why.**
+
+These are one run's numbers. Repeated runs move `t_plan` by a few per cent and
+`t_graph` by one or two; the two orders of magnitude between the last two
+columns do not move.
+
+**What the adapt actually costs is the host mesh rebuild**, 362× the recapture
+at 13824 cells and growing linearly with the mesh while the recapture stays
+flat. The three `t_plan` figures are 4.3 / 3.2 / 2.2 µs per cell; at 10^6 cells
+that is of order two seconds, against a step that would be a millisecond or
+two. **No adapt cadence makes that affordable.** The binding constraint on
+adaptive refinement in this codebase is therefore
+`mesh/geometry.rs::compute` — 1396 host lines of polygon and pyramid
+decomposition that must run on every adapt — and porting it to the device is
+the next thing that has to happen, not the graph work.
+
+That is a reordering of the design note's own sequencing: its step 2 (port the
+geometry sweep) is confirmed as the critical path, and its step 4 (over-allocate
+and pass counts by device pointer, to make the graph survive) is measured to be
+worth 2 % of a run at a 16-step cadence and can wait. `t_xfer` — the part this
+section put on the device — is 0.040–0.057 ms, flat to within noise and
+negligible against everything else, which is the shape the rest of the rebuild
+needs to reach.
+
+### 75.9 §13.4 contract
+
+**Supported, as an API.** `ofgpu::adapt`:
+
+| what | how |
+|---|---|
+| the state | `Forest::uniform`, `Forest::from_base_levels`, `Forest::from_leaves`, `Forest::build` |
+| the criterion | `loehner_indicator` / `gpu_loehner_indicator`, `d_star`, `fire_resolution_indicator` / `gpu_fire_resolution_indicator`, `combine_max`, `mark_with_hysteresis` |
+| the plan | `plan`, `balance_sweep` / `gpu_balance_sweep` |
+| the rebuild | `rebuild::ldu_permutation`, `rebuild::neighbour_order`, `rebuild::cell_face_csr`, `rebuild::rebuild_addressing`, `rebuild::gpu_rebuild_addressing` |
+| the transfer | `transfer::parent_targets`, `transfer::barth_jespersen`, `transfer::transfer_density`, `transfer::transfer_scalar`, and their `gpu_` twins, under `Prolongation::{Constant, LimitedLinear}` |
+| the audit | `transfer::Integrals` — volume, mass, energy, min and max, summed exactly |
+
+**Refused by name, with the alternative.**
+
+| asked for | answer |
+|---|---|
+| **any `fvSchemes`, `controlDict` or case-file entry that turns adaptation on** | **There is none, and that is deliberate.** Nothing in a time loop calls any of the above. A case that asked for adaptive refinement would be asking for something no solver in this crate does, and the honest answer is that the machinery exists, is measured, and is not wired in. §75.11 is the list of what would have to land first. |
+| the Jasak–Gosman a-posteriori residual estimator | Recognised, not implemented. It needs the assembled matrix of the equation being adapted for, and this section's criteria take a field and a gradient. **Use the Löhner indicator**, which is the cheap first cut of the same idea and is what Part 2's driver falls back to. |
+| the Pope LES resolution index `M = k_sgs/(k_res + k_sgs)` | Recognised, not implemented. `k_res` is a running variance and therefore three extra fields of state that must themselves be restricted and prolonged on every adapt — a decision about the field registry, not about the criterion. **Use the Löhner indicator on velocity magnitude.** |
+| divergence-free prolongation of the face flux | Not implemented, not started. The face flux `phi_f` is not transferred at all. §75.11. |
+| a post-adapt pressure projection | Not implemented. It is one line of plumbing once there is a solver to plumb it into, and there is not. |
+| anisotropic refinement, or refinement of a tetrahedron, prism or cut cell | Refused: `Forest` is hexahedral by construction and `Leaf::children` splits 1 → 8. Refining a cut cell needs re-cutting against the surface, which is a separate project (§24). |
+| more than one level per adapt | Not expressible: `plan` moves a cell by at most one level, which §75.4 shows is a consequence of 2:1 balance rather than a restriction added on top. Call it twice. |
+| refinement level above 6 | Refused by name (`LEVEL_MAX`), and `Forest::build` refuses by name again if the finest grid would exceed `VOXEL_LIMIT` voxels. |
+
+**Bit-identical defaults, BY CONSTRUCTION.** §13.4.1 asks for a pair test for
+every setting added. **This section adds no setting.** There is no case-file
+entry, no `fvSchemes` key and no environment variable that reaches any of it,
+and no solver calls it, so no shipped case can produce a different answer than
+it did before — not to a tolerance, but because the code is never entered. That
+is the §70.7 precedent, and the equivalent claim is asserted instead:
+`adapt::tests::no_time_loop_reaches_the_adapt` walks the crate's own sources and
+requires that **no non-comment line** outside this module, `src/lib.rs` (which
+declares it) and `src/bin/validate.rs` (which measures it) names it at all. Non-
+comment, because `mesh::refined` carries a doc pointer here deliberately; the
+same shape as `validate.rs`'s own verdict-registry test.
+
+### 75.10 What must hold
+
+| # | Statement | Where it is checked |
+|---|---|---|
+| 1 | The forest emitter and §74.2's static generator produce identical bits on every mesh both can express | `adapt::tests::the_forest_emitter_reproduces_the_static_generator` |
+| 2 | The forest's integer cell centres and the geometry sweep's polygon centroids agree to `1e-14` | `adapt::tests::the_forest_and_the_geometry_agree_on_where_every_cell_is` |
+| 3 | A leaf set that is not a partition of the base grid is refused by name | `Forest::from_leaves`; exact integer volume sum |
+| 4 | The Löhner indicator lies in `[0,1]` and is zero on a linear field | `adapt::tests::the_loehner_indicator_is_bounded_and_blind_to_a_linear_field`; `ofgpu-validate` |
+| 5 | A hysteresis band narrower than `tau_r/4` is refused by name | `adapt::tests::a_narrow_hysteresis_band_is_refused_by_name` |
+| 6 | A steady field reaches a fixed point in cell count | `adapt::tests::hysteresis_reaches_a_fixed_point_on_a_steady_field` |
+| 7 | 2:1 balance's fixed point is independent of the order the faces are visited | `adapt::tests::the_balance_fixed_point_is_order_independent` |
+| 8 | Balance promotes cells the criterion never marked, and cancels a coarsen it must | `adapt::tests::balance_promotes_and_cancels`; `ofgpu-validate` (10 promoted, 2 sweeps) |
+| 9 | Seven of eight siblings are not a family | `adapt::tests::a_coarsen_needs_all_eight_siblings` |
+| 9b | A family is keyed on its parent's LEVEL as well as its corner, so a level-2 family inside a base cell that also holds level-1 leaves is not merged with the level-0 bucket and refused | `adapt::tests::a_family_is_not_confused_with_its_grandparent` |
+| 9c | A leaf set that overlaps itself and leaves a gap is refused by name, even when the two leaves do not share a corner | `Forest::build`, the unclaimed-voxel check |
+| 10 | The adapted mesh is 2:1 balanced and no cell exceeds 24 internal faces | `ofgpu-validate` |
+| 11 | `cf_offset[c] = lower_bound(owner,c) + lower_bound(nbrKey,c)`, with no scan | `rebuild::tests::the_offset_is_two_binary_searches_and_no_scan` |
+| 12 | The rebuilt CSR equals `build_cell_face_maps` element for element, on a generated mesh, a 2:1 mesh and an ADAPTED one | `rebuild::tests::the_rebuilt_csr_is_the_one_the_mesh_builder_makes`; `ofgpu-validate` for the device |
+| 13 | The radix sort is the identity on an LDU-ordered mesh and recovers the order from a shuffle | `rebuild::tests::the_radix_sort_recovers_the_ldu_order` |
+| 14 | A face with `owner >= neighbour`, or an unsorted owner array, is refused by name | `rebuild::tests::a_face_that_is_not_normalised_is_refused`, `an_unsorted_owner_array_is_refused` |
+| 15 | The conservative weights sum to one on every old cell, and `xbar` is the parent centre to `1e-15` | `transfer::tests::the_conservative_weights_sum_to_one`; `ofgpu-validate` |
+| 16 | **THE GATE.** Volume, mass and energy survive a refine and a coarsen to round-off | `transfer::tests::mass_and_energy_survive_a_refine_and_a_coarsen`; `ofgpu-validate` (all three exactly `0`) |
+| 17 | Neither a refine nor a coarsen invents an extremum | same |
+| 18 | **THE GATE.** A refine-then-coarsen round trip returns the field — measured at `6.5e-16` | `transfer::tests::refine_then_coarsen_returns_the_field_to_round_off`; `ofgpu-validate` |
+| 19 | Coarsen-then-refine loses at first order with piecewise-constant prolongation and second order with limited-linear | `transfer::tests::coarsen_then_refine_loses_information_at_the_order_the_prolongation_promises` (0.993/0.998 and 2.200/2.115) |
+| 20 | The design note's multiplicative rescale is singular on a field the recentred form handles | `transfer::tests::the_multiplicative_rescale_is_singular_where_the_recentred_form_is_not` |
+| 21 | Device == host for all nine kernels | `adapt::tests::the_device_agrees_with_the_host_on_every_adapt_kernel`; `ofgpu-validate` |
+| 22 | A captured graph replays what the direct launches compute, bit for bit | `ofgpu-validate` |
+| 23 | No non-comment line outside `src/adapt*`, `src/lib.rs` and `src/bin/validate.rs` names this module — so no shipped case can enter it | `adapt::tests::no_time_loop_reaches_the_adapt` |
+
+### 75.11 Validation, and what is NOT claimed
+
+`ofgpu-validate` gains a section, `the adapt: refine, coarsen, and what a
+rebuild costs`, which runs a refine and a coarsen end to end on a mesh that
+already has 2:1 interfaces, and prints the cadence table of §75.8.
+
+**Not claimed, and not implemented:**
+
+* **Nothing adapts inside a time loop.** No solver calls any of this, no case
+  file reaches it, and §75.9 says so in the contract rather than in a footnote.
+  What is delivered is the adapt as an operation, with its gates.
+* **The face flux is not transferred.** `phi_f` lives on faces, must stay
+  discretely divergence-free, and neither the area-weighted split of a parent
+  face nor the locally divergence-free filling of a refined parent's twelve new
+  interior faces is implemented. This is the largest single gap and it is what
+  stands between §75 and a solver that can adapt.
+* **There is no post-adapt pressure projection**, for the same reason.
+* **Only scalar fields are transferred.** A vector or tensor field needs the
+  same gathers component by component and nothing more, but they are not
+  written and so are not claimed.
+* **The mesh rebuild is on the host.** §75.8 measures that this, and not the
+  graph, is what makes an adapt expensive. The device kernels here cover the
+  criterion, the balance sweep, the transfer and the addressing rebuild; they
+  do not cover the geometry sweep, the emitter or the plan.
+* **The multi-colour preconditioner is not rebuilt.** `precon.rs` colours on
+  the host at setup; an adapt invalidates the colouring and raises the maximum
+  degree from 6 to as much as 24. Not measured here.
+* **The CSR export, `restart.rs`, `io/polymesh.rs` and `bin/probe.rs` are
+  untouched** and would all need work before an adapt could happen mid-run:
+  a probe is a cell index, and `constant/polyMesh` is no longer valid for every
+  time.
+* **`L_max = 2` and hexahedra only**, as in §74.

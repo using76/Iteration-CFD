@@ -23,10 +23,13 @@
 //!
 //! # What this is for
 //!
-//! Adaptive mesh refinement is not implemented, and this module does not
-//! implement it: **nothing here changes a mesh after it is built.** What it
-//! does is produce, statically, the mesh an adapt would have produced, so that
-//! the operators of SPEC-LIT section 3 can be measured on one.
+//! This module does not adapt anything: **nothing here changes a mesh after it
+//! is built.** What it does is produce, statically, the mesh an adapt would
+//! have produced, so that the operators of SPEC-LIT section 3 can be measured
+//! on one. `crate::adapt` (SPEC-LIT section 75) is where a mesh does change,
+//! and its emitter is required to agree with this one BIT FOR BIT on every
+//! mesh both can express - which is what stops the two from drifting into
+//! being different mesh generators.
 //!
 //! The point of doing that separately, and first, is SPEC-LIT section 74: a
 //! 2:1 hexahedral interface carries 25.24 degrees of non-orthogonality and a
