@@ -286,8 +286,12 @@ fn every_unsupported_setting_is_refused_by_name_with_the_menu() {
     assert!(e.contains("putnamStokes"), "{e}");
     assert!(e.contains("schillerNaumann"), "the menu must be printed: {e}");
 
-    let e = WallAction::from_name("stick").unwrap_err().to_string();
-    assert!(e.contains("stick") && e.contains("film"), "{e}");
+    // S78.11: `stick` was refused here until S78 built the deposit and the
+    // ledger that accounts for it. It is supported now, and the line that
+    // used to refuse it is a record of what changed rather than a deletion.
+    assert_eq!(WallAction::from_name("stick").unwrap(), WallAction::Stick);
+    let e = WallAction::from_name("film").unwrap_err().to_string();
+    assert!(e.contains("film") && e.contains("no film transport"), "{e}");
     let e = WallAction::from_name("splash").unwrap_err().to_string();
     assert!(e.contains("splash") && e.contains("population growth"), "{e}");
 
@@ -435,6 +439,7 @@ fn fall_to_terminal(
         max_substeps: 1,
         max_walk: 16,
         evaporation: EvaporationControls::default(),
+        impact: WallImpactControls::default(),
         persistent_blocks: None,
     };
     let mut p = Parcels::new(gpu, hm, gm, ctrl, &[], dt)?;
@@ -566,6 +571,7 @@ fn gate_66b_a_parcel_lands_in_the_cell_the_arithmetic_names() {
         max_substeps: 64,
         max_walk: 16,
         evaporation: EvaporationControls::default(),
+        impact: WallImpactControls::default(),
         persistent_blocks: None,
     };
     let dt: Scalar = 1.0;
@@ -622,6 +628,7 @@ fn a_parcel_aimed_out_of_the_domain_escapes_at_the_face_and_is_counted() {
         max_substeps: 64,
         max_walk: 32,
         evaporation: EvaporationControls::default(),
+        impact: WallImpactControls::default(),
         persistent_blocks: None,
     };
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[], 1.0).unwrap();
@@ -684,6 +691,7 @@ fn a_rebounding_parcel_follows_the_folded_straight_line() {
         max_substeps: 64,
         max_walk: 32,
         evaporation: EvaporationControls::default(),
+        impact: WallImpactControls::default(),
         persistent_blocks: None,
     };
     let dt: Scalar = 0.05;
@@ -749,6 +757,7 @@ fn base_controls() -> ParcelControls {
         max_substeps: 64,
         max_walk: 16,
         evaporation: EvaporationControls::default(),
+        impact: WallImpactControls::default(),
         persistent_blocks: None,
     }
 }
@@ -1357,6 +1366,7 @@ fn evaporating_controls(ev: EvaporationControls) -> ParcelControls {
         max_substeps: 64,
         max_walk: 16,
         evaporation: ev,
+        impact: WallImpactControls::default(),
         persistent_blocks: None,
     }
 }
@@ -2102,3 +2112,674 @@ fn the_device_evaporation_enumerations_match_the_host() {
     }
 }
 
+
+// ======================================================================
+//  SPEC-LIT S78 - the droplet-wall impact regime map
+// ======================================================================
+
+/// A cube of `wall` on all six sides, four cells a side. Every parcel below
+/// is fired at the `+z` face of it.
+fn impact_box() -> HostMesh {
+    block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6])
+}
+
+/// A parcel that feels nothing but its own inertia: no drag, no gravity, no
+/// heating. That is what makes S78's gates ANALYTIC - the impact velocity is
+/// the seeded velocity, exactly, so the impact Weber number is a closed form
+/// of the seed and not an output of the integrator.
+fn impact_controls(wall: WallAction, im: WallImpactControls, capacity: usize) -> ParcelControls {
+    ParcelControls {
+        capacity,
+        drag: DragModel::None,
+        physics: ParcelPhysics::Inert,
+        wall,
+        restitution: 1.0,
+        tangential_loss: 0.0,
+        gravity: Vec3::ZERO,
+        rho_liquid: 1000.0,
+        mu_gas: 1.8e-5,
+        c_liquid: 4182.0,
+        k_gas: 0.026,
+        cp_gas: 1005.0,
+        added_mass: false,
+        cfl: 0.9,
+        max_substeps: 64,
+        max_walk: 32,
+        evaporation: EvaporationControls::default(),
+        impact: im,
+        persistent_blocks: None,
+    }
+}
+
+/// Fire `speeds.len()` parcels straight at the `+z` wall, one per column of
+/// the mesh, and return the pool after they have all reached it.
+fn fire_at_the_wall(
+    gpu: &Gpu,
+    hm: &HostMesh,
+    gm: &GpuMesh,
+    ctrl: ParcelControls,
+    d: Scalar,
+    t: Scalar,
+    speeds: &[Scalar],
+) -> (ParcelSnapshot, ParcelStats) {
+    let dt: Scalar = 0.05;
+    let seeds: Vec<SeedParcel> = speeds
+        .iter()
+        .enumerate()
+        .map(|(i, &u)| SeedParcel {
+            // Spread over the 4x4 columns so that no two share a cell - not
+            // because they would interact (they cannot; S66 is one-way and
+            // collisionless) but so that a failure names one parcel.
+            position: Vec3::new(
+                0.125 + 0.25 * ((i % 4) as Scalar),
+                0.125 + 0.25 * (((i / 4) % 4) as Scalar),
+                // Close to the +z wall, so that the SLOWEST speed a gate
+                // sweeps still reaches it inside the run. A parcel that
+                // never landed would report "did not deposit" and pass a
+                // deposit test for the wrong reason.
+                0.9,
+            ),
+            velocity: Vec3::new(0.0, 0.0, u),
+            diameter: d,
+            temperature: t,
+            n_p: 1.0,
+            uid: None,
+        })
+        .collect();
+    let mut p = Parcels::new(gpu, hm, gm, ctrl, &[], dt).unwrap();
+    p.seed(gpu, hm, &seeds).unwrap();
+    let (ug, rho) = still_gas(gpu, gm, 1.2).unwrap();
+    for _ in 0..40 {
+        p.step(gpu, &ug, &rho, None, None, dt).unwrap();
+    }
+    (p.snapshot(gpu).unwrap(), p.stats(gpu).unwrap())
+}
+
+/// **Gate 78-A, the device half.** The regime the KERNEL takes is the regime
+/// [`WallImpactControls::regime`] says, at every impact speed - checked where
+/// it is hardest, one part in a million either side of the two boundaries
+/// that separate a rebound from a deposit.
+///
+/// The outcome is read from the parcel's own state and not from a counter, so
+/// each of the 4x2x2 impacts is identified individually: a deposited parcel
+/// is dead, flagged and stopped; a rebounding one is alive and moving.
+#[test]
+fn gate_78a_the_device_regime_boundaries_are_the_published_ones() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = impact_box();
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (rho_l, d, t) = (1000.0 as Scalar, 1e-4 as Scalar, 293.15 as Scalar);
+
+    for splash in [SplashCriterion::Mundo, SplashCriterion::BaiGosman] {
+        for tension in [SurfaceTension::Constant, SurfaceTension::IapwsR176] {
+            let im = WallImpactControls { splash, tension, ..Default::default() };
+            // The two boundaries a parcel's own state can resolve: below
+            // `weStick` it sticks, above it bounces; below `weSpread` it
+            // bounces, above it spreads.
+            let mut speeds = Vec::new();
+            for to in [WallRegime::Rebound, WallRegime::Spread] {
+                let u = im.boundary_speed(rho_l, d, t, to).unwrap();
+                speeds.push(u * (1.0 - 1e-6));
+                speeds.push(u * (1.0 + 1e-6));
+            }
+            let ctrl = impact_controls(WallAction::Weber, im, speeds.len());
+            let (s, st) = fire_at_the_wall(&gpu, &hm, &gm, ctrl, d, t, &speeds);
+
+            for (i, &u) in speeds.iter().enumerate() {
+                let want = im.classify(rho_l, d, t, u).1;
+                let deposited = s.flags[i] & FLAG_DEPOSITED != 0;
+                assert_eq!(
+                    deposited,
+                    want.deposits(),
+                    "{splash:?}/{tension:?} at {u} m/s: the host says {}, the device {}",
+                    want.name(),
+                    if deposited { "deposited" } else { "did not" }
+                );
+                if deposited {
+                    assert!(s.cell[i] < 0, "a deposited parcel is out of the working set");
+                    assert_eq!(s.u[i].z.to_bits(), (0.0 as Scalar).to_bits());
+                } else {
+                    assert!(s.cell[i] >= 0, "a rebounding parcel stays in it");
+                }
+            }
+            // Two of the four stuck or spread and two bounced, so the
+            // histogram is not vacuously right.
+            assert!(st.n_stick + st.n_spread + st.n_splash > 0);
+            assert!(st.n_rebound > 0);
+            st.check_wall_histogram(WallAction::Weber).unwrap();
+        }
+    }
+}
+
+/// **Gate 78-A, the splash boundary.** Spread and splash are both deposits,
+/// so the parcel's own state cannot tell them apart and the counter has to.
+/// One parcel per run, so the histogram names exactly one impact.
+#[test]
+fn gate_78a_the_splash_threshold_is_where_the_criterion_puts_it() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = impact_box();
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (rho_l, d, t) = (1000.0 as Scalar, 1e-4 as Scalar, 293.15 as Scalar);
+
+    for splash in [SplashCriterion::Mundo, SplashCriterion::BaiGosman] {
+        let im = WallImpactControls { splash, ..Default::default() };
+        let u0 = im.boundary_speed(rho_l, d, t, WallRegime::Splash).unwrap();
+        for (f, want) in [(1.0 - 1e-6, WallRegime::Spread), (1.0 + 1e-6, WallRegime::Splash)] {
+            let u = u0 * f;
+            assert_eq!(im.classify(rho_l, d, t, u).1, want, "the host's own map");
+            let ctrl = impact_controls(WallAction::Weber, im, 1);
+            let (_, st) = fire_at_the_wall(&gpu, &hm, &gm, ctrl, d, t, &[u]);
+            let got = [st.n_stick, st.n_rebound, st.n_spread, st.n_splash];
+            let hit: Vec<usize> = (0..4).filter(|&j| got[j] > 0).collect();
+            assert_eq!(
+                hit,
+                vec![want.code() as usize],
+                "{splash:?} at {u} m/s ({f} of the threshold): the histogram is {got:?} and \
+                 the map says {}",
+                want.name()
+            );
+        }
+        // ... and the threshold is a real, finite speed a spray reaches.
+        assert!(u0 > 1.0 && u0 < 100.0, "{splash:?}: splash at {u0} m/s");
+    }
+}
+
+/// **Gate 78-A, the sweep.** The two maps agree on every one of sixteen
+/// impact speeds spanning all four regimes, not only at the boundaries. A
+/// boundary test alone would pass a device map that was right at four points
+/// and wrong between them.
+#[test]
+fn gate_78a_the_device_and_host_maps_agree_over_the_whole_sweep() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = impact_box();
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (rho_l, d, t) = (1000.0 as Scalar, 1e-4 as Scalar, 293.15 as Scalar);
+    let im = WallImpactControls::default();
+    // Geometric, from well inside `stick` to well inside `splash`.
+    let speeds: Vec<Scalar> = (0..16)
+        .map(|i| 0.4 * (10.0 as Scalar).powf((i as Scalar) / 10.0))
+        .collect();
+    let ctrl = impact_controls(WallAction::Weber, im, speeds.len());
+    let (s, st) = fire_at_the_wall(&gpu, &hm, &gm, ctrl, d, t, &speeds);
+
+    let mut seen = [0usize; 4];
+    for (i, &u) in speeds.iter().enumerate() {
+        let want = im.classify(rho_l, d, t, u).1;
+        seen[want.code() as usize] += 1;
+        assert_eq!(
+            s.flags[i] & FLAG_DEPOSITED != 0,
+            want.deposits(),
+            "at {u} m/s the host says {}",
+            want.name()
+        );
+    }
+    // All four regimes were actually visited, so the sweep is a sweep.
+    for (r, n) in seen.iter().enumerate() {
+        assert!(*n > 0, "{} was never reached by the sweep", WallRegime::NAMES[r]);
+    }
+    // The three depositing counters are exact: a deposit ends the parcel, so
+    // each contributes exactly one impact.
+    assert_eq!(st.n_stick as usize, seen[WallRegime::Stick.code() as usize]);
+    assert_eq!(st.n_spread as usize, seen[WallRegime::Spread.code() as usize]);
+    assert_eq!(st.n_splash as usize, seen[WallRegime::Splash.code() as usize]);
+    // `n_rebound` is not, and the reason is a property worth stating: a
+    // rebounding parcel is RE-CLASSIFIED at every impact, and at `e = 1` the
+    // normal speed is preserved, so its regime is invariant and it bounces
+    // between the two walls for the rest of the run. The counter therefore
+    // counts impacts and not parcels, which is what a regime histogram
+    // should count.
+    assert!(
+        st.n_rebound as usize >= seen[WallRegime::Rebound.code() as usize],
+        "{} rebound impacts from {} rebounding parcels",
+        st.n_rebound,
+        seen[WallRegime::Rebound.code() as usize]
+    );
+    assert_eq!(
+        st.n_rebound > 0,
+        seen[WallRegime::Rebound.code() as usize] > 0
+    );
+    st.check_wall_histogram(WallAction::Weber).unwrap();
+}
+
+/// **Gate 78-B.** Nothing vanishes at a wall, and the exact form of that
+/// claim is per parcel: the mass sitting on the wall is BITWISE the mass that
+/// arrived, because `d` and `n_p` are not written by the deposit and the pool
+/// reclaims no slot.
+///
+/// The aggregate follows and is measured too - it closes to round-off rather
+/// than exactly, because the three sub-sums re-associate the one sum over the
+/// pool, and saying which of the two statements is exact is the point.
+#[test]
+fn gate_78b_every_gram_that_hits_a_wall_is_still_accounted_for() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([10, 10, 10], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let inj = Injector { mass_flow: 1e-3, ..base_injector() };
+
+    for wall in [WallAction::Stick, WallAction::Weber] {
+        let ctrl = ParcelControls { wall, ..base_controls() };
+        let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[inj], BASE_DT).unwrap();
+        let (ug, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
+        for _ in 0..BASE_STEPS {
+            p.step(&gpu, &ug, &rho, None, None, BASE_DT).unwrap();
+        }
+        let s = p.snapshot(&gpu).unwrap();
+        let st = p.stats(&gpu).unwrap();
+        st.check_capacity().unwrap();
+        st.check_wall_histogram(wall).unwrap();
+
+        // The partition, first: every slot is in exactly one of the three
+        // buckets. This is what "nothing vanishes" MEANS.
+        let live = s.live();
+        let dep = s.deposited();
+        let gone = s.gone();
+        assert_eq!(
+            live.len() + dep.len() + gone.len(),
+            s.n_slots,
+            "{}: the three buckets do not cover the pool",
+            wall.name()
+        );
+        let mut all: Vec<usize> = live.iter().chain(&dep).chain(&gone).copied().collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), s.n_slots, "{}: the buckets overlap", wall.name());
+        assert!(!dep.is_empty(), "{}: nothing reached a wall", wall.name());
+        assert!(!live.is_empty(), "{}: nothing was still flying", wall.name());
+
+        // The exact claim: each deposited droplet is bitwise the droplet the
+        // injector emitted. An inert parcel's `d` and `n_p` are written once,
+        // at injection, and the deposit does not touch them.
+        let m_droplet = ctrl.rho_liquid
+            * std::f64::consts::FRAC_PI_6 as Scalar
+            * inj.diameter
+            * inj.diameter
+            * inj.diameter;
+        let want_np = inj.mass_flow * BASE_DT / ((inj.parcels_per_event as Scalar) * m_droplet);
+        for &i in &dep {
+            assert_eq!(
+                s.d[i].to_bits(),
+                inj.diameter.to_bits(),
+                "{}: slot {i} lost diameter at the wall",
+                wall.name()
+            );
+            assert_eq!(
+                s.n_p[i].to_bits(),
+                want_np.to_bits(),
+                "{}: slot {i} lost weight at the wall",
+                wall.name()
+            );
+            assert_eq!(s.u[i].x.to_bits(), (0.0 as Scalar).to_bits());
+            assert_eq!(s.u[i].y.to_bits(), (0.0 as Scalar).to_bits());
+            assert_eq!(s.u[i].z.to_bits(), (0.0 as Scalar).to_bits());
+        }
+
+        // The aggregate: airborne + on the wall + gone = the pool.
+        let rl = ctrl.rho_liquid;
+        let sum = s.liquid_mass(rl) + s.deposited_mass(rl) + s.escaped_mass(rl);
+        let pool = s.pool_mass(rl);
+        assert!(
+            (sum - pool).abs() <= 8.0 * Scalar::EPSILON * pool,
+            "{}: {sum} against {pool}, a relative gap of {}",
+            wall.name(),
+            (sum - pool).abs() / pool
+        );
+        assert!(s.deposited_mass(rl) > 0.0);
+
+        // ... and the pool is the mass the injector says it emitted, which is
+        // what stops the ledger from balancing around a leak upstream of it.
+        let injected = (st.n_injected as Scalar) * want_np * m_droplet;
+        assert!(
+            (pool - injected).abs() <= 1e-12 * injected,
+            "{}: the pool holds {pool} and the injector emitted {injected}",
+            wall.name()
+        );
+    }
+}
+
+/// **Gate 78-B, the other half.** `stick` is `remove` plus exactly two
+/// statements - the velocity is zeroed and the flag is set - and nothing else
+/// about the run moves. So the mass the ledger now accounts for is precisely
+/// the mass `remove` was throwing away without saying so.
+#[test]
+fn gate_78b_stick_is_remove_plus_two_statements_and_nothing_else() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([10, 10, 10], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let inj = [Injector { mass_flow: 1e-3, ..base_injector() }];
+
+    let r = run_case(&gpu, &hm, &gm, base_controls(), &inj, BASE_STEPS).unwrap();
+    let ctrl = ParcelControls { wall: WallAction::Stick, ..base_controls() };
+    let k = run_case(&gpu, &hm, &gm, ctrl, &inj, BASE_STEPS).unwrap();
+
+    assert_eq!(r.n_slots, k.n_slots);
+    assert!(vec_bits_eq(&r.x, &k.x), "the trajectory moved");
+    assert!(bits_eq(&r.d, &k.d), "a diameter moved");
+    assert!(bits_eq(&r.n_p, &k.n_p), "a weight moved");
+    assert_eq!(r.cell, k.cell, "a parcel lived or died differently");
+    assert_eq!(r.uid, k.uid);
+
+    // The two statements, and only on the parcels that reached a wall.
+    let dep = k.deposited();
+    assert!(!dep.is_empty(), "nothing reached a wall, so this compares nothing");
+    for i in 0..k.n_slots {
+        let on_wall = dep.contains(&i);
+        assert_eq!(
+            k.flags[i],
+            r.flags[i] | if on_wall { FLAG_DEPOSITED } else { 0 },
+            "slot {i}: the flag word differs by more than the deposit bit"
+        );
+        if on_wall {
+            assert_eq!(k.u[i].z.to_bits(), (0.0 as Scalar).to_bits());
+        } else {
+            assert_eq!(k.u[i].x.to_bits(), r.u[i].x.to_bits(), "slot {i}");
+            assert_eq!(k.u[i].y.to_bits(), r.u[i].y.to_bits(), "slot {i}");
+            assert_eq!(k.u[i].z.to_bits(), r.u[i].z.to_bits(), "slot {i}");
+        }
+    }
+    // `remove` never set the bit, so its ledger is empty and its mass is
+    // unaccounted for - which is the defect S78 exists to fix.
+    assert_eq!(r.deposited().len(), 0);
+    assert!(k.deposited_mass(1000.0) > 0.0);
+}
+
+/// **Gate 78-C.** A run that never touches a wall is BITWISE what it was
+/// before S78 existed - every position, velocity, diameter, flag and
+/// identity - whatever the impact map is set to.
+///
+/// This is the construction claim rather than a measurement of one: the map
+/// is read inside `if (wallAction == OFP_WALL_WEBER)` at a `wall` face and
+/// nowhere else, so a domain with no wall in it cannot reach a single
+/// expression of it. The test is here because "cannot reach" is exactly the
+/// kind of claim that stops being true when somebody hoists a computation.
+#[test]
+fn gate_78c_a_run_with_no_wall_impact_is_bitwise_unmoved_by_the_map() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    // Every patch open: the parcels leave rather than land, so no impact of
+    // any kind happens and the map has nothing to classify.
+    let hm = block([10, 10, 10], [1.0, 1.0, 1.0], ["patch"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let inj = [Injector { mass_flow: 1e-3, ..base_injector() }];
+
+    let a = run_case(&gpu, &hm, &gm, base_controls(), &inj, BASE_STEPS).unwrap();
+    assert!(a.n_slots > 50, "the case must actually inject");
+    assert!(a.deposited().is_empty(), "something deposited; there is no wall to deposit on");
+
+    for im in [
+        WallImpactControls::default(),
+        WallImpactControls {
+            splash: SplashCriterion::BaiGosman,
+            tension: SurfaceTension::IapwsR176,
+            sigma: 0.03,
+            mu_liquid: 5e-3,
+            we_stick: 7.0,
+            we_spread: 33.0,
+            k_crit: 12.0,
+            splash_a: 900.0,
+        },
+    ] {
+        for wall in [WallAction::Remove, WallAction::Stick, WallAction::Weber] {
+            let ctrl = ParcelControls { wall, impact: im, ..base_controls() };
+            let b = run_case(&gpu, &hm, &gm, ctrl, &inj, BASE_STEPS).unwrap();
+            assert!(
+                snapshot_bits_eq(&a, &b),
+                "{}: the impact model moved a run that never met a wall",
+                wall.name()
+            );
+        }
+    }
+}
+
+/// **Gate 78-C, the default path.** A run under `remove` or `rebound` that
+/// DOES meet walls is bitwise identical whatever the impact model is set to -
+/// including a deliberately absurd one - because neither action reads it.
+///
+/// This is the claim that matters for "the defaults do not move": the
+/// no-wall test above shows the map cannot reach a run with nothing to
+/// classify, and this one shows it does not reach a run with plenty to
+/// classify either, so long as the case did not ask for it. It is a
+/// measurement of a construction - every expression of the map is inside
+/// `if (wallAction == OFP_WALL_WEBER)` - and the construction is what makes
+/// it true; the measurement is what would catch a hoist.
+#[test]
+fn gate_78c_the_default_wall_actions_do_not_read_the_impact_model() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([10, 10, 10], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let inj = [Injector { mass_flow: 1e-3, ..base_injector() }];
+
+    let absurd = WallImpactControls {
+        splash: SplashCriterion::BaiGosman,
+        tension: SurfaceTension::IapwsR176,
+        sigma: 1e-4,
+        mu_liquid: 5e-3,
+        we_stick: 1e6,
+        we_spread: 1e7,
+        k_crit: 1e-3,
+        splash_a: 1.0,
+    };
+    for wall in [WallAction::Remove, WallAction::Rebound] {
+        let a = run_case(
+            &gpu,
+            &hm,
+            &gm,
+            ParcelControls { wall, ..base_controls() },
+            &inj,
+            BASE_STEPS,
+        )
+        .unwrap();
+        let b = run_case(
+            &gpu,
+            &hm,
+            &gm,
+            ParcelControls { wall, impact: absurd, ..base_controls() },
+            &inj,
+            BASE_STEPS,
+        )
+        .unwrap();
+        assert!(
+            snapshot_bits_eq(&a, &b),
+            "{}: the impact model moved a run that never asked for it",
+            wall.name()
+        );
+        // Non-vacuity: parcels really did reach walls under `remove`, and
+        // really did bounce off them under `rebound`.
+        let s = if wall == WallAction::Remove {
+            a.n_slots - a.live().len()
+        } else {
+            a.live().len()
+        };
+        assert!(s > 0, "{}: nothing met a wall, so this compares nothing", wall.name());
+        assert!(a.deposited().is_empty(), "{}: nothing may be flagged", wall.name());
+    }
+}
+
+/// **Gate 78-C, the empty pool.** With no parcels at all, every counter this
+/// section added is exactly zero and every ledger term is `+0.0` - not
+/// `-0.0`, and not a NaN from a `0/0` Weber number nobody formed.
+#[test]
+fn gate_78c_an_empty_pool_deposits_exactly_nothing() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = impact_box();
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let ctrl = impact_controls(WallAction::Weber, WallImpactControls::default(), 8);
+    let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[], 0.05).unwrap();
+    let (ug, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
+    for _ in 0..4 {
+        p.step(&gpu, &ug, &rho, None, None, 0.05).unwrap();
+    }
+    let s = p.snapshot(&gpu).unwrap();
+    let st = p.stats(&gpu).unwrap();
+    assert_eq!((st.n_stick, st.n_rebound, st.n_spread, st.n_splash), (0, 0, 0, 0));
+    assert_eq!(st.n_wall, 0);
+    st.check_wall_histogram(WallAction::Weber).unwrap();
+    assert!(s.deposited().is_empty());
+    for m in [s.deposited_mass(1000.0), s.escaped_mass(1000.0), s.pool_mass(1000.0)] {
+        assert_eq!(m.to_bits(), (0.0 as Scalar).to_bits(), "an empty sum that is not +0.0");
+    }
+}
+
+/// S13.4.1: every setting S78 added owes a pair, and here they are. Each one
+/// is turned against the SAME four impacts - one in each regime under the
+/// defaults - so a knob that never reaches the kernel is named.
+///
+/// `surfaceTension` and `splashA` need their own bases, for the reason S66's
+/// own knob table records: a pair has to be posed where the setting bites.
+/// The IAPWS curve at 293.15 K is within 0.01 % of the default `sigma`, so it
+/// is turned against a `sigma` that is visibly not water's; and `splashA` is
+/// read only by the criterion that has an `A`.
+#[test]
+fn every_impact_setting_changes_what_the_run_writes() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = impact_box();
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (d, t) = (1e-4 as Scalar, 293.15 as Scalar);
+    // One impact in each of the four regimes, plus two placed where a
+    // single threshold bites: 1.5 m/s is `We = 3.0`, between the default
+    // `weStick` of 2 and the 3.5 the pair moves it to; 15 m/s is `We = 309`,
+    // above Mundo's splash threshold (about 111) and below Bai & Gosman's
+    // (about 531), which is the only place the two criteria disagree.
+    let speeds: [Scalar; 5] = [0.8, 1.5, 2.5, 6.0, 15.0];
+
+    let base = WallImpactControls::default();
+    let bai = WallImpactControls { splash: SplashCriterion::BaiGosman, ..base };
+    let cases: &[(&str, WallImpactControls, WallImpactControls)] = &[
+        ("splashCriterion", base, bai),
+        (
+            "surfaceTension",
+            WallImpactControls { sigma: 0.03, ..base },
+            WallImpactControls { sigma: 0.03, tension: SurfaceTension::IapwsR176, ..base },
+        ),
+        ("sigma", base, WallImpactControls { sigma: 0.02, ..base }),
+        ("muLiquid", base, WallImpactControls { mu_liquid: 1e-4, ..base }),
+        ("weStick", base, WallImpactControls { we_stick: 3.5, ..base }),
+        ("weSpread", base, WallImpactControls { we_spread: 60.0, ..base }),
+        ("kCrit", base, WallImpactControls { k_crit: 20.0, ..base }),
+        ("splashA", bai, WallImpactControls { splash_a: 200.0, ..bai }),
+    ];
+
+    for (name, a, b) in cases {
+        assert_ne!(a, b, "{name}: the knob turned nothing");
+        let run = |im: WallImpactControls| {
+            let ctrl = impact_controls(WallAction::Weber, im, speeds.len());
+            fire_at_the_wall(&gpu, &hm, &gm, ctrl, d, t, &speeds)
+        };
+        let (sa, ta) = run(*a);
+        let (sb, tb) = run(*b);
+        let hist = |t: &ParcelStats| (t.n_stick, t.n_rebound, t.n_spread, t.n_splash);
+        assert!(
+            hist(&ta) != hist(&tb) || !vec_bits_eq(&sa.u, &sb.u) || sa.flags != sb.flags,
+            "{name} is INERT: two runs differing only in it classified all four impacts \
+             identically, {:?} both times (SPEC-LIT S13.4.1)",
+            hist(&ta)
+        );
+    }
+}
+
+/// The four values of `wallInteraction` are four different runs, and the two
+/// S78 added are refused-no-longer. `spread`, `film` and `splash` are still
+/// refused, each with a note naming what is missing and what to ask for
+/// instead - S13.4's contract, and the reason the refusal list is a list
+/// rather than a shrug.
+#[test]
+fn the_wall_interaction_contract_names_what_it_gained_and_what_it_still_refuses() {
+    for s in WallAction::NAMES {
+        assert_eq!(WallAction::from_name(s).unwrap().name(), *s);
+    }
+    assert_eq!(WallAction::from_name("deposit").unwrap(), WallAction::Stick);
+    assert_eq!(WallAction::from_name("baiGosman").unwrap(), WallAction::Weber);
+    assert_eq!(WallAction::from_name("regime").unwrap(), WallAction::Weber);
+
+    for (bad, must) in [
+        ("spread", "film transport"),
+        ("film", "no film transport"),
+        ("splash", "population growth"),
+    ] {
+        let m = format!("{}", WallAction::from_name(bad).unwrap_err());
+        assert!(m.contains(must), "{bad}: {m}");
+        assert!(m.contains("S78"), "{bad} does not carry a section number: {m}");
+        assert!(m.contains("weber"), "{bad} does not print the menu: {m}");
+    }
+    // The three that used to be refused together are no longer one refusal:
+    // `stick` is supported and the other two are refused for DIFFERENT
+    // reasons, which is the whole content of S78.11.
+    let spread = format!("{}", WallAction::from_name("spread").unwrap_err());
+    let film = format!("{}", WallAction::from_name("film").unwrap_err());
+    assert_ne!(spread, film);
+    assert!(spread.contains("stick"), "{spread}");
+
+    // S13.4.2: the banner prints the impact model when it is in force and
+    // not when it is not.
+    let c = base_controls();
+    assert!(!ParcelControls { wall: WallAction::Remove, ..c }.describe().contains("S78"));
+    assert!(!ParcelControls { wall: WallAction::Stick, ..c }.describe().contains("S78"));
+    let w = ParcelControls { wall: WallAction::Weber, ..c }.describe();
+    assert!(w.contains("parcels/impact:"), "{w}");
+    assert!(w.contains("e=1 ft=0"), "{w}");
+}
+
+/// The device's regime codes are the host's, and they are also the offsets
+/// into the counter array. Both facts are load-bearing and neither is visible
+/// from either side alone, so a run with one impact of each kind pins them.
+#[test]
+fn the_device_regime_codes_are_the_host_regime_codes() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = impact_box();
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let im = WallImpactControls::default();
+    let (rho_l, d, t) = (1000.0 as Scalar, 1e-4 as Scalar, 293.15 as Scalar);
+    let ub = |r: WallRegime| im.boundary_speed(rho_l, d, t, r).unwrap();
+
+    for want in [
+        WallRegime::Stick,
+        WallRegime::Rebound,
+        WallRegime::Spread,
+        WallRegime::Splash,
+    ] {
+        // A speed squarely inside the band: the geometric mean of its two
+        // boundaries, or a factor either side of the one boundary it has.
+        let u = match want {
+            WallRegime::Stick => ub(WallRegime::Rebound) * 0.5,
+            WallRegime::Rebound => (ub(WallRegime::Rebound) * ub(WallRegime::Spread)).sqrt(),
+            WallRegime::Spread => (ub(WallRegime::Spread) * ub(WallRegime::Splash)).sqrt(),
+            WallRegime::Splash => ub(WallRegime::Splash) * 2.0,
+        };
+        assert_eq!(im.classify(rho_l, d, t, u).1, want, "the host's own map at {u} m/s");
+        let ctrl = impact_controls(WallAction::Weber, im, 1);
+        let (_, st) = fire_at_the_wall(&gpu, &hm, &gm, ctrl, d, t, &[u]);
+        // Exactly one slot of the histogram moved, and it is the one the
+        // host's code indexes. A rebounding parcel bounces for the rest of
+        // the run, so the COUNT is not one - the point being pinned is which
+        // slot, not how many.
+        let got = [st.n_stick, st.n_rebound, st.n_spread, st.n_splash];
+        let hit: Vec<usize> = (0..4).filter(|&j| got[j] > 0).collect();
+        assert_eq!(
+            hit,
+            vec![want.code() as usize],
+            "{} at {u} m/s gave the histogram {got:?}",
+            want.name()
+        );
+    }
+}
+
+/// A droplet impacts at the size and temperature it ACTUALLY has, not the
+/// ones it was injected at. The map reads `d` and `T_p` as locals inside the
+/// sub-step loop, and a droplet that shrank on the way to the wall has a
+/// smaller Weber number for it - which can move it a whole regime, and does
+/// here.
+#[test]
+fn a_droplet_impacts_at_the_size_and_temperature_it_arrives_with() {
+    let im = WallImpactControls::default();
+    let (rho_l, t) = (1000.0 as Scalar, 293.15 as Scalar);
+    let u: Scalar = 2.0;
+    let big = im.classify(rho_l, 2e-4, t, u).1;
+    let small = im.classify(rho_l, 1e-5, t, u).1;
+    assert_ne!(big, small, "the classification has to depend on the diameter at all");
+    assert_eq!(big, WallRegime::Rebound);
+    assert_eq!(small, WallRegime::Stick);
+    // ... and on the temperature, through the IAPWS surface tension: a hot
+    // droplet has less of it, so the same impact is a higher Weber number.
+    let hot = WallImpactControls { tension: SurfaceTension::IapwsR176, ..im };
+    let cold_we = hot.classify(rho_l, 1e-4, 293.15, u).0.we;
+    let hot_we = hot.classify(rho_l, 1e-4, 360.0, u).0.we;
+    assert!(hot_we > cold_we * 1.05, "{cold_we} against {hot_we}");
+}

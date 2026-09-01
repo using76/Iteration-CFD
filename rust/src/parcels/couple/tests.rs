@@ -69,6 +69,7 @@ fn base_controls() -> ParcelControls {
         max_substeps: 64,
         max_walk: 16,
         evaporation: EvaporationControls::default(),
+        impact: crate::parcels::WallImpactControls::default(),
         persistent_blocks: None,
     }
 }
@@ -1610,7 +1611,7 @@ fn full_coupling() -> CouplingControls {
 }
 
 /// A gas at rest with a temperature and a vapour fraction, uniform, so that
-/// the host reference of (77.9) can carry one number for each.
+/// the host reference of S77.9's gates can carry one number for each.
 fn wet_gas(
     gpu: &Gpu,
     m: &GpuMesh,
@@ -1690,7 +1691,7 @@ fn gate_77a_the_vapour_the_parcels_lost_is_the_vapour_the_gas_is_given() {
     );
 }
 
-/// The deposit is exactly what S77.5 says: S68's convective exchange plus
+/// The deposit is exactly what S77.4 says: S68's convective exchange plus
 /// the enthalpy the arriving mass carries, `cp_g mdot (T_p - T_g)`, and
 /// **nothing else**.
 ///
@@ -1763,7 +1764,7 @@ fn the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy() {
 ///
 /// Two things in it are worth stating because both are traps.
 ///
-/// **1. The registry integral is NOT the gas's energy change.** (77.5)
+/// **1. The registry integral is NOT the gas's energy change.** (77.2)
 /// deposits the NON-conservative source `cp mdot (T_p - T_g)`, because
 /// S26's equation is `rho cp DT/Dt = Q`. The gas also gains the mass itself,
 /// so the conservative change is `integral(q) dt + cp T_g dm`. Forgetting
@@ -1774,7 +1775,7 @@ fn the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy() {
 /// **2. `E_vapour` is not `h_v dm`.** It is [`live_parcel_vapour_energy`],
 /// the latent heat plus `dm (c_l - cp_g) T_p`, and the second term is the
 /// offset between two sensible pools whose enthalpy data are `c_l T` and
-/// `cp_g T`. S77.10 says what that means physically.
+/// `cp_g T`. S77.11 says what that means physically.
 #[test]
 fn gate_77b_the_energy_ledger_closes_across_the_phase_change() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1928,6 +1929,157 @@ fn gate_77e_an_empty_pool_couples_exactly_zero_vapour() {
     .unwrap();
     assert_eq!(cp.device_bytes() - dry.device_bytes(), gm.n_cells * 4 * 8);
     assert_eq!(dry.device_bytes(), gm.n_cells * 15 * 8);
+}
+
+/// **Gate 77-E, end to end.** S77's deposits are `+0.0` for an empty pool
+/// (above); this is the claim a case actually cares about, which is one
+/// consumer further on: an empty pool with `mass evaporation` ON leaves the
+/// GAS ANSWER - the solved vapour field and the target divergence - bit for
+/// bit where a run with no coupling at all left it.
+///
+/// The two are not the same statement. "The deposit is zero" is about this
+/// module; "the answer is unmoved" is about `fvm_su` and `energyAccumulate`,
+/// and it holds because the deposit is `+0.0` and `+0.0` is the ADDITIVE
+/// IDENTITY - the same argument S68.3 makes for the momentum deposit, one
+/// section over and now measured through the two S77 seams rather than
+/// asserted about them.
+///
+/// It is what a reader of S77 wants to know before turning the setting on:
+/// every case in this repository without a spray is unmoved, and not
+/// "within tolerance" - `to_bits()`.
+#[test]
+fn gate_77e_a_coupled_empty_pool_leaves_the_gas_bitwise_where_it_was() {
+    use crate::energy::{DomainKind, Energy, EnergyControls, GasProperties, GasState};
+    use crate::field::{BcKind, GpuScalarField};
+    use crate::io::case::TurbulenceControls as TCtrl;
+    use crate::scalar_transport::{ScalarTransport, ScalarTransportCoeffs};
+
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([3, 3, 3], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let dt: Scalar = 1e-3;
+    let t_g: Scalar = 335.0;
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, t_g, 0.006, 1.05);
+
+    // An evaporating pool with the whole of S77 switched on, and NOT ONE
+    // PARCEL in it. Every S77 array is `n_cells` long and every entry of it
+    // is written by the kernel this step.
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+    one_wet_step(&gpu, &mut p, &mut dep, &mut cp, &u, &rho, &t_gas, &y_gas, dt);
+
+    // ---- 1. the species field ----------------------------------------
+    //
+    // (77.1) handed to a `ScalarTransport` called `Yv` - S54's own humidity
+    // object - against the same object solved with no source at all.
+    let ctrl = TCtrl {
+        k_solver: crate::io::case::SolverControls {
+            tolerance: 1e-15,
+            rel_tol: 0.0,
+            max_iter: 500,
+            check_interval: 1,
+            ..crate::io::case::SolverControls::default()
+        },
+        k_relax: 1.0,
+        steady: false,
+        delta_t: dt,
+        sn_grad: crate::fv::SnGradScheme::Uncorrected,
+        ..TCtrl::default()
+    };
+    let nut = GpuScalarField::zeros(&gpu, &gm, "nut").unwrap();
+    let phi = crate::field::GpuSurfaceScalarField::zeros(&gpu, &gm, "phi").unwrap();
+    let uz = GpuVectorField::zeros(&gpu, &gm, "U").unwrap();
+    let flow = crate::turbulence::FlowState::new(&uz, &phi, 1.5e-5);
+    // A LUMPY initial field: a uniform one would be unmoved by a wrong
+    // source that happened to be uniform too.
+    let y0: Vec<Scalar> = (0..gm.n_cells)
+        .map(|c| 0.004 + 0.002 * ((c % 7) as Scalar) / 7.0)
+        .collect();
+    let solve = |su: Option<&DevBuf<Scalar>>| -> Vec<Scalar> {
+        let mut yv = ScalarTransport::new(
+            &gpu,
+            &hm,
+            &gm,
+            "Yv",
+            ScalarTransportCoeffs { pr: 0.6, prt: 0.7 },
+            ctrl,
+        )
+        .unwrap();
+        {
+            let f = yv.field_mut();
+            gpu.write(&mut f.f, &y0).unwrap();
+        }
+        yv.initialise(&gpu).unwrap();
+        yv.correct_with_source(&gpu, &flow, &nut, su).unwrap();
+        gpu.download(&yv.field().f).unwrap()
+    };
+    let bare = solve(None);
+    let coupled = solve(Some(cp.vapour_source()));
+    assert!(
+        bits_eq(&bare, &coupled),
+        "an empty pool's `+0.0` vapour source moved the solved Y_v"
+    );
+    // And the solve is not a no-op it would be trivially unmoved by: the
+    // equation transported the lumpy field it was given.
+    assert!(
+        !bits_eq(&bare, &y0),
+        "the species equation did not move the field at all, so the gate is vacuous"
+    );
+
+    // ---- 2. the target divergence ------------------------------------
+    //
+    // Both S77 halves at once: the energy deposit registered on
+    // `EnergySources` (which is how the phase change's ENERGY reaches
+    // `(div u)_target`, S77.6) and (77.3) passed as `d_mass` (which is how
+    // its VOLUME does). Neither may move a bit when the pool is empty.
+    let props = GasProperties { k: 0.026, cp: 1005.0, ..GasProperties::default() };
+    let ectrl = EnergyControls { steady: true, delta_t: 1.0, ..EnergyControls::default() };
+    let div = |register: bool| -> Vec<Scalar> {
+        let mut e = Energy::new(&gpu, &gm, ectrl, props).unwrap();
+        {
+            let f = e.field_mut();
+            let lumpy: Vec<Scalar> = (0..gm.n_cells)
+                .map(|c| 320.0 + 8.0 * ((c % 5) as Scalar))
+                .collect();
+            gpu.write(&mut f.f, &lumpy).unwrap();
+            gpu.write(
+                &mut f.bc_kind,
+                &vec![BcKind::ZeroGradient as crate::Label; hm.n_boundary_faces],
+            )
+            .unwrap();
+            gpu.write(&mut f.fr, &vec![0.0 as Scalar; hm.n_boundary_faces]).unwrap();
+            gpu.write(&mut f.ref_value, &vec![0.0 as Scalar; hm.n_boundary_faces])
+                .unwrap();
+            gpu.write(&mut f.ref_grad, &vec![0.0 as Scalar; hm.n_boundary_faces])
+                .unwrap();
+        }
+        e.initialise(&gpu).unwrap();
+        let mut gas = GasState::new(&gpu, &gm, props, DomainKind::Open, 101_325.0).unwrap();
+        gas.update_density(&gpu, e.field()).unwrap();
+        let k_cell = gpu.zeros::<Scalar>(gm.n_cells.max(1)).unwrap();
+        let d = if register {
+            cp.register_energy(&gpu, e.sources_mut()).unwrap();
+            Some(cp.divergence_source())
+        } else {
+            None
+        };
+        e.update_target_divergence_with(&gpu, &gas, &nut, &k_cell, 1.5e-5, d)
+            .unwrap();
+        gpu.download(e.target_divergence()).unwrap()
+    };
+    let bare_div = div(false);
+    let coupled_div = div(true);
+    assert!(
+        bits_eq(&bare_div, &coupled_div),
+        "an empty pool's `+0.0` deposits moved (div u)_target"
+    );
+    // And the fixture is not vacuous: the divergence it is unmoved AT is a
+    // real, non-uniform field, so "bitwise unmoved" is not "both are zero".
+    assert!(
+        bare_div.iter().any(|&d| d != 0.0),
+        "the target divergence was zero everywhere, so the gate is vacuous"
+    );
 }
 
 /// S13.4.1's pair for `coupling/mass`: the same pool, the same step, the two
@@ -2096,7 +2248,7 @@ fn the_half_coupled_evaporating_pool_is_refused_by_name() {
 }
 
 /// S13.4 on the vapour field, in both directions: `update` needs `Y_v`
-/// exactly when (77.4) reads it.
+/// exactly when (77.1) reads it.
 #[test]
 fn the_vapour_field_contract_is_refused_in_both_directions() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -2314,7 +2466,7 @@ fn the_gas_moves_along_the_adiabatic_saturation_line() {
     );
 }
 
-/// The species seam, end to end: (77.4)'s source handed to the very object
+/// The species seam, end to end: (77.1)'s source handed to the very object
 /// S54's humidity is - a `ScalarTransport` called `Yv` - and the vapour
 /// arriving in the field.
 ///

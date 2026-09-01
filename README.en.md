@@ -126,7 +126,8 @@ applied on faces rather than interpolated from cell values.
 | Parcel deposition gather (SPEC-LIT §67) | Radix sort on the `(cell, uid)` total order, a device exclusive scan, the per-cell parcel CSR, and a one-thread-per-cell gather. **No f64 atomics**: the scatter is transposed into a gather so the result is bitwise reproducible |
 | Two-way coupling (SPEC-LIT §68) | The drag impulse the parcel integrator applied, handed back to the gas through §18's source registries — momentum (kinematic, explicit or Patankar-split) and sensible heat, with `physics heating` for the droplet side. **Conservative to round-off by construction**, and bitwise inert when no parcel has been injected. Droplet radiation and wall splash are refused by name; the mass coupling §76 changed the reason for is **built at §77** |
 | Droplet heating and evaporation (SPEC-LIT §76) | `physics evaporating`: Spalding's Stefan-flow mass rate with Abramzon–Sirignano's `B_T` (Ranz–Marshall and FDS's `B_T = B_M` also selectable), Watson's `h_v(T)`, Marrero & Mason's `D(T)`, the 1/3-rule film state, and Godsave's heat-limited branch at the boiling point. Two saturation curves — a general Clausius–Clapeyron and §54's own Hyland–Wexler, which is refused for anything but water. The mass is derived from the energy the exponential integrator applied, so the droplet's own budget closes in f64; the accumulator is the difference of the step's two endpoint masses, so conservation is an identity. Gated on the `d²` law (`1.8e-6`), on the wet-bulb temperature (`5.7e-13 K` against this crate's own balance, **`0.76 K` against ASHRAE's**, and the gap is the Lewis number), and on the parcel's mass (`9.1e-16`). **The vapour stays on the parcel here** — §77 is what carries it into the gas |
-| The vapour into the gas (SPEC-LIT §77) | `coupling/mass evaporation`: the mass, the enthalpy it carries and the volume it makes, through the seams the solvers already had — §61.2's whole-field explicit source on `Y_v`, §18's energy registry, and the one `Energy::target_divergence` seam §25.3 says the pressure loop changes in. **The mass identity is `6.3e-16`** and the energy ledger closes to `1.3e-12`, which is the droplet's own budget and not round-off. Two findings worth the row: there is **no second latent-heat sink** — (76.10)'s budget already puts every joule the phase change consumed inside the convective heat §68 deposits, so depositing `q_lat` again would count it twice, and what the gas is actually owed is the arriving mass's sensible enthalpy, 12 % of the latent heat; and **the ENERGY half of the divergence arrives through `Q` unaided while the VOLUME half does not**, which is §26.1's omission with the halves swapped and is why it is a named argument on its own method. A mist is a **net contraction**, by `h_v/(cp T) ~ 8`. Gated on ASHRAE's adiabatic saturation — 40 °C air at 12 % rh sprayed to saturation lands at **19.179 °C against ASHRAE's 19.296 °C**, and the wet bulb, which the relation says is an invariant of the process, drifts by the same 0.117 K. **A run with no dispersed phase is bitwise what it was, by construction**: `energyTargetDivergence` is untouched and the old call path is the old call path |
+| The vapour into the gas (SPEC-LIT §77) | `coupling/mass evaporation`: the mass, the enthalpy it carries and the volume it makes, through the seams the solvers already had — §61.2's whole-field explicit source on `Y_v`, §18's energy registry, and the one `Energy::target_divergence` seam §25.3 says the pressure loop changes in. **The mass identity is `6.3e-16`** and the energy ledger closes to `1.3e-12`, which is the droplet's own budget and not round-off. Two findings worth the row: there is **no second latent-heat sink** — (76.10)'s budget already puts every joule the phase change consumed inside the convective heat §68 deposits, so depositing `q_lat` again would count it twice, and what the gas is actually owed is the arriving mass's sensible enthalpy, 12 % of the latent heat; and **the ENERGY half of the divergence arrives through `Q` unaided while the VOLUME half does not**, which is §26.1's omission with the halves swapped and is why it is a named argument on its own method. A mist is a **net contraction**, by `h_v/(cp T) ~ 8`. Gated on ASHRAE's adiabatic saturation — 40 °C air at 12 % rh sprayed to saturation lands at **19.179 °C against ASHRAE's 19.296 °C**, and the wet bulb, which the relation says is an invariant of the process, drifts by the same 0.117 K. **A run with no dispersed phase is bitwise what it was, by construction**: `energyTargetDivergence` is untouched and the old call path is the old call path — and now measured one seam further on, with an empty pool's `+0.0` deposits pushed through a real `Y_v` solve and a real `(div u)_target` and compared with `to_bits()` |
+| Droplet-wall impact (SPEC-LIT §78) | `wallInteraction stick` and `weber`: the four-regime impingement map of **Bai & Gosman (1995)** — adhere, rebound, spread, splash — selected by the impact Weber number, with **Mundo, Sommerfeld & Tropea (1995)**'s `K = Oh Re^1.25 > 57.7` as the default splash criterion and Bai & Gosman's own `We_c = A La^(-0.18)` as the alternative. Surface tension is a constant or **IAPWS R1-76**'s correlation at the droplet's own temperature, gated against the release's own table to **0.0045 mN/m**. `K` is never formed: the decision is taken in its fourth power, `We² Re > K_crit⁴`, which is the same test — `Oh Re = √We` exactly — with no `pow` and no `sqrt`, and is therefore bit-stable across compute capabilities where the criterion's own form is not (§38.6). **Nothing vanishes at a wall, and the statement is about bits**: the pool reclaims no slot, so a deposit is `remove` plus exactly two statements (`u ← 0`, one flag bit) and the mass on the wall is *bitwise* the mass that arrived; the ledger is a partition of the pool — `live` / `deposited` / `gone` — not an accumulator, and there is no atomic in it. Gated at **0 defects** on every regime boundary at `1 ± 10⁻⁸` of its closed-form inverse, on a 16-point sweep through all four regimes, and on the ledger; a run that meets no wall is **bitwise unmoved** by the whole map. **Splash is detected and NOT enacted** — the parent deposits whole, `n_splash` counts it, and the wall deposit is published as the upper bound that makes it. **Film transport is refused by name** (§78.11) with what each missing piece would need. **Gate 78-D is OPEN**: the two published splash criteria disagree by a factor of **4.78** in Weber number for the same 100 µm droplet, and neither is measured against an experiment here |
 
 ### Linear solvers
 
@@ -607,13 +608,13 @@ shared refusal now covers all of them:
 ## Validation
 
 ```
-cargo test        1509 passed, 0 failed, 4 ignored (lib)
-                  1657 passed, 0 failed, 6 ignored (every target — including the
+cargo test        1586 passed, 0 failed, 4 ignored (lib)
+                  1734 passed, 0 failed, 6 ignored (every target — including the
                   per-binary CLI-parsing suites and SPEC-LIT §13.4.1's per-driver
                   "two runs must differ" pair tests)
-ofgpu-validate    813 / 813 checks passed (765 computed live, 48 replayed from recorded
+ofgpu-validate    861 / 861 checks passed (813 computed live, 48 replayed from recorded
                   measurements), then a GENERATED list of the 6 gates that miss and the
-                  3 verdicts that are open (SPEC-LIT §69)
+                  4 verdicts that are open (SPEC-LIT §69)
 ```
 
 **SPEC-LIT §13.4.1's standing requirement**: two short runs of a driver,
@@ -696,9 +697,9 @@ and *tightens* the scatter from 0.359 to 0.271 — which says the still-air
 scatter is one missing mechanism seen ninety times, not ninety independent
 modelling errors. Having that number is worth more than a pass.
 
-**Three further verdicts are `OPEN` rather than missing**, and the generated
-list carries them as a second, separately counted group: SPEC-LIT §32.4's
-plane-channel comparisons against **Gnielinski (1976)**, which is a
+**Four further verdicts are `OPEN` rather than missing**, and the generated
+list carries them as a second, separately counted group. Three are SPEC-LIT
+§32.4's plane-channel comparisons against **Gnielinski (1976)**, which is a
 correlation and not a measurement. The wall-function leg is `+34.4 %` and
 `+15.2 %` of it at its own measured friction factor; the resolved leg is
 `+11.9 %` at the Petukhov pipe `f` and `+14.9 %` at its own — all outside the
@@ -707,6 +708,22 @@ a fitted correlation, with a one-token opt-in (§37's Kays-Crawford `Pr_t`)
 that moves the resolved leg to `+4.3 %` and inside, is a different finding
 from a published measurement this solver does not reproduce. They were absent
 from the summary line before §69 for the same reason Gate 68-C was.
+
+The fourth is **SPEC-LIT §78.10's Gate 78-D**, and it is open for a different
+reason: the two *published* splash criteria disagree with **each other**. For a
+100 µm water droplet at 20 °C, Mundo, Sommerfeld & Tropea (1995) put the
+splash threshold at `8.99 m/s` (`We 111`) and Bai & Gosman (1995) at
+`19.65 m/s` (`We 531`) — a factor of **4.78** in Weber number — and Bai &
+Gosman's own roughness range moves theirs by a further factor of about two.
+SAE 950283 is paywalled and was not obtained, so Bai & Gosman's constants
+here are the ones their citing literature quotes — which is a direct reason
+every threshold in the map is a control with a default rather than a constant
+in the source. And neither criterion is measured against an experiment here:
+Mundo's own deposition/splashing boundary is a figure rather than a table and
+nothing in this repository transcribes it, so holding the kernel against the criterion (which
+gate 78-A does, to `10⁻⁸`) is a transcription check and calling it a
+validation would be exactly the confusion §69 exists to prevent. The splash
+boundary of this map is known to within a factor of five and the run says so.
 
 ### Order of convergence — method of manufactured solutions
 
@@ -1172,8 +1189,15 @@ Convert binary-format cases to ASCII before use.
   does not make the mixture lighter (§54 measures that at 0.85 % in density at
   saturation), and §26 gives **every gas one `cp`**, so the vapour's enthalpy
   is booked at dry air's 1005 J/(kg·K) — which is what the 0.117 K of gate
-  77-D is made of. Parcels also still
-  do not absorb radiation and do not splash (§68.13) — water mist is a
+  77-D is made of. **§78 built the wall interaction §68.13 refused**, so parcels
+  now stick, rebound, spread or splash by the Bai-Gosman map and the mass that
+  lands is accounted for bitwise — but **splash children are still not
+  emitted** (the parent deposits whole and `n_splash` publishes the upper bound
+  that makes), and there is still **no film transport** (§78.11): a deposited
+  droplet stays where it landed, with no thickness, no momentum equation, no
+  dripping and no re-entrainment, so the wetted-wall boundary conditions and
+  the FM/NIST suppression law both remain out of reach. Parcels also still
+  do not absorb radiation (§68.13) — water mist is a
   radiation shield and that is most of its value in suppression. Also absent:
   buoyancy and added-mass reaction on the gas, the momentum the vapour carries
   off, deposition into more than one cell along a crossing, and sub-grid
@@ -1656,6 +1680,20 @@ unreachable, or deliberately left closed — say so on their own line.
 - Theobald, R. C. (1981). The effect of nozzle design on the stability and
   performance of turbulent water jets. *Fire Safety Journal*, 4, 1–13.
   — §68.12, Gate 68-C, which **misses with the gas held at rest**
+- Bai, C., & Gosman, A. D. (1995). Development of methodology for spray
+  impingement simulation. *SAE Technical Paper 950283.* — §78.1, §78.4 (the
+  four-regime map, its Weber-number boundaries, and `We_c = A La^(−0.18)`)
+- Mundo, C., Sommerfeld, M., & Tropea, C. (1995). Droplet–wall collisions:
+  experimental studies of the deformation and breakup process. *International
+  Journal of Multiphase Flow*, 21(2), 151–173. — §78.4 (`K = Oh Re^1.25`,
+  `K_crit = 57.7`, the DEFAULT criterion); their splashing data themselves are
+  **not transcribed**, which is what Gate 78-D is open about
+- Yarin, A. L. (2006). Drop impact dynamics: splashing, spreading, receding,
+  bouncing… *Annual Review of Fluid Mechanics*, 38, 159–192. — §78.1 (why every
+  threshold in the map is a control and not a constant)
+- IAPWS (2014). *Revised Release on Surface Tension of Ordinary Water
+  Substance*, R1-76. — §78.2 (`σ = B τ^μ (1 + b τ)`, implemented and gated
+  against the release's own table)
 
 ### Multiphase flow
 

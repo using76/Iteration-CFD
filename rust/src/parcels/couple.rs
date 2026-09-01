@@ -204,13 +204,13 @@ pub enum MassCoupling {
 
     /// The vapour reaches the gas - SPEC-LIT S77:
     ///
-    /// * `Y_v` gains `mdot'''(1 - Y_v)/rho` (77.4), through the whole-field
+    /// * `Y_v` gains `mdot'''(1 - Y_v)/rho` (77.1), through the whole-field
     ///   explicit seam S61.2's soot source already uses;
-    /// * the energy registry gains `cp_g mdot''' (T_p - T_g)` (77.5), the
+    /// * the energy registry gains `cp_g mdot''' (T_p - T_g)` (77.2), the
     ///   enthalpy the arriving mass carries, on top of S68's convective
     ///   exchange - and **not** a second latent-heat sink, which would be
-    ///   counting the same joules twice (S77.5);
-    /// * `Energy::target_divergence` gains `mdot'''/rho` (77.6), the volume
+    ///   counting the same joules twice (S77.4);
+    /// * `Energy::target_divergence` gains `mdot'''/rho` (77.3), the volume
     ///   the mass occupies at fixed `p0`.
     ///
     /// Requires `physics evaporating` and energy coupling on, in both
@@ -335,15 +335,15 @@ pub struct CouplingSnapshot {
     pub energy_q: Vec<Scalar>,
     /// What [`EnergySources`] is handed, W/(m3 K), `<= 0`.
     pub energy_sp: Vec<Scalar>,
-    /// (77.2) `mdot'''`, kg/(m3 s): the vapour the parcels put into the gas.
+    /// (77.6) `mdot'''`, kg/(m3 s): the vapour the parcels put into the gas.
     /// Positive when they are evaporating, negative when they are growing.
     pub vapour: Vec<Scalar>,
-    /// (77.5) `cp_g mdot''' (T_p - T_g)`, W/m3: the enthalpy the arriving
+    /// (77.2) `cp_g mdot''' (T_p - T_g)`, W/m3: the enthalpy the arriving
     /// mass carries, already summed into [`Self::energy_q`].
     pub vapour_enthalpy: Vec<Scalar>,
-    /// (77.4) what the `Y_v` equation is handed, 1/s.
+    /// (77.1) what the `Y_v` equation is handed, 1/s.
     pub species_su: Vec<Scalar>,
-    /// (77.6) what `Energy::target_divergence` is handed, 1/s.
+    /// (77.3) what `Energy::target_divergence` is handed, 1/s.
     pub divergence: Vec<Scalar>,
 }
 
@@ -390,20 +390,29 @@ pub struct ParcelCoupling<'m> {
     nrg_sp: DevBuf<Scalar>,
 
     // ---- S77, the vapour ----------------------------------------------
-    /// (77.2) `mdot'''`, kg/(m3 s). Length 1 unless mass coupling is on.
+    /// (77.6) `mdot'''`, kg/(m3 s). Length 1 unless mass coupling is on.
     mdot_v: DevBuf<Scalar>,
-    /// (77.5) the enthalpy the arriving mass carries, W/m3. Length 1 unless
+    /// (77.2) the enthalpy the arriving mass carries, W/m3. Length 1 unless
     /// mass coupling is on. Already inside [`Self::nrg_q`]; kept separately
-    /// because (77.9)'s ledger is posed on it and a round trip through a sum
+    /// because S77.9's ledger is posed on it and a round trip through a sum
     /// is not exact.
     q_vap: DevBuf<Scalar>,
-    /// (77.4) the `Y_v` source, 1/s. Length 1 unless mass coupling is on.
+    /// (77.1) the `Y_v` source, 1/s. Length 1 unless mass coupling is on.
     y_su: DevBuf<Scalar>,
-    /// (77.6) the target-divergence source, 1/s. Length 1 unless mass
+    /// (77.3) the target-divergence source, 1/s. Length 1 unless mass
     /// coupling is on.
     d_src: DevBuf<Scalar>,
     /// The gas specific heat the enthalpy source is formed with - S66's own
-    /// `cpGas`, which S26's energy equation must be given too (S77.5).
+    /// `ParcelControls::cp_gas` (S77.3).
+    ///
+    /// **It is not the same object as `GasProperties::cp`, and nothing here
+    /// can check that they agree.** S66 uses this one as a FILM property, in
+    /// `Pr = mu cp/k` for the Nusselt number; S26 books the gas's own
+    /// enthalpy as `rho cp T` with the other. (77.2) is the enthalpy the
+    /// arriving mass carries relative to that booking, so the constant it
+    /// wants is S26's - and this module never sees a `GasProperties`.
+    /// [`Self::gas_cp`] exists so that a driver can assert the two agree;
+    /// S77.12 says what it costs when they do not.
     cp_gas: Scalar,
 
     /// Scratch for [`Self::total_impulse`]. Diagnostics only.
@@ -442,7 +451,7 @@ impl<'m> ParcelCoupling<'m> {
                 "parcels/coupling: mass coupling is \"{}\" and energy coupling is \
                  \"off\". The vapour would arrive in the gas without the heat its \
                  phase change took out of it, so the run would gain water and lose no \
-                 energy - a spray that humidifies without cooling. (77.5)'s enthalpy \
+                 energy - a spray that humidifies without cooling. (77.2)'s enthalpy \
                  source rides the SAME registry S68's convective exchange does, and \
                  turning that registry off turns both off. Say `energy explicit` \
                  (SPEC-LIT S77.7)",
@@ -593,13 +602,13 @@ impl<'m> ParcelCoupling<'m> {
             }
             _ => {}
         }
-        // S13.4 again, on the vapour field, and in both directions. (77.4)'s
+        // S13.4 again, on the vapour field, and in both directions. (77.1)'s
         // dilution factor is the only thing that reads it, so a coupling that
         // is not coupling mass would read it and ignore it.
         match (self.ctrl.mass.is_on(), y_vapour) {
             (true, None) => {
                 return Err(Error::Config(
-                    "parcels/coupling: mass coupling is on and no gas vapour mass                      fraction was given; (77.4)'s source is mdot(1 - Y_v)/rho and the                      dilution factor is not a detail - without it the vapour goes in                      faster than the mixture it is going into grew (SPEC-LIT S77.4)"
+                    "parcels/coupling: mass coupling is on and no gas vapour mass                      fraction was given; (77.1)'s source is mdot(1 - Y_v)/rho and the                      dilution factor is not a detail - without it the vapour goes in                      faster than the mixture it is going into grew (SPEC-LIT S77.3)"
                         .to_string(),
                 ))
             }
@@ -758,21 +767,43 @@ impl<'m> ParcelCoupling<'m> {
         &self.nrg_sp
     }
 
-    /// (77.2) `mdot'''`, kg/(m3 s) - the vapour the parcels put into the gas.
+    /// (77.6) `mdot'''`, kg/(m3 s) - the vapour the parcels put into the gas.
     ///
-    /// The raw deposit, and what (77.9)'s mass identity is posed on. Length
+    /// The raw deposit, and what gate 77-A's mass identity is posed on. Length
     /// one and never written unless mass coupling is on.
     pub fn vapour_production(&self) -> &DevBuf<Scalar> {
         &self.mdot_v
     }
 
-    /// (77.5) `cp_g mdot''' (T_p - T_g)`, W/m3 - the enthalpy the arriving
+    /// (77.2) `cp_g mdot''' (T_p - T_g)`, W/m3 - the enthalpy the arriving
     /// mass carries, already summed into [`Self::energy_q`].
+    ///
+    /// `cp_g` here is the pool's [`crate::parcels::ParcelControls::cp_gas`],
+    /// not `GasProperties::cp`. They are the same number in every fixture in
+    /// this repository and they must be: see [`Self::gas_cp`] and S77.12.
     pub fn vapour_enthalpy_density(&self) -> &DevBuf<Scalar> {
         &self.q_vap
     }
 
-    /// (77.4) what the `Y_v` equation is handed, 1/s.
+    /// The gas specific heat (77.2)'s enthalpy source was formed with,
+    /// J/(kg K) - the pool's own `cp_gas`.
+    ///
+    /// A driver that registers this coupling on an [`EnergySources`] whose
+    /// equation carries a DIFFERENT `cp` has a seam that does not close:
+    /// gate 77-B still passes, because it is posed on this same constant on
+    /// both sides, but the gas's temperature moves by the wrong amount and
+    /// `Q/(rho cp T)` in the divergence divides by the other one. Nothing in
+    /// this module can see a `GasProperties`, so the check belongs to the
+    /// caller and this is the handle for it:
+    ///
+    /// ```text
+    ///   assert_eq!(coupling.gas_cp(), props.cp);
+    /// ```
+    pub fn gas_cp(&self) -> Scalar {
+        self.cp_gas
+    }
+
+    /// (77.1) what the `Y_v` equation is handed, 1/s.
     ///
     /// Pass it to [`crate::scalar_transport::ScalarTransport::correct_with_source`]
     /// on the vapour species - the whole-field explicit seam S61.2's soot
@@ -784,12 +815,12 @@ impl<'m> ParcelCoupling<'m> {
     /// `bounded` - S19's own requirement for a bounded scalar and what every
     /// species entry in this crate carries. With an unbounded scheme the
     /// assembled operator is `dY/dt + div(phi, Y)` and this source is short
-    /// by `Y div(u)`; S77.4 says so rather than leaving it to be discovered.
+    /// by `Y div(u)`; S77.3 says so rather than leaving it to be discovered.
     pub fn vapour_source(&self) -> &DevBuf<Scalar> {
         &self.y_su
     }
 
-    /// (77.6) what `Energy::update_target_divergence_with` is handed, 1/s -
+    /// (77.3) what `Energy::update_target_divergence_with` is handed, 1/s -
     /// the volume the arriving mass occupies at fixed `p0` and `T`.
     ///
     /// **This is the half of evaporation's effect on the divergence that
@@ -859,7 +890,7 @@ impl<'m> ParcelCoupling<'m> {
     }
 
     /// `sum_P V_P mdot'''_P dt` - the vapour mass this step handed the gas,
-    /// kg. SPEC-LIT (77.9)'s left-hand side.
+    /// kg. SPEC-LIT S77.9's gate 77-A, left-hand side.
     ///
     /// A device read-back and a host reduction in cell order, exactly like
     /// [`Self::total_impulse`]: call it when a driver reports, never inside
@@ -986,11 +1017,11 @@ pub fn live_parcel_heat(s: &super::ParcelSnapshot) -> Scalar {
 
 /// `cp_g sum_p n_p dm_p (T_p - T_g)` over the live parcels, J - the enthalpy
 /// the arriving vapour carries into a gas at the uniform temperature
-/// `t_gas`, and (77.9)'s energy twin of [`live_parcel_impulse`].
+/// `t_gas`, and gate 77-B's energy twin of [`live_parcel_impulse`].
 ///
 /// `t_gas` is one number because the gates that read this run in a uniform
 /// gas; the kernel does it per cell, where `T_g` is a per-cell constant that
-/// factors out of the cell's own sum (77.5).
+/// factors out of the cell's own sum (77.2).
 ///
 /// The sign is the physics: droplets are colder than the gas they evaporate
 /// into, so the vapour they hand over is a small extra COOLING on top of the
@@ -1014,7 +1045,7 @@ pub fn live_parcel_vapour_enthalpy(
 }
 
 /// The energy the vapour carried out of BOTH sensible pools over one step, J
-/// - SPEC-LIT (77.10), summed on the host over the live parcels.
+/// - SPEC-LIT gate 77-B (S77.9), summed on the host over the live parcels.
 ///
 /// ```text
 ///   E_vap = sum_p n_p [ q_lat,p + dm_p (c_l - cp_g) T_p ]
@@ -1039,7 +1070,7 @@ pub fn live_parcel_vapour_enthalpy(
 /// `dm (c_l - cp_g) T_p`, which for water at 290 K is 38 % of the latent
 /// heat and is not a rounding.
 ///
-/// S77.10 says what this costs in physical terms: the crate's gas energy
+/// S77.11 says what this costs in physical terms: the crate's gas energy
 /// equation gives water vapour dry air's `cp`, so the number here is not
 /// `h_v` and a reader should not read it as one.
 #[must_use]
@@ -1064,7 +1095,7 @@ pub fn live_parcel_vapour_energy(
 /// `sum_p n_p m_p c_l T_p` over the live parcels, J - the liquid's own
 /// sensible energy, on the reference S26 carries (absolute zero).
 ///
-/// The middle term of (77.10)'s ledger, and the one a test differences
+/// The middle term of gate 77-B's ledger, and the one a test differences
 /// across a step.
 #[must_use]
 pub fn live_parcel_liquid_energy(

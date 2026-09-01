@@ -111,6 +111,28 @@ OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
 
 #define OFP_WALL_REMOVE  0
 #define OFP_WALL_REBOUND 1
+// SPEC-LIT S78.5: the two values the impact map added. `stick` deposits
+// every impact; `weber` classifies each one and deposits three of the four
+// outcomes. Neither is reachable from a run that asked for `remove` or
+// `rebound`, which is the whole of S78.9's bitwise claim.
+#define OFP_WALL_STICK   2
+#define OFP_WALL_WEBER   3
+
+// SPEC-LIT (78.4): which published threshold separates spread from splash.
+#define OFP_SPLASH_MUNDO 0
+#define OFP_SPLASH_BAI   1
+
+// SPEC-LIT (78.2): where sigma comes from.
+#define OFP_TENSION_CONSTANT 0
+#define OFP_TENSION_IAPWS    1
+
+// SPEC-LIT (78.5): the four outcomes. These codes are also OFFSETS into the
+// counter array - see OFP_N_REGIME_BASE below - so their order is
+// load-bearing and `the_device_enumerations_match_the_host` pins it.
+#define OFP_REGIME_STICK   0
+#define OFP_REGIME_REBOUND 1
+#define OFP_REGIME_SPREAD  2
+#define OFP_REGIME_SPLASH  3
 
 // SPEC-LIT S68.5: what a parcel's own state does. `inert` freezes the
 // diameter, the temperature and n_p; `heating` evolves the temperature by
@@ -143,11 +165,24 @@ OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
 // the working set exactly as an escaping parcel is, and counted separately,
 // because "the spray shrank" and "the spray left" are different runs.
 #define OFP_N_EVAPORATED 5
-#define OFP_N_COUNTERS 6
+// SPEC-LIT (78.5): the regime histogram, in the order of the OFP_REGIME_*
+// codes so that `counters[OFP_N_REGIME_BASE + regime]` is the right slot and
+// the kernel needs no branch to pick it.
+#define OFP_N_STICK    6
+#define OFP_N_REBOUND  7
+#define OFP_N_SPREAD   8
+#define OFP_N_SPLASH   9
+#define OFP_N_REGIME_BASE OFP_N_STICK
+#define OFP_N_COUNTERS 10
 
 // flags bits
 #define OFP_FLAG_ACTIVE 1u
 #define OFP_FLAG_LOST   2u
+// SPEC-LIT (78.6): this parcel's mass is on a wall. Set once, at the impact,
+// and never cleared - the pool reclaims no slot (S66.12), so the bit and the
+// diameter beside it are what makes the wall ledger an exact partition of
+// the pool rather than a running total that could drift.
+#define OFP_FLAG_DEPOSITED 4u
 
 // --------------------------------------------------------------------------
 //  SPEC-LIT (66.9): the parcel identity
@@ -181,6 +216,99 @@ OFGPU_DEV unsigned long long parcelUid
     z ^= z >> 27; z *= 0x94d049bb133111ebULL;
     z ^= z >> 31;
     return z;
+}
+
+// --------------------------------------------------------------------------
+//  SPEC-LIT S78: the droplet-wall impact regime map
+// --------------------------------------------------------------------------
+//
+//  The host mirror is `src/parcels/impact.rs` and the two are pinned by
+//  `parcels::tests::the_device_impact_map_is_the_host_impact_map`, which
+//  sweeps the impact speed through every boundary on both sides.
+//
+//  Every field here is a setup-time constant, so the map costs the captured
+//  graph nothing: there is no launch argument in it that moves between steps.
+struct ofpWallImpact
+{
+    int      splash;     // OFP_SPLASH_*
+    int      tension;    // OFP_TENSION_*
+    ofscalar sigma0;     // N/m, read by OFP_TENSION_CONSTANT
+    ofscalar muL;        // LIQUID dynamic viscosity, Pa s - not `mu`
+    ofscalar weStick;
+    ofscalar weSpread;
+    ofscalar kCrit4;     // K_crit^4, formed on the host (78.4b)
+    ofscalar splashA;    // Bai-Gosman's A in We_c = A La^-0.18
+};
+
+//  SPEC-LIT (78.2): surface tension, N/m.
+//
+//  IAPWS R1-76: sigma = B tau^mu (1 + b tau), tau = 1 - T/T_c, with
+//  B = 0.2358 N/m, b = -0.625, mu = 1.256, T_c = 647.096 K. Clamped to zero
+//  at and above T_c rather than calling pow() on a negative base: a droplet
+//  above the critical temperature is not a droplet, its Weber number is
+//  +inf, and the map reads that as a splash - the right answer, with no
+//  special case anywhere downstream.
+OFGPU_DEV ofscalar ofpSurfaceTension(const ofpWallImpact& w, ofscalar t)
+{
+    if (w.tension == OFP_TENSION_CONSTANT) return w.sigma0;
+    const ofscalar tau = 1 - t/(ofscalar)647.096;
+    if (!(tau > 0)) return 0;
+    return (ofscalar)0.2358*pow(tau, (ofscalar)1.256)*(1 - (ofscalar)0.625*tau);
+}
+
+//  SPEC-LIT (78.3)/(78.5): classify one impact.
+//
+//  `un` is the MAGNITUDE of the wall-normal component of the impact
+//  velocity. All three groups take LIQUID properties:
+//
+//      We = rho_l d un^2/sigma      Re = rho_l un d/mu_l
+//      Oh = mu_l/sqrt(rho_l sigma d) = sqrt(We)/Re
+//      La = rho_l sigma d/mu_l^2   = 1/Oh^2
+//
+//  Mundo's K = Oh Re^1.25 is NOT formed. Its fourth power is
+//
+//      K^4 = (Oh Re)^4 Re = We^2 Re                                 (78.4b)
+//
+//  because Oh Re = sqrt(We) exactly, and x -> x^4 is strictly increasing on
+//  the non-negatives, so `We^2 Re > K_crit^4` is `K > K_crit` and needs
+//  neither pow() nor sqrt(). That matters here for a reason with a section
+//  number: S38.6 records that pow() with a non-integer exponent is not
+//  bit-stable across compute capabilities, and a regime map that flips on
+//  the hardware is a different model on the hardware. The Bai-Gosman branch
+//  cannot avoid pow() - its threshold IS La^-0.18 - and S78.10 says so
+//  rather than leaving the asymmetry to be discovered.
+//
+//  The splash test is taken FIRST, which is what makes the map total: on a
+//  liquid viscous enough for We_c to fall below `weSpread`, the spread band
+//  is empty rather than overlapping.
+OFGPU_DEV int ofpImpactRegime
+(
+    const ofpWallImpact& w,
+    ofscalar rhoL,
+    ofscalar d,
+    ofscalar t,
+    ofscalar un
+)
+{
+    const ofscalar sigma = ofpSurfaceTension(w, t);
+    const ofscalar we = rhoL*d*un*un/sigma;
+    const ofscalar re = rhoL*un*d/w.muL;
+
+    int splashing;
+    if (w.splash == OFP_SPLASH_MUNDO)
+    {
+        splashing = (we*we*re > w.kCrit4);
+    }
+    else
+    {
+        const ofscalar la = rhoL*sigma*d/(w.muL*w.muL);
+        splashing = (we > w.splashA*pow(la, (ofscalar)-0.18));
+    }
+
+    if (splashing)       return OFP_REGIME_SPLASH;
+    if (we < w.weStick)  return OFP_REGIME_STICK;
+    if (we < w.weSpread) return OFP_REGIME_REBOUND;
+    return OFP_REGIME_SPREAD;
 }
 
 // --------------------------------------------------------------------------
@@ -225,6 +353,14 @@ OFGPU_DEV oflabel parcelWalkTo
     int wallAction,
     ofscalar restitution,
     ofscalar tangentialLoss,
+    // SPEC-LIT S78: the impact model, and the three pieces of parcel state it
+    // needs. Read ONLY inside `if (wallAction == OFP_WALL_WEBER)`, so a run
+    // that asked for `remove` or `rebound` evaluates not one expression of
+    // it - which is the construction S78.9's gate 78-C measures.
+    const ofpWallImpact& wimp,
+    ofscalar rhoL,
+    ofscalar dParcel,
+    ofscalar tParcel,
     int maxWalk,
     long long* __restrict__ counters,
     unsigned int* pflags
@@ -295,6 +431,11 @@ OFGPU_DEV oflabel parcelWalkTo
         // that left through one would be leaving the plane the case is
         // solved on.
         int reflect = (kind == OFP_PATCH_SYMMETRY) || (kind == OFP_PATCH_EMPTY);
+        // SPEC-LIT (78.6): does this impact leave the droplet's mass on the
+        // wall? Zero on every path S66 had, so the block below it is dead
+        // code for `remove` and `rebound` and the two are bitwise what they
+        // were.
+        int deposit = 0;
         ofscalar e = 1;
         ofscalar ft = 0;
         if (kind == OFP_PATCH_WALL && wallAction == OFP_WALL_REBOUND)
@@ -302,6 +443,44 @@ OFGPU_DEV oflabel parcelWalkTo
             reflect = 1;
             e = restitution;
             ft = tangentialLoss;
+        }
+        else if (kind == OFP_PATCH_WALL && wallAction == OFP_WALL_STICK)
+        {
+            // S78.5: every impact deposits, whatever it arrived at. The
+            // `stick` slot of the histogram records the ACTION and not a
+            // classification: the map was not consulted, so what this impact
+            // physically was is unknown here and is not claimed. Under
+            // `weber` the same slot means the regime; S78.5 says which is
+            // which rather than leaving one counter with two meanings
+            // undeclared.
+            deposit = 1;
+            atomicAdd((unsigned long long*)&counters[OFP_N_STICK], 1ULL);
+        }
+        else if (kind == OFP_PATCH_WALL && wallAction == OFP_WALL_WEBER)
+        {
+            // S78.5: the normal impact speed is taken from the PARCEL
+            // VELOCITY and not from the remaining displacement. The two are
+            // parallel for a straight sub-step and are not after a rebound
+            // earlier in the same one; the Weber number is a statement about
+            // the droplet's momentum, so it takes the droplet's velocity.
+            const ofscalar un = fabs(dot3(*pu, nh));
+            const int regime = ofpImpactRegime(wimp, rhoL, dParcel, tParcel, un);
+            atomicAdd((unsigned long long*)&counters[OFP_N_REGIME_BASE + regime], 1ULL);
+            if (regime == OFP_REGIME_REBOUND)
+            {
+                reflect = 1;
+                e = restitution;
+                ft = tangentialLoss;
+            }
+            else
+            {
+                // Stick, spread and splash all leave the mass on the wall.
+                // Splash is among them because no child parcels are emitted
+                // (S78.7): the parent deposits whole, the deposit is an
+                // upper bound, and `n_splash` is the counter that says by how
+                // many impacts.
+                deposit = 1;
+            }
         }
 
         if (reflect)
@@ -316,9 +495,28 @@ OFGPU_DEV oflabel parcelWalkTo
             continue;
         }
 
-        // Escape (a generic patch) or removal at a wall. The parcel stops
-        // where it met the face, which is where a film would receive it.
+        // Escape (a generic patch), removal at a wall, or S78's deposit. The
+        // parcel stops where it met the face, which under `remove` is where
+        // a film would receive it and under `stick`/`weber` is where the
+        // mass now IS.
         *px = x;
+        if (deposit)
+        {
+            // (78.6). Two statements, and they are the entire difference
+            // between a deposit and a removal:
+            //
+            //   u = 0     the wall took the momentum. It is NOT given to the
+            //             gas: the parcel is out of the CSR this step, so its
+            //             accumulators are not deposited, exactly as S68.9
+            //             row 4 already measures for an escape.
+            //   the bit   which makes the slot's mass findable afterwards.
+            //             `d` and `n_p` are not touched, so the mass on the
+            //             wall is BITWISE the mass that arrived - which is
+            //             what turns S78.9's gate 78-B from a tolerance into
+            //             an identity.
+            *pu = mkvec(0, 0, 0);
+            *pflags |= OFP_FLAG_DEPOSITED;
+        }
         atomicAdd(
             (unsigned long long*)&counters[kind == OFP_PATCH_WALL ? OFP_N_WALL : OFP_N_ESCAPED],
             1ULL);
@@ -683,7 +881,16 @@ extern "C" __global__ void parcelIntegrate
     ofscalar cpVap,
     ofscalar pAmb,
     ofscalar tBoilP,
-    ofscalar evapCfl
+    ofscalar evapCfl,
+    // SPEC-LIT S78. Read only when wallAction == OFP_WALL_WEBER.
+    int splashCriterion,
+    int tensionModel,
+    ofscalar sigma0,
+    ofscalar muLiquid,
+    ofscalar weStick,
+    ofscalar weSpread,
+    ofscalar kCrit4,
+    ofscalar splashA
 )
 {
     const int n = *nActive;
@@ -700,6 +907,13 @@ extern "C" __global__ void parcelIntegrate
     liq.tRefD = tRefD; liq.dExp = dExp;     liq.cpVap = cpVap;
     liq.wCar = wCarrier; liq.pAmb = pAmb;   liq.tBoilP = tBoilP;
     liq.sat = satCurve;  liq.mt = massTransfer;
+    // SPEC-LIT S78: assembled once, outside every loop, from eight
+    // setup-time constants.
+    ofpWallImpact wimp;
+    wimp.splash = splashCriterion; wimp.tension = tensionModel;
+    wimp.sigma0 = sigma0;          wimp.muL = muLiquid;
+    wimp.weStick = weStick;        wimp.weSpread = weSpread;
+    wimp.kCrit4 = kCrit4;          wimp.splashA = splashA;
     // Pr = mu c_p / k. A property of the gas alone, so it is formed once
     // outside every loop; `cbrt` of it is the Ranz-Marshall Sh/Nu exponent.
     const ofscalar cbrtPr = thermal ? cbrt(mu*cpGas/kGas) : (ofscalar)0;
@@ -730,6 +944,14 @@ extern "C" __global__ void parcelIntegrate
         ofscalar atr = 0;
         ofscalar qlat = 0;
         ofscalar tp = thermal ? pt[p] : (ofscalar)0;
+        // SPEC-LIT (78.2): the temperature the IAPWS surface tension is
+        // evaluated at when the parcel is inert - the constant it was born
+        // with. Loaded only when both the map and the temperature-dependent
+        // tension are in force, so no run that existed before S78 pays a
+        // load for it, and an inert spray still gets the right sigma.
+        const ofscalar tInert =
+            (wallAction == OFP_WALL_WEBER && tensionModel == OFP_TENSION_IAPWS)
+            ? pt[p] : (ofscalar)0;
         // The single-droplet mass. Re-formed every sub-step now, because
         // (76.10) shrinks d; for inert and heating parcels d never moves, so
         // the value is the one the hoisted `const` used to carry.
@@ -972,7 +1194,14 @@ extern "C" __global__ void parcelIntegrate
                 cell, &x, &u, target,
                 owner, neighbour, sf, cf, cfOffset, cfFace, cfOwn,
                 bcfOffset, bcfFace, bSf, bCf, bKind,
-                wallAction, restitution, tangentialLoss, maxWalk,
+                wallAction, restitution, tangentialLoss,
+                // S78: `d` is the diameter this sub-step ends with - a
+                // LOCAL, so an evaporating droplet impacts at the size it
+                // actually has and not the one it was injected at - and the
+                // temperature is the evolving `tp` for a thermal parcel or
+                // the constant `tInert` for one whose temperature this
+                // kernel otherwise never loads.
+                wimp, rhoL, d, thermal ? tp : tInert, maxWalk,
                 counters, &flags);
         }
 
@@ -1171,7 +1400,12 @@ extern "C" __global__ void parcelInject
                 cell, &x, &discard, vadd(x, vscl(injStandoff[j], dir)),
                 owner, neighbour, sf, cf, cfOffset, cfFace, cfOwn,
                 bcfOffset, bcfFace, bSf, bCf, bKind,
-                OFP_WALL_REMOVE, 1, 0, maxWalk, counters, &flags);
+                // S78: the stand-off walk is `remove` whatever the case
+                // asked for - an injector placed inside a wall is a setup
+                // error, not an impact - so the impact model is a
+                // value-initialised stand-in the walk never reaches.
+                OFP_WALL_REMOVE, 1, 0, ofpWallImpact(), 0, 0, 0,
+                maxWalk, counters, &flags);
         }
 
         px[slot] = x;

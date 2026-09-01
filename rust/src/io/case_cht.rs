@@ -30,15 +30,20 @@
 //! §47.4's concatenated mesh (§59) beside §5's SIMPLE loop on the fluid
 //! block alone.
 //!
-//! **The fluid region is a CLOSED CAVITY** and that is the one restriction
-//! worth reading before anything else: every non-`empty` patch of it is a
-//! no-slip wall. There is no inlet and no outlet, because the moment a case
-//! can name one it also needs `inletOutlet` on `T`, a flux-establishment pass
-//! and an outflow treatment, none of which this format carries - and a
-//! setting the format carries but the solver ignores is the §13.4.1 defect
-//! this whole file is arranged around. SPEC-LIT §60.6 records what that
-//! costs: Qu & Mudawar's micro-channel is forced convection and cannot be
-//! expressed here at all.
+//! **SPEC-LIT §79 opened it.** A fluid patch may now say
+//! `"kind": "inlet"` (and carry `U`) or `"kind": "outlet"` (and carry
+//! `inletOutlet` on `T`), which is the entry §60.2 recorded as not existing -
+//! and the reason §60.6's Gate 6, Qu & Mudawar's forced-convection
+//! micro-channel, was UNREACHABLE rather than refused. Exactly one of each, or
+//! neither; **neither is §60.2's closed cavity, unchanged in every bit**, and
+//! a case with no opening still writes a no-slip wall on every non-`empty`
+//! fluid patch.
+//!
+//! One more thing moved with it: `buoyancy` is REQUIRED by a closed cavity,
+//! which has nothing else that could drive it, and OPTIONAL once a case names
+//! an inlet. Absent, the fluid has constant density `fluid.rho` and no body
+//! force - Qu & Mudawar's own assumptions (4) and (6), and the right model for
+//! a liquid, which SPEC-LIT §25's `rho = p0/(R_s T)` is not.
 //!
 //! §47.9's `coupledTemperature` is still refused as a patch entry, because on
 //! this format an interface is declared by the `interfaces` block, and a patch
@@ -60,7 +65,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::blockgen::{self, BlockSpec, GradedAxis};
-use crate::cht::flow::{Buoyancy, FlowCase, FlowControls, FlowRegion, FluidMaterial};
+use crate::cht::flow::{
+    Buoyancy, FlowCase, FlowControls, FlowRegion, FluidMaterial, Openings,
+};
 use crate::cht::{
     Conductivity, InterfaceRequest, PairingTolerances, RegionKind, SolidMaterial,
 };
@@ -228,7 +235,8 @@ impl ChtKappa {
     }
 }
 
-/// One patch's temperature condition.
+/// One patch's temperature condition, and - on a fluid region - what the patch
+/// IS.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ChtPatchRule {
@@ -237,8 +245,28 @@ pub struct ChtPatchRule {
     /// only make it possible to match none of them by accident.
     #[serde(rename = "match")]
     pub match_: String,
+    /// `"wall"` (the default), `"inlet"` or `"outlet"` - SPEC-LIT §79.2.
+    ///
+    /// This is the entry §60.2 said did not exist. Until §79 every non-`empty`
+    /// patch of a fluid region was a no-slip wall and the document had no
+    /// spelling for anything else, which is why §60.6's Gate 6 was
+    /// UNREACHABLE rather than refused. An `inlet` carries [`Self::u`] and a
+    /// `fixedValue` `T`; an `outlet` carries neither and takes `inletOutlet`
+    /// or `zeroGradient`. Only a FLUID region may say either.
+    #[serde(default = "wall_patch_kind")]
+    pub kind: String,
+    /// The inlet velocity vector, m/s - required on an `inlet` and refused
+    /// anywhere else. Uniform over the patch: SPEC-LIT §79.3's
+    /// flux-establishment pass takes one normal speed, and a profile is
+    /// refused by name rather than averaged.
+    #[serde(rename = "U", default, skip_serializing_if = "Option::is_none")]
+    pub u: Option<[f64; 3]>,
     #[serde(rename = "T")]
     pub t: ChtScalarBc,
+}
+
+fn wall_patch_kind() -> String {
+    "wall".to_string()
 }
 
 /// What a patch can say about `T` - SPEC-LIT §4's triple, reached by name.
@@ -255,6 +283,18 @@ pub enum ChtScalarBc {
     /// SPEC-LIT §32.2.
     #[serde(rename = "fixedFluxTemperature")]
     FixedFluxTemperature { q: f64 },
+    /// SPEC-LIT §79.4's outflow condition: `zeroGradient` while the flux
+    /// leaves, `fixedValue inletValue` on any face where it comes back in.
+    ///
+    /// Legal ONLY on an `outlet` patch. On a wall the flux is identically
+    /// zero, so the switch would never fire and the condition would be
+    /// `zeroGradient` wearing another name - a setting the case can say and
+    /// the solver ignores, which is the §13.4.1 defect.
+    #[serde(rename = "inletOutlet")]
+    InletOutlet {
+        #[serde(rename = "inletValue")]
+        inlet_value: f64,
+    },
     /// The 2-D front/back plane: the patch contributes to no surface integral
     /// at all.
     ///
@@ -427,6 +467,10 @@ pub enum LoweredBc {
     /// `fr = 0`, and `refGrad` is written from `q` and the face's own
     /// conductance - SPEC-LIT §32.2.
     FixedFlux(Scalar),
+    /// SPEC-LIT §79.4: `refValue = inletValue`, `refGrad = 0`, and `fr`
+    /// rewritten from the sign of the face flux every outer iteration by
+    /// `field_ops::update_inlet_outlet`.
+    InletOutlet(Scalar),
 }
 
 impl LoweredBc {
@@ -435,6 +479,7 @@ impl LoweredBc {
             Self::FixedValue(_) => BcKind::FixedValue,
             Self::ZeroGradient => BcKind::ZeroGradient,
             Self::FixedFlux(_) => BcKind::FixedFluxTemperature,
+            Self::InletOutlet(_) => BcKind::InletOutlet,
         }
     }
 }
@@ -457,6 +502,9 @@ pub struct LoweredChtCase {
     pub buoyancy: Option<Buoyancy>,
     /// The outer loop's settings. `Some` exactly when there is a fluid region.
     pub flow: Option<FlowControls>,
+    /// SPEC-LIT §79.2's inlet/outlet pair, on the fluid region. `None` is
+    /// §60.2's closed cavity, unchanged.
+    pub openings: Option<Openings>,
     /// `[n_regions]` uniform volumetric source, W/m^3.
     pub sources: Vec<Scalar>,
     pub interfaces: Vec<InterfaceRequest>,
@@ -488,7 +536,7 @@ impl LoweredChtCase {
     /// The conjugate fluid/solid case, borrowed out of this one - SPEC-LIT
     /// §60. `None` on a pure-conduction case.
     pub fn flow_case(&self) -> Option<FlowCase<'_>> {
-        let (buoyancy, flow) = (self.buoyancy?, self.flow.clone()?);
+        let flow = self.flow.clone()?;
         Some(FlowCase {
             name: self.name.clone(),
             regions: self
@@ -509,7 +557,8 @@ impl LoweredChtCase {
             meshes: &self.meshes,
             interfaces: self.interfaces.clone(),
             patch_bcs: self.patch_bcs.clone(),
-            buoyancy,
+            buoyancy: self.buoyancy,
+            openings: self.openings.clone(),
             initial_t: self.initial_t,
             flow,
             t_solver: self.solver,
@@ -613,7 +662,46 @@ impl ChtCase {
                 .filter(|p| matches!(p.t, ChtScalarBc::Empty))
                 .map(|p| p.match_.as_str())
                 .collect();
-            let mesh = build_region_mesh(r, &empties)?;
+            // SPEC-LIT §79.2: an opening is the mesh's patch TYPE, exactly as
+            // `empty` is, so it has to be known before the block is built. A
+            // solid region cannot carry one - it has no flow - and the message
+            // names the region rather than a face index.
+            let mut flow_patches: Vec<&str> = Vec::new();
+            for rule in &r.patches {
+                match rule.kind.as_str() {
+                    "wall" => {}
+                    "inlet" | "outlet" => {
+                        if kind != RegionKind::Fluid {
+                            return Err(Error::Config(format!(
+                                "regions/{}/patches: patch '{}' is an `{}`, but region '{}' is \
+                                 SOLID. An opening is a place flow enters or leaves and a \
+                                 conducting solid has none (SPEC-LIT 79.2); put it on the fluid \
+                                 region",
+                                r.name, rule.match_, rule.kind, r.name
+                            )));
+                        }
+                        flow_patches.push(rule.match_.as_str());
+                    }
+                    other => {
+                        crate::io::contract::unsupported(
+                            &format!("regions/{}/patches/{}/kind", r.name, rule.match_),
+                            other,
+                            &["wall", "inlet", "outlet"],
+                            "wall - SPEC-LIT 60.2's no-slip patch, which is what every fluid patch \
+                             was before SPEC-LIT 79",
+                            (),
+                        )?;
+                        return Err(Error::Config(format!(
+                            "regions/{}/patches/{}/kind: \"{other}\" is not wall, inlet or outlet, \
+                             and cannot be substituted even under -permissive - the patch TYPE \
+                             decides whether the pressure equation owns the face's flux, and there \
+                             is no third answer to guess",
+                            r.name, rule.match_
+                        )));
+                    }
+                }
+            }
+            let mesh = build_region_mesh(r, &empties, &flow_patches)?;
 
             let (mat, fluid) = match (kind, &r.material, &r.fluid) {
                 (RegionKind::Solid, Some(m), None) => {
@@ -792,6 +880,9 @@ impl ChtCase {
 
         // ---- patch rules -------------------------------------------------
         let mut patch_bcs = Vec::new();
+        #[allow(clippy::type_complexity)]
+        let mut inlets: Vec<(String, String, Option<crate::Vec3>)> = Vec::new();
+        let mut outlets: Vec<(String, String)> = Vec::new();
         for (r, region) in self.regions.iter().enumerate() {
             for rule in &region.patches {
                 match claimed[r].get_mut(rule.match_.as_str()) {
@@ -812,6 +903,95 @@ impl ChtCase {
                     }
                     Some(slot) => *slot = "patches rule",
                 }
+                let path = format!("regions/{}/patches/{}", region.name, rule.match_);
+                let is_inlet = rule.kind == "inlet";
+                let is_outlet = rule.kind == "outlet";
+
+                // SPEC-LIT §79.2, in both directions. A `U` that no opening
+                // reads and an inlet with no `U` are the same defect seen from
+                // the two sides, and each is refused by name.
+                if rule.u.is_some() && !is_inlet {
+                    return Err(Error::Config(format!(
+                        "{path}/U: a velocity on a `{}` patch is a setting the solver would ignore \
+                         (SPEC-LIT 13.4.1) - only an `inlet` prescribes one. A wall is no-slip and \
+                         an outlet's velocity is what the pressure equation computes",
+                        rule.kind
+                    )));
+                }
+                let opening_u = if is_inlet {
+                    let u = rule.u.ok_or_else(|| {
+                        Error::Config(format!(
+                            "{path}: an `inlet` needs `U` - the velocity, m/s, uniform over the \
+                             patch. SPEC-LIT 79.3's flux-establishment pass is built from its \
+                             normal component and there is no default this reader is entitled to \
+                             invent"
+                        ))
+                    })?;
+                    let v = crate::Vec3::new(u[0] as Scalar, u[1] as Scalar, u[2] as Scalar);
+                    if !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite() {
+                        return Err(Error::Config(format!("{path}/U is not finite")));
+                    }
+                    if !(v.mag_sqr() > 0.0) {
+                        return Err(Error::Config(format!(
+                            "{path}/U is zero. An inlet through which nothing enters is a no-slip \
+                             wall spelled at length; say `\"kind\": \"wall\"` and mean it (SPEC-LIT \
+                             79.2)"
+                        )));
+                    }
+                    Some(v)
+                } else {
+                    None
+                };
+
+                // SPEC-LIT §79.4: which `T` each patch kind may carry. Every
+                // combination not listed is refused by name, because the ones
+                // that are missing are the ones that would be read and then
+                // mean nothing.
+                match (&rule.t, is_inlet, is_outlet) {
+                    (ChtScalarBc::Empty, false, false) => {}
+                    (ChtScalarBc::Empty, _, _) => {
+                        return Err(Error::Config(format!(
+                            "{path}: an `empty` patch contributes to no surface integral at all, so \
+                             it cannot also be an opening (SPEC-LIT 79.2)"
+                        )))
+                    }
+                    (ChtScalarBc::InletOutlet { .. }, _, true) => {}
+                    (ChtScalarBc::InletOutlet { .. }, _, false) => {
+                        return Err(Error::Config(format!(
+                            "{path}/T: `inletOutlet` switches on the SIGN of the face flux, and the \
+                             flux through a wall or an inlet never changes sign - so on anything \
+                             but an `outlet` it is `zeroGradient` (or `fixedValue`) wearing another \
+                             name, which is the setting the solver ignores that SPEC-LIT 13.4.1 \
+                             exists to stop"
+                        )))
+                    }
+                    (ChtScalarBc::FixedValue { .. }, true, _) => {}
+                    (_, true, _) => {
+                        return Err(Error::Config(format!(
+                            "{path}/T: an `inlet` carries `fixedValue` - the temperature of what \
+                             enters. Any other condition leaves the entering enthalpy undetermined \
+                             (SPEC-LIT 79.4)"
+                        )))
+                    }
+                    (ChtScalarBc::ZeroGradient, _, true) => {}
+                    (_, _, true) => {
+                        return Err(Error::Config(format!(
+                            "{path}/T: an `outlet` carries `inletOutlet` or `zeroGradient`. A held \
+                             temperature at an outlet conducts heat back INTO a domain the flow is \
+                             leaving, and a prescribed flux there is a wall condition on a face \
+                             that is not a wall (SPEC-LIT 79.4)"
+                        )))
+                    }
+                    _ => {}
+                }
+
+                if is_inlet {
+                    inlets.push((region.name.clone(), rule.match_.clone(), opening_u));
+                }
+                if is_outlet {
+                    outlets.push((region.name.clone(), rule.match_.clone()));
+                }
+
                 patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t)));
             }
         }
@@ -836,14 +1016,64 @@ impl ChtCase {
             )));
         }
 
+        // ---- SPEC-LIT §79.2's openings -----------------------------------
+        //
+        // Exactly one of each, or neither. Two inlets would need a pressure
+        // level each to decide how the inflow splits, and SPEC-LIT §79.3's
+        // flux-establishment pass carries the single Dirichlet reference the
+        // outlet supplies - so rather than pick a split silently, the pair is
+        // required to be a pair.
+        let openings = match (inlets.len(), outlets.len()) {
+            (0, 0) => None,
+            (1, 1) => {
+                let (_, inlet_patch, u) = inlets.remove(0);
+                let (_, outlet_patch) = outlets.remove(0);
+                if inlet_patch == outlet_patch {
+                    return Err(Error::Config(
+                        "regions/patches: the inlet and the outlet are the same patch. A patch \
+                         carries ONE condition"
+                            .to_string(),
+                    ));
+                }
+                Some(Openings {
+                    inlet_patch,
+                    inlet_velocity: u.unwrap_or_default(),
+                    outlet_patch,
+                })
+            }
+            (n_in, n_out) => {
+                return Err(Error::Config(format!(
+                    "regions/patches: {n_in} inlet(s) and {n_out} outlet(s). SPEC-LIT 79.2 takes \
+                     exactly one of each, or neither (the closed cavity of SPEC-LIT 60.2). An inlet \
+                     with no outlet drives mass into a domain with no path out of it; a second \
+                     opening needs a pressure level of its own to decide how the flow splits, and \
+                     SPEC-LIT 79.3's flux-establishment solve carries exactly one Dirichlet \
+                     reference"
+                )));
+            }
+        };
+        if openings.is_some() && !has_fluid {
+            return Err(Error::Config(
+                "regions/patches: an opening was named but no region has `\"kind\": \"fluid\"`"
+                    .to_string(),
+            ));
+        }
+
         // ---- the fluid-only blocks, and SPEC-LIT 60.3's refusals ---------
         //
         // Each of these is a setting the case could write and the solver would
         // ignore, which is the 13.4.1 defect six instances of have been found
         // in this project. Refused in BOTH directions: present without a fluid
         // region, and absent with one.
+        //
+        // SPEC-LIT §79.5 loosened exactly one row of this: `buoyancy` is
+        // required by a CLOSED cavity, which has no other thing to drive it,
+        // and OPTIONAL once the case names an inlet, because forced convection
+        // is driven by the inlet and Qu & Mudawar's own assumption (6) is that
+        // buoyancy is negligible. Absent, the fluid has CONSTANT density -
+        // their assumption (4) - and no body force.
+        let forced = openings.is_some();
         for (what, present) in [
-            ("buoyancy", self.buoyancy.is_some()),
             ("numerics/flow", self.numerics.flow.is_some()),
             ("run/iterations", self.run.iterations.is_some()),
         ] {
@@ -863,6 +1093,26 @@ impl ChtCase {
                      reader is entitled to invent"
                 )));
             }
+        }
+
+        if self.buoyancy.is_some() && !has_fluid {
+            return Err(Error::Config(
+                "buoyancy was given but no region has `\"kind\": \"fluid\"`. Nothing in a stack of \
+                 conducting solids reads it, and a setting the solver ignores is exactly what \
+                 SPEC-LIT 13.4.1 exists to stop - delete it, or make a region fluid"
+                    .to_string(),
+            ));
+        }
+        if self.buoyancy.is_none() && has_fluid && !forced {
+            return Err(Error::Config(
+                "a CLOSED fluid cavity needs `buoyancy`. SPEC-LIT 60.2: every non-`empty` patch of \
+                 it is a no-slip wall, so SPEC-LIT 9's body force is the only thing that can drive \
+                 any flow at all and there is no default this reader is entitled to invent. A case \
+                 that meant conduction should say `kind: solid`; a case that meant FORCED \
+                 convection should name an `inlet` and an `outlet` (SPEC-LIT 79.2), and may then \
+                 omit `buoyancy` - which makes the fluid's density constant at `fluid.rho`"
+                    .to_string(),
+            ));
         }
 
         let buoyancy = match &self.buoyancy {
@@ -972,6 +1222,7 @@ impl ChtCase {
             fluids,
             buoyancy,
             flow,
+            openings,
             sources,
             interfaces,
             patch_bcs,
@@ -991,6 +1242,9 @@ fn lower_bc(bc: &ChtScalarBc) -> LoweredBc {
         ChtScalarBc::FixedValue { value } => LoweredBc::FixedValue(*value as Scalar),
         ChtScalarBc::ZeroGradient => LoweredBc::ZeroGradient,
         ChtScalarBc::FixedFluxTemperature { q } => LoweredBc::FixedFlux(*q as Scalar),
+        ChtScalarBc::InletOutlet { inlet_value } => {
+            LoweredBc::InletOutlet(*inlet_value as Scalar)
+        }
         // An `empty` patch contributes to no surface integral, so the triple
         // written on it is never read. `run_flow_case` skips those faces by
         // the mesh's own `PatchKind`, which is where the fact lives.
@@ -1048,7 +1302,7 @@ fn lower_precon(name: &str) -> Result<Preconditioner> {
 /// region's become `wall`, because they are no-slip walls in the momentum
 /// sense (SPEC-LIT §60.2) and `momFluxIsPrescribed` asks the mesh, not the
 /// case.
-fn build_region_mesh(r: &ChtRegion, empties: &[&str]) -> Result<HostMesh> {
+fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Result<HostMesh> {
     let b = &r.mesh.bounds;
     let axis = |i: usize| -> Result<GradedAxis> {
         let (lo, hi) = (b.min[i] as Scalar, b.max[i] as Scalar);
@@ -1118,6 +1372,11 @@ fn build_region_mesh(r: &ChtRegion, empties: &[&str]) -> Result<HostMesh> {
         patch_type: std::array::from_fn(|i| {
             if empties.contains(&names[i]) {
                 "empty".to_string()
+            } else if openings.contains(&names[i]) {
+                // SPEC-LIT §79.2: an opening is `patch`, not `wall`. The
+                // distinction is not cosmetic - `PatchKind::Wall` is what a
+                // wall function targets, and an outlet is not a wall.
+                "patch".to_string()
             } else {
                 base.to_string()
             }

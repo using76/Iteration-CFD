@@ -215,6 +215,30 @@ fn report_flow(low: &LoweredChtCase, sol: &ChtFlowSolution) {
         );
     }
 
+    // SPEC-LIT §79.3: the openings, and the two balances they make checkable
+    // from the output alone.
+    if let Some(o) = &sol.openings {
+        println!(
+            "\n  openings (SPEC-LIT 79): inlet flux {:+.6e} m^3/s, outlet {:+.6e}, \
+             imbalance {:.3e} (both signed OUTWARD)",
+            f64::from(o.inlet_flux),
+            f64::from(o.outlet_flux),
+            f64::from(o.imbalance()),
+        );
+        println!(
+            "    flux establishment: laplacian(Phi) = 0 in {} iterations, residual {:.3e}, \
+             max_c |sum_f phi_f| {:.3e} m^3/s",
+            o.potential.iterations,
+            f64::from(o.potential.final_residual),
+            f64::from(o.potential.max_div_phi),
+        );
+        println!(
+            "    outlet bulk (mixing-cup) T {:.6} K; enthalpy carried out {:+.6e} W",
+            f64::from(o.outlet_bulk_t),
+            f64::from(o.enthalpy_rise),
+        );
+    }
+
     // Every patch that is not an interface, so a reader can close the energy
     // balance from the output alone.
     println!("\n  patch heat flow, W (positive = INTO the domain):");

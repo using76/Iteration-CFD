@@ -64,6 +64,7 @@ fn still(capacity: usize) -> ParcelControls {
         max_substeps: 64,
         max_walk: 16,
         evaporation: EvaporationControls::default(),
+        impact: crate::parcels::WallImpactControls::default(),
         persistent_blocks: None,
     }
 }
@@ -981,6 +982,7 @@ fn the_pool_grid_geometry_does_not_move_the_deposition() {
             drag: DragModel::SchillerNaumann,
             gravity: Vec3::new(0.0, 0.0, -9.81),
             evaporation: EvaporationControls::default(),
+            impact: crate::parcels::WallImpactControls::default(),
             persistent_blocks: Some(blocks),
             ..still(4096)
         };

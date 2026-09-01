@@ -21881,15 +21881,16 @@ iteration when a mass source is present and none when it is not.
 | 11 | **Gate 77-E**, by construction: `None` is the old kernel with the old arguments and moves not one bit of `(div u)_target` | the same | every bit |
 | 12 | **Gate 77-E**, measured: an empty pool with mass coupling ON deposits `+0.0` into all four arrays | `gate_77e_an_empty_pool_couples_exactly_zero_vapour` | every bit |
 | 13 | and a cell with no parcels in a coupled spray is bitwise unmoved | `ofgpu-validate` | every bit |
-| 14 | (77.1) reaches the species field it is handed to, exactly, through §61.2's seam | `the_vapour_source_reaches_the_species_field_it_is_handed_to` | `<= 1e-11` |
-| 15 | **Gate 77-D**: ASHRAE's adiabatic saturation | `ofgpu-validate`; `the_gas_moves_along_the_adiabatic_saturation_line` | **PASSES**, `-0.117 K` — §77.10 |
-| 16 | and the wet-bulb temperature is an invariant of the process, as ASHRAE says | the same | `0.117 K` drift over 3 s |
-| 17 | condensation reverses every sign, which is why neither source is implicit | `condensation_reverses_every_sign_and_is_why_the_sources_are_explicit` | 0 defects |
-| 18 | the half-coupled evaporating pool is refused by name in every direction | `the_half_coupled_evaporating_pool_is_refused_by_name` | 6 refusals |
-| 19 | `Y_v` is required when it is read and refused when it is not | `the_vapour_field_contract_is_refused_in_both_directions` | §13.4 |
-| 20 | the menu takes `evaporation` now and still refuses what does not exist | `the_menu_takes_evaporation_now_and_still_refuses_the_rest` | — |
-| 21 | the device mass codes match the host, and the gather still has no atomic | `the_device_modes_match_the_host` | — |
-| 22 | what it costs is reportable before it is spent | `gate_77e_an_empty_pool_couples_exactly_zero_vapour` | 32 B/cell more |
+| 14 | **Gate 77-E**, end to end: an empty pool with mass coupling ON leaves the SOLVED `Y_v` and `(div u)_target` bit for bit where a run with no coupling left them | `gate_77e_a_coupled_empty_pool_leaves_the_gas_bitwise_where_it_was` | every bit |
+| 15 | (77.1) reaches the species field it is handed to, exactly, through §61.2's seam | `the_vapour_source_reaches_the_species_field_it_is_handed_to` | `<= 1e-11` |
+| 16 | **Gate 77-D**: ASHRAE's adiabatic saturation | `ofgpu-validate`; `the_gas_moves_along_the_adiabatic_saturation_line` | **PASSES**, `-0.117 K` — §77.10 |
+| 17 | and the wet-bulb temperature is an invariant of the process, as ASHRAE says | the same | `0.117 K` drift over 3 s |
+| 18 | condensation reverses every sign, which is why neither source is implicit | `condensation_reverses_every_sign_and_is_why_the_sources_are_explicit` | 0 defects |
+| 19 | the half-coupled evaporating pool is refused by name in every direction | `the_half_coupled_evaporating_pool_is_refused_by_name` | 6 refusals |
+| 20 | `Y_v` is required when it is read and refused when it is not | `the_vapour_field_contract_is_refused_in_both_directions` | §13.4 |
+| 21 | the menu takes `evaporation` now and still refuses what does not exist | `the_menu_takes_evaporation_now_and_still_refuses_the_rest` | — |
+| 22 | the device mass codes match the host, and the gather still has no atomic | `the_device_modes_match_the_host` | — |
+| 23 | what it costs is reportable before it is spent | `gate_77e_an_empty_pool_couples_exactly_zero_vapour` | 32 B/cell more |
 
 **§13.4.1's pair table.**
 
@@ -22040,3 +22041,609 @@ and the suite by 10 tests.
 * **Read a spray from a case file.** Still nothing does. `CouplingControls` is
   built in code and its `describe()` is the banner it will print when there is
   one.
+* **Check that its `cp` is the energy equation's `cp`.** (77.2) is formed
+  with the pool's own `ParcelControls::cp_gas` — which §66 uses as a FILM
+  property, inside `Pr = mu cp/k` — while §26 books the gas's enthalpy as
+  `rho cp T` with `GasProperties::cp`. The constant (77.2) wants is §26's,
+  and `ParcelCoupling` never sees a `GasProperties`. They are the same
+  number in every fixture here and they must be: if they differ, gate 77-B
+  still closes (it is posed on this constant on both sides) while the gas's
+  temperature moves by the wrong amount and `Q/(rho cp T)` divides by the
+  other one. `ParcelCoupling::gas_cp` is the handle a driver asserts on, and
+  is all §77 does about it — a checked API would have to carry
+  `GasProperties` into a module whose whole point is that it does not know
+  what equation it is feeding.
+* **Check that `rho > 0`.** The gather divides by `rho[c]` three times - once
+  for §68's kinematic momentum source and twice more for (77.1) and (77.3).
+  `ParcelCoupling::update` validates the array's LENGTH and nothing about its
+  values. The contract holds wherever it is used, because every gas density in
+  this crate is `GasState`'s `p0 W/(R T)` and therefore positive for any
+  positive temperature - but it holds by where the number came from, not by a
+  guard, and §77.13 is where the comment that claimed otherwise was found.
+
+### 77.13 The gating pass: what re-measuring it found
+
+§77 was committed with its spec written, its code compiling and its gates
+**never run** - its author reached a session limit between the two. This
+subsection is the pass that ran them, and it is separate from §77.11 because
+the four findings there belong to the unit that built the section and these
+belong to the unit that checked it.
+
+**Every number above stands.** Re-measured on the same machine, from the
+committed tree, before anything was changed:
+
+```
+  gate 77-A   the mass identity                 6.257e-16   (§77.9 says 6.3e-16)
+  §77.4       the deposit is conv + enthalpy    5.593e-16   (5.6e-16)
+  gate 77-B   the energy ledger                 1.347e-12   (1.3e-12)
+              and the naive ledger short by         6.0 %   (6 %)
+  gate 77-C   D = mdot/rho, cell by cell        2.165e-16   (2.2e-16)
+  §77.6       the two halves, exact             0.000e+00   (exact)
+              cooling / expansion                   17.59   (17.6)
+  gate 77-D   19.1792 C vs ASHRAE 19.2964 C    -0.1172 K    (-0.117 K)
+              wet-bulb drift                    0.1172 K    (0.117 K)
+```
+
+`ofgpu-validate` 839/839 and `cargo test --release` green as committed. An
+ungated section is not the same thing as a wrong one, and this one was right.
+
+**5. Every `(77.x)` in the code pointed at the wrong equation.** The spec's
+equations were reordered - the three sources (77.1)-(77.3) moved to the front,
+ahead of the deposits they are built from - after the code's comments were
+written, and nothing in this repository checks a cross-reference. The code's
+`(77.2)` was the deposit `mdot'''` (now (77.6)); its `(77.4)` was the species
+source (now (77.1)); its `(77.5)` the vapour enthalpy (now (77.2)); its
+`(77.6)` the divergence source (now (77.3)). `S77.5` meant §77.4 in
+`couple.rs`, §77.6 in `parcelcouple.cu` and §77.5 in `couple/tests.rs` - three
+subsections, one spelling, three files. 42 sites in four files, all corrected.
+`PROVENANCE.md` and both READMEs already carried the published numbering, so
+the drift was confined to the source comments, where the two audit tests that
+count files and licence lines cannot see it.
+
+**6. A comment claimed a host-side check that does not exist.**
+`parcelcouple.cu` said, above the momentum branch, `rho > 0 is checked on the
+host, once, at setup`. It is not: `ParcelCoupling::update` validates the length
+of `rho` and nothing about its values, and §77 added two more divisions by
+`rho[c]` on the strength of that sentence. The contract is real and it holds -
+`GasState` is the only producer of a gas density in this crate and `p0 W/(R T)`
+is positive - but it holds by provenance, not by a guard. The comment now says
+which, and §77.12 carries the omission.
+
+**7. The enthalpy source's `cp` is not the energy equation's `cp`, and
+nothing joins them.** (77.2) is `cp_g mdot''' (T_p - T_g)` and the `cp_g` it
+uses is `ParcelControls::cp_gas`, a §66 film property; the equation it is
+registered on divides by `GasProperties::cp`. Every fixture sets both to
+1005 J/(kg K), so nothing measured it — and gate 77-B would not have, because
+the ledger is posed on the same constant on both sides. Documented at the
+accessor, given a handle (`ParcelCoupling::gas_cp`) and listed in §77.12
+rather than closed, because closing it means carrying `GasProperties` into a
+module whose whole argument is that it does not know what equation it feeds.
+
+**Gate 77-E was one consumer short.** `gate_77e_an_empty_pool_couples_exactly_zero_vapour`
+proved the four deposits are `+0.0`; nothing pushed that `+0.0` through the two
+seams §77 exists to reach. `gate_77e_a_coupled_empty_pool_leaves_the_gas_bitwise_where_it_was`
+now solves `Y_v` on a lumpy field with and without the source, and forms
+`(div u)_target` on a lumpy temperature with and without the registration and
+the `d_mass` argument, and compares `to_bits()`. Both are unmoved, which is the
+additive-identity argument §68.3 makes for the momentum deposit, measured one
+seam further on. The non-vacuity guard matters here and is asserted: the target
+divergence it is unmoved AT is not zero.
+
+## 78. Droplet-wall impact — the regime map, the mass that stays, and the film that is refused
+
+§66.10 gave a parcel meeting a `wall` two outcomes and refused four by name.
+Three of those four — `stick`, `spread` and `film` — shared one sentence: *a
+wall film is needed to receive the mass and this crate has none.* That sentence
+was doing too much work, because it hides two entirely different missing
+things. One is **where the mass
+goes**, which is bookkeeping and is cheap. The other is **what the mass does
+next**, which is a thin-film momentum equation on the boundary-face mesh and is
+a separate project. This section builds the first, refuses the second by name,
+and separates them so that the next reader is not told that a deposit needs a
+film.
+
+What is here: the impact regime map (Bai & Gosman 1995), the criterion that
+selects between its four outcomes (Mundo, Sommerfeld & Tropea 1995, with Bai &
+Gosman's own threshold as the alternative), the parcel-side action each regime
+takes, and a ledger in which the mass that reaches a wall is **still findable
+afterwards, bitwise**. What is not: film transport, splash children, and the
+hot-wall branch — §78.11, each with what it would need.
+
+**A numbering convention, stated because §77.13 found the alternative the hard
+way.** Several of this section's equations come in lettered sets, and the code
+refers to a set by its bare number: `(78.2)` means the pair (78.2a)/(78.2b),
+`(78.3)` the four groups (78.3a)-(78.3d), and `(78.4)` the two criteria
+(78.4a)/(78.4b) together with the inverse (78.4c). `(78.5)`, `(78.5b)` and
+`(78.6)` are single equations and mean themselves. §77's comments drifted from
+its equations because nothing in this repository checks a cross-reference; the
+convention is written down here so that a reader can check them by hand
+without guessing what a bare number was meant to point at.
+
+The defaults do not move. `wallInteraction` is still `remove`, and every
+expression the map evaluates is inside `if (wallAction == OFP_WALL_WEBER)` at a
+`wall` face. §78.9's gate 78-C measures both halves of what that buys: a run
+that never meets a wall is bitwise what it was, and so is a run that meets
+walls constantly under an action that does not consult the map — the second
+being the one that matters, because it is the case a default run actually is.
+
+### 78.1 What an impact is, and what selects between the outcomes
+
+A droplet arriving at a solid surface does one of four things. It **adheres**;
+it **rebounds** off the gas film it could not push out of the way; it
+**spreads** into a lamella that stays; or the lamella breaks up and it
+**splashes**, throwing part of its mass back off the wall as secondary
+droplets. Which one is a competition between the droplet's inertia and the two
+things that resist it — surface tension, and viscous dissipation inside the
+droplet — so the classification is a map on dimensionless groups, and it is a
+map with **liquid** properties in every one of them. The gas is not in it at
+all: the gas viscosity `mu` of (66.5) and the liquid viscosity `mu_l` of (78.3)
+differ by three orders of magnitude and this section takes the second.
+
+The classical map is Bai & Gosman, SAE 950283 (1995). Its dry-wall boundaries
+are Weber numbers — adhesion below `We ~ 2`, rebound to `We ~ 20`, spread above
+that — and its splash threshold is a Laplace-number correlation. Mundo,
+Sommerfeld & Tropea, *Int. J. Multiphase Flow* 21 (1995) 151, measured a
+different splash threshold on a different apparatus, and the two do not agree.
+Yarin, *Annu. Rev. Fluid Mech.* 38 (2006) 159, is the review that explains why
+neither is better than approximately right. That is why every threshold in this
+section is a **control with a published default** rather than a constant, and
+why §78.10 reports the disagreement as a gate rather than picking one and
+calling it settled.
+
+### 78.2 Surface tension, and the one published number in this section
+
+Every group below divides by `sigma`, so `sigma` has to come from somewhere.
+Two choices:
+
+```
+  constant     sigma = sigma_0                                          (78.2a)
+
+  iapwsR1-76   sigma = B tau^mu (1 + b tau),   tau = 1 - T_p/T_c        (78.2b)
+               B = 0.2358 N/m,  b = -0.625,  mu = 1.256,  T_c = 647.096 K
+```
+
+(78.2b) is IAPWS R1-76 (2014) verbatim — a freely published international
+standard, evaluated at the **droplet's own** temperature, so an evaporating
+spray that arrives hot arrives with less surface tension and a higher Weber
+number for the same speed. It is water's correlation and nothing here can check
+that the parcels are water; selecting it is the case's statement that they are,
+and `constant` is the default for exactly that reason.
+
+It is **clamped to zero at and above `T_c`** rather than evaluating
+`pow(negative, 1.256)`. A droplet above the critical temperature is not a
+droplet; its Weber number is `+inf`; (78.5) reads `+inf` as a splash. That is
+the physically right answer and it needs no special case anywhere downstream —
+the clamp is the whole of it.
+
+The default `sigma_0` is `0.07274 N/m`, which is (78.2b) at 293.15 K to the
+four figures the release's own table prints. A default nobody can trace is how
+a magic number gets into a spray model.
+
+### 78.3 The groups, and the identity that matters
+
+```
+  u_n = |u_p . n_w|                          impact NORMAL speed, m/s
+
+  We  = rho_l d u_n^2 / sigma                inertia / surface tension  (78.3a)
+  Re  = rho_l u_n d / mu_l                   LIQUID Reynolds number     (78.3b)
+  Oh  = mu_l / sqrt(rho_l sigma d)           = sqrt(We)/Re              (78.3c)
+  La  = rho_l sigma d / mu_l^2               = 1/Oh^2                   (78.3d)
+```
+
+`u_n` is taken from the **parcel velocity**, not from the remaining
+displacement of the walk. The two are parallel through a straight sub-step and
+are not after a rebound earlier in the same one, and the Weber number is a
+statement about the droplet's momentum.
+
+Only the normal component enters. Neither published threshold in this map has a
+tangential term, so a grazing impact at 40 m/s and a normal impact at the same
+`u_n` are the same impact here. That is the map's, and §78.12 records it rather
+than leaving it to be inferred from a function signature.
+
+### 78.4 The two splash criteria, and the fourth power that removes the `pow`
+
+**Mundo** (the default):
+
+```
+  K = Oh Re^1.25 ,     splash when K > K_crit ,   K_crit = 57.7         (78.4a)
+```
+
+`K` is never formed. Its fourth power is, because `Oh Re = sqrt(We)` exactly:
+
+```
+  K^4 = (Oh Re)^4 Re = We^2 Re ,   splash when We^2 Re > K_crit^4       (78.4b)
+```
+
+and `x -> x^4` is strictly increasing on the non-negatives, so (78.4b) is
+(78.4a) — the same decision, taken with two multiplications and no `pow`, no
+`sqrt` and no division beyond the two already in `We` and `Re`. That matters
+for a reason with a section number: §38.6 records that `pow(x, y)` with
+non-integer `y` is **not bit-stable across compute capabilities**, and a regime
+map that flips on the hardware is a different model on the hardware.
+`K_crit^4` is formed once on the host and passed as a launch constant.
+
+**Bai & Gosman** (the alternative):
+
+```
+  We_c = A La^(-0.18) ,   splash when We > We_c ,   A = 2630 (smooth, dry)
+```
+
+`A` is a roughness parameter — Bai & Gosman report a range over the surfaces
+they tested and 2630 is the smooth end — so it is the control `splashA`. This
+branch **cannot** avoid `pow`: its threshold *is* `La^(-0.18)`. The asymmetry
+is real, it is why `mundo` is the default, and §78.10 states it rather than
+letting it be discovered.
+
+**The inverse, in closed form.** Both thresholds invert in `u_n`, which is what
+makes §78.9's boundary gate analytic rather than a bisection against the
+kernel:
+
+```
+  u_n(We)     = sqrt( We sigma / (rho_l d) )                            (78.4c)
+  u_n(K_crit) = ( K_crit^4 / C )^(1/5) ,
+                C = (rho_l d/sigma)^2 (rho_l d/mu_l)
+```
+
+because `K^4 = We^2 Re` is one monotone power of `u_n`. Bai & Gosman's inverts
+through (78.4c) directly: `La` does not contain `u_n`, so `We_c` is a constant
+at fixed `d`.
+
+### 78.5 The map, and the two statements that make a deposit
+
+```
+  splashing        ->  Splash
+  We <  weStick    ->  Stick
+  We <  weSpread   ->  Rebound
+  otherwise        ->  Spread                                            (78.5)
+```
+
+**The splash test is taken first**, and that ordering is load-bearing: with the
+thresholds a case is free to set, `We_c` can fall below `weSpread`, and taking
+the splash test first leaves the spread band *empty* rather than making the map
+two-valued. The map is total and single-valued for every input, including a
+`We` that is `NaN` — which falls through to `Spread`, the same on host and
+device, and is unreachable for any `sigma > 0`.
+
+**The action.** `Rebound` is (66.15), unchanged, with the same `e` and `f_t`
+`wallInteraction rebound` uses. The other three deposit, and a deposit is
+**exactly two statements** beyond what `remove` already did:
+
+```
+  u_p  <- 0                     the wall took the momentum
+  flags |= FLAG_DEPOSITED       which makes the slot's mass findable
+```
+
+Everything else is `remove`'s: the parcel stops at the face, leaves the working
+set, and is counted into `n_wall`. `d` and `n_p` are **not touched**, and that
+omission is the whole of §78.6. The momentum is not given to the gas: a parcel
+that died this step is out of the per-cell CSR, so its accumulators are not
+deposited — the same measurable gap §68.9 row 4 already reports for an escape,
+and not a new one.
+
+**The histogram.** Four integer counters, `n_stick`, `n_rebound`, `n_spread`,
+`n_splash`, indexed by the regime code so the kernel needs no branch to pick
+one. Integer, because §66's rule stands: the only reproducible accumulator on
+this device is an integer one. They close on `n_wall`:
+
+```
+  n_wall = n_stick + n_spread + n_splash                                (78.5b)
+```
+
+— `ParcelStats::check_wall_histogram` is that statement, and it is checked
+rather than left for two printed numbers to be compared by eye. It takes the
+wall action, because the claim runs **in both directions**: under `stick` and
+`weber` the identity holds, and under `remove` and `rebound` all four counters
+are zero while `n_wall` need not be. That second half is not a gap to be
+tolerated — it is the exact sense in which `remove` is bookkeeping and not a
+model, it is asserted, and a stray increment would be caught by it.
+
+Under `stick` every impact lands in the `stick` slot, and that slot then
+records the **action** rather than a classification: the map was not consulted,
+so what the impact physically was is unknown and is not claimed. Under `weber`
+the same slot means the regime. One counter with two meanings is a trap unless
+it is declared, so it is declared here, at the kernel, and on
+`ParcelStats::n_stick`.
+
+`n_rebound` is **not** in (78.5b), and counts impacts rather than parcels: a
+rebounding parcel is re-classified at every impact, and at `e = 1` the normal
+speed is preserved, so its regime is invariant and it bounces for the rest of
+the run.
+
+### 78.6 The ledger: a partition of the pool, not a running total
+
+A deposited mass total could have been an accumulator. It is not, and the
+reason is §66's own architecture: **the pool reclaims no slot**. Every parcel
+that ever existed is still in the array it was born in, with the diameter and
+weight it had when it stopped moving. So the ledger is a *classification of
+slots*, not a sum that has to be maintained:
+
+```
+  live       cell >= 0                                airborne
+  deposited  cell <  0  and  FLAG_DEPOSITED           on a wall
+  gone       cell <  0  and  not FLAG_DEPOSITED       left, or evaporated away
+```
+
+The three are disjoint and cover `0..n_slots` **by construction** — a deposited
+slot is dead, so it cannot be live, and the flag partitions the dead. Then
+
+```
+  m(S) = sum_{i in S} n_p,i rho_l (pi/6) d_i^3                          (78.6)
+```
+
+over each, and `m(live) + m(deposited) + m(gone) = m(pool)`.
+
+Two things follow, and they are different in kind, which is why §78.9 states
+them separately:
+
+* **Exact, by construction**: the mass of a droplet on the wall is *bitwise*
+  the mass that arrived, because nothing writes `d` or `n_p` at a deposit and
+  nothing writes them for an inert or heating parcel at all. "Nothing vanishes
+  at a wall" is not a tolerance here; it is that the bits did not move.
+* **To round-off**: the aggregate. Splitting one sum over the pool into three
+  sub-sums re-associates it. On the fixtures of §78.9 the three happen to sum
+  to the whole exactly, and that is measured, not promised.
+
+There is **no atomic anywhere in this**, floating-point or otherwise. The
+ledger is a host-side gather over a snapshot the driver already downloads.
+
+**A deposit is located, not merely counted.** The parcel stops *at the face*,
+so its position is the impact point, and a film built later has what it needs
+to find the face without this section storing a face index it would otherwise
+never read.
+
+### 78.7 Splash is detected and is not enacted
+
+The splash regime's physics is that part of the parent's mass leaves the wall
+again as `N` secondary droplets. This section **does not emit them**. Splash is
+a population-growth event at an unpredictable rate, and §66.10's refusal of it
+stands for the reason it always did: no deterministic capacity policy for
+population growth is designed, and a captured graph cannot express one.
+
+What changes is that the regime is no longer invisible. It is **classified,
+counted and reported**: `n_splash` is a first-class statistic, `ofgpu-validate`
+prints it, and the consequence is stated wherever the deposit is:
+
+> the parent deposits whole, so the wall deposit is an **upper bound**, by the
+> mass of the children that should have left again.
+
+Bai & Gosman give a retained-mass fraction for exactly this, and it is not used
+here, for a reason worth naming: their fraction is **stochastic** — a range
+sampled per impact — and this crate has no RNG (§66.8 names the counter-based
+generator as the prerequisite and does not build it). Depositing a
+deterministic fraction of the parent and deleting the rest would break §78.6's
+partition, which is the one thing this section is for. Depositing the whole
+parent keeps the ledger exact and makes the error a *named upper bound* rather
+than a silent loss.
+
+### 78.8 What a case can say
+
+| setting | values | default |
+|---|---|---|
+| `wallInteraction` | `remove`, `rebound`, `stick`, `weber` | `remove` |
+| `restitution`, `tangentialLoss` | `[0, 1]` | `1`, `0` — read by `rebound` **and** by `weber`'s rebound regime |
+| `splashCriterion` | `mundo`, `baiGosman` | `mundo` |
+| `surfaceTension` | `constant`, `iapwsR1-76` | `constant` |
+| `sigma` | finite, positive | `0.07274` N/m |
+| `muLiquid` | finite, positive | `1.0016e-3` Pa s |
+| `weStick`, `weSpread` | finite, `0 <= weStick <= weSpread` | `2`, `20` |
+| `kCrit` | finite, positive | `57.7` |
+| `splashA` | finite, positive | `2630` |
+
+**The §13.4 contract.** `stick` was refused by §66.10 and is supported now;
+`spread`, `film` and `splash` are still refused and **each carries a different
+note**, which is the point:
+
+* `spread` — *a spreading droplet's parcel-side state change is identical to
+  `stick`, which IS supported; what distinguishes the two is film transport.*
+  The alternative is named because it is genuinely the same thing at this level
+  of description, and a refusal that does not say so sends the user away from a
+  supported answer.
+* `film` — *there is no film transport: §78 deposits the mass at the impact
+  point and leaves it there, with no thickness, no momentum equation, no
+  dripping and no re-entrainment* (§78.11).
+* `splash` **as a forced mode** — population growth, §78.7 — with the note
+  that `weber` detects and counts it.
+
+`WallImpactControls::validate` refuses every bad number by name, **always**,
+and not only when the map is selected: a number that is nonsense when it is
+read is nonsense when it is written, and the error is more use at setup than
+three steps into a run (§66.11's own rule). `weSpread < weStick` is among the
+refusals, because an unordered pair is a different map rather than a tolerable
+input. `describe` prints the impact block **only when `weber` is in force**,
+per §13.4.2: a banner line for a model that is not running is the dead entry
+that rule forbids.
+
+**No block is added to any case format**, for §66.11's reason: no driver reads
+parcels yet.
+
+### 78.9 What must hold
+
+| # | claim | where it is checked | verdict |
+|---|---|---|---|
+| 1 | (78.2b) reproduces IAPWS R1-76's own table, 0–300 °C | `the_surface_tension_reproduces_the_iapws_r1_76_table`; `ofgpu-validate` | worst `0.0045 mN/m`, against a table quoted to `0.01` |
+| 2 | and the default `sigma` is that correlation at 293.15 K | `the_default_surface_tension_is_the_iapws_value_at_twenty_celsius` | `<= 5e-6` |
+| 3 | and it is clamped at `T_c`, which the map reads as a splash | `the_correlation_is_clamped_at_the_critical_point_and_a_splash_follows` | exact |
+| 4 | (78.3): `Oh = sqrt(We)/Re` and `La = 1/Oh^2`, over five decades of speed and three of diameter | `the_four_groups_satisfy_their_algebraic_identities` | `< 1e-14` |
+| 5 | (78.4b): `K^4 = We^2 Re`, and the two decision forms take the same decision at 20 000 speeds | the same; `the_fourth_power_form_decides_exactly_what_k_does` | `< 1e-13`; 0 disagreements |
+| 6 | **Gate 78-A**: the KERNEL's rebound/deposit boundaries are the closed-form inverse of the published criterion, at `1 ± 10^-1` down to `1 ± 10^-8`, for both criteria and both surface-tension models | `gate_78a_the_device_regime_boundaries_are_the_published_ones`; `ofgpu-validate` (64 impacts) | 0 defects |
+| 7 | **Gate 78-A**: and the spread/splash boundary, which only the histogram can resolve | `gate_78a_the_splash_threshold_is_where_the_criterion_puts_it`; `ofgpu-validate` | 0 defects at `1 ± 10^-8` |
+| 8 | **Gate 78-A**: and the two maps agree over a 16-point sweep spanning all four regimes, not only at the boundaries | `gate_78a_the_device_and_host_maps_agree_over_the_whole_sweep` | 0 defects |
+| 9 | (78.4c) lands on Mundo's constant: `K = 57.7` at the inverted speed | `ofgpu-validate` | `1.2e-16` relative |
+| 10 | the device regime codes are the host's, and are the counter offsets | `the_device_regime_codes_are_the_host_regime_codes` | 4 regimes, 4 slots |
+| 11 | **Gate 78-B**: the three buckets partition the pool, for an injected spray and for a 16-speed ladder | `gate_78b_every_gram_that_hits_a_wall_is_still_accounted_for`; `ofgpu-validate` | exact |
+| 12 | **Gate 78-B**, the exact half: every deposited droplet's `d` and `n_p` are *bitwise* the ones it arrived with | the same | every bit |
+| 13 | **Gate 78-B**, the aggregate: `m(live) + m(deposited) + m(gone) = m(pool)` | the same | `0.0` on both fixtures |
+| 14 | and the pool is the mass the injector says it emitted | `ofgpu-validate` | `6.5e-16` |
+| 15 | (78.5b): `n_wall = n_stick + n_spread + n_splash` under `stick` and `weber`, and **all four counters zero** under `remove` with `n_wall` not zero | `ParcelStats::check_wall_histogram`, in every §78 gate; `ofgpu-validate` | exact, both directions |
+| 16 | `stick` is `remove` plus two statements: position, diameter, weight, cell and identity are bitwise identical, and the flag word differs by exactly one bit | `gate_78b_stick_is_remove_plus_two_statements_and_nothing_else`; `ofgpu-validate` | every bit |
+| 17 | and `remove` accounts for none of that mass, which is the defect this section fixes | the same | 0 slots flagged |
+| 18 | **Gate 78-C**: a run that meets no wall is bitwise unmoved — every position, velocity, diameter, flag and identity — under all three wall actions and a deliberately absurd impact model | `gate_78c_a_run_with_no_wall_impact_is_bitwise_unmoved_by_the_map`; `ofgpu-validate` | every bit |
+| 19 | **Gate 78-C**, the default path: a run under `remove` or `rebound` that DOES meet walls is bitwise identical whatever the impact model says - including a deliberately absurd one - because neither action reads it | `gate_78c_the_default_wall_actions_do_not_read_the_impact_model`; `ofgpu-validate` | every bit |
+| 20 | **Gate 78-C**: an empty pool leaves every added counter at zero and every ledger term at `+0.0` | `gate_78c_an_empty_pool_deposits_exactly_nothing` | every bit |
+| 21 | **Gate 78-D**: the two published splash criteria against each other | `ofgpu-validate` | **OPEN**, a factor of `4.78` in `We` — §78.10 |
+| 22 | the map is monotone in the impact speed, over 4000 speeds, for both criteria | `the_map_is_monotone_in_the_impact_speed` | 0 defects |
+| 23 | a closed spread band leaves the map single-valued, because the splash test is first | `a_closed_spread_band_leaves_the_map_single_valued` | 0 defects |
+| 24 | viscosity RAISES the splash threshold, which is the physically right direction | `viscosity_raises_the_splash_threshold_and_the_spread_band_never_closes` | ×12 for ×1000 in `mu_l` |
+| 25 | `stick` is supported, and `spread`, `film` and `splash` are refused with three DIFFERENT notes | `the_wall_interaction_contract_names_what_it_gained_and_what_it_still_refuses`; `every_unsupported_setting_is_refused_by_name_with_the_menu` | §13.4 |
+| 26 | every bad impact number is refused by name, including `weSpread < weStick` | `every_bad_impact_number_is_refused_by_name` | 7 refusals |
+| 27 | the banner prints the criterion in force and not the one that is not | `the_banner_prints_the_criterion_that_is_in_force` | §13.4.2 |
+
+**§13.4.1's pair table.** Every setting §78 adds is turned against the same
+five impacts, in `every_impact_setting_changes_what_the_run_writes`: one in
+each of the four regimes under the defaults, plus two placed where a single
+threshold bites and nowhere else. Two settings need their own base, for the
+reason §66's own knob table records — a pair has to be posed where the setting
+bites, or it compares two identical runs and passes.
+
+| setting | pair | where it bites |
+|---|---|---|
+| `wallInteraction` | `remove` / `stick` / `weber` | the flag word and the velocity; `stick` against `remove` is the one-bit pair of row 16 |
+| `splashCriterion` | `mundo` / `baiGosman` | at `We = 309` — above Mundo's threshold and below Bai & Gosman's, which is the only place they disagree |
+| `surfaceTension` | `constant` / `iapwsR1-76` | posed at `sigma_0 = 0.03`, because the IAPWS curve at 293.15 K is within 0.01 % of the DEFAULT `sigma` and a pair there would compare two identical runs |
+| `sigma` | `0.07274` / `0.02` | `We` scales by 3.6 and the slowest impact crosses `weStick` |
+| `muLiquid` | `1.0016e-3` / `1e-4` | only through `Re`, `K` and `La` — the splash threshold moves and nothing else does |
+| `weStick` | `2` / `3.5` | at `We = 3.0`, between them |
+| `weSpread` | `20` / `60` | at `We = 49.5`, between them |
+| `kCrit` | `57.7` / `20` | the Mundo threshold speed falls from 9.0 to 3.9 m/s |
+| `splashA` | `2630` / `200` | posed under `baiGosman`, the only criterion that reads it |
+
+### 78.10 Gate 78-D: the two published criteria, against each other
+
+**The comparison.** A 100 µm water droplet at 20 °C, striking normally.
+
+| | threshold speed | `We` | `Re` | `Oh` | `K` |
+|---|---|---|---|---|---|
+| Mundo, Sommerfeld & Tropea (1995) | `8.99 m/s` | `111.1` | `898` | `0.01174` | `57.700` |
+| Bai & Gosman (1995), smooth dry wall | `19.65 m/s` | `531.0` | `1962` | `0.01174` | `153.4` |
+
+**The verdict is OPEN**, and the number is `4.78` — the ratio of the two Weber
+numbers at which the same droplet is said to start splashing. Bai & Gosman's
+own roughness range moves their threshold by a further factor of about two on
+its own, so the honest statement is that the splash boundary of this map is
+known to within a factor of five and no default can hide that.
+
+**The Bai-Gosman constants are quoted, not verified at the primary
+source.** SAE 950283 is paywalled and was not obtained. The form
+`We_c = A La^(-0.18)`, the roughness range for `A`, and the dry-wall
+boundaries `We ~ 2` and `We ~ 20` are as they are universally quoted in the
+spray-impingement literature that cites them, and §60.5's Kaminski & Prakash
+row is the precedent for saying so rather than letting a secondary reading
+pass as a primary one. **This is a direct reason every one of them is a
+control with a default rather than a constant**: a case that has the paper can
+set them, and the run prints what it used. Mundo's `K = Oh Re^1.25` and
+`K_crit = 57.7` come from a journal article that was obtainable, and the
+IAPWS release is free.
+
+**Neither criterion is measured against an experiment here.** Mundo's
+droplet-wall collision data are the gate this section owes and does not have:
+the paper's deposition/splashing boundary is a figure rather than a table, and
+nothing in this repository transcribes it. Comparing the kernel to the *criterion* — which
+is what gate 78-A does, to `10^-8` — is a transcription check, and calling it a
+validation would be exactly the confusion §69 exists to prevent. §78.12 names
+it.
+
+**Why `mundo` is the default** is not a physical argument and is not presented
+as one: it is the threshold the design note prescribes, and (78.4b) makes its
+decision polynomial and therefore bit-stable where `La^(-0.18)` is not (§38.6).
+A case that wants the other asks for it by name.
+
+### 78.11 The film, refused by name
+
+A wall film is **not** here, and the refusal is specific enough to be useful:
+
+| what is missing | what it would need |
+|---|---|
+| film **thickness** per boundary face | `delta = (1/A_f) sum_{p on f} n_p (pi/6) d_p^3`, which needs a per-boundary-face CSR — §67's sort keyed on the face rather than the cell |
+| film **transport** — spreading, running, dripping from an edge | a momentum equation on the boundary-face mesh (O'Rourke & Amsden 1996, 2000; Stanton & Rutland 1998), or FDS's much cheaper fixed-dripping-velocity rule, which needs an RNG for the direction |
+| **re-entrainment** and film evaporation | the film to exist first, plus §76's closure posed on a flat surface rather than a sphere |
+| the **wetted-wall boundary conditions** — a Robin `T`, an evaporating `Y_a`, a Marshak `G` | the film's own `delta` and coverage fraction; they are derived in the design note and implemented by nothing |
+| **suppression** — `qdot'' = qdot_0'' exp(-int k dt)`, `k = a m_w''` | the per-face accumulated water mass, i.e. the film's mass ledger rather than this section's global one |
+
+What §78 gives a future film is the two things it would otherwise have to
+invent: the mass is **at the impact point**, and it is **still in the pool**.
+Neither is a film and neither is presented as one.
+
+### 78.12 What this section does not do
+
+* **No experimental gate.** Gate 78-A holds the kernel against the criterion,
+  not against a measurement. §78.10 says what the missing gate is.
+* **SAE 950283 was not obtained.** It is paywalled; the Bai-Gosman constants
+  here are the ones its citing literature quotes, and §78.10 says so. That is
+  a reason to expose them as controls, which is what is done, and not a reason
+  to present them as verified.
+* **Splash children are not emitted** (§78.7). The wall deposit is an upper
+  bound and `n_splash` says by how many impacts.
+* **No tangential dependence.** Neither published threshold has one, so a
+  grazing impact and a normal impact at the same `u_n` are the same impact.
+  Real impacts are not: an oblique impact spreads asymmetrically and splashes
+  preferentially downstream (Yarin 2006).
+* **No hot wall.** Bai & Gosman's map has a second half above the Leidenfrost
+  temperature, in which everything rebounds off its own vapour. It is not here
+  because it needs the wall temperature **at the impact face**, and the parcel
+  kernel reads no boundary field — it reads cell fields through the cell it is
+  in. Adding it means passing a boundary-face temperature array into the walk,
+  which is a real but separate change.
+* **No wet-wall map.** Bai & Gosman's thresholds differ on a wall that is
+  already wet, and knowing whether it is requires the film of §78.11.
+* **A deposited parcel still occupies a slot.** That is what makes §78.6 exact,
+  and it means a long run into walls fills the pool and hits §66.11's capacity
+  refusal. The refusal is honest and names what to do; it is not free.
+* **The deposit gives its momentum to the wall and not to the gas.** The parcel
+  is out of the CSR the step it lands, so its last impulse is not deposited —
+  §68.9 row 4's gap, unchanged in kind by this section and not enlarged by it.
+
+### 78.13 What was measured, and the three things this section found in itself
+
+**1. The design note's splash parameter is not Mundo's.** The note gives
+`K = Oh^(-1/2) We^(3/4)` against `K_crit ~ 57.7`. Mundo's parameter is
+`K = Oh Re^1.25`, and the two are not the same group: substituting
+`Oh = sqrt(We)/Re` gives `Oh^(-1/2) We^(3/4) = (We Re)^(1/2)`, while
+`Oh Re^1.25 = We^(1/2) Re^(1/4)`. They differ by `Re^(1/4)` — a factor of
+`5.5` at the `Re ~ 900` of a 100 µm water droplet at 9 m/s. At exactly that
+condition, which is where Mundo's `K` **is** `57.7`, the note's expression
+returns `316`: five and a half times its own stated threshold, so a sprinkler
+spray would be classified as splashing everywhere. **The implementation
+follows the paper, not the note**, and the note's form appears nowhere in the
+code.
+
+**2. Viscosity raises the splash threshold, and the first version of the test
+asserted the opposite.** `We_c = A La^(-0.18)` with `La = rho sigma d/mu^2`: a
+more viscous liquid has a *smaller* `La`, and a negative exponent turns that
+into a *larger* `We_c`. That is physically right — viscous dissipation is what
+stops the lamella breaking up — and the test that now asserts it was written
+the other way round first, from the sign of the exponent alone, and failed. The
+measured factor is `12` for a `1000x` viscosity, and it is in the table.
+
+**3. The refusal of `stick` and the refusal of `film` were one sentence, and
+they are two different things.** §66.10 refused `stick`, `spread` and `film`
+together with *a wall film is needed to receive the mass*. That is wrong about
+`stick`: receiving the mass needs a *flag and a rule about the velocity*, and
+the pool already holds everything else because it reclaims no slot. The film is
+needed for what the mass does *next*. Separating the two is what made this
+section small, and the three refusals now carry three different notes.
+
+**What was measured, on this machine.**
+
+```
+  78-A   64 boundary impacts, 10^-1 to 10^-8      0 defects
+         the splash boundary, both criteria        0 defects at 1 +/- 10^-8
+         the 16-point sweep, all four regimes      0 defects
+         (78.4c) lands on K_crit = 57.7            1.2e-16 relative
+  78-B   airborne + wall + gone = pool             0.0    (both fixtures)
+         the pool against the injector             6.5e-16
+         every deposited droplet, bitwise          0 defects
+         stick vs remove, one bit                  0 defects
+  78-C   no wall, no effect                        every bit
+         remove/rebound at a wall, absurd model    every bit
+         empty pool                                every bit
+  78-D   Mundo against Bai-Gosman                  4.78 in We     OPEN
+  (78.2) IAPWS R1-76's own table                   0.0045 mN/m
+```
+
+The `stick` spray of gate 78-B emits 1000.0 mg over 20 steps, and ends with
+100.0 mg still flying and **900.0 mg on the walls** — the term
+`wallInteraction remove` was discarding with no way to find out that it had.
+The `weber` ladder puts 68.75 % of its mass on the wall through 5 sticks, 4
+spreads and 2 splashes, with 23 rebound impacts from the five parcels that
+bounce, and reports the 2 splashes, which are what make that deposit an upper
+bound rather than an answer.

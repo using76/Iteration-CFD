@@ -175,10 +175,11 @@ pub(crate) fn de_vahl_davis(
             (0, "bottom".to_string(), LoweredBc::ZeroGradient),
             (0, "top".to_string(), LoweredBc::ZeroGradient),
         ],
-        buoyancy: Buoyancy {
+        buoyancy: Some(Buoyancy {
             g: Vec3::new(0.0, -g_for_ra(ra, &f), 0.0),
             t_ref: T_REF,
-        },
+        }),
+        openings: None,
         initial_t: T_REF,
         flow: flow_controls(iterations, residual, 0.7, 0.3),
         t_solver: t_solver(),
@@ -311,10 +312,11 @@ pub(crate) fn kaminski_prakash(
             (1, "wallBottom".to_string(), LoweredBc::ZeroGradient),
             (1, "wallTop".to_string(), LoweredBc::ZeroGradient),
         ],
-        buoyancy: Buoyancy {
+        buoyancy: Some(Buoyancy {
             g: Vec3::new(0.0, -g_for_ra(ra, &f), 0.0),
             t_ref: T_REF,
-        },
+        }),
+        openings: None,
         initial_t: T_REF,
         flow: flow_controls(iterations, residual, 0.7, 0.3),
         t_solver: t_solver(),

@@ -51,7 +51,7 @@
   `energyTargetDivergence` reads `EnergySources::q`, so the moment the
   latent and convective heat are registered they are in `Q` and therefore in
   (div u)_target. S25.1 lost its conduction term once for exactly this
-  reason - a term that is in `Q` in one place and not the other - and S77.5
+  reason - a term that is in `Q` in one place and not the other - and S77.6
   says which half of evaporation is which so the mistake is not repeated.
 
   Written from:
@@ -207,7 +207,7 @@ extern "C" __global__ void parcelCoupleGather
         }
         if (mass)
         {
-            // (77.2). `pdmv` is the DIFFERENCE of the step's two endpoint
+            // (77.6). `pdmv` is the DIFFERENCE of the step's two endpoint
             // masses (76.11), so this sum telescopes over a run: what the
             // gas is given is what the pool's own state says it lost, and
             // not a per-sub-step rate re-integrated at deposition time.
@@ -261,8 +261,16 @@ extern "C" __global__ void parcelCoupleGather
     //
     // The momentum equation this crate assembles is KINEMATIC (S5): its
     // sources are accelerations, so the force density is divided by the gas
-    // density the caller says the equation is normalised by. rho > 0 is
-    // checked on the host, once, at setup.
+    // density the caller says the equation is normalised by.
+    //
+    // `rho > 0` is the CALLER'S contract and nothing checks it. An earlier
+    // draft of this comment said it was "checked on the host, once, at
+    // setup"; it is not, and `ParcelCoupling::update` validates the array's
+    // LENGTH and nothing about its values. Every gas density in this crate
+    // comes from `GasState`, which is `p0 W/(R T)` and therefore positive
+    // for any positive temperature, so the contract holds wherever it is
+    // used - but it holds by where the number came from, not by a guard, and
+    // S77's two more divisions by `rho[c]` below inherit exactly that.
     if (momMode == OFC_MODE_OFF)
     {
         momSu[c] = mkvec(0, 0, 0);
@@ -325,7 +333,7 @@ extern "C" __global__ void parcelCoupleGather
     // ENERGY half of evaporation's effect on the divergence needs no code at
     // all - `qSrc` and `qVap` go into `EnergySources`, and
     // `energyTargetDivergence` reads that registry - which is exactly why
-    // this half is easy to miss (S77.5).
+    // this half is easy to miss (S77.6).
     //
     // `mdot` is NOT sign-definite: a droplet in supersaturated air grows
     // (S76.12 row 11), so neither of these can be made an implicit sink

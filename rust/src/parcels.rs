@@ -15,9 +15,13 @@
 //! by measurement, but because there is no code path from a parcel to a
 //! matrix. [`deposit`] (S67) adds the `(cell, uid)` sort, the per-cell CSR and
 //! a gather that produces four per-cell quantities, and couples none of them
-//! into an equation either. Evaporation is a later section still;
-//! [`ParcelPhysics`] and [`ParcelControls::validate`] refuse it by name rather
-//! than quietly doing something else (S13.4).
+//! into an equation either. Two things this module once refused by name are
+//! now built and live in submodules of it: [`evaporation`] is S76's droplet
+//! side, reached by `physics evaporating`, and [`impact`] is S78's
+//! droplet-wall regime map, reached by `wallInteraction stick` or `weber`.
+//! What is still refused is refused by name, with the reason and the
+//! alternative printed (S13.4) - `physics reacting`, `wallInteraction film`
+//! and `wallInteraction splash` among them.
 //!
 //! Written from:
 //!   J. K. Dukowicz, *A particle-fluid numerical model for liquid sprays*,
@@ -46,8 +50,13 @@
 //!     SplitMix64 finalising mix, used here as a BIJECTION so that parcel
 //!     identity is unique by construction. Vigna's reference implementation
 //!     is public domain (CC0)
+//!   C. Bai, A. D. Gosman, SAE 950283 (1995), and C. Mundo, M. Sommerfeld,
+//!     C. Tropea, *Int. J. Multiphase Flow* 21 (1995) 151 - the droplet-wall
+//!     impingement map and its splash threshold. Named and refused here at
+//!     S66.10; implemented at S78, in [`impact`]
 //!   ofgpu `SPEC-LIT.md` S66 - the section this module implements; S1 (the
-//!     cell -> face CSR the walk gathers over), S13.4 (the refusal contract)
+//!     cell -> face CSR the walk gathers over), S13.4 (the refusal contract);
+//!     S76 and S78 - the two submodules
 //!
 //! No GPL-licensed source was consulted, and in particular OpenFOAM's
 //! `src/lagrangian` tree - the obvious reference, and GPL-3.0 - was not
@@ -85,6 +94,7 @@ mod tests;
 pub mod couple;
 pub mod deposit;
 pub mod evaporation;
+pub mod impact;
 
 pub use couple::{
     CouplingControls, CouplingMode, CouplingSnapshot, MassCoupling, ParcelCoupling,
@@ -96,6 +106,10 @@ pub use evaporation::{
 pub use deposit::{
     DepositSnapshot, DeviceScan, ParcelCsrSnapshot, ParcelDeposition, RADIX_BITS, RADIX_DIGITS,
     SORT_TILE, UID_PASSES,
+};
+pub use impact::{
+    impact_numbers, surface_tension, ImpactNumbers, SplashCriterion, SurfaceTension,
+    WallImpactControls, WallRegime,
 };
 
 // ==========================================================================
@@ -196,32 +210,54 @@ impl DragModel {
     }
 }
 
-/// SPEC-LIT (66.10): what a parcel does when the walk takes it through a
-/// `wall` patch.
+/// SPEC-LIT (66.10), extended by S78.5: what a parcel does when the walk
+/// takes it through a `wall` patch.
 ///
-/// This is deliberately *two* outcomes, not the Bai-Gosman four. Stick,
-/// spread and splash all need a wall film to receive the mass, and splash is
-/// a population-growth event with no deterministic capacity policy designed
-/// yet; both are refused by name rather than approximated.
+/// S66 had *two* outcomes and refused the Bai-Gosman four by name, because a
+/// wall film was needed to receive the mass and this crate had none. S78
+/// supplies the half of that which is parcel-side - the impact regime map,
+/// and a deposit whose mass is accounted for exactly - so `stick` is now a
+/// value and [`Self::Weber`] selects among all four. **Film TRANSPORT is
+/// still refused by name** (S78.11): a deposited droplet stays where it
+/// landed, and nothing spreads, drips, runs off or re-entrains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WallAction {
     /// The parcel stops where it met the face and is removed from the working
-    /// set, counted into [`ParcelStats::n_wall`]. This is where a film would
-    /// receive it.
+    /// set, counted into [`ParcelStats::n_wall`]. Its velocity is left as it
+    /// was, which is what makes this bookkeeping rather than a model - the
+    /// default, and unchanged by S78.
     #[default]
     Remove,
     /// Specular rebound with normal restitution `e` and tangential loss
     /// `f_t`: `u_n' = -e u_n`, `u_t' = (1 - f_t) u_t`.
     Rebound,
+    /// S78.5: every impact deposits. The parcel stops at the face with
+    /// `u = 0`, is marked [`FLAG_DEPOSITED`] and leaves the working set; its
+    /// mass is on the wall and [`ParcelSnapshot::deposited_mass`] says how
+    /// much.
+    ///
+    /// This is what `remove` should have been physically, and the difference
+    /// between them is exactly the zeroed velocity and the flag: `remove`
+    /// says a parcel stopped being tracked, `stick` says its mass is at the
+    /// wall.
+    Stick,
+    /// S78.5: the impact regime map. Each impact is classified by its Weber
+    /// number and by the splash criterion of
+    /// [`impact::WallImpactControls::splash`], and rebounds or deposits
+    /// accordingly.
+    Weber,
 }
 
 impl WallAction {
-    pub const NAMES: &'static [&'static str] = &["remove", "rebound"];
+    pub const NAMES: &'static [&'static str] = &["remove", "rebound", "stick", "weber"];
 
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Remove => "remove",
             Self::Rebound => "rebound",
+            Self::Stick => "stick",
+            Self::Weber => "weber",
         }
     }
 
@@ -229,30 +265,68 @@ impl WallAction {
         match self {
             Self::Remove => 0,
             Self::Rebound => 1,
+            Self::Stick => 2,
+            Self::Weber => 3,
         }
+    }
+
+    /// True for the values that read [`ParcelControls::impact`]. Only
+    /// [`Self::Weber`] classifies, so only [`Self::Weber`] reads it.
+    #[must_use]
+    pub fn reads_impact_model(self) -> bool {
+        matches!(self, Self::Weber)
+    }
+
+    /// True for the two values that classify an impact into one of S78.5's
+    /// four regimes and therefore fill the histogram.
+    ///
+    /// [`Self::Remove`] does not, and that is what makes it bookkeeping
+    /// rather than a model: it ends a parcel at a wall without saying what
+    /// happened there. [`ParcelStats::wall_histogram_closes`] asserts the
+    /// difference in both directions.
+    #[must_use]
+    pub fn classifies_impacts(self) -> bool {
+        matches!(self, Self::Stick | Self::Weber)
     }
 
     pub fn from_name(s: &str) -> Result<Self> {
         match s {
             "remove" | "escape" => Ok(Self::Remove),
             "rebound" => Ok(Self::Rebound),
-            "stick" | "spread" | "film" => contract::unsupported_note(
+            "stick" | "deposit" => Ok(Self::Stick),
+            "weber" | "baiGosman" | "regime" => Ok(Self::Weber),
+            "spread" => contract::unsupported_note(
                 "parcels/wallInteraction",
                 s,
                 Self::NAMES,
-                "a wall film is needed to receive the mass, and this crate has none; \
-                 SPEC-LIT S66.10 names it as the next step",
-                "remove",
-                Self::Remove,
+                "a spreading droplet's PARCEL-SIDE state change is identical to stick, \
+                 which IS supported; what distinguishes the two is film transport, and \
+                 that is refused by name in SPEC-LIT S78.11. Ask for stick if the \
+                 deposit is what you want, or weber to let the impact Weber number \
+                 choose",
+                "stick",
+                Self::Stick,
+            ),
+            "film" => contract::unsupported_note(
+                "parcels/wallInteraction",
+                s,
+                Self::NAMES,
+                "there is no film transport: S78 deposits the mass at the impact point \
+                 and leaves it there, with no thickness, no momentum equation, no \
+                 dripping and no re-entrainment (SPEC-LIT S78.11)",
+                "stick",
+                Self::Stick,
             ),
             "splash" => contract::unsupported_note(
                 "parcels/wallInteraction",
                 s,
                 Self::NAMES,
                 "splash multiplies one parcel into N and no deterministic capacity \
-                 policy for population growth is designed yet (SPEC-LIT S66.10)",
-                "remove",
-                Self::Remove,
+                 policy for population growth is designed yet (SPEC-LIT S78.7). weber \
+                 DETECTS the splash regime and counts it - the parent deposits whole, \
+                 which makes the wall deposit an upper bound and says so",
+                "weber",
+                Self::Weber,
             ),
             other => contract::unsupported(
                 "parcels/wallInteraction",
@@ -430,6 +504,12 @@ pub struct ParcelControls {
     /// and is asserted, not promised, by
     /// [`tests::the_evaporation_settings_cannot_move_a_heating_parcel`].
     pub evaporation: EvaporationControls,
+    /// SPEC-LIT S78: the impact regime map - the surface tension, the liquid
+    /// viscosity, the two Weber thresholds and the splash criterion.
+    ///
+    /// Read only by [`WallAction::Weber`], and validated always for the
+    /// reason the three thermal properties above are.
+    pub impact: WallImpactControls,
     /// Blocks in the fixed persistent grid, or `None` to derive it from
     /// `capacity`.
     ///
@@ -462,6 +542,7 @@ impl Default for ParcelControls {
             max_substeps: 64,
             max_walk: 16,
             evaporation: EvaporationControls::default(),
+            impact: WallImpactControls::default(),
             persistent_blocks: None,
         }
     }
@@ -547,6 +628,8 @@ impl ParcelControls {
         // it, so a pressure at which this liquid does not boil is refused
         // here rather than discovered as a NaN diameter.
         self.evaporation.validate()?;
+        // S78.8, and validated always for the same reason.
+        self.impact.validate()?;
         Ok(())
     }
 
@@ -561,7 +644,10 @@ impl ParcelControls {
             self.physics.name(),
             self.drag.name(),
             self.wall.name(),
-            if self.wall == WallAction::Rebound {
+            // S78.5's rebound regime reuses these two, so `weber` prints
+            // them as well - a run that can bounce has to say what it
+            // bounces with.
+            if matches!(self.wall, WallAction::Rebound | WallAction::Weber) {
                 format!(" e={} ft={}", self.restitution, self.tangential_loss)
             } else {
                 String::new()
@@ -587,6 +673,13 @@ impl ParcelControls {
         ) + &if self.physics == ParcelPhysics::Evaporating {
             format!("
 {}", self.evaporation.describe())
+        } else {
+            String::new()
+        } + &if self.wall.reads_impact_model() {
+            // S13.4.2: printed only when it is read. A banner line for a
+            // model that is not in force is the dead entry S13.4.2 forbids.
+            format!("
+{}", self.impact.describe())
         } else {
             String::new()
         }
@@ -663,7 +756,15 @@ pub struct ParcelStats {
     pub capacity: usize,
     /// Parcels removed through a non-wall patch.
     pub n_escaped: i64,
-    /// Parcels removed at a `wall` patch under [`WallAction::Remove`].
+    /// Parcels that ENDED at a `wall` patch - removed under
+    /// [`WallAction::Remove`], deposited under [`WallAction::Stick`], or
+    /// deposited by one of S78's three depositing regimes under
+    /// [`WallAction::Weber`].
+    ///
+    /// Under `stick` and `weber` it is exactly `n_stick + n_spread +
+    /// n_splash`, and under `remove` and `rebound` those three are zero while
+    /// this need not be. [`Self::check_wall_histogram`] asserts both
+    /// directions rather than leaving two counters to be compared by eye.
     pub n_wall: i64,
     /// Parcels the walk could not place within `max_walk` crossings. **Zero
     /// on any hex or Cartesian mesh**; a non-zero count is the measurable
@@ -677,9 +778,70 @@ pub struct ParcelStats {
     /// `n_escaped` and `n_wall` because "the spray shrank" and "the spray
     /// left" are different runs and a single "gone" count cannot say which.
     pub n_evaporated: i64,
+    /// SPEC-LIT (78.5): impacts classified `stick` under
+    /// [`WallAction::Weber`] - **or** the action taken under
+    /// [`WallAction::Stick`], where the map is not consulted at all and what
+    /// the impact physically was is therefore unknown and not claimed. Zero
+    /// under `remove` and `rebound`.
+    pub n_stick: i64,
+    /// (78.5): impacts classified `rebound`. The one regime that does NOT
+    /// end the parcel, so it is not in `n_wall`.
+    pub n_rebound: i64,
+    /// (78.5): impacts classified `spread`.
+    pub n_spread: i64,
+    /// (78.5): impacts classified `splash`. **Detected, not enacted**: the
+    /// parent deposits whole and no child parcels are emitted, so a non-zero
+    /// count is the measure of how much of the run S78.7 is wrong about.
+    pub n_splash: i64,
 }
 
 impl ParcelStats {
+    /// SPEC-LIT (78.5b): the regime histogram and `n_wall` are two ways of
+    /// counting the same events, and they have to agree.
+    ///
+    /// The statement depends on the wall action, and it is a statement in
+    /// both directions rather than one:
+    ///
+    /// * under [`WallAction::Stick`] and [`WallAction::Weber`], every parcel
+    ///   that ended at a wall was classified, so
+    ///   `n_wall = n_stick + n_spread + n_splash`;
+    /// * under [`WallAction::Remove`] and [`WallAction::Rebound`], **nothing
+    ///   is classified at all**, so all four regime counters are zero while
+    ///   `n_wall` need not be. That is not a gap: `remove` deliberately ends
+    ///   a parcel at a wall without saying what happened there, and a stray
+    ///   increment would be caught here.
+    ///
+    /// Returned as a `bool` rather than asserted, so that a driver can print
+    /// it and a test can require it.
+    #[must_use]
+    pub fn wall_histogram_closes(&self, wall: WallAction) -> bool {
+        let sum = self.n_stick + self.n_spread + self.n_splash;
+        if wall.classifies_impacts() {
+            self.n_wall == sum
+        } else {
+            sum == 0 && self.n_rebound == 0
+        }
+    }
+
+    /// The same statement as an error a human can be shown.
+    pub fn check_wall_histogram(&self, wall: WallAction) -> Result<()> {
+        if self.wall_histogram_closes(wall) {
+            return Ok(());
+        }
+        Err(Error::Config(format!(
+            "parcels: the wall histogram does not close under wallInteraction {} - {} \
+             parcels ended at a wall and the regimes account for {} + {} + {} = {}, with \
+             {} rebound impacts (SPEC-LIT S78.5)",
+            wall.name(),
+            self.n_wall,
+            self.n_stick,
+            self.n_spread,
+            self.n_splash,
+            self.n_stick + self.n_spread + self.n_splash,
+            self.n_rebound,
+        )))
+    }
+
     /// SPEC-LIT S66.11's capacity rule: dropping parcels changes what the
     /// case means, so it is an error rather than a warning - refused where a
     /// human can be told, which is outside the step loop.
@@ -791,6 +953,75 @@ impl ParcelSnapshot {
             .map(|i| self.n_p[i] * self.mass_lost[i])
             .sum()
     }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT (78.6): the wall ledger
+    // ------------------------------------------------------------------
+
+    /// Slot indices whose parcel is on the wall, in slot order.
+    ///
+    /// A deposited slot is dead (`cell < 0`), so it is disjoint from
+    /// [`Self::live`] BY CONSTRUCTION and the two together with
+    /// [`Self::gone`] partition `0..n_slots`. That is (78.6), and it is why
+    /// nothing can vanish at a wall: the pool never reclaims a slot (S66.12),
+    /// so every parcel that ever existed is still somewhere in this
+    /// partition with the diameter and weight it had when it stopped moving.
+    #[must_use]
+    pub fn deposited(&self) -> Vec<usize> {
+        (0..self.n_slots)
+            .filter(|&i| self.cell[i] < 0 && self.flags[i] & FLAG_DEPOSITED != 0)
+            .collect()
+    }
+
+    /// Slot indices whose parcel is dead and NOT on the wall - it left
+    /// through a patch, or its last droplet evaporated away.
+    #[must_use]
+    pub fn gone(&self) -> Vec<usize> {
+        (0..self.n_slots)
+            .filter(|&i| self.cell[i] < 0 && self.flags[i] & FLAG_DEPOSITED == 0)
+            .collect()
+    }
+
+    /// (78.6): the liquid mass sitting on walls, kg -
+    /// `sum n_p rho_l (pi/6) d^3` over [`Self::deposited`].
+    ///
+    /// Formed exactly as [`Self::liquid_mass`] is, over a disjoint set of
+    /// slots, so the two are the two halves of one ledger and not two
+    /// different accountings of the same droplets.
+    #[must_use]
+    pub fn deposited_mass(&self, rho_liquid: Scalar) -> Scalar {
+        self.slot_mass_sum(&self.deposited(), rho_liquid)
+    }
+
+    /// (78.6): the liquid mass that left the domain, kg - the same sum over
+    /// [`Self::gone`].
+    ///
+    /// A parcel that evaporated to nothing contributes `d = 0` and therefore
+    /// zero, which is right: its mass is in the vapour, not in this term.
+    #[must_use]
+    pub fn escaped_mass(&self, rho_liquid: Scalar) -> Scalar {
+        self.slot_mass_sum(&self.gone(), rho_liquid)
+    }
+
+    /// (78.6): the mass of every slot in the pool, alive or not, kg.
+    ///
+    /// For an inert or heating spray - one whose diameters never move - this
+    /// is the total mass ever injected, and
+    /// `pool_mass = liquid_mass + deposited_mass + escaped_mass` is the
+    /// conservation statement of S78.9's gate 78-B.
+    #[must_use]
+    pub fn pool_mass(&self, rho_liquid: Scalar) -> Scalar {
+        self.slot_mass_sum(&(0..self.n_slots).collect::<Vec<_>>(), rho_liquid)
+    }
+
+    fn slot_mass_sum(&self, slots: &[usize], rho_liquid: Scalar) -> Scalar {
+        let mut m = 0.0;
+        for &i in slots {
+            let d = self.d[i];
+            m += self.n_p[i] * rho_liquid * std::f64::consts::FRAC_PI_6 as Scalar * d * d * d;
+        }
+        m
+    }
 }
 
 // ==========================================================================
@@ -823,7 +1054,29 @@ const N_LOST: usize = 2;
 const N_DROPPED: usize = 3;
 const N_INJECTED: usize = 4;
 const N_EVAPORATED: usize = 5;
-const N_COUNTERS: usize = 6;
+/// SPEC-LIT (78.5): the regime histogram. Four integer counters, because the
+/// only reproducible accumulator on this device is an integer one and a run
+/// that cannot say which regimes it was in cannot be believed about any of
+/// them.
+const N_STICK: usize = 6;
+const N_REBOUND: usize = 7;
+const N_SPREAD: usize = 8;
+const N_SPLASH: usize = 9;
+const N_COUNTERS: usize = 10;
+
+/// SPEC-LIT (78.6): the flag bit a deposited parcel carries, mirroring
+/// `OFP_FLAG_DEPOSITED` in `cuda/parcels.cu`.
+///
+/// It is what makes the wall ledger a PARTITION of the pool: a dead slot
+/// with this bit is on the wall, a dead slot without it left the domain or
+/// evaporated away, and no slot is both.
+pub const FLAG_DEPOSITED: u32 = 4;
+
+/// The `active` bit, mirroring `OFP_FLAG_ACTIVE`.
+pub const FLAG_ACTIVE: u32 = 1;
+
+/// The `lost` bit of (66.6), mirroring `OFP_FLAG_LOST`.
+pub const FLAG_LOST: u32 = 2;
 
 /// Upper bound on the fixed persistent grid. A grid-stride kernel needs only
 /// enough blocks to fill the device; more is waste, and the number must be a
@@ -1531,6 +1784,23 @@ impl<'m> Parcels<'m> {
         let p_amb = ev.p_ambient;
         let t_boil_p = self.t_boil_p;
         let evap_cfl = ev.cfl;
+        // SPEC-LIT S78. Setup-time constants too, for the same reason: the
+        // impact map must not add a launch argument that moves between
+        // steps, or the captured graph would need an update path it does not
+        // have. Read by the walk only when `wall == weber`.
+        let im = self.ctrl.impact;
+        let splash_crit = im.splash.code();
+        let tension = im.tension.code();
+        let sigma0 = im.sigma;
+        let mu_liquid = im.mu_liquid;
+        let we_stick = im.we_stick;
+        let we_spread = im.we_spread;
+        // K_crit^4, formed on the host so the kernel's comparison is one
+        // multiply and one branch. (78.4b) is `We^2 Re > K_crit^4`, and the
+        // fourth power of a positive constant is the same decision as the
+        // first power of K - which is the whole point of it.
+        let k_crit4 = (im.k_crit * im.k_crit) * (im.k_crit * im.k_crit);
+        let splash_a = im.splash_a;
         let m = self.m;
         let Self {
             x,
@@ -1630,6 +1900,16 @@ impl<'m> Parcels<'m> {
                 .arg(&p_amb)
                 .arg(&t_boil_p)
                 .arg(&evap_cfl)
+                // SPEC-LIT S78. Eight more setup-time constants, read by the
+                // walk only when `wall == weber`.
+                .arg(&splash_crit)
+                .arg(&tension)
+                .arg(&sigma0)
+                .arg(&mu_liquid)
+                .arg(&we_stick)
+                .arg(&we_spread)
+                .arg(&k_crit4)
+                .arg(&splash_a)
                 .launch(cfg)?;
         }
 
@@ -1656,6 +1936,10 @@ impl<'m> Parcels<'m> {
             n_dropped: c[N_DROPPED],
             n_injected: c[N_INJECTED],
             n_evaporated: c[N_EVAPORATED],
+            n_stick: c[N_STICK],
+            n_rebound: c[N_REBOUND],
+            n_spread: c[N_SPREAD],
+            n_splash: c[N_SPLASH],
         })
     }
 
