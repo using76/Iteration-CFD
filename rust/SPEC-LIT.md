@@ -23390,3 +23390,321 @@ says that instead.
   middle of the walls, exactly as Qu & Mudawar solve it. A whole `1 cm^2`
   wafer with a manifold at each end is a different problem and needs the
   multiple openings the first bullet refuses.
+
+---
+
+## 80. The citation audit — making a source comment unable to name a section that does not exist
+
+`NOTICE`, `PROVENANCE.md` and both READMEs make claims about this repository,
+and every one of those claims is checked by a test. `lib.rs`'s
+`provenance_audit` walks the four roots `NOTICE` names, reads the file count
+back out of both documents, and fails if either has gone stale. §69 did the
+same for the run's own summary: a verdict word may be spelled in exactly one
+non-comment line of `validate.rs`, so the summary cannot claim a verdict that
+was never registered.
+
+**Source comments were guarded by nothing**, and that is precisely where the
+drift accumulated. Three times in a row the defect has been the same one:
+
+* **§77.** Every `(77.x)` in the code pointed at the wrong equation, because
+  the section's equations were renumbered after the comments were written. The
+  same token `S77.5` meant §77.4 in one file, §77.6 in another and §77.5 in a
+  third — **42 sites across four files**. It was not harmless: new code was
+  written against a comment that was false.
+* **§79.** About **thirty sites across five files** pointed at a section layout
+  that never existed, this time including user-facing error messages.
+* Earlier still, `README.en.md` described the crate as a port of a deleted GPL
+  tree, and `ofgpu-validate`'s summary claimed a verdict was printed in a block
+  that never printed it.
+
+Both §77 and §79 were corrected by hand. This section replaces the hand with a
+test, `xref::tests`, in the style of §69's registry tests: it reads the tree
+back off disk, parses this document for the symbols that exist, and requires
+every citation to be one of them.
+
+**No external source of any kind was consulted for this section.** The rule,
+the lexer, the attribution model and the ratchet are **ORIGINAL**, and the only
+inputs are this document's own structure and `rust/`'s own text. No
+GPL-licensed source was consulted.
+
+### 80.1 What a citation is, and where the audit looks
+
+A *citation* is a reference to a numbered division of a document: a section, a
+subsection, or a labelled equation. The audit reads only **prose** — line
+comments, block comments, doc comments, string literals (which is where error
+messages and panic strings live) — of every `.rs`, `.cu` and `.cuh` file under
+`rust/src`, `rust/cuda`, `rust/tests`, plus `rust/build.rs`. Those are the same
+four roots `NOTICE` names and `provenance_audit` walks, and the walk is a
+directory walk rather than a list, so a file added later is audited without
+this section being edited. A list would rot exactly the way the comments did.
+
+Code is deliberately excluded, because in code `(78.0)` is a float, `S2s` is a
+type and `powf(0.25)` is a call. The separation is done by a small lexer that
+tracks line comments, block comments (nested, in Rust; not nested, in CUDA),
+string literals, raw strings and character literals. Every delimiter it walks
+is ASCII and no UTF-8 continuation byte is ASCII, so it is byte-oriented and
+still correct on the files that contain Korean.
+
+### 80.2 The five forms, and what each one is allowed to mean
+
+| Form | Written | Means | Resolves against |
+|---|---|---|---|
+| **S** | `§13.4`, `§35.3.5` | a section or subsection, always | a heading number |
+| **A** | `S13.4`, `S77.6` | the ASCII spelling — a section **or** an equation | either |
+| **P** | `(64.6)`, `(24.5)` | an equation where the section labels equations; a subsection where it does not | see below |
+| **PA** | `(S47.3)`, `(S6.3)` | a section **or** an equation | either |
+| **B** | `SPEC-LIT 13.4`, `SPEC-LIT section 36`, `SPEC-LIT.md 13.4.1` | a section, always | a heading number |
+
+**The section set** is every heading number in `SPEC-LIT.md`, plus every
+ancestor of one: `#### 13.4.1` registers `13.4.1`, `13.4` and `13`, whether or
+not those are spelled as headings of their own. 601 symbols, this section's
+own nine included.
+
+**The equation set** is every label *defined* in this document, and a
+definition is a `(NN.M)` or `(SNN.M)` **closing a line inside a fenced block**,
+which is where this document writes them. A label mentioned in prose is a
+reference and does not create the symbol it cites — otherwise a typo would
+define itself. `E_P = N_P / max(D_P, tiny)` also ends in a parenthesis and is
+not a label, because its contents are not a number. 302 symbols, after §78's
+own convention is applied: "a bare number refers to a set by its bare number:
+`(78.2)` means the pair (78.2a)/(78.2b)", so a lettered label registers its
+family too.
+
+**Form P is the tight one, and the split is computed rather than listed.** A
+section labels equations if some label defined in this document carries its
+number; **twenty-nine do**, all of them §40 or later — §44, §45, §48, §51, §58
+and §70–§75 do not, and neither does anything before §40. In a section that
+labels none the code writes `(24.5)`, `(38.3)`, `(11.3)`, `(44.1)` meaning the
+*subsection*, so there the parenthesised form resolves against headings. In a
+section that labels equations the parenthesised form is this document's own
+equation notation, so it must be an equation label — and that is what turns a
+renumbering into a test failure: `(64.8)` in `radiation.rs` named an equation
+§64 does not have, and §64.5's own table says the two rows that test measures
+are both against **(64.6)**.
+
+**A number written with a leading zero is arithmetic, not an address.** There
+is no §0 and no §07, so `(0.25)`, `(0.50)`, `(0.0)` and the DOI fragment
+`S0017-9310(02)00101-1` are not citations. Neither is a parenthesis preceded by
+an identifier character: `unwrap_or(0.0)`, `cmu.powf(0.25)`, `ln(2.25)`,
+`Limited(0.0)`, `K(0.56)`. And the single-letter suffix that §42.5a, §49.2b and
+§78.3a use is accepted **only on a dotted number**, without which `S2s::update`
+scans as a citation of "§2s" — the kind of false positive that gets a rule
+weakened until it catches nothing.
+
+### 80.3 Which document a citation belongs to — the finding that changed this section
+
+The brief this section was written from said: *every* `§NN`, `§NN.N` and
+`(NN.N)` in any source comment must exist in `SPEC-LIT.md`. **That rule is
+wrong, and running it proves it.** 171 citations in this tree are to somebody
+else's numbering:
+
+```
+    //! Patankar, *Numerical Heat Transfer and Fluid Flow* (1980), §4.2
+    /// The explicit non-orthogonal correction of the laplacian (Jasak §3.4.3).
+    //!   Saad, *Iterative Methods*, 2nd ed. (2003), §6.7 (PCG) ... §12.4
+    //! J. H. Ferziger, M. Perić, *Computational Methods*, §7.5
+    /// as reported in `docs/07-fire-solver.md` §1.1's LAST subsection
+```
+
+There is no §4.2, §3.4.3, §6.7, §7.5 or §12.4 in this document, and there
+should not be. A rule that condemned those 171 sites would have been "fixed" by
+corrupting citations that were already correct — a worse outcome than the drift
+it was meant to stop.
+
+So a citation is attributed before it is checked:
+
+> **A citation belongs to the last document named on its own line or the line
+> before it. With no name in that window, it belongs to `SPEC-LIT.md`.**
+
+Two lines, not one and not the whole comment. All three widths were measured,
+over a deliberately over-wide list of author names, and the trade is between
+false positives and citations silently excused:
+
+| Window | Citations excused | Sites flagged |
+|---|---|---|
+| the citation's own line | 135 | 47 — 28 of them a bibliography entry whose work name had wrapped onto the line above |
+| that line and the one before | 203 | 19 |
+| the whole comment block | 307 | 25 — but a module header naming ASHRAE once at the top then excused every SPEC-LIT citation below it, including §54.3, §55.4 and §76.13 |
+
+Two lines it is. With the narrower registry that shipped, the two-line window
+attributes **171** citations elsewhere, and every one of the 171 was read by
+hand and is genuinely external.
+
+The names come from this block, which the test parses out of this document, so
+that widening the escape hatch is a spec edit and not a code edit:
+
+```
+CITATION-AUDIT REGISTRY
+work       Patankar
+work       Jasak
+work       Moukalled
+work       Saad
+work       Peric
+work       Perić
+work       Incropera
+work       Modest
+work       Numerical Recipes
+document   docs/05-io-redesign.md
+document   docs/07-fire-solver.md
+reserved   99   the invented gate addresses §69's registry tests cite
+ambiguous-ceiling 972
+```
+
+Three properties are tested, not asserted:
+
+1. **`work` is a promise this audit cannot keep, and says so.** Patankar's §4.2
+   is Patankar's; no copy of it is in this repository and nothing here can
+   check it. A `work` entry therefore *excuses* a citation. A `document` entry
+   does not: `docs/05-io-redesign.md` and `docs/07-fire-solver.md` are parsed
+   for their own headings and the citation is resolved against them, so
+   `docs/07-fire-solver.md §1.1` is checked and would fail if that document
+   were reorganised.
+2. **Every registry entry must be used.** A name no citation is attributed to
+   is an exemption that widens silently, and
+   `every_registry_name_is_actually_used` deletes it by failing.
+3. **A `reserved` number must not exist here.** §69's registry tests cite
+   `S99.1`, `S99.2`, `S99.3` and `S99.9` precisely because §99 is invented —
+   ten sites, all inside `#[cfg(test)]`. §99 is reserved for that purpose, and
+   `a_reserved_number_has_no_heading` fails the day someone writes a real one,
+   before the fixtures stop looking obviously fake.
+
+### 80.4 A citation must mean the same thing everywhere — what is enforceable, and what is not
+
+Existence is checkable. **Meaning is not**, and this section will not pretend
+otherwise: `(77.5)` after a renumbering still names an equation that exists, it
+is simply the wrong one. Two rules were measured against the tree and rejected
+before the one below was adopted, and both rejections are recorded because they
+are the reason the enforceable rule is the shape it is:
+
+* **Gloss agreement.** Where a comment writes ``§NN.M's `word` ``, require
+  `word` to occur in §NN.M's own body. Measured over the 872 possessive glosses
+  in this tree: **81.1 % match**, 165 misses, essentially all benign
+  (`§18's registry`, `§9's face`, `§28's radiationKernels`). A gate with a
+  19 % false-positive rate is a gate that gets deleted.
+* **Heading anchoring.** Require every symbol cited from three or more files to
+  quote at least one distinctive word of its own heading somewhere. Measured:
+  **78.4 %** of 241 such symbols already do. The 52 that do not are mostly
+  symbols whose headings are `Validation`, `Discretisation`, `The extension`,
+  `The gates` — there is no distinctive word to quote. Rejected for the same
+  reason.
+
+What **is** enforceable is the ambiguity that let one token mean three things
+in the first place. Form A — the bare ASCII `SNN.M` — does not say whether it
+means the subsection or the equation, and in this document **252 symbols are
+both** — every `NN.M` in one of the twenty-nine sections that labels equations
+and also carries a subsection of that number, from `40.1` to `79.14`. `S77.5`
+is one of them, and that is exactly how it came to mean §77.4 in one file,
+§77.6 in another and §77.5 in a third: three authors resolved the same
+ambiguous token three ways, and nothing could tell them apart.
+
+> **§80.4, the ratchet.** The number of bare-`S` citations naming a symbol that
+> is both an equation label and a subsection is bounded by
+> `ambiguous-ceiling` above. It may fall; it may not rise. New code writes
+> `§NN.M` for a subsection and `(NN.M)` for an equation, both of which resolve
+> to exactly one thing.
+
+**972 today**, 237 of them in `validate.rs` alone, then 66 in `s2s.rs`, 58 in
+`s2s/tests.rs` and 44 in `radiation.rs`. The ceiling is not a target, it is a
+ledger: rewriting 972 citation sites is not this section's work, and pretending
+they are fine is not either. What it buys immediately is that the *next* §77
+cannot be written, because the next file to add one of these fails the build.
+
+### 80.5 The census
+
+`the_multi_file_census_is_printed` lists every symbol cited from more than one
+file, with this document's own heading beside it, sorted by how many files
+share it. It asserts only that the list is not empty; its value is that the
+symbols most likely to drift are the ones most cited, and they are now on one
+screen with their headings next to them. §80.4 has the two automatic rules that
+were measured and rejected; this list is what stands in for them, and it is a
+list a human reads rather than a gate.
+
+### 80.6 What must hold
+
+| Check | Test | Expected |
+|---|---|---|
+| the walk finds the tree | `the_audit_reads_the_tree_it_claims_to_read` | ≥ 170 files, ≥ 7000 checked citations, ≥ 500 sections and ≥ 250 equation labels parsed |
+| every citation resolves | `every_citation_names_something_that_exists` | zero stale sites, each failure naming file, line, symbol and the citing line |
+| the registry is minimal | `every_registry_name_is_actually_used` | no unused `work` or `document` |
+| §99 stays invented | `a_reserved_number_has_no_heading` | no heading numbered 99 |
+| ambiguity does not grow | `the_ambiguous_ascii_form_does_not_grow` | ≤ `ambiguous-ceiling` |
+| the census is non-empty | `the_multi_file_census_is_printed` | > 100 shared symbols |
+| headings and labels parse | `headings_and_equation_labels_parse_the_way_the_spec_writes_them` | numbered and lettered headings, ancestors, fenced labels, families; NOT a prose reference and NOT `max(D_P, tiny)` |
+| prose is separated from code | `the_scanner_reads_prose_and_leaves_code_alone` | seven citations, in order, from a mixed file |
+| arithmetic is not a citation | `arithmetic_in_parentheses_is_not_a_citation` | nothing from `unwrap_or(0.0)`, `K(0.50)`, `ln(2.25)`, `S0017-9310(02)…` |
+| attribution is two lines wide | `a_citation_belongs_to_the_last_work_named_within_two_lines` | Saad's two, SPEC-LIT's two, the document's one |
+| block comments and raw strings are prose | `a_block_comment_and_a_raw_string_are_both_prose` | both scanned |
+| the registry block parses | `the_registry_block_parses` | ≥ 8 works, ≥ 2 documents, a non-zero ceiling |
+
+### 80.7 What was measured, and the finding
+
+`the_audit_reads_the_tree_it_claims_to_read` prints the census the audit ran
+on, so the numbers below are the shipping code's and not a prose claim:
+
+```
+  [S80] 175 files; 9147 citations = 8976 SPEC-LIT + 171 attributed elsewhere;
+        by form S/A/P/PA/B = [4102, 2963, 827, 460, 795];
+        the spec has 601 section numbers and 302 equation labels,
+        252 of which are both
+  [S80.4] 972 ambiguous bare-S citations, ceiling 972
+  [S80.5] 421 symbols are cited from more than one file
+```
+
+**On its first run, 23 sites failed**, of which ten are §99's deliberate test
+fixtures. The remaining **thirteen were real, and they fall into three
+kinds**:
+
+| Kind | Sites | What it was |
+|---|---|---|
+| **Renumbered** — the §77 defect exactly | 2 | `radiation.rs` cited `(64.8)` for the banded diffusion-limit gate. §64 defines equations up to **(64.7)**, and §64.5's own two rows for that test say **(64.6)**. Both corrected. |
+| **Wrong document** — a citation that reads as this document's and is not | 4 | `fire.rs` and `restart.rs` cited `§4.6` for the `.mcr` restart format, which is `docs/05-io-redesign.md §4.6`; `cuda/fv.cu` cited `(S3.4.2)` on a continuation line of Jasak's bibliography entry; `fvdom.rs` cited Modest's `(9.24)` two lines below his name. |
+| **Unattributed** — the citation names no document and a reader cannot tell | 7 | `S75.3a`, `S61.3a` and `S61.3b` name the lettered sub-blocks §75.3(a), §61.3(a) and §61.3(b) in a spelling this document does not use; four SPEC-LIT citations in `validate.rs` (§33.3, §61.8, `S26.1`, `S13.4.1`) sit on lines that had just named `docs/07-fire-solver.md`, where a human reader has exactly the scanner's problem. |
+
+All thirteen are corrected, and the audit is green. Three more were fixed on
+the way even though nothing flagged them — `cuda/fv.cu`'s `(S3.3)` and
+`(S3.5)`, and `restart.rs`'s `§7/Q5` — for the reason the next paragraph but
+one gives.
+
+Thirteen is a smaller number than the brief expected — it guessed at
+"hundreds". The reason is that §77 and §79 were both corrected by hand and the
+other 77 sections were, on the whole, written correctly. **The finding is not
+the thirteen; the finding is the 972.** The existence check was never going to
+catch the defect that keeps recurring, because a renumbered citation still
+exists and still resolves. What produces the recurrence is that 972 citation
+sites use a spelling that resolves two ways, and that number was not known
+until this section counted it.
+
+The second finding is smaller and sharper, and it is the one no existence check
+could ever have produced. Fixing `cuda/fv.cu`'s flagged `(S3.4.2)` meant
+reading the whole bibliography entry it sat in, and the two citations beside it
+— **`(S3.3)` and `(S3.5)`**, Jasak's Green-Gauss gradient and his TVD ratio on
+an unstructured mesh — **resolve against *this* document**, as §3.3 "Temporal"
+and §3.5 "Gradients". They would have passed the audit for ever while pointing
+at the wrong document's sections. `restart.rs`'s `§7/Q5` is the same thing:
+`docs/05-io-redesign.md` §7 exists, and so does this document's §7 ("Limited
+convection schemes"), and nothing but naming the document distinguishes them.
+Only §80.3's attribution rule makes a citation say which document it means, and
+only reading the entry made these three visible. That is the shape of the
+defect this section cannot automate away, and §80.8 says so.
+
+### 80.8 What this section does not do
+
+* **It does not audit this document's own cross-references.** Measured: **73
+  references inside `SPEC-LIT.md` do not resolve against `SPEC-LIT.md`**, and
+  the same attribution rule would excuse most of them (`Patankar §4.2`,
+  `Jasak §3.4.2`, `Saad §12.4`, `Ferziger & Perić §8.6`) — but not all, and at
+  least one is a real dangling reference: §62.6 cites **(S36.1)** and §36
+  labels no equations at all. Running the same lexer over this document is a
+  section of its own, and it is named here rather than quietly skipped.
+* **It cannot check another author's numbering.** A `work` entry is an excuse,
+  not a check. `Patankar §4.9` could be wrong and nothing here would know.
+* **It cannot check that a citation means what the sentence around it says.**
+  §80.4 has the two candidate rules that were measured and rejected, and the
+  ratchet is what replaced them.
+* **It does not read `README.md`, `README.en.md`, `LICENSING.md` or the case
+  files.** The READMEs have their own audit; the case files carry no citations.
+* **It does not renumber anything.** A section that grows an equation in the
+  middle still silently invalidates every downstream citation, and the audit
+  will not notice as long as the labels stay in range. The only defence against
+  that is §80.2's forms, which at least make the *kind* of thing being cited
+  unambiguous.

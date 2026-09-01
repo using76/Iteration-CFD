@@ -99,6 +99,13 @@ pub mod io;
 pub mod reference;
 pub mod surface;
 
+/// The citation audit of SPEC-LIT §80: every `§NN.M`, `SNN.M` and `(NN.M)` in
+/// a comment, doc comment or error message must name something that exists in
+/// the document the citation belongs to. Test-only, so the release build is
+/// unchanged by construction.
+#[cfg(test)]
+mod xref;
+
 pub use device::{cfg_for, DevBuf, Gpu, Graph, KernelSet, BLOCK};
 pub use error::{Error, Result};
 pub use field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};

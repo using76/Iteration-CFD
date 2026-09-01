@@ -10,9 +10,10 @@
 //! Written from:
 //!   `docs/05-io-redesign.md` §4.6 ("자체 바이너리" - our own binary format,
 //!     a header with version / cell counts / field list / **mesh hash**,
-//!     rejected on hash mismatch) and §7/Q5 ("재시작은 한 형식으로 되는가? -
-//!     안 됩니다", i.e. a single restart format is not optional - this is the
-//!     format). The problem this closes is named directly in §4.6: the
+//!     rejected on hash mismatch) and `docs/05-io-redesign.md` §7/Q5
+//!     ("재시작은 한 형식으로 되는가? - 안 됩니다", i.e. a single restart
+//!     format is not optional - this is the format). The problem this closes
+//!     is named directly in `docs/05-io-redesign.md` §4.6: the
 //!     `ofgpu-buoyant` driver does not write `phi` on restart today, so a
 //!     restarted run falls back to a non-conservative potential-flow flux
 //!     instead of the converged one. This is meteor-cfd's own format, not a

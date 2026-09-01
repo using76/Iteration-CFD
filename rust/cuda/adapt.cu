@@ -10,7 +10,7 @@
 
   Provenance: the Loehner ratio is Loehner, Comput. Methods Appl. Mech. Engrg.
   61 (1987) 323-338, restated for a cell-centred finite-volume mesh (DESIGN,
-  S75.3a). The reconstruction limiter is Barth & Jespersen, AIAA 89-0366
+  SPEC-LIT S75.3(a)). The reconstruction limiter is Barth & Jespersen, AIAA 89-0366
   (1989). The characteristic fire diameter D* is the FDS User's Guide, NIST SP
   1019, "Mesh Resolution" - US Government work, public domain. The 2:1 balance
   condition is Isaac, Burstedde & Ghattas, IPDPS 2012, 426-437. The recentred

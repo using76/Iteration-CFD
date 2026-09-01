@@ -11,8 +11,8 @@
     H. Jasak, "Error Analysis and Estimation for the Finite Volume Method with
       Applications to Fluid Flows", PhD thesis, Imperial College (1996), ch. 3
       - Gauss convection and diffusion, the over-relaxed non-orthogonal
-        splitting (S3.4.2), the Green-Gauss gradient (S3.3), the TVD ratio on
-        an unstructured mesh (S3.5)
+        splitting (Jasak S3.4.2), the Green-Gauss gradient (Jasak S3.3), the
+        TVD ratio on an unstructured mesh (Jasak S3.5)
     F. Moukalled, L. Mangani, M. Darwish, "The Finite Volume Method in
       Computational Fluid Dynamics", Springer (2016), ch. 8, 11, 12 and S15.4
       - the bounded convection correction

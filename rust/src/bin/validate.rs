@@ -2711,8 +2711,8 @@ fn run(c: &mut Checks) -> Result<()> {
 //  five that measures the banded ANSWER rather than an identity or another
 //  model) are all RUN LIVE here. Gate 4 - the NIST 37 cm propane burner - is a multi-minute
 //  fire run per heat release rate and is reported in SPEC-LIT §62.13 and
-//  `docs/07-fire-solver.md`, not here, on the same grounds §33.3's channel
-//  run is kept out. §61.8's Gate 61-A (the predicted post-flame soot yield
+//  `docs/07-fire-solver.md`, not here, on the same grounds that SPEC-LIT
+//  §33.3's channel run is kept out. SPEC-LIT §61.8's Gate 61-A (the soot yield
 //  against Tewarson's measured one) is a 1200-step fire on the same grounds
 //  again; it MISSES, and the note below says so on this screen rather than
 //  leaving the verdict only in the spec.
@@ -10952,10 +10952,10 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
 
     // The derivation of `T_mean` from the thermostat's own steady law is
     // checked against the value `docs/07-fire-solver.md` §1.1 RECORDS for
-    // this leg (293.563 K after S26.1; 293.576 K at the S13.4.1 numerics,
-    // 293.574 K before that). Since S26.1 the two legs settle at the SAME
-    // `T_mean`, because both thermostats now settle at the same -3.2 W - which
-    // is the balance closing, seen from the controller's side.
+    // this leg (293.563 K after SPEC-LIT S26.1; 293.576 K at SPEC-LIT
+    // S13.4.1's numerics, 293.574 K before that). Since S26.1 the two legs
+    // settle at the SAME `T_mean`, because both thermostats now settle at the
+    // same -3.2 W - which is the balance closing, seen from the controller.
     c.check(
         "T_mean from the thermostat law matches the recorded 293.563 K (S35.1/S35.2)",
         (v.t_mean - 293.563).abs(),
