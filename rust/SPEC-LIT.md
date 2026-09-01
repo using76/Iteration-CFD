@@ -17492,7 +17492,9 @@ coupled stream is thrown further than the uncoupled one.
 * **Give back what an escaping parcel took.** §68.9 row 4 measures the gap.
 * **Couple to the pressure equation.** With no mass transfer the mixture volume
   does not change, so `target_divergence` has nothing to receive - which is
-  true, and stops being true the moment evaporation exists.
+  true, and stops being true the moment evaporation exists. **§77 is that
+  moment**: `mdot'''/rho` is the term, and §77.6 records that the ENERGY half
+  of the same effect had been arriving through `Q` unaided all along.
 * **Read a spray from a case file.** Still nothing does, and §13.4.2 forbids
   adding a block before the driver that would read it. `CouplingControls` is
   built in code, and its `describe()` is the banner it will print when there is
@@ -20983,3 +20985,1058 @@ already has 2:1 interfaces, and prints the cadence table of §75.8.
   a probe is a cell index, and `constant/polyMesh` is no longer valid for every
   time.
 * **`L_max = 2` and hexahedra only**, as in §74.
+
+## 76. Droplet heating and evaporation — the parcel side
+
+§66 built the parcel pool and moved it. §68 gave the gas back the momentum the
+parcels took, added `physics heating` so that the energy exchange was against a
+finite heat capacity rather than a bath, and then said, in §68.13, exactly what
+it was not doing:
+
+> **Evaporate.** No `dm_p/dt`, so no species source, no `D_src` in
+> `Energy::target_divergence`, no change in `d` or `n_p`. … **A sprinkler that
+> does not evaporate is not a sprinkler**, and the refusal is what tells a user
+> that rather than letting them believe otherwise.
+
+This section writes `dm_p/dt`. It is **the parcel side only**: the mass and the
+energy that leave a droplet are computed, applied to the droplet, and
+accumulated per parcel where a later section can find them. Nothing here writes
+a cell field, and §76.14 lists what that leaves undone — beginning with the
+species source, which is why `MassCoupling` still has exactly one value and
+still refuses the rest by name.
+
+Scoping it that way is not only a schedule. It buys a property the design note
+called *"the one physical caveat, and it is the crux"*: `T_g` and `Y_v` are
+**cell** values shared by every parcel in the cell, and a model that updated
+them parcel by parcel would make the answer depend on the order the parcels
+were visited — the thing this codebase forbids everywhere else. While the gas
+is read-only, every parcel in a cell sees the same frozen state, and the
+order-independence is not a construction to be defended but an absence of the
+problem. What it costs is stated in §76.14 and is real: a closed box does not
+get wetter as its droplets evaporate.
+
+**W. E. Ranz, W. R. Marshall**, *Evaporation from drops*, Chem. Eng. Prog. 48
+(1952) 141–146 (Part I) and 173–180 (Part II) — `Nu_0 = 2 + 0.6 Re^(1/2)
+Pr^(1/3)` and `Sh_0 = 2 + 0.6 Re^(1/2) Sc^(1/3)`, and the 56 suspended-droplet
+experiments whose metric, `d(D^2)/dt`, is what §76.12's first gate measures.
+**D. B. Spalding**, *The combustion of liquid fuels*, 4th Symposium
+(International) on Combustion (1953) 847–864, and *Convective Mass Transfer: An
+Introduction*, Edward Arnold (1963) — the mass transfer number `B_M` and the
+Stefan-flow rate. **G. A. E. Godsave**, *Studies of the combustion of drops in
+a fuel spray*, 4th Symposium (International) on Combustion (1953) 818–830 — the
+heat-limited rate the boiling branch of (76.9) uses. **B. Abramzon, W. A.
+Sirignano**, *Droplet vaporization model for spray combustion calculations*,
+Int. J. Heat Mass Transfer 32 (1989) 1605–1618, DOI
+`10.1016/0017-9310(89)90043-4` — the heat transfer number `B_T`, which is the
+**default** here and the subject of §76.6. **S. S. Sazhin**, *Advanced models
+of fuel droplet heating and evaporation*, Prog. Energy Combust. Sci. 32 (2006)
+162–214, DOI `10.1016/j.pecs.2005.11.001` — the modern re-derivation and the
+survey of which successors earn their flops. **K. M. Watson**, *Thermodynamics
+of the liquid state*, Ind. Eng. Chem. 35 (1943) 398–406 — `h_v(T)`. **T. R.
+Marrero, E. A. Mason**, *Gaseous diffusion coefficients*, J. Phys. Chem. Ref.
+Data 1 (1972) 3–118, DOI `10.1063/1.3253094` — `D(H2O–air) = 1.87e-10
+T^2.072/p[atm]` m²/s, 282–450 K, which sets both the default diffusivity and
+its temperature exponent. **R. W. Hyland, A. Wexler**, *ASHRAE Transactions*
+89(2A) (1983) 500–519 — the saturation polynomial, already in this crate as
+§54's `psychro::p_ws` and reused rather than re-fitted. **W. K. Lewis**, *The
+evaporation of a liquid into a gas*, Trans. ASME 44 (1922) 325–340 — the
+relation between the heat and mass transfer coefficients whose failure at
+`Le != 1` is exactly what §76.13's gap is made of. **NIST Chemistry WebBook,
+SRD 69** (US-government public domain) — the water-vapour specific heat and the
+critical constants. The **FDS Technical Reference Guide** (NIST SP 1018-1,
+US-government public domain, vendored at `reference/fds`), chapter *Lagrangian
+Particles* and the appendix *Development of an Implicit Solution for Droplet
+Evaporation*, states the same model set for fire; its `B_T = B_M`
+simplification is offered here as `massTransfer spalding` and is **not** the
+default, for the reason (76.6) gives. **No GPL-licensed source was consulted**,
+and in particular OpenFOAM's `src/lagrangian` tree, which contains the obvious
+reference implementation of a droplet evaporation model, was not opened.
+
+### 76.1 The two equations, and what is new about neither
+
+For one droplet, with the gas state in its cell held frozen over the step:
+
+```
+  dm_p/dt         = -A_p h_m rho_f ( Y_s - Y_g )                          (76.1)
+  m_p c_l dT_p/dt = A_p h_g ( T_g - T_p ) + (dm_p/dt) h_v(T_p)            (76.2)
+```
+
+Neither is new; both are in the design note and in every spray textbook. What a
+specification has to say is which closure each symbol takes, which of the
+temperature dependences are carried and which are not, what happens at the
+boiling point, and how the pair is integrated so that a droplet whose thermal
+time constant is a thousandth of the time step does not oscillate. §76.3–§76.10
+are those answers.
+
+`n_p` does **not** appear and does not move. A parcel stands for a fixed number
+of identical droplets and evaporation shrinks each of them; the alternative —
+holding `d` and shrinking `n_p` — would make a spray's droplet-size
+distribution a function of how much it had evaporated, which is wrong, and it
+would break the mass bookkeeping of (76.10) as well.
+
+### 76.2 What a case says
+
+```
+  physics            inert | heating | evaporating
+  saturationCurve    clausiusClapeyron | hylandWexler          (default the second)
+  massTransfer       ranzMarshall | spalding | abramzonSirignano  (default the third)
+  pAmbient           Pa
+  wCarrier           kg/mol
+  liquid             wVapour tBoil pBoil hvBoil tCrit dVapour tRefD dExponent cpVapour
+  evaporation/cfl    the largest fraction of d^2 one sub-step may remove
+```
+
+Twelve numbers and two menus, all in `EvaporationControls`, which is a struct
+of its own and not twelve more fields on `ParcelControls` — so that a reader
+can see at a glance that none of it is read unless the physics is
+`evaporating`. `ParcelControls::validate` calls into it anyway, always, for the
+reason §68 validates `cLiquid` for an inert pool: a number that is nonsense
+when it is read is nonsense when it is written, and the error is more use at
+setup than three steps into a run.
+
+`pAmbient` is the **thermodynamic** pressure and not the solver's `p` or
+`p_rgh`. The low-Mach split means the pressure that sets a boiling point is the
+background one; taking it from the momentum equation would make a droplet's
+boiling point a function of the local dynamic head.
+
+Two things a case supplies as **fields**, and both are refused in both
+directions by §13.4: the gas temperature `T_g`, which `heating` already
+required, and the vapour mass fraction `Y_v`, which is new. There is
+deliberately no "assume dry air" default. Dry air is `Y_v = 0`, which is a
+field a case can supply and mean; a *missing* field is a case that has not said
+what it is evaporating into, and (76.7)'s driving force is `Y_s - Y_g`, so half
+of it would be silently invented.
+
+### 76.3 The saturation curve, and the one that is water
+
+Two, and they are not two accuracies of one thing.
+
+```
+  clausiusClapeyron:  p_sat(T) = p_b exp[ -(h_v(T) W_v/R)(1/T - 1/T_b) ]   (76.3)
+  hylandWexler:       p_sat(T) = §54's p_ws(T)                             (76.4)
+```
+
+(76.3) is **general**: it needs only `(h_v, W_v, T_b, p_b)`, so it works for any
+liquid whose boiling point and latent heat are known, which is what a fuel spray
+needs and what Ranz & Marshall's benzene table would need. It is anchored so
+that `p_sat(T_b) = p_b` exactly, and `h_v(T)` inside the exponent is Watson's,
+so it is not the constant-latent-heat integral.
+
+(76.4) is **water**, and it is §54's own polynomial rather than a second fit of
+the same data — a data-centre or fire user checks a number against a
+psychrometric chart drawn from Hyland & Wexler, and §76.13's gate is posed
+against §54's `t_wb`, which is built on it. `validate` refuses `hylandWexler`
+for any liquid whose molar mass is not water's, because evaluating a fit to
+water for benzene returns a confident number from the wrong curve.
+
+**The gap between them is 20 %, and it is measured rather than described.**
+`the_two_saturation_curves_differ_by_a_measured_amount` prints it:
+
+| T | clausiusClapeyron | hylandWexler | gap |
+|---|---|---|---|
+| 10 °C | 978.11 Pa | 1228.00 Pa | **−20.35 %** |
+| 25 °C | 2729.44 Pa | 3169.22 Pa | −13.88 % |
+| 60 °C | 19320.43 Pa | 19943.76 Pa | −3.13 % |
+| 100 °C | 101325.00 Pa | 101418.72 Pa | −0.09 % |
+
+The two-parameter Clausius–Clapeyron form is anchored at the boiling point and
+is good near it; 75 K below, it is 20 % low, and since `B_M` is very nearly
+linear in `p_sat` at low humidity, so is the evaporation rate. That is why the
+water default is the water curve and why the general one is offered rather than
+imposed. It is also why `T_boil` at one atmosphere comes out as `373.1500 K` on
+the general curve, by construction, and as `373.1241 K` on Hyland–Wexler, which
+is the IAPWS value and not the round number.
+
+**A defect found by writing the test.** The general curve is **not monotone**.
+Watson sends `h_v` to zero at the critical temperature, so the exponent of
+(76.3) vanishes there and `p_sat(T_c) = p_b` again: the curve rises to about
+1.74 MPa near 549 K for water and comes back down. A boiling-point solve that
+brackets on `[T_lo, T_c]` and requires `f(T_c) > 0` therefore fails for **every
+ambient pressure above one atmosphere**, which is how this was found — the test
+asking for the boiling point at 2 bar refused. `boiling_temperature` scans for
+the first sign change and bisects there; the second root, on the falling limb,
+is an artefact of the correlation and is never returned.
+
+### 76.4 The properties that move, and the ones that deliberately do not
+
+```
+  h_v(T_p) = h_v(T_b) [ (T_c - T_p)/(T_c - T_b) ]^0.38          Watson (1943)
+  D_f      = D_ref (T_f/T_ref)^n (p_ref/p),   n = 2.072         Marrero & Mason
+  rho_f    = rho_g T_g/T_f                    ideal gas at constant p
+  T_f      = T_p + (T_g - T_p)/3              the 1/3 rule                (76.5)
+```
+
+`h_v` is the one that matters most: it falls 10 % between 0 °C and 100 °C and it
+multiplies the entire cooling term of (76.2). Watson's correlation is 1.33 %
+high for water at 25 °C against the steam table — measured and printed by
+`watsons_latent_heat_matches_its_anchor_and_its_derivative`, not asserted away.
+`D_f` moves 50 % over the same range and enters (76.1) linearly. `rho_f` is the
+film density, so a hot gas is correctly thinner at the droplet surface than in
+the cell.
+
+**`mu` and `k_g` are held at the constants §66 and §68 already carry, and that
+is a deliberate scope line rather than an oversight.** They are shared with the
+drag law and with the sensible-heat relaxation; making them functions of `T_f`
+would move every §66.12 and §68.9 result, and this section's contract is that
+they do not move. What it costs is a film Lewis number that drifts with `T_f`
+where a Sutherland `k_g(T_f)` would hold it steadier; the number is reported by
+`DropletRate::lewis` so a run can see it. A `filmProperties` setting that
+applied the 1/3 rule to `mu` and `k_g` as well is the obvious next step and is
+not here.
+
+### 76.5 The surface state
+
+At equilibrium the surface is saturated, and the mole fraction becomes a mass
+fraction through the two molar masses:
+
+```
+  X_s = p_sat(T_p)/p,     Y_s = X_s W_v / ( X_s W_v + (1 - X_s) W_c )     (76.6)
+```
+
+written as that ratio and not as `X/(X(1 - W_c/W_v) + W_c/W_v)`, because the
+second form loses a digit when `W_c/W_v` is far from one and benzene in air
+makes it 0.37.
+
+### 76.6 The blowing correction — three rungs, and why the default is the third
+
+The Stefan flow of vapour away from the surface thickens the boundary layer and
+reduces both transfer coefficients. All three settings share one mass rate form
+and one conductance form and differ only in **which transfer number the heat
+correction is taken at**:
+
+```
+  B_M   = (Y_s - Y_g)/(1 - Y_s)                Spalding mass transfer number
+  F(B)  = ln(1 + B)/B,   F(0) = 1
+
+  ranzMarshall        mdot = -pi d rho_f D_f Sh_0 (Y_s - Y_g),   Nu = Nu_0
+  spalding            mdot = -pi d rho_f D_f Sh_0 ln(1 + B_M),   Nu = Nu_0 F(B_M)
+  abramzonSirignano   mdot as spalding,                          Nu = Nu_0 F(B_T)
+      with  B_T = (1 + B_M)^phi - 1,   phi = (c_pv/c_pg)(Sh_0/Nu_0)/Le_f  (76.7)
+
+  a  = pi d k_g Nu        so that the convective heat into the droplet is
+                          a (T_g - T_p), and  K = -4 mdot/(pi rho_l d)
+```
+
+`Le_f = k_g/(rho_f c_pg D_f)` is the film Lewis number.
+
+**Why Abramzon–Sirignano is the default.** `phi` is exactly the factor by which
+the heat and mass transfer numbers differ, and it is 1 only when
+`c_pv = c_pg` **and** `Le = 1`. For water in air neither holds: `c_pv/c_pg` is
+1.87 and `Le_f` is 0.87–0.91, so `phi` is about 2.07. FDS's simplification
+`B_T = B_M` is the `phi = 1` special case and is what `massTransfer spalding`
+selects; it is cheaper by one `pow` and it is exactly right when `Le = 1`.
+Sazhin's survey is the reason the ladder stops here: the film-thickness
+corrections `Nu*` and `Sh*` that complete Abramzon & Sirignano need a bounded
+fixed point on `F(B)`, and a fixed point is a data-dependent trip count, which
+is warp divergence and a launch geometry a captured graph cannot express. It is
+refused by name, with that reason.
+
+**A finding, from a test written expecting the opposite.** `ranzMarshall` is
+*not* the `B_M -> 0` limit of the other two. `spalding/ranzMarshall` is exactly
+`ln(1+B_M)/(Y_s - Y_g)`, which tends to `1/(1 - Y_s)` and **not** to one: the
+published form omits the Stefan-flow denominator altogether, and that is 2.0 %
+at 25 °C and a factor of **2.40** at 90 °C, where `Y_s` has reached 0.58. What
+does collapse as `B_M -> 0` is `spalding` against `abramzonSirignano`, which
+share a mass rate **bit for bit** and differ only in `F(B_T)/F(B_M)`. The test
+now asserts the two exact relations instead of a limit that was not true.
+
+### 76.7 The single-droplet closure, and where it is solved
+
+Everything above is one pure function of `(d, T_p)` and the frozen gas state —
+`ofpEvapRate` on the device, `evaporation::droplet_rate` on the host, and
+`the_device_closure_is_the_host_closure` holds the two together on four
+combinations of gas state and model. It returns `mdot`, `a`, `h_v`, `Le`, and
+one more thing:
+
+```
+  dL/dT_p ,   L(T_p) = -mdot(T_p) h_v(T_p)   the evaporative cooling power   (76.8)
+```
+
+with the one piece of algebra worth writing out, because it is where the
+expression collapses:
+
+```
+  d ln(1 + B_M)/dT_p  =  (dY_s/dT_p)/(1 - Y_s)      exactly
+```
+
+— the `(1 - Y_s)^2` of `dB_M/dY_s` cancels the `(1 - Y_s)` of `1/(1 + B_M)`.
+`dY_s/dT_p` follows from (76.6) and the analytic `dp_sat/dT` of either curve;
+for Hyland–Wexler that is the polynomial differentiated term by term, checked
+against a central difference of §54's own `p_ws`.
+
+`dL/dT_p` is clamped at zero and the film properties are frozen inside it. Both
+are admissible, and the reason is worth stating precisely: **(76.8) is a
+preconditioner, not a model.** The fixed point of (76.10) is where the
+*residual* `a(T_g - T_p) + mdot h_v` vanishes, and the residual does not contain
+`dL/dT_p`. An approximate derivative changes how fast the droplet gets to its
+steady temperature and, by construction, not what that temperature is —
+§76.12's gate measures the settled temperature against a bracketed root find
+that uses no derivative at all, and it agrees to `5.7e-13 K`.
+
+### 76.8 What is refused inside the closure
+
+* **The film-thickness corrections `Nu*`, `Sh*`** — a fixed point (§76.6).
+* **Internal circulation and a resolved droplet temperature profile.** This is
+  a one-temperature droplet, which §68.5 already justified by the Biot number:
+  `Bi ~ 1e-3` for a 300 µm water droplet in air at `Nu = 2`. A fuel droplet in a
+  hot stream reaches `Bi ~ 0.1`, where it is not, and Sazhin's effective-
+  conductivity model is what would be needed.
+* **Multi-component liquids.** One vapour, one `T_b`, one `h_v`. A distillation
+  curve needs a per-species surface equilibrium and a diffusion equation inside
+  the droplet.
+* **The Kelvin (curvature) and solute corrections to `p_sat`.** They matter
+  below about 0.1 µm and for salt-laden droplets, and neither is a
+  fire-suppression regime.
+* **The momentum the vapour carries off**, `-mdot(u_p - u)`. It belongs with
+  §68.6's coupling split, and for water in air it is `1e-3` of the drag.
+
+### 76.9 The boiling limit — and why it is a branch and not a clamp
+
+As `T_p -> T_b(p)`, `X_s -> 1`, so `Y_s -> 1` and `B_M -> infinity`. The
+diffusion-limited rate does not merely become inaccurate there; it is a division
+by zero. And it is genuinely the wrong physics: at the boiling point the surface
+carries no inert gas at all, so nothing is diffusing and the rate is set by the
+heat that reaches the surface. That is Godsave's:
+
+```
+  boiling, T_p >= T_b(p):
+      B_T  = c_pv (T_g - T_p)/h_v          the energy definition, not (76.7)'s
+      a    = pi d k_g Nu_0 F(B_T)
+      mdot = -a (T_g - T_p)/h_v   =  -pi d (k_g/c_pv) Nu_0 ln(1 + B_T)     (76.9)
+```
+
+`T_b(p)` is the root of `p_sat(T) = p`, found **on the host, once, at setup**,
+by the scan-and-bisect of §76.3 — the same rule §54.5 states for the wet-bulb
+solve, and for the same two reasons: a bisection has a data-dependent trip count
+that a captured graph cannot hold, and a root find that fails has to be able to
+say so.
+
+Three things about this branch are worth stating because each was got wrong
+first.
+
+**(a) It is taken on `T_p >= T_b` alone, not on `T_p >= T_b and T_g > T_p`.**
+At `T_b` the sub-cooled branch is undefined for *any* gas state, so it must not
+be reachable there at all. When the gas is colder and there is no superheat
+left, the boiling branch relaxes the droplet down instead, exponentially, and
+the next sub-step finds it below `T_b`.
+
+**(b) `T_p` is PINNED at `T_b`, not relaxed towards it.** A relaxation leaves
+`T_p` one ulp off `T_b`; the `T_p >= T_b` test then flips; the next sub-step
+takes the sub-cooled branch at `Y_s = 1 - 1e-16`, where `B_M` is `1e16` and the
+conductance underflows. The first version of this file did exactly that, and the
+boiling gate caught it as an evaporation rate that collapsed from `1.2e-12` to
+`2.1e-22 kg/s` on the fifth step. Pinning is what makes the branch a function of
+the state rather than of round-off.
+
+**(c) Superheat is vaporised, not discarded.** A droplet that arrives above
+`T_b` carries `flash = m_p c_l (T_p - T_b)` more energy than it can hold, and
+that energy takes `flash/h_v` of liquid with it. Clamping `T_p` without it would
+delete energy from the run. With it, the droplet's own budget
+`m c_l dT = Q_c - dm h_v` closes across the cap.
+
+**Does a sub-cooled droplet ever reach `T_b` from below?** No, and it is worth
+saying why the branch is therefore a guard rather than a regime. As
+`T_p -> T_b`, `F(B_T) -> 0` faster than `ln(1 + B_M) -> infinity` grows, so the
+conduction term of the balance vanishes while the cooling term diverges: the
+residual is `-infinity` at `T_b` for any finite `T_g`, and the steady
+temperature is strictly below it, and by a lot: in dry air this crate's own
+balance gives 304.4 K at `T_g = 400 K`, 322.0 K at 700 K, 327.1 K at 1000 K and
+330.3 K at 2000 K - it converges on a ceiling forty kelvin below `T_b` rather
+than approaching it. The branch therefore exists for a droplet **released**
+hot, or for an ambient pressure below the one its temperature was chosen at,
+and not for a droplet that got there by being heated.
+
+### 76.10 The integrator, and why the mass follows the energy
+
+The stiff part of (76.2) is the conduction: a 100 µm water droplet has
+`tau_T = rho_l c_l d^2/(6 Nu k_g) ~ 0.13 s`, and a 10 µm one has `1.3 ms`. An
+explicit step oscillates. §66.5 and §68.9 both integrate their linearised
+equation **exactly**, and this section does the same one equation over.
+
+Per sub-step, with everything evaluated at the state the sub-step starts in:
+
+```
+  C    = m_p c_l
+  lam  = ( a + dL/dT_p ) / C                                >= 0 by construction
+  w    = 1 - e^{-lam h},    tau = w/lam
+  T_eq = T_p + [ a (T_g - T_p) + mdot h_v ] / ( a + dL/dT_p )
+  dE   = C w ( T_eq - T_p )                                 the energy applied
+  Q_c  = a [ (T_g - T_eq) h + (T_eq - T_p) tau ]            the CONVECTIVE half,
+                                                            in closed form
+  dm   = ( Q_c - dE ) / h_v                                 the latent half,
+                                                            BY DEFINITION       (76.10)
+  m'   = max(0, m_p - dm),   d' = d (m'/m_p)^{1/3},   dm_applied = m_p - m'
+  T_p' = T_p + ( Q_c - dm_applied h_v ) / C
+```
+
+`Q_c` is not a re-linearisation: `∫_0^h (T_g - T_p(t)) dt` has a closed form for
+the exponential solution and that is what is written. And the mass is **derived
+from the energy that was actually applied** rather than integrated beside it.
+That ordering is the whole of this sub-section, and it is §68's construction one
+equation over: §68 deposits the impulse the integrator applied, so momentum
+conservation is an identity; here the droplet's own budget
+`C dT = Q_c - dm h_v` holds in f64 rather than to the accuracy of the
+linearisation, and the measured residual over 300 steps is `4.8e-12` relative —
+what is left is the change of `m` *within* a sub-step, which is second order in
+`dt` and is reported rather than hidden.
+
+`d' = d (m'/m_p)^{1/3}` and not `d' = (6m'/(pi rho_l))^{1/3}`: `cbrt(1)` is
+exactly one, so a sub-step that removed nothing leaves `d` bit for bit alone and
+no epsilon is needed to say so.
+
+**The two accumulators.** Written once per step, not per sub-step:
+
+```
+  dm_p  = rho_l (pi/6) (d_0 - d)(d_0^2 + d_0 d + d^2)         kg, one droplet
+  q_lat = sum over sub-steps of  dm_applied h_v(T_p)          J, one droplet    (76.11)
+```
+
+`dm_p` is a **difference of the step's two endpoints**, so "what the parcel
+lost" and "what the parcel's state says it lost" are the same number by
+construction and the sum over a run telescopes. It is written factored rather
+than as `d_0^3 - d^3` for a measured reason: the two cubes agree to twelve
+digits over one step and their difference does not, so the subtraction is done
+on the diameters — where it is exact, by Sterbenz, for any pair within a factor
+of two — and the well-conditioned quadratic carries the rest. That change moved
+the agreement with a host recomputation from `5.7e-12` to `4.3e-16` and the
+mass defect of §76.12's gate 76-C from `5.0e-15` to `9.1e-16`.
+
+`qim` and `atr`, the accumulators §68.9 already gates, keep their meaning and
+gain a definition: `qim` is the **convective** heat into one droplet, which for
+a heating parcel is `m_p c_l dT_p` exactly — the same expression, the same bits
+— and for an evaporating one is `Q_c` alone, with `q_lat` the rest.
+
+**The sub-step count** gains a second bound beside §66.7's motion CFL:
+
+```
+  n_sub >= ceil( K dt / (cfl_evap d^2) ),    K = -4 mdot/(pi rho_l d)      (76.12)
+```
+
+capped by the same `maxSubSteps`, from one extra closure evaluation at the state
+the step starts in. Without it a droplet can vanish inside one step and the
+`d^2` law is lost with no diagnostic. It is a bound and not a convergence test,
+for the reason every trip count in this crate is.
+
+**What happens when the liquid runs out.** The parcel is removed from the
+working set exactly as an escaping one is, and counted into a counter of its
+own — `n_evaporated`, because "the spray shrank" and "the spray left" are
+different runs and one "gone" count cannot say which. Its accumulators are still
+written and, being out of §67's CSR, will not be deposited: the same measurable
+gap §68.9 row 4 reports for an escape. The final sub-step accumulates the whole
+remaining latent heat, which is more than the gas supplied by less than one
+sub-step's worth — the price of not carrying a fractional final sub-step through
+a captured graph.
+
+### 76.11 What the gates are measured against
+
+Two closed forms, both on the host, both solved a **different way** from the
+kernel so that agreement is evidence and not tautology. They are this section's
+analogue of (66.4)'s `terminal_velocity`.
+
+```
+  steady_temperature:  the root of  a(T_g - T_p) + mdot h_v = 0,
+                       by bracketed bisection up to T_b(p) - 1 nK         (76.13)
+
+  d2_law_slope:        K = -4 mdot/(pi rho_l d)                           (76.14)
+```
+
+(76.14) is the whole content of the `d^2` law, and the content is that **`K`
+does not depend on `d`**: `mdot ∝ d`, so `K` does not, so `d^2(t)` is a straight
+line. For the Spalding rate at `Re -> 0` it is the textbook
+`K = 8 rho_f D_f ln(1 + B_M)/rho_l`; for Ranz–Marshall's,
+`K = 8 rho_f D_f (Y_s - Y_g)/rho_l`; on the boiling branch, Godsave's
+`K = 8 (k_g/c_pv) ln(1 + B_T)/rho_l`. All three are checked against the slope
+this crate reports, assembled from the film state rather than from `mdot`.
+
+(76.13) is also **independent of `d`** — both sides of the balance scale as `d`
+— which is why a polydisperse spray reaches one wet-bulb temperature, and which
+is asserted rather than assumed.
+
+The nanokelvin in (76.13) is not fussiness. At `T_b` exactly, (76.9)'s branch
+makes the residual identically zero in exact arithmetic, so in f64 its sign is
+one ulp of noise and the bracket test "does this droplet boil?" would answer at
+random. A nanokelvin down, the sub-cooled branch answers, and its answer there
+is unambiguous — `F(B_T)` has collapsed and `ln(1 + B_M)` has not — which is
+also §76.9's claim that a sub-cooled droplet never reaches `T_b` from below.
+
+### 76.12 What must hold
+
+| # | claim | where it is checked | verdict |
+|---|---|---|---|
+| 1 | **Gate 76-A**: the `d^2` law. A 500 µm droplet released at its steady temperature in still 25 °C air at 30 % rh follows `d^2 = d_0^2 - K t` for 0.8 s | `gate_76a_the_d2_law_holds_against_its_closed_form`; `ofgpu-validate` | `1.8e-6` of the drop; `T_p` drifts `1.2e-12 K` |
+| 2 | and the departure is the TIME-STEP error and nothing else: halving `dt` halves it | `the_d2_law_error_is_first_order_in_the_step` | `9.20e-6 -> 4.60e-6 -> 2.30e-6` |
+| 3 | and `K` is the textbook closed form, and independent of `d` over two decades | `the_d2_law_slope_is_the_textbook_closed_form` | `<= 1e-12` relative |
+| 4 | **Gate 76-B**: a droplet settles at the temperature the balance says, over four humidities | `gate_76b_the_droplet_settles_at_its_wet_bulb_temperature`; `ofgpu-validate` | `5.7e-13 K` |
+| 5 | and that temperature is within 2 K of §54's ASHRAE psychrometric wet bulb | same | **`0.76 K` worst**, at 10 % rh; see §76.13 |
+| 6 | **Gate 76-C**: the parcel's own mass. Held plus given up equals started with, through 80 % of the liquid | `gate_76c_the_parcel_conserves_its_own_mass`; `ofgpu-validate` | `9.1e-16` |
+| 7 | and the accumulator IS the state change, step by step | `the_accumulators_are_the_change_in_the_parcels_own_state` | `4.3e-16`; the energy budget closes to `4.8e-12` |
+| 8 | the device closure is the host closure, over four gas states and three models | `the_device_closure_is_the_host_closure`, `the_device_evaporation_enumerations_match_the_host` | `< 1e-9` |
+| 9 | **the evaporation settings cannot move an inert or heating parcel** — every one of them changed at once, parcel state and both §68 accumulators bit for bit | `the_evaporation_settings_cannot_move_a_heating_parcel` | bitwise |
+| 10 | (76.9): a superheated droplet is capped at `T_b` and then follows Godsave's slope | `a_superheated_droplet_is_capped_at_the_boiling_point_and_boils` | `1.6e-5` |
+| 11 | a droplet in saturated air holds its size; in supersaturated air it grows, and the mass accumulator goes negative with it | `a_droplet_in_wet_air_stops_and_in_wetter_air_grows` | `< 1e-3` of `d_0` / grows |
+| 12 | every setting S76 adds changes the answer (§13.4.1), including `cfl` where it bites | `every_evaporation_setting_changes_the_answer` | 6 settings + `cfl` |
+| 13 | every liquid property is read — perturb one, the steady temperature moves | `every_liquid_property_moves_the_answer` | 11 numbers |
+| 14 | `Y_v` is required when it is read and refused when it is not, in both directions | `the_vapour_field_is_required_when_it_is_read_and_refused_when_it_is_not` | §13.4 |
+| 15 | energy coupling is refused for an evaporating pool, by name, with the reason | `energy_coupling_is_refused_for_an_evaporating_pool` | §76.14 |
+| 16 | the Hyland–Wexler slope is the derivative of §54's own polynomial | `the_hyland_wexler_slope_is_the_derivative_of_psychro` | `7.7e-7`, the central difference's own truncation |
+| 17 | benzene is a different liquid and not water with a new label | `benzene_is_a_different_liquid_and_not_water_with_a_new_label` | `K` 7x water's |
+
+Row 9 is §76's version of §68.10, and it deserves its shape stated. The
+by-construction half is that every evaporation statement in `cuda/parcels.cu`
+is inside `if (evaporating)`, the inert and heating arithmetic is textually
+unchanged, and `d` and `m_p` became mutable locals that those two paths assign
+the same value to every sub-step — so every expression downstream sees identical
+operands. The measured half runs a heating pool twice with **every** evaporation
+setting changed between them — a different liquid, a different saturation curve,
+a different blowing model, a different ambient pressure, a different sub-step
+bound — and compares the parcel state and both §68 accumulators bit for bit.
+That is §13.4.1's admissible exception, asserted rather than argued, in the form
+§70.7 set the precedent for.
+
+### 76.13 Gate 76-B against ASHRAE, and the Lewis number
+
+The number that matters, from `gate_76b_the_droplet_settles_at_its_wet_bulb_temperature`,
+for a 100 µm droplet released at 25 °C into still air and relaxed for 4 s:
+
+| rh | this crate | ASHRAE `t_wb` (§54) | gap |
+|---|---|---|---|
+| 0.10 | 9.7053 °C | 10.4678 °C | **−0.762 K** |
+| 0.30 | 13.8933 °C | 14.4218 °C | −0.529 K |
+| 0.50 | 17.5531 °C | 17.8893 °C | −0.336 K |
+| 0.90 | 23.6687 °C | 23.7227 °C | −0.054 K |
+
+**These are not the same quantity, and the gate would be dishonest if it
+pretended they were.** ASHRAE's wet bulb is the adiabatic-saturation
+temperature, which assumes a psychrometric ratio of one — that is, the Lewis
+relation `h/(h_m c_p) = 1`. A droplet's balance assumes nothing of the kind: at
+`Re -> 0` it carries `Sh_0/Nu_0 = 1` and the full `1/Le_f`, and `Le_f` is
+0.874–0.905 here, so the depression should be about 11 % larger. The measured
+gap is 4–5 % of the depression, not 11 %, and the difference is the saturation
+curve's own curvature: a colder droplet has a lower `p_sat`, hence a smaller
+`B_M`, hence less cooling. The nonlinearity absorbs about half of the Lewis
+amplification. That was not obvious in advance and it is the reason this gate is
+reported with its mechanism rather than with a tolerance.
+
+**The verdict is a pass, at the design note's own bar of ±2 K, and the number is
+0.76 K.** What sets it is not the integrator — the same gate measures the
+kernel against this crate's own balance at `5.7e-13 K` — but the **property
+data**. Marrero & Mason's `D = 2.505e-5 m²/s` at 298 K and the `2.42e-5` that
+also circulates differ by 3.6 %, that difference lands directly on `Le_f`, and
+`Le_f` is what the gap is made of. The default quotes the source rather than the
+round number, and the sensitivity is stated here so that a user who prefers the
+other value knows what it will move.
+
+### 76.14 What this section does not do
+
+* **Give the gas the vapour.** `mdot` is computed, applied to the droplet, and
+  accumulated per parcel; no species source carries it into `Y_v`, and there is
+  no `D_src` term in `Energy::target_divergence` for the volume the phase change
+  produces. `MassCoupling::from_name` still refuses a mass coupling by name, and
+  the refusal's **reason has changed**: it is no longer "there is nothing to
+  give" but "there is nowhere to put it", and the message says so.
+  **IMPLEMENTED at §77**, which builds all three - the species source, the
+  enthalpy the arriving mass carries, and the `D_src` term - so the menu now
+  takes `evaporation` and this refusal is gone.
+* **Give the gas the latent heat.** §68's energy gather carries the convective
+  half only, so `ParcelCoupling::new` **refuses** energy coupling for an
+  evaporating pool rather than couple half of an energy budget and report it as
+  a closed one. Momentum coupling stays available and stays exact: the drag
+  impulse is the one the integrator applied, whatever the diameter did on the
+  way. `ParcelSnapshot::heat` and `::latent` carry both halves for a case that
+  wants to see them.
+  **§77 made this refusal CONDITIONAL and corrected its reason.** The latent
+  heat is not a second transfer the gas owes: (76.10)'s own budget puts every
+  joule the phase change consumed inside the convective heat §68 already
+  deposits, so a second `q_lat` sink would double-count it (§77.4). What §68
+  was really missing is the *sensible enthalpy of the arriving mass*, which is
+  12 % of the latent heat and not 100 % of it. The refusal now fires only when
+  the mass coupling is off, and its message says which setting closes it.
+* **Let a cell get wetter.** `T_g` and `Y_v` are read and frozen. That is what
+  makes the result order-independent by absence rather than by construction, and
+  it is also what lets a droplet keep evaporating into an atmosphere that never
+  saturates. In a well-ventilated spray this is right; in a closed box it is not,
+  and nothing in this section will notice.
+  **§77's gate 77-D is a closed box that DOES saturate**, because the driver
+  there advances the gas from §77's own deposits between steps - so the
+  frozen state is frozen within a step and not across a run, and the
+  order-independence survives while the limitation does not.
+* **Vary `mu` or `k_g` with temperature** — §76.4, and the reason is that they
+  are shared with the drag and the sensible-heat relaxation whose results this
+  section promises not to move.
+* **Evaporate a multi-component liquid, resolve the droplet's interior, or
+  correct `p_sat` for curvature** — §76.8.
+* **Return the momentum the vapour carries off**, `-mdot(u_p - u)` — §76.8. It
+  is `1e-3` of the drag for water in air and it belongs with §68.6's split.
+* **Absorb radiation.** Still §68.13's item: no `kappa_p`, no Mie efficiencies,
+  no Sauter-mean cell closure. Water mist is a radiation shield and that is most
+  of its value in suppression; a spray that evaporates and does not shield is
+  half a suppression model.
+* **Splash, or a wall film.** Still §66.10's menu. A film is where the mass an
+  evaporating spray deposits on a surface would go, and it is the other half of
+  the suppression closure.
+* **Read a spray from a case file.** Still nothing does, and §13.4.2 forbids
+  adding a block before the driver that would read it. `EvaporationControls` is
+  built in code and its `describe()` is the banner it will print when there is
+  one.
+
+## 77. The vapour, the enthalpy it carries, and the volume it makes
+
+§76 wrote `dm_p/dt`, applied it to the droplet, accumulated it per parcel, and
+then said what it was not doing:
+
+> **Give the gas the vapour.** `mdot` is computed, applied to the droplet, and
+> accumulated per parcel; no species source carries it into `Y_v`, and there is
+> no `D_src` term in `Energy::target_divergence` for the volume the phase change
+> produces. … the refusal's **reason has changed**: it is no longer "there is
+> nothing to give" but "there is nowhere to put it".
+
+This section is the somewhere. Three things cross from the dispersed phase to
+the Eulerian one, and they land in three different equations:
+
+```
+  species    S_Y,P  = mdot'''_P (1 - Y_v,P)/rho_P                 [1/s]   (77.1)
+  energy     q_P   += cp_g mdot'''_P (T_p - T_g,P)                [W/m^3] (77.2)
+  pressure   D_P    = mdot'''_P/rho_P                             [1/s]   (77.3)
+```
+
+all built from one per-cell deposit, `mdot'''_P`, gathered by §67's CSR walk in
+the kernel §68 already launches. **Nothing in any solver learns that parcels
+exist**: (77.1) goes through the whole-field explicit seam §61.2's soot source
+already uses, (77.2) through §18's energy registry, and (77.3) through the one
+`Energy::target_divergence` seam §25.3 says the SIMPLE/PISO loop changes in.
+
+Two of this section's four findings are about which of those three is not what
+it looks like, and both were found by tests written to check the obvious thing.
+
+**C. T. Crowe, M. P. Sharma, D. E. Stock**, *The particle-source-in-cell
+(PSI-CELL) model for gas-droplet flows*, J. Fluids Eng. 99 (1977) 325, DOI
+`10.1115/1.3448756` — the per-cell source construction (68.1), which (77.1)
+and (77.3) are two more instances of. **S. V. Patankar**, *Numerical Heat
+Transfer and Fluid Flow*, Hemisphere (1980), §4.2 — the `S_u + S_p psi` split
+and the rule `S_p <= 0`, which §77.5 explains why neither of these sources can
+satisfy without a clamp. **R. G. Rehm, H. R. Baum**, *The equations of motion
+for thermally driven, buoyant flows*, J. Res. NBS 83 (1978) 297–308 — the
+low-Mach split whose divergence constraint (§25.1) (77.3) enters. The **FDS
+Technical Reference Guide** (NIST SP 1018-1, US-government public domain,
+vendored at `reference/fds`), chapter *The Divergence* — the same `D_SOURCE`
+term in its general variable-molar-mass form, of which §25's constant-`W` gas
+keeps `mdot/rho` and nothing else (§77.6). **ASHRAE Handbook — Fundamentals**
+(2017), ch. 1, eq. 33 — the adiabatic-saturation relation gate 77-D is measured
+against, already in this crate as §54's `psychro::t_wb` and reused rather than
+re-fitted. **W. E. Ranz, W. R. Marshall**, *Evaporation from drops*, Chem. Eng.
+Prog. 48 (1952) 141 and 173, and **D. B. Spalding**, *Convective Mass Transfer*,
+Edward Arnold (1963) — §76's closure, which produces the `dm_p` this section
+distributes and is not re-derived here. **No GPL-licensed source was
+consulted**, and in particular OpenFOAM's `src/lagrangian` tree, which contains
+the obvious reference implementation of a parcel-to-gas species source, was not
+opened.
+
+### 77.1 What is deposited, and why it telescopes
+
+One extra pass through the same per-cell CSR segment §68.3 already walks:
+
+```
+  m_P   = sum_{p in P} n_p dm_p                          kg           (77.4)
+  mT_P  = sum_{p in P} n_p dm_p T_p                      kg K         (77.5)
+
+  mdot'''_P = m_P/(V_P dt)                               kg/(m^3 s)   (77.6)
+  q_vap,P   = cp_g ( mT_P/(V_P dt) - mdot'''_P T_g,P )   W/m^3        (77.7)
+```
+
+`dm_p` is (76.11): the **difference of the step's two endpoint masses**, not a
+per-sub-step rate re-integrated at deposition time. So the sum over a run
+telescopes, and "what the gas was given" and "what the pool's own state says it
+lost" are the same number by construction. That is §68.1's principle one
+quantity over, and it is why gate 77-A is an identity rather than a tolerance.
+
+`T_p` in (77.5) is the parcel's **end-of-step** temperature: the temperature the
+vapour is handed to the gas at. The alternative — a third accumulator holding
+`sum_i dm_i T_p,i` over the sub-steps — was considered and not built, because
+the endpoint form is a pure function of the endpoint state, which is what makes
+the ledger of §77.10 close on quantities a snapshot can see. What it costs is
+the sub-step variation of `T_p` inside one step, which for a droplet at its wet
+bulb is the thing that by definition does not move.
+
+`T_g,P` is a per-cell constant and factors out of the cell's own sum, so (77.7)
+is one subtraction per cell and not one per parcel.
+
+**The sign convention differs from §68 and the difference is deliberate.**
+`f_P` is minus what the parcel took, so (68.4) reads `given + taken = 0`;
+`dm_p` is already a loss, so `mdot'''_P` is plus what the parcel gave up and
+(77.9) reads `given = taken`. Writing it the other way round is the first
+mistake available here.
+
+### 77.2 What a case says
+
+```
+  coupling/mass    none | evaporation                     (default the first)
+```
+
+One new value on a menu that had one. `evaporation` carries **all three** of
+(77.1)–(77.3) together, and there is no way to ask for one of them: a case that
+took the vapour and left the enthalpy, or the enthalpy and left the volume,
+would have a run whose mass or energy does not close and no way to find out.
+§77.7 is the contract that enforces it.
+
+Two things a case supplies as fields, both refused in both directions by §13.4:
+the gas temperature `T_g`, which §68's energy coupling already required, and
+the vapour mass fraction `Y_v`, which (77.1)'s dilution factor reads. `Y_v` was
+already required by §76 for the parcel side; §77 makes the *coupling* read it
+too, and refuses it when mass coupling is off because it would then be read and
+ignored.
+
+### 77.3 Which equation each term belongs to
+
+The three sources are not three spellings of one thing. Each is the source for
+a **particular** equation in the form that equation is actually written in, and
+getting that wrong is silent.
+
+**Species.** The conservative statement is
+`d(rho Y)/dt + div(rho u Y) = mdot'''`, and with continuity carrying the same
+`mdot'''` the non-conservative form is `rho DY/Dt = mdot'''(1 - Y)`. §19's
+species equation is `ddt(Y) + div(phi, Y) - laplacian(D_eff, Y) = S`, unit
+density, so `S = mdot'''(1 - Y_v)/rho` — which is (77.1).
+
+The `(1 - Y_v)` is the dilution the arriving mass does to the fraction already
+there. It is 1.2 % at `Y_v = 0.012` — small, real, and the difference between a
+species equation whose water balance closes and one that does not. §77.9's pair
+table measures it.
+
+**One contract this section states rather than checks.** (77.1) is the source
+for the NON-conservative form, and §19's equation is that form only when its
+convection is `bounded` — which is §19's own requirement for a bounded scalar
+and what every species entry in this crate carries. With an unbounded scheme
+the assembled operator is `dY/dt + div(phi, Y)` and this source is short by
+`Y div(u)`. The coupling cannot see the scheme (it does not own the transport
+object), so it says so in `vapour_source`'s documentation and here, and does
+not pretend.
+
+**Energy.** §26's equation is `rho cp DT/Dt = Q`, so mass arriving at `T_p`
+contributes `S_m cp (T_p - T_g)` and **not** `S_m cp T_p`. The
+non-conservative form is the right one because it is the form the registry
+feeds, and it has a property the conservative one does not: it vanishes when
+the vapour arrives at the gas's own temperature. Adding vapour at `T_g` changes
+the gas's mass and its volume and not its temperature, and (77.2) says so
+without needing the discrete continuity residual to cancel it.
+
+**Pressure.** §77.6.
+
+### 77.4 There is no second latent-heat sink, and adding one would double-count
+
+This is the section's first finding, and it contradicts the obvious reading of
+its own brief.
+
+"Couple the latent heat back into the gas" sounds like a second sink beside
+§68's convective one: `q_P -= (1/(V dt)) sum n_p q_lat,p`. It is wrong. The
+droplet's own budget (76.10) is
+
+```
+  Q_c = C dT_p + dm h_v                                                (77.8)
+```
+
+so **the convective heat the gas has already given up contains every joule the
+phase change consumed**. The latent heat is not a second transfer from the gas;
+it is the part of the first one that ended up as phase energy in the vapour
+rather than as sensible heat in the liquid. Depositing it again counts it twice.
+
+The measured size of the mistake is in the test that fixes it
+(`the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy`): the
+latent heat is 0.398 of the convective heat on a spray still warming towards
+its wet bulb, and approaches one on a spray that is on it. A second sink would
+have **very nearly doubled** the cooling.
+
+What the gas does gain, and what §68 did not give it, is the **sensible
+enthalpy of the arriving mass** — (77.2), which is a further cooling because
+droplets are colder than the gas they evaporate into, and which is about 12 %
+of the latent heat rather than 100 % of it.
+
+§76.14 refused energy coupling on an evaporating pool because "an evaporating
+droplet also loses the latent heat its vapour takes with it, and that half has
+nowhere to go". The refusal was right; the reason was half a step off, and an
+implementation that had followed the words rather than the physics would have
+double-counted. The refusal is now conditional (§77.7) and its message says why.
+
+### 77.5 Why both sources are explicit
+
+`beta_P` and `alpha_T,P` of (68.7) are non-negative sums, so §68's implicit
+halves satisfy Patankar's `S_p <= 0` **by construction, with no clamp and no
+sign branch**. Neither §77 source can.
+
+`mdot'''` is not sign-definite: a droplet in supersaturated air grows (§76.12
+row 11), and then `-mdot cp` on the energy diagonal is positive and
+`-mdot(1-Y)/rho` on the species diagonal is positive. Making either implicit
+would need a `max(mdot, 0)` — a clamp, and the first one in this three-section
+addition. The alternative is what is done: both are explicit, and the reason is
+recorded rather than the clamp being added quietly.
+
+`condensation_reverses_every_sign_and_is_why_the_sources_are_explicit` is the
+test, and it also checks the physics the argument rests on: in supersaturated
+air the droplet grows, the gas loses vapour, and the divergence source turns
+negative because mass is leaving the mixture.
+
+### 77.6 The divergence: one half arrives free, and the other does not
+
+**This is the part that is easy to miss, and §25.1 has already been caught by
+its mirror image once.** §26.1 records that `Q` ran for several rounds without
+its conduction term, that the omission "prescribes the wrong dilatation", and
+that it was invisible until the energy balance was instrumented. §77 has the
+same asymmetry with the halves swapped, and states which is which.
+
+With §25's constant molar mass, `rho = p0 W/(R T)`, continuity with a mass
+source gives
+
+```
+  div u = -(1/rho) Drho/Dt + S_m/rho
+        = Q/(rho cp T) - (1/(gamma p0)) dp0/dt + S_m/rho                (77.9)
+```
+
+The first two terms are §25.1 unchanged. The third is (77.3).
+
+* **The ENERGY the phase change moves is already in `Q`, with no new code at
+  all.** `energyTargetDivergence` reads `EnergySources::q`, and
+  `ParcelCoupling::register_energy` has put both §68's convective exchange and
+  (77.2)'s vapour enthalpy there. The moment the energy coupling is registered
+  it is in the divergence constraint too. Nothing has to be passed and nothing
+  can be forgotten.
+* **The VOLUME the added mass occupies is not a heat source and cannot be
+  written as one.** It has to be handed over, and if it is assumed to arrive
+  the way the energy did, it silently does not.
+
+So the answer to "does evaporation enter `Q`?" is **yes for its energy and no
+for its mass**, and the two are checked separately
+(`the_target_divergence_takes_the_mass_source_and_takes_the_heat_through_q`,
+and `ofgpu-validate`'s two 77.6 rows).
+
+**The relative size of the two halves.** For water in air near ambient the
+cooling contracts the gas by `h_v/(cp T) ~ 8` for every unit of volume the added
+mass expands it by — measured at 17.6 on the validate fixture, where the gas is
+at 60 °C and the droplets are far below their wet bulb. **A mist is a net
+contraction**, and by an order of magnitude. That is the number a reader should
+carry away from this subsection, because a model that had only the mass term
+would get the sign of the pressure coupling wrong.
+
+**How it is added, and why the old path is bitwise safe.**
+`energyTargetDivergence` is **not touched**. `Energy::update_target_divergence`
+is not touched. A new method `update_target_divergence_with` calls the old one
+and then, only when a source is passed, runs one `energyAccumulate` — the same
+elementwise `+=` `EnergySources` already uses. `None` is the old path, from the
+old kernel, with the old arguments: every case in this repository with no
+dispersed phase is unmoved because no code ran. That is the by-construction
+half of gate 77-E, and it costs one extra launch over `n_cells` when a spray is
+present.
+
+**What §25's constant `W` costs here, stated.** FDS's `D_SOURCE` carries
+`(1/rho) sum_a (Wbar/W_a) mdot'''_a`, which is (77.3) times `Wbar/W_v`. With
+§25's constant molar mass `Wbar = W_v = W` and the factor is one, so the general
+form degenerates to exactly (77.3) — the two agree in this crate's own limit.
+The limit is real, though: §54's `psychro::molar_mass` gives 28.72 g/mol for
+saturated air at 20 °C against 28.966 for dry, so the density this crate
+computes for saturated air is 0.85 % high, and that error is §54's, not §77's.
+`Psychrometrics::molar_mass_caveat` already reports it.
+
+### 77.7 The contract, in every direction
+
+An evaporating pool has three states and only two are coherent:
+
+| physics | energy | mass | verdict |
+|---|---|---|---|
+| `evaporating` | `off` | `none` | supported — the parcels evaporate, the gas is told nothing, and `ParcelSnapshot` carries all of it |
+| `evaporating` | on | `evaporation` | supported — §77 |
+| `evaporating` | on | `none` | **refused by name**: §68's convective deposit already contains the phase change's energy (77.8), so the gas would be cooled for a mass transfer that never happened |
+| `evaporating` | `off` | `evaporation` | **refused by name**: the vapour without the heat is a spray that humidifies and does not cool |
+| `heating`/`inert` | — | `evaporation` | **refused by name**: `dm_p/dt` is identically zero, so there is no vapour to give |
+| `inert` | on | — | **refused by name**, §68.5's infinite heat bath, unchanged |
+
+Momentum coupling is orthogonal to all of it and stays exact: the drag impulse
+is the one the integrator applied, whatever the diameter did on the way (§68.1).
+
+### 77.8 What it costs
+
+Four more `n_cells` arrays — `mdot`, `q_vap`, `S_Y` and `D` — so **32 B per
+cell on top of §68.8's 120**, and only when mass coupling is on: with
+`mass none` they are allocated at length one, which is why the kernel writes
+them under the same branch it computes them in and why §68.6's "the deposit is
+written in all three modes" does not extend to them. A million-cell mesh with an
+evaporating spray spends 152 MB in `ParcelCoupling`, and `device_bytes` says so
+before it is spent.
+
+The gather is the same launch, the same CSR, two more registers and two more
+loads per parcel. `Energy` pays one extra elementwise launch per outer
+iteration when a mass source is present and none when it is not.
+
+### 77.9 What must hold
+
+| # | claim | where it is checked | verdict |
+|---|---|---|---|
+| 1 | **Gate 77-A**: `sum_P V_P mdot'''_P dt = sum_p n_p dm_p` — the gas gains the mass the parcels lost, over 8 steps, 100 droplets, weights over three decades | `gate_77a_the_vapour_the_parcels_lost_is_the_vapour_the_gas_is_given`; `ofgpu-validate` | `6.3e-16`, tolerance `1e-13` |
+| 2 | and the sign is the physics: vapour in, heat out, both halves of the energy negative | the same | 0 defects |
+| 3 | (77.2)/(77.7): the deposit is the convective heat plus the vapour enthalpy and **nothing else** | `the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy`; `ofgpu-validate` | `5.6e-16` |
+| 4 | and a second latent sink would have cooled the gas by 0.398 of the convective heat again | the same | measured |
+| 5 | **Gate 77-B**: `dE_gas + dE_liquid + E_vapour = 0` | `gate_77b_the_energy_ledger_closes_across_the_phase_change`; `ofgpu-validate` | `1.3e-12` — the droplet's own budget's `4.8e-12` (§76.12 row 7) and not round-off |
+| 6 | and the ledger that integrates the registry and forgets `cp T_g dm` does **not** close | the same | short by 6 % |
+| 7 | **Gate 77-C**: `D_P = mdot'''_P/rho_P` and `S_Y,P = D_P (1 - Y_v,P)`, cell by cell | `gate_77c_the_divergence_and_species_sources_are_the_deposit_divided_through`; `ofgpu-validate` | `2.2e-16` |
+| 8 | the phase-change ENERGY reaches `(div u)_target` through `Q` alone, with nothing passed | `the_target_divergence_takes_the_mass_source_and_takes_the_heat_through_q`; `ofgpu-validate` | exact |
+| 9 | and the VOLUME reaches it only when it is passed | the same | exact |
+| 10 | and for water in air the cooling beats the expansion by `h_v/(cp T)` | the same | 17.6 on the fixture, 8.1 at ambient |
+| 11 | **Gate 77-E**, by construction: `None` is the old kernel with the old arguments and moves not one bit of `(div u)_target` | the same | every bit |
+| 12 | **Gate 77-E**, measured: an empty pool with mass coupling ON deposits `+0.0` into all four arrays | `gate_77e_an_empty_pool_couples_exactly_zero_vapour` | every bit |
+| 13 | and a cell with no parcels in a coupled spray is bitwise unmoved | `ofgpu-validate` | every bit |
+| 14 | (77.1) reaches the species field it is handed to, exactly, through §61.2's seam | `the_vapour_source_reaches_the_species_field_it_is_handed_to` | `<= 1e-11` |
+| 15 | **Gate 77-D**: ASHRAE's adiabatic saturation | `ofgpu-validate`; `the_gas_moves_along_the_adiabatic_saturation_line` | **PASSES**, `-0.117 K` — §77.10 |
+| 16 | and the wet-bulb temperature is an invariant of the process, as ASHRAE says | the same | `0.117 K` drift over 3 s |
+| 17 | condensation reverses every sign, which is why neither source is implicit | `condensation_reverses_every_sign_and_is_why_the_sources_are_explicit` | 0 defects |
+| 18 | the half-coupled evaporating pool is refused by name in every direction | `the_half_coupled_evaporating_pool_is_refused_by_name` | 6 refusals |
+| 19 | `Y_v` is required when it is read and refused when it is not | `the_vapour_field_contract_is_refused_in_both_directions` | §13.4 |
+| 20 | the menu takes `evaporation` now and still refuses what does not exist | `the_menu_takes_evaporation_now_and_still_refuses_the_rest` | — |
+| 21 | the device mass codes match the host, and the gather still has no atomic | `the_device_modes_match_the_host` | — |
+| 22 | what it costs is reportable before it is spent | `gate_77e_an_empty_pool_couples_exactly_zero_vapour` | 32 B/cell more |
+
+**§13.4.1's pair table.**
+
+| setting | values | pair test | verdict |
+|---|---|---|---|
+| `coupling/mass` | `none`, `evaporation` | `the_mass_coupling_mode_changes_the_answer` | the ENERGY source differs bitwise as well as the vapour appearing; the parcels are bit for bit identical, which is §76's read-only gas surviving |
+| the `(1 - Y_v)` dilution | on (no menu) | `gate_77c_...` | 1.2 % of the source at `Y_v = 0.012`, asserted as a band |
+| `Energy`'s `d_mass` | `None`, `Some` | `the_target_divergence_takes_the_mass_source_...` | `None` is bitwise the old path; `Some` adds exactly `d` |
+
+### 77.10 Gate 77-D: ASHRAE's adiabatic saturation
+
+**The case.** A sealed, adiabatic, constant-pressure box of moist air with
+liquid water sprayed into it moves along the **adiabatic saturation line** and
+ends saturated, at the temperature `t*` that satisfies ASHRAE's own relation
+(*Handbook — Fundamentals*, ch. 1, eq. 33):
+
+```
+  W1 = [ (2501 - 2.326 t*) W_s(t*) - 1.006 (t1 - t*) ]
+       / [ 2501 + 1.86 t1 - 4.186 t* ]                               (77.10)
+```
+
+which this crate already carries as §54's `psychro::t_wb` and which is solved
+here by the same Newton, not re-fitted.
+
+**Why it is the right gate for this section.** Nothing about the endpoint
+depends on a transfer coefficient: at equilibrium the droplet sits at the gas
+temperature and the gas is saturated, so `B_M = 0` and the rate closure has
+dropped out. What is left is the *thermodynamics* of all three couplings at
+once — the mass must go somewhere, the latent heat must come from somewhere,
+and the two must be the same somewhere. It is also the first case in this
+repository in which **a cell gets wetter**: §76.14 listed that as what a
+read-only gas could not do, and this is the section that makes it possible.
+
+**The run.** A 0.5 m box at 40.0 °C and 12 % relative humidity, one parcel
+standing for `1.2e8` 50 µm droplets released at `t*`, 3000 steps of 1 ms. The
+gas is advanced on the host from the three §77 deposits: the mass into `W`, the
+energy into `T` through the conservative form of §77.11's first finding, the
+density from the ideal gas law at constant `p0`. The parcels still see one
+frozen state per step — what changed is that the state is refreshed *between*
+steps, so §76's order-independence survives intact.
+
+```
+                          this crate      ASHRAE (77.10)     gap
+  temperature             19.1792 C        19.2964 C       -0.117 K
+  humidity ratio W         0.013948         0.014052       -1.0e-4
+  relative humidity         100.0 %          (saturated)
+  wet-bulb drift over the whole process:  0.117 K
+```
+
+**VERDICT: PASSES**, at −0.117 K against a bar of ±0.5 K.
+
+**And the drift is the same number as the gap**, which is the point of
+measuring it. ASHRAE's `t*` is an invariant of the adiabatic saturation line —
+that is what the line *is* — so a model that reproduced (77.10) exactly would
+hold it fixed to round-off. This one moves it by 0.117 K over the whole
+process, and arrives 0.117 K low. The two agreeing says the discrepancy is a
+property of the path and not an accumulation.
+
+**What sets it** is property data, exactly as §76.13 found for the droplet's own
+wet bulb, and it is the shorter list here: ASHRAE carries
+`1.006 + 1.86 W` kJ/(kg·K) for the moist mixture where §26's energy equation
+has **one constant `cp`** — 1.8 % low at `W = 0.014` — and `2501 - 2.326 t`
+kJ/kg for `h_fg` where §76 has Watson's correlation. The saturation curve is not
+in the list, because both sides use §54's Hyland–Wexler. 1.8 % of a 20 K
+depression is 0.36 K, the same order as the 0.117 K measured, with the two
+property errors partly cancelling.
+
+**What the gate does NOT establish**, and it is worth saying: this is a 0-D
+thermodynamic endpoint. It exercises none of the transport — no convection, no
+pressure equation, no entrainment — and a spray in a real enclosure is limited
+by mixing long before it is limited by thermodynamics. §68.12's Theobald gate
+is the one that measures the transport, and it still **MISSES**. A water-mist
+suppression case, which the design note's §7.3 names as the end-to-end target
+and itself says "should be *reported*, not used as a pass/fail gate", needs the
+radiation absorption §68.13 refuses and the wall film §66.10 refuses, and is not
+here.
+
+### 77.11 What was measured, and the four things this section found in itself
+
+**1. The obvious energy coupling is a double-count, and §76.14's stated reason
+would have produced it.** §77.4. Found by writing the ledger and watching it
+close only when the latent sink was *absent*. The gas's second source is the
+arriving mass's sensible enthalpy, 12 % of the latent heat, not the latent heat
+itself, which the convective deposit already carried.
+
+**2. The registry integral is not the gas's energy change.** (77.2) is the
+non-conservative source, so a ledger built from `sum_P V_P q_P dt` alone is
+short by `cp T_g dm` — **6.0 % on the validate fixture**, asserted as a
+non-closure so that the trap stays named. The conservative change is
+`sum_P V_P q_P dt + cp T_g dm`, and gate 77-B uses it.
+
+**3. The ledger closes to the droplet's budget, not to round-off, and the
+distinction is real.** `1.3e-12` measured against §76.12 row 7's `4.8e-12`. The
+two accumulators (76.11) are endpoint differences while the droplet's budget is
+a sum over sub-steps whose mass changes between them, so the ledger inherits
+exactly that gap and no more. The first version of this section's documentation
+claimed "by construction"; the measurement said otherwise, and the claim is now
+the measured one. It also means `E_vapour` is *not* `h_v dm`: it is
+`q_lat + dm (c_l - cp_g) T_p`, and the second term — 38 % of the latent heat for
+water at 290 K — is not physics but the offset between two sensible pools whose
+enthalpy data are `c_l T` and `cp_g T` on §26's own absolute-zero reference.
+`live_parcel_vapour_energy` computes it and says so.
+
+**4. A 0-D fixture's own bookkeeping is a 3 % error, and it is not the
+deposit's.** The validate driver holds the vapour in a mesh of fixed volume
+while taking the density from the ideal gas law at constant `p0`, so `rho` and
+`m_gas/V_box` drift apart by 6 % over a 20 K cooling; the integrated divergence
+then differs from `ln(V/V_0)` by 3 %. The exact statement about (77.3) is the
+cell-by-cell one, at `2.2e-16`, and the consistency check is reported as the
+3 % it is rather than tightened until it passed.
+
+**Measured, on an RTX 5070 Ti.** Gate 77-A `6.3e-16`; the deposit identity
+`5.6e-16`; gate 77-B `1.3e-12` with the naive ledger short by 6.0 %; gate 77-C
+`2.2e-16`; the two divergence halves exact; gate 77-D `-0.117 K` against ASHRAE
+with the box at 100.0 % relative humidity. `ofgpu-validate` grew by 14 checks
+and the suite by 10 tests.
+
+### 77.12 What this section does not do
+
+* **Let the gas move.** The three sources are deposited and registered; no
+  driver in this repository calls them, because §13.4.2 forbids adding a case
+  block before the driver that would read it. `ofgpu-fire` still runs without a
+  dispersed phase, and every measurement in `SPEC-LIT` and
+  `docs/07-fire-solver.md` is unmoved. The gates run the couplings against a
+  gas the test advances itself, which is enough to measure conservation and not
+  enough to measure a spray.
+* **Vary the molar mass.** §25's gas has one `W`, so adding water vapour does
+  not make the mixture lighter and the buoyancy a mist column produces is
+  missing its composition half. §54 measured that gap at 0.85 % in density for
+  saturated air and this section inherits it (§77.6).
+* **Give water vapour its own `cp`.** §26 gives every gas one, so the enthalpy
+  the vapour carries is booked at dry air's 1005 J/(kg·K) rather than the
+  1860 the `cpVapour` in §76's own controls already holds. Gate 77-D measures
+  what that costs: 0.117 K on the adiabatic-saturation temperature.
+* **Make either source implicit.** §77.5; `mdot` is not sign-definite and the
+  clamp it would need is not worth the diagonal.
+* **Return the momentum the vapour carries off**, `-mdot(u_p - u)` — still
+  §76.8's omission. It is `1e-3` of the drag for water in air and it belongs
+  with §68.6's split.
+* **Give back what an escaping or fully-evaporated parcel took.** §68.9 row 4's
+  gap, one quantity over: a parcel that vanished during the step is not in the
+  CSR and its last `dm` is not deposited. `ParcelSnapshot::dead_mass_lost`
+  reports it, which is why §76.12's gate runs in a closed box.
+* **Absorb radiation, splash, or build a wall film.** Still §68.13's and
+  §66.10's items. A mist that evaporates and does not shield is half a
+  suppression model, and the film is where the mass that reaches a surface
+  would go.
+* **Read a spray from a case file.** Still nothing does. `CouplingControls` is
+  built in code and its `describe()` is the banner it will print when there is
+  one.

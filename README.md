@@ -118,9 +118,11 @@ SIMPLE, SIMPLEC, PISO, PIMPLE을 지원합니다. Rhie–Chow 보간을 사용�
 | 부력 | 비Boussinesq 밀도비 `b = g(T_ref/T − 1)` |
 | 일반화 뉴턴 점성 (SPEC-LIT §38) | `nu`가 **필드**가 됩니다: 멱법칙, Cross, Bird-Carreau(`a = 2`)와 Carreau-Yasuda(일반 `a`)를 한 수식으로, Herschel-Bulkley, Casson. 변형률 불변량 `gdot = sqrt(2 D:D)`는 §6가 이미 계산하고 있었지만 아무도 부르지 않던 `turbStrainRateMag` 그대로이며, 이 절이 그 첫 호출자입니다 — 사슬 전체가 게더 형태로 유지되고 원자연산이 없습니다. 항복응력 모형 둘은 Papanastasiou **곱 형태**로 정칙화합니다 — `n < 1`에서도 유계를 유지하는 쪽입니다. 평면 Poiseuille 유동은 명세가 유도한 닫힌 해에 대해 **2.08 / 2.03 / 2.00 / 1.97**차로 수렴하며, 뉴턴 환원은 `4.5e-14`이고 모든 모형의 자체 환원이 `gdot`에 대해 반올림 오차 수준으로 일정합니다. Buckingham-Reiner의 `1, -4/3, +1/3` 괄호는 인용하지 않고 그것이 닫힌 해인 속도분포의 수치적분에 대해 검증합니다(`9.4e-11`). `physics.fluid.rheology.model`(JSONC) 또는 `viscosityModel`(`constant/physicalProperties`)로 선택하며, 모르는 이름은 여섯 개를 열거하면서 오류를 내고, 선택된 모형이 쓰지 않는 계수도 이름을 밝히며 오류입니다. **`U`를 고정해 두는 드라이버들은 비뉴턴 모형을 이름을 밝혀 거부합니다** — `blockgen`은 그 생성기가 생긴 이래 모든 생성 케이스에 `viscosityModel constant;`를 써 넣었고 아무도 읽지 않았습니다(계약 결함의 여섯 번째 사례). 거부 없이 읽기만 했다면 여섯 번째를 고치면서 일곱 번째를 만들었을 것입니다 |
 | 접촉각 (SPEC-LIT §39) | VOF 벽에서의 정적·이력(hysteresis)·동적 접촉각이 §20의 `nHatf = 0`을 대체합니다 — 그 자체가 이미 90도의 접촉각이었고, 명시되지 않은 물리를 더하지 않는 유일한 선택이었기 때문입니다. 동적 각은 Jiang-Oh-Slattery와 Cox-Voinov를 쓰며, **Kistler는 의도적으로 빠졌습니다** — 그 네 상수가 이 프로젝트가 읽지 않은 단행본 장에서 나오기 때문입니다. `theta = 90`은 모형이 없는 경우와 비트 단위로 같고 `theta = 45`는 그렇지 않으므로 두 시험 모두 공허하지 않으며, `cos(pi/2) != 0` 함정은 두 번 가드되고 시험은 그 전제를 단언하는 대신 **측정**합니다(`6.12e-17`). 기하(`bNHatf = magSf cos theta`를 0/45/90/135/180도에서, 부호는 양끝 모두 확인), `alpha` 고정기울기 삼중항, 두 상관식 모두 `Ca = 0`에서 `theta_e`를 정확히 돌려줌, 그리고 Jurin 높이를 닫힌 해로 게이트합니다 — `theta_e > 90`은 반드시 하강이어야 합니다. **주장하지 않는 것**: 실제 모세관 상승이나 액적 충돌 실행이 발표된 `theta_d(t)`를 재현한다는 것. Tanner 법칙, Sikalo 등의 액적 충돌, 두 해상도 치환 실험은 실행하지 않으며, Afkhami·Zaleski·Bussmann의 메쉬 의존 보정은 그것이 제 역할을 한다는 것을 보일 게이트가 생기기 전까지 의도적으로 보류됩니다(§39.8) |
-| 라그랑주 파셀 (SPEC-LIT §66) | SoA 풀, 지수함수 항력 갱신 (Schiller–Naumann), 셀→면 CSR 기반 면 통과 워크, 결정론적 분사. **단방향 결합·비증발**: 파셀은 기체를 느끼지만 기체는 파셀을 느끼지 않으며, 증발은 이름을 들어 거부됩니다. **아직 어느 드라이버도 케이스 파일에서 스프레이를 읽지 않으며**, §13.4.2는 그것을 읽을 드라이버보다 먼저 `parcels` 블록을 추가하는 것을 금지합니다. 따라서 풀은 라이브러리 API이며 `ofgpu-validate`의 게이트가 그것을 구동합니다 |
+| 라그랑주 파셀 (SPEC-LIT §66) | SoA 풀, 지수함수 항력 갱신 (Schiller–Naumann), 셀→면 CSR 기반 면 통과 워크, 결정론적 분사. 파셀은 기체를 느끼며, 기체가 되돌려 받는 것은 §68, 액적이 스스로에게 하는 일은 §76입니다. **아직 어느 드라이버도 케이스 파일에서 스프레이를 읽지 않으며**, §13.4.2는 그것을 읽을 드라이버보다 먼저 `parcels` 블록을 추가하는 것을 금지합니다. 따라서 풀은 라이브러리 API이며 `ofgpu-validate`의 게이트가 그것을 구동합니다 |
 | 파셀 침적 게더 (SPEC-LIT §67) | `(cell, uid)` 전순서 키에 대한 기수 정렬, 장치 배타 스캔, 셀별 파셀 CSR, 셀당 한 스레드 게더. **f64 원자연산 없음**: 흩뿌리기(scatter)를 모으기(gather)로 뒤집어 결과가 비트 단위로 재현됩니다 |
-| 양방향 결합 (SPEC-LIT §68) | 파셀 적분기가 실제로 가한 항력 임펄스를 §18 소스 레지스트리를 통해 기체에 그대로 돌려줍니다 — 운동량(운동학적, 명시적 또는 Patankar 분리)과 현열, 그리고 액적 온도를 위한 `physics heating`. **구성상 반올림 오차 수준으로 보존**되며, 파셀이 하나도 분사되지 않으면 비트 단위로 아무 영향이 없습니다. 증발, 액적의 복사 흡수, 벽면 스플래시는 이름을 들어 거부됩니다 |
+| 양방향 결합 (SPEC-LIT §68) | 파셀 적분기가 실제로 가한 항력 임펄스를 §18 소스 레지스트리를 통해 기체에 그대로 돌려줍니다 — 운동량(운동학적, 명시적 또는 Patankar 분리)과 현열, 그리고 액적 온도를 위한 `physics heating`. **구성상 반올림 오차 수준으로 보존**되며, 파셀이 하나도 분사되지 않으면 비트 단위로 아무 영향이 없습니다. 액적의 복사 흡수와 벽면 스플래시는 이름을 들어 거부되며, §76이 이유를 바꾸었던 질량 결합은 **§77에서 만들어졌습니다** |
+| 액적 가열과 증발 (SPEC-LIT §76) | `physics evaporating`: Spalding의 Stefan 유동 질량속에 Abramzon–Sirignano의 `B_T`(Ranz–Marshall과 FDS의 `B_T = B_M`도 선택 가능), Watson의 `h_v(T)`, Marrero & Mason의 `D(T)`, 1/3 법칙 막(film) 상태, 그리고 비등점에서의 Godsave 열제한 분기. 포화곡선은 둘 — 일반형 Clausius–Clapeyron과 §54 자신의 Hyland–Wexler이며, 후자는 물이 아닌 액체에 대해 거부됩니다. 질량은 지수 적분기가 **실제로 가한** 에너지에서 유도되므로 액적 자신의 수지가 f64로 닫히고, 누적량은 스텝 양끝 질량의 차이 하나이므로 보존은 허용오차가 아니라 항등식입니다. `d²` 법칙(`1.8e-6`), 습구온도(이 크레이트 자신의 평형에 대해 `5.7e-13 K`, **ASHRAE에 대해 `0.76 K`**, 그 차이는 Lewis 수), 파셀 질량(`9.1e-16`)으로 게이트합니다. **여기서는 증기가 파셀에 남습니다** — 그것을 기체로 옮기는 것이 §77입니다 |
+| 증기를 기체로 (SPEC-LIT §77) | `coupling/mass evaporation`: 질량과 그것이 나르는 엔탈피와 그것이 만드는 부피를, 솔버가 이미 가지고 있던 이음매로 전달합니다 — `Y_v`에 대한 §61.2의 전역 명시 소스, §18의 에너지 레지스트리, 그리고 §25.3이 압력 루프가 바뀌는 단 한 곳이라고 말한 `Energy::target_divergence`. **질량 항등식은 `6.3e-16`**, 에너지 원장은 `1.3e-12`로 닫히며 이는 반올림이 아니라 액적 자신의 수지 정확도입니다. 이 행에 값하는 발견 둘: **두 번째 잠열 흡수원은 없습니다** — (76.10)의 수지가 상변화가 소비한 모든 줄을 §68이 이미 침적하는 대류열 안에 넣어 두었으므로 `q_lat`를 다시 침적하면 같은 에너지를 두 번 세는 것이고, 기체가 실제로 받아야 할 것은 도착한 질량의 현열 엔탈피, 즉 잠열의 12 %입니다. 그리고 **발산 제약의 에너지 절반은 `Q`를 통해 저절로 도착하지만 부피 절반은 그렇지 않습니다** — §26.1의 누락을 좌우 뒤집은 것이며, 그래서 그것만 별도 메서드의 이름 붙은 인자입니다. 미스트는 `h_v/(cp T) ~ 8`배로 **순수축**입니다. ASHRAE의 단열포화로 게이트합니다 — 12 % 습도의 40 °C 공기에 물을 뿌려 포화시키면 **19.179 °C, ASHRAE는 19.296 °C**이고, 그 관계식이 과정의 불변량이라고 말하는 습구온도는 같은 0.117 K만큼 표류합니다. **분산상이 없는 실행은 구성상 비트 단위로 이전과 같습니다**: `energyTargetDivergence`는 손대지 않았고 기존 호출 경로도 그대로입니다 |
 
 ### 선형 해법
 
@@ -1097,12 +1099,20 @@ ASCII로 변환한 뒤 사용하십시오.
   점착벽이므로 마이크로채널은 이름 붙일 유입구가 없고, §47.12의 Gate 6(Qu & Mudawar
   2002)는 애초에 표현되지 않습니다. 이는 게이트를 조용히 빼놓은 것이 아니라 기능
   공백이며, 그렇게 명시합니다.
-- **라그랑주 파셀은 증발하지 않고, 복사를 흡수하지 않으며, 스플래시하지 않습니다
-  (SPEC-LIT §68.13).** 세 가지 모두 빠진 것을 출력하면서 **이름을 밝혀** 거부되며,
-  그중 첫 번째가 가장 중요합니다: 증발하지 않는 스프링클러는 스프링클러가 아닙니다.
-  또한 없는 것: 기체에 돌려주는 부력·부가질량 반작용(항력 임펄스만 결합됩니다),
-  셀 경계를 넘는 동안의 분할 침적, 압력 방정식과의 결합(질량전달이 없으므로 받을 것이
-  없습니다), 결합 소스의 아격자 분산. 소방 수류 게이트(§68.12, Theobald 1981)는
+- **라그랑주 파셀은 증발하고 기체도 증기를 받지만, 스프레이를 읽는 드라이버가
+  없습니다 (SPEC-LIT §77.12).** §76이 액적마다 빠져나가는 것을 계산하고, §77이 그
+  셋 모두를 기체에 전달합니다 — 질량은 `Y_v`로, 그 질량이 나르는 엔탈피는 에너지
+  레지스트리로, 그것이 만드는 부피는 발산 제약으로. 아직 없는 것은 *드라이버*입니다:
+  §13.4.2가 그것을 읽을 것보다 먼저 `parcels` 블록을 추가하는 것을 금지하므로, 결합은
+  `ofgpu-validate`의 게이트가 구동하는 라이브러리 API이고 `ofgpu-fire`는 여전히
+  분산상 없이 돕니다. 감추지 않고 이름 붙인 모형 공백 둘: §25의 기체는 **몰질량이
+  하나**라서 수증기가 섞여도 혼합물이 가벼워지지 않고(§54가 포화 시 밀도 0.85 %로
+  측정), §26은 **모든 기체에 같은 `cp`**를 주므로 증기의 엔탈피가 건공기의
+  1005 J/(kg·K)로 기록됩니다 — 게이트 77-D의 0.117 K가 바로 그것입니다.
+  파셀은 여전히 복사를 흡수하지 않고 스플래시하지 않습니다(§68.13) — 물 미스트는
+  복사 차폐물이고 그것이 소화 성능의 대부분입니다. 또한 없는 것: 기체에 돌려주는
+  부력·부가질량 반작용, 증기가 가져가는 운동량, 셀 경계를 넘는 동안의 분할 침적,
+  결합 소스의 아격자 분산. 소방 수류 게이트(§68.12, Theobald 1981)는
   **기체를 정지시킨 채로 빗나가며**, 측정값이 그 이유를 말합니다: 날아가는 거리의
   61–199 %가 유입된 공기로 결정됩니다.
 - **면대면 복사와 라그랑주 파셀은 케이스 형식이 없는 라이브러리 기능입니다.**
@@ -1549,7 +1559,24 @@ ASCII로 변환한 뒤 사용하십시오.
   as a generator)
 - Ranz, W. E., & Marshall, W. R. (1952). Evaporation from drops. *Chemical
   Engineering Progress*, 48, 141 and 173. — §68.5 (the sensible-heat half of
-  `Nu = 2 + 0.6 Re^(1/2) Pr^(1/3)`; the evaporative half is **refused by name**)
+  `Nu = 2 + 0.6 Re^(1/2) Pr^(1/3)`) and §76 (the mass-transfer half)
+- Spalding, D. B. (1953). The combustion of liquid fuels. *4th Symposium
+  (International) on Combustion*, 847–864. — §76.6 (`B_M`, and the Stefan-flow
+  rate)
+- Godsave, G. A. E. (1953). Studies of the combustion of drops in a fuel spray.
+  *4th Symposium (International) on Combustion*, 818–830. — §76.9 (the
+  heat-limited rate at the boiling point)
+- Abramzon, B., & Sirignano, W. A. (1989). Droplet vaporization model for spray
+  combustion calculations. *International Journal of Heat and Mass Transfer*,
+  32, 1605–1618. — §76.6 (`B_T = (1 + B_M)^φ − 1`, the default)
+- Sazhin, S. S. (2006). Advanced models of fuel droplet heating and
+  evaporation. *Progress in Energy and Combustion Science*, 32, 162–214. — §76
+- Watson, K. M. (1943). Thermodynamics of the liquid state. *Industrial &
+  Engineering Chemistry*, 35, 398–406. — §76.4 (`h_v(T)`)
+- Marrero, T. R., & Mason, E. A. (1972). Gaseous diffusion coefficients.
+  *Journal of Physical and Chemical Reference Data*, 1, 3–118. — §76.4
+- Lewis, W. K. (1922). The evaporation of a liquid into a gas. *Transactions of
+  the ASME*, 44, 325–340. — §76.13
 - Theobald, R. C. (1981). The effect of nozzle design on the stability and
   performance of turbulent water jets. *Fire Safety Journal*, 4, 1–13.
   — §68.12, Gate 68-C, which **misses with the gas held at rest**

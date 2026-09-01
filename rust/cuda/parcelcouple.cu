@@ -34,6 +34,26 @@
   function of the physical state, so the result is bit-for-bit reproducible.
   There is no f64 atomic in this file and there must never be one.
 
+  WHAT S77 ADDED, AND THE HALF THAT ARRIVES FOR FREE
+  --------------------------------------------------
+
+  S76 made the droplets evaporate; S77 gives the gas the vapour. Three
+  things land, and only two of them are code:
+
+    * the vapour itself, as a source on Y_v (a whole-field explicit source,
+      the seam S61.2's soot already uses);
+    * the enthalpy that mass carries in, cp_g (T_p - T_g) per kilogram,
+      added to the SAME energy registry S68 already writes; and
+    * the volume the mass makes at fixed p0, mdot/rho, which is a new term
+      in S25.1's target divergence and cannot be expressed as a heat source.
+
+  The half that arrives for free is the ENERGY half of the divergence:
+  `energyTargetDivergence` reads `EnergySources::q`, so the moment the
+  latent and convective heat are registered they are in `Q` and therefore in
+  (div u)_target. S25.1 lost its conduction term once for exactly this
+  reason - a term that is in `Q` in one place and not the other - and S77.5
+  says which half of evaporation is which so the mistake is not repeated.
+
   Written from:
     C. T. Crowe, M. P. Sharma, D. E. Stock, "The particle-source-in-cell
       (PSI-CELL) model for gas-droplet flows", J. Fluids Eng. 99 (1977) 325,
@@ -48,6 +68,16 @@
     S. Elghobashi, "On predicting particle-laden turbulent flows", Appl. Sci.
       Res. 52 (1994) 309, DOI 10.1007/BF00936835 - the coupling map that says
       when two-way coupling is required at all
+    R. G. Rehm, H. R. Baum, "The equations of motion for thermally driven,
+      buoyant flows", J. Res. NBS 83 (1978) 297 - the low-Mach split whose
+      divergence constraint (S25.1) the vapour's volume enters
+    The FDS Technical Reference Guide (NIST SP 1018-1, US-government public
+      domain, vendored at reference/fds), "The Divergence" - the same
+      D_SOURCE term, of which the constant-molar-mass gas of S25 keeps
+      mdot/rho and nothing else
+    ASHRAE Handbook - Fundamentals (2017), ch. 1 - the adiabatic-saturation
+      relation gate 77-D is measured against, already in this crate as
+      S54's `psychro::t_wb`
 
   No GPL-licensed source was consulted. OpenFOAM's src/lagrangian tree, which
   contains the obvious reference implementation of a parcel-to-cell source,
@@ -63,6 +93,14 @@
 #define OFC_MODE_OFF          0
 #define OFC_MODE_EXPLICIT     1
 #define OFC_MODE_SEMIIMPLICIT 2
+
+// --------------------------------------------------------------------------
+//  Mass coupling, SPEC-LIT S77. Mirrored by src/parcels/couple.rs's
+//  `MassCoupling::code` and pinned to it by the same test.
+// --------------------------------------------------------------------------
+
+#define OFC_MASS_NONE         0
+#define OFC_MASS_EVAPORATION  1
 
 // --------------------------------------------------------------------------
 //  parcelCoupleGather - SPEC-LIT S68.3, equation (68.7)
@@ -107,24 +145,33 @@ extern "C" __global__ void parcelCoupleGather
     const ofscalar* __restrict__ paxr,
     const ofscalar* __restrict__ pqim,
     const ofscalar* __restrict__ patr,
+    const ofscalar* __restrict__ pdmv,
+    const ofscalar* __restrict__ ptmp,
     // gas side
     const ofscalar* __restrict__ vol,
     const ofscalar* __restrict__ rho,
     const ofvec3*  __restrict__ uGas,
     const ofscalar* __restrict__ tGas,
+    const ofscalar* __restrict__ yVap,
     // raw deposits
     ofvec3*  __restrict__ fSrc,
     ofscalar* __restrict__ beta,
     ofscalar* __restrict__ qSrc,
     ofscalar* __restrict__ alphaT,
+    ofscalar* __restrict__ mdotV,
+    ofscalar* __restrict__ qVap,
     // what the registries take
     ofvec3*  __restrict__ momSu,
     ofscalar* __restrict__ momSp,
     ofscalar* __restrict__ nrgQ,
     ofscalar* __restrict__ nrgSp,
+    ofscalar* __restrict__ ySu,
+    ofscalar* __restrict__ dSrc,
     ofscalar dt,
+    ofscalar cpGas,
     int momMode,
     int nrgMode,
+    int massMode,
     int nCells
 )
 {
@@ -138,8 +185,11 @@ extern "C" __global__ void parcelCoupleGather
     ofscalar ax = 0;
     ofscalar qh = 0;
     ofscalar at = 0;
+    ofscalar sm = 0;
+    ofscalar smt = 0;
 
     const int heat = (nrgMode != OFC_MODE_OFF);
+    const int mass = (massMode != OFC_MASS_NONE);
 
     for (oflabel k = k0; k < k1; ++k)
     {
@@ -155,6 +205,18 @@ extern "C" __global__ void parcelCoupleGather
             qh += np*pqim[p];
             at += np*patr[p];
         }
+        if (mass)
+        {
+            // (77.2). `pdmv` is the DIFFERENCE of the step's two endpoint
+            // masses (76.11), so this sum telescopes over a run: what the
+            // gas is given is what the pool's own state says it lost, and
+            // not a per-sub-step rate re-integrated at deposition time.
+            // `ptmp` is the parcel's END-of-step temperature, which is the
+            // temperature the vapour is handed to the gas at.
+            const ofscalar dm = np*pdmv[p];
+            sm  += dm;
+            smt += dm*ptmp[p];
+        }
     }
 
     const ofscalar v = vol[c];
@@ -167,6 +229,28 @@ extern "C" __global__ void parcelCoupleGather
     const ofscalar b = ax*rV;
     const ofscalar q = -qh*rVdt;
     const ofscalar a = at*rV;
+
+    // ---- SPEC-LIT S77: the vapour, and the enthalpy it carries ---------
+    //
+    //   mdot_P = (1/(V dt)) sum n_p dm_p                    kg/(m^3 s)
+    //   qv_P   = cp_g (1/(V dt)) sum n_p dm_p (T_p - T_g)   W/m^3
+    //
+    // `qv` is the NON-CONSERVATIVE form's mass-addition term: S26's energy
+    // equation is rho cp DT/Dt = Q, so mass arriving at T_p contributes
+    // S_m cp (T_p - T_g) and NOT S_m cp T_p. It vanishes when the vapour
+    // arrives at the gas's own temperature, which is right: adding vapour at
+    // T_g changes the gas's mass and its volume, not its temperature.
+    //
+    // `T_g` is a per-cell constant and factors out of the sum, so one
+    // subtraction serves the whole cell rather than one per parcel.
+    //
+    // There is NO second latent-heat sink here, and that is the whole of
+    // S77.4: the latent heat has already left the gas inside `qSrc`. The
+    // droplet's own budget is Q_c = C dT_p + dm h_v (76.10), so the
+    // convective heat the gas gave up already contains every joule the
+    // phase change consumed. Depositing `q_lat` again would count it twice.
+    const ofscalar mv  = mass ? sm*rVdt : (ofscalar)0;
+    const ofscalar qv  = mass ? cpGas*(smt*rVdt - mv*tGas[c]) : (ofscalar)0;
 
     fSrc[c] = f;
     beta[c] = b;
@@ -215,13 +299,51 @@ extern "C" __global__ void parcelCoupleGather
     }
     else if (nrgMode == OFC_MODE_SEMIIMPLICIT)
     {
-        nrgQ[c] = q + a*tGas[c];
+        nrgQ[c] = q + qv + a*tGas[c];
         nrgSp[c] = -a;
     }
     else
     {
-        nrgQ[c] = q;
+        nrgQ[c] = q + qv;
         nrgSp[c] = 0;
+    }
+
+    // ---- species, and the divergence constraint ------------------------
+    //
+    //   ySu  [1/s]  mdot_P (1 - Y_v,P)/rho_P     the vapour source on Y_v
+    //   dSrc [1/s]  mdot_P/rho_P                 the volume the mass makes
+    //
+    // The (1 - Y_v) factor is the dilution the added mass does to the
+    // fraction that is already there: the conservative species equation is
+    // d(rho Y)/dt + div(rho u Y) = mdot''', and with continuity carrying the
+    // SAME mdot''' the non-conservative form the crate solves is
+    // rho DY/Dt = mdot'''(1 - Y). Dropping it would put vapour in faster
+    // than the mixture grew.
+    //
+    // `dSrc` is NOT an entry in S25.1's `Q`. It is the volume the added mass
+    // occupies at fixed p0 and T, and no heat source can express it. The
+    // ENERGY half of evaporation's effect on the divergence needs no code at
+    // all - `qSrc` and `qVap` go into `EnergySources`, and
+    // `energyTargetDivergence` reads that registry - which is exactly why
+    // this half is easy to miss (S77.5).
+    //
+    // `mdot` is NOT sign-definite: a droplet in supersaturated air grows
+    // (S76.12 row 11), so neither of these can be made an implicit sink
+    // without a clamp, and S68's "by construction, no clamp" guarantee is
+    // worth more than the diagonal dominance. Both are explicit.
+    //
+    // The four S77 arrays are allocated at length ONE when mass coupling is
+    // off - the same stand-in shape `qim`/`atr` have for a pool that cannot
+    // heat - so they are written only under this branch. That is why S68.6's
+    // "the deposit is written in all three modes" does not extend to them:
+    // with no mass coupling there is no array to write it into.
+    if (mass)
+    {
+        const ofscalar rr = (ofscalar)1/rho[c];
+        mdotV[c] = mv;
+        qVap[c] = qv;
+        ySu[c] = mv*((ofscalar)1 - yVap[c])*rr;
+        dSrc[c] = mv*rr;
     }
 }
 

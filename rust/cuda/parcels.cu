@@ -118,6 +118,12 @@ OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
 // energy coupling of S68 CONSERVATIVE rather than a bath.
 #define OFP_PHYS_INERT   0
 #define OFP_PHYS_HEATING 1
+// SPEC-LIT S76.1: ... and `evaporating` adds the mass transfer, the latent
+// heat, the temperature dependence of h_v and D, and the boiling limit. It
+// is the ONLY value that writes `pd`, `pdm` or `pqlat`; every statement that
+// does is inside `if (evaporating)`, which is what makes the inert and
+// heating answers bit for bit what they were before S76 existed.
+#define OFP_PHYS_EVAPORATING 2
 
 // crate::mesh::PatchKind, verbatim.
 #define OFP_PATCH_GENERIC  0
@@ -133,7 +139,11 @@ OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
 #define OFP_N_LOST     2
 #define OFP_N_DROPPED  3
 #define OFP_N_INJECTED 4
-#define OFP_N_COUNTERS 5
+// SPEC-LIT (76.10): parcels whose last droplet evaporated away. Removed from
+// the working set exactly as an escaping parcel is, and counted separately,
+// because "the spray shrank" and "the spray left" are different runs.
+#define OFP_N_EVAPORATED 5
+#define OFP_N_COUNTERS 6
 
 // flags bits
 #define OFP_FLAG_ACTIVE 1u
@@ -358,6 +368,241 @@ OFGPU_DEV ofscalar parcelDragK
     return (ofscalar)0.44*rhoG*magUrel;
 }
 
+
+// --------------------------------------------------------------------------
+//  SPEC-LIT S76: droplet heating and evaporation - the parcel side
+// --------------------------------------------------------------------------
+//
+//  Every function below is a pure function of one droplet's state and the
+//  FROZEN gas state in its cell. Nothing here writes a cell field, nothing
+//  reads another parcel, and nothing takes an atomic. That is what makes the
+//  result independent of the order the parcels in a cell were visited - the
+//  ordering hazard the design note called the crux of the whole model simply
+//  does not arise while the gas is read-only, and S76.14 states exactly what
+//  that costs.
+//
+//  Written from:
+//    W. E. Ranz, W. R. Marshall, Chem. Eng. Prog. 48 (1952) 141 and 173 -
+//      Nu_0 = 2 + 0.6 Re^(1/2) Pr^(1/3), Sh_0 = 2 + 0.6 Re^(1/2) Sc^(1/3)
+//    D. B. Spalding, 4th Symp. (Int.) Combust. (1953) 847, and "Convective
+//      Mass Transfer" (1963) - B_M and mdot = -pi d rho D Sh ln(1 + B_M)
+//    G. A. E. Godsave, 4th Symp. (Int.) Combust. (1953) 818 - the
+//      heat-limited rate the boiling branch uses
+//    B. Abramzon, W. A. Sirignano, Int. J. Heat Mass Transfer 32 (1989)
+//      1605 - B_T = (1 + B_M)^phi - 1, phi = (c_pv/c_pg)(Sh_0/Nu_0)/Le, the
+//      DEFAULT here, and closed form so that no fixed point ever runs on a
+//      warp
+//    K. M. Watson, Ind. Eng. Chem. 35 (1943) 398 - h_v(T)
+//    T. R. Marrero, E. A. Mason, J. Phys. Chem. Ref. Data 1 (1972) 3 - D(T)
+//    R. W. Hyland, A. Wexler, ASHRAE Trans. 89(2A) (1983) 500 - p_ws(T), the
+//      same polynomial src/psychro.rs carries for S54
+//    K. McGrattan et al., FDS Technical Reference Guide, NIST SP 1018-1
+//      (US-Government public domain) - chapter "Lagrangian Particles" and the
+//      appendix on the implicit evaporation solve
+//  No GPL-licensed source was consulted.
+
+#define OFP_SAT_CLAUSIUS 0
+#define OFP_SAT_HYLAND   1
+
+#define OFP_MT_RANZ     0
+#define OFP_MT_SPALDING 1
+#define OFP_MT_AS       2
+
+#define OFP_R_UNIVERSAL ((ofscalar)8.31446261815324)
+#define OFP_WATSON      ((ofscalar)0.38)
+#define OFP_PI          ((ofscalar)3.14159265358979323846)
+
+// The liquid, the carrier and the two model choices, in one register-resident
+// bundle so that parcelIntegrate's argument list stays readable and so that
+// the host mirror in src/parcels/evaporation.rs has one struct to match.
+struct ofpLiquid
+{
+    ofscalar wVap, tBoil, pBoil, hvBoil, tCrit;
+    ofscalar dVap, tRefD, dExp, cpVap;
+    ofscalar wCar, pAmb, tBoilP;
+    int      sat, mt;
+};
+
+// (76.4): Watson's latent heat, J/kg. Zero at and above the critical
+// temperature rather than the negative number pow() would hand back.
+OFGPU_DEV ofscalar ofpLatent(const ofpLiquid& L, ofscalar t)
+{
+    if (t >= L.tCrit) return 0;
+    return L.hvBoil*pow((L.tCrit - t)/(L.tCrit - L.tBoil), OFP_WATSON);
+}
+
+// Hyland & Wexler (1983), the polynomial of (S54.3) - the SAME coefficients
+// src/psychro.rs carries, and psychro::tests holds the two together.
+OFGPU_DEV ofscalar ofpPws(ofscalar t)
+{
+    const ofscalar l = log(t);
+    if (t < (ofscalar)273.15)
+    {
+        return exp((ofscalar)-5.6745359e3/t + (ofscalar)6.3925247
+                 + (ofscalar)-9.677843e-3*t + (ofscalar)6.2215701e-7*t*t
+                 + (ofscalar)2.0747825e-9*t*t*t + (ofscalar)-9.484024e-13*t*t*t*t
+                 + (ofscalar)4.1635019*l);
+    }
+    return exp((ofscalar)-5.8002206e3/t + (ofscalar)1.3914993
+             + (ofscalar)-4.8640239e-2*t + (ofscalar)4.1764768e-5*t*t
+             + (ofscalar)-1.4452093e-8*t*t*t + (ofscalar)6.5459673*l);
+}
+
+// d(ln p_ws)/dT for the same polynomial, term by term.
+OFGPU_DEV ofscalar ofpPwsDlog(ofscalar t)
+{
+    if (t < (ofscalar)273.15)
+    {
+        return (ofscalar)5.6745359e3/(t*t) + (ofscalar)-9.677843e-3
+             + 2*(ofscalar)6.2215701e-7*t + 3*(ofscalar)2.0747825e-9*t*t
+             + 4*(ofscalar)-9.484024e-13*t*t*t + (ofscalar)4.1635019/t;
+    }
+    return (ofscalar)5.8002206e3/(t*t) + (ofscalar)-4.8640239e-2
+         + 2*(ofscalar)4.1764768e-5*t + 3*(ofscalar)-1.4452093e-8*t*t
+         + (ofscalar)6.5459673/t;
+}
+
+// (76.3): the saturation pressure, Pa.
+OFGPU_DEV ofscalar ofpPsat(const ofpLiquid& L, ofscalar t, ofscalar hv)
+{
+    if (L.sat == OFP_SAT_HYLAND) return ofpPws(t);
+    return L.pBoil*exp(-(hv*L.wVap/OFP_R_UNIVERSAL)*(1/t - 1/L.tBoil));
+}
+
+// d(ln p_sat)/dT, 1/K. The Clausius-Clapeyron branch carries the dh_v/dT
+// term, which the constant-latent-heat form drops and which is not small.
+OFGPU_DEV ofscalar ofpPsatDlog(const ofpLiquid& L, ofscalar t, ofscalar hv, ofscalar dhv)
+{
+    if (L.sat == OFP_SAT_HYLAND) return ofpPwsDlog(t);
+    return (L.wVap/OFP_R_UNIVERSAL)*(hv/(t*t) - dhv*(1/t - 1/L.tBoil));
+}
+
+// F(B) = ln(1 + B)/B, exact at B = 0 rather than 0/0.
+OFGPU_DEV ofscalar ofpBlowing(ofscalar b)
+{
+    if (fabs(b) > (ofscalar)1e-6) return log1p(b)/b;
+    return 1 - b/2 + b*b/3;
+}
+
+// (76.7): everything the closure computes for one droplet at one instant.
+struct ofpRate
+{
+    ofscalar mdot;   // kg/s for ONE droplet, <= 0 for evaporation
+    ofscalar cond;   // W/K: the convective heat into it is cond*(Tg - Tp)
+    ofscalar hv;     // J/kg at Tp
+    ofscalar dCool;  // W/K: d(-mdot hv)/dTp, clamped at zero
+    int      boiling;
+};
+
+OFGPU_DEV ofpRate ofpEvapRate
+(
+    const ofpLiquid& L,
+    ofscalar d, ofscalar tp,
+    ofscalar tg, ofscalar yg, ofscalar rhog,
+    ofscalar mu, ofscalar kg, ofscalar cpg,
+    ofscalar magUrel, ofscalar cbrtPr
+)
+{
+    ofpRate r;
+    if (tp > L.tBoilP) tp = L.tBoilP;
+
+    // (76.4): the film state. The 1/3 rule for the temperature, and the film
+    // density from the ideal gas at constant pressure, so a hot gas is
+    // correctly thinner at the surface than in the cell.
+    const ofscalar tf   = tp + (tg - tp)/3;
+    const ofscalar rhof = rhog*tg/tf;
+    const ofscalar df   = L.dVap*pow(tf/L.tRefD, L.dExp)*(L.pBoil/L.pAmb);
+    const ofscalar hv   = ofpLatent(L, tp);
+    r.hv = hv;
+
+    const ofscalar re   = rhog*magUrel*d/mu;
+    const ofscalar sqre = sqrt(re);
+    const ofscalar sc   = mu/(rhof*df);
+    const ofscalar sh0  = 2 + (ofscalar)0.6*sqre*cbrt(sc);
+    const ofscalar nu0  = 2 + (ofscalar)0.6*sqre*cbrtPr;
+    const ofscalar le   = kg/(rhof*cpg*df);
+
+    // (76.9): the boiling branch, taken on `tp >= T_b(p)` ALONE and not on
+    // the gas being hotter as well. At T_b the surface is pure vapour, so
+    // Y_s -> 1 and the diffusion-limited B_M diverges: the sub-cooled branch
+    // is not merely less accurate there, it is a division by zero, and it
+    // must not be reachable at T_b for ANY gas state. Godsave's heat-limited
+    // rate is what is physically true instead - whatever heat reaches the
+    // surface leaves as vapour - and the caller pins T_p here so the two
+    // branches cannot alternate on a one-ulp comparison. That alternation is
+    // not hypothetical: it is what the first version of this code did, and
+    // the boiling d^2 gate caught it as an evaporation rate that collapsed to
+    // 1e-22 kg/s five steps in.
+    if (tp >= L.tBoilP)
+    {
+        const ofscalar bt = L.cpVap*(tg - tp)/hv;
+        r.cond    = OFP_PI*d*kg*nu0*ofpBlowing(bt);
+        r.mdot    = -r.cond*(tg - tp)/hv;
+        r.dCool   = 0;
+        r.boiling = 1;
+        return r;
+    }
+
+    // (76.5): the surface state, from Raoult/Dalton at equilibrium.
+    const ofscalar ps  = ofpPsat(L, tp, hv);
+    ofscalar x = ps/L.pAmb;
+    if (x < 0) x = 0;
+    if (x > 1) x = 1;
+    const ofscalar den = L.wCar + x*(L.wVap - L.wCar);
+    const ofscalar ys  = x*L.wVap/den;
+    const ofscalar bm  = (ys - yg)/(1 - ys);
+    const ofscalar l1b = log1p(bm);
+
+    ofscalar fheat;
+    if (L.mt == OFP_MT_RANZ)
+    {
+        // The published Ranz-Marshall form: no blowing correction anywhere,
+        // and the mass rate linear in (Y_s - Y_g).
+        r.mdot = -OFP_PI*d*rhof*df*sh0*(ys - yg);
+        fheat  = 1;
+    }
+    else if (L.mt == OFP_MT_SPALDING)
+    {
+        r.mdot = -OFP_PI*d*rhof*df*sh0*l1b;
+        fheat  = ofpBlowing(bm);
+    }
+    else
+    {
+        // Abramzon & Sirignano. phi > 1 for water in air, because Le < 1 and
+        // the vapour is more than twice as heat-capacious as the air.
+        const ofscalar phi = (L.cpVap/cpg)*(sh0/nu0)/le;
+        const ofscalar bt  = pow(1 + bm, phi) - 1;
+        r.mdot = -OFP_PI*d*rhof*df*sh0*l1b;
+        fheat  = ofpBlowing(bt);
+    }
+    r.cond    = OFP_PI*d*kg*nu0*fheat;
+    r.boiling = 0;
+
+    // (76.8): d(-mdot hv)/dTp, film properties held frozen. Its only job is
+    // to make the relaxation stiff enough to be unconditionally stable. The
+    // fixed point it relaxes to is where the RESIDUAL vanishes and the
+    // residual does not contain it, so an approximate derivative changes the
+    // path and never the destination - which is why an approximation is
+    // admissible here and would not be in the rate itself.
+    const ofscalar dhv  = (tp >= L.tCrit) ? (ofscalar)0
+                                          : -OFP_WATSON*hv/(L.tCrit - tp);
+    const ofscalar dx   = ps*ofpPsatDlog(L, tp, hv, dhv)/L.pAmb;
+    const ofscalar dys  = L.wVap*L.wCar/(den*den)*dx;
+    ofscalar dcool;
+    if (L.mt == OFP_MT_RANZ)
+    {
+        dcool = OFP_PI*d*rhof*df*sh0*(hv*dys + (ys - yg)*dhv);
+    }
+    else
+    {
+        // d ln(1 + B_M)/dTp = (dY_s/dTp)/(1 - Y_s) EXACTLY: the (1 - Y_s)^2
+        // of dB_M/dY_s cancels the (1 - Y_s) of 1/(1 + B_M).
+        dcool = OFP_PI*d*rhof*df*sh0*(hv*dys/(1 - ys) + l1b*dhv);
+    }
+    r.dCool = (dcool > 0) ? dcool : (ofscalar)0;
+    return r;
+}
+
 // --------------------------------------------------------------------------
 //  parcelIntegrate - SPEC-LIT (66.5): the exponential update, sub-stepped,
 //  with the walk after every sub-step.
@@ -366,7 +611,10 @@ extern "C" __global__ void parcelIntegrate
 (
     ofvec3* __restrict__ px,
     ofvec3* __restrict__ pu,
-    const ofscalar* __restrict__ pd,
+    // (76.10): WRITTEN by the evaporating branch and by nothing else. It was
+    // `const` through S66-S68 and the constness was the proof; the proof is
+    // now the `if (evaporating)` around every store to it.
+    ofscalar* __restrict__ pd,
     oflabel* __restrict__ pcell,
     unsigned int* __restrict__ pflags,
     long long* __restrict__ counters,
@@ -416,15 +664,45 @@ extern "C" __global__ void parcelIntegrate
     int physics,
     ofscalar cLiquid,
     ofscalar kGas,
-    ofscalar cpGas
+    ofscalar cpGas,
+    // SPEC-LIT S76. Read only when physics == OFP_PHYS_EVAPORATING.
+    ofscalar* __restrict__ pdm,      // mass lost by ONE droplet this step, kg
+    ofscalar* __restrict__ pqlat,    // latent heat it carried off, J
+    const ofscalar* __restrict__ yvg,// gas vapour mass fraction, kg/kg
+    int satCurve,
+    int massTransfer,
+    ofscalar wVap,
+    ofscalar wCarrier,
+    ofscalar tBoil,
+    ofscalar pBoil,
+    ofscalar hvBoil,
+    ofscalar tCrit,
+    ofscalar dVap,
+    ofscalar tRefD,
+    ofscalar dExp,
+    ofscalar cpVap,
+    ofscalar pAmb,
+    ofscalar tBoilP,
+    ofscalar evapCfl
 )
 {
     const int n = *nActive;
     const ofscalar piOver6 = (ofscalar)0.52359877559829887307710723054658;
+    const int evaporating = (physics == OFP_PHYS_EVAPORATING);
+    // `heating` stays TRUE only for OFP_PHYS_HEATING, so every statement it
+    // guards is reached by exactly the runs that reached it before S76 and
+    // with exactly the same operands. S76.10's bitwise claim is this line.
     const int heating = (physics == OFP_PHYS_HEATING);
+    const int thermal = heating || evaporating;
+    ofpLiquid liq;
+    liq.wVap = wVap;   liq.tBoil = tBoil;   liq.pBoil = pBoil;
+    liq.hvBoil = hvBoil; liq.tCrit = tCrit; liq.dVap = dVap;
+    liq.tRefD = tRefD; liq.dExp = dExp;     liq.cpVap = cpVap;
+    liq.wCar = wCarrier; liq.pAmb = pAmb;   liq.tBoilP = tBoilP;
+    liq.sat = satCurve;  liq.mt = massTransfer;
     // Pr = mu c_p / k. A property of the gas alone, so it is formed once
     // outside every loop; `cbrt` of it is the Ranz-Marshall Sh/Nu exponent.
-    const ofscalar cbrtPr = heating ? cbrt(mu*cpGas/kGas) : (ofscalar)0;
+    const ofscalar cbrtPr = thermal ? cbrt(mu*cpGas/kGas) : (ofscalar)0;
     const int stride = gridDim.x*blockDim.x;
     for (int p = blockIdx.x*blockDim.x + threadIdx.x; p < n; p += stride)
     {
@@ -433,7 +711,12 @@ extern "C" __global__ void parcelIntegrate
 
         ofvec3 x = px[p];
         ofvec3 u = pu[p];
-        const ofscalar d = pd[p];
+        // (76.10): `d` is a LOCAL now, and only the evaporating branch ever
+        // assigns it. For inert and heating parcels it holds pd[p] for every
+        // sub-step, which is the same value the `const` used to hold, so
+        // every expression downstream sees identical operands.
+        ofscalar d = pd[p];
+        const ofscalar d0 = d;
         unsigned int flags = pflags[p];
 
         // (68.5). `imp` is the impulse the DRAG alone put on one droplet
@@ -445,10 +728,12 @@ extern "C" __global__ void parcelIntegrate
         ofscalar axr = 0;
         ofscalar qim = 0;
         ofscalar atr = 0;
-        ofscalar tp = heating ? pt[p] : (ofscalar)0;
-        // The single-droplet mass. Constant here: S68.13 refuses evaporation
-        // by name, so nothing in this section changes d.
-        const ofscalar mp = rhoL*piOver6*d*d*d;
+        ofscalar qlat = 0;
+        ofscalar tp = thermal ? pt[p] : (ofscalar)0;
+        // The single-droplet mass. Re-formed every sub-step now, because
+        // (76.10) shrinks d; for inert and heating parcels d never moves, so
+        // the value is the one the hoisted `const` used to carry.
+        ofscalar mp = rhoL*piOver6*d*d*d;
 
         // (66.7): the sub-step count. A conservative speed bound - the
         // parcel's own speed, the gas it is relaxing towards, and what
@@ -462,6 +747,26 @@ extern "C" __global__ void parcelIntegrate
         {
             const ofscalar want = ceil(speed*dt/(h*cflTarget));
             nSub = (want < 1) ? 1 : (want > (ofscalar)maxSub ? maxSub : (int)want);
+        }
+        if (evaporating)
+        {
+            // (76.10): and no sub-step may take more than `evapCfl` of d^2.
+            // One extra closure evaluation, at the state the step starts in -
+            // the same shape as the motion CFL above, and capped by the same
+            // maxSub, so the trip count stays bounded and the geometry stays
+            // fixed. Without it a droplet can vanish inside one step and the
+            // d^2 law is lost with no diagnostic.
+            const ofpRate r0 = ofpEvapRate(liq, d, tp, tg[cell], yvg[cell],
+                                           rhoG[cell], mu, kGas, cpGas,
+                                           vmag(vsub(u, ugc)), cbrtPr);
+            const ofscalar k2 = -4*r0.mdot/(OFP_PI*rhoL*d);
+            if (k2 > 0 && evapCfl > 0)
+            {
+                const ofscalar want = ceil(k2*dt/(evapCfl*d*d));
+                const int ns = (want < 1) ? 1
+                             : (want > (ofscalar)maxSub ? maxSub : (int)want);
+                if (ns > nSub) nSub = ns;
+            }
         }
         const ofscalar dts = dt/nSub;
 
@@ -530,6 +835,134 @@ extern "C" __global__ void parcelIntegrate
                 tp += dT;
             }
 
+            if (evaporating)
+            {
+                // (76.7)-(76.9). One closure evaluation, then the linearised
+                // exponential relaxation of the temperature, then the mass
+                // the energy that relaxation actually applied corresponds to.
+                //
+                // The order matters and it is the whole of (76.10): the mass
+                // is derived FROM the applied energy rather than integrated
+                // beside it, so the droplet's own budget C dT = Qc - dm h_v
+                // holds as an identity in f64 and not to the accuracy of the
+                // linearisation. S68 made the momentum coupling conservative
+                // by depositing the impulse the integrator applied; this is
+                // the same construction one equation over.
+                const ofscalar tgc = tg[cell];
+                const ofpRate r = ofpEvapRate(liq, d, tp, tgc, yvg[cell],
+                                              rg, mu, kGas, cpGas,
+                                              magUrel, cbrtPr);
+                const ofscalar C   = mp*cLiquid;
+                ofscalar qc, dmt, tnew;
+                if (r.boiling)
+                {
+                    // (76.9). T_p is PINNED at the boiling temperature and
+                    // NOT relaxed towards it, for a reason that is numerical
+                    // rather than physical: relaxing leaves T_p one ulp off
+                    // T_b, the `tp >= tBoilP` test then flips, and the next
+                    // sub-step takes the sub-cooled branch at Y_s = 1 - 1e-16
+                    // where B_M is 1e16 and the conductance underflows. The
+                    // first version of this file did exactly that and the
+                    // boiling gate caught it.
+                    //
+                    // Any superheat the droplet arrives with is not
+                    // discarded: it is `flash`, and it vaporises
+                    // `flash/h_v` of liquid, so the droplet's energy budget
+                    // C dT = Qc - dm h_v closes across the cap.
+                    const ofscalar flash = C*(tp - liq.tBoilP);
+                    qc  = r.cond*(tgc - liq.tBoilP)*dts;
+                    dmt = (qc + flash)/r.hv;
+                    if (dmt >= 0)
+                    {
+                        tnew = liq.tBoilP;
+                        atr += r.cond*dts/dt;
+                    }
+                    else
+                    {
+                        // Colder gas than T_b, and not enough superheat to
+                        // outlast one sub-step: the droplet is not boiling,
+                        // it is cooling. No mass moves this sub-step and the
+                        // next one finds it below T_b on the sub-cooled
+                        // branch. The exponential form keeps this
+                        // unconditionally stable at any dt.
+                        const ofscalar lamb = r.cond/C;
+                        const ofscalar wb   = -expm1(-lamb*dts);
+                        tnew = tp + wb*(tgc - tp);
+                        qc   = C*(tnew - tp);
+                        dmt  = 0;
+                        atr += r.cond*(wb/lamb)/dt;
+                    }
+                }
+                else
+                {
+                    // cond > 0 because Nu and F(B) are, and dCool >= 0 by the
+                    // clamp in ofpEvapRate - so lam >= 0 and the exponential
+                    // is a contraction whatever the time step.
+                    const ofscalar lam = (r.cond + r.dCool)/C;
+                    const ofscalar bT  = lam*dts;
+                    const ofscalar wT  = -expm1(-bT);
+                    // tau = (1 - e^-lam h)/lam, the effective exposure time,
+                    // with the series that is exact at lam = 0 rather than
+                    // 0/0.
+                    const ofscalar tau = (bT > (ofscalar)1e-8)
+                                       ? wT/lam
+                                       : dts*(1 - bT/2 + bT*bT/6);
+                    // The quasi-steady temperature this sub-step relaxes
+                    // towards.
+                    const ofscalar teq = tp + (r.cond*(tgc - tp) + r.mdot*r.hv)
+                                            /(r.cond + r.dCool);
+                    const ofscalar dEl = C*wT*(teq - tp);
+                    // The convective heat ACTUALLY applied, in closed form:
+                    //   Qc = a INTEGRAL_0^h (Tg - Tp(t)) dt
+                    //      = a [ (Tg - Teq) h + (Teq - Tp) tau ]
+                    qc  = r.cond*((tgc - teq)*dts + (teq - tp)*tau);
+                    // ... and the latent heat left over, BY DEFINITION.
+                    dmt = (r.hv > 0) ? (qc - dEl)/r.hv : (ofscalar)0;
+                    tnew = tp + wT*(teq - tp);
+                    atr += r.cond*tau/dt;
+                }
+
+                ofscalar mnew = mp - dmt;
+                if (!(mnew > 0)) mnew = 0;
+                // d from m, and not m from d: cbrt(1) is exactly 1, so a
+                // sub-step that removed nothing leaves d bit for bit alone,
+                // and no epsilon is needed to say so.
+                const ofscalar dnew = d*cbrt(mnew/mp);
+                const ofscalar mact = rhoL*piOver6*dnew*dnew*dnew;
+                const ofscalar dm   = mp - mact;
+
+                qim  += qc;
+                qlat += dm*r.hv;
+                d     = dnew;
+                if (mact > 0)
+                {
+                    // The energy budget, closed on the mass actually taken.
+                    // In the boiling case T_p is the pin and this correction
+                    // is not applied: the pin is the physics and a round-off
+                    // nudge off it costs a branch flip (see above).
+                    tp = r.boiling ? tnew : (tp + (qc - dm*r.hv)/C);
+                    if (tp > liq.tBoilP) tp = liq.tBoilP;
+                    mp = mact;
+                }
+                else
+                {
+                    // The last of the liquid went this sub-step. Its whole
+                    // remaining latent heat is accumulated - which is more
+                    // than the gas actually supplied, by less than one
+                    // sub-step's worth, and is the price of not carrying a
+                    // fractional final sub-step through a captured graph
+                    // (76.14). The parcel leaves the working set exactly as
+                    // an escaping one does, and its accumulators are still
+                    // written: the deposition will not see them, the same
+                    // measurable gap S68.9 row 4 reports for an escape.
+                    atomicAdd((unsigned long long*)&counters[OFP_N_EVAPORATED], 1ULL);
+                    flags &= ~OFP_FLAG_ACTIVE;
+                    cell = -1;
+                    mp = 0;
+                    break;
+                }
+            }
+
             // Trapezoidal position update, as FDS integrates it: second
             // order in dts, and dts is CFL-bounded above.
             const ofvec3 target = vadd(x, vscl(dts/2, vadd(u, uNew)));
@@ -553,11 +986,31 @@ extern "C" __global__ void parcelIntegrate
         // names it rather than rounding it away.
         pimp[p] = imp;
         paxr[p] = axr;
-        if (heating)
+        if (thermal)
         {
             pt[p] = tp;
             pqim[p] = qim;
             patr[p] = atr;
+        }
+        if (evaporating)
+        {
+            pd[p] = d;
+            // (76.10): the mass accumulator is the DIFFERENCE OF THE
+            // ENDPOINTS - one subtraction, not the sum of the sub-steps. So
+            // "what the parcel lost" and "what the parcel's own state says it
+            // lost" are the same f64 BY CONSTRUCTION rather than to a
+            // tolerance, which is the property the species source of a later
+            // section will need if its conservation is to be an identity.
+            // Factored, and not `d0^3 - d^3`: the two cubes agree to twelve
+            // digits over one step and their difference does not, so the
+            // subtraction is done on the DIAMETERS - where it is exact, by
+            // Sterbenz, for any pair within a factor of two - and the
+            // well-conditioned quadratic carries the rest. Same value in
+            // exact arithmetic; four orders of magnitude better in f64, and
+            // it is what lets the host check this against the state change
+            // to round-off rather than to the cancellation.
+            pdm[p] = rhoL*piOver6*(d0 - d)*(d0*d0 + d0*d + d*d);
+            pqlat[p] = qlat;
         }
     }
 }

@@ -122,9 +122,11 @@ applied on faces rather than interpolated from cell values.
 | Buoyancy | Non-Boussinesq density ratio `b = g(T_ref/T − 1)` |
 | Generalised-Newtonian viscosity (SPEC-LIT §38) | `nu` becomes a **field**: power law, Cross, Bird-Carreau (`a = 2`) and Carreau-Yasuda (general `a`) from one formula, Herschel-Bulkley and Casson. The strain-rate invariant `gdot = sqrt(2 D:D)` is the `turbStrainRateMag` §6 already computed and nothing ever called; this is its first caller, and the whole chain stays gather-shaped and atomic-free. The two yield-stress models are Papanastasiou-regularised in the **product** form, the one that stays bounded for `n < 1` as well. Plane Poiseuille converges at order **2.08 / 2.03 / 2.00 / 1.97** against a closed form the spec derives; the Newtonian reduction is `4.5e-14` and every model's own reduction is constant in `gdot` to round-off; Buckingham-Reiner's `1, -4/3, +1/3` bracket is verified against the numerical integral of the profile it is the closed form of (`9.4e-11`) rather than quoted. Selected by `physics.fluid.rheology.model` (JSONC) or `viscosityModel` (`constant/physicalProperties`); an unrecognised name errors listing all six, and a coefficient the named model does not use errors naming it. **The drivers that hold `U` frozen refuse a non-Newtonian model by name** — `blockgen` had written `viscosityModel constant;` into every generated case since that generator existed and nothing ever read it, the sixth instance of that contract defect, and reading it without the refusal would have created the seventh while fixing the sixth |
 | Contact angle (SPEC-LIT §39) | Static, hysteresis and dynamic on the VOF wall, replacing §20's `nHatf = 0` — which was already a contact angle, of ninety degrees, chosen because it adds no unstated physics. Jiang-Oh-Slattery and Cox-Voinov for the dynamic angle; **Kistler is deliberately absent**, its four constants coming from a book chapter this project has not read. `theta = 90` is bit-identical to no model and `theta = 45` is not, so neither test is vacuous, and the `cos(pi/2) != 0` trap is guarded twice with the test **measuring** the premise (`6.12e-17`) rather than asserting it. Gated on the geometry (`bNHatf = magSf cos theta` at 0/45/90/135/180 degrees, sign checked at both ends), on the `alpha` fixed-gradient triple, on both correlations returning `theta_e` EXACTLY at `Ca = 0`, and on Jurin's height as a closed form — `theta_e > 90` must give depression. **Not claimed**: that a live capillary-rise or drop-impact run reproduces a published `theta_d(t)`. Tanner's law, Sikalo et al.'s drop impact and the two-resolution displacement experiment are not run, and Afkhami, Zaleski & Bussmann's mesh-dependent correction is deliberately withheld until the gate that would show it works exists (§39.8) |
-| Lagrangian parcels (SPEC-LIT §66) | SoA pool, exponential drag update (Schiller–Naumann), face-crossing walk over the cell→face CSR, deterministic injection. **One-way coupled and inert**: parcels feel the gas, the gas does not feel them, and evaporation is refused by name. **No driver reads a spray from a case file yet**, and §13.4.2 forbids adding a `parcels` block before the driver that would read it, so the pool is a library API and `ofgpu-validate`'s gates are what drive it |
+| Lagrangian parcels (SPEC-LIT §66) | SoA pool, exponential drag update (Schiller–Naumann), face-crossing walk over the cell→face CSR, deterministic injection. Parcels feel the gas; what the gas feels back is §68's, and what a droplet does to itself is §76's. **No driver reads a spray from a case file yet**, and §13.4.2 forbids adding a `parcels` block before the driver that would read it, so the pool is a library API and `ofgpu-validate`'s gates are what drive it |
 | Parcel deposition gather (SPEC-LIT §67) | Radix sort on the `(cell, uid)` total order, a device exclusive scan, the per-cell parcel CSR, and a one-thread-per-cell gather. **No f64 atomics**: the scatter is transposed into a gather so the result is bitwise reproducible |
-| Two-way coupling (SPEC-LIT §68) | The drag impulse the parcel integrator applied, handed back to the gas through §18's source registries — momentum (kinematic, explicit or Patankar-split) and sensible heat, with `physics heating` for the droplet side. **Conservative to round-off by construction**, and bitwise inert when no parcel has been injected. Evaporation, droplet radiation and wall splash are refused by name |
+| Two-way coupling (SPEC-LIT §68) | The drag impulse the parcel integrator applied, handed back to the gas through §18's source registries — momentum (kinematic, explicit or Patankar-split) and sensible heat, with `physics heating` for the droplet side. **Conservative to round-off by construction**, and bitwise inert when no parcel has been injected. Droplet radiation and wall splash are refused by name; the mass coupling §76 changed the reason for is **built at §77** |
+| Droplet heating and evaporation (SPEC-LIT §76) | `physics evaporating`: Spalding's Stefan-flow mass rate with Abramzon–Sirignano's `B_T` (Ranz–Marshall and FDS's `B_T = B_M` also selectable), Watson's `h_v(T)`, Marrero & Mason's `D(T)`, the 1/3-rule film state, and Godsave's heat-limited branch at the boiling point. Two saturation curves — a general Clausius–Clapeyron and §54's own Hyland–Wexler, which is refused for anything but water. The mass is derived from the energy the exponential integrator applied, so the droplet's own budget closes in f64; the accumulator is the difference of the step's two endpoint masses, so conservation is an identity. Gated on the `d²` law (`1.8e-6`), on the wet-bulb temperature (`5.7e-13 K` against this crate's own balance, **`0.76 K` against ASHRAE's**, and the gap is the Lewis number), and on the parcel's mass (`9.1e-16`). **The vapour stays on the parcel here** — §77 is what carries it into the gas |
+| The vapour into the gas (SPEC-LIT §77) | `coupling/mass evaporation`: the mass, the enthalpy it carries and the volume it makes, through the seams the solvers already had — §61.2's whole-field explicit source on `Y_v`, §18's energy registry, and the one `Energy::target_divergence` seam §25.3 says the pressure loop changes in. **The mass identity is `6.3e-16`** and the energy ledger closes to `1.3e-12`, which is the droplet's own budget and not round-off. Two findings worth the row: there is **no second latent-heat sink** — (76.10)'s budget already puts every joule the phase change consumed inside the convective heat §68 deposits, so depositing `q_lat` again would count it twice, and what the gas is actually owed is the arriving mass's sensible enthalpy, 12 % of the latent heat; and **the ENERGY half of the divergence arrives through `Q` unaided while the VOLUME half does not**, which is §26.1's omission with the halves swapped and is why it is a named argument on its own method. A mist is a **net contraction**, by `h_v/(cp T) ~ 8`. Gated on ASHRAE's adiabatic saturation — 40 °C air at 12 % rh sprayed to saturation lands at **19.179 °C against ASHRAE's 19.296 °C**, and the wet bulb, which the relation says is an invariant of the process, drifts by the same 0.117 K. **A run with no dispersed phase is bitwise what it was, by construction**: `energyTargetDivergence` is untouched and the old call path is the old call path |
 
 ### Linear solvers
 
@@ -1158,16 +1160,26 @@ Convert binary-format cases to ASCII before use.
   "fluid"` region is a no-slip wall, so a micro-channel has no inlet to name
   and §47.12's Gate 6 (Qu & Mudawar 2002) cannot be expressed at all. That is
   a capability gap, stated as one, rather than a gate left quietly unrun.
-- **Lagrangian parcels do not evaporate, do not absorb radiation and do not
-  splash (SPEC-LIT §68.13).** Each is refused **by name** with what is
-  missing printed, and the first of them matters most: a sprinkler that does
-  not evaporate is not a sprinkler. Also absent: buoyancy and added-mass
-  reaction on the gas (only the drag impulse is coupled), deposition into more
-  than one cell along a crossing, coupling to the pressure equation (there is
-  no mass transfer for it to receive), and sub-grid dispersion of the coupled
-  source. The hose-stream gate (§68.12, Theobald 1981) **misses with the gas
-  held at rest**, and the measurement says why: 61–199 % of the throw is
-  decided by the entrained air.
+- **Lagrangian parcels evaporate and the gas now gets the vapour, but no
+  driver reads a spray (SPEC-LIT §77.12).** §76 computes what leaves each
+  droplet and §77 hands the gas all three of it — the mass into `Y_v`, the
+  enthalpy the mass carries into the energy registry, and the volume it makes
+  into the divergence constraint. What is still missing is a *driver*:
+  §13.4.2 forbids adding a `parcels` block before something reads it, so the
+  couplings are a library API driven by `ofgpu-validate`'s gates and
+  `ofgpu-fire` still runs without a dispersed phase. Two model gaps are named
+  rather than hidden: §25's gas has **one molar mass**, so adding water vapour
+  does not make the mixture lighter (§54 measures that at 0.85 % in density at
+  saturation), and §26 gives **every gas one `cp`**, so the vapour's enthalpy
+  is booked at dry air's 1005 J/(kg·K) — which is what the 0.117 K of gate
+  77-D is made of. Parcels also still
+  do not absorb radiation and do not splash (§68.13) — water mist is a
+  radiation shield and that is most of its value in suppression. Also absent:
+  buoyancy and added-mass reaction on the gas, the momentum the vapour carries
+  off, deposition into more than one cell along a crossing, and sub-grid
+  dispersion of the coupled source. The hose-stream gate (§68.12, Theobald
+  1981) **misses with the gas held at rest**, and the measurement says why:
+  61–199 % of the throw is decided by the entrained air.
 - **Surface-to-surface radiation and Lagrangian parcels are library
   capabilities with no case format.** Both are fully specified, gated and
   pair-tested, but **no driver binary reads an enclosure or a spray out of a
@@ -1616,7 +1628,31 @@ unreachable, or deliberately left closed — say so on their own line.
   as a generator)
 - Ranz, W. E., & Marshall, W. R. (1952). Evaporation from drops. *Chemical
   Engineering Progress*, 48, 141 and 173. — §68.5 (the sensible-heat half of
-  `Nu = 2 + 0.6 Re^(1/2) Pr^(1/3)`; the evaporative half is **refused by name**)
+  `Nu = 2 + 0.6 Re^(1/2) Pr^(1/3)`) and §76 (the mass-transfer half, and the
+  `d(D²)/dt` metric its 56 experiments are correlated on)
+- Spalding, D. B. (1953). The combustion of liquid fuels. *4th Symposium
+  (International) on Combustion*, 847–864. — §76.6 (the mass transfer number
+  `B_M` and the Stefan-flow rate)
+- Godsave, G. A. E. (1953). Studies of the combustion of drops in a fuel spray.
+  *4th Symposium (International) on Combustion*, 818–830. — §76.9 (the
+  heat-limited rate at the boiling point)
+- Abramzon, B., & Sirignano, W. A. (1989). Droplet vaporization model for spray
+  combustion calculations. *International Journal of Heat and Mass Transfer*,
+  32, 1605–1618. — §76.6 (`B_T = (1 + B_M)^φ − 1`, the default; their
+  film-thickness corrections are **refused by name**)
+- Sazhin, S. S. (2006). Advanced models of fuel droplet heating and
+  evaporation. *Progress in Energy and Combustion Science*, 32, 162–214.
+  — §76 (the survey; its effective-conductivity droplet interior is **named
+  and not implemented**)
+- Watson, K. M. (1943). Thermodynamics of the liquid state. *Industrial &
+  Engineering Chemistry*, 35, 398–406. — §76.4 (`h_v(T)`)
+- Marrero, T. R., & Mason, E. A. (1972). Gaseous diffusion coefficients.
+  *Journal of Physical and Chemical Reference Data*, 1, 3–118. — §76.4
+  (`D(H₂O–air) = 1.87e-10 T^2.072/p`, and hence the Lewis number §76.13's
+  wet-bulb gap is made of)
+- Lewis, W. K. (1922). The evaporation of a liquid into a gas. *Transactions of
+  the ASME*, 44, 325–340. — §76.13 (the psychrometric ratio, and why a
+  droplet's balance is not ASHRAE's wet bulb)
 - Theobald, R. C. (1981). The effect of nozzle design on the stability and
   performance of turbulent water jets. *Fire Safety Journal*, 4, 1–13.
   — §68.12, Gate 68-C, which **misses with the gas held at rest**

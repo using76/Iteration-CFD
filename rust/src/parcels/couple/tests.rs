@@ -14,6 +14,7 @@
 //! module's header. No GPL-licensed source was consulted.
 
 use super::*;
+use crate::parcels::EvaporationControls;
 use crate::blockgen::{self, BlockSpec, GradedAxis};
 use crate::device::Gpu;
 use crate::energy::EnergySources;
@@ -67,6 +68,7 @@ fn base_controls() -> ParcelControls {
         cfl: 0.9,
         max_substeps: 64,
         max_walk: 16,
+        evaporation: EvaporationControls::default(),
         persistent_blocks: None,
     }
 }
@@ -153,9 +155,28 @@ fn one_step<'a>(
     t: Option<&DevBuf<Scalar>>,
     dt: Scalar,
 ) {
-    p.step(gpu, u, rho, t, dt).unwrap();
+    p.step(gpu, u, rho, t, None, dt).unwrap();
     dep.update(gpu, p).unwrap();
-    cp.update(gpu, p, dep, rho, u, t, dt).unwrap();
+    cp.update(gpu, p, dep, rho, u, t, None, dt).unwrap();
+}
+
+/// [`one_step`] for an evaporating pool: the gas carries a vapour field, so
+/// both the parcel step and the S77 gather read it.
+#[allow(clippy::too_many_arguments)]
+fn one_wet_step<'a>(
+    gpu: &Gpu,
+    p: &mut Parcels<'a>,
+    dep: &mut ParcelDeposition<'a>,
+    cp: &mut ParcelCoupling<'a>,
+    u: &GpuVectorField,
+    rho: &DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    y: &DevBuf<Scalar>,
+    dt: Scalar,
+) {
+    p.step(gpu, u, rho, Some(t), Some(y), dt).unwrap();
+    dep.update(gpu, p).unwrap();
+    cp.update(gpu, p, dep, rho, u, Some(t), Some(y), dt).unwrap();
 }
 
 // ======================================================================
@@ -174,6 +195,8 @@ fn the_device_modes_match_the_host() {
         ("OFC_MODE_OFF", CouplingMode::Off.code()),
         ("OFC_MODE_EXPLICIT", CouplingMode::Explicit.code()),
         ("OFC_MODE_SEMIIMPLICIT", CouplingMode::SemiImplicit.code()),
+        ("OFC_MASS_NONE", MassCoupling::None.code()),
+        ("OFC_MASS_EVAPORATION", MassCoupling::Evaporation.code()),
     ] {
         let line = couple
             .lines()
@@ -187,6 +210,7 @@ fn the_device_modes_match_the_host() {
     for (name, want) in [
         ("OFP_PHYS_INERT", ParcelPhysics::Inert.code()),
         ("OFP_PHYS_HEATING", ParcelPhysics::Heating.code()),
+        ("OFP_PHYS_EVAPORATING", ParcelPhysics::Evaporating.code()),
     ] {
         let line = parcels
             .lines()
@@ -226,7 +250,7 @@ fn the_accumulated_impulse_is_the_closed_form() {
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[], dt).unwrap();
     p.seed(&gpu, &hm, &[seed(Vec3::new(0.5, 0.5, 4.5), u0, d, 1.0, 7)])
         .unwrap();
-    p.step(&gpu, &u, &rho, None, dt).unwrap();
+    p.step(&gpu, &u, &rho, None, None, dt).unwrap();
     let s = p.snapshot(&gpu).unwrap();
 
     // The host closed form, from (66.3)/(66.4) with the same numbers.
@@ -308,7 +332,7 @@ fn at_terminal_velocity_the_impulse_is_the_weight() {
     .unwrap();
     // A few steps, so any transient has relaxed.
     for _ in 0..8 {
-        p.step(&gpu, &u, &rho, None, dt).unwrap();
+        p.step(&gpu, &u, &rho, None, None, dt).unwrap();
     }
     let s = p.snapshot(&gpu).unwrap();
 
@@ -1054,7 +1078,7 @@ fn a_still_droplet_relaxes_at_the_lumped_capacity_rate() {
 
     let n = 200;
     for _ in 0..n {
-        p.step(&gpu, &u, &rho, Some(&t_gas), dt).unwrap();
+        p.step(&gpu, &u, &rho, Some(&t_gas), None, dt).unwrap();
     }
     let got = p.snapshot(&gpu).unwrap().temperature[0];
 
@@ -1300,9 +1324,9 @@ fn the_coupling_captures_once_and_replays() {
     let mut cp = ParcelCoupling::new(&gpu, &p, momentum_only()).unwrap();
     let captured = gpu
         .capture(|_| {
-            p.step(&gpu, &u, &rho, None, dt)?;
+            p.step(&gpu, &u, &rho, None, None, dt)?;
             dep.update(&gpu, &p)?;
-            cp.update(&gpu, &p, &dep, &rho, &u, None, dt)
+            cp.update(&gpu, &p, &dep, &rho, &u, None, None, dt)
         })
         .expect("capture must not fail: nothing in the sequence allocates or reads back");
     let Some(mut graph) = captured else {
@@ -1360,14 +1384,14 @@ fn the_gas_temperature_contract_is_refused_in_both_directions() {
 
     let mut inert = Parcels::new(&gpu, &hm, &gm, base_controls(), &[], 1e-3).unwrap();
     let e = inert
-        .step(&gpu, &u, &rho, Some(&t), 1e-3)
+        .step(&gpu, &u, &rho, Some(&t), None, 1e-3)
         .unwrap_err()
         .to_string();
     assert!(e.contains("read and ignored"), "{e}");
 
     let heating = ParcelControls { physics: ParcelPhysics::Heating, ..base_controls() };
     let mut hot = Parcels::new(&gpu, &hm, &gm, heating, &[], 1e-3).unwrap();
-    let e = hot.step(&gpu, &u, &rho, None, 1e-3).unwrap_err().to_string();
+    let e = hot.step(&gpu, &u, &rho, None, None, 1e-3).unwrap_err().to_string();
     assert!(e.contains("no gas temperature"), "{e}");
 }
 
@@ -1382,11 +1406,11 @@ fn a_coupling_handed_the_wrong_pool_or_dt_is_refused_by_name() {
     let mut p = Parcels::new(&gpu, &hm, &gm, base_controls(), &[], dt).unwrap();
     let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
     let mut cp = ParcelCoupling::new(&gpu, &p, momentum_only()).unwrap();
-    p.step(&gpu, &u, &rho, None, dt).unwrap();
+    p.step(&gpu, &u, &rho, None, None, dt).unwrap();
     dep.update(&gpu, &p).unwrap();
 
     let e = cp
-        .update(&gpu, &p, &dep, &rho, &u, None, 2e-3)
+        .update(&gpu, &p, &dep, &rho, &u, None, None, 2e-3)
         .unwrap_err()
         .to_string();
     assert!(e.contains("dt = 0.002"), "{e}");
@@ -1401,22 +1425,33 @@ fn a_coupling_handed_the_wrong_pool_or_dt_is_refused_by_name() {
     )
     .unwrap();
     let e = cp
-        .update(&gpu, &other, &dep, &rho, &u, None, dt)
+        .update(&gpu, &other, &dep, &rho, &u, None, None, dt)
         .unwrap_err()
         .to_string();
     assert!(e.contains("slots"), "{e}");
 }
 
 #[test]
-fn evaporation_is_refused_by_name_with_what_it_would_need() {
-    let e = MassCoupling::from_name("evaporation").unwrap_err().to_string();
-    assert!(e.contains("3x3"), "{e}");
-    assert!(e.contains("target_divergence"), "{e}");
-    assert!(e.contains("sprinkler"), "{e}");
-    assert!(MassCoupling::from_name("none").is_ok());
+fn the_menu_takes_evaporation_now_and_still_refuses_the_rest() {
+    // S68 refused every mass coupling because there was nothing to give;
+    // S76 made the droplets evaporate and the reason became "there is
+    // nowhere to put it"; S77 built the somewhere, so the name is accepted.
+    // What is NOT accepted is a name for something that does not exist.
+    assert_eq!(
+        MassCoupling::from_name("evaporation").unwrap(),
+        MassCoupling::Evaporation
+    );
+    assert_eq!(MassCoupling::from_name("vapour").unwrap(), MassCoupling::Evaporation);
+    assert_eq!(MassCoupling::from_name("none").unwrap(), MassCoupling::None);
 
-    let e = ParcelPhysics::from_name("evaporating").unwrap_err().to_string();
-    assert!(e.contains("heating"), "{e}");
+    let e = MassCoupling::from_name("breakup").unwrap_err().to_string();
+    assert!(e.contains("evaporation"), "{e}");
+    assert!(e.contains("none"), "{e}");
+
+    assert_eq!(
+        ParcelPhysics::from_name("evaporating").unwrap(),
+        ParcelPhysics::Evaporating
+    );
     assert_eq!(ParcelPhysics::from_name("heating").unwrap(), ParcelPhysics::Heating);
     assert_eq!(ParcelPhysics::from_name("inert").unwrap(), ParcelPhysics::Inert);
 
@@ -1437,6 +1472,15 @@ fn the_banner_names_every_setting() {
     for want in ["momentum=explicit", "energy=off", "mass=none", "S68"] {
         assert!(d.contains(want), "{d}");
     }
+    // S77's value has a name of its own and the banner prints it.
+    let wet = CouplingControls {
+        momentum: CouplingMode::Explicit,
+        energy: CouplingMode::Explicit,
+        mass: MassCoupling::Evaporation,
+    }
+    .describe();
+    assert!(wet.contains("mass=evaporation"), "{wet}");
+    assert!(wet.contains("energy=explicit"), "{wet}");
     let hot = ParcelControls { physics: ParcelPhysics::Heating, ..base_controls() }.describe();
     for want in ["physics=heating", "cLiquid=4182", "kGas=0.026", "cpGas=1005"] {
         assert!(hot.contains(want), "{hot}");
@@ -1444,6 +1488,23 @@ fn the_banner_names_every_setting() {
     // ... and an inert run does not print three numbers nothing will read.
     let cold = base_controls().describe();
     assert!(!cold.contains("cLiquid"), "{cold}");
+    assert!(!cold.contains("saturation="), "{cold}");
+    assert!(!hot.contains("saturation="), "{hot}");
+    // S76.2: an evaporating run prints the twelve numbers and two menus that
+    // ONLY it reads, on a second line, and the thermal three as well.
+    let wet =
+        ParcelControls { physics: ParcelPhysics::Evaporating, ..base_controls() }.describe();
+    for want in [
+        "physics=evaporating",
+        "cLiquid=4182",
+        "saturation=hylandWexler",
+        "transfer=abramzonSirignano",
+        "pAmbient=101325",
+        "tCrit=647.096",
+        "S76",
+    ] {
+        assert!(wet.contains(want), "{wet}");
+    }
 }
 
 /// A property that will be read has to be a number. All three are checked at
@@ -1514,10 +1575,873 @@ fn the_host_reference_counts_only_live_parcels() {
         exchange: vec![0.0; 3],
         heat: vec![10.0, 100.0, 1000.0],
         heat_exchange: vec![0.0; 3],
+        mass_lost: vec![0.0; 3],
+        latent: vec![0.0; 3],
         n_slots: 3,
     };
     assert_eq!(live_parcel_impulse(&s).x, 7.0);
     assert_eq!(live_parcel_heat(&s), 2.0 * 10.0 + 5.0 * 1000.0);
     s.heat.clear();
     assert_eq!(live_parcel_heat(&s), 0.0);
+}
+
+// ======================================================================
+//  SPEC-LIT S77 - the vapour, the enthalpy it carries, and the volume
+//  it makes
+// ======================================================================
+
+/// An evaporating pool: S76's physics, S66's everything else.
+fn wet_controls() -> ParcelControls {
+    ParcelControls {
+        capacity: 256,
+        physics: ParcelPhysics::Evaporating,
+        ..base_controls()
+    }
+}
+
+/// All three couplings on - the only combination S77.7 allows for an
+/// evaporating pool.
+fn full_coupling() -> CouplingControls {
+    CouplingControls {
+        momentum: CouplingMode::Explicit,
+        energy: CouplingMode::Explicit,
+        mass: MassCoupling::Evaporation,
+    }
+}
+
+/// A gas at rest with a temperature and a vapour fraction, uniform, so that
+/// the host reference of (77.9) can carry one number for each.
+fn wet_gas(
+    gpu: &Gpu,
+    m: &GpuMesh,
+    t: Scalar,
+    yv: Scalar,
+    rho: Scalar,
+) -> (GpuVectorField, DevBuf<Scalar>, DevBuf<Scalar>, DevBuf<Scalar>) {
+    let (u, r) = gas(gpu, m, Vec3::ZERO, rho);
+    let tg = gpu.upload(&vec![t; m.n_cells]).unwrap();
+    let yg = gpu.upload(&vec![yv; m.n_cells]).unwrap();
+    (u, r, tg, yg)
+}
+
+/// A spread of droplets over the box, weights over three decades so a
+/// dropped `n_p` cannot hide.
+fn wet_seeds(n: u64) -> Vec<SeedParcel> {
+    (0..n)
+        .map(|i| SeedParcel {
+            position: Vec3::new(unit(i), unit(i + 31), unit(i + 62)),
+            velocity: Vec3::new(0.0, 0.0, -0.2 * unit(i + 93)),
+            diameter: 6e-5 + 2.4e-4 * unit(i + 124),
+            temperature: 285.0 + 8.0 * unit(i + 155),
+            n_p: 1.0 + 1000.0 * unit(i + 186),
+            uid: Some(i + 1),
+        })
+        .collect()
+}
+
+/// **Gate 77-A.** The vapour the gas is given is the vapour the parcels
+/// lost, to round-off, and it is an IDENTITY rather than a tolerance for
+/// S68's reason: `pdmv` is the difference of the step's two endpoint masses
+/// (76.11), the gather multiplies it by `n_p` and divides by `V dt`, and the
+/// only way for the two sides to differ is a dropped weight, a missing
+/// volume or a `dt` that is not the one the mass was lost over.
+///
+/// The SIGN convention is the one place this differs from (68.4). S68's
+/// `f_P` is minus what the parcel took, so its identity reads
+/// `given + taken = 0`; `mass_lost` is ALREADY a loss, so `mdot_P` is plus
+/// what the parcel gave up and the identity reads `given = taken`. Writing
+/// it the other way round is the first mistake available here and this test
+/// is what would catch it.
+#[test]
+fn gate_77a_the_vapour_the_parcels_lost_is_the_vapour_the_gas_is_given() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([5, 5, 5], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, 340.0, 0.004, 1.0);
+    let dt: Scalar = 2e-3;
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    p.seed(&gpu, &hm, &wet_seeds(120)).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+
+    let vol = gpu.download(&gm.v).unwrap();
+    let mut worst: Scalar = 0.0;
+    let mut total: Scalar = 0.0;
+    for step in 0..6 {
+        one_wet_step(&gpu, &mut p, &mut dep, &mut cp, &u, &rho, &t_gas, &y_gas, dt);
+        let s = cp.snapshot(&gpu).unwrap();
+        let given: Scalar = (0..gm.n_cells).map(|c| vol[c] * s.vapour[c] * dt).sum();
+        let taken = p.snapshot(&gpu).unwrap().total_mass_lost();
+        assert!(taken > 0.0, "step {step}: nothing evaporated, so the gate is vacuous");
+        assert!(given > 0.0, "step {step}: the gas was given {given:e} kg of vapour");
+        worst = worst.max((given - taken).abs() / taken);
+        total += taken;
+        // The reduction over cells is the same number the object reports.
+        let reported = cp.total_vapour_mass(&gpu).unwrap();
+        assert!(
+            (reported - given).abs() <= 1e-15 * given,
+            "step {step}: total_vapour_mass {reported:e} against the cell sum {given:e}"
+        );
+    }
+    assert!(
+        worst <= 1e-13,
+        "worst relative mass defect {worst:e} over {total:e} kg evaporated"
+    );
+}
+
+/// The deposit is exactly what S77.5 says: S68's convective exchange plus
+/// the enthalpy the arriving mass carries, `cp_g mdot (T_p - T_g)`, and
+/// **nothing else**.
+///
+/// This is the test that fixes the section's one real physics decision. The
+/// obvious reading of "couple the latent heat back" is to deposit
+/// `-q_lat` as a second sink beside `-Q_c`. It is wrong, and it is wrong by
+/// a factor this test prints: the droplet's own budget is
+/// `Q_c = C dT_p + dm h_v` (76.10), so **the convective heat the gas has
+/// already given up contains every joule the phase change consumed**. A
+/// second latent sink counts them twice.
+#[test]
+fn the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let t_g: Scalar = 330.0;
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, t_g, 0.006, 1.05);
+    let dt: Scalar = 2e-3;
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    p.seed(&gpu, &hm, &wet_seeds(80)).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+
+    let vol = gpu.download(&gm.v).unwrap();
+    let cp_gas = base_controls().cp_gas;
+    let mut worst: Scalar = 0.0;
+    let mut ratio: Scalar = 0.0;
+    for _ in 0..4 {
+        one_wet_step(&gpu, &mut p, &mut dep, &mut cp, &u, &rho, &t_gas, &y_gas, dt);
+        let s = cp.snapshot(&gpu).unwrap();
+        let ps = p.snapshot(&gpu).unwrap();
+
+        let given: Scalar = (0..gm.n_cells).map(|c| vol[c] * s.energy_q[c] * dt).sum();
+        let conv = live_parcel_heat(&ps);
+        let vap = live_parcel_vapour_enthalpy(&ps, cp_gas, t_g);
+        // -Q_c + cp mdot (T_p - T_g), and both halves are real: the droplets
+        // are colder than the gas so `vap` is a further cooling.
+        let want = -conv + vap;
+        worst = worst.max((given - want).abs() / want.abs());
+        assert!(conv > 0.0 && vap < 0.0, "conv {conv:e} vap {vap:e}");
+
+        // What the WRONG deposit would have been: a second latent sink.
+        let latent: Scalar = ps.live().iter().map(|&i| ps.n_p[i] * ps.latent[i]).sum();
+        ratio = ratio.max(latent / conv);
+    }
+    assert!(worst <= 1e-13, "worst relative deposit error {worst:e}");
+    // The latent heat is a large fraction of the convective heat - 0.398
+    // measured here, where the droplets are still warming towards their wet
+    // bulb and so keep some of the heat, and approaching one once they are
+    // on it. Depositing it a second time would cool the gas by that much
+    // again. The number is asserted so that a future change which quietly
+    // adds it back fails here with the size of its own mistake printed.
+    assert!(
+        ratio > 0.3 && ratio < 1.05,
+        "the latent heat is {ratio:.4} of the convective heat; a second sink would \
+         have cooled the gas by that much again"
+    );
+}
+
+/// **Gate 77-B.** The energy ledger, closed to the accuracy of the droplet's
+/// own budget (S76.12 row 7's `4.8e-12`, and measured at `1.3e-12` here):
+///
+/// ```text
+///   dE_gas + dE_liquid + E_vapour = 0
+/// ```
+///
+/// with every pool referred to absolute zero, which is the reference S26's
+/// `rho cp T` actually carries.
+///
+/// Two things in it are worth stating because both are traps.
+///
+/// **1. The registry integral is NOT the gas's energy change.** (77.5)
+/// deposits the NON-conservative source `cp mdot (T_p - T_g)`, because
+/// S26's equation is `rho cp DT/Dt = Q`. The gas also gains the mass itself,
+/// so the conservative change is `integral(q) dt + cp T_g dm`. Forgetting
+/// that second term leaves the ledger short by about 12 % of the latent
+/// heat - which is large, and which is exactly the size of error a
+/// tolerance-shaped gate would have shrugged at.
+///
+/// **2. `E_vapour` is not `h_v dm`.** It is [`live_parcel_vapour_energy`],
+/// the latent heat plus `dm (c_l - cp_g) T_p`, and the second term is the
+/// offset between two sensible pools whose enthalpy data are `c_l T` and
+/// `cp_g T`. S77.10 says what that means physically.
+#[test]
+fn gate_77b_the_energy_ledger_closes_across_the_phase_change() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let t_g: Scalar = 350.0;
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, t_g, 0.003, 1.0);
+    let dt: Scalar = 2e-3;
+
+    let ctrl = wet_controls();
+    let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[], dt).unwrap();
+    p.seed(&gpu, &hm, &wet_seeds(96)).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+
+    let vol = gpu.download(&gm.v).unwrap();
+    let (rl, cl, cg) = (ctrl.rho_liquid, ctrl.c_liquid, ctrl.cp_gas);
+    let mut before = live_parcel_liquid_energy(&p.snapshot(&gpu).unwrap(), rl, cl);
+    let mut worst: Scalar = 0.0;
+    let mut worst_naive: Scalar = 0.0;
+    for _ in 0..5 {
+        one_wet_step(&gpu, &mut p, &mut dep, &mut cp, &u, &rho, &t_gas, &y_gas, dt);
+        let s = cp.snapshot(&gpu).unwrap();
+        let ps = p.snapshot(&gpu).unwrap();
+
+        let registry: Scalar = (0..gm.n_cells).map(|c| vol[c] * s.energy_q[c] * dt).sum();
+        let dm: Scalar = (0..gm.n_cells).map(|c| vol[c] * s.vapour[c] * dt).sum();
+        let d_gas = registry + cg * t_g * dm;
+
+        let after = live_parcel_liquid_energy(&ps, rl, cl);
+        let d_liq = after - before;
+        let e_vap = live_parcel_vapour_energy(&ps, cl, cg);
+        before = after;
+
+        let scale = d_liq.abs().max(e_vap.abs()).max(d_gas.abs());
+        worst = worst.max((d_gas + d_liq + e_vap).abs() / scale);
+        // And the ledger a reader who integrates the registry alone would
+        // have written, which is the trap this test names.
+        worst_naive = worst_naive.max((registry + d_liq + e_vap).abs() / scale);
+    }
+    // NOT round-off, and the difference matters: the two accumulators are
+    // endpoint differences while the droplet's budget is a sum over
+    // sub-steps whose mass changes between them (S76.10). The ledger
+    // inherits that gap exactly and nothing else.
+    assert!(worst <= 1e-11, "worst relative energy defect {worst:e}");
+    assert!(
+        worst_naive > 0.05,
+        "the naive ledger closed too ({worst_naive:e}); either the fixture stopped \
+         transferring mass or the deposit stopped being the non-conservative one"
+    );
+}
+
+/// **Gate 77-C.** The divergence source is the volume the added mass
+/// occupies, `mdot/rho`, cell by cell - and the species source is that same
+/// number diluted by `1 - Y_v`.
+///
+/// Both are exact algebra on the deposit, so the tolerance is round-off and
+/// what the test is really checking is that no factor was dropped: a `V`,
+/// an `n_p`, a `dt`, or the density that turns a mass rate into a volume
+/// rate. Getting `dSrc = mdot` instead of `mdot/rho` is off by three orders
+/// of magnitude and dimensionally wrong, and nothing downstream could tell.
+#[test]
+fn gate_77c_the_divergence_and_species_sources_are_the_deposit_divided_through() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (rho_g, y_v): (Scalar, Scalar) = (0.98, 0.012);
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, 345.0, y_v, rho_g);
+    let dt: Scalar = 2e-3;
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    p.seed(&gpu, &hm, &wet_seeds(64)).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+
+    one_wet_step(&gpu, &mut p, &mut dep, &mut cp, &u, &rho, &t_gas, &y_gas, dt);
+    let s = cp.snapshot(&gpu).unwrap();
+    let mut occupied = 0;
+    for c in 0..gm.n_cells {
+        let want_d = s.vapour[c] / rho_g;
+        let want_y = want_d * (1.0 - y_v);
+        assert!(
+            (s.divergence[c] - want_d).abs() <= 1e-15 * want_d.abs().max(1e-30),
+            "cell {c}: dSrc {} against mdot/rho {want_d}",
+            s.divergence[c]
+        );
+        assert!(
+            (s.species_su[c] - want_y).abs() <= 1e-15 * want_y.abs().max(1e-30),
+            "cell {c}: ySu {} against mdot(1-Y)/rho {want_y}",
+            s.species_su[c]
+        );
+        if s.vapour[c] > 0.0 {
+            occupied += 1;
+        }
+    }
+    assert!(occupied > 4, "only {occupied} cells held vapour; the gate is thin");
+
+    // The dilution factor BITES: 1.2 % of the source is small but it is not
+    // zero, and S13.4.1 wants the pair rather than the assertion.
+    let bare: Scalar = (0..gm.n_cells).map(|c| s.divergence[c]).sum();
+    let diluted: Scalar = (0..gm.n_cells).map(|c| s.species_su[c]).sum();
+    let moved = (bare - diluted) / bare;
+    assert!(
+        moved > 0.011 && moved < 0.013,
+        "the dilution factor moved the species source by {moved}"
+    );
+}
+
+/// **Gate 77-E, the by-construction half.** With mass coupling off nothing
+/// is registered on the species equation and `None` is passed for the
+/// divergence, so the arithmetic is the arithmetic it always was. This half
+/// is a property of the source and cannot be measured; what CAN be measured
+/// is that the four S77 arrays are then not even allocated at mesh size, so
+/// there is nothing for a stray write to land in.
+///
+/// **The measured half** is here: a pool that has never held a parcel,
+/// coupled and registered with mass coupling ON, deposits exactly zero into
+/// all four arrays.
+#[test]
+fn gate_77e_an_empty_pool_couples_exactly_zero_vapour() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, 330.0, 0.005, 1.1);
+    let dt: Scalar = 1e-3;
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+    one_wet_step(&gpu, &mut p, &mut dep, &mut cp, &u, &rho, &t_gas, &y_gas, dt);
+
+    let s = cp.snapshot(&gpu).unwrap();
+    let zeros = vec![0.0 as Scalar; gm.n_cells];
+    assert!(bits_eq(&s.vapour, &zeros), "an empty pool made vapour");
+    assert!(bits_eq(&s.species_su, &zeros), "an empty pool sourced Y_v");
+    assert!(bits_eq(&s.divergence, &zeros), "an empty pool expanded the gas");
+    assert!(bits_eq(&s.vapour_enthalpy, &zeros), "an empty pool carried enthalpy");
+    assert_eq!(cp.total_vapour_mass(&gpu).unwrap(), 0.0);
+
+    // And the four arrays are the only thing S77 costs, so the memory report
+    // moves by exactly them.
+    let dry = ParcelCoupling::new(
+        &gpu,
+        &p,
+        CouplingControls {
+            momentum: CouplingMode::Explicit,
+            energy: CouplingMode::Off,
+            mass: MassCoupling::None,
+        },
+    )
+    .unwrap();
+    assert_eq!(cp.device_bytes() - dry.device_bytes(), gm.n_cells * 4 * 8);
+    assert_eq!(dry.device_bytes(), gm.n_cells * 15 * 8);
+}
+
+/// S13.4.1's pair for `coupling/mass`: the same pool, the same step, the two
+/// values - and the ENERGY the gas is handed differs, bitwise, because the
+/// vapour's enthalpy rides the same registry field.
+///
+/// This is what makes `mass evaporation` a setting rather than a label: not
+/// only does the vapour appear, the temperature source changes with it.
+#[test]
+fn the_mass_coupling_mode_changes_the_answer() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([3, 3, 3], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, 340.0, 0.004, 1.0);
+    let dt: Scalar = 2e-3;
+
+    let run = |mass: MassCoupling| {
+        let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+        p.seed(&gpu, &hm, &wet_seeds(48)).unwrap();
+        let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+        // `energy off` is the only legal partner for `mass none` on an
+        // evaporating pool (S77.7), so the pair is exercised at the two
+        // points the contract allows and not at an illegal third.
+        let energy = if mass.is_on() { CouplingMode::Explicit } else { CouplingMode::Off };
+        let mut cp = ParcelCoupling::new(
+            &gpu,
+            &p,
+            CouplingControls { momentum: CouplingMode::Explicit, energy, mass },
+        )
+        .unwrap();
+        let (t, y) = if mass.is_on() {
+            (Some(&t_gas), Some(&y_gas))
+        } else {
+            (None, None)
+        };
+        p.step(&gpu, &u, &rho, Some(&t_gas), Some(&y_gas), dt).unwrap();
+        dep.update(&gpu, &p).unwrap();
+        cp.update(&gpu, &p, &dep, &rho, &u, t, y, dt).unwrap();
+        (cp.snapshot(&gpu).unwrap(), p.snapshot(&gpu).unwrap())
+    };
+
+    let (off, poff) = run(MassCoupling::None);
+    let (on, pon) = run(MassCoupling::Evaporation);
+
+    // The PARCELS are bit for bit the same in both: what the gas is told
+    // does not reach back into the droplet within a step, which is the
+    // read-only-gas property S76 was scoped around and S77 does not break.
+    assert!(bits_eq(&poff.d, &pon.d), "the mass coupling moved the droplets");
+    assert!(
+        bits_eq(&poff.temperature, &pon.temperature),
+        "the mass coupling moved the droplet temperature"
+    );
+    assert!(bits_eq(&poff.mass_lost, &pon.mass_lost));
+
+    // The GAS is not.
+    assert!(
+        !bits_eq(&off.energy_q, &on.energy_q),
+        "the mass coupling left the energy source alone"
+    );
+    let vap: Scalar = on.vapour.iter().sum();
+    assert!(vap > 0.0, "nothing evaporated, so the pair is vacuous");
+    assert_eq!(off.vapour.len(), 1, "`mass none` allocated the S77 arrays");
+}
+
+/// S77.7's contract, in every direction it has. Six refusals, each by name,
+/// each naming the setting that would fix it.
+#[test]
+fn the_half_coupled_evaporating_pool_is_refused_by_name() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([2, 2, 2], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let dt: Scalar = 1e-3;
+    let wet = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    let hot = Parcels::new(
+        &gpu,
+        &hm,
+        &gm,
+        ParcelControls { physics: ParcelPhysics::Heating, ..base_controls() },
+        &[],
+        dt,
+    )
+    .unwrap();
+
+    // 1. mass coupling on a pool that cannot evaporate.
+    let e = ParcelCoupling::new(
+        &gpu,
+        &hot,
+        CouplingControls {
+            momentum: CouplingMode::Explicit,
+            energy: CouplingMode::Explicit,
+            mass: MassCoupling::Evaporation,
+        },
+    )
+    .err()
+    .map(|e| e.to_string())
+    .unwrap_or_default();
+    assert!(e.contains("no vapour to give"), "{e}");
+    assert!(e.contains("evaporating"), "{e}");
+
+    // 2. the vapour without the heat.
+    let e = ParcelCoupling::new(
+        &gpu,
+        &wet,
+        CouplingControls {
+            momentum: CouplingMode::Explicit,
+            energy: CouplingMode::Off,
+            mass: MassCoupling::Evaporation,
+        },
+    )
+    .err()
+    .map(|e| e.to_string())
+    .unwrap_or_default();
+    assert!(e.contains("humidifies without cooling"), "{e}");
+
+    // 3. the heat without the vapour - S76.14's refusal, with its reason
+    //    rewritten now that the other half exists.
+    let e = ParcelCoupling::new(
+        &gpu,
+        &wet,
+        CouplingControls {
+            momentum: CouplingMode::Explicit,
+            energy: CouplingMode::Explicit,
+            mass: MassCoupling::None,
+        },
+    )
+    .err()
+    .map(|e| e.to_string())
+    .unwrap_or_default();
+    assert!(e.contains("mass evaporation"), "{e}");
+    assert!(e.contains("S77"), "{e}");
+
+    // 4. and the two legal combinations are legal.
+    assert!(ParcelCoupling::new(&gpu, &wet, full_coupling()).is_ok());
+    assert!(ParcelCoupling::new(
+        &gpu,
+        &wet,
+        CouplingControls {
+            momentum: CouplingMode::Explicit,
+            energy: CouplingMode::Off,
+            mass: MassCoupling::None,
+        }
+    )
+    .is_ok());
+    // 5. an inert pool is still refused energy, with S68's own reason.
+    let cold = Parcels::new(&gpu, &hm, &gm, base_controls(), &[], dt).unwrap();
+    let e = ParcelCoupling::new(
+        &gpu,
+        &cold,
+        CouplingControls {
+            momentum: CouplingMode::Off,
+            energy: CouplingMode::Explicit,
+            mass: MassCoupling::None,
+        },
+    )
+    .err()
+    .map(|e| e.to_string())
+    .unwrap_or_default();
+    assert!(e.contains("INFINITE heat bath"), "{e}");
+    // 6. and the menu itself takes the new name and refuses a nonsense one.
+    assert_eq!(
+        MassCoupling::from_name("evaporation").unwrap(),
+        MassCoupling::Evaporation
+    );
+    let e = MassCoupling::from_name("condensation").unwrap_err().to_string();
+    assert!(e.contains("evaporation"), "{e}");
+}
+
+/// S13.4 on the vapour field, in both directions: `update` needs `Y_v`
+/// exactly when (77.4) reads it.
+#[test]
+fn the_vapour_field_contract_is_refused_in_both_directions() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([2, 2, 2], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, 330.0, 0.005, 1.1);
+    let dt: Scalar = 1e-3;
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    p.step(&gpu, &u, &rho, Some(&t_gas), Some(&y_gas), dt).unwrap();
+    dep.update(&gpu, &p).unwrap();
+
+    let mut on = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+    let e = on
+        .update(&gpu, &p, &dep, &rho, &u, Some(&t_gas), None, dt)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("dilution"), "{e}");
+
+    let mut off = ParcelCoupling::new(
+        &gpu,
+        &p,
+        CouplingControls {
+            momentum: CouplingMode::Explicit,
+            energy: CouplingMode::Off,
+            mass: MassCoupling::None,
+        },
+    )
+    .unwrap();
+    let e = off
+        .update(&gpu, &p, &dep, &rho, &u, None, Some(&y_gas), dt)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("read and ignored"), "{e}");
+
+    // A short field is refused too, and named.
+    let short = gpu.upload(&vec![0.0 as Scalar; 1]).unwrap();
+    let e = on
+        .update(&gpu, &p, &dep, &rho, &u, Some(&t_gas), Some(&short), dt)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("vapour mass fraction has 1 cells"), "{e}");
+}
+
+/// A droplet in SUPERSATURATED air grows (S76.12 row 11), and every sign in
+/// S77 reverses with it: the gas loses vapour, the gas is WARMED by the
+/// condensation, and the divergence source turns negative - the mixture
+/// contracts because mass is leaving it.
+///
+/// This is also why neither S77 source can be made an implicit sink: with
+/// `mdot` free to change sign, `-mdot cp` on the diagonal would sometimes be
+/// positive, and S68's Patankar guarantee is "by construction, with no
+/// clamp".
+#[test]
+fn condensation_reverses_every_sign_and_is_why_the_sources_are_explicit() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([2, 2, 2], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    // 20 C air holding far more vapour than it can: Y_s(293 K) is about
+    // 0.0146, so 0.05 is heavily supersaturated and the droplets grow.
+    let (u, rho, t_gas, y_gas) = wet_gas(&gpu, &gm, 293.15, 0.05, 1.2);
+    let dt: Scalar = 1e-3;
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    p.seed(
+        &gpu,
+        &hm,
+        &[SeedParcel {
+            position: Vec3::new(0.5, 0.5, 0.5),
+            velocity: Vec3::ZERO,
+            diameter: 2e-4,
+            temperature: 293.15,
+            n_p: 1e5,
+            uid: Some(1),
+        }],
+    )
+    .unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+
+    let d0 = p.snapshot(&gpu).unwrap().d[0];
+    for _ in 0..5 {
+        one_wet_step(&gpu, &mut p, &mut dep, &mut cp, &u, &rho, &t_gas, &y_gas, dt);
+    }
+    let s = cp.snapshot(&gpu).unwrap();
+    let ps = p.snapshot(&gpu).unwrap();
+    assert!(ps.d[0] > d0, "the droplet did not grow: {} against {d0}", ps.d[0]);
+
+    let vap: Scalar = s.vapour.iter().sum();
+    let div: Scalar = s.divergence.iter().sum();
+    let ysu: Scalar = s.species_su.iter().sum();
+    assert!(vap < 0.0, "condensing droplets still made vapour: {vap:e}");
+    assert!(div < 0.0, "condensing droplets still expanded the gas: {div:e}");
+    assert!(ysu < 0.0, "condensing droplets still sourced Y_v: {ysu:e}");
+    // And the sign of the implicit coefficient a semi-implicit split WOULD
+    // have wanted is the wrong one, which is the whole argument.
+    assert!(
+        -vap > 0.0,
+        "with mdot < 0 the sink coefficient -mdot cp is POSITIVE, which is what \
+         S77.5 refuses to put on a diagonal"
+    );
+}
+
+/// **Gate 77-D, the cheap half.** A sealed adiabatic box of air with water
+/// sprayed into it moves along the ADIABATIC SATURATION LINE: the gas cools
+/// and humidifies together, and ASHRAE's wet-bulb temperature of the mixture
+/// - which is the adiabatic-saturation temperature - stays put while it
+/// does. That is the defining property of the process, and it is a property
+/// of the whole trajectory rather than of one endpoint, so it is worth more
+/// than the endpoint alone.
+///
+/// The gas is advanced ON THE HOST from the three S77 deposits, which is the
+/// point: this is the first test in this crate where a cell gets wetter,
+/// and it is what S76.14 said the read-only gas could not do. The parcels
+/// still see one frozen state per step, so the order-independence of S76
+/// survives - what changed is that the state is refreshed BETWEEN steps.
+///
+/// The drift is the model gap, not the integrator's error, and S77.11 names
+/// it: ASHRAE's relation carries `1.006 + 1.86 W` kJ/(kg K) for the moist
+/// mixture where S26's energy equation has one constant `cp`.
+#[test]
+fn the_gas_moves_along_the_adiabatic_saturation_line() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([2, 2, 2], [0.5, 0.5, 0.5], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let dt: Scalar = 5e-4;
+    let p_atm: Scalar = 101_325.0;
+
+    let ctrl = ParcelControls { capacity: 8, ..wet_controls() };
+    let cp_gas = ctrl.cp_gas;
+
+    // 40 C at 12 % relative humidity - dry enough that the depression is
+    // large and the drift, if there is one, has room to show.
+    let mut t_g: Scalar = 313.15;
+    let mut y_v: Scalar = crate::psychro::yv_from_t_rh_p(t_g, 0.12, p_atm);
+    let w0 = crate::psychro::w_from_yv(y_v);
+    let t_star = crate::psychro::t_wb(t_g, w0, p_atm).unwrap();
+
+    let vol = gpu.download(&gm.v).unwrap();
+    let v_box: Scalar = vol.iter().sum();
+    let mut rho_g: Scalar = 1.15;
+    let mut m_gas = rho_g * v_box;
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[], dt).unwrap();
+    // 50 um droplets released AT the adiabatic-saturation temperature, which
+    // is where a droplet on this line sits: they should barely change
+    // temperature while the gas comes to meet them.
+    p.seed(
+        &gpu,
+        &hm,
+        &[SeedParcel {
+            position: Vec3::new(0.25, 0.25, 0.25),
+            velocity: Vec3::ZERO,
+            diameter: 5e-5,
+            temperature: t_star + 273.15,
+            n_p: 6.0e7,
+            uid: Some(1),
+        }],
+    )
+    .unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+
+    let mut u = GpuVectorField::zeros(&gpu, &gm, "U").unwrap();
+    u.f = gpu.upload(&vec![Vec3::ZERO; gm.n_cells]).unwrap();
+    let mut rho = gpu.upload(&vec![rho_g; gm.n_cells]).unwrap();
+    let mut t_f = gpu.upload(&vec![t_g; gm.n_cells]).unwrap();
+    let mut y_f = gpu.upload(&vec![y_v; gm.n_cells]).unwrap();
+
+    let t0 = t_g;
+    let mut drift: Scalar = 0.0;
+    for _ in 0..400 {
+        p.step(&gpu, &u, &rho, Some(&t_f), Some(&y_f), dt).unwrap();
+        dep.update(&gpu, &p).unwrap();
+        cp.update(&gpu, &p, &dep, &rho, &u, Some(&t_f), Some(&y_f), dt)
+            .unwrap();
+
+        let s = cp.snapshot(&gpu).unwrap();
+        let dm: Scalar = (0..gm.n_cells).map(|c| vol[c] * s.vapour[c] * dt).sum();
+        let dq: Scalar = (0..gm.n_cells).map(|c| vol[c] * s.energy_q[c] * dt).sum();
+
+        // The CONSERVATIVE enthalpy change: the registry carries the
+        // non-conservative source, so the mass the gas gained brings
+        // `cp T_g dm` with it (gate 77-B's first trap).
+        let h = m_gas * cp_gas * t_g + dq + cp_gas * t_g * dm;
+        let m_new = m_gas + dm;
+        y_v = (m_gas * y_v + dm) / m_new;
+        t_g = h / (m_new * cp_gas);
+        m_gas = m_new;
+        rho_g = m_gas / v_box;
+
+        gpu.write(&mut rho, &vec![rho_g; gm.n_cells]).unwrap();
+        gpu.write(&mut t_f, &vec![t_g; gm.n_cells]).unwrap();
+        gpu.write(&mut y_f, &vec![y_v; gm.n_cells]).unwrap();
+
+        let w = crate::psychro::w_from_yv(y_v);
+        let t_wb = crate::psychro::t_wb(t_g, w, p_atm).unwrap();
+        drift = drift.max((t_wb - t_star).abs());
+    }
+
+    let w = crate::psychro::w_from_yv(y_v);
+    assert!(t_g < t0 - 2.0, "the gas did not cool: {t_g} from {t0}");
+    assert!(w > 1.5 * w0, "the gas did not humidify: {w} from {w0}");
+    assert!(
+        crate::psychro::rh_from_t_w_p(t_g, w, p_atm) > 0.4,
+        "the box did not get near saturation, so the drift bound is thin"
+    );
+    // The drift is the property-data gap, and 0.5 K is the bar S76.13 set
+    // for the same comparison against the same reference.
+    assert!(
+        drift < 0.5,
+        "ASHRAE's adiabatic-saturation temperature drifted {drift:.4} K along the \
+         process; it should be an invariant of it"
+    );
+}
+
+/// The species seam, end to end: (77.4)'s source handed to the very object
+/// S54's humidity is - a `ScalarTransport` called `Yv` - and the vapour
+/// arriving in the field.
+///
+/// The fixture is deliberately UNIFORM: one identical droplet at every cell
+/// centre of a 2x2x2 block, adiabatic walls, no flow. Then `Y_v` stays
+/// uniform, the convection and diffusion terms are identically zero, and
+/// Euler makes the step exact - `Y_v' = Y_v + S dt` with no solver tolerance
+/// in the way. Anything that goes wrong here is the SEAM and not the
+/// equation: a missing `V`, a source applied after relaxation, or the
+/// registry being read at a different iteration from the one it was written
+/// in.
+#[test]
+fn the_vapour_source_reaches_the_species_field_it_is_handed_to() {
+    use crate::io::case::TurbulenceControls as TCtrl;
+    use crate::scalar_transport::{ScalarTransport, ScalarTransportCoeffs};
+
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let hm = block([2, 2, 2], [1.0, 1.0, 1.0], ["wall"; 6]);
+    let gm = GpuMesh::upload(&gpu, &hm).unwrap();
+    let dt: Scalar = 1e-3;
+    let (rho_g, y0): (Scalar, Scalar) = (1.0, 0.005);
+    let (u, rho, t_gas, _) = wet_gas(&gpu, &gm, 340.0, y0, rho_g);
+
+    let mut p = Parcels::new(&gpu, &hm, &gm, wet_controls(), &[], dt).unwrap();
+    let mut seeds = Vec::new();
+    let mut uid = 1u64;
+    for k in 0..2 {
+        for j in 0..2 {
+            for i in 0..2 {
+                seeds.push(SeedParcel {
+                    position: Vec3::new(
+                        0.25 + 0.5 * i as Scalar,
+                        0.25 + 0.5 * j as Scalar,
+                        0.25 + 0.5 * k as Scalar,
+                    ),
+                    velocity: Vec3::ZERO,
+                    diameter: 1.5e-4,
+                    temperature: 300.0,
+                    n_p: 5.0e4,
+                    uid: Some(uid),
+                });
+                uid += 1;
+            }
+        }
+    }
+    p.seed(&gpu, &hm, &seeds).unwrap();
+    let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
+    let mut cp = ParcelCoupling::new(&gpu, &p, full_coupling()).unwrap();
+
+    let ctrl = TCtrl {
+        k_solver: crate::io::case::SolverControls {
+            tolerance: 1e-15,
+            rel_tol: 0.0,
+            max_iter: 500,
+            check_interval: 1,
+            ..crate::io::case::SolverControls::default()
+        },
+        k_relax: 1.0,
+        steady: false,
+        delta_t: dt,
+        sn_grad: crate::fv::SnGradScheme::Uncorrected,
+        ..TCtrl::default()
+    };
+    let mut yv = ScalarTransport::new(
+        &gpu,
+        &hm,
+        &gm,
+        "Yv",
+        ScalarTransportCoeffs { pr: 0.6, prt: 0.7 },
+        ctrl,
+    )
+    .unwrap();
+    {
+        let f = yv.field_mut();
+        gpu.write(&mut f.f, &vec![y0; gm.n_cells]).unwrap();
+    }
+    yv.initialise(&gpu).unwrap();
+
+    let nut = crate::field::GpuScalarField::zeros(&gpu, &gm, "nut").unwrap();
+    let phi = crate::field::GpuSurfaceScalarField::zeros(&gpu, &gm, "phi").unwrap();
+    let uz = crate::field::GpuVectorField::zeros(&gpu, &gm, "U").unwrap();
+    let flow = crate::turbulence::FlowState::new(&uz, &phi, 1.5e-5);
+
+    let vol = gpu.download(&gm.v).unwrap();
+    let mut y_now = y0;
+    let mut worst: Scalar = 0.0;
+    for step in 0..4 {
+        let y_field = gpu.upload(&vec![y_now; gm.n_cells]).unwrap();
+        p.step(&gpu, &u, &rho, Some(&t_gas), Some(&y_field), dt).unwrap();
+        dep.update(&gpu, &p).unwrap();
+        cp.update(&gpu, &p, &dep, &rho, &u, Some(&t_gas), Some(&y_field), dt)
+            .unwrap();
+
+        let s = cp.snapshot(&gpu).unwrap();
+        yv.correct_with_source(&gpu, &flow, &nut, Some(cp.vapour_source()))
+            .unwrap();
+        let got = gpu.download(&yv.field().f).unwrap();
+
+        // Uniform source, uniform field, no flux: Euler is exact.
+        let want = y_now + s.species_su[0] * dt;
+        for c in 0..gm.n_cells {
+            worst = worst.max((got[c] - want).abs() / want);
+        }
+        assert!(s.species_su[0] > 0.0, "step {step}: no vapour was sourced");
+        y_now = got[0];
+    }
+    assert!(worst <= 1e-11, "worst relative Y_v error {worst:e}");
+    assert!(y_now > y0, "Y_v did not rise: {y_now} from {y0}");
+
+    // The vapour that arrived in the FIELD is the vapour the parcels lost,
+    // divided through by the mixture the crate's unit-density species
+    // equation carries. Not an identity - the equation is `DY/Dt = S` with
+    // `rho` outside it - but it is the right order and the right sign, and
+    // it is the check that catches a source handed to the wrong equation.
+    let dm: Scalar = (0..gm.n_cells).map(|c| vol[c] * s_total(&cp, &gpu, c)).sum::<Scalar>() * dt;
+    let v_dom: Scalar = vol.iter().sum();
+    let want_dy = dm * (1.0 - y0) / (rho_g * v_dom);
+    let got_dy = y_now - y0;
+    assert!(
+        (got_dy / (4.0 * want_dy) - 1.0).abs() < 0.35,
+        "Y_v rose by {got_dy:e}, four steps of {want_dy:e} would have been {:e}",
+        4.0 * want_dy
+    );
+}
+
+/// `mdot'''` in one cell, read back - a one-line helper so the test above
+/// reads as arithmetic rather than as three downloads.
+fn s_total(cp: &ParcelCoupling<'_>, gpu: &Gpu, c: usize) -> Scalar {
+    gpu.download(cp.vapour_production()).unwrap()[c]
 }

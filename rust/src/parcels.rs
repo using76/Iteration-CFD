@@ -84,9 +84,14 @@ mod tests;
 
 pub mod couple;
 pub mod deposit;
+pub mod evaporation;
 
 pub use couple::{
     CouplingControls, CouplingMode, CouplingSnapshot, MassCoupling, ParcelCoupling,
+};
+pub use evaporation::{
+    boiling_temperature, d2_law_slope, droplet_rate, steady_temperature, DropletRate,
+    EvaporationControls, GasState, LiquidProperties, MassTransfer, SaturationCurve,
 };
 pub use deposit::{
     DepositSnapshot, DeviceScan, ParcelCsrSnapshot, ParcelDeposition, RADIX_BITS, RADIX_DIGITS,
@@ -285,18 +290,38 @@ pub enum ParcelPhysics {
     /// nowhere - which is why this is an enum value and not a flag on the
     /// coupling.
     ///
-    /// Still no mass transfer: `d` and `n_p` do not move, and evaporation is
-    /// refused by name (S68.13).
+    /// Still no mass transfer: `d` and `n_p` do not move.
+    /// [`Self::Evaporating`] is the half this one leaves out.
     Heating,
+
+    /// ... and the diameter evolves too, by the mass transfer of SPEC-LIT
+    /// (76.7): Spalding's Stefan-flow rate through a film whose properties
+    /// are evaluated at the 1/3-rule temperature, with the latent heat that
+    /// mass carries taken out of the same energy balance (68.9) already
+    /// integrates, and the boiling limit of (76.9) capping the temperature.
+    ///
+    /// `n_p` does NOT move: a parcel stands for a fixed number of droplets
+    /// and evaporation shrinks each of them. That is what makes the mass
+    /// bookkeeping of (76.10) a difference of two endpoints rather than a
+    /// sum over sub-steps.
+    ///
+    /// The gas is still READ and not written. The vapour and the latent heat
+    /// are accumulated per parcel and made available - [`ParcelSnapshot`]
+    /// carries both - and coupling them into a species equation and into
+    /// `Energy::target_divergence` is a later section's. S76.14 says so, and
+    /// [`couple::ParcelCoupling::new`] refuses to couple the energy of an
+    /// evaporating pool rather than couple half of it.
+    Evaporating,
 }
 
 impl ParcelPhysics {
-    pub const NAMES: &'static [&'static str] = &["inert", "heating"];
+    pub const NAMES: &'static [&'static str] = &["inert", "heating", "evaporating"];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Inert => "inert",
             Self::Heating => "heating",
+            Self::Evaporating => "evaporating",
         }
     }
 
@@ -305,33 +330,33 @@ impl ParcelPhysics {
         match self {
             Self::Inert => 0,
             Self::Heating => 1,
+            Self::Evaporating => 2,
         }
+    }
+
+    /// Whether the parcel carries a temperature that moves - true for both
+    /// [`Self::Heating`] and [`Self::Evaporating`], which is what sizes the
+    /// thermal accumulators and what `cuda/parcels.cu` calls `thermal`.
+    #[must_use]
+    pub fn is_thermal(self) -> bool {
+        matches!(self, Self::Heating | Self::Evaporating)
     }
 
     pub fn from_name(s: &str) -> Result<Self> {
         match s {
             "inert" => Ok(Self::Inert),
             "heating" | "heatTransfer" => Ok(Self::Heating),
-            "evaporating" | "evaporation" | "heatAndMassTransfer" => {
-                contract::unsupported_note(
-                    "parcels/physics",
-                    s,
-                    Self::NAMES,
-                    "evaporation needs the semi-implicit 3x3 closure of the design note's \
-                     S1.5, liquid property tables and a species source, none of which \
-                     exist; SPEC-LIT S68.13 names them and this module does NOT implement \
-                     them. `heating` is the sensible-heat half of it and IS implemented",
-                    "heating",
-                    Self::Heating,
-                )
-            }
+            "evaporating" | "evaporation" | "heatAndMassTransfer" => Ok(Self::Evaporating),
             "reacting" | "combusting" => contract::unsupported_note(
                 "parcels/physics",
                 s,
                 Self::NAMES,
-                "a reacting parcel needs evaporation first (SPEC-LIT S68.13)",
-                "inert",
-                Self::Inert,
+                "a reacting parcel needs the vapour it produces to reach a combustion \
+                 model, and S76 leaves that vapour ON the parcel: it is accumulated and \
+                 made available, and there is no species source carrying it into the gas \
+                 yet (SPEC-LIT S76.14)",
+                "evaporating",
+                Self::Evaporating,
             ),
             other => contract::unsupported(
                 "parcels/physics",
@@ -397,6 +422,14 @@ pub struct ParcelControls {
     /// Hard cap on face crossings per sub-step. Exceeding it marks the parcel
     /// `lost` and counts it (66.6).
     pub max_walk: u32,
+    /// SPEC-LIT S76: the liquid, the saturation curve, the blowing
+    /// correction and the evaporation sub-step bound.
+    ///
+    /// Read only by [`ParcelPhysics::Evaporating`], and not read at all by
+    /// the other two - which is the whole content of S76.10's bitwise claim
+    /// and is asserted, not promised, by
+    /// [`tests::the_evaporation_settings_cannot_move_a_heating_parcel`].
+    pub evaporation: EvaporationControls,
     /// Blocks in the fixed persistent grid, or `None` to derive it from
     /// `capacity`.
     ///
@@ -428,6 +461,7 @@ impl Default for ParcelControls {
             cfl: 0.9,
             max_substeps: 64,
             max_walk: 16,
+            evaporation: EvaporationControls::default(),
             persistent_blocks: None,
         }
     }
@@ -506,6 +540,13 @@ impl ParcelControls {
         {
             return Err(Error::Config("parcels: gravity is not finite".to_string()));
         }
+        // S76.2, and validated for the same reason the three thermal
+        // properties above are: a number that is nonsense when it is read is
+        // nonsense when it is written, and the error is more use at setup
+        // than three steps into a run. The boiling-point root find is inside
+        // it, so a pressure at which this liquid does not boil is refused
+        // here rather than discovered as a NaN diameter.
+        self.evaporation.validate()?;
         Ok(())
     }
 
@@ -535,7 +576,7 @@ impl ParcelControls {
             self.cfl,
             self.max_substeps,
             self.max_walk,
-            if self.physics == ParcelPhysics::Heating {
+            if self.physics.is_thermal() {
                 format!(
                     " cLiquid={} kGas={} cpGas={}",
                     self.c_liquid, self.k_gas, self.cp_gas
@@ -543,7 +584,12 @@ impl ParcelControls {
             } else {
                 String::new()
             },
-        )
+        ) + &if self.physics == ParcelPhysics::Evaporating {
+            format!("
+{}", self.evaporation.describe())
+        } else {
+            String::new()
+        }
     }
 
     fn c_am(&self) -> Scalar {
@@ -626,6 +672,11 @@ pub struct ParcelStats {
     /// Parcels an injector wanted to emit and the pool had no room for.
     pub n_dropped: i64,
     pub n_injected: i64,
+    /// SPEC-LIT (76.10): parcels whose last droplet evaporated away and
+    /// which left the working set for that reason. Counted apart from
+    /// `n_escaped` and `n_wall` because "the spray shrank" and "the spray
+    /// left" are different runs and a single "gone" count cannot say which.
+    pub n_evaporated: i64,
 }
 
 impl ParcelStats {
@@ -666,8 +717,16 @@ pub struct ParcelSnapshot {
     /// unless the parcels are heating.
     pub heat: Vec<Scalar>,
     /// (68.9): the heat exchange rate for one droplet, W/K. Empty unless
-    /// the parcels are heating.
+    /// the parcels are heating or evaporating.
     pub heat_exchange: Vec<Scalar>,
+    /// (76.10): the mass ONE DROPLET lost over the last step, kg - the
+    /// difference of the two endpoint masses, so it is exactly the change in
+    /// this parcel's own state and not a sum that nearly is. Multiply by
+    /// `n_p` for the parcel's. Empty unless the parcels are evaporating.
+    pub mass_lost: Vec<Scalar>,
+    /// (76.10): the latent heat that mass carried away from ONE DROPLET over
+    /// the last step, J. Empty unless the parcels are evaporating.
+    pub latent: Vec<Scalar>,
     /// Slots in use; entries beyond this are untouched pool.
     pub n_slots: usize,
 }
@@ -681,6 +740,10 @@ impl ParcelSnapshot {
 
     /// Total liquid mass the live parcels stand for, kg:
     /// `sum n_p rho_l (pi/6) d^3`.
+    ///
+    /// The `n_p`-weighted mass accumulator [`Self::total_mass_lost`] and this
+    /// are the two halves of S76.12's conservation gate: what the pool holds
+    /// plus what it says it gave up has to be what it started with.
     #[must_use]
     pub fn liquid_mass(&self, rho_liquid: Scalar) -> Scalar {
         let mut m = 0.0;
@@ -689,6 +752,44 @@ impl ParcelSnapshot {
             m += self.n_p[i] * rho_liquid * std::f64::consts::FRAC_PI_6 as Scalar * d * d * d;
         }
         m
+    }
+
+    /// (76.10): `sum n_p dm_p` over the LIVE parcels, kg - what this step's
+    /// evaporation took out of the liquid the pool still holds.
+    ///
+    /// Live only, and deliberately: a parcel that evaporated to nothing, or
+    /// left through a patch, is not in the pool at the end of the step, so
+    /// its loss is not in [`Self::liquid_mass`] either and adding it here
+    /// would double-count. S76.12's gate runs in a closed box with no
+    /// escapes for exactly that reason, and [`Self::dead_mass_lost`] is the
+    /// term it would need if there were.
+    #[must_use]
+    pub fn total_mass_lost(&self) -> Scalar {
+        if self.mass_lost.is_empty() {
+            // A pool that cannot evaporate lost nothing, and says so rather
+            // than indexing an array it never allocated - the same shape
+            // `live_parcel_heat` uses for a pool that cannot heat.
+            return 0.0;
+        }
+        self.live().iter().map(|&i| self.n_p[i] * self.mass_lost[i]).sum()
+    }
+
+    /// (76.10): `sum n_p dm_p` over the slots that are NOT live - the mass
+    /// the parcels that died this step gave up on their way out.
+    ///
+    /// It is reported rather than folded in because it is the measurable
+    /// version of S68.9 row 4's gap: an accumulator written by a parcel that
+    /// is no longer in the CSR is never deposited, and the number is here so
+    /// a run can say how much that was.
+    #[must_use]
+    pub fn dead_mass_lost(&self) -> Scalar {
+        if self.mass_lost.is_empty() {
+            return 0.0;
+        }
+        (0..self.n_slots)
+            .filter(|&i| self.cell[i] < 0)
+            .map(|i| self.n_p[i] * self.mass_lost[i])
+            .sum()
     }
 }
 
@@ -721,7 +822,8 @@ const N_WALL: usize = 1;
 const N_LOST: usize = 2;
 const N_DROPPED: usize = 3;
 const N_INJECTED: usize = 4;
-const N_COUNTERS: usize = 5;
+const N_EVAPORATED: usize = 5;
+const N_COUNTERS: usize = 6;
 
 /// Upper bound on the fixed persistent grid. A grid-stride kernel needs only
 /// enough blocks to fill the device; more is waste, and the number must be a
@@ -764,14 +866,24 @@ pub struct Parcels<'m> {
     imp: DevBuf<Vec3>,
     /// Momentum exchange rate for one droplet, kg/s.
     axr: DevBuf<Scalar>,
-    /// Heat into ONE droplet over the last step, J. Length 1 unless the
-    /// parcels are heating.
+    /// Convective heat into ONE droplet over the last step, J. Length 1
+    /// unless the parcels are thermal. For a heating parcel this is
+    /// `m_p c_l dT_p` exactly; for an evaporating one it is the convective
+    /// term alone, and (76.10)'s `qlat` is the rest.
     qim: DevBuf<Scalar>,
-    /// Heat exchange rate for one droplet, W/K. Length 1 unless heating.
+    /// Heat exchange rate for one droplet, W/K. Length 1 unless thermal.
     atr: DevBuf<Scalar>,
-    /// A one-element stand-in for the gas temperature, passed when the
-    /// parcels are inert so that the kernel signature never changes and the
-    /// pointer is never dereferenced.
+    /// (76.10): mass lost by ONE droplet over the last step, kg. Length 1
+    /// unless the parcels are evaporating.
+    dmv: DevBuf<Scalar>,
+    /// (76.10): latent heat that mass carried off, J. Length 1 unless
+    /// evaporating.
+    qlat: DevBuf<Scalar>,
+    /// A one-element stand-in for a gas field, passed when the parcels do not
+    /// read it so that the kernel signature never changes and the pointer is
+    /// never dereferenced. Used for both the gas temperature and the vapour
+    /// mass fraction, because neither is read unless the physics that reads
+    /// it is selected.
     t_null: DevBuf<Scalar>,
 
     // ---- device-resident step state -----------------------------------
@@ -803,6 +915,11 @@ pub struct Parcels<'m> {
     /// The `dt` the injection strides were computed against. A captured graph
     /// freezes it, so [`Parcels::step`] refuses a different one.
     dt: Scalar,
+
+    /// SPEC-LIT (76.9): the boiling temperature at the ambient pressure, K.
+    /// Root-found ONCE on the host, at setup, where a liquid that does not
+    /// boil at this pressure can be named; the kernel is handed the number.
+    t_boil_p: Scalar,
 }
 
 impl<'m> Parcels<'m> {
@@ -860,6 +977,13 @@ impl<'m> Parcels<'m> {
                 injectors.len()
             )));
         }
+
+        // (76.9). The root find is here - once, on the host, at setup - and
+        // never in a kernel: a bisection has a data-dependent trip count,
+        // which is warp divergence and a geometry a captured graph cannot
+        // express, and a root find that fails has to be able to SAY so.
+        let evaporating = ctrl.physics == ParcelPhysics::Evaporating;
+        let t_boil_p = ctrl.evaporation.boiling_temperature()?;
 
         let cap = ctrl.capacity;
         let blocks = ctrl.persistent_blocks.unwrap_or_else(|| {
@@ -994,9 +1118,13 @@ impl<'m> Parcels<'m> {
 
             imp: gpu.zeros(cap)?,
             axr: gpu.zeros(cap)?,
-            // Sized only when something reads them - S68.2's memory note.
-            qim: gpu.zeros(if ctrl.physics == ParcelPhysics::Heating { cap } else { 1 })?,
-            atr: gpu.zeros(if ctrl.physics == ParcelPhysics::Heating { cap } else { 1 })?,
+            // Sized only when something reads them - S68.2's memory note,
+            // and S76 keeps to it: an inert pool pays nothing for the
+            // thermal pair and a heating pool nothing for the mass pair.
+            qim: gpu.zeros(if ctrl.physics.is_thermal() { cap } else { 1 })?,
+            atr: gpu.zeros(if ctrl.physics.is_thermal() { cap } else { 1 })?,
+            dmv: gpu.zeros(if evaporating { cap } else { 1 })?,
+            qlat: gpu.zeros(if evaporating { cap } else { 1 })?,
             t_null: gpu.zeros(1)?,
 
             n_active: gpu.zeros(1)?,
@@ -1024,6 +1152,7 @@ impl<'m> Parcels<'m> {
             n_inj: n as i32,
 
             dt,
+            t_boil_p,
         })
     }
 
@@ -1038,6 +1167,14 @@ impl<'m> Parcels<'m> {
     /// Blocks in the fixed persistent grid, as resolved at setup.
     pub fn persistent_blocks(&self) -> u32 {
         self.grid.grid_dim.0
+    }
+
+    /// SPEC-LIT (76.9): the boiling temperature at the ambient pressure, K,
+    /// as the host root-found it at setup. Reported so a run can print the
+    /// number its droplets are capped at rather than leave it implied.
+    #[must_use]
+    pub fn boiling_temperature(&self) -> Scalar {
+        self.t_boil_p
     }
 
     /// Place parcels directly, at setup, with no injector - what a
@@ -1142,6 +1279,7 @@ impl<'m> Parcels<'m> {
         u_gas: &GpuVectorField,
         rho_gas: &DevBuf<Scalar>,
         t_gas: Option<&DevBuf<Scalar>>,
+        y_vapour: Option<&DevBuf<Scalar>>,
         dt: Scalar,
     ) -> Result<()> {
         if dt != self.dt {
@@ -1168,12 +1306,24 @@ impl<'m> Parcels<'m> {
         // temperature field would read it and ignore it. Both are refused
         // by name.
         match (self.ctrl.physics, t_gas) {
-            (ParcelPhysics::Heating, Some(t)) if t.len() != self.m.n_cells => {
+            (ParcelPhysics::Heating | ParcelPhysics::Evaporating, Some(t))
+                if t.len() != self.m.n_cells =>
+            {
                 return Err(Error::Config(format!(
                     "parcels: the gas temperature has {} cells, the mesh has {}",
                     t.len(),
                     self.m.n_cells
                 )))
+            }
+            (ParcelPhysics::Evaporating, None) => {
+                return Err(Error::Config(
+                    "parcels: physics is \"evaporating\" and no gas temperature was \
+                     given. (76.4) evaluates every film property at a temperature \
+                     between the droplet's and the gas's, and (76.7) drives the whole \
+                     transfer with the difference between them; without that field there \
+                     is nothing to evaporate into (SPEC-LIT S76.2)"
+                        .to_string(),
+                ))
             }
             (ParcelPhysics::Heating, None) => {
                 return Err(Error::Config(
@@ -1191,6 +1341,43 @@ impl<'m> Parcels<'m> {
                      inert parcel's temperature does not move, so the field would be \
                      read and ignored; say `physics heating` to have it used (SPEC-LIT \
                      S13.4)"
+                        .to_string(),
+                ))
+            }
+            _ => {}
+        }
+
+        // SPEC-LIT S13.4 again, on the vapour field, and in both directions
+        // for the same reason. An evaporating pool with no `Y_v` would read a
+        // pointer that is one element long; a pool that cannot evaporate,
+        // handed `Y_v`, would read the field and ignore it - the quiet wrong
+        // answer this contract exists to refuse. There is deliberately no
+        // "assume dry air" default: dry air is `Y_v = 0`, which is a field a
+        // case can supply and mean.
+        match (self.ctrl.physics, y_vapour) {
+            (ParcelPhysics::Evaporating, Some(y)) if y.len() != self.m.n_cells => {
+                return Err(Error::Config(format!(
+                    "parcels: the gas vapour mass fraction has {} cells, the mesh has {}",
+                    y.len(),
+                    self.m.n_cells
+                )))
+            }
+            (ParcelPhysics::Evaporating, None) => {
+                return Err(Error::Config(
+                    "parcels: physics is \"evaporating\" and no gas vapour mass fraction \
+                     was given. The Spalding number of (76.7) is (Y_s - Y_g)/(1 - Y_s), \
+                     so the ambient vapour is not a detail of the model - it is half of \
+                     the driving force, and it is the whole reason a droplet stops \
+                     evaporating in saturated air. Pass a zeroed field to mean dry \
+                     (SPEC-LIT S76.2)"
+                        .to_string(),
+                ))
+            }
+            (ParcelPhysics::Inert | ParcelPhysics::Heating, Some(_)) => {
+                return Err(Error::Config(
+                    "parcels: a gas vapour mass fraction was given and the physics is \
+                     not \"evaporating\", so the field would be read and ignored \
+                     (SPEC-LIT S13.4)"
                         .to_string(),
                 ))
             }
@@ -1325,6 +1512,25 @@ impl<'m> Parcels<'m> {
         let c_liquid = self.ctrl.c_liquid;
         let k_gas = self.ctrl.k_gas;
         let cp_gas = self.ctrl.cp_gas;
+        // SPEC-LIT S76. Every one of these is a setup-time constant, so the
+        // launch arguments are frozen exactly as (66.7) requires and the
+        // captured graph never needs updating.
+        let ev = self.ctrl.evaporation;
+        let sat_curve = ev.saturation.code();
+        let transfer = ev.transfer.code();
+        let w_vap = ev.liquid.w_vapour;
+        let w_carrier = ev.w_carrier;
+        let t_boil = ev.liquid.t_boil;
+        let p_boil = ev.liquid.p_boil;
+        let hv_boil = ev.liquid.h_v_boil;
+        let t_crit = ev.liquid.t_crit;
+        let d_vap = ev.liquid.d_vapour;
+        let t_ref_d = ev.liquid.t_ref_d;
+        let d_exp = ev.liquid.d_exponent;
+        let cp_vap = ev.liquid.cp_vapour;
+        let p_amb = ev.p_ambient;
+        let t_boil_p = self.t_boil_p;
+        let evap_cfl = ev.cfl;
         let m = self.m;
         let Self {
             x,
@@ -1339,6 +1545,8 @@ impl<'m> Parcels<'m> {
             axr,
             qim,
             atr,
+            dmv,
+            qlat,
             t_null,
             ..
         } = self;
@@ -1349,12 +1557,20 @@ impl<'m> Parcels<'m> {
             Some(t) => t,
             None => &*t_null,
         };
+        let y_field: &DevBuf<Scalar> = match y_vapour {
+            Some(y) => y,
+            None => &*t_null,
+        };
         unsafe {
             gpu.stream()
                 .launch_builder(&f)
                 .arg(&mut *x)
                 .arg(&mut *u)
-                .arg(&*d)
+                // (76.10): the diameter is written now, and only by an
+                // evaporating pool. It was passed const through S66-S68 and
+                // the constness was the proof; the proof is now the
+                // `if (evaporating)` around the one store in the kernel.
+                .arg(&mut *d)
                 .arg(&mut *cell)
                 .arg(&mut *flags)
                 .arg(&mut *counters)
@@ -1396,6 +1612,24 @@ impl<'m> Parcels<'m> {
                 .arg(&c_liquid)
                 .arg(&k_gas)
                 .arg(&cp_gas)
+                .arg(&mut *dmv)
+                .arg(&mut *qlat)
+                .arg(y_field)
+                .arg(&sat_curve)
+                .arg(&transfer)
+                .arg(&w_vap)
+                .arg(&w_carrier)
+                .arg(&t_boil)
+                .arg(&p_boil)
+                .arg(&hv_boil)
+                .arg(&t_crit)
+                .arg(&d_vap)
+                .arg(&t_ref_d)
+                .arg(&d_exp)
+                .arg(&cp_vap)
+                .arg(&p_amb)
+                .arg(&t_boil_p)
+                .arg(&evap_cfl)
                 .launch(cfg)?;
         }
 
@@ -1421,6 +1655,7 @@ impl<'m> Parcels<'m> {
             n_lost: c[N_LOST],
             n_dropped: c[N_DROPPED],
             n_injected: c[N_INJECTED],
+            n_evaporated: c[N_EVAPORATED],
         })
     }
 
@@ -1438,13 +1673,23 @@ impl<'m> Parcels<'m> {
             flags: gpu.download(&self.flags)?,
             impulse: gpu.download(&self.imp)?,
             exchange: gpu.download(&self.axr)?,
-            heat: if self.ctrl.physics == ParcelPhysics::Heating {
+            heat: if self.ctrl.physics.is_thermal() {
                 gpu.download(&self.qim)?
             } else {
                 Vec::new()
             },
-            heat_exchange: if self.ctrl.physics == ParcelPhysics::Heating {
+            heat_exchange: if self.ctrl.physics.is_thermal() {
                 gpu.download(&self.atr)?
+            } else {
+                Vec::new()
+            },
+            mass_lost: if self.ctrl.physics == ParcelPhysics::Evaporating {
+                gpu.download(&self.dmv)?
+            } else {
+                Vec::new()
+            },
+            latent: if self.ctrl.physics == ParcelPhysics::Evaporating {
+                gpu.download(&self.qlat)?
             } else {
                 Vec::new()
             },

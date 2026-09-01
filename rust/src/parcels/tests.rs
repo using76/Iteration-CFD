@@ -291,18 +291,17 @@ fn every_unsupported_setting_is_refused_by_name_with_the_menu() {
     let e = WallAction::from_name("splash").unwrap_err().to_string();
     assert!(e.contains("splash") && e.contains("population growth"), "{e}");
 
-    // The one this unit is defined by NOT having. `heating` was refused here
-    // too until S68.5 implemented it - the sensible-heat half of the same two
-    // Ranz & Marshall papers - so the menu grew by one and the refusal list
-    // shrank by one. Evaporation is still refused, and still by name.
+    // The refusal list here has now shrunk TWICE, and the shape of this test
+    // is the record of it. `heating` was refused until S68.5 implemented the
+    // sensible-heat half of the two Ranz & Marshall papers; `evaporating` was
+    // refused until S76 implemented the other half. Both are supported now,
+    // and what is still refused is what genuinely does not exist.
     for name in ["evaporating", "evaporation", "heatAndMassTransfer"] {
-        let e = ParcelPhysics::from_name(name).unwrap_err().to_string();
-        assert!(e.contains(name), "{e}");
-        assert!(
-            e.contains("evaporation") || e.contains("evaporating"),
-            "the refusal must name what is missing: {e}"
+        assert_eq!(
+            ParcelPhysics::from_name(name).unwrap(),
+            ParcelPhysics::Evaporating,
+            "S76 supports `{name}`"
         );
-        assert!(e.contains("inert"), "the alternative must be printed: {e}");
     }
     assert_eq!(
         ParcelPhysics::from_name("heating").unwrap(),
@@ -310,6 +309,12 @@ fn every_unsupported_setting_is_refused_by_name_with_the_menu() {
         "S68.5 supports `heating`; if this ever fails, the refusal above has to \
          grow it back"
     );
+    for name in ["reacting", "combusting"] {
+        let e = ParcelPhysics::from_name(name).unwrap_err().to_string();
+        assert!(e.contains(name), "{e}");
+        assert!(e.contains("species source"), "the refusal must name what is missing: {e}");
+        assert!(e.contains("evaporating"), "the alternative must be printed: {e}");
+    }
 
     assert_eq!(DragModel::from_name("stokes").unwrap(), DragModel::Stokes);
     assert_eq!(WallAction::from_name("rebound").unwrap(), WallAction::Rebound);
@@ -429,6 +434,7 @@ fn fall_to_terminal(
         cfl: 0.9,
         max_substeps: 1,
         max_walk: 16,
+        evaporation: EvaporationControls::default(),
         persistent_blocks: None,
     };
     let mut p = Parcels::new(gpu, hm, gm, ctrl, &[], dt)?;
@@ -447,7 +453,7 @@ fn fall_to_terminal(
     let (u, rho) = still_gas(gpu, gm, 1.2)?;
     let n = ((t_end / dt).round() as usize).max(min_steps);
     for _ in 0..n {
-        p.step(gpu, &u, &rho, None, dt)?;
+        p.step(gpu, &u, &rho, None, None, dt)?;
     }
     let s = p.snapshot(gpu)?;
     assert!(s.cell[0] >= 0, "the droplet left the box before the run ended");
@@ -559,13 +565,14 @@ fn gate_66b_a_parcel_lands_in_the_cell_the_arithmetic_names() {
         cfl: 0.9,
         max_substeps: 64,
         max_walk: 16,
+        evaporation: EvaporationControls::default(),
         persistent_blocks: None,
     };
     let dt: Scalar = 1.0;
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[], dt).unwrap();
     p.seed(&gpu, &hm, &seeds).unwrap();
     let (u, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
-    p.step(&gpu, &u, &rho, None, dt).unwrap();
+    p.step(&gpu, &u, &rho, None, None, dt).unwrap();
 
     let s = p.snapshot(&gpu).unwrap();
     let stats = p.stats(&gpu).unwrap();
@@ -614,6 +621,7 @@ fn a_parcel_aimed_out_of_the_domain_escapes_at_the_face_and_is_counted() {
         cfl: 0.9,
         max_substeps: 64,
         max_walk: 32,
+        evaporation: EvaporationControls::default(),
         persistent_blocks: None,
     };
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[], 1.0).unwrap();
@@ -631,7 +639,7 @@ fn a_parcel_aimed_out_of_the_domain_escapes_at_the_face_and_is_counted() {
     )
     .unwrap();
     let (u, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
-    p.step(&gpu, &u, &rho, None, 1.0).unwrap();
+    p.step(&gpu, &u, &rho, None, None, 1.0).unwrap();
 
     let s = p.snapshot(&gpu).unwrap();
     let st = p.stats(&gpu).unwrap();
@@ -675,6 +683,7 @@ fn a_rebounding_parcel_follows_the_folded_straight_line() {
         cfl: 0.9,
         max_substeps: 64,
         max_walk: 32,
+        evaporation: EvaporationControls::default(),
         persistent_blocks: None,
     };
     let dt: Scalar = 0.05;
@@ -696,7 +705,7 @@ fn a_rebounding_parcel_follows_the_folded_straight_line() {
     let (u, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
 
     for n in 1..=40usize {
-        p.step(&gpu, &u, &rho, None, dt).unwrap();
+        p.step(&gpu, &u, &rho, None, None, dt).unwrap();
         let s = p.snapshot(&gpu).unwrap();
         assert!(s.cell[0] >= 0, "a rebounding parcel never leaves the domain");
         let t = n as Scalar * dt;
@@ -739,6 +748,7 @@ fn base_controls() -> ParcelControls {
         cfl: 0.9,
         max_substeps: 64,
         max_walk: 16,
+        evaporation: EvaporationControls::default(),
         persistent_blocks: None,
     }
 }
@@ -777,7 +787,7 @@ fn run_case(
     let mut p = Parcels::new(gpu, hm, gm, ctrl, inj, BASE_DT)?;
     let (u, rho) = still_gas(gpu, gm, 1.2)?;
     for _ in 0..steps {
-        p.step(gpu, &u, &rho, None, BASE_DT)?;
+        p.step(gpu, &u, &rho, None, None, BASE_DT)?;
     }
     p.snapshot(gpu)
 }
@@ -851,7 +861,7 @@ fn a_permutation_of_the_pool_permutes_the_answer_and_nothing_else() {
         p.seed(&gpu, &hm, sd).unwrap();
         let (u, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
         for _ in 0..BASE_STEPS {
-            p.step(&gpu, &u, &rho, None, BASE_DT).unwrap();
+            p.step(&gpu, &u, &rho, None, None, BASE_DT).unwrap();
         }
         p.snapshot(&gpu).unwrap()
     };
@@ -893,7 +903,7 @@ fn the_graph_is_captured_once_and_replayed() {
     let (u, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
 
     let captured = gpu
-        .capture(|_| p.step(&gpu, &u, &rho, None, BASE_DT))
+        .capture(|_| p.step(&gpu, &u, &rho, None, None, BASE_DT))
         .expect("capture must not fail: nothing in the step allocates, synchronises or reads back");
     let Some(mut graph) = captured else {
         panic!("the capture produced an empty graph - the step launched nothing");
@@ -987,7 +997,7 @@ fn the_device_enumerations_match_the_host() {
             }],
         )
         .unwrap();
-        p.step(&gpu, &u, &rho, None, dt).unwrap();
+        p.step(&gpu, &u, &rho, None, None, dt).unwrap();
         let s = p.snapshot(&gpu).unwrap();
 
         // u_new = u + (0 - u) w, so w = 1 - u_new/u and beta = -ln(1 - w).
@@ -1016,7 +1026,7 @@ fn the_device_identity_matches_the_host_identity() {
     let mut p = Parcels::new(&gpu, &hm, &gm, base_controls(), &inj, BASE_DT).unwrap();
     let (u, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
     for _ in 0..4 {
-        p.step(&gpu, &u, &rho, None, BASE_DT).unwrap();
+        p.step(&gpu, &u, &rho, None, None, BASE_DT).unwrap();
     }
     let s = p.snapshot(&gpu).unwrap();
 
@@ -1092,7 +1102,7 @@ fn the_pool_refuses_by_name_when_it_overflows() {
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &inj, BASE_DT).unwrap();
     let (u, rho) = still_gas(&gpu, &gm, 1.2).unwrap();
     for _ in 0..10 {
-        p.step(&gpu, &u, &rho, None, BASE_DT).unwrap();
+        p.step(&gpu, &u, &rho, None, None, BASE_DT).unwrap();
     }
     let st = p.stats(&gpu).unwrap();
     assert!(st.n_dropped > 0, "capacity 20 with 8 parcels a step for 10 steps must overflow");
@@ -1281,3 +1291,814 @@ fn the_parcel_output_writes_one_point_per_live_parcel() {
         assert_eq!(((hi as u64) << 32) | lo as u64, s.uid[i]);
     }
 }
+
+// ======================================================================
+//  SPEC-LIT S76: droplet heating and evaporation, on the device
+// ======================================================================
+
+/// One droplet, alone, in a box of still gas at a fixed state - the fixture
+/// every S76 gate below is posed on, because a single suspended droplet is
+/// what Ranz & Marshall measured and it isolates the closure from the mesh,
+/// the walk and the injector all at once.
+struct Drop {
+    hm: HostMesh,
+    gm: GpuMesh,
+    u: GpuVectorField,
+    rho: DevBuf<Scalar>,
+    tg: DevBuf<Scalar>,
+    yv: DevBuf<Scalar>,
+    gas: GasState,
+}
+
+fn droplet_box(gpu: &Gpu, t_gas: Scalar, rh: Scalar, u_rel: Scalar) -> Drop {
+    let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["patch"; 6]);
+    let gm = GpuMesh::upload(gpu, &hm).unwrap();
+    // The GAS moves and the droplet is released at rest, which is how the
+    // suspended-droplet experiments were run.
+    let mut u = GpuVectorField::zeros(gpu, &gm, "U").unwrap();
+    u.f = gpu.upload(&vec![Vec3::new(u_rel, 0.0, 0.0); gm.n_cells]).unwrap();
+    let rho_gas = 101_325.0 * 28.966e-3 / (crate::parcels::evaporation::R_UNIVERSAL * t_gas);
+    let y = crate::psychro::yv_from_t_rh_p(t_gas, rh, 101_325.0);
+    Drop {
+        rho: gpu.upload(&vec![rho_gas; gm.n_cells]).unwrap(),
+        tg: gpu.upload(&vec![t_gas; gm.n_cells]).unwrap(),
+        yv: gpu.upload(&vec![y; gm.n_cells]).unwrap(),
+        gas: GasState {
+            t: t_gas,
+            y_vapour: y,
+            rho: rho_gas,
+            mu: 1.8e-5,
+            k: 0.026,
+            cp: 1005.0,
+            u_rel,
+        },
+        hm,
+        gm,
+        u,
+    }
+}
+
+fn evaporating_controls(ev: EvaporationControls) -> ParcelControls {
+    ParcelControls {
+        capacity: 4,
+        drag: DragModel::None,
+        physics: ParcelPhysics::Evaporating,
+        wall: WallAction::Remove,
+        restitution: 1.0,
+        tangential_loss: 0.0,
+        gravity: Vec3::ZERO,
+        rho_liquid: 1000.0,
+        mu_gas: 1.8e-5,
+        c_liquid: 4182.0,
+        k_gas: 0.026,
+        cp_gas: 1005.0,
+        added_mass: false,
+        cfl: 0.9,
+        max_substeps: 64,
+        max_walk: 16,
+        evaporation: ev,
+        persistent_blocks: None,
+    }
+}
+
+fn one_droplet<'m>(
+    gpu: &Gpu,
+    b: &'m Drop,
+    ctrl: ParcelControls,
+    d0: Scalar,
+    t0: Scalar,
+    n_p: Scalar,
+    dt: Scalar,
+) -> Parcels<'m> {
+    let mut p = Parcels::new(gpu, &b.hm, &b.gm, ctrl, &[], dt).unwrap();
+    p.seed(
+        gpu,
+        &b.hm,
+        &[SeedParcel {
+            position: Vec3::new(0.5, 0.5, 0.5),
+            velocity: Vec3::ZERO,
+            diameter: d0,
+            temperature: t0,
+            n_p,
+            uid: None,
+        }],
+    )
+    .unwrap();
+    p
+}
+
+/// The kernel's closure and the host's are one closure. One sub-step from a
+/// known state, with the mass and the heat read back and compared against
+/// what `evaporation::droplet_rate` says they should be.
+///
+/// This is the test that would catch a coefficient typed differently on the
+/// two sides, which is the only kind of error a `d^2` gate posed against the
+/// host closed form could not see.
+#[test]
+fn the_device_closure_is_the_host_closure() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let dt: Scalar = 1e-4;
+    let d0: Scalar = 5e-4;
+    let t0: Scalar = 290.0;
+    for (t_gas, rh, u_rel, transfer, sat) in [
+        (298.15, 0.30, 0.0, MassTransfer::AbramzonSirignano, SaturationCurve::HylandWexler),
+        (298.15, 0.30, 2.5, MassTransfer::AbramzonSirignano, SaturationCurve::HylandWexler),
+        (350.00, 0.05, 1.0, MassTransfer::Spalding, SaturationCurve::HylandWexler),
+        (320.00, 0.60, 0.0, MassTransfer::RanzMarshall, SaturationCurve::ClausiusClapeyron),
+    ] {
+        let b = droplet_box(&gpu, t_gas, rh, u_rel);
+        let ev = EvaporationControls {
+            transfer,
+            saturation: sat,
+            ..EvaporationControls::default()
+        };
+        let ctrl = ParcelControls { max_substeps: 1, ..evaporating_controls(ev) };
+        let mut p = one_droplet(&gpu, &b, ctrl, d0, t0, 1.0, dt);
+        let t_boil = p.boiling_temperature();
+        p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        let s = p.snapshot(&gpu).unwrap();
+
+        // The host closure, integrated by the SAME one-sub-step rule (76.10)
+        // - written out here rather than called, so that this is a check on
+        //   the kernel and not a second call to the same function.
+        let r = droplet_rate(&ev, t_boil, d0, t0, &b.gas);
+        let mp = 1000.0 * std::f64::consts::FRAC_PI_6 * d0 * d0 * d0;
+        let cap = mp * ctrl.c_liquid;
+        let lam = (r.conductance + r.d_cooling_d_t) / cap;
+        let w_t = -(-lam * dt).exp_m1();
+        let tau = w_t / lam;
+        let teq = t0 + (r.conductance * (b.gas.t - t0) + r.mdot * r.h_v)
+            / (r.conductance + r.d_cooling_d_t);
+        let d_e = cap * w_t * (teq - t0);
+        let qc = r.conductance * ((b.gas.t - teq) * dt + (teq - t0) * tau);
+        let dm = (qc - d_e) / r.h_v;
+        let d_new = d0 * (1.0 - dm / mp).cbrt();
+
+        let rel = (s.d[0] - d_new).abs() / (d0 - d_new).abs().max(1e-30);
+        assert!(
+            rel < 1e-9,
+            "{} / {}, T_g {t_gas}: device d {}, host {d_new} (change {} vs {})",
+            transfer.name(),
+            sat.name(),
+            s.d[0],
+            d0 - s.d[0],
+            d0 - d_new
+        );
+        // ... and the accumulators are the state change, not a second model
+        // of it.
+        // The accumulator is `rho_l (pi/6)(d_0^3 - d^3)` - ONE expression
+        // over the two endpoint diameters, which is what makes the sum over a
+        // run telescope. It is NOT `m(d_0) - m(d)` evaluated separately:
+        // those two masses agree to fifteen digits and their difference does
+        // not, so the grouping is the claim, and it is compared here in the
+        // grouping the kernel uses.
+        let want = 1000.0
+            * std::f64::consts::FRAC_PI_6
+            * (d0 - s.d[0])
+            * (d0 * d0 + d0 * s.d[0] + s.d[0] * s.d[0]);
+        assert!(
+            (s.mass_lost[0] - want).abs() <= 1e-14 * want.abs(),
+            "the accumulator {} is not the state change {want}",
+            s.mass_lost[0]
+        );
+    }
+}
+
+/// **Gate 76-A.** The `d^2` law: an isolated droplet in a quiescent gas,
+/// released AT its steady temperature, must shrink so that `d^2` falls
+/// linearly at exactly the closed-form slope `K`.
+///
+/// The droplet is seeded at `evaporation::steady_temperature`, which is a
+/// bracketed root find on the host; the kernel never solves that balance, it
+/// relaxes towards it. So "the temperature does not move" and "the slope is
+/// the closed form" are two independent statements and both are asserted.
+#[test]
+fn gate_76a_the_d2_law_holds_against_its_closed_form() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 298.15, 0.30, 0.0);
+    let ev = EvaporationControls::default();
+    let ctrl = evaporating_controls(ev);
+    let dt: Scalar = 2e-3;
+    let d0: Scalar = 5e-4;
+
+    let t_boil = ev.boiling_temperature().unwrap();
+    let t_wet = steady_temperature(&ev, t_boil, d0, &b.gas).unwrap();
+    let k_closed = d2_law_slope(&ev, t_boil, ctrl.rho_liquid, d0, t_wet, &b.gas);
+
+    let mut p = one_droplet(&gpu, &b, ctrl, d0, t_wet, 1.0, dt);
+    let steps = 400;
+    let mut worst_d2: Scalar = 0.0;
+    let mut worst_t: Scalar = 0.0;
+    for n in 1..=steps {
+        p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        let s = p.snapshot(&gpu).unwrap();
+        let t = n as Scalar * dt;
+        let want = d0 * d0 - k_closed * t;
+        let got = s.d[0] * s.d[0];
+        worst_d2 = worst_d2.max((got - want).abs() / (d0 * d0 - want).abs());
+        worst_t = worst_t.max((s.temperature[0] - t_wet).abs());
+    }
+    let s = p.snapshot(&gpu).unwrap();
+    println!(
+        "[76-A] 500 um water in still 25 C air at 30 % rh: K {k_closed:.6e} m2/s, \
+         T_wet {t_wet:.4} K; after {:.2} s, d {:.3} um, d2 error {worst_d2:.3e}, \
+         T drift {worst_t:.2e} K",
+        steps as Scalar * dt,
+        1e6 * s.d[0],
+    );
+    assert!(worst_t < 1e-3, "the droplet drifted {worst_t} K off its steady temperature");
+    assert!(
+        worst_d2 < 2e-3,
+        "d^2 departed the closed-form line by {worst_d2} of the drop so far"
+    );
+}
+
+/// ... and the departure is the TIME-STEP error and nothing else: halving
+/// `dt` halves it. Without this, gate 76-A could be passed by an integrator
+/// that is wrong in a way the tolerance happens to admit.
+#[test]
+fn the_d2_law_error_is_first_order_in_the_step() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 298.15, 0.30, 0.0);
+    let ev = EvaporationControls::default();
+    let d0: Scalar = 5e-4;
+    let t_boil = ev.boiling_temperature().unwrap();
+    let t_wet = steady_temperature(&ev, t_boil, d0, &b.gas).unwrap();
+    let k_closed = d2_law_slope(&ev, t_boil, 1000.0, d0, t_wet, &b.gas);
+    let horizon: Scalar = 0.8;
+
+    let run = |dt: Scalar, cfl: Scalar| -> Scalar {
+        let ctrl = evaporating_controls(EvaporationControls { cfl, ..ev });
+        let mut p = one_droplet(&gpu, &b, ctrl, d0, t_wet, 1.0, dt);
+        let n = (horizon / dt).round() as usize;
+        for _ in 0..n {
+            p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        }
+        let s = p.snapshot(&gpu).unwrap();
+        let want = d0 * d0 - k_closed * (n as Scalar * dt);
+        (s.d[0] * s.d[0] - want).abs() / (d0 * d0 - want)
+    };
+    // `cfl = 1` disables the (76.10) sub-step bound in all but name, so the
+    // step being refined is the one the case asked for.
+    let e1 = run(1e-2, 1.0);
+    let e2 = run(5e-3, 1.0);
+    let e4 = run(2.5e-3, 1.0);
+    println!("[76.10] d^2 error against dt: {e1:.3e} -> {e2:.3e} -> {e4:.3e}");
+    assert!(e2 < 0.7 * e1, "halving dt did not halve the error: {e1} -> {e2}");
+    assert!(e4 < 0.7 * e2, "halving dt did not halve the error: {e2} -> {e4}");
+}
+
+/// **Gate 76-B.** The temperature an evaporating droplet settles at.
+///
+/// Two comparisons, and they are different in kind. The first is against
+/// this crate's own closed form, and it must close to round-off: the kernel's
+/// exponential relaxation and the host's bracketed root find are two ways of
+/// finding the same fixed point. The second is against S54's ASHRAE
+/// psychrometric wet bulb, which is a DIFFERENT quantity - it assumes a
+/// psychrometric ratio of one, and a droplet's balance carries the Lewis
+/// number instead. The gap is reported.
+#[test]
+fn gate_76b_the_droplet_settles_at_its_wet_bulb_temperature() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let ev = EvaporationControls::default();
+    let t_boil = ev.boiling_temperature().unwrap();
+    // A 100 um droplet, because the thermal time constant is
+    // rho c_l d^2/(6 Nu k) and at 500 um that is 3.3 s - a gate that ran for
+    // four of those would be reporting how far the relaxation had got, not
+    // where it was going. At 100 um it is 0.13 s and four seconds is thirty
+    // time constants. This was measured, not assumed: the first version of
+    // this gate used 500 um and missed the balance by 0.62 K.
+    let dt: Scalar = 2e-3;
+    let d0: Scalar = 1e-4;
+    println!("[76-B] a 100 um droplet released at 25 C, relaxed for 4 s:");
+    println!("        rh    T_device(C)  T_closed(C)  ASHRAE T_wb(C)   gap(K)");
+    let mut worst_closed: Scalar = 0.0;
+    let mut worst_ashrae: Scalar = 0.0;
+    for &rh in &[0.10, 0.30, 0.50, 0.90] {
+        let b = droplet_box(&gpu, 298.15, rh, 0.0);
+        let ctrl = evaporating_controls(ev);
+        let mut p = one_droplet(&gpu, &b, ctrl, d0, 298.15, 1.0, dt);
+        for _ in 0..2000 {
+            p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        }
+        let s = p.snapshot(&gpu).unwrap();
+        let t_dev = s.temperature[0];
+        // The closed form is re-evaluated at the diameter the droplet has
+        // NOW, which is the honest comparison - though (76.11) says it
+        // cannot matter, and the assertion below is what says so.
+        let t_closed = steady_temperature(&ev, t_boil, s.d[0], &b.gas).unwrap();
+        let w = crate::psychro::w_from_t_rh_p(298.15, rh, 101_325.0);
+        let t_wb = crate::psychro::t_wb(298.15, w, 101_325.0).unwrap();
+        worst_closed = worst_closed.max((t_dev - t_closed).abs());
+        worst_ashrae = worst_ashrae.max((t_dev - 273.15 - t_wb).abs());
+        println!(
+            "        {rh:4.2}   {:9.4}    {:9.4}    {t_wb:11.4}   {:+7.4}",
+            t_dev - 273.15,
+            t_closed - 273.15,
+            t_dev - 273.15 - t_wb
+        );
+    }
+    println!(
+        "        against this crate's own balance: {worst_closed:.3e} K; \
+         against ASHRAE: {worst_ashrae:.3} K"
+    );
+    assert!(
+        worst_closed < 1e-6,
+        "the kernel settled {worst_closed} K away from the balance it is relaxing to"
+    );
+    // The published bar. The design note's own figure for the wet-bulb
+    // plateau is +/- 2 K, and this is the number held against it.
+    assert!(
+        worst_ashrae < 2.0,
+        "the droplet settled {worst_ashrae} K from the psychrometric wet bulb"
+    );
+}
+
+/// **Gate 76-C.** The parcel's own mass conservation: what the pool holds
+/// plus what it says it gave up is what it started with, to round-off, and
+/// over a run long enough to remove most of the liquid.
+///
+/// It is an identity rather than a tolerance by construction - (76.10)
+/// forms the accumulator as the difference of the step's two endpoint
+/// masses, one subtraction - so the only error here is the summation of the
+/// per-step numbers on the host.
+#[test]
+fn gate_76c_the_parcel_conserves_its_own_mass() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    // Still gas and no drag, so the droplet does not move: an escaping
+    // parcel would leave with mass this pool never sees again, and the
+    // conservation statement being made here is about the POOL. The gap an
+    // escape opens is real and is S68.9 row 4's; it is not what this gate is
+    // measuring, so the fixture removes it rather than tolerating it.
+    let b = droplet_box(&gpu, 340.0, 0.05, 0.0);
+    let ev = EvaporationControls::default();
+    let ctrl = evaporating_controls(ev);
+    let dt: Scalar = 2e-3;
+    let d0: Scalar = 2e-4;
+    let n_p: Scalar = 1.7e5;
+    let mut p = one_droplet(&gpu, &b, ctrl, d0, 293.15, n_p, dt);
+
+    let m0 = p.snapshot(&gpu).unwrap().liquid_mass(ctrl.rho_liquid);
+    let mut given: Scalar = 0.0;
+    let mut worst: Scalar = 0.0;
+    let mut steps = 0;
+    for _ in 0..4000 {
+        p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        let s = p.snapshot(&gpu).unwrap();
+        given += s.total_mass_lost() + s.dead_mass_lost();
+        steps += 1;
+        let held = s.liquid_mass(ctrl.rho_liquid);
+        worst = worst.max((held + given - m0).abs() / m0);
+        if s.live().is_empty() {
+            break;
+        }
+    }
+    let s = p.snapshot(&gpu).unwrap();
+    let st = p.stats(&gpu).unwrap();
+    println!(
+        "[76-C] a 200 um droplet standing for {n_p:.1e} of them, in 340 K air: \
+         {} steps, {:.4} % of the liquid evaporated, worst mass defect {worst:.3e}",
+        steps,
+        100.0 * given / m0
+    );
+    assert!(given > 0.5 * m0, "only {} of the mass evaporated", given / m0);
+    assert!(worst < 1e-13, "the parcel lost {worst} of its mass to bookkeeping");
+    // A droplet that runs out is REMOVED and counted, not left as a
+    // zero-diameter parcel that every later kernel divides by.
+    if s.live().is_empty() {
+        assert_eq!(st.n_evaporated, 1, "the spent parcel was not counted");
+        assert_eq!(st.n_escaped, 0);
+    }
+}
+
+/// (76.9): a droplet released above the boiling point flashes down to it and
+/// then evaporates at Godsave's heat-limited rate - a `d^2` law with a
+/// DIFFERENT closed form from gate 76-A's, which is the point.
+#[test]
+fn a_superheated_droplet_is_capped_at_the_boiling_point_and_boils() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 700.0, 0.0, 0.0);
+    let ev = EvaporationControls::default();
+    let ctrl = evaporating_controls(ev);
+    let dt: Scalar = 2e-4;
+    let d0: Scalar = 3e-4;
+    let t_boil = ev.boiling_temperature().unwrap();
+    let mut p = one_droplet(&gpu, &b, ctrl, d0, t_boil + 40.0, 1.0, dt);
+
+    p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+    let first = p.snapshot(&gpu).unwrap();
+    assert!(
+        first.temperature[0] <= t_boil + 1e-12,
+        "a superheated droplet stayed at {} K, above T_boil {t_boil}",
+        first.temperature[0]
+    );
+
+    // Godsave's slope, written out from the correlation.
+    let hv = crate::parcels::evaporation::latent_heat(&ev.liquid, t_boil);
+    let b_t = ev.liquid.cp_vapour * (b.gas.t - t_boil) / hv;
+    let k_godsave =
+        8.0 * (b.gas.k / ev.liquid.cp_vapour) * (1.0 + b_t).ln() / ctrl.rho_liquid;
+
+    let d1 = first.d[0];
+    let mut worst: Scalar = 0.0;
+    for n in 1..=200 {
+        p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        let s = p.snapshot(&gpu).unwrap();
+        if s.live().is_empty() {
+            break;
+        }
+        let want = d1 * d1 - k_godsave * (n as Scalar * dt);
+        worst = worst.max((s.d[0] * s.d[0] - want).abs() / (d1 * d1 - want).abs());
+        assert!(s.temperature[0] <= t_boil + 1e-12);
+    }
+    println!(
+        "[76.9] boiling in 700 K air: T capped at {t_boil:.3} K, B_T {b_t:.4}, \
+         K {k_godsave:.4e} m2/s, worst departure {worst:.3e}"
+    );
+    assert!(worst < 2e-3, "the boiling d^2 slope departed Godsave's by {worst}");
+}
+
+/// (76.7): a droplet in a saturated gas neither shrinks nor grows, and one in
+/// a supersaturated gas GROWS - both on the device, and neither is a NaN.
+#[test]
+fn a_droplet_in_wet_air_stops_and_in_wetter_air_grows() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let ev = EvaporationControls::default();
+    let dt: Scalar = 1e-3;
+    let d0: Scalar = 3e-4;
+    let t_boil = ev.boiling_temperature().unwrap();
+
+    // Saturated: seeded at the gas temperature, so Y_s == Y_g to the accuracy
+    // of the two correlations and the droplet barely moves.
+    let sat = droplet_box(&gpu, 293.15, 1.0, 0.0);
+    let mut p = one_droplet(&gpu, &sat, evaporating_controls(ev), d0, 293.15, 1.0, dt);
+    for _ in 0..200 {
+        p.step(&gpu, &sat.u, &sat.rho, Some(&sat.tg), Some(&sat.yv), dt).unwrap();
+    }
+    let s = p.snapshot(&gpu).unwrap();
+    assert!(s.d[0].is_finite());
+    assert!(
+        (s.d[0] - d0).abs() < 1e-3 * d0,
+        "a droplet in saturated air moved from {d0} to {}",
+        s.d[0]
+    );
+
+    // Supersaturated: 20 % above saturation. The droplet grows, and the mass
+    // accumulator goes negative with it.
+    let mut wet = droplet_box(&gpu, 293.15, 1.0, 0.0);
+    let y_hi = 1.2 * wet.gas.y_vapour;
+    wet.yv = gpu.upload(&vec![y_hi; wet.gm.n_cells]).unwrap();
+    wet.gas.y_vapour = y_hi;
+    let mut q = one_droplet(&gpu, &wet, evaporating_controls(ev), d0, 293.15, 1.0, dt);
+    for _ in 0..200 {
+        q.step(&gpu, &wet.u, &wet.rho, Some(&wet.tg), Some(&wet.yv), dt).unwrap();
+    }
+    let s = q.snapshot(&gpu).unwrap();
+    println!(
+        "[76.7] in air 20 % above saturation a 300 um droplet grew to {:.3} um; \
+         T_p {:.3} C against a T_wb of {:.3} C",
+        1e6 * s.d[0],
+        s.temperature[0] - 273.15,
+        steady_temperature(&ev, t_boil, s.d[0], &wet.gas).unwrap() - 273.15
+    );
+    assert!(s.d[0] > d0, "a droplet in supersaturated air shrank to {}", s.d[0]);
+    assert!(s.mass_lost[0] < 0.0, "condensation did not show as a negative loss");
+}
+
+/// SPEC-LIT S76.10, the bitwise claim, MEASURED.
+///
+/// The by-construction half is that every evaporation statement in
+/// `cuda/parcels.cu` is inside `if (evaporating)` and the inert/heating
+/// arithmetic is textually unchanged. This is the other half: a heating pool
+/// run twice, once with the shipped evaporation settings and once with every
+/// one of them set to something else - a different liquid, a different
+/// saturation curve, a different blowing model, a different sub-step bound -
+/// and the parcel state and both coupling accumulators must be bit for bit
+/// the same.
+#[test]
+fn the_evaporation_settings_cannot_move_a_heating_parcel() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 340.0, 0.2, 1.5);
+    let dt: Scalar = 1e-3;
+
+    let run = |ev: EvaporationControls, physics: ParcelPhysics| -> ParcelSnapshot {
+        let ctrl = ParcelControls {
+            physics,
+            drag: DragModel::SchillerNaumann,
+            gravity: Vec3::new(0.0, 0.0, -9.81),
+            ..evaporating_controls(ev)
+        };
+        let mut p = one_droplet(&gpu, &b, ctrl, 3e-4, 293.15, 3.0, dt);
+        let t = if physics == ParcelPhysics::Inert { None } else { Some(&b.tg) };
+        for _ in 0..40 {
+            p.step(&gpu, &b.u, &b.rho, t, None, dt).unwrap();
+        }
+        p.snapshot(&gpu).unwrap()
+    };
+
+    let shipped = EvaporationControls::default();
+    let other = EvaporationControls {
+        saturation: SaturationCurve::ClausiusClapeyron,
+        transfer: MassTransfer::RanzMarshall,
+        liquid: LiquidProperties::benzene(),
+        w_carrier: 0.044,
+        p_ambient: 50_000.0,
+        cfl: 0.9,
+    };
+    for physics in [ParcelPhysics::Inert, ParcelPhysics::Heating] {
+        let a = run(shipped, physics);
+        let c = run(other, physics);
+        assert!(
+            snapshot_bits_eq(&a, &c),
+            "{}: the evaporation settings moved the parcel state",
+            physics.name()
+        );
+        assert!(
+            vec_bits_eq(&a.impulse, &c.impulse) && bits_eq(&a.exchange, &c.exchange),
+            "{}: the evaporation settings moved the S68 momentum accumulators",
+            physics.name()
+        );
+        assert!(
+            bits_eq(&a.heat, &c.heat) && bits_eq(&a.heat_exchange, &c.heat_exchange),
+            "{}: the evaporation settings moved the S68 energy accumulators",
+            physics.name()
+        );
+        assert!(a.mass_lost.is_empty() && a.latent.is_empty());
+        // ... and the two mass accessors say "nothing" rather than index an
+        // array the pool never allocated.
+        assert_eq!(a.total_mass_lost(), 0.0);
+        assert_eq!(a.dead_mass_lost(), 0.0);
+    }
+}
+
+/// SPEC-LIT S76.10's other half: the accumulators an EVAPORATING parcel
+/// writes are the change in its own state, and the two energies it reports
+/// add up to what its temperature and mass actually did.
+#[test]
+fn the_accumulators_are_the_change_in_the_parcels_own_state() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 330.0, 0.1, 0.5);
+    let ev = EvaporationControls::default();
+    let ctrl = evaporating_controls(ev);
+    let dt: Scalar = 1e-3;
+    let d0: Scalar = 4e-4;
+    let mut p = one_droplet(&gpu, &b, ctrl, d0, 293.15, 1.0, dt);
+
+    let mut prev = p.snapshot(&gpu).unwrap();
+    let mut worst_mass: Scalar = 0.0;
+    let mut worst_energy: Scalar = 0.0;
+    for _ in 0..300 {
+        p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        let s = p.snapshot(&gpu).unwrap();
+        // Mass: BITWISE, because the accumulator is the difference of the
+        // two endpoint masses and nothing else.
+        let m_before = 1000.0 * std::f64::consts::FRAC_PI_6 * prev.d[0].powi(3);
+        let m_after = 1000.0 * std::f64::consts::FRAC_PI_6 * s.d[0].powi(3);
+        let (a, c) = (prev.d[0], s.d[0]);
+        let want =
+            1000.0 * std::f64::consts::FRAC_PI_6 * (a - c) * (a * a + a * c + c * c);
+        worst_mass = worst_mass.max((s.mass_lost[0] - want).abs() / want.abs());
+        // Energy: the droplet's own budget. `m c_l dT = Q_conv - dm h_v` is
+        // closed sub-step by sub-step by construction, so what is left here
+        // is the change of `m` WITHIN the step, which is second order in dt
+        // and is the number this reports rather than hides.
+        let d_int = m_after * ctrl.c_liquid * s.temperature[0]
+            - m_before * ctrl.c_liquid * prev.temperature[0];
+        let budget = s.heat[0] - s.latent[0] - want * ctrl.c_liquid * s.temperature[0];
+        let scale = s.heat[0].abs().max(s.latent[0].abs()).max(1e-30);
+        worst_energy = worst_energy.max((d_int - budget).abs() / scale);
+        prev = s;
+    }
+    println!(
+        "[76.10] mass accumulator against the state change: {worst_mass:.3e}; \
+         the droplet energy budget closes to {worst_energy:.3e}"
+    );
+    assert!(worst_mass < 1e-14, "the mass accumulator is off by {worst_mass}");
+    assert!(worst_energy < 1e-5, "the droplet energy budget is off by {worst_energy}");
+}
+
+/// SPEC-LIT S13.4.1: every setting S76 adds changes the answer, and is shown
+/// to.
+#[test]
+fn every_evaporation_setting_changes_the_answer() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 340.0, 0.10, 1.0);
+    let dt: Scalar = 1e-3;
+    let d0: Scalar = 3e-4;
+    let after = |ev: EvaporationControls| -> (Scalar, Scalar) {
+        let mut p = one_droplet(&gpu, &b, evaporating_controls(ev), d0, 293.15, 1.0, dt);
+        for _ in 0..200 {
+            p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        }
+        let s = p.snapshot(&gpu).unwrap();
+        (s.d[0], s.temperature[0])
+    };
+    let base = EvaporationControls::default();
+    let (d_base, t_base) = after(base);
+    for (name, ev) in [
+        (
+            "saturation",
+            EvaporationControls { saturation: SaturationCurve::ClausiusClapeyron, ..base },
+        ),
+        ("transfer=spalding", EvaporationControls { transfer: MassTransfer::Spalding, ..base }),
+        (
+            "transfer=ranzMarshall",
+            EvaporationControls { transfer: MassTransfer::RanzMarshall, ..base },
+        ),
+        ("pAmbient", EvaporationControls { p_ambient: 80_000.0, ..base }),
+        ("wCarrier", EvaporationControls { w_carrier: 0.030, ..base }),
+        (
+            "liquid",
+            EvaporationControls {
+                saturation: SaturationCurve::ClausiusClapeyron,
+                liquid: LiquidProperties {
+                    h_v_boil: 2.0e6,
+                    ..LiquidProperties::water()
+                },
+                ..base
+            },
+        ),
+    ] {
+        let (d, t) = after(ev);
+        assert!(
+            (d - d_base).abs() > 1e-12 * d0 || (t - t_base).abs() > 1e-9,
+            "{name} did not move the answer: d {d} vs {d_base}, T {t} vs {t_base}"
+        );
+    }
+    // ... and `cfl` is a sub-step BOUND, so it only moves the answer when it
+    // actually bites: at `dt = 1 ms` a 300 um droplet loses `1e-4` of its
+    // `d^2` in a step and no setting in `(0, 1]` divides that further. So the
+    // leg that demonstrates it uses a step coarse enough for the bound to
+    // engage, which is also the only regime in which it is worth having.
+    let coarse = |cfl: Scalar| -> Scalar {
+        let dt: Scalar = 0.05;
+        let ev = EvaporationControls { cfl, ..base };
+        let mut p = one_droplet(&gpu, &b, evaporating_controls(ev), 1e-4, 293.15, 1.0, dt);
+        for _ in 0..20 {
+            p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+        }
+        p.snapshot(&gpu).unwrap().d[0]
+    };
+    let (whole, split) = (coarse(1.0), coarse(0.02));
+    println!(
+        "[76.10] a 100 um droplet, 20 steps of 50 ms: cfl 1.0 leaves {:.4} um, \
+         cfl 0.02 leaves {:.4} um",
+        1e6 * whole,
+        1e6 * split
+    );
+    assert!(
+        (whole - split).abs() > 1e-12 * 1e-4,
+        "evaporation cfl did not move an evaporating parcel: {whole} against {split}"
+    );
+}
+
+/// SPEC-LIT S13.4, in both directions, on the field the parcels read.
+#[test]
+fn the_vapour_field_is_required_when_it_is_read_and_refused_when_it_is_not() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 300.0, 0.3, 0.0);
+    let dt: Scalar = 1e-3;
+
+    let mut ev = one_droplet(
+        &gpu,
+        &b,
+        evaporating_controls(EvaporationControls::default()),
+        3e-4,
+        293.15,
+        1.0,
+        dt,
+    );
+    let e = ev.step(&gpu, &b.u, &b.rho, Some(&b.tg), None, dt).unwrap_err().to_string();
+    assert!(e.contains("vapour mass fraction"), "{e}");
+    assert!(e.contains("S76.2"), "{e}");
+    let e = ev.step(&gpu, &b.u, &b.rho, None, Some(&b.yv), dt).unwrap_err().to_string();
+    assert!(e.contains("no gas temperature"), "{e}");
+
+    let ctrl = ParcelControls {
+        physics: ParcelPhysics::Heating,
+        ..evaporating_controls(EvaporationControls::default())
+    };
+    let mut h = one_droplet(&gpu, &b, ctrl, 3e-4, 293.15, 1.0, dt);
+    let e = h.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap_err().to_string();
+    assert!(e.contains("not \"evaporating\""), "{e}");
+    assert!(e.contains("S13.4"), "{e}");
+    // ... and the supported combination runs.
+    h.step(&gpu, &b.u, &b.rho, Some(&b.tg), None, dt).unwrap();
+}
+
+/// SPEC-LIT S76.14, as S77.7 leaves it: coupling the energy of an evaporating
+/// pool with the MASS coupling off is still refused by name - but the reason
+/// has changed and so has the fix.
+///
+/// S76 said the refusal was because "the latent half has nowhere to go". S77
+/// found that half a step off: the latent heat is not a second transfer the
+/// gas owes at all, because (76.10)'s budget already puts it inside the
+/// convective heat S68 deposits. What was really missing is the vapour and
+/// the sensible enthalpy it carries, and the refusal now says which setting
+/// supplies them.
+#[test]
+fn energy_coupling_is_refused_for_an_evaporating_pool() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 300.0, 0.3, 0.0);
+    let p = one_droplet(
+        &gpu,
+        &b,
+        evaporating_controls(EvaporationControls::default()),
+        3e-4,
+        293.15,
+        1.0,
+        1e-3,
+    );
+    let e = match crate::parcels::couple::ParcelCoupling::new(
+        &gpu,
+        &p,
+        crate::parcels::couple::CouplingControls {
+            momentum: crate::parcels::couple::CouplingMode::Explicit,
+            energy: crate::parcels::couple::CouplingMode::Explicit,
+            mass: crate::parcels::couple::MassCoupling::None,
+        },
+    ) {
+        Ok(_) => panic!("energy coupling was accepted for an evaporating pool"),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("mass evaporation"), "{e}");
+    assert!(e.contains("S77"), "{e}");
+    // The old message's diagnosis is gone with the old reason: the gate is
+    // no longer "the latent half has nowhere to go".
+    assert!(!e.contains("S76.14"), "{e}");
+
+    // ... and with the mass coupling ON the same pool is accepted, which is
+    // the whole of S77.
+    crate::parcels::couple::ParcelCoupling::new(
+        &gpu,
+        &p,
+        crate::parcels::couple::CouplingControls {
+            momentum: crate::parcels::couple::CouplingMode::Explicit,
+            energy: crate::parcels::couple::CouplingMode::Explicit,
+            mass: crate::parcels::couple::MassCoupling::Evaporation,
+        },
+    )
+    .map(|_| ())
+    .unwrap_or_else(|e| panic!("the S77 combination was refused: {e}"));
+
+    // Momentum coupling IS allowed and remains what S68 gated: the drag
+    // impulse is exact for the update that was applied whatever the diameter
+    // did on the way.
+    crate::parcels::couple::ParcelCoupling::new(
+        &gpu,
+        &p,
+        crate::parcels::couple::CouplingControls {
+            momentum: crate::parcels::couple::CouplingMode::Explicit,
+            energy: crate::parcels::couple::CouplingMode::Off,
+            mass: crate::parcels::couple::MassCoupling::None,
+        },
+    )
+    .map(|_| ())
+    .unwrap_or_else(|e| panic!("momentum coupling was refused: {e}"));
+}
+
+/// The device codes and the host enums are one mapping. `evaporation::tests`
+/// pins the host half; this pins the device half by selecting each value and
+/// showing the kernel behaved as that value and not as its neighbour.
+#[test]
+fn the_device_evaporation_enumerations_match_the_host() {
+    let Some(gpu) = Gpu::new(0).ok() else { return };
+    let b = droplet_box(&gpu, 330.0, 0.10, 0.0);
+    let dt: Scalar = 1e-4;
+    let d0: Scalar = 4e-4;
+    let t0: Scalar = 300.0;
+    for sat in [SaturationCurve::ClausiusClapeyron, SaturationCurve::HylandWexler] {
+        for transfer in [
+            MassTransfer::RanzMarshall,
+            MassTransfer::Spalding,
+            MassTransfer::AbramzonSirignano,
+        ] {
+            let ev = EvaporationControls { saturation: sat, transfer, ..Default::default() };
+            let ctrl = ParcelControls { max_substeps: 1, ..evaporating_controls(ev) };
+            let mut p = one_droplet(&gpu, &b, ctrl, d0, t0, 1.0, dt);
+            let t_boil = p.boiling_temperature();
+            p.step(&gpu, &b.u, &b.rho, Some(&b.tg), Some(&b.yv), dt).unwrap();
+            let s = p.snapshot(&gpu).unwrap();
+            let r = droplet_rate(&ev, t_boil, d0, t0, &b.gas);
+            // One sub-step at the fixed point of neither: the mass removed is
+            // dominated by the modelled rate, so it identifies the model.
+            let mp = 1000.0 * std::f64::consts::FRAC_PI_6 * d0 * d0 * d0;
+            let cap = mp * ctrl.c_liquid;
+            let lam = (r.conductance + r.d_cooling_d_t) / cap;
+            let w_t = -(-lam * dt).exp_m1();
+            let teq = t0
+                + (r.conductance * (b.gas.t - t0) + r.mdot * r.h_v)
+                    / (r.conductance + r.d_cooling_d_t);
+            let qc = r.conductance * ((b.gas.t - teq) * dt + (teq - t0) * w_t / lam);
+            let want = (qc - cap * w_t * (teq - t0)) / r.h_v;
+            assert!(
+                (s.mass_lost[0] - want).abs() < 1e-9 * want.abs(),
+                "{}/{}: device removed {}, host says {want}",
+                sat.name(),
+                transfer.name(),
+                s.mass_lost[0]
+            );
+        }
+    }
+}
+

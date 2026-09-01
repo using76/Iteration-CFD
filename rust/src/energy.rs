@@ -2360,6 +2360,69 @@ impl<'m> Energy<'m> {
         )
     }
 
+    /// [`Self::update_target_divergence`] with SPEC-LIT S77.6's volumetric
+    /// mass source added: `(div u)_target += mdot'''/rho`, 1/s.
+    ///
+    /// # Which half of a phase change this is
+    ///
+    /// Evaporation moves the divergence twice, and only one of the two needs
+    /// a line of code:
+    ///
+    /// * **the energy it moves** enters through `Q`, on its own, because
+    ///   `Q` is [`EnergySources::q`] and a parcel coupling that registers
+    ///   its convective and vapour enthalpy sources there has already put it
+    ///   in both places `Q` is used. Nothing here does that; it is already
+    ///   done by the time this runs;
+    /// * **the volume the added mass occupies** at fixed `p0` and `T` is
+    ///   `S_m/rho`, is not a heat source, cannot be written as one, and is
+    ///   what `d_mass` carries.
+    ///
+    /// S25.1 says `Q` must be `Q` "in BOTH places `Q` is used" and S26.1
+    /// measured what it cost when the conduction term was in one and not the
+    /// other. This is the same trap with the halves swapped - a term that is
+    /// NOT a `Q` and would be invisible if it were assumed to be one - which
+    /// is why it is a named argument on its own method rather than folded
+    /// into the registry.
+    ///
+    /// # Why it is a second launch
+    ///
+    /// `energyTargetDivergence` is not touched. `None` runs exactly the
+    /// arithmetic S25.1 always ran, from exactly the same kernel, so a run
+    /// with no dispersed phase is bit for bit the run it was before this
+    /// method existed - by construction, with nothing measured and nothing
+    /// to measure. `Some` costs one extra elementwise `+=` over `n_cells`,
+    /// the same `energyAccumulate` [`EnergySources`] uses.
+    ///
+    /// `d_mass` must be `mdot'''/rho` in 1/s - what
+    /// `ParcelCoupling::divergence_source` deposits. Adding `mdot'''` itself
+    /// would be off by three orders of magnitude and dimensionally wrong,
+    /// and nothing downstream could tell.
+    pub fn update_target_divergence_with(
+        &mut self,
+        gpu: &Gpu,
+        gas: &GasState,
+        nut: &GpuScalarField,
+        k: &DevBuf<Scalar>,
+        nu: Scalar,
+        d_mass: Option<&DevBuf<Scalar>>,
+    ) -> Result<()> {
+        self.update_target_divergence(gpu, gas, nut, k, nu)?;
+        let n = self.m.n_cells;
+        match d_mass {
+            None => Ok(()),
+            Some(_) if n == 0 => Ok(()),
+            Some(d) if d.len() < n => Err(Error::Config(format!(
+                "Energy::update_target_divergence_with: the mass source has {} cells, \
+                 the mesh has {n} (SPEC-LIT S77.6)",
+                d.len()
+            ))),
+            Some(d) => {
+                let Energy { ek, target_div, .. } = self;
+                ek.accumulate(gpu, target_div, d, n)
+            }
+        }
+    }
+
     /// The domain integral of [`Self::update_conduction_source`]'s field, W -
     /// the CONDUCTION half of S25.1/S25.2's `Q`, which telescopes to the net
     /// heat crossing the boundary. `ofgpu-fire` adds it to
@@ -3014,6 +3077,132 @@ mod tests {
     /// heat crossing the boundary, exactly, and for ANY temperature field -
     /// which is what makes it safe to fold into `(div u)_target`.
     ///
+    /// SPEC-LIT S77.6: the volumetric mass source in the target divergence,
+    /// and the two things about it that are easy to get wrong.
+    ///
+    /// **1. `None` is the old path, bit for bit.** Not "close enough" and
+    /// not "within tolerance": the same kernel, the same arguments, and then
+    /// nothing. Every case in this repository with no dispersed phase is in
+    /// that state, so S25.1's every previous measurement is unmoved because
+    /// no code ran.
+    ///
+    /// **2. The ENERGY of a phase change is already in `Q` and the VOLUME is
+    /// not.** A parcel coupling registers its heat on [`EnergySources`], and
+    /// `energyTargetDivergence` reads that registry - so the moment the heat
+    /// is registered it is in `(div u)_target` with no further code at all.
+    /// The mass term is a different animal: it is not a heat source, it
+    /// cannot be written as one, and if it is assumed to arrive the same way
+    /// it silently does not. S25.1 lost its conduction term to exactly that
+    /// asymmetry once (S26.1); this test is the guard against the second
+    /// time.
+    #[test]
+    fn the_target_divergence_takes_the_mass_source_and_takes_the_heat_through_q() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 10;
+        let h: Scalar = 0.02;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+        let props = GasProperties { k: 0.5, cp: 1000.0, ..GasProperties::default() };
+        let (mut e, nut, _phi) = laminar_slab_energy(&g, &hm, &m, props, true, 1.0)?;
+        // A LUMPY temperature, adiabatic ends: `rho cp T` is then a real
+        // divisor and every cell has a different one, so a term that
+        // happened to cancel on a uniform field cannot pass by accident.
+        let nbf = hm.n_boundary_faces;
+        let lumpy: Vec<Scalar> = (0..N)
+            .map(|i| 300.0 + 25.0 * ((i * 7 % 5) as Scalar) - 2.0 * (i as Scalar))
+            .collect();
+        {
+            let f = e.field_mut();
+            let mut kind = vec![BcKind::Empty as Label; nbf];
+            for (pi_i, pi) in hm.patches.iter().enumerate() {
+                if pi_i < 2 {
+                    for k in 0..pi.size {
+                        kind[pi.start + k] = BcKind::ZeroGradient as Label;
+                    }
+                }
+            }
+            g.write(&mut f.bc_kind, &kind)?;
+            g.write(&mut f.fr, &vec![0.0 as Scalar; nbf])?;
+            g.write(&mut f.ref_value, &vec![0.0 as Scalar; nbf])?;
+            g.write(&mut f.ref_grad, &vec![0.0 as Scalar; nbf])?;
+            g.write(&mut f.f, &lumpy)?;
+        }
+        e.initialise(&g)?;
+        let mut gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+        gas.update_density(&g, e.field())?;
+        let k_cell = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+
+        // ---- 1. no mass source: the same numbers, to the bit ------------
+        e.update_target_divergence(&g, &gas, &nut, &k_cell, 1.5e-5)?;
+        let plain = g.download(e.target_divergence())?;
+        e.update_target_divergence_with(&g, &gas, &nut, &k_cell, 1.5e-5, None)?;
+        let none = g.download(e.target_divergence())?;
+        for c in 0..N {
+            assert_eq!(
+                plain[c].to_bits(),
+                none[c].to_bits(),
+                "cell {c}: `None` moved a bit of the target divergence"
+            );
+        }
+
+        // ---- 2. a mass source is added, exactly ------------------------
+        let d: Vec<Scalar> = (0..N).map(|i| 1e-3 * (1.0 + i as Scalar)).collect();
+        let dbuf = g.upload(&d)?;
+        e.update_target_divergence_with(&g, &gas, &nut, &k_cell, 1.5e-5, Some(&dbuf))?;
+        let with = g.download(e.target_divergence())?;
+        for c in 0..N {
+            let want = plain[c] + d[c];
+            assert!(
+                (with[c] - want).abs() <= 1e-15 * want.abs(),
+                "cell {c}: {} against {want}",
+                with[c]
+            );
+        }
+
+        // ---- 3. and the heat arrives through `Q` with no code at all ----
+        //
+        // Register a volumetric heat sink of the size an evaporating spray
+        // would deposit - a few hundred kW/m3 - and the target divergence
+        // moves WITHOUT anyone passing it anything.
+        let rho = g.download(&gas.rho().f)?;
+        let t = g.download(&e.field().f)?;
+        // The heat that goes WITH `d`: an evaporation rate `mdot = rho d`
+        // takes `h_v` per kilogram out of the gas.
+        const H_V: Scalar = 2.44e6;
+        let q: Vec<Scalar> = (0..N).map(|i| -H_V * rho[i] * d[i]).collect();
+        let qbuf = g.upload(&q)?;
+        e.sources_mut().register_explicit(&g, &qbuf)?;
+        e.update_target_divergence_with(&g, &gas, &nut, &k_cell, 1.5e-5, None)?;
+        let hot = g.download(e.target_divergence())?;
+        for c in 0..N {
+            let want = plain[c] + q[c] / (rho[c] * props.cp * t[c]);
+            assert!(
+                (hot[c] - want).abs() <= 1e-12 * want.abs(),
+                "cell {c}: the registry's heat did not reach the divergence: {} vs {want}",
+                hot[c]
+            );
+            // Evaporation cools, so it CONTRACTS the gas, and the mass it
+            // adds expands it: the two have opposite signs and the cooling
+            // is the larger by about an order of magnitude for water in air.
+            assert!(hot[c] < plain[c], "cell {c}: a heat sink expanded the gas");
+        }
+        // The two halves of an evaporating cell, side by side: the cooling
+        // contracts the gas by `h_v/(cp T)` for every unit of volume the
+        // added mass expands it by - about 8 for water in air near ambient.
+        // A mist puts the gas into NET contraction, and this is the number
+        // that says so.
+        let cool = (plain[0] - hot[0]).abs();
+        let want = H_V / (props.cp * t[0]);
+        assert!(
+            (cool / d[0] - want).abs() <= 1e-9 * want,
+            "the contraction/expansion ratio is {} and h_v/(cp T) is {want}",
+            cool / d[0]
+        );
+        assert!(want > 5.0 && want < 12.0, "h_v/(cp T) = {want}");
+        Ok(())
+    }
+
     /// Two identities, both independent of convergence:
     ///
     /// * every boundary face adiabatic (`zeroGradient`) - the domain integral

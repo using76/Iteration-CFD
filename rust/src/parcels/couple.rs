@@ -33,13 +33,34 @@
 //! linearisation point so that it buys diagonal dominance **without changing
 //! what was exchanged**.
 //!
+//! # And the same idea for the mass - SPEC-LIT S77
+//!
+//! S76 made the droplets evaporate. S77 hands the gas what leaves them, and
+//! it is three things at once because a phase change owes the gas three:
+//! the vapour itself (a source on `Y_v`), the enthalpy that mass carries in
+//! (`cp_g mdot (T_p - T_g)`, on the SAME energy registry), and the volume it
+//! occupies at fixed `p0` (`mdot/rho`, in `Energy::target_divergence`).
+//!
+//! Two things about that are not what they look like, and both are S77's:
+//!
+//! * **There is no second latent-heat sink.** The droplet's own budget
+//!   (76.10) is `Q_c = C dT_p + dm h_v`, so the convective heat S68 already
+//!   deposits contains every joule the phase change consumed. Depositing
+//!   `q_lat` again would count it twice. What the gas is actually owed is the
+//!   arriving mass's SENSIBLE enthalpy, 12 % of the latent heat, not 100 %.
+//! * **The energy half of the divergence arrives on its own.**
+//!   `energyTargetDivergence` reads `EnergySources::q`, so registering the
+//!   energy source puts it in `(div u)_target` too, with no code. The mass
+//!   half is not a heat source, cannot be written as one, and has to be
+//!   handed over - S25.1's conduction omission with the halves swapped.
+//!
 //! # What is refused, by name
 //!
-//! * **Evaporation** and therefore every mass source. `dm_p/dt` is
-//!   identically zero for both supported physics, so there is no vapour to
-//!   put anywhere; [`MassCoupling::from_name`] says so rather than letting a
-//!   case believe a sprinkler is wetting the air. A sprinkler that does not
-//!   evaporate is not a sprinkler.
+//! * **The half-coupled evaporating pool**, in both directions
+//!   ([`ParcelCoupling::new`]): the vapour without the heat is a spray that
+//!   humidifies and does not cool; the heat without the vapour cools the gas
+//!   for a mass transfer that never happened. `mass evaporation` carries all
+//!   three couplings or none of them.
 //! * **Radiation absorption by droplets** - S68.13. It needs `kappa_p`,
 //!   `sigmabar_p`, Mie efficiencies and a face-interpolated `Gamma` in
 //!   `radiation.rs`; none of it is here.
@@ -164,44 +185,66 @@ impl CouplingMode {
     }
 }
 
-/// Mass exchange between the phases - SPEC-LIT S68.13.
+/// Mass exchange between the phases - SPEC-LIT S77.
 ///
-/// There is exactly one supported value, and it is an enum rather than an
-/// absence for the reason S66's [`ParcelPhysics`] is: a case that asks for
-/// evaporation is refused **by name**, with what it would need, instead of
-/// running an inert spray and producing a plausible wrong answer.
+/// S68 had one value and refused everything else because there was nothing
+/// to give; S76 made the droplets evaporate and the refusal's reason became
+/// "there is nowhere to put it"; S77 built the somewhere. There are now two
+/// values, and [`Self::Evaporation`] carries all three of the couplings a
+/// phase change owes the gas at once - the vapour, the enthalpy it brings,
+/// and the volume it makes - because a case that took one and left another
+/// would have a run whose mass and energy do not close and no way to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MassCoupling {
-    /// `dm_p/dt = 0`. No species source, no `D_src` contribution to the
-    /// pressure equation, no change in `n_p` or `d`.
+    /// No species source, no vapour enthalpy and no `D_src` contribution to
+    /// the pressure equation. The parcels may still evaporate: `dm_p/dt` is
+    /// theirs and this setting is about whether the GAS hears about it.
     #[default]
     None,
+
+    /// The vapour reaches the gas - SPEC-LIT S77:
+    ///
+    /// * `Y_v` gains `mdot'''(1 - Y_v)/rho` (77.4), through the whole-field
+    ///   explicit seam S61.2's soot source already uses;
+    /// * the energy registry gains `cp_g mdot''' (T_p - T_g)` (77.5), the
+    ///   enthalpy the arriving mass carries, on top of S68's convective
+    ///   exchange - and **not** a second latent-heat sink, which would be
+    ///   counting the same joules twice (S77.5);
+    /// * `Energy::target_divergence` gains `mdot'''/rho` (77.6), the volume
+    ///   the mass occupies at fixed `p0`.
+    ///
+    /// Requires `physics evaporating` and energy coupling on, in both
+    /// directions and by name.
+    Evaporation,
 }
 
 impl MassCoupling {
-    pub const NAMES: &'static [&'static str] = &["none"];
+    pub const NAMES: &'static [&'static str] = &["none", "evaporation"];
 
     pub fn name(self) -> &'static str {
-        "none"
+        match self {
+            Self::None => "none",
+            Self::Evaporation => "evaporation",
+        }
+    }
+
+    /// The `OFC_MASS_*` code `cuda/parcelcouple.cu` switches on.
+    pub fn code(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::Evaporation => 1,
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        self != Self::None
     }
 
     pub fn from_name(s: &str) -> Result<Self> {
         match s {
             "none" | "off" => Ok(Self::None),
             "evaporation" | "evaporating" | "species" | "vapour" | "vapor" => {
-                contract::unsupported_note(
-                    "parcels/massCoupling",
-                    s,
-                    Self::NAMES,
-                    "a mass source between the phases IS evaporation, and evaporation \
-                     needs the semi-implicit 3x3 closure, liquid property tables, a \
-                     species source that follows a moving spray and the D_src term in \
-                     `Energy::target_divergence` - none of which exist. SPEC-LIT S68.13 \
-                     names all four. A spray that does not evaporate is not a sprinkler, \
-                     and this refusal is what says so",
-                    "none",
-                    Self::None,
-                )
+                Ok(Self::Evaporation)
             }
             other => contract::unsupported(
                 "parcels/massCoupling",
@@ -240,10 +283,11 @@ impl CouplingControls {
     /// One line for the startup banner - SPEC-LIT S13.4.2.
     pub fn describe(&self) -> String {
         format!(
-            "parcels/coupling: momentum={} energy={} mass={} (SPEC-LIT S68)",
+            "parcels/coupling: momentum={} energy={} mass={} (SPEC-LIT S68{})",
             self.momentum.name(),
             self.energy.name(),
             self.mass.name(),
+            if self.mass.is_on() { "/S77" } else { "" },
         )
     }
 }
@@ -291,6 +335,16 @@ pub struct CouplingSnapshot {
     pub energy_q: Vec<Scalar>,
     /// What [`EnergySources`] is handed, W/(m3 K), `<= 0`.
     pub energy_sp: Vec<Scalar>,
+    /// (77.2) `mdot'''`, kg/(m3 s): the vapour the parcels put into the gas.
+    /// Positive when they are evaporating, negative when they are growing.
+    pub vapour: Vec<Scalar>,
+    /// (77.5) `cp_g mdot''' (T_p - T_g)`, W/m3: the enthalpy the arriving
+    /// mass carries, already summed into [`Self::energy_q`].
+    pub vapour_enthalpy: Vec<Scalar>,
+    /// (77.4) what the `Y_v` equation is handed, 1/s.
+    pub species_su: Vec<Scalar>,
+    /// (77.6) what `Energy::target_divergence` is handed, 1/s.
+    pub divergence: Vec<Scalar>,
 }
 
 // ==========================================================================
@@ -309,7 +363,10 @@ pub struct CouplingSnapshot {
 ///
 /// Twelve `f64` per cell, plus the three of the read-back scratch (68.4) is
 /// posed on: fifteen, 120 B, so a million-cell mesh spends 120 MB here.
-/// S68.8 states it rather than discovering it as an OOM.
+/// S68.8 states it rather than discovering it as an OOM. A mass coupling
+/// adds four more - `mdot`, `q_vap`, `S_Y` and `D` - for 152 B, and they are
+/// allocated at length ONE when it is off, so a momentum-only spray costs
+/// exactly what S68 measured (S77.8).
 pub struct ParcelCoupling<'m> {
     m: &'m GpuMesh,
     ctrl: CouplingControls,
@@ -332,6 +389,23 @@ pub struct ParcelCoupling<'m> {
     nrg_q: DevBuf<Scalar>,
     nrg_sp: DevBuf<Scalar>,
 
+    // ---- S77, the vapour ----------------------------------------------
+    /// (77.2) `mdot'''`, kg/(m3 s). Length 1 unless mass coupling is on.
+    mdot_v: DevBuf<Scalar>,
+    /// (77.5) the enthalpy the arriving mass carries, W/m3. Length 1 unless
+    /// mass coupling is on. Already inside [`Self::nrg_q`]; kept separately
+    /// because (77.9)'s ledger is posed on it and a round trip through a sum
+    /// is not exact.
+    q_vap: DevBuf<Scalar>,
+    /// (77.4) the `Y_v` source, 1/s. Length 1 unless mass coupling is on.
+    y_su: DevBuf<Scalar>,
+    /// (77.6) the target-divergence source, 1/s. Length 1 unless mass
+    /// coupling is on.
+    d_src: DevBuf<Scalar>,
+    /// The gas specific heat the enthalpy source is formed with - S66's own
+    /// `cpGas`, which S26's energy equation must be given too (S77.5).
+    cp_gas: Scalar,
+
     /// Scratch for [`Self::total_impulse`]. Diagnostics only.
     integral: DevBuf<Vec3>,
 }
@@ -341,10 +415,56 @@ impl<'m> ParcelCoupling<'m> {
     ///
     /// Refuses, by name and at setup: energy coupling on inert parcels (an
     /// inert droplet is an infinite heat bath and coupling one would create
-    /// energy from nothing); and a mass coupling other than
-    /// [`MassCoupling::None`], which cannot be constructed anyway.
+    /// energy from nothing); a mass coupling on a pool that cannot
+    /// evaporate; and - in both directions, per S13.4 - the half-coupled
+    /// evaporating pool, which is a run whose energy does not close.
     pub fn new(gpu: &Gpu, p: &Parcels<'m>, ctrl: CouplingControls) -> Result<Self> {
-        if ctrl.energy.is_on() && p.ctrl.physics != ParcelPhysics::Heating {
+        let evaporating = p.ctrl.physics == ParcelPhysics::Evaporating;
+
+        // SPEC-LIT S77.7, and it replaces S76.14's blanket refusal. An
+        // evaporating droplet's energy leaves it in TWO parts - the
+        // convective heat and the mass that carries enthalpy away - and
+        // giving the gas one without the other is not "an approximation": it
+        // is a run whose mass and energy do not close, reported as one that
+        // does. So the two are refused apart and supported together.
+        if ctrl.mass.is_on() && !evaporating {
+            return Err(Error::Config(format!(
+                "parcels/coupling: mass coupling is \"{}\" and the parcels are \"{}\". \
+                 There is no vapour to give: `dm_p/dt` is identically zero unless the \
+                 physics is \"evaporating\" (SPEC-LIT S76). Say `physics evaporating`, \
+                 or `mass none`",
+                ctrl.mass.name(),
+                p.ctrl.physics.name(),
+            )));
+        }
+        if ctrl.mass.is_on() && !ctrl.energy.is_on() {
+            return Err(Error::Config(format!(
+                "parcels/coupling: mass coupling is \"{}\" and energy coupling is \
+                 \"off\". The vapour would arrive in the gas without the heat its \
+                 phase change took out of it, so the run would gain water and lose no \
+                 energy - a spray that humidifies without cooling. (77.5)'s enthalpy \
+                 source rides the SAME registry S68's convective exchange does, and \
+                 turning that registry off turns both off. Say `energy explicit` \
+                 (SPEC-LIT S77.7)",
+                ctrl.mass.name(),
+            )));
+        }
+        if ctrl.energy.is_on() && evaporating && !ctrl.mass.is_on() {
+            return Err(Error::Config(format!(
+                "parcels/coupling: energy coupling is \"{}\", the parcels are \
+                 \"evaporating\" and mass coupling is \"none\". S68's energy gather \
+                 carries the CONVECTIVE heat, which for an evaporating droplet already \
+                 contains every joule the phase change consumed (76.10); depositing it \
+                 with the vapour thrown away would cool the gas for a mass transfer \
+                 that never happened, and the run's energy would not close. Say \
+                 `mass evaporation` and the gas gets both (SPEC-LIT S77), or \
+                 `energy off` and it gets neither. `ParcelSnapshot::heat`, `::latent` \
+                 and `::mass_lost` carry all three halves for a case that only wants \
+                 to see them",
+                ctrl.energy.name(),
+            )));
+        }
+        if ctrl.energy.is_on() && !evaporating && p.ctrl.physics != ParcelPhysics::Heating {
             return Err(Error::Config(format!(
                 "parcels/coupling: energy coupling is \"{}\" but the parcels are \
                  \"{}\". An inert parcel's temperature never moves, so it would be an \
@@ -358,6 +478,10 @@ impl<'m> ParcelCoupling<'m> {
 
         let n = p.m.n_cells;
         let one = n.max(1);
+        // S68.8's rule, one section on: an array nothing will read is
+        // allocated at length one rather than at n_cells, so the memory a
+        // momentum-only spray costs is the memory S68 measured.
+        let vap = if ctrl.mass.is_on() { one } else { 1 };
         Ok(Self {
             m: p.m,
             ctrl,
@@ -377,6 +501,12 @@ impl<'m> ParcelCoupling<'m> {
             nrg_q: gpu.zeros(one)?,
             nrg_sp: gpu.zeros(one)?,
 
+            mdot_v: gpu.zeros(vap)?,
+            q_vap: gpu.zeros(vap)?,
+            y_su: gpu.zeros(vap)?,
+            d_src: gpu.zeros(vap)?,
+            cp_gas: p.ctrl.cp_gas,
+
             integral: gpu.zeros(one)?,
         })
     }
@@ -385,11 +515,13 @@ impl<'m> ParcelCoupling<'m> {
         &self.ctrl
     }
 
-    /// `15 * 8` bytes per cell - what this object costs before it is paid
-    /// for. SPEC-LIT S68.8.
+    /// `15 * 8` bytes per cell without a mass coupling and `19 * 8` with
+    /// one - what this object costs before it is paid for. SPEC-LIT S68.8
+    /// and S77.8.
     pub fn device_bytes(&self) -> usize {
         let n = self.m.n_cells.max(1);
-        n * (3 * 8 + 8 + 8 + 8 + 3 * 8 + 8 + 8 + 8 + 3 * 8)
+        let base = n * (3 * 8 + 8 + 8 + 8 + 3 * 8 + 8 + 8 + 8 + 3 * 8);
+        base + if self.ctrl.mass.is_on() { n * 4 * 8 } else { 0 }
     }
 
     // ---- the step -----------------------------------------------------
@@ -403,11 +535,12 @@ impl<'m> ParcelCoupling<'m> {
     /// only gather-shaped choice and what it costs.
     ///
     /// `t_gas` is required exactly when energy coupling is on, and refused
-    /// when it is not.
-    // Eight, and the lint's bar is seven. Every one is a distinct object the
+    /// when it is not; `y_vapour` exactly when mass coupling is on (77.4
+    /// reads it for the dilution factor), and refused when it is not.
+    // Nine, and the lint's bar is seven. Every one is a distinct object the
     // gather reads and none can be folded into another without this module
     // taking ownership of something that is not its: the pool, the CSR, and
-    // the three gas fields all have different owners and different lifetimes.
+    // the four gas fields all have different owners and different lifetimes.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -417,6 +550,7 @@ impl<'m> ParcelCoupling<'m> {
         rho: &DevBuf<Scalar>,
         u_gas: &GpuVectorField,
         t_gas: Option<&DevBuf<Scalar>>,
+        y_vapour: Option<&DevBuf<Scalar>>,
         dt: Scalar,
     ) -> Result<()> {
         self.check(p)?;
@@ -459,6 +593,30 @@ impl<'m> ParcelCoupling<'m> {
             }
             _ => {}
         }
+        // S13.4 again, on the vapour field, and in both directions. (77.4)'s
+        // dilution factor is the only thing that reads it, so a coupling that
+        // is not coupling mass would read it and ignore it.
+        match (self.ctrl.mass.is_on(), y_vapour) {
+            (true, None) => {
+                return Err(Error::Config(
+                    "parcels/coupling: mass coupling is on and no gas vapour mass                      fraction was given; (77.4)'s source is mdot(1 - Y_v)/rho and the                      dilution factor is not a detail - without it the vapour goes in                      faster than the mixture it is going into grew (SPEC-LIT S77.4)"
+                        .to_string(),
+                ))
+            }
+            (false, Some(_)) => {
+                return Err(Error::Config(
+                    "parcels/coupling: mass coupling is off and a gas vapour mass                      fraction was given, which would be read and ignored (SPEC-LIT                      S13.4)"
+                        .to_string(),
+                ))
+            }
+            (true, Some(y)) if y.len() < n => {
+                return Err(Error::Config(format!(
+                    "parcels/coupling: the gas vapour mass fraction has {} cells, the                      mesh has {n}",
+                    y.len()
+                )))
+            }
+            _ => {}
+        }
 
         if n == 0 {
             return Ok(());
@@ -469,9 +627,12 @@ impl<'m> ParcelCoupling<'m> {
         // never dereferences. The launch has ONE shape whatever the mode is,
         // which is what a captured graph needs.
         let t_field: &DevBuf<Scalar> = t_gas.unwrap_or(rho);
+        let y_field: &DevBuf<Scalar> = y_vapour.unwrap_or(rho);
         let n_cells = n as i32;
         let mom = self.ctrl.momentum.code();
         let nrg = self.ctrl.energy.code();
+        let mss = self.ctrl.mass.code();
+        let cp_gas = self.cp_gas;
         let cfg = self.cfg_cells;
         let f = self.k.gather.clone();
         let m = self.m;
@@ -484,6 +645,10 @@ impl<'m> ParcelCoupling<'m> {
             mom_sp,
             nrg_q,
             nrg_sp,
+            mdot_v,
+            q_vap,
+            y_su,
+            d_src,
             ..
         } = self;
         unsafe {
@@ -496,21 +661,30 @@ impl<'m> ParcelCoupling<'m> {
                 .arg(&p.axr)
                 .arg(&p.qim)
                 .arg(&p.atr)
+                .arg(&p.dmv)
+                .arg(&p.t)
                 .arg(&m.v)
                 .arg(rho)
                 .arg(&u_gas.f)
                 .arg(t_field)
+                .arg(y_field)
                 .arg(&mut *f_src)
                 .arg(&mut *beta)
                 .arg(&mut *q)
                 .arg(&mut *alpha_t)
+                .arg(&mut *mdot_v)
+                .arg(&mut *q_vap)
                 .arg(&mut *mom_su)
                 .arg(&mut *mom_sp)
                 .arg(&mut *nrg_q)
                 .arg(&mut *nrg_sp)
+                .arg(&mut *y_su)
+                .arg(&mut *d_src)
                 .arg(&dt)
+                .arg(&cp_gas)
                 .arg(&mom)
                 .arg(&nrg)
+                .arg(&mss)
                 .arg(&n_cells)
                 .launch(cfg)?;
         }
@@ -584,6 +758,50 @@ impl<'m> ParcelCoupling<'m> {
         &self.nrg_sp
     }
 
+    /// (77.2) `mdot'''`, kg/(m3 s) - the vapour the parcels put into the gas.
+    ///
+    /// The raw deposit, and what (77.9)'s mass identity is posed on. Length
+    /// one and never written unless mass coupling is on.
+    pub fn vapour_production(&self) -> &DevBuf<Scalar> {
+        &self.mdot_v
+    }
+
+    /// (77.5) `cp_g mdot''' (T_p - T_g)`, W/m3 - the enthalpy the arriving
+    /// mass carries, already summed into [`Self::energy_q`].
+    pub fn vapour_enthalpy_density(&self) -> &DevBuf<Scalar> {
+        &self.q_vap
+    }
+
+    /// (77.4) what the `Y_v` equation is handed, 1/s.
+    ///
+    /// Pass it to [`crate::scalar_transport::ScalarTransport::correct_with_source`]
+    /// on the vapour species - the whole-field explicit seam S61.2's soot
+    /// source already uses, applied as `fvm_su(su, +1)` in the same place
+    /// every other source in that equation goes.
+    ///
+    /// **The source is the one for the NON-CONSERVATIVE form** `DY/Dt = S`,
+    /// which the species equation is when its convection scheme is
+    /// `bounded` - S19's own requirement for a bounded scalar and what every
+    /// species entry in this crate carries. With an unbounded scheme the
+    /// assembled operator is `dY/dt + div(phi, Y)` and this source is short
+    /// by `Y div(u)`; S77.4 says so rather than leaving it to be discovered.
+    pub fn vapour_source(&self) -> &DevBuf<Scalar> {
+        &self.y_su
+    }
+
+    /// (77.6) what `Energy::update_target_divergence_with` is handed, 1/s -
+    /// the volume the arriving mass occupies at fixed `p0` and `T`.
+    ///
+    /// **This is the half of evaporation's effect on the divergence that
+    /// needs code.** The other half - the energy the phase change moved -
+    /// arrives on its own, because `energyTargetDivergence` reads
+    /// `EnergySources::q` and [`Self::register_energy`] has already put it
+    /// there. S25.1 lost its conduction term once for exactly this kind of
+    /// asymmetry, and S77.6 states which half is which.
+    pub fn divergence_source(&self) -> &DevBuf<Scalar> {
+        &self.d_src
+    }
+
     // ---- read-back, for reporting and for the gates -------------------
 
     /// `sum_P V_P f_P dt` - the total impulse this step handed to the gas,
@@ -633,7 +851,32 @@ impl<'m> ParcelCoupling<'m> {
             momentum_sp: gpu.download(&self.mom_sp)?,
             energy_q: gpu.download(&self.nrg_q)?,
             energy_sp: gpu.download(&self.nrg_sp)?,
+            vapour: gpu.download(&self.mdot_v)?,
+            vapour_enthalpy: gpu.download(&self.q_vap)?,
+            species_su: gpu.download(&self.y_su)?,
+            divergence: gpu.download(&self.d_src)?,
         })
+    }
+
+    /// `sum_P V_P mdot'''_P dt` - the vapour mass this step handed the gas,
+    /// kg. SPEC-LIT (77.9)'s left-hand side.
+    ///
+    /// A device read-back and a host reduction in cell order, exactly like
+    /// [`Self::total_impulse`]: call it when a driver reports, never inside
+    /// the step. Zero when mass coupling is off, and it says so by being the
+    /// sum of an array that was never written.
+    pub fn total_vapour_mass(&self, gpu: &Gpu) -> Result<Scalar> {
+        let n = self.m.n_cells;
+        if n == 0 || !self.ctrl.mass.is_on() {
+            return Ok(0.0);
+        }
+        let mdot = gpu.download(&self.mdot_v)?;
+        let vol = gpu.download(&self.m.v)?;
+        let mut acc = 0.0;
+        for c in 0..n {
+            acc += vol[c] * mdot[c] * self.dt;
+        }
+        Ok(acc)
     }
 
     /// (68.10)'s cost, measured: `sum_P V_P beta_P (u_P - u_P^n) dt`, the
@@ -720,8 +963,13 @@ pub fn live_parcel_impulse(s: &super::ParcelSnapshot) -> Vec3 {
     acc
 }
 
-/// `sum_p n_p qim_p` over the live parcels, J - the heat the gas gave the
-/// droplets, and (68.4)'s energy twin.
+/// `sum_p n_p qim_p` over the live parcels, J - the CONVECTIVE heat the gas
+/// gave the droplets, and (68.4)'s energy twin.
+///
+/// For a heating parcel that is the whole exchange. For an evaporating one it
+/// is half of it, the other half being the latent heat the vapour carried off
+/// (`ParcelSnapshot::latent`); which is why S76.14 refuses to couple the
+/// energy of an evaporating pool rather than deposit this and call it closed.
 #[must_use]
 pub fn live_parcel_heat(s: &super::ParcelSnapshot) -> Scalar {
     let mut acc = 0.0;
@@ -732,6 +980,103 @@ pub fn live_parcel_heat(s: &super::ParcelSnapshot) -> Scalar {
         if s.cell[i] >= 0 {
             acc += s.n_p[i] * s.heat[i];
         }
+    }
+    acc
+}
+
+/// `cp_g sum_p n_p dm_p (T_p - T_g)` over the live parcels, J - the enthalpy
+/// the arriving vapour carries into a gas at the uniform temperature
+/// `t_gas`, and (77.9)'s energy twin of [`live_parcel_impulse`].
+///
+/// `t_gas` is one number because the gates that read this run in a uniform
+/// gas; the kernel does it per cell, where `T_g` is a per-cell constant that
+/// factors out of the cell's own sum (77.5).
+///
+/// The sign is the physics: droplets are colder than the gas they evaporate
+/// into, so the vapour they hand over is a small extra COOLING on top of the
+/// convective exchange [`live_parcel_heat`] measures.
+#[must_use]
+pub fn live_parcel_vapour_enthalpy(
+    s: &super::ParcelSnapshot,
+    cp_gas: Scalar,
+    t_gas: Scalar,
+) -> Scalar {
+    if s.mass_lost.is_empty() {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    for i in 0..s.n_slots.min(s.cell.len()) {
+        if s.cell[i] >= 0 {
+            acc += s.n_p[i] * s.mass_lost[i] * (s.temperature[i] - t_gas);
+        }
+    }
+    cp_gas * acc
+}
+
+/// The energy the vapour carried out of BOTH sensible pools over one step, J
+/// - SPEC-LIT (77.10), summed on the host over the live parcels.
+///
+/// ```text
+///   E_vap = sum_p n_p [ q_lat,p + dm_p (c_l - cp_g) T_p ]
+/// ```
+///
+/// The first term is the latent heat (76.11) accumulated. The second is not
+/// physics: it is the offset between two sensible pools whose enthalpy data
+/// are `c_l T` for the liquid and `cp_g T` for the gas, both referred to
+/// absolute zero, which is the reference S26's energy equation actually
+/// carries. With it, the ledger
+///
+/// ```text
+///   dE_gas + dE_liquid + E_vap = 0
+/// ```
+///
+/// closes to the accuracy of the droplet's OWN budget - `4.8e-12` relative,
+/// S76.12 row 7 - and not to round-off. The remainder is the same thing
+/// S76.10 already reports: the two accumulators are endpoint differences
+/// while the budget is a sum over sub-steps whose mass changes between them,
+/// so the ledger inherits exactly that gap and no more. It is measured at
+/// `1.3e-12`. Without the second term the ledger is short by
+/// `dm (c_l - cp_g) T_p`, which for water at 290 K is 38 % of the latent
+/// heat and is not a rounding.
+///
+/// S77.10 says what this costs in physical terms: the crate's gas energy
+/// equation gives water vapour dry air's `cp`, so the number here is not
+/// `h_v` and a reader should not read it as one.
+#[must_use]
+pub fn live_parcel_vapour_energy(
+    s: &super::ParcelSnapshot,
+    c_liquid: Scalar,
+    cp_gas: Scalar,
+) -> Scalar {
+    if s.mass_lost.is_empty() || s.latent.is_empty() {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    for i in 0..s.n_slots.min(s.cell.len()) {
+        if s.cell[i] >= 0 {
+            acc += s.n_p[i]
+                * (s.latent[i] + s.mass_lost[i] * (c_liquid - cp_gas) * s.temperature[i]);
+        }
+    }
+    acc
+}
+
+/// `sum_p n_p m_p c_l T_p` over the live parcels, J - the liquid's own
+/// sensible energy, on the reference S26 carries (absolute zero).
+///
+/// The middle term of (77.10)'s ledger, and the one a test differences
+/// across a step.
+#[must_use]
+pub fn live_parcel_liquid_energy(
+    s: &super::ParcelSnapshot,
+    rho_liquid: Scalar,
+    c_liquid: Scalar,
+) -> Scalar {
+    let mut acc = 0.0;
+    for i in s.live() {
+        let d = s.d[i];
+        let m = rho_liquid * std::f64::consts::FRAC_PI_6 as Scalar * d * d * d;
+        acc += s.n_p[i] * m * c_liquid * s.temperature[i];
     }
     acc
 }

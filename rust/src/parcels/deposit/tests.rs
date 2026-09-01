@@ -17,7 +17,8 @@ use crate::blockgen::{self, BlockSpec, GradedAxis};
 use crate::device::Gpu;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::parcels::{
-    DragModel, ParcelControls, ParcelPhysics, ParcelSnapshot, Parcels, SeedParcel, WallAction,
+    DragModel, EvaporationControls, ParcelControls, ParcelPhysics, ParcelSnapshot, Parcels,
+    SeedParcel, WallAction,
 };
 use crate::types::Vec3;
 
@@ -62,6 +63,7 @@ fn still(capacity: usize) -> ParcelControls {
         cfl: 0.9,
         max_substeps: 64,
         max_walk: 16,
+        evaporation: EvaporationControls::default(),
         persistent_blocks: None,
     }
 }
@@ -505,7 +507,7 @@ fn a_spray_deposits_every_live_parcel_exactly_once() {
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[inj], dt).unwrap();
     let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
     for _ in 0..20 {
-        p.step(&gpu, &u, &rho, None, dt).unwrap();
+        p.step(&gpu, &u, &rho, None, None, dt).unwrap();
     }
     dep.update(&gpu, &p).unwrap();
 
@@ -605,7 +607,7 @@ fn the_sort_holds_at_twenty_thousand_parcels_and_thirty_two_tiles() {
     let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
     assert_eq!(dep.padded_capacity() / SORT_TILE, 32);
     for _ in 0..20 {
-        p.step(&gpu, &u, &rho, None, dt).unwrap();
+        p.step(&gpu, &u, &rho, None, None, dt).unwrap();
     }
     dep.update(&gpu, &p).unwrap();
 
@@ -639,7 +641,7 @@ fn the_sort_holds_at_twenty_thousand_parcels_and_thirty_two_tiles() {
     let mut q = Parcels::new(&gpu, &hm, &gm, ctrl, &inj, dt).unwrap();
     let mut dep2 = ParcelDeposition::new(&gpu, &q).unwrap();
     for _ in 0..20 {
-        q.step(&gpu, &u, &rho, None, dt).unwrap();
+        q.step(&gpu, &u, &rho, None, None, dt).unwrap();
     }
     dep2.update(&gpu, &q).unwrap();
     let again = dep2.snapshot(&gpu).unwrap();
@@ -829,7 +831,7 @@ fn shifting_every_injected_parcel_into_a_different_slot_moves_no_bit() {
         }
         let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
         for _ in 0..20 {
-            p.step(&gpu, &u, &rho, None, dt).unwrap();
+            p.step(&gpu, &u, &rho, None, None, dt).unwrap();
         }
         dep.update(&gpu, &p).unwrap();
         (dep.snapshot(&gpu).unwrap(), p.stats(&gpu).unwrap())
@@ -978,13 +980,14 @@ fn the_pool_grid_geometry_does_not_move_the_deposition() {
         let ctrl = ParcelControls {
             drag: DragModel::SchillerNaumann,
             gravity: Vec3::new(0.0, 0.0, -9.81),
+            evaporation: EvaporationControls::default(),
             persistent_blocks: Some(blocks),
             ..still(4096)
         };
         let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[inj], dt).unwrap();
         let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
         for _ in 0..15 {
-            p.step(&gpu, &u, &rho, None, dt).unwrap();
+            p.step(&gpu, &u, &rho, None, None, dt).unwrap();
         }
         dep.update(&gpu, &p).unwrap();
         let s = dep.snapshot(&gpu).unwrap();
@@ -1041,7 +1044,7 @@ fn the_sort_and_the_gather_capture_once_and_replay() {
         let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[inj], dt).unwrap();
         let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
         for _ in 0..steps {
-            p.step(&gpu, &u, &rho, None, dt).unwrap();
+            p.step(&gpu, &u, &rho, None, None, dt).unwrap();
             dep.update(&gpu, &p).unwrap();
         }
         dep.snapshot(&gpu).unwrap()
@@ -1051,7 +1054,7 @@ fn the_sort_and_the_gather_capture_once_and_replay() {
     let mut dep = ParcelDeposition::new(&gpu, &p).unwrap();
     let captured = gpu
         .capture(|_| {
-            p.step(&gpu, &u, &rho, None, dt)?;
+            p.step(&gpu, &u, &rho, None, None, dt)?;
             dep.update(&gpu, &p)
         })
         .expect("capture must not fail: nothing in the sequence allocates or reads back");
@@ -1208,7 +1211,7 @@ fn the_cost_of_the_sort_at_a_million_slots() {
     let mut done = 0usize;
     for target in [50usize, 250] {
         while done < target {
-            p.step(&gpu, &u, &rho, None, dt).unwrap();
+            p.step(&gpu, &u, &rho, None, None, dt).unwrap();
             done += 1;
         }
         gpu.sync().unwrap();
@@ -1232,7 +1235,7 @@ fn the_cost_of_the_sort_at_a_million_slots() {
 
         let t0 = std::time::Instant::now();
         for _ in 0..reps {
-            p.step(&gpu, &u, &rho, None, dt).unwrap();
+            p.step(&gpu, &u, &rho, None, None, dt).unwrap();
             done += 1;
         }
         gpu.sync().unwrap();
