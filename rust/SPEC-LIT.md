@@ -12764,6 +12764,11 @@ more `T` condition (`empty`).
 
 ### 60.2 What the fluid region is, and the one restriction that shapes it
 
+**A closed cavity — and §79 lifted exactly this, which is why the paragraph
+stays.** What follows was true of §60 as written, and it is what §79.2's
+`kind` entry changed: a fluid patch may now say `inlet` or `outlet`, exactly
+one of each or neither, and *neither* is what this paragraph describes.
+
 **A closed cavity.** Every non-`empty` patch of a fluid region is a **no-slip
 wall**: `U = 0` and `p` zero-gradient, written by the reader and not
 settable. There is no inlet, no outlet and no flux to establish, so the
@@ -12980,15 +12985,23 @@ status than "not run" by exactly the amount above.
 `10.1016/S0017-9310(02)00101-1`: a silicon micro-channel heat sink with
 measured substrate temperatures.
 
-**NOT RUN, and the reason is a capability and not an oversight.** The
-micro-channel is a forced-convection problem: water enters at a prescribed
-flow rate and leaves at an outlet. §60.2's fluid region is a **closed
-cavity** with every patch a no-slip wall, so the case cannot be expressed at
-all - there is no `inlet` to name. Building it needs the inlet/outlet half of
-§60.2's restriction lifted, which is the `inletOutlet` temperature condition,
-a flux-establishment pass and an outflow treatment. That is the next piece of
-work and it is named here rather than approximated with a fixed-flux wall
-standing in for a flowing channel.
+**NOT RUN AT THE TIME OF WRITING, and the reason was a capability and not an
+oversight.** The micro-channel is a forced-convection problem: water enters at
+a prescribed flow rate and leaves at an outlet. §60.2's fluid region was a
+**closed cavity** with every patch a no-slip wall, so the case could not be
+expressed at all - there was no `inlet` to name. Building it needed the
+inlet/outlet half of §60.2's restriction lifted, which is the `inletOutlet`
+temperature condition, a flux-establishment pass and an outflow treatment.
+That was named here rather than approximated with a fixed-flux wall standing
+in for a flowing channel.
+
+**§79 is that work, and Gate 6 now RUNS.** All four pieces are there,
+`cases/quMudawar.cht.jsonc` is the case, and §79.12 has the result: both
+substrate temperatures inside the experimental uncertainty Qu & Mudawar plot,
+with the two disclosures the comparison needs. This row is left as it was
+written because it is the record of what a named restriction cost and of the
+list that was made when it was named - every item on that list is what §79
+built.
 
 ### 60.7 What must hold, and what was measured
 
@@ -13003,6 +13016,7 @@ standing in for a flowing channel.
 | every refusal of §60.3 | fires, and names the setting | pass |
 | §47.14's own solid-only case | `cases/dieStack.cht.jsonc` reproduces its closed form unchanged | pass |
 | `ofgpu-validate`'s "Gate 5 NOT run" line | **gone**, replaced by a result | done |
+| §60.6's Gate 6 | UNREACHABLE when this section was written | **run by §79** - `ofgpu-validate`'s "Gate 6 NOT RUN" line is gone too |
 
 ---
 
@@ -22647,3 +22661,732 @@ The `weber` ladder puts 68.75 % of its mass on the wall through 5 sticks, 4
 spreads and 2 splashes, with 23 rebound impacts from the five parcels that
 bounce, and reports the 2 splashes, which are what make that deposit an upper
 bound rather than an answer.
+
+---
+
+## 79. Forced convection in the conjugate fluid region — the opening, the flux that establishes it, and the outflow
+
+§60.2 said what a conjugate fluid region was, in one sentence: **a closed
+cavity**, every non-`empty` patch of it a no-slip wall. §60.6 said what that
+cost, and named it rather than working around it — Qu & Mudawar's silicon
+micro-channel is forced convection, it is *the* published benchmark the
+semiconductor claim rests on, and it could not be expressed at all. Not
+refused: **unreachable**, because the case document had no entry an inlet
+could go in.
+
+§60.2 also named the four things lifting the restriction would need:
+`inletOutlet` on `T`, a flux-establishment pass, an outflow treatment, and a
+global mass balance. This section is those four, plus the two the list did not
+mention and the work found — that a liquid is not §25's ideal gas (§79.6), and
+that a unit cell with a hole in it is nine boxes and not one (§79.8). One word
+of that list does not survive being implemented, and §79.3 says which.
+
+`No GPL-licensed source was consulted.`
+
+**A numbering convention, the same one §78 stated.** `(79.1)`, `(79.2)` … are
+this section's equations and mean themselves; where a set is lettered, the bare
+number means the set. The code refers to them exactly as written here.
+
+**The defaults do not move, and here that is a claim about a whole run.** A
+case with no opening takes the same branch it always did: `openings: None`
+writes the same no-slip triple on every fluid patch, leaves `p`
+zero-gradient so `Simple::initialise` pins the singular system, never reaches
+the potential-flow solve, and never calls the value-fraction update. §60.5's
+Gate 5 and §59.8's Gates 59-A and 59-B are run LIVE on every `ofgpu-validate`
+invocation, on the closed-cavity path, and they are the regression: if §79 had
+moved a closed cavity by so much as a bit, the three of them would say so on
+the same screen.
+
+### 79.1 What §60.2 refused, and what has to arrive with an opening
+
+An opening is not one setting. It is four, and each of them is a place a
+solver quietly does the wrong thing if it is missing:
+
+| What | If it is missing |
+|---|---|
+| a patch that says it is an inlet, and a velocity on it | the case cannot be written |
+| a face flux consistent with `div u = 0` **before** the first momentum assembly | mass enters a domain with no path out of it, the first momentum equation is assembled with no convection at all, and the bounded correction papers over the divergence instead of removing it (§79.4) |
+| an outflow condition on `T` that does not conduct heat back in | a `fixedValue` at an outlet is a heat source the case did not ask for; a `zeroGradient` is right only while the flow leaves (§79.5) |
+| a global mass balance that is reported, not assumed | an incompressible run whose inlet and outlet fluxes do not cancel is wrong in a way no residual shows (§79.7) |
+
+The first is a document entry, the second is a solve, the third is §4's triple
+with a switch on it, and the fourth is a reduction. None of them is new
+numerics: every piece already existed in this crate for the `buoyant` and
+`fire` solvers, and what §79 does is make the conjugate format able to reach
+them.
+
+### 79.2 The two openings, and why exactly one of each
+
+A fluid patch gains one entry, `kind`:
+
+```
+  "kind": "wall"      the default, and what every fluid patch was before §79
+  "kind": "inlet"     carries U, and a fixedValue T
+  "kind": "outlet"    carries neither, and takes inletOutlet or zeroGradient
+```
+
+**A case may name exactly one of each, or neither.** Neither is §60.2's closed
+cavity. Two inlets, or an inlet with no outlet, is refused by name, and the
+reason is not a limitation of the reader:
+
+* an inlet with no outlet drives mass into a domain that has nowhere to put
+  it, and the steady incompressible pressure equation has no solution;
+* a **second** opening needs a pressure level of its own to decide how the
+  flow splits between the two, and nothing in this format states one;
+* §79.4's flux-establishment solve carries exactly **one** Dirichlet
+  reference, which is the outlet's — `crate::potential_flow`'s own
+  `PotentialFlowSpec` has stated that restriction since §31 and this is the
+  same restriction for the same reason.
+
+**An opening is a mesh patch TYPE, not only a case entry.** The reader writes
+`patch` for an opening where it writes `wall` for everything else and `empty`
+for a 2-D plane. That distinction is not cosmetic: `PatchKind::Wall` is what a
+wall function targets and what a wall-distance sweep seeds from, and an outlet
+is not a wall. It has to be known before `blockgen` builds the block, which is
+why `kind` is read in the same pass that collects the `empty` patches.
+
+**Only a fluid region may say either.** An opening is a place flow enters or
+leaves and a conducting solid has none; a solid region that names one is
+refused with the region's name in the message.
+
+### 79.3 Which side owns the flux — the velocity and the pressure
+
+The whole of the inlet/outlet treatment in the momentum and pressure equations
+is two triples, and the thing that makes them work is a predicate that already
+existed. `momFluxIsPrescribed` (§10.4) asks whether a boundary face's flux is
+*given* — in which case the pressure equation may not change it — and it is
+
+```
+  prescribed  <=>  kind = empty  or  kind = symmetry  or  fr >= 1     (79.1)
+```
+
+So:
+
+```
+  inlet    U:  fr = 1, refValue = U_in       -> prescribed, phi_b = U_in . Sf
+           p:  fr = 0                        (zero-gradient)
+           T:  fr = 1, refValue = T_in                                (79.2)
+
+  outlet   U:  fr = 0                        (zero-gradient)
+           p:  fr = 1, refValue = 0          -> the only Dirichlet
+           T:  §79.5's switched triple
+```
+
+`fr = 0` on the outlet's velocity makes `momFluxIsPrescribed` **false** there,
+and that single fact *is* the outflow treatment: the pressure equation owns
+the outlet flux, so whatever mass the inlet pushed in leaves through the
+outlet by construction of the pressure correction rather than by an
+extrapolation anybody has to write down.
+
+**A word in §60.2's list that does not survive contact: "non-reflecting".**
+§60.2 named the third missing piece as "an outflow **non-reflecting**
+treatment", and that adjective is borrowed from compressible practice, where
+an outflow boundary can reflect acoustic waves back into the domain. This
+solver's fluid side is INCOMPRESSIBLE (§5): the pressure equation is elliptic,
+there is no acoustic mode to reflect, and the whole of the outflow treatment
+is the two lines of (79.2). A characteristic or sponge-layer outflow is a
+compressible solver's problem and there is nothing here for one to fix. The
+list was right about four things and loose about one word, and this is the
+word.
+
+**The pressure level, and why `p_outlet = 0` is not a case entry.** With no
+opening the Poisson problem is singular and `Simple::initialise` pins it —
+exactly right for a closed cavity, and exactly what happened before §79. With
+an opening the outlet's Dirichlet is what `pressure_has_a_dirichlet` finds, so
+nothing is pinned and the level is the outlet's. An incompressible solver
+reads only *differences* of `p`, so an entry for the outlet gauge would change
+no velocity and no temperature anywhere: it would be a setting the case states
+and the solver ignores, which is the §13.4.1 defect, and it is therefore not
+an entry.
+
+### 79.4 The flux-establishment pass, and the defect it removes
+
+At the start of a run `U` is zero everywhere except on the inlet faces, whose
+value the case wrote. The face flux built by interpolating that field,
+
+```
+  phi_f = (interpolate(U) . Sf)_f                                     (79.3)
+```
+
+is then **zero on every internal face and `U_in . Sf` on the inlet**. Every
+cell in the domain has `sum_f phi_f = 0` except the first row, which has all
+of the inflow and no outflow. Assembling the first momentum equation on that
+flux gives a convection operator that transports nothing anywhere, and an
+inconsistent one: the bounded-convection correction of §11.5 subtracts
+`psi div(phi)`, which *hides* the divergence rather than removing it.
+
+The fix is the one `crate::potential_flow` (§31) already implements, and §79
+is one more caller of it. Solve
+
+```
+  laplacian(Phi) = 0        in the fluid
+  dPhi/dn = -U_in           on the inlet
+  Phi = 0                   on the outlet                             (79.4)
+  dPhi/dn = 0               on every wall
+
+  phi_f  = Delta_f (Phi_N - Phi_P) |Sf|_f                   internal
+  phi_bf = internalCoeffs[bf] Phi_P - boundaryCoeffs[bf]     boundary
+```
+
+Both lines are `fv::sn_grad_flux`, written against the same coefficients in
+the same multiplication order `fv::fvm_laplacian` used, so with a zero source
+the linear solver's residual in cell `c` **is** `sum_f phi_f`. Reading the
+flux off the operator rather than off a reconstructed velocity is what makes
+that identity hold, and it is why nothing here interpolates a cell velocity
+onto the faces — that is the step this pass exists to remove. On the shipped micro-channel it is
+`3.1e-14 m^3/s` against an inlet flux of `1.7e-8 m^3/s`.
+
+The pass runs **once, at setup**, on free-standing `phi` and `U` fields —
+`solve_potential_flow` needs both mutably at once and `Simple` cannot lend two
+mutable borrows of itself — and the answer is copied in before
+`Simple::initialise`. A case with no opening never reaches it: there is no
+inlet to prescribe and the closed cavity's initial flux of zero is already
+divergence-free.
+
+### 79.5 `inletOutlet` as §4's triple — and the entry that cannot move the answer
+
+The outflow condition on `T` is §4's universal triple with a **value fraction
+switched by the sign of the face flux**:
+
+```
+  fr_b = 1  if  phi_b < 0   (flow entering)  -> T_b = inletValue
+  fr_b = 0  if  phi_b >= 0  (flow leaving)   -> T_b = T_P             (79.5)
+
+  refValue = inletValue,   refGrad = 0
+```
+
+One elementwise kernel, `fldInletOutletFraction`, one thread per boundary
+face, no branch on anything but the stored `bc_kind`. It runs over the **whole
+concatenated boundary** of §47.4's thermal mesh, once per outer iteration,
+immediately after the fluid flux has been copied onto that mesh and
+immediately before the assembly that reads `fr`. Sweeping the concatenated
+boundary rather than the outlet's own face range is safe by construction and
+not by care: the kernel touches only faces whose kind lies in the
+flux-switched range, no solid patch and no interface face carries such a kind,
+and on a closed cavity no face does, so the launch is a no-op that writes
+nothing.
+
+**Two claims follow, and both are tested rather than argued.**
+
+**(a) While the flow leaves, `inletOutlet` is `zeroGradient` in every bit.**
+`fr = 0` and `refGrad = 0` make (79.5) `T_b = T_P`, which is what
+`zeroGradient` writes; the two conditions take the same arithmetic path
+through `fldMixed`. The gate replaces one with the other in a running case and
+requires the cell field AND the evaluated face values to agree **exactly** —
+`0.0`, not "to tolerance".
+
+**(b) `inletValue` cannot move the answer while nothing enters — and this is
+a §13.4.1 problem the contract cannot see.** `inletValue` is read on exactly
+the faces where `phi_b < 0`. On a channel that never backflows there are none,
+so a case can write any number there and the solver will produce the same
+field. That is the shape of the defect §13.4.1 exists to catch, but it is not
+the defect: the entry is legitimate, the solver is right to ignore it, and
+what decides whether it matters is the **flow** and not the document. Refusing
+the entry would be worse — it is exactly the entry a recirculating outlet
+needs, and it is a solver's business to be robust when one appears.
+
+So the answer is neither to refuse it nor to pretend: **the run reports how
+many of its outlet faces the flow came back in through**, from the same
+`phi_b` array the kernel switched on, and a run that reports zero has said in
+its own output that `inletValue` could not have moved that answer. §79.11's
+pair test is written in both halves — bitwise-identical forward, and moving by
+more than `1 K` with the inlet velocity reversed so that every outlet face is
+an inflow face. §70.7 is the precedent for asserting the equivalent claim
+where a setting cannot change the output by construction; this is that, with
+the construction supplied by the flow rather than by the code, and so the
+report is what makes the claim checkable.
+
+**And backflow is not exotic.** The driver-level test that blows `0.05 m/s`
+up through a buoyant cavity whose own circulation is an order of magnitude
+stronger finds the flow coming back IN through **7 of the outlet's 10 faces**,
+with the global mass balance still closing to the pressure solver's tolerance
+because the outlet flux is made of both signs. That assertion was written the
+other way round first — `n_backflow == 0`, "the outlet is downstream of the
+inlet" — and it failed, which is how the number got measured. A forced
+micro-channel does not backflow; a mixed-convection enclosure with an opening
+routinely does, and `inletValue` is the entry that decides what enters when
+it does.
+
+### 79.6 No buoyancy: the constant-density branch, and why water is not a gas
+
+§60.3 **required** `buoyancy` on any case with a fluid region and refused it
+without one, for a good reason: a closed cavity with no body force has nothing
+that could drive any flow at all, so a case that meant conduction should have
+said `kind: solid`. Forced convection removes that reason — the inlet drives
+it — and §79 loosens exactly that one row:
+
+```
+  a CLOSED fluid cavity          `buoyancy` REQUIRED
+  a fluid region with an inlet   `buoyancy` OPTIONAL
+  no fluid region at all         `buoyancy` REFUSED     (unchanged)     (79.6)
+```
+
+**Absent, it is a model and not a default**, and it is two statements at once:
+
+* **no body force.** `g = 0` makes `BuoyancyCoeffs::is_active` false and §9's
+  face body force **exactly** zero — not small, zero.
+* **constant density.** `GasState::update_density` is not called inside the
+  outer loop at all. The array is written once, before the loop, at the
+  initial temperature, and never again. §25's gas state
+  `rho = p0/(R_s T)` is an *ideal gas law*, and the fluid in a micro-channel
+  heat sink is liquid water, whose density falls by `0.6 %` over the `21 K`
+  this case spans and certainly does not follow `1/T`. Holding it constant is
+  Qu & Mudawar's own assumption (4), and it is a better model here than the
+  one §25 would otherwise impose.
+
+The two together are Qu & Mudawar's assumptions (4) and (6). A forced case
+*may* still carry `buoyancy`, and then nothing changes from §59: `TRef` is the
+reference and the density moves every outer iteration exactly as it did. The
+two are a §13.4.1 pair (§79.11), not an either/or.
+
+### 79.7 The global balance, and the identity a converged run must reproduce
+
+Both opening fluxes are summed **signed outward**, so a real inlet reports a
+negative number and the two cancel:
+
+```
+  imbalance = SUM_inlet phi_b  +  SUM_outlet phi_b                    (79.7)
+```
+
+The temperature the flow leaves at is the mixing-cup (bulk) mean, and the
+enthalpy it carries away is the same two arrays weighted by `T`:
+
+```
+  T_bulk = SUM_outlet phi_b T_b / SUM_outlet phi_b                    (79.8)
+
+  H_out - H_in = rho c_p ( SUM_outlet phi_b T_b + SUM_inlet phi_b T_b )
+                                                                      (79.9)
+```
+
+Both are taken on the host from `phi_b` and the evaluated `T_b` — **the same
+two arrays the assembly used**, so this is a reading of the answer and not a
+second model of it.
+
+(79.9) makes a steady run checkable against an identity with no modelling in
+it. For a channel heated at `Q` watts with everything else adiabatic,
+
+```
+  dT_bulk = Q / (rho c_p |phi_outlet|)                                (79.10)
+```
+
+and a converged solution must reproduce it. **`Q` is not always just the
+heater**, and the gate that checks (79.10) had to learn that: an inlet with a
+`fixedValue` `T` is a Dirichlet face, and the first cell behind it is warmer,
+so the inlet **conducts heat back out** of the domain. On the 4 mm test duct
+of §79.11 that is `0.3 %` of the heater — small, and thirty times the
+tolerance a balance deserves. The gate sums both patches. On Qu & Mudawar's
+`10 mm` channel the same term is `5e-8 W` against `0.9 W` and disappears into
+the round-off. On Qu & Mudawar's case, `Q` is
+`0.9 W` exactly (the top wall's `9.0e5 W/m^2` over `100 um x 10 mm`), the heat
+capacity rate is `0.0695181 W/K`, and (79.10) says `12.9463 K`. That is Gate
+79-B, and §79.13 has what it measured.
+
+### 79.8 A unit cell is nine boxes, and eight of the twelve couples are exact
+
+`blockgen` builds one axis-aligned block per region. A micro-channel unit cell
+is a block **with a rectangular hole in it**, and the hole is the fluid. There
+is no way to say that in one region, and §47.4's pairing couples one whole
+patch to one whole patch with equal face counts, so a full-width slab beneath
+the channel cannot be coupled to three different partners across its top.
+
+The cell is therefore cut into the `3 x 3` grid of boxes its two wall
+thicknesses and its three z-layers already define, and the middle box is the
+channel:
+
+```
+        y in [0,Ww1]   [Ww1,Ww1+Wch]   [Ww1+Wch,W]
+  top       topL           topC            topR      <- heated at z = H
+  mid       midL         * fluid *         midR
+  bot       botL           botC            botR
+```
+
+Nine regions, and **twelve** conformal couples: six joining boxes side by side
+in `y`, six stacking them in `z`. Four of the twelve touch the fluid and are
+the conjugate interfaces §47 exists for. The other eight are silicon against
+silicon.
+
+**Those eight are not an approximation, and the algebra says why.** Take two
+cells of the same material `k` either side of a plane face, cell centres a
+distance `2h` apart, cut in half by the face. As an INTERNAL face, §46.2's
+harmonic conductivity of two equal values is `k` and §3.2's coefficient is
+
+```
+  a_int = k |Sf| Delta_f = k |Sf| / (2h)                             (79.11)
+```
+
+As an INTERFACE, §47.2's one-sided conductances are `C_A = C_B = k/h` and the
+series conductance is
+
+```
+  h_G = (1/C_A + R_c + 1/C_B)^-1 = k/(2h)     at R_c = 0
+  a_cpl = h_G |Sf| = k |Sf| / (2h)                                   (79.12)
+```
+
+which is (79.11). The non-orthogonal correction §47.3 suppresses on an
+interface face is identically zero on an orthogonal mesh, so nothing else
+differs either. The cut is a *renumbering*, and Gate 79-C measures it: the
+same box, solved once as one region and once as the nine with all twelve
+couples declared, agreeing cell for cell to **`1.25e-12 K` over a `95.7 K`
+range, `1.3e-14` relative**.
+
+The two coefficients are not bitwise equal, and it is worth saying why rather
+than claiming more than holds. (79.11) evaluates `1/(1/k + 1/k)^-1`-shaped
+arithmetic through §46.2's harmonic form and (79.12) through §47.2's series
+form; both round to `k` within an ulp but not necessarily to the same ulp, and
+the two systems are also solved by different Krylov iterations because the
+coupled entries live in `boundary_coeffs` rather than in `upper`/`lower`. So
+the claim is *round-off*, not *bitwise*, and §79.13 reports the number.
+
+### 79.9 What a conjugate forced-convection case says
+
+Everything §60.1 described stays as it was. The additions are `kind` and `U`
+on a fluid patch, one more `T` condition, and `buoyancy` becoming optional:
+
+```jsonc
+{
+  "name": "quMudawar",
+  "regions": [
+    { "name": "water", "kind": "fluid",
+      "mesh": { "bounds": { "min": [0, 21.5e-6, 270e-6],
+                            "max": [10e-3, 78.5e-6, 450e-6] },
+                "cells": [60, 9, 21],
+                "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+                "boundaries": { "xmin": "inlet", "xmax": "outlet", ... } },
+      "fluid": { "rho": 998.2, "cp": 4182.0, "kappa": 0.61, "mu": 1.002e-3 },
+      "patches": [
+        { "match": "inlet",  "kind": "inlet",  "U": [1.623115, 0, 0],
+          "T": { "type": "fixedValue", "value": 293.15 } },
+        { "match": "outlet", "kind": "outlet",
+          "T": { "type": "inletOutlet", "inletValue": 293.15 } } ] },
+
+    { "name": "topC", "kind": "solid",
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [ { "match": "topCZmax",
+                     "T": { "type": "fixedFluxTemperature", "q": 9.0e5 } },
+                   ... ] },
+    ...  /* seven more silicon boxes */ ],
+
+  "interfaces": [ ... twelve of them ... ],
+
+  // no "buoyancy": SPEC-LIT §79.6
+  "initial": { "T": 293.15 },
+  "run": { "steady": true, "iterations": 1500 },
+  "numerics": { "solver": "PBiCGStab", "preconditioner": "DILU",
+                "tolerance": 1e-16, "maxIter": 500,
+                "flow": { "relaxU": 0.7, "relaxP": 0.3, "relaxT": 1.0, ... } }
+}
+```
+
+| Entry | Meaning |
+|---|---|
+| `patches[].kind` | `wall` (default), `inlet` or `outlet`. Fluid regions only, exactly one of each or neither |
+| `patches[].U` | the inlet velocity, m/s, **uniform over the patch**. Required on an `inlet` and refused everywhere else |
+| `T: inletOutlet` + `inletValue` | §79.5's switched triple. Legal only on an `outlet` |
+| `buoyancy` | now OPTIONAL when there is an inlet — §79.6, and its absence is constant density AND no body force |
+
+`relaxT: 1.0` is worth a note, because it is not what §60.1's closed cavity
+wanted. With no body force the momentum equation does not read `T` at all, so
+at a fixed flux the energy equation is **linear** in `T` and under-relaxing it
+only slows the same answer down. The shipped case converges in 261 outer
+iterations at `relaxT = 1.0`. Measured on §79.12's coarsest mesh, where the
+comparison is cheap: at `relaxT = 1.0` it converges in 159 outer iterations,
+and at `0.7` the velocity and pressure residuals are already at `1e-11` after
+200 while `T` is still at `2.4e-3` and `20 K` short of its answer.
+
+**A uniform inlet velocity, and a profile refused rather than averaged.** §79.4
+takes one normal speed. A case wanting a developed profile at the inlet must
+mesh the development length, which is what Qu & Mudawar's own (7) does.
+
+### 79.10 What is refused, by name
+
+| Asked for | Action |
+|---|---|
+| `kind` anything but `wall`, `inlet` or `outlet` | §13.4 error listing all three, and **not** substitutable under `-permissive`: the patch type decides whether the pressure equation owns the face's flux and there is no third answer to guess |
+| an opening on a `solid` region | error naming the region — a conducting solid has nowhere for flow to go |
+| an `inlet` with no `U` | error: §79.4's pass is built from its normal component and there is no default to invent |
+| `U` on a `wall` or an `outlet` | error: a wall is no-slip and an outlet's velocity is what the pressure equation computes, so the entry would be read and dropped (§13.4.1) |
+| an `inlet` whose `U` is zero | error: an inlet nothing enters through is a no-slip wall spelled at length |
+| two inlets, two outlets, or one without the other | error: §79.2's pressure-level argument, quoted in the message |
+| an opening with no `fluid` region | error naming what is missing |
+| an `empty` patch that is also an opening | error: it contributes to no surface integral at all |
+| `inletOutlet` on anything but an `outlet` | error: the flux through a wall or an inlet never changes sign, so the condition would be `zeroGradient` wearing another name (§13.4.1) |
+| `inletOutlet` on a pure-conduction case | error naming §79.4 — a stack of solids has no flux to switch on. Unreachable through the reader, and refused anyway |
+| an `inlet` with anything but `fixedValue` `T` | error: the entering enthalpy would be undetermined |
+| an `outlet` with `fixedValue` or `fixedFluxTemperature` `T` | error: a held temperature at an outlet conducts heat back INTO a domain the flow is leaving, and a prescribed flux there is a wall condition on a face that is not a wall |
+| a CLOSED fluid cavity with no `buoyancy` | error (unchanged from §60.3), and the message now also names `inlet`/`outlet` as the other way out |
+| `buoyancy` with no fluid region | error (unchanged) |
+| an inlet velocity PROFILE | not an entry. §79.4 takes one normal speed; mesh the development length |
+| more than one fluid region | error (§47.4), unchanged — and it is what a second opening would want |
+| a transient forced case | error (§59.6), unchanged |
+
+### 79.11 The §13.4.1 pair tests
+
+Every one of these is two case documents identical in every byte but one,
+required to produce a different answer and failing **by name** if they do not.
+They run on a 288-cell heated duct — a `4 mm` plane channel of water below a
+`0.2 mm` conducting lid heated from outside at `1e4 W/m^2`, with the two
+coupled by one conjugate interface — so that a pair test is a measurement and
+not a parse. It is the smallest thing that is not §60.2's closed cavity.
+
+| # | The one entry that differs | What must move |
+|---|---|---|
+| 1 | inlet `U` `0.05` -> `0.1` | everything: the flow, the outlet bulk temperature, the wall temperature |
+| 2 | inlet `T` `300` -> `320` | the whole field — the inlet temperature is the datum |
+| 3 | `buoyancy` absent -> present | the body force AND the density (§79.6) |
+| 4a | outlet `inletValue` `300` -> `900`, **flow forward** | **NOTHING, in every bit** — asserted as the equivalent claim, with the run's own report that 0 of 8 outlet faces had inflow (§79.5, §70.7's precedent) |
+| 4b | the same entry, **inlet velocity reversed** | more than `1 K`, because every outlet face is then an inflow face |
+| 5 | outlet `T` `inletOutlet` -> `zeroGradient`, flow forward | **NOTHING, in every bit**, in the cells AND in the evaluated face values — §79.5(a) |
+| 6 | `kind` `inlet` -> `wall` on the inlet patch | a refusal, not a different answer: the outlet is then alone and §79.2 refuses the pair |
+
+Pairs 4a and 5 are the two that matter most, and they are the two that assert
+**equality**. A pair test that only ever demands a difference cannot catch a
+setting that changes something it should not, and `inletOutlet` degenerating
+exactly to `zeroGradient` on outflow is the property that makes §79.5's kernel
+safe to run over the whole concatenated boundary.
+
+### 79.12 Gate 6 — Qu & Mudawar (2002), run at last, and the two disclosures it needs
+
+**W. Qu, I. Mudawar, "Analysis of three-dimensional heat transfer in
+micro-channel heat sinks", *Int. J. Heat Mass Transfer* **45** (2002)
+3973–3985**, DOI `10.1016/S0017-9310(02)00101-1`. Read in full from the
+authors' own copy at
+`engineering.purdue.edu/mudawar/files/articles-all/2002/2002_3.pdf`. This is
+§47.12's Gate 6 and §60.6's UNREACHABLE row.
+
+**The configuration**, their Table 1 exactly: a unit cell of a `1 cm^2` silicon
+heat sink, one `57 um x 180 um` channel with `21.5 um` half-walls either side,
+`270 um` of silicon below it and `450 um` above, `10 mm` long. Water in;
+`9.0e5 W/m^2` on the heat-sink top wall; every other outer face adiabatic.
+Their Table 2 operating point: `Re = 140`, `T_in = 20 C`, `k_water = 0.61`,
+`k_silicon = 148 W/(m K)`. Meshed as §79.8's nine boxes.
+
+**What is compared.** Their Fig. 4(b) and 4(c) hold their own predictions of
+the inlet and outlet thermal resistance against Kawano *et al.*'s (1998)
+measurements with error bars:
+
+```
+  R_t,in  = (T_w,in  - T_in)/q"        R_t,out = (T_w,out - T_in)/q"
+                                                                     (79.13)
+```
+
+`T_w` is the width-averaged temperature of the **heated top wall** at the
+channel inlet and at its exit — their (20) with `z = H`. Here it is the
+area-weighted mean of the evaluated FACE temperature over one `x` column of
+the three heated patches, linearly extrapolated to `x = 0` and `x = L` from
+the two end columns.
+
+**The word FACE in that sentence is worth `0.0011` in `R`, which is a whole
+mesh level.** The first reduction of this gate averaged the top row of CELL
+temperatures, and on a fixed-flux face the two differ by exactly
+
+```
+  T_b - T_P = (q"/k_s) (dz/2)                                        (79.14)
+```
+
+— `0.098 K` on the coarsest mesh here, `0.037 K` on the finest, or `0.0011`
+and `0.0004` in `R`. That is `1.2 %` of `R_t,in` and larger than the
+level-to-level change it would have been read against. `T_w` is a WALL
+temperature, so the face value is the right one, and (79.14) is exact rather
+than interpolated because the patch is a fixed-flux face on an orthogonal
+mesh. The extrapolation to the ends is worth another `0.00005`.
+
+**DISCLOSURE 1: Kawano *et al.* (1998) was not obtained, and the reference is
+a figure.** *K. Kawano, K. Minakami, H. Iwasaki, M. Ishizuka, "Micro channel
+heat exchanger for cooling electrical equipment", ASME HTD-361-3/PID-3 (1998)
+173–180* is an ASME conference volume; no copy was found. What this gate
+compares against is therefore **Qu & Mudawar's Fig. 4 itself**, digitised: the
+page was rendered at 8x, the plot frames and the axis tick marks were located
+by pixel, and the marker centres, the error-bar caps and the prediction curve
+were read off the resulting linear map. At `Re ~ 140`:
+
+```
+  Fig. 4(b)  R_t,in    Kawano  0.116  [0.080, 0.152]   Qu & Mudawar  0.083
+  Fig. 4(c)  R_t,out   Kawano  0.222  [0.156, 0.288]   Qu & Mudawar  0.249
+                                                    (C cm^2/W)      (79.15)
+```
+
+The digitisation's own uncertainty is about `0.002` in `R`: in Fig. 4(c) a
+tick spacing is `109` pixels for `0.1`, the markers are `18` pixels across,
+and the centre of a symmetric marker is locatable to about `2` of those
+pixels. That is `1 %` of the outlet value and a thirtieth of the half-bar
+(`0.066`) it is read against. This
+is the same class of disclosure §60.5 makes about Kaminski & Prakash and
+§78.12 about SAE 950283, and it is stated here, in `PROVENANCE.md`, and in the
+run's own output.
+
+**DISCLOSURE 2: the paper gives one of the four water properties, and the
+other three had to be chosen.** Table 2 states `k_water = 0.61 W/(m K)` and
+nothing else, but `Re` fixes the inlet speed only once `rho` and `mu` are
+known, and the bulk temperature rise is `Q d_h/(Re mu A_c c_p)` — so `mu` and
+`c_p` set the answer directly. This case uses water at the **inlet**
+temperature, `20 C` and 1 atm: `rho = 998.2 kg/m^3`, `c_p = 4182 J/(kg K)`,
+`mu = 1.002e-3 Pa s`, giving `Pr = 6.869` and `u_in = 1.6231 m/s`.
+
+The choice is not arbitrary and it is not free. Evaluating instead at the
+*mean fluid* temperature of about `30 C` gives `mu = 0.797e-3`, a mass flow
+`20 %` smaller at the same `Re`, and a bulk rise of `16.2 K` instead of
+`12.9 K` — which would move `R_t,out` from `0.235` to roughly `0.27`, still
+inside Kawano's bar but at its top rather than its middle. That last figure is
+an ESTIMATE from the mass-flow scaling and not a run; what is measured is the
+`20 %` in the flow rate, which is arithmetic. **This is the
+largest single uncertainty in this gate**, larger than the mesh error and
+larger than the digitisation. Two things argue for `20 C`: the paper's own
+`k = 0.61` and the fact that reproducing their `R_t,out` at all requires the
+larger mass flow. Neither is proof, and this document does not claim one.
+
+**RESULT.** Four uniform-refinement levels, `x` graded toward both ends, each
+run steady and stopped on its own residual:
+
+| level | cells | outer iterations | `R_t,in` | change | `R_t,out` | change |
+|---|---|---|---|---|---|---|
+| 1 | `14 400` | 191 | `0.09050` | — | `0.23374` | — |
+| 2 | `48 600` | 261 | `0.09163` | `1.25 %` | `0.23459` | `0.37 %` |
+| 3 | `115 200` | 322 | `0.09239` | `0.83 %` | `0.23490` | `0.13 %` |
+| 4 | `259 350` | 440 | `0.09289` | `0.55 %` | `0.23507` | `0.07 %` |
+| extrapolated | — | — | `~0.094` | — | `~0.235` | — |
+
+(`ofgpu-validate` runs the first two of those four live on every invocation
+and prints them; the two finest are minutes each and belong in the case file.
+Each level-to-level change is between `0.4` and `0.7` of the one before it,
+so the last row is the geometric sum of that sequence and not a fit to
+anything. It is quoted to two significant figures because that is all a ratio
+estimated from three differences supports.)
+
+**GATE 6 HOLDS.** On the finest mesh:
+
+```
+  R_t,in   0.0929   against Kawano  0.116 [0.080, 0.152]   INSIDE the bar
+                    against Qu & Mudawar's own 0.083       +12 %
+  R_t,out  0.2351   against Kawano  0.222 [0.156, 0.288]   INSIDE the bar
+                    against Qu & Mudawar's own 0.249       -5.4 %
+
+  T_w,in   28.36 C     T_w,out  41.16 C                            (79.16)
+```
+
+Both substrate temperatures lie inside the experimental uncertainty the paper
+plots, which is what §47.12's Gate 6 asked for. **The verdict does not depend
+on the remaining truncation error**: the sequence is monotone increasing and
+its extrapolated limit, `0.094` and `0.235`, is inside the same bars, so
+even a perfectly converged answer would not change it: `0.094` sits between
+Kawano's `0.080` and `0.152`, and `0.235` between `0.156` and `0.288`.
+
+**Three things this result is honest about.**
+
+1. `R_t,in` has **not** reached the `0.5 %` level-to-level criterion §60.5
+   used, at `259 350` cells — it is at `0.55 %`, which is close and is not
+   rounded to met. `R_t,out` has, at `0.07 %`. The inlet resistance
+   is measured where the thermal boundary layer is thinnest and it converges
+   slowly, which is the same reason Qu & Mudawar used a non-uniform grid
+   clustered at the inlet. It is reported as `0.69 %` and not rounded to met.
+
+2. `R_t,in` sits `20 %` **below** Kawano's own point while `R_t,out` sits
+   `5.9 %` above it. Qu & Mudawar's prediction has the same shape and larger —
+   `28 %` below at the inlet — and they attribute it to heat lost into the
+   upstream plenum in the experiment, which would inflate the *measured*
+   inlet resistance. This solver agreeing with their prediction's direction is
+   evidence that the two codes are solving the same problem; it is not
+   evidence that either is right about the plenum.
+
+3. **The outlet thermal condition is not theirs.** Their (11) is
+   `d2T/dx2 = 0` at the channel exit; this solver's `inletOutlet` is
+   `dT/dx = 0` while the flow leaves. In a channel whose bulk temperature is
+   still rising linearly at the exit, the second is the stronger condition and
+   it flattens the last cell. §79.13 measures what it costs: the enthalpy
+   deficit it leaves in the global balance is `3.4e-5` relative on the shipped
+   mesh, and `R_t,out` changes by `0.00005` between the last cell column and
+   the extrapolated `x = L` — the wall temperature is already flat there, and
+   that flatness IS the artefact rather than evidence against it. It is small
+   because the two-sided grading puts the last column `20 um` from the exit.
+
+### 79.13 What must hold, and what was measured
+
+| Check | Expected | Measured |
+|---|---|---|
+| Gate 6, `R_t,in` against Kawano *et al.* through Fig. 4(b) | inside `[0.080, 0.152]` | **`0.0929`, inside** — `0.0905`/`0.0916`/`0.0924`/`0.0929` over four meshes |
+| Gate 6, `R_t,out` against Kawano *et al.* through Fig. 4(c) | inside `[0.156, 0.288]` | **`0.2351`, inside** — `0.2337`/`0.2346`/`0.2349`/`0.2351` |
+| against Qu & Mudawar's own predictions | comparable | `+12 %` at the inlet, `-5.4 %` at the outlet |
+| mesh convergence | level-to-level change under `0.5 %` | **`R_t,out` met (`0.07 %`); `R_t,in` NOT met (`0.55 %`)** at `259 350` cells, and §79.12 says why the verdict does not turn on it |
+| (79.14), the cell value against the FACE value | exact on a fixed-flux face | `0.098 K` / `0.037 K` on the coarsest and finest meshes — `0.0011` and `0.0004` in `R`, which is why §79.12 says which one `T_w` is |
+| Gate 79-B, (79.10)'s bulk-rise identity | `dT_bulk = Q/(rho c_p phi)` | outlet bulk `306.09582 K` against `306.09626 K` — **`3.4e-5` relative** |
+| the enthalpy carried out against the heat put in | `0.9 W` | `0.899969 W` — `3.4e-5` relative, and `7.2e-5` on the finest mesh where the run stops at the same normalised residual |
+| the global mass balance (79.7) | round-off | `4.2e-21 m^3/s` against an inlet flux of `1.67e-8` — **`2.5e-13` relative** |
+| the flux-establishment pass (79.4) | `max_c \|sum_f phi_f\|` at solver tolerance | `3.1e-14 m^3/s` |
+| §47.12 Gate 4 on all twelve couples | round-off | **`0.0`** — the two sides of every interface carry the same heat exactly |
+| the interface temperature jump at `R_c = 0` | round-off | `5.7e-14 K` |
+| Gate 79-C, §79.8's nine boxes against the one they were cut from | round-off, not bitwise | **`1.25e-12 K` over `95.7 K` — `1.3e-14` relative**, cell for cell, matched by centroid because the two meshes number their cells differently |
+| §79.5(a), `inletOutlet` = `zeroGradient` on outflow | **every bit**, cells and faces | pass |
+| §79.5(b), `inletValue` with no backflow | **every bit**, and `0` of `8` outlet faces reported | pass |
+| the six pair tests of §79.11 | each as the table says, failing by name | pass |
+| every refusal of §79.10 | fires, and names the setting | pass |
+| a case with NO opening | §60.2's closed cavity, unmoved | Gates 5, 59-A and 59-B run live on that path every validate run |
+| `ofgpu-validate`'s "Gate 6 NOT RUN, and the reason is a capability" line | **gone**, replaced by a result | done |
+
+**What this section found in itself, and in what it inherited.**
+
+**1. §60.2's list was right about four things and loose about one word.**
+"An outflow **non-reflecting** treatment" is a compressible solver's problem;
+this fluid side is incompressible, there is no acoustic mode, and §79.3 says
+so rather than shipping a sponge layer nobody needs.
+
+**2. Every `(79.x)` and `§79.x` in the code pointed at a layout that did not
+exist.** The driver and the reader were written before this section was, with
+a numbering the author had in mind, and *none* of the 30-odd references
+survived contact with the section as written: `§79.3` meant the
+flux-establishment pass in one file and the outflow treatment in another,
+`§79.4` meant `inletOutlet`, `§79.5` meant `buoyancy`. Every one was
+re-checked by hand against the text above, in `src/cht/flow.rs`,
+`src/io/case_cht.rs`, `src/cht.rs`, `src/bin/cht.rs`, `src/bin/validate.rs`
+and the shipped case file — including the ones inside user-facing error
+messages, which are the ones a licensee would actually follow. This is
+**exactly** the class §77.13 named and §78's numbering convention was written
+to head off, and nothing in this repository checks a cross-reference; a
+section that arrives after its code will keep hitting it.
+
+**3. A reported WALL temperature is a FACE value, and reading the cell instead
+costs a whole mesh level.** (79.14) is `0.098 K` on the coarsest mesh — `1.2 %`
+of `R_t,in`, larger than the level-to-level change it would have been read
+against. The first reduction of Gate 6 averaged cell temperatures and would
+have carried that offset into the comparison.
+
+**4. Backflow through an outlet is not exotic.** §79.5 has the number: 7 of 10
+faces, on a case nobody would call recirculating.
+
+**5. A short heated duct's energy balance has three terms.** §79.7 has that
+one; the gate that checks (79.10) was written with two and needed a `1e-3`
+tolerance to pass, and holds at `1e-5` with the third.
+
+**6. A `fallback_name` handed to `contract::unsupported` is a promise.** The
+non-permissive message reads *"run with -permissive to substitute X and
+continue"*, so a refusal that returns `Err` unconditionally afterwards must
+not name a real substitute. §79's patch-`kind` refusal named `wall`, which
+would have told a user that `-permissive` turns a mistyped `inlet` into a
+no-slip wall. It does not; the case is refused either way, and the message now
+says that instead.
+
+### 79.14 What this section does not do
+
+* **More than one opening.** §79.2 has the argument. A manifold, a T-junction
+  or an outlet split between two patches needs a pressure level per opening
+  and a flux-establishment solve with more than one Dirichlet reference;
+  neither is here, and the pair is refused rather than guessed.
+* **A velocity profile at the inlet.** Uniform only. A `mapped` or tabulated
+  inlet is not an entry.
+* **A pressure-driven opening.** There is no `totalPressure` inlet and no
+  prescribed pressure drop: the case states a velocity and the pressure
+  follows. A pump curve is §55's fan, on a different format.
+* **Their (11).** `d2T/dx2 = 0` at the channel exit is not implemented, and
+  §79.12's third note measures what using `dT/dx = 0` instead costs.
+* **Any turbulence at an opening.** The forced cases here are laminar. An
+  inlet carrying `k` and `epsilon` (or a turbulence intensity) is not an
+  entry, and a turbulent conjugate case would need §29's wall functions on the
+  interface, which §47.6 supports but no case in this format reaches.
+* **A transient forced case.** §59.6's refusal is unchanged: the conjugate
+  driver is steady.
+* **Temperature-dependent properties.** §79.12's Disclosure 2 is the size of
+  what that costs here, and it is the largest uncertainty in the gate. Fixing
+  it means a `mu(T)`, `rho(T)`, `c_p(T)` liquid state beside §25's gas one,
+  which is its own section.
+* **The heat-sink array.** One unit cell, with the symmetry planes through the
+  middle of the walls, exactly as Qu & Mudawar solve it. A whole `1 cm^2`
+  wafer with a manifold at each end is a different problem and needs the
+  multiple openings the first bullet refuses.

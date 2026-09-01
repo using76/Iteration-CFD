@@ -2635,6 +2635,7 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("
 === the conjugate fluid/solid interface (SPEC-LIT 59, 60) ===");
     check_conjugate_fluid(c, &gpu)?;
+    check_forced_convection(c, &gpu)?;
 
     // SPEC-LIT S49/S50/S51 - surface-to-surface radiation.
     println!("
@@ -5729,16 +5730,421 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     }
 
     c.note(
-        "Gate 6 (Qu & Mudawar 2002, DOI 10.1016/S0017-9310(02)00101-1) is NOT RUN, and the \
-         reason is a capability rather than an oversight: a micro-channel heat sink is FORCED \
-         convection, and SPEC-LIT 60.2's fluid region is a CLOSED cavity in which every \
-         non-empty patch is a no-slip wall. There is no `inlet` to name. Lifting that needs \
-         inletOutlet on T, a flux-establishment pass and an outflow treatment (SPEC-LIT 60.6)",
+        "Gate 6 (Qu & Mudawar 2002) was SPEC-LIT 60.6's UNREACHABLE row, and SPEC-LIT 79          lifted the closed-cavity restriction that made it one. It is RUN by          check_forced_convection, below.",
     );
     c.note(
         "Gate 7 (Flageul et al. 2015) is NOT RUN: it is a turbulent conjugate interface and \
          needs the DNS dataset, and SPEC-LIT 59.6 refuses a wall-function fluid side by name \
          rather than giving it k_eff Delta",
+    );
+
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §79 - forced convection in the conjugate fluid region, and
+//  §47.12's Gate 6
+//
+//  Everything here runs LIVE, from a case DOCUMENT, through the same reader
+//  and the same driver a user reaches. The reference is Qu & Mudawar (2002)
+//  Fig. 4, digitised - §79.12's Disclosure 1 - and the water properties are
+//  §79.12's Disclosure 2.
+// ==========================================================================
+
+/// Qu & Mudawar's Table 1, in metres, and the three band edges the nine boxes
+/// of §79.8 are cut on.
+const QM_L: f64 = 10.0e-3;
+const QM_Y: [f64; 4] = [0.0, 21.5e-6, 78.5e-6, 100.0e-6];
+const QM_Z: [f64; 4] = [0.0, 270.0e-6, 450.0e-6, 900.0e-6];
+/// Table 2: `Re`, `T_in`, `q"`, `k_water`, `k_silicon`.
+const QM_RE: f64 = 140.0;
+const QM_TIN: f64 = 293.15;
+const QM_QPP: f64 = 9.0e5;
+const QM_KF: f64 = 0.61;
+const QM_KS: f64 = 148.0;
+/// §79.12 Disclosure 2 - water at the INLET temperature, 20 C and 1 atm.
+const QM_RHO: f64 = 998.2;
+const QM_CP: f64 = 4182.0;
+const QM_MU: f64 = 1.002e-3;
+
+/// The digitisation of Qu & Mudawar Fig. 4(b) and 4(c) at `Re ~ 140`, in
+/// `C cm^2/W` - SPEC-LIT (79.14). Kawano *et al.*'s marker, the two ends of
+/// its error bar, and Qu & Mudawar's own prediction curve.
+const QM_FIG4: [(f64, f64, f64, f64); 2] = [
+    // (Kawano, bar low, bar high, Qu & Mudawar)
+    (0.116, 0.080, 0.152, 0.083), // R_t,in,  Fig. 4(b)
+    (0.222, 0.156, 0.288, 0.249), // R_t,out, Fig. 4(c)
+];
+
+/// The nine-box unit cell as a case document - SPEC-LIT §79.8 and §79.9.
+///
+/// `nx` is the cell count along the channel; `ny` and `nz` are the counts in
+/// the three `y` bands and the three `z` bands, so that every box in a band
+/// shares the discretisation its couples need.
+fn qm_document(nx: usize, ny: [usize; 3], nz: [usize; 3]) -> String {
+    let d_h = 4.0 * (57.0e-6 * 180.0e-6) / (2.0 * (57.0e-6 + 180.0e-6));
+    let u_in = QM_RE * QM_MU / (QM_RHO * d_h);
+    let tag = [
+        ["botL", "botC", "botR"],
+        ["midL", "water", "midR"],
+        ["topL", "topC", "topR"],
+    ];
+    // §47.4's numbering invariant: the fluid is region 0.
+    let mut order = vec![(1usize, 1usize)];
+    for j in 0..3 {
+        for i in 0..3 {
+            if (j, i) != (1, 1) {
+                order.push((j, i));
+            }
+        }
+    }
+
+    let mut regions = Vec::new();
+    for (j, i) in order {
+        let n = tag[j][i];
+        let fluid = (j, i) == (1, 1);
+        let (px0, px1) = if fluid { ("inlet", "outlet") } else { ("Xmin", "Xmax") };
+        let (px0, px1) = if fluid {
+            (px0.to_string(), px1.to_string())
+        } else {
+            (format!("{n}{px0}"), format!("{n}{px1}"))
+        };
+        let mut pats: Vec<String> = Vec::new();
+        if fluid {
+            pats.push(format!(
+                r#"{{ "match": "inlet", "kind": "inlet", "U": [{u_in}, 0.0, 0.0],
+             "T": {{ "type": "fixedValue", "value": {QM_TIN} }} }}"#
+            ));
+            pats.push(format!(
+                r#"{{ "match": "outlet", "kind": "outlet",
+             "T": {{ "type": "inletOutlet", "inletValue": {QM_TIN} }} }}"#
+            ));
+        } else {
+            pats.push(format!(r#"{{ "match": "{px0}", "T": {{ "type": "zeroGradient" }} }}"#));
+            pats.push(format!(r#"{{ "match": "{px1}", "T": {{ "type": "zeroGradient" }} }}"#));
+        }
+        if i == 0 {
+            pats.push(format!(r#"{{ "match": "{n}Ymin", "T": {{ "type": "zeroGradient" }} }}"#));
+        }
+        if i == 2 {
+            pats.push(format!(r#"{{ "match": "{n}Ymax", "T": {{ "type": "zeroGradient" }} }}"#));
+        }
+        if j == 0 {
+            pats.push(format!(r#"{{ "match": "{n}Zmin", "T": {{ "type": "zeroGradient" }} }}"#));
+        }
+        if j == 2 {
+            // The component, idealised as a constant heat flux on the heat
+            // sink top wall - Qu & Mudawar (9).
+            pats.push(format!(
+                r#"{{ "match": "{n}Zmax",
+             "T": {{ "type": "fixedFluxTemperature", "q": {QM_QPP} }} }}"#
+            ));
+        }
+        let material = if fluid {
+            format!(
+                r#""fluid": {{ "rho": {QM_RHO}, "cp": {QM_CP}, "kappa": {QM_KF}, "mu": {QM_MU} }}"#
+            )
+        } else {
+            format!(r#""material": {{ "rho": 2330.0, "c": 712.0, "kappa": {QM_KS} }}"#)
+        };
+        regions.push(format!(
+            r#"    {{ "name": "{n}", "kind": "{}",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, {}, {}], "max": [{QM_L}, {}, {}] }},
+        "cells": [{nx}, {}, {}],
+        "grading": {{ "x": {{ "expansion": 6.0, "twoSided": true }} }},
+        "boundaries": {{ "xmin": "{px0}", "xmax": "{px1}",
+                        "ymin": "{n}Ymin", "ymax": "{n}Ymax",
+                        "zmin": "{n}Zmin", "zmax": "{n}Zmax" }} }},
+      {material},
+      "patches": [ {} ] }}"#,
+            if fluid { "fluid" } else { "solid" },
+            QM_Y[i],
+            QM_Z[j],
+            QM_Y[i + 1],
+            QM_Z[j + 1],
+            ny[i],
+            nz[j],
+            pats.join(",\n                   ")
+        ));
+    }
+
+    let mut ifaces = Vec::new();
+    for tj in &tag {
+        for i in 0..2 {
+            let (a, b) = (tj[i], tj[i + 1]);
+            ifaces.push(format!(
+                r#"    {{ "regionA": "{a}", "patchA": "{a}Ymax", "regionB": "{b}", "patchB": "{b}Ymin" }}"#
+            ));
+        }
+    }
+    for j in 0..2 {
+        for (a, b) in tag[j].iter().zip(&tag[j + 1]) {
+            ifaces.push(format!(
+                r#"    {{ "regionA": "{a}", "patchA": "{a}Zmax", "regionB": "{b}", "patchB": "{b}Zmin" }}"#
+            ));
+        }
+    }
+
+    format!(
+        r#"{{
+  "name": "quMudawar",
+  "regions": [
+{}
+  ],
+  "interfaces": [
+{}
+  ],
+  "initial": {{ "T": {QM_TIN} }},
+  "run": {{ "steady": true, "iterations": 1500 }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU",
+    "tolerance": 1e-16, "maxIter": 500,
+    "flow": {{
+      "relaxU": 0.7, "relaxP": 0.3, "relaxT": 1.0,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear",
+      "residual": 1e-9,
+      "uTolerance": 1e-14, "pTolerance": 1e-14,
+      "uMaxIter": 200, "pMaxIter": 800
+    }}
+  }}
+}}"#,
+        regions.join(",\n"),
+        ifaces.join(",\n")
+    )
+}
+
+/// What one micro-channel run measured.
+struct QmRun {
+    r_in: Scalar,
+    r_out: Scalar,
+    t_w_in: Scalar,
+    t_w_out: Scalar,
+    /// `|inlet flux + outlet flux| / |outlet flux|`.
+    mass_imbalance: Scalar,
+    /// `|enthalpy carried out - q" W L| / (q" W L)`.
+    enthalpy_gap: Scalar,
+    /// `|T_bulk - (T_in + Q/(rho cp phi))|`, K - (79.10).
+    bulk_gap: Scalar,
+    /// `max_c |sum_f phi_f|` after the flux-establishment pass (79.4).
+    max_div_phi: Scalar,
+    interface_imbalance: Scalar,
+    n_backflow: usize,
+    cells: usize,
+    iterations: usize,
+    converged: bool,
+}
+
+/// The width-averaged temperature of the HEATED top wall as a function of `x`
+/// - Qu & Mudawar (20) at `z = H`, which their (16)/(17) are built from.
+///
+/// The wall spans three regions (`topL`, `topC`, `topR`), so the average is
+/// taken over all three at once, area-weighted, binned by the `x` column the
+/// face centre falls in. The columns are identical in all three because
+/// §79.8's couples require the same `x` discretisation everywhere.
+fn qm_top_wall(sol: &ofgpu::cht::flow::ChtFlowSolution) -> Result<Vec<(Scalar, Scalar)>> {
+    let mut faces = Vec::new();
+    for (region, patch) in [(6, "topLZmax"), (7, "topCZmax"), (8, "topRZmax")] {
+        faces.extend(sol.patch_faces(region, patch)?);
+    }
+    // Bin by x. The tolerance is a nanometre; the finest column is microns
+    // wide, so this is a grouping and not a rounding.
+    let mut cols: Vec<(Scalar, Scalar, Scalar)> = Vec::new(); // (x, sum A T, sum A)
+    for (cf, area, t) in faces {
+        match cols.iter_mut().find(|(x, _, _)| (*x - cf.x).abs() < 1e-9) {
+            Some(col) => {
+                col.1 += area * t;
+                col.2 += area;
+            }
+            None => cols.push((cf.x, area * t, area)),
+        }
+    }
+    cols.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(cols.into_iter().map(|(x, num, den)| (x, num / den)).collect())
+}
+
+/// Run one micro-channel document and reduce it to (79.13)'s two resistances.
+fn run_qm_document(gpu: &Gpu, text: &str) -> Result<QmRun> {
+    use ofgpu::cht::flow::run_flow_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let low = parse_cht_case(text, "SPEC-LIT 79 gate")?.lower()?;
+    let case = low
+        .flow_case()
+        .ok_or_else(|| ofgpu::Error::Config("the gate's own document has no fluid".into()))?;
+    let sol = run_flow_case(gpu, &case)?;
+
+    let wall = qm_top_wall(&sol)?;
+    if wall.len() < 2 {
+        return Err(ofgpu::Error::Config("the heated wall has fewer than two columns".into()));
+    }
+    // Linearly extrapolate the two end columns to x = 0 and x = L, so the
+    // measurement does not move with the mesh - SPEC-LIT §79.12.
+    let l = QM_L as Scalar;
+    let (x0, t0) = wall[0];
+    let (x1, t1) = wall[1];
+    let t_w_in = t0 - (t1 - t0) / (x1 - x0) * x0;
+    let (xa, ta) = wall[wall.len() - 2];
+    let (xb, tb) = wall[wall.len() - 1];
+    let t_w_out = tb + (tb - ta) / (xb - xa) * (l - xb);
+
+    // R in the units Fig. 4 plots, C cm^2/W: q" is in W/cm^2 there.
+    let q_cm2 = (QM_QPP / 1.0e4) as Scalar;
+    let t_in = QM_TIN as Scalar;
+
+    let o = sol
+        .openings
+        .ok_or_else(|| ofgpu::Error::Config("the micro-channel case has no openings".into()))?;
+    let q_total = (QM_QPP * (QM_Y[3] - QM_Y[0]) * QM_L) as Scalar;
+    let m_cp = sol.fluid_rho_cp * o.outlet_flux.abs();
+
+    Ok(QmRun {
+        r_in: (t_w_in - t_in) / q_cm2,
+        r_out: (t_w_out - t_in) / q_cm2,
+        t_w_in,
+        t_w_out,
+        mass_imbalance: o.imbalance().abs() / o.outlet_flux.abs().max(Scalar::MIN_POSITIVE),
+        enthalpy_gap: ((o.enthalpy_rise - q_total) / q_total).abs(),
+        bulk_gap: (o.outlet_bulk_t - (t_in + q_total / m_cp)).abs(),
+        max_div_phi: o.potential.max_div_phi,
+        interface_imbalance: sol.interface.imbalance(),
+        n_backflow: o.n_backflow,
+        cells: sol.mesh.host.n_cells,
+        iterations: sol.iterations,
+        converged: sol.converged,
+    })
+}
+
+/// **SPEC-LIT §79's gates, and §47.12's Gate 6, run live.**
+fn check_forced_convection(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    c.note(
+        "SPEC-LIT 79 - forced convection in the conjugate fluid region. Gate 6 (Qu & Mudawar \
+         2002, DOI 10.1016/S0017-9310(02)00101-1) was recorded NOT RUN by SPEC-LIT 60.6 \
+         because 60.2's fluid region was a CLOSED cavity and a micro-channel heat sink has an \
+         inlet. It runs below, from a case document, on the same reader and driver a user \
+         reaches.",
+    );
+    c.note(
+        "  DISCLOSURE 1 (SPEC-LIT 79.12): Kawano et al. (1998), ASME HTD-361-3/PID-3 173-180, \
+         was NOT obtained - it is an ASME conference volume and no copy was found. The \
+         measurements below are Qu & Mudawar's own Fig. 4(b)/4(c), DIGITISED: the page \
+         rendered at 8x, the plot frames and tick marks located by pixel, the marker centres \
+         and error-bar caps read off the resulting linear map. Reading uncertainty about 0.002 \
+         in R, against error bars of 0.036 and 0.066.",
+    );
+    c.note(
+        "  DISCLOSURE 2 (SPEC-LIT 79.12): the paper's Table 2 gives k_water = 0.61 and NOTHING \
+         else, but Re fixes the inlet speed only once rho and mu are known. This gate uses \
+         water at the INLET temperature, 20 C: rho 998.2, cp 4182, mu 1.002e-3, Pr 6.869. \
+         Evaluating at the MEAN fluid temperature instead would cut the mass flow by 20 % at \
+         the same Re and move R_t,out from 0.235 to about 0.27 - the largest single \
+         uncertainty in this gate, larger than the mesh error and larger than the \
+         digitisation.",
+    );
+
+    // Two uniform-refinement levels. SPEC-LIT §79.12 tabulates four; the two
+    // finest are minutes each and belong in the case file rather than in a
+    // harness that has to finish.
+    let levels: [(usize, [usize; 3], [usize; 3]); 2] =
+        [(40, [2, 6, 2], [8, 14, 14]), (60, [3, 9, 3], [12, 21, 21])];
+    let mut runs = Vec::new();
+    for (nx, ny, nz) in levels {
+        let r = run_qm_document(gpu, &qm_document(nx, ny, nz))?;
+        c.note(&format!(
+            "  Gate 6, {} cells: R_t,in = {:.5}, R_t,out = {:.5} C cm^2/W; T_w,in = {:.2} C, \
+             T_w,out = {:.2} C; {} outer iterations, converged {}",
+            r.cells,
+            f64::from(r.r_in),
+            f64::from(r.r_out),
+            f64::from(r.t_w_in) - 273.15,
+            f64::from(r.t_w_out) - 273.15,
+            r.iterations,
+            r.converged,
+        ));
+
+        // The four things a forced conjugate run has to close, every level.
+        c.check(
+            &format!("S79.7: the two opening fluxes cancel ({} cells)", r.cells),
+            r.mass_imbalance,
+            1e-10,
+        );
+        c.check(
+            &format!("S79.7: the flow carries out the 0.9 W the top wall put in ({} cells)", r.cells),
+            r.enthalpy_gap,
+            1e-3,
+        );
+        c.check(
+            &format!("S79.7 Gate 79-B, identity (79.10) ({} cells)", r.cells),
+            r.bulk_gap,
+            1e-2,
+        );
+        c.check(
+            &format!("S79.4: max_c |sum_f phi_f| after the establishment pass ({} cells)", r.cells),
+            r.max_div_phi,
+            1e-10,
+        );
+        c.check(
+            &format!("S47.12 Gate 4 on all twelve couples ({} cells)", r.cells),
+            r.interface_imbalance,
+            1e-12,
+        );
+        c.require(
+            &format!("S79.5: nothing re-enters through the outlet ({} cells)", r.cells),
+            r.n_backflow == 0,
+        );
+        c.require(
+            &format!("Gate 6 converged on its own residual ({} cells)", r.cells),
+            r.converged,
+        );
+        runs.push(r);
+    }
+
+    let fine = runs.last().expect("two levels");
+    let coarse = &runs[0];
+    let d_in = ((fine.r_in - coarse.r_in) / fine.r_in).abs();
+    let d_out = ((fine.r_out - coarse.r_out) / fine.r_out).abs();
+    c.note(&format!(
+        "  Gate 6 mesh change {} -> {} cells: R_t,in {:.2} %, R_t,out {:.2} %. SPEC-LIT 79.12 \
+         carries two further levels (115 200 and 259 350 cells) reaching 0.0929 and 0.2351, \
+         where R_t,out meets the 0.5 % criterion at 0.07 % and R_t,in does NOT, at 0.55 %.",
+        coarse.cells,
+        fine.cells,
+        f64::from(100.0 * d_in),
+        f64::from(100.0 * d_out),
+    ));
+
+    // The verdict. Both resistances against the digitised error bars.
+    let names = ["R_t,in (Fig. 4b)", "R_t,out (Fig. 4c)"];
+    let mine = [fine.r_in, fine.r_out];
+    let mut inside = true;
+    for (k, (meas, lo, hi, qm)) in QM_FIG4.iter().copied().enumerate() {
+        let (lo, hi) = (lo as Scalar, hi as Scalar);
+        let ok = mine[k] >= lo && mine[k] <= hi;
+        inside &= ok;
+        c.require(
+            &format!("Gate 6: {} inside Kawano et al.'s error bar", names[k]),
+            ok,
+        );
+        c.note(&format!(
+            "    {}: {:.4} against Kawano {meas} [{lo}, {hi}] and Qu & Mudawar's own {qm} \
+             ({:+.1} % of theirs)",
+            names[k],
+            f64::from(mine[k]),
+            f64::from(100.0 * (mine[k] / qm as Scalar - 1.0)),
+        ));
+    }
+    c.require(
+        "Gate 6: BOTH substrate temperatures inside the published experimental uncertainty",
+        inside,
+    );
+    c.note(
+        "  Gate 6 HOLDS on both resistances, and the verdict does not turn on the remaining \
+         truncation error: the four-level sequence is monotone increasing and its geometric \
+         limit, 0.094 and 0.235, is inside the same bars. What is NOT established is \
+         agreement with Kawano et al.'s own table, because that paper was not obtained - the \
+         comparison is against Qu & Mudawar's rendering of it (Disclosure 1). SPEC-LIT 79.12 \
+         records the whole of it, including that this solver's outflow condition is dT/dx = 0 \
+         and theirs is d2T/dx2 = 0.",
     );
 
     Ok(())

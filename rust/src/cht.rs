@@ -1927,7 +1927,7 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
                         rv[bf] = *q;
                         rg[bf] = if c_b > 0.0 { q * delta / c_b } else { 0.0 };
                     }
-                    // SPEC-LIT §79.4. Unreachable through the reader - the
+                    // SPEC-LIT §79.5. Unreachable through the reader - the
                     // condition is legal only on an `outlet`, an outlet is
                     // legal only on a FLUID region, and a case with a fluid
                     // region is `run_flow_case`'s and never this function's.
@@ -1939,7 +1939,7 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
                             "regions/{}/patches/{patch}/T: `inletOutlet` on a \
                              pure-conduction case. It switches on the sign of \
                              the face flux and a stack of solids has no flux \
-                             at all (SPEC-LIT 79.4)",
+                             at all (SPEC-LIT 79.5)",
                             tm.regions
                                 .get(*region)
                                 .map_or("?", |r| r.name.as_str())

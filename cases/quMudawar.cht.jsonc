@@ -1,0 +1,317 @@
+// meteor-cfd case - SPEC-LIT §79, run by `ofgpu-cht`.
+//
+// A SILICON MICRO-CHANNEL HEAT SINK - the configuration of
+//   W. Qu, I. Mudawar, "Analysis of three-dimensional heat transfer in
+//   micro-channel heat sinks", Int. J. Heat Mass Transfer 45 (2002)
+//   3973-3985, DOI 10.1016/S0017-9310(02)00101-1,
+// which SPEC-LIT §47.12 named as Gate 6 and §60.6 recorded as UNREACHABLE,
+// because until §79 a conjugate fluid region was a CLOSED CAVITY and this
+// problem is forced convection. It is reachable now, and this file is what
+// §60.6 said would have to exist.
+//
+// THE GEOMETRY, Qu & Mudawar Table 1, exactly. One unit cell of the heat
+// sink: a single channel and the silicon around it, with the symmetry planes
+// through the middle of the walls on either side.
+//
+//   Ww1 = 21.5 um   Wch = 57 um    Ww2 = 21.5 um     -> W = 100 um
+//   Hw1 = 270 um    Hch = 180 um   Hw2 = 450 um      -> H = 900 um
+//   L   = 10 mm
+//
+// THE NINE BOXES, and why there are nine. `blockgen` builds one axis-aligned
+// block per region, and a unit cell is a block with a rectangular hole in it.
+// So the cell is cut into the 3x3 grid of boxes the two wall thicknesses and
+// the three z-layers make, and the middle one is the channel:
+//
+//        y:  [0, 21.5]     [21.5, 78.5]    [78.5, 100]  um
+//   z: [450,900]   topL         topC            topR      <- heated at z = H
+//   z: [270,450]   midL       * water *         midR
+//   z: [0,270]     botL         botC            botR
+//
+// Eight of them are silicon and one is water. The eight silicon boxes are ONE
+// material, so the eight solid/solid couples between them are not an
+// approximation of anything: SPEC-LIT §79.8 works out that a perfect-contact
+// interface between two boxes of the same material on a matched orthogonal
+// mesh is arithmetically the internal-face coefficient it replaced, and
+// §79.8's Gate 79-C measures the difference at 1.3e-14 relative.
+//
+// THE BOUNDARY CONDITIONS, Qu & Mudawar (7)-(11). Uniform velocity at the
+// channel inlet, developed outflow at its exit, `T = Tin` entering; every
+// outer face of the solid adiabatic EXCEPT the heat-sink top wall (z = H),
+// which takes the component's constant heat flux q". Their (11) is
+// d2T/dx2 = 0 at the channel exit and this case's outflow condition is
+// `inletOutlet`, i.e. dT/dx = 0 while the flow leaves - SPEC-LIT §79.12 says
+// what that costs and measures it.
+//
+// THE OPERATING POINT, Qu & Mudawar Table 2: Re = 140, Tin = 20 C,
+// q" = 90 W/cm^2 = 9.0e5 W/m^2, k_water = 0.61 W/(m K), k_silicon = 148
+// W/(m K).
+//
+// THE THREE NUMBERS THE PAPER DOES NOT GIVE. Table 2 states only the
+// conductivities, and the Reynolds number fixes the inlet speed only once
+// rho and mu are chosen. This case uses water at the INLET temperature,
+// 20 C and 1 atm: rho = 998.2 kg/m^3, cp = 4182 J/(kg K),
+// mu = 1.002e-3 Pa s. SPEC-LIT §79.12 records that choice, why 20 C rather
+// than the mean fluid temperature, and how much the answer moves if the other
+// reading is taken - it is the largest single uncertainty in this gate.
+//
+// WHAT FOLLOWS FROM THEM, all derived and none stated twice:
+//
+//   d_h  = 4 Ac/P = 4(57)(180)/(2(57+180)) um            = 86.5823 um
+//   u_in = Re mu/(rho d_h)                               = 1.623115 m/s
+//   Pr   = mu cp/kappa                                   = 6.8694
+//   Q    = q" W L                                        = 0.9 W
+//   m cp = rho u_in Ac cp                                = 0.0695181 W/K
+//   dT_bulk = Q/(m cp)                                   = 12.9463 K
+//
+// The last line is an identity a converged run has to reproduce, and it is
+// SPEC-LIT §79.7's Gate 79-B: the outlet mixing-cup temperature must be
+// 293.15 + 12.9463 = 306.0963 K, and the enthalpy the flow carries out must
+// be the 0.9 W the top wall put in.
+//
+// WHAT IT IS GATED ON. Qu & Mudawar's Fig. 4(b) and 4(c) compare their
+// predicted inlet and outlet thermal resistances
+//
+//   R_t,in  = (T_w,in  - T_in)/q"        R_t,out = (T_w,out - T_in)/q"
+//
+// against Kawano et al.'s (1998) measurements, with error bars. `T_w` is the
+// width-averaged temperature of the HEATED top wall, at the channel inlet and
+// at its exit. SPEC-LIT §79.12 has the digitisation, the disclosure that
+// Kawano et al.'s own paper was not obtained, and the result.
+//
+// MEASURED, on an RTX 5070 Ti in f64, as shipped (48 600 cells, 261 outer
+// iterations, converged on its own residual):
+//
+//   R_t,in  = 0.0916 C cm^2/W    against Kawano 0.116 [0.080, 0.152]
+//   R_t,out = 0.2346 C cm^2/W    against Kawano 0.222 [0.156, 0.288]
+//   T_w,in  = 28.25 C            T_w,out = 41.11 C
+//   outlet bulk T 306.0958 K (identity 306.0963), enthalpy out 0.899969 W
+//   interface conservation imbalance 0, largest interface T jump 5.7e-14 K
+//
+// Both resistances are inside the measured error bars. `T_w` is the evaluated
+// FACE temperature at z = H and not the top cell's; on a fixed-flux face the
+// two differ by exactly q"(dz/2)/k_s - 0.065 K here, 0.0007 in R, and
+// SPEC-LIT (79.14) says why that matters. Refine the mesh with the `cells`
+// entries - SPEC-LIT §79.12 has the four-level study - and the two numbers
+// move to 0.0929 and 0.2351 at 259 350 cells.
+{
+  "name": "quMudawar",
+
+  "regions": [
+    {
+      "name": "water", "kind": "fluid",
+      "mesh": {
+        "bounds": { "min": [0.0, 2.15e-05, 0.00027], "max": [0.01, 7.85e-05, 0.00045] },
+        "cells": [60, 9, 21],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "inlet", "xmax": "outlet",
+          "ymin": "waterYmin", "ymax": "waterYmax",
+          "zmin": "waterZmin", "zmax": "waterZmax"
+        }
+      },
+      "fluid": { "rho": 998.2, "cp": 4182.0, "kappa": 0.61, "mu": 0.001002 },
+      "patches": [
+        {"match": "inlet", "kind": "inlet", "U": [1.623114588715829, 0.0, 0.0], "T": {"type": "fixedValue", "value": 293.15}},
+        {"match": "outlet", "kind": "outlet", "T": {"type": "inletOutlet", "inletValue": 293.15}}
+      ]
+    },
+    {
+      "name": "botL", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.01, 2.15e-05, 0.00027] },
+        "cells": [60, 3, 12],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "botLXmin", "xmax": "botLXmax",
+          "ymin": "botLYmin", "ymax": "botLYmax",
+          "zmin": "botLZmin", "zmax": "botLZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "botLXmin", "T": {"type": "zeroGradient"}},
+        {"match": "botLXmax", "T": {"type": "zeroGradient"}},
+        {"match": "botLYmin", "T": {"type": "zeroGradient"}},
+        {"match": "botLZmin", "T": {"type": "zeroGradient"}}
+      ]
+    },
+    {
+      "name": "botC", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 2.15e-05, 0.0], "max": [0.01, 7.85e-05, 0.00027] },
+        "cells": [60, 9, 12],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "botCXmin", "xmax": "botCXmax",
+          "ymin": "botCYmin", "ymax": "botCYmax",
+          "zmin": "botCZmin", "zmax": "botCZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "botCXmin", "T": {"type": "zeroGradient"}},
+        {"match": "botCXmax", "T": {"type": "zeroGradient"}},
+        {"match": "botCZmin", "T": {"type": "zeroGradient"}}
+      ]
+    },
+    {
+      "name": "botR", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 7.85e-05, 0.0], "max": [0.01, 0.0001, 0.00027] },
+        "cells": [60, 3, 12],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "botRXmin", "xmax": "botRXmax",
+          "ymin": "botRYmin", "ymax": "botRYmax",
+          "zmin": "botRZmin", "zmax": "botRZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "botRXmin", "T": {"type": "zeroGradient"}},
+        {"match": "botRXmax", "T": {"type": "zeroGradient"}},
+        {"match": "botRYmax", "T": {"type": "zeroGradient"}},
+        {"match": "botRZmin", "T": {"type": "zeroGradient"}}
+      ]
+    },
+    {
+      "name": "midL", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.00027], "max": [0.01, 2.15e-05, 0.00045] },
+        "cells": [60, 3, 21],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "midLXmin", "xmax": "midLXmax",
+          "ymin": "midLYmin", "ymax": "midLYmax",
+          "zmin": "midLZmin", "zmax": "midLZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "midLXmin", "T": {"type": "zeroGradient"}},
+        {"match": "midLXmax", "T": {"type": "zeroGradient"}},
+        {"match": "midLYmin", "T": {"type": "zeroGradient"}}
+      ]
+    },
+    {
+      "name": "midR", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 7.85e-05, 0.00027], "max": [0.01, 0.0001, 0.00045] },
+        "cells": [60, 3, 21],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "midRXmin", "xmax": "midRXmax",
+          "ymin": "midRYmin", "ymax": "midRYmax",
+          "zmin": "midRZmin", "zmax": "midRZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "midRXmin", "T": {"type": "zeroGradient"}},
+        {"match": "midRXmax", "T": {"type": "zeroGradient"}},
+        {"match": "midRYmax", "T": {"type": "zeroGradient"}}
+      ]
+    },
+    {
+      "name": "topL", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.00045], "max": [0.01, 2.15e-05, 0.0009] },
+        "cells": [60, 3, 21],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "topLXmin", "xmax": "topLXmax",
+          "ymin": "topLYmin", "ymax": "topLYmax",
+          "zmin": "topLZmin", "zmax": "topLZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "topLXmin", "T": {"type": "zeroGradient"}},
+        {"match": "topLXmax", "T": {"type": "zeroGradient"}},
+        {"match": "topLYmin", "T": {"type": "zeroGradient"}},
+        {"match": "topLZmax", "T": {"type": "fixedFluxTemperature", "q": 900000.0}}
+      ]
+    },
+    {
+      "name": "topC", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 2.15e-05, 0.00045], "max": [0.01, 7.85e-05, 0.0009] },
+        "cells": [60, 9, 21],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "topCXmin", "xmax": "topCXmax",
+          "ymin": "topCYmin", "ymax": "topCYmax",
+          "zmin": "topCZmin", "zmax": "topCZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "topCXmin", "T": {"type": "zeroGradient"}},
+        {"match": "topCXmax", "T": {"type": "zeroGradient"}},
+        {"match": "topCZmax", "T": {"type": "fixedFluxTemperature", "q": 900000.0}}
+      ]
+    },
+    {
+      "name": "topR", "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 7.85e-05, 0.00045], "max": [0.01, 0.0001, 0.0009] },
+        "cells": [60, 3, 21],
+        "grading": { "x": { "expansion": 6.0, "twoSided": true } },
+        "boundaries": {
+          "xmin": "topRXmin", "xmax": "topRXmax",
+          "ymin": "topRYmin", "ymax": "topRYmax",
+          "zmin": "topRZmin", "zmax": "topRZmax"
+        }
+      },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        {"match": "topRXmin", "T": {"type": "zeroGradient"}},
+        {"match": "topRXmax", "T": {"type": "zeroGradient"}},
+        {"match": "topRYmax", "T": {"type": "zeroGradient"}},
+        {"match": "topRZmax", "T": {"type": "fixedFluxTemperature", "q": 900000.0}}
+      ]
+    }
+  ],
+
+  // The twelve conformal couples that make the nine boxes one unit cell.
+  // Six join boxes side by side in y, six stack them in z; the four that
+  // touch `water` are the fluid/solid interfaces and the other eight are
+  // silicon against silicon, where SPEC-LIT §79.8 shows the couple is the
+  // internal-face coefficient it replaced.
+  "interfaces": [
+    {"regionA": "botL", "patchA": "botLYmax", "regionB": "botC", "patchB": "botCYmin"},
+    {"regionA": "botC", "patchA": "botCYmax", "regionB": "botR", "patchB": "botRYmin"},
+    {"regionA": "midL", "patchA": "midLYmax", "regionB": "water", "patchB": "waterYmin"},
+    {"regionA": "water", "patchA": "waterYmax", "regionB": "midR", "patchB": "midRYmin"},
+    {"regionA": "topL", "patchA": "topLYmax", "regionB": "topC", "patchB": "topCYmin"},
+    {"regionA": "topC", "patchA": "topCYmax", "regionB": "topR", "patchB": "topRYmin"},
+    {"regionA": "botL", "patchA": "botLZmax", "regionB": "midL", "patchB": "midLZmin"},
+    {"regionA": "midL", "patchA": "midLZmax", "regionB": "topL", "patchB": "topLZmin"},
+    {"regionA": "botC", "patchA": "botCZmax", "regionB": "water", "patchB": "waterZmin"},
+    {"regionA": "water", "patchA": "waterZmax", "regionB": "topC", "patchB": "topCZmin"},
+    {"regionA": "botR", "patchA": "botRZmax", "regionB": "midR", "patchB": "midRZmin"},
+    {"regionA": "midR", "patchA": "midRZmax", "regionB": "topR", "patchB": "topRZmin"}
+  ],
+
+  // No `buoyancy`: SPEC-LIT §79.6. Qu & Mudawar assumption (6) is that
+  // superimposed natural convection is negligible and (4) that the
+  // properties are constant, so the density never moves off `fluid.rho`
+  // and the face body force is exactly zero rather than small.
+  "initial": { "T": 293.15 },
+  "run": { "steady": true, "iterations": 1500 },
+
+  "numerics": {
+    "solver": "PBiCGStab", "preconditioner": "DILU",
+    "tolerance": 1e-16, "maxIter": 500,
+    "flow": {
+      // relaxT = 1: with no body force the flow does not read T at all, so
+      // the energy equation is LINEAR in T at a fixed flux and under-
+      // relaxing it only slows the same answer down.
+      "relaxU": 0.7, "relaxP": 0.3, "relaxT": 1.0,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear",
+      "residual": 1e-9,
+      "uTolerance": 1e-14, "pTolerance": 1e-14,
+      "uMaxIter": 200, "pMaxIter": 800
+    }
+  }
+}

@@ -1154,3 +1154,632 @@ fn changing_rho_cp_and_mu_together_at_fixed_nu_alpha_and_rho_cp_leaves_the_answe
          something else is reading one of them"
     );
 }
+
+// ==========================================================================
+//  SPEC-LIT §79 - the openings: what a forced-convection fluid region says,
+//  what is refused, and the §13.4.1 pair tests
+//
+//  §60.2's fluid region was a CLOSED CAVITY and §60.6 recorded what that
+//  cost. The rig below is the smallest thing that is not one: a plane channel
+//  with an inlet and an outlet, one conducting wall above it, heated from
+//  outside. 288 cells, so every pair test RUNS.
+// ==========================================================================
+
+/// A heated plane duct: fluid below, one conducting wall above, flow left to
+/// right. Every entry a pair test varies is a parameter, so the two documents
+/// of a pair differ in exactly one substring.
+#[allow(clippy::too_many_arguments)]
+fn duct_case(
+    inlet_kind: &str,
+    inlet_u: &str,
+    inlet_t: &str,
+    outlet_kind: &str,
+    outlet_t: &str,
+    buoyancy: &str,
+) -> String {
+    format!(
+        r#"{{
+  "name": "heatedDuct",
+  "regions": [
+    {{
+      "name": "water", "kind": "fluid",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [4.0e-3, 4.0e-4, 1.0e-4] }},
+        "cells": [24, 8, 1],
+        "boundaries": {{
+          "xmin": "west",       "xmax": "east",
+          "ymin": "floor",      "ymax": "waterToWall",
+          "zmin": "waterFront", "zmax": "waterBack"
+        }}
+      }},
+      "fluid": {{ "rho": 1000.0, "cp": 4000.0, "kappa": 0.6, "mu": 1.0e-3 }},
+      "patches": [
+        {{ "match": "west", "kind": "{inlet_kind}"{inlet_u}, "T": {inlet_t} }},
+        {{ "match": "east", "kind": "{outlet_kind}", "T": {outlet_t} }},
+        {{ "match": "floor",      "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "waterFront", "T": {{ "type": "empty" }} }},
+        {{ "match": "waterBack",  "T": {{ "type": "empty" }} }}
+      ]
+    }},
+    {{
+      "name": "lid", "kind": "solid",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 4.0e-4, 0.0], "max": [4.0e-3, 6.0e-4, 1.0e-4] }},
+        "cells": [24, 4, 1],
+        "boundaries": {{
+          "xmin": "lidWest",  "xmax": "lidEast",
+          "ymin": "wallToWater", "ymax": "heated",
+          "zmin": "lidFront", "zmax": "lidBack"
+        }}
+      }},
+      "material": {{ "rho": 2000.0, "c": 700.0, "kappa": 100.0 }},
+      "patches": [
+        {{ "match": "lidWest",  "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "lidEast",  "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "heated",   "T": {{ "type": "fixedFluxTemperature", "q": 1.0e4 }} }},
+        {{ "match": "lidFront", "T": {{ "type": "empty" }} }},
+        {{ "match": "lidBack",  "T": {{ "type": "empty" }} }}
+      ]
+    }}
+  ],
+  "interfaces": [
+    {{ "regionA": "water", "patchA": "waterToWall",
+       "regionB": "lid",   "patchB": "wallToWater" }}
+  ],{buoyancy}
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": 400 }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU",
+    "tolerance": 1e-16, "maxIter": 300,
+    "flow": {{
+      "relaxU": 0.7, "relaxP": 0.3, "relaxT": 1.0,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear",
+      "residual": 1e-10,
+      "uTolerance": 1e-14, "pTolerance": 1e-14,
+      "uMaxIter": 150, "pMaxIter": 400
+    }}
+  }}
+}}"#
+    )
+}
+
+const DUCT_U: &str = r#", "U": [0.05, 0.0, 0.0]"#;
+const DUCT_TIN: &str = r#"{ "type": "fixedValue", "value": 300.0 }"#;
+const DUCT_TOUT: &str = r#"{ "type": "inletOutlet", "inletValue": 300.0 }"#;
+const DUCT_BUOY: &str = "\n  \"buoyancy\": { \"g\": [0.0, -9.81, 0.0], \"TRef\": 300.0 },";
+
+/// The forward-flowing rig every §79 pair test starts from.
+fn duct_base() -> String {
+    duct_case("inlet", DUCT_U, DUCT_TIN, "outlet", DUCT_TOUT, "")
+}
+
+/// The same rig with the inlet velocity REVERSED, so the flow leaves through
+/// `west` and comes back in through every face of `east`. SPEC-LIT §79.5:
+/// this is the configuration in which `inletValue` is read at all.
+fn duct_reversed() -> String {
+    duct_case(
+        "inlet",
+        r#", "U": [-0.05, 0.0, 0.0]"#,
+        DUCT_TIN,
+        "outlet",
+        DUCT_TOUT,
+        "",
+    )
+}
+
+/// The largest temperature difference between two runs of the same rig.
+fn field_gap(
+    a: &crate::cht::flow::ChtFlowSolution,
+    b: &crate::cht::flow::ChtFlowSolution,
+) -> Scalar {
+    a.t.iter()
+        .zip(&b.t)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()))
+}
+
+fn duct_pair_differs(gpu: &Gpu, base: &str, from: &str, to: &str, what: &str) {
+    let b = base.replace(from, to);
+    assert_ne!(base, b, "the pair test's own substitution '{from}' -> '{to}' changed nothing");
+    let gap = field_gap(&run_flow(gpu, base), &run_flow(gpu, &b));
+    assert!(
+        gap > 1e-12,
+        "changing {what} moved the temperature field by {gap} K. Two cases \
+         differing in one entry produced the SAME answer, which means the case \
+         said {what} and the solver ignored it (SPEC-LIT 13.4.1)"
+    );
+}
+
+#[test]
+fn the_shipped_qu_mudawar_case_reads_and_lowers_as_a_forced_flow_case() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/quMudawar.cht.jsonc");
+    let case = super::read_cht_case(&path).expect("read");
+    let low = case.lower().expect("lower");
+
+    // Nine boxes, one of them the channel, and it is region 0 (SPEC-LIT
+    // §47.4's numbering invariant).
+    assert_eq!(low.kinds().len(), 9);
+    assert_eq!(low.kinds()[0], RegionKind::Fluid);
+    assert!(low.kinds()[1..].iter().all(|k| *k == RegionKind::Solid));
+    // Twelve conformal couples: six in y, six in z (SPEC-LIT §79.8).
+    assert_eq!(low.interfaces.len(), 12);
+
+    let flow = low.flow_case().expect("a forced case lowers to a FlowCase");
+    // SPEC-LIT §79.6: forced convection, so NO body force at all.
+    assert!(flow.buoyancy.is_none(), "Qu & Mudawar assumption (6)");
+    let o = flow.openings.as_ref().expect("one inlet and one outlet");
+    assert_eq!(o.inlet_patch, "inlet");
+    assert_eq!(o.outlet_patch, "outlet");
+
+    // Re = rho u d_h/mu at the paper's Table 2 value of 140, from the case's
+    // own four numbers and Table 1's channel - the arithmetic the case
+    // comment states, checked rather than trusted.
+    let f = flow.regions[0].fluid.as_ref().expect("fluid");
+    let (w_ch, h_ch) = (57.0e-6 as Scalar, 180.0e-6 as Scalar);
+    let d_h = 4.0 * (w_ch * h_ch) / (2.0 * (w_ch + h_ch));
+    let re = f.rho * o.inlet_velocity.x * d_h / f.mu;
+    assert!((re - 140.0).abs() < 1e-9, "Re = {re}, Qu & Mudawar Table 2 says 140");
+    let pr = f.pr();
+    assert!((pr - 6.869_449_180_327_87).abs() < 1e-9, "Pr = {pr}");
+}
+
+/// SPEC-LIT §79.10, every refusal, in both directions. Each is a setting the
+/// document could carry and the solver would ignore, or one the solver needs
+/// and no default may be invented for.
+#[test]
+fn every_opening_refusal_fires_and_names_the_setting() {
+    let base = duct_base();
+    let zero_grad = r#"{ "type": "zeroGradient" }"#;
+    let cases: Vec<(String, &str, &str)> = vec![
+        // A velocity nothing reads.
+        (
+            base.replace(
+                r#"{ "match": "floor",      "T": { "type": "zeroGradient" } }"#,
+                r#"{ "match": "floor", "U": [1.0, 0.0, 0.0], "T": { "type": "zeroGradient" } }"#,
+            ),
+            "would ignore",
+            "a velocity on a wall patch",
+        ),
+        // An inlet with no velocity.
+        (
+            duct_case("inlet", "", DUCT_TIN, "outlet", DUCT_TOUT, ""),
+            "an `inlet` needs `U`",
+            "an inlet with no velocity",
+        ),
+        // An inlet through which nothing enters.
+        (
+            duct_case("inlet", r#", "U": [0.0, 0.0, 0.0]"#, DUCT_TIN, "outlet", DUCT_TOUT, ""),
+            "is zero",
+            "a zero inlet velocity",
+        ),
+        // `inletOutlet` where the flux cannot change sign.
+        (
+            base.replace(
+                r#"{ "match": "floor",      "T": { "type": "zeroGradient" } }"#,
+                r#"{ "match": "floor", "T": { "type": "inletOutlet", "inletValue": 300.0 } }"#,
+            ),
+            "SIGN of the face flux",
+            "`inletOutlet` on a wall",
+        ),
+        // An inlet whose entering enthalpy is undetermined.
+        (
+            duct_case("inlet", DUCT_U, zero_grad, "outlet", DUCT_TOUT, ""),
+            "carries `fixedValue`",
+            "an inlet with no temperature",
+        ),
+        // A held temperature at an outlet.
+        (
+            duct_case("inlet", DUCT_U, DUCT_TIN, "outlet", DUCT_TIN, ""),
+            "carries `inletOutlet` or `zeroGradient`",
+            "a fixed temperature at an outlet",
+        ),
+        // An inlet with no outlet.
+        (
+            duct_case("inlet", DUCT_U, DUCT_TIN, "wall", zero_grad, ""),
+            "exactly one of each",
+            "an inlet with no outlet",
+        ),
+        // An outlet with no inlet.
+        (
+            duct_case("wall", "", DUCT_TIN, "outlet", DUCT_TOUT, ""),
+            "exactly one of each",
+            "an outlet with no inlet",
+        ),
+        // A third answer to what a patch is.
+        (
+            duct_case("inlet", DUCT_U, DUCT_TIN, "farfield", zero_grad, ""),
+            "available: wall, inlet, outlet",
+            "an unknown patch kind",
+        ),
+        // An opening on a solid region.
+        (
+            base.replace(
+                r#"{ "match": "lidWest",  "T": { "type": "zeroGradient" } }"#,
+                r#"{ "match": "lidWest", "kind": "outlet", "T": { "type": "zeroGradient" } }"#,
+            ),
+            "is SOLID",
+            "an opening on a conducting solid",
+        ),
+        // An `empty` plane that is also an opening.
+        (
+            base.replace(
+                r#"{ "match": "waterFront", "T": { "type": "empty" } }"#,
+                r#"{ "match": "waterFront", "kind": "outlet", "T": { "type": "empty" } }"#,
+            ),
+            "no surface integral",
+            "an `empty` opening",
+        ),
+    ];
+    for (text, needle, what) in cases {
+        let err = read(&text)
+            .and_then(|c| c.lower())
+            .err()
+            .unwrap_or_else(|| panic!("{what} was ACCEPTED"))
+            .to_string();
+        assert!(err.contains(needle), "{what}: the message does not name it - {err}");
+    }
+}
+
+/// SPEC-LIT §79.6, both directions. `buoyancy` is REQUIRED by a closed cavity,
+/// which has nothing else that could drive it, and OPTIONAL once the case
+/// names an inlet.
+#[test]
+fn buoyancy_is_required_by_a_closed_cavity_and_optional_once_there_is_an_inlet() {
+    // Forced, no buoyancy: accepted.
+    read(&duct_base())
+        .expect("parse")
+        .lower()
+        .expect("a forced case may omit `buoyancy`");
+
+    // Forced, with buoyancy: also accepted - the two are a §13.4.1 pair
+    // below, not an either/or.
+    read(&duct_case("inlet", DUCT_U, DUCT_TIN, "outlet", DUCT_TOUT, DUCT_BUOY))
+        .expect("parse")
+        .lower()
+        .expect("a forced case may carry `buoyancy`");
+
+    // Closed, no buoyancy: refused, and the message names the way out.
+    let closed = duct_case(
+        "wall",
+        "",
+        DUCT_TIN,
+        "wall",
+        r#"{ "type": "zeroGradient" }"#,
+        "",
+    );
+    let err = read(&closed)
+        .expect("parse")
+        .lower()
+        .expect_err("a closed cavity with no body force has nothing to drive it")
+        .to_string();
+    assert!(err.contains("CLOSED fluid cavity needs `buoyancy`"), "{err}");
+    assert!(err.contains("inlet"), "the refusal names the alternative: {err}");
+}
+
+/// SPEC-LIT §79.11 pair 1. The inlet velocity is this case's whole forcing.
+#[test]
+fn pair_the_inlet_velocity_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    duct_pair_differs(
+        &gpu,
+        &duct_base(),
+        r#""U": [0.05, 0.0, 0.0]"#,
+        r#""U": [0.1, 0.0, 0.0]"#,
+        "the inlet velocity",
+    );
+}
+
+/// SPEC-LIT §79.11 pair 2. The inlet temperature is the enthalpy datum
+/// everything downstream is measured from.
+#[test]
+fn pair_the_inlet_temperature_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    duct_pair_differs(
+        &gpu,
+        &duct_base(),
+        r#"{ "type": "fixedValue", "value": 300.0 }"#,
+        r#"{ "type": "fixedValue", "value": 320.0 }"#,
+        "the inlet temperature",
+    );
+}
+
+/// SPEC-LIT §79.11 pair 3. `buoyancy` on a forced case is not decoration: it
+/// switches on §9's body force AND §25's variable density, and §79.6 says the
+/// absence of it is a model and not a default.
+#[test]
+fn pair_buoyancy_on_a_forced_case_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = run_flow(&gpu, &duct_base());
+    let b = run_flow(
+        &gpu,
+        &duct_case("inlet", DUCT_U, DUCT_TIN, "outlet", DUCT_TOUT, DUCT_BUOY),
+    );
+    let gap = field_gap(&a, &b);
+    assert!(
+        gap > 1e-12,
+        "adding `buoyancy` to a forced case moved the temperature field by \
+         {gap} K - SPEC-LIT 79.6 says it must move both the body force and \
+         the density"
+    );
+}
+
+/// SPEC-LIT §79.11 pair 4, and the honest half of it.
+///
+/// `inletOutlet`'s `inletValue` is read on exactly the faces where
+/// `phi_b < 0`. On a channel that never backflows there are none, so the
+/// entry CANNOT move the answer - and this test asserts that equivalent claim
+/// (§70.7's precedent) together with the run's own report that no face fired.
+/// Reverse the inlet velocity and every outlet face is an inflow face, and
+/// then the same entry moves the answer by a lot.
+#[test]
+fn pair_the_outlet_inlet_value_moves_nothing_until_the_flow_comes_back_in() {
+    let Some(gpu) = gpu() else { return };
+
+    // ---- forward: it cannot move the answer, and the run says so ----------
+    let a = duct_base();
+    let b = a.replace(r#""inletValue": 300.0"#, r#""inletValue": 900.0"#);
+    assert_ne!(a, b);
+    let sa = run_flow(&gpu, &a);
+    let sb = run_flow(&gpu, &b);
+    let oa = sa.openings.expect("openings");
+    assert!(oa.n_outlet_faces > 0);
+    assert_eq!(
+        oa.n_backflow, 0,
+        "the forward duct backflowed on {} of {} outlet faces, so this half of \
+         the pair test is not testing what it says it is",
+        oa.n_backflow, oa.n_outlet_faces
+    );
+    let gap = field_gap(&sa, &sb);
+    assert_eq!(
+        gap, 0.0,
+        "with nothing entering through the outlet, `inletValue` is read by no \
+         face at all, so the two answers must agree in every bit and they \
+         differ by {gap} K"
+    );
+
+    // ---- reversed: every outlet face is an inflow face --------------------
+    let c = duct_reversed();
+    let d = c.replace(r#""inletValue": 300.0"#, r#""inletValue": 900.0"#);
+    let sc = run_flow(&gpu, &c);
+    let sd = run_flow(&gpu, &d);
+    let oc = sc.openings.expect("openings");
+    assert!(
+        oc.n_backflow > 0,
+        "the reversed duct was supposed to make the flow re-enter through the \
+         outlet and did not"
+    );
+    let gap = field_gap(&sc, &sd);
+    assert!(
+        gap > 1.0,
+        "with the flow coming back in, `inletValue` 300 -> 900 moved the field \
+         by only {gap} K"
+    );
+}
+
+/// SPEC-LIT §79.5's other claim: while the flow is leaving, `inletOutlet` is
+/// `zeroGradient` in every bit - not approximately, and not eventually.
+#[test]
+fn inlet_outlet_is_bitwise_zero_gradient_while_the_flow_leaves() {
+    let Some(gpu) = gpu() else { return };
+    let a = duct_base();
+    let b = duct_case(
+        "inlet",
+        DUCT_U,
+        DUCT_TIN,
+        "outlet",
+        r#"{ "type": "zeroGradient" }"#,
+        "",
+    );
+    assert_ne!(a, b);
+    let sa = run_flow(&gpu, &a);
+    let sb = run_flow(&gpu, &b);
+    assert_eq!(sa.openings.expect("openings").n_backflow, 0);
+    let gap = field_gap(&sa, &sb);
+    assert_eq!(gap, 0.0, "the two outflow conditions differ by {gap} K");
+    let gap_b = sa
+        .bt
+        .iter()
+        .zip(&sb.bt)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+    assert_eq!(gap_b, 0.0, "the evaluated FACE values differ by {gap_b} K");
+}
+
+/// SPEC-LIT §79.7: what goes in comes out, and the bulk temperature rise is
+/// `Q/(m cp)` - an identity, not a correlation.
+#[test]
+fn the_openings_close_the_global_balance_and_the_bulk_rise_is_the_identity() {
+    let Some(gpu) = gpu() else { return };
+    let sol = run_flow(&gpu, &duct_base());
+    let o = sol.openings.expect("openings");
+
+    // Both fluxes signed OUTWARD, so they cancel.
+    let imbalance = o.imbalance().abs() / o.outlet_flux.abs();
+    assert!(imbalance < 1e-10, "global mass imbalance {imbalance} relative");
+
+    // The heat the case put in, and it is THREE terms rather than the two the
+    // obvious reading gives. The heater is one. The inlet is the other: `T`
+    // is held at 300 K there while the first cell is warmer, so that face
+    // conducts heat back OUT of the domain, and on a duct this short it is
+    // 0.3 % of the heater - small, and thirty times the tolerance a balance
+    // deserves. It is in the balance because it is in the physics; leaving it
+    // out and loosening the tolerance instead would be hiding it.
+    let q_heater = sol.patch_heat_flow(1, "heated").expect("heated patch");
+    let q_inlet = sol.patch_heat_flow(0, "west").expect("inlet patch");
+    assert!(q_inlet < 0.0, "the inlet conducts heat OUT, not in: {q_inlet} W");
+    let q_in = q_heater + q_inlet;
+    let rel = ((o.enthalpy_rise - q_in) / q_in).abs();
+    assert!(
+        rel < 1e-5,
+        "the flow carried out {} W against the {q_in} W that entered          ({q_heater} through the heater, {q_inlet} through the inlet), {rel}          relative",
+        o.enthalpy_rise
+    );
+
+    // dT_bulk = Q/(m cp), with m cp = rho cp |phi_outlet|.
+    let m_cp = sol.fluid_rho_cp * o.outlet_flux.abs();
+    let want = 300.0 + q_in / m_cp;
+    let err = (o.outlet_bulk_t - want).abs();
+    assert!(
+        err < 1e-5,
+        "outlet bulk T {} against the identity {want}",
+        o.outlet_bulk_t
+    );
+}
+
+/// SPEC-LIT §79.8. Nine boxes of ONE material, joined by the twelve couples a
+/// micro-channel unit cell needs, against the single box they were cut out
+/// of. A perfect-contact interface between two cells of the same material on
+/// a matched orthogonal mesh IS the internal-face coefficient it replaced, so
+/// the cut is not an approximation - and this test says by how much.
+#[test]
+fn the_nine_box_decomposition_is_the_single_box_it_was_cut_from() {
+    let Some(gpu) = gpu() else { return };
+
+    let mono = r#"{
+  "name": "monolith",
+  "regions": [
+    { "name": "block",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0], "max": [2.0, 3.0, 3.0] },
+        "cells": [4, 6, 9],
+        "boundaries": { "xmin": "w", "xmax": "e", "ymin": "s", "ymax": "n",
+                        "zmin": "bottom", "zmax": "top" } },
+      "material": { "rho": 2330.0, "c": 712.0, "kappa": 148.0 },
+      "patches": [
+        { "match": "w", "T": { "type": "zeroGradient" } },
+        { "match": "e", "T": { "type": "zeroGradient" } },
+        { "match": "s", "T": { "type": "zeroGradient" } },
+        { "match": "n", "T": { "type": "zeroGradient" } },
+        { "match": "bottom", "T": { "type": "fixedValue", "value": 300.0 } },
+        { "match": "top",    "T": { "type": "fixedFluxTemperature", "q": 5.0e3 } } ] } ],
+  "initial": { "T": 300.0 },
+  "run": { "steady": true },
+  "numerics": { "solver": "PCG", "preconditioner": "DIC",
+                "tolerance": 1e-18, "maxIter": 5000 }
+}"#;
+
+    let tag = [
+        ["botL", "botC", "botR"],
+        ["midL", "midC", "midR"],
+        ["topL", "topC", "topR"],
+    ];
+    let mut regions = Vec::new();
+    for (j, tj) in tag.iter().enumerate() {
+        for (i, n) in tj.iter().enumerate() {
+            let mut pats = vec![
+                format!(r#"{{ "match": "{n}Xmin", "T": {{ "type": "zeroGradient" }} }}"#),
+                format!(r#"{{ "match": "{n}Xmax", "T": {{ "type": "zeroGradient" }} }}"#),
+            ];
+            if i == 0 {
+                pats.push(format!(
+                    r#"{{ "match": "{n}Ymin", "T": {{ "type": "zeroGradient" }} }}"#
+                ));
+            }
+            if i == 2 {
+                pats.push(format!(
+                    r#"{{ "match": "{n}Ymax", "T": {{ "type": "zeroGradient" }} }}"#
+                ));
+            }
+            if j == 0 {
+                pats.push(format!(
+                    r#"{{ "match": "{n}Zmin", "T": {{ "type": "fixedValue", "value": 300.0 }} }}"#
+                ));
+            }
+            if j == 2 {
+                pats.push(format!(
+                    r#"{{ "match": "{n}Zmax", "T": {{ "type": "fixedFluxTemperature", "q": 5.0e3 }} }}"#
+                ));
+            }
+            regions.push(format!(
+                r#"    {{ "name": "{n}",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, {}.0, {}.0], "max": [2.0, {}.0, {}.0] }},
+        "cells": [4, 2, 3],
+        "boundaries": {{ "xmin": "{n}Xmin", "xmax": "{n}Xmax",
+                        "ymin": "{n}Ymin", "ymax": "{n}Ymax",
+                        "zmin": "{n}Zmin", "zmax": "{n}Zmax" }} }},
+      "material": {{ "rho": 2330.0, "c": 712.0, "kappa": 148.0 }},
+      "patches": [ {} ] }}"#,
+                i,
+                j,
+                i + 1,
+                j + 1,
+                pats.join(", ")
+            ));
+        }
+    }
+    let mut ifaces = Vec::new();
+    for tj in &tag {
+        for i in 0..2 {
+            let (a, b) = (tj[i], tj[i + 1]);
+            ifaces.push(format!(
+                r#"    {{ "regionA": "{a}", "patchA": "{a}Ymax", "regionB": "{b}", "patchB": "{b}Ymin" }}"#
+            ));
+        }
+    }
+    for j in 0..2 {
+        for (a, b) in tag[j].iter().zip(&tag[j + 1]) {
+            ifaces.push(format!(
+                r#"    {{ "regionA": "{a}", "patchA": "{a}Zmax", "regionB": "{b}", "patchB": "{b}Zmin" }}"#
+            ));
+        }
+    }
+    assert_eq!(ifaces.len(), 12);
+    let split = format!(
+        r#"{{
+  "name": "nineBox",
+  "regions": [
+{}
+  ],
+  "interfaces": [
+{}
+  ],
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true }},
+  "numerics": {{ "solver": "PCG", "preconditioner": "DIC",
+                "tolerance": 1e-18, "maxIter": 5000 }}
+}}"#,
+        regions.join(",\n"),
+        ifaces.join(",\n")
+    );
+
+    let a = solve(&gpu, mono);
+    let b = solve(&gpu, &split);
+    assert_eq!(a.mesh.host.n_cells, b.mesh.host.n_cells);
+    assert_eq!(b.mesh.interface_ranges.len(), 12);
+
+    // Match cells by centroid: the two meshes number them differently, which
+    // is the whole point of the concatenation.
+    let key = |p: crate::Vec3| {
+        (
+            (f64::from(p.x) * 1e9).round() as i64,
+            (f64::from(p.y) * 1e9).round() as i64,
+            (f64::from(p.z) * 1e9).round() as i64,
+        )
+    };
+    let map: std::collections::HashMap<_, _> = b
+        .mesh
+        .host
+        .c
+        .iter()
+        .enumerate()
+        .map(|(c, p)| (key(*p), b.t[c]))
+        .collect();
+    let mut worst: Scalar = 0.0;
+    let mut span: Scalar = 0.0;
+    for (c, p) in a.mesh.host.c.iter().enumerate() {
+        let t = *map.get(&key(*p)).unwrap_or_else(|| panic!("cell {c} unmatched"));
+        worst = worst.max((t - a.t[c]).abs());
+        span = span.max((a.t[c] - 300.0).abs());
+    }
+    let rel = worst / span;
+    assert!(
+        rel < 1e-11,
+        "the nine-box decomposition differs from the box it was cut from by \
+         {worst} K over a {span} K range ({rel} relative). SPEC-LIT 79.8 says \
+         a perfect-contact couple between two cells of the SAME material on a \
+         matched orthogonal mesh is the internal-face coefficient it replaced"
+    );
+    println!(
+        "SPEC-LIT 79.8: nine boxes against one, {worst} K over {span} K = {rel} relative"
+    );
+}

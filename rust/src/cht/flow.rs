@@ -29,12 +29,12 @@
 //!     (2012) 179-190, open access - the secondary table that gate uses
 //!   W. Qu, I. Mudawar, *Int. J. Heat Mass Transfer* 45 (2002) 3973-3985,
 //!     DOI 10.1016/S0017-9310(02)00101-1 - the silicon micro-channel heat
-//!     sink SPEC-LIT §79.7 runs, and the configuration §60.6 recorded as
+//!     sink SPEC-LIT §79.12 runs, and the configuration §60.6 recorded as
 //!     UNREACHABLE. Read in full from the authors' own copy at
 //!     `engineering.purdue.edu/mudawar/files/articles-all/2002/2002_3.pdf`
 //!   K. Kawano, K. Minakami, H. Iwasaki, M. Ishizuka, ASME HTD-361-3/PID-3
 //!     (1998) 173-180 - the measured thermal resistances that gate is held
-//!     against, reached THROUGH Qu & Mudawar's Fig. 4 (SPEC-LIT §79.8's
+//!     against, reached THROUGH Qu & Mudawar's Fig. 4 (SPEC-LIT §79.12's
 //!     disclosure)
 //!   ofgpu `SPEC-LIT.md` §5, §9, §13.4, §25, §26, §46, §47, §59, §60, §79
 //!
@@ -231,7 +231,7 @@ impl Buoyancy {
 /// every bit.
 ///
 /// **Exactly one of each.** Two openings would need a pressure level apiece to
-/// decide how the flow splits between them, and §79.3's flux-establishment
+/// decide how the flow splits between them, and §79.4's flux-establishment
 /// solve carries the single Dirichlet reference the outlet supplies - the same
 /// restriction, for the same reason, that
 /// [`crate::potential_flow::PotentialFlowSpec`] already states.
@@ -245,11 +245,12 @@ pub struct Openings {
     pub inlet_velocity: Vec3,
     /// The outlet patch. `U` zero-gradient (`fr = 0`, so the PRESSURE equation
     /// owns the flux), `p` `fixedValue 0`, `T` `inletOutlet` or
-    /// `zeroGradient` - SPEC-LIT §79.4.
+    /// `zeroGradient` - SPEC-LIT §79.5.
     pub outlet_patch: String,
 }
 
-/// What the flux-establishment pass and the openings came to - SPEC-LIT §79.3.
+/// What the flux-establishment pass and the openings came to - SPEC-LIT
+/// §79.4 and §79.7.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OpeningReport {
     /// `sum phi_b` over the inlet, signed OUTWARD, so a real inlet is
@@ -267,6 +268,20 @@ pub struct OpeningReport {
     pub enthalpy_rise: Scalar,
     /// What [`crate::potential_flow::solve_potential_flow`] did at setup.
     pub potential: crate::potential_flow::PotentialFlowResult,
+    /// How many faces the outlet has, and how many of them the flow was
+    /// coming back IN through on the last iteration - SPEC-LIT §79.5.
+    ///
+    /// This pair exists because of one honest problem with `inletOutlet`.
+    /// Its `inletValue` is read on exactly the faces where `phi_b < 0`, so on
+    /// a channel that never backflows it is an entry the case states and the
+    /// solver never reads - the §13.4.1 defect, seen from a direction §13.4.1
+    /// cannot see, because the entry is legitimate and it is the FLOW that
+    /// decides whether it matters. The answer is not to refuse the entry: it
+    /// is to REPORT how often it fired, so a reader can tell the two cases
+    /// apart without guessing. `n_backflow == 0` is the statement that
+    /// `inletValue` could not have moved this answer.
+    pub n_outlet_faces: usize,
+    pub n_backflow: usize,
 }
 
 impl OpeningReport {
@@ -275,6 +290,16 @@ impl OpeningReport {
     /// to the pressure solver's tolerance.
     pub fn imbalance(&self) -> Scalar {
         self.inlet_flux + self.outlet_flux
+    }
+
+    /// The fraction of the outlet's faces the flow re-entered through.
+    /// Zero on a clean channel; SPEC-LIT §79.5 is what it is for.
+    pub fn backflow_fraction(&self) -> Scalar {
+        if self.n_outlet_faces == 0 {
+            0.0
+        } else {
+            self.n_backflow as Scalar / self.n_outlet_faces as Scalar
+        }
     }
 }
 
@@ -352,7 +377,7 @@ pub struct ChtFlowSolution {
     pub residuals: (Scalar, Scalar, Scalar),
     /// `max_c |sum_f phi_f|`, m^3/s.
     pub continuity: Scalar,
-    /// SPEC-LIT §79.3: what the openings carried, and what the
+    /// SPEC-LIT §79.4 and §79.7: what the openings carried, and what the
     /// flux-establishment pass did. `None` on SPEC-LIT §60.2's closed cavity.
     pub openings: Option<OpeningReport>,
     /// `rho cp` of the fluid at `TRef`, J/(m^3 K) - what
@@ -393,7 +418,7 @@ impl ChtFlowSolution {
     ///
     /// The three arrays a reported wall temperature is built from, handed over
     /// together so a caller can bin by position without reaching into
-    /// [`Self::mesh`] and re-deriving the patch range. SPEC-LIT §79.7's
+    /// [`Self::mesh`] and re-deriving the patch range. SPEC-LIT §79.12's
     /// substrate temperatures are an area-weighted average of the `T` of the
     /// faces in one `x` column of this list.
     pub fn patch_faces(&self, region: usize, patch: &str) -> Result<Vec<(Vec3, Scalar, Scalar)>> {
@@ -477,7 +502,7 @@ pub struct FlowCase<'a> {
     pub interfaces: Vec<InterfaceRequest>,
     /// `(region, patch, condition)`, one per patch that is not an interface.
     pub patch_bcs: Vec<(usize, String, crate::io::case_cht::LoweredBc)>,
-    /// SPEC-LIT §9's body force. `None` is SPEC-LIT §79.5's forced-convection
+    /// SPEC-LIT §9's body force. `None` is SPEC-LIT §79.6's forced-convection
     /// case: no body force, and the fluid's density held CONSTANT at
     /// `fluid.rho` - Qu & Mudawar's own assumptions (4) and (6). A closed
     /// cavity is refused without one by the reader, because it would then have
@@ -510,7 +535,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     if let Some(b) = &case.buoyancy {
         b.validate()?;
     }
-    // SPEC-LIT §79.5. Without a body force the gas state is pinned at the
+    // SPEC-LIT §79.6. Without a body force the gas state is pinned at the
     // INITIAL temperature and never moved again, so `rho` is `fluid.rho`
     // everywhere for the whole run - the constant-property fluid Qu & Mudawar
     // assume, and the right model for a liquid, which SPEC-LIT §25's
@@ -664,7 +689,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
                         rv[bf] = 0.0;
                         rg[bf] = 0.0;
                     }
-                    // SPEC-LIT §79.4. `fr` is seeded at 0 - zero-gradient,
+                    // SPEC-LIT §79.5. `fr` is seeded at 0 - zero-gradient,
                     // the outflow branch - and rewritten from the sign of the
                     // face flux by `field_ops::update_inlet_outlet` at the top
                     // of every outer iteration, before the assembly that reads
@@ -759,7 +784,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         report_continuity: false,
     };
     let buoy = case.buoyancy.map_or(
-        // SPEC-LIT §79.5: no `buoyancy` block, so no body force. `g = 0` makes
+        // SPEC-LIT §79.6: no `buoyancy` block, so no body force. `g = 0` makes
         // `BuoyancyCoeffs::is_active` false and the face body force exactly
         // zero - not small, zero - and `t_ref` is then only the reference the
         // guard needs to be positive.
@@ -780,7 +805,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     //           equation may not change it.
     //   outlet  U zero-gradient (fr = 0), p fixedValue 0.  `fr = 0` makes
     //           `momFluxIsPrescribed` FALSE, which is what hands the outlet
-    //           flux to the pressure equation - SPEC-LIT §79.4's outflow
+    //           flux to the pressure equation - SPEC-LIT §79.3's outflow
     //           treatment, and the whole of it.
     //
     // With no opening `p` keeps `GpuScalarField::zeros`' zero-gradient, the
@@ -843,7 +868,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         gpu.write(&mut p.ref_value, &rv)?;
     }
 
-    // ---- SPEC-LIT §79.3, the flux-establishment pass ---------------------
+    // ---- SPEC-LIT §79.4, the flux-establishment pass ---------------------
     //
     // `interpolate(U) & Sf` on a field at rest is zero on every internal face
     // and `U_in . Sf` on the inlet: mass enters and has no path out, the first
@@ -942,7 +967,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         field_ops::copy_field(gpu, &fldk, &mut phi_thermal.f, &simple.phi().f, n_fluid_if)?;
         field_ops::copy_field(gpu, &fldk, &mut phi_thermal.bf, &simple.phi().bf, n_fluid_bf)?;
 
-        // 3b. SPEC-LIT §79.4: `inletOutlet`'s value fraction, from the flux
+        // 3b. SPEC-LIT §79.5: `inletOutlet`'s value fraction, from the flux
         // that was just written. One launch over the whole thermal boundary;
         // every face whose kind is not in the flux-switched range is left
         // untouched, so the solid half and every interface face are unmoved -
@@ -961,7 +986,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             )?;
         }
 
-        // 4. rho(T) at the current field - SPEC-LIT §79.5: only when a body
+        // 4. rho(T) at the current field - SPEC-LIT §79.6: only when a body
         // force is what drives the case. Without one the density is the
         // constant it was seeded with and this is not called at all, which is
         // a stronger statement than "it barely moves": the array is written
@@ -1006,7 +1031,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     let bt = gpu.download(&energy.field().bf)?;
     let rho_cp = fluid.rho * fluid.cp;
     let opening_report = if openings.is_some() {
-        // SPEC-LIT §79.3's global balance, taken on the host from the boundary
+        // SPEC-LIT §79.7's global balance, taken on the host from the boundary
         // flux and the evaluated boundary temperature - the same two arrays the
         // assembly used, so this is a reading of the answer and not a second
         // model of it. Both sums are signed OUTWARD, so they cancel on a
@@ -1017,6 +1042,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         let mut outlet_flux: Scalar = 0.0;
         let mut out_h: Scalar = 0.0;
         let mut in_h: Scalar = 0.0;
+        let mut n_backflow = 0usize;
         for &bf in &inlet_faces {
             inlet_flux += bphi[bf];
             in_h += bphi[bf] * bt[bf];
@@ -1024,6 +1050,12 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         for &bf in &outlet_faces {
             outlet_flux += bphi[bf];
             out_h += bphi[bf] * bt[bf];
+            // The SAME test `fldInletOutletFraction` makes, on the same
+            // array, so this counts the faces whose value fraction was 1 and
+            // not a second opinion about them (SPEC-LIT §79.5).
+            if bphi[bf] < 0.0 {
+                n_backflow += 1;
+            }
         }
         Some(OpeningReport {
             inlet_flux,
@@ -1031,6 +1063,8 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             outlet_bulk_t: if outlet_flux != 0.0 { out_h / outlet_flux } else { 0.0 },
             enthalpy_rise: rho_cp * (out_h + in_h),
             potential,
+            n_outlet_faces: outlet_faces.len(),
+            n_backflow,
         })
     } else {
         None

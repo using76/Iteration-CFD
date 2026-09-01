@@ -1084,3 +1084,137 @@ fn attach_conjugate_refuses_the_wrong_mesh_and_a_solid_first_region() -> Result<
     assert!(msg.contains("ConjugateHeat"), "{msg}");
     Ok(())
 }
+
+// ==========================================================================
+//  SPEC-LIT §79 - the driver's own half of the openings
+//
+//  The document-level refusals and every §13.4.1 pair test live in
+//  `io/case_cht/tests.rs`, because they are about what a case can SAY. These
+//  two are about what the DRIVER does with an `Openings` it is handed
+//  directly, which no document can reach.
+// ==========================================================================
+
+fn open_cavity_case<'a>(
+    meshes: &'a [HostMesh],
+    f: &FluidMaterial,
+    openings: Option<Openings>,
+) -> FlowCase<'a> {
+    FlowCase {
+        name: "cavityOrDuct".to_string(),
+        regions: vec![FlowRegion {
+            name: "air".to_string(),
+            kind: RegionKind::Fluid,
+            solid: None,
+            fluid: Some(f.clone()),
+            source: 0.0,
+        }],
+        meshes,
+        interfaces: Vec::new(),
+        patch_bcs: vec![
+            (0, "left".to_string(), LoweredBc::FixedValue(300.05)),
+            (0, "right".to_string(), LoweredBc::FixedValue(299.95)),
+            (0, "bottom".to_string(), LoweredBc::ZeroGradient),
+            (0, "top".to_string(), LoweredBc::ZeroGradient),
+        ],
+        buoyancy: Some(Buoyancy { g: Vec3::new(0.0, -2.13e7, 0.0), t_ref: T_REF }),
+        openings,
+        initial_t: T_REF,
+        flow: flow_controls(120, 0.0, 0.7, 0.3),
+        t_solver: t_solver(),
+        n_non_orthogonal_correctors: 0,
+        tolerances: PairingTolerances::default(),
+        p0: 101_325.0,
+    }
+}
+
+/// SPEC-LIT §79.2: the opening is resolved against the FLUID mesh's own patch
+/// names, and it is resolved BEFORE any device work happens - so a caller
+/// that names a patch the mesh does not have gets the list of the ones it
+/// does, not a panic three kernels later.
+#[test]
+fn an_opening_naming_a_patch_the_fluid_mesh_lacks_lists_the_ones_it_has() -> Result<()> {
+    let Some(gpu) = gpu() else { return Ok(()) };
+
+    let n = 10;
+    let f = air(1.0);
+    let dz: Scalar = 1.0 / n as Scalar;
+    let meshes = [cavity_block(n, 0.0, 1.0, dz)];
+    let case = open_cavity_case(
+        &meshes,
+        &f,
+        Some(Openings {
+            inlet_patch: "inflow".to_string(),
+            inlet_velocity: Vec3::new(1.0, 0.0, 0.0),
+            outlet_patch: "top".to_string(),
+        }),
+    );
+    let msg = match run_flow_case(&gpu, &case) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("an opening naming a patch that does not exist must be refused"),
+    };
+    assert!(msg.contains("inflow"), "{msg}");
+    assert!(msg.contains("It has:"), "the message lists the real patches: {msg}");
+    Ok(())
+}
+
+/// SPEC-LIT §79's headline claim about the DEFAULT, at the driver's own
+/// level: `openings: None` is §60.2's closed cavity, and `Some(..)` is not.
+///
+/// The two documents of §79.11's pair tests prove this from the case format;
+/// this proves it one layer down, where the only difference between the two
+/// runs is the `Option` itself - the same mesh, the same properties, the same
+/// patch conditions and the same iteration count.
+#[test]
+fn a_closed_cavity_and_an_open_one_differ_only_by_the_option() -> Result<()> {
+    let Some(gpu) = gpu() else { return Ok(()) };
+
+    let n = 10;
+    let f = air(1.0);
+    let dz: Scalar = 1.0 / n as Scalar;
+    let meshes = [cavity_block(n, 0.0, 1.0, dz)];
+
+    let a = run_flow_case(&gpu, &open_cavity_case(&meshes, &f, None))?;
+    assert!(a.openings.is_none(), "a closed cavity reports no openings");
+
+    let b = run_flow_case(
+        &gpu,
+        &open_cavity_case(
+            &meshes,
+            &f,
+            Some(Openings {
+                inlet_patch: "bottom".to_string(),
+                inlet_velocity: Vec3::new(0.0, 0.05, 0.0),
+                outlet_patch: "top".to_string(),
+            }),
+        ),
+    )?;
+    let o = b.openings.expect("an open cavity reports its openings");
+
+    // Both fluxes signed outward, so they cancel; and the answer moved.
+    assert!(
+        o.imbalance().abs() / o.outlet_flux.abs() < 1e-10,
+        "global mass imbalance {}",
+        o.imbalance()
+    );
+    // And a finding worth keeping rather than asserting away: blowing 0.05 m/s
+    // up through a cavity whose own buoyant circulation is far stronger makes
+    // the flow come back IN through most of the outlet - 7 of its 10 faces
+    // here. That is not a defect, it is the configuration `inletOutlet`
+    // exists for (SPEC-LIT §79.5), and the global balance above still closes
+    // to the pressure solver's tolerance with the outlet flux made of both
+    // signs.
+    assert!(
+        o.n_backflow > 0 && o.n_backflow < o.n_outlet_faces,
+        "a weak through-flow against a strong buoyant circulation should \
+         backflow through SOME of the outlet and not all of it: {} of {}",
+        o.n_backflow,
+        o.n_outlet_faces
+    );
+    let gap = a
+        .t
+        .iter()
+        .zip(&b.t)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+    assert!(gap > 1e-6, "blowing air through the cavity moved T by only {gap} K");
+    Ok(())
+}

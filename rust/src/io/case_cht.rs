@@ -256,7 +256,7 @@ pub struct ChtPatchRule {
     #[serde(default = "wall_patch_kind")]
     pub kind: String,
     /// The inlet velocity vector, m/s - required on an `inlet` and refused
-    /// anywhere else. Uniform over the patch: SPEC-LIT §79.3's
+    /// anywhere else. Uniform over the patch: SPEC-LIT §79.4's
     /// flux-establishment pass takes one normal speed, and a profile is
     /// refused by name rather than averaged.
     #[serde(rename = "U", default, skip_serializing_if = "Option::is_none")]
@@ -283,7 +283,7 @@ pub enum ChtScalarBc {
     /// SPEC-LIT §32.2.
     #[serde(rename = "fixedFluxTemperature")]
     FixedFluxTemperature { q: f64 },
-    /// SPEC-LIT §79.4's outflow condition: `zeroGradient` while the flux
+    /// SPEC-LIT §79.5's outflow condition: `zeroGradient` while the flux
     /// leaves, `fixedValue inletValue` on any face where it comes back in.
     ///
     /// Legal ONLY on an `outlet` patch. On a wall the flux is identically
@@ -467,7 +467,7 @@ pub enum LoweredBc {
     /// `fr = 0`, and `refGrad` is written from `q` and the face's own
     /// conductance - SPEC-LIT §32.2.
     FixedFlux(Scalar),
-    /// SPEC-LIT §79.4: `refValue = inletValue`, `refGrad = 0`, and `fr`
+    /// SPEC-LIT §79.5: `refValue = inletValue`, `refGrad = 0`, and `fr`
     /// rewritten from the sign of the face flux every outer iteration by
     /// `field_ops::update_inlet_outlet`.
     InletOutlet(Scalar),
@@ -683,12 +683,21 @@ impl ChtCase {
                         flow_patches.push(rule.match_.as_str());
                     }
                     other => {
+                        // The fallback NAME is deliberately not the name of a
+                        // patch kind, because there is no substitution to
+                        // make: `-permissive` reaches the refusal below
+                        // whatever it says here, so a `fallback_name` reading
+                        // "wall" would promise, in the non-permissive
+                        // message, a substitution that never happens. This is
+                        // §60.3's own idiom for `regions/kind`, with the
+                        // promise taken back out of it.
                         crate::io::contract::unsupported(
                             &format!("regions/{}/patches/{}/kind", r.name, rule.match_),
                             other,
                             &["wall", "inlet", "outlet"],
-                            "wall - SPEC-LIT 60.2's no-slip patch, which is what every fluid patch \
-                             was before SPEC-LIT 79",
+                            "NOTHING - the patch TYPE decides whether the pressure equation owns \
+                             the face's flux, so there is no third answer to guess and this is \
+                             refused under -permissive too",
                             (),
                         )?;
                         return Err(Error::Config(format!(
@@ -922,7 +931,7 @@ impl ChtCase {
                     let u = rule.u.ok_or_else(|| {
                         Error::Config(format!(
                             "{path}: an `inlet` needs `U` - the velocity, m/s, uniform over the \
-                             patch. SPEC-LIT 79.3's flux-establishment pass is built from its \
+                             patch. SPEC-LIT 79.4's flux-establishment pass is built from its \
                              normal component and there is no default this reader is entitled to \
                              invent"
                         ))
@@ -943,7 +952,7 @@ impl ChtCase {
                     None
                 };
 
-                // SPEC-LIT §79.4: which `T` each patch kind may carry. Every
+                // SPEC-LIT §79.5 and §79.10: which `T` each patch kind may carry. Every
                 // combination not listed is refused by name, because the ones
                 // that are missing are the ones that would be read and then
                 // mean nothing.
@@ -970,7 +979,7 @@ impl ChtCase {
                         return Err(Error::Config(format!(
                             "{path}/T: an `inlet` carries `fixedValue` - the temperature of what \
                              enters. Any other condition leaves the entering enthalpy undetermined \
-                             (SPEC-LIT 79.4)"
+                             (SPEC-LIT 79.5)"
                         )))
                     }
                     (ChtScalarBc::ZeroGradient, _, true) => {}
@@ -979,7 +988,7 @@ impl ChtCase {
                             "{path}/T: an `outlet` carries `inletOutlet` or `zeroGradient`. A held \
                              temperature at an outlet conducts heat back INTO a domain the flow is \
                              leaving, and a prescribed flux there is a wall condition on a face \
-                             that is not a wall (SPEC-LIT 79.4)"
+                             that is not a wall (SPEC-LIT 79.5)"
                         )))
                     }
                     _ => {}
@@ -1019,7 +1028,7 @@ impl ChtCase {
         // ---- SPEC-LIT §79.2's openings -----------------------------------
         //
         // Exactly one of each, or neither. Two inlets would need a pressure
-        // level each to decide how the inflow splits, and SPEC-LIT §79.3's
+        // level each to decide how the inflow splits, and SPEC-LIT §79.4's
         // flux-establishment pass carries the single Dirichlet reference the
         // outlet supplies - so rather than pick a split silently, the pair is
         // required to be a pair.
@@ -1047,7 +1056,7 @@ impl ChtCase {
                      exactly one of each, or neither (the closed cavity of SPEC-LIT 60.2). An inlet \
                      with no outlet drives mass into a domain with no path out of it; a second \
                      opening needs a pressure level of its own to decide how the flow splits, and \
-                     SPEC-LIT 79.3's flux-establishment solve carries exactly one Dirichlet \
+                     SPEC-LIT 79.4's flux-establishment solve carries exactly one Dirichlet \
                      reference"
                 )));
             }
@@ -1066,7 +1075,7 @@ impl ChtCase {
         // in this project. Refused in BOTH directions: present without a fluid
         // region, and absent with one.
         //
-        // SPEC-LIT §79.5 loosened exactly one row of this: `buoyancy` is
+        // SPEC-LIT §79.6 loosened exactly one row of this: `buoyancy` is
         // required by a CLOSED cavity, which has no other thing to drive it,
         // and OPTIONAL once the case names an inlet, because forced convection
         // is driven by the inlet and Qu & Mudawar's own assumption (6) is that

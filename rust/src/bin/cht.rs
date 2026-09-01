@@ -30,10 +30,13 @@
 //! by §9's body force. That is `cases/kaminskiPrakash.cht.jsonc`, and it is
 //! §47.12's Gate 5.
 //!
-//! The fluid region is a **closed cavity**: every non-`empty` patch of it is a
-//! no-slip wall. An inlet or an outlet is refused by name (SPEC-LIT §60.2),
-//! which is also why §47.12's Gate 6 - Qu & Mudawar's forced-convection
-//! micro-channel - still cannot be expressed here (§60.6).
+//! **A fluid region may now be open** - SPEC-LIT §79. A fluid patch that says
+//! `"kind": "inlet"` carries a velocity and a `fixedValue` `T`; one that says
+//! `"kind": "outlet"` takes `inletOutlet` or `zeroGradient`, and the pressure
+//! equation owns its flux. Exactly one of each, or neither - and neither is
+//! §60.2's closed cavity, unchanged in every bit. That is
+//! `cases/quMudawar.cht.jsonc`, the forced-convection micro-channel §60.6
+//! recorded as UNREACHABLE, and it is §47.12's Gate 6.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -215,7 +218,7 @@ fn report_flow(low: &LoweredChtCase, sol: &ChtFlowSolution) {
         );
     }
 
-    // SPEC-LIT §79.3: the openings, and the two balances they make checkable
+    // SPEC-LIT §79.4 and §79.7: the openings, and the two balances they make checkable
     // from the output alone.
     if let Some(o) = &sol.openings {
         println!(
@@ -236,6 +239,21 @@ fn report_flow(low: &LoweredChtCase, sol: &ChtFlowSolution) {
             "    outlet bulk (mixing-cup) T {:.6} K; enthalpy carried out {:+.6e} W",
             f64::from(o.outlet_bulk_t),
             f64::from(o.enthalpy_rise),
+        );
+        // SPEC-LIT §79.5. `inletOutlet`'s `inletValue` is read on exactly the
+        // faces the flow came back in through, so a run that reports zero of
+        // them has stated a number the solver never read - which is worth
+        // saying out loud rather than leaving a reader to assume either way.
+        println!(
+            "    outflow: {} of {} outlet faces had inflow ({:.1} %){}",
+            o.n_backflow,
+            o.n_outlet_faces,
+            100.0 * f64::from(o.backflow_fraction()),
+            if o.n_backflow == 0 {
+                " - so an `inletOutlet` inletValue could not have moved this answer"
+            } else {
+                ""
+            }
         );
     }
 
