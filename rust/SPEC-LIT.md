@@ -13465,13 +13465,25 @@ them REQUIRES the run to differ, failing by name if it does not. They pass. The 
 mesh is too cold for it; those are different sentences and this document says
 which one it means.
 
+**RETRACTED IN PART - see §83.** "The mesh is too cold for it" is the right
+half of that sentence and "the mesh" is the wrong half. §83.1 refined this same
+case from 32³ to 64³ - eight times the cells, everything else held - and the
+peak temperature moved from 816.9 K to 883.3 K with the count above 1375 K
+still at ZERO. What moves this case is `deltaT`, which changes the combustion
+efficiency from 19 % to 718 % over a factor of ten, because the fuel budget
+does not close: 20.97 kW of propane enters, 7.45 kW burns, 6.7e-7 kW leaves
+and 0.029 g is resident. §83 carries the measurements, the case built to
+answer them (`cases/burnerPlumeResolved.jsonc`, `D*/dx = 12.6`, fuel budget
+closed to 0.13 %), and Gate 61-A's verdict on it.
+
 **The prescribed-yield leg is not a pass in disguise.** On the same case it
 returns `0.024` against `0.024`, and both the run and (61.7) above say why
 that is an identity: the source term is `y_s q'''_c/dh_c`, so integrating it
 and dividing by the fuel burnt gives `y_s` back whatever the flow does. A
 model that is handed the answer cannot be gated on producing it.
 
-**What would close it**, named rather than implied: a mesh that resolves the
+**What would close it**, named rather than implied - and the first of the two
+was tried and does NOT close it (§83.1, §83.7): a mesh that resolves the
 flame - the same refinement §62.12's Gate 4 already names as part of itself -
 or the Santoro, Semerjian & Dobbins (1983) laminar co-flow ethylene flame,
 which is the regime the model was calibrated in and where its own paper's soot
@@ -23422,6 +23434,14 @@ test, `xref::tests`, in the style of §69's registry tests: it reads the tree
 back off disk, parses this document for the symbols that exist, and requires
 every citation to be one of them.
 
+The section was then written twice. Its first version was committed by a unit
+that reached a session limit before it could report, so the module shipped
+wired and green with nobody standing behind it. Reading it back found three
+holes in the rule and three claims that were not true, all of them in §80.8
+and §80.9 — a
+result worth stating plainly, because a gate written to stop drift is exactly
+as trustworthy as the reading somebody gave it, and this one had had none.
+
 **No external source of any kind was consulted for this section.** The rule,
 the lexer, the attribution model and the ratchet are **ORIGINAL**, and the only
 inputs are this document's own structure and `rust/`'s own text. No
@@ -23452,35 +23472,48 @@ still correct on the files that contain Korean.
 | **S** | `§13.4`, `§35.3.5` | a section or subsection, always | a heading number |
 | **A** | `S13.4`, `S77.6` | the ASCII spelling — a section **or** an equation | either |
 | **P** | `(64.6)`, `(24.5)` | an equation where the section labels equations; a subsection where it does not | see below |
-| **PA** | `(S47.3)`, `(S6.3)` | a section **or** an equation | either |
+| **PA** | `(S47.3)`, `(S6.3)` | the same as **P**, with the `S` the ASCII-only files spell it with | see below |
 | **B** | `SPEC-LIT 13.4`, `SPEC-LIT section 36`, `SPEC-LIT.md 13.4.1` | a section, always | a heading number |
 
 **The section set** is every heading number in `SPEC-LIT.md`, plus every
 ancestor of one: `#### 13.4.1` registers `13.4.1`, `13.4` and `13`, whether or
-not those are spelled as headings of their own. 601 symbols, this section's
-own nine included.
+not those are spelled as headings of their own. 602 symbols, this section's
+own ten included.
 
 **The equation set** is every label *defined* in this document, and a
-definition is a `(NN.M)` or `(SNN.M)` **closing a line inside a fenced block**,
-which is where this document writes them. A label mentioned in prose is a
-reference and does not create the symbol it cites — otherwise a typo would
-define itself. `E_P = N_P / max(D_P, tiny)` also ends in a parenthesis and is
-not a label, because its contents are not a number. 302 symbols, after §78's
-own convention is applied: "a bare number refers to a set by its bare number:
+definition is a `(NN.M)` or `(SNN.M)` **closing a line inside a fenced block
+of the section whose number it carries**, which is where and how this document
+writes them. A label mentioned in prose is a reference and does not create the
+symbol it cites — otherwise a typo would define itself — and neither does a
+reference that happens to sit *inside* a fenced block, which is the same
+principle and was the shipped parser's blind spot (§80.8).
+`E_P = N_P / max(D_P, tiny)` also ends in a parenthesis and is not a label,
+because its contents are not a number. 301 symbols, after §78's own convention
+is applied: "a bare number refers to a set by its bare number:
 `(78.2)` means the pair (78.2a)/(78.2b)", so a lettered label registers its
 family too.
 
 **Form P is the tight one, and the split is computed rather than listed.** A
 section labels equations if some label defined in this document carries its
 number; **twenty-nine do**, all of them §40 or later — §44, §45, §48, §51, §58
-and §70–§75 do not, and neither does anything before §40. In a section that
-labels none the code writes `(24.5)`, `(38.3)`, `(11.3)`, `(44.1)` meaning the
+and §70–§75 do not, and neither does anything before §40. That sentence was
+written from this document and was right; the parser that shipped counted
+**thirty**, and §80.8 has the reason. In a section that labels none the code
+writes `(24.5)`, `(38.3)`, `(11.3)`, `(44.1)` meaning the
 *subsection*, so there the parenthesised form resolves against headings. In a
 section that labels equations the parenthesised form is this document's own
 equation notation, so it must be an equation label — and that is what turns a
 renumbering into a test failure: `(64.8)` in `radiation.rs` named an equation
 §64 does not have, and §64.5's own table says the two rows that test measures
 are both against **(64.6)**.
+
+**Form PA is form P.** The `S` is not a change of meaning; it is what a file
+that cannot spell `§` writes instead. All 38 files under `rust/cuda` are pure
+ASCII, and so, in practice, are `s2s.rs`, `parcels.rs` and `impact.rs`.
+Resolving `(S47.3)` against "either" made the ASCII spelling mean *less* than
+the one it stands in for, and §80.8 records the eight sites that had drifted
+into the gap. The ASCII way to cite a **subsection** unambiguously is form B —
+`(SPEC-LIT 78.7)` — which is what those eight now say.
 
 **A number written with a leading zero is arithmetic, not an address.** There
 is no §0 and no §07, so `(0.25)`, `(0.50)`, `(0.0)` and the DOI fragment
@@ -23550,7 +23583,7 @@ reserved   99   the invented gate addresses §69's registry tests cite
 ambiguous-ceiling 972
 ```
 
-Three properties are tested, not asserted:
+Four properties are tested, not asserted:
 
 1. **`work` is a promise this audit cannot keep, and says so.** Patankar's §4.2
    is Patankar's; no copy of it is in this repository and nothing here can
@@ -23559,12 +23592,23 @@ Three properties are tested, not asserted:
    for their own headings and the citation is resolved against them, so
    `docs/07-fire-solver.md §1.1` is checked and would fail if that document
    were reorganised.
-2. **Every registry entry must be used.** A name no citation is attributed to
+2. **A `document` that does not load fails, rather than excusing everything.**
+   The distinction in (1) is worth exactly as much as the file path is
+   accurate, and the code that shipped kept it only while the path held: a
+   registry document that could not be read fell into the same branch as a
+   `work` and every citation into it became a silent pass. Renaming one file
+   would have converted a checked promise into an unchecked one with nothing
+   said. `a_registry_document_is_read_not_merely_excused` fails on a document
+   that parses to no heading, and the citations themselves fail too.
+3. **Every registry entry must be used.** A name no citation is attributed to
    is an exemption that widens silently, and
    `every_registry_name_is_actually_used` deletes it by failing.
-3. **A `reserved` number must not exist here.** §69's registry tests cite
-   `S99.1`, `S99.2`, `S99.3` and `S99.9` precisely because §99 is invented —
-   ten sites, all inside `#[cfg(test)]`. §99 is reserved for that purpose, and
+4. **A `reserved` number must not exist here.** §69's registry tests cite
+   `S99.1`, `S99.2`, `S99.3` and `S99.9` precisely because §99 is invented, and
+   §80's own parser fixture cites `(99.6)` for the same reason — a fixture that
+   spells a real stale citation to prove a point *is* a real stale citation,
+   and `xref.rs` is audited like every other file. §99 is reserved for that,
+   and
    `a_reserved_number_has_no_heading` fails the day someone writes a real one,
    before the fixtures stop looking obviously fake.
 
@@ -23589,33 +23633,59 @@ are the reason the enforceable rule is the shape it is:
   reason.
 
 What **is** enforceable is the ambiguity that let one token mean three things
-in the first place. Form A — the bare ASCII `SNN.M` — does not say whether it
-means the subsection or the equation, and in this document **252 symbols are
-both** — every `NN.M` in one of the twenty-nine sections that labels equations
-and also carries a subsection of that number, from `40.1` to `79.14`. `S77.5`
-is one of them, and that is exactly how it came to mean §77.4 in one file,
+in the first place — and the first thing to do with an ambiguous form is to
+try to remove the ambiguity rather than count it.
+
+**Form PA was removed.** `(SNN.M)` resolved against "either", which made the
+spelling an ASCII-only file is *obliged* to use mean less than the `§` form it
+substitutes for; **357 citations sat in that gap**. Resolving it exactly like
+form P — an equation where the section labels equations, a subsection where it
+does not — costs **eight** corrections in the whole tree, listed in §80.8, and
+buys 357 sites that now mean one thing. Both counts were measured before the
+rule was adopted; neither was guessed.
+
+**Form A could not be.** The same tightening applied to the bare `SNN.M` fails
+**586** sites: this tree genuinely writes `S49.6` for the *subsection* of a
+section that also labels equations, hundreds of times over, and a rule that
+condemns 586 correct-in-context citations is a rule that gets deleted within
+the week. So form A keeps "either", and the ratchet below stands in its place.
+
+Form A does not say whether it means the subsection or the equation, and in
+this document **252 symbols are both** — every `NN.M` that is a subsection of
+one of the twenty-nine sections that label equations *and* carries a label of
+that number, from `40.1` to `79.14`. `S49.6` is one (the equation, and the
+heading "An open enclosure"); so is `S77.5`, and that is exactly how one token
+came to mean §77.4 in one file,
 §77.6 in another and §77.5 in a third: three authors resolved the same
 ambiguous token three ways, and nothing could tell them apart.
 
 > **§80.4, the ratchet.** The number of bare-`S` citations naming a symbol that
 > is both an equation label and a subsection is bounded by
 > `ambiguous-ceiling` above. It may fall; it may not rise. New code writes
-> `§NN.M` for a subsection and `(NN.M)` for an equation, both of which resolve
-> to exactly one thing.
+> `§NN.M` for a subsection and `(NN.M)` for an equation — or, where the file
+> is ASCII-only, `(SPEC-LIT NN.M)` for the subsection and `(SNN.M)` for the
+> equation. All four resolve to exactly one thing.
 
 **972 today**, 237 of them in `validate.rs` alone, then 66 in `s2s.rs`, 58 in
-`s2s/tests.rs` and 44 in `radiation.rs`. The ceiling is not a target, it is a
-ledger: rewriting 972 citation sites is not this section's work, and pretending
-they are fine is not either. What it buys immediately is that the *next* §77
-cannot be written, because the next file to add one of these fails the build.
+`s2s/tests.rs`, 44 in `radiation.rs`, 43 in `fire.rs` and 41 in `parcels.rs`.
+The ceiling is not a target, it is a ledger: rewriting 972 citation sites is
+not this section's work, and pretending they are fine is not either. What it
+buys immediately is that the *next* §77 cannot be written, because the next
+file to add one of these fails the build.
+
+The ceiling did **not** move when form PA was tightened, and that is the point
+of separating the two: 357 sites left the ambiguous population by becoming
+unambiguous, not by being forgiven.
 
 ### 80.5 The census
 
 `the_multi_file_census_is_printed` lists every symbol cited from more than one
-file, with this document's own heading beside it, sorted by how many files
-share it. It asserts only that the list is not empty; its value is that the
-symbols most likely to drift are the ones most cited, and they are now on one
-screen with their headings next to them. §80.4 has the two automatic rules that
+file, with this document's own heading beside it, most-shared first. It asserts
+only that the list is not empty; its value is that the symbols most likely to
+drift are the ones most cited, and the list puts them and their headings side
+by side. It prints **all 421**, not a head: a list whose tail nobody has ever
+seen is not a list a human reads, and the code that shipped printed the first
+twenty-five under a sentence that claimed every one. §80.4 has the two rules that
 were measured and rejected; this list is what stands in for them, and it is a
 list a human reads rather than a gate.
 
@@ -23626,10 +23696,11 @@ list a human reads rather than a gate.
 | the walk finds the tree | `the_audit_reads_the_tree_it_claims_to_read` | ≥ 170 files, ≥ 7000 checked citations, ≥ 500 sections and ≥ 250 equation labels parsed |
 | every citation resolves | `every_citation_names_something_that_exists` | zero stale sites, each failure naming file, line, symbol and the citing line |
 | the registry is minimal | `every_registry_name_is_actually_used` | no unused `work` or `document` |
+| a `document` is read, not excused | `a_registry_document_is_read_not_merely_excused` | every registry `document` parses to ≥ 1 heading; hiding one fails this AND the citations into it |
 | §99 stays invented | `a_reserved_number_has_no_heading` | no heading numbered 99 |
 | ambiguity does not grow | `the_ambiguous_ascii_form_does_not_grow` | ≤ `ambiguous-ceiling` |
-| the census is non-empty | `the_multi_file_census_is_printed` | > 100 shared symbols |
-| headings and labels parse | `headings_and_equation_labels_parse_the_way_the_spec_writes_them` | numbered and lettered headings, ancestors, fenced labels, families; NOT a prose reference and NOT `max(D_P, tiny)` |
+| the census is non-empty, and whole | `the_multi_file_census_is_printed` | > 100 shared symbols, every one of them printed |
+| headings and labels parse | `headings_and_equation_labels_parse_the_way_the_spec_writes_them` | numbered and lettered headings, ancestors, fenced labels, families; NOT a prose reference, NOT `max(D_P, tiny)`, NOT a fenced cross-reference to another section, NOT a measured value that closes its line in parentheses |
 | prose is separated from code | `the_scanner_reads_prose_and_leaves_code_alone` | seven citations, in order, from a mixed file |
 | arithmetic is not a citation | `arithmetic_in_parentheses_is_not_a_citation` | nothing from `unwrap_or(0.0)`, `K(0.50)`, `ln(2.25)`, `S0017-9310(02)…` |
 | attribution is two lines wide | `a_citation_belongs_to_the_last_work_named_within_two_lines` | Saad's two, SPEC-LIT's two, the document's one |
@@ -23642,13 +23713,23 @@ list a human reads rather than a gate.
 on, so the numbers below are the shipping code's and not a prose claim:
 
 ```
-  [S80] 175 files; 9147 citations = 8976 SPEC-LIT + 171 attributed elsewhere;
-        by form S/A/P/PA/B = [4102, 2963, 827, 460, 795];
-        the spec has 601 section numbers and 302 equation labels,
-        252 of which are both
+  [S80] 178 files; 9273 citations = 9102 SPEC-LIT + 171 attributed elsewhere;
+        by form S/A/P/PA/B = [4120, 2963, 828, 453, 909];
+        the spec has 618 section numbers and 306 equation labels,
+        257 of which are both
   [S80.4] 972 ambiguous bare-S citations, ceiling 972
-  [S80.5] 421 symbols are cited from more than one file
+  [S80.5] 426 symbols are cited from more than one file
 ```
+
+That block is a **snapshot**, not a gate — see §80.8 — and the first one
+shipped stale. It was retaken when §81 added three files and a hundred-odd
+form-B citations; nothing made that happen except somebody remembering, which
+is exactly what §80.8 says about it. The version committed with the module claimed 9147 citations
+and `[4102, ...]`; the code it was committed beside printed 9142 and
+`[4097, ...]`. Five `§NN` citations were removed by the hand-fixes below after
+the census was taken and before the commit, and nothing noticed, in the section
+whose entire subject is a claim that no longer matches the thing it describes.
+The inequalities in §80.6 are what is actually enforced.
 
 **On its first run, 23 sites failed**, of which ten are §99's deliberate test
 fixtures. The remaining **thirteen were real, and they fall into three
@@ -23685,17 +23766,126 @@ at the wrong document's sections. `restart.rs`'s `§7/Q5` is the same thing:
 convection schemes"), and nothing but naming the document distinguishes them.
 Only §80.3's attribution rule makes a citation say which document it means, and
 only reading the entry made these three visible. That is the shape of the
-defect this section cannot automate away, and §80.8 says so.
+defect this section cannot automate away, and §80.9 says so.
 
-### 80.8 What this section does not do
+### 80.8 Reading the audit back — what a second reading found
 
-* **It does not audit this document's own cross-references.** Measured: **73
-  references inside `SPEC-LIT.md` do not resolve against `SPEC-LIT.md`**, and
-  the same attribution rule would excuse most of them (`Patankar §4.2`,
-  `Jasak §3.4.2`, `Saad §12.4`, `Ferziger & Perić §8.6`) — but not all, and at
-  least one is a real dangling reference: §62.6 cites **(S36.1)** and §36
-  labels no equations at all. Running the same lexer over this document is a
-  section of its own, and it is named here rather than quietly skipped.
+§80's first version was written and committed by a unit that reached a session
+limit before it could report, so nothing had stood behind it. Reading it back
+found **three holes in the rule** and **three claims that were not true**. All
+six are the same shape as the drift the section exists to stop — a statement
+that stopped matching the thing it describes, with nothing to notice — which is
+why they are written down rather than quietly patched.
+
+**1. A fenced line that is not a label defined an equation.** §80.2 says a
+label defines and a reference does not, "otherwise a typo would define itself".
+The parser applied that only to prose: *any* line inside a fenced block ending
+in `(NN.M)` defined the symbol. Five lines in this document do so without being
+labels. Four are cross-references — `(S46.5)` inside §47's and §59's tables,
+`(S46.6)` inside §59's, `(67.4)` inside §68's — and are harmless, because §46
+and §67 define those labels properly themselves. The fifth is §77's validation
+row:
+
+```
+              cooling / expansion                   17.59   (17.6)
+```
+
+`17.6` there is the **expected value** beside a computed `17.59`. It invented
+an equation `(17.6)` for §17 — a section with no subsections and no equations
+of any kind — with two consequences. `S17.6` and `(S17.6)` would have resolved
+against a symbol that does not exist, which is precisely the class of pass this
+section exists to prevent. And §17 entered the set of sections that label
+equations, making §80.2's own sentence — "**twenty-nine do**, all of them §40
+or later" — true of this document and false of the code enforcing it, which
+counted thirty. A label now defines only inside a fenced block **of its own
+section**. The equation set falls 302 → 301, the labelling sections 30 → 29,
+and the sentence is true of both.
+
+**2. A registry `document` that did not load excused every citation into it.**
+§80.3 draws its central distinction between a `work`, which is excused, and a
+`document`, which is checked. Both took the same branch when the file could not
+be read. Hiding `docs/07-fire-solver.md` and re-running the audit turned a
+deliberately broken `docs/07-fire-solver.md §143.9` from a failure into a pass,
+with nothing said — one `git mv` away from a promise that had silently stopped
+being kept. A missing `document` now fails its citations, and
+`a_registry_document_is_read_not_merely_excused` fails first and names it.
+
+**3. Form PA was ambiguous where form P is not, and the ratchet did not count
+it.** §80.4's ceiling bounds the bare `SNN.M` only. `(SNN.M)` resolved against
+"either" and was bounded by nothing, so **357** citations sat outside the
+ratchet in a form that could grow without limit — the ledger's stated purpose,
+"the next file to add one of these fails the build", was false for a quarter of
+the population. The fix is not to widen the ceiling but to remove the
+ambiguity: form PA now resolves exactly like form P (§80.2). **Eight** sites in
+the tree had drifted into the gap, every one of them a *subsection* written in
+the parenthesised spelling:
+
+| Site | Was | Is |
+|---|---|---|
+| `cuda/parcels.cu:479` | `(S78.7)` | `(SPEC-LIT 78.7)` |
+| `src/parcels/impact.rs:211`, `:241` | `(S78.7)` | `(SPEC-LIT 78.7)` |
+| `src/parcels.rs:221` | `(S78.11)` | `(SPEC-LIT 78.11)` |
+| `src/s2s.rs:1249`, `:1437` | `(S49.2b)` | `(SPEC-LIT 49.2b)` |
+| `src/s2s.rs:1516` — a **user-facing refusal message** | `(S49.2b)` | `(SPEC-LIT 49.2b)` |
+| `src/s2s/tests.rs:538` | `(S49.2b)` | `(SPEC-LIT 49.2b)` |
+
+§78.7, §78.11 and §49.2b are headings, and this document cites all three as
+`§78.7`, `§78.11`, `§49.2b` in its own prose. Form B is the replacement rather
+than `§` because every one of those five files is ASCII-only: no `.cu` file in
+this tree contains a single `§`, and `s2s.rs` contains exactly one in 2460
+lines. The same tightening applied to form A fails **586** sites, which is why
+§80.4 ratchets it instead.
+
+**The three claims that were not true.** The first is §80.5's: it said the
+census "lists every symbol cited from more than one file", and the code printed
+the first twenty-five of 421. Fixed by printing all 421.
+
+The second is §80.7's own census block, which shipped claiming 9147 citations
+and `[4102, ...]` beside code that printed 9142 and `[4097, ...]`. Five `§NN`
+citations were removed by the hand-fixes of §80.7 after the census was taken;
+the block was not re-run. §80.7 now says so, and §80.9 says why the block is
+not gated.
+
+The third is §80.9's, and it is the one worth reading twice: the single example
+it gave of a **real** dangling cross-reference inside this document — §62.6's
+`(S36.1)` — was not one, and the reason it looked like one was hole 3 above. A
+rule loose in one direction manufactures false findings as readily as it
+excuses true ones. §80.9 has the correction.
+
+### 80.9 What this section does not do
+
+* **It does not audit this document's own cross-references.** Measured under
+  the rules as they first shipped: **73 references inside `SPEC-LIT.md` do not
+  resolve against `SPEC-LIT.md`**, most of which the same attribution rule
+  would excuse (`Patankar §4.2`, `Jasak §3.4.2`, `Saad §12.4`,
+  `Ferziger & Perić §8.6`). That number is left as it was measured and is not
+  restated as current, because §80.8 changed two of the rules it was measured
+  under and this section does not run the audit over itself.
+
+  The one example given for a *real* dangling internal reference has since
+  stopped being one, and how it stopped is the point. §62.6 cites **(S36.1)**,
+  and the argument was that §36 labels no equations. It does not — which under
+  §80.8's tightening is exactly the case where the parenthesised form resolves
+  against headings, and §36.1 ("The RTE along one ordinate…") is a heading. The
+  citation was correct all along; the rule that made it look dangling was form
+  PA resolving against "either". A rule loose in one direction manufactures
+  false findings as readily as it excuses true ones, and this section printed
+  one of each. Running the lexer over this document is a section of its own,
+  and it is named here rather than quietly skipped.
+* **It does not gate its own census.** §80.7's block moves whenever anybody
+  edits a comment, so making it a test would turn every comment into a spec
+  edit and the number would be "fixed" to whatever the run last printed. What
+  is enforced instead is §80.6's inequalities and §80.4's ceiling — a floor and
+  a ratchet, neither of which moves under ordinary work. The block is labelled
+  a snapshot for the same reason it once went stale: nothing is watching it.
+* **It bounds the "a label defines itself" class rather than eliminating it.**
+  A stray whose number belongs to another section is now rejected, which is the
+  only case a machine can tell apart. A measured value closing a line in §NN's
+  own fenced block with `(NN.M)` would still define `(NN.M)` — §77's row would
+  have survived had it printed `17.6` under §17. Every same-section fenced
+  label preceded by a bare number was read: **22 candidates, all of them
+  genuine labels**, so the residual class is empty today and unguarded
+  tomorrow.
 * **It cannot check another author's numbering.** A `work` entry is an excuse,
   not a check. `Patankar §4.9` could be wrong and nothing here would know.
 * **It cannot check that a citation means what the sentence around it says.**
@@ -23708,3 +23898,914 @@ defect this section cannot automate away, and §80.8 says so.
   will not notice as long as the labels stay in range. The only defence against
   that is §80.2's forms, which at least make the *kind* of thing being cited
   unambiguous.
+
+## 81. The capture gate — making a module unable to lose its CUDA graph quietly
+
+CUDA-graph capture is one of this project's published results. `README.en.md`
+prints **3.16×** for it, and the sentence that matters is not the number: it is
+"the result is bitwise identical to the per-launch path across all 24,000
+cells". A graph that is faster and right is a result. A graph that is faster
+and *slightly* wrong is worse than no graph at all, because the run still
+finishes and still prints numbers.
+
+Until this section that guarantee was guarded in **five** places —
+`solver.rs`, `models/k_epsilon.rs` and the three parcel modules — while §38
+through §79 added kernels across rheology, contact angle, conjugate heat,
+surface-to-surface radiation, fan curves, psychrometrics, Spalart-Allmaras, the
+DES family, soot, WSGG, exact summation, AMR, parcels, evaporation, vapour
+coupling and wall impact. Nothing said which modules were covered, so nothing
+could say which were not.
+
+No outside source is consulted. The CUDA Graph semantics used here are the
+CUDA Driver API's own (`cuStreamBeginCapture`, `cuGraphGetNodes`,
+`cuGraphNodeGetType`, `cuMemAllocAsync`), which are a published interface and
+not source code. **No GPL-licensed source was consulted.**
+
+### 81.1 The defect, stated exactly
+
+Two failure modes, and neither announces itself.
+
+**(a) A host round-trip anywhere in the iteration.** A capture records device
+work. Ask the host a question in the middle of it — `download`, `sync`, a
+device allocation — and there is nothing to record. Before this section the
+driver answered such a call with `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`: a
+number, naming nothing, from whichever of some hundreds of launches happened to
+be the offender. One module doing this costs the capture to every module
+downstream of it in the same iteration.
+
+**(b) Per-iteration state kept on the host.** A counter, a clock, a
+coefficient recomputed in Rust. Capture runs that host code **once**; replay
+runs the kernels **many** times. The capture succeeds, the graph contains
+nothing but kernels, and the answer is still wrong from the second replay
+onwards. No error is available to report this. Only a comparison against the
+per-launch path can see it.
+
+And one that is worse than either, because it looks like success:
+
+**(c) An allocation inside the iteration.** `cudarc` allocates with
+`cuMemAllocAsync`, which is **stream-ordered and therefore capturable**. A
+module that allocates per iteration does not fail the capture — it records a
+`MEM_ALLOC` node and succeeds. The graph then performs a device allocation on
+every replay, which is most of what the graph existed to remove, and under
+`CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH` it frees it again on the next
+launch so it does not even leak. Nothing complains, ever.
+
+### 81.2 The rule
+
+For a module `M` with a per-iteration entry point, write `E_k(M)` for the state
+after `k` per-launch iterations from a fixed initial state, and `G_k(M)` for the
+state after one captured iteration replayed `k` times from the same state. Let
+`N(M)` be the node multiset of the captured graph. Then
+
+```
+  capture(M) succeeds and is non-empty                             (81.1)
+  N(M) contains no HOST, MEM_ALLOC or MEM_FREE node                (81.2)
+  N(M) contains at least one KERNEL node                           (81.3)
+  state is unchanged by the act of capturing                       (81.4)
+  E_k(M) = G_k(M)  bit for bit, for k = 1..R                       (81.5)
+```
+
+(81.1) rules out the vacuous pass — an empty graph satisfies everything below
+it. (81.2) is the only statement that can see defect (c). (81.4) does **not**
+see defect (b), and saying that it did would be the easy overclaim: stream
+capture records without running, so what (81.4) catches is device work that
+never went onto the captured stream at all — a launch on another stream, or
+a synchronous copy. That work runs once, at capture, and never again, and the
+graph is silently missing it. Defect (b) is seen by (81.5), and only by (81.5).
+(81.5) is the guarantee itself, and `R > 1` because a
+graph that is right once and wrong on the second replay is the interesting
+failure: it means the captured region depended on something that existed only
+at capture time. `R = 3`.
+
+A module is **gated** when (81.1)–(81.5) are run against it by a `#[test]`. It
+is **refused** when it cannot satisfy them and the reason is named, with an
+alternative, per §13.4.
+
+### 81.3 The guard: a host round-trip is refused by name
+
+`Gpu` carries an `AtomicBool` set between `begin_capture` and `end_capture`,
+and every host round-trip on that type checks it first: `sync`, `download`,
+`upload`, `write`, `zeros`, `mem_info`, `load`. Each returns an error naming
+**the call**, the reason a graph cannot hold it, and the alternative — keep the
+value on the device, as `solver.rs` keeps its residuals. A nested `capture` is
+refused too, because it would fold into the outer graph and return `None`,
+which reads as "the body launched nothing": the most misleading answer
+available.
+
+`fill_zero` is deliberately **not** guarded. `cuMemsetD8Async` becomes a memset
+node and replays correctly, so zeroing an accumulator at the top of an
+iteration is legal, and several modules do it — the gates below record between
+0 and 34 memset nodes each.
+
+The guard costs one relaxed atomic load on paths that already make a driver
+call, and it cannot move a number: it either returns the same value as before
+or returns an error where the driver would have returned one anyway.
+
+### 81.4 What was actually captured: the node census
+
+`Graph::shape()` walks the instantiated graph with `cuGraphGetNodes` and
+`cuGraphNodeGetType` and returns `GraphShape { total, kernel, memset, memcpy,
+host, alloc, free, other }`. `is_pure_device_work()` is
+`host == 0 && alloc == 0 && free == 0`.
+
+This is not decoration; it is the **only** way to see defect (c) from outside,
+because that defect makes capture succeed. It is also what turns "the gate
+passed" into a number a reader can weigh: the momentum predictor captures 384
+nodes, the DES length scale captures 1.
+
+### 81.5 The protocol
+
+`capture_replays_bitwise(gpu, what, build, iterate, state)` in
+`src/capture.rs`, once, for every gate:
+
+1. `build()`, then `WARM + R` per-launch iterations → `want` (WARM = 2, so what
+   the graph records is an ordinary steady iteration and not the first one,
+   which also loads modules);
+2. `build()` again, `WARM` per-launch iterations, snapshot `before`;
+3. capture one `iterate` → assert (81.1);
+4. `shape()` → assert (81.2) and (81.3);
+5. snapshot `after` → assert `after == before`, which is (81.4) — a
+   statement about the *stream*, not about the host: see §81.2;
+6. replay `R` times → `got` → assert `got == want` bitwise, which is (81.5).
+
+`build` is `Fn` and is called twice, so anything random or clock-dependent in it
+would make the comparison meaningless; nothing in any caller has either. `state`
+reads back every device buffer the iteration writes — whatever it omits is not
+gated.
+
+### 81.6 The five stances
+
+Every module that reaches the device is in exactly one, and four of the five
+carry a reason in prose. There is no "not applicable".
+
+| stance | meaning |
+|---|---|
+| `Gate(test)` | (81.1)–(81.5) are run by the named `#[test]`, which must exist in the tree exactly once and must call the protocol |
+| `Via(owner)` | no iteration of its own; its kernels run inside a region `owner` owns, and `owner`'s stance is what settles it. Chains must terminate |
+| `Outside(why)` | runs outside the time loop — setup, mesh generation, post-processing. Nothing replays it |
+| `Refused(why)` | cannot be captured, with the reason and the alternative (§13.4) |
+| `Ungated(why)` | in the iteration, capturable as far as anyone knows, **and not gated**. Counted, and capped by a ratchet |
+
+### 81.7 The registry, and the population read off disk
+
+`REGISTRY` in `src/capture/registry.rs` has one row per module. The population
+it must cover is **read off disk**, not written there: every `.rs` under `src/`
+outside `src/bin/` that either
+
+* contains a kernel launch — `launch_builder` is the only way this crate
+  executes a `CudaFunction`, and `no_other_launch_path` holds that by scanning
+  for four alternative spellings; or
+* declares `pub fn correct/step/update/solve/advance(` — which is what a module
+  that orchestrates other modules' kernels looks like. Four turbulence models
+  own no kernels at all and would be invisible without this half.
+
+`every_device_module_is_classified` requires the two sets to be **equal**. A
+module with no row fails; a row naming a file that is not in the population
+fails. The table cannot go stale in either direction.
+
+Two files are excluded by name, `src/capture.rs` and
+`src/capture/registry.rs`, and `the_excluded_files_launch_nothing` checks that
+they really do launch nothing. Both assemble the tokens they search for from
+pieces rather than spelling them, for the reason §69.3 gives: a file that lists
+a forbidden token must not trip on its own list.
+
+### 81.8 What makes it hard to evade
+
+Four checks, and they fail closed in four different ways.
+
+1. **A new module cannot be absent.** It launches a kernel or it declares an
+   iteration entry; either way the population finds it and the missing row
+   fails the tests. This is the §69 move: the tree already knows the answer, so
+   stop keeping a list beside the tree.
+2. **A gate cannot be a name.** `every_gate_names_a_test_that_runs_the_protocol`
+   requires the named function to be defined exactly once across `src/`, to be
+   marked `#[test]`, and for its body to call `capture_replays_bitwise` or
+   capture a graph itself. A gate that does not capture is not a gate. Both
+   halves are narrower than they look and were written twice: "its body" ends
+   at the next `#[test]` **at either nesting this crate uses**, because a
+   fixed-size slab would let a gate borrow the word `capture` from the test
+   after it; and "marked `#[test]`" means everything between the nearest
+   `#[test]` above and the definition is an attribute, a doc comment or blank,
+   because otherwise that attribute belongs to some other item.
+3. **`Via` cannot borrow coverage that does not exist.** Chains are followed to
+   a terminal, cycles and dangling owners are errors, and a chain ending at
+   `Ungated` makes the *pointing* row ungated too. A new module cannot hide
+   behind an owner that has none.
+4. **The debt is capped and only falls.** `UNGATED_CEILING = 3`. Raising it is
+   an edit somebody has to defend in a diff — §80.4's ratchet, applied to
+   coverage instead of citations.
+
+What it does **not** stop: a gate whose `state` closure reads one buffer of the
+five its module writes. That is real, and it is why the protocol's own doc says
+so in as many words. A cheap partial defence is in the numbers the gates print
+— a gate comparing 42 values beside one comparing 640 invites the question.
+
+### 81.9 The gates, and what they measured
+
+Thirty-six of fifty modules resolve to gated. Measured on an RTX 5070 Ti, CUDA
+13.3, default `f64`; `nodes` is `GraphShape::total`, and every row replayed
+three times bit for bit.
+
+| module | gate | nodes (kernel / memset) | values compared |
+|---|---|---|---|
+| `solver.rs` | `the_fixed_iteration_solve_replays_bitwise` | 118 (107 / 11) | 29 |
+| `models/k_epsilon.rs` | `a_fixed_iteration_correct_captures_into_a_cuda_graph` | — (pre-existing) | 64 |
+| `parcels.rs`, `parcels/couple.rs`, `parcels/deposit.rs` | three pre-existing gates | — | — |
+| `momentum.rs` | `the_momentum_predictor_replays_bitwise` | 384 (351 / 33) | 192 |
+| `species.rs` | `the_species_correction_replays_bitwise` | 369 (335 / 34) | 256 |
+| `models/k_omega_sst.rs` | `the_sst_correction_replays_bitwise` | 259 (237 / 22) | 192 |
+| `models/launder_sharma.rs` | `the_launder_sharma_correction_replays_bitwise` | 258 (236 / 22) | 192 |
+| `models/ke_variants.rs` | `both_ke_variants_replay_bitwise` | 255 / 254 | 192 each |
+| `models/k_omega.rs` | `the_k_omega_correction_replays_bitwise` | 252 (230 / 22) | 192 |
+| `cht.rs` | `the_solid_side_iteration_replays_bitwise` | 142 (131 / 11) | 42 |
+| `energy.rs` | `the_energy_correction_replays_bitwise` | 139 (128 / 11) | 42 |
+| `models/spalart_allmaras.rs` | `the_spalart_allmaras_correction_replays_bitwise` | 132 (121 / 11) | 128 |
+| `soot.rs` | `the_soot_correction_replays_bitwise` | 126 (115 / 11) | 192 |
+| `radiation.rs` | `the_p1_radiation_correction_replays_bitwise` | 108 (97 / 11) | 192 |
+| `s2s.rs` | `the_s2s_exchange_replays_bitwise` | 29 (28 / 1) | 42 |
+| `wsgg.rs` | `the_wsgg_update_replays_bitwise` | 17 | 640 |
+| `combustion.rs` | `the_combustion_step_replays_bitwise` | 17 | 320 |
+| `models/les.rs` | `the_les_correction_replays_bitwise` | 5 | 64 |
+| `psychro.rs` | `the_psychrometric_update_replays_bitwise` | 1 | 320 |
+| `models/des.rs` | `the_des_correction_replays_bitwise` | 1 | 192 |
+| `fan.rs` | `the_fan_source_replays_bitwise` | 1 | 37 |
+
+**Four of the five pre-existing gates already compared bitwise. The fifth did
+not, and it was `solver.rs`'s** — the module the whole claim rests on.
+`a_fixed_iteration_solve_captures_into_a_cuda_graph` captures the solve and
+then compares the replayed answer against a *dense direct solve* to within
+`SLACK` (1e-10). That is a statement about the solver, not about the graph: a
+replay that perturbed the last bits of every cell would pass it, and a
+perturbed last bit is precisely the failure a graph can introduce and nothing
+else would notice. It is kept, because "the solve converges after replay" is
+worth knowing; `the_fixed_iteration_solve_replays_bitwise` is what the registry
+now names, and it holds the claim `README.en.md` actually makes.
+
+A gate may live anywhere in the tree — the registry looks its name up across
+`src/`. Most live in `src/capture/gates.rs` because most want the same three
+lines of scaffolding; `soot`, `energy`, `species`, `combustion`, `cht`, `s2s`
+and `fan` live with their own modules, because those modules' test scaffolding
+is private to them. Both placements are exercised, deliberately.
+
+### 81.10 Three modules were fixed, and what they had in common
+
+Writing the gates found six modules that could not be captured. Three of the
+six failed for the *same* reason, and it was not physics: a **diagnostic
+counter** was being reduced on the device and then read back to the host, once
+per iteration, purely to be reported.
+
+| module | what was read back | what it cost |
+|---|---|---|
+| `wsgg.rs` | `n_floored` — how many cells the `kappa` floor touched, one `device_sum` + `download` per band | the whole radiation iteration of every WSGG fire case |
+| `combustion.rs` | `n_clipped` and `n_extinguished` (§43.3) | the whole reaction step |
+| `s2s.rs` | §50.10's three reported numbers and the fixed-point residual, computed by pulling four cluster-sized arrays back and reducing them **on the CPU** | the whole enclosure-radiation iteration |
+
+Each is now behind a flag that **defaults to on**, so every existing run
+reports exactly what it reported before: `Bands::set_count_floored`,
+`Combustion::set_count_stats`, `S2s::set_measure_report`. This is
+`SolverControls::report_residuals` applied to a diagnostic count instead of a
+residual, and the argument is the same one. It is bitwise-neutral **by
+construction**: the kernels that produce the numbers still run, and what is
+skipped is a reduction into scratch that nothing else reads.
+
+Each also gained a companion query — `floor_count_is_measured`,
+`stats_are_counted`, `report_is_measured` — so that a reported `0` meaning "not
+counted" is distinguishable from a `0` meaning "nothing was clipped". Reporting
+the two as the same number is the confusion §69 exists to prevent.
+
+### 81.11 Three refusals, measured rather than asserted
+
+A refusal written only in prose decays: the module is fixed, or made worse, and
+the sentence beside it stays the same. All three below are **executed**, and
+each must fail *naming the call that makes it impossible*. If any starts to
+succeed, the test fails and says which registry row to promote.
+
+**(a) `vof.rs` — a data-dependent trip count.** `Vof::step` computes the alpha
+Courant number on the device, **downloads it**, and derives from it the MULES
+sub-cycle count it then loops over on the host. This is the one thing a graph
+structurally cannot hold: it would record whatever count the capture happened
+to see and replay that count for ever, on every flux field. Everything else in
+the step — the momentum predictor, the pressure correctors — is capturable and
+is gated through `momentum.rs` and `solver.rs`. **Alternative:** a *prescribed*
+`nAlphaSubCycles` from the case rather than one derived from the flux, which
+removes the read-back. Not implemented.
+
+**(b) `fvdom.rs` — a host-mediated sweep.** `FvDom::correct` carries each
+ordinate's boundary intensity to the next **through the host** — `bf_cache` is
+a `Vec<Scalar>` filled by `download` once per ordinate per correction — and
+downloads the wall temperature once per correction on top. **Alternative:** a
+device-resident inflow coupling, which is a rewrite of the sweep and not a
+flag; or P-1 (`radiation.rs`), which is gated.
+
+**(c) `PCG` and `DIC` — a correctness check that lands on the host.**
+`solver::solve` verifies that the matrix really is symmetric before running
+conjugate gradients or an incomplete Cholesky on it (§8.2), and that check ends
+in a `download`. `solve`'s own doc comment has said so since it was written.
+**Nothing held it**: `solver.rs`'s gate calls `solve_pbicgstab` directly and
+`models/k_epsilon`'s runs the default, so no test in this crate had ever
+captured a `PCG` solve. `a_pcg_solve_is_not_capturable_and_says_which_call`
+does, on a matrix that is symmetric, so the refusal cannot be the asymmetry
+refusal wearing the wrong name. **The consequence for a case is concrete:
+choosing `PCG` in `fvSolution` costs that equation its CUDA graph, whatever
+`fixed_iters` says.** `cht.rs`'s own default controls select `PCG` + `DIC`, and
+its gate therefore runs `PBiCGStab` + `DILU`.
+
+`adapt.rs` is refused for a different reason again, and it is the only one that
+is not about the host: AMR *reallocates* every cell-sized buffer, and a captured
+graph holds the old device pointers. Replaying it after a refinement would
+write through freed memory. AMR runs between captured regions, and §74 already
+requires re-capture after a mesh change.
+
+`distsolve.rs` is refused because a rank cannot decide to stop without telling
+the other ranks: the decision is host-side by construction. `pressure/amgx.rs`
+is refused because AMGX owns its own streams and allocation and the feature is
+off by default.
+
+### 81.12 What the graph actually buys — measured, and not what was expected
+
+The published **3.16×** was measured at 24 000 cells, and it reproduces: this
+machine gives **2.96×** on the same case today. What did not survive is the
+belief that the advantage *grows with mesh size*. It does the opposite, and
+monotonically. RTX 5070 Ti, `ofgpu-graph-bench`, 3 solver sweeps, 300 outer
+iterations, every row bitwise identical to its per-launch path:
+
+| cells | per-launch ms/iter | graph ms/iter | ratio |
+|---|---|---|---|
+| 1 500 | 1.229 | 0.332 | **3.70×** |
+| 24 000 | 1.258 | 0.412 | **3.06×** |
+| 240 000 | 2.851 | 2.265 | **1.26×** |
+| 800 000 | 9.101 | 8.794 | **1.03×** |
+
+The controlled experiment separates the two variables. Hold the mesh at 24 000
+cells and vary the number of launches per iteration (solver sweeps):
+
+| sweeps | per-launch ms/iter | graph ms/iter | ratio |
+|---|---|---|---|
+| 1 | 0.842 | 0.310 | 2.72× |
+| 3 | 1.233 | 0.417 | 2.96× |
+| 10 | 2.606 | 0.797 | 3.27× |
+| 30 | 6.408 | 1.880 | 3.41× |
+
+and at 240 000 cells, 3 sweeps gives 1.25× while 30 sweeps gives 1.38×.
+
+**A CUDA graph buys back CPU submission time. That cost is per *launch* and is
+independent of the work each launch does.** So the ratio is governed by
+launches per unit of GPU work, not by cells: it rises with the number of
+kernels in an iteration and falls as each kernel gets more to do. Above roughly
+half a million cells this solver is memory-bandwidth bound and the graph is
+worth a few per cent — which `README.en.md`'s neighbouring paragraph already
+said about launch overhead in general, two sections earlier, without anyone
+joining the two statements.
+
+The practical consequence for this project cuts the helpful way. §38–§79 added
+*more kernels per iteration*, not more work per kernel: the gates above measure
+384 nodes for one momentum predictor and 369 for one species correction, and a
+fire iteration is the sum of a dozen such modules. At a fixed mesh, today's
+iteration has far more launches to amortise than the 2024 iteration that was
+measured at 3.16×, so the graph is worth **more** now than it was — and the
+place it is worth least is the large mesh, not the small one.
+
+Capture and instantiation cost 0.3–0.8 ms, once, on every mesh measured. It is
+never the consideration.
+
+### 81.13 What must hold
+
+| # | claim | held by |
+|---|---|---|
+| 1 | a host round-trip inside a capture fails **naming the call** | `refuse_during_capture`; every gate in §81.9 would have failed with it otherwise, and three did before §81.10 |
+| 2 | a captured graph is pure device work | (81.2) in the protocol; `GraphShape::is_pure_device_work` |
+| 3 | nothing escaped the captured stream | (81.4), asserted on every gate |
+| 4 | replay is bitwise the per-launch path | (81.5), `R = 3`, on all 36 gated modules |
+| 5 | every device module is classified | `every_device_module_is_classified`: population(disk) `==` registry keys, both directions |
+| 6 | a gate names a test that exists and captures | `every_gate_names_a_test_that_runs_the_protocol` |
+| 7 | `Via` terminates and cannot launder coverage | `every_via_chain_terminates`; a chain ending at `Ungated` counts as ungated |
+| 8 | the ungated debt only falls | `the_ungated_debt_is_within_the_published_ceiling`, ceiling 3 |
+| 9 | `launch_builder` is the only launch path | `no_other_launch_path` |
+| 10 | the three refusals are refusals **today** | `the_two_refusals_are_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call` |
+| 11 | defaults are bitwise unchanged | by construction: `mod capture` is `#[cfg(test)]`; the guard adds a relaxed atomic load and no arithmetic; §81.10's three flags default to on |
+
+### 81.14 Validation
+
+The registry as the tests print it:
+
+```
+  CUDA-graph capture registry (50 modules)
+     36  gated
+     10  refused, by name
+      1  outside the iteration
+      3  UNGATED
+    ungated: src/pressure/fft.rs, src/pressure/mod.rs, src/simple.rs
+```
+
+The three ungated, named because they should be:
+
+* `src/simple.rs` — the SIMPLE outer loop. The binaries capture it live
+  (`bin/plume.rs`, `bin/buoyant.rs`), and every piece it calls is gated
+  separately, but it has no gate of its own because building a SIMPLE case in a
+  unit test means building a case directory;
+* `src/pressure/mod.rs` — the backend selector. It dispatches to the Krylov
+  solve, which `solver.rs` gates, or to the cuFFT Poisson solve;
+* `src/pressure/fft.rs` — `Via` the selector. cuFFT executes on this crate's
+  stream and *should* capture, but nothing has captured it and cuFFT plan
+  execution is library code this crate does not control. This is the honest
+  gap, and it is the one worth closing next.
+
+### 81.15 What this does not do
+
+* **It does not check that a gate reads everything its module writes.** §81.8
+  item 4 names this; the value counts in §81.9 are the only pressure on it.
+* **It does not gate the binaries.** `src/bin/` is outside the population.
+  `plume.rs`, `buoyant.rs` and `validate.rs` capture graphs at run time and
+  will fail loudly if they cannot, but nothing in the test suite runs them.
+* **It does not measure per-module speed-up.** §81.12 measures one module,
+  k-epsilon, across mesh size and launch count, and the mechanism it isolates —
+  launches per unit of GPU work — is not module-specific. A per-module table
+  would need a per-module case and is not here.
+* **It does not fix the three refusals.** Two are structural and one is a
+  correctness check that belongs where it is. All three name their alternative;
+  none of the alternatives is implemented.
+* **It cannot see a module that never joins an iteration.** A kernel launched
+  only from a binary, never from a module, is outside the population by
+  construction — which is correct, and is also a place to hide.
+
+## 82. The mesh rebuild on the device — and the half of it that §75.8 named wrongly
+
+§75.8 measured what an adapt costs and found the CUDA graph was not it. Capture
+plus instantiate is **0.076–0.077 ms and does not grow with the mesh**, because
+a graph's cost is in its node count; the host mesh rebuild is **2.3 / 12.8 /
+30.7 ms** at 512 / 4096 / 13824 cells and grows linearly. At a 2 % overhead
+budget that is an adapt every **470 / 2389 / 5415 steps**, against 15 if the
+recapture were the only cost. A flame or a plume moves in tens of steps, so an
+adapt at that cadence is an adapt that has stopped being adaptive.
+
+§75.8 then named the culprit: `mesh/geometry.rs::compute`, "1396 host lines of
+polygon and pyramid decomposition that must run on every adapt", and called
+porting it to the device "the next thing that has to happen". This section
+ports it, gates it on **bitwise identity with the host sweep**, and measures
+the cadence again.
+
+**Four things came out of that. Two contradict the brief, and one contradicts
+an earlier draft of this section.**
+
+1. **`geometry::compute` is not the binding constraint.** It is 31 % of a
+   rebuild. **The emitter is 54 %** — `Forest::build`'s face-grouping loop,
+   which §75.2 describes in one paragraph as "the same traversal
+   `mesh::refined::build` runs" and which no measurement had ever separated
+   from the sweep that follows it. §82.2 has the split. Amdahl therefore caps
+   what this section could achieve at **1.44×** — even a geometry sweep costing
+   *nothing* — before a line of it was written, and the measured end-to-end
+   figure is 1.21×.
+2. **The sweep is 5.2× faster on the device, and 2.2× as a drop-in.** The
+   difference is the download: sixteen arrays coming back to the host cost
+   **half of the whole drop-in path**, 2.10 ms of 4.19 ms at 13824 cells. The
+   port is worth what it claims only for a mesh that then *stays* on the
+   device, which is the shape the rest of an adapt has to reach anyway. §82.5.
+3. **`-fmad=false` is load-bearing, and the argument for it was measured at the
+   wrong place.** nvcc contracts `a*b + c` into one rounding and rustc does
+   not, so the contracted build of the same source misses the host's bits.
+   The first draft of the gate *simulated* a contraction of `Sf . (Cf - C_P)`
+   on the host, found no difference on any box mesh, and concluded the flag was
+   buying nothing — because a box's area vectors are axis-aligned and that dot
+   product has nothing to fuse. Building the other compiler settles it:
+   the contracted module moves **8 to 15 of the sixteen geometry arrays on
+   every fixture, uniform box included**, through the pyramid centroid
+   `0.75 Cf + 0.25 x_apex`. §82.4.
+4. **And a fourth, found by this section in its own draft.** §82.2's first
+   version quoted the unported host prologue at 1.9 ms and made an argument out
+   of it. That number was a *residual* — one timing minus two others — and
+   across runs of the same code it moves between 0.12 and 0.78 ms. The
+   prologue is small, as the first estimate had it; the correction was the
+   error. The residual is still printed, and the note beside it says what it
+   is.
+
+**Sources.** The physics is §2's and the citations are §2's; nothing new is
+derived here. This section is a port, and its own claim is about arithmetic
+reproducibility rather than about a model.
+
+* Jasak, H. *Error Analysis and Estimation for the Finite Volume Method with
+  Applications to Fluid Flows*, PhD thesis, Imperial College London (1996),
+  §3.2, §3.3.1 and §3.4.2 — the face decomposition, the interpolation weight
+  and the over-relaxed non-orthogonal split, all as §2 already carries them.
+* Moukalled, F., Mangani, L. & Darwish, M. *The Finite Volume Method in
+  Computational Fluid Dynamics*, Springer (2016), §6.4 and §8.6.4 — the
+  pyramid decomposition of a polyhedral cell.
+* Ferziger, J. H. & Perić, M. *Computational Methods for Fluid Dynamics*, 3rd
+  ed., Springer (2002), §8.6 — the same, for the volume and the centroid.
+* Goldberg, D. "What Every Computer Scientist Should Know About Floating-Point
+  Arithmetic." *ACM Computing Surveys* **23**(1), 5–48 (1991).
+  DOI 10.1145/103162.103163 — non-associativity of floating-point addition,
+  which is why §82.3's gather order is a specification and not a detail.
+* *NVIDIA CUDA C++ Programming Guide*, appendix "Mathematical Functions", and
+  the `nvcc` reference for `-fmad` — the contraction of `a*b + c` into a single
+  fused multiply-add is licensed by the C++ standard and enabled by default;
+  `-fmad=false` disables it. §82.4 measures what that costs and what it buys.
+
+**Nothing was read from OpenFOAM (GPL-3.0), SU2 (LGPL), p4est
+(GPL-2.0-or-later) or t8code (GPL-2.0).** `cuda/meshgeom.cu` is a restatement
+of this project's own `src/mesh/geometry.rs`, line for line, and the file says
+so.
+
+### 82.1 What was ported, and what was not
+
+`rust/src/mesh/gpugeom.rs` and `rust/cuda/meshgeom.cu`. Four kernels, all
+gathers, no atomic of any width:
+
+| kernel | one thread per | writes |
+|---|---|---|
+| `meshFaceGeometry` | face, internal and boundary alike | `Sf`, `Cf` for every face |
+| `meshCellGeometry` | cell | `V`, `C` — the apex pass and the pyramid pass fused |
+| `meshInternalFaceMetrics` | internal face | `sf`, `cf`, `mag_sf`, `weights`, `delta_coeffs`, `non_orth_corr`, `skew_corr` |
+| `meshBoundaryFaceMetrics` | boundary face | `b_sf`, `b_mag_sf`, `b_cf`, `b_delta_coeffs`, `b_non_orth_corr`, `b_y`, `b_weights` |
+
+**The two scatters become one gather each.** The host sweep walks faces and
+scatters into cells twice — once to average the face centroids into the pyramid
+apex, once to accumulate the pyramid volumes and centroids. `mesh/geometry.rs`
+says of itself that it and `topology.rs` "are the only places in the crate that
+scatter into a per-cell array", and that they are allowed to because they run
+once, on the host, at setup. Once they run on the device that permission
+expires. Both become one thread per cell reading the cell → face CSR, and the
+two passes fuse into one kernel because the second needs only *this* cell's
+apex, so nothing has to reach global memory between them.
+
+**What stays on the host, and how much it costs.** The prologue is
+`geometry::validate`, the cyclic pairing, and the derivation of
+`b_kind`/`b_patch`/`b_nbr_cell`. Two of those three are loops over *patches* —
+six of them on a box. The third is not: `validate` walks **every vertex of
+every face**, chasing one heap allocation per face. It is left on the host
+because it returns `Error::Mesh` naming the offending face and a kernel cannot.
+
+**Its cost is bounded rather than measured, and the difference matters.** The
+`rest` column of §82.2 is `geom_d − kernel − down`, a residual of three
+separately-timed quantities, and across runs of the same binary it moves
+between **0.12 and 0.78 ms** at 13824 cells while the three it comes from move
+by fifteen per cent. So the prologue is **under a millisecond against a 9.4 ms
+sweep**, and nothing finer than that is claimed. An earlier draft of this
+section read one such residual as 1.9 ms and built an argument on it; the
+argument is withdrawn and the residual is now printed with a note saying what
+it is.
+
+**The one precondition the host sweep does not have.** Every kernel here
+gathers, so the mesh must already carry `cf_offset`/`cf_face`/`cf_own` and
+`bcf_offset`/`bcf_face`. `geometry::compute` needs no addressing at all — it
+walks faces. A mesh handed to the device sweep without that CSR is refused by
+name, naming the array and the call that builds it, rather than reading a short
+array. §82.7 carries it as a contract row and
+`a_mesh_without_a_cell_face_csr_is_refused_by_name` shows the host sweep
+succeeding on the same mesh, so the refusal is a statement about this module
+and not about the mesh being broken.
+
+### 82.2 Where a rebuild's time actually goes
+
+Measured by `ofgpu-validate` on this machine (RTX 5070 Ti, `Scalar = f64`), on
+the mesh the §75 adapt produces from a 2:1-balanced base grid. `emit` is
+`Forest::build` with neither the CSR build nor the geometry sweep in it;
+`geom_h` is `mesh::geometry::compute`; `flat` is turning `&[Vec<Label>]` into
+the face → point CSR a kernel can read.
+
+| base cells | emit /ms | geom_h /ms | flat /ms | geom_d /ms | kernel /ms | geom_h / kernel |
+|---|---|---|---|---|---|---|
+| 512 | 1.305 | 0.708 | 0.017 | 0.925 | 0.284 | **2.5×** |
+| 4096 | 6.756 | 3.850 | 0.110 | 1.953 | 0.484 | **8.0×** |
+| 13824 | 16.546 | 9.361 | 0.757 | 4.191 | 1.791 | **5.2×** |
+
+**Half of the drop-in is the download.** `geom_d` is timed as a whole and
+`kernel` and `down` are timed separately inside it, so the three columns say
+where a drop-in call goes; `rest` is what is left, and §82.1 says why that is a
+bound and not a measurement.
+
+| base cells | drop-in `geom_d` /ms | uploads + kernels /ms | download /ms | residual /ms |
+|---|---|---|---|---|
+| 512 | 0.925 | 0.284 | 0.231 | 0.409 |
+| 4096 | 1.953 | 0.484 | 1.069 | 0.400 |
+| 13824 | 4.191 | 1.791 | 2.098 | 0.302 |
+
+At 13824 cells the download is **50 % of the drop-in**, and it is the whole
+reason the drop-in is 2.2× where the sweep itself is 5.2×. A `HostMesh` is the
+wrong destination, and `GpuGeometry::compute` is the entry point that does not
+build one.
+
+**These are one run's numbers**, as §75.8's were. Repeated runs move the host
+columns by a few per cent and the sub-millisecond device ones by more; the
+ratios between the three parts of a rebuild, and the two orders of magnitude
+§75.8 measured between the rebuild and the recapture, do not move.
+
+At 13824 base cells the rebuild is **54 % emitter, 31 % geometry sweep**, the
+remaining 15 % being the CSR build and the plan's own bookkeeping. §75.8's
+sentence
+— "the binding constraint on adaptive refinement in this codebase is therefore
+`mesh/geometry.rs::compute`" — is wrong by that ratio. It is understandable:
+`compute` is 1396 lines and looks expensive, and `Forest::build`'s emit loop is
+about ninety. The ninety allocate a `BTreeMap` and several `Vec<Label>` per
+cell per axis, and that is what costs; §82.9 says what a device version would
+have to reproduce.
+
+**The 512-cell row is the honest floor.** At that size the device drop-in
+(0.925 ms) is *slower* than the host sweep (0.708 ms): four kernel launches
+plus twelve uploads plus sixteen downloads is a fixed cost of roughly a
+millisecond, and a mesh that small does not have enough work to hide it. The device sweep is worth having from a few thousand cells up,
+and the table says so rather than quoting only the row that flatters it.
+
+### 82.3 The bitwise claim, and the two things that make it true
+
+**The gate is bitwise identity with `mesh::geometry::compute`, on every array,
+on every mesh.** Not "agrees to 1e-15". This is a refactor of *where* the work
+happens: `weights` feeds every interpolation, `delta_coeffs` every Laplacian
+and `V` every source term, so a last-bit difference in the mesh is a different
+answer everywhere downstream, and a solver whose answer changed because its
+mesh was rebuilt on the device would be a bug no tolerance could tell from a
+real one.
+
+Two things make the claim true.
+
+**(a) The gather order.** Floating-point addition is not associative
+(Goldberg 1991), so the order a cell's faces are accumulated in *is* the
+answer. The host walks all internal faces in ascending id, adding each to its
+owner and to its neighbour, and then all boundary faces in ascending id. For
+one cell that is:
+
+```
+apex_P  = ( sum_{f in cf_face[P]} Cf_f  +  sum_{b in bcf_face[P]} Cf_(nIf+b) ) / n_P
+```
+
+evaluated left to right in exactly that order — which is the cell's `cf_face`
+slice followed by its `bcf_face` slice, because `mesh::topology`'s fill pass
+walks faces in ascending index and appends. The kernel gathers in that order
+and no other. The same argument carries the pyramid pass:
+
+```
+V_P     = sum_f  ( s_f Sf_f ) . ( Cf_f - apex_P ) / 3
+C_P     = ( sum_f ( 0.75 Cf_f + 0.25 apex_P ) V_pyr,f ) / V_P
+```
+
+with `s_f = +1` when `P` owns `f` and `-1` when it neighbours it, the internal
+slice first and the boundary slice second.
+
+**(b) `-fmad=false`.** §82.4.
+
+Everything else in the sweep is elementwise on a face or on a cell, so it is
+bitwise by construction once (a) and (b) hold: same expression, same
+association, same order, correctly-rounded `sqrt` and division on both sides
+(nvcc's defaults `-prec-sqrt=true` and `-prec-div=true`; Rust's `f64::sqrt` and
+`/` are IEEE).
+
+### 82.4 The contraction, measured on the other compiler
+
+nvcc contracts `a*b + c` into a single fused multiply-add by default — one
+rounding where the host does two. Everywhere else in this crate that is
+accepted and *measured*: §28.5 and §67.11 both record device answers that
+differ from the host's in the last bit for exactly this reason, and both say so
+rather than smoothing it over, because there the device is the reference and a
+fused product is simply the better answer. Here there is nothing to be tolerant
+with, so `cuda/meshgeom.cu` is compiled with `-fmad=false`.
+
+That flag is passed **by name**, to the units in `build.rs::FMAD_OFF_UNITS`,
+never blanket-applied — §28.5's and §67.11's kernels depend on the contraction.
+`the_translation_unit_is_compiled_with_fmad_off` reads `build.rs` off disk and
+fails if `meshgeom.cu` leaves the list, if the flag disappears, or if it stops
+being consulted per unit.
+
+**And the claim that the flag is needed is measured rather than argued.**
+`build.rs` compiles `cuda/meshgeom.cu` a **second** time, with `-fmad=true`,
+into `kernels::MESHGEOM_FMAD`. Nothing links against it; one test runs it.
+Measured, against the host sweep, on the four fixtures of §82.6:
+
+| fixture | arrays of 16 the contracted build moves | first difference |
+|---|---|---|
+| uniform 5×4×3 | **9** | `v[0]`, 1 ulp |
+| 2:1 refined 6×6×6, three levels | **14** | `v[0]`, 1 ulp |
+| graded 8×6×4, z cyclic | **15** | `v[2]`, 1 ulp |
+| 2:1 refined, points displaced | **14** | `v[0]`, 2 ulp |
+| uniform 4×3×2, pentagonal faces | **8** | `weights[3]`, 2 ulp |
+
+(The ulp figure is the *first* difference each fixture reports, not the worst:
+the test stops at the first differing entry of each array so that a failure
+names one place rather than a hundred thousand.)
+
+**This replaced a simulation that said the opposite.** The first draft computed
+a fused and an unfused `Sf . (Cf - C_P)` on the host and required them to
+differ somewhere — and on every box mesh they do not, because an axis-aligned
+`Sf` makes that dot product one term plus two exact zeros. The conclusion drawn
+was that `-fmad=false` was costing throughput and buying nothing. It was
+probing the wrong expression: the contraction reaches `V` and `C` through the
+pyramid centroid `0.75 Cf + 0.25 x_apex`, which fuses on a uniform box too, and
+from there it reaches everything. **A simulation can only find the contraction
+you thought of; the other compiler finds the ones you did not.** That is the
+§67.11 lesson restated — its first draft asserted an FMA had *not* happened, on
+a fixture where it happened not to show.
+
+### 82.5 What the port bought, and the cadence again
+
+The §75.8 table, re-measured with two columns added. `t_planD` is the same
+`plan` with `Rebuild::Device`; `N dev` is its 2 % cadence.
+
+| cells | `t_step` /ms | `t_plan` /ms | `t_xfer` /ms | `t_graph` /ms | N at 2 % | N graph | `t_planD` /ms | **N dev** |
+|---|---|---|---|---|---|---|---|---|
+| 512 | 0.259 | 2.315 | 0.044 | 0.077 | 470 | 15 | 2.076 | **424** |
+| 4096 | 0.271 | 12.822 | 0.044 | 0.077 | 2389 | 15 | 11.115 | **2074** |
+| 13824 | 0.284 | 30.677 | 0.054 | 0.076 | 5415 | 14 | 25.350 | **4479** |
+
+**The answer to the question asked is that the cadence improves by 17 % and
+that is not enough.** N at 13824 cells falls from 5415 to 4479. The adapt is
+still two orders of magnitude off the cadence a moving flame needs, and it is
+off it for a reason this section can now name precisely rather than estimate:
+**the emitter**.
+
+The port itself did what it was asked to. The sweep is 5.2× faster on the
+device; the drop-in is 2.2×, and §82.2 takes the gap apart — half of it is the
+download. A `HostMesh` is the wrong destination. `GpuGeometry::compute` leaves
+everything on the device and is the entry point a device-resident adapt would
+use; `gpu_compute_geometry` exists so the two sweeps can be compared field for
+field and so an existing caller can be switched over one line at a time.
+
+**One cost §75.8's table does not contain at all.** After an adapt the new mesh
+has to reach the device: `GpuMesh::upload` costs **0.25 / 0.59 / 1.94 ms** at
+the three sizes (measured separately, not in the table above), of which the
+sixteen geometry arrays are most. A
+device-resident sweep removes that too, and the table above does not credit it
+with any of it, because `plan` still returns a `HostMesh` and paying the
+download twice would be the honest accounting of what the code does today.
+
+### 82.6 The fixtures, and why a box mesh is not enough
+
+`mesh::gpugeom::tests::fixtures` — five meshes, each earning its place:
+
+* **uniform 5×4×3.** Orthogonal and unskewed, so `skew_corr` is exactly zero
+  and the `SKEW_FLOOR` branch of §2.5 is exercised on its *zeroing* side. The
+  floor case: a wrong port passes it anyway.
+* **2:1 refined 6×6×6, three levels.** The interface faces are skewed — §2.5
+  measures one at `0.1421 |d|` — so `skew_corr` becomes a real array and
+  `weights` leaves one half. This is the mesh an adapt produces.
+* **graded 8×6×4, z cyclic.** Grading makes every face's weight and delta
+  coefficient different from its neighbour's, and the cyclic pair is the *only*
+  route into the branch of `meshBoundaryFaceMetrics` that writes `b_weights`
+  and a boundary `non_orth_corr` at all.
+* **2:1 refined, every point displaced** by a fixed 32-bit LCG on the point
+  index. All three above are axis-aligned; this one is not. Every face is
+  non-planar, so the median decomposition of §2.1 stops being a rectangle: the
+  four sub-triangles have different areas, `Cf` stops being the vertex average
+  and `area` stops being exact. It was added while chasing §82.4's simulation
+  and it stays, because a sweep written for arbitrary polyhedra should be gated
+  on something that is not a box.
+* **uniform 4×3×2 with a fifth vertex on every face**, the midpoint of its
+  first edge. All four above are *quadrilateral*, because every emitter in this
+  crate makes quads — so nothing was testing the median decomposition at
+  `n ≠ 4`, which is the case a cut cell (§24) reaches routinely. The inserted
+  vertex is collinear with its neighbours, so one of the five sub-triangles has
+  **zero area** and contributes `t_a = 0` to the centroid weighting; the same
+  vertex moves `Cf` off the true face centroid by round-off, and the first
+  array the contracted build moves on this fixture is `weights[3]`, at
+  `0.500000000000000111` rather than one half. The midpoint is appended per
+  face rather than shared, so the point set is non-conformal — nothing in
+  either sweep looks at point sharing, and both are handed the identical mesh.
+
+The sixth mesh is in `ofgpu-validate`: the mesh an **adapt actually produced**,
+compared array by array between `plan` and `plan_with(Rebuild::Device)`. A
+generator's mesh and an adapt's are different numberings, and §75.5 already
+learned to gate the rebuild on both.
+
+### 82.7 §13.4 contract
+
+**Supported.** `ofgpu::mesh::gpugeom`:
+
+| what | how |
+|---|---|
+| the sweep, device-resident | `GpuGeometry::compute` → every geometric array in `DevBuf`s, nothing downloaded |
+| the sweep, as a drop-in | `gpu_compute_geometry`, same signature as `mesh::geometry::compute`, same bits |
+| the same, for a caller that already flattened | `gpu_compute_geometry_csr` |
+| the face list a kernel can read | `flatten_faces` → `FacePointCsr` |
+| getting the result back | `GpuGeometry::download_into` |
+| an adapt that rebuilds on the device | `adapt::Rebuild::Device`, `Forest::build_with`, `adapt::plan_with` |
+
+**Refused by name, with the alternative.**
+
+| asked for | answer |
+|---|---|
+| the device sweep on a mesh with no cell → face CSR | Refused by name, naming the array and its length. Every kernel here gathers over that CSR and the accumulation order it fixes *is* the bitwise claim. **Alternative: call `HostMesh::build_cell_face_maps()` first** (every emitter in this crate already does), **or use `mesh::geometry::compute`, which walks faces and needs no addressing.** |
+| a `HostMesh` back, cheaply | Not possible, and measured: the download is half the drop-in path (§82.2). **Alternative: `GpuGeometry::compute` and keep the buffers.** |
+| the EMITTER on the device | **Not implemented, and not started.** §82.9 says exactly what it would have to reproduce and why the point numbering is the hard half. It is now the larger part of a rebuild, so this is the honest gap, not a footnote. |
+| the cyclic pairing on the device | Not implemented. It is a loop over patches — six on a box — and §82.1 bounds the whole host remainder at under a millisecond against a 9.4 ms sweep. **Alternative: none needed.** |
+| `mesh::check` / `print_report` on the device | Not implemented. They run when a human asks, not on every adapt. |
+| a mesh whose faces are not the ones `validate` accepts | Unchanged: the same `geometry::validate` runs first, in the same words, so a corrupt mesh is diagnosed identically whichever sweep is called. |
+
+**Bit-identical defaults, BY CONSTRUCTION.** §13.4.1 asks for a pair test for
+every setting added. **This section adds no setting**, and the default arm of
+the one selector it adds is literally the code that was there before:
+`Forest::build()` is `build_with(Rebuild::Host)` and `plan()` is
+`plan_with(.., Rebuild::Host)`, and `Rebuild::Host` calls
+`mesh::compute_geometry`. No case file, no `fvSchemes` key and no environment
+variable reaches `Rebuild::Device`; nothing in a time loop reaches any of it,
+because §75.9's `no_time_loop_reaches_the_adapt` still holds and this section
+did not touch it. **And the stronger statement is asserted anyway**: the two
+arms produce the same bits, gated on five fixtures in the unit tests and on an
+adapted mesh in `ofgpu-validate`, so even a caller that *did* switch could not
+change an answer.
+
+### 82.8 The capture stance
+
+`src/mesh/gpugeom.rs` launches kernels, so §81.7's registry must classify it,
+and §81.8's census — read off disk — fails if it does not. It is
+`Stance::Outside`: the geometry sweep runs when a mesh is **built**, at setup
+or at an adapt, and never inside an iteration. There is nothing here for a time
+loop to lose. A captured graph bakes the device pointers of the mesh it was
+captured on, so a mesh that has *just been rebuilt* is by definition on the far
+side of a recapture — which is the same argument `src/adapt.rs` is refused
+under, and §81's registry now carries both.
+
+### 82.9 The new bottleneck, named precisely
+
+**It is `Forest::build`'s emit loop**, 16.5 ms of a 30.7 ms rebuild at 13824
+base cells, growing linearly, and §82.2 is the first measurement that separates
+it from the sweep it feeds. The second, a quarter its size, is the **download**
+— 2.1 ms of a 4.2 ms drop-in call — and it is the cheaper of the two to remove,
+because removing it means *not* building a `HostMesh` rather than writing a
+kernel. What the emit loop does per cell per axis:
+
+1. groups the far-side voxels of that face by the leaf on the other side, in a
+   `BTreeMap<Label, [usize; 4]>` **allocated fresh for every (cell, axis)
+   pair** — three heap allocations and a tree per cell;
+2. calls `emit`, which allocates a `Vec<Label>` of four elements per face via
+   `.collect()`;
+3. pushes `(Label, Label, Vec<Label>)` onto `internal`, which is then sorted —
+   a stable sort moving 24-byte `Vec` headers.
+
+**A device version is tractable and the topology is the easy half.** Under 2:1
+balance the far side of a cell's face is either one leaf of level ≤ L or
+exactly four leaves of level L+1 — a level-L leaf on the far side would cover
+the face entirely — so the `BTreeMap` is answering a question with two possible
+answers, and one thread per (cell, axis) probing four quadrant voxels answers
+it with no allocation and no tree. The voxel-ownership map is a gather if each
+voxel thread scans the leaves of its own base cell, which are contiguous
+because the canonical order is base-cell-major.
+
+**The hard half is the point numbering.** The host numbers a point the first
+time the cell-major, axis-major, minus-then-plus traversal touches it, which is
+an inherently sequential order. Reproducing it on the device means a
+min-reduction of the touch rank per grid point — expressible as an integer
+`atomicMin` or as a sort, both deterministic — and until that is written, a
+device emitter would produce a *different but equivalent* point numbering.
+**That is not automatically a problem**: nothing in the geometry sweep depends
+on the numbering, only on each face's corner *positions* in their winding
+order, so a mesh built with a permuted point set is bitwise identical in `v`,
+`c`, `sf`, `weights` and everything else. It would break §75.2's
+`the_forest_emitter_reproduces_the_static_generator`, which asserts `points`
+and the face point lists element for element, and it would change what
+`io::polymesh` writes. Whoever writes it should decide that deliberately rather
+than discover it.
+
+### 82.10 What must hold
+
+| # | Statement | Where it is checked |
+|---|---|---|
+| 1 | **THE GATE.** The device sweep and the host sweep write the same bits, in all sixteen geometric arrays, on five fixtures | `mesh::gpugeom::tests::the_device_sweep_is_bitwise_identical_to_the_host_sweep` |
+| 2 | **THE GATE.** The same, on a mesh an ADAPT produced, comparing `plan` with `plan_with(Rebuild::Device)` | `ofgpu-validate`, "the adapt cadence" |
+| 3 | The claim is not vacuous: the same source compiled with `-fmad=true` misses the host's bits on every fixture, 8 to 15 arrays of 16 | `mesh::gpugeom::tests::the_contraction_this_unit_turns_off_is_real` |
+| 4 | `build.rs` still compiles `meshgeom.cu` with `-fmad=false`, by name and not blanket | `mesh::gpugeom::tests::the_translation_unit_is_compiled_with_fmad_off` |
+| 5 | A mesh with no cell → face CSR is refused by name, and the host sweep still succeeds on it | `mesh::gpugeom::tests::a_mesh_without_a_cell_face_csr_is_refused_by_name` |
+| 6 | A cell with no faces is refused in the same words as the host sweep's diagnosis | `gpugeom::refuse_a_cell_with_no_faces` |
+| 7 | `flatten_faces` is the face list and nothing else | `mesh::gpugeom::tests::the_flattened_face_list_is_the_face_list` |
+| 8 | The default arm of `Rebuild` is the host sweep, so `Forest::build` and `plan` are unchanged BY CONSTRUCTION | `adapt::Forest::build`, `adapt::plan` — one line each |
+| 9 | `src/mesh/gpugeom.rs` is classified in the capture registry, and the census read off disk agrees | `capture::registry::tests::every_device_module_is_classified` |
+| 10 | Every kernel in `meshgeom.cu` is a gather; there is no atomic of any width in the file | by inspection, and by the file header |
+
+### 82.11 Validation, and what is NOT claimed
+
+`ofgpu-validate`'s adapt section gains the bitwise gate on an adapted mesh and
+a second table, "where a rebuild's time goes, and what the device sweep
+removes". The cadence table gains `t_planD` and `N dev`.
+
+**Not claimed, and not implemented:**
+
+* **The emitter is still on the host**, and §82.2 measures that it, and not the
+  geometry sweep, is now what makes an adapt expensive. This is the single
+  largest remaining cost and §82.9 is the specification for closing it.
+* **The cadence is still not usable.** N = 4479 at 13824 cells. This section
+  improved it by 17 % and says so; it did not solve the problem §75.8 posed.
+* **Nothing adapts inside a time loop**, exactly as §75.9 says. `Rebuild` is
+  reachable only from a test and from `ofgpu-validate`.
+* **No solver was switched to the device sweep.** `blockgen`, `io::polymesh`
+  and every case-setup path still call `mesh::geometry::compute`. Switching
+  them is safe — the bits are the same — and is not done here, because a setup
+  sweep runs once and the change would be motion without a measurement.
+* **The multi-colour preconditioner is still not rebuilt** after an adapt
+  (§75.11), and neither is the CSR export, `restart.rs` or `bin/probe.rs`.
+* **`--features single` was not exercised.** `meshgeom.cu` carries the
+  `OFGPU_SINGLE` branch for `SMALL` and `MIN_POSITIVE`, and it does compile
+  under it — checked by running `nvcc --cubin -DOFGPU_SINGLE -fmad=false`
+  directly on the file, which emits a cubin with no diagnostic. Nothing was
+  RUN, because §67.11 records that the single-precision build of this crate
+  does not link. In particular the bitwise gate has never been measured in
+  `f32`, where the same expressions have far fewer bits to agree on and the
+  `SKEW_FLOOR` and `SMALL` constants sit in quite different places relative to
+  the data.
+* **The download is not overlapped.** `download_into` is sixteen synchronous
+  copies. A single packed transfer, or an async copy on a second stream, would
+  cut the drop-in path; neither is written.
+* **No fixture is a cut cell, and three branches are therefore transcribed
+  rather than gated.** `n == 0`, `n < 3` and `area <= SMALL` in
+  `meshFaceGeometry` are the host's, line for line, and only a mesh that is
+  already broken reaches them; §82.6's pentagonal fixture reaches the
+  zero-area *sub-triangle* but not a zero-area face. The fixture that would
+  close this is a §24 cut-cell mesh, whose faces are genuinely polygonal and
+  can be small — and `blockgen::build_cutcell_mesh` returns a finished
+  `HostMesh` with no public accessor for the raw points and faces the sweep
+  needs, so getting one is a change to `blockgen` rather than a line in a test.

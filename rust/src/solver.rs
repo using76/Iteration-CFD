@@ -2584,6 +2584,50 @@ mod tests {
         assert!(err < SLACK, "the replayed graph solved to {err:.3e}");
     }
 
+    /// **SPEC-LIT 81: the replay is the per-launch path, bit for bit.**
+    ///
+    /// `a_fixed_iteration_solve_captures_into_a_cuda_graph` above proves that
+    /// a fixed-iteration solve *can* be captured, and then compares the
+    /// replayed answer against a dense direct solve to within `SLACK`. That is
+    /// a statement about the solver, not about the graph: a replay that
+    /// perturbed the last bits of every cell would still pass it, and a
+    /// perturbed last bit is exactly the failure a graph can introduce and
+    /// nothing else would notice.
+    ///
+    /// So the claim README makes for this feature - *bitwise identical to the
+    /// per-launch path* - is checked here, on the module the whole claim rests
+    /// on, with the same protocol every other module is held to.
+    #[test]
+    fn the_fixed_iteration_solve_replays_bitwise() {
+        let n = 29;
+        let Some(r) = rig(n, 606, false) else { return };
+
+        let ctrl = SolverControls {
+            max_iter: 12,
+            fixed_iters: true,
+            report_residuals: false,
+            ..tight()
+        };
+
+        let report = crate::capture::capture_replays_bitwise(
+            &r.gpu,
+            "PBiCGStab, fixed iterations (SPEC-LIT 8)",
+            || {
+                let psi: DevBuf<Scalar> = r.gpu.zeros(n)?;
+                let w = SolverWorkspace::for_mesh(&r.gpu, &r.m)?;
+                Ok((psi, w))
+            },
+            |(psi, w): &mut (DevBuf<Scalar>, SolverWorkspace)| {
+                solve_pbicgstab(&r.gpu, &r.k, psi, &r.a, &r.m, w, &ctrl).map(|_| ())
+            },
+            |(psi, _): &(DevBuf<Scalar>, SolverWorkspace)| {
+                Ok(vec![crate::capture::buf(&r.gpu, "psi", psi)?])
+            },
+        )
+        .expect("SPEC-LIT 81.7: the solve must capture and replay bitwise");
+        println!("  PBiCGStab: {report}");
+    }
+
     /// `fixed_iters` runs exactly the sweeps it was told to and reports them.
     #[test]
     fn fixed_iterations_run_exactly_the_requested_sweeps() {

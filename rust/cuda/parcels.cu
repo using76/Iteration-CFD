@@ -476,7 +476,7 @@ OFGPU_DEV oflabel parcelWalkTo
             {
                 // Stick, spread and splash all leave the mass on the wall.
                 // Splash is among them because no child parcels are emitted
-                // (S78.7): the parent deposits whole, the deposit is an
+                // (SPEC-LIT 78.7): the parent deposits whole, the deposit is an
                 // upper bound, and `n_splash` is the counter that says by how
                 // many impacts.
                 deposit = 1;

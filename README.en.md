@@ -521,13 +521,56 @@ actually costs is the **host** mesh-and-geometry rebuild: 362× the recapture at
 13 824 cells and growing linearly while the recapture stays flat. At 10⁶ cells
 that is of order two seconds against a step of a millisecond or two, and no
 cadence makes it affordable. The binding constraint on adaptive refinement here
-is `mesh/geometry.rs`, not the graph.
+is the **host rebuild**, not the graph.
+
+### The rebuild on the device — and the half §75 named wrongly
+
+SPEC-LIT §75.8 went one step further and named the culprit inside the rebuild:
+`mesh/geometry.rs::compute`, "1396 host lines of polygon and pyramid
+decomposition". SPEC-LIT §82 ports that sweep to the device, gates it on
+**bitwise identity with the host sweep** — on five fixtures and on a mesh an
+adapt actually produced — and then measures the rebuild again. **The naming was
+wrong.** At 13 824 cells:
+
+| piece of a 30.7 ms rebuild | /ms | share |
+|---|---|---|
+| the emitter — `Forest::build`'s face grouping | 16.5 | **54 %** |
+| the geometry sweep — `mesh/geometry.rs::compute` | 9.4 | 31 % |
+| the cell → face CSR and the plan's own bookkeeping | 4.8 | 15 % |
+
+So a geometry sweep costing *nothing* could only have made the rebuild 1.44×
+faster. The port delivers what it can: the sweep runs **5.2× faster** on the
+device, but as a drop-in returning a `HostMesh` it is 2.2×, because downloading
+sixteen arrays is half of what the drop-in costs. End to end the adapt cadence
+improves by 17 % — N goes from 5 415 to **4 479** at 13 824 cells — and that is
+not enough. **The new bottleneck is the emitter**, and §82.9 states what a
+device version of it would have to reproduce, including the point numbering,
+which is the hard half.
+
+A number this section got wrong in its own draft and corrected: the unported
+host prologue was quoted at 1.9 ms and argued about. It is a *residual* — one
+timing minus two others — and across runs of the same code it moves between
+0.12 and 0.78 ms. It is small, and the table now prints it with a note saying
+it is a bound rather than a measurement.
+
+One thing the port established that was not asked for: **`-fmad=false` is
+load-bearing, and the first argument for it was measured in the wrong place.**
+nvcc contracts `a*b + c` into a single rounding and rustc does not, so the build
+system compiles `cuda/meshgeom.cu` twice — with the contraction off, which ships,
+and with it on, which nothing links against and one test runs. The contracted
+build misses the host's bits on **8 to 15 of the sixteen geometry arrays on
+every fixture, uniform box included**. An earlier version of that check
+*simulated* a contraction on the host, found nothing on any box mesh, and
+concluded the flag was buying nothing; it had probed the wrong expression.
 
 **What is not claimed.** The face flux is not transferred at all — neither the
 area-weighted split of a parent face nor a divergence-free filling of a refined
 parent's new interior faces — and that is the largest single gap between this
 and a solver that can adapt. There is no post-adapt pressure projection. Only
-scalar fields are transferred. The mesh rebuild is on the host. The multi-colour
+scalar fields are transferred. **The emitter is still on the host, and is now
+the larger half of a rebuild.** No solver was switched to the device sweep: the
+bits are identical, so switching is safe, but a setup sweep runs once and the
+change would be motion without a measurement. The multi-colour
 preconditioner is not rebuilt, and an adapt raises the maximum cell degree from
 6 to 24. `restart.rs`, the polyMesh writer and `bin/probe.rs` are untouched and
 would all need work before an adapt could happen mid-run. The Jasak–Gosman
@@ -967,6 +1010,69 @@ is memory-bandwidth bound.
 A **3.16×** improvement, for a one-off capture and instantiation cost of
 0.46 ms. The result is bitwise identical to the per-launch path across all
 24,000 cells: a graph removes launch overhead without changing execution order.
+
+**That ratio is a property of the case, not of the feature, and it falls as the
+mesh grows.** A graph buys back CPU submission time, which is a cost per
+*launch* and is independent of how much work each launch does — so the
+ratio is governed by launches per unit of GPU work, not by cells. Re-measured
+on an RTX 5070 Ti, CUDA 13.3, 3 sweeps, 300 outer iterations, every row still
+bitwise identical:
+
+| cells | per-launch ms/iter | graph ms/iter | ratio |
+|---|---|---|---|
+| 1,500 | 1.229 | 0.332 | **3.70×** |
+| 24,000 | 1.258 | 0.412 | **3.06×** |
+| 240,000 | 2.851 | 2.265 | **1.26×** |
+| 800,000 | 9.101 | 8.794 | **1.03×** |
+
+Holding the mesh at 24,000 cells and raising the launch count instead (1, 3,
+10, 30 solver sweeps) moves the ratio the other way: 2.72×, 2.96×,
+3.27×, 3.41×. Above roughly half a million cells this solver is
+memory-bandwidth bound and the graph is worth a few per cent. It is worth most
+where an iteration is many small kernels — which is what the fire, VOF and
+multi-model paths are.
+
+### Every module is gated for capture, or refused by name
+
+The bitwise claim above is now checked **per module** rather than asserted once.
+`SPEC-LIT` §81 derives the population from the tree — every module
+that launches a kernel or declares a per-iteration entry — so a module
+added later is gated, excused by name, or it fails the tests. Fifty modules:
+
+| | |
+|---|---|
+| gated: capture, replay 3×, compare **bitwise** | **36** |
+| refused, with the reason and the alternative | **10** |
+| outside the iteration | 1 |
+| **ungated** — `pressure/mod.rs`, `pressure/fft.rs`, `simple.rs` | **3** |
+
+Writing the gates found six modules that could not be captured at all. Three
+were the same defect — a *diagnostic counter* reduced on the device and
+read back to the host once per iteration — in WSGG, combustion and
+surface-to-surface radiation; each is now behind a flag that defaults to on, so
+every existing run reports exactly what it reported before, and each has a
+companion query so a `0` meaning "not counted" is distinguishable from a `0`
+meaning "nothing happened".
+
+The other three are refused, and the refusals are **executed** rather than
+written down:
+
+* **VOF** — `Vof::step` downloads the alpha Courant number and derives the
+  MULES sub-cycle count from it, so the trip count is data-dependent and lives
+  on the host. A graph would record whatever count the capture saw and replay
+  it for ever. The alternative is a prescribed `nAlphaSubCycles`; not
+  implemented;
+* **fvDOM** — the ordinate sweep carries each ordinate's boundary intensity
+  to the next *through the host*. P-1 is gated and is the alternative;
+* **`PCG` and `DIC`** — `solve` verifies symmetry before running conjugate
+  gradients or an incomplete Cholesky, and that check ends in a read-back.
+  Choosing `PCG` in `fvSolution` costs that equation its CUDA graph, however
+  the solve is otherwise configured — the fixed-iteration mode removes the
+  *other* read-back, not this one. This was documented in the code and had
+  never been tested.
+
+AMR is refused for a different reason: it reallocates every cell-sized buffer,
+and a captured graph holds the old pointers.
 
 ### Pressure backend selection
 

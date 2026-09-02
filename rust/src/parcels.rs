@@ -218,7 +218,7 @@ impl DragModel {
 /// supplies the half of that which is parcel-side - the impact regime map,
 /// and a deposit whose mass is accounted for exactly - so `stick` is now a
 /// value and [`Self::Weber`] selects among all four. **Film TRANSPORT is
-/// still refused by name** (S78.11): a deposited droplet stays where it
+/// still refused by name** (SPEC-LIT 78.11): a deposited droplet stays where it
 /// landed, and nothing spreads, drips, runs off or re-entrains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WallAction {

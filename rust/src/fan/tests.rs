@@ -2416,3 +2416,59 @@ fn a_zero_reference_density_is_refused_by_name() {
         .to_string();
     assert!(e.contains("kinematic"), "{e}");
 }
+
+// ----------------------------------------------------------------------
+//  SPEC-LIT 81.7: the CUDA-graph capture gate
+// ----------------------------------------------------------------------
+
+/// SPEC-LIT 81: the fan/porous-jump face operator captures and replays
+/// bitwise.
+///
+/// The operating point is under-relaxed from iteration to iteration, so this
+/// also gates the thing most likely to have gone wrong: if the relaxation
+/// were done on the host, capture would record one step of it and replay
+/// that same step for ever, and only a bitwise comparison over several
+/// replays would notice.
+#[test]
+fn the_fan_source_replays_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let faces: Vec<Label> = vec![2, 5, 7];
+    let jumps = [PorousJump::Internal {
+        faces: faces.clone(),
+        coeffs: PorousJumpCoeffs::from_loss_coefficient(30.68).expect("K"),
+    }];
+
+    let report = crate::capture::capture_replays_bitwise(
+        &gpu,
+        "fan and porous jump (SPEC-LIT 52/53)",
+        || {
+            let mut rig = Rig::new(&gpu, chain(10), 0.019)?;
+            rig.set_dirichlet(&gpu, "xmin", 2.0)?;
+            let phi: Vec<Scalar> = vec![0.02; rig.hm.n_internal_faces];
+            gpu.write(&mut rig.phi.f, &phi)?;
+            let fd = FlowDevices::new(&gpu, &rig.hm, Vec::new(), &jumps, 1.2)?;
+            Ok((fd, rig))
+        },
+        |(fd, rig): &mut (FlowDevices, Rig)| {
+            fd.update(
+                &gpu,
+                &rig.m,
+                &rig.phi,
+                &mut rig.phi_hbya,
+                &mut rig.rauf,
+                &mut rig.rauf_mag_sf,
+                &mut rig.p,
+            )
+        },
+        |(_, rig): &(FlowDevices, Rig)| {
+            Ok(vec![
+                ("rAU_f", gpu.download(&rig.rauf.f)?),
+                ("rAU_f|Sf|", gpu.download(&rig.rauf_mag_sf.f)?),
+                ("phi_HbyA", gpu.download(&rig.phi_hbya.f)?),
+                ("p", gpu.download(&rig.p.f)?),
+            ])
+        },
+    )
+    .expect("SPEC-LIT 81.7: the fan operator must capture and replay bitwise");
+    println!("  fan / porous jump: {report}");
+}

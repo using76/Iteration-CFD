@@ -535,7 +535,7 @@ fn gate_49d_closure_at_scale_with_an_internal_blocker() {
     //     says so.** `perPoint` distrusts the five-ray "visible" verdict, so
     //     every pair that could be blocked goes to the AREA form - and on a
     //     box, the adjacent-wall pairs are the C-14 configuration, where the
-    //     area form is 40% wrong (S49.2b). Closure degrades from 8.8e-3 to
+    //     area form is 40% wrong (SPEC-LIT 49.2b). Closure degrades from 8.8e-3 to
     //     0.16, past S49.6's threshold, and the model REFUSES rather than
     //     shipping that F. The design note assumed Level 2 was strictly more
     //     accurate than Level 1. On this geometry it is strictly worse.
@@ -2028,4 +2028,54 @@ fn the_diagonal_is_exactly_zero_and_the_raw_quadrature_is_already_reciprocal() {
     for i in 0..n {
         assert_eq!(f[i * n + i], 0.0, "F[{i}][{i}] is not exactly zero");
     }
+}
+
+// ----------------------------------------------------------------------
+//  SPEC-LIT 81.7: the CUDA-graph capture gate
+// ----------------------------------------------------------------------
+
+/// SPEC-LIT 81: one surface-to-surface exchange captures and replays
+/// bitwise.
+///
+/// S2S is the interesting case: the view factors are built ONCE, outside any
+/// iteration, and what runs per iteration is the radiosity solve over the
+/// coarse clusters plus the scatter back to the fine faces. That is all
+/// device work, and this proves it.
+#[test]
+fn the_s2s_exchange_replays_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let (hm, gm, points, faces, sel) = box_rig(&gpu, [2, 2, 2], 0.9);
+    let nbf = hm.n_boundary_faces;
+    let cfg = S2sConfig { agglomerate: 4, ..S2sConfig::default() };
+    let k_eff: DevBuf<Scalar> = gpu.upload(&vec![0.03 as Scalar; nbf]).expect("k");
+    let tb: Vec<Scalar> = (0..nbf)
+        .map(|bf| if bf % 2 == 0 { 300.0 } else { 900.0 })
+        .collect();
+
+    let report = crate::capture::capture_replays_bitwise(
+        &gpu,
+        "surface-to-surface exchange (SPEC-LIT 49/50)",
+        || {
+            let mut s = S2s::new(&gpu, &gm, &hm, &points, &faces, &sel, cfg)?;
+            // The only host round-trip in the exchange is SPEC-LIT 50.10's
+            // report, computed by downloading four cluster arrays and
+            // reducing them on the CPU - see S2s::set_measure_report.
+            s.set_measure_report(false);
+            let mut t = GpuScalarField::zeros(&gpu, &gm, "T")?;
+            gpu.write(&mut t.bf, &tb)?;
+            Ok((s, t))
+        },
+        |(s, t): &mut (S2s, GpuScalarField)| s.update(&gpu, t, &k_eff),
+        |(s, t): &(S2s, GpuScalarField)| {
+            let (a, b, c) = s.state(&gpu)?;
+            Ok(vec![
+                ("T boundary", gpu.download(&t.bf)?),
+                ("radiosity", a),
+                ("irradiation", b),
+                ("net flux", c),
+            ])
+        },
+    )
+    .expect("SPEC-LIT 81.7: the S2S exchange must capture and replay bitwise");
+    println!("  S2S: {report}");
 }

@@ -24,6 +24,7 @@
 //! anywhere. `PROVENANCE.md`, *GPU plumbing and tooling - original*. No
 //! GPL-licensed source was consulted.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
@@ -60,6 +61,9 @@ pub fn cfg_for(n: usize) -> LaunchConfig {
 pub struct Gpu {
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
+    /// True between `begin_capture` and `end_capture`. See
+    /// [`Gpu::refuse_during_capture`] and `SPEC-LIT` 81.3.
+    capturing: AtomicBool,
 }
 
 impl Gpu {
@@ -89,7 +93,7 @@ impl Gpu {
         // something larger.
         let stream = ctx.new_stream()?;
 
-        Ok(Self { ctx, stream })
+        Ok(Self { ctx, stream, capturing: AtomicBool::new(false) })
     }
 
     pub fn ctx(&self) -> &Arc<CudaContext> {
@@ -106,17 +110,62 @@ impl Gpu {
 
     /// Load one of the CUBIN blobs from [`crate::kernels`].
     pub fn load(&self, cubin: &[u8]) -> Result<Arc<CudaModule>> {
+        self.refuse_during_capture("load")?;
         Ok(self.ctx.load_module(Ptx::from_binary(cubin.to_vec()))?)
     }
 
     pub fn sync(&self) -> Result<()> {
+        self.refuse_during_capture("sync")?;
         Ok(self.stream.synchronize()?)
     }
 
     /// Total and free device memory, in bytes.
     pub fn mem_info(&self) -> Result<(usize, usize)> {
+        self.refuse_during_capture("mem_info")?;
         let (free, total) = cudarc::driver::result::mem_get_info()?;
         Ok((free, total))
+    }
+
+    // ---- the capture guard -------------------------------------------
+    //
+    // SPEC-LIT 81.3. A CUDA graph records a sequence of *device* work. The
+    // moment the host is asked a question mid-capture - "how much memory is
+    // free", "what does this buffer hold", "give me a fresh allocation" -
+    // there is nothing to record, and the driver answers with
+    // `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`: a number, naming nothing.
+    //
+    // That is the failure this crate has to be able to read. A future module
+    // that slips a `download` into its per-iteration path breaks capture for
+    // every module downstream of it, and the driver's error says only that
+    // some operation somewhere was unsupported. So the crate asks first, and
+    // names the operation and the rule it broke.
+
+    /// True while [`Gpu::capture`] is recording this stream.
+    #[inline]
+    pub fn is_capturing(&self) -> bool {
+        self.capturing.load(Ordering::Relaxed)
+    }
+
+    /// Refuse `op` if a capture is in progress, naming it.
+    ///
+    /// `SPEC-LIT` 13.4: refused by name, with the alternative. Every caller is
+    /// a host round-trip, and the alternative is always the same one - keep
+    /// the value on the device.
+    #[inline]
+    fn refuse_during_capture(&self, op: &str) -> Result<()> {
+        if self.is_capturing() {
+            return Err(Error::Config(format!(
+                "Gpu::{op} was called inside a CUDA-graph capture. A \
+                 graph records device work; {op} is a host round-trip, so \
+                 there is nothing to record, and the capture would otherwise \
+                 fail with an unattributed \
+                 CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED. Keep the value on the \
+                 device - solver.rs keeps its residuals there for exactly \
+                 this reason - or move the call outside the captured region. \
+                 SPEC-LIT 81.3"
+            )));
+        }
+        Ok(())
     }
 
     // ---- memory -----------------------------------------------------------
@@ -125,17 +174,27 @@ impl Gpu {
     where
         T: DeviceRepr + ValidAsZeroBits,
     {
+        self.refuse_during_capture("zeros")?;
         Ok(self.stream.alloc_zeros::<T>(n)?)
     }
 
     pub fn upload<T: DeviceRepr>(&self, src: &[T]) -> Result<DevBuf<T>> {
+        self.refuse_during_capture("upload")?;
         Ok(self.stream.clone_htod(src)?)
     }
 
     pub fn download<T: DeviceRepr>(&self, src: &DevBuf<T>) -> Result<Vec<T>> {
+        self.refuse_during_capture("download")?;
         Ok(self.stream.clone_dtoh(src)?)
     }
 
+    /// Zero a buffer in place.
+    ///
+    /// Deliberately **not** guarded against capture: `cuMemsetD8Async` becomes
+    /// a memset node in the graph and replays correctly, so zeroing an
+    /// accumulator at the top of an iteration is legal and several modules do
+    /// it. It is the one device-side write on this type that is (`SPEC-LIT`
+    /// 81.3, row *memset*).
     pub fn fill_zero<T>(&self, dst: &mut DevBuf<T>) -> Result<()>
     where
         T: DeviceRepr + ValidAsZeroBits,
@@ -144,7 +203,8 @@ impl Gpu {
     }
 
     /// Overwrite an existing buffer from the host. Setup only - nothing in the
-    /// time loop is allowed to call this.
+    /// time loop is allowed to call this, and inside a capture it is refused
+    /// by name (`SPEC-LIT` 81.3).
     pub fn write<T: DeviceRepr>(&self, dst: &mut DevBuf<T>, src: &[T]) -> Result<()> {
         if src.len() != dst.len() {
             return Err(Error::Config(format!(
@@ -153,6 +213,7 @@ impl Gpu {
                 dst.len()
             )));
         }
+        self.refuse_during_capture("write")?;
         Ok(self.stream.memcpy_htod(src, dst)?)
     }
 
@@ -171,21 +232,42 @@ impl Gpu {
     where
         F: FnOnce(&Arc<CudaStream>) -> Result<()>,
     {
+        // One stream, so one capture. A nested `capture` would silently fold
+        // the inner region into the outer graph and hand back `None`, which
+        // reads as "the body launched nothing" - the most misleading answer
+        // available. Refuse it by name instead.
+        if self.is_capturing() {
+            return Err(Error::Config(
+                "Gpu::capture was called while a capture is already \
+                 recording this stream. There is one stream, so captures do \
+                 not nest: the inner region would be folded into the outer \
+                 graph and this call would return None, which reads as \
+                 \"the body launched nothing\" - SPEC-LIT 81.3"
+                    .to_string(),
+            ));
+        }
+
         // Relaxed rather than Global: Global would fail the capture if any
         // other thread in the process touched a legacy default stream, which
         // is not something this crate can promise about its embedder.
         self.stream
             .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)?;
+        self.capturing.store(true, Ordering::Relaxed);
 
         // If the body fails mid-capture the stream is left in capturing mode,
-        // so end it before propagating.
+        // so end it before propagating. The flag is cleared FIRST, because
+        // `end_capture` is itself one of the calls the flag would refuse if
+        // it were routed through the guard, and because a body that failed
+        // must not leave the guard armed for the next caller.
         if let Err(e) = body(&self.stream) {
+            self.capturing.store(false, Ordering::Relaxed);
             let _ = self
                 .stream
                 .end_capture(CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH);
             return Err(e);
         }
 
+        self.capturing.store(false, Ordering::Relaxed);
         let graph = self
             .stream
             .end_capture(CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)?;
@@ -222,6 +304,103 @@ impl Graph {
 
     pub fn is_uploaded(&self) -> bool {
         self.uploaded
+    }
+
+    /// What the captured graph is actually made of, by node type.
+    ///
+    /// This is not decoration. `cudarc` allocates with `cuMemAllocAsync`,
+    /// which is **stream-ordered and therefore capturable**: a module that
+    /// allocates inside its per-iteration path does not fail the capture, it
+    /// records a `MEM_ALLOC` node and succeeds. The graph then does a device
+    /// allocation on every replay - which is most of what the graph existed to
+    /// remove - and with
+    /// `CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH` it frees it again on
+    /// the next launch, so it does not even leak. Nothing complains.
+    ///
+    /// `alloc == 0 && free == 0 && host == 0` is the statement that the
+    /// captured region is pure device work, and it is the only way to see it
+    /// from outside. `SPEC-LIT` 81.4.
+    pub fn shape(&self) -> Result<GraphShape> {
+        use cudarc::driver::sys as cu;
+
+        let g = self.inner.cu_graph();
+        let mut n: usize = 0;
+        // SAFETY: `g` is owned by `self.inner` and outlives this call. A null
+        // node pointer with a null count is how the driver is asked for the
+        // count alone.
+        unsafe { cu::cuGraphGetNodes(g, std::ptr::null_mut(), &mut n) }.result()?;
+
+        let mut nodes: Vec<cu::CUgraphNode> = vec![std::ptr::null_mut(); n];
+        if n > 0 {
+            // SAFETY: `nodes` has room for exactly the `n` the driver just
+            // reported, and `n` is passed back unchanged.
+            unsafe { cu::cuGraphGetNodes(g, nodes.as_mut_ptr(), &mut n) }.result()?;
+        }
+
+        let mut sh = GraphShape { total: n, ..Default::default() };
+        for node in nodes.into_iter().take(n) {
+            let mut t = cu::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
+            // SAFETY: `node` came from `cuGraphGetNodes` on a live graph.
+            unsafe { cu::cuGraphNodeGetType(node, &mut t) }.result()?;
+            match t {
+                cu::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL => sh.kernel += 1,
+                cu::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEMSET => sh.memset += 1,
+                cu::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEMCPY => sh.memcpy += 1,
+                cu::CUgraphNodeType::CU_GRAPH_NODE_TYPE_HOST => sh.host += 1,
+                cu::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEM_ALLOC => sh.alloc += 1,
+                cu::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEM_FREE => sh.free += 1,
+                _ => sh.other += 1,
+            }
+        }
+        Ok(sh)
+    }
+}
+
+/// The node-type census of a captured graph. See [`Graph::shape`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GraphShape {
+    /// Every node, whatever its kind.
+    pub total: usize,
+    /// Kernel launches - the work the graph exists to replay.
+    pub kernel: usize,
+    /// `cuMemsetD*Async`. Legal and expected: zeroing an accumulator.
+    pub memset: usize,
+    /// Device-to-device copies. Legal.
+    pub memcpy: usize,
+    /// A host callback. **Never legal in an iteration**: it serialises the
+    /// replay on the CPU, which is what the graph was removing.
+    pub host: usize,
+    /// A stream-ordered allocation. **Never legal in an iteration.**
+    pub alloc: usize,
+    /// A stream-ordered free. **Never legal in an iteration.**
+    pub free: usize,
+    /// Events, child graphs, semaphores: none of this crate's doing.
+    pub other: usize,
+}
+
+impl GraphShape {
+    /// True when the graph is nothing but device work: no host callback, no
+    /// allocation, no free.
+    pub fn is_pure_device_work(&self) -> bool {
+        self.host == 0 && self.alloc == 0 && self.free == 0
+    }
+
+    /// The impurities, named, for an assertion message. Empty when pure.
+    pub fn impurities(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.host > 0 {
+            v.push(format!("{} host-callback node(s)", self.host));
+        }
+        if self.alloc > 0 {
+            v.push(format!(
+                "{} stream-ordered allocation node(s) - something in the                  iteration calls a device allocator, so every replay allocates",
+                self.alloc
+            ));
+        }
+        if self.free > 0 {
+            v.push(format!("{} stream-ordered free node(s)", self.free));
+        }
+        v
     }
 }
 

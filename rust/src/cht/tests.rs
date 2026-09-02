@@ -1872,3 +1872,59 @@ fn worst_residual_of(tm: &ThermalMesh, k: Tensor) -> Scalar {
     }
     worst
 }
+
+// ----------------------------------------------------------------------
+//  SPEC-LIT 81.7: the CUDA-graph capture gate
+// ----------------------------------------------------------------------
+
+/// SPEC-LIT 81: one solid-side conduction iteration captures and replays
+/// bitwise.
+#[test]
+fn the_solid_side_iteration_replays_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let n = 8usize;
+    let l = 0.02 as Scalar;
+    let mesh = block([n, 1, 1], Vec3::new(l / n as Scalar, 0.02, 0.02), Vec3::ZERO);
+    let tm = one_region(&mesh);
+    let cond = Conduction::uniform_per_region(
+        &tm,
+        &[SolidMaterial::isotropic("s", 2330.0, 700.0, 148.0)],
+    )
+    .expect("conduction");
+    let gm = upload(&gpu, &tm.host);
+
+    // `fixed_iters`: the adaptive residual test is a host round-trip, and
+    // SPEC-LIT 81.3 refuses it inside a capture by name.
+    let report = crate::capture::capture_replays_bitwise(
+        &gpu,
+        "conjugate heat, solid side (SPEC-LIT 46)",
+        || {
+            let mut ctrl = tight_controls();
+            // PBiCGStab, not the PCG + DIC `tight_controls` uses. `solve`
+            // verifies symmetry before running PCG or DIC, and that check
+            // ends in a host read-back - so a PCG solve is not capturable at
+            // all. `a_pcg_solve_is_not_capturable_and_says_which_call`
+            // holds that; here the point is the CHT iteration, so it runs
+            // the solver a captured case would run.
+            ctrl.solver.solver = LinearSolverKind::PBiCGStab;
+            ctrl.solver.precon = Preconditioner::Dilu;
+            ctrl.solver.fixed_iters = true;
+            ctrl.solver.max_iter = 4;
+            ctrl.solver.report_residuals = false;
+            let mut cht = ConjugateHeat::new(&gpu, &gm, &tm, &cond, ctrl)?;
+            fix_value(&gpu, cht.field_mut(), tm.patch_range(0, "xmin").unwrap(), 400.0);
+            fix_value(&gpu, cht.field_mut(), tm.patch_range(0, "xmax").unwrap(), 300.0);
+            seed(&gpu, &mut cht, &vec![350.0 as Scalar; n]);
+            Ok(cht)
+        },
+        |c: &mut ConjugateHeat| c.correct(&gpu).map(|_| ()),
+        |c: &ConjugateHeat| {
+            Ok(vec![
+                crate::capture::field(&gpu, "T", c.field())?,
+                ("T boundary", gpu.download(&c.field().bf)?),
+            ])
+        },
+    )
+    .expect("SPEC-LIT 81.7: the solid side must capture and replay bitwise");
+    println!("  conjugate heat: {report}");
+}

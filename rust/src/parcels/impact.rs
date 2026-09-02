@@ -208,7 +208,7 @@ pub enum WallRegime {
     Spread,
     /// Above the splash threshold. The lamella breaks up and part of the mass
     /// leaves the wall again as secondary droplets - **which this section
-    /// detects and does not emit** (S78.7).
+    /// detects and does not emit** (SPEC-LIT 78.7).
     Splash,
 }
 
@@ -238,7 +238,7 @@ impl WallRegime {
     /// True for the three outcomes that leave the droplet's mass on the wall.
     ///
     /// `Splash` is among them **here and not in the papers**: the parent's
-    /// mass is deposited whole because no child parcels are emitted (S78.7),
+    /// mass is deposited whole because no child parcels are emitted (SPEC-LIT 78.7),
     /// which makes the deposit an upper bound and is why `n_splash` is a
     /// reported counter rather than an internal detail.
     #[must_use]

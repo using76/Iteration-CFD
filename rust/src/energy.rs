@@ -3942,4 +3942,67 @@ mod tests {
     fn flux_to_grad_is_the_plain_division() {
         assert!((flux_to_grad(200.0, 0.5) - 400.0).abs() < 1e-12);
     }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT 81.7: the CUDA-graph capture gate
+    // ------------------------------------------------------------------
+
+    /// One energy correction captures, and three replays are bit-for-bit
+    /// three per-launch corrections.
+    #[test]
+    fn the_energy_correction_replays_bitwise() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 8;
+        let h: Scalar = 0.02;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+        let props = GasProperties { k: 0.5, cp: 1000.0, ..GasProperties::default() };
+
+        // Read-only inputs, shared by both instances.
+        let nut = GpuScalarField::zeros(&g, &m, "nut")?;
+        let phi = GpuSurfaceScalarField::zeros(&g, &m, "phi")?;
+        let gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+        let k = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+
+        // `fixed_iters`: the adaptive residual test reads a flag back to the
+        // host, which SPEC-LIT 81.3 refuses inside a capture by name.
+        let ctrl = EnergyControls {
+            t_solver: SolverControls {
+                tolerance: 1e-14,
+                rel_tol: 0.0,
+                max_iter: 4,
+                fixed_iters: true,
+                report_residuals: false,
+                ..SolverControls::default()
+            },
+            t_relax: 1.0,
+            steady: false,
+            delta_t: 1e-3,
+            sn_grad: SnGradScheme::Uncorrected,
+            ddt: DdtScheme::Euler,
+            ..EnergyControls::default()
+        };
+
+        let report = crate::capture::capture_replays_bitwise(
+            &g,
+            "energy (SPEC-LIT 25)",
+            || {
+                let mut e = Energy::new(&g, &m, ctrl, props)?;
+                g.write(&mut e.field_mut().f, &vec![320.0 as Scalar; hm.n_cells])?;
+                e.initialise(&g)?;
+                Ok(e)
+            },
+            |e: &mut Energy| e.correct(&g, &phi, &nut, &k, 0.0, &gas).map(|_| ()),
+            |e: &Energy| {
+                Ok(vec![
+                    crate::capture::field(&g, "T", e.field())?,
+                    ("T boundary", g.download(&e.field().bf)?),
+                ])
+            },
+        )
+        .expect("SPEC-LIT 81.7: energy must capture and replay bitwise");
+        println!("  energy: {report}");
+        Ok(())
+    }
 }

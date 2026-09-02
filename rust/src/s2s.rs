@@ -1246,7 +1246,7 @@ pub struct ViewFactorReport {
     pub n_coarse: usize,
     pub n_blockers: usize,
     pub n_blocker_triangles: usize,
-    /// How many ordered pairs took the 1LI contour path (S49.2b), and how
+    /// How many ordered pairs took the 1LI contour path (SPEC-LIT 49.2b), and how
     /// many the 2AI area path. Reported rather than assumed.
     pub n_line: usize,
     pub n_area: usize,
@@ -1434,7 +1434,7 @@ impl ViewFactors {
         gpu.sync()?;
         let build_seconds = t0.elapsed().as_secs_f64();
 
-        // Which path each pair took (S49.2b): 0 blocked, 1 line, 2 area. The
+        // Which path each pair took (SPEC-LIT 49.2b): 0 blocked, 1 line, 2 area. The
         // split is REPORTED rather than assumed, because "the near-field pairs
         // went through 1LI" is exactly the claim S49.8's C-14 gate rests on.
         let mh = gpu.download(&method)?;
@@ -1513,7 +1513,7 @@ impl ViewFactors {
                  directions: `occlusion pairwise` settles a partly-shadowed \
                  pair with five rays and gets it all-or-nothing, while \
                  `occlusion perPoint` puts every blockable pair on the area \
-                 form, which is far less accurate in the near field (S49.2b) \
+                 form, which is far less accurate in the near field (SPEC-LIT 49.2b) \
                  - measured 8.8e-3 against 0.16 on the same enclosure. Try \
                  the OTHER one, or a finer `agglomerate`.",
                 f64::from(rs[worst_row] / area_host[worst_row].max(1e-300))
@@ -2023,6 +2023,10 @@ pub struct S2s<'m> {
 
     sweeps: usize,
     report: S2sReport,
+
+    /// Whether [`S2s::update`] fills [`S2s::report`]. See
+    /// [`S2s::set_measure_report`].
+    measure_report: bool,
 }
 
 impl<'m> S2s<'m> {
@@ -2126,7 +2130,33 @@ impl<'m> S2s<'m> {
                 radiosity_residual: 0.0,
                 sweeps,
             },
+            measure_report: true,
         })
+    }
+
+    /// Is [`S2s::report`] a measurement, or is measuring switched off?
+    ///
+    /// Reporting a residual of `0.0` that means "not measured" beside one
+    /// that means "converged to the last bit" is the confusion `SPEC-LIT` 69
+    /// exists to prevent, so the two are distinguishable.
+    pub fn report_is_measured(&self) -> bool {
+        self.measure_report
+    }
+
+    /// Stop (or resume) filling [`S2s::report`] in [`S2s::update`].
+    ///
+    /// `true` is the default and the shipped behaviour. Off skips **only**
+    /// `SPEC-LIT` 50.10's three reported numbers and the fixed-point
+    /// residual, all four of which are computed by pulling cluster-sized
+    /// arrays back to the host and reducing them there. Every field this
+    /// module writes is bit-for-bit what it was.
+    ///
+    /// It exists because those read-backs are what stop a surface-to-surface
+    /// exchange being captured into a CUDA graph (`SPEC-LIT` 81.3), and S2S
+    /// sits inside the radiation iteration of every enclosure fire case - so
+    /// one host round-trip here costs the whole iteration its graph.
+    pub fn set_measure_report(&mut self, on: bool) {
+        self.measure_report = on;
     }
 
     pub fn view_factors(&self) -> &ViewFactors {
@@ -2230,7 +2260,14 @@ impl<'m> S2s<'m> {
             self.n_surf,
             self.sweeps,
         )?;
-        let residual = self.measure_residual(gpu)?;
+        // SPEC-LIT 81.3. `measure_residual` and `measure` between them pull
+        // four cluster-sized arrays back to the host and reduce them there -
+        // the comment on `measure` says so plainly, and at 32k clusters once
+        // per outer iteration that was a defensible trade until the enclosing
+        // iteration had to be capturable. They compute the REPORT and nothing
+        // else; every field this module writes is produced by the kernels
+        // above and below them, so skipping them moves no number anywhere.
+        let residual = if self.measure_report { self.measure_residual(gpu)? } else { 0.0 };
 
         // ---- S50.13: under-relax H (identity at w = 1) -------------------
         //
@@ -2292,7 +2329,9 @@ impl<'m> S2s<'m> {
                 .launch(cfg_for(self.n_fine))?;
         }
 
-        self.measure(gpu, residual)?;
+        if self.measure_report {
+            self.measure(gpu, residual)?;
+        }
         Ok(())
     }
 

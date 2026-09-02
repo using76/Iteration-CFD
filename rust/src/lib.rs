@@ -99,6 +99,12 @@ pub mod io;
 pub mod reference;
 pub mod surface;
 
+/// The CUDA-graph capture gate of SPEC-LIT §81: every module that puts work
+/// on the device is gated, excused by name, or fails the registry check.
+/// Test-only, so the release build is unchanged by construction.
+#[cfg(test)]
+mod capture;
+
 /// The citation audit of SPEC-LIT §80: every `§NN.M`, `SNN.M` and `(NN.M)` in
 /// a comment, doc comment or error message must name something that exists in
 /// the document the citation belongs to. Test-only, so the release build is

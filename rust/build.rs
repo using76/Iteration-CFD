@@ -29,7 +29,32 @@ use std::process::Command;
 
 /// Every translation unit in `cuda/` that holds device code.
 /// Each becomes one module loaded at run time.
-const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "combustion.cu", "radiation.cu", "fvdom.cu", "rheology.cu", "ke_variants.cu", "twostep.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "wsgg.cu", "soot.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu"];
+const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "combustion.cu", "radiation.cu", "fvdom.cu", "rheology.cu", "ke_variants.cu", "twostep.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "wsgg.cu", "soot.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu", "meshgeom.cu"];
+
+/// Translation units compiled with `-fmad=false`.
+///
+/// nvcc contracts `a*b + c` into a single fused multiply-add by default and
+/// rustc never does, so one rounding meets two and the device answer differs
+/// from the host answer in the last bit. Everywhere else in this crate that is
+/// accepted and measured (SPEC-LIT §62.8, §67.11): the device is the reference
+/// and the host is a check, so a fused product is simply the better answer.
+///
+/// `meshgeom.cu` is the exception, and it is an exception of KIND rather than
+/// of degree. It is a port of `src/mesh/geometry.rs` whose gate is BITWISE
+/// identity with that sweep - SPEC-LIT §82 - because moving where the mesh
+/// geometry is computed must not move what it is. A geometry array that
+/// differs in the last bit changes every operator downstream of it, so there
+/// is nothing to be tolerant with.
+///
+/// This costs the listed units their FMA throughput. It buys the only claim
+/// SPEC-LIT §82 makes.
+///
+/// Each listed unit is ALSO compiled a second time with `-fmad=true`, into
+/// `<STEM>_FMAD`. Nothing links against it: it exists so that the claim "the
+/// contraction would break the gate" can be measured on the real compiler
+/// rather than simulated on the host, which is how §67.11's first draft came
+/// to assert an FMA had not happened when it had.
+const FMAD_OFF_UNITS: &[&str] = &["meshgeom.cu"];
 
 fn cuda_root() -> PathBuf {
     // CUDA_PATH is set by the Windows installer; CUDA_HOME and /usr/local/cuda
@@ -274,6 +299,12 @@ fn main() {
             // bit-stable across compute capabilities OR across this flag - so
             // this is not folklore, it is a requirement with a section number.
             .arg("-lineinfo")
+            // See FMAD_OFF_UNITS. Passed by name, never blanket-applied.
+            .args(if FMAD_OFF_UNITS.contains(unit) {
+                &["-fmad=false"][..]
+            } else {
+                &[][..]
+            })
             // C4819: MSVC complains that NVIDIA's own headers contain bytes
             // it cannot represent in the console codepage. Nothing to do with
             // this project, and it drowns out real diagnostics.
@@ -316,6 +347,50 @@ fn main() {
             "pub const {const_name}: &[u8] = include_bytes!(r\"{}\");\n",
             cubin.display()
         ));
+
+        // The contracted twin. See FMAD_OFF_UNITS: a unit that turns the
+        // contraction OFF is making a claim about what the contraction would
+        // do, and the only way to hold a claim like that is to build the other
+        // one and run it. Emitted as `<STEM>_FMAD`, used by exactly one test
+        // (mesh::gpugeom::tests::the_contraction_this_unit_turns_off_is_real)
+        // and by no solver.
+        if FMAD_OFF_UNITS.contains(unit) {
+            let twin = out_dir.join(format!("{stem}_fmad.cubin"));
+            let mut cmd = Command::new(&nvcc);
+            cmd.arg("--cubin")
+                .arg(format!("--gpu-architecture=sm_{arch}"))
+                .arg("-std=c++17")
+                .arg("-lineinfo")
+                .arg("-fmad=true")
+                .arg("-Xcompiler=/wd4819")
+                .arg("-I")
+                .arg(&cuda_dir)
+                .arg("-o")
+                .arg(&twin)
+                .arg(&src);
+
+            if single {
+                cmd.arg("-DOFGPU_SINGLE");
+            }
+            for (k, v) in &host_env {
+                cmd.env(k, v);
+            }
+
+            let out = cmd
+                .output()
+                .unwrap_or_else(|e| panic!("failed to run {}: {e}", nvcc.display()));
+            if !out.status.success() {
+                panic!(
+                    "nvcc failed on the contracted twin of {unit}\n--- stderr ---\n{}",
+                    String::from_utf8_lossy(&out.stderr),
+                );
+            }
+
+            generated.push_str(&format!(
+                "pub const {const_name}_FMAD: &[u8] = include_bytes!(r\"{}\");\n",
+                twin.display()
+            ));
+        }
     }
 
     fs::write(out_dir.join("kernels.rs"), generated).expect("failed to write kernels.rs");

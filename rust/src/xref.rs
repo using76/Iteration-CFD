@@ -19,8 +19,9 @@
 //! symbols its comments, doc comments and string literals cite, and requires
 //! the second set to be a subset of the first. §80.2 states the five citation
 //! forms it recognises, §80.3 how a citation is attributed to the document it
-//! belongs to, §80.4 the ambiguity ratchet, §80.5 the census, and §80.6 what
-//! the audit does NOT catch.
+//! belongs to, §80.4 the ambiguity ratchet, §80.5 the census, §80.8 what a
+//! second reading of this module found in it, and §80.9 what the audit does
+//! NOT catch.
 //!
 //! Written from: nothing. **ORIGINAL** - the rule, the lexer and the
 //! attribution model are this project's own, and the only inputs are
@@ -60,6 +61,7 @@ impl Doc {
     pub fn parse(text: &str) -> Doc {
         let mut d = Doc::default();
         let mut fenced = false;
+        let mut section: Option<String> = None;
         for line in text.lines() {
             let t = line.trim_start();
             if t.starts_with("```") {
@@ -67,10 +69,21 @@ impl Doc {
                 continue;
             }
             if fenced {
+                // A label defines only IN ITS OWN SECTION. A cross-reference
+                // to §46's equation closing a line of §59's fenced table is a
+                // reference and not a definition; a validation row whose last
+                // column is a measured value - §77 prints an expected 17.6
+                // beside a computed 17.59 - is not a label at all. The shipped
+                // parser took both, which is how §17, a section with no
+                // subsections and no equations whatever, came to be counted
+                // among the sections that label equations.
                 if let Some(sym) = trailing_label(line) {
-                    d.equations.insert(sym);
+                    if top(&sym) == section {
+                        d.equations.insert(sym);
+                    }
                 }
             } else if let Some((num, title)) = heading(t) {
+                section = top(&num);
                 d.headings.entry(num.clone()).or_insert(title);
                 for a in ancestors(&num) {
                     d.sections.insert(a);
@@ -308,7 +321,9 @@ pub enum Form {
     /// `(64.6)` - an equation where its section labels equations, a
     /// subsection where it does not.
     Paren,
-    /// `(S47.3)` - a section OR an equation, like [`Form::Ascii`].
+    /// `(S47.3)` - the parenthesised form with the `S` the ASCII-only files
+    /// spell it with, and resolved exactly like [`Form::Paren`]: an equation
+    /// where its section labels equations, a subsection where it does not.
     ParenAscii,
     /// `SPEC-LIT 13.4`, `SPEC-LIT section 36` - a section, always.
     Bare,
@@ -616,10 +631,13 @@ fn resolves(cite: &Cite, spec: &Doc, docs: &BTreeMap<String, Doc>, reg: &Registr
     if let Some(d) = &cite.document {
         return match docs.get(d) {
             Some(doc) => doc.sections.contains(&cite.symbol),
-            // A work with no document in this repository - Patankar, Jasak,
+            // A `work` has no document in this repository - Patankar, Jasak,
             // Saad. Their numbering is theirs and this audit cannot check it;
-            // §80.6 says so rather than pretending otherwise.
-            None => true,
+            // §80.9 says so rather than pretending otherwise. A `document`
+            // that did not load is the opposite case: §80.3 promises it is
+            // CHECKED, and a promise that evaporates when the file is renamed
+            // is the no-op this section exists to make impossible.
+            None => !reg.documents.iter().any(|x| x == d),
         };
     }
     let Some(t) = top(&cite.symbol) else { return true };
@@ -628,14 +646,19 @@ fn resolves(cite: &Cite, spec: &Doc, docs: &BTreeMap<String, Doc>, reg: &Registr
     }
     match cite.form {
         Form::Section | Form::Bare => spec.sections.contains(&cite.symbol),
-        Form::Paren => {
+        // §80.4: the parenthesised form means one thing, with or without the
+        // `S` that the ASCII-only files (every `.cu` in this tree) must use.
+        Form::Paren | Form::ParenAscii => {
             if spec.equation_sections.contains(&t) {
                 spec.equations.contains(&cite.symbol)
             } else {
                 spec.sections.contains(&cite.symbol)
             }
         }
-        Form::Ascii | Form::ParenAscii => {
+        // The bare `SNN.M` cannot be tightened the same way: 586 sites in this
+        // tree write it for a subsection of a section that also labels
+        // equations. §80.4's ratchet is what stands in for a rule here.
+        Form::Ascii => {
             spec.equations.contains(&cite.symbol) || spec.sections.contains(&cite.symbol)
         }
     }
@@ -656,6 +679,10 @@ struct Audit {
     used_names: BTreeSet<String>,
     /// Symbol -> the files citing it, for §80.5's census.
     cited_in: BTreeMap<String, BTreeSet<String>>,
+    /// Registry `document` -> how many heading numbers it parsed to. One that
+    /// is missing or unreadable is absent from the map, and the test below
+    /// that §80.3 property 2 names fails on it rather than excusing it.
+    docs_read: BTreeMap<String, usize>,
     spec: Doc,
 }
 
@@ -670,6 +697,8 @@ fn run() -> Audit {
             docs.insert(d.clone(), Doc::parse(&t));
         }
     }
+    let docs_read: BTreeMap<String, usize> =
+        docs.iter().map(|(k, v)| (k.clone(), v.sections.len())).collect();
     let both: BTreeSet<String> = spec.equations.intersection(&spec.sections).cloned().collect();
 
     let mut files = 0usize;
@@ -713,7 +742,19 @@ fn run() -> Audit {
         }
     }
     let both = both.len();
-    Audit { files, checked, attributed, by_form, both, stale, ambiguous, used_names, cited_in, spec }
+    Audit {
+        files,
+        checked,
+        attributed,
+        by_form,
+        both,
+        stale,
+        ambiguous,
+        used_names,
+        cited_in,
+        docs_read,
+        spec,
+    }
 }
 
 // ==========================================================================
@@ -806,6 +847,33 @@ mod tests {
         );
     }
 
+    /// **§80.3.** A `work` is an excuse this audit cannot check; a `document`
+    /// is a promise that it CAN, and §80.3 says so in those words. That
+    /// promise is kept only while the file is where the registry says it is,
+    /// and nothing used to notice when it was not. Hiding one of the two
+    /// registered documents turned every citation into it into a silent pass -
+    /// the no-op this whole section exists to make impossible. Those citations
+    /// now fail, and this test fails first and names the file.
+    ///
+    /// (The document is deliberately not named on either of these two lines:
+    /// §80.3's window would attribute the citations above to it.)
+    #[test]
+    fn a_registry_document_is_read_not_merely_excused() {
+        let a = run();
+        let reg = registry();
+        assert!(!reg.documents.is_empty(), "SPEC-LIT §80.3's registry names no document");
+        for d in &reg.documents {
+            let n = a.docs_read.get(d).copied().unwrap_or(0);
+            assert!(
+                n > 0,
+                "SPEC-LIT §80.3's registry names `{d}` as a document whose OWN headings a \
+                 citation is resolved against, but it did not parse to a single heading - \
+                 it has been moved, renamed or emptied. Fix the path, or demote the entry \
+                 to `work`, which excuses a citation instead of checking it."
+            );
+        }
+    }
+
     /// **§80.3.** A reserved number must not exist in the spec. §99 is the
     /// address §69's registry tests cite precisely because it is invented; the
     /// day someone writes a real §99 those fixtures stop being obviously fake,
@@ -855,7 +923,7 @@ mod tests {
     /// **§80.5, the census.** Every symbol cited from more than one file, with
     /// the spec's own heading beside it, so a human reading the list can see a
     /// citation that survives §80.2 and still means the wrong thing. Printed,
-    /// not asserted - §80.6 says why no automatic rule replaces it.
+    /// not asserted - §80.4 says why no automatic rule replaces it.
     #[test]
     fn the_multi_file_census_is_printed() {
         let a = run();
@@ -863,7 +931,9 @@ mod tests {
             a.cited_in.iter().filter(|(_, f)| f.len() > 1).collect();
         shared.sort_by_key(|(sym, f)| (std::cmp::Reverse(f.len()), (*sym).clone()));
         println!("  [S80.5] {} symbols are cited from more than one file", shared.len());
-        for (sym, files) in shared.iter().take(25) {
+        // EVERY one of them, not a head - §80.5 claims a list a human reads,
+        // and a truncated list is one whose tail nobody has ever seen.
+        for (sym, files) in &shared {
             let h = a.spec.headings.get(*sym).map(String::as_str).unwrap_or("(equation only)");
             println!("      {sym:<9} {:>2} files  {h}", files.len());
         }
@@ -874,18 +944,28 @@ mod tests {
 
     #[test]
     fn headings_and_equation_labels_parse_the_way_the_spec_writes_them() {
+        // The two strays are numbered §99 - §80.3's reserved address - for the
+        // same reason §69's fixtures are: this file is itself audited, and a
+        // fixture that spells a real stale citation to prove a point is a real
+        // stale citation. The case it stands for is §77's validation row,
+        // whose last column prints an expected 17.6 beside a computed 17.59.
         let d = Doc::parse(concat!(
             "## 77. The vapour\n",
             "### 77.1 What is deposited\n",
-            "#### 13.4.1 A setting must REACH the solver\n",
-            "### 42.5a A correction\n",
             "#### (a) `prescribedYield`\n",
             "```\n",
             "  m_P = sum n_p dm_p            kg      (77.4)\n",
             "  E_P = N_P / max(D_P, tiny)\n",
-            "  x = y                                 (78.3a)\n",
+            "  cooling / expansion          99.59    (99.6)\n",
+            "  from the solid side, see              (S46.5)\n",
             "```\n",
             "prose citing (77.9), which is a reference and not a definition\n",
+            "#### 13.4.1 A setting must REACH the solver\n",
+            "### 42.5a A correction\n",
+            "## 78. Impact\n",
+            "```\n",
+            "  x = y                                 (78.3a)\n",
+            "```\n",
         ));
         assert!(d.sections.contains("77") && d.sections.contains("77.1"));
         assert!(d.sections.contains("42.5a"));
@@ -901,6 +981,16 @@ mod tests {
         assert!(d.equations.contains("78.3a") && d.equations.contains("78.3"));
         // a reference in prose does not define the symbol it cites
         assert!(!d.equations.contains("77.9"));
+        // ... and neither does a measured value that happens to close its line
+        // in parentheses, nor a cross-reference to another section's equation
+        // inside a fenced block. Both shipped as definitions. The first
+        // invented an equation for §17 - a section with no subsections and no
+        // equations of its own - and put §17 into `equation_sections`, where
+        // it would have turned the first honest parenthesised citation of a
+        // §17 subsection into a spurious failure, and this rule into the next
+        // thing somebody weakened to make the tree pass.
+        assert!(!d.equations.contains("99.6"), "a measured value defined an equation");
+        assert!(!d.equations.contains("46.5"), "a cross-reference defined an equation");
         assert_eq!(d.equation_sections, ["77".to_string(), "78".to_string()].into());
     }
 

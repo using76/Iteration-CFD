@@ -160,7 +160,7 @@ fn face_geometry(verts: &[Label], points: &[Vec3]) -> (Vec3, Vec3) {
 /// Everything indexed by the sweep is checked here, once, so that a corrupt
 /// mesh becomes an `Error::Mesh` naming the offending entity rather than a
 /// panic somewhere in the middle of a pass.
-fn validate(m: &HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Result<()> {
+pub(crate) fn validate(m: &HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Result<()> {
     let (n_cells, n_if, n_bf) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
     let n_faces = n_if + n_bf;
 
@@ -239,7 +239,7 @@ fn validate(m: &HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Result<()> {
 /// couples to face `k` of the patch it names. That ordering is the contract a
 /// cyclic pair carries, and the polyMesh reader derives `b_nbr_cell` from the
 /// same rule.
-fn cyclic_pairing(m: &HostMesh) -> Result<Vec<Label>> {
+pub(crate) fn cyclic_pairing(m: &HostMesh) -> Result<Vec<Label>> {
     let n_bf = m.n_boundary_faces;
     let mut pair = vec![-1 as Label; n_bf];
 

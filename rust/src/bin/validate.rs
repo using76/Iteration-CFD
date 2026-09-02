@@ -8006,11 +8006,13 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     use ofgpu::adapt::rebuild;
     use ofgpu::adapt::transfer::{self, Integrals, Prolongation};
     use ofgpu::adapt::{
-        gpu_loehner_indicator, loehner_indicator, mark_with_hysteresis, plan, AdaptKernels,
-        Forest, Mark, LOEHNER_EPS,
+        gpu_loehner_indicator, loehner_indicator, mark_with_hysteresis, plan, plan_with,
+        AdaptKernels, Forest, Mark, Rebuild, LOEHNER_EPS,
     };
+    use ofgpu::mesh::gpugeom::{flatten_faces, GpuGeometry, MeshGeomKernels};
 
     let ak = AdaptKernels::new(gpu)?;
+    let mgk = MeshGeomKernels::new(gpu)?;
     let d = Vec3::new(0.125, 0.125, 0.125);
 
     // A base grid whose middle block starts one level finer, so the adapt
@@ -8360,10 +8362,19 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     //      terms are measured here rather than estimated.
     println!("\n  the adapt cadence, measured on this machine:");
     println!(
-        "  {:>7} {:>10} {:>11} {:>11} {:>11} {:>9} {:>10}",
-        "cells", "t_step/ms", "t_plan/ms", "t_xfer/ms", "t_graph/ms", "N at 2%", "N graph"
+        "  {:>7} {:>10} {:>11} {:>11} {:>11} {:>9} {:>10} {:>11} {:>9}",
+        "cells",
+        "t_step/ms",
+        "t_plan/ms",
+        "t_xfer/ms",
+        "t_graph/ms",
+        "N at 2%",
+        "N graph",
+        "t_planD/ms",
+        "N dev"
     );
     let mut any = false;
+    let mut split: Vec<(usize, f64, f64, f64, f64, f64, f64)> = Vec::new();
     for nb in [8usize, 16, 24] {
         let dd = Vec3::new(1.0 / nb as Scalar, 1.0 / nb as Scalar, 1.0 / nb as Scalar);
         let fb = Forest::uniform([nb, nb, nb], dd)?;
@@ -8450,6 +8461,117 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         let pl = plan(&fb, mb, &mkb, 1)?;
         let t_plan = t0.elapsed().as_secs_f64() * 1e3;
 
+        // The same plan with the geometry sweep on the device - SPEC-LIT S82.
+        // One throwaway first: the module load and the first allocation belong
+        // to neither sweep.
+        let warm = plan_with(&fb, mb, &mkb, 1, Rebuild::Device(gpu, &mgk))?;
+        drop(warm);
+        let t0 = std::time::Instant::now();
+        let pld = plan_with(&fb, mb, &mkb, 1, Rebuild::Device(gpu, &mgk))?;
+        let t_plan_dev = t0.elapsed().as_secs_f64() * 1e3;
+
+        // THE GATE. A rebuild that moves where the geometry is computed must
+        // not move what it is, on the mesh an ADAPT produces and not only on a
+        // generator's. Every geometric array, by its bits.
+        {
+            let (a, b) = (&pl.mesh.mesh, &pld.mesh.mesh);
+            let bits_s = |x: &[Scalar], y: &[Scalar]| {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits())
+            };
+            let bits_v = |x: &[Vec3], y: &[Vec3]| {
+                x.len() == y.len()
+                    && x.iter().zip(y).all(|(p, q)| {
+                        p.x.to_bits() == q.x.to_bits()
+                            && p.y.to_bits() == q.y.to_bits()
+                            && p.z.to_bits() == q.z.to_bits()
+                    })
+            };
+            let ok = bits_s(&a.v, &b.v)
+                && bits_s(&a.mag_sf, &b.mag_sf)
+                && bits_s(&a.weights, &b.weights)
+                && bits_s(&a.delta_coeffs, &b.delta_coeffs)
+                && bits_s(&a.b_mag_sf, &b.b_mag_sf)
+                && bits_s(&a.b_delta_coeffs, &b.b_delta_coeffs)
+                && bits_s(&a.b_y, &b.b_y)
+                && bits_s(&a.b_weights, &b.b_weights)
+                && bits_v(&a.c, &b.c)
+                && bits_v(&a.sf, &b.sf)
+                && bits_v(&a.cf, &b.cf)
+                && bits_v(&a.non_orth_corr, &b.non_orth_corr)
+                && bits_v(&a.skew_corr, &b.skew_corr)
+                && bits_v(&a.b_sf, &b.b_sf)
+                && bits_v(&a.b_cf, &b.b_cf)
+                && bits_v(&a.b_non_orth_corr, &b.b_non_orth_corr);
+            if nb == 8 {
+                c.require(
+                    "the device geometry sweep rebuilds an ADAPTED mesh bit for bit \
+                     (S82.3)",
+                    ok,
+                );
+            } else if !ok {
+                c.require("the device geometry sweep is bitwise on every size", false);
+            }
+        }
+
+        // Where the rebuild's time actually goes. `plan` is re-entered here
+        // rather than instrumented, so these are three independent timings of
+        // the same three pieces and not a decomposition of one.
+        let (t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down) = {
+            let after = pl.after.clone();
+            let t0 = std::time::Instant::now();
+            let rbx = after.build()?;
+            let t_build = t0.elapsed().as_secs_f64() * 1e3;
+
+            let mut mh = rbx.mesh.clone();
+            let t0 = std::time::Instant::now();
+            mh.build_cell_face_maps();
+            let t_csr = t0.elapsed().as_secs_f64() * 1e3;
+            let t0 = std::time::Instant::now();
+            mh.compute_geometry(&rbx.points, &rbx.faces)?;
+            let t_geom_h = t0.elapsed().as_secs_f64() * 1e3;
+
+            let t0 = std::time::Instant::now();
+            let fcsr = flatten_faces(&rbx.faces);
+            let t_flat = t0.elapsed().as_secs_f64() * 1e3;
+
+            let mut md = rbx.mesh.clone();
+            let t0 = std::time::Instant::now();
+            ofgpu::mesh::gpugeom::gpu_compute_geometry_csr(
+                gpu, &mgk, &mut md, &rbx.points, &rbx.faces, &fcsr,
+            )?;
+            gpu.sync()?;
+            let t_geom_d = t0.elapsed().as_secs_f64() * 1e3;
+
+            // The same sweep with nothing downloaded: what an adapt would pay
+            // once the mesh stops coming back to the host at all.
+            let pair = vec![-1 as Label; rbx.mesh.n_boundary_faces];
+            let bw = vec![1.0 as Scalar; rbx.mesh.n_boundary_faces];
+            let t0 = std::time::Instant::now();
+            let gg = GpuGeometry::compute(gpu, &mgk, &rbx.mesh, &rbx.points, &fcsr, &pair, &bw)?;
+            gpu.sync()?;
+            let t_res = t0.elapsed().as_secs_f64() * 1e3;
+
+            // And the download on its own, so that the difference between the
+            // drop-in and the resident path is SPLIT rather than attributed.
+            // It has to be timed in this run and not another: the two differ
+            // by 15 % on the sub-millisecond columns, which is enough to move
+            // a number derived as a difference of three of them by a factor
+            // of two. SPEC-LIT 82.2 makes a claim out of that difference and
+            // an earlier draft of it mixed two runs and said 1.9 ms where
+            // this says otherwise.
+            let mut sink = rbx.mesh.clone();
+            gg.download_into(gpu, &mut sink)?;
+            let t0 = std::time::Instant::now();
+            gg.download_into(gpu, &mut sink)?;
+            let t_down = t0.elapsed().as_secs_f64() * 1e3;
+            drop(gg);
+
+            (t_build - t_csr - t_geom_h, t_geom_h, t_flat, t_geom_d, t_res, t_down)
+        };
+        split.push((
+            mb.n_cells, t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down,
+        ));
+
         let nmb = &pl.mesh.mesh;
         let gmap = transfer::GpuMap::upload(gpu, &pl.map)?;
         let d_p = gpu.upload(&pb)?;
@@ -8484,13 +8606,64 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
 
         let n_amort = ((t_plan + t_xfer + t_graph) / (0.02 * t_step)).ceil();
         let n_graph = (t_graph / (0.02 * t_step)).ceil();
+        let n_dev = ((t_plan_dev + t_xfer + t_graph) / (0.02 * t_step)).ceil();
         println!(
-            "  {:>7} {:>10.3} {:>11.3} {:>11.3} {:>11.3} {:>9.0} {:>10.0}",
-            mb.n_cells, t_step, t_plan, t_xfer, t_graph, n_amort, n_graph
+            "  {:>7} {:>10.3} {:>11.3} {:>11.3} {:>11.3} {:>9.0} {:>10.0} {:>11.3} {:>9.0}",
+            mb.n_cells, t_step, t_plan, t_xfer, t_graph, n_amort, n_graph, t_plan_dev, n_dev
         );
         drop(gmb);
     }
     c.require("the cadence measurement ran", any);
+    println!("\n  where a rebuild's time goes, and what the device sweep removes:");
+    println!(
+        "  {:>7} {:>10} {:>10} {:>8} {:>10} {:>10} {:>10} {:>9} {:>8}",
+        "cells",
+        "emit/ms",
+        "geom_h/ms",
+        "flat/ms",
+        "geom_d/ms",
+        "kernel/ms",
+        "down/ms",
+        "rest/ms",
+        "speed-up"
+    );
+    for (n, e, gh, fl, gd, gr, dn) in &split {
+        // `rest` is a RESIDUAL, not a measurement: geom_d, geom_res and the
+        // download are three separate timings, so what is left after taking
+        // two from the first carries all three noises. It is printed because
+        // it bounds the host prologue - the part of the sweep BOTH arms run
+        // and neither ports - and it is not quoted to more than "small",
+        // because across the three rows it moves by a factor of seven while
+        // the three quantities it comes from move by fifteen per cent.
+        // SPEC-LIT 82.1 said 1.9 ms here on one run of an earlier draft; that
+        // number was this residual, and it was noise.
+        let rest = gd - gr - dn;
+        println!(
+            "  {:>7} {:>10.3} {:>10.3} {:>8.3} {:>10.3} {:>10.3} {:>10.3} {:>9.3} {:>7.1}x",
+            n,
+            e,
+            gh,
+            fl,
+            gd,
+            gr,
+            dn,
+            rest,
+            gh / gr.max(1e-9)
+        );
+    }
+    println!(
+        "  emit is Forest::build WITHOUT the geometry sweep and without the CSR;\n           \
+         geom_h is mesh::geometry::compute; geom_d is the device sweep as a drop-in,\n           \
+         which uploads the topology and downloads sixteen arrays; kernel is the same\n           \
+         call with nothing downloaded, which is what a mesh that STAYS on the device\n           \
+         pays; down is the sixteen arrays coming back on top of that,\n           \
+         and rest is geom_d - kernel - down: a RESIDUAL of three separate timings, not\n           \
+         a measurement, which bounds the host prologue both arms run and neither ports.\n           \
+         The speed-up column is geom_h/kernel, the arithmetic the port is responsible\n           \
+         for. SPEC-LIT 75.8 named geometry::compute as the binding constraint on an\n           \
+         adapt; 82.2 measures that the EMITTER is larger, and 82.9 says what a device\n           \
+         emitter would have to reproduce."
+    );
     println!(
         "  t_step is one replay of the fifty-launch graph; t_plan is the HOST mesh and\n           geometry rebuild; t_xfer is the four device transfer kernels; t_graph is\n           capture + instantiate. \"N at 2%\" is how many steps an adapt must be spread\n           over to cost 2 % of the run; \"N graph\" is the same figure if the graph\n           recapture were the ONLY cost. The gap between the two columns is the finding\n           of S75.8: the recapture is not what makes an adapt expensive."
     );

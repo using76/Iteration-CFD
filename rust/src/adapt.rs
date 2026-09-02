@@ -90,6 +90,33 @@ use crate::mesh::refined::RefinedBox;
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
 use crate::{DevBuf, Label, Scalar, Vec3};
 
+/// Where the geometry sweep of a rebuild runs.
+///
+/// SPEC-LIT section 82. An adapt renumbers every cell, so the mesh and its
+/// geometry have to be built again from nothing; section 75.8 measured that
+/// this, and not the CUDA graph, is what makes an adapt expensive, and section
+/// 82.2 measures which part of it.
+///
+/// **The two arms compute the same bits.** Not to a tolerance:
+/// `mesh::gpugeom` is gated on bitwise identity with `mesh::geometry`, so
+/// [`Rebuild::Device`] cannot change any answer, only how long it takes to
+/// reach it. [`Rebuild::Host`] is the default everywhere and is literally the
+/// code that was here before the device arm existed, so a caller that does not
+/// ask for the device cannot be affected by it - BY CONSTRUCTION, section
+/// 13.4.1.
+#[derive(Clone, Copy)]
+pub enum Rebuild<'a> {
+    /// `mesh::geometry::compute`, on the host. The default.
+    Host,
+    /// `mesh::gpugeom::gpu_compute_geometry`, on the device.
+    ///
+    /// Faster only if you then keep the mesh: section 82.2 measures the
+    /// download at two thirds of what the whole device path costs. The
+    /// device-resident route is `GpuGeometry::compute`, which this arm cannot
+    /// use because it must return a `HostMesh`.
+    Device(&'a Gpu, &'a crate::mesh::gpugeom::MeshGeomKernels),
+}
+
 /// The deepest level a [`Leaf`] may carry. The canonical ordering key packs
 /// octant coordinates shifted to this level, so it also bounds the key.
 pub const LEVEL_MAX: u32 = 6;
@@ -375,6 +402,41 @@ impl Forest {
     /// emitted with the smaller index as owner and its polygon reversed, and
     /// the sort at the end puts the whole list into upper-triangular order.
     pub fn build(&self) -> Result<RefinedBox> {
+        self.build_with(Rebuild::Host)
+    }
+
+    /// [`Forest::build`], with the geometry sweep run where `how` says.
+    ///
+    /// The emission - the voxel map, the face grouping, the point numbering
+    /// and the sort - is the same code in both arms and is still on the host;
+    /// SPEC-LIT section 82.9 records that it is now the larger half of a
+    /// rebuild and what a device version of it would have to reproduce.
+    pub fn build_with(&self, how: Rebuild<'_>) -> Result<RefinedBox> {
+        let (mut mesh, points, faces) = self.emit()?;
+        match how {
+            Rebuild::Host => mesh.compute_geometry(&points, &faces)?,
+            Rebuild::Device(gpu, k) => {
+                crate::mesh::gpugeom::gpu_compute_geometry(gpu, k, &mut mesh, &points, &faces)?
+            }
+        }
+        Ok(RefinedBox {
+            mesh,
+            points,
+            faces,
+            level: self.levels(),
+            base_n: self.n,
+            base_d: self.d,
+        })
+    }
+
+    /// The emitter proper: everything but the geometry sweep.
+    ///
+    /// Returns the mesh with its topology and its cell -> face CSR filled and
+    /// every geometric array still empty, together with the points and the
+    /// face point lists the sweep needs. `build_cell_face_maps` runs here
+    /// because the device sweep GATHERS over that CSR and cannot be called
+    /// without it - see `mesh::gpugeom`'s precondition.
+    fn emit(&self) -> Result<(HostMesh, Vec<Vec3>, Vec<Vec<Label>>)> {
         let (nx, ny, nz) = (self.n[0], self.n[1], self.n[2]);
         let lmax = self.lmax();
         let fac = 1usize << lmax;
@@ -588,16 +650,8 @@ impl Forest {
             ..Default::default()
         };
         mesh.build_cell_face_maps();
-        mesh.compute_geometry(&points, &faces)?;
 
-        Ok(RefinedBox {
-            mesh,
-            points,
-            faces,
-            level: self.levels(),
-            base_n: self.n,
-            base_d: self.d,
-        })
+        Ok((mesh, points, faces))
     }
 }
 
@@ -780,6 +834,19 @@ pub fn balance_sweep(target: &mut [u32], owner: &[Label], neighbour: &[Label]) -
 /// and nothing else. It is passed rather than re-derived because the caller
 /// already has it and building it is the expensive half.
 pub fn plan(before: &Forest, mesh: &HostMesh, mark: &[Mark], l_max: u32) -> Result<Plan> {
+    plan_with(before, mesh, mark, l_max, Rebuild::Host)
+}
+
+/// [`plan`], with the geometry sweep of the rebuild run where `how` says.
+///
+/// The two arms produce the same `Plan`, bit for bit - see [`Rebuild`].
+pub fn plan_with(
+    before: &Forest,
+    mesh: &HostMesh,
+    mark: &[Mark],
+    l_max: u32,
+    how: Rebuild<'_>,
+) -> Result<Plan> {
     let n_old = before.len();
     if mesh.n_cells != n_old {
         return Err(Error::Mesh(format!(
@@ -983,7 +1050,7 @@ pub fn plan(before: &Forest, mesh: &HostMesh, mark: &[Mark], l_max: u32) -> Resu
         }
     }
 
-    let mesh_new = after.build()?;
+    let mesh_new = after.build_with(how)?;
     let v_new = &mesh_new.mesh.v;
 
     // The conservative weights. `w_qp = V_q / sum_{q' in C(p)} V_q'` makes
