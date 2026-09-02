@@ -13426,7 +13426,7 @@ Two readings of (61.7), and they are different readings:
 | §61.2's mass approximation | `max Y_s` and the resident soot mass REPORTED | `max Y_s = 0.0397` in the near-burner stagnation cell, resident mass `0.303 g` - a domain-mean mass fraction of `6.3e-5`. The peak is what an unoxidised, undeposited tracer does in a slow inlet cell, and it is on the screen rather than in a footnote |
 | the device report against the host one (§61.6) | every printed number unmoved when the driver's host loops became device reductions | **unmoved in every printed digit** on the live fire: `max Y_s 0.0397`, resident mass `0.303409 g`, formation `0.00821579 g/s`, and with them combustion efficiency `75.8133 %` and radiated fraction `45.7607 %`. `max Y_s` is exact on both sides (a maximum does not round); the three integrals agree to the six digits the report prints |
 | (61.7) under `prescribedYield` | returns `y_s` back, to round-off | `<= 1e-12` relative on the unit gate; `0.024` against `0.024` on the live fire - and the run LABELS it an identity |
-| **Gate 61-A**, (61.7) under `laminarSmokePoint` against a measured yield | within a factor of two of Tewarson's `0.024 kg/kg` for propane | **MISSED: `0.000` against `0.024`.** See below |
+| **Gate 61-A**, (61.7) under `laminarSmokePoint` against a measured yield | within a factor of two of Tewarson's `0.024 kg/kg` for propane | **NOT CLOSED. `0.000` against `0.024` here; `0.0124` (a factor of 1.94) on the resolved burner of §85.10, which reaches the model's window but does not close its own species mass budget.** See below, and §85 |
 
 **Gate 61-A - the predicted post-flame soot yield against a measured one:
 MISSED, and the diagnosis is on the same screen.**
@@ -13465,16 +13465,35 @@ them REQUIRES the run to differ, failing by name if it does not. They pass. The 
 mesh is too cold for it; those are different sentences and this document says
 which one it means.
 
-**RETRACTED IN PART - see §83.** "The mesh is too cold for it" is the right
-half of that sentence and "the mesh" is the wrong half. §83.1 refined this same
-case from 32³ to 64³ - eight times the cells, everything else held - and the
-peak temperature moved from 816.9 K to 883.3 K with the count above 1375 K
-still at ZERO. What moves this case is `deltaT`, which changes the combustion
-efficiency from 19 % to 718 % over a factor of ten, because the fuel budget
-does not close: 20.97 kW of propane enters, 7.45 kW burns, 6.7e-7 kW leaves
-and 0.029 g is resident. §83 carries the measurements, the case built to
-answer them (`cases/burnerPlumeResolved.jsonc`, `D*/dx = 12.6`, fuel budget
-closed to 0.13 %), and Gate 61-A's verdict on it.
+**RETRACTED - see §85.** Both halves of that sentence are wrong about the
+reason, and §85 measures what it was. It is not the mesh: §85.6 refines the
+same burner and the count above 1375 K goes 0 → 24 → 296 as it does, which is
+the opposite of the sweep first run against this claim. And it is not that the
+model needed a hotter mesh than a fire can give: with §85.5's defect removed
+this solver puts 296 of 262 144 cells over the model's own threshold and (61.7)
+returns **`0.0124 kg/kg` against Tewarson's `0.024`** — inside the factor of
+two this gate asks for.
+
+**What it was.** `Species` is handed `CaseControls::turb` whole and
+`ScalarTransport` under-relaxes with that struct's `k_relax`, so
+`numerics.relaxation`'s entry for **`k`, the turbulence kinetic energy**, was
+the under-relaxation of `Y_F`, `Y_O2`, `Y_P` and `Y_s`. In §14's non-iterative
+transient splitting there is no outer iteration for a relaxed equation to
+converge in, and the factor multiplies the rate at which fuel enters the
+domain's books: measured on this case with the reaction off and the domain
+isothermal, **42 % of the propane that crossed the burner never appeared
+anywhere** (§85.5's table). That is also what the fuel budget above was
+recording without naming: 20.97 kW enters, 7.45 kW burns, 6.7e-7 kW leaves and
+0.029 g is resident, and the missing 13.5 kW is 64 % of the supply.
+
+**And Gate 61-A is still not closed**, for a reason that has moved rather than
+gone: the only configuration that reaches the model's window has a species mass
+budget out by a factor of 2.6, so its `0.0124` is read off cells partly made of
+fuel that entered nowhere. §85.7 brackets that error from both sides — −17 %
+under a conservative species convection, +162 % under §19's bounded default —
+and says the fix is a species equation in `rho Y` rather than another case
+file. §85.10 is the re-run, §85.11 records that the case file's own previous
+header did not reproduce.
 
 **The prescribed-yield leg is not a pass in disguise.** On the same case it
 returns `0.024` against `0.024`, and both the run and (61.7) above say why
@@ -13483,9 +13502,12 @@ and dividing by the fuel burnt gives `y_s` back whatever the flow does. A
 model that is handed the answer cannot be gated on producing it.
 
 **What would close it**, named rather than implied - and the first of the two
-was tried and does NOT close it (§83.1, §83.7): a mesh that resolves the
-flame - the same refinement §62.12's Gate 4 already names as part of itself -
-or the Santoro, Semerjian & Dobbins (1983) laminar co-flow ethylene flame,
+was tried and DOES move it, once §85.5's defect is out of the way (§85.6): a
+mesh that resolves the flame - the same refinement §62.12's Gate 4 already
+names as part of itself - which now carries 296 cells over the model's own
+threshold, leaving §85.7's species mass budget as the one thing between that
+and a verdict. The second, which would settle it independently of any of this,
+is the Santoro, Semerjian & Dobbins (1983) laminar co-flow ethylene flame,
 which is the regime the model was calibrated in and where its own paper's soot
 volume fractions are measured, in the single-digit ppm range.
 
@@ -25637,3 +25659,388 @@ table.
   should survive `f32` unchanged — and that is an argument, not a measurement.
 * **Nothing here was measured on a second machine**, and every timing is the
   minimum of three or four calls for the reason §83.11's finding 4 gives.
+
+---
+
+## 85. The flame that could not fire — the species mass budget, and Gate 61-A's verdict on a burner that reaches its own threshold
+
+§61.8's **Gate 61-A** — the `laminarSmokePoint` model's predicted post-flame
+soot yield (61.7) against Tewarson's measured `0.024 kg/kg` for propane —
+missed **totally**: `0.000` against `0.024`, because **0 of 32 768 cells** on
+`cases/burnerPlume.jsonc` reached the model's own `1375 K` formation
+threshold. §61.7 predicted that collapse before §61 was written, §61.8 recorded
+it, and §61.8's own diagnosis was "the model works and the mesh is too cold for
+it".
+
+**The mesh was not the reason.** This section measures what was, and the answer
+is not in §61 at all: `Species` is handed `CaseControls::turb` whole, and
+`ScalarTransport` reads its under-relaxation out of that struct's `k_relax` —
+**the turbulence kinetic energy's factor** — so `cases/burnerPlume.jsonc`,
+which names `k: 0.5` for its k-epsilon model, was under-relaxing `Y_F`, `Y_O2`,
+`Y_P` and `Y_s` by the same 0.5. In a non-iterative transient splitting (§14)
+there is no outer iteration for a relaxed equation to converge in, so that
+factor multiplies the rate at which fuel enters the domain's books at all.
+**42 % of the propane that crossed the burner never appeared anywhere.**
+
+With the species relaxation named, the same solver on the same models carries a
+resolved burner **over** the 1375 K threshold: 296 of 262 144 cells, and a
+predicted yield of `0.0124 kg/kg` against the measured `0.024` — inside the
+factor of two Gate 61-A asks for. **This section does not report that as a
+pass**, because the leg that produces it exports 4.56 kW of unburnt fuel
+against a 2.95 kW supply, and §85.7 says why.
+
+**Written from:** the measurements below, this document's §14 (the
+non-iterative splitting), §19 (species), §25 (low-Mach), §27 (the
+mixing-controlled rate) and §61 (soot), and Patankar, *Numerical Heat Transfer
+and Fluid Flow* (1980) §6.7 — implicit under-relaxation and the fixed point it
+preserves — which is already this crate's cited source for the pressure
+relaxation. Tewarson's propane yield is quoted through
+`reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex` (NIST,
+public domain), exactly as §61.3 quotes it. **ORIGINAL** otherwise: the defect,
+the measurements and the contract are this project's own. No GPL-licensed
+source was consulted.
+
+### 85.1 What §61.8 believed, and the two halves of it
+
+§61.8 said, in one sentence: *"The model works and the mesh is too cold for
+it."* The first half is right — §61.5's five smoke-point pair rows run on a
+duct inside the model's own windows and every one of them requires the run to
+differ, failing by name if it does not, and they pass. The second half named
+**the mesh** as the reason the fire never reached `1375 K`, and offered mesh
+refinement as what would close the gate.
+
+A refinement sweep was run against that, and reported that refining
+`cases/burnerPlume.jsonc` from 32³ to 64³ moved the peak temperature from
+816.9 K to 883.3 K and left the count above 1375 K at **zero**. That reading is
+reproduced here — 816.92 K at 32³, and the same zero — and it is **not
+evidence about resolution**, because every run in it was deleting 42 % of its
+own fuel before the first cell could get hot. §85.6 re-runs the sweep with that
+removed, and it says the opposite.
+
+### 85.2 Where the flame is: a ladder by volume, not by cell count
+
+A count of cells above a threshold is not a statement about a fire on a mesh
+whose cells differ in size: a graded mesh packs its small cells where the
+action is, so a cell-count fraction reports a hot region growing under
+refinement while the fire has not moved. The burner report's ladder is a
+fraction of **volume**:
+
+```text
+above(bar) = ( sum over cells with T > bar of V_c ) / ( sum over all cells of V_c )
+```
+
+reported at 500, 700, 1000, 1375 and 1600 K — the last two being the
+smoke-point model's own formation threshold and its peak — beside the peak
+temperature, the cell that holds it, and that cell's `Y_F`, `Y_O2` and
+`q'''_c`. It is printed whether or not a soot model is selected, because the
+question it answers ("is this mesh resolving a flame?") is §27's and not §61's.
+
+`the_flame_ladder_is_by_volume_and_not_by_cell_count` builds the same block
+twice — uniform, and graded one-sided — and puts the same physical field on
+both: the two fractions are one number to the last bit on the uniform mesh and
+differ by more than 0.05 on the graded one, where only the volume fraction
+still measures half a block.
+
+### 85.3 Where the fuel went: the budget that has to close
+
+A combustion efficiency of 35 % is two different cases with the same number —
+fuel leaving unburnt, or fuel piling up inside — and a third, which is the one
+that was actually happening. The burner report closes §27's own fuel budget in
+the currency the measurement is published in, kilograms:
+
+```text
+supply  =  burnt  +  efflux  +  d(resident)/dt  +  (what is left over)
+```
+
+with `supply` and `efflux` the SAME reduction read in two directions:
+
+```text
+mdot_Y(patch, outward) = sum over faces f of patch of  max(+-phi_f, 0) * rho_f * Y_f
+```
+
+`Sf` is outward, so an outflow is `phi > 0` and an inflow is `phi < 0`, and an
+`inletOutlet` patch carrying flow both ways gives two different, both
+meaningful, numbers. `burnt` is `integral q'''_c dV / dh_c` — what §27 burnt,
+not what the inlet supplied — and `resident` is `integral rho Y_F dV`.
+
+**On `cases/burnerPlume.jsonc`, quasi-steady at 1200 steps, the leftover is two
+thirds of the fire:**
+
+| term | measured |
+|---|---|
+| supply, metered off the `inlet` patch | **20.9739 kW** |
+| burnt (§27's own `q'''_c`) | 7.4452 kW |
+| left the domain unburnt | 6.67e-7 kW |
+| resident, and unmoving | 0.0295 g (1.368 kW-seconds) |
+| **unaccounted** | **13.5 kW, 64 % of the supply** |
+
+### 85.4 One time step, for every equation
+
+`CaseControls::turb.delta_t` is lowered from the case's `run.deltaT`, and that
+is the `ddt` of every equation built on `RasCore`: `k`, `epsilon`, §19's
+species and §61's soot. `ofgpu-fire` takes its run mode from `-endTime` /
+`-deltaT` and said so in its own banner — while six equations took it from the
+file. A case naming `run.deltaT 0.005` and run with `-deltaT 0.001` advanced
+its flow five times for every step its fuel took, and no printed number said
+so.
+
+The driver assigns the step in force to `cc.turb.delta_t` before any equation
+is built, and **reports** a disagreement rather than leaving it to be
+discovered in a factor of five. Every case in this tree names exactly the
+`deltaT` its own documented command passes, and every steady case names `1.0`,
+so this moves no published number —
+`fire_tests::the_time_step_in_force_is_the_one_the_run_prints` measures that
+rather than asserting it.
+
+### 85.5 The species' own under-relaxation, and what it was taking instead
+
+`ScalarTransport::correct` under-relaxes with `self.core.ctrl.k_relax` and
+solves with `self.core.ctrl.k_solver`, because `TurbulenceControls` has no slot
+for a passive scalar and the module's own doc says so. `Species::new` and
+`Soot::new` are handed `cc.turb` whole. So **`numerics.relaxation`'s entry for
+`k` was the under-relaxation of every species mass fraction**, and nothing
+printed it.
+
+That is the substitution `fire_controls`'s own doc calls the mistake to avoid —
+*"Reading one equation's entry for another"* — and it is the **fifth** instance
+of §13.4.1's defect class in that one function.
+
+**Why it is not a small error.** Patankar's implicit under-relaxation preserves
+the fixed point: at convergence the relaxed equation and the original have the
+same solution, which is what makes it safe in an iterated steady solve. A
+non-iterative transient splitting has no iteration to converge in. For a cell
+filling with fuel at influx `F` and volume `V`, one relaxed step gives
+
+```text
+Y = Y_old + alpha * dt * F / V
+```
+
+— the cell fills at `alpha` times the rate, every step, for ever.
+
+**Measured, and the cleanest measurement in this section**, because it removes
+every other term at once: `cases/burnerPlume.jsonc` with the reaction switched
+off (`CEDM 1e-12`), so the domain stays isothermal at 293.15 K to the printed
+digit and `rho` is uniform at 1.2041 kg/m³; nothing crosses an outlet
+(`< 1e-20 kW`); and the only thing that can happen to the fuel is that it
+accumulates. Its own burner admits **2.709 g** in 6 s:
+
+| `relaxation.k` | resident fuel after 6 s | fraction of what entered |
+|---|---|---|
+| 0.25 | 0.8186 g | **30.2 %** |
+| 0.5 (what the case ships) | 1.5687 g | **57.9 %** |
+| 1.0 | 3.0562 g | 112.8 % |
+
+Proportional to the factor, to the accuracy a filling transient allows
+(1 : 1.92 : 3.73 against 1 : 2 : 4). And it is not confined to an inert test —
+on the live fire, halving the same factor halves the fire: combustion
+efficiency `35.4976 %` at 0.5 against `19.0153 %` at 0.25, peak temperature
+816.92 K against 600.41 K.
+
+**The contract.** `FireControls` gains `species_relax`, resolved by
+`num.relax("Y", cc.turb.k_relax)` — **the fallback is what the species took
+before that line existed**, so a case naming no `"Y"` builds the identical
+struct and every published number is bitwise unmoved **by construction**. The
+run prints the factor and its provenance, so the substitution cannot be
+invisible again:
+
+```text
+relaxation   U 0.7, p 0.3, T 0.5, Y_i 0.5 (INHERITED from k - this case names no "Y")
+relaxation   U 0.7, p 0.3, T 0.5, Y_i 1 (named)
+```
+
+The soot equation takes the same factor, because `Y_s` is a species equation in
+everything but the name and giving it a different relaxation from the fuel that
+feeds it would be a second silent substitution beside the one this removes.
+
+### 85.6 The refinement sweep, re-run
+
+§85.1's sweep is re-run on `cases/burnerPlumeResolved.jsonc`'s geometry with
+`"Y": 1.0` named and §19's own species convection, 4 s at `deltaT 0.0015`:
+
+| cells | peak T | volume > 1375 K | cells > 1375 K | comb. efficiency |
+|---|---|---|---|---|
+| 32³ | 1350.98 K | 0 % | **0** | 97.95 % |
+| 48³ | 1379.01 K | 0.0217 % | **24** | 95.51 % |
+| 64³ | 1394.60 K | 0.1129 % | **296** | 107.28 % |
+
+**Refinement moves it, monotonically, and it is what carries the model over its
+own threshold.** §61.8's retracted claim that refinement leaves the count at
+zero was measured with §85.5 deleting 42 % of the fuel first.
+
+**One caveat, stated because it is load-bearing.** The inlet region snaps to
+cell boundaries, and the 0.1 m window is 6.4 / 9.6 / 12.8 cells at these three
+meshes: 32³ and 64³ both meter **2.94945 kW** off the patch and 48³ meters
+**3.6413 kW**. The 32³ → 64³ comparison is at constant fuel supply; the 48³ row
+is a 23 % larger burner and is here for its shape, not its level.
+
+`T` at 0.5 is load-bearing for stability in that case and is **reported** as
+such rather than presented as a choice: `T` at 1.0 — which is what the same §14
+argument would ask for, and what `U` and `p` get there by having no entry at
+all — makes it diverge inside 100 steps at every `deltaT` tried.
+
+### 85.7 What is left: the budget that still does not close, and what is exonerated
+
+**Radiation is exonerated, by measurement.** `cases/burnerPlume.jsonc` at 32³,
+1200 steps, **all three legs on §19's own bounded species convection** so that
+the only thing changing is the radiation:
+
+| radiation | peak T |
+|---|---|
+| P1 gray, `a = 0.5`, `chi_r = 0.35` (the case as shipped) | **816.92 K** |
+| the same, with the radiant-fraction floor at zero | **1015.50 K** |
+| no `radiation` block at all | **996.35 K** |
+
+The most that can be bought by touching radiation on this case is **+198.6 K**,
+and the flame is still **359 K** short of the model's threshold. It is not the
+reason. (The middle row being *above* the third is measured and not a
+transcription: with P1 on at `chi_r = 0` the medium absorbs as well as emits,
+and the peak cell is a net gainer. Nothing in this section rests on it.)
+
+**A note on how that was measured, because the first attempt was wrong.** The
+three legs above were originally taken with the radiation varied on top of a
+*conservative* species convection while the baseline had §19's bounded default,
+which made the comparison a two-variable one and produced "52 K" for a quantity
+that is 179 K. The rule the rest of this section follows is the one that catches
+it: change one token, and read the run's own printed `div(phi,Y_i)` line back
+before believing the pair.
+
+**The species mass budget is what is left, and it does not close in either
+discretisation.** `ScalarTransport` integrates
+
+```text
+ddt(psi) + div(phi, psi) - laplacian(alpha_eff, psi) = 0
+```
+
+with `phi` **volumetric** — the constant-density transport equation. The
+variable-density species equation is `d(rho Y)/dt + div(rho u Y) = S`,
+equivalently `rho DY/Dt = S`. §27's own listing writes the fuel sink as
+`Y_F -= omega_F dt / rho`, which is `DY/Dt` units, and the `bounded` correction
+subtracts `Y div(phi)` — exactly what turns `div(u Y)` into `u . grad Y`. **So
+§19's BOUNDED default is the form consistent with §27**, and a conservative
+override is the inconsistent one, which is the opposite of what
+`cases/burnerPlumeResolved.jsonc` shipped with before this section.
+
+Both legs, 64³, `"Y": 1.0`, against a supply of 2.94945 kW metered off the
+patch:
+
+| `div(phi,Y_F)` | burnt | efflux | budget | peak T | cells > 1375 K | yield (61.7) |
+|---|---|---|---|---|---|---|
+| `Gauss upwind` | 2.331 kW | 0.109 kW | **−17 %** | 998.6 K | 0 | `0` |
+| `bounded Gauss upwind` (§19) | 3.164 kW | 4.559 kW | **+162 %** | 1394.6 K | 296 | `0.0124` |
+
+**They bracket the truth from opposite sides and neither closes.** The
+conservative leg loses fuel; the bounded leg exports 4.56 kW of it against
+2.95 kW admitted, and 4 s of that imbalance is 0.41 g against the 0.036 g the
+domain actually holds, so it is not an accumulation transient — that domain is
+manufacturing fuel.
+
+**What is NOT claimed**, and this is the sentence this section most wants read:
+that the remaining error has been located. Three candidates are open and none is
+measured here — the `d(rho)/dt` half of the difference above, which `bounded`
+does not touch; the discrete consistency between the low-Mach `(div u)_target`
+of §25.1 and the `div(phi)` the bounded correction actually subtracts; and
+`T`'s own 0.5 relaxation, which makes `rho` lag `T` and therefore makes those
+two disagree by construction. **The next unit of work here is a species
+equation in `rho Y`, not another case file.**
+
+### 85.8 §13.4 contract — what is refused, and by what name
+
+| Setting | What happens |
+|---|---|
+| `numerics.relaxation."Y"` | **Honoured**, by that name, for every species mass fraction and for `Y_s`. Printed with its value. |
+| `numerics.relaxation` naming no `"Y"` | The species take `k`'s factor, exactly as before this section — and the run PRINTS `Y_i <v> (INHERITED from k - this case names no "Y")`, so the substitution is visible rather than silent. **Alternative: name `"Y"`.** |
+| `numerics.relaxation."Y_F"` (or `Y_O2`, `Y_I`, `Y_P`, `N2`) | **Refused by name**, quoting every per-species key it found: the species are one `Species` set sharing one `ScalarTransport` shape and there is one factor, so a per-species entry would be read and dropped. **Alternative: `"Y"`, named in the message.** |
+| an OpenFOAM `relaxationFactors { equations { ".*" 0.7; } }` | Honoured — the pattern legitimately matches every equation including this one, and refusing a pattern that matched would refuse the idiom §13.4 exists to honour. The per-species refusal above is therefore JSONC-only, and §85.12 records the asymmetry. |
+| the species' LINEAR SOLVER | Still `k_solver`, and **still a substitution**. Not fixed here: it is the same one-field-for-another shape, its effect is bounded by the solver tolerance rather than by the physics, and fixing it is a change to solver resolution that this section did not measure. Named here so it is on the record. |
+
+### 85.9 What must hold
+
+| # | Statement | Test |
+|---|---|---|
+| 1 | The ladder is a fraction of VOLUME, and on a graded mesh that differs from the cell-count fraction | `the_flame_ladder_is_by_volume_and_not_by_cell_count` |
+| 2 | The ladder is non-increasing in its threshold, for any field | `the_ladder_thresholds_are_ordered_and_monotone` |
+| 3 | §85.3's two patch terms are ONE reduction read in two directions, each seeing only the faces flowing that way | `the_fuel_budget_reads_one_patch_flux_in_two_directions` |
+| 4 | The time step in force is the one the run prints, for every equation | `the_time_step_in_force_is_the_one_the_run_prints` |
+| 5 | A case naming no `"Y"` gets exactly `k_relax`, so no published number moves | `the_species_relaxation_falls_back_to_the_turbulence_factor` |
+| 6 | A case naming `"Y"` gets that, and the two legs are distinguishable | same test, both legs |
+| 7 | A per-species relaxation key is refused, and the message names both the offending key and `"Y"` | `a_per_species_relaxation_key_is_refused_by_name` |
+
+### 85.10 Gate 61-A, re-run
+
+Configuration: `cases/burnerPlumeResolved.jsonc` as shipped after this section —
+262 144 cells over a 0.5 m cube (`D*/dx = 12.6`), 2667 steps at
+`deltaT 0.0015`, propane, `laminarSmokePoint` at `l_s = 0.162 m`, `M_F = 44.1`,
+`Y_F,1 = 1`, `omega_so,P = 0.85`, P1 gray at `a = 0.5`, `"Y": 1.0`, §19's own
+bounded species convection. Target `y_s = 0.024 kg/kg` (Tewarson, SFPE Handbook
+Table A.40).
+
+| quantity | §61.8's measurement | this section's |
+|---|---|---|
+| cells above the model's 1375 K threshold | **0 of 32 768** | **296 of 262 144** (0.113 %) |
+| peak T | 816.9 K | **1394.6 K** |
+| formation, oxidation | `0`, `0` g/s | `8.449e-4`, `0` g/s |
+| resident soot, `max Y_s` | `0` g, `0` | `1.245` mg, `0.0927` |
+| predicted post-flame yield (61.7) | **`0` kg/kg, exactly** | **`0.0124` kg/kg** |
+| Tewarson's measured propane yield | `0.024` | `0.024` |
+| ratio | — | **1.94, inside the factor of two** |
+| fuel budget on the leg that produced it | 64 % unaccounted | **+162 %** |
+
+**The verdict is that Gate 61-A is still not closed, and the reason has moved.**
+It is no longer "no cell is hot enough" — 296 are, and §85.6 shows refinement is
+what gets them there. It is that the only configuration reaching the model's
+window is one whose species mass budget is out by a factor of 2.6, so the
+`0.0124` is read off cells partly made of fuel that entered nowhere. A number
+inside the target's factor of two, produced by a run that manufactures its own
+reactant, is not a pass, and calling it one would be the worst outcome available
+here.
+
+**Nothing was tuned to reach it.** `l_s`, `M_F`, `Y_F,1`, `omega_so,P`,
+`C_EDM`, `chi_r` and `a` are all at the values §61 and §27 published, and the
+two settings this section changed in the gate case — the species relaxation and
+the species convection scheme — were each chosen by an argument about the
+discretisation and then measured, in both directions, with both legs in §85.7's
+table.
+
+### 85.11 The header that did not reproduce
+
+`cases/burnerPlumeResolved.jsonc` shipped with a header claiming a combustion
+efficiency of **95.86 %** and a peak temperature of **1012.0 K** at the command
+the same header documents, and `fire.rs`'s §85.4 comment repeated the pair.
+**Neither reproduces.** At `-endTime 4.0 -deltaT 0.0015` on the settings that
+header shipped with, this section measures **46.6742 %** and **743.071 K** —
+which is precisely the pair that comment attributes to the *other* leg of its
+own comparison, the one where the case names `deltaT 0.005`. Since §85.4 makes
+the case's `run.deltaT` inert, the two legs of that comparison are the same run
+and cannot both be reproducible; the one HEAD produces is 46.67 %.
+
+The numbers are replaced with measured ones rather than deleted, and this
+subsection exists so that the replacement is visible. The supply term, which is
+metered off the patch by the run itself, agrees to six digits (2.9494 against
+2.94945), so it is the fire and not the case that differs.
+
+### 85.12 Validation, and what is NOT claimed
+
+`ofgpu-validate` gains nothing that runs a fire — a 2667-step 262 144-cell
+burner is not a harness check — and §69's registry entry for Gate 61-A is
+rewritten to the verdict above, with `How::NotRunHere` unchanged.
+
+**What is NOT claimed:**
+
+* **that the species equation is now conservative.** It is not. §85.7's table is
+  the measurement of how far it is from being so, in both directions, and the
+  fix is a species equation in `rho Y` rather than a case setting.
+* **that Gate 61-A passes.** §85.10 says why the `0.0124` is a number and not a
+  verdict.
+* **that the species SOLVER is resolved by name.** It is still `k_solver`;
+  §85.8's last row records it.
+* **that the per-species refusal covers the OpenFOAM format.** It does not, for
+  the reason §85.8 gives, and an OpenFOAM case naming
+  `relaxationFactors { equations { Y_F 0.5; } }` still has it read through the
+  pattern resolver and applied to nothing.
+* **that a locally refined (§75) flame was tried.** It was not: §85.6 gets the
+  model over its threshold on a uniform mesh, and an adapted one would have
+  been a second variable on top of a budget that does not close. §85.7 names
+  what to fix first.
+* **that anything was measured on a second machine.** One RTX 5070 Ti.
+* **that the 48³ row of §85.6 is the same fire as the other two.** It is a 23 %
+  larger burner; §85.6 says so on the row.

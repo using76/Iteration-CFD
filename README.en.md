@@ -721,6 +721,79 @@ calls. That is a factor of 2.4 that survives `best_of` entirely. The table
 above is the third of them — the run the committed binary produced, and the
 slowest — so the honest reading of the 8.7× is "between eight and twenty".
 
+### The flame that could not fire: a gate that missed for the wrong reason
+
+SPEC-LIT §61.8's **Gate 61-A** holds the `laminarSmokePoint` model's predicted
+post-flame soot yield against Tewarson's measured `0.024 kg/kg` for propane. It
+missed **totally** — `0.000` against `0.024` — because **0 of 32 768 cells** on
+the demonstration burner reached the model's own `1375 K` formation threshold.
+§61.7 had predicted that collapse before §61 was written, and §61.8's diagnosis
+was: *the model works and the mesh is too cold for it.*
+
+**The mesh was not the reason.** SPEC-LIT §85 measures what was, and it is not
+in the soot model at all. `Species` is handed the case's `TurbulenceControls`
+whole, and `ScalarTransport` under-relaxes with that struct's `k_relax` — **the
+turbulence kinetic energy's factor**. So a case naming `relaxation { k: 0.5 }`
+for its k-epsilon model was under-relaxing `Y_F`, `Y_O2`, `Y_P` and `Y_s` by
+the same 0.5. In a non-iterative transient splitting there is no outer
+iteration for a relaxed equation to converge in, so that factor multiplies the
+rate at which fuel can enter the domain's books at all.
+
+The cleanest measurement removes every other term at once: the reaction
+switched off, the domain isothermal at 293.15 K to the printed digit, nothing
+crossing an outlet, so the only thing that can happen to the fuel is that it
+accumulates. Against the **2.709 g** the burner admits in 6 s:
+
+| `relaxation.k` | resident fuel after 6 s | fraction of what entered |
+|---|---|---|
+| 0.25 | 0.8186 g | **30.2 %** |
+| 0.5 (what the case shipped) | 1.5687 g | **57.9 %** |
+| 1.0 | 3.0562 g | 112.8 % |
+
+Proportional to the factor. **42 % of the propane that crossed the burner never
+appeared anywhere**, which is also what the fire's own fuel budget had been
+saying without naming it: 20.97 kW in, 7.45 kW burnt, 6.7e-7 kW out, 0.029 g
+resident, and 13.5 kW simply gone.
+
+The species now read `relaxation."Y"` **by name**, falling back to `k`'s factor
+so every published number is bitwise unmoved by construction, and the run
+prints which of the two it got. A per-species key (`Y_F`, `Y_O2`, …) is refused
+by name, because there is one factor for the set.
+
+**With that out of the way, refinement does what §61.8 said it would.** The
+sweep that had reported zero at every mesh was measured while 42 % of the fuel
+was being deleted; re-run on a resolved 2.95 kW burner:
+
+| cells | peak T | cells > 1375 K | predicted yield |
+|---|---|---|---|
+| 32³ | 1350.98 K | **0** | `0` |
+| 48³ | 1379.01 K | **24** | ≈ `0` |
+| 64³ | **1394.60 K** | **296** | **`0.0124 kg/kg`** |
+
+`0.0124` against the measured `0.024` is a factor of **1.94** — inside the
+factor of two Gate 61-A asks for.
+
+**It is still not reported as a pass, and that is the point of the section.**
+The leg that reaches the model's window exports **4.56 kW** of unburnt fuel
+against a **2.95 kW** supply, so the yield is read off cells partly made of
+fuel that entered nowhere. The species equation is
+`ddt(psi) + div(phi, psi) - laplacian = 0` with a *volumetric* flux — the
+constant-density transport equation — where a fire needs `d(rho Y)/dt +
+div(rho u Y)`. The two available convection schemes bracket the truth from
+opposite sides and neither closes it: **−17 %** conservative, **+162 %** under
+the bounded default. A number inside the target's factor of two, produced by a
+run that manufactures its own reactant, is not a pass, and the next unit of
+work here is a species equation in `rho Y` rather than another case file.
+
+Radiation is **exonerated** by measurement along the way, all three legs on
+the same species convection so that only the radiation moves: peak T is
+816.92 K as the case ships, 1015.50 K with the radiant-fraction floor at zero,
+and 996.35 K with radiation removed entirely. The most that touching radiation
+can buy is **+198.6 K** on a flame still **359 K** short of the threshold. And the gate case's own previous header, which claimed 95.86 % and
+1012.0 K at the command it documented, **does not reproduce**: the same command
+gives 46.67 % and 743.1 K, and §85.11 says so rather than quietly substituting
+a different pair.
+
 ---
 
 ## Case settings: honoured or refused

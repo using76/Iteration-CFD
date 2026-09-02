@@ -2971,15 +2971,26 @@ fn check_soot_and_wsgg(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         how: How::NotRunHere,
         gate: "SPEC-LIT S61.8 Gate 61-A",
         against: "Tewarson's measured post-flame soot yield for propane, 0.024 kg/kg (SFPE \
-                  Handbook Table A.40), on cases/burnerPlume.jsonc",
-        headline: "the laminarSmokePoint model's PREDICTED post-flame soot yield (61.7) is \
-                   0.000 kg/kg against that measured 0.024, because 0 of 32768 cells reach \
-                   the model's own 1375 K formation threshold - S61.7 predicted exactly this"
+                  Handbook Table A.40), on cases/burnerPlumeResolved.jsonc",
+        headline: "the laminarSmokePoint model now REACHES its own 1375 K window - 296 of \
+                   262144 cells, against 0 of 32768 before S85 - and (61.7) returns 0.0124 kg/kg \
+                   against that measured 0.024, a factor of 1.94. It is NOT reported as a pass: \
+                   the only leg that reaches the window exports 4.559 kW of unburnt fuel against \
+                   a 2.949 kW supply, so the number is read off cells partly made of fuel that \
+                   entered nowhere"
             .to_string(),
         detail: vec![
-            "  a 1200-step fire, which is why it is not run inside this harness; SPEC-LIT \
-             S61.8 and docs/07-fire-solver.md carry it. The prescribedYield leg returns \
-             0.024 on the same case and is an IDENTITY, not a pass"
+            "  a 2667-step 262144-cell fire, which is why it is not run inside this harness; \
+             SPEC-LIT S85.10 carries it and S85.7 brackets the species mass budget error from \
+             both sides (-17 % conservative, +162 % under S19's bounded default)"
+                .to_string(),
+            "  what changed: S85.5 - Species was handed CaseControls::turb whole, so \
+             numerics.relaxation's entry for k (the TURBULENCE kinetic energy) was the \
+             under-relaxation of Y_F/Y_O2/Y_P/Y_s, and in S14's non-iterative transient \
+             splitting that deleted 42 % of the fuel the burner supplied"
+                .to_string(),
+            "  the prescribedYield leg still returns 0.024 on the same case and is an \
+             IDENTITY, not a pass"
                 .to_string(),
         ],
     });
