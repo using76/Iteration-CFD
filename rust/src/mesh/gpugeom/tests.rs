@@ -257,6 +257,154 @@ fn the_device_sweep_is_bitwise_identical_to_the_host_sweep() {
     }
 }
 
+/// Every geometric array of a `GpuMesh`, read back into a `HostMesh` so that
+/// [`differences`] can compare it to one the host sweep filled.
+///
+/// The read-back is the TEST's, not the path's: a resident mesh downloads
+/// nothing but `v`, and the only way to ask whether the sixteen arrays on the
+/// device are the right bits is to look at them.
+fn read_back(g: &Gpu, gm: &crate::mesh::GpuMesh, shape: &HostMesh) -> HostMesh {
+    fn cut<T: Clone>(mut v: Vec<T>, n: usize) -> Vec<T> {
+        v.truncate(n);
+        v
+    }
+    let (nc, nif, nbf) = (gm.n_cells, gm.n_internal_faces, gm.n_boundary_faces);
+    let mut m = shape.clone();
+    m.v = cut(g.download(&gm.v).expect("v"), nc);
+    m.c = cut(g.download(&gm.c).expect("c"), nc);
+    m.sf = cut(g.download(&gm.sf).expect("sf"), nif);
+    m.cf = cut(g.download(&gm.cf).expect("cf"), nif);
+    m.mag_sf = cut(g.download(&gm.mag_sf).expect("mag_sf"), nif);
+    m.weights = cut(g.download(&gm.weights).expect("weights"), nif);
+    m.delta_coeffs = cut(g.download(&gm.delta_coeffs).expect("delta_coeffs"), nif);
+    m.non_orth_corr = cut(g.download(&gm.non_orth_corr).expect("non_orth_corr"), nif);
+    m.skew_corr = cut(g.download(&gm.skew_corr).expect("skew_corr"), nif);
+    m.b_sf = cut(g.download(&gm.b_sf).expect("b_sf"), nbf);
+    m.b_mag_sf = cut(g.download(&gm.b_mag_sf).expect("b_mag_sf"), nbf);
+    m.b_cf = cut(g.download(&gm.b_cf).expect("b_cf"), nbf);
+    m.b_delta_coeffs = cut(g.download(&gm.b_delta_coeffs).expect("b_delta_coeffs"), nbf);
+    m.b_non_orth_corr = cut(g.download(&gm.b_non_orth_corr).expect("b_non_orth_corr"), nbf);
+    m.b_y = cut(g.download(&gm.b_y).expect("b_y"), nbf);
+    m.b_weights = cut(g.download(&gm.b_weights).expect("b_weights"), nbf);
+    m
+}
+
+/// **THE GATE, on the path that never builds a `HostMesh`.**
+///
+/// SPEC-LIT section 83.5. The gate above compares two `HostMesh`es, which is
+/// the drop-in's answer; this one compares two `GpuMesh`es - one reached by
+/// `host sweep -> GpuMesh::upload`, the other by
+/// `gpu_geometry_resident -> GpuMesh::from_device_geometry`, which downloads
+/// one array and uploads none of the sixteen. Section 82.3's claim was about
+/// the arrays a sweep writes; this is the claim that the mesh a solver is
+/// handed is the same mesh, which is the thing that actually has to be true
+/// and is one constructor further along.
+///
+/// Two things are compared here that the drop-in gate cannot see:
+///
+/// * **The row map** - `rf_offset`, `rf_face`, `rf_flags`. Section 70's whole
+///   guarantee is that a row's summation order is a property of the mesh, and
+///   a device-built mesh reaching a second copy of section 70.3's rebuild
+///   would end that guarantee for adapted meshes specifically - the one case
+///   nobody looks at. Both constructors go through one private
+///   `GpuTopology::upload`, so this asserts a property that holds by
+///   construction; it is here because "by construction" is a claim about
+///   today's code and this is a claim about tomorrow's.
+/// * **`total_volume`**, the ascending-cell-id fold of `v`. It is the reason
+///   `from_device_geometry` refuses a mesh with no host `v` instead of
+///   quietly reducing on the device, where the fold order would be the
+///   scheduler's.
+#[test]
+fn a_device_built_mesh_reaches_the_device_as_the_same_mesh() {
+    let Some(g) = gpu() else { return };
+    let k = MeshGeomKernels::new(&g).expect("the meshgeom kernels must load");
+
+    for (name, base, points, faces) in fixtures() {
+        let mut host = base.clone();
+        geometry::compute(&mut host, &points, &faces).expect("the host sweep");
+        let gm_h = crate::mesh::GpuMesh::upload(&g, &host).expect("the host upload");
+
+        let mut dev = base.clone();
+        let csr = flatten_faces(&faces);
+        let geom = gpu_geometry_resident(&g, &k, &mut dev, &points, &faces, &csr)
+            .expect("the resident sweep");
+        // Nothing was downloaded: every host geometric array is still the one
+        // the fixture arrived with, byte for byte, and the `b_weights` SEED
+        // was moved to the device rather than copied. Fixture (d) makes this
+        // sharp - its points are displaced but its `base` mesh carries the
+        // undisplaced geometry, so an array that had been filled from the
+        // device would differ.
+        assert!(
+            dev.c == base.c && dev.sf == base.sf && dev.v == base.v,
+            "on '{name}' the resident sweep wrote geometry back onto the host mesh"
+        );
+        assert!(
+            dev.b_weights.is_empty(),
+            "on '{name}' the boundary weights came back, and the resident path's answer \
+             for them is GpuGeometry::b_weights"
+        );
+        dev.v = geom.download_volumes(&g).expect("the one array that comes back");
+        let gm_d = crate::mesh::GpuMesh::from_device_geometry(&g, &dev, geom)
+            .expect("the resident upload");
+
+        let a = read_back(&g, &gm_h, &host);
+        let b = read_back(&g, &gm_d, &host);
+        let bad = differences(&a, &b);
+        assert!(
+            bad.is_empty(),
+            "SPEC-LIT section 83.5 requires a mesh built on the device to REACH the \
+             device as the same mesh, and on '{name}' it does not:\n  {}",
+            bad.join("\n  ")
+        );
+
+        for (what, x, y) in [
+            ("rf_offset", &gm_h.rf_offset, &gm_d.rf_offset),
+            ("rf_face", &gm_h.rf_face, &gm_d.rf_face),
+            ("rf_flags", &gm_h.rf_flags, &gm_d.rf_flags),
+        ] {
+            assert_eq!(
+                g.download(x).expect("row map"),
+                g.download(y).expect("row map"),
+                "SPEC-LIT section 70's row map moved on '{name}': {what}"
+            );
+        }
+        assert_eq!(
+            gm_h.total_volume.to_bits(),
+            gm_d.total_volume.to_bits(),
+            "total_volume on '{name}'"
+        );
+    }
+}
+
+/// A device-built mesh with no host `v` is refused by name, and told what to
+/// call.
+///
+/// SPEC-LIT section 83.6. `total_volume` is a fold in ascending cell id and
+/// the alternative - reducing on the device - would not be the same bits, so
+/// the constructor must not be able to reach it by accident.
+#[test]
+fn a_device_geometry_with_no_host_volumes_is_refused_by_name() {
+    let Some(g) = gpu() else { return };
+    let k = MeshGeomKernels::new(&g).expect("the meshgeom kernels must load");
+    let (_, base, points, faces) = fixtures().remove(0);
+
+    let mut dev = base.clone();
+    let csr = flatten_faces(&faces);
+    let geom =
+        gpu_geometry_resident(&g, &k, &mut dev, &points, &faces, &csr).expect("the resident sweep");
+    // The fixture arrives with the generator's volumes on it. Clear them: the
+    // case under test is the caller who never fetched the one array.
+    dev.v = Vec::new();
+    let msg = match crate::mesh::GpuMesh::from_device_geometry(&g, &dev, geom) {
+        Ok(_) => panic!("a mesh with no host volumes must be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("download_volumes") && msg.contains("GpuMesh::upload"),
+        "the refusal must name the alternative, and it says: {msg}"
+    );
+}
+
 /// The gate above is not vacuous: the SAME source compiled with nvcc's
 /// default multiply-add contraction does NOT reproduce the host's bits.
 ///

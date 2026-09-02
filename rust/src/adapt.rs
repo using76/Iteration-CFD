@@ -111,9 +111,10 @@ pub enum Rebuild<'a> {
     /// `mesh::gpugeom::gpu_compute_geometry`, on the device.
     ///
     /// Faster only if you then keep the mesh: section 82.2 measures the
-    /// download at two thirds of what the whole device path costs. The
-    /// device-resident route is `GpuGeometry::compute`, which this arm cannot
-    /// use because it must return a `HostMesh`.
+    /// download at two thirds of what the whole device path costs. This arm
+    /// must return a `HostMesh`, so it cannot avoid that download; the
+    /// device-resident route is [`plan_resident`], which does not build one -
+    /// section 83.
     Device(&'a Gpu, &'a crate::mesh::gpugeom::MeshGeomKernels),
 }
 
@@ -427,6 +428,50 @@ impl Forest {
             base_n: self.n,
             base_d: self.d,
         })
+    }
+
+    /// [`Forest::build`], with the geometry computed on the device and **left
+    /// there**: the mesh comes back already uploaded.
+    ///
+    /// SPEC-LIT section 83. [`Rebuild::Device`] runs the same kernels and then
+    /// spends the sixteen-array download to fill a `HostMesh`, which a caller
+    /// then spends a sixteen-array upload to put back; section 82.2 measured
+    /// the first of those at half of what the device drop-in costs and section
+    /// 82.5 measured the second separately. This route pays neither. It is not
+    /// a faster `build_with` - it is a different destination.
+    ///
+    /// **What comes back on the host.** The `RefinedBox`'s mesh carries its
+    /// points, its faces, its topology, its addressing, the four boundary
+    /// bookkeeping arrays - and of the sixteen geometric arrays, only `v`.
+    /// `v` is not a print: [`plan_resident`] builds the conservative
+    /// prolongation weights `w_qp = V_q / sum V` of section 75.6 out of it on
+    /// the host, and `GpuMesh::total_volume` is its fold. Section 83.3 prices
+    /// that one array and section 83.9 says what a device weight kernel would
+    /// have to reproduce to remove it. Every other geometric array on that
+    /// mesh is EMPTY, deliberately: an empty `c` is a length mismatch at the
+    /// first line that reads it, and a stale or zeroed one would not be.
+    pub fn build_resident(
+        &self,
+        gpu: &Gpu,
+        k: &crate::mesh::gpugeom::MeshGeomKernels,
+    ) -> Result<(RefinedBox, GpuMesh)> {
+        let (mut mesh, points, faces) = self.emit()?;
+        let csr = crate::mesh::gpugeom::flatten_faces(&faces);
+        let geom =
+            crate::mesh::gpugeom::gpu_geometry_resident(gpu, k, &mut mesh, &points, &faces, &csr)?;
+        mesh.v = geom.download_volumes(gpu)?;
+        let gm = GpuMesh::from_device_geometry(gpu, &mesh, geom)?;
+        Ok((
+            RefinedBox {
+                mesh,
+                points,
+                faces,
+                level: self.levels(),
+                base_n: self.n,
+                base_d: self.d,
+            },
+            gm,
+        ))
     }
 
     /// The emitter proper: everything but the geometry sweep.
@@ -847,6 +892,65 @@ pub fn plan_with(
     l_max: u32,
     how: Rebuild<'_>,
 ) -> Result<Plan> {
+    plan_by(before, mesh, mark, l_max, &mut |f: &Forest| f.build_with(how))
+}
+
+/// [`plan`], with the new mesh built **on the device and left there**.
+///
+/// SPEC-LIT section 83. Returns the same `Plan` the host route returns, except
+/// that its `mesh.mesh` carries only `v` of the sixteen geometric arrays - see
+/// [`Forest::build_resident`] - together with the [`GpuMesh`] that carries all
+/// sixteen and needed no upload to get them.
+///
+/// **The `Map` is bit-for-bit the host route's.** Its weights are folds over
+/// `v_new` in ascending cell id and `v` is downloaded, so the arithmetic that
+/// produces them is literally the same code on the same bits; nothing about
+/// the transfer moved. That is asserted rather than argued, in
+/// `ofgpu-validate`'s adapt section.
+///
+/// This is the entry point section 82.5 said was missing: `plan_with` "must
+/// return a `HostMesh`" and so could not use `GpuGeometry::compute`. It still
+/// must, and it still does - the emitter is on the host (section 82.9) - but
+/// the geometry no longer makes the round trip with it.
+pub fn plan_resident(
+    before: &Forest,
+    mesh: &HostMesh,
+    mark: &[Mark],
+    l_max: u32,
+    gpu: &Gpu,
+    k: &crate::mesh::gpugeom::MeshGeomKernels,
+) -> Result<(Plan, GpuMesh)> {
+    let mut built: Option<GpuMesh> = None;
+    let plan = plan_by(before, mesh, mark, l_max, &mut |f: &Forest| {
+        let (rb, gm) = f.build_resident(gpu, k)?;
+        built = Some(gm);
+        Ok(rb)
+    })?;
+    let gm = built.ok_or_else(|| {
+        Error::Mesh(
+            "adapt::plan_resident: the rebuild did not run, so there is no device mesh to \
+             return. This cannot happen unless plan_by stopped calling `build`"
+                .to_string(),
+        )
+    })?;
+    Ok((plan, gm))
+}
+
+/// The body of [`plan_with`] and [`plan_resident`], with the one line that
+/// differs between them - how the new mesh is built - passed in.
+///
+/// The two entry points must not be two copies of the balance fixed point and
+/// the gather map. SPEC-LIT section 83.5: the `Map` a resident adapt hands to
+/// `transfer` is gated as bitwise identical to the host route's, and that gate
+/// is only interesting because it is testing one implementation reached two
+/// ways rather than two implementations that agree today.
+fn plan_by(
+    before: &Forest,
+    mesh: &HostMesh,
+    mark: &[Mark],
+    l_max: u32,
+    build: &mut dyn FnMut(&Forest) -> Result<RefinedBox>,
+) -> Result<Plan> {
     let n_old = before.len();
     if mesh.n_cells != n_old {
         return Err(Error::Mesh(format!(
@@ -1050,7 +1154,7 @@ pub fn plan_with(
         }
     }
 
-    let mesh_new = after.build_with(how)?;
+    let mesh_new = build(&after)?;
     let v_new = &mesh_new.mesh.v;
 
     // The conservative weights. `w_qp = V_q / sum_{q' in C(p)} V_q'` makes

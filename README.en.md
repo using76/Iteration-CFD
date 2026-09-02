@@ -563,6 +563,65 @@ every fixture, uniform box included**. An earlier version of that check
 *simulated* a contraction on the host, found nothing on any box mesh, and
 concluded the flag was buying nothing; it had probed the wrong expression.
 
+### The mesh that never comes home
+
+§82 left one sentence of work behind it: *a `HostMesh` is the wrong
+destination*. SPEC-LIT §83 builds the destination. `adapt::plan_resident`
+rebuilds the mesh, computes its geometry on the device and hands back a
+`GpuMesh` — no host geometry array is assembled and none is uploaded back.
+
+Two things came out of it that were not in the brief.
+
+**The download was not the only round trip, and not the larger one.** An adapt
+that keeps its mesh also pays `GpuMesh::upload` — sixteen arrays in the other
+direction — which §82 measured separately and left out of its table because
+`plan` returned a `HostMesh` and there was nothing to compare it against.
+Priced to the same place, *the new mesh on the device*:
+
+| cells | host + upload /ms | device drop-in + upload /ms | **resident /ms** | N host | N dev | **N res** |
+|---|---|---|---|---|---|---|
+| 64 | 0.307 | 0.682 | 0.420 | 93 | 176 | 119 |
+| 216 | 0.927 | 1.239 | 0.851 | 217 | 282 | 201 |
+| 512 | 2.467 | 2.111 | 1.644 | 510 | 440 | 348 |
+| 4 096 | 12.879 | 11.494 | 9.313 | 2 453 | 2 192 | 1 780 |
+| 13 824 | 30.140 | 24.728 | **21.894** | 5 345 | 4 389 | **3 889** |
+
+N falls from 5 345 to **3 889** at 13 824 cells — 27 %, against the 17 % §82
+reported for the drop-in — and **it is still not enough**. `Forest::build`'s
+emit loop is 15.4 ms of a 29.1 ms rebuild, 53 %, and no amount of geometry work
+reaches it. §82.9 is still the specification for closing that, and nothing here
+touched it.
+
+**And "never round-trip the geometry" is one array short of achievable.** The
+array is not `total_volume`; it is the conservative prolongation weight
+`w_qp = V_q / Σ V` that makes the transfer conserve. `plan` builds it on the
+host out of the new mesh's cell volumes, and that fold is in ascending cell id,
+so a tree reduction on the device would be a different answer. `v` comes home;
+the other fifteen do not. §83.9 is the specification for the kernel that would
+remove even that, and it is not written.
+
+§82 could not say where the device sweep overtakes the host, because 512 cells
+was the smallest mesh it measured and the device was still losing there. With
+64 and 216 added the answer turns out to be three answers: **the kernels cross
+between 216 and 512 cells, the drop-in between 512 and 4 096, and the resident
+route between 64 and 216** — three fixed costs, being four kernel launches,
+sixteen synchronous device-to-host copies, and none.
+
+The gate is §82's, one constructor further along: a mesh built on the device
+must *reach* the device as the same mesh — sixteen arrays by their bits, plus
+§70's row map, `total_volume`, and the transfer map's weights — on five
+fixtures and on a mesh an adapt produced, at every size in the sweep.
+
+One thing this section changed about how the project measures. §75.8's and
+§82.5's tables time each quantity **once**, and on this machine that is not a
+measurement: four runs put one step at 0.535, 0.262, 0.482 and 0.390 ms, and
+the unmodified §82 binary measured the same 4 096-cell rebuild at **13.4 ms in
+one run and 68.5 ms in another**, same code, same machine, an hour apart. The adapt section now reports the **minimum of three or four
+calls**, which is the one estimator interference cannot bias upward, and the
+evidence that it was needed is that the per-step time is now monotone in mesh
+size — 0.227 / 0.241 / 0.254 / 0.265 / 0.283 ms — which it must be and never
+was.
+
 **What is not claimed.** The face flux is not transferred at all — neither the
 area-weighted split of a parent face nor a divergence-free filling of a refined
 parent's new interior faces — and that is the largest single gap between this

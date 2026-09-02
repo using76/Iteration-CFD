@@ -352,6 +352,24 @@ impl GpuGeometry {
 
         Ok(())
     }
+
+    /// The cell volumes, and only those - the one array a device-resident
+    /// rebuild still brings back.
+    ///
+    /// Section 83.3 is the accounting: fifteen of the sixteen arrays stop
+    /// coming home, and `v` does not, because two host computations are
+    /// written on it and neither is a print. `adapt::plan`'s conservative
+    /// prolongation weight is `w_qp = V_q / sum_{q'} V_{q'}` over a refined
+    /// family (section 75.6) and `GpuMesh`'s `total_volume` is
+    /// `v.iter().sum()`. Both are folds in ascending cell id, so downloading
+    /// the array and folding it on the host is bit-for-bit what the host
+    /// sweep produced; a tree reduction on the device would not be, and that
+    /// is why this is a download and not a kernel.
+    pub fn download_volumes(&self, gpu: &Gpu) -> Result<Vec<Scalar>> {
+        let mut v = gpu.download(&self.v)?;
+        v.truncate(self.n_cells);
+        Ok(v)
+    }
 }
 
 /// The device twin of [`crate::mesh::geometry::compute`]: same signature, same
@@ -383,6 +401,37 @@ pub fn gpu_compute_geometry_csr(
     faces: &[Vec<Label>],
     csr: &FacePointCsr,
 ) -> Result<()> {
+    let g = gpu_geometry_resident(gpu, k, m, points, faces, csr)?;
+    g.download_into(gpu, m)?;
+    Ok(())
+}
+
+/// The sweep with **nothing downloaded**: the host prologue, then the four
+/// kernels, then the buffers.
+///
+/// This is the entry point a device-resident rebuild uses, and
+/// [`gpu_compute_geometry_csr`] is now literally this function followed by
+/// [`GpuGeometry::download_into`]. That is the point of the split rather than
+/// a tidying: section 82.3's bitwise claim is a claim about the PROLOGUE as
+/// much as about the kernels - `cyclic_pairing`, `b_kind`, `b_patch`,
+/// `b_nbr_cell` and the `b_weights` seed all feed the device sweep - so the
+/// resident path and the drop-in must run the same prologue, and after this
+/// split they cannot run different ones. Section 83.2.
+///
+/// `m` comes back carrying its topology, its addressing and the four boundary
+/// bookkeeping arrays, and **none of its geometry**: `v`, `c`, `sf` and the
+/// rest are left exactly as they were, and `b_weights` is left EMPTY, because
+/// the seed was moved to the device and the answer is `GpuGeometry::b_weights`.
+/// A caller that wants the host arrays back calls `download_into`; a caller
+/// that wants a device mesh calls [`crate::mesh::GpuMesh::from_device_geometry`].
+pub fn gpu_geometry_resident(
+    gpu: &Gpu,
+    k: &MeshGeomKernels,
+    m: &mut HostMesh,
+    points: &[Vec3],
+    faces: &[Vec<Label>],
+    csr: &FacePointCsr,
+) -> Result<GpuGeometry> {
     // ---- the host prologue, identical to `geometry::compute` --------------
     geometry::validate(m, points, faces)?;
     refuse_a_mesh_without_a_cell_face_csr(m)?;
@@ -427,16 +476,13 @@ pub fn gpu_compute_geometry_csr(
 
     // ---- the device sweep -------------------------------------------------
     let b_weights_in = std::mem::take(&mut m.b_weights);
-    let g = GpuGeometry::compute(gpu, k, m, points, csr, &pair, &b_weights_in);
-    let g = match g {
-        Ok(g) => g,
+    match GpuGeometry::compute(gpu, k, m, points, csr, &pair, &b_weights_in) {
+        Ok(g) => Ok(g),
         Err(e) => {
             m.b_weights = b_weights_in;
-            return Err(e);
+            Err(e)
         }
-    };
-    g.download_into(gpu, m)?;
-    Ok(())
+    }
 }
 
 /// The one precondition the host sweep does not have.
@@ -461,7 +507,10 @@ fn refuse_a_mesh_without_a_cell_face_csr(m: &HostMesh) -> Result<()> {
     for (name, got, exp) in want {
         if got != exp {
             return Err(Error::Mesh(format!(
-                "gpu_compute_geometry: the device sweep gathers over the cell ->                  face CSR, and `{name}` holds {got} entries where the mesh needs                  {exp}. Call HostMesh::build_cell_face_maps() first, or use the                  host sweep mesh::geometry::compute, which needs no addressing"
+                "gpu_compute_geometry: the device sweep gathers over the cell -> face CSR, \
+                 and `{name}` holds {got} entries where the mesh needs {exp}. Call \
+                 HostMesh::build_cell_face_maps() first, or use the host sweep \
+                 mesh::geometry::compute, which needs no addressing"
             )));
         }
     }

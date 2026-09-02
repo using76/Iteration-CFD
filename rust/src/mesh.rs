@@ -32,7 +32,7 @@
 //! GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::{Label, Scalar, Vec3};
 
 /// What a patch *is*, topologically. The physical boundary condition applied
@@ -363,8 +363,35 @@ pub struct GpuMesh {
     pub total_volume: Scalar,
 }
 
-impl GpuMesh {
-    pub fn upload(gpu: &Gpu, m: &HostMesh) -> Result<Self> {
+/// Everything a [`GpuMesh`] carries that is **not** geometry: the addressing,
+/// the boundary bookkeeping and the §70 row map.
+///
+/// It exists so that there is exactly one of it. A `GpuMesh` can now be built
+/// two ways - from a `HostMesh` that has run the host sweep, or from a
+/// [`gpugeom::GpuGeometry`] the device sweep just filled - and §70's guarantee
+/// is that a row's summation order is a property of the MESH. Two constructors
+/// that each built their own row map would be two rules, and the second one
+/// would be wrong the first time someone edited the first. SPEC-LIT §83.4.
+struct GpuTopology {
+    owner: DevBuf<Label>,
+    neighbour: DevBuf<Label>,
+    b_face_cells: DevBuf<Label>,
+    b_nbr_cell: DevBuf<Label>,
+    b_nbr_face: DevBuf<Label>,
+    b_kind: DevBuf<Label>,
+    b_patch: DevBuf<Label>,
+    cf_offset: DevBuf<Label>,
+    cf_face: DevBuf<Label>,
+    cf_own: DevBuf<Label>,
+    bcf_offset: DevBuf<Label>,
+    bcf_face: DevBuf<Label>,
+    rf_offset: DevBuf<Label>,
+    rf_face: DevBuf<Label>,
+    rf_flags: DevBuf<Label>,
+}
+
+impl GpuTopology {
+    fn upload(gpu: &Gpu, m: &HostMesh) -> Result<Self> {
         // SPEC-LIT §70.3. Half the meshes in this crate's tests are written
         // out by hand and never call `build_cell_face_maps`, so the merged row
         // map may not be there. Uploading an empty one would give every row a
@@ -372,6 +399,12 @@ impl GpuMesh {
         // wrong QUIETLY, which is the failure mode this project has been bitten
         // by before. Build it here instead, from the addressing the mesh does
         // carry. Three vectors, not a clone of the mesh.
+        //
+        // A device-built mesh reaches this by the same route and gets the same
+        // answer BY CONSTRUCTION, because there is one copy of these lines:
+        // the row map is a function of `owner`, `neighbour`, `b_face_cells`
+        // and `global_face`, none of which the geometry sweep touches, so
+        // where the geometry was computed cannot move it. §83.4.
         let rebuilt = if m.rf_offset.len() == m.n_cells + 1
             && m.rf_face.len() == 2 * m.n_internal_faces + m.n_boundary_faces
             && m.rf_flags.len() == m.rf_face.len()
@@ -398,12 +431,45 @@ impl GpuMesh {
         };
 
         Ok(Self {
+            owner: gpu.upload(&m.owner)?,
+            neighbour: gpu.upload(&m.neighbour)?,
+            b_face_cells: gpu.upload(&m.b_face_cells)?,
+            b_nbr_cell: gpu.upload(&m.b_nbr_cell)?,
+            // A mesh built before §48.3, or by hand in a test, may have no
+            // pairing array at all. `-1` everywhere is "no couple", which is
+            // what every consumer already means by it.
+            b_nbr_face: if m.b_nbr_face.len() == m.n_boundary_faces {
+                gpu.upload(&m.b_nbr_face)?
+            } else {
+                gpu.upload(&vec![-1 as Label; m.n_boundary_faces])?
+            },
+            b_kind: gpu.upload(&m.b_kind)?,
+            b_patch: gpu.upload(&m.b_patch)?,
+
+            cf_offset: gpu.upload(&m.cf_offset)?,
+            cf_face: gpu.upload(&m.cf_face)?,
+            cf_own: gpu.upload(&m.cf_own)?,
+            bcf_offset: gpu.upload(&m.bcf_offset)?,
+            bcf_face: gpu.upload(&m.bcf_face)?,
+
+            rf_offset: gpu.upload(rf_offset)?,
+            rf_face: gpu.upload(rf_face)?,
+            rf_flags: gpu.upload(rf_flags)?,
+        })
+    }
+}
+
+impl GpuMesh {
+    pub fn upload(gpu: &Gpu, m: &HostMesh) -> Result<Self> {
+        let t = GpuTopology::upload(gpu, m)?;
+
+        Ok(Self {
             n_cells: m.n_cells,
             n_internal_faces: m.n_internal_faces,
             n_boundary_faces: m.n_boundary_faces,
 
-            owner: gpu.upload(&m.owner)?,
-            neighbour: gpu.upload(&m.neighbour)?,
+            owner: t.owner,
+            neighbour: t.neighbour,
 
             v: gpu.upload(&m.v)?,
             c: gpu.upload(&m.c)?,
@@ -425,35 +491,136 @@ impl GpuMesh {
                 gpu.upload(&vec![Vec3::ZERO; m.n_internal_faces])?
             },
 
-            b_face_cells: gpu.upload(&m.b_face_cells)?,
+            b_face_cells: t.b_face_cells,
             b_sf: gpu.upload(&m.b_sf)?,
             b_mag_sf: gpu.upload(&m.b_mag_sf)?,
             b_cf: gpu.upload(&m.b_cf)?,
             b_delta_coeffs: gpu.upload(&m.b_delta_coeffs)?,
             b_non_orth_corr: gpu.upload(&m.b_non_orth_corr)?,
             b_y: gpu.upload(&m.b_y)?,
-            b_nbr_cell: gpu.upload(&m.b_nbr_cell)?,
-            // A mesh built before §48.3, or by hand in a test, may have no
-            // pairing array at all. `-1` everywhere is "no couple", which is
-            // what every consumer already means by it.
-            b_nbr_face: if m.b_nbr_face.len() == m.n_boundary_faces {
-                gpu.upload(&m.b_nbr_face)?
-            } else {
-                gpu.upload(&vec![-1 as Label; m.n_boundary_faces])?
-            },
+            b_nbr_cell: t.b_nbr_cell,
+            b_nbr_face: t.b_nbr_face,
             b_weights: gpu.upload(&m.b_weights)?,
-            b_kind: gpu.upload(&m.b_kind)?,
-            b_patch: gpu.upload(&m.b_patch)?,
+            b_kind: t.b_kind,
+            b_patch: t.b_patch,
 
-            cf_offset: gpu.upload(&m.cf_offset)?,
-            cf_face: gpu.upload(&m.cf_face)?,
-            cf_own: gpu.upload(&m.cf_own)?,
-            bcf_offset: gpu.upload(&m.bcf_offset)?,
-            bcf_face: gpu.upload(&m.bcf_face)?,
+            cf_offset: t.cf_offset,
+            cf_face: t.cf_face,
+            cf_own: t.cf_own,
+            bcf_offset: t.bcf_offset,
+            bcf_face: t.bcf_face,
 
-            rf_offset: gpu.upload(rf_offset)?,
-            rf_face: gpu.upload(rf_face)?,
-            rf_flags: gpu.upload(rf_flags)?,
+            rf_offset: t.rf_offset,
+            rf_face: t.rf_face,
+            rf_flags: t.rf_flags,
+
+            patches: m.patches.clone(),
+            total_volume: m.v.iter().copied().sum(),
+        })
+    }
+
+    /// The device-resident constructor: the topology from `m`, the geometry
+    /// **moved** out of a [`gpugeom::GpuGeometry`] the device sweep just
+    /// filled, and not one geometric array through the host.
+    ///
+    /// SPEC-LIT §83. `GpuMesh::upload` is how a mesh reaches the device when
+    /// the geometry was computed on the host; this is how it reaches the
+    /// device when the geometry never left it. §82.2 measured the two costs
+    /// that removes at 13824 cells - the sixteen-array download inside
+    /// `gpu_compute_geometry` and the sixteen-array upload inside
+    /// `GpuMesh::upload` - and §83.3 measures what is left.
+    ///
+    /// The sixteen `DevBuf`s are moved, not copied: `g` is consumed, so there
+    /// is no moment at which the same geometry exists twice on the device and
+    /// no way to hand the same buffers to two meshes.
+    ///
+    /// **The row map is the same rule.** Both constructors go through the one
+    /// private `GpuTopology::upload`, which is the only copy of §70.3's
+    /// rebuild, so an adapted mesh cannot get a different row from a
+    /// generated one.
+    ///
+    /// **Refused by name.** `m.v` must already hold the cell volumes.
+    /// `total_volume` is `v.iter().sum()` - a fold in ascending cell id - and
+    /// this constructor will not silently spend a device-to-host copy to get
+    /// it, nor quietly substitute a tree reduction that would not be the same
+    /// bits. **Alternative: `m.v = g.download_volumes(gpu)?` before the
+    /// call**, which is the one array §83.3 accounts for and the same array
+    /// `adapt::plan` needs anyway for the conservative weights of §75.6.
+    pub fn from_device_geometry(
+        gpu: &Gpu,
+        m: &HostMesh,
+        g: gpugeom::GpuGeometry,
+    ) -> Result<Self> {
+        let want = [
+            ("cells", g.n_cells, m.n_cells),
+            ("internal faces", g.n_internal_faces, m.n_internal_faces),
+            ("boundary faces", g.n_boundary_faces, m.n_boundary_faces),
+        ];
+        for (what, got, exp) in want {
+            if got != exp {
+                return Err(Error::Mesh(format!(
+                    "GpuMesh::from_device_geometry: the device geometry was computed for \
+                     {got} {what} and the host mesh has {exp}. The two must be the same \
+                     mesh; call mesh::gpugeom::gpu_geometry_resident on THIS mesh, or use \
+                     GpuMesh::upload, which needs no device geometry"
+                )));
+            }
+        }
+        if m.v.len() != m.n_cells {
+            return Err(Error::Mesh(format!(
+                "GpuMesh::from_device_geometry: the host mesh carries {} cell volumes for \
+                 {} cells, and `total_volume` is the ascending-cell-id fold of them. This \
+                 constructor will not spend a hidden download to get it. Set `mesh.v = \
+                 geometry.download_volumes(gpu)?` first - one array of the sixteen, which \
+                 SPEC-LIT §83.3 accounts for - or use GpuMesh::upload",
+                m.v.len(),
+                m.n_cells
+            )));
+        }
+
+        let t = GpuTopology::upload(gpu, m)?;
+
+        Ok(Self {
+            n_cells: m.n_cells,
+            n_internal_faces: m.n_internal_faces,
+            n_boundary_faces: m.n_boundary_faces,
+
+            owner: t.owner,
+            neighbour: t.neighbour,
+
+            v: g.v,
+            c: g.c,
+
+            sf: g.sf,
+            mag_sf: g.mag_sf,
+            cf: g.cf,
+            weights: g.weights,
+            delta_coeffs: g.delta_coeffs,
+            non_orth_corr: g.non_orth_corr,
+            skew_corr: g.skew_corr,
+
+            b_face_cells: t.b_face_cells,
+            b_sf: g.b_sf,
+            b_mag_sf: g.b_mag_sf,
+            b_cf: g.b_cf,
+            b_delta_coeffs: g.b_delta_coeffs,
+            b_non_orth_corr: g.b_non_orth_corr,
+            b_y: g.b_y,
+            b_nbr_cell: t.b_nbr_cell,
+            b_nbr_face: t.b_nbr_face,
+            b_weights: g.b_weights,
+            b_kind: t.b_kind,
+            b_patch: t.b_patch,
+
+            cf_offset: t.cf_offset,
+            cf_face: t.cf_face,
+            cf_own: t.cf_own,
+            bcf_offset: t.bcf_offset,
+            bcf_face: t.bcf_face,
+
+            rf_offset: t.rf_offset,
+            rf_face: t.rf_face,
+            rf_flags: t.rf_flags,
 
             patches: m.patches.clone(),
             total_volume: m.v.iter().copied().sum(),

@@ -8002,12 +8002,46 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 /// **This is not a solver running.** Nothing here is inside a time loop; the
 /// adapt is driven directly, which is exactly the state SPEC-LIT S75.9
 /// records. What is measured is the adapt.
+/// How many times a timing in the adapt section is repeated before its
+/// minimum is taken. One more than this is used wherever the first call also
+/// serves as the warm-up.
+///
+/// SPEC-LIT S83.3.
+const TIMING_REPS: usize = 3;
+
+/// The MINIMUM of `reps` timings of the same call, in milliseconds, with
+/// whatever the last call returned.
+///
+/// SPEC-LIT S83.3. A single-shot timing is not a measurement on this machine.
+/// Three separate runs of the same `plan` at 4096 cells gave 12.9, 13.2 and
+/// **68.5** ms, and the third is a Windows scheduling artefact rather than a
+/// property of the code; the same runs put `t_step` at 0.262, 0.390 and 0.482
+/// ms, and every `N` in the cadence table is divided by it. Interference can
+/// only ADD time, so the minimum is the estimator that converges on what the
+/// code costs; the mean converges on what the machine was doing.
+///
+/// This replaces the "one throwaway call first" idiom S82's table used. It is
+/// strictly stronger: with `reps + 1` the first call is still the warm-up, and
+/// the minimum then also discards the run in which the scheduler intervened,
+/// which a single timed call after a single warm-up cannot.
+fn best_of<T>(reps: usize, mut f: impl FnMut() -> Result<T>) -> Result<(f64, T)> {
+    let mut best = f64::INFINITY;
+    let mut last: Option<T> = None;
+    for _ in 0..reps.max(1) {
+        let t0 = std::time::Instant::now();
+        let v = f()?;
+        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        last = Some(v);
+    }
+    Ok((best, last.expect("best_of runs at least once")))
+}
+
 fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     use ofgpu::adapt::rebuild;
     use ofgpu::adapt::transfer::{self, Integrals, Prolongation};
     use ofgpu::adapt::{
-        gpu_loehner_indicator, loehner_indicator, mark_with_hysteresis, plan, plan_with,
-        AdaptKernels, Forest, Mark, Rebuild, LOEHNER_EPS,
+        gpu_loehner_indicator, loehner_indicator, mark_with_hysteresis, plan, plan_resident,
+        plan_with, AdaptKernels, Forest, Mark, Rebuild, LOEHNER_EPS,
     };
     use ofgpu::mesh::gpugeom::{flatten_faces, GpuGeometry, MeshGeomKernels};
 
@@ -8362,7 +8396,7 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     //      terms are measured here rather than estimated.
     println!("\n  the adapt cadence, measured on this machine:");
     println!(
-        "  {:>7} {:>10} {:>11} {:>11} {:>11} {:>9} {:>10} {:>11} {:>9}",
+        "  {:>7} {:>10} {:>11} {:>11} {:>11} {:>9} {:>10} {:>11} {:>9} {:>11} {:>9}",
         "cells",
         "t_step/ms",
         "t_plan/ms",
@@ -8371,11 +8405,24 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         "N at 2%",
         "N graph",
         "t_planD/ms",
-        "N dev"
+        "N dev",
+        "t_planR/ms",
+        "N res"
     );
     let mut any = false;
-    let mut split: Vec<(usize, f64, f64, f64, f64, f64, f64)> = Vec::new();
-    for nb in [8usize, 16, 24] {
+    let mut split: Vec<(usize, f64, f64, f64, f64, f64, f64, f64)> = Vec::new();
+    // SPEC-LIT S83.3. The three plan columns above do not leave the new mesh in
+    // the same place, so they are not comparable and the third table below
+    // makes them so: `t_plan` and `t_planD` hand back a `HostMesh` that still
+    // has to be uploaded before a kernel can touch it, and `t_planR` hands
+    // back a `GpuMesh` that does not.
+    let mut ready: Vec<(usize, f64, f64, f64, f64, f64, f64, f64)> = Vec::new();
+    // 64 and 216 cells are not here for the cadence - an adapt on a 64-cell
+    // mesh is not a question anyone asks - but for the CROSSOVER. S82.5
+    // measured the device drop-in slower than the host sweep at 512 cells and
+    // could not say where the two meet; S83.8 answers that, and it needs
+    // meshes on the far side of it.
+    for nb in [4usize, 6, 8, 16, 24] {
         let dd = Vec3::new(1.0 / nb as Scalar, 1.0 / nb as Scalar, 1.0 / nb as Scalar);
         let fb = Forest::uniform([nb, nb, nb], dd)?;
         let rb = fb.build()?;
@@ -8399,36 +8446,32 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         // Capture a fifty-launch graph - about what one outer iteration of a
         // turbulence model costs - and time capture + instantiate.
         //
-        // One throwaway capture first. The very first capture in a process
-        // pays for driver machinery that has nothing to do with the mesh, and
-        // timing it would put a millisecond of warm-up into the smallest case
-        // and make the table say the opposite of what it means.
-        {
-            let warm = gpu.capture(|_| {
+        // `TIMING_REPS + 1`: the first capture in a process pays for driver
+        // machinery that has nothing to do with the mesh, and timing it would
+        // put a millisecond of warm-up into the smallest case and make the
+        // table say the opposite of what it means. The minimum discards it,
+        // and discards the run the scheduler interrupted as well - S83.3.
+        let (t_graph, graph) = best_of(TIMING_REPS + 1, || {
+            let g = gpu.capture(|_| {
                 for _ in 0..50 {
                     fvc_grad_scalar(gpu, &k.fv, &mut gout, &fld, &gmb)?;
                 }
                 Ok(())
             })?;
-            if let Some(mut w) = warm {
-                w.upload()?;
-            }
+            let g = match g {
+                Some(mut w) => {
+                    w.upload()?;
+                    Some(w)
+                }
+                None => None,
+            };
             gpu.sync()?;
-        }
-        let t0 = std::time::Instant::now();
-        let graph = gpu.capture(|_| {
-            for _ in 0..50 {
-                fvc_grad_scalar(gpu, &k.fv, &mut gout, &fld, &gmb)?;
-            }
-            Ok(())
+            Ok(g)
         })?;
-        let Some(mut graph) = graph else {
+        let Some(graph) = graph else {
             c.skip("the adapt cadence", "the captured graph held no work");
             continue;
         };
-        graph.upload()?;
-        gpu.sync()?;
-        let t_graph = t0.elapsed().as_secs_f64() * 1e3;
 
         graph.launch()?;
         gpu.sync()?;
@@ -8440,12 +8483,14 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             any = true;
         }
         let reps = 20;
-        let t0 = std::time::Instant::now();
-        for _ in 0..reps {
-            graph.launch()?;
-        }
-        gpu.sync()?;
-        let t_step = t0.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        let (t_batch, _) = best_of(TIMING_REPS + 1, || {
+            for _ in 0..reps {
+                graph.launch()?;
+            }
+            gpu.sync()?;
+            Ok(())
+        })?;
+        let t_step = t_batch / reps as f64;
 
         // What an adapt costs: the plan (which rebuilds the mesh and its
         // geometry on the host) and the transfer (which does not).
@@ -8457,18 +8502,34 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             e
         };
         let mkb = mark_with_hysteresis(&eb, &fb.levels(), 0.12, 0.02, 1)?;
-        let t0 = std::time::Instant::now();
-        let pl = plan(&fb, mb, &mkb, 1)?;
-        let t_plan = t0.elapsed().as_secs_f64() * 1e3;
+        let (t_plan, pl) = best_of(TIMING_REPS, || plan(&fb, mb, &mkb, 1))?;
 
         // The same plan with the geometry sweep on the device - SPEC-LIT S82.
-        // One throwaway first: the module load and the first allocation belong
-        // to neither sweep.
-        let warm = plan_with(&fb, mb, &mkb, 1, Rebuild::Device(gpu, &mgk))?;
-        drop(warm);
-        let t0 = std::time::Instant::now();
-        let pld = plan_with(&fb, mb, &mkb, 1, Rebuild::Device(gpu, &mgk))?;
-        let t_plan_dev = t0.elapsed().as_secs_f64() * 1e3;
+        // `TIMING_REPS + 1`, because the module load and the first allocation
+        // belong to neither sweep and the minimum drops them.
+        let (t_plan_dev, pld) = best_of(TIMING_REPS + 1, || {
+            let p = plan_with(&fb, mb, &mkb, 1, Rebuild::Device(gpu, &mgk))?;
+            gpu.sync()?;
+            Ok(p)
+        })?;
+
+        // The same plan again with the new mesh built on the device and LEFT
+        // there - SPEC-LIT S83.
+        let (t_plan_res, (plr, gmr)) = best_of(TIMING_REPS + 1, || {
+            let r = plan_resident(&fb, mb, &mkb, 1, gpu, &mgk)?;
+            gpu.sync()?;
+            Ok(r)
+        })?;
+
+        // And what the two HostMesh routes still owe after they return: the
+        // upload the resident route never pays. S82.5 measured this separately
+        // and did not put it in the table, because `plan` returned a HostMesh
+        // and there was nothing to compare it against. There is now.
+        let (t_upload, gmu) = best_of(TIMING_REPS + 1, || {
+            let g = GpuMesh::upload(gpu, &pl.mesh.mesh)?;
+            gpu.sync()?;
+            Ok(g)
+        })?;
 
         // THE GATE. A rebuild that moves where the geometry is computed must
         // not move what it is, on the mesh an ADAPT produces and not only on a
@@ -8513,63 +8574,195 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             }
         }
 
+        // THE SECOND GATE - SPEC-LIT S83.5. The block above compares two
+        // `HostMesh`es, which is what the DROP-IN produces. This one compares
+        // what a solver is actually handed: the `GpuMesh` a resident adapt
+        // builds without ever assembling a host geometry array, against the
+        // one the host route produces and then uploads. Sixteen arrays, the
+        // S70 row map, `total_volume`, and the transfer map's weights.
+        //
+        // The row map is the reason this is not a repeat of the first gate.
+        // S70's guarantee is that a row's summation order is a property of the
+        // MESH; `GpuMesh::upload` rebuilds that map when the host mesh has
+        // none, and a device-built mesh that reached a second copy of the rule
+        // would end the guarantee for adapted meshes exactly - the one case
+        // nothing else here looks at.
+        {
+            let a = &pl.mesh.mesh;
+            let (nc, nif, nbf) = (a.n_cells, a.n_internal_faces, a.n_boundary_faces);
+            let mut moved: Vec<&'static str> = Vec::new();
+            for (w, h, d, n) in [
+                ("v", &a.v, &gmr.v, nc),
+                ("mag_sf", &a.mag_sf, &gmr.mag_sf, nif),
+                ("weights", &a.weights, &gmr.weights, nif),
+                ("delta_coeffs", &a.delta_coeffs, &gmr.delta_coeffs, nif),
+                ("b_mag_sf", &a.b_mag_sf, &gmr.b_mag_sf, nbf),
+                ("b_delta_coeffs", &a.b_delta_coeffs, &gmr.b_delta_coeffs, nbf),
+                ("b_y", &a.b_y, &gmr.b_y, nbf),
+                ("b_weights", &a.b_weights, &gmr.b_weights, nbf),
+            ] {
+                let mut got = gpu.download(d)?;
+                got.truncate(n);
+                if h.len() != got.len()
+                    || !h.iter().zip(&got).all(|(x, y)| x.to_bits() == y.to_bits())
+                {
+                    moved.push(w);
+                }
+            }
+            for (w, h, d, n) in [
+                ("c", &a.c, &gmr.c, nc),
+                ("sf", &a.sf, &gmr.sf, nif),
+                ("cf", &a.cf, &gmr.cf, nif),
+                ("non_orth_corr", &a.non_orth_corr, &gmr.non_orth_corr, nif),
+                ("skew_corr", &a.skew_corr, &gmr.skew_corr, nif),
+                ("b_sf", &a.b_sf, &gmr.b_sf, nbf),
+                ("b_cf", &a.b_cf, &gmr.b_cf, nbf),
+                ("b_non_orth_corr", &a.b_non_orth_corr, &gmr.b_non_orth_corr, nbf),
+            ] {
+                let mut got = gpu.download(d)?;
+                got.truncate(n);
+                if h.len() != got.len()
+                    || !h.iter().zip(&got).all(|(x, y)| {
+                        x.x.to_bits() == y.x.to_bits()
+                            && x.y.to_bits() == y.y.to_bits()
+                            && x.z.to_bits() == y.z.to_bits()
+                    })
+                {
+                    moved.push(w);
+                }
+            }
+            let rows_ok = gpu.download(&gmu.rf_offset)? == gpu.download(&gmr.rf_offset)?
+                && gpu.download(&gmu.rf_face)? == gpu.download(&gmr.rf_face)?
+                && gpu.download(&gmu.rf_flags)? == gpu.download(&gmr.rf_flags)?;
+            let vol_ok = gmu.total_volume.to_bits() == gmr.total_volume.to_bits();
+            // The transfer map is built on the host out of `v_new`, and `v` is
+            // the one array the resident route still downloads. If that fold
+            // had moved, every conserved quantity would move with it.
+            let bits = |x: &[Scalar], y: &[Scalar]| {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits())
+            };
+            let map_ok = bits(&pl.map.src_w, &plr.map.src_w)
+                && bits(&pl.map.own_w, &plr.map.own_w)
+                && pl.map.src_cell == plr.map.src_cell
+                && pl.map.src_offset == plr.map.src_offset
+                && pl.map.own_child == plr.map.own_child
+                && pl.map.own_offset == plr.map.own_offset;
+            let all = moved.is_empty() && rows_ok && vol_ok && map_ok;
+            if !all {
+                c.note(&format!(
+                    "S83.5 at {} cells: arrays that moved: {:?}; row map ok {rows_ok}, \
+                     total_volume ok {vol_ok}, transfer map ok {map_ok}",
+                    mb.n_cells, moved
+                ));
+            }
+            if nb == 8 {
+                c.require(
+                    "a mesh an adapt built ON THE DEVICE reaches the device as the same \
+                     mesh - sixteen arrays, the S70 row map, total_volume and the transfer \
+                     weights - S83.5",
+                    all,
+                );
+            } else if !all {
+                c.require(
+                    "the device-resident rebuild is bitwise on every size",
+                    false,
+                );
+            }
+        }
+
         // Where the rebuild's time actually goes. `plan` is re-entered here
-        // rather than instrumented, so these are three independent timings of
-        // the same three pieces and not a decomposition of one.
-        let (t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down) = {
+        // rather than instrumented, so these are independent timings of the
+        // same pieces and not a decomposition of one - and each is the MINIMUM
+        // of `TIMING_REPS` of them, for the reason `best_of` records: a
+        // single-shot timing on this machine moves by a factor of five.
+        let (t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down, t_resident) = {
             let after = pl.after.clone();
-            let t0 = std::time::Instant::now();
-            let rbx = after.build()?;
-            let t_build = t0.elapsed().as_secs_f64() * 1e3;
+            let (t_build, rbx) = best_of(TIMING_REPS, || after.build())?;
 
-            let mut mh = rbx.mesh.clone();
-            let t0 = std::time::Instant::now();
-            mh.build_cell_face_maps();
-            let t_csr = t0.elapsed().as_secs_f64() * 1e3;
-            let t0 = std::time::Instant::now();
-            mh.compute_geometry(&rbx.points, &rbx.faces)?;
-            let t_geom_h = t0.elapsed().as_secs_f64() * 1e3;
+            // Cloned OUTSIDE the timer: both calls mutate the mesh they are
+            // handed, so a repeat needs a fresh one, and cloning inside would
+            // be timing the clone.
+            let mut t_csr = f64::INFINITY;
+            let mut t_geom_h = f64::INFINITY;
+            for _ in 0..TIMING_REPS {
+                let mut mh = rbx.mesh.clone();
+                let t0 = std::time::Instant::now();
+                mh.build_cell_face_maps();
+                t_csr = t_csr.min(t0.elapsed().as_secs_f64() * 1e3);
+                let t0 = std::time::Instant::now();
+                mh.compute_geometry(&rbx.points, &rbx.faces)?;
+                t_geom_h = t_geom_h.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
 
-            let t0 = std::time::Instant::now();
-            let fcsr = flatten_faces(&rbx.faces);
-            let t_flat = t0.elapsed().as_secs_f64() * 1e3;
+            let (t_flat, fcsr) = best_of(TIMING_REPS, || Ok(flatten_faces(&rbx.faces)))?;
 
-            let mut md = rbx.mesh.clone();
-            let t0 = std::time::Instant::now();
-            ofgpu::mesh::gpugeom::gpu_compute_geometry_csr(
-                gpu, &mgk, &mut md, &rbx.points, &rbx.faces, &fcsr,
-            )?;
-            gpu.sync()?;
-            let t_geom_d = t0.elapsed().as_secs_f64() * 1e3;
+            let mut t_geom_d = f64::INFINITY;
+            for _ in 0..TIMING_REPS + 1 {
+                let mut md = rbx.mesh.clone();
+                let t0 = std::time::Instant::now();
+                ofgpu::mesh::gpugeom::gpu_compute_geometry_csr(
+                    gpu, &mgk, &mut md, &rbx.points, &rbx.faces, &fcsr,
+                )?;
+                gpu.sync()?;
+                t_geom_d = t_geom_d.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
 
             // The same sweep with nothing downloaded: what an adapt would pay
             // once the mesh stops coming back to the host at all.
             let pair = vec![-1 as Label; rbx.mesh.n_boundary_faces];
             let bw = vec![1.0 as Scalar; rbx.mesh.n_boundary_faces];
-            let t0 = std::time::Instant::now();
-            let gg = GpuGeometry::compute(gpu, &mgk, &rbx.mesh, &rbx.points, &fcsr, &pair, &bw)?;
-            gpu.sync()?;
-            let t_res = t0.elapsed().as_secs_f64() * 1e3;
+            let (t_res, gg) = best_of(TIMING_REPS + 1, || {
+                let g =
+                    GpuGeometry::compute(gpu, &mgk, &rbx.mesh, &rbx.points, &fcsr, &pair, &bw)?;
+                gpu.sync()?;
+                Ok(g)
+            })?;
 
             // And the download on its own, so that the difference between the
             // drop-in and the resident path is SPLIT rather than attributed.
-            // It has to be timed in this run and not another: the two differ
-            // by 15 % on the sub-millisecond columns, which is enough to move
-            // a number derived as a difference of three of them by a factor
-            // of two. SPEC-LIT 82.2 makes a claim out of that difference and
-            // an earlier draft of it mixed two runs and said 1.9 ms where
-            // this says otherwise.
+            // It has to be timed in this run and not another: SPEC-LIT 82.2
+            // makes a claim out of that difference and an earlier draft of it
+            // mixed two runs.
             let mut sink = rbx.mesh.clone();
-            gg.download_into(gpu, &mut sink)?;
-            let t0 = std::time::Instant::now();
-            gg.download_into(gpu, &mut sink)?;
-            let t_down = t0.elapsed().as_secs_f64() * 1e3;
+            let (t_down, _) = best_of(TIMING_REPS + 1, || {
+                gg.download_into(gpu, &mut sink)?;
+                Ok(())
+            })?;
             drop(gg);
 
-            (t_build - t_csr - t_geom_h, t_geom_h, t_flat, t_geom_d, t_res, t_down)
+            // And the whole resident route for the same mesh: the host
+            // prologue, the four kernels, the ONE array that still comes back,
+            // and the mesh arriving on the device. This is the column that
+            // replaces `geom_d` AND the geometry half of `GpuMesh::upload`,
+            // and it is measured end to end rather than assembled out of the
+            // three timings above, because SPEC-LIT S82.1 records what
+            // happened the last time a number here was a residual.
+            let mut t_resident = f64::INFINITY;
+            for _ in 0..TIMING_REPS + 1 {
+                let mut mr = rbx.mesh.clone();
+                let t0 = std::time::Instant::now();
+                let gg2 = ofgpu::mesh::gpugeom::gpu_geometry_resident(
+                    gpu, &mgk, &mut mr, &rbx.points, &rbx.faces, &fcsr,
+                )?;
+                mr.v = gg2.download_volumes(gpu)?;
+                let gm_res = GpuMesh::from_device_geometry(gpu, &mr, gg2)?;
+                gpu.sync()?;
+                t_resident = t_resident.min(t0.elapsed().as_secs_f64() * 1e3);
+                drop(gm_res);
+            }
+
+            (
+                t_build - t_csr - t_geom_h,
+                t_geom_h,
+                t_flat,
+                t_geom_d,
+                t_res,
+                t_down,
+                t_resident,
+            )
         };
         split.push((
-            mb.n_cells, t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down,
+            mb.n_cells, t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down, t_resident,
         ));
 
         let nmb = &pl.mesh.mesh;
@@ -8591,32 +8784,51 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         let mut d_rn: DevBuf<Scalar> = gpu.zeros(pl.map.n_new)?;
         let mut d_pn: DevBuf<Scalar> = gpu.zeros(pl.map.n_new)?;
         gpu.sync()?;
-        let t0 = std::time::Instant::now();
-        transfer::gpu_parent_targets(gpu, &ak, &mut d_xb, &mut d_ws, &gmap, &d_cn)?;
-        transfer::gpu_barth_jespersen(
-            gpu, &ak, &mut d_ps, &d_p, &d_b, &d_g, &d_xb, &gmap, &d_cn, &gmb,
-        )?;
-        transfer::gpu_transfer_density(gpu, &ak, &mut d_rn, &d_r, &d_vo, &d_vn, &gmap)?;
-        transfer::gpu_transfer_scalar(
-            gpu, &ak, &mut d_pn, &d_p, &d_r, &d_g, &d_ps, &d_xb, &d_vo, &d_vn, &d_cn, &gmap,
-            Prolongation::LimitedLinear,
-        )?;
-        gpu.sync()?;
-        let t_xfer = t0.elapsed().as_secs_f64() * 1e3;
+        let (t_xfer, _) = best_of(TIMING_REPS + 1, || {
+            transfer::gpu_parent_targets(gpu, &ak, &mut d_xb, &mut d_ws, &gmap, &d_cn)?;
+            transfer::gpu_barth_jespersen(
+                gpu, &ak, &mut d_ps, &d_p, &d_b, &d_g, &d_xb, &gmap, &d_cn, &gmb,
+            )?;
+            transfer::gpu_transfer_density(gpu, &ak, &mut d_rn, &d_r, &d_vo, &d_vn, &gmap)?;
+            transfer::gpu_transfer_scalar(
+                gpu, &ak, &mut d_pn, &d_p, &d_r, &d_g, &d_ps, &d_xb, &d_vo, &d_vn, &d_cn, &gmap,
+                Prolongation::LimitedLinear,
+            )?;
+            gpu.sync()?;
+            Ok(())
+        })?;
 
         let n_amort = ((t_plan + t_xfer + t_graph) / (0.02 * t_step)).ceil();
         let n_graph = (t_graph / (0.02 * t_step)).ceil();
         let n_dev = ((t_plan_dev + t_xfer + t_graph) / (0.02 * t_step)).ceil();
+        let n_res = ((t_plan_res + t_xfer + t_graph) / (0.02 * t_step)).ceil();
+        ready.push((
+            mb.n_cells, t_upload, t_plan, t_plan_dev, t_plan_res, t_step, t_xfer, t_graph,
+        ));
         println!(
-            "  {:>7} {:>10.3} {:>11.3} {:>11.3} {:>11.3} {:>9.0} {:>10.0} {:>11.3} {:>9.0}",
-            mb.n_cells, t_step, t_plan, t_xfer, t_graph, n_amort, n_graph, t_plan_dev, n_dev
+            "  {:>7} {:>10.3} {:>11.3} {:>11.3} {:>11.3} {:>9.0} {:>10.0} {:>11.3} \
+             {:>9.0} {:>11.3} {:>9.0}",
+            mb.n_cells,
+            t_step,
+            t_plan,
+            t_xfer,
+            t_graph,
+            n_amort,
+            n_graph,
+            t_plan_dev,
+            n_dev,
+            t_plan_res,
+            n_res
         );
         drop(gmb);
+        drop(gmu);
+        drop(gmr);
+        drop(plr);
     }
     c.require("the cadence measurement ran", any);
     println!("\n  where a rebuild's time goes, and what the device sweep removes:");
     println!(
-        "  {:>7} {:>10} {:>10} {:>8} {:>10} {:>10} {:>10} {:>9} {:>8}",
+        "  {:>7} {:>10} {:>10} {:>8} {:>10} {:>10} {:>10} {:>9} {:>8} {:>10}",
         "cells",
         "emit/ms",
         "geom_h/ms",
@@ -8625,9 +8837,10 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         "kernel/ms",
         "down/ms",
         "rest/ms",
-        "speed-up"
+        "speed-up",
+        "res/ms"
     );
-    for (n, e, gh, fl, gd, gr, dn) in &split {
+    for (n, e, gh, fl, gd, gr, dn, rs) in &split {
         // `rest` is a RESIDUAL, not a measurement: geom_d, geom_res and the
         // download are three separate timings, so what is left after taking
         // two from the first carries all three noises. It is printed because
@@ -8639,7 +8852,8 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         // number was this residual, and it was noise.
         let rest = gd - gr - dn;
         println!(
-            "  {:>7} {:>10.3} {:>10.3} {:>8.3} {:>10.3} {:>10.3} {:>10.3} {:>9.3} {:>7.1}x",
+            "  {:>7} {:>10.3} {:>10.3} {:>8.3} {:>10.3} {:>10.3} {:>10.3} {:>9.3} \
+             {:>7.1}x {:>10.3}",
             n,
             e,
             gh,
@@ -8648,7 +8862,8 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             gr,
             dn,
             rest,
-            gh / gr.max(1e-9)
+            gh / gr.max(1e-9),
+            rs
         );
     }
     println!(
@@ -8664,6 +8879,40 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
          adapt; 82.2 measures that the EMITTER is larger, and 82.9 says what a device\n           \
          emitter would have to reproduce."
     );
+    // SPEC-LIT S83.3. The three plan columns of the cadence table do not leave
+    // the new mesh in the same place, so they cannot be compared as they
+    // stand: `plan` and `plan_with(Rebuild::Device)` return a `HostMesh` that
+    // a solver cannot touch until it has been uploaded, and `plan_resident`
+    // returns a `GpuMesh` that is already there. This table adds the upload to
+    // the two that owe it. It is the only accounting in which the resident
+    // path's win is the whole of what it removes rather than half of it.
+    println!("\n  the same three routes, priced to the same place - the new mesh ON THE DEVICE:");
+    println!(
+        "  {:>7} {:>10} {:>12} {:>12} {:>12} {:>9} {:>9} {:>9}",
+        "cells", "upload/ms", "host+up/ms", "dev+up/ms", "resident/ms", "N host", "N dev", "N res"
+    );
+    for (n, up, ph, pd, pr, ts, tx, tg) in &ready {
+        let nn = |t: f64| ((t + tx + tg) / (0.02 * ts)).ceil();
+        println!(
+            "  {:>7} {:>10.3} {:>12.3} {:>12.3} {:>12.3} {:>9.0} {:>9.0} {:>9.0}",
+            n,
+            up,
+            ph + up,
+            pd + up,
+            pr,
+            nn(ph + up),
+            nn(pd + up),
+            nn(*pr)
+        );
+    }
+    println!("  upload is GpuMesh::upload of the mesh `plan` returned - the cost S82.5");
+    println!("           measured separately and left out of its table, because there was");
+    println!("           nothing then to compare it with. host+up and dev+up are the two");
+    println!("           HostMesh routes plus that upload; resident is adapt::plan_resident,");
+    println!("           which pays neither the sixteen-array download nor the sixteen-array");
+    println!("           upload and brings back one array, `v`, because plan's conservative");
+    println!("           weights (S75.6) and total_volume are folds over it in ascending");
+    println!("           cell id and a device reduction would not be the same bits.");
     println!(
         "  t_step is one replay of the fifty-launch graph; t_plan is the HOST mesh and\n           geometry rebuild; t_xfer is the four device transfer kernels; t_graph is\n           capture + instantiate. \"N at 2%\" is how many steps an adapt must be spread\n           over to cost 2 % of the run; \"N graph\" is the same figure if the graph\n           recapture were the ONLY cost. The gap between the two columns is the finding\n           of S75.8: the recapture is not what makes an adapt expensive."
     );

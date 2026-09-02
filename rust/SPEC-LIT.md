@@ -24809,3 +24809,410 @@ removes". The cadence table gains `t_planD` and `N dev`.
   can be small — and `blockgen::build_cutcell_mesh` returns a finished
   `HostMesh` with no public accessor for the raw points and faces the sweep
   needs, so getting one is a change to `blockgen` rather than a line in a test.
+
+## 83. The mesh that never comes home — a device-resident rebuild, and the one array that still returns
+
+§82 put the geometry sweep on the device, measured it **5.2× faster** than the
+host sweep, and then measured the *drop-in* at **2.2×** — because sixteen
+arrays coming back to the host are half of what the drop-in path costs. It
+said what the fix was in one sentence and did not write it: "A `HostMesh` is
+the wrong destination. `GpuGeometry::compute` leaves everything on the device
+and is the entry point a device-resident adapt would use; `plan_with` cannot
+use it because it must return a `HostMesh`."
+
+This section writes it. `adapt::plan_resident` rebuilds the mesh, computes its
+geometry on the device, and hands back a `GpuMesh` — never assembling a host
+geometry array and never uploading one.
+
+**Four things came out of that, and two of them correct the brief this section
+was given.**
+
+1. **The download is not the only round trip, and it is not the larger one.**
+   An adapt that keeps its mesh pays a *second* sixteen-array trip in the other
+   direction: `GpuMesh::upload`. §82.5 measured it — 0.25 / 0.59 / 1.94 ms —
+   and deliberately declined to put it in the cadence table, because `plan`
+   returned a `HostMesh` and there was nothing to compare it against. There is
+   now. Priced to the same place — *the new mesh on the device* — the host
+   route is `t_plan + t_upload` and the resident route is neither download nor
+   upload. §83.3 is that table, and it is the first honest accounting of what
+   the port removes.
+2. **"Never round-trip the geometry" is one array short of achievable, and the
+   array that holds it is not the one you would guess.** It is not
+   `total_volume`, which is a report. It is §75.6's conservative prolongation
+   weight
+
+   ```text
+   w_qp = V_q / sum_{q' in C(p)} V_q'                                   (83.1)
+   ```
+
+   which `adapt::plan` builds on the host out of the NEW mesh's cell volumes
+   and which is the whole conservation argument of the transfer. Both it and
+
+   ```text
+   total_volume = ((V_0 + V_1) + V_2) + ...                             (83.2)
+   ```
+
+   are folds in **ascending cell id**, so a tree reduction on the device is a
+   different summation order and a different answer, and §72 is this project's
+   own account of why that matters. `v` therefore comes home — **one array of
+   the sixteen** — and `total_volume` is taken from the same copy rather than
+   costing a second one. §83.9 says what a device weight kernel would have to
+   reproduce to remove even that.
+3. **The crossover is three numbers, not one, and §82.5 was asking about the
+   middle one.** §82.5 measured the device drop-in *slower* than the host sweep
+   at 512 cells and could not say where the two meet. §83.8 measures it on five
+   mesh sizes and separates three questions that had been one: the four kernels
+   cross the host sweep **between 216 and 512 cells**, the drop-in crosses it
+   **between 512 and 4096**, and the resident route — the only comparison in
+   which both sides end with a mesh a kernel can read — crosses **between 64
+   and 216**. The three crossovers are three fixed costs and nothing else: four
+   launches, sixteen synchronous device-to-host copies, and none.
+4. **And a fourth, found by this section in its own measurement, which changed
+   how the measurement is taken.** §75.8's and §82.5's tables time each
+   quantity **once**. On this machine that is not a measurement. Four runs of
+   `ofgpu-validate` — two of them the unmodified §82 binary, three of them on
+   an otherwise idle machine — put `t_step` at 512 cells at 0.535, 0.262, 0.482
+   and 0.390 ms; and **the §82 binary measured `t_plan` at 4096 cells at 13.4 ms
+   in one run and 68.5 ms in another**, same code, same machine, an hour apart.
+   That is a Windows scheduling artefact rather than a property of the code, and
+   every `N` in the cadence table is divided by `t_step`. The adapt section
+   now takes the **minimum of three or four calls** of everything it times
+   (`ofgpu-validate::best_of`), which is the one estimator interference cannot
+   bias upward. The immediate evidence that it was needed: `t_step` is now
+   monotone in mesh size — 0.227 / 0.241 / 0.254 / 0.265 / 0.283 ms — which it
+   must be and never was. Every number in §83.3 and §83.8 is measured that way,
+   inside ONE run, host column and device column alike.
+
+**Sources.** None new. Every kernel is §82's, every host line is one that was
+already there, and the only claim is about where arrays live. The
+reproducibility citation is §82's — Goldberg (1991), DOI 10.1145/103162.103163
+— and it is what forbids replacing (83.2) with a device reduction. **Nothing
+was read from OpenFOAM (GPL-3.0), SU2 (LGPL) or p4est (GPL-2.0-or-later).**
+
+### 83.1 What §82 left standing
+
+`GpuGeometry::compute` already left the sixteen arrays on the device; nothing
+could reach it. The three obstacles, in the order they had to be removed:
+
+1. **`GpuMesh` had one constructor and it took a `HostMesh`.** Every geometric
+   field was `gpu.upload(&m.<field>)`.
+2. **`gpu_compute_geometry_csr` fused the host prologue with the download.**
+   The prologue — `geometry::validate`, `cyclic_pairing`, `b_kind`, `b_patch`,
+   `b_nbr_cell`, the `b_weights` seed — *feeds* the device sweep, so §82.3's
+   bitwise claim is a claim about it too. A resident path that reimplemented it
+   would be a second prologue, and the gate would be comparing two of them.
+3. **`plan_with` took a `Rebuild` enum whose arms both produced a
+   `RefinedBox`,** so no arm could hand back a device mesh.
+
+### 83.2 The split that makes the prologue impossible to fork
+
+`gpu_geometry_resident` is the prologue plus the four kernels, returning
+`GpuGeometry`. `gpu_compute_geometry_csr` — §82's drop-in, and the reference
+the bitwise gate compares against — is now *literally* that function followed
+by `GpuGeometry::download_into`, three lines long. The two routes cannot run
+different prologues because there is one.
+
+The mesh it hands back carries its topology, its addressing and the four
+boundary bookkeeping arrays, and **none of its geometry**. `b_weights` is left
+*empty* rather than restored: the seed was moved to the device and the answer
+is `GpuGeometry::b_weights`. An empty array is a length mismatch at the first
+line that reads it; a stale one is a wrong answer at the first line that reads
+it, and §82.1 records that this project has shipped the second kind before.
+
+`Forest::build_resident` is `emit` + `flatten_faces` + `gpu_geometry_resident`
++ the one download + `GpuMesh::from_device_geometry`. `adapt::plan_resident`
+is `plan_by` with that as its build step, where `plan_by` is the body
+`plan_with` already had: the balance fixed point, the family cancellation and
+the gather map are one implementation reached two ways, which is what makes
+§83.5's assertion that the two `Map`s are bitwise identical worth making.
+
+### 83.3 Where a rebuild's time goes, and the three routes priced to the same place
+
+Measured on one RTX 5070 Ti, in **one run**, with nothing else on the machine,
+and **every entry the minimum of three or four timings of the same call** —
+`ofgpu-validate::best_of`, which finding 4 above is the argument for. The
+minimum is the estimator that converges on what the code costs, because
+interference can only add; the mean converges on what the machine was doing.
+
+The cadence table of §75.8 and §82.5, with two columns added. `t_planR` is
+`adapt::plan_resident`; `N res` is its 2 % cadence.
+
+| cells | `t_step` /ms | `t_plan` /ms | `t_xfer` /ms | `t_graph` /ms | N at 2 % | N graph | `t_planD` /ms | N dev | `t_planR` /ms | **N res** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | 0.227 | 0.145 | 0.034 | 0.081 | 58 | 18 | 0.520 | 141 | 0.420 | 119 |
+| 216 | 0.241 | 0.686 | 0.038 | 0.080 | 167 | 17 | 0.998 | 232 | 0.851 | 201 |
+| 512 | 0.254 | 2.187 | 0.038 | 0.079 | 455 | 16 | 1.831 | 385 | 1.644 | 348 |
+| 4096 | 0.265 | 12.350 | 0.038 | 0.082 | 2353 | 16 | 10.966 | 2092 | 9.313 | 1780 |
+| 13824 | 0.283 | 29.072 | 0.040 | 0.082 | 5156 | 15 | 23.660 | 4200 | 21.894 | 3889 |
+
+The rebuild split of §82.2, with one column added. `res/ms` is the whole
+resident route for the same mesh, measured end to end and not assembled from
+the others: the host prologue, the four kernels, the one array that comes back
+and the mesh arriving on the device.
+
+| cells | emit /ms | `geom_h` /ms | flat /ms | `geom_d` /ms | kernel /ms | down /ms | rest /ms | speed-up | **res /ms** |
+|---|---|---|---|---|---|---|---|---|---|
+| 64 | 0.103 | 0.041 | 0.002 | 0.380 | 0.203 | 0.170 | 0.007 | 0.2x | 0.312 |
+| 216 | 0.383 | 0.186 | 0.009 | 0.512 | 0.242 | 0.209 | 0.061 | 0.8x | 0.367 |
+| 512 | 0.936 | 0.441 | 0.019 | 0.611 | 0.311 | 0.246 | 0.055 | 1.4x | 0.512 |
+| 4096 | 6.514 | 3.590 | 0.115 | 2.501 | 0.407 | 0.960 | 1.134 | 8.8x | 0.860 |
+| 13824 | 15.385 | 8.443 | 0.492 | 3.439 | 0.716 | 1.905 | 0.819 | 11.8x | 1.892 |
+
+**And the table §82.5 could not write.** The three plan columns above do not
+leave the new mesh in the same place, so they are not comparable as they stand:
+`plan` and `plan_with(Rebuild::Device)` return a `HostMesh` that no kernel can
+touch until it has been uploaded, and `plan_resident` returns a `GpuMesh` that
+is already there. `upload/ms` is `GpuMesh::upload` of the mesh `plan` returned
+— the cost §82.5 measured separately and deliberately left out of its table.
+
+| cells | upload /ms | host+up /ms | dev+up /ms | **resident /ms** | N host | N dev | **N res** |
+|---|---|---|---|---|---|---|---|
+| 64 | 0.162 | 0.307 | 0.682 | 0.420 | 93 | 176 | 119 |
+| 216 | 0.241 | 0.927 | 1.239 | 0.851 | 217 | 282 | 201 |
+| 512 | 0.280 | 2.467 | 2.111 | 1.644 | 510 | 440 | 348 |
+| 4096 | 0.528 | 12.879 | 11.494 | 9.313 | 2453 | 2192 | 1780 |
+| 13824 | 1.068 | 30.140 | 24.728 | 21.894 | 5345 | 4389 | 3889 |
+
+**Two of §82's own figures do not reproduce here, and one of them is better.**
+The sweep is **11.8×** the host at 13824 cells rather than §82.5's 5.2×, and
+`GpuMesh::upload` is **1.07 ms** rather than 1.94. Both are the same code; the
+difference is that these are minima of four calls and §82's were single shots.
+Nothing in this section depends on which figure is right, because every
+comparison it makes is between two columns of the same table.
+
+**What the port is now worth, at 13824 cells.** The drop-in removes 3.0 ms of
+a 30.1 ms host route (10 %); the resident path removes 8.2 ms (27 %). N falls
+from **5345 to 3889**. §82.5 reported 5415 → 4479 for the drop-in and called
+17 % "not enough"; this is 27 %, and it is still not enough, for the reason
+§82.9 gave and this section did not touch: `emit` is 15.4 ms of the 29.1 ms
+`t_plan`, **53 %**, and no amount of geometry work reaches it.
+
+### 83.4 One row map, one rule
+
+§70 says a row's summation order is a property of the **mesh**, not of the
+partition, and `GpuMesh::upload` carries the practical half of that: when the
+host mesh has no merged row map — half the meshes in this crate's tests are
+written by hand and never call `build_cell_face_maps` — it rebuilds one from
+`owner`, `neighbour`, `b_face_cells` and `global_face` rather than uploading an
+empty one and making `amul` quietly return `diag*psi`.
+
+A second constructor is a second place for that rule to live, and the mesh it
+would get wrong is the **adapted** one — the case §75.5 already had to learn to
+gate separately, and the one nothing else looks at. So there is no second
+place. The private `GpuTopology::upload` holds every non-geometric array and
+the whole of §70.3's rebuild, and both constructors are that function plus a
+choice of where the geometry came from. The row map is a function of arrays the
+geometry sweep does not touch, so *where the geometry was computed cannot move
+it* — and §83.5 asserts it anyway, on five fixtures and on an adapted mesh,
+because "by construction" is a statement about today's code.
+
+### 83.5 The bitwise claim, one constructor further along
+
+§82.3's gate compares two `HostMesh`es. That is the drop-in's answer, and it is
+not what a solver is handed. This section's gate compares two `GpuMesh`es:
+
+* one reached by `geometry::compute` then `GpuMesh::upload`;
+* one reached by `gpu_geometry_resident` then `GpuMesh::from_device_geometry`,
+  which downloads one array and uploads none of the sixteen.
+
+All sixteen geometric arrays by `to_bits()`, plus three things the older gate
+cannot see: the §70 row map (`rf_offset`, `rf_face`, `rf_flags`),
+`total_volume` by its bits, and — in `ofgpu-validate`, where a real adapt runs
+— the transfer `Map`'s `src_w` and `own_w` by their bits, which is (83.1)
+asserting that conservation did not move.
+
+It runs on §82.6's five fixtures in `mesh::gpugeom::tests` and on the mesh an
+adapt produced in `ofgpu-validate`, at every mesh size in the cadence sweep and
+not only the first.
+
+### 83.6 §13.4 contract
+
+**Supported.**
+
+| what | how |
+|---|---|
+| an adapt whose new mesh is built on the device and stays there | `adapt::plan_resident` → `(Plan, GpuMesh)` |
+| the same, without the adapt | `Forest::build_resident` → `(RefinedBox, GpuMesh)` |
+| the geometry sweep with nothing downloaded | `mesh::gpugeom::gpu_geometry_resident` → `GpuGeometry` |
+| a `GpuMesh` from geometry that is already on the device | `GpuMesh::from_device_geometry`, which MOVES the sixteen buffers |
+| the one array a resident rebuild still needs on the host | `GpuGeometry::download_volumes` |
+| everything §82 supported | unchanged: `gpu_compute_geometry`, `gpu_compute_geometry_csr`, `Rebuild::Device`, `GpuGeometry::download_into` |
+
+**Refused by name, with the alternative.**
+
+| asked for | answer |
+|---|---|
+| `GpuMesh::from_device_geometry` on a host mesh with no `v` | Refused by name, quoting both lengths. `total_volume` is (83.2), a fold in ascending cell id; the constructor will not spend a hidden device-to-host copy to get it, nor substitute a device reduction that would not be the same bits. **Alternative: `mesh.v = geometry.download_volumes(gpu)?` first** — the one array §83.3 accounts for, and the same array §75.6's weights need anyway — **or `GpuMesh::upload`, which needs no device geometry.** |
+| `GpuMesh::from_device_geometry` where the geometry and the mesh are different meshes | Refused by name, quoting cells, internal faces and boundary faces on both sides. **Alternative: run `gpu_geometry_resident` on *this* mesh.** |
+| a resident rebuild on a mesh with no cell → face CSR | Unchanged from §82.7: refused by name, because every kernel gathers over that CSR and the order it fixes *is* the bitwise claim. **Alternative: `HostMesh::build_cell_face_maps()`, or the host sweep.** |
+| §75.6's conservative weights computed on the device | **Not implemented.** They are folds over at most eight volumes in ascending cell id (83.1); a one-thread-per-old-cell kernel would reproduce the order exactly, and §83.9 says why it is a separate piece of work. **Alternative: none needed today — `v` is one array of sixteen and §83.3 prices it.** |
+| the EMITTER on the device | **Not implemented, and not started** — unchanged from §82.7. It is now the *large* majority of a rebuild, and §82.9 remains the specification for closing it. |
+| `HostMesh::check` or `print_report` on the mesh `plan_resident` returned | Not meaningful, and it does not fail: `geometry::check` clamps every loop to the length of the array it reads, so on a mesh whose fifteen geometric arrays are empty it reports on nothing rather than refusing. This is the one place where the resident mesh's empty arrays are quiet instead of loud. **Alternative: `plan_with(Rebuild::Device)`, or `GpuGeometry::download_into` on the buffers, if a `HostMesh` is what you want to check** - checking a mesh is something a human asks for once, not something an adapt does. |
+| a solver that adapts inside a time loop | Unchanged: §75.9's `no_time_loop_reaches_the_adapt` still holds, and this section did not touch it. `plan_resident` is reachable from a test and from `ofgpu-validate`. |
+
+**Bit-identical defaults, BY CONSTRUCTION.** This section adds no setting. It
+adds three functions and one constructor, all of them new names; `plan`,
+`plan_with`, `Forest::build`, `Forest::build_with`, `GpuMesh::upload` and
+`gpu_compute_geometry*` are reached by exactly the code that reached them
+before. `plan_with` is now one line — `plan_by` with `build_with(how)` — and
+`plan_by` is the body it already had, moved and not edited. **And the stronger
+statement is asserted anyway**: §83.5 gates the resident route as bitwise
+identical to the host route, so even a caller that *did* switch could not
+change an answer.
+
+### 83.7 The capture stance
+
+Unchanged from §82.8, and it has to be. Nothing new launches a kernel:
+`gpu_geometry_resident` is §82's launches with the download moved out, and
+`GpuMesh::from_device_geometry` launches nothing at all — it uploads and moves
+buffers. `src/mesh/gpugeom.rs` stays `Stance::Outside` in §81.7's registry and
+`src/adapt.rs` stays where it was. `src/mesh.rs` is not in §81.8's population
+at all and this section did not put it there: the census admits a file that
+contains `launch_builder(` or declares a `pub fn correct/step/update/solve/
+advance(`, and `GpuMesh::from_device_geometry` is neither — it is fifteen
+`cuMemcpyHtoD`s and sixteen moves. A
+mesh that has just been rebuilt is by definition on the far side of a
+recapture, because a captured graph bakes the device pointers of the mesh it
+was captured on — and a *resident* rebuild does not weaken that argument, it
+sharpens it: the pointers the new graph must be captured against are now
+produced by the rebuild itself rather than by a later upload.
+
+**§81's trap, checked.** `GpuMesh::from_device_geometry` allocates — fifteen
+topology arrays — and allocation inside a captured region is capturable and
+therefore silent. It is not in one: it runs at an adapt, and §75.9 keeps an
+adapt out of the time loop.
+
+### 83.8 The crossover, and why there are three of them
+
+§82.5 measured the device drop-in **slower than the host sweep at 512 cells**
+and could not say where the two meet, because 512 was the smallest mesh in the
+sweep. This section adds 64 and 216 to bracket it — and finds that the question
+has three answers, because the three things one might mean by "the device
+sweep" do not pay the same fixed cost.
+
+| what is being compared | 64 | 216 | 512 | 4096 | 13824 | crossover |
+|---|---|---|---|---|---|---|
+| **the kernels** — `geom_h` vs `kernel` | 0.2× | 0.8× | 1.4× | 8.8× | 11.8× | **between 216 and 512 cells** |
+| **the drop-in** — `geom_h` vs `geom_d` | 0.11× | 0.36× | 0.72× | 1.44× | 2.46× | **between 512 and 4096 cells** |
+| **the resident route** — `geom_h + upload` vs `res` | 0.65× | 1.16× | 1.41× | 4.79× | 5.02× | **between 64 and 216 cells** |
+
+Read the last row as the one that matters, because it is the only one in which
+both sides end in the same place: a mesh a kernel can read. On it the answer to
+§82.5's question is **216 cells** — an eight-cubed box — and a mesh that small
+is not a mesh anyone adapts.
+
+**The three crossovers are three fixed costs and nothing else.** All three
+curves have the same shape: a fixed per-call cost plus arithmetic that grows
+with the mesh. The kernels' fixed cost is four launches, and it is smallest.
+The drop-in adds **sixteen synchronous device-to-host copies**, which at 64
+cells is 0.170 ms against 0.041 ms of host arithmetic — the download alone is
+four times the whole thing it is replacing, and no mesh below a few thousand
+cells can amortise it. The resident route pays neither, and its fixed cost is
+the fifteen-array topology **upload**, which the host route pays too — which is
+exactly why its crossover is the earliest of the three.
+
+**And it moves the honest end-to-end statement.** In the third table of §83.3,
+`resident` beats `host+up` at 216 cells and every size above; at 64 it loses,
+0.420 ms against 0.307. There is no mesh size in this sweep at which the
+resident route is the wrong choice for an adapt, because there is no mesh size
+at which anyone adapts a 64-cell box.
+
+### 83.9 The array that still comes back, and what would remove it
+
+`v`. `n_cells` scalars, and two host computations are written on it:
+
+* **(83.1), §75.6's conservative prolongation weight.** `adapt::plan` divides
+  each child's volume by the sum over its family. This is what makes the
+  transfer conserve, and it is the reason the array cannot simply be dropped.
+* **(83.2), `GpuMesh::total_volume`.** A report, and `bin/fire.rs` divides a
+  heater power by it, so it is a report with a physical consequence. It is
+  taken from the same downloaded copy and costs nothing extra.
+
+**A device version is tractable and it is not a graph problem.** A family is at
+most eight cells, so one thread per OLD cell, walking `own_offset[c] ..
+own_offset[c+1]` in ascending order and summing in that order, reproduces
+(83.1) exactly — the fold is short, sequential and in the host's order, so this
+is one of the rare device reductions that *is* bitwise. `src_w` is then a
+permutation of `own_w`: for a source entry `j` with `c = src_cell[j]` feeding
+new cell `q`, the entry is the unique `i` in `c`'s `own_child` slice with
+`own_child[i] == q` — at most eight comparisons, a gather, no atomic.
+
+**What stops it being written here is not the kernel.** `adapt::Map` is a
+public struct of host `Vec`s and `transfer::GpuMap::upload` takes one; a
+device-computed weight would either be uploaded again (which removes nothing)
+or would need `GpuMap` to have a second constructor and `Plan` to admit that
+its `Map` may be device-side. That is the same shape of change this section
+made to `GpuMesh`, and it should be made the same way — with a gate that the
+two `Map`s are bitwise identical — rather than bolted on. §83.11 records it as
+the honest gap.
+
+**And it should be measured before it is written.** It is not measured here:
+`v` is `n_cells` scalars — 110 kB at 13824 cells — and it is *inside* §83.3's
+`res/ms` column rather than separated from it, so what this section can say is
+that the whole resident route is 1.89 ms against an `emit` of 15.4 ms and not
+what fraction of that 1.89 the array is. §75.8 named the wrong half of a
+rebuild once and §82.2 had to correct it. The next person here should time
+`download_volumes` on its own first, and only then decide it is worth a
+kernel and a second constructor on `GpuMap`.
+
+### 83.10 What must hold
+
+| # | Statement | Where it is checked |
+|---|---|---|
+| 1 | **THE GATE.** A mesh built on the device reaches the device as the same mesh: sixteen geometric arrays by `to_bits()`, on five fixtures | `mesh::gpugeom::tests::a_device_built_mesh_reaches_the_device_as_the_same_mesh` |
+| 2 | **THE GATE.** The §70 row map is the same three arrays whichever constructor built the mesh | the same test, and by construction — one `GpuTopology::upload` |
+| 3 | `total_volume` is the same bits by both routes | the same test |
+| 4 | **THE GATE.** The same, on a mesh an ADAPT produced, at every size in the cadence sweep, including the transfer `Map`'s weights | `ofgpu-validate`, "a mesh an adapt built ON THE DEVICE reaches the device as the same mesh" |
+| 5 | The resident sweep downloads nothing: every host geometric array is byte-for-byte what the fixture arrived with, and `b_weights` is left empty rather than restored | `mesh::gpugeom::tests::a_device_built_mesh_reaches_the_device_as_the_same_mesh`, first two assertions |
+| 6 | A device geometry with no host `v` is refused by name, and the refusal names both alternatives | `mesh::gpugeom::tests::a_device_geometry_with_no_host_volumes_is_refused_by_name` |
+| 7 | §82's drop-in still produces the same bits as the host sweep, so the split of §83.2 did not move it | `mesh::gpugeom::tests::the_device_sweep_is_bitwise_identical_to_the_host_sweep`, unchanged |
+| 8 | `plan_with` and `plan_resident` are one implementation: the balance fixed point, the family cancellation and the gather map are `plan_by` | `adapt::plan_with` — one line — and gate 4, which compares the two `Map`s |
+| 9 | Nothing here is reachable from a time loop | `adapt`'s §75.9 gate, unchanged |
+| 10 | The capture registry still classifies every module that launches, and the census read off disk agrees | `capture::registry::tests::every_device_module_is_classified` |
+
+### 83.11 Validation, and what is NOT claimed
+
+`ofgpu-validate`'s adapt section gains the §83.5 gate, two columns on the
+cadence table (`t_planR`, `N res`), one column on the rebuild split (`res/ms`)
+and a third table, "the same three routes, priced to the same place". The
+cadence sweep grows from three mesh sizes to five, and the two new ones are
+there for §83.8's crossover rather than for the cadence.
+
+**Not claimed, and not implemented:**
+
+* **The cadence is still not usable, and this section did not make it usable.**
+  §83.3 has the numbers. The improvement is real and it is not the order of
+  magnitude the problem needs, for the reason §82.9 gave and this section did
+  not touch: **the emitter**. Every millisecond this section removed came out
+  of the smaller half of a rebuild.
+* **`v` still comes back**, and §83.9 is the specification for the kernel that
+  would stop it. One array of sixteen is not zero.
+* **No solver was switched to the resident path.** `plan_resident` is reachable
+  from `ofgpu-validate` and from tests. Switching a solver over means rebuilding
+  the multi-colour preconditioner, the CSR export and `restart.rs` after an
+  adapt — §75.11's list, still open — and a mesh that stays on the device does
+  not shorten it.
+* **The download is still sixteen synchronous copies** when a caller *does*
+  want a `HostMesh`. §82.11 said a packed transfer or a second stream would cut
+  it; neither is written, and this section removes the need for it on the
+  resident path rather than fixing it on the drop-in.
+* **The topology is still uploaded.** `GpuTopology::upload` is fifteen host
+  arrays going the other way on every rebuild, and the resident path pays it
+  exactly as the host path does. It is not geometry, it is not what §82.5
+  named, and it is not measured separately here — it is inside both the
+  `upload/ms` and the `resident/ms` columns of §83.3. A device emitter (§82.9)
+  would produce those arrays on the device and remove it; nothing short of one
+  will.
+* **`--features single` was not exercised**, exactly as §82.11 records. The
+  bitwise gate has never been measured in `f32` on either route.
+* **The table is not comparable to §75.8's or §82.5's, and that is deliberate.**
+  Those time each quantity once; this one takes the minimum of three or four,
+  for the reason finding 4 gives. Their numbers are not withdrawn — they are
+  what a single call measured on the day — but a reader who lays the two side
+  by side is comparing two estimators as much as two versions of the code.
+* **Nothing here was measured on a second machine.** Every figure is one
+  RTX 5070 Ti, and finding 4 is the reason every comparison is within-run.
+* **`best_of` is not a benchmark harness.** It is nine lines and a minimum. It
+  does not pin clocks, does not control for GPU boost state, and does not
+  report a spread — so it can say "this is at most what the code costs" and
+  cannot say how much of the remaining gap between two columns is real.
