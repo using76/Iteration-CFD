@@ -93,6 +93,36 @@ extern "C" __global__ void tsDdtGeneralRho
 }
 
 
+//- SPEC-LIT S86.4: the ddt half of the DISCRETE continuity residual,
+//
+//      contDdt[P] = aN*rho_P + a0*rho0_P + a00*rho00_P
+//
+//  which is exactly what tsDdtGeneralRho above contributes to row P when the
+//  transported field is 1 everywhere, divided by V_P. The bounded correction
+//  of a mass-weighted equation subtracts psi_P times this (through fvSp) as
+//  well as psi_P*sum_f(+-phi_m,f), because on a variable-density equation the
+//  continuity residual has two halves and S3.1's correction only ever saw
+//  one. Written as its own kernel rather than three field_ops passes so that
+//  no scratch cell field has to exist to hold an intermediate.
+extern "C" __global__ void tsDdtRhoContinuity
+(
+    ofscalar* __restrict__ contDdt,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ rho00,
+    ofscalar aN,
+    ofscalar a0,
+    ofscalar a00,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    contDdt[c] = aN*rho[c] + a0*rho0[c] + a00*rho00[c];
+}
+
+
 // ==========================================================================
 //  S13.2  Local time stepping - Euler with a PER-CELL reciprocal step
 // ==========================================================================

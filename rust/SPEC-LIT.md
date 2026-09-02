@@ -10,9 +10,9 @@ This is the only specification implementers may work from.
 
 ## 0. Why this document exists, and the rules that follow from it
 
-ofgpu is released under the **Meteor Simulation Source-Available License,
-Version 1.1** (`../LICENSE`); this document was first written when the target
-was MIT, and the change of licence changes nothing below. Mathematics is not
+ofgpu is released under the **Prosperity Public License 3.0.0**
+(`../LICENSE`); this document was first written when the target was MIT, and
+two changes of licence since have changed nothing below. Mathematics is not
 copyrightable and coefficients are facts, so any published model may be
 implemented freely. What may not be copied is another program's *expression* of
 it — its code, its structure, and the implementation choices that are the
@@ -26062,3 +26062,572 @@ rewritten to the verdict above, with `How::NotRunHere` unchanged.
 * **that anything was measured on a second machine.** One RTX 5070 Ti.
 * **that the 48³ row of §85.6 is the same fire as the other two.** It is a 23 %
   larger burner; §85.6 says so on the row.
+
+## 86. The species equation a fire needs — `d(rho Y)/dt + div(rho u, Y)`, the budget that closes by construction, and the two terms nobody was metering
+
+§85.7 measured a species mass budget that closes in neither discretisation —
+`−17 %` conservative, `+162 %` bounded, against a 2.95 kW supply — and named
+what to fix: *"The next unit of work here is a species equation in `rho Y`, not
+another case file."* This section is that equation, and it finds three things.
+
+**One.** `ScalarTransport` integrated `ddt(psi) + div(phi, psi)` with a
+volumetric `phi`, so it conserved `sum_c Y_P V_P` while §85.3's budget meters
+`sum_c rho_P Y_P V_P`. On this fire `rho` runs from 1.204 at the 293.15 K
+inlet to 0.253 in leg A's 1394.6 K peak cell - nearly a factor of five. **`−17 %` is not a discretisation error; it is a currency error**,
+and no amount of refinement touches it.
+
+**Two.** §85.3's budget was missing two terms of its own. It reads
+`supply = burnt + efflux + d(resident)/dt`, evaluates the first two and prints
+`resident` as a mass rather than a rate — and it has no term at all for the
+**diffusive** flux across the boundary, which on a `fixedValue` fuel inlet is
+not small: **1.73 kW against a 2.95 kW convective supply, 59 % of it.** Both
+terms are computable and both are now printed.
+
+**Three.** With the equation in `rho Y` and all four terms on the line, the
+conservative leg closes to **0.87 % of the supply**, against §85.7's `−17 %`,
+and the residue is one reaction step of lag in the *instrument* rather than
+anything in the equation — `the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`
+holds the discretisation itself to the linear solver's tolerance on a closed
+domain. The **bounded** leg does not close and structurally cannot: it differs
+from the conservative one by exactly `sum_c Y_P R_P`, the fuel-weighted
+discrete continuity residual, which on this fire is **30.1 kW** — ten times the
+supply.
+
+So §85.7's bracket is not two approximations straddling an answer. It is one
+form that conserves fuel mass and one that does not, plus a meter that was
+reading two of its four terms.
+
+**Written from:** this document's §3.1 (the bounded correction), §13.3 (the
+`ddt` coefficients), §14 (the non-iterative splitting), §19 (the species set
+and its boundedness clip), §25.1 and §25.3 (the low-Mach divergence constraint
+and the pressure equation that solves it), §26.1 (the same argument one
+equation over — the mass flux, the two halves of its divergence, and which of
+them can carry an imbalance), §27 (the mixing-controlled rate and its
+operator-split sink), §61 (soot), §77.3 (which form of a species source belongs
+to which form of the species equation) and §85 (the measurements this section
+starts from); Patankar, *Numerical Heat Transfer and Fluid Flow* (1980),
+ch. 5.2 — the conservative/non-conservative pair — and ch. 4.2's first basic
+rule, consistency at control-volume faces; Moukalled, Mangani & Darwish, *The
+Finite Volume Method in Computational Fluid Dynamics*, Springer (2016),
+ch. 15.4 — the bounded-convection correction — and its ch. 12 requirement that
+the flux a scalar equation is convected with satisfy the same discrete
+continuity the equation's own time derivative assumes; Ferziger & Perić,
+*Computational Methods for Fluid Dynamics*, 3rd ed. (2002), ch. 5.3. Tewarson's
+propane yield is quoted through
+`reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex` (NIST,
+public domain), exactly as §61.3 and §85.10 quote it. **No source was opened
+for this section that this document had not already cited**, and `NOTICE` is
+therefore unchanged. **ORIGINAL** otherwise: the discretisation, the identity
+of §86.4, the two new budget terms and every number below are this project's
+own. No GPL-licensed source was consulted.
+
+### 86.1 What §85.7's two legs actually are
+
+§85.7's table has two rows and reads as a bracket. Both reproduce at HEAD, to
+every digit §85.7 published, and are re-measured in §86.10 as this section's
+own "before". What they are is not two errors of opposite sign around a right
+answer.
+
+Write the assembled row of §19's equation for cell `P`, Euler, no source, and
+sum over the domain:
+
+```text
+sum_c [ (Y_P - Y_P^0) V_P / dt ]  +  sum_c sum_f (+-phi_f Y_f)_P  =  0
+```
+
+The convection telescopes — every internal face appears twice with opposite
+sign — so the second term is the net boundary outflow of **`phi Y`**, in m³/s
+of mass fraction. The first is the change in `sum_c Y_P V_P`. **Neither is a
+kilogram.** §85.3's budget is metered in kilograms: `rho_f phi_f Y_f` across a
+patch, `rho_P Y_P V_P` resident. The equation conserves one quantity and the
+instrument measures another, and what separates them is the whole of `rho`.
+
+That is the `−17 %`. A currency error has no order of accuracy, so no
+refinement moves it — which is why §85.12 was right that the fix is an
+equation and not a case setting, and how §85.6's sweep could move the peak
+temperature monotonically while the budget stayed broken.
+
+The `+162 %` is a different thing. `bounded` subtracts `Y_P (div phi)_P V_P`,
+which turns the conservative `div(phi Y)` into the non-conservative
+`phi . grad Y` — the form §27's operator-split sink and §77.3's vapour source
+are both written for. That form has no conservation property to lose: it is a
+statement about a material derivative following the flow, and what it costs is
+`sum_c Y_P (div phi)_P V_P`, the fuel-weighted divergence of a flux §25.3
+deliberately does **not** make solenoidal. §85.7 was right that `bounded` is
+the form consistent with §27, and right that the constant-density conservative
+leg is the inconsistent one. What it could not say is that **neither of the two
+forms available to it conserves fuel mass**, because neither is written in fuel
+mass.
+
+§86 removes the dichotomy rather than choosing a side. §27's sink is applied as
+an operator-split field update, `Y_F -= omega_F dt / rho`, which is
+`Delta(rho Y_F) = -omega_F dt` at fixed `rho` — consistent with the material
+form AND with (86.1)'s conservative one. It is only the constant-density
+conservative equation that it does not fit.
+
+### 86.2 Which flux, and why sharing it is what closes the budget
+
+The equation this section adds is
+
+```text
+d(rho Y_i)/dt + div(phi_m, Y_i) - laplacian(rho D_eff,i, Y_i) = S_i        (86.1)
+
+phi_m = rho_f phi                                                          (86.2)
+```
+
+with `phi` the ONE conservative volumetric flux §14's pressure equation
+produced and §19's requirement 3 already insists every species share, and
+`rho_f` the linear interpolation of §25's density onto the faces.
+
+**`phi_m` is not a new flux. It is §26's, one `cp` earlier.** §26 convects `T`
+with
+
+```text
+phi_conv = cp * (phi * rho_f)          rho_f = interpolate_linear(rho)
+```
+
+built in `Energy::update_conv_flux` out of the `rho_face`
+`Energy::update_k_eff` interpolated a line before. (86.2) is the same product
+before the `cp` scaling: the same `interpolate_linear`, on the same §25 `rho`,
+times the same §14 `phi`. `ScalarTransport` builds it from the same function on
+the same input rather than holding a pointer into `Energy` — which would tie
+two objects' lifetimes together for no arithmetic benefit — and
+`the_species_mass_flux_is_the_energy_equation_s_own` measures the consequence
+instead of asserting it: `phi_conv[f] == phi_m[f] * cp` **in every bit**, on
+every internal and every boundary face, because a single-precision multiply of
+the same two operands has one answer.
+
+**Why sharing it is what makes the budget close rather than merely improve.**
+Take (86.1) with no source, sum the assembled rows over every cell, and use the
+fact that the convection telescopes:
+
+```text
+d/dt [ sum_c rho_P Y_P V_P ]  +  sum_b (+-phi_m,b Y_b)  -  D_b  =  0        (86.3)
+       \_____ resident _____/       \__ efflux - supply __/  \_ diffusive _/
+```
+
+The first term is §85.3's `resident` — the *same* `rho_P Y_P V_P`, cell by
+cell. The second is §85.3's `supply` and `efflux` — the *same*
+`phi_b rho_b Y_b`, face by face, split by sign. §85.3's budget is not an
+approximation of (86.3); it IS (86.3), read off the same three arrays. So it
+closes to round-off **whatever the flow is doing** — whether or not the flux is
+mass-conservative, whether or not the mesh resolves anything, whether or not
+the fire is quasi-steady. That is what "by construction" means here: it is a
+property of the discretisation, not of the solution, and
+`the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`
+measures it on a closed domain whose flux is deliberately non-solenoidal and
+whose density moves in space and in time.
+
+Had the species equation built its own face density — an entirely reasonable
+thing to do, and invisible afterwards — the `rho_b` in its convection and the
+`rho_b` §85.3's meter reads would be two numbers, the identity above would hold
+for neither, and the budget would improve without closing. That is §19's
+requirement 3 one field up: not "use a conservative flux" but "use *the same*
+one the instrument reads".
+
+`D_b` is §86.9's subject: it is in the equation, it has never been in the
+budget, and it is 59 % of the supply on this burner.
+
+### 86.3 The equation, term by term, and the one assembly it reaches
+
+| term | constant density (§19) | mass-weighted (§86) |
+|---|---|---|
+| `ddt` | `fvm_ddt(psi0, psi00)` | `fvm_ddt_rho(rho, rho0, rho00, psi0, psi00)` — **each old level carries its own density**, which is what makes the discrete term conserve `rho psi` and not `psi` |
+| scheme weights | on `phi` | on `phi_m` |
+| convection | `fvm_div_gauss(phi)` | `fvm_div_gauss(phi_m)` |
+| `bounded` | `-Y_P sum_f(+-phi_f)` | §86.4 |
+| deferred correction (§11.1) | on `phi` | on `phi_m` |
+| diffusion | `laplacian(D_eff, Y)` | `laplacian(rho D_eff, Y)` — laminar half `rho D`, turbulent half `rho nu_t/Sc_t = mu_t/Sc_t` |
+| relaxation, solver, boundaries | unchanged | unchanged |
+
+Every convective row of that table is reached **without a branch**.
+`RasCore::assemble_after_diffusivity` takes its flux out of the `FlowState` it
+is handed, so `ScalarTransport` hands it one whose `phi` is `phi_m` and the
+scheme weights, the Gauss convection, the bounded correction and the deferred
+correction are all on the mass flux because they read the field they always
+read. The diffusivity is scaled by `rho_f` in the entry point, before the
+shared assembly begins. What is left is two places — the `ddt` and the
+`bounded` correction — and they are the only `match`/`if let` arms §86 adds to
+that function.
+
+That matters beyond tidiness. §85.7's own methodological note is that a
+two-variable comparison produced "52 K" for a quantity that is 179 K, and the
+rule it drew was to change one token at a time. A second assembly for the
+mass-weighted equation would be a second place for a scheme, a boundary
+treatment or a non-orthogonal corrector to be handled differently, and the
+difference would present as physics.
+
+### 86.4 On a variable-density equation the continuity residual has two halves
+
+§3.1's bounded correction exists to remove the spurious source a non-solenoidal
+flux injects into `div(phi, psi)`. On a constant-density equation the thing it
+subtracts is the discrete continuity residual in full, because `d(1)/dt` is
+identically zero. On (86.1) it is not. The residual is
+
+```text
+R_P = V_P (a_N rho + a_0 rho^0 + a_00 rho^00)_P  +  sum_f (+-phi_m,f)_P    (86.4)
+      \______________ the ddt half ____________/    \___ the flux half ___/
+```
+
+with `a_N`, `a_0`, `a_00` the same three §13.3 coefficients the `ddt` term is
+built from — Euler's `1/dt`, `-1/dt`, `0`, or `backward`'s three at whatever
+`dt` ratio the run is at. The first half is exactly what `fvm_ddt_rho` puts
+into row `P` when the transported field is 1 everywhere, divided by `V_P`;
+`the_continuity_coefficient_is_the_rho_weighted_ddt_of_a_uniform_field`
+measures that on both schemes rather than assuming it.
+
+`bounded` on a mass-weighted equation therefore subtracts `Y_P R_P`, both
+halves. Both corrections write to the DIAGONAL and nowhere else, so the whole
+of the difference between the two legs is one array, and
+`the_bounded_correction_is_the_whole_continuity_residual` measures it cell by
+cell on a mesh whose density varies in time and whose flux is deliberately not
+solenoidal.
+
+**The consequence is an identity, not a tendency.** Summing both assembled
+equations over the domain, with `D_b` for the boundary diffusive influx:
+
+```text
+conservative : d(resident)/dt + efflux + burnt - supply - D_b  =  0        (86.5)
+bounded      : d(resident)/dt + efflux + burnt - supply - D_b  =  sum_c Y_P R_P
+                                                                           (86.6)
+```
+
+You cannot have both. Exact global conservation and exact preservation of a
+uniform field coincide only when `R_P` is zero, which is the classical
+mass-consistency requirement (Moukalled et al. ch. 12; Ferziger & Perić ch.
+5.3) and which §25.3's pressure equation does not enforce: it solves for
+`sum_f (+-phi_f)_P = V_P (div u)_target,P`, a *prescribed* dilatation, and
+nothing in this solver constrains the discrete `d(rho)/dt` to agree with it.
+§26.1 made the same split one equation over, found the prescribed half
+annihilated by `cp rho T = const` and the residual half carrying the whole
+energy-balance gap. Here neither half is annihilated, because `Y` is not `T`
+and there is no ideal-gas identity to kill anything.
+
+`sum_c Y_P R_P` is printed by every mass-weighted run, in kW of
+fuel-equivalent, beside the budget it explains and with `R_P`'s L1 norm and
+worst cell. §85.7's first open candidate — *"the `d(rho)/dt` half of the
+difference above, which `bounded` does not touch"* — is that first term of
+(86.4), and it is now a number.
+
+### 86.5 What must hold
+
+| # | Statement | Test |
+|---|---|---|
+| 1 | (86.4)'s continuity coefficient is exactly what the `rho`-weighted `ddt` puts into a uniform row, on Euler and on `backward` | `the_continuity_coefficient_is_the_rho_weighted_ddt_of_a_uniform_field` |
+| 2 | `bounded` minus conservative is `Y_P R_P` — **both** halves of (86.4), cell by cell | `the_bounded_correction_is_the_whole_continuity_residual` |
+| 3 | (86.5): on a closed domain the conservative mass-weighted equation holds `sum_c rho_P Y_P V_P` fixed to the solver's tolerance, on a non-solenoidal flux and a moving density, and the constant-density equation on the same data drifts by three orders of magnitude more | `the_conservative_mass_weighted_equation_holds_the_species_mass_fixed` |
+| 4 | The species mass flux IS §26's, in every bit: `phi_conv == phi_m * cp` on every face | `the_species_mass_flux_is_the_energy_equation_s_own` |
+| 5 | `Species::correct` and `correct_with_density(None)` are bitwise the same constant-density equation, on every solved species and on the inert remainder | `the_two_entry_points_are_bitwise_the_same_constant_density_equation` |
+| 6 | Every mismatch of mode and density is refused by name — no silent substitution in either direction | `a_mismatched_density_and_mode_are_refused_by_name` |
+| 7 | `localEuler` is refused on a mass-weighted equation, with the alternatives named | `local_euler_is_refused_on_a_mass_weighted_equation` |
+| 8 | `-speciesEquation` is reachable by name, defaults to the constant-density equation, and refuses anything else | `the_species_equation_is_selected_by_name_and_defaults_to_constant_density` |
+
+### 86.6 The default is bitwise what it was, and that is a construction
+
+Every measurement recorded in this document before §86 — §85's four tables,
+§61.8's Gate 61-A, §42's CO, §62's absorption — was taken on the
+constant-density species equation. A default that silently changed which
+equation the solver integrates would make all of them irreproducible at once,
+so §86 is **opt-in**, by `-speciesEquation rhoY`, and the run prints which of
+the two it got on the same block as the scheme that discretises it.
+
+The identity is by construction in three places, and there is nothing to
+compare:
+
+* `Species::correct` is a one-line delegation to
+  `correct_with_density(..., None)`, and `ScalarTransport::correct_with_source`
+  a one-line delegation to `correct_inner(..., None)`.
+* Inside `correct_inner`, every §86 line is inside `if let Some(rho)` or a
+  `match` whose `None` arm is the line that was there before.
+* Inside `assemble_after_diffusivity`, `mass: None` reaches `self.ddt.add(...)`
+  and skips one `fvm_sp`, which is that function unchanged.
+
+The one part of that argument a typo could break silently is the delegation
+itself — a `correct` that had quietly acquired a density would still run and
+still converge — so row 5 of §86.5 measures it: three steps of a three-species
+set through each entry point, compared bit for bit including the inert
+remainder.
+
+The run-level check is §86.10's first two rows: legs A and B reproduce §85.7's
+two published numbers on a tree that contains all of §86.
+
+### 86.7 §13.4 contract — what is refused, and by what name
+
+| Setting | What happens |
+|---|---|
+| `-speciesEquation Y` (and its absence) | **Honoured**, and it is the default: §19's constant-density equation, unchanged. Printed. |
+| `-speciesEquation rhoY` | **Honoured**: (86.1). Printed, on the same block as `div(phi,Y_i)`. |
+| `-speciesEquation` anything else | **Refused by name**, quoting what was given and naming both values that work. |
+| a case key naming the species equation | **Not read, and none exists.** §86 is selected on the command line, beside `-absorption`/`-chiR`/`-radiationModel` — the other legs §85 measured and compared. A case key would have to default to `Y` for the same reason the flag does, so it would buy reachability this already has. **Alternative: `-speciesEquation rhoY`.** Recorded here rather than left to be discovered. |
+| `ddtSchemes` naming `localEuler`, with `rhoY` | **Refused by name.** The local step (§13.2) is a per-cell preconditioner wearing a time derivative's clothes; `d(rho Y)/dt` with a different `dt` in every cell conserves nothing, and (86.4) would be a statement about the preconditioner. **Alternatives named in the message: `Euler`, `backward`, `steadyState`.** |
+| `ddtSchemes` naming `steadyState`, with `rhoY` | Honoured, and the `ddt` half of (86.4) is identically zero — the same no-op it is for the constant-density equation. |
+| `bounded Gauss ...` on `div(phi,Y_i)`, with `rhoY` | **Honoured, and its cost is printed.** It is what §85.6's gate case names, and refusing it would refuse the configuration §85 measured. What it costs is (86.6)'s `sum_c Y_P R_P`, reported in kW beside the budget it explains. **Alternative, on the line above it: the unbounded scheme, which closes (86.5).** |
+| §61's soot `Y_s`, with `rhoY` | **Left volumetric, deliberately.** `Y_s` is transported outside §19's closure by its own `ScalarTransport`, and §61.2's source is `omega_s/rho`-shaped — the non-conservative form. Moving it would be a second unmeasured change on top of the one this section measures, and §86.11 shows the soot field is already the thing that needs looking at next. Named here so it is on the record. |
+| §77's vapour coupling, with `rhoY` | **Cannot arise in this driver** — `ofgpu-fire` has no parcels — and would be wrong if it could. §77.3 derives `S = mdot'''(1 - Y_v)/rho` for §19's non-conservative form; (86.1) wants `mdot'''(1 - Y_v)`, a factor of `rho` larger. §77.3 already states which equation its source belongs to; this row records the second equation it does not belong to. |
+| the species LINEAR SOLVER | Still `k_solver`, still a substitution, exactly as §85.8's last row records. Unchanged here. |
+
+### 86.8 The capture stance
+
+§81: a kernel added to an iteration must stay CUDA-graph capturable, and a
+per-iteration allocation does not fail capture — it records a MEM_ALLOC node
+and reallocates on every replay, which is worse than failing.
+
+`ScalarTransport::use_mass_weighting` allocates `rho_face`, `phi_m` and
+(86.4)'s coefficient buffer **once**, at setup, before the first `initialise`;
+`Species::use_mass_weighting` allocates §86.9's clip ledger in the same call.
+The per-iteration path allocates nothing: one `interpolate_linear`, two
+`copy_field`/`multiply_field` pairs, one `tsDdtRhoContinuity`, two
+`multiply_field` on the diffusivity, one `copy_field` and one `spcClipLedger`
+per species, and (under `bounded`) one `fvSp` — all on preallocated buffers,
+none of them a host synchronisation.
+
+The mode is a field on the object rather than a per-call argument for the same
+reason: an equation that was mass-weighted on one iteration and volumetric on
+the next would have an `f0` in the wrong currency, and a captured graph would
+have recorded whichever it was on the capture pass.
+
+### 86.9 The budget's other two terms, and the clip that turned out not to matter
+
+§85.3's budget is `supply = burnt + efflux + d(resident)/dt`, and the run
+printed the first two as rates and the third as a MASS. There is no fourth
+term at all. Both omissions are now closed, and one of them is large.
+
+**The diffusive flux across the boundary.** `laplacian(rho D_eff, Y)` moves
+species mass across a patch exactly as convection does, and on a `fixedValue`
+fuel inlet it is not a correction: `Y_F` is 1 on the face and whatever the
+first cell holds inside it, over a half-cell `1/Delta` of 256 m⁻¹. The run now
+reports
+
+```text
+D_b = sum_b rho_b D_eff,b |Sf_b| Delta_b (Y_b - Y_P)
+```
+
+with `D_eff,b = nu/Pr + nu_t,b/Pr_t` read off the equation's own coefficients
+and the same `empty`-patch skip the assembly makes. **On this burner it is
+1.73159 kW on leg D, 2.23673 kW on leg A and 2.89011 kW on leg B, against a
+2.94945 kW convective supply — 59 %, 76 % and 98 % of it.** It is not a term §85 got wrong; it is a term no
+budget in this document has ever had, so every one of them was short by
+something of that size, in both legs and at every refinement.
+
+**`d(resident)/dt`, discretely.** Formed from the same `f0` levels the last
+assembled step differenced — `sum_c V_c (rho_c Y_c - rho^0_c Y^0_c)/dt` — so it
+is that term and not a second opinion of it. `0.0485812 kW` on leg D: the fire
+is quasi-steady at 4 s to within 1.6 % of its supply, which §85 asserted and
+could not show.
+
+**Two lags are accepted and stated.** `Y_b`, `Y_P` and the resident inventory
+are read post-reaction and post-clip while the equation solved with their
+pre-reaction values, so every term above carries one reaction step of error.
+§86.10 measures what that is worth by halving `dt`, and it is
+first order: 0.869 % of the supply at `deltaT 0.0015` and 0.409 % at
+0.00075.
+
+**§19's boundedness clip is a mass source and nobody was metering it either.**
+`spcClipLedger` accumulates `rho_P V_P (Y_after - Y_before)` per cell over the
+whole run — a term that sits OUTSIDE the transport equation, so (86.5) says
+nothing about it. It could only exist once there was a `rho` to meter it with,
+which is §86.1's point again. **Measured, it is nothing:** `0 g` created and
+`0 g` destroyed on the bounded leg, and `-0.00044 g` net over 2667 steps on the
+conservative one, against a resident inventory of `0.0395 g` and `0.25 g` of
+fuel admitted. The clip was the first suspect for leg D's residue and it is
+**exonerated by measurement**, which is why the ledger is kept rather than
+deleted.
+
+### 86.10 The measurement: four legs, one case, one command each
+
+`cases/burnerPlumeResolved.jsonc` as §85.10 ships it — 262 144 cells over a
+0.5 m cube, 2667 steps at `deltaT 0.0015`, propane, `"Y": 1.0`, P1 gray at
+`a = 0.5` and `chi_r = 0.35`, `laminarSmokePoint` at `l_s = 0.162 m` — against
+the 2.94945 kW its own `inlet` patch meters. The conservative legs add
+`"div(phi,Y_F)": "Gauss upwind"` and nothing else. One RTX 5070 Ti; each leg is
+one run of about ten minutes.
+
+| # | equation | `div(phi,Y_F)` | burnt | efflux | **§85.7's budget** | peak T | cells > 1375 K | yield (61.7) |
+|---|---|---|---|---|---|---|---|---|
+| A | `Y` (§19) | `bounded Gauss upwind` | 3.16418 kW | 4.55882 kW | **+161.8 %** | 1394.60 K | 296 | `0.0124` |
+| B | `Y` (§19) | `Gauss upwind` | 2.33119 kW | 0.10932 kW | **−17.3 %** | 998.60 K | 0 | `0` |
+| C | `rhoY` (§86) | `bounded Gauss upwind` | 6.18438 kW | 29.2126 kW | **+1100.1 %** | 1604.94 K | 9272 | `0.845` |
+| D | `rhoY` (§86) | `Gauss upwind` | 2.32705 kW | 2.27978 kW | **+56.2 %** | 1505.71 K | 908 | `0.559` |
+
+**A and B are §85.7's own two rows**, reproduced on this tree to every digit
+§85.7 published: `2.331 / 0.109 / −17 %` and `3.164 / 4.559 / +162 %`, with
+`998.6 K`, `1394.6 K`, `0` and `296` cells and the yields `0` and `0.0124`.
+That is the run-level half of §86.6's bitwise claim, and it is why the other
+two rows can be read as a change of equation rather than a change of tree.
+
+**The column above is §85.7's budget, which is the two-term one.** With §86.9's
+other two terms on the line, leg D reads
+
+```text
+supply 2.94945 kW  +  diffusive in 1.73159 kW
+     =  burnt 2.32705 kW  +  out 2.27978 kW  +  d(resident)/dt 0.04858 kW
+residue 0.02563 kW  =  0.869 % of supply  =  0.00055 g/s
+```
+
+**0.87 %, against §85.7's `−17 %` and `+162 %`.** That is the result this
+section exists for. It is not round-off, and §86.9 says what the rest is: one
+reaction step of lag between the fields the equation solved with and the fields
+the meter reads. 
+
+**And that is measured rather than argued, by halving the time step.** An
+operator-split lag is first order in `dt`; a defect in the discretisation would
+not be. The same leg at `deltaT 0.00075` — 5334 steps instead of 2667, nothing
+else changed:
+
+| `deltaT` | residue | as % of supply | peak T | §85.7's budget |
+|---|---|---|---|---|
+| 0.0015 | 0.025630 kW | **0.869 %** | 1505.71 K | +56.2 % |
+| 0.00075 | 0.012052 kW | **0.409 %** | 1510.16 K | +56.0 % |
+
+**The residue halves when `dt` halves — 2.127, against the 2.000 a first-order
+lag predicts — while the solution itself does not move** (4.5 K on the peak,
+0.2 points on the two-term budget). The remaining 0.87 % is therefore in the
+INSTRUMENT and not in the equation: it is the reaction step between the fields
+(86.1) solved with and the fields the meter reads, and it goes to zero with
+`dt` while the discretisation's own conservation
+(`the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`) is
+exact at every `dt`.
+
+**The contrast that makes the point.** Completing the meter is not what closed
+the budget; the equation is. The same four terms on the two constant-density
+legs:
+
+```text
+leg A (bounded)  : 2.94945 + 2.23673  =  3.16418 + 4.55882 + (-0.09215)
+                   residue  -2.44467 kW  =  -82.9 % of supply
+leg B (upwind)   : 2.94945 + 2.89011  =  2.33119 + 0.10932 +   0.02265
+                   residue  +3.37639 kW  =  +114.5 % of supply
+```
+
+Both are wrong by more than their own fuel supply once every term is on the
+line, and they are wrong in opposite directions — the same bracket §85.7 saw,
+widened rather than narrowed by an honest meter, because a complete instrument
+cannot fix an equation that conserves the wrong quantity.
+
+**Leg C is worse than either leg of §85.7, and §86.4 says by exactly how
+much.** The run reports `sum_c Y_P R_P = 30.1242 kW` of fuel-equivalent, with
+`R_P`'s L1 norm `0.0385683 kg/s` and its worst single cell `6.96e-6 kg/s`. On a
+2.95 kW fire the discrete continuity residual is **ten times the fuel supply**,
+and (86.6) says `bounded` is non-conservative by `Y_P` times it. That is not a
+defect §86 introduced: the residual was there in every leg of §85, and a
+volumetric equation had no term that could see the `d(rho)/dt` half of it.
+
+
+**And (86.6) is measured on the fire itself, not only on the unit test.** With
+§86.9's four terms on the line, leg C reads
+
+```text
+supply 2.94945 kW  +  diffusive in 1.70869 kW
+     =  burnt 6.18438 kW  +  out 29.2126 kW  +  d(resident)/dt -0.61893 kW
+residue -30.1199 kW  =  -1021.2 % of supply
+```
+
+against a reported `sum_c Y_P R_P` of **`30.1242 kW`**. The two agree to
+**0.014 %** — four digits, on a 262 144-cell fire, between a number formed from
+the assembled matrix's own two arrays and a number formed from five independent
+domain reductions. That is (86.6) as an identity rather than as an argument,
+and it is the strongest single statement in this section: the bounded leg's
+budget error is not "large", it is `sum_c Y_P R_P` and nothing else.
+
+**Where that residual comes from, named and not separated.** Three
+contributions, in the order this section would attack them:
+
+1. **The lag.** The species equations are corrected before this step's pressure
+   solve, so they convect with `phi^{n-1}` while being weighted by `rho^n` —
+   the segregated ordering §14 chooses, and the one place a mass flux and a
+   density are guaranteed to be a step apart.
+2. **`(div u)_target` is not `d(rho)/dt`.** §25.3's pressure equation enforces
+   `sum_f (+-phi_f)_P = V_P (div u)_target,P` with `(div u)_target` built from
+   §25.1's `Q`. Nothing makes that discretely equal to
+   `-(V_P/rho_P)(a_N rho + a_0 rho^0 + a_00 rho^00)_P`, which is what (86.4)
+   would need. §26.1 measured the same disagreement from the energy side and
+   found it carrying the whole balance gap there too.
+3. **`T`'s 0.5 relaxation.** §85.6 records that `"T": 0.5` is load-bearing for
+   stability on this case and that `1.0` diverges inside 100 steps. A relaxed
+   `T` makes `rho` lag `T`, so the density the `ddt` half differences and the
+   dilatation the flux half carries disagree by construction.
+
+§85.7 listed all three as open candidates and could measure none. This section
+measures their **sum** — that is what `R_P` is — and separates it from the
+discretisation, which is now exact. **It does not separate the three from each
+other, and does not claim to.**
+
+### 86.11 Gate 61-A, re-run — and the `0.0124` was an accident of the error
+
+§61.8's Gate 61-A asks the `laminarSmokePoint` model's predicted post-flame
+soot yield (61.7) against Tewarson's measured `0.024 kg/kg` for propane.
+
+| leg | §85.7's budget | peak T | cells > 1375 K | yield | ratio to 0.024 |
+|---|---|---|---|---|---|
+| §61.8's original | 64 % unaccounted | 816.9 K | 0 of 32 768 | `0` | — |
+| §85.10's (leg A) | +162 % | 1394.6 K | 296 | `0.0124` | **1.94** |
+| §86's conservative (leg D) | +56 %, and 0.87 % on all four terms | 1505.7 K | 908 | `0.559` | **23.3** |
+
+**This is the finding §85.10 most needs to hear.** §85.10 reported `0.0124`
+against `0.024` — *"inside the factor of two Gate 61-A asks for"* — and refused
+to call it a pass because the leg that produced it had a budget out by 2.6×.
+That refusal was right, and it was right for a stronger reason than it knew:
+**with the budget closed to 0.87 %, the same model, on the same case, with
+nothing else touched, predicts `0.559 kg/kg` — 23 times the measured value.**
+The near-agreement was not a model that was almost working on a run that was
+not; it was an artefact of the missing reactant.
+
+**And leg D's soot field cannot be read as a result either.** It carries
+`max Y_s = 1.626` — a mass fraction above one — with `0.0236 g` resident and
+`0` oxidation anywhere. Whatever (61.7) is reporting on that field, it is not a
+yield. §61's soot equation is untouched by §86 (§86.7's row says why), so this
+is a statement about `laminarSmokePoint` on a hotter flame, and it is what the
+next unit of work here has to look at.
+
+**The verdict does not move, and §61.8's reason for it still stands.** §61.8
+records that a closed budget is *necessary and not sufficient*: leg D's flame
+peaks at 1505.7 K, still far below a propane flame's critical flame
+temperature, so the comparison is not like-for-like whatever the budget does.
+Gate 61-A is **still not closed**, the reason has moved from "no cell is hot
+enough" (§61.8) through "the budget is out by 2.6×" (§85.10) to "the budget
+closes and the model is 23× high on a soot field with a mass fraction above
+one", and every one of those three is a different piece of work.
+
+**Nothing was tuned.** `l_s`, `M_F`, `Y_F,1`, `omega_so,P`, `C_EDM`, `chi_r`
+and `a` are at the values §61 and §27 published, and the case file is
+unchanged: the only difference between leg A and leg D is one command-line
+token and one `divSchemes` entry, each measured in both directions in §86.10.
+
+### 86.12 Validation, and what is NOT claimed
+
+`ofgpu-validate` gains nothing that runs a fire, for §85.12's reason: a
+2667-step 262 144-cell burner is not a harness check. The eight rows of §86.5
+are `cargo test` device tests, and §69's Gate 61-A registry entry keeps
+`How::NotRunHere`.
+
+**What is NOT claimed:**
+
+* **that the budget closes to round-off.** It closes to **0.87 % of the
+  supply** on leg D, against §85.7's `−17 %`. The DISCRETISATION closes to the
+  linear solver's tolerance — that is row 3 of §86.5, on a closed domain with
+  no reaction and no clip — and the 0.87 % is the operator-split lag between
+  the fields the equation solved with and the fields the meter reads.
+* **that it closes under both convection schemes.** It does not. (86.6) says
+  why it cannot while `R_P` is nonzero, leg C measures what that costs on this
+  fire — `30.1 kW` of fuel-equivalent — and §86.7's table names the alternative
+  that does close on the line that reports it.
+* **that the continuity residual has been reduced.** Nothing in this section
+  touches it. §86 makes it *visible* and makes one discretisation independent
+  of it; §86.10 names its three contributions and separates none of them.
+* **that a mass-consistent flux was attempted.** It was not. The standard
+  remedy — a projection of `phi_m` onto the discrete continuity of `rho`, one
+  extra pressure-shaped solve per step — is a change to §25.3 and to the cost
+  of every time step.
+* **that Gate 61-A passes, or that it is closer than §85.10 thought.** §86.11
+  says it is further, and says why the `0.0124` looked closer.
+* **that leg D's yield is a model prediction to be compared with anything.**
+  It is read off a field with `max Y_s = 1.626`. §86.11 says so on the line
+  that prints it.
+* **that `Y_s` or a §77 vapour source were moved to (86.1).** Neither was;
+  §86.7 has a row for each with the algebra of what would change.
+* **that the mass-weighted equation was measured on any case but this one.**
+  It was not. One fire, one mesh, one RTX 5070 Ti.
+* **that the bitwise-default claim was measured on the whole solver.** It was
+  measured on the species set (row 5 of §86.5) and on two full runs of the gate
+  case (§86.10's rows A and B). Every other driver in the tree reaches
+  `Species::correct`, whose delegation is what row 5 pins.

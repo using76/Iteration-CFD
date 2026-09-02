@@ -2991,6 +2991,108 @@ mod tests {
         Ok(())
     }
 
+    /// **SPEC-LIT §86.5 row 4, and §86.2's whole claim.** The species
+    /// equation's mass flux IS this equation's, measured rather than
+    /// asserted.
+    ///
+    /// §26 convects `T` with `phi_conv = cp * (phi * rho_f)` and §86 convects
+    /// `Y` with `phi_m = phi * rho_f`, both from `interpolate_linear` of the
+    /// same §25 `rho` and the same §14 `phi`. If those are one construction
+    /// then `phi_conv` is `cp` times `phi_m` in EVERY BIT, on every internal
+    /// and every boundary face - a single-precision multiply of the same two
+    /// operands, and nothing else between them.
+    ///
+    /// This is what makes §86's budget close rather than merely improve: the
+    /// fuel that the energy equation carries out of a cell and the fuel the
+    /// species equation carries out of it are the same kilograms, so the two
+    /// cannot disagree about how much mass crossed a face. A second, private
+    /// interpolation here would be individually reasonable and would put the
+    /// two equations on different fluxes - §19's requirement 3, one field up.
+    #[test]
+    fn the_species_mass_flux_is_the_energy_equation_s_own() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        const N: usize = 12;
+        let h: Scalar = 0.01;
+        let hm = slab(N, h);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+
+        let nu: Scalar = 1.5e-5;
+        let props = GasProperties::default();
+        let (mut e, nut, mut phi) = laminar_slab_energy(&g, &hm, &m, props, false, 0.002)?;
+
+        // A flux with structure, so the comparison is not a field of zeros.
+        g.write(
+            &mut phi.f,
+            &(0..hm.n_internal_faces)
+                .map(|i| 1e-4 * (0.6 + ((i as Scalar) * 0.31).sin()))
+                .collect::<Vec<_>>(),
+        )?;
+        g.write(
+            &mut phi.bf,
+            &(0..hm.n_boundary_faces)
+                .map(|i| 1e-4 * (0.2 + ((i as Scalar) * 0.17).cos()))
+                .collect::<Vec<_>>(),
+        )?;
+
+        e.initialise(&g)?;
+        set_dirichlet_ends(&g, &hm, e.field_mut(), 320.0, 300.0)?;
+        e.initialise(&g)?;
+
+        let mut gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+        gas.update_density(&g, e.field())?;
+
+        // §26's own two lines, in their own order.
+        e.update_k_eff(&g, &nut, &gas, nu)?;
+        e.update_conv_flux(&g, &phi)?;
+
+        // §86's, on the same rho and the same phi.
+        let mut st = crate::scalar_transport::ScalarTransport::new(
+            &g,
+            &hm,
+            &m,
+            "Y_F",
+            crate::scalar_transport::ScalarTransportCoeffs::default(),
+            crate::io::case::TurbulenceControls {
+                k_relax: 1.0,
+                steady: false,
+                delta_t: 0.002,
+                sn_grad: SnGradScheme::Uncorrected,
+                ..crate::io::case::TurbulenceControls::default()
+            },
+        )?;
+        st.use_mass_weighting(&g)?;
+        st.initialise(&g)?;
+        let u = crate::field::GpuVectorField::zeros(&g, &m, "U")?;
+        let flow = crate::turbulence::FlowState::new(&u, &phi, nu);
+        st.correct_with_density(&g, &flow, &nut, None, Some(gas.rho()))?;
+
+        let pc_i = g.download(&e.phi_conv.f)?;
+        let pc_b = g.download(&e.phi_conv.bf)?;
+        let pm = st.mass_flux().expect("mass weighted");
+        let pm_i = g.download(&pm.f)?;
+        let pm_b = g.download(&pm.bf)?;
+
+        let cp = props.cp;
+        let mut nonzero = 0usize;
+        for (i, (&a, &b)) in pc_i.iter().zip(pm_i.iter()).enumerate() {
+            if b != 0.0 {
+                nonzero += 1;
+            }
+            assert_eq!(
+                a,
+                b * cp,
+                "internal face {i}: the energy equation convects with {a} and the \
+                 species equation with {b}*cp - they are not the same flux"
+            );
+        }
+        for (i, (&a, &b)) in pc_b.iter().zip(pm_b.iter()).enumerate() {
+            assert_eq!(a, b * cp, "boundary face {i}: {a} against {b}*cp");
+        }
+        assert!(nonzero > hm.n_internal_faces / 2, "the test compared a field of zeros");
+        Ok(())
+    }
+
     /// SPEC-LIT S37.3: `energyKEffKaysCrawford` has to reproduce the host
     /// [`kays_crawford_prt`] on every face, INCLUDING the two end branches -
     /// the same discipline `wallfunctions::thermal_wall_device_agrees_with_the_host_law`

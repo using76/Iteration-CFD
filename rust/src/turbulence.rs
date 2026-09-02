@@ -1455,6 +1455,37 @@ pub fn grad_frobenius(
 /// Allocated once. Nothing in an outer iteration allocates, both because a
 /// time loop should not and because a CUDA graph cannot capture an
 /// allocation at all.
+/// **SPEC-LIT §86.3.** What turns `ddt(psi) + div(phi, psi)` into
+/// `ddt(rho, psi) + div(phi_m, psi)` on the ONE assembly
+/// [`RasCore::assemble_transport`] and its siblings share.
+///
+/// The `phi` carried in the [`FlowState`] handed alongside this is the MASS
+/// flux `phi_m = rho_f phi`, so every convective line of that assembly - the
+/// scheme weights, `fvm_div_gauss`, the bounded correction, the deferred
+/// correction - is on the mass flux with no branch at all. What this struct
+/// supplies is the three things that are NOT a flux: the density time levels
+/// the `ddt` carries, the face density the laplacian is weighted by, and
+/// (86.4)'s continuity coefficient.
+pub struct MassWeighting<'a> {
+    /// `rho^n`, `[n_cells]`.
+    pub rho: &'a DevBuf<Scalar>,
+    /// `rho^{n-1}`, `[n_cells]`.
+    pub rho0: &'a DevBuf<Scalar>,
+    /// `rho^{n-2}`, `[n_cells]`.
+    pub rho00: &'a DevBuf<Scalar>,
+
+    /// `rho_f` on every face, `[n_if]`/`[n_bf]`. The diffusivity
+    /// `Gamma_eff |Sf|` is multiplied by it, which turns
+    /// `laplacian(D_eff, Y)` into `laplacian(rho D_eff, Y)`.
+    pub rho_face: &'a GpuSurfaceScalarField,
+
+    /// `[n_cells]` `a_N rho + a_0 rho^0 + a_00 rho^00` -
+    /// [`crate::timescheme::Ddt::rho_continuity`], the ddt half of the
+    /// discrete continuity residual. Read ONLY when the case asked for
+    /// `bounded`; see (86.4).
+    pub cont_ddt: &'a DevBuf<Scalar>,
+}
+
 pub struct RasCore<'m> {
     pub mesh: &'m GpuMesh,
     pub ctrl: TurbulenceControls,
@@ -1745,7 +1776,68 @@ impl<'m> RasCore<'m> {
             r_sigma,
         )?;
 
-        self.assemble_after_diffusivity(gpu, flow, psi, conv)
+        self.assemble_after_diffusivity(gpu, flow, psi, conv, None)
+    }
+
+    /// [`Self::assemble_transport`] for a MASS-WEIGHTED equation -
+    /// `SPEC-LIT` §86.3:
+    ///
+    /// ```text
+    /// ddt(rho, psi) + div(phi_m, psi) - laplacian(rho Gamma_eff, psi) = 0
+    /// ```
+    ///
+    /// `flow.phi` must already BE the mass flux `phi_m = rho_f phi`; this
+    /// function does not build it, because the whole point of §86.2 is that
+    /// the flux is one object shared with the equation that already convects
+    /// with it rather than a second one assembled here.
+    ///
+    /// Everything downstream of the diffusivity is literally the same code
+    /// [`Self::assemble_transport`] reaches - the same scheme weights, the
+    /// same `fvm_div_gauss`, the same deferred correction - because it is the
+    /// same equation with a different flux in it. The two differences are
+    /// named in `assemble_after_diffusivity` and are the only places `mass`
+    /// is read.
+    pub fn assemble_transport_mass_weighted(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        psi: &GpuScalarField,
+        conv: DivEntry,
+        r_sigma: Scalar,
+        mass: &MassWeighting<'_>,
+    ) -> Result<()> {
+        self.a.zero(gpu)?;
+
+        face_diffusivity(
+            gpu,
+            &self.turb,
+            &mut self.gamma,
+            &mut self.b_gamma,
+            &self.nut,
+            self.mesh,
+            flow.nu,
+            r_sigma,
+        )?;
+
+        // `Gamma_eff |Sf|` -> `rho_f Gamma_eff |Sf|`. The laminar half is
+        // then `rho D` and the turbulent half `rho nu_t/Sc_t = mu_t/Sc_t`,
+        // which is what a mass fraction in `rho Y` diffuses with.
+        crate::field_ops::multiply_field(
+            gpu,
+            &self.fld,
+            &mut self.gamma,
+            &mass.rho_face.f,
+            self.mesh.n_internal_faces,
+        )?;
+        crate::field_ops::multiply_field(
+            gpu,
+            &self.fld,
+            &mut self.b_gamma,
+            &mass.rho_face.bf,
+            self.mesh.n_boundary_faces,
+        )?;
+
+        self.assemble_after_diffusivity(gpu, flow, psi, conv, Some(mass))
     }
 
     /// [`Self::assemble_transport`] with the diffusivity `a·nu + b·nu_t` -
@@ -1778,7 +1870,7 @@ impl<'m> RasCore<'m> {
             b,
         )?;
 
-        self.assemble_after_diffusivity(gpu, flow, psi, conv)
+        self.assemble_after_diffusivity(gpu, flow, psi, conv, None)
     }
 
     /// [`Self::assemble_transport`] with `sigma` read per cell rather than
@@ -1811,7 +1903,7 @@ impl<'m> RasCore<'m> {
             flow.nu,
         )?;
 
-        self.assemble_after_diffusivity(gpu, flow, psi, conv)
+        self.assemble_after_diffusivity(gpu, flow, psi, conv, None)
     }
 
     /// [`Self::assemble_transport`] with the face diffusivity supplied by
@@ -1841,7 +1933,7 @@ impl<'m> RasCore<'m> {
     {
         self.a.zero(gpu)?;
         fill(&mut self.gamma, &mut self.b_gamma, self.mesh)?;
-        self.assemble_after_diffusivity(gpu, flow, psi, conv)
+        self.assemble_after_diffusivity(gpu, flow, psi, conv, None)
     }
 
     /// Everything an eddy-viscosity transport equation does once its face
@@ -1854,6 +1946,12 @@ impl<'m> RasCore<'m> {
         flow: &FlowState,
         psi: &GpuScalarField,
         conv: DivEntry,
+        // SPEC-LIT §86.3. `None` is every line of this function as it stood
+        // before §86, and is what all four constant-density entry points
+        // above pass: the `match` and the `if let` below are the WHOLE
+        // difference, which is what makes the constant-density path bitwise
+        // identical by construction rather than by comparison (§86.6).
+        mass: Option<&MassWeighting<'_>>,
     ) -> Result<()> {
         let scheme: crate::fv::DivScheme = conv.scheme.into();
 
@@ -1895,7 +1993,23 @@ impl<'m> RasCore<'m> {
         // SPEC-LIT 13: whichever scheme `ddtSchemes` named. Both old levels
         // are passed even for Euler, which ignores the second - a caller that
         // has only one cannot ask for `backward` and be quietly given Euler.
-        self.ddt.add(gpu, &mut self.a, self.mesh, &psi.f0, &psi.f00, 1.0)?;
+        match mass {
+            None => self.ddt.add(gpu, &mut self.a, self.mesh, &psi.f0, &psi.f00, 1.0)?,
+            // SPEC-LIT §86.3: `ddt(rho, psi)`, each old level carrying its
+            // OWN density, which is what makes the discrete term conserve
+            // `rho psi` rather than `psi`.
+            Some(mw) => self.ddt.add_rho(
+                gpu,
+                &mut self.a,
+                self.mesh,
+                mw.rho,
+                mw.rho0,
+                mw.rho00,
+                &psi.f0,
+                &psi.f00,
+                1.0,
+            )?,
+        }
 
         fvm_div_gauss(
             gpu,
@@ -1914,6 +2028,19 @@ impl<'m> RasCore<'m> {
         // when phi conserves mass.
         if conv.bounded {
             fvm_div_bounded_correction(gpu, &self.fv, &mut self.a, self.mesh, flow.phi, 1.0)?;
+
+            // SPEC-LIT (86.4): on a mass-weighted equation the discrete
+            // continuity residual has TWO halves, and the line above is only
+            // the flux one. Subtracting `psi_P` times the other half as well
+            // is what makes `bounded` preserve a uniform field EXACTLY - with
+            // `psi = 1` the whole row is then `R_P - R_P = 0` - which is the
+            // property `bounded` exists for and which it does NOT have on a
+            // variable-density equation without this term. It is also
+            // precisely §85.7's first open candidate, "the d(rho)/dt half of
+            // the difference above, which `bounded` does not touch".
+            if let Some(mw) = mass {
+                crate::fv::fvm_sp(gpu, &self.fv, &mut self.a, self.mesh, mw.cont_ddt, -1.0)?;
+            }
         }
 
         // The explicit half of `linearUpwind`/`cubic` (SPEC-LIT §11.1). The

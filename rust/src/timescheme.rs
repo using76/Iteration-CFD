@@ -369,6 +369,7 @@ impl TimeState {
 pub struct TimeKernels {
     ddt_general: CudaFunction,
     ddt_general_rho: CudaFunction,
+    ddt_rho_continuity: CudaFunction,
     ddt_local: CudaFunction,
     theta_cells: CudaFunction,
     scale: CudaFunction,
@@ -383,6 +384,7 @@ impl TimeKernels {
         Ok(Self {
             ddt_general: k.func("tsDdtGeneral")?,
             ddt_general_rho: k.func("tsDdtGeneralRho")?,
+            ddt_rho_continuity: k.func("tsDdtRhoContinuity")?,
             ddt_local: k.func("tsDdtLocal")?,
             theta_cells: k.func("tsThetaCells")?,
             scale: k.func("tsScale")?,
@@ -1004,6 +1006,100 @@ impl Ddt {
                 fvm_ddt(gpu, &self.kernels, a, m, psi0, psi00, c, sign)
             }
         }
+    }
+
+    /// [`Self::add`] for `sign · d(rho psi)/dt` - `SPEC-LIT` §86.3.
+    ///
+    /// The same three coefficients [`Self::add`] uses, so a mass-weighted
+    /// equation cannot be integrated by a different time scheme from the one
+    /// `ddtSchemes` named for the rest of the run: the scheme is read off
+    /// `self`, not off the call site.
+    ///
+    /// `localEuler` is **refused by name** (§86.7): its step is a per-cell
+    /// preconditioner rather than a time derivative, so `d(rho psi)/dt` with
+    /// a different `dt` in every cell conserves nothing, and the discrete
+    /// continuity residual [`Self::rho_continuity`] forms would be a
+    /// statement about the preconditioner. `steadyState` is a no-op, exactly
+    /// as it is for [`Self::add`].
+    pub fn add_rho(
+        &self,
+        gpu: &Gpu,
+        a: &mut GpuLduMatrix,
+        m: &GpuMesh,
+        rho: &DevBuf<Scalar>,
+        rho0: &DevBuf<Scalar>,
+        rho00: &DevBuf<Scalar>,
+        psi0: &DevBuf<Scalar>,
+        psi00: &DevBuf<Scalar>,
+        sign: Scalar,
+    ) -> Result<()> {
+        match self.scheme {
+            DdtScheme::SteadyState => Ok(()),
+
+            DdtScheme::LocalEuler => Err(Error::Config(
+                "ddtSchemes named `localEuler` and this equation is                  mass-weighted (SPEC-LIT §86.3). The local step is a per-cell                  preconditioner, not a time derivative, so d(rho psi)/dt with                  a different dt in every cell conserves nothing. Alternative:                  `Euler` or `backward` for a transient run, `steadyState` for                  a steady one - both are honoured here."
+                    .to_string(),
+            )),
+
+            other => {
+                let c = other.coeffs(self.state.dt, self.state.dt_old, self.state.step)?;
+                fvm_ddt_rho(gpu, &self.kernels, a, m, rho, rho0, rho00, psi0, psi00, c, sign)
+            }
+        }
+    }
+
+    /// `a_N rho + a_0 rho^{n-1} + a_00 rho^{n-2}` per cell - the ddt half of
+    /// the DISCRETE continuity residual, `SPEC-LIT` (86.4).
+    ///
+    /// This is exactly what [`Self::add_rho`] puts into row `P` when the
+    /// transported field is `1` everywhere, divided by `V_P`. It is the term
+    /// §3.1's bounded correction never had to know about, because on a
+    /// constant-density equation it is identically zero.
+    ///
+    /// Zero under `steadyState`, which is the same thing [`Self::add_rho`]
+    /// contributes there.
+    pub fn rho_continuity(
+        &self,
+        gpu: &Gpu,
+        out: &mut DevBuf<Scalar>,
+        m: &GpuMesh,
+        rho: &DevBuf<Scalar>,
+        rho0: &DevBuf<Scalar>,
+        rho00: &DevBuf<Scalar>,
+    ) -> Result<()> {
+        let n = m.n_cells;
+        expect_len(out, n, "out")?;
+        if n == 0 {
+            return Ok(());
+        }
+        let c = match self.scheme {
+            DdtScheme::SteadyState => DdtCoeffs::ZERO,
+            DdtScheme::LocalEuler => {
+                return Err(Error::Config(
+                    "SPEC-LIT §86.3 refuses `localEuler` on a mass-weighted                      equation; this residual is not defined for it.                      Alternative: `Euler`, `backward` or `steadyState`."
+                        .to_string(),
+                ))
+            }
+            other => other.coeffs(self.state.dt, self.state.dt_old, self.state.step)?,
+        };
+        for (b, what) in [(rho, "rho"), (rho0, "rho0"), (rho00, "rho00")] {
+            expect_len(b, n, what)?;
+        }
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.kernels.ddt_rho_continuity)
+                .arg(&mut *out)
+                .arg(rho)
+                .arg(rho0)
+                .arg(rho00)
+                .arg(&c.a_n)
+                .arg(&c.a_0)
+                .arg(&c.a_00)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
     }
 
     /// Close the step just taken and open the next one.

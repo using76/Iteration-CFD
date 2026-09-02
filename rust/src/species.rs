@@ -142,6 +142,7 @@ impl SpeciesCoeffs {
 
 struct SpeciesKernels {
     bound: CudaFunction,
+    clip_ledger: CudaFunction,
     accumulate: CudaFunction,
     close_inert: CudaFunction,
     sum_error: CudaFunction,
@@ -152,6 +153,7 @@ impl SpeciesKernels {
         let k = KernelSet::new(gpu, crate::kernels::SPECIES)?;
         Ok(Self {
             bound: k.func("spcBound")?,
+            clip_ledger: k.func("spcClipLedger")?,
             accumulate: k.func("spcAccumulate")?,
             close_inert: k.func("spcCloseInert")?,
             sum_error: k.func("spcSumError")?,
@@ -180,6 +182,22 @@ pub struct Species<'m> {
     sum: DevBuf<Scalar>,
     /// `|1 - Σ_i Y_i|` per cell, for [`Species::max_sum_error`].
     err: DevBuf<Scalar>,
+
+    /// **SPEC-LIT §86.9.** Per solved species, `[n_cells]` of
+    /// `sum over steps of rho_P V_P (Y_after - Y_before)` across §19's
+    /// boundedness clip - the species mass that clip put in or took out,
+    /// which is a source sitting OUTSIDE the transport equation and which
+    /// (86.5) therefore says nothing about.
+    ///
+    /// Empty until [`Species::use_mass_weighting`] is called: on the
+    /// constant-density equation there is no `rho` to meter it in, and an
+    /// unweighted ledger would be a number in the wrong currency - which is
+    /// §86.1's whole subject.
+    clip_ledger: Vec<DevBuf<Scalar>>,
+    /// `[n_cells]` scratch holding one species' field as it stood before the
+    /// clip. Reused across the species within one `correct`, because it is
+    /// written and read back before the next species is touched.
+    pre_clip: DevBuf<Scalar>,
 
     sk: SpeciesKernels,
     fldk: FieldKernels,
@@ -259,6 +277,8 @@ impl<'m> Species<'m> {
             inert_name: inert.to_string(),
             sum: gpu.zeros(nc)?,
             err: gpu.zeros(nc)?,
+            clip_ledger: Vec::new(),
+            pre_clip: gpu.zeros(nc)?,
             sk: SpeciesKernels::new(gpu)?,
             fldk: FieldKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
@@ -349,6 +369,52 @@ impl<'m> Species<'m> {
         self.solved.get_mut(i)
     }
 
+    /// **SPEC-LIT §86.** Integrate every solved species in `rho Y` rather
+    /// than in `Y`, from the next [`Species::correct_with_density`] on.
+    ///
+    /// ```text
+    /// d(rho Y_i)/dt + div(rho u, Y_i) - laplacian(rho D_eff,i, Y_i) = S_i
+    /// ```
+    ///
+    /// Applied to ALL of them or to none: the `N-1` solved fractions and the
+    /// inert remainder are one set, and a set half of whose members conserve
+    /// `rho Y` while the other half conserve `Y` does not sum to anything.
+    /// [`Species::correct`] is refused afterwards, by name, because the
+    /// density it would need is not on its signature.
+    ///
+    /// This is opt-in, and §86.6 says why: every measurement recorded in
+    /// SPEC-LIT was taken on the constant-density equation, and a default
+    /// that silently changed which equation the solver integrates would make
+    /// all of them irreproducible at once.
+    pub fn use_mass_weighting(&mut self, gpu: &Gpu) -> Result<()> {
+        for st in &mut self.solved {
+            st.use_mass_weighting(gpu)?;
+        }
+        // §86.9's ledger, allocated ONCE with the rest of §86's buffers, so
+        // the time loop still allocates nothing (§81).
+        if self.clip_ledger.is_empty() {
+            let nc = self.m.n_cells.max(1);
+            for _ in 0..self.solved.len() {
+                self.clip_ledger.push(gpu.zeros(nc)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// **SPEC-LIT §86.9.** The species mass §19's boundedness clip has added
+    /// to (positive) or removed from (negative) this species since the run
+    /// began, per cell, in kg. `None` unless
+    /// [`Species::use_mass_weighting`] was called.
+    pub fn clip_ledger(&self, name: &str) -> Option<&DevBuf<Scalar>> {
+        let i = self.names.iter().position(|n| n == name)?;
+        self.clip_ledger.get(i)
+    }
+
+    /// Is this set integrated in `rho Y` (SPEC-LIT §86)?
+    pub fn is_mass_weighted(&self) -> bool {
+        self.solved.first().is_some_and(|st| st.is_mass_weighted())
+    }
+
     /// This species' own `divSchemes` entry.
     ///
     /// SPEC-LIT §19 asks for a LIMITED scheme (§7): a mass fraction is exactly
@@ -403,19 +469,63 @@ impl<'m> Species<'m> {
         flow: &FlowState,
         nut: &GpuScalarField,
     ) -> Result<Vec<SolverPerformance>> {
+        self.correct_with_density(gpu, flow, nut, None)
+    }
+
+    /// [`Species::correct`] with SPEC-LIT §86's density.
+    ///
+    /// `rho` must be `Some` exactly when [`Species::use_mass_weighting`] was
+    /// called; each equation refuses the other two pairings by name rather
+    /// than quietly solving the equation it was not asked for.
+    ///
+    /// `None` is [`Species::correct`], and the two share this body.
+    pub fn correct_with_density(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        nut: &GpuScalarField,
+        rho: Option<&GpuScalarField>,
+    ) -> Result<Vec<SolverPerformance>> {
         let n = self.m.n_cells;
         if n == 0 {
             return Ok(Vec::new());
         }
 
         let mut perf = Vec::with_capacity(self.solved.len());
-        for st in &mut self.solved {
-            let p = st.correct(gpu, flow, nut)?;
+        for (i, st) in self.solved.iter_mut().enumerate() {
+            let p = st.correct_with_density(gpu, flow, nut, None, rho)?;
+
+            // SPEC-LIT §86.9: what the clip is about to do, in kilograms.
+            // Only reachable on the mass-weighted equation, because only
+            // there is there a `rho` to meter it with.
+            let ledger = match (rho, self.clip_ledger.get_mut(i)) {
+                (Some(rho), Some(acc)) => {
+                    field_ops::copy_field(gpu, &self.fldk, &mut self.pre_clip, &st.field().f, n)?;
+                    Some((rho, acc))
+                }
+                _ => None,
+            };
 
             // Requirement 1: bound, then re-evaluate the boundary faces so a
             // zero-gradient patch carries the clipped value and not the value
             // before it.
             launch_bound(gpu, &self.sk.bound, &mut st.field_mut().f, n)?;
+
+            if let Some((rho, acc)) = ledger {
+                let nl = n as Label;
+                let f = self.sk.clip_ledger.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&f)
+                        .arg(&mut *acc)
+                        .arg(&st.field().f)
+                        .arg(&self.pre_clip)
+                        .arg(&rho.f)
+                        .arg(&self.m.v)
+                        .arg(&nl)
+                        .launch(crate::device::cfg_for(n))?;
+                }
+            }
             field_ops::correct_boundary_conditions(gpu, &self.fldk, st.field_mut(), self.m)?;
 
             perf.push(p);
@@ -690,5 +800,93 @@ mod tests {
 
         let e = sp.max_sum_error(&gpu).expect("sum error");
         assert!(e <= 4.0 * Scalar::EPSILON, "max |1 - sum| = {e}");
+    }
+    /// **SPEC-LIT §86.5 row 5, and §86.6.** [`Species::correct`] and
+    /// [`Species::correct_with_density`] with no density are the SAME
+    /// arithmetic, to the last bit, on every solved species and on the inert
+    /// remainder.
+    ///
+    /// §86.6's claim is that the constant-density path is bitwise what it was
+    /// BY CONSTRUCTION - `correct` is a one-line delegation and every `§86`
+    /// arm below it is an `if let Some`. This measures the delegation, which
+    /// is the one part of that argument a typo could break silently: a
+    /// `correct` that had quietly acquired a density would still run, still
+    /// converge, and produce different numbers from every measurement
+    /// recorded in SPEC-LIT.
+    #[test]
+    fn the_two_entry_points_are_bitwise_the_same_constant_density_equation() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        let hm = box3(4, 0.02);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+        let names = vec!["Y_F".to_string(), "Y_O2".to_string(), "N2".to_string()];
+        let coeffs = vec![SpeciesCoeffs::default(); names.len()];
+        let ctrl = TurbulenceControls {
+            k_relax: 1.0,
+            steady: false,
+            delta_t: 0.004,
+            sn_grad: crate::fv::SnGradScheme::Uncorrected,
+            ..TurbulenceControls::default()
+        };
+
+        let u = crate::field::GpuVectorField::zeros(&g, &m, "U")?;
+        let mut phi = crate::field::GpuSurfaceScalarField::zeros(&g, &m, "phi")?;
+        g.write(
+            &mut phi.f,
+            &(0..hm.n_internal_faces)
+                .map(|i| 1e-3 * (0.7 + ((i as Scalar) * 0.19).sin()))
+                .collect::<Vec<_>>(),
+        )?;
+        let nut = GpuScalarField::zeros(&g, &m, "nut")?;
+        let flow = FlowState::new(&u, &phi, 1.5e-5);
+
+        let seed = |sp: &mut Species<'_>, gpu: &Gpu| -> Result<()> {
+            for (j, name) in sp.names().to_vec().iter().enumerate() {
+                let f = sp.by_name_mut(name).expect("just named").field_mut();
+                let v: Vec<Scalar> = (0..hm.n_cells)
+                    .map(|i| 0.1 + 0.05 * ((i + j) as Scalar * 0.23).sin())
+                    .collect();
+                gpu.write(&mut f.f, &v)?;
+            }
+            sp.initialise(gpu)
+        };
+
+        let mut a = Species::new(&g, &hm, &m, &names, &coeffs, "N2", 1.5e-5, ctrl)?;
+        let mut b = Species::new(&g, &hm, &m, &names, &coeffs, "N2", 1.5e-5, ctrl)?;
+        seed(&mut a, &g)?;
+        seed(&mut b, &g)?;
+
+        for _ in 0..3 {
+            a.correct(&g, &flow, &nut)?;
+            b.correct_with_density(&g, &flow, &nut, None)?;
+        }
+
+        for name in a.names().to_vec() {
+            let x = g.download(&a.by_name(&name).expect("named").field().f)?;
+            let y = g.download(&b.by_name(&name).expect("named").field().f)?;
+            assert_eq!(x, y, "\"{name}\" differs between the two entry points");
+            assert!(x.iter().any(|v| *v != 0.0), "\"{name}\" is all zeros, which compares nothing");
+        }
+        let x = g.download(&a.inert().f)?;
+        let y = g.download(&b.inert().f)?;
+        assert_eq!(x, y, "the inert remainder differs between the two entry points");
+        Ok(())
+    }
+
+    /// A three-dimensional box with six ordinary patches - the same helper
+    /// §86's transport tests use, repeated here because a test module cannot
+    /// borrow another's.
+    fn box3(n: usize, h: Scalar) -> HostMesh {
+        use crate::mesh::PatchKind;
+
+        let (mut m, points, faces) =
+            crate::mesh::topology::tests::box_mesh([n, n, n], crate::Vec3::new(h, h, h));
+        for p in m.patches.iter_mut() {
+            p.kind = PatchKind::Generic;
+            p.type_name = "patch".to_string();
+        }
+        m.compute_geometry(&points, &faces).expect("box geometry");
+        m.build_cell_face_maps();
+        m
     }
 }

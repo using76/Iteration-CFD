@@ -78,6 +78,39 @@ extern "C" __global__ void spcBound
 
 
 // ==========================================================================
+//  S86.9  What the boundedness clip did to the MASS, cell by cell
+// ==========================================================================
+//
+//  SPEC-LIT S19 requirement 1 clips every solved fraction into [0, 1] after
+//  its solve, and until S86 nothing measured what that costs. On the
+//  constant-density equation there was nothing to measure it IN: the clip
+//  moves `Y`, and a budget in `Y` is not a budget in kilograms. On S86's
+//  mass-weighted equation the currency exists, so the clip's ledger is
+//
+//      acc[P] += rho_P V_P (Y_P,after - Y_P,before)
+//
+//  accumulated over every step of the run and reduced once at the end. It is
+//  a SOURCE of species mass sitting outside the transport equation, and
+//  (86.5)'s conservation identity is a statement about the equation and not
+//  about the clip.
+extern "C" __global__ void spcClipLedger
+(
+    ofscalar* __restrict__ acc,
+    const ofscalar* __restrict__ y,
+    const ofscalar* __restrict__ before,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ V,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+
+    acc[c] += rho[c]*V[c]*(y[c] - before[c]);
+}
+
+
+// ==========================================================================
 //  sum += y   -  accumulate one solved fraction into the running total
 // ==========================================================================
 

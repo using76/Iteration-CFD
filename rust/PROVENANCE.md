@@ -1,7 +1,7 @@
 # Provenance — where every file came from
 
-meteor-cfd is source-available under the Meteor Simulation Source-Available
-License 1.0 (see ../LICENSE). This file is the per-file record that
+meteor-cfd is source-available under the Prosperity Public License 3.0.0
+(see ../LICENSE). This file is the per-file record that
 [`../LICENSING.md`](../LICENSING.md) §6 phase 4 calls for: for each source
 file, what it was written from.
 
@@ -72,9 +72,9 @@ Each of these carries its own citation header. The papers are listed in
 | `src/field.rs`, `src/field_setup.rs` (boundary conditions) | §4, §13.4, §15.2, §15.5, §15.6 | Launder & Spalding (1974) for `k = 3/2 (I\|U\|)²` and `ε = C_mu^{3/4} k^{3/2}/L`; Wilcox for the ω form |
 | `cuda/momentum.cu`, `src/momentum.rs` | §5.1, §9 | Rhie & Chow (1983); Moukalled et al. §15.6; Ferziger & Perić §7.5 |
 | `cuda/simple.cu`, `src/simple.rs` | §5.2–5.4, §14 | Patankar & Spalding (1972); Patankar (1980) ch. 6; Van Doormaal & Raithby (1984); Issa (1986); Ferziger & Perić §7.4 |
-| `src/scalar_transport.rs` | §3, §18 | the same assembly with an effective diffusivity, plus the volumetric sources of §18 |
+| `src/scalar_transport.rs` | §3, §18, §86 | the same assembly with an effective diffusivity, plus the volumetric sources of §18; §86's mass-weighted form `d(rho psi)/dt + div(rho u, psi)` — Patankar (1980) ch. 5.2 (the conservative/non-conservative pair) and ch. 4.2 (consistency at control-volume faces); Moukalled et al. ch. 12 (mass consistency) and §15.4; Ferziger & Perić §5.3 |
 | `cuda/sources.cu`, `src/sources.rs` | §3.4, §18 | Patankar (1980) §4.2; Ward (1964) for Darcy–Forchheimer |
-| `cuda/species.cu`, `src/species.rs` | §19 | the `N-1` formulation, boundedness and sum-to-one |
+| `cuda/species.cu`, `src/species.rs` | §19, §86 | the `N-1` formulation, boundedness and sum-to-one; §86.9's ledger of what the boundedness clip does to the species MASS |
 | `src/reference.rs` | §3, §10 | the CPU mirror, written as scatter loops so its structure differs from the device gather |
 | `src/potential_flow.rs` | — | Ferziger & Perić §7.1 |
 | `cuda/rheology.cu`, `src/rheology.rs` | §38 | Ostwald (1925) and de Waele (1923); Cross, *J. Colloid Sci.* 20 (1965) 417; Carreau, *Trans. Soc. Rheol.* 16 (1972) 99; Yasuda, Armstrong & Cohen, *Rheol. Acta* 20 (1981) 163; Herschel & Bulkley (1926); Casson (1959); Papanastasiou, *J. Rheol.* 31 (1987) 385; Bercovier & Engelman (1980); Frigaard & Nouar, *J. Non-Newtonian Fluid Mech.* 127 (2005) 1; Bird, Armstrong & Hassager (1987); Chhabra & Richardson (2008) for Buckingham–Reiner |
@@ -91,7 +91,7 @@ Each of these carries its own citation header. The papers are listed in
 | the `_HalfFloat` path in `src/io/vdb.rs` | §45 | AcademySoftwareFoundation **openvdb, Apache-2.0**, at the `v13.0.0` tag: `io/GridDescriptor.cc` (`writeHeader`, `HALF_FLOAT_TYPENAME_SUFFIX`), `io/Compression.h` (`writeCompressedValues`, `HalfWriter`, `RealToHalf`, `truncateRealToHalf`), `tree/{Root,Internal,Leaf}Node.h` (the `toHalf` argument of `writeTopology`/`writeBuffers`), `io/Archive.cc` (`writeGrid`), `Grid.cc` (`setSaveFloatAsHalf`, `META_SAVE_HALF_FLOAT`), `Metadata.h` (`Metadata::write`, `TypedMetadata<bool>`) — the same permissively-licensed source this file's `fp32` path was already written from, cited inline. The binary16 conversion itself is `src/io/nvdb.rs`'s own, not a second implementation |
 | `cuda/vof.cu`, `src/vof.rs` | §20, §22 | Hirt & Nichols (1981); Ubbink (1997); Rusche (2002); Zalesak (1979); Brackbill, Kothe & Zemach (1992); Rhie & Chow (1983); Issa (1986); Ferziger & Perić §7.5 |
 
-| `src/timescheme.rs`, `cuda/timescheme.cu` | §3.3, §13 | Crank & Nicolson (1947); Ferziger & Perić §6.3 — the theta method, BDF2 with variable dt, local time stepping |
+| `src/timescheme.rs`, `cuda/timescheme.cu` | §3.3, §13, §86.4 | Crank & Nicolson (1947); Ferziger & Perić §6.3 — the theta method, BDF2 with variable dt, local time stepping; (86.4)'s continuity coefficient, which is the same three coefficients read for a field that is 1 everywhere |
 | `src/precon.rs`, `cuda/precon.cu` | §21 | Saad (2003) §12.4 — multi-colour DIC / DILU |
 | `src/walldistance.rs` | §6.6 | Tucker, *Appl. Math. Modelling* 22 (1998) 293 |
 | `src/models/k_omega_sst.rs`, `cuda/sst.cu` | §6.3 | Menter, *AIAA J.* 32 (1994) 1598; Menter, Kuntz & Langtry (2003) |
