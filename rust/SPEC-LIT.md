@@ -13506,7 +13506,25 @@ was tried and DOES move it, once §85.5's defect is out of the way (§85.6): a
 mesh that resolves the flame - the same refinement §62.12's Gate 4 already
 names as part of itself - which now carries 296 cells over the model's own
 threshold, leaving §85.7's species mass budget as the one thing between that
-and a verdict. The second, which would settle it independently of any of this,
+and a verdict.
+
+**That last clause is wrong, and an adversarial audit of this section is what
+found it.** Closing the mass budget is NECESSARY and not SUFFICIENT. The
+hottest cell in §85.6's whole 262 144-cell domain is 1394.6 K, which clears
+§61's own 1375 K formation threshold by 20 K and falls far short of a propane
+flame's critical flame temperature — the value this repository already carries
+in `reference/fds/Manuals/FDS_Validation_Guide`. A flame that never reaches a
+propane flame's state is not the fire Tewarson measured, so a budget-closed
+comparison at these temperatures would still not be like-for-like, and 0.0124
+against 0.024 is not "a factor of 1.94, inside the bar" — it is two numbers
+about two different fires. §85.6's own table says the same thing a second way:
+the `bounded` leg's budget is +162 % and the conservative leg's is −17 %, so
+the two schemes BRACKET the answer rather than agreeing on it, which is what a
+discretisation-dominated quantity looks like. And the sweep behind it is two
+comparable points, not three — §85.6's 48³ row is a 23 % larger burner — so
+there is no convergence evidence for the gate quantity at all.
+
+The second, which would settle it independently of any of this,
 is the Santoro, Semerjian & Dobbins (1983) laminar co-flow ethylene flame,
 which is the regime the model was calibrated in and where its own paper's soot
 volume fractions are measured, in the single-digit ppm range.
