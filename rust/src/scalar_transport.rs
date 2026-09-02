@@ -1471,6 +1471,21 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("localEuler"), "the refusal must name the scheme: {msg}");
         assert!(msg.contains("Euler"), "the refusal must name an alternative: {msg}");
+        assert!(msg.contains("backward"), "the refusal must name every alternative: {msg}");
+        assert!(msg.contains("steadyState"), "the refusal must name every alternative: {msg}");
+        // SPEC-LIT §86.7 is the §13.4 refusal table this message implements -
+        // NOT §86.3, which is the equation. §80 checks that a cited section
+        // EXISTS and cannot check that it is the right one, so the citation is
+        // pinned here instead.
+        assert!(msg.contains("86.7"), "the refusal must cite its own contract: {msg}");
+        // A `\`-continued Rust literal that loses its backslash still compiles
+        // and still contains every substring above - it just renders with a run
+        // of indentation in the middle of a sentence. That is how this message
+        // reached a commit, so the shape is asserted and not only the words.
+        assert!(
+            !msg.contains("  "),
+            "the refusal must not carry a broken line continuation: {msg}"
+        );
         Ok(())
     }
 }

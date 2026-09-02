@@ -26552,6 +26552,32 @@ measures their **sum** — that is what `R_P` is — and separates it from the
 discretisation, which is now exact. **It does not separate the three from each
 other, and does not claim to.**
 
+**Re-measured independently, and the check was not a formality.** A later unit
+re-ran all four legs, because the executable that could have produced the table
+above was not built from the sources this section was committed with:
+`ofgpu-fire.exe` stood in the tree at `23:51:19` while `src/bin/fire.rs` — the
+budget instrument itself — together with `src/energy.rs`, `src/species.rs` and
+`cuda/species.cu` were last written at `00:01:25`, ten minutes later. A rebuild
+produces a different executable (`10 282 496` bytes against `10 283 008`), and
+every number in §86.9, §86.10 and §86.11 was re-taken on it, on the same one
+RTX 5070 Ti and from the same two case files.
+
+**Every one of them reproduces, to every digit published.** Legs A and B
+return §85.7's published pair unchanged — `3.16418` / `4.55882` / `1394.6 K` /
+`296` / `0.0124027`, and `2.33119` / `0.109323` / `998.598 K` / `0` / `0` —
+with four-term residues of `-2.44467 kW` (`-82.8858 %`) and `+3.37639 kW`
+(`+114.475 %`), so §86.6's bitwise-default claim holds at run level on this
+build too. Leg D returns `2.32705` / `2.27978` / `1505.71 K` / `908` /
+`0.559312`, a residue of `0.0256296 kW` = **`0.868963 %`** of supply, and a
+clip ledger of `-0.000437361 g`. Leg C returns `6.18438` / `29.2126` /
+`1604.94 K` / `9272` / `0.845206`, a residue of `-30.1199 kW` = `-1021.2 %`,
+and `sum_c Y_P R_P = 30.1242 kW` with `L1 = 0.0385683 kg/s` and worst cell
+`6.96197e-06 kg/s` — so (86.6)'s identity holds to `0.0143 %` on an
+independent build, which is the figure §86.10 states. Nothing in this section
+changed as a result except this paragraph, §86.11's soot rows below, and the
+`localEuler` refusal §86.7 promises, which had lost the backslash joining its
+lines and cited §86.3 where the contract is §86.7's own row.
+
 ### 86.11 Gate 61-A, re-run — and the `0.0124` was an accident of the error
 
 §61.8's Gate 61-A asks the `laminarSmokePoint` model's predicted post-flame
@@ -26578,6 +26604,37 @@ not; it was an artefact of the missing reactant.
 yield. §61's soot equation is untouched by §86 (§86.7's row says why), so this
 is a statement about `laminarSmokePoint` on a hotter flame, and it is what the
 next unit of work here has to look at.
+
+**And the re-run of §86.10 shows it is worse on leg C, which this section
+quotes in the same table.** Read across all four legs, the soot field degrades
+monotonically with the number of cells over §61.7's own 1375 K threshold:
+
+| leg | equation, scheme | cells > 1375 K | `max Y_s` | formation | as % of the fuel supply | yield (61.7) |
+|---|---|---|---|---|---|---|
+| B | `Y`, upwind | 0 | `0` | `0 g/s` | 0 % | `0` |
+| A | `Y`, bounded | 296 | **`0.0927362`** | `0.000844877 g/s` | 1.3 % | `0.0124027` |
+| D | `rhoY`, upwind | 908 | `1.62562` | `0.0280204 g/s` | 44.1 % | `0.559312` |
+| C | `rhoY`, bounded | 9272 | **`112.302`** | `0.302232 g/s` | 476.0 % | `0.845206` |
+
+**Leg A's soot field is physical and leg C's is not, by three orders of
+magnitude.** Leg C carries `5.77206 g` resident against leg A's `0.001245 g`,
+oxidises `0.189701 g/s` of it, and fires §61's availability clip in `1552` of
+`262 144` cells on the last step alone. So `0.0124` and `0.845` are not two
+values of one quantity: the first is read off a bounded field and the second
+off a field a hundred times out of bounds.
+
+**What the fuel budget says about where that mass comes from.** At
+`dh_c = 4.645e7 J/kg` the `2.94945 kW` supply is `0.0635 g/s` of propane, so
+leg D forms soot at **44 %** of the fuel admitted and leg C at **476 %** of it
+— while leg D's fuel budget closes to `0.869 %`. Those two facts together say
+that `laminarSmokePoint`'s formation term draws on **no metered reactant**:
+(61.5) sets a rate per unit volume, §61.2 adds it to `Y_s`, and nothing
+anywhere subtracts the mass it creates from `Y_F` or from any other field. It
+sits outside (86.5) for exactly the reason §86.9's clip does — it is not a term
+in (86.1) — so a closed fuel budget neither constrains it nor is disturbed by
+it. **This is the mechanism behind the conclusion above**, and it says the next
+unit's problem is not that `laminarSmokePoint` is mistuned on a hot flame but
+that its source has no sink and no reservoir.
 
 **The verdict does not move, and §61.8's reason for it still stands.** §61.8
 records that a closed budget is *necessary and not sufficient*: leg D's flame
@@ -26623,6 +26680,12 @@ are `cargo test` device tests, and §69's Gate 61-A registry entry keeps
 * **that leg D's yield is a model prediction to be compared with anything.**
   It is read off a field with `max Y_s = 1.626`. §86.11 says so on the line
   that prints it.
+* **that the soot field's own mass is accounted for anywhere.** It is not.
+  §86.11 measures `laminarSmokePoint` forming soot at 44 % (leg D) and 476 %
+  (leg C) of the fuel supply while drawing on no metered reactant, and (86.5)
+  is silent about it because it is not a term in (86.1). The fuel budget
+  closing is therefore no evidence at all about the soot field, in either
+  direction.
 * **that `Y_s` or a §77 vapour source were moved to (86.1).** Neither was;
   §86.7 has a row for each with the algebra of what would change.
 * **that the mass-weighted equation was measured on any case but this one.**

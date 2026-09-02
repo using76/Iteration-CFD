@@ -1037,7 +1037,12 @@ impl Ddt {
             DdtScheme::SteadyState => Ok(()),
 
             DdtScheme::LocalEuler => Err(Error::Config(
-                "ddtSchemes named `localEuler` and this equation is                  mass-weighted (SPEC-LIT §86.3). The local step is a per-cell                  preconditioner, not a time derivative, so d(rho psi)/dt with                  a different dt in every cell conserves nothing. Alternative:                  `Euler` or `backward` for a transient run, `steadyState` for                  a steady one - both are honoured here."
+                "ddtSchemes named `localEuler` and this equation is \
+                 mass-weighted (SPEC-LIT §86.7). The local step is a per-cell \
+                 preconditioner, not a time derivative, so d(rho psi)/dt with \
+                 a different dt in every cell conserves nothing. Alternative: \
+                 `Euler` or `backward` for a transient run, `steadyState` for \
+                 a steady one - both are honoured here."
                     .to_string(),
             )),
 
@@ -1076,7 +1081,9 @@ impl Ddt {
             DdtScheme::SteadyState => DdtCoeffs::ZERO,
             DdtScheme::LocalEuler => {
                 return Err(Error::Config(
-                    "SPEC-LIT §86.3 refuses `localEuler` on a mass-weighted                      equation; this residual is not defined for it.                      Alternative: `Euler`, `backward` or `steadyState`."
+                    "SPEC-LIT §86.7 refuses `localEuler` on a mass-weighted \
+                     equation; this residual is not defined for it. \
+                     Alternative: `Euler`, `backward` or `steadyState`."
                         .to_string(),
                 ))
             }
