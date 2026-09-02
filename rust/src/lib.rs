@@ -61,6 +61,7 @@ pub mod halo;
 pub mod ldu;
 pub mod ldu_ops;
 pub mod les;
+pub mod marangoni;
 pub mod mesh;
 pub mod momentum;
 pub mod models;

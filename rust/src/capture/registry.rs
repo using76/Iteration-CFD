@@ -151,6 +151,7 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ("src/halo.rs", Stance::Via("src/distsolve.rs")),
     ("src/ldu_ops.rs", Stance::Via("src/solver.rs")),
     ("src/les.rs", Stance::Via("src/models/les.rs")),
+    ("src/marangoni.rs", Stance::Via("src/vof.rs")),
     (
         "src/models/des.rs",
         Stance::Gate("the_des_correction_replays_bitwise"),

@@ -29,7 +29,7 @@ use std::process::Command;
 
 /// Every translation unit in `cuda/` that holds device code.
 /// Each becomes one module loaded at run time.
-const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "combustion.cu", "radiation.cu", "fvdom.cu", "rheology.cu", "ke_variants.cu", "twostep.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "wsgg.cu", "soot.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu", "meshgeom.cu", "meshemit.cu"];
+const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "combustion.cu", "radiation.cu", "fvdom.cu", "rheology.cu", "ke_variants.cu", "twostep.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "wsgg.cu", "soot.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu", "meshgeom.cu", "meshemit.cu", "marangoni.cu"];
 
 /// Translation units compiled with `-fmad=false`.
 ///

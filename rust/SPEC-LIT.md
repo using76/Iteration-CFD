@@ -26694,3 +26694,498 @@ are `cargo test` device tests, and §69's Gate 61-A registry entry keeps
   measured on the species set (row 5 of §86.5) and on two full runs of the gate
   case (§86.10's rows A and B). Every other driver in the tree reaches
   `Species::correct`, whose delegation is what row 5 pins.
+
+## 87. Marangoni convection — the term a face scalar structurally cannot hold
+
+§20.4 builds the whole two-phase body force as a **face scalar flux**,
+`vofBodyForceFlux`:
+
+```text
+    phib[f] = -(g·x)_f |Sf| snGrad(rho)  +  sigma kappa_f |Sf| snGrad(alpha)
+```
+
+A scalar per face carries one degree of freedom, and it is already spent: the
+force such a flux represents is along `Sf`. The Marangoni force is by
+definition **tangential to the interface**, and the interface is not aligned
+with faces. **No rewrite of `phib` can hold it.** §87.1 makes that a counting
+argument rather than a preference, and it is why this section exists at all. Of
+the four additions the microfluidics design note set out, two have since shipped
+as ordinary work — §38's generalised-Newtonian closures and §39's contact angle —
+and this was the one the note itself identified as blocked by the shape of the
+code rather than by the amount of work in it.
+
+The section takes the split Brackbill, Kothe & Zemach's own paper offers. The
+normal half of the continuum surface force stays exactly where it is, in the
+balanced-force face representation that makes a static drop hold its Laplace
+jump; the tangential half becomes a cell-vector `fvm_su` source. Three things
+follow, and the third was not expected.
+
+**One.** The default is bitwise what it was, and the proof is a construction
+rather than a measurement: `cuda/vof.cu` is not edited, and the new code is
+behind an `Option` that a case which names no Marangoni model leaves `None`
+(§87.5).
+
+**Two.** The tangential force cannot enter `phib`, so it reaches the face flux
+only through `HbyA` — one order down. That is not a compromise but the correct
+treatment: a tangential force is not a gradient and **must not** be balanced by
+a pressure gradient; it is supposed to drive flow (§87.4).
+
+**Three.** When the model is on, the normal term needs `sigma_f`, and
+`sigma_f = w sigma_P + (1-w) sigma_N` **does not reliably return a uniform
+field unchanged** — for 524 of the 700 surface tensions sampled across
+`[0.010, 0.080)` N/m, some interpolation weight moves it by one ulp. So a
+`dsigma/dT` of zero must not be routed through the field path. This is §39's
+`cos(pi/2)` trap in a second costume, and measuring it rather than asserting it
+**refuted the first version of this section's own claim**, which was that any
+`w != 1/2` moves it: whether it moves turns on `sigma`'s mantissa, and **this
+crate's own default `sigma = 0.0728` is one of the values that never moves**.
+The default's safety is a property of that number and not of anything in the
+code (§87.5).
+
+**Written from:** this document's §5.1 (why a body force lives on faces and
+what happens to one that does not), §20.1 (`n_hat`, and the `epsN` that
+stabilises its normalisation), §20.3 (the mixture, and the dimensional form of
+the momentum equation this force must match), §20.4 (the normal term this sits
+beside), §20.5 (`p_rgh`), §22 (the VOF gates the default path must not move),
+§13.4 (refusal by name), §38.5 (where an explicit `fvm_su` momentum source
+goes), §39 (the contact angle, whose `cos(pi/2)` trap is the same shape as
+§87.5's), §81 (the capture stance);
+J. U. Brackbill, D. B. Kothe & C. Zemach, *J. Comput. Phys.* **100** (1992)
+335–354 — the continuum-surface-force regularisation, whose tangential term
+§20.4 did not take; C. Ma & D. Bothe, *Int. J. Multiphase Flow* **37** (2011)
+1045–1058 — the tangential stress in a VOF code; B. Lafaurie, C. Nardone,
+R. Scardovelli, S. Zaleski & G. Zanetti, *J. Comput. Phys.* **113** (1994)
+134–147 — the continuum-surface-**stress** alternative, named in §87.3 and not
+taken; N. O. Young, J. S. Goldstein & M. J. Block, *J. Fluid Mech.* **6**
+(1959) 350–356 — the closed form Gate 87-C's surface integral and Gate 87-D's
+terminal velocity both come from. **ORIGINAL** otherwise: the counting argument
+of §87.1, the split of §87.3, the `HbyA` accounting of §87.4, the interpolation
+finding of §87.5, the closed-form surface integrals (87.5) and (87.6), the
+finite-band correction of §87.9 and every number below are this project's own.
+No GPL-licensed source was consulted.
+
+### 87.1 Why a face scalar cannot carry a tangential force
+
+Count the degrees of freedom.
+
+A face-scalar body force reaches a cell only through `fvc_reconstruct`, which
+turns the set of face values `phib_f` into a cell vector by a least-squares
+inverse of the face-normal outer products. One number per face, and that number
+multiplies `Sf_f`: the set of contributions a given face can make is the
+**line** through `Sf_f`, a one-dimensional subspace of the three available.
+Three faces of a hexahedron span the space, so a cell force in an arbitrary
+direction is reachable — but only as a weighted sum of contributions each of
+which is normal to its own face, with weights that the *normal* capillary term
+has already claimed.
+
+The Marangoni force is `grad_s(sigma) = (I - n̂ n̂)·grad(sigma)`, orthogonal to
+`n̂` by construction. To carry it, a face would have to supply a component
+orthogonal to the interface normal **independently of** the component along it
+— two numbers where the flux has one. A second face-scalar field would not help
+either: it would still be a scalar times `Sf`, and `Sf` is not `n̂`.
+
+This is the whole obstruction, and it says nothing about the discretisation
+being good or bad. It says only that a tangential interfacial force is a
+**cell-vector** object in this architecture.
+
+### 87.2 `sigma` as a field
+
+The closure, linear, which is the one Young, Goldstein & Block assume:
+
+```text
+    sigma(T) = sigma0 + (d sigma/dT) (T - T0)                        (87.1)
+    sigma    = max(sigma, sigmaMin)
+```
+
+with `d sigma/dT` negative for essentially every clean liquid–gas pair, which is
+why a bubble migrates towards the hot side rather than away from it.
+
+`sigma` is needed on cells (for `grad(sigma)`) and on **boundary faces** (the
+Green–Gauss gather in `fvc_grad_scalar` reads a field's evaluated boundary
+values). There is no boundary *condition* on `sigma` to invent: the closure is
+algebraic in `T`, so the boundary values are the same line applied to `T`'s own
+boundary values, and `marSigmaFromT` runs over cells and boundary faces alike,
+reading one array and writing one. Leaving that half out would put a spurious
+`grad(sigma)` in every wall-adjacent cell, which is the specific defect
+`set_marangoni_field` in `src/vof.rs` exists to make impossible in a test.
+
+**The floor is not decoration.** (87.1) is linear and unbounded below, so a
+large enough excursion drives `sigma` through zero, and a negative surface
+tension is not a stiff problem but an ill-posed one — the interface then wants
+infinite area. `sigmaMin` clips it, and `marSigmaFloor` writes a per-cell `1`
+where the clip bit so the host can report the count. No atomics; one flag per
+cell; and `Vof::marangoni_clipped_cells` is what a gate reads to know its own
+field stayed linear.
+
+**`T` is prescribed.** §87 ships the force, not the two-phase energy equation
+that would transport `T`; §87.10 states what that costs and what it would take.
+Nothing in the kernels knows the field is a temperature: a solutal Marangoni
+case supplies a mass fraction and reads `d sigma/dT` as `d sigma/dY`, and the
+units are then the caller's to keep straight, because this module cannot check
+them.
+
+### 87.3 The tangential force
+
+The interfacial stress balance with a position-dependent surface tension:
+
+```text
+    [[ -p I + tau ]] · n̂  =  sigma kappa n̂  +  grad_s(sigma)         (87.2)
+
+    grad_s = (I - n̂ (x) n̂) · grad          kappa = -div(n̂)
+```
+
+Under the Brackbill–Kothe–Zemach regularisation `delta_s ≈ |grad(alpha)|`,
+`n̂ = grad(alpha)/|grad(alpha)|`, the two halves become
+
+```text
+    f_normal      = sigma kappa grad(alpha)                     §20.4, exists
+    f_tangential  = ( grad(sigma) - n̂ (n̂·grad(sigma)) ) |grad(alpha)|
+                                                                        (87.3)
+```
+
+and (87.3) is `marTangentialForce`, one thread per cell, reading two gradients
+the host has already gathered. Units: `[(N/m)/m] × [1/m] = N/m³`, a force
+**density**, and it is **not** divided by `rho` — §20.3's momentum equation is
+dimensional (`d(rho U)/dt + div(rho_phi, U) - laplacian(mu, U)`, rows in
+newtons), not kinematic. A `rho` division here would show up in Gate 87-C as a
+clean factor of a thousand, not as a subtlety.
+
+Two details that are choices rather than accidents:
+
+* `epsN` is §20.1's, `1e-8/L`: eight orders below the interface signal
+  `|grad alpha| ~ 1/L` and eight orders above the round-off `~1e-16/L` of a
+  pure phase. Inside a pure phase `n̂` is then a zero vector rather than a
+  random direction, **and** the `|grad alpha|` factor is zero, so (87.3) is
+  zero twice over. Its cost where the model does apply is one-sided and
+  bounded: it shortens `n̂` by `epsN/|grad alpha|`, so the projector leaves a
+  relative residue of `2 epsN/|grad alpha|` on a normal gradient. Gate 87-B
+  measures `5.0e-10` where that estimate gives `5.0e-10`.
+* the projector is applied with the unit `n̂` rather than by the algebraically
+  equal `g (g·gs)/|g|²`, because the second form squares the small quantity and
+  underflows the ratio where the first merely divides by `epsN`.
+
+**The alternative not taken.** Lafaurie et al.'s continuum surface *stress*
+writes the whole force as `div(T)` with
+`T = sigma(|grad alpha| I - grad(alpha)(x)grad(alpha)/|grad alpha|)`, which
+handles normal and tangential together, needs no `kappa`, and is a per-cell
+gather over the same cell→face CSR — architecturally the most natural fit in
+this codebase. It is **not** taken because it would replace a tested, balanced,
+measured normal term with an untested one, and because CSS is known to produce
+larger spurious currents than a balanced-force CSF at constant `sigma`. It
+stays here as the escape hatch if the split of §87.4 is ever shown to be
+inconsistent.
+
+### 87.4 Where the force enters, and the one order it costs
+
+`f_M` enters the momentum matrix through `fv::fvm_su`, per component:
+
+```text
+    source[P] += V_P * f_M,P[cmpt]                                   (87.4)
+```
+
+added after the convection and diffusion operators and before the
+under-relaxation, which is where §38.5 puts the variable-viscosity stress.
+
+What that buys, traced through the Rhie–Chow sequence of §5.1 as
+`cuda/momentum.cu` implements it. Write `b` for the assembled source
+*including* (87.4), and `F` for the reconstructed face body force:
+
+```text
+    momSolveSource :  A u = b + V F
+    momHbyA        :  HbyA = ( b - sum_N a_N u_N ) / diag  =  u - rAU F
+    momPhiHbyA     :  phiHbyA = interp(HbyA)·Sf + rAU_f phib
+    momCorrectVel  :  U = HbyA + rAU F
+```
+
+The middle line's **second** equality assumes the predictor actually solved,
+which is `momentumPredictor yes`; with it off (`Vof::momentum_predictor`
+returns early and `u` is the previous iterate) `HbyA` is
+`( b - sum_N a_N u_N )/diag` and nothing simpler. The conclusion is the same
+either way, because `b` carries (87.4) in both: with the predictor on, `f_M`
+reaches `HbyA` through the solved `u`, and with it off, directly through `b`.
+When the predictor did solve, the last line returns `u` exactly, so the cell
+velocity carries the full tangential force.
+
+The **flux** is the interesting line: `phib` does not contain `f_M` and cannot,
+so `f_M` reaches `phi` only through `interp(HbyA)·Sf` — a cell-to-face
+interpolation rather than a face-native difference. That is one order down from
+the treatment the normal term gets, and it is stated here rather than buried,
+because it is the price of the split.
+
+It is also the **correct** price. The normal capillary force is a gradient: it
+must be balanced against `snGrad(p_rgh)` face by face or a static drop grows
+spurious currents, and that exact cancellation is what §20.4's face
+representation buys. A tangential force is *not* a gradient. There is no
+pressure field whose gradient cancels it, and putting it into the balanced-force
+flux would invite the pressure equation to try. It is supposed to drive flow,
+and driving flow through `HbyA` is what a momentum source does everywhere else
+in this crate.
+
+### 87.5 The default is bitwise what it was, and that is a construction
+
+Two independent guards, and neither is a tolerance.
+
+**Guard one — the translation unit.** `cuda/vof.cu` is not edited by §87.
+`vofBodyForceFlux` is compiled from an unchanged source file into an unchanged
+cubin and launched from the same call site with the same arguments. Everything
+§87 adds lives in `cuda/marangoni.cu`. This is why `marBodyForceFlux`
+duplicates four lines of `vofBodyForceFlux` instead of sharing a `__device__`
+helper: sharing would have meant editing `vof.cu`, and four duplicated lines
+are cheaper than re-deriving the bitwise argument every time `nvcc` changes its
+mind about contraction. `the_field_sigma_flux_is_the_scalar_one_when_sigma_is_flat`
+closes the loop from the other side — given a `sigma_f` buffer holding the
+literal constant rather than an interpolation of it, the two kernels agree on
+**every bit of every one of 4096 faces**, and
+`marangoni_restates_the_prescribed_flux_predicate` does the same for the
+boundary twin across all six patch kinds and both sides of `fr >= 1`.
+
+**Guard two — the `Option`.** `Vof::marangoni` is `Option<Marangoni>`. A case
+that names no model allocates none of the buffers and launches none of the
+kernels; `assemble_component` adds no source because the branch is not entered.
+There is no `+ 0.0` anywhere in the default path.
+
+**Guard three, and the finding that made it necessary.** When the model *is*
+on, the normal term must read `sigma_f`, because the interfacial tension is no
+longer one number. And `sigma_f = w sigma_P + (1-w) sigma_N` returns a
+**uniform** field unchanged only sometimes:
+
+```text
+    w = 1/2 :  0.5*sigma + 0.5*sigma  ==  sigma      exactly, for every sigma
+    otherwise: it depends on sigma's mantissa
+```
+
+MEASURED, in `a_uniform_sigma_field_does_not_interpolate_to_itself`, over 4999
+low-discrepancy weights in `(0,1)` — the kind a non-uniform mesh produces,
+rather than the dyadic `k/2^n` a uniform box gives:
+
+| `sigma` [N/m] | weights that move it | displacement |
+|---|---|---|
+| scan of `[0.010, 0.080)`, 700 values | **524 of 700 values (74.9 %)** are moved by at least one weight | — |
+| worst, `sigma = 0.0156` | **33.5 %** of weights | one ulp |
+| `0.0730` | 105 of 4999 (2.1 %) | `1.3878e-17`, exactly one ulp |
+| **`0.0728`, this crate's default** | **0 of 4999** | — |
+
+So the guard is **not** justified by "the default would shift" — the default is
+one of the values that never shifts, by luck of its mantissa, while 0.0730 one
+table entry away from it is moved by 2 % of the weights. It is justified by the first two rows: three
+quarters of the plausible band is vulnerable, at up to a third of the weights,
+and the uniform boxes this project gates on give every internal face `w = 1/2`,
+which is precisely why the defect would never have shown up on them.
+
+`MarangoniModel::is_active` is guard three, and it is one comparison: a zero
+`d sigma/dT` **is** the model being off, and `Vof::set_marangoni` stores `None`
+for it. §39 found the same shape of defect in `cos(pi/2)` and guarded it the
+same way; this one was found by looking for it, because §39 had happened.
+
+### 87.6 What must hold
+
+| | statement | how it is held |
+|---|---|---|
+| 1 | with no Marangoni model configured, every field of a VOF step is bit-identical to §20's | by construction: `cuda/vof.cu` unedited, `Option` `None`, no kernel launched, no buffer allocated |
+| 2 | `marBodyForceFlux` given a constant `sigma_f` equals `vofBodyForceFlux` on every face, bitwise | `the_field_sigma_flux_is_the_scalar_one_when_sigma_is_flat` |
+| 3 | the same on the boundary, across every patch kind and both sides of `fr >= 1` | `marangoni_restates_the_prescribed_flux_predicate` |
+| 4 | `d sigma/dT = 0` does not turn the model on | `MarangoniModel::is_active`; `a_zero_coefficient_is_the_model_being_off` |
+| 5 | a `grad(sigma)` parallel to `n̂` produces no force, to `2 epsN/\|grad alpha\|` | `the_projector_annihilates_a_normal_sigma_gradient` |
+| 6 | a `grad(sigma)` orthogonal to `n̂` passes through undiminished, and in that direction | same test |
+| 7 | `f_M` is **exactly** zero in a pure phase | same test |
+| 8 | on a flat interface with `sigma = sigma0 + a x`, `sum_c V_c f_M,c` is `a` times the interface area | `a_flat_interface_feels_the_slope_times_its_area` |
+| 9 | on a spherical interface in a linear `T`, that sum converges to `(8/3) pi R² (d sigma/dT) G (1 + pi² w²/(12 R²))` at second order | `a_spherical_interface_feels_the_young_goldstein_block_surface_integral` |
+| 10 | `sigma` never goes negative, and the count of clipped cells is readable | `marSigmaFloor`, `Vof::marangoni_clipped_cells` |
+| 11 | (87.4) reaches the momentum matrix, with the sign (87.3) gives, and moves fluid of the right order | `the_marangoni_source_reaches_the_momentum_equation_and_drives_flow` |
+| 12 | nothing added here scatters or uses an f64 atomic | four elementwise kernels and one gather that was already there |
+
+### 87.7 §13.4 contract — what is refused, and by what name
+
+| entry | verdict |
+|---|---|
+| `constant/transportProperties: sigma` | honoured, unchanged: it is `sigma0` |
+| `constant/transportProperties: dSigmaDT` | **REFUSED BY NAME.** The model is real and is reached through `Vof::set_marangoni`, but the case-file route needs a `0/T` field the two-phase reader does not read and an energy equation §87.10 does not ship. Refusing is the §13.4 contract; silently ignoring an entry that names a physical coefficient is what §13.4 exists to stop |
+| `constant/transportProperties: viscosityModel` | refused by name already, §38 and §20.3 |
+| a non-linear `sigma(T)` | not implemented. It is one kernel (`marSigmaFromT`) and nothing else, and (87.1) is what Gate 87-D's closed form assumes |
+| surfactant-driven Marangoni | **REFUSED.** It needs the surfactant concentration transported *on* the moving interface — a PDE on a codimension-1, moving, topology-changing set. On an unstructured VOF mesh that is either a diffuse `Gamma` with interface-localised sources or genuine interface reconstruction, and the second wants a scatter. Thermal Marangoni ships; surfactant Marangoni does not, and saying so is better than a term nobody can trust |
+
+### 87.8 The capture stance
+
+`src/marangoni.rs` is `Via("src/vof.rs")` in §81.7's registry, and `src/vof.rs`
+is `Refused` — `Vof::step` downloads the alpha Courant number and derives a
+host-side sub-cycle count from it, which is a data-dependent trip count and the
+one thing a graph cannot hold. §87 does not change that in either direction: it
+adds four kernels to the iteration, all with a fixed launch count, none with a
+host round trip, none allocating per iteration. Were `Vof::step`'s trip count
+ever made static, nothing in this section would stand in the way.
+
+### 87.9 Validation
+
+**Gate 87-A (regression, by construction) — HOLDS.** With no model configured
+every §22 VOF gate runs the arithmetic it ran before: the Zalesak disc, the
+Laplace jump, the two curvature-convergence tests, the sealed stratified tank,
+the mass-flux consistency identity, and §20's Martin & Moyce dam break. Held by
+§87.5's guards one and two, not by a tolerance.
+
+**Gate 87-B (the projector, round-off) — HOLDS.** A `grad(sigma)` parallel to
+`n̂` leaves a relative residue of `5.000e-10` against the `2 epsN/|grad alpha|`
+= `5.0e-10` the `epsN` normalisation predicts; a `grad(sigma)` orthogonal to
+`n̂` passes through with relative error `0` and along `grad_s(sigma)` to
+`1e-12` in direction; a pure phase gives exactly `0`, all three components.
+
+**Gate 87-C (the surface integral, closed form) — HOLDS, both legs.** (87.3) is
+a regularised surface integral, so its volume integral has a closed form, and
+comparing them gates the magnitude, the sign, the projector and the
+`|grad alpha|` normalisation at once — with no time stepping.
+
+*Flat interface,* `sigma = sigma0 + a x`, normal `ẑ`, interface area `A`:
+
+```text
+    grad_s(sigma) = (a, 0, 0)                       exactly, everywhere
+    sum_c V_c f_M,c[x]  =  a * A                                     (87.5)
+```
+
+because `int |d alpha/dz| dz = 1` across the band whatever its shape. Measured
+on `48³`, `a = -1.5e-4 N/m²`, `A = 1 m²`:
+`-1.4999999906e-4 N` against `-1.5e-4 N`, **relative error `-6.25e-9`** — the
+size of what the band's own tails leave outside the domain,
+`1 - tanh(10) = 4.1e-9`, the rest being the `zeroGradient` closure at the two
+walls those tails run into.
+The two components the projector had to leave alone came out `2.3e-17` and
+`6.5e-21` N.
+
+*Spherical interface,* radius `R`, `T = G z`, `sigma = sigma0 + sigma_T G z`:
+
+```text
+    grad(sigma) = sigma_T G ẑ                              uniform
+    (grad_s sigma)_z = sigma_T G (1 - n_z²) = sigma_T G sin²(theta)
+    F_z = 2 pi R² sigma_T G int_0^pi sin³ = (8/3) pi R² sigma_T G    (87.6)
+```
+
+Derived here. The projector is what turns `4 pi R²` into `(8/3) pi R²` — a
+factor of `3/2` — so a force that forgot to project fails by 50 %, which is why
+this geometry was chosen.
+
+**And a 3.3 % that is the model, not the code.** The first run of this gate
+found an excess over (87.6) of `3.00 %` at `32³` and `3.21 %` at `64³` — an
+error that grew slightly under refinement, which is the shape of a defect. It
+is not one. The CSF delta function is a band of finite width, and for
+`alpha = (1 - tanh((r-R)/w))/2` the surface integral picks up a curvature
+correction, derived here from `int sech² = 2`, `int u sech² = 0`,
+`int u² sech² = pi²/6`:
+
+```text
+    F_z = sigma_T G (8 pi/3) int |d alpha/dr| r² dr
+        = sigma_T G (8 pi/3) ( R² + w² pi²/12 )
+        = (8/3) pi R² sigma_T G ( 1 + pi² w² / (12 R²) )             (87.7)
+```
+
+At `w = 0.05`, `R = 0.25` that factor is `1.032899`. Against (87.7) the
+measurements are
+
+| `w` | predicted factor | `32³` | `64³` | order |
+|---|---|---|---|---|
+| 0.05 | `1.032899` | 0.2779 % | **0.0774 %** | **1.84** |
+| 0.04 | `1.021055` | — | **0.0722 %** | — |
+
+so the excess over the sharp-interface form is the diffuse band's own geometry,
+present in the continuum model before any mesh exists, and (87.6) is the
+`w -> 0` limit of (87.7). The second width is run precisely so that (87.7) is
+not a fit to one number: it reproduces its own predicted factor to 0.07 %,
+which a correction tuned to the first row could not do.
+
+**Gate 87-W (the wiring) — HOLDS.** Every other gate above measures `f_M`
+where it is built, and none of them would notice an `fvm_su` that was dropped,
+mis-signed, or overwritten before it reached `su` — each a silent failure that
+leaves the field correct and the solver unmoved. A flat interface in a sealed
+2-D box with `sigma` rising along it has zero curvature, so the normal term
+contributes nothing and every metre per second that appears was put there by
+(87.4). After 40 steps at `dt = 1e-4 s`, `d sigma/dx = +2e-4 N/m²`:
+
+| | band-mean `U_x` | `max\|U\|` |
+|---|---|---|
+| model on | **`+2.369e-8` m/s** | `1.107e-7` m/s |
+| model off, same case | `-9.29e-28` m/s | `3.42e-15` m/s |
+
+The interfacial fluid moves towards **higher** `sigma`, which is what a surface
+under a tension gradient does, and it does so `2.6e19` times faster than the
+control — the control being at round-off, which is itself the flat interface's
+own statement that a zero-curvature CSF drives nothing. The magnitude is
+checked too, against `F t / M` built from that same run's own force sum and
+band mass: `1.023e-8` m/s, so measured/ballistic is **2.32**, above one because
+the band-mean is weighted towards the interface centre where the force per unit
+mass is highest, and nowhere near the factor of `rho = 1000`, of a cell volume,
+or of the band width that a mis-scaled force would give.
+
+**Gate 87-D (Young, Goldstein & Block's terminal velocity) — NOT RUN, and
+no verdict is claimed.** A drop of radius `R` (phase 2) in an unbounded fluid
+(phase 1) with a uniform imposed `grad(T)`, at `Re -> 0` and `Ma -> 0`,
+migrates at
+
+```text
+    U_YGB = 2 U_ref / [ (2 + 3 lam)(2 + beta) ]
+    U_ref = -(d sigma/dT) |grad T| R / mu_1
+    lam   = mu_2/mu_1        beta = k_2/k_1                          (87.8)
+```
+
+with the bubble limit `lam = beta = 0` giving `U_YGB = U_ref/2`. At `beta = 1`
+the conduction problem is blind to the drop, so the undisturbed linear `T` is
+the *exact* `Ma -> 0` field and §87.2's prescribed `T` is that gate's
+hypothesis rather than an approximation of it.
+
+What §87 ships is the force; the migration is a three-dimensional transient to
+terminal velocity under a capillary time-step restriction, in a box, against a
+formula whose hypothesis is an unbounded fluid — three sources of disagreement
+(wall confinement, drop deformation, finite `Ma`) that a single reported
+velocity could not be decomposed into, on top of a prescribed `T` that is exact
+only at `Ma -> 0`. Gate 87-C is the part of YGB that **can** be checked without
+a migration: it is the surface integral their derivation performs, held against
+a closed form, and it is reported as that and not as their velocity.
+
+**Gate 87-E (Ma & Bothe, Nas & Tryggvason: `U/U_YGB` against `Ma`) — NOT RUN.**
+For the same reason and one more: finite `Ma` is by definition the regime in
+which the drop's own convection moves the temperature field, which is exactly
+what a prescribed `T` cannot represent. Unreachable until the energy equation
+of §87.10 exists.
+
+**Why neither is called `OPEN`, and why neither is in §69's registry.** §69.5
+reserves two verdict words for a *published comparison this project has made*,
+and §69's whole purpose is that a verdict reached must be a verdict printed.
+Gates 87-D and 87-E have reached nothing: no case was run, no number was
+produced, and there is therefore nothing to print. Calling them `OPEN` would
+put them beside §32.4's three legs and §78.10's Gate 78-D — comparisons that
+were performed and whose results fall outside a band or between two
+disagreeing sources — and that equivalence would be false. `ofgpu-validate`
+still reports **six** `MISSES` and **four** `OPEN`; §87 adds neither, and
+"not run" belongs in §87.10's scope statement rather than in a registry of
+results. Registering an entry with no measurement in it would be exactly the
+confusion §69 exists to prevent, in the opposite direction.
+
+### 87.10 What is claimed, and what is not
+
+**Claimed:** that `grad_s(sigma)` is discretised; that it is a cell-vector
+source because §87.1 says it cannot be anything else; that it integrates to the
+closed-form surface integral on two geometries, one to `6e-9` and one to
+`0.08 %` at second order; that it is zero where it should be zero and
+**exactly** zero in a pure phase; and that a case which does not ask for it is
+bit-for-bit unaffected.
+
+**Not claimed: a migration velocity.** §87 has no energy equation, so `T` is
+prescribed, and a prescribed `T` is exact only in the `Ma -> 0`, `beta = 1`
+corner of (87.8). The two-phase energy equation is
+`d(rho cp T)/dt + div(rho cp phi, T) - laplacian(k_th, T) = 0` with `alpha`-
+mixed coefficients — one more scalar transport of the shape
+`RasCore::assemble_transport` already assembles, with two real hazards: the
+mixture `rho cp` must be differenced from the **same limited alpha fluxes** as
+§20.3's `rho_phi` or the interface manufactures energy, and `k_1/k_2 ~ 20` for
+a gas–liquid pair makes the laplacian coefficient jump harder than the passive
+scalar `scalar_transport.rs` was written for. That is the next unit of work
+here, and Gate 87-D is what it should be gated on.
+
+**Not claimed: that the split of §87.4 leaks no spurious normal component.**
+The design note asks for a static-drop spurious-current check at uniform
+`sigma`; at uniform `sigma` this model is *off* by §87.5, so that check as
+written measures nothing new. The version that would mean something — `sigma`
+varying along a static interface, spurious currents compared against the same
+case at `d sigma/dT = 0` — is not run. Gate 87-C bounds the error in the force
+that drives them, which is a different statement and a weaker one.
+
+**Not claimed: a case-file route.** `dSigmaDT` in `transportProperties` is
+refused by name (§87.7). The model is reachable only from Rust, through
+`Vof::set_marangoni` and `Vof::marangoni_temperature_mut`, and that is stated
+so that nobody reads §87 as shipping a solver option it does not ship.

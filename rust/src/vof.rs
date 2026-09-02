@@ -145,6 +145,7 @@ use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::contact_angle::{self, ContactAngleDevice, ContactAngleFaces};
+use crate::marangoni::{self, Marangoni, MarangoniModel};
 use crate::momentum::BuoyancyCoeffs;
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Vec3};
@@ -587,6 +588,13 @@ pub struct Vof<'m> {
     /// zero and the kernel returns before it touches them.
     ca_null_cos: DevBuf<Scalar>,
     ca_null_applies: DevBuf<Label>,
+
+    /// SPEC-LIT §87: the Marangoni model, or `None` when no case asks for
+    /// one. `None` is the bitwise-unchanged path and it is a construction
+    /// rather than a tolerance - `cuda/vof.cu` was not edited, and with this
+    /// `None` not one of §87's kernels is launched and not one of its buffers
+    /// is allocated (§87.5).
+    marangoni: Option<Marangoni>,
     phir: DevBuf<Scalar>,
     phi_l: DevBuf<Scalar>,
     b_phi_l: DevBuf<Scalar>,
@@ -705,6 +713,7 @@ impl<'m> Vof<'m> {
             contact_angle: None,
             ca_null_cos: gpu.zeros(1)?,
             ca_null_applies: gpu.zeros(1)?,
+            marangoni: None,
             phir: gpu.zeros(one(nif))?,
             phi_l: gpu.zeros(one(nif))?,
             b_phi_l: gpu.zeros(one(nbf))?,
@@ -1105,6 +1114,150 @@ impl<'m> Vof<'m> {
             Some(d) => Ok(gpu.download(&d.cos_theta)?),
             None => Ok(Vec::new()),
         }
+    }
+
+    // ---- SPEC-LIT §87: Marangoni ------------------------------------------
+
+    /// Turn the §87 tangential interfacial stress on.
+    ///
+    /// A model with `dsigma/dT == 0` turns it **off** instead, and §87.5 says
+    /// why: `sigma` would then be a uniform field, and
+    /// `w sigma_P + (1-w) sigma_N` does not reliably return a uniform field
+    /// unchanged - it always does at `w = 1/2`, and whether it does elsewhere
+    /// turns on `sigma`'s mantissa, with three quarters of the plausible band
+    /// moved by one ulp at some weight. Routing such a case through the field
+    /// path would move a recorded VOF measurement it never asked to change -
+    /// §39's `cos(pi/2)` trap in a second costume.
+    /// `a_uniform_sigma_field_does_not_interpolate_to_itself` measures the
+    /// premise, and refuted the stronger version of it this module was first
+    /// written with.
+    ///
+    /// The driving field starts at zero everywhere and is the caller's to
+    /// write, through [`Vof::marangoni_temperature_mut`]. §87 ships the
+    /// force, not the two-phase energy equation that would transport it;
+    /// §87.10 says what that costs.
+    pub fn set_marangoni(&mut self, gpu: &Gpu, model: MarangoniModel) -> Result<()> {
+        model.validate()?;
+        if !model.is_active() {
+            self.marangoni = None;
+            return Ok(());
+        }
+        self.marangoni = Some(Marangoni::new(gpu, self.m, model)?);
+        Ok(())
+    }
+
+    /// Whether the §87 model is on. For the run banner, and for a test that
+    /// needs to know the model really is on rather than silently `None`.
+    pub fn marangoni_is_on(&self) -> bool {
+        self.marangoni.is_some()
+    }
+
+    /// The prescribed driving field `T`, for the caller to write. `None` when
+    /// the model is off.
+    pub fn marangoni_temperature_mut(&mut self) -> Option<&mut GpuScalarField> {
+        self.marangoni.as_mut().map(|d| &mut d.t)
+    }
+
+    /// `sigma` per cell as of the last body-force update, for a test or a
+    /// diagnostic. Empty when the model is off.
+    pub fn marangoni_sigma(&self, gpu: &Gpu) -> Result<Vec<Scalar>> {
+        match &self.marangoni {
+            Some(d) => Ok(gpu.download(&d.sigma.f)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// `f_M` per cell as of the last body-force update, in N/m³. Empty when
+    /// the model is off.
+    pub fn marangoni_force(&self, gpu: &Gpu) -> Result<Vec<Vec3>> {
+        match &self.marangoni {
+            Some(d) => Ok(gpu.download(&d.f_m)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// `sum_c V_c f_M,c[cmpt]` - §87.6's integrand, reduced. This is the
+    /// quantity Gate 87-C holds against a closed-form surface integral.
+    ///
+    /// Zero when the model is off, which is the right answer and not an
+    /// evasion: with no model there is no tangential force.
+    pub fn marangoni_force_sum(&mut self, gpu: &Gpu, cmpt: Label) -> Result<Scalar> {
+        let n = self.m.n_cells;
+        if self.marangoni.is_none() || n == 0 {
+            return Ok(0.0);
+        }
+        {
+            let v = &self.m.v;
+            let d = self.marangoni.as_mut().expect("checked above");
+            marangoni::force_integrand(gpu, d, v, cmpt, n)?;
+        }
+        {
+            let Self { solk, ws, marangoni, .. } = self;
+            let d = marangoni.as_mut().expect("checked above");
+            solver::device_sum(gpu, solk, &mut ws.num, &d.scratch, &mut ws.partials, n)?;
+        }
+        Ok(gpu.download(&self.ws.num)?[0])
+    }
+
+    /// How many cells the `sigmaMin` floor bit at the last update - §87.2.
+    pub fn marangoni_clipped_cells(&mut self, gpu: &Gpu) -> Result<Scalar> {
+        let n = self.m.n_cells;
+        if self.marangoni.is_none() || n == 0 {
+            return Ok(0.0);
+        }
+        {
+            let Self { solk, ws, marangoni, .. } = self;
+            let d = marangoni.as_ref().expect("checked above");
+            solver::device_sum(gpu, solk, &mut ws.num, &d.clipped, &mut ws.partials, n)?;
+        }
+        Ok(gpu.download(&self.ws.num)?[0])
+    }
+
+    /// §87.2 and §87.3: `sigma(T)`, its face interpolation, its gradient and
+    /// the tangential force, in that order.
+    ///
+    /// Runs after `grad(alpha)` and before the body-force flux reads
+    /// `sigma_f`, which is the same ordering discipline §20.4 already
+    /// enforces one step earlier - a stale normal is a wrong curvature, and a
+    /// stale `sigma` is a wrong force.
+    fn update_marangoni(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.marangoni.is_none() {
+            return Ok(());
+        }
+        let m = self.m;
+        let (n, nif, nbf) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
+        let eps = self.eps_n;
+
+        {
+            let d = self.marangoni.as_mut().expect("checked above");
+            marangoni::update_sigma(gpu, d, m)?;
+        }
+        {
+            let Self { vk, marangoni, .. } = self;
+            let d = marangoni.as_mut().expect("checked above");
+            let (sf, sc) = (&mut d.sigma_f, &d.sigma.f);
+            launch_face_interp(gpu, &vk.face_interp, &mut sf.f, sc, m, nif)?;
+            launch_face_interp_boundary(
+                gpu,
+                &vk.face_interp_boundary,
+                &mut sf.bf,
+                sc,
+                m,
+                nbf,
+            )?;
+        }
+        {
+            let Self { fvk, marangoni, .. } = self;
+            let d = marangoni.as_mut().expect("checked above");
+            let Marangoni { grad_sigma, sigma, .. } = d;
+            fv::fvc_grad_scalar(gpu, fvk, grad_sigma, sigma, m)?;
+        }
+        {
+            let Self { grad_alpha, marangoni, .. } = self;
+            let d = marangoni.as_mut().expect("checked above");
+            marangoni::update_tangential_force(gpu, d, grad_alpha, eps, n)?;
+        }
+        Ok(())
     }
 
     /// SPEC-LIT §39.4, §39.5: `cos(theta)` per boundary face, and `alpha`'s
@@ -1526,6 +1679,35 @@ impl<'m> Vof<'m> {
         let g = self.props.g;
         let sigma = self.props.sigma;
 
+        // SPEC-LIT §87.2, §87.3: sigma(T), its face values, its gradient and
+        // the tangential force. A no-op when no case named a model, and that
+        // `return` is the whole of §87.5's bitwise guard on this side - the
+        // launches below are then reached with the same arguments they have
+        // always had.
+        self.update_marangoni(gpu)?;
+
+        if self.marangoni.is_some() {
+            // §87.4: the same body force with `sigma` a FIELD. The kernel is
+            // `marBodyForceFlux` in cuda/marangoni.cu, which is
+            // `vofBodyForceFlux` with one scalar argument replaced by an
+            // array - pinned against it, bit for bit, by
+            // `the_field_sigma_flux_is_the_scalar_one_when_sigma_is_flat`.
+            let Self { marangoni, phib, sn_grad_rho, sn_grad_alpha, kappa_f, u, .. } = self;
+            let d = marangoni.as_ref().expect("checked above");
+            marangoni::body_force_flux(
+                gpu,
+                d,
+                phib,
+                sn_grad_rho,
+                sn_grad_alpha,
+                kappa_f,
+                &u.fr,
+                g,
+                m,
+            )?;
+            return Ok(());
+        }
+
         if nif > 0 {
             let nl = nif as Label;
             let f = self.vk.body_force_flux.clone();
@@ -1790,6 +1972,30 @@ impl<'m> Vof<'m> {
                 ctrl.sn_grad,
                 -1.0,
             )?;
+        }
+
+        // SPEC-LIT §87.4: the tangential interfacial stress, as a wholly
+        // explicit cell source `source[P] += V_P f_M,P[cmpt]`.
+        //
+        // §87.1 is why it is here and not in `phib`: a face SCALAR flux
+        // carries one degree of freedom and it points along `Sf`, while
+        // `grad_s(sigma)` is orthogonal to the interface normal by
+        // construction. No rewrite of the flux can hold it.
+        //
+        // It lands in `a.source`, which `launch_set_component` below copies
+        // into `su` - so it reaches BOTH `momSolveSource` (the predictor) and
+        // `momHbyA` (and through it the face flux, one order down, §87.4).
+        //
+        // With no model configured this branch is not entered at all, which
+        // is §87.5's bitwise guard: there is no `+ 0.0` in the default path.
+        if self.marangoni.is_some() {
+            {
+                let d = self.marangoni.as_mut().expect("checked above");
+                marangoni::force_component(gpu, d, cmpt, n)?;
+            }
+            let Self { fvk, a, marangoni, .. } = self;
+            let d = marangoni.as_ref().expect("checked above");
+            fv::fvm_su(gpu, fvk, a, m, &d.scratch, 1.0)?;
         }
 
         if self.ctrl.u_relax < 1.0 {
@@ -2816,10 +3022,35 @@ impl VofProperties {
                         &format!("constant/{nm}: viscosityModel"),
                         name,
                         &["Newtonian", "constant"],
-                        "Newtonian - SPEC-LIT 38's five closures apply to the                          SINGLE-phase momentum equation of S5 (ofgpu-buoyant,                          ofgpu-fire). This solver mixes two phases' viscosities                          by S20.3 and has no per-phase rheology",
+                        "Newtonian - SPEC-LIT 38's five closures apply to the \
+                         SINGLE-phase momentum equation of S5 (ofgpu-buoyant, \
+                         ofgpu-fire). This solver mixes two phases' viscosities \
+                         by S20.3 and has no per-phase rheology",
                         (),
                     )?;
                 }
+            }
+
+            // SPEC-LIT 13.4 and §87.7. The Marangoni model of S87 is real and
+            // is reached through `Vof::set_marangoni`, but the case-file
+            // route is not wired: it needs a `0/T` field this two-phase
+            // reader does not read and an energy equation §87.10 does not
+            // ship. So the entry is REFUSED BY NAME rather than dropped -
+            // silently ignoring an entry that names a physical coefficient is
+            // exactly what 13.4 exists to stop, and `dSigmaDT` names one.
+            if let Some(raw) = d.get("dSigmaDT") {
+                let v = raw.split_whitespace().next().unwrap_or("");
+                unsupported(
+                    &format!("constant/{nm}: dSigmaDT"),
+                    v,
+                    &["sigma (a constant surface tension)"],
+                    "no Marangoni model - SPEC-LIT S87 implements grad_s(sigma) \
+                     and it is reached through the `Vof::set_marangoni` API, \
+                     but §87.10 ships no two-phase energy equation, so there is \
+                     no T for this coefficient to multiply and a case file \
+                     cannot yet turn the model on",
+                    (),
+                )?;
             }
             break;
         }
@@ -3793,6 +4024,464 @@ mod tests {
         assert!(order > 1.5, "the curvature is converging at order {order:.2}");
         assert!(e64 < 0.02, "the fine-mesh curvature error is {e64:.4}");
 
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §87: Marangoni - Gate 87-C, the closed-form surface integral
+    // ----------------------------------------------------------------------
+
+    /// Turn §87 on and write a driving field `T = f(x)` on cells and boundary
+    /// faces alike.
+    ///
+    /// Both halves matter. `T.bf` is what `sigma.bf` is built from, and
+    /// `sigma.bf` is what the Green-Gauss gather reads at a boundary face -
+    /// so leaving it at zero would put a spurious `grad(sigma)` in every
+    /// wall-adjacent cell and quietly corrupt the very integral being gated.
+    fn set_marangoni_field(
+        gpu: &Gpu,
+        vof: &mut Vof<'_>,
+        hm: &HostMesh,
+        model: MarangoniModel,
+        t: impl Fn(Vec3) -> Scalar,
+    ) -> Result<()> {
+        vof.set_marangoni(gpu, model)?;
+        let cells: Vec<Scalar> = (0..hm.n_cells).map(|c| t(hm.c[c])).collect();
+        let faces: Vec<Scalar> = (0..hm.n_boundary_faces).map(|b| t(hm.b_cf[b])).collect();
+        let f = vof.marangoni_temperature_mut().expect("the model is on");
+        gpu.write(&mut f.f, &cells)?;
+        gpu.write(&mut f.bf, &faces)
+    }
+
+    /// Gate 87-C, the exact half: a flat interface feels the slope times its
+    /// own area.
+    ///
+    /// With the interface normal along `z` and `sigma = sigma0 + a x`, the
+    /// surface gradient is `(a, 0, 0)` **everywhere and exactly** — the
+    /// projector removes nothing, because `grad(sigma)` is already tangential.
+    /// The regularised force is then `a |grad(alpha)|`, and
+    ///
+    /// ```text
+    ///     sum_c V_c f_M,c[x]  =  a * int |grad(alpha)| dV  =  a * A
+    /// ```
+    ///
+    /// because `int |d alpha/dz| dz = 1` across the band whatever its shape.
+    /// So this measures the CSF delta-function normalisation and the sign and
+    /// the magnitude, at machine precision, with no time stepping at all.
+    ///
+    /// It is also the test that would catch a missing `rho` division if this
+    /// solver's momentum equation were kinematic — §20.3's is not, and
+    /// `f_M` is a force density in N/m³. Getting that wrong would show up
+    /// here as a factor of `rho`, not as a subtlety.
+    #[test]
+    fn a_flat_interface_feels_the_slope_times_its_area() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        let nx = 48usize;
+        let h = 1.0 / nx as Scalar;
+        let hm = boxed([nx, nx, nx], Vec3::new(h, h, h), [PatchKind::Wall; 6]);
+        let m = GpuMesh::upload(&g, &hm)?;
+
+        let (props, ctrl) = advection_only(0.0);
+        let mut vof = Vof::new(&g, &hm, &m, props, ctrl)?;
+
+        // A planar diffuse interface at z = 1/2, thickness fixed in metres and
+        // well clear of both walls: tanh(0.5/0.05) = 1 - 4e-9, so the tails
+        // outside the domain carry nothing this test can see.
+        let w = 0.05 as Scalar;
+        let a: Vec<Scalar> =
+            (0..hm.n_cells).map(|c| 0.5 * (1.0 - ((hm.c[c].z - 0.5) / w).tanh())).collect();
+        g.write(&mut vof.alpha_mut().f, &a)?;
+        set_scalar_bcs(&g, vof.alpha_mut(), &hm, &[None; 6])?;
+
+        // sigma = sigma0 + dsigma/dT * (T - T0) with T = x and T0 = 0, so the
+        // slope along the interface is exactly `dsigma_dt`.
+        let slope = -1.5e-4 as Scalar;
+        let model = MarangoniModel {
+            sigma0: 0.05,
+            dsigma_dt: slope,
+            t0: 0.0,
+            // No floor: sigma runs 0.05 to 0.04985 here and a floor that bit
+            // would make the field non-linear and the gate meaningless.
+            sigma_min: 0.0,
+        };
+        set_marangoni_field(&g, &mut vof, &hm, model, |p| p.x)?;
+        assert!(vof.marangoni_is_on(), "the model must actually be on");
+
+        vof.initialise(&g)?;
+        vof.update_body_force(&g)?;
+
+        assert_eq!(
+            vof.marangoni_clipped_cells(&g)?,
+            0.0,
+            "the sigma floor bit; the field is no longer linear and (87.5) \
+             does not apply to it"
+        );
+
+        let fx = vof.marangoni_force_sum(&g, 0)?;
+        let fy = vof.marangoni_force_sum(&g, 1)?;
+        let fz = vof.marangoni_force_sum(&g, 2)?;
+
+        let exact = slope * 1.0; // a * A, with A = 1 m^2
+        let rel = (fx - exact) / exact;
+
+        println!(
+            "  Gate 87-C (flat): sum V f_M = ({fx:e}, {fy:e}, {fz:e}) N against \
+             a A = {exact:e}; relative error {rel:.3e}"
+        );
+
+        assert!(
+            rel.abs() < 1e-6,
+            "the tangential force integrates to {fx:e} N against the exact \
+             {exact:e} N, {:.4} % out. (87.5) is an identity, not an estimate",
+            100.0 * rel
+        );
+        // The interface is flat and `grad(sigma)` is along x, so nothing may
+        // appear on the other two axes. The z one is the interesting one: it
+        // is the component the projector had to remove.
+        assert!(
+            fz.abs() < 1e-9 * exact.abs(),
+            "a flat interface with a purely tangential grad(sigma) produced \
+             {fz:e} N normal to itself"
+        );
+        assert!(fy.abs() < 1e-9 * exact.abs(), "and {fy:e} N across it");
+        Ok(())
+    }
+
+    /// Gate 87-C, the Young–Goldstein–Block half: a sphere in a linear `T`.
+    ///
+    /// This is the surface integral their derivation performs, and it has a
+    /// closed form. With `T = G z`, `sigma = sigma0 + sigma_T G z`, so
+    /// `grad(sigma) = sigma_T G ẑ` is uniform and
+    ///
+    /// ```text
+    ///     (grad_s sigma)_z = sigma_T G (1 - n_z^2) = sigma_T G sin^2(theta)
+    ///     F_z = 2 pi R^2 sigma_T G int_0^pi sin^3 = (8/3) pi R^2 sigma_T G
+    /// ```
+    ///
+    /// The projector is what turns `4 pi R^2` into `(8/3) pi R^2`, so a force
+    /// that forgot to project fails this by exactly 50 % — which is why this
+    /// geometry was chosen over any other.
+    ///
+    /// # The 3.3 % that is the model and not the code
+    ///
+    /// The first run of this test found a **mesh-independent** excess of 3.0 %
+    /// at `32^3` and 3.2 % at `64^3` — an error that would not fall however
+    /// fine the mesh, which is exactly the shape of a defect. It is not one.
+    /// The CSF delta function is a band of finite width, and for a radial
+    /// profile `alpha = (1 - tanh((r-R)/w))/2` the surface integral picks up a
+    /// curvature correction that is derived here:
+    ///
+    /// ```text
+    ///     |d alpha/dr| = sech^2((r-R)/w) / (2w),   u = (r-R)/w
+    ///     int sech^2 = 2,   int u sech^2 = 0,   int u^2 sech^2 = pi^2/6
+    ///
+    ///     F_z = sigma_T G (8 pi/3) int |d alpha/dr| r^2 dr
+    ///         = sigma_T G (8 pi/3) ( R^2 + w^2 pi^2/12 )
+    ///         = (8/3) pi R^2 sigma_T G ( 1 + pi^2 w^2 / (12 R^2) )
+    /// ```
+    ///
+    /// At `w = 0.05`, `R = 0.25` that factor is `1.032899` — **3.2899 %**, and
+    /// the `64^3` measurement lands on it to 0.08 %. So the excess is the
+    /// diffuse band's own geometry, present in the continuum model before any
+    /// mesh exists, and the sharp-interface `(8/3) pi R^2` is the `w -> 0`
+    /// limit of it.
+    ///
+    /// The gate is therefore held against the band-corrected form, and the
+    /// correction is not tuned to the measurement: a **second** width is run
+    /// at the same resolution and required to reproduce its OWN predicted
+    /// factor. A formula fitted to one number would fail that; this one does
+    /// not.
+    ///
+    /// **This is not Gate 87-D.** It gates the force, not the migration
+    /// velocity; §87.9 records why the velocity gate is OPEN.
+    #[test]
+    fn a_spherical_interface_feels_the_young_goldstein_block_surface_integral() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        let r = 0.25 as Scalar;
+        let slope = -1.5e-4 as Scalar; // sigma_T G, with G = 1 K/m
+        let pi = std::f64::consts::PI as Scalar;
+        let sharp = (8.0 / 3.0) * pi * r * r * slope;
+        // The finite-band form derived above; `w -> 0` returns `sharp`.
+        let banded = |w: Scalar| sharp * (1.0 + pi * pi * w * w / (12.0 * r * r));
+
+        let measure = |nx: usize, w: Scalar| -> Result<Scalar> {
+            let h = 1.0 / nx as Scalar;
+            let hm = boxed([nx, nx, nx], Vec3::new(h, h, h), [PatchKind::Wall; 6]);
+            let m = GpuMesh::upload(&g, &hm)?;
+
+            let (props, ctrl) = advection_only(0.0);
+            let mut vof = Vof::new(&g, &hm, &m, props, ctrl)?;
+
+            let centre = Vec3::new(0.5, 0.5, 0.5);
+            let a = radial_alpha(&hm, centre, r, w, false);
+            g.write(&mut vof.alpha_mut().f, &a)?;
+            set_scalar_bcs(&g, vof.alpha_mut(), &hm, &[None; 6])?;
+
+            let model = MarangoniModel {
+                sigma0: 0.05,
+                dsigma_dt: slope,
+                t0: 0.5,
+                sigma_min: 0.0,
+            };
+            set_marangoni_field(&g, &mut vof, &hm, model, |p| p.z)?;
+
+            vof.initialise(&g)?;
+            vof.update_body_force(&g)?;
+            vof.marangoni_force_sum(&g, 2)
+        };
+
+        // Leg 1: mesh refinement at a fixed band width.
+        let w = 0.05 as Scalar;
+        let f32c = measure(32, w)?;
+        let f64c = measure(64, w)?;
+        let e32 = ((f32c - banded(w)) / banded(w)).abs();
+        let e64 = ((f64c - banded(w)) / banded(w)).abs();
+        let order = (e32 / e64).log2();
+
+        // Leg 2: a SECOND band width at the fine resolution, against its own
+        // predicted factor. This is what stops the correction being a fit.
+        let w2 = 0.04 as Scalar;
+        let f64w2 = measure(64, w2)?;
+        let e64w2 = ((f64w2 - banded(w2)) / banded(w2)).abs();
+
+        println!(
+            "  Gate 87-C (sphere): sharp-interface (8/3) pi R^2 sigma_T G = \
+             {sharp:e} N.\n    w = {w}: banded form {:e} (x{:.6}); measured \
+             {f32c:e} on 32^3 (err {:.4} %), {f64c:e} on 64^3 (err {:.4} %), \
+             order {order:.2}.\n    w = {w2}: banded form {:e} (x{:.6}); \
+             measured {f64w2:e} on 64^3 (err {:.4} %). Against the SHARP form \
+             the 64^3 excesses are {:.4} % and {:.4} % - the band's own \
+             geometry, not the mesh's error.",
+            banded(w),
+            banded(w) / sharp,
+            100.0 * e32,
+            100.0 * e64,
+            banded(w2),
+            banded(w2) / sharp,
+            100.0 * e64w2,
+            100.0 * ((f64c - sharp) / sharp).abs(),
+            100.0 * ((f64w2 - sharp) / sharp).abs(),
+        );
+
+        // The sign is the first thing that can be wrong and the cheapest to
+        // check: sigma_T < 0 with T increasing in +z means the interfacial
+        // fluid is pulled towards the COLD side.
+        assert!(
+            f64c < 0.0,
+            "the force came out {f64c:e}, positive, for a negative dsigma/dT \
+             in an increasing T - the sign is wrong"
+        );
+        // An unprojected force would be 4 pi R^2 sigma_T G, exactly 1.5x this.
+        let unprojected = 1.5 * sharp;
+        assert!(
+            ((f64c - unprojected) / unprojected).abs() > 0.2,
+            "the force {f64c:e} is within 20 % of the UNPROJECTED \
+             4 pi R^2 sigma_T G = {unprojected:e}; the projector is not doing \
+             its job"
+        );
+        assert!(
+            e64 < e32,
+            "the error against the banded form did not fall under refinement: \
+             {e32} -> {e64}"
+        );
+        assert!(order > 1.2, "observed convergence order {order:.2}");
+        assert!(e64 < 0.005, "the fine-mesh error is {:.3} %", 100.0 * e64);
+        assert!(
+            e64w2 < 0.005,
+            "the second band width missed its OWN predicted factor by {:.3} %, \
+             so the w^2 correction is a fit to one number rather than the \
+             derivation it claims to be",
+            100.0 * e64w2
+        );
+        Ok(())
+    }
+
+    /// §87.4: the source really does reach the momentum equation, and drives
+    /// flow in the direction (87.3) says.
+    ///
+    /// Everything else in §87's gate set measures `f_M` where it is built.
+    /// None of it would notice a `fvm_su` that was dropped, given the wrong
+    /// sign, or overwritten by `launch_set_component` before it reached `su` —
+    /// and each of those is a silent failure that leaves the field correct and
+    /// the solver unaffected. This is the test that closes that, and it is a
+    /// WIRING test: it holds the direction and a ratio, not a velocity.
+    ///
+    /// A flat interface in a sealed two-dimensional box, `sigma` increasing
+    /// along it. From rest, with `g = 0`, there is nothing else to move the
+    /// fluid: the normal capillary force is zero for a flat interface, so
+    /// every metre per second that appears was put there by (87.4). The
+    /// interfacial fluid must move towards **higher** `sigma`, which is what
+    /// a surface under a tension gradient does.
+    ///
+    /// The same case with the model off is run as the control, so the number
+    /// this test reports is a ratio against this solver's own spurious
+    /// currents rather than against a threshold picked to pass.
+    #[test]
+    fn the_marangoni_source_reaches_the_momentum_equation_and_drives_flow() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        let nx = 64usize;
+        let h = 1.0 / nx as Scalar;
+        let hm = boxed(
+            [nx, nx, 1],
+            Vec3::new(h, h, h),
+            [
+                PatchKind::Wall,
+                PatchKind::Wall,
+                PatchKind::Wall,
+                PatchKind::Wall,
+                PatchKind::Empty,
+                PatchKind::Empty,
+            ],
+        );
+        let m = GpuMesh::upload(&g, &hm)?;
+
+        let props = VofProperties {
+            rho1: 1000.0,
+            rho2: 1.0,
+            mu1: 0.1,
+            mu2: 0.01,
+            sigma: 0.05,
+            g: Vec3::ZERO,
+            c_alpha: 0.0,
+        };
+        let ctrl = VofControls {
+            delta_t: 1e-4,
+            n_correctors: 2,
+            u_solver: tight(),
+            p_solver: tight(),
+            sn_grad: fv::SnGradScheme::Uncorrected,
+            ..VofControls::default()
+        };
+
+        // `sigma` RISES with x, so the interfacial fluid must be pulled
+        // towards +x. Positive, deliberately: the sign of `dsigma/dT` and the
+        // sign of the resulting motion are two different statements and a
+        // test that only ever used the physical negative one would not
+        // separate them.
+        let slope = 2.0e-4 as Scalar;
+
+        let run = |marangoni: bool| -> Result<(Scalar, Scalar, Scalar)> {
+            let mut vof = Vof::new(&g, &hm, &m, props, ctrl)?;
+
+            // A flat interface halfway up: zero curvature, so the normal
+            // capillary term contributes nothing and cannot be mistaken for
+            // the tangential one.
+            let w = 2.0 * h;
+            let a: Vec<Scalar> =
+                (0..hm.n_cells).map(|c| 0.5 * (1.0 - ((hm.c[c].y - 0.5) / w).tanh())).collect();
+            g.write(&mut vof.alpha_mut().f, &a)?;
+            set_scalar_bcs(&g, vof.alpha_mut(), &hm, &[None; 6])?;
+            set_velocity_bcs(&g, vof.u_mut(), &hm, &[Some(Vec3::ZERO); 6])?;
+            set_scalar_bcs(&g, vof.p_rgh_mut(), &hm, &[None; 6])?;
+
+            if marangoni {
+                let model = MarangoniModel {
+                    sigma0: 0.05,
+                    dsigma_dt: slope,
+                    t0: 0.0,
+                    sigma_min: 0.0,
+                };
+                set_marangoni_field(&g, &mut vof, &hm, model, |p| p.x)?;
+                assert!(vof.marangoni_is_on());
+            } else {
+                assert!(!vof.marangoni_is_on());
+            }
+
+            vof.initialise(&g)?;
+            let steps = 40usize;
+            for _ in 0..steps {
+                vof.step(&g, ctrl.delta_t)?;
+            }
+
+            // The interfacial fluid's mean x-velocity, weighted by how much
+            // interface each cell holds - which is the quantity (87.3) puts
+            // the force on. And the largest speed anywhere, as the control.
+            let u = g.download(&vof.u().f)?;
+            let al = g.download(&vof.alpha().f)?;
+            let rho = g.download(&vof.rho().f)?;
+            let mut num = 0.0 as Scalar;
+            let mut den = 0.0 as Scalar;
+            let mut umax = 0.0 as Scalar;
+            let mut band_mass = 0.0 as Scalar;
+            for c in 0..hm.n_cells {
+                let band = al[c] * (1.0 - al[c]);
+                num += band * u[c].x;
+                den += band;
+                if band > 0.01 {
+                    band_mass += rho[c] * hm.v[c];
+                }
+                let s = u[c].mag();
+                if s > umax {
+                    umax = s;
+                }
+            }
+            assert!(den > 0.0 && band_mass > 0.0, "no interface band");
+
+            // The ballistic scale: the whole force, acting for the whole
+            // elapsed time, on the whole mass it is spread over. `a A / M t`,
+            // with everything on the right measured from this same run rather
+            // than estimated. Zero when the model is off.
+            let fx = vof.marangoni_force_sum(&g, 0)?;
+            let ballistic = fx / band_mass * (steps as Scalar * ctrl.delta_t);
+            Ok((num / den, umax, ballistic))
+        };
+
+        let (on_mean, on_max, on_ballistic) = run(true)?;
+        let (off_mean, off_max, _) = run(false)?;
+
+        println!(
+            "  §87.4 wiring: 40 steps, flat interface, dsigma/dx = +{slope:e} N/m².\n    \
+             model ON : band-mean U_x = {on_mean:e} m/s, max|U| = {on_max:e} m/s\n    \
+             model OFF: band-mean U_x = {off_mean:e} m/s, max|U| = {off_max:e} m/s\n    \
+             ratio of band-mean speeds {:.4e}\n    \
+             ballistic scale (whole force / band mass x elapsed time) = \
+             {on_ballistic:e} m/s; measured/ballistic = {:.3}",
+            on_mean.abs() / off_mean.abs().max(Scalar::MIN_POSITIVE),
+            on_mean / on_ballistic
+        );
+
+        assert!(
+            on_mean > 0.0,
+            "sigma rises with x, so the interfacial fluid must be pulled \
+             towards +x; it moved at {on_mean:e} m/s instead. Either (87.4) \
+             reaches the matrix with the wrong sign or it does not reach it"
+        );
+        assert!(
+            on_mean.abs() > 100.0 * off_mean.abs(),
+            "the model moved the interface at {on_mean:e} m/s against \
+             {off_mean:e} m/s with it off - a factor of {:.2}. That is not a \
+             driven flow, it is the same spurious current twice, and (87.4) \
+             is not reaching the momentum equation",
+            on_mean.abs() / off_mean.abs().max(Scalar::MIN_POSITIVE)
+        );
+        // The control has to be a control: if the model-off case were already
+        // moving, the ratio above would mean nothing.
+        assert!(
+            off_max < 1e-4,
+            "the model-OFF case reached {off_max:e} m/s on its own, so it is \
+             not a quiet baseline and the ratio proves nothing"
+        );
+        // ...and the SIZE is right, not merely the sign. Over four
+        // milliseconds this drop's viscous time is far away, so the band is
+        // still accelerating ballistically and the speed should be within a
+        // small factor of `F t / M`. It cannot be exact - the pressure
+        // solve and the walls take a share, and the band mass depends on
+        // where the band is cut - so the window is deliberately wide. What it
+        // excludes is a force off by the density ratio (1000), by `V_P`, or
+        // by the interface thickness.
+        let ratio = on_mean / on_ballistic;
+        assert!(
+            (0.3..3.0).contains(&ratio),
+            "the interfacial fluid moved at {on_mean:e} m/s against a \
+             ballistic scale of {on_ballistic:e} m/s, a factor of {ratio:.4}. \
+             A force scaled by rho, by a cell volume or by the band width \
+             would land outside this window; the window is wide because the \
+             pressure solve and the walls take a share, not because the \
+             magnitude is unchecked"
+        );
         Ok(())
     }
 
