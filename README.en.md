@@ -636,6 +636,91 @@ would all need work before an adapt could happen mid-run. The Jasak–Gosman
 residual estimator and the Pope LES resolution index are **refused by name**,
 with the Löhner indicator as the alternative in both cases.
 
+### The emitter on the device: a point numbering that is one scan
+
+§82 measured that the emitter, not the geometry sweep, was 54 % of a mesh
+rebuild, and §82.9 wrote the specification for porting it — splitting it
+honestly into an easy half and a hard one. SPEC-LIT §84 is that port.
+`cuda/meshemit.cu` builds the voxel ownership map, groups the faces, numbers
+the points, and writes the internal faces already in `(owner, neighbour)` order
+and the boundary faces patch by patch, on the device.
+
+**The hard half was the point numbering, and the trick is that the sequential
+loop is a number.** The host numbers a grid point the first time its
+cell-major, axis-major, minus-then-plus traversal touches it — which is a total
+order on `(cell, axis, slot, corner)`, so it is an integer, the *touch rank*.
+The host's point id is then the position of a site's smallest touch rank among
+all sites' smallest touch ranks: a minimum per grid point, and one exclusive
+scan. Both are pure functions of the leaf set, so there is nothing left for the
+hardware to order.
+
+The minimum is **gathered, not scattered**. An `atomicMin` over touches would
+give the same answer — integer minimum does not care what order it arrives in —
+but every rectangle this emitter emits is a whole face of some leaf, so every
+point it touches has an incident voxel belonging to a leaf that touches it.
+Read the eight voxels around a grid point, replay those leaves' own touches,
+take the minimum. There is no atomic of any width in the file.
+
+Two smaller observations did the rest. `(owner, neighbour)` keys are **unique** —
+two boxes adjacent on one axis overlap on the other two — so the host's sort of
+the internal face list is exactly "each cell's faces to higher-numbered
+neighbours, ascending", which a cell can gather itself: no sort. And the
+boundary flag array is patch-major, so **one** scan gives both the patch starts
+and the within-patch order.
+
+§82.9 offered permission to produce a *different but equivalent* point
+numbering. It was declined: `io::polymesh` writes the point list to disk, and
+§75.2's cross-check against the static generator compares it element for
+element. The gate is bitwise on `points` and on every face's point list.
+
+| cells | emit (host) /ms | **emit (device) /ms** | speed-up | rebuild, resident /ms | **rebuild, device-emitted /ms** | N res | **N emit** |
+|---|---|---|---|---|---|---|---|
+| 64 | 0.088 | 0.400 | 0.2× | 0.448 | 0.771 | 126 | 197 |
+| 216 | 0.399 | 0.481 | 0.8× | 0.884 | 0.958 | 198 | 212 |
+| 512 | 1.080 | 0.979 | 1.1× | 1.696 | 1.191 | 348 | 252 |
+| 4 096 | 6.426 | 0.802 | 8.0× | 9.254 | 3.833 | 1 732 | 730 |
+| 13 824 | **15.249** | **1.751** | **8.7×** | 22.563 | **7.081** | 4 039 | **1 287** |
+
+The emitter is **8.7× faster** and the whole rebuild **3.2×**, priced to the
+same place — the new mesh already on the device. N falls from 4 039 to
+**1 287**, or from 5 388 against where §82 started.
+
+**Is that enough? No, and by a factor of forty.** One step is 0.281 ms; an
+adapt every 30 steps would cost 84 % of the run. But the bottleneck has moved
+again and this time it is in four roughly equal pieces, none of them the
+emitter: of the 7.08 ms, the device emitter and its download are 1.75,
+**`build_cell_face_maps` on the host is 1.95**, the resident geometry route is
+1.81, and `plan`'s own bookkeeping is 1.58 (a residual of four timings, not a
+measurement — at 512 cells it comes out negative, which is what a residual
+looks like when its inputs are noisier than the thing being differenced out).
+The interesting one is the second: the cell → face CSR is now a larger piece of
+a rebuild than the emitter that feeds it, and **a device version of it already
+exists and is already gated** — `adaptCellFaceCsr` and `adaptBoundaryCsr`,
+which `ofgpu-validate` checks element for element on every run. They are
+unwired because the CSR used to be 6 % of a rebuild. It is 27 % now.
+
+Four things this section found that were not in its brief. **A gate in the
+repository caught a dependency this section had got backwards.** §75.9's
+`no_time_loop_reaches_the_adapt` walks every source file and fails if anything
+outside `adapt` names `crate::adapt`; the first draft had the mesh module
+reading `adapt::VOXEL_LIMIT` and its tests importing `Forest`. The fix was not
+to add two names to the allow-list — the test's own comment warns against that
+— but to turn the arrow round: the voxel limit now travels with the call, and
+the two gates that need a `Forest` live in `adapt`'s test module. **The fixtures
+could not be §82's.** Three of that gate's five meshes — a graded block with a
+cyclic axis, a box with every point displaced, a box with a fifth vertex on
+every face — are not leaf sets at all, and the forest emitter cannot produce
+them; the gate here uses the two that carry over plus six chosen to reach
+branches the *device* emitter has and the host one does not. **The emitter's
+cost below 512 cells is four host round trips, not arithmetic** — 0.40 / 0.48 /
+0.98 ms on the three smallest meshes, which is the gap check, two grouping
+diagnostics and the nine counts. And **`best_of` does not remove the machine**: the same code
+measured the same 13 824-cell device emission at **0.727, 1.439 and 1.751 ms**
+in three runs within forty minutes, every one of them the minimum of four
+calls. That is a factor of 2.4 that survives `best_of` entirely. The table
+above is the third of them — the run the committed binary produced, and the
+slowest — so the honest reading of the 8.7× is "between eight and twenty".
+
 ---
 
 ## Case settings: honoured or refused

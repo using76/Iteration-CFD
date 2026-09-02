@@ -161,6 +161,89 @@ fn face_geometry(verts: &[Label], points: &[Vec3]) -> (Vec3, Vec3) {
 /// mesh becomes an `Error::Mesh` naming the offending entity rather than a
 /// panic somewhere in the middle of a pass.
 pub(crate) fn validate(m: &HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Result<()> {
+    let (n_if, n_bf) = (m.n_internal_faces, m.n_boundary_faces);
+    let n_faces = n_if + n_bf;
+    validate_topology(m)?;
+
+    if faces.len() != n_faces {
+        return Err(Error::Mesh(format!(
+            "compute_geometry: {} face vertex lists for {} internal + {} \
+             boundary faces",
+            faces.len(),
+            n_if,
+            n_bf
+        )));
+    }
+    for (f, fv) in faces.iter().enumerate() {
+        for &v in fv.iter() {
+            if v < 0 || v as usize >= points.len() {
+                return Err(Error::Mesh(format!(
+                    "compute_geometry: face {f} refers to point {v} but there \
+                     are {} points",
+                    points.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`validate`], against the face -> point CSR instead of the `Vec<Vec<Label>>`
+/// face list.
+///
+/// SPEC-LIT section 84.10. The device emitter produces the CSR directly, and
+/// the `Vec<Vec<Label>>` form is one heap allocation per face - part of the
+/// fourteen milliseconds section 82.2 measured - so a resident route that
+/// built it only in order to validate it would have paid for the thing it
+/// exists to remove. Every question below is the same question asked of the
+/// same numbers; what the two entry points share is [`validate_topology`], so
+/// they cannot drift.
+pub(crate) fn validate_csr(
+    m: &HostMesh,
+    points: &[Vec3],
+    csr: &crate::mesh::gpugeom::FacePointCsr,
+) -> Result<()> {
+    let n_faces = m.n_internal_faces + m.n_boundary_faces;
+    validate_topology(m)?;
+
+    if csr.offset.len() != n_faces + 1 {
+        return Err(Error::Mesh(format!(
+            "compute_geometry: {} face CSR offsets for {} internal + {} \
+             boundary faces",
+            csr.offset.len(),
+            m.n_internal_faces,
+            m.n_boundary_faces
+        )));
+    }
+    for f in 0..n_faces {
+        let (a, b) = (csr.offset[f], csr.offset[f + 1]);
+        if a < 0 || b < a || b as usize > csr.point.len() {
+            return Err(Error::Mesh(format!(
+                "compute_geometry: face {f}'s CSR range is [{a}, {b}) of {} point \
+                 entries, which is not a range",
+                csr.point.len()
+            )));
+        }
+        for &v in &csr.point[a as usize..b as usize] {
+            if v < 0 || v as usize >= points.len() {
+                return Err(Error::Mesh(format!(
+                    "compute_geometry: face {f} refers to point {v} but there \
+                     are {} points",
+                    points.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Everything [`validate`] and [`validate_csr`] both ask: that the counts fit
+/// in a `Label`, that the addressing arrays are the right length, and that
+/// every cell id in them is a cell.
+///
+/// Extracted so that the two entry points cannot drift apart - SPEC-LIT
+/// section 84.10.
+fn validate_topology(m: &HostMesh) -> Result<()> {
     let (n_cells, n_if, n_bf) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
     let n_faces = n_if + n_bf;
 
@@ -189,16 +272,6 @@ pub(crate) fn validate(m: &HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> R
             n_bf
         )));
     }
-    if faces.len() != n_faces {
-        return Err(Error::Mesh(format!(
-            "compute_geometry: {} face vertex lists for {} internal + {} \
-             boundary faces",
-            faces.len(),
-            n_if,
-            n_bf
-        )));
-    }
-
     for f in 0..n_if {
         for (what, c) in [("owner", m.owner[f]), ("neighbour", m.neighbour[f])] {
             if c < 0 || c as usize >= n_cells {
@@ -216,17 +289,6 @@ pub(crate) fn validate(m: &HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> R
                 "compute_geometry: boundary face {bf} belongs to cell {c}, \
                  outside [0, {n_cells})"
             )));
-        }
-    }
-    for (f, fv) in faces.iter().enumerate() {
-        for &v in fv.iter() {
-            if v < 0 || v as usize >= points.len() {
-                return Err(Error::Mesh(format!(
-                    "compute_geometry: face {f} refers to point {v} but there \
-                     are {} points",
-                    points.len()
-                )));
-            }
         }
     }
 

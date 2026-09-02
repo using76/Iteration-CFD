@@ -188,6 +188,19 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_spalart_allmaras_correction_replays_bitwise"),
     ),
     (
+        "src/mesh/gpuemit.rs",
+        Stance::Outside(
+            "the polyMesh emitter runs when a mesh is BUILT - at setup, or at \
+             an adapt - and never inside an iteration, for exactly the reason \
+             src/mesh/gpugeom.rs is Outside: the mesh it produces is the one a \
+             captured graph would have to be recaptured against. It also \
+             downloads four times mid-sequence, because sizing an allocation \
+             is a host act, and SPEC-LIT 81.3's capture guard refuses a host \
+             round trip by name while a capture is recording - so it could \
+             not be captured even if someone wanted it to be. SPEC-LIT 84.8",
+        ),
+    ),
+    (
         "src/mesh/gpugeom.rs",
         Stance::Outside(
             "the finite-volume geometry sweep runs when a mesh is BUILT - at \

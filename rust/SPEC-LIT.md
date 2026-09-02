@@ -25216,3 +25216,424 @@ there for §83.8's crossover rather than for the cadence.
   does not pin clocks, does not control for GPU boost state, and does not
   report a spread — so it can say "this is at most what the code costs" and
   cannot say how much of the remaining gap between two columns is real.
+
+## 84. The emitter on the device — the touch rank, and a point numbering that is one scan
+
+§75.8 named `mesh/geometry.rs::compute` as what makes an adapt expensive.
+§82.2 measured that and found it was not: the geometry sweep was 31 % of a
+rebuild and **`Forest::emit`'s face-grouping loop was 54 %**. §82.9 then wrote
+the specification for closing it and split it honestly — the topology is the
+easy half, the point numbering is the hard one — and §83 closed the other end
+of the problem instead, leaving the emitter untouched and now the *large*
+majority of the remaining cost.
+
+This section is that port. `cuda/meshemit.cu` and `src/mesh/gpuemit.rs` are
+new; `adapt::Forest::emit_on_device`, `Forest::build_resident_on_device` and
+`adapt::plan_resident_on_device` reach them; and the claim is bitwise identity
+with `Forest::emit` — the same faces, in the same order, **with the same point
+numbers**.
+
+### 84.1 The permission §82.9 gave, and why it was declined
+
+§82.9 said, of a device emitter:
+
+> until that is written, a device emitter would produce a *different but
+> equivalent* point numbering. **That is not automatically a problem**:
+> nothing in the geometry sweep depends on the numbering, only on each face's
+> corner *positions* in their winding order […] Whoever writes it should decide
+> that deliberately rather than discover it.
+
+The decision is **no**. Three reasons, in order of weight:
+
+1. `io::polymesh` writes `points` and the face point lists to disk. A permuted
+   numbering changes every `polyMesh` this crate has ever written, silently,
+   and with no test that would notice — because every test that reads one back
+   reads the permutation too.
+2. §75.2's `the_forest_emitter_reproduces_the_static_generator` asserts
+   `points` and the face point lists element for element against
+   `mesh::refined::build`. It is the cross-check that the forest emitter is not
+   a second mesh generator that merely agrees on volumes, and it would have had
+   to be weakened.
+3. The thing that makes the numbering reproducible — §84.2's touch rank — costs
+   one integer per touch and one exclusive scan. It is cheaper than the
+   argument about whether the permutation matters.
+
+So the gate below is on `points` and on every face's point list, by bits and by
+element, and not on the geometry those produce.
+
+### 84.2 The touch rank: a sequential traversal, written as a number
+
+The host numbers a grid point the first time its traversal touches it. The
+traversal is:
+
+    for c in 0 .. n_cells:
+      for axis in 0 .. 3:
+        if lo[c][axis] == 0:                       emit the MINUS boundary face
+        if hi[c][axis] == vn[axis]:                emit the PLUS boundary face
+                                                   and go to the next axis
+        else: for nb in the far-side leaves, ASCENDING:   emit that sub-face
+      each face emits its four corners in the order (a0,b0) (a1,b0) (a1,b1) (a0,b1)
+
+which is a **total order** on the quadruples `(cell, axis, slot, corner)`, with
+
+* `slot = 0` — the minus-side boundary face,
+* `slot = 1` — the plus-side boundary face, **or** internal group 0,
+* `slot = 1+g` — internal group `g`, in ascending neighbour id,
+
+and at most `EM_MAXG = 4` groups, so at most `EM_SLOTS = 5` slots. A total
+order on a bounded index set is a number:
+
+$$
+r = \Big(\big((c \cdot 3 + \text{axis})\cdot 5 + \text{slot}\big)\cdot 4 + \text{corner}\Big)
+$$
+
+— the **touch rank**, dense in `[0, 60 * n_cells)` and unique to one touch.
+Two facts follow, and they are the whole of the port's point half:
+
+* write `minRank[s]` for the smallest rank of any touch that lands on grid
+  site `s`. The host's point id for `s` is then the position of `minRank[s]`
+  among all sites' `minRank`, in ascending order;
+* because the ranks are dense and each belongs to exactly one site, that
+  position is the **exclusive scan** of the predicate
+  `isFirst[r] = (touch r exists) and (minRank[site(r)] == r)`.
+
+Both are pure functions of the leaf set. Nothing is left for the hardware to
+order, which is what "bitwise" has to mean here.
+
+The rank space costs 60 `int`s per cell, twice — the flags and the scan. That
+is the price of the dense space, and §84.7 refuses by name rather than wrap
+when it does not fit an `i32`.
+
+### 84.3 The point numbering as a gather, not an `atomicMin`
+
+`minRank` is a minimum over touches, and the obvious device form is one thread
+per touch doing `atomicMin` on `minRank[site]`. That would be *correct* —
+integer minimum is associative, commutative and exact, so the answer does not
+depend on the order the atomics land in, unlike the `atomicAdd(double*)` §67's
+whole sort exists to avoid. It is still a scatter, though, and `meshgeom.cu` —
+the file this one sits next to, and whose emitter this one feeds — carries in
+its header the claim that there is no atomic of any width in it. Matching that
+claim costs nothing here, so it is matched, and §84.9 row 5 is the test that
+keeps it true rather than a comment that decays. (`adapt.cu` does carry one
+`atomicOr` on a single flag word, and says in its own header exactly why that
+is the class of atomic the rule is not about.)
+
+The gather form rests on one observation:
+
+> **Every rectangle this emitter emits is a whole face of some leaf.** A
+> boundary face is a whole face of its own cell; a one-to-one internal face is
+> a whole face of both; and a 2:1 sub-face is a whole face of the *finer* of
+> the two. So every point it touches is a lattice point on the closed boundary
+> of at least one leaf's voxel box.
+
+A lattice point on the closed box `[lo, hi]` always has at least one incident
+voxel inside `[lo, hi)`. Therefore: read the owners of the (at most) **eight
+voxels incident to the site**, replay each of those leaves' own touches, and
+take the minimum. Nothing that touches the site can be missed, duplicates among
+the eight cost time and not correctness because minimum is idempotent, and the
+kernel writes only its own element.
+
+The one case worth checking by hand is the centre of a coarse cell's face when
+the far side is four finer leaves: the point is in the *interior* of the coarse
+cell's face, so it is not a corner of that cell's box — but four of the eight
+incident voxels belong to the coarse cell, which is the leaf that generates the
+touch. It is found.
+
+`emitPointRanks` is therefore at most `8 × 3 × 5 × 4 = 480` corner comparisons
+per grid point, and there is no atomic of any width in the file.
+
+### 84.4 The topology: a question with two answers
+
+§82.9's argument, restated as it is used:
+
+> Under 2:1 balance the far side of a cell's face is either one leaf of level
+> ≤ L or exactly four leaves of level L+1 — a level-L leaf on the far side
+> would cover the face entirely.
+
+Leaves are cubes, so a partition of a face into anything other than one
+rectangle or four quadrants is impossible in a balanced set. `emitFaceGroups`
+nevertheless **scans the whole face**, voxel by voxel, and not the four
+quadrant probes §82.9 suggested. The reason is not caution about the argument;
+it is that the bounding box the scan accumulates is exactly what the host's
+
+    want = (r1 + 1 - r0)(r3 + 1 - r2)      # bbox of the far leaf's face voxels
+    got  = |[max(a,lo_nb) .. min(b,hi_nb))| on each tangent axis
+
+test compares, and that test is the mesh's only statement that the leaf set is
+2:1 balanced *here*. Four probes would make the device emitter quieter than the
+host one on a broken mesh, which §84.7 forbids.
+
+The **minus** side is different, and there the four probes are used
+(`emOwnedFaces`). By the time any face-writing kernel runs, `emitFaceGroups`
+has been reduced and its refusals raised, so every face in the mesh is known to
+be one rectangle or four. Four probes then see every distinct owner, and the
+minus side needs only the owner — the rectangle is the box intersection, which
+is symmetric in the two cells.
+
+The voxel ownership map itself is a gather: a voxel knows its own base cell,
+the leaves of a base cell are contiguous because `Leaf::key` is base-cell-major,
+and the range is one binary search (`emitBaseOffsets`, the same argument §75.5
+makes for the CSR rebuild).
+
+### 84.5 The internal faces, already in (owner, neighbour) order
+
+The host builds `internal` in emission order and then sorts it by
+`(owner, neighbour)`. **Those keys are unique**: two axis-aligned boxes face-
+adjacent on one axis overlap on the other two, so they can be adjacent on only
+one axis and share at most one rectangle. A stable sort on unique keys is a
+total order, so the sorted list is exactly
+
+> for each cell in ascending id, its faces to **higher-numbered** neighbours,
+> in ascending neighbour id
+
+and a cell can gather that list itself. Its plus-side higher neighbours are
+`grpNb`, already ascending; its minus-side ones come off the four quadrant
+probes of §84.4. An insertion sort over at most 24 entries — §74's bound on a
+balanced cell's degree — merges the two into one ascending list in registers,
+and an exclusive scan over the counts gives each cell its base offset. **There
+is no device-wide sort**, which is the point: a 24-element insertion sort in a
+thread's own registers is not a sort in the sense that would need a radix pass
+over every face in the mesh.
+
+The winding follows from which cell generated the face. The host winds along
+`+axis`, from the generator toward its plus-side neighbour, and reverses when
+the generator is the one with the larger index. For a cell writing its own
+owned faces that is exactly "the face is on my minus side": corner `m` of a
+minus-side face is corner `3-m` of the rectangle.
+
+### 84.6 The boundary faces and the patches
+
+The host collects six per-patch lists and sorts each by cell id. The device
+form is one flag array of `6 n_cells`, **patch-major**, and one exclusive scan
+over it: within a patch the scan runs over cells in ascending id, so each face's
+position inside its patch is the host's sorted position, and `scan[p·n_cells]`
+is the patch's start. Six starts, one total, and the patch names —
+`xmin xmax ymin ymax zmin zmax`, type `patch`, kind `Generic` — are written on
+the host because a name is not a number.
+
+### 84.7 §13.4 contract — what is refused, and by what name
+
+| asked for | answer |
+|---|---|
+| a leaf set with a **gap** (a voxel no leaf claims) | **Refused, in the host emitter's exact words**: `voxel {v} of the finest grid belongs to no leaf; the leaf set overlaps itself somewhere and leaves a gap here`. Detected before any kernel that would index a leaf array with `-1`, by a fixed-shape min-index reduction and a host-side minimum over 256 partials — so the voxel it names is the one the host would have named, not the one a scheduler happened to reach first. |
+| a face whose far side is **not one rectangle** | **Refused, in the host emitter's exact words**: `cells {c} and {nb} share a non-rectangular region on axis {axis}; the leaf set is not 2:1 balanced`. The device records the first offending neighbour per (cell, axis) in ascending neighbour order and the reduction takes the smallest (cell, axis), so the pair named is the first the host's loop would have reached. |
+| a face with **more than four** distinct far-side leaves | **Refused by name, with the alternative**: the emitter holds four groups in registers and says so, and names `adapt::Forest::build` — which groups an unbounded number of neighbours in a `BTreeMap` and will name the pair *it* refuses. 2:1 balance forbids the case; the refusal exists because a register array is a bound and a bound that is not checked is a corruption. |
+| a mesh whose **touch-rank space or point grid overflows an `i32`** | **Refused by name, with the alternative**: 60 ranks per cell is this route's own cost and the host emitter has no such space — its point numbering is sequential. Names `adapt::Forest::build`. |
+| a base grid past **`VOXEL_LIMIT`** | Refused in the host emitter's words, which this route repeats verbatim: it allocates the same voxel array. |
+| **a permuted point numbering** (§82.9's offer) | **Declined** — §84.1. |
+| a mesh that is **not a box** | Not refused because not reachable: this is a port of `Forest::emit`, which emits the axis-aligned box a leaf set is. There is no other caller and no other input. |
+| **`mesh::gpuemit` reaching for `adapt::VOXEL_LIMIT`** | **Refused by a test, and this section was caught by it.** §75.9's `adapt::tests::no_time_loop_reaches_the_adapt` walks every `.rs` under `src/` and fails if any file outside `adapt` names `crate::adapt` on a non-comment line. A first draft of this section had `mesh::gpuemit` reading `crate::adapt::VOXEL_LIMIT` and its test module importing `Forest` and `plan`, and the gate failed the build. The right answer was not to add two names to its allow-list — the test's own comment warns against exactly that — but to fix the direction: `LeafGrid` now carries a `voxel_limit` the caller supplies, and the two gates that need a `Forest` live in `adapt`'s test module. `adapt` may depend on `mesh`; `mesh` may not depend on `adapt`. |
+
+### 84.8 The capture stance
+
+`src/mesh/gpuemit.rs` launches kernels, so §81.7's registry must classify it
+and §81.8's census — read off disk — fails if it does not. It is
+`Stance::Outside`, for §82.8's reason and one more of its own:
+
+* a mesh is **built**, at setup or at an adapt, and never inside an iteration.
+  A captured graph bakes the device pointers of the mesh it was captured on, so
+  a mesh that has just been rebuilt is on the far side of a recapture by
+  definition;
+* and this module **downloads four times mid-sequence** — the gap check, the
+  two grouping diagnostics and the nine counts — because sizing an allocation
+  is a host act and the number of points is not known until the scan has run.
+  §81.3's capture guard makes every host round trip on `Gpu` refuse itself by
+  name while a capture is recording, so this module could not be captured even
+  if someone wanted it to be. That is a second, independent reason the answer
+  can only be `Outside`, and it is stated so that a later reader does not try
+  to promote the module without noticing it.
+
+### 84.9 What must hold
+
+| # | Statement | Where it is checked |
+|---|---|---|
+| 1 | **THE GATE.** The device emitter and the host emitter produce the same mesh: counts, `owner`, `neighbour`, `bFaceCells`, the six patches field for field, `points` **by bits**, and every face's point list element for element — on eight leaf sets including one an ADAPT produced | `adapt::tests::the_device_emitter_is_bitwise_identical_to_the_host_emitter` |
+| 2 | The same, end to end: emit on the device, sweep on the device, and the `GpuMesh` that arrives is the one the host emission produces — sixteen arrays, the §70 row map, `total_volume` | `adapt::tests::a_mesh_emitted_on_the_device_reaches_the_device_as_the_same_mesh` |
+| 3 | **THE GATE, in the binary.** `plan_resident_on_device` and `plan_resident` agree on the topology, the sixteen arrays, the §70 row map, `total_volume` and the transfer `Map`'s weights, at every mesh size in the cadence sweep | `ofgpu-validate`, "the adapt cadence" |
+| 4 | The cell → face CSR `download` rebuilds is the CSR the host emitter's mesh carries | gate 1, `cf_offset`/`cf_face`/`cf_own`/`bcf_offset`/`bcf_face` |
+| 5 | Every kernel is a gather; there is no atomic of any width, no warp shuffle and no CUB | `mesh::gpuemit::tests::the_emitter_uses_no_atomic_and_no_shared_scatter`, which strips both comment forms first because the file's own header is where the claim is written |
+| 6 | A leaf set with a gap is refused **in the host emitter's words** | `mesh::gpuemit::tests::a_leaf_set_with_a_gap_is_refused_in_the_host_emitters_words` |
+| 7 | The scan borrowed from `parcelsort.cu` is an exclusive scan at every length this module asks for, including lengths that are not a whole number of tiles | `mesh::gpuemit::tests::the_borrowed_scan_is_an_exclusive_scan` |
+| 8 | The default arm is the host emitter, so `Forest::build`, `build_with` and `plan` are unchanged BY CONSTRUCTION | `adapt::Forest::build` — the device emitter is reached only through the three new entry points |
+| 9 | `src/mesh/gpuemit.rs` is classified in the capture registry, and the census read off disk agrees | `capture::registry::tests::every_device_module_is_classified` |
+| 10 | Every `§NN.N` this section's code cites exists | `xref`, §80 |
+| 11 | Nothing outside `adapt` names `crate::adapt`, this section's two new modules included | `adapt::tests::no_time_loop_reaches_the_adapt` — see §84.7's last row |
+
+The gate lives in **two places**, and that is not an accident: rows 1 and 2
+need a `Forest`, and §75.9's `no_time_loop_reaches_the_adapt` forbids anything
+outside `adapt` from naming `crate::adapt` — so they are in `adapt`'s own test
+module, and `mesh::gpuemit::tests` keeps the three that test the device module
+on its own terms. §84.7's last row is the finding that put them there.
+
+**The fixtures are not §82.6's five, and cannot be.** Three of them — the
+graded block with a cyclic axis, the box with every point displaced, and the
+box with a fifth vertex on every face — are not leaf sets, and `Forest::emit`
+cannot produce them: a forest emits a uniform box with six generic patches, and
+that is the whole of what this is a port of. §82.6's fixtures (a) and (b) carry
+over; the other six exist to reach branches the *device* emitter has that the
+host one does not — a base grid one cell thick (a cell that is a boundary cell
+on both sides of the same axis, the only case where slots 0 and 1 are both
+boundary faces), three levels of refinement (a level-0 face of 64 voxels, so
+the grouping scan is not four probes), a single unrefined base cell (no
+internal face at all, the shape a zero-length allocation hides in), a single
+refined one, and a mesh an adapt produced, whose leaves inside a base cell are
+a proper subset of the eight.
+
+### 84.10 One validation, two shapes
+
+`geometry::validate` walks `faces: &[Vec<Label>]`. The device emitter never
+builds that — one heap allocation per face is a large part of what §82.2
+measured — so a resident route that constructed it *in order to validate it*
+would have paid for the thing it exists to remove. `geometry::validate_csr` is
+the same set of questions asked of the face → point CSR, and the two share
+`validate_topology`, which is everything that does not mention faces.
+`gpugeom::gpu_geometry_resident` and `gpu_geometry_resident_csr` differ in one
+line for the same reason §83.2 gives: two prologues would be two places for the
+boundary bookkeeping to drift.
+
+**One thing did change, and it is worth naming.** Extracting `validate_topology`
+moved the "wrong number of face vertex lists" check from *before* the
+owner/neighbour range loop to *after* it, so a mesh that is broken in both ways
+now gets the other of the two diagnoses. Every individual refusal is unchanged
+in wording and in reachability; only which one a doubly-broken mesh meets first
+has moved.
+
+`RefinedBox::faces` therefore comes back **empty** from
+`build_resident_on_device`, exactly as §83 leaves the geometric arrays empty —
+an empty array is a length mismatch at the first line that reads it, and a
+stale one would not be. `mesh::gpuemit::faces_from_csr` rebuilds the
+`Vec<Vec<Label>>` form for a caller that wants it, at that caller's expense and
+at its call site.
+
+### 84.11 The cadence, re-measured
+
+RTX 5070 Ti, one run of the committed binary, every figure the **minimum of
+three or four calls** for the reason §83.11's finding 4 gives. **Where a
+rebuild's time goes**, with the device emitter priced to the same place as the
+host one — a `HostMesh`, the points, and the face list (as a CSR rather than
+one `Vec` per face):
+
+| cells | emit /ms | **emit_d /ms** | e-up | csr /ms | geom_h /ms | kernel /ms | res /ms | **planE /ms** | left /ms |
+|---|---|---|---|---|---|---|---|---|---|
+| 64 | 0.088 | 0.400 | 0.2× | 0.008 | 0.041 | 0.203 | 0.304 | 0.771 | 0.058 |
+| 216 | 0.399 | 0.481 | 0.8× | 0.036 | 0.188 | 0.233 | 0.375 | 0.958 | 0.065 |
+| 512 | 1.080 | 0.979 | 1.1× | 0.087 | 0.446 | 0.537 | 0.834 | 1.191 | −0.709 |
+| 4 096 | 6.426 | 0.802 | 8.0× | 0.802 | 3.760 | 0.441 | 0.818 | 3.833 | 1.410 |
+| 13 824 | **15.249** | **1.751** | **8.7×** | 1.946 | 8.765 | 0.772 | 1.808 | **7.081** | 1.576 |
+
+and **the four routes priced to the same place — the new mesh on the device**:
+
+| cells | host+upload /ms | device drop-in+upload /ms | resident /ms | **res+emit /ms** | N host | N dev | N res | **N emit** |
+|---|---|---|---|---|---|---|---|---|
+| 64 | 0.316 | 0.692 | 0.448 | 0.771 | 97 | 180 | 126 | 197 |
+| 216 | 0.939 | 1.243 | 0.884 | 0.958 | 209 | 269 | 198 | 212 |
+| 512 | 2.295 | 2.094 | 1.696 | 1.191 | 462 | 423 | 348 | 252 |
+| 4 096 | 13.059 | 11.206 | 9.254 | 3.833 | 2 435 | 2 093 | 1 732 | 730 |
+| 13 824 | 30.148 | 26.500 | 22.563 | **7.081** | 5 388 | 4 739 | 4 039 | **1 287** |
+
+**The emitter is 8.7× faster and the rebuild is 3.2× faster.** At 13 824 base
+cells a device-emitted resident rebuild is **7.08 ms** against the resident
+route's 22.56 and the original host route's 30.15, and N — the number of steps
+an adapt must be spread over to cost 2 % of the run — falls **4 039 → 1 287**,
+or **5 388 → 1 287** against where §82 started.
+
+**The bottleneck has moved again, and this time it is in four roughly equal
+pieces.** Of the 7.08 ms at 13 824 cells:
+
+| piece | ms | share | where it is |
+|---|---|---|---|
+| the device emitter and its download | 1.75 | 25 % | `mesh::gpuemit` |
+| `HostMesh::build_cell_face_maps` | 1.95 | **27 %** | the host |
+| the resident geometry route, `v` and the host prologue included | 1.81 | 26 % | `mesh::gpugeom` |
+| `plan`'s own bookkeeping — a RESIDUAL | 1.58 | 22 % | `adapt::plan_by` |
+
+The last row is `planE − emit_d − csr − res`, a residual of four separate
+timings and **not** a measurement — §82.1 records what happened the last time a
+number in this table was read as one. At 512 cells it comes out **negative**,
+which is the honest signature of a residual whose four inputs each carry more
+noise than the thing being differenced out; only the two largest rows are worth
+reading at all, and even they are a bound on the balance fixed point, the
+family `BTreeMap` and the gather `Map` together.
+
+The interesting row is the second. **`build_cell_face_maps` is now a larger
+piece of a rebuild than the emitter it feeds**, it is a host loop, and a device
+version of it *already exists and is already gated*: `adaptCellFaceCsr` and
+`adaptBoundaryCsr` (§75.5), which `ofgpu-validate` checks element for element
+against the host build on every run. They are unwired because until this
+section the CSR was 6 % of a rebuild and not worth the risk. It is 27 % now.
+
+**The crossovers.** The device emitter overtakes the host emitter between
+**216 and 512** cells, and the whole device-emitted route overtakes the
+resident route in the same interval — but *where* in it moves between runs, and
+§84.11's last paragraph is why. Below 512 cells the emitter's cost is not
+arithmetic: `emit_d` is 0.40 / 0.48 / 0.98 ms on the three smallest meshes,
+which is **four host round trips** — the gap check, the two grouping
+diagnostics and the nine counts. Merging the two diagnostics into one reduction
+would remove one of them; nothing else here is worth spending on a 64-cell mesh.
+
+**Is adaptation every few tens of steps affordable? No — and by a factor of
+forty.** One step is 0.281 ms; an adapt every 30 steps would cost 84 % of the
+run. At the 2 % budget this table reports, an adapt is affordable every 1 287
+steps; at a 10 % budget, every 257. That is enough for a slowly moving front
+and not for a flame, which is the case §75.8 posed. What stands between here
+and that number is no longer the emitter: **5.33 ms of the 7.08 is everything
+but it**, and of that only 0.77 is device arithmetic — the geometry kernels.
+The rest is host loops, a host prologue and two round trips, and each of them
+is either an unwired kernel that already exists (§75.5's CSR build), a named
+unwritten one (§83.9's device weight, a `GpuTopology` built from device
+arrays), or `plan_by`'s bookkeeping, which nobody has yet measured properly.
+
+**Two cautions on these numbers.** First, they are not comparable to §82.5's or
+§75.8's, for §83.11's reason — those time each quantity once and these take a
+minimum. Second, and more sharply than §83.11 put it: `emit_d` at 13 824 cells
+measured **0.727, 1.439 and 1.751 ms** in three runs of the same code on the
+same machine within forty minutes, every one of them the minimum of four calls.
+That is a factor of 2.4 that survives `best_of` entirely. The tables above are
+the third of those runs — the one the committed binary produced, and the
+slowest — and the honest reading of the 8.7× is "between eight and twenty",
+with the 3.2× on the rebuild much steadier because its other three pieces are
+larger and quieter.
+
+### 84.12 Validation, and what is NOT claimed
+
+`ofgpu-validate`'s adapt section gains gate 3, the `emit_d`, `e-up`, `csr`,
+`planE` and `left` columns of the split table, the `t_planE`/`N emit` columns
+of the cadence table, and the `res+emit` column of the priced-to-the-same-place
+table.
+
+**Not claimed, and not implemented:**
+
+* **`RefinedBox::faces` is empty on the device-emitted route**, and
+  `HostMesh::check` on such a mesh reports on nothing rather than refusing —
+  the same hole §83.11 records for the resident route's geometric arrays, in
+  one more array. It is refused by name nowhere, because nothing reads it; the
+  honest statement is that it is quiet, not that it is guarded.
+
+* **The topology still comes home.** `owner`, `neighbour`, `bFaceCells`, the
+  points and the face → point CSR are downloaded, because
+  `GpuMesh::from_device_geometry` uploads a `HostMesh` and
+  `HostMesh::build_cell_face_maps` is still on the host. §84.11 prices it. The
+  arrays exist on the device already; what is missing is a `GpuTopology`
+  constructor that takes them there, and a device CSR build — `adapt.cu`
+  already has `adaptCellFaceCsr` and `adaptBoundaryCsr` (§75.5) and
+  `ofgpu-validate` already gates them against the host, so the second half is
+  written and unwired.
+* **`v` still comes back**, exactly as §83.9 records, and for the same reason:
+  §75.6's conservative weights are a host fold in ascending cell id.
+* **The plan bookkeeping is now a larger share than the emitter.** The balance
+  fixed point, the family grouping and the gather map are host loops over
+  `BTreeMap`s and were never measured separately; §84.11 bounds them as a
+  residual and does not claim to have measured them.
+* **Nothing adapts inside a time loop**, exactly as §75.9 and §82.11 say. The
+  three new entry points are reachable from a test and from `ofgpu-validate`
+  and from nothing else.
+* **No solver was switched.** `blockgen`, `io::polymesh` and every case-setup
+  path still call `Forest::build` and `mesh::geometry::compute`.
+* **The multi-colour preconditioner is still not rebuilt** after an adapt
+  (§75.11), and neither is the CSR export, `restart.rs` or `bin/probe.rs`.
+* **`--features single` was not exercised**, exactly as §82.11 and §83.11
+  record. `meshemit.cu` is integer arithmetic except for the point
+  coordinates, so it is the one device file in this crate whose bitwise claim
+  should survive `f32` unchanged — and that is an argument, not a measurement.
+* **Nothing here was measured on a second machine**, and every timing is the
+  minimum of three or four calls for the reason §83.11's finding 4 gives.

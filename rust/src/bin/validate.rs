@@ -8041,12 +8041,14 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     use ofgpu::adapt::transfer::{self, Integrals, Prolongation};
     use ofgpu::adapt::{
         gpu_loehner_indicator, loehner_indicator, mark_with_hysteresis, plan, plan_resident,
-        plan_with, AdaptKernels, Forest, Mark, Rebuild, LOEHNER_EPS,
+        plan_resident_on_device, plan_with, AdaptKernels, Forest, Mark, Rebuild, LOEHNER_EPS,
     };
+    use ofgpu::mesh::gpuemit::MeshEmitKernels;
     use ofgpu::mesh::gpugeom::{flatten_faces, GpuGeometry, MeshGeomKernels};
 
     let ak = AdaptKernels::new(gpu)?;
     let mgk = MeshGeomKernels::new(gpu)?;
+    let mek = MeshEmitKernels::new(gpu)?;
     let d = Vec3::new(0.125, 0.125, 0.125);
 
     // A base grid whose middle block starts one level finer, so the adapt
@@ -8396,7 +8398,8 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     //      terms are measured here rather than estimated.
     println!("\n  the adapt cadence, measured on this machine:");
     println!(
-        "  {:>7} {:>10} {:>11} {:>11} {:>11} {:>9} {:>10} {:>11} {:>9} {:>11} {:>9}",
+        "  {:>7} {:>10} {:>11} {:>11} {:>11} {:>9} {:>10} {:>11} {:>9} {:>11} {:>9} \
+         {:>11} {:>9}",
         "cells",
         "t_step/ms",
         "t_plan/ms",
@@ -8407,16 +8410,18 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         "t_planD/ms",
         "N dev",
         "t_planR/ms",
-        "N res"
+        "N res",
+        "t_planE/ms",
+        "N emit"
     );
     let mut any = false;
-    let mut split: Vec<(usize, f64, f64, f64, f64, f64, f64, f64)> = Vec::new();
+    let mut split: Vec<(usize, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64)> = Vec::new();
     // SPEC-LIT S83.3. The three plan columns above do not leave the new mesh in
     // the same place, so they are not comparable and the third table below
     // makes them so: `t_plan` and `t_planD` hand back a `HostMesh` that still
     // has to be uploaded before a kernel can touch it, and `t_planR` hands
     // back a `GpuMesh` that does not.
-    let mut ready: Vec<(usize, f64, f64, f64, f64, f64, f64, f64)> = Vec::new();
+    let mut ready: Vec<(usize, f64, f64, f64, f64, f64, f64, f64, f64)> = Vec::new();
     // 64 and 216 cells are not here for the cadence - an adapt on a 64-cell
     // mesh is not a question anyone asks - but for the CROSSOVER. S82.5
     // measured the device drop-in slower than the host sweep at 512 cells and
@@ -8517,6 +8522,13 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         // there - SPEC-LIT S83.
         let (t_plan_res, (plr, gmr)) = best_of(TIMING_REPS + 1, || {
             let r = plan_resident(&fb, mb, &mkb, 1, gpu, &mgk)?;
+            gpu.sync()?;
+            Ok(r)
+        })?;
+
+        // And the same plan with the EMITTER on the device too - SPEC-LIT S84.
+        let (t_plan_rd, (plrd, gmrd)) = best_of(TIMING_REPS + 1, || {
+            let r = plan_resident_on_device(&fb, mb, &mkb, 1, gpu, &mgk, &mek)?;
             gpu.sync()?;
             Ok(r)
         })?;
@@ -8670,14 +8682,124 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             }
         }
 
+        // THE GATE, one more constructor along - SPEC-LIT S84.9. S83.5 compared
+        // two geometry sweeps over ONE host emission. This compares two
+        // EMISSIONS as well: the mesh `plan_resident` builds and the mesh
+        // `plan_resident_on_device` builds, both already on the device.
+        {
+            let (nc, nif, nbf) = (gmr.n_cells, gmr.n_internal_faces, gmr.n_boundary_faces);
+            let mut moved: Vec<&str> = Vec::new();
+            if (nc, nif, nbf) != (gmrd.n_cells, gmrd.n_internal_faces, gmrd.n_boundary_faces) {
+                moved.push("the counts themselves");
+            } else {
+                for (w, x, y, n) in [
+                    ("v", &gmr.v, &gmrd.v, nc),
+                    ("mag_sf", &gmr.mag_sf, &gmrd.mag_sf, nif),
+                    ("weights", &gmr.weights, &gmrd.weights, nif),
+                    ("delta_coeffs", &gmr.delta_coeffs, &gmrd.delta_coeffs, nif),
+                    ("b_mag_sf", &gmr.b_mag_sf, &gmrd.b_mag_sf, nbf),
+                    ("b_delta_coeffs", &gmr.b_delta_coeffs, &gmrd.b_delta_coeffs, nbf),
+                    ("b_y", &gmr.b_y, &gmrd.b_y, nbf),
+                    ("b_weights", &gmr.b_weights, &gmrd.b_weights, nbf),
+                ] {
+                    let (mut a, mut b) = (gpu.download(x)?, gpu.download(y)?);
+                    a.truncate(n);
+                    b.truncate(n);
+                    if a.len() != b.len()
+                        || !a.iter().zip(&b).all(|(p, q)| p.to_bits() == q.to_bits())
+                    {
+                        moved.push(w);
+                    }
+                }
+                for (w, x, y, n) in [
+                    ("c", &gmr.c, &gmrd.c, nc),
+                    ("sf", &gmr.sf, &gmrd.sf, nif),
+                    ("cf", &gmr.cf, &gmrd.cf, nif),
+                    ("non_orth_corr", &gmr.non_orth_corr, &gmrd.non_orth_corr, nif),
+                    ("skew_corr", &gmr.skew_corr, &gmrd.skew_corr, nif),
+                    ("b_sf", &gmr.b_sf, &gmrd.b_sf, nbf),
+                    ("b_cf", &gmr.b_cf, &gmrd.b_cf, nbf),
+                    (
+                        "b_non_orth_corr",
+                        &gmr.b_non_orth_corr,
+                        &gmrd.b_non_orth_corr,
+                        nbf,
+                    ),
+                ] {
+                    let (mut a, mut b) = (gpu.download(x)?, gpu.download(y)?);
+                    a.truncate(n);
+                    b.truncate(n);
+                    if a.len() != b.len()
+                        || !a.iter().zip(&b).all(|(p, q)| {
+                            p.x.to_bits() == q.x.to_bits()
+                                && p.y.to_bits() == q.y.to_bits()
+                                && p.z.to_bits() == q.z.to_bits()
+                        })
+                    {
+                        moved.push(w);
+                    }
+                }
+            }
+            // The TOPOLOGY, which S83.5 could not test because both of its
+            // meshes came from the same emitter. This is the whole of what
+            // S84 ports, so it is the whole of what has to agree.
+            let topo_ok = gpu.download(&gmr.owner)? == gpu.download(&gmrd.owner)?
+                && gpu.download(&gmr.neighbour)? == gpu.download(&gmrd.neighbour)?
+                && gpu.download(&gmr.b_face_cells)? == gpu.download(&gmrd.b_face_cells)?
+                && gpu.download(&gmr.rf_offset)? == gpu.download(&gmrd.rf_offset)?
+                && gpu.download(&gmr.rf_face)? == gpu.download(&gmrd.rf_face)?
+                && gpu.download(&gmr.rf_flags)? == gpu.download(&gmrd.rf_flags)?;
+            let vol_ok = gmr.total_volume.to_bits() == gmrd.total_volume.to_bits();
+            let bits = |x: &[Scalar], y: &[Scalar]| {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits())
+            };
+            let map_ok = bits(&pl.map.src_w, &plrd.map.src_w)
+                && bits(&pl.map.own_w, &plrd.map.own_w)
+                && pl.map.src_cell == plrd.map.src_cell
+                && pl.map.src_offset == plrd.map.src_offset
+                && pl.map.own_child == plrd.map.own_child
+                && pl.map.own_offset == plrd.map.own_offset;
+            let all = moved.is_empty() && topo_ok && vol_ok && map_ok;
+            if !all {
+                c.note(&format!(
+                    "S84.9 at {} cells: arrays that moved: {:?}; topology ok {topo_ok}, \
+                     total_volume ok {vol_ok}, transfer map ok {map_ok}",
+                    mb.n_cells, moved
+                ));
+            }
+            if nb == 8 {
+                c.require(
+                    "a mesh EMITTED on the device is the mesh the host emitter emits - \
+                     topology, points, the sixteen arrays, the S70 row map and the \
+                     transfer weights - S84.9",
+                    all,
+                );
+            } else if !all {
+                c.require("the device-emitted rebuild is bitwise on every size", false);
+            }
+        }
+
         // Where the rebuild's time actually goes. `plan` is re-entered here
         // rather than instrumented, so these are independent timings of the
         // same pieces and not a decomposition of one - and each is the MINIMUM
         // of `TIMING_REPS` of them, for the reason `best_of` records: a
         // single-shot timing on this machine moves by a factor of five.
-        let (t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down, t_resident) = {
+        let (t_emit, t_emit_d, t_csr_o, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down, t_resident) = {
             let after = pl.after.clone();
             let (t_build, rbx) = best_of(TIMING_REPS, || after.build())?;
+
+            // The same emission on the device, priced to the same place: a
+            // `HostMesh` with its cell -> face CSR built, the points, and the
+            // face list - as a CSR rather than one `Vec` per face, which is
+            // the shape S84 produces and part of what it removes. `t_csr` is
+            // subtracted from both columns, because `download` builds the CSR
+            // maps exactly as `Forest::emit` does.
+            let (t_emit_raw, _) = best_of(TIMING_REPS + 1, || {
+                let de = after.emit_on_device(gpu, &mek)?;
+                let r = de.download(gpu)?;
+                gpu.sync()?;
+                Ok(r)
+            })?;
 
             // Cloned OUTSIDE the timer: both calls mutate the mesh they are
             // handed, so a repeat needs a fresh one, and cloning inside would
@@ -8753,6 +8875,8 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
 
             (
                 t_build - t_csr - t_geom_h,
+                t_emit_raw - t_csr,
+                t_csr,
                 t_geom_h,
                 t_flat,
                 t_geom_d,
@@ -8762,7 +8886,17 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             )
         };
         split.push((
-            mb.n_cells, t_emit, t_geom_h, t_flat, t_geom_d, t_geom_res, t_down, t_resident,
+            mb.n_cells,
+            t_emit,
+            t_emit_d,
+            t_csr_o,
+            t_geom_h,
+            t_flat,
+            t_geom_d,
+            t_geom_res,
+            t_down,
+            t_resident,
+            t_plan_rd,
         ));
 
         let nmb = &pl.mesh.mesh;
@@ -8802,12 +8936,14 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         let n_graph = (t_graph / (0.02 * t_step)).ceil();
         let n_dev = ((t_plan_dev + t_xfer + t_graph) / (0.02 * t_step)).ceil();
         let n_res = ((t_plan_res + t_xfer + t_graph) / (0.02 * t_step)).ceil();
+        let n_rd = ((t_plan_rd + t_xfer + t_graph) / (0.02 * t_step)).ceil();
         ready.push((
-            mb.n_cells, t_upload, t_plan, t_plan_dev, t_plan_res, t_step, t_xfer, t_graph,
+            mb.n_cells, t_upload, t_plan, t_plan_dev, t_plan_res, t_plan_rd, t_step, t_xfer,
+            t_graph,
         ));
         println!(
             "  {:>7} {:>10.3} {:>11.3} {:>11.3} {:>11.3} {:>9.0} {:>10.0} {:>11.3} \
-             {:>9.0} {:>11.3} {:>9.0}",
+             {:>9.0} {:>11.3} {:>9.0} {:>11.3} {:>9.0}",
             mb.n_cells,
             t_step,
             t_plan,
@@ -8818,29 +8954,34 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             t_plan_dev,
             n_dev,
             t_plan_res,
-            n_res
+            n_res,
+            t_plan_rd,
+            n_rd
         );
         drop(gmb);
         drop(gmu);
         drop(gmr);
+        drop(gmrd);
         drop(plr);
+        drop(plrd);
     }
     c.require("the cadence measurement ran", any);
     println!("\n  where a rebuild's time goes, and what the device sweep removes:");
     println!(
-        "  {:>7} {:>10} {:>10} {:>8} {:>10} {:>10} {:>10} {:>9} {:>8} {:>10}",
+        "  {:>7} {:>10} {:>10} {:>8} {:>8} {:>10} {:>10} {:>10} {:>8} {:>10} {:>10}",
         "cells",
         "emit/ms",
+        "emit_d/ms",
+        "e-up",
+        "csr/ms",
         "geom_h/ms",
-        "flat/ms",
-        "geom_d/ms",
         "kernel/ms",
-        "down/ms",
-        "rest/ms",
+        "res/ms",
         "speed-up",
-        "res/ms"
+        "planE/ms",
+        "left/ms"
     );
-    for (n, e, gh, fl, gd, gr, dn, rs) in &split {
+    for (n, e, ed, cs, gh, fl, gd, gr, dn, rs, pe) in &split {
         // `rest` is a RESIDUAL, not a measurement: geom_d, geom_res and the
         // download are three separate timings, so what is left after taking
         // two from the first carries all three noises. It is printed because
@@ -8850,34 +8991,44 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         // the three quantities it comes from move by fifteen per cent.
         // SPEC-LIT 82.1 said 1.9 ms here on one run of an earlier draft; that
         // number was this residual, and it was noise.
-        let rest = gd - gr - dn;
+        let _unused = (fl, gd, dn);
+        // `left` is a RESIDUAL and not a measurement, exactly as S82.1 records
+        // of the last number in this table that was one: what is left of the
+        // device-emitted rebuild after the emitter, the CSR build and the
+        // resident geometry sweep is `plan`'s own host bookkeeping - the
+        // balance fixed point, the family BTreeMap and the gather map - and it
+        // carries the noise of all four timings it is differenced from.
+        let left = pe - ed - cs - rs;
         println!(
-            "  {:>7} {:>10.3} {:>10.3} {:>8.3} {:>10.3} {:>10.3} {:>10.3} {:>9.3} \
-             {:>7.1}x {:>10.3}",
+            "  {:>7} {:>10.3} {:>10.3} {:>7.1}x {:>8.3} {:>10.3} {:>10.3} {:>10.3} \
+             {:>7.1}x {:>10.3} {:>10.3}",
             n,
             e,
+            ed,
+            e / ed.max(1e-9),
+            cs,
             gh,
-            fl,
-            gd,
             gr,
-            dn,
-            rest,
+            rs,
             gh / gr.max(1e-9),
-            rs
+            pe,
+            left
         );
     }
     println!(
         "  emit is Forest::build WITHOUT the geometry sweep and without the CSR;\n           \
-         geom_h is mesh::geometry::compute; geom_d is the device sweep as a drop-in,\n           \
-         which uploads the topology and downloads sixteen arrays; kernel is the same\n           \
-         call with nothing downloaded, which is what a mesh that STAYS on the device\n           \
-         pays; down is the sixteen arrays coming back on top of that,\n           \
-         and rest is geom_d - kernel - down: a RESIDUAL of three separate timings, not\n           \
-         a measurement, which bounds the host prologue both arms run and neither ports.\n           \
-         The speed-up column is geom_h/kernel, the arithmetic the port is responsible\n           \
-         for. SPEC-LIT 75.8 named geometry::compute as the binding constraint on an\n           \
-         adapt; 82.2 measures that the EMITTER is larger, and 82.9 says what a device\n           \
-         emitter would have to reproduce."
+         emit_d is the same emission on the DEVICE, priced to the same place - a\n           \
+         HostMesh, the points, and the face list as a CSR rather than one Vec per\n           \
+         face - and e-up is emit/emit_d. csr is HostMesh::build_cell_face_maps,\n           \
+         which BOTH emitters still pay on the host. geom_h is\n           \
+         mesh::geometry::compute; kernel is the device sweep with nothing\n           \
+         downloaded, and speed-up is geom_h/kernel; res is the whole resident\n           \
+         geometry route, host prologue and `v` included. planE is\n           \
+         adapt::plan_resident_on_device end to end, and left is\n           \
+         planE - emit_d - csr - res: a RESIDUAL of four separate timings, not a\n           \
+         measurement (SPEC-LIT 82.1), bounding `plan`'s own host bookkeeping - the\n           \
+         balance fixed point, the family BTreeMap and the gather map - which is\n           \
+         what 84.11 finds is now the largest piece."
     );
     // SPEC-LIT S83.3. The three plan columns of the cadence table do not leave
     // the new mesh in the same place, so they cannot be compared as they
@@ -8886,23 +9037,35 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     // returns a `GpuMesh` that is already there. This table adds the upload to
     // the two that owe it. It is the only accounting in which the resident
     // path's win is the whole of what it removes rather than half of it.
-    println!("\n  the same three routes, priced to the same place - the new mesh ON THE DEVICE:");
+    println!("\n  the same four routes, priced to the same place - the new mesh ON THE DEVICE:");
     println!(
-        "  {:>7} {:>10} {:>12} {:>12} {:>12} {:>9} {:>9} {:>9}",
-        "cells", "upload/ms", "host+up/ms", "dev+up/ms", "resident/ms", "N host", "N dev", "N res"
+        "  {:>7} {:>10} {:>12} {:>12} {:>12} {:>12} {:>9} {:>9} {:>9} {:>9}",
+        "cells",
+        "upload/ms",
+        "host+up/ms",
+        "dev+up/ms",
+        "resident/ms",
+        "res+emit/ms",
+        "N host",
+        "N dev",
+        "N res",
+        "N emit"
     );
-    for (n, up, ph, pd, pr, ts, tx, tg) in &ready {
+    for (n, up, ph, pd, pr, pe, ts, tx, tg) in &ready {
         let nn = |t: f64| ((t + tx + tg) / (0.02 * ts)).ceil();
         println!(
-            "  {:>7} {:>10.3} {:>12.3} {:>12.3} {:>12.3} {:>9.0} {:>9.0} {:>9.0}",
+            "  {:>7} {:>10.3} {:>12.3} {:>12.3} {:>12.3} {:>12.3} {:>9.0} {:>9.0} {:>9.0} \
+             {:>9.0}",
             n,
             up,
             ph + up,
             pd + up,
             pr,
+            pe,
             nn(ph + up),
             nn(pd + up),
-            nn(*pr)
+            nn(*pr),
+            nn(*pe)
         );
     }
     println!("  upload is GpuMesh::upload of the mesh `plan` returned - the cost S82.5");
@@ -8913,6 +9076,11 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     println!("           upload and brings back one array, `v`, because plan's conservative");
     println!("           weights (S75.6) and total_volume are folds over it in ascending");
     println!("           cell id and a device reduction would not be the same bits.");
+    println!("           res+emit is adapt::plan_resident_on_device, which runs the EMITTER");
+    println!("           on the device as well (S84) and is the column S82.9 asked for. What");
+    println!("           it still pays is the topology and the points coming home, because");
+    println!("           GpuMesh::from_device_geometry uploads a HostMesh and");
+    println!("           HostMesh::build_cell_face_maps is still on the host - S84.11.");
     println!(
         "  t_step is one replay of the fifty-launch graph; t_plan is the HOST mesh and\n           geometry rebuild; t_xfer is the four device transfer kernels; t_graph is\n           capture + instantiate. \"N at 2%\" is how many steps an adapt must be spread\n           over to cost 2 % of the run; \"N graph\" is the same figure if the graph\n           recapture were the ONLY cost. The gap between the two columns is the finding\n           of S75.8: the recapture is not what makes an adapt expensive."
     );

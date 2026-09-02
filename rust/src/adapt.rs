@@ -474,6 +474,85 @@ impl Forest {
         ))
     }
 
+    /// [`Forest::build_resident`], with the EMITTER on the device too.
+    ///
+    /// SPEC-LIT section 84. [`Forest::build_resident`] moved the geometry
+    /// sweep; section 82.2 then measured that the emitter, not the sweep, is
+    /// the larger half of a rebuild. This route runs both on the device.
+    ///
+    /// **What still comes home.** The topology - `owner`, `neighbour`,
+    /// `bFaceCells` - the points, and the face -> point CSR, because
+    /// `GpuMesh::from_device_geometry` uploads a `HostMesh` and
+    /// `HostMesh::build_cell_face_maps` is still on the host. Section 84.11
+    /// prices that round trip against the fourteen milliseconds of allocation
+    /// it replaces, and says what removing it would take.
+    ///
+    /// `RefinedBox::faces` comes back **EMPTY**, deliberately, and for the
+    /// reason section 83 leaves the geometric arrays empty: the CSR goes
+    /// straight to the geometry sweep, and building the `Vec<Vec<Label>>` form
+    /// is one heap allocation per face - the cost this route exists to remove.
+    /// [`crate::mesh::gpuemit::faces_from_csr`] rebuilds it for a caller that
+    /// needs it, at that caller's own expense.
+    pub fn build_resident_on_device(
+        &self,
+        gpu: &Gpu,
+        kg: &crate::mesh::gpugeom::MeshGeomKernels,
+        ke: &crate::mesh::gpuemit::MeshEmitKernels,
+    ) -> Result<(RefinedBox, GpuMesh)> {
+        let de = self.emit_on_device(gpu, ke)?;
+        let (mut mesh, points, csr) = de.download(gpu)?;
+        let geom =
+            crate::mesh::gpugeom::gpu_geometry_resident_csr(gpu, kg, &mut mesh, &points, &csr)?;
+        mesh.v = geom.download_volumes(gpu)?;
+        let gm = GpuMesh::from_device_geometry(gpu, &mesh, geom)?;
+        Ok((
+            RefinedBox {
+                mesh,
+                points,
+                faces: Vec::new(),
+                level: self.levels(),
+                base_n: self.n,
+                base_d: self.d,
+            },
+            gm,
+        ))
+    }
+
+    /// [`Forest::emit`], on the device, with every array left there.
+    ///
+    /// SPEC-LIT section 84. The leaf set is packed into five `i32` per leaf in
+    /// the canonical order `Leaf::key` defines, which is base-cell-major -
+    /// `emitBaseOffsets` finds a base cell's leaves by binary search and would
+    /// find a subrange of them if the order were anything else.
+    pub fn emit_on_device(
+        &self,
+        gpu: &Gpu,
+        k: &crate::mesh::gpuemit::MeshEmitKernels,
+    ) -> Result<crate::mesh::gpuemit::DeviceEmit> {
+        let mut packed = Vec::with_capacity(5 * self.leaf.len());
+        for l in &self.leaf {
+            packed.push(l.base as i32);
+            packed.push(l.level as i32);
+            packed.push(l.oct[0] as i32);
+            packed.push(l.oct[1] as i32);
+            packed.push(l.oct[2] as i32);
+        }
+        crate::mesh::gpuemit::emit_device(
+            gpu,
+            k,
+            &crate::mesh::gpuemit::LeafGrid {
+                n: self.n,
+                d: self.d,
+                lmax: self.lmax(),
+                // The policy travels with the call. `mesh::gpuemit` owns none
+                // of it and does not name this module - see the field's own
+                // documentation, and SPEC-LIT section 84.7.
+                voxel_limit: VOXEL_LIMIT,
+                leaf: &packed,
+            },
+        )
+    }
+
     /// The emitter proper: everything but the geometry sweep.
     ///
     /// Returns the mesh with its topology and its cell -> face CSR filled and
@@ -930,6 +1009,39 @@ pub fn plan_resident(
         Error::Mesh(
             "adapt::plan_resident: the rebuild did not run, so there is no device mesh to \
              return. This cannot happen unless plan_by stopped calling `build`"
+                .to_string(),
+        )
+    })?;
+    Ok((plan, gm))
+}
+
+/// [`plan_resident`], with the EMITTER on the device as well.
+///
+/// SPEC-LIT section 84. One line differs from [`plan_resident`] - which
+/// `build` the shared body is handed - so the balance fixed point, the family
+/// grouping and the gather map are the same implementation reached a third
+/// way, not a third copy of them. Section 84.9 gates that the `Map` this
+/// returns is bitwise the host route's.
+pub fn plan_resident_on_device(
+    before: &Forest,
+    mesh: &HostMesh,
+    mark: &[Mark],
+    l_max: u32,
+    gpu: &Gpu,
+    kg: &crate::mesh::gpugeom::MeshGeomKernels,
+    ke: &crate::mesh::gpuemit::MeshEmitKernels,
+) -> Result<(Plan, GpuMesh)> {
+    let mut built: Option<GpuMesh> = None;
+    let plan = plan_by(before, mesh, mark, l_max, &mut |f: &Forest| {
+        let (rb, gm) = f.build_resident_on_device(gpu, kg, ke)?;
+        built = Some(gm);
+        Ok(rb)
+    })?;
+    let gm = built.ok_or_else(|| {
+        Error::Mesh(
+            "adapt::plan_resident_on_device: the rebuild did not run, so there is no \
+             device mesh to return. This cannot happen unless plan_by stopped calling \
+             `build`"
                 .to_string(),
         )
     })?;
@@ -1841,6 +1953,346 @@ mod tests {
     fn gpu() -> Option<Gpu> {
         Gpu::new(0).ok()
     }
+
+    // ======================================================================
+    //  SPEC-LIT section 84 - the emitter on the device
+    // ======================================================================
+    //
+    //  Rows 1 and 2 of section 84.9. They live here rather than in
+    //  `mesh::gpuemit::tests` because they need `Forest`, and
+    //  `no_time_loop_reaches_the_adapt` above requires that nothing outside
+    //  this module name it. The three tests that do not need `Forest` - the
+    //  atomics census, the gap refusal and the borrowed scan - are in
+    //  `mesh::gpuemit::tests`, where the code they test is.
+
+    /// A leaf set under a name for the failure message.
+    type Fixture = (String, Forest);
+
+    /// The forests the bitwise gate runs on, and why each one is here.
+    ///
+    /// **These are not section 82.6's five fixtures.** Three of those - the graded
+    /// cyclic block, the box with every point displaced, and the box with a fifth
+    /// vertex on every face - are not leaf sets and `Forest::emit` cannot produce
+    /// them at all: a forest emits a uniform box with six generic patches, and
+    /// that is the whole of what this emitter is a port of. What section 82.6
+    /// contributes here is its fixtures (a) and (b); the rest of this list exists
+    /// to reach the branches a device emitter has that the host one does not - a
+    /// base grid one cell thick, a cell that is a boundary cell on both sides of
+    /// the same axis, four sub-faces on one side and one on the other, and the
+    /// deepest refinement the touch-rank space is sized for.
+    fn fixtures() -> Vec<Fixture> {
+        let cube = Vec3::new(0.25, 0.2, 0.3);
+        let mut out: Vec<Fixture> = Vec::new();
+
+        // (a) Section 82.6's uniform box. Every face is a boundary face or a
+        //     one-to-one internal face, and no cell has a refined neighbour.
+        out.push((
+            "uniform 5x4x3".to_string(),
+            Forest::uniform([5, 4, 3], cube).expect("uniform box"),
+        ));
+
+        // (b) Section 82.6's 2:1 refined box with three levels. Every 2:1
+        //     interface is a face with FOUR groups on one side and one on the
+        //     other, which is the branch the BTreeMap existed for.
+        let at = |i: usize, j: usize, k: usize| i + 6 * (j + 6 * k);
+        let mut lev = vec![0u32; 216];
+        lev[at(3, 3, 3)] = 1;
+        lev[at(1, 1, 1)] = 2;
+        out.push((
+            "2:1 refined 6x6x6, three levels".to_string(),
+            Forest::from_base_levels([6, 6, 6], cube, &lev).expect("2:1 refined box"),
+        ));
+
+        // (c) One cell thick on x. Every cell is a boundary cell on BOTH sides of
+        //     axis 0, so the host emits the minus face and then the plus face and
+        //     `continue`s - the only case in which slots 0 and 1 are both taken by
+        //     boundary faces, and the only one in which a (cell, axis) pair emits
+        //     two faces and no internal group.
+        out.push((
+            "one cell thick, 1x3x4".to_string(),
+            Forest::uniform([1, 3, 4], cube).expect("slab"),
+        ));
+
+        // (d) The same slab, refined. A level-1 leaf in a one-cell-thick base
+        //     grid is still a boundary cell on both sides of x, and now also has
+        //     four-to-one neighbours on y and z.
+        let mut lev = vec![0u32; 12];
+        lev[1 + 1 * 3] = 1;
+        out.push((
+            "one cell thick, 1x3x4, one cell refined".to_string(),
+            Forest::from_base_levels([1, 3, 4], cube, &lev).expect("refined slab"),
+        ));
+
+        // (e) Three levels of refinement in a 3x3x3 base grid: `fac` is 8, so a
+        //     level-0 leaf's face is 64 voxels and the grouping kernel's scan is
+        //     not four probes. This is the fixture that would catch a device
+        //     emitter that had quietly assumed one voxel per face.
+        let mut lev = vec![0u32; 27];
+        lev[13] = 3;
+        out.push((
+            "3x3x3 base, three levels deep".to_string(),
+            Forest::from_base_levels([3, 3, 3], cube, &lev).expect("deep"),
+        ));
+
+        // (f0) ONE cell, and therefore NO internal face at all. Every count the
+        //      emitter scans for is zero except the boundary one, `n_if` is zero,
+        //      and the internal-face kernels are launched over a cell that owns
+        //      nothing. It is the degenerate mesh, and it is here because a
+        //      zero-length allocation is the shape of bug that only ever shows up
+        //      on the smallest input.
+        out.push((
+            "1x1x1 base, unrefined".to_string(),
+            Forest::uniform([1, 1, 1], cube).expect("one cell"),
+        ));
+
+        // (f) A single base cell, refined once. The smallest mesh with an
+        //     internal face at all, and the one where every count is small enough
+        //     to check by hand when something breaks.
+        out.push((
+            "1x1x1 base, one level".to_string(),
+            Forest::from_base_levels([1, 1, 1], cube, &[1u32]).expect("single"),
+        ));
+
+        // (g) A mesh an ADAPT produced. Section 82.10 row 2 makes the same
+        //     distinction for the geometry sweep: a forest built from base levels
+        //     is uniformly refined per base cell, and an adapted one is not - its
+        //     leaves at one level inside a base cell are a proper subset of the
+        //     eight, which is the case `Leaf::key`'s ordering exists for.
+        let base = Forest::from_base_levels([6, 6, 6], cube, &vec![0u32; 216]).expect("base");
+        let rb = base.build().expect("base mesh");
+        let mut mark = vec![Mark::Keep; rb.mesh.n_cells];
+        for (c, m) in mark.iter_mut().enumerate() {
+            if c % 7 == 0 {
+                *m = Mark::Refine;
+            }
+        }
+        let pl = plan(&base, &rb.mesh, &mark, 2).expect("adapt");
+        out.push(("a mesh an adapt produced, 6x6x6".to_string(), pl.after));
+
+        out
+    }
+
+    /// THE GATE. The device emitter and the host emitter write the same mesh.
+    ///
+    /// Not "an equivalent mesh": the same faces, in the same order, with the same
+    /// point numbers and the same point coordinates bit for bit. Section 82.9
+    /// allowed a permuted point set and section 84.1 declined the permission,
+    /// so `points` and every face's point list are compared element for
+    /// element. It lives here rather than beside the code it tests because it
+    /// needs `Forest`; section 84.7's last row is why that matters.
+    #[test]
+    fn the_device_emitter_is_bitwise_identical_to_the_host_emitter() {
+        let Some(g) = gpu() else {
+            eprintln!("no CUDA device; skipping");
+            return;
+        };
+        let k = crate::mesh::gpuemit::MeshEmitKernels::new(&g).expect("meshemit kernels");
+
+        for (name, f) in fixtures() {
+            let want = f.build().expect("host emitter");
+            let de = f.emit_on_device(&g, &k).expect("device emitter");
+            let (got, points, csr) = de.download(&g).expect("download");
+
+            assert_eq!(got.n_cells, want.mesh.n_cells, "n_cells differ for {name}");
+            assert_eq!(
+                got.n_internal_faces, want.mesh.n_internal_faces,
+                "internal face count differs for {name}"
+            );
+            assert_eq!(
+                got.n_boundary_faces, want.mesh.n_boundary_faces,
+                "boundary face count differs for {name}"
+            );
+            assert_eq!(
+                got.n_points,
+                want.points.len(),
+                "point count differs for {name}"
+            );
+
+            assert_eq!(got.owner, want.mesh.owner, "owner differs for {name}");
+            assert_eq!(
+                got.neighbour, want.mesh.neighbour,
+                "neighbour differs for {name}"
+            );
+            assert_eq!(
+                got.b_face_cells, want.mesh.b_face_cells,
+                "bFaceCells differ for {name}"
+            );
+
+            // The patches, field for field. A patch's `start` and `size` are what
+            // every boundary loop in this crate slices with.
+            assert_eq!(
+                got.patches.len(),
+                want.mesh.patches.len(),
+                "patch count differs for {name}"
+            );
+            for (a, b) in got.patches.iter().zip(want.mesh.patches.iter()) {
+                assert_eq!(a.name, b.name, "patch name differs for {name}");
+                assert_eq!(a.type_name, b.type_name, "patch type differs for {name}");
+                assert_eq!(a.kind, b.kind, "patch kind differs for {name}");
+                assert_eq!(
+                    a.start, b.start,
+                    "patch '{}' start differs for {name}",
+                    a.name
+                );
+                assert_eq!(a.size, b.size, "patch '{}' size differs for {name}", a.name);
+            }
+
+            // The points, BY BITS. A coordinate is one multiply on both sides and
+            // there is nothing in it for a compiler to contract, which is the
+            // claim `cuda/meshemit.cu`'s header makes and this line is the
+            // evidence for.
+            assert_eq!(points.len(), want.points.len(), "point count for {name}");
+            for (i, (a, b)) in points.iter().zip(want.points.iter()).enumerate() {
+                for (ca, cb, ax) in [(a.x, b.x, 'x'), (a.y, b.y, 'y'), (a.z, b.z, 'z')] {
+                    assert_eq!(
+                        ca.to_bits(),
+                        cb.to_bits(),
+                        "point {i}.{ax} differs for {name}: {ca:e} vs {cb:e}"
+                    );
+                }
+            }
+
+            let faces = crate::mesh::gpuemit::faces_from_csr(&csr);
+            assert_eq!(
+                faces.len(),
+                want.faces.len(),
+                "face list length differs for {name}"
+            );
+            for (f, (a, b)) in faces.iter().zip(want.faces.iter()).enumerate() {
+                assert_eq!(a, b, "face {f}'s point list differs for {name}");
+            }
+
+            // The cell -> face CSR the device sweep gathers over, which
+            // `download` rebuilds on the host from the topology it just brought
+            // back. Same input, same maps.
+            assert_eq!(
+                got.cf_offset, want.mesh.cf_offset,
+                "cf_offset differs for {name}"
+            );
+            assert_eq!(got.cf_face, want.mesh.cf_face, "cf_face differs for {name}");
+            assert_eq!(got.cf_own, want.mesh.cf_own, "cf_own differs for {name}");
+            assert_eq!(
+                got.bcf_offset, want.mesh.bcf_offset,
+                "bcf_offset differs for {name}"
+            );
+            assert_eq!(
+                got.bcf_face, want.mesh.bcf_face,
+                "bcf_face differs for {name}"
+            );
+        }
+    }
+
+    /// The whole resident route, end to end: emit on the device, sweep on the
+    /// device, and the mesh that arrives is the one the host route builds.
+    ///
+    /// Section 83.5 made this claim one constructor earlier - two `GpuMesh`es from
+    /// two geometry sweeps over the SAME host emission. This is the same claim
+    /// with the emission moved too, so a difference here is a difference the
+    /// gate above would have to have missed.
+    #[test]
+    fn a_mesh_emitted_on_the_device_reaches_the_device_as_the_same_mesh() {
+        let Some(g) = gpu() else {
+            eprintln!("no CUDA device; skipping");
+            return;
+        };
+        let ke = crate::mesh::gpuemit::MeshEmitKernels::new(&g).expect("meshemit kernels");
+        let kg = crate::mesh::gpugeom::MeshGeomKernels::new(&g).expect("meshgeom kernels");
+
+        for (name, f) in fixtures() {
+            let (_, host) = f
+                .build_resident(&g, &kg)
+                .unwrap_or_else(|e| panic!("host emission, resident sweep, for {name}: {e}"));
+            let (_, dev) = f
+                .build_resident_on_device(&g, &kg, &ke)
+                .unwrap_or_else(|e| panic!("device emission, resident sweep, for {name}: {e}"));
+            let moved = arrays_that_moved(&g, &host, &dev).expect("download");
+            assert!(
+                moved.is_empty(),
+                "the device-emitted mesh differs from the host-emitted one for \
+                 {name}: {moved:?}"
+            );
+            assert_eq!(
+                host.total_volume.to_bits(),
+                dev.total_volume.to_bits(),
+                "total_volume differs for {name}"
+            );
+            for (w, a, b) in [
+                ("rf_offset", &host.rf_offset, &dev.rf_offset),
+                ("rf_face", &host.rf_face, &dev.rf_face),
+                ("rf_flags", &host.rf_flags, &dev.rf_flags),
+            ] {
+                assert_eq!(
+                    g.download(a).expect("download"),
+                    g.download(b).expect("download"),
+                    "the section 70 row map's {w} differs for {name}"
+                );
+            }
+        }
+    }
+
+    /// The names of the geometric arrays on which two device meshes differ.
+    ///
+    /// Sixteen arrays by `to_bits`, which is the comparison section 83.5 makes
+    /// and the one a rebuild has to survive: a geometry array off in the last bit
+    /// changes every operator downstream of it.
+    fn arrays_that_moved(
+        g: &Gpu,
+        a: &GpuMesh,
+        b: &GpuMesh,
+    ) -> Result<Vec<&'static str>> {
+        let (nc, nif, nbf) = (a.n_cells, a.n_internal_faces, a.n_boundary_faces);
+        if (nc, nif, nbf) != (b.n_cells, b.n_internal_faces, b.n_boundary_faces) {
+            return Ok(vec!["the counts themselves"]);
+        }
+        let mut moved = Vec::new();
+        for (w, x, y, n) in [
+            ("v", &a.v, &b.v, nc),
+            ("mag_sf", &a.mag_sf, &b.mag_sf, nif),
+            ("weights", &a.weights, &b.weights, nif),
+            ("delta_coeffs", &a.delta_coeffs, &b.delta_coeffs, nif),
+            ("b_mag_sf", &a.b_mag_sf, &b.b_mag_sf, nbf),
+            ("b_delta_coeffs", &a.b_delta_coeffs, &b.b_delta_coeffs, nbf),
+            ("b_y", &a.b_y, &b.b_y, nbf),
+            ("b_weights", &a.b_weights, &b.b_weights, nbf),
+        ] {
+            let (mut p, mut q) = (g.download(x)?, g.download(y)?);
+            p.truncate(n);
+            q.truncate(n);
+            if p.len() != q.len() || !p.iter().zip(&q).all(|(u, v)| u.to_bits() == v.to_bits()) {
+                moved.push(w);
+            }
+        }
+        for (w, x, y, n) in [
+            ("c", &a.c, &b.c, nc),
+            ("sf", &a.sf, &b.sf, nif),
+            ("cf", &a.cf, &b.cf, nif),
+            ("non_orth_corr", &a.non_orth_corr, &b.non_orth_corr, nif),
+            ("skew_corr", &a.skew_corr, &b.skew_corr, nif),
+            ("b_sf", &a.b_sf, &b.b_sf, nbf),
+            ("b_cf", &a.b_cf, &b.b_cf, nbf),
+            (
+                "b_non_orth_corr",
+                &a.b_non_orth_corr,
+                &b.b_non_orth_corr,
+                nbf,
+            ),
+        ] {
+            let (mut p, mut q) = (g.download(x)?, g.download(y)?);
+            p.truncate(n);
+            q.truncate(n);
+            if p.len() != q.len()
+                || !p.iter().zip(&q).all(|(u, v)| {
+                    u.x.to_bits() == v.x.to_bits()
+                        && u.y.to_bits() == v.y.to_bits()
+                        && u.z.to_bits() == v.z.to_bits()
+                })
+            {
+                moved.push(w);
+            }
+        }
+        Ok(moved)
+    }
+
 
     /// SPEC-LIT section 75.9's bit-identical-defaults claim, asserted rather
     /// than promised.

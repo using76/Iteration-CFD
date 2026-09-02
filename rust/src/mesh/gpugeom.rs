@@ -432,8 +432,41 @@ pub fn gpu_geometry_resident(
     faces: &[Vec<Label>],
     csr: &FacePointCsr,
 ) -> Result<GpuGeometry> {
-    // ---- the host prologue, identical to `geometry::compute` --------------
     geometry::validate(m, points, faces)?;
+    resident_after_validate(gpu, k, m, points, csr)
+}
+
+/// [`gpu_geometry_resident`], validated against the face -> point CSR instead
+/// of a `Vec<Vec<Label>>` face list.
+///
+/// SPEC-LIT section 84.10. This is the entry point a device-emitted mesh
+/// takes: `mesh::gpuemit` produces the CSR and never builds the face-list
+/// form, whose one-allocation-per-face cost is part of what section 84 exists
+/// to remove. Everything after the validation is the same function.
+pub fn gpu_geometry_resident_csr(
+    gpu: &Gpu,
+    k: &MeshGeomKernels,
+    m: &mut HostMesh,
+    points: &[Vec3],
+    csr: &FacePointCsr,
+) -> Result<GpuGeometry> {
+    geometry::validate_csr(m, points, csr)?;
+    resident_after_validate(gpu, k, m, points, csr)
+}
+
+/// The host prologue and the launch, shared by the two resident entry points.
+///
+/// They differ in one line - which shape the face list was validated in - and
+/// section 83.2 records why that line is the only one allowed to differ: two
+/// prologues would be two places for the boundary bookkeeping to drift.
+fn resident_after_validate(
+    gpu: &Gpu,
+    k: &MeshGeomKernels,
+    m: &mut HostMesh,
+    points: &[Vec3],
+    csr: &FacePointCsr,
+) -> Result<GpuGeometry> {
+    // ---- the host prologue, identical to `geometry::compute` --------------
     refuse_a_mesh_without_a_cell_face_csr(m)?;
     refuse_a_cell_with_no_faces(m)?;
 

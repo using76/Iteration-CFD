@@ -629,6 +629,7 @@ impl GpuMesh {
 }
 
 pub mod geometry;
+pub mod gpuemit;
 pub mod gpugeom;
 pub mod refined;
 pub mod topology;
