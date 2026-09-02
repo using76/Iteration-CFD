@@ -33,46 +33,47 @@ comparison against another CFD code.
 
 ## Licence
 
-**The source is published, but this is not Open Source.**
+**Prosperity Public License 3.0.0** — source-available, not open source.
+Noncommercial use is free; commercial use gets a thirty-day trial and then
+needs a commercial licence.
 
 | Use | Terms |
 |---|---|
-| Teaching — courses, coursework, lab classes, self-study | **Free** |
-| **Academic research** — universities, schools, and their research institutes and laboratories | **Free** |
-| Publishing the results of that research — papers, theses, talks | **Free**, with acknowledgement |
-| Industrial R&D | Commercial licence |
-| Government or national research institutes not part of an educational institution | Commercial licence |
-| Consultancy, contract research, testing services | Commercial licence |
-| Design, certification or operation of a real product, plant or system | Commercial licence |
+| Personal study, hobby and amateur work | **Free** |
+| Educational institutions — teaching, coursework, lab work | **Free** |
+| Universities and their institutes and laboratories | **Free** |
+| Public research organisations and government institutions | **Free**, whatever the funding |
+| Public safety, public health and environmental protection organisations | **Free** |
+| Charitable organisations | **Free** |
+| Any other commercial use | **Thirty-day trial**, then a commercial licence |
 
-Research funded by a company remains within the free grant **provided the
-results are published openly**. Only sponsored work whose results are
-confidential, or in which the sponsor holds exclusive rights, requires a
-commercial licence.
+What decides the free tier is **the kind of organisation using the software,
+not who pays for it**. A public research organisation or a government
+institution is inside the free tier *regardless of the source of its funding* —
+which is a change from the previous licence.
 
-If you publish results obtained with meteor-cfd, acknowledge it. This is a
-condition of the grant, not a request:
+**The thirty-day trial is per company, not per person.** If you use this for
+work, your company gets one trial period covering all personnel. CFD is not
+software anyone buys without running it on their own cases, their own meshes
+and their own hardware first, and the trial exists for exactly that.
 
-```
-meteor-cfd, Meteo Simulation Co., Ltd., https://github.com/using76/meteor-cfd
-```
+Contributing feedback, changes or additions back under a standardised public
+licence — Blue Oak 1.0.0, Apache 2.0, MIT or two-clause BSD — does not count as
+commercial use.
 
-For cases where the boundary is unclear — a national laboratory, a hospital
-research group, a non-profit, a university spin-out — please ask. Where the use
-is not commercial in substance, no-cost or reduced-cost terms are available.
+If your situation is unclear, please ask. Where the substance of the use is not
+commercial, a free or reduced licence will be considered.
 
-**Licence enquiries: simul@msimul.com**
+**Licensing enquiries: simul@msimul.com**
 
-The governing licence is the **Meteor Simulation Source-Available License,
-Version 1.1**; the licensor is 주식회사 메테오시뮬레이션 (Meteo Simulation Co.,
-Ltd.). On 23 August 2036 the version published as of that date becomes available
-under the Apache License 2.0. See [`LICENSE`](LICENSE) for the full text and
-[`NOTICE`](NOTICE) for third-party notices.
+The licensor is 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.). The full
+text is in [`LICENSE`](LICENSE), what a commercial licence covers is in
+[`LICENSING.md`](LICENSING.md), and third-party notices are in
+[`NOTICE`](NOTICE).
 
-> This licence borrows the structure of the Business Source License 1.1 but is
-> not BUSL. BUSL grants all non-production use free of charge, which would
-> include a company's internal R&D. Here the free grant is limited to teaching
-> and academic research.
+> Prosperity is a noncommercial licence, not an open-source one. It is not
+> OSI-approved and it restricts commercial use, so this project does not call
+> itself open source.
 
 ---
 

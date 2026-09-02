@@ -1,14 +1,67 @@
-# Licensing audit — what can and cannot ship
+# Licensing — the terms, and the audit behind them
 
-**Goal: ship meteor-cfd under a licence 주식회사 메테오시뮬레이션 controls.**
+**meteor-cfd is licensed under the Prosperity Public License 3.0.0.** The
+licensor is 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.). The full
+text is in [`LICENSE`](LICENSE); this document says what it means in practice
+and what a commercial licence covers.
 
-> This audit was written while the target was the MIT licence. The target has
-> since changed to the Meteor Simulation Source-Available License 1.1 — source
-> public, education free, research and commercial paid. **The analysis below is
-> unchanged and remains the reason the rewrite happened**: GPL-derived code
-> cannot be relicensed under MIT *or* under a proprietary licence. Removing it
-> was necessary either way, and it is what makes the current licence possible
-> at all.
+---
+
+## 0. The terms
+
+### What is free
+
+Prosperity draws the line at **the kind of organisation**, not at who funds it:
+
+- personal study, hobby projects, amateur pursuits, private entertainment;
+- educational institutions — teaching, coursework, student and staff research;
+- public research organisations and government institutions, **regardless of
+  the source of their funding**;
+- public safety, public health and environmental protection organisations;
+- charitable organisations.
+
+Contributing feedback, changes or additions back under Blue Oak 1.0.0,
+Apache 2.0, MIT or two-clause BSD does not count as commercial use.
+
+### What is a thirty-day trial
+
+Everything else. Commercial use gets **thirty days, one trial per company
+rather than one per person** — so a team evaluating it does not each get their
+own clock. The trial exists because CFD is not bought unseen: an engineer has
+to run their own cases, on their own meshes, on their own hardware, and compare
+against whatever they use today. Thirty days is what the licence grants; if an
+evaluation needs longer, ask.
+
+### What a commercial licence covers
+
+Beyond the trial, commercial use needs a separate licence from the contributor.
+Enquiries are answered within one business day.
+
+    주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+    simul@msimul.com
+
+When you write, the things that decide the quote are: how many concurrent
+solver processes or GPUs you intend to run, whether you want an annual
+subscription or a perpetual licence with maintenance, and whether the work is
+internal engineering or delivered to your own customers. Academic users moving
+into commercial work are handled as a conversion rather than a fresh purchase.
+
+### What this licence is not
+
+Prosperity is **not an open-source licence**. It is not OSI-approved and it
+restricts commercial use. This project does not describe itself as open source,
+and neither should anyone redistributing it.
+
+---
+
+## The audit behind the licence
+
+> The audit below was written while the target was the MIT licence, and it has
+> outlived two licence changes. **The analysis is unchanged and remains the
+> reason the rewrite happened**: GPL-derived code cannot be relicensed under
+> MIT, under a source-available licence, *or* under Prosperity. Removing it was
+> necessary for every one of those outcomes, and it is what makes the current
+> licence possible at all.
 
 This document is the honest accounting of where the current code came from, so
 the reimplementation has a definite scope rather than a vague sense of unease.
@@ -132,8 +185,8 @@ is the specification.
 | `gpu/` | the transcribed C++ |
 
 Shipping any of these inside a repository licensed by us — the target was MIT
-when this was written and is now the Meteor Simulation Source-Available License
-1.1 — would relicense GPL code, which is exactly the thing to avoid. Keep them in a separate,
+when this was written and is now the Prosperity Public License 3.0.0 — would
+relicense GPL code, which is exactly the thing to avoid. Keep them in a separate,
 clearly-GPL working tree for reference, or delete them from the published one.
 
 ### 3e. The documentation
@@ -242,7 +295,7 @@ reference available for this project.
 | 1 | Write `rust/SPEC-LIT.md`: every equation cited to a paper, verified against it. | no OpenFOAM path appears anywhere in it | **done** |
 | 2 | Reimplement §3a from `SPEC-LIT.md` only, with no GPL source in reach. | builds and passes §10 validation | **done** |
 | 3 | Rebuild validation on MMS, analytical solutions and published benchmarks. | second-order convergence shown without reference to any other code | **done** |
-| 4 | `LICENSE`, per-file provenance, `NOTICE` for third-party dependencies. | ready to publish | **done** — `LICENSE` is the Meteor Simulation Source-Available License 1.1, not the MIT this row originally planned; see `rust/PROVENANCE.md` and `NOTICE` |
+| 4 | `LICENSE`, per-file provenance, `NOTICE` for third-party dependencies. | ready to publish | **done** — `LICENSE` is the Prosperity Public License 3.0.0, not the MIT this row originally planned; see `rust/PROVENANCE.md` and `NOTICE` |
 
 ### What phases 2 and 3 produced
 

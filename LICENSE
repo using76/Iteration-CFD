@@ -1,239 +1,70 @@
-Meteor Simulation Source-Available License, Version 1.1
+# Prosperity Public License 3.0.0
 
------------------------------------------------------------------------------
+Contributor: 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
 
-Licensor              주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+Source Code: https://github.com/using76/meteor-cfd
 
-Licensed Work         meteor-cfd, including the `ofgpu` crate and every file
-                      in this repository.
-                      Copyright (c) 2026 주식회사 메테오시뮬레이션.
-                      All rights reserved except as granted below.
+## Purpose
 
-Academic Use Grant    Free of charge for teaching and for academic research
-                      at an educational institution, on the terms of
-                      section 2.
+This license allows you to use and share this software for noncommercial purposes for free and to try this software for commercial purposes for thirty days.
 
-Change Date           2036-08-23
+## Agreement
 
-Change License        Apache License, Version 2.0
+In order to receive this license, you have to agree to its rules.  Those rules are both obligations under that agreement and conditions to your license.  Don't do anything with this software that triggers a rule you can't or won't follow.
 
-Licence enquiries     simul@msimul.com
+## Notices
 
------------------------------------------------------------------------------
+Make sure everyone who gets a copy of any part of this software from you, with or without changes, also gets the text of this license and the contributor and source code lines above.
 
-NOTICE
+## Commercial Trial
 
-This is **not** an Open Source licence, and it is not the Business Source
-Licence. Its structure — a source-available grant that converts to an open
-source licence on a stated date — follows the Business Source License 1.1,
-but the terms differ in one substantive way and it therefore does not use that
-name.
+Limit your use of this software for commercial purposes to a thirty-day trial period.  If you use this software for work, your company gets one trial period for all personnel, not one trial per person.
 
-The difference: BUSL 1.1 grants all non-production use free of charge, which
-would include a company's internal R&D. This licence does not. Under this
-licence, **teaching and academic research are free; research anywhere else is
-not**; see sections 2 and 3.
+## Contributions Back
 
-On the Change Date the version of the Licensed Work then published becomes
-available under the Change License, and these restrictions cease to apply to
-that version.
+Developing feedback, changes, or additions that you contribute back to the contributor on the terms of a standardized public software license such as [the Blue Oak Model License 1.0.0](https://blueoakcouncil.org/license/1.0.0), [the Apache License 2.0](https://spdx.org/licenses/Apache-2.0.html), [the MIT license](https://spdx.org/licenses/MIT.html), or [the two-clause BSD license](https://spdx.org/licenses/BSD-2-Clause.html) doesn't count as use for a commercial purpose.
 
------------------------------------------------------------------------------
+## Personal Uses
 
-TERMS
+Personal use for research, experiment, and testing for the benefit of public knowledge, personal study, private entertainment, hobby projects, amateur pursuits, or religious observance, without any anticipated commercial application, doesn't count as use for a commercial purpose.
 
-1. Source grant
+## Noncommercial Organizations
 
-   Licensor grants you a non-exclusive, worldwide, royalty-free right to read,
-   copy, modify, create derivative works of, and redistribute the source of
-   the Licensed Work, subject to sections 4 and 5.
+Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution doesn't count as use for a commercial purpose regardless of the source of funding or obligations resulting from the funding.
 
-   This grant does not by itself permit you to USE the Licensed Work, or any
-   derivative of it, to compute a result. Use is governed by sections 2 and 3.
+## Defense
 
-2. Academic Use Grant
+Don't make any legal claim against anyone accusing this software, with or without changes, alone or with other technology, of infringing any patent.
 
-   You may use the Licensed Work free of charge for Educational Purposes and
-   for Academic Research.
+## Copyright
 
-   2.1 "Educational Purposes" means teaching, coursework, classroom
-       demonstration, and self-study, by students and by educators at an
-       Educational Institution, or by an individual learning the subject.
+The contributor licenses you to do everything with this software that would otherwise infringe their copyright in it.
 
-   2.2 "Academic Research" means research carried out at an Educational
-       Institution by its students, faculty or research staff, where the
-       results may be published openly.
+## Patent
 
-       Academic Research includes publishing those results — in a paper,
-       preprint, thesis, dissertation, poster or talk — subject to the
-       acknowledgement in section 2.5.
+The contributor licenses you to do everything with this software that would otherwise infringe any patents they can license or become able to license.
 
-   2.3 "Educational Institution" means a university, college, school, or
-       other institution whose primary purpose is education and which grants
-       academic degrees or recognised qualifications, including a research
-       institute or laboratory operated by and forming part of such an
-       institution.
+## Reliability
 
-       It does not mean a company, a government or national research
-       institute that is not part of an Educational Institution, a hospital
-       or clinical body operating commercially, or a non-profit whose primary
-       purpose is not education. Those are not excluded from using the
-       Licensed Work — see section 3, and please ask; Licensor is willing to
-       grant them terms.
+The contributor can't revoke this license.
 
-   2.4 The Academic Use Grant does NOT cover:
+## Excuse
 
-       (a) research carried out for, or funded by, a commercial sponsor where
-           the sponsor receives results that are confidential, or exclusive
-           rights in them. Openly published research remains covered even if
-           it was grant-funded;
-       (b) consultancy, contract testing, or any service provided to a third
-           party for a fee;
-       (c) use by a spin-out, start-up or other commercial entity, whatever
-           its relationship to the institution;
-       (d) any use in the design, certification, operation or assessment of a
-           real product, plant, building or system, whoever performs it.
+You're excused for unknowingly breaking [Notices](#notices) if you take all practical steps to comply within thirty days of learning you broke the rule.
 
-   2.5 If you publish results obtained with the Licensed Work, acknowledge it.
-       A citation of this form is sufficient:
+## No Liability
 
-           meteor-cfd, 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.),
-           https://github.com/using76/meteor-cfd
+***As far as the law allows, this software comes as is, without any warranty or condition, and the contributor won't be liable to anyone for any damages related to this software or this license, under any kind of legal claim.***
 
-       This is a condition of the grant in section 2, not a request.
+---
 
-3. Licensed Use
+## Commercial licensing
 
-   Any use of the Licensed Work outside section 2 requires a separate
-   commercial licence from Licensor. This includes, without limitation:
+Commercial use beyond the thirty-day trial requires a separate commercial
+licence from the contributor.
 
-     * research and development inside a company, at any scale;
-     * research at a government or national research institute that is not
-       part of an Educational Institution;
-     * evaluation for procurement;
-     * consultancy, contract research, and testing services;
-     * any production, operational or commercial use.
+    주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+    simul@msimul.com
 
-   Commercial licences are available. Please write to simul@msimul.com with a
-   description of the intended use, and Licensor will respond with terms.
-
-   If you are unsure which side of section 2 your use falls on — a national
-   laboratory, a hospital research group, a non-profit, a university spin-out,
-   a sponsored project — write and ask. Licensor would rather answer the
-   question than have you guess, and grants no-cost or reduced-cost licences
-   where the use is not commercial in substance.
-
-4. Redistribution
-
-   If you redistribute the Licensed Work, or any derivative of it, in source
-   or in any other form, you must:
-
-     (a) include a complete, unmodified copy of this licence;
-     (b) retain all copyright, licence, and attribution notices, including the
-         file NOTICE;
-     (c) state prominently that the recipient's use is governed by this
-         licence and that use beyond section 2 requires a licence from
-         Licensor;
-     (d) if you modified the Licensed Work, carry a prominent notice saying
-         that you changed it, and the date.
-
-   You may not sublicense the Licensed Work, and you may not offer it to
-   others on terms more permissive than these.
-
-5. Third-party components
-
-   The Licensed Work incorporates or links against components licensed by
-   others. Those components remain under their own licences, which are listed
-   in the file NOTICE and which are not affected by this licence. Nothing here
-   restricts any right you have in those components under their own terms.
-
-6. Change Date
-
-   On the Change Date stated above, the version of the Licensed Work published
-   as of that date becomes available under the Change License, and sections 2,
-   3 and 4 cease to apply to that version. Versions published after the Change
-   Date carry their own Change Date, and this licence continues to govern them
-   until it arrives.
-
-7. Trademarks
-
-   This licence grants no right to use the name, logo, or trademarks of
-   주식회사 메테오시뮬레이션, except as required by section 4 to give
-   attribution.
-
-8. Termination
-
-   If you use the Licensed Work outside the terms of this licence, the rights
-   granted here terminate automatically. They are reinstated if you cure the
-   breach within 30 days of becoming aware of it, unless Licensor has already
-   notified you of the breach, in which case reinstatement requires Licensor's
-   written agreement.
-
-9. No warranty
-
-   THE LICENSED WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, AND
-   NON-INFRINGEMENT.
-
-   This is numerical simulation software. Its results depend on the mesh, the
-   discretisation, the models selected, and the boundary conditions supplied,
-   and they may be wrong. Do not rely on them for any decision affecting
-   safety, health, property, or the environment without independent
-   verification.
-
-10. Limitation of liability
-
-    TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL
-    LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN
-    AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
-    CONNECTION WITH THE LICENSED WORK OR THE USE OR OTHER DEALINGS IN IT.
-
-11. Governing law
-
-    This licence is governed by the laws of the Republic of Korea, without
-    regard to its conflict of laws provisions. The Seoul Central District
-    Court shall have exclusive jurisdiction over any dispute arising from it.
-
------------------------------------------------------------------------------
-
-  Licence enquiries:  simul@msimul.com
-  주식회사 메테오시뮬레이션 / Meteo Simulation Co., Ltd.
-
------------------------------------------------------------------------------
-
-
-한국어 요약 (편의를 위한 것이며, 법적 효력은 위 영문에 있습니다)
-
-  * 소스는 공개입니다. 읽고, 고치고, 포크하고, 재배포할 수 있습니다.
-
-  * **무료입니다:**
-      - 교육 목적 — 수업, 과제, 강의 실습, 독학
-      - **학교 연구** — 대학·대학(원)·학교, 그리고 그 소속 연구소·연구실에서
-        학생·교원·연구원이 수행하는, 공개 발표가 가능한 연구
-      - 그 연구 결과의 **논문·학위논문·발표** (제2.5조의 출처 표기 조건)
-
-  * **유상 라이선스가 필요합니다:**
-      - 기업 내부 연구개발 (규모 무관)
-      - 학교에 속하지 않은 국가·정부출연 연구기관에서의 연구
-      - 도입 검토·성능 평가
-      - 컨설팅, 수탁 연구, 시험 대행
-      - 실제 제품·설비·건축물·시스템의 설계·인증·운용·평가
-      - 결과가 비공개이거나 스폰서가 독점권을 갖는 기업 수탁 연구
-        (연구비를 받았더라도 **공개 발표하는 연구는 무료 범위**입니다)
-
-  * 결과를 발표할 때는 출처를 밝혀 주세요 — 이건 요청이 아니라 조건입니다:
-
-        meteor-cfd, 주식회사 메테오시뮬레이션,
-        https://github.com/using76/meteor-cfd
-
-  * 재배포할 때는 이 라이선스 전문과 NOTICE를 함께 넣고, 고쳤다면 고쳤다고
-    밝혀야 합니다.
-
-  * **2036년 8월 23일**부터 그 시점에 공개된 버전은 Apache-2.0이 됩니다.
-
-  * 국가연구소·병원 연구팀·비영리 단체·대학 스핀오프처럼 경계가 애매하면
-    추측하지 마시고 문의해 주세요. 실질이 상업적이지 않으면 무상 또는 감면을
-    검토합니다.
-
-  라이선스 문의: simul@msimul.com
+See [LICENSING.md](LICENSING.md) for what counts as commercial use, what a
+commercial licence covers, and how to ask for one.

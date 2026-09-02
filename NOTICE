@@ -1,10 +1,14 @@
 meteor-cfd
 Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
 
-Licensed under the Meteor Simulation Source-Available License, Version 1.1.
-See LICENSE. Teaching and academic research at an educational institution are
-free, publication of academic results included; commercial and non-academic
-research require a licence — simul@msimul.com.
+Licensed under the Prosperity Public License 3.0.0. See LICENSE.
+
+Noncommercial use is free: personal study, hobby and amateur work, and use by
+any charitable organisation, educational institution, public research
+organisation, public safety or health organisation, environmental protection
+organisation or government institution — whatever its funding. Commercial use
+gets a thirty-day trial, one per company rather than one per person, after
+which it needs a commercial licence — simul@msimul.com.
 
 ================================================================================
 Provenance
