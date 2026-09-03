@@ -454,10 +454,10 @@ impl<'m> ScalarTransport<'m> {
     }
 
     /// [`Self::correct`] with one extra whole-field explicit source,
-    /// `fvm_su(su, +1)` - SPEC-LIT §61.2's soot formation/oxidation term.
+    /// `fvm_su(su, +1)` - a formation/destruction term computed per cell.
     ///
     /// `SourceSet` (SPEC-LIT §18) carries CONSTANT-per-zone terms and is the
-    /// right shape for a heater or a fixed-value constraint; a soot source is
+    /// right shape for a heater or a fixed-value constraint; such a source is
     /// a whole field recomputed every iteration from the local state, which
     /// has no zone and no constant. Rather than widen `SourceTerm` with a
     /// variant only one caller can build, this takes the array directly.
@@ -641,8 +641,9 @@ impl<'m> ScalarTransport<'m> {
                 sources.flag_constraints(gpu, srck, &mut core.a)?;
             }
 
-            // SPEC-LIT §61.2's soot source, in the same place and with the
-            // same sign convention every other source in this solver uses.
+            // The caller's own per-cell source, in the same place and with
+            // the same sign convention every other source in this solver
+            // uses.
             if let Some(su) = su {
                 let crate::turbulence::RasCore { fv, a, .. } = &mut self.core;
                 crate::fv::fvm_su(gpu, fv, a, m, su, 1.0)?;
@@ -1273,9 +1274,9 @@ mod tests {
     /// `ddt` term being `d(resident)/dt` written out, and neither of those
     /// asks anything of `phi` or of `rho`.
     ///
-    /// The second half is what makes the first half mean something. §85.7's
+    /// The second half is what makes the first half mean something. §86.1's
     /// `-17 %` is exactly this drift: an equation that conserves `sum Y V`
-    /// measured by a budget that meters `sum rho Y V`, on a fire whose `rho`
+    /// measured by a budget that meters `sum rho Y V`, on a flow whose `rho`
     /// runs from 1.2 to 0.22.
     #[test]
     fn the_conservative_mass_weighted_equation_holds_the_species_mass_fixed() -> Result<()> {

@@ -948,7 +948,7 @@ pub fn is_transient_run(end_time: Scalar, ddt: DdtScheme) -> bool {
 
 /// SPEC-LIT §31.3: the transient/algorithm contract.
 ///
-/// `cases/burnerPlume.jsonc` named `SIMPLE` (a steady algorithm, under-
+/// A shipped transient case named `SIMPLE` (a steady algorithm, under-
 /// relaxation and all) while being run as a transient fire: the momentum
 /// equation was relaxed toward a steady state a buoyant plume does not
 /// have, and it diverged to Inf around step 20. Nothing in either reader
@@ -1481,7 +1481,7 @@ fn read_control_dict(c: &mut CaseControls, d: &FoamDict) -> Result<()> {
     // SPEC-LIT 13.4. `adjustTimeStep yes;` asks the run to choose its own
     // step from a Courant number, and no driver that goes through
     // `read_case_controls` has such a loop: `ofgpu-plume`, `ofgpu-buoyant`,
-    // `ofgpu-k-epsilon`, `ofgpu-k-omega` and `ofgpu-fire` all march on a
+    // `ofgpu-k-epsilon`, `ofgpu-k-omega` and `ofgpu-lowmach` all march on a
     // fixed `deltaT`. `ofgpu-vof` DOES adapt, and reads this entry itself
     // (`VofControls::from_case`) without coming through here.
     //
@@ -1524,7 +1524,7 @@ fn read_control_dict(c: &mut CaseControls, d: &FoamDict) -> Result<()> {
 
     // SPEC-LIT §31.3: `endTime`, `ddtSchemes` and the `SIMPLE`/`PISO`/
     // `PIMPLE` dictionary are three settings a case can get individually
-    // right and jointly nonsensical - `cases/burnerPlume.jsonc` did.
+    // right and jointly nonsensical - a shipped transient case did.
     check_transient_algorithm_contract(end_time, c.turb.ddt, &mut c.algorithm)?;
 
     Ok(())
@@ -2800,7 +2800,7 @@ mod tests {
         check_transient_algorithm_contract(-1.0, DdtScheme::SteadyState, &mut algorithm).unwrap();
     }
 
-    /// The exact defect `cases/burnerPlume.jsonc` shipped with (SPEC-LIT
+    /// The exact defect a shipped transient case had (SPEC-LIT
     /// §31.3's motivating example): `-permissive` substitutes PIMPLE with
     /// one outer corrector, and says so.
     #[test]
@@ -2835,7 +2835,7 @@ mod tests {
     }
 
     /// SPEC-LIT §31.3's regression: every case file this project ships must
-    /// pass the contract cleanly - `cases/burnerPlume.jsonc` used not to.
+    /// pass the contract cleanly - a shipped transient case used not to.
     #[test]
     fn every_shipped_case_passes_the_transient_algorithm_contract() {
         let _g = crate::io::contract::permissive_test_guard();

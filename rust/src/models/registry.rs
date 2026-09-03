@@ -3536,11 +3536,11 @@ mod tests {
         assert_eq!(turb.name(), "SpalartAllmaras");
         let names: Vec<&str> = turb.output_fields().iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"nuTilda") && names.contains(&"nut"), "{names:?}");
-        // §27: a one-equation model carries no mixing time scale, and this
-        // says so rather than inventing one.
+        // A one-equation model carries no mixing time scale, and this says
+        // so rather than inventing one - SPEC-LIT §13.4.
         assert!(matches!(
-            turb.combustion_mixing(),
-            crate::models::coupled::CombustionMixing::None
+            turb.mixing_rate(),
+            crate::models::coupled::MixingRate::None
         ));
 
         // Both hybrid backgrounds, all three branches.

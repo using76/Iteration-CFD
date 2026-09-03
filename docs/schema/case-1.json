@@ -83,7 +83,7 @@
       ]
     },
     "BuoyancyModel": {
-      "description": "`b = g·(TRef/T - 1)` (density-ratio, `SPEC-LIT` §9) is the only model this\nsolver implements - see [`crate::momentum::BuoyancyCoeffs`]. `boussinesq`\nis accepted here, so the schema documents that OpenFOAM cases spell it\nthat way too, and [`JsonCase::lower`] rejects it under the §13.4 contract\nrather than silently linearising a fire plume's `ΔT/T ≈ 3`.",
+      "description": "`b = g·(TRef/T - 1)` (density-ratio, `SPEC-LIT` §9) is the only model this\nsolver implements - see [`crate::momentum::BuoyancyCoeffs`]. `boussinesq`\nis accepted here, so the schema documents that OpenFOAM cases spell it\nthat way too, and [`JsonCase::lower`] rejects it under the §13.4 contract\nrather than silently linearising a hot plume's `ΔT/T ≈ 3`.",
       "type": "string",
       "enum": [
         "densityRatio",
@@ -179,121 +179,6 @@
         "max"
       ]
     },
-    "JsonCombustion": {
-      "description": "SPEC-LIT §27's mixing-controlled combustion, overridable per case.\nPresence of this block (`physics.fire.combustion`) is what turns\ncombustion ON in `ofgpu-fire`; everything inside it is optional and falls\nback to [`CombustionCoeffs::default`]'s propane values (SPEC-LIT §27's own\n*DESIGN* default fuel).\n\nThe species set combustion needs (`Y_F`, `Y_O2`, `Y_P`, inert `N2`) is\nNOT named here - it is fixed by [`JsonCase::lower`], because SPEC-LIT §27\nnames exactly these three reacting species and there is nothing for a\ncase to choose about their identities, only about the coefficients above.\nA case turns combustion on by giving `initial.Y_F` and an inlet patch's\nown `Y_F` condition - see [`y_f_spec_for`].",
-      "type": "object",
-      "properties": {
-        "CEDM": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "CEDMLES": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "TAIT": {
-          "description": "SPEC-LIT §43.4's `TAIT`, the auto-ignition temperature, K. `0` (the\ndefault) means \"no auto-ignition rule\", which is FDS's own default.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "TOI": {
-          "description": "SPEC-LIT §43.4's `TOI`, the critical flame temperature, K.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "Tfb": {
-          "description": "SPEC-LIT §43.4's `Tfb`, the free-burn temperature, K.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "Tinf": {
-          "description": "SPEC-LIT §43.4's `Tinf`, ambient, K.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "XOI": {
-          "description": "SPEC-LIT §43.4's `XOI`, the limiting oxygen index as a VOLUME\nfraction. Refused unless `extinctionModel` is `\"oxygen\"`.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "dh1": {
-          "description": "SPEC-LIT §42.4's `dh1`, J per kg of fuel released in step 1. Optional;\ndefaults to the Huggett split `dhc*s1/s`, which the banner prints.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "dhc": {
-          "description": "Heat of combustion, J/kg. Propane's `46.45e6` by default.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "extinctionModel": {
-          "description": "SPEC-LIT §43.4's `extinctionModel`: `\"none\"` (the default) or\n`\"oxygen\"` (the FDS EXTINCTION 1 predicate).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "s": {
-          "description": "Stoichiometric O2/fuel MASS ratio `s`. Propane's `3.63` by default.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "s1": {
-          "description": "SPEC-LIT §42.4's `s1`, the O2/fuel MASS ratio of step 1. Required\nunder `serialTwoStep`, refused under `singleStep`.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "scheme": {
-          "description": "SPEC-LIT §42.4's `scheme`: `\"singleStep\"` (§27, the default) or\n`\"serialTwoStep\"` (§42, McGrattan/McDermott/Floyd). Anything else is a\n§13.4 error naming both.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "yCO": {
-          "description": "SPEC-LIT (42.5)'s `yCO`, kg of CO per kg of fuel reacted at zero\nstep-2 conversion. Required under `serialTwoStep`.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        }
-      },
-      "additionalProperties": false
-    },
     "JsonCyclicPair": {
       "description": "One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six\n`mesh.boundaries` values, and must name the two opposite slots of one\naxis (`xmin`/`xmax`, `ymin`/`ymax` or `zmin`/`zmax`) - `build_block`\nchecks that, not this type.\n\n`transform` takes only `\"translate\"` - the transform\n[`crate::blockgen::BlockSpec::set_cyclic_axis`] knows how to build a\npairing from, implied by the block's own extent along that axis. A\nrotational pair (`\"rotate\"`, with an axis and an angle) needs a different\nface-matching search and a vector transform on `Sf` that nothing here\nimplements yet, so it deserialises fine (it is a *known* setting) and is\nrefused in `build_block` with a SPEC-LIT §13.4 error naming `translate` -\nexactly like any other recognised-but-unimplemented setting, not a parse\nfailure.",
       "type": "object",
@@ -343,44 +228,6 @@
       "required": [
         "format"
       ]
-    },
-    "JsonFire": {
-      "description": "`physics.fire`: the two S27/S28 blocks `ofgpu-fire` reads. Either or both\nmay be absent - a case with neither runs the plain S25/S26 low-Mach solver\n`ofgpu-fire` already had, unchanged.",
-      "type": "object",
-      "properties": {
-        "combustion": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JsonCombustion"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "radiation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JsonRadiation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "soot": {
-          "description": "SPEC-LIT §61.5's soot block. Absent means no soot equation at all,\nwhich is what every case did before §61 existed.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JsonSoot"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
     },
     "JsonFluid": {
       "type": "object",
@@ -503,14 +350,6 @@
           },
           "maxItems": 3,
           "minItems": 3
-        },
-        "Y_F": {
-          "description": "The ambient fuel mass fraction, and the presence check that turns\ncombustion (SPEC-LIT §27) on - same convention as [`Self::t`]:\nabsent means this case does not solve species at all. Usually `0.0`\n(no fuel in the ambient air); the fuel inlet's own value comes from\nits patch rule's `Y_F` ([`y_f_spec_for`]), not from here.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
         },
         "epsilon": {
           "type": [
@@ -754,17 +593,6 @@
             }
           ]
         },
-        "Y_F": {
-          "description": "The fuel mass fraction at this patch - SPEC-LIT §27's \"an inlet\ncarrying `Y_F`\". Only required on the patch(es) that inject fuel; see\n[`y_f_spec_for`] for the wall/open defaults and why `Y_O2`/`Y_P` are\nnot separately named here.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ScalarBc"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "epsilon": {
           "anyOf": [
             {
@@ -875,16 +703,6 @@
         "buoyancy": {
           "$ref": "#/$defs/BuoyancyModel"
         },
-        "fire": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JsonFire"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "fluid": {
           "$ref": "#/$defs/JsonFluid"
         },
@@ -903,122 +721,6 @@
         "gravity",
         "fluid",
         "buoyancy"
-      ]
-    },
-    "JsonRadiation": {
-      "description": "SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by\n[`RadiationModel::from_name`] - the §13.4 gate that names what is\navailable and anything else as an error.\n\n**This block cannot express §49/§50's surface-to-surface model**, and\nnaming `viewFactor` here is an error rather than a silent substitution:\nthat model needs an ENCLOSURE - which patches radiate, at what emissivity,\nand how the openings close - and there is nowhere here to say it. It is\nread from `constant/radiationProperties` instead (SPEC-LIT §51.1), and\n§50.12 records the missing fluid-side driver.",
-      "type": "object",
-      "properties": {
-        "a": {
-          "description": "Gray absorption coefficient `a`, 1/m. Constant, case-supplied\n(SPEC-LIT §28/§36).\n\n**Required under `spectralModel` `gray` and `grayBanded`, and REFUSED\nunder `wsgg`**, where every band's coefficient is computed per cell\nfrom the local composition and nothing would read this one - SPEC-LIT\n§62.11. A number read and discarded is the §13.4.1 defect itself.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "ambientT": {
-          "description": "The surroundings' temperature, K - `coldSurroundings` only.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "chiR": {
-          "description": "The radiant-fraction floor `chi_r`. Defaults to\n[`crate::participating::CHI_R_DEFAULT`] (`0.35`, FDS practice).",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "fuelC": {
-          "description": "Carbon atoms per fuel molecule - `wsgg` only, SPEC-LIT (62.7).",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "fuelH": {
-          "description": "Hydrogen atoms per fuel molecule - `wsgg` only, SPEC-LIT (62.7).",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "kappaMin": {
-          "description": "P1's `kappa` floor, 1/m - `wsgg` + `P1` only, SPEC-LIT §62.5(ii).\nRefused under fvDOM, which never forms `Gamma = 1/(3 kappa)`.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "model": {
-          "description": "`\"P1\"` or `\"fvDOM\"`; see [`RadiationModel::from_name`] for what\nhappens with anything else, and this struct's own doc for why\n`\"viewFactor\"` is refused here in particular.",
-          "type": "string"
-        },
-        "openBoundary": {
-          "description": "SPEC-LIT §63.3's `openBoundary`: `\"zeroGradient\"` (the default, §28 and\n§36 unchanged - and a PERFECTLY REFLECTING open domain) or\n`\"coldSurroundings\"` (a black body at `ambientT` outside every\nnon-wall face).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "pressure": {
-          "description": "Total pressure, Pa - `wsgg` only. Reaches `p_a` in (62.10) and\ntherefore every band's absorption coefficient.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "sigmaS": {
-          "description": "Gray scattering coefficient `sigma_s`, 1/m - fvDOM only (SPEC-LIT\n§36.1's isotropic-scattering term); ignored, and normally absent,\nunder `model: \"P1\"`. Defaults to `0.0` (non-scattering).",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "spectralModel": {
-          "description": "SPEC-LIT §62.11's `spectralModel`: `\"gray\"` (the default, §28/§36\nunchanged), `\"grayBanded\"` (one band, bitwise identical to `gray` -\n§62.8) or `\"wsgg\"` (Bordbar et al. 2014). Anything else is a §13.4\nerror naming all three **and saying why that set is not here**.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "updateInterval": {
-          "description": "SPEC-LIT §62.10: outer iterations between radiation solves. `1` (the\ndefault) is what every case did before §62 existed; at 120 solves per\ncall it is the difference between a case that runs and one that does\nnot.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "wallEmissivity": {
-          "description": "Marshak wall emissivity, applied to every `wall`-kind patch. Defaults\nto `1.0` (black wall) when absent.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "windowTreatment": {
-          "description": "SPEC-LIT §62.5's `windowTreatment`: `\"dropped\"` or `\"floored\"`.\n**Required** with `wsgg` + `P1` and refused everywhere else - there is\nno honest default, because both values lose something and the case has\nto say which loss it is taking.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "model"
       ]
     },
     "JsonRegion": {
@@ -1213,7 +915,7 @@
           "format": "double"
         },
         "endTime": {
-          "description": "The end time the case asks for. Honoured: both case readers turn it\ninto `TurbulenceControls::n_outer_iterations` (steady) or a step count\n(transient). `ofgpu-fire` takes its run MODE from `-endTime`/`-deltaT`\ninstead and prints which of the two is in force (SPEC-LIT S13.4.2).",
+          "description": "The end time the case asks for. Honoured: both case readers turn it\ninto `TurbulenceControls::n_outer_iterations` (steady) or a step count\n(transient). `ofgpu-lowmach` takes its run MODE from `-endTime`/`-deltaT`\ninstead and prints which of the two is in force (SPEC-LIT S13.4.2).",
           "type": "number",
           "format": "double"
         },
@@ -1306,60 +1008,6 @@
         "solver",
         "preconditioner",
         "tolerance"
-      ]
-    },
-    "JsonSoot": {
-      "description": "SPEC-LIT §61.5's `physics.fire.soot`.\n\nEvery entry only one model reads is REFUSED under the other\n([`crate::soot::refuse_unread`], shared with the OpenFOAM-dictionary\nroute so the two cannot drift apart).",
-      "type": "object",
-      "properties": {
-        "fuelMolarMass": {
-          "description": "`M_F`, kg/kmol - `laminarSmokePoint` only.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "fuelStreamY": {
-          "description": "`Y_F,1`, the fuel stream's own fuel mass fraction. Read by BOTH models:\nit sets `Z_st` in (61.6) and scales (61.5).",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "model": {
-          "description": "`\"none\"` (default), `\"prescribedYield\"` or `\"laminarSmokePoint\"`.\nMoss-Brookes and the sectional models are recognised and refused **with\nthe reason** - SPEC-LIT §61.1.",
-          "type": "string"
-        },
-        "oxidationPeak": {
-          "description": "`omega_so,P`, kg/(m3 s) - `laminarSmokePoint` only.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "smokePointHeight": {
-          "description": "`l_s`, the measured laminar smoke-point height, m -\n`laminarSmokePoint` only. Propane 0.162, ethylene 0.106.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "yield": {
-          "description": "`y_s`, kg soot per kg fuel - `prescribedYield` only. Tewarson Table\nA.40: propane 0.024, heptane 0.015.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "model"
       ]
     },
     "JsonSource": {

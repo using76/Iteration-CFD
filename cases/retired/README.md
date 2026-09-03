@@ -51,13 +51,13 @@ that has already been replaced — not restoring a record.
 
 후속 케이스는 `LaunderSharmaKE`/`lowRe`(SPEC-LIT §33)로 실행되며, SPEC-LIT
 §34가 진짜 2차원 평면 채널로 재구성하고 §35의 thermostat으로 구동합니다.
-명령은 `cases/README.md`에 있고, 현재 판정은 `docs/07-fire-solver.md` §1.1에
+명령은 `cases/README.md`에 있고, 현재 판정은 `docs/07-lowmach-solver.md` §1.1에
 있습니다.
 
 The successor runs as `LaunderSharmaKE`/`lowRe` (SPEC-LIT §33), rebuilt by
 SPEC-LIT §34 as a genuine 2-D plane channel and driven by §35's thermostat. Its
 command is in `cases/README.md`; its current verdict is in
-`docs/07-fire-solver.md` §1.1.
+`docs/07-lowmach-solver.md` §1.1.
 
 ## 이 파일들이 낸 숫자 — 두 번 superseded / What they measured — superseded twice
 
@@ -78,8 +78,8 @@ upwind`. They are **historical records**, not predictions of the current solver.
 | 구동 | 유입구동, `Tw = 373.15 K` | `momentumSource` + `-heaterPower -60` |
 | 결과 | 두 메쉬 벽 열유입 비율 0.381 (게이트 열림) | `\|U\|` 잔차 ~1e-5에서 정체, 코어가 비물리적으로 냉각 |
 
-전체 진단은 `docs/07-fire-solver.md` §1.1의 접힌 블록
+전체 진단은 `docs/07-lowmach-solver.md` §1.1의 접힌 블록
 ("The second attempt", "The first attempt")에 있습니다.
 
-The full diagnosis is in the collapsed blocks of `docs/07-fire-solver.md` §1.1
+The full diagnosis is in the collapsed blocks of `docs/07-lowmach-solver.md` §1.1
 ("The second attempt", "The first attempt").

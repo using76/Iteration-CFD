@@ -272,9 +272,9 @@ pub struct KOmegaSst<'m> {
     /// With no hybrid attached, the code this field adds to `correct` is a
     /// single failed `if let`: not one kernel launch and not one
     /// floating-point operation changes, and `cuda/sst.cu` is byte-for-byte
-    /// what it was. That is the same pattern §43's extinction rate mask and
-    /// §54.4's virtual temperature both use, and it is why "SST is unmoved"
-    /// is provable from the diff rather than argued from a tolerance.
+    /// what it was. That is the same pattern §54.4's virtual temperature
+    /// uses, and it is why "SST is unmoved" is provable from the diff rather
+    /// than argued from a tolerance.
     des: Option<crate::models::des::DesLengthScale>,
 
     /// `[n_cells]` the Frobenius norm of the full velocity gradient, which

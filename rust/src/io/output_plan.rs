@@ -642,7 +642,7 @@ struct Stage {
     ///
     /// Owned by the stage rather than passed in, because a driver that
     /// passed a constant wrote every step over the top of the last one, and
-    /// `ofgpu-fire` did exactly that (`step: 0`, hard-coded, at its single
+    /// `ofgpu-lowmach` did exactly that (`step: 0`, hard-coded, at its single
     /// `WriteCtx` site) - so `-output vtu -writeInterval W` produced one
     /// file called `fire_000000.vtu` however long the run was. A counter the
     /// pipeline increments cannot be forgotten by the next driver either.
@@ -1117,7 +1117,7 @@ mod tests {
         v.interval = Some(2.0);
         let mut p = OutputPlan::from_json(&only_vis(v)).unwrap();
         let e = p
-            .refuse_interval_when_steady("ofgpu-fire", "give it -endTime and -deltaT")
+            .refuse_interval_when_steady("ofgpu-lowmach", "give it -endTime and -deltaT")
             .unwrap_err();
         let s = e.to_string();
         assert!(s.contains("output.visualisation.interval"), "{s}");
@@ -1125,7 +1125,7 @@ mod tests {
 
         // No interval: silent, everywhere.
         let mut p = OutputPlan::from_json(&only_vis(vis("vdb"))).unwrap();
-        assert!(p.refuse_interval_when_steady("ofgpu-fire", "x").is_ok());
+        assert!(p.refuse_interval_when_steady("ofgpu-lowmach", "x").is_ok());
     }
 
     #[test]
@@ -1150,9 +1150,9 @@ mod tests {
             restart: Some(JsonRestart { interval: Some(1.0), keep: 2, precision: None }),
         })
         .unwrap();
-        let e = p.refuse_restart("ofgpu-k-epsilon", "ofgpu-fire does").unwrap_err();
+        let e = p.refuse_restart("ofgpu-k-epsilon", "ofgpu-lowmach does").unwrap_err();
         let s = e.to_string();
-        assert!(s.contains("output.restart") && s.contains("ofgpu-fire"), "{s}");
+        assert!(s.contains("output.restart") && s.contains("ofgpu-lowmach"), "{s}");
 
         let mut empty = OutputPlan::default();
         assert!(empty.refuse_restart("d", "x").is_ok());

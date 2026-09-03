@@ -2036,8 +2036,8 @@ impl<'m> RasCore<'m> {
             // `psi = 1` the whole row is then `R_P - R_P = 0` - which is the
             // property `bounded` exists for and which it does NOT have on a
             // variable-density equation without this term. It is also
-            // precisely §85.7's first open candidate, "the d(rho)/dt half of
-            // the difference above, which `bounded` does not touch".
+            // precisely §86.4's second half, "the d(rho)/dt half of the
+            // difference above, which `bounded` does not touch".
             if let Some(mw) = mass {
                 crate::fv::fvm_sp(gpu, &self.fv, &mut self.a, self.mesh, mw.cont_ddt, -1.0)?;
             }

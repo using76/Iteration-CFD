@@ -19,7 +19,7 @@
 // >>> token added (`PrtModel`, which defaults to `constant` and is absent
 // >>> here), so it changes nothing in this file. The blocks in between are
 // >>> kept, in order, as the record of how this gate got there.
-// STATUS (SPEC-LIT S34, RUN and REPORTED - docs/07-fire-solver.md S1.1 has
+// STATUS (SPEC-LIT S34, RUN and REPORTED - docs/07-lowmach-solver.md S1.1 has
 // the full table): converges to a bit-identical fixed point (`|U|` residual
 // 1.4e-10, T unchanged in its last printed digit from iteration 5 000
 // through 40 000). Measured y+ 56.8/57.7/58.5, T_w = 316.861 K,
@@ -49,7 +49,7 @@
 // had to distinguish now coincide. H = 0.04 m (the y extent below), so
 // D_h = 0.08 m - the SAME number the duct's own "heated perimeter"
 // convention already used, kept on purpose so this rebuild is comparable
-// to the duct numbers on record in docs/07-fire-solver.md S1.1.
+// to the duct numbers on record in docs/07-lowmach-solver.md S1.1.
 //
 // q_w = 500 W/m^2 on each of the two hot walls (unchanged from the duct
 // version - a property of the wall, not the cross-section). The
@@ -65,7 +65,7 @@
 //
 // Momentum source unchanged (3.9 m/s^2, the duct version's own Blasius
 // estimate for Re_Dh ~ 8000) - removing the duct's side-wall drag is
-// EXPECTED to raise U_b (see the run report in docs/07-fire-solver.md
+// EXPECTED to raise U_b (see the run report in docs/07-lowmach-solver.md
 // S1.1), not something recalibrated away; the sanity checks in SPEC-LIT
 // S34's own task (U_b below a laminar solve of the same mesh, U_b/u_tau in
 // 15-17 for a genuinely developed plane channel) are what this rebuild is
@@ -100,7 +100,7 @@
 // S35.2): rerunning the resolved twin (`channelPeriodicFluxLowRe.jsonc`)
 // from T0 = 293.15 K and T0 = 400 K now converges to the IDENTICAL T_mean
 // (293.574 K, every printed digit) from either start - see that file's own
-// header and `docs/07-fire-solver.md` S1.1 for the full table.
+// header and `docs/07-lowmach-solver.md` S1.1 for the full table.
 // ============================================================================
 //
 // ============================================================================
@@ -114,7 +114,7 @@
 // different claims and the second is the weaker one. That f is INFERRED from
 // the force balance on this file's own `bodyForce`, not measured at the wall
 // - `ofgpu-lowmach` now measures the wall traction directly and prints both,
-// but this case has NOT been rerun. See docs/07-fire-solver.md S1.1.
+// but this case has NOT been rerun. See docs/07-lowmach-solver.md S1.1.
 // SUPERSEDED: it has since been rerun, and the measured f retired the
 // Reynolds-analogy verdict above - see the S32.5.3/S35.3 block at the end of
 // this header.
@@ -162,7 +162,7 @@
 // balance by -13.6%, which is this wall function's own distance from local
 // equilibrium, quantified for the first time.
 //
-// See docs/07-fire-solver.md S1.1's last subsection for the full account,
+// See docs/07-lowmach-solver.md S1.1's last subsection for the full account,
 // including the isothermal controls and a S13.4 defect found on the way
 // (ofgpu-lowmach does not read numerics.div["div(phi,U)"] or
 // numerics.relaxation.U at all).
@@ -215,7 +215,7 @@
 // a wall. SPEC-LIT S3.1 now forbids defaulting a momentum equation to it, and
 // S32.5.5 has the four-run isolation.
 //
-// See docs/07-fire-solver.md S1.1's last subsection for the full account.
+// See docs/07-lowmach-solver.md S1.1's last subsection for the full account.
 // ============================================================================
 //
 // ============================================================================
@@ -223,7 +223,7 @@
 // UNCHANGED): S37 adds a selectable variable turbulent Prandtl number
 // (Kays-Crawford), defaulting to `constant`, and this leg is the control for
 // the experiment that measures it - see `channelPeriodicFluxLowRe.jsonc`'s
-// own header and docs/07-fire-solver.md S1.1's last subsection.
+// own header and docs/07-lowmach-solver.md S1.1's last subsection.
 //
 //   THIS MESH        constant        KaysCrawford     change
 //   T_w              317.483 K       317.828 K
@@ -279,7 +279,7 @@
 // (still OPEN, still a FRICTION finding and not a thermal one). At PrtModel
 // KaysCrawford: Nu 63.5527, -7.3% / -14.1% / +34.0%.
 //
-// See docs/07-fire-solver.md S1.1's last subsection and SPEC-LIT S26.1.
+// See docs/07-lowmach-solver.md S1.1's last subsection and SPEC-LIT S26.1.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

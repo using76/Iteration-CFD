@@ -41,7 +41,7 @@
   things land, and only two of them are code:
 
     * the vapour itself, as a source on Y_v (a whole-field explicit source,
-      the seam S61.2's soot already uses);
+      the seam ScalarTransport::correct_with_source provides);
     * the enthalpy that mass carries in, cp_g (T_p - T_g) per kilogram,
       added to the SAME energy registry S68 already writes; and
     * the volume the mass makes at fixed p0, mdot/rho, which is a new term

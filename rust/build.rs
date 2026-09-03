@@ -29,14 +29,14 @@ use std::process::Command;
 
 /// Every translation unit in `cuda/` that holds device code.
 /// Each becomes one module loaded at run time.
-const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "combustion.cu", "radiation.cu", "fvdom.cu", "rheology.cu", "ke_variants.cu", "twostep.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "wsgg.cu", "soot.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu", "meshgeom.cu", "meshemit.cu", "marangoni.cu", "lmtrans.cu"];
+const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "rheology.cu", "ke_variants.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu", "meshgeom.cu", "meshemit.cu", "marangoni.cu", "lmtrans.cu"];
 
 /// Translation units compiled with `-fmad=false`.
 ///
 /// nvcc contracts `a*b + c` into a single fused multiply-add by default and
 /// rustc never does, so one rounding meets two and the device answer differs
 /// from the host answer in the last bit. Everywhere else in this crate that is
-/// accepted and measured (SPEC-LIT §62.8, §67.11): the device is the reference
+/// accepted and measured (SPEC-LIT §67.11): the device is the reference
 /// and the host is a check, so a fused product is simply the better answer.
 ///
 /// `meshgeom.cu` is the exception, and it is an exception of KIND rather than

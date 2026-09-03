@@ -56,7 +56,7 @@
 //! experiment and the §32.5 friction factor are all properties of THIS
 //! loop, and of nothing above it.
 //!
-//! Their write-up is `docs/07-fire-solver.md` §1 and §1.1.
+//! Their write-up is `docs/07-lowmach-solver.md` §1 and §1.1.
 //!
 //! # One unit of work
 //!
@@ -890,49 +890,6 @@ fn load_initial_fields(
     }
 }
 
-/// **SPEC-LIT §13.4.** The `physics.fire` sub-blocks this driver solves
-/// nothing for, refused by name rather than parsed and dropped.
-///
-/// `ofgpu-lowmach` is §25/§26 and the equations under them; a combusting,
-/// sooting or radiating medium is a different driver, and a case carrying
-/// one of those blocks is asking for a heat release this loop will never
-/// register on `EnergySources`. Serde accepts every key of them - they are
-/// part of the case FORMAT - so nothing but this stops the run proceeding at
-/// `q''' = 0` and reporting a wall heat balance that closes for the wrong
-/// reason. That is exactly §13.4.1's defect class, and the cases it would
-/// bite are the ones whose whole point is the heat.
-///
-/// Named, with what does exist beside it: `-heaterPower` and §35.1's
-/// thermostat are the two heat terms this driver has.
-fn refuse_chemistry_blocks(lowered: Option<&ofgpu::io::case_json::LoweredCase>) -> Result<()> {
-    let Some(l) = lowered else { return Ok(()) };
-    // All of them at once, not the first one found: a case naming radiation
-    // must name combustion too (the format requires it), so refusing one at a
-    // time would report the least interesting half of what was asked for.
-    let named: Vec<&str> = [
-        ("physics.fire.combustion", l.combustion.is_some()),
-        ("physics.fire.radiation", l.radiation.is_some()),
-        ("physics.fire.soot", l.soot.is_some()),
-    ]
-    .into_iter()
-    .filter_map(|(block, present)| present.then_some(block))
-    .collect();
-    if named.is_empty() {
-        return Ok(());
-    }
-    ofgpu::io::contract::unsupported_note(
-        &named.join(", "),
-        "present",
-        &["-heaterPower", "sources[] thermostat"],
-        "ofgpu-lowmach solves SPEC-LIT §25's low-Mach formulation and §26's \
-         energy equation and nothing above them, so a block naming a reacting, \
-         sooting or radiating medium would be read here and the heat it asks \
-         for never registered on §18's source registry",
-        "no reacting or radiating medium at all",
-        (),
-    )
-}
-
 /// `Simple` owns `U` and `phi` in the same struct, so
 /// `field_setup::compute_phi_from_u(gpu, s.phi_mut(), s.u(), hm)` cannot be
 /// called directly - the two accessors borrow all of `s`, mutably and
@@ -1006,7 +963,7 @@ fn resolve_ddt(cc: &CaseControls, transient: bool) -> Result<DdtScheme> {
 ///
 /// `ofgpu-lowmach` advances energy and the momentum/pressure system ONCE
 /// per unit of work, in that order, with no
-/// loop around them - `docs/07-fire-solver.md`'s own "one outer corrector"
+/// loop around them - `docs/07-lowmach-solver.md`'s own "one outer corrector"
 /// note, and the reason `is_final` is simply `transient` at the call site.
 /// `nCorrectors` (the PISO pressure correctors, SPEC-LIT §14) IS honoured,
 /// because `Simple::correct_outer` runs them, and so is `momentumPredictor`;
@@ -1030,7 +987,7 @@ fn check_outer_correctors(cc: &CaseControls, json: bool) -> Result<()> {
         &["1"],
         "ofgpu-lowmach advances energy and the momentum/pressure system \
          once per step and has no PIMPLE outer loop around them yet \
-         (docs/07-fire-solver.md). nCorrectors - the PISO \
+         (docs/07-lowmach-solver.md). nCorrectors - the PISO \
          pressure correctors - is honoured and is the knob that is here; \
          ofgpu-buoyant has the outer loop",
         "1 outer corrector",
@@ -1308,7 +1265,7 @@ momentum predictor {}{}",
     }
 }
 
-/// **SPEC-LIT §65.4's memory, MEASURED rather than counted.**
+/// **Device memory, MEASURED rather than counted.**
 ///
 /// A field count times a cell count times eight bytes is arithmetic on a
 /// design, and arithmetic on a design is not a measurement of a program:
@@ -1318,14 +1275,14 @@ momentum predictor {}{}",
 /// reports the whole device, and on a desktop card that includes the
 /// compositor and every browser tab, so the baseline is taken after the CUDA
 /// context exists and BEFORE the first field does. What the line prints is
-/// therefore what THIS RUN allocated, which is the quantity §65.7's table
-/// needs and the only one that can be compared between two configurations on
-/// the same machine.
+/// therefore what THIS RUN allocated, which is the only figure that can be
+/// compared between two configurations on the same machine.
 ///
 /// Sampled at three points - after setup, after the first step, after the
 /// last - not every step. Nothing in the time loop allocates after the first
-/// iteration (65.4), and a `cuMemGetInfo` per step would put a driver round
-/// trip and a stream synchronise inside the wall time the same table quotes.
+/// iteration, and a `cuMemGetInfo` per step would put a driver round trip
+/// and a stream synchronise inside the wall time a run is also being judged
+/// on.
 struct MemWatch {
     baseline_free: usize,
     total: usize,
@@ -1351,7 +1308,8 @@ impl MemWatch {
     }
 
     /// `peak MiB own | resident of total MiB | B/cell`, the three numbers
-    /// §65.7's table carries. The per-cell figure is the one that can be
+    /// a storage claim is checked against. The per-cell figure is the one
+    /// that can be
     /// extrapolated to another mesh, which is what any storage ceiling
     /// stated as arithmetic has to be checked against.
     fn describe(&self, n_cells: usize) -> String {
@@ -1373,7 +1331,7 @@ fn run(o: &Options) -> Result<()> {
 
     let gpu = Gpu::new(0)?;
     println!("{}", device_banner(&gpu, "lowmach")?);
-    // Before the mesh, before the first field - §65.4.
+    // Before the mesh, before the first field.
     let mut mem = MemWatch::new(&gpu)?;
 
     let (hm, mut cc, _lowered_for_controls): (HostMesh, CaseControls, _) =
@@ -1420,10 +1378,13 @@ fn run(o: &Options) -> Result<()> {
     let (fields, lowered) =
         load_initial_fields(&o.case_path, &hm, diss_name, selection.model.name())?;
 
-    // Before anything is reconciled or allocated: a case built for a
-    // reacting medium is refused for THAT reason, not for whichever of its
-    // other settings this driver happens to check first.
-    refuse_chemistry_blocks(lowered.as_ref())?;
+    // A case built for a reacting medium is refused by NAME, before
+    // anything is reconciled or allocated, and it is refused by the reader
+    // rather than here - `case_json::refuse_held_back_blocks`. It has to be
+    // the reader's job: every driver in this engine would otherwise need the
+    // same check, and the one that forgot it would run a burner case at
+    // `q''' = 0` and report a wall heat balance closing perfectly because
+    // there was no fire in it.
 
     let transient = o.end_time > 0.0;
     let dt: Scalar = if transient { o.delta_t as Scalar } else { 1.0 };
@@ -3714,13 +3675,9 @@ mod lowmach_tests {
         /// knob. `293.15` is what every pair below runs at.
         t_amb: &'static str,
         /// A whole `physics.fire` block, verbatim (including the leading
-        /// comma) or empty - the blocks `refuse_chemistry_blocks` exists to
-        /// turn away. Empty is what every pair below runs with, so the one
-        /// row that fills it in costs the others nothing. Non-empty also
-        /// switches on the `Y_F` field the case format requires beside a
-        /// combustion block, because a case that named the block and not the
-        /// field would be refused by the LOWERING and would test that
-        /// instead.
+        /// comma) or empty - the blocks the READER turns away by name.
+        /// Empty is what every pair below runs with, so the one row that
+        /// fills it in costs the others nothing.
         fire: &'static str,
         /// The whole `output` block, verbatim (including the leading comma)
         /// or empty - SPEC-LIT §44. Empty is "the command line decides",
@@ -3771,9 +3728,11 @@ mod lowmach_tests {
             relax_u, relax_p, relax_t, relax_k, t_tol, u_tol,
             correctors, prt, ddt, algo_kind, rheology, wall_t, t_amb, fire, output,
         } = k;
-        // The case format requires `initial.Y_F` beside a combustion block
-        // and wants a boundary value for it; both are absent otherwise,
-        // because this driver reads neither.
+        // A case that names a `physics.fire` block is refused by the reader
+        // before it is lowered, so the only thing the `fire` knob is for is
+        // proving exactly that. It carries `initial.Y_F` and a boundary value
+        // for it too, because the burner cases it stands in for did, and a
+        // refusal that only fires on the block would leave those two silent.
         let (yf_patch, yf_initial) = if fire.is_empty() {
             ("", "")
         } else {
@@ -4092,17 +4051,27 @@ mod lowmach_tests {
     }
 
     /// **SPEC-LIT §13.4.** A case that asks for a reacting, sooting or
-    /// radiating medium is refused by name, not run at `q''' = 0`.
+    /// radiating medium is refused BY NAME before this driver ever sees it,
+    /// and not run at `q''' = 0`.
     ///
-    /// The case FORMAT carries `physics.fire`, so serde accepts every key of
-    /// it and the lowering builds the coefficients; nothing but
-    /// [`refuse_chemistry_blocks`] stands between a burner case and a run
-    /// that reports a wall heat balance closing perfectly because there was
-    /// no fire in it. All three sub-blocks are checked, because a case may
-    /// name radiation or soot without ever reaching the combustion arm.
+    /// This is the driver's end of `case_json::refuse_held_back_blocks`, run
+    /// through the real reader on the real case text this file writes: the
+    /// engine carries no chemistry, and the failure mode it is guarding
+    /// against is a burner case that runs to completion and reports a wall
+    /// heat balance closing perfectly because there was no fire in it. All
+    /// three sub-blocks are checked, because a case may name radiation or
+    /// soot without ever reaching the combustion arm.
+    ///
+    /// That the refusal ALSO survives `-permissive` is
+    /// `io::case_json::tests::a_case_written_for_a_reacting_medium_is_refused_by_name`'s
+    /// to hold: the flag is process-wide and several tests in THIS binary
+    /// read it without taking the guard, so turning it on here would refuse
+    /// nothing and break them instead.
     #[test]
     fn a_case_that_asks_for_a_reacting_medium_is_refused_by_name() {
         let _g = ofgpu::io::contract::permissive_test_guard();
+        ofgpu::io::contract::set_permissive(false);
+        let mut got = Vec::new();
         for (block, fire) in [
             (
                 "physics.fire.combustion",
@@ -4117,21 +4086,23 @@ mod lowmach_tests {
                 r#", "fire": { "combustion": {}, "soot": { "model": "prescribedYield", "yield": 0.024 } }"#,
             ),
         ] {
-            let (_, _, lowered) =
-                lower_knobs(&Knobs { fire, ..Knobs::default() }, "refusefire");
-            let e = refuse_chemistry_blocks(Some(&lowered))
-                .expect_err("a chemistry block must be refused, not dropped")
-                .to_string();
+            let dir = scratch_dir("refusefire");
+            let path = dir.join("case.jsonc");
+            std::fs::write(&path, knob_case_text(&Knobs { fire, ..Knobs::default() }))
+                .expect("write case");
+            got.push((block, read_case_jsonc(&path).err().map(|e| e.to_string())));
+        }
+        for (block, e) in got {
+            let e = e.unwrap_or_else(|| panic!("{block} was read and not refused"));
             assert!(e.contains(block), "the refusal must name {block}: {e}");
             assert!(
-                e.contains("-heaterPower"),
-                "the refusal must name what IS available: {e}"
+                e.contains("initial.Y_F"),
+                "the refusal must name the species entry that went with it: {e}"
             );
         }
-        // And the baseline case - no `physics.fire` at all - is not refused,
-        // or the check above would pass for the wrong reason.
-        let (_, _, plain) = lower_knobs(&Knobs::default(), "refusenone");
-        refuse_chemistry_blocks(Some(&plain)).expect("a case with no fire block must run");
+        // And the baseline case - no `physics.fire` at all - is read, or the
+        // check above would pass for the wrong reason.
+        lower_knobs(&Knobs::default(), "refusenone");
     }
 
     /// SPEC-LIT §13.4: `ofgpu-lowmach` has no PIMPLE outer loop, so a case
@@ -4210,7 +4181,7 @@ mod lowmach_tests {
     /// byte of the case file but one, must write DIFFERENT fields. A pair
     /// that comes back bit-identical means the setting is inert - which is
     /// precisely how the defect this file records was demonstrated in the
-    /// first place (`docs/07-fire-solver.md` §1.1: "two 500-iteration runs
+    /// first place (`docs/07-lowmach-solver.md` §1.1: "two 500-iteration runs
     /// ... differing only in `div(phi,U)` print BIT-IDENTICAL residual and
     /// bulk-state lines").
     ///

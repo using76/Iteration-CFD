@@ -8,7 +8,7 @@
 
 ## 개요
 
-meteor-cfd는 시간 적분 루프 전체가 GPU에 머무르도록 설계된 비정렬 격자 유한체적 CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 루프 안에서 장치 메모리 할당도, 필드 데이터의 호스트 전송도 발생하지 않습니다. **단일 GPU 전용**이며, 쓰임새는 비압축성·저마하 유동입니다 — RANS/LES/하이브리드 난류, 부력 플룸, 저마하 화재(연소·복사·그을음), 2상 VOF, 켤레 열전달, 팬과 다공성 점프를 갖춘 환기 및 데이터센터 기류. 수치 코어 전체를 공개 문헌으로부터 직접 구현했으며 모든 수식은 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)에 원논문 인용과 함께 명세되어 있습니다. 검증은 인위해법(MMS), 해석해, 공개 벤치마크만을 사용하며 **다른 CFD 코드와 비교하지 않습니다.**
+meteor-cfd는 시간 적분 루프 전체가 GPU에 머무르도록 설계된 비정렬 격자 유한체적 CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 루프 안에서 장치 메모리 할당도, 필드 데이터의 호스트 전송도 발생하지 않습니다. **단일 GPU 전용**이며, 쓰임새는 비압축성·저마하 유동입니다 — RANS/LES/하이브리드 난류, 부력 플룸, 가변밀도 저마하 유동, 2상 VOF, 켤레 열전달, 면대면 복사, 라그랑주 분무, 팬과 다공성 점프를 갖춘 환기 및 데이터센터 기류. 수치 코어 전체를 공개 문헌으로부터 직접 구현했으며 모든 수식은 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)에 원논문 인용과 함께 명세되어 있습니다. 검증은 인위해법(MMS), 해석해, 공개 벤치마크만을 사용하며 **다른 CFD 코드와 비교하지 않습니다.**
 
 Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으로 단정밀도), 대상은 NVIDIA GPU 한 장, 의존성은 cudarc와 thiserror뿐입니다(AMGX는 선택 기능).
 
@@ -59,10 +59,10 @@ cargo test --release   1,853 passed, 0 failed, 6 ignored   (모든 타깃 합계
 
 ofgpu-validate         901 / 901 checks passed
                        853개는 실시간 계산, 48개는 기록된 측정값 재생
-                       이어서 MISSES 6개와 OPEN 5개를 이름으로 부르는 목록을 출력
+                       이어서 MISSES 2개와 OPEN 5개를 이름으로 부르는 목록을 출력
 ```
 
-그 목록은 손으로 유지되는 것이 아니라, 게이트가 자신의 판정을 보고하는 바로 그 지점에서 들어가는 레지스트리로부터 **생성**됩니다(SPEC-LIT §69). 판정을 출력하는 것과 등록하는 것이 같은 호출이므로 열한 개 전부가 매 실행 이름으로 불리며, 열두 번째가 추가되더라도 목록에서 빠질 수 없습니다. **`ofgpu-validate`가 실행하는 모든 항목은 통과합니다. 그것은 "이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다"와 다른 진술이며, 둘을 혼동해서는 안 됩니다.**
+그 목록은 손으로 유지되는 것이 아니라, 게이트가 자신의 판정을 보고하는 바로 그 지점에서 들어가는 레지스트리로부터 **생성**됩니다(SPEC-LIT §69). 판정을 출력하는 것과 등록하는 것이 같은 호출이므로 일곱 개 전부가 매 실행 이름으로 불리며, 여덟 번째가 추가되더라도 목록에서 빠질 수 없습니다. **`ofgpu-validate`가 실행하는 모든 항목은 통과합니다. 그것은 "이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다"와 다른 진술이며, 둘을 혼동해서는 안 됩니다.**
 
 ---
 
@@ -77,7 +77,7 @@ cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 12
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 ```
 
-검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열여섯 개 실행 파일(`ofgpu-lowmach`, `ofgpu-fire`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
+검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열다섯 개 실행 파일(`ofgpu-lowmach`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
 
 ---
 
@@ -89,7 +89,6 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 | 압력–속도 | SIMPLE, SIMPLEC, PISO, PIMPLE. Rhie–Chow 보간이며 체적력은 셀 값을 보간하지 않고 면에서 직접 처리 |
 | 난류 | RANS: 표준·realizable·RNG k-ε, Wilcox k-ω, Menter SST, Launder–Sharma 저Re, Spalart-Allmaras(4변종). LES: Smagorinsky, WALE, Deardorff. 하이브리드: DES97·DDES·IDDES. 천이: k-ω SST-LM. 벽 처리: 표준·연속 벽함수, `lowRe` 적분, Jayatilleke 열 벽함수, 거칠기 |
 | 다상·수송 | VOF(계면 압축, Zalesak FCT, CSF 표면장력, 정적·이력·동적 접촉각), 다성분 화학종, 일반화 뉴턴 점성 6종, Darcy–Forchheimer 다공성, 비Boussinesq 부력 |
-| 화재 | 저마하 `p = p0(t) + p~`, EDM 단일 단계와 직렬 2단계, 임계화염온도 소염, 회색 P1과 fvDOM(level-symmetric S4 24 종좌표), WSGG 스펙트럼 복사, 그을음(연기점·지정수율), 개방 복사 경계 |
 | 켤레 열전달 | 고체 영역, 접촉저항, 조화평균 계면 전도도, 유입구 하나와 유출구 하나까지의 유체 영역 |
 | 환기·데이터센터 | 팬 성능곡선(AMCA 210 보정), 다공성 점프, 습공기(Hyland–Wexler), RCI·RTI·SHI·RHI 지표 |
 | 라그랑주 파셀 | SoA 풀, Schiller–Naumann 항력, 양방향 결합, 증발과 증기 결합, Bai-Gosman 벽 충돌 지도 — **라이브러리 API로만** |
@@ -102,21 +101,18 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 - **압축성·천음속 없음.** 밀도 가중 시간미분은 VOF에서 쓰이지만 압력 방정식은 비압축성입니다.
 - **유한율(아레니우스) 화학 없음** — 경직 ODE 적분기도, 야코비안도, 반응 메커니즘도 없습니다.
 - **Crank–Nicolson은 저완화 방정식과 함께 쓸 수 없습니다** — 묵시적으로 Euler로 대체하지 않고 사유를 오류로 보고합니다.
-- **면대면 복사와 라그랑주 스프레이는 케이스 형식이 없습니다.** 둘 다 명세되고 게이트되어 있으나 어느 드라이버 바이너리도 케이스 파일에서 밀폐공간이나 스프레이를 읽지 않습니다(§50.12, §13.4.2).
+- **연소·그을음·참여 매질 복사가 없습니다.** 반응 모델도, 그을음 방정식도, P1·fvDOM 솔버도 이 엔진에 없습니다. 두 복사 모델 이름은 `radiationModel` 선택기가 여전히 **인식**하되 아무것도 해석하지 않으며(§13.4), `physics.fire`, `physics.fire.combustion`, `physics.fire.radiation`, `physics.fire.soot`, `initial.Y_F`를 이름하는 케이스는 무엇을 고른 것이고 대신 무엇이 있는지와 함께 **이름으로 거부**됩니다 — 읽고 버리는 일은 없습니다. 여기서 복사는 §49/§50의 *투명* 매질을 가로지르는 면대면 교환을 뜻합니다.
+- **면대면 복사·화학종 수송·라그랑주 스프레이는 케이스 형식이 없습니다.** 셋 다 라이브러리 API로 명세되고 게이트되어 있으나 어느 드라이버 바이너리도 케이스 파일에서 밀폐공간·화학종 집합·스프레이를 읽지 않습니다(§50.12, §13.4.2).
 - **파셀은 스플래시 자식 액적을 만들지 않고, 막(film) 수송이 없으며, 복사를 흡수하지 않습니다**(§78.11, §68.13).
 - **적응 세분화는 어떤 솔버에도 연결되어 있지 않습니다** — 면 플럭스를 옮기지 않고, 적응 후 압력 투영도 없습니다.
 - **AMGX는 기본 비활성**이며, 비활성 상태에서도 선택기가 AMGX를 "unavailable"로 명시 보고합니다.
 - **DES 계열이 발표된 박리 유동 통계를 재현한다고 주장하지 않으며**, Spalart-Allmaras의 TMR 평판 게이트는 실행하지 않습니다(§57.12, §56.11).
 
-**그리고 빗나가는 게이트 여섯 개.** `ofgpu-validate`가 매 실행 이름으로 부르며, 아래는 그 이름 그대로입니다.
+**그리고 빗나가는 게이트 두 개.** `ofgpu-validate`가 매 실행 이름으로 부르며, 아래는 그 이름 그대로입니다.
 
 | 게이트 | 판정 |
 |---|---|
-| §42.8b Gate 2 — NIST Reduced Scale Enclosure 구획 스윕 (Bryner, Johnsson & Pitts, NISTIR 5568) | **MISSES.** 200 kW를 넘으면 예측 천장 CO가 최대 20배 낮음. 진단은 화학이 아니라 환기 — 연소 효율 15–58 % |
 | §60.5 Gate 5 — 정사각 밀폐공간 켤레 자연대류 (Kaminski & Prakash 1986) | **MISSES**, 전도 지배 쪽에서 3 % 바를: `Kr = 0.1`에서 −7.11 %, `Kr = 10`에서 −0.07 %. 1차 문헌은 유료라 끝내 읽지 못했고 비교는 Belazizia 등(2012)이라는 **2차 출처**에 대한 것 |
-| §62.12 Gate 1-E — WSGG 전방사율 대 RADCAL (Grosshandler, NIST TN 1402) | **MISSES.** 108점 중 58점이 ±10 % 밖, 최악 30.52 %. 편향이 온도에 대해 단조이며, 어느 모형도 진실이 아닙니다 |
-| §61.8 Gate 61-A — 예측 그을음 수율 대 Tewarson (프로판 0.024 kg/kg) | **MISSES.** `cases/burnerPlumeResolved.jsonc`에서 262,144셀 중 296셀이 1375 K 창에 도달해 **0.0124 kg/kg — 1.94배**. 통과로 보고하지 않습니다: 그 leg가 2.949 kW 공급에 4.559 kW의 미연 연료를 내보냅니다 |
-| §62.12 Gate 4 — NIST 37 cm 버너 복사분율 (Sung 등, NIST TN 2162r1) | **MISSES.** 케이스가 복사분율이 의미를 갖는 상태에 애초에 도달하지 못합니다 — 연소 효율 **226 %** |
 | §68.12 Gate 68-C — Theobald(1981) 소방 수류 90회 | **MISSES**, 기체를 정지시킨 채로: 평균 측정 거리의 **61.29 %**. 항력 없는 진공 괄호가 198.65 %이므로 던지는 거리를 결정하는 것은 유입 공기입니다 |
 
 **판정이 `OPEN`인 것이 다섯 개 더** 있으며 같은 목록의 둘째 그룹으로 출력됩니다. 셋은 §32.4의 평판 채널을 측정값이 아니라 **상관식**(Gnielinski 1976)에 견준 것이고, 넷째 `78-D`는 발표된 두 스플래시 기준이 Weber 수로 4.78배 **서로** 어긋나기 때문이며, 다섯째 §88.10 Gate 88-T는 T3A 평판의 측정된 개시 `Re_x`를 구하지 못해 비교를 닫지 못했기 때문입니다.
@@ -128,10 +124,10 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 | 문서 | 내용 |
 |---|---|
 | **사용자 안내서** (별도 페이지) | 빌드, 케이스 파일, 설정 계약, 실행, 출력, 못 하는 것 |
-| **기술 안내서** (별도 페이지) | 이산화, 경계조건, 압력–속도, 난류, 저마하, 연소·복사, 검증, GPU 상주·메쉬 적응·성능 |
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 86개 절. 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
+| **기술 안내서** (별도 페이지) | 이산화, 경계조건, 압력–속도, 난류, 저마하, 면대면 복사, 검증, GPU 상주·메쉬 적응·성능 |
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 79개 절. 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | 파일별 출처와 설계 결정, 라이선스 감사 기록, 서드파티 고지 |
-| [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | 시험 케이스 형상, 그리고 `docs/`의 색인 — 모델 카탈로그, GPU 이식성, 입출력 재설계와 JSONC 스키마, `ofgpu-lowmach`의 저-마하 정식화와 벽 열전달 게이트 기록, `ofgpu-fire`의 화재 모델 |
+| [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | 시험 케이스 형상, 그리고 `docs/`의 색인 — 모델 카탈로그, GPU 이식성, 입출력 재설계와 JSONC 스키마, 그리고 `ofgpu-lowmach`의 저-마하 정식화와 벽 열전달 게이트 기록 |
 
 ---
 
@@ -214,7 +210,7 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 ### 부력
 - Rehm, R. G., & Baum, H. R. (1978). The equations of motion for thermally driven, buoyant flows. *Journal of Research of the National Bureau of Standards*, 83, 297–308. — §9, §25, §77
 - Majda, A., & Sethian, J. (1985). *Combustion Science and Technology*, 42, 185. — §25
-- Spiegel, E. A., & Veronis, G. (1960). *Astrophysical Journal*, 131, 442. — §9 (the `ΔT/T << 1` requirement, which a fire plume does not meet)
+- Spiegel, E. A., & Veronis, G. (1960). *Astrophysical Journal*, 131, 442. — §9 (the `ΔT/T << 1` requirement, which a strongly heated plume does not meet)
 - Rodi, W. (1987). *Journal of Geophysical Research*, 92, 5305–5328. — §17
 - Henkes, R. A. W. M., van der Vlugt, F. F., & Hoogendoorn, C. J. (1991). *International Journal of Heat and Mass Transfer*, 34, 377–388. — §17
 ### 켤레 열전달
@@ -233,24 +229,10 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 - Belazizia, A., Benissaad, S., & Abboudi, S. (2012). Effect of wall conductivity on conjugate natural convection in a square enclosure with finite vertical wall thickness. *Advanced Theoretical and Applied Mechanics*, 5, no. 4, 179–190. Open access at `m-hikari.com/atam/atam2012/atam1-4-2012/` — an independent published solution of the Kaminski–Prakash configuration, itself validated against it. **The SECONDARY source Gate 5 actually compares against.** — §60.5
 - Qu, W., & Mudawar, I. (2002). Analysis of three-dimensional heat transfer in micro-channel heat sinks. *International Journal of Heat and Mass Transfer*, 45, 3973–3985. DOI `10.1016/S0017-9310(02)00101-1` — §47.12's Gate 6, the semiconductor gate. Read in full from the authors' own public copy. **§79.12 runs it and it PASSES**: both substrate temperatures fall inside the experimental uncertainty the paper draws. — §79
 - Kawano, K., Minakami, K., Iwasaki, H., & Ishizuka, M. Micro channel heat exchanger for cooling electrical equipment. *ASME HTD-361-3/PID-3* (1998) 173–180. — the inlet and outlet thermal-resistance measurements Gate 6 is held against. **NOT OBTAINED** (an ASME conference volume; no copy found), so the comparison is a **digitisation of Qu & Mudawar's Fig. 4**, which §79.12's Disclosure 1 states. — §79
-### 연소, 그을음, 복사
-- Magnussen, B. F., & Hjertager, B. H. (1977). *Proceedings of the Combustion Institute*, 16, 719–729. — §27 (the eddy-dissipation model), §61.3 (its soot-burnout rate, the Khan–Greeves partner)
-- McGrattan, K., McDermott, R., & Floyd, J. E. (2022). A simple two-step reaction scheme for soot and CO. *Proceedings of the Tenth International Seminar on Fire and Explosion Hazards (ISFEH10)*, Oslo, 23–27 May 2022. `https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=927294` — a NIST work, US public domain; fetched and read in full, and its Eqs. (1)–(5) are the model implemented. — §42
+### 복사
 - McGrattan, K., Hostikka, S., McDermott, R., Floyd, J., Weinschenk, C., Overholt, K., Vanella, M., et al. *Fire Dynamics Simulator Technical Reference Guide*, NIST SP 1018-1. NIST, US public domain; read locally from `reference/fds/Manuals/` with `reference/fds/LICENSE.md` read verbatim. **No FDS source code was read for these sections.** — §25, §42, §43, §66, §68, §76
-- Beyler, C. (2016). Flammability limits of premixed and diffusion flames. Chapter in *SFPE Handbook of Fire Protection Engineering*, 5th ed. — §43 (the critical-flame-temperature and auto-ignition values, as quoted by two independent NIST sources both read here)
-- Morehart, J. H., Zukoski, E. E., & Kubota, T. NIST-GCR-90-585 (1991). — §43 (the self-extinction bracket, as quoted by the FDS Technical Reference Guide)
-- Bryner, N., Johnsson, E., & Pitts, W. NISTIR 5568 (1994). — §42.8b, the NIST Reduced Scale Enclosure compartment sweep, 50–600 kW: measured ceiling CO volume fraction below `0.0005` under 100 kW, rising to `0.02–0.035` at 400–640 kW. **MISSES — Gate 2.** The published statistics for this model over the RSE 1994 / RSE 2007 / FSE 2008 set are model bias 1.08 and model relative standard deviation 0.50 against an experimental relative standard deviation of 0.19; that is the bar.
-- Steckler, Quintiere & Rinkinen (1982) — the compartment doorway-flow measurements. Named in §42.8b as the prerequisite the Reduced Scale Enclosure miss points to, and **NOT run**; the paper itself has not been read here, so no report number or title is asserted for it.
-- Lautenberger, C. W., de Ris, J. L., Dembsey, N. A., Barnett, J. R., & Baum, H. R. (2005). A simplified model for soot formation and oxidation in CFD simulation of non-premixed hydrocarbon flames. *Fire Safety Journal*, 40(2), 141–176. DOI `10.1016/j.firesaf.2004.10.002`; author manuscript free at `https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=101148` — §61 (the laminar-smoke-point model, and every constant in §61.3)
-- Kent, J. H., & Honnery, D. (1990). *Combustion and Flame*, 79, 287. — §61 (the measured formation-rate map the smoke-point polynomials are shaped to)
-- Tewarson, A. *SFPE Handbook*, ch. 36, Table A.40, as quoted in the FDS Validation Guide (NIST, public domain). — §61.8, propane post-flame soot yield `0.024 kg/kg`. **MISSES — Gate 61-A**: `0.000` here; `0.0124` (a factor of 1.94) on the resolved burner of §85.10.
-- Modest, M. F. *Radiative Heat Transfer*, 3rd ed., Academic Press (2013), ch. 5, 11, 15–17. — §28, §36, §50, §62, §65
-- Fiveland, W. A. Discrete-ordinates solutions of the radiative transport equation for rectangular enclosures. *Journal of Heat Transfer*, 106 (1984) 699. DOI `10.1115/1.3246741` — §36, §65
-- Truelove, J. S. Discrete-ordinate solutions of the radiation transport equation. *Journal of Heat Transfer*, 109 (1987) 1048. DOI `10.1115/1.3248182` — §36, §65 (the S_N quadrature sets and the two conditions that fix their directions and weights; the S4 digits in §36.2 are this crate's own closed-form solve, not a copied table)
+- Modest, M. F. *Radiative Heat Transfer*, 3rd ed., Academic Press (2013), ch. 5. — §50
 - Hottel, H. C., & Sarofim, A. F. *Radiative Transfer*, McGraw-Hill (1967), ch. 3, 5. — §50 (the net-radiation exchange method; the method of images, named in §50.9's refusal), §62 (the weighted-sum construction itself)
-- Bordbar, M. H., Węcel, G., & Hyppänen, T. (2014). A line by line based weighted sum of gray gases model for inhomogeneous CO2–H2O mixture in oxy-fired combustion. *Combustion and Flame*, 161(9), 2435–2445. DOI `10.1016/j.combustflame.2014.03.013` — §62, the coefficient set implemented. **The paper is paywalled** (ScienceDirect returned HTTP 403 to every attempt); the 168 coefficients are transcribed from NIST's public-domain `reference/fds/Source/radi.f90`, and its own tabulated emissivities could not be obtained, which is why Gate 1-E measures against RADCAL instead.
-- Grosshandler, W. *RADCAL: A Narrow-Band Model for Radiation Calculations in a Combustion Environment*, NIST Technical Note 1402 (1993). DOI `10.6028/NIST.TN.1402` — US public domain; NIST's own implementation ships at `reference/fds/Source/rcal.f90` and `tools/radcal_emissivity/` compiles it **unmodified** behind a standalone driver. — §62.12, the reference the total emissivity is measured against. **MISSES — Gate 1-E.** RADCAL is an independent model, not truth: a disagreement says which way and by how much, and convicts neither.
-- Sung, Chen, Bundy, Fernandez & Hamins. NIST Technical Note 2162r1 (2021), as documented in the FDS Validation Guide (NIST, public domain). — §62.13, the NIST 37 cm gas burner's measured radiative fractions 0.23 / 0.30 / 0.33 at 20 / 34 / 50 kW. **MISSES — Gate 4.**
 - Walton, G. N. *Calculation of Obstructed View Factors by Adaptive Integration.* NISTIR 6925, National Institute of Standards and Technology, November 2002. `https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir6925.pdf` — US Government, public domain. §49 (the double area integral and its dot-product form, the obstruction-elimination tests, the row-sum figure of merit, and the `BB104` benchmark)
 - Shapiro, A. B. *FACET — A Radiation View Factor Computer Code for Axisymmetric, 2D Planar and 3D Geometries with Shadowing.* UCID-19887, Lawrence Livermore National Laboratory, 1983. DOI `10.2172/5607653` — US DOE, public domain. §49.8 (the shadowed configuration `F_12 = 0.115621`)
 - Howell, J. R. *A Catalog of Radiation Heat Transfer Configuration Factors*, 3rd ed. `https://www.thermalradiation.net/` — entries **C-11** (identical parallel directly-opposed rectangles) and **C-14** (two rectangles of equal length sharing an edge at 90°), both tracing to Hottel (1931) and Hamilton & Morgan (1952). §49.8 (the two analytic view-factor gates)

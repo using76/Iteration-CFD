@@ -3024,7 +3024,7 @@ impl VofProperties {
                         &["Newtonian", "constant"],
                         "Newtonian - SPEC-LIT 38's five closures apply to the \
                          SINGLE-phase momentum equation of S5 (ofgpu-buoyant, \
-                         ofgpu-fire). This solver mixes two phases' viscosities \
+                         ofgpu-lowmach). This solver mixes two phases' viscosities \
                          by S20.3 and has no per-phase rheology",
                         (),
                     )?;
@@ -3386,7 +3386,7 @@ mod tests {
             .expect_err("a non-Newtonian model here would be read by nothing");
         let msg = e.to_string();
         assert!(msg.contains("viscosityModel"), "{msg}");
-        assert!(msg.contains("ofgpu-fire") || msg.contains("SINGLE-phase"), "{msg}");
+        assert!(msg.contains("ofgpu-lowmach") || msg.contains("SINGLE-phase"), "{msg}");
 
         write("Bingham");
         let e = VofProperties::from_case(&dir)

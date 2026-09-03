@@ -24,7 +24,7 @@
 //!
 //! **Why this driver exists at all.** `models::registry::build_coupled` can
 //! build Spalart-Allmaras, but the two drivers that call it -
-//! `ofgpu-buoyant` and `ofgpu-fire` - both solve a temperature under gravity,
+//! `ofgpu-buoyant` and `ofgpu-lowmach` - both solve a temperature under gravity,
 //! and SPEC-LIT §56.8 refuses SA there by name: §17's buoyancy production
 //! `G_b` enters a `k` equation and this model has none. Without an isothermal
 //! driver, SA would be a model the registry could select and no binary could

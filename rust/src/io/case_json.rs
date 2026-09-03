@@ -71,10 +71,7 @@ use crate::fv::{GradScheme, SnGradScheme};
 use crate::momentum::BuoyancyCoeffs;
 use crate::scalar_transport::ScalarTransportCoeffs;
 use crate::timescheme::DdtScheme;
-use crate::combustion::CombustionCoeffs;
 use crate::energy::PrtModel;
-use crate::participating::ParticipatingConfig;
-use crate::radiation::RadiationModel;
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -467,207 +464,12 @@ impl JsonRheology {
 /// solver implements - see [`crate::momentum::BuoyancyCoeffs`]. `boussinesq`
 /// is accepted here, so the schema documents that OpenFOAM cases spell it
 /// that way too, and [`JsonCase::lower`] rejects it under the §13.4 contract
-/// rather than silently linearising a fire plume's `ΔT/T ≈ 3`.
+/// rather than silently linearising a hot plume's `ΔT/T ≈ 3`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum BuoyancyModel {
     DensityRatio,
     Boussinesq,
-}
-
-/// SPEC-LIT §27's mixing-controlled combustion, overridable per case.
-/// Presence of this block (`physics.fire.combustion`) is what turns
-/// combustion ON in `ofgpu-fire`; everything inside it is optional and falls
-/// back to [`CombustionCoeffs::default`]'s propane values (SPEC-LIT §27's own
-/// *DESIGN* default fuel).
-///
-/// The species set combustion needs (`Y_F`, `Y_O2`, `Y_P`, inert `N2`) is
-/// NOT named here - it is fixed by [`JsonCase::lower`], because SPEC-LIT §27
-/// names exactly these three reacting species and there is nothing for a
-/// case to choose about their identities, only about the coefficients above.
-/// A case turns combustion on by giving `initial.Y_F` and an inlet patch's
-/// own `Y_F` condition - see [`y_f_spec_for`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct JsonCombustion {
-    #[serde(rename = "CEDM", default, skip_serializing_if = "Option::is_none")]
-    pub c_edm: Option<f64>,
-    #[serde(rename = "CEDMLES", default, skip_serializing_if = "Option::is_none")]
-    pub c_edm_les: Option<f64>,
-    /// Stoichiometric O2/fuel MASS ratio `s`. Propane's `3.63` by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub s: Option<f64>,
-    /// Heat of combustion, J/kg. Propane's `46.45e6` by default.
-    #[serde(rename = "dhc", default, skip_serializing_if = "Option::is_none")]
-    pub dh_c: Option<f64>,
-    /// SPEC-LIT §42.4's `scheme`: `"singleStep"` (§27, the default) or
-    /// `"serialTwoStep"` (§42, McGrattan/McDermott/Floyd). Anything else is a
-    /// §13.4 error naming both.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scheme: Option<String>,
-    /// SPEC-LIT §42.4's `s1`, the O2/fuel MASS ratio of step 1. Required
-    /// under `serialTwoStep`, refused under `singleStep`.
-    #[serde(rename = "s1", default, skip_serializing_if = "Option::is_none")]
-    pub s1: Option<f64>,
-    /// SPEC-LIT §42.4's `dh1`, J per kg of fuel released in step 1. Optional;
-    /// defaults to the Huggett split `dhc*s1/s`, which the banner prints.
-    #[serde(rename = "dh1", default, skip_serializing_if = "Option::is_none")]
-    pub dh1: Option<f64>,
-    /// SPEC-LIT (42.5)'s `yCO`, kg of CO per kg of fuel reacted at zero
-    /// step-2 conversion. Required under `serialTwoStep`.
-    #[serde(rename = "yCO", default, skip_serializing_if = "Option::is_none")]
-    pub y_co: Option<f64>,
-    /// SPEC-LIT §43.4's `extinctionModel`: `"none"` (the default) or
-    /// `"oxygen"` (the FDS EXTINCTION 1 predicate).
-    #[serde(rename = "extinctionModel", default, skip_serializing_if = "Option::is_none")]
-    pub extinction_model: Option<String>,
-    /// SPEC-LIT §43.4's `XOI`, the limiting oxygen index as a VOLUME
-    /// fraction. Refused unless `extinctionModel` is `"oxygen"`.
-    #[serde(rename = "XOI", default, skip_serializing_if = "Option::is_none")]
-    pub x_oi: Option<f64>,
-    /// SPEC-LIT §43.4's `TOI`, the critical flame temperature, K.
-    #[serde(rename = "TOI", default, skip_serializing_if = "Option::is_none")]
-    pub t_oi: Option<f64>,
-    /// SPEC-LIT §43.4's `Tfb`, the free-burn temperature, K.
-    #[serde(rename = "Tfb", default, skip_serializing_if = "Option::is_none")]
-    pub t_fb: Option<f64>,
-    /// SPEC-LIT §43.4's `Tinf`, ambient, K.
-    #[serde(rename = "Tinf", default, skip_serializing_if = "Option::is_none")]
-    pub t_inf: Option<f64>,
-    /// SPEC-LIT §43.4's `TAIT`, the auto-ignition temperature, K. `0` (the
-    /// default) means "no auto-ignition rule", which is FDS's own default.
-    #[serde(rename = "TAIT", default, skip_serializing_if = "Option::is_none")]
-    pub t_ait: Option<f64>,
-}
-
-/// SPEC-LIT §28's P1 gray radiation, or §36's fvDOM. `model` is validated by
-/// [`RadiationModel::from_name`] - the §13.4 gate that names what is
-/// available and anything else as an error.
-///
-/// **This block cannot express §49/§50's surface-to-surface model**, and
-/// naming `viewFactor` here is an error rather than a silent substitution:
-/// that model needs an ENCLOSURE - which patches radiate, at what emissivity,
-/// and how the openings close - and there is nowhere here to say it. It is
-/// read from `constant/radiationProperties` instead (SPEC-LIT §51.1), and
-/// §50.12 records the missing fluid-side driver.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct JsonRadiation {
-    /// `"P1"` or `"fvDOM"`; see [`RadiationModel::from_name`] for what
-    /// happens with anything else, and this struct's own doc for why
-    /// `"viewFactor"` is refused here in particular.
-    pub model: String,
-    /// Gray absorption coefficient `a`, 1/m. Constant, case-supplied
-    /// (SPEC-LIT §28/§36).
-    ///
-    /// **Required under `spectralModel` `gray` and `grayBanded`, and REFUSED
-    /// under `wsgg`**, where every band's coefficient is computed per cell
-    /// from the local composition and nothing would read this one - SPEC-LIT
-    /// §62.11. A number read and discarded is the §13.4.1 defect itself.
-    #[serde(rename = "a", default, skip_serializing_if = "Option::is_none")]
-    pub absorption: Option<f64>,
-    /// SPEC-LIT §62.11's `spectralModel`: `"gray"` (the default, §28/§36
-    /// unchanged), `"grayBanded"` (one band, bitwise identical to `gray` -
-    /// §62.8) or `"wsgg"` (Bordbar et al. 2014). Anything else is a §13.4
-    /// error naming all three **and saying why that set is not here**.
-    #[serde(rename = "spectralModel", default, skip_serializing_if = "Option::is_none")]
-    pub spectral_model: Option<String>,
-    /// SPEC-LIT §62.5's `windowTreatment`: `"dropped"` or `"floored"`.
-    /// **Required** with `wsgg` + `P1` and refused everywhere else - there is
-    /// no honest default, because both values lose something and the case has
-    /// to say which loss it is taking.
-    #[serde(rename = "windowTreatment", default, skip_serializing_if = "Option::is_none")]
-    pub window_treatment: Option<String>,
-    /// Total pressure, Pa - `wsgg` only. Reaches `p_a` in (62.10) and
-    /// therefore every band's absorption coefficient.
-    #[serde(rename = "pressure", default, skip_serializing_if = "Option::is_none")]
-    pub pressure: Option<f64>,
-    /// Carbon atoms per fuel molecule - `wsgg` only, SPEC-LIT (62.7).
-    #[serde(rename = "fuelC", default, skip_serializing_if = "Option::is_none")]
-    pub fuel_c: Option<f64>,
-    /// Hydrogen atoms per fuel molecule - `wsgg` only, SPEC-LIT (62.7).
-    #[serde(rename = "fuelH", default, skip_serializing_if = "Option::is_none")]
-    pub fuel_h: Option<f64>,
-    /// P1's `kappa` floor, 1/m - `wsgg` + `P1` only, SPEC-LIT §62.5(ii).
-    /// Refused under fvDOM, which never forms `Gamma = 1/(3 kappa)`.
-    #[serde(rename = "kappaMin", default, skip_serializing_if = "Option::is_none")]
-    pub kappa_min: Option<f64>,
-    /// SPEC-LIT §62.10: outer iterations between radiation solves. `1` (the
-    /// default) is what every case did before §62 existed; at 120 solves per
-    /// call it is the difference between a case that runs and one that does
-    /// not.
-    #[serde(rename = "updateInterval", default, skip_serializing_if = "Option::is_none")]
-    pub update_interval: Option<u32>,
-    /// SPEC-LIT §63.3's `openBoundary`: `"zeroGradient"` (the default, §28 and
-    /// §36 unchanged - and a PERFECTLY REFLECTING open domain) or
-    /// `"coldSurroundings"` (a black body at `ambientT` outside every
-    /// non-wall face).
-    #[serde(rename = "openBoundary", default, skip_serializing_if = "Option::is_none")]
-    pub open_boundary: Option<String>,
-    /// The surroundings' temperature, K - `coldSurroundings` only.
-    #[serde(rename = "ambientT", default, skip_serializing_if = "Option::is_none")]
-    pub ambient_t: Option<f64>,
-    /// Gray scattering coefficient `sigma_s`, 1/m - fvDOM only (SPEC-LIT
-    /// §36.1's isotropic-scattering term); ignored, and normally absent,
-    /// under `model: "P1"`. Defaults to `0.0` (non-scattering).
-    #[serde(rename = "sigmaS", default, skip_serializing_if = "Option::is_none")]
-    pub scattering: Option<f64>,
-    /// The radiant-fraction floor `chi_r`. Defaults to
-    /// [`crate::participating::CHI_R_DEFAULT`] (`0.35`, FDS practice).
-    #[serde(rename = "chiR", default, skip_serializing_if = "Option::is_none")]
-    pub chi_r: Option<f64>,
-    /// Marshak wall emissivity, applied to every `wall`-kind patch. Defaults
-    /// to `1.0` (black wall) when absent.
-    #[serde(rename = "wallEmissivity", default, skip_serializing_if = "Option::is_none")]
-    pub wall_emissivity: Option<f64>,
-}
-
-/// `physics.fire`: the two S27/S28 blocks `ofgpu-fire` reads. Either or both
-/// may be absent - a case with neither runs the plain S25/S26 low-Mach solver
-/// `ofgpu-fire` already had, unchanged.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct JsonFire {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub combustion: Option<JsonCombustion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub radiation: Option<JsonRadiation>,
-    /// SPEC-LIT §61.5's soot block. Absent means no soot equation at all,
-    /// which is what every case did before §61 existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub soot: Option<JsonSoot>,
-}
-
-/// SPEC-LIT §61.5's `physics.fire.soot`.
-///
-/// Every entry only one model reads is REFUSED under the other
-/// ([`crate::soot::refuse_unread`], shared with the OpenFOAM-dictionary
-/// route so the two cannot drift apart).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct JsonSoot {
-    /// `"none"` (default), `"prescribedYield"` or `"laminarSmokePoint"`.
-    /// Moss-Brookes and the sectional models are recognised and refused **with
-    /// the reason** - SPEC-LIT §61.1.
-    pub model: String,
-    /// `y_s`, kg soot per kg fuel - `prescribedYield` only. Tewarson Table
-    /// A.40: propane 0.024, heptane 0.015.
-    #[serde(rename = "yield", default, skip_serializing_if = "Option::is_none")]
-    pub soot_yield: Option<f64>,
-    /// `l_s`, the measured laminar smoke-point height, m -
-    /// `laminarSmokePoint` only. Propane 0.162, ethylene 0.106.
-    #[serde(rename = "smokePointHeight", default, skip_serializing_if = "Option::is_none")]
-    pub smoke_point_height: Option<f64>,
-    /// `M_F`, kg/kmol - `laminarSmokePoint` only.
-    #[serde(rename = "fuelMolarMass", default, skip_serializing_if = "Option::is_none")]
-    pub fuel_molar_mass: Option<f64>,
-    /// `Y_F,1`, the fuel stream's own fuel mass fraction. Read by BOTH models:
-    /// it sets `Z_st` in (61.6) and scales (61.5).
-    #[serde(rename = "fuelStreamY", default, skip_serializing_if = "Option::is_none")]
-    pub fuel_stream_y: Option<f64>,
-    /// `omega_so,P`, kg/(m3 s) - `laminarSmokePoint` only.
-    #[serde(rename = "oxidationPeak", default, skip_serializing_if = "Option::is_none")]
-    pub oxidation_peak: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -676,8 +478,6 @@ pub struct JsonPhysics {
     pub gravity: [f64; 3],
     pub fluid: JsonFluid,
     pub buoyancy: BuoyancyModel,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fire: Option<JsonFire>,
 }
 
 // ---- turbulence ------------------------------------------------------
@@ -905,12 +705,6 @@ pub struct JsonPatchRule {
     pub p: Option<ScalarBc>,
     #[serde(rename = "T", default, skip_serializing_if = "Option::is_none")]
     pub t: Option<ScalarBc>,
-    /// The fuel mass fraction at this patch - SPEC-LIT §27's "an inlet
-    /// carrying `Y_F`". Only required on the patch(es) that inject fuel; see
-    /// [`y_f_spec_for`] for the wall/open defaults and why `Y_O2`/`Y_P` are
-    /// not separately named here.
-    #[serde(rename = "Y_F", default, skip_serializing_if = "Option::is_none")]
-    pub y_f: Option<ScalarBc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turbulence: Option<JsonPatchTurbulence>,
     /// `k`'s own condition. Only required when `initial.k` is given (this
@@ -950,13 +744,6 @@ pub struct JsonInitial {
     /// equation, and a `0` here would claim one does.
     #[serde(rename = "T", default, skip_serializing_if = "Option::is_none")]
     pub t: Option<f64>,
-    /// The ambient fuel mass fraction, and the presence check that turns
-    /// combustion (SPEC-LIT §27) on - same convention as [`Self::t`]:
-    /// absent means this case does not solve species at all. Usually `0.0`
-    /// (no fuel in the ambient air); the fuel inlet's own value comes from
-    /// its patch rule's `Y_F` ([`y_f_spec_for`]), not from here.
-    #[serde(rename = "Y_F", default, skip_serializing_if = "Option::is_none")]
-    pub y_f: Option<f64>,
     pub p: f64,
     /// The four turbulence closure fields, each absent when the case does
     /// not solve it - same reasoning as [`Self::t`]. Present exactly when a
@@ -1061,7 +848,7 @@ pub struct JsonNumerics {
 pub struct JsonRun {
     /// The end time the case asks for. Honoured: both case readers turn it
     /// into `TurbulenceControls::n_outer_iterations` (steady) or a step count
-    /// (transient). `ofgpu-fire` takes its run MODE from `-endTime`/`-deltaT`
+    /// (transient). `ofgpu-lowmach` takes its run MODE from `-endTime`/`-deltaT`
     /// instead and prints which of the two is in force (SPEC-LIT S13.4.2).
     #[serde(rename = "endTime")]
     pub end_time: f64,
@@ -1265,7 +1052,127 @@ fn jsonc_to_serde(v: jsonc_parser::JsonValue) -> Result<serde_json::Value> {
 /// give: WHERE in the file, as a JSON path (`patches[3].kind`), rather than
 /// just what.
 pub fn read_case_jsonc(path: &Path) -> Result<JsonCase> {
-    parse_jsonc_file(path)
+    let text = std::fs::read_to_string(path).path(path)?;
+    read_case_jsonc_str(&text, &path.display().to_string())
+}
+
+/// [`read_case_jsonc`] on text already in memory - what a test that writes
+/// two cases differing in one byte needs.
+pub fn read_case_jsonc_str(text: &str, what: &str) -> Result<JsonCase> {
+    let value = jsonc_value(text, what)?;
+    refuse_held_back_blocks(&value, what)?;
+    deserialize_value(value, what)
+}
+
+/// The entries this format still SPELLS and this engine does not solve, each
+/// refused by name with what it selected and what is here instead - SPEC-LIT
+/// §13.4.
+///
+/// They described a reacting, sooting or radiating medium. This engine has no
+/// chemistry, no soot equation and no participating-medium radiation in it,
+/// and the honest answer to a case that asks for one is not serde's `unknown
+/// field "fire", expected one of ...` beside a list of its siblings. §13.4
+/// asks for the name, what it needed, and what is available instead; a case
+/// written for the reacting-medium solver is a real document somebody wrote,
+/// and it deserves to be told what happened to it rather than diagnosed as a
+/// typo.
+///
+/// It runs BEFORE deserialisation because `deny_unknown_fields` would
+/// otherwise answer first and answer worse, and it is an [`Error::Config`]
+/// rather than an `io::contract` note because `-permissive` must not be able
+/// to waive it: a waived `physics.fire.combustion` is a burner case running
+/// at `q''' = 0` and reporting a wall heat balance that closes because there
+/// was no fire in it. That is §13.4.1's defect class on exactly the cases
+/// whose whole point is the heat.
+fn refuse_held_back_blocks(value: &serde_json::Value, what: &str) -> Result<()> {
+    fn at<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        let mut node = v;
+        for seg in path.split('.') {
+            node = node.get(seg)?;
+        }
+        Some(node)
+    }
+
+    // `(entry, what it selected, what is here instead)`.
+    let sub: &[(&str, &str, &str)] = &[
+        (
+            "physics.fire.combustion",
+            "a mixing-controlled reaction between transported species",
+            "a `sources[]` heat release, or a driver's own `-heaterPower`",
+        ),
+        (
+            "physics.fire.radiation",
+            "a PARTICIPATING medium - a radiation field solved on the cells \
+             out of an absorption coefficient and a spectral model",
+            "`viewFactor` exchange across a TRANSPARENT medium, selected in \
+             `constant/radiationProperties` (SPEC-LIT §49/§50/§51)",
+        ),
+        (
+            "physics.fire.soot",
+            "a transported soot mass fraction whose source is driven by the \
+             reaction",
+            "nothing - there is no soot equation here, and no reaction to \
+             drive one",
+        ),
+    ];
+
+    let mut named: Vec<String> = Vec::new();
+    for (entry, selected, instead) in sub {
+        if at(value, entry).is_some() {
+            named.push(format!("{entry} selects {selected}; here instead: {instead}"));
+        }
+    }
+    // The parent only when no child was named: reporting `physics.fire` as
+    // well as `physics.fire.combustion` says the same thing twice and buries
+    // the specific half.
+    if named.is_empty() && at(value, "physics.fire").is_some() {
+        named.push(
+            "physics.fire is the reacting-medium block; here instead: the \
+             low-Mach formulation of SPEC-LIT §25 and the energy equation \
+             of §26, which is what is left when nothing reacts"
+                .to_string(),
+        );
+    }
+    if at(value, "initial.Y_F").is_some() {
+        named.push(
+            "initial.Y_F is the ambient fuel mass fraction, and it is what \
+             turned the fuel/oxidiser/products species set on; here \
+             instead: `crate::species` as a LIBRARY - SPEC-LIT §19's \
+             general scalar transport is in this engine, and no case entry \
+             selects it"
+                .to_string(),
+        );
+    }
+    // A patch rule's own `Y_F` is a condition on that same species set. Named
+    // once, not once per matching rule: it is one decision, not N.
+    if value
+        .get("patches")
+        .and_then(|v| v.as_array())
+        .is_some_and(|rules| rules.iter().any(|r| r.get("Y_F").is_some()))
+    {
+        named.push(
+            "patches[].Y_F is the fuel mass fraction at a boundary; here \
+             instead: nothing - there is no species equation for it to be a \
+             condition on"
+                .to_string(),
+        );
+    }
+
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{what}: this case names {} that this engine does not solve. \
+         SPEC-LIT §13.4 refuses {} by name rather than reading {} and \
+         dropping {}:\n  {}\nThe names are still recognised here precisely \
+         so that a case written for the reacting-medium solver is told what \
+         became of it.",
+        if named.len() == 1 { "an entry" } else { "entries" },
+        if named.len() == 1 { "it" } else { "them" },
+        if named.len() == 1 { "it" } else { "them" },
+        if named.len() == 1 { "it" } else { "them" },
+        named.join("\n  ")
+    )))
 }
 
 /// Parse any JSONC document into any `serde` type, with the same comment and
@@ -1285,6 +1192,13 @@ pub fn parse_jsonc_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T
 /// [`parse_jsonc_file`] on text already in memory - what a test that writes
 /// two cases differing in one byte needs.
 pub fn parse_jsonc_str<T: serde::de::DeserializeOwned>(text: &str, what: &str) -> Result<T> {
+    deserialize_value(jsonc_value(text, what)?, what)
+}
+
+/// The JSONC document as a [`serde_json::Value`], before any type has had an
+/// opinion about it. [`refuse_held_back_blocks`] reads this, because
+/// `deny_unknown_fields` would otherwise answer first and answer worse.
+fn jsonc_value(text: &str, what: &str) -> Result<serde_json::Value> {
     let parsed = jsonc_parser::parse_to_value(text, &parse_options())
         .map_err(|e| Error::Parse { path: what.to_string(), msg: e.to_string() })?;
     let Some(value) = parsed else {
@@ -1293,9 +1207,15 @@ pub fn parse_jsonc_str<T: serde::de::DeserializeOwned>(text: &str, what: &str) -
             msg: "empty JSONC document".to_string(),
         });
     };
+    jsonc_to_serde(value)
+}
 
-    let value = jsonc_to_serde(value)?;
-
+/// [`jsonc_value`]'s output, deserialised, with `serde_path_to_error`'s JSON
+/// path in the message - WHERE in the file, and not just what.
+fn deserialize_value<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+    what: &str,
+) -> Result<T> {
     serde_path_to_error::deserialize(value).map_err(|e| {
         let json_path = e.path().to_string();
         Error::Parse {
@@ -1431,18 +1351,6 @@ pub struct LoweredCase {
     /// the JSONC format does not spell.
     pub turbulence_kind: Option<TurbulenceKind>,
 
-    /// `physics.fire.combustion`, resolved to [`CombustionCoeffs`] - `None`
-    /// when the case has no `fire.combustion` block. Combustion is actually
-    /// SOLVED only when [`Self::y_f_field`] is also `Some` - see
-    /// [`JsonCase::lower`]'s cross-check between the two.
-    pub combustion: Option<CombustionCoeffs>,
-    /// `physics.fire.radiation`, resolved - `None` when the case has no
-    /// `fire.radiation` block.
-    pub radiation: Option<ParticipatingConfig>,
-    /// The Marshak wall emissivity every `wall`-kind patch gets when
-    /// `radiation` is `Some`; meaningless otherwise.
-    pub radiation_wall_emissivity: Scalar,
-
     pub turb: TurbulenceControls,
     pub algorithm: AlgorithmControls,
     pub p_solver: SolverControls,
@@ -1462,7 +1370,7 @@ pub struct LoweredCase {
     /// [`Self::p_solver`], [`Self::u_solver`] and `turb.k_solver`/
     /// `turb.epsilon_solver` are the four `lower` resolves eagerly, because
     /// those are the four `CaseControls` has slots for. A driver solving an
-    /// equation with no slot - `T` in `ofgpu-fire`, `Y_F`, anything a later
+    /// equation with no slot - `T` in `ofgpu-lowmach`, anything a later
     /// model adds - had NO way to reach its rule at all, so a case writing
     /// `{ "match": "T", ... }` got `SolverControls::default()` and no
     /// diagnostic. [`Self::solver_for`] is that way.
@@ -1494,30 +1402,6 @@ pub struct LoweredCase {
     /// OpenFOAM case with no `nut` file.
     pub nut_field: Option<LoweredScalarField>,
 
-    /// `None` when the case has no `initial.Y_F` - see [`JsonInitial::y_f`].
-    /// The species set combustion needs is exactly `{y_f, o2, products}`
-    /// solved with `N2` as the inert closure (SPEC-LIT §27, §19) -
-    /// `crate::species::Species::new` is given `["Y_F", "Y_O2", "Y_P", "N2"]`
-    /// with `inert = "N2"` verbatim, never a case choice.
-    pub y_f_field: Option<LoweredScalarField>,
-    pub o2_field: Option<LoweredScalarField>,
-    pub products_field: Option<LoweredScalarField>,
-    /// SPEC-LIT §42.3's lumped intermediate `Y_I` - CO, soot, H2 and the
-    /// step-1 water vapour together. `Some` only under
-    /// `scheme: "serialTwoStep"`, because §27's single step has no
-    /// intermediate to transport and a field nothing reads is exactly the
-    /// §13.4 defect this crate keeps finding.
-    pub intermediate_field: Option<LoweredScalarField>,
-    /// SPEC-LIT S61.2's transported soot mass fraction `Y_s`. `Some` exactly
-    /// when a soot model is selected. Its boundary conditions are the
-    /// IDENTICAL rule `Y_O2`/`Y_P` already use at ambient zero
-    /// (`oxidiser_product_spec_for`), so the case says nothing about `Y_s`
-    /// and therefore cannot say anything the solver ignores.
-    pub soot_field: Option<LoweredScalarField>,
-    /// SPEC-LIT S61.5's soot block, resolved. `None` when the case has no
-    /// `physics.fire.soot`.
-    pub soot: Option<crate::soot::SootCoeffs>,
-
     pub output: Option<JsonOutput>,
 
     /// `sources[]`, resolved to the same [`crate::sources::SourceSpec`] the
@@ -1547,10 +1431,10 @@ impl LoweredCase {
     /// [`Self::div_for`] is right for an equation the case is expected to
     /// have an opinion about; this is for one where the DRIVER's own
     /// documented default is better than the case's catch-all `default`
-    /// entry - `ofgpu-fire`'s species convection, whose SPEC-LIT S19 default
-    /// is bounded upwind while a case's `"default": "Gauss upwind"` is not
-    /// bounded. Falling back there would change the physics of every case
-    /// that never mentioned species at all.
+    /// entry - a species convection, whose SPEC-LIT S19 default is bounded
+    /// upwind while a case's `"default": "Gauss upwind"` is not bounded.
+    /// Falling back there would change the physics of every case that never
+    /// mentioned species at all.
     pub fn div_named(&self, key: &str) -> Option<DivEntry> {
         self.div.get(key).copied()
     }
@@ -1775,9 +1659,6 @@ fn validate_constraint_rules(patches: &[JsonPatchRule]) -> Result<()> {
         if rule.t.is_some() {
             return Err(reject("T"));
         }
-        if rule.y_f.is_some() {
-            return Err(reject("Y_F"));
-        }
         if rule.turbulence.is_some() {
             return Err(reject("turbulence"));
         }
@@ -1966,9 +1847,9 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
         windows.push(WindowRegionSpec { name: region.name.clone(), on: region.on.clone(), window });
     }
 
-    // SPEC-LIT §42.8 Gate 2 generalised this from one region to one per SLOT:
-    // a compartment fire needs a burner window in the floor and a doorway
-    // window in a wall. Two regions on the SAME slot are still refused, by
+    // One region per SLOT, generalised from the single region this shipped
+    // with: a compartment case needs a supply window in the floor and a
+    // doorway window in a wall. Two regions on the SAME slot are refused, by
     // `blockgen::boundary_patches` and by name, because a slot split three
     // ways cannot be written as contiguous startFace/nFaces runs.
     block.windows = windows.iter().map(|w| w.window.clone()).collect();
@@ -2188,127 +2069,6 @@ fn t_spec_for(
         // See `u_spec_for`'s matching arm: a placeholder, overridden by the
         // mesh's own topology at field-build time regardless.
         PatchPresetKind::Empty | PatchPresetKind::Symmetry => Ok(spec(patch_class(rule.kind))),
-    }
-}
-
-/// *DESIGN*: the ambient air composition, by mass, that every non-fuel
-/// patch's `Y_O2`/`Y_P` fall back to. `0.232` is the standard mass fraction of
-/// O2 in dry air; the case has no field for it because there is nothing to
-/// choose - it is a physical constant of the ambient the case is already
-/// immersed in, not a tunable.
-pub const AMBIENT_Y_O2: Scalar = 0.232;
-
-/// SPEC-LIT §62.11's spectral block, lowered - the JSONC mirror of
-/// `participating::read_spectral`, refusing exactly the same entries under
-/// exactly the same models so the two routes cannot drift apart.
-fn lower_spectral(
-    r: &JsonRadiation,
-    model: RadiationModel,
-) -> Result<crate::wsgg::SpectralProps> {
-    use crate::wsgg::{SpectralModel, SpectralProps, WindowTreatment};
-
-    let spectral_model = match r.spectral_model.as_deref() {
-        Some(name) => SpectralModel::from_name(name)?,
-        None => SpectralModel::Gray,
-    };
-    let wsgg = spectral_model == SpectralModel::Wsgg;
-
-    let named: Vec<&str> = [
-        ("pressure", r.pressure.is_some()),
-        ("fuelC", r.fuel_c.is_some()),
-        ("fuelH", r.fuel_h.is_some()),
-        ("kappaMin", r.kappa_min.is_some()),
-        ("windowTreatment", r.window_treatment.is_some()),
-    ]
-    .into_iter()
-    .filter_map(|(k, present)| present.then_some(k))
-    .collect();
-    if !wsgg && !named.is_empty() {
-        return Err(Error::Config(format!(
-            "physics.fire.radiation names {} but spectralModel is \"{}\", which reads none \
-             of them - SPEC-LIT §62.11. Write \"spectralModel\": \"wsgg\" to select the \
-             model those entries belong to, or remove them",
-            named.join(", "),
-            spectral_model.name()
-        )));
-    }
-    if wsgg && model == RadiationModel::FvDom && r.kappa_min.is_some() {
-        return Err(Error::Config(
-            "physics.fire.radiation gives kappaMin but the model is fvDOM, which never \
-             forms Gamma = 1/(3 kappa) and has nothing to floor - the floor is a P1 \
-             artefact (SPEC-LIT §62.5)"
-                .to_string(),
-        ));
-    }
-
-    let d = SpectralProps::default();
-    let mut s = SpectralProps { model: spectral_model, ..d };
-    if wsgg {
-        s.pressure = r.pressure.map(|v| v as Scalar).unwrap_or(d.pressure);
-        s.kappa_min = r.kappa_min.map(|v| v as Scalar).unwrap_or(d.kappa_min);
-        s.fuel.c = r.fuel_c.map(|v| v as Scalar).unwrap_or(d.fuel.c);
-        s.fuel.h = r.fuel_h.map(|v| v as Scalar).unwrap_or(d.fuel.h);
-        if let Some(w) = r.window_treatment.as_deref() {
-            s.window = Some(WindowTreatment::from_name(w)?);
-        }
-    }
-    s.validate()?;
-    Ok(s)
-}
-
-/// `Y_F` at one resolved rule - SPEC-LIT §27's "an inlet carrying `Y_F`".
-/// Same fallback shape as [`t_spec_for`]: a wall is impermeable
-/// (`zeroGradient`), an `open` boundary is `inletOutlet` at the ambient
-/// `Y_F` (`initial.Y_F`, usually `0`), and an `inlet` with no `Y_F` condition
-/// is an error - a fuel inlet with no fuel fraction is a case error, not a
-/// default.
-fn y_f_spec_for(rule: &JsonPatchRule, ambient: Scalar) -> Result<PatchFieldSpec> {
-    if let Some(bc) = &rule.y_f {
-        return Ok(scalar_bc_spec(bc));
-    }
-    match rule.kind {
-        PatchPresetKind::Wall => Ok(spec("zeroGradient")),
-        PatchPresetKind::Open => {
-            let mut s = spec("inletOutlet");
-            s.inlet_value = vec![ambient];
-            s.value = vec![ambient];
-            Ok(s)
-        }
-        PatchPresetKind::Inlet => Err(Error::Config(format!(
-            "patches: rule \"{}\" has kind \"inlet\" but no \"Y_F\" condition, \
-             and this case solves combustion (initial.Y_F is given)",
-            rule.pattern
-        ))),
-        // See `u_spec_for`'s matching arm.
-        PatchPresetKind::Empty | PatchPresetKind::Symmetry => Ok(spec(patch_class(rule.kind))),
-    }
-}
-
-/// `Y_O2`/`Y_P` at one resolved rule. Neither is a field a case names
-/// directly (see [`JsonPatchRule`]'s doc on `y_f`): a wall or open boundary
-/// carries the ambient composition (`AMBIENT_Y_O2`/`0` respectively, the same
-/// `inletOutlet`-at-ambient shape as `Y_F`), and a fuel `inlet` carries pure
-/// fuel - `fixedValue 0` for both, since the same patch's `Y_F` is already
-/// pinned by `fixedValue` to whatever the case named. *DESIGN*: a partially
-/// diluted fuel stream (`Y_F < 1` at the inlet with nonzero `Y_O2`) is not
-/// expressible this way; SPEC-LIT §27 only asks for a burner supplying fuel,
-/// which this covers.
-fn oxidiser_product_spec_for(rule: &JsonPatchRule, ambient: Scalar) -> PatchFieldSpec {
-    match rule.kind {
-        PatchPresetKind::Wall => spec("zeroGradient"),
-        PatchPresetKind::Open => {
-            let mut s = spec("inletOutlet");
-            s.inlet_value = vec![ambient];
-            s.value = vec![ambient];
-            s
-        }
-        PatchPresetKind::Inlet => {
-            let mut s = spec("fixedValue");
-            s.value = vec![0.0];
-            s
-        }
-        // See `u_spec_for`'s matching arm.
-        PatchPresetKind::Empty | PatchPresetKind::Symmetry => spec(patch_class(rule.kind)),
     }
 }
 
@@ -2557,273 +2317,6 @@ impl JsonCase {
             )?,
         };
 
-        // ---- fire: combustion (S27) and radiation (S28) -----------------
-        let combustion = self
-            .physics
-            .fire
-            .as_ref()
-            .and_then(|f| f.combustion.as_ref())
-            .map(|c| {
-                let mut coeffs = CombustionCoeffs::default();
-                if let Some(v) = c.c_edm {
-                    coeffs.c_edm = v as Scalar;
-                }
-                if let Some(v) = c.c_edm_les {
-                    coeffs.c_edm_les = v as Scalar;
-                }
-                if let Some(v) = c.s {
-                    coeffs.s = v as Scalar;
-                }
-                if let Some(v) = c.dh_c {
-                    coeffs.dh_c = v as Scalar;
-                }
-
-                // ---- SPEC-LIT §42.4: the scheme and its split ------------
-                coeffs.scheme = crate::twostep::CombustionScheme::from_name(
-                    c.scheme.as_deref().unwrap_or(crate::twostep::CombustionScheme::NAMES[0]),
-                )?;
-                if c.s1.is_some() || c.y_co.is_some() || c.dh1.is_some() {
-                    let (Some(s1), Some(y_co)) = (c.s1, c.y_co) else {
-                        return Err(Error::Config(format!(
-                            "physics.fire.combustion gives {}{}{}but SPEC-LIT \
-                             §42.4 needs BOTH s1 and yCO: s1 is the O2/fuel \
-                             mass ratio of step 1, yCO is the CO produced per \
-                             kg of fuel, and neither can be derived from the \
-                             other. Propane under ISFEH10 Eq. (2) is \
-                             s1 = 1.451255, yCO = 1.270381",
-                            if c.s1.is_some() { "s1 " } else { "" },
-                            if c.y_co.is_some() { "yCO " } else { "" },
-                            if c.dh1.is_some() { "dh1 " } else { "" },
-                        )));
-                    };
-                    let s1 = s1 as Scalar;
-                    coeffs.two_step = Some(crate::twostep::TwoStepCoeffs {
-                        s1,
-                        dh1: c.dh1.map(|v| v as Scalar).unwrap_or_else(|| {
-                            crate::twostep::TwoStepCoeffs::huggett_dh1(coeffs.s, coeffs.dh_c, s1)
-                        }),
-                        y_co: y_co as Scalar,
-                    });
-                }
-
-                // ---- SPEC-LIT §43.4: extinction --------------------------
-                let model = crate::twostep::ExtinctionModel::from_name(
-                    c.extinction_model
-                        .as_deref()
-                        .unwrap_or(crate::twostep::ExtinctionModel::NAMES[0]),
-                )?;
-                let named: Vec<&str> = [
-                    ("XOI", c.x_oi.is_some()),
-                    ("TOI", c.t_oi.is_some()),
-                    ("Tfb", c.t_fb.is_some()),
-                    ("Tinf", c.t_inf.is_some()),
-                    ("TAIT", c.t_ait.is_some()),
-                ]
-                .into_iter()
-                .filter_map(|(k, present)| present.then_some(k))
-                .collect();
-                match model {
-                    crate::twostep::ExtinctionModel::None => {
-                        if !named.is_empty() {
-                            return Err(Error::Config(format!(
-                                "physics.fire.combustion names {} but \
-                                 extinctionModel is \"none\" (the default), \
-                                 which reads none of them - SPEC-LIT §43.4. \
-                                 Write \"extinctionModel\": \"oxygen\" to \
-                                 select the model those coefficients belong \
-                                 to, or remove them",
-                                named.join(", ")
-                            )));
-                        }
-                    }
-                    crate::twostep::ExtinctionModel::Oxygen => {
-                        let d = crate::twostep::ExtinctionCoeffs::default();
-                        coeffs.extinction = Some(crate::twostep::ExtinctionCoeffs {
-                            x_oi: c.x_oi.map(|v| v as Scalar).unwrap_or(d.x_oi),
-                            t_oi: c.t_oi.map(|v| v as Scalar).unwrap_or(d.t_oi),
-                            t_fb: c.t_fb.map(|v| v as Scalar).unwrap_or(d.t_fb),
-                            t_inf: c.t_inf.map(|v| v as Scalar).unwrap_or(d.t_inf),
-                            t_ait: c.t_ait.map(|v| v as Scalar).unwrap_or(d.t_ait),
-                        });
-                    }
-                }
-
-                coeffs.validate()?;
-                Ok::<_, Error>(coeffs)
-            })
-            .transpose()?;
-        if combustion.is_some() && self.initial.y_f.is_none() {
-            return Err(Error::Config(
-                "physics.fire.combustion is given but initial.Y_F is not - \
-                 combustion (SPEC-LIT S27) needs the species set built, and \
-                 that needs an ambient Y_F to build it from"
-                    .to_string(),
-            ));
-        }
-
-        let (radiation, radiation_wall_emissivity) = match self.physics.fire.as_ref().and_then(|f| f.radiation.as_ref())
-        {
-            Some(r) => {
-                let model = RadiationModel::from_name(&r.model)?;
-                let spectral = lower_spectral(r, model)?;
-                let wsgg = spectral.model == crate::wsgg::SpectralModel::Wsgg;
-                // SPEC-LIT §62.11, both directions: `a` is required by the
-                // gray models and REFUSED under WSGG, which reads none of it.
-                let a = match (r.absorption, wsgg) {
-                    (Some(_), true) => {
-                        return Err(Error::Config(
-                            "physics.fire.radiation gives \"a\" AND \"spectralModel\": \
-                             \"wsgg\", which computes every band's absorption coefficient \
-                             per cell from the local composition and would read none of it - \
-                             SPEC-LIT §62.11. Remove \"a\", or select a gray spectral model \
-                             to make it mean something"
-                                .to_string(),
-                        ))
-                    }
-                    (None, false) => {
-                        return Err(Error::Config(format!(
-                            "physics.fire.radiation has no \"a\" and spectralModel is \
-                             \"{}\", which needs one - the gray absorption coefficient is \
-                             case-supplied with no default (SPEC-LIT §28/§36)",
-                            spectral.model.name()
-                        )))
-                    }
-                    // A placeholder no kernel reads under WSGG; see
-                    // `RadiationProps::a`'s own doc.
-                    (None, true) => 1.0 as Scalar,
-                    (Some(v), false) => v as Scalar,
-                };
-                let chi_r = r.chi_r.map(|v| v as Scalar);
-                let update_interval = r.update_interval.unwrap_or(1) as usize;
-                // SPEC-LIT §63.3, both directions.
-                let open = crate::participating::OpenBoundary::from_name(
-                    r.open_boundary.as_deref().unwrap_or("zeroGradient"),
-                    r.ambient_t.map(|v| v as Scalar).unwrap_or(293.15),
-                )?;
-                if r.ambient_t.is_some() && open.t_inf().is_none() {
-                    return Err(Error::Config(
-                        "physics.fire.radiation gives \"ambientT\" but \"openBoundary\" is                          \"zeroGradient\" (the default), which reads none of it - SPEC-LIT                          §63.3. Write \"openBoundary\": \"coldSurroundings\" to select the                          condition that number belongs to, or remove it"
-                            .to_string(),
-                    ));
-                }
-                open.validate()?;
-                let config = match model {
-                    RadiationModel::P1 => {
-                        let props = crate::participating::RadiationProps {
-                            a,
-                            chi_r: chi_r.unwrap_or(crate::participating::CHI_R_DEFAULT),
-                            spectral,
-                            update_interval,
-                            open,
-                        };
-                        props.validate()?;
-                        ParticipatingConfig::P1(props)
-                    }
-                    RadiationModel::FvDom => {
-                        let sigma_s = r.scattering.unwrap_or(0.0) as Scalar;
-                        let props = crate::fvdom::FvDomProps {
-                            a,
-                            sigma_s,
-                            chi_r: chi_r.unwrap_or(crate::participating::CHI_R_DEFAULT),
-                            spectral,
-                            update_interval,
-                            open,
-                        };
-                        props.validate()?;
-                        ParticipatingConfig::FvDom(props)
-                    }
-
-                    // SPEC-LIT S50.12: the model exists and is gated, but the
-                    // `physics.fire.radiation` block has no way to say WHICH
-                    // patches form the enclosure, what emissivity each
-                    // carries, or how the openings are closed - and a
-                    // surface-to-surface model is nothing without that. Naming
-                    // `viewFactor` here and quietly building a participating
-                    // medium instead is precisely the S13.4 defect this
-                    // project keeps finding, so it is an error naming the two
-                    // models this block CAN express and where the third one
-                    // lives.
-                    RadiationModel::ViewFactor => {
-                        crate::io::contract::unsupported_note(
-                            "physics.fire.radiation.model",
-                            &r.model,
-                            &["P1", "fvDOM"],
-                            "surface-to-surface radiation (SPEC-LIT 49/50) needs an \
-                             ENCLOSURE - which patches radiate, at what emissivity, and \
-                             how the openings are closed - and this block has no way to \
-                             say any of it. Read it from constant/radiationProperties \
-                             (SPEC-LIT 51.1) and build crate::s2s::S2s directly; \
-                             SPEC-LIT 50.12 records this as the boundary the fluid side \
-                             has not crossed yet",
-                            "P1 with this block's own absorptionCoefficient",
-                            (),
-                        )?;
-                        // -permissive only: the substitution the message named.
-                        let props = crate::participating::RadiationProps {
-                            a,
-                            chi_r: chi_r.unwrap_or(crate::participating::CHI_R_DEFAULT),
-                            spectral,
-                            update_interval,
-                            open,
-                        };
-                        props.validate()?;
-                        ParticipatingConfig::P1(props)
-                    }
-                };
-                (Some(config), r.wall_emissivity.unwrap_or(1.0) as Scalar)
-            }
-            None => (None, 1.0),
-        };
-
-        // ---- fire: soot (S61) -------------------------------------------
-        let soot = match self.physics.fire.as_ref().and_then(|f| f.soot.as_ref()) {
-            Some(s) => {
-                let model = crate::soot::SootModel::from_name(&s.model)?;
-                let named: Vec<&str> = [
-                    ("yield", s.soot_yield.is_some()),
-                    ("smokePointHeight", s.smoke_point_height.is_some()),
-                    ("fuelMolarMass", s.fuel_molar_mass.is_some()),
-                    ("oxidationPeak", s.oxidation_peak.is_some()),
-                    ("fuelStreamY", s.fuel_stream_y.is_some()),
-                ]
-                .into_iter()
-                .filter_map(|(k, present)| present.then_some(k))
-                .collect();
-                crate::soot::refuse_unread(model, &named)?;
-                if model.is_on() && combustion.is_none() {
-                    return Err(Error::Config(
-                        "physics.fire.soot selects a soot model but there is no \
-                         physics.fire.combustion block - BOTH source models are driven by \
-                         combustion (the prescribed yield by q'''_c, the smoke-point model \
-                         by Y_F and Y_O2 through Z), so soot without it would be \
-                         identically zero (SPEC-LIT §61.5)"
-                            .to_string(),
-                    ));
-                }
-                let d = crate::soot::SootCoeffs::default();
-                let c = crate::soot::SootCoeffs {
-                    model,
-                    soot_yield: s.soot_yield.map(|v| v as Scalar).unwrap_or(d.soot_yield),
-                    smoke_point: s
-                        .smoke_point_height
-                        .map(|v| v as Scalar)
-                        .unwrap_or(d.smoke_point),
-                    fuel_molar_mass: s
-                        .fuel_molar_mass
-                        .map(|v| v as Scalar)
-                        .unwrap_or(d.fuel_molar_mass),
-                    fuel_stream_y: s.fuel_stream_y.map(|v| v as Scalar).unwrap_or(d.fuel_stream_y),
-                    oxidation_peak: s
-                        .oxidation_peak
-                        .map(|v| v as Scalar)
-                        .unwrap_or(d.oxidation_peak),
-                };
-                c.validate()?;
-                Some(c)
-            }
-            None => None,
-        };
-
         // ---- turbulence -------------------------------------------------
         let mut wall = WallFunctionCoeffs::default();
         let (turbulence_model, turbulence_kind) = if let Some(t) = &self.turbulence {
@@ -2933,8 +2426,8 @@ impl JsonCase {
 
         // SPEC-LIT §31.3: `run.endTime`, `numerics.ddt` and `numerics.algorithm`
         // are three settings a case can get individually right and jointly
-        // nonsensical - `cases/burnerPlume.jsonc` named `SIMPLE` while being
-        // run as a transient fire and diverged to Inf around step 20.
+        // nonsensical - a shipped transient case named `SIMPLE` while being
+        // run transiently, and diverged to Inf around step 20.
         crate::io::case::check_transient_algorithm_contract(
             self.run.end_time as Scalar,
             ddt,
@@ -3013,90 +2506,6 @@ impl JsonCase {
             internal_uniform: t as Scalar,
             boundary: t_boundary,
         });
-
-        // ---- species (SPEC-LIT S19/S27) --------------------------------
-        let (y_f_field, o2_field, products_field, intermediate_field) = if let Some(y_f0) =
-            self.initial.y_f
-        {
-            let mut y_f_boundary = BTreeMap::new();
-            let mut o2_boundary = BTreeMap::new();
-            let mut p_boundary_sp = BTreeMap::new();
-            for name in &names {
-                let rule = resolve_patch_rule(&self.patches, name)?;
-                y_f_boundary.insert(name.clone(), y_f_spec_for(rule, y_f0 as Scalar)?);
-                o2_boundary.insert(name.clone(), oxidiser_product_spec_for(rule, AMBIENT_Y_O2));
-                p_boundary_sp.insert(name.clone(), oxidiser_product_spec_for(rule, 0.0));
-            }
-            let dims = "[0 0 0 0 0 0 0]"; // mass fraction, dimensionless
-            (
-                Some(LoweredScalarField {
-                    name: "Y_F".to_string(),
-                    dimensions: dims.to_string(),
-                    internal_uniform: y_f0 as Scalar,
-                    boundary: y_f_boundary,
-                }),
-                Some(LoweredScalarField {
-                    name: "Y_O2".to_string(),
-                    dimensions: dims.to_string(),
-                    internal_uniform: AMBIENT_Y_O2,
-                    boundary: o2_boundary,
-                }),
-                Some(LoweredScalarField {
-                    name: "Y_P".to_string(),
-                    dimensions: dims.to_string(),
-                    internal_uniform: 0.0,
-                    boundary: p_boundary_sp,
-                }),
-                // SPEC-LIT §42.3: the intermediate carries the same
-                // ambient-zero shape as the products and is built ONLY under
-                // the two-step scheme.
-                matches!(
-                    combustion.as_ref().map(|c| c.scheme),
-                    Some(crate::twostep::CombustionScheme::SerialTwoStep)
-                )
-                .then(|| {
-                    let mut b = BTreeMap::new();
-                    for name in &names {
-                        // `resolve_patch_rule` already succeeded for every
-                        // name in the loop above, so this cannot fail here.
-                        if let Ok(rule) = resolve_patch_rule(&self.patches, name) {
-                            b.insert(name.clone(), oxidiser_product_spec_for(rule, 0.0));
-                        }
-                    }
-                    LoweredScalarField {
-                        name: "Y_I".to_string(),
-                        dimensions: dims.to_string(),
-                        internal_uniform: 0.0,
-                        boundary: b,
-                    }
-                }),
-            )
-        } else {
-            (None, None, None, None)
-        };
-
-        // ---- soot (SPEC-LIT S61.2) --------------------------------------
-        //
-        // The IDENTICAL boundary rule `Y_O2`/`Y_P` already use at ambient
-        // zero: zeroGradient at a wall, inletOutlet at 0 on an open boundary,
-        // fixedValue 0 at an inlet. The case says nothing about `Y_s`, so it
-        // cannot say anything the solver ignores.
-        let soot_field = match soot.as_ref().filter(|c| c.model.is_on()) {
-            Some(_) => {
-                let mut b = BTreeMap::new();
-                for name in &names {
-                    let rule = resolve_patch_rule(&self.patches, name)?;
-                    b.insert(name.clone(), oxidiser_product_spec_for(rule, 0.0));
-                }
-                Some(LoweredScalarField {
-                    name: "Y_s".to_string(),
-                    dimensions: "[0 0 0 0 0 0 0]".to_string(),
-                    internal_uniform: 0.0,
-                    boundary: b,
-                })
-            }
-            None => None,
-        };
 
         // ---- turbulence closure fields ---------------------------------
         // Dimensions match what `crate::field_setup`'s own drivers write
@@ -3276,9 +2685,6 @@ impl JsonCase {
             wall,
             turbulence_model,
             turbulence_kind,
-            combustion,
-            radiation,
-            radiation_wall_emissivity,
             turb,
             algorithm,
             p_solver,
@@ -3302,12 +2708,6 @@ impl JsonCase {
             epsilon_field,
             omega_field,
             nut_field,
-            y_f_field,
-            o2_field,
-            products_field,
-            intermediate_field,
-            soot_field,
-            soot,
             output: self.output.clone(),
             sources,
         })
@@ -3428,7 +2828,7 @@ mod tests {
 
     /// A minimal, parseable case whose mesh block callers mutate before
     /// lowering - `docs/case-example.json` and `cases/plume.jsonc` both carry
-    /// far more machinery (combustion, radiation, windows) than a grading
+    /// far more machinery (sources, windows, a full patch table) than a grading
     /// test needs to exercise `build_block`.
     fn minimal_case_with_mesh(mesh_extra: &str) -> JsonCase {
         let text = format!(
@@ -4055,9 +3455,8 @@ mod tests {
     /// `docs/schema/case-1.json` is what a case file's `$schema` points a
     /// human's editor at, and it is a copy of [`emit_schema`]'s output. A
     /// copy drifts: when SPEC-LIT S44 regenerated it, the shipped file was
-    /// still missing every field S42 and S43 had added months earlier -
-    /// `s1`, `yCO`, `dh1`, `extinctionModel`, `XOI`, `TAIT`, `TOI`, `Tfb`,
-    /// `Tinf` - so an editor validating against it flagged a valid case as
+    /// still missing every field two later sections had added months
+    /// earlier, so an editor validating against it flagged a valid case as
     /// invalid. That is the documentation half of S13.4.1's defect, and this
     /// is the test that stops it recurring.
     ///
@@ -4439,7 +3838,6 @@ mod tests {
                 u: Some(VectorBc::FixedValue { value: [0.0, 0.0, 1.0] }),
                 p: None,
                 t: None,
-                y_f: None,
                 turbulence: None,
                 k: None,
                 epsilon: None,
@@ -4455,7 +3853,6 @@ mod tests {
                 u: None,
                 p: None,
                 t: None,
-                y_f: None,
                 turbulence: None,
                 k: None,
                 epsilon: None,
@@ -4613,7 +4010,7 @@ mod tests {
     //  SPEC-LIT §31.3: the transient/algorithm contract, JSONC side
     // ------------------------------------------------------------------
 
-    /// The exact shape `cases/burnerPlume.jsonc` shipped with: `endTime > 0`,
+    /// The exact shape a shipped transient case had: `endTime > 0`,
     /// `ddt` not `steadyState`, and `numerics.algorithm.kind` still `SIMPLE`.
     #[test]
     fn a_transient_jsonc_case_naming_simple_is_a_lower_error() {
@@ -4668,7 +4065,7 @@ mod tests {
         crate::io::contract::set_permissive(false);
     }
 
-    /// A transient case naming `PIMPLE` (`cases/burnerPlume.jsonc`'s fixed
+    /// A transient case naming `PIMPLE` (the shape that fixed
     /// shape) lowers cleanly - the contract does not reject the combination
     /// it exists to require.
     #[test]
@@ -4684,8 +4081,65 @@ mod tests {
         assert_eq!(lowered.algorithm.dict, "PIMPLE");
     }
 
+    /// **SPEC-LIT §13.4.** A case written for the reacting-medium solver is
+    /// refused BY NAME, and the refusal survives `-permissive`.
+    ///
+    /// This is [`refuse_held_back_blocks`]'s own gate. The failure it stands
+    /// against is not a parse error: it is a burner case read cleanly by an
+    /// engine with no chemistry in it, run to completion at `q''' = 0`, and
+    /// reporting a wall heat balance that closes because there was no fire.
+    /// The names must therefore still be RECOGNISED here - "unknown field" is
+    /// a diagnosis of a typo, and this is not one.
+    #[test]
+    fn a_case_written_for_a_reacting_medium_is_refused_by_name() {
+        let _g = crate::io::contract::permissive_test_guard();
+        // ON. A note would be waived here; this is an `Error::Config` and is
+        // not, for the same reason `RadiationConfig::from_case`'s is not.
+        crate::io::contract::set_permissive(true);
+
+        let base = std::fs::read_to_string(example_path()).expect("read the example case");
+        let mut got: Vec<(&str, Option<String>)> = Vec::new();
+        for (entry, insert, after) in [
+            ("physics.fire.combustion", r#""fire": { "combustion": {} },"#, "\"physics\": {"),
+            (
+                "physics.fire.radiation",
+                r#""fire": { "radiation": { "model": "P1", "a": 0.5 } },"#,
+                "\"physics\": {",
+            ),
+            (
+                "physics.fire.soot",
+                r#""fire": { "soot": { "model": "prescribedYield" } },"#,
+                "\"physics\": {",
+            ),
+            ("initial.Y_F", r#""Y_F": 0.0,"#, "\"initial\": {"),
+        ] {
+            let at = base.find(after).expect("the example case must have the block");
+            let mut text = base.clone();
+            text.insert_str(at + after.len(), insert);
+            got.push((
+                entry,
+                read_case_jsonc_str(&text, "fixture").err().map(|e| e.to_string()),
+            ));
+        }
+        // Process-wide: restore before an assertion can panic and leave a
+        // later strict-mode test observing it.
+        crate::io::contract::set_permissive(false);
+
+        for (entry, e) in got {
+            let e = e.unwrap_or_else(|| panic!("{entry} was read and not refused"));
+            assert!(e.contains(entry), "the refusal must name {entry}: {e}");
+            assert!(
+                e.contains("13.4"),
+                "the refusal must name the contract it is made under: {e}"
+            );
+        }
+        // And the example case itself, unmodified, is read - or every
+        // assertion above would pass for the wrong reason.
+        read_case_jsonc_str(&base, "fixture").expect("the example case must still read");
+    }
+
     /// SPEC-LIT §31.3's regression: every `.jsonc` case this project ships
-    /// must pass the contract - `cases/burnerPlume.jsonc` used not to.
+    /// must pass the contract - a shipped transient case used not to.
     #[test]
     fn every_shipped_jsonc_case_passes_the_transient_algorithm_contract() {
         let _g = crate::io::contract::permissive_test_guard();

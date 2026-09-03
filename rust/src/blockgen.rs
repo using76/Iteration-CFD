@@ -134,10 +134,10 @@ pub struct BlockSpec {
     /// and OpenFOAM records a patch as nothing but a `startFace`/`nFaces` pair,
     /// so it cannot be expressed. `boundary_patches` refuses it by name.
     ///
-    /// SPEC-LIT §42.8 Gate 2 is what generalised this from the single slot it
-    /// shipped with: a compartment fire needs a burner window in the floor AND
-    /// a doorway window in a wall, and one window is not enough for the case
-    /// the whole two-step scheme exists to answer.
+    /// A `Vec` and not one window, because it was generalised from the
+    /// single slot it shipped with: a compartment case needs a supply window
+    /// in the floor AND a doorway window in a wall, and one window cannot
+    /// express that.
     pub windows: Vec<PatchWindow>,
     /// SPEC-LIT §31.1/§34.2: the axes (0=x, 1=y, 2=z) whose two opposite
     /// slots are a cyclic pair - `constant/polyMesh/boundary` gets
@@ -5457,13 +5457,13 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    //  SPEC-LIT §42.8 Gate 2: more than one window
+    //  More than one window
     // ----------------------------------------------------------------------
 
     /// Two windows on DIFFERENT slots both get carved, and each slot's
-    /// remainder keeps its own name. This is what a compartment fire needs -
-    /// a burner in the floor and a doorway in a wall - and what `BlockSpec`
-    /// could not express until §42.8's gate needed it.
+    /// remainder keeps its own name. This is what a compartment case needs -
+    /// a supply window in the floor and a doorway in a wall - and what
+    /// `BlockSpec` could not express when it carried one window per block.
     #[test]
     fn two_windows_on_different_slots_are_both_carved() {
         let mut b = split_spec(6, 6, 4);

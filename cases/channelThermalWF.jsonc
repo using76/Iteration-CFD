@@ -26,7 +26,7 @@
 //
 // Duct length is 2.0 m - L/Dh = 50 (Dh = 0.04 m, the square duct's hydraulic
 // diameter), five times the 0.4 m / L/Dh = 10 of the first attempt at this
-// gate (see `docs/07-fire-solver.md` S1.1's history), chosen so the
+// gate (see `docs/07-lowmach-solver.md` S1.1's history), chosen so the
 // thermal/momentum boundary layers are closer to fully developed by
 // mid-channel - JSONC has no cyclic-patch support yet (`blockgen`'s own
 // `case_block_spec` notes cyclics "need a coupled patch pair" it does not
@@ -40,7 +40,7 @@
 // provides and needs no correction for" - a resolved sublayer wants the
 // PLAIN Robin condition, not the log-law correction). Run both through
 // `ofgpu-lowmach`, steady, and compare the wall heat transferred - see
-// `docs/07-fire-solver.md` S1.1 for the measured numbers and what the ratio
+// `docs/07-lowmach-solver.md` S1.1 for the measured numbers and what the ratio
 // says.
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

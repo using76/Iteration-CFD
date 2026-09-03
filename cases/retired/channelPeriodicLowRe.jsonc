@@ -53,7 +53,7 @@
 // thin, fast-conducting near-wall cells over-cools the much larger core -
 // at -900 W the domain interior fell to 160 K and was still falling after
 // 6000 iterations, not converging. That is a real limit of this technique,
-// reported rather than pushed past: see `docs/07-fire-solver.md` S1.1 for
+// reported rather than pushed past: see `docs/07-lowmach-solver.md` S1.1 for
 // what it means for the two meshes' RATIO, which is compared at
 // deliberately DIFFERENT Delta-T as a result, and for the measured y+, the
 // two wall heat fluxes and the honest reading of their ratio.

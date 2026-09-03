@@ -1149,7 +1149,7 @@ is discarded, and nothing prints:
 | 1 | the turbulence reader (`read_fv_schemes`) | ONE `divSchemes` entry was taken for the whole case, so `div(phi,U) Gauss linearUpwind; div(phi,k) bounded Gauss upwind;` ran the momentum equation first order |
 | 2 | the same reader, `ddtSchemes` | reduced to a steady/transient boolean, so `backward`, `CrankNicolson <c>` and `localEuler` all became first-order Euler |
 | 3 | `ofgpu-buoyant` (`read_simple_controls`) | `solvers/U`, `solvers/p`, `relaxationFactors`, `nNonOrthogonalCorrectors`, `consistent`, and — the line its own comment records — `div(phi,U)`, which was being read from the TURBULENCE equation's entry |
-| 4 | `ofgpu-fire` (`fire_controls`) | every `numerics.div` entry, every `numerics.relaxation` entry, `numerics.grad`, `numerics.laplacian.snGrad`, `nonOrthogonalCorrectors`, the `solvers` rule for `T`, `numerics.ddt`, `numerics.algorithm.correctors`/`momentumPredictor` and `physics.fluid.Pr`/`Prt` |
+| 4 | the low-Mach driver (`lowmach_controls`) | every `numerics.div` entry, every `numerics.relaxation` entry, `numerics.grad`, `numerics.laplacian.snGrad`, `nonOrthogonalCorrectors`, the `solvers` rule for `T`, `numerics.ddt`, `numerics.algorithm.correctors`/`momentumPredictor` and `physics.fluid.Pr`/`Prt` |
 | 5 | `ofgpu-plume` (`read_t_controls`) | `div(phi,T)` and `gradSchemes/grad(T)`, so the ENERGY equation was assembled with `div(phi,k)`'s scheme and `bounded` flag and with `gradSchemes/default`; plus `laplacianSchemes` for its own laplacian and `SIMPLE/residualControl` |
 
 **What the five have in common**, stated once because it is the thing to
@@ -1241,7 +1241,7 @@ named `every_wired_setting_changes_what_the_run_writes`:
 
 | driver | case the pair is built on | settings turned |
 |---|---|---|
-| `ofgpu-fire` | generated JSONC text | 13 |
+| `ofgpu-lowmach` | generated JSONC text | 13 |
 | `ofgpu-plume` | `blockgen::write_case(Plume, 8×8×8)` | 11 |
 | `ofgpu-buoyant` | `blockgen::write_case(Plume, 8×8×8)` | 17 |
 | `ofgpu-vof` | `blockgen::write_case(DamBreak, 20×30×1)` | 15 |
@@ -1314,10 +1314,10 @@ A block of the case format that NO driver reads is not exempt from §13.4
 either — and the treatment it gets is a **refusal**, not a printed note.
 
 This paragraph used to say the opposite: that a driver may say so in one line
-and continue, and `ofgpu-fire` did that for the whole `output` block. Three
+and continue, and `ofgpu-lowmach` did that for the whole `output` block. Three
 things settled it the other way:
 
-1. **A note is per driver, and drivers drift.** `ofgpu-fire` printed one;
+1. **A note is per driver, and drivers drift.** `ofgpu-lowmach` printed one;
    `ofgpu-k-epsilon`, which reads the same JSONC format, printed nothing — so
    the same `output` block was silently ignored by one of the two drivers that
    can read it. One shared refusal (`common::refuse_unimplemented_blocks`)
@@ -1338,7 +1338,7 @@ So, format-wide:
 | `run.adjustTimeStep: true` | **refused**; names `-deltaT`, and `ofgpu-vof` as the one adaptive loop in this crate |
 | `run.maxCo` | **refused**, whenever present, for the same reason |
 | `run.adjustTimeStep: false` | honoured — it is what every driver does |
-| `run.endTime`, `run.deltaT` | honoured: both readers turn them into `TurbulenceControls::n_outer_iterations`/`delta_t`. `ofgpu-fire` takes its run MODE from `-endTime`/`-deltaT` instead and prints which of the two is in force |
+| `run.endTime`, `run.deltaT` | honoured: both readers turn them into `TurbulenceControls::n_outer_iterations`/`delta_t`. `ofgpu-lowmach` takes its run MODE from `-endTime`/`-deltaT` instead and prints which of the two is in force |
 | `controlDict/adjustTimeStep yes` (OpenFOAM) | **refused** in `read_control_dict`, which covers every driver that goes through it |
 | `controlDict/adjustTimeStep`, `maxCo`, `maxDeltaT` under `ofgpu-vof` | **honoured** — it is the one driver whose step is adaptive, and it reads them itself |
 
@@ -1353,7 +1353,7 @@ same way rather than dropped:
   `ofgpu-k-omega`.** Both models have had a `set_buoyancy` all along and
   nothing was calling it; §17's `G_b = (nu_t/Pr_t) g·∇T/T` needs a temperature
   field and these two drivers read none. The refusal names `ofgpu-plume`,
-  `ofgpu-buoyant` and `ofgpu-fire`, which do transport `T` and do wire `G_b`
+  `ofgpu-buoyant` and `ofgpu-lowmach`, which do transport `T` and do wire `G_b`
   in. It fires only where the CASE named gravity — `constant/g` present, or
   JSONC, where `physics.gravity` is a required field — because
   `BuoyancyCoeffs::default()` is `(0 0 −9.81)` and refusing on that would
@@ -1389,15 +1389,15 @@ and it is a requirement, not a courtesy:
 > marked as pre-fix. A stale number left standing without a marker is the same
 > failure this section exists to prevent, one step downstream.**
 
-The sweep for instance 4 (`ofgpu-fire`) covered `README.md`, `README.en.md`,
-`docs/07-fire-solver.md`, `cases/README.md`, every `cases/*.jsonc` header, this
+The sweep for instance 4 (`ofgpu-lowmach`) covered `README.md`, `README.en.md`,
+`docs/07-lowmach-solver.md`, `cases/README.md`, every `cases/*.jsonc` header, this
 file, and the replayed constants in `src/bin/validate.rs`. Its results, which
 are the reason the rule is stated in this form:
 
 * **The two channel-gate legs were rerun** — §32.5.5, and they are the
-  headline. Reported there and in `docs/07-fire-solver.md` §1.1.
+  headline. Reported there and in `docs/07-lowmach-solver.md` §1.1.
 * **The demonstration case moved much further than the gate did.**
-  `cases/burnerPlume.jsonc` at the same 1200 steps: combustion efficiency
+  the reacting-medium gate case at the same 1200 steps: combustion efficiency
   96.0 % → **35.5 %**, domain heat release 20.1 → **7.45 kW**, net radiated
   power 6.3 → **1.12 kW**, radiated fraction 31.3 → **15.0 %**, peak
   temperature ~1600 → **819 K**, centreline decay exponent +0.03 → **−0.59**.
@@ -1405,15 +1405,16 @@ are the reason the rule is stated in this form:
   thermal expansion IS the plume's drive — so a `bounded` correction that
   subtracts a momentum sink proportional to it is not a small perturbation.
   Quasi-steadiness confirmed by extending to 2400 steps (35.48 %, 14.99 %).
-* **The P1-vs-fvDOM comparison of §36.7's last row survived it.** Radiated
-  fractions 15.08 / 13.35 % → **14.98 / 13.83 %** → (after §26.1)
-  **14.97 / 13.79 %**, wall times 18.8 / 119 s → 18.96 / 124.5 s →
-  **19.22 / 121.5 s**. fvDOM still radiates less than P1 on the same fire, at
-  ~6.5× the cost. **A comparison between two models run under the SAME
+* **A two-model comparison recorded here survived it**, and it is quoted as
+  the RULE rather than for its numbers, which were measurements of a
+  participating-medium radiation solver this engine no longer carries. Both
+  models moved by about the same amount in the same direction under the
+  correction, and their relative standing did not change.
+  **A comparison between two models run under the SAME
   discarded settings is the one kind of claim this defect does not
   invalidate**, and saying so explicitly is part of the sweep.
 * **`check_burner_heat_release` is untouched, and the reason is structural.**
-  It builds its own mesh, constructs `Combustion` directly and never goes
+  It builds its own mesh, constructs the reaction model directly and never goes
   through a driver's controls. A gate that reaches the physics without passing
   through a case file cannot be moved by a case file being misread — which is
   an argument for having such gates, not only replayed ones.
@@ -1431,7 +1432,7 @@ are the reason the rule is stated in this form:
   successor for each (`cases/channelPeriodicFluxLowRe.jsonc` for both) and the
   conditions their numbers were taken under; the failing commands are DELETED
   from `cases/README.md` rather than commented out, and the one in
-  `docs/07-fire-solver.md` is reduced to a record of what was run.
+  `docs/07-lowmach-solver.md` is reduced to a record of what was run.
   **A published command that no longer runs is a reproducibility defect even
   when the case it runs is obsolete**, because a reader cannot tell the two
   apart from the outside — and a commented-out command is still published.
@@ -2248,21 +2249,23 @@ rho = p0 / (R_s T),   R_s = R / W        (v1: constant W = air, stated)
 
 **Which driver.** `ofgpu-lowmach` (`src/bin/lowmach.rs`), and it is a driver
 of its own because for a long time it was not. The only shipped binary that
-built a `GasState` and called `Energy::update_target_divergence` was
-`ofgpu-fire`, which also carried §27's combustion and §28's radiation above
+built a `GasState` and called `Energy::update_target_divergence` was a
+reacting-medium solver that carried a combustion and a radiation model above
 this formulation; every measurement of §25/§26 in this document, and the
-whole of `docs/07-fire-solver.md` §1/§1.1 - the §29.3 wall-heat-transfer
+whole of `docs/07-lowmach-solver.md` §1/§1.1 - the §29.3 wall-heat-transfer
 gate, §32's redesigned Nusselt gate on both channel legs, §35's thermostat,
 §37's `Pr_t` experiment and §32.5's measured friction factor - was taken
 through that binary on general CHANNEL cases with nothing burning in them.
 Those measurements are properties of the low-Mach loop, so the loop was given
-its own driver: `ofgpu-lowmach` is `ofgpu-fire` without species, combustion,
-radiation, soot and the §85 burner report, and refuses a case naming
-`physics.fire` by name (§13.4) rather than running it at `q''' = 0`. The two
-print identical residual, bulk-state, wall-flux, thermostat, energy-budget
-and friction lines on `cases/channelPeriodicFluxWF.jsonc`, and §32's gate
-table was re-measured under the new name at 40 000 iterations on both legs.
-Text elsewhere in this document that names `ofgpu-fire` for a §25/§26
+its own driver: `ofgpu-lowmach` is that binary without species, combustion,
+radiation, soot and the burner report. The reacting-medium physics has since
+left this engine altogether, and the case reader refuses a case naming
+`physics.fire` by name (§13.4) rather than running it at `q''' = 0`. Before
+the split the two binaries printed identical residual, bulk-state, wall-flux,
+thermostat, energy-budget and friction lines on
+`cases/channelPeriodicFluxWF.jsonc`, and §32's gate table was re-measured
+under the new name at 40 000 iterations on both legs.
+Text elsewhere in this document that named a reacting-medium binary for a §25/§26
 measurement is a dated record of what was run and is left as it stands;
 the command to run one of them TODAY is the one in `cases/README.md`.
 
@@ -2273,7 +2276,7 @@ equation of §26 for `DT/Dt`:
 
 ```
 ∇·u = Q / (rho cp T)  −  (1/(γ p0)) dp0/dt
-Q   = q'''_c + ∇·(k_eff ∇T) − ∇·q_r          (combustion §27, radiation §28)
+Q   = ∇·(k_eff ∇T) + whatever §18's registry holds
 ```
 
 Check the limit: `Q = 0`, sealed, gives `∇·u = 0` — incompressible recovered.
@@ -2337,8 +2340,9 @@ the bounded-convection correction of §3.1, **written on the MASS flux, where
 it is §3.1 STABILISATION of a discrete continuity residual and not the physics
 term this sentence used to claim** — §26.1, which also says why it is
 nevertheless applied unconditionally. Sources arrive through the §18 registry:
-combustion and radiation REGISTER energy sources; the energy module must not
-know their internals (the hook keeps §27/§28 out of this file).
+a model with a volumetric heat term REGISTERS it; the energy module must not
+know any of their internals, and that hook is what keeps every such model out
+of this file.
 
 Wall heat transfer: fixed-T and fixed-flux walls via the §4 Robin triple
 (`g_ref = q_w / k_eff`); the convective wall function for temperature
@@ -2496,7 +2500,7 @@ self-consistent and is the same segregated lag every other coupling
 coefficient in this crate runs at. It is also WRONG at a restart: a resumed
 `Energy` has no previous `correct`, so `k_eff` is zero, the conduction term is
 zero, and the first pressure system after the restart is not the one the
-continuous run solved. `ofgpu-fire`'s own restart gate catches it — the first
+continuous run solved. `ofgpu-lowmach`'s own restart gate catches it — the first
 post-restart pressure residual missed the continuous run's step-21 residual by
 4.8 %, against a 0.1 % tolerance.
 
@@ -2544,7 +2548,7 @@ target divergence it did not have and works for the seven orders of magnitude
 second is that prologue running twice per outer iteration — about 1.2 ms on
 BOTH legs, which on meshes of 48 and 400 cells is kernel-launch overhead and
 nothing else, and is what buys the restart fidelity above. On a mesh where the
-work per kernel is not negligible it is small: `cases/burnerPlume.jsonc`,
+work per kernel is not negligible it is small: a 32 768-cell JSONC case,
 32 768 cells, 1 200 steps, goes **18.96 s → 19.22 s (+1.4 %)**.
 
 #### Two candidate fixes that were RUN, and are refutations
@@ -2622,7 +2626,7 @@ hypothesis — is refuted at both values of `Q`.
 
 #### What else collapsed: §32's channel dilatation was FICTITIOUS
 
-`ofgpu-fire` reports `contErr` = `max_c |Σ_f (±phi_f)|`, m³/s. In an
+`ofgpu-lowmach` reports `contErr` = `max_c |Σ_f (±phi_f)|`, m³/s. In an
 incompressible solver that is a convergence residual. In THIS one it is not:
 §25.3's pressure equation drives `Σ_f (±phi_f)_P` to `V_P (∇·u)_target,P`, so
 `contErr` measures the PRESCRIBED dilatation, and it is only a residual to the
@@ -2727,94 +2731,6 @@ energy balance, and that is the deepest reason the balance now closes.
 | the prescribed half subtracted from the correction | the case diverges. NOT a fix |
 | a case with no heat anywhere | `(∇·u)_target` is identically zero and nothing above moves any number — §32.5.3's isothermal controls |
 | a case whose `Q` is a volumetric release only, no wall flux, sealed | `dp0/dt` unchanged from before this section, to round-off |
-
----
-
-## 27. Combustion — mixing-controlled single step
-
-**Magnussen & Hjertager, *Proc. Combust. Inst.* 16 (1977) 719–729** (the
-eddy-dissipation model); background Poinsot & Veynante, *Theoretical and
-Numerical Combustion*. FDS's mixing-controlled default is the same idea
-(public domain reference).
-
-One global step, mass basis:
-
-```
-Fuel + s·O2 → (1+s)·Products          s = stoichiometric O2/fuel mass ratio
-```
-
-Species (§19 machinery): Y_F, Y_O2, Y_P transported; N2 is the inert
-closure. Reaction rate — mixing-limited, no kinetics:
-
-```
-omega_F = C_EDM · rho · (eps/k) · min(Y_F, Y_O2 / s)         [kg/m³s]
-C_EDM = 4.0 (Magnussen)
-```
-
-For an LES cell substitute `1/tau_mix = C_EDM' · |S|` (*DESIGN*, stated).
-Rate limiting (*DESIGN*): `omega_F ≤ rho·min(Y_F, Y_O2/s)/dt` so a species
-cannot go negative within a step; clip AND report the clipped-cell count.
-
-```
-q'''_c = omega_F · Δh_c        into the §26 source registry
-Y_F   −= omega_F dt / rho ;  Y_O2 −= s·omega_F dt / rho ;  Y_P += (1+s)(...)
-```
-
-as implicit-sink linearisation per §3.4 (Y_F sink is `omega_F/Y_F`-implicit).
-
-Default fuel (*DESIGN*): propane — Δh_c = 46.45 MJ/kg, s = 3.63 — overridable
-in the case.
-
-| Test | Expected |
-|---|---|
-| burner supplying m'_F, complete burn | ∫q''' dV = m'_F·Δh_c exactly |
-| lean/rich limits | the limiting reactant reaches ~0, no negatives |
-| species sum | exactly 1 (existing §19 invariant holds under reaction) |
-| flame height | Heskestad correlation L_f = 0.235 Q^{2/5} − 1.02 D (SFPE handbook), reported not asserted |
-| McCaffrey plume | NBS TN 910 centreline T, ΔT ~ z^{−5/3} in the plume region — §22's entry becomes REACHABLE |
-
----
-
-## 28. Radiation — P1 gray approximation
-
-**Modest, *Radiative Heat Transfer*, 3rd ed., ch. 15 (the P1/differential
-approximation)**; Marshak boundary conditions ibid. FDS uses finite-volume
-DOM — better in optically thin fire margins — which is the DOCUMENTED next
-step, not this one (§13.4: asking for `fvDOM` errors, naming `P1`).
-
-Incident radiation G [W/m²] satisfies one Helmholtz equation:
-
-```
-∇·( Γ ∇G ) − a G + 4 a σ T⁴ = 0,      Γ = 1/(3a)
-```
-
-`a` = gray absorption coefficient [1/m] (v1: constant, case-supplied;
-WSGG later). Existing laplacian + Sp machinery solves it as-is (SPD → PCG).
-
-Energy coupling, through the §26 registry:
-
-```
-−∇·q_r = a (G − 4 σ T⁴)
-```
-
-Under-resolved flames radiate too little (T⁴ of a smeared flame): prescribe a
-radiant fraction χ_r (*DESIGN*, default 0.35, FDS practice): in cells with
-`q'''_c > 0` the emission term becomes `max(4 a σ T⁴, χ_r q'''_c)`; energy
-sees the matching sink so the budget closes.
-
-Marshak wall BC — a Robin condition, natively the §4 triple:
-
-```
-−Γ ∂G/∂n = (ε_w / (2(2−ε_w))) (4 σ T_w⁴ − G)
-```
-
-| Test | Expected |
-|---|---|
-| isothermal medium, hot walls | G → 4σT⁴ uniformly (equilibrium), exact |
-| optically thick slab | diffusion limit q = −(4σ/(3a))∇T⁴ recovered |
-| cold black walls, hot slab | net wall flux vs 1-D analytic P1 solution |
-| energy budget | ∫(emission − absorption) dV = net boundary radiative flux |
-| χ_r override | with q''' on, radiated power ≥ χ_r·∫q''' |
 
 ---
 
@@ -2991,7 +2907,7 @@ by the registry from the case. Requirements that come with it:
 
 ---
 
-## 31. Periodic domains, fire output, and case robustness
+## 31. Periodic domains, low-Mach output, and case robustness
 
 Three items that close known gaps rather than add physics.
 
@@ -3037,15 +2953,15 @@ to prevent. A cyclic patch may not also be a wall, an inlet or an outlet;
 field advected through a periodic pair returns to itself; the pair's two
 patches carry equal and opposite total flux at every step.
 
-### 31.2 Field output and restart for the fire solver
+### 31.2 Field output and restart for the low-Mach solver
 
-`ofgpu-fire` carries no writer and no restart. The machinery exists —
-`io::writer`'s `ResultWriter`/`WriteCtx`, the `.mcr` format of §4.6 in
-docs/05, and `CoupledTurbulence`'s own field accessors. Adopting it is
-wiring, with one requirement of substance: a low-Mach restart must carry
-**p0** (§25.2) and the species mass fractions, or the restarted run starts
-from a different thermodynamic state than the one it stopped in. The mesh
-hash already refuses a mesh mismatch.
+The low-Mach driver carried no writer and no restart when this was written.
+The machinery exists — `io::writer`'s `ResultWriter`/`WriteCtx`, the `.mcr`
+format of §4.6 in docs/05, and `CoupledTurbulence`'s own field accessors.
+Adopting it is wiring, with one requirement of substance: a low-Mach restart
+must carry **p0** (§25.2) and every transported scalar, or the restarted run
+starts from a different thermodynamic state than the one it stopped in. The
+mesh hash already refuses a mesh mismatch.
 
 *Test*: 40 steps continuous against 20 + restart + 20 — the first pressure
 residual after the restart, p0, and the total enthalpy all agree with the
@@ -3054,10 +2970,10 @@ as the VOF restart already does.
 
 ### 31.3 Transient cases must not run a steady algorithm
 
-`cases/burnerPlume.jsonc` diverges around step 20: it names
+A shipped transient case diverged around step 20: it named
 `"algorithm": { "kind": "SIMPLE" }` with under-relaxation while being run
-as a transient fire, so the momentum equation is relaxed towards a steady
-state that a buoyant plume does not have.
+transiently, so the momentum equation was relaxed towards a steady state
+that a buoyant plume does not have.
 
 *DESIGN — the contract.* A case whose `run` block has a non-zero `endTime`
 and a `ddt` scheme that is not `steadyState` is transient; a transient case
@@ -3183,7 +3099,7 @@ forbidden here. Specifically:
 * **Every** statement of the form "within Gnielinski's ±10 % band" MUST name
   the `f` — in the check's own name, in the doc's own table, in the case
   file's own header. `ofgpu-validate`'s check names carry `at the PIPE f` or
-  `at the REALISED f`; `ofgpu-fire` prints the two lines labelled
+  `at the REALISED f`; `ofgpu-lowmach` prints the two lines labelled
   `ABSOLUTE-PREDICTION verdict` and `REYNOLDS-ANALOGY verdict`.
 * **A verdict quoting the realised `f` is a REYNOLDS-ANALOGY verdict, and
   must say so.** It may not be reported as, summarised as, or promoted to an
@@ -3438,7 +3354,7 @@ as shipped, which since this rerun means with the thermostat's
 `"weighting": "massFlux"` (§35.3), the form a streamwise-periodic
 constant-flux duct actually calls for. Each leg was also rerun with the
 `uniform` weighting first, as a control: those runs reproduce every number
-`docs/07-fire-solver.md` §1.1 had on record — `T_b`, `U_b`, `T_w`,
+`docs/07-lowmach-solver.md` §1.1 had on record — `T_b`, `U_b`, `T_w`,
 `Nu`, the thermostat power, the mesh-resolution counts — to the last
 printed digit, which is what says the rerun changed one thing and measured the
 change.
@@ -3558,7 +3474,7 @@ buys.
 
 **A §13.4 violation found while judging this gate, reported and not
 fixed here — FIXED SINCE (§13.4.1), and both legs rerun in §32.5.5, which
-supersedes the verdicts in this section.** `ofgpu-fire` builds its
+supersedes the verdicts in this section.** `ofgpu-lowmach` builds its
 `MomentumControls` from `MomentumControls::default()` and overrides only `nu`,
 `steady`, `delta_t` and `ddt`. It therefore never reads
 `numerics.div["div(phi,U)"]` or `numerics.relaxation.U` from the case at all:
@@ -3574,7 +3490,7 @@ lines, and so do two differing only in `relaxation.U` (0.5 against 0.9). Under
 defect, and it is a defect that touches every velocity field this gate
 measures: the momentum convection scheme is first order where the case asked
 for second. It is NOT fixed in this round — fixing it moves every number
-`ofgpu-fire` has ever recorded, on every case, and that is its own job with
+`ofgpu-lowmach` has ever recorded, on every case, and that is its own job with
 its own reruns. It is named here because the friction factors above are its
 downstream measurements, and because "the resolved leg under-predicts `f`" and
 "the momentum equation is running a more diffusive scheme than the case asked
@@ -3669,7 +3585,7 @@ this gate in its own right, on both meshes, and it is a MOMENTUM finding
 
 Every measurement in §32.5.3 — and every number §32's gate had produced
 before it — was taken by a driver that read none of the case's own `numerics`
-block. `ofgpu-fire` built its `MomentumControls` and `EnergyControls` from
+block. `ofgpu-lowmach` built its `MomentumControls` and `EnergyControls` from
 `::default()`, so both channel cases, which ask for
 `div(phi,U) Gauss linearUpwind grad(U)`, ran the substituted default instead.
 That default is **`bounded Gauss upwind`**, not the `Gauss upwind` §32.5.3's
@@ -3776,7 +3692,7 @@ The candidate this verdict ends by naming — the case-wide constant `Pr_t` — 
 `PrtModel KaysCrawford` on both legs takes the resolved leg from +14.1 % to
 +6.4 % and closes the absolute-prediction verdict on BOTH; the default is
 unchanged, so every number in the table above still stands as written. See
-§37 and `docs/07-fire-solver.md` §1.1's last subsection.
+§37 and `docs/07-lowmach-solver.md` §1.1's last subsection.
 
 **What the remaining discrepancy implicates, with three suspects retired.**
 The uniform thermostat sink (§35.3), the inferred friction factor (§32.5.3)
@@ -3810,7 +3726,7 @@ and now the momentum bounded-convection correction are all off the list:
 
 | Check | Expected |
 |---|---|
-| a case naming `Gauss linearUpwind grad(U)` for `div(phi,U)` | runs it, and `ofgpu-fire` prints which scheme, relaxation, solver and corrector count each equation will use, before iterating |
+| a case naming `Gauss linearUpwind grad(U)` for `div(phi,U)` | runs it, and `ofgpu-lowmach` prints which scheme, relaxation, solver and corrector count each equation will use, before iterating |
 | a MOMENTUM equation whose case named no `div` entry | falls back to an UNBOUNDED entry, never to `bounded` (§3.1) |
 | the resolved leg's kinematic drag balance, as shipped | closes — measured −0.000 %, against −3.787 % with `bounded` restored |
 | the wall-function leg's kinematic drag balance, as shipped | closes — measured −0.005 % |
@@ -4174,10 +4090,10 @@ cell values a weighting would see; on the resolved `lowRe` mesh (50 cells,
 `expansion: 200`) it is resolved in full. The two legs therefore carry
 DIFFERENT amounts of this same error, which makes it a candidate
 explanation for the two-mesh ratio `Nu_resolved/Nu_wallFunction = 1.125`
-that `docs/07-fire-solver.md` §1.1 currently attributes to Launder-Sharma's
+that `docs/07-lowmach-solver.md` §1.1 currently attributes to Launder-Sharma's
 own near-wall thermal prediction. That is a HYPOTHESIS this section makes
 testable, not a measurement: nothing here has rerun either leg, and the
-attribution in `docs/07-fire-solver.md` stands until something does.
+attribution in `docs/07-lowmach-solver.md` stands until something does.
 
 **MEASURED — the experiment this section was written to make possible, run
 on the resolved leg with nothing else changed.** `cases/
@@ -4443,287 +4359,8 @@ error naming those two.
 | no cyclic pair, no `direction` | refused |
 | `direction` on a `uniform` thermostat | refused |
 | `weighting` misspelled | refused, naming `uniform` and `massFlux` |
-| the two channel cases of §32/§34, run at the DEFAULT | bit-for-bit the numbers `docs/07-fire-solver.md` §1.1 recorded before this section existed — MEASURED, on both legs, and it is what makes the pair below a controlled comparison |
+| the two channel cases of §32/§34, run at the DEFAULT | bit-for-bit the numbers `docs/07-lowmach-solver.md` §1.1 recorded before this section existed — MEASURED, on both legs, and it is what makes the pair below a controlled comparison |
 | the same two cases at `massFlux` | `Nu` LOWER and `(T_w − T_b)` WIDER on both legs, and the shift larger on the resolved mesh than on the wall-function one — MEASURED at −3.99 %/−1.41 % in `Nu` (§35.3.2) |
-
----
-
-## 36. fvDOM: finite-volume discrete ordinates radiation
-
-**Chandrasekhar, *Radiative Transfer*, Dover (1960)** — the radiative
-transfer equation (RTE) itself, §1. **Modest, *Radiative Heat Transfer*,
-3rd ed., ch. 16** — the discrete-ordinates method, its finite-volume
-discretisation, and the diffuse-wall boundary condition. **Fiveland,
-*J. Heat Transfer* 106 (1984) 699** — assembling the S_N ordinates' spatial
-derivatives with a finite-volume (not finite-difference) scheme, which is the
-form this section implements. **Truelove, *J. Heat Transfer* 109 (1987)
-1048** — the S_N quadrature sets and the two conditions (§36.2) that fix
-their directions and weights. `reference/fds/Source/radi.f90` is public
-domain (NIST) and implements the same physics with a different angular
-quadrature (a solid-angle subdivision rather than a fixed S_N table); read
-for the wall-reflection bookkeeping shape, acknowledged here, not copied —
-this section's quadrature, assembly and wall formula are all derived
-independently below. §28's own text names this the documented next step:
-"FDS uses finite-volume DOM — better in optically thin fire margins — which
-is the DOCUMENTED next step, not this one." This section is that step.
-
-### 36.1 The RTE along one ordinate, as a transport equation this crate already assembles
-
-For a gray, absorbing-emitting-scattering, non-refracting medium
-(`n = 1`, *DESIGN* — no participating medium in this crate changes the speed
-of light; FDS makes the same assumption), the steady RTE along a fixed unit
-direction `s_m` (Modest ch. 9, eq. 9.24; Chandrasekhar ch. 1) is
-
-```
-(s_m . grad) I_m = -(a + sigma_s) I_m + a sigma T^4/pi + (sigma_s/4pi) G
-```
-
-`I_m` is the spectral... here gray, so total... intensity along `s_m`
-[W/(m² sr)], `a` the absorption coefficient, `sigma_s` the (assumed
-isotropic-scattering, *DESIGN* — the phase function `Phi = 1`; anisotropic
-scattering is a coefficient change to the last term, not a structure change)
-scattering coefficient, both [1/m], and `G = sum_m' w_m' I_m'` the incident
-radiation [W/m²] §28 already defines. There is no time derivative: light
-crosses a combustion-scale domain in nanoseconds, so the radiation field is
-always at its (pseudo-)steady state relative to the flow's own timescale —
-the same "instantaneous relative to everything else" assumption §28's own
-Helmholtz solve makes.
-
-The left side is a pure convection with the CONSTANT "velocity" `s_m`, and
-`div(s_m) = 0` makes `(s_m . grad) I_m` and `div(s_m I_m)` the same field, so
-integrating over a cell and applying Gauss's theorem gives exactly §3.1's
-convection operator with the face flux
-
-```
-phi_m,f = s_m . Sf          (internal and boundary faces)
-```
-
-— a field that is CONSTANT (mesh and direction are both fixed), computed once
-per ordinate at construction exactly as §28's `Gamma * magSf` is. The
-extinction `-(a + sigma_s) I_m` is §3.4's implicit sink (`fvm_sp`, always
-`<= 0` since `a, sigma_s >= 0`); the emission and in-scattering source is
-`fvm_su`. **No new spatial operator exists in this section — `fvm_div_gauss`,
-`fvm_sp` and `fvm_su` assemble the whole equation**, which is the reason
-`SPEC-LIT` §28 could name this the next step at all rather than a rewrite.
-
-Upwind weights (§3.1, `w_f = 1 if phi_f >= 0 else 0`) are not a choice here —
-they are the ONLY stable weight for a pure hyperbolic transport with no
-diffusion to regularise a central scheme, exactly the reason DOM/FVM-DOM
-codes use a step (upwind) scheme along each ordinate (Fiveland 1984 §3;
-Modest ch. 16.3). Because `phi_m` is constant, `w_m` is ALSO constant and is
-precomputed once, alongside `phi_m` itself.
-
-**In-scattering, lagged.** `G` on the right side is this equation's own
-solution summed over every OTHER ordinate — a real coupling, not a
-convenience — so it is evaluated at the previous sweep's `G` (§36.3), the same
-lag every coefficient in this crate that depends on "the rest of the system"
-runs at (P1's wall temperature, turbulence's production term, ...). One
-sweep's worth of lag per outer iteration, not per equation — see §36.6.
-
-### 36.2 The angular quadrature
-
-`sum_m w_m = 4 pi` (the solid angle of the sphere) is necessary but nowhere
-near sufficient — a quadrature also has to get the LOW-ORDER MOMENTS of the
-sphere right, or the discrete equation does not converge to the continuum RTE
-as the mesh refines. This crate implements the level-symmetric **S4** set
-(Lathrop & Carlson 1965, reproduced in Truelove 1987 and Fiveland 1984): 24
-ordinates, 3 per octant, each octant's three directions the permutations of
-one triple `(a, a, b)`:
-
-```
-directions, one octant:  (a,a,b), (a,b,a), (b,a,a)     (the other 7 octants: every sign combination)
-weight, every ordinate:  w = pi/6                       (3 per octant * pi/6 = pi/2 ; 8 octants * pi/2 = 4pi)
-```
-
-Two conditions fix `a` and `b`. First, every direction is a unit vector:
-
-```
-2a^2 + b^2 = 1
-```
-
-Second — Lathrop & Carlson's actual defining condition, and the one that
-makes the wall formula of §36.4 exact in the isothermal limit — the
-HALF-RANGE flux of the quadrature along any one axis must reproduce the
-continuum integral `integral_(hemisphere) mu dOmega = pi` exactly. Along `x`,
-the four octants with `a_x > 0` each contribute `(2a + b) * pi/6` to that sum
-(the three permutations' `x`-components are `a, a, b`), so
-
-```
-4 * (2a + b) * pi/6 = pi   =>   2a + b = 3/2
-```
-
-Solving the two simultaneously (`b = 3/2 - 2a` into `2a^2 + b^2 = 1` gives
-`6a^2 - 6a + 1.25 = 0`):
-
-```
-a = (6 - sqrt(6)) / 12  = 0.29587585...
-b = (3 + sqrt(6)) / 6   = 0.90824829...
-```
-
-*DESIGN.* Truelove (1987) and Fiveland (1984) both TABULATE this set rather
-than derive it in the paper itself, so the exact digits above are this
-crate's own closed-form solve of the two defining conditions, not a copied
-table — a value obtained this way is checkable (§36.7's quadrature-invariant
-tests) rather than trusted. The widely-reproduced decimal `0.2958759` for S4
-agrees with the closed form to 7 figures. **S6, S8, S10, S12** are named
-alternatives with no closed form this simple (each needs additional moment
-conditions with no unique solution, which is exactly why the literature
-tabulates them) — requesting one is the §13.4 contract: an error naming `S4`
-as what is available, not a silent substitution.
-
-The second moment needed to recover the diffusion limit (§36.3's third gate),
-`sum_m w_m mu_x^2 = 4pi/3`, holds for ANY `a` satisfying `2a^2+b^2=1` with
-this direction/weight structure (each octant contributes `w(2a^2+b^2) = w`,
-times 8 octants times `w=pi/6` gives `4pi/3` identically) — so it is not a
-third condition on `a`, it is a property of the S4 STRUCTURE, and is
-therefore checkable directly as a quadrature invariant with no dependence on
-which root of the quadratic was taken.
-
-### 36.3 Assembly and the sweep
-
-One `correct()` call, given the current `T` and (optionally) combustion's
-`q'''_c`:
-
-```
-total_emission = max(4 a sigma T^4, chi_r q'''_c)        the SAME §28 floor, reused verbatim
-vol_src        = total_emission/(4pi) + (sigma_s/4pi) G     (G from the PREVIOUS sweep; zero on the first)
-
-for each ordinate m (24, S4):
-    stamp the diffuse-wall triple on m's wall faces (§36.4), from the
-      OTHER ordinates' latest boundary intensities
-    assemble:  fvm_div_gauss(phi_m, w_m, I_m, +1)
-             + fvm_sp(a + sigma_s, +1)
-             + fvm_su(vol_src, +1)
-             + add_boundary_contributions
-    solve (PBiCGStab — §36.1's convection makes the matrix asymmetric,
-           and crate::solver::solve refuses PCG on it by itself, §8.2)
-    correct_boundary_conditions(I_m)
-
-G = sum_m w_m I_m                                        for the NEXT sweep's vol_src, and for §36.5
-```
-
-`total_emission`'s floor and its formula are `a sigma T^4`-shaped exactly as
-§28's own emission term — reusing §28's `RadiationKernels::emission_source`
-CUDA kernel rather than re-deriving it, because the floor is a statement
-about how much a cell radiates in TOTAL (over all `4pi` steradians), and
-that total does not depend on which model computes the ANGULAR distribution
-of it. Dividing by `4pi` spreads it isotropically over the ordinates, which
-recovers the un-floored `a sigma T^4/pi` per-ordinate term exactly when the
-floor is inactive.
-
-`n_sweeps` (a `correct()` parameter, mirroring §28's `n_non_orth`) is extra
-FULL passes over all 24 ordinates within one call, each using the
-just-updated `G` and wall intensities from the pass before. §36.6 discusses
-why v1 defaults to one sweep per call and leans on the outer iteration loop
-to converge the rest, exactly as §28 lags `T`.
-
-### 36.4 Wall boundary: diffuse emission and reflection
-
-A face on a Marshak-analogous wall (emissivity `epsilon_w`, temperature
-`T_w`, diffusely reflecting: Modest ch. 16.5) splits its ordinates by sign of
-`phi_m,bf = s_m . Sf` against the mesh's own outward normal:
-
-```
-phi_m,bf > 0   ray leaves the gas cell toward the wall - "incident" on the wall - outflow BC (zero-gradient, S4 triple: fr=0, refGrad=0)
-phi_m,bf < 0   ray leaves the wall INTO the gas - inflow BC (Dirichlet, S4 triple: fr=1, refValue = I_w)
-```
-
-`I_w`, the SAME for every inflow ordinate at that face (a diffuse wall's
-leaving intensity does not depend on direction), is built from the OTHER
-ordinates' latest boundary intensities — "the incoming intensity built from
-the outgoing ones", and, being one more instance of `psi_b = fr*ref + (1-fr)
-(...)`, the section-4 triple again:
-
-```
-I_w = epsilon_w sigma T_w^4/pi  +  ((1 - epsilon_w)/pi) * sum_(m': phi_m',bf>0) w_m' I_m'(at face) * |phi_m',bf|/magSf_bf
-```
-
-The first term is the wall's own blackbody emission spread isotropically
-over the outward hemisphere (`sigma T^4 = pi * I_black`, the standard
-hemispherical-flux/radiance relation); the second is Lambertian reflection of
-whatever irradiance the wall receives, `(1-epsilon_w)` of it re-emitted
-uniformly over the same hemisphere. `|phi_m',bf|/magSf_bf = |s_m' . n|` is
-the direction cosine against the wall normal, recovered from the flux this
-crate already carries rather than stored again.
-
-**Why this is exact at isothermal equilibrium, and not by luck.** At
-`T = T_w` everywhere, `I_m = sigma T^4/pi` for every ordinate is an exact
-solution of §36.1's interior equation for ANY `a, sigma_s` (its gradient is
-zero and the emission/extinction/in-scattering terms cancel identically —
-the same statement P1's own equilibrium test is checking). It is ALSO an
-exact fixed point of `I_w` above if and only if
-`sum_(phi_m'>0) w_m' |s_m'.n| = pi` — exactly §36.2's half-range flux
-condition, for the wall's own normal direction. On an axis-aligned wall (the
-only kind this crate's Cartesian/`blockgen` meshes build, and every gate
-below), that is precisely the condition the S4 set was SOLVED to satisfy
-(§36.2), to the closed form's own precision — not an approximation, and not
-the same statement as P1's Marshak derivation (which is exact on ANY mesh,
-by construction of a single scalar field's boundary condition); fvDOM's
-version is exact on an axis-aligned wall because the quadrature was chosen
-for it, and would carry a small (checkable) angular-discretisation bias on
-an arbitrarily oriented one.
-
-**Every other boundary** keeps §28's own convention: the default triple
-(`ZeroGradient`, from `GpuScalarField::zeros`) unless a face is named a wall.
-*DESIGN, consistency over "more physical"* — an outlet BC that better
-represented an open sky (Dirichlet zero for inflow ordinates, "cold black
-surroundings") is straightforward to add later, but P1 and fvDOM must run
-the SAME assumption on the SAME case for §36.7's comparison gates to be a
-comparison of the angular method and nothing else.
-
-### 36.5 Coupling to §26 energy: the same registry, unchanged formula
-
-```
--div(q_r) = a (G - 4 sigma T^4)
-```
-
-is model-agnostic: it is a statement about `G` and `T`, and does not know
-whether `G` came from one Helmholtz solve or twenty-four transport solves.
-§28's `RadiationKernels::energy_coupling` — the Patankar linearisation
-`Sp = -16 a sigma T0^3`, `Su = a G + 12 a sigma T0^4 - excess`, `excess` the
-same radiant-fraction bookkeeping — is called VERBATIM with fvDOM's own `G`,
-and the result registers on the identical `crate::energy::EnergySources` P1
-uses. Energy does not learn, and must not need to learn, which radiation
-model produced its source terms — the whole reason §18's registry exists.
-
-### 36.6 Cost, stated honestly
-
-One fvDOM `correct()` call is `N_ordinates` (24, S4) asymmetric transport
-solves against P1's one symmetric-positive-definite Helmholtz solve — every
-one of PBiCGStab's iterations does more work per iteration than PCG's too,
-since the matrix is not exploitable for a Cholesky-shaped preconditioner
-(§8.2, DIC is refused on it for the same reason P1 gets to use it). This is
-not a constant-factor difference to be optimised away; it is the price of
-resolving the angular distribution P1 collapses to two moments (`G` and its
-gradient) instead of assuming a scalar field.
-
-*DESIGN — recommended, not enforced by a setting in v1.* Radiation couples to
-the flow only through a source term that is smooth on the flow's own
-timescale (photon transit is instantaneous by comparison; the medium's `T`
-that DRIVES the emission term moves on the flow timescale, not faster), so a
-production run should update fvDOM every 5-10 outer iterations rather than
-every one, holding `su`/`sp` fixed in between — the same reasoning that
-justifies lagging turbulence production or a wall function's coefficients.
-`n_sweeps` (§36.3) is the knob for converging the WITHIN-call ordinate
-coupling (wall reflection, scattering) faster than the outer loop would; the
-UPDATE INTERVAL is a driver-level choice (`ofgpu-fire`'s outer-iteration
-loop, not this module) and is not wired to a case setting in v1 — a case
-that wants it approximates it today by simply not calling `correct()` every
-iteration, which is already possible without new plumbing.
-
-### 36.7 What must hold
-
-| Test | Expected |
-|---|---|
-| quadrature weights | `sum_m w_m = 4pi`, `sum_m w_m mu_x^2 = sum w_m mu_y^2 = sum w_m mu_z^2 = 4pi/3`, to the closed form's own precision |
-| half-range flux | `sum_(mu_x>0) w_m mu_x = pi` (§36.2/§36.4's exactness condition), same tolerance |
-| isothermal enclosure at `T_w` | `G -> 4 sigma T_w^4` uniformly — the same check §28 passes, converged over repeated `correct()` calls (§36.3/§36.6's sweep lag, not one call) |
-| optically thick limit | recovers the diffusion result, AND agrees with P1 to within discretisation error — where P1 is right, fvDOM must agree |
-| optically thin limit | fvDOM vs. an analytic thin-medium result vs. P1 vs. the same analytic result — report all three, and how far P1's error is from fvDOM's, which is the reason this section exists |
-| energy budget | domain `integral(emission - absorption) dV` equals net boundary radiative flux, to round-off — §28's own check, unchanged by which model produced `emission`/`absorption` |
-| `cases/burnerPlume.jsonc` | run with `radiationModel P1` and `radiationModel fvDOM`; report the radiated fraction from both |
-
-**MEASURED**, `cases/burnerPlume.jsonc` and its `_fvDOM` twin, 32 768 cells, 1200 steps at `deltaT = 0.005 s`, RTX 5070 Ti, at the §13.4.1 numerics: radiated fraction **14.97 %** (P1) against **13.79 %** (fvDOM) of the domain heat release; wall time **19.22 s** against **121.5 s**, a factor 6.3 on 24 ordinates *(rerun after §26.1, which moved the fractions by less than 0.05 points: previously 14.98 / 13.83 % at 18.96 / 124.5 s, a factor 6.6)* — §36.6's `N_ordinates`-times-cost statement confirmed by measurement. *Previously recorded as 15.08 / 13.35 % and 18.8 / 119 s, from runs made by a driver that read none of the case's `numerics` block (§13.4.3). Both models were rerun on the fixed driver; because both legs of the comparison were affected identically, the P1-vs-fvDOM conclusion is unchanged in substance — fvDOM radiates less, by 1.15 points instead of 1.73.*
 
 ---
 
@@ -4915,7 +4552,7 @@ driver refuses that combination, naming `PrtModel constant` and "gravity
 and is named here rather than left implicit.
 
 **A defect this section found in the driver's own REPORT, fixed here.**
-`ofgpu-fire` integrates the wall heat flux as `k_eff,wall * snGrad(T)` off the
+`ofgpu-lowmach` integrates the wall heat flux as `k_eff,wall * snGrad(T)` off the
 same Robin triple the matrix was assembled from, and recomputes `k_eff,wall`
 on the host from the downloaded `rho`/`nu_t` boundary fields. That
 recomputation used the constant `Pr_t` unconditionally. On a wall-function
@@ -4932,7 +4569,7 @@ than quietly corrected — it is the only way a reader can tell that this
 section's first wall-function measurement was discarded.
 
 Also stated because it is a scope limit and not an oversight: this section
-reaches `ofgpu-fire`'s energy equation. `ofgpu-buoyant` and `ofgpu-plume`
+reaches `ofgpu-lowmach`'s energy equation. `ofgpu-buoyant` and `ofgpu-plume`
 carry their own `Prt` in `ScalarTransportCoeffs` and do not implement §37;
 neither reads a JSONC case, so neither can be handed the setting and ignore
 it.
@@ -4950,9 +4587,9 @@ Absent means `constant`, which is what every case written before this section
 existed means. An unrecognised spelling is an error NAMING both alternatives;
 `-permissive` substitutes `constant` and prints the substitution.
 
-**The default stays `constant`, deliberately.** Every measurement
-`ofgpu-fire` has recorded — §32's whole gate history, §35's thermostat
-experiments, §36's radiated fractions — was made with a single case-wide
+**The default stays `constant`, deliberately.** Every measurement the
+low-Mach driver has recorded — §32's whole gate history, §35's thermostat
+experiments — was made with a single case-wide
 `Pr_t`, and a default that changed would move all of them at once, silently,
 on the next rerun. The opt-in is one token in the case file; the reproducible
 record is worth more than the convenience.
@@ -4977,7 +4614,7 @@ driver prints which reading is in force.
 | §13.4 | an unrecognised `PrtModel` errors, naming both spellings; `KaysCrawford` with gravity on errors, naming §17 |
 | the experiment | §32's two legs, 40 000 iterations, `constant` against `KaysCrawford`, nothing else changed: report `Nu`, `T_w`, `T_b`, both balances, and the measured `Pr_t` range on each mesh |
 
-**MEASURED** — see `docs/07-fire-solver.md` §1.1's last subsection for the
+**MEASURED** — see `docs/07-lowmach-solver.md` §1.1's last subsection for the
 four runs and the verdict.
 
 > **The four runs were repeated after §26.1** and every conclusion §37 draws
@@ -5989,725 +5626,6 @@ length.
 
 ---
 
-## 42. The serial two-step mixing-controlled scheme — CO and incomplete combustion
-
-**K. McGrattan, R. McDermott, J. E. Floyd, "A simple two-step reaction scheme
-for soot and CO", *Proc. Tenth International Seminar on Fire and Explosion
-Hazards (ISFEH10)*, Oslo, 23–27 May 2022** — a NIST work, US public domain;
-the PDF at <https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=927294> was
-fetched and read in full for this section, and its Eqs. (1)–(5) are the model
-below. Background, all public domain and read locally from
-`reference/fds/Manuals/` (`reference/fds/LICENSE.md`: *"software developed by
-NIST employees is not subject to copyright protection within the United
-States"*): the **FDS Technical Reference Guide** Combustion chapter (lumped
-species, `tau_mix`, the batch reactor, both extinction models) and the **FDS
-Validation Guide** Experiment chapter (the UMD line burner's two-step
-stoichiometry, the NIST RSE geometry). Prior art acknowledged by [L21] but not
-implemented here: Westbrook & Dryer, *Combust. Sci. Technol.* 27 (1981) 31–43;
-Andersen et al., *Energy & Fuels* 23 (2009) 1379–1389. No GPL-licensed source
-was consulted. **No FDS source code was read** — the manuals and the ISFEH10
-paper needed none of it.
-
-§27's single global step answers none of the three questions fire safety
-actually asks — how much CO is in an under-ventilated compartment, what the
-combustion efficiency is, and where the flame goes out — because it has one
-reaction, no intermediate, and a heat release that is a fixed multiple of the
-fuel consumed. This section adds the second step. **It adds no kinetics, no
-Arrhenius rate, no Jacobian, no ODE integrator and no stiffness**: both steps
-use §27's own mixing-controlled rate, and the whole model is the decision to
-run them *serially inside one time step* instead of in parallel. [L21] states
-why that is the right trade at fire resolutions:
-
-> "A typical large-scale fire simulation is performed on a numerical grid with
-> cells on the order of 10 cm or greater, and the resolved temperature field is
-> too coarse to allow detailed kinetic modeling of products of incomplete
-> combustion."
-
-An `exp(-E/(R_u T))` evaluated on a cell mean `T` that is several hundred
-kelvin low because the flame occupies one per cent of the cell is not a better
-answer than a mixing-controlled one; the exponential amplifies the resolution
-error. §27's model stays the **default**, and every recorded measurement made
-with it is unmoved (§42.8).
-
-### 42.1 The two reactions
-
-[L21] Eq. (2)–(3), written for propane to show the idea, are quoted here
-because they are also this section's worked example:
-
-```
-C3H8 + 2 O2  ->  2 CO + C + 2 H2 + 2 H2O                             (42.1)
-
-2 CO + C + 2 H2 + 3 O2  ->  3 CO2 + 2 H2O                            (42.2)
-```
-
-and generalised ([L21] Eqs. (4)-(5)) to an arbitrary fuel `CxHyOzNv` reacting
-to a lumped **intermediate** (CO, soot, H2, H2O) and then to final products.
-This crate transports mass fractions, not moles, so the model is stated on a
-**mass basis** — which is what makes the arithmetic below exact rather than
-approximate:
-
-```
-Fuel  +  s1 O2   ->  (1 + s1) Int                    releases dh1 per kg fuel
-Int   +  r2 O2   ->  (1 + r2) Prod                   releases dh2I per kg Int
-```
-
-with, per unit mass of FUEL,
-
-```
-s1 + s2  = s              s is S27's own stoichiometric O2/fuel mass ratio
-dh1 + dh2 = dhc           dhc is S27's own heat of combustion
-r2   = s2 / (1 + s1)                                                 (42.3)
-dh2I = dh2 / (1 + s1)                                                (42.4)
-```
-
-Mass is conserved in each step by construction: `1 + s1` in, `1 + s1` out;
-`(1 + s1) + s2` in, `(1 + s1) + s2` out. Both steps to completion consume
-`s1 + s2 = s` kg of O2 per kg of fuel, produce `1 + s` kg of products, and
-release `dh1 + dh2 = dhc` — **§27's global step, exactly, with no residue**.
-That identity is what makes §42.8's energy-closure gate an identity of the
-scheme rather than a numerical near-miss, and it holds however the case splits
-`s` and `dhc` between the steps.
-
-### 42.2 The serialisation — which IS the model
-
-Both steps use the same mixing-controlled rate `1/tau_mix` that §27 already
-builds (`C_EDM eps/k` in RANS, `C_EDM beta* omega` in a k-omega family, `C_EDM'
-|S|` in LES). Inside one time step, in one cell, in this order:
-
-```
-step 1   minY1 = min(Y_F, Y_O2 / s1)
-         omega1 = rate rho minY1,  clipped to rho minY1 / dt
-         Y_F'   = Y_F / (1 + omega1 dt / (rho Y_F))     Patankar, as S27
-         dY_F   = Y_F - Y_F'
-         q1     = rho dY_F dh1 / dt
-
-         Y_O2'  = Y_O2 - s1 dY_F           <-- the LEFTOVER oxygen
-         Y_I'   = Y_I + (1 + s1) dY_F      <-- including what step 1 just made
-
-step 2   minY2 = min(Y_I', Y_O2' / r2)
-         omega2 = rate rho minY2,  clipped to rho minY2 / dt
-         Y_I''  = Y_I' / (1 + omega2 dt / (rho Y_I'))
-         dY_I   = Y_I' - Y_I''
-         q2     = rho dY_I dh2I / dt
-```
-
-and the cell's outputs are `Y_F'`, `Y_O2' - r2 dY_I`, `Y_I''`,
-`Y_P + (1 + r2) dY_I`, the inert closure `1 - sum`, and `q = q1 + q2`.
-
-**The two lines marked with arrows are the entire model.** Step 2 sees the
-oxygen step 1 did not use and the intermediate step 1 just made. [L21]:
-
-> "in a given discrete time step, the available oxygen first reacts with any
-> fuel present, forming soot precursors, CO, and water vapor. If any oxygen
-> remains, it is free to oxidize the soot, CO, and H2. It is the availability
-> of oxygen and rate of mixing that determine the progression of the reaction,
-> not temperature."
-
-Each step keeps §27's two guards unchanged: the availability clip
-`omega <= rho min(...)/dt`, reported as a clipped-cell count, and Patankar's
-implicit sink, which keeps the reactant positive for any `dt`. The extent of
-reaction is computed ONCE per step and every consequence — the oxidiser, the
-intermediate, the products, the inert closure and the heat release — is derived
-from that one number, never from a second independently-rounded evaluation of
-the rate. That is §27's own `dY_F`-once rule, applied twice.
-
-*DESIGN, stated because it is a real limitation.* Patankar's implicit map means
-step 1 does not run to completion within one step even when oxygen is abundant,
-so the two-step scheme is **not** bit-identical to §27's single step in the
-well-ventilated limit — it is asymptotically the same as `rate dt -> inf`,
-which is [L21]'s own "essentially the one-step, mixing-controlled model", not
-an equality. The exact statements this section does make are in §42.8.
-
-### 42.3 The species set
-
-Five: `Y_F`, `Y_O2`, `Y_I`, `Y_P` solved on §19's machinery, `N2` closed by
-`1 - sum`. `Y_I` is the ONE new transported field, and it is one more
-`ScalarTransport` on the same conservative `phi` — no new operator, no new
-boundary condition, no new matrix. `Combustion::new` refuses any other set by
-name, generalising §27's "exactly three plus inert" to "exactly the scheme's
-own non-inert set", because the device kernel recomputes the inert species as
-`1 - sum(solved)` and that is correct only for the exact set.
-
-`Y_I` is a LUMPED species — CO, soot, H2 and the step-1 water vapour together —
-which is why it needs (42.3)'s mass-basis coefficients and not a molar
-stoichiometry. The reportable carbon monoxide mass fraction is a fixed multiple
-of it:
-
-```
-Y_CO = f_CO Y_I ,       f_CO = yCO / (1 + s1)                        (42.5)
-```
-
-where `yCO` is [L21]'s own definition (FDS TRG's `y_CO`) — kilograms of CO
-produced per kilogram of fuel reacted, at zero step-2 conversion. `Y_CO` is
-written as an output field; it feeds nothing back into the solve, so (42.5) is
-a diagnostic scaling and is exact for whatever the case states.
-
-Volume fraction, which is what every published compartment measurement reports:
-
-```
-X_CO = Y_CO Wbar / W_CO ,       X_O2 = Y_O2 Wbar / W_O2              (42.6)
-```
-
-*DESIGN, and the size of the error is stated.* §25's v1 gas state carries a
-CONSTANT molar mass (air, `Wbar = 28.96`), so (42.6) uses it. The design note
-for this work argues that `Wbar(Y)` is forced once CO2 and CO are distinguished
-from a lumped "Products", and it is right; it is not implemented here and this
-section does not claim it. What can be checked is the ambient anchor: `W_air /
-W_O2 = 0.905057`, so this crate's own `AMBIENT_Y_O2 = 0.232` maps to
-`X_O2 = 0.209973` against dry air's 0.2095 — **0.2 % high**, which is the scale
-of the error (42.6) carries in an air-like cell and NOT the scale it carries in
-a product-rich upper layer, where `Wbar` genuinely moves.
-
-### 42.4 What the case must say, and what it must not be made to guess
-
-```
-combustionProperties
-{
-    scheme   serialTwoStep;   // or singleStep (the default, S27)
-    s        3.628138;        // total O2/fuel mass ratio,   as S27
-    dhc      46.45e6;         // total heat of combustion,   as S27
-    s1       1.451255;        // REQUIRED: O2/fuel mass ratio of step 1
-    yCO      1.270381;        // REQUIRED: kg CO per kg fuel, step 1 complete
-    dh1      1.858e7;         // optional; defaults to dhc*s1/s (see below)
-}
-```
-
-`s2 = s - s1` and `dh2 = dhc - dh1` are DERIVED, never stated, so the totals
-§27 already published cannot drift. `s1 <= 0`, `s1 >= s`, `dh1 <= 0`,
-`dh1 >= dhc`, `yCO <= 0` are each refused by name. `s1` or `yCO` absent under
-`scheme serialTwoStep` is refused by name with the derivation quoted, and
-`s1`/`yCO`/`dh1` present under `scheme singleStep` is refused by name too —
-a coefficient that the selected scheme does not read is §13.4's defect in the
-other direction.
-
-**The worked derivation, from [L21] Eq. (42.1)-(42.2) and standard atomic
-masses.** Propane, `W = 44.0970`:
-
-| quantity | from | value |
-|---|---|---|
-| `n_O2` step 1 / step 2 | (42.1)/(42.2) | 2 / 3 |
-| `s1` | `2 W_O2 / W` | **1.451255** |
-| `s2` | `3 W_O2 / W` | **2.176883** |
-| `s` | `5 W_O2 / W` | **3.628138** (§27's `3.63`) |
-| `s1/s` | | **exactly 2/5** |
-| `yCO` | `2 W_CO / W` | **1.270381** |
-| soot yield | `1 W_C / W` | 0.272377 |
-| `1 + s1` | mass of Int per kg fuel | 2.451255 |
-| `f_CO` | (42.5) | 0.518257 |
-
-Methane under the scheme the FDS Validation Guide states for the UMD line
-burner (`CH4 + 1.333 Air -> 2/3 CO + 1/3 C + 2 H2O`, i.e. two moles of CO per
-mole of soot carbon — [L21]'s own choice for every compartment case in it):
-`W = 16.0430`, `n_O2 = 1.3333 / 0.6667`, `s1 = 2.659353`, `s2 = 1.329676`,
-`s = 3.989029`, `s1/s = 2/3`, `yCO = 1.163955`, `f_CO = 0.318077`.
-
-**The carbon split.** [L21] gives the fraction of the fuel's carbon that forms
-CO in step 1 as a range by sooting propensity — **0.9-1.0** for clean fuels
-(methane, methanol, ethanol), **0.8-0.9** for lightly sooting (acetone),
-**0.7-0.8** for moderately sooting (propane), and **0.6-0.7** for dirty fuels
-(toluene, heavy hydrocarbons) — and then uses **2/3** for every compartment
-case it reports. It also says plainly why the choice does not decide the
-compartment answer:
-
-> "the concentration of CO in an under-ventilated compartment fire is limited
-> by the supply of oxygen, not carbon; thus, the exact distribution of the
-> carbon atoms in the fuel is not a critical input parameter for compartment
-> fire simulations."
-
-§42.5 turns that sentence into a closed form, and §42.8 Gate 1 measures it.
-
-**`dh1`, and why the default is what it is.** *DESIGN.* The default split is
-`dh1 = dhc s1/s` — heat released in proportion to oxygen consumed. That is
-Huggett's principle, which the FDS TRG states as
-
-> "`ΔH/r_O2` has a relatively constant value of approximately 13100 kJ/kg for
-> most fuels of interest in fire applications"
-
-and uses to build its own extinction model (§43). This crate's §27 propane
-carries `dhc/s = 12.803` MJ per kg O2, which is 2.3 % below Huggett's constant
-— an independent check that the default is not arbitrary. **It is nonetheless
-an approximation, and the direction of the error is known**: CO oxidation
-releases more energy per kilogram of oxygen than the fuel-to-CO step does, so
-the proportional split gives step 2 too little heat and step 1 too much. The
-thermochemically exact split needs a table of standard enthalpies of formation;
-none was read while writing this section, and §0 does not allow one to be
-pinned from recollection, so the exact split is **not implemented** and `dh1`
-is left settable by any case that has such a table. Combustion efficiency in
-§42.5 therefore inherits the approximation; the CO prediction does not, because
-CO comes out of the oxygen bookkeeping and not out of the heat.
-
-### 42.5 The oxygen-limit law — the scheme's own closed form
-
-Consider a well-stirred control volume fed fuel at `mdot_F` and air at
-`mdot_a`, air carrying `Y_O2a`, in the fast-chemistry limit where every
-reaction that can proceed does. Write the oxygen supplied per unit fuel and the
-global equivalence ratio as
-
-```
-beta = mdot_a Y_O2a / mdot_F ,          phi = s / beta                (42.7)
-```
-
-Then the steady state of §42.2 is, exactly, three regimes:
-
-```
-phi <= 1                (beta >= s):      both steps complete
-                                          yCO_out = 0,  eta = 1
-
-1 < phi <= s/s1         (s1 <= beta < s): step 1 completes, step 2 partial
-      xi = (beta - s1)/s2 = 1 - (s/s2)(1 - 1/phi)
-      yCO_out = yCO (s/s2) (1 - 1/phi)                                (42.8)
-      eta = (dh1 + xi dh2)/dhc  ->  1/phi  under the Huggett split
-
-phi > s/s1              (beta < s1):      step 1 itself is O2-limited
-      yCO_out = yCO s/(s1 phi)                                        (42.9)
-      eta = (beta/s1)(dh1/dhc)  ->  1/phi  under the Huggett split
-```
-
-Three things in (42.7)-(42.9) are worth stating as predictions, because each
-one is falsifiable and each one fails under a different implementation error:
-
-1. **CO switches on exactly at `phi = 1`** and rises linearly in `1 - 1/phi`.
-   A scheme that let step 2 see step 1's oxygen twice switches on at the wrong
-   `phi` and under-predicts CO by a large factor (§42.5a).
-2. **CO peaks at `phi = s/s1`** — `2.5` for propane under (42.1), `1.5` for
-   methane — and *falls* beyond it, because past that point there is not even
-   enough oxygen to make CO and the fuel leaves unburnt. The peak value is
-   `yCO`, and only the peak height depends on the carbon split; the POSITION of
-   both features is set by `s1/s` alone. This is [L21]'s "limited by the supply
-   of oxygen, not carbon", quantified.
-3. **`eta = 1/phi` for every `phi > 1`, under the Huggett split, in both
-   regimes** — a single straight line in `1/phi` through the whole
-   under-ventilated range, with no discontinuity at `phi = s/s1`. That is not a
-   coincidence: it is oxygen-consumption calorimetry, and it is the sharpest
-   available test that the heat split and the mass split are consistent with
-   each other.
-
-### 42.5a A correction to this section's first draft, and what replaced it
-
-This section was first written claiming that a PARALLEL two-step — both steps
-reading the same entry `Y_O2` — "never accumulates CO at all", and that this
-was the control that isolates the serialisation. **That is false, and the
-measurement that showed it is worth recording**, because the true statement is
-sharper.
-
-A parallel two-step does accumulate CO: the intermediate that survived earlier
-steps is still there for step 2 to read, so it still runs out of oxygen when
-`phi > 1`. What it does instead is **conjure oxygen**. Both steps compute their
-own extent against the SAME `Y_O2`, so their combined demand can exceed what
-the cell holds, and the boundedness clamp `Y_O2 >= 0` — which is a correctness
-guard, not a licence — silently absorbs the difference. Measured in the
-well-stirred reactor of §42.5, per kg of fuel fed:
-
-| `phi` | serial: O2 conjured | parallel: O2 conjured | serial `eta`·`phi` | parallel `eta`·`phi` |
-|---|---|---|---|---|
-| 1.2 | **0** | 0.599 | 1.000 | 1.198 |
-| 1.6 | **0** | 1.336 | 1.000 | 1.589 |
-| 2.0 | **0** | 1.444 | 1.000 | 1.796 |
-| 2.5 | **0** | 1.418 | 1.000 | 1.977 |
-| 3.5 | **0** | 1.034 | 1.000 | 1.998 |
-| 6.0 | **0** | 0.604 | 1.000 | 1.999 |
-
-The parallel scheme releases up to **twice** the heat its oxygen supply can pay
-for — `eta -> 2/phi`, the factor being exactly the number of reactions each
-independently draining the same pool — and correspondingly under-predicts CO by
-a factor of 3 to 40. The serial scheme conjures nothing: the clamp never fires,
-because step 2 is handed only what step 1 left.
-
-*The one qualification, measured rather than assumed.* "Nothing" means an exact
-`0.0` at every `phi` in the reactor above, and at worst the round-off of the
-extent subtraction elsewhere. That floor is not `eps` times the RESULT:
-`dY_I = Y_I' - Y_I''` is a difference of two numbers of order `Y_I` that can
-differ by `1e-9`, so `dY_I` carries an absolute error of order `eps Y_I` and
-`r2 dY_I` over-draws by that much. On an adversarial per-cell sweep the worst
-case is **1.9e-19 kg O2 per kg of mixture against a `Y_I` of 1e-2** — 0.086 ULP
-of the input — which is twelve orders of magnitude below what the parallel
-scheme invents. The test asserts `8 eps` times the largest input mass fraction
-and says why.
-
-So the control that isolates the serialisation is not "the parallel scheme
-makes no CO"; it is **"the parallel scheme does not conserve oxygen, and the
-serial scheme does, exactly"**. §42.8's Gate 1 measures that, and it is a
-stronger statement than the one it replaced: a CO count can be argued about,
-an invented kilogram of oxygen cannot.
-
-### 42.6 Where it sits in the solve — nothing new
-
-Operator-split, exactly as §27: `Species::correct` transports, then the
-reaction pass rewrites the mass fractions in place, then
-`EnergySources::register_explicit` takes `q`. The reaction never enters a
-matrix, so `SourceSet`'s uniform-per-zone restriction (§18) is untouched, and
-the fuel-consumed/heat-released identity stays exact rather than becoming
-approximate. §26 does not learn that a second reaction exists.
-
-One fused elementwise kernel, `cmbReactSerial`, one thread per cell, no face
-stencil, no atomic, no reduction, no host branch, the same fixed instruction
-count for every thread on the mesh. Every output buffer is distinct from every
-input buffer, so there is no aliasing hazard within or across threads, and the
-result is bitwise reproducible by construction — cell `i`'s answer is a
-function of cell `i`'s own state and nothing else.
-
-### 42.7 What the drivers do
-
-`ofgpu-fire` is the only driver that reacts. `ofgpu-buoyant`, `ofgpu-plume`,
-`ofgpu-k-epsilon` and `ofgpu-k-omega` do not construct a `Combustion` at all,
-so there is nothing for them to ignore. A case naming `scheme serialTwoStep`
-without the species set is refused where the species set is built, by name.
-
-### 42.8 What must hold
-
-| Check | Expected |
-|---|---|
-| default path, `scheme singleStep` | **bit-identical** to §27 — the same `cmbReact` kernel with the same arguments; `cases/burnerPlume.jsonc` re-run and its recorded numbers unmoved |
-| mass closure, per cell, per step | all five mass fractions sum to `1` to `4 eps`; every species in `[0, 1]` |
-| oxygen closure | `dY_O2 == s1 dY_F + r2 dY_I` exactly, from the two extents, not from a re-evaluated rate |
-| **energy closure over a complete burn** | `int q dV dt == m_F dhc` to `1e-9` relative, INDEPENDENT of the split — every kg of fuel contributes `dh1` on leaving the fuel pool and `(1+s1) dh2I = dh2` on leaving the intermediate pool |
-| step 2 starved | `Y_O2 = 0` at entry: step 1 does nothing, step 2 does nothing, `q = 0`, nothing moves |
-| step 2 abundant | `Y_O2` large: `Y_I` decreases monotonically every step, `Y_P` increases, `Y_CO -> 0` |
-| **Gate 1 (live) — the oxygen-limit law (42.8)/(42.9)** | a well-stirred cell driven to steady state on the GPU with every §42 kernel in the loop reproduces the three regimes: CO exactly zero for `phi <= 1`, linear in `1 - 1/phi` above it, peak at `phi = s/s1`, and `eta = 1/phi`. Because the closed form is the infinitely-fast limit and the reactor is finite-rate, the gate is a CONVERGENCE study, not a band: `theta = dt/tau_res` is halved twice and the live CO has to approach the closed form at first order, with the first-order extrapolation landing on it |
-| a PARALLEL two-step, same coefficients | must **conjure oxygen** — `eta > 1/phi`, tending to `2/phi`, with up to 1.4 kg of O2 per kg of fuel appearing out of the boundedness clamp (§42.5a) — and must under-predict CO by a factor of 3 to 40. This is the control that shows the serialisation is what is being measured |
-| §27, same case | must produce **zero** CO at every `phi` — it has no CO field; the pass/fail is categorical before it is quantitative |
-| **Gate 2 — NIST RSE 1994** | ceiling CO volume fraction against Bryner, Johnsson & Pitts, NISTIR 5568 (1994), swept 50-600 kW: measured below `0.0005` under 100 kW, rising to `0.02-0.035` at 400-640 kW. [L21]'s own published statistics for this model over the NIST RSE 1994 / RSE 2007 / FSE 2008 compartment set are **model bias factor 1.08, model relative standard deviation 0.50** against an experimental relative standard deviation of 0.19 — that is the bar, and claiming better would be dishonest |
-| a two-run bit-for-bit repeat | identical `f64` bits |
-
-### 42.8a What Gate 1 measured
-
-Live on an RTX 5070 Ti, 64 cells (24 operating points, each replicated, every
-replica bitwise identical), propane, 14 000 steps:
-
-| `phi` | closed form | `theta = 0.02` | `0.01` | `0.005` | order | `eta·phi` |
-|---|---|---|---|---|---|---|
-| 0.50 | 0 | — | — | — | 1.0 | 1.0 |
-| 1.20 | 0.3529 | 0.3125 | 0.3322 | 0.3424 | ~1.0 | 1.0000 |
-| 2.00 | 1.0587 | 0.9370 | 0.9889 | 1.0206 | ~0.9 | 1.0000 |
-| **2.50** | 1.2704 | 1.0083 | 1.0780 | 1.1306 | **0.46** | 1.0000 |
-| 3.50 | 0.9074 | 0.8445 | 0.8732 | 0.8895 | ~0.9 | 1.0000 |
-| 6.00 | 0.5293 | 0.5172 | 0.5233 | 0.5262 | ~1.0 | 1.0000 |
-
-* **First order in `theta` everywhere except at `phi = s/s1` exactly**, and the
-  first-order extrapolation of the two finest lands within **0.5 % of `yCO`**
-  of the closed form.
-* At `phi = s/s1 = 2.5` the order is **0.46** — `sqrt(theta)`, not `theta`.
-  That is not a defect and it is not excused: it is the knife-edge where step
-  1's two reactants are *precisely* co-limiting, so Patankar's implicit map
-  leaves a residue of unburnt fuel that scales as the square root of the step.
-  The gate names the point and asserts the half order rather than widening a
-  band until it fits.
-* **`eta * phi = 1.0000` at every `phi > 1`**, to five figures — the heat split
-  and the mass split agree exactly, which is (42.5)'s third prediction.
-* **The serial scheme conjured `0.000e0` kg of oxygen**; the parallel control
-  conjured at least `0.411` and reached `eta * phi = 1.987`.
-* §27's single step scored **exactly zero** CO on the same sweep.
-
-**Validation, stated honestly, before it is run.** Gate 1 tests the *scheme*
-and is decisive about it: it isolates the serialisation, the mass split and the
-heat split from every transport error, and there is no tuned parameter that
-could rescue a wrong answer. Gate 2 tests the scheme *plus* the compartment
-ventilation that sets `phi`, and this crate has never validated a doorway flow
-(Steckler, Quintiere & Rinkinen 1982 is not run). A Gate 2 miss is therefore
-ambiguous between the two halves by construction, so Gate 2 reports the
-predicted upper-layer OXYGEN alongside the CO, against the same experiment's
-own measured oxygen, so a reader can tell which half moved.
-
-### 42.8b Gate 2 was run, and it MISSES
-
-`cases/nistRSE1994.jsonc` is the compartment: 0.98 x 1.46 x 0.98 m, a
-0.48 x 0.81 m doorway, an area-matched burner window in the floor, 6144 cells
-(`D*/dx ~ 10` at 400 kW), k-epsilon, radiation off, adiabatic walls, 30 s of
-physical time at `dt = 0.005`. Two mesh regions - a burner in the floor AND a
-doorway in a wall - is what generalised `blockgen::BlockSpec` from one window
-to one per slot; it could not be expressed before.
-
-**Two things landed and one did not.**
-
-* **The oxygen crossover is roughly right.** The upper layer goes from
-  ventilated to starved between 200 and 300 kW in the measurement and at about
-  200 kW in the model - within one step of the swept heat release rate.
-* **The doorway velocity boundary condition turned out to matter enormously,
-  and it was measured rather than assumed.** `inletOutlet` with
-  `inletValue [0,0,0]` - the shape every other open patch in this tree uses -
-  clamps the VELOCITY to zero on every INFLOW face, and a doorway is the one
-  boundary where that is fatal, because the inflow is half of what the boundary
-  is for. At 400 kW it halves the combustion efficiency (11.5 % against 24.0 %)
-  and leaves the upper layer about 1000 K too hot. The case uses
-  `zeroGradient`, and the header says why.
-* **The ceiling CO is low by a factor of up to 20**, and it does not close the
-  gap as the fire grows. Front-probe volume fraction, measured (NISTIR 5568 bin
-  means) against predicted:
-
-  | kW | 50 | 100 | 200 | 300 | 400 | 500 | 600 |
-  |---|---|---|---|---|---|---|---|
-  | measured | 0.00023 | 0.00157 | 0.01080 | 0.02085 | 0.02567 | 0.02874 | 0.02944 |
-  | model | 0.0000005 | 0.00010 | 0.00080 | 0.00195 | 0.00147 | 0.00257 | 0.00145 |
-  | measured O2 | 0.166 | 0.082 | 0.026 | 0.0057 | 0.0025 | 0.0020 | 0.0028 |
-  | model O2 | 0.126 | 0.092 | 0.00003 | 0.00002 | 0.00048 | 0.000004 | 0.00002 |
-
-  [L21]'s own published statistic for this model on this experiment is a bias
-  factor of 1.08 at a model relative standard deviation of 0.50. This is
-  nowhere near it, and the numbers are recorded in `ofgpu-validate` so the miss
-  stays on the screen.
-
-**The diagnosis, from the runs and not from the model.** The predicted
-combustion efficiency is 15-58 %, so most of the fuel leaves the compartment
-unburnt rather than becoming CO, and the implied doorway air flow is roughly a
-tenth of what a 400 kW fire in this room draws. That is a VENTILATION failure,
-not a chemistry failure - and §42.8 named it as the ambiguous half before the
-run. Gate 1 validates the chemistry half decisively and independently.
-Steckler, Quintiere & Rinkinen (1982) is the prerequisite this miss names, and
-it is still not run.
-
-Two further gaps push the same way and are stated rather than corrected: the
-walls are adiabatic and radiation is off (the experiment's Marinite liner is a
-conjugate-heat-transfer problem this solver does not have, and at 120 s the
-adiabatic layer runs to 2475 K against a measured 925-1157 K), and the burner
-is a window in the floor rather than an obstruction 15 cm above it.
-
----
-
-## 43. Local extinction — the critical flame temperature
-
-**FDS Technical Reference Guide, Combustion chapter, "Extinction"** (McGrattan,
-Hostikka, McDermott, Floyd, Weinschenk & Overholt, NIST SP 1018, 6th ed.), read
-locally at `reference/fds/Manuals/FDS_Technical_Reference_Guide/Combustion_Chapter.tex`
-— NIST, US public domain, licence read. The critical-flame-temperature values
-and the auto-ignition temperatures below are those of **C. Beyler, "Flammability
-limits of premixed and diffusion flames", ch. in *SFPE Handbook of Fire
-Protection Engineering*, 5th ed. (2016)**, as quoted by two independent NIST
-sources both read here: the ISFEH10 paper [L21] and the FDS Validation Guide's
-UMD Line Burner section. The self-extinction bracket is **Morehart, Zukoski &
-Kubota, NIST-GCR-90-585 (1991)**, as quoted by the FDS TRG. Huggett's
-`ΔH/r_O2 ≈ 13100 kJ/kg` is the FDS TRG's own statement. No GPL-licensed source
-was consulted; no FDS source code was read.
-
-§27 and §42 both assume fuel and oxygen react on contact, whatever the
-temperature. The FDS TRG names the exact limitation:
-
-> "A limitation of the default mixing-controlled reaction model described above
-> is that it assumes fuel and oxygen always react regardless of the local
-> temperature, reactant concentration, or strain rate. For large-scale,
-> well-ventilated fires, this approximation is usually sufficient. However, if
-> a fire is in an under-ventilated compartment, or if a suppression agent like
-> water mist or CO2 is introduced, or if the strain between the fuel and
-> oxidizing streams is high, burning may not occur."
-
-An under-ventilated compartment does not behave like one until the flame is
-allowed to go out. This section is the predicate that lets it.
-
-### 43.1 The critical flame temperature, and why the two published numbers agree
-
-Complete combustion of the oxygen in a control volume of mass `m` releases
-`Q = m Y_O2 (ΔH/r_O2)`, and under adiabatic conditions raises the bulk
-temperature to `T_f`, so `Y_O2 = cbar_p (T_f - T)/(ΔH/r_O2)` (FDS TRG). Taking
-`T_f` at the **limiting oxygen index** `X_OI` — the oxidiser-stream oxygen
-volume fraction at which a diffusion flame extinguishes — defines the CFT:
-
-```
-T_OI = T_inf + Y_OI (ΔH/r_O2) / cbar_p                               (43.1)
-
-Y_OI = X_OI W_O2 / ( X_OI W_O2 + (1 - X_OI) W_N2 )                   (43.2)
-```
-
-Two numbers are published independently and this crate takes both: FDS's
-default `X_OI = 0.135` at `T_inf = 20 °C`, and Beyler's tabulated
-`T_OI = 1447 °C` for propane and `1507 °C` for methane. **They are not
-independent claims — (43.1) ties them — and the tie is a usable check.**
-(43.2) at `X_OI = 0.135` gives `Y_OI = 0.151294`; inverting (43.1) at Huggett's
-`13.1 MJ/kg` gives the mean product specific heat each CFT implies:
-
-| fuel | `T_OI` | implied `cbar_p` |
-|---|---|---|
-| propane | 1720.15 K | **1388.9 J/(kg·K)** |
-| methane | 1780.15 K | **1332.9 J/(kg·K)** |
-
-Both are plausible means for a combustion-product mixture between 293 K and
-1750 K, and they bracket each other within 4 %. So the pair `(X_OI = 0.135,
-T_OI = Beyler)` is self-consistent, and this section records the check rather
-than asserting the numbers on trust.
-
-*DESIGN, and it is a real gap.* This crate's §26 gas state carries a CONSTANT
-`c_p = 1006 J/(kg·K)` (air at ambient). Feeding **that** into (43.1) gives
-`T_OI = 2263.3 K = 1990 °C`, 500 K above every published CFT — because 1006 is
-the cold-air value, not the hot-product mean the derivation needs. So `T_OI` is
-**not** derived from this crate's `c_p`; it defaults to Beyler's tabulated
-value for the case's fuel and is settable. When §26 grows `c_p(T, Y)` — the
-design note's item 5 — (43.1) becomes derivable here and the default should
-move to it. Until then the derived route is documented and unused, and the
-reason is stated rather than hidden.
-
-### 43.2 The predicate — FDS `EXTINCTION 1`
-
-The limiting oxygen volume fraction is a piecewise-linear function of the cell
-bulk temperature (FDS TRG):
-
-```
-                { X_OI (T_OI - T)/(T_OI - T_inf)      T <  T_fb
-X_O2,lim(T)  =  {                                                    (43.3)
-                { 0                                   T >= T_fb
-```
-
-and, with `X_O2 = Y_O2 Wbar/W_O2` from (42.6),
-
-```
-X_O2 < X_O2,lim(T)   =>   the cell does not react this step:
-                          mdot''' = 0 for every species, q''' = 0    (43.4)
-```
-
-The FDS TRG on why the free-burn cut-off exists, which is the sentence that
-makes this the right model for THIS solver:
-
-> "The `EXTINCTION 1` model is intended for relatively coarse fire simulations
-> where the grid cell cannot resolve details of the flame structure or capture
-> flame temperatures. The 'free-burn' temperature, `T_fb`, in
-> Eq. (`extinction_model`) is needed for simulations in which the
-> characteristic grid cell size `dx` is much larger than 1 cm. In such cases,
-> the combustion occurs within a fraction of the grid cell and its energy
-> cannot raise the cell bulk temperature to the critical value."
-
-`T_fb` defaults to 600 °C, the TRG's own default, justified there by
-measurements of Pitts and Bundy showing upper-layer oxygen falling to zero
-above roughly that temperature in flashover experiments. Note the consequence
-of (43.3): with `T_OI = 1720.15 K` and `T_fb = 873.15 K`, `X_O2,lim` falls from
-`0.135` at ambient to **`0.080130`** just below `T_fb` and then steps
-discontinuously to zero. The discontinuity is the model's, not this
-implementation's, and it is deliberate — above the free-burn temperature the
-cell is taken to be burning whatever oxygen it has.
-
-A third suppression rule, also the TRG's and also one comparison:
-
-```
-T < T_AIT   =>   the cell does not react this step                   (43.5)
-```
-
-`T_AIT` defaults to **0 K — no suppression, fuel and oxygen burn on contact**,
-which is FDS's own default and is what keeps this section opt-in in a second,
-independent way. [L21] uses 540 °C for methane and 450 °C for propane in the
-UMD line-burner simulations. FDS additionally exempts a small volume just above
-the burner to stand in for a spark igniter; **that exemption is a spatial zone
-and is NOT implemented here** — a case that sets `TAIT` gets it applied to
-every cell.
-
-### 43.3 Why it is a rate mask, and what that buys
-
-(43.4) says the reaction rate is zero, and in both §27 and §42 every
-consequence — `dY_F`, `dY_O2`, `dY_I`, `dY_P`, the inert closure and `q` — is
-derived from `omega`, which is `rate * rho * min(...)`. So extinction is
-implemented as **one elementwise kernel that zeroes `rate` where the predicate
-fires**, upstream of the reaction kernel, and:
-
-* `cmbReact` is **not touched at all**, so §27's default path is bit-identical
-  to what it was before this section existed — not by argument but because the
-  kernel and its arguments are unchanged;
-* the same predicate serves §27 and §42 with no duplicated arithmetic and no
-  second copy to keep in step;
-* `rate = 0` gives `omega = 0`, `clip = false`, `dY = 0`, `q = 0` — exactly
-  (43.4), with no separate branch inside the reaction kernel and therefore no
-  extra divergence;
-* it is elementwise: one thread per cell, reading only that cell's `T` and
-  `Y_O2`. No atomic, no reduction, no neighbour.
-
-The kernel also writes a per-cell `extinguished` flag which is reduced with
-`solver::device_sum` — the same deterministic tree reduction the clipped-cell
-count already uses — so the run reports how many cells went out, the way §27
-reports how many were availability-clipped. A model that silently extinguishes
-is as bad as a setting that is silently ignored.
-
-### 43.4 What the case can say
-
-```
-combustionProperties
-{
-    extinctionModel   oxygen;    // or none (the default)
-    XOI               0.135;     // limiting oxygen index, volume fraction
-    TOI               1720.15;   // critical flame temperature, K (Beyler)
-    Tfb               873.15;    // free-burn temperature, K
-    Tinf              293.15;    // ambient, K
-    TAIT              0.0;       // auto-ignition temperature, K (0 = off)
-}
-```
-
-`extinctionModel none` is the default and every coefficient above is refused by
-name under it — a case that writes `XOI 0.12` and no `extinctionModel` is
-asking for something that will not happen. `oxygen` is the only implemented
-model; anything else errors naming `none` and `oxygen`, and the error also
-names FDS's `EXTINCTION 2` as the documented next step and says why it is not
-here (§43.6). Ranges: `0 < XOI < 1`, `T_inf < T_fb < T_OI`, `TAIT >= 0`.
-
-### 43.5 What must hold
-
-| Check | Expected |
-|---|---|
-| default, `extinctionModel none` | `rate` untouched; §27 and §42 bit-identical to the same run without this section |
-| (43.3) at `T = T_inf` | exactly `X_OI` |
-| (43.3) at `T -> T_fb^-` | `0.080130` at the propane defaults; a step to `0` at `T_fb` |
-| (43.3) monotone | strictly decreasing in `T` on `[T_inf, T_fb)`, never negative |
-| (43.1)/(43.2) round trip | `X_OI = 0.135` implies `Y_OI = 0.151294`; propane's and methane's published CFTs imply `cbar_p = 1388.9` and `1332.9 J/(kg·K)` |
-| a cell at ambient `T`, `X_O2 = 0.21` | burns |
-| a cell at ambient `T`, `X_O2 = 0.13` | out — below `X_OI` |
-| a cell at `T = 700 °C`, `X_O2 = 0.05` | burns — above `T_fb` |
-| `T < T_AIT` with abundant oxygen | out, whatever the oxygen |
-| extinguished cell | `q == 0.0` exactly and every mass fraction bitwise unchanged |
-| **Gate (live) — UMD line burner** | combustion efficiency against **White, Link, Trouvé, Sunderland, Marshall, Sheffel, Corn, Colket, Chaos & Yu, *Fire Safety Journal* 76 (2015) 74-84**, measured data from the MaCFP database: methane `eta = 1.00` for `X_O2 >= 0.15`, `0.93` at `0.14`, `0.55` at `0.13`, `0.04` at `0.12`; propane `eta ~ 0.97` down to `0.14` and `0.78` at `0.13`. The anchors are unarguable at both ends and the LOI is bracketed independently by Morehart et al.'s measured self-extinction range of **12.4 %-14.3 %** oxygen by volume |
-
-### 43.5a What the gate measured
-
-Live on an RTX 5070 Ti, 96 cells (92 operating points, every replica bitwise
-identical), methane, an adiabatic well-stirred reactor with the cell
-temperature evolving from the heat §42 actually released, 8 000 steps:
-
-| lean `phi` | threshold `X_O2` (eta drops below 0.5) | `eta` at 0.21 | at 0.15 | at 0.12 |
-|---|---|---|---|---|
-| 0.10 | **0.1350** | 0.9868 | 0.9868 | 0.0000 |
-| 0.15 | **0.1350** | 0.9868 | 0.9868 | 0.0000 |
-| 0.20 | **0.1300** | 0.9868 | 0.9868 | 0.0000 |
-| 0.30 | **0.1300** | 0.9868 | 0.9868 | 0.0000 |
-
-The model's extinction threshold spans **`X_O2 = 0.130` to `0.135`** across
-these lean conditions — inside Morehart, Zukoski & Kubota's measured
-self-extinction range of **0.124-0.143**, and at the UMD line burner's own
-50 %-efficiency point, which the measured methane record puts at about
-**0.130** (measured `eta` is 0.5552 at 0.13 and 0.9296 at 0.14).
-
-Against the measured curve, methane:
-
-| `X_O2` | measured `eta` | model |
-|---|---|---|
-| 0.12 | 0.0412 | 0.0000 |
-| 0.13 | 0.5552 | **0.0000** |
-| 0.14 | 0.9296 | 0.9868 |
-| 0.15 | 1.0016 | 0.9868 |
-| 0.18 | 1.0047 | 0.9868 |
-| 0.21 | 0.9804 | 0.9868 |
-
-Both ends land: fully burning above the limit, out below it. **The one bin
-where the model misses is 0.13**, where the measurement is halfway through the
-transition and the model has already switched off — the model's transition is
-one bin (0.005 in `X_O2`) wide and the measurement's is about 0.02 wide.
-
-**What this section does NOT claim.** That a live LES of the UMD line burner
-reproduces the measured `eta(X_O2)` curve. What is run is the model's own
-`eta(X_O2)` in the well-stirred limit, which is where the extinction predicate
-and the §42 oxygen bookkeeping meet and where a wrong `X_OI`, a wrong `T_fb` or
-a wrong mass-fraction/volume-fraction conversion each move the curve in a
-different, distinguishable way. The measured curve's *slope* through the
-transition is set by turbulent intermittency at the flame base, which a
-well-stirred model does not have, and the report says so rather than tuning a
-constant until the slope matches.
-
-### 43.6 `EXTINCTION 2`, deliberately not implemented
-
-The FDS TRG's second model tests an enthalpy inequality — whether the potential
-heat release can raise the mixed portion of the cell above `T_CFT`, with excess
-fuel counted as a diluent and excess air removed from the balance. It is
-strictly better than (43.3) where the flame temperature is resolved. It is not
-implemented here for one stated reason: it needs `h_alpha(T)` — a per-species
-chemical-plus-sensible enthalpy, i.e. the NASA-polynomial table and the
-composition-dependent `c_p` that §26 does not have (the same gap §43.1 names).
-Building it on this crate's constant `c_p = 1006` would produce a criterion
-that looks like the TRG's and is not, which is worse than not having it.
-`extinctionModel extinction2` is therefore refused BY NAME, and the refusal
-says what is missing.
-
----
-
 ## 44. The `output` block: letting the case say what a run writes
 
 No external source. `docs/05-io-redesign.md` §6 (the `ResultWriter` seam),
@@ -6788,7 +5706,7 @@ Three things are refused by name, and the third is the one that matters:
 |---|---|
 | `"fields": []` | a write with no fields is not a write; `vdb::write` would fail four levels down with "no fields to write" |
 | `"fields": ["T","T"]` | two grids of the same name in one file; the duplicate is named |
-| `"fields": ["Y_CO"]` on a run with no combustion | **the field does not exist in this run** — the error lists every field that does |
+| `"fields": ["Y_CO"]` on a run that transports no such species | **the field does not exist in this run** — the error lists every field that does |
 
 The third is checked TWICE, deliberately: once before the time loop, against
 the names the driver is about to build, so a six-hour run does not fail at its
@@ -6830,7 +5748,7 @@ interval: W  (W > 0)    write every W seconds of physical time
 
 `interval` is optional (it was required before this section; a case that wants
 one final write should not have to invent a number). The schedule is the one
-`ofgpu-fire`/`ofgpu-buoyant` already run for `-writeInterval`, to the line:
+`ofgpu-lowmach`/`ofgpu-buoyant` already run for `-writeInterval`, to the line:
 
 ```
 next = t0 + W;      due(t) := (t + 1e-9 >= next),  and then  next += W
@@ -6840,9 +5758,9 @@ with a final write forced after the loop regardless — so a case that names an
 interval landing exactly on the end time gets one write there, not two.
 
 **A steady run refuses a positive `interval` by name.** `ofgpu-k-epsilon` and
-`ofgpu-fire -iters N` advance an iteration counter, not a clock; "every 2.0
+`ofgpu-lowmach -iters N` advance an iteration counter, not a clock; "every 2.0
 seconds" names a schedule they have no clock for. The error names `-endTime`
-/`-deltaT` (`ofgpu-fire`) and says the driver writes its final state once.
+/`-deltaT` (`ofgpu-lowmach`) and says the driver writes its final state once.
 `interval` absent runs everywhere.
 
 ### 44.5 `restart.keep` — retain N, delete older, and delete nothing else
@@ -6892,7 +5810,7 @@ error: output (case file): "visualisation, exact, restart" is not supported
 ```
 
 *DESIGN.* The alternative — "the command line wins, and a line is printed" —
-is what `ofgpu-fire` does for `run.endTime`, and it is right there because the
+is what `ofgpu-lowmach` does for `run.endTime`, and it is right there because the
 case's `endTime` still reaches §31.3's transient/algorithm contract at
 lowering time. Nothing in the `output` block reaches anything else, so a
 printed note would be the same "documented example that quietly disagrees with
@@ -6924,7 +5842,7 @@ routed through one type instead of three call sites.
 | non-Cartesian mesh | a `visualisation` block on a mesh `cartesian::detect` refuses errors BEFORE the loop, naming `exact` |
 | `output.restart` in `ofgpu-k-epsilon` | errors by name — that driver has no checkpoint at all — naming the three that do |
 | **§13.4.1 pair** | ten pairs — `output` present/absent, `visualisation.format`, `.interval`, `.fields`, `.precision`, `.usdScene`, `exact.format`, `exact.interval`, `restart.interval`, `restart.keep` — each two runs identical in every byte but one, each REQUIRED to write different bytes. Compared as BYTES, not text: `.vdb`/`.nvdb` are binary and `read_to_string` silently skips them |
-| the default does not move | `cargo test`, `ofgpu-validate` and `cases/burnerPlume.jsonc`'s three recorded numbers unchanged |
+| the default does not move | `cargo test`, `ofgpu-validate` and the gate case's three recorded numbers unchanged |
 
 
 ### 44.8 What the documented example turned out to be
@@ -6936,7 +5854,7 @@ older than this section**:
 
 ```
 error: blockgen: two patches are both called 'outlet'
-error: ofgpu-fire needs `initial.k` - ... this case runs kEpsilon on top of it
+error: ofgpu-lowmach needs `initial.k` - ... this case runs kEpsilon on top of it
 ```
 
 The first is deliberate in the file: four box faces share the name `outlet`,
@@ -7797,8 +6715,8 @@ and §47.4 explains why.
 ### 47.10 Out of scope, and recorded as such
 
 Radiative exchange across the interface adds
-`q_rad = sigma eps (T_b^4 - T_env^4)` to (S47.1). A per-region P1/fvDOM
-treatment (§28/§36) with a Marshak wall is tier A/B and needs only an
+`q_rad = sigma eps (T_b^4 - T_env^4)` to (S47.1). A per-region
+participating-medium treatment with a Marshak wall is tier A/B and needs only an
 emissivity per interface face; **surface-to-surface view factors are tier D**
 (all-pairs visibility, `O(n_f^2)` plus ray occlusion) and are not attempted
 here. If a radiative interface flux is added it must go through the *cell*
@@ -8187,8 +7105,9 @@ Written from:
 * ofgpu `SPEC-LIT.md` §2.1 (the face fan about the vertex average, which
   §49.3 must match exactly), §8.4 (the fixed-partition reduction whose
   determinism argument §49.2 reuses), §13.4 (the unsupported-setting
-  contract), §28 (P1, the model this one is *not*), §36 (fvDOM, likewise),
-  §47 (the conjugate interface this one composes with).
+  contract, which is where the two participating-medium models this one is
+  *not* are recognised and refused), §47 (the conjugate interface this one
+  composes with).
 
 No GPL-licensed source was consulted. In particular
 `github.com/jasondegraw/View3D` was **not** opened: its README states that the
@@ -8766,7 +7685,7 @@ Written from:
   of images for specular surfaces, named in §50.9's refusal.
 * M. F. Modest, *Radiative Heat Transfer*, 3rd ed., Academic Press (2013)
   ch. 5 — surface exchange between grey diffuse surfaces, and the closed forms
-  of §50.11. Already this crate's reference for §28 and §36.
+  of §50.11.
 * B. Gebhart, *Int. J. Heat Mass Transfer* **3**(4) (1961) 341–346.
   DOI `10.1016/0017-9310(61)90048-5` — the absorption-factor alternative to
   (S50.3), **named and not used** (§50.2).
@@ -8788,8 +7707,7 @@ Written from:
   coupled convection-plus-surface-radiation cavity gate, **named and NOT
   RUN**; §50.12 says why.
 * ofgpu `SPEC-LIT.md` §4 (the universal Robin triple this whole model reduces
-  to), §26 (the energy equation), §28 (the Marshak wall this triple is
-  compared against), §32.2 (`fixedFluxTemperature`, which the `eps -> 0` limit
+  to), §26 (the energy equation), §32.2 (`fixedFluxTemperature`, which the `eps -> 0` limit
   collapses onto **bitwise**), §47 (the conjugate interface), §13.4 and
   §13.4.1.
 
@@ -8944,8 +7862,8 @@ zero-heat-capacity surface element:
 ```
 
 using (S50.4). Newton-linearise about the lagged face temperature `T0` (the
-previous outer iterate's `t.bf`) — the same linearisation §28 already uses and
-the same Patankar `Sp <= 0` rule:
+previous outer iterate's `t.bf`) — the same linearisation a Marshak wall
+uses, and the same Patankar `Sp <= 0` rule:
 
 ```
     sigma T_b^4 ~= 4 sigma T0^3 T_b - 3 sigma T0^4
@@ -8985,8 +7903,9 @@ emissivity cancel out of `refValue` entirely**:
 ### 50.4 Four checks on (S50.12)
 
 1. **`fr` is in `[0,1)` unconditionally.** `h >= 0` and `k_eff Delta_b > 0`,
-   so no clamp, no branch, no special case. Strictly better behaved than the
-   Marshak triple of §28, which needed a sign argument to land in range.
+   so no clamp, no branch, no special case. Strictly better behaved than a
+   participating medium's Marshak triple, which needs a sign argument to land
+   in range.
 2. **`eps -> 0` is exact, not a limit.** `h -> 0` gives `fr -> 0` and
    `refGrad = q_ext/k_eff`, and `refValue` stays *finite* — `(3/4)T0 +
    H_b/(4 sigma T0^3)` contains no `eps`, which is why `g = q_ext/k_eff` and
@@ -9086,7 +8005,7 @@ but it caps the achievable row-sum residual at about `1e-7` and would break
 
 (S50.12) treats the local emission **implicitly** (`h` on the diagonal through
 `fr`, the Patankar rule) and the incoming irradiation `H_b` **explicitly**.
-That is the same splitting §28's Marshak wall already uses and it is
+That is the same splitting a Marshak wall uses and it is
 structurally sound, but the off-diagonal sensitivity `dH_i/dT_j` is entirely
 lagged. There is **no convergence proof and no bound on the lagged operator's
 spectral radius**; the bad case is intermediate emissivity with a large
@@ -9132,7 +8051,9 @@ The condition is accepted under the OpenFOAM spelling
 temperature field** — on any other field nothing would ever rewrite the triple
 it is defined by, which is the §13.4 defect this project keeps finding, and it
 is refused naming the field it belongs on. `radiationModel viewFactor` (or
-`s2s`) joins `P1` and `fvDOM` in the §13.4 selector.
+`s2s`) joins `P1` and `fvDOM` in the §13.4 selector - the two participating
+models it stands beside are recognised there and carried by no solver in this
+engine.
 
 **And it is refused in the three places it does not belong**, each naming
 where it does. `ParticipatingConfig::from_case` reads the same file for the
@@ -9142,7 +8063,7 @@ entries, so it names `crate::s2s::S2s::new` and this section's own reader.
 model at all — the type does not carry one. The JSONC `physics.fire.radiation`
 block can say a model name and an absorption coefficient and nothing about
 which patches radiate, so it names `constant/radiationProperties`.
-`ofgpu-fire`'s `-radiationModel` flag has the same gap, and its medium is
+A participating-medium driver's own `-radiationModel` flag had the same gap, and its medium is
 participating anyway. None of the three substitutes silently.
 
 `compressible::turbulentTemperatureRadCoupledMixed` stays **refused**, and its
@@ -9158,7 +8079,7 @@ that a face carries one or the other.
 | Asked for | Answer |
 |---|---|
 | **Specular reflection** | The entire radiosity formulation (S50.1)–(S50.4) assumes *diffuse* reflection. Polished aluminium and gold plating — common in exactly the target application — are strongly specular. Hottel & Sarofim ch. 5's method of images handles a small specular fraction and Emery et al. (1991) survey the alternatives, but there is no view-factor-shaped answer: it is a different model. **Refused**, rather than letting a user set `emissivity 0.05` on a mirror and believe the result. |
-| **A participating medium** | This model has no absorption, emission or scattering in the volume. A case that sets `absorptionCoefficient` non-zero under `radiationModel viewFactor` is refused naming `P1` (§28) and `fvDOM` (§36). |
+| **A participating medium** | This model has no absorption, emission or scattering in the volume. A case that sets `absorptionCoefficient` non-zero under `radiationModel viewFactor` is refused naming `P1` and `fvDOM`, the two participating-medium models §13.4's selector recognises and this engine does not carry. |
 | **Non-grey / spectral bands** | Not implemented; refused naming the grey model. |
 | **`eps_min < 0.02`** | §50.2's sweep-count refusal. |
 | **`N_c > 32 768`, or `G` above 60% of free memory** | §50.6's refusal. |
@@ -9268,7 +8189,7 @@ incidental:
    conjugate model's fluid side, and it is the next step for both.
 
 `ofgpu-validate` prints this omission on every run rather than leaving it
-silent, in the same way §42.8b prints its miss.
+silent, in the same way §68.12 prints its miss.
 
 **Three more, smaller, recorded here so nobody has to rediscover them.**
 
@@ -9295,7 +8216,8 @@ test). No GPL-licensed source was consulted.
 ### 51.1 The dictionary
 
 Read from `constant/radiationProperties`, alongside the `radiationModel`
-selector §28 and §36 already share.
+selector of §13.4, which recognises all three model names and resolves the one
+this engine carries.
 
 | Entry | Meaning | Default | Refusal |
 |---|---|---|---|
@@ -10537,8 +9459,8 @@ Consequences, in the order they matter:
 
 1. **`src/momentum.rs`'s buoyancy path is not modified at all.** There is no
    new branch, no new kernel argument, nothing to regress. The default is
-   unmoved because nothing on the default path changed — the same way §43's
-   extinction became a rate mask upstream of an untouched `cmbReact`.
+   unmoved because nothing on the default path changed — the same way §57's
+   hybrid length scale is an `Option` upstream of an untouched `correct`.
 2. A driver that never builds a humidity field never calls the virtual-
    temperature kernel: it passes `T` exactly as it always did.
 3. Where the kernel *is* called with `Y_v == 0` everywhere, it computes
@@ -11368,7 +10290,7 @@ and a temperature naming `SpalartAllmaras` is refused, naming `kEpsilon`,
 carry one. This is S40.5's refusal, one model further.
 
 **And that refusal is exactly why `ofgpu-sa` exists.** The two drivers that
-call `models::registry::build_coupled` - `ofgpu-buoyant` and `ofgpu-fire` -
+call `models::registry::build_coupled` - `ofgpu-buoyant` and `ofgpu-lowmach` -
 both solve a temperature under gravity, and `BuoyancyCoeffs::default()`
 carries `g` whether or not the case has a `constant/g`. So without an
 ISOTHERMAL driver, Spalart-Allmaras would be a model the registry can select,
@@ -12809,7 +11731,7 @@ condition per patch and nothing else, and the reader chooses the mesh's patch
 TYPE - `empty` where the case said `empty`, `wall` everywhere else on a fluid
 region. There is no spelling of "inlet" for the reader to reject, because
 there is no entry it would go in. A case that needs one uses `ofgpu-buoyant`
-or `ofgpu-fire`, which do carry them.
+or `ofgpu-lowmach`, which do carry them.
 
 A fluid region therefore says only four numbers plus its `T` conditions:
 
@@ -13041,2731 +11963,6 @@ built.
 | §60.6's Gate 6 | UNREACHABLE when this section was written | **run by §79** - `ofgpu-validate`'s "Gate 6 NOT RUN" line is gone too |
 
 ---
-
-## 61. Soot — a transported mass fraction, and where its source comes from
-
-§27 burns fuel to lumped products and §42 puts CO in between; neither produces
-**soot**, and soot is what makes a hydrocarbon flame radiate. §28 and §36 both
-take the absorption coefficient as a case constant, so today a fire's radiation
-is whatever number the case wrote down. This section adds the transported
-scalar; §62 is what reads it.
-
-**C. W. Lautenberger, J. L. de Ris, N. A. Dembsey, J. R. Barnett, H. R. Baum,
-*A simplified model for soot formation and oxidation in CFD simulation of
-non-premixed hydrocarbon flames*, Fire Safety Journal 40(2) (2005) 141-176**,
-DOI `10.1016/j.firesaf.2004.10.002`; the author manuscript is free at
-`https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=101148`. That is the
-laminar-smoke-point model below and every constant in §61.3. Background and
-alternatives, all cited and none implemented: **Tesner et al.**, *Combust.
-Flame* 17 (1971) 253; **Khan & Greeves** (1974) in *Heat Transfer in Flames*
-ch. 25; **Magnussen & Hjertager**, *Symp. (Int.) Combust.* 16 (1977) 719 - the
-same paper §27 already cites, whose soot-burnout rate is the Khan-Greeves
-partner; **Kent & Honnery**, *Combust. Flame* 79 (1990) 287 - the measured
-formation-rate map the smoke-point polynomials are shaped to; **Leung,
-Lindstedt & Jones**, *Combust. Flame* 87 (1991) 289; **Delichatsios**,
-*Combust. Sci. Technol.* 100 (1994) 283; **Brookes & Moss**, *Combust. Flame*
-116 (1999) 486 - the Moss-Brookes two-equation model, refused in §61.1;
-**Rigopoulos**, *Flow Turbul. Combust.* 103 (2019) 565 - the open-access review
-to read before choosing. Post-flame yields: **Tewarson**, SFPE Handbook ch. 36
-Table A.40, as quoted in `reference/fds/Manuals/FDS_Validation_Guide/`
-(NIST, public domain - `reference/fds/LICENSE.md`). `reference/fds/Source/`
-implements no soot *formation* model at all (FDS prescribes yields), so
-nothing here could have come from it; `soot.f90` covers thermophoretic
-deposition, which §61.2 names as the documented next step and does not
-implement. **No GPL-licensed source was consulted**, and in particular no
-OpenFOAM-derived course report on two-equation soot models was opened.
-
-### 61.1 Which model, and why not a better one
-
-| model | extra PDEs | needs | verdict |
-|---|---|---|---|
-| prescribed yield | 1 | `q'''_c`, a measured `y_s` | **implemented.** Honest, cheap, gates against published yields, and the only one that produces soot on a fire-resolution mesh (§61.7) |
-| Khan-Greeves + Magnussen burnout | 1 | `p_F`, `phi`, `eps/k`, `Y_O2` | not implemented. Every input is on the device, but the constants are diesel-engine-calibrated and transfer badly to fires; nothing would be gained over the two that are here |
-| laminar smoke point (Lautenberger/de Ris) | 1 | `Z`, `T`, `l_s` | **implemented.** Calibrated on flames, parameterised by one measured fuel property, and asks the combustion model only for quantities it actually has |
-| Moss-Brookes / Moss-Brookes-Hall | 2 | `X_C2H2`, `X_OH` | **refused by name (§61.5).** A single global step produces neither species |
-| sectional / population balance | 20-60 | full precursor chemistry | **refused by name.** Research scope |
-
-The argument, in one line: **the level of the soot model must not exceed the
-level of the combustion model.** §27's global step resolves fuel, oxygen and
-lumped products and nothing else; §42 adds one lumped intermediate. A soot
-model that asks for acetylene and hydroxyl is asking that combustion model a
-question it cannot answer, and the state-relationship sub-model that answers it
-anyway (Sivathanu & Faeth, *Combust. Flame* 82 (1990) 211) is where all the
-error would live - feeding a model whose entire selling point is that it uses
-*real* precursor concentrations. That is a strictly worse trade than the
-smoke-point model, which is honest about being a correlation in `Z` and `T`.
-
-### 61.2 The transport equation, and what it is NOT part of
-
-One more scalar, in the identical form `crate::scalar_transport::ScalarTransport`
-already solves for every species (§19):
-
-```
-d(rho Y_s)/dt + div(rho u Y_s) - div(rho D_eff grad Y_s) = omega_sf - omega_so      (61.1)
-```
-
-`D_eff = nu/Sc + nu_t/Sc_t` exactly as `SpeciesCoeffs::as_transport` builds it.
-What §62's radiative properties want is the soot **mass concentration**
-
-```
-rho Y_s      [kg/m^3]
-```
-
-and **not** the volume fraction: the solid soot density cancels out of
-(62.11) exactly (it enters as `rho_s f_v` and `f_v = rho Y_s/rho_s`), so a
-`sootDensity` entry would be a number read and discarded - the S13.4.1 defect
-itself. *This section carried one until the implementation showed the
-cancellation; it is removed, and `rho Y_s` is what the run reports.*
-
-**The source is KINEMATIC, because S19's equation is.** `ScalarTransport` -
-which S61.2 reuses unchanged, and which every species in this crate already
-goes through - assembles `ddt(Y) + div(phi, Y) - lap(alpha_eff, Y) = S` with
-no density on the time derivative. So (61.1)'s volumetric rates enter as
-
-```
-S = (omega_sf - omega_so) / rho          [1/s]                          (61.1a)
-```
-
-which is (61.1) divided through by `rho` at the same lag every other
-coefficient in this crate is evaluated at. The division is done in the source
-kernel rather than by the driver, so (61.1) and the crate's own species
-convention are one equation rather than two that have to be kept in step.
-
-**`Y_s` is transported OUTSIDE §19's `sum(Y) = 1` closure, and that is a
-decision with a cost.** The §27/§42 species set is exactly the selected
-scheme's own non-inert set plus one inert closure, and `cmbReact` recomputes
-the inert species as `1 - sum(solved)`. Adding soot to that set would change
-what combustion computes and would make every §27, §42 and §43 measurement in
-this document stale. So `Y_s` is a **transported tracer driven by combustion
-and by the local state**, and:
-
-* it removes **no mass** from the gas mixture. The mass error is `Y_s` itself,
-  typically `1e-5` to `1e-3` in a fire; the run reports `max Y_s` so the size
-  of the approximation is on the screen rather than in a footnote;
-* it removes **no energy**. The carbon that became soot has already released
-  its full `dh_c` through §27's own step, so the model over-predicts heat
-  release by roughly `y_s` - about 2.4 % for propane at Tewarson's yield;
-* `src/combustion.rs`, `src/twostep.rs` and `src/energy.rs` are **byte-for-byte
-  unmodified** by this section, which is what makes the previous two bullets
-  the whole of the error and makes every earlier measurement still valid.
-
-Taking soot mass and its enthalpy out of the gas is the documented next step,
-and it belongs with a `Y_s` that is a member of §19's set rather than beside
-it.
-
-**Boundary conditions, v1.** `Y_s` uses the *identical* rule §27's `Y_O2`/`Y_P`
-already use (`case_json::oxidiser_product_spec_for` at ambient `0`): a wall is
-`zeroGradient` (soot neither sticks nor is created there), an `open` boundary
-is `inletOutlet` at `0` (soot leaves freely; none enters), an `inlet` is
-`fixedValue 0`. **The case says nothing about `Y_s` and therefore cannot say
-anything the solver ignores.** Thermophoretic deposition - the physically real
-wall mechanism, `u_th = -K_th (nu/T) dT/dn` (Talbot et al., *J. Fluid Mech.*
-101 (1980) 737), which is the §4 triple with `fr = 0` and
-`refGrad = -rho Y_s u_th/(rho D_eff)` - is the documented next step and is not
-implemented; it would need a deposited-mass budget beside it or the mass
-statement above stops being true.
-
-### 61.3 The two source models
-
-#### (a) `prescribedYield`
-
-```
-omega_sf = y_s * q'''_c / dh_c ,        omega_so = 0                    (61.2)
-```
-
-`y_s` is a measured post-flame yield. Propane `0.024` (Tewarson, SFPE
-Handbook Table A.40; FDS's own propane cases use `0.019`); heptane `0.0149 +-
-0.0033` and toluene `0.195 +- 0.052` as 95 % confidence intervals from the
-NIST/NRC compartment experiments, quoted in
-`reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex` (NIST,
-public domain) - and note that FDS's own surrogate for the toluene/heptane
-mixture, `C7H12`, is run at `0.114`, so even a measured yield is a modelling
-choice once the fuel is a blend.
-`q'''_c` is `Combustion::q`, already on the device.
-
-Under §27's single step `q'''_c = omega_F dh_c` **identically** - `cmbReact`
-writes `q = rho dY_F dh_c/dt` - so (61.2) is `y_s omega_F` to one rounding,
-which is the definition of a post-flame yield. Under §42's two steps
-`dh1 + dh2 = dhc` exactly (§42.1), so the DOMAIN INTEGRAL of (61.2) is still
-`y_s` times the fuel burnt to completion; what differs is the *distribution* -
-soot appears where heat is released rather than where fuel is consumed, and
-those differ by one step's worth of lag. Stated, not hidden.
-
-No oxidation: a post-flame yield is by definition what is left after the flame
-has finished with it. This is FDS's own treatment.
-
-#### (b) `laminarSmokePoint`
-
-```
-omega_sf = f_sf(Z) * g_sf(T) ,      omega_so = f_so(Z) * g_so(T)        (61.3)
-```
-
-`f_sf` is the unique cubic that is zero at `Z_L`, zero at `Z_H`, and has a
-stationary maximum at `Z_P` of height `omega_sf,P`; likewise `f_so`. `g_sf` is
-the same cubic in `T` normalised to unit peak; `g_so` is linear above its own
-threshold. Writing `u = Z - Z_P`, `u_L = Z_L - Z_P < 0`, `u_H = Z_H - Z_P > 0`,
-the four conditions `f(u_L) = f(u_H) = 0`, `f(0) = w_P`, `f'(0) = 0` determine
-
-```
-f(u) = w_P + A u^2 + B u^3 ,
-A = -(w_P/(u_L^2 u_H^2)) (u_H^2 + u_L u_H + u_L^2) ,
-B =  (w_P/(u_L^2 u_H^2)) (u_H + u_L)                                    (61.4)
-```
-
-*DESIGN.* Lautenberger et al. state the four conditions; the closed form (61.4)
-is this crate's own solve of them, in the same spirit as §36.2's S4 quadrature
-- derived so it is checkable rather than trusted, and §61.8's first row checks
-all four conditions to round-off. `f` is clipped to zero outside `[Z_L, Z_H]`
-and, being a cubic, is non-negative *inside* it for the published constants
-(measured: `min f >= 0` to `1e-16` on a 2001-point sweep of both windows), so
-the clip never fires in the interior.
-
-Lautenberger et al. Tables 1-2, calibrated on a 212 W laminar ethylene flame:
-
-```
-formation:    c_ZL = 1.05, c_ZP = 1.77, c_ZH = 2.15          Z_x = c_Zx * Z_st
-              T_L  = 1375 K, T_P = 1625 K, T_H = 1825 K
-oxidation:    c_ZL = 0.56, c_ZP = 0.84, c_ZH = 1.05
-              omega_so,P = 0.85 kg/(m^3 s)
-              g_so(T) = max(0, C_so (T - T_L,so)),  C_so = 0.006 1/K, T_L,so = 1375 K
-```
-
-Every constant except the formation peak is asserted fuel-independent; the peak
-carries the whole fuel dependence through the measured laminar smoke-point
-height (their Eq. 26):
-
-```
-omega_sf,P = 1.1 * (0.106/l_s) * (28/M_F) * (p_0/p)^2 * Y_F,stream   kg/(m^3 s)   (61.5)
-```
-
-with `l_s` in m and `M_F` in kg/kmol; the two leading constants are ethylene's
-own `l_s = 0.106 m`, `M_F = 28`. Measured smoke points (their Table 4):
-ethylene `0.106`, propylene `0.029`, **propane `0.162`**. Propane is this
-crate's default fuel, so `M_F = 44.1`, `l_s = 0.162` and a pure fuel stream
-give `omega_sf,P = 0.45699 kg/(m^3 s)`.
-
-*Recorded uncertainty.* The oxidation peak `omega_so,P` is taken as
-fuel-independent because (61.5) is stated for the formation peak only. If the
-paper scales oxidation too, a heavily-sooting fuel's formation/oxidation
-balance here is wrong in a way that shifts soot upward. `omega_so,P` is
-therefore a case setting with the published default, and §61.5's pair test
-proves it reaches the solver.
-
-**`g_so` is unbounded above** - `g_so(1542 K) = 1` and it keeps climbing. That
-is what the paper's linear form says, and it is left alone; the availability
-clip below is what bounds the effect.
-
-**Availability, as §27 does it.** `omega_so <= rho Y_s / dt`, clipped **and the
-clipped-cell count reported** - the identical idiom `CombustionStats::n_clipped`
-already carries. `Y_floor` never appears: the oxidation term goes into
-`fvm_su` with a negative sign rather than into `fvm_sp` as `omega_so/Y_s`,
-because after clipping it is already bounded by the available mass and the
-`fvm_sp` route would need a floor constant that has to match bitwise between
-host and device to be testable.
-
-### 61.4 The mixture fraction, which is why this model is affordable
-
-The smoke-point model needs `Z`, and this crate transports no mixture fraction.
-It does not need to. For a single global step with equal effective
-diffusivities - which holds here because `Species` gives every scalar the same
-`Sc_t` and the same `Sc` - the Shvab-Zeldovich coupling function
-
-```
-Z = ( s Y_F - Y_O2 + Y_O2,inf ) / ( s Y_F,1 + Y_O2,inf )                (61.6)
-```
-
-is a conserved scalar and is **exact**, using `CombustionCoeffs::s` verbatim.
-`Y_F,1` (the fuel stream's own fuel mass fraction) and `Y_O2,inf` (the
-oxidiser stream's oxygen, `0.232`) are case constants. `Z` is therefore a
-**pure elementwise kernel over the two species the EDM already solves** - four
-flops, no gather, no communication - and `Z_st = Y_O2,inf/(s Y_F,1 + Y_O2,inf)`
-is a derived scalar (`0.0600725` for propane). This single fact is what makes
-the smoke-point model tractable here; without it the model would need a fourth
-transported scalar and a second closure to go with it.
-
-`Z` is clamped to `[0, 1]` before the cubics see it. It can leave that range
-only through the boundedness slack of two separately-limited convection
-equations, which is exactly the kind of small excursion a correlation must not
-be asked to extrapolate on.
-
-### 61.5 What a case says, what is refused, and the pair tests
-
-```jsonc
-"physics": { "fire": {
-  "combustion": {},
-  "soot": {
-    "model": "laminarSmokePoint",   // "none" (default) | "prescribedYield" | "laminarSmokePoint"
-    "yield": 0.024,                 // prescribedYield only, kg soot / kg fuel
-    "smokePointHeight": 0.162,      // laminarSmokePoint only, m
-    "fuelMolarMass": 44.1,          // laminarSmokePoint only, kg/kmol
-    "fuelStreamY": 1.0,             // Y_F in the fuel stream, both models' Z and (61.5)
-    "oxidationPeak": 0.85           // laminarSmokePoint only, kg/(m^3 s)
-  } } }
-```
-
-There is **no `sootDensity`**, and §61.2 says why: it would cancel out of
-every formula that could read it.
-
-**§13.4 refusals, each naming what is available:**
-
-| the case says | what happens |
-|---|---|
-| `model` anything but the three names | error naming `none`, `prescribedYield`, `laminarSmokePoint` |
-| `model: "mossBrookes"` / `"mossBrookesHall"` | error naming the three, **and saying why**: a single-step or two-step mixing-controlled scheme produces neither `C2H2` nor `OH`, and manufacturing them from a state relationship is a second modelling layer this crate does not have (§61.1) |
-| `model: "sectional"` / `"populationBalance"` | same shape; 20-60 transport equations and full precursor chemistry |
-| `yield` with `model` not `prescribedYield` | error - a number read and discarded is the §13.4.1 defect itself |
-| `smokePointHeight` / `fuelMolarMass` / `oxidationPeak` / `fuelStreamY` with `model` not `laminarSmokePoint` | same. **`fuelStreamY` is smoke-point-only**: this section said "read by BOTH models" until the pair test was written, and the prescribed yield reads `q'''_c` and `y_s` and nothing else - `Z_st` never reaches it |
-| a `soot` block with no `combustion` block | error: both source models are driven by combustion (`q'''_c`, or `Y_F`/`Y_O2` through `Z`) |
-| `yield <= 0`, `smokePointHeight <= 0`, `fuelMolarMass <= 0`, `oxidationPeak < 0`, `fuelStreamY` outside `(0, 1]` | error naming the entry and its value |
-
-**§13.4.1 pair tests** - two cases identical in every byte but one, REQUIRED to
-differ, failing by name if they do not:
-
-| pair | what it proves |
-|---|---|
-| `model: none` vs `prescribedYield` | soot exists at all, and the default is untouched |
-| `yield: 0.024` vs `0.048` | the yield reaches the source term |
-| `model: prescribedYield` vs `laminarSmokePoint` | the two models are not the same code path |
-| `smokePointHeight: 0.162` vs `0.106` | (61.5) reaches `omega_sf,P` |
-| `fuelMolarMass: 44.1` vs `28.0` | the other factor of (61.5) does too |
-| `fuelStreamY: 1.0` vs `0.4` | `Z_st` AND (61.5) both move - a single knob with two paths |
-| `oxidationPeak: 0.85` vs `0.0` | oxidation is wired, not decorative |
-| soot on vs off under `spectralModel wsgg` | the §61/§62 join: `rho Y_s` reaches every band's `kappa` through (62.12), and therefore `T` |
-| `combustion.s: 3.63` vs `4.0` | `Z` really is built from the EDM's own stoichiometry. **Checked as a CLOSED FORM, not as a run pair**, and that is the stronger test rather than a shortcut: `s` also changes what §27 burns, so two runs differing in it would differ for reasons that have nothing to do with soot. `z_stoichiometric(4.0, 1) < z_stoichiometric(3.63, 1)` says exactly the thing this row is about and nothing else |
-
-**The five smoke-point rows run on a HOT case, and that is part of the test
-rather than a convenience.** At the duct's default 373 K walls and `Y_F = 0.03`
-inlet, all five come back bit-identical - not because the settings are inert
-but because the model forms no soot at all: (61.6)'s formation window is
-`Z` in `[1.05, 2.15] Z_st` and `g_sf` is zero below 1375 K, and that duct
-reaches neither. The pair rows therefore run at 1600 K walls, 1500 K ambient
-and `Y_F = 0.10`. A knob that cannot fire on the case it is tested on is a
-knob that has not been tested - and the reason it could not fire is exactly
-§61.7's collapse, showing up first in a unit test.
-
-### 61.6 GPU shape
-
-Everything new is **tier A**: one fused elementwise kernel per source model,
-reading `(Y_F, Y_O2, T, rho, Y_s, q)` and writing `omega_sf`, `omega_so` and a
-clipped-cell flag. `Z` is four flops; two cubics and a clip are about thirty.
-There is no gather, no scatter, no atomic and no branch that depends on
-anything but the cell's own state. The transport equation itself is **tier B**
-and is one existing asymmetric solve on the existing LDU - `ScalarTransport`,
-unmodified.
-
-The clipped-cell count is reduced by the same deterministic tree reduction
-`CombustionStats::n_clipped` already uses (fixed-size partials, fixed order, no
-atomic), so the reported count is bitwise reproducible.
-
-**Every reported number is reduced on the device, and none of them is reduced
-per step.** `Soot::correct` is source kernel, transport solve, bound and
-`rho Y_s`, and adds **no host traffic of its own** - the linear solver's own
-round trips per inner product are §8's and are not this section's to remove.
-The six quantities §61.8 reports come from a separate `Soot::stats`, which the
-driver calls when it prints.
-
-*This is a correction of what this section shipped first, and the defect is
-worth naming because it is a class this project keeps finding.* The reductions
-used to run at the end of **every** `correct` call - and with them a download
-of `Y_s` and a download of `T`, two full-field host round trips per time step -
-while the only production caller threw the returned struct away and recomputed
-the same numbers on the host from five freshly downloaded fields at the end of
-the run. Two definitions of one quantity, and the device one dead. The split
-leaves exactly one definition of each and takes this section's own host
-traffic out of the step loop entirely.
-**It cannot move a solution value**, because nothing the report touches is read
-by the solve - the scratch buffer, the reduction partials and the
-single-element output are the soot module's own - so the default path is
-bitwise identical BY CONSTRUCTION rather than by measurement. Measured anyway,
-on the live fire: every printed digit unmoved (§61.8).
-
-What the split is **not** is a measured speed-up, and this paragraph exists so
-nobody quotes it as one. Four runs of the same 1200-step WSGG + soot case
-straddling the change came in at `99.3 s` **before** and `99.1`, `99.8`,
-`97.4 s` **after** - the before-value sits inside the after-values' own spread,
-so the measurement resolves nothing. The two transfers the split removes are
-`0.26 MB` each per step at 32 768 cells, which is below this case's
-run-to-run scatter of about `1 %` on a shared GPU. They scale with the mesh -
-`1.3 MB` each per step at 165 888 cells - and that was **not** measured. The
-justification is one definition of each number, not speed.
-
-### 61.7 The measurement that decides which model a fire case can actually use
-
-The smoke-point model forms **no soot below 1375 K**. A resolved laminar flame
-reaches that easily; an under-resolved RANS or LES fire cell smears the flame
-over a whole control volume and may never get there.
-`cases/burnerPlume.jsonc` records a peak `T` of **819 K** on its 32 768-cell
-mesh. If that survives mesh refinement, the recommended model produces
-identically zero soot on any mesh a user will actually run, and the honest
-deliverable is prescribed yield.
-
-**This is measured, not argued** - §61.8's table carries the number, and
-§62.12's Gate 4 runs both models on the same case so the comparison is against
-something rather than against nothing. If it collapses, the fallback is
-prescribed yield (shipped, for exactly this reason) or a subgrid
-temperature-PDF correction, which is a paper and not a task.
-
-**The quantity that carries the comparison is the predicted post-flame soot
-yield**, because that is the unit a measured soot number is published in:
-
-```
-y_s,pred = ( integral omega_sf dV - integral omega_so dV ) / mdot_F,burnt     (61.7)
-```
-
-with `mdot_F,burnt` the domain's own fuel consumption, `integral q'''_c dV /
-dh_c` - what §27 **burnt**, not what the inlet supplied, because a post-flame
-yield is per kilogram burnt. A non-positive denominator returns `0`: with
-nothing burning there is no yield, and dividing would manufacture one.
-
-Two readings of (61.7), and they are different readings:
-
-* under `prescribedYield` it returns the case's own `y_s` back to round-off,
-  **by construction** - (61.2) is `y_s q'''_c/dh_c` and its domain integral is
-  `y_s` times the fuel burnt identically. That is a **calibration of the
-  diagnostic**, not a test of the model, and the run says so on the same line
-  rather than leaving a reader to notice;
-* under `laminarSmokePoint` nothing in the source term knows what a yield is -
-  the model sees `Z` and `T` and a measured smoke-point height - so (61.7) is
-  a genuine prediction, and it is the only number a fire run produces that a
-  published soot measurement can be held against. §61.8's **Gate 61-A** is
-  that comparison.
-
-### 61.8 What must hold, and what was measured
-
-| Test | Expected | Measured |
-|---|---|---|
-| the cubic (61.4) | `f(Z_L) = f(Z_H) = 0`, `f(Z_P) = w_P`, `f'(Z_P) = 0`, each to round-off; `f >= 0` throughout `[Z_L, Z_H]` on a fine sweep | **`2.4e-16`** worst over all four conditions and both windows; `min f = 0` exactly, so the kernel's own guard never fires in the interior |
-| `Z` from (61.6) | `Z = 1` in the pure fuel stream, `Z = 0` in pure oxidiser, `Z = Z_st` on the mixing line, exactly | all three to `1e-15` or better; propane's `Z_st = 0.0600725` to `1.3e-9` |
-| `omega_sf,P` from (61.5) | `0.45699 kg/(m^3 s)` for propane; `1.1` exactly for ethylene's own anchor | **`8.7e-8`** and **`0.0`** |
-| prescribed yield, integral | the domain integral of `omega_sf` equals `y_s/dh_c` times the domain integral of the heat release, to round-off | `<= 1e-14` relative on the unit gate; on the live fire, formation `0.00822 g/s` against `y_s` x (fuel burnt) `= 0.00821 g/s` |
-| availability clip | `omega_so <= rho Y_s/dt` everywhere; clipped-cell count reported and non-zero when forced | holds cell by cell against the host closed form, and the unit gate asserts the test state actually reaches the clip |
-| host/device agreement | the host closed forms and the device kernels agree to round-off on a state that reaches every branch | `<= 1e-14` relative on `omega_sf`, `omega_so` and `Z` |
-| soot mass balance | with oxidation off and no flow, the domain's `rho Y_s` equals the accumulated source | `<= 1e-6` relative over five steps |
-| `sootModel none` | every field bitwise identical to the same case built without this section | holds - the module is not constructed at all |
-| the pair tests of §61.5 | each DIFFERENT, each failing by name | pass, on a case hot enough for the smoke-point model to fire - see §61.5 for why that is part of the test |
-| every refusal of §61.5 | fires, and names the setting | pass - six of them, Moss-Brookes and the sectional family each refused WITH the reason |
-| §61.7's temperature window | fraction of cells above `1375 K` on the fire gate's mesh, REPORTED | **`0` of `32 768` cells (0 %)** on `cases/burnerPlume.jsonc` - and the `laminarSmokePoint` run is consequently **bit-identical to no soot at all**. §61.7's doubt is confirmed rather than dispelled; §62.13 carries the full row |
-| §61.2's mass approximation | `max Y_s` and the resident soot mass REPORTED | `max Y_s = 0.0397` in the near-burner stagnation cell, resident mass `0.303 g` - a domain-mean mass fraction of `6.3e-5`. The peak is what an unoxidised, undeposited tracer does in a slow inlet cell, and it is on the screen rather than in a footnote |
-| the device report against the host one (§61.6) | every printed number unmoved when the driver's host loops became device reductions | **unmoved in every printed digit** on the live fire: `max Y_s 0.0397`, resident mass `0.303409 g`, formation `0.00821579 g/s`, and with them combustion efficiency `75.8133 %` and radiated fraction `45.7607 %`. `max Y_s` is exact on both sides (a maximum does not round); the three integrals agree to the six digits the report prints |
-| (61.7) under `prescribedYield` | returns `y_s` back, to round-off | `<= 1e-12` relative on the unit gate; `0.024` against `0.024` on the live fire - and the run LABELS it an identity |
-| **Gate 61-A**, (61.7) under `laminarSmokePoint` against a measured yield | within a factor of two of Tewarson's `0.024 kg/kg` for propane | **NOT CLOSED. `0.000` against `0.024` here; `0.0124` (a factor of 1.94) on the resolved burner of §85.10, which reaches the model's window but does not close its own species mass budget.** See below, and §85 |
-
-**Gate 61-A - the predicted post-flame soot yield against a measured one:
-MISSED, and the diagnosis is on the same screen.**
-
-The gate is the one the design note this section was written from asked for:
-run the model that *predicts* soot on a fire, and hold its predicted
-post-flame yield against a published measured one. Configuration:
-`cases/burnerPlume.jsonc`, 32 768 cells, 1200 steps at `deltaT = 0.005 s`,
-propane, `laminarSmokePoint` at `l_s = 0.162 m`, `M_F = 44.1`, `Y_F,1 = 1`,
-`omega_so,P = 0.85`, WSGG radiation with the window dropped. Target
-`y_s = 0.024 kg/kg` (Tewarson, SFPE Handbook Table A.40, as quoted for propane
-in `reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex` -
-NIST, public domain).
-
-| quantity | measured |
-|---|---|
-| predicted post-flame soot yield (61.7) | **`0` kg/kg, exactly** - formation and oxidation are both identically zero, so this is not a small number, it is the absence of one |
-| Tewarson's measured propane yield | `0.024 kg/kg` |
-| formation, oxidation | `0 g/s`, `0 g/s` |
-| resident soot mass, `max Y_s` | `0 g`, `0` |
-| cells above the model's own 1375 K threshold | **`0` of `32 768`** |
-| combustion efficiency, radiated fraction | `62.9911 %`, `47.2833 %` - **identical to the same case with no soot at all** |
-
-**The miss is total and it is not a calibration problem.** The smoke-point
-model's formation window is zero below 1375 K (§61.3) and no cell on this mesh
-reaches it, so `omega_sf` is identically zero everywhere and no choice of
-`l_s`, `M_F`, `Y_F,1` or `omega_so,P` can move the answer off zero. This is
-§61.7's collapse, predicted before any of this section was written, now
-carrying a number in the unit the measurement is published in.
-
-**What the gate does NOT show is that the model is unwired**, and the
-distinction matters because the two failures look identical from a fire run.
-§61.5's five smoke-point pair rows run on a duct at 1600 K walls, 1500 K
-ambient and `Y_F = 0.10` - inside the model's own windows - and every one of
-them REQUIRES the run to differ, failing by name if it does not. They pass. The model works and the
-mesh is too cold for it; those are different sentences and this document says
-which one it means.
-
-**RETRACTED - see §85.** Both halves of that sentence are wrong about the
-reason, and §85 measures what it was. It is not the mesh: §85.6 refines the
-same burner and the count above 1375 K goes 0 → 24 → 296 as it does, which is
-the opposite of the sweep first run against this claim. And it is not that the
-model needed a hotter mesh than a fire can give: with §85.5's defect removed
-this solver puts 296 of 262 144 cells over the model's own threshold and (61.7)
-returns **`0.0124 kg/kg` against Tewarson's `0.024`** — inside the factor of
-two this gate asks for.
-
-**What it was.** `Species` is handed `CaseControls::turb` whole and
-`ScalarTransport` under-relaxes with that struct's `k_relax`, so
-`numerics.relaxation`'s entry for **`k`, the turbulence kinetic energy**, was
-the under-relaxation of `Y_F`, `Y_O2`, `Y_P` and `Y_s`. In §14's non-iterative
-transient splitting there is no outer iteration for a relaxed equation to
-converge in, and the factor multiplies the rate at which fuel enters the
-domain's books: measured on this case with the reaction off and the domain
-isothermal, **42 % of the propane that crossed the burner never appeared
-anywhere** (§85.5's table). That is also what the fuel budget above was
-recording without naming: 20.97 kW enters, 7.45 kW burns, 6.7e-7 kW leaves and
-0.029 g is resident, and the missing 13.5 kW is 64 % of the supply.
-
-**And Gate 61-A is still not closed**, for a reason that has moved rather than
-gone: the only configuration that reaches the model's window has a species mass
-budget out by a factor of 2.6, so its `0.0124` is read off cells partly made of
-fuel that entered nowhere. §85.7 brackets that error from both sides — −17 %
-under a conservative species convection, +162 % under §19's bounded default —
-and says the fix is a species equation in `rho Y` rather than another case
-file. §85.10 is the re-run, §85.11 records that the case file's own previous
-header did not reproduce.
-
-**The prescribed-yield leg is not a pass in disguise.** On the same case it
-returns `0.024` against `0.024`, and both the run and (61.7) above say why
-that is an identity: the source term is `y_s q'''_c/dh_c`, so integrating it
-and dividing by the fuel burnt gives `y_s` back whatever the flow does. A
-model that is handed the answer cannot be gated on producing it.
-
-**What would close it**, named rather than implied - and the first of the two
-was tried and DOES move it, once §85.5's defect is out of the way (§85.6): a
-mesh that resolves the flame - the same refinement §62.12's Gate 4 already
-names as part of itself - which now carries 296 cells over the model's own
-threshold, leaving §85.7's species mass budget as the one thing between that
-and a verdict.
-
-**That last clause is wrong, and an adversarial audit of this section is what
-found it.** Closing the mass budget is NECESSARY and not SUFFICIENT. The
-hottest cell in §85.6's whole 262 144-cell domain is 1394.6 K, which clears
-§61's own 1375 K formation threshold by 20 K and falls far short of a propane
-flame's critical flame temperature — the value this repository already carries
-in `reference/fds/Manuals/FDS_Validation_Guide`. A flame that never reaches a
-propane flame's state is not the fire Tewarson measured, so a budget-closed
-comparison at these temperatures would still not be like-for-like, and 0.0124
-against 0.024 is not "a factor of 1.94, inside the bar" — it is two numbers
-about two different fires. §85.6's own table says the same thing a second way:
-the `bounded` leg's budget is +162 % and the conservative leg's is −17 %, so
-the two schemes BRACKET the answer rather than agreeing on it, which is what a
-discretisation-dominated quantity looks like. And the sweep behind it is two
-comparable points, not three — §85.6's 48³ row is a 23 % larger burner — so
-there is no convergence evidence for the gate quantity at all.
-
-The second, which would settle it independently of any of this,
-is the Santoro, Semerjian & Dobbins (1983) laminar co-flow ethylene flame,
-which is the regime the model was calibrated in and where its own paper's soot
-volume fractions are measured, in the single-digit ppm range.
-
-That second case **cannot be built with what this crate has, and the crate says
-so itself**: `ofgpu-fire` REFUSES `-combustion` on a laminar case by name -
-*"needs a turbulence closure with a mixing time scale (k-epsilon's eps/k,
-k-omega/SST's beta_star*omega, or an LES's resolved strain rate); this case
-selects laminar, which has none (§13.4, §27, §30.2)"* - because §27's rate is
-mixing-limited and a laminar diffusion flame has no mixing time scale to give
-it. Running it under an LES closure instead would not fix that; it would hand a
-laminar flame a subgrid strain rate that is a numerical artefact and call the
-result a validation. **This is a capability gap and not an oversight**, in
-exactly the sense §60.6 uses for its own Gate 6: the model this crate has
-cannot be asked the question, and pretending otherwise would be the worse
-answer. Closing it needs a finite-rate or flamelet closure beside §27, which is
-a section of its own and not a task inside this one.
-
----
-
-## 62. WSGG — spectral radiation, and what it costs
-
-§28 (P1) and §36 (fvDOM) both solve for one gray medium whose absorption
-coefficient the case writes down. This section replaces that constant with
-`kappa_j(X_H2O, X_CO2, p, soot)` and `a_j(T)` over `N_g + 1` spectral bands,
-for **both** models, through the same `EnergySources` registration §36 used -
-and it states, in §62.10, what that costs before anyone pays it.
-
-**M. H. Bordbar, G. Wecel, T. Hyppanen, *A line by line based weighted sum of
-gray gases model for inhomogeneous CO2-H2O mixture in oxy-fired combustion*,
-Combustion and Flame 161(9) (2014) 2435-2445**, DOI
-`10.1016/j.combustflame.2014.03.013` - the coefficient set. **Hottel &
-Sarofim, *Radiative Transfer*, McGraw-Hill (1967)** - the weighted-sum
-construction itself. **Smith, Shen & Friedman, *J. Heat Transfer* 104 (1982)
-602**, DOI `10.1115/1.3245174`; **Coppalle & Vervisch, *Combust. Flame* 49
-(1983) 101**; **Johansson et al., *Combust. Flame* 158 (2011) 893**;
-**Dorigon et al., *Int. J. Heat Mass Transfer* 64 (2013) 863**; **Denison &
-Webb, *J. Heat Transfer* 117 (1995) 788** (SLW); **Cassol et al., *Int. J.
-Heat Mass Transfer* 79 (2014) 796** (superposition); **Alberti, Weber &
-Mancini, *JQSRT* 219 (2018) 274**; **Sadeghi, Hostikka, Fraga & Bordbar,
-*Fire Safety Journal* 125 (2021) 103420** - the alternatives surveyed in
-§62.2, none implemented. Soot optics: **Chang & Charalampopoulos, *Proc. R.
-Soc. A* 430 (1990) 577**; **Widmann, *Combust. Sci. Technol.* 175 (2003)
-2299**; **Modest, *Radiative Heat Transfer*, 3rd ed., ch. 11**; **Grosshandler,
-*RADCAL*, NIST TN 1402 (1993)**, DOI `10.6028/NIST.TN.1402` - US public
-domain, and **the reference §62.12's Gate 1-E measures the total emissivity
-against**: NIST's own implementation ships at `reference/fds/Source/rcal.f90`
-and `tools/radcal_emissivity/` compiles it unmodified.
-
-`reference/fds/Source/radi.f90` is **public domain** (NIST;
-`reference/fds/LICENSE.md`: *"software developed by NIST employees is not
-subject to copyright protection within the United States"*) and carries a
-complete implementation of Bordbar's set - `MODULE WSGG_ARRAYS` and the
-functions `KAPPA_WSGG`, `A_WSGG`, `KAPPA_SOOT`. **The coefficient tables of
-§62.3 are transcribed from it**, and that is stated rather than paraphrased:
-Bordbar's paper is paywalled (ScienceDirect returned HTTP 403 to every attempt
-made for this section), the 168 numbers are *data* rather than expression, and
-a public-domain transcription is clean on both counts. Everything else here -
-the band decomposition, the P1 and fvDOM assembly, the window treatment, the
-energy coupling and the gray limit - is derived below, and §62.9's structure is
-this crate's own. **No GPL-licensed source was consulted.**
-
-### 62.1 The band decomposition, and the one equation per band
-
-The weighted-sum-of-gray-gases model represents the total emissivity of a
-homogeneous isothermal column of length `L` as
-
-```
-eps(T, p_a L) = sum_{j=1..N_g} a_j(T) [ 1 - exp(-kappa_j p_a L) ]        (62.1)
-```
-
-closed by
-
-```
-a_0(T) = 1 - sum_{j=1..N_g} a_j(T) ,      kappa_0 = 0   (the transparent window)   (62.2)
-```
-
-so that `sum_{j=0..N_g} a_j = 1` **identically, by construction** - `a_0` is
-computed as the complement and never from a fit of its own. The interpretation
-that turns an emissivity fit into an RTE model is that the medium behaves as
-`N_g + 1` independent gray media, gray gas `j` carrying the fraction `a_j(T)`
-of the local blackbody emissive power. Per band, then:
-
-```
-fvDOM (S36.1):  (s_m . grad) I_{j,m} = -(kappa_j + sigma_s) I_{j,m}
-                                       + kappa_j a_j(T) sigma T^4/pi + (sigma_s/4pi) G_j   (62.3)
-P1    (S28):    div(Gamma_j grad G_j) - kappa_j G_j + 4 kappa_j a_j(T) sigma T^4 = 0,
-                Gamma_j = 1/(3 kappa_j)                                                     (62.4)
-G = sum_j G_j ,     G_j = sum_m w_m I_{j,m}
-```
-
-Setting `N_g = 1`, `a_1 = 1`, `kappa_1 = a_case` recovers §28 and §36
-**bitwise** - §62.8, and it is a test rather than a claim.
-
-### 62.2 Which coefficient set, and whether fire conditions sit inside it
-
-"Fire conditions" concretely: flame zone 1200-1800 K, buoyant plume 500-1000 K,
-smoke layer 350-700 K, far field 300 K - **most of the volume below 1000 K**.
-Participating-gas mole fractions `X_H2O + X_CO2` of 0.10-0.20 in the plume,
-far less once diluted. Path lengths 0.3 m (bench burner) to 3 m (compartment)
-to 30 m (radiometer at distance), so `p_a L` spans roughly 0.01-5 atm.m. Molar
-ratio `M_r = X_H2O/X_CO2` for hydrocarbon-air combustion: about 2 for methane,
-**1.33 for propane**, 1 for ethylene.
-
-| set | gray gases | fitted to | fire verdict |
-|---|---|---|---|
-| Hottel & Sarofim (1967) | 3 | Hottel's charts | historical; superseded |
-| Smith, Shen & Friedman (1982) | 3 + clear | exponential wide-band | **the 600 K floor is the problem.** Most of a fire's volume is below it, and extrapolating a fitted polynomial below its range is how weights go negative |
-| Coppalle & Vervisch (1983) | 3 + soot | high-T spectra | 2000-3000 K - the wrong end entirely |
-| Johansson et al. (2011) | 4 | Malkmus SNB | better on `M_r` than Smith, but the band was built for oxy-fuel and skews high |
-| Dorigon et al. (2013) | 4 | LBL, HITEMP-2010 | good, but only `M_r = 1` and `2` |
-| **Bordbar et al. (2014)** | **4 + clear** | **LBL, HITEMP-2010** | **chosen.** Continuous in `M_r` over `[0.01, 4]` with pure-CO2 and pure-H2O limits outside it, so no case-specific table; and it is the one set with a public-domain reference implementation whose numbers can be checked |
-| Cassol et al. (2014) | per species, superposed | LBL | the formally correct gas+soot route, and **125 gray gases** (§62.4). Not shipped |
-| Sadeghi et al. (2021) | per species | LBL | the most fire-specific set that exists - fuel vapours, CH4, CO **and soot** - but needs Cassol-style superposition to combine. Named as the next step |
-
-**The validity range, stated as honestly as it can be.** Bordbar's own Table 1
-was **not read** - the paper is paywalled and every route to it returned 403,
-exactly as it did for §60.5's primary reference. What is verified is the
-range the *implementation* enforces, read from the public-domain source:
-`M_r < 0.01` switches to the pure-CO2 limit, `M_r > 4` to the pure-H2O limit,
-`T_ref = 1200 K`, no temperature guard at all. And what is **measured here**,
-which is a stronger statement about usability than the citation would be:
-evaluating the published polynomials over `T` in `[300, 2500] K` on a
-15-point `M_r` grid spanning `[0.005, 10]`,
-
-* `min_j a_j = +3.16e-4` at `T = 2500 K, M_r = 4.5, j = 4` - **the four gray
-  weights are non-negative everywhere in the box**, which is what keeps
-  `Sp <= 0` in §62.7 and is the formal statement of this table's verdict;
-* `min a_0 = -6.80e-3` at **`T = 300 K`, `M_r = 2`** - the *window* weight
-  goes slightly negative below about **323 K**. §62.7 shows why this is
-  harmless for the energy coupling (`sum_j a_j = 1` makes the soot half of
-  `A(T)` exactly `kappa_soot`, independent of `a_0`'s sign) and §62.13 gates
-  the bound.
-
-Fire conditions therefore sit inside the set's `M_r` window everywhere
-(0.01 <= 1.33 <= 4 for propane), inside its `p_a L` range on the evidence that
-FDS applies it without a guard, and inside its temperature range down to about
-323 K with a measured, bounded defect below that.
-
-**That is a statement about the fit's stated range, and §62.12's Gate 1-E now
-puts a number beside it.** Against RADCAL (NIST TN 1402, public domain, run
-from NIST's own source) over 108 points spanning this whole box, the total
-emissivity (62.1) is **14-21 % HIGH at 400-700 K**, agrees to a few per cent
-at 1500 K, and is **7-12 % LOW at 2000-2400 K** - a monotone ladder crossing
-zero near `T_ref = 1200 K`. Being inside a fit's range is not the same as
-agreeing with an independent model inside it, and most of a fire's volume sits
-at the end where the two agree least. §62.13 has the table and the reasons
-neither model is truth. **FDS's own User Guide calls
-its WSGG implementation "an experimental feature" with "very limited
-verification and validation that is focused mainly on simple fuels and
-geometric configurations"** - that is quoted rather than paraphrased, because
-it is the most relevant thing anyone has written about applying this set to
-fires.
-
-**The caveat that applies to every WSGG set**, and is not a caveat about this
-one: the coefficients are fitted to the total emissivity of a *homogeneous,
-isothermal* column. Applying them cell by cell in a non-isothermal,
-non-homogeneous medium is standard practice and formally unjustified. §62.12's
-Gate 3 is what measures the resulting error.
-
-### 62.3 The coefficients, and the composition they are evaluated at
-
-```
-kappa_j = p_a * sum_{k=0..4} d_{j,k} M_r^k                             (j = 1..4)      (62.5)
-a_j(T)  = sum_{i=0..4} [ sum_{k=0..4} c_{j,i,k} M_r^k ] (T/T_ref)^i ,  T_ref = 1200 K  (62.6)
-```
-
-for `0.01 <= M_r <= 4`; outside it, one-dimensional polynomial sets `b1`
-(pure CO2) and `b2` (pure H2O) in `T/T_ref` alone with fixed `kappa_p1`,
-`kappa_p2`. That is 100 `c`, 20 `d`, 40 `b` and 10 `kappa_p` - 168 numbers,
-every one of which §62.12's Gate 1 checks by consequence rather than by eye.
-
-**The composition, from what §27 and §42 already transport.** This crate
-carries a *lumped* product mass fraction, not CO2 and H2O separately. For a
-fuel `C_x H_y` the split is fixed by stoichiometry and is exact:
-
-```
-single step (S27):   Prod = x CO2 + (y/2) H2O
-                     f_CO2 = x W_CO2 / (x W_CO2 + (y/2) W_H2O) ,  f_H2O = 1 - f_CO2   (62.7)
-
-two step (S42):      n_a     = s1 W_F / W_O2           O2 moles consumed in step 1
-                     n_CO    = yCO W_F / W_CO          CO moles made in step 1
-                     n_H2O,I = 2 n_a - n_CO            oxygen balance on step 1
-                     Int  = n_CO CO + (x - n_CO) C + (y/2 - n_H2O,I) H2 + n_H2O,I H2O
-                     Prod = x CO2 + (y/2 - n_H2O,I) H2O                                (62.8)
-```
-
-Nothing new is asked of the case: `s1` and `yCO` are §42.4's own entries, and
-`x`, `y` are the two numbers §62.11 adds. For propane under ISFEH10 Eq. (2)
-this reproduces `2 CO + C + 2 H2 + 2 H2O` to five figures from `s1` and `yCO`
-alone (`n_a = 1.99993`, `n_CO = 1.99995`, `n_H2O,I = 1.99991`), which is the
-check that (62.8) is the right balance and not an assumed one. The
-intermediate's H2O is counted; its CO is not (below).
-
-Mole fractions follow §25's v1 constant-molecular-weight assumption - the same
-one the density and the gas state already make -
-
-```
-X_i = Y_i * W_mix / W_i ,     W_mix = W_air = 28.9647 kg/kmol                    (62.9)
-M_r = X_H2O / (X_CO2 + eps_mr) ,       eps_mr = 1e-16     (a named constant)
-p_a = p * (X_H2O + X_CO2) / p_STP                                                (62.10)
-```
-
-`p` is the case's total pressure (§62.11's `pressure`, 101325 Pa by default);
-`p_a` is in atm because that is the unit (62.5) is fitted in. **CO is not in
-Bordbar's fit** and is therefore not counted, even though §42 transports it;
-Sadeghi et al. (2021) is the set that would count it, and §62.2 names it. That
-is stated because a lumped intermediate that contributes nothing to absorption
-is exactly the kind of thing that gets quietly assumed to.
-
-### 62.4 Soot, and why additively
-
-Soot particles in a flame are far smaller than the relevant wavelengths, so
-`kappa_lambda = C_0 f_v/lambda` and the Planck mean is linear in `T`. The
-engineering form both FDS and Fluent use, and the one shipped here because it
-needs no refractive-index model:
-
-```
-kappa_soot = rho Y_s * ( 1232.4 + 0.591552 (T - 2000) )       [1/m]              (62.11)
-```
-
-(`radi.f90::KAPPA_SOOT`, with FDS's own comment that it is the same function
-Fluent uses.) Equivalently `b_1 rho_s f_v [1 + b_T (T - 2000)]` with
-`b_1 = 1232.4 m^2/kg`, `b_T = 4.8e-4 1/K`. It is positive for every physical
-temperature (the bracket vanishes at `-83 K`).
-
-**Cross-check performed.** At `T = 1500 K` and `rho_s = 1800`, (62.11) gives
-`kappa = 1.686e6 f_v`. The Rayleigh form `kappa = (C_eta/C_2) C_0 f_v T` with
-`C_eta = 3.6` (Lautenberger et al. Eq. 24, after Felske/Tien) and
-`C_2 = 1.4388e-2 m K` gives the same number for `C_0 = 4.35`, squarely inside
-the 4-6 range reported for flame soot. The two forms agree; the fit is shipped.
-*The `C_eta` discrepancy in the literature - 3.6 in Lautenberger, 3.72 in
-Modest ch. 11 - is recorded and NOT resolved here, and it is one reason to ship
-the fit instead.*
-
-Soot is **added to every gray gas, the window included**:
-
-```
-kappa_j,total = kappa_j,gas + kappa_soot ,      j = 0 .. N_g                     (62.12)
-```
-
-with the weights left alone. This is FDS practice and it is an approximation:
-soot's spectrum is continuous, so spreading it uniformly over bands is
-defensible, but the `a_j` are still the pure-gas ones and no longer sum
-correctly against the soot-broadened emissivity. The formally correct route is
-Cassol superposition - each species its own set, the mixture's gray gases the
-product grid `kappa_(j1,j2,j3) = kappa_H2O,j1 + kappa_CO2,j2 + kappa_soot,j3`,
-`a_(j1,j2,j3) = a_H2O,j1 a_CO2,j2 a_soot,j3` - which is `(4+1)^3 = 125` gray
-gases, hence 125 radiation solves (§62.10's last row). Truncating the product
-grid by weight would make the **band count data-dependent**, and therefore the
-cost and arguably the arithmetic non-reproducible run to run. **That alone
-disqualifies it here**, before the cost argument is even reached.
-
-One consequence worth naming because it is load-bearing in §62.5: with soot
-present `kappa_0 = kappa_soot > 0`, so the "transparent window" is not
-transparent any more.
-
-### 62.5 P1 per band, and the transparent-window degeneracy
-
-Per band, §28's `Radiation::correct` body verbatim with three substitutions:
-
-```
-fvm_laplacian(gammaMagSf[j], bGammaMagSf[j], G_j, -1)
-fvm_sp(kappaCell[j], +1)
-fvm_su(emission[j], +1)
-```
-
-`gammaMagSf[j]` is now a **field**. It is built by a gather over
-owner/neighbour, and the form matters (§62.8):
-
-```
-kappa_f = kappa_n + w_f (kappa_o - kappa_n) ,    Gamma_f = 1/(3 kappa_f) ,
-gammaMagSf[j][f] = Gamma_f * magSf[f]                                            (62.13)
-```
-
-*DESIGN, and both halves are recorded because neither is forced.* **(i)
-Interpolate `kappa`, then invert** - arithmetic on `kappa` is harmonic on
-`Gamma`, which is the classical choice when the coefficient jumps across a face,
-and a sooty flame cell next to clear ambient air is exactly that jump. It is
-also the choice that makes (62.13) exact for a uniform field, which is what
-§62.8 needs. **(ii) `kappa` is floored** at `kappa_min` (a case setting,
-`1e-4 1/m` by default) before (62.13), because `kappa_j -> 0` sends
-`Gamma_j -> infinity`; the floored-cell count is reported, the crate's own
-idiom. **The floor is applied to the SOLVED bands only** - under
-`windowTreatment dropped`, band 0 is never assembled, and flooring it would
-floor nothing that is used while making the reported omitted emission
-non-zero, destroying exactly the property `dropped` is chosen for. *That was
-not in this section's first draft; the test that checks the omitted emission
-is identically zero without soot is what found it.* Neither choice exists
-under fvDOM, where `kappa = 0` is an ordinary matrix - the floor is a P1
-artefact and is named as one.
-
-**The degeneracy.** For the clear gas `kappa_0 = 0` exactly:
-
-* `Gamma_0 = 1/(3 kappa_0) = infinity` - the Laplacian coefficient is unbounded;
-* `fvm_sp(kappa_0) = 0` - nothing on the diagonal;
-* `marshak_fr_ref_value` gives `fr = h/(h + Gamma Delta_b) -> 0` - the Marshak
-  wall degenerates to zero-gradient at **every** wall regardless of emissivity.
-
-So band 0's equation is a **singular pure-Neumann Laplace problem with zero
-source**: no unique solution, and PCG will not converge on it. This is not a
-numerical annoyance; it is the diffusion approximation failing at its own
-limit, because P1 assumes an optically thick medium and the window is optically
-empty. It is the same null space §8.5 and §35 have each dealt with once
-already, and it is handled explicitly here rather than becoming a third silent
-instance.
-
-**`windowTreatment` is therefore REQUIRED whenever `spectralModel` is `wsgg`
-and `radiationModel` is `P1`** - no default, because there is no honest one:
-
-| value | what it does, and what it costs |
-|---|---|
-| `dropped` | bands `1..N_g` are solved; band 0 is not solved at all. Its contribution to `-div(q_r)` is `kappa_0 (G_0 - 4 a_0 sigma T^4)`, which is **identically zero when soot is off** - dropping it is then EXACT for the gas energy budget. What is lost either way is the transparent flux from hot surfaces to cold ones, i.e. wall heat flux and a radiometer at distance; `a_0` is 10-33 % of the blackbody power at fire temperatures (§62.2's sweep), so this is not a small correction. With soot on, `kappa_0 = kappa_soot` and the omitted emission `4 kappa_soot a_0 sigma T^4` is no longer zero: it is **integrated over the domain and REPORTED** so the size of the approximation is on the screen |
-| `floored` | band 0 is solved with `kappa_0 -> max(kappa_0, kappa_min)`. Determinate, band count fixed, no data dependence - and it is P1's diffusion approximation applied to a nearly transparent band, which READS like where P1 is least defensible. **§64 measured that, and it is not.** Between black walls the transparent limit is ISOTROPIC, which is P1's own closure, so the floored window lands closer to the exact slab solution than the worst band P1 solves - by a factor of 463 in §64.6's leg A. What the floor DOES cost is (64.7), a closed form: it admits `kappa_min L (E_m/E_w - 1)/(2h)` of the medium's own emission into a band that physically carries none, measured at `-0.04 %` with hot walls and `+10.1 %` with a hot gas in cold ones. §62.12's Gate 3 measures this treatment against fvDOM; §64 measures it against arithmetic |
-
-Naming `windowTreatment` under **fvDOM** is a §13.4 error: fvDOM solves
-`kappa = 0` as an ordinary pure-advection matrix with a well-conditioned
-diagonal from the outgoing face fluxes, so there is nothing to treat, and
-accepting the entry there would be a setting read and discarded.
-
-**Recommendation, stated once and not hidden in a table: WSGG belongs with
-fvDOM.** WSGG-on-P1 is a documented compromise, not the same model. **§64.6
-gives that recommendation a number, and a different reason from the one this
-subsection gives**: measured against the exact slab, banded P1 is off by
-**-48 %** on the weakest band it solves and by `4.9e-4` on the strongest, and
-the window - the band this subsection is about - is not the problem. Half the
-bands of a WSGG medium sit in the regime P1 is worst at, and a spectral model
-is precisely a device for putting them there.
-
-*And after §62.13 ran it, it is stronger than a recommendation.* Neither
-treatment rescues P1 on an open-domain fire at practical resolution: with 94 %
-of the (cell, band) pairs sitting at `kappa_min` and the only Robin condition
-on `G` being one wall, a floored band is a NEARLY pure-Neumann Helmholtz
-problem, and refining the mesh makes it worse (`Gamma h` against
-`kappa_min h^3`). P1 + WSGG went NaN on `cases/nistBurner37cm.jsonc`'s 3.33 cm
-mesh at settings that ran to completion on `cases/burnerPlume.jsonc`'s 6.25 cm
-one. The `kappa` floor converts an exactly singular problem into a nearly
-singular one, which converges quietly to nonsense instead of failing loudly.
-§62.13 has both runs and both diagnoses.
-
-### 62.6 fvDOM per band
-
-Per band `j`, per ordinate `m`, §36's assembly with
-
-```
-fvm_div_gauss(phi_m, w_m, I_{j,m}, +1)      phi_m, w_m BAND-INDEPENDENT
-fvm_sp(kappaCell[j] + sigma_s, +1)
-fvm_su(volSrc[j], +1)                       volSrc[j] = emission[j]/(4pi) + (sigma_s/4pi) G_j
-```
-
-**The ordinate flux `phi_m,f = s_m . Sf` and its upwind weights do not depend
-on the band.** They are computed once at construction and stay that way, so
-*assembly* cost grows sub-linearly in `N_g` while the *solve* cost grows
-exactly linearly. That is the correct mental model for §62.10.
-
-Loop order is `for j { for m { ... } }` - the natural extension of §36.3 - and
-it needs `N_g x N_ord` interior intensity fields resident to keep the warm
-start PBiCGStab benefits from. §62.10 has what that costs in bytes.
-
-### 62.7 Walls, energy, and the radiant-fraction floor per band
-
-**Marshak, per band (P1).** §28's derivation carries straight over with
-`Gamma -> Gamma_j` and the wall's emission weighted by the band's share:
-
-```
-h            = eps_w/(2(2 - eps_w))
-fr_j         = h/(h + Gamma_j Delta_b)              Gamma_j from the OWNER cell's kappa_j
-refValue_j   = 4 a_j(T_w, M_r|owner) sigma T_w^4
-refGrad_j    = 0                                                                 (62.14)
-```
-
-The subtlety worth its own test: **`a_j` is evaluated at the WALL temperature
-but with the GAS composition next to the wall.** The band structure is a
-property of the participating medium, not of the wall; the weight answers
-"what fraction of a blackbody at `T_w` falls in the spectral region gray gas
-`j` represents". Getting it wrong is a silent energy error, and the one-line
-assertion that catches it is `sum_j refValue_j == 4 sigma T_w^4` exactly, which
-follows from `sum_j a_j = 1` and is §62.12's own row.
-
-**Diffuse wall, per band (fvDOM).** §36.4's split-by-sign rule per band; only
-the leaving intensity changes:
-
-```
-I_w,j = eps_w a_j(T_w) sigma T_w^4/pi
-      + ((1 - eps_w)/pi) sum_{m': phi_m',bf > 0} w_m' I_{j,m'} |s_m' . n|        (62.15)
-```
-
-Reflection is **spectrally local for a gray wall** - band `j`'s reflected
-intensity comes only from band `j`'s incident intensity - so no band coupling
-enters at the wall, and §36.4's half-range-flux exactness argument is untouched
-because it is a statement about the quadrature, not about the spectrum.
-
-**Energy, and a correction to how the emission floor distributes.** The
-coupling is
-
-```
--div(q_r) = sum_j kappa_j G_j - 4 A(T) sigma T^4 ,     A(T) = sum_j kappa_j a_j(T)   (62.16)
-```
-
-Patankar-linearised exactly as §28 does, dropping the `a_j'(T) T^4` term (as
-FDS does) so that `Sp <= 0` is guaranteed rather than checked:
-
-```
-Sp = -16 A(T0) sigma T0^3 ,     Su = sum_j kappa_j G_j + 12 A(T0) sigma T0^4 - excess   (62.17)
-```
-
-`Sp <= 0` unconditionally because every `kappa_j >= 0` and every `a_j >= 0` for
-`j = 1..N_g` (§62.2's measurement, and §62.12's gate). The window's own weight
-can be slightly negative below 323 K, and it does **not** threaten this: with
-soot added to every band by (62.12),
-
-```
-A = sum_{j=0..N_g} (kappa_j,gas + kappa_soot) a_j
-  = kappa_soot * sum_j a_j  +  sum_{j=1..N_g} kappa_j,gas a_j
-  = kappa_soot + sum_{j=1..N_g} kappa_j,gas a_j                                  (62.18)
-```
-
-because `sum_{j=0..N_g} a_j = 1` **exactly** and `kappa_0,gas = 0`. The sign of
-`a_0` cancels out of the energy coupling entirely. It survives only in band 0's
-own emission source, bounded by `|a_0| 4 kappa_soot sigma T^4`, which at 300 K
-is at most `0.0068 * 4 * kappa_soot * 459 W/m^2` - and §62.12 gates it.
-
-**The radiant-fraction floor, per band, and the error in the design note this
-section was written from.** That note proposed
-`E_total = max(4 K sigma T^4, chi_r q'''_c)` with `K = sum_j kappa_j`, then
-`E_j = a_j E_total`. **That is wrong**, and it is wrong in a way that would not
-have shown up in the gray limit: band `j`'s unfloored emission is
-`4 kappa_j a_j sigma T^4`, whereas `a_j * 4 K sigma T^4` spreads the *total*
-extinction over the bands by weight and gets the per-band emission right only
-when every `kappa_j` is equal. The construction actually implemented, which is
-also FDS's (`KFST4_GAS = BBF*KAPPA_GAS*FOUR_SIGMA*TMP**4`, `BBF*CHI_R*Q`):
-
-```
-emission_j = 4 kappa_j a_j(T) sigma T^4
-floor_j    = a_j(T) chi_r q'''_c                    the band's SHARE of the floor
-E_j        = max(emission_j, floor_j)
-excess     = sum_j (E_j - emission_j)   ( >= 0 )                                  (62.19)
-```
-
-Because `sum_j a_j = 1`, the total floored power `sum_j E_j` is at least
-`max(4 A sigma T^4, chi_r q'''_c)`, with equality when the floor is active in
-every band or in none - the floor is honoured in total, and it is honoured
-band by band, which is what a spectral model has to mean. At `N_g = 1` with
-`a_1 = 1` this is `max(4 kappa sigma T^4, chi_r q'''_c)` - §28's own formula,
-bit for bit.
-
-*The interaction §62.12's Gate 4 must measure and cannot assume away:* §28's
-floor exists because under-resolved cells radiate too little, and it OVERRIDES
-the computed emission with a prescribed fraction - so in exactly the cells
-where a composition-dependent `kappa` matters most, the floor may discard it.
-Either `chi_r`'s default drops once the spectral model is in, or the spectral
-model is cosmetic in the flame. **MEASURED** (§62.13): on
-`cases/burnerPlume.jsonc`, gray P1 radiates 14.97 % of its heat release with
-`chi_r = 0.35` and **3.12 %** with `chi_r = 0` - so with a case-supplied
-`a = 0.5` the floor was doing four fifths of the work, and the answer WAS the
-floor. Under WSGG the same case radiates 45.76 % with the floor on, well
-above it, so the spectral model is not cosmetic there. The pair that would
-close the question - WSGG with `chi_r = 0` on that case - **DIVERGES**
-(§62.13's second finding), so this row is answered on the gray leg and
-half-answered on the banded one, and that is said rather than rounded up.
-
-### 62.8 The gray limit, bitwise, by construction
-
-`spectralModel grayBanded` is `N_g = 1`, `a_1(T) = 1`, `kappa_1 = ` the case's
-own `absorptionCoefficient`. It must reproduce §28's and §36's answers
-**bit for bit**, and it does, for reasons that are constructions rather than
-coincidences:
-
-* the assembly is the same three operator calls with the same arguments;
-* `kappaCell` filled by a kernel writing the constant equals `set_field` with
-  the same constant;
-* **(62.13) is exact for a uniform field.** The crate's own
-  `fvInterpolateLinear` computes `w psi_o + (1-w) psi_n`, which for
-  `psi_o = psi_n = c` is NOT exactly `c` in IEEE-754 - a real trap, and the
-  reason (62.13) is written `kappa_n + w (kappa_o - kappa_n)` instead, which
-  gives `kappa_n + w*0 = kappa_n` exactly. Then `Gamma_f = 1/(3 kappa_f)` is
-  the identical expression `RadiationProps::gamma` evaluates, and
-  `Gamma_f * magSf[f]` is `magSf[f] * Gamma` reordered, which IEEE-754
-  multiplication makes exact;
-* the boundary `Gamma` comes from the owner cell's `kappa`, so it is the same
-  scalar again, and (62.14) is `marshak_fr_ref_value` with the same four
-  arguments;
-* `a_1` is exactly `1.0`, and multiplication by `1.0` is exact - so (62.19)
-  is `max(4 kappa sigma T^4, chi_r q)` unchanged and (62.17) is
-  `-16 kappa sigma T0^3` / `kappa G + 12 kappa sigma T0^4 - excess` unchanged;
-* the band sum over one band is `0 + x`, exact for any finite `x`.
-
-**Two things had to change for that list to be true, and both were found by
-running the gate rather than by reading the code.**
-
-*(i) The fused multiply-add.* §28's `radEnergyCoupling` writes
-`su = a*g[i] + 12*a*sigma*t0_4 - excess`, and nvcc's default `-fmad=true`
-contracts `a*g[i] + X` into ONE rounding. Handing a banded kernel a pre-summed
-`sum_j kappa_j G_j` forces two, and the difference - one ulp of
-`12 A sigma T^4`, a term two orders of magnitude larger than `su` itself once
-the floor's excess is subtracted - came out as **16 ulp on `su`** the first
-time Gate 2 ran. `G` and every matrix array were already bitwise; only that
-term was not. The fix is to hand the LAST band's `(kappa, G)` pair to the
-energy kernel separately, so the expression is `kappa*G + (X + absorb) - excess`
-with `absorb` identically zero at one band: §28's own line, with `a` replaced
-by an array.
-
-*(ii) `T^4` is spelled two ways in §28.* `radEmissionSource` computes it as
-`t2*t2` and `radEnergyCoupling` as `((t*t)*t)*t`, and those round differently.
-The gray path has carried that inconsistency since §28 was written; it is
-harmless (one ulp, in a term the floor usually dominates) and nothing depends
-on it. But the banded emission kernel produces BOTH the G-equation source and
-the floor's excess, and it has to use §28's own spelling for each or the gray
-limit is bitwise in every array except one. It does, and this paragraph is
-here because a reader who finds two `T^4` chains in one kernel deserves to
-know they are not a mistake.
-
-`grayBanded` is a **selectable model, not test scaffolding**: a case can ask
-for it and gets the gray answer, which is what makes the identity something a
-user can check rather than something this document asserts.
-
-**And it is checked at BOTH levels, which it was not at first.**
-`radiation::tests` and `fvdom::tests` assert 0 ulp on `G`, `su`, `sp` and every
-matrix array across a handful of `correct()` calls - the arrays. What was
-missing was the other half of the claim §62.11's table makes, "on a full run":
-`fire::the_gray_limit_is_bit_identical_through_the_whole_driver` runs
-`ofgpu-fire` twice for twelve coupled outer iterations with combustion,
-buoyancy, the `chi_r` floor and Marshak walls all live, and compares **every
-byte of every file** the two runs wrote. It carries the `spectralModel` absent
-vs `"gray"` row as well, so the claim that the default is untouched is a test
-rather than a reading of the code. *That test did not exist when this section
-was first written and the constant for it did: `FIRE_RAD_GRAY_BANDED` was
-declared in `fire.rs` and never used, which the compiler had been saying all
-along.*
-
-**And the default is untouched by construction, not by argument.**
-`spectralModel` defaults to `gray`, under which `Radiation::correct` and
-`FvDom::correct` execute exactly the code they executed before this section
-existed - one `if` on an `Option` that is `None`. Every §28 and §36
-measurement in this document stands.
-
-### 62.9 Order dependence: four hazards, four gather-shaped answers
-
-**(1) The band sum**, `G = sum_j G_j` and `-div(q_r) = sum_j kappa_j(...)`.
-The wrong implementation parallelises over `(cell, band)` and accumulates with
-`atomicAdd` - which this architecture forbids outright and which would make the
-result depend on warp scheduling. The right one is what `fvdom.rs` already uses
-for `G = sum_m w_m I_m`: **loop bands on the HOST, one kernel launch per band,
-each a fused `dst[i] += factor*src[i]`**. The accumulation order is then the
-band index, fixed at compile time, and the result is bitwise reproducible.
-Cost: `N_g` extra launches per update - negligible beside `N_g` solves.
-
-**(2) Face interpolation of `kappa`.** Gather form only: one thread per face
-reads owner and neighbour and writes the face. `fvLapDiag` gathers back over
-the cell-to-face CSR. Nothing is written by hand and nothing scatters.
-
-**(3) The fvDOM wall reflection, per band.** (62.15) sums the OTHER ordinates'
-incident boundary intensities at a face. Written as a scatter it needs atomics;
-written as a gather over the boundary-face-to-ordinate index - which §36.4
-already does - one thread per boundary face reads all `N_ord` values in a fixed
-order and writes one result. Already right, and it stays right per band.
-
-**(4) The property table - the trap.** The GPU-natural way to evaluate 168
-coefficients is a `cudaTextureObject_t` with hardware bilinear filtering.
-**Do not.** Texture filtering is fixed-point with 8 bits of sub-texel
-precision, is not IEEE-754, and is not guaranteed stable across driver or
-architecture versions - it would break this project's bitwise reproducibility
-*only sometimes, on someone else's machine*. The polynomials are evaluated
-directly in `double`; §62.10 shows the cost is nil.
-
-**Also named, because it is the throughput problem rather than a correctness
-one:** `Radiation::stamp_walls` and `FvDom::stamp_wall_bc` compute their
-boundary triples on the HOST, with a download/upload round trip per call. Per
-band that becomes `N_g` round trips (P1) or `N_g x N_ord` (fvDOM). They are
-kept on the host in this section - moving them to device kernels is a refactor
-that touches §28's and §36's own bitwise paths and belongs on its own commit -
-and §62.13 reports what they cost so the decision is made on a number.
-
-### 62.10 Cost, stated before anyone pays it
-
-The band count multiplies the SOLVE, and the solve is the whole cost:
-
-| configuration | radiation solves per call | intensity storage |
-|---|---|---|
-| P1 gray | 1 SPD Helmholtz | - |
-| P1 + WSGG, window dropped | **4** SPD Helmholtz | - |
-| P1 + WSGG, window floored | **5** SPD Helmholtz | - |
-| fvDOM S4 gray | 24 asymmetric | `N_ord n` doubles = 192 B/cell |
-| **fvDOM S4 + WSGG** | **5 x 24 = 120** asymmetric | **`N_g N_ord n` doubles = 960 B/cell** |
-| fvDOM S4 + Cassol superposition | 125 x 24 = 3000 | 24 kB/cell |
-
-**Storage puts a hard ceiling on the mesh.** 960 bytes per cell is 31 MB at
-32 768 cells, **960 MB at 10^6 cells** and 9.6 GB at 10^7 - the intensity
-arrays alone exceed half a 16 GB card before any flow field exists. **10^6
-cells is the practical single-GPU ceiling for WSGG + fvDOM S4**, and S6 (48
-ordinates) halves it again. A memory-lean variant exists - the diffuse wall
-needs only the *boundary* values of the other ordinates, so one interior field
-per band plus `N_ord` boundary fields would do - but it costs PBiCGStab's warm
-start and therefore some iterations back. That is a trade to measure, not a
-free win.
-
-**Public-domain corroboration of the same trade.** FDS's own defaults
-(`read.f90`, US-government public domain): gray gas runs
-`NUMBER_SPECTRAL_BANDS = 1` with `ANGLE_INCREMENT = 5`, i.e. only a fifth of
-the angles are updated per call; WSGG sets `NUMBER_SPECTRAL_BANDS = 5` and
-**abandons that trick entirely** (`ANGLE_INCREMENT = 1`), because the bands
-already multiply the work and letting both go stale would leave the radiation
-field too far behind the flow. A factor 25 in radiation work, from a reference
-implementation's own defaults.
-
-**The mitigation, and it becomes a case setting here rather than advice.**
-§36.6 already recommended calling `correct()` every 5-10 outer iterations
-rather than every one, on the argument that radiation couples to the flow only
-through a source term smooth on the flow timescale. With 120 solves per call
-that is the difference between a case that runs and one that does not, so
-`updateInterval` is now an entry in the radiation block (§62.11), default `1`
-- which is bitwise what every existing case does - and the `su`/`sp` arrays are
-re-registered every iteration whether or not `correct()` ran.
-
-The property model itself is free: about 150 flops per cell per update
-(the `M_r` powers shared across all four gray gases, 4 x (25 + 5) FMA for
-(62.5) and (62.6), three for (62.11), four divisions for `Gamma`), elementwise,
-bandwidth-bound, one launch. At 10^7 cells that is 1.5 GFLOP - under a
-millisecond. **The property model is not the cost. The solve is.**
-
-**MEASURED** - see §62.13's table. The band structure costs a factor **4.1 of
-P1** and **6.9 of fvDOM** on `cases/burnerPlume.jsonc`, against the **1.4** and
-**4.5** this section's design note projected from arithmetic on two measured
-points; fvDOM + WSGG against gray P1 is **46.7x**, against the note's `~30x`.
-Every projection was optimistic, and the note said they were arithmetic rather
-than measurements. And
-`updateInterval: 4` recovers **6.7** of the fvDOM factor for **0.12 points** of
-radiated fraction, which is why it is a case entry here rather than the advice
-§36.6 left it as.
-
-### 62.11 What a case says, what is refused, and the pair tests
-
-```jsonc
-"physics": { "fire": { "radiation": {
-  "model": "fvDOM",                // S28 P1 | S36 fvDOM
-  "spectralModel": "wsgg",         // "gray" (default) | "grayBanded" | "wsgg"
-  "a": 0.5,                        // required under gray/grayBanded, REFUSED under wsgg
-  "chiR": 0.35,
-  "sigmaS": 0.0,
-  "updateInterval": 4,             // S62.10; 1 by default, which is today's behaviour
-  "pressure": 101325.0,            // wsgg only, Pa
-  "fuelC": 3,                      // wsgg only, carbon atoms per fuel molecule
-  "fuelH": 8,                      // wsgg only, hydrogen atoms
-  "windowTreatment": "dropped",    // wsgg + P1 only, and REQUIRED there
-  "kappaMin": 1.0e-4               // wsgg + P1 only, 1/m
-} } } }
-```
-
-§63.3 adds two more entries to this same block - `openBoundary` and
-`ambientT` - and they are not §62's, which is why they are stated there. They
-matter to §62 all the same: §63 is the condition this section's transparent
-window forced.
-
-**§13.4 refusals:**
-
-| the case says | what happens |
-|---|---|
-| `spectralModel` anything but the three names | error naming `gray`, `grayBanded`, `wsgg` |
-| `spectralModel: "hottel"` / `"coppalle"` / `"smith"` / `"johansson"` / `"dorigon"` / `"cassol"` / `"sadeghi"` / `"slw"` / `"fsk"` | error naming the three **and why that set is not here** (§62.2's table row). Every row of §62.2's survey is reachable by name; a set that appears in that table and not in this list would be a survey the code does not honour |
-| `a` together with `spectralModel: "wsgg"` | error: WSGG computes the absorption coefficient per cell per band and would read none of it |
-| no `a` with `gray` or `grayBanded` | error - §28's own message, unchanged |
-| `pressure`/`fuelC`/`fuelH` with `spectralModel` not `wsgg` | error, each naming the entry |
-| `windowTreatment` with `model: "fvDOM"` | error: fvDOM solves `kappa = 0` as an ordinary matrix; there is nothing to treat |
-| `windowTreatment` with `spectralModel` not `wsgg` | error: there is no window without bands |
-| **no `windowTreatment` with `wsgg` + `P1`** | error naming `dropped` and `floored` and stating what each costs (§62.5). There is no default |
-| `kappaMin` with `model: "fvDOM"`, or with `spectralModel` not `wsgg` | error |
-| `fuelC`/`fuelH` not positive, `pressure <= 0`, `kappaMin <= 0`, `updateInterval < 1` | error naming the entry and its value |
-
-**§13.4.1 pair tests:**
-
-| pair | what it proves |
-|---|---|
-| `spectralModel` absent vs `"gray"` | the default really is gray - these two must be IDENTICAL, an inverted row, and it is what §62.8 rests on. Both inverted rows live in `fire::the_gray_limit_is_bit_identical_through_the_whole_driver`, NOT in the differ-list, because that list asserts the opposite of what they claim |
-| `"gray"` vs `"grayBanded"` | **bitwise identical**, on a full run, every byte of every file written - §62.8 |
-| `"gray"` vs `"wsgg"` | different, or the band model is not running |
-| `wsgg` + `fuelC: 3` vs `fuelC: 4` | the fuel formula reaches `M_r` reaches `kappa_j` |
-| `wsgg` + `fuelH: 8` vs `fuelH: 10` | the other half of (62.7) does too |
-| `wsgg` + `pressure: 101325` vs `202650` | `p_a` reaches (62.5) |
-| `wsgg` + `P1` + `dropped` vs `floored` | the window treatment is a treatment, not a label |
-| `wsgg` + `kappaMin: 1e-4` vs `1e-1` | the floor reaches `Gamma` |
-| `updateInterval: 1` vs `4` | the interval reaches the loop |
-| soot on vs off, `wsgg` unchanged | (62.12) reaches every band - the §61/§62 join |
-| two `wsgg` runs differing ONLY in the stored gray `a` | **identical** - the proof that `a` is dead under `wsgg`, the companion to refusing it |
-
-### 62.12 The gates
-
-**Gate 1 - the coefficient set itself, no mesh.** `sum_j a_j = 1` to round-off
-and `a_j >= 0` (`j = 1..4`) over `T` in `[300, 2500] K` and `M_r` in
-`[0.005, 10]`; the emissivity (62.1) monotone increasing in `p_a L`, tending to
-`0` as `p_a L -> 0` and to `1 - a_0(T)` as `p_a L -> infinity`.
-
-**Gate 1-E - the emissivity level, against a PUBLISHED reference.** Everything
-in Gate 1 above is a shape or an identity: every one of them would still pass
-with each `kappa_j` scaled by two, which is exactly the kind of transcription
-error a table of 168 numbers invites. The level needs an outside number, and §62.2
-records that Bordbar's own table could not be obtained. **The reference used
-here is RADCAL** - Grosshandler, *RADCAL: A Narrow-Band Model for Radiation
-Calculations in a Combustion Environment*, **NIST Technical Note 1402** (1993),
-DOI `10.6028/NIST.TN.1402` - which is US public domain, is NIST's own
-implementation, ships inside FDS at `reference/fds/Source/rcal.f90`, and is the
-model FDS's own gray absorption coefficients come from. `SUB_RADCAL` returns
-the Planck-weighted mean transmissivity of a path; set the wall temperature to
-the gas temperature and `1 - tau` **is** the total emissivity of an isothermal
-column, which is exactly what (62.1) fits and what Hottel's charts plot. The
-driver that compiles NIST's source unmodified and prints the table is
-`tools/radcal_emissivity/`; the 108 numbers it produced are recorded as
-`wsgg::RADCAL_EPS` and `ofgpu-validate` compares (62.1) against them live.
-
-Four things about this gate, stated before its verdict rather than after:
-
-* **RADCAL is an independent model, not truth.** It is a narrow-band
-  statistical model on the band data of NASA SP-3080; Bordbar's set is a fit to
-  line-by-line HITEMP-2010. A disagreement says which way and by how much. It
-  does not convict either.
-* **The spectral window has to be corrected for or the hot end is a lie.**
-  RADCAL integrates `50 <= w <= 10000 1/cm`. At 400 K that is `1 - 2.8e-4` of
-  the blackbody; at 2400 K it is **86 %**, because a seventh of a 2400 K
-  blackbody radiates below 1 micron, where RADCAL does not look and the gas
-  does not absorb. So the full-spectrum emissivity is `eps_win * f_win(T)`,
-  `f_win` is `wsgg::RADCAL_WINDOW_FRACTION`, and a unit test recomputes all six
-  entries from the Planck function. **Comparing against the uncorrected number
-  would have put the mean bias at 2400 K at `-24.6 %` where the honest figure
-  is `-12.3 %`** (and the whole-box mean at 14.5 % instead of 11.4 %). That
-  error was in this gate's first draft, and it is the only place the reference
-  is touched at all: `RADCAL_EPS` records RADCAL's own output verbatim, so the
-  correction can be checked, or dropped, by anyone reading it.
-* **`p_a L` is not a complete parameterisation, and that costs the comparison
-  a few per cent.** (62.1) makes `eps` a function of `p_a L`, `T` and `M_r`
-  alone; RADCAL's does not, because collision broadening depends on the
-  partial pressure and not only on the product. **Measured, not assumed**:
-  re-running the whole 108-point table at `X_H2O + X_CO2 = 0.10` and at `0.50`
-  instead of `0.271` moves `eps` at the SAME `p_a L` by a mean of `-2.4 %` and
-  `+2.4 %`, worst `-7.1 %` / `+7.2 %`, with a worst spread of **15.3 %** across
-  the three at a single point. So the numbers below are for a
-  stoichiometric propane-air product mixture and no other, and part of the
-  disagreement they report is the WSGG idealisation itself rather than the
-  coefficients. It is a few per cent of an 11.4 % mean and it does not touch
-  the monotone temperature structure, which is the actual result.
-* **The driver is checked against RADCAL's own second output.** At
-  `p_a L = 1e-6` the emissivity must collapse to `kappa_Planck L` with
-  `kappa_Planck` the Planck-mean coefficient `SUB_RADCAL` also returns. It
-  does, to four figures (`7.3214619 x 3.690e-6 = 2.702e-5` against a printed
-  `2.70e-5` at 400 K), which is what rules out a mis-set path length or a
-  mis-read return value.
-
-The bar is **±10 % at every point** - two published models of one quantity,
-each claiming better than that on its own.
-
-**Gate 2 - the gray limit, bitwise.** §62.8, for BOTH models, on a full
-multi-iteration run: `G`, `su`, `sp` and every matrix array identical in every
-bit between `gray` and `grayBanded`.
-
-**Gate 3 - P1 against fvDOM on the same banded medium.** The window loss of
-§62.5 as a number: the same case, the same `kappa_j`, `a_j`, walls and `T`,
-solved by banded P1 (both window treatments) and by banded fvDOM. This is the
-gate that separates "the band structure is right" from "the fire is right", and
-running it in both models is what quantifies the transparent-window loss rather
-than arguing about it.
-
-**Gate 4 - the fire gate. NIST 37 cm gas burner, propane, three heat release
-rates.** Sung, Chen, Bundy, Fernandez & Hamins, **NIST TN 2162r1** (2021), as
-documented in `reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex`
-(NIST, public domain), "NIST Pool Fire Experiments": a water-cooled 38 cm
-burner of 37 cm effective diameter, surface near 40 degC, propane at **20 kW,
-34 kW and 50 kW**, with measured radiative fractions
-
-| HRR | measured `chi_r` |
-|---|---|
-| 20 kW | **0.23** |
-| 34 kW | **0.30** |
-| 50 kW | **0.33** |
-
-and, for the same rig with methane at 34.5 kW (0.69 g/s), `chi_r = 0.21`. The
-post-flame soot yield for propane is `y_s = 0.024 kg/kg` (Tewarson, SFPE
-Handbook Table A.40; FDS's own propane cases use 0.019).
-
-Why this case: propane is already this crate's default fuel
-(`CombustionCoeffs`: `dh_c = 46.45 MJ/kg`, `s = 3.63`); a fixed-flow gas burner
-is exactly the geometry `cases/burnerPlume.jsonc` already builds, so no
-pyrolysis model is needed; and the measured quantity is one the solver
-**already reports**.
-
-**The gate case runs fvDOM + WSGG + prescribed yield, at
-`updateInterval: 4` and `openBoundary coldSurroundings`, and none of those
-four is a preference.** fvDOM because P1 + WSGG went NaN on this very mesh
-(§62.13's second finding, and §62.5's degeneracy measured rather than argued);
-`coldSurroundings` because BOTH models go NaN without it, which is §63 and
-which is what §62's transparent window forced; `updateInterval: 4` because 120
-transport solves per call on 165 888 cells is otherwise hours per heat release
-rate, and because that setting is worth 0.12 points of radiated fraction on
-`cases/burnerPlume.jsonc` - far below this gate's own resolution; and the
-prescribed yield because §61.7's smoke-point collapse means the alternative
-would produce no soot at all (0 of 165 888 cells reach 1375 K here, measured).
-
-The gate is: **with soot on and the absorption coefficient computed from the
-local composition, the predicted radiative fraction reproduces the measured
-trend `0.23 -> 0.30 -> 0.33` and lands within the measurement's uncertainty at
-each point.** Two qualifications, stated in the gate's own verdict rather than
-discovered afterwards:
-
-* the gate is on the **trend as well as the level**. A gray model with a tuned
-  constant `a` can hit any single `chi_r`; only a composition-dependent model
-  can get all three from one setting. The trend is the whole point of the work
-  and it is the part a tuned constant cannot fake;
-* `cases/burnerPlume.jsonc` reaches only **35.5 % combustion efficiency** on
-  its 32 768-cell mesh, so its reported "radiated fraction" is radiated power
-  over *domain heat release*, not over fuel supply. **Mesh refinement is part
-  of this gate, not a precondition someone else supplies**, and if the
-  refinement does not happen the gate is not met and says so.
-
-*Note on the reference implementation's own practice, because it bears on what
-"predicted" means:* FDS's validation cases for these very fires **specify** the
-radiative fraction (`Experiment_Chapter.tex`: "The radiative fractions are
-specified based on reported values from Ref. [Sung:TN2162r1]"). The 0.23 /
-0.30 / 0.33 are therefore *measurements*, and no reference CFD prediction of
-them is being compared against - which is the right way round for a gate, and
-also means there is no "FDS got it too" to hide behind.
-
-**Secondary, named and not run:** Santoro, Semerjian & Dobbins, *Combust.
-Flame* 51 (1983) 203 - the laminar co-flow ethylene diffusion flame with
-measured radial and axial soot volume fractions in the single-digit ppm range.
-It is a laminar case with a resolved temperature field, precisely the regime
-the smoke-point model was calibrated in, so it tests the soot model without
-§61.7's under-resolution confound. It is the right diagnostic to run *first* if
-Gate 4 fails, to tell "the soot model is wrong" from "the fire mesh is too
-coarse for the soot model".
-
-**Gate 5 - banded P1 against the EXACT slab, band by band: §64.** Gates 1 and
-1-E test the coefficient set with no mesh; Gate 2 is an identity (bitwise, and
-it would pass just as happily if every band were wrong the same way); Gate 3 is
-one model against another. None of them measures the banded P1 **answer**
-against arithmetic. §64 carries §36.7's own two references - the optically thin
-slab, solved exactly along every ray, and the optically thick diffusion limit -
-over to a banded medium one band at a time, and reports what P1 does to each of
-the five. It is the gate that found (i) that P1's per-band error is NOT
-monotone in optical thickness and peaks at `tau ~ 0.03-0.3`, reaching
-**-48 %** on the band a fire radiates through; (ii) that in EVERY leg the
-floored transparent band is closer to the exact answer than the worst band P1
-actually SOLVES, which is the opposite of what §62.5 assumed about it; and
-(iii) a closed form (64.7) for what the `kappa` floor does to the answer,
-confirmed to `1.5e-4` on two of its three legs. Its verdict is in §64.6
-rather than repeated here.
-
-### 62.13 What must hold, and what was measured
-
-All of it on one machine (RTX 5070 Ti, `cargo test --release`,
-`ofgpu-validate`, `ofgpu-fire`). **The wall times below were taken on a
-SHARED GPU** - other work was running on the same card for part of the
-session - so each ratio is quoted within a batch that ran back to back, and
-the gray legs are 5-9 % above the values SPEC-LIT §36.6 already records for
-them (`20.0 s` here against `19.08 s`, `135.2 s` against `124.6 s`). The
-ratios are what this table claims; the absolute seconds carry that offset.
-
-### The coefficient set (Gate 1, no mesh) - `ofgpu-validate`, live
-
-| Check | Expected | Measured |
-|---|---|---|
-| `sum_{j=0..4} a_j(T) = 1` | exactly, by construction (62.2) | **`2.22e-16`** worst over `T` in `[300, 2500] K` x 15 molar ratios in `[0.005, 10]` |
-| `a_j >= 0`, `j = 1..4` | over the whole box | **holds**; `min_j a_j = +3.158e-4` |
-| `a_0` sign | reported, with where it turns | **`min a_0 = -6.805e-3`, negative below 324 K.** (62.18) is why it cannot reach `Sp`, and a unit gate holds the bound |
-| `eps(T, p_a L)` monotone in `p_a L` | exactly | **`0`** violation |
-| `eps -> 1 - a_0` as `p_a L -> inf` | to the exponential's own precision | **`< 1e-9`** |
-| `eps` against a published reference | within 10 % (Gate 1-E) | **MISSED at 58 of 108 points**, mean **11.4 %**, worst **30.5 %** - and the disagreement is MONOTONE in temperature rather than scattered. The reference is RADCAL, not Bordbar's own table, which still could not be obtained; the whole comparison has its own subsection below |
-| the four gray gases ordered weak to strong | by construction of the fit | holds at every `M_r` tested |
-| (62.11) soot cross-check | `1.686e6 f_v` at 1500 K, `rho_s = 1800` | **`2.2e-4`** relative |
-| (62.7)/(62.8) composition | exact stoichiometry; ISFEH10 Eq. (2) reproduced | **`0`** and **`2.0e-5`** |
-| the S13.4 refusals | fire, and say WHY | pass - `smith` names its 600 K floor, `cassol` its 125 gray gases and the data-dependent band count, `mossBrookes` its missing acetylene |
-
-### Gate 1-E - the total emissivity against RADCAL: **MISSED**, and the miss has a shape
-
-`ofgpu-validate`, live. 3 molar ratios (`M_r = 1`, **1.333**, `2` - ethylene-,
-propane- and methane-air) x 6 temperatures in `[400, 2400] K` x 6 path lengths
-in `[0.01, 3] atm.m`, against RADCAL run on a 1 atm column with
-`X_H2O + X_CO2 = 0.271` (the stoichiometric propane-air product mixture), the
-balance N2, no soot, the window correction of §62.12 applied.
-
-| Check | Bar | Measured |
-|---|---|---|
-| mean relative deviation over the 108 points | 15 % | **11.44 %** |
-| worst point | 35 % (the transcription guard) | **30.52 %**, at `M_r = 2`, 400 K, 0.03 atm.m |
-| **points inside ±10 %** | **all 108** | **50 of 108 - the gate is MISSED** |
-| signed bias, 400 K | - | **+20.84 %** |
-| signed bias, 700 K | - | **+14.11 %** |
-| signed bias, 1000 K | - | **+6.64 %** |
-| signed bias, 1500 K | - | **-1.31 %** |
-| signed bias, 2000 K | - | **-7.46 %** |
-| signed bias, 2400 K | - | **-12.28 %** |
-| the bias falls monotonically, one sign change | required | holds |
-
-**The shape is the result, not the level.** The disagreement is not scatter: it
-is a monotone ladder, positive at the cold end and negative at the hot one,
-crossing zero **near Bordbar's own `T_ref = 1200 K`**. A fit anchored at 1200 K
-drifting away from an independent model in both directions is the most
-ordinary thing a fit can do, and it is the reason this gate's `require` is on
-the ladder rather than on the tolerance: a wrong coefficient among the 168
-would break the monotone ordering long before it broke ±35 %.
-
-**What it means for a fire, said plainly.** §62.2's own temperature census puts
-**most of a fire's volume below 1000 K** - smoke layer 350-700 K, buoyant plume
-500-1000 K. That is exactly where this measurement puts Bordbar's set **14 to
-21 % HIGH** against RADCAL, at every path length tested. The best agreement is
-at **1500 K**, where the mean deviation is `-1.3 %` (individual points spanning
-`-12.2 %` to `+8.4 %`), and past it the sign is negative everywhere. So the
-sentence §62.2 could not write before - "fire conditions sit inside the set's
-range" - can now be
-written with a number attached: they sit inside its *stated* range everywhere,
-and inside a ±10 % agreement with an independent published model only in a band
-around 1200-1800 K.
-
-**And the thing this gate cannot do.** It cannot say which model is right.
-RADCAL's band data predates HITEMP-2010 and at 2400 K both are extrapolating;
-Bordbar's paper claims a few per cent against its own LBL reference, which was
-not read here. What would settle it is Bordbar's own Table 1 or an LBL
-calculation, and neither is available in this environment. **No number in this
-subsection should be read as saying Bordbar's set is 11 % wrong.** It says two
-published models of the same quantity differ by that much, in a direction that
-depends on temperature, and it says where.
-
-### Gate 2 - the gray limit, BITWISE
-
-| Check | Measured |
-|---|---|
-| P1: `grayBanded` vs `gray`, 5 calls, floor active, Marshak walls | **0 ulp** on `G`, `G_b`, `su`, `sp`, `diag`, `upper`, `lower`, `source`, `internalCoeffs`, `boundaryCoeffs` |
-| fvDOM: same, with scattering on and 2 extra sweeps | **0 ulp** on `G`, `su`, `sp` and all 24 ordinates' interior AND boundary fields |
-| on a full 1200-step FIRE (`cases/burnerPlume.jsonc`) | radiated fraction **14.9724 %** vs **14.9724 %**, combustion efficiency **35.4976 %** vs **35.4976 %**, net radiated power **1.11473 kW** vs **1.11473 kW** - every printed digit |
-| `sum_j refValue_j = 4 sigma T_w^4` on every Marshak wall face (62.14) | **`< 1e-14`** relative |
-| two `wsgg` runs differing ONLY in the dead gray `a` | **0 ulp** - the companion to refusing the entry |
-
-**Two things had to change for that to be true, and §62.8 records both**: the
-fused multiply-add nvcc emits for §28's `a*g[i] + ...` (16 ulp on `su` until
-the last band was handed in as a `(kappa, G)` pair), and §28's own two
-spellings of `T^4` (1 ulp more).
-
-### Gate 3 - P1 against fvDOM on the same banded medium
-
-Hot uniform gas at 1500 K in cold black walls at 300 K, `X_H2O + X_CO2` from
-`Y_P = 0.10`, no soot, no `chi_r` floor - the configuration where every watt
-the gas loses reaches a wall, so the domain integral of the §26 source **is**
-the radiated power:
-
-| solver | net radiated power | vs fvDOM |
-|---|---|---|
-| fvDOM S4, 5 bands | **9211.97 W** | - |
-| P1, window `dropped` (4 bands) | **9727.18 W** | **+5.59 %** |
-| P1, window `floored` (5 bands) | **9727.62 W** | **+5.60 %** |
-
-Two readings, and they are different readings. The **P1-vs-fvDOM** gap is the
-angular method's error on a banded medium - the same disagreement §36.7
-measures for a gray one. The **dropped-vs-floored** gap is `4.6e-5` relative,
-which is (62.5)'s claim confirmed by construction: `kappa_0 = 0` makes band 0
-contribute nothing to `-div(q_r)` whatever `G_0` is, so dropping it costs the
-GAS budget essentially nothing. What the window carries and P1-dropped cannot
-is `a_0 = 0.130` of the blackbody power at 1500 K, and that is a
-**wall-to-wall** flux, not a gas one.
-
-### The cost, measured
-
-`cases/burnerPlume.jsonc`, 32 768 cells, 1200 steps at `deltaT = 0.005 s`:
-
-| configuration | solves per call | wall time | vs gray P1 | radiated fraction | combustion efficiency |
-|---|---|---|---|---|---|
-| P1, gray | 1 SPD | **20.0 s** | 1.0x | 14.972 % | 35.498 % |
-| P1, `grayBanded` | 1 SPD | 21.1 s | 1.06x | **14.972 %** | **35.498 %** |
-| P1, WSGG, `dropped`, soot | 4 SPD | **82.8 s** | **4.1x** | 45.761 % | 75.813 % |
-| P1, WSGG, `floored`, soot | 5 SPD | 111.3 s | 5.6x | 49.025 % | 67.445 % |
-| P1, WSGG, `dropped`, NO soot | 4 SPD | 81.1 s | 4.1x | 47.283 % | 62.991 % |
-| P1, WSGG, `laminarSmokePoint` | 4 SPD | 82.1 s | 4.1x | **47.283 %** | **62.991 %** |
-| fvDOM S4, gray | 24 asym | 135.2 s | 6.8x | 13.789 % | 35.303 % |
-| **fvDOM S4, WSGG, soot** | **120 asym** | **933.1 s** | **46.7x** | 42.130 % | 88.429 % |
-| fvDOM S4, WSGG, soot, `updateInterval: 4` | 120 every 4th | **138.8 s** | 6.9x | 42.248 % | 88.097 % |
-
-**The band structure costs 4.1x on P1 and 6.9x on fvDOM.** The P1 figure is
-well above the four-solves-for-one arithmetic the design note projected (1.4x), and
-the reason is measurable: a WSGG `kappa` spans orders of magnitude across the
-plume edge, so the four Helmholtz systems are far worse conditioned than the
-one gray system. The design note this section was written from projected
-`~30x` for fvDOM + WSGG against gray P1; the measurement is **46.7x**. Both
-projections were optimistic and the note said they were arithmetic on two
-measured points rather than measurements.
-
-**`updateInterval: 4` gives essentially all of it back**: a **6.7x**
-speed-up for **0.12 points** of radiated fraction and 0.33 of combustion
-efficiency. At 120 solves per call that setting is the difference between a
-case that runs and one that does not, and it is the reason §62.10 turned
-§36.6's recommendation into a case entry.
-
-### The two findings this section did not expect
-
-**(1) The laminar-smoke-point model produces IDENTICALLY ZERO soot on a fire
-mesh, and §61.7 predicted it.** The `laminarSmokePoint` row above is
-bit-identical to the no-soot row in every printed digit, and the run says
-why: **0 of 32 768 cells are above the model's own 1375 K formation
-threshold.** The model is calibrated on a resolved 212 W laminar flame; an
-under-resolved RANS fire cell smears the flame over a whole control volume
-and never gets there. This is the single biggest doubt the design note raised,
-it was raised before any code was written, and it is confirmed. The
-prescribed-yield model is shipped alongside it for exactly this reason, and
-Gate 4 uses that one.
-
-**(2) P1 + WSGG is not usable on an open-domain fire at practical resolution,
-and that is a MEASUREMENT of §62.5's degeneracy rather than an argument about
-it.** Two runs found it, and they found it in the order that makes the
-diagnosis unambiguous:
-
-* On `cases/burnerPlume.jsonc` (6.25 cm cells) with `chiR: 0`, P1 + WSGG goes
-  **non-finite at step 1045**, while gray P1 on the same case runs to
-  completion (and its radiated fraction falls from 14.97 % to **3.12 %** -
-  i.e. with a case-supplied `a = 0.5` the `chi_r` floor was doing four fifths
-  of the work, which is §62.7's own warning confirmed).
-* On `cases/nistBurner37cm.jsonc` (3.33 cm cells) **with the floor on**, at
-  `chiR: 0.35`, P1 + WSGG goes NaN within the first hundred steps at both
-  20 kW and 34 kW (`GasState::advance_p0: total_q is NaN`) - the same
-  settings that ran to completion on the coarser mesh.
-
-The mechanism is reported by the run itself, not inferred: `kappa` is floored
-in **123 284 of 131 072 (cell, band)** pairs - **94 %** of the domain is
-optically empty for every band - and on an open-domain fire the only Robin
-condition on `G` is the burner floor, every other patch being `open` and so
-`zeroGradient` (§36.4's own *DESIGN* choice, shared by both models so their
-comparison stays a comparison of the angular method). A band whose `kappa` is
-`kappa_min` everywhere is then a **nearly pure-Neumann Helmholtz problem**,
-and refining the mesh makes it worse rather than better: the Laplacian
-diagonal scales as `Gamma h` while the sink scales as `kappa_min h^3`, so the
-ratio grows like `h^-2`.
-
-**So the `kappa` floor does not cure §62.5's degeneracy. It converts an
-exactly singular problem into a nearly singular one, which converges quietly
-to nonsense instead of failing loudly** - and that is worse. §62.5's
-recommendation that WSGG belongs with fvDOM was written as a derivation
-before any of this ran; it is now the reason Gate 4 is a **fvDOM** case, and
-the reason this section says so in three places rather than one.
-
-Two things would remove it and neither is done here. The first is §36.4's own
-deferred item: a cold-black-surroundings Dirichlet on `G` at an `open` patch
-instead of zero-gradient, which would give every band a well-posed problem -
-but it moves every §28 and §36 measurement in this document, and both models
-have to keep the same assumption for §36.7's comparison to mean anything. The
-second is a deflated-null-space or fixed-reference PCG on the band equations,
-which is §8.5's own machinery pointed at a third instance of the same null
-space.
-
-
-### Gate 4 - the fire gate: **MISSED**, and here is exactly where
-
-The gate asked for the measured trend `chi_r` = 0.23 / 0.30 / 0.33 at 20 / 34
-/ 50 kW (Sung et al., NIST TN 2162r1, via the FDS Validation Guide), from one
-setting, on `cases/nistBurner37cm.jsonc`. It is not met, and the reason is not
-the radiation model. It is that **the case never reaches a state in which a
-radiative fraction is a meaningful quantity**, and §62.12's own gate text
-named that precondition before any of this ran: *"the gate case has to be
-refined until the combustion efficiency is above ~95 % before the comparison
-means anything"*.
-
-What happened instead, measured at every step:
-
-| configuration | outcome |
-|---|---|
-| P1 + WSGG, `openBoundary zeroGradient` (the default) | **NaN within the first hundred steps**, at 20 kW and at 34 kW |
-| fvDOM + WSGG, `zeroGradient` | **NaN at step 857** |
-| **either model + WSGG, `openBoundary coldSurroundings`** (§63) | **runs** - the null space is closed and the window stops being a numerical problem |
-| P1 + WSGG + `coldSurroundings` + soot, 24 s | **NaN at step 1341** - and the cause is §61.2's own limitation, below |
-| P1 + WSGG + `coldSurroundings`, soot OFF, 24 s | **runs clean, 4 800 steps** - and reports a **combustion efficiency of 226 %** |
-| gray P1 + `coldSurroundings`, 24 s | runs clean; combustion efficiency **74.7 %**, radiated fraction **35.5 %** |
-
-**The 226 % is the gate's failure, stated plainly.** A domain heat release of
-45 kW from a 20 kW fuel supply means the domain is consuming an accumulated
-fuel inventory rather than burning what enters, so the "radiated fraction of
-heat release" this case prints is not `chi_r` and cannot be compared with
-0.23. Radiated power over FUEL SUPPLY - which is what `chi_r` means - would be
-85 %, which is not a physical answer either. The same case under gray
-radiation settles at 74.7 % efficiency, so it is the composition-dependent
-absorption that drives the fire past its own supply: WSGG cools the plume,
-the plume slows, residence time rises, and more of the fuel burns inside the
-domain than enters it per second.
-
-**It is not the pressure solver.** A control run with three pressure
-correctors and the pressure solved to `relTol 0` / `1e-10` (final `|p|`
-residual `1.9e-5` against `0.74`) reproduces **226.0 %** against the loose
-run's 226.5 %, so mass conservation is not manufacturing the fuel. The case is
-simply not at quasi-steady state at 24 s: the domain accumulated fuel during
-start-up and is still burning it off, and the gray leg - which reaches 74.7 %
-on the same mesh in the same time - shows what settled looks like. The next
-measurement is a longer run or a smaller domain, and it is named here rather
-than guessed at.
-
-**The second failure is §61.2's, and it was predicted there.** With soot on,
-`prescribedYield` has no oxidation and no wall deposition, so `Y_s`
-accumulates without bound in the near-burner stagnation cells: the run reports
-`max Y_s = 0.041` at 6 s and rising, against `0.00065` for the same case under
-gray radiation. Since `kappa_soot = rho Y_s x 1232`, a runaway `Y_s` is a
-runaway absorption coefficient, and the feedback is real rather than
-numerical. §61.2 says soot's mass and enthalpy are not taken out of the gas
-and names that as the documented next step; this is what it costs.
-
-**What IS established, and it is not nothing.** Gates 1, 2 and 3 all pass,
-live, in `ofgpu-validate`: the coefficient set's own invariants, the gray
-limit bitwise on both models, and the P1-vs-fvDOM disagreement on a banded
-medium reduced to `+5.6 %`. The band structure runs end to end on a real fire
-(`cases/burnerPlume.jsonc`, both models, with and without soot, with and
-without the `chi_r` floor) and its cost is measured. §63 closes the null space
-the window found. What is NOT established is the one thing this gate exists
-for: **that the predicted radiative fraction tracks a measured one.** No
-number in this document should be read as saying it does.
-
----
-
-## 63. The open radiative boundary — cold black surroundings
-
-§36.4 ends with a *DESIGN* choice and a promise:
-
-> **Every other boundary** keeps §28's own convention: the default triple
-> (`ZeroGradient`, from `GpuScalarField::zeros`) unless a face is named a
-> wall. *DESIGN, consistency over "more physical"* — an outlet BC that better
-> represented an open sky (Dirichlet zero for inflow ordinates, "cold black
-> surroundings") is straightforward to add later, but P1 and fvDOM must run
-> the SAME assumption on the SAME case for §36.7's comparison gates to be a
-> comparison of the angular method and nothing else.
-
-This section is that later, and §62 is why it could not stay deferred.
-`No GPL-licensed source was consulted.`
-
-### 63.1 What zero-gradient at an open boundary actually says
-
-A zero-gradient `G` (P1) or `I_m` (fvDOM) on a boundary face says the
-boundary value equals the adjacent cell's. For radiation leaving the domain
-that is the ordinary upwind outflow treatment and it is right. For radiation
-**entering** it says: whatever leaves comes straight back. **An open-sided
-fire domain with zero-gradient radiation boundaries is a perfectly reflecting
-enclosure.** That is not a small modelling detail — it is why a gray fire with
-`a = 0.5` radiates 3.1 % of its heat release with the `chi_r` floor off and
-15.0 % with it on (§62.13): with nowhere for the radiation to go, the floor
-was doing four fifths of the work.
-
-It is also a **singular** statement, and that is what §62 ran into. For P1 the
-band-0 equation with `kappa_0 = 0` is `div(Gamma_0 grad G_0) = 0` with
-zero-gradient everywhere but the floor: a pure-Neumann Laplace problem
-(§62.5). For fvDOM the same band's ordinate equation is
-`(s_m . grad) I_{0,m} = 0` — a pure advection with **no** sink, and an
-ordinate whose every inflow face is zero-gradient has no Dirichlet data at
-all, so its matrix rows sum to zero exactly as the pure-Neumann pressure
-system's do. **Both models have the same null space, and the transparent
-window is what exposes it**; the gray models never see it because
-`fvm_sp(a + sigma_s)` always puts something on the diagonal.
-
-§62.13 measures the consequence: P1 + WSGG and fvDOM + WSGG both go non-finite
-on `cases/nistBurner37cm.jsonc`, at settings that run to completion on the
-coarser `cases/burnerPlume.jsonc`, and refining the mesh makes it worse
-(P1's Laplacian diagonal scales as `Gamma h` against the sink's
-`kappa_min h^3`). §62.5's `kappa` floor does not cure it — it converts an
-exactly singular problem into a nearly singular one, which converges quietly
-to nonsense instead of failing loudly.
-
-### 63.2 The condition
-
-The surroundings are a **black body at `T_inf`**, and what enters is its
-emission. In this crate's §4 triple, on every boundary face that is neither a
-Marshak/diffuse wall nor `empty`/`symmetry`/`cyclic` — that is, on exactly the
-faces that get zero-gradient today:
-
-```
-P1     (S28):   fr = 1,  refValue = 4 sigma T_inf^4,               refGrad = 0     (63.1)
-fvDOM  (S36):   phi_m,bf >= 0  (leaving):   fr = 0, refGrad = 0    (unchanged)
-                phi_m,bf <  0  (entering):  fr = 1, refValue = sigma T_inf^4/pi    (63.2)
-```
-
-and, per band under §62,
-
-```
-refValue_j = a_j(T_inf, M_r|owner) * 4 sigma T_inf^4        (P1)
-I_inf,j    = a_j(T_inf, M_r|owner) * sigma T_inf^4/pi       (fvDOM)                (63.3)
-```
-
-`a_j` is evaluated at the **surroundings'** temperature with the **local
-medium's** molar ratio, which is the identical rule §62.7 states for a wall
-and for the identical reason: the band structure is a property of the
-participating medium, not of the surface. `sum_j refValue_j = 4 sigma T_inf^4`
-exactly, because `sum_j a_j = 1` exactly.
-
-**"Open" includes the INLET, and that is deliberate rather than an
-oversight.** The set is defined by what the face does today, not by what the
-case calls it: a fuel inlet is a `Generic` patch and gets the zero-gradient
-triple, so under this condition it gets the surroundings' blackbody instead.
-For a water-cooled burner plate near ambient that is very nearly right - a
-cold black plate and a cold black sky deliver the same `4 sigma T^4` - and it
-is closer to right than reflecting every photon back into the flame, which is
-what it did before. A case that wants the burner treated as a radiating
-SURFACE at its own temperature names it a wall and gets §28's Marshak triple;
-the two are not the same statement and the case chooses between them.
-
-**P1's condition is Dirichlet and not Marshak, and that is deliberate.** A
-Marshak triple describes a surface with an emissivity; the surroundings are
-not a surface, they are a half-space at `T_inf`, and the incident radiation
-they deliver is `4 sigma T_inf^4` whatever the medium does. Writing it as
-`fr = 1` also makes the band-0 system non-singular by construction rather than
-by floor, which is the whole point.
-
-**fvDOM's is a one-sided Dirichlet**, applied only to ordinates entering the
-domain — the outgoing ones keep §36.4's zero-gradient, which is the correct
-upwind outflow treatment and is what keeps the leaving intensity the medium's
-own.
-
-### 63.3 What a case says, what is refused, and the pair test
-
-```jsonc
-"physics": { "fire": { "radiation": {
-  "model": "fvDOM",
-  "openBoundary": "coldSurroundings",   // "zeroGradient" (default) | "coldSurroundings"
-  "ambientT": 293.15                    // K; coldSurroundings only
-} } } }
-```
-
-| the case says | what happens |
-|---|---|
-| `openBoundary` anything but the two names | error naming both, **and what each means**: `zeroGradient` is a perfectly reflecting open boundary, `coldSurroundings` a black body at `ambientT` |
-| `ambientT` with `openBoundary` not `coldSurroundings` | error - a number read and discarded |
-| `ambientT <= 0` or non-finite | error naming the entry |
-| nothing at all | `zeroGradient`, which is what §28 and §36 have always done, **bitwise** |
-
-| pair | what it proves |
-|---|---|
-| `openBoundary` absent vs `"zeroGradient"` | IDENTICAL - the default is the old behaviour, and §36.7's comparison gates are untouched |
-| `zeroGradient` vs `coldSurroundings` | different, on both models |
-| `ambientT: 293.15` vs `600` | the temperature reaches the boundary value |
-
-### 63.4 What must hold, and what was measured
-
-| Test | Expected | Measured |
-|---|---|---|
-| the default | every field bitwise identical to the same case built without this section, on BOTH models | **0 ulp** on `G` over multi-call runs, P1 and fvDOM |
-| radiative equilibrium survives | an isothermal enclosure of walls at `T_w` still reaches `G = 4 sigma T_w^4` - the condition changes nothing where there are no open faces | `< 1e-8` relative, with `coldSurroundings` selected and no open face for it to touch |
-| a hot medium in cold surroundings radiates MORE than the same medium in a reflecting box | strictly, on both models | with the walls at the GAS temperature so the open faces are the only exit: the reflecting box radiates `~0` (to `1e-6` of the other) and the cold-surroundings case radiates a large positive power. Both models |
-| the transparent window becomes solvable | band 0 (`kappa_0 = 0` exactly, no soot) has a FINITE, bounded `G_0` | holds - `G_0` finite everywhere and between the surroundings' and the walls' blackbody levels, where under zero-gradient its ordinate systems have no Dirichlet inflow at all |
-| the three pair tests and three refusals of §63.3 | as stated | pass |
-
-### 63.5 What it did to a fire, and what it did not fix
-
-**It is what made §62.12's Gate 4 case run at all.** With `zeroGradient`,
-`cases/nistBurner37cm.jsonc` goes non-finite within the first hundred steps
-under P1 + WSGG and at step 857 under fvDOM + WSGG. With
-`coldSurroundings` at 293.15 K the same case runs; with soot ALSO off it runs
-4 800 steps (24 s) clean. **§63 closes the null space and §62's window stops
-being a numerical problem.**
-
-**It is not a small correction to the physics either.** A fire that cannot
-radiate anywhere is a fire whose radiative fraction is whatever the `chi_r`
-floor says: gray P1 with `a = 0.5` radiates 3.1 % of its heat release with the
-floor off against 15.0 % with it on (§62.13). Turning the reflecting box into
-an open sky, on `cases/burnerPlume.jsonc`, same 1200 steps, ONE token
-changed:
-
-| configuration | `zeroGradient` | `coldSurroundings` at 293.15 K | wall time |
-|---|---|---|---|
-| P1, gray | 14.972 % | **33.889 %** | 20.0 -> 20.3 s |
-| fvDOM S4, gray | 13.789 % | **25.067 %** | 135.2 -> 120.9 s |
-| P1 + WSGG + soot, window dropped | 45.761 % | **56.998 %** | **82.8 -> 36.6 s** |
-| fvDOM S4 + WSGG + soot, `updateInterval 4` | 42.248 % | **45.747 %** | 138.8 -> 153.4 s |
-
-(combustion efficiency is unmoved on the gray legs - 35.498 -> 35.511 % and
-35.303 -> 35.526 % - so those two rows are the radiation model alone.)
-
-**Read the third row's wall time twice.** Banded P1 gets **2.3x FASTER** under
-cold surroundings, and that is the same fact as everything above: a Dirichlet
-on the open faces turns four nearly singular Helmholtz systems into four
-ordinary ones, and PBiCGStab stops grinding on a null space. The condition
-that fixes the physics also fixes the conditioning.
-
-**And it did not fix everything, which is the part worth saying out loud.**
-With `coldSurroundings` and soot ON, the 20 kW leg still goes non-finite - at
-step 1341 rather than step 90 - and the diagnosis is §61.2's own stated
-limitation rather than §62's or §63's: `prescribedYield` has no oxidation and
-no wall deposition, so in the near-burner stagnation cells `Y_s` accumulates
-without bound. The run reports it: **`max Y_s = 0.041` at 6 s and rising**,
-against `0.00065` for the same case under gray radiation. `kappa_soot` is
-`rho Y_s x 1232`, so a runaway `Y_s` is a runaway absorption coefficient, and
-the feedback (more soot -> more emission -> a bigger, better-mixed fire ->
-more soot) is real rather than numerical. §62.13's Gate 4 verdict says what
-follows from that.
-
----
-
-## 64. The banded slab, solved exactly — what P1 does to each band, and where the transparent window really sits
-
-§62 couples `N_g` P1 solves through the shared §26 `EnergySources`
-registration, and §62.12 gates it four ways: Gate 1 checks the coefficient
-set with no mesh, Gate 1-E checks its emissivity against RADCAL, Gate 2 checks
-that one band reproduces §28 **bitwise**, and Gate 3 compares banded P1
-against banded fvDOM. Not one of those measures the banded P1 **answer**
-against arithmetic. Gate 2 is an identity — it would pass just as happily if
-every band were wrong in the same way. Gate 3 is one model against another,
-and §36.7 already records that the two disagree by design.
-
-§36.7 does have references made of arithmetic — an optically thin slab and an
-optically thick one, both solved exactly — and this section carries them over
-to a **banded** medium, one band at a time. `No GPL-licensed source was
-consulted.`
-
-It exists because §62.5's account of the transparent window was a derivation
-with no number behind it, and the number turns out to point the other way.
-
-### 64.1 The reference, derived
-
-A plane slab of thickness `L`, filled with a non-scattering, **isothermal**
-medium at `T_m` of uniform composition, between two **black** walls at `T_A`
-(`y = 0`) and `T_B` (`y = L`). Per band `j` the RTE is linear and the bands do
-not talk to each other, so each is the ordinary gray slab with the band's own
-`kappa_j` and its own emissive powers. The walls are lettered rather than
-numbered so that nothing collides with the `E_2` of (64.2). Write
-
-```
-E_m,j = 4 a_j(T_m) sigma T_m^4        the medium's band emissive power, W/m2
-E_A,j = 4 a_j(T_A) sigma T_A^4        wall A's, at the WALL temperature      (64.1)
-E_B,j = 4 a_j(T_B) sigma T_B^4        wall B's
-```
-
-— and `a_j` at a wall is evaluated at that wall's temperature with the
-**gas**'s molar ratio, which is (62.14)'s own rule and not a new one.
-
-Along a ray of direction cosine `mu` in `(0, 1]` from wall A, the exact
-solution of `mu dI/dy = -kappa_j I + kappa_j E_m,j/(4 pi)` is
-
-```
-I_j(y, mu) = (E_A,j/4pi) exp(-kappa_j y/mu) + (E_m,j/4pi) (1 - exp(-kappa_j y/mu))
-```
-
-and the incident radiation is the full-sphere integral of it and of its mirror
-from wall B. With
-
-```
-E_2(x) = integral_0^1 exp(-x/mu) dmu                                          (64.2)
-```
-
-the second exponential integral, `integral_{2pi} I dOmega = 2 pi integral_0^1 I dmu`
-gives, at the midplane `y = L/2` where both paths are `tau_j = kappa_j L/2`,
-
-```
-G_j(L/2) = E_w,j E_2(tau_j) + E_m,j (1 - E_2(tau_j)) ,   E_w,j = (E_A,j + E_B,j)/2   (64.3)
-
-G(L/2)   = sum_{j=0..N_g} G_j(L/2)                                            (64.4)
-```
-
-Two limits are in the formula rather than in a comment, and they are the whole
-reason it can be trusted without a table:
-
-* `tau_j -> 0`: `E_2(0) = 1` and `G_j -> E_w,j`. A transparent band shows the
-  midplane **nothing but the walls**, and shows it their mean.
-* `tau_j -> infinity`: `E_2 -> 0` and `G_j -> E_m,j`. An opaque band hides the
-  walls completely.
-
-Setting `N_g = 1`, `a_1 = 1`, `E_A = E_B = 0` recovers §36.7's own thin-slab
-reference `4 sigma T_m^4 (1 - E_2(tau))` unchanged, which is what makes this a
-generalisation of that gate rather than a different one. `E_2` is evaluated by
-composite Simpson on `mu` rather than by a series, so no asymptotic constant
-is trusted from memory; `radiation::e2` is the one implementation and
-`fvdom`'s §36.7 gate now calls it instead of carrying a second copy.
-
-**The window's exact value, written out**, because it is the number §62.5
-could not put a figure on. With no soot `kappa_0 = 0` **exactly**, so
-
-```
-G_0(L/2) = E_w,0 = 2 sigma ( a_0(T_A) T_A^4 + a_0(T_B) T_B^4 )                (64.5)
-```
-
-with **no dependence on the medium at all**. The window is a pure wall-to-wall
-transmission, it is closed-form, and `windowTreatment dropped` replaces it
-with zero.
-
-### 64.2 What P1 can and cannot be right about, band by band
-
-P1 closes the RTE by assuming the intensity is `I = (G + 3 q.s)/(4 pi)` — a
-field that is isotropic plus a linear-in-direction correction. Both ends of
-(64.3) satisfy that assumption, and for different reasons:
-
-* **`tau_j -> infinity`.** Local radiative equilibrium: `I -> E_m,j/(4 pi)`,
-  isotropic, and the flux is the diffusion result §36.7 already gates. P1 is
-  the diffusion approximation, so this is the limit it was derived for.
-* **`tau_j -> 0` between black walls.** The exact field at the midplane is the
-  superposition of two half-ranges of *isotropic* wall emission, so it is
-  isotropic whenever the two walls emit alike, and its half-range flux is
-  exact whatever they do — which is precisely what §36.4's Marshak condition
-  is constructed to reproduce. So P1 gets `G_0` right at `tau = 0` **for this
-  geometry**, and the reason is a property of the slab and not of P1.
-* **In between**, neither holds, and nothing says the error is small.
-
-That is the prediction §64.6 measures, and it is the opposite of what §62.5
-assumed when it called the floored window "P1's diffusion approximation
-applied to a nearly transparent band, which is where P1 is least defensible".
-
-### 64.3 The optically thick end, and why one number cannot describe a spectral medium
-
-§36.7's other reference is the diffusion limit, and it carries over by the
-same substitution §62.5 makes in the operators — `T^4` becomes `a_j(T) T^4`:
-
-```
-q_r,j = -(4 sigma / (3 kappa_j)) d( a_j(T) T^4 )/dy                           (64.6)
-```
-
-This is what P1's own equation **reduces to** where `kappa_j L >> 1`, so a
-band that fails it is a defect in the operators rather than in the physics.
-The point of running it per band is the other half: `Gamma_j = 1/(3 kappa_j)`
-is **largest exactly where (64.6) is least valid**, so the band contributing
-least to the medium's opacity contributes most to the modelled flux. A gray
-medium has one optical thickness and this is a single number; a WSGG medium
-spans `tau = 0` to `tau = 29` at one composition (§64.5's table), and the gate
-is that the weakest band must be measurably **further** from (64.6) than the
-strongest — otherwise the band structure is not doing anything.
-
-### 64.4 What the `kappa` floor does to the answer, in closed form
-
-§62.5 floors `kappa` at `kappaMin` on the solved bands, and under
-`windowTreatment floored` band 0 is one of them. What that does is not a
-matter of opinion. Integrate the band-0 P1 equation over the slab. With
-`h = eps_w/(2(2 - eps_w))` the Marshak conductance and `kappa_min L` small,
-the two walls deliver `2 h (E_w,0 - G_0)` per unit area and the volumetric
-sink removes `kappa_min L (G_0 - E_m,0)`, so
-
-```
-G_0 = (2h E_w,0 + kappa_min L E_m,0) / (2h + kappa_min L)
-
-(G_0 - E_w,0)/E_w,0 = [kappa_min L / (2h + kappa_min L)] (E_m,0/E_w,0 - 1)    (64.7)
-```
-
-**The floor contaminates a band that physically carries no gas emission with
-the gas's own emission**, in proportion to `kappa_min L` and to the
-medium-to-wall emissive contrast. Three things follow and all three are
-measured in §64.6:
-
-1. it is **small when the walls dominate** and **large when the medium is much
-   hotter than the walls** — and a fire is the second case;
-2. it is **controllable**: the error is linear in `kappaMin`, so it can be
-   made as small as one likes — at the cost of `Gamma_0 = 1/(3 kappaMin)`,
-   which is what §62.13 measured going NaN on a fire mesh. The floor is a
-   monotone trade of accuracy against conditioning and neither end is free;
-3. it is **exact enough to assert**, which is why §64.5's gate checks the
-   formula rather than a magnitude. A floor applied to the wrong bands, or
-   before the conductances instead of after, breaks (64.7) immediately.
-
-**And what P1 cannot report for the window under either treatment.** The
-radiative flux in P1 is `q_r,j = -Gamma_j grad G_j`. Under `dropped` there is
-no band-0 equation and so no flux at all. On an *unfloored* window the
-expression is `(1/(3 x 0)) x 0` — an indeterminate form, not a large number.
-Under `floored` it is finite, but it is `1/(3 kappa_min)` multiplying a
-gradient that vanishes with `kappa_min`: a quantity whose limit is that same
-indeterminate form and whose value is set by the floor rather than by the
-physics. So the wall heat flux — the very quantity §62.5 says the window
-carries — has no trustworthy per-band P1 value, and that is a statement about
-the closure rather than about the discretisation. It is why §64.6 measures
-`G`, which is what enters the Marshak wall condition, and says so plainly
-rather than quoting a flux the model does not have. §64.8 names what would
-close it.
-
-### 64.5 What must hold
-
-| Check | Expected |
-|---|---|
-| `E_2(0) = 1`, `E_2` decreasing, `E_2(60) < 1e-25` | exactly / by inspection |
-| `integral_0^inf E_2 dx = integral_0^1 mu dmu = 1/2` | to the quadrature's own precision |
-| (64.3) at `tau = 0` and `tau -> inf` | `E_w` and `E_m` exactly |
-| (64.5): the exact window `G_0` equals the walls' mean band emissive power | to round-off, with `a_0` at the WALL temperatures |
-| the optically **thick** band against (64.3) | within 1 % — and §64.6 says why this row is weaker than it reads |
-| the optically **thick** band against §36.7's diffusion flux (64.6), banded | within 5 % — this is the thick row with content |
-| the distance from (64.6), band by band | must fall MONOTONICALLY with `tau` — a spectral medium has no single optical thickness |
-| (64.7): the floored window's error | the closed form, to 5 % of itself |
-| the worst band P1 **solves** against the error of the **window** | the solved band must be worse — §64.2 |
-| `floored` against `dropped` on the total `G` | `floored` closer, in every leg |
-| every wall weight `a_j(T_w)` against the closed form at `T_w` | to round-off, band by band |
-
-That last row is not decoration. §62.7's own one-line assertion is
-`sum_j refValue_j = 4 sigma T_w^4`, and `sum_j a_j(T) = 1` holds at **every**
-temperature — so the existing test would have passed unchanged if every wall
-weight had been evaluated at the near-wall **gas** temperature instead of the
-wall's, which is exactly the silent energy error (62.14) exists to prevent.
-It is now checked band by band against the closed form, with the wall and gas
-temperatures held far enough apart that the wrong one could not pass.
-
-**No case setting is added by this section**, so no §13.4.1 pair test is owed:
-every entry the gate touches — `spectralModel`, `windowTreatment`, `kappaMin`
-— is §62.11's, with its refusals and its pair rows already in place. What
-(64.7) does add is a sharper claim for one of them: §62.11's `kappaMin`
-pair row says only that "the floor reaches `Gamma`", and (64.7) now predicts
-by how much the floor moves the answer, which is the difference between a
-setting that demonstrably does something and a setting whose effect is
-understood.
-
-### 64.6 What was measured
-
-`cargo test --release` and `ofgpu-validate`, RTX 5070 Ti, **live in both** —
-nine `ofgpu-validate` rows and four new `radiation::tests`, plus the
-strengthening of §62.7's existing wall-weight test that §64.5's last row
-describes. One slab: `L = 4 m`, 40 cells across it (80 in all), `Y_P = 0.20` (`p_a = 0.199 atm`, `M_r = 4/3`,
-propane-air products), no soot, black walls (`eps_w = 1`), `chiR = 0` so §27's
-radiant-fraction floor cannot replace the emission the reference is written
-for. The five bands of §62 span the entire optical range **in one medium**:
-
-| band | `kappa_j`, 1/m | `tau_j = kappa_j L/2` |
-|---|---|---|
-| 0 (window) | **0 exactly** | **0** |
-| 1 | 1.32904e-2 | 0.0266 |
-| 2 | 1.45177e-1 | 0.290 |
-| 3 | 1.15055e0 | 2.301 |
-| 4 | 1.44496e1 | **28.90** |
-
-**Three legs, and the leg is the experiment.** The medium and the walls are
-put on opposite sides of each other, because (64.3)'s two limits pull in
-opposite directions and a single leg could satisfy either by accident.
-
-| | leg A: gas 900 K, walls 1800/1800 | leg B: gas 1800 K, walls 600/600 | leg C: gas 1200 K, walls 600/1800 |
-|---|---|---|---|
-| window's share of the exact `G(L/2)` | **22.74 %** | 0.18 % | **18.59 %** |
-| band 0, `floored` vs exact | **−0.039 %** | **+10.137 %** | −0.028 % |
-| band 1 (`tau` 0.027), vs exact | +6.042 % | **−48.255 %** | +4.439 % |
-| band 2 (`tau` 0.290), vs exact | **+17.894 %** | −18.477 % | +8.759 % |
-| band 3 (`tau` 2.301), vs exact | −5.115 % | +0.805 % | −0.238 % |
-| band 4 (`tau` 28.90), vs exact | −3.6e-12 % | +8.7e-13 % | −1.3e-13 % |
-| total `G`, `dropped` | −15.925 % | −14.207 % | −14.541 % |
-| total `G`, `floored` | **+6.805 %** | −14.014 % | **+4.041 %** |
-| (64.7) predicted / measured floor error | 1.000149 | 1.000150 | 0.974558 |
-
-**Finding 1 — the transparent window is not where P1's spectral error
-lives.** In every leg the floored window is closer to the exact answer than
-the worst band P1 actually **solves** — by a factor of **463** in leg A
-(0.0387 % against 17.894 %), **309** in leg C, and **4.8** in leg B. §64.2
-derives why: at `tau = 0` between black walls the exact intensity field is
-isotropic, which is P1's own closure assumption, so the band P1 supposedly
-cannot handle is the one whose exact solution its closure happens to
-represent. §62.5 reads the floored window as "P1's diffusion approximation
-applied to a nearly transparent band, which is where P1 is least defensible".
-The general half of that is right and §36 is built on it — P1 **is** worst in
-the optically thin limit. What the slab shows is that the transparent **end**
-of the spectrum is not where that bites; the bands just inside it are, and
-Finding 2 is that measurement. §62.5's table now carries a pointer to this
-section rather than the unqualified sentence.
-
-**Finding 2 — where the error does live: the middle of the spectrum, and it
-reaches 48 %.** P1's per-band error is **not monotone in `tau`** and it is
-small at both ends. It peaks at `tau` of order `0.03` to `0.3` — the bands
-that are optically thin but not empty, which no limit rescues. In the
-fire-relevant leg B (hot gas, cold walls, radiation escaping) band 1 is
-**−48.3 %** and band 2 is **−18.5 %**, while the window is +10.1 % and the
-opaque band sits `4.9e-4` from the diffusion limit (Finding 5). **That is a
-stronger statement of
-§62.5's own recommendation than §62.5 makes**: WSGG belongs with fvDOM not
-because of the window, but because half the bands of a WSGG medium are in the
-regime P1 is worst at, and a spectral model is precisely a device for putting
-them there.
-
-**Finding 3 — (64.7) is confirmed, on legs spanning three orders of
-magnitude of it.** The floored window's error is `−3.865e-4`, `+1.0137e-1` and
-`−2.833e-4` in the three legs; the closed form predicts `−3.865e-4`,
-`+1.0136e-1` and `−2.907e-4`. Ratios `1.000149`, `1.000150`, `0.974558` — the
-symmetric legs to 1.5e-4, the asymmetric one to 2.5 %, which is the
-leading-order truncation of (64.7) showing up where the band carries a
-gradient. **So "clamp `kappa_0` to a small number" now has a number attached:
-it admits `kappa_min L (E_m/E_w - 1)/(2h)` of the medium's own emission into a
-band that has none**, which is `−0.04 %` when the walls are hotter and
-`+10.1 %` when the gas is three times hotter than the walls.
-
-**Finding 4 — `floored` beats `dropped` on `G`, in all three legs, and that
-does not settle it.** `dropped` throws away 0.18 % to 22.7 % of the midplane
-incident radiation and puts zero in its place; its total error is `−15.9 %`,
-`−14.2 %`, `−14.5 %` against `floored`'s `+6.8 %`, `−14.0 %`, `+4.0 %`. On
-this evidence alone `floored` is the better treatment. **§62.13's fire
-measurement is the counterweight and it is not close**: on
-`cases/nistBurner37cm.jsonc`, 94 % of `(cell, band)` pairs sit at `kappa_min`
-and the run goes NaN. A 4 m slab with a Robin condition on both sides is the
-best case for `floored` and an open-domain fire is the worst, and this
-document now has both. Neither `windowTreatment` is a default and §62.5 is
-right to refuse to pick one.
-
-**Finding 5 — the band structure itself is wired correctly, and this is the
-first gate that could have said otherwise.** (64.5)'s identity holds to
-**`0` exactly** with the wall weights read at the wall temperatures, and the
-opaque band reproduces (64.3) to `3.6e-14` relative in all three legs.
-
-**That last figure is worth less than it looks, and the gate says so.** At
-`tau = 28.9` the exact solution *is* `E_m,4` to within `E_2(28.9) < 1e-15`,
-and the isothermal P1 solution is `E_m,4` too, because the wall's influence
-decays as `exp(-sqrt(3) kappa_4 y)` and the midplane is 50 e-foldings away.
-Two answers that both collapse to the same constant agree for free. **The
-thick check with content is the gradient one**, (64.6), which needs a
-temperature gradient to have a flux at all: on a linear leg from 700 K to
-1900 K the distance from §36.7's banded diffusion flux falls monotonically
-
-| `tau_j` | 0.027 | 0.290 | 2.301 | 28.90 |
-|---|---|---|---|---|
-| relative distance from (64.6) | **0.9485** | 0.6140 | 0.0458 | **4.898e-4** |
-
-which is both halves of the statement at once: the strongest band **is** in
-the diffusion limit (`4.9e-4`), and a WSGG medium has **no single optical
-thickness**, reduced to four numbers. `Gamma_j = 1/(3 kappa_j)` is largest
-exactly where (64.6) is least valid, which is §64.3's point measured rather
-than argued.
-
-### 64.7 The error this gate found in itself
-
-The first run of the gate compared `a_j(T_w)` taken from boundary face **0**
-of the slab mesh. Boundary face 0 is an `xMin` face — zero-gradient, not a
-wall — so it carries the **medium's** temperature, and every "exact" value in
-the first table was built with `a_j(T_m)` where (64.1) calls for `a_j(T_w)`.
-The window's exact value came out **1.873 times too small** (1.9887e5 against
-3.7248e5 in leg A), band 1's 1.47 times, and the exact total 25.5 % low —
-enough to make `floored` look 43 % high where it is 6.8 % high.
-
-Both the unit gate and the `ofgpu-validate` one now find their wall faces **by
-kind**, with a comment saying why, so the same index cannot be reached back
-for.
-
-It is worth recording for two reasons. It is **the identical mistake (62.14)
-warns about**, committed in the checker rather than in the model — the wall
-weights on the device were right all along. And it is the mistake §62.7's
-existing `sum_j refValue_j = 4 sigma T_w^4` assertion **cannot catch**, since
-`sum_j a_j = 1` at every temperature; §64.5's last row is that gap closed, and
-it was found by writing a reference that needed the individual weights rather
-than their sum.
-
-### 64.8 What is not measured here, and why
-
-* **fvDOM.** (64.3) is a reference for any RTE solver and §36.7 already runs
-  the gray form of it on fvDOM. Applying it band by band there is the obvious
-  next measurement and it is not in this section. **§65 takes it** - and it
-  found something this section could not have: fvDOM's angular error is
-  available in CLOSED FORM ((65.6)), so the measured per-band error splits into
-  an angular half that needs no run and a spatial residue that does. §65.6 also
-  overturns half of what this section's recommendation implied, by measuring
-  banded P1 BEATING fvDOM on the optically thick bands.
-* **A per-band wall flux.** §64.4 derives why P1 has none for a transparent
-  band (`q = -Gamma grad G` is `0 x infinity` there), so the quantity §62.5
-  says the window carries — wall heat flux — is measured here only through
-  `G`, which is what enters the Marshak wall condition. An enclosure gate that
-  compares total wall flux against a view-factor result (§49/§50 already has
-  the machinery) would close it.
-* **Scattering.** §28's P1 carries none, so (64.3)'s non-scattering
-  assumption costs this gate nothing. fvDOM's does, and a banded version of
-  this gate there would have to say so.
-* **A third `windowTreatment`.** §62.13 names two ways to remove the null
-  space properly — the §63 Dirichlet, which is now in, and a deflated or
-  fixed-reference PCG on the band equations, which is §8.5's machinery pointed
-  at a third instance of the same null space. (64.7) says what the floor costs
-  and §62.13 says what it costs in conditioning; neither argues that a third
-  option is unnecessary.
-
-## 65. Band coupling to fvDOM, and what the spectral model costs
-
-§62 built one band structure for two solvers and §64 measured what banded P1
-does to each band of it. This section does the other half. It carries §64's
-exact slab (64.3) over to the discrete ordinates band by band, and then it
-runs the four combinations of {P1, fvDOM} x {gray, WSGG} on
-`cases/burnerPlume.jsonc` and reports **measured** wall time, **measured**
-device memory and radiated fraction for each - because §62.10 stated that cost
-as arithmetic on a design, and arithmetic on a design is not a measurement of a
-program.
-
-**W. A. Fiveland, *Discrete-ordinates solutions of the radiative transport
-equation for rectangular enclosures*, J. Heat Transfer 106 (1984) 699**, DOI
-`10.1115/1.3246741`, and **J. S. Truelove, *Discrete-ordinate solutions of the
-radiation transport equation*, J. Heat Transfer 109 (1987) 1048**, DOI
-`10.1115/1.3248182` - the S_N sets and the two conditions §36.2 builds them
-from, which (65.7) and (65.8) below turn out to be the same two statements this
-section needs. **M. F. Modest, *Radiative Heat Transfer*, 3rd ed., ch. 16-17**
-- the discrete-ordinates method and its ray effects. **W. Grosshandler,
-*RADCAL*, NIST TN 1402 (1993)**, US public domain, is §62.12's Gate 1-E and is
-not re-used here. Everything below - the closed-form angular error, the
-cost model and its measurement - is derived or measured in this repository.
-
-`reference/fds/Source/radi.f90` (NIST, public domain) carries the same band
-loop over the same kind of angular set, and §65.4 quotes its **defaults** as
-corroboration of the cost trade rather than as source: no line of it was
-translated for this section.
-
-### 65.1 The band loop on fvDOM, and one property model for two solvers
-
-Per band `j` and ordinate `m`, §36's assembly with the band's own coefficient
-and weight - (62.3) written as the three operator calls the code makes:
-
-```
-fvm_div_gauss(phi_m, w_m, I_{j,m}, +1)     phi_m, w_m BAND-INDEPENDENT
-fvm_sp(kappa_j + sigma_s, +1)
-fvm_su(volSrc_j, +1)                       volSrc_j = a_j(T) kappa_j sigma T^4/pi
-                                                      + (sigma_s/4pi) G_j        (65.1)
-G_j = sum_m w_m I_{j,m} ,     G = sum_j G_j                                       (65.2)
-```
-
-`phi_m,f = s_m . Sf` and its upwind weights are built once at construction and
-never rebuilt, so **assembly** cost grows sub-linearly in `N_g` while the
-**solve** cost grows exactly linearly. The band loop is on the HOST in index
-order and the band sum is a sequence of `add_field` launches, so there is no
-atomic and no order-dependent reduction anywhere in it - §62.9(1), unchanged.
-
-The window needs no treatment on this solver and the entry is refused by name:
-`kappa_0 = 0` makes (65.1) a pure advection matrix whose diagonal comes from
-the outgoing face fluxes, which is well conditioned, so there is no null space
-to close and `windowTreatment` would be a setting read and discarded (§62.5,
-§62.11). `kappaMin` is refused for the same reason.
-
-**One property model, two solvers.** `wsgg::Bands` is built identically by
-`Radiation` and by `FvDom`; §65.5's first row asserts that the `kappa_j` and
-all three `a_j` (cell, and both walls) the two models construct for the same
-medium are **bitwise equal**, band 0 excepted, which `windowTreatment floored`
-moves on purpose. Without that row every number in §65.6 would be a comparison
-of two property models as much as of two angular methods.
-
-### 65.2 What each model can be right about, band by band
-
-§64.2 derived where P1's closure holds - the two ends of the optical range,
-`tau -> 0` between black walls (the exact field is isotropic, which is P1's own
-closure) and `tau -> infinity` (local radiative equilibrium, which is what P1
-was derived from) - and §64.6 measured the consequence: banded P1's error peaks
-**in between**, at 48 % on the band a hot gas in cold surroundings radiates
-through.
-
-fvDOM's error has a completely different origin, and that is the point of
-running the same reference on it. It makes no closure assumption about the
-angular distribution at all; it replaces the integral over direction by a
-24-point quadrature. So:
-
-* where P1 is **worst** - intermediate `tau`, where the intensity is neither
-  isotropic nor diffusive - fvDOM has nothing to be wrong about except the
-  quadrature, and §65.6 measures the gap;
-* where P1 is **best** - `tau` well above 1 - fvDOM's remaining error is not
-  angular at all. It is first-order upwind on `I` over cells of optical
-  thickness `kappa_j dy`, and §65.6 measures P1 **winning** there.
-
-That two-sidedness is the honest statement of §62.5's "WSGG belongs with
-fvDOM", and §65.5 requires both halves of it rather than the half that flatters
-the recommendation.
-
-### 65.3 The angular error in closed form, and which knob shrinks it
-
-Ordinate `m` crosses the slab of §64.1 at direction cosine
-`mu_m = |s_m . n|`, and along that one ray (65.1) is the ordinary linear
-first-order equation §64.1 already solves. At the midplane, where both paths
-are `tau_j = kappa_j L/2`,
-
-```
-I_{j,m}(L/2) = (E_w,j/4pi) exp(-tau_j/mu_m) + (E_m,j/4pi) (1 - exp(-tau_j/mu_m))  (65.3)
-```
-
-with `E_m,j`, `E_w,j` exactly (64.1)'s. Substituting (65.3) into the quadrature
-sum (65.2) gives (64.3) back with **one** substitution — the integral over `mu`
-replaced by the sum over ordinates:
-
-```
-E_2^S4(tau) = (1/4pi) sum_m w_m exp(-tau/|s_m . n|)                              (65.5)
-
-G_j^S4(L/2) = E_w,j E_2^S4(tau_j) + E_m,j (1 - E_2^S4(tau_j))                    (65.6)
-```
-
-so the measured error of a run **splits**, with no fitting and no free
-parameter:
-
-```
-G_j^fvDOM - G_j     =    (G_j^S4 - G_j)      +   (G_j^fvDOM - G_j^S4)            (65.4)
-  what a run reports    the ANGULAR half,          the SPATIAL residue
-                        closed form, no run        what the mesh costs
-```
-
-**The first term needs no run and the second needs no model.** That is the
-whole reason for carrying (64.3) to this solver rather than stopping at §64:
-P1 has no such split, because its closure is not a quadrature and there is
-nothing to evaluate it on.
-
-For the level-symmetric S4 set of §36.2, whose `y`-cosines are `a` on sixteen
-ordinates and `b` on eight with uniform weight `pi/6`, (65.5) is
-
-```
-E_2^S4(tau) = (2/3) exp(-tau/a) + (1/3) exp(-tau/b) ,   a = (6-sqrt6)/12, b = (3+sqrt6)/6
-```
-
-and two of its properties are **exactly** §36.2's own two conditions on the
-set, wearing different clothes:
-
-```
-E_2^S4(0) = (1/4pi) sum_m w_m = 1              <-  sum_m w_m = 4 pi              (65.7)
-integral_0^inf E_2^S4 dtau = (1/4pi) sum_m w_m |mu_m| = 1/2
-                                               <-  sum_(mu>0) w_m mu_m = pi      (65.8)
-```
-
-Both are exact in real arithmetic and round-off in IEEE-754, and §65.9 records
-that this section first asserted the evaluation rather than the identity and
-was corrected by its own gate.
-
-Three consequences, and all three are measured rather than asserted:
-
-* **(65.7): a transparent band has NO angular error.** `E_2^S4(0) = 1` is the
-  same statement as `E_2(0) = 1`, so (65.6) and (64.3) agree exactly at
-  `tau = 0`. fvDOM solves the window; it does not approximate it. P1 cannot
-  solve it at all and (64.7) is the price of its floor.
-* **(65.8): the angular error encloses zero area, so it must change sign.**
-  The true `E_2` and its S4 quadrature have the *same* integral, which is the
-  half-range-flux condition that makes §36.4's wall reflection an exact
-  isothermal fixed point. Where the sign changes is not fixed by the identity,
-  and §65.6 goes and finds out.
-* **The two halves of the error answer to different knobs.** The angular half
-  shrinks with the ordinate count (S6, S8); the spatial residue shrinks with
-  the mesh. §65.5 requires that the optically thin band is angular-dominated
-  and the optically thick ones spatial-dominated, which is what tells a user
-  which of the two to spend on.
-
-### 65.4 What it costs: solves, storage, and the wall-time model
-
-The band count multiplies the **solve**, and on fvDOM the solve is multiplied
-again by the ordinate count:
-
-```
-solves per correct() = N_g x N_ord            120 for WSGG on S4               (65.9)
-wall time            ~ X + N_g N_ord R_asym   X = non-radiation work per run
-                                              R_asym = one asymmetric ordinate solve
-```
-
-**Storage, and what §62.10 counted.** §62.10 put fvDOM's banded intensity
-storage at `N_g N_ord n` doubles - 960 B/cell for five bands on S4 - and that
-is the count of one array per `(j, m)`. What the program actually allocates per
-`(j, m)` is a `GpuScalarField`, which carries **three** `[n_cells]` arrays
-(`f`, `f0`, `f00` - §3.3's BDF2 levels) and five `[n_bf]` ones:
-
-```
-per (j, m) :  3 n x 8 B  +  4 n_bf x 8 B  +  n_bf x 4 B
-per m      :  2 surface fields (phi_m, w_m) over the internal faces, BAND-INDEPENDENT
-                                                                                  (65.10)
-```
-
-so the interior part alone is `3 N_g N_ord n` doubles - **2880 B/cell**, three
-times §62.10's figure - and `f0`/`f00` are **never read by this module**: the
-RTE is solved steady on every call and `fvdom.rs` contains no `ddt` term and no
-`store_old_time`. §65.7 measures the whole footprint and §65.10 says what a
-memory-lean variant would recover and why this section does not take it.
-
-**Public-domain corroboration of the trade, not of the numbers.** FDS's own
-defaults (`read.f90`, US-government public domain) run the gray gas with
-`NUMBER_SPECTRAL_BANDS = 1` and `ANGLE_INCREMENT = 5` - only a fifth of the
-angles updated per call - and, going spectral, set
-`NUMBER_SPECTRAL_BANDS = 5` and **abandon that trick entirely**
-(`ANGLE_INCREMENT = 1`). A factor 25 in radiation work, from a reference
-implementation's own choice of defaults. This repository's answer to the same
-problem is `updateInterval` (§62.10, §62.11), whose measured value is in
-§62.13's table and whose price is 0.12 points of radiated fraction.
-
-### 65.5 What must hold
-
-| Check | Expected |
-|---|---|
-| `kappa_j` and all three `a_j` built by `FvDom` and by `Radiation` on the same medium | **BITWISE equal**, band 0 excepted (`floored` moves it on purpose) |
-| (65.7) `E_2^S4(0) = 1` | exact in real arithmetic; round-off in double |
-| (65.8) `integral_0^inf E_2^S4 dtau = 1/2` | the true `E_2`'s own value, to round-off |
-| (65.8) `E_2^S4 - E_2` changes sign | at least once — and §65.6 reports where, which the identity does not fix |
-| the transparent band `G_0` against (64.5) | to round-off. There is no angular error at `tau = 0` and no floor on this solver |
-| (65.6): the measured `G_j` against `E_2^S4` | the SPATIAL residue alone, bar 3 % |
-| the optically THIN band | **angular**-dominated: more ordinates would shrink it |
-| the two optically THICK bands | **spatial**-dominated: a finer mesh would shrink them |
-| within one leg, every band with a measurable angular error | the SAME sign — the errors accumulate in the band sum, they do not cancel |
-| fvDOM against banded P1 on every band with `tau <= 1` | fvDOM closer, in every leg |
-| fvDOM against banded P1 on the band P1 is WORST at | fvDOM closer, in every leg |
-| fvDOM's TOTAL `G` against (64.4) | closer than banded P1's, in every leg |
-| **banded P1 against fvDOM on an optically thick band** | **P1 closer, somewhere** — fvDOM is not uniformly better and the gate says so |
-| the four combinations on `cases/burnerPlume.jsonc` | wall time and device memory MEASURED, not counted, with the radiated fraction beside them |
-| the DEFAULT path after all of it | combustion efficiency `35.4976 %`, radiated fraction `14.9724 %`, peak `T` `816.92 K` — every digit |
-
-**No case setting is added by this section**, so no §13.4.1 pair test is owed:
-every entry it touches — `model`, `spectralModel`, `windowTreatment`,
-`updateInterval` — is §62.11's, with its refusals and its pair rows already in
-place. The one thing this section adds to a run's output is a device-memory
-line, which is a report and not a control: it changes no field, and §65.8 is
-the assertion that it changed none.
-
-### 65.6 What was measured — the banded slab on ordinates (Gate 6)
-
-`ofgpu-validate`, **live**, twelve rows, plus two `fvdom::tests` (one of them
-host-only, so it runs with no GPU present). The slab is §64's, unchanged and
-now shared as one `SlabRig` so the two gates cannot drift apart: `L = 4 m`, 80
-cells, `Y_P = 0.20` (`p_a = 0.199 atm`, `M_r = 4/3`), no soot, BLACK walls,
-`chiR = 0`, three legs. fvDOM runs S4 (24 ordinates) with all five bands and
-nothing treated; banded P1 runs with the window `floored` so that band 0 has a
-value to compare at all.
-
-**The quadrature's own two identities**, before anything is measured against
-them:
-
-| Check | Bar | Measured |
-|---|---|---|
-| (65.7) `E_2^S4(0) - 1` | round-off | **`3.331e-16`** |
-| (65.8) `integral E_2^S4 dtau - 1/2` | round-off | **`1.110e-16`** |
-| (65.8) sign changes of `E_2^S4 - E_2` on `tau in [1e-3, 60]` | at least one | **three**, at `tau = 0.381 / 1.983 / 19.42` |
-
-**Where those crossings are is the result, not that they exist.** S4
-over-estimates `E_2` below `tau = 0.381` and again above `tau = 19.4`, and
-under-estimates it in between. The five bands of this WSGG set at `L = 4 m` sit
-at `tau = 0, 0.0266, 0.290, 2.301, 28.9` — so **two of the three crossings fall
-in the gap between band 2 and band 3**, the bands sample only the positive
-lobes, and the per-band angular errors **accumulate in the band sum instead of
-cancelling**. That is why fvDOM's total `G` below is no better than its own
-worst band, and it is a property of this coefficient set at this path length
-rather than of S4.
-
-**Band by band, relative to the exact (64.3), at the midplane** (`%`):
-
-| leg | band | `tau` | **fvDOM** | banded P1 | fvDOM ANGULAR (65.6) | fvDOM SPATIAL |
-|---|---|---|---|---|---|---|
-| gas 900 K, walls 1800 K | 0 window | 0 | **`-1.3e-13`** | `-0.0387` | `-3.1e-14` | `-9.4e-14` |
-| | 1 | 0.0266 | `+4.235` | `+6.042` | `+4.392` | `-0.150` |
-| | 2 | 0.290 | **`+2.297`** | **`+17.894`** | `+2.548` | `-0.245` |
-| | 3 | 2.301 | `+2.724` | `-5.115` | `+0.806` | `+1.903` |
-| | 4 | 28.90 | `+4.8e-7` | `-3.6e-12` | `-1.6e-12` | `+4.8e-7` |
-| | **total `G`** | | **`+2.788`** | **`+6.805`** | | |
-| gas 1800 K, walls 600 K | 0 window | 0 | **`-9.3e-14`** | `+10.137` | `+8.5e-12` | `-8.5e-12` |
-| | 1 | 0.0266 | **`-33.825`** | **`-48.255`** | `-35.079` | `+1.931` |
-| | 2 | 0.290 | `-2.371` | `-18.477` | `-2.631` | `+0.266` |
-| | 3 | 2.301 | `-0.429` | `+0.805` | `-0.127` | `-0.302` |
-| | 4 | 28.90 | `-1.2e-7` | `+8.7e-13` | `+3.9e-13` | `-1.2e-7` |
-| | **total `G`** | | **`-5.704`** | **`-14.014`** | | |
-| gas 1200 K, walls 600/1800 K | 0 window | 0 | **`-1.7e-13`** | `-0.0283` | `-1.6e-14` | `-1.6e-13` |
-| | 1 | 0.0266 | `+3.210` | `+4.439` | `+3.153` | `+0.056` |
-| | 2 | 0.290 | `+2.093` | `+8.759` | `+1.112` | `+0.970` |
-| | 3 | 2.301 | **`+0.550`** | **`-0.238`** | `+0.079` | `+0.471` |
-| | 4 | 28.90 | `+7.3e-8` | `-1.3e-13` | `-4.4e-14` | `+7.3e-8` |
-| | **total `G`** | | **`+1.986`** | **`+4.041`** | | |
-
-Five readings, and the last two are the ones a recommendation has to survive.
-
-**(1) fvDOM solves the transparent window exactly.** `1.7e-15` worst over the
-three legs, which is (65.7) confirmed: `E_2^S4(0) = 1`, so there is no angular
-error at `tau = 0`, and a pure wall-to-wall transmission is carried by the
-upwind scheme without loss. Banded P1 cannot solve that band at all — it floors
-it, and pays `-0.039 %` when the walls are hot and **`+10.1 %`** when the gas
-is, which is (64.7) exactly.
-
-**(2) On the band P1 is worst at, fvDOM is better by up to 7.8x.** Leg A's
-`tau = 0.290` band: `+17.894 %` against `+2.297 %`. Leg C's, the same band:
-`+8.759 %` against `+2.093 %`, a factor 4.2. Leg B's `tau = 0.0266` band:
-`-48.255 %` against `-33.825 %`, only 1.43 — a hot gas radiating through a
-nearly transparent band into cold surroundings is hard for **both** methods,
-and saying so is more useful than quoting the best of the three.
-
-**(3) The error split works.** Over all fifteen `(leg, band)` pairs the spatial
-residue after (65.6) removes the closed-form angular half is at most
-**`1.931 %`**, and on twelve of the fifteen it is under `0.5 %`. So the number
-a run reports is, to that accuracy, a number that could have been written down
-without running anything — which is what makes "buy more ordinates" a
-quantified decision rather than a hope.
-
-**(4) The two halves answer to different knobs, and the crossover is inside the
-band set.** On the `tau = 0.0266` band the error is `4.39 %` angular against
-`0.15 %` spatial; on `tau = 2.301` it is `0.81 %` angular against `1.90 %`
-spatial. The crossover sits on the `tau = 0.290` band, where leg C measures
-`1.11 %` angular against `0.97 %` spatial. **A WSGG medium is therefore
-simultaneously angular-limited and mesh-limited**, in different bands of the
-same cell, which is a thing a gray model cannot express and a reason a spectral
-run should not be refined in only one direction.
-
-**(5) fvDOM is NOT uniformly better, and here is where it loses.** On leg C's
-`tau = 2.301` band banded P1 is `-0.238 %` from the exact slab and fvDOM is
-`+0.550 %` — P1 wins by 2.3x. (65.6) says why without ambiguity: fvDOM's error
-there is `0.079 %` angular and `0.471 %` **spatial**, so it is first-order
-upwind on `I` over cells of optical thickness `kappa_3 dy = 0.115`, while
-`tau > 1` is precisely the regime P1's diffusion closure was derived for. The
-same reversal appears on the `tau = 28.9` band in all three legs, at the
-`1e-7 %` level where neither number matters. **So §62.5's "WSGG belongs with
-fvDOM" is right for a stated reason and not universally**: it is right because
-a spectral model *manufactures* bands at intermediate `tau`, which is the one
-regime P1 has no claim on — not because fvDOM is a better solver band for band.
-
-### 65.7 The cost, measured — four combinations, four wall times, four memories
-
-`cases/burnerPlume.jsonc`, 32 768 cells, 1200 steps at `deltaT = 0.005 s`,
-`ofgpu-fire cases/burnerPlume.jsonc -endTime 6.0 -deltaT 0.005`, RTX 5070 Ti
-(16 302 MiB), **run back to back twice with nothing else on the card** — the
-GPU carries this machine's desktop, which held 1 265 MiB and 0 % utilisation
-throughout, and the memory column is a DIFFERENCE from that baseline so it is
-this run's own allocation and nothing else's. The four cases are the shipped
-`cases/burnerPlume.jsonc` with the `physics.fire.radiation` block replaced by
-exactly one of
-
-```
-{ "model": "P1",    "a": 0.5, "chiR": 0.35 }                                    (the file itself)
-{ "model": "P1",    "chiR": 0.35, "spectralModel": "wsgg", "windowTreatment": "dropped" }
-{ "model": "fvDOM", "a": 0.5, "chiR": 0.35 }
-{ "model": "fvDOM", "chiR": 0.35, "spectralModel": "wsgg" }
-```
-
-and nothing else in any of the four files differs by a byte. **Soot is off in
-all four** and `updateInterval` is `1` in all four, so this is a clean 2x2 in
-the two tokens it is meant to be a 2x2 in — which is why the fvDOM + WSGG row
-here is not §62.13's, whose fvDOM legs carried soot.
-
-| configuration | solves per call | wall time, 2 passes | vs gray P1 | **peak device memory, this run** | B/cell | **radiated fraction** | combustion efficiency |
-|---|---|---|---|---|---|---|---|
-| **P1, gray** (the default) | 1 SPD | **22.93 / 22.60 s** | **1.00x** | **172 MiB** | 5 504 | **14.9724 %** | 35.4976 % |
-| **P1, WSGG**, window dropped | 4 SPD | **93.64 / 94.01 s** | **4.12x** | **172 MiB** | 5 504 | **47.2833 %** | 62.9911 % |
-| **fvDOM S4, gray** | 24 asym | **141.12 / 141.16 s** | **6.20x** | **236 MiB** | 7 552 | **13.7893 %** | 35.3028 % |
-| **fvDOM S4, WSGG** | 120 asym | **527.06 / 536.42 s** | **23.36x** | **332 MiB** | 10 624 | **43.7569 %** | 72.0828 % |
-
-Run-to-run scatter is **1.5 / 0.4 / 0.03 / 1.8 %** on the four rows, so every
-ratio above is quoted to three figures honestly and to two figures safely.
-
-**The band structure costs 4.12x on P1 and 3.77x on fvDOM, and the two numbers
-sit on OPPOSITE sides of their own arithmetic.** P1 solves four bands for one
-and pays **more** than four; fvDOM solves five for one and pays **less** than
-five. Both have a mechanism and both were predicted by something already in
-this document:
-
-* P1's excess is §62.13's own diagnosis, now confirmed on a leg with no soot in
-  it: a WSGG `kappa` spans orders of magnitude across the plume edge, so the
-  four Helmholtz systems are worse conditioned than the single gray one and
-  cost more than four times its iterations.
-* fvDOM's shortfall is what §62.6 predicted from (65.1): `phi_m` and the
-  upwind weights are **band-independent** and are built once, so only the
-  diagonal and the source are rebuilt per band — "assembly sub-linear in `N_g`,
-  solve exactly linear" — and the transparent band's matrix is pure advection
-  with no absorption on the diagonal at all. **What is measured is the total,
-  3.77x against five solves for one; the split of that shortfall between the
-  saved assembly and the cheap window is NOT measured here**, and it would take
-  a per-band iteration count to separate them.
-
-**Against gray P1, fvDOM + WSGG is 23.4x.** The design note this tranche was
-written from projected `~30x` by arithmetic on two measured points; §62.13
-measured `46.7x` for the same pair **with soot on**. Both are consistent with
-this row: soot raises `kappa` in every band, and the same configuration with
-soot is `933 s` against this `532 s`. That **~1.8x** is the one cross-session
-comparison in this table and it carries §62.13's own caveat — those runs were
-taken on a shared card and its gray legs read 5-9 % high — so read it as "soot
-costs something of order two on this configuration", not as a third
-significant figure. What is not in doubt is the direction: it belongs to soot
-and not to the band count. Quoting one of the three numbers without saying
-which soot setting it carries would be a mistake, and §62.13's table now says
-so where it stands.
-
-**The physics difference, beside the cost.** The radiated fraction on this case
-is `14.97 %` gray-P1, `13.79 %` gray-fvDOM (the `1.18`-point gap §36.7 already
-records — fvDOM radiates *less* on the same fire), and `47.28 %` / `43.76 %`
-with WSGG. **The spectral model triples the radiated fraction on this case**,
-and the reason is §62.7's own warning rather than a discovery: the gray legs
-run at the case's `a = 0.5`, under which the `chi_r = 0.35` floor is doing most
-of the work, while a WSGG `kappa` built from the local `X_H2O`, `X_CO2` at a
-6.25 cm cell is far larger in the plume. The 2x2 also shows that **the angular
-method and the spectral model do not commute in size**: gray-to-WSGG moves the
-radiated fraction by `+32.3` points on P1 and `+30.0` on fvDOM, while
-P1-to-fvDOM moves it by `-1.18` points gray and `-3.53` banded. The spectral
-model is the larger effect on this case by a factor of nine.
-
-**Memory, measured at three mesh sizes**, five steps each (nothing in the time
-loop allocates after the first iteration, so five steps and 1200 give the same
-peak — the 32^3 column below is the same 172/172/236/332 MiB the 1200-step runs
-above reported):
-
-| configuration | 32^3 = 32 768 | 48^3 = 110 592 | 64^3 = 262 144 | B/cell at 64^3 | **radiation's own share at 64^3** |
-|---|---|---|---|---|---|
-| P1, gray | 172 MiB | 524 MiB | **1 164 MiB** | 4 656 | — (the baseline) |
-| P1, WSGG | 172 MiB | 556 MiB | **1 260 MiB** | 5 040 | **+96 MiB = 384 B/cell** |
-| fvDOM S4, gray | 236 MiB | 716 MiB | **1 612 MiB** | 6 448 | **+448 MiB = 1 792 B/cell** |
-| fvDOM S4, WSGG | 332 MiB | 1 004 MiB | **2 316 MiB** | 9 264 | **+1 152 MiB = 4 608 B/cell** |
-
-**§62.10's `960 B/cell` is low by 4.8x, and (65.10) says exactly why.** The
-measured increment of fvDOM + WSGG over gray P1 at 64^3 is **4 608 B/cell**.
-Put (65.10)'s three terms in at `n = 262 144`, `n_bf = 24 576`,
-`n_faces = 774 144`:
-
-| term | arithmetic | measured |
-|---|---|---|
-| 24 intensity fields + 24 pairs of `(phi_m, w_m)` — i.e. gray fvDOM over P1 | `447.5 MiB` | **`448 MiB`** |
-| 96 more intensity fields + the band arrays — i.e. WSGG fvDOM over gray fvDOM | `689 MiB` | **`704 MiB`** |
-
-so the corrected count is right to **0.2 %** and **2 %** on the two increments,
-and §62.10's is wrong because it counted **one** `[n_cells]` array per
-`(band, ordinate)` where the program allocates **three** (`f`, `f0`, `f00`) —
-and then omitted the 24 band-independent surface fields entirely, which at this
-mesh are `283 MiB`, more than the intensities themselves.
-
-**So where does it actually stop?** Taking the 64^3 per-cell figures, which are
-the least distorted by the 1 MiB granularity of the allocator (the 32^3 column
-is inflated by it — 5 120 B/cell against 4 608):
-
-| mesh | fvDOM S4 + WSGG, whole solver | headroom on this 16 GB card |
-|---|---|---|
-| 10^6 cells | **9.3 GB** | fits, with 5.7 GB spare |
-| 1.6 x 10^6 cells | **~15 GB** | **the ceiling** |
-| 10^7 cells | 93 GB | no |
-
-**§62.10's "10^6 cells is the practical single-GPU ceiling" is right, and it is
-right for a bigger reason than it gave**: it put 960 MB of intensity there, and
-the measured requirement for the whole solver is **9.3 GB**. S6 (48 ordinates)
-doubles the fvDOM-attributable share and puts the ceiling at about
-**1.1 x 10^6 cells**. And the wall time arrives at the same place independently:
-see the per-step table below.
-
-**And the wall time at the same three meshes, MARGINALLY.** A 5-step and a
-20-step run of each configuration, differenced, so setup, mesh upload and
-module load fall out and what is left is the cost of one time step:
-
-| configuration | 32^3 | 48^3 | 64^3 | ns per cell per step at 64^3 | 32^3 -> 64^3 exponent |
-|---|---|---|---|---|---|
-| P1, gray | 26.7 ms | 38.0 ms | **72.2 ms** | 275 | **0.48** |
-| P1, WSGG | 80.9 ms | 130.1 ms | **270.3 ms** | 1 031 | 0.58 |
-| fvDOM S4, gray | 80.8 ms | 132.2 ms | **247.0 ms** | 942 | 0.54 |
-| **fvDOM S4, WSGG** | **389.4 ms** | **563.8 ms** | **1 091.6 ms** | **4 164** | **0.50** |
-
-**Eight times the cells costs between 2.7 and 3.3 times the time, not eight.**
-The exponent is about `0.5` on every row, which says plainly that
-`cases/burnerPlume.jsonc`'s 32 768 cells **do not fill this card**: the solver
-is launch- and latency-bound there, not bandwidth-bound, and the per-cell cost
-falls by a factor 2.9 on the way to 64^3. Two consequences, and the second is
-the one a user needs:
-
-* **The 2x2's wall times must not be extrapolated by multiplying by the cell
-  ratio.** Doing that from the 32^3 row would over-state a 10^6-cell run by
-  roughly 3x.
-* **From 64^3 the scaling has nearly caught up** — the `48^3 -> 64^3` exponent
-  on the fvDOM + WSGG row is `0.77`, not `0.50` — so a linear extrapolation
-  from `64^3` is the honest estimate and, if anything, a floor.
-
-**Where fvDOM + WSGG stops being practical, with the number.** At `64^3` one
-step costs `1.09 s`, so this case's own 1200 steps — **6 seconds of physics** —
-cost **22 minutes**. Scaling the `64^3` marginal rate linearly to 10^6 cells
-gives `1.39 h` for the same 6 seconds; the marginal rate is itself 14 % below
-the steady rate (the first twenty steps carry a colder flow and fewer solver
-iterations: 389 ms marginal against `532/1200 = 443 ms` sustained at 32^3), so
-call it **1.6 h per 6 s of physics at 10^6 cells**.
-
-| what a user wants | fvDOM S4 + WSGG, `updateInterval: 1`, at 10^6 cells |
-|---|---|
-| 6 s of fire | **~1.6 h** |
-| 60 s of fire | **~16 h** |
-| 600 s of fire (a compartment test) | **~1 week** |
-
-So the binding constraint at 10^6 cells is the **clock, not the memory**: the
-memory ceiling is at `1.6 x 10^6` cells and the clock has already made the run
-unreasonable at `10^6`. **The combination that is impractical is fvDOM + WSGG
-at `updateInterval: 1` above roughly 3 x 10^5 cells**, and the setting that
-fixes it is the one §62.10 introduced for exactly this reason:
-`updateInterval: 4`, measured in §62.13 at a **6.7x** recovery for **0.12
-points** of radiated fraction, which turns the 10^6-cell row above from 1.6 h
-into about 15 minutes. That single entry is the difference between a spectral
-fire that can be run at a useful mesh and one that cannot, and it is why §62.10
-made it a case setting instead of advice.
-
-### 65.8 The default path, re-run and unmoved
-
-Every number this section publishes was taken after the device-memory report of
-(65.10) was added to `ofgpu-fire`, so the last thing it must do is show that
-adding a report changed no answer. The shipped `cases/burnerPlume.jsonc` at its
-recorded settings, on the final tree:
-
-| quantity | recorded | re-run |
-|---|---|---|
-| combustion efficiency | `35.4976 %` | **`35.4976 %`** |
-| radiated fraction (P1) | `14.9724 %` | **`14.9724 %`** |
-| peak `T` | `816.92 K` | **`816.92 K`** |
-| net radiated power | `1.11473 kW` | **`1.11473 kW`** |
-| domain heat release | `7.44521 kW` | **`7.44521 kW`** |
-
-Every printed digit, in both passes. The memory line is a report and not a
-control: it reads `cuMemGetInfo` at three points and writes one line of stdout,
-and it is registered on nothing.
-
-### 65.9 The three errors this section found in itself
-
-**(1) `E_2^S4(0) == 1.0` was asserted as a floating-point equality, and it is
-false.** The identity is exact — it is `sum_m w_m = 4 pi`, §36.2's first
-condition on the set — but its *evaluation* is twenty-four copies of `pi/6`
-accumulated and divided by `4 pi`, and neither operand is representable. The
-gate FAILED on its first run at `3.331e-16`. It is now a round-off check that
-says which of the two statements it is testing. The existing
-`fvdom::tests::s4_weights_sum_to_4pi` had used a `1e-12` relative bar for
-exactly this reason since §36 was written; this section wrote a stronger claim
-without reading it first.
-
-**(2) "The angular error changes sign, so the bands see both signs" — wrong
-twice over, and the correction is the more interesting result.** The gate first
-asserted a SINGLE crossing bracketed by `tau = 0.5` and `tau = 60`. It FAILED,
-because `E_2^S4 - E_2` is already **negative** at `tau = 0.5`: there are
-**three** crossings, at `tau = 0.381 / 1.983 / 19.42`. The bisection that ran
-anyway converged on the third of them, at `tau = 19.4`, where `E_2` is
-`1.73e-10` — a number that would have been reported as "the sign change happens
-in the tail, so the error is effectively one-signed" and would have been right
-by accident and wrong in reasoning. What is actually true is sharper: **two of
-the three crossings fall in the gap between this set's band 2 (`tau = 0.290`)
-and band 3 (`tau = 2.301`)**, so the bands sample only the positive lobes, the
-per-band angular errors **accumulate rather than cancel** in the band sum, and
-fvDOM's total `G` is no more accurate than its own worst band. §65.6's table
-shows that directly: leg A's bands are `+4.24 / +2.30 / +2.72 %` and its total
-is `+2.79 %`, a weighted mean and not a cancellation. The gate now scans for
-every crossing and requires the one-signedness that is true.
-
-**(3) §62.10's `960 B/cell` is not what the program allocates, and it is low by
-more than 3x in the interior alone.** That figure is `N_g N_ord n` doubles: one
-array per `(band, ordinate)`. What is allocated per `(band, ordinate)` is a
-`GpuScalarField`, which carries `f`, `f0` and `f00` — §3.3's three BDF2 time
-levels — plus five boundary arrays, so the interior storage is **2880 B/cell**
-for five bands on S4. §65.7 measures the whole thing. The part worth saying out
-loud is that **`f0` and `f00` are never read by this module**: `fvdom.rs`
-contains no `ddt` term and no `store_old_time` call, because the RTE is solved
-steady on every call. Two thirds of the banded intensity storage is dead, and
-§65.10 says why removing it is not this section's work.
-
-### 65.10 What is not measured here, and why
-
-* **The memory-lean fvDOM.** (65.10) and §65.9(3) locate 2 `N_g N_ord n`
-  doubles of storage that no kernel reads — at 10^6 cells and five bands, 1.9
-  GB. Recovering it means a leaner field type across the whole of §36, and
-  every byte of §62.8's bitwise gray limit would have to be re-proved against
-  it. That is a unit of work, not a footnote, and §62.10's "memory-lean
-  variant" paragraph is where it belongs.
-* **A mesh above 64^3.** §65.7's per-cell slopes are measured on three meshes
-  and the 10^6-cell ceiling is arithmetic on a measured slope. That is better
-  than §62.10's arithmetic on a design and it is still not a measurement at
-  10^6 cells.
-* **S6 or S8.** (65.6) predicts what more ordinates buy, band by band, and
-  nothing here runs one: `N_ORDINATES` is a compile-time constant in this
-  module and adding a second set is §36's work, not §65's.
-* **`updateInterval` on the four combinations.** §62.13 measured it once, on
-  fvDOM + WSGG + soot, and found a 6.7x recovery for 0.12 points of radiated
-  fraction. §65.7's 2x2 deliberately runs every leg at `updateInterval: 1`, so
-  that the four rows differ only in the two tokens they are meant to differ in.
-* **Soot, in the 2x2.** All four rows run with soot off. §62.13's own table has
-  the soot legs on P1; what §65.7 adds is that the fvDOM + WSGG row **without**
-  soot is `527 s` against §62.13's `933 s` **with** it, so soot costs something
-  of order two more on that configuration and is not a free rider on the band
-  count. That one ratio crosses sessions - §62.13's runs were taken on a shared
-  card - so §65.7 quotes it as a direction rather than a third figure.
-* **Scattering**, and **a per-band wall flux** — §64.8's own two deferred
-  items, unchanged. All four rows run `sigma_s = 0`.
-
 
 ## 66. Lagrangian parcels — the pool, the drag update, and the mesh walk
 
@@ -16742,7 +12939,7 @@ as three).
 * **Three need nothing at all**: `a_pv = (1/V) sum n_p pi r^2`, `sum n_p r^2`
   and `sum n_p r^3` are pure geometry, three more accumulators in the same
   loop. They are absent only because **nothing reads them** until the spray
-  couples to `participating.rs` and `fvdom.rs`, and §13.4.2's rule against adding
+  couples to a participating-medium solver, and §13.4.2's rule against adding
   what no driver reads applies to a deposited field exactly as it does to a
   case entry. That is a deliberate omission with one line of work behind it,
   not a difficulty. The remaining one, `emit`, needs `T_p` to be doing
@@ -17008,10 +13205,10 @@ any `parcels` file**, this section's or §66's — rustc lists every type error 
 a crate, so their absence is the result. The tests could not be *run*, because
 the single-precision build does not compile at all: three `f64`/`f32`
 mismatches in `src/io/case_dc.rs` (which is at `HEAD`, so this predates §66)
-and two in `src/wsgg/tests.rs`. **Neither was fixed here**, because neither is
-this section's file and one of them is in work that is still in progress; it is
-recorded so that the next person to want a single-precision build knows it is
-five lines away and knows where they are.
+and two in a spectral-radiation test file that has since left the engine.
+**Neither was fixed here**, because neither is this section's file; it is
+recorded so that the next person to want a single-precision build knows where
+to start, and the remaining three are the `case_dc.rs` ones.
 
 ### 67.12 What this section does not do
 
@@ -17414,7 +13611,7 @@ and it is made twice on purpose.
 launch the component extraction, `fvm_su` or `fvm_sp` over the registry. There
 is no arithmetic to be wrong about. Every case in this repository that has no
 dispersed phase is in this state, so every measurement in `SPEC-LIT` and
-`docs/07-fire-solver.md` is unmoved, and it is unmoved because no code ran.
+`docs/07-lowmach-solver.md` is unmoved, and it is unmoved because no code ran.
 
 **Measured.** The other half is the case where something registers and what it
 registers is zero — the parcel model present, no parcel yet injected. That is
@@ -17602,13 +13799,14 @@ already knew the answer.
 
 * it named **four** gates as missing. **Six** report a miss on the screen above
   it;
-* the fifth, §42.8b's Gate 2, appeared only inside the *replayed-measurements*
+* the fifth, the compartment-sweep gate, appeared only inside the *replayed-measurements*
   parenthetical, as an aside to a sentence about counting;
 * the sixth, §68.12's Gate 68-C, appeared **nowhere** in the summary. Its
   verdict was printed in the parcel block and stopped there, and
   `README.en.md` said so in as many words rather than fixing it;
-* and the sentence asserted that both fire verdicts — §61.8's Gate 61-A and
-  §62.12's Gate 4 — "are noted in the soot/WSGG block above". Gate 61-A's was.
+* and the sentence asserted that both reacting-medium verdicts — the soot
+  yield and the burner radiant fraction — "are noted in the soot/WSGG block
+  above". The soot yield's was.
   **Gate 4's was not, and never had been**: no line this binary printed
   mentioned the NIST 37 cm burner at all. The claim was false on the commit
   that introduced it and nothing could have caught it, because nothing read
@@ -17630,15 +13828,18 @@ consulted.
 
 ### 69.1 The defect, stated exactly
 
-At HEAD (442ddd2), with `ofgpu-validate` run to completion:
+At HEAD (442ddd2), with `ofgpu-validate` run to completion. **Four of these
+six gates belonged to the reacting-medium physics and left this engine with
+it** - §69.10 says which, and what the registry holds now. The table is the
+defect's record and is left as it was measured:
 
 | gate | where its verdict is printed | named in the summary line? |
 |---|---|---|
-| §42.8b Gate 2 — NIST Reduced Scale Enclosure | the replayed compartment block | **only inside the replay parenthetical** |
+| the NIST Reduced Scale Enclosure compartment sweep | the replayed compartment block | **only inside the replay parenthetical** |
 | §60.5 Gate 5 — Kaminski & Prakash | the conjugate-fluid block, live | yes |
-| §62.12 Gate 1-E — WSGG emissivity vs RADCAL | the soot/WSGG block, live | yes |
-| §61.8 Gate 61-A — post-flame soot yield | the soot/WSGG block, as a note | yes |
-| §62.12 Gate 4 — NIST 37 cm burner `chi_r` | **nowhere** | yes — and the summary said it was printed above, which was false |
+| the WSGG total emissivity against RADCAL | the soot/WSGG block, live | yes |
+| the post-flame soot yield | the soot/WSGG block, as a note | yes |
+| the NIST 37 cm burner `chi_r` | **nowhere** | yes — and the summary said it was printed above, which was false |
 | §68.12 Gate 68-C — Theobald hose streams | the parcel block, live | **no** |
 
 Three further verdicts print the word `OPEN`, all of them §32.4's channel
@@ -17651,7 +13852,7 @@ ninth miss.
 Let a **verdict word** be one of the two upper-case words this binary shouts at
 a published comparison, `MISSES` and `OPEN`, or an inflection of the first.
 Lower case is ordinary prose and is not a verdict, and the run depends on the
-distinction: §42.8b's own diagnosis note ends "the prerequisite this miss
+distinction: one gate's own diagnosis note ended "the prerequisite this miss
 names", and a §67 check row is titled "CSR entries misplaced, missing or
 duplicated". Neither is a verdict, neither is registered, and neither is
 caught — `lower_case_prose_is_not_a_verdict` holds that.
@@ -17737,7 +13938,12 @@ at the source level rather than leaving it open and describing it, and it
 closes it for `#[cfg(test)]` blocks and doc strings too. Neither enforcement
 alone is enough; the pair is.
 
-### 69.4 What the summary prints now
+### 69.4 What the summary printed when this was written
+
+The transcript below is that run's. Its counts and its gate list are not this
+build's - four of the nine entries left with the reacting-medium physics
+(§69.10) - and what it is quoted for is the SHAPE of an entry, which is
+unchanged.
 
 ```
 747/747 checks passed
@@ -17768,17 +13974,19 @@ next measurement is — stays beside the table it came from, in the block, where
 the numbers that support it are. Repeating a diagnosis in a summary is how a
 summary becomes something nobody reads.
 
-**`NOT run here` is a first-class value, not a gap.** Two of the six are
-multi-minute fires that do not belong inside a harness that has to finish
-(§61.8 Gate 61-A, §62.12 Gate 4). Before §69 that fact was the mechanism by
-which Gate 4's verdict went missing: a gate nothing runs is a gate nothing
-prints, unless printing is a deliberate act. It now is.
+**`NOT run here` was a first-class value, not a gap.** Two of the six were
+multi-minute reacting-medium runs that do not belong inside a harness that has
+to finish. Before §69 that fact was the mechanism by which one of the two
+verdicts went missing: a gate nothing runs is a gate nothing prints, unless
+printing is a deliberate act. Both of those gates have since left the engine,
+and with them the only two users of the value - §69.10.
 
 ### 69.5 Two verdict words, and why `OPEN` is not `MISSES`
 
 `MISSES` is reserved for **a comparison against a published measurement that
 this solver does not reproduce**. That is the sentence `README.en.md`'s
-"Gates that miss" table is built on, and there are six.
+"Gates that miss" table is built on, and there were six when this was written
+(§69.10: two now).
 
 `OPEN` is **a comparison against a correlation that does not close at the
 shipped default**. §32.4's three channel verdicts are all of this kind:
@@ -17830,11 +14038,11 @@ measured number is bit-identical**: `20`, `7.11 %`, `0.07 %`, `58 of 108`,
 `-2.4 %`. That is the point of the section: it changes what the run *says about
 itself* and nothing about what it computes.
 
-One verdict is **new text on the screen and not a new measurement**: §62.12
-Gate 4's, which SPEC-LIT §62.13 has carried in full since the WSGG work and
-which the summary already claimed was printed. The numbers in it — `chi_r`
-0.23 / 0.30 / 0.33 at 20 / 34 / 50 kW measured, 226 % combustion efficiency
-predicted, 74.7 % on the gray leg — are §62.13's own, transcribed, not rerun.
+One verdict was **new text on the screen and not a new measurement**: a
+reacting-medium gate the spec had carried in full for some time and which the
+summary already claimed was printed. Its numbers were transcribed from that
+section, not rerun. Both it and that section have since left the engine
+(§69.10).
 
 ### 69.8 The §13.4 contract, and §13.4.1
 
@@ -17852,8 +14060,10 @@ and is not part of it.
 ### 69.9 What this section does not do
 
 * **Decide whether a gate should miss.** It moves no bar and re-runs no case.
-  Six gates missed at HEAD and six miss now; the difference is that the run
-  says so in one place.
+  Six gates missed at HEAD and six missed after; the difference is that the run
+  says so in one place. (Four of those six have since left the engine with the
+  physics they gated - §69.10 - and the mechanism is unchanged by that, which
+  is the point of having one.)
 * **Cover the other binaries.** The audit and the source test are
   `validate.rs`-only. Measured, not assumed: `grep` over every other file in
   `src/bin/` finds **no** occurrence of either verdict word, so today there is
@@ -17861,8 +14071,8 @@ and is not part of it.
   banners, not verdicts against published measurements. It is a gap rather than
   a defect for that reason, and it stops being one the moment a driver prints a
   gate verdict of its own.
-* **Cover `README.en.md`'s table by test.** The six rows there are still
-  maintained by hand against the six the registry holds, and nothing compares
+* **Cover `README.en.md`'s table by test.** The rows there are still
+  maintained by hand against the ones the registry holds, and nothing compares
   the two files. That is the next honest step and it is named here rather than
   quietly left: a test that parses the "Gates that miss" table and holds it
   against a registry the binary can dump. It is not done, so the READMEs are
@@ -17871,6 +14081,38 @@ and is not part of it.
 * **Wrap prose it did not write.** `gate_summary`'s word wrap is greedy and
   ASCII-width; the gate *names* are never wrapped, which is what keeps (69.6)'s
   substring test meaningful.
+
+### 69.10 What the registry holds after the reacting-medium physics left
+
+Four of §69.1's six misses were gates on a combustion, soot or spectral
+radiation model. That physics is a separate product and is no longer in this
+engine; the checks that ran those gates went with it, so the gates are not
+registered, not printed, and not claimed anywhere. **This subsection exists so
+that the six above cannot be read as a claim about this binary.**
+
+| gate | verdict | what happened to it |
+|---|---|---|
+| the NIST Reduced Scale Enclosure compartment sweep | `MISSES` | left with the two-step reaction scheme |
+| the WSGG total emissivity against RADCAL | `MISSES` | left with the spectral radiation model |
+| the post-flame soot yield against Tewarson | `MISSES` | left with the soot model |
+| the NIST 37 cm burner radiant fraction | `MISSES` | left with the spectral radiation model |
+| §60.5 Gate 5 — Kaminski & Prakash, conjugate `Nu` | `MISSES` | **stays**, run live |
+| §68.12 Gate 68-C — Theobald hose streams | `MISSES` | **stays**, run live |
+| §88's Gate 88-T, and §32.4's three channel verdicts | `OPEN` | **stay**; §78's splash verdict is the fifth |
+
+So `ofgpu-validate` now registers **two `MISSES` and five `OPEN`**, and both
+remaining misses are general-CFD findings: a conjugate-convection Nusselt
+number and a hose-stream throw. The count in §69.7's table (`9: 6 MISSES and 3
+OPEN`) is that run's and is left as measured; this is the current one. Nothing
+in §69's mechanism changed - the summary is still generated from the registry,
+and the four gates disappeared from it the moment the code that reported them
+did, which is exactly the property §69 exists to have.
+
+`How::NotRunHere` had precisely two users, the two multi-minute reacting-medium
+gates above, and it left with them: the variant is gone from `How`, and every
+gate the registry now holds is `Live` or `Replayed`. It is a five-line re-add
+the day a gate needs it again, and §69.4's paragraph is why it would be
+re-added rather than the gate left unlisted.
 
 ---
 
@@ -18170,7 +14412,7 @@ compared as bytes.
 | Artefact | Comparison | Result |
 |---|---|---|
 | `ofgpu-validate`, whole run | full stdout, 1178 lines, every printed number | **identical**, 747/747 checks, 699 computed live and 48 replayed. The one run-to-run difference is two wall-clock figures inside the §49-D view-factor report (`0.066 s` against `0.067 s`, `0.069 s` against `0.071 s`); with `<digits>.<digits> s` masked the `diff` is empty. On one of the two before/after pairs it was empty unmasked as well |
-| `ofgpu-fire cases/channelPeriodicWF.jsonc -iters 25` | the seven fields it writes | SHA-256 identical, all seven |
+| `ofgpu-lowmach cases/channelPeriodicWF.jsonc -iters 25` | the seven fields it writes | SHA-256 identical, all seven |
 | `ofgpu-plume cases/plume -iters 40` | the five fields it writes | SHA-256 identical, all five |
 | `ofgpu-k-epsilon cases/channel -iters 40` | the four fields it writes | SHA-256 identical, all four |
 | the four drivers' console logs | line by line | identical **except** the wall-clock lines (`mesh uploaded in ...`, `N iterations in ... s`, `done in ... s`), which are timings and not results |
@@ -18682,7 +14924,7 @@ Jacobi sweeps, `alpha = 0.5`, at `P = 2, 3, 4` under all three partitioners:
 |---|---|---|---|
 | `cases/channelPeriodicWF.jsonc` | 192 | JSONC/blockgen, **cyclic** patches | **9/9 bitwise identical** |
 | `cases/channel` | 24,000 | polyMesh on disk | **9/9** |
-| `cases/burnerPlume.jsonc` | 32,768 | JSONC/blockgen | **9/9** |
+| a 32 768-cell buoyant JSONC case | 32,768 | JSONC/blockgen | **9/9** |
 | `cases/plume` | 82,320 | polyMesh on disk, 240,044 internal faces | **9/9** |
 
 **36 of 36**, with `worst == 0.0` on every cell of every run. The cyclic case is
@@ -18719,7 +14961,7 @@ not a measurement:
 | Comparison | Result |
 |---|---|
 | `ofgpu-validate` | **747/747, 699 computed live and 48 replayed**, 1178 lines — the recorded figure, reproduced |
-| `ofgpu-fire cases/channelPeriodicWF.jsonc -iters 25` (7 fields, cyclic), `ofgpu-plume cases/plume -iters 40` (5), `ofgpu-k-epsilon cases/channel -iters 40` (4) | **all 16 field files SHA-256 identical** between a build with this section's modules removed and a build with them in |
+| `ofgpu-lowmach cases/channelPeriodicWF.jsonc -iters 25` (7 fields, cyclic), `ofgpu-plume cases/plume -iters 40` (5), `ofgpu-k-epsilon cases/channel -iters 40` (4) | **all 16 field files SHA-256 identical** between a build with this section's modules removed and a build with them in |
 | the three drivers' console logs | identical **except** `mesh uploaded in …`, `N iterations in …` and `done in …`, which are wall-clock times and not results |
 | `cargo clippy --release --all-targets` | exit 0; **no warning names any file added here** |
 
@@ -18859,8 +15101,8 @@ it:
 | `fan.rs` §52.7 — three `device_sum` per fan patch | one patch's faces | cross-part sum **only if that patch is cut**, which a partitioner is free to do |
 | `cht.rs` §47 — interface flux into A, into B, and its scale | interface face pairs | cross-part sum if the interface is cut |
 | `dcmetrics.rs` §55 — every SHI/RTI/RCI numerator and denominator | cells or rack faces | cross-part sum |
-| `combustion.rs` clip and extinction counts, `wsgg.rs` floored-band count, `soot.rs` clip counts | 0/1 flags over cells | sums of **exact integers below 2^53**, so already partition-invariant. Recorded because "it is a `device_sum`, therefore it is a hazard" would have been the easy wrong answer |
-| `simple.rs`, `vof.rs` — `contErr` = `max_c |sum_f phi_f|`; `vof.rs` Courant; `psychro.rs`, `species.rs`, `turbulence.rs`, `soot.rs` maxima | cells | **maxima. Already partition-invariant**, and the brief's list of hazards names `contErr` as one when it is not |
+| a reaction module's clip and extinction counts, a spectral module's floored-band count, a soot module's clip counts | 0/1 flags over cells | sums of **exact integers below 2^53**, so already partition-invariant. Recorded because "it is a `device_sum`, therefore it is a hazard" would have been the easy wrong answer |
+| `simple.rs`, `vof.rs` — `contErr` = `max_c |sum_f phi_f|`; `vof.rs` Courant; `psychro.rs`, `species.rs`, `turbulence.rs` maxima | cells | **maxima. Already partition-invariant**, and the brief's list of hazards names `contErr` as one when it is not |
 
 **Reductions outside `solver.cu`.**
 
@@ -18872,7 +15114,7 @@ it:
 | `ofsScanReduce`, `ofsScanBlockSums` (`cuda/parcelsort.cu`) | the parcel sort's prefix scan | **integer**; associative, order-free |
 | `parcelIntegrate`, `parcelCoupleCellIntegral`, the per-cell parcel sums (§67.4) | one thread per cell over that cell's own parcels | per-cell gathers, not cross-part |
 | `smpFaceFluxSum`, `lduNegSumDiag`, `desHmax`, the LES face sums (§16), the Green–Gauss gradient | one thread per cell over that cell's own faces | per-cell gathers. §70 fixed their *order*; a cut does not make them global |
-| `energyAccumulate`, `spcAccumulate`, `vofAccumulate`, `wsggFmaAccumulate`, `spcSumError` | `dst[i] += ...` | elementwise. Named because "Accumulate" reads like a reduction and is not |
+| `energyAccumulate`, `spcAccumulate`, `vofAccumulate`, `spcSumError` | `dst[i] += ...` | elementwise. Named because "Accumulate" reads like a reduction and is not |
 
 **Host-side aggregates.**
 
@@ -19207,7 +15449,7 @@ labels of each** — 27 relabelled decompositions per case:
 |---|---|---|
 | `cases/channelPeriodicWF.jsonc` | 192 (cyclic) | **27/27 bitwise identical** |
 | `cases/channel` | 24,000 | **27/27** |
-| `cases/burnerPlume.jsonc` | 32,768 | **27/27** |
+| a 32 768-cell buoyant JSONC case | 32,768 | **27/27** |
 | `cases/plume` | 82,320 | **27/27** |
 
 Each row is `P = 2, 3, 4` × three partitioners × every rotation of the part
@@ -19226,7 +15468,7 @@ this section exists to publish:
 |---|---|---|
 | `cases/channelPeriodicWF.jsonc` | 8 of 27 | 13 of 27 |
 | `cases/channel` | 2 of 27 | 18 of 27 |
-| `cases/burnerPlume.jsonc` | 2 of 27 | 17 of 27 |
+| the same 32 768-cell case | 2 of 27 | 17 of 27 |
 | `cases/plume` | 8 of 27 | 27 of 27 |
 
 **20 of 108 on the solver's own output, 75 of 108 on the adversarial field**,
@@ -19262,7 +15504,7 @@ rule is that an argument is not a measurement:
 | Comparison | Result |
 |---|---|
 | `ofgpu-validate` | **747/747, 699 computed live and 48 replayed** — the recorded figure, reproduced |
-| `ofgpu-fire cases/channelPeriodicWF.jsonc` (7 fields, cyclic), `ofgpu-plume cases/plume` (5), `ofgpu-k-epsilon cases/channel` (4) | **all 16 field files SHA-256 identical** between a build with this section's module removed and a build with it in |
+| `ofgpu-lowmach cases/channelPeriodicWF.jsonc` (7 fields, cyclic), `ofgpu-plume cases/plume` (5), `ofgpu-k-epsilon cases/channel` (4) | **all 16 field files SHA-256 identical** between a build with this section's module removed and a build with it in |
 | the three drivers' console logs | identical except the wall-clock lines |
 | `cargo clippy --release --all-targets` | exit 0; no warning names a file added here |
 
@@ -19593,7 +15835,7 @@ they **cannot** move, and they do not.
 | | | PCG DIC block-local | 62 | 62 | 62 | 101 | 103 | **1.66×** |
 | | | BiCG diagonal | 79 | 79 | 79 | 79 | 79 | **1.00×** |
 | | | BiCG DILU block-local | 43 | 43 | 43 | 80 | 79 | **1.84×** |
-| `burnerPlume.jsonc` | 32,768 | PCG diagonal | 97 | 97 | 97 | 97 | 97 | **1.00×** |
+| a 32 768-cell buoyant JSONC case | 32,768 | PCG diagonal | 97 | 97 | 97 | 97 | 97 | **1.00×** |
 | | | PCG DIC block-local | 53 | 56 | 60 | 62 | 64 | **1.21×** |
 | | | BiCG diagonal | 62 | 62 | 62 | 62 | 62 | **1.00×** |
 | | | BiCG DILU block-local | 40 | 42 | 44 | 45 | 46 | **1.15×** |
@@ -19840,7 +16082,7 @@ The claim is bitwise identity, so the measurement is a bit comparison.
 |---|---|---|---|---|---|
 | `cases/channelPeriodicWF.jsonc` | 192 | JSONC/blockgen, **cyclic** | 29 iterations | 20 | **18/18 bitwise identical** |
 | `cases/channel` | 24,000 | polyMesh, 2-D | 124 | 79 | **18/18** |
-| `cases/burnerPlume.jsonc` | 32,768 | JSONC/blockgen | 97 | 62 | **18/18** |
+| a 32 768-cell buoyant JSONC case | 32,768 | JSONC/blockgen | 97 | 62 | **18/18** |
 | `cases/plume` | 82,320 | polyMesh, 240,044 internal faces | 125 | 78 | **18/18** |
 | `cases/gb_800000` | 800,000 | polyMesh, 2,196,400 internal faces | 286 | 174 | **6/6** (Hilbert only) |
 
@@ -19862,7 +16104,7 @@ part labels, both solvers, same criterion:
 |---|---|---|
 | `cases/channelPeriodicWF.jsonc` | 3 partitioners × (1 + 2 + 3) × 2 solvers | **36/36** |
 | `cases/channel` | as above | **36/36** |
-| `cases/burnerPlume.jsonc` | as above | **36/36** |
+| the same 32 768-cell case | as above | **36/36** |
 | `cases/plume` | as above | **36/36** |
 | `cases/gb_800000` | Hilbert × (1 + 2 + 3) × 2 solvers | **12/12** |
 
@@ -20298,7 +16540,7 @@ checks all five statements.
 
 | asked for | answer |
 |---|---|
-| `gradSchemes { default skewCorrected ...; }` | Not a `gradSchemes` entry here. The operator exists (`fvc_grad_*_skew_correction`) but is not reachable from `fvSchemes`, because wiring it into `GradScheme` needs a scratch gradient per call — an allocation inside a captured CUDA graph (§43) — and that is a separate decision. **Use `leastSquares`**, which §74.6(d) measures as at least as good on this problem. |
+| `gradSchemes { default skewCorrected ...; }` | Not a `gradSchemes` entry here. The operator exists (`fvc_grad_*_skew_correction`) but is not reachable from `fvSchemes`, because wiring it into `GradScheme` needs a scratch gradient per call — an allocation inside a captured CUDA graph (§81) — and that is a separate decision. **Use `leastSquares`**, which §74.6(d) measures as at least as good on this problem. |
 | `divSchemes { ... skewCorrected; }` | Still "recognised, not implemented". The convection face value is a different quantity from the diffusive one and §11's deferred correction has its own limiter structure. |
 | `interpolationSchemes { skewCorrected; }` | Still refused; `linear` is the only supported entry. |
 | `snGradSchemes { skewCorrected; }` **on a mesh with a skewed CYCLIC couple** | The skewness term is internal-face only. A cyclic couple can be skewed and is **not** corrected — the boundary half of `fvLapNonOrth` gets `k` but no `s_f`. Not detected and not refused at run time; recorded here as a limitation. |
@@ -20323,7 +16565,7 @@ mesh.
 
 ### 74.8 The cuFFT direct Poisson path: excluded, and the exclusion measured
 
-§43's direct Poisson solve transforms, divides and transforms back. That works
+§8.5's direct Poisson solve transforms, divides and transforms back. That works
 because on a uniform Cartesian box the discrete operator is a Kronecker sum of
 three one-dimensional operators. **A mesh with a 2:1 interface is not such a
 box, and the FFT path is excluded from it — not untested, excluded.**
@@ -21689,8 +17931,9 @@ the Eulerian one, and they land in three different equations:
 
 all built from one per-cell deposit, `mdot'''_P`, gathered by §67's CSR walk in
 the kernel §68 already launches. **Nothing in any solver learns that parcels
-exist**: (77.1) goes through the whole-field explicit seam §61.2's soot source
-already uses, (77.2) through §18's energy registry, and (77.3) through the one
+exist**: (77.1) goes through the whole-field explicit seam
+`ScalarTransport::correct_with_source` provides, (77.2) through §18's energy
+registry, and (77.3) through the one
 `Energy::target_divergence` seam §25.3 says the SIMPLE/PISO loop changes in.
 
 Two of this section's four findings are about which of those three is not what
@@ -21970,7 +18213,7 @@ iteration when a mass source is present and none when it is not.
 | 12 | **Gate 77-E**, measured: an empty pool with mass coupling ON deposits `+0.0` into all four arrays | `gate_77e_an_empty_pool_couples_exactly_zero_vapour` | every bit |
 | 13 | and a cell with no parcels in a coupled spray is bitwise unmoved | `ofgpu-validate` | every bit |
 | 14 | **Gate 77-E**, end to end: an empty pool with mass coupling ON leaves the SOLVED `Y_v` and `(div u)_target` bit for bit where a run with no coupling left them | `gate_77e_a_coupled_empty_pool_leaves_the_gas_bitwise_where_it_was` | every bit |
-| 15 | (77.1) reaches the species field it is handed to, exactly, through §61.2's seam | `the_vapour_source_reaches_the_species_field_it_is_handed_to` | `<= 1e-11` |
+| 15 | (77.1) reaches the species field it is handed to, exactly, through that seam | `the_vapour_source_reaches_the_species_field_it_is_handed_to` | `<= 1e-11` |
 | 16 | **Gate 77-D**: ASHRAE's adiabatic saturation | `ofgpu-validate`; `the_gas_moves_along_the_adiabatic_saturation_line` | **PASSES**, `-0.117 K` — §77.10 |
 | 17 | and the wet-bulb temperature is an invariant of the process, as ASHRAE says | the same | `0.117 K` drift over 3 s |
 | 18 | condensation reverses every sign, which is why neither source is implicit | `condensation_reverses_every_sign_and_is_why_the_sources_are_explicit` | 0 defects |
@@ -22100,9 +18343,9 @@ and the suite by 10 tests.
 
 * **Let the gas move.** The three sources are deposited and registered; no
   driver in this repository calls them, because §13.4.2 forbids adding a case
-  block before the driver that would read it. `ofgpu-fire` still runs without a
+  block before the driver that would read it. `ofgpu-lowmach` still runs without a
   dispersed phase, and every measurement in `SPEC-LIT` and
-  `docs/07-fire-solver.md` is unmoved. The gates run the couplings against a
+  `docs/07-lowmach-solver.md` is unmoved. The gates run the couplings against a
   gas the test advances itself, which is enough to measure conservation and not
   enough to measure a spray.
 * **Vary the molar mass.** §25's gas has one `W`, so adding water vapour does
@@ -23469,6 +19712,13 @@ says that instead.
 
 ## 80. The citation audit — making a source comment unable to name a section that does not exist
 
+**A note on the evidence below.** §80.5 and §80.8 are the forensic record of
+what the audit found on the runs that built it, and some of the symbols they
+quote — `(64.8)`, `S61.3a`, `§62.6`'s `(S36.1)` — name sections that have since
+left this engine with the reacting-medium physics they specified. The findings
+are kept verbatim because they are evidence of a defect CLASS, not pointers;
+the audit itself reads the document on disk and is green against it.
+
 `NOTICE`, `PROVENANCE.md` and both READMEs make claims about this repository,
 and every one of those claims is checked by a test. `lib.rs`'s
 `provenance_audit` walks the four roots `NOTICE` names, reads the file count
@@ -23598,7 +19848,7 @@ else's numbering:
     /// The explicit non-orthogonal correction of the laplacian (Jasak §3.4.3).
     //!   Saad, *Iterative Methods*, 2nd ed. (2003), §6.7 (PCG) ... §12.4
     //! J. H. Ferziger, M. Perić, *Computational Methods*, §7.5
-    /// as reported in `docs/07-fire-solver.md` §1.1's LAST subsection
+    /// as reported in `docs/07-lowmach-solver.md` §1.1's LAST subsection
 ```
 
 There is no §4.2, §3.4.3, §6.7, §7.5 or §12.4 in this document, and there
@@ -23640,9 +19890,9 @@ work       Incropera
 work       Modest
 work       Numerical Recipes
 document   docs/05-io-redesign.md
-document   docs/07-fire-solver.md
+document   docs/07-lowmach-solver.md
 reserved   99   the invented gate addresses §69's registry tests cite
-ambiguous-ceiling 972
+ambiguous-ceiling 651
 ```
 
 Four properties are tested, not asserted:
@@ -23650,9 +19900,9 @@ Four properties are tested, not asserted:
 1. **`work` is a promise this audit cannot keep, and says so.** Patankar's §4.2
    is Patankar's; no copy of it is in this repository and nothing here can
    check it. A `work` entry therefore *excuses* a citation. A `document` entry
-   does not: `docs/05-io-redesign.md` and `docs/07-fire-solver.md` are parsed
+   does not: `docs/05-io-redesign.md` and `docs/07-lowmach-solver.md` are parsed
    for their own headings and the citation is resolved against them, so
-   `docs/07-fire-solver.md §1.1` is checked and would fail if that document
+   `docs/07-lowmach-solver.md §1.1` is checked and would fail if that document
    were reorganised.
 2. **A `document` that does not load fails, rather than excusing everything.**
    The distinction in (1) is worth exactly as much as the file path is
@@ -23685,7 +19935,7 @@ are the reason the enforceable rule is the shape it is:
 * **Gloss agreement.** Where a comment writes ``§NN.M's `word` ``, require
   `word` to occur in §NN.M's own body. Measured over the 872 possessive glosses
   in this tree: **81.1 % match**, 165 misses, essentially all benign
-  (`§18's registry`, `§9's face`, `§28's radiationKernels`). A gate with a
+  (`§18's registry`, `§9's face`, `§26's energyKernels`). A gate with a
   19 % false-positive rate is a gate that gets deleted.
 * **Heading anchoring.** Require every symbol cited from three or more files to
   quote at least one distinctive word of its own heading somewhere. Measured:
@@ -23728,10 +19978,13 @@ ambiguous token three ways, and nothing could tell them apart.
 > is ASCII-only, `(SPEC-LIT NN.M)` for the subsection and `(SNN.M)` for the
 > equation. All four resolve to exactly one thing.
 
-**972 today**, 237 of them in `validate.rs` alone, then 66 in `s2s.rs`, 58 in
-`s2s/tests.rs`, 44 in `radiation.rs`, 43 in `fire.rs` and 41 in `parcels.rs`.
-The ceiling is not a target, it is a ledger: rewriting 972 citation sites is
-not this section's work, and pretending they are fine is not either. What it
+**972 when this was written**, 237 of them in `validate.rs` alone, then 66 in
+`s2s.rs`, 58 in `s2s/tests.rs`, 44 in `radiation.rs`, 43 in the reacting-medium
+driver and 41 in `parcels.rs`. **651 now**: the ceiling came down by 321 when
+the reacting-medium physics left the engine, and it came down because a ratchet
+that keeps its old slack is not a ratchet. The ceiling is not a target, it is a
+ledger: rewriting the remaining sites is not this section's work, and
+pretending they are fine is not either. What it
 buys immediately is that the *next* §77 cannot be written, because the next
 file to add one of these fails the build.
 
@@ -23801,7 +20054,7 @@ kinds**:
 |---|---|---|
 | **Renumbered** — the §77 defect exactly | 2 | `radiation.rs` cited `(64.8)` for the banded diffusion-limit gate. §64 defines equations up to **(64.7)**, and §64.5's own two rows for that test say **(64.6)**. Both corrected. |
 | **Wrong document** — a citation that reads as this document's and is not | 4 | `fire.rs` and `restart.rs` cited `§4.6` for the `.mcr` restart format, which is `docs/05-io-redesign.md §4.6`; `cuda/fv.cu` cited `(S3.4.2)` on a continuation line of Jasak's bibliography entry; `fvdom.rs` cited Modest's `(9.24)` two lines below his name. |
-| **Unattributed** — the citation names no document and a reader cannot tell | 7 | `S75.3a`, `S61.3a` and `S61.3b` name the lettered sub-blocks §75.3(a), §61.3(a) and §61.3(b) in a spelling this document does not use; four SPEC-LIT citations in `validate.rs` (§33.3, §61.8, `S26.1`, `S13.4.1`) sit on lines that had just named `docs/07-fire-solver.md`, where a human reader has exactly the scanner's problem. |
+| **Unattributed** — the citation names no document and a reader cannot tell | 7 | `S75.3a`, `S61.3a` and `S61.3b` name the lettered sub-blocks §75.3(a), §61.3(a) and §61.3(b) in a spelling this document does not use; four SPEC-LIT citations in `validate.rs` (§33.3, §61.8, `S26.1`, `S13.4.1`) sit on lines that had just named `docs/07-lowmach-solver.md`, where a human reader has exactly the scanner's problem. |
 
 All thirteen are corrected, and the audit is green. Three more were fixed on
 the way even though nothing flagged them — `cuda/fv.cu`'s `(S3.3)` and
@@ -23813,8 +20066,8 @@ Thirteen is a smaller number than the brief expected — it guessed at
 other 77 sections were, on the whole, written correctly. **The finding is not
 the thirteen; the finding is the 972.** The existence check was never going to
 catch the defect that keeps recurring, because a renumbered citation still
-exists and still resolves. What produces the recurrence is that 972 citation
-sites use a spelling that resolves two ways, and that number was not known
+exists and still resolves. What produces the recurrence is that that many
+citation sites use a spelling that resolves two ways, and that number was not known
 until this section counted it.
 
 The second finding is smaller and sharper, and it is the one no existence check
@@ -23866,8 +20119,8 @@ and the sentence is true of both.
 **2. A registry `document` that did not load excused every citation into it.**
 §80.3 draws its central distinction between a `work`, which is excused, and a
 `document`, which is checked. Both took the same branch when the file could not
-be read. Hiding `docs/07-fire-solver.md` and re-running the audit turned a
-deliberately broken `docs/07-fire-solver.md §143.9` from a failure into a pass,
+be read. Hiding `docs/07-lowmach-solver.md` and re-running the audit turned a
+deliberately broken `docs/07-lowmach-solver.md §143.9` from a failure into a pass,
 with nothing said — one `git mv` away from a promise that had silently stopped
 being kept. A missing `document` now fails its citations, and
 `a_registry_document_is_read_not_merely_excused` fails first and names it.
@@ -23974,7 +20227,7 @@ Until this section that guarantee was guarded in **five** places —
 `solver.rs`, `models/k_epsilon.rs` and the three parcel modules — while §38
 through §79 added kernels across rheology, contact angle, conjugate heat,
 surface-to-surface radiation, fan curves, psychrometrics, Spalart-Allmaras, the
-DES family, soot, WSGG, exact summation, AMR, parcels, evaporation, vapour
+DES family, radiation, exact summation, AMR, parcels, evaporation, vapour
 coupling and wall impact. Nothing said which modules were covered, so nothing
 could say which were not.
 
@@ -24178,9 +20431,14 @@ that; only reading the gate can.
 
 ### 81.9 The gates, and what they measured
 
-Thirty-seven of fifty-four modules resolve to gated. Measured on an RTX 5070
-Ti, CUDA 13.3, default `f64`; `nodes` is `GraphShape::total`, and every row
-replayed three times bit for bit.
+Thirty-seven of fifty-four modules resolved to gated when this was measured, on
+an RTX 5070 Ti, CUDA 13.3, default `f64`; `nodes` is `GraphShape::total`, and
+every row replayed three times bit for bit. **Five of the rows below - the
+reaction step, the P1 radiation correction, the WSGG band update, the soot
+correction and the discrete-ordinates refusal - left the engine with the
+reacting-medium physics, and §81.14 carries the census as it stands now.** The
+table is left as measured because what it is quoted for is the SHAPE of the
+population, and the rows that left do not change it.
 
 | module | gate | nodes (kernel / memset) | values compared |
 |---|---|---|---|
@@ -24196,11 +20454,11 @@ replayed three times bit for bit.
 | `cht.rs` | `the_solid_side_iteration_replays_bitwise` | 142 (131 / 11) | 42 |
 | `energy.rs` | `the_energy_correction_replays_bitwise` | 139 (128 / 11) | 42 |
 | `models/spalart_allmaras.rs` | `the_spalart_allmaras_correction_replays_bitwise` | 132 (121 / 11) | 128 |
-| `soot.rs` | `the_soot_correction_replays_bitwise` | 126 (115 / 11) | 192 |
-| `participating.rs` | `the_p1_radiation_correction_replays_bitwise` | 108 (97 / 11) | 192 |
+| `soot.rs` **(left)** | `the_soot_correction_replays_bitwise` | 126 (115 / 11) | 192 |
+| `participating.rs` **(left)** | `the_p1_radiation_correction_replays_bitwise` | 108 (97 / 11) | 192 |
 | `s2s.rs` | `the_s2s_exchange_replays_bitwise` | 29 (28 / 1) | 42 |
-| `wsgg.rs` | `the_wsgg_update_replays_bitwise` | 17 | 640 |
-| `combustion.rs` | `the_combustion_step_replays_bitwise` | 17 | 320 |
+| `wsgg.rs` **(left)** | `the_wsgg_update_replays_bitwise` | 17 | 640 |
+| `combustion.rs` **(left)** | `the_combustion_step_replays_bitwise` | 17 | 320 |
 | `models/les.rs` | `the_les_correction_replays_bitwise` | 5 | 64 |
 | `psychro.rs` | `the_psychrometric_update_replays_bitwise` | 1 | 320 |
 | `models/des.rs` | `the_des_correction_replays_bitwise` | 1 | 192 |
@@ -24219,9 +20477,9 @@ now names, and it holds the claim `README.en.md` actually makes.
 
 A gate may live anywhere in the tree — the registry looks its name up across
 `src/`. Most live in `src/capture/gates.rs` because most want the same three
-lines of scaffolding; `soot`, `energy`, `species`, `combustion`, `cht`, `s2s`
-and `fan` live with their own modules, because those modules' test scaffolding
-is private to them. Both placements are exercised, deliberately.
+lines of scaffolding; `energy`, `species`, `cht`, `s2s` and `fan` live with
+their own modules, because those modules' test scaffolding is private to them.
+Both placements are exercised, deliberately.
 
 ### 81.10 Three modules were fixed, and what they had in common
 
@@ -24232,8 +20490,8 @@ per iteration, purely to be reported.
 
 | module | what was read back | what it cost |
 |---|---|---|
-| `wsgg.rs` | `n_floored` — how many cells the `kappa` floor touched, one `device_sum` + `download` per band | the whole radiation iteration of every WSGG fire case |
-| `combustion.rs` | `n_clipped` and `n_extinguished` (§43.3) | the whole reaction step |
+| a spectral radiation module | `n_floored` — how many cells the absorption floor touched, one `device_sum` + `download` per band | the whole radiation iteration of every banded case |
+| a reaction module | `n_clipped` and `n_extinguished` | the whole reaction step |
 | `s2s.rs` | §50.10's three reported numbers and the fixed-point residual, computed by pulling four cluster-sized arrays back and reducing them **on the CPU** | the whole enclosure-radiation iteration |
 
 Each is now behind a flag that **defaults to on**, so every existing run
@@ -24351,13 +20609,13 @@ never the consideration.
 | 1 | a host round-trip inside a capture fails **naming the call** | `refuse_during_capture`; every gate in §81.9 would have failed with it otherwise, and three did before §81.10 |
 | 2 | a captured graph is pure device work | (81.2) in the protocol; `GraphShape::is_pure_device_work` |
 | 3 | nothing escaped the captured stream | (81.4), asserted on every gate |
-| 4 | replay is bitwise the per-launch path | (81.5), `R = 3`, on all 36 gated modules |
+| 4 | replay is bitwise the per-launch path | (81.5), `R = 3`, on every gated module |
 | 5 | every device module is classified | `every_device_module_is_classified`: population(disk) `==` registry keys, both directions |
 | 6 | a gate names a test that exists and captures | `every_gate_names_a_test_that_runs_the_protocol` |
 | 7 | `Via` terminates and cannot launder coverage | `every_via_chain_terminates`; a chain ending at `Ungated` counts as ungated |
 | 8 | the ungated debt only falls | `the_ungated_debt_is_within_the_published_ceiling`, ceiling 3 |
 | 9 | `launch_builder` is the only launch path | `no_other_launch_path` |
-| 10 | the three refusals are refusals **today** | `the_two_refusals_are_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call` |
+| 10 | the refusals are refusals **today** | `the_refusal_is_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call` |
 | 11 | defaults are bitwise unchanged | by construction: `mod capture` is `#[cfg(test)]`; the guard adds a relaxed atomic load and no arithmetic; §81.10's three flags default to on |
 
 ### 81.14 Validation
@@ -24365,13 +20623,18 @@ never the consideration.
 The registry as the tests print it:
 
 ```
-  CUDA-graph capture registry (50 modules)
-     36  gated
+  CUDA-graph capture registry (48 modules)
+     32  gated
      10  refused, by name
-      1  outside the iteration
+      3  outside the iteration
       3  UNGATED
     ungated: src/pressure/fft.rs, src/pressure/mod.rs, src/simple.rs
 ```
+
+It read `50 / 36 / 10 / 1 / 3` when §81 was written and the difference is not a
+regression: five modules left with the reacting-medium physics, three rows that
+were miscounted as one `outside` are three, and the ungated debt is where it
+was. The ceiling only falls, and it did not have to.
 
 The three ungated, named because they should be:
 
@@ -24628,14 +20891,14 @@ association, same order, correctly-rounded `sqrt` and division on both sides
 
 nvcc contracts `a*b + c` into a single fused multiply-add by default — one
 rounding where the host does two. Everywhere else in this crate that is
-accepted and *measured*: §28.5 and §67.11 both record device answers that
-differ from the host's in the last bit for exactly this reason, and both say so
-rather than smoothing it over, because there the device is the reference and a
-fused product is simply the better answer. Here there is nothing to be tolerant
+accepted and *measured*: §67.11 records device answers that differ from the
+host's in the last bit for exactly this reason, and says so rather than
+smoothing it over, because there the device is the reference and a fused
+product is simply the better answer. Here there is nothing to be tolerant
 with, so `cuda/meshgeom.cu` is compiled with `-fmad=false`.
 
 That flag is passed **by name**, to the units in `build.rs::FMAD_OFF_UNITS`,
-never blanket-applied — §28.5's and §67.11's kernels depend on the contraction.
+never blanket-applied — §67.11's kernels depend on the contraction.
 `the_translation_unit_is_compiled_with_fmad_off` reads `build.rs` off disk and
 fails if `meshgeom.cu` leaves the list, if the flag disappears, or if it stops
 being consulted per unit.
@@ -25716,453 +21979,80 @@ table.
 
 ---
 
-## 85. The flame that could not fire — the species mass budget, and Gate 61-A's verdict on a burner that reaches its own threshold
-
-§61.8's **Gate 61-A** — the `laminarSmokePoint` model's predicted post-flame
-soot yield (61.7) against Tewarson's measured `0.024 kg/kg` for propane —
-missed **totally**: `0.000` against `0.024`, because **0 of 32 768 cells** on
-`cases/burnerPlume.jsonc` reached the model's own `1375 K` formation
-threshold. §61.7 predicted that collapse before §61 was written, §61.8 recorded
-it, and §61.8's own diagnosis was "the model works and the mesh is too cold for
-it".
-
-**The mesh was not the reason.** This section measures what was, and the answer
-is not in §61 at all: `Species` is handed `CaseControls::turb` whole, and
-`ScalarTransport` reads its under-relaxation out of that struct's `k_relax` —
-**the turbulence kinetic energy's factor** — so `cases/burnerPlume.jsonc`,
-which names `k: 0.5` for its k-epsilon model, was under-relaxing `Y_F`, `Y_O2`,
-`Y_P` and `Y_s` by the same 0.5. In a non-iterative transient splitting (§14)
-there is no outer iteration for a relaxed equation to converge in, so that
-factor multiplies the rate at which fuel enters the domain's books at all.
-**42 % of the propane that crossed the burner never appeared anywhere.**
-
-With the species relaxation named, the same solver on the same models carries a
-resolved burner **over** the 1375 K threshold: 296 of 262 144 cells, and a
-predicted yield of `0.0124 kg/kg` against the measured `0.024` — inside the
-factor of two Gate 61-A asks for. **This section does not report that as a
-pass**, because the leg that produces it exports 4.56 kW of unburnt fuel
-against a 2.95 kW supply, and §85.7 says why.
-
-**Written from:** the measurements below, this document's §14 (the
-non-iterative splitting), §19 (species), §25 (low-Mach), §27 (the
-mixing-controlled rate) and §61 (soot), and Patankar, *Numerical Heat Transfer
-and Fluid Flow* (1980) §6.7 — implicit under-relaxation and the fixed point it
-preserves — which is already this crate's cited source for the pressure
-relaxation. Tewarson's propane yield is quoted through
-`reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex` (NIST,
-public domain), exactly as §61.3 quotes it. **ORIGINAL** otherwise: the defect,
-the measurements and the contract are this project's own. No GPL-licensed
-source was consulted.
-
-### 85.1 What §61.8 believed, and the two halves of it
-
-§61.8 said, in one sentence: *"The model works and the mesh is too cold for
-it."* The first half is right — §61.5's five smoke-point pair rows run on a
-duct inside the model's own windows and every one of them requires the run to
-differ, failing by name if it does not, and they pass. The second half named
-**the mesh** as the reason the fire never reached `1375 K`, and offered mesh
-refinement as what would close the gate.
-
-A refinement sweep was run against that, and reported that refining
-`cases/burnerPlume.jsonc` from 32³ to 64³ moved the peak temperature from
-816.9 K to 883.3 K and left the count above 1375 K at **zero**. That reading is
-reproduced here — 816.92 K at 32³, and the same zero — and it is **not
-evidence about resolution**, because every run in it was deleting 42 % of its
-own fuel before the first cell could get hot. §85.6 re-runs the sweep with that
-removed, and it says the opposite.
-
-### 85.2 Where the flame is: a ladder by volume, not by cell count
-
-A count of cells above a threshold is not a statement about a fire on a mesh
-whose cells differ in size: a graded mesh packs its small cells where the
-action is, so a cell-count fraction reports a hot region growing under
-refinement while the fire has not moved. The burner report's ladder is a
-fraction of **volume**:
-
-```text
-above(bar) = ( sum over cells with T > bar of V_c ) / ( sum over all cells of V_c )
-```
-
-reported at 500, 700, 1000, 1375 and 1600 K — the last two being the
-smoke-point model's own formation threshold and its peak — beside the peak
-temperature, the cell that holds it, and that cell's `Y_F`, `Y_O2` and
-`q'''_c`. It is printed whether or not a soot model is selected, because the
-question it answers ("is this mesh resolving a flame?") is §27's and not §61's.
-
-`the_flame_ladder_is_by_volume_and_not_by_cell_count` builds the same block
-twice — uniform, and graded one-sided — and puts the same physical field on
-both: the two fractions are one number to the last bit on the uniform mesh and
-differ by more than 0.05 on the graded one, where only the volume fraction
-still measures half a block.
-
-### 85.3 Where the fuel went: the budget that has to close
-
-A combustion efficiency of 35 % is two different cases with the same number —
-fuel leaving unburnt, or fuel piling up inside — and a third, which is the one
-that was actually happening. The burner report closes §27's own fuel budget in
-the currency the measurement is published in, kilograms:
-
-```text
-supply  =  burnt  +  efflux  +  d(resident)/dt  +  (what is left over)
-```
-
-with `supply` and `efflux` the SAME reduction read in two directions:
-
-```text
-mdot_Y(patch, outward) = sum over faces f of patch of  max(+-phi_f, 0) * rho_f * Y_f
-```
-
-`Sf` is outward, so an outflow is `phi > 0` and an inflow is `phi < 0`, and an
-`inletOutlet` patch carrying flow both ways gives two different, both
-meaningful, numbers. `burnt` is `integral q'''_c dV / dh_c` — what §27 burnt,
-not what the inlet supplied — and `resident` is `integral rho Y_F dV`.
-
-**On `cases/burnerPlume.jsonc`, quasi-steady at 1200 steps, the leftover is two
-thirds of the fire:**
-
-| term | measured |
-|---|---|
-| supply, metered off the `inlet` patch | **20.9739 kW** |
-| burnt (§27's own `q'''_c`) | 7.4452 kW |
-| left the domain unburnt | 6.67e-7 kW |
-| resident, and unmoving | 0.0295 g (1.368 kW-seconds) |
-| **unaccounted** | **13.5 kW, 64 % of the supply** |
-
-### 85.4 One time step, for every equation
-
-`CaseControls::turb.delta_t` is lowered from the case's `run.deltaT`, and that
-is the `ddt` of every equation built on `RasCore`: `k`, `epsilon`, §19's
-species and §61's soot. `ofgpu-fire` takes its run mode from `-endTime` /
-`-deltaT` and said so in its own banner — while six equations took it from the
-file. A case naming `run.deltaT 0.005` and run with `-deltaT 0.001` advanced
-its flow five times for every step its fuel took, and no printed number said
-so.
-
-The driver assigns the step in force to `cc.turb.delta_t` before any equation
-is built, and **reports** a disagreement rather than leaving it to be
-discovered in a factor of five. Every case in this tree names exactly the
-`deltaT` its own documented command passes, and every steady case names `1.0`,
-so this moves no published number —
-`fire_tests::the_time_step_in_force_is_the_one_the_run_prints` measures that
-rather than asserting it.
-
-### 85.5 The species' own under-relaxation, and what it was taking instead
-
-`ScalarTransport::correct` under-relaxes with `self.core.ctrl.k_relax` and
-solves with `self.core.ctrl.k_solver`, because `TurbulenceControls` has no slot
-for a passive scalar and the module's own doc says so. `Species::new` and
-`Soot::new` are handed `cc.turb` whole. So **`numerics.relaxation`'s entry for
-`k` was the under-relaxation of every species mass fraction**, and nothing
-printed it.
-
-That is the substitution `fire_controls`'s own doc calls the mistake to avoid —
-*"Reading one equation's entry for another"* — and it is the **fifth** instance
-of §13.4.1's defect class in that one function.
-
-**Why it is not a small error.** Patankar's implicit under-relaxation preserves
-the fixed point: at convergence the relaxed equation and the original have the
-same solution, which is what makes it safe in an iterated steady solve. A
-non-iterative transient splitting has no iteration to converge in. For a cell
-filling with fuel at influx `F` and volume `V`, one relaxed step gives
-
-```text
-Y = Y_old + alpha * dt * F / V
-```
-
-— the cell fills at `alpha` times the rate, every step, for ever.
-
-**Measured, and the cleanest measurement in this section**, because it removes
-every other term at once: `cases/burnerPlume.jsonc` with the reaction switched
-off (`CEDM 1e-12`), so the domain stays isothermal at 293.15 K to the printed
-digit and `rho` is uniform at 1.2041 kg/m³; nothing crosses an outlet
-(`< 1e-20 kW`); and the only thing that can happen to the fuel is that it
-accumulates. Its own burner admits **2.709 g** in 6 s:
-
-| `relaxation.k` | resident fuel after 6 s | fraction of what entered |
-|---|---|---|
-| 0.25 | 0.8186 g | **30.2 %** |
-| 0.5 (what the case ships) | 1.5687 g | **57.9 %** |
-| 1.0 | 3.0562 g | 112.8 % |
-
-Proportional to the factor, to the accuracy a filling transient allows
-(1 : 1.92 : 3.73 against 1 : 2 : 4). And it is not confined to an inert test —
-on the live fire, halving the same factor halves the fire: combustion
-efficiency `35.4976 %` at 0.5 against `19.0153 %` at 0.25, peak temperature
-816.92 K against 600.41 K.
-
-**The contract.** `FireControls` gains `species_relax`, resolved by
-`num.relax("Y", cc.turb.k_relax)` — **the fallback is what the species took
-before that line existed**, so a case naming no `"Y"` builds the identical
-struct and every published number is bitwise unmoved **by construction**. The
-run prints the factor and its provenance, so the substitution cannot be
-invisible again:
-
-```text
-relaxation   U 0.7, p 0.3, T 0.5, Y_i 0.5 (INHERITED from k - this case names no "Y")
-relaxation   U 0.7, p 0.3, T 0.5, Y_i 1 (named)
-```
-
-The soot equation takes the same factor, because `Y_s` is a species equation in
-everything but the name and giving it a different relaxation from the fuel that
-feeds it would be a second silent substitution beside the one this removes.
-
-### 85.6 The refinement sweep, re-run
-
-§85.1's sweep is re-run on `cases/burnerPlumeResolved.jsonc`'s geometry with
-`"Y": 1.0` named and §19's own species convection, 4 s at `deltaT 0.0015`:
-
-| cells | peak T | volume > 1375 K | cells > 1375 K | comb. efficiency |
-|---|---|---|---|---|
-| 32³ | 1350.98 K | 0 % | **0** | 97.95 % |
-| 48³ | 1379.01 K | 0.0217 % | **24** | 95.51 % |
-| 64³ | 1394.60 K | 0.1129 % | **296** | 107.28 % |
-
-**Refinement moves it, monotonically, and it is what carries the model over its
-own threshold.** §61.8's retracted claim that refinement leaves the count at
-zero was measured with §85.5 deleting 42 % of the fuel first.
-
-**One caveat, stated because it is load-bearing.** The inlet region snaps to
-cell boundaries, and the 0.1 m window is 6.4 / 9.6 / 12.8 cells at these three
-meshes: 32³ and 64³ both meter **2.94945 kW** off the patch and 48³ meters
-**3.6413 kW**. The 32³ → 64³ comparison is at constant fuel supply; the 48³ row
-is a 23 % larger burner and is here for its shape, not its level.
-
-`T` at 0.5 is load-bearing for stability in that case and is **reported** as
-such rather than presented as a choice: `T` at 1.0 — which is what the same §14
-argument would ask for, and what `U` and `p` get there by having no entry at
-all — makes it diverge inside 100 steps at every `deltaT` tried.
-
-### 85.7 What is left: the budget that still does not close, and what is exonerated
-
-**Radiation is exonerated, by measurement.** `cases/burnerPlume.jsonc` at 32³,
-1200 steps, **all three legs on §19's own bounded species convection** so that
-the only thing changing is the radiation:
-
-| radiation | peak T |
-|---|---|
-| P1 gray, `a = 0.5`, `chi_r = 0.35` (the case as shipped) | **816.92 K** |
-| the same, with the radiant-fraction floor at zero | **1015.50 K** |
-| no `radiation` block at all | **996.35 K** |
-
-The most that can be bought by touching radiation on this case is **+198.6 K**,
-and the flame is still **359 K** short of the model's threshold. It is not the
-reason. (The middle row being *above* the third is measured and not a
-transcription: with P1 on at `chi_r = 0` the medium absorbs as well as emits,
-and the peak cell is a net gainer. Nothing in this section rests on it.)
-
-**A note on how that was measured, because the first attempt was wrong.** The
-three legs above were originally taken with the radiation varied on top of a
-*conservative* species convection while the baseline had §19's bounded default,
-which made the comparison a two-variable one and produced "52 K" for a quantity
-that is 179 K. The rule the rest of this section follows is the one that catches
-it: change one token, and read the run's own printed `div(phi,Y_i)` line back
-before believing the pair.
-
-**The species mass budget is what is left, and it does not close in either
-discretisation.** `ScalarTransport` integrates
-
-```text
-ddt(psi) + div(phi, psi) - laplacian(alpha_eff, psi) = 0
-```
-
-with `phi` **volumetric** — the constant-density transport equation. The
-variable-density species equation is `d(rho Y)/dt + div(rho u Y) = S`,
-equivalently `rho DY/Dt = S`. §27's own listing writes the fuel sink as
-`Y_F -= omega_F dt / rho`, which is `DY/Dt` units, and the `bounded` correction
-subtracts `Y div(phi)` — exactly what turns `div(u Y)` into `u . grad Y`. **So
-§19's BOUNDED default is the form consistent with §27**, and a conservative
-override is the inconsistent one, which is the opposite of what
-`cases/burnerPlumeResolved.jsonc` shipped with before this section.
-
-Both legs, 64³, `"Y": 1.0`, against a supply of 2.94945 kW metered off the
-patch:
-
-| `div(phi,Y_F)` | burnt | efflux | budget | peak T | cells > 1375 K | yield (61.7) |
-|---|---|---|---|---|---|---|
-| `Gauss upwind` | 2.331 kW | 0.109 kW | **−17 %** | 998.6 K | 0 | `0` |
-| `bounded Gauss upwind` (§19) | 3.164 kW | 4.559 kW | **+162 %** | 1394.6 K | 296 | `0.0124` |
-
-**They bracket the truth from opposite sides and neither closes.** The
-conservative leg loses fuel; the bounded leg exports 4.56 kW of it against
-2.95 kW admitted, and 4 s of that imbalance is 0.41 g against the 0.036 g the
-domain actually holds, so it is not an accumulation transient — that domain is
-manufacturing fuel.
-
-**What is NOT claimed**, and this is the sentence this section most wants read:
-that the remaining error has been located. Three candidates are open and none is
-measured here — the `d(rho)/dt` half of the difference above, which `bounded`
-does not touch; the discrete consistency between the low-Mach `(div u)_target`
-of §25.1 and the `div(phi)` the bounded correction actually subtracts; and
-`T`'s own 0.5 relaxation, which makes `rho` lag `T` and therefore makes those
-two disagree by construction. **The next unit of work here is a species
-equation in `rho Y`, not another case file.**
-
-### 85.8 §13.4 contract — what is refused, and by what name
-
-| Setting | What happens |
-|---|---|
-| `numerics.relaxation."Y"` | **Honoured**, by that name, for every species mass fraction and for `Y_s`. Printed with its value. |
-| `numerics.relaxation` naming no `"Y"` | The species take `k`'s factor, exactly as before this section — and the run PRINTS `Y_i <v> (INHERITED from k - this case names no "Y")`, so the substitution is visible rather than silent. **Alternative: name `"Y"`.** |
-| `numerics.relaxation."Y_F"` (or `Y_O2`, `Y_I`, `Y_P`, `N2`) | **Refused by name**, quoting every per-species key it found: the species are one `Species` set sharing one `ScalarTransport` shape and there is one factor, so a per-species entry would be read and dropped. **Alternative: `"Y"`, named in the message.** |
-| an OpenFOAM `relaxationFactors { equations { ".*" 0.7; } }` | Honoured — the pattern legitimately matches every equation including this one, and refusing a pattern that matched would refuse the idiom §13.4 exists to honour. The per-species refusal above is therefore JSONC-only, and §85.12 records the asymmetry. |
-| the species' LINEAR SOLVER | Still `k_solver`, and **still a substitution**. Not fixed here: it is the same one-field-for-another shape, its effect is bounded by the solver tolerance rather than by the physics, and fixing it is a change to solver resolution that this section did not measure. Named here so it is on the record. |
-
-### 85.9 What must hold
-
-| # | Statement | Test |
-|---|---|---|
-| 1 | The ladder is a fraction of VOLUME, and on a graded mesh that differs from the cell-count fraction | `the_flame_ladder_is_by_volume_and_not_by_cell_count` |
-| 2 | The ladder is non-increasing in its threshold, for any field | `the_ladder_thresholds_are_ordered_and_monotone` |
-| 3 | §85.3's two patch terms are ONE reduction read in two directions, each seeing only the faces flowing that way | `the_fuel_budget_reads_one_patch_flux_in_two_directions` |
-| 4 | The time step in force is the one the run prints, for every equation | `the_time_step_in_force_is_the_one_the_run_prints` |
-| 5 | A case naming no `"Y"` gets exactly `k_relax`, so no published number moves | `the_species_relaxation_falls_back_to_the_turbulence_factor` |
-| 6 | A case naming `"Y"` gets that, and the two legs are distinguishable | same test, both legs |
-| 7 | A per-species relaxation key is refused, and the message names both the offending key and `"Y"` | `a_per_species_relaxation_key_is_refused_by_name` |
-
-### 85.10 Gate 61-A, re-run
-
-Configuration: `cases/burnerPlumeResolved.jsonc` as shipped after this section —
-262 144 cells over a 0.5 m cube (`D*/dx = 12.6`), 2667 steps at
-`deltaT 0.0015`, propane, `laminarSmokePoint` at `l_s = 0.162 m`, `M_F = 44.1`,
-`Y_F,1 = 1`, `omega_so,P = 0.85`, P1 gray at `a = 0.5`, `"Y": 1.0`, §19's own
-bounded species convection. Target `y_s = 0.024 kg/kg` (Tewarson, SFPE Handbook
-Table A.40).
-
-| quantity | §61.8's measurement | this section's |
-|---|---|---|
-| cells above the model's 1375 K threshold | **0 of 32 768** | **296 of 262 144** (0.113 %) |
-| peak T | 816.9 K | **1394.6 K** |
-| formation, oxidation | `0`, `0` g/s | `8.449e-4`, `0` g/s |
-| resident soot, `max Y_s` | `0` g, `0` | `1.245` mg, `0.0927` |
-| predicted post-flame yield (61.7) | **`0` kg/kg, exactly** | **`0.0124` kg/kg** |
-| Tewarson's measured propane yield | `0.024` | `0.024` |
-| ratio | — | **1.94, inside the factor of two** |
-| fuel budget on the leg that produced it | 64 % unaccounted | **+162 %** |
-
-**The verdict is that Gate 61-A is still not closed, and the reason has moved.**
-It is no longer "no cell is hot enough" — 296 are, and §85.6 shows refinement is
-what gets them there. It is that the only configuration reaching the model's
-window is one whose species mass budget is out by a factor of 2.6, so the
-`0.0124` is read off cells partly made of fuel that entered nowhere. A number
-inside the target's factor of two, produced by a run that manufactures its own
-reactant, is not a pass, and calling it one would be the worst outcome available
-here.
-
-**Nothing was tuned to reach it.** `l_s`, `M_F`, `Y_F,1`, `omega_so,P`,
-`C_EDM`, `chi_r` and `a` are all at the values §61 and §27 published, and the
-two settings this section changed in the gate case — the species relaxation and
-the species convection scheme — were each chosen by an argument about the
-discretisation and then measured, in both directions, with both legs in §85.7's
-table.
-
-### 85.11 The header that did not reproduce
-
-`cases/burnerPlumeResolved.jsonc` shipped with a header claiming a combustion
-efficiency of **95.86 %** and a peak temperature of **1012.0 K** at the command
-the same header documents, and `fire.rs`'s §85.4 comment repeated the pair.
-**Neither reproduces.** At `-endTime 4.0 -deltaT 0.0015` on the settings that
-header shipped with, this section measures **46.6742 %** and **743.071 K** —
-which is precisely the pair that comment attributes to the *other* leg of its
-own comparison, the one where the case names `deltaT 0.005`. Since §85.4 makes
-the case's `run.deltaT` inert, the two legs of that comparison are the same run
-and cannot both be reproducible; the one HEAD produces is 46.67 %.
-
-The numbers are replaced with measured ones rather than deleted, and this
-subsection exists so that the replacement is visible. The supply term, which is
-metered off the patch by the run itself, agrees to six digits (2.9494 against
-2.94945), so it is the fire and not the case that differs.
-
-### 85.12 Validation, and what is NOT claimed
-
-`ofgpu-validate` gains nothing that runs a fire — a 2667-step 262 144-cell
-burner is not a harness check — and §69's registry entry for Gate 61-A is
-rewritten to the verdict above, with `How::NotRunHere` unchanged.
-
-**What is NOT claimed:**
-
-* **that the species equation is now conservative.** It is not. §85.7's table is
-  the measurement of how far it is from being so, in both directions, and the
-  fix is a species equation in `rho Y` rather than a case setting.
-* **that Gate 61-A passes.** §85.10 says why the `0.0124` is a number and not a
-  verdict.
-* **that the species SOLVER is resolved by name.** It is still `k_solver`;
-  §85.8's last row records it.
-* **that the per-species refusal covers the OpenFOAM format.** It does not, for
-  the reason §85.8 gives, and an OpenFOAM case naming
-  `relaxationFactors { equations { Y_F 0.5; } }` still has it read through the
-  pattern resolver and applied to nothing.
-* **that a locally refined (§75) flame was tried.** It was not: §85.6 gets the
-  model over its threshold on a uniform mesh, and an adapted one would have
-  been a second variable on top of a budget that does not close. §85.7 names
-  what to fix first.
-* **that anything was measured on a second machine.** One RTX 5070 Ti.
-* **that the 48³ row of §85.6 is the same fire as the other two.** It is a 23 %
-  larger burner; §85.6 says so on the row.
-
-## 86. The species equation a fire needs — `d(rho Y)/dt + div(rho u, Y)`, the budget that closes by construction, and the two terms nobody was metering
-
-§85.7 measured a species mass budget that closes in neither discretisation —
-`−17 %` conservative, `+162 %` bounded, against a 2.95 kW supply — and named
-what to fix: *"The next unit of work here is a species equation in `rho Y`, not
-another case file."* This section is that equation, and it finds three things.
+## 86. The species equation in `d(rho Y)/dt + div(rho u, Y)` — the budget that closes by construction, and the two terms nobody was metering
+
+**On the numbers in this section.** The measurement that produced them was a
+reacting-medium case — a burner with a mixing-controlled reaction and a soot
+model above §19's species set — and that physics is **not part of this
+engine**; it is a separate product. What is here, and what every module that
+cites this section uses, is the EQUATION and its two structural claims: that a
+scalar convected by a volumetric flux conserves `sum_c Y_P V_P` and not
+`sum_c rho_P Y_P V_P`, and that the difference between the conservative and
+the `bounded` form is exactly the scalar-weighted discrete continuity residual.
+Both are properties of `ScalarTransport` on any variable-density flow and both
+are held by device tests in this tree (§86.5). The four-leg run that first
+measured them cannot be re-run here, and §86.10 says so rather than leaving a
+reader to discover it.
+
+An earlier measurement recorded a species mass budget that closed in neither
+discretisation — **`−17 %`** conservative, **`+162 %`** bounded, against a
+2.95 kW supply — and named what to fix: *"the next unit of work here is a
+species equation in `rho Y`, not another case file."* This section is that
+equation, and it finds three things.
 
 **One.** `ScalarTransport` integrated `ddt(psi) + div(phi, psi)` with a
-volumetric `phi`, so it conserved `sum_c Y_P V_P` while §85.3's budget meters
-`sum_c rho_P Y_P V_P`. On this fire `rho` runs from 1.204 at the 293.15 K
-inlet to 0.253 in leg A's 1394.6 K peak cell - nearly a factor of five. **`−17 %` is not a discretisation error; it is a currency error**,
-and no amount of refinement touches it.
+volumetric `phi`, so it conserved `sum_c Y_P V_P` while the budget meters
+`sum_c rho_P Y_P V_P`. On that case `rho` ran from 1.204 at the 293.15 K inlet
+to 0.253 in the 1394.6 K peak cell - nearly a factor of five. **`−17 %` is not
+a discretisation error; it is a currency error**, and no amount of refinement
+touches it.
 
-**Two.** §85.3's budget was missing two terms of its own. It reads
+**Two.** The budget was missing two terms of its own. It reads
 `supply = burnt + efflux + d(resident)/dt`, evaluates the first two and prints
 `resident` as a mass rather than a rate — and it has no term at all for the
-**diffusive** flux across the boundary, which on a `fixedValue` fuel inlet is
-not small: **1.73 kW against a 2.95 kW convective supply, 59 % of it.** Both
-terms are computable and both are now printed.
+**diffusive** flux across the boundary, which on a `fixedValue` inlet is not
+small: **1.73 kW against a 2.95 kW convective supply, 59 % of it.** Both terms
+are computable and both are now printed.
 
 **Three.** With the equation in `rho Y` and all four terms on the line, the
-conservative leg closes to **0.87 % of the supply**, against §85.7's `−17 %`,
-and the residue is one reaction step of lag in the *instrument* rather than
-anything in the equation — `the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`
+conservative leg closes to **0.87 % of the supply**, against the `−17 %`, and
+the residue is one source step of lag in the *instrument* rather than anything
+in the equation — `the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`
 holds the discretisation itself to the linear solver's tolerance on a closed
 domain. The **bounded** leg does not close and structurally cannot: it differs
-from the conservative one by exactly `sum_c Y_P R_P`, the fuel-weighted
-discrete continuity residual, which on this fire is **30.1 kW** — ten times the
+from the conservative one by exactly `sum_c Y_P R_P`, the scalar-weighted
+discrete continuity residual, which on that case is **30.1 kW** — ten times the
 supply.
 
-So §85.7's bracket is not two approximations straddling an answer. It is one
-form that conserves fuel mass and one that does not, plus a meter that was
-reading two of its four terms.
+So the recorded bracket is not two approximations straddling an answer. It is
+one form that conserves scalar mass and one that does not, plus a meter that
+was reading two of its four terms.
 
 **Written from:** this document's §3.1 (the bounded correction), §13.3 (the
 `ddt` coefficients), §14 (the non-iterative splitting), §19 (the species set
 and its boundedness clip), §25.1 and §25.3 (the low-Mach divergence constraint
 and the pressure equation that solves it), §26.1 (the same argument one
 equation over — the mass flux, the two halves of its divergence, and which of
-them can carry an imbalance), §27 (the mixing-controlled rate and its
-operator-split sink), §61 (soot), §77.3 (which form of a species source belongs
-to which form of the species equation) and §85 (the measurements this section
-starts from); Patankar, *Numerical Heat Transfer and Fluid Flow* (1980),
+them can carry an imbalance) and §77.3 (which form of a species source belongs
+to which form of the species equation); Patankar, *Numerical Heat Transfer and Fluid Flow* (1980),
 ch. 5.2 — the conservative/non-conservative pair — and ch. 4.2's first basic
 rule, consistency at control-volume faces; Moukalled, Mangani & Darwish, *The
 Finite Volume Method in Computational Fluid Dynamics*, Springer (2016),
 ch. 15.4 — the bounded-convection correction — and its ch. 12 requirement that
 the flux a scalar equation is convected with satisfy the same discrete
 continuity the equation's own time derivative assumes; Ferziger & Perić,
-*Computational Methods for Fluid Dynamics*, 3rd ed. (2002), ch. 5.3. Tewarson's
-propane yield is quoted through
-`reference/fds/Manuals/FDS_Validation_Guide/Experiment_Chapter.tex` (NIST,
-public domain), exactly as §61.3 and §85.10 quote it. **No source was opened
-for this section that this document had not already cited**, and `NOTICE` is
+*Computational Methods for Fluid Dynamics*, 3rd ed. (2002), ch. 5.3. **No
+source was opened for this section that this document had not already
+cited**, and `NOTICE` is
 therefore unchanged. **ORIGINAL** otherwise: the discretisation, the identity
 of §86.4, the two new budget terms and every number below are this project's
 own. No GPL-licensed source was consulted.
 
-### 86.1 What §85.7's two legs actually are
+### 86.1 What the two recorded legs actually are
 
-§85.7's table has two rows and reads as a bracket. Both reproduce at HEAD, to
-every digit §85.7 published, and are re-measured in §86.10 as this section's
-own "before". What they are is not two errors of opposite sign around a right
-answer.
+The recorded table has two rows and reads as a bracket: `−17 %` and `+162 %`
+of the same supply. What they are is not two errors of opposite sign around a
+right answer.
 
 Write the assembled row of §19's equation for cell `P`, Euler, no source, and
 sum over the domain:
@@ -26174,32 +22064,32 @@ sum_c [ (Y_P - Y_P^0) V_P / dt ]  +  sum_c sum_f (+-phi_f Y_f)_P  =  0
 The convection telescopes — every internal face appears twice with opposite
 sign — so the second term is the net boundary outflow of **`phi Y`**, in m³/s
 of mass fraction. The first is the change in `sum_c Y_P V_P`. **Neither is a
-kilogram.** §85.3's budget is metered in kilograms: `rho_f phi_f Y_f` across a
+kilogram.** The budget is metered in kilograms: `rho_f phi_f Y_f` across a
 patch, `rho_P Y_P V_P` resident. The equation conserves one quantity and the
 instrument measures another, and what separates them is the whole of `rho`.
 
 That is the `−17 %`. A currency error has no order of accuracy, so no
-refinement moves it — which is why §85.12 was right that the fix is an
-equation and not a case setting, and how §85.6's sweep could move the peak
-temperature monotonically while the budget stayed broken.
+refinement moves it — which is why the fix is an equation and not a case
+setting, and how a refinement sweep could move the peak temperature
+monotonically while the budget stayed broken.
 
 The `+162 %` is a different thing. `bounded` subtracts `Y_P (div phi)_P V_P`,
 which turns the conservative `div(phi Y)` into the non-conservative
-`phi . grad Y` — the form §27's operator-split sink and §77.3's vapour source
-are both written for. That form has no conservation property to lose: it is a
+`phi . grad Y` — the form an operator-split sink and §77.3's vapour source are
+both written for. That form has no conservation property to lose: it is a
 statement about a material derivative following the flow, and what it costs is
 `sum_c Y_P (div phi)_P V_P`, the fuel-weighted divergence of a flux §25.3
-deliberately does **not** make solenoidal. §85.7 was right that `bounded` is
-the form consistent with §27, and right that the constant-density conservative
-leg is the inconsistent one. What it could not say is that **neither of the two
-forms available to it conserves fuel mass**, because neither is written in fuel
-mass.
+deliberately does **not** make solenoidal. The record was right that `bounded`
+is the form an operator-split sink is consistent with, and right that the
+constant-density conservative leg is the inconsistent one. What it could not
+say is that **neither of the two forms available to it conserves scalar
+mass**, because neither is written in scalar mass.
 
-§86 removes the dichotomy rather than choosing a side. §27's sink is applied as
-an operator-split field update, `Y_F -= omega_F dt / rho`, which is
-`Delta(rho Y_F) = -omega_F dt` at fixed `rho` — consistent with the material
-form AND with (86.1)'s conservative one. It is only the constant-density
-conservative equation that it does not fit.
+§86 removes the dichotomy rather than choosing a side. An operator-split sink
+applied as a field update, `Y -= omega dt / rho`, is `Delta(rho Y) = -omega dt`
+at fixed `rho` — consistent with the material form AND with (86.1)'s
+conservative one. It is only the constant-density conservative equation that
+it does not fit.
 
 ### 86.2 Which flux, and why sharing it is what closes the budget
 
@@ -26242,13 +22132,13 @@ d/dt [ sum_c rho_P Y_P V_P ]  +  sum_b (+-phi_m,b Y_b)  -  D_b  =  0        (86.
        \_____ resident _____/       \__ efflux - supply __/  \_ diffusive _/
 ```
 
-The first term is §85.3's `resident` — the *same* `rho_P Y_P V_P`, cell by
-cell. The second is §85.3's `supply` and `efflux` — the *same*
-`phi_b rho_b Y_b`, face by face, split by sign. §85.3's budget is not an
+The first term is the budget's `resident` — the *same* `rho_P Y_P V_P`, cell
+by cell. The second is its `supply` and `efflux` — the *same*
+`phi_b rho_b Y_b`, face by face, split by sign. The budget is not an
 approximation of (86.3); it IS (86.3), read off the same three arrays. So it
 closes to round-off **whatever the flow is doing** — whether or not the flux is
 mass-conservative, whether or not the mesh resolves anything, whether or not
-the fire is quasi-steady. That is what "by construction" means here: it is a
+the flow is quasi-steady. That is what "by construction" means here: it is a
 property of the discretisation, not of the solution, and
 `the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`
 measures it on a closed domain whose flux is deliberately non-solenoidal and
@@ -26256,7 +22146,7 @@ whose density moves in space and in time.
 
 Had the species equation built its own face density — an entirely reasonable
 thing to do, and invisible afterwards — the `rho_b` in its convection and the
-`rho_b` §85.3's meter reads would be two numbers, the identity above would hold
+`rho_b` the meter reads would be two numbers, the identity above would hold
 for neither, and the budget would improve without closing. That is §19's
 requirement 3 one field up: not "use a conservative flux" but "use *the same*
 one the instrument reads".
@@ -26286,7 +22176,7 @@ shared assembly begins. What is left is two places — the `ddt` and the
 `bounded` correction — and they are the only `match`/`if let` arms §86 adds to
 that function.
 
-That matters beyond tidiness. §85.7's own methodological note is that a
+That matters beyond tidiness. The record's own methodological note is that a
 two-variable comparison produced "52 K" for a quantity that is 179 K, and the
 rule it drew was to change one token at a time. A second assembly for the
 mass-weighted equation would be a second place for a scheme, a boundary
@@ -26341,7 +22231,7 @@ and there is no ideal-gas identity to kill anything.
 
 `sum_c Y_P R_P` is printed by every mass-weighted run, in kW of
 fuel-equivalent, beside the budget it explains and with `R_P`'s L1 norm and
-worst cell. §85.7's first open candidate — *"the `d(rho)/dt` half of the
+worst cell. The record's first open candidate — *"the `d(rho)/dt` half of the
 difference above, which `bounded` does not touch"* — is that first term of
 (86.4), and it is now a number.
 
@@ -26360,8 +22250,8 @@ difference above, which `bounded` does not touch"* — is that first term of
 
 ### 86.6 The default is bitwise what it was, and that is a construction
 
-Every measurement recorded in this document before §86 — §85's four tables,
-§61.8's Gate 61-A, §42's CO, §62's absorption — was taken on the
+Every species measurement recorded in this document before §86 was taken on
+the
 constant-density species equation. A default that silently changed which
 equation the solver integrates would make all of them irreproducible at once,
 so §86 is **opt-in**, by `-speciesEquation rhoY`, and the run prints which of
@@ -26384,7 +22274,7 @@ still converge — so row 5 of §86.5 measures it: three steps of a three-specie
 set through each entry point, compared bit for bit including the inert
 remainder.
 
-The run-level check is §86.10's first two rows: legs A and B reproduce §85.7's
+The run-level check was two full runs of the recorded case: they reproduce its
 two published numbers on a tree that contains all of §86.
 
 ### 86.7 §13.4 contract — what is refused, and by what name
@@ -26394,13 +22284,13 @@ two published numbers on a tree that contains all of §86.
 | `-speciesEquation Y` (and its absence) | **Honoured**, and it is the default: §19's constant-density equation, unchanged. Printed. |
 | `-speciesEquation rhoY` | **Honoured**: (86.1). Printed, on the same block as `div(phi,Y_i)`. |
 | `-speciesEquation` anything else | **Refused by name**, quoting what was given and naming both values that work. |
-| a case key naming the species equation | **Not read, and none exists.** §86 is selected on the command line, beside `-absorption`/`-chiR`/`-radiationModel` — the other legs §85 measured and compared. A case key would have to default to `Y` for the same reason the flag does, so it would buy reachability this already has. **Alternative: `-speciesEquation rhoY`.** Recorded here rather than left to be discovered. |
+| a case key naming the species equation | **Not read, and none exists.** §86 is selected on the command line, beside the other legs the recorded run measured and compared. A case key would have to default to `Y` for the same reason the flag does, so it would buy reachability this already has. **Alternative: `-speciesEquation rhoY`.** Recorded here rather than left to be discovered. |
 | `ddtSchemes` naming `localEuler`, with `rhoY` | **Refused by name.** The local step (§13.2) is a per-cell preconditioner wearing a time derivative's clothes; `d(rho Y)/dt` with a different `dt` in every cell conserves nothing, and (86.4) would be a statement about the preconditioner. **Alternatives named in the message: `Euler`, `backward`, `steadyState`.** |
 | `ddtSchemes` naming `steadyState`, with `rhoY` | Honoured, and the `ddt` half of (86.4) is identically zero — the same no-op it is for the constant-density equation. |
-| `bounded Gauss ...` on `div(phi,Y_i)`, with `rhoY` | **Honoured, and its cost is printed.** It is what §85.6's gate case names, and refusing it would refuse the configuration §85 measured. What it costs is (86.6)'s `sum_c Y_P R_P`, reported in kW beside the budget it explains. **Alternative, on the line above it: the unbounded scheme, which closes (86.5).** |
-| §61's soot `Y_s`, with `rhoY` | **Left volumetric, deliberately.** `Y_s` is transported outside §19's closure by its own `ScalarTransport`, and §61.2's source is `omega_s/rho`-shaped — the non-conservative form. Moving it would be a second unmeasured change on top of the one this section measures, and §86.11 shows the soot field is already the thing that needs looking at next. Named here so it is on the record. |
-| §77's vapour coupling, with `rhoY` | **Cannot arise in this driver** — `ofgpu-fire` has no parcels — and would be wrong if it could. §77.3 derives `S = mdot'''(1 - Y_v)/rho` for §19's non-conservative form; (86.1) wants `mdot'''(1 - Y_v)`, a factor of `rho` larger. §77.3 already states which equation its source belongs to; this row records the second equation it does not belong to. |
-| the species LINEAR SOLVER | Still `k_solver`, still a substitution, exactly as §85.8's last row records. Unchanged here. |
+| `bounded Gauss ...` on `div(phi,Y_i)`, with `rhoY` | **Honoured, and its cost is printed.** It is what the gate case named, and refusing it would refuse the configuration that was measured. What it costs is (86.6)'s `sum_c Y_P R_P`, reported in kW beside the budget it explains. **Alternative, on the line above it: the unbounded scheme, which closes (86.5).** |
+| a scalar transported OUTSIDE §19's closure by its own `ScalarTransport`, with `rhoY` | **Left volumetric, deliberately.** Such a scalar's source is `omega/rho`-shaped — the non-conservative form — and moving it would be a second unmeasured change on top of the one this section measures. Named here so it is on the record. |
+| §77's vapour coupling, with `rhoY` | **Cannot arise in the driver this was measured through** — it has no parcels — and would be wrong if it could. §77.3 derives `S = mdot'''(1 - Y_v)/rho` for §19's non-conservative form; (86.1) wants `mdot'''(1 - Y_v)`, a factor of `rho` larger. §77.3 already states which equation its source belongs to; this row records the second equation it does not belong to. |
+| the species LINEAR SOLVER | Still `k_solver`, still a substitution. Unchanged here. |
 
 ### 86.8 The capture stance
 
@@ -26424,13 +22314,13 @@ have recorded whichever it was on the capture pass.
 
 ### 86.9 The budget's other two terms, and the clip that turned out not to matter
 
-§85.3's budget is `supply = burnt + efflux + d(resident)/dt`, and the run
+The budget is `supply = burnt + efflux + d(resident)/dt`, and the run
 printed the first two as rates and the third as a MASS. There is no fourth
 term at all. Both omissions are now closed, and one of them is large.
 
 **The diffusive flux across the boundary.** `laplacian(rho D_eff, Y)` moves
 species mass across a patch exactly as convection does, and on a `fixedValue`
-fuel inlet it is not a correction: `Y_F` is 1 on the face and whatever the
+inlet it is not a correction: `Y` is 1 on the face and whatever the
 first cell holds inside it, over a half-cell `1/Delta` of 256 m⁻¹. The run now
 reports
 
@@ -26439,24 +22329,24 @@ D_b = sum_b rho_b D_eff,b |Sf_b| Delta_b (Y_b - Y_P)
 ```
 
 with `D_eff,b = nu/Pr + nu_t,b/Pr_t` read off the equation's own coefficients
-and the same `empty`-patch skip the assembly makes. **On this burner it is
-1.73159 kW on leg D, 2.23673 kW on leg A and 2.89011 kW on leg B, against a
-2.94945 kW convective supply — 59 %, 76 % and 98 % of it.** It is not a term §85 got wrong; it is a term no
+and the same `empty`-patch skip the assembly makes. **On that case it is
+1.73159 kW, 2.23673 kW and 2.89011 kW across the three legs that ran it, against a
+2.94945 kW convective supply — 59 %, 76 % and 98 % of it.** It is not a term the record got wrong; it is a term no
 budget in this document has ever had, so every one of them was short by
 something of that size, in both legs and at every refinement.
 
 **`d(resident)/dt`, discretely.** Formed from the same `f0` levels the last
 assembled step differenced — `sum_c V_c (rho_c Y_c - rho^0_c Y^0_c)/dt` — so it
-is that term and not a second opinion of it. `0.0485812 kW` on leg D: the fire
-is quasi-steady at 4 s to within 1.6 % of its supply, which §85 asserted and
+is that term and not a second opinion of it. `0.0485812 kW` on the conservative
+leg: the flow is quasi-steady at 4 s to within 1.6 % of its supply, which the
+record asserted and
 could not show.
 
 **Two lags are accepted and stated.** `Y_b`, `Y_P` and the resident inventory
 are read post-reaction and post-clip while the equation solved with their
 pre-reaction values, so every term above carries one reaction step of error.
-§86.10 measures what that is worth by halving `dt`, and it is
-first order: 0.869 % of the supply at `deltaT 0.0015` and 0.409 % at
-0.00075.
+Halving `dt` measures what that is worth, and it is first order: 0.869 % of
+the supply at `deltaT 0.0015` and 0.409 % at 0.00075.
 
 **§19's boundedness clip is a mass source and nobody was metering it either.**
 `spcClipLedger` accumulates `rho_P V_P (Y_after - Y_before)` per cell over the
@@ -26464,272 +22354,58 @@ whole run — a term that sits OUTSIDE the transport equation, so (86.5) says
 nothing about it. It could only exist once there was a `rho` to meter it with,
 which is §86.1's point again. **Measured, it is nothing:** `0 g` created and
 `0 g` destroyed on the bounded leg, and `-0.00044 g` net over 2667 steps on the
-conservative one, against a resident inventory of `0.0395 g` and `0.25 g` of
-fuel admitted. The clip was the first suspect for leg D's residue and it is
-**exonerated by measurement**, which is why the ledger is kept rather than
-deleted.
+conservative one, against a resident inventory of `0.0395 g` and `0.25 g`
+admitted. The clip was the first suspect for the conservative leg's residue and
+it is **exonerated by measurement**, which is why the ledger is kept rather
+than deleted.
 
-### 86.10 The measurement: four legs, one case, one command each
+### 86.10 What the measurement was, and what is left of it here
 
-`cases/burnerPlumeResolved.jsonc` as §85.10 ships it — 262 144 cells over a
-0.5 m cube, 2667 steps at `deltaT 0.0015`, propane, `"Y": 1.0`, P1 gray at
-`a = 0.5` and `chi_r = 0.35`, `laminarSmokePoint` at `l_s = 0.162 m` — against
-the 2.94945 kW its own `inlet` patch meters. The conservative legs add
-`"div(phi,Y_F)": "Gauss upwind"` and nothing else. One RTX 5070 Ti; each leg is
-one run of about ten minutes.
+The four claims above were measured on a **reacting-medium case**: a burner in
+a 0.5 m cube at 262 144 cells, 2667 steps, run four ways — `Y` (§19) and `rhoY`
+(§86) crossed with `bounded Gauss upwind` and `Gauss upwind` — with the budget,
+the diffusive flux, the clip ledger and `sum_c Y_P R_P` printed on every leg.
+That case, the reaction that drove it and the soot model it carried are a
+separate product and **are not in this engine**, so the run cannot be repeated
+here and its tables are not reproduced.
 
-| # | equation | `div(phi,Y_F)` | burnt | efflux | **§85.7's budget** | peak T | cells > 1375 K | yield (61.7) |
-|---|---|---|---|---|---|---|---|---|
-| A | `Y` (§19) | `bounded Gauss upwind` | 3.16418 kW | 4.55882 kW | **+161.8 %** | 1394.60 K | 296 | `0.0124` |
-| B | `Y` (§19) | `Gauss upwind` | 2.33119 kW | 0.10932 kW | **−17.3 %** | 998.60 K | 0 | `0` |
-| C | `rhoY` (§86) | `bounded Gauss upwind` | 6.18438 kW | 29.2126 kW | **+1100.1 %** | 1604.94 K | 9272 | `0.845` |
-| D | `rhoY` (§86) | `Gauss upwind` | 2.32705 kW | 2.27978 kW | **+56.2 %** | 1505.71 K | 908 | `0.559` |
+What the four legs established, and where each claim now lives:
 
-**A and B are §85.7's own two rows**, reproduced on this tree to every digit
-§85.7 published: `2.331 / 0.109 / −17 %` and `3.164 / 4.559 / +162 %`, with
-`998.6 K`, `1394.6 K`, `0` and `296` cells and the yields `0` and `0.0124`.
-That is the run-level half of §86.6's bitwise claim, and it is why the other
-two rows can be read as a change of equation rather than a change of tree.
-
-**The column above is §85.7's budget, which is the two-term one.** With §86.9's
-other two terms on the line, leg D reads
-
-```text
-supply 2.94945 kW  +  diffusive in 1.73159 kW
-     =  burnt 2.32705 kW  +  out 2.27978 kW  +  d(resident)/dt 0.04858 kW
-residue 0.02563 kW  =  0.869 % of supply  =  0.00055 g/s
-```
-
-**0.87 %, against §85.7's `−17 %` and `+162 %`.** That is the result this
-section exists for. It is not round-off, and §86.9 says what the rest is: one
-reaction step of lag between the fields the equation solved with and the fields
-the meter reads. 
-
-**And that is measured rather than argued, by halving the time step.** An
-operator-split lag is first order in `dt`; a defect in the discretisation would
-not be. The same leg at `deltaT 0.00075` — 5334 steps instead of 2667, nothing
-else changed:
-
-| `deltaT` | residue | as % of supply | peak T | §85.7's budget |
-|---|---|---|---|---|
-| 0.0015 | 0.025630 kW | **0.869 %** | 1505.71 K | +56.2 % |
-| 0.00075 | 0.012052 kW | **0.409 %** | 1510.16 K | +56.0 % |
-
-**The residue halves when `dt` halves — 2.127, against the 2.000 a first-order
-lag predicts — while the solution itself does not move** (4.5 K on the peak,
-0.2 points on the two-term budget). The remaining 0.87 % is therefore in the
-INSTRUMENT and not in the equation: it is the reaction step between the fields
-(86.1) solved with and the fields the meter reads, and it goes to zero with
-`dt` while the discretisation's own conservation
-(`the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`) is
-exact at every `dt`.
-
-**The contrast that makes the point.** Completing the meter is not what closed
-the budget; the equation is. The same four terms on the two constant-density
-legs:
-
-```text
-leg A (bounded)  : 2.94945 + 2.23673  =  3.16418 + 4.55882 + (-0.09215)
-                   residue  -2.44467 kW  =  -82.9 % of supply
-leg B (upwind)   : 2.94945 + 2.89011  =  2.33119 + 0.10932 +   0.02265
-                   residue  +3.37639 kW  =  +114.5 % of supply
-```
-
-Both are wrong by more than their own fuel supply once every term is on the
-line, and they are wrong in opposite directions — the same bracket §85.7 saw,
-widened rather than narrowed by an honest meter, because a complete instrument
-cannot fix an equation that conserves the wrong quantity.
-
-**Leg C is worse than either leg of §85.7, and §86.4 says by exactly how
-much.** The run reports `sum_c Y_P R_P = 30.1242 kW` of fuel-equivalent, with
-`R_P`'s L1 norm `0.0385683 kg/s` and its worst single cell `6.96e-6 kg/s`. On a
-2.95 kW fire the discrete continuity residual is **ten times the fuel supply**,
-and (86.6) says `bounded` is non-conservative by `Y_P` times it. That is not a
-defect §86 introduced: the residual was there in every leg of §85, and a
-volumetric equation had no term that could see the `d(rho)/dt` half of it.
-
-
-**And (86.6) is measured on the fire itself, not only on the unit test.** With
-§86.9's four terms on the line, leg C reads
-
-```text
-supply 2.94945 kW  +  diffusive in 1.70869 kW
-     =  burnt 6.18438 kW  +  out 29.2126 kW  +  d(resident)/dt -0.61893 kW
-residue -30.1199 kW  =  -1021.2 % of supply
-```
-
-against a reported `sum_c Y_P R_P` of **`30.1242 kW`**. The two agree to
-**0.014 %** — four digits, on a 262 144-cell fire, between a number formed from
-the assembled matrix's own two arrays and a number formed from five independent
-domain reductions. That is (86.6) as an identity rather than as an argument,
-and it is the strongest single statement in this section: the bounded leg's
-budget error is not "large", it is `sum_c Y_P R_P` and nothing else.
-
-**Where that residual comes from, named and not separated.** Three
-contributions, in the order this section would attack them:
-
-1. **The lag.** The species equations are corrected before this step's pressure
-   solve, so they convect with `phi^{n-1}` while being weighted by `rho^n` —
-   the segregated ordering §14 chooses, and the one place a mass flux and a
-   density are guaranteed to be a step apart.
-2. **`(div u)_target` is not `d(rho)/dt`.** §25.3's pressure equation enforces
-   `sum_f (+-phi_f)_P = V_P (div u)_target,P` with `(div u)_target` built from
-   §25.1's `Q`. Nothing makes that discretely equal to
-   `-(V_P/rho_P)(a_N rho + a_0 rho^0 + a_00 rho^00)_P`, which is what (86.4)
-   would need. §26.1 measured the same disagreement from the energy side and
-   found it carrying the whole balance gap there too.
-3. **`T`'s 0.5 relaxation.** §85.6 records that `"T": 0.5` is load-bearing for
-   stability on this case and that `1.0` diverges inside 100 steps. A relaxed
-   `T` makes `rho` lag `T`, so the density the `ddt` half differences and the
-   dilatation the flux half carries disagree by construction.
-
-§85.7 listed all three as open candidates and could measure none. This section
-measures their **sum** — that is what `R_P` is — and separates it from the
-discretisation, which is now exact. **It does not separate the three from each
-other, and does not claim to.**
-
-**Re-measured independently, and the check was not a formality.** A later unit
-re-ran all four legs, because the executable that could have produced the table
-above was not built from the sources this section was committed with:
-`ofgpu-fire.exe` stood in the tree at `23:51:19` while `src/bin/fire.rs` — the
-budget instrument itself — together with `src/energy.rs`, `src/species.rs` and
-`cuda/species.cu` were last written at `00:01:25`, ten minutes later. A rebuild
-produces a different executable (`10 282 496` bytes against `10 283 008`), and
-every number in §86.9, §86.10 and §86.11 was re-taken on it, on the same one
-RTX 5070 Ti and from the same two case files.
-
-**Every one of them reproduces, to every digit published.** Legs A and B
-return §85.7's published pair unchanged — `3.16418` / `4.55882` / `1394.6 K` /
-`296` / `0.0124027`, and `2.33119` / `0.109323` / `998.598 K` / `0` / `0` —
-with four-term residues of `-2.44467 kW` (`-82.8858 %`) and `+3.37639 kW`
-(`+114.475 %`), so §86.6's bitwise-default claim holds at run level on this
-build too. Leg D returns `2.32705` / `2.27978` / `1505.71 K` / `908` /
-`0.559312`, a residue of `0.0256296 kW` = **`0.868963 %`** of supply, and a
-clip ledger of `-0.000437361 g`. Leg C returns `6.18438` / `29.2126` /
-`1604.94 K` / `9272` / `0.845206`, a residue of `-30.1199 kW` = `-1021.2 %`,
-and `sum_c Y_P R_P = 30.1242 kW` with `L1 = 0.0385683 kg/s` and worst cell
-`6.96197e-06 kg/s` — so (86.6)'s identity holds to `0.0143 %` on an
-independent build, which is the figure §86.10 states. Nothing in this section
-changed as a result except this paragraph, §86.11's soot rows below, and the
-`localEuler` refusal §86.7 promises, which had lost the backslash joining its
-lines and cited §86.3 where the contract is §86.7's own row.
-
-### 86.11 Gate 61-A, re-run — and the `0.0124` was an accident of the error
-
-§61.8's Gate 61-A asks the `laminarSmokePoint` model's predicted post-flame
-soot yield (61.7) against Tewarson's measured `0.024 kg/kg` for propane.
-
-| leg | §85.7's budget | peak T | cells > 1375 K | yield | ratio to 0.024 |
-|---|---|---|---|---|---|
-| §61.8's original | 64 % unaccounted | 816.9 K | 0 of 32 768 | `0` | — |
-| §85.10's (leg A) | +162 % | 1394.6 K | 296 | `0.0124` | **1.94** |
-| §86's conservative (leg D) | +56 %, and 0.87 % on all four terms | 1505.7 K | 908 | `0.559` | **23.3** |
-
-**This is the finding §85.10 most needs to hear.** §85.10 reported `0.0124`
-against `0.024` — *"inside the factor of two Gate 61-A asks for"* — and refused
-to call it a pass because the leg that produced it had a budget out by 2.6×.
-That refusal was right, and it was right for a stronger reason than it knew:
-**with the budget closed to 0.87 %, the same model, on the same case, with
-nothing else touched, predicts `0.559 kg/kg` — 23 times the measured value.**
-The near-agreement was not a model that was almost working on a run that was
-not; it was an artefact of the missing reactant.
-
-**And leg D's soot field cannot be read as a result either.** It carries
-`max Y_s = 1.626` — a mass fraction above one — with `0.0236 g` resident and
-`0` oxidation anywhere. Whatever (61.7) is reporting on that field, it is not a
-yield. §61's soot equation is untouched by §86 (§86.7's row says why), so this
-is a statement about `laminarSmokePoint` on a hotter flame, and it is what the
-next unit of work here has to look at.
-
-**And the re-run of §86.10 shows it is worse on leg C, which this section
-quotes in the same table.** Read across all four legs, the soot field degrades
-monotonically with the number of cells over §61.7's own 1375 K threshold:
-
-| leg | equation, scheme | cells > 1375 K | `max Y_s` | formation | as % of the fuel supply | yield (61.7) |
-|---|---|---|---|---|---|---|
-| B | `Y`, upwind | 0 | `0` | `0 g/s` | 0 % | `0` |
-| A | `Y`, bounded | 296 | **`0.0927362`** | `0.000844877 g/s` | 1.3 % | `0.0124027` |
-| D | `rhoY`, upwind | 908 | `1.62562` | `0.0280204 g/s` | 44.1 % | `0.559312` |
-| C | `rhoY`, bounded | 9272 | **`112.302`** | `0.302232 g/s` | 476.0 % | `0.845206` |
-
-**Leg A's soot field is physical and leg C's is not, by three orders of
-magnitude.** Leg C carries `5.77206 g` resident against leg A's `0.001245 g`,
-oxidises `0.189701 g/s` of it, and fires §61's availability clip in `1552` of
-`262 144` cells on the last step alone. So `0.0124` and `0.845` are not two
-values of one quantity: the first is read off a bounded field and the second
-off a field a hundred times out of bounds.
-
-**What the fuel budget says about where that mass comes from.** At
-`dh_c = 4.645e7 J/kg` the `2.94945 kW` supply is `0.0635 g/s` of propane, so
-leg D forms soot at **44 %** of the fuel admitted and leg C at **476 %** of it
-— while leg D's fuel budget closes to `0.869 %`. Those two facts together say
-that `laminarSmokePoint`'s formation term draws on **no metered reactant**:
-(61.5) sets a rate per unit volume, §61.2 adds it to `Y_s`, and nothing
-anywhere subtracts the mass it creates from `Y_F` or from any other field. It
-sits outside (86.5) for exactly the reason §86.9's clip does — it is not a term
-in (86.1) — so a closed fuel budget neither constrains it nor is disturbed by
-it. **This is the mechanism behind the conclusion above**, and it says the next
-unit's problem is not that `laminarSmokePoint` is mistuned on a hot flame but
-that its source has no sink and no reservoir.
-
-**The verdict does not move, and §61.8's reason for it still stands.** §61.8
-records that a closed budget is *necessary and not sufficient*: leg D's flame
-peaks at 1505.7 K, still far below a propane flame's critical flame
-temperature, so the comparison is not like-for-like whatever the budget does.
-Gate 61-A is **still not closed**, the reason has moved from "no cell is hot
-enough" (§61.8) through "the budget is out by 2.6×" (§85.10) to "the budget
-closes and the model is 23× high on a soot field with a mass fraction above
-one", and every one of those three is a different piece of work.
-
-**Nothing was tuned.** `l_s`, `M_F`, `Y_F,1`, `omega_so,P`, `C_EDM`, `chi_r`
-and `a` are at the values §61 and §27 published, and the case file is
-unchanged: the only difference between leg A and leg D is one command-line
-token and one `divSchemes` entry, each measured in both directions in §86.10.
-
-### 86.12 Validation, and what is NOT claimed
-
-`ofgpu-validate` gains nothing that runs a fire, for §85.12's reason: a
-2667-step 262 144-cell burner is not a harness check. The eight rows of §86.5
-are `cargo test` device tests, and §69's Gate 61-A registry entry keeps
-`How::NotRunHere`.
+| claim | held by |
+|---|---|
+| the conservative `rhoY` equation holds `sum_c rho_P Y_P V_P` fixed on a closed domain, to the linear solver's tolerance | `the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`, a device test (§86.5 row 3) |
+| the two forms differ by exactly `sum_c Y_P R_P` | (86.6), and §86.5's rows on the identity |
+| the `Y` default is bitwise what it was | §86.5 row 5, on `Species::correct`'s delegation - and every driver in this tree reaches that call |
+| the budget's four terms are all computable and all printed | §86.9 |
+| the boundedness clip is not a mass source of any size that matters | §86.9's ledger, measured at `-0.00044 g` |
+| the residue is first order in `dt` | §86.9, 0.869 % at `deltaT 0.0015` and 0.409 % at half of it |
 
 **What is NOT claimed:**
 
-* **that the budget closes to round-off.** It closes to **0.87 % of the
-  supply** on leg D, against §85.7's `−17 %`. The DISCRETISATION closes to the
-  linear solver's tolerance — that is row 3 of §86.5, on a closed domain with
-  no reaction and no clip — and the 0.87 % is the operator-split lag between
-  the fields the equation solved with and the fields the meter reads.
+* **that the budget closes to round-off on a real case.** It closed to
+  **0.87 % of the supply** on the conservative leg, against the recorded
+  `−17 %`. The DISCRETISATION closes to the linear solver's tolerance — that is
+  row 3 of §86.5, on a closed domain with no source and no clip — and the
+  0.87 % is the operator-split lag between the fields the equation solved with
+  and the fields the meter reads.
 * **that it closes under both convection schemes.** It does not. (86.6) says
-  why it cannot while `R_P` is nonzero, leg C measures what that costs on this
-  fire — `30.1 kW` of fuel-equivalent — and §86.7's table names the alternative
-  that does close on the line that reports it.
+  why it cannot while `R_P` is nonzero, the bounded leg measured what that
+  costs — `30.1 kW` of fuel-equivalent on that case — and §86.7's table names
+  the alternative that does close, on the line that reports it.
 * **that the continuity residual has been reduced.** Nothing in this section
   touches it. §86 makes it *visible* and makes one discretisation independent
-  of it; §86.10 names its three contributions and separates none of them.
+  of it.
 * **that a mass-consistent flux was attempted.** It was not. The standard
   remedy — a projection of `phi_m` onto the discrete continuity of `rho`, one
   extra pressure-shaped solve per step — is a change to §25.3 and to the cost
   of every time step.
-* **that Gate 61-A passes, or that it is closer than §85.10 thought.** §86.11
-  says it is further, and says why the `0.0124` looked closer.
-* **that leg D's yield is a model prediction to be compared with anything.**
-  It is read off a field with `max Y_s = 1.626`. §86.11 says so on the line
-  that prints it.
-* **that the soot field's own mass is accounted for anywhere.** It is not.
-  §86.11 measures `laminarSmokePoint` forming soot at 44 % (leg D) and 476 %
-  (leg C) of the fuel supply while drawing on no metered reactant, and (86.5)
-  is silent about it because it is not a term in (86.1). The fuel budget
-  closing is therefore no evidence at all about the soot field, in either
-  direction.
-* **that `Y_s` or a §77 vapour source were moved to (86.1).** Neither was;
-  §86.7 has a row for each with the algebra of what would change.
-* **that the mass-weighted equation was measured on any case but this one.**
-  It was not. One fire, one mesh, one RTX 5070 Ti.
-* **that the bitwise-default claim was measured on the whole solver.** It was
-  measured on the species set (row 5 of §86.5) and on two full runs of the gate
-  case (§86.10's rows A and B). Every other driver in the tree reaches
-  `Species::correct`, whose delegation is what row 5 pins.
+* **that the mass-weighted equation was measured on more than one case.** It
+  was not: one case, one mesh, one RTX 5070 Ti — and that case is no longer
+  here to re-run.
+* **that anything in this section is a statement about a reacting medium.**
+  The reaction, the soot field and the yield comparison that motivated the
+  work all left with the physics. What is specified here is a transport
+  equation.
 
 ## 87. Marangoni convection — the term a face scalar structurally cannot hold
 
@@ -27187,7 +22863,7 @@ produced, and there is therefore nothing to print. Calling them `OPEN` would
 put them beside §32.4's three legs and §78.10's Gate 78-D — comparisons that
 were performed and whose results fall outside a band or between two
 disagreeing sources — and that equivalence would be false. `ofgpu-validate`
-still reports **six** `MISSES` and **four** `OPEN`; §87 adds neither, and
+reports **two** `MISSES` and **five** `OPEN` (§69.10); §87 adds neither, and
 "not run" belongs in §87.10's scope statement rather than in a registry of
 results. Registering an entry with no measurement in it would be exactly the
 confusion §69 exists to prevent, in the opposite direction.

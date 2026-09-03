@@ -8,7 +8,7 @@
 //! The capture gates themselves: one per module the registry marks `Gate`.
 //!
 //! `SPEC-LIT` 81.9. A gate may live anywhere in the tree - the registry looks
-//! its name up across `src/`, and `src/soot/tests.rs` deliberately keeps its
+//! its name up across `src/`, and `src/species.rs` deliberately keeps its
 //! own, to show that it can. Most live here, because most of them want the
 //! same three lines of scaffolding and there is no reason to write those
 //! nineteen times.
@@ -436,7 +436,7 @@ fn the_transition_correction_replays_bitwise() {
     println!("  kOmegaSSTLM: {report}");
 }
 
-/// `SPEC-LIT` 43: the LES subgrid models.
+/// `SPEC-LIT` 6.5 and 16: the LES subgrid models.
 #[test]
 fn the_les_correction_replays_bitwise() {
     let Some(gpu) = gpu() else { return };
@@ -450,7 +450,7 @@ fn the_les_correction_replays_bitwise() {
 
     let report = capture_replays_bitwise(
         &gpu,
-        "LES subgrid (SPEC-LIT 43)",
+        "LES subgrid (SPEC-LIT 6.5)",
         || {
             crate::models::les::Les::new(
                 &gpu,
@@ -590,129 +590,40 @@ fn the_momentum_predictor_replays_bitwise() {
     println!("  momentum: {report}");
 }
 
-/// `SPEC-LIT` 28: the P-1 radiation correction.
-#[test]
-fn the_p1_radiation_correction_replays_bitwise() {
-    let Some(gpu) = gpu() else { return };
-    let hm = box4();
-    let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
-    let n = hm.n_cells;
-
-    let mut t = GpuScalarField::zeros(&gpu, &mesh, "T").expect("T");
-    gpu.write(&mut t.f, &vec![1200.0 as Scalar; n]).expect("T");
-    gpu.write(&mut t.bf, &vec![600.0 as Scalar; hm.n_boundary_faces]).expect("Tb");
-
-    let props = crate::participating::RadiationProps::new(0.5).expect("props");
-    let sc = crate::solver::SolverControls {
-        tolerance: 1e-14,
-        rel_tol: 0.0,
-        max_iter: 4,
-        fixed_iters: true,
-        report_residuals: false,
-        ..Default::default()
-    };
-
-    let report = capture_replays_bitwise(
-        &gpu,
-        "P-1 radiation (SPEC-LIT 28)",
-        || crate::participating::Radiation::new(&gpu, &mesh, props),
-        |r: &mut crate::participating::Radiation| r.correct(&gpu, &t, None, &sc, 0).map(|_| ()),
-        |r: &crate::participating::Radiation| {
-            Ok(vec![
-                field(&gpu, "G", r.field())?,
-                buf(&gpu, "su", r.su())?,
-                buf(&gpu, "sp", r.sp())?,
-            ])
-        },
-    )
-    .expect("SPEC-LIT 81.7: P-1 radiation must capture and replay bitwise");
-    println!("  P-1 radiation: {report}");
-}
-
-/// `SPEC-LIT` 62: the WSGG band coefficients, recomputed each iteration from
-/// the local composition.
-#[test]
-fn the_wsgg_update_replays_bitwise() {
-    let Some(gpu) = gpu() else { return };
-    let hm = box4();
-    let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
-    let n = hm.n_cells;
-
-    let mut t = GpuScalarField::zeros(&gpu, &mesh, "T").expect("T");
-    gpu.write(&mut t.f, &vec![1400.0 as Scalar; n]).expect("T");
-    gpu.write(&mut t.bf, &vec![900.0 as Scalar; hm.n_boundary_faces]).expect("Tb");
-    let y_p = gpu.upload(&vec![0.1 as Scalar; n]).expect("yP");
-    let medium = crate::wsgg::MediumState {
-        y_products: Some(&y_p),
-        ..Default::default()
-    };
-
-    let props = crate::wsgg::SpectralProps {
-        model: crate::wsgg::SpectralModel::Wsgg,
-        ..Default::default()
-    };
-
-    let report = capture_replays_bitwise(
-        &gpu,
-        "WSGG band properties (SPEC-LIT 62)",
-        || {
-            let mut b = crate::wsgg::Bands::new(&gpu, &mesh, props, 0.5, true)?;
-            // The one host round-trip in the WSGG update is the diagnostic
-            // count of floored cells; the floor itself is a kernel. Off, the
-            // update is pure device work - see Bands::set_count_floored.
-            b.set_count_floored(false);
-            Ok(b)
-        },
-        |b: &mut crate::wsgg::Bands| b.update(&gpu, &mesh, &t, &medium),
-        |b: &crate::wsgg::Bands| {
-            // Every solved band, not just the first: a capture that dropped
-            // one would otherwise pass.
-            let mut out = Vec::new();
-            for j in b.solved() {
-                out.push(("kappa_j", gpu.download(b.kappa(j))?));
-                out.push(("weight_j", gpu.download(b.weight(j))?));
-            }
-            Ok(out)
-        },
-    )
-    .expect("SPEC-LIT 81.7: the WSGG update must capture and replay bitwise");
-    println!("  WSGG: {report}");
-}
-
 // ==========================================================================
-//  81.10  The refusals, measured
+//  81.10  The refusal, measured
 // ==========================================================================
 
-/// **Two modules cannot be captured, and this runs the capture to prove it.**
+/// **One module cannot be captured, and this runs the capture to prove it.**
 ///
 /// A refusal written only in prose decays: the module is fixed, or made
-/// worse, and the sentence beside it stays the same. So the two refusals in
-/// [`crate::capture::registry::REGISTRY`] are executed. Each must fail, and
-/// each must fail *naming the call that makes it impossible* - if either
-/// starts to succeed, this test fails and the registry row is out of date in
-/// the good direction.
+/// worse, and the sentence beside it stays the same. So the refusal in
+/// [`crate::capture::registry::REGISTRY`] is executed. It must fail, and it
+/// must fail *naming the call that makes it impossible* - if it starts to
+/// succeed, this test fails and the registry row is out of date in the good
+/// direction.
 ///
-/// * `src/vof.rs` - `Vof::step` computes an alpha Courant number on the
-///   device, **downloads it**, and divides the time step by it to get a
-///   sub-cycle count it then loops over on the host. That is the
-///   data-dependent trip count a graph cannot hold: the graph would record
-///   whatever count the capture happened to see and replay that count for
-///   ever. `SPEC-LIT` 13.4's alternative is a **prescribed**
-///   `nAlphaSubCycles`, given by the case rather than derived from the flux -
-///   which is what removes the read-back. It is not implemented;
-/// * `src/fvdom.rs` - `FvDom::correct` sweeps the ordinates and carries each
-///   ordinate's boundary intensity to the next **through the host**
-///   (`bf_cache`), and downloads the wall temperature once per correction.
-///   The alternative is a device-resident inflow coupling, which is a
-///   rewrite of the sweep and not a flag.
+/// `src/vof.rs` - `Vof::step` computes an alpha Courant number on the
+/// device, **downloads it**, and divides the time step by it to get a
+/// sub-cycle count it then loops over on the host. That is the
+/// data-dependent trip count a graph cannot hold: the graph would record
+/// whatever count the capture happened to see and replay that count for
+/// ever. `SPEC-LIT` 13.4's alternative is a **prescribed**
+/// `nAlphaSubCycles`, given by the case rather than derived from the flux -
+/// which is what removes the read-back. It is not implemented.
+///
+/// It used to measure two, the second being the discrete-ordinates sweep of
+/// a participating radiation model whose ordinate coupling ran through the
+/// host. That module is no longer in this engine; what the test is FOR - a
+/// refusal that is run rather than asserted - is unchanged, and the registry
+/// carries exactly one `Refused` row for it to run.
 #[test]
-fn the_two_refusals_are_measured_and_not_asserted() {
+fn the_refusal_is_measured_and_not_asserted() {
     let Some(gpu) = gpu() else { return };
     let hm = box4();
     let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
 
-    // ---- VOF ------------------------------------------------------------
     let props = crate::vof::VofProperties {
         rho1: 1000.0,
         rho2: 1.0,
@@ -753,37 +664,6 @@ fn the_two_refusals_are_measured_and_not_asserted() {
         err.contains("Gpu::download"),
         "VOF must be refused by the download guard and not by something else \
          - got: {err}"
-    );
-
-    // ---- fvDOM ----------------------------------------------------------
-    let mut t = GpuScalarField::zeros(&gpu, &mesh, "T").expect("T");
-    gpu.write(&mut t.f, &vec![1200.0 as Scalar; n]).expect("T");
-    gpu.write(&mut t.bf, &vec![600.0 as Scalar; hm.n_boundary_faces]).expect("Tb");
-    let dprops = crate::fvdom::FvDomProps::new(0.5, 0.0).expect("props");
-    let sc = crate::solver::SolverControls {
-        tolerance: 1e-14,
-        rel_tol: 0.0,
-        max_iter: 2,
-        fixed_iters: true,
-        report_residuals: false,
-        ..Default::default()
-    };
-    let mut d = crate::fvdom::FvDom::new(&gpu, &mesh, dprops).expect("fvdom");
-    d.correct(&gpu, &t, None, &sc, 1).expect("one eager sweep");
-    gpu.sync().expect("sync");
-
-    let err = match gpu.capture(|_| d.correct(&gpu, &t, None, &sc, 1).map(|_| ())) {
-        Ok(_) => panic!(
-            "FvDom::correct CAPTURED. If the ordinate coupling no longer goes \
-             through the host, src/fvdom.rs should be promoted from Refused \
-             to Gate in the capture registry - SPEC-LIT 81.10"
-        ),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        err.contains("Gpu::download"),
-        "fvDOM must be refused by the download guard and not by something \
-         else - got: {err}"
     );
 }
 

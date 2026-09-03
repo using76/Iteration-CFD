@@ -841,7 +841,7 @@ rheology
         let msg = format!("{e}");
         assert!(msg.contains("viscosityModel"), "must name the setting: {msg}");
         assert!(msg.contains("powerLaw"), "must quote what the case said: {msg}");
-        assert!(msg.contains("ofgpu-fire"), "must name where it IS honoured: {msg}");
+        assert!(msg.contains("ofgpu-lowmach"), "must name where it IS honoured: {msg}");
 
         // `constant` - what every case in this tree writes - is silent.
         let mut newtonian = cc;

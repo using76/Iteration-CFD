@@ -3973,7 +3973,7 @@ mod tests {
     /// Gnielinski at a SUPPLIED `f` must reduce to the published pipe form
     /// when the `f` supplied IS the pipe form - bit for bit, since
     /// `gnielinski_nu` is now literally that call and every number
-    /// `docs/07-fire-solver.md` §1.1 records came out of it.
+    /// `docs/07-lowmach-solver.md` §1.1 records came out of it.
     #[test]
     fn gnielinski_at_a_supplied_f_reduces_to_the_pipe_form() {
         for re in [4.0e3 as Scalar, 1.6e4, 2.5834e4, 2.8638e4, 1.0e6] {

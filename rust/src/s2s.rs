@@ -51,11 +51,12 @@
 //!
 //! # The surprising part: nothing becomes an `fvm_*` term
 //!
-//! [`crate::radiation`] (P1) is a Helmholtz equation on cells;
-//! [`crate::fvdom`] is 24 transport equations. **Surface-to-surface radiation
-//! through a non-participating medium contributes no volumetric term to any
-//! equation at all** - there is no medium, so `div(q_r) = 0` everywhere in
-//! the fluid. There is no `fvm_*` call here, no
+//! A PARTICIPATING medium makes radiation a field on the cells - a Helmholtz
+//! equation under the P1 approximation, one transport equation per ordinate
+//! under discrete ordinates - and either way a volumetric source in the
+//! energy equation. **Surface-to-surface radiation through a
+//! non-participating medium contributes no volumetric term to any equation at
+//! all** - there is no medium, so `div(q_r) = 0` everywhere in the fluid. There is no `fvm_*` call here, no
 //! [`crate::energy::EnergySources`] registration, and no new LDU assembly.
 //! The entire model enters the solver through **one rewritten Robin triple on
 //! `T`** (SPEC-LIT S50.3), and the cost of the model is entirely in building

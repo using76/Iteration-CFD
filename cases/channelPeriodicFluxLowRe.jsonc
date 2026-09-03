@@ -19,7 +19,7 @@
 // >>> changes nothing in this file; S26.1 reruns it too. The blocks in
 // >>> between are kept, in order, as the record of how this gate got there,
 // >>> including two candidate fixes that were RUN and refuted.
-// STATUS (SPEC-LIT S34 rebuild, RUN and REPORTED - docs/07-fire-solver.md
+// STATUS (SPEC-LIT S34 rebuild, RUN and REPORTED - docs/07-lowmach-solver.md
 // S1.1 has the full table): the previous ("mesh b") version of this file was
 // a DUCT - real `wallSide.*` walls at only 4 spanwise cells - and collapsed
 // to U_b = 0.24 m/s (WF duct twin: 3.51 m/s; laminar solve of the same duct
@@ -49,7 +49,7 @@
 // T is Dirichlet nowhere in this domain, so the domain-mean temperature has
 // no restoring term - why the COARSE WF mesh nonetheless lands on an exact
 // fixed point while this fine mesh does not is not resolved here. Reported,
-// not tuned away - see docs/07-fire-solver.md S1.1 for the full table.
+// not tuned away - see docs/07-lowmach-solver.md S1.1 for the full table.
 // ============================================================================
 //
 // ============================================================================
@@ -91,7 +91,7 @@
 //   prediction accuracy (SPEC-LIT S33.3 validated its MOMENTUM law of the
 //   wall independently; nothing here has yet validated its temperature
 //   sublayer the same way) rather than another energy-accounting defect.
-//   See `docs/07-fire-solver.md` S1.1 for the full table and the
+//   See `docs/07-lowmach-solver.md` S1.1 for the full table and the
 //   two-initial-temperature trace.
 // ============================================================================
 //
@@ -139,7 +139,7 @@
 // traction, the `lowRe` form on this leg and the wall-function form on the
 // WF twin); `ofgpu-lowmach` now measures it, prints it next to the body-force
 // inference with their disagreement, and prints Gnielinski BOTH ways.
-// NEITHER CASE HAS BEEN RERUN WITH IT. See docs/07-fire-solver.md S1.1.
+// NEITHER CASE HAS BEEN RERUN WITH IT. See docs/07-lowmach-solver.md S1.1.
 // SUPERSEDED: both cases have since been rerun with it, and the measurement
 // retired the Reynolds-analogy verdicts above - see the S32.5.3/S35.3 block
 // at the end of this header.
@@ -207,7 +207,7 @@
 // mechanism for it (S3.1's bounded convection correction, whose domain
 // integral is zero only when div(phi) is) that has not yet been tested.
 //
-// See docs/07-fire-solver.md S1.1's last subsection for the full account.
+// See docs/07-lowmach-solver.md S1.1's last subsection for the full account.
 // ============================================================================
 //
 // ============================================================================
@@ -266,7 +266,7 @@
 // Kays (ASME J. Heat Transfer 116 (1994) 284) puts Prt at 1.5-1.9; a
 // hypothesis with a mechanism and the right sign, measured by nothing yet.
 //
-// See docs/07-fire-solver.md S1.1's last subsection for the full account.
+// See docs/07-lowmach-solver.md S1.1's last subsection for the full account.
 // ============================================================================
 //
 // ============================================================================
@@ -309,7 +309,7 @@
 // `Prt`. The predicted fall was 10-14%; the measured fall is 6.8%, about
 // half, and that is reported rather than rounded.
 //
-// See docs/07-fire-solver.md S1.1's last subsection for the four runs, the
+// See docs/07-lowmach-solver.md S1.1's last subsection for the four runs, the
 // two-mesh consequence, and what this does NOT establish.
 // ============================================================================
 //
@@ -357,7 +357,7 @@
 //   orders of magnitude (164 -> 302 s), and the coefficient prologue running
 //   twice per outer iteration so the target divergence never reads stale
 //   state (302 -> 385 s). The second is ~1.2 ms/iteration of kernel-launch
-//   overhead on a 400-cell mesh and +1.4% on cases/burnerPlume.jsonc's 32768
+//   overhead on a 400-cell mesh and +1.4% on a 32768-cell buoyant case
 //
 // The state is a FIXED POINT, not a slow drift: at 80 000 iterations every
 // reported quantity above is identical in every printed digit. The |U|
@@ -385,7 +385,7 @@
 // S3.1's RULE is unchanged; a channel whose true div(u) is zero is simply not
 // a case where it bites, and a fire plume still is.
 //
-// See docs/07-fire-solver.md S1.1's last subsection and SPEC-LIT S26.1.
+// See docs/07-lowmach-solver.md S1.1's last subsection and SPEC-LIT S26.1.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

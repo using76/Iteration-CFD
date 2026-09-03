@@ -289,7 +289,7 @@ fn run(o: &Options) -> Result<()> {
         // -restartWrite here either.
         plan.refuse_restart(
             "ofgpu-k-epsilon",
-            "ofgpu-fire, ofgpu-buoyant and ofgpu-vof do write .mcr checkpoints, and ofgpu-fire honours output.restart",
+            "ofgpu-lowmach, ofgpu-buoyant and ofgpu-vof do write .mcr checkpoints, and ofgpu-lowmach honours output.restart",
         )?;
         plan.refuse_visualisation_on_a_non_cartesian_mesh(
             ofgpu::pressure::cartesian::detect(&hm).is_ok(),
@@ -307,7 +307,7 @@ fn run(o: &Options) -> Result<()> {
         println!(
             "    physics.fluid         Pr and Prt are not read by ofgpu-k-epsilon: it \
 solves k and epsilon on a frozen U and transports no scalar for them to diffuse \
-(ofgpu-plume, ofgpu-buoyant, ofgpu-fire do)"
+(ofgpu-plume, ofgpu-buoyant, ofgpu-lowmach do)"
         );
         println!(
             "    run                   endTime {} -> {} outer iteration(s), deltaT {}",
@@ -1168,7 +1168,7 @@ mod k_epsilon_tests {
     // DIRECTORY, which has no `output` block at all. This one runs on a
     // `.jsonc` case, because that is the only format that carries one - and
     // it is here, in the second driver, for exactly the reason S13.4.2 gives
-    // for one shared refusal: a block honoured by `ofgpu-fire` and silently
+    // for one shared refusal: a block honoured by `ofgpu-lowmach` and silently
     // ignored by the other driver that reads the same format is the defect
     // this whole subsection exists to prevent.
 
@@ -1251,7 +1251,7 @@ mod k_epsilon_tests {
     }
 
     /// Everything a JSONC run wrote, as `(relative path, BYTES)` - binary,
-    /// for the reason `ofgpu-fire`'s own `written_bytes` gives: `.vdb` and
+    /// for the reason `ofgpu-lowmach`'s own `written_bytes` gives: `.vdb` and
     /// `.nvdb` are not text, and a text walker skips them in silence.
     fn json_written_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
         fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
@@ -1361,7 +1361,7 @@ mod k_epsilon_tests {
         .expect_err("a driver with no checkpoint must refuse output.restart");
         let m = format!("{e}");
         assert!(m.contains("output.restart"), "{m}");
-        assert!(m.contains("ofgpu-fire"), "the error must name a driver that does: {m}");
+        assert!(m.contains("ofgpu-lowmach"), "the error must name a driver that does: {m}");
 
         // S44.6 - the case and the command line both naming the output.
         let e = run_json_case(

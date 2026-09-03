@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """
 The figure at the top of the README: a centre-plane slice of a finished
-`ofgpu-fire` run, temperature beside velocity magnitude.
+`ofgpu-lowmach` run, temperature beside velocity magnitude.
 
     python tools/readme_figure.py <caseDir> <out.png> [--time T]
 
-Reads the OpenFOAM ASCII fields `ofgpu-fire -output foam` writes, so it needs
+Reads the OpenFOAM ASCII fields `ofgpu-lowmach -output foam` writes, so it needs
 no VTK and no ParaView. The mesh shape comes from the case's own cell count
 rather than being hard-coded, which is the difference between this and
 `render_plume.py` — that one is pinned to the 98x42x20 plume and stays that way

@@ -53,9 +53,9 @@ pub mod spalart_allmaras;
 pub mod transition;
 
 pub use coupled::{
-    BuoyancySettings, CombustionMixing, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst,
+    BuoyancySettings, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst,
     CoupledLaminar, CoupledLaunderSharmaKE, CoupledLes, CoupledRealizableKe, CoupledRngKe,
-    CoupledSpalartAllmaras, CoupledTurbulence, ThermalCtx,
+    CoupledSpalartAllmaras, CoupledTurbulence, MixingRate, ThermalCtx,
 };
 pub use des::{DesBranch, DesCoeffs, DesLengthScale, HybridBackground, HybridDelta};
 pub use k_epsilon::{KEpsilon, KEpsilonCoeffs};

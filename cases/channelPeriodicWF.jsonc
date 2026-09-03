@@ -16,7 +16,7 @@
 // S31.1's cyclic-pair pairing, `mesh.cyclic`), hot top and bottom walls at
 // Tw = 373.15 K, gravity zero (forced convection only - no buoyancy in this
 // comparison, exactly as `channelThermalWF.jsonc` before it). The two prior
-// attempts at this gate (see `docs/07-fire-solver.md` S1.1's history) both
+// attempts at this gate (see `docs/07-lowmach-solver.md` S1.1's history) both
 // used a DEVELOPING duct - first 0.4 m (L/Dh = 10, ratio 0.095), then 2.0 m
 // (L/Dh = 50, ratio 0.381) - and named the same remaining cause each time:
 // an inlet-driven duct is never more than APPROACHING the fully-developed
@@ -76,7 +76,7 @@
 // wall-normal cells, uniform: the `standard` wallTreatment row is asked to
 // do its actual job on a deliberately coarse near-wall cell (y+ target
 // 30-60), exactly as before. `retired/channelPeriodicLowRe.jsonc` is the resolved
-// (y+ ~ 1) twin - see that file and `docs/07-fire-solver.md` S1.1 for the
+// (y+ ~ 1) twin - see that file and `docs/07-lowmach-solver.md` S1.1 for the
 // measured y+, the two wall heat fluxes and their ratio.
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

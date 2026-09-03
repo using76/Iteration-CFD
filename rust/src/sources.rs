@@ -341,7 +341,7 @@ pub enum SourceTerm {
 /// [`Self::Uniform`] is `w_c = 1` and [`Self::MassFlux`] is
 /// `w_c = (rho u)_c . e_hat`. Uniform is the slug-flow limit of the mass-flux
 /// form, and is the DEFAULT (SPEC-LIT §35.3.6) so that every measurement
-/// already recorded in `docs/07-fire-solver.md` §1.1 stays reproducible
+/// already recorded in `docs/07-lowmach-solver.md` §1.1 stays reproducible
 /// bit for bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThermostatWeighting {
@@ -1019,7 +1019,7 @@ const THERMOSTAT_MIN_NET_FLUX_FRACTION: Scalar = 1.0e-3;
 /// q_thermostat`. That branch is NOT routed through the formula: it writes
 /// `q_thermostat` directly, exactly as before, because a device reduction of
 /// `V_c` differs from the mesh's own stored `total_volume` in the last bits
-/// and every measurement in `docs/07-fire-solver.md` §1.1 was made with the
+/// and every measurement in `docs/07-lowmach-solver.md` §1.1 was made with the
 /// direct fill (SPEC-LIT §35.3.6).
 ///
 /// `rho_cp` is fixed at construction, `rho(T_target) c_p` - not recomputed
@@ -1273,7 +1273,7 @@ impl Thermostat {
             // SPEC-LIT §35.3.6: NOT routed through `Q w_c / W`. `w_c = 1`
             // gives `W = sum_c V_c`, which differs from the mesh's own
             // `total_volume` in the last bits, and every measurement in
-            // `docs/07-fire-solver.md` §1.1 was made with this direct fill.
+            // `docs/07-lowmach-solver.md` §1.1 was made with this direct fill.
             ThermostatWeighting::Uniform => {
                 self.last_fell_back = false;
                 self.last_net_flux = 0.0;

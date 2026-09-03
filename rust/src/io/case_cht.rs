@@ -790,7 +790,7 @@ impl ChtCase {
                      registry is what would carry it, and this reader does not \
                      reach it - so the entry is refused rather than read and \
                      dropped (SPEC-LIT 13.4.1). Put the source in a solid \
-                     region, or use `ofgpu-fire`",
+                     region, or use `ofgpu-lowmach`",
                     r.name
                 )));
             }

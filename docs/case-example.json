@@ -14,7 +14,7 @@
 //      the mesh.cyclic comment further down, which uses it as the example of
 //      what a cyclic pair may NOT be given.
 //   2. There is no "initial.k"/"initial.epsilon", and no per-patch k/epsilon
-//      condition, so a kEpsilon run is refused by name - "ofgpu-fire needs
+//      condition, so a kEpsilon run is refused by name - "ofgpu-lowmach needs
 //      `initial.k`".
 //
 // It is also deliberately carrying two §13.4 ERRORS in "run" (see there).
@@ -74,7 +74,7 @@
   "physics": {
     // Gravity reaches the momentum equation of every buoyant driver, and
     // SPEC-LIT §17's turbulence buoyancy production G_b in ofgpu-plume,
-    // ofgpu-buoyant and ofgpu-fire. ofgpu-k-epsilon and ofgpu-k-omega solve
+    // ofgpu-buoyant and ofgpu-lowmach. ofgpu-k-epsilon and ofgpu-k-omega solve
     // the two turbulence equations on a FROZEN U and read no temperature, so
     // G_b has nothing to be built from there: a non-zero gravity is a §13.4
     // error naming those three drivers (`-permissive` substitutes no
@@ -135,8 +135,8 @@
     },
     "grad": "Gauss linear",
     // nonOrthogonalCorrectors reaches the equations a driver ASSEMBLES:
-    // U and p (ofgpu-buoyant, ofgpu-fire, ofgpu-vof) and T (ofgpu-plume,
-    // ofgpu-buoyant, ofgpu-fire). No turbulence model in this crate loops
+    // U and p (ofgpu-buoyant, ofgpu-lowmach, ofgpu-vof) and T (ofgpu-plume,
+    // ofgpu-buoyant, ofgpu-lowmach). No turbulence model in this crate loops
     // over it, so in ofgpu-k-epsilon and ofgpu-k-omega — which solve nothing
     // else — it would reach no equation at all and is a §13.4 error there.
     "laplacian": { "snGrad": "limited 0.33", "nonOrthogonalCorrectors": 1 },
@@ -150,7 +150,7 @@
   "run": {
     // endTime and deltaT are honoured: both case readers turn them into an
     // outer-iteration count (steady) or a step count (transient).
-    // ofgpu-fire takes its run MODE from -endTime/-deltaT on the command
+    // ofgpu-lowmach takes its run MODE from -endTime/-deltaT on the command
     // line instead, and prints which of the two is in force.
     "endTime": 20.0,
     "deltaT": 0.005,
@@ -179,7 +179,7 @@
   // the two that did (format, interval) while dropping those three in
   // silence would have been §13.4.1's own defect manufactured inside its
   // fix. §44 built all three, and the block is now READ, by every driver
-  // that reads this format (ofgpu-fire and ofgpu-k-epsilon).
+  // that reads this format (ofgpu-lowmach and ofgpu-k-epsilon).
   //
   // The command line still says the same things:
   //   -output foam,vtu,nvdb,vdb,usda   the format(s)
@@ -207,7 +207,7 @@
       "format": "vdb",
       // Seconds of PHYSICAL time between writes. Optional: absent (or 0) is
       // "the final state, once". A positive value on a STEADY run — every
-      // ofgpu-k-epsilon run, and ofgpu-fire under -iters — is a §13.4 error
+      // ofgpu-k-epsilon run, and ofgpu-lowmach under -iters — is a §13.4 error
       // naming -endTime/-deltaT, because those runs advance an iteration
       // counter and have no clock (§44.4).
       "interval": 2.0,

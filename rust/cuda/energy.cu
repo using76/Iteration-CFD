@@ -27,7 +27,7 @@
 #include "ofgpu_device.cuh"
 
 //- dst[i] += src[i]. The one generic accumulate cuda/field.cu is missing -
-//  used by energy::EnergySources to sum whatever combustion and radiation
+//  used by energy::EnergySources to sum whatever a volumetric heat model
 //  registered this iteration, and nowhere else needs it enough to justify
 //  adding it to the shared file.
 extern "C" __global__ void energyAccumulate
@@ -170,8 +170,9 @@ extern "C" __global__ void energyKEffKaysCrawford
 //  derivative are single numbers the whole domain shares - there is nothing
 //  per-cell about them, so there is nothing to interpolate.
 //
-//  `q` is the S18 registry - combustion's q'''_c, radiation's -div(q_r), the
-//  S35 thermostat - and `qCond` is the CONDUCTION half of S25.1's own `Q`,
+//  `q` is the S18 registry - a heater's q''', a parcel cloud's convective
+//  exchange, the S35 thermostat - and `qCond` is the CONDUCTION half of
+//  S25.1's own `Q`,
 //  div(k_eff grad T), which Energy::update_conduction_source forms off the
 //  same face flux fvm_laplacian assembles. The two are separate arguments
 //  rather than one summed field because they are accumulated by different

@@ -205,7 +205,8 @@ pub enum MassCoupling {
     /// The vapour reaches the gas - SPEC-LIT S77:
     ///
     /// * `Y_v` gains `mdot'''(1 - Y_v)/rho` (77.1), through the whole-field
-    ///   explicit seam S61.2's soot source already uses;
+    ///   explicit seam [`crate::scalar_transport::ScalarTransport::correct_with_source`]
+    ///   provides;
     /// * the energy registry gains `cp_g mdot''' (T_p - T_g)` (77.2), the
     ///   enthalpy the arriving mass carries, on top of S68's convective
     ///   exchange - and **not** a second latent-heat sink, which would be
@@ -806,9 +807,9 @@ impl<'m> ParcelCoupling<'m> {
     /// (77.1) what the `Y_v` equation is handed, 1/s.
     ///
     /// Pass it to [`crate::scalar_transport::ScalarTransport::correct_with_source`]
-    /// on the vapour species - the whole-field explicit seam S61.2's soot
-    /// source already uses, applied as `fvm_su(su, +1)` in the same place
-    /// every other source in that equation goes.
+    /// on the vapour species - the whole-field explicit seam that solver
+    /// provides, applied as `fvm_su(su, +1)` in the same place every other
+    /// source in that equation goes.
     ///
     /// **The source is the one for the NON-CONSERVATIVE form** `DY/Dt = S`,
     /// which the species equation is when its convection scheme is

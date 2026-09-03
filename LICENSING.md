@@ -279,11 +279,11 @@ Permissively-licensed code that may be read directly (verify each before use):
 | AMGX | BSD-3-Clause | already a dependency |
 | Ginkgo | BSD-3-Clause | GPU linear algebra |
 | deal.II | LGPL | reference only |
-| FDS | US Government work, public domain | low-Mach, FFT pressure solve, fire-specific models |
+| FDS | US Government work, public domain | low-Mach, FFT pressure solve, mesh-resolution arithmetic, public-domain validation decks |
 
-**FDS is public domain** (a US NIST work) and is the closest match to the fire
-problem being solved here. That makes it the single most valuable permissive
-reference available for this project.
+**FDS is public domain** (a US NIST work) and is the closest match to the
+buoyant, low-Mach problem being solved here. That makes it the single most
+valuable permissive reference available for this project.
 
 ---
 

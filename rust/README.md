@@ -111,7 +111,7 @@ cargo run --release --bin ofgpu-validate
 cargo run --release --bin ofgpu-bench         -- 2000 1000 1 -iters 30
 
 # 저-마하 가변밀도 솔버 (SPEC-LIT §25/§26). JSONC 케이스를 읽습니다:
-cargo run --release --bin ofgpu-fire -- ../cases/channelPeriodicFluxWF.jsonc -iters 40000 -check 5000
+cargo run --release --bin ofgpu-lowmach -- ../cases/channelPeriodicFluxWF.jsonc -iters 40000 -check 5000
 
 # 2상 유동 (SPEC-LIT §20). Martin & Moyce (1952)의 댐 브레이크:
 cargo run --release --bin ofgpu-generate-mesh -- damBreak ../cases/dam
@@ -133,8 +133,8 @@ rust/
 │   ├── ldu.cu field.cu fv.cu solver.cu precon.cu timescheme.cu
 │   ├── momentum.cu simple.cu pressure.cu      운동량 · SIMPLE · 압력
 │   ├── turbulence.cu sst.cu les.cu wallfunctions.cu
-│   ├── energy.cu combustion.cu species.cu sources.cu
-│   ├── radiation.cu fvdom.cu                  P1 · fvDOM
+│   ├── energy.cu species.cu sources.cu
+│   ├── s2s.cu                                 면대면 복사
 │   ├── vof.cu                                 Zalesak FCT · 계면 압축 · CSF
 │   └── probe.cu                               툴체인 수직 슬라이스
 └── src/
@@ -144,8 +144,8 @@ rust/
     ├── fv.rs solver.rs precon.rs walldistance.rs
     ├── momentum.rs simple.rs scalar_transport.rs timescheme.rs
     ├── pressure/{mod,cartesian,fft,amgx}.rs   압력 방정식 backend 선택
-    ├── energy.rs combustion.rs species.rs sources.rs
-    ├── radiation.rs fvdom.rs                  복사 (P1 / fvDOM)
+    ├── energy.rs species.rs sources.rs
+    ├── radiation.rs s2s.rs                    §13.4 선택기 · 면대면 복사
     ├── turbulence.rs les.rs
     ├── models/{registry,coupled,k_epsilon,k_omega,
     │           k_omega_sst,launder_sharma,les}.rs
@@ -156,14 +156,14 @@ rust/
     ├── vof.rs                                 2상 VOF
     ├── blockgen.rs restart.rs potential_flow.rs
     ├── reference.rs                           독립 CPU 구현 (검증 전용)
-    └── bin/                                   바이너리 12개
+    └── bin/                                   바이너리 16개
 ```
 
 ## 알려진 제약
 
 [`../README.md`](../README.md)의 "제한사항"이 그대로 적용됩니다 — 단일 GPU 전용,
-AMGX 기본 비활성, 저이완 방정식에서의 Crank–Nicolson, 압축성 미지원, 연소는
-혼합제어 단일 스텝, 복사는 회색.
+AMGX 기본 비활성, 저이완 방정식에서의 Crank–Nicolson, 압축성 미지원,
+참여 매질 복사(P1 · fvDOM) 미지원 — 이름으로 거부됩니다.
 
 Rust판 고유 사항 하나: 토크나이저가 `Tok::Num(f64)`로 숫자의 원본 표기를 버립니다.
 `tolerance 1e-06`이 `"0.000001"`로, `FoamFile/version`이 `"2.0"` 대신 `"2"`로

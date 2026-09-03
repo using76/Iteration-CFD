@@ -44,7 +44,7 @@ pub struct Doc {
     pub sections: BTreeSet<String>,
     /// Heading number -> heading text, for the census and the messages.
     pub headings: BTreeMap<String, String>,
-    /// Equation labels: `(64.6)` and `(S47.3)` both reduce to `64.6`/`47.3`.
+    /// Equation labels: `(77.4)` and `(S47.3)` both reduce to `77.4`/`47.3`.
     pub equations: BTreeSet<String>,
     /// Top-level numbers of the sections that label equations at all -
     /// twenty-nine of them, all §40 or later. In a section that labels none
@@ -123,7 +123,7 @@ fn heading(t: &str) -> Option<(String, String)> {
     Some((num, after.trim().to_string()))
 }
 
-/// A label closing a line inside a fenced block: `... (64.6)` -> `64.6`.
+/// A label closing a line inside a fenced block: `... (77.4)` -> `77.4`.
 /// `E_P = N_P / max(D_P, tiny)` also ends in a parenthesis and is not one.
 fn trailing_label(line: &str) -> Option<String> {
     let inner = line.trim_end().strip_suffix(')')?;
@@ -318,14 +318,14 @@ pub enum Form {
     Section,
     /// `S13.4` - the ASCII spelling, which is a section OR an equation.
     Ascii,
-    /// `(64.6)` - an equation where its section labels equations, a
+    /// `(77.4)` - an equation where its section labels equations, a
     /// subsection where it does not.
     Paren,
     /// `(S47.3)` - the parenthesised form with the `S` the ASCII-only files
     /// spell it with, and resolved exactly like [`Form::Paren`]: an equation
     /// where its section labels equations, a subsection where it does not.
     ParenAscii,
-    /// `SPEC-LIT 13.4`, `SPEC-LIT section 36` - a section, always.
+    /// `SPEC-LIT 13.4`, `SPEC-LIT section 35` - a section, always.
     Bare,
 }
 
@@ -546,7 +546,7 @@ impl Registry {
     }
 
     /// Every name the attribution window may match, longest first so that
-    /// `docs/07-fire-solver.md` is preferred over any prefix of it.
+    /// `docs/07-lowmach-solver.md` is preferred over any prefix of it.
     fn names(&self) -> Vec<String> {
         let mut v: Vec<String> = std::iter::once("SPEC-LIT".to_string())
             .chain(self.works.iter().cloned())
@@ -655,9 +655,9 @@ fn resolves(cite: &Cite, spec: &Doc, docs: &BTreeMap<String, Doc>, reg: &Registr
                 spec.sections.contains(&cite.symbol)
             }
         }
-        // The bare `SNN.M` cannot be tightened the same way: 586 sites in this
-        // tree write it for a subsection of a section that also labels
-        // equations. §80.4's ratchet is what stands in for a rule here.
+        // The bare `SNN.M` cannot be tightened the same way: hundreds of
+        // sites in this tree write it for a subsection of a section that also
+        // labels equations. §80.4's ratchet is what stands in for a rule here.
         Form::Ascii => {
             spec.equations.contains(&cite.symbol) || spec.sections.contains(&cite.symbol)
         }
@@ -892,7 +892,7 @@ mod tests {
         }
     }
 
-    /// **§80.4, the ratchet.** 252 symbols in this spec are BOTH an equation
+    /// **§80.4, the ratchet.** Several hundred symbols in this spec are BOTH an equation
     /// label and a subsection number, and the bare `SNN.M` form does not say
     /// which is meant - that ambiguity is how one bare token for 77.5 came to
     /// mean §77.4 in one file, §77.6 in another and §77.5 in a third. The
@@ -1002,7 +1002,7 @@ mod tests {
             "let x = Limited(0.0);\n",
             "let y = cmu.powf(0.25);\n",
             "let s = \"refused by name (39.6), SPEC-LIT S26.1\";\n",
-            "// SPEC-LIT section 36 and SPEC-LIT.md 13.4.1\n",
+            "// SPEC-LIT section 35 and SPEC-LIT.md 13.4.1\n",
             "let z = S2s::update();\n",
         );
         let got: Vec<(Form, String, Option<String>)> = citations_in(src, false, &names)
@@ -1015,7 +1015,7 @@ mod tests {
             (Form::Section, "4.2", Some("Patankar")),
             (Form::Paren, "39.6", None),
             (Form::Ascii, "26.1", None),
-            (Form::Bare, "36", None),
+            (Form::Bare, "35", None),
             (Form::Bare, "13.4.1", None),
         ];
         let want: Vec<(Form, String, Option<String>)> = want
@@ -1042,14 +1042,14 @@ mod tests {
     #[test]
     fn a_citation_belongs_to_the_last_work_named_within_two_lines() {
         let names =
-            vec!["SPEC-LIT".to_string(), "Saad".to_string(), "docs/07-fire-solver.md".to_string()];
+            vec!["SPEC-LIT".to_string(), "Saad".to_string(), "docs/07-lowmach-solver.md".to_string()];
         // One literal, so the fixture is one prose span and §80.3's window
         // sees the work name the way it does in a real bibliography entry.
         let src = r#"//!   Saad, *Iterative Methods*, 2nd ed. (2003),
 //!     §6.7 (PCG) and §12.4, with `SPEC-LIT` §21 for the colouring
 //!
 //!   plain prose citing §8.4
-/// see `docs/07-fire-solver.md` §1.1 for the run
+/// see `docs/07-lowmach-solver.md` §1.1 for the run
 "#;
         let got: Vec<(String, Option<String>)> = citations_in(src, false, &names)
             .into_iter()
@@ -1060,7 +1060,7 @@ mod tests {
             ("12.4", Some("Saad")),
             ("21", None),
             ("8.4", None),
-            ("1.1", Some("docs/07-fire-solver.md")),
+            ("1.1", Some("docs/07-lowmach-solver.md")),
         ]
         .into_iter()
         .map(|(s, d): (&str, Option<&str>)| (s.to_string(), d.map(str::to_string)))

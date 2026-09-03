@@ -184,7 +184,7 @@ impl<'a> CaseNumerics<'a> {
     /// did not, with no fall back to the case's `default`.
     ///
     /// For an equation whose driver-side default is deliberately stricter
-    /// than a case's catch-all: `ofgpu-fire`'s species convection is bounded
+    /// than a case's catch-all: `ofgpu-lowmach`'s species convection is bounded
     /// upwind by SPEC-LIT S19, and a case's `divSchemes/default Gauss upwind`
     /// is upwind and NOT bounded, so falling back there would quietly unbound
     /// an equation the case never mentioned.
@@ -310,7 +310,7 @@ impl<'a> CaseNumerics<'a> {
 // The choice made here is REFUSAL, not a printed note, and the reasoning is
 // worth stating because 13.4.2 previously blessed the note:
 //
-//   1. A note is per driver. `ofgpu-fire` printed one for `output`;
+//   1. A note is per driver. `ofgpu-lowmach` printed one for `output`;
 //      `ofgpu-k-epsilon`, which reads the same format, printed nothing - so
 //      the same case file was silently ignored by one of the two drivers
 //      that can read it. One shared refusal cannot drift that way.
@@ -352,7 +352,7 @@ impl<'a> CaseNumerics<'a> {
 /// turn them into `TurbulenceControls::n_outer_iterations`/`delta_t`
 /// (`JsonCase::lower`, `read_control_dict`), so they reach the solver. A
 /// driver whose run mode comes from the command line instead says so in its
-/// own banner - `ofgpu-fire` does.
+/// own banner - `ofgpu-lowmach` does.
 pub fn refuse_unimplemented_blocks(json: Option<&LoweredCase>) -> Result<()> {
     let Some(l) = json else { return Ok(()) };
 
@@ -399,7 +399,7 @@ pub fn refuse_unimplemented_blocks(json: Option<&LoweredCase>) -> Result<()> {
 /// instances, and it is still a setting the case states and the solver drops.
 ///
 /// Refused HERE and not in `RasCore::new`, and the line is exact: in
-/// `ofgpu-plume`, `ofgpu-buoyant` and `ofgpu-fire` the same entry reaches
+/// `ofgpu-plume`, `ofgpu-buoyant` and `ofgpu-lowmach` the same entry reaches
 /// `T`, `U` and `p`, so it is NOT inert there and a blanket refusal would be
 /// telling a user "not supported" about a setting three of their four
 /// equations honour - both of those drivers' pair tests carry it and both
@@ -419,7 +419,7 @@ pub fn refuse_non_orth_correctors_without_another_equation(
         &cc.turb.n_non_orth_correctors.to_string(),
         &["0"],
         &format!(
-            "no turbulence model in ofgpu loops over the non-orthogonal corrector count: the k and epsilon/omega equations make one pass, with SPEC-LIT 2.4's correction applied once and not refreshed. {driver} solves nothing else, so the entry would reach no equation at all. ofgpu-plume, ofgpu-buoyant and ofgpu-fire do honour it, on their T, U and p equations"
+            "no turbulence model in ofgpu loops over the non-orthogonal corrector count: the k and epsilon/omega equations make one pass, with SPEC-LIT 2.4's correction applied once and not refreshed. {driver} solves nothing else, so the entry would reach no equation at all. ofgpu-plume, ofgpu-buoyant and ofgpu-lowmach do honour it, on their T, U and p equations"
         ),
         "one pass - the correction applied once, exactly as nNonOrthogonalCorrectors 0",
         (),
@@ -472,7 +472,7 @@ pub fn refuse_buoyancy_without_temperature(
         &format!("({} {} {})", g(f64::from(gv.x)), g(f64::from(gv.y)), g(f64::from(gv.z))),
         &["(0 0 0)"],
         &format!(
-            "{driver} solves the turbulence transport equations on a frozen U and phi and reads no temperature field, so SPEC-LIT §17's buoyancy production G_b = (nu_t/Pr_t) g.grad(T)/T has nothing to be built from. ofgpu-plume, ofgpu-buoyant and ofgpu-fire transport T and do wire G_b into k and epsilon/omega"
+            "{driver} solves the turbulence transport equations on a frozen U and phi and reads no temperature field, so SPEC-LIT §17's buoyancy production G_b = (nu_t/Pr_t) g.grad(T)/T has nothing to be built from. ofgpu-plume, ofgpu-buoyant and ofgpu-lowmach transport T and do wire G_b into k and epsilon/omega"
         ),
         "no buoyancy production - G_b identically zero, exactly as gravity (0 0 0)",
         (),
@@ -501,7 +501,7 @@ pub fn refuse_rheology_without_momentum(cc: &CaseControls, driver: &str) -> Resu
         cc.rheology.model.name(),
         &["Newtonian", "constant"],
         &format!(
-            "{driver} solves the turbulence transport equations on a frozen U and assembles no momentum equation, so SPEC-LIT 38's nu(gdot) has no strain rate to be evaluated at and would be read by nothing. ofgpu-buoyant and ofgpu-fire assemble momentum and do apply it"
+            "{driver} solves the turbulence transport equations on a frozen U and assembles no momentum equation, so SPEC-LIT 38's nu(gdot) has no strain rate to be evaluated at and would be read by nothing. ofgpu-buoyant and ofgpu-lowmach assemble momentum and do apply it"
         ),
         "Newtonian - the case's own single nu",
         (),
@@ -798,7 +798,7 @@ pub fn restart_shell(mesh_hash: u64, time: Scalar, p0: Scalar, hm: &ofgpu::HostM
         time: f64::from(time),
         p0: f64::from(p0),
         // `ofgpu-buoyant`/`ofgpu-vof` have no `p0` ODE (SPEC-LIT §25.2 is
-        // `ofgpu-fire`-only) and so nothing to carry here; `ofgpu-fire`'s
+        // `ofgpu-lowmach`-only) and so nothing to carry here; `ofgpu-lowmach`'s
         // own `write_restart_checkpoint` overwrites this field with
         // `GasState::dp0dt()` after calling this - see `.mcr`'s "Version 2"
         // doc in `ofgpu::restart`.
@@ -867,7 +867,7 @@ pub fn driver_for(m: RasModel) -> &'static str {
         // SPEC-LIT §33 needs `wallTreatment lowRe` and a wall-resolving mesh,
         // which is a different CASE, not a different coefficient set - the
         // coupled drivers are where it is reachable.
-        RasModel::LaunderSharmaKE => "ofgpu-buoyant or ofgpu-fire",
+        RasModel::LaunderSharmaKE => "ofgpu-buoyant or ofgpu-lowmach",
         RasModel::KOmega | RasModel::KOmegaSST => "ofgpu-k-omega",
         // SPEC-LIT S88/S89: the transition model is `kOmegaSST` with two more
         // equations bolted on, and it is reachable exactly where SST is
@@ -875,7 +875,7 @@ pub fn driver_for(m: RasModel) -> &'static str {
         // builds `KOmegaSst` directly and would run a transitional case fully
         // turbulent from the leading edge, which is the plausible converged
         // wrong answer S13.4 exists to stop.
-        RasModel::KOmegaSstLM => "ofgpu-buoyant or ofgpu-fire",
+        RasModel::KOmegaSstLM => "ofgpu-buoyant or ofgpu-lowmach",
         // SPEC-LIT S56/S57: SA and both hybrid backgrounds are reachable
         // through `models::registry::build_coupled`, which is what the
         // coupled drivers use - there is no standalone `ofgpu-sa`.
@@ -884,8 +884,8 @@ pub fn driver_for(m: RasModel) -> &'static str {
         // it, and its SA-background hybrids with it. The SST-background
         // hybrids go through `build_coupled` like SST itself.
         RasModel::SpalartAllmaras | RasModel::HybridSa => "ofgpu-sa",
-        RasModel::HybridSst => "ofgpu-buoyant or ofgpu-fire",
-        RasModel::Les => "ofgpu-buoyant or ofgpu-fire",
+        RasModel::HybridSst => "ofgpu-buoyant or ofgpu-lowmach",
+        RasModel::Les => "ofgpu-buoyant or ofgpu-lowmach",
         RasModel::Laminar => "any driver",
     }
 }
@@ -898,7 +898,7 @@ pub fn driver_for(m: RasModel) -> &'static str {
 // > case file and nothing else, must write DIFFERENT output. If they are
 // > bit-identical, the setting is inert.
 //
-// `ofgpu-fire` has had such a test since instance 4
+// `ofgpu-lowmach` has had such a test since instance 4
 // (`every_wired_setting_changes_what_the_run_writes`), built on generated
 // JSONC case TEXT. The other five drivers take an OpenFOAM case DIRECTORY,
 // so theirs is built on `blockgen::write_case` plus a textual edit of one

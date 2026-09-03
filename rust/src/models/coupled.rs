@@ -151,40 +151,41 @@ impl BuoyancySettings {
 //  The trait
 // ==========================================================================
 
-/// What SPEC-LIT §27's eddy-dissipation combustion model needs from a
-/// turbulence closure to build its mixing rate, in whatever form THIS
-/// model's own closure gives it - so a caller like `ofgpu-fire` reads one of
-/// these off [`CoupledTurbulence::combustion_mixing`] and hands it straight
-/// to the matching [`crate::combustion::Combustion`] entry point, never
-/// downcasting to a concrete model to get there (the same discipline
-/// [`ThermalCtx`]/`nut()` already keep).
+/// The inverse time scale of turbulent mixing this closure carries, in
+/// whatever form THIS model's own equations give it.
+///
+/// A scalar source that is limited by how fast the turbulence stirs - a
+/// mixing-limited transfer between two transported scalars, an eddy-break-up
+/// rate - needs `1/tau_mix`, and no two closures spell it the same way. A
+/// driver reads one of these off [`CoupledTurbulence::mixing_rate`] and
+/// matches on it, never downcasting to a concrete model to get there (the
+/// same discipline [`ThermalCtx`]/`nut()` already keep).
 ///
 /// Every field/coefficient here is borrowed, not computed - this is a
-/// dispatch key, not a rate. Computing the rate itself (`eps/k`,
-/// `beta_star*omega`, `C_EDM'*|S|`) stays inside `Combustion`, which is
-/// where SPEC-LIT §27 lives and where the availability clip and species
-/// bookkeeping already are.
-pub enum CombustionMixing<'a> {
-    /// k-epsilon (SPEC-LIT §6.1): feed [`crate::combustion::Combustion::react_rans`].
+/// dispatch key, not a rate. Forming the rate itself (`eps/k`,
+/// `beta_star*omega`, `C*|S|`) belongs to whoever needs it, together with
+/// whatever clip and bookkeeping their own model asks for.
+pub enum MixingRate<'a> {
+    /// k-epsilon (SPEC-LIT §6.1): `epsilon/k` is the rate, and both fields
+    /// are transported.
     Epsilon {
         k: &'a GpuScalarField,
         epsilon: &'a GpuScalarField,
     },
     /// k-omega / k-omega-SST (SPEC-LIT §6.2, §6.3): neither transports
     /// `epsilon`, but both carry the Wilcox identity
-    /// `epsilon = beta_star*k*omega` in their own `k` equation - feed
-    /// [`crate::combustion::Combustion::react_rans_omega`], which applies
-    /// exactly that substitution.
+    /// `epsilon = beta_star*k*omega` in their own `k` equation, so the rate
+    /// is `beta_star*omega` and needs no `k` at all.
     Omega { omega: &'a GpuScalarField, beta_star: Scalar },
-    /// LES (SPEC-LIT §6.5): the resolved strain-rate magnitude stands in for
-    /// the eddy turnover rate, SPEC-LIT §27's own *DESIGN* note for an LES
-    /// cell - feed [`crate::combustion::Combustion::react_les`].
+    /// LES (SPEC-LIT §6.5): nothing transports a turbulent time scale, and
+    /// the resolved strain-rate magnitude `|S|` stands in for the eddy
+    /// turnover rate of the sub-filter cell.
     Strain(&'a DevBuf<Scalar>),
-    /// laminar: `nu_t = 0` carries no mixing time scale at all. A caller
-    /// that lets `-combustion` run against this model would be reporting a
-    /// reaction rate with no closure behind it - SPEC-LIT §13.4: refuse the
-    /// COMBINATION by name rather than silently returning a zero rate that
-    /// reads as "correctly modelled, and simply not reacting".
+    /// laminar, and Spalart-Allmaras: no mixing time scale at all. A caller
+    /// that runs a mixing-limited source against this model would be
+    /// reporting a rate with no closure behind it - SPEC-LIT §13.4: refuse
+    /// the COMBINATION by name rather than silently returning a zero rate
+    /// that reads as "correctly modelled, and simply not transferring".
     None,
 }
 
@@ -233,10 +234,10 @@ pub trait CoupledTurbulence {
     /// this cannot be the same method as the shared-reference one.
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)>;
 
-    /// SPEC-LIT §27's combustion mixing rate, in whatever form this model's
-    /// own closure provides it - see [`CombustionMixing`]'s doc for why this
-    /// exists and what each arm feeds.
-    fn combustion_mixing(&self) -> CombustionMixing<'_>;
+    /// The turbulent mixing rate `1/tau_mix`, in whatever form this model's
+    /// own closure provides it - see [`MixingRate`]'s doc for why this
+    /// exists and what each arm carries.
+    fn mixing_rate(&self) -> MixingRate<'_>;
 }
 
 // ==========================================================================
@@ -298,8 +299,8 @@ impl<'m> CoupledTurbulence for CoupledKEpsilon<'m> {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         self.model.named_fields_mut()
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
-        CombustionMixing::Epsilon {
+    fn mixing_rate(&self) -> MixingRate<'_> {
+        MixingRate::Epsilon {
             k: self.model.k(),
             epsilon: self.model.epsilon(),
         }
@@ -361,13 +362,13 @@ impl<'m> CoupledTurbulence for CoupledLaunderSharmaKE<'m> {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         self.model.named_fields_mut()
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
+    fn mixing_rate(&self) -> MixingRate<'_> {
         // epsilon_tilde stands in for epsilon here (see the model's own
         // module doc): the difference is D = 2 nu |grad(sqrt k)|^2, an O(nu)
-        // near-wall correction that a combustion mixing-time estimate - which
+        // near-wall correction that a mixing-time estimate - which
         // is never evaluated inside the viscous sublayer to begin with - does
         // not need resolved any more finely than that.
-        CombustionMixing::Epsilon {
+        MixingRate::Epsilon {
             k: self.model.k(),
             epsilon: self.model.epsilon(),
         }
@@ -432,8 +433,8 @@ impl<'m> CoupledTurbulence for CoupledRealizableKe<'m> {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         self.model.named_fields_mut()
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
-        CombustionMixing::Epsilon {
+    fn mixing_rate(&self) -> MixingRate<'_> {
+        MixingRate::Epsilon {
             k: self.model.k(),
             epsilon: self.model.epsilon(),
         }
@@ -503,20 +504,20 @@ impl<'m> CoupledTurbulence for CoupledSpalartAllmaras<'m> {
         self.model.named_fields_mut()
     }
 
-    /// SPEC-LIT §27's mixing rate, and the one place a one-equation model
-    /// genuinely has nothing to offer.
+    /// The mixing rate, and the one place a one-equation model genuinely has
+    /// nothing to offer.
     ///
-    /// The eddy-break-up rate needs an inverse time scale. k-epsilon has
+    /// A mixing-limited source needs an inverse time scale. k-epsilon has
     /// `epsilon/k`; k-omega has `beta* omega`. Spalart-Allmaras transports
     /// **neither an energy nor a frequency** - `nu~` is a viscosity - so
     /// there is no identity that recovers one, and constructing a plausible
     /// substitute (say `nu_t/d^2`, or a strain rate) would be inventing a
-    /// combustion model and attributing it to Spalart & Allmaras. §13.4 and
-    /// §0 between them forbid that, so this answers `None` and a driver that
-    /// wanted `-combustion` under this model is refused by name - the same
+    /// closure and attributing it to Spalart & Allmaras. §13.4 and §0
+    /// between them forbid that, so this answers `None` and a driver that
+    /// needs a mixing rate under this model is refused by name - the same
     /// treatment `CoupledLaminar` gets, and for the same reason.
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
-        CombustionMixing::None
+    fn mixing_rate(&self) -> MixingRate<'_> {
+        MixingRate::None
     }
 }
 
@@ -579,8 +580,8 @@ impl<'m> CoupledTurbulence for CoupledRngKe<'m> {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         self.model.named_fields_mut()
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
-        CombustionMixing::Epsilon {
+    fn mixing_rate(&self) -> MixingRate<'_> {
+        MixingRate::Epsilon {
             k: self.model.k(),
             epsilon: self.model.epsilon(),
         }
@@ -642,8 +643,8 @@ impl<'m> CoupledTurbulence for CoupledKOmega<'m> {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         self.model.named_fields_mut()
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
-        CombustionMixing::Omega {
+    fn mixing_rate(&self) -> MixingRate<'_> {
+        MixingRate::Omega {
             omega: self.model.omega(),
             beta_star: self.model.coeffs().beta_star,
         }
@@ -719,8 +720,8 @@ impl<'m> CoupledTurbulence for CoupledKOmegaSst<'m> {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         self.model.named_fields_mut()
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
-        CombustionMixing::Omega {
+    fn mixing_rate(&self) -> MixingRate<'_> {
+        MixingRate::Omega {
             omega: self.model.omega(),
             beta_star: self.model.coeffs().beta_star,
         }
@@ -815,12 +816,12 @@ impl<'m> CoupledTurbulence for CoupledLes<'m> {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         vec![("nut", self.model.nut_mut())]
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
+    fn mixing_rate(&self) -> MixingRate<'_> {
         // The strain rate of the LAST `correct`/`initialise` call - the same
         // one-iteration lag `nut()` itself already carries into momentum and
-        // energy, and true of all three LES submodels alike (SPEC-LIT §27's
-        // *DESIGN* note names no distinction between them here).
-        CombustionMixing::Strain(self.model.strain_rate())
+        // energy, and true of all three LES submodels alike: SPEC-LIT §6.5
+        // draws no distinction between them at this seam.
+        MixingRate::Strain(self.model.strain_rate())
     }
 }
 
@@ -872,7 +873,7 @@ impl CoupledTurbulence for CoupledLaminar {
     fn output_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
         vec![("nut", &mut self.nut)]
     }
-    fn combustion_mixing(&self) -> CombustionMixing<'_> {
-        CombustionMixing::None
+    fn mixing_rate(&self) -> MixingRate<'_> {
+        MixingRate::None
     }
 }

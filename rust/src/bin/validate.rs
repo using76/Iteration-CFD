@@ -59,7 +59,6 @@ use std::process::ExitCode;
 
 use ofgpu::blockgen;
 use ofgpu::blockgen::{write_block_mesh, BlockSpec, GradedAxis};
-use ofgpu::combustion::{Combustion, CombustionCoeffs};
 use ofgpu::energy::{DomainKind, EnergySources, GasProperties, GasState};
 use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{
@@ -82,11 +81,9 @@ use ofgpu::ldu_ops::{
 use ofgpu::mesh::{HostMesh, PatchKind};
 use ofgpu::pressure::fft::cufft_available;
 use ofgpu::pressure::{FftBackend, PbicgstabBackend, PressureBackend, SystemProbe};
-use ofgpu::participating::{Radiation, RadiationProps};
 use ofgpu::rheology::{herschel_bulkley_channel_u, KinematicCoeffs};
 use ofgpu::reference as cpu;
 use ofgpu::solver::{solve_pbicgstab, solve_pcg, SolverKernels, SolverWorkspace};
-use ofgpu::species::{Species, SpeciesCoeffs};
 use ofgpu::surface::classify::BlockAxes;
 use ofgpu::surface::cutcell::{classify_cutcells, CellState, DEFAULT_SUPERSAMPLE};
 use ofgpu::surface::stl::parse_stl;
@@ -94,7 +91,7 @@ use ofgpu::models::{RealizableKeCoeffs, RngKeCoeffs};
 use ofgpu::turbulence::TurbulenceControls;
 use ofgpu::vof::{Vof, VofControls, VofProperties};
 use cudarc::driver::PushKernelArg;
-use ofgpu::{cfg_for, DevBuf, Error, Gpu, GpuMesh, KernelSet, Label, Result, Scalar, Tensor, Vec3};
+use ofgpu::{cfg_for, DevBuf, Gpu, GpuMesh, KernelSet, Label, Result, Scalar, Tensor, Vec3};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -142,10 +139,6 @@ enum How {
     /// Judged against a recorded measurement replayed above - see
     /// [`Checks::replayed`].
     Replayed,
-    /// A multi-minute run that does not belong inside a validation harness
-    /// which has to finish. The verdict is registered here anyway, so that
-    /// "not run here" can never quietly become "not reported here".
-    NotRunHere,
 }
 
 impl How {
@@ -153,7 +146,6 @@ impl How {
         match self {
             How::Live => "run live above",
             How::Replayed => "replayed above",
-            How::NotRunHere => "NOT run here",
         }
     }
 }
@@ -190,7 +182,7 @@ struct Checks {
     /// [`check_resolved_leg_gate_verdict_replay`],
     /// [`check_thermostat_weighting_experiment_replay`] and
     /// [`check_bounded_convection_experiment_replay`]. Their INPUTS are frozen
-    /// constants copied out of `docs/07-fire-solver.md` §1.1; everything done
+    /// constants copied out of `docs/07-lowmach-solver.md` §1.1; everything done
     /// WITH those inputs - the correlations, the friction-factor
     /// conversions, the band arithmetic - is computed live, which is the
     /// whole point of replaying them. Counting them separately keeps the
@@ -2519,15 +2511,9 @@ fn run(c: &mut Checks) -> Result<()> {
     check_msh_hex_closure(c)?;
     check_cutcell_closure(c)?;
 
-    // ---- fire: low-Mach p0, combustion, radiation (SPEC-LIT 25, 27, 28) ---
-    println!("\n=== fire: low-Mach p0, combustion, radiation (SPEC-LIT 25, 27, 28) ===");
+    // ---- the low-Mach reference pressure (SPEC-LIT 25) -------------------
+    println!("\n=== the low-Mach reference pressure (SPEC-LIT 25) ===");
     check_low_mach_p0(c, &gpu)?;
-    check_burner_heat_release(c, &gpu)?;
-    check_two_step_closed_forms(c);
-    check_two_step_oxygen_limit(c, &gpu)?;
-    check_extinction_threshold(c, &gpu)?;
-    c.replaying(check_rse_compartment_replay);
-    check_radiative_equilibrium(c, &gpu)?;
 
     // ---- wall treatment: rough-wall Ks -> 0, the thermal wall function
     //      (SPEC-LIT 29) --------------------------------------------------
@@ -2562,7 +2548,7 @@ fn run(c: &mut Checks) -> Result<()> {
     // check that says the damping is right" - is NOT promoted here. It was
     // run (a periodic 2-D channel, LaunderSharmaKE, Re_tau ~ 440) and DOES
     // reproduce u+ = y+ below y+ 5 (worst deviation 0.8% at y+ 4.4) and the
-    // log law within ~1% at y+ 30-35 - see docs/07-fire-solver.md §1.1 for
+    // log law within ~1% at y+ 30-35 - see docs/07-lowmach-solver.md §1.1 for
     // the full table - but the run takes ~10 minutes on an RTX 5070 Ti and
     // had not fully settled (|U| residual ~5e-2, plateauing on the
     // periodic pressure equation's own null space, SPEC-LIT §31.1) even
@@ -2583,7 +2569,7 @@ fn run(c: &mut Checks) -> Result<()> {
     // ---- SPEC-LIT §35: the bulk-temperature thermostat -------------------
     //
     // The two-initial-temperature regression itself (SPEC-LIT §35.2) is run
-    // LIVE and reported in `docs/07-fire-solver.md` §1.1, not here: it takes
+    // LIVE and reported in `docs/07-lowmach-solver.md` §1.1, not here: it takes
     // ~2.5 minutes PER initial condition on the real channel mesh, which
     // disqualifies it from this always-run suite the same way §33.3's law-
     // of-the-wall channel run is disqualified above. What IS promoted here:
@@ -2662,11 +2648,6 @@ fn run(c: &mut Checks) -> Result<()> {
     );
     check_transition(c)?;
 
-    // SPEC-LIT S61/S62 - soot, and the WSGG spectral radiation that reads it.
-    println!("
-=== soot and WSGG spectral radiation (SPEC-LIT 61, 62) ===");
-    check_soot_and_wsgg(c, &gpu)?;
-
     // SPEC-LIT S66 - the Lagrangian parcel pool, the drag update and the walk.
     println!("
 === Lagrangian parcels (SPEC-LIT 66) ===");
@@ -2707,1509 +2688,6 @@ fn run(c: &mut Checks) -> Result<()> {
 }
 
 
-
-// ==========================================================================
-//  SPEC-LIT §61/§62 - soot, and the WSGG spectral radiation that reads it
-//
-//  Gate 1 (the coefficient set, no mesh), Gate 2 (the gray limit, BITWISE,
-//  both models), Gate 3 (P1 against fvDOM on the same banded medium, which is
-//  what turns §62.5's transparent-window loss into a number) and Gate 5
-//  (§64: banded P1 against the EXACT slab, band by band - the only one of the
-//  five that measures the banded ANSWER rather than an identity or another
-//  model) are all RUN LIVE here. Gate 4 - the NIST 37 cm propane burner - is a multi-minute
-//  fire run per heat release rate and is reported in SPEC-LIT §62.13 and
-//  `docs/07-fire-solver.md`, not here, on the same grounds that SPEC-LIT
-//  §33.3's channel run is kept out. SPEC-LIT §61.8's Gate 61-A (the soot yield
-//  against Tewarson's measured one) is a 1200-step fire on the same grounds
-//  again; it MISSES, and the note below says so on this screen rather than
-//  leaving the verdict only in the spec.
-// ==========================================================================
-
-/// **SPEC-LIT §61.8 and §62.12.**
-#[allow(clippy::too_many_lines)]
-fn check_soot_and_wsgg(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    use ofgpu::soot::{
-        cubic_window, cubic_window_coeffs, omega_sf_peak, z_stoichiometric, SootModel, SootStats,
-        C_ZH_FORMATION, C_ZL_FORMATION, C_ZP_FORMATION, MOLAR_MASS_PROPANE, MOLAR_MASS_REF,
-        SMOKE_POINT_ETHYLENE, SMOKE_POINT_PROPANE, T_H_FORMATION, T_L_FORMATION, T_P_FORMATION,
-    };
-    use ofgpu::wsgg::{
-        a_gray, a_window, emissivity, kappa_gray, kappa_soot, weights_sum_to_one, FuelFormula,
-        radcal_emissivity, MediumState, SpectralModel, SpectralProps, WindowTreatment, N_GRAY,
-        RADCAL_MR, RADCAL_PAL, RADCAL_T, W_CO2, W_H2O,
-    };
-
-    // ---- Gate 1: the coefficient set itself ------------------------------
-    //
-    // The sweep the unit gates run, promoted here so a transcription error in
-    // the 170 published numbers fails `ofgpu-validate` and not only one
-    // module's own `cargo test`.
-    let mr_grid: [Scalar; 15] = [
-        0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 1.333, 2.0, 3.0, 3.999, 4.0, 4.5, 10.0,
-    ];
-    let mut worst_sum: Scalar = 0.0;
-    let mut min_gray: Scalar = Scalar::INFINITY;
-    let mut min_window: Scalar = Scalar::INFINITY;
-    let mut warmest_negative_window: Scalar = 0.0;
-    for &mr in &mr_grid {
-        for i in 0..=2200 {
-            let t = 300.0 + i as Scalar;
-            worst_sum = worst_sum.max((weights_sum_to_one(t, mr) - 1.0).abs());
-            for j in 1..=N_GRAY {
-                min_gray = min_gray.min(a_gray(t, mr, j));
-            }
-            let a0 = a_window(t, mr);
-            min_window = min_window.min(a0);
-            if a0 < 0.0 && t > warmest_negative_window {
-                warmest_negative_window = t;
-            }
-        }
-    }
-    c.check("S62 Gate 1: sum_j a_j = 1 (62.2), exactly by construction", worst_sum, 1e-15);
-    c.require("S62 Gate 1: every GRAY weight a_j >= 0 over the fit's range", min_gray >= 0.0);
-    c.note(&format!(
-        "S62.2 MEASURED: min_j a_j = {} at the sweep's worst point; min a_0 = {} \
-         (the WINDOW weight, negative below {} K - reported, and (62.18) shows why it \
-         cannot reach Sp)",
-        sci(f64::from(min_gray), 3),
-        sci(f64::from(min_window), 3),
-        common::g(f64::from(warmest_negative_window)),
-    ));
-
-    // The emissivity (62.1) is what the set was FITTED to: monotone, zero at
-    // zero path length, saturating at `1 - a_0`.
-    let mut worst_mono: Scalar = 0.0;
-    let mut worst_sat: Scalar = 0.0;
-    for &mr in &mr_grid {
-        for t in [400.0 as Scalar, 1000.0, 1500.0, 2000.0, 2400.0] {
-            let mut prev: Scalar = 0.0;
-            for &l in &[0.0 as Scalar, 0.01, 0.1, 0.3, 1.0, 3.0, 10.0] {
-                let e = emissivity(t, l, mr);
-                worst_mono = worst_mono.max((prev - e).max(0.0));
-                prev = e;
-            }
-            worst_sat =
-                worst_sat.max((emissivity(t, 1.0e4, mr) - (1.0 - a_window(t, mr))).abs());
-        }
-    }
-    c.check("S62 Gate 1: eps(T, p_a L) monotone in path length", worst_mono, 1e-15);
-    c.check("S62 Gate 1: eps -> 1 - a_0 as p_a L -> infinity (62.2)", worst_sat, 1e-9);
-    // ---- Gate 1-E: (62.1) against a PUBLISHED reference -------------------
-    //
-    // S62.2 records that Bordbar's own emissivity table could not be
-    // obtained, and until this gate existed the level was checked against a
-    // hand-written band with no number behind it. The reference is RADCAL
-    // (Grosshandler, NIST TN 1402, US public domain) run from NIST's own
-    // `reference/fds/Source/rcal.f90`; the 108 recorded points and the
-    // blackbody-window correction they need are `wsgg::RADCAL_EPS` and
-    // `wsgg::RADCAL_WINDOW_FRACTION`, and `tools/radcal_emissivity/`
-    // reproduces them. RADCAL is an INDEPENDENT model, not truth.
-    let mut e_sum: Scalar = 0.0;
-    let mut e_worst: Scalar = 0.0;
-    let mut e_worst_at = (0usize, 0usize, 0usize);
-    let mut e_out10 = 0usize;
-    let mut e_n = 0usize;
-    let mut e_bias = [0.0 as Scalar; 6];
-    for (i_mr, &mr) in RADCAL_MR.iter().enumerate() {
-        for (i_t, &t) in RADCAL_T.iter().enumerate() {
-            for (i_l, &pal) in RADCAL_PAL.iter().enumerate() {
-                let want = radcal_emissivity(i_mr, i_t, i_l);
-                let rel = (emissivity(t, pal, mr) - want) / want;
-                if rel.abs() > e_worst {
-                    e_worst = rel.abs();
-                    e_worst_at = (i_mr, i_t, i_l);
-                }
-                if rel.abs() > 0.10 {
-                    e_out10 += 1;
-                }
-                e_bias[i_t] += rel / (RADCAL_MR.len() * RADCAL_PAL.len()) as Scalar;
-                e_sum += rel.abs();
-                e_n += 1;
-            }
-        }
-    }
-    let e_mean = e_sum / e_n as Scalar;
-    c.note(&format!(
-        "S62 Gate 1-E MEASURED, (62.1) against RADCAL (NIST TN 1402, public domain, run \
-         from reference/fds/Source/rcal.f90 via tools/radcal_emissivity) over {} points \
-         - 3 molar ratios x 6 temperatures in [400, 2400] K x 6 path lengths in \
-         [0.01, 3] atm.m: mean |d eps/eps| = {} %, worst {} % at M_r = {}, T = {} K, \
-         p_a L = {} atm.m. The signed bias per temperature is {} % (400 K), {} % \
-         (700 K), {} % (1000 K), {} % (1500 K), {} % (2000 K), {} % (2400 K) - \
-         MONOTONE, one sign change, high in the smoke layer and low in the flame, \
-         crossing near Bordbar's own T_ref = 1200 K",
-        e_n,
-        common::g(f64::from(100.0 * e_mean)),
-        common::g(f64::from(100.0 * e_worst)),
-        common::g(f64::from(RADCAL_MR[e_worst_at.0])),
-        common::g(f64::from(RADCAL_T[e_worst_at.1])),
-        common::g(f64::from(RADCAL_PAL[e_worst_at.2])),
-        common::g(f64::from(100.0 * e_bias[0])),
-        common::g(f64::from(100.0 * e_bias[1])),
-        common::g(f64::from(100.0 * e_bias[2])),
-        common::g(f64::from(100.0 * e_bias[3])),
-        common::g(f64::from(100.0 * e_bias[4])),
-        common::g(f64::from(100.0 * e_bias[5])),
-    ));
-    c.report(GateReport {
-        verdict: Verdict::Misses,
-        how: How::Live,
-        gate: "SPEC-LIT S62.12 Gate 1-E",
-        against: "RADCAL's total emissivity (Grosshandler, NIST TN 1402, US public domain, \
-                  compiled unmodified from reference/fds/Source/rcal.f90), 108 points, bar \
-                  +-10 % at every one",
-        headline: format!(
-            "{} of {} points are outside the bar, the worst by {} % - two published models \
-             of one quantity, each claiming better than that on its own",
-            e_out10,
-            e_n,
-            common::g(f64::from(100.0 * e_worst)),
-        ),
-        detail: vec![
-            "  The gate is NOT evidence that Bordbar's set is wrong: RADCAL is a narrow-band \
-             model on the band data of NASA SP-3080, Bordbar's is a fit to line-by-line \
-             HITEMP-2010, and at 2400 K both are extrapolating. What it IS evidence of is \
-             that the disagreement is STRUCTURED rather than scattered, so a fire's smoke \
-             layer (400-700 K, where most of the volume is) and its flame are the two \
-             places the choice of set moves the answer most - which is exactly where S62.2 \
-             said the range was thinnest"
-                .to_string(),
-        ],
-    });
-    // What must hold is the TRANSCRIPTION guard, not the physics bar: a wrong
-    // coefficient among the 168 would move the level by a factor, and it
-    // would break the monotone temperature ladder long before that.
-    c.check(
-        "S62 Gate 1-E: every point within +-35 % of RADCAL (the transcription guard)",
-        e_worst,
-        0.35,
-    );
-    c.check("S62 Gate 1-E: the mean |d eps/eps| against RADCAL is within 15 %", e_mean, 0.15);
-    c.require(
-        "S62 Gate 1-E: the bias against RADCAL falls MONOTONICALLY with temperature, \
-         positive at 400 K and negative at 2400 K, with exactly one sign change",
-        (1..6).all(|i| e_bias[i] < e_bias[i - 1])
-            && e_bias[0] > 0.0
-            && e_bias[5] < 0.0
-            && (1..6).filter(|&i| e_bias[i].signum() != e_bias[i - 1].signum()).count() == 1,
-    );
-
-    // The gray gases are a weak-to-strong ladder, and kappa is linear in p_a.
-    let mut ordered = true;
-    for &mr in &[0.5 as Scalar, 1.0, 1.333, 2.0, 3.5] {
-        for j in 1..N_GRAY {
-            ordered &= kappa_gray(mr, 1.0, j) < kappa_gray(mr, 1.0, j + 1);
-        }
-    }
-    c.require("S62 Gate 1: the four gray gases are ordered weak to strong", ordered);
-
-    // (62.11)'s soot coefficient, and the cross-check S62.4 records.
-    let k_soot = kappa_soot(1800.0, 1500.0);
-    c.check(
-        "S62.4: kappa_soot = 1.686e6 f_v at 1500 K, rho_s = 1800 (the recorded cross-check)",
-        (k_soot - 1.6863e6).abs() / 1.6863e6,
-        2e-3,
-    );
-
-    // (62.7)/(62.8): the composition model.
-    let propane = FuelFormula { c: 3.0, h: 8.0 };
-    let split = propane.product_split(None);
-    let want_co2 = 3.0 * W_CO2 / (3.0 * W_CO2 + 4.0 * W_H2O);
-    c.check("S62 (62.7): the single-step product split is exact stoichiometry",
-        (split.co2_products - want_co2).abs(), 1e-15);
-    let two = propane.product_split(Some((1.451255, 1.270381)));
-    c.check(
-        "S62 (62.8): the two-step split reproduces ISFEH10 Eq. (2)'s intermediate water",
-        (two.h2o_intermediate - 1.0 / 3.0).abs(),
-        1e-3,
-    );
-
-    // ---- S61.8: the soot closed forms ------------------------------------
-    let z_st = z_stoichiometric(3.63, 1.0);
-    c.check("S61 (61.6): propane's Z_st = 0.0600725", (z_st - 0.060_072_5).abs(), 1e-6);
-    c.check(
-        "S61 (61.5): ethylene's own anchor returns 1.1 kg/(m3 s) exactly",
-        (omega_sf_peak(SMOKE_POINT_ETHYLENE, MOLAR_MASS_REF, 1.0) - 1.1).abs(),
-        1e-15,
-    );
-    c.check(
-        "S61 (61.5): propane's peak formation rate = 0.45699 kg/(m3 s)",
-        (omega_sf_peak(SMOKE_POINT_PROPANE, MOLAR_MASS_PROPANE, 1.0) - 0.456_986).abs(),
-        1e-5,
-    );
-    // (61.4)'s four defining conditions, checked back.
-    let mut worst_cubic: Scalar = 0.0;
-    let mut min_cubic: Scalar = Scalar::INFINITY;
-    for (x_l, x_p, x_h, w_p) in [
-        (C_ZL_FORMATION * z_st, C_ZP_FORMATION * z_st, C_ZH_FORMATION * z_st, 0.456_986),
-        (T_L_FORMATION, T_P_FORMATION, T_H_FORMATION, 1.0),
-    ] {
-        let (a, b) = cubic_window_coeffs(x_l, x_p, x_h, w_p);
-        let f = |u: Scalar| w_p + a * u * u + b * u * u * u;
-        worst_cubic = worst_cubic.max(f(x_l - x_p).abs() / w_p);
-        worst_cubic = worst_cubic.max(f(x_h - x_p).abs() / w_p);
-        worst_cubic = worst_cubic.max((f(0.0) - w_p).abs() / w_p);
-        for i in 0..=2000 {
-            let x = x_l + (x_h - x_l) * i as Scalar / 2000.0;
-            min_cubic = min_cubic.min(cubic_window(x, x_p, x_l, x_h, a, b, w_p));
-        }
-    }
-    c.check("S61 (61.4): the cubic's four defining conditions hold", worst_cubic, 1e-12);
-    c.require("S61 (61.4): the cubic is non-negative inside its own window", min_cubic >= 0.0);
-
-    // (61.7)'s two readings, as closed forms, so the identity leg cannot be
-    // mistaken for the prediction leg by anyone reading only this file.
-    let ys_stats = SootStats {
-        formation_rate: 0.024 * 3.5e-4,
-        oxidation_rate: 0.0,
-        ..Default::default()
-    };
-    c.check(
-        "S61 (61.7): the predicted post-flame yield returns y_s under prescribedYield",
-        (ys_stats.predicted_yield(3.5e-4) - 0.024).abs() / 0.024,
-        1e-15,
-    );
-    c.require(
-        "S61 (61.7): nothing burning is a yield of zero, not a division",
-        SootStats { formation_rate: 1.0, ..Default::default() }.predicted_yield(0.0) == 0.0,
-    );
-    c.report(GateReport {
-        verdict: Verdict::Misses,
-        how: How::NotRunHere,
-        gate: "SPEC-LIT S61.8 Gate 61-A",
-        against: "Tewarson's measured post-flame soot yield for propane, 0.024 kg/kg (SFPE \
-                  Handbook Table A.40), on cases/burnerPlumeResolved.jsonc",
-        headline: "the laminarSmokePoint model now REACHES its own 1375 K window - 296 of \
-                   262144 cells, against 0 of 32768 before S85 - and (61.7) returns 0.0124 kg/kg \
-                   against that measured 0.024, a factor of 1.94. It is NOT reported as a pass: \
-                   the only leg that reaches the window exports 4.559 kW of unburnt fuel against \
-                   a 2.949 kW supply, so the number is read off cells partly made of fuel that \
-                   entered nowhere"
-            .to_string(),
-        detail: vec![
-            "  a 2667-step 262144-cell fire, which is why it is not run inside this harness; \
-             SPEC-LIT S85.10 carries it and S85.7 brackets the species mass budget error from \
-             both sides (-17 % conservative, +162 % under S19's bounded default)"
-                .to_string(),
-            "  what changed: S85.5 - Species was handed CaseControls::turb whole, so \
-             numerics.relaxation's entry for k (the TURBULENCE kinetic energy) was the \
-             under-relaxation of Y_F/Y_O2/Y_P/Y_s, and in S14's non-iterative transient \
-             splitting that deleted 42 % of the fuel the burner supplied"
-                .to_string(),
-            "  the prescribedYield leg still returns 0.024 on the same case and is an \
-             IDENTITY, not a pass"
-                .to_string(),
-        ],
-    });
-
-    // S62.12's Gate 4 - the OTHER fire gate this block is answerable for, and
-    // until SPEC-LIT S69 the one gate of the six whose verdict this binary
-    // never printed at all. The summary line used to assert that both fire
-    // verdicts were "noted in the soot/WSGG block above"; Gate 61-A's was,
-    // Gate 4's was not, and nothing checked the claim. Registering it here is
-    // what makes the sentence true, and S69.2's audit is what would have
-    // caught it. The numbers are SPEC-LIT S62.13's own, unchanged.
-    c.report(GateReport {
-        verdict: Verdict::Misses,
-        how: How::NotRunHere,
-        gate: "SPEC-LIT S62.12 Gate 4",
-        against: "the NIST 37 cm propane burner's measured radiative fraction, chi_r = 0.23 \
-                  / 0.30 / 0.33 at 20 / 34 / 50 kW (Sung, Chen, Bundy, Fernandez & Hamins, \
-                  NIST TN 2162r1, 2021, via the FDS Validation Guide), on \
-                  cases/nistBurner37cm.jsonc",
-        headline: "the case never reaches a state in which a radiative fraction is a \
-                   meaningful quantity - it reports a combustion efficiency of 226 %, so the \
-                   domain is burning an accumulated fuel inventory rather than what enters, \
-                   and S62.12's own gate text named ~95 % efficiency as the precondition \
-                   before any of this ran"
-            .to_string(),
-        detail: vec![
-            "  a multi-minute fire per heat release rate, which is why it is not run inside \
-             this harness; SPEC-LIT S62.13 carries the configuration table and the \
-             diagnosis. The gray leg of the same case settles at 74.7 % efficiency, so what \
-             drives the fire past its own supply is the composition-dependent absorption, \
-             and the next measurement named there is a longer run or a smaller domain"
-                .to_string(),
-        ],
-    });
-
-    // The S13.4 contract, both sections.
-    c.require(
-        "S61.5: mossBrookes is refused BY NAME and with the reason",
-        SootModel::from_name("mossBrookes")
-            .err()
-            .map(|e| {
-                let m = format!("{e}");
-                m.contains("acetylene") && m.contains("laminarSmokePoint")
-            })
-            .unwrap_or(false),
-    );
-    c.require(
-        "S62.11: cassol is refused BY NAME, with its 125 gray gases and the reproducibility reason",
-        SpectralModel::from_name("cassol")
-            .err()
-            .map(|e| {
-                let m = format!("{e}");
-                m.contains("125 gray gases") && m.contains("data-dependent")
-            })
-            .unwrap_or(false),
-    );
-
-    // ---- Gate 2: the gray limit, BITWISE, on a real mesh ------------------
-    let n = [6usize, 10, 4];
-    let l: [Scalar; 3] = [0.3, 0.5, 0.2];
-    let axis = |i: usize| GradedAxis { lo: 0.0, hi: l[i], n: n[i], expansion: 1.0, two_sided: false };
-    let b = BlockSpec {
-        x: axis(0),
-        y: axis(1),
-        z: axis(2),
-        windows: Vec::new(),
-        patch_name: BlockSpec::default().patch_name,
-        patch_type: ["wall", "wall", "wall", "wall", "wall", "wall"].map(String::from),
-        cyclic: Vec::new(),
-    };
-    let hm = blockgen::build_mesh(&b)?;
-    let gm = GpuMesh::upload(gpu, &hm)?;
-
-    let ctrl = SolverControls {
-        solver: LinearSolverKind::PCG,
-        precon: Preconditioner::Diagonal,
-        tolerance: 1e-14,
-        rel_tol: 0.0,
-        max_iter: 5000,
-        report_residuals: true,
-        ..Default::default()
-    };
-
-    // A temperature field with a real gradient, and a heat release that
-    // floors the emission in some cells and not others.
-    let mut t = GpuScalarField::zeros(gpu, &gm, "T")?;
-    let t_host: Vec<Scalar> =
-        hm.c.iter().map(|p| 400.0 + 1400.0 * (p.y / l[1])).collect();
-    gpu.write(&mut t.f, &t_host)?;
-    let tb: Vec<Scalar> = hm.b_cf.iter().map(|p| 400.0 + 1400.0 * (p.y / l[1])).collect();
-    gpu.write(&mut t.bf, &tb)?;
-    let kind = vec![BcKind::FixedValue as Label; hm.n_boundary_faces];
-    let fr = vec![1.0 as Scalar; hm.n_boundary_faces];
-    let ref_grad = vec![0.0 as Scalar; hm.n_boundary_faces];
-    gpu.write(&mut t.bc_kind, &kind)?;
-    gpu.write(&mut t.fr, &fr)?;
-    gpu.write(&mut t.ref_value, &tb)?;
-    gpu.write(&mut t.ref_grad, &ref_grad)?;
-    let fldk = FieldKernels::new(gpu)?;
-    correct_boundary_conditions(gpu, &fldk, &mut t, &gm)?;
-    let qc = gpu.upload(&(0..hm.n_cells).map(|i| 3.0e4 * (i % 6) as Scalar).collect::<Vec<_>>())?;
-
-    let a: Scalar = 0.41;
-    let p1_run = |spectral: SpectralProps| -> Result<Vec<Vec<Scalar>>> {
-        let props = RadiationProps { a, chi_r: 0.35, spectral, update_interval: 1, ..Default::default() };
-        let mut rad = Radiation::new(gpu, &gm, props)?;
-        rad.set_walls(&hm, 0.75)?;
-        rad.initialise(gpu)?;
-        for _ in 0..4 {
-            rad.correct(gpu, &t, Some(&qc), &ctrl, 1)?;
-        }
-        Ok(vec![
-            gpu.download(&rad.field().f)?,
-            gpu.download(&rad.field().bf)?,
-            gpu.download(rad.su())?,
-            gpu.download(rad.sp())?,
-        ])
-    };
-    let gray = p1_run(SpectralProps { model: SpectralModel::Gray, ..Default::default() })?;
-    let banded = p1_run(SpectralProps { model: SpectralModel::GrayBanded, ..Default::default() })?;
-    let mut ulp: u64 = 0;
-    for (x, y) in gray.iter().zip(&banded) {
-        for (&p, &q) in x.iter().zip(y) {
-            ulp = ulp.max((p.to_bits() as i64 - q.to_bits() as i64).unsigned_abs());
-        }
-    }
-    c.require("S62 Gate 2 (P1): grayBanded is BITWISE identical to gray - G, G_b, su, sp", ulp == 0);
-    c.require("S62 Gate 2: the run was not trivially zero", gray[0].iter().any(|&v| v > 1.0));
-
-    let dom_run = |spectral: SpectralProps| -> Result<Vec<Vec<Scalar>>> {
-        let props = ofgpu::fvdom::FvDomProps {
-            a,
-            sigma_s: 0.13,
-            chi_r: 0.35,
-            spectral,
-            update_interval: 1,
-            ..Default::default()
-        };
-        let mut rad = ofgpu::fvdom::FvDom::new(gpu, &gm, props)?;
-        rad.set_walls(&hm, 0.75)?;
-        rad.initialise(gpu)?;
-        for _ in 0..2 {
-            rad.correct(gpu, &t, Some(&qc), &ctrl, 1)?;
-        }
-        Ok(vec![gpu.download(rad.g())?, gpu.download(rad.su())?, gpu.download(rad.sp())?])
-    };
-    let gray_d = dom_run(SpectralProps { model: SpectralModel::Gray, ..Default::default() })?;
-    let banded_d =
-        dom_run(SpectralProps { model: SpectralModel::GrayBanded, ..Default::default() })?;
-    let mut ulp_d: u64 = 0;
-    for (x, y) in gray_d.iter().zip(&banded_d) {
-        for (&p, &q) in x.iter().zip(y) {
-            ulp_d = ulp_d.max((p.to_bits() as i64 - q.to_bits() as i64).unsigned_abs());
-        }
-    }
-    c.require("S62 Gate 2 (fvDOM): grayBanded is BITWISE identical to gray - G, su, sp", ulp_d == 0);
-
-    // ---- Gate 3: P1 against fvDOM on the SAME banded medium --------------
-    //
-    // A HOT, uniform, participating gas in an enclosure of COLD BLACK walls -
-    // the configuration where every watt the gas loses reaches a wall, so the
-    // domain integral of the S26 source IS the radiated power and the two
-    // angular methods have exactly one number to disagree about. Same mesh,
-    // same T, same walls, same composition; the only differences are the
-    // angular method and what each does about `kappa_0 = 0`.
-    let t_gas: Scalar = 1500.0;
-    let t_wall: Scalar = 300.0;
-    let mut th = GpuScalarField::zeros(gpu, &gm, "T")?;
-    gpu.write(&mut th.f, &vec![t_gas; hm.n_cells])?;
-    gpu.write(&mut th.bf, &vec![t_wall; hm.n_boundary_faces])?;
-    gpu.write(&mut th.bc_kind, &vec![BcKind::FixedValue as Label; hm.n_boundary_faces])?;
-    gpu.write(&mut th.fr, &vec![1.0 as Scalar; hm.n_boundary_faces])?;
-    gpu.write(&mut th.ref_value, &vec![t_wall; hm.n_boundary_faces])?;
-    gpu.write(&mut th.ref_grad, &vec![0.0 as Scalar; hm.n_boundary_faces])?;
-    correct_boundary_conditions(gpu, &fldk, &mut th, &gm)?;
-
-    let yp = gpu.upload(&vec![0.10 as Scalar; hm.n_cells])?;
-    let medium = MediumState { y_products: Some(&yp), ..Default::default() };
-    let wsgg = |window: Option<WindowTreatment>| SpectralProps {
-        model: SpectralModel::Wsgg,
-        window,
-        ..Default::default()
-    };
-    let v = gpu.download(&gm.v)?;
-    let net_of = |su: &[Scalar], sp: &[Scalar]| -> Scalar {
-        let mut net: Scalar = 0.0;
-        for i in 0..hm.n_cells {
-            net += (su[i] + sp[i] * t_gas) * v[i];
-        }
-        -net
-    };
-
-    let radiated = |props_window: Option<WindowTreatment>| -> Result<Scalar> {
-        let props =
-            RadiationProps { a, chi_r: 0.0, spectral: wsgg(props_window), update_interval: 1, ..Default::default() };
-        let mut rad = Radiation::new(gpu, &gm, props)?;
-        rad.set_walls(&hm, 1.0)?;
-        rad.initialise(gpu)?;
-        for _ in 0..3 {
-            rad.correct_with_medium(gpu, &th, None, &medium, &ctrl, 1)?;
-        }
-        Ok(net_of(&gpu.download(rad.su())?, &gpu.download(rad.sp())?))
-    };
-    let p1_dropped = radiated(Some(WindowTreatment::Dropped))?;
-    let p1_floored = radiated(Some(WindowTreatment::Floored))?;
-
-    let dom_props = ofgpu::fvdom::FvDomProps {
-        a,
-        sigma_s: 0.0,
-        chi_r: 0.0,
-        spectral: wsgg(None),
-        update_interval: 1,
-        ..Default::default()
-    };
-    let mut dom = ofgpu::fvdom::FvDom::new(gpu, &gm, dom_props)?;
-    dom.set_walls(&hm, 1.0)?;
-    dom.initialise(gpu)?;
-    for _ in 0..4 {
-        dom.correct_with_medium(gpu, &th, None, &medium, &ctrl, 2)?;
-    }
-    let dom_radiated = net_of(&gpu.download(dom.su())?, &gpu.download(dom.sp())?);
-
-    let rel = |x: Scalar| 100.0 * f64::from(x - dom_radiated) / f64::from(dom_radiated.abs());
-    c.note(&format!(
-        "S62 Gate 3 MEASURED - hot uniform gas at {} K in cold black walls at {} K, \
-         X_H2O+X_CO2 from Y_P = 0.10, no soot, no chi_r floor. Net radiated power: fvDOM \
-         {} W; P1 with the window DROPPED {} W ({} %); P1 with the window FLOORED {} W \
-         ({} %). The P1-vs-fvDOM gap is the ANGULAR method's error on a banded medium - \
-         the same disagreement S36.7 measures for a gray one. The dropped-vs-floored gap \
-         is what the window costs the GAS budget, and it is small BY CONSTRUCTION \
-         (kappa_0 = 0 makes band 0 contribute nothing to -div(q_r) whatever G_0 is); what \
-         the window carries and P1 cannot is a_0 = {} of the blackbody power at this \
-         temperature, and that is a WALL-to-WALL flux, not a gas one (S62.5)",
-        common::g(f64::from(t_gas)),
-        common::g(f64::from(t_wall)),
-        common::g(f64::from(dom_radiated)),
-        common::g(f64::from(p1_dropped)),
-        common::g(rel(p1_dropped)),
-        common::g(f64::from(p1_floored)),
-        common::g(rel(p1_floored)),
-        common::g(f64::from(a_window(t_gas, 4.0 / 3.0))),
-    ));
-    c.require(
-        "S62 Gate 3: a hot gas in cold walls RADIATES - all three banded solves agree on the sign",
-        dom_radiated > 0.0 && p1_dropped > 0.0 && p1_floored > 0.0,
-    );
-
-    // ---- S63: the open radiative boundary --------------------------------
-    //
-    // The condition S62's transparent window forced. Two rows: the default is
-    // S28/S36 BITWISE (so every measurement in this document stands), and the
-    // alternative actually lets a hot medium lose energy through an open face
-    // instead of reflecting it back.
-    let open_run = |open: ofgpu::participating::OpenBoundary| -> Result<(Vec<Scalar>, Scalar)> {
-        let props =
-            RadiationProps { a: 0.8, chi_r: 0.0, open, ..Default::default() };
-        let mut rad = Radiation::new(gpu, &gm, props)?;
-        rad.set_walls(&hm, 1.0)?;
-        rad.initialise(gpu)?;
-        // Walls AT the gas temperature, so the open faces are the only exit.
-        let mut tt = GpuScalarField::zeros(gpu, &gm, "T")?;
-        gpu.write(&mut tt.f, &vec![t_gas; hm.n_cells])?;
-        gpu.write(&mut tt.bf, &vec![t_gas; hm.n_boundary_faces])?;
-        gpu.write(&mut tt.bc_kind, &vec![BcKind::FixedValue as Label; hm.n_boundary_faces])?;
-        gpu.write(&mut tt.fr, &vec![1.0 as Scalar; hm.n_boundary_faces])?;
-        gpu.write(&mut tt.ref_value, &vec![t_gas; hm.n_boundary_faces])?;
-        gpu.write(&mut tt.ref_grad, &vec![0.0 as Scalar; hm.n_boundary_faces])?;
-        correct_boundary_conditions(gpu, &fldk, &mut tt, &gm)?;
-        for _ in 0..4 {
-            rad.correct(gpu, &tt, None, &ctrl, 0)?;
-        }
-        let g = gpu.download(&rad.field().f)?;
-        let (su, sp) = (gpu.download(rad.su())?, gpu.download(rad.sp())?);
-        let mut net: Scalar = 0.0;
-        for i in 0..hm.n_cells {
-            net += (su[i] + sp[i] * t_gas) * v[i];
-        }
-        Ok((g, -net))
-    };
-    // NOTE: this block's mesh is `blockgen`'s all-wall box, so it has no open
-    // face at all - which is exactly the "changes nothing where there is
-    // nothing to change" row, and the reason the DIFFERENCE row below uses
-    // the channel mesh instead.
-    let (g_zg, _) = open_run(ofgpu::participating::OpenBoundary::ZeroGradient)?;
-    let (g_cs, _) =
-        open_run(ofgpu::participating::OpenBoundary::ColdSurroundings { t_inf: 300.0 })?;
-    let mut ulp_o: u64 = 0;
-    for (&p, &q) in g_zg.iter().zip(&g_cs) {
-        ulp_o = ulp_o.max((p.to_bits() as i64 - q.to_bits() as i64).unsigned_abs());
-    }
-    c.require(
-        "S63: an all-wall enclosure has no open face, so coldSurroundings changes NOTHING - bitwise",
-        ulp_o == 0,
-    );
-    c.require(
-        "S63: the refusals name both conditions and say what the default IS",
-        ofgpu::participating::OpenBoundary::from_name("openSky", 293.15)
-            .err()
-            .map(|e| {
-                let m = format!("{e}");
-                m.contains("zeroGradient")
-                    && m.contains("coldSurroundings")
-                    && m.contains("PERFECTLY REFLECTING")
-            })
-            .unwrap_or(false),
-    );
-    c.check(
-        "S62.5: dropping the window changes the GAS energy budget by under 1 %",
-        (p1_dropped - p1_floored).abs() / p1_floored.abs(),
-        0.01,
-    );
-
-    // ---- Gate 5: banded P1 against the EXACT slab (SPEC-LIT S64) ---------
-    check_banded_slab(c, gpu)?;
-    // ---- Gate 6: the same slab on DISCRETE ORDINATES (SPEC-LIT S65) ------
-    check_banded_slab_fvdom(c, gpu)?;
-
-    Ok(())
-}
-
-// ==========================================================================
-//  SPEC-LIT §64 - banded P1 against the EXACT slab, band by band
-//
-//  §62.12's Gate 5. Gates 1 and 1-E test the coefficient set with no mesh,
-//  Gate 2 is an identity (bitwise - it would pass just as happily if every
-//  band were wrong the same way), Gate 3 is one model against another. This
-//  is the banded P1 ANSWER against arithmetic: §36.7's own optically thin
-//  slab, solved exactly along every ray, carried over to a banded medium one
-//  band at a time by (64.3).
-// ==========================================================================
-
-/// The one slab SPEC-LIT §64 and §65 are both measured on.
-///
-/// §64 solves it with P1 and §65 with fvDOM, band for band, against the SAME
-/// closed form (64.3) - so the mesh, the wall lookup and the temperature
-/// field are built once here rather than twice, and the two gates cannot
-/// drift apart by editing one of them. `wall` on yMin/yMax, `patch`
-/// (zero-gradient) on x and `empty` on z: `BlockSpec::default()`'s own
-/// layout, which is exactly the 1-D geometry (64.3) is derived for.
-struct SlabRig {
-    hm: HostMesh,
-    gm: GpuMesh,
-    fldk: FieldKernels,
-    /// Slab thickness, m.
-    l: Scalar,
-    nx: usize,
-    ny: usize,
-    /// A cell in the middle of the slab - where (64.3) is evaluated.
-    cell: usize,
-    /// The two wall faces, found by KIND. Boundary face 0 of this mesh is an
-    /// `xMin` face, which is zero-gradient and carries the MEDIUM's
-    /// temperature, so indexing it would silently compare `a_j(T_w)` against
-    /// `a_j(T_m)`. §64.7 records that this gate made exactly that mistake on
-    /// its first run, and it is the reason this lookup is shared code.
-    bf_a: usize,
-    bf_b: usize,
-}
-
-impl SlabRig {
-    fn build(gpu: &Gpu) -> Result<Self> {
-        let l: Scalar = 4.0;
-        let (nx, ny) = (2usize, 40usize);
-        let b = BlockSpec {
-            x: GradedAxis { lo: 0.0, hi: 0.2, n: nx, expansion: 1.0, two_sided: false },
-            y: GradedAxis { lo: 0.0, hi: l, n: ny, expansion: 1.0, two_sided: false },
-            z: GradedAxis { lo: 0.0, hi: 0.2, n: 1, expansion: 1.0, two_sided: false },
-            ..BlockSpec::default()
-        };
-        let hm = blockgen::build_mesh(&b)?;
-        let gm = GpuMesh::upload(gpu, &hm)?;
-        let fldk = FieldKernels::new(gpu)?;
-        let wall_bf = |lower: bool| -> usize {
-            (0..hm.n_boundary_faces)
-                .find(|&bf| {
-                    hm.b_kind[bf] == PatchKind::Wall as Label
-                        && ((hm.b_cf[bf].y < 0.5 * l) == lower)
-                })
-                .expect("the slab has a wall on each side")
-        };
-        let (bf_a, bf_b) = (wall_bf(true), wall_bf(false));
-        let cell = 1 + nx * (ny / 2);
-        Ok(Self { hm, gm, fldk, l, nx, ny, cell, bf_a, bf_b })
-    }
-
-    /// An ISOTHERMAL medium at `t_m` between black walls at `t_a` (`y = 0`)
-    /// and `t_b` (`y = L`) - (64.1)'s own configuration. The non-wall
-    /// boundaries carry the medium's temperature and are zero-gradient, which
-    /// is the 1-D symmetry (64.3) assumes.
-    fn isothermal(&self, gpu: &Gpu, t_m: Scalar, t_a: Scalar, t_b: Scalar) -> Result<GpuScalarField> {
-        let (hm, gm) = (&self.hm, &self.gm);
-        let mut t = GpuScalarField::zeros(gpu, gm, "T")?;
-        gpu.write(&mut t.f, &vec![t_m; hm.n_cells])?;
-        let is_wall = |bf: usize| hm.b_kind[bf] == PatchKind::Wall as Label;
-        let tb: Vec<Scalar> = (0..hm.n_boundary_faces)
-            .map(|bf| {
-                if is_wall(bf) {
-                    if hm.b_cf[bf].y < 0.5 * self.l {
-                        t_a
-                    } else {
-                        t_b
-                    }
-                } else {
-                    t_m
-                }
-            })
-            .collect();
-        let kind: Vec<Label> = (0..hm.n_boundary_faces)
-            .map(|bf| {
-                if is_wall(bf) {
-                    BcKind::FixedValue as Label
-                } else {
-                    BcKind::ZeroGradient as Label
-                }
-            })
-            .collect();
-        let fr: Vec<Scalar> = kind
-            .iter()
-            .map(|&k| if k == BcKind::FixedValue as Label { 1.0 } else { 0.0 })
-            .collect();
-        gpu.write(&mut t.bc_kind, &kind)?;
-        gpu.write(&mut t.fr, &fr)?;
-        gpu.write(&mut t.ref_value, &tb)?;
-        gpu.write(&mut t.ref_grad, &vec![0.0 as Scalar; hm.n_boundary_faces])?;
-        correct_boundary_conditions(gpu, &self.fldk, &mut t, gm)?;
-        Ok(t)
-    }
-}
-
-/// The three legs §64 and §65 both run: `(T_medium, T_wallA, T_wallB)`.
-/// Cold gas in a hot enclosure, hot gas in a cold one, and a gas between two
-/// walls that disagree - the last being the only one in which (64.3)'s
-/// `E_w,j = (E_A,j + E_B,j)/2` is not a single wall temperature in disguise.
-const SLAB_LEGS: [(Scalar, Scalar, Scalar); 3] =
-    [(900.0, 1800.0, 1800.0), (1800.0, 600.0, 600.0), (1200.0, 600.0, 1800.0)];
-
-/// **SPEC-LIT §64.5/§64.6 - Gate 5, run live.**
-#[allow(clippy::too_many_lines)]
-fn check_banded_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    use ofgpu::participating::{e2, slab_g_mid};
-    use ofgpu::radiation::SIGMA_SB;
-    use ofgpu::wsgg::{MediumState, SpectralModel, SpectralProps, WindowTreatment, N_WSGG_BANDS};
-
-    let rig = SlabRig::build(gpu)?;
-    let SlabRig { ref hm, ref gm, ref fldk, l, nx, ny, cell, bf_a: bf_1, bf_b: bf_2 } = rig;
-    let ctrl = SolverControls {
-        solver: LinearSolverKind::PCG,
-        precon: Preconditioner::Diagonal,
-        tolerance: 1e-14,
-        rel_tol: 0.0,
-        max_iter: 5000,
-        report_residuals: true,
-        ..Default::default()
-    };
-
-    // The quadrature (64.2) is the reference's own ingredient, so it is gated
-    // before anything is measured against it: `E_2(0) = 1` exactly, and the
-    // moment `integral_0^inf E_2 dx = integral_0^1 mu dmu = 1/2` exactly,
-    // which tests the whole curve rather than one point.
-    let steps = 60_000usize;
-    let h = 60.0 / steps as Scalar;
-    let mut moment = e2(0.0) + e2(60.0);
-    for k in 1..steps {
-        moment += (if k % 2 == 1 { 4.0 } else { 2.0 }) * e2(k as Scalar * h);
-    }
-    let moment = moment * h / 3.0;
-    c.require("S64 (64.2): E_2(0) = 1 exactly", e2(0.0) == 1.0);
-    c.check(
-        "S64 (64.2): integral_0^inf E_2 dx = 1/2, exactly in closed form",
-        (moment - 0.5).abs(),
-        1e-5,
-    );
-
-    let mut worst_formula: Scalar = 0.0;
-    let mut worst_window_identity: Scalar = 0.0;
-    let mut worst_thick: Scalar = 0.0;
-    let mut all_solved_worse = true;
-    let mut all_floored_closer = true;
-    let mut worst_p1_band: Scalar = 0.0;
-    let mut worst_p1_tau: Scalar = 0.0;
-    let mut worst_window: Scalar = 0.0;
-
-    for &(t_m, t_1, t_2) in &SLAB_LEGS {
-        // Isothermal medium, black walls, no soot, `chiR = 0` so §27's
-        // radiant-fraction floor cannot replace the emission (64.3) is
-        // written for.
-        let t = rig.isothermal(gpu, t_m, t_1, t_2)?;
-
-        let yp = gpu.upload(&vec![0.20 as Scalar; hm.n_cells])?;
-        let medium = MediumState { y_products: Some(&yp), ..Default::default() };
-
-        type Leg = (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>);
-        let run = |window: WindowTreatment| -> Result<Leg> {
-            let props = RadiationProps {
-                a: 1.0,
-                chi_r: 0.0,
-                spectral: SpectralProps {
-                    model: SpectralModel::Wsgg,
-                    window: Some(window),
-                    ..Default::default()
-                },
-                update_interval: 1,
-                ..Default::default()
-            };
-            let mut rad = Radiation::new(gpu, gm, props)?;
-            rad.set_walls(hm, 1.0)?; // BLACK, as (64.3) assumes
-            rad.initialise(gpu)?;
-            for _ in 0..3 {
-                rad.correct_with_medium(gpu, &t, None, &medium, &ctrl, 0)?;
-            }
-            let bands = rad.bands().expect("wsgg has bands");
-            let (mut kappa, mut a_m, mut a_w1, mut a_w2, mut g) =
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for j in 0..N_WSGG_BANDS {
-                kappa.push(gpu.download(bands.kappa(j))?[0]);
-                a_m.push(gpu.download(bands.weight(j))?[0]);
-                let w = gpu.download(bands.weight_bf(j))?;
-                a_w1.push(w[bf_1]);
-                a_w2.push(w[bf_2]);
-                g.push(gpu.download(&rad.band_field(j).expect("band").f)?[cell]);
-            }
-            g.push(gpu.download(&rad.field().f)?[cell]);
-            Ok((g, kappa, a_m, a_w1, a_w2))
-        };
-
-        let (g_d, kappa, a_m, a_w1, a_w2) = run(WindowTreatment::Dropped)?;
-        let (g_f, kappa_f, _, _, _) = run(WindowTreatment::Floored)?;
-
-        let sig_t4 = |tt: Scalar| 4.0 * SIGMA_SB * tt * tt * tt * tt;
-        let emit_w = |j: usize| 0.5 * (a_w1[j] * sig_t4(t_1) + a_w2[j] * sig_t4(t_2));
-        let exact: Vec<Scalar> = (0..N_WSGG_BANDS)
-            .map(|j| slab_g_mid(a_m[j] * sig_t4(t_m), emit_w(j), kappa[j], l))
-            .collect();
-        let exact_total: Scalar = exact.iter().sum();
-
-        // (64.5): with kappa_0 = 0 exactly, E_2(0) = 1 and the window's exact
-        // midplane G is a PURE WALL TERM with no dependence on the medium.
-        worst_window_identity =
-            worst_window_identity.max((exact[0] - emit_w(0)).abs() / emit_w(0));
-
-        // (64.7): what the floor does to the answer, in closed form.
-        let hw = 1.0 / (2.0 * (2.0 - 1.0)); // eps_w = 1
-        let kl = kappa_f[0] * l;
-        let predicted = (kl / (2.0 * hw + kl)) * (a_m[0] * sig_t4(t_m) / emit_w(0) - 1.0);
-        let window_err = (g_f[0] - exact[0]) / exact[0];
-        worst_formula = worst_formula.max((window_err / predicted - 1.0).abs());
-        worst_window = worst_window.max(window_err.abs());
-
-        // The optically thick band is where P1 IS the right model.
-        let jt = N_WSGG_BANDS - 1;
-        worst_thick = worst_thick.max((g_d[jt] - exact[jt]).abs() / exact[jt]);
-
-        // S64.2's headline: the worst band P1 SOLVES is further from the exact
-        // answer than the floored transparent band is.
-        let mut worst_solved: Scalar = 0.0;
-        for j in 1..N_WSGG_BANDS {
-            let e = (g_d[j] - exact[j]).abs() / exact[j];
-            if e > worst_solved {
-                worst_solved = e;
-            }
-            if e > worst_p1_band {
-                worst_p1_band = e;
-                worst_p1_tau = 0.5 * kappa[j] * l;
-            }
-        }
-        all_solved_worse &= worst_solved > window_err.abs();
-
-        let (err_d, err_f) = (
-            (g_d[N_WSGG_BANDS] - exact_total).abs() / exact_total,
-            (g_f[N_WSGG_BANDS] - exact_total).abs() / exact_total,
-        );
-        all_floored_closer &= err_f < err_d;
-
-        c.note(&format!(
-            "S64 Gate 5 MEASURED - slab L = {} m, {} cells, Y_P = 0.20 (p_a = 0.199 atm, \
-             M_r = 4/3), no soot, BLACK walls, chi_r = 0. Gas {} K, walls {} / {} K. Band \
-             optical half-depths tau = 0 / {} / {} / {} / {}. Exact (64.3) vs banded P1, \
-             at the midplane: window {} % (dropped is -100 % by construction), then {} %, \
-             {} %, {} %, {} % on the four solved bands; TOTAL G dropped {} %, floored \
-             {} %, with the window carrying {} % of the exact total. (64.7) predicts the \
-             floor's own error as {}, measured {}",
-            common::g(f64::from(l)),
-            hm.n_cells,
-            common::g(f64::from(t_m)),
-            common::g(f64::from(t_1)),
-            common::g(f64::from(t_2)),
-            common::g(f64::from(0.5 * kappa[1] * l)),
-            common::g(f64::from(0.5 * kappa[2] * l)),
-            common::g(f64::from(0.5 * kappa[3] * l)),
-            common::g(f64::from(0.5 * kappa[4] * l)),
-            common::g(100.0 * f64::from(window_err)),
-            common::g(100.0 * f64::from((g_d[1] - exact[1]) / exact[1])),
-            common::g(100.0 * f64::from((g_d[2] - exact[2]) / exact[2])),
-            common::g(100.0 * f64::from((g_d[3] - exact[3]) / exact[3])),
-            common::g(100.0 * f64::from((g_d[4] - exact[4]) / exact[4])),
-            common::g(100.0 * f64::from((g_d[N_WSGG_BANDS] - exact_total) / exact_total)),
-            common::g(100.0 * f64::from((g_f[N_WSGG_BANDS] - exact_total) / exact_total)),
-            common::g(100.0 * f64::from(exact[0] / exact_total)),
-            common::g(f64::from(predicted)),
-            common::g(f64::from(window_err)),
-        ));
-    }
-
-    c.check(
-        "S64 (64.5): the exact window G_0 is the walls' MEAN band emissive power, with a_0 \
-         at the WALL temperatures - no dependence on the medium at all",
-        worst_window_identity,
-        1e-14,
-    );
-    c.check(
-        "S64 (64.3): the optically thick band (tau = 28.9) reproduces the exact slab solution",
-        worst_thick,
-        0.01,
-    );
-    c.check(
-        "S64 (64.7): the floored window's error IS kappa_min L (E_m/E_w - 1)/(2h + \
-         kappa_min L) - the formula, not a magnitude, over three legs spanning three \
-         orders of magnitude of it",
-        worst_formula,
-        0.05,
-    );
-    c.require(
-        "S64.2: the worst band P1 SOLVES is further from the exact answer than the FLOORED \
-         transparent band - the window is not where P1's spectral error lives",
-        all_solved_worse,
-    );
-    c.require(
-        "S64.6: solving the window (floored) beats dropping it, on G at the midplane, in \
-         every leg - and S62.13's fire NaN is the counterweight, not this",
-        all_floored_closer,
-    );
-    // ---- (64.6): the banded diffusion limit, on a LINEAR temperature -----
-    //
-    // The isothermal legs above cannot separate "P1 is right in the thick
-    // limit" from "both answers collapse to E_m": at tau = 28.9 the exact
-    // solution IS the medium's own emissive power to machine precision, and
-    // so is P1's, so the agreement is real but empty. The check with content
-    // is the GRADIENT one - S36.7's own diffusion-limit flux with a_j(T) T^4
-    // in place of T^4 - and it needs a temperature gradient to have a flux.
-    let (t1, t2): (Scalar, Scalar) = (700.0, 1900.0);
-    let mut tg = GpuScalarField::zeros(gpu, gm, "T")?;
-    let prof = |y: Scalar| t1 + (t2 - t1) * (y / l);
-    gpu.write(&mut tg.f, &hm.c.iter().map(|p| prof(p.y)).collect::<Vec<_>>())?;
-    let tgb: Vec<Scalar> = hm.b_cf.iter().map(|p| prof(p.y)).collect();
-    gpu.write(&mut tg.bc_kind, &vec![BcKind::FixedValue as Label; hm.n_boundary_faces])?;
-    gpu.write(&mut tg.fr, &vec![1.0 as Scalar; hm.n_boundary_faces])?;
-    gpu.write(&mut tg.ref_value, &tgb)?;
-    gpu.write(&mut tg.ref_grad, &vec![0.0 as Scalar; hm.n_boundary_faces])?;
-    correct_boundary_conditions(gpu, fldk, &mut tg, &gm)?;
-
-    let yp = gpu.upload(&vec![0.20 as Scalar; hm.n_cells])?;
-    let medium = MediumState { y_products: Some(&yp), ..Default::default() };
-    let props = RadiationProps {
-        a: 1.0,
-        chi_r: 0.0,
-        spectral: SpectralProps {
-            model: SpectralModel::Wsgg,
-            window: Some(WindowTreatment::Dropped),
-            ..Default::default()
-        },
-        update_interval: 1,
-        ..Default::default()
-    };
-    let mut rad = Radiation::new(gpu, gm, props)?;
-    rad.set_walls(hm, 1.0)?;
-    rad.initialise(gpu)?;
-    for _ in 0..3 {
-        rad.correct_with_medium(gpu, &tg, None, &medium, &ctrl, 1)?;
-    }
-    let bands = rad.bands().expect("bands");
-    let t_cell = gpu.download(&tg.f)?;
-    let dy = l / ny as Scalar;
-    let mut ladder = Vec::new();
-    for j in 1..N_WSGG_BANDS {
-        let kappa = gpu.download(bands.kappa(j))?;
-        let a_j = gpu.download(bands.weight(j))?;
-        let g_j = gpu.download(&rad.band_field(j).expect("band").f)?;
-        let k_mid = kappa[cell];
-        let emit = |ci: usize| {
-            let tt = t_cell[ci];
-            4.0 * SIGMA_SB * a_j[ci] * tt * tt * tt * tt
-        };
-        let (up, dn) = (cell + nx, cell - nx);
-        let q_obs = -(1.0 / (3.0 * k_mid)) * (g_j[up] - g_j[dn]) / (2.0 * dy);
-        let q_exact = -(1.0 / (3.0 * k_mid)) * (emit(up) - emit(dn)) / (2.0 * dy);
-        ladder.push((0.5 * k_mid * l, (q_obs - q_exact).abs() / q_exact.abs().max(1e-30)));
-    }
-    c.note(&format!(
-        "S64 (64.6) MEASURED - the banded diffusion-limit flux q_j = -(4 sigma/3 \
-         kappa_j) d(a_j T^4)/dy, S36.7's own thick reference with a_j(T) T^4 for T^4, \
-         on the SAME slab at T = {} -> {} K. Relative distance from it, band by band: \
-         tau = {} -> {}, tau = {} -> {}, tau = {} -> {}, tau = {} -> {}. The ladder \
-         is the result: a WSGG medium has NO single optical thickness, and Gamma_j = \
-         1/(3 kappa_j) is largest exactly where the diffusion limit is least valid",
-        common::g(f64::from(t1)),
-        common::g(f64::from(t2)),
-        common::g(f64::from(ladder[0].0)),
-        common::g(f64::from(ladder[0].1)),
-        common::g(f64::from(ladder[1].0)),
-        common::g(f64::from(ladder[1].1)),
-        common::g(f64::from(ladder[2].0)),
-        common::g(f64::from(ladder[2].1)),
-        common::g(f64::from(ladder[3].0)),
-        common::g(f64::from(ladder[3].1)),
-    ));
-    c.check(
-        "S64 (64.6): the optically thick band reproduces S36.7's diffusion-limit \
-         flux, banded - this is the thick check with CONTENT, since the isothermal \
-         one is two collapses to the same constant",
-        ladder[3].1,
-        0.05,
-    );
-    c.require(
-        "S64 (64.6): the distance from the diffusion limit falls MONOTONICALLY with \
-         the band's optical thickness - the weakest band must be further from it than \
-         the strongest, or the band structure is doing nothing",
-        ladder.windows(2).all(|w| w[0].1 > w[1].1),
-    );
-
-    c.note(&format!(
-        "S64.6 VERDICT: banded P1's per-band error is NOT monotone in optical \
-         thickness and is SMALL at both ends - {} against S36.7's diffusion-limit \
-         flux on the OPAQUE band (the isothermal legs above give 3.6e-14 there, but \
-         that is two collapses to the same constant rather than a measurement) and \
-         {} % on the TRANSPARENT one, where the exact field between black walls is \
-         isotropic, which is P1's own closure. It peaks IN BETWEEN, at {} % on the \
-         band with tau = {}. That is a stronger statement of S62.5's recommendation \
-         than S62.5 makes: WSGG belongs with fvDOM not because of the window, but \
-         because half the bands of a WSGG medium sit in the regime P1 is worst at, \
-         and a spectral model is precisely a device for putting them there",
-        common::g(f64::from(ladder[3].1)),
-        common::g(100.0 * f64::from(worst_window)),
-        common::g(100.0 * f64::from(worst_p1_band)),
-        common::g(f64::from(worst_p1_tau)),
-    ));
-    Ok(())
-}
-
-// ==========================================================================
-//  SPEC-LIT §65 - the banded slab on DISCRETE ORDINATES
-//
-//  §64 ran (64.3) against banded P1 and found P1's per-band error peaking in
-//  the middle of the optical range, at 48 % on the band a hot gas radiates
-//  through. §64.8 named the obvious next measurement and did not take it:
-//  (64.3) is a reference for any RTE solver, and fvDOM is the other one.
-//
-//  What makes this more than "the same gate with a different solver" is that
-//  fvDOM's angular error is available in CLOSED FORM. §65.3 replaces the
-//  exponential integral of (64.3) with the same integral evaluated on the S4
-//  quadrature, which splits the measured error into an angular half that can
-//  be predicted without running anything and a spatial half that is the
-//  residue. P1 has no such decomposition - its closure is not a quadrature.
-// ==========================================================================
-
-/// **SPEC-LIT §65.5/§65.6 - Gate 6, run live.**
-#[allow(clippy::too_many_lines)]
-fn check_banded_slab_fvdom(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    use ofgpu::fvdom::{FvDom, FvDomProps, Quadrature};
-    use ofgpu::participating::{e2, slab_g_mid};
-    use ofgpu::radiation::SIGMA_SB;
-    use ofgpu::wsgg::{MediumState, SpectralModel, SpectralProps, WindowTreatment, N_WSGG_BANDS};
-
-    let rig = SlabRig::build(gpu)?;
-    let SlabRig { ref hm, ref gm, l, cell, bf_a, bf_b, .. } = rig;
-    let ctrl = SolverControls {
-        solver: LinearSolverKind::PCG,
-        precon: Preconditioner::Diagonal,
-        tolerance: 1e-14,
-        rel_tol: 0.0,
-        max_iter: 5000,
-        report_residuals: true,
-        ..Default::default()
-    };
-
-    // ---- (65.6): E_2 on the S4 quadrature, in closed form ---------------
-    //
-    // `G_j = sum_m w_m I_{j,m}` with the exact ray solution in each ordinate
-    // gives (64.3) with `E_2` replaced by `E_2^S4(tau) = (1/4pi) sum_m w_m
-    // exp(-tau/|s_m . n|)`. Two of its properties are the SAME two conditions
-    // SPEC-LIT §36.2 built the set from, and both are exact rather than
-    // approximate - which is why §65.3 can say where the angular error is
-    // zero without measuring anything.
-    let quad = Quadrature::s4();
-    let mu: Vec<Scalar> = quad.directions.iter().map(|d| d.y.abs()).collect();
-    let four_pi: Scalar = 4.0 * std::f64::consts::PI as Scalar;
-    let e2_s4 = |tau: Scalar| -> Scalar {
-        quad.weights
-            .iter()
-            .zip(&mu)
-            .map(|(&w, &m)| w * (-tau / m).exp())
-            .sum::<Scalar>()
-            / four_pi
-    };
-    // NOT `== 1.0`, and §65.9 records why this gate was written that way and
-    // corrected: `E_2^S4(0) = (1/4pi) sum_m w_m` is exactly 1 in REAL
-    // arithmetic - it is §36.2's `sum_m w_m = 4 pi` - but in IEEE-754 it is
-    // twenty-four copies of `pi/6` accumulated and then divided by `4 pi`,
-    // and neither operand is representable. The identity is exact; its
-    // evaluation is not, and asserting the evaluation was this gate's own
-    // first error.
-    c.check(
-        "S65 (65.7): E_2^S4(0) = 1 - it is sum_m w_m = 4 pi, S36.2's own first condition, \
-         so fvDOM has NO ANGULAR ERROR AT ALL in a transparent band. Exact in real \
-         arithmetic, round-off in double (S65.9)",
-        (e2_s4(0.0) - 1.0).abs(),
-        1e-15,
-    );
-    // `integral_0^inf exp(-tau/mu) dtau = mu`, so the integral of E_2^S4 is
-    // `(1/4pi) sum_m w_m |mu_m|`, which is the half-range flux condition
-    // `sum_(mu>0) w_m mu_m = pi` divided by `2 pi`. Exact for S4 and exact
-    // for the true E_2 - so the two curves enclose EQUAL area and the
-    // angular error MUST change sign.
-    let moment_s4: Scalar =
-        quad.weights.iter().zip(&mu).map(|(&w, &m)| w * m).sum::<Scalar>() / four_pi;
-    c.check(
-        "S65 (65.8): integral_0^inf E_2^S4 dtau = 1/2, the SAME value the true E_2 has - \
-         S36.2's half-range-flux condition in a second disguise, so the S4 angular error \
-         encloses zero area and has to change sign",
-        (moment_s4 - 0.5).abs(),
-        1e-15,
-    );
-
-    // WHERE the two curves cross. (65.8)'s equal-area identity forces at
-    // least one crossing and says NOTHING about how many or where; §65.9
-    // records that this gate first assumed one, bracketed it wrongly, and
-    // was corrected by its own failure. A log scan finds them all.
-    let d_e2 = |tau: Scalar| e2_s4(tau) - e2(tau);
-    let bisect = |x0: Scalar, x1: Scalar| -> Scalar {
-        let (mut lo, mut hi) = (x0, x1);
-        let s = d_e2(lo) > 0.0;
-        for _ in 0..80 {
-            let mid = 0.5 * (lo + hi);
-            if (d_e2(mid) > 0.0) == s {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        0.5 * (lo + hi)
-    };
-    let n_scan = 600usize;
-    let (tau_lo, tau_hi): (Scalar, Scalar) = (1.0e-3, 60.0);
-    let grid = |k: usize| tau_lo * (tau_hi / tau_lo).powf(k as Scalar / n_scan as Scalar);
-    let mut crossings: Vec<Scalar> = Vec::new();
-    for k in 0..n_scan {
-        let (x0, x1) = (grid(k), grid(k + 1));
-        if (d_e2(x0) > 0.0) != (d_e2(x1) > 0.0) {
-            crossings.push(bisect(x0, x1));
-        }
-    }
-    c.require(
-        "S65 (65.8): E_2^S4 - E_2 changes sign at least once on tau in [1e-3, 60] - the \
-         equal-area identity has to be paid for somewhere, and this is where",
-        !crossings.is_empty(),
-    );
-    c.note(&format!(
-        "S65 (65.8) MEASURED - the S4 angular error changes sign {} times, at tau = {}, \
-         where E_2 itself is {}. So the identity is NOT paid by one crossing in the tail: \
-         S4 over-estimates E_2 on tau < {} and again on tau > {}, and under-estimates it \
-         in between. What that means for a WSGG medium is in the per-leg rows below - the \
-         five bands of this set at L = 4 m sit at tau = 0, 0.027, 0.29, 2.30 and 28.9, so \
-         TWO of the three crossings fall in the GAP between band 2 and band 3 and the \
-         bands sample only the positive lobes",
-        crossings.len(),
-        crossings
-            .iter()
-            .map(|&x| common::g(f64::from(x)))
-            .collect::<Vec<_>>()
-            .join(" / "),
-        crossings
-            .iter()
-            .map(|&x| common::sci(f64::from(e2(x)), 3))
-            .collect::<Vec<_>>()
-            .join(" / "),
-        common::g(f64::from(crossings[0])),
-        common::g(f64::from(*crossings.last().expect("a crossing"))),
-    ));
-
-    let mut worst_spatial: Scalar = 0.0;
-    let mut worst_window_dom: Scalar = 0.0;
-    let mut dom_beats_p1_worst = true;
-    let mut dom_total_beats_p1 = true;
-    let mut worst_dom_band: Scalar = 0.0;
-    let mut worst_dom_tau: Scalar = 0.0;
-    let mut worst_p1_band: Scalar = 0.0;
-    let mut worst_p1_tau: Scalar = 0.0;
-    let mut prop_ulp: u64 = 0;
-    let mut thin_is_angular = true;
-    let mut one_signed = true;
-    let mut thick_is_spatial = true;
-    let mut dom_beats_p1_thin = true;
-    let mut p1_wins: Vec<(Scalar, Scalar, Scalar, Scalar, Scalar, Scalar)> = Vec::new();
-
-    for &(t_m, t_a, t_b) in &SLAB_LEGS {
-        let t = rig.isothermal(gpu, t_m, t_a, t_b)?;
-        let yp = gpu.upload(&vec![0.20 as Scalar; hm.n_cells])?;
-        let medium = MediumState { y_products: Some(&yp), ..Default::default() };
-
-        // ---- fvDOM, five bands, the window solved as an ordinary --------
-        // pure-advection matrix: no floor, nothing treated, `kappa_0 = 0`.
-        let mut dom = FvDom::new(
-            gpu,
-            gm,
-            FvDomProps {
-                a: 1.0,
-                sigma_s: 0.0,
-                chi_r: 0.0,
-                spectral: SpectralProps {
-                    model: SpectralModel::Wsgg,
-                    window: None,
-                    ..Default::default()
-                },
-                update_interval: 1,
-                ..Default::default()
-            },
-        )?;
-        dom.set_walls(hm, 1.0)?; // BLACK, as (64.3) assumes
-        dom.initialise(gpu)?;
-        for _ in 0..3 {
-            dom.correct_with_medium(gpu, &t, None, &medium, &ctrl, 1)?;
-        }
-
-        // ---- banded P1 on the SAME leg, window FLOORED ------------------
-        //
-        // Floored rather than dropped so that band 0 has a value to compare
-        // at all; the two treatments differ in band 0 alone (they change only
-        // `kappa_0`, and the bands do not couple), so bands 1..4 below are
-        // §64's own numbers unchanged.
-        let mut p1 = Radiation::new(
-            gpu,
-            gm,
-            RadiationProps {
-                a: 1.0,
-                chi_r: 0.0,
-                spectral: SpectralProps {
-                    model: SpectralModel::Wsgg,
-                    window: Some(WindowTreatment::Floored),
-                    ..Default::default()
-                },
-                update_interval: 1,
-                ..Default::default()
-            },
-        )?;
-        p1.set_walls(hm, 1.0)?;
-        p1.initialise(gpu)?;
-        for _ in 0..3 {
-            p1.correct_with_medium(gpu, &t, None, &medium, &ctrl, 0)?;
-        }
-
-        // ---- the two models' band PROPERTIES, on the same medium --------
-        //
-        // §62's claim is that ONE property model serves both solvers. That is
-        // a construction, and this is the assertion that it stayed one: the
-        // absorption coefficients and the three weights each model built for
-        // itself have to agree BIT FOR BIT before any difference between
-        // their answers can be attributed to the angular method.
-        let (db, pb) = (dom.bands().expect("wsgg"), p1.bands().expect("wsgg"));
-        let (mut kappa, mut a_m, mut a_wa, mut a_wb) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let (mut g_dom, mut g_p1) = (Vec::new(), Vec::new());
-        for j in 0..N_WSGG_BANDS {
-            let (kd, kp) = (gpu.download(db.kappa(j))?, gpu.download(pb.kappa(j))?);
-            let (wd, wp) = (gpu.download(db.weight(j))?, gpu.download(pb.weight(j))?);
-            let (bd, bp) = (gpu.download(db.weight_bf(j))?, gpu.download(pb.weight_bf(j))?);
-            let mut ulp_of = |x: Scalar, y: Scalar| {
-                prop_ulp =
-                    prop_ulp.max((x.to_bits() as i64 - y.to_bits() as i64).unsigned_abs());
-            };
-            // Band 0 is the ONE property P1 changes on purpose: `floored`
-            // raises `kappa_0` from 0 to `kappaMin` so `Gamma_0` is finite
-            // (62.5). Every weight, and every other band's kappa, must match.
-            if j > 0 {
-                ulp_of(kd[cell], kp[cell]);
-            }
-            ulp_of(wd[cell], wp[cell]);
-            ulp_of(bd[bf_a], bp[bf_a]);
-            ulp_of(bd[bf_b], bp[bf_b]);
-            kappa.push(kd[cell]);
-            a_m.push(wd[cell]);
-            a_wa.push(bd[bf_a]);
-            a_wb.push(bd[bf_b]);
-            g_dom.push(gpu.download(dom.band_g(j))?[cell]);
-            g_p1.push(gpu.download(&p1.band_field(j).expect("band").f)?[cell]);
-        }
-        g_dom.push(gpu.download(dom.g())?[cell]);
-        g_p1.push(gpu.download(&p1.field().f)?[cell]);
-
-        let sig_t4 = |tt: Scalar| 4.0 * SIGMA_SB * tt * tt * tt * tt;
-        let e_w = |j: usize| 0.5 * (a_wa[j] * sig_t4(t_a) + a_wb[j] * sig_t4(t_b));
-        let exact: Vec<Scalar> = (0..N_WSGG_BANDS)
-            .map(|j| slab_g_mid(a_m[j] * sig_t4(t_m), e_w(j), kappa[j], l))
-            .collect();
-        let exact_total: Scalar = exact.iter().sum();
-        // (65.6): the same formula with E_2 -> E_2^S4. The angular error is
-        // `exact_s4 - exact`, in closed form; the spatial error is the residue
-        // `g_dom - exact_s4`, which is the only part a run can tell you.
-        let exact_s4: Vec<Scalar> = (0..N_WSGG_BANDS)
-            .map(|j| {
-                let (em, ew) = (a_m[j] * sig_t4(t_m), e_w(j));
-                let f = e2_s4(0.5 * kappa[j] * l);
-                ew * f + em * (1.0 - f)
-            })
-            .collect();
-
-        let rel = |x: Scalar, r: Scalar| (x - r) / r;
-        let mut dom_err = Vec::new();
-        let mut p1_err = Vec::new();
-        let mut ang_err = Vec::new();
-        let mut spa_err = Vec::new();
-        let mut taus = Vec::new();
-        for j in 0..N_WSGG_BANDS {
-            taus.push(0.5 * kappa[j] * l);
-            dom_err.push(rel(g_dom[j], exact[j]));
-            p1_err.push(rel(g_p1[j], exact[j]));
-            ang_err.push(rel(exact_s4[j], exact[j]));
-            spa_err.push(rel(g_dom[j], exact_s4[j]));
-        }
-        worst_spatial =
-            worst_spatial.max(spa_err.iter().fold(0.0 as Scalar, |m, &x| m.max(x.abs())));
-        worst_window_dom = worst_window_dom.max(dom_err[0].abs());
-        // §65.3's two-sided claim: the OPTICALLY THIN band's remaining error
-        // is ANGULAR (more ordinates would shrink it) and the OPTICALLY THICK
-        // ones' is SPATIAL (a finer mesh would). They are different knobs and
-        // this is the row that says which one to turn.
-        thin_is_angular &= ang_err[1].abs() > spa_err[1].abs();
-        // Every band that HAS a measurable angular error must carry the same
-        // sign, within one leg: (65.8)'s sign changes fall between the bands
-        // rather than on them, so the per-band angular errors ACCUMULATE in
-        // the band sum instead of cancelling. That is why fvDOM's total is no
-        // better than its bands - it is the mechanism, and it is measured.
-        let signs: Vec<bool> =
-            ang_err.iter().filter(|x| x.abs() > 1e-9).map(|x| *x > 0.0).collect();
-        one_signed &= !signs.is_empty() && signs.iter().all(|&b| b == signs[0]);
-        thick_is_spatial &= (3..N_WSGG_BANDS).all(|j| spa_err[j].abs() > ang_err[j].abs());
-        // Where P1's closure is worst - the thin half of the set - fvDOM has
-        // to be closer on EVERY band, not only on the worst one.
-        dom_beats_p1_thin &= (0..N_WSGG_BANDS)
-            .filter(|&j| taus[j] <= 1.0)
-            .all(|j| dom_err[j].abs() < p1_err[j].abs());
-        // ... and the honest other half: on a band P1 was DERIVED for, it can
-        // and does win, and (65.6) says why - fvDOM's error there is not
-        // angular any more.
-        for j in 0..N_WSGG_BANDS {
-            if taus[j] > 1.0 && p1_err[j].abs() < dom_err[j].abs() {
-                p1_wins.push((t_m, taus[j], p1_err[j], dom_err[j], ang_err[j], spa_err[j]));
-            }
-        }
-
-        // §65.2's headline, band by band: where P1 is WORST, is fvDOM better?
-        let (mut wp, mut wp_tau, mut wd, mut wd_tau): (Scalar, Scalar, Scalar, Scalar) =
-            (0.0, 0.0, 0.0, 0.0);
-        for j in 0..N_WSGG_BANDS {
-            if p1_err[j].abs() > wp {
-                wp = p1_err[j].abs();
-                wp_tau = taus[j];
-            }
-            if dom_err[j].abs() > wd {
-                wd = dom_err[j].abs();
-                wd_tau = taus[j];
-            }
-        }
-        // The comparison is made at P1's own worst band, not at each model's
-        // own worst - comparing two models each at its own best index is not
-        // a comparison.
-        let j_worst = (0..N_WSGG_BANDS)
-            .max_by(|&x, &y| p1_err[x].abs().total_cmp(&p1_err[y].abs()))
-            .expect("five bands");
-        dom_beats_p1_worst &= dom_err[j_worst].abs() < p1_err[j_worst].abs();
-        if wp > worst_p1_band {
-            worst_p1_band = wp;
-            worst_p1_tau = wp_tau;
-        }
-        if wd > worst_dom_band {
-            worst_dom_band = wd;
-            worst_dom_tau = wd_tau;
-        }
-        let (tot_d, tot_p) = (
-            rel(g_dom[N_WSGG_BANDS], exact_total).abs(),
-            rel(g_p1[N_WSGG_BANDS], exact_total).abs(),
-        );
-        dom_total_beats_p1 &= tot_d < tot_p;
-
-        let pc = |x: Scalar| common::g(100.0 * f64::from(x));
-        c.note(&format!(
-            "S65 Gate 6 MEASURED - the S64 slab (L = {} m, {} cells, Y_P = 0.20, no soot, \
-             BLACK walls, chi_r = 0), gas {} K, walls {} / {} K, solved by fvDOM S4 and by \
-             banded P1 (window floored) on the SAME properties. Relative to the exact \
-             (64.3), band by band at tau = 0 / {} / {} / {} / {}: fvDOM {} / {} / {} / {} \
-             / {} %, P1 {} / {} / {} / {} / {} %. TOTAL G: fvDOM {} %, P1 {} %. The fvDOM \
-             error SPLIT by (65.6) into its ANGULAR half (closed form, E_2^S4 - E_2) {} / \
-             {} / {} / {} / {} % and its SPATIAL residue {} / {} / {} / {} / {} %",
-            common::g(f64::from(l)),
-            hm.n_cells,
-            common::g(f64::from(t_m)),
-            common::g(f64::from(t_a)),
-            common::g(f64::from(t_b)),
-            common::g(f64::from(taus[1])),
-            common::g(f64::from(taus[2])),
-            common::g(f64::from(taus[3])),
-            common::g(f64::from(taus[4])),
-            pc(dom_err[0]),
-            pc(dom_err[1]),
-            pc(dom_err[2]),
-            pc(dom_err[3]),
-            pc(dom_err[4]),
-            pc(p1_err[0]),
-            pc(p1_err[1]),
-            pc(p1_err[2]),
-            pc(p1_err[3]),
-            pc(p1_err[4]),
-            pc(rel(g_dom[N_WSGG_BANDS], exact_total)),
-            pc(rel(g_p1[N_WSGG_BANDS], exact_total)),
-            pc(ang_err[0]),
-            pc(ang_err[1]),
-            pc(ang_err[2]),
-            pc(ang_err[3]),
-            pc(ang_err[4]),
-            pc(spa_err[0]),
-            pc(spa_err[1]),
-            pc(spa_err[2]),
-            pc(spa_err[3]),
-            pc(spa_err[4]),
-        ));
-    }
-
-    c.require(
-        "S65.1: fvDOM and P1 build BITWISE IDENTICAL band properties on the same medium - \
-         kappa_j (band 0 excepted, which `floored` moves on purpose) and all three a_j, \
-         cell and wall. One property model, two solvers, and the difference between their \
-         answers is the ANGULAR METHOD alone",
-        prop_ulp == 0,
-    );
-    c.check(
-        "S65 (65.7): fvDOM reproduces the EXACT transparent window - E_2^S4(0) = 1 leaves \
-         no angular error, and a band with kappa_0 = 0 exactly is a pure wall-to-wall \
-         transmission the upwind scheme carries without loss. P1 can only reach this by \
-         flooring, and then only to (64.7)",
-        worst_window_dom,
-        1e-12,
-    );
-    c.check(
-        "S65 (65.6): fvDOM's answer is (64.3) with E_2 -> E_2^S4 to the SPATIAL scheme's \
-         own error alone - the angular half of the error is closed form and needs no run",
-        worst_spatial,
-        0.03,
-    );
-    c.require(
-        "S65.3: within one leg every band with a measurable angular error carries the SAME \
-         SIGN - (65.8)'s sign changes fall in the GAPS between this set's bands, so the \
-         per-band angular errors ACCUMULATE in the band sum rather than cancelling, and \
-         fvDOM's total G is no more accurate than its own worst band",
-        one_signed,
-    );
-    c.require(
-        "S65.3: the optically THIN band's fvDOM error is ANGULAR-dominated and the two \
-         optically THICK bands' are SPATIAL-dominated, in every leg - more ordinates and \
-         a finer mesh are different knobs, and this says which band each one turns",
-        thin_is_angular && thick_is_spatial,
-    );
-    c.require(
-        "S65.2: fvDOM is closer to the exact slab than banded P1 on EVERY band with tau \
-         <= 1 - the whole thin half of the set, not just the worst band",
-        dom_beats_p1_thin,
-    );
-    c.require(
-        "S65.2: on the band banded P1 is WORST at, fvDOM is closer to the exact slab - in \
-         every leg. This is S62.5's 'WSGG belongs with fvDOM' as a measurement",
-        dom_beats_p1_worst,
-    );
-    c.require(
-        "S65.2: fvDOM's TOTAL banded G is closer to the exact sum (64.4) than banded P1's, \
-         in every leg",
-        dom_total_beats_p1,
-    );
-    c.require(
-        "S65.6: banded P1 is CLOSER than fvDOM on at least one optically thick band - \
-         fvDOM is not uniformly better and this gate says so rather than reporting only \
-         the half that favours it",
-        !p1_wins.is_empty(),
-    );
-    for (t_m, tau, ep, ed, ea, es) in &p1_wins {
-        c.note(&format!(
-            "S65.6 MEASURED, the other half - at gas {} K on the band tau = {}, banded P1 \
-             is {} % from the exact slab and fvDOM is {} %. P1 WINS, and (65.6) says why: \
-             fvDOM's error there is {} % angular and {} % SPATIAL, so it is first-order \
-             upwind on the intensity rather than the quadrature, while tau > 1 is the \
-             regime P1's own closure was derived for",
-            common::g(f64::from(*t_m)),
-            common::g(f64::from(*tau)),
-            common::g(100.0 * f64::from(*ep)),
-            common::g(100.0 * f64::from(*ed)),
-            common::g(100.0 * f64::from(*ea)),
-            common::g(100.0 * f64::from(*es)),
-        ));
-    }
-    c.note(&format!(
-        "S65.6 VERDICT: over the three legs banded P1's worst band is {} % (at tau = {}) \
-         and fvDOM's is {} % (at tau = {}). Both peak in the MIDDLE of the optical range \
-         and both are small at its ends, but for different reasons and by different \
-         amounts: P1's is a CLOSURE error with no small parameter, while fvDOM's is a \
-         QUADRATURE error that more ordinates would shrink. On the thin half of the set \
-         that difference is worth up to a factor 7.8 (S65.6's table); on the thick half it \
-         REVERSES, because fvDOM's residue there is the spatial scheme's and P1 is in \
-         the regime it was derived for. The spatial residue over all fifteen (leg, band) \
-         pairs is at most {} %",
-        common::g(100.0 * f64::from(worst_p1_band)),
-        common::g(f64::from(worst_p1_tau)),
-        common::g(100.0 * f64::from(worst_dom_band)),
-        common::g(f64::from(worst_dom_tau)),
-        common::g(100.0 * f64::from(worst_spatial)),
-    ));
-    Ok(())
-}
 
 // ==========================================================================
 //  SPEC-LIT §56/§57/§58 - Spalart-Allmaras and the hybrid RANS-LES family
@@ -9483,11 +7961,10 @@ fn main() -> ExitCode {
     println!("\n{}/{} checks passed", c.total - c.failures, c.total);
     println!(
         "{} computed live, {} replayed from recorded measurements \
-         (docs/07-fire-solver.md S1.1: the wall-function gate verdict, the resolved leg's \
+         (docs/07-lowmach-solver.md S1.1: the wall-function gate verdict, the resolved leg's \
          mesh resolution, the resolved leg's gate verdict, the thermostat-weighting \
          experiment, the bounded-convection isolation, and the Kays-Crawford Prt \
-         experiment; and SPEC-LIT S42.8b, the NIST Reduced Scale Enclosure \
-         compartment sweep, whose verdict is in the list below)",
+         experiment)",
         c.total - c.replayed,
         c.replayed,
     );
@@ -9504,11 +7981,11 @@ fn main() -> ExitCode {
 }
 
 // ==========================================================================
-//  SPEC-LIT sections 23, 24, 25, 27, 28: the "decisive gates" - promoted
-//  from each module's own unit tests into permanent checks here, so a
-//  regression in the mesh-format reader, the cut-cell fractions, the
-//  low-Mach p0 evolution, combustion or radiation fails `ofgpu-validate`
-//  and not only that one module's own `cargo test`.
+//  SPEC-LIT sections 23, 24, 25: the "decisive gates" - promoted from each
+//  module's own unit tests into permanent checks here, so a regression in
+//  the mesh-format reader, the cut-cell fractions or the low-Mach p0
+//  evolution fails `ofgpu-validate` and not only that one module's own
+//  `cargo test`.
 // ==========================================================================
 
 /// SPEC-LIT §23.1/§10: a `.msh` file read through the SAME `parse_msh` a real
@@ -9695,1047 +8172,13 @@ fn check_low_mach_p0(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     Ok(())
 }
 
-/// SPEC-LIT §27's decisive gate: a burner supplying fuel that burns
-/// completely releases EXACTLY the fuel mass consumed times `dh_c` - not
-/// approximately, because `q'''_c` and the mass actually consumed come from
-/// the SAME `dYF` inside one reaction kernel.
-fn check_burner_heat_release(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    let spec = MeshSpec { n: [4, 4, 4], l: [0.4, 0.4, 0.4], all_generic: true, ..Default::default() };
-    let hm = make_mesh(&scratch_dir("burner"), &spec)?;
-    let m = GpuMesh::upload(gpu, &hm)?;
-    let n = hm.n_cells;
-    let nbf = hm.n_boundary_faces;
-
-    let names: Vec<String> = ["Fuel", "O2", "Products", "N2"].iter().map(|s| s.to_string()).collect();
-    let coeffs = [SpeciesCoeffs::default(); 4];
-    let mut sp = Species::new(gpu, &hm, &m, &names, &coeffs, "N2", 1.5e-5, TurbulenceControls::default())?;
-    let y_f0: Scalar = 0.02;
-    gpu.write(&mut sp.by_name_mut("Fuel").ok_or_else(|| Error::Config("species set has no \"Fuel\"".to_string()))?.field_mut().f, &vec![y_f0; n])?;
-    gpu.write(&mut sp.by_name_mut("O2").ok_or_else(|| Error::Config("species set has no \"O2\"".to_string()))?.field_mut().f, &vec![0.5 as Scalar; n])?;
-    gpu.write(&mut sp.by_name_mut("Products").ok_or_else(|| Error::Config("species set has no \"Products\"".to_string()))?.field_mut().f, &vec![0.0 as Scalar; n])?;
-    sp.initialise(gpu)?;
-
-    let coeffs_c = CombustionCoeffs::default();
-    let mut cmb = Combustion::new(gpu, &m, coeffs_c, &sp, "Fuel", "O2", "Products", "Int")?;
-
-    let mut rho = GpuScalarField::zeros(gpu, &m, "rho")?;
-    gpu.write(&mut rho.f, &vec![1.1 as Scalar; n])?;
-    gpu.write(&mut rho.bf, &vec![1.1 as Scalar; nbf])?;
-    let mut k = GpuScalarField::zeros(gpu, &m, "k")?;
-    gpu.write(&mut k.f, &vec![0.2 as Scalar; n])?;
-    gpu.write(&mut k.bf, &vec![0.2 as Scalar; nbf])?;
-    let mut eps = GpuScalarField::zeros(gpu, &m, "epsilon")?;
-    gpu.write(&mut eps.f, &vec![1.0 as Scalar; n])?;
-    gpu.write(&mut eps.bf, &vec![1.0 as Scalar; nbf])?;
-    // SPEC-LIT §43 made the reaction pass read T (for the extinction
-    // predicate); with `extinctionModel none` - the default this check uses -
-    // nothing reads it, but the signature is honest about the dependency.
-    let mut tfld = GpuScalarField::zeros(gpu, &m, "T")?;
-    gpu.write(&mut tfld.f, &vec![293.15 as Scalar; n])?;
-    gpu.write(&mut tfld.bf, &vec![293.15 as Scalar; nbf])?;
-
-    let mut sources = EnergySources::new(gpu, &m)?;
-    let dt: Scalar = 5.0e-3;
-    let vol = &hm.v;
-
-    let mut energy_released = 0.0f64;
-    let mut fuel_mass_consumed = 0.0f64;
-    for _ in 0..300 {
-        let yf_before = gpu.download(&sp.by_name("Fuel").ok_or_else(|| Error::Config("species set has no \"Fuel\"".to_string()))?.field().f)?;
-        let rho_h = gpu.download(&rho.f)?;
-        sources.clear(gpu)?;
-        cmb.react_rans(gpu, &mut sp, &rho, &tfld, &k, &eps, dt, &mut sources)?;
-        let yf_after = gpu.download(&sp.by_name("Fuel").ok_or_else(|| Error::Config("species set has no \"Fuel\"".to_string()))?.field().f)?;
-        let q = gpu.download(cmb.q())?;
-        for cell in 0..n {
-            let d_yf = (yf_before[cell] - yf_after[cell]).max(0.0) as f64;
-            fuel_mass_consumed += rho_h[cell] as f64 * d_yf * vol[cell] as f64;
-            energy_released += q[cell] as f64 * vol[cell] as f64 * dt as f64;
-        }
-    }
-
-    let expect = fuel_mass_consumed * coeffs_c.dh_c as f64;
-    let rel = if expect.abs() > 0.0 {
-        ((energy_released - expect).abs() / expect.abs()) as Scalar
-    } else {
-        0.0
-    };
-    c.note(&format!(
-        "burner: fuel consumed {fuel_mass_consumed:.6e} kg, heat released \
-         {energy_released:.6e} J, m_F*dh_c {expect:.6e} J"
-    ));
-    c.check("burner exact heat release (S27, decisive)", rel, 1e-9);
-
-    let sum_err = sp.max_sum_error(gpu)?;
-    c.check("burner: species mass fractions still sum to 1", sum_err, 4.0 * Scalar::EPSILON);
-
-    Ok(())
-}
-
-// ==========================================================================
-//  SPEC-LIT S42/S43: the serial two-step scheme and local extinction
-// ==========================================================================
-
-/// SPEC-LIT §42.4's derivation, checked rather than quoted: the propane and
-/// methane coefficients come out of ISFEH10 Eq. (2)-(3) and standard atomic
-/// masses, the two steps close on §27's totals exactly, and §43.1's two
-/// published numbers are consistent with each other.
-///
-/// Host arithmetic, no GPU - the closed forms the live gates below are
-/// measured against.
-fn check_two_step_closed_forms(c: &mut Checks) {
-    use ofgpu::twostep::{ExtinctionCoeffs, TwoStepCoeffs, W_CO, W_O2};
-
-    // ---- SPEC-LIT §42.4, propane, from ISFEH10 Eq. (2)-(3) ---------------
-    let w_fuel: Scalar = 3.0 * 12.011 + 8.0 * 1.008;
-    let s1 = 2.0 * W_O2 / w_fuel;
-    let s2 = 3.0 * W_O2 / w_fuel;
-    let s = 5.0 * W_O2 / w_fuel;
-    let y_co = 2.0 * W_CO / w_fuel;
-    c.note(&format!(
-        "S42.4 propane, C3H8 + 2 O2 -> 2 CO + C + 2 H2 + 2 H2O, then \
-         2 CO + C + 2 H2 + 3 O2 -> 3 CO2 + 2 H2O:"
-    ));
-    c.note(&format!(
-        "  s1 = {s1:.6}  s2 = {s2:.6}  s = {s:.6}  s1/s = {:.6}  yCO = {y_co:.6}",
-        s1 / s
-    ));
-    // Two of the five oxygen molecules go to step 1, so the split is exactly
-    // 2/5 - which is why SPEC-LIT §42.4 can state it as a fraction.
-    c.check("S42.4: propane s1/s is exactly 2/5", ((s1 / s) - 0.4).abs(), 1e-15);
-    c.check(
-        "S42.4: propane s matches S27's published 3.63",
-        (s - 3.63).abs() / 3.63,
-        1.0e-3,
-    );
-
-    let ts = TwoStepCoeffs { s1, dh1: TwoStepCoeffs::huggett_dh1(s, DHC_PROPANE, s1), y_co };
-    // (42.3)/(42.4): the two steps together consume `s` and release `dhc`,
-    // exactly. This is what makes the energy-closure gate an identity.
-    let total_o2 = ts.s1 + ts.r2(s) * (1.0 + ts.s1);
-    c.check("S42.1: the two steps consume exactly s of oxygen", (total_o2 - s).abs() / s, 1e-15);
-    let total_products = (1.0 + ts.r2(s)) * (1.0 + ts.s1);
-    c.check(
-        "S42.1: the two steps make exactly 1 + s of products",
-        (total_products - (1.0 + s)).abs() / (1.0 + s),
-        1e-15,
-    );
-    let total_heat = ts.dh1 + ts.dh2i(DHC_PROPANE) * (1.0 + ts.s1);
-    c.check(
-        "S42.1: the two steps release exactly dhc",
-        (total_heat - DHC_PROPANE).abs() / DHC_PROPANE,
-        1e-15,
-    );
-
-    // Huggett's constant is the FDS TRG's own statement, and propane's own
-    // dhc/s landing near it is what makes the default heat split a principle
-    // rather than an arbitrary choice.
-    let per_o2 = DHC_PROPANE / s;
-    c.note(&format!(
-        "  dhc/s = {:.4} MJ per kg O2 against Huggett's 13.1 (FDS TRG): {:+.2} %",
-        per_o2 / 1e6,
-        100.0 * (per_o2 - 13.1e6) / 13.1e6
-    ));
-    c.check(
-        "S42.4: propane's heat per kg O2 is within 5 % of Huggett's constant",
-        (per_o2 - 13.1e6).abs() / 13.1e6,
-        0.05,
-    );
-
-    // ---- methane, the FDS Validation Guide's UMD line-burner scheme ------
-    let w_ch4: Scalar = 12.011 + 4.0 * 1.008;
-    let alpha: Scalar = 2.0 / 3.0; // two moles of CO per mole of soot carbon
-    let n1 = alpha / 2.0 + 1.0;
-    let n2 = 1.0 - alpha / 2.0;
-    let s1m = n1 * W_O2 / w_ch4;
-    let sm = (n1 + n2) * W_O2 / w_ch4;
-    c.note(&format!(
-        "S42.4 methane (CH4 + 1.333 Air -> 2/3 CO + 1/3 C + 2 H2O): n_O2 = {n1:.6} / {n2:.6}, \
-         s1 = {s1m:.6}, s = {sm:.6}, s1/s = {:.6}, yCO = {:.6}",
-        s1m / sm,
-        alpha * W_CO / w_ch4
-    ));
-    c.check(
-        "S42.4: the FDS methane scheme's n_O2 step 1 is 1.3333",
-        (n1 - 4.0 / 3.0).abs(),
-        1e-15,
-    );
-    c.check("S42.4: methane s1/s is exactly 2/3", (s1m / sm - 2.0 / 3.0).abs(), 1e-15);
-
-    // ---- SPEC-LIT §42.5: the oxygen-limit law's own structure ------------
-    let peak = ts.phi_peak(s);
-    c.check("S42.5: CO peaks at phi = s/s1 = 2.5 for propane", (peak - 2.5).abs(), 1e-6);
-    c.check("S42.5: no CO at or below stoichiometric", ts.co_yield_at_phi(s, 1.0), 0.0);
-    c.check(
-        "S42.5: the peak CO yield is exactly yCO",
-        (ts.co_yield_at_phi(s, peak) - y_co).abs() / y_co,
-        1e-14,
-    );
-    // The two branches meet: a discontinuity here would mean the rising and
-    // falling regimes disagree about what happens at phi = s/s1.
-    let jump = (ts.co_yield_at_phi(s, peak - 1e-9) - ts.co_yield_at_phi(s, peak + 1e-9)).abs();
-    c.check("S42.5: the two CO branches meet at the peak", jump / y_co, 1e-8);
-    // And the Huggett split makes eta exactly 1/phi through BOTH regimes -
-    // oxygen-consumption calorimetry, and the sharpest test that the heat
-    // split and the mass split agree with each other.
-    let mut worst_eta: Scalar = 0.0;
-    for i in 0..=60 {
-        let phi = 1.0 + 0.1 * i as Scalar;
-        let e = ts.efficiency_at_phi(s, DHC_PROPANE, phi);
-        worst_eta = worst_eta.max((e - 1.0 / phi).abs());
-    }
-    c.check(
-        "S42.5: the Huggett split gives eta = 1/phi at every phi > 1",
-        worst_eta,
-        1e-14,
-    );
-
-    // ---- SPEC-LIT §43.1: the two published numbers are consistent --------
-    let e = ExtinctionCoeffs::default();
-    c.check("S43.1: X_OI = 0.135 implies Y_OI = 0.151294", (e.y_oi() - 0.151294).abs(), 1e-6);
-    let cp_propane = e.implied_mean_cp();
-    let cp_methane =
-        ExtinctionCoeffs { t_oi: ExtinctionCoeffs::T_OI_METHANE, ..e }.implied_mean_cp();
-    c.note(&format!(
-        "S43.1: FDS's X_OI = 0.135 and Beyler's CFTs are tied by (43.1). Propane's 1447 C \
-         implies mean cp = {cp_propane:.1} J/(kg K); methane's 1507 C implies {cp_methane:.1}"
-    ));
-    c.check(
-        "S43.1: propane's CFT implies a plausible product cp (1389)",
-        (cp_propane - 1388.9).abs(),
-        1.0,
-    );
-    c.check(
-        "S43.1: methane's CFT implies a plausible product cp (1333)",
-        (cp_methane - 1332.9).abs(),
-        1.0,
-    );
-    // The gap SPEC-LIT §43.1 states: this crate's constant cp = 1006 is the
-    // COLD-AIR value and putting it in (43.1) lands 500 K high, which is why
-    // T_OI is not derived from it.
-    let wrong = e.derived_t_oi(1006.0);
-    c.note(&format!(
-        "S43.1: (43.1) at this crate's constant cp = 1006 J/(kg K) would give T_OI = {wrong:.1} K \
-         = {:.0} C, {:.0} K above Beyler's - which is why T_OI is NOT derived from it",
-        wrong - 273.15,
-        wrong - e.t_oi
-    ));
-    c.require("S43.1: the cp = 1006 route is more than 400 K high", wrong - e.t_oi > 400.0);
-
-    // ---- SPEC-LIT (43.3): the limiting-oxygen curve ----------------------
-    c.check("S43.2: X_lim at ambient is exactly X_OI", (e.x_o2_limit(e.t_inf) - e.x_oi).abs(), 0.0);
-    c.check(
-        "S43.2: X_lim just below the free-burn temperature is 0.080130",
-        (e.x_o2_limit(e.t_fb - 1e-9) - 0.080130).abs(),
-        1e-5,
-    );
-    c.check("S43.2: X_lim is exactly zero above the free-burn temperature", e.x_o2_limit(e.t_fb), 0.0);
-    let mut monotone = true;
-    let mut prev = e.x_o2_limit(e.t_inf);
-    let mut t = e.t_inf + 5.0;
-    while t < e.t_fb {
-        let x = e.x_o2_limit(t);
-        monotone &= x < prev && x >= 0.0;
-        prev = x;
-        t += 5.0;
-    }
-    c.require("S43.2: X_lim decreases monotonically to the cut-off", monotone);
-
-    // The ambient anchor for (42.6)'s constant-molar-mass conversion.
-    let x_amb = ofgpu::twostep::volume_fraction_o2(ofgpu::io::case_json::AMBIENT_Y_O2);
-    c.note(&format!(
-        "S42.3: the constant-Wbar conversion maps AMBIENT_Y_O2 = 0.232 to X_O2 = {x_amb:.6}, \
-         against dry air's 0.2095 - {:+.2} %",
-        100.0 * (x_amb - 0.2095) / 0.2095
-    ));
-    c.check(
-        "S42.3: the ambient oxygen volume fraction is within 1 % of dry air",
-        (x_amb - 0.2095).abs() / 0.2095,
-        0.01,
-    );
-}
-
-/// Propane's heat of combustion, SPEC-LIT §27's own default.
-const DHC_PROPANE: Scalar = 46.45e6;
-
-/// A perfectly-stirred reactor driven on the DEVICE by the real §42 kernels.
-///
-/// One cell per operating point: cell `i` is fed its own mixture, so the whole
-/// sweep marches in one launch sequence and nothing about the answer depends
-/// on which cell a point landed in (which the replication check below
-/// measures). Over one step a fraction `theta` of every cell's contents is
-/// replaced by fresh feed - done on the host, because SPEC-LIT §18's registry
-/// takes a uniform source per zone and this is a per-cell one, and because a
-/// validation harness is not the time loop.
-struct StirredRig<'m> {
-    sp: Species<'m>,
-    cmb: Combustion<'m>,
-    rho: GpuScalarField,
-    tfld: GpuScalarField,
-    k: GpuScalarField,
-    eps: GpuScalarField,
-    sources: EnergySources,
-    n: usize,
-}
-
-impl<'m> StirredRig<'m> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        gpu: &Gpu,
-        hm: &HostMesh,
-        m: &'m GpuMesh,
-        coeffs: CombustionCoeffs,
-        rate: Scalar,
-    ) -> Result<Self> {
-        let n = hm.n_cells;
-        let nbf = hm.n_boundary_faces;
-        let names: Vec<String> = if coeffs.two_step.is_some() {
-            ["Y_F", "Y_O2", "Y_I", "Y_P", "N2"].iter().map(|s| s.to_string()).collect()
-        } else {
-            ["Y_F", "Y_O2", "Y_P", "N2"].iter().map(|s| s.to_string()).collect()
-        };
-        let sc = vec![SpeciesCoeffs::default(); names.len()];
-        let mut sp = Species::new(gpu, hm, m, &names, &sc, "N2", 1.5e-5, TurbulenceControls::default())?;
-        sp.initialise(gpu)?;
-        let cmb = Combustion::new(gpu, m, coeffs, &sp, "Y_F", "Y_O2", "Y_P", "Y_I")?;
-
-        let uniform = |name: &str, v: Scalar| -> Result<GpuScalarField> {
-            let mut f = GpuScalarField::zeros(gpu, m, name)?;
-            gpu.write(&mut f.f, &vec![v; n])?;
-            gpu.write(&mut f.bf, &vec![v; nbf])?;
-            Ok(f)
-        };
-        // `rate = C_EDM eps/k`, so `eps = rate k / C_EDM` gives whatever
-        // mixing frequency the sweep asks for through the model's own path.
-        let kv: Scalar = 1.0;
-        Ok(Self {
-            sp,
-            cmb,
-            rho: uniform("rho", 1.0)?,
-            tfld: uniform("T", 293.15)?,
-            k: uniform("k", kv)?,
-            eps: uniform("epsilon", rate * kv / coeffs.c_edm)?,
-            sources: EnergySources::new(gpu, m)?,
-            n,
-        })
-    }
-
-    fn write_species(&mut self, gpu: &Gpu, name: &str, v: &[Scalar]) -> Result<()> {
-        let f = self
-            .sp
-            .by_name_mut(name)
-            .ok_or_else(|| Error::Config(format!("stirred rig has no {name}")))?
-            .field_mut();
-        gpu.write(&mut f.f, v)
-    }
-
-    fn read_species(&self, gpu: &Gpu, name: &str) -> Result<Vec<Scalar>> {
-        let f = self
-            .sp
-            .by_name(name)
-            .ok_or_else(|| Error::Config(format!("stirred rig has no {name}")))?
-            .field();
-        gpu.download(&f.f)
-    }
-}
-
-/// **SPEC-LIT §42.8's Gate 1, live on the device.**
-///
-/// A perfectly-stirred reactor swept over the global equivalence ratio, with
-/// every §42 kernel in the loop, against (42.8)/(42.9)'s closed form.
-///
-/// The closed form is the INFINITELY-fast limit and the reactor is
-/// finite-rate, so the gate is a convergence study rather than a tolerance:
-/// `theta = dt/tau_res` is halved twice and the live CO yield has to approach
-/// the closed form at first order. That is a much harder thing to pass by
-/// accident than a single loose band, and it is what shows the closed form is
-/// the kernel's own limit rather than a number that happens to be nearby.
-///
-/// Four things are measured, and each fails under a different implementation
-/// error: the CO yield's shape (a wrong `s1/s` moves the peak), the efficiency
-/// (`eta = 1/phi` exactly, which is where the heat split and the mass split
-/// have to agree), the oxygen the boundedness clamp had to invent (SPEC-LIT
-/// §42.5a - what actually separates the serial scheme from a parallel one),
-/// and the fact that §27's single step scores identically zero.
-fn check_two_step_oxygen_limit(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    use ofgpu::twostep::{CombustionScheme, TwoStepCoeffs};
-
-    const PHIS: [Scalar; 8] = [0.5, 0.9, 1.2, 1.6, 2.0, 2.5, 3.5, 6.0];
-    // Steps per residence time: 50, 100, 200. Halving `theta` twice is what
-    // makes the convergence order measurable rather than assumed.
-    const THETAS: [Scalar; 3] = [0.02, 0.01, 0.005];
-    const N_POINT: usize = PHIS.len() * THETAS.len();
-
-    let spec = MeshSpec { n: [4, 4, 4], l: [0.4, 0.4, 0.4], all_generic: true, ..Default::default() };
-    let hm = make_mesh(&scratch_dir("stirred"), &spec)?;
-    let m = GpuMesh::upload(gpu, &hm)?;
-    let n = hm.n_cells;
-
-    let s: Scalar = 3.628138;
-    let ts = TwoStepCoeffs {
-        s1: TwoStepCoeffs::PROPANE_S1,
-        dh1: TwoStepCoeffs::huggett_dh1(s, DHC_PROPANE, TwoStepCoeffs::PROPANE_S1),
-        y_co: TwoStepCoeffs::PROPANE_Y_CO,
-    };
-    let coeffs = CombustionCoeffs {
-        s,
-        dh_c: DHC_PROPANE,
-        scheme: CombustionScheme::SerialTwoStep,
-        two_step: Some(ts),
-        ..CombustionCoeffs::default()
-    };
-
-    // One operating point per cell, replicated so that a cell's answer must
-    // not depend on which cell it is - the reproducibility half of the gate,
-    // free because the sweep is elementwise anyway.
-    let y_o2a = ofgpu::io::case_json::AMBIENT_Y_O2;
-    let point = |i: usize| i % N_POINT;
-    let mut x_f = vec![0.0 as Scalar; n];
-    let mut theta = vec![0.0 as Scalar; n];
-    let mut feed = [vec![0.0 as Scalar; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]];
-    for i in 0..n {
-        let p = point(i);
-        let phi = PHIS[p % PHIS.len()];
-        theta[i] = THETAS[p / PHIS.len()];
-        let beta = s / phi;
-        x_f[i] = y_o2a / (beta + y_o2a);
-        feed[0][i] = x_f[i];
-        feed[1][i] = (1.0 - x_f[i]) * y_o2a;
-    }
-
-    // `rate*dt >> 1` so the availability clip binds and the reactor sits in
-    // the fast-chemistry limit (42.7) is stated in. A larger `rate` past that
-    // point changes nothing - the clip lets each step consume half of
-    // whatever is limiting - so the approach to the closed form is governed
-    // by `theta` alone, which is exactly what the sweep varies.
-    let dt: Scalar = 1.0e-3;
-    let rate: Scalar = 1.0e5;
-    let n_steps = 14_000;
-    let names = ["Y_F", "Y_O2", "Y_I", "Y_P"];
-
-    // (co, eta, o2 conjured) per point, serial and parallel.
-    let mut serial = vec![(0.0 as Scalar, 0.0 as Scalar, 0.0 as Scalar); N_POINT];
-    let mut parallel = vec![(0.0 as Scalar, 0.0 as Scalar, 0.0 as Scalar); N_POINT];
-
-    for is_serial in [true, false] {
-        let mut rig = StirredRig::new(gpu, &hm, &m, coeffs, rate)?;
-        rig.cmb.set_parallel_for_test(!is_serial);
-        let mut y = [feed[0].clone(), feed[1].clone(), vec![0.0 as Scalar; n], vec![0.0; n]];
-        // The parallel control is only ever compared qualitatively - it has
-        // no closed form to converge to - so it does not need the fine sweep.
-        let steps = if is_serial { n_steps } else { 4_000 };
-
-        let mut q_last = vec![0.0 as Scalar; n];
-        let mut df_last = vec![0.0 as Scalar; n];
-        for step in 0..steps {
-            for j in 0..4 {
-                for i in 0..n {
-                    y[j][i] += theta[i] * (feed[j][i] - y[j][i]);
-                }
-                rig.write_species(gpu, names[j], &y[j])?;
-            }
-            rig.sources.clear(gpu)?;
-            let (rho, tf, kf, ef) = (&rig.rho, &rig.tfld, &rig.k, &rig.eps);
-            rig.cmb.react_rans(gpu, &mut rig.sp, rho, tf, kf, ef, dt, &mut rig.sources)?;
-            for j in 0..4 {
-                y[j] = rig.read_species(gpu, names[j])?;
-            }
-            if step + 1 == steps {
-                q_last = gpu.download(rig.cmb.q())?;
-                df_last = gpu.download(rig.cmb.o2_deficit())?;
-            }
-        }
-
-        // Per unit mass of feed drained, the fuel supplied is `theta x_F`.
-        let mut spread: Scalar = 0.0;
-        let out = if is_serial { &mut serial } else { &mut parallel };
-        for i in 0..n {
-            let p = point(i);
-            let v = (
-                ts.f_co() * y[2][i] / x_f[i],
-                q_last[i] * dt / (theta[i] * x_f[i]) / DHC_PROPANE,
-                df_last[i] / (theta[i] * x_f[i]),
-            );
-            if i < N_POINT {
-                out[p] = v;
-            } else {
-                spread = spread.max((v.0 - out[p].0).abs());
-            }
-        }
-        c.check(
-            &format!(
-                "S42.8 Gate 1 ({}): every replica of a point agrees",
-                if is_serial { "serial" } else { "parallel" }
-            ),
-            spread,
-            0.0,
-        );
-    }
-
-    // ---- the table, and the convergence study ---------------------------
-    c.note("S42.8 Gate 1: live GPU stirred reactor, propane, against SPEC-LIT (42.8)/(42.9).");
-    c.note("  theta = dt/tau_res, so 1/theta steps per residence time. Halved twice.");
-    c.note("  phi  | closed  | y_CO at theta 0.02 / 0.01 / 0.005 | err ratio | order | eta*phi");
-    let mut worst_order_offpeak: Scalar = Scalar::INFINITY;
-    let mut order_at_peak: Scalar = 0.0;
-    let mut worst_eta: Scalar = 0.0;
-    let mut worst_extrap: Scalar = 0.0;
-    let peak = ts.phi_peak(s);
-    for (pi, &phi) in PHIS.iter().enumerate() {
-        let want = ts.co_yield_at_phi(s, phi);
-        let co: Vec<Scalar> = (0..THETAS.len()).map(|t| serial[t * PHIS.len() + pi].0).collect();
-        let err: Vec<Scalar> = co.iter().map(|v| (v - want).abs()).collect();
-        let r1 = err[0] / err[1].max(Scalar::MIN_POSITIVE);
-        let r2 = err[1] / err[2].max(Scalar::MIN_POSITIVE);
-        let order = r2.max(1.0).log2();
-        // First-order Richardson on the two finest: co_f + (co_f - co_c).
-        let extrap = co[2] + (co[2] - co[1]);
-        let bound = if phi <= 1.0 { 1.0 } else { 1.0 / phi };
-        let eta_p = serial[2 * PHIS.len() + pi].1 / bound;
-        c.note(&format!(
-            "  {phi:4.2} | {want:7.4} | {:7.4} {:7.4} {:7.4} | {r1:5.2} {r2:5.2} | {order:5.2} | {eta_p:.5}",
-            co[0], co[1], co[2]
-        ));
-        if (phi - peak).abs() > 1e-6 {
-            worst_order_offpeak = worst_order_offpeak.min(order);
-            worst_extrap = worst_extrap.max((extrap - want).abs() / ts.y_co);
-        } else {
-            order_at_peak = order;
-        }
-        worst_eta = worst_eta.max((serial[2 * PHIS.len() + pi].1 - bound).abs());
-    }
-
-    c.check(
-        "S42.8 Gate 1: live CO converges to (42.8)/(42.9) at first order",
-        (1.0 - worst_order_offpeak).max(0.0),
-        0.15,
-    );
-    c.check(
-        "S42.8 Gate 1: first-order extrapolation lands on the closed form",
-        worst_extrap,
-        0.02,
-    );
-    c.check(
-        "S42.8 Gate 1: live eta is 1/phi (oxygen-consumption calorimetry)",
-        worst_eta,
-        0.02,
-    );
-    // The one exception, MEASURED rather than excused: at `phi = s/s1` exactly
-    // the two reactants of step 1 are precisely co-limiting, and the implicit
-    // map leaves a residue that scales as sqrt(theta) rather than theta. It
-    // still converges - it converges at half order - and the gate says which
-    // point it is and what order it gets.
-    c.note(&format!(
-        "  the one exception is phi = s/s1 = {peak:.2} exactly, where step 1's two reactants are \
-         precisely co-limiting: order {order_at_peak:.2}, i.e. sqrt(theta), not theta"
-    ));
-    c.require(
-        "S42.8 Gate 1: the peak still converges, at half order",
-        order_at_peak > 0.3 && order_at_peak < 0.8,
-    );
-
-    // ---- SPEC-LIT §42.5a: the oxygen the clamp had to invent ------------
-    let mut worst_serial_conj: Scalar = 0.0;
-    let mut least_par_conj: Scalar = Scalar::INFINITY;
-    let mut worst_par_eta_ratio: Scalar = 0.0;
-    for (p, v) in serial.iter().enumerate() {
-        worst_serial_conj = worst_serial_conj.max(v.2);
-        let phi = PHIS[p % PHIS.len()];
-        if phi > 1.0 {
-            let bound = 1.0 / phi;
-            least_par_conj = least_par_conj.min(parallel[p].2);
-            worst_par_eta_ratio = worst_par_eta_ratio.max(parallel[p].1 / bound);
-        }
-    }
-    c.check("S42.5a: the SERIAL scheme conjures no oxygen", worst_serial_conj, 1e-12);
-    c.require(
-        "S42.5a: the PARALLEL control conjures oxygen at every phi > 1",
-        least_par_conj > 0.3,
-    );
-    c.require(
-        "S42.5a: the PARALLEL control exceeds the oxygen bound on eta",
-        worst_par_eta_ratio > 1.15,
-    );
-    c.note(&format!(
-        "  the parallel control's worst eta*phi is {worst_par_eta_ratio:.3} - it releases up to \
-         that multiple of the heat its oxygen supply can pay for, and conjures at least \
-         {least_par_conj:.3} kg O2 per kg fuel to do it. The serial scheme conjures \
-         {worst_serial_conj:.3e}"
-    ));
-
-    // ---- SPEC-LIT §42.8: the categorical half of the gate ---------------
-    let single = CombustionCoeffs { s, dh_c: DHC_PROPANE, ..CombustionCoeffs::default() };
-    let mut rig = StirredRig::new(gpu, &hm, &m, single, rate)?;
-    let mut ys = [feed[0].clone(), feed[1].clone(), vec![0.0 as Scalar; n]];
-    let snames = ["Y_F", "Y_O2", "Y_P"];
-    for _ in 0..500 {
-        for j in 0..3 {
-            for i in 0..n {
-                ys[j][i] += theta[i] * (feed[j][i] - ys[j][i]);
-            }
-            rig.write_species(gpu, snames[j], &ys[j])?;
-        }
-        rig.sources.clear(gpu)?;
-        let (rho, tf, kf, ef) = (&rig.rho, &rig.tfld, &rig.k, &rig.eps);
-        rig.cmb.react_rans(gpu, &mut rig.sp, rho, tf, kf, ef, dt, &mut rig.sources)?;
-        for j in 0..3 {
-            ys[j] = rig.read_species(gpu, snames[j])?;
-        }
-    }
-    let co_single = max_abs(&gpu.download(&rig.cmb.y_co().f)?);
-    c.check("S42.8: S27's single step predicts exactly zero CO", co_single, 0.0);
-
-    Ok(())
-}
-
-/// **SPEC-LIT §43.5's gate, live on the device: where the flame goes out.**
-///
-/// A lean, adiabatic, perfectly-stirred reactor whose oxidiser stream is
-/// progressively diluted with nitrogen, with §42's reaction and §43's
-/// extinction predicate both in the loop on the GPU, and the cell temperature
-/// evolving from the heat the reaction actually released. Reported as
-/// combustion efficiency against the oxidiser-stream oxygen VOLUME fraction -
-/// the quantity the University of Maryland line burner measures.
-///
-/// **Why this configuration and not a stoichiometric one.** (43.3) suppresses
-/// a cell whose bulk temperature is LOW; a stoichiometric well-stirred reactor
-/// reaches 2000-3000 K even at 13 % oxygen and is never suppressed, which is
-/// correct and uninteresting. The cells that actually extinguish in a fire are
-/// the entrainment-diluted edges of the flame, so the sweep is over LEAN
-/// mixtures - and over four of them, because a single chosen equivalence ratio
-/// would be a tuned parameter and the point of the gate is that the threshold
-/// is an OUTCOME of the temperature-composition coupling, not an input.
-///
-/// Measured data: **J. P. White, E. D. Link, A. C. Trouvé, P. B. Sunderland,
-/// A. W. Marshall, J. A. Sheffel, M. L. Corn, M. B. Colket, M. Chaos, H.-Z.
-/// Yu, *Fire Safety Journal* 76 (2015) 74-84**, methane, binned from the
-/// MaCFP experimental archive. Independent bracket: **Morehart, Zukoski &
-/// Kubota, NIST-GCR-90-585 (1991)**, self-extinction at 12.4 %-14.3 % oxygen
-/// by volume, as quoted by the FDS Technical Reference Guide.
-fn check_extinction_threshold(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    use ofgpu::twostep::{CombustionScheme, ExtinctionCoeffs, TwoStepCoeffs, W_BAR, W_O2};
-
-    // UMD line burner, methane, combustion efficiency against oxidiser-stream
-    // O2 volume fraction. Binned means of the measured record.
-    const UMD_CH4: [(Scalar, Scalar); 10] = [
-        (0.12, 0.0412),
-        (0.13, 0.5552),
-        (0.14, 0.9296),
-        (0.15, 1.0016),
-        (0.16, 1.0067),
-        (0.17, 1.0049),
-        (0.18, 1.0047),
-        (0.19, 1.0037),
-        (0.20, 1.0015),
-        (0.21, 0.9804),
-    ];
-    // Morehart, Zukoski & Kubota's measured self-extinction range.
-    const MOREHART: (Scalar, Scalar) = (0.124, 0.143);
-
-    const PHIS: [Scalar; 4] = [0.10, 0.15, 0.20, 0.30];
-    const N_X: usize = 23; // 0.10 .. 0.21 in steps of 0.005
-    const N_POINT: usize = PHIS.len() * N_X;
-
-    let spec = MeshSpec { n: [4, 4, 6], l: [0.4, 0.4, 0.6], all_generic: true, ..Default::default() };
-    let hm = make_mesh(&scratch_dir("extinct"), &spec)?;
-    let m = GpuMesh::upload(gpu, &hm)?;
-    let n = hm.n_cells;
-    if n < N_POINT {
-        c.skip("S43.5: the extinction sweep", "the scratch mesh is too small");
-        return Ok(());
-    }
-
-    // Methane, under the two-step stoichiometry the FDS Validation Guide
-    // states for this very experiment (two moles of CO per mole of soot
-    // carbon), and Beyler's methane critical flame temperature.
-    let s: Scalar = 3.989029;
-    let dhc: Scalar = 50.0e6;
-    let ext = ExtinctionCoeffs { t_oi: ExtinctionCoeffs::T_OI_METHANE, ..ExtinctionCoeffs::default() };
-    let ts = TwoStepCoeffs {
-        s1: TwoStepCoeffs::METHANE_S1,
-        dh1: TwoStepCoeffs::huggett_dh1(s, dhc, TwoStepCoeffs::METHANE_S1),
-        y_co: TwoStepCoeffs::METHANE_Y_CO,
-    };
-    let coeffs = CombustionCoeffs {
-        s,
-        dh_c: dhc,
-        scheme: CombustionScheme::SerialTwoStep,
-        two_step: Some(ts),
-        extinction: Some(ext),
-        ..CombustionCoeffs::default()
-    };
-
-    let x_of = |p: usize| 0.10 + 0.005 * (p % N_X) as Scalar;
-    let phi_of = |p: usize| PHIS[p / N_X];
-
-    let point = |i: usize| i % N_POINT;
-    let mut x_f = vec![0.0 as Scalar; n];
-    let mut feed = [vec![0.0 as Scalar; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]];
-    for i in 0..n {
-        let p = point(i);
-        // The oxidiser stream's O2 MASS fraction, from its volume fraction
-        // through (42.6)'s constant molar mass.
-        let y_o2_ox = x_of(p) * W_O2 / W_BAR;
-        let beta = s / phi_of(p);
-        x_f[i] = y_o2_ox / (beta + y_o2_ox);
-        feed[0][i] = x_f[i];
-        feed[1][i] = (1.0 - x_f[i]) * y_o2_ox;
-    }
-
-    let dt: Scalar = 1.0e-3;
-    let rate: Scalar = 1.0e5;
-    let theta: Scalar = 0.01;
-    let cp: Scalar = 1006.0; // SPEC-LIT §26's constant, the one this crate has
-    let t_feed: Scalar = 293.15;
-    let names = ["Y_F", "Y_O2", "Y_I", "Y_P"];
-
-    let mut rig = StirredRig::new(gpu, &hm, &m, coeffs, rate)?;
-    let mut y = [feed[0].clone(), feed[1].clone(), vec![0.0 as Scalar; n], vec![0.0; n]];
-    let mut t_cell = vec![t_feed; n];
-    // Every cell starts hot enough to be burning, so the sweep measures where
-    // the flame GOES OUT rather than where it fails to light: an ignited edge
-    // that survives is a different question from a cold mixture that never
-    // starts, and (43.3) is about the first.
-    for v in t_cell.iter_mut() {
-        *v = 1200.0;
-    }
-    let mut q_last = vec![0.0 as Scalar; n];
-    let mut ext_last = vec![0.0 as Scalar; n];
-    for step in 0..8_000 {
-        for j in 0..4 {
-            for i in 0..n {
-                y[j][i] += theta * (feed[j][i] - y[j][i]);
-            }
-            rig.write_species(gpu, names[j], &y[j])?;
-        }
-        // Feed and drain the enthalpy on the same schedule as the mass, then
-        // add whatever the LAST step's reaction released. Adiabatic: no walls,
-        // no radiation - the configuration the critical-flame-temperature
-        // concept is defined on.
-        for i in 0..n {
-            t_cell[i] += theta * (t_feed - t_cell[i]) + q_last[i] * dt / (1.0 * cp);
-        }
-        gpu.write(&mut rig.tfld.f, &t_cell)?;
-
-        rig.sources.clear(gpu)?;
-        let (rho, kf, ef) = (&rig.rho, &rig.k, &rig.eps);
-        let tf = &rig.tfld;
-        rig.cmb.react_rans(gpu, &mut rig.sp, rho, tf, kf, ef, dt, &mut rig.sources)?;
-        for j in 0..4 {
-            y[j] = rig.read_species(gpu, names[j])?;
-        }
-        q_last = gpu.download(rig.cmb.q())?;
-        if step + 1 == 8_000 {
-            ext_last = gpu.download(rig.cmb.extinguished())?;
-        }
-    }
-
-    // eta per point, and the threshold in oxidiser-stream oxygen.
-    let mut eta = vec![0.0 as Scalar; N_POINT];
-    let mut out = vec![false; N_POINT];
-    let mut spread: Scalar = 0.0;
-    for i in 0..n {
-        let p = point(i);
-        let e = q_last[i] * dt / (theta * x_f[i]) / dhc;
-        if i < N_POINT {
-            eta[p] = e;
-            out[p] = ext_last[i] > 0.5;
-        } else {
-            spread = spread.max((e - eta[p]).abs());
-        }
-    }
-    c.check("S43.5: every replica of an extinction point agrees", spread, 0.0);
-
-    c.note(
-        "S43.5: live GPU adiabatic stirred reactor, methane, FDS EXTINCTION 1 in the loop.",
-    );
-    c.note(
-        "  X_O2(oxidiser) at which eta falls below 0.5, per lean equivalence ratio:",
-    );
-    let mut thresholds: Vec<Scalar> = Vec::new();
-    let mut monotone = true;
-    for (pi, &phi) in PHIS.iter().enumerate() {
-        let mut thr = Scalar::NAN;
-        let mut prev_eta = -1.0 as Scalar;
-        for xi in 0..N_X {
-            let p = pi * N_X + xi;
-            if eta[p] >= 0.5 && thr.is_nan() {
-                thr = x_of(p);
-            }
-            // eta must not fall as the oxidiser gets richer.
-            if prev_eta >= 0.0 && eta[p] < prev_eta - 1e-6 {
-                monotone = false;
-            }
-            prev_eta = eta[p];
-        }
-        c.note(&format!(
-            "  phi = {phi:.2}: threshold X_O2 = {thr:.4} | eta at 0.21 = {:.4}, at 0.15 = {:.4}, \
-             at 0.12 = {:.4}",
-            eta[pi * N_X + 22],
-            eta[pi * N_X + 10],
-            eta[pi * N_X + 4]
-        ));
-        if thr.is_finite() {
-            thresholds.push(thr);
-        }
-    }
-    c.require("S43.5: eta never falls as the oxidiser gets richer", monotone);
-    c.require("S43.5: every lean condition has a threshold in the swept range", thresholds.len() == PHIS.len());
-
-    let lo = thresholds.iter().fold(Scalar::INFINITY, |a, &b| a.min(b));
-    let hi = thresholds.iter().fold(0.0 as Scalar, |a, &b| a.max(b));
-    c.note(&format!(
-        "  the model's extinction threshold spans X_O2 = {lo:.4} to {hi:.4} across these lean \
-         conditions, against Morehart, Zukoski & Kubota's measured self-extinction range of \
-         {:.3}-{:.3} and the UMD line burner's own 50 %-efficiency point at about 0.130",
-        MOREHART.0, MOREHART.1
-    ));
-    c.require(
-        "S43.5: the threshold lies inside Morehart's measured 12.4-14.3 % bracket",
-        lo >= MOREHART.0 - 1e-9 && hi <= MOREHART.1 + 1e-9,
-    );
-
-    // The measured curve, alongside. This is a COMPARISON, not a tolerance:
-    // the model is a per-cell predicate and gives a switch, while the measured
-    // transition is smoothed by turbulent intermittency at the flame base,
-    // which a well-stirred reactor does not have. What is asserted is the two
-    // ends, where the answer is unarguable.
-    c.note("  against White et al. (2015), methane, MaCFP archive:");
-    let phi_ref = 1; // phi = 0.15, the mid lean condition
-    let mut worst_end: Scalar = 0.0;
-    for &(x, e_exp) in UMD_CH4.iter() {
-        let xi = ((x - 0.10) / 0.005).round() as usize;
-        let e_mod = eta[phi_ref * N_X + xi.min(N_X - 1)];
-        c.note(&format!("    X_O2 = {x:.2}: measured eta = {e_exp:.4}, model = {e_mod:.4}"));
-        // Both ends are unarguable: fully burning well above the limit, out
-        // well below it. The transition itself is not asserted.
-        if x >= 0.16 {
-            worst_end = worst_end.max((e_mod - 1.0).abs());
-        }
-        if x <= 0.12 {
-            worst_end = worst_end.max(e_mod.abs());
-        }
-    }
-    c.check(
-        "S43.5: eta is 1 well above the limit and 0 well below it",
-        worst_end,
-        0.05,
-    );
-
-    // And the extinction flag has to agree with the efficiency: a cell that
-    // reports itself extinguished must release no heat, and vice versa.
-    let mut inconsistent = 0usize;
-    for p in 0..N_POINT {
-        if out[p] != (eta[p] < 0.5) {
-            inconsistent += 1;
-        }
-    }
-    c.check(
-        "S43.3: the reported extinction flag matches the heat released",
-        inconsistent as Scalar,
-        0.0,
-    );
-
-    c.note(
-        "  NOT claimed: that this reproduces the measured curve's SLOPE through the transition. \
-         The measured transition is smoothed by turbulent intermittency at the flame base and by \
-         the spread of local conditions over the flame; (43.3) is a per-cell predicate and gives \
-         a switch. Tuning X_OI until the slope matched would be fitting a constant to a \
-         mechanism the model does not have",
-    );
-
-    Ok(())
-}
-
-/// **SPEC-LIT §42.8's Gate 2, REPLAYED: the NIST Reduced Scale Enclosure.**
-///
-/// The compartment gate is a real, shipped case - `cases/nistRSE1994.jsonc` -
-/// run through `ofgpu-fire` at seven heat release rates. It is replayed here
-/// rather than computed, for the same reason the six §32 experiments are: one
-/// point is a 6144-cell transient run of four to nine minutes, and seven of
-/// them do not belong inside a validation harness that has to finish.
-///
-/// Replaying it is not the same as not running it. What is recorded below is
-/// what the runs produced, and the point of recording it is that the gate
-/// **MISSES** and the miss has to stay on the screen.
-///
-/// Measured data: **N. Bryner, E. Johnsson, W. Pitts, "Carbon Monoxide
-/// Production in Compartment Fires - Reduced-Scale Test Facility", NISTIR
-/// 5568, NIST, Gaithersburg MD, 1994**, binned by heat release rate from the
-/// NIST public-domain experimental archive. Acceptance context: **McGrattan,
-/// McDermott & Floyd, ISFEH10 2022** publish, for this model over the NIST RSE
-/// 1994 / RSE 2007 / FSE 2008 compartment set, a **model bias factor of 1.08
-/// and a model relative standard deviation of 0.50**, against an experimental
-/// relative standard deviation of 0.19. That is the bar.
-fn check_rse_compartment_replay(c: &mut Checks) {
-    // (HRR kW, measured front CO, rear CO, front O2, rear O2) - bin means.
-    const MEASURED: [(Scalar, Scalar, Scalar, Scalar, Scalar); 7] = [
-        (50.0, 0.00023, 0.00042, 0.16566, 0.14770),
-        (100.0, 0.00157, 0.00148, 0.08236, 0.06796),
-        (200.0, 0.01080, 0.00721, 0.02627, 0.01399),
-        (300.0, 0.02085, 0.01881, 0.00574, 0.00075),
-        (400.0, 0.02567, 0.01815, 0.00248, 0.00121),
-        (500.0, 0.02874, 0.01848, 0.00200, 0.00375),
-        (600.0, 0.02944, 0.02074, 0.00279, 0.00188),
-    ];
-    // What `cases/nistRSE1994.jsonc` produced: RTX 5070 Ti, 6144 cells
-    // (16 x 24 x 16, D*/dx ~ 10 at 400 kW), 30 s of physical time at
-    // dt = 0.005, k-epsilon, radiation off, adiabatic walls.
-    // (HRR, front CO, rear CO, front O2, rear O2, combustion efficiency %)
-    const MODEL: [(Scalar, Scalar, Scalar, Scalar, Scalar, Scalar); 7] = [
-        (50.0, 5.3345e-7, 1.02744e-5, 0.126345, 0.0977561, 57.63),
-        (100.0, 9.68976e-5, 3.28565e-6, 0.0918892, 0.0163022, 43.04),
-        (200.0, 8.00253e-4, 1.33424e-3, 2.78232e-5, 6.01061e-3, 37.06),
-        (300.0, 1.94957e-3, 1.58389e-5, 1.88595e-5, 5.76616e-3, 32.48),
-        (400.0, 1.46881e-3, 4.20010e-4, 4.79975e-4, 3.23311e-4, 24.01),
-        (500.0, 2.56684e-3, 2.70904e-5, 4.29083e-6, 3.71539e-2, 17.79),
-        (600.0, 1.44907e-3, 3.07046e-5, 2.10652e-5, 1.65781e-2, 15.31),
-    ];
-
-    c.note(
-        "S42.8 Gate 2 (REPLAYED): NIST Reduced Scale Enclosure 1994, cases/nistRSE1994.jsonc,",
-    );
-    c.note(
-        "  6144 cells, 30 s at dt = 0.005, k-epsilon, radiation off, adiabatic walls. Measured \
-         data: Bryner, Johnsson & Pitts, NISTIR 5568 (1994), NIST public domain.",
-    );
-    c.note("  HRR   | CO front meas / model | CO rear meas / model | O2 front meas / model | eta %");
-    let mut worst_co_ratio: Scalar = 1.0;
-    let mut co_rising_model = true;
-    let mut co_rising_meas = true;
-    let (mut prev_m, mut prev_e) = (-1.0 as Scalar, -1.0 as Scalar);
-    for (i, &(q, e_cof, e_cor, e_o2f, _e_o2r)) in MEASURED.iter().enumerate() {
-        let (_, m_cof, m_cor, m_o2f, _m_o2r, eta) = MODEL[i];
-        c.note(&format!(
-            "  {q:5.0} | {e_cof:.5} / {m_cof:.5} | {e_cor:.5} / {m_cor:.5} | \
-             {e_o2f:.5} / {m_o2f:.5} | {eta:.1}"
-        ));
-        if q >= 200.0 {
-            worst_co_ratio = worst_co_ratio.max(e_cof / m_cof.max(1e-12));
-        }
-        if prev_m >= 0.0 {
-            co_rising_model &= m_cof >= prev_m * 0.5;
-            co_rising_meas &= e_cof >= prev_e;
-        }
-        prev_m = m_cof;
-        prev_e = e_cof;
-    }
-
-    // What DOES land. The oxygen crossover - the point at which the upper
-    // layer goes from ventilated to starved - is the half of the problem the
-    // chemistry does not control, and it is the half that works.
-    let meas_cross = MEASURED.iter().position(|r| r.3 < 0.01).unwrap_or(usize::MAX);
-    let model_cross = MODEL.iter().position(|r| r.3 < 0.01).unwrap_or(usize::MAX);
-    c.note(&format!(
-        "  the upper layer's oxygen crosses below 1 % at {} kW measured and {} kW predicted",
-        MEASURED[meas_cross.min(6)].0,
-        MEASURED[model_cross.min(6)].0
-    ));
-    c.require(
-        "S42.8 Gate 2: the oxygen crossover lands within one HRR step of the measurement",
-        meas_cross.abs_diff(model_cross) <= 1,
-    );
-    c.require("S42.8 Gate 2: measured CO rises with HRR", co_rising_meas);
-    c.require("S42.8 Gate 2: predicted CO does not fall with HRR", co_rising_model);
-
-    // And the miss, stated as a number rather than as a caveat - and
-    // REGISTERED, so that SPEC-LIT S69's summary carries it whether or not
-    // anyone remembers to put it there.
-    c.report(GateReport {
-        verdict: Verdict::Misses,
-        how: How::Replayed,
-        gate: "SPEC-LIT S42.8b Gate 2",
-        against: "the NIST Reduced Scale Enclosure 1994 compartment sweep (Bryner, Johnsson \
-                  & Pitts, NISTIR 5568, NIST public domain), cases/nistRSE1994.jsonc, at the \
-                  bias factor 1.08 / model relative standard deviation 0.50 ISFEH10 \
-                  publishes for this model on this experiment",
-        headline: format!(
-            "above 200 kW the predicted ceiling CO is low by a factor of up to \
-             {worst_co_ratio:.0}, which is nowhere near that bar"
-        ),
-        detail: Vec::new(),
-    });
-    c.note(
-        "  DIAGNOSIS, from the runs themselves and not from the model: the combustion efficiency \
-         is 15-58 %, so most of the fuel leaves the compartment unburnt, and the doorway admits \
-         roughly a tenth of the air a 400 kW fire in this room draws. The chemistry half of the \
-         prediction is validated separately and decisively by Gate 1; what is unvalidated is the \
-         VENTILATION, which SPEC-LIT S42.8 said before the run would be the ambiguous half. \
-         Steckler, Quintiere & Rinkinen (1982) - the doorway-flow gate - is still not run, and \
-         it is the prerequisite this miss names.",
-    );
-    c.note(
-        "  Two further modelling gaps that move it in the same direction: the walls are adiabatic \
-         and radiation is off (the experiment's Marinite liner is a conjugate heat transfer \
-         problem this solver does not have), and the burner is a window in the FLOOR rather than \
-         an obstruction 15 cm above it.",
-    );
-}
-
-/// SPEC-LIT §28's decisive gate: an isothermal medium with hot walls reaches
-/// `G = 4 sigma T^4` everywhere (equilibrium) to round-off, whatever wall
-/// emissivity was chosen.
-fn check_radiative_equilibrium(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    let n = [6usize, 6, 6];
-    let l: [Scalar; 3] = [0.3, 0.3, 0.3];
-    let axis = |i: usize| GradedAxis { lo: 0.0, hi: l[i], n: n[i], expansion: 1.0, two_sided: false };
-    let b = BlockSpec {
-        x: axis(0),
-        y: axis(1),
-        z: axis(2),
-        windows: Vec::new(),
-        patch_name: BlockSpec::default().patch_name,
-        patch_type: ["wall", "wall", "wall", "wall", "wall", "wall"].map(String::from),
-        cyclic: Vec::new(),
-    };
-    let hm = blockgen::build_mesh(&b)?;
-    let gm = GpuMesh::upload(gpu, &hm)?;
-
-    let props = RadiationProps::new(2.0)?;
-    let mut rad = Radiation::new(gpu, &gm, props)?;
-    rad.set_walls(&hm, 0.6)?;
-    rad.initialise(gpu)?;
-
-    let t0: Scalar = 1000.0;
-    let mut t = GpuScalarField::zeros(gpu, &gm, "T")?;
-    gpu.write(&mut t.f, &vec![t0; hm.n_cells])?;
-    gpu.write(&mut t.bf, &vec![t0; hm.n_boundary_faces])?;
-    let kind = vec![BcKind::FixedValue as Label; hm.n_boundary_faces];
-    let fr = vec![1.0 as Scalar; hm.n_boundary_faces];
-    let ref_value = vec![t0; hm.n_boundary_faces];
-    let ref_grad = vec![0.0 as Scalar; hm.n_boundary_faces];
-    gpu.write(&mut t.bc_kind, &kind)?;
-    gpu.write(&mut t.fr, &fr)?;
-    gpu.write(&mut t.ref_value, &ref_value)?;
-    gpu.write(&mut t.ref_grad, &ref_grad)?;
-    let fldk = FieldKernels::new(gpu)?;
-    correct_boundary_conditions(gpu, &fldk, &mut t, &gm)?;
-
-    let solver_ctrl = SolverControls {
-        solver: LinearSolverKind::PCG,
-        precon: Preconditioner::Diagonal,
-        tolerance: 1e-14,
-        rel_tol: 0.0,
-        max_iter: 5000,
-        report_residuals: true,
-        ..Default::default()
-    };
-    rad.correct(gpu, &t, None, &solver_ctrl, 1)?;
-
-    let g = gpu.download(&rad.field().f)?;
-    let want = 4.0 * ofgpu::radiation::SIGMA_SB * t0 * t0 * t0 * t0;
-    let worst = g.iter().fold(0.0 as Scalar, |w, &v| w.max((v - want).abs() / want));
-    c.check("radiative equilibrium (S28, decisive): G = 4 sigma T^4", worst, 1e-8);
-    Ok(())
-}
-
 // ==========================================================================
 //  SPEC-LIT §31.1: the cyclic-pair invariants
 //
 //  Cheap and geometric only - no GPU kernel, no solve - which is exactly why
 //  this is the piece of §31.1 promoted into the permanent gate rather than
 //  the two-mesh wall-heat-flux comparison (SPEC-LIT §29.3/§31's own
-//  deferred gate): that one needs `ofgpu-fire` run to convergence on two
+//  deferred gate): that one needs `ofgpu-lowmach` run to convergence on two
 //  meshes, which is minutes, not the seconds this file's whole suite runs
 //  in. What IS cheap, and worth gating permanently, is that a cyclic pair's
 //  face matching itself never regresses - a mismatched pair "silently
@@ -10849,7 +8292,7 @@ fn check_cyclic_pair(c: &mut Checks) -> Result<()> {
 //  Nusselt-number correlations §32.3 compares against. What is NOT promoted
 //  here: the two-mesh channel comparison itself (§32.2) - a live GPU run to
 //  statistical steady state, minutes long, reported once in
-//  `docs/07-fire-solver.md` §1.1 rather than re-run on every `cargo test`.
+//  `docs/07-lowmach-solver.md` §1.1 rather than re-run on every `cargo test`.
 // ==========================================================================
 
 /// SPEC-LIT §32.2's own identity: `k_eff_wall * flux_to_grad(q_w, k_eff_wall)
@@ -10947,7 +8390,7 @@ fn check_nu_correlations(c: &mut Checks) {
 ///    duct). This is what says [`ofgpu::wallfunctions::darcy_friction_factor`]
 ///    is the DARCY convention and not the Fanning one four times smaller.
 ///
-/// Also checks `D_h = 4V/A_wall`, the definition `ofgpu-fire` reports from,
+/// Also checks `D_h = 4V/A_wall`, the definition `ofgpu-lowmach` reports from,
 /// against `2H` on this same block - the reduction SPEC-LIT §32.2 asserts
 /// for a plane channel is here computed, not assumed.
 fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
@@ -10994,7 +8437,7 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
         );
 
         // The force balance, from the mesh's own volume and wall area - the
-        // same two reductions `ofgpu-fire` does at the end of a run.
+        // same two reductions `ofgpu-lowmach` does at the end of a run.
         let volume: Scalar = m.v.iter().sum();
         let tau_force = g_x * rho * volume / ws.area;
 
@@ -11214,7 +8657,7 @@ struct LegVerdict {
     t_mean: Scalar,
     rho_b: Scalar,
     rho_bar: Scalar,
-    /// The traction `ofgpu-fire` MEASURED at the wall, in whichever of
+    /// The traction `ofgpu-lowmach` MEASURED at the wall, in whichever of
     /// §32.5.1's two forms is correct for this leg's own wall treatment
     /// (`rho u_tau^2` on the wall-function leg, viscous on the resolved one).
     tau_w_measured: Scalar,
@@ -11249,7 +8692,7 @@ const CHANNEL_KIN_FORCE: Scalar = CHANNEL_G_X * CHANNEL_VOLUME;
 
 /// Everything §32.4's table needs for one leg, from its recorded measurement
 /// plus the case inputs above - no constant here that is not either recorded
-/// in `docs/07-fire-solver.md` §1.1 or written in the case file.
+/// in `docs/07-lowmach-solver.md` §1.1 or written in the case file.
 ///
 /// `rho_b` is recovered from the recorded `k_thermal = rho cp nu/Pr` rather
 /// than recomputed from `p0/(R_s T_b)`, so the density in the friction factor
@@ -11373,7 +8816,7 @@ fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
     ));
 }
 /// The WALL-FUNCTION leg's recorded measurement -
-/// `cases/channelPeriodicFluxWF.jsonc`, `docs/07-fire-solver.md` §1.1's LAST
+/// `cases/channelPeriodicFluxWF.jsonc`, `docs/07-lowmach-solver.md` §1.1's LAST
 /// subsection, a 40 000-iteration run to `|U|` residual 2.1e-8 whose state is
 /// unchanged in every printed digit from iteration 5 000 on. Every number here
 /// is a printed output of that run; nothing is derived.
@@ -11404,7 +8847,7 @@ fn wall_function_leg() -> LegVerdict {
 }
 
 /// The RESOLVED leg's recorded measurement -
-/// `cases/channelPeriodicFluxLowRe.jsonc`, `docs/07-fire-solver.md` §1.1's
+/// `cases/channelPeriodicFluxLowRe.jsonc`, `docs/07-lowmach-solver.md` §1.1's
 /// LAST subsection, a 40 000-iteration run to `|U|` residual 4.1e-12.
 ///
 /// **These numbers changed with SPEC-LIT §13.4.1/§32.5.5**, for the same
@@ -11448,7 +8891,7 @@ fn resolved_leg() -> LegVerdict {
 
 /// The DECISIVE EXPERIMENT of SPEC-LIT §35.3.2, replayed: the same two cases,
 /// the same 40 000 iterations, `"weighting"` the only token that differs.
-/// `(Nu, T_w - T_b)` for each of the four runs, exactly as `ofgpu-fire`
+/// `(Nu, T_w - T_b)` for each of the four runs, exactly as `ofgpu-lowmach`
 /// printed them. Each pair differs in one token and nothing else, which is
 /// what makes the comparison controlled rather than two different states.
 /// **Re-measured after SPEC-LIT S26.1**, all four runs, because that section's
@@ -11469,7 +8912,7 @@ const WEIGHTING_EXPERIMENT: [(&str, Scalar, Scalar, Scalar, Scalar); 2] = [
 /// used to substitute for the case's own, varied over all four combinations of
 /// `{Gauss upwind, Gauss linearUpwind grad(U)} x {plain, bounded}` on the
 /// resolved leg and three of them on the wall-function leg, 40 000 iterations
-/// each, nothing else changed. These are the numbers `ofgpu-fire` printed.
+/// each, nothing else changed. These are the numbers `ofgpu-lowmach` printed.
 ///
 /// **These seven runs are a PRE-§26.1 record and are kept as one.** They were
 /// made with §25.1's `Q` implemented without its conduction term, which was
@@ -11520,7 +8963,7 @@ const BOUNDED_EXPERIMENT: [BoundedRun; 7] = [
 /// `empty` front/back, hot walls top and bottom - no side walls at all, unlike
 /// the duct this case used to be) and, since SPEC-LIT §35, driven by the
 /// bulk-temperature thermostat in place of the old fixed `-heaterPower -3.2`,
-/// as reported in `docs/07-fire-solver.md` §1.1's LAST subsection (a run to
+/// as reported in `docs/07-lowmach-solver.md` §1.1's LAST subsection (a run to
 /// `\|U\|` residual 2.1e-8, unchanged in every printed digit from iteration
 /// 5 000 on - a true fixed point, not merely a small residual):
 /// `q_w = 500 W/m2` on both hot walls, `y+` 56.89/57.78/58.59 (min/mean/max),
@@ -11709,9 +9152,9 @@ fn check_launder_sharma_damping_functions(c: &mut Checks) {
 
 /// SPEC-LIT §33.2/§34's mesh-resolution check, REPLAYED against
 /// `cases/channelPeriodicFluxLowRe.jsonc` as rebuilt in SPEC-LIT §34 (the
-/// genuine 2-D plane channel, `empty` front/back - see `docs/07-fire-solver.md`
+/// genuine 2-D plane channel, `empty` front/back - see `docs/07-lowmach-solver.md`
 /// §1.1) and, since SPEC-LIT §35, driven by the bulk-temperature thermostat.
-/// `ofgpu-fire`'s own end-of-run report (`ofgpu::models::mesh_resolution_report`,
+/// `ofgpu-lowmach`'s own end-of-run report (`ofgpu::models::mesh_resolution_report`,
 /// over a REAL Poisson wall distance and the converged `k` field, not the
 /// duct version's hot-wall-only approximation) measured
 /// `max_first_cell_y_plus = 0.00174051` and `cells_below_y_plus_20 = 192` of
@@ -11777,7 +9220,7 @@ fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
 /// arrive at the same `T` produce bit-identical output by construction, and
 /// this checks that construction directly rather than replaying two
 /// 40 000-iteration runs to demonstrate it (SPEC-LIT §35.2's own regression
-/// was run live instead - see `docs/07-fire-solver.md` §1.1 - and is NOT
+/// was run live instead - see `docs/07-lowmach-solver.md` §1.1 - and is NOT
 /// promoted here because it takes ~2.5 minutes per initial condition, not
 /// seconds).
 fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<()> {
@@ -11824,7 +9267,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
     // A persistent net forcing (here, a manufactured "wall heat" analog Q)
     // settles the volume-mean at target + Q*tau/(rho_cp*V), NOT at target
     // exactly - SPEC-LIT §35.1 states the ideal ("at steady state T_mean =
-    // T_target"); §35's own channel measurement (docs/07-fire-solver.md
+    // T_target"); §35's own channel measurement (docs/07-lowmach-solver.md
     // §1.1) found the true discrete offset is small but real for any
     // nonzero forcing, and this is that same closed form, checked directly:
     // iterate `T_mean_{n+1} = T_mean_n + dt*(Q/(rho_cp*V) - (T_mean_n -
@@ -11846,7 +9289,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
     c.note(&format!(
         "a persistent {} W/m3 forcing settles T_mean at target + {} K, not at target exactly \
          (the ordinary steady-state error of a proportional-only controller) - \
-         docs/07-fire-solver.md S1.1's own {} W leg measured a {} K offset the same way",
+         docs/07-lowmach-solver.md S1.1's own {} W leg measured a {} K offset the same way",
         sci(q_forcing, 4),
         sci(q_forcing * tau / rho_cp, 4),
         sci(3.2, 2),
@@ -11859,7 +9302,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
 /// SPEC-LIT §32.4's verdict, REPLAYED, for the resolved leg
 /// (`cases/channelPeriodicFluxLowRe.jsonc`) now that SPEC-LIT §35's
 /// thermostat has given it an actual steady state to measure - see
-/// `docs/07-fire-solver.md` §1.1 for the full derivation and the
+/// `docs/07-lowmach-solver.md` §1.1 for the full derivation and the
 /// two-initial-temperature regression this measurement is downstream of.
 ///
 /// UNLIKE [`check_thermal_wall_function_gate_verdict_replay`], this does
@@ -11883,7 +9326,7 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     note_leg_verdict(c, "resolved leg", &v);
 
     // The derivation of `T_mean` from the thermostat's own steady law is
-    // checked against the value `docs/07-fire-solver.md` §1.1 RECORDS for
+    // checked against the value `docs/07-lowmach-solver.md` §1.1 RECORDS for
     // this leg (293.563 K after SPEC-LIT S26.1; 293.576 K at SPEC-LIT
     // S13.4.1's numerics, 293.574 K before that). Since S26.1 the two legs
     // settle at the SAME `T_mean`, because both thermostats now settle at the
@@ -12220,10 +9663,10 @@ fn check_kays_crawford_prt(c: &mut Checks) {
 /// SPEC-LIT §37's EXPERIMENT, replayed: `cases/channelPeriodicFluxWF.jsonc`
 /// and `channelPeriodicFluxLowRe.jsonc`, 40 000 iterations each, run twice
 /// with `physics.fluid.PrtModel` the only token that differs. These are the
-/// numbers `ofgpu-fire` printed, all four on the same binary (the first
+/// numbers `ofgpu-lowmach` printed, all four on the same binary (the first
 /// wall-function `KaysCrawford` run was discarded: the driver's own
 /// wall-heat report recomputed `k_eff,wall` with the constant `Pr_t` and so
-/// claimed 580 W/m2 on a wall imposing 500 - see `docs/07-fire-solver.md`
+/// claimed 580 W/m2 on a wall imposing 500 - see `docs/07-lowmach-solver.md`
 /// §1.1's last subsection).
 ///
 /// The `constant` pair are the CONTROL and reproduce this section's own
@@ -12242,7 +9685,7 @@ struct PrtRun {
     /// other energy-balance number in this file uses.
     energy_gap: Scalar,
     /// The `Pr_t` the run actually used, min and max over the domain, as
-    /// `ofgpu-fire`'s own §37.5 report printed them.
+    /// `ofgpu-lowmach`'s own §37.5 report printed them.
     prt_min: Scalar,
     prt_max: Scalar,
 }
@@ -12473,7 +9916,7 @@ fn check_thermostat_weighting_experiment_replay(c: &mut Checks) {
 /// separated by running all four combinations on the resolved leg and three on
 /// the wall-function leg.
 ///
-/// This exists because a §13.4 defect - `ofgpu-fire` building
+/// This exists because a §13.4 defect - `ofgpu-lowmach` building
 /// `MomentumControls` from `::default()`, whose convection entry is
 /// `bounded Gauss upwind`, on two cases that ask for
 /// `Gauss linearUpwind grad(U)` - produced every number §32's gate had ever
@@ -17445,7 +14888,7 @@ mod verdict_registry {
     fn a_report(gate: &'static str, verdict: Verdict) -> GateReport {
         GateReport {
             verdict,
-            how: How::NotRunHere,
+            how: How::Live,
             gate,
             against: "an invented measurement",
             headline: "it is out".to_string(),

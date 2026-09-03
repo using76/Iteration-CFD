@@ -114,10 +114,6 @@ name = "ofgpu-vof"
 path = "src/bin/vof.rs"
 
 [[bin]]
-name = "ofgpu-fire"
-path = "src/bin/fire.rs"
-
-[[bin]]
 name = "ofgpu-lowmach"
 path = "src/bin/lowmach.rs"
 

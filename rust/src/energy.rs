@@ -39,10 +39,11 @@
 //! * [`GasProperties`] / [`GasState`] - S25: the ideal-gas density
 //!   `rho = p0/(R_s T)` and the thermodynamic pressure `p0(t)`, sealed or
 //!   open.
-//! * [`EnergySources`] - S18/S26: the registry combustion (S27) and
-//!   radiation (S28) push their volumetric heat sources into. This module
-//!   sums what is registered; it does not know how either number was
-//!   computed, which is what keeps S27/S28 out of this file entirely.
+//! * [`EnergySources`] - S18/S26: the registry every volumetric heat source
+//!   pushes into - a heater, a porous zone, the dispersed phase's convective
+//!   exchange. This module sums what is registered; it does not know how any
+//!   of those numbers was computed, and that is what keeps every model that
+//!   produces one out of this file entirely.
 //! * [`Energy`] - S26: the temperature equation itself, `rho cp`-weighted,
 //!   plus [`Energy::target_divergence`] - S25.1's `(div u)_target`, the ONE
 //!   number the pressure equation needs from this module (SPEC-LIT S25.3:
@@ -810,10 +811,10 @@ impl<'m> GasState<'m> {
 /// The volumetric sources on the energy equation - SPEC-LIT S18 specialised
 /// to S26's units (W/m3 explicit, W/(m3 K) implicit).
 ///
-/// Combustion (S27) and radiation (S28) push their contribution in every
-/// outer iteration; this struct sums them and knows nothing else about
-/// either - which is the whole point (the module doc's hook that keeps S27
-/// and S28 out of this file).
+/// Every model with a volumetric heat term pushes its contribution in in
+/// every outer iteration; this struct sums them and knows nothing else about
+/// any of them - which is the whole point (the module doc's hook that keeps
+/// those models out of this file).
 pub struct EnergySources {
     /// `[n_cells]` W/m3, explicit - `q'''_c`, `-div(q_r)`, ...
     q: DevBuf<Scalar>,
@@ -1397,10 +1398,9 @@ impl<'m> Energy<'m> {
 
     /// [`Self::field`] and [`Self::sources_mut`] at once - the split borrow
     /// neither can give alone through `&mut Energy`. Exists for a caller
-    /// (combustion/radiation, SPEC-LIT S27/S28) that needs to read `T` WHILE
-    /// registering onto `sources`, e.g. radiation's Marshak wall stamp reads
-    /// `T`'s boundary field in the same call that registers its energy
-    /// coupling.
+    /// that needs to read `T` WHILE registering onto `sources` - a wall
+    /// stamp that reads `T`'s boundary field in the same call that registers
+    /// its energy coupling, say.
     pub fn field_and_sources_mut(&mut self) -> (&GpuScalarField, &mut EnergySources) {
         (&self.t, &mut self.sources)
     }

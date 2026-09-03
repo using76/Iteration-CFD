@@ -986,8 +986,9 @@ fn the_sweep_count_matches_the_published_table() {
 // ==========================================================================
 
 /// SPEC-LIT S50.10: `fr` in `[0,1)` for every input, swept rather than
-/// argued. This is strictly better behaved than S28's Marshak triple, which
-/// needed a sign argument to land in range.
+/// argued. This is strictly better behaved than the Marshak triple a
+/// participating-medium model needs, which needed a sign argument to land in
+/// range.
 #[test]
 fn the_triple_lands_in_range_for_every_input() {
     for &eps in &[0.0 as Scalar, 0.01, 0.3, 0.7, 1.0] {
@@ -1039,7 +1040,8 @@ fn the_emissivity_does_not_reach_the_reference_value() {
 
 /// SPEC-LIT S50.4 check 3: refining the mesh does NOT lose the radiation.
 /// The quantity that reaches the matrix is `fr Delta_b -> h/k_eff`, a finite
-/// radiative conductance - unlike S28's Marshak triple, which degenerates.
+/// radiative conductance - unlike a participating medium's Marshak triple,
+/// which degenerates.
 #[test]
 fn refinement_keeps_a_finite_radiative_conductance() {
     let (eps, t0, k) = (0.85 as Scalar, 500.0 as Scalar, 0.04 as Scalar);
@@ -1063,7 +1065,7 @@ fn refinement_keeps_a_finite_radiative_conductance() {
         );
     }
     // Measured 6.0e-4 at Delta_b = 1e6 with h = 24.1 W/m^2K and k = 0.04 -
-    // a FINITE radiative conductance, which is the whole point (S28's Marshak
+    // a FINITE radiative conductance, which is the whole point (a Marshak
     // triple degenerates to zero-gradient in the same limit).
     assert!(prev < 1e-3, "fr*Delta_b -> h/k_eff only to {prev:.3e}");
     assert!(

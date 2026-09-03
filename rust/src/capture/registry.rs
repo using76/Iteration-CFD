@@ -98,10 +98,6 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/cht.rs",
         Stance::Gate("the_solid_side_iteration_replays_bitwise"),
     ),
-    (
-        "src/combustion.rs",
-        Stance::Gate("the_combustion_step_replays_bitwise"),
-    ),
     ("src/contact_angle.rs", Stance::Via("src/vof.rs")),
     (
         "src/dcmetrics.rs",
@@ -134,20 +130,6 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ),
     ("src/field_ops.rs", Stance::Via("src/momentum.rs")),
     ("src/fv.rs", Stance::Via("src/momentum.rs")),
-    (
-        "src/fvdom.rs",
-        Stance::Refused(
-            "the discrete-ordinates sweep carries each ordinate\'s boundary \
-             intensity to the next THROUGH THE HOST - `bf_cache` is a \
-             `Vec<Scalar>` filled by `gpu.download` once per ordinate per \
-             correction - and downloads the wall temperature once per \
-             correction on top of that. A graph records device work; this \
-             sweep is a conversation with the CPU. Measured, not asserted: \
-             `the_two_refusals_are_measured_and_not_asserted`. Alternative: a \
-             device-resident inflow coupling, which is a rewrite of the sweep \
-             and not a flag; or P-1 (src/radiation.rs), which is gated",
-        ),
-    ),
     ("src/halo.rs", Stance::Via("src/distsolve.rs")),
     ("src/ldu_ops.rs", Stance::Via("src/solver.rs")),
     ("src/les.rs", Stance::Via("src/models/les.rs")),
@@ -233,10 +215,6 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/parcels/deposit.rs",
         Stance::Gate("the_sort_and_the_gather_capture_once_and_replay"),
     ),
-    (
-        "src/participating.rs",
-        Stance::Gate("the_p1_radiation_correction_replays_bitwise"),
-    ),
     ("src/precon.rs", Stance::Via("src/solver.rs")),
     (
         "src/pressure/amgx.rs",
@@ -283,10 +261,6 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/solver.rs",
         Stance::Gate("the_fixed_iteration_solve_replays_bitwise"),
     ),
-    (
-        "src/soot.rs",
-        Stance::Gate("the_soot_correction_replays_bitwise"),
-    ),
     ("src/sources.rs", Stance::Via("src/energy.rs")),
     (
         "src/species.rs",
@@ -294,7 +268,6 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ),
     ("src/timescheme.rs", Stance::Via("src/momentum.rs")),
     ("src/turbulence.rs", Stance::Via("src/models/k_epsilon.rs")),
-    ("src/twostep.rs", Stance::Via("src/combustion.rs")),
     (
         "src/vof.rs",
         Stance::Refused(
@@ -306,17 +279,13 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              flux field. Everything else in the step - the momentum \
              predictor, the pressure correctors - is capturable and is gated \
              through src/momentum.rs and src/solver.rs. Measured, not \
-             asserted: `the_two_refusals_are_measured_and_not_asserted`. \
+             asserted: `the_refusal_is_measured_and_not_asserted`. \
              Alternative: a PRESCRIBED nAlphaSubCycles from the case instead \
              of one derived from the flux, which removes the read-back; not \
              implemented",
         ),
     ),
     ("src/wallfunctions.rs", Stance::Via("src/models/k_epsilon.rs")),
-    (
-        "src/wsgg.rs",
-        Stance::Gate("the_wsgg_update_replays_bitwise"),
-    ),
 ];
 
 /// How many rows may resolve to [`Terminal::Ungated`].
