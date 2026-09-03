@@ -64,7 +64,7 @@
 //!
 //! # Version 2: `dp0dt`
 //!
-//! SPEC-LIT §31.2's gate for `ofgpu-fire` found that `p0` alone is not
+//! SPEC-LIT §31.2's gate for `ofgpu-lowmach` found that `p0` alone is not
 //! enough: `ofgpu::energy::Energy::update_target_divergence` reads
 //! `GasState::dp0dt` at a ONE-ITERATION LAG (the value
 //! [`crate::energy::GasState::advance_p0`] computed at the END of the

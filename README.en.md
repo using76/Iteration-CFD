@@ -77,7 +77,7 @@ cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 12
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 ```
 
-The whole validation suite is `cargo run --release --bin ofgpu-validate`. The other thirteen executables (`ofgpu-fire`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, the benchmarks), the case file format and the command-line options are in the **user guide**. Cases are read and written either as a single JSONC file or as an OpenFOAM ASCII case directory — the latter for interoperability with existing tools such as ParaView and `foamToVTK`; meteor-cfd links against no part of OpenFOAM and contains none of its source.
+The whole validation suite is `cargo run --release --bin ofgpu-validate`. The other sixteen executables (`ofgpu-lowmach`, `ofgpu-fire`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, the benchmarks), the case file format and the command-line options are in the **user guide**. Cases are read and written either as a single JSONC file or as an OpenFOAM ASCII case directory — the latter for interoperability with existing tools such as ParaView and `foamToVTK`; meteor-cfd links against no part of OpenFOAM and contains none of its source.
 
 ---
 
@@ -131,7 +131,7 @@ The whole validation suite is `cargo run --release --bin ofgpu-validate`. The ot
 | **Technical guidebook** (separate page) | Discretisation, boundary conditions, pressure–velocity, turbulence, low-Mach, combustion and radiation, validation, GPU residency, mesh adaptation and performance |
 | [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | The numerical specification, 86 sections, with a citation for every formulation — both guides are drawn *from* it and neither replaces it |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | Per-file provenance and design decisions, the licence audit, third-party notices |
-| [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | Test case geometries, and the index to `docs/` — the model catalogue, GPU portability, the I/O redesign and the JSONC schema, `ofgpu-fire`'s formulation and its gate record |
+| [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | Test case geometries, and the index to `docs/` — the model catalogue, GPU portability, the I/O redesign and the JSONC schema, `ofgpu-lowmach`'s low-Mach formulation and wall-heat gate record, and `ofgpu-fire`'s fire models |
 
 ---
 

@@ -39,7 +39,7 @@
 // "lowRe... pins the molecular resistance the resolved mesh already
 // provides and needs no correction for" - a resolved sublayer wants the
 // PLAIN Robin condition, not the log-law correction). Run both through
-// `ofgpu-fire`, steady, and compare the wall heat transferred - see
+// `ofgpu-lowmach`, steady, and compare the wall heat transferred - see
 // `docs/07-fire-solver.md` S1.1 for the measured numbers and what the ratio
 // says.
 {
@@ -147,7 +147,7 @@
     ],
   },
 
-  // Unused by `ofgpu-fire` in steady mode (no `-endTime`/`-deltaT` given on
+  // Unused by `ofgpu-lowmach` in steady mode (no `-endTime`/`-deltaT` given on
   // the command line) - present because the schema requires it.
   "run": {
     "endTime": 1.0,

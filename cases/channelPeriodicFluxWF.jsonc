@@ -113,7 +113,7 @@
 // requires every band statement to name which f it used; the two are
 // different claims and the second is the weaker one. That f is INFERRED from
 // the force balance on this file's own `bodyForce`, not measured at the wall
-// - `ofgpu-fire` now measures the wall traction directly and prints both,
+// - `ofgpu-lowmach` now measures the wall traction directly and prints both,
 // but this case has NOT been rerun. See docs/07-fire-solver.md S1.1.
 // SUPERSEDED: it has since been rerun, and the measured f retired the
 // Reynolds-analogy verdict above - see the S32.5.3/S35.3 block at the end of
@@ -164,7 +164,7 @@
 //
 // See docs/07-fire-solver.md S1.1's last subsection for the full account,
 // including the isothermal controls and a S13.4 defect found on the way
-// (ofgpu-fire does not read numerics.div["div(phi,U)"] or
+// (ofgpu-lowmach does not read numerics.div["div(phi,U)"] or
 // numerics.relaxation.U at all).
 // ============================================================================
 //
@@ -172,7 +172,7 @@
 // UPDATE (SPEC-LIT S13.4.1/S32.5.5 - THE GATE RERUN ON THE SETTINGS THIS FILE
 // ACTUALLY ASKS FOR; comments only, the case itself is unchanged): every
 // number in every block above was produced by a driver that read NONE of this
-// file's `numerics` block. `ofgpu-fire` built its MomentumControls from
+// file's `numerics` block. `ofgpu-lowmach` built its MomentumControls from
 // `::default()`, whose convection entry is `bounded Gauss upwind` - so the
 // momentum equation ran a first-order scheme WITH S3.1's bounded correction
 // where this file asks for `Gauss linearUpwind grad(U)` with no `bounded`
@@ -387,7 +387,7 @@
     ],
   },
 
-  // Unused by `ofgpu-fire` in steady mode (no `-endTime`/`-deltaT` given on
+  // Unused by `ofgpu-lowmach` in steady mode (no `-endTime`/`-deltaT` given on
   // the command line) - present because the schema requires it.
   "run": {
     "endTime": 1.0,

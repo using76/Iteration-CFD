@@ -50,7 +50,7 @@
 // argument predicts (steady state needs the NET flux over every cell,
 // walls included, to be zero; a cyclic pair contributes zero net by
 // construction, so the wall flux alone must be canceled by something).
-// `ofgpu-fire -heaterPower` (SPEC-LIT S18, already wired for a POSITIVE
+// `ofgpu-lowmach -heaterPower` (SPEC-LIT S18, already wired for a POSITIVE
 // heat release) is reused NEGATIVE here as that "something": a uniform
 // domain-wide heat SINK exactly offsetting the wall's own heat input,
 // which is what a real periodic duct's downstream cooling does and this
@@ -192,7 +192,7 @@
     ],
   },
 
-  // Unused by `ofgpu-fire` in steady mode (no `-endTime`/`-deltaT` given on
+  // Unused by `ofgpu-lowmach` in steady mode (no `-endTime`/`-deltaT` given on
   // the command line) - present because the schema requires it.
   "run": {
     "endTime": 1.0,

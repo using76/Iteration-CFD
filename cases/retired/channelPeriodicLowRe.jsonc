@@ -3,7 +3,7 @@
 // !! lowRe` together with `turbulence.model kEpsilon`. SPEC-LIT S33's rule,
 // !! added AFTER the numbers in this header were measured, refuses that
 // !! combination as a S13.4 error and names `LaunderSharmaKE` as what
-// !! `lowRe` needs. `ofgpu-fire` therefore exits on this case today, and
+// !! `lowRe` needs. `ofgpu-lowmach` therefore exits on this case today, and
 // !! `-permissive` does not reproduce the record either - it substitutes
 // !! `standard` (the wall-function row), which is a different flow.
 // !!

@@ -118,6 +118,10 @@ name = "ofgpu-fire"
 path = "src/bin/fire.rs"
 
 [[bin]]
+name = "ofgpu-lowmach"
+path = "src/bin/lowmach.rs"
+
+[[bin]]
 name = "ofgpu-cht"
 path = "src/bin/cht.rs"
 

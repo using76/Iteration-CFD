@@ -1765,7 +1765,7 @@ pub fn refuse_realizable_ke_buoyancy(c: &CaseControls) -> Result<()> {
 }
 
 /// Build the turbulence closure a coupled solver (`ofgpu-buoyant`,
-/// `ofgpu-fire`) drives, from the case's own `constant/momentumTransport` -
+/// `ofgpu-lowmach`) drives, from the case's own `constant/momentumTransport` -
 /// SPEC-LIT §30.2.
 ///
 /// This is the fix for the failure the module doc of
@@ -3419,7 +3419,7 @@ mod tests {
     /// SPEC-LIT §30.2's whole point: the case's own `RAS { model ...; }` (or
     /// `simulationType laminar;`) must reach the CONCRETE model
     /// `build_coupled` allocates, not just the string `select_turbulence_model`
-    /// returns. Before this function existed, `ofgpu-buoyant`/`ofgpu-fire`
+    /// returns. Before this function existed, `ofgpu-buoyant`/`ofgpu-lowmach`
     /// built `KEpsilon` regardless of what this loop iterates over.
     #[test]
     fn build_coupled_constructs_the_model_the_case_names() -> Result<()> {

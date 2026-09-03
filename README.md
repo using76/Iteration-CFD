@@ -77,7 +77,7 @@ cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 12
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 ```
 
-검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열세 개 실행 파일(`ofgpu-fire`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
+검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열여섯 개 실행 파일(`ofgpu-lowmach`, `ofgpu-fire`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
 
 ---
 
@@ -131,7 +131,7 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 | **기술 안내서** (별도 페이지) | 이산화, 경계조건, 압력–속도, 난류, 저마하, 연소·복사, 검증, GPU 상주·메쉬 적응·성능 |
 | [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 86개 절. 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | 파일별 출처와 설계 결정, 라이선스 감사 기록, 서드파티 고지 |
-| [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | 시험 케이스 형상, 그리고 `docs/`의 색인 — 모델 카탈로그, GPU 이식성, 입출력 재설계와 JSONC 스키마, `ofgpu-fire`의 정식화와 게이트 기록 |
+| [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | 시험 케이스 형상, 그리고 `docs/`의 색인 — 모델 카탈로그, GPU 이식성, 입출력 재설계와 JSONC 스키마, `ofgpu-lowmach`의 저-마하 정식화와 벽 열전달 게이트 기록, `ofgpu-fire`의 화재 모델 |
 
 ---
 

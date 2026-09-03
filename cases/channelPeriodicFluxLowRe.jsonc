@@ -137,7 +137,7 @@
 // this file's own `bodyForce` plus the recorded U_b - not measured at the
 // wall. S32.5.1 specifies the direct measurement (wall-face viscous
 // traction, the `lowRe` form on this leg and the wall-function form on the
-// WF twin); `ofgpu-fire` now measures it, prints it next to the body-force
+// WF twin); `ofgpu-lowmach` now measures it, prints it next to the body-force
 // inference with their disagreement, and prints Gnielinski BOTH ways.
 // NEITHER CASE HAS BEEN RERUN WITH IT. See docs/07-fire-solver.md S1.1.
 // SUPERSEDED: both cases have since been rerun with it, and the measurement

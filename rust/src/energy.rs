@@ -160,7 +160,7 @@ use crate::{Label, Scalar, Vec3};
 /// SPEC-LIT S37.
 ///
 /// The DEFAULT is [`Self::Constant`], deliberately: every measurement this
-/// project has recorded through `ofgpu-fire` was made with a single case-wide
+/// project has recorded through its low-Mach driver was made with a single case-wide
 /// `Pr_t`, and a default that changed would move all of them at once. A case
 /// opts in by naming `KaysCrawford`; anything else is a S13.4 error naming
 /// both spellings (see [`Self::parse`]).
@@ -668,7 +668,7 @@ impl<'m> GasState<'m> {
     }
 
     /// Restore `dp0dt` directly - SPEC-LIT §31.2's restart requirement of
-    /// substance for `ofgpu-fire`: [`Energy::update_target_divergence`]
+    /// substance for `ofgpu-lowmach`: [`Energy::update_target_divergence`]
     /// reads `dp0dt` at a ONE-ITERATION LAG (the value [`Self::advance_p0`]
     /// left behind at the end of the previous unit of work), exactly the
     /// segregated lag every other coupling coefficient in that driver
@@ -2425,7 +2425,7 @@ impl<'m> Energy<'m> {
 
     /// The domain integral of [`Self::update_conduction_source`]'s field, W -
     /// the CONDUCTION half of S25.1/S25.2's `Q`, which telescopes to the net
-    /// heat crossing the boundary. `ofgpu-fire` adds it to
+    /// heat crossing the boundary. `ofgpu-lowmach` adds it to
     /// [`EnergySources::total_q`] before S25.2's `p0` ODE, so the ONE `Q`
     /// S25 defines drives both the divergence constraint and the `p0` ramp.
     /// Zero to round-off on a sealed box with adiabatic walls - which is why
@@ -2768,8 +2768,8 @@ mod tests {
         assert!(msg.contains("constant") && msg.contains("KaysCrawford"), "{msg}");
     }
 
-    /// The default has to stay `constant`: every measurement `ofgpu-fire`
-    /// has recorded was made with one, and a default that moved would move
+    /// The default has to stay `constant`: every measurement the low-Mach
+    /// driver has recorded was made with one, and a default that moved would move
     /// all of them at once (SPEC-LIT S37.4).
     #[test]
     fn the_default_prt_model_is_the_constant_one() {

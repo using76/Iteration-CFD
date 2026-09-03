@@ -2246,6 +2246,26 @@ hydrodynamic perturbation the momentum equation sees. The ideal gas law uses
 rho = p0 / (R_s T),   R_s = R / W        (v1: constant W = air, stated)
 ```
 
+**Which driver.** `ofgpu-lowmach` (`src/bin/lowmach.rs`), and it is a driver
+of its own because for a long time it was not. The only shipped binary that
+built a `GasState` and called `Energy::update_target_divergence` was
+`ofgpu-fire`, which also carried §27's combustion and §28's radiation above
+this formulation; every measurement of §25/§26 in this document, and the
+whole of `docs/07-fire-solver.md` §1/§1.1 - the §29.3 wall-heat-transfer
+gate, §32's redesigned Nusselt gate on both channel legs, §35's thermostat,
+§37's `Pr_t` experiment and §32.5's measured friction factor - was taken
+through that binary on general CHANNEL cases with nothing burning in them.
+Those measurements are properties of the low-Mach loop, so the loop was given
+its own driver: `ofgpu-lowmach` is `ofgpu-fire` without species, combustion,
+radiation, soot and the §85 burner report, and refuses a case naming
+`physics.fire` by name (§13.4) rather than running it at `q''' = 0`. The two
+print identical residual, bulk-state, wall-flux, thermostat, energy-budget
+and friction lines on `cases/channelPeriodicFluxWF.jsonc`, and §32's gate
+table was re-measured under the new name at 40 000 iterations on both legs.
+Text elsewhere in this document that names `ofgpu-fire` for a §25/§26
+measurement is a dated record of what was run and is left as it stands;
+the command to run one of them TODAY is the one in `cases/README.md`.
+
 ### 25.1 The divergence constraint
 
 Continuity `D(rho)/Dt = −rho ∇·u` with the gas law gives, using the energy

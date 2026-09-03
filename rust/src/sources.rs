@@ -831,7 +831,7 @@ pub fn heat_release_source(q_dot: Scalar, rho_cp: Scalar, zone: &CellZone) -> Re
 /// way to be given), the length scale is `V^(1/3)`, the domain's own cube
 /// root of volume, and the speed is whatever the caller measured as the
 /// flow's own characteristic speed (the volume-mean `|U|` of the initial
-/// condition, in every caller this project has today - see `ofgpu-fire`'s
+/// condition, in every caller this project has today - see `ofgpu-lowmach`'s
 /// `main`).
 pub fn flow_through_time(total_volume: Scalar, u_ref: Scalar) -> Result<Scalar> {
     if !(total_volume > 0.0) {
