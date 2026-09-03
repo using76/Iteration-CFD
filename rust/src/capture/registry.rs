@@ -189,6 +189,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_spalart_allmaras_correction_replays_bitwise"),
     ),
     (
+        "src/models/transition.rs",
+        Stance::Gate("the_transition_correction_replays_bitwise"),
+    ),
+    (
         "src/mesh/gpuemit.rs",
         Stance::Outside(
             "the polyMesh emitter runs when a mesh is BUILT - at setup, or at \

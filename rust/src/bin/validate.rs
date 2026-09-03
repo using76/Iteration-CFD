@@ -2655,6 +2655,13 @@ fn run(c: &mut Checks) -> Result<()> {
     );
     check_spalart_allmaras_and_des(c, &gpu)?;
 
+    // SPEC-LIT S88/S89 - the gamma-Re_theta transition model.
+    println!(
+        "
+=== gamma-Re_theta transition (SPEC-LIT 88, 89) ==="
+    );
+    check_transition(c)?;
+
     // SPEC-LIT S61/S62 - soot, and the WSGG spectral radiation that reads it.
     println!("
 === soot and WSGG spectral radiation (SPEC-LIT 61, 62) ===");
@@ -4592,12 +4599,334 @@ fn check_spalart_allmaras_and_des(c: &mut Checks, gpu: &Gpu) -> Result<()> {
          Shur et al. (2008). Neither open-access restatement read carries it (S57.5)",
     );
     c.note(
-        "NOT implemented: the gamma-Re_theta transition model. `kOmegaSSTLM` stays refused, \
-         and S58.3 says what it would have cost and why Menter et al. (2015)'s one-equation \
-         gamma is the one to build instead",
+        "S58.3's line - `kOmegaSSTLM` stays refused - no longer holds: S88 implements it, and \
+         the section below is its gate. What stays refused in its place is Menter et al. \
+         (2015)'s one-equation gamma successor (S89.3)",
     );
 
     Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §88/§89 - the Langtry-Menter transition model
+//
+//  Everything here is host arithmetic on the shipped closed forms. It needs
+//  no GPU, and it is computed live on this machine every run - the kernel
+//  twins of these same functions are measured against them by
+//  `models::transition::tests::the_host_and_device_correlations_agree`, which
+//  is a GPU test and not this binary's job.
+// ==========================================================================
+
+fn check_transition(c: &mut Checks) -> Result<()> {
+    use ofgpu::models::transition::{
+        f_length, re_theta_eq, re_theta_eq_raw, re_thetac, re_thetac_nested, re_thetat_inlet,
+        turbulence_intensity, BLASIUS_REV_OVER_RETHETA,
+    };
+
+    // ---- the two correlations, and the two forms of one of them ----------
+    let mut worst_form = 0.0 as Scalar;
+    let mut r = 20.0 as Scalar;
+    while r <= 1870.0 {
+        let a = re_thetac(r);
+        worst_form = worst_form.max((a - re_thetac_nested(r)).abs() / a.abs());
+        r += 0.5;
+    }
+    c.check("S88 (88.3) Re_thetac: the TMR's expanded form vs the paper's nested one", worst_form, 1e-12);
+
+    let (mut below, mut positive) = (true, true);
+    let mut r = 20.0 as Scalar;
+    while r <= 4000.0 {
+        let v = re_thetac(r);
+        below &= v < r;
+        positive &= v > 0.0;
+        r += 1.0;
+    }
+    c.require("S88 (88.3) Re_thetac < Re_theta~ over the whole fitted range", below);
+    c.require("S88 ... and strictly positive, so F_onset1 can divide by it", positive);
+
+    // The published F_length is discontinuous, and this says so rather than
+    // asserting a continuity the fit does not have.
+    let eps = 1e-9 as Scalar;
+    let jump = |x: Scalar| {
+        let (lo, hi) = (f_length(x - eps, 1e12), f_length(x + eps, 1e12));
+        (hi - lo).abs() / lo.abs().max(1e-30)
+    };
+    let (j400, j596, j1200) = (jump(400.0), jump(596.0), jump(1200.0));
+    c.note(&format!(
+        "S88 (88.4): the PUBLISHED F_length is discontinuous - {} % at Re_theta~ = 400 and {} % at \
+         596, and exact at 1200. Both pieces are the TMR's verbatim; the jump is in Langtry \
+         & Menter's own fit, which was made to reproduce values rather than to meet",
+        common::g(f64::from(100.0 * j400)),
+        common::g(f64::from(100.0 * j596)),
+    ));
+    c.require("S88 (88.4) F_length's 1200 breakpoint IS exact", j1200 < 1e-11);
+    c.require("S88 ... its 596 breakpoint is not, and by 0.8 % not round-off", j596 > 1e-3);
+    c.check("S88 ... and the 596 jump has not grown", j596, 1e-2);
+
+    // ---- monotone in Tu, which no compensating error survives ------------
+    let mut monotone = true;
+    let mut prev = Scalar::INFINITY;
+    let mut tu = 0.03 as Scalar;
+    while tu <= 12.0 {
+        let v = re_theta_eq_raw(tu, 0.0);
+        monotone &= v <= prev;
+        prev = v;
+        tu += 0.01;
+    }
+    c.require("S88 (88.9) Re_theta_eq is monotone decreasing in Tu, everywhere", monotone);
+
+    // ---- the three published limits --------------------------------------
+    c.require("S88 (88.9) the published Tu floor of 0.027 is applied", turbulence_intensity(0.0, 10.0) == 0.027);
+    c.require("S88 (88.9) the published Re_theta_eq floor of 20 is applied", re_theta_eq_raw(1000.0, 0.0) == 20.0);
+    c.require(
+        "S88 (88.9) lambda_theta is clipped at +-0.1",
+        re_theta_eq(3.3, 1e6, 1.5e-5, 5.0, 10) == re_theta_eq(3.3, 1e12, 1.5e-5, 5.0, 10)
+            && re_theta_eq(3.3, -1e6, 1.5e-5, 5.0, 10) == re_theta_eq(3.3, -1e12, 1.5e-5, 5.0, 10),
+    );
+
+    // ---- the fixed point: ten sweeps, and the sweeps do something --------
+    let (nu, u) = (1.5e-5 as Scalar, 5.0 as Scalar);
+    let (mut worst_conv, mut biggest_move) = (0.0 as Scalar, 0.0 as Scalar);
+    for tu in [0.05 as Scalar, 0.3, 0.9, 1.3, 3.3, 6.5, 10.0] {
+        for du in [-2e4 as Scalar, -2e3, -200.0, 0.0, 200.0, 2e3, 2e4] {
+            let a = re_theta_eq(tu, du, nu, u, 10);
+            let b = re_theta_eq(tu, du, nu, u, 20);
+            let d = re_theta_eq(tu, du, nu, u, 40);
+            worst_conv = worst_conv
+                .max((a - b).abs() / b)
+                .max((b - d).abs() / d);
+            let start = re_theta_eq_raw(tu, 0.0);
+            biggest_move = biggest_move.max((a - start).abs() / start);
+        }
+    }
+    c.check("S88 (88.9) Re_theta_eq: N = 10 vs 20 vs 40 sweeps", worst_conv, 1e-12);
+    c.require("S88 (88.9) ... and the sweeps are not a no-op", biggest_move > 0.01);
+    c.note(&format!(
+        "S88 (88.9): ten sweeps and forty agree to {}; the sweeps move the answer by up to {} % \
+         off its zero-pressure-gradient guess, so the loop is doing work and has converged",
+        common::g(f64::from(worst_conv)),
+        common::g(f64::from(100.0 * biggest_move)),
+    ));
+
+    // ---- S88 (88.7): 2.193, from a Blasius profile computed here ---------------
+    let (theta_b, rev_b) = blasius_theta_and_max_rev(10.0, 200_000);
+    let ratio = rev_b / theta_b;
+    c.check("S88 (88.7) Blasius momentum thickness int f'(1 - f') = 0.664", (theta_b - 0.664).abs(), 1e-3);
+    c.check(
+        "S88 (88.7) max(Re_V)/Re_theta on a Blasius profile vs the model's 2.193",
+        (ratio - BLASIUS_REV_OVER_RETHETA).abs() / BLASIUS_REV_OVER_RETHETA,
+        5e-3,
+    );
+    c.note(&format!(
+        "S88 (88.7): the onset constant is CONFIRMED to {} %, not derived - max(eta^2 f'') = {} \
+         over theta = {} gives {}, against the published 2.193. Both halves are converged to \
+         five figures, so the residue is in the constant or in a definition not recovered here",
+        common::g(f64::from(100.0 * (ratio - BLASIUS_REV_OVER_RETHETA).abs() / BLASIUS_REV_OVER_RETHETA)),
+        common::g(f64::from(rev_b)),
+        common::g(f64::from(theta_b)),
+        common::g(f64::from(ratio)),
+    ));
+
+    // ---- Gate 88-T ---------------------------------------------------------
+    // The NASA/TMBWG 2D T3A inflow, read live from
+    // <https://tmbwg.github.io/turbmodels/t3_transition_mainpage.html> while
+    // S88 was written.
+    let (u_inf, re_per_m, tu_in, nut_ratio, le, tu_le) =
+        (69.44 as Scalar, 2.0e5 as Scalar, 5.855 as Scalar, 11.90 as Scalar, 0.250 as Scalar, 3.300 as Scalar);
+    let sst = ofgpu::models::KOmegaSstCoeffs::default();
+    let nu_t3a = u_inf / re_per_m;
+    let k0 = 1.5 * (tu_in / 100.0 * u_inf) * (tu_in / 100.0 * u_inf);
+    let omega0 = k0 / (nut_ratio * nu_t3a);
+    let tu_at = |x: Scalar| -> Scalar {
+        let tau = 1.0 + sst.beta_2 * omega0 * x / u_inf;
+        tu_in * tau.powf(-sst.beta_star / (2.0 * sst.beta_2))
+    };
+
+    let tu_pred = tu_at(le);
+    let leg1 = (tu_pred - tu_le).abs() / tu_le;
+    c.check(
+        "Gate 88-T leg 1: SST free-stream decay reaches the TMR's leading-edge Tu = 3.300 %",
+        leg1,
+        0.05,
+    );
+    c.note(&format!(
+        "Gate 88-T leg 1: {} % at the leading edge against the published 3.300 % -> {} %. \
+         That is the LOCAL Tu, which is what the onset correlation reads, and it is 43 % \
+         below the inlet value the case file carries",
+        common::g(f64::from(tu_pred)),
+        common::g(f64::from(100.0 * leg1)),
+    ));
+
+    // Leg 2: where the onset criterion fires, by bisection.
+    let onset_re_x = |scale: Scalar| -> (Scalar, Scalar, Scalar) {
+        let re_theta = |s: Scalar| 0.664 * (re_per_m * s).sqrt();
+        let re_crit = |s: Scalar| re_thetac(re_theta_eq_raw(tu_at(le + s) * scale, 0.0));
+        let (mut lo, mut hi) = (1e-6 as Scalar, 500.0 as Scalar);
+        for _ in 0..300 {
+            let mid = 0.5 * (lo + hi);
+            if re_theta(mid) < re_crit(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let s = 0.5 * (lo + hi);
+        (re_per_m * s, tu_at(le + s) * scale, re_theta_eq_raw(tu_at(le + s) * scale, 0.0))
+    };
+
+    let (re_x_a, tu_local_a, re_tt_a) = onset_re_x(1.0);
+    c.require("Gate 88-T leg 2: onset is on the plate, not at the leading edge", re_x_a > 1e3);
+    c.require("Gate 88-T leg 2: ... and within the decade the T3 series occupies", re_x_a < 1e6);
+
+    let (re_x_minus, _, _) = onset_re_x(0.9 / tu_le);
+    let (re_x_b, _, _) = onset_re_x(6.5 / tu_le);
+    let spread = re_x_minus / re_x_b;
+    c.require(
+        "Gate 88-T leg 3: onset is monotone in Tu across the T3 series",
+        re_x_minus > re_x_a && re_x_a > re_x_b,
+    );
+
+    c.report(GateReport {
+        verdict: Verdict::Open,
+        how: How::Live,
+        gate: "SPEC-LIT S88 Gate 88-T",
+        against: "the ERCOFTAC T3A flat plate's measured transition, on the NASA/TMBWG 2D T3A \
+                  rig (U = 69.44 m/s, Re/m = 2.00e5, Tu = 3.300 % at the leading edge)",
+        headline: format!(
+            "the model's own onset criterion fires at Re_x = {}, where the local Tu has \
+             decayed to {} % and Re_theta~ = {} - but no published digit-level onset Re_x for \
+             T3A was found to hold it against, so the comparison is not closed",
+            common::g(f64::from(re_x_a)),
+            common::g(f64::from(tu_local_a)),
+            common::g(f64::from(re_tt_a)),
+        ),
+        detail: vec![
+            "  What IS measured: leg 1, the free-stream decay, reproduces the TMR's published \
+             leading-edge Tu to 1.6 %, and that is the quantity the onset correlation reads. \
+             What is NOT: the intermittency still has to grow from its free-stream value \
+             through P_gamma over a finite distance, so the C_f rise an experiment records is \
+             DOWNSTREAM of the number above by an amount F_length sets - and the TMR's T3A \
+             page is under construction and publishes the inflow state without the measured \
+             C_f distribution."
+                .to_string(),
+            format!(
+                "  And leg 3 is a finding rather than a trend: running T3A-, T3A and T3B on \
+                 this ONE rig with only the leading-edge Tu changed gives a spread of {}x \
+                 against the ~10x the T3 series measures. The excess is the free-stream \
+                 DECAY, not the correlation - the low-Tu case transitions so far downstream \
+                 that its own Tu has fallen by another factor by the time it gets there. \
+                 Separating the two needs a per-case inflow omega, which the TMR publishes \
+                 for T3A and not for the other two, so S88 claims the T3A leg only.",
+                common::g(f64::from(spread)),
+            ),
+        ],
+    });
+
+    // ---- the inlet correlation, and what a case writes --------------------
+    let mut worst_inlet = 0.0 as Scalar;
+    for tu in [0.1 as Scalar, 0.9, 1.3, 3.3, 5.855, 6.5] {
+        let want = if tu <= 1.3 {
+            1173.51 - 589.428 * tu + 0.2196 / (tu * tu)
+        } else {
+            331.50 * (tu - 0.5658).powf(-0.671)
+        }
+        .max(20.0);
+        worst_inlet = worst_inlet.max((re_thetat_inlet(tu) - want).abs() / want);
+    }
+    c.check(
+        "S89.1 re_thetat_inlet IS the TMR's farfield ReThetat boundary condition",
+        worst_inlet,
+        1e-14,
+    );
+    c.note(&format!(
+        "S89.1: the ReThetat inlet value a case writes - Tu 0.9 % -> {}, 3.3 % -> {}, \
+         6.5 % -> {}. S88 adds NO BcKind: both wall conditions are zeroGradient and both \
+         inlet conditions are fixedValue, so the flux-switched block of field.rs is untouched",
+        common::g(f64::from(re_thetat_inlet(0.9))),
+        common::g(f64::from(re_thetat_inlet(3.3))),
+        common::g(f64::from(re_thetat_inlet(6.5))),
+    ));
+
+    // ---- what is not invariant --------------------------------------------
+    let base = re_theta_eq_raw(turbulence_intensity(0.05, 5.0), 0.0);
+    let shifted = re_theta_eq_raw(turbulence_intensity(0.05, 10.0), 0.0);
+    c.require(
+        "S88 (88.9) the model is NOT Galilean-invariant, and the measurement says so",
+        (shifted - base).abs() / base > 0.5,
+    );
+    c.note(&format!(
+        "S88 (88.9): translating the frame by 5 m/s - which changes no derivative and no physics - \
+         moves Re_theta_eq from {} to {}, {} %. Tu and the time scale T read an ABSOLUTE \
+         velocity magnitude. That is LM2009's defect, it is the one Menter et al. (2015) \
+         fixed, and S89.3's refusal of kOmegaSSTGamma names it",
+        common::g(f64::from(base)),
+        common::g(f64::from(shifted)),
+        common::g(f64::from(100.0 * (shifted - base) / base)),
+    ));
+
+    // ---- what is NOT run, said out loud -----------------------------------
+    c.note(
+        "NOT run: a two-dimensional transitional boundary-layer solve. There is no flat-plate \
+         harness in this tree that couples SIMPLE momentum-pressure to a RANS closure on a \
+         graded mesh with a resolved leading edge - S40 and S56 record the same absence \
+         for their own gates - so everything above is a ONE-dimensional calculation on a \
+         Blasius profile with the model's own correlations (S88)",
+    );
+    c.note(
+        "NOT claimed: the C_f distribution through transition, which is what the ERCOFTAC T3 \
+         experiments measure and what a transition model is finally judged on; T3A- or T3B, \
+         for the reason Gate 88-T's leg 3 measures; and separation-induced transition, whose \
+         gamma_sep branch (88.12) is exercised only as a closed form (S88)",
+    );
+
+    Ok(())
+}
+
+/// The Blasius similarity solution's two integrals - SPEC-LIT §88.7.
+///
+/// Returns `(int f'(1 - f') d eta, max eta^2 f'')`, the momentum thickness and
+/// the peak vorticity Reynolds number in similarity variables. RK4 with a
+/// secant shot on `f''(0)`; nothing here is the transition model, which is the
+/// point - the constant `2.193` is checked against a profile computed from the
+/// Blasius equation rather than taken from the paper that prints it.
+fn blasius_theta_and_max_rev(eta_max: Scalar, n: usize) -> (Scalar, Scalar) {
+    let h = eta_max / n as Scalar;
+    let f3 = |y: [Scalar; 3]| -> [Scalar; 3] { [y[1], y[2], -0.5 * y[0] * y[2]] };
+    let march = |fpp0: Scalar| -> (Scalar, Scalar, Scalar) {
+        let mut y = [0.0 as Scalar, 0.0, fpp0];
+        let (mut theta, mut rev) = (0.0 as Scalar, 0.0 as Scalar);
+        let mut prev = y[1] * (1.0 - y[1]);
+        for i in 0..n {
+            let k1 = f3(y);
+            let k2 = f3([y[0] + 0.5 * h * k1[0], y[1] + 0.5 * h * k1[1], y[2] + 0.5 * h * k1[2]]);
+            let k3 = f3([y[0] + 0.5 * h * k2[0], y[1] + 0.5 * h * k2[1], y[2] + 0.5 * h * k2[2]]);
+            let k4 = f3([y[0] + h * k3[0], y[1] + h * k3[1], y[2] + h * k3[2]]);
+            for j in 0..3 {
+                y[j] += h / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+            }
+            let eta = (i + 1) as Scalar * h;
+            let cur = y[1] * (1.0 - y[1]);
+            theta += 0.5 * h * (prev + cur);
+            prev = cur;
+            rev = rev.max(eta * eta * y[2]);
+        }
+        (y[1], theta, rev)
+    };
+    let (mut a, mut b) = (0.3 as Scalar, 0.4 as Scalar);
+    let mut fa = march(a).0 - 1.0;
+    let mut fb = march(b).0 - 1.0;
+    for _ in 0..80 {
+        if (fb - fa).abs() < 1e-300 || fb.abs() < 1e-14 {
+            break;
+        }
+        let cnew = b - fb * (b - a) / (fb - fa);
+        a = b;
+        fa = fb;
+        b = cnew;
+        fb = march(b).0 - 1.0;
+    }
+    let (_, theta, rev) = march(b);
+    (theta, rev)
 }
 
 // ==========================================================================

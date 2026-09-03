@@ -281,6 +281,19 @@ pub struct KOmegaSst<'m> {
     /// (57.7)'s `r_d` reads. Allocated always (one buffer), written only
     /// when a hybrid is attached.
     grad_frob: DevBuf<Scalar>,
+
+    /// SPEC-LIT §88: Langtry & Menter's transition model, when the case
+    /// asked for one.
+    ///
+    /// **`None` is the whole of "the default is unmoved by construction",
+    /// for a second time.** With no transition model attached the code this
+    /// field adds to `correct` is three failed `if let`s - one in
+    /// `update_blending`, one after `sstKSources`, one after `correct_nut` -
+    /// and `cuda/sst.cu` is byte-for-byte what it was. Unlike the hybrid
+    /// this costs not even a buffer: every allocation the transition model
+    /// needs lives inside [`crate::models::transition::LangtryMenter`],
+    /// which is not constructed.
+    lm: Option<crate::models::transition::LangtryMenter>,
 }
 
 impl<'m> KOmegaSst<'m> {
@@ -361,6 +374,7 @@ impl<'m> KOmegaSst<'m> {
 
             f1_override: None,
             des: None,
+            lm: None,
             grad_frob: gpu.zeros(nc)?,
         })
     }
@@ -405,16 +419,29 @@ impl<'m> KOmegaSst<'m> {
     /// [`crate::models::KEpsilon::named_fields`] for why this is a method on
     /// the concrete model rather than a trait default.
     pub fn named_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
-        vec![("k", &self.k), ("omega", &self.omega), ("nut", &self.core.nut)]
+        let mut v = vec![("k", &self.k), ("omega", &self.omega), ("nut", &self.core.nut)];
+        // SPEC-LIT §89.1: a transitional run's `0/` set is four fields, not
+        // two, and a writer that emitted only `k` and `omega` would leave a
+        // restart unable to reproduce the run it restarted from. The list
+        // grows exactly when the model does.
+        if let Some(lm) = &self.lm {
+            v.extend(lm.named_fields());
+        }
+        v
     }
 
     /// [`Self::named_fields`], mutable - for `0/` upload and `.mcr` restore.
     pub fn named_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
-        vec![
-            ("k", &mut self.k),
-            ("omega", &mut self.omega),
-            ("nut", &mut self.core.nut),
-        ]
+        let Self { k, omega, core, lm, .. } = self;
+        let mut v = vec![
+            ("k", k),
+            ("omega", omega),
+            ("nut", &mut core.nut),
+        ];
+        if let Some(lm) = lm {
+            v.extend(lm.named_fields_mut());
+        }
+        v
     }
     pub fn core(&self) -> &RasCore<'m> {
         &self.core
@@ -433,6 +460,45 @@ impl<'m> KOmegaSst<'m> {
     /// pure SST run and costs one failed `if let` per outer iteration.
     pub fn set_des(&mut self, des: Option<crate::models::des::DesLengthScale>) {
         self.des = des;
+    }
+
+    /// Attach §88's transition model. `None` (the default) leaves this
+    /// plain SST, bit for bit.
+    ///
+    /// Refused beside a hybrid: §88.9 says why, and it is not a modelling
+    /// opinion but an arithmetic one - both stamp the same `sp` buffer after
+    /// `sstKSources`, and the second one to run would multiply a dissipation
+    /// the first had already replaced.
+    pub fn set_transition(
+        &mut self,
+        lm: Option<crate::models::transition::LangtryMenter>,
+    ) -> Result<()> {
+        if lm.is_some() && self.des.is_some() {
+            return Err(Error::Config(
+                "kOmegaSSTLM and a DES hybrid cannot both be attached to one \
+                 kOmegaSST (SPEC-LIT 88.9): both replace what `sstKSources` \
+                 wrote into the k equation's `sp` - the hybrid with \
+                 `beta* omega l_RANS/l_DES` (57.4) and the transition model \
+                 with `min(max(gamma_eff, 0.1), 1) beta* omega` (88.13) - and \
+                 whichever ran second would silently discard the other. \
+                 Langtry & Menter publish no hybrid form and this solver will \
+                 not invent one"
+                    .to_string(),
+            ));
+        }
+        self.lm = lm;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn transition(&self) -> Option<&crate::models::transition::LangtryMenter> {
+        self.lm.as_ref()
+    }
+
+    pub fn transition_mut(
+        &mut self,
+    ) -> Option<&mut crate::models::transition::LangtryMenter> {
+        self.lm.as_mut()
     }
 
     #[must_use]
@@ -550,6 +616,31 @@ impl<'m> KOmegaSst<'m> {
             set_field(gpu, &self.fld, &mut self.f1, v, n)?;
         }
 
+        // SPEC-LIT §88.6: the transition model's eight closed forms, then
+        // `F_1 <- max(F_1, F_3)`. HERE and not later, because
+        // `sst_blend_coeffs` below builds the four blended coefficient
+        // fields from `F_1`, and F_3 exists precisely to keep a laminar
+        // boundary layer on the k-omega branch - stamping after the blend
+        // would raise a number nothing reads.
+        //
+        // With no transition model attached this is one failed `if let`.
+        if self.lm.is_some() {
+            let Self { lm, core, k, omega, s, f1, .. } = self;
+            let lm = lm.as_mut().expect("checked just above");
+            lm.update_fields(
+                gpu,
+                &core.turb,
+                &k.f,
+                &omega.f,
+                s,
+                flow.u,
+                &core.grad_u,
+                flow.nu,
+                n,
+            )?;
+            lm.stamp_f1(gpu, f1, n)?;
+        }
+
         sst_blend_coeffs(
             gpu,
             &self.sst,
@@ -603,6 +694,12 @@ impl<'m> KOmegaSst<'m> {
         // same rotation and the same caveat as `k_omega.rs`.
         advance_time_levels(gpu, &self.core.fld, &mut self.k)?;
         advance_time_levels(gpu, &self.core.fld, &mut self.omega)?;
+        // §88.5: all four equations see the same time levels, so the
+        // transition model's two rotate here beside k and omega rather than
+        // inside its own solve - where they would be one step behind.
+        if let Some(lm) = &mut self.lm {
+            lm.advance_time_levels(gpu)?;
+        }
         self.core.ddt.advance(ctrl.delta_t);
 
         self.core.update_flow_derived(gpu, flow)?;
@@ -788,6 +885,19 @@ impl<'m> KOmegaSst<'m> {
             des.stamp_sst_k_sink(gpu, &mut core.sp, &omega.f, c.beta_star, n)?;
         }
 
+        // SPEC-LIT §88.6/(88.13): `P_k <- gamma_eff P_k` and
+        // `D_k <- min(max(gamma_eff, 0.1), 1) D_k`, stamped over what
+        // `sstKSources` has just written. `cuda/sst.cu` is untouched, and
+        // with no transition model attached this is one failed `if let`.
+        //
+        // `gamma_eff` is the value `update_blending` formed at the top of
+        // this same `correct`, from the PREVIOUS iteration's `gamma` - the
+        // same one-iteration lag `F_2` already carries inside `nu_t`, and
+        // §88.6 names it rather than leaving it to be discovered.
+        if let Some(lm) = &self.lm {
+            lm.stamp_k_sources(gpu, &mut self.g_lim, &mut self.core.sp, n)?;
+        }
+
         fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.g_lim, 1.0)?;
 
         // + G_b, both signs (SPEC-LIT 17) - the same route into `k` every
@@ -821,6 +931,18 @@ impl<'m> KOmegaSst<'m> {
         correct_boundary_conditions(gpu, &self.core.fld, &mut self.k, self.core.mesh)?;
 
         self.correct_nut(gpu, flow)?;
+
+        // SPEC-LIT §88.5: gamma then Re_theta~, LAST, through the same
+        // `RasCore` the other two equations just used - so they see the
+        // `nu_t` this iteration produced rather than the one it started
+        // from. Their solver performance is not returned: `correct`'s
+        // signature is §6.3's and belongs to the two equations SST owns.
+        // `transition()` carries the fields a driver wants to report.
+        if self.lm.is_some() {
+            let Self { lm, core, s, .. } = self;
+            let lm = lm.as_mut().expect("checked just above");
+            lm.solve(gpu, core, flow, s)?;
+        }
 
         Ok((w_perf, k_perf))
     }

@@ -704,6 +704,11 @@ impl<'m> CoupledTurbulence for CoupledKOmegaSst<'m> {
         // selection test reading what it always read.
         if self.model.des().is_some() {
             "kOmegaSST (hybrid)"
+        } else if self.model.transition().is_some() {
+            // SPEC-LIT 89.1: a transitional run says so on its own banner
+            // line too. The pure-SST answer is unchanged, which is what
+            // keeps 30.3's selection test reading what it always read.
+            "kOmegaSSTLM"
         } else {
             "kOmegaSST"
         }

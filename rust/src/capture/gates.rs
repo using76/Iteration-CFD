@@ -355,6 +355,87 @@ fn the_spalart_allmaras_correction_replays_bitwise() {
     println!("  Spalart-Allmaras: {report}");
 }
 
+/// `SPEC-LIT` 88: the Langtry-Menter transition model, on SST.
+///
+/// The one thing here that a capture could have broken is §88.4's fixed
+/// point: a loop whose trip count depended on a floating-point convergence
+/// test would be a data-dependent loop inside the recorded region, and a
+/// graph cannot hold one. The trip count is a launch parameter instead, so
+/// the sequence is identical every replay - and this is the measurement that
+/// says so rather than the argument.
+#[test]
+fn the_transition_correction_replays_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let hm = box4();
+    let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
+    let ctrl = fixed(1e-3);
+    let wf = WallFaces::none(hm.n_boundary_faces);
+    let quiet = Quiet::new(&gpu, &mesh).expect("flow");
+    let flow = quiet.state();
+    let (y, _gy) = wall_distance(&gpu, hm.n_cells).expect("y");
+
+    let report = capture_replays_bitwise(
+        &gpu,
+        "kOmegaSSTLM (SPEC-LIT 88)",
+        || {
+            let mut m = crate::models::k_omega_sst::KOmegaSst::new(
+                &gpu,
+                &hm,
+                &mesh,
+                Default::default(),
+                ctrl,
+                WallFunctionCoeffs::default(),
+                &wf,
+                &y,
+            )?;
+            gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; hm.n_cells])?;
+            gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; hm.n_cells])?;
+            // The two new equations get the SAME fixed-iteration solver the
+            // other two have. Not a detail: a checking solve calls
+            // `read_flag`, which synchronises on an event, and §81.3's guard
+            // catches exactly that - the capture fails with
+            // CUDA_ERROR_CAPTURED_EVENT rather than silently recording a
+            // stale flag. It is how this gate found that `LmControls`
+            // defaults to a checking solver, which is right for a run and
+            // wrong for a capture.
+            let lmc = crate::models::transition::LmControls {
+                gamma_solver: ctrl.k_solver,
+                gamma_relax: 1.0,
+                gamma_conv: ctrl.k_conv(),
+                re_thetat_solver: ctrl.k_solver,
+                re_thetat_relax: 1.0,
+                re_thetat_conv: ctrl.k_conv(),
+            };
+            let mut lm = crate::models::transition::LangtryMenter::new(
+                &gpu,
+                &mesh,
+                Default::default(),
+                lmc,
+                &y,
+            )?;
+            gpu.write(&mut lm.gamma_mut().f, &vec![0.3 as Scalar; hm.n_cells])?;
+            gpu.write(&mut lm.re_thetat_mut().f, &vec![250.0 as Scalar; hm.n_cells])?;
+            lm.initialise(&gpu, &mesh)?;
+            m.set_transition(Some(lm))?;
+            m.initialise(&gpu, &flow)?;
+            Ok(m)
+        },
+        |m| m.correct(&gpu, &flow).map(|_| ()),
+        |m| {
+            let lm = m.transition().expect("attached");
+            Ok(vec![
+                field(&gpu, "k", m.k())?,
+                field(&gpu, "omega", m.omega())?,
+                field(&gpu, "nut", m.nut())?,
+                field(&gpu, "gamma", lm.gamma())?,
+                field(&gpu, "ReThetat", lm.re_thetat())?,
+            ])
+        },
+    )
+    .expect("SPEC-LIT 81.7: kOmegaSSTLM must capture and replay bitwise");
+    println!("  kOmegaSSTLM: {report}");
+}
+
 /// `SPEC-LIT` 43: the LES subgrid models.
 #[test]
 fn the_les_correction_replays_bitwise() {

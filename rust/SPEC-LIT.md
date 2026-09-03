@@ -27189,3 +27189,815 @@ that drives them, which is a different statement and a weaker one.
 refused by name (§87.7). The model is reachable only from Rust, through
 `Vof::set_marangoni` and `Vof::marangoni_temperature_mut`, and that is stated
 so that nobody reads §87 as shipping a solver option it does not ship.
+
+---
+
+## 88. Transition — where a boundary layer stops being laminar
+
+**Langtry & Menter, "Correlation-Based Transition Modeling for Unstructured
+Parallelized Computational Fluid Dynamics Codes", *AIAA J.* 47 (2009)
+2894–2906** — the paper that finally published the previously proprietary
+correlations. The 2006 pair (**Menter, Langtry, Likki, Suzen, Huang & Völker,
+*J. Turbomach.* 128 (2006) 413–422**, and **Langtry et al., *ibid.* 423–434**)
+gives the model's structure and *withholds* `Re_thetac`, `F_length` and
+`Re_theta_eq`, so the 2006 papers alone are not enough to write it. The copy
+actually read, and quoted here to the printed digit: **NASA / Turbulence
+Modeling Benchmarking Working Group, *Turbulence Modeling Resource —
+Langtry-Menter 4-equation Transitional SST Model (SST-2003-LM2009)***,
+<https://tmbwg.github.io/turbmodels/langtrymenter_4eqn.html> — US
+government-authored DOCUMENTATION, not source, **fetched and read live while
+writing this section**, together with **NASA / TMBWG, *2D T3A Transitional
+Flat Plate***, <https://tmbwg.github.io/turbmodels/t3_transition_mainpage.html>,
+which is where §88.10's inflow state comes from. Background: **Patankar,
+*Numerical Heat Transfer and Fluid Flow* (1980) §4.2** — the linearisation
+every source below is emitted through; **Menter, Smirnov, Liu & Avancha,
+*Flow Turbul. Combust.* 95 (2015) 583–619** — the one-equation successor,
+which is refused by name (§89.3). No GPL-licensed source was consulted;
+OpenFOAM's and SU2's transition implementations were not opened, searched or
+quoted.
+
+§6.3's SST produces a fully turbulent boundary layer from the leading edge,
+whatever the free-stream turbulence is. That is not a small error on a
+transitional case — it is the whole answer, and it is a plausible converged
+wrong answer of exactly the kind §13.4 exists to stop. §58.3 refused
+`kOmegaSSTLM` by name and said so. This section is the model, and §89 is the
+contract.
+
+**Two equations, not four.** `k` and `omega` stay entirely inside §6.3. What
+this section adds is the intermittency `gamma`, the transported
+transition-onset momentum-thickness Reynolds number `Re_theta~`, and **three
+stamps** into SST's own assembly — nothing else. `cuda/sst.cu` has a
+**zero-line diff**, and §88.6 is where that becomes a proof rather than a
+claim.
+
+### 88.1 The four equations
+
+```text
+D gamma/Dt   = div((nu + nu_t/sigma_f) grad gamma) + P_g - E_g         (88.1)
+
+D ReTT/Dt    = div(sigma_tt (nu + nu_t) grad ReTT) + P_tt              (88.2)
+```
+
+with `ReTT` written for `Re_theta~` throughout. `k` and `omega` are §6.3's,
+modified only by (88.13).
+
+Constants, from the TMR: `c_a1 = 2.0`, `c_a2 = 0.06`, `c_e1 = 1.0`,
+`c_e2 = 50`, `c_tt = 0.03`, `s_1 = 2`, `sigma_f = 1.0`, `sigma_tt = 2.0`.
+
+Note that `sigma_tt` multiplies the **effective** viscosity, molecular part
+included, where `sigma_f` divides only the eddy part. They are not the same
+kind of coefficient and the two equations therefore go through two different
+`RasCore` entry points (§88.5).
+
+### 88.2 The two correlations, digit for digit
+
+Both are functions of the transported `ReTT` alone, and both are transcribed
+from the TMR in the **expanded** form it prints rather than the nested
+`ReTT - f(ReTT)` form Langtry & Menter print:
+
+```text
+ReTT <= 1870:
+  Re_thetac = -396.035e-2 + 10120.656e-4 ReTT - 868.230e-6 ReTT^2
+              + 696.506e-9 ReTT^3 - 174.105e-12 ReTT^4
+ReTT >  1870:
+  Re_thetac = ReTT - (593.11 + 0.482 (ReTT - 1870))                    (88.3)
+
+ReTT <  400:          Fl1 = 39.8189 - 119.270e-4 ReTT - 132.567e-6 ReTT^2
+400  <= ReTT <  596:  Fl1 = 263.404 - 123.939e-2 ReTT + 194.548e-5 ReTT^2
+                            - 101.695e-8 ReTT^3
+596  <= ReTT < 1200:  Fl1 = 0.5 - 3.0e-4 (ReTT - 596)
+1200 <= ReTT:         Fl1 = 0.3188
+
+F_sublayer = exp(-(Re_w/200)^2) ,   Re_w = omega d^2/nu
+F_length   = Fl1 (1 - F_sublayer) + 40 F_sublayer                      (88.4)
+```
+
+`Re_thetac` is the **critical** momentum-thickness Reynolds number, where the
+model may start producing intermittency; `ReTT` is the **onset** one the
+experiment records. They are not the same number, `Re_thetac < ReTT` over the
+whole fitted range, and the correlation is a fit to the distance between them.
+
+*Two forms, and what the rearrangement costs.* `re_thetac` and
+`re_thetac_nested` are both implemented, and measured against each other over
+`[20, 1870]` at a step of `0.5`: **`6.037e-16` relative at worst**, at
+`ReTT = 1131.5`. So the TMR's expanded form and the paper's nested one are
+the same polynomial to round-off and either may be followed.
+
+**A finding: the published `F_length` is DISCONTINUOUS at two of its three
+breakpoints.** The test that measures this was written to assert continuity,
+on the reasoning that a jump where two pieces meet is a transcription error in
+one of them. It failed, and the failure is not ours — both pieces are the
+TMR's verbatim:
+
+| breakpoint | left | right | jump |
+|---|---|---|---|
+| `ReTT = 400` | 13.83738 | 13.84000 | 0.019 % |
+| `ReTT = 596` | 0.4959846 | 0.5000000 | **0.810 %** |
+| `ReTT = 1200` | 0.31880 | 0.31880 | `1e-12` %, i.e. the two pieces meet |
+
+Langtry & Menter's four pieces were evidently fitted to reproduce values
+rather than to meet. A 0.81 % step in `F_length` is a 0.81 % step in the
+intermittency production rate across the cells that straddle `ReTT = 596` — a
+shift in transition **length**, not in onset, and far below the scatter of the
+data the correlation was fitted to. It is recorded rather than smoothed,
+because smoothing it would be a model this solver invented. `Re_thetac` is
+continuous at 1870 and that breakpoint IS asserted, because its two pieces
+were written to meet.
+
+### 88.3 The onset machinery, and the three Reynolds numbers that are not each other
+
+```text
+R_T   = k/(nu omega)          turbulence Reynolds number
+Re_V  = S d^2/nu              vorticity Reynolds number  (S, not Omega)
+Re_w  = omega d^2/nu          the one F_sublayer and F_wake read
+R_y   = d sqrt(k)/nu          the one F_3 reads
+
+F_onset1 = Re_V/(2.193 Re_thetac)
+F_onset2 = min(max(F_onset1, F_onset1^4), 2)
+F_onset3 = max(1 - (R_T/2.5)^3, 0)
+F_onset  = max(F_onset2 - F_onset3, 0)                                 (88.7)
+
+F_turb   = exp(-(R_T/4)^4)                                             (88.8)
+```
+
+**`R_T` reads `nu omega`, not `nu_t`.** They agree only where §6.3's
+eddy-viscosity limiter `nu_t = a_1 k/max(a_1 omega, b_1 F_2 S)` is inactive —
+which is to say, everywhere except the part of the boundary layer this model
+exists to get right. Substituting `nu_t/nu` for `R_T` is the classic
+transcription error here and it is silent: it moves `F_turb`, `F_onset3` and
+`F_reattach` together, so the model still transitions, just in the wrong place.
+
+`Re_V` reads the **strain rate** `S = sqrt(2 S_ij S_ij)`, which is
+`turbStrainRateMag`'s own expression and the same number §6.3's `nu_t` limiter
+reads. `E_gamma` reads the **vorticity** magnitude `Omega = sqrt(2 W_ij W_ij)`
+instead — §56.2's second invariant, which this crate already computes. Three
+invariants, and §40.2's warning applies unchanged: confusing any pair of them
+is a silent error.
+
+### 88.4 `Re_theta_eq`, the one loop, and why its trip count is a constant
+
+```text
+Tu     = max(100 sqrt(2k/3)/U, 0.027)
+lambda = clamp((theta_t^2/nu) dU/ds, -0.1, +0.1)
+theta_t = Re_eq nu/U
+dU/ds  = (u_m u_n/U^2) du_m/dx_n
+
+lambda <= 0: F = 1 + (12.986 L + 123.66 L^2 + 405.689 L^3) exp(-(Tu/1.5)^1.5)
+lambda >  0: F = 1 + 0.275 (1 - exp(-35 L)) exp(-Tu/0.5)      , L = lambda
+
+Tu <= 1.3: Re_eq = max((1173.51 - 589.428 Tu + 0.2196/Tu^2) F, 20)
+Tu >  1.3: Re_eq = max(331.50 (Tu - 0.5658)^(-0.671) F, 20)            (88.9)
+```
+
+`Re_eq` appears inside its own argument, through `theta_t`. Langtry & Menter
+prescribe iterating to convergence.
+
+*DESIGN — the trip count is ours, and it is a constant.* A convergence test
+inside the kernel makes the sweep count depend on a floating-point comparison.
+That costs warp coherence, and — far worse for this crate — it makes the
+answer depend on how many sweeps each cell happened to take, which breaks
+bitwise reproducibility, and it makes the launch a data-dependent loop, which
+a CUDA graph cannot capture (§81). So the kernel runs exactly
+`RAS { nReThetaSweeps N; }` sweeps from the zero-pressure-gradient value,
+every cell, every iteration. **Default `N = 10`.**
+
+Measured, over `Tu` in {0.05, 0.3, 0.9, 1.3, 3.3, 6.5, 10} % crossed with
+`dU/ds` in {±2e4, ±2e3, ±200, ±20, 0} s⁻¹: `N = 10` against `N = 20`, and
+`N = 20` against `N = 40`, **agree on every bit** — worst relative difference
+`0.000e0`. The design note asked for `1e-10`; the measurement is exact,
+because the clip on `lambda` bounds the correlation's excursion so tightly
+that the iteration reaches a floating-point fixed point in a handful of
+sweeps.
+
+**And the sweeps do something.** A fixed point that agreed with its own
+initial guess everywhere would pass the test above while computing nothing —
+which is exactly how a loop written against the wrong variable would look. At
+a real pressure gradient the converged answer moves **42.8 %** off the
+zero-pressure-gradient value the iteration starts from over the unit test's
+sweep, and **46.5 %** over `ofgpu-validate`'s wider one, and that is asserted
+beside the convergence rather than left to be assumed.
+
+The three numerical limits — `lambda` clipped to `[-0.1, 0.1]`, `Tu >= 0.027`,
+`Re_eq >= 20` — are the TMR's own, published with the model, and each is
+pinned by a test that names it.
+
+### 88.5 Discretisation — the Patankar split, and the one the design note asked for
+
+Under the crate's sign convention `ddt + div - laplacian + Sp psi = Su`:
+
+```text
+P_g = F_length c_a1 S sqrt(gamma F_onset) (1 - c_e1 gamma)             (88.5)
+E_g = c_a2 Omega gamma F_turb (c_e2 gamma - 1)                         (88.6)
+```
+
+Writing `A = F_length c_a1 S sqrt(gamma F_onset)` and
+`B = c_a2 Omega F_turb`, both evaluated at the lagged `gamma`:
+
+| term | emitted as | sign |
+|---|---|---|
+| `+A` | `fvm_su(A)` | source, `A >= 0` |
+| `-A c_e1 gamma` | `fvm_sp(A c_e1)` | sink, diagonal, `>= 0` |
+| `-B c_e2 gamma^2` | `fvm_sp(B c_e2 gamma)` | sink, diagonal, `>= 0` |
+| `+B gamma` | `fvm_susp(-B)` | source proportional to the unknown |
+
+**This is not the split the design note asked for.** The note proposed
+emitting the whole of `P_g - E_g` as one `Susp` with coefficient
+`-(P_g - E_g)/gamma`. That form divides by `gamma`, and `gamma` is zero in
+every cell of a laminar initial field — which is the field this model is
+started from. The split above never divides by anything and its diagonal
+contribution is non-negative at every state, which is checked over a sweep of
+`gamma`, `A` and `B` including the zeros.
+
+The `Re_theta~` source is linear in the unknown and sign-definite in both
+halves, so it splits exactly:
+
+```text
+P_tt = c_tt (1/T) (Re_eq - ReTT) (1 - F_thetat) ,  T = 500 nu/U^2      (88.10)
+
+  =>  Su = c_tt (1/T)(1 - F_thetat) Re_eq ,  Sp = c_tt (1/T)(1 - F_thetat)
+
+F_wake   = exp(-(Re_w/1e5)^2)
+delta    = 375 Omega nu ReTT d/U^2
+F_thetat = min(max(F_wake exp(-(d/delta)^4),
+                   1 - ((c_e2 gamma - 1)/(c_e2 - 1))^2), 1)            (88.11)
+```
+
+`1/T` is formed as `U^2/(500 nu)` rather than as a reciprocal of `T`, so a
+quiescent cell gives **exactly** zero production instead of dividing by zero;
+and `d/delta` is formed as a ratio directly, so the `0/0` a quiescent cell
+makes of `delta` becomes the ratio 0 and `exp(0) = 1` rather than a NaN.
+
+`gamma`'s diffusivity is `nu + nu_t/sigma_f`, which is
+`RasCore::assemble_transport(r_sigma = 1/sigma_f)`. `Re_theta~`'s is
+`sigma_tt (nu + nu_t)`, which multiplies the **molecular** viscosity too, and
+is `RasCore::assemble_transport_affine(sigma_tt, sigma_tt)` — §41.2's own
+distinction, made for the same reason: folding `sigma_tt` into `r_sigma` gives
+`nu + sigma_tt nu_t`, which is right at high Reynolds number and wrong near a
+wall, silently.
+
+The separation-induced branch and the effective intermittency:
+
+```text
+F_reattach = exp(-(R_T/20)^4)
+gamma_sep  = min(s_1 max(Re_V/(3.235 Re_thetac) - 1, 0) F_reattach, 2) F_thetat
+gamma_eff  = max(gamma, gamma_sep)                                     (88.12)
+```
+
+### 88.6 The coupling into SST, and why the default is unmoved BY CONSTRUCTION
+
+```text
+P~_k = gamma_eff P_k,SST
+D~_k = min(max(gamma_eff, 0.1), 1) D_k,SST
+F_3  = exp(-(R_y/120)^8) ,   F_1 = max(F_1,SST, F_3)                   (88.13)
+```
+
+The transition model reaches SST's assembly through **exactly two buffers**:
+`g_lim` and `sp` after `sstKSources`, and `f1` between `sstBlending` and
+`sstBlendCoeffs`. `cuda/sst.cu` is byte-for-byte unmodified. A pure SST run
+launches neither stamp: `KOmegaSst` carries an `Option<LangtryMenter>` and the
+added code in `correct` is **three failed `if let`s** — one in
+`update_blending`, one after `sstKSources`, one after `correct_nut`. Unlike
+§57's hybrid this costs not even a buffer, because every allocation the
+transition model needs lives inside `LangtryMenter`, which is not constructed.
+
+So "SST is unmoved" reduces to two statements about IEEE-754, and **Gate
+88-R** measures both:
+
+* multiplication by an exact `1.0` is exact, so `gamma_eff = 1` leaves both
+  `g_lim` and `sp` **bitwise** unchanged — measured on 216 cells of awkward
+  magnitudes, every bit;
+* `max(a, 0.0) = a` for `a >= 0`, so `F_3 = 0` leaves `f1` **bitwise**
+  unchanged — same 216 cells.
+
+And end to end: `kOmegaSSTLM` with `gammaMin = gammaMax = 1` — the
+fully-turbulent limit, a real setting and not a test hook (§88.8) — reproduces
+plain `kOmegaSST` **on every bit of `k`, `omega` and `nut` over three full
+`correct` steps**. The `F_3` half is neutral there because `R_y = d sqrt(k)/nu`
+is 1118 on that block and `exp(-(1118/120)^8)` underflows to exactly `0.0`.
+
+**The one lag, named rather than left to be discovered.** `gamma_eff` reaches
+the `k` equation from the value `update_blending` formed at the top of the
+*same* `correct`, which was built from the *previous* iteration's `gamma`. That
+is the same one-iteration lag `F_2` already carries inside `nu_t` (§6.3) and
+§57.9's `nu_t` carries into `d_tilde`. It is deliberate: iterating `gamma` and
+`k` to convergence inside one `correct` would put a data-dependent loop count
+in the time loop, which §81 forbids for the same reason §88.4 does.
+
+**Order of work in one `correct`.** `update_blending` (which now also forms
+every field of §88.3 and stamps `F_1`), then `omega`, then `k`, then `nu_t`,
+then `gamma`, then `Re_theta~`. The two new equations run **last**, so they see
+the `nu_t` this iteration produced rather than the one it started from. Their
+solver performance is not returned from `correct`: that signature is §6.3's and
+belongs to the two equations SST owns.
+
+**What is NOT scaled.** `sstKSources`' third output, `susp`, carries §6.3's
+Favre dilatation `-(2/3)(div u)k`. Langtry & Menter write nothing about it, so
+it is left alone rather than multiplied by a factor they did not publish —
+§13.4 again.
+
+### 88.7 `2.193`, and the constant that lets a local quantity stand in for an integral
+
+`F_onset1 = Re_V/(2.193 Re_thetac)` compares a **strictly local** quantity,
+`Re_V = S d^2/nu`, against a momentum-thickness Reynolds number, which is an
+**integral across the layer**. The substitution is what makes the whole model
+implementable in an unstructured code with no boundary-layer edge detection,
+and it works because on a Blasius profile both quantities are `sqrt(Re_x)`
+times a pure number:
+
+```text
+u = U f'(eta) ,  eta = y sqrt(U/(nu x))
+
+max_y Re_V = sqrt(Re_x) max_eta(eta^2 f'')
+Re_theta   = sqrt(Re_x) int_0^inf f'(1 - f') d eta
+```
+
+so their ratio is a constant. `models::transition::tests::blasius` integrates
+`f''' + f f''/2 = 0` by RK4 at `h = 5e-5` with a secant shot on `f''(0)`, and
+measures:
+
+| quantity | measured here | classical |
+|---|---|---|
+| `f''(0)` | 0.332057 | 0.332057 |
+| `int f'(1 - f')` | 0.664115 | 0.664 |
+| `max(eta^2 f'')` | 1.453375 | — |
+| **the ratio** | **2.188440** | the model's **2.193** |
+
+**Confirmed to 0.208 %, and the residue is not accounted for here.** Both
+halves are converged to five figures — `f''(0)` lands on the classical value —
+so the gap is in the published constant or in a definition this reconstruction
+has not recovered, not in the arithmetic. It is small enough that it moves the
+onset criterion by 0.21 %, and large enough that calling `2.193` **derived**
+here would be an overstatement. It is not: it is **confirmed to 0.21 %**, and
+that distinction is the point of writing this subsection at all.
+
+### 88.8 The bounds, which are ours
+
+*DESIGN, all three.* Langtry & Menter publish none of them.
+
+* `gamma` is bounded into `[gammaMin, gammaMax]` after its solve, default
+  `[0, 1]`. The two may be **equal**, and that is a real setting rather than a
+  degenerate one: it freezes the intermittency, and `gammaMin = gammaMax = 1`
+  is the fully-turbulent limit Gate 88-R runs the bitwise reduction on.
+* `Re_theta~` is floored at `ReThetatMin`, default `20` — the same floor the
+  TMR puts on `Re_theta_eq`, applied to the **transported** field so that
+  (88.3) can never be handed an argument outside the range its polynomial was
+  fitted over. Measured: `Re_thetac(20) = 15.94`, comfortably positive, and
+  `F_onset1` divides by it. A value below 20 is refused by name.
+* `Re_thetac` is floored at `1e-30` inside the kernel for the same reason,
+  belt and braces: it is a divisor and nothing else.
+
+### 88.9 What is not invariant, and what is refused
+
+**The model is not Galilean-invariant, and this is how much.** `Tu` and the
+time scale `T` of (88.9)/(88.10) read an **absolute** velocity magnitude, so
+translating the frame — adding a constant velocity to every cell, which
+changes no derivative and no physics — changes `Re_theta_eq` and hence where
+the model transitions. Measured at `k = 0.05 m²/s²`, `U = 5 m/s`:
+
+| frame shift | `Re_theta_eq` | change |
+|---|---|---|
+| 0 | 155.64 | — |
+| +0.5 m/s | 167.99 | +7.9 % |
+| +1 m/s | 180.36 | +15.9 % |
+| +2 m/s | 205.30 | +31.9 % |
+| +5 m/s | 283.89 | +82.4 % |
+
+That is a property of LM2009, not of this implementation, and it is the defect
+Menter et al. (2015) fixed with the one-equation `gamma` model. §89.3's
+refusal of `kOmegaSSTGamma` names it, and a run banner that printed
+"transition model: on" without this paragraph existing anywhere would be
+hiding it.
+
+**Refused by name, with the reason:**
+
+* **A DES hybrid and a transition model together.** Both replace what
+  `sstKSources` wrote into the `k` equation's `sp` — the hybrid with
+  `beta* omega l_RANS/l_DES` (57.4), the transition model with
+  `min(max(gamma_eff, 0.1), 1) beta* omega` (88.13) — and whichever ran second
+  would silently discard the other. Langtry & Menter publish no hybrid form
+  and this solver will not invent one. `KOmegaSst::set_transition` refuses it,
+  naming both models and the buffer.
+* **`ce2 <= 1`.** (88.11) carries `(c_e2 gamma - 1)/(c_e2 - 1)`, which divides
+  by zero at 1 and changes sign below it.
+* **A non-positive `sigmaf` or `sigmaThetat`.** Both are diffusivity
+  coefficients, and a non-positive one makes the laplacian anti-diffusive.
+* **`nReThetaSweeps` of zero**, which never evaluates `F(lambda)` at all, and
+  above 100, which is a hundred times past the measured convergence.
+* **`gammaMin > gammaMax`**, and **`ReThetatMin < 20`** (§88.8).
+* **Gravity.** This one is different from §40.5's and §56.8's, and the
+  difference is worth stating because the refusal looks the same. There the
+  term is *missing*: `realizableKE` has no production form for §17's
+  `epsilon` counterpart to attach to, and `SpalartAllmaras` has no `k`
+  equation at all. Here the term is present — `G_b` enters the `k` equation
+  exactly as §6.3's does — and what is missing is a published answer to the
+  one question the coupling asks: **does `gamma_eff` multiply `G_b` as
+  (88.13) makes it multiply `P_k`?** Langtry & Menter publish no buoyant
+  extension. Both answers are defensible and they differ where it matters
+  most: a laminar buoyant layer with an unscaled `G_b` generates turbulence
+  the intermittency says is not there yet. So a case with gravity naming
+  `kOmegaSSTLM` is refused by name, with `kOmegaSST` as the alternative.
+
+### 88.10 Gate 88-T — where transition happens
+
+A transition model exists to predict WHERE transition happens. A model that
+gets the fully-turbulent limit right and the transition location wrong has not
+been validated; it has been confirmed to reduce correctly. Gate 88-R is the
+reduction. **This is the location.**
+
+The rig is the NASA/TMBWG **2D T3A transitional flat plate**, whose inflow the
+TMR states in full and which was fetched live while this section was written:
+`U = 69.44 m/s`, unit Reynolds number `2.00e5 /m`, `Tu = 5.855 %` and
+`mu_t/mu = 11.90` at the inflow, the plate's leading edge `0.250 m`
+downstream, and **`Tu = 3.300 %` at the leading edge**. The last of those is a
+*consequence* of the first three under SST's own free-stream decay, which is
+what makes it a check and not an input.
+
+**Leg 1 — the free stream, against a published number.** With `F_1 = 0` in a
+uniform free stream the two SST equations reduce to `U dk/dx = -beta* k omega`
+and `U domega/dx = -beta_2 omega^2`, whose solution is
+
+```text
+tau      = 1 + beta_2 omega_0 x/U
+omega(x) = omega_0/tau ,  k(x) = k_0 tau^(-beta*/beta_2)
+Tu(x)    = Tu_0 tau^(-beta*/(2 beta_2))
+```
+
+Starting from the TMR's inflow state this gives **`Tu = 3.3530 %` at the
+leading edge against the published `3.300 %` — `1.61 %`.** That is the
+sharpest available check of the quantity that most strongly sets where
+transition happens: the **local** `Tu`, not the inlet one. It **HOLDS**.
+
+**Leg 2 — the onset location.** On a Blasius layer `max_y Re_V = 2.193
+Re_theta` by §88.7, so the model's onset switch reaches one exactly where
+`Re_theta = Re_thetac`. With `Re_theta = 0.664 sqrt(Re_x)` and the local `Tu`
+decaying along the plate, that is one scalar equation in `x`. Its root, with
+every correlation evaluated by the shipped code:
+
+```text
+onset at x - x_LE = 0.4263 m ,  Re_x = 8.525e4
+there:  local Tu = 2.244 % ,  ReTT = 234.21 ,  Re_thetac = 193.87
+        Re_theta = 193.87 ,   F_length = 29.75
+```
+
+**Verdict: OPEN, and registered as OPEN.** The number is the location the
+model's own published correlations put onset at, on an exactly-known laminar
+profile with an exactly-known free-stream decay — that much is measured. What
+it is NOT is the location a skin-friction measurement records: the
+intermittency still has to grow from its free-stream value through `P_g` over
+a finite distance, and `F_length = 29.75` there is what sets that distance. So
+the measured `C_f` rise is **downstream** of `Re_x = 8.5e4` by an amount this
+section does not compute, and **no published digit-level onset `Re_x` for T3A
+was found to compare against** — the TMR's T3A page is under construction and
+publishes the inflow state without the measured `C_f` distribution. Closing
+this verdict needs either that data or a full two-dimensional boundary-layer
+run, and neither is in this unit.
+
+**Leg 3 — the `Tu` trend, and the finding that refutes the obvious way to run
+it.** The T3 series' content is that raising the free-stream turbulence from
+0.9 % (T3A-) through 3.3 % (T3A) to 6.5 % (T3B) moves transition by roughly an
+order of magnitude in `Re_x`. The obvious gate is to run all three on one rig
+and check the spread. **That gate does not measure what it looks like it
+measures.** Run on the T3A rig with only the leading-edge `Tu` changed:
+
+| case | `Tu` at the leading edge | onset `Re_x` | local `Tu` there |
+|---|---|---|---|
+| T3A- | 0.9 % | 1.112e6 | 0.208 % |
+| T3A | 3.3 % | 8.525e4 | 2.244 % |
+| T3B | 6.5 % | 2.144e4 | 5.788 % |
+
+The ordering is right and is asserted — more free-stream turbulence, earlier
+transition, and that half IS a property of the model. But the **spread is
+51.9×** against the ~10× the T3 series measures, and the excess is the
+construction's, not the model's: each case's own `Tu` at its own onset point
+differs by far more than the leading-edge values do, because the low-`Tu` case
+transitions so much further downstream that its free stream has decayed by
+another factor by the time it gets there. **On a single rig the free-stream
+decay is as strong a lever on onset as `Tu` itself.** Separating the two needs
+a per-case inflow `omega`, which the TMR publishes for T3A and not for T3A- or
+T3B. **So the T3A-/T3B legs are NOT claimed**, and the measurement above is
+recorded as the reason rather than the trend being reported as a result.
+
+### 88.11 What must hold
+
+| Check | Expected |
+|---|---|
+| `max(eta^2 f'')/int f'(1-f')` on a Blasius profile computed here | `2.188440` against the model's `2.193` — **confirmed to 0.208 %**, not derived (§88.7) |
+| Blasius `f''(0)` and `theta` | `0.332057` and `0.664115`, the classical values |
+| `Re_thetac` expanded vs nested | agree to `6.037e-16` relative over `[20, 1870]` |
+| `Re_thetac(ReTT) < ReTT`, and `> 0` | over `[20, 4000]`, every value |
+| `Re_thetac(20)` | `15.939`, positive — the floor of §88.8 is where the polynomial still behaves |
+| `F_length` at 400 / 596 / 1200 | jumps `0.019 %` / `0.810 %` / `0` — the published fit's own, measured not asserted away |
+| `Re_thetac` at 1870 | continuous |
+| `Re_theta_eq` monotone decreasing in `Tu` | over `[0.03, 12] %`, every step |
+| the three published limits | `Tu >= 0.027`, `Re_eq >= 20`, `lambda` clipped at `±0.1` — each pinned |
+| `N = 10` vs `N = 20` vs `N = 40` sweeps | identical bits, worst `0.000e0` relative |
+| the sweeps move the answer | by `42.8 %` off the ZPG guess over the unit test's sweep, `46.5 %` over `ofgpu-validate`'s |
+| `re_thetat_inlet(Tu)` | equals the TMR's farfield `Re_theta~` correlation to 8 ulp |
+| the `gamma` fixed points | `1.0` where `F_turb = 0`, `1/c_e2 = 0.02` where `F_onset = 0` |
+| the `gamma` source split | `Sp >= 0` at every state, and the two halves reconstruct the source |
+| **Gate 88-R, by construction** | both stamps **bitwise** identities at `gamma_eff = 1`, `F_3 = 0`, 216 cells |
+| **Gate 88-R, end to end** | `gammaMin = gammaMax = 1` reproduces plain SST **bit for bit** in `k`, `omega`, `nut` over three `correct` steps |
+| host vs device, five correlations | worst `1.2e-13` relative (`F_length`); the other four below `1.1e-14` |
+| two identical transitional runs | identical bits in `k`, `omega`, `nut`, `gamma`, `ReThetat` |
+| attaching the model | grows the written field set from 3 names to 5 |
+| a hybrid and a transition model together | refused by name, message naming both and the buffer |
+| **Gate 88-T leg 1** | `Tu` at the T3A leading edge `3.3530 %` against the published `3.300 %` — **1.61 %** |
+| **Gate 88-T leg 2** | onset at `Re_x = 8.525e4` — **OPEN**, no published digit to close it against |
+| **Gate 88-T leg 3** | monotone in `Tu`, and the `51.9×` spread that says a single-rig trend gate measures the decay |
+| the CUDA graph | a transitional `correct` captures and replays bitwise (§81) |
+
+### 88.12 Validation — what is run, and what is NOT
+
+**Run:** everything in §88.11. The correlations are verified against the
+published statement of them, digit by digit, on the host and on the device
+independently; the onset constant is confirmed against a Blasius solution
+computed here; the free-stream decay is validated against a published NASA
+number; the coupling into SST is bitwise; and the onset location the model
+predicts on the T3A rig is computed and printed.
+
+**NOT run: a two-dimensional transitional boundary-layer solve.** There is no
+flat-plate harness in this tree that couples SIMPLE momentum–pressure to a RANS
+closure on a graded boundary-layer mesh with a resolved leading edge, and §40.7
+and §56.11 both record the same absence for their own gates. Everything in
+§88.10 is therefore a **one-dimensional** calculation on a Blasius profile with
+the model's own correlations — which is sharp about the correlations and the
+onset criterion, and says nothing about what the two transport equations do to
+each other in a real layer.
+
+**NOT claimed: the `C_f` distribution through transition.** That is what the
+ERCOFTAC T3 experiments measure and what a transition model is finally judged
+on. Reproducing it needs the run above, and this section does not have it.
+
+**NOT claimed: T3A- or T3B.** §88.10 leg 3 says why, and the 51.9×
+measurement is the evidence.
+
+**NOT claimed: separation-induced transition.** (88.12)'s `gamma_sep` branch
+is implemented and is exercised only as a closed form; no separating case runs
+here, for the same reason §40.7's Driver–Seegmiller gate does not.
+
+**NOT claimed: crossflow transition, roughness, or a trip.** LM2009 has none
+of them, and neither does this.
+
+---
+
+## 89. What a transitional case says, the refusal list that shrank again, and the pair tests
+
+§88 is the model. This section is the contract: what a case writes, what is
+refused, what moved from "recognised and refused" to "available", and the
+§13.4.1 pair tests that prove every one of those entries reaches the solver.
+
+`No GPL-licensed source was consulted.`
+
+### 89.1 The dictionary, and the field set that grew
+
+```text
+constant/momentumTransport:
+
+    simulationType  RAS;
+    RAS
+    {
+        model            kOmegaSSTLM;
+        turbulence       on;
+
+        // §6.3's, unchanged - the k and omega equations ARE §6.3's
+        betaStar         0.09;   a1 0.31;   b1 1.0;   c1 10.0;
+        sigmaK1          0.85;   sigmaOmega1 0.5;   beta1 0.075;  gamma1 0.5532;
+        sigmaK2          1.0;    sigmaOmega2 0.856; beta2 0.0828; gamma2 0.4403;
+
+        // §88's
+        ca1              2.0;    ca2  0.06;
+        ce1              1.0;    ce2  50;
+        cThetat          0.03;   s1   2;
+        sigmaf           1.0;    sigmaThetat 2.0;
+
+        // §88's, and OURS
+        nReThetaSweeps   10;     // §88.4
+        gammaMin         0;      gammaMax 1;   // §88.8
+        ReThetatMin      20;     // §88.8
+    }
+```
+
+```text
+system/fvSchemes:      div(phi,gamma)     bounded Gauss limitedLinear 1;
+                       div(phi,ReThetat)  bounded Gauss limitedLinear 1;
+system/fvSolution:     solvers { gamma { ... }  ReThetat { ... } }
+                       relaxationFactors { equations { gamma 0.7; ReThetat 0.7; } }
+```
+
+**The field set grows from two to four.** `RasModel::transported_fields()`
+answers `["k", "omega", "gamma", "ReThetat"]`, in the order they are solved,
+and `KOmegaSst::named_fields()` grows from three names to five exactly when a
+transition model is attached. A writer that emitted only `k` and `omega` would
+leave a restart unable to reproduce the run it restarted from: the
+intermittency carries the whole state of the transition.
+
+`dissipation_field()` still answers `Some("omega")`, and that is the honest
+answer rather than a convenient one: `omega` IS the dissipation variable among
+the four, and `gamma` and `ReThetat` are neither dissipations nor working
+viscosities. §58.1's argument, applied once more, with the same resolution:
+two accessors that mean two different things, and both honest.
+
+**Boundary conditions.** `gamma`: zero-gradient at a wall, `1` at an inlet.
+`Re_theta~`: zero-gradient at a wall, and at an inlet the free-stream
+correlation evaluated at the case's own `Tu`. Both are patch types this crate
+already has — `zeroGradient` and `fixedValue` — so **§88 adds no `BcKind`**,
+which is worth saying plainly because the design note called a
+`turbulentIntensityReThetatInlet` "the one intrusive change in the whole note"
+and forecast a renumbering of `field.rs`'s flux-switched block reaching into
+`.mcr` restart files. It is not needed. What IS provided, so that the inlet
+number is not solved on paper, is
+`models::transition::re_thetat_inlet(Tu_percent)`, which is (88.9) at
+`lambda = 0` and is pinned against the TMR's farfield correlation by a test.
+
+### 89.2 What is read, and from where
+
+Two records, because they come from two files.
+`constant/momentumTransport` carries the coefficients (`lm_coeffs`);
+`system/fvSolution` and `system/fvSchemes` carry the two new equations'
+settings (`lm_controls`). Keeping them apart is what lets each pair test name
+the file it exercises.
+
+**Each entry is read for ITSELF, and that is the whole point.**
+`TurbulenceControls::epsilon_solver` is documented as "also used for omega —
+the two never coexist". Three dissipation-like variables DO coexist under this
+model, and reaching for that slot a third time would make `solvers/gamma`,
+`relaxationFactors/equations/gamma` and `divSchemes/div(phi,gamma)` inert —
+the exact §13.4.1 failure `dissipation_from_model` was written to fix for
+`nuTilda` in §58.1. So `LmControls` is its own struct with six fields, read
+through the same public helpers a driver uses for `U` and `p`
+(`read_solver_controls`, `relaxation_factor`, `div_entry`), and where the case
+writes no entry of its own the fallback is `k`'s — the closest bounded scalar
+in the run.
+
+This forced one addition outside §88: `CaseControls` now carries
+`fv_solution`, the whole `system/fvSolution` dictionary, for the same reason it
+already carried `schemes`. An equation `read_case_controls` knows nothing
+about needs `solvers/<its own name>`, and reaching for the nearest slot that
+already exists is how this defect keeps recurring.
+
+### 89.3 The refusal list, and what moved
+
+**Out:** `kOmegaSSTLM`. It is in `REGISTRY`, in `available_models()`, and
+`select_turbulence_model` returns `RasModel::KOmegaSstLM` with a populated
+`transition` record.
+
+**In, in its place:** `kOmegaSSTGamma` — Menter, Smirnov, Liu & Avancha's
+one-equation `gamma` model (*Flow Turbul. Combust.* 95 (2015) 583–619). §58.3
+argued at length that the 2015 model is the better one to build: it drops the
+`Re_theta~` equation, and with it §88.4's fixed point entirely, and it is
+Galilean-invariant where LM2009 is not. **That argument stands, and §88.9
+measures the defect it names — up to +82 % in `Re_theta_eq` for a 5 m/s frame
+shift.** The refusal therefore says: `ofgpu` has `kOmegaSSTLM`, here is what
+the 2015 model would fix, and here is the section that measures how much it
+matters. A refusal that names the model this solver DOES have, and the
+specific way that model is weaker, is a better message than either "not
+implemented" or silence.
+
+**Unchanged, and rewritten:** `LRR` and `SSG` — §89.6.
+
+**The test that asserted the opposite is rewritten, not deleted.** §58.3's
+refusal message named three things — the paper, the successor, and the
+specific way `kOmegaSST` would be wrong in a transitional case — and all three
+survive the move: the first two into §88's file headers, the third into
+§89.5's refusal of a transitional case run under the wrong driver.
+
+### 89.4 The pair tests
+
+§13.4.1: for every setting added, two cases identical in every byte but one,
+REQUIRED to produce different output, failing by name if they do not.
+
+**Case-document pairs, read through the registry** — built by replacing one
+substring in one base document, so the two really do differ in one place and
+nowhere else:
+
+| # | The one entry | What must differ |
+|---|---|---|
+| 1 | `RAS { model kOmegaSST; }` → `kOmegaSSTLM` | the model, and `transported_fields()` |
+| 2 | `RAS { ca1 2.0; }` → `4.0` | the intermittency production |
+| 3 | `RAS { ce2 50; }` → `25` | the destruction and `F_thetat` |
+| 4 | `RAS { cThetat 0.03; }` → `0.06` | the `Re_theta~` source |
+| 5 | `RAS { sigmaThetat 2.0; }` → `1.0` | the `Re_theta~` diffusivity |
+| 6 | `RAS { nReThetaSweeps 10; }` → `3` | the fixed point |
+| 7 | `RAS { gammaMax 1; }` → `0.5` | the bound |
+| 8 | `RAS { ReThetatMin 20; }` → `50` | the bound |
+| 9 | `RAS { betaStar 0.09; }` → `0.08` | §6.3's own constant, still read under this model |
+| 10 | `solvers/gamma/tolerance` | `LmControls::gamma_solver` |
+| 11 | `solvers/ReThetat/maxIter` | `LmControls::re_thetat_solver` |
+| 12 | `relaxationFactors/equations/gamma` | `LmControls::gamma_relax` |
+| 13 | `relaxationFactors/equations/ReThetat` | `LmControls::re_thetat_relax` |
+| 14 | `divSchemes/div(phi,gamma)` | `LmControls::gamma_conv` |
+| 15 | `divSchemes/div(phi,ReThetat)` | `LmControls::re_thetat_conv` |
+
+Rows 10–15 are the §13.4.1 instances this section exists to prevent. Every one
+of them would have been inert had `LmControls` reached for
+`TurbulenceControls`' `k`/`epsilon` slots, and every one of them is a setting a
+real case writes.
+
+**Rig-level pairs**, where a case document cannot reach the quantity directly:
+
+| # | The one setting | What must differ |
+|---|---|---|
+| 16 | `gammaMin = gammaMax = 1` vs the default bounds | `k`, `omega`, `nut` after three `correct` steps — Gate 88-R's two sides |
+| 17 | `gamma` frozen at 1 vs frozen at 0.3 | `k` after one `correct`, through `gamma_eff` |
+
+Row 17 is the one Gate 88-R cannot supply. Gate 88-R shows that
+`gamma_eff = 1` leaves SST bitwise unmoved — and so would a coupling wired to
+nothing. Row 17 is the other half: two runs identical in every byte but the
+value the intermittency is frozen at, required to produce a different `k`.
+
+**Refusals fired by name**, each a separate test asserting the message names
+the setting: `Cmu`, `C1`, `C2`, `C3`, `sigmak`, `sigmaEps`, `FlengthCoeff`,
+`ReThetacCoeff` and `Tu` under `kOmegaSSTLM`; `ce2 <= 1`; a non-positive
+`sigmaf` or `sigmaThetat`; `nReThetaSweeps` at 0 or past 100;
+`gammaMin > gammaMax`; `ReThetatMin < 20`; **gravity** (§88.9, and the message
+must name `G_b` and an alternative); a DES hybrid and a transition model
+attached together; and `kOmegaSSTGamma`, `LRR` and `SSG`, whose messages must
+each name what IS here.
+
+And one setting that is deliberately NOT refused: `gammaMin = gammaMax`. It
+freezes the intermittency, which is a real thing to ask for — at `1` it is the
+fully-turbulent limit Gate 88-R runs the bitwise reduction on — and a check
+written as `gammaMin < gammaMax` would have refused it. That check was written
+that way first; the gate it made unrunnable is what corrected it.
+
+`Tu` is the interesting refusal, and it is refused for a reason none of the
+others share: **the free-stream turbulence intensity is not a model constant.**
+It is computed per cell from the local `k` and `|U|` (88.9), which is the whole
+point of a *local* correlation-based transition model, and a case that could
+set it globally could ask for a transition model that is not one. What a case
+DOES set from a free-stream `Tu` is the inlet value of `ReThetat`, and §89.1
+says where.
+
+### 89.5 What must hold
+
+| Check | Expected |
+|---|---|
+| `kOmegaSSTLM` in `REGISTRY` and in `available_models()` | and not in any refusal list |
+| `select_turbulence_model` on it | `RasModel::KOmegaSstLM`, with `transition` populated |
+| `transported_fields()` | `["k", "omega", "gamma", "ReThetat"]` |
+| `dissipation_field()` | `Some("omega")`, unchanged |
+| `driver_for(KOmegaSstLM)` | names a binary that exists and is NOT `ofgpu-k-omega` — compiler-enforced, because that `match` is exhaustive over `RasModel`, and `ofgpu-k-omega` refuses the model by name and points at what `driver_for` answers |
+| `build_coupled` on a transitional case | builds, and plain `kOmegaSST` through the same route is unchanged |
+| `named_fields()` with and without the model | 3 names and 5 |
+| the banner | says `kOmegaSSTLM`, and plain SST still says `kOmegaSST` |
+| the fifteen document pairs | each DIFFERENT, each failing by name |
+| the two rig pairs | each DIFFERENT |
+| every refusal | fires, and names the setting |
+| `kOmegaSSTGamma`'s refusal | names `kOmegaSSTLM`, cites 2015, and says "Galilean" |
+| `LRR`/`SSG`'s refusals | name their papers, say how many equations, name `kOmegaSST`, and DIFFER where the two models differ |
+| §6.1, §6.2, §6.3, §33, §40, §41, §56, §57 outputs | **unchanged, bit for bit**, on a case that names none of this |
+
+### 89.6 The Reynolds-stress family, refused by name, with what it would take
+
+`LRR` and `SSG` are the one family with no representative in this crate at
+all. The old refusal said "Reynolds-stress transport: six coupled equations
+and a redistribution model, not an eddy-viscosity closure. Nothing in ofgpu is
+close." Every word of that is true and it is not a useful message: it says the
+gap exists and nothing about its shape. This is the shape.
+
+**Launder, Reece & Rodi, *J. Fluid Mech.* 68 (1975) 537–566** — LRR — solves
+**seven** transport equations: the six independent components of `<u_i u_j>`
+plus `epsilon`, with the pressure–strain redistribution closed by a **linear**
+model. **Speziale, Sarkar & Gatski, *J. Fluid Mech.* 227 (1991) 245–272** —
+SSG — is the same seven with a **quadratic** pressure–strain model.
+
+What this crate would need, item by item:
+
+1. **A symmetric-tensor transported field.** Every field this solver solves is
+   a scalar: `GpuScalarField`, `RasCore::assemble_transport`, `fvm_su`/`sp`/
+   `susp`, the LDU matrix, the `0/` reader, the writer and the restart format
+   are all scalar-shaped. A six-component field is a new field type reaching
+   every one of them.
+2. **A momentum equation that takes a stress divergence.** §4's momentum
+   equation takes an effective viscosity. A Reynolds-stress model produces no
+   `nu_t` at all; what it produces is `div(<u_i u_j>)`, an explicit vector
+   source, and the implicit part that used to stabilise the momentum equation
+   is gone with it. In practice implementations keep an effective viscosity for
+   the implicit part and correct explicitly, which is a numerical device that
+   has to be chosen and stated, not a detail.
+3. **Six coupled solves per outer iteration**, against `kOmegaSST`'s two. The
+   six are coupled through the production term, which is exact and needs no
+   model — that is the family's whole attraction — and through the
+   redistribution, which does.
+4. **Wall-reflection terms that need the wall NORMAL**, not only the wall
+   distance §6.6 computes. §57.6 showed `walldistance::grad_y` supplies the
+   direction to `2e-13` near a wall, so this one is *nearly* free; what is not
+   free is that `|grad y|` departs from 1 by **0.495** over a whole block
+   (§57.6's second correction), and a wall-reflection term that reads the
+   magnitude rather than the direction would be wrong far from the wall.
+5. **A realizability guard on the solved tensor.** An eddy-viscosity model
+   cannot produce a negative normal stress; a Reynolds-stress model can, and
+   does, on a coarse mesh mid-convergence. §40's whole subject is the
+   realizability of a *modelled* stress; here it would be a constraint on a
+   *solved* one, which is a different and harder problem.
+
+That is a tranche, and probably more than one. Both refusals now carry it, and
+they **differ where the two models differ**: LRR's says "LINEAR", SSG's says
+"QUADRATIC" and names the anisotropy invariants its extra terms need, so
+neither message can be read as the other with the name changed. A test asserts
+exactly that, because two refusals that had drifted into copies of each other
+would be the same failure this whole contract exists to stop.
+
+**The alternative each names:** `kOmegaSST` (§6.3), or `LaunderSharmaKE`
+(§33) where the near-wall behaviour is what matters. Neither is a
+Reynolds-stress model and the refusals say so.

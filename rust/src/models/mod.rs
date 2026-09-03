@@ -50,6 +50,7 @@ pub mod launder_sharma;
 pub mod les;
 pub mod registry;
 pub mod spalart_allmaras;
+pub mod transition;
 
 pub use coupled::{
     BuoyancySettings, CombustionMixing, CoupledKEpsilon, CoupledKOmega, CoupledKOmegaSst,
@@ -64,9 +65,11 @@ pub use launder_sharma::{f2, f_mu, mesh_resolution_report, LaunderSharmaKE, Mesh
 pub use k_omega_sst::{KOmegaSst, KOmegaSstCoeffs};
 pub use les::{Les, LesCoeffs, LesModel};
 pub use spalart_allmaras::{SaCoeffs, SaVariant, SpalartAllmaras};
+pub use transition::{LangtryMenter, LmCoeffs, LmControls};
 pub use registry::{
     available_hybrid_deltas, available_hybrid_models, available_models, build_coupled,
     buoyancy_settings, realizable_ke_coeffs, refuse_realizable_ke_buoyancy,
-    refuse_sa_buoyancy, refuse_two_dimensional_hybrid, rng_ke_coeffs, sa_coeffs,
+    refuse_lm_buoyancy, refuse_sa_buoyancy, refuse_two_dimensional_hybrid, rng_ke_coeffs,
+    sa_coeffs,
     select_turbulence_model, HybridSelection, RasModel, TurbulenceSelection,
 };

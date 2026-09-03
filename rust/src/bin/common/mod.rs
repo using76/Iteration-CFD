@@ -869,6 +869,13 @@ pub fn driver_for(m: RasModel) -> &'static str {
         // coupled drivers are where it is reachable.
         RasModel::LaunderSharmaKE => "ofgpu-buoyant or ofgpu-fire",
         RasModel::KOmega | RasModel::KOmegaSST => "ofgpu-k-omega",
+        // SPEC-LIT S88/S89: the transition model is `kOmegaSST` with two more
+        // equations bolted on, and it is reachable exactly where SST is
+        // reachable through `build_coupled`. NOT `ofgpu-k-omega`: that driver
+        // builds `KOmegaSst` directly and would run a transitional case fully
+        // turbulent from the leading edge, which is the plausible converged
+        // wrong answer S13.4 exists to stop.
+        RasModel::KOmegaSstLM => "ofgpu-buoyant or ofgpu-fire",
         // SPEC-LIT S56/S57: SA and both hybrid backgrounds are reachable
         // through `models::registry::build_coupled`, which is what the
         // coupled drivers use - there is no standalone `ofgpu-sa`.

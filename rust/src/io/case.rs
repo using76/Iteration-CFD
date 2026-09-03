@@ -749,6 +749,21 @@ pub struct CaseControls {
     /// up through here by whoever assembles them - see [`div_entry`].
     pub schemes: FvSchemes,
 
+    /// `system/fvSolution`, kept whole for the same reason [`Self::schemes`]
+    /// is: an equation `read_case_controls` knows nothing about needs
+    /// `solvers/<its own name>` and `relaxationFactors/equations/<its own
+    /// name>`, and reaching for the nearest slot that already exists is the
+    /// SPEC-LIT 13.4.1 failure this crate keeps finding. SPEC-LIT 89.2 is
+    /// the instance that forced it: `kOmegaSSTLM` transports `gamma` and
+    /// `ReThetat` besides `k` and `omega`, and
+    /// [`TurbulenceControls::epsilon_solver`] is already doing double duty
+    /// for `omega`.
+    ///
+    /// Empty when the case has no `system/fvSolution`, exactly as
+    /// [`Self::momentum_transport`] is when it has no
+    /// `constant/momentumTransport`.
+    pub fv_solution: FoamDict,
+
     /// `solvers/p`, read here so the pressure equation's `solver` and
     /// `preconditioner` reach [`crate::solver::solve`] rather than being
     /// parsed and dropped.
@@ -780,6 +795,7 @@ impl Default for CaseControls {
             model_name: String::new(),
             write_time: "1".to_string(),
             momentum_transport: FoamDict::default(),
+            fv_solution: FoamDict::default(),
             schemes: FvSchemes::default(),
             p_solver: SolverControls::default(),
             u_solver: SolverControls::default(),
@@ -1623,6 +1639,7 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
         read_solver_controls(&mut c.u_solver, &d, "U")?;
         c.residual_control = ResidualControl::read(&d);
         c.algorithm = AlgorithmControls::read(&d);
+        c.fv_solution = d;
     }
 
     // ---- fvSchemes --------------------------------------------------------
