@@ -926,7 +926,7 @@
           "format": "double"
         },
         "chiR": {
-          "description": "The radiant-fraction floor `chi_r`. Defaults to\n[`crate::radiation::CHI_R_DEFAULT`] (`0.35`, FDS practice).",
+          "description": "The radiant-fraction floor `chi_r`. Defaults to\n[`crate::participating::CHI_R_DEFAULT`] (`0.35`, FDS practice).",
           "type": [
             "number",
             "null"

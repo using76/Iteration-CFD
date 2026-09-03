@@ -82,7 +82,7 @@ use ofgpu::ldu_ops::{
 use ofgpu::mesh::{HostMesh, PatchKind};
 use ofgpu::pressure::fft::cufft_available;
 use ofgpu::pressure::{FftBackend, PbicgstabBackend, PressureBackend, SystemProbe};
-use ofgpu::radiation::{Radiation, RadiationProps};
+use ofgpu::participating::{Radiation, RadiationProps};
 use ofgpu::rheology::{herschel_bulkley_channel_u, KinematicCoeffs};
 use ofgpu::reference as cpu;
 use ofgpu::solver::{solve_pbicgstab, solve_pcg, SolverKernels, SolverWorkspace};
@@ -3251,7 +3251,7 @@ fn check_soot_and_wsgg(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     // S28/S36 BITWISE (so every measurement in this document stands), and the
     // alternative actually lets a hot medium lose energy through an open face
     // instead of reflecting it back.
-    let open_run = |open: ofgpu::radiation::OpenBoundary| -> Result<(Vec<Scalar>, Scalar)> {
+    let open_run = |open: ofgpu::participating::OpenBoundary| -> Result<(Vec<Scalar>, Scalar)> {
         let props =
             RadiationProps { a: 0.8, chi_r: 0.0, open, ..Default::default() };
         let mut rad = Radiation::new(gpu, &gm, props)?;
@@ -3281,9 +3281,9 @@ fn check_soot_and_wsgg(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     // face at all - which is exactly the "changes nothing where there is
     // nothing to change" row, and the reason the DIFFERENCE row below uses
     // the channel mesh instead.
-    let (g_zg, _) = open_run(ofgpu::radiation::OpenBoundary::ZeroGradient)?;
+    let (g_zg, _) = open_run(ofgpu::participating::OpenBoundary::ZeroGradient)?;
     let (g_cs, _) =
-        open_run(ofgpu::radiation::OpenBoundary::ColdSurroundings { t_inf: 300.0 })?;
+        open_run(ofgpu::participating::OpenBoundary::ColdSurroundings { t_inf: 300.0 })?;
     let mut ulp_o: u64 = 0;
     for (&p, &q) in g_zg.iter().zip(&g_cs) {
         ulp_o = ulp_o.max((p.to_bits() as i64 - q.to_bits() as i64).unsigned_abs());
@@ -3294,7 +3294,7 @@ fn check_soot_and_wsgg(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     );
     c.require(
         "S63: the refusals name both conditions and say what the default IS",
-        ofgpu::radiation::OpenBoundary::from_name("openSky", 293.15)
+        ofgpu::participating::OpenBoundary::from_name("openSky", 293.15)
             .err()
             .map(|e| {
                 let m = format!("{e}");
@@ -3436,7 +3436,8 @@ const SLAB_LEGS: [(Scalar, Scalar, Scalar); 3] =
 /// **SPEC-LIT §64.5/§64.6 - Gate 5, run live.**
 #[allow(clippy::too_many_lines)]
 fn check_banded_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
-    use ofgpu::radiation::{e2, slab_g_mid, SIGMA_SB};
+    use ofgpu::participating::{e2, slab_g_mid};
+    use ofgpu::radiation::SIGMA_SB;
     use ofgpu::wsgg::{MediumState, SpectralModel, SpectralProps, WindowTreatment, N_WSGG_BANDS};
 
     let rig = SlabRig::build(gpu)?;
@@ -3754,7 +3755,8 @@ fn check_banded_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 #[allow(clippy::too_many_lines)]
 fn check_banded_slab_fvdom(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::fvdom::{FvDom, FvDomProps, Quadrature};
-    use ofgpu::radiation::{e2, slab_g_mid, SIGMA_SB};
+    use ofgpu::participating::{e2, slab_g_mid};
+    use ofgpu::radiation::SIGMA_SB;
     use ofgpu::wsgg::{MediumState, SpectralModel, SpectralProps, WindowTreatment, N_WSGG_BANDS};
 
     let rig = SlabRig::build(gpu)?;

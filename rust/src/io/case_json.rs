@@ -73,7 +73,8 @@ use crate::scalar_transport::ScalarTransportCoeffs;
 use crate::timescheme::DdtScheme;
 use crate::combustion::CombustionCoeffs;
 use crate::energy::PrtModel;
-use crate::radiation::{RadiationConfig, RadiationModel};
+use crate::participating::ParticipatingConfig;
+use crate::radiation::RadiationModel;
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -612,7 +613,7 @@ pub struct JsonRadiation {
     #[serde(rename = "sigmaS", default, skip_serializing_if = "Option::is_none")]
     pub scattering: Option<f64>,
     /// The radiant-fraction floor `chi_r`. Defaults to
-    /// [`crate::radiation::CHI_R_DEFAULT`] (`0.35`, FDS practice).
+    /// [`crate::participating::CHI_R_DEFAULT`] (`0.35`, FDS practice).
     #[serde(rename = "chiR", default, skip_serializing_if = "Option::is_none")]
     pub chi_r: Option<f64>,
     /// Marshak wall emissivity, applied to every `wall`-kind patch. Defaults
@@ -1437,7 +1438,7 @@ pub struct LoweredCase {
     pub combustion: Option<CombustionCoeffs>,
     /// `physics.fire.radiation`, resolved - `None` when the case has no
     /// `fire.radiation` block.
-    pub radiation: Option<RadiationConfig>,
+    pub radiation: Option<ParticipatingConfig>,
     /// The Marshak wall emissivity every `wall`-kind patch gets when
     /// `radiation` is `Some`; meaningless otherwise.
     pub radiation_wall_emissivity: Scalar,
@@ -2198,7 +2199,7 @@ fn t_spec_for(
 pub const AMBIENT_Y_O2: Scalar = 0.232;
 
 /// SPEC-LIT §62.11's spectral block, lowered - the JSONC mirror of
-/// `radiation::read_spectral`, refusing exactly the same entries under
+/// `participating::read_spectral`, refusing exactly the same entries under
 /// exactly the same models so the two routes cannot drift apart.
 fn lower_spectral(
     r: &JsonRadiation,
@@ -2695,7 +2696,7 @@ impl JsonCase {
                 let chi_r = r.chi_r.map(|v| v as Scalar);
                 let update_interval = r.update_interval.unwrap_or(1) as usize;
                 // SPEC-LIT §63.3, both directions.
-                let open = crate::radiation::OpenBoundary::from_name(
+                let open = crate::participating::OpenBoundary::from_name(
                     r.open_boundary.as_deref().unwrap_or("zeroGradient"),
                     r.ambient_t.map(|v| v as Scalar).unwrap_or(293.15),
                 )?;
@@ -2708,28 +2709,28 @@ impl JsonCase {
                 open.validate()?;
                 let config = match model {
                     RadiationModel::P1 => {
-                        let props = crate::radiation::RadiationProps {
+                        let props = crate::participating::RadiationProps {
                             a,
-                            chi_r: chi_r.unwrap_or(crate::radiation::CHI_R_DEFAULT),
+                            chi_r: chi_r.unwrap_or(crate::participating::CHI_R_DEFAULT),
                             spectral,
                             update_interval,
                             open,
                         };
                         props.validate()?;
-                        RadiationConfig::P1(props)
+                        ParticipatingConfig::P1(props)
                     }
                     RadiationModel::FvDom => {
                         let sigma_s = r.scattering.unwrap_or(0.0) as Scalar;
                         let props = crate::fvdom::FvDomProps {
                             a,
                             sigma_s,
-                            chi_r: chi_r.unwrap_or(crate::radiation::CHI_R_DEFAULT),
+                            chi_r: chi_r.unwrap_or(crate::participating::CHI_R_DEFAULT),
                             spectral,
                             update_interval,
                             open,
                         };
                         props.validate()?;
-                        RadiationConfig::FvDom(props)
+                        ParticipatingConfig::FvDom(props)
                     }
 
                     // SPEC-LIT S50.12: the model exists and is gated, but the
@@ -2758,15 +2759,15 @@ impl JsonCase {
                             (),
                         )?;
                         // -permissive only: the substitution the message named.
-                        let props = crate::radiation::RadiationProps {
+                        let props = crate::participating::RadiationProps {
                             a,
-                            chi_r: chi_r.unwrap_or(crate::radiation::CHI_R_DEFAULT),
+                            chi_r: chi_r.unwrap_or(crate::participating::CHI_R_DEFAULT),
                             spectral,
                             update_interval,
                             open,
                         };
                         props.validate()?;
-                        RadiationConfig::P1(props)
+                        ParticipatingConfig::P1(props)
                     }
                 };
                 (Some(config), r.wall_emissivity.unwrap_or(1.0) as Scalar)

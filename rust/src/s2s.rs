@@ -455,7 +455,7 @@ fn gauss_legendre_table() -> (Vec<Scalar>, Vec<Scalar>, Vec<Label>) {
 /// flux each carries - SPEC-LIT S50.8.
 ///
 /// One entry per boundary face, the flattened indexing [`HostMesh`] uses
-/// throughout, exactly as [`crate::radiation::Radiation::set_wall_faces`]
+/// throughout, exactly as a participating-medium solver's own wall setter
 /// takes its arrays.
 #[derive(Debug, Clone)]
 pub struct RadiantFaces {
@@ -468,9 +468,9 @@ pub struct RadiantFaces {
 impl RadiantFaces {
     /// Every face carrying [`BcKind::S2sWall`], at one uniform emissivity and
     /// no external flux - the convenience
-    /// [`crate::radiation::Radiation::set_walls`] offers for the same
-    /// question, keyed on the FIELD's own patch type rather than on the
-    /// mesh's patch kind, which is SPEC-LIT S15.5's discipline.
+    /// a participating-medium solver offers for the same question, keyed on
+    /// the FIELD's own patch type rather than on the mesh's patch kind,
+    /// which is SPEC-LIT S15.5's discipline.
     pub fn from_field(gpu: &Gpu, t: &GpuScalarField, emissivity: Scalar) -> Result<Self> {
         let kinds = gpu.download(&t.bc_kind)?;
         let radiating: Vec<bool> = kinds
@@ -2406,7 +2406,8 @@ impl<'m> S2s<'m> {
 
 /// (S50.12), for one face. A free function rather than something buried in
 /// the kernel launch so SPEC-LIT S50.4's four checks have something to call
-/// directly - the same shape [`crate::radiation::marshak_fr_ref_value`] has.
+/// directly - the same shape a Marshak wall's own `(fr, refValue)` helper
+/// has.
 ///
 /// Returns `(fr, refValue, refGrad)`.
 pub fn s2s_triple(
@@ -2482,10 +2483,11 @@ pub fn concentric_flux(
     SIGMA_SB * (t1.powi(4) - t2.powi(4)) / (1.0 / e1 + a1_over_a2 * (1.0 / e2 - 1.0))
 }
 
-/// The `radiationProperties` reader, for a case directory. A missing file is
-/// an error here (unlike [`crate::radiation::RadiationConfig::from_case`]'s
-/// optional `chiR`), because a surface-to-surface model with no emissivity
-/// has nothing to compute.
+/// The `radiationProperties` reader, for a case directory - the S50 half of
+/// what [`crate::radiation::RadiationConfig::from_case`] dispatches to, for
+/// a caller that already knows the model is this one. A missing file is an
+/// error, because a surface-to-surface model with no emissivity has nothing
+/// to compute.
 pub fn config_from_case(case_dir: &Path) -> Result<S2sConfig> {
     let p = case_dir.join("constant").join("radiationProperties");
     if !p.exists() {

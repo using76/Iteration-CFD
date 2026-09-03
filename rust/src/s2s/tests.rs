@@ -1692,22 +1692,6 @@ fn the_combined_conjugate_and_radiative_name_names_both_conditions() {
     assert!(m.contains("never"), "the message must say a face carries one or the other: {m}");
 }
 
-/// SPEC-LIT S50.2/S50.3: surface-to-surface radiation is not a third member
-/// of `RadiationSolver`'s family, and asking for it there is refused rather
-/// than silently building a participating-medium model.
-#[test]
-fn the_participating_medium_solver_refuses_the_surface_model() {
-    let Some(gpu) = gpu() else { return };
-    let (_, gm, _, _, _) = box_rig(&gpu, [2, 2, 2], 0.9);
-    let cfg = crate::radiation::RadiationConfig::S2s(S2sConfig::default());
-    let m = match crate::radiation::RadiationSolver::new(&gpu, &gm, cfg) {
-        Ok(_) => panic!("RadiationSolver built a surface-to-surface model"),
-        Err(e) => e.to_string(),
-    };
-    assert!(m.contains("PARTICIPATING"), "{m}");
-    assert!(m.contains("crate::s2s::S2s::new"), "{m}");
-}
-
 // ==========================================================================
 //  S49.3  The fan must be the one the finite-volume geometry uses
 // ==========================================================================
@@ -1802,6 +1786,14 @@ fn case_with(body: &str, tag: &str) -> std::path::PathBuf {
 /// through `RadiationModel::from_name`'s S13.4 gate, to the model that gets
 /// constructed. This is S51.2's `radiationModel` pair test at the level a
 /// user actually writes - two files differing in one word.
+///
+/// SPEC-LIT §50.2/§50.3 is the other half of it, and it is why the two
+/// files do NOT both build something. A surface-to-surface enclosure is
+/// not a third participating model: it has no volumetric equation, no
+/// incident-radiation field and no energy-source registration, and it
+/// shares not one entry with the two models that do. So the `P1` file is
+/// refused BY NAME by this reader rather than quietly handed an enclosure
+/// - the S13.4 substitution this project exists to stop.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn the_radiation_model_selector_reaches_the_case_directory() {
@@ -1814,17 +1806,19 @@ fn the_radiation_model_selector_reaches_the_case_directory() {
         "vf",
     );
 
-    let a = RadiationConfig::from_case(&p1).expect("P1");
+    // The participating model is recognised and is not resolved here.
+    let e = RadiationConfig::from_case(&p1).expect_err("P1 is not this reader's model");
+    let m = e.to_string();
+    assert!(m.contains("P1"), "the refusal must name what was asked for: {m}");
+    assert!(m.contains("PARTICIPATING"), "{m}");
+
     let b = RadiationConfig::from_case(&vf).expect("viewFactor");
-    assert_eq!(a.model(), RadiationModel::P1);
     assert_eq!(b.model(), RadiationModel::ViewFactor);
-    assert!(matches!(a, RadiationConfig::P1(_)));
     match b {
         RadiationConfig::S2s(c) => {
             assert_eq!(c.emissivity, 0.83);
             assert_eq!(c.agglomerate, 3);
         }
-        _ => panic!("`radiationModel viewFactor` did not build an S2S config"),
     }
 
     // And the same file read through the module's own entry point.

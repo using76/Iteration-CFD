@@ -9115,9 +9115,11 @@ is refused naming the field it belongs on. `radiationModel viewFactor` (or
 `s2s`) joins `P1` and `fvDOM` in the §13.4 selector.
 
 **And it is refused in the three places it does not belong**, each naming
-where it does. `RadiationSolver::new` dispatches the two participating-medium
-models and has neither the enclosure geometry nor a `G` field to give this
-one, so it names `crate::s2s::S2s::new`. The JSONC `physics.fire.radiation`
+where it does. `ParticipatingConfig::from_case` reads the same file for the
+two participating-medium models and has nothing to do with an enclosure's
+entries, so it names `crate::s2s::S2s::new` and this section's own reader.
+`RadiationSolver`, which that config feeds, cannot be handed a surface
+model at all — the type does not carry one. The JSONC `physics.fire.radiation`
 block can say a model name and an absorption coefficient and nothing about
 which patches radiate, so it names `constant/radiationProperties`.
 `ofgpu-fire`'s `-radiationModel` flag has the same gap, and its medium is
@@ -9329,8 +9331,8 @@ in this project; the pair test is what stops the seventh.
 | `greyDiffusiveRadiationViewFactor` on a non-temperature field | refused, naming `T` |
 | the same name on the `IMPLEMENTED_BC_NAMES` round trip | reaches `S2sWall`, not `Calculated` — §15.5's rule, extended a third time |
 | `radiationModel viewFactor` in the JSONC `physics.fire.radiation` block | **refused**, naming `P1` and `fvDOM` and saying where the enclosure is read from instead — that block has no way to say which patches radiate, and accepting the name there would build a participating medium under a surface model's name |
-| `RadiationSolver::new` with a surface-to-surface config | refused, naming `crate::s2s::S2s::new` — S2S has no `G` field and registers no energy source, so it is not a third member of that family |
-| the case-directory round trip | two `constant/radiationProperties` files differing in one word build **different models**, and the `viewFactor` one carries its own `emissivity` and `agglomerate` through |
+| `ParticipatingConfig::from_case` on a `viewFactor` file | refused, naming `crate::s2s::S2s::new` and `RadiationConfig::from_case` — S2S has no `G` field and registers no energy source, so it is not a third member of that family; `RadiationSolver` cannot express it at all |
+| the case-directory round trip | two `constant/radiationProperties` files differing in one word reach **different readers** — the `viewFactor` one carries its own `emissivity` and `agglomerate` through, and the `P1` one is refused by name by the reader that does not own it |
 | the provenance audit | `NOTICE` and `PROVENANCE.md` quote the new file count |
 
 ---
@@ -16720,7 +16722,7 @@ as three).
 * **Three need nothing at all**: `a_pv = (1/V) sum n_p pi r^2`, `sum n_p r^2`
   and `sum n_p r^3` are pure geometry, three more accumulators in the same
   loop. They are absent only because **nothing reads them** until the spray
-  couples to `radiation.rs` and `fvdom.rs`, and §13.4.2's rule against adding
+  couples to `participating.rs` and `fvdom.rs`, and §13.4.2's rule against adding
   what no driver reads applies to a deposited field exactly as it does to a
   case entry. That is a deliberate omission with one line of work behind it,
   not a difficulty. The remaining one, `emit`, needs `T_p` to be doing
@@ -17544,7 +17546,7 @@ coupled stream is thrown further than the uncoupled one.
   all four. **A sprinkler that does not evaporate is not a sprinkler**, and the
   refusal is what tells a user that rather than letting them believe otherwise.
 * **Absorb radiation.** No `kappa_p`, no `sigmabar_p`, no Mie efficiencies, no
-  Sauter-mean cell closure, and `radiation.rs` still takes a constant `Gamma`
+  Sauter-mean cell closure, and `participating.rs` still takes a constant `Gamma`
   where a spray would make it a field. Water mist is a radiation *shield* and
   that is most of its value in suppression; this section does not model it.
 * **Splash.** Wall interaction is still §66.10's stick-free menu — escape,
@@ -24175,7 +24177,7 @@ replayed three times bit for bit.
 | `energy.rs` | `the_energy_correction_replays_bitwise` | 139 (128 / 11) | 42 |
 | `models/spalart_allmaras.rs` | `the_spalart_allmaras_correction_replays_bitwise` | 132 (121 / 11) | 128 |
 | `soot.rs` | `the_soot_correction_replays_bitwise` | 126 (115 / 11) | 192 |
-| `radiation.rs` | `the_p1_radiation_correction_replays_bitwise` | 108 (97 / 11) | 192 |
+| `participating.rs` | `the_p1_radiation_correction_replays_bitwise` | 108 (97 / 11) | 192 |
 | `s2s.rs` | `the_s2s_exchange_replays_bitwise` | 29 (28 / 1) | 42 |
 | `wsgg.rs` | `the_wsgg_update_replays_bitwise` | 17 | 640 |
 | `combustion.rs` | `the_combustion_step_replays_bitwise` | 17 | 320 |
@@ -24249,7 +24251,7 @@ ordinate's boundary intensity to the next **through the host** — `bf_cache` is
 a `Vec<Scalar>` filled by `download` once per ordinate per correction — and
 downloads the wall temperature once per correction on top. **Alternative:** a
 device-resident inflow coupling, which is a rewrite of the sweep and not a
-flag; or P-1 (`radiation.rs`), which is gated.
+flag; or P-1 (`participating.rs`), which is gated.
 
 **(c) `PCG` and `DIC` — a correctness check that lands on the host.**
 `solver::solve` verifies that the matrix really is symmetric before running

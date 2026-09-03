@@ -233,6 +233,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/parcels/deposit.rs",
         Stance::Gate("the_sort_and_the_gather_capture_once_and_replay"),
     ),
+    (
+        "src/participating.rs",
+        Stance::Gate("the_p1_radiation_correction_replays_bitwise"),
+    ),
     ("src/precon.rs", Stance::Via("src/solver.rs")),
     (
         "src/pressure/amgx.rs",
@@ -258,10 +262,6 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     (
         "src/psychro.rs",
         Stance::Gate("the_psychrometric_update_replays_bitwise"),
-    ),
-    (
-        "src/radiation.rs",
-        Stance::Gate("the_p1_radiation_correction_replays_bitwise"),
     ),
     ("src/rheology.rs", Stance::Via("src/momentum.rs")),
     (

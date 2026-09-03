@@ -78,6 +78,7 @@ pub mod twostep;
 pub mod contact_angle;
 pub mod energy;
 pub mod fvdom;
+pub mod participating;
 pub mod radiation;
 pub mod s2s;
 pub mod soot;

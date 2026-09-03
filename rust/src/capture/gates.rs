@@ -602,7 +602,7 @@ fn the_p1_radiation_correction_replays_bitwise() {
     gpu.write(&mut t.f, &vec![1200.0 as Scalar; n]).expect("T");
     gpu.write(&mut t.bf, &vec![600.0 as Scalar; hm.n_boundary_faces]).expect("Tb");
 
-    let props = crate::radiation::RadiationProps::new(0.5).expect("props");
+    let props = crate::participating::RadiationProps::new(0.5).expect("props");
     let sc = crate::solver::SolverControls {
         tolerance: 1e-14,
         rel_tol: 0.0,
@@ -615,9 +615,9 @@ fn the_p1_radiation_correction_replays_bitwise() {
     let report = capture_replays_bitwise(
         &gpu,
         "P-1 radiation (SPEC-LIT 28)",
-        || crate::radiation::Radiation::new(&gpu, &mesh, props),
-        |r: &mut crate::radiation::Radiation| r.correct(&gpu, &t, None, &sc, 0).map(|_| ()),
-        |r: &crate::radiation::Radiation| {
+        || crate::participating::Radiation::new(&gpu, &mesh, props),
+        |r: &mut crate::participating::Radiation| r.correct(&gpu, &t, None, &sc, 0).map(|_| ()),
+        |r: &crate::participating::Radiation| {
             Ok(vec![
                 field(&gpu, "G", r.field())?,
                 buf(&gpu, "su", r.su())?,
