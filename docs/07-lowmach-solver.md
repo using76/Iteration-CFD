@@ -10,16 +10,14 @@ it. It is a companion to [`rust/SPEC-LIT.md`](../rust/SPEC-LIT.md) §25/§26, no
 a replacement for it — read that document for the derivations and citations;
 this one is the map of how the pieces fit together in the running driver.
 
-> **What this document used to be.** It was written as `07-fire-solver.md`,
-> about a driver called `ofgpu-fire` that carried a combustion model, a soot
-> model and two participating-medium radiation models above this formulation.
-> That physics is a separate product and is **not in this engine**; the
-> sections describing it have been removed along with it. What remains is §1
-> and §1.1, which were always measurements of the low-Mach loop taken on
-> general plane-channel cases with nothing burning in them, and which the
-> engine cites seventeen times. Every measurement below was taken through the
-> low-Mach loop on a plane channel, and §1.1's last subsection re-measures the
-> whole gate table under `ofgpu-lowmach` at 40 000 iterations on both legs.
+> **What is in here, and what is not.** §1 is the formulation and §1.1 is the
+> wall-heat-transfer gate record, and they are the whole of this document.
+> `bin/validate.rs` alone names it sixteen times, and `xref.rs` resolves every
+> one of those citations against the headings below rather than excusing them
+> (`rust/SPEC-LIT.md` §80.3), so a heading number here is an address and not a
+> label. Every measurement below was taken through the low-Mach loop on a
+> general plane channel, and §1.1's last subsection re-measures the whole gate
+> table under `ofgpu-lowmach` at 40 000 iterations on both legs.
 
 ---
 
@@ -28,16 +26,12 @@ this one is the map of how the pieces fit together in the running driver.
 > **Which binary this section and §1.1 are about.** Everything below —
 > the low-Mach formulation, §29.3's wall heat transfer, and the whole gate
 > record of §1.1 — is the driver `ofgpu-lowmach`, and every command line
-> below names it. It carried another name while these measurements were being
-> taken, because for most of that time the only binary that drove §25/§26 also
-> carried a combustion and a radiation model above them. That physics is a
-> separate product; the loop underneath is the same loop, and the split was
+> below names it. Some of these measurements were taken while the driver
+> carried another name; the identity of the loop across that rename was
 > checked rather than assumed — the two binaries printed identical residual,
 > bulk-state, wall-flux, thermostat, budget and friction lines on
 > `cases/channelPeriodicFluxWF.jsonc`, and §1.1's table below was re-measured
-> under the new name at the full 40 000 iterations on both legs. A case naming
-> `physics.fire` is now refused BY NAME by the case reader itself; none of the
-> channel cases in §1.1 names it.
+> under the new name at the full 40 000 iterations on both legs.
 
 A strongly heated flow is buoyancy-driven and low-Mach with density ratios of
 3–4 (1173 K against a 293 K ambient), so the Boussinesq approximation does
@@ -60,7 +54,7 @@ rather than the usual `div(u) = 0`:
 
 ```
 div(u) = Q / (rho cp T) - (1/(gamma p0)) dp0/dt          (§25.1)
-Q      = q'''_c + div(k_eff grad T) - div(q_r)           (§26, §27, §28)
+Q      = q'''_c + div(k_eff grad T) - div(q_r)           (§25.1, §26)
 ```
 
 `Q = 0` in a sealed, unheated box recovers `div(u) = 0` exactly — the
@@ -1795,11 +1789,9 @@ meshes past each other relative to their momentum.
 
 #### Re-measured under `ofgpu-lowmach`
 
-The table above was taken when this loop and the reacting-medium models were
-one binary.
-Both legs were run again, 40 000 iterations each, on the cases exactly as
-shipped, through `ofgpu-lowmach` — the driver every command line in §1 and
-§1.1 now names. **Every solved quantity above reproduces to the printed
+The table above was taken under the driver's earlier name. Both legs were run
+again, 40 000 iterations each, on the cases exactly as shipped, through
+`ofgpu-lowmach` — the driver every command line in §1 and §1.1 now names. **Every solved quantity above reproduces to the printed
 digit**:
 
 | | (a) WF `constant` | (b) resolved `constant` |

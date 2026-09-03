@@ -20,8 +20,8 @@
 //! side, reached by `physics evaporating`, and [`impact`] is S78's
 //! droplet-wall regime map, reached by `wallInteraction stick` or `weber`.
 //! What is still refused is refused by name, with the reason and the
-//! alternative printed (S13.4) - `physics reacting`, `wallInteraction film`
-//! and `wallInteraction splash` among them.
+//! alternative printed (S13.4) - `wallInteraction film` and
+//! `wallInteraction splash` among them.
 //!
 //! Written from:
 //!   J. K. Dukowicz, *A particle-fluid numerical model for liquid sprays*,

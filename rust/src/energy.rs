@@ -3006,7 +3006,7 @@ mod tests {
     /// operands, and nothing else between them.
     ///
     /// This is what makes §86's budget close rather than merely improve: the
-    /// fuel that the energy equation carries out of a cell and the fuel the
+    /// mass the energy equation carries out of a cell and the mass the
     /// species equation carries out of it are the same kilograms, so the two
     /// cannot disagree about how much mass crossed a face. A second, private
     /// interpolation here would be individually reasonable and would put the
@@ -3054,7 +3054,7 @@ mod tests {
             &g,
             &hm,
             &m,
-            "Y_F",
+            "Y_A",
             crate::scalar_transport::ScalarTransportCoeffs::default(),
             crate::io::case::TurbulenceControls {
                 k_relax: 1.0,

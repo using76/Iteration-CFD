@@ -749,7 +749,7 @@ mod tests {
             return;
         };
 
-        // A non-uniform start: a slug of fuel at one end, oxidiser everywhere.
+        // A non-uniform start: a slug of one specie at one end, a second everywhere.
         let n = hm.n_cells;
         let ch4: Vec<Scalar> = (0..n)
             .map(|c| if hm.c[c].x < 0.2 { 0.4 } else { 0.0 })

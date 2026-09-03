@@ -59,7 +59,7 @@
     // that actually turns it on.
     // "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
 
-    // The burner inlet: a window in the floor. In the OpenFOAM format this
+    // The hot inlet: a window in the floor. In the OpenFOAM format this
     // needed the PatchWindow workaround because a patch is only
     // startFace + nFaces; here it is just a region.
     "regions": [

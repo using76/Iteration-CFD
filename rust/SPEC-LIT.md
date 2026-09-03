@@ -56,6 +56,17 @@ Rules for anyone implementing from this document:
    thing.
 5. Every implementation file carries a provenance header naming the papers it
    was written from.
+6. **The section numbering has gaps, and they are deliberate.** A section
+   number here is an address: thousands of sites across `rust/src` and
+   `rust/cuda` cite one, `xref.rs` fails the build if any of them names a
+   section that does not exist (§80), and `docs/` cites them too. When a
+   section is withdrawn its number is therefore **retired, not reused and not
+   closed up** — renumbering would silently change the meaning of every
+   surviving citation, which is precisely the defect §80 exists to catch.
+   A missing number means the address is vacant; it does not mean a number was
+   skipped by accident, and nothing should be renumbered to fill it. §80.5 and
+   §80.8 quote a few such numbers as evidence of a defect class, and they are
+   quoted for their shape rather than followed.
 
 ---
 
@@ -289,8 +300,9 @@ fails by that amount. Measured: −3.787 % of the streamwise body force on
   term, and with `Q` complete the same channel's true `∇·u` is zero, the same
   `bounded` run closes the drag balance to +0.000 %, and the token is worth
   nothing there. The RULE is unchanged and is not weakened by that: the
-  correction is wrong wherever `∇·u` is genuinely nonzero — a fire plume,
-  where the expansion is the drive — and a channel is simply not such a case.
+  correction is wrong wherever `∇·u` is genuinely nonzero — a strongly heated
+  plume, where the expansion is the drive — and a channel is simply not such a
+  case.
   §26.1 records both measurements side by side.
 * **§26's energy equation applies the correction unconditionally, the
   `bounded` flag on its own entry is NOT read, and the code says so at the
@@ -754,7 +766,7 @@ All-Neumann has a null space (the constant); zero the zero-wavenumber mode.
 ## 9. Buoyancy
 
 The Boussinesq approximation requires `ΔT/T << 1` (Spiegel & Veronis, *ApJ* 131
-(1960) 442). A fire plume at 1173 K against 293 K ambient has `ΔT/T ≈ 3`, so it
+(1960) 442). A hot plume at 1173 K against 293 K ambient has `ΔT/T ≈ 3`, so it
 does not apply and must not be used.
 
 *DESIGN — density-ratio buoyancy.* Retain the full ideal-gas density ratio in
@@ -1307,7 +1319,7 @@ see which scheme, which relaxation factor and which linear solver were in
 force without inferring it from the case files, because the case files are
 exactly what may have been overridden. `print_effective_settings`
 (`src/io/case.rs`) does this from an OpenFOAM `CaseControls`;
-`FireControls::print` does it from the controls themselves, which is what
+`LowMachControls::print` does it from the controls themselves, which is what
 makes it independent of which case format the run came from.
 
 A block of the case format that NO driver reads is not exempt from §13.4
@@ -1396,28 +1408,25 @@ are the reason the rule is stated in this form:
 
 * **The two channel-gate legs were rerun** — §32.5.5, and they are the
   headline. Reported there and in `docs/07-lowmach-solver.md` §1.1.
-* **The demonstration case moved much further than the gate did.**
-  the reacting-medium gate case at the same 1200 steps: combustion efficiency
-  96.0 % → **35.5 %**, domain heat release 20.1 → **7.45 kW**, net radiated
-  power 6.3 → **1.12 kW**, radiated fraction 31.3 → **15.0 %**, peak
-  temperature ~1600 → **819 K**, centreline decay exponent +0.03 → **−0.59**.
-  The reason is §3.1's, amplified: in a fire, §25.1 makes `div u` LARGE — the
-  thermal expansion IS the plume's drive — so a `bounded` correction that
-  subtracts a momentum sink proportional to it is not a small perturbation.
-  Quasi-steadiness confirmed by extending to 2400 steps (35.48 %, 14.99 %).
-* **A two-model comparison recorded here survived it**, and it is quoted as
-  the RULE rather than for its numbers, which were measurements of a
-  participating-medium radiation solver this engine no longer carries. Both
-  models moved by about the same amount in the same direction under the
-  correction, and their relative standing did not change.
-  **A comparison between two models run under the SAME
-  discarded settings is the one kind of claim this defect does not
-  invalidate**, and saying so explicitly is part of the sweep.
-* **`check_burner_heat_release` is untouched, and the reason is structural.**
-  It builds its own mesh, constructs the reaction model directly and never goes
-  through a driver's controls. A gate that reaches the physics without passing
-  through a case file cannot be moved by a case file being misread — which is
-  an argument for having such gates, not only replayed ones.
+* **A strongly heated demonstration case moves much further than the gate
+  does**, and the reason is §3.1's, amplified: where §25.1 makes `div u` LARGE
+  — where the thermal expansion IS the plume's drive — a `bounded` correction
+  that subtracts a momentum sink proportional to it is not a small
+  perturbation. On §32's channel, whose true dilatation is `6.7e-14`, the same
+  correction is worth nothing. **The size of a misread setting's effect is a
+  property of the case, not of the setting**, which is why the sweep is over
+  every published measurement rather than over a representative one.
+* **A comparison between two models run under the SAME discarded settings is
+  the one kind of claim this defect does not invalidate.** Where a recorded
+  comparison moved both models by about the same amount in the same direction
+  and left their relative standing unchanged, it survives the sweep and is
+  quoted for its RULE rather than for its numbers. Saying so explicitly is
+  part of the sweep.
+* **A gate that builds its own mesh, constructs its model directly and never
+  goes through a driver's controls is untouched, and the reason is
+  structural.** A gate that reaches the physics without passing through a case
+  file cannot be moved by a case file being misread — which is an argument for
+  having such gates, not only replayed ones.
 * **Two cases could not be rerun at all**, and have now been RETIRED rather
   than left in place: `cases/retired/channelThermalLowRe.jsonc` and
   `cases/retired/channelPeriodicLowRe.jsonc` name `wallTreatment lowRe` with
@@ -2232,8 +2241,8 @@ names the cell and suggests refining).
 Sci. Tech.* 42 (1985) 185; the FDS Technical Reference Guide (NIST, public
 domain — `reference/fds` MAY be read and adapted, with acknowledgement).
 
-Fire is Mach ≪ 1 with density ratios of 3–4. Acoustics are filtered by
-splitting the pressure:
+The regime is Mach ≪ 1 with density ratios of 3–4 — strong heating, low speed.
+Acoustics are filtered by splitting the pressure:
 
 ```
 p(x,t) = p0(t) + p~(x,t),        p~ ≪ p0
@@ -2247,27 +2256,16 @@ hydrodynamic perturbation the momentum equation sees. The ideal gas law uses
 rho = p0 / (R_s T),   R_s = R / W        (v1: constant W = air, stated)
 ```
 
-**Which driver.** `ofgpu-lowmach` (`src/bin/lowmach.rs`), and it is a driver
-of its own because for a long time it was not. The only shipped binary that
-built a `GasState` and called `Energy::update_target_divergence` was a
-reacting-medium solver that carried a combustion and a radiation model above
-this formulation; every measurement of §25/§26 in this document, and the
-whole of `docs/07-lowmach-solver.md` §1/§1.1 - the §29.3 wall-heat-transfer
-gate, §32's redesigned Nusselt gate on both channel legs, §35's thermostat,
-§37's `Pr_t` experiment and §32.5's measured friction factor - was taken
-through that binary on general CHANNEL cases with nothing burning in them.
-Those measurements are properties of the low-Mach loop, so the loop was given
-its own driver: `ofgpu-lowmach` is that binary without species, combustion,
-radiation, soot and the burner report. The reacting-medium physics has since
-left this engine altogether, and the case reader refuses a case naming
-`physics.fire` by name (§13.4) rather than running it at `q''' = 0`. Before
-the split the two binaries printed identical residual, bulk-state, wall-flux,
-thermostat, energy-budget and friction lines on
-`cases/channelPeriodicFluxWF.jsonc`, and §32's gate table was re-measured
-under the new name at 40 000 iterations on both legs.
-Text elsewhere in this document that named a reacting-medium binary for a §25/§26
-measurement is a dated record of what was run and is left as it stands;
-the command to run one of them TODAY is the one in `cases/README.md`.
+**Which driver.** `ofgpu-lowmach` (`src/bin/lowmach.rs`). It is the binary
+that builds a `GasState` and calls `Energy::update_target_divergence`, and
+every measurement of §25/§26 in this document, together with the whole of
+`docs/07-lowmach-solver.md` §1/§1.1 - the §29.3 wall-heat-transfer gate,
+§32's redesigned Nusselt gate on both channel legs, §35's thermostat, §37's
+`Pr_t` experiment and §32.5's measured friction factor - was taken through it
+on general CHANNEL cases. Those measurements are properties of the low-Mach
+loop rather than of any one case: §32's gate table was measured at 40 000
+iterations on both legs, and the command to run one of them TODAY is the one
+in `cases/README.md`.
 
 ### 25.1 The divergence constraint
 
@@ -2671,9 +2669,9 @@ report the same streamwise drag, `0.000560223 N`, bit for bit. That is what a
 correction proportional to a dilatation of `6.7e-14` looks like.
 
 **The rule stays exactly as §3.1 states it.** Subtracting `V_P (∇·u)_P` from a
-momentum equation is still wrong wherever `∇·u` is genuinely nonzero — a fire
-plume, where the thermal expansion IS the drive, is such a case and §32's
-channel, once its `Q` is right, is not. What IS retired is the SIZE: §32.5.5's
+momentum equation is still wrong wherever `∇·u` is genuinely nonzero — a
+strongly heated plume, where the thermal expansion IS the drive, is such a case
+and §32's channel, once its `Q` is right, is not. What IS retired is the SIZE: §32.5.5's
 "What is NOT established: the SIZE" paragraph, whose hand estimate of the
 correction's domain integral missed by a factor 2.5 on one leg and 28 on the
 other, was estimating against a dilatation field that should not have been
@@ -2866,7 +2864,7 @@ two (a rough LES wall model is future work, not an alias).
 ### 30.2 Turbulence selection in the coupled solvers
 
 *DESIGN.* The standalone drivers already dispatch on `RAS { model ...; }` /
-`simulationType`; the coupled solvers (buoyant, fire) construct k-epsilon
+`simulationType`; the coupled solvers construct k-epsilon
 directly, so a case asking for SST or LES silently gets k-epsilon - the
 exact substitution class §13.4 forbids. The fix is one trait:
 
@@ -2902,7 +2900,7 @@ by the registry from the case. Requirements that come with it:
 | WW power branch | inverting the integrated law reproduces a manufactured tau_w to round-off |
 | coupled SST | buoyant plume runs NaN-free; nut differs from the k-epsilon run (not bit-identical) |
 | coupled LES (Deardorff) | room/plume case runs NaN-free; mean nut < RAS nut on the same mesh (reported) |
-| selection | `model kOmegaSST` in buoyant/fire constructs SST - verified by the printed banner AND a field difference |
+| selection | `model kOmegaSST` in `ofgpu-buoyant` constructs SST - verified by the printed banner AND a field difference |
 | the §29.3 deferred gate | channel-with-energy at y+ ~ 30 (thermal WF) vs y+ ~ 1 (resolved): wall heat fluxes reported with their ratio, honestly |
 
 ---
@@ -3217,7 +3215,7 @@ is the cross-flow the projection dropped. `e_hat` is the case's own
 streamwise axis: the direction a §35.3 `massFlux` thermostat already
 resolved, or otherwise the mesh's single cyclic pair's axis, through the SAME
 `resolve_streamwise_direction` §35.3.5 specifies. A mesh with neither is not
-an error — a burner plume has no streamwise axis and wants none — but the
+an error — a free plume has no streamwise axis and wants none — but the
 streamwise quantities are then SKIPPED and said to be skipped, never guessed.
 
 #### 32.5.2 The friction factor, and the body-force cross-check
@@ -4219,7 +4217,7 @@ above, which is the one thing that must not break.
 weights are rebuilt from the CURRENT `rho` and `U` once per outer iteration,
 at the moment §35.1's `T_mean` is measured, from the fields left by the
 previous unit of work — the same segregated lag the turbulence production,
-the buoyancy coefficient and P1's wall temperature already run at.
+the buoyancy coefficient and §50's radiosity wall temperature already run at.
 
 #### 35.3.4 The degenerate guard
 
@@ -5879,13 +5877,13 @@ output exact (case output block): vtu | every 10 s | fields: every field | preci
 output restart (case output block): .mcr checkpoints | every 10 s | keep 2
 ```
 
-and it wrote `VDB/fire_000000.vdb`, `fire.usda`, `VTK/fire_000000.vtu`,
-`VTK/fire.pvd` and `restart_0.02.mcr`. Measured on the `.vdb`: **nine grids,
+and it wrote `VDB/plumeB_000000.vdb`, `plumeB.usda`, `VTK/plumeB_000000.vtu`,
+`VTK/plumeB.pvd` and `restart_0.02.mcr`. Measured on the `.vdb`: **nine grids,
 every one of them `Tree_float_5_4_3_HalfFloat`, none plain**; the grid names
 are `U.x/.y/.z/.mag`, `T`, `p`, `k`, `epsilon`, `nut`; `rho` is **absent**,
 because the case's `fields` list did not name it; `is_saved_as_half_float` is
 present. The `.usda` carries nine `def Volume` prims and points at
-`./VDB/fire_000000.vdb`. That is every one of §44.1, §44.2, §44.3 and §45
+`./VDB/plumeB_000000.vdb`. That is every one of §44.1, §44.2, §44.3 and §45
 doing what this section says, on the documented example's own text.
 
 ---
@@ -6594,7 +6592,7 @@ Fo_TIM = alpha_TIM t / t_TIM^2  >>  1                                 (S47.13)
 ```
 
 For a 50 um TIM with `alpha ~ 1e-6 m^2/s`, `t_TIM^2/alpha ~ 2.5 ms` —
-negligible for a data-centre or fire transient, marginal for a switching
+negligible for a data-centre or room-scale transient, marginal for a switching
 transient in a power device. When (S47.13) fails, mesh the TIM as its own thin
 solid region; nothing else changes.
 
@@ -7847,7 +7845,8 @@ everywhere in the fluid. There is no `fvm_*` call, no `EnergySources`
 registration and no new LDU assembly. `RadiationKernels::energy_coupling`
 computes `a(G - 4 sigma T^4)`, which is identically zero at `a = 0`, and is
 not used. The entire model enters the solver through **one rewritten Robin
-triple on `T`**. This is a *smaller* change to the solver than P1 was, and the
+triple on `T`**. It is a smaller change to the solver than any volumetric
+radiative source would be, and the
 whole cost of the model is in building `F` (§49) and inverting (S50.3),
 neither of which is a finite-volume operation at all.
 
@@ -8050,21 +8049,19 @@ The condition is accepted under the OpenFOAM spelling
 `greyDiffusiveRadiationViewFactor` and the native `s2sWall`, **only on a
 temperature field** — on any other field nothing would ever rewrite the triple
 it is defined by, which is the §13.4 defect this project keeps finding, and it
-is refused naming the field it belongs on. `radiationModel viewFactor` (or
-`s2s`) joins `P1` and `fvDOM` in the §13.4 selector - the two participating
-models it stands beside are recognised there and carried by no solver in this
-engine.
+is refused naming the field it belongs on. `radiationModel viewFactor` — and
+`s2s`, the native spelling of the same model — is what §13.4's selector
+(`RadiationModel::from_name`) recognises, and it is the whole of what it
+recognises. Any other value is an **unrecognised setting**, refused with the
+recognised set beside it rather than substituted for.
 
-**And it is refused in the three places it does not belong**, each naming
-where it does. `ParticipatingConfig::from_case` reads the same file for the
-two participating-medium models and has nothing to do with an enclosure's
-entries, so it names `crate::s2s::S2s::new` and this section's own reader.
-`RadiationSolver`, which that config feeds, cannot be handed a surface
-model at all — the type does not carry one. The JSONC `physics.fire.radiation`
-block can say a model name and an absorption coefficient and nothing about
-which patches radiate, so it names `constant/radiationProperties`.
-A participating-medium driver's own `-radiationModel` flag had the same gap, and its medium is
-participating anyway. None of the three substitutes silently.
+**And the selector has no default, in either direction.** A case directory
+with no `constant/radiationProperties` is refused, and so — this is the
+stronger half — is a `constant/radiationProperties` that exists and names no
+`radiationModel`. With one recognised value the second would be easy to guess,
+and a reader that guessed would be answering a question the case never asked.
+§13.4 selects BY NAME; "there is no default for it" is true of the entry as
+well as of the file.
 
 `compressible::turbulentTemperatureRadCoupledMixed` stays **refused**, and its
 message is updated rather than deleted: it asks for the conjugate coupling of
@@ -8079,7 +8076,7 @@ that a face carries one or the other.
 | Asked for | Answer |
 |---|---|
 | **Specular reflection** | The entire radiosity formulation (S50.1)–(S50.4) assumes *diffuse* reflection. Polished aluminium and gold plating — common in exactly the target application — are strongly specular. Hottel & Sarofim ch. 5's method of images handles a small specular fraction and Emery et al. (1991) survey the alternatives, but there is no view-factor-shaped answer: it is a different model. **Refused**, rather than letting a user set `emissivity 0.05` on a mirror and believe the result. |
-| **A participating medium** | This model has no absorption, emission or scattering in the volume. A case that sets `absorptionCoefficient` non-zero under `radiationModel viewFactor` is refused naming `P1` and `fvDOM`, the two participating-medium models §13.4's selector recognises and this engine does not carry. |
+| **A participating medium** | This model has no absorption, emission or scattering in the volume. A case that sets `absorptionCoefficient` non-zero under `radiationModel viewFactor` is refused, saying that an absorption coefficient here would be read and then ignored. It is not accepted and dropped, which is the §13.4 defect this project keeps finding. |
 | **Non-grey / spectral bands** | Not implemented; refused naming the grey model. |
 | **`eps_min < 0.02`** | §50.2's sweep-count refusal. |
 | **`N_c > 32 768`, or `G` above 60% of free memory** | §50.6's refusal. |
@@ -8221,7 +8218,7 @@ this engine carries.
 
 | Entry | Meaning | Default | Refusal |
 |---|---|---|---|
-| `radiationModel viewFactor` | selects this model | — | anything else is §13.4's existing error, now naming three models |
+| `radiationModel viewFactor` | selects this model | — | anything else is §13.4's unrecognised-setting error, naming the recognised set; a file with no `radiationModel` at all is refused too, because there is no default for the entry |
 | `emissivity <e>` | grey hemispherical total emissivity on every radiating face | — | **required**; outside `[0,1]` is an error; `eps_min < 0.02` is §50.2's refusal |
 | `viewFactorQuadrature <n>` | override §49.2's order table with a fixed `nq` | `0` = use the table | outside `[2,10]` is an error naming the table |
 | `occlusion none\|pairwise\|perPoint` | §49.4's three levels | `pairwise` | any other name is an error naming the three |
@@ -8230,7 +8227,7 @@ this engine carries.
 | `ambientTemperature <T>` | close an open enclosure with a black pseudo-surface at `T` | absent | `<= 0` is an error; **absent plus an unclosed enclosure** is §49.6's refusal |
 | `radiationRelaxation <w>` | (S50.13)'s under-relaxation of `H` | `1.0` | outside `(0,1]` is an error |
 | `radiositySweeps <n>` | override (S50.8) | `0` = use (S50.8) | `< 0` is an error |
-| `absorptionCoefficient` non-zero | a participating medium | — | §50.9's refusal naming `P1` and `fvDOM` |
+| `absorptionCoefficient` non-zero | a participating medium | — | §50.9's refusal |
 
 Boundary side: `T`'s patch entry says `greyDiffusiveRadiationViewFactor` (or
 `s2sWall`), optionally with its own `emissivity` and a `q` (the external flux
@@ -8240,8 +8237,10 @@ Boundary side: `T`'s patch entry says `greyDiffusiveRadiationViewFactor` (or
 It configures the model; it does not run one. No driver binary reads an
 enclosure out of a case directory and steps a flow with it — the library API
 (`RadiantFaces`, `S2s::new`, `S2s::update`) is what the gates drive, and
-§50.12 records that boundary. `radiationModel viewFactor` in the JSONC
-`physics.fire.radiation` block is refused for the same reason and says so.
+§50.12 records that boundary. The JSONC case format has no radiation block at
+all — an enclosure is read from `constant/radiationProperties` and from
+nowhere else — so there is no second place for the same entries to be said
+and ignored.
 
 ### 51.2 The pair tests
 
@@ -8261,7 +8260,7 @@ in this project; the pair test is what stops the seventh.
 | `agglomerate` | `1` vs `4` | `N_c`, and `F` |
 | `maxClusterAngle` | `20` vs `89` on a box corner | `N_c` |
 | `radiositySweeps` | `1` vs the (S50.8) count | `J` |
-| `radiationModel` | `P1` vs `viewFactor` | which model is constructed at all |
+| `radiationModel` | present vs absent, everything else byte-identical | whether a model is constructed at all — the absent case is refused, not defaulted |
 
 ### 51.3 What must hold
 
@@ -8272,9 +8271,9 @@ in this project; the pair test is what stops the seventh.
 | a recognised-but-unimplemented BC name | error, not `Calculated` |
 | `greyDiffusiveRadiationViewFactor` on a non-temperature field | refused, naming `T` |
 | the same name on the `IMPLEMENTED_BC_NAMES` round trip | reaches `S2sWall`, not `Calculated` — §15.5's rule, extended a third time |
-| `radiationModel viewFactor` in the JSONC `physics.fire.radiation` block | **refused**, naming `P1` and `fvDOM` and saying where the enclosure is read from instead — that block has no way to say which patches radiate, and accepting the name there would build a participating medium under a surface model's name |
-| `ParticipatingConfig::from_case` on a `viewFactor` file | refused, naming `crate::s2s::S2s::new` and `RadiationConfig::from_case` — S2S has no `G` field and registers no energy source, so it is not a third member of that family; `RadiationSolver` cannot express it at all |
-| the case-directory round trip | two `constant/radiationProperties` files differing in one word reach **different readers** — the `viewFactor` one carries its own `emissivity` and `agglomerate` through, and the `P1` one is refused by name by the reader that does not own it |
+| a `constant/radiationProperties` with no `radiationModel` | **refused**, naming the entry and the recognised set — with one recognised value a default would be easy and would answer a question the case never asked |
+| a missing `constant/radiationProperties` | refused, naming the path §13.4 selects from |
+| an unrecognised `radiationModel` value | refused with the recognised set beside it, and nothing constructed |
 | the provenance audit | `NOTICE` and `PROVENANCE.md` quote the new file count |
 
 ---
@@ -9306,9 +9305,9 @@ Written from:
 * FDS 6, `Source/func.f90` — **US public domain**. Its
   `WATER_VAPOR_MASS_FRACTION` and `RELATIVE_HUMIDITY` are built on a
   Clausius–Clapeyron integral with a tabulated `H_V_H2O` rather than the
-  ASHRAE polynomial. Simpler than ASHRAE and adequate for fire; **deliberately
-  not used here**, because a data-centre customer checks the number against a
-  psychrometric chart.
+  ASHRAE polynomial. Simpler than ASHRAE and adequate for its own purposes;
+  **deliberately not used here**, because a data-centre customer checks the
+  number against a psychrometric chart.
 * ofgpu `SPEC-LIT.md` §19 (species transport, which carries `Y_v` verbatim),
   §9 (buoyancy, whose kernel §54.4 leaves untouched), §25 (the low-Mach
   divergence constraint and the `p0` ODE, whose molar mass §54.4 discusses),
@@ -12518,7 +12517,7 @@ receive it.
 
 **The §13.4 contract.** Every name above goes through a `from_name` that
 returns the value or an `Error` naming the setting, the value and the menu.
-Three refusals carry a `note` saying *why*, because "not supported" is the
+Two refusals carry a `note` saying *why*, because "not supported" is the
 wrong summary when the feature is understood and simply not built:
 
 * `physics evaporating` / `heatAndMassTransfer` — *"evaporation needs the
@@ -12532,7 +12531,6 @@ wrong summary when the feature is understood and simply not built:
   only conservative if the droplet has a finite heat capacity; the refusal text
   now says so and points at it.)
 * `wallInteraction stick|spread|film` and `splash` — §66.10.
-* `physics reacting` — needs evaporation first.
 
 `ParcelControls::validate` refuses every bad *number* by name, and
 `ParcelControls::describe` prints every setting the run will actually use in
@@ -13665,7 +13663,7 @@ performance of turbulent water jets*, Fire Safety Journal 4 (1981) 1-13: about
 90 experiments, four nozzle types (6, 7, 9-Rouse, 10), bores 13 / 19 / 25.4 mm,
 hose pressures 2.1-6.2 bar, firing angles 20°-45°, measuring the **maximum
 throw**. The design note names it as the gate for this phase, and it is the
-right one: pure drag and ballistics at engineering scale, no fire, no
+right one: pure drag and ballistics at engineering scale, no heat transfer, no
 evaporation, no turbulence model, and a single scalar per experiment.
 
 **The columns** are transcribed from the FDS validation suite's own input-deck
@@ -13799,18 +13797,15 @@ already knew the answer.
 
 * it named **four** gates as missing. **Six** report a miss on the screen above
   it;
-* the fifth, the compartment-sweep gate, appeared only inside the *replayed-measurements*
-  parenthetical, as an aside to a sentence about counting;
+* the fifth appeared only inside the *replayed-measurements* parenthetical, as
+  an aside to a sentence about counting;
 * the sixth, §68.12's Gate 68-C, appeared **nowhere** in the summary. Its
   verdict was printed in the parcel block and stopped there, and
   `README.en.md` said so in as many words rather than fixing it;
-* and the sentence asserted that both reacting-medium verdicts — the soot
-  yield and the burner radiant fraction — "are noted in the soot/WSGG block
-  above". The soot yield's was.
-  **Gate 4's was not, and never had been**: no line this binary printed
-  mentioned the NIST 37 cm burner at all. The claim was false on the commit
-  that introduced it and nothing could have caught it, because nothing read
-  what the run printed.
+* and one of the verdicts the sentence asserted was "noted in the block above"
+  **was not, and never had been**: no line this binary printed carried it at
+  all. The claim was false on the commit that introduced it and nothing could
+  have caught it, because nothing read what the run printed.
 
 Two previous passes over this file found the first two of those and fixed them
 by editing the sentence. That is what produced the third. **This section stops
@@ -13828,19 +13823,19 @@ consulted.
 
 ### 69.1 The defect, stated exactly
 
-At HEAD (442ddd2), with `ofgpu-validate` run to completion. **Four of these
-six gates belonged to the reacting-medium physics and left this engine with
-it** - §69.10 says which, and what the registry holds now. The table is the
-defect's record and is left as it was measured:
+At HEAD (442ddd2), with `ofgpu-validate` run to completion. Six gates reported
+a miss on the screen and the hand-written sentence named four. Two of the six
+are the ones this section's enforcement is demonstrated on below, and their
+rows are the shape the registry now stores:
 
 | gate | where its verdict is printed | named in the summary line? |
 |---|---|---|
-| the NIST Reduced Scale Enclosure compartment sweep | the replayed compartment block | **only inside the replay parenthetical** |
 | §60.5 Gate 5 — Kaminski & Prakash | the conjugate-fluid block, live | yes |
-| the WSGG total emissivity against RADCAL | the soot/WSGG block, live | yes |
-| the post-flame soot yield | the soot/WSGG block, as a note | yes |
-| the NIST 37 cm burner `chi_r` | **nowhere** | yes — and the summary said it was printed above, which was false |
 | §68.12 Gate 68-C — Theobald hose streams | the parcel block, live | **no** |
+
+The second row is the whole defect in one line: a verdict the run printed, in
+full, in the block where its numbers are, and a summary sentence that did not
+know it existed.
 
 Three further verdicts print the word `OPEN`, all of them §32.4's channel
 gates against Gnielinski, and none of them was named in the summary either.
@@ -13941,8 +13936,7 @@ alone is enough; the pair is.
 ### 69.4 What the summary printed when this was written
 
 The transcript below is that run's. Its counts and its gate list are not this
-build's - four of the nine entries left with the reacting-medium physics
-(§69.10) - and what it is quoted for is the SHAPE of an entry, which is
+build's, and what it is quoted for is the SHAPE of an entry, which is
 unchanged.
 
 ```
@@ -13953,10 +13947,6 @@ unchanged.
 GENERATED from the registry each of them entered at the point it reported
 (SPEC-LIT S69): printing a verdict and registering one are the same call, and
 the two rows above hold the two halves of that ...
-  [1] SPEC-LIT S42.8b Gate 2 - replayed above - MISSES
-      against the NIST Reduced Scale Enclosure 1994 compartment sweep (...):
-      above 200 kW the predicted ceiling CO is low by a factor of up to 20,
-      which is nowhere near that bar
   ...
   [9] SPEC-LIT S32.4 verdict 2 (Reynolds analogy), resolved leg - replayed
       above - OPEN
@@ -13967,26 +13957,30 @@ the two rows above hold the two halves of that ...
 
 Each entry carries four things and no more: SPEC-LIT's own **name** for the
 gate, **how** the number beside it was obtained on this run (`run live above`,
-`replayed above`, `NOT run here`), the **verdict word**, and the **published
+`replayed above`), the **verdict word**, and the **published
 measurement or correlation** it is held against with the verdict in one clause.
 The diagnosis — why it misses, what it does and does not establish, what the
 next measurement is — stays beside the table it came from, in the block, where
 the numbers that support it are. Repeating a diagnosis in a summary is how a
 summary becomes something nobody reads.
 
-**`NOT run here` was a first-class value, not a gap.** Two of the six were
-multi-minute reacting-medium runs that do not belong inside a harness that has
-to finish. Before §69 that fact was the mechanism by which one of the two
-verdicts went missing: a gate nothing runs is a gate nothing prints, unless
-printing is a deliberate act. Both of those gates have since left the engine,
-and with them the only two users of the value - §69.10.
+**A gate nothing runs is a gate nothing prints, unless printing is a
+deliberate act.** Before §69 that was the mechanism by which a verdict could go
+missing: a comparison too long to belong inside a harness that has to finish
+would simply have no line, and no line is indistinguishable from no gate.
+`How` therefore has room for a third value beside `Live` and `Replayed` — one
+that registers a verdict a run did not compute — and today it carries only the
+two, because every gate the registry holds is one or the other. It is a
+five-line re-add the day a gate needs it, and this paragraph is why it would be
+re-added rather than the gate left unlisted.
 
 ### 69.5 Two verdict words, and why `OPEN` is not `MISSES`
 
 `MISSES` is reserved for **a comparison against a published measurement that
 this solver does not reproduce**. That is the sentence `README.en.md`'s
-"Gates that miss" table is built on, and there were six when this was written
-(§69.10: two now).
+"Gates that miss" table is built on, and there were six when this was written;
+the registry, not this sentence, is what says how many there are on any given
+build.
 
 `OPEN` is **a comparison against a correlation that does not close at the
 shipped default**. §32.4's three channel verdicts are all of this kind:
@@ -14038,11 +14032,11 @@ measured number is bit-identical**: `20`, `7.11 %`, `0.07 %`, `58 of 108`,
 `-2.4 %`. That is the point of the section: it changes what the run *says about
 itself* and nothing about what it computes.
 
-One verdict was **new text on the screen and not a new measurement**: a
-reacting-medium gate the spec had carried in full for some time and which the
-summary already claimed was printed. Its numbers were transcribed from that
-section, not rerun. Both it and that section have since left the engine
-(§69.10).
+One verdict was **new text on the screen and not a new measurement**: a gate
+the spec had carried in full for some time and which the summary already
+claimed was printed. Its numbers were transcribed from that section, not
+rerun — which is exactly the case §69.4's `Replayed` value exists to make
+legible, rather than letting a transcription read as a live run.
 
 ### 69.8 The §13.4 contract, and §13.4.1
 
@@ -14061,9 +14055,9 @@ and is not part of it.
 
 * **Decide whether a gate should miss.** It moves no bar and re-runs no case.
   Six gates missed at HEAD and six missed after; the difference is that the run
-  says so in one place. (Four of those six have since left the engine with the
-  physics they gated - §69.10 - and the mechanism is unchanged by that, which
-  is the point of having one.)
+  says so in one place. The registry's population is whatever the run reports,
+  so a gate added or withdrawn moves the summary without this section being
+  edited — which is the point of having one.
 * **Cover the other binaries.** The audit and the source test are
   `validate.rs`-only. Measured, not assumed: `grep` over every other file in
   `src/bin/` finds **no** occurrence of either verdict word, so today there is
@@ -14081,38 +14075,6 @@ and is not part of it.
 * **Wrap prose it did not write.** `gate_summary`'s word wrap is greedy and
   ASCII-width; the gate *names* are never wrapped, which is what keeps (69.6)'s
   substring test meaningful.
-
-### 69.10 What the registry holds after the reacting-medium physics left
-
-Four of §69.1's six misses were gates on a combustion, soot or spectral
-radiation model. That physics is a separate product and is no longer in this
-engine; the checks that ran those gates went with it, so the gates are not
-registered, not printed, and not claimed anywhere. **This subsection exists so
-that the six above cannot be read as a claim about this binary.**
-
-| gate | verdict | what happened to it |
-|---|---|---|
-| the NIST Reduced Scale Enclosure compartment sweep | `MISSES` | left with the two-step reaction scheme |
-| the WSGG total emissivity against RADCAL | `MISSES` | left with the spectral radiation model |
-| the post-flame soot yield against Tewarson | `MISSES` | left with the soot model |
-| the NIST 37 cm burner radiant fraction | `MISSES` | left with the spectral radiation model |
-| §60.5 Gate 5 — Kaminski & Prakash, conjugate `Nu` | `MISSES` | **stays**, run live |
-| §68.12 Gate 68-C — Theobald hose streams | `MISSES` | **stays**, run live |
-| §88's Gate 88-T, and §32.4's three channel verdicts | `OPEN` | **stay**; §78's splash verdict is the fifth |
-
-So `ofgpu-validate` now registers **two `MISSES` and five `OPEN`**, and both
-remaining misses are general-CFD findings: a conjugate-convection Nusselt
-number and a hose-stream throw. The count in §69.7's table (`9: 6 MISSES and 3
-OPEN`) is that run's and is left as measured; this is the current one. Nothing
-in §69's mechanism changed - the summary is still generated from the registry,
-and the four gates disappeared from it the moment the code that reported them
-did, which is exactly the property §69 exists to have.
-
-`How::NotRunHere` had precisely two users, the two multi-minute reacting-medium
-gates above, and it left with them: the variant is gone from `How`, and every
-gate the registry now holds is `Live` or `Replayed`. It is a five-line re-add
-the day a gate needs it again, and §69.4's paragraph is why it would be
-re-added rather than the gate left unlisted.
 
 ---
 
@@ -14974,8 +14936,8 @@ not a measurement:
   iteration on a Laplacian assembled on the host. That is the strongest thing
   this section *can* gate, because every route to a physics answer runs through
   either a reduction or an assembly kernel, and §71.7 refuses both by name. A
-  decomposed fire case is not close, and saying otherwise would be the fourth
-  instance of §13.4.1 in a different costume.
+  decomposed physics case is not close, and saying otherwise would be the
+  fourth instance of §13.4.1 in a different costume.
 * **The buffer-length audit is not done.** Every field a decomposed run touches
   must be `n_cells + n_halo` long. The exchange refuses a short one, and that
   is a guard, not an audit.
@@ -15085,10 +15047,11 @@ other module reaches through, so converting the shapes converts the callers.
 | `max|x|` | `solMaxMagStage1` + `solMaxStage2` | max | **no accumulator needed.** Gathered by `::max_mag`, and both kernels are reused unchanged by everything above |
 | `max|upper-lower|`, `max|coeff|` (§48.3) | `solSymDefectStage1`, `solCoupledSymDefectStage1`, `solMax2Stage2` | max | order-free. `matrix_is_symmetric` is what asks, and a decomposed build needs only the gather |
 
-**The callers — 43 of them, counted mechanically outside the tests and the
-definitions: 35 sums and 8 maxima.** Every summing reduction in the crate is
-one of the five shapes above; there is no sixth. Listed by what a cut does to
-it:
+**The callers were counted mechanically outside the tests and the
+definitions — 43 at the time of writing, 35 sums and 8 maxima.** That count is
+a dated measurement and moves with the crate; the structural claim does not.
+Every summing reduction in the crate is one of the five shapes above; there is
+no sixth. Listed by what a cut does to it:
 
 | Caller | Reduces | Under a cut |
 |---|---|---|
@@ -15101,7 +15064,6 @@ it:
 | `fan.rs` §52.7 — three `device_sum` per fan patch | one patch's faces | cross-part sum **only if that patch is cut**, which a partitioner is free to do |
 | `cht.rs` §47 — interface flux into A, into B, and its scale | interface face pairs | cross-part sum if the interface is cut |
 | `dcmetrics.rs` §55 — every SHI/RTI/RCI numerator and denominator | cells or rack faces | cross-part sum |
-| a reaction module's clip and extinction counts, a spectral module's floored-band count, a soot module's clip counts | 0/1 flags over cells | sums of **exact integers below 2^53**, so already partition-invariant. Recorded because "it is a `device_sum`, therefore it is a hazard" would have been the easy wrong answer |
 | `simple.rs`, `vof.rs` — `contErr` = `max_c |sum_f phi_f|`; `vof.rs` Courant; `psychro.rs`, `species.rs`, `turbulence.rs` maxima | cells | **maxima. Already partition-invariant**, and the brief's list of hazards names `contErr` as one when it is not |
 
 **Reductions outside `solver.cu`.**
@@ -16638,7 +16600,7 @@ printed.
 * nothing adapts, so there is no conservation-across-an-adapt test, no
   restriction/prolongation, no flux prolongation and no post-adapt projection;
 * the physics gates (§10, §22) are unchanged and were not re-run on a refined
-  mesh — no fire or plume case uses one;
+  mesh — no shipped physics case uses one;
 * the skewness correction is measured on the Poisson equation only. Its effect
   on convection, on the pressure–velocity coupling, or on a turbulence model has
   not been measured and no claim is made about it;
@@ -16739,8 +16701,8 @@ volume, issue, pages and year against what is printed here.
 * McGrattan, K., Hostikka, S., McDermott, R., Floyd, J., Weinschenk, C. &
   Overholt, K. *Fire Dynamics Simulator User's Guide*, NIST Special Publication
   1019, "Mesh Resolution" — **US Government work, public domain**, present
-  locally at `reference/fds/Manuals/`. The characteristic fire diameter `D*`
-  and the `D*/dx` resolution measure of §75.3(b).
+  locally at `reference/fds/Manuals/`. The `D*` length scale and the `D*/dx`
+  resolution measure of §75.3(b).
 
 **Nothing was read from p4est (GPL-2.0-or-later), libsc (LGPL-2.1), t8code
 (GPL-2.0), OpenFOAM (GPL-3.0) or SU2 (LGPL).** p4est's licence was checked
@@ -16858,8 +16820,12 @@ wrong and one of them was got wrong here first.
 by the matching pair in the denominator. That is what lets one threshold mean
 the same thing for every field, and it is asserted rather than argued.
 
-**(b) The fire resolution criterion, `D*/dx`.** FDS User's Guide, "Mesh
-Resolution", US Government work, public domain:
+**(b) The heat-release resolution criterion, `D*/dx`.** `D*` is the
+characteristic diameter of a buoyant plume driven by a volumetric heat
+release — the only length that can be built out of the release rate, the
+ambient state and gravity, which is why the measure is a ratio against it
+rather than against anything in the mesh. FDS User's Guide, "Mesh Resolution",
+US Government work, public domain:
 
 ```
 D* = ( Qdot / (rho_inf cp_inf T_inf sqrt(g)) )^(2/5)         [m]
@@ -17376,7 +17342,7 @@ SRD 69** (US-government public domain) — the water-vapour specific heat and th
 critical constants. The **FDS Technical Reference Guide** (NIST SP 1018-1,
 US-government public domain, vendored at `reference/fds`), chapter *Lagrangian
 Particles* and the appendix *Development of an Implicit Solution for Droplet
-Evaporation*, states the same model set for fire; its `B_T = B_M`
+Evaporation*, states the same model set; its `B_T = B_M`
 simplification is offered here as `massTransfer spalding` and is **not** the
 default, for the reason (76.6) gives. **No GPL-licensed source was consulted**,
 and in particular OpenFOAM's `src/lagrangian` tree, which contains the obvious
@@ -17453,7 +17419,7 @@ that `p_sat(T_b) = p_b` exactly, and `h_v(T)` inside the exponent is Watson's,
 so it is not the constant-latent-heat integral.
 
 (76.4) is **water**, and it is §54's own polynomial rather than a second fit of
-the same data — a data-centre or fire user checks a number against a
+the same data — a data-centre user checks a number against a
 psychrometric chart drawn from Hyland & Wexler, and §76.13's gate is posed
 against §54's `t_wb`, which is built on it. `validate` refuses `hylandWexler`
 for any liquid whose molar mass is not water's, because evaluating a fit to
@@ -17615,8 +17581,8 @@ that uses no derivative at all, and it agrees to `5.7e-13 K`.
   curve needs a per-species surface equilibrium and a diffusion equation inside
   the droplet.
 * **The Kelvin (curvature) and solute corrections to `p_sat`.** They matter
-  below about 0.1 µm and for salt-laden droplets, and neither is a
-  fire-suppression regime.
+  below about 0.1 µm and for salt-laden droplets, and neither is a regime any
+  gate in this document poses.
 * **The momentum the vapour carries off**, `-mdot(u_p - u)`. It belongs with
   §68.6's coupling split, and for water in air it is `1e-3` of the drag.
 
@@ -19029,7 +18995,7 @@ solver quietly does the wrong thing if it is missing:
 The first is a document entry, the second is a solve, the third is §4's triple
 with a switch on it, and the fourth is a reduction. None of them is new
 numerics: every piece already existed in this crate for the `buoyant` and
-`fire` solvers, and what §79 does is make the conjugate format able to reach
+low-Mach solvers, and what §79 does is make the conjugate format able to reach
 them.
 
 ### 79.2 The two openings, and why exactly one of each
@@ -19714,10 +19680,10 @@ says that instead.
 
 **A note on the evidence below.** §80.5 and §80.8 are the forensic record of
 what the audit found on the runs that built it, and some of the symbols they
-quote — `(64.8)`, `S61.3a`, `§62.6`'s `(S36.1)` — name sections that have since
-left this engine with the reacting-medium physics they specified. The findings
-are kept verbatim because they are evidence of a defect CLASS, not pointers;
-the audit itself reads the document on disk and is green against it.
+quote — `(64.8)`, `S61.3a`, `§62.6`'s `(S36.1)` — name numbers this document
+does not use (§0's rule 6). The findings are kept verbatim because they are
+evidence of a defect CLASS, not pointers; the audit itself reads the document
+on disk and is green against it.
 
 `NOTICE`, `PROVENANCE.md` and both READMEs make claims about this repository,
 and every one of those claims is checked by a test. `lib.rs`'s
@@ -19815,9 +19781,9 @@ writes `(24.5)`, `(38.3)`, `(11.3)`, `(44.1)` meaning the
 *subsection*, so there the parenthesised form resolves against headings. In a
 section that labels equations the parenthesised form is this document's own
 equation notation, so it must be an equation label — and that is what turns a
-renumbering into a test failure: `(64.8)` in `radiation.rs` named an equation
-§64 does not have, and §64.5's own table says the two rows that test measures
-are both against **(64.6)**.
+renumbering into a test failure: one module wrote `(64.8)` for a gate whose
+section defined equations only up to `(64.7)`, and whose own table says the two
+rows that test measures are both against **(64.6)**.
 
 **Form PA is form P.** The `S` is not a change of meaning; it is what a file
 that cannot spell `§` writes instead. All 38 files under `rust/cuda` are pure
@@ -19979,10 +19945,9 @@ ambiguous token three ways, and nothing could tell them apart.
 > equation. All four resolve to exactly one thing.
 
 **972 when this was written**, 237 of them in `validate.rs` alone, then 66 in
-`s2s.rs`, 58 in `s2s/tests.rs`, 44 in `radiation.rs`, 43 in the reacting-medium
-driver and 41 in `parcels.rs`. **651 now**: the ceiling came down by 321 when
-the reacting-medium physics left the engine, and it came down because a ratchet
-that keeps its old slack is not a ratchet. The ceiling is not a target, it is a
+`s2s.rs`, 58 in `s2s/tests.rs` and 41 in `parcels.rs`. **651 now**, and the
+ceiling came down with the count rather than keeping its old slack, because a
+ratchet that keeps its old slack is not a ratchet. The ceiling is not a target, it is a
 ledger: rewriting the remaining sites is not this section's work, and
 pretending they are fine is not either. What it
 buys immediately is that the *next* §77 cannot be written, because the next
@@ -20052,8 +20017,8 @@ kinds**:
 
 | Kind | Sites | What it was |
 |---|---|---|
-| **Renumbered** — the §77 defect exactly | 2 | `radiation.rs` cited `(64.8)` for the banded diffusion-limit gate. §64 defines equations up to **(64.7)**, and §64.5's own two rows for that test say **(64.6)**. Both corrected. |
-| **Wrong document** — a citation that reads as this document's and is not | 4 | `fire.rs` and `restart.rs` cited `§4.6` for the `.mcr` restart format, which is `docs/05-io-redesign.md §4.6`; `cuda/fv.cu` cited `(S3.4.2)` on a continuation line of Jasak's bibliography entry; `fvdom.rs` cited Modest's `(9.24)` two lines below his name. |
+| **Renumbered** — the §77 defect exactly | 2 | one module cited `(64.8)` for a gate whose section defined equations only up to **(64.7)**, and whose own two rows for that test said **(64.6)**. Both corrected. |
+| **Wrong document** — a citation that reads as this document's and is not | 4 | two modules cited `§4.6` for the `.mcr` restart format, which is `docs/05-io-redesign.md §4.6`; `cuda/fv.cu` cited `(S3.4.2)` on a continuation line of Jasak's bibliography entry; one module cited Modest's `(9.24)` two lines below his name. |
 | **Unattributed** — the citation names no document and a reader cannot tell | 7 | `S75.3a`, `S61.3a` and `S61.3b` name the lettered sub-blocks §75.3(a), §61.3(a) and §61.3(b) in a spelling this document does not use; four SPEC-LIT citations in `validate.rs` (§33.3, §61.8, `S26.1`, `S13.4.1`) sit on lines that had just named `docs/07-lowmach-solver.md`, where a human reader has exactly the scanner's problem. |
 
 All thirteen are corrected, and the audit is green. Three more were fixed on
@@ -20181,8 +20146,8 @@ excuses true ones. §80.9 has the correction.
   stopped being one, and how it stopped is the point. §62.6 cites **(S36.1)**,
   and the argument was that §36 labels no equations. It does not — which under
   §80.8's tightening is exactly the case where the parenthesised form resolves
-  against headings, and §36.1 ("The RTE along one ordinate…") is a heading. The
-  citation was correct all along; the rule that made it look dangling was form
+  against headings, and §36.1 was a heading. The citation was correct all
+  along; the rule that made it look dangling was form
   PA resolving against "either". A rule loose in one direction manufactures
   false findings as readily as it excuses true ones, and this section printed
   one of each. Running the lexer over this document is a section of its own,
@@ -20420,7 +20385,7 @@ state where nothing *happens*. `species.rs`'s gate was written on a uniform
 field with `phi = 0` behind zero-gradient walls, and there every term of §19's
 equation is identically zero — three replays equalled three per-launch
 iterations because neither moved a value, and a graph that had recorded no work
-at all would have passed. It also lived, physically, in `src/combustion.rs`
+at all would have passed. It also lived, physically, in another module's file
 rather than beside the module it gates, which the registry permits — it looks a
 gate up by name across `src/` — and which left a general module's proof of a
 general property hostage to a file that has nothing to do with §19. It now sits
@@ -20433,12 +20398,9 @@ that; only reading the gate can.
 
 Thirty-seven of fifty-four modules resolved to gated when this was measured, on
 an RTX 5070 Ti, CUDA 13.3, default `f64`; `nodes` is `GraphShape::total`, and
-every row replayed three times bit for bit. **Five of the rows below - the
-reaction step, the P1 radiation correction, the WSGG band update, the soot
-correction and the discrete-ordinates refusal - left the engine with the
-reacting-medium physics, and §81.14 carries the census as it stands now.** The
-table is left as measured because what it is quoted for is the SHAPE of the
-population, and the rows that left do not change it.
+every row replayed three times bit for bit. The counts are a dated measurement
+and §81.14 carries the census as it stands now; the table is quoted for the
+SHAPE of the population, which is what does not move.
 
 | module | gate | nodes (kernel / memset) | values compared |
 |---|---|---|---|
@@ -20454,11 +20416,7 @@ population, and the rows that left do not change it.
 | `cht.rs` | `the_solid_side_iteration_replays_bitwise` | 142 (131 / 11) | 42 |
 | `energy.rs` | `the_energy_correction_replays_bitwise` | 139 (128 / 11) | 42 |
 | `models/spalart_allmaras.rs` | `the_spalart_allmaras_correction_replays_bitwise` | 132 (121 / 11) | 128 |
-| `soot.rs` **(left)** | `the_soot_correction_replays_bitwise` | 126 (115 / 11) | 192 |
-| `participating.rs` **(left)** | `the_p1_radiation_correction_replays_bitwise` | 108 (97 / 11) | 192 |
 | `s2s.rs` | `the_s2s_exchange_replays_bitwise` | 29 (28 / 1) | 42 |
-| `wsgg.rs` **(left)** | `the_wsgg_update_replays_bitwise` | 17 | 640 |
-| `combustion.rs` **(left)** | `the_combustion_step_replays_bitwise` | 17 | 320 |
 | `models/les.rs` | `the_les_correction_replays_bitwise` | 5 | 64 |
 | `psychro.rs` | `the_psychrometric_update_replays_bitwise` | 1 | 320 |
 | `models/des.rs` | `the_des_correction_replays_bitwise` | 1 | 192 |
@@ -20481,37 +20439,41 @@ lines of scaffolding; `energy`, `species`, `cht`, `s2s` and `fan` live with
 their own modules, because those modules' test scaffolding is private to them.
 Both placements are exercised, deliberately.
 
-### 81.10 Three modules were fixed, and what they had in common
+### 81.10 The defect three modules shared, and what it cost them
 
 Writing the gates found six modules that could not be captured. Three of the
 six failed for the *same* reason, and it was not physics: a **diagnostic
-counter** was being reduced on the device and then read back to the host, once
-per iteration, purely to be reported.
+number** was being reduced on the device and then read back to the host, once
+per iteration, purely to be reported. The one still in this tree is also the
+expensive one:
 
 | module | what was read back | what it cost |
 |---|---|---|
-| a spectral radiation module | `n_floored` — how many cells the absorption floor touched, one `device_sum` + `download` per band | the whole radiation iteration of every banded case |
-| a reaction module | `n_clipped` and `n_extinguished` | the whole reaction step |
 | `s2s.rs` | §50.10's three reported numbers and the fixed-point residual, computed by pulling four cluster-sized arrays back and reducing them **on the CPU** | the whole enclosure-radiation iteration |
 
-Each is now behind a flag that **defaults to on**, so every existing run
-reports exactly what it reported before: `Bands::set_count_floored`,
-`Combustion::set_count_stats`, `S2s::set_measure_report`. This is
+The other two were the same shape and cheaper to state: a count of how many
+cells a clip or a floor had touched, one `device_sum` plus a `download` per
+iteration, kept for no reason but to print it. A number nobody reads costing a
+module its graph is the finding, and it does not need three instances to make
+it.
+
+The fix is a flag that **defaults to on**, so every existing run reports
+exactly what it reported before — `S2s::set_measure_report`. This is
 `SolverControls::report_residuals` applied to a diagnostic count instead of a
 residual, and the argument is the same one. It is bitwise-neutral **by
 construction**: the kernels that produce the numbers still run, and what is
 skipped is a reduction into scratch that nothing else reads.
 
-Each also gained a companion query — `floor_count_is_measured`,
-`stats_are_counted`, `report_is_measured` — so that a reported `0` meaning "not
-counted" is distinguishable from a `0` meaning "nothing was clipped". Reporting
-the two as the same number is the confusion §69 exists to prevent.
+It also gained a companion query — `S2s::report_is_measured` — so that a
+reported `0` meaning "not measured" is distinguishable from a `0` meaning "the
+residual really is zero". Reporting the two as the same number is the confusion
+§69 exists to prevent.
 
-### 81.11 Three refusals, measured rather than asserted
+### 81.11 The refusals, measured rather than asserted
 
 A refusal written only in prose decays: the module is fixed, or made worse, and
-the sentence beside it stays the same. All three below are **executed**, and
-each must fail *naming the call that makes it impossible*. If any starts to
+the sentence beside it stays the same. Both below are **executed**, and each
+must fail *naming the call that makes it impossible*. If either starts to
 succeed, the test fails and says which registry row to promote.
 
 **(a) `vof.rs` — a data-dependent trip count.** `Vof::step` computes the alpha
@@ -20524,14 +20486,7 @@ is gated through `momentum.rs` and `solver.rs`. **Alternative:** a *prescribed*
 `nAlphaSubCycles` from the case rather than one derived from the flux, which
 removes the read-back. Not implemented.
 
-**(b) `fvdom.rs` — a host-mediated sweep.** `FvDom::correct` carries each
-ordinate's boundary intensity to the next **through the host** — `bf_cache` is
-a `Vec<Scalar>` filled by `download` once per ordinate per correction — and
-downloads the wall temperature once per correction on top. **Alternative:** a
-device-resident inflow coupling, which is a rewrite of the sweep and not a
-flag; or P-1 (`participating.rs`), which is gated.
-
-**(c) `PCG` and `DIC` — a correctness check that lands on the host.**
+**(b) `PCG` and `DIC` — a correctness check that lands on the host.**
 `solver::solve` verifies that the matrix really is symmetric before running
 conjugate gradients or an incomplete Cholesky on it (§8.2), and that check ends
 in a `download`. `solve`'s own doc comment has said so since it was written.
@@ -20594,7 +20549,7 @@ joining the two statements.
 The practical consequence for this project cuts the helpful way. §38–§79 added
 *more kernels per iteration*, not more work per kernel: the gates above measure
 384 nodes for one momentum predictor and 369 for one species correction, and a
-fire iteration is the sum of a dozen such modules. At a fixed mesh, today's
+coupled iteration is the sum of a dozen such modules. At a fixed mesh, today's
 iteration has far more launches to amortise than the 2024 iteration that was
 measured at 3.16×, so the graph is worth **more** now than it was — and the
 place it is worth least is the large mesh, not the small one.
@@ -20616,7 +20571,7 @@ never the consideration.
 | 8 | the ungated debt only falls | `the_ungated_debt_is_within_the_published_ceiling`, ceiling 3 |
 | 9 | `launch_builder` is the only launch path | `no_other_launch_path` |
 | 10 | the refusals are refusals **today** | `the_refusal_is_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call` |
-| 11 | defaults are bitwise unchanged | by construction: `mod capture` is `#[cfg(test)]`; the guard adds a relaxed atomic load and no arithmetic; §81.10's three flags default to on |
+| 11 | defaults are bitwise unchanged | by construction: `mod capture` is `#[cfg(test)]`; the guard adds a relaxed atomic load and no arithmetic; §81.10's report flag defaults to on |
 
 ### 81.14 Validation
 
@@ -20632,9 +20587,9 @@ The registry as the tests print it:
 ```
 
 It read `50 / 36 / 10 / 1 / 3` when §81 was written and the difference is not a
-regression: five modules left with the reacting-medium physics, three rows that
-were miscounted as one `outside` are three, and the ungated debt is where it
-was. The ceiling only falls, and it did not have to.
+regression: the population is derived from disk, so it moves as the tree does,
+three rows that were miscounted as one `outside` are three, and the ungated
+debt is where it was. The ceiling only falls, and it did not have to.
 
 The three ungated, named because they should be:
 
@@ -20674,7 +20629,7 @@ plus instantiate is **0.076–0.077 ms and does not grow with the mesh**, becaus
 a graph's cost is in its node count; the host mesh rebuild is **2.3 / 12.8 /
 30.7 ms** at 512 / 4096 / 13824 cells and grows linearly. At a 2 % overhead
 budget that is an adapt every **470 / 2389 / 5415 steps**, against 15 if the
-recapture were the only cost. A flame or a plume moves in tens of steps, so an
+recapture were the only cost. A buoyant plume moves in tens of steps, so an
 adapt at that cadence is an adapt that has stopped being adaptive.
 
 §75.8 then named the culprit: `mesh/geometry.rs::compute`, "1396 host lines of
@@ -20945,7 +20900,7 @@ The §75.8 table, re-measured with two columns added. `t_planD` is the same
 
 **The answer to the question asked is that the cadence improves by 17 % and
 that is not enough.** N at 13824 cells falls from 5415 to 4479. The adapt is
-still two orders of magnitude off the cadence a moving flame needs, and it is
+still two orders of magnitude off the cadence a moving front needs, and it is
 off it for a reason this section can now name precisely rather than estimate:
 **the emitter**.
 
@@ -21463,7 +21418,7 @@ at which anyone adapts a 64-cell box.
 * **(83.1), §75.6's conservative prolongation weight.** `adapt::plan` divides
   each child's volume by the sum over its family. This is what makes the
   transfer conserve, and it is the reason the array cannot simply be dropped.
-* **(83.2), `GpuMesh::total_volume`.** A report, and `bin/fire.rs` divides a
+* **(83.2), `GpuMesh::total_volume`.** A report, and `bin/lowmach.rs` divides a
   heater power by it, so it is a report with a physical consequence. It is
   taken from the same downloaded copy and costs nothing extra.
 
@@ -21914,7 +21869,7 @@ would remove one of them; nothing else here is worth spending on a 64-cell mesh.
 forty.** One step is 0.281 ms; an adapt every 30 steps would cost 84 % of the
 run. At the 2 % budget this table reports, an adapt is affordable every 1 287
 steps; at a 10 % budget, every 257. That is enough for a slowly moving front
-and not for a flame, which is the case §75.8 posed. What stands between here
+and not for a fast-moving one, which is the case §75.8 posed. What stands between here
 and that number is no longer the emitter: **5.33 ms of the 7.08 is everything
 but it**, and of that only 0.77 is device arithmetic — the geometry kernels.
 The rest is host loops, a host prologue and two round trips, and each of them
@@ -21981,24 +21936,22 @@ table.
 
 ## 86. The species equation in `d(rho Y)/dt + div(rho u, Y)` — the budget that closes by construction, and the two terms nobody was metering
 
-**On the numbers in this section.** The measurement that produced them was a
-reacting-medium case — a burner with a mixing-controlled reaction and a soot
-model above §19's species set — and that physics is **not part of this
-engine**; it is a separate product. What is here, and what every module that
-cites this section uses, is the EQUATION and its two structural claims: that a
-scalar convected by a volumetric flux conserves `sum_c Y_P V_P` and not
-`sum_c rho_P Y_P V_P`, and that the difference between the conservative and
-the `bounded` form is exactly the scalar-weighted discrete continuity residual.
-Both are properties of `ScalarTransport` on any variable-density flow and both
-are held by device tests in this tree (§86.5). The four-leg run that first
-measured them cannot be re-run here, and §86.10 says so rather than leaving a
-reader to discover it.
+**On the numbers in this section.** They were measured on one strongly
+source-driven case, on one mesh, and that run is not reproducible in this tree
+— §86.10 says so plainly rather than leaving a reader to discover it. What is
+here, and what every module that cites this section uses, is the EQUATION and
+its two structural claims: that a scalar convected by a volumetric flux
+conserves `sum_c Y_P V_P` and not `sum_c rho_P Y_P V_P`, and that the
+difference between the conservative and the `bounded` form is exactly the
+scalar-weighted discrete continuity residual. Both are properties of
+`ScalarTransport` on any variable-density flow and both are held by device
+tests in this tree (§86.5).
 
 An earlier measurement recorded a species mass budget that closed in neither
-discretisation — **`−17 %`** conservative, **`+162 %`** bounded, against a
-2.95 kW supply — and named what to fix: *"the next unit of work here is a
-species equation in `rho Y`, not another case file."* This section is that
-equation, and it finds three things.
+discretisation — **`−17 %`** conservative, **`+162 %`** bounded — and named
+what to fix: *"the next unit of work here is a species equation in `rho Y`,
+not another case file."* This section is that equation, and it finds three
+things.
 
 **One.** `ScalarTransport` integrated `ddt(psi) + div(phi, psi)` with a
 volumetric `phi`, so it conserved `sum_c Y_P V_P` while the budget meters
@@ -22008,7 +21961,7 @@ a discretisation error; it is a currency error**, and no amount of refinement
 touches it.
 
 **Two.** The budget was missing two terms of its own. It reads
-`supply = burnt + efflux + d(resident)/dt`, evaluates the first two and prints
+`supply = S + efflux + d(resident)/dt`, evaluates the first two and prints
 `resident` as a mass rather than a rate — and it has no term at all for the
 **diffusive** flux across the boundary, which on a `fixedValue` inlet is not
 small: **1.73 kW against a 2.95 kW convective supply, 59 % of it.** Both terms
@@ -22152,7 +22105,7 @@ requirement 3 one field up: not "use a conservative flux" but "use *the same*
 one the instrument reads".
 
 `D_b` is §86.9's subject: it is in the equation, it has never been in the
-budget, and it is 59 % of the supply on this burner.
+budget, and on the case that was measured it is 59 % of the boundary supply.
 
 ### 86.3 The equation, term by term, and the one assembly it reaches
 
@@ -22213,8 +22166,8 @@ solenoidal.
 equations over the domain, with `D_b` for the boundary diffusive influx:
 
 ```text
-conservative : d(resident)/dt + efflux + burnt - supply - D_b  =  0        (86.5)
-bounded      : d(resident)/dt + efflux + burnt - supply - D_b  =  sum_c Y_P R_P
+conservative : d(resident)/dt + efflux - supply - S - D_b  =  0            (86.5)
+bounded      : d(resident)/dt + efflux - supply - S - D_b  =  sum_c Y_P R_P
                                                                            (86.6)
 ```
 
@@ -22229,8 +22182,9 @@ annihilated by `cp rho T = const` and the residual half carrying the whole
 energy-balance gap. Here neither half is annihilated, because `Y` is not `T`
 and there is no ideal-gas identity to kill anything.
 
-`sum_c Y_P R_P` is printed by every mass-weighted run, in kW of
-fuel-equivalent, beside the budget it explains and with `R_P`'s L1 norm and
+`S` is `sum_c S_i,P V_P`, the §18 volumetric source term summed over the
+domain, and is zero unless a case names one. `sum_c Y_P R_P` is available to
+every mass-weighted run beside the budget it explains, with `R_P`'s L1 norm and
 worst cell. The record's first open candidate — *"the `d(rho)/dt` half of the
 difference above, which `bounded` does not touch"* — is that first term of
 (86.4), and it is now a number.
@@ -22287,7 +22241,7 @@ two published numbers on a tree that contains all of §86.
 | a case key naming the species equation | **Not read, and none exists.** §86 is selected on the command line, beside the other legs the recorded run measured and compared. A case key would have to default to `Y` for the same reason the flag does, so it would buy reachability this already has. **Alternative: `-speciesEquation rhoY`.** Recorded here rather than left to be discovered. |
 | `ddtSchemes` naming `localEuler`, with `rhoY` | **Refused by name.** The local step (§13.2) is a per-cell preconditioner wearing a time derivative's clothes; `d(rho Y)/dt` with a different `dt` in every cell conserves nothing, and (86.4) would be a statement about the preconditioner. **Alternatives named in the message: `Euler`, `backward`, `steadyState`.** |
 | `ddtSchemes` naming `steadyState`, with `rhoY` | Honoured, and the `ddt` half of (86.4) is identically zero — the same no-op it is for the constant-density equation. |
-| `bounded Gauss ...` on `div(phi,Y_i)`, with `rhoY` | **Honoured, and its cost is printed.** It is what the gate case named, and refusing it would refuse the configuration that was measured. What it costs is (86.6)'s `sum_c Y_P R_P`, reported in kW beside the budget it explains. **Alternative, on the line above it: the unbounded scheme, which closes (86.5).** |
+| `bounded Gauss ...` on `div(phi,Y_i)`, with `rhoY` | **Honoured, and its cost is measurable.** It is what the recorded case named, and refusing it would refuse the configuration that was measured. What it costs is (86.6)'s `sum_c Y_P R_P`, beside the budget it explains. **Alternative, on the line above it: the unbounded scheme, which closes (86.5).** |
 | a scalar transported OUTSIDE §19's closure by its own `ScalarTransport`, with `rhoY` | **Left volumetric, deliberately.** Such a scalar's source is `omega/rho`-shaped — the non-conservative form — and moving it would be a second unmeasured change on top of the one this section measures. Named here so it is on the record. |
 | §77's vapour coupling, with `rhoY` | **Cannot arise in the driver this was measured through** — it has no parcels — and would be wrong if it could. §77.3 derives `S = mdot'''(1 - Y_v)/rho` for §19's non-conservative form; (86.1) wants `mdot'''(1 - Y_v)`, a factor of `rho` larger. §77.3 already states which equation its source belongs to; this row records the second equation it does not belong to. |
 | the species LINEAR SOLVER | Still `k_solver`, still a substitution. Unchanged here. |
@@ -22314,9 +22268,9 @@ have recorded whichever it was on the capture pass.
 
 ### 86.9 The budget's other two terms, and the clip that turned out not to matter
 
-The budget is `supply = burnt + efflux + d(resident)/dt`, and the run
-printed the first two as rates and the third as a MASS. There is no fourth
-term at all. Both omissions are now closed, and one of them is large.
+The budget the record kept was `supply = S + efflux + d(resident)/dt`, printed
+with the first two as rates and the third as a MASS. There is no fourth term at
+all. Both omissions are now closed, and one of them is large.
 
 **The diffusive flux across the boundary.** `laplacian(rho D_eff, Y)` moves
 species mass across a patch exactly as convection does, and on a `fixedValue`
@@ -22343,8 +22297,8 @@ record asserted and
 could not show.
 
 **Two lags are accepted and stated.** `Y_b`, `Y_P` and the resident inventory
-are read post-reaction and post-clip while the equation solved with their
-pre-reaction values, so every term above carries one reaction step of error.
+are read post-source and post-clip while the equation solved with their
+pre-source values, so every term above carries one source step of error.
 Halving `dt` measures what that is worth, and it is first order: 0.869 % of
 the supply at `deltaT 0.0015` and 0.409 % at 0.00075.
 
@@ -22361,13 +22315,13 @@ than deleted.
 
 ### 86.10 What the measurement was, and what is left of it here
 
-The four claims above were measured on a **reacting-medium case**: a burner in
-a 0.5 m cube at 262 144 cells, 2667 steps, run four ways — `Y` (§19) and `rhoY`
+The four claims above were measured on one strongly source-driven case in a
+0.5 m cube at 262 144 cells, 2667 steps, run four ways — `Y` (§19) and `rhoY`
 (§86) crossed with `bounded Gauss upwind` and `Gauss upwind` — with the budget,
 the diffusive flux, the clip ledger and `sum_c Y_P R_P` printed on every leg.
-That case, the reaction that drove it and the soot model it carried are a
-separate product and **are not in this engine**, so the run cannot be repeated
-here and its tables are not reproduced.
+**That case is not in this tree**, so the run cannot be repeated here and its
+tables are not reproduced. What replaced it is not a second case but the device
+tests below, which hold each claim on arithmetic rather than on a run.
 
 What the four legs established, and where each claim now lives:
 
@@ -22376,7 +22330,7 @@ What the four legs established, and where each claim now lives:
 | the conservative `rhoY` equation holds `sum_c rho_P Y_P V_P` fixed on a closed domain, to the linear solver's tolerance | `the_conservative_mass_weighted_equation_holds_the_species_mass_fixed`, a device test (§86.5 row 3) |
 | the two forms differ by exactly `sum_c Y_P R_P` | (86.6), and §86.5's rows on the identity |
 | the `Y` default is bitwise what it was | §86.5 row 5, on `Species::correct`'s delegation - and every driver in this tree reaches that call |
-| the budget's four terms are all computable and all printed | §86.9 |
+| the budget's four terms are all computable and all metered | §86.9 |
 | the boundedness clip is not a mass source of any size that matters | §86.9's ledger, measured at `-0.00044 g` |
 | the residue is first order in `dt` | §86.9, 0.869 % at `deltaT 0.0015` and 0.409 % at half of it |
 
@@ -22390,8 +22344,8 @@ What the four legs established, and where each claim now lives:
   and the fields the meter reads.
 * **that it closes under both convection schemes.** It does not. (86.6) says
   why it cannot while `R_P` is nonzero, the bounded leg measured what that
-  costs — `30.1 kW` of fuel-equivalent on that case — and §86.7's table names
-  the alternative that does close, on the line that reports it.
+  costs on that case, and §86.7's table names the alternative that does close,
+  on the line that reports it.
 * **that the continuity residual has been reduced.** Nothing in this section
   touches it. §86 makes it *visible* and makes one discretisation independent
   of it.
@@ -22400,12 +22354,12 @@ What the four legs established, and where each claim now lives:
   extra pressure-shaped solve per step — is a change to §25.3 and to the cost
   of every time step.
 * **that the mass-weighted equation was measured on more than one case.** It
-  was not: one case, one mesh, one RTX 5070 Ti — and that case is no longer
-  here to re-run.
-* **that anything in this section is a statement about a reacting medium.**
-  The reaction, the soot field and the yield comparison that motivated the
-  work all left with the physics. What is specified here is a transport
-  equation.
+  was not: one case, one mesh, one RTX 5070 Ti — and that case is not in this
+  tree to re-run.
+* **that anything in this section is a statement about any particular
+  physics.** What is specified here is a transport equation and two identities
+  about its discretisation; the case that motivated the work supplied the
+  numbers and none of the structure.
 
 ## 87. Marangoni convection — the term a face scalar structurally cannot hold
 
@@ -22863,7 +22817,7 @@ produced, and there is therefore nothing to print. Calling them `OPEN` would
 put them beside §32.4's three legs and §78.10's Gate 78-D — comparisons that
 were performed and whose results fall outside a band or between two
 disagreeing sources — and that equivalence would be false. `ofgpu-validate`
-reports **two** `MISSES` and **five** `OPEN` (§69.10); §87 adds neither, and
+reports **two** `MISSES` and **five** `OPEN`; §87 adds neither, and
 "not run" belongs in §87.10's scope statement rather than in a registry of
 results. Registering an entry with no measurement in it would be exactly the
 confusion §69 exists to prevent, in the opposite direction.

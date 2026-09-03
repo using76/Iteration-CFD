@@ -1183,7 +1183,7 @@ mod tests {
 
         let dt: Scalar = 0.004;
         let coeffs = ScalarTransportCoeffs { pr: 0.71, prt: 0.7 };
-        let mut st = ScalarTransport::new(&g, &hm, &m, "Y_F", coeffs, mass_controls(dt))?;
+        let mut st = ScalarTransport::new(&g, &hm, &m, "Y_A", coeffs, mass_controls(dt))?;
         st.use_mass_weighting(&g)?;
 
         let rho = seeded_density(&g, &m, &hm)?;
@@ -1322,7 +1322,7 @@ mod tests {
 
         let mut mass = [Vec::new(), Vec::new()];
         for (slot, weighted) in [true, false].into_iter().enumerate() {
-            let mut st = ScalarTransport::new(&g, &hm, &m, "Y_F", coeffs, mass_controls(dt))?;
+            let mut st = ScalarTransport::new(&g, &hm, &m, "Y_A", coeffs, mass_controls(dt))?;
             if weighted {
                 st.use_mass_weighting(&g)?;
             }
@@ -1420,7 +1420,7 @@ mod tests {
         let flow = FlowState::new(&u, &phi, 1.5e-5);
 
         // Volumetric equation, handed a density.
-        let mut st = ScalarTransport::new(&g, &hm, &m, "Y_F", coeffs, mass_controls(0.004))?;
+        let mut st = ScalarTransport::new(&g, &hm, &m, "Y_A", coeffs, mass_controls(0.004))?;
         st.initialise(&g)?;
         let e = st
             .correct_with_density(&g, &flow, &nut, None, Some(&rho))
@@ -1429,7 +1429,7 @@ mod tests {
         assert!(msg.contains("use_mass_weighting"), "the refusal must name the way out: {msg}");
 
         // Mass-weighted equation, corrected without one.
-        let mut st = ScalarTransport::new(&g, &hm, &m, "Y_F", coeffs, mass_controls(0.004))?;
+        let mut st = ScalarTransport::new(&g, &hm, &m, "Y_A", coeffs, mass_controls(0.004))?;
         st.use_mass_weighting(&g)?;
         st.initialise(&g)?;
         let e = st

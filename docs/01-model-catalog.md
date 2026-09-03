@@ -12,14 +12,14 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 |---|---:|
 | [Linear algebra: lduMatrix solvers, preconditioners, smoothers, AMG](#linear-algebra-ldumatrix-solvers,-preconditioners,-smoothers,-amg) | 91 |
 | [Momentum transport / turbulence](#momentum-transport--turbulence) | 129 |
-| [Thermophysical, combustion, radiation, chemistry](#thermophysical,-combustion,-radiation,-chemistry) | 272 |
-| [Multiphase, two-phase, lagrangian, waves](#multiphase,-two-phase,-lagrangian,-waves) | 291 |
+| [Thermophysical and chemistry](#thermophysical-and-chemistry) | 212 |
+| [Multiphase, two-phase, lagrangian, waves](#multiphase,-two-phase,-lagrangian,-waves) | 289 |
 | [finiteVolume discretisation schemes, surface interpolation and fvMatrix](#finitevolume-discretisation-schemes,-surface-interpolation-and-fvmatrix) | 317 |
 | [Mesh: Mesh generation and manipulation](#mesh-mesh-generation-and-manipulation) | 145 |
 | [Mesh: Mesh tools and searching](#mesh-mesh-tools-and-searching) | 187 |
 | [Mesh: Mesh motion, run-time topology change, decomposition](#mesh-mesh-motion,-run-time-topology-change,-decomposition) | 187 |
 | [Mesh: Core mesh data structures](#mesh-core-mesh-data-structures) | 204 |
-| **Total** | **1823** |
+| **Total** | **1761** |
 
 ---
 
@@ -565,7 +565,7 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 
 | Name | Keyword | Path | What it computes | Equations |
 |---|---|---|---|---|
-| `LaunderSharmaKE` | `RAS { model LaunderSharmaKE; } (incompressible, compressible)` | `[Foundation-12] src/MomentumTransportModels/momentumTransportModels/RAS/LaunderSharmaKE/LaunderSharmaKE.H` | Launder-Sharma low-Reynolds-number k-epsilon with damping functions, for near-wall-resolved and combusting flows, incl. RDT compression term. | Solves for the reduced dissipation epsilonTilda; fMu = exp(-3.4/sqr(1 + sqr(k)/(nu*eps)/50)); f2 = 1 - 0.3exp(-min(sqr(sqr(k)/(nu*eps)),50)); extra terms E = 2*nu*nut*magSqr(grad grad U) and D = 2*nu*magSqr(grad sqrt(k)). Coeffs Cmu 0.09, C1 1.44, C2 1.92, C3 0, alphah 1.0, alphahk 1.0, alphaEps 0.76923. |
+| `LaunderSharmaKE` | `RAS { model LaunderSharmaKE; } (incompressible, compressible)` | `[Foundation-12] src/MomentumTransportModels/momentumTransportModels/RAS/LaunderSharmaKE/LaunderSharmaKE.H` | Launder-Sharma low-Reynolds-number k-epsilon with damping functions, for near-wall-resolved flows, incl. RDT compression term. | Solves for the reduced dissipation epsilonTilda; fMu = exp(-3.4/sqr(1 + sqr(k)/(nu*eps)/50)); f2 = 1 - 0.3exp(-min(sqr(sqr(k)/(nu*eps)),50)); extra terms E = 2*nu*nut*magSqr(grad grad U) and D = 2*nu*magSqr(grad sqrt(k)). Coeffs Cmu 0.09, C1 1.44, C2 1.92, C3 0, alphah 1.0, alphahk 1.0, alphaEps 0.76923. |
 | `RNGkEpsilon` | `RAS { model RNGkEpsilon; } (incompressible, compressible, phaseCompressible)` | `[Foundation-12] src/MomentumTransportModels/momentumTransportModels/RAS/RNGkEpsilon/RNGkEpsilon.H` | Renormalisation-group k-epsilon (Yakhot et al. 1992) for incompressible/compressible flow. | As kEpsilon but with the strain-dependent C1 correction: C1RNG = C1 - eta*(1 - eta/eta0)/(1 + beta*eta^3), eta = S*k/eps. Coeffs Cmu 0.0845, C1 1.42, C2 1.68, C3 0, sigmak 0.71942, sigmaEps 0.71942, eta0 4.38, beta 0.012. |
 | `SpalartAllmaras` | `RAS { model SpalartAllmaras; } (incompressible, compressible)` | `[Foundation-12] src/MomentumTransportModels/momentumTransportModels/RAS/SpalartAllmaras/SpalartAllmaras.H` | Spalart-Allmaras one-equation mixing-length model for external aerodynamic flows; implemented without the trip term (ft2 omitted), with Spalart's Stilda clipping at Cs*Omega. | ddt(a,rho,nuTilda)+div(aRhoPhi,nuTilda)-laplacian(a*rho*DnuTildaEff,nuTilda) - Cb2/sigmaNut*a*rho*magSqr(grad nuTilda) = Cb1*a*rho*Stilda*nuTilda - fvm::Sp(Cw1*a*rho*fw*nuTilda/sqr(y), nuTilda); nut = nuTilda*fv1, fv1 = chi^3/(chi^3+Cv1^3). Coeffs Cb1 0.1355, Cb2 0.622, Cw2 0.3, Cw3 2.0, Cv1 7.1, Cs 0.3, sigmaNut 0.66666, kappa 0.41. |
 | `kEpsilon` | `RAS { model kEpsilon; } (all four variants incl. phaseIncompressible, phaseCompressible)` | `[Foundation-12] src/MomentumTransportModels/momentumTransportModels/RAS/kEpsilon/kEpsilon.H` | Standard Launder-Spalding k-epsilon model for incompressible and compressible flow, including an RDT-based compression term (El Tahry). | ddt(a,rho,eps)+div(aRhoPhi,eps)-laplacian(a*rho*DepsilonEff,eps) = C1*a*rho*G*eps/k - SuSp(((2/3)C1-C3)*a*rho*divU, eps) - Sp(C2*a*rho*eps/k, eps); ddt(a,rho,k)+div(aRhoPhi,k)-laplacian(a*rho*DkEff,k) = a*rho*G - SuSp((2/3)a*rho*divU,k) - Sp(a*rho*eps/k, k); nut = Cmu*k^2/eps. Coeffs Cmu 0.09, C1 1.44, C2 1.92, C3 0, sigmak 1.0, sigmaEps 1.3. |
@@ -854,7 +854,7 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 
 ---
 
-## Thermophysical, combustion, radiation, chemistry
+## Thermophysical and chemistry
 
 > **Subsystem notes**
 >
@@ -878,32 +878,11 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 > irreversibleArrhenius, reversibleArrhenius, nonEquilibriumReversibleArrhenius, reversibleThirdBodyArrhenius, irreversibleArrheniusLindemannFallOff, reversibleArrheniusTroeFallOff, irreversibleArrheniusSRIChemicallyActivated, reversibleLangmuirHinshelwood, irreversibleMichaelisMenten (liquids only), irreversiblefluxLimitedLangmuirHinshelwood (gases only), irreversiblesurfaceArrhenius.
 > FallOff and ChemicallyActivated are only instantiated with ArrheniusReactionRate as the inner rate, and with the three fall-off functions Lindemann/Troe/SRI.
 > Reactions using surface or flux-limited rates are registered in the objectRegistry table rather than the dictionary table because they need field access.
-> STRUCTURAL POINT 4 - combustionModel::New and sootModel::New both strip legacy template parameters from the model name using basicThermo::splitThermoName and warn; the thermo package is now taken from the thermo object rather than the dictionary.
-> combustionModel defaults to noCombustion if constant/combustionProperties is absent. STRUCTURAL POINT 5 - AntoineExtended is present in the tree but its source file is commented out of src/thermophysicalModels/saturationModels/Make/files, so it is not compiled in this release.
+> STRUCTURAL POINT 4 - AntoineExtended is present in the tree but its source file is commented out of src/thermophysicalModels/saturationModels/Make/files, so it is not compiled in this release.
 > Also note constantPressure and constantTemperature BOTH register under the keyword `constant` but in different tables (saturationPressureModel vs saturationTemperatureModel), and Antoine registers in both tables.
-> STRUCTURAL POINT 6 - radiation sub-model selection keywords are the dictionary key names themselves in constant/radiationProperties: radiationModel, absorptionEmissionModel, scatterModel, sootModel.
-> Radiation models are added to two tables at once by the addToRadiationRunTimeSelectionTables(model) macro (radiationModel.H:240): one keyed on (const volScalarField& T), one on (const dictionary&, const volScalarField& T).
-> STRUCTURAL POINT 7 - libraries produced by this subsystem: libspecie, libthermophysicalProperties, libfluidThermophysicalModels, libmulticomponentThermophysicalModels, libsolidThermo, libchemistryModel, liblaminarFlameSpeedModels, libXiIgnition, libsaturationModels, libODE, libcombustionModels, libradiationModels, libphysicalProperties, libspecieTransfer.
+> STRUCTURAL POINT 5 - libraries produced by this subsystem: libspecie, libthermophysicalProperties, libfluidThermophysicalModels, libmulticomponentThermophysicalModels, libsolidThermo, libchemistryModel, libsaturationModels, libODE, libphysicalProperties, libspecieTransfer.
 > WHAT IS NOT IN THIS SUBSYSTEM (so this catalogue deliberately contains no RAS/LES/wall-function/divergence-scheme/limiter/linear-solver/preconditioner/smoother/mesh entries): turbulence RAS and LES models and wall functions live in src/MomentumTransportModels and src/ThermophysicalTransportModels; interpolation/divergence schemes, limitedSurfaceInterpolationScheme limiters, linear solvers, preconditioners and smoothers live in src/finiteVolume and src/OpenFOAM; mesh generation, motion and topology changes live in src/mesh, src/motionSolvers, src/fvMotionSolver, src/fvMeshMovers, src/fvMeshTopoChangers, src/fvMeshStitchers, src/fvMeshDistributors and src/polyTopoChange.
 > Within the six assigned paths the only "solvers" are the 13 ODESolvers and the 3 chemistrySolvers listed above; there are no scheme limiters, no linear-algebra solvers and no mesh classes at all.
-
-### FSD sub-model  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `reactionRateFlameAreaModels::relaxation` | `relaxation (coefficients C, alpha, fuel)` | `src/combustionModels/FSD/reactionRateFlameAreaModels/relaxation` | Solves a relaxation transport equation for the consumption rate per unit flame area towards the strained-flamelet equilibrium value | d(rho*omega)/dt + div(phi,omega) = rho*Rc*omegaInf - Sp(rho*Rc, omega); sigmaTotal = sigma + alpha*epsilon/(k + kMin) |
-
-### FSD sub-model base  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `reactionRateFlameArea` | `reactionRateFlameArea (entry in the FSD coefficients)` | `src/combustionModels/FSD/reactionRateFlameAreaModels/reactionRateFlameArea` | Abstract base and selection table for the reaction rate per unit flame area used by FSD | omega = f(sigma, ...) |
-
-### FSD sub-model helper  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `consumptionSpeed` | `consumptionSpeed sub-dictionary (omega0, eta, sigmaExt, omegaMin)` | `src/combustionModels/FSD/reactionRateFlameAreaModels/consumptionSpeed` | Correlation for the laminar consumption speed versus strain rate, fitted to strained flamelet solutions with an exponential distribution | omega(sigma) fitted with omega0, eta, sigmaExt, omegaMin |
 
 ### ODE solver (Rosenbrock, stiff)  <sub>(5)</sub>
 
@@ -1024,38 +1003,6 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 |---|---|---|---|---|
 | `binaryTree / binaryNode / chemPointISAT` |  | `src/thermophysicalModels/chemistryModel/chemistryModel/tabulation/ISAT` | Binary search tree, splitting node (hyperplane test) and leaf storing the composition, mapping, mapping gradient A and the EOA matrix L | Node test v.(phi - phi_split) > 0; EOA test \|\|L.(phi - phi0)\|\| <= 1 |
 
-### combustion ignition  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `ignition` | `ignite yes\|no with an ignitionSites list in combustionProperties` | `src/thermophysicalModels/ignition` | Holds a list of ignitionSites and applies their source to the regress-variable/b equation (library libXiIgnition) | Adds a source over each site's duration and strength |
-| `ignitionSite` | `location / diameter / start / duration / strength entries` | `src/thermophysicalModels/ignition/ignitionSite.H` | A single spherical ignition kernel defined by location, diameter, start time, duration and strength; finds the enclosed cells and their volumes | Source applied to cells within diameter/2 of the location between start and start+duration |
-
-### combustion model  <sub>(7)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `combustionModels::EDC` | `EDC with EDCCoeffs { version v1981 \| v1996 \| v2005 (default) \| v2016; Cgamma; Ctau; C1; C2; }` | `src/combustionModels/EDC` | Eddy Dissipation Concept: reaction confined to fine structures whose mass fraction and residence time come from an energy cascade; four selectable model versions with different exponents | gammaL = Cgamma*(nu*epsilon/k^2)^0.25; tauStar = Ctau*sqrt(nu/epsilon); kappa = gammaL^exp1/(1 - gammaL^exp2); v2016 rescales Ctau and Cgamma with Da and ReT |
-| `combustionModels::FSD` | `FSD (with a reactionRateFlameArea sub-model, Cv, ftVarMin)` | `src/combustionModels/FSD` | Flame Surface Density model intended for LES: fuel source is filtered flame area times combustion-progress probability times filtered consumption speed, with beta-PDF filtering when the sub-grid mixture-fraction fluctuation exceeds 1e-4 and linear flame thickening when unresolved | wFuel = mgft*pc*omegaFuelBar |
-| `combustionModels::PaSR` | `PaSR (coefficient Cmix)` | `src/combustionModels/PaSR` | Partially Stirred Reactor: blends the laminar chemical rate with a turbulent mixing time scale through the reacting fraction kappa | tk = Cmix*sqrt(nuEff/epsilon); kappa = tc/(tc + tk); R = kappa*R_laminar |
-| `combustionModels::diffusion` | `diffusion (coefficients C, oxidant)` | `src/combustionModels/diffusion` | Diffusion-controlled single-step model; the burn rate follows the scalar gradient product of fuel and oxidant | wFuel = C*rho*nuEff*\|grad(YFuel) . grad(YO2)\|*pos0(YFuel)*pos0(YO2) |
-| `combustionModels::infinitelyFastChemistry` | `infinitelyFastChemistry (coefficient C)` | `src/combustionModels/infinitelyFastChemistry` | Mixed-is-burnt single-step model; burn rate limited only by local fuel/oxidant availability and spread over C time steps | wFuel = rho/(deltaT*C)*min(YFuel, YO2/s) with s the stoichiometric oxidant/fuel mass ratio |
-| `combustionModels::laminar` | `laminar (integrateReactionRate, maxIntegrationTime, outerCorrect)` | `src/combustionModels/laminar` | Laminar finite-rate combustion: reaction rates taken directly from the chemistry model, optionally integrated over the time step | R_i = chemistry RR_i; Qdot from the chemistry heat release |
-| `combustionModels::none` | `none` | `src/combustionModels/noCombustion` | Dummy model with zero reaction rate and zero heat release; also the default when combustionProperties is absent | R = 0; Qdot = 0 |
-
-### combustion model (wrapper)  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `combustionModels::zoneCombustion` | `zoneCombustion (entries: zones plus the wrapped model's dictionary)` | `src/combustionModels/zoneCombustion` | Wraps another combustion model and filters its sources so reactions are active only inside a named list of cell zones | R_filtered = filter(R_base), zero outside the zones; Qdot likewise filtered |
-
-### combustion model base  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `combustionModel` | `combustionModel (entry in constant/combustionProperties)` | `src/combustionModels/combustionModel` | Base class for combustion models providing R(specie) and R(Y) source matrices and Qdot(); New() reads the model name from constant/combustionProperties and strips legacy template parameters | R_i [kg/m^3/s]; Qdot = -sum_i hf_i*R_i |
-| `combustionModels::singleStepCombustion` |  | `src/combustionModels/singleStepCombustion` | Base for single-step irreversible fuel + oxidant -> products models; holds the stoichiometry, the fres residue fields and the optional semi-implicit source linearisation | R_i = wFuel*nu_i; semi-implicit form R = -fNorm*wSpecie*fres + fNorm*Sp(wSpecie, Y) |
-
 ### energy boundary condition  <sub>(4)</sub>
 
 | Name | Keyword | Path | What it computes | Equations |
@@ -1112,40 +1059,12 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 | `functionObjects::adjustTimeStepToChemistry` | `adjustTimeStepToChemistry (phase)` | `src/thermophysicalModels/chemistryModel/functionObjects/adjustTimeStepToChemistry` | Limits the solver time step to the minimum chemical time scale deltaTChem; only active if adjustTimeStep is on | deltaT <= min(deltaTChem) |
 | `functionObjects::specieReactionRates` | `specieReactionRates` | `src/thermophysicalModels/chemistryModel/functionObjects/specieReactionRates` | Writes the domain-averaged reaction rate for each specie in each reaction to <timeDir>/specieReactionRates.dat | <RR_ir> = (1/V) integral(nu_ir*omega_r dV) |
 
-### function object (combustion)  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `functionObjects::Qdot` | `Qdot` | `src/combustionModels/functionObjects/Qdot` | Calculates and writes the volumetric heat release rate field of the current combustion model | Qdot = -sum_i hf_i*R_i [W/m^3] |
-| `functionObjects::adjustTimeStepToCombustion` | `adjustTimeStepToCombustion (maxCo default 1, extrapolate default false, phase)` | `src/combustionModels/functionObjects/adjustTimeStepToCombustion` | Limits the solver time step by the bulk reaction time scale (a combustion Courant number); only active if adjustTimeStep is on | deltaT <= maxCo*rho*Y/\|R\| |
-
 ### function object (thermo)  <sub>(2)</sub>
 
 | Name | Keyword | Path | What it computes | Equations |
 |---|---|---|---|---|
 | `functionObjects::massFractions` | `massFractions (optional phase)` | `src/thermophysicalModels/multicomponentThermo/functionObjects/massFractions` | Initialisation helper computing mass fractions from X_ or n_ fields on disk; errors out if mass-fraction fields other than Ydefault already exist | Y_i = X_i*W_i/sum_j(X_j*W_j) |
 | `functionObjects::moleFractions` | `moleFractions (optional phase)` | `src/thermophysicalModels/multicomponentThermo/functionObjects/moleFractions` | Computes X_<specie> mole-fraction fields from the mass fractions of a multicomponent thermo | X_i = (Y_i/W_i)/sum_j(Y_j/W_j) |
-
-### fvModel (radiation source)  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `fv::radiation` | `type radiation in an fvModels sub-dictionary, with libs ("libradiationModels.so")` | `src/radiationModels/fvModels/radiation` | fvModel that constructs a radiationModel and adds its source to the energy equation | he equation source = radiation->Sh(thermo, he), i.e. Ru - Rp*T^4 linearised |
-
-### laminar flame speed  <sub>(4)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `Gulders` | `Gulders` | `src/thermophysicalModels/laminarFlameSpeed/Gulders` | Gulder's correlation for Su in terms of equivalence ratio, unburnt temperature and pressure | Su = W*phi^eta*exp(-xi*(phi - 1.075)^2)*(Tu/Tref)^alpha*(p/pref)^beta |
-| `GuldersEGR` | `GuldersEGR` | `src/thermophysicalModels/laminarFlameSpeed/GuldersEGR` | Gulder's correlation with an exhaust gas recirculation correction | Su = Gulders(phi,Tu,p)*(1 - f*egr) |
-| `RaviPetersen` | `RaviPetersen` | `src/thermophysicalModels/laminarFlameSpeed/RaviPetersen` | Ravi and Petersen polynomial correlation with pressure- and equivalence-ratio-banded coefficients | Su = (sum_i alpha_i*phi^i)*(T/Tref)^(sum_j beta_j*phi^j) |
-| `laminarFlameSpeedModels::constant` | `constant` | `src/thermophysicalModels/laminarFlameSpeed/constant` | Uniform constant laminar flame speed | Su = Su0 |
-
-### laminar flame speed base  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `laminarFlameSpeed` | `laminarFlameSpeedCorrelation (entry in combustionProperties)` | `src/thermophysicalModels/laminarFlameSpeed/laminarFlameSpeed` | Abstract base and selection table for the laminar flame speed Su, constructed from a psiuMulticomponentThermo with fuel and equivalenceRatio | Su = f(p, Tu, phi) |
 
 ### liquid properties (generic)  <sub>(1)</sub>
 
@@ -1207,15 +1126,6 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 |---|---|---|---|---|
 | `liquidPropertiesSelector` |  | `src/thermophysicalModels/thermophysicalProperties/liquidProperties/liquidProperties/liquidPropertiesSelector.H` | Run-time-selectable liquidProperties presented as a compile-time thermo type; the basis of liquidThermo |  |
 
-### mixture (premixed combustion)  <sub>(4)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `egrMixture` | `egrMixture` | `src/thermophysicalModels/multicomponentThermo/mixtures/egrMixture` | Premixed mixture with exhaust gas recirculation, parameterised by ft, b and egr | mixture evaluated from (ft, b, egr) |
-| `homogeneousMixture` | `homogeneousMixture` | `src/thermophysicalModels/multicomponentThermo/mixtures/homogeneousMixture` | Two-state reactants/products mixture parameterised by the regress variable b, for the Xi/b premixed combustion thermo | mixture = b*reactants + (1-b)*products |
-| `inhomogeneousMixture` | `inhomogeneousMixture` | `src/thermophysicalModels/multicomponentThermo/mixtures/inhomogeneousMixture` | Fuel/oxidant/products mixture parameterised by b and the total fuel mass fraction ft | mixture evaluated from (ft, b) |
-| `veryInhomogeneousMixture` | `veryInhomogeneousMixture` | `src/thermophysicalModels/multicomponentThermo/mixtures/veryInhomogeneousMixture` | As inhomogeneousMixture but carrying an additional unburnt fuel fraction fu | mixture evaluated from (ft, fu, b) |
-
 ### mixture (thermo mixing)  <sub>(5)</sub>
 
 | Name | Keyword | Path | What it computes | Equations |
@@ -1244,116 +1154,6 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 |---|---|---|---|---|
 | `physicalProperties` | `constant/physicalProperties dictionary` | `src/physicalProperties/physicalProperties` | Base class for the physicalProperties IOdictionary, with backwards-compatible reading of transportProperties/thermophysicalProperties |  |
 | `viscosity` |  | `src/physicalProperties/viscosity` | Abstract base class for all fluid physical properties, providing nu() | nu [m^2/s] |
-
-### radiation (fvDOM) component  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `radiativeIntensityRay` |  | `src/radiationModels/radiationModels/fvDOM/radiativeIntensityRay` | Holds and solves the intensity for one discrete direction/solid angle per wavelength band, accumulating qr, Qr, Qin and Qem | fvm::div(Ji, I) + fvm::Sp(k*omega, I) == (omega/pi)*((k - aDisp)*bLambda + E/4) |
-
-### radiation BC helper  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `radiationCoupledBase` | `emissivityMode lookup \| solidRadiation` | `src/radiationModels/derivedFvPatchFields/radiationCoupledBase` | Common emissivity handling for radiation boundary conditions: read from the dictionary, or mapped from the adjacent solid thermo |  |
-
-### radiation absorption/emission  <sub>(5)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `absorptionEmissionModels::binary` | `binary (binaryCoeffs: model1, model2 sub-dictionaries)` | `src/radiationModels/absorptionEmissionModels/binary` | Sums the contributions of two nested absorption/emission models | a = a1 + a2; e = e1 + e2; E = E1 + E2 |
-| `absorptionEmissionModels::constant` | `constant (constantCoeffs: absorptivity, emissivity, E)` | `src/radiationModels/absorptionEmissionModels/constantAbsorptionEmission` | Uniform constant absorptivity, emissivity and emission contribution for the continuous phase | a = absorptivity; e = emissivity; E = E |
-| `absorptionEmissionModels::greyMean` | `greyMean (greyMeanCoeffs: lookUpTableFileName, EhrrCoeff, per-specie Tcommon/Tlow/Thigh/invTemp/loTcoeffs/hiTcoeffs)` | `src/radiationModels/absorptionEmissionModels/greyMean` | Grey-mean absorption from per-specie polynomial coefficients evaluated at mole fraction times pressure in atm, taken from a speciesTable look-up table and/or from solved species (CO and soot multiplied by their mass fractions) | a = sum_i k_i(T)*X_i*p*9.869231e-6; e = a; E = EhrrCoeff*Qdot |
-| `absorptionEmissionModels::none` | `none` | `src/radiationModels/absorptionEmissionModels/noAbsorptionEmission` | Zero absorption and emission | a = e = E = 0 |
-| `absorptionEmissionModels::wideBand` | `wideBand (wideBandCoeffs: bandN { bandLimits; per-specie coefficients; EhrrCoeff; })` | `src/radiationModels/absorptionEmissionModels/wideBand` | Wide-band model with per-band species absorption polynomials, bandLimits and per-band EhrrCoeff; bands must not overlap or leave gaps and must list the species in the same order | a_band = sum_i k_i,band(T)*X_i*p*9.869231e-6 |
-
-### radiation absorption/emission (combustion)  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `absorptionEmissionModels::greyMeanCombustion` | `greyMeanCombustion` | `src/combustionModels/radiationModels/absorptionEmissionModels/greyMeanCombustion` | Exactly greyMean but with the additional emission contribution from the combustion heat release rate | a as greyMean; E = EhrrCoeff*Qdot from the combustion model |
-| `absorptionEmissionModels::wideBandCombustion` | `wideBandCombustion` | `src/combustionModels/radiationModels/absorptionEmissionModels/wideBandCombustion` | Exactly wideBand but with the additional per-band emission contribution from the combustion heat release rate | a_band as wideBand; E_band = EhrrCoeff_band*Qdot |
-
-### radiation absorption/emission base  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `absorptionEmissionModel` | `absorptionEmissionModel (entry in radiationProperties)` | `src/radiationModels/absorptionEmissionModels/absorptionEmissionModel` | Base and selection table supplying absorption a, emission e and emission contribution E, each split into continuous-phase, dispersed and soot contributions | a = aCont + aDisp + aSoot (likewise e and E) |
-
-### radiation boundary condition  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `MarshakRadiationFixedTemperatureFvPatchScalarField` | `MarshakRadiationFixedTemperature (Trad, emissivityMode)` | `src/radiationModels/derivedFvPatchFields/MarshakRadiationFixedTemperature` | Marshak condition for G with a user-supplied radiation temperature field Trad | As MarshakRadiation but with T replaced by the supplied Trad |
-| `MarshakRadiationFvPatchScalarField` | `MarshakRadiation (T, emissivityMode)` | `src/radiationModels/derivedFvPatchFields/MarshakRadiation` | Mixed Marshak condition for the incident radiation G, with the radiation temperature retrieved from a named temperature field | Marshak condition relating dG/dn and G to sigma*T^4 through the patch emissivity |
-
-### radiation boundary condition (fvDOM)  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `greyDiffusiveRadiationMixedFvPatchScalarField` | `greyDiffusiveRadiation (T, emissivityMode)` | `src/radiationModels/derivedFvPatchFields/greyDiffusiveRadiation` | Grey-diffuse wall condition for the fvDOM ray intensity I, temperature taken from the T boundary condition | I_out = (e*sigma*T^4 + (1-e)*qin)/pi for outgoing directions; zeroGradient for incoming |
-| `wideBandDiffusiveRadiationMixedFvPatchScalarField` | `wideBandDiffusiveRadiation` | `src/radiationModels/derivedFvPatchFields/wideBandDiffusiveRadiation` | Wide-band diffusive condition for the band intensities with a specified patch temperature | I_band,out = (e*Eb_band(T) + (1-e)*qin_band)/pi |
-
-### radiation boundary condition (viewFactor)  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `greyDiffusiveViewFactorFixedValueFvPatchScalarField` | `greyDiffusiveRadiationViewFactor (qro, emissivityMode)` | `src/radiationModels/derivedFvPatchFields/greyDiffusiveViewFactor` | Grey-diffuse fixed-value condition for the radiative heat flux qr used by the view factor model, with an external radiative flux qro | qr obtained from the view-factor system solve; qro added as an external contribution |
-
-### radiation component  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `absorptionCoeffs` |  | `src/radiationModels/radiationModels/fvDOM/absorptionCoeffs` | Two-range (loTcoeffs/hiTcoeffs split at Tcommon) polynomial absorption coefficients, optionally in inverse temperature; used by greyMean and wideBand | k = sum_{n=0..5} a_n*T^(+/-n) |
-| `blackBodyEmission` |  | `src/radiationModels/radiationModels/fvDOM/blackBodyEmission` | Black body emissive power per band, interpolated from the Modest (1993) table of fractional emissive power | Eb = sigma*T^4; band fraction from the tabulated F(lambda*T) |
-
-### radiation model  <sub>(5)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `radiationModels::P1` | `P1` | `src/radiationModels/radiationModels/P1` | P1 (first-order spherical harmonics) diffusion approximation of the RTE, suited to optically thick media (tau = a*L > 3); assumes diffuse surfaces and tends to over-predict fluxes from sources/sinks | laplacian(gamma, G) - Sp(a, G) = -4*e*sigma*T^4 - E with gamma = 1/(3a + sigmaEff); qr = -gamma*snGrad(G); Rp = 4*eCont*sigma; Ru = a*G - E |
-| `radiationModels::fvDOM` | `fvDOM with fvDOMCoeffs { nPhi; nTheta; convergence; maxIter; } and solverFreq` | `src/radiationModels/radiationModels/fvDOM` | Finite Volume Discrete Ordinates Method: solves the RTE for 4*nPhi*nTheta directions in 3-D (4*nPhi in 2-D, 2 in 1-D), iterating to convergence each solverFreq flow iterations; scattering not included | div(Ji, I_lambda) + Sp(k*omega, I_lambda) = (omega/pi)*((k - aDisp)*bLambda + E/4) |
-| `radiationModels::none` | `none` | `src/radiationModels/radiationModels/noRadiation` | No radiation; returns zero energy-equation source terms | Rp = 0; Ru = 0 |
-| `radiationModels::opaqueSolid` | `opaqueSolid` | `src/radiationModels/radiationModels/opaqueSolid` | Radiation for opaque solids: zero energy source but still constructs the absorptionEmission and scatter models so coupled boundary conditions can query emissivity | Rp = 0; Ru = 0 |
-| `radiationModels::viewFactor` | `viewFactor (requires a precomputed view-factor matrix F)` | `src/radiationModels/radiationModels/viewFactor` | Surface-to-surface grey-diffuse view factor model; assembles and solves a dense linear system for the boundary radiative heat fluxes | C q = b with Cij = deltaij/Ej - (1/Ej - 1)Fij, b = A*eb - Ho, eb = sigma*T^4, Aij = deltaij - Fij |
-
-### radiation model base  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `radiationModel` | `radiationModel (entry in constant/radiationProperties)` | `src/radiationModels/radiationModels/radiationModel` | Top-level radiation base owning the absorptionEmission, scatter and soot sub-models and solverFreq; supplies Rp/Ru to the energy equation. addToRadiationRunTimeSelectionTables(model) registers each model in both the T and (dictionary,T) tables | Energy source Sh = Ru - Rp*T^4, linearised in T |
-
-### radiation scatter  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `scatterModels::constant` | `constant (constantCoeffs: sigma, C)` | `src/radiationModels/scatterModels/constantScatter` | Constant scattering coefficient with a linear-anisotropy phase function coefficient C | sigmaEff = sigma*(3 - C) |
-| `scatterModels::none` | `none` | `src/radiationModels/scatterModels/noScatter` | No scattering | sigmaEff = 0 |
-
-### radiation scatter base  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `scatterModel` | `scatterModel (entry in radiationProperties)` | `src/radiationModels/scatterModels/scatterModel` | Base and selection table for the effective scattering coefficient sigmaEff used in the RTE | sigmaEff = f(sigma, phase function) |
-
-### radiation soot  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `sootModels::mixtureFraction` | `mixtureFraction (mixtureFractionCoeffs: nuSoot, Wsoot, mappingField)` | `src/combustionModels/radiationModels/sootModels/mixtureFraction` | Purely a state model: soot amount set by single-step chemistry stoichiometry read from the combustion model, spatially distributed by a normalised product field; soot is not part of the thermodynamics or transported as an extra specie | nuf Fuel + nuOx Ox = nuP P + nuSoot soot; soot distributed by normalising mappingField (default the first product) |
-| `sootModels::none` | `none` | `src/radiationModels/sootModels/noSoot` | No soot model (the default if no sootModel entry is present) | soot = 0 |
-
-### radiation soot base  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `sootModel` | `sootModel (entry in radiationProperties)` | `src/radiationModels/sootModels/sootModel` | Base and selection table for soot models supplying the soot field used by the absorption model; New() strips legacy template parameters from the model name |  |
-
-### radiation utility  <sub>(1)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `interpolationLookUpTable` |  | `src/radiationModels/absorptionEmissionModels/interpolationLookUpTable` | List-of-lists table interpolating on the first (positive, monotonically increasing) dimension; used by greyMean/wideBand for the species table | linear interpolation on the first field |
 
 ### reaction base  <sub>(1)</sub>
 
@@ -1530,7 +1330,7 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 | Name | Keyword | Path | What it computes | Equations |
 |---|---|---|---|---|
 | `basicThermo` | `thermoType { type; mixture; transport; thermo; equationOfState; specie; energy; } or the 4-part { type; mixture; properties; energy; } form` | `src/thermophysicalModels/basic/basicThermo` | Pure-virtual base for all fluid and solid thermodynamics; owns the selection tables, assembles/splits the thermoType name, maps T boundary types onto he boundary types and triggers on-the-fly template compilation |  |
-| `fluidMulticomponentThermo` | `fluidMulticomponentThermo (selection table name)` | `src/thermophysicalModels/multicomponentThermo/fluidMulticomponentThermo` | Multi-species fluid thermo interface adding species diffusivity/mass transfer; this is the table chemistry and combustion models are constructed from |  |
+| `fluidMulticomponentThermo` | `fluidMulticomponentThermo (selection table name)` | `src/thermophysicalModels/multicomponentThermo/fluidMulticomponentThermo` | Multi-species fluid thermo interface adding species diffusivity/mass transfer; this is the table chemistry models are constructed from |  |
 | `fluidThermo` | `fluidThermo (selection table name)` | `src/thermophysicalModels/basic/fluidThermo` | Base for fluid thermodynamics adding p, psi, mu, nu and its own selection table | nu = mu/rho |
 | `liquidThermo` | `thermoType { type heRhoThermo; mixture pureMixture; properties <liquidName>\|liquid; energy sensibleEnthalpy\|sensibleInternalEnergy; }` | `src/thermophysicalModels/basic/liquidThermo` | Liquid thermo built on liquidPropertiesSelector adding surface tension sigma(); registered into the basicThermo, fluidThermo, rhoFluidThermo and liquidThermo tables for both sensible energy forms | All properties come from the selected liquidProperties model; sigma = f(T) |
 | `multicomponentThermo` |  | `src/thermophysicalModels/multicomponentThermo/multicomponentThermo` | Adds species mass-fraction fields Y, per-specie properties and the composition interface on top of basicThermo | sum_i Y_i = 1 |
@@ -1623,14 +1423,6 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 | `polynomialTransport` | `polynomial` | `src/thermophysicalModels/specie/transport/polynomial` | mu and kappa as polynomials in T (templated order, default 8) | mu = sum_i muCoeffs[i]*T^i; kappa = sum_i kappaCoeffs[i]*T^i |
 | `sutherlandTransport` | `sutherland` | `src/thermophysicalModels/specie/transport/sutherland` | Sutherland's law for viscosity with modified-Eucken thermal conductivity for gases | mu = As*sqrt(T)/(1 + Ts/T); kappa = mu*Cv*(1.32 + 1.77*R/Cv) |
 | `tabulatedTransport` | `tabulated` | `src/thermophysicalModels/specie/transport/tabulated` | Uniformly-tabulated mu and kappa vs (p,T) | mu = f_table(p,T); kappa = f_table(p,T) |
-
-### unburnt energy boundary condition  <sub>(3)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `fixedUnburntEnthalpyFvPatchScalarField` | `fixedUnburntEnthalpy` | `src/thermophysicalModels/multicomponentThermo/derivedFvPatchFields/fixedUnburntEnthalpy` | Fixed-value condition for the unburnt enthalpy heu, selected when the Tu condition is fixedValue | heu = heu(p, Tu_patch) |
-| `gradientUnburntEnthalpyFvPatchScalarField` | `gradientUnburntEnthalpy` | `src/thermophysicalModels/multicomponentThermo/derivedFvPatchFields/gradientUnburntEnthalpy` | Fixed-gradient condition for the unburnt enthalpy heu | snGrad(heu) = Cpu*snGrad(Tu) |
-| `mixedUnburntEnthalpyFvPatchScalarField` | `mixedUnburntEnthalpy` | `src/thermophysicalModels/multicomponentThermo/derivedFvPatchFields/mixedUnburntEnthalpy` | Mixed condition for the unburnt enthalpy heu, linearised from the mixed Tu condition | refValue = heu(p, TuRef); refGrad = Cpu*TuRefGrad |
 
 ### viscosity model  <sub>(1)</sub>
 
@@ -2503,13 +2295,6 @@ ESI(v2606)에만 있는 모델은 `03-esi-vs-foundation.md`를 보세요. GPU �
 | `LiquidEvaporation` | `liquidEvaporation` | `[Foundation-12] src/lagrangian/parcel/submodels/Reacting/PhaseChangeModel/LiquidEvaporation/LiquidEvaporation.H` | Diffusion-controlled evaporation of the liquid components using the ideal-gas assumption and a Sherwood-number mass transfer correlation. | dm_i/dt = -pi*d*Sh*Dab*rho_c*ln(1 + Bm); Sh = 2 + 0.6*Re^0.5*Sc^(1/3); surface mole fraction Xs from pv(T) of the liquid |
 | `LiquidEvaporationBoil` | `liquidEvaporationBoil` | `[Foundation-12] src/lagrangian/parcel/submodels/Reacting/PhaseChangeModel/LiquidEvaporationBoil/LiquidEvaporationBoil.H` | As LiquidEvaporation but adds a boiling regime (Zuo, Gomes & Rutland 2000) once the droplet reaches saturation temperature. | Sub-boiling as LiquidEvaporation; boiling: dd/dt = 4*kappa_c/(rho_l*cp_c*d)*(1 + 0.23*sqrt(Re))*ln(1 + cp_c*(Tc - T)/hv) |
 | `NoPhaseChange` | `none` | `[Foundation-12] src/lagrangian/parcel/submodels/Reacting/PhaseChangeModel/NoPhaseChange/NoPhaseChange.H` | Placeholder for the 'none' option. |  |
-
-### radiation bolt-on (lagrangian)  <sub>(2)</sub>
-
-| Name | Keyword | Path | What it computes | Equations |
-|---|---|---|---|---|
-| `radiationModels::absorptionEmissionModels::cloud` | `cloud (radiationProperties absorptionEmissionModel)` | `[Foundation-12] src/lagrangian/parcel/submodels/addOns/radiation/absorptionEmission/cloudAbsorptionEmission/cloudAbsorptionEmission.H` | Supplies the absorption and emission coefficients of a parcel cloud to the radiation model. | a = sum(nParticle*pi*d^2/4*eps)/V; E = sum(nParticle*pi*d^2/4*eps*sigma*T^4)/V |
-| `radiationModels::scatterModels::cloud` | `cloud (radiationProperties scatterModel)` | `[Foundation-12] src/lagrangian/parcel/submodels/addOns/radiation/scatter/cloudScatter/cloudScatter.H` | Supplies the scattering coefficient of a parcel cloud to the radiation model. | sigma_s = sum(nParticle*pi*d^2/4*(1 - f))/V |
 
 ### scheme registry  <sub>(1)</sub>
 

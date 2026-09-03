@@ -33,7 +33,7 @@
 | **Salome/SMESH** (LGPL) | 9.15, 2025-09 | ViscousLayers 수정(9.14) | STEP→BL 가능한 최고 오픈 GUI. 출력이 MED/UNV라 변환 고리 필요 |
 | **CGAL Alpha Wrapping** (GPL 패키지) | 6.2, 2026-06 | 6.0(2024-09)에서 2배 가속 + 체적 랩 | **더러운 CAD→방수 표면의 표준.** 우리 castellation 전처리로 최적. 패치명은 소실되어 재투영 필요 |
 | **FreeCAD + CfdOF** (LGPL) | 1.1.3, 2026-07 | 1.0(2024-11) 토포네이밍 해결 | STEP 열고 GUI로 패치 지정 → cfMesh/snappy → **polyMesh** — 비전문가용 최단 경로 |
-| **IfcOpenShell/Bonsai** (LGPL/GPL) | 0.8.x, 주간 릴리스 | BlenderBIM→Bonsai 개편(2024 말) | **화재·AEC의 정문**: IFC→OBJ/STL. 요소 정체성은 스크립트로 클래스별 분리 |
+| **IfcOpenShell/Bonsai** (LGPL/GPL) | 0.8.x, 주간 릴리스 | BlenderBIM→Bonsai 개편(2024 말) | **AEC의 정문**: IFC→OBJ/STL. 요소 정체성은 스크립트로 클래스별 분리 |
 | cfMesh (GPL) | v2406, 유지보수만 | 호환성 수정뿐 | polyMesh 직출력이나 2024+ 신기능 없음 |
 | Mmg/ParMmg (LGPL) | 5.8.0, 2024-10 | 2년 만의 재개 릴리스 | 초기 생성이 아니라 **적응 재메쉬** — 컷셀 시대에 유용 |
 | MeshLib | 주간 릴리스 | 매우 활발 | **비상용 전용 라이선스 — 상용 벤더는 무료 외부 사용도 불가.** 배제 |
@@ -74,7 +74,7 @@
 - Barill 2018 fast winding number의 성숙한 Rust 크레이트 없음 — **직접 구현**
   (이미 SPEC-LIT §23.3에 반영)
 
-## 화재·AEC 사용자를 위한 구체 체인 (전부 2024+ 버전으로 성립)
+## AEC 사용자를 위한 구체 체인 (전부 2024+ 버전으로 성립)
 
 ```
 IFC 건물 모델

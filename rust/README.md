@@ -163,7 +163,8 @@ rust/
 
 [`../README.md`](../README.md)의 "제한사항"이 그대로 적용됩니다 — 단일 GPU 전용,
 AMGX 기본 비활성, 저이완 방정식에서의 Crank–Nicolson, 압축성 미지원,
-참여 매질 복사(P1 · fvDOM) 미지원 — 이름으로 거부됩니다.
+복사는 면대면(§49/§50)만 — `radiationModel`은 `viewFactor`/`s2s`만 인식하고
+그 밖의 값은 인식되는 집합과 함께 거부됩니다.
 
 Rust판 고유 사항 하나: 토크나이저가 `Tok::Num(f64)`로 숫자의 원본 표기를 버립니다.
 `tolerance 1e-06`이 `"0.000001"`로, `FoamFile/version`이 `"2.0"` 대신 `"2"`로
