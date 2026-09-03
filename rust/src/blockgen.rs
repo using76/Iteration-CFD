@@ -25,7 +25,7 @@
 //! * boundary faces follow all internal faces and every patch occupies a
 //!   contiguous `[startFace, startFace + nFaces)` range - including when one
 //!   of the six sides is split in two by a [`PatchWindow`], which is what puts
-//!   a burner inlet in the middle of the plume case's floor.
+//!   a hot inlet in the middle of the plume case's floor.
 //!
 //! Provenance: carried across from this project's own earlier C++ mesh
 //! generator when the crate moved to Rust. It writes a file format; it
@@ -155,7 +155,7 @@ pub struct BlockSpec {
 }
 
 /// A rectangular window of one slot's faces, carved out into a patch of its
-/// own - the plume case's burner inlet sitting in the middle of its floor.
+/// own - the plume case's hot inlet sitting in the middle of its floor.
 ///
 /// The two indices are the slot's own tangential cell indices, in the order
 /// `boundary_quad` decomposes a slot index: `(j, k)` on `-x`/`+x`, `(i, k)` on
@@ -3171,9 +3171,9 @@ pub enum CaseKind {
     Step,
     /// Uniform benchmark box.
     Big,
-    /// Buoyant plume in a room-sized box, with a burner inlet let into the
+    /// Buoyant plume in a room-sized box, with a hot inlet let into the
     /// middle of the floor and one open face at `xMax` for everything the
-    /// burner injects to leave through.
+    /// inlet injects to leave through.
     Plume,
     /// Two-dimensional dam break: a column of water of width `a` and height
     /// `2a` released in a tank open at the top, in the geometry Martin & Moyce
@@ -3214,8 +3214,11 @@ impl CaseKind {
             Self::Cavity => (128, 128, 1),
             Self::Step => (300, 100, 1),
             Self::Big => (160, 160, 160),
-            // 14.64 x 6.24 x 3 m at ~0.15 m: the cell count of the published
-            // FDS-vs-GPU fire benchmark, so timings are comparable to it.
+            // 14.64 x 6.24 x 3 m at ~0.15 m, which is 82_320 cells. Both
+            // the resolution and the cell count are FIXED, not tuned: every
+            // timing SPEC-LIT records against `cases/plume` was measured on
+            // this mesh, so moving either makes those numbers incomparable.
+            // `the_plume_box_is_the_published_benchmark_geometry` pins it.
             Self::Plume => (98, 42, 20),
             // 10 x 10 x 3 m at 0.1 m: 300k cells; centres at z = ..., 2.75,
             // 2.85, 2.95, so a near-ceiling slice sits in the hot layer.
@@ -3255,10 +3258,10 @@ pub const DAM_BREAK_A: Scalar = 0.05;
 /// Column height as a multiple of the width - Martin & Moyce's `n^2`.
 pub const DAM_BREAK_ASPECT: Scalar = 2.0;
 
-/// Side of the plume burner opening before it is snapped to whole cells.
+/// Side of the plume's hot inlet before it is snapped to whole cells.
 const PLUME_INLET_SIDE: Scalar = 1.2;
 
-/// Velocity out of the burner.
+/// Velocity out of the hot inlet.
 const PLUME_INLET_U: Scalar = 2.0;
 
 /// Ambient air, 20 C.
@@ -3268,7 +3271,7 @@ const PLUME_T_AMBIENT: Scalar = 293.15;
 const ROOM_T_INLET: Scalar = 573.15;
 const ROOM_INLET_U: Scalar = 2.0;
 
-/// Burner outlet, 900 C.
+/// Hot inlet, 900 C.
 const PLUME_T_INLET: Scalar = 1173.15;
 
 /// The half-open cell range whose CENTRES fall inside `centre +- width/2`.
@@ -3315,7 +3318,6 @@ fn centred_cell_range(nodes: &[Scalar], centre: Scalar, width: Scalar) -> (usize
     (best, best + 1)
 }
 
-/// The burner opening, as a window of the `zMin` slot.
 /// The kinds that carry gravity, a temperature equation and the buoyant
 /// `constant/` dictionaries. Field assembly treats them identically; only
 /// the numbers (inlet temperature, reference velocity) differ per kind.
@@ -3339,6 +3341,7 @@ fn room_door_window(b: &BlockSpec) -> PatchWindow {
     }
 }
 
+/// The hot inlet, as a window of the `zMin` slot.
 fn plume_inlet_window(b: &BlockSpec) -> PatchWindow {
     let (i0, i1) = centred_cell_range(&graded_nodes(&b.x), 0.0, PLUME_INLET_SIDE);
     let (j0, j1) = centred_cell_range(&graded_nodes(&b.y), 0.0, PLUME_INLET_SIDE);
@@ -3467,10 +3470,10 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
             )
         }
         CaseKind::Plume => {
-            // Fire plume in a room-sized box with exactly ONE opening: +x.
+            // Buoyant plume in a room-sized box, one opening only: +x.
             //
             // Every other face is solid. That is not a modelling preference,
-            // it is what makes the case solvable. Mass entering at the burner
+            // it is what makes the case solvable. Mass entering at the inlet
             // has to leave somewhere, and with several open faces there is no
             // unique split of the outflow between them - the potential-flow
             // solve in `potential_flow.rs` would then need a pressure level
@@ -3479,7 +3482,7 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
             // meaningful: `inlet_flux + outlet_flux` is a two-term sum whose
             // cancellation is exactly the conservation claim.
             //
-            // The burner is a window cut out of the floor further down, once
+            // The inlet is a window cut out of the floor further down, once
             // the cell size is known.
             b.x.lo = -8.32;
             b.x.hi = 6.32;
@@ -3540,7 +3543,7 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
         // arms, not reachability.
         CaseKind::DamBreak => (0.0, DAM_BREAK_A),
         // The plume has no wall-normal profile; `half_height` only feeds the
-        // inlet mixing length, which scales with the burner, not the room. The
+        // inlet mixing length, which scales with the inlet, not the room. The
         // two snapped sides differ by well under a percent, so their mean is
         // the honest single number to hand it.
         // The room's inlet spans the whole 10 x 3 m wall; the mixing
@@ -4607,7 +4610,7 @@ fn build_initial_fields(
     // ---- U ---------------------------------------------------------------
     //
     // The plume starts from rest. It used to start from a prescribed column of
-    // rising air over the burner, because the velocity was FROZEN and a plume
+    // rising air over the inlet, because the velocity was FROZEN and a plume
     // with no jet in the initial file was a plume with no jet at all.
     // `ofgpu-buoyant` solves the momentum equation, so the same column would be
     // an initial condition arguing with the solution: it satisfies neither
@@ -4742,7 +4745,7 @@ fn build_initial_fields(
                 s.value = vec![0.0];
                 s
             } else {
-                // Walls and the burner alike. A wall imposes no pressure, and
+                // Walls and the hot inlet alike. A wall imposes no pressure, and
                 // neither does an inlet whose velocity is prescribed: fixing
                 // both `U` and `p` on the same face over-specifies the face.
                 patch_spec("zeroGradient")
@@ -4924,7 +4927,7 @@ mod tests {
             slot: 4,
             lo: [1, 1],
             hi: [3, 3],
-            name: "burner".to_string(),
+            name: "hotInlet".to_string(),
             type_name: "patch".to_string(),
         }];
         b
@@ -5429,7 +5432,7 @@ mod tests {
         let w = b.windows.first().expect("window");
 
         let inlet = &block.patches[4];
-        assert_eq!(inlet.name, "burner");
+        assert_eq!(inlet.name, "hotInlet");
         assert_eq!(inlet.part, SlotPart::Window);
         assert_eq!(inlet.size, 4);
 
@@ -5467,7 +5470,7 @@ mod tests {
     #[test]
     fn two_windows_on_different_slots_are_both_carved() {
         let mut b = split_spec(6, 6, 4);
-        // `split_spec` already put `burner` in the floor (slot 4); add a
+        // `split_spec` already put `hotInlet` in the floor (slot 4); add a
         // doorway in the -y wall (slot 2).
         b.patch_name[2] = "wallFront".to_string();
         b.patch_type[2] = "wall".to_string();
@@ -5481,9 +5484,9 @@ mod tests {
         let block = Block::new(&b).expect("two windows on two slots");
 
         let by_name = |n: &str| block.patches.iter().find(|p| p.name == n).expect(n);
-        assert_eq!(by_name("burner").size, 4, "burner is 2x2 floor faces");
+        assert_eq!(by_name("hotInlet").size, 4, "hotInlet is 2x2 floor faces");
         assert_eq!(by_name("door").size, 6, "door is 3x2 wall faces");
-        assert_eq!(by_name("burner").part, SlotPart::Window);
+        assert_eq!(by_name("hotInlet").part, SlotPart::Window);
         assert_eq!(by_name("door").part, SlotPart::Window);
         assert_eq!(by_name("floor").part, SlotPart::Rest);
         assert_eq!(by_name("wallFront").part, SlotPart::Rest);
@@ -5517,15 +5520,15 @@ mod tests {
             slot: 4,
             lo: [4, 4],
             hi: [5, 5],
-            name: "secondBurner".to_string(),
+            name: "secondInlet".to_string(),
             type_name: "patch".to_string(),
         });
         let Err(e) = Block::new(&b) else {
             panic!("two windows on one slot must be refused");
         };
         let msg = format!("{e}");
-        assert!(msg.contains("burner"), "{msg}");
-        assert!(msg.contains("secondBurner"), "{msg}");
+        assert!(msg.contains("hotInlet"), "{msg}");
+        assert!(msg.contains("secondInlet"), "{msg}");
         assert!(msg.contains("at most one window"), "{msg}");
     }
 
@@ -5661,7 +5664,7 @@ mod tests {
         let block = Block::new(&b).expect("block");
         assert_eq!(block.n_cells, 82_320);
 
-        // Exactly one opening. Everything the burner injects has to leave
+        // Exactly one opening. Everything the inlet injects has to leave
         // through `outlet`, which is what makes the flux balance a two-term
         // sum and the potential-flow solve well posed.
         let named: Vec<(&str, &str)> = block
@@ -5693,16 +5696,16 @@ mod tests {
 
         assert_patches_are_contiguous(&block);
 
-        // The burner and what is left of the floor together are the zMin slot.
+        // The inlet and what is left of the floor together are the zMin slot.
         assert_eq!(block.patches[4].size + block.patches[5].size, nx * ny);
     }
 
     /// The requested 1.2 m does not land on a node on either axis, so the
     /// opening has to be snapped. It must stay within one cell of the
-    /// requested size and within half a cell of the origin, or the burner is
-    /// not the burner the benchmark specifies.
+    /// requested size and within half a cell of the origin, or the opening
+    /// is not the one `PLUME_INLET_SIDE` asks for.
     #[test]
-    fn the_plume_burner_snaps_to_whole_cells_around_the_origin() {
+    fn the_plume_inlet_snaps_to_whole_cells_around_the_origin() {
         let (nx, ny, nz) = CaseKind::Plume.default_resolution();
         let b = case_block_spec(CaseKind::Plume, nx, ny, nz);
         let block = Block::new(&b).expect("block");
@@ -5727,7 +5730,7 @@ mod tests {
     /// Degenerate requests: an opening narrower than a cell still has to
     /// produce a patch, because a zero-face inlet is a case that cannot run.
     #[test]
-    fn a_burner_narrower_than_one_cell_still_gets_a_face() {
+    fn an_inlet_narrower_than_one_cell_still_gets_a_face() {
         // Five cells, so one of them is centred on the origin outright.
         let nodes = graded_nodes(&axis(-1.0, 1.0, 5, 1.0, false));
         assert_eq!(centred_cell_range(&nodes, 0.0, 0.01), (2, 3));
@@ -5764,7 +5767,7 @@ mod tests {
             "the split has to show up as seven patches"
         );
 
-        // The cells the burner should sit under, straight from the window.
+        // The cells the inlet should sit under, straight from the window.
         let mut want = BTreeSet::new();
         for j in w.lo[1]..w.hi[1] {
             for i in w.lo[0]..w.hi[0] {
@@ -5775,7 +5778,7 @@ mod tests {
         let inlet = &block.patches[4];
         let got: BTreeSet<usize> =
             owner[inlet.start..inlet.start + inlet.size].iter().copied().collect();
-        assert_eq!(got, want, "the inlet run does not cover the burner cells");
+        assert_eq!(got, want, "the inlet run does not cover the inlet cells");
         assert_eq!(got.len(), inlet.size, "the inlet run repeats a cell");
 
         // And the floor gets every other zMin cell, exactly once.
@@ -5796,7 +5799,7 @@ mod tests {
     /// is checked by loading it back through ofgpu's own polyMesh reader
     /// rather than by asking the writer's bookkeeping a second time.
     #[test]
-    fn the_split_mesh_reads_back_with_the_burner_on_the_right_cells() {
+    fn the_split_mesh_reads_back_with_the_inlet_on_the_right_cells() {
         use crate::io::polymesh::{build_host_mesh, read_poly_mesh};
         use crate::Label;
 
@@ -5842,19 +5845,19 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        assert_eq!(got, want, "the burner sits on the wrong cells");
+        assert_eq!(got, want, "the inlet sits on the wrong cells");
 
         // And they really are floor faces: on z = 0, looking down.
         for f in inlet.start..inlet.start + inlet.size {
-            assert!(m.b_sf[f].z < 0.0, "burner face {f} does not face down");
-            assert!(m.b_cf[f].z.abs() < 1e-12, "burner face {f} is off the floor");
+            assert!(m.b_sf[f].z < 0.0, "inlet face {f} does not face down");
+            assert!(m.b_cf[f].z.abs() < 1e-12, "inlet face {f} is off the floor");
         }
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_plume_fields_carry_the_burner_and_the_single_opening() {
+    fn the_plume_fields_carry_the_hot_inlet_and_the_single_opening() {
         let dir = temp_dir("plume_fields");
         write_case(&dir, CaseKind::Plume, 20, 12, 6).expect("write");
 
@@ -5881,7 +5884,7 @@ mod tests {
 
         assert!(t.contains("[0 0 0 1 0 0 0]"), "T has the wrong dimensions");
         assert!(t.contains("internalField   uniform 293.15"), "{t}");
-        assert!(t.contains("uniform 1173.15"), "the burner is not hot:\n{t}");
+        assert!(t.contains("uniform 1173.15"), "the inlet is not hot:\n{t}");
         assert_eq!(t.matches("inletOutlet").count(), 1);
         // Adiabatic on all five walls.
         assert_eq!(t.matches("zeroGradient").count(), 5);
@@ -6073,7 +6076,7 @@ mod tests {
 
     /// Carved STL wall patches follow the same preset as the block's own
     /// walls - route (c)'s explicit requirement. A small cuboid obstruction
-    /// well inside the plume domain, away from the floor's burner window and
+    /// well inside the plume domain, away from the floor's inlet window and
     /// the +x outlet, castellates into new `wall`-kind patches; those must
     /// carry the SAME `spalding` row as `wallXMin`/`wallYMin`/etc., not the
     /// `standard` default.

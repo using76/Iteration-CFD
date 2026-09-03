@@ -9,7 +9,7 @@
 // estimate, no `noSlip` standing in for `fixedValue 0`), it is copied
 // straight out of `cases/plumeB`'s own field files.
 //
-// Geometry: the domain and the burner window are the literal numbers
+// Geometry: the domain and the hot-inlet window are the literal numbers
 // `crate::blockgen::case_block_spec`/`plume_inlet_window` compute for
 // `CaseKind::Plume` (x/y/z bounds, and the 1.2 m x 1.2 m window centred on
 // the origin - PLUME_INLET_SIDE) - not re-derived here, read off that
@@ -31,7 +31,7 @@
       "zmin": "floor",    "zmax": "ceiling",
     },
 
-    // The burner: a 1.2 m x 1.2 m window centred on the origin, cut from the
+    // The hot inlet: a 1.2 m x 1.2 m window centred on the origin, cut from the
     // floor - `PLUME_INLET_SIDE` and `plume_inlet_window`'s `centre = 0.0`.
     // `cell_range_from_bounds` below snaps this to the SAME whole cells
     // `centred_cell_range` does (i 52..60, j 14..22 at this resolution): both

@@ -38,8 +38,8 @@ BAFFLES = [
 
 T_MIN, T_MAX = 293.15, 573.15  # ambient .. inlet
 
-# The fire palette of render_plume.py (kept in one place there; duplicated
-# here only as data, with the same stops).
+# The temperature palette of render_plume.py (kept in one place there;
+# duplicated here only as data, with the same stops).
 _STOPS = [
     (0.00, (10, 10, 40)),
     (0.25, (40, 40, 140)),

@@ -18,7 +18,7 @@
 //! CUDA graph. Capture and instantiate are under 0.08 ms and do not grow with
 //! the mesh; the host mesh rebuild is 2.3 / 12.8 / 30.7 ms at 512 / 4096 /
 //! 13824 cells and grows linearly. An adapt that costs thirty milliseconds can
-//! only happen every few thousand steps, and a flame moves in tens.
+//! only happen every few thousand steps, and a plume front moves in tens.
 //!
 //! Section 75.8 then named `mesh/geometry.rs::compute` as the binding
 //! constraint. **Section 82.2 measures that claim and it is wrong**: the

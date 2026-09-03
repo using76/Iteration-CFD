@@ -11,7 +11,7 @@
   Provenance: the Loehner ratio is Loehner, Comput. Methods Appl. Mech. Engrg.
   61 (1987) 323-338, restated for a cell-centred finite-volume mesh (DESIGN,
   SPEC-LIT S75.3(a)). The reconstruction limiter is Barth & Jespersen, AIAA 89-0366
-  (1989). The characteristic fire diameter D* is the FDS User's Guide, NIST SP
+  (1989). The D* length scale is the FDS User's Guide, NIST SP
   1019, "Mesh Resolution" - US Government work, public domain. The 2:1 balance
   condition is Isaac, Burstedde & Ghattas, IPDPS 2012, 426-437. The recentred
   conservative reconstruction of S75.6 and the scan-free CSR rebuild of S75.5
@@ -148,18 +148,19 @@ extern "C" __global__ void adaptLoehner
 
 
 /*---------------------------------------------------------------------------*\
-  adaptFireResolution - 1 where a reacting cell is too coarse for D*, else 0.
+  adaptSourceResolution - 1 where a cell with a heat release in it is too
+  coarse for D*, else 0.
 
   S75.3(b). `dStar` is a global reduction the host supplies; `nStar` is the
-  number of cells wanted across it (16 in the FDS User's Guide's own
-  well-resolved case). The cell size is V^(1/3): the edge length for a cube,
-  the equivalent edge length for anything else.
+  number of cells wanted across it (16, the well-resolved figure S75.3(b)
+  records). The cell size is V^(1/3): the edge length for a cube, the
+  equivalent edge length for anything else.
 \*---------------------------------------------------------------------------*/
-extern "C" __global__ void adaptFireResolution
+extern "C" __global__ void adaptSourceResolution
 (
     ofscalar* __restrict__ out,
     const ofscalar* __restrict__ v,
-    const ofscalar* __restrict__ burning,
+    const ofscalar* __restrict__ heating,
     ofscalar dStar,
     ofscalar nStar,
     oflabel nCells
@@ -169,7 +170,7 @@ extern "C" __global__ void adaptFireResolution
     if (c >= nCells) return;
     if (dStar <= 0 || nStar <= 0) { out[c] = 0; return; }
     const ofscalar want = dStar/nStar;
-    out[c] = (burning[c] > 0 && cbrt(v[c]) > want) ? ofscalar(1) : ofscalar(0);
+    out[c] = (heating[c] > 0 && cbrt(v[c]) > want) ? ofscalar(1) : ofscalar(0);
 }
 
 

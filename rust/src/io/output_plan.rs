@@ -644,7 +644,7 @@ struct Stage {
     /// passed a constant wrote every step over the top of the last one, and
     /// `ofgpu-lowmach` did exactly that (`step: 0`, hard-coded, at its single
     /// `WriteCtx` site) - so `-output vtu -writeInterval W` produced one
-    /// file called `fire_000000.vtu` however long the run was. A counter the
+    /// file called `plume_000000.vtu` however long the run was. A counter the
     /// pipeline increments cannot be forgotten by the next driver either.
     count: usize,
 }

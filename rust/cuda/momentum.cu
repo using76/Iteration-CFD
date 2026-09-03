@@ -567,7 +567,7 @@ extern "C" __global__ void momFaceInterpBoundary
 //      rho/rho_ref = Tref/T        ideal gas at constant pressure
 //      b           = g (Tref/T - 1)
 //
-//  NOT Boussinesq. A fire plume at 1173 K against 293 K ambient has
+//  NOT Boussinesq. A hot plume at 1173 K against 293 K ambient has
 //  dT/T ~ 3, and the linearised beta*(T - Tref) is then wrong by a factor of
 //  three (Spiegel & Veronis 1960 give the dT/T << 1 condition Boussinesq
 //  needs). The density ratio above is exact for an ideal gas at constant

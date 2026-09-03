@@ -1567,7 +1567,7 @@ fn les_block_model_name(d: &FoamDict) -> Option<String> {
 }
 
 // ==========================================================================
-//  §30.2 - the coupled solvers (buoyant, fire)
+//  §30.2 - the coupled solvers
 // ==========================================================================
 
 /// Read `RAS { C3Buoyancy ...; }` into the [`BuoyancySettings`] every

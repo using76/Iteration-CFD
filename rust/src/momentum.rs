@@ -99,7 +99,7 @@ use crate::{Label, Scalar, Tensor, Vec3};
 /// The body force per unit mass, `b = g·(T_ref/T - 1)`.
 ///
 /// **Not Boussinesq.** Boussinesq linearises the density about `T_ref` and is
-/// derived under `ΔT/T << 1` (Spiegel & Veronis 1960). A fire plume at 1173 K
+/// derived under `ΔT/T << 1` (Spiegel & Veronis 1960). A hot plume at 1173 K
 /// against a 293 K ambient has `ΔT/T ≈ 3`, where `β·(T - T_ref)` overstates
 /// the force by about a factor of three. The full ideal-gas ratio costs one
 /// divide and is exact at constant pressure:

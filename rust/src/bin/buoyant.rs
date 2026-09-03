@@ -627,7 +627,7 @@ enum FluxSource {
 ///    pressure operator implies;
 /// 3. potential flow, for a cold start from rest. `interpolate(0) & Sf` is
 ///    zero everywhere, which would leave the first momentum equation with no
-///    convection at all and the burner injecting mass into a domain with no
+///    convection at all and the inlet injecting mass into a domain with no
 ///    path out of it.
 ///
 /// Case 3 overwrites `u`'s internal field, and that is the point: the velocity
@@ -908,7 +908,7 @@ fn print_verdict(l: &Layers) {
     );
     println!("!!  the hot gas has not risen, so nothing in this run is a plume.");
     println!("!!  Check the sign of constant/g, TRef in physicalProperties, that the T");
-    println!("!!  field really is hotter at the burner than the ambient - and that the");
+    println!("!!  field really is hotter at the inlet than the ambient - and that the");
     println!("!!  run was long enough for the plume to cross the room in the first place.");
     println!("{rule}");
 }
@@ -2195,7 +2195,7 @@ fn run(o: &Options) -> Result<()> {
     // SPEC-LIT 17: the buoyancy production. A run on a 1173 K plume in 293 K
     // air with no G_b is missing a leading-order term - buoyancy is where
     // most of that flow's turbulence comes from, and the stratification
-    // above the fire is where the rest of it is destroyed. `build_coupled`
+    // above the inlet is where the rest of it is destroyed. `build_coupled`
     // has already wired it into whichever model this is (k-epsilon takes it
     // as it always has; k-omega/SST through `(gamma/nu_t) G_b` in omega -
     // SPEC-LIT §17, §30.2); this is only the banner and the per-iteration
@@ -2274,10 +2274,11 @@ fn run(o: &Options) -> Result<()> {
 
     // ---- volumetric sources (SPEC-LIT 18) ---------------------------------
     //
-    // A fire is a HEAT RELEASE, not only a hot inlet. Until `constant/fvSources`
-    // existed there was no way to put a watt into any equation in this solver,
-    // so the only way to model one was to blow hot gas in through a patch - and
-    // that prescribes a mass flux the fire does not have.
+    // A heat source is a HEAT RELEASE, not only a hot inlet. Until
+    // `constant/fvSources` existed there was no way to put a watt into any
+    // equation in this solver, so the only way to model one was to blow hot
+    // gas in through a patch - and that prescribes a mass flux a volumetric
+    // source does not have.
     //
     // Each source names the equation it acts on. A `type` this solver cannot
     // apply, or a zone that selects no cells, is an ERROR here rather than a

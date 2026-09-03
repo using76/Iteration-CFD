@@ -8,7 +8,7 @@
 //!
 //! Written from:
 //!   ofgpu `SPEC-LIT.md` §30.2 - the trait this file defines, and the
-//!     requirement that a buoyant/fire case asking for SST or LES must
+//!     requirement that a buoyant case asking for SST or LES must
 //!     actually get it rather than the k-epsilon every coupled driver built
 //!     directly until now
 //!   ofgpu `SPEC-LIT.md` §17 - the buoyancy production `G_b`, and which
@@ -19,11 +19,10 @@
 //!
 //! # The failure this removes
 //!
-//! `src/bin/buoyant.rs` and `src/bin/fire.rs` used to call `KEpsilon::new`
-//! directly, unconditionally - the case's own `constant/momentumTransport`
-//! was never consulted. A case asking for `kOmegaSST` or `LES` got standard
-//! k-epsilon, silently, which is exactly the substitution SPEC-LIT §13.4
-//! forbids. `crate::models::registry::select_turbulence_model` already reads
+//! The coupled drivers used to call `KEpsilon::new` directly,
+//! unconditionally - the case's own `constant/momentumTransport` was never
+//! consulted. A case asking for `kOmegaSST` or `LES` got standard k-epsilon,
+//! silently, which is exactly the substitution SPEC-LIT §13.4 forbids. `crate::models::registry::select_turbulence_model` already reads
 //! the setting correctly (`src/bin/k_epsilon.rs` and `src/bin/k_omega.rs`
 //! use it); the two coupled drivers just never called it.
 //!
@@ -96,7 +95,7 @@ use crate::{Scalar, Vec3};
 /// optional argument instead of three.
 ///
 /// `None` at the call site (rather than an isothermal `ThermalCtx`) is what
-/// an isothermal case passes - `buoyant`/`fire` always solve a temperature,
+/// an isothermal case passes - `buoyant` always solves a temperature,
 /// so today `None` in practice means "this case has zero gravity", handled
 /// exactly as the direct-`KEpsilon` code path always has: the models below
 /// skip the whole term rather than compute a zero.

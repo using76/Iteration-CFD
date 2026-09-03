@@ -620,7 +620,7 @@ extern "C" __global__ void lesTestFilterVector
 //  Deardorff's 1980 paper carries a transport equation for k_sgs rather than
 //  this estimate of it. The estimate is what SPEC-LIT 6.5 points at by naming
 //  FDS as the reference, and it is the form that costs no extra transport
-//  equation - which is the whole reason a fire code uses it.
+//  equation - which is the whole reason the reference implementation uses it.
 // ==========================================================================
 
 extern "C" __global__ void lesNutDeardorff

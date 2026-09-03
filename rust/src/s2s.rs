@@ -51,10 +51,9 @@
 //!
 //! # The surprising part: nothing becomes an `fvm_*` term
 //!
-//! A PARTICIPATING medium makes radiation a field on the cells - a Helmholtz
-//! equation under the P1 approximation, one transport equation per ordinate
-//! under discrete ordinates - and either way a volumetric source in the
-//! energy equation. **Surface-to-surface radiation through a
+//! A PARTICIPATING medium makes radiation a field on the cells, and a
+//! volumetric source in the energy equation. **Surface-to-surface radiation
+//! through a
 //! non-participating medium contributes no volumetric term to any equation at
 //! all** - there is no medium, so `div(q_r) = 0` everywhere in the fluid. There is no `fvm_*` call here, no
 //! [`crate::energy::EnergySources`] registration, and no new LDU assembly.
@@ -260,13 +259,13 @@ impl S2sConfig {
         // ignoring it is exactly the defect this project keeps finding.
         if d.has("absorptionCoefficient") && d.scalar("absorptionCoefficient", 0.0) != 0.0 {
             return contract::unsupported_note(
-                "radiationProperties/radiationModel",
-                "viewFactor with a non-zero absorptionCoefficient",
-                &["P1", "fvDOM"],
+                "radiationProperties/absorptionCoefficient",
+                "a non-zero absorptionCoefficient under radiationModel viewFactor",
+                &[],
                 "surface-to-surface radiation assumes a NON-PARTICIPATING medium: \
                  nothing in the volume absorbs, emits or scatters, so an absorption \
                  coefficient would be read and then ignored (SPEC-LIT S50.9)",
-                "P1",
+                "no absorption",
                 (),
             )
             .map(|()| c);
@@ -2154,8 +2153,8 @@ impl<'m> S2s<'m> {
     ///
     /// It exists because those read-backs are what stop a surface-to-surface
     /// exchange being captured into a CUDA graph (`SPEC-LIT` 81.3), and S2S
-    /// sits inside the radiation iteration of every enclosure fire case - so
-    /// one host round-trip here costs the whole iteration its graph.
+    /// sits inside the radiation iteration of every enclosure case - so one
+    /// host round-trip here costs the whole iteration its graph.
     pub fn set_measure_report(&mut self, on: bool) {
         self.measure_report = on;
     }

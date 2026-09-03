@@ -1227,8 +1227,9 @@ pub fn constrain_wall_cells(
 // Jayatilleke machinery is needed to get the FLUX right, on a wall-function
 // mesh or a resolved one. Diagnosing the wall TEMPERATURE that flux produces
 // still needs the formula above - that is a postprocessing read of
-// [`jayatilleke_p`]/[`t_plus`]/[`u_tau_of`], done in `src/bin/fire.rs`'s own
-// report, not a second device kernel.
+// [`jayatilleke_p`]/[`t_plus`]/[`u_tau_of`], done in a driver's own report -
+// `src/bin/lowmach.rs`'s SPEC-LIT 32.5 friction report is the one that does
+// it today - not a second device kernel.
 //
 // # Why `fr = 0` rather than a genuine Robin fraction
 //

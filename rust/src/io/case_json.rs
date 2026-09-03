@@ -1059,120 +1059,7 @@ pub fn read_case_jsonc(path: &Path) -> Result<JsonCase> {
 /// [`read_case_jsonc`] on text already in memory - what a test that writes
 /// two cases differing in one byte needs.
 pub fn read_case_jsonc_str(text: &str, what: &str) -> Result<JsonCase> {
-    let value = jsonc_value(text, what)?;
-    refuse_held_back_blocks(&value, what)?;
-    deserialize_value(value, what)
-}
-
-/// The entries this format still SPELLS and this engine does not solve, each
-/// refused by name with what it selected and what is here instead - SPEC-LIT
-/// §13.4.
-///
-/// They described a reacting, sooting or radiating medium. This engine has no
-/// chemistry, no soot equation and no participating-medium radiation in it,
-/// and the honest answer to a case that asks for one is not serde's `unknown
-/// field "fire", expected one of ...` beside a list of its siblings. §13.4
-/// asks for the name, what it needed, and what is available instead; a case
-/// written for the reacting-medium solver is a real document somebody wrote,
-/// and it deserves to be told what happened to it rather than diagnosed as a
-/// typo.
-///
-/// It runs BEFORE deserialisation because `deny_unknown_fields` would
-/// otherwise answer first and answer worse, and it is an [`Error::Config`]
-/// rather than an `io::contract` note because `-permissive` must not be able
-/// to waive it: a waived `physics.fire.combustion` is a burner case running
-/// at `q''' = 0` and reporting a wall heat balance that closes because there
-/// was no fire in it. That is §13.4.1's defect class on exactly the cases
-/// whose whole point is the heat.
-fn refuse_held_back_blocks(value: &serde_json::Value, what: &str) -> Result<()> {
-    fn at<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-        let mut node = v;
-        for seg in path.split('.') {
-            node = node.get(seg)?;
-        }
-        Some(node)
-    }
-
-    // `(entry, what it selected, what is here instead)`.
-    let sub: &[(&str, &str, &str)] = &[
-        (
-            "physics.fire.combustion",
-            "a mixing-controlled reaction between transported species",
-            "a `sources[]` heat release, or a driver's own `-heaterPower`",
-        ),
-        (
-            "physics.fire.radiation",
-            "a PARTICIPATING medium - a radiation field solved on the cells \
-             out of an absorption coefficient and a spectral model",
-            "`viewFactor` exchange across a TRANSPARENT medium, selected in \
-             `constant/radiationProperties` (SPEC-LIT §49/§50/§51)",
-        ),
-        (
-            "physics.fire.soot",
-            "a transported soot mass fraction whose source is driven by the \
-             reaction",
-            "nothing - there is no soot equation here, and no reaction to \
-             drive one",
-        ),
-    ];
-
-    let mut named: Vec<String> = Vec::new();
-    for (entry, selected, instead) in sub {
-        if at(value, entry).is_some() {
-            named.push(format!("{entry} selects {selected}; here instead: {instead}"));
-        }
-    }
-    // The parent only when no child was named: reporting `physics.fire` as
-    // well as `physics.fire.combustion` says the same thing twice and buries
-    // the specific half.
-    if named.is_empty() && at(value, "physics.fire").is_some() {
-        named.push(
-            "physics.fire is the reacting-medium block; here instead: the \
-             low-Mach formulation of SPEC-LIT §25 and the energy equation \
-             of §26, which is what is left when nothing reacts"
-                .to_string(),
-        );
-    }
-    if at(value, "initial.Y_F").is_some() {
-        named.push(
-            "initial.Y_F is the ambient fuel mass fraction, and it is what \
-             turned the fuel/oxidiser/products species set on; here \
-             instead: `crate::species` as a LIBRARY - SPEC-LIT §19's \
-             general scalar transport is in this engine, and no case entry \
-             selects it"
-                .to_string(),
-        );
-    }
-    // A patch rule's own `Y_F` is a condition on that same species set. Named
-    // once, not once per matching rule: it is one decision, not N.
-    if value
-        .get("patches")
-        .and_then(|v| v.as_array())
-        .is_some_and(|rules| rules.iter().any(|r| r.get("Y_F").is_some()))
-    {
-        named.push(
-            "patches[].Y_F is the fuel mass fraction at a boundary; here \
-             instead: nothing - there is no species equation for it to be a \
-             condition on"
-                .to_string(),
-        );
-    }
-
-    if named.is_empty() {
-        return Ok(());
-    }
-    Err(Error::Config(format!(
-        "{what}: this case names {} that this engine does not solve. \
-         SPEC-LIT §13.4 refuses {} by name rather than reading {} and \
-         dropping {}:\n  {}\nThe names are still recognised here precisely \
-         so that a case written for the reacting-medium solver is told what \
-         became of it.",
-        if named.len() == 1 { "an entry" } else { "entries" },
-        if named.len() == 1 { "it" } else { "them" },
-        if named.len() == 1 { "it" } else { "them" },
-        if named.len() == 1 { "it" } else { "them" },
-        named.join("\n  ")
-    )))
+    deserialize_value(jsonc_value(text, what)?, what)
 }
 
 /// Parse any JSONC document into any `serde` type, with the same comment and
@@ -1196,8 +1083,7 @@ pub fn parse_jsonc_str<T: serde::de::DeserializeOwned>(text: &str, what: &str) -
 }
 
 /// The JSONC document as a [`serde_json::Value`], before any type has had an
-/// opinion about it. [`refuse_held_back_blocks`] reads this, because
-/// `deny_unknown_fields` would otherwise answer first and answer worse.
+/// opinion about it.
 fn jsonc_value(text: &str, what: &str) -> Result<serde_json::Value> {
     let parsed = jsonc_parser::parse_to_value(text, &parse_options())
         .map_err(|e| Error::Parse { path: what.to_string(), msg: e.to_string() })?;
@@ -1543,7 +1429,7 @@ fn tangential_axes(slot: usize) -> (usize, usize) {
 
 /// The half-open cell-index range along one axis whose cell CENTRES fall
 /// inside `[lo, hi]` - the same criterion `crate::blockgen`'s own
-/// `centred_cell_range` uses for the plume's burner window, generalised from
+/// `centred_cell_range` uses for the plume's hot-inlet window, generalised from
 /// a centre-and-width pair to an explicit `[lo, hi]` because a JSON region is
 /// given as a box, not a centre and a side length. Falls back to the single
 /// cell nearest the box's own centre when the box is narrower than one cell,
@@ -1987,7 +1873,7 @@ fn vector_bc_spec(bc: &VectorBc) -> PatchFieldSpec {
 /// `U` at one resolved rule: the rule's own `U` if it gave one, otherwise the
 /// preset [`crate::blockgen::write_case`]'s `write_initial_fields` gives a
 /// wall (`noSlip 0`) or an open boundary (`inletOutlet`, inlet value zero). An
-/// `inlet` preset with no `U` has nothing to fall back to - a burner with no
+/// `inlet` preset with no `U` has nothing to fall back to - an inlet with no
 /// velocity is a case error, not a default - so that is a §13.4-shaped error
 /// naming the rule.
 fn u_spec_for(rule: &JsonPatchRule) -> Result<PatchFieldSpec> {
@@ -2751,7 +2637,7 @@ mod tests {
         assert_eq!(lowered.block.z.n, 20);
         assert_eq!(lowered.block.patch_name[4], "floor");
         assert_eq!(lowered.block.patch_type[4], "wall");
-        assert!(!lowered.block.windows.is_empty(), "the burner window should be carved");
+        assert!(!lowered.block.windows.is_empty(), "the inlet window should be carved");
         let w = lowered.block.windows.first().unwrap();
         assert_eq!(w.name, "inlet");
         assert_eq!(w.type_name, "patch");
@@ -4081,37 +3967,27 @@ mod tests {
         assert_eq!(lowered.algorithm.dict, "PIMPLE");
     }
 
-    /// **SPEC-LIT §13.4.** A case written for the reacting-medium solver is
-    /// refused BY NAME, and the refusal survives `-permissive`.
+    /// **SPEC-LIT §13.4.** A setting this format does not define is refused,
+    /// and the refusal survives `-permissive`.
     ///
-    /// This is [`refuse_held_back_blocks`]'s own gate. The failure it stands
-    /// against is not a parse error: it is a burner case read cleanly by an
-    /// engine with no chemistry in it, run to completion at `q''' = 0`, and
-    /// reporting a wall heat balance that closes because there was no fire.
-    /// The names must therefore still be RECOGNISED here - "unknown field" is
-    /// a diagnosis of a typo, and this is not one.
+    /// `deny_unknown_fields` is on every struct in this tree, so the answer
+    /// to an entry that is not in the format is serde's own - the name that
+    /// was written, beside the list of names that exist - and
+    /// [`serde_path_to_error`] adds WHERE in the document it sat. There is
+    /// nothing for `-permissive` to waive: this is not an `io::contract`
+    /// note but a read that could not produce a case at all.
     #[test]
-    fn a_case_written_for_a_reacting_medium_is_refused_by_name() {
+    fn a_setting_this_format_does_not_define_is_refused() {
         let _g = crate::io::contract::permissive_test_guard();
-        // ON. A note would be waived here; this is an `Error::Config` and is
-        // not, for the same reason `RadiationConfig::from_case`'s is not.
+        // ON. There is still no way through: the document did not parse.
         crate::io::contract::set_permissive(true);
 
         let base = std::fs::read_to_string(example_path()).expect("read the example case");
         let mut got: Vec<(&str, Option<String>)> = Vec::new();
         for (entry, insert, after) in [
-            ("physics.fire.combustion", r#""fire": { "combustion": {} },"#, "\"physics\": {"),
-            (
-                "physics.fire.radiation",
-                r#""fire": { "radiation": { "model": "P1", "a": 0.5 } },"#,
-                "\"physics\": {",
-            ),
-            (
-                "physics.fire.soot",
-                r#""fire": { "soot": { "model": "prescribedYield" } },"#,
-                "\"physics\": {",
-            ),
-            ("initial.Y_F", r#""Y_F": 0.0,"#, "\"initial\": {"),
+            ("physics", r#""thermodynamics": { "model": "idealGas" },"#, "\"physics\": {"),
+            ("initial", r#""Z": 0.0,"#, "\"initial\": {"),
+            ("mesh", r#""refinement": 2,"#, "\"mesh\": {"),
         ] {
             let at = base.find(after).expect("the example case must have the block");
             let mut text = base.clone();
@@ -4126,12 +4002,9 @@ mod tests {
         crate::io::contract::set_permissive(false);
 
         for (entry, e) in got {
-            let e = e.unwrap_or_else(|| panic!("{entry} was read and not refused"));
-            assert!(e.contains(entry), "the refusal must name {entry}: {e}");
-            assert!(
-                e.contains("13.4"),
-                "the refusal must name the contract it is made under: {e}"
-            );
+            let e = e.unwrap_or_else(|| panic!("an unknown entry under {entry} was read"));
+            assert!(e.contains("unknown field"), "the refusal must say what went wrong: {e}");
+            assert!(e.contains(entry), "the refusal must name WHERE it sat: {e}");
         }
         // And the example case itself, unmodified, is read - or every
         // assertion above would pass for the wrong reason.

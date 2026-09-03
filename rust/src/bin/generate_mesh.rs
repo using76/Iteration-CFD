@@ -15,7 +15,7 @@
 //! cavity   lid-driven cavity, 2-D                   (128 x 128 x 1)
 //! step     backward-facing-step BOX, 2-D            (300 x 100 x 1)
 //! big      uniform benchmark box                    (160 x 160 x 160)
-//! plume    fire plume, floor burner, xMax outlet    (98 x 42 x 20)
+//! plume    buoyant plume, floor inlet, xMax outlet  (98 x 42 x 20)
 //! damBreak two-phase collapsing column, 2-D           (150 x 90 x 1)
 //! ```
 //!

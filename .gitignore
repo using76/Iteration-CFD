@@ -5,8 +5,8 @@ __pycache__/
 *.pyc
 
 # ------------------------------------------------------------ reference ----
-# FDS (NIST, public domain). Cloned separately for reference; 191 MB and not
-# part of what meteor-cfd distributes. See NOTICE.
+# Reference material read while writing this engine, cloned separately and
+# not part of what meteor-cfd distributes. See NOTICE.
 reference/
 
 # ---------------------------------------------------------------- cases ----
@@ -18,7 +18,7 @@ reference/
 #   cargo run --release --bin ofgpu-generate-mesh -- damBreak ../cases/damBreak  60 100 1
 #
 # ...but the .jsonc case DEFINITIONS are the opposite of generated data: a
-# few kB of text each, referenced by docs/07-fire-solver.md and by
+# few kB of text each, referenced by docs/07-lowmach-solver.md and by
 # ofgpu-validate, and without them a fresh clone can reproduce nothing.
 cases/*
 !cases/README.md

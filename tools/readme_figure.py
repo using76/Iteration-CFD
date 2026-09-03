@@ -118,11 +118,11 @@ def latest_time(case_dir):
     return max(times)[1]
 
 
-# A flame ramp that stays legible in both themes: deep blue-grey through
-# ember to a pale core. Not a rainbow - the eye reads ordered brightness,
+# A heat ramp that stays legible in both themes: deep blue-grey through
+# amber to a pale core. Not a rainbow - the eye reads ordered brightness,
 # and a perceptually reversing map invents structure that is not there.
-FLAME = LinearSegmentedColormap.from_list(
-    "flame",
+HEAT = LinearSegmentedColormap.from_list(
+    "heat",
     ["#141A21", "#26303A", "#5A3A66", "#A8342F", "#E07A18", "#F5C542", "#FDF3D0"],
 )
 SPEED = LinearSegmentedColormap.from_list(
@@ -163,7 +163,7 @@ def main():
     fig.patch.set_facecolor("#FFFFFF")
 
     panels = [
-        (axes[0], t_slice, FLAME, "temperature", "K", "%.0f"),
+        (axes[0], t_slice, HEAT, "temperature", "K", "%.0f"),
         (axes[1], u_slice, SPEED, "velocity magnitude", "m/s", "%.1f"),
     ]
     for ax, data, cmap, title, unit, fmt in panels:

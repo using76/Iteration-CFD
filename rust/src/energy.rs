@@ -78,7 +78,7 @@
 //!
 //! **2. `Q` is S25.1's `Q`, complete - RESOLVED, and it was not free.**
 //! Until SPEC-LIT S26.1 this module took `Q` to be exactly what
-//! [`EnergySources`] had accumulated (combustion's `q'''_c`, radiation's
+//! [`EnergySources`] had accumulated (a `sources[]` heat release, radiation's
 //! `-div(q_r)`, the S35 thermostat) and left out the CONDUCTION term
 //! `div(k_eff grad T)` that S25.1's own `Q` also names, on the argument that
 //! it costs nothing for the decisive S25.2 sealed-box gate (a sealed box with
@@ -734,7 +734,7 @@ impl<'m> GasState<'m> {
     ///
     /// `total_q` is `integral(Q) dV` over the whole domain, in watts -
     /// [`EnergySources::total_q`] computes exactly that from whatever
-    /// combustion and radiation registered this iteration (see the module
+    /// the sources and radiation registered this iteration (see the module
     /// doc's second *DESIGN* note for what `Q` does and does not include
     /// here). `Phi_b` is taken to be exactly zero for `Sealed`, per
     /// SPEC-LIT S25.2's own parenthetical - a vented sealed compartment is
@@ -856,8 +856,8 @@ impl EnergySources {
     }
 
     /// Zero both accumulators. Call once at the top of every outer iteration,
-    /// before combustion and radiation register - otherwise a source from two
-    /// iterations ago is still being added in.
+    /// before the sources and radiation register - otherwise a source from
+    /// two iterations ago is still being added in.
     pub fn clear(&mut self, gpu: &Gpu) -> Result<()> {
         field_ops::set_field(gpu, &self.fldk, &mut self.q, 0.0, self.n)?;
         field_ops::set_field(gpu, &self.fldk, &mut self.sp, 0.0, self.n)
@@ -875,9 +875,9 @@ impl EnergySources {
         Ok(())
     }
 
-    /// `q += contribution`, W/m3 - a combustion heat-release rate, a
-    /// radiative source, a heater's `Q_dot/V`, or anything else that is a
-    /// volumetric power density with a definite sign.
+    /// `q += contribution`, W/m3 - a heater's `Q_dot/V`, a radiative
+    /// source, or anything else that is a volumetric power density with a
+    /// definite sign.
     pub fn register_explicit(&mut self, gpu: &Gpu, contribution: &DevBuf<Scalar>) -> Result<()> {
         self.check_len(contribution, "register_explicit")?;
         self.ek.accumulate(gpu, &mut self.q, contribution, self.n)
@@ -2341,8 +2341,10 @@ impl<'m> Energy<'m> {
         // Building them here rather than reading what the last `correct` left
         // is what makes this function independent of call order - and what
         // makes a RESTART reproduce the continuous run's own first pressure
-        // system, which reading stale state does not (`fire.rs`'s restart
-        // gate). The prologue is idempotent and `correct` runs it again.
+        // system, which reading stale state does not (SPEC-LIT §31.2's restart
+        // gate, `bin/lowmach.rs`'s
+        // `restart_matches_a_continuous_run_p0_included`). The prologue is
+        // idempotent and `correct` runs it again.
         self.prepare_coefficients(gpu, nut, k, nu, gas)?;
         self.update_conduction_source(gpu)?;
         let inv_gamma_p0 = 1.0 / (self.props.gamma * gas.p0());
@@ -2496,7 +2498,8 @@ impl<'m> Energy<'m> {
     /// `fr = 0`, `ref_grad = q_w/k_eff,wall`; a fresh `k_eff` against a stale
     /// `ref_grad` would NOT). There is therefore no start-up or restart lag on
     /// this term: it does not depend on what a previous [`Self::correct`]
-    /// left behind, which is what `fire.rs`'s restart gate checks.
+    /// left behind, which is what SPEC-LIT §31.2's restart gate checks
+    /// (`bin/lowmach.rs`'s `restart_matches_a_continuous_run_p0_included`).
     fn update_conduction_source(&mut self, gpu: &Gpu) -> Result<()> {
         let m = self.m;
         fv::sn_grad_flux(
@@ -2820,8 +2823,8 @@ mod tests {
             t_min: 1.0,
         };
 
-        // Small, moderate and large delta-T/T, including the fire-plume-scale
-        // ratio SPEC-LIT S9 itself uses (1173 K against 293 K).
+        // Small, moderate and large delta-T/T, including the large ratio
+        // SPEC-LIT S9 itself uses (1173 K against 293 K).
         for t in [294.0, 305.0, 350.0, 600.0, 1173.15] {
             let rho = gas.rho_at(t);
             let density_ratio_force = buoy.g * ((rho - rho_ref) / rho_ref);

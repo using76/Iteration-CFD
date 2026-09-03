@@ -393,7 +393,7 @@ pub fn side_bcs(
 /// `(separable, why not)`.
 ///
 /// On a recovered box the test is per SIDE, not per patch: the plume's floor
-/// carries two patches - the burner window and the rest of the floor - and
+/// carries two patches - the hot-inlet window and the rest of the floor - and
 /// they have to agree with each other, while a single `walls` patch spanning
 /// five sides only has to be uniform within each of them. Per-side is the
 /// condition that actually makes the operator separate, and it is the one

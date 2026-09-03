@@ -15,7 +15,7 @@
 //! continuity equation, so the flux it interpolates to does not either. On the
 //! plume case, whose `0/U` prescribes a jet that tapers to zero inside the
 //! domain, `max |sum_f phi|` per cell came out at 1.4e-2 m^3/s: mass entered at
-//! the burner and never left. A transported temperature then has no mean
+//! the inlet and never left. A transported temperature then has no mean
 //! transport to carry heat out of the room, so the whole domain equilibrates to
 //! the inlet value — a physically wrong answer that the `bounded` correction
 //! (`- fvm::Sp(fvc::div(phi), psi)`) papers over rather than fixes.
@@ -387,7 +387,7 @@ pub fn patch_flux_host(bphi: &[Scalar], p: &PatchInfo) -> Scalar {
 ///
 /// This is what [`PotentialFlowSpec::inlet_normal_velocity`] wants, and taking
 /// it from the case's own `0/U` rather than from a constant in a driver is
-/// what stops the two descriptions of the burner from drifting apart. Positive
+/// what stops the two descriptions of the inlet from drifting apart. Positive
 /// means inflow.
 ///
 /// `empty` faces are skipped, matching every surface integral in the crate.
@@ -544,7 +544,7 @@ mod tests {
     }
 
     /// `mean_inflow_speed` has to come out positive for flow that enters, or
-    /// every driver reading it would prescribe the burner backwards.
+    /// every driver reading it would prescribe the inlet backwards.
     #[test]
     fn the_mean_inflow_speed_is_positive_for_flow_that_enters() {
         let (dir, hm) = case_mesh("inflow", CaseKind::Big, (4, 3, 3));
@@ -574,12 +574,12 @@ mod tests {
         let mut u = GpuVectorField::zeros(&g, &m, "U")?;
 
         let bad_name = PotentialFlowSpec {
-            inlet_patch: "burner".to_string(),
+            inlet_patch: "hotInlet".to_string(),
             ..spec(1.0)
         };
         let err = solve_potential_flow(&g, &hm, &m, &mut phi, &mut u, &bad_name, &controls())
-            .expect_err("a mesh without a `burner` patch must not solve");
-        assert!(format!("{err}").contains("burner"), "{err}");
+            .expect_err("a mesh without a `hotInlet` patch must not solve");
+        assert!(format!("{err}").contains("hotInlet"), "{err}");
 
         let same = PotentialFlowSpec {
             outlet_patch: "inlet".to_string(),
@@ -672,7 +672,7 @@ mod tests {
         Ok(())
     }
 
-    /// The headline claim. The plume geometry - one small burner in the floor,
+    /// The headline claim. The plume geometry - one small inlet in the floor,
     /// one opening at +x, walls everywhere else - is the case that produced
     /// `max |sum_f phi| = 1.4e-2` from an interpolated velocity. The solved
     /// flux has to be conservative to the solver's tolerance instead, and the

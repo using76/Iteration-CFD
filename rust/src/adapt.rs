@@ -33,8 +33,8 @@
 //!   K. McGrattan, S. Hostikka, R. McDermott, J. Floyd, C. Weinschenk and
 //!     K. Overholt, Fire Dynamics Simulator User's Guide, NIST Special
 //!     Publication 1019, "Mesh Resolution" - US Government work, public
-//!     domain. The characteristic fire diameter D* and the D*/dx resolution
-//!     measure of SPEC-LIT section 75.3(b).
+//!     domain. The D* length scale and the D*/dx resolution measure of
+//!     SPEC-LIT section 75.3(b).
 //! No GPL-licensed source was consulted.
 //!
 //! # What this module does, and what it does not
@@ -1415,15 +1415,20 @@ pub fn loehner_indicator(
     }
 }
 
-/// The characteristic fire diameter, FDS User's Guide, "Mesh Resolution":
+/// The characteristic diameter of a buoyant plume driven by a volumetric
+/// heat release - SPEC-LIT section 75.3(b)'s `D*`:
 ///
 /// ```text
 /// D* = ( Qdot / (rho_inf cp_inf T_inf sqrt(g)) )^(2/5)
 /// ```
 ///
+/// It is the only length that can be built out of the release rate, the
+/// ambient state and gravity, which is why the resolution measure below is a
+/// ratio against it rather than against anything in the mesh.
+///
 /// `q_dot` is the total heat release rate in watts - `sum_P V_P qdot'''_P`.
 /// Returns zero for a non-positive heat release, which is the honest answer:
-/// with no fire there is no fire length scale.
+/// with no release there is no length scale to resolve.
 pub fn d_star(q_dot: Scalar, rho_inf: Scalar, cp_inf: Scalar, t_inf: Scalar, g: Scalar) -> Scalar {
     let den = rho_inf * cp_inf * t_inf * g.max(0.0).sqrt();
     if q_dot <= 0.0 || den <= 0.0 {
@@ -1432,20 +1437,20 @@ pub fn d_star(q_dot: Scalar, rho_inf: Scalar, cp_inf: Scalar, t_inf: Scalar, g: 
     (q_dot / den).powf(0.4)
 }
 
-/// The fire resolution indicator: `1` where the cell is inside the reacting
-/// region and too coarse for `D*`, `0` elsewhere - SPEC-LIT section 75.3(b).
+/// The source-resolution indicator: `1` where the cell has a heat release in
+/// it and is too coarse for `D*`, `0` elsewhere - SPEC-LIT section 75.3(b).
 ///
-/// `n_star` is the number of cells wanted across `D*`; the FDS User's Guide
-/// puts a well-resolved fire at 16 and calls 4 the coarse end of usable, so
-/// `n_star = 16` is this crate's default and is not a free parameter dressed
-/// up as one.
+/// `n_star` is the number of cells wanted across `D*`. `16` is this crate's
+/// default because that is the well-resolved figure SPEC-LIT section 75.3(b)
+/// records, and it is a default rather than a free parameter: a caller that
+/// changes it is no longer running the measure the spec states.
 ///
 /// The cell size is `V_P^(1/3)`, which is the edge length for a cube and the
 /// equivalent edge length for anything else.
-pub fn fire_resolution_indicator(
+pub fn source_resolution_indicator(
     out: &mut Vec<Scalar>,
     v: &[Scalar],
-    burning: &[Scalar],
+    heating: &[Scalar],
     d_star: Scalar,
     n_star: Scalar,
 ) {
@@ -1456,7 +1461,7 @@ pub fn fire_resolution_indicator(
     }
     let want = d_star / n_star;
     for c in 0..v.len() {
-        if burning[c] > 0.0 && v[c].cbrt() > want {
+        if heating[c] > 0.0 && v[c].cbrt() > want {
             out[c] = 1.0;
         }
     }
@@ -1476,7 +1481,7 @@ pub fn fire_resolution_indicator(
 pub struct AdaptKernels {
     pub loehner: cudarc::driver::CudaFunction,
     pub balance_sweep: cudarc::driver::CudaFunction,
-    pub fire_resolution: cudarc::driver::CudaFunction,
+    pub source_resolution: cudarc::driver::CudaFunction,
     pub parent_targets: cudarc::driver::CudaFunction,
     pub limiter: cudarc::driver::CudaFunction,
     pub transfer_density: cudarc::driver::CudaFunction,
@@ -1491,7 +1496,7 @@ impl AdaptKernels {
         Ok(Self {
             loehner: ks.func("adaptLoehner")?,
             balance_sweep: ks.func("adaptBalanceSweep")?,
-            fire_resolution: ks.func("adaptFireResolution")?,
+            source_resolution: ks.func("adaptSourceResolution")?,
             parent_targets: ks.func("adaptParentTargets")?,
             limiter: ks.func("adaptLimiter")?,
             transfer_density: ks.func("adaptTransferDensity")?,
@@ -1585,16 +1590,16 @@ pub fn gpu_balance_sweep(
     Ok(())
 }
 
-/// The fire resolution indicator on the device: elementwise, and the one
+/// The source-resolution indicator on the device: elementwise, and the one
 /// criterion here that needs a global reduction first (`q_dot`), which the
 /// caller supplies as a scalar.
 #[allow(clippy::too_many_arguments)]
-pub fn gpu_fire_resolution_indicator(
+pub fn gpu_source_resolution_indicator(
     gpu: &Gpu,
     k: &AdaptKernels,
     out: &mut DevBuf<Scalar>,
     v: &DevBuf<Scalar>,
-    burning: &DevBuf<Scalar>,
+    heating: &DevBuf<Scalar>,
     d_star: Scalar,
     n_star: Scalar,
     n_cells: usize,
@@ -1605,10 +1610,10 @@ pub fn gpu_fire_resolution_indicator(
     let nl = n_cells as Label;
     unsafe {
         gpu.stream()
-            .launch_builder(&k.fire_resolution)
+            .launch_builder(&k.source_resolution)
             .arg(&mut *out)
             .arg(v)
-            .arg(burning)
+            .arg(heating)
             .arg(&d_star)
             .arg(&n_star)
             .arg(&nl)
@@ -2414,16 +2419,16 @@ mod tests {
         let got = g.download(&d_e).unwrap();
         assert!(worst(&e, &got) < 1e-12, "Loehner: {:e}", worst(&e, &got));
 
-        // ---- the fire resolution indicator ---------------------------------
-        let burn: Vec<Scalar> =
+        // ---- the source-resolution indicator -------------------------------
+        let heat: Vec<Scalar> =
             (0..m.n_cells).map(|c| if c % 3 == 0 { 1.0 } else { 0.0 }).collect();
         let ds = d_star(5.0e5, 1.2, 1005.0, 293.0, 9.81);
         let mut fr = Vec::new();
-        fire_resolution_indicator(&mut fr, &m.v, &burn, ds, 4.0);
+        source_resolution_indicator(&mut fr, &m.v, &heat, ds, 4.0);
         let d_v = g.upload(&m.v).unwrap();
-        let d_burn = g.upload(&burn).unwrap();
+        let d_heat = g.upload(&heat).unwrap();
         let mut d_fr: DevBuf<Scalar> = g.zeros(m.n_cells).unwrap();
-        gpu_fire_resolution_indicator(&g, &k, &mut d_fr, &d_v, &d_burn, ds, 4.0, m.n_cells)
+        gpu_source_resolution_indicator(&g, &k, &mut d_fr, &d_v, &d_heat, ds, 4.0, m.n_cells)
             .unwrap();
         assert_eq!(fr, g.download(&d_fr).unwrap());
 
@@ -2517,19 +2522,24 @@ mod tests {
         }
     }
 
-    /// D* against the FDS User's Guide's own worked arithmetic. A 1000 kW fire
-    /// in air at 293 K has D* close to 0.96 m, and the resolution measure is
-    /// the ratio of that to the cell size.
+    /// `D*` against the one arithmetic SPEC-LIT section 75.3(b) records:
+    /// `d_star(1.0e6, 1.2, 1005, 293, 9.81) = 0.961 m`, checked to `5e-3`. A
+    /// 1 MW release in air at 293 K is a metre to two figures, so a typo in
+    /// the exponent or in the grouping fails here rather than silently
+    /// rescaling every refinement decision the criterion makes.
     #[test]
-    fn the_fire_diameter_matches_the_published_formula() {
+    fn the_plume_diameter_matches_the_recorded_formula() {
         let d = d_star(1.0e6, 1.2, 1005.0, 293.0, 9.81);
         assert!((d - 0.9612).abs() < 5e-3, "D* = {d}");
         assert_eq!(d_star(0.0, 1.2, 1005.0, 293.0, 9.81), 0.0);
 
+        // And the indicator on it: cell 0 has a release and is too coarse,
+        // cell 1 is the same size with no release, cell 2 has a release and
+        // is fine enough.
         let v = vec![0.001 as Scalar, 0.001, 1.0e-6];
-        let burn = vec![1.0 as Scalar, 0.0, 1.0];
+        let heat = vec![1.0 as Scalar, 0.0, 1.0];
         let mut out = Vec::new();
-        fire_resolution_indicator(&mut out, &v, &burn, d, 16.0);
+        source_resolution_indicator(&mut out, &v, &heat, d, 16.0);
         assert_eq!(out, vec![1.0, 0.0, 0.0]);
     }
 }

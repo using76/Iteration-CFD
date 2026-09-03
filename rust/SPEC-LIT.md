@@ -17154,7 +17154,7 @@ old cells, the kernels gather one thread per cell:
 | kernel | agreement |
 |---|---|
 | `adaptLoehner` | `0` |
-| `adaptFireResolution` | exact (`assert_eq!`) |
+| `adaptSourceResolution` | exact (`assert_eq!`) |
 | `adaptBalanceSweep` | exact — the same integer fixed point |
 | `adaptCellFaceCsr` / `adaptBoundaryCsr` | exact, element for element |
 | `adaptParentTargets` | `< 1e-14` on `xbar`, `< 1e-15` on `sum w` |
@@ -17222,7 +17222,7 @@ needs to reach.
 | what | how |
 |---|---|
 | the state | `Forest::uniform`, `Forest::from_base_levels`, `Forest::from_leaves`, `Forest::build` |
-| the criterion | `loehner_indicator` / `gpu_loehner_indicator`, `d_star`, `fire_resolution_indicator` / `gpu_fire_resolution_indicator`, `combine_max`, `mark_with_hysteresis` |
+| the criterion | `loehner_indicator` / `gpu_loehner_indicator`, `d_star`, `source_resolution_indicator` / `gpu_source_resolution_indicator`, `combine_max`, `mark_with_hysteresis` |
 | the plan | `plan`, `balance_sweep` / `gpu_balance_sweep` |
 | the rebuild | `rebuild::ldu_permutation`, `rebuild::neighbour_order`, `rebuild::cell_face_csr`, `rebuild::rebuild_addressing`, `rebuild::gpu_rebuild_addressing` |
 | the transfer | `transfer::parent_targets`, `transfer::barth_jespersen`, `transfer::transfer_density`, `transfer::transfer_scalar`, and their `gpu_` twins, under `Prolongation::{Constant, LimitedLinear}` |

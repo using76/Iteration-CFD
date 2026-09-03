@@ -234,7 +234,7 @@ pub struct ScalarTransport<'m> {
     /// Volumetric sources on this equation - SPEC-LIT §18.
     ///
     /// Empty by default, which is exactly the equation this struct used to
-    /// solve. What it adds is the ability for a fire to be a HEAT RELEASE
+    /// solve. What it adds is the ability for a source to be a HEAT RELEASE
     /// rather than only a hot inlet: until this existed there was no way to
     /// put a watt into any equation in the solver.
     sources: crate::sources::SourceSet,

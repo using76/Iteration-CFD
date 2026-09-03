@@ -383,7 +383,7 @@
 // on the momentum equation gives Nu 71.683, U_b 4.93682 and a force balance
 // of +0.000% - the same numbers as shipped, to every printed digit. SPEC-LIT
 // S3.1's RULE is unchanged; a channel whose true div(u) is zero is simply not
-// a case where it bites, and a fire plume still is.
+// a case where it bites, and a hot plume still is.
 //
 // See docs/07-lowmach-solver.md S1.1's last subsection and SPEC-LIT S26.1.
 // ============================================================================

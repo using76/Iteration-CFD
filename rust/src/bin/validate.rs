@@ -1993,7 +1993,7 @@ fn check_mms(
 // ==========================================================================
 
 /// SPEC-LIT section 9, *DESIGN*: the full ideal-gas density ratio, not a
-/// Boussinesq expansion. A fire plume at 1173 K against 293 K ambient has
+/// Boussinesq expansion. A hot plume at 1173 K against 293 K ambient has
 /// `dT/T ~ 3`, so Boussinesq does not apply and must not be used.
 ///
 /// ```text
@@ -5715,7 +5715,7 @@ fn field_hash(f: &[Scalar]) -> u64 {
     h
 }
 
-/// SPEC-LIT §30.3's selection row: "`model kOmegaSST` in buoyant/fire
+/// SPEC-LIT §30.3's selection row: "`model kOmegaSST` in a buoyant driver
 /// constructs SST - verified by the printed banner AND a field difference."
 ///
 /// Promoted from `models::registry::tests::komega_sst_via_build_coupled_is_
@@ -5968,7 +5968,7 @@ fn check_volumetric_source(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let zone = CellZone::new(
         gpu,
         &m,
-        "fire",
+        "heater",
         CellSelector::Box {
             min: Vec3::new(0.2, 0.2, 0.0),
             max: Vec3::new(0.6, 0.6, 0.3),
@@ -10065,7 +10065,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
     // The seven runs above are a record of the solver as it was. This pair is
     // the solver as it is: the `bounded` token, on each leg, at the corrected
     // `Q`. The point is not that the token became harmless in general - S3.1's
-    // rule is unchanged and a fire plume still has a real dilatation for the
+    // rule is unchanged and a hot plume still has a real dilatation for the
     // correction to eat - but that on THIS case the dilatation it was eating
     // was itself the defect, so the -3.787 % does not reproduce.
     for r in &BOUNDED_AFTER_S261 {
@@ -10104,7 +10104,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
     );
     c.note(
         "S3.1's rule is unchanged by any of this: subtracting V_P (div u)_P from a MOMENTUM \
-         equation is wrong wherever div(u) is genuinely nonzero, which a fire plume is and a \
+         equation is wrong wherever div(u) is genuinely nonzero, which a hot plume is and a \
          thermally fully developed channel - once its Q is right - is not",
     );
 }

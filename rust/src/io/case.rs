@@ -949,7 +949,7 @@ pub fn is_transient_run(end_time: Scalar, ddt: DdtScheme) -> bool {
 /// SPEC-LIT §31.3: the transient/algorithm contract.
 ///
 /// A shipped transient case named `SIMPLE` (a steady algorithm, under-
-/// relaxation and all) while being run as a transient fire: the momentum
+/// relaxation and all) while being run as a transient case: the momentum
 /// equation was relaxed toward a steady state a buoyant plume does not
 /// have, and it diverged to Inf around step 20. Nothing in either reader
 /// noticed, because `endTime`, `ddt` and the algorithm dictionary are three

@@ -1378,13 +1378,12 @@ fn run(o: &Options) -> Result<()> {
     let (fields, lowered) =
         load_initial_fields(&o.case_path, &hm, diss_name, selection.model.name())?;
 
-    // A case built for a reacting medium is refused by NAME, before
-    // anything is reconciled or allocated, and it is refused by the reader
-    // rather than here - `case_json::refuse_held_back_blocks`. It has to be
-    // the reader's job: every driver in this engine would otherwise need the
-    // same check, and the one that forgot it would run a burner case at
-    // `q''' = 0` and report a wall heat balance closing perfectly because
-    // there was no fire in it.
+    // A setting this format does not define is refused by the READER,
+    // before anything is reconciled or allocated - `deny_unknown_fields` on
+    // every struct in `case_json`, not a check here. It has to be the
+    // reader's job: every driver in this engine would otherwise need the
+    // same check, and the one that forgot it would run a case whose entries
+    // it had silently dropped.
 
     let transient = o.end_time > 0.0;
     let dt: Scalar = if transient { o.delta_t as Scalar } else { 1.0 };
@@ -2587,8 +2586,8 @@ fn run(o: &Options) -> Result<()> {
             // One case, one streamwise axis: a `massFlux` thermostat has
             // already resolved it (SPEC-LIT §35.3.5), and a case without one
             // gets it from the mesh's single cyclic pair through the SAME
-            // function. Neither available is not an error - a burner plume
-            // has no streamwise axis and wants none - but it does mean the
+            // function. Neither available is not an error - a buoyant
+            // plume has no streamwise axis and wants none - but it does mean the
             // streamwise quantities below are skipped rather than guessed.
             let e_hat = match streamwise_hint {
                 Some(e) => Some((e, "the thermostat's own massFlux direction")),
@@ -3674,11 +3673,6 @@ mod lowmach_tests {
         /// those three disagree is a case with a discontinuity rather than a
         /// knob. `293.15` is what every pair below runs at.
         t_amb: &'static str,
-        /// A whole `physics.fire` block, verbatim (including the leading
-        /// comma) or empty - the blocks the READER turns away by name.
-        /// Empty is what every pair below runs with, so the one row that
-        /// fills it in costs the others nothing.
-        fire: &'static str,
         /// The whole `output` block, verbatim (including the leading comma)
         /// or empty - SPEC-LIT §44. Empty is "the command line decides",
         /// which is what every case in this repository still means and what
@@ -3713,7 +3707,6 @@ mod lowmach_tests {
                 algo_kind: "SIMPLE",
                 wall_t: "373.15",
                 t_amb: "293.15",
-                fire: "",
                 output: "",
             }
         }
@@ -3726,18 +3719,8 @@ mod lowmach_tests {
         let Knobs {
             div_u, div_t, div_k, grad, sn_grad, non_orth,
             relax_u, relax_p, relax_t, relax_k, t_tol, u_tol,
-            correctors, prt, ddt, algo_kind, rheology, wall_t, t_amb, fire, output,
+            correctors, prt, ddt, algo_kind, rheology, wall_t, t_amb, output,
         } = k;
-        // A case that names a `physics.fire` block is refused by the reader
-        // before it is lowered, so the only thing the `fire` knob is for is
-        // proving exactly that. It carries `initial.Y_F` and a boundary value
-        // for it too, because the burner cases it stands in for did, and a
-        // refusal that only fires on the block would leave those two silent.
-        let (yf_patch, yf_initial) = if fire.is_empty() {
-            ("", "")
-        } else {
-            (r#""Y_F": { "type": "fixedValue", "value": 0.03 },"#, r#""Y_F": 0.0,"#)
-        };
         format!(
             r#"{{
   "name": "settingReachTest",
@@ -3754,7 +3737,7 @@ mod lowmach_tests {
   "physics": {{
     "gravity": [0, 0, 0],
     "fluid": {{ "nu": 1.5e-5, "Pr": 0.71, "Prt": {prt}, "TRef": 293.15{rheology} }},
-    "buoyancy": "densityRatio"{fire}
+    "buoyancy": "densityRatio"
   }},
   "turbulence": {{
     "kind": "RAS",
@@ -3768,7 +3751,6 @@ mod lowmach_tests {
       "U": {{ "type": "fixedValue", "value": [3.0, 0, 0] }},
       "p": {{ "type": "zeroGradient" }},
       "T": {{ "type": "fixedValue", "value": {t_amb} }},
-      {yf_patch}
       "k": {{ "type": "fixedValue", "value": 0.03 }},
       "epsilon": {{ "type": "fixedValue", "value": 0.3 }},
       "nut": {{ "type": "calculated", "value": 0 }}
@@ -3796,7 +3778,7 @@ mod lowmach_tests {
     }}
   ],
   "initial": {{
-    "U": [3.0, 0, 0], "T": {t_amb}, "p": 0.0, {yf_initial}
+    "U": [3.0, 0, 0], "T": {t_amb}, "p": 0.0,
     "k": 0.03, "epsilon": 0.3, "nut": 0.0
   }},
   "numerics": {{
@@ -3830,7 +3812,7 @@ mod lowmach_tests {
     fn scratch_dir(tag: &str) -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let d = std::env::temp_dir().join(format!(
-            "ofgpu_fire_13_4_1_{}_{}_{}",
+            "ofgpu_lowmach_13_4_{}_{}_{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed),
             tag
@@ -4039,8 +4021,8 @@ mod lowmach_tests {
     fn a_transient_ddt_in_a_steady_run_is_a_named_error() {
         // A case that is INTERNALLY consistent - transient scheme, transient
         // algorithm, positive endTime, so SPEC-LIT §31.3 passes it - run with
-        // no `-endTime` on the command line. That combination is fire's own
-        // to refuse.
+        // no `-endTime` on the command line. That combination is this
+        // driver's own to refuse.
         let k = Knobs { ddt: "Euler", algo_kind: "PIMPLE", ..Knobs::default() };
         let (path, cc, lowered) = lower_knobs(&k, "ddtx");
         let e = lowmach_controls(&path, &cc, Some(&lowered), false, 1.0)
@@ -4048,61 +4030,6 @@ mod lowmach_tests {
         let msg = format!("{e}");
         assert!(msg.contains("ddtSchemes"), "the error must name the setting: {msg}");
         assert!(msg.contains("-endTime"), "the error must name the way out: {msg}");
-    }
-
-    /// **SPEC-LIT §13.4.** A case that asks for a reacting, sooting or
-    /// radiating medium is refused BY NAME before this driver ever sees it,
-    /// and not run at `q''' = 0`.
-    ///
-    /// This is the driver's end of `case_json::refuse_held_back_blocks`, run
-    /// through the real reader on the real case text this file writes: the
-    /// engine carries no chemistry, and the failure mode it is guarding
-    /// against is a burner case that runs to completion and reports a wall
-    /// heat balance closing perfectly because there was no fire in it. All
-    /// three sub-blocks are checked, because a case may name radiation or
-    /// soot without ever reaching the combustion arm.
-    ///
-    /// That the refusal ALSO survives `-permissive` is
-    /// `io::case_json::tests::a_case_written_for_a_reacting_medium_is_refused_by_name`'s
-    /// to hold: the flag is process-wide and several tests in THIS binary
-    /// read it without taking the guard, so turning it on here would refuse
-    /// nothing and break them instead.
-    #[test]
-    fn a_case_that_asks_for_a_reacting_medium_is_refused_by_name() {
-        let _g = ofgpu::io::contract::permissive_test_guard();
-        ofgpu::io::contract::set_permissive(false);
-        let mut got = Vec::new();
-        for (block, fire) in [
-            (
-                "physics.fire.combustion",
-                r#", "fire": { "combustion": {} }"#,
-            ),
-            (
-                "physics.fire.radiation",
-                r#", "fire": { "combustion": {}, "radiation": { "model": "P1", "a": 0.5, "chiR": 0.35 } }"#,
-            ),
-            (
-                "physics.fire.soot",
-                r#", "fire": { "combustion": {}, "soot": { "model": "prescribedYield", "yield": 0.024 } }"#,
-            ),
-        ] {
-            let dir = scratch_dir("refusefire");
-            let path = dir.join("case.jsonc");
-            std::fs::write(&path, knob_case_text(&Knobs { fire, ..Knobs::default() }))
-                .expect("write case");
-            got.push((block, read_case_jsonc(&path).err().map(|e| e.to_string())));
-        }
-        for (block, e) in got {
-            let e = e.unwrap_or_else(|| panic!("{block} was read and not refused"));
-            assert!(e.contains(block), "the refusal must name {block}: {e}");
-            assert!(
-                e.contains("initial.Y_F"),
-                "the refusal must name the species entry that went with it: {e}"
-            );
-        }
-        // And the baseline case - no `physics.fire` at all - is read, or the
-        // check above would pass for the wrong reason.
-        lower_knobs(&Knobs::default(), "refusenone");
     }
 
     /// SPEC-LIT §13.4: `ofgpu-lowmach` has no PIMPLE outer loop, so a case

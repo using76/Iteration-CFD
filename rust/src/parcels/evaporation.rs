@@ -105,7 +105,7 @@ pub const WATSON_EXPONENT: Scalar = 0.38;
 /// liquid whose boiling point and latent heat are known, which is what a fuel
 /// spray needs. [`Self::HylandWexler`] is **water only** and is the ASHRAE
 /// polynomial S54 already carries; it is what a psychrometric comparison has
-/// to be made against, because a data-centre or fire user checks the number
+/// to be made against, because a data-centre or HVAC user checks the number
 /// against a chart drawn from that same polynomial.
 ///
 /// The gap between them is not small and it is not hidden: S76.12 measures

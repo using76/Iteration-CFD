@@ -35,7 +35,7 @@
 //! which makes the constraint an identity. *DESIGN*, per §19: the inert
 //! species is the one the case names, or the one with the largest
 //! volume-weighted mean mass fraction if the case names none - which for a
-//! combustion case is nitrogen, and for a dispersion case is the carrier gas.
+//! dispersion case is the carrier gas.
 //!
 //! **3. The same flux.** Every species is advected by the one conservative
 //! `phi` the pressure equation produced. This is the requirement that is
@@ -819,7 +819,7 @@ mod tests {
 
         let hm = box3(4, 0.02);
         let m = crate::GpuMesh::upload(&g, &hm)?;
-        let names = vec!["Y_F".to_string(), "Y_O2".to_string(), "N2".to_string()];
+        let names = vec!["Y_A".to_string(), "Y_B".to_string(), "N2".to_string()];
         let coeffs = vec![SpeciesCoeffs::default(); names.len()];
         let ctrl = TurbulenceControls {
             k_relax: 1.0,

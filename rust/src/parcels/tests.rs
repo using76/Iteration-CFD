@@ -313,11 +313,14 @@ fn every_unsupported_setting_is_refused_by_name_with_the_menu() {
         "S68.5 supports `heating`; if this ever fails, the refusal above has to \
          grow it back"
     );
-    for name in ["reacting", "combusting"] {
+    // Anything else is an unrecognised setting: refused by name, with the
+    // three names that ARE recognised printed beside it.
+    for name in ["condensing", "banana"] {
         let e = ParcelPhysics::from_name(name).unwrap_err().to_string();
         assert!(e.contains(name), "{e}");
-        assert!(e.contains("species source"), "the refusal must name what is missing: {e}");
-        assert!(e.contains("evaporating"), "the alternative must be printed: {e}");
+        for want in ParcelPhysics::NAMES {
+            assert!(e.contains(want), "the recognised set must be printed: {e}");
+        }
     }
 
     assert_eq!(DragModel::from_name("stokes").unwrap(), DragModel::Stokes);

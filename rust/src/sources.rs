@@ -32,8 +32,8 @@
 //! [`crate::fv::fvm_sp`] and [`crate::fv::fvm_susp`] have implemented it since
 //! the beginning - but over the WHOLE MESH, from an array the caller had to
 //! build itself. There was no way to say "this much heat, in these cells", so
-//! a fire could only ever be a hot inlet and never a heat release. This module
-//! is the missing half: which cells, and how much.
+//! a heat source could only ever be a hot inlet and never a heat release.
+//! This module is the missing half: which cells, and how much.
 //!
 //! # The cell set
 //!
@@ -511,8 +511,8 @@ impl Source {
 
 /// Every source acting on one equation.
 ///
-/// Held as a set rather than a single term because a case may well put a fire
-/// and a fan in the same domain, and because the order they are applied in
+/// Held as a set rather than a single term because a case may well put a
+/// heater and a fan in the same domain, and because the order they are applied in
 /// must not matter: every form here either adds to `diag` or adds to `source`,
 /// and addition commutes. The one exception is [`SourceTerm::FixedValue`],
 /// which is a constraint and not a source - it is applied last, after
@@ -1187,8 +1187,8 @@ impl Thermostat {
     /// [`Self::source_buf`] hands to `EnergySources::register_explicit`.
     ///
     /// Call once per outer iteration, right after
-    /// `EnergySources::clear` - the same moment the heater and combustion
-    /// register their own contributions.
+    /// `EnergySources::clear` - the same moment the other volumetric
+    /// sources register their own contributions.
     ///
     /// UNIFORM weighting only. A [`ThermostatWeighting::MassFlux`]
     /// thermostat needs `rho` and `U` to form its weights, so this is an
@@ -1483,7 +1483,7 @@ impl Thermostat {
 /// per source:
 ///
 /// ```text
-/// fire
+/// heater
 /// {
 ///     type        heatRelease;    // the equation it acts on is `field`
 ///     field       T;
@@ -2031,7 +2031,7 @@ mod tests {
             min: Vec3::new(10.0, 10.0, 10.0),
             max: Vec3::new(11.0, 11.0, 11.0),
         };
-        let r = CellZone::new(&gpu, &m, "fire", sel);
+        let r = CellZone::new(&gpu, &m, "heater", sel);
         assert!(r.is_err(), "a source that heats nothing must be refused");
     }
 
@@ -2071,7 +2071,7 @@ mod tests {
         let zone = CellZone::new(
             &gpu,
             &m,
-            "fire",
+            "heater",
             CellSelector::Box {
                 min: Vec3::new(0.0, 0.0, 0.0),
                 max: Vec3::new(0.5, 0.5, 0.5),

@@ -27,7 +27,7 @@
   Why a cell LIST and not a mask
   ------------------------------------------------------------------------
 
-  A source occupies a fire, a fan or a filter: a few thousand cells out of a
+  A source occupies a heater, a fan or a filter: a few thousand cells out of a
   few million. Launching one thread per cell in the mesh and having almost
   all of them return would cost the whole mesh in bandwidth to touch nothing.
   One thread per SELECTED cell costs the zone.

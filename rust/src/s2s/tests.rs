@@ -1397,7 +1397,7 @@ fn every_bad_entry_is_refused_by_name() {
         ("emissivity 0.9;\nradiationRelaxation 1.5;\n", &["radiationRelaxation", "(0, 1]"]),
         (
             "emissivity 0.9;\nabsorptionCoefficient 0.5;\n",
-            &["NON-PARTICIPATING", "P1", "fvDOM"],
+            &["NON-PARTICIPATING", "absorptionCoefficient"],
         ),
     ];
     for (body, wants) in cases {
@@ -1617,15 +1617,21 @@ fn the_s13_4_1_pair_tests() {
         );
     }
 
-    // ---- radiationModel: a different model is CONSTRUCTED -------------
+    // ---- radiationModel: the name gate reaches this reader -------------
     {
         use crate::radiation::RadiationModel;
-        assert_eq!(RadiationModel::from_name("P1").expect("P1"), RadiationModel::P1);
         assert_eq!(
             RadiationModel::from_name("viewFactor").expect("viewFactor"),
             RadiationModel::ViewFactor
         );
-        assert_ne!(RadiationModel::P1, RadiationModel::ViewFactor);
+        // Both spellings, one model - and nothing else is recognised.
+        assert_eq!(
+            RadiationModel::from_name("s2s").expect("s2s"),
+            RadiationModel::ViewFactor
+        );
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        assert!(RadiationModel::from_name("banana").is_err());
     }
 }
 
@@ -1786,33 +1792,34 @@ fn case_with(body: &str, tag: &str) -> std::path::PathBuf {
 
 /// The whole path a real case takes: `constant/radiationProperties` on disk,
 /// through `RadiationModel::from_name`'s S13.4 gate, to the model that gets
-/// constructed. This is S51.2's `radiationModel` pair test at the level a
-/// user actually writes - two files differing in one word.
+/// constructed. This is S51.2's `radiationModel` test at the level a user
+/// actually writes - a file, not a dictionary built in memory.
 ///
-/// SPEC-LIT §50.2/§50.3 is the other half of it, and it is why the two
-/// files do NOT both build something. A surface-to-surface enclosure is
-/// not a third participating model: it has no volumetric equation, no
-/// incident-radiation field and no energy-source registration, and it
-/// shares not one entry with the two models that do. So the `P1` file is
-/// refused BY NAME by this reader rather than quietly handed an enclosure
-/// - the S13.4 substitution this project exists to stop.
+/// SPEC-LIT §50.2/§50.3 is the other half of it. A surface-to-surface
+/// enclosure has no volumetric equation, no incident-radiation field and no
+/// energy-source registration, so a value this gate does not recognise is
+/// refused by name with `viewFactor` printed beside it rather than resolved
+/// to an enclosure the case never asked for - the S13.4 substitution this
+/// project exists to stop.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn the_radiation_model_selector_reaches_the_case_directory() {
     use crate::radiation::{RadiationConfig, RadiationModel};
 
-    let common = "absorptionCoefficient 0.1;\n";
-    let p1 = case_with(&format!("radiationModel P1;\n{common}"), "p1");
+    let unknown = case_with("radiationModel banana;\nemissivity 0.83;\n", "unknown");
     let vf = case_with(
         "radiationModel viewFactor;\nemissivity 0.83;\nagglomerate 3;\n",
         "vf",
     );
 
-    // The participating model is recognised and is not resolved here.
-    let e = RadiationConfig::from_case(&p1).expect_err("P1 is not this reader's model");
+    // An unrecognised model is refused by name, and the recognised set is
+    // printed. Strict mode: `-permissive` is what would substitute a default.
+    let _guard = crate::io::contract::permissive_test_guard();
+    crate::io::contract::set_permissive(false);
+    let e = RadiationConfig::from_case(&unknown).expect_err("banana is not a model");
     let m = e.to_string();
-    assert!(m.contains("P1"), "the refusal must name what was asked for: {m}");
-    assert!(m.contains("PARTICIPATING"), "{m}");
+    assert!(m.contains("banana"), "the refusal must name what was asked for: {m}");
+    assert!(m.contains("viewFactor"), "the refusal must name what IS here: {m}");
 
     let b = RadiationConfig::from_case(&vf).expect("viewFactor");
     assert_eq!(b.model(), RadiationModel::ViewFactor);
@@ -1842,7 +1849,7 @@ fn the_radiation_model_selector_reaches_the_case_directory() {
     let e = RadiationConfig::from_case(&bare).expect_err("must be refused");
     assert!(e.to_string().contains("emissivity"), "{e}");
 
-    for d in [p1, vf, both, bare] {
+    for d in [unknown, vf, both, bare] {
         let _ = std::fs::remove_dir_all(d);
     }
 }

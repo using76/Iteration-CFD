@@ -344,7 +344,7 @@ enum FluxSource {
 ///    this driver used to do unconditionally. Nothing constrains the `U` in a
 ///    `0/` directory to satisfy discrete continuity, so nothing constrains its
 ///    interpolant to either; on the plume case it leaves `max |sum_f phi|` at
-///    1.4e-2 m^3/s, mass enters at the burner and never leaves, and `T`
+///    1.4e-2 m^3/s, mass enters at the inlet and never leaves, and `T`
 ///    equilibrates to the inlet value because there is no mean transport to
 ///    carry heat out. `bounded` hides that rather than fixing it.
 ///
@@ -387,7 +387,7 @@ fn establish_flux(
 /// return `None`.
 ///
 /// The inflow speed comes from the case's own evaluated `0/U` on the inlet
-/// patch rather than from a constant here, so the burner has one description
+/// patch rather than from a constant here, so the inlet has one description
 /// and not two that can drift apart.
 fn potential_flux(
     gpu: &Gpu,
@@ -1339,7 +1339,7 @@ fn run(o: &Options) -> Result<()> {
     // SPEC-LIT 17: the buoyancy production. A k-epsilon run on a 1173 K plume
     // in 293 K air with no G_b is missing a leading-order term - buoyancy is
     // where most of that flow's turbulence comes from, and the stratification
-    // above the fire is where the rest of it is destroyed.
+    // above the inlet is where the rest of it is destroyed.
     //
     //     G_b = (nu_t/Pr_t) g . grad(T) / T
     //

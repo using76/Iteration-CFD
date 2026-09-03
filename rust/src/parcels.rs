@@ -421,17 +421,6 @@ impl ParcelPhysics {
             "inert" => Ok(Self::Inert),
             "heating" | "heatTransfer" => Ok(Self::Heating),
             "evaporating" | "evaporation" | "heatAndMassTransfer" => Ok(Self::Evaporating),
-            "reacting" | "combusting" => contract::unsupported_note(
-                "parcels/physics",
-                s,
-                Self::NAMES,
-                "a reacting parcel needs the vapour it produces to reach a combustion \
-                 model, and S76 leaves that vapour ON the parcel: it is accumulated and \
-                 made available, and there is no species source carrying it into the gas \
-                 yet (SPEC-LIT S76.14)",
-                "evaporating",
-                Self::Evaporating,
-            ),
             other => contract::unsupported(
                 "parcels/physics",
                 other,
