@@ -24140,11 +24140,25 @@ five its module writes. That is real, and it is why the protocol's own doc says
 so in as many words. A cheap partial defence is in the numbers the gates print
 — a gate comparing 42 values beside one comparing 640 invites the question.
 
+Nor does it stop the mirror of that defect: a gate whose module is put in a
+state where nothing *happens*. `species.rs`'s gate was written on a uniform
+field with `phi = 0` behind zero-gradient walls, and there every term of §19's
+equation is identically zero — three replays equalled three per-launch
+iterations because neither moved a value, and a graph that had recorded no work
+at all would have passed. It also lived, physically, in `src/combustion.rs`
+rather than beside the module it gates, which the registry permits — it looks a
+gate up by name across `src/` — and which left a general module's proof of a
+general property hostage to a file that has nothing to do with §19. It now sits
+in `src/species.rs`, it carries a non-uniform seed, a conservative flux along
+`x` and an eddy viscosity, and it measures that a step moves the field before
+it asserts that a replay reproduces it. The registry can see neither half of
+that; only reading the gate can.
+
 ### 81.9 The gates, and what they measured
 
-Thirty-six of fifty modules resolve to gated. Measured on an RTX 5070 Ti, CUDA
-13.3, default `f64`; `nodes` is `GraphShape::total`, and every row replayed
-three times bit for bit.
+Thirty-seven of fifty-four modules resolve to gated. Measured on an RTX 5070
+Ti, CUDA 13.3, default `f64`; `nodes` is `GraphShape::total`, and every row
+replayed three times bit for bit.
 
 | module | gate | nodes (kernel / memset) | values compared |
 |---|---|---|---|

@@ -873,6 +873,137 @@ mod tests {
         Ok(())
     }
 
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §81.7: the CUDA-graph capture gate for this module
+    // ------------------------------------------------------------------
+
+    /// Turbulence controls with **`fixed_iters` on**.
+    ///
+    /// [`ScalarTransport`] takes its linear solver from `k_solver`, and that
+    /// solver's adaptive residual test reads a convergence flag back to the
+    /// host every few sweeps - which SPEC-LIT §81.3 refuses by name while a
+    /// capture is recording. A gate that forgot this line would fail with
+    /// that message, which is the point of the message.
+    fn fixed_species_controls() -> TurbulenceControls {
+        let mut c = TurbulenceControls { steady: false, delta_t: 0.01, ..Default::default() };
+        c.k_solver.fixed_iters = true;
+        c.k_solver.max_iter = 4;
+        c.k_solver.report_residuals = false;
+        c
+    }
+
+    /// The set the gate captures: three solved, one carrier gas, seeded with
+    /// a smooth non-uniform field.
+    ///
+    /// The protocol calls this **twice** and the two instances must be
+    /// identical, so everything here is a function of the cell index and
+    /// nothing else. The seed sums to well under one, so the inert species is
+    /// an ordinary remainder rather than a clip.
+    fn seeded_species<'m>(
+        gpu: &Gpu,
+        hm: &HostMesh,
+        m: &'m GpuMesh,
+        names: &[String],
+        ctrl: TurbulenceControls,
+    ) -> Result<Species<'m>> {
+        let coeffs = vec![SpeciesCoeffs::default(); names.len()];
+        let mut sp = Species::new(gpu, hm, m, names, &coeffs, "Air", 1.5e-5, ctrl)?;
+        for j in 0..sp.n_solved() {
+            let v: Vec<Scalar> = (0..hm.n_cells)
+                .map(|i| 0.10 + 0.04 * (((i + 5 * j) as Scalar) * 0.23).sin())
+                .collect();
+            gpu.write(&mut sp.get_mut(j).expect("solved").field_mut().f, &v)?;
+        }
+        sp.initialise(gpu)?;
+        Ok(sp)
+    }
+
+    /// **SPEC-LIT §81.7, the gate this module is registered under:** one
+    /// [`Species::correct`] captures into a CUDA graph and replays bit for
+    /// bit against the per-launch path.
+    ///
+    /// The transport is *driven*, and that is not decoration. A bitwise
+    /// comparison is a measurement only if the thing compared moved: on a
+    /// uniform field with `phi = 0` behind zero-gradient walls every term of
+    /// §19's equation is identically zero, the state after three replays
+    /// equals the state after three per-launch iterations because neither
+    /// changed anything, and a graph that recorded no work at all would pass.
+    /// So the set below carries a non-uniform seed, a uniform conservative
+    /// flux along `x`, and an eddy viscosity that gives `D_eff` its turbulent
+    /// half - and before the gate runs, the test measures that a step really
+    /// does move the field.
+    #[test]
+    fn the_species_correction_replays_bitwise() {
+        let Some(gpu) = gpu() else { return };
+        let hm = boxed([4, 4, 4]);
+        let m = crate::GpuMesh::upload(&gpu, &hm).expect("mesh");
+        let n = hm.n_cells;
+        let ctrl = fixed_species_controls();
+
+        let names: Vec<String> = ["Tracer", "Vapour", "Contaminant", "Air"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // A uniform velocity's flux is discretely conservative on this mesh -
+        // every cell gains through one face exactly what it loses through the
+        // other - so requirement 3 of §19 is met and the sum is not disturbed.
+        let u = GpuVectorField::zeros(&gpu, &m, "U").expect("U");
+        let mut phi = GpuSurfaceScalarField::zeros(&gpu, &m, "phi").expect("phi");
+        let uf = Vec3::new(0.05, 0.0, 0.0);
+        let internal: Vec<Scalar> = (0..hm.n_internal_faces).map(|f| uf.dot(hm.sf[f])).collect();
+        let boundary: Vec<Scalar> = (0..hm.n_boundary_faces).map(|f| uf.dot(hm.b_sf[f])).collect();
+        gpu.write(&mut phi.f, &internal).expect("phi");
+        gpu.write(&mut phi.bf, &boundary).expect("phi bf");
+
+        let mut nut = GpuScalarField::zeros(&gpu, &m, "nut").expect("nut");
+        gpu.write(&mut nut.f, &vec![1.0e-4 as Scalar; n]).expect("nut");
+        gpu.write(&mut nut.bf, &vec![1.0e-4 as Scalar; hm.n_boundary_faces])
+            .expect("nut bf");
+
+        let flow = FlowState::new(&u, &phi, 1.5e-5);
+
+        // Is there anything for the gate to compare? Three steps of the
+        // per-launch path, and the field must have left its seed. Without
+        // this the comparison below is a statement about a constant.
+        {
+            let mut sp = seeded_species(&gpu, &hm, &m, &names, ctrl).expect("species");
+            let before = gpu.download(&sp.get(0).expect("solved").field().f).expect("download");
+            for _ in 0..3 {
+                sp.correct(&gpu, &flow, &nut).expect("correct");
+            }
+            let after = gpu.download(&sp.get(0).expect("solved").field().f).expect("download");
+            let moved = before
+                .iter()
+                .zip(&after)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            assert!(
+                moved > n / 2,
+                "only {moved} of {n} cells moved in three transport steps: a \
+                 bitwise replay comparison over a field that does not move \
+                 holds for a graph that launched nothing - SPEC-LIT §81.5"
+            );
+        }
+
+        let report = crate::capture::capture_replays_bitwise(
+            &gpu,
+            "species transport (SPEC-LIT 19)",
+            || seeded_species(&gpu, &hm, &m, &names, ctrl),
+            |sp: &mut Species| sp.correct(&gpu, &flow, &nut).map(|_| ()),
+            |sp: &Species| {
+                let mut out = Vec::new();
+                for nm in ["Tracer", "Vapour", "Contaminant"] {
+                    out.push((nm, gpu.download(&sp.by_name(nm).expect("named").field().f)?));
+                }
+                out.push(("inert", gpu.download(&sp.inert().f)?));
+                Ok(out)
+            },
+        )
+        .expect("SPEC-LIT §81.7: species transport must capture and replay bitwise");
+        println!("  species: {report}");
+    }
+
     /// A three-dimensional box with six ordinary patches - the same helper
     /// §86's transport tests use, repeated here because a test module cannot
     /// borrow another's.
