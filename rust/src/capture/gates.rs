@@ -436,6 +436,66 @@ fn the_transition_correction_replays_bitwise() {
     println!("  kOmegaSSTLM: {report}");
 }
 
+/// `SPEC-LIT` 90: the 2015 one-equation gamma transition model, on SST.
+///
+/// The LM gate's reasoning with a fourth equation in the rotation:
+/// `GammaControls` mirrors the k settings, which are adaptive, so a
+/// checking solve is what a default `gamma` solve would be - and a checking
+/// solve calls `read_flag`, which synchronises on an event, and §81.3's
+/// guard refuses that inside a capture by name (CUDA_ERROR_CAPTURED_EVENT,
+/// not a silent stale flag). The gate therefore hands `gamma` the SAME
+/// fixed-iteration solver the other three equations get, which is right for
+/// a capture and what the run's `system/fvSolution` would say.
+#[test]
+fn the_gamma_transition_correction_replays_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let hm = box4();
+    let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
+    let ctrl = fixed(1e-3);
+    let wf = WallFaces::none(hm.n_boundary_faces);
+    let quiet = Quiet::new(&gpu, &mesh).expect("flow");
+    let flow = quiet.state();
+    let (y, gy) = wall_distance(&gpu, hm.n_cells).expect("y");
+
+    let report = capture_replays_bitwise(
+        &gpu,
+        "kOmegaSSTGamma (SPEC-LIT 90)",
+        || {
+            let mut m = crate::models::k_omega_sst::KOmegaSst::new(
+                &gpu, &hm, &mesh, Default::default(), ctrl,
+                WallFunctionCoeffs::default(), &wf, &y,
+            )?;
+            gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; hm.n_cells])?;
+            gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; hm.n_cells])?;
+            let gcc = crate::models::menter_gamma::GammaControls {
+                gamma_solver: ctrl.k_solver,
+                gamma_relax: 1.0,
+                gamma_conv: ctrl.k_conv(),
+            };
+            let mut gm = crate::models::menter_gamma::MenterGamma::new(
+                &gpu, &mesh, Default::default(), gcc, &y, &gy,
+            )?;
+            gpu.write(&mut gm.gamma_mut().f, &vec![0.7 as Scalar; hm.n_cells])?;
+            gm.initialise(&gpu, &mesh)?;
+            m.set_gamma_transition(Some(gm))?;
+            m.initialise(&gpu, &flow)?;
+            Ok(m)
+        },
+        |m| m.correct(&gpu, &flow).map(|_| ()),
+        |m| {
+            let gm = m.gamma_transition().expect("attached");
+            Ok(vec![
+                field(&gpu, "k", m.k())?,
+                field(&gpu, "omega", m.omega())?,
+                field(&gpu, "nut", m.nut())?,
+                field(&gpu, "gamma", gm.gamma())?,
+            ])
+        },
+    )
+    .expect("SPEC-LIT 81.7: kOmegaSSTGamma must capture and replay bitwise");
+    println!("  kOmegaSSTGamma: {report}");
+}
+
 /// `SPEC-LIT` 6.5 and 16: the LES subgrid models.
 #[test]
 fn the_les_correction_replays_bitwise() {

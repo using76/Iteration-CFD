@@ -1183,3 +1183,625 @@ fn update_fields_reads_no_velocity() {
          input path exists for a velocity to reach it"
     );
 }
+
+// ======================================================================
+//  90.10  Gate 90-R through the SST hooks - the wiring unit's half
+// ======================================================================
+
+/// What a rig run leaves behind, as bits: the three fields a writer emits,
+/// the final `gamma`, `gamma` after every `correct` (the monotonicity rows
+/// read this), and the three buffers the coupling stamps - `f1`, `core.g`
+/// (the production the k equation read) and `core.sp` (the dissipation
+/// coefficient it was handed).
+#[derive(Default)]
+struct RigBits {
+    k: Vec<u64>,
+    omega: Vec<u64>,
+    nut: Vec<u64>,
+    gamma: Vec<u64>,
+    gamma_steps: Vec<Vec<u64>>,
+    f1: Vec<u64>,
+    g: Vec<u64>,
+    sp: Vec<u64>,
+}
+
+/// The rig every test below shares: one [`crate::models::KOmegaSst`], plain
+/// or with a [`MenterGamma`] attached, on the wall-floor block, uniform
+/// `y = 0.05`, `nu = 1e-5`, Euler at `dt = 1e-3`.
+///
+/// `velocity` is the `0/U` field; the attached triple is the model's
+/// coefficients, its `kato_launder` instrument and the `0/gamma` seed.
+/// `relax` is `(k_relax, eps_relax)` - the laminar rows hand in a small
+/// pair so the background state stays put while `gamma` moves, exactly the
+/// point of the row.
+#[allow(clippy::too_many_arguments)]
+fn gamma_rig(
+    gpu: &Gpu,
+    hm: &crate::mesh::HostMesh,
+    attach: Option<(GammaCoeffs, bool, &[Scalar])>,
+    velocity: &[Vec3],
+    k0: Scalar,
+    w0: Scalar,
+    steps: usize,
+    relax: (Scalar, Scalar),
+) -> Result<RigBits> {
+    let n = hm.n_cells;
+    let mesh = crate::mesh::GpuMesh::upload(gpu, hm)?;
+    let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let mut u = crate::field::GpuVectorField::zeros(gpu, &mesh, "U")?;
+    gpu.write(&mut u.f, &velocity.to_vec())?;
+    let phi = crate::field::GpuSurfaceScalarField::zeros(gpu, &mesh, "phi")?;
+    let flow = FlowState::new(&u, &phi, 1e-5);
+    let ctrl = crate::io::case::TurbulenceControls {
+        ddt: crate::timescheme::DdtScheme::Euler,
+        steady: false,
+        delta_t: 1e-3,
+        k_relax: relax.0,
+        eps_relax: relax.1,
+        ..Default::default()
+    };
+    let mut wy: DevBuf<Scalar> = gpu.zeros(n)?;
+    gpu.write(&mut wy, &vec![0.05 as Scalar; n])?;
+    let mut m = crate::models::KOmegaSst::new(
+        gpu,
+        hm,
+        &mesh,
+        Default::default(),
+        ctrl,
+        crate::wallfunctions::WallFunctionCoeffs::default(),
+        &wf,
+        &wy,
+    )?;
+    gpu.write(&mut m.k_mut().f, &vec![k0; n])?;
+    gpu.write(&mut m.omega_mut().f, &vec![w0; n])?;
+    if let Some((coeffs, kato, gamma0)) = attach {
+        let mut gy: DevBuf<Vec3> = gpu.zeros(n)?;
+        gpu.write(&mut gy, &vec![Vec3 { x: 0.0, y: 1.0, z: 0.0 }; n])?;
+        let mut gm =
+            MenterGamma::new(gpu, &mesh, coeffs, GammaControls::default(), &wy, &gy)?;
+        gpu.write(&mut gm.gamma_mut().f, &gamma0.to_vec())?;
+        gm.set_kato_launder(kato);
+        gm.initialise(gpu, &mesh)?;
+        m.set_gamma_transition(Some(gm))?;
+    }
+    m.initialise(gpu, &flow)?;
+    let mut out = RigBits::default();
+    for _ in 0..steps {
+        m.correct(gpu, &flow)?;
+        if let Some(gm) = m.gamma_transition() {
+            let bits: Vec<u64> = gpu
+                .download(&gm.gamma().f)?
+                .iter()
+                .map(|v: &Scalar| v.to_bits())
+                .collect();
+            out.gamma_steps.push(bits);
+        }
+    }
+    if let Some(gm) = m.gamma_transition() {
+        out.gamma = gpu.download(&gm.gamma().f)?.iter().map(|v: &Scalar| v.to_bits()).collect();
+    }
+    out.k = gpu.download(&m.k().f)?.iter().map(|v: &Scalar| v.to_bits()).collect();
+    out.omega = gpu.download(&m.omega().f)?.iter().map(|v: &Scalar| v.to_bits()).collect();
+    out.nut = gpu.download(&m.nut().f)?.iter().map(|v: &Scalar| v.to_bits()).collect();
+    out.f1 = gpu.download(m.f1())?.iter().map(|v: &Scalar| v.to_bits()).collect();
+    out.g = gpu.download(&m.core().g)?.iter().map(|v: &Scalar| v.to_bits()).collect();
+    out.sp = gpu.download(&m.core().sp)?.iter().map(|v: &Scalar| v.to_bits()).collect();
+    Ok(out)
+}
+
+/// `u = (a y, 0, 0)` on the rig's block - a pure shear, `S = Omega = a` in
+/// every cell. Cell order is blockgen's: x fastest, then y, then z.
+fn shear_u(n: usize, a: Scalar) -> Vec<Vec3> {
+    (0..n * n * n)
+        .map(|c| {
+            let yc = 0.2 * (((c / n) % n) as Scalar + 0.5) / n as Scalar;
+            Vec3 { x: a * yc, y: 0.0, z: 0.0 }
+        })
+        .collect()
+}
+
+/// `u = (b x, -b y, 0)` - the stagnation-like irrotational strain: a
+/// DIAGONAL `grad U`, so `S = 2b` and `Omega = 0` - the one place the
+/// Kato-Launder form cannot agree with SST's (90.6).
+fn strain_u(n: usize, b: Scalar) -> Vec<Vec3> {
+    (0..n * n * n)
+        .map(|c| {
+            let xc = ((c % n) as Scalar + 0.5) / n as Scalar;
+            let yc = 0.2 * (((c / n) % n) as Scalar + 0.5) / n as Scalar;
+            Vec3 { x: b * xc, y: -b * yc, z: 0.0 }
+        })
+        .collect()
+}
+
+/// **Gate 90-R (i), through the SST hooks: at `gamma = 1` exactly with the
+/// Kato-Launder stamp switched OFF, one `correct`'s worth of stamps leaves
+/// everything the coupling touches bitwise unchanged against plain SST.**
+///
+/// Unit 3's kernel-level half proved each stamp an identity in isolation;
+/// this runs them where a run runs them. `gammaMin = gammaMax = 1` freezes
+/// the intermittency at exactly 1 - a real setting, not a hook - and `F_3`
+/// is zero in the only way that survives `update_fields`: `k = 0.05` with
+/// `y = 0.05`, `nu = 1e-5` puts `R_y = 1118`, so `exp(-(R_y/120)^8)`
+/// underflows to exactly `0.0` on every pass, the 88-R template's own
+/// arithmetic. The compared buffers are the ones a post-`correct` read can
+/// reach: `f1` and `core.g` - the blending function and the production the
+/// stamps land on - plus `k`, `omega` and `nut` after the solve. Two
+/// buffers are deliberately absent: `g_lim` and `p` are private to
+/// `KOmegaSst`, and `core.sp` is REWRITTEN by the gamma equation's own
+/// assembly after `k` is solved (the shared workspace `gm.solve` runs
+/// through) - so the `sp` stamp is visible only through `k` itself, which
+/// carries it, and through Unit 3's kernel-level half on the stamp in
+/// isolation.
+#[test]
+fn gate_90_r_the_stamps_are_bitwise_identities_at_their_neutral_values() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(6);
+    let n = hm.n_cells;
+    let u = shear_u(6, 2.0);
+
+    let plain =
+        gamma_rig(&gpu, &hm, None, &u, 0.05, 50.0, 1, (1.0, 1.0)).expect("plain");
+    let coeffs = GammaCoeffs { gamma_min: 1.0, gamma_max: 1.0, ..Default::default() };
+    let attached = gamma_rig(
+        &gpu,
+        &hm,
+        Some((coeffs, false, &vec![1.0 as Scalar; n])),
+        &u,
+        0.05,
+        50.0,
+        1,
+        (1.0, 1.0),
+    )
+    .expect("attached");
+
+    for (name, a, b) in [
+        ("f1", &plain.f1, &attached.f1),
+        ("core.g", &plain.g, &attached.g),
+        ("k", &plain.k, &attached.k),
+        ("omega", &plain.omega, &attached.omega),
+        ("nut", &plain.nut, &attached.nut),
+    ] {
+        let differ = a.iter().zip(b).filter(|(x, y)| x != y).count();
+        assert_eq!(differ, 0, "Gate 90-R (i): {name} differs on {differ} of {n} cells");
+    }
+    println!(
+        "  Gate 90-R (i), through the SST hooks: f1, core.g and k, omega, \
+         nut bitwise on {n} cells after one correct (the sp stamp shows \
+         through k: gamma's own assembly rewrites core.sp after k solves)"
+    );
+}
+
+/// **Gate 90-R (i), end to end: `gammaMin = gammaMax = 1` with the stamp
+/// OFF reproduces plain `kOmegaSST` BIT FOR BIT in `k`, `omega` and `nut`
+/// over three `correct` steps.**
+///
+/// `gammaMin = gammaMax = 1` is a real setting (90.8) - "run the 2015 model
+/// with transition switched off" - and the neutrality needs no tolerance:
+/// multiplication by an exact 1.0 is exact, `P_k^lim` carries the exact
+/// factor `(1 - gamma) = 0`, and `max(F_1, 0.0) = F_1`. The only verdict
+/// is bitwise or fail.
+#[test]
+fn gate_90_r_a_frozen_intermittency_with_kato_launder_off_reproduces_plain_sst_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(6);
+    let n = hm.n_cells;
+    let u = shear_u(6, 2.0);
+
+    let plain =
+        gamma_rig(&gpu, &hm, None, &u, 0.05, 50.0, 3, (1.0, 1.0)).expect("plain");
+    let coeffs = GammaCoeffs { gamma_min: 1.0, gamma_max: 1.0, ..Default::default() };
+    let attached = gamma_rig(
+        &gpu,
+        &hm,
+        Some((coeffs, false, &vec![1.0 as Scalar; n])),
+        &u,
+        0.05,
+        50.0,
+        3,
+        (1.0, 1.0),
+    )
+    .expect("attached");
+
+    for (name, a, b) in [
+        ("k", &plain.k, &attached.k),
+        ("omega", &plain.omega, &attached.omega),
+        ("nut", &plain.nut, &attached.nut),
+        ("f1", &plain.f1, &attached.f1),
+        ("core.g", &plain.g, &attached.g),
+    ] {
+        let differ = a.iter().zip(b).filter(|(x, y)| x != y).count();
+        assert_eq!(
+            differ, 0,
+            "Gate 90-R: {differ} of {n} cells of {name} differ between plain \
+             SST and kOmegaSSTGamma with the intermittency frozen at 1"
+        );
+    }
+    println!(
+        "  Gate 90-R (end to end): kOmegaSSTGamma with gamma frozen at 1 \
+         reproduces kOmegaSST on every bit of k, omega and nut over three \
+         correct steps, {n} cells"
+    );
+}
+
+/// **Gate 90-R (ii), the measurement: with the stamp ON at `gamma = 1` the
+/// model is SST with Kato-Launder production - and the honest form of "it
+/// reduces to SST" is a pair of numbers.** §90.10, and neither number is a
+/// pass/fail.
+///
+/// Three velocity fields, in order: the template's own (`U = 0`, the
+/// degenerate pure shear `S = Omega = 0`, where nothing can differ), a
+/// real pure shear `u = (2y, 0, 0)` with `S = Omega = 2` - where
+/// `nu_t S Omega` and SST's `nu_t S^2` agree in exact arithmetic and the
+/// question is whether they agree BITWISE through the crate's actual
+/// `sstKSources` path, which they may not by operation order - and a
+/// strained `u = (2x, -2y, 0)`, whose `grad U` is diagonal so `S = 4` and
+/// `Omega = 0` and the two productions cannot agree. The strained field is
+/// the only assertion; every number is printed.
+#[test]
+fn gate_90_r_at_gamma_one_the_model_is_sst_with_kato_launder_production() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(6);
+    let n = hm.n_cells;
+
+    let frozen = |u: &[Vec3]| {
+        let coeffs = GammaCoeffs { gamma_min: 1.0, gamma_max: 1.0, ..Default::default() };
+        gamma_rig(
+            &gpu,
+            &hm,
+            Some((coeffs, true, &vec![1.0 as Scalar; n])),
+            u,
+            0.05,
+            50.0,
+            3,
+            (1.0, 1.0),
+        )
+        .expect("gamma rig")
+    };
+    let plain =
+        |u: &[Vec3]| gamma_rig(&gpu, &hm, None, u, 0.05, 50.0, 3, (1.0, 1.0)).expect("plain");
+    let measure = |a: &[u64], b: &[u64]| -> (Scalar, usize) {
+        let av: Vec<Scalar> = a.iter().map(|x| Scalar::from_bits(*x)).collect();
+        let bv: Vec<Scalar> = b.iter().map(|x| Scalar::from_bits(*x)).collect();
+        let mut worst = 0.0 as Scalar;
+        let mut bitwise = 0;
+        for (x, y) in av.iter().zip(&bv) {
+            worst = worst.max((x - y).abs() / y.abs().max(x.abs()).max(1e-300));
+            if x.to_bits() == y.to_bits() {
+                bitwise += 1;
+            }
+        }
+        (worst, bitwise)
+    };
+
+    let fields: [(&str, Vec<Vec3>); 3] = [
+        ("U = 0, the template's field", vec![Vec3::ZERO; n]),
+        ("pure shear u = (2y, 0, 0)", shear_u(6, 2.0)),
+        ("strained u = (2x, -2y, 0)", strain_u(6, 2.0)),
+    ];
+    let mut worst_shear = 0.0 as Scalar;
+    let mut bitwise_shear = 0usize;
+    for (name, u) in &fields {
+        let p = plain(u);
+        let g = frozen(u);
+        let (worst, bitwise) = measure(&p.k, &g.k);
+        println!(
+            "  Gate 90-R (ii), {name}: max relative difference of k from \
+             plain SST after three corrects is {worst:.3e}; {bitwise} of \
+             {n} cells bitwise"
+        );
+        if name.starts_with("pure shear") {
+            worst_shear = worst;
+            bitwise_shear = bitwise;
+        }
+    }
+    // The strained field is the one the Kato-Launder form cannot fake: with
+    // Omega = 0 the replacement production is exactly 0 where SST keeps
+    // nu_t S^2. That k MOVED is the assertion; the size of the move is the
+    // record above, a measurement and not a pass (90.10).
+    let (p, g) = (plain(&fields[2].1), frozen(&fields[2].1));
+    let (worst, bitwise) = measure(&p.k, &g.k);
+    assert!(
+        bitwise < n && worst > 1e-6,
+        "the strained field left k at plain SST's values (worst {worst:.3e}, \
+         {bitwise} of {n} bitwise) - the Kato-Launder stamp is not live"
+    );
+    println!(
+        "  Gate 90-R (ii) summary: pure shear worst {worst_shear:.3e} \
+         relative ({bitwise_shear}/{n} cells bitwise), strained {worst:.3e}"
+    );
+}
+
+/// **Two identical runs of a gamma-coupled `correct` produce identical
+/// bits** in `k`, `omega`, `nut` and `gamma` - §90.11's repeatability row,
+/// on the whole coupling rather than on one kernel.
+#[test]
+fn a_gamma_correct_is_bitwise_repeatable() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(6);
+    let n = hm.n_cells;
+    let u = shear_u(6, 2.0);
+
+    let run = || {
+        gamma_rig(
+            &gpu,
+            &hm,
+            Some((GammaCoeffs::default(), true, &vec![0.7 as Scalar; n])),
+            &u,
+            0.05,
+            50.0,
+            3,
+            (1.0, 1.0),
+        )
+        .expect("rig")
+    };
+
+    let a = run();
+    let b = run();
+    for (name, x, y) in [
+        ("k", &a.k, &b.k),
+        ("omega", &a.omega, &b.omega),
+        ("nut", &a.nut, &b.nut),
+        ("gamma", &a.gamma, &b.gamma),
+    ] {
+        assert_eq!(x, y, "{name} is not bitwise repeatable");
+    }
+    println!("  a gamma correct repeats bitwise on k, omega, nut and gamma over {n} cells");
+}
+
+/// **SPEC-LIT §89.4's rig pair, 2015 edition: the intermittency reaches the
+/// `k` equation.** Two runs identical in every byte but the value `gamma`
+/// is frozen at, REQUIRED to produce a different `k` - the other half of
+/// the argument Gate 90-R (i) starts, since a coupling wired to nothing
+/// would also pass it.
+#[test]
+fn the_intermittency_reaches_the_k_equation() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(6);
+    let n = hm.n_cells;
+    let u = shear_u(6, 2.0);
+
+    let run = |frozen_at: Scalar| {
+        let coeffs =
+            GammaCoeffs { gamma_min: frozen_at, gamma_max: frozen_at, ..Default::default() };
+        gamma_rig(
+            &gpu,
+            &hm,
+            Some((coeffs, true, &vec![frozen_at; n])),
+            &u,
+            0.05,
+            50.0,
+            1,
+            (1.0, 1.0),
+        )
+        .expect("rig")
+        .k
+    };
+
+    let full = run(1.0);
+    let part = run(0.3);
+    let differ = full.iter().zip(&part).filter(|(a, b)| a != b).count();
+    assert!(
+        differ > 0,
+        "freezing gamma at 0.3 instead of 1.0 left k bit-identical on all \
+         {n} cells - the intermittency does not reach the k equation"
+    );
+    println!("  gamma 1.0 vs 0.3 moves k on {differ} of {n} cells after one correct");
+}
+
+/// **Attaching the 2015 model grows the written field set from three names
+/// to four** - §91.1's dictionary, one `0/gamma` on top of `k`, `omega`
+/// and `nut`, in both the shared and the mutable listing.
+#[test]
+fn attaching_the_model_grows_the_written_field_set() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(4);
+    let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
+    let n = hm.n_cells;
+    let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let y: DevBuf<Scalar> = gpu.zeros(n).expect("y");
+    let gy: DevBuf<Vec3> = gpu.zeros(n).expect("grad y");
+
+    let mut m = crate::models::KOmegaSst::new(
+        &gpu,
+        &hm,
+        &mesh,
+        Default::default(),
+        crate::io::case::TurbulenceControls::default(),
+        crate::wallfunctions::WallFunctionCoeffs::default(),
+        &wf,
+        &y,
+    )
+    .expect("sst");
+    let names: Vec<&str> = m.named_fields().iter().map(|(nm, _)| *nm).collect();
+    assert_eq!(names, vec!["k", "omega", "nut"]);
+
+    let gm = MenterGamma::new(
+        &gpu,
+        &mesh,
+        GammaCoeffs::default(),
+        GammaControls::default(),
+        &y,
+        &gy,
+    )
+    .expect("gm");
+    m.set_gamma_transition(Some(gm)).expect("attach");
+    let names: Vec<&str> = m.named_fields().iter().map(|(nm, _)| *nm).collect();
+    assert_eq!(names, vec!["k", "omega", "nut", "gamma"]);
+    let names: Vec<&str> = m.named_fields_mut().iter().map(|(nm, _)| *nm).collect();
+    assert_eq!(names, vec!["k", "omega", "nut", "gamma"]);
+}
+
+/// **§90.5's two states, end to end through `correct`: `gamma = 0` is
+/// absorbing, and a laminar cell decays toward `1/c_e2 = 0.02`.**
+///
+/// Both halves run on the laminar rig: `R_T = 1` puts `F_turb = 0.94` and
+/// `F_onset3 = 0.977`, while `Re_V = 1250` against `Re_thetac ~ 1100`
+/// keeps `F_onset2` near `0.52` - so `A = F_length S F_onset = 0` exactly
+/// and `B = c_a2 Omega F_turb ~ 0.28` is the whole of the source, which is
+/// what a laminar layer IS for this model: `F_onset = 0`, `E_gamma` alone.
+/// `k_relax = eps_relax = 1e-3` holds that background still for the ten
+/// steps the row needs while `gamma` moves at relaxation 1.
+///
+/// The absorbing half is bitwise: a cell whose `gamma` is exactly zero has
+/// zero source forever (the split never divides by `gamma`, so nothing
+/// here rescues one), and on a uniform field the diffusion is exactly
+/// zero too. The decay half asserts monotone descent that stops at the
+/// fixed point: never at or below `0.02`, never below `gammaMin = 0`.
+#[test]
+fn a_cell_at_zero_stays_at_zero_and_a_laminar_cell_decays_toward_one_over_ce2() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(6);
+    let n = hm.n_cells;
+    let u = shear_u(6, 5.0);
+
+    let lam = |gamma0: &[Scalar]| {
+        gamma_rig(
+            &gpu,
+            &hm,
+            Some((GammaCoeffs::default(), true, gamma0)),
+            &u,
+            1e-4,
+            1e5,
+            10,
+            (1e-3, 1e-3),
+        )
+        .expect("rig")
+    };
+
+    let zero = lam(&vec![0.0 as Scalar; n]);
+    assert!(
+        zero.gamma.iter().all(|b| *b == (0.0 as Scalar).to_bits()),
+        "a cell at gamma = 0 did not stay at exactly 0 through ten corrects"
+    );
+
+    let one = lam(&vec![1.0 as Scalar; n]);
+    assert_eq!(one.gamma_steps.len(), 10, "the rig did not snapshot every step");
+    let mut prev = 1.0 as Scalar;
+    for (s, bits) in one.gamma_steps.iter().enumerate() {
+        let lo = bits
+            .iter()
+            .fold(Scalar::INFINITY, |a, &b| a.min(Scalar::from_bits(b)));
+        assert!(lo < prev, "step {s}: gamma did not decrease (min {lo} against {prev})");
+        assert!(
+            lo > 0.02,
+            "step {s}: gamma reached {lo}, at or below the fixed point 1/ce2 = 0.02"
+        );
+        assert!(lo >= 0.0, "step {s}: gamma below gammaMin");
+        prev = lo;
+    }
+    println!(
+        "  absorbing state: gamma = 0 bitwise through ten corrects, {n} \
+         cells; laminar decay: min gamma fell monotonically 1 -> {prev:.4} \
+         toward 0.02, never below gammaMin"
+    );
+}
+
+/// **A DES hybrid and the 2015 model cannot both be attached, and the
+/// refusal names both and says which buffer they fight over** - §90.9's
+/// first refusal, in §88's test's shape.
+#[test]
+fn a_hybrid_and_the_gamma_model_together_are_refused_by_name() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(4);
+    let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
+    let n = hm.n_cells;
+    let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let y: DevBuf<Scalar> = gpu.zeros(n).expect("y");
+    let gy: DevBuf<Vec3> = gpu.zeros(n).expect("grad y");
+
+    let mut m = crate::models::KOmegaSst::new(
+        &gpu,
+        &hm,
+        &mesh,
+        Default::default(),
+        crate::io::case::TurbulenceControls::default(),
+        crate::wallfunctions::WallFunctionCoeffs::default(),
+        &wf,
+        &y,
+    )
+    .expect("sst");
+
+    let des = crate::models::des::DesLengthScale::new(
+        &gpu,
+        &mesh,
+        &y,
+        &gy,
+        crate::models::des::DesBranch::Ddes,
+        crate::models::des::HybridDelta::MaxEdge,
+        crate::models::des::HybridBackground::Sst,
+        crate::models::des::DesCoeffs::sst(),
+    )
+    .expect("des");
+    m.set_des(Some(des));
+
+    let gm = MenterGamma::new(
+        &gpu,
+        &mesh,
+        GammaCoeffs::default(),
+        GammaControls::default(),
+        &y,
+        &gy,
+    )
+    .expect("gm");
+    let e = m.set_gamma_transition(Some(gm)).expect_err("the combination must be refused");
+    let s = e.to_string();
+    assert!(s.contains("kOmegaSSTGamma"), "{s}");
+    assert!(s.contains("sstKSources"), "the refusal does not name the buffer: {s}");
+    assert!(s.contains("90.9"), "the refusal does not cite the section: {s}");
+}
+
+/// **Two transition models on one background are refused, in both orders,
+/// and both messages name both models** - the same buffer collision §90.9
+/// records for the hybrid: LM's `gamma_eff` scaling (88.13) and this
+/// model's `max(gamma, 0.1)` scaling (90.14) both stamp what
+/// `sstKSources` wrote, and whichever ran second would silently discard
+/// the other.
+#[test]
+fn two_transition_models_on_one_background_are_refused_by_name() {
+    let Some(gpu) = gpu() else { return };
+    let hm = block(4);
+    let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
+    let n = hm.n_cells;
+    let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let y: DevBuf<Scalar> = gpu.zeros(n).expect("y");
+    let gy: DevBuf<Vec3> = gpu.zeros(n).expect("grad y");
+    let no_ctrl = crate::io::case::TurbulenceControls::default();
+    let wall = crate::wallfunctions::WallFunctionCoeffs::default();
+
+    let build = || {
+        crate::models::KOmegaSst::new(
+            &gpu, &hm, &mesh, Default::default(), no_ctrl, wall, &wf, &y,
+        )
+        .expect("sst")
+    };
+    let lm = || {
+        crate::models::transition::LangtryMenter::new(
+            &gpu,
+            &mesh,
+            Default::default(),
+            crate::models::transition::LmControls::default(),
+            &y,
+        )
+        .expect("lm")
+    };
+    let gm = || {
+        MenterGamma::new(&gpu, &mesh, GammaCoeffs::default(), GammaControls::default(), &y, &gy)
+            .expect("gm")
+    };
+
+    // LM first, then gamma.
+    let mut m = build();
+    m.set_transition(Some(lm())).expect("lm alone must attach");
+    let e = m.set_gamma_transition(Some(gm())).expect_err("gamma must be refused");
+    let s = e.to_string();
+    assert!(s.contains("kOmegaSSTLM") && s.contains("kOmegaSSTGamma"), "{s}");
+    assert!(s.contains("sstKSources"), "the refusal does not name the buffer: {s}");
+
+    // gamma first, then LM - the mirror refusal.
+    let mut m = build();
+    m.set_gamma_transition(Some(gm())).expect("gamma alone must attach");
+    let e = m.set_transition(Some(lm())).expect_err("LM must be refused");
+    let s = e.to_string();
+    assert!(s.contains("kOmegaSSTLM") && s.contains("kOmegaSSTGamma"), "{s}");
+    assert!(s.contains("sstKSources"), "the refusal does not name the buffer: {s}");
+}

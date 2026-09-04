@@ -168,13 +168,7 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ),
     (
         "src/models/menter_gamma.rs",
-        Stance::Ungated(
-            "wired into SST in Unit 4a; gated there. The model's six kernels \
-             launch only through an Option<MenterGamma> nothing can set yet, \
-             so a run today launches none of them; when the hooks land, every \
-             one rides inside the SST correct whose capture gate is what will \
-             cover them",
-        ),
+        Stance::Gate("the_gamma_transition_correction_replays_bitwise"),
     ),
     (
         "src/models/spalart_allmaras.rs",
@@ -305,14 +299,12 @@ pub const REGISTRY: &[(&str, Stance)] = &[
 /// list: it pushes this number past the ceiling and the tests stop, and
 /// raising the ceiling is an edit somebody has to defend in a diff.
 ///
-/// Defended here, for the rise from 3 to 4: `src/models/menter_gamma.rs`
-/// (SPEC-LIT 90) launches six kernels of its own, but nothing can ATTACH the
-/// model yet - the `Option<MenterGamma>` slot in `k_omega_sst.rs` is the
-/// next unit's work - so there is no transitional `correct` in existence to
-/// capture, and a Gate row would name a test that cannot be written. When
-/// the wiring lands it rides inside the SST `correct` and is gated there,
-/// and this comes back down.
-pub const UNGATED_CEILING: usize = 4;
+/// Back at 3. The rise to 4 was defended in the diff that made it, for
+/// `src/models/menter_gamma.rs` (SPEC-LIT 90) before anything could ATTACH
+/// the model; the wiring has since landed, the model rides inside the SST
+/// `correct`, and `the_gamma_transition_correction_replays_bitwise` gates
+/// it - which is the fall the ratchet exists to record.
+pub const UNGATED_CEILING: usize = 3;
 
 // ==========================================================================
 //  81.8  The population, read off disk
