@@ -59,6 +59,7 @@ use crate::models::coupled::{
 };
 use crate::models::des::{DesBranch, DesCoeffs, HybridBackground, HybridDelta};
 use crate::models::les::{Les, LesCoeffs, LesModel};
+use crate::models::menter_gamma::{GammaControls, GammaCoeffs, MenterGamma};
 use crate::models::spalart_allmaras::{SaCoeffs, SaVariant};
 use crate::models::transition::{LangtryMenter, LmCoeffs, LmControls};
 use crate::models::{
@@ -109,6 +110,16 @@ pub enum RasModel {
     /// that matched `RasModel::KOmegaSST` would run a transitional case
     /// fully turbulent from the leading edge and say nothing.
     KOmegaSstLM,
+    /// Menter, Smirnov, Liu & Avancha's ONE-equation gamma transition model
+    /// on the k-omega SST background - SPEC-LIT §90.
+    ///
+    /// ONE more transport equation than §6.3, `gamma`, and three stamps into
+    /// SST's own assembly. It is a separate variant rather than a flag on
+    /// `KOmegaSST` for the reason `KOmegaSstLM` is: what changes is the set
+    /// of `0/` files a driver must find, and a driver that matched
+    /// `RasModel::KOmegaSST` would run a transitional case fully turbulent
+    /// from the leading edge and say nothing.
+    KOmegaSstGamma,
     /// Spalart-Allmaras - SPEC-LIT §56. ONE transport equation, for `nuTilda`,
     /// which is not a dissipation rate and not an eddy viscosity; and no wall
     /// function at all, because `nu~ = 0` is an exact Dirichlet condition.
@@ -151,6 +162,7 @@ impl RasModel {
             Self::KOmega => "kOmega",
             Self::KOmegaSST => "kOmegaSST",
             Self::KOmegaSstLM => "kOmegaSSTLM",
+            Self::KOmegaSstGamma => "kOmegaSSTGamma",
             Self::SpalartAllmaras => "SpalartAllmaras",
             // The branch is on `TurbulenceSelection::des`; a bare
             // `RasModel` cannot name it, and `TurbulenceSelection::describe`
@@ -184,6 +196,13 @@ impl RasModel {
             // `ReThetat` are neither dissipations nor working viscosities,
             // and `transported_fields` below is where a driver reads them.
             Self::KOmegaSstLM => Some("omega"),
+            // SPEC-LIT 91.1: `omega` IS the dissipation variable among the
+            // three fields this model transports, and `gamma` is neither a
+            // dissipation nor a working viscosity. Two accessors that mean
+            // two different things, both honest - §58.1's resolution,
+            // applied once more; `transported_fields` below is where a
+            // driver reads the rest.
+            Self::KOmegaSstGamma => Some("omega"),
             // SPEC-LIT §58.1, following the design note's own recommendation:
             // `nu~` is NOT a dissipation rate, and returning `Some("nuTilda")`
             // here would make this accessor mean two different things
@@ -219,6 +238,8 @@ impl RasModel {
             Self::KOmega | Self::KOmegaSST | Self::HybridSst => &["k", "omega"],
             // SPEC-LIT §89.1. The order is the order they are solved in.
             Self::KOmegaSstLM => &["k", "omega", "gamma", "ReThetat"],
+            // SPEC-LIT §91.1. Same rule, one field fewer.
+            Self::KOmegaSstGamma => &["k", "omega", "gamma"],
             Self::SpalartAllmaras | Self::HybridSa => &["nuTilda"],
         }
     }
@@ -242,6 +263,7 @@ const REGISTRY: &[(&str, RasModel)] = &[
     ("KOmega", RasModel::KOmega),
     ("kOmegaSST", RasModel::KOmegaSST),
     ("kOmegaSSTLM", RasModel::KOmegaSstLM),
+    ("kOmegaSSTGamma", RasModel::KOmegaSstGamma),
     ("KOmegaSST", RasModel::KOmegaSST),
     ("SpalartAllmaras", RasModel::SpalartAllmaras),
     ("SpalartAllmarras", RasModel::SpalartAllmaras),
@@ -270,23 +292,10 @@ const HYBRID_REGISTRY: &[(&str, DesBranch, HybridBackground)] = &[
 /// `kepsilon` is not a model at all, and the second one is a typo they can fix
 /// in five seconds once they are told.
 const RECOGNISED_NOT_IMPLEMENTED: &[(&str, &str)] = &[
-    // SPEC-LIT 89.3. `kOmegaSSTLM` used to sit here, at the head of this
-    // list; it is now in REGISTRY. What replaces it is its own successor,
-    // refused with the reason the successor is the better model rather than
-    // with a shrug.
-    (
-        "kOmegaSSTGamma",
-        "Menter, Smirnov, Liu & Avancha's ONE-equation gamma transition model \
-         (Flow Turbul. Combust. 95 (2015) 583-619) - the successor to \
-         kOmegaSSTLM, which ofgpu HAS (SPEC-LIT 88). The 2015 model drops the \
-         Re_theta~ equation and with it the implicit Re_theta_eq fixed point \
-         (SPEC-LIT 88.4), and it is Galilean-invariant where LM2009 is not: \
-         LM2009's Tu and its time scale T read an ABSOLUTE velocity \
-         magnitude, so its answer changes if the frame is translated. That is \
-         a real defect of the model ofgpu does have, SPEC-LIT 88.9 measures \
-         how large it is, and this refusal names it rather than pretending \
-         kOmegaSSTLM is the last word",
-    ),
+    // SPEC-LIT 91.3: `kOmegaSSTGamma` used to sit here, at the head of this
+    // list, refusing with the reason its predecessor's Galilean defect made
+    // it the better model; it is now in REGISTRY beside that predecessor,
+    // and §91.3 records where the refusal's three claims moved.
     (
         "kOmegaSSTSAS",
         "a scale-adaptive model, which reads the von Karman length scale from \
@@ -414,6 +423,7 @@ pub fn available_models() -> Vec<&'static str> {
         "kOmega",
         "kOmegaSST",
         "kOmegaSSTLM",
+        "kOmegaSSTGamma",
         "SpalartAllmaras",
         "laminar",
     ];
@@ -470,6 +480,11 @@ pub struct TurbulenceSelection {
     /// §89.2. The transition model's own constants and its two equations'
     /// `system/` settings.
     pub transition: Option<LmSelection>,
+
+    /// `Some` exactly when `model == RasModel::KOmegaSstGamma` - SPEC-LIT
+    /// §90, §91.2. The 2015 model's own constants and its one equation's
+    /// `system/` settings.
+    pub gamma_transition: Option<GammaSelection>,
 }
 
 /// What a transition case asked for - SPEC-LIT §88, §89.2.
@@ -490,6 +505,30 @@ impl LmSelection {
     #[must_use]
     pub fn describe(&self) -> String {
         format!("kOmegaSSTLM (SPEC-LIT 88): {}", self.coeffs.describe())
+    }
+}
+
+/// What a 2015-gamma transition case asked for - SPEC-LIT §90, §91.2.
+///
+/// Two records in one, because they come from two files:
+/// `constant/momentumTransport` carries the coefficients
+/// (`gamma_coeffs`) and `system/` carries the solver, relaxation and
+/// convection entries for `gamma` (`gamma_controls`). Keeping them apart is
+/// what lets each of §91.4's pair tests name the file it exercises - §89.2's
+/// split, kept.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GammaSelection {
+    pub coeffs: GammaCoeffs,
+    pub controls: GammaControls,
+}
+
+impl GammaSelection {
+    /// The run banner's line. The closing words are a claim with a gate
+    /// behind it: §90.7 measured the frame dependence LM2009 has and this
+    /// model does not.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("kOmegaSSTGamma (SPEC-LIT 90): {}", self.coeffs.describe())
     }
 }
 
@@ -549,6 +588,7 @@ impl TurbulenceSelection {
             les: None,
             des: None,
             transition: None,
+            gamma_transition: None,
         }
     }
 
@@ -561,10 +601,11 @@ impl TurbulenceSelection {
     /// The run banner's model line, branch included.
     #[must_use]
     pub fn describe(&self) -> String {
-        match (&self.des, &self.transition) {
-            (Some(h), _) => h.describe(),
-            (None, Some(t)) => t.describe(),
-            (None, None) => self.model.name().to_string(),
+        match (&self.des, &self.transition, &self.gamma_transition) {
+            (Some(h), _, _) => h.describe(),
+            (None, Some(t), _) => t.describe(),
+            (None, None, Some(g)) => g.describe(),
+            (None, None, None) => self.model.name().to_string(),
         }
     }
 }
@@ -714,6 +755,14 @@ pub fn select_turbulence_model(c: &CaseControls) -> Result<TurbulenceSelection> 
     } else {
         None
     };
+    // SPEC-LIT 91.2: the 2015 model's record, set beside `transition` and
+    // read only when the case named THAT. `gamma_selection` fires the
+    // refusals 90.9 lists, on the same principle.
+    let gamma_transition = if model == RasModel::KOmegaSstGamma {
+        Some(gamma_selection(c)?)
+    } else {
+        None
+    };
 
     Ok(TurbulenceSelection {
         model,
@@ -721,6 +770,7 @@ pub fn select_turbulence_model(c: &CaseControls) -> Result<TurbulenceSelection> 
         les: None,
         des: None,
         transition,
+        gamma_transition,
     })
 }
 
@@ -806,6 +856,7 @@ fn select_les(d: &FoamDict) -> Result<TurbulenceSelection> {
         }),
         des: None,
         transition: None,
+        gamma_transition: None,
     })
 }
 
@@ -985,6 +1036,7 @@ fn select_hybrid(
         active,
         les: None,
         transition: None,
+        gamma_transition: None,
         des: Some(HybridSelection {
             branch,
             background,
@@ -1444,6 +1496,250 @@ pub fn lm_controls(c: &CaseControls) -> Result<LmControls> {
     ctrl.re_thetat_conv = crate::io::case::div_entry(c, "div(phi,ReThetat)")?;
 
     Ok(ctrl)
+}
+
+// ==========================================================================
+//  §90 / §91  What a 2015-gamma transition case says
+// ==========================================================================
+
+/// Every `RAS { ... }` key `kOmegaSSTGamma` READS - SPEC-LIT §91.1.
+///
+/// The SST coefficients are here because the 2015 model runs on the SST
+/// background and every one of them still reaches the two equations SST
+/// owns; §6.3's list is `LM_KEYS`'s, and it stays that list deliberately -
+/// the background does not change when a transition equation is bolted on.
+const GAMMA_KEYS: &[&str] = &[
+    "model",
+    "turbulence",
+    "printCoeffs",
+    // §6.3's own, unchanged
+    "sigmaK1", "sigmaOmega1", "beta1", "gamma1",
+    "sigmaK2", "sigmaOmega2", "beta2", "gamma2",
+    "betaStar", "a1", "b1", "c1", "nutMaxCoeff",
+    // §90's, and OURS
+    "Flength", "ce2", "ca2", "sigmaGamma",
+    "CTU1", "CTU2", "CTU3",
+    "CPG1", "CPG2", "CPG3", "CPG1lim", "CPG2lim", "ReThetacLim",
+    "Ck", "Csep", "gammaMin", "gammaMax",
+];
+
+/// Keys a case might plausibly carry that `kOmegaSSTGamma` does NOT read -
+/// SPEC-LIT §91.3.
+///
+/// Two families. LM2009's eight: read by nothing under this model, each
+/// message pointing at `kOmegaSSTLM`, where the key IS read - §89.3's
+/// refusal run in reverse, and the message has to say so in THAT direction,
+/// not `LM_INERT`'s with the name swapped. And §89.4's nine, which keep the
+/// refusals they already have, adapted to what this model is.
+const GAMMA_INERT: &[(&str, &str)] = &[
+    (
+        "ca1",
+        "the 2015 model's intermittency production is (90.2), whose rate is \
+         F_length - there is no ca1 in it. ca1 is read by kOmegaSSTLM, whose \
+         production (88.5) is Langtry & Menter's (SPEC-LIT 90.2)",
+    ),
+    (
+        "ce1",
+        "the 2015 model has one destruction term, (90.3), and ce1 is not in \
+         it. ce1 is read by kOmegaSSTLM, inside (88.5)'s (1 - c_e1 gamma), \
+         which this one-equation model does not have (SPEC-LIT 90.2)",
+    ),
+    (
+        "cThetat",
+        "there is no ReThetat equation here for it to drive: the 2015 model \
+         computes Re_thetac in place from (90.6) and (90.7). cThetat is read \
+         by kOmegaSSTLM, whose ReThetat equation carries the transported \
+         version (SPEC-LIT 90.1)",
+    ),
+    (
+        "s1",
+        "s1 scales kOmegaSSTLM's ReThetat diffusion term (88.2). The 2015 \
+         model's gamma diffusion is (90.1)'s nu + nu_t/sigma_gamma, which \
+         has no such factor - so the key belongs to kOmegaSSTLM and is not \
+         read here (SPEC-LIT 90.5)",
+    ),
+    (
+        "sigmaf",
+        "sigmaf is the diffusivity of kOmegaSSTLM's gamma equation \
+         (88.1); its ReThetat one carries sigmaThetat (88.2). The 2015 \
+         model's own diffusivity coefficient is spelled `sigmaGamma`, and \
+         the key belongs to kOmegaSSTLM (SPEC-LIT 90.5)",
+    ),
+    (
+        "sigmaThetat",
+        "sigmaThetat scales kOmegaSSTLM's ReThetat diffusion (88.2). The \
+         2015 model has no ReThetat equation and its gamma diffusivity is \
+         `sigmaGamma` - the key belongs to kOmegaSSTLM (SPEC-LIT 90.5)",
+    ),
+    (
+        "nReThetaSweeps",
+        "the Re_theta_eq fixed-point sweep is kOmegaSSTLM's device for \
+         solving the correlation the 2015 model does not transport \
+         (SPEC-LIT 90.1): Re_thetac is evaluated once per outer iteration \
+         from (90.6), and there is nothing to sweep. The key belongs to \
+         kOmegaSSTLM",
+    ),
+    (
+        "ReThetatMin",
+        "ReThetatMin is the floor of kOmegaSSTLM's transported ReThetat \
+         field. The 2015 model transports no ReThetat; its correlation \
+         floor is `CTU1`, and the key belongs to kOmegaSSTLM (SPEC-LIT \
+         90.6)",
+    ),
+    (
+        "Cmu",
+        "kOmegaSSTGamma runs on the k-omega SST background, whose \
+         corresponding constant is `betaStar` (SPEC-LIT 6.3). `kEpsilon`, \
+         `realizableKE` and `RNGkEpsilon` read Cmu",
+    ),
+    (
+        "C1",
+        "there is no epsilon equation here for C_1 to appear in. The 2015 \
+         model's own production constant is `Flength` (SPEC-LIT (90.2)), \
+         and SST's cross-diffusion limiter is c1 - a DIFFERENT constant \
+         with a lower-case spelling, which is exactly why C1 is refused \
+         rather than being read as it",
+    ),
+    (
+        "C2",
+        "there is no epsilon equation here for C_2 to appear in. The 2015 \
+         model's own destruction constants are `ce2` and `ca2` (SPEC-LIT \
+         (90.3))",
+    ),
+    (
+        "C3",
+        "the Favre dilatation coefficient belongs to an epsilon equation \
+         this model has not got. SST's own dilatation term is unscaled by \
+         the intermittency and SPEC-LIT 90.6 says why: Menter et al. write \
+         nothing about it, and inventing a factor is what 13.4 forbids",
+    ),
+    (
+        "sigmak",
+        "SST blends TWO of these and they are `sigmaK1` and `sigmaK2` \
+         (SPEC-LIT 6.3). A single sigmak would be read into neither",
+    ),
+    (
+        "sigmaEps",
+        "there is no epsilon equation here. SST's omega-equation diffusivities \
+         are `sigmaOmega1` and `sigmaOmega2` (SPEC-LIT 6.3)",
+    ),
+    (
+        "FlengthCoeff",
+        "F_length is ONE constant in the 2015 model (90.2), spelled \
+         `Flength` here - there is nothing for a coefficient to multiply. \
+         The CORRELATION of four polynomial pieces is Langtry & Menter's \
+         (88.4), and a case wanting THAT names kOmegaSSTLM",
+    ),
+    (
+        "ReThetacCoeff",
+        "Re_thetac is computed in place from (90.6) in the 2015 model, with \
+         `CTU1`, `CTU2` and `CTU3` as its constants. Scaling the result \
+         would move the transition location by an amount no published \
+         calibration supports",
+    ),
+    (
+        "Tu",
+        "the free-stream turbulence intensity is not a model constant: it is \
+         computed per cell from the local k, omega and the wall distance - \
+         Tu_L = min(100 sqrt(2k/3)/(omega d_w), 100), (90.9) - which is the \
+         whole point of a LOCAL correlation-based transition model. What a \
+         case DOES set from a free-stream Tu is the inlet value of \
+         ReThetat, and `models::transition::re_thetat_inlet` computes it \
+         (SPEC-LIT 89.2)",
+    ),
+];
+
+/// Read `constant/momentumTransport` and `system/` for `kOmegaSSTGamma` -
+/// SPEC-LIT §91.2.
+pub fn gamma_selection(c: &CaseControls) -> Result<GammaSelection> {
+    refuse_inert_coefficients(c, "kOmegaSSTGamma", GAMMA_KEYS, GAMMA_INERT)?;
+    Ok(GammaSelection {
+        coeffs: gamma_coeffs(c)?,
+        controls: gamma_controls(c)?,
+    })
+}
+
+/// §90's own constants, and the two that are ours. Every key falls back to
+/// `GammaCoeffs::default()`'s value - the printed digit - so a case that
+/// writes none of them runs the published model.
+pub fn gamma_coeffs(c: &CaseControls) -> Result<GammaCoeffs> {
+    let d = &c.momentum_transport;
+    let def = GammaCoeffs::default();
+    let g = |k: &str, fallback: Scalar| d.scalar(&format!("RAS/{k}"), fallback);
+
+    let coeffs = GammaCoeffs {
+        f_length: g("Flength", def.f_length),
+        ce2: g("ce2", def.ce2),
+        ca2: g("ca2", def.ca2),
+        sigma_gamma: g("sigmaGamma", def.sigma_gamma),
+        c_tu1: g("CTU1", def.c_tu1),
+        c_tu2: g("CTU2", def.c_tu2),
+        c_tu3: g("CTU3", def.c_tu3),
+        c_pg1: g("CPG1", def.c_pg1),
+        c_pg2: g("CPG2", def.c_pg2),
+        c_pg3: g("CPG3", def.c_pg3),
+        c_pg1_lim: g("CPG1lim", def.c_pg1_lim),
+        c_pg2_lim: g("CPG2lim", def.c_pg2_lim),
+        re_thetac_lim: g("ReThetacLim", def.re_thetac_lim),
+        c_k: g("Ck", def.c_k),
+        c_sep: g("Csep", def.c_sep),
+        gamma_min: g("gammaMin", def.gamma_min),
+        gamma_max: g("gammaMax", def.gamma_max),
+    };
+    coeffs.check()?;
+    Ok(coeffs)
+}
+
+/// The one new equation's `system/` settings - SPEC-LIT §91.2.
+///
+/// **Each entry is read for ITSELF**, on §89.2's rule: `solvers/gamma`,
+/// `relaxationFactors/equations/gamma` and `divSchemes/div(phi,gamma)` go
+/// through the same public helpers a driver uses for `U` and `p`, into
+/// `GammaControls`' own three fields - not through any slot
+/// `TurbulenceControls` already owns. Where the case writes no entry of its
+/// own the fallback is `k`'s, the closest bounded scalar in the run.
+pub fn gamma_controls(c: &CaseControls) -> Result<GammaControls> {
+    let mut ctrl = GammaControls {
+        gamma_solver: c.turb.k_solver,
+        gamma_relax: c.turb.k_relax,
+        gamma_conv: c.turb.k_conv(),
+    };
+
+    crate::io::case::read_solver_controls(&mut ctrl.gamma_solver, &c.fv_solution, "gamma")?;
+    ctrl.gamma_relax =
+        crate::io::case::relaxation_factor(&c.fv_solution, "gamma", ctrl.gamma_relax)?;
+    ctrl.gamma_conv = crate::io::case::div_entry(c, "div(phi,gamma)")?;
+
+    Ok(ctrl)
+}
+
+/// SPEC-LIT §90.9: a 2015-gamma case with gravity is refused by name.
+///
+/// §17's `G_b` reaches a `k` equation model-independently, and this model
+/// has one - so the term is not *missing*. What is missing is a published
+/// answer to the one question the coupling asks: **does `gamma` multiply
+/// `G_b` as (90.13) makes it multiply `P_k`?** Menter et al. write nothing
+/// about buoyancy, both answers are defensible, and picking one silently is
+/// precisely the substitution §13.4 exists to stop - the more so because a
+/// laminar buoyant layer with an unscaled `G_b` would generate turbulence
+/// the intermittency says is not there yet.
+pub fn refuse_gamma_buoyancy(c: &CaseControls) -> Result<()> {
+    if !c.buoyancy.is_active() {
+        return Ok(());
+    }
+    unsupported_note::<()>(
+        "momentumTransport/RAS/model (`kOmegaSSTGamma` in a case with gravity)",
+        "kOmegaSSTGamma",
+        &["kOmegaSST", "kEpsilon", "LaunderSharmaKE", "kOmega", "RNGkEpsilon"],
+        "SPEC-LIT 90.9: section 17's buoyancy production G_b enters the k \
+         equation, and (90.13) scales that equation's production by the \
+         intermittency. Whether G_b is scaled with it is a question Menter, \
+         Smirnov, Liu & Avancha do not answer - they publish no buoyant \
+         extension - and both answers change where a buoyant layer \
+         transitions. This solver will not invent one",
+        "nothing - a buoyant kOmegaSSTGamma run is refused",
+        (),
+    )
 }
 
 /// `LES/<model>Coeffs/<name>`, then `LES/<name>`.
@@ -1984,6 +2280,66 @@ pub fn build_coupled<'m>(
             Ok(Box::new(CoupledKOmegaSst::new(model, buoy)))
         }
 
+        // SPEC-LIT §90. The same SST above, with §90's one equation bolted
+        // on - not a second model, and the same argument that keeps §6.3's
+        // coefficients live under `kOmegaSSTLM` keeps them live here.
+        // The wall GRADIENT is needed too: (90.7)'s dV/dy is
+        // grad(n . V) . n with n = grad(y)/|grad(y)| (§90.6's decision),
+        // and `MenterGamma::new` takes the gradient beside the distance.
+        RasModel::KOmegaSstGamma => {
+            refuse_gamma_buoyancy(cc)?;
+            let sel = selection.gamma_transition.as_ref().ok_or_else(|| {
+                Error::Config(
+                    "momentumTransport: kOmegaSSTGamma was selected with no \
+                     gamma-transition record - an internal registry error \
+                     (select_turbulence_model should have built one before \
+                     build_coupled ever saw it), not a setting this case file \
+                     can fix"
+                        .to_string(),
+                )
+            })?;
+
+            let wd = crate::walldistance::wall_distance(
+                gpu,
+                hm,
+                mesh,
+                &cc.p_solver,
+                cc.turb.n_non_orth_correctors,
+            )?;
+
+            let d = KOmegaSstCoeffs::default();
+            let coeffs = KOmegaSstCoeffs {
+                sigma_k1: model_coeff(cc, "sigmaK1", d.sigma_k1),
+                sigma_w1: model_coeff(cc, "sigmaOmega1", d.sigma_w1),
+                beta_1: model_coeff(cc, "beta1", d.beta_1),
+                gamma_1: model_coeff(cc, "gamma1", d.gamma_1),
+                sigma_k2: model_coeff(cc, "sigmaK2", d.sigma_k2),
+                sigma_w2: model_coeff(cc, "sigmaOmega2", d.sigma_w2),
+                beta_2: model_coeff(cc, "beta2", d.beta_2),
+                gamma_2: model_coeff(cc, "gamma2", d.gamma_2),
+                beta_star: model_coeff(cc, "betaStar", d.beta_star),
+                a1: model_coeff(cc, "a1", d.a1),
+                b1: model_coeff(cc, "b1", d.b1),
+                c1: model_coeff(cc, "c1", d.c1),
+            };
+            let mut model = KOmegaSst::new(
+                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f,
+            )?;
+            let gm = MenterGamma::new(
+                gpu,
+                mesh,
+                sel.coeffs,
+                sel.controls,
+                &wd.y.f,
+                &wd.grad_y,
+            )?;
+            model.set_gamma_transition(Some(gm))?;
+            if !selection.active {
+                model.freeze_nut(gpu)?;
+            }
+            Ok(Box::new(CoupledKOmegaSst::new(model, buoy)))
+        }
+
         // SPEC-LIT §56. One transport equation and one solve, and no
         // wall-function machinery at all on `nu~` - which is why
         // `wall_faces.constrained_cells` is never read here. `nut`'s own set
@@ -2503,6 +2859,469 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    //  SPEC-LIT §91 - what a kOmegaSSTGamma case says, and the pair tests
+    // ------------------------------------------------------------------
+
+    /// The base 2015-gamma case: every §90 setting written explicitly, plus
+    /// the `system/` entries the one new equation reads, so that a pair test
+    /// can replace exactly one substring and change nothing else (§91.4).
+    const GM_MOMENTUM: &str = "\
+        simulationType RAS; \
+        RAS { model kOmegaSSTGamma; betaStar 0.09; \
+              Flength 100.0; ce2 50.0; ca2 0.06; sigmaGamma 1.0; \
+              CTU1 100.0; CTU2 1000.0; CTU3 1.0; \
+              CPG1 14.68; CPG2 -7.34; CPG3 0.0; \
+              CPG1lim 1.5; CPG2lim 3.0; ReThetacLim 1100.0; \
+              Ck 1.0; Csep 1.0; gammaMin 0; gammaMax 1; }";
+
+    const GM_SCHEMES: &str = "\
+        divSchemes { default Gauss linear; \
+                     div(phi,k) bounded Gauss upwind; \
+                     div(phi,gamma) bounded Gauss upwind; }";
+
+    const GM_SOLUTION: &str = "\
+        solvers { gamma { solver PBiCGStab; tolerance 1e-9; maxIter 100; } } \
+        relaxationFactors { equations { gamma 0.7; } }";
+
+    /// A whole 2015-gamma case, from three dictionary sources - `lm_case`'s
+    /// shape, so the two harnesses stay comparable.
+    fn gm_case(momentum: &str, schemes: &str, solution: &str) -> CaseControls {
+        let d = FoamDict::parse(momentum, "momentumTransport").expect("momentumTransport");
+        let sch = FoamDict::parse(schemes, "fvSchemes").expect("fvSchemes");
+        let sol = FoamDict::parse(solution, "fvSolution").expect("fvSolution");
+        let name = d
+            .get_or("RAS/model", d.get_or("RAS/RASModel", ""))
+            .to_string();
+        CaseControls {
+            model_name: name,
+            momentum_transport: d,
+            schemes: crate::io::schemes::FvSchemes::from_dict(sch),
+            fv_solution: sol,
+            ..Default::default()
+        }
+    }
+
+    fn gm_base() -> CaseControls {
+        gm_case(GM_MOMENTUM, GM_SCHEMES, GM_SOLUTION)
+    }
+
+    /// **SPEC-LIT §91.4, row 1: the model itself, and the field set that
+    /// grew from two to three.**
+    #[test]
+    fn the_model_pair_changes_the_field_set() {
+        let src = GM_MOMENTUM.replace("model kOmegaSSTGamma", "model kOmegaSST");
+        assert_ne!(src, GM_MOMENTUM, "the pair did not differ");
+        let s = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect("the plain-SST side of the pair is valid");
+        let base = select_turbulence_model(&gm_base()).expect("base");
+        assert_ne!(s.model, base.model, "the model did not move");
+        assert_ne!(
+            s.model.transported_fields(),
+            base.model.transported_fields(),
+            "`model kOmegaSST` -> `kOmegaSSTGamma` left transported_fields \
+             unchanged (SPEC-LIT 91.4, row 1)"
+        );
+        assert!(base.gamma_transition.is_some());
+        assert!(s.gamma_transition.is_none());
+    }
+
+    /// **SPEC-LIT §91.4, rows 2-18: seventeen coefficient pairs differing in
+    /// one entry, each REQUIRED to reach `GammaCoeffs`.** Rows 11 and 17-18
+    /// are the ones §90.3 and §90.8 lean on: `CPG3` is dead at the printed
+    /// constants and lives only through rig pairs 24-25, and the two bounds
+    /// are OURS, not the page's.
+    #[test]
+    fn the_gamma_coefficient_pairs_reach_the_solver() {
+        let base_t = select_turbulence_model(&gm_base())
+            .expect("base")
+            .gamma_transition
+            .expect("a gamma-transition record");
+
+        for (from, to, what) in [
+            ("Flength 100.0", "Flength 50.0", "the intermittency production"),
+            ("ce2 50.0", "ce2 25.0", "the destruction term, and the laminar fixed point"),
+            ("ca2 0.06", "ca2 0.12", "the destruction term's rate"),
+            ("sigmaGamma 1.0", "sigmaGamma 0.5", "the gamma diffusivity"),
+            ("CTU1 100.0", "CTU1 120.0", "the correlation's floor"),
+            ("CTU2 1000.0", "CTU2 500.0", "the correlation's amplitude"),
+            ("CTU3 1.0", "CTU3 2.0", "the exponent's rate"),
+            ("CPG1 14.68", "CPG1 7.34", "the pressure-gradient sensitivity, positive branch"),
+            ("CPG2 -7.34", "CPG2 -3.67", "the pressure-gradient sensitivity, negative branch"),
+            ("CPG3 0.0", "CPG3 1.0", "the term dead at the printed constants"),
+            ("CPG1lim 1.5", "CPG1lim 1.2", "the positive cap"),
+            ("CPG2lim 3.0", "CPG2lim 2.0", "the negative cap"),
+            ("ReThetacLim 1100.0", "ReThetacLim 800.0", "F_on^lim, and P_k^lim with it"),
+            ("Ck 1.0", "Ck 2.0", "P_k^lim's amplitude"),
+            ("Csep 1.0", "Csep 2.0", "P_k^lim's nu_t cutoff"),
+            ("gammaMax 1;", "gammaMax 0.5;", "the bound"),
+            ("gammaMin 0;", "gammaMin 0.1;", "the bound's floor"),
+        ] {
+            let src = GM_MOMENTUM.replace(from, to);
+            assert_ne!(src, GM_MOMENTUM, "the pair did not differ: {from}");
+            let s = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+                .expect("the varied case is valid");
+            let t = s.gamma_transition.expect("a gamma-transition record");
+            assert_ne!(
+                t.coeffs, base_t.coeffs,
+                "`{from}` -> `{to}` is INERT: {what} does not move (SPEC-LIT 91.4)"
+            );
+        }
+    }
+
+    /// **SPEC-LIT §91.4, row 19: §6.3's own constant, still read under this
+    /// model** - the k and omega equations ARE §6.3's.
+    #[test]
+    fn the_sst_coefficient_pair_reaches_the_solver_under_the_gamma_model() {
+        let src = GM_MOMENTUM.replace("betaStar 0.09", "betaStar 0.08");
+        assert_ne!(src, GM_MOMENTUM, "the pair did not differ");
+        let c = gm_case(&src, GM_SCHEMES, GM_SOLUTION);
+        assert_ne!(
+            model_coeff(&c, "betaStar", 0.09),
+            model_coeff(&gm_base(), "betaStar", 0.09),
+            "betaStar is inert under kOmegaSSTGamma - the k and omega \
+             equations ARE section 6.3's (SPEC-LIT 91.4, row 19)"
+        );
+    }
+
+    /// **SPEC-LIT §91.4, rows 20-22: the `system/` entries.** These are the
+    /// three §13.4.1 instances this section exists to prevent - every
+    /// `kOmegaSSTGamma` case writes them, and each would be inert the moment
+    /// `GammaControls` reached for a slot somebody else owns. And the
+    /// sharper half: moving one entry moves NOTHING else, because each is
+    /// read for ITSELF (§91.2, §89.2's rule).
+    #[test]
+    fn the_gamma_system_entries_reach_the_solver() {
+        let base_t = select_turbulence_model(&gm_base())
+            .expect("base")
+            .gamma_transition
+            .expect("a gamma-transition record");
+
+        // Row 20: `solvers/gamma`, for itself.
+        let src = GM_SOLUTION.replace(
+            "gamma { solver PBiCGStab; tolerance 1e-9;",
+            "gamma { solver PBiCGStab; tolerance 1e-5;",
+        );
+        assert_ne!(src, GM_SOLUTION, "the pair did not differ: solvers/gamma");
+        let t = select_turbulence_model(&gm_case(GM_MOMENTUM, GM_SCHEMES, &src))
+            .expect("the varied case is valid")
+            .gamma_transition
+            .expect("a gamma-transition record");
+        assert_ne!(t.controls.gamma_solver, base_t.controls.gamma_solver);
+        assert_eq!(t.controls.gamma_relax, base_t.controls.gamma_relax);
+
+        // Row 21: `relaxationFactors/equations/gamma`, for itself - and the
+        // solver entry it sits beside did not move with it.
+        let only_relax = GM_SOLUTION.replace("gamma 0.7;", "gamma 0.4;");
+        assert_ne!(only_relax, GM_SOLUTION, "the pair did not differ: gamma relaxation");
+        let t = select_turbulence_model(&gm_case(GM_MOMENTUM, GM_SCHEMES, &only_relax))
+            .expect("the varied case is valid")
+            .gamma_transition
+            .expect("a gamma-transition record");
+        assert_ne!(
+            t.controls, base_t.controls,
+            "`relaxationFactors/equations/gamma` is INERT - it was read and \
+             thrown away (SPEC-LIT 91.4, row 21)"
+        );
+        assert_ne!(t.controls.gamma_relax, base_t.controls.gamma_relax);
+        assert_eq!(t.controls.gamma_solver, base_t.controls.gamma_solver);
+
+        // Row 22: `system/fvSchemes`, by its own name.
+        let src = GM_SCHEMES.replace("div(phi,gamma) bounded Gauss upwind", "div(phi,gamma) Gauss linear");
+        assert_ne!(src, GM_SCHEMES, "the pair did not differ: div(phi,gamma)");
+        let t = select_turbulence_model(&gm_case(GM_MOMENTUM, &src, GM_SOLUTION))
+            .expect("the varied case is valid")
+            .gamma_transition
+            .expect("record");
+        assert_ne!(
+            t.controls, base_t.controls,
+            "`div(phi,gamma)` is INERT - the gamma equation took some other \
+             entry's scheme (SPEC-LIT 91.4, row 22)"
+        );
+        assert_ne!(t.controls.gamma_conv, base_t.controls.gamma_conv);
+    }
+
+    /// **SPEC-LIT §91.3, §91.4: LM2009's eight keys are the inert list under
+    /// this model, and the refusal runs §89.3 in REVERSE** - each message
+    /// points at `kOmegaSSTLM`, where the key IS read. One assertion per
+    /// key, every key named.
+    #[test]
+    fn the_lm_keys_are_inert_under_the_gamma_model() {
+        for (key, value) in [
+            ("ca1", "2.0"),
+            ("ce1", "1.0"),
+            ("cThetat", "0.03"),
+            ("s1", "2"),
+            ("sigmaf", "1.0"),
+            ("sigmaThetat", "2.0"),
+            ("nReThetaSweeps", "10"),
+            ("ReThetatMin", "20"),
+        ] {
+            let src =
+                GM_MOMENTUM.replace("betaStar 0.09;", &format!("betaStar 0.09; {key} {value};"));
+            assert_ne!(src, GM_MOMENTUM, "the pair did not differ: {key}");
+            let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+                .expect_err("an inert key must be refused");
+            let m = e.to_string();
+            assert!(m.contains(key), "the refusal does not name {key}: {m}");
+            assert!(
+                m.contains("kOmegaSSTLM"),
+                "the refusal does not point at kOmegaSSTLM, where {key} IS \
+                 read (SPEC-LIT 91.3): {m}"
+            );
+        }
+    }
+
+    /// **SPEC-LIT §91.4: §89.4's nine inert keys keep the refusals they
+    /// already have**, adapted to what this model is. Each refusal names
+    /// its setting.
+    #[test]
+    fn the_shared_inert_keys_are_refused_under_the_gamma_model() {
+        for (key, value) in [
+            ("Cmu", "0.09"),
+            ("C1", "1.44"),
+            ("C2", "1.92"),
+            ("C3", "0.0"),
+            ("sigmak", "1.0"),
+            ("sigmaEps", "1.3"),
+            ("FlengthCoeff", "1.0"),
+            ("ReThetacCoeff", "1.0"),
+            ("Tu", "3.3"),
+        ] {
+            let src =
+                GM_MOMENTUM.replace("betaStar 0.09;", &format!("betaStar 0.09; {key} {value};"));
+            assert_ne!(src, GM_MOMENTUM, "the pair did not differ: {key}");
+            let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+                .expect_err("an inert key must be refused");
+            let m = e.to_string();
+            assert!(m.contains(key), "the refusal does not name {key}: {m}");
+        }
+    }
+
+    /// **SPEC-LIT §91.3: the two inert-key lists must stay distinct in
+    /// exactly the direction the models differ.** For the eight LM keys the
+    /// gamma message names `kOmegaSSTLM` - the OTHER model, where the key is
+    /// read, and not its own name. Of the nine shared keys, the three that
+    /// are plain SST-background facts (`Cmu`, `sigmak`, `sigmaEps`) read the
+    /// same under both models and may share text; the six whose reasons are
+    /// the 2015 model's own must NOT reuse LM's wording.
+    #[test]
+    fn the_two_inert_lists_do_not_share_a_message() {
+        // The reasons that are the same fact about the SST background
+        // whichever transition model sits on it.
+        const SAME_UNDER_BOTH: &[&str] = &["Cmu", "sigmak", "sigmaEps"];
+        for (key, g) in GAMMA_INERT {
+            match LM_INERT.iter().find(|(k, _)| k == key) {
+                Some((_, l)) if SAME_UNDER_BOTH.contains(key) => {}
+                // A shared key whose reason is the model's own: the messages
+                // are not the same text with the model name exchanged.
+                Some((_, l)) => {
+                    assert_ne!(g, l, "GAMMA_INERT reuses LM_INERT's {key} message");
+                }
+                // An LM-only key: the gamma message points at the model that
+                // DOES read it - §89.3's refusal, run in reverse.
+                None => assert!(
+                    g.contains("kOmegaSSTLM"),
+                    "{key}'s refusal does not point at kOmegaSSTLM: {g}"
+                ),
+            }
+        }
+    }
+
+    /// **SPEC-LIT §90.9: `ce2 <= 1` is refused by name.** The laminar fixed
+    /// point `1/ce2` leaves `[0, 1]`, and `(ce2 gamma - 1)` goes negative on
+    /// the whole operating range.
+    #[test]
+    fn ce2_at_or_below_one_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("ce2 50.0", "ce2 1");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("ce2 = 1 must be refused");
+        let m = e.to_string();
+        assert!(m.contains("ce2"), "the refusal does not name the setting: {m}");
+    }
+
+    /// **SPEC-LIT §90.9: `sigmaGamma <= 0` is refused by name** - a
+    /// non-positive diffusivity coefficient makes the laplacian
+    /// anti-diffusive.
+    #[test]
+    fn sigma_gamma_at_or_below_zero_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("sigmaGamma 1.0", "sigmaGamma 0");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("sigmaGamma = 0 must be refused");
+        let m = e.to_string();
+        assert!(m.contains("sigmaGamma"), "the refusal does not name the setting: {m}");
+    }
+
+    /// **SPEC-LIT §90.9: `Flength < 0` is refused by name** - production
+    /// becomes destruction, and the onset machinery drives `gamma` down
+    /// exactly where it should drive it up.
+    #[test]
+    fn negative_f_length_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("Flength 100.0", "Flength -1");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("Flength < 0 must be refused");
+        let m = e.to_string();
+        assert!(m.contains("Flength"), "the refusal does not name the setting: {m}");
+    }
+
+    /// **SPEC-LIT §90.9: `CTU2 < 0` is refused by name** - the correlation's
+    /// amplitude, with which `Re_thetac` would rise with `Tu_L`.
+    #[test]
+    fn negative_c_tu2_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("CTU2 1000.0", "CTU2 -100");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("CTU2 < 0 must be refused");
+        let m = e.to_string();
+        assert!(m.contains("CTU2"), "the refusal does not name the setting: {m}");
+    }
+
+    /// **SPEC-LIT §90.9: `ReThetacLim <= 0` is refused by name** - (90.15)
+    /// divides by it.
+    #[test]
+    fn re_thetac_lim_at_or_below_zero_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("ReThetacLim 1100.0", "ReThetacLim 0");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("ReThetacLim = 0 must be refused");
+        let m = e.to_string();
+        assert!(m.contains("ReThetacLim"), "the refusal does not name the setting: {m}");
+    }
+
+    /// **SPEC-LIT §90.9: `gammaMin > gammaMax` is refused by name** - and
+    /// the message says the two may be EQUAL, because that freezes the
+    /// intermittency.
+    #[test]
+    fn gamma_min_above_gamma_max_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("gammaMin 0;", "gammaMin 2;");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("gammaMin > gammaMax must be refused");
+        let m = e.to_string();
+        assert!(m.contains("gammaMin"), "the refusal does not name the setting: {m}");
+        assert!(m.contains("gammaMax"), "the refusal does not name the other bound: {m}");
+    }
+
+    /// **SPEC-LIT §90.9: `CPG1lim < 1` is refused by name** - a cap below 1
+    /// bites at `lambda_thL = 0`, where `F_PG` must be exactly 1.
+    #[test]
+    fn c_pg1_lim_below_one_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("CPG1lim 1.5", "CPG1lim 0.5");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("CPG1lim < 1 must be refused");
+        let m = e.to_string();
+        assert!(
+            m.contains("CPG1lim"),
+            "the refusal does not name the setting: {m}"
+        );
+    }
+
+    /// **SPEC-LIT §90.9: `CPG2lim < 1` is refused by name**, same reason,
+    /// negative branch.
+    #[test]
+    fn c_pg2_lim_below_one_is_refused_by_name() {
+        let src = GM_MOMENTUM.replace("CPG2lim 3.0", "CPG2lim 0.5");
+        assert_ne!(src, GM_MOMENTUM);
+        let e = select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect_err("CPG2lim < 1 must be refused");
+        let m = e.to_string();
+        assert!(
+            m.contains("CPG2lim"),
+            "the refusal does not name the setting: {m}"
+        );
+    }
+
+    /// **And the setting deliberately NOT refused (§91.4, §89.4's reason):
+    /// `gammaMin = gammaMax` freezes the intermittency**, which is a real
+    /// thing to ask for - Gate 90-R's fully-turbulent limit is exactly it.
+    #[test]
+    fn a_frozen_gamma_is_accepted_under_the_gamma_model() {
+        let src = GM_MOMENTUM.replace("gammaMin 0;", "gammaMin 1;");
+        assert_ne!(src, GM_MOMENTUM);
+        select_turbulence_model(&gm_case(&src, GM_SCHEMES, GM_SOLUTION))
+            .expect("a frozen intermittency is a legitimate setting - SPEC-LIT 90.8");
+    }
+
+    /// **SPEC-LIT §90.9: a 2015-gamma case with gravity is refused by name.**
+    ///
+    /// Not because the term is missing - `G_b` enters a `k` equation and
+    /// this model has one - but because whether `gamma` multiplies it, as
+    /// (90.13) makes it multiply `P_k`, is a question Menter et al. do not
+    /// answer.
+    #[test]
+    fn a_buoyant_gamma_case_is_refused_by_name() {
+        let mut cc = gm_base();
+        cc.buoyancy.g = crate::Vec3::new(0.0, -9.81, 0.0);
+        assert!(cc.buoyancy.is_active());
+        let e = refuse_gamma_buoyancy(&cc).expect_err("gravity under kOmegaSSTGamma must be refused");
+        let m = e.to_string();
+        assert!(m.contains("kOmegaSSTGamma"), "{m}");
+        assert!(m.contains("G_b"), "the refusal does not name the term: {m}");
+        assert!(m.contains("kOmegaSST"), "the refusal names no alternative: {m}");
+        // And with no gravity it is silent.
+        let mut cc = gm_base();
+        cc.buoyancy.g = crate::Vec3::ZERO;
+        refuse_gamma_buoyancy(&cc).expect("a case with no gravity is fine");
+    }
+
+    /// **SPEC-LIT §91.5: a 2015-gamma case builds, end to end, and the
+    /// banner and the written field set both say what it is.** Skips without
+    /// a GPU, as every device test here does.
+    #[test]
+    fn a_k_omega_sst_gamma_case_builds_through_the_coupled_route() {
+        let Ok(gpu) = Gpu::new(0) else { return };
+        let hm = {
+            let mut spec = crate::blockgen::BlockSpec {
+                x: crate::blockgen::GradedAxis {
+                    lo: 0.0, hi: 1.0, n: 4, expansion: 1.0, two_sided: false,
+                },
+                y: crate::blockgen::GradedAxis {
+                    lo: 0.0, hi: 0.2, n: 4, expansion: 1.0, two_sided: false,
+                },
+                z: crate::blockgen::GradedAxis {
+                    lo: 0.0, hi: 0.2, n: 4, expansion: 1.0, two_sided: false,
+                },
+                ..Default::default()
+            };
+            spec.patch_type[4] = "patch".to_string();
+            spec.patch_type[5] = "patch".to_string();
+            crate::blockgen::build_mesh(&spec).expect("block")
+        };
+        let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
+        let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_rough = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
+
+        let mut cc = gm_base();
+        cc.buoyancy.g = crate::Vec3::ZERO;
+        let sel = select_turbulence_model(&cc).expect("selection");
+        assert_eq!(sel.model, RasModel::KOmegaSstGamma);
+        let describe = sel.describe();
+        assert!(describe.contains("kOmegaSSTGamma"), "{describe}");
+
+        let turb = build_coupled(&gpu, &hm, &mesh, &cc, &sel, &no_walls, &no_rough)
+            .expect("kOmegaSSTGamma must build");
+        assert_eq!(turb.name(), "kOmegaSSTGamma");
+        let names: Vec<&str> = turb.output_fields().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["k", "omega", "nut", "gamma"]);
+
+        // And plain SST out of the same route is untouched: three names, and
+        // the banner it always printed - §91.5's "unchanged" row, on the
+        // route the gamma model now shares.
+        let mut cc = case("RAS { model kOmegaSST; }");
+        cc.buoyancy.g = crate::Vec3::ZERO;
+        let sel = select_turbulence_model(&cc).expect("selection");
+        assert!(sel.gamma_transition.is_none());
+        let turb = build_coupled(&gpu, &hm, &mesh, &cc, &sel, &no_walls, &no_rough)
+            .expect("kOmegaSST must still build");
+        assert_eq!(turb.name(), "kOmegaSST");
+        let names: Vec<&str> = turb.output_fields().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["k", "omega", "nut"]);
+    }
+
+    // ------------------------------------------------------------------
     //  SPEC-LIT §56 / §57 / §58 - the refusals that became capabilities
     // ------------------------------------------------------------------
 
@@ -2620,19 +3439,46 @@ mod tests {
         assert!(s.transition.is_some(), "a kOmegaSSTLM case must carry a transition record");
         assert!(available_models().contains(&"kOmegaSSTLM"));
         assert!(RECOGNISED_NOT_IMPLEMENTED.iter().all(|(n, _)| *n != "kOmegaSSTLM"));
+    }
 
-        // And the successor is refused, naming the model that IS here and
-        // the reason it is nevertheless the weaker of the two.
-        let e = select_turbulence_model(&case("RAS { model kOmegaSSTGamma; }"))
-            .expect_err("the 2015 one-equation gamma model is not implemented");
-        let m = e.to_string();
-        assert!(m.contains("kOmegaSSTGamma"), "{m}");
-        assert!(m.contains("kOmegaSSTLM"), "the refusal does not name what IS here: {m}");
-        assert!(m.contains("2015"), "the refusal does not cite Menter et al. (2015): {m}");
+    /// **SPEC-LIT §91.3, §91.5: the refusal §89.3 described is GONE.**
+    ///
+    /// This test used to be the sibling of
+    /// `the_transition_model_now_selects_a_model` and it asserted the
+    /// opposite: that `kOmegaSSTGamma`'s refusal names `kOmegaSSTLM`, cites
+    /// Menter et al. (2015) and says "Galilean". All three claims moved
+    /// rather than died - §91.3 records where - and what replaced them is
+    /// the row they were always going to become: the model is in the
+    /// registry, beside the predecessor it succeeded.
+    #[test]
+    fn the_2015_gamma_model_now_selects_a_model() {
+        let s = select_turbulence_model(&case("RAS { model kOmegaSSTGamma; }"))
+            .expect("kOmegaSSTGamma is implemented - SPEC-LIT 90");
+        assert_eq!(s.model, RasModel::KOmegaSstGamma);
+        // §91.5's rows, each named: the field set grew from two to three,
+        // the dissipation slot did not move, and the record is populated.
+        assert_eq!(s.model.transported_fields(), &["k", "omega", "gamma"]);
+        assert_eq!(s.model.dissipation_field(), Some("omega"));
         assert!(
-            m.contains("Galilean"),
-            "the refusal does not say why the successor is better: {m}"
+            s.gamma_transition.is_some(),
+            "a kOmegaSSTGamma case must carry a gamma-transition record"
         );
+        assert!(s.transition.is_none(), "no LM record on a 2015-gamma case");
+        // §91.3: out of the refusal list, into the registry and the menu.
+        assert!(RECOGNISED_NOT_IMPLEMENTED.iter().all(|(n, _)| *n != "kOmegaSSTGamma"));
+        assert!(REGISTRY.iter().any(|(n, _)| *n == "kOmegaSSTGamma"));
+        assert!(available_models().contains(&"kOmegaSSTGamma"));
+        // The banner's model line: the model, the section, and the claim
+        // Gate 90-G backs.
+        let d = s.gamma_transition.as_ref().expect("record").describe();
+        assert!(d.contains("kOmegaSSTGamma"), "{d}");
+        assert!(d.contains("SPEC-LIT 90"), "{d}");
+        assert!(d.contains("Galilean invariant (Gate 90-G)"), "{d}");
+        // §91.5: `driver_for(KOmegaSstGamma)` names an existing binary and
+        // NOT `ofgpu-k-omega`. That table lives in the bins' shared
+        // `common` module, so the assertion lives with it -
+        // `bin::common::tests::the_gamma_model_reaches_the_coupled_drivers`,
+        // run by `cargo test --bins`.
     }
 
     /// SPEC-LIT §89.6: the Reynolds-stress family is refused by name, with
@@ -2936,12 +3782,13 @@ mod tests {
     /// must not both be true. `realizableKE` and `RNGkEpsilon` left the list
     /// the same way, for `the_two_k_epsilon_variants_now_select_a_model`.
     /// So did `SpalartAllmaras`, for `spalart_allmaras_now_selects_a_model`.
-    /// And so did `kOmegaSSTLM`, for
-    /// `the_transition_model_now_selects_a_model`; what stands in its place
-    /// here is its own successor, `kOmegaSSTGamma`.
+    /// So did `kOmegaSSTLM`, for `the_transition_model_now_selects_a_model`;
+    /// and so did its own successor `kOmegaSSTGamma`, for
+    /// `the_2015_gamma_model_now_selects_a_model` - §91.3's refusal list
+    /// has now given up both transition models.
     #[test]
     fn an_unimplemented_model_errors_and_names_the_alternatives() {
-        for name in ["kOmegaSSTGamma", "LRR", "v2f"] {
+        for name in ["LRR", "v2f"] {
             let e = select_turbulence_model(&case(&format!("RAS {{ model {name}; }}")))
                 .expect_err("must not silently substitute");
             let s = e.to_string();

@@ -3080,8 +3080,8 @@ fn check_spalart_allmaras_and_des(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     );
     c.note(
         "S58.3's line - `kOmegaSSTLM` stays refused - no longer holds: S88 implements it, and \
-         the section below is its gate. What stays refused in its place is Menter et al. \
-         (2015)'s one-equation gamma successor (S89.3)",
+         the section below is its gate. Nor is its 2015 one-equation gamma successor refused \
+         any more: S91.3 puts `kOmegaSSTGamma` in the registry beside it, and its gate is S90's",
     );
 
     Ok(())

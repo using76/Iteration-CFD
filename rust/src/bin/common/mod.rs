@@ -876,6 +876,13 @@ pub fn driver_for(m: RasModel) -> &'static str {
         // turbulent from the leading edge, which is the plausible converged
         // wrong answer S13.4 exists to stop.
         RasModel::KOmegaSstLM => "ofgpu-buoyant or ofgpu-lowmach",
+        // SPEC-LIT 91.5: the 2015 gamma model is `kOmegaSST` with one more
+        // equation bolted on, and it is reachable exactly where SST is
+        // reachable through `build_coupled` - NOT `ofgpu-k-omega`, which
+        // builds `KOmegaSst` directly and would run a transitional case
+        // fully turbulent from the leading edge (SPEC-LIT 13.4's plausible
+        // converged wrong answer).
+        RasModel::KOmegaSstGamma => "ofgpu-buoyant or ofgpu-lowmach",
         // SPEC-LIT S56/S57: SA and both hybrid backgrounds are reachable
         // through `models::registry::build_coupled`, which is what the
         // coupled drivers use - there is no standalone `ofgpu-sa`.
@@ -888,6 +895,43 @@ pub fn driver_for(m: RasModel) -> &'static str {
         RasModel::Les => "ofgpu-buoyant or ofgpu-lowmach",
         RasModel::Laminar => "any driver",
     }
+}
+
+/// SPEC-LIT §90.5, §91.5: the `kOmegaSSTGamma` banner's `gamma`-range half.
+///
+/// The coupled drivers print `turbulence model: <name>` BEFORE any `0/`
+/// field is uploaded, so the initial `gamma` range cannot ride that line -
+/// it is printed here instead, at the call site just before the first outer
+/// iteration's `correct`, on the field that `correct` will actually read
+/// (after `turb.initialise`, and after a restart's `.mcr` has overwritten
+/// it, which is the state worth reporting). The closing words are a claim
+/// with a gate behind it: §90.7 measured the frame dependence LM2009 has
+/// and this model does not. Silent on every model that transports no
+/// `gamma`.
+pub fn report_gamma_range(
+    gpu: &Gpu,
+    fields: &[(&'static str, &ofgpu::GpuScalarField)],
+) -> Result<()> {
+    let Some((_, gamma)) = fields.iter().find(|(n, _)| *n == "gamma") else {
+        return Ok(());
+    };
+    let v = gpu.download(&gamma.f)?;
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &x in &v {
+        let x = f64::from(x);
+        lo = lo.min(x);
+        hi = hi.max(x);
+    }
+    if v.is_empty() {
+        (lo, hi) = (0.0, 0.0);
+    }
+    println!(
+        "transition: kOmegaSSTGamma (SPEC-LIT 90), initial gamma in [{}, {}] | \
+         Galilean invariant (Gate 90-G)",
+        g(lo),
+        g(hi)
+    );
+    Ok(())
 }
 
 // ==========================================================================
@@ -1109,5 +1153,20 @@ mod tests {
         // the C++ benchmark's argument loop relies on.
         assert_eq!(atoi("-iters"), 0);
         assert_eq!(atoi(""), 0);
+    }
+
+    /// SPEC-LIT 91.5: `driver_for(KOmegaSstGamma)` names a binary that
+    /// exists and is NOT `ofgpu-k-omega` - that driver builds `KOmegaSst`
+    /// directly and would run a transitional case fully turbulent from the
+    /// leading edge. The coupled drivers are where `build_coupled` reaches
+    /// the 2015 model, exactly as for `kOmegaSSTLM`.
+    #[test]
+    fn the_gamma_model_reaches_the_coupled_drivers() {
+        let d = driver_for(RasModel::KOmegaSstGamma);
+        assert!(!d.contains("ofgpu-k-omega"), "{d}");
+        assert!(d.contains("ofgpu-buoyant"), "{d}");
+        assert!(d.contains("ofgpu-lowmach"), "{d}");
+        // And the same answer its predecessor gets: one route, two models.
+        assert_eq!(d, driver_for(RasModel::KOmegaSstLM));
     }
 }
