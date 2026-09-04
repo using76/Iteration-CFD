@@ -65,7 +65,7 @@ pub use k_omega::{KOmega, KOmegaCoeffs};
 pub use launder_sharma::{f2, f_mu, mesh_resolution_report, LaunderSharmaKE, MeshResolutionReport};
 pub use k_omega_sst::{KOmegaSst, KOmegaSstCoeffs};
 pub use les::{Les, LesCoeffs, LesModel};
-pub use menter_gamma::{GammaCoeffs, GammaControls};
+pub use menter_gamma::{GammaCoeffs, GammaControls, MenterGamma};
 pub use spalart_allmaras::{SaCoeffs, SaVariant, SpalartAllmaras};
 pub use transition::{LangtryMenter, LmCoeffs, LmControls};
 pub use registry::{

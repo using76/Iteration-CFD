@@ -44,25 +44,38 @@
 //! where §88.9 measured LM2009's `Re_theta_eq` moving +82.4 % under a frame
 //! shift of +5 m/s.
 //!
-//! Nothing here launches a kernel. The device twins and the `MenterGamma`
-//! model struct are the next unit's work; a case that names no transition
-//! model runs none of this.
+//! Nothing here is launched by a case that names no transition model: the
+//! device twins live in `cuda/gmtrans.cu`, the model struct
+//! [`MenterGamma`] below launches them, and the SST hook that would attach
+//! one is not wired yet - the whole of this file is dead code to a run
+//! until `k_omega_sst.rs` grows the `Option<MenterGamma>` slot.
 //!
 //! The page prints `C_PG2` twice in (90.7)'s negative branch and `C_PG3` in
 //! no equation at all; §90.3 records the reading implemented here and the
 //! pair test that proves the choice live in both directions.
 
+use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
+use crate::field::GpuScalarField;
+use crate::field_ops::{
+    advance_time_levels, correct_boundary_conditions, copy_field, copy_field_vector, FieldKernels,
+};
+use crate::fv::{fvm_sp, fvm_su, fvm_susp};
 use crate::io::case::SolverControls;
 use crate::io::schemes::DivEntry;
+use crate::mesh::GpuMesh;
+use crate::solver::SolverPerformance;
+use crate::turbulence::{vorticity_mag, FlowState, RasCore, TurbKernels};
 use crate::{Scalar, Tensor, Vec3};
+
+use cudarc::driver::{CudaFunction, PushKernelArg};
 
 // ==========================================================================
 //  90.4  The local inputs, as host functions
 //
 //  Every one of these is the CPU twin of a device function in
-//  `cuda/gmtrans.cu`, written in the same order with the same constants
-//  (that file is the next unit's work). None of them reads a velocity
+//  `cuda/gmtrans.cu`, written in the same order with the same constants.
+//  None of them reads a velocity
 //  magnitude - the property Gate 90-G holds bitwise.
 // ==========================================================================
 
@@ -378,7 +391,7 @@ impl GammaCoeffs {
                 "momentumTransport/RAS/CTU2 = {}: the correlation's \
                  amplitude - with it negative Re_thetac (90.6) RISES with \
                  Tu_L and reaches C_TU1 + C_TU2 at clean air, non-positive \
-                 from C_TU2 = -1000 down, where F_onset1 divides by it \
+                 from C_TU2 = -100 down, where F_onset1 divides by it \
                  (SPEC-LIT 90.9). Menter et al.'s value is 1000",
                 self.c_tu2
             )));
@@ -474,6 +487,560 @@ impl Default for GammaControls {
     }
 }
 
-// The device twins and the `MenterGamma` model struct are the next unit.
+// ==========================================================================
+//  The device half
+// ==========================================================================
+
+/// Every entry point in `cuda/gmtrans.cu`, resolved once.
+pub struct GmKernels {
+    fields: CudaFunction,
+    gamma_sources: CudaFunction,
+    stamp_production: CudaFunction,
+    stamp_k_sources: CudaFunction,
+    stamp_f1: CudaFunction,
+    bound_gamma: CudaFunction,
+}
+
+impl GmKernels {
+    pub fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::GMTRANS)?;
+        Ok(Self {
+            fields: k.func("gmFields")?,
+            gamma_sources: k.func("gmGammaSources")?,
+            stamp_production: k.func("gmStampProduction")?,
+            stamp_k_sources: k.func("gmStampKSources")?,
+            stamp_f1: k.func("gmStampF1")?,
+            bound_gamma: k.func("gmBoundGamma")?,
+        })
+    }
+}
+
+/// The one transported field, the seven closed forms it stands on, and the
+/// three stamps that reach the background model - the one-equation twin of
+/// [`crate::models::transition::LangtryMenter`], with the second equation
+/// gone (SPEC-LIT §90.1) and the production stamp the Kato-Launder coupling
+/// adds (§90.6).
+///
+/// Owns its buffers and allocates nothing in an outer iteration. Every
+/// launch is guarded by `n == 0` the way LM's is, and nothing here reads a
+/// velocity: `update_fields` takes no `U` at all, which is what makes
+/// Gate 90-G's claim structural rather than measured.
+pub struct MenterGamma {
+    kern: GmKernels,
+    fld: FieldKernels,
+    coeffs: GammaCoeffs,
+    ctrl: GammaControls,
+
+    gamma: GpuScalarField,
+
+    /// `[n_cells]` the wall distance of SPEC-LIT §6.6, and its gradient.
+    /// Both are COPIED at construction, for the reason
+    /// [`crate::models::transition::LangtryMenter`] copies `y`: they are
+    /// computed once at setup and the model outlives the `WallDistance`
+    /// that produced them. `grad_y` is a DIRECTION, not a unit vector -
+    /// §57.6 measured `|grad y|` leaving 1 by 0.495 - and (90.11)
+    /// normalises it per cell.
+    y: DevBuf<Scalar>,
+    grad_y: DevBuf<Vec3>,
+
+    /// `[n_cells]` the vorticity magnitude `sqrt(2 W_ij W_ij)`, formed here
+    /// and not by SST: (90.2) reads `S`, (90.3) reads `Omega`, and the two
+    /// agree only in a pure shear (§40.2's warning, §90.2's).
+    omega_mag: DevBuf<Scalar>,
+
+    f_onset: DevBuf<Scalar>,
+    f_turb: DevBuf<Scalar>,
+    re_thetac: DevBuf<Scalar>,
+    f_on_lim: DevBuf<Scalar>,
+    f3: DevBuf<Scalar>,
+
+    /// The two correlation inputs (90.9), (90.10), kept as diagnostics a
+    /// test - and Gate 90-G's device leg - read.
+    tu_l: DevBuf<Scalar>,
+    lambda_thl: DevBuf<Scalar>,
+
+    /// Gate 90-R (i)'s instrument: the Kato-Launder production stamp
+    /// switched OFF, so the bitwise reduction to plain SST can be run
+    /// without it. Test-only, like §88's `seed_stamp_inputs` - never a
+    /// case setting (§90.8).
+    #[cfg(test)]
+    kato_launder: bool,
+}
+
+impl MenterGamma {
+    /// `y` is the wall distance of SPEC-LIT §6.6 and `grad_y` its gradient;
+    /// both are copied, not borrowed.
+    pub fn new(
+        gpu: &Gpu,
+        mesh: &GpuMesh,
+        coeffs: GammaCoeffs,
+        ctrl: GammaControls,
+        y: &DevBuf<Scalar>,
+        grad_y: &DevBuf<Vec3>,
+    ) -> Result<Self> {
+        coeffs.check()?;
+        if mesh.n_cells > 0 && (y.len() != mesh.n_cells || grad_y.len() != mesh.n_cells) {
+            return Err(Error::Config(format!(
+                "MenterGamma::new: the wall distance has {} entries and its \
+                 gradient {} against {} cells (SPEC-LIT §6.6)",
+                y.len(),
+                grad_y.len(),
+                mesh.n_cells
+            )));
+        }
+        let nc = mesh.n_cells.max(1);
+        let fld = FieldKernels::new(gpu)?;
+        let mut y_own: DevBuf<Scalar> = gpu.zeros(nc)?;
+        copy_field(gpu, &fld, &mut y_own, y, mesh.n_cells)?;
+        let mut gy_own: DevBuf<Vec3> = gpu.zeros(nc)?;
+        copy_field_vector(gpu, &fld, &mut gy_own, grad_y, mesh.n_cells)?;
+
+        Ok(Self {
+            kern: GmKernels::new(gpu)?,
+            fld,
+            coeffs,
+            ctrl,
+            gamma: GpuScalarField::zeros(gpu, mesh, "gamma")?,
+            y: y_own,
+            grad_y: gy_own,
+            omega_mag: gpu.zeros(nc)?,
+            f_onset: gpu.zeros(nc)?,
+            f_turb: gpu.zeros(nc)?,
+            re_thetac: gpu.zeros(nc)?,
+            f_on_lim: gpu.zeros(nc)?,
+            f3: gpu.zeros(nc)?,
+            tu_l: gpu.zeros(nc)?,
+            lambda_thl: gpu.zeros(nc)?,
+            #[cfg(test)]
+            kato_launder: true,
+        })
+    }
+
+    #[must_use]
+    pub fn coeffs(&self) -> &GammaCoeffs {
+        &self.coeffs
+    }
+    #[must_use]
+    pub fn controls(&self) -> &GammaControls {
+        &self.ctrl
+    }
+    #[must_use]
+    pub fn gamma(&self) -> &GpuScalarField {
+        &self.gamma
+    }
+    pub fn gamma_mut(&mut self) -> &mut GpuScalarField {
+        &mut self.gamma
+    }
+    #[must_use]
+    pub fn f_onset(&self) -> &DevBuf<Scalar> {
+        &self.f_onset
+    }
+    #[must_use]
+    pub fn f_turb_field(&self) -> &DevBuf<Scalar> {
+        &self.f_turb
+    }
+    #[must_use]
+    pub fn re_thetac_field(&self) -> &DevBuf<Scalar> {
+        &self.re_thetac
+    }
+    #[must_use]
+    pub fn f_on_lim_field(&self) -> &DevBuf<Scalar> {
+        &self.f_on_lim
+    }
+    #[must_use]
+    pub fn f3_field(&self) -> &DevBuf<Scalar> {
+        &self.f3
+    }
+    #[must_use]
+    pub fn tu_l_field(&self) -> &DevBuf<Scalar> {
+        &self.tu_l
+    }
+    #[must_use]
+    pub fn lambda_thl_field(&self) -> &DevBuf<Scalar> {
+        &self.lambda_thl
+    }
+    #[must_use]
+    pub fn vorticity(&self) -> &DevBuf<Scalar> {
+        &self.omega_mag
+    }
+    #[must_use]
+    pub fn wall_distance(&self) -> &DevBuf<Scalar> {
+        &self.y
+    }
+
+    /// The `0/` file a driver has to find for this model, beyond `k` and
+    /// `omega`: one, against LM's two (§90.1 - the second equation is the
+    /// one that is gone).
+    #[must_use]
+    pub fn named_fields(&self) -> Vec<(&'static str, &GpuScalarField)> {
+        vec![("gamma", &self.gamma)]
+    }
+
+    pub fn named_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
+        vec![("gamma", &mut self.gamma)]
+    }
+
+    /// `psi^{n-2} <- psi^{n-1} <- psi`, once per step.
+    ///
+    /// Called from [`crate::models::KOmegaSst::correct`] beside `k`'s and
+    /// `omega`'s, so all three equations see the same time levels.
+    pub fn advance_time_levels(&mut self, gpu: &Gpu) -> Result<()> {
+        advance_time_levels(gpu, &self.fld, &mut self.gamma)
+    }
+
+    /// Bound `gamma` and evaluate its boundary values, without solving.
+    ///
+    /// The counterpart of [`crate::models::KOmegaSst::initialise`]: a driver
+    /// that has just read `0/gamma` calls this so the first `correct` sees a
+    /// field the correlations can be evaluated on.
+    pub fn initialise(&mut self, gpu: &Gpu, mesh: &GpuMesh) -> Result<()> {
+        let n = mesh.n_cells;
+        self.bound(gpu, n)?;
+        correct_boundary_conditions(gpu, &self.fld, &mut self.gamma, mesh)
+    }
+
+    fn bound(&mut self, gpu: &Gpu, n: usize) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as crate::Label;
+        let (lo, hi) = (self.coeffs.gamma_min, self.coeffs.gamma_max);
+        let f = self.kern.bound_gamma.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(&mut self.gamma.f)
+                .arg(&lo)
+                .arg(&hi)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// §90.2-§90.4: the seven closed forms, one launch, from the fields the
+    /// previous outer iteration left.
+    ///
+    /// `s` is the strain-rate magnitude the background model has already
+    /// formed; the vorticity magnitude is formed here, because SST does not
+    /// need one and a buffer nobody reads is a buffer that goes stale.
+    ///
+    /// **There is no velocity argument, and nothing here reads `U`.** Every
+    /// input is a gradient, a turbulence quantity or the wall distance - the
+    /// structural form of Gate 90-G's claim that a frame shift moves
+    /// nothing (§90.7).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_fields(
+        &mut self,
+        gpu: &Gpu,
+        turb: &TurbKernels,
+        k: &DevBuf<Scalar>,
+        omega: &DevBuf<Scalar>,
+        s: &DevBuf<Scalar>,
+        grad_u: &DevBuf<Tensor>,
+        nu: Scalar,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        vorticity_mag(gpu, turb, &mut self.omega_mag, grad_u, n)?;
+
+        let nl = n as crate::Label;
+        let c = self.coeffs;
+        let f = self.kern.fields.clone();
+
+        let Self {
+            f_onset,
+            f_turb,
+            re_thetac,
+            f_on_lim,
+            f3,
+            tu_l,
+            lambda_thl,
+            gamma,
+            y,
+            grad_y,
+            omega_mag,
+            ..
+        } = self;
+
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(f_onset)
+                .arg(f_turb)
+                .arg(re_thetac)
+                .arg(f_on_lim)
+                .arg(f3)
+                .arg(tu_l)
+                .arg(lambda_thl)
+                .arg(&gamma.f)
+                .arg(k)
+                .arg(omega)
+                .arg(s)
+                .arg(&*omega_mag)
+                .arg(&*y)
+                .arg(&*grad_y)
+                .arg(grad_u)
+                .arg(&nu)
+                .arg(&c.c_tu1)
+                .arg(&c.c_tu2)
+                .arg(&c.c_tu3)
+                .arg(&c.c_pg1)
+                .arg(&c.c_pg2)
+                .arg(&c.c_pg3)
+                .arg(&c.c_pg1_lim)
+                .arg(&c.c_pg2_lim)
+                .arg(&c.re_thetac_lim)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// §90.6: `F_1 <- max(F_1, F_3)`, stamped between `sstBlending` and
+    /// `sstBlendCoeffs`.
+    pub fn stamp_f1(&self, gpu: &Gpu, f1: &mut DevBuf<Scalar>, n: usize) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as crate::Label;
+        let f = self.kern.stamp_f1.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(f1)
+                .arg(&self.f3)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// §90.6: the production replacement - `g <- nu_t S Omega` (what the
+    /// `k` equation reads) and `p <- S Omega` (what the `omega` equation
+    /// reads per unit `nu_t`), stamped in `update_blending` BEFORE the
+    /// `omega` equation assembles. SST's own production limiter is NOT
+    /// applied here: `sstKSources` limits whatever it is handed, and it is
+    /// handed this (§90.6).
+    ///
+    /// A no-op while the `kato_launder` instrument is false - Gate 90-R
+    /// (i)'s instrument, test-only.
+    pub fn stamp_production(
+        &self,
+        gpu: &Gpu,
+        g: &mut DevBuf<Scalar>,
+        p: &mut DevBuf<Scalar>,
+        nut: &DevBuf<Scalar>,
+        s: &DevBuf<Scalar>,
+        n: usize,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            if !self.kato_launder {
+                return Ok(());
+            }
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as crate::Label;
+        let f = self.kern.stamp_production.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(g)
+                .arg(p)
+                .arg(nut)
+                .arg(s)
+                .arg(&self.omega_mag)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// §90.6: `g_lim <- gamma g_lim + P_k^lim` and `sp <- max(gamma, 0.1)
+    /// sp`, stamped over what `sstKSources` has just written - the limiter
+    /// has already been applied to the production this model replaced
+    /// (§90.6).
+    #[allow(clippy::too_many_arguments)]
+    pub fn stamp_k_sources(
+        &self,
+        gpu: &Gpu,
+        g_lim: &mut DevBuf<Scalar>,
+        sp: &mut DevBuf<Scalar>,
+        nut: &DevBuf<Scalar>,
+        s: &DevBuf<Scalar>,
+        nu: Scalar,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as crate::Label;
+        let (ck, csep) = (self.coeffs.c_k, self.coeffs.c_sep);
+        let f = self.kern.stamp_k_sources.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(g_lim)
+                .arg(sp)
+                .arg(&self.gamma.f)
+                .arg(&self.f_on_lim)
+                .arg(nut)
+                .arg(s)
+                .arg(&self.omega_mag)
+                .arg(&nu)
+                .arg(&ck)
+                .arg(&csep)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// §90.5: assemble and solve `gamma` - the ONE equation, where §88.5
+    /// had two.
+    ///
+    /// It runs through the background model's own [`RasCore`] - the same
+    /// matrix, the same workspace, the same `ddt + div - laplacian` - with
+    /// `r_sigma = 1/sigma_gamma`, the plain entry point: the page's
+    /// `mu + mu_t/sigma_gamma` is the standard shape, and the kinematic
+    /// form divides it straight through (§90.5, against §88's affine one).
+    ///
+    /// ONE [`SolverPerformance`]: `gamma`'s solve is the whole of it. The
+    /// performance is not returned from `correct` - that signature is
+    /// §6.3's and belongs to the two equations SST owns.
+    pub fn solve(
+        &mut self,
+        gpu: &Gpu,
+        core: &mut RasCore<'_>,
+        flow: &FlowState,
+        s: &DevBuf<Scalar>,
+    ) -> Result<SolverPerformance> {
+        let n = core.mesh.n_cells;
+        let c = self.coeffs;
+
+        core.assemble_transport(gpu, flow, &self.gamma, self.ctrl.gamma_conv, 1.0 / c.sigma_gamma)?;
+
+        {
+            let Self {
+                kern,
+                gamma,
+                f_onset,
+                f_turb,
+                omega_mag,
+                ..
+            } = self;
+            let RasCore { su, sp, susp, .. } = core;
+            let nl = n as crate::Label;
+            let f = kern.gamma_sources.clone();
+            if n > 0 {
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&f)
+                        .arg(su)
+                        .arg(sp)
+                        .arg(susp)
+                        .arg(&gamma.f)
+                        .arg(&*f_onset)
+                        .arg(&*f_turb)
+                        .arg(s)
+                        .arg(&*omega_mag)
+                        .arg(&c.f_length)
+                        .arg(&c.ca2)
+                        .arg(&c.ce2)
+                        .arg(&nl)
+                        .launch(cfg_for(n))?;
+                }
+            }
+        }
+
+        fvm_su(gpu, &core.fv, &mut core.a, core.mesh, &core.su, 1.0)?;
+        fvm_sp(gpu, &core.fv, &mut core.a, core.mesh, &core.sp, 1.0)?;
+        fvm_susp(
+            gpu,
+            &core.fv,
+            &mut core.a,
+            core.mesh,
+            &core.susp,
+            &self.gamma.f,
+            1.0,
+        )?;
+
+        let sc = self.ctrl.gamma_solver;
+        let perf =
+            core.solve_equation(gpu, &mut self.gamma, self.ctrl.gamma_relax, &sc, false)?;
+
+        self.bound(gpu, n)?;
+        correct_boundary_conditions(gpu, &self.fld, &mut self.gamma, core.mesh)?;
+        Ok(perf)
+    }
+
+    /// Write `F_3` directly, for Gate 90-R's stamp half.
+    ///
+    /// The gate's claim is about the two stamps in isolation - each is the
+    /// identity at its neutral value, on every bit - and the only way to put
+    /// a stamp at its neutral value is to say what the factor is. Test-only,
+    /// because a run has no business writing it: it is an output of
+    /// [`Self::update_fields`]. (`gamma` needs no seeding here: it is a
+    /// transported field the test writes through [`Self::gamma_mut`].)
+    #[cfg(test)]
+    pub(crate) fn seed_stamp_inputs(&mut self, gpu: &Gpu, f3: &[Scalar]) -> Result<()> {
+        gpu.write(&mut self.f3, f3)
+    }
+
+    /// Gate 90-R (i)'s other half: the Kato-Launder production stamp OFF.
+    /// Test-only, never a case setting (§90.8).
+    #[cfg(test)]
+    pub(crate) fn set_kato_launder(&mut self, on: bool) {
+        self.kato_launder = on;
+    }
+
+    /// Launch [`GmKernels::gamma_sources`] in isolation, for the split tests:
+    /// they must reach the kernel without the [`RasCore`] a real `solve`
+    /// needs, and the capture audit's population is about RUNTIME launches,
+    /// so the raw `launch_builder` lives here in the model's own file rather
+    /// than in `tests.rs`. Test-only: a run reaches this kernel only through
+    /// [`Self::solve`].
+    #[cfg(test)]
+    pub(crate) fn gamma_sources_for_test(
+        &self,
+        gpu: &Gpu,
+        su: &mut DevBuf<Scalar>,
+        sp: &mut DevBuf<Scalar>,
+        susp: &mut DevBuf<Scalar>,
+        s: &DevBuf<Scalar>,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as crate::Label;
+        let c = self.coeffs;
+        let f = self.kern.gamma_sources.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(su)
+                .arg(sp)
+                .arg(susp)
+                .arg(&self.gamma.f)
+                .arg(&self.f_onset)
+                .arg(&self.f_turb)
+                .arg(s)
+                .arg(&self.omega_mag)
+                .arg(&c.f_length)
+                .arg(&c.ca2)
+                .arg(&c.ce2)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests;
