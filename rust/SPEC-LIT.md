@@ -23890,7 +23890,10 @@ And where there is no wall in the mesh at all, `|grad y|` is zero, `n` is
 zero with it, and (90.11) is zero: `lambda_thL` is exactly `0.0128`, the
 clean-air value, rather than a NaN. A mesh with no wall is not a case this
 model can mean anything in, and falling back to the correlation's own
-zero-pressure-gradient value is the honest degenerate answer.
+offset constant — the value it reads wherever the wall-normal strain is
+zero — is the honest degenerate answer. It is not the zero-pressure-
+gradient point: that is `lambda_thL = 0`, and §90.10's leg 2 measures
+where a Blasius layer actually sits.
 
 ### 90.5 Discretisation — the Patankar split
 
