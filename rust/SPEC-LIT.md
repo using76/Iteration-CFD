@@ -23845,8 +23845,11 @@ give back, and the form a pressure-gradient cap below 1 would silently
 deform; and `Re_thetac` is monotone decreasing in `Tu_L` wherever `F_PG >
 0`, from `C_TU1 + C_TU2 = 1100` at clean air — which is `Re_thetac_lim`
 to the digit, a fact §90.11 states and nothing exploits — down to
-`C_TU1` in the limit the `min(..., 100)` cap of (90.9) creates, where the
-exponent's argument has grown past anything `f64` can represent.
+`C_TU1` in the limit the `min(..., 100)` cap of (90.9) creates — not
+because `exp` underflows, `exp(-300)` being representable in `f64`, but
+because `C_TU2 exp(...)` there falls below the ulp of `C_TU1` (`1.4e-14`
+at 100) and the sum rounds to `C_TU1` exactly, the fact §90.11's
+`100 + 1000 e^-100` row states correctly.
 
 ### 90.4 `Tu_L`, `lambda_thL`, and the wall normal
 
@@ -23860,9 +23863,12 @@ dV/dy      = grad(n . V) . n                                            (90.11)
 
 `V` is the local wall-normal velocity and `y` the wall-normal direction;
 the `min(..., 100)` cap is the page's own, and `Tu_L` is a percentage
-throughout. `0.0128` is the correlation's clean-air value: at `dV/dy = 0`,
-`lambda_thL = 0.0128` — the value §90.3's two properties are stated at and
-§90.10's leg 2 is run at.
+throughout. At `dV/dy = 0` literally, (90.10) reads `lambda_thL = 0.0128`
+and `F_PG = 1.1879` — which is **not** §90.3's `lambda_thL = 0` point, and
+so not the two-constant form either. The offset's job is not at a vanishing
+wall-normal velocity but inside a boundary layer, where `dV/dy` is not
+zero: on a Blasius profile it brings `lambda_thL` at the onset height to
+`-0.0034`, which §90.10's leg 2 computes and prints rather than assumes.
 
 **`n` the page does not define, and this is where the choice is recorded.**
 `n = grad(y)/|grad(y)|`, built from `walldistance`'s `grad_y` and
@@ -23917,9 +23923,15 @@ operating envelope rather than outside it.
 **`gamma = 0` is an absorbing state, and this model is therefore started
 from 1.** `P_gamma` carries the factor `gamma (1 - gamma)` and `E_gamma`
 the factor `gamma`, so a cell whose `gamma` is exactly zero has zero
-source forever — nothing here rescues a zero, where §88.5's
-`sqrt(gamma F_onset)` pushed off exactly zero and made a zero start
-workable for LM2009. **The model is started from `gamma = 1`**, the
+source forever — nothing here rescues a zero. Nothing in §88.5 does
+either: `sqrt(0) = 0`, so LM2009's source is exactly zero at `gamma = 0`
+too, and a literal zero start was never workable there. The difference is
+the growth rate out of a **small** `gamma`, which is where the two models
+part: `sqrt(gamma F_onset)` grows like `sqrt(gamma)`, far faster than
+`gamma` itself, so once diffusion from an inlet at `gamma = 1` has put any
+non-zero value into a cell LM2009 recovers quickly, where this model's
+`A gamma` recovers slowly — exponentially, at rate `A`. **The model is
+started from `gamma = 1`**, the
 page's far-field value; its laminar state is not the starting state but
 the fixed point `gamma = 1/c_e2 = 0.02` of `E_gamma`, reached by decay:
 with `F_onset = 0` the production vanishes and `E_gamma` drives every
@@ -24189,21 +24201,39 @@ one where `Re_V = 2.2 Re_thetac`, so the onset point is the root of one
 scalar equation:
 
 ```text
-0.664 sqrt(Re_x) * (2.193/2.2) = Re_thetac(Tu_L(x), 0.0128)
+0.664 sqrt(Re_x) * (2.193/2.2) = Re_thetac(Tu_L(x), lambda_B)
 ```
 
-`lambda_thL` at its clean-air value: a laminar layer with no separation
-has `dV/dy = 0`, and §90.3's `F_PG(0) = 1` is what makes the right-hand
-side the published two-constant correlation. `Tu_L(x)` comes from the
-decayed free-stream `k` and `omega` and the wall distance. **Two
-assumptions, stated because the root depends on them:** `Tu_L` is
-evaluated at the height of the Blasius `Re_V` maximum — the height is
-printed with the root — and `k` and `omega` are taken uniform across the
-layer at their free-stream values there. The root is printed and
-compared with §88.10's `Re_x = 8.525e4`; the comparison is a fact about
-the two models' correlations, not a validation of either. **Verdict:
-OPEN**, for §88.10's reason — no published digit-level onset `Re_x` for
-T3A exists to close it against.
+**`lambda_B` is not the clean-air constant, and the gate computes it.**
+Inside a Blasius layer continuity gives `dV/dy = -dU/dx`, and on §88.7's
+similarity form that is `dV/dy = U eta f''(eta)/(2x)` — not zero, so
+(90.10)'s `dV/dy` term does not drop out. With `d_w^2/nu = eta^2 x/U` the
+`x` cancels, and at any fixed similarity height (90.10) collapses to the
+`x`-independent number
+
+```text
+lambda_B = -7.57e-3 eta^3 f''(eta)/2 + 0.0128
+```
+
+The gate evaluates it at `eta*`, the height of the Blasius `Re_V` maximum
+(`eta^2 f''` maximal — §88.7's substitution), taking `eta*` and
+`f''(eta*)` from the crate's own Blasius solution — §88.7's, the one
+that measured `2.188440` — and prints `eta*`, `lambda_B` and
+`F_PG(lambda_B)` beside the root. The independent computation it is
+expected to reproduce gives `eta* = 2.951`, `f''(eta*) = 0.16689`,
+`eta*^3 f''(eta*)/2 = 2.1445`, `lambda_B = -0.003434`,
+`F_PG(lambda_B) = 1.02520`. The `0.0128` offset is the correlation's
+constant for putting a zero-pressure-gradient layer near `lambda = 0`;
+what the layer actually reads at the onset height is `lambda_B`, and the
+gate measures it from the solution above rather than assuming the
+clean-air value. **One assumption remains, stated because the root
+depends on it:** `Tu_L(x)` is formed from the decayed free-stream `k`
+and `omega`, taken uniform across the layer at their free-stream values
+there, evaluated at `d_w = eta* sqrt(nu x/U)` — the height printed
+beside the root. The root is printed and compared with §88.10's
+`Re_x = 8.525e4`; the comparison is a fact about the two correlations,
+not a validation of either. **Verdict: OPEN**, for §88.10's reason — no
+published digit-level onset `Re_x` for T3A exists to close it against.
 
 **Leg 3 — not claimed.** §88.10's leg 3 measured the reason: on one rig
 the free-stream decay is as strong a lever on onset as `Tu` itself, and
@@ -24234,7 +24264,8 @@ construction with a new correlation on top of it.
 | host vs device, every closed form | worst relative difference below `1e-13` over a sweep |
 | **Gate 90-G** | every row of the table `0.000 %`, bitwise; the device number printed |
 | **Gate 90-T leg 1** | `3.3530 %` against the published `3.300 %` — `1.61 %`, **HOLDS**, inherited from §88.10 |
-| **Gate 90-T leg 2** | root printed, both assumptions stated — **OPEN** |
+| `lambda_B` on the Blasius profile | `-7.57e-3 eta*^3 f''(eta*)/2 + 0.0128 = -0.00343` at `eta* = 2.951`, from §88.7's own solution — pinned to `1e-4` absolute |
+| **Gate 90-T leg 2** | root printed with `eta*`, `lambda_B` and `F_PG(lambda_B)`; the one assumption stated — **OPEN** |
 | two identical runs | identical bits in `k`, `omega`, `nut`, `gamma` |
 | attaching the model | `named_fields` grows from 3 names to 4 |
 | a hybrid and this model together | refused by name, message naming both and the buffer |
