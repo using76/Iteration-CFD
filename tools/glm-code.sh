@@ -13,6 +13,14 @@
 #   tools/glm-code.sh "작업 지시"
 #   tools/glm-code.sh -f task.md          # 파일에서 지시를 읽는다
 #   GLM_TIMEOUT=1800 tools/glm-code.sh "..."
+#   GLM_THINKING_TOKENS=4096 GLM_MAX_OUTPUT_TOKENS=64000 tools/glm-code.sh "..."
+#
+# 2026-09-05 실측: GLM-5.3-Flash 는 thinking 이 강제이고, 예산을 두지 않으면
+# 출력 32k 토큰을 thinking 이 전부 삼켜 도구 호출이 `max_tokens` 로 잘린 채
+# 재시도만 반복한다 (stop_reason max_tokens, output_tokens 32000, 보이는 도구
+# 입력 1.3 KB). MAX_THINKING_TOKENS 로 예산을 묶고 출력 한도를 올리면 사라진다.
+# 또 도구 호출 하나의 입력이 약 4 KB(60줄)를 넘으면 전송 중 잘린다 - 긴 파일은
+# 조각으로 덧붙이게 지시할 것.
 #
 # API 키는 이 파일에 두지 않는다. 저장소는 이 스크립트를 추적하므로 키가
 # 여기 있으면 그대로 커밋된다. 아래 순서로 찾는다:
@@ -54,6 +62,8 @@ ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL_ID" \
 ANTHROPIC_MODEL="$MODEL_ID" \
 API_TIMEOUT_MS="$((TIMEOUT * 1000))" \
 CLAUDE_CODE_MAX_CONTEXT_TOKENS="${GLM_MAX_CONTEXT_TOKENS:-256000}" \
+MAX_THINKING_TOKENS="${GLM_THINKING_TOKENS:-4096}" \
+CLAUDE_CODE_MAX_OUTPUT_TOKENS="${GLM_MAX_OUTPUT_TOKENS:-64000}" \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   claude -p "$prompt" \
     --model sonnet \
