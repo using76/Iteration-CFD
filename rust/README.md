@@ -39,10 +39,10 @@ cargo test --release --lib provenance_audit
 ## 검증
 
 ```
-cargo test --release   814 passed, 0 failed, 2 ignored (lib 크레이트)
-                       905 passed, 0 failed, 4 ignored (모든 타깃 합계)
-ofgpu-validate         314 / 314 checks passed
-                       (279개는 실시간 계산, 35개는 기록된 측정값 재생)
+cargo test --release   1,645 passed, 0 failed, 4 ignored (lib 크레이트)
+                       1,774 passed, 0 failed, 6 ignored (모든 타깃 합계)
+ofgpu-validate         833 / 833 checks passed
+                       (788개는 실시간 계산, 45개는 기록된 측정값 재생)
 ```
 
 재생(replay) 항목은 GPU를 수만 반복 돌려야 나오는 측정값이라 `cargo test` 안에서

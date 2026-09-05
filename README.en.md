@@ -51,18 +51,18 @@ text is in [`LICENSE`](LICENSE), what a commercial licence covers is in
 
 ## Status
 
-**This is the output of actually running it on this working tree on 2026-09-03**, on an NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, double precision.
+**This is the output of actually running it on this working tree on 2026-09-05**, on an NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, double precision.
 
 ```
-cargo test --release   1,853 passed, 0 failed, 6 ignored   (all targets, 18 suites)
-                       1,699 passed, 0 failed, 4 ignored   (the lib crate alone)
+cargo test --release   1,774 passed, 0 failed, 6 ignored   (all targets, 18 suites)
+                       1,645 passed, 0 failed, 4 ignored   (the lib crate alone)
 
-ofgpu-validate         901 / 901 checks passed
-                       853 computed live, 48 replayed from recorded measurements
-                       then a list naming the 2 gates whose verdict is MISSES and the 5 OPEN
+ofgpu-validate         833 / 833 checks passed
+                       788 computed live, 45 replayed from recorded measurements
+                       then a list naming the 2 gates whose verdict is MISSES and the 6 OPEN
 ```
 
-That list is not maintained by hand: it is **generated** from the registry each gate enters at the point it reports its own verdict (SPEC-LIT §69). Printing a verdict and registering one are the same call, so all seven are named on every run and an eighth could not fail to appear. **Everything `ofgpu-validate` runs passes. That is a different statement from "this project reproduces every published benchmark it compares against", and the two must not be confused.**
+That list is not maintained by hand: it is **generated** from the registry each gate enters at the point it reports its own verdict (SPEC-LIT §69). Printing a verdict and registering one are the same call, so all eight are named on every run and a ninth could not fail to appear. **Everything `ofgpu-validate` runs passes. That is a different statement from "this project reproduces every published benchmark it compares against", and the two must not be confused.**
 
 ---
 
@@ -87,7 +87,7 @@ The whole validation suite is `cargo run --release --bin ofgpu-validate`. The ot
 |---|---|
 | Discretisation | Gauss linear, upwind, linearUpwind, cubic, QUICK, Gamma, blended; six TVD limiters; Green–Gauss and least-squares gradients with cell- and face-limiters (Barth–Jespersen, Venkatakrishnan); over-relaxed non-orthogonal correction; steadyState, Euler, BDF2, local time stepping |
 | Pressure–velocity | SIMPLE, SIMPLEC, PISO, PIMPLE. Rhie–Chow interpolation, with body forces treated at the face rather than interpolated from cell values |
-| Turbulence | RANS: standard, realizable and RNG k-ε, Wilcox k-ω, Menter SST, Launder–Sharma low-Re, Spalart-Allmaras (four variants). LES: Smagorinsky, WALE, Deardorff. Hybrid: DES97, DDES, IDDES. Transition: k-ω SST-LM. Wall treatment: standard and continuous wall functions, `lowRe` integration, the Jayatilleke thermal wall function, roughness |
+| Turbulence | RANS: standard, realizable and RNG k-ε, Wilcox k-ω, Menter SST, Launder–Sharma low-Re, Spalart-Allmaras (four variants). LES: Smagorinsky, WALE, Deardorff. Hybrid: DES97, DDES, IDDES. Transition: k-ω SST-LM, k-ω SST-γ (Menter 2015, Galilean invariant). Wall treatment: standard and continuous wall functions, `lowRe` integration, the Jayatilleke thermal wall function, roughness |
 | Multiphase and transport | VOF (interface compression, Zalesak FCT bounding, CSF surface tension, static, hysteresis and dynamic contact angles), multicomponent species, six generalised-Newtonian viscosity models, Darcy–Forchheimer porosity, non-Boussinesq buoyancy |
 | Conjugate heat transfer | Solid regions, contact resistance, harmonic-mean interface conductivity, a fluid region with up to one inlet and one outlet |
 | Ventilation and data centre | Fan performance curves (AMCA 210 corrections), porous jumps, moist air (Hyland–Wexler), RCI, RTI, SHI and RHI metrics |
@@ -115,7 +115,7 @@ The whole validation suite is `cargo run --release --bin ofgpu-validate`. The ot
 | §60.5 Gate 5 — conjugate natural convection in a square enclosure (Kaminski & Prakash 1986) | **MISSES** its 3 % bar at the conduction-dominated end: −7.11 % at `Kr = 0.1`, −0.07 % at `Kr = 10`. The primary reference is paywalled and was never read, so the comparison is against Belazizia et al. (2012), a **secondary source** |
 | §68.12 Gate 68-C — Theobald's (1981) 90 hose streams | **MISSES with the gas held at rest**: the throws average **61.29 %** of the measured range, while a vacuum bracket with no drag reaches 198.65 %, so what decides the throw is entrained air |
 
-**Five more verdicts are `OPEN`** and are printed as a second group of the same list. Three hold §32.4's plane channel against a **correlation rather than a measurement** (Gnielinski 1976); the fourth, `78-D`, is open because the two published splash criteria disagree with **each other** by a factor of 4.78 in Weber number; and the fifth, §88.10 Gate 88-T, because no measured onset `Re_x` for the T3A flat plate could be found to close the comparison against.
+**Six more verdicts are `OPEN`** and are printed as a second group of the same list. Three hold §32.4's plane channel against a **correlation rather than a measurement** (Gnielinski 1976); the fourth, `78-D`, is open because the two published splash criteria disagree with **each other** by a factor of 4.78 in Weber number; the fifth, §88.10 Gate 88-T, because no measured onset `Re_x` for the T3A flat plate could be found to close the comparison against; and the sixth, §90.10 Gate 90-T — the 2015 model's onset location on T3A — for the same reason as 88-T.
 
 ---
 
@@ -125,7 +125,7 @@ The whole validation suite is `cargo run --release --bin ofgpu-validate`. The ot
 |---|---|
 | **User guide** (separate page) | Building, the case file, the settings contract, running, output, what it cannot do |
 | **Technical guidebook** (separate page) | Discretisation, boundary conditions, pressure–velocity, turbulence, low-Mach, surface-to-surface radiation, validation, GPU residency, mesh adaptation and performance |
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | The numerical specification, 79 sections, with a citation for every formulation — both guides are drawn *from* it and neither replaces it |
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | The numerical specification, 81 sections, with a citation for every formulation — both guides are drawn *from* it and neither replaces it |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | Per-file provenance and design decisions, the licence audit, third-party notices |
 | [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | Test case geometries, and the index to `docs/` — the model catalogue, GPU portability, the I/O redesign and the JSONC schema, and `ofgpu-lowmach`'s low-Mach formulation and wall-heat gate record |
 
@@ -179,6 +179,8 @@ Sources for the numerical methods and models. Section numbers refer to SPEC-LIT,
 - Allmaras, S. R., Johnson, F. T., & Spalart, P. R. (2012). Modifications and Clarifications for the Implementation of the Spalart-Allmaras Turbulence Model. *ICCFD7-1902.* `https://www.iccfd.org/iccfd7/assets/pdf/papers/ICCFD7-1902_paper.pdf` — a freely distributed conference paper, **the copy actually read**, and the implementation reference. — §56
 - NASA / Turbulence Modeling Benchmarking Working Group. *Turbulence Modeling Resource — The Spalart-Allmaras Turbulence Model.* `https://tmbwg.github.io/turbmodels/spalart.html` — US government-authored DOCUMENTATION, not source; quoted to the printed digit. — §56
 - Rumsey, C. L., & Spalart, P. R. (2009). *AIAA Journal*, 47, 982–993. — §56 (why the free-stream `nu~/nu` matters)
+- Menter, F. R., Smirnov, P. E., Liu, T., & Avancha, R. (2015). *Flow, Turbulence and Combustion*, 95, 583–619. DOI 10.1007/s10494-015-9622-4. **Paywalled and NOT read**; every digit comes from the NASA/TMBWG Turbulence Modeling Resource page below. — §90
+- NASA / Turbulence Modeling Benchmarking Working Group. *Turbulence Modeling Resource — SST-2003-Menter-Gamma-2015.* `https://tmbwg.github.io/turbmodels/menter_gamma_3eqn.html` — US government-authored DOCUMENTATION, not source; fetched and read 2026-09-05, quoted to the printed digit, including the constant it prints in no equation (§90.3). — §90
 ### Turbulence — LES
 - Smagorinsky, J. (1963). *Monthly Weather Review*, 91, 99–164. — §6.5
 - Deardorff, J. W. (1970). *Journal of Fluid Mechanics*, 41, 453–480. — §16.1

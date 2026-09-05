@@ -24238,6 +24238,25 @@ beside the root. The root is printed and compared with §88.10's
 not a validation of either. **Verdict: OPEN**, for §88.10's reason — no
 published digit-level onset `Re_x` for T3A exists to close it against.
 
+**What the run measured, and whose number it is.** The root is
+`Re_x = 22826`, where the assumption gives `Tu_L = 54.6 %` at the onset
+height and `Re_thetac = 100` — the correlation **saturated at `C_TU1`**
+(§88.10's leg 2 root was `8.525e4`). The saturation is the stated
+assumption's, not the model's: (90.9) reads
+`Tu_L = 100 sqrt(2k/3)/(omega d_w)` with the FREE-STREAM `omega` at a
+wall distance `d_w = eta* sqrt(nu x/U)` of order a millimetre, and the
+free-stream `k` divided by so small an `omega d_w` puts `Tu_L` an order
+of magnitude above the free-stream `Tu`. Inside a real boundary layer
+`omega` is far larger than in the free stream — the viscous limit
+`omega = 6 nu/(beta_1 y^2)` at a wall is the extreme of it — and read
+through such a profile the same (90.9) would give a far smaller `Tu_L`.
+§88.10's leg 2 read the free-stream `Tu` directly and did not have this
+exposure, so the two legs are NOT comparable: `22826` against `8.525e4`
+is a statement about the assumption and not about the two correlations.
+Closing the comparison needs an `omega` profile through the layer —
+which is the two-dimensional run §90.12 says does not exist. **The
+verdict stays OPEN.**
+
 **Leg 3 — not claimed.** §88.10's leg 3 measured the reason: on one rig
 the free-stream decay is as strong a lever on onset as `Tu` itself, and
 its 51.9x spread is the evidence. This gate does not repeat the
@@ -24268,7 +24287,7 @@ construction with a new correlation on top of it.
 | **Gate 90-G** | every row of the table `0.000 %`, bitwise; the device number printed |
 | **Gate 90-T leg 1** | `3.3530 %` against the published `3.300 %` — `1.61 %`, **HOLDS**, inherited from §88.10 |
 | `lambda_B` on the Blasius profile | `-7.57e-3 eta*^3 f''(eta*)/2 + 0.0128 = -0.00343` at `eta* = 2.951`, from §88.7's own solution — pinned to `1e-4` absolute |
-| **Gate 90-T leg 2** | root printed with `eta*`, `lambda_B` and `F_PG(lambda_B)`; the one assumption stated — **OPEN** |
+| **Gate 90-T leg 2** | root printed with `eta*`, `lambda_B` and `F_PG(lambda_B)`; the one assumption stated — **OPEN**; the printed `Tu_L` is the assumption's (§90.10) |
 | two identical runs | identical bits in `k`, `omega`, `nut`, `gamma` |
 | attaching the model | `named_fields` grows from 3 names to 4 |
 | a hybrid and this model together | refused by name, message naming both and the buffer |
