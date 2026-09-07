@@ -29,7 +29,7 @@ async function writeP(dir: string, values: number[]): Promise<void> {
 
 /** fs mtime resolution is coarse; the size change alone must be enough. */
 async function fingerprintOf(root: string): Promise<string> {
-  const resolved = await resolveResultRoot(root, root)
+  const resolved = await resolveResultRoot(root)
   return datasetFingerprint('case', resolved, await scanSeries(resolved))
 }
 

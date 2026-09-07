@@ -2,6 +2,7 @@
 // registry), wait, status, log window and stop.
 import { BINARY_NAMES, driversFor, getBinary, isJsonCase, RunStatusSchema, type RunInfo } from '@cfd/shared'
 import { z } from 'zod'
+import { compileUserRegex } from '../regex.js'
 import type { RunManager } from '../runs/types.js'
 import { errorMessage, fail, okResult, type ToolDef } from './context.js'
 
@@ -138,7 +139,7 @@ export const runLog: ToolDef<typeof LogSchema> = {
     let grep: RegExp | undefined
     if (input.grep) {
       try {
-        grep = new RegExp(input.grep, 'i')
+        grep = compileUserRegex(input.grep, 'i')
       } catch (err) {
         return fail('INVALID', `bad regex: ${(err as Error).message}`)
       }

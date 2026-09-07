@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
+import { clampLine, compileUserRegex } from '../regex.js'
 import { fail, okResult, type ToolDef } from './context.js'
 import { globMatcher, isHiddenDir, resolveTool } from './paths.js'
 
@@ -137,7 +138,7 @@ export interface SearchHit {
 
 export async function searchFiles(root: string, opts: { pattern: string; glob: string | null; maxHits: number; regex: boolean; signal?: AbortSignal }): Promise<{ hits: SearchHit[]; truncated: boolean; filesScanned: number }> {
   const source = opts.regex ? opts.pattern : opts.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(source, 'i')
+  const re = opts.regex ? compileUserRegex(source, 'i') : new RegExp(source, 'i')
   const match = globMatcher(opts.glob)
   const hits: SearchHit[] = []
   let filesScanned = 0
@@ -172,7 +173,7 @@ export async function searchFiles(root: string, opts: { pattern: string; glob: s
       filesScanned++
       const lines = buf.toString('utf8').split('\n')
       for (let i = 0; i < lines.length; i++) {
-        if (!re.test(lines[i])) continue
+        if (!re.test(clampLine(lines[i]))) continue
         hits.push({ path: childRel, line: i + 1, text: lines[i].trim().slice(0, 300) })
         if (hits.length >= opts.maxHits) {
           truncated = true
@@ -192,7 +193,7 @@ export const fileSearch: ToolDef<typeof SearchSchema> = {
   async run(input, ctx) {
     if (input.regex) {
       try {
-        new RegExp(input.pattern)
+        compileUserRegex(input.pattern, 'i')
       } catch (err) {
         return fail('INVALID', `bad regex: ${(err as Error).message}`)
       }

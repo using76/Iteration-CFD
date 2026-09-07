@@ -7,6 +7,7 @@ import { BINARIES, MESH_PRESETS, MODELS, type ServerHello, type StartRunRequest 
 import type { AgentService } from '../agent/types.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
+import { compileUserRegex, UnsafeRegexError } from '../regex.js'
 import type { CaseSchema } from '../registry/schema.js'
 import type { RunManager, StartRunOptions } from '../runs/types.js'
 import { fsTree, readWorkspaceFile, writeWorkspaceFile } from '../workspace/fs.js'
@@ -123,9 +124,9 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     let re: RegExp | undefined
     if (grep) {
       try {
-        re = new RegExp(grep, 'i')
-      } catch {
-        throw new HttpError(400, 'grep is not a valid regular expression')
+        re = compileUserRegex(grep, 'i')
+      } catch (err) {
+        throw new HttpError(400, err instanceof UnsafeRegexError ? err.message : 'grep is not a valid regular expression')
       }
     }
     return runs.log(params.id, intParam(query, 'fromSeq', 1), intParam(query, 'max', 500), re)

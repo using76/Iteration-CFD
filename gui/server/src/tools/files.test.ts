@@ -78,6 +78,10 @@ describe('file tools', () => {
     expect((re.data as { hits: unknown[] }).hits).toHaveLength(2)
     const bad = await runTool('file_search', { pattern: '(', glob: null, maxHits: null, regex: true }, ctx())
     expect(bad.error?.code).toBe('INVALID')
+    // Compiling this and running it over a line of a's never returns.
+    const unsafe = await runTool('file_search', { pattern: '(a+)+$', glob: null, maxHits: null, regex: true }, ctx())
+    expect(unsafe.error?.code).toBe('INVALID')
+    expect(unsafe.error?.message).toContain('star height')
   })
 
   it('file_write creates files, refuses jsonc cases and honours createOnly', async () => {

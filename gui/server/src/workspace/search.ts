@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import readline from 'node:readline'
 import type { FsSearchHit } from '@cfd/shared'
+import { clampLine, compileUserRegex, UnsafeRegexError } from '../regex.js'
 import { isBinary } from './fs.js'
 import { isHiddenDir, resolveInWorkspace } from './paths.js'
 
@@ -59,8 +60,9 @@ function matcher(opts: SearchOptions): RegExp {
   const flags = opts.caseSensitive ? 'g' : 'gi'
   if (opts.regex) {
     try {
-      return new RegExp(opts.q, flags)
+      return compileUserRegex(opts.q, flags)
     } catch (err) {
+      if (err instanceof UnsafeRegexError) throw err
       throw new Error(`invalid regular expression: ${(err as Error).message}`)
     }
   }
@@ -121,7 +123,7 @@ function scanFile(abs: string, rel: string, re: RegExp, hits: FsSearchHit[], max
       lineNo++
       if (done) return
       re.lastIndex = 0
-      const m = re.exec(text)
+      const m = re.exec(clampLine(text))
       if (!m) return
       hits.push({ path: rel, line: lineNo, col: m.index + 1, text: text.length > 400 ? `${text.slice(0, 400)}…` : text })
       if (hits.length >= max) finish()
