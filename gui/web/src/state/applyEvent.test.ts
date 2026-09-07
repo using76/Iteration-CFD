@@ -28,6 +28,48 @@ describe('applyEvent fixtures', () => {
   })
 })
 
+describe('session switching and the turn message', () => {
+  it('resets the turn when the server confirms a different session', () => {
+    let s = opened()
+    s = applyEvent(s, { t: 'turn.error', sessionId: 's_1', turnId: 't_1', message: 'boom', retryable: false }, NOW).state
+    expect(s.turn.error?.message).toBe('boom')
+    // actions.openSession sets currentSessionId optimistically before the
+    // server answers; the reducer must not read that as "same session".
+    s = { ...s, currentSessionId: 's_2' }
+    const other = { ...SESSION_1, id: 's_2', title: 'Second', messages: [] }
+    s = applyEvent(s, { t: 'session.state', session: other }, NOW).state
+    expect(s.session?.id).toBe('s_2')
+    expect(s.turn.error).toBeNull()
+    expect(s.toolInputJson).toEqual({})
+  })
+
+  it('keeps the turn when the same session is refreshed', () => {
+    let s = opened()
+    s = applyEvent(s, { t: 'turn.warning', sessionId: 's_1', turnId: 't_1', message: 'retrying' }, NOW).state
+    s = applyEvent(s, FRAMES['session.state'], NOW).state
+    expect(s.turn.warnings).toEqual(['retrying'])
+  })
+
+  it('follows the turn onto the message of each round', () => {
+    let s = opened()
+    s = applyEvent(s, { t: 'turn.start', sessionId: 's_1', turnId: 't_1', messageId: 'm_r1' }, NOW).state
+    expect(s.turn.messageId).toBe('m_r1')
+    // The server allocates a new messageId per round; the first block of the
+    // second round is what says so.
+    s = applyEvent(s, { t: 'msg.block_start', sessionId: 's_1', messageId: 'm_r2', blockIndex: 0, kind: 'text' }, NOW).state
+    expect(s.turn.messageId).toBe('m_r2')
+    s = applyEvent(s, { t: 'tool.start', sessionId: 's_1', messageId: 'm_r3', blockIndex: 0, toolUseId: 'toolu_9', name: 'gpu_info' }, NOW).state
+    expect(s.turn.messageId).toBe('m_r3')
+  })
+
+  it('does not move the turn message when no turn is running', () => {
+    let s = opened()
+    s = applyEvent(s, { t: 'msg.block_start', sessionId: 's_1', messageId: 'm_z', blockIndex: 0, kind: 'text' }, NOW).state
+    expect(s.turn.active).toBe(false)
+    expect(s.turn.messageId).toBeNull()
+  })
+})
+
 describe('hello / sessions / gpu', () => {
   it('hello stores the server facts, runs and emits the hello effect', () => {
     const r = applyEvent(initialSessionData(), FRAMES.hello, NOW)

@@ -130,6 +130,18 @@ function isCurrent(state: SessionData, sessionId: string): boolean {
   return state.currentSessionId === null || state.currentSessionId === sessionId
 }
 
+/**
+ * turn.start names the first round's message, but the server allocates a new
+ * messageId for every round after it. Left pinned to the first, the streaming
+ * indicator stayed on a message that had stopped, turn.done stamped the model
+ * on the wrong one, and tool.update's fallback appended to it. Each round's
+ * first block moves the turn onto the message it belongs to.
+ */
+function followTurnMessage(state: SessionData, messageId: string): SessionData {
+  if (!state.turn.active || state.turn.messageId === messageId) return state
+  return { ...state, turn: { ...state.turn, messageId } }
+}
+
 function resolveApprovals(approvals: PendingApproval[], toolUseIds: string[]): PendingApproval[] {
   const done = new Set(toolUseIds)
   const out: PendingApproval[] = []
@@ -162,7 +174,12 @@ export function applyEvent(state: SessionData, msg: ServerMsg, now: number = Dat
       const sessions = known
         ? state.sessions.map((x) => (x.id === s.id ? { ...x, title: s.title, updatedAt: s.updatedAt, messageCount: s.messages.length } : x))
         : [{ id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt, messageCount: s.messages.length }, ...state.sessions]
-      const switching = state.currentSessionId !== s.id
+      // state.session is the last session the server confirmed. currentSessionId
+      // is not: actions.openSession sets it optimistically before this frame
+      // arrives, so comparing against it made every user-initiated switch look
+      // like a refresh of the same session and carried the previous session's
+      // error, refusal and warning cards into the new one.
+      const switching = state.session?.id !== s.id
       const turn = switching ? { ...EMPTY_TURN, active: s.turnActive } : { ...state.turn, active: s.turnActive }
       return { state: { ...state, session: s, currentSessionId: s.id, sessions, turn, toolInputJson: switching ? {} : state.toolInputJson }, effects: NO_EFFECTS }
     }
@@ -208,6 +225,7 @@ export function applyEvent(state: SessionData, msg: ServerMsg, now: number = Dat
     }
     case 'msg.block_start': {
       if (!isCurrent(state, msg.sessionId)) return { state, effects: NO_EFFECTS }
+      state = followTurnMessage(state, msg.messageId)
       const next = updateMessageAt(state, msg.messageId, now, (m) => {
         const existing = m.blocks[msg.blockIndex]
         if (existing && existing.kind === msg.kind) return m
@@ -238,6 +256,7 @@ export function applyEvent(state: SessionData, msg: ServerMsg, now: number = Dat
 
     case 'tool.start': {
       if (!isCurrent(state, msg.sessionId)) return { state, effects: NO_EFFECTS }
+      state = followTurnMessage(state, msg.messageId)
       const call: ToolCallRecord = {
         toolUseId: msg.toolUseId,
         name: msg.name,
