@@ -61,7 +61,15 @@ export function CodeEditor({ path, active }: { path: string; active: boolean }) 
   const onMount: OnMount = useCallback(
     (ed) => {
       editorRef.current = ed
-      appliedHash.current = useEditorStore.getState().buffers[path]?.hash ?? null
+      // The model may have outlived an earlier tab for this path, in which case
+      // it still holds that tab's text and defaultValue was ignored. Trusting
+      // appliedHash here would call the stale text applied and let the next
+      // save write it back under a baseHash the server accepts - no conflict,
+      // no warning, the newer file on disk simply gone.
+      const buf = useEditorStore.getState().buffers[path]
+      appliedHash.current = buf?.hash ?? null
+      const mounted = ed.getModel()
+      if (mounted && buf && !buf.loading && !buf.dirty && mounted.getValue() !== buf.content) mounted.setValue(buf.content)
       ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void save(path))
       ed.onDidChangeCursorPosition((e) => {
         if (useUiStore.getState().activeTabId === `file:${path}`) setCursor({ line: e.position.lineNumber, col: e.position.column })

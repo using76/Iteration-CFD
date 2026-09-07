@@ -16,6 +16,18 @@ export function fileUri(path: string): string {
   return `file:///${path.replace(/^\/+/, '')}`
 }
 
+/**
+ * Monaco keeps one model per URI. `keepCurrentModel` is what makes tab
+ * switching cheap, but a closed tab whose model survives is reused verbatim
+ * when the file is opened again - defaultValue is ignored for a URI that
+ * already has a model - so the editor shows text the disk no longer holds,
+ * and saving that text carries a baseHash the server accepts. Closing a tab
+ * has to take the model with it.
+ */
+export function disposeModel(path: string): void {
+  monaco.editor.getModel(monaco.Uri.parse(fileUri(path)))?.dispose()
+}
+
 export function setupMonaco(): typeof monaco {
   if (configured) return monaco
   configured = true

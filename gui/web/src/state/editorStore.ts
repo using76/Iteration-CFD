@@ -3,6 +3,7 @@
 // conflict handling and cross-component reveal requests.
 import { create } from 'zustand'
 import { ApiError, api } from '../api/rest'
+import { disposeModel } from '../editor/monacoSetup'
 
 export interface EditorBuffer {
   path: string
@@ -177,6 +178,7 @@ export const useEditorStore = create<EditorStore>()((set, get) => {
       patch(path, { readOnly: false })
     },
     closeBuffer(path) {
+      disposeModel(path)
       set((s) => {
         if (!s.buffers[path]) return {}
         const buffers = { ...s.buffers }

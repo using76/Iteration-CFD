@@ -36,6 +36,7 @@ export function TabBar() {
   const [menu, openMenu] = useContextMenu()
 
   const close = (tab: Tab) => {
+    if (tab.kind === 'file' && buffers[tab.path]?.dirty && !window.confirm(t('editor.closeDirty', { name: basename(tab.path) }))) return
     closeTab(tab.id)
     if (tab.kind === 'file') closeBuffer(tab.path)
     if (tab.kind === 'diff') removeDiff(tab.id)
