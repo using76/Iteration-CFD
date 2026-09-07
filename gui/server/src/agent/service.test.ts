@@ -101,6 +101,23 @@ describe('agent service', () => {
     expect(card && card.kind === 'tool' ? card.call.status : null).toBe('cancelled')
   })
 
+  it('two user.message frames in the same tick produce one turn', async () => {
+    const client = fakeClient()
+    await agent.handleClientMessage(client, { t: 'session.new' })
+    const id = client.of('session.state')[0].session.id
+    hub.clear()
+    // The second frame arrives while the first is still reading its attachment.
+    // An rt.active-only guard is false for both, so both messages were appended
+    // and the second startTurn returned false without a word to the client.
+    const first = agent.handleClientMessage(client, { t: 'user.message', sessionId: id, text: 'tell me about the registry', context: { ...ctx, attachments: ['cases/plume.jsonc'] } })
+    const second = agent.handleClientMessage(client, { t: 'user.message', sessionId: id, text: 'and again', context: ctx })
+    await Promise.all([first, second])
+    expect(client.of('error').at(-1)?.message).toMatch(/already active/)
+    await until(() => hub.of('turn.done').length === 1)
+    expect(hub.of('msg.user')).toHaveLength(1)
+    expect(agent.getSessionState(id)!.messages.filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
   it('quick actions become synthetic user turns', async () => {
     const client = fakeClient()
     await agent.handleClientMessage(client, { t: 'session.new' })

@@ -24,7 +24,8 @@ export interface ApprovalRequest {
 }
 
 export interface ApprovalManager {
-  request(turnId: string, calls: PendingApproval['calls'], ttlMs?: number): ApprovalRequest
+  /** `signal` settles every waiter as denied when the turn is cancelled, instead of leaving them to the TTL. */
+  request(turnId: string, calls: PendingApproval['calls'], ttlMs?: number, signal?: AbortSignal): ApprovalRequest
   resolve(toolUseIds: string[], decision: 'approved' | 'denied', reason?: string | null): string[]
   /** Deny everything still pending (turn cancelled / session deleted). */
   cancelAll(reason: string): void
@@ -56,7 +57,7 @@ export function createApprovalManager(onResolved?: (toolUseIds: string[], decisi
   }
 
   return {
-    request(turnId, calls, ttlMs = APPROVAL_TTL_MS) {
+    request(turnId, calls, ttlMs = APPROVAL_TTL_MS, signal?: AbortSignal) {
       const now = Date.now()
       const approval: PendingApproval = { turnId, toolUseIds: calls.map((c) => c.toolUseId), calls, requestedAt: now, expiresAt: now + ttlMs }
       const w: Waiter = { approval, resolvers: new Map(), timer: setTimeout(() => settle(w, [...w.resolvers.keys()], { decision: 'expired', reason: 'approval timed out' }), ttlMs) }
@@ -72,6 +73,14 @@ export function createApprovalManager(onResolved?: (toolUseIds: string[], decisi
         byToolUse.set(c.toolUseId, w)
       }
       waiters.set(turnId + ':' + now, w)
+      // A cancel that lands after the waiters exist is handled by cancelAll; one
+      // that landed before they existed would otherwise hold the turn until the
+      // 10-minute TTL, because there was nothing to cancel at the time.
+      if (signal) {
+        const onAbort = () => settle(w, [...w.resolvers.keys()], { decision: 'denied', reason: 'cancelled by user' })
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
+      }
       return { approval, outcomes }
     },
     resolve(toolUseIds, decision, reason = null) {

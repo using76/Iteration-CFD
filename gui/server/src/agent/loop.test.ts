@@ -204,6 +204,40 @@ describe('approvals', () => {
     expect(textOf(rec.messages[rec.messages.length - 1])).toMatch(/Edited/)
   })
 
+  it('a cancel that lands before the card never asks', async () => {
+    // msg.done for the assistant turn is emitted immediately before the tool
+    // round, which is the window the review found: cancelAll ran when there
+    // was nothing to cancel, and the waiters were created afterwards.
+    const deps = makeDeps(ws)
+    const rec = session(deps, 'edit cases/plume.jsonc endTime to 6')
+    const controller = new AbortController()
+    const original = deps.emit
+    deps.emit = (msg) => {
+      original(msg)
+      if (msg.t === 'msg.done') controller.abort()
+    }
+    const outcome = await runTurn(rec, 't20', controller.signal, deps)
+    expect(outcome.status).toBe('cancelled')
+    expect(deps.hub.of('tool.approval_request')).toHaveLength(0)
+    expect(deps.approvals.pending()).toHaveLength(0)
+    expect(JSON.parse(toolResultsOf(rec.messages[2])[0].content).error.code).toBe('CANCELLED')
+  })
+
+  it('a cancel while the card is up settles the waiter, not the TTL', async () => {
+    // Without the abort signal reaching the approval manager this test hangs
+    // for the full 10-minute TTL.
+    const deps = makeDeps(ws)
+    const rec = session(deps, 'edit cases/plume.jsonc endTime to 7')
+    const controller = new AbortController()
+    const turn = runTurn(rec, 't21', controller.signal, deps)
+    await until(() => deps.hub.of('tool.approval_request').length === 1)
+    controller.abort()
+    const outcome = await turn
+    expect(outcome.status).toBe('cancelled')
+    expect(deps.approvals.pending()).toHaveLength(0)
+    expect(JSON.parse(toolResultsOf(rec.messages[2])[0].content).error.code).toBe('CANCELLED')
+  })
+
   it('expires unanswered approvals', async () => {
     const deps = makeDeps(ws)
     const rec = session(deps, 'edit cases/plume.jsonc endTime to 5')

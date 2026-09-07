@@ -45,6 +45,8 @@ interface ActiveTurn {
 interface SessionRuntime {
   approvals: ApprovalManager
   active: ActiveTurn | null
+  /** Set synchronously while a turn is being assembled, before `active` exists. */
+  starting: boolean
   context: UserContext | null
 }
 
@@ -69,6 +71,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       rt = {
         approvals: createApprovalManager((toolUseIds, decision) => hub.sendToSession(sessionId, { t: 'tool.approval_resolved', sessionId, toolUseIds, decision })),
         active: null,
+        starting: false,
         context: null,
       }
       runtimes.set(sessionId, rt)
@@ -130,8 +133,10 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
 
   function cancelTurn(rec: SessionRecord): void {
     const rt = runtime(rec.id)
-    rt.approvals.cancelAll('cancelled by user')
+    // Abort first: cancelAll only reaches waiters that already exist, and the
+    // loop checks the signal before it creates any more.
     rt.active?.controller.abort()
+    rt.approvals.cancelAll('cancelled by user')
   }
 
   async function attachmentBlocks(context: UserContext): Promise<{ blocks: BetaTextBlockParam[]; notices: string[] }> {
@@ -165,32 +170,45 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     const rec = store.get(msg.sessionId)
     if (!rec) return client.send({ t: 'error', message: `no session ${msg.sessionId}`, fatal: false })
     const rt = runtime(rec.id)
-    if (rt.active) return client.send({ t: 'error', message: 'a turn is already active in this session; cancel it first', fatal: false })
-    rt.context = msg.context
-    const text = msg.text.trim()
-    const { blocks, notices } = await attachmentBlocks(msg.context)
-    if (!text && !blocks.length) return client.send({ t: 'error', message: 'empty message', fatal: false })
-    const content: BetaTextBlockParam[] = [...(text ? [{ type: 'text', text } as BetaTextBlockParam] : []), ...blocks]
-    const message: BetaMessageParam = { role: 'user', content: text && !blocks.length ? text : content }
-    const ui = appendUserTurn(rec, message, { synthetic: false, notices, entitle: true })
-    if (ui) {
-      if (blocks.length && text) ui.blocks = [{ kind: 'text', text }, ...ui.blocks.filter((b) => b.kind === 'notice')]
-      hub.sendToSession(rec.id, { t: 'msg.user', sessionId: rec.id, message: ui })
+    if (rt.active || rt.starting) return client.send({ t: 'error', message: 'a turn is already active in this session; cancel it first', fatal: false })
+    // Reserved before the first await: reading attachments takes long enough
+    // for a second frame to pass an `active`-only guard, and the second turn
+    // would then be appended to the history and never answered.
+    rt.starting = true
+    try {
+      rt.context = msg.context
+      const text = msg.text.trim()
+      const { blocks, notices } = await attachmentBlocks(msg.context)
+      if (!text && !blocks.length) return client.send({ t: 'error', message: 'empty message', fatal: false })
+      const content: BetaTextBlockParam[] = [...(text ? [{ type: 'text', text } as BetaTextBlockParam] : []), ...blocks]
+      const message: BetaMessageParam = { role: 'user', content: text && !blocks.length ? text : content }
+      const ui = appendUserTurn(rec, message, { synthetic: false, notices, entitle: true })
+      if (ui) {
+        if (blocks.length && text) ui.blocks = [{ kind: 'text', text }, ...ui.blocks.filter((b) => b.kind === 'notice')]
+        hub.sendToSession(rec.id, { t: 'msg.user', sessionId: rec.id, message: ui })
+      }
+      await store.save(rec)
+      if (!startTurn(rec)) client.send({ t: 'error', message: 'a turn is already active in this session; cancel it first', fatal: false })
+    } finally {
+      rt.starting = false
     }
-    await store.save(rec)
-    startTurn(rec)
   }
 
   async function quick(client: ClientConn, msg: ClientMsgOf<'quick'>): Promise<void> {
     const rec = store.get(msg.sessionId)
     if (!rec) return client.send({ t: 'error', message: `no session ${msg.sessionId}`, fatal: false })
     const rt = runtime(rec.id)
-    if (rt.active) return client.send({ t: 'error', message: 'a turn is already active in this session; cancel it first', fatal: false })
-    const built = buildQuickMessage({ action: msg.action, casePath: msg.casePath, runId: msg.runId, activeFile: rt.context?.activeFile ?? null, locale: rec.settings.locale, runs })
-    const ui = appendUserTurn(rec, { role: 'user', content: built.text }, { synthetic: true, entitle: true })
-    if (ui) hub.sendToSession(rec.id, { t: 'msg.user', sessionId: rec.id, message: ui })
-    await store.save(rec)
-    startTurn(rec)
+    if (rt.active || rt.starting) return client.send({ t: 'error', message: 'a turn is already active in this session; cancel it first', fatal: false })
+    rt.starting = true
+    try {
+      const built = buildQuickMessage({ action: msg.action, casePath: msg.casePath, runId: msg.runId, activeFile: rt.context?.activeFile ?? null, locale: rec.settings.locale, runs })
+      const ui = appendUserTurn(rec, { role: 'user', content: built.text }, { synthetic: true, entitle: true })
+      if (ui) hub.sendToSession(rec.id, { t: 'msg.user', sessionId: rec.id, message: ui })
+      await store.save(rec)
+      if (!startTurn(rec)) client.send({ t: 'error', message: 'a turn is already active in this session; cancel it first', fatal: false })
+    } finally {
+      rt.starting = false
+    }
   }
 
   async function handleClientMessage(client: ClientConn, msg: ClientMsg): Promise<boolean> {

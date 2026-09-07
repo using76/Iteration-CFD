@@ -355,11 +355,20 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       asks.push({ tu, call, input: parsed.data })
     }
 
+    if (asks.length && signal.aborted) {
+      // Nothing to approve on a cancelled turn: asking would put a card on
+      // screen after the cancel and hold the session for the approval TTL.
+      for (const a of asks) settle(a.tu, a.call, a.input, fail('CANCELLED', 'cancelled by user'))
+      asks.length = 0
+    }
+
     if (asks.length) {
       const previews = await Promise.all(asks.map((a) => approvalPreview(a.tu.name, a.input, deps.config.workspaceRoot).catch(() => null)))
       const req = deps.approvals.request(
         turnId,
         asks.map((a, i) => ({ toolUseId: a.tu.id, name: a.tu.name, input: a.input, summary: toolLabel(a.tu.name, locale), preview: previews[i] })),
+        undefined,
+        signal,
       )
       for (const a of asks) {
         a.call.status = 'awaiting_approval'
