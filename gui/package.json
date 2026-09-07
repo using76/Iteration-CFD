@@ -3,7 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "description": "AI chat GUI for Iteration CFD (meteor-cfd): tool-calling agent + WebGPU result viewer",
-  "workspaces": ["shared", "server", "web"],
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
     "build": "npm run build -w shared && npm run build -w server && npm run build -w web",
@@ -13,10 +17,12 @@
     "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.1",
     "concurrently": "^10.0.5",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4",
-    "@playwright/test": "^1.56.1"
+    "vitest": "^3.2.4"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }
