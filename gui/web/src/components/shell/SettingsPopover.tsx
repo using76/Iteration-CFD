@@ -84,6 +84,41 @@ export function SettingsPopover() {
           </div>
         </div>
       ) : null}
+      <LicenceNotice />
+    </div>
+  )
+}
+
+const REPO = 'https://github.com/using76/Iteration-CFD'
+
+/**
+ * The terms, where someone using the software will actually meet them. The one
+ * line that matters most is the research rule, because it is the one people get
+ * wrong: an institute is not free or paid as an institution - the purpose of the
+ * work decides.
+ */
+function LicenceNotice() {
+  const t = useT()
+  return (
+    <div className="settings-group muted" style={{ fontSize: 'var(--fs-xs)', lineHeight: 1.6 }}>
+      <div className="settings-title">{t('licence.title')}</div>
+      <div>{t('licence.name')}</div>
+      <div style={{ marginTop: 4 }}>{t('licence.free')}</div>
+      <div style={{ marginTop: 4 }}>{t('licence.paid')}</div>
+      <div style={{ marginTop: 4 }}>{t('licence.research')}</div>
+      <div style={{ marginTop: 6, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <a href={`${REPO}/blob/main/LICENSE`} target="_blank" rel="noreferrer">
+          LICENSE
+        </a>
+        <a href={`${REPO}/blob/main/LICENSING.md`} target="_blank" rel="noreferrer">
+          LICENSING.md
+        </a>
+        <a href={`${REPO}/blob/main/NOTICE`} target="_blank" rel="noreferrer">
+          NOTICE
+        </a>
+        <a href="mailto:simul@msimul.com">simul@msimul.com</a>
+      </div>
+      <div style={{ marginTop: 6 }}>{t('licence.owner')}</div>
     </div>
   )
 }

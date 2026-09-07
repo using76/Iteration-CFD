@@ -102,6 +102,12 @@ const STRINGS = {
 
     // Filled in after an audit found 134 keys used by the UI and defined
     // nowhere, so the app was rendering the key itself at the reader.
+    'licence.title': '라이선스',
+    'licence.name': 'Prosperity Public License 3.0.0 + 라이선서 해석 조항',
+    'licence.free': '무료: 개인 학습·취미, 교육기관, 대학과 그 소속 연구소, 정부기관, 공공 안전·보건·환경 단체, 자선단체.',
+    'licence.paid': '유상: 그 밖의 상업적 이용 — 30일 시험 후 라이선스가 필요합니다. 시험 기간은 사람이 아니라 회사 단위입니다.',
+    'licence.research': '연구는 목적으로 판단합니다. 소방·의료·보건·안전·재난·환경 목적이면 정부출연연구기관에서도 무료이고, 특정 제품이나 산업 이전을 목적으로 하는 기술개발은 — 기술료 징수 대상이면 — 정출연이라도 유상입니다.',
+    'licence.owner': '© 2026 주식회사 이터레이션즈 · 협력 및 기여 주식회사 메테오시뮬레이션',
     'gpu.absent': 'GPU 없음',
     'gpu.demoName': '데모 GPU',
     'assistant.approvals': '승인 대기 {n}건',
@@ -336,6 +342,12 @@ const STRINGS = {
 
     // Filled in after an audit found 134 keys used by the UI and defined
     // nowhere, so the app was rendering the key itself at the reader.
+    'licence.title': 'Licence',
+    'licence.name': 'Prosperity Public License 3.0.0, with the licensor reading appended',
+    'licence.free': 'Free: personal study and hobby work, educational institutions, universities and their institutes, government institutions, public safety, health and environmental bodies, charities.',
+    'licence.paid': 'Paid: any other commercial use — a thirty-day trial, then a licence. The trial is per company, not per person.',
+    'licence.research': 'Research is judged by its purpose. Fire, medicine, public health, safety, disaster and environmental work is free even at a government-funded institute; development aimed at a product or at technology transferred to industry — anything carrying a technology fee — is not.',
+    'licence.owner': '© 2026 Iterations Co., Ltd. · in collaboration with Meteo Simulation Co., Ltd.',
     'gpu.absent': 'no GPU',
     'gpu.demoName': 'demo GPU',
     'assistant.approvals': '{n} awaiting approval',
