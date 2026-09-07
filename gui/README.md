@@ -10,6 +10,12 @@ gui/
   e2e/      Playwright 데모 모드 스모크 테스트
 ```
 
+## 스크린샷 (데모 모드, Playwright 자동 캡처)
+
+| 셸 | 솔버 실행과 잔차 | 3D 뷰어(절단면 + 유선) |
+|---|---|---|
+| ![shell](docs/screenshots/shell.png) | ![run](docs/screenshots/run.png) | ![viewer](docs/screenshots/viewer.png) |
+
 ## 빠른 시작
 
 요구사항: Node 22 이상. 실제 솔버를 돌리려면 빌드된 `ofgpu-*` 바이너리(Windows + NVIDIA GPU, `rust/README.md` 참고)가 필요하고, 없으면 **데모 모드**로 전부 체험할 수 있습니다.
