@@ -58,6 +58,36 @@ function isRecord(v: unknown): v is SessionRecord {
   return typeof r.id === 'string' && Array.isArray(r.messages) && Array.isArray(r.ui)
 }
 
+/**
+ * The assistant message carrying tool_use blocks is saved before any tool has
+ * run - it has to be, because a tool round can take two minutes of run_wait or
+ * ten of waiting for approval. If the process does not survive that round, the
+ * file on disk holds a tool_use with no tool_result, and the API rejects every
+ * later request in that session with a 400. Give each unanswered tool_use an
+ * is_error result on load; the model reads it the way it reads any failure.
+ */
+export function repairDanglingToolUses(messages: BetaMessageParam[], reason = 'interrupted: the server stopped before this tool finished'): number {
+  let repaired = 0
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]
+    if (m.role !== 'assistant' || typeof m.content === 'string') continue
+    const ids = m.content.filter((b) => b.type === 'tool_use').map((b) => b.id)
+    if (!ids.length) continue
+    const next = messages[i + 1]
+    const answered = new Set<string>()
+    const nextBlocks = next && next.role === 'user' && typeof next.content !== 'string' ? next.content : null
+    if (nextBlocks) for (const b of nextBlocks) if (b.type === 'tool_result') answered.add(b.tool_use_id)
+    const missing = ids.filter((id) => !answered.has(id))
+    if (!missing.length) continue
+    const blocks = missing.map((id) => ({ type: 'tool_result' as const, tool_use_id: id, content: JSON.stringify({ error: { code: 'INTERRUPTED', message: reason } }), is_error: true }))
+    // tool_result blocks lead the user message the API replies to.
+    if (nextBlocks) nextBlocks.unshift(...blocks)
+    else messages.splice(i + 1, 0, { role: 'user', content: blocks })
+    repaired += missing.length
+  }
+  return repaired
+}
+
 export interface SessionStore {
   list(): SessionRecord[]
   get(id: string): SessionRecord | undefined
@@ -88,6 +118,7 @@ export function createSessionStore(dir: string, model: string): SessionStore {
           runs: partial.runs ?? [],
           allowedTools: partial.allowedTools ?? [],
         }
+        repairDanglingToolUses(rec.messages)
         records.set(rec.id, rec)
       }
     } catch {

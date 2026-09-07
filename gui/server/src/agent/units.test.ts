@@ -1,6 +1,6 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages'
+import type { BetaMessageParam, BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import { DEFAULT_SESSION_SETTINGS, TOOL_NAMES, type RunInfo, type ServerMsg, type ToolCallRecord } from '@cfd/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { STATIC_SYSTEM } from '../prompts/system.js'
@@ -9,7 +9,7 @@ import { createApprovalManager } from './approvals.js'
 import { classifyTool, parsePolicyOverrides } from './policy.js'
 import { buildVolatileContext, foldContextIntoUser, systemParam } from './prompt.js'
 import { buildQuickMessage } from './quick.js'
-import { appendUserTurn, createSessionStore, stateOf, titleFromText } from './session.js'
+import { appendUserTurn, createSessionStore, repairDanglingToolUses, stateOf, titleFromText } from './session.js'
 import { fakeRuns, makeWorkspace, type TempWorkspace } from './test-fakes.js'
 import { until } from './test-util.js'
 import { createStreamProjector, projectAssistant, projectUser } from './ui-projection.js'
@@ -47,6 +47,65 @@ describe('session store', () => {
     expect(state.messages).toHaveLength(1)
     expect(await again.delete(rec.id)).toBe(true)
     expect(await fsp.readdir(dir)).toEqual([])
+  })
+
+  it('repairs a tool_use that never got its result', () => {
+    const messages: BetaMessageParam[] = [
+      { role: 'user', content: 'run it' },
+      { role: 'assistant', content: [{ type: 'text', text: 'starting' }, { type: 'tool_use', id: 'toolu_a', name: 'run_start', input: {} }] },
+    ]
+    expect(repairDanglingToolUses(messages)).toBe(1)
+    expect(messages).toHaveLength(3)
+    const blocks = messages[2].content as Array<{ type: string; tool_use_id?: string; is_error?: boolean; content?: string }>
+    expect(messages[2].role).toBe('user')
+    expect(blocks[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'toolu_a', is_error: true })
+    expect(JSON.parse(blocks[0].content!).error.code).toBe('INTERRUPTED')
+    // Idempotent: a repaired history is already answered.
+    expect(repairDanglingToolUses(messages)).toBe(0)
+  })
+
+  it('repairs only the unanswered half of a partly answered round', () => {
+    const messages: BetaMessageParam[] = [
+      { role: 'user', content: 'two things' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'toolu_a', name: 'file_read', input: {} },
+          { type: 'tool_use', id: 'toolu_b', name: 'run_start', input: {} },
+        ],
+      },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: 'ok', is_error: false }] },
+    ]
+    expect(repairDanglingToolUses(messages)).toBe(1)
+    expect(messages).toHaveLength(3)
+    const blocks = messages[2].content as Array<{ type: string; tool_use_id: string }>
+    // The synthetic result leads: tool_result blocks come first in the message.
+    expect(blocks.map((b) => b.tool_use_id)).toEqual(['toolu_a', 'toolu_b'])
+  })
+
+  it('repairs a session file that was written mid-tool-round', async () => {
+    const dir = path.join(ws.tmp, 'sessions-dangling')
+    await fsp.mkdir(dir, { recursive: true })
+    const rec = {
+      id: 's_dangling',
+      title: 't',
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+      model: 'claude-opus-5',
+      settings: DEFAULT_SESSION_SETTINGS,
+      messages: [
+        { role: 'user', content: 'mesh it' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_x', name: 'mesh_generate', input: {} }] },
+      ],
+      ui: [],
+      toolCalls: [],
+      runs: [],
+      allowedTools: [],
+    }
+    await fsp.writeFile(path.join(dir, 's_dangling.json'), JSON.stringify(rec))
+    const loaded = createSessionStore(dir, 'claude-opus-5').get('s_dangling')!
+    expect(loaded.messages).toHaveLength(3)
+    expect((loaded.messages[2].content as Array<{ tool_use_id: string }>)[0].tool_use_id).toBe('toolu_x')
   })
 
   it('skips corrupt files and titles empty text', async () => {
