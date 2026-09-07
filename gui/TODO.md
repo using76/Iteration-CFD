@@ -5,7 +5,40 @@
 
 ---
 
-## 1. 지금 상태 (검증된 것)
+## 0. 2026-09-07 후속 작업 — 27건 중 25건 수정 완료
+
+2.1 → 2.2 → 2.3 → 2.4 순서로 고쳤고, 항목마다 커밋이 하나씩 있습니다 (`git log --oneline 61e1242..`).
+
+| 상태 | 항목 |
+|---|---|
+| 완료 | H1 H2(shell) H3 H4 · S1(main.ts) S3(shared) S4 S5 · A1 A2 A3 A4 A5 A6 · L1 L2 L3 L4 · W1 W2 W3 W4 W5 W6 W7 W8 |
+| **미완 — 파일이 저장소에 없음** | **S1**(runs/store.ts 스트림 error 리스너), **S2**(runs/manager.ts launch try/catch), H2의 runs/dispatch.ts 절반, S3의 manager 배선 |
+
+### 먼저 해결해야 할 것: `gui/server/src/runs/` 가 저장소에 없습니다
+
+`gui/.gitignore` 의 `runs/` 에 앞 슬래시가 없어 **모든 깊이**에서 매칭됐고, `server/src/runs/`
+(types.ts, manager.ts, store.ts, dispatch.ts, test-helpers.ts)가 이 브랜치의 어떤 커밋에도
+들어가지 않았습니다. 그래서 새로 클론하면:
+
+- `npm run typecheck` — server에서 13개 오류 (`Cannot find module '../runs/types.js'` 외)
+- `npm test` — 6개 파일이 로드 실패 (`../runs/test-helpers.js`), 나머지 22개 파일 174개 통과
+- `npm run build` / `npm run dev` — 서버 빌드·부팅 불가
+
+`.gitignore` 는 커밋 `1deb5bb` 에서 앞 슬래시를 붙여 고쳤으니, **그 파일들을 가진 기기에서
+`git add gui/server/src/runs && git commit` 만 하면** 됩니다. 그 뒤 S1·S2를 이어서 고치면
+2.2가 끝납니다.
+
+### 이 트리에서 실제로 측정한 값
+
+| 항목 | 결과 |
+|---|---|
+| `npm run typecheck` (shared, web) | 통과 |
+| `npm test` (shared 18 · web 84 · server 174, runs/ 의존 6파일 제외) | 276개 통과 |
+| `npm run typecheck` (server) | runs/ 누락으로 인한 오류만 남음 |
+
+---
+
+## 1. 원래 상태 (2026-09-07 리뷰 시점)
 
 브랜치 `claude/cfd-ai-chat-gui-k296dq`, 마지막 커밋 `61e1242`.
 
