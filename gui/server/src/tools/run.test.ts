@@ -87,6 +87,16 @@ describe('run tools', () => {
     expect(bad.error?.code).toBe('INVALID')
   })
 
+  it('mesh_generate confines the -stl path to the workspace', async () => {
+    const escape = await runTool('mesh_generate', { kind: 'channel', outputDir: 'cases/c3', cells: null, stl: [{ name: null, path: '../../etc/passwd' }], cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null }, ctx())
+    expect(escape.error?.code).toBe('OUTSIDE_WORKSPACE')
+    // The `name=` form hides the path inside a string, which is how it slipped
+    // past every other path check.
+    const named = await runTool('mesh_generate', { kind: 'channel', outputDir: 'cases/c4', cells: null, stl: [{ name: 'body', path: '../../../secrets.stl' }], cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null }, ctx())
+    expect(named.error?.code).toBe('OUTSIDE_WORKSPACE')
+    expect(runs.started.some((s) => s.args.some((a) => String(a.value).includes('passwd') || String(a.value).includes('secrets')))).toBe(false)
+  })
+
   it('results and viewer tools delegate to the services', async () => {
     const d = await runTool('results_discover', { root: 'cases' }, ctx())
     expect((d.data as { times: unknown[] }).times).toHaveLength(1)

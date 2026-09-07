@@ -510,16 +510,26 @@ export function driversFor(model: string | null, format: CaseFormat): string[] {
   return out
 }
 
+/** A number, or a string that is entirely a number. Anything else is NaN. */
+function numericValue(value: unknown): number {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string' && value.trim() !== '') return Number(value.trim())
+  return Number.NaN
+}
+
 /** Validate one command-line value against a flag or positional spec. Returns an error message or null. */
 export function checkArgValue(spec: FlagSpec | PositionalSpec, value: unknown): string | null {
   switch (spec.type) {
     case 'flag':
       return value === true || value === null || value === undefined ? null : `${spec.name} takes no value`
+    // Number(null) is 0, Number(true) is 1 and Number('') is 0, so the old
+    // Number(value) test let null, true and the empty string through and handed
+    // the driver the literal strings "null", "true" and "".
     case 'int':
-      return Number.isInteger(Number(value)) ? null : `${spec.name} expects an integer, got ${JSON.stringify(value)}`
+      return Number.isInteger(numericValue(value)) ? null : `${spec.name} expects an integer, got ${JSON.stringify(value)}`
     case 'float':
     case 'time':
-      return Number.isFinite(Number(value)) ? null : `${spec.name} expects a number, got ${JSON.stringify(value)}`
+      return Number.isFinite(numericValue(value)) ? null : `${spec.name} expects a number, got ${JSON.stringify(value)}`
     case 'enum':
       return spec.values && spec.values.includes(String(value)) ? null : `${spec.name} must be one of ${spec.values?.join(', ')}`
     case 'list':

@@ -175,8 +175,13 @@ export function createHub(deps: HubDeps): HubHandle {
       default:
         break
     }
-    if ('sessionId' in msg && typeof msg.sessionId === 'string') c.sessionId = msg.sessionId
-    if (msg.t === 'session.open') c.sessionId = msg.sessionId
+    // session.open is the only frame that says which session this tab is
+    // looking at. Every other frame carrying a sessionId names a target -
+    // session.delete, session.rename, settings.set for a session in the history
+    // menu - and re-pointing the connection at it silently cut the tab off from
+    // the stream of the session actually on screen. session.new sets it from
+    // the agent's reply.
+    if (msg.t === 'session.open' && typeof msg.sessionId === 'string') c.sessionId = msg.sessionId
     if (msgHandlers.size === 0) {
       sendError(c, `no handler for ${msg.t}`)
       return

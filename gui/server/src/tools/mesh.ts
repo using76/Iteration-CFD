@@ -56,7 +56,16 @@ export const meshGenerate: ToolDef<typeof MeshSchema> = {
     if (out.path.rel === '') return fail('INVALID', 'outputDir must be a subdirectory of the workspace')
     if (input.cutcell && !input.stl?.length) return fail('INVALID', 'cutcell needs at least one stl surface')
     if (input.Ks !== null && input.wallModel !== 'rough') return fail('INVALID', 'Ks needs wallModel "rough"')
-    const { positionals, args } = meshArgs({ ...input, outputDir: out.path.rel })
+    // The one path-shaped input that never went through resolveTool: it is
+    // carried inside a `[name=]path` string, so the registry types it as a
+    // plain string and mesh_generate could name any file on the machine.
+    const stl: Array<{ name: string | null; path: string }> = []
+    for (const s of input.stl ?? []) {
+      const r = resolveTool(ctx.workspaceRoot, s.path, { mustExist: true })
+      if (!r.ok) return r.result
+      stl.push({ name: s.name, path: r.path.rel })
+    }
+    const { positionals, args } = meshArgs({ ...input, outputDir: out.path.rel, stl: stl.length ? stl : null })
     let run
     try {
       run = await ctx.runs.start({ binary: 'ofgpu-generate-mesh', casePath: null, args, positionals, label: `mesh ${input.kind}`, sessionId: ctx.sessionId })

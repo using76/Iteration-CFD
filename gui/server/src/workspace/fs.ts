@@ -70,20 +70,25 @@ function sortEntries(a: FsTreeNode, b: FsTreeNode): number {
   return a.name.localeCompare(b.name, 'en', { numeric: true, sensitivity: 'base' })
 }
 
-async function buildNode(root: string, abs: string, rel: string, name: string, depth: number): Promise<FsTreeNode | null> {
+async function buildNode(root: string, abs: string, rel: string, name: string, depth: number, isRoot = false): Promise<FsTreeNode | null> {
   let st: Awaited<ReturnType<typeof fsp.stat>>
   try {
-    st = await fsp.stat(abs)
+    // lstat for everything below the root: stat() follows a symlink, and the
+    // explorer would then list - and serve paths from - whatever it points at,
+    // outside the workspace resolveInWorkspace exists to confine it to.
+    st = isRoot ? await fsp.stat(abs) : await fsp.lstat(abs)
   } catch {
     return null
   }
+  if (st.isSymbolicLink()) return null
   if (st.isDirectory()) {
     let entries: Array<{ name: string; dir: boolean }> = []
     try {
       const list = await fsp.readdir(abs, { withFileTypes: true })
       entries = list
+        .filter((d) => !d.isSymbolicLink())
         .filter((d) => !(d.isDirectory() && isHiddenDir(d.name, rel ? `${rel}/${d.name}` : d.name)))
-        .map((d) => ({ name: d.name, dir: d.isDirectory() || d.isSymbolicLink() }))
+        .map((d) => ({ name: d.name, dir: d.isDirectory() }))
     } catch {
       entries = []
     }
@@ -106,7 +111,7 @@ async function buildNode(root: string, abs: string, rel: string, name: string, d
 export async function fsTree(root: string, relPath: string, depth = 1): Promise<FsTreeNode> {
   const r = resolveInWorkspace(root, relPath || '.', { mustExist: true })
   const name = r.rel === '' ? path.basename(r.abs) : path.basename(r.rel)
-  const node = await buildNode(root, r.abs, r.rel, name, Math.min(Math.max(depth, 0), MAX_TREE_DEPTH))
+  const node = await buildNode(root, r.abs, r.rel, name, Math.min(Math.max(depth, 0), MAX_TREE_DEPTH), true)
   if (!node) throw new WorkspaceError('NOT_FOUND', `no such file or directory: ${relPath}`)
   return node
 }

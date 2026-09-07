@@ -175,9 +175,16 @@ describe('hub', () => {
     const c = new Client(url)
     await c.open()
     await c.next('hello')
+    c.send({ t: 'session.open', sessionId: 's_7' })
     c.send({ t: 'user.message', sessionId: 's_7', text: 'hi', context: { activeFile: null, activeRun: null, attachments: [], selection: null } })
     await new Promise((r) => setTimeout(r, 30))
-    expect(seen).toEqual(['user.message:s_7'])
+    expect(seen).toEqual(['session.open:s_7', 'user.message:s_7'])
+    // Deleting or renaming another session names a target; it must not move
+    // this tab off the session it is showing.
+    c.send({ t: 'session.delete', sessionId: 's_99' })
+    c.send({ t: 'session.rename', sessionId: 's_99', title: 'x' })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(seen.slice(2)).toEqual(['session.delete:s_7', 'session.rename:s_7'])
     hub.sendToSession('s_7', { t: 'session.deleted', sessionId: 's_7' })
     expect((await c.next('session.deleted')).sessionId).toBe('s_7')
     hub.broadcast({ t: 'gpu', gpu: runs.gpu() })
