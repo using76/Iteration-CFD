@@ -2,7 +2,7 @@
 
 **meteor-cfd — SPEC-LIT sections 25 and 26, wired into one driver**
 
-주식회사 메테오시뮬레이션 · 2026-08-28
+주식회사 이터레이션즈 · 2026-08-28
 
 This note states what `ofgpu-lowmach` actually solves, the assumptions it makes
 (stated, not hidden), and the wall-heat-transfer gate record that stands behind

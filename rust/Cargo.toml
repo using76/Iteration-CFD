@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "GPU-native finite-volume CFD, resident on the device"
-authors = ["주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.) <simul@msimul.com>"]
-repository = "https://github.com/using76/meteor-cfd"
+authors = [
+  "주식회사 이터레이션즈 (Iterations Co., Ltd.) <simul@msimul.com>",
+  "주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)",
+]
+repository = "https://github.com/using76/Iteration-CFD"
 # Source-available, not Open Source. Educational use is free; research,
 # publication and commercial use require a licence - simul@msimul.com.
 # Not an SPDX identifier, so it is given as a file reference.

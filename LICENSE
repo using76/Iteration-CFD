@@ -1,8 +1,10 @@
 # Prosperity Public License 3.0.0
 
-Contributor: 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+Contributor: 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 
-Source Code: https://github.com/using76/meteor-cfd
+Collaborator and contributor: 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+
+Source Code: https://github.com/using76/Iteration-CFD
 
 ## Purpose
 
@@ -63,7 +65,7 @@ You're excused for unknowingly breaking [Notices](#notices) if you take all prac
 Commercial use beyond the thirty-day trial requires a separate commercial
 licence from the contributor.
 
-    주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+    주식회사 이터레이션즈 (Iterations Co., Ltd.)
     simul@msimul.com
 
 See [LICENSING.md](LICENSING.md) for what counts as commercial use, what a

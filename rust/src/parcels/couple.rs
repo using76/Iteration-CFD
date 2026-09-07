@@ -1,4 +1,4 @@
-// meteor-cfd - Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+// meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 // Source-available, not Open Source. Teaching and academic research are
 // free; commercial and non-academic research require a licence.
 // Enquiries: simul@msimul.com

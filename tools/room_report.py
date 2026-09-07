@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# meteor-cfd - Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+# meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 # Source-available, not Open Source. See LICENSE at the repository root.
 """One-file HTML report for the serpentine room case.
 
@@ -174,7 +174,7 @@ def main():
 </p>
 
 <footer>
-  meteor-cfd · 주식회사 메테오시뮬레이션 · GPU 상주 유한체적 해석 ·
+  meteor-cfd · 주식회사 이터레이션즈 · GPU 상주 유한체적 해석 ·
   케이스 <span class="mono">room</span> + <span class="mono">baffles.stl</span> ·
   결과는 검증 목적의 데모이며 설계 판단에는 독립 검증이 필요합니다.
 </footer>
