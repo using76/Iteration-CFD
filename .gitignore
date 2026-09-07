@@ -31,3 +31,8 @@ cases/*
 # ------------------------------------------------------------- results -----
 *.png
 *.mp4
+
+# ------------------------------------------------------------ packaging ----
+# Built installers. `packaging/iterations.iss` is the recipe; the output is not
+# part of the source tree - it belongs to a GitHub release.
+/dist/
