@@ -10,3 +10,4 @@ playwright-report/
 e2e/screenshots/
 config/custom-tools.json
 config/policy.local.json
+.cache/
