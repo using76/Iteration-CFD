@@ -10,6 +10,11 @@ export default defineConfig({
     },
   },
   server: {
+    // Explicit, not the default 'localhost': on Windows that resolves to ::1
+    // first, so a dev server bound only to the IPv6 loopback is invisible to
+    // anything asking for 127.0.0.1 - including the e2e config's readiness
+    // probe, which then times out after a minute with the server running fine.
+    host: '127.0.0.1',
     port: 5173,
     strictPort: true,
     proxy: {
