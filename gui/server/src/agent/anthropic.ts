@@ -1,6 +1,7 @@
 // LlmClient over @anthropic-ai/sdk 0.124: client.beta.messages.stream with
-// adaptive summarised thinking, effort, server-side fallbacks and the
-// cache_control breakpoint on the static system prompt. No prefill.
+// adaptive summarised thinking, effort, server-side fallbacks and two cache
+// breakpoints - the static system prompt and, through top-level
+// cache_control, the growing history. No prefill.
 import Anthropic from '@anthropic-ai/sdk'
 import type { BetaMessageStreamParams } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import type { ServerConfig } from '../config.js'
@@ -16,6 +17,13 @@ export function buildStreamParams(model: string, p: LlmStreamParams): BetaMessag
     output_config: { effort: p.effort },
     betas: [...ANTHROPIC_BETAS],
     fallbacks: 'default',
+    // Caching is a prefix match, and the only breakpoint used to be the static
+    // system block - so every tool result, thinking block and prior turn was
+    // re-read at full price on every round of every turn. Top-level
+    // cache_control caches the last cacheable block of the request, which is
+    // the end of the history; the volatile role:"system" message that prompt.ts
+    // appends is not persisted and sits after it, so it invalidates nothing.
+    cache_control: { type: 'ephemeral' },
     system: p.system,
     tools: p.tools,
     messages: p.messages,

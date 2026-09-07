@@ -176,6 +176,8 @@ describe('prompt', () => {
     expect(sys[0].cache_control).toEqual({ type: 'ephemeral' })
     const params = buildStreamParams('claude-opus-5', { system: sys, messages: [], tools: [], maxTokens: 64000, effort: 'high', signal: new AbortController().signal })
     expect(params).toMatchObject({ model: 'claude-opus-5', max_tokens: 64000, thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort: 'high' }, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' })
+    // Without this the whole conversation is re-processed uncached each round.
+    expect(params.cache_control).toEqual({ type: 'ephemeral' })
   })
 
   it('volatile context lists runs in a parseable form and folds into the user turn', () => {
