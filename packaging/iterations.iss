@@ -12,7 +12,8 @@
 
 #define AppName        "Iterations"
 #define AppVersion     "0.1.0"
-#define AppPublisher   "주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)"
+#define AppPublisher   "주식회사 이터레이션즈 (Iterations Co., Ltd.)"
+#define AppCollaborator "주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)"
 #define AppURL         "https://github.com/using76/Iteration-CFD"
 #define SrcRoot        ".."
 
@@ -40,6 +41,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayName={#AppName} {#AppVersion}
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
+VersionInfoCopyright=Copyright (c) 2026 {#AppPublisher} · in collaboration with {#AppCollaborator}
 VersionInfoDescription=GPU-resident finite volume CFD solvers
 
 [Languages]
