@@ -101,6 +101,12 @@ describe('common lines', () => {
     expect(classifyLine('converged: every residualControl entry met', 'kEpsilon')[0]).toEqual({ kind: 'converged', message: 'every residualControl entry met' })
     expect(classifyLine('written to ../cases/ch/4000', 'kEpsilon')[0]).toEqual({ kind: 'written', dir: '../cases/ch/4000' })
     expect(classifyLine('    written to cases/plume_jsonc/0.5', 'plume')[0]).toEqual({ kind: 'written', dir: 'cases/plume_jsonc/0.5' })
+    expect(classifyLine('  written to cases/dam_jsonc/0.2', 'vof')[0]).toEqual({ kind: 'written', dir: 'cases/dam_jsonc/0.2' })
+    // The transient drivers' checkpoint line ends in "written to <file> (...)"
+    // too, and it names a .mcr file, not a results directory.
+    expect(classifyLine('    restart checkpoint written to cases/plume_jsonc/restart.mcr (t = 0.5, p0 = 101325)', 'lowmach')).toEqual([])
+    expect(classifyLine('  restart checkpoint written to r.mcr (t = 1, p0 = 2)', 'vof')).toEqual([])
+    expect(classifyLine('phi loaded from the restart checkpoint - not re-derived from U', 'buoyant')).toEqual([])
     expect(classifyLine('error: no case directory given', 'kEpsilon')[0]).toEqual({ kind: 'error', message: 'no case directory given' })
     expect(classifyLine('ofgpu-vof: -endTime must be positive', 'vof')[0]).toEqual({ kind: 'error', message: '-endTime must be positive' })
     expect(classifyLine('benchmark aborted: out of memory', 'none')[0]).toEqual({ kind: 'error', message: 'out of memory' })

@@ -88,7 +88,14 @@ const PRE_SUBST: Array<[RegExp, string]> = [
 ]
 
 const RE_CONVERGED = /^\s*converged(?::\s*(.*))?\s*$/
-const RE_WRITTEN = /written to\s+(.+?)\s*$/
+// Anchored at the start of the line. Every driver prints the results line as
+// `written to <dir>` with only indentation before it (k_epsilon.rs:738,
+// lowmach.rs:636, plume.rs:1042, vof.rs:840, buoyant.rs:1601), while the
+// transient drivers also print `    restart checkpoint written to <file>
+// (t = .., p0 = ..)` (lowmach.rs:685, vof.rs:784, buoyant.rs:1117). Unanchored,
+// the second matched too and handed a .mcr file plus its trailing parenthesis
+// to the run manager as a results directory.
+const RE_WRITTEN = /^\s*written to\s+(.+?)\s*$/
 const RE_ERROR = /^\s*(error|ofgpu-[\w-]+|benchmark aborted):\s*(.+)$/
 const RE_NAN = /\*\*\* NaN\/Inf \*\*\*/
 const RE_ITERATING = /^\s*iterating (\d+) times/
