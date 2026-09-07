@@ -3,11 +3,15 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
-runs/
-sessions/
-test-results/
-playwright-report/
-e2e/screenshots/
-config/custom-tools.json
-config/policy.local.json
-.cache/
+
+# Runtime state written under gui/ itself. Anchored with a leading slash: an
+# unanchored `runs/` also matches server/src/runs/, which is source, and git
+# silently drops it from every commit.
+/runs/
+/sessions/
+/.cache/
+/test-results/
+/playwright-report/
+/e2e/screenshots/
+/config/custom-tools.json
+/config/policy.local.json
