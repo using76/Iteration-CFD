@@ -23,6 +23,13 @@ reference/
 cases/*
 !cases/README.md
 !cases/*.jsonc
+# The race-car sample is a geometry and a recipe, not a mesh: 52 kB of STL and
+# the two commands that turn it into a 2.1-million-cell run. The mesh and the
+# results it produces are a gigabyte, and they are what the user's own machine
+# is for.
+!cases/racecar.stl
+!cases/racecar.md
+!cases/racecar.cmd
 # Retired case definitions - kept as dated records of measurements that were
 # taken before a later SPEC-LIT rule made the cases themselves unrunnable.
 # They are records, not cases; cases/retired/README.md says what replaced each.

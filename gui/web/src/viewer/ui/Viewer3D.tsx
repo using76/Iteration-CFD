@@ -67,6 +67,11 @@ export function Viewer3D({ overlay, locale }: Viewer3DProps) {
         observer = new ResizeObserver(resize)
         observer.observe(host)
         controller.attachView(v)
+        // Dev only: the controller that actually owns a canvas, published so a
+        // script can drive the viewer the way the assistant does. Importing the
+        // module from outside is not enough -- an HMR pass gives the module a
+        // second URL and therefore a second, canvas-less singleton.
+        if (import.meta.env.DEV) (window as unknown as { __viewer?: ViewerController }).__viewer = controller
         const demo = demoDatasetPath()
         if (demo && !controller.dataset) void controller.execute({ type: 'load', path: demo, timeIndex: null, field: null })
       } catch (err) {

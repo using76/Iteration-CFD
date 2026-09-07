@@ -216,23 +216,31 @@ export function blockLatticeFromCellCenters(centers: Float32Array, bounds: Bound
       counts[b]++
       sums[b] += v
     }
-    // A site's bin holds roughly n / nSites cells. Cut-cell noise is spread
-    // over many bins and never comes close, so half of the median occupied
-    // count separates them without needing to know nSites first.
-    const occupied: number[] = []
-    for (let b = 0; b < BINS; b++) if (counts[b] > 0) occupied.push(counts[b])
-    if (occupied.length === 0) return null
-    occupied.sort((p, q) => p - q)
-    const median = occupied[occupied.length >> 1]
-    const floorCount = Math.max(2, median * 0.5)
+    // A site's bin holds one whole layer of the block -- tens of thousands of
+    // cells -- while a displaced cut centroid lands in a bin of its own with a
+    // handful. The two populations are orders of magnitude apart, so the floor
+    // comes off the busiest bin. It must NOT come off the median: the noise
+    // bins outnumber the sites, so the median IS the noise and every scrap of
+    // it survives, which is how a 128-site axis reads as 158.
+    let maxCount = 0
+    for (let b = 0; b < BINS; b++) if (counts[b] > maxCount) maxCount = counts[b]
+    if (maxCount < 2) return null
+    // A tenth of the fullest layer. The body would have to block 90% of a
+    // layer to fall under it, and a body that big is not what this recovers.
+    const floorCount = Math.max(2, maxCount * 0.1)
     const sites: number[] = []
     for (let b = 0; b < BINS; b++) {
       if (counts[b] < floorCount) continue
-      // Neighbouring bins can split one site; merge them by weight.
-      const last = sites.length - 1
-      const c = sums[b] / counts[b]
-      if (last >= 0 && b > 0 && counts[b - 1] >= floorCount) sites[last] = (sites[last] + c) / 2
-      else sites.push(c)
+      // One site can straddle two bins; take the run of them as one site,
+      // weighted by how many cells each holds rather than averaged blind.
+      let sum = 0
+      let count = 0
+      while (b < BINS && counts[b] >= floorCount) {
+        sum += sums[b]
+        count += counts[b]
+        b++
+      }
+      sites.push(sum / count)
     }
     if (sites.length < 2 || sites.length > 1 << 12) return null
     return sites
@@ -246,8 +254,11 @@ export function blockLatticeFromCellCenters(centers: Float32Array, bounds: Bound
   const ny = ys.length
   const nz = zs.length
   const sites = nx * ny * nz
-  // A block that is mostly holes is not the block this mesh came from.
-  if (sites > 40e6 || n < sites * 0.5) return null
+  // A cut-cell block is a box with a body carved out of it, and the body is a
+  // small part of the box. Anything holier than this is a mesh that merely
+  // resembles a lattice, and reading it as one would put cells in the wrong
+  // place; the unstructured path is the honest answer for it.
+  if (sites > 40e6 || n < sites * 0.85) return null
 
   const nearest = (u: number[], v: number): number => {
     let lo = 0

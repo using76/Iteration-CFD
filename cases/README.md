@@ -109,6 +109,19 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 결과는 `<caseDir>/1/`에 OpenFOAM ASCII 형식으로 쓰이므로 ParaView나 `foamToVTK`로
 바로 열립니다.
 
+## `racecar` — 외부 공력 샘플
+
+`racecar.stl`(자체 생성 형상 1,040 삼각형)과 `racecar.cmd`(명령 두 줄)만
+들어 있습니다. 메쉬도 결과도 없습니다 — 합쳐 1 GB가 넘고, 그것을 만드는 것이
+이 프로그램이 하는 일입니다.
+
+```powershell
+cd cases
+.acecar.cmd          # 메쉬 10-20분(CPU) + 솔브 약 40초(GPU) -> racecar_case```
+
+자세한 것은 [`racecar.md`](racecar.md) — 크기를 바꾸는 법, 컷셀이 닫힌
+다양체를 요구하는 이유, 뷰어에서 무엇을 보게 되는지까지.
+
 ## JSONC 케이스 (`*.jsonc`)
 
 `ofgpu-lowmach`와 `ofgpu-k-epsilon`은 OpenFOAM 케이스 디렉터리 대신 주석과
