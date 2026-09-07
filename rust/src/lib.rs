@@ -1,4 +1,4 @@
-// meteor-cfd - Copyright (c) 2026 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+// meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 // Source-available, not Open Source. Teaching and academic research are
 // free; commercial and non-academic research require a licence.
 // Enquiries: simul@msimul.com
@@ -153,7 +153,7 @@ mod provenance_audit {
     use std::path::{Path, PathBuf};
 
     const GPL_LINE: &str = "No GPL-licensed source was consulted";
-    const COPYRIGHT: &str = "Meteo Simulation Co., Ltd.";
+    const COPYRIGHT: &str = "Iterations Co., Ltd.";
 
     fn root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()

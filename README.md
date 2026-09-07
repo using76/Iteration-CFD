@@ -2,7 +2,7 @@
 
 **GPU 상주 유한체적 전산유체역학 솔버**
 
-주식회사 메테오시뮬레이션 · Rust 호스트 + CUDA 커널 · [English](README.en.md)
+주식회사 이터레이션즈 · 협력 및 기여 주식회사 메테오시뮬레이션 · Rust 호스트 + CUDA 커널 · [English](README.en.md)
 
 ---
 
@@ -39,7 +39,8 @@ Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으�
 
 **라이선스 문의: simul@msimul.com**
 
-라이선서는 주식회사 메테오시뮬레이션(Meteo Simulation Co., Ltd.)입니다.
+저작권자이자 라이선서는 주식회사 이터레이션즈(Iterations Co., Ltd.)이며,
+주식회사 메테오시뮬레이션(Meteo Simulation Co., Ltd.)이 협력 및 기여자입니다.
 전문은 [`LICENSE`](LICENSE), 상업 라이선스의 범위와 절차는
 [`LICENSING.md`](LICENSING.md), 서드파티 고지는 [`NOTICE`](NOTICE)를
 참조하십시오.
@@ -325,7 +326,8 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 
 ## 문의
 
-**simul@msimul.com** · 주식회사 메테오시뮬레이션 / Meteo Simulation Co., Ltd.
+**simul@msimul.com** · 주식회사 이터레이션즈 / Iterations Co., Ltd.
+협력 및 기여: 주식회사 메테오시뮬레이션 / Meteo Simulation Co., Ltd.
 
 교육과 학술 연구는 무료입니다. 기업 연구개발, 학교에 속하지 않은 연구기관, 수탁
 및 상업적 이용은 별도 라이선스가 필요합니다 — [`LICENSE`](LICENSE) 제2·3절.

@@ -1,9 +1,10 @@
 # Licensing — the terms, and the audit behind them
 
 **meteor-cfd is licensed under the Prosperity Public License 3.0.0.** The
-licensor is 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.). The full
-text is in [`LICENSE`](LICENSE); this document says what it means in practice
-and what a commercial licence covers.
+licensor and copyright holder is 주식회사 이터레이션즈 (Iterations Co., Ltd.);
+주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.) is a collaborator on and
+contributor to the work. The full text is in [`LICENSE`](LICENSE); this document
+says what it means in practice and what a commercial licence covers.
 
 ---
 
@@ -37,7 +38,7 @@ evaluation needs longer, ask.
 Beyond the trial, commercial use needs a separate licence from the contributor.
 Enquiries are answered within one business day.
 
-    주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.)
+    주식회사 이터레이션즈 (Iterations Co., Ltd.)
     simul@msimul.com
 
 When you write, the things that decide the quote are: how many concurrent

@@ -2,7 +2,7 @@
 
 **A GPU-resident finite volume CFD solver**
 
-Meteo Simulation Co., Ltd. · Rust host, CUDA kernels · [한국어](README.md)
+Iterations Co., Ltd. · in collaboration with Meteo Simulation Co., Ltd. · Rust host, CUDA kernels · [한국어](README.md)
 
 ---
 
@@ -38,7 +38,9 @@ commercial, a free or reduced licence will be considered.
 
 **Licensing enquiries: simul@msimul.com**
 
-The licensor is 주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.). The full
+The copyright holder and licensor is 주식회사 이터레이션즈 (Iterations Co., Ltd.);
+주식회사 메테오시뮬레이션 (Meteo Simulation Co., Ltd.) is a collaborator on and
+contributor to the work. The full
 text is in [`LICENSE`](LICENSE), what a commercial licence covers is in
 [`LICENSING.md`](LICENSING.md), and third-party notices are in
 [`NOTICE`](NOTICE).
@@ -325,7 +327,8 @@ Sources for the numerical methods and models. Section numbers refer to SPEC-LIT,
 
 ## Contact
 
-**simul@msimul.com** · Meteo Simulation Co., Ltd. / 주식회사 메테오시뮬레이션
+**simul@msimul.com** · Iterations Co., Ltd. / 주식회사 이터레이션즈
+In collaboration with Meteo Simulation Co., Ltd. / 주식회사 메테오시뮬레이션
 
 Teaching and academic research are free. Industrial R&D, research institutes outside
 an educational institution, contract work and commercial use require a licence — see
