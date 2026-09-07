@@ -1,6 +1,8 @@
 # Iteration CFD Studio
 
-meteor-cfd(Iteration CFD) 솔버를 **AI 채팅으로 구동하는** Cursor/Codex 스타일 개발 환경입니다. 어시스턴트가 케이스(JSONC)를 읽고 고치고, 메쉬를 만들고, 솔버를 실행·감시하고, 결과를 WebGPU 3D 뷰어에 띄우는 일을 전부 **툴 콜링**으로 수행합니다. 설계 결정과 단계는 [`PLAN.md`](PLAN.md)에 있습니다.
+meteor-cfd(Iteration CFD) 솔버를 **AI 채팅으로 구동하는** Cursor/Codex 스타일 개발 환경입니다. 어시스턴트가 케이스(JSONC)를 읽고 고치고, 메쉬를 만들고, 솔버를 실행·감시하고, 결과를 WebGPU 3D 뷰어에 띄우는 일을 전부 **툴 콜링**으로 수행합니다.
+
+설계 결정과 단계는 [`PLAN.md`](PLAN.md), **다음에 할 일과 리뷰에서 확인된 결함 목록은 [`TODO.md`](TODO.md)** 에 있습니다.
 
 ```
 gui/
