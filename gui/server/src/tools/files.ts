@@ -8,8 +8,22 @@ import { fail, okResult, type ToolDef } from './context.js'
 import { globMatcher, isHiddenDir, resolveTool } from './paths.js'
 
 export const TEXT_CAP = 32 * 1024
+/** Same ceiling the REST route uses (workspace/fs.ts MAX_FILE_BYTES). */
+export const READ_FILE_CAP = 8 * 1024 * 1024
 const SEARCH_FILE_CAP = 2 * 1024 * 1024
 const MAX_HITS = 500
+
+/** The first 8 KB is all looksBinary() ever examined; reading it alone keeps a huge file out of memory. */
+async function readHead(abs: string, bytes: number): Promise<Buffer> {
+  const head = Buffer.alloc(bytes)
+  const fh = await fsp.open(abs, 'r')
+  try {
+    const { bytesRead } = await fh.read(head, 0, bytes, 0)
+    return head.subarray(0, bytesRead)
+  } finally {
+    await fh.close()
+  }
+}
 
 function looksBinary(buf: Buffer): boolean {
   const n = Math.min(buf.length, 8192)
@@ -32,8 +46,11 @@ export const fileRead: ToolDef<typeof ReadSchema> = {
     if (!r.ok) return r.result
     const st = await fsp.stat(r.path.abs)
     if (!st.isFile()) return fail('NOT_A_FILE', `${r.path.rel} is a directory; use file_list`)
+    // A result file can be gigabytes. The old order read the whole thing into
+    // memory and only then asked how big it was.
+    if (looksBinary(await readHead(r.path.abs, Math.min(8192, st.size)))) return fail('BINARY', `${r.path.rel} is a binary file (${st.size} bytes)`)
+    if (st.size > READ_FILE_CAP) return fail('TOO_LARGE', `${r.path.rel} is ${st.size} bytes; file_read handles text files up to ${READ_FILE_CAP} bytes. Use file_search to find the lines you want, or the results tools for solver output.`)
     const buf = await fsp.readFile(r.path.abs)
-    if (looksBinary(buf)) return fail('BINARY', `${r.path.rel} is a binary file (${st.size} bytes)`)
     const lines = buf.toString('utf8').split('\n')
     if (lines[lines.length - 1] === '') lines.pop()
     const start = Math.max(1, input.startLine ?? 1)

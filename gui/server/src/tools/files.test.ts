@@ -35,6 +35,26 @@ describe('file tools', () => {
     expect(out.error?.code).toBe('OUTSIDE_WORKSPACE')
   })
 
+  it('file_read refuses a file it would have to hold in memory', async () => {
+    // More than 8 KB of text at the head so the binary sniff passes, then
+    // sparse out to 9 MB: the old code read the whole file into memory before
+    // it ever asked how big it was.
+    const big = path.join(ws.root, 'big.log')
+    await fsp.writeFile(big, 'plain text header\n'.repeat(600))
+    const fh = await fsp.open(big, 'r+')
+    await fh.truncate(9 * 1024 * 1024)
+    await fh.close()
+    const r = await runTool('file_read', { path: 'big.log', startLine: null, endLine: null }, ctx())
+    expect(r.error?.code).toBe('TOO_LARGE')
+    expect(r.error?.message).toContain('9437184 bytes')
+
+    await fsp.writeFile(path.join(ws.root, 'blob.bin'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]))
+    expect((await runTool('file_read', { path: 'blob.bin', startLine: null, endLine: null }, ctx())).error?.code).toBe('BINARY')
+
+    await fsp.rm(big)
+    await fsp.rm(path.join(ws.root, 'blob.bin'))
+  })
+
   it('file_list filters with globs and recurses on **', async () => {
     const flat = await runTool('file_list', { dir: 'src', glob: null }, ctx())
     expect((flat.data as { entries: Array<{ path: string; kind: string }> }).entries.map((e) => e.path)).toEqual(['src/a.rs', 'src/deep'])
