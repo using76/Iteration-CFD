@@ -16,13 +16,37 @@ Prosperity draws the line at **the kind of organisation**, not at who funds it:
 
 - personal study, hobby projects, amateur pursuits, private entertainment;
 - educational institutions — teaching, coursework, student and staff research;
-- public research organisations and government institutions, **regardless of
-  the source of their funding**;
+- government institutions;
+- research whose **purpose** is public — fire and rescue, medicine and public
+  health, occupational and public safety, disaster response, environmental
+  protection — including such work at a government-funded research institute;
 - public safety, public health and environmental protection organisations;
 - charitable organisations.
 
 Contributing feedback, changes or additions back under Blue Oak 1.0.0,
 Apache 2.0, MIT or two-clause BSD does not count as commercial use.
+
+### What "public research organisation" means here
+
+Prosperity's Noncommercial Organizations section makes use by a public research
+organisation noncommercial. **Public** is read as the purpose of the work, not
+the ownership of the body doing it — the same reading is written into `LICENSE`
+itself, under the Prosperity text.
+
+So research and development aimed at a particular product, or at technology to
+be transferred to industry, is commercial use whoever performs it: electric
+vehicle technology, rail and propulsion technology, aircraft engine technology
+and anything comparable, at a government-funded research institute as much as at
+a company. The test is one question — **is the work subject to a technology fee
+(기술료), or carried out for a company or under a programme that transfers the
+result to one?** If so it needs a licence after the trial.
+
+A government-funded institute is therefore not free or paid as an institution.
+The same institute's fire-safety research is free and its vehicle-propulsion
+programme is not.
+
+Universities and schools, and the institutes and laboratories belonging to them,
+are educational institutions and stay free.
 
 ### What is a thirty-day trial
 
