@@ -19,10 +19,24 @@ meteor-cfd is an unstructured finite volume CFD solver designed so that the enti
 | Personal study, hobby and amateur work | **Free** |
 | Educational institutions — teaching, coursework, lab work | **Free** |
 | Universities and their institutes and laboratories | **Free** |
-| Public research organisations and government institutions | **Free**, whatever the funding |
+| Government institutions | **Free** |
 | Public safety, public health and environmental protection organisations | **Free** |
 | Charitable organisations | **Free** |
+| Research whose purpose is public — fire, medicine, safety, disaster, environment | **Free**, including at a government-funded institute |
+| **Product or technology-transfer R&D at a research institute** | **Thirty-day trial**, then a commercial licence |
 | Any other commercial use | **Thirty-day trial**, then a commercial licence |
+
+**"Public" describes the purpose of the work, not the owner of the body doing
+it.** Research aimed at fire and rescue, medicine, public health, safety,
+disaster response or environmental protection is free wherever it is done,
+including at a government-funded research institute. Research and development
+aimed at a particular product or at technology to be transferred to industry —
+electric vehicles, rail and propulsion, aircraft engines and the like — is
+commercial use even when a government-funded institute performs it. One test
+applies: **if the work carries a technology fee, or is done for a company or
+under a programme that hands the result to one, it needs a licence** after the
+thirty-day trial. Universities and schools, and the institutes and laboratories
+that belong to them, are educational institutions and stay free.
 
 **The thirty-day trial is per company, not per person.** If you use this for
 work, your company gets one trial period covering all personnel. CFD is not
