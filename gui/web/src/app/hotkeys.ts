@@ -21,7 +21,10 @@ export function useHotkeys(): void {
         ui.setPaletteOpen(!ui.paletteOpen)
         return
       }
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+      // Ctrl+Shift+N opens an incognito window in Chromium and never reaches
+      // the page, so the binding was dead on the browser this runs in. e.code
+      // rather than e.key because Alt+N is a dead key on a Mac layout.
+      if (mod && e.altKey && !e.shiftKey && e.code === 'KeyN') {
         e.preventDefault()
         actions.newSession()
         return
@@ -40,12 +43,6 @@ export function useHotkeys(): void {
         e.preventDefault()
         const file = selectActiveFile(ui)
         if (file) void useEditorStore.getState().save(file)
-        return
-      }
-      if (mod && e.key === 'Enter' && isEditable(e.target) && (e.target as HTMLElement).dataset.testid === 'composer-input') {
-        e.preventDefault()
-        const text = ui.composerDraft
-        if (actions.sendUserMessage(text)) ui.setComposerDraft('')
         return
       }
       if (e.altKey && !mod && /^[1-4]$/.test(e.key)) {

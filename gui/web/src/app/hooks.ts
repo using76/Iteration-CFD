@@ -45,7 +45,12 @@ export function useDismiss(open: boolean, onClose: () => void): React.RefObject<
       if (ref.current && !ref.current.contains(e.target as Node)) onClose()
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      // The Escape that closes this popover is spent here. Letting it reach the
+      // window handler cancels the running turn as well.
+      e.stopPropagation()
+      e.preventDefault()
+      onClose()
     }
     document.addEventListener('mousedown', onDown, true)
     document.addEventListener('keydown', onKey, true)

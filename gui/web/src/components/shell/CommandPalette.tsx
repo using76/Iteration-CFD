@@ -70,7 +70,7 @@ export function CommandPalette() {
       { id: 'c:bottom', group: 'commands', label: t('palette.toggleBottom'), icon: 'terminal', hint: 'Ctrl+J', run: () => s.toggleBottom() },
       { id: 'c:viewer', group: 'commands', label: t('palette.openViewer'), icon: 'cube', run: () => s.openViewerTab() },
       { id: 'c:residuals', group: 'commands', label: t('palette.openResiduals'), icon: 'chart', run: () => s.openResidualsTab(null) },
-      { id: 'c:newchat', group: 'commands', label: t('palette.newChat'), icon: 'plus', hint: 'Ctrl+Shift+N', run: () => actions.newSession() },
+      { id: 'c:newchat', group: 'commands', label: t('palette.newChat'), icon: 'plus', hint: 'Ctrl+Alt+N', run: () => actions.newSession() },
       ...(['mesh', 'run', 'postprocess', 'validate', 'export'] as QuickAction[]).map<Item>((a) => ({
         id: `q:${a}`,
         group: 'commands',

@@ -103,6 +103,11 @@ export function Composer() {
   }
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // A Korean IME commits its composition with Enter, and every branch below
+    // reads Enter as a command: with the @-mention popup open it picked a
+    // candidate and rewrote the half-typed word. Nothing here acts while a
+    // composition is in progress.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (mention && candidates.length) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -124,7 +129,7 @@ export function Composer() {
         return
       }
     }
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       send()
     }

@@ -34,7 +34,12 @@ export function ContextMenu({ entries, position, onClose }: { entries: MenuEntry
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      // Consumed here: the window handler would take the same Escape as a
+      // request to cancel the running turn.
+      e.stopPropagation()
+      e.preventDefault()
+      onClose()
     }
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
