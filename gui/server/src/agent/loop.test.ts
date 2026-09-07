@@ -262,6 +262,28 @@ describe('stop reasons and errors', () => {
     expect(deps.hub.of('turn.done')).toHaveLength(1)
   })
 
+  it('keeps a mid-stream refusal from persisting a tool_use nothing will answer', async () => {
+    const deps = makeDeps(ws, {
+      llm: constantLlm({
+        blocks: [
+          { type: 'text', text: 'I can start that, but' },
+          { type: 'tool_use', name: 'gpu_info', input: {} },
+        ],
+        stopReason: 'refusal',
+        stopDetails: { type: 'refusal', category: 'general_harms', explanation: null },
+      }),
+    })
+    const rec = session(deps, 'something refused mid-stream')
+    const outcome = await runTurn(rec, 't11b', new AbortController().signal, deps)
+    expect(outcome.status).toBe('refusal')
+    expect(rec.messages.map((m) => m.role)).toEqual(['user', 'assistant'])
+    // The text survives; the call does not, because no tool_result can follow a
+    // refused turn and a dangling tool_use is a 400 on the next request.
+    const kept = rec.messages[1].content as Array<{ type: string }>
+    expect(kept.map((b) => b.type)).toEqual(['text'])
+    expect(deps.hub.of('turn.refusal')).toHaveLength(1)
+  })
+
   it('repairs a max_tokens response with a dangling tool_use', async () => {
     const deps = makeDeps(ws)
     const rec = session(deps, 'long-test')

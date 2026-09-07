@@ -246,8 +246,13 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     addUsage(usage, final.usage)
 
     if (final.stop_reason === 'refusal') {
-      if (final.content.length) {
-        const ui = appendAssistant(final.content, 'refusal', messageId, new Map())
+      // A refusal can arrive mid-stream with a finished tool_use already in the
+      // content. Persisting that leaves a tool_use no tool_result will ever
+      // answer, and the session is a 400 from then on. Keep the text the user
+      // can see; the call itself is not part of a refused turn.
+      const kept = final.content.filter((b) => !isToolUse(b))
+      if (kept.length) {
+        const ui = appendAssistant(kept, 'refusal', messageId, new Map())
         emit({ t: 'msg.done', sessionId, message: ui })
       }
       emit({ t: 'turn.refusal', sessionId, turnId, category: final.stop_details?.category ?? null, explanation: final.stop_details?.explanation ?? null })
