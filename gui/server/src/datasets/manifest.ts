@@ -82,7 +82,8 @@ export function foamSeries(dirs: TimeDirInfo[]): TimeSeries {
     }
     fields.push({ name, components, perTime })
   }
-  return { kind: 'foam', times, fields, warnings, fingerprint: dirs.map((d) => `${d.name}@${d.mtimeMs}:${d.fields.join(',')}`) }
+  const fingerprint = dirs.map((d) => `${d.name}@${d.mtimeMs}:${d.fields.map((f) => `${f}@${d.fieldStamps[f] ?? 'missing'}`).join(',')}`)
+  return { kind: 'foam', times, fields, warnings, fingerprint }
 }
 
 interface VtuStep {
@@ -161,6 +162,10 @@ export async function datasetFingerprint(rel: string, root: ResultRoot, series: 
   const parts = [rel, root.kind, root.rootAbs, root.timeDir ?? '', ...series.fingerprint]
   if (root.caseJsoncAbs) parts.push(`jsonc@${await mtimeOf(root.caseJsoncAbs)}`)
   if (root.hasPolyMesh) parts.push(`polyMesh@${await mtimeOf(path.join(root.rootAbs, 'constant', 'polyMesh', 'points'))}`)
+  // A re-run that changes the dictionaries but reuses the time directory names
+  // is the case this catches; the field files themselves are stamped per file
+  // in series.fingerprint.
+  for (const rel of [['system', 'controlDict'], ['system', 'fvSolution']]) parts.push(`${rel.join('/')}@${await mtimeOf(path.join(root.rootAbs, ...rel))}`)
   return createHash('sha1').update(parts.join('\n')).digest('hex')
 }
 

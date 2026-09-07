@@ -15,6 +15,14 @@ export interface TimeDirInfo {
   fields: string[]
   /** FoamFile class of each listed field (volScalarField, volVectorField, ...). */
   fieldClasses: Record<string, string>
+  /**
+   * `mtimeMs:size` per field FILE. A re-run writes the same time directory
+   * names, so the directory's own mtime does not always move - on Windows a
+   * directory mtime only changes when an entry is added or removed, and
+   * rewriting `10/U` in place leaves it alone. The per-file stamps are what
+   * tells a fresh result from a cached one.
+   */
+  fieldStamps: Record<string, string>
   mtimeMs: number
 }
 
@@ -60,6 +68,22 @@ async function isFile(p: string): Promise<boolean> {
   }
 }
 
+/** `mtimeMs:size` for each named file in a directory; 'missing' for one that went away mid-scan. */
+export async function statFields(dirAbs: string, names: string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  await Promise.all(
+    names.map(async (name) => {
+      try {
+        const st = await fs.stat(path.join(dirAbs, name))
+        out[name] = `${st.mtimeMs}:${st.size}`
+      } catch {
+        out[name] = 'missing'
+      }
+    }),
+  )
+  return out
+}
+
 /** vol*Field files directly inside a directory, by FoamFile class; anything else (phi, binary, dictionaries) is skipped. */
 export async function listVolFields(dirAbs: string): Promise<Record<string, string>> {
   const out: Record<string, string> = {}
@@ -97,8 +121,8 @@ export async function listTimeDirs(rootAbs: string): Promise<TimeDirInfo[]> {
       const fieldClasses = await listVolFields(abs)
       const fields = Object.keys(fieldClasses).sort()
       if (fields.length === 0) return null
-      const st = await fs.stat(abs)
-      return { name: e.name, value: parseTimeName(e.name), abs, fields, fieldClasses, mtimeMs: st.mtimeMs }
+      const [st, fieldStamps] = await Promise.all([fs.stat(abs), statFields(abs, fields)])
+      return { name: e.name, value: parseTimeName(e.name), abs, fields, fieldClasses, fieldStamps, mtimeMs: st.mtimeMs }
     }),
   )
   const out = infos.filter((t): t is TimeDirInfo => t !== null)
