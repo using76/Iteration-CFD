@@ -1,0 +1,87 @@
+/* Design tokens — light theme modelled on the reference mockup (VS Code/Cursor-like),
+   plus a dark theme. Every colour used by the app comes from here. */
+:root {
+  color-scheme: light;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "Pretendard", "Noto Sans KR", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 14px; --fs-xl: 16px; --fs-2xl: 20px;
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 10px; --radius-xl: 14px;
+
+  --bg-app: #f3f5f8;
+  --bg-panel: #ffffff;
+  --bg-panel-alt: #f7f9fb;
+  --bg-activity: #eef1f5;
+  --bg-hover: #eaf0f8;
+  --bg-active: #dfe9f7;
+  --bg-input: #ffffff;
+  --bg-code: #f4f6f9;
+  --bg-terminal: #ffffff;
+  --bg-overlay: rgba(255,255,255,0.86);
+
+  --border: #e1e6ed;
+  --border-strong: #cfd6df;
+  --shadow-sm: 0 1px 2px rgba(16,24,40,0.06);
+  --shadow-md: 0 4px 14px rgba(16,24,40,0.10);
+
+  --fg: #1f2733;
+  --fg-muted: #5f6b7a;
+  --fg-faint: #8a94a3;
+  --fg-inverse: #ffffff;
+
+  --accent: #2f7ce8;
+  --accent-strong: #1f66d1;
+  --accent-soft: #e8f1fd;
+  --accent-fg: #ffffff;
+
+  --success: #22a35c; --success-soft: #e6f6ec;
+  --warning: #e39b12; --warning-soft: #fff5df;
+  --danger: #dc3a3a;  --danger-soft: #fde9e9;
+  --info: #2f7ce8;
+
+  --chat-user-bg: #2f7ce8;
+  --chat-user-fg: #ffffff;
+  --chat-assistant-bg: #f6f8fb;
+
+  --chart-continuity: #2f7ce8;
+  --chart-u: #f2a33a;
+  --chart-k: #22a35c;
+  --chart-eps: #8a4fd6;
+  --chart-p: #e0483f;
+  --chart-t: #d6336c;
+  --chart-omega: #0ea5b7;
+
+  --activity-w: 56px;
+  --explorer-w: 268px;
+  --assistant-w: 420px;
+  --bottom-h: 300px;
+  --tab-h: 36px;
+  --status-h: 24px;
+  --header-h: 46px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-app: #14171c;
+  --bg-panel: #1b1f26;
+  --bg-panel-alt: #181c22;
+  --bg-activity: #12151a;
+  --bg-hover: #242a33;
+  --bg-active: #2a3442;
+  --bg-input: #12151a;
+  --bg-code: #12151a;
+  --bg-terminal: #0f1216;
+  --bg-overlay: rgba(27,31,38,0.86);
+  --border: #2a3039;
+  --border-strong: #3a424d;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 14px rgba(0,0,0,0.5);
+  --fg: #e6eaf0;
+  --fg-muted: #a5adba;
+  --fg-faint: #6f7886;
+  --accent: #4f93f0;
+  --accent-strong: #6aa6f5;
+  --accent-soft: #1d2c42;
+  --chat-user-bg: #2f6fd6;
+  --chat-assistant-bg: #20252d;
+  --success-soft: #16301f; --warning-soft: #332a10; --danger-soft: #3a1a1a;
+}

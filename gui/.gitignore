@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+runs/
+sessions/
+test-results/
+playwright-report/
+e2e/screenshots/
