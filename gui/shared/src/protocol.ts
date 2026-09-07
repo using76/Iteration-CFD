@@ -199,7 +199,7 @@ export const DEFAULT_SESSION_SETTINGS: SessionSettings = {
   autoApprove: 'reads',
   effort: 'high',
   notifyOnRunEnd: true,
-  locale: 'ko',
+  locale: 'en',
 }
 
 export const PendingApprovalSchema = z.object({
