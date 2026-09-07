@@ -39,7 +39,15 @@ function storeSession(id: string | null): void {
   }
 }
 
-const schedule: (fn: () => void) => void = typeof requestAnimationFrame === 'function' ? (fn) => requestAnimationFrame(() => fn()) : (fn) => setTimeout(fn, 16)
+/** Longest a frame waits when requestAnimationFrame is not running (a hidden tab). */
+const HIDDEN_FLUSH_MS = 50
+
+/**
+ * Frames the UI must not sit on. viewer.command has a server waiting on its
+ * reply, tool.approval_request holds a turn until the user answers, and hello
+ * is what opens the session.
+ */
+const FLUSH_NOW = new Set<ServerMsg['t']>(['hello', 'viewer.command', 'tool.approval_request', 'error'])
 
 export function createWsClient(url: string = wsUrlFor(window.location)): WsClient {
   let ws: WebSocket | null = null
@@ -49,6 +57,8 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
   let pingTimer: ReturnType<typeof setInterval> | null = null
   let queue: ServerMsg[] = []
   let flushScheduled = false
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
+  const subscribed = new Set<string>()
 
   const session = useSessionStore
   const ui = useUiStore
@@ -65,7 +75,41 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
 
   function subscribeRun(runId: string) {
     const data = session.getState().runData[runId]
+    subscribed.add(runId)
     send({ t: 'run.subscribe', runId, fromSeq: (data?.lastLogSeq ?? 0) + 1 })
+  }
+
+  /** Runs the UI is showing right now: the run panel, the terminal, the residuals tab. */
+  function displayedRunIds(): Set<string> {
+    const u = ui.getState()
+    const out = new Set<string>()
+    for (const id of [u.activeRunId, u.terminalRunId]) if (id) out.add(id)
+    for (const tab of u.tabs) if (tab.kind === 'residuals' && tab.runId) out.add(tab.runId)
+    return out
+  }
+
+  /**
+   * The live runs and the displayed ones, and nothing else. Subscribing to a
+   * finished run replays up to 5,000 log lines and its whole residual series;
+   * the server restores every past run from gui/runs on startup, so doing that
+   * for all of them on every connect and every reconnect was the cost of
+   * opening a tab.
+   */
+  function wantedRunIds(): Set<string> {
+    const want = displayedRunIds()
+    for (const r of Object.values(session.getState().runs)) if (r.status === 'running' || r.status === 'queued') want.add(r.id)
+    return want
+  }
+
+  function syncRunSubscriptions() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    const want = wantedRunIds()
+    for (const id of want) if (!subscribed.has(id)) subscribeRun(id)
+    for (const id of [...subscribed]) {
+      if (want.has(id)) continue
+      subscribed.delete(id)
+      send({ t: 'run.unsubscribe', runId: id })
+    }
   }
 
   function openBestSession() {
@@ -87,9 +131,8 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
   async function reconcileRuns() {
     try {
       const list = await api.runs()
-      const known = session.getState().runs
       session.getState().reconcileRuns(list)
-      for (const r of list) if (!known[r.id]) subscribeRun(r.id)
+      syncRunSubscriptions()
     } catch (err) {
       console.warn('ws: run reconcile failed', err)
     }
@@ -99,7 +142,9 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     attempt = 0
     session.getState().setConnection('online')
     openBestSession()
-    for (const runId of Object.keys(session.getState().runs)) subscribeRun(runId)
+    // A new socket carries none of the old socket's subscriptions.
+    subscribed.clear()
+    syncRunSubscriptions()
     void reconcileRuns()
     viewer.attach()
   }
@@ -141,6 +186,10 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
 
   function flush() {
     flushScheduled = false
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
     if (!queue.length) return
     const batch = queue
     queue = []
@@ -159,9 +208,19 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
 
   function enqueue(msg: ServerMsg) {
     queue.push(msg)
+    if (FLUSH_NOW.has(msg.t)) {
+      flush()
+      return
+    }
     if (flushScheduled) return
     flushScheduled = true
-    schedule(flush)
+    // requestAnimationFrame does not fire in a hidden tab, and it was the only
+    // thing draining this queue: a backgrounded studio processed nothing at all
+    // and the queue grew without bound. The timer runs either way; rAF only
+    // makes the visible case land on a paint, and whichever fires first clears
+    // the other.
+    flushTimer = setTimeout(flush, HIDDEN_FLUSH_MS)
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => flushScheduled && flush())
   }
 
   function stopTimers() {
@@ -169,6 +228,8 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     pingTimer = null
     if (reconnectTimer) clearTimeout(reconnectTimer)
     reconnectTimer = null
+    if (flushTimer) clearTimeout(flushTimer)
+    flushTimer = null
   }
 
   function scheduleReconnect() {
@@ -213,6 +274,10 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     }
   }
 
+  // Selecting a finished run in the UI is what subscribes to it, and moving off
+  // it is what unsubscribes.
+  const stopWatchingUi = ui.subscribe(syncRunSubscriptions)
+
   return {
     viewer,
     connect() {
@@ -222,6 +287,8 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     },
     close() {
       closedByUser = true
+      stopWatchingUi()
+      subscribed.clear()
       stopTimers()
       viewer.detach()
       const sock = ws
