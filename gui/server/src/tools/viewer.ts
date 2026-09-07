@@ -5,7 +5,7 @@ import { ViewerCommandSchema, type ViewerState } from '@cfd/shared'
 import { z } from 'zod'
 import { okResult, type ToolDef, type ToolResult } from './context.js'
 
-const LOAD_TIMEOUT_MS = 15_000
+const LOAD_TIMEOUT_MS = 45_000
 const COMMAND_TIMEOUT_MS = 30_000
 
 /** Compact view of the viewer state for the model. */

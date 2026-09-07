@@ -259,9 +259,15 @@ export function createHub(deps: HubDeps): HubHandle {
   }
 
   function pickViewer(sessionId: string | null | undefined): Client | null {
-    const candidates = [...clients.values()].filter((c) => c.viewerState !== null && c.ws.readyState === c.ws.OPEN)
+    // Prefer a client that already reported a viewer state; the shell opens
+    // the viewer tab on demand, so any client of the session (or any client
+    // at all) can still host the command.
+    const open = [...clients.values()].filter((c) => c.ws.readyState === c.ws.OPEN)
+    const withViewer = open.filter((c) => c.viewerState !== null)
+    const inSession = sessionId ? open.filter((c) => c.sessionId === sessionId) : []
+    const candidates = withViewer.length ? withViewer : inSession.length ? inSession : open
     if (!candidates.length) return null
-    const score = (c: Client) => (sessionId && c.sessionId === sessionId ? 1e15 : 0) + Math.max(c.lastActive, c.lastViewerAt)
+    const score = (c: Client) => (sessionId && c.sessionId === sessionId ? 1e15 : 0) + (c.viewerState ? 1e12 : 0) + Math.max(c.lastActive, c.lastViewerAt)
     candidates.sort((a, b) => score(b) - score(a))
     return candidates[0]
   }

@@ -44,7 +44,9 @@ export function createViewerBridge(send: (msg: ClientMsg) => boolean, ui: StoreL
 
   return {
     async handleCommand(requestId, cmd) {
-      if (cmd.type === 'load') ui.getState().openViewerTab()
+      // Commands that need a canvas open the viewer tab; the viewer API
+      // queues the command until the canvas has mounted.
+      if (cmd.type === 'load' || (!getViewerApi().isMounted() && cmd.type !== 'getState')) ui.getState().openViewerTab()
       let result: ViewerResult
       try {
         result = await getViewerApi().execute(cmd)
@@ -68,6 +70,9 @@ export function createViewerBridge(send: (msg: ClientMsg) => boolean, ui: StoreL
       unsubscribe?.()
       subscribedTo = apiInstance
       unsubscribe = apiInstance.subscribe(onState)
+      // Report the current state right away so the server knows this client
+      // can host viewer commands even before the tab is opened.
+      onState(apiInstance.getState())
     },
     detach() {
       unsubscribe?.()

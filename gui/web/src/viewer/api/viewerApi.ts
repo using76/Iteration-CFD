@@ -2,7 +2,7 @@
 // only talks to the viewer through this object; the viewer never imports
 // shell state. The real implementation installs itself at module import, so
 // commands issued before the canvas mounts queue until it exists (or fail
-// NO_VIEWER after 5 s).
+// NO_VIEWER after 30 s).
 import type { ViewerCommand, ViewerResult, ViewerState } from '@cfd/shared'
 import { HttpTransport, RoutingTransport, SyntheticTransport } from '../data/transport'
 import { SYNTHETIC_CHANNEL_2D_PATH, SYNTHETIC_CHANNEL_PATH, buildSyntheticChannel } from '../data/syntheticDataset'
@@ -45,7 +45,7 @@ export function getViewerController(): ViewerController {
       transport: new RoutingTransport(http, synthetic),
       createCompute: (provider) => new WorkerCompute(provider, createWorker),
       requireMount: true,
-      mountTimeoutMs: 5000,
+      mountTimeoutMs: 30_000,
     })
   }
   return controller
