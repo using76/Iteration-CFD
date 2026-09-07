@@ -97,6 +97,33 @@ The whole validation suite is `cargo run --release --bin ofgpu-validate`. The ot
 
 ---
 
+### Sample case — race-car external aerodynamics
+
+One geometry and two commands live in [`cases/`](cases/). No mesh and no
+results: together they are over a gigabyte, and producing them is what this
+program is for.
+
+```powershell
+cd cases
+.\racecar.cmd     # 10-20 min of meshing (CPU) + about 40 s of solving (GPU)
+```
+
+Details in [`cases/racecar.md`](cases/racecar.md).
+
+### MCP — hand the solvers to an assistant
+
+Claude Code, Claude Desktop, or anything else that speaks the Model Context
+Protocol can run these solvers directly. One file, no dependencies.
+
+```powershell
+claude mcp add ofgpu -- node mcp\server.mjs
+```
+
+The guide, the tool list, and what the server refuses to do:
+[`mcp/README.md`](mcp/README.md).
+
+---
+
 ## What it can do
 
 | Area | Supported |

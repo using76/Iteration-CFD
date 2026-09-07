@@ -91,6 +91,31 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 
 ---
 
+### 샘플 케이스 — 경주차 외부 공력
+
+형상 하나와 명령 두 줄이 [`cases/`](cases/)에 들어 있습니다. 격자와 결과는
+없습니다 — 합쳐 1 GB가 넘고, 그것을 만드는 것이 이 프로그램이 하는 일입니다.
+
+```powershell
+cd cases
+.\racecar.cmd     # 격자 10-20분(CPU) + 솔브 약 40초(GPU)
+```
+
+자세한 것은 [`cases/racecar.md`](cases/racecar.md).
+
+### MCP — AI에게 솔버 넘기기
+
+Claude Code, Claude Desktop 등 Model Context Protocol을 말하는 클라이언트가
+이 솔버들을 직접 실행하게 할 수 있습니다. 의존성 없는 파일 하나입니다.
+
+```powershell
+claude mcp add ofgpu -- node mcp\server.mjs
+```
+
+사용법과 도구 목록, 무엇을 못 하게 막아 두었는지는 [`mcp/README.md`](mcp/README.md).
+
+---
+
 ## 할 수 있는 것
 
 | 영역 | 지원 |
