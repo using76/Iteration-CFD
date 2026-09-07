@@ -193,6 +193,18 @@ async function main(): Promise<void> {
   }
   process.on('SIGINT', () => stop('SIGINT'))
   process.on('SIGTERM', () => stop('SIGTERM'))
+  // A write stream that loses its file, a socket that errors after its handler
+  // is gone: node's default for an unhandled 'error' event is to kill the
+  // process, and a solver mid-run dies with it and leaves no log of why. Log
+  // it, then shut down the way a signal would so the run files are closed.
+  process.on('uncaughtException', (err) => {
+    log.error(`uncaught exception: ${err.stack ?? String(err)}`)
+    stop('uncaughtException')
+  })
+  process.on('unhandledRejection', (reason) => {
+    log.error(`unhandled rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`)
+    stop('unhandledRejection')
+  })
 }
 
 const invokedDirectly = process.argv[1] && /[\\/]main\.(ts|js)$/.test(process.argv[1])
