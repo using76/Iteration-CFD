@@ -1,6 +1,6 @@
 // node:http server: /api -> router, /ws -> hub upgrade, everything else ->
 // the built web app. Loopback-only unless allowRemote; optional bearer
-// token on /api and /ws; WS origin check.
+// token on /api and /ws; Host and Origin checked on both /api and /ws.
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import type { ServerConfig } from '../config.js'
@@ -37,6 +37,20 @@ export function tokenOf(req: IncomingMessage): string | null {
   return url.searchParams.get('token')
 }
 
+/**
+ * The Host header a browser sends is the name the page was loaded from, so a
+ * name that resolves to 127.0.0.1 (DNS rebinding) reaches a loopback-bound
+ * server carrying its own hostname. Requiring a loopback Host is what keeps
+ * http://evil.test from driving /api once its A record flips.
+ */
+export function hostAllowed(req: IncomingMessage, allowRemote: boolean): boolean {
+  if (allowRemote) return true
+  const raw = req.headers.host
+  if (!raw) return false
+  const host = raw.startsWith('[') ? raw.slice(0, raw.indexOf(']') + 1) : raw.split(':')[0]
+  return LOOPBACK_HOSTS.has(host.toLowerCase())
+}
+
 export function originAllowed(req: IncomingMessage, allowRemote: boolean): boolean {
   const origin = req.headers.origin
   if (!origin) return true
@@ -60,6 +74,16 @@ export function createHttpServer(deps: HttpServerDeps): HttpServerHandle {
     const url = req.url ?? '/'
     try {
       if (url === '/api' || url.startsWith('/api/') || url.startsWith('/api?')) {
+        if (!hostAllowed(req, config.allowRemote)) {
+          log.warn(`refused ${req.method} ${url} for Host ${req.headers.host ?? '(none)'}`)
+          sendJson(res, 403, { error: 'host not allowed' })
+          return
+        }
+        if (!originAllowed(req, config.allowRemote)) {
+          log.warn(`refused ${req.method} ${url} from origin ${req.headers.origin}`)
+          sendJson(res, 403, { error: 'origin not allowed' })
+          return
+        }
         if (!authorised(req)) {
           sendJson(res, 401, { error: 'missing or invalid token' })
           return
@@ -92,8 +116,8 @@ export function createHttpServer(deps: HttpServerDeps): HttpServerHandle {
       socket.destroy()
       return
     }
-    if (!originAllowed(req, config.allowRemote)) {
-      log.warn(`refused WebSocket upgrade from origin ${req.headers.origin}`)
+    if (!hostAllowed(req, config.allowRemote) || !originAllowed(req, config.allowRemote)) {
+      log.warn(`refused WebSocket upgrade from origin ${req.headers.origin} host ${req.headers.host ?? '(none)'}`)
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       socket.destroy()
       return

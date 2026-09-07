@@ -38,6 +38,19 @@ interface Route {
 
 export const MAX_BODY_BYTES = 32 * 1024 * 1024
 
+/**
+ * A cross-site form or img can send text/plain, multipart or urlencoded
+ * without a preflight; application/json always costs the attacker a CORS
+ * preflight this server never answers. Demanding it on every JSON body is
+ * the cheap half of the CSRF defence, the Host/Origin check in server.ts is
+ * the other.
+ */
+export function requireJsonContentType(req: IncomingMessage): void {
+  const raw = req.headers['content-type']
+  const mime = (raw ?? '').split(';')[0].trim().toLowerCase()
+  if (mime !== 'application/json') throw new HttpError(415, `expected content-type: application/json, got ${raw ?? 'none'}`)
+}
+
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text), 'cache-control': 'no-store' })
@@ -131,6 +144,7 @@ export class Router {
         query: url.searchParams,
         text: () => readBody(req),
         json: async (schema) => {
+          requireJsonContentType(req)
           const text = await readBody(req)
           let parsed: unknown
           try {

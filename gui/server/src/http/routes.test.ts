@@ -42,6 +42,7 @@ afterAll(async () => {
 type Loose = any
 const get = (p: string) => fetch(`${base}${p}`)
 const json = async (p: string): Promise<Loose> => (await get(p)).json()
+const postJson = (u: string, body: unknown, method = 'POST') => fetch(u, { method, body: JSON.stringify(body), headers: { 'content-type': 'application/json' } })
 
 describe('api routes', () => {
   it('health, hello, registry and the schema', async () => {
@@ -81,7 +82,7 @@ describe('api routes', () => {
   })
 
   it('writes with conflict detection and broadcasts fs.changed', async () => {
-    const put = (body: unknown) => fetch(`${base}/api/fs/file`, { method: 'PUT', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } })
+    const put = (body: unknown) => postJson(`${base}/api/fs/file`, body, 'PUT')
     const created = await put({ path: 'cases/new.jsonc', content: '{}', baseHash: null })
     expect(created.status).toBe(200)
     const { hash } = (await created.json()) as { hash: string }
@@ -107,12 +108,14 @@ describe('api routes', () => {
     expect(csv.headers.get('content-type')).toContain('text/csv')
     expect(await csv.text()).toBe('iter,time,k\n1,,0.5\n')
     expect((await json('/api/runs/r_1/residuals')).residuals).toHaveLength(1)
-    const started = await fetch(`${base}/api/runs`, { method: 'POST', body: JSON.stringify({ binary: 'ofgpu-k-epsilon', casePath: 'cases/plume.jsonc', args: [{ flag: '-iters', value: 10 }], positionals: [], label: 'x' }) })
+    const started = await postJson(`${base}/api/runs`, { binary: 'ofgpu-k-epsilon', casePath: 'cases/plume.jsonc', args: [{ flag: '-iters', value: 10 }], positionals: [], label: 'x' })
     expect(started.status).toBe(200)
     expect(((await started.json()) as { label: string }).label).toBe('x')
-    const bad = await fetch(`${base}/api/runs`, { method: 'POST', body: JSON.stringify({ binary: 'ofgpu-bad', casePath: null, args: [], positionals: [], label: null }) })
+    const bad = await postJson(`${base}/api/runs`, { binary: 'ofgpu-bad', casePath: null, args: [], positionals: [], label: null })
     expect(bad.status).toBe(400)
-    expect((await fetch(`${base}/api/runs`, { method: 'POST', body: JSON.stringify({ casePath: 1 }) })).status).toBe(400)
+    expect((await postJson(`${base}/api/runs`, { casePath: 1 })).status).toBe(400)
+    // A cross-site form can post text/plain but never application/json.
+    expect((await fetch(`${base}/api/runs`, { method: 'POST', body: JSON.stringify({ casePath: 1 }) })).status).toBe(415)
     const stop = await fetch(`${base}/api/runs/r_1/stop`, { method: 'POST' })
     expect(((await stop.json()) as { status: string }).status).toBe('killed')
     expect(runs.stopped).toEqual(['r_1'])
@@ -125,10 +128,10 @@ describe('api routes', () => {
     expect((await json(`/api/sessions/${s.id}`)).id).toBe(s.id)
     expect((await get('/api/sessions/nope')).status).toBe(404)
     expect(await (await fetch(`${base}/api/sessions/${s.id}`, { method: 'DELETE' })).json()).toEqual({ deleted: true })
-    const open = await fetch(`${base}/api/datasets/open`, { method: 'POST', body: JSON.stringify({ path: 'cases/plume.jsonc', timeIndex: 'last' }) })
+    const open = await postJson(`${base}/api/datasets/open`, { path: 'cases/plume.jsonc', timeIndex: 'last' })
     expect(await open.json()).toMatchObject({ datasetId: 'd_1', status: 'loading' })
     expect(datasets.opened).toEqual(['cases/plume.jsonc'])
-    expect((await fetch(`${base}/api/datasets/open`, { method: 'POST', body: JSON.stringify({ path: '../../etc' }) })).status).toBe(403)
+    expect((await postJson(`${base}/api/datasets/open`, { path: '../../etc' })).status).toBe(403)
     expect((await get('/api/datasets/d_9')).status).toBe(404)
     const blob = await get('/api/datasets/d_1/blob/f32')
     expect(blob.headers.get('content-type')).toBe('application/octet-stream')
