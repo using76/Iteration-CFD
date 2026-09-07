@@ -1,5 +1,6 @@
 // Read-only `git status` for the Source Control panel and the status bar.
 import { execFile } from 'node:child_process'
+import { scrubbedEnv } from '../env.js'
 
 export interface GitChange {
   /** Two-letter porcelain status ("M ", "??", "A ", ...). */
@@ -49,7 +50,7 @@ export function parsePorcelain(text: string): Omit<GitStatus, 'available' | 'err
 
 export function gitStatus(cwd: string): Promise<GitStatus> {
   return new Promise((resolve) => {
-    execFile('git', ['status', '--porcelain=v1', '-b', '--untracked-files=normal'], { cwd, timeout: 10_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile('git', ['status', '--porcelain=v1', '-b', '--untracked-files=normal'], { cwd, timeout: 10_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env: scrubbedEnv() }, (err, stdout, stderr) => {
       if (err) {
         resolve({ available: false, branch: null, upstream: null, ahead: 0, behind: 0, changes: [], error: (String(stderr) || err.message).trim() })
         return

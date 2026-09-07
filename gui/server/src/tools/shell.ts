@@ -2,6 +2,7 @@
 // code runs unless config/policy.json (or the session settings) relax it.
 import { spawn } from 'node:child_process'
 import { z } from 'zod'
+import { scrubbedEnv } from '../env.js'
 import { fail, okResult, type ToolDef } from './context.js'
 import { resolveTool } from './paths.js'
 
@@ -30,7 +31,7 @@ export function spawnCapture(argv: string[], opts: { cwd: string; timeoutMs: num
     let truncated = false
     let timedOut = false
     let settled = false
-    const child = spawn(cmd, args, { cwd: opts.cwd, shell: false, env: opts.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    const child = spawn(cmd, args, { cwd: opts.cwd, shell: false, env: scrubbedEnv(opts.env), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     const append = (which: 'out' | 'err', chunk: Buffer) => {
       const text = chunk.toString('utf8')
       if (which === 'out') {

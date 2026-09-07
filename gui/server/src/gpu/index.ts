@@ -2,6 +2,7 @@
 // polled with nvidia-smi (once at boot, every 5 s while a GPU run is
 // active); demo mode fabricates a card; no nvidia-smi means 'absent'.
 import { execFile } from 'node:child_process'
+import { scrubbedEnv } from '../env.js'
 import type { GpuState } from '@cfd/shared'
 
 export interface GpuQuery {
@@ -38,7 +39,7 @@ export function queryNvidiaSmi(): Promise<GpuQuery | null> {
     execFile(
       'nvidia-smi',
       ['--query-gpu=name,memory.used,memory.total', '--format=csv,noheader,nounits'],
-      { timeout: 4000, windowsHide: true },
+      { timeout: 4000, windowsHide: true, env: scrubbedEnv() },
       (err, stdout) => resolve(err ? null : parseNvidiaSmi(String(stdout))),
     )
   })
