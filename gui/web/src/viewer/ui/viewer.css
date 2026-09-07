@@ -1,0 +1,67 @@
+/* 3D viewer tab. Colours come from styles/tokens.css. */
+.v3d { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; font-family: var(--font-ui); color: var(--fg); background: var(--bg-panel); }
+.v3d-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-panel); flex: none; flex-wrap: wrap; }
+.v3d-toolbar .spacer { flex: 1; }
+.v3d-select { height: 30px; padding: 0 28px 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-input); color: var(--fg); font-size: var(--fs-md); font-family: inherit; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235f6b7a' stroke-width='2.5'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 9px center; }
+.v3d-select.field { min-width: 210px; }
+.v3d-select.rep { min-width: 190px; }
+.v3d-tools { display: flex; border: 1px solid var(--border-strong); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-input); }
+.v3d-tools button { width: 36px; height: 30px; border: none; border-right: 1px solid var(--border); background: transparent; color: var(--fg-muted); display: grid; place-items: center; cursor: pointer; }
+.v3d-tools button:last-child { border-right: none; }
+.v3d-tools button:hover { background: var(--bg-hover); color: var(--fg); }
+.v3d-tools button.active { background: var(--accent-soft); color: var(--accent); }
+.v3d-iconbtn { width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-input); color: var(--fg-muted); display: grid; place-items: center; cursor: pointer; }
+.v3d-iconbtn:hover { background: var(--bg-hover); color: var(--fg); }
+.v3d-iconbtn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.v3d-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: linear-gradient(180deg, #f7f9fc 0%, #e6ebf1 100%); }
+:root[data-theme="dark"] .v3d-stage { background: linear-gradient(180deg, #1c2129 0%, #10141a 100%); }
+.v3d-host { position: absolute; inset: 0; }
+.v3d-host canvas.viewer-canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }
+.v3d-card { position: absolute; background: var(--bg-overlay); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); font-size: var(--fs-sm); line-height: 1.5; padding: 8px 12px; pointer-events: none; backdrop-filter: blur(4px); }
+.v3d-card b { font-weight: 600; }
+.v3d-card.pointer { pointer-events: auto; }
+.v3d-overlay { top: 12px; left: 14px; font-size: var(--fs-md); background: transparent; border: none; box-shadow: none; padding: 0; text-shadow: 0 0 6px var(--bg-panel), 0 0 2px var(--bg-panel); }
+.v3d-overlay .k { color: var(--fg-muted); }
+.v3d-domain { right: 14px; bottom: 14px; }
+.v3d-domain .toggle { pointer-events: auto; cursor: pointer; color: var(--accent); }
+.v3d-badge { position: absolute; top: 10px; right: 12px; font-size: var(--fs-xs); padding: 2px 8px; border-radius: 999px; background: var(--bg-overlay); border: 1px solid var(--border); color: var(--fg-muted); letter-spacing: .02em; }
+.v3d-badge.gpu { color: var(--success); border-color: var(--success); }
+.v3d-legend { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); pointer-events: none; }
+.v3d-legend text { font-family: var(--font-ui); fill: var(--fg); }
+.v3d-legend .title { font-weight: 600; }
+.v3d-layers { position: absolute; top: 40px; right: 12px; width: 220px; pointer-events: auto; }
+.v3d-layers h4 { margin: 0 0 4px; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--fg-muted); }
+.v3d-layers ul { list-style: none; margin: 0; padding: 0; }
+.v3d-layers li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.v3d-layers li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--fs-xs); }
+.v3d-layers li.hidden span { opacity: .45; }
+.v3d-layers button { border: none; background: transparent; color: var(--fg-muted); cursor: pointer; padding: 2px; display: grid; place-items: center; }
+.v3d-layers button:hover { color: var(--fg); }
+.v3d-layers .clip { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.v3d-layers .clip input[type=range] { flex: 1; }
+.v3d-time { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; min-width: 320px; pointer-events: auto; }
+.v3d-time input[type=range] { flex: 1; }
+.v3d-time .label { font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; min-width: 90px; }
+.v3d-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--fg-muted); font-size: var(--fs-md); text-align: center; padding: 24px; pointer-events: none; }
+.v3d-loading { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.v3d-loading .box { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: var(--bg-overlay); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-md); font-size: var(--fs-md); }
+.v3d-spinner { width: 16px; height: 16px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: v3d-spin .8s linear infinite; }
+@keyframes v3d-spin { to { transform: rotate(360deg); } }
+.v3d-toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger); border-radius: var(--radius-md); padding: 6px 12px; font-size: var(--fs-sm); max-width: 70%; pointer-events: auto; cursor: pointer; }
+.v3d-toast.info { background: var(--warning-soft); color: var(--warning); border-color: var(--warning); }
+.v3d-tip { position: absolute; background: var(--fg); color: var(--fg-inverse); font-family: var(--font-mono); font-size: var(--fs-xs); padding: 3px 7px; border-radius: var(--radius-sm); pointer-events: none; transform: translate(10px, -100%); white-space: nowrap; }
+.v3d-settings { position: absolute; top: 46px; right: 12px; z-index: 5; width: 260px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); padding: 10px 12px; font-size: var(--fs-sm); }
+.v3d-settings .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+.v3d-settings .row > label { color: var(--fg-muted); }
+.v3d-settings select, .v3d-settings input[type=number] { height: 26px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-input); color: var(--fg); font-family: inherit; font-size: var(--fs-sm); padding: 0 6px; }
+.v3d-settings input[type=number] { width: 72px; }
+.v3d-settings .seg { display: flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+.v3d-settings .seg button { border: none; background: transparent; padding: 3px 8px; cursor: pointer; color: var(--fg-muted); font-size: var(--fs-xs); font-family: inherit; }
+.v3d-settings .seg button.active { background: var(--accent-soft); color: var(--accent); }
+.v3d-settings .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.v3d-settings .presets button { border: 1px solid var(--border-strong); background: var(--bg-input); border-radius: var(--radius-sm); padding: 3px 0; cursor: pointer; font-size: var(--fs-xs); color: var(--fg); font-family: inherit; }
+.v3d-settings .presets button:hover { background: var(--bg-hover); }
+.v3d-settings hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+.v3d-settings .wide { width: 100%; height: 28px; border: 1px solid var(--border-strong); background: var(--bg-input); color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; font-family: inherit; font-size: var(--fs-sm); }
+.v3d-settings .wide:hover { background: var(--bg-hover); }
