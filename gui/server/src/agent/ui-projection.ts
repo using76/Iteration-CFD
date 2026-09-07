@@ -69,6 +69,8 @@ export type PartialBlock =
   | { type: 'thinking'; thinking: string; signature: string; stopped: boolean }
   | { type: 'redacted_thinking'; data: string; stopped: boolean }
   | { type: 'tool_use'; id: string; name: string; json: string; stopped: boolean }
+  /** A block this projector does not model - `fallback` today, whatever ships next. Carried through untouched. */
+  | { type: 'other'; raw: BetaContentBlockParam; stopped: boolean }
 
 export interface PartialMessage {
   model: string | null
@@ -108,6 +110,12 @@ export function createStreamProjector(emit: (msg: ServerMsg) => void, sessionId:
           } else if (cb.type === 'tool_use') {
             state.blocks[index] = { type: 'tool_use', id: cb.id, name: cb.name, json: '', stopped: false }
             emit({ t: 'tool.start', sessionId, messageId, blockIndex: index, toolUseId: cb.id, name: cb.name })
+          } else {
+            // Dropping it would be silent and would break the next request: a
+            // `fallback` block is the boundary marker between two thinking
+            // runs, and the API rejects a message that lost it. There is
+            // nothing to show, so no frame is emitted.
+            state.blocks[index] = { type: 'other', raw: cb as unknown as BetaContentBlockParam, stopped: false }
           }
           break
         }
@@ -149,6 +157,7 @@ export function createStreamProjector(emit: (msg: ServerMsg) => void, sessionId:
         if (b.type === 'text') out.push({ type: 'text', text: b.text })
         else if (b.type === 'thinking') out.push({ type: 'thinking', thinking: b.thinking, signature: b.signature })
         else if (b.type === 'redacted_thinking') out.push({ type: 'redacted_thinking', data: b.data })
+        else if (b.type === 'other') out.push(b.raw)
         else {
           try {
             out.push({ type: 'tool_use', id: b.id, name: b.name, input: b.json.trim() ? JSON.parse(b.json) : {} })

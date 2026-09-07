@@ -19,7 +19,7 @@ import { emptyUsage, type LlmClient } from './llm.js'
 import { classifyTool, type PolicyOverrides } from './policy.js'
 import { BUDGET_EXHAUSTED_TEXT, buildVolatileContext, foldContextIntoUser, systemParam, volatileSystemMessage } from './prompt.js'
 import { appendUserTurn, newId, type SessionRecord, type SessionStore } from './session.js'
-import { createStreamProjector, projectAssistant, type AssistantExtras, type StreamProjector, type UiStopReason } from './ui-projection.js'
+import { createStreamProjector, projectAssistant, type AssistantExtras, type UiStopReason } from './ui-projection.js'
 
 export const MAX_TOOL_ROUNDS = 40
 export const MAX_TOKENS = 64_000
@@ -170,9 +170,14 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     return { status, rounds, model }
   }
 
-  /** The stream stopped before finalMessage(): keep complete blocks, give dangling tool_uses an is_error result. */
-  async function repairPartial(projector: StreamProjector, messageId: string, stopReason: UiStopReason, code: string, message: string, warning: string | null): Promise<void> {
-    const content = projector.completeContent()
+  /**
+   * Keep the complete blocks of a turn that stopped early and give any dangling
+   * tool_use an is_error result. `content` is the projector's reconstruction
+   * when the stream never produced a final message, and final.content itself
+   * when it did - the latter is authoritative and carries blocks the projector
+   * has no case for.
+   */
+  async function repairPartial(content: ReadonlyArray<BetaContentBlockParam | BetaMessage['content'][number]>, messageId: string, stopReason: UiStopReason, code: string, message: string, warning: string | null): Promise<void> {
     const toolUses = content.filter(isToolUse)
     if (stopReason === 'cancelled' && !toolUses.length) return
     if (!content.length) return
@@ -217,13 +222,13 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       final = await stream.finalMessage()
     } catch (err) {
       if (signal.aborted || isAbortError(err)) {
-        await repairPartial(projector, messageId, 'cancelled', 'CANCELLED', 'cancelled by user', null)
+        await repairPartial(projector.completeContent(), messageId, 'cancelled', 'CANCELLED', 'cancelled by user', null)
         return finish('cancelled')
       }
       if (isToolJsonParseError(err)) {
         rounds++
         model = projector.partial().model ?? model
-        await repairPartial(projector, messageId, 'max_tokens', 'TRUNCATED', 'not executed: the response was truncated', 'The response was cut off before a tool call was complete; that call was not executed.')
+        await repairPartial(projector.completeContent(), messageId, 'max_tokens', 'TRUNCATED', 'not executed: the response was truncated', 'The response was cut off before a tool call was complete; that call was not executed.')
         return finish('done')
       }
       if (isSystemRoleRejection(err) && !foldContext) {
@@ -260,7 +265,7 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     }
 
     if (final.stop_reason === 'max_tokens' || final.stop_reason === 'model_context_window_exceeded') {
-      await repairPartial(projector, messageId, 'max_tokens', 'TRUNCATED', 'not executed: the response was truncated (max_tokens)', 'The response hit the output token limit; tool calls in it were not executed.')
+      await repairPartial(final.content, messageId, 'max_tokens', 'TRUNCATED', 'not executed: the response was truncated (max_tokens)', 'The response hit the output token limit; tool calls in it were not executed.')
       return finish('done')
     }
 

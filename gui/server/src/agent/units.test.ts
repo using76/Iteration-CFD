@@ -173,6 +173,27 @@ describe('projection', () => {
       { type: 'tool_use', id: 'tu1', name: 'gpu_info', input: {} },
     ])
   })
+
+  it('carries a block type it does not model through completeContent', () => {
+    const sent: ServerMsg[] = []
+    const p = createStreamProjector((m) => sent.push(m), 's', 'm1')
+    // A `fallback` block marks where one model declined and another continued;
+    // it sits between two thinking runs and the API rejects the next request if
+    // it is missing. The projector has no case for it, and used to drop it.
+    const fallback = { type: 'fallback', from: { model: 'claude-fable-5-1' }, to: { model: 'claude-opus-5' } }
+    const events = [
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: 'a', signature: 'S' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: fallback },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'content_block_start', index: 2, content_block: { type: 'text', text: 'b', citations: null } },
+      { type: 'content_block_stop', index: 2 },
+    ] as unknown as BetaRawMessageStreamEvent[]
+    for (const ev of events) p.onEvent(ev)
+    expect(p.completeContent()).toEqual([{ type: 'thinking', thinking: 'a', signature: 'S' }, fallback, { type: 'text', text: 'b' }])
+    // Nothing to show for it, so no frame is emitted either.
+    expect(sent.filter((m) => m.t === 'msg.block_start')).toHaveLength(2)
+  })
 })
 
 describe('policy', () => {

@@ -1,7 +1,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import Anthropic from '@anthropic-ai/sdk'
-import type { BetaMessage, BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages'
+import type { BetaMessage, BetaRawMessageStreamEvent, BetaRefusalStopDetails } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { setSchemaValidator, structuralValidate } from '../tools/case.js'
 import type { LlmClient } from './llm.js'
@@ -270,7 +270,7 @@ describe('stop reasons and errors', () => {
           { type: 'tool_use', name: 'gpu_info', input: {} },
         ],
         stopReason: 'refusal',
-        stopDetails: { type: 'refusal', category: 'general_harms', explanation: null },
+        stopDetails: { category: 'general_harms', explanation: null, fallback_credit_token: null } as unknown as BetaRefusalStopDetails,
       }),
     })
     const rec = session(deps, 'something refused mid-stream')
