@@ -302,6 +302,8 @@ function scenarioViewer(f: Facts): MockPlan {
   const type = String(last.input.type ?? '')
   if (last.name === 'viewer_command' && type === 'load') return useTools([tool('viewer_command', { type: 'addSlice', id: null, axis: 'z', position: { fraction: 0.5 } })])
   if (last.name === 'viewer_command' && type === 'addSlice') return useTools([tool('viewer_command', { type: 'addStreamlines', id: null, field: null, seed: { plane: 'x', position: { fraction: 0.1 }, grid: [8, 8] }, style: 'line', maxLength: null, direction: 'forward' })])
+  // Interior layers are hidden by an opaque box: make the surface translucent, as the reference mockup does.
+  if (last.name === 'viewer_command' && type === 'addStreamlines') return useTools([tool('viewer_command', { type: 'setRepresentation', mode: 'surface', opacity: 0.3, patches: null, shading: null })])
   if (last.name === 'viewer_command') return useTools([suggest(ko, ['Take a screenshot of the slice', 'Add an iso-surface of |U|', 'Compute field statistics'])])
   const state = ([...f.results].reverse().find((r) => r.name === 'viewer_command' && r.ok)?.data.state ?? null) as Record<string, unknown> | null
   const cells = n(state?.cellCount)

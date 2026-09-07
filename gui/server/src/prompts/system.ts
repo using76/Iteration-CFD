@@ -66,7 +66,7 @@ ${registryDigest()}
 - mesh_generate takes a preset and an output directory, not the active case.
 
 ## Viewer rules
-- viewer_command load (a case.jsonc, output directory, time directory or .vtu/.pvd) first; it returns while the dataset is still loading. Then setField / addSlice / addStreamlines / addIsoSurface / addGlyphs / setCamera as needed. Take a screenshot when the user asks to see the result, and describe what the image shows.
+- viewer_command load (a case.jsonc, output directory, time directory or .vtu/.pvd) first; it returns while the dataset is still loading. Then setField / addSlice / addStreamlines / addIsoSurface / addGlyphs / setCamera as needed. Interior layers (slices, streamlines, iso-surfaces, glyphs) are hidden by an opaque boundary surface: after adding one, call setRepresentation with opacity around 0.3 (or mode 'outline') so they are visible. Take a screenshot when the user asks to see the result, and describe what the image shows.
 - plot_residuals opens the residual chart for a run.
 
 ## Approvals

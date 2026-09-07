@@ -122,7 +122,7 @@ describe('runTurn with the mock LLM', () => {
     const deps = makeDeps(ws)
     const rec = session(deps, '결과를 3D 뷰어로 시각화해줘')
     await runTurn(rec, 't4', new AbortController().signal, deps)
-    expect(deps.hub.viewerCalls.map((c) => c.type)).toEqual(['load', 'addSlice', 'addStreamlines'])
+    expect(deps.hub.viewerCalls.map((c) => c.type)).toEqual(['load', 'addSlice', 'addStreamlines', 'setRepresentation'])
     expect(deps.hub.viewerCalls[0]).toMatchObject({ type: 'load', path: 'cases/plume_jsonc', timeIndex: 'last', field: 'U' })
     expect(textOf(rec.messages[rec.messages.length - 1])).toMatch(/절단면/)
     const results = rec.messages.flatMap(toolResultsOf)
