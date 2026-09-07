@@ -65,3 +65,51 @@ describe('StructuredGrid', () => {
     expect(out[0]).toBeCloseTo(1.5 + 5, 5)
   })
 })
+
+// A cut-cell mesh is the block minus the cells the body occupies. The lattice
+// still exists; some of its sites just have no cell behind them, and a site
+// index is no longer a cell index.
+describe('a lattice with holes', () => {
+  /** 4x4x1, with the two middle sites of the bottom row carved out. */
+  function holed() {
+    const sites = 4 * 4 * 1
+    const index = new Int32Array(sites)
+    let cell = 0
+    for (let s = 0; s < sites; s++) index[s] = s === 5 || s === 6 ? -1 : cell++
+    return new StructuredGrid({ dims: [4, 4, 1], x: uniformNodes(0, 4, 4), y: uniformNodes(0, 4, 4), z: uniformNodes(0, 1, 1), index })
+  }
+
+  it('maps a site to its cell, and says which sites have none', () => {
+    const g = holed()
+    expect(g.cellIndex(0, 0, 0)).toBe(0)
+    expect(g.cellIndex(1, 1, 0)).toBe(-1)
+    expect(g.cellIndex(2, 1, 0)).toBe(-1)
+    // Sites after the holes shift down by two, which is exactly what a cell
+    // array written by the mesher does.
+    expect(g.cellIndex(3, 1, 0)).toBe(5)
+    expect(g.blocked(1, 1, 0)).toBe(true)
+    expect(g.blocked(0, 0, 0)).toBe(false)
+  })
+
+  it('refuses an index that does not cover the lattice', () => {
+    expect(() => new StructuredGrid({ dims: [2, 2, 1], x: uniformNodes(0, 2, 2), y: uniformNodes(0, 2, 2), z: uniformNodes(0, 1, 1), index: new Int32Array(3) })).toThrow(/3 entries for 4 sites/)
+  })
+
+  it('interpolates from the corners that exist and refuses where none do', () => {
+    const g = holed()
+    // 14 cells; give every cell the value 1 so any correct interpolation is 1.
+    const field = new Float32Array(14).fill(1)
+    const out = [0]
+    // Beside the hole: some corners are missing, the answer is still 1 rather
+    // than a fraction of it - the weight is renormalised, not padded with zero.
+    expect(g.sampleTrilinear(field, 1, 1.0, 1.5, 0.5, out)).toBe(true)
+    expect(out[0]).toBeCloseTo(1, 12)
+    // Dead centre of the two holes, far from any live corner.
+    expect(g.sampleTrilinear(field, 1, 2.0, 1.5, 0.5, out)).toBe(false)
+  })
+
+  it('gives a site its own centre without going through a cell index', () => {
+    const g = holed()
+    expect(Array.from(g.centerOfSite(3, 1, 0) as number[])).toEqual([3.5, 1.5, 0.5])
+  })
+})

@@ -28,9 +28,13 @@ function gridOf(resolve: BlobResolver, keys: GridKeys): StructuredGrid {
   const x = need(resolve, keys.x, Float32Array)
   const y = need(resolve, keys.y, Float32Array)
   const z = need(resolve, keys.z, Float32Array)
+  // The blob travels as u32 like every other integer blob; the map is signed
+  // because -1 is how a site says the body is there.
+  const raw = keys.index ? need(resolve, keys.index, Uint32Array) : null
+  const index = raw ? new Int32Array(raw.buffer, raw.byteOffset, raw.length) : null
   const cached = gridCache.get(x)
-  if (cached && cached.nodes[1] === y && cached.nodes[2] === z) return cached
-  const grid = new StructuredGrid({ dims: keys.dims, x, y, z })
+  if (cached && cached.nodes[1] === y && cached.nodes[2] === z && cached.index === index) return cached
+  const grid = new StructuredGrid({ dims: keys.dims, x, y, z, index })
   gridCache.set(x, grid)
   return grid
 }

@@ -39,6 +39,15 @@ export interface StructuredGridInfo {
   uniform: boolean
   /** 2-D case: one cell across this axis and `empty` patches on its two faces. */
   emptyAxis: 'x' | 'y' | 'z' | null
+  /**
+   * A cut-cell mesh is the block minus the cells the body occupies, so the
+   * lattice has holes and site index no longer equals cell index. When this is
+   * present it is an i32 blob of nx*ny*nz entries: the cell at each site, or -1
+   * where the site is inside the body. Absent means site index IS cell index.
+   */
+  index?: BlobRef | null
+  /** Sites with no cell behind them. */
+  holes?: number
 }
 
 export interface SurfaceInfo {

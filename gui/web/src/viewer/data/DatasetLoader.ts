@@ -68,9 +68,25 @@ export class DatasetLoader {
     let grid: StructuredGrid | null = null
     let gridKeys: GridKeys | null = null
     if (manifest.grid) {
-      const [x, y, z] = await Promise.all([this.blob(manifest.id, manifest.grid.nodes.x), this.blob(manifest.id, manifest.grid.nodes.y), this.blob(manifest.id, manifest.grid.nodes.z)])
-      grid = new StructuredGrid({ dims: manifest.grid.dims, x: x as Float32Array, y: y as Float32Array, z: z as Float32Array })
-      gridKeys = { dims: manifest.grid.dims, x: scopedKey(manifest.id, manifest.grid.nodes.x.key), y: scopedKey(manifest.id, manifest.grid.nodes.y.key), z: scopedKey(manifest.id, manifest.grid.nodes.z.key) }
+      const idxRef = manifest.grid.index ?? null
+      const [x, y, z, idx] = await Promise.all([
+        this.blob(manifest.id, manifest.grid.nodes.x),
+        this.blob(manifest.id, manifest.grid.nodes.y),
+        this.blob(manifest.id, manifest.grid.nodes.z),
+        idxRef ? this.blob(manifest.id, idxRef) : Promise.resolve(null),
+      ])
+      // A cut-cell mesh's lattice has holes where the body is; without this map
+      // a site index would be read as a cell index and every slice past the
+      // geometry would sample the wrong cell.
+      const index = idx ? new Int32Array((idx as Uint32Array).buffer, (idx as Uint32Array).byteOffset, (idx as Uint32Array).length) : null
+      grid = new StructuredGrid({ dims: manifest.grid.dims, x: x as Float32Array, y: y as Float32Array, z: z as Float32Array, index })
+      gridKeys = {
+        dims: manifest.grid.dims,
+        x: scopedKey(manifest.id, manifest.grid.nodes.x.key),
+        y: scopedKey(manifest.id, manifest.grid.nodes.y.key),
+        z: scopedKey(manifest.id, manifest.grid.nodes.z.key),
+        index: idxRef ? scopedKey(manifest.id, idxRef.key) : null,
+      }
     }
     return {
       manifest,
@@ -108,6 +124,7 @@ export class DatasetLoader {
       add(manifest.grid.nodes.x)
       add(manifest.grid.nodes.y)
       add(manifest.grid.nodes.z)
+      if (manifest.grid.index) add(manifest.grid.index)
     }
     for (const f of manifest.fields) for (const t of f.perTime) add(t.blob)
   }

@@ -19,6 +19,7 @@ import {
   fieldBlobKey,
   fieldInfos,
   gridInfo,
+  blockLatticeFromCellCenters,
   latticeFromCellCenters,
   parseFieldBlobKey,
   parseGravityFile,
@@ -53,6 +54,8 @@ interface Geometry {
   grid: CartesianGrid | null
   cellCount: number
   cellCenters: Float32Array | null
+  /** Present only for a lattice with holes (a cut-cell mesh). */
+  lattice?: { index: Int32Array; holes: number } | null
 }
 
 interface Entry {
@@ -135,8 +138,17 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     if (caseInfo && !caseInfo.mesh) warnings.push(`${path.basename(root.caseJsoncAbs ?? '')}: mesh block is not a cartesian mesh; geometry taken from the results`)
     if (root.hasPolyMesh) {
       const r = await pool.run({ op: 'polyMesh', dir: path.join(root.rootAbs, 'constant', 'polyMesh') })
-      if (!r.lattice) warnings.push('polyMesh is not a structured lattice: slices, iso-surfaces and streamlines are unavailable')
-      return { geometry: { source: 'polymesh', fidelity: 'exact', grid: r.lattice, cellCount: r.nCells, cellCenters: r.cellCenters }, surface: r.surface, warnings }
+      if (r.lattice) return { geometry: { source: 'polymesh', fidelity: 'exact', grid: r.lattice, cellCount: r.nCells, cellCenters: r.cellCenters }, surface: r.surface, warnings }
+      // A cut-cell mesh is a block with the body carved out of it. The exact
+      // detector cannot see that; this one can, and it is what makes slices and
+      // streamlines work on an external-aerodynamics case.
+      const block = r.cellCenters ? blockLatticeFromCellCenters(r.cellCenters, r.surface.bounds) : null
+      if (block) {
+        warnings.push(`structured block recovered from the cut-cell mesh: ${block.grid.dims.join(' x ')}, ${block.holes.toLocaleString()} site(s) inside the body`)
+        return { geometry: { source: 'polymesh', fidelity: 'exact', grid: block.grid, cellCount: r.nCells, cellCenters: r.cellCenters, lattice: { index: block.index, holes: block.holes } }, surface: r.surface, warnings }
+      }
+      warnings.push('polyMesh is not a structured lattice: slices, iso-surfaces and streamlines are unavailable')
+      return { geometry: { source: 'polymesh', fidelity: 'exact', grid: null, cellCount: r.nCells, cellCenters: r.cellCenters }, surface: r.surface, warnings }
     }
     const vtuTime = series.times.find((t) => t.source.kind === 'vtu')
     const vtuFile = vtuTime && vtuTime.source.kind === 'vtu' ? vtuTime.source.fileAbs : root.vtk.find((v) => v.kind === 'vtu')?.abs
@@ -177,6 +189,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       }
       await storeSurface(id, surface)
       if (geometry.grid) await storeGrid(id, geometry.grid)
+      if (geometry.lattice) await blobs.put(id, 'grid.index', geometry.lattice.index)
       if (geometry.cellCenters) await blobs.put(id, CELL_CENTERS_KEY, geometry.cellCenters)
       emit(id, 'geometry', 60, `${surface.indices.length / 3} triangles`)
 
@@ -190,7 +203,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
         bounds: geometry.grid ? { min: [...geometry.grid.bounds.min], max: [...geometry.grid.bounds.max] } : { min: [...surface.bounds.min], max: [...surface.bounds.max] },
         up: await upAxis(entry),
         cellCount: geometry.cellCount,
-        grid: geometry.grid ? gridInfo(geometry.grid) : null,
+        grid: geometry.grid ? gridInfo(geometry.grid, geometry.lattice ?? null) : null,
         surface: surfaceInfo(surface),
         fields: fieldInfos(entry.series, geometry.cellCount),
         times: timeSteps(entry.series),

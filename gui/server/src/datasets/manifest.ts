@@ -169,6 +169,145 @@ export async function datasetFingerprint(rel: string, root: ResultRoot, series: 
   return createHash('sha1').update(parts.join('\n')).digest('hex')
 }
 
+/** A lattice that has cells missing: the block, plus where each site's cell is. */
+export interface BlockLattice {
+  grid: CartesianGrid
+  /** nx*ny*nz entries: the mesh cell at that site, or -1 where the site is solid. */
+  index: Int32Array
+  /** Sites with no cell. */
+  holes: number
+}
+
+/**
+ * Recover the block a cut-cell mesh was carved out of.
+ *
+ * latticeFromCellCenters wants every centre exactly on a lattice site and the
+ * product of the axis counts to equal the cell count. A cut-cell mesh satisfies
+ * neither: cells inside the body are gone, and a cut cell's centroid is its own
+ * centroid, not the block cell's. So the viewer refused every slice, streamline
+ * and glyph on exactly the meshes - external aerodynamics - that most need them.
+ *
+ * The block is still there, though, and overwhelmingly intact: in the race-car
+ * case 2,095,989 of 2,097,152 sites carry a cell. The uncut cells sit exactly on
+ * the lattice and outnumber the cut ones by three orders of magnitude, so each
+ * lattice coordinate shows up as a spike in a histogram of the centres while a
+ * cut centroid is scattered noise. Find the spikes, bin every cell to the
+ * nearest one, and what is left over is the body.
+ */
+export function blockLatticeFromCellCenters(centers: Float32Array, bounds: Bounds): BlockLattice | null {
+  const n = centers.length / 3
+  if (n < 8) return null
+
+  const axisSites = (a: number): number[] | null => {
+    const lo = bounds.min[a]
+    const hi = bounds.max[a]
+    const span = hi - lo
+    if (!(span > 0)) return null
+    // Fine enough to separate 4096 sites, which is far past any grid this
+    // viewer can hold in memory anyway.
+    const BINS = 8192
+    const counts = new Int32Array(BINS)
+    const sums = new Float64Array(BINS)
+    for (let i = 0; i < n; i++) {
+      const v = centers[3 * i + a]
+      let b = Math.floor(((v - lo) / span) * BINS)
+      if (b < 0) b = 0
+      else if (b >= BINS) b = BINS - 1
+      counts[b]++
+      sums[b] += v
+    }
+    // A site's bin holds roughly n / nSites cells. Cut-cell noise is spread
+    // over many bins and never comes close, so half of the median occupied
+    // count separates them without needing to know nSites first.
+    const occupied: number[] = []
+    for (let b = 0; b < BINS; b++) if (counts[b] > 0) occupied.push(counts[b])
+    if (occupied.length === 0) return null
+    occupied.sort((p, q) => p - q)
+    const median = occupied[occupied.length >> 1]
+    const floorCount = Math.max(2, median * 0.5)
+    const sites: number[] = []
+    for (let b = 0; b < BINS; b++) {
+      if (counts[b] < floorCount) continue
+      // Neighbouring bins can split one site; merge them by weight.
+      const last = sites.length - 1
+      const c = sums[b] / counts[b]
+      if (last >= 0 && b > 0 && counts[b - 1] >= floorCount) sites[last] = (sites[last] + c) / 2
+      else sites.push(c)
+    }
+    if (sites.length < 2 || sites.length > 1 << 12) return null
+    return sites
+  }
+
+  const xs = axisSites(0)
+  const ys = axisSites(1)
+  const zs = axisSites(2)
+  if (!xs || !ys || !zs) return null
+  const nx = xs.length
+  const ny = ys.length
+  const nz = zs.length
+  const sites = nx * ny * nz
+  // A block that is mostly holes is not the block this mesh came from.
+  if (sites > 40e6 || n < sites * 0.5) return null
+
+  const nearest = (u: number[], v: number): number => {
+    let lo = 0
+    let hi = u.length - 1
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1
+      if (u[mid] <= v) lo = mid
+      else hi = mid
+    }
+    return Math.abs(u[lo] - v) <= Math.abs(u[hi] - v) ? lo : hi
+  }
+
+  const index = new Int32Array(sites).fill(-1)
+  let placed = 0
+  for (let c = 0; c < n; c++) {
+    const i = nearest(xs, centers[3 * c])
+    const j = nearest(ys, centers[3 * c + 1])
+    const k = nearest(zs, centers[3 * c + 2])
+    const s = i + nx * (j + ny * k)
+    // Merged cut cells can share a site; the first one owns it, which is the
+    // same choice the mesher made when it merged them.
+    if (index[s] === -1) {
+      index[s] = c
+      placed++
+    }
+  }
+  const holes = sites - placed
+  // If nothing is missing this is an ordinary lattice and the exact detector
+  // should have taken it; leaving it to that path keeps one code path for the
+  // common case.
+  if (holes === 0) return null
+
+  const nodesOf = (u: number[], lo: number, hi: number): Float64Array => {
+    const out = new Float64Array(u.length + 1)
+    out[0] = Math.min(lo, u[0])
+    for (let i = 1; i < u.length; i++) out[i] = 0.5 * (u[i - 1] + u[i])
+    out[u.length] = Math.max(hi, u[u.length - 1])
+    return out
+  }
+  const nodes = { x: nodesOf(xs, bounds.min[0], bounds.max[0]), y: nodesOf(ys, bounds.min[1], bounds.max[1]), z: nodesOf(zs, bounds.min[2], bounds.max[2]) }
+  const isUniform = (v: Float64Array): boolean => {
+    if (v.length < 3) return true
+    const h = v[1] - v[0]
+    const tol = Math.abs(h) * 1e-3
+    for (let i = 1; i + 1 < v.length; i++) if (Math.abs(v[i + 1] - v[i] - h) > tol) return false
+    return true
+  }
+  const b = emptyBounds()
+  extendBounds(b, nodes.x[0], nodes.y[0], nodes.z[0])
+  extendBounds(b, nodes.x[nx], nodes.y[ny], nodes.z[nz])
+  const grid: CartesianGrid = {
+    dims: [nx, ny, nz],
+    nodes,
+    bounds: b,
+    uniform: isUniform(nodes.x) && isUniform(nodes.y) && isUniform(nodes.z),
+    emptyAxis: nx === 1 ? 'x' : ny === 1 ? 'y' : nz === 1 ? 'z' : null,
+  }
+  return { grid, index, holes }
+}
+
 export function upAxisFromGravity(g: [number, number, number] | null): UpAxis {
   if (!g) return 'z'
   const ax = Math.abs(g[0])
@@ -198,12 +337,14 @@ export function u32Ref(key: string, count: number, components: number): BlobRef 
   return { key, dtype: 'u32', count, components, bytes: 4 * count * components }
 }
 
-export function gridInfo(grid: CartesianGrid): StructuredGridInfo {
+export function gridInfo(grid: CartesianGrid, lattice?: { index: Int32Array; holes: number } | null): StructuredGridInfo {
   return {
     dims: [...grid.dims],
     nodes: { x: f32Ref('grid.x', grid.nodes.x.length, 1), y: f32Ref('grid.y', grid.nodes.y.length, 1), z: f32Ref('grid.z', grid.nodes.z.length, 1) },
     uniform: grid.uniform,
     emptyAxis: grid.emptyAxis,
+    index: lattice ? u32Ref('grid.index', lattice.index.length, 1) : null,
+    holes: lattice ? lattice.holes : 0,
   }
 }
 

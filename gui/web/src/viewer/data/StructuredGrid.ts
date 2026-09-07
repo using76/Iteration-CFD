@@ -7,6 +7,13 @@ export interface GridSpec {
   x: Float32Array
   y: Float32Array
   z: Float32Array
+  /**
+   * Cut-cell meshes are the block minus the cells the body occupies, so a
+   * lattice site no longer equals a cell. When present this maps site index to
+   * cell index, with -1 where the site is inside the body. Absent means the two
+   * are the same, which is the ordinary case.
+   */
+  index?: Int32Array | null
 }
 
 export type Axis = 0 | 1 | 2
@@ -42,6 +49,8 @@ export class StructuredGrid {
   readonly centers: [Float32Array, Float32Array, Float32Array]
   readonly min: [number, number, number]
   readonly max: [number, number, number]
+  /** Site -> cell, or null when they are the same. */
+  readonly index: Int32Array | null
 
   constructor(spec: GridSpec) {
     const [nx, ny, nz] = spec.dims
@@ -55,6 +64,9 @@ export class StructuredGrid {
     this.centers = [centersOf(spec.x), centersOf(spec.y), centersOf(spec.z)]
     this.min = [spec.x[0], spec.y[0], spec.z[0]]
     this.max = [spec.x[nx], spec.y[ny], spec.z[nz]]
+    const index = spec.index ?? null
+    if (index && index.length !== nx * ny * nz) throw new Error(`grid index has ${index.length} entries for ${nx * ny * nz} sites`)
+    this.index = index
   }
 
   get dims(): [number, number, number] {
@@ -65,8 +77,15 @@ export class StructuredGrid {
     return this.nx * this.ny * this.nz
   }
 
+  /** The cell at a lattice site, or -1 when the site is inside a body. */
   cellIndex(i: number, j: number, k: number): number {
-    return i + this.nx * (j + this.ny * k)
+    const site = i + this.nx * (j + this.ny * k)
+    return this.index ? this.index[site] : site
+  }
+
+  /** True where the lattice has no cell — inside the geometry the mesh cut out. */
+  blocked(i: number, j: number, k: number): boolean {
+    return this.index !== null && this.index[i + this.nx * (j + this.ny * k)] < 0
   }
 
   inside(x: number, y: number, z: number): boolean {
@@ -107,6 +126,14 @@ export class StructuredGrid {
     const j = this.clampAxis(1, y)
     const k = this.clampAxis(2, z)
     return Math.min(this.spacing(0, i), this.spacing(1, j), this.spacing(2, k))
+  }
+
+  /** Centre of a lattice site. Use this, not centerOf, when the grid has holes: a cell index no longer carries its own (i,j,k). */
+  centerOfSite(i: number, j: number, k: number, out: Float32Array | number[] = [0, 0, 0]): typeof out {
+    out[0] = this.centers[0][i]
+    out[1] = this.centers[1][j]
+    out[2] = this.centers[2][k]
+    return out
   }
 
   centerOf(cell: number, out: Float32Array | number[] = [0, 0, 0]): typeof out {
@@ -158,6 +185,11 @@ export class StructuredGrid {
     const iy = this.centerInterval(1, y, IY)
     const iz = this.centerInterval(2, z, IZ)
     for (let c = 0; c < components; c++) out[c] = 0
+    // Corners inside the body carry no value. Skip them and renormalise by the
+    // weight that was actually used, so a cell next to the surface interpolates
+    // from its real neighbours instead of averaging in a zero and reading as a
+    // dark halo around everything solid.
+    let used = 0
     for (let dz = 0; dz < 2; dz++) {
       const wz = dz ? iz.t : 1 - iz.t
       if (wz === 0) continue
@@ -170,12 +202,17 @@ export class StructuredGrid {
           const wx = dx ? ix.t : 1 - ix.t
           if (wx === 0) continue
           const i = dx ? ix.i1 : ix.i0
+          const cell = this.cellIndex(i, j, k)
+          if (cell < 0) continue
           const w = wx * wy * wz
-          const base = this.cellIndex(i, j, k) * components
+          const base = cell * components
           for (let c = 0; c < components; c++) out[c] += w * field[base + c]
+          used += w
         }
       }
     }
+    if (used <= 0) return false
+    if (used < 0.999999) for (let c = 0; c < components; c++) out[c] /= used
     return true
   }
 }

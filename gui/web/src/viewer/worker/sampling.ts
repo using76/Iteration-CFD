@@ -226,7 +226,10 @@ export function sampleGlyphs(grid: StructuredGrid, U: Float32Array, stride: numb
     for (let j = j0; j < j1; j += js) {
       for (let i = i0; i < i1; i += is) {
         const cell = grid.cellIndex(i, j, k)
-        grid.centerOf(cell, c)
+        // A site inside the body has no cell and no velocity; drawing an arrow
+        // there would put one in the middle of the geometry.
+        if (cell < 0) continue
+        grid.centerOfSite(i, j, k, c)
         if (slice) c[slice.axis] = slice.position
         positions[n * 3] = c[0]
         positions[n * 3 + 1] = c[1]

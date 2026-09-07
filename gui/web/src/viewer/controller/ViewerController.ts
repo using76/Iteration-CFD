@@ -441,6 +441,11 @@ export class ViewerController {
   private async addIso(cmd: Extract<ViewerCommand, { type: 'addIsoSurface' }>): Promise<void> {
     const ds = this.requireGrid()
     if (ds.manifest.grid?.emptyAxis) throw new ViewerError('NO_STRUCTURED_GRID', 'ISO_2D: iso-surfaces are disabled for 2-D cases; use a slice instead')
+    // Marching cubes walks the lattice by site and reads the field by the same
+    // number. On a cut-cell grid those differ, so it would contour the wrong
+    // cells rather than nothing. Slices, streamlines and glyphs all go through
+    // the grid's own index and are fine.
+    if (ds.manifest.grid?.index) throw new ViewerError('NO_STRUCTURED_GRID', 'ISO_CUTCELL: iso-surfaces are not available on a cut-cell mesh yet; slices, streamlines and glyphs are')
     const info = this.requireField(cmd.field)
     await this.upsertLayer({ id: this.layerId(cmd.id, 'iso'), type: 'iso', field: info.name, values: cmd.values })
   }

@@ -13,6 +13,8 @@ export interface GridKeys {
   x: string
   y: string
   z: string
+  /** Site -> cell for a cut-cell mesh; absent when the two are the same. */
+  index?: string | null
 }
 
 export interface FieldRef {
