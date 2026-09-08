@@ -244,6 +244,46 @@ ofgpu-generate-mesh big case 128 -stl car=racecar.stl -cutcell
 
 자세한 표(LES일 때의 축약 포함)는 [`cases/README.md`](../cases/README.md).
 
+### STEP 형상에서 격자로, 그리고 Fluent로
+
+CAD가 주는 것은 STEP 파일이고 솔버가 먹는 것은 격자입니다. 그 사이는 두 단계입니다 —
+Gmsh가 격자를 만들고, 이 저장소의 변환기가 그것을 가져갑니다.
+
+**STEP을 Gmsh 격자로.** 설정은 JSON 파일 하나입니다. 스키마는
+[`tools/mesh/README.md`](../tools/mesh/README.md)에 있습니다.
+
+```powershell
+python tools\mesh\step_mesh.py step.json
+```
+
+**Gmsh 격자를 케이스와 Fluent 메쉬로.** `ofgpu-convert-mesh`는 하나의 .msh로 두
+가지를 씁니다 — 케이스 디렉터리의 `constant/polyMesh`(위의 (b) 형식이라 바로 돌릴
+수 있고, 상세는 [`cases/README.md`](../cases/README.md))와, `-fluent`를 붙였을 때
+ANSYS Fluent가 읽는 ASCII 메쉬(사면체 격자 전용). 패치 타입은 `wall*`/`empty*`/
+`symmetry*` 접두어로 정해지고 `-type 이름=타입`으로 직접 정할 수 있습니다.
+
+```powershell
+ofgpu-convert-mesh site.msh site_case -fluent site_fluent.msh -type wall_ground=wall
+```
+
+**Studio 안에서는 이 두 단계가 도구입니다.** `mesh_from_step`(설정 JSON 경로,
+선택적으로 `--from-checkpoint` 같은 추가 토큰)과 `mesh_to_fluent`(.msh 경로, 케이스
+디렉터리, Fluent 출력 경로, 선택적으로 `-type 이름=타입` 토큰)은 서버가 시작할 때
+`gui/server/tools.defaults.json`에서 읽어 등록하므로 사용자가 따로 만들 필요가
+없습니다. 같은 이름의 사용자 도구를 등록하면 그쪽이 이기고, 실행할 때는 다른 도구와
+마찬가지로 확인을 받습니다.
+
+**Fluent 쪽에서 읽기.** File > Read > Mesh. 좌표는 미터로 취급하고, 존(zone)
+이름은 패치 이름을 따릅니다 — 벽은 `wall`, `symmetry*`는 `symmetry`,
+`east`/`inlet*`/`*_source`는 `velocity-inlet`, 나머지는 `pressure-outlet`이며
+`-fluentType 이름=존`으로 바꿀 수 있습니다. 읽어 들인 뒤에는 Mesh > Check를
+돌리십시오. 상대가 CGNS를 원한다면 Gmsh 단계에서 `gmsh.write('x.cgns')`로 직접
+쓰는 것이 대안입니다.
+
+Fluent 메쉬 쓰기 형식은 ANSYS FLUENT 12.0 User's Guide 부록 B.3.7을 따릅니다
+(공개 미러:
+[afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm](http://afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm)).
+
 ---
 
 ## 6. 솔버 고르기 — 가장 많이 틀리는 곳

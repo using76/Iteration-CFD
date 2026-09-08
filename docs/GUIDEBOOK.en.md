@@ -256,6 +256,49 @@ row** — so that picking them field by field cannot produce a contradictory mix
 The full table, including how it collapses for LES, is in
 [`cases/README.md`](../cases/README.md).
 
+### From a STEP geometry to a mesh, and to Fluent
+
+CAD hands you a STEP file; the solver eats a mesh. Two steps sit between them —
+Gmsh builds the mesh, and this repository's converter brings it in.
+
+**STEP to a Gmsh mesh.** The setup is a single JSON file. The schema is in
+[`tools/mesh/README.md`](../tools/mesh/README.md).
+
+```powershell
+python tools\mesh\step_mesh.py step.json
+```
+
+**From the Gmsh mesh to a case and a Fluent mesh.** `ofgpu-convert-mesh` writes
+two things from one .msh — the `constant/polyMesh` of a case directory (format
+(b) above, so it runs as it stands; details in
+[`cases/README.md`](../cases/README.md)), and, with `-fluent`, an ASCII mesh
+ANSYS Fluent reads (tetrahedral meshes only). A patch's type comes from the
+`wall*`/`empty*`/`symmetry*` prefix of its name, or straight from
+`-type name=type`.
+
+```powershell
+ofgpu-convert-mesh site.msh site_case -fluent site_fluent.msh -type wall_ground=wall
+```
+
+**Inside the Studio the two steps are tools.** `mesh_from_step` (the path of the
+config JSON, optionally extra tokens such as `--from-checkpoint`) and
+`mesh_to_fluent` (the .msh path, the case directory, the Fluent output path,
+optionally `-type name=type` tokens) are read out of
+`gui/server/tools.defaults.json` and registered when the server starts, so
+nothing needs to be created by hand. A user tool of the same name wins, and
+running either asks for approval like every other tool.
+
+**Reading it on the Fluent side.** File > Read > Mesh. Coordinates are treated
+as metres, and the zone names follow the patch names — walls are `wall`,
+`symmetry*` is `symmetry`, `east`/`inlet*`/`*_source` are `velocity-inlet`, the
+rest is `pressure-outlet`, with `-fluentType name=zone` to change one. After
+reading, run Mesh > Check. If the counterpart wants CGNS instead, the
+alternative is writing it straight from the Gmsh step with `gmsh.write('x.cgns')`.
+
+The Fluent mesh writer follows Appendix B.3.7 of the ANSYS FLUENT 12.0 User's
+Guide (public mirror:
+[afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm](http://afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm)).
+
 ---
 
 ## 6. Choosing a solver — where people go wrong

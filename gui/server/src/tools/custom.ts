@@ -11,6 +11,7 @@ import { TOOL_NAMES } from '@cfd/shared'
 import { z } from 'zod'
 import { resolveInWorkspace } from '../workspace/paths.js'
 import { errorMessage, fail, okResult, type ToolContext, type ToolDef } from './context.js'
+import { mergeTools } from './defaults.js'
 import { resolveTool } from './paths.js'
 import { spawnCapture } from './shell.js'
 
@@ -21,7 +22,7 @@ const JS_TIMEOUT_MS = 10_000
 const JS_SOURCE_CAP = 64 * 1024
 const READ_CAP = 1024 * 1024
 
-const ImplSchema = z.union([
+export const ImplSchema = z.union([
   z.object({ kind: z.literal('command'), argv: z.array(z.string()).min(1).describe('Program and arguments; tokens may contain {{input.field}} placeholders'), cwd: z.string().nullable() }),
   z.object({ kind: z.literal('js'), source: z.string().max(JS_SOURCE_CAP).describe('Body of an async function (input, cfd, console) => ...; return a JSON value') }),
 ])
@@ -99,6 +100,34 @@ function substitute(token: string, input: Record<string, unknown>): string {
   })
 }
 
+/**
+ * substitute() over a whole argv, with one extension: a token that is exactly
+ * one `{{input.field}}` naming an OPTIONAL field is a splice. An absent field
+ * contributes no token at all - which is how a defaults tool spells an
+ * optional tail like `{{input.extra}}` or `{{input.types}}`, and which used to
+ * leave an empty element behind - and a field whose value holds whitespace
+ * contributes one token per word (`--from-checkpoint z=3.05` arrives as two
+ * arguments). Required fields substitute in place as before, so a path with a
+ * space in it survives.
+ */
+function substituteArgv(argv: readonly string[], schema: Record<string, unknown>, input: Record<string, unknown>): string[] {
+  const req = Array.isArray(schema.required) ? schema.required.filter((r): r is string => typeof r === 'string') : []
+  const required = new Set(req)
+  const out: string[] = []
+  for (const token of argv) {
+    const sole = /^\{\{\s*input\.([A-Za-z0-9_]+)\s*\}\}$/.exec(token)
+    if (sole && !required.has(sole[1])) {
+      const v = input[sole[1]]
+      if (v === undefined || v === null) continue
+      const text = typeof v === 'object' ? JSON.stringify(v) : String(v)
+      out.push(...text.trim().split(/\s+/).filter(Boolean))
+      continue
+    }
+    out.push(substitute(token, input))
+  }
+  return out
+}
+
 function missingRequired(schema: Record<string, unknown>, input: Record<string, unknown>): string[] {
   const req = Array.isArray(schema.required) ? (schema.required as unknown[]).filter((r): r is string => typeof r === 'string') : []
   return req.filter((k) => !(k in input))
@@ -147,10 +176,10 @@ const RunSchema = z.object({
 
 export const customToolRun: ToolDef<typeof RunSchema> = {
   name: 'custom_tool_run',
-  description: 'Run a tool registered with custom_tool_create. Returns the command output (stdout/stderr/exit code) or the js return value and console output.',
+  description: 'Run a custom tool: one registered with custom_tool_create, or one the Studio ships by default (gui/server/tools.defaults.json; the user\'s file wins on a name clash). Returns the command output (stdout/stderr/exit code) or the js return value and console output.',
   schema: RunSchema,
   async run(input, ctx) {
-    const tools = await loadCustomTools(ctx.config.configDir)
+    const tools = mergeTools(await loadCustomTools(ctx.config.configDir))
     const spec = tools.find((t) => t.name === input.name)
     if (!spec) return fail('NO_SUCH_TOOL', `no custom tool ${input.name}; registered: ${tools.map((t) => t.name).join(', ') || 'none'}`)
     let parsed: unknown
@@ -166,7 +195,7 @@ export const customToolRun: ToolDef<typeof RunSchema> = {
     if (spec.impl.kind === 'command') {
       const cwd = resolveTool(ctx.workspaceRoot, spec.impl.cwd ?? '.', { mustExist: true })
       if (!cwd.ok) return cwd.result
-      const argv = spec.impl.argv.map((t) => substitute(t, args))
+      const argv = substituteArgv(spec.impl.argv, spec.inputSchema, args)
       const res = await spawnCapture(argv, { cwd: cwd.path.abs, timeoutMs: COMMAND_TIMEOUT_MS, signal: ctx.signal })
       const data = { name: spec.name, argv, ...res }
       if (res.timedOut) return { ...fail('TIMEOUT', `${spec.name} did not finish within ${COMMAND_TIMEOUT_MS / 1000} s`), data }

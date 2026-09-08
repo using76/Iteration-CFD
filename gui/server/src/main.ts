@@ -14,6 +14,7 @@ import { createLogger, type Logger } from './log.js'
 import { createProblemsTracker } from './problems.js'
 import { loadCaseSchema, schemaCandidates, setCaseSchema, type CaseSchema } from './registry/schema.js'
 import { createRunManager, type RunManagerHandle } from './runs/manager.js'
+import { loadDefaultTools, setDefaultTools } from './tools/defaults.js'
 import { createWorkspaceWatcher, type WorkspaceWatcher } from './workspace/watch.js'
 import { createHub, type HubHandle } from './ws/hub.js'
 
@@ -86,6 +87,10 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
 
   const schema = loadCaseSchema(schemaCandidates(config.workspaceRoot, config.guiDir))
   setCaseSchema(schema)
+  // The shipped custom tools go under the user's own before anything can run one.
+  const defaultTools = await loadDefaultTools(config, log.child('tools'))
+  setDefaultTools(defaultTools)
+  if (defaultTools.length) log.info(`default tools: ${defaultTools.map((t) => t.name).join(', ')}`)
   const datasets = tryCreate('dataset service', () => createDatasetService({ config }), unavailableDatasets, log)
   const runs = await createRunManager({ config, log: log.child('runs') })
   await runs.gpuMonitor.start()

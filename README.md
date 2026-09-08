@@ -141,6 +141,8 @@ claude mcp add ofgpu -- node mcp\server.mjs
 | 선형 해법 | PBiCGStab, PCG; Jacobi·다색 DIC·다색 DILU; cuFFT 직접 Poisson과 AMGX(선택 기능); 적용가능성·정확도·실측 시간으로 backend 자동 선택 |
 | 메쉬·입출력 | 블록 격자와 grading, STL 계단식 조각, 컷셀, Gmsh v4.1, cyclic 다중 쌍, `empty`/`symmetry` constraint, 2:1 적응 세분화(어느 솔버에도 연결되지 않음); JSONC 케이스와 자동 생성 스키마, OpenFOAM ASCII, VTU·NanoVDB/OpenVDB·USD, 배정밀도 재시작 |
 
+- **STEP에서 격자로, 그리고 Fluent로.** CAD가 준 STEP 형상은 `tools/mesh/step_mesh.py`(설정 JSON 하나)로 Gmsh 격자를 만들고, `ofgpu-convert-mesh`가 그 .msh를 케이스의 `constant/polyMesh`와 ANSYS Fluent 메쉬로 한 번에 씁니다. 같은 두 단계가 Studio에는 `mesh_from_step`·`mesh_to_fluent` 도구로 들어 있습니다 — [가이드북 §5](docs/GUIDEBOOK.md#5-격자-만들기).
+
 ## 할 수 없는 것
 
 - **MPI·다중 GPU 없음.** 분할·헤일로·분할 불변 축약·분산 PCG/PBiCGStab이 모두 구현되고 게이트되어 있으나(§71–§73) 한 장의 카드 위 한 프로세스에서 돕니다. 통신 라이브러리를 링크하지 않으며 강한 확장성 수치도 발표하지 않습니다.

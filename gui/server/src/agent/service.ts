@@ -8,6 +8,7 @@ import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
 import { loadCustomTools } from '../tools/custom.js'
+import { mergeTools } from '../tools/defaults.js'
 import type { Hub, ClientConn } from '../ws/types.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
 import { createAnthropicClient } from './anthropic.js'
@@ -61,7 +62,8 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
   let customTools: Array<{ name: string; description: string }> = []
 
   const refreshCustomTools = async () => {
-    customTools = (await loadCustomTools(config.configDir)).map((t) => ({ name: t.name, description: t.description }))
+    // The shipped defaults too, so the prompt names tools the user never registered.
+    customTools = mergeTools(await loadCustomTools(config.configDir)).map((t) => ({ name: t.name, description: t.description }))
   }
   void refreshCustomTools()
 

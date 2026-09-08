@@ -151,6 +151,8 @@ The guide, the tool list, and what the server refuses to do:
 | Linear solvers | PBiCGStab, PCG; Jacobi, multi-colour DIC and DILU; a cuFFT direct Poisson backend and AMGX (optional feature); backend chosen automatically on applicability, accuracy and measured time |
 | Mesh and I/O | Block meshes with grading, castellated STL carving, cut cells, Gmsh v4.1, multiple cyclic pairs, `empty`/`symmetry` constraints, 2:1 adaptive refinement (wired to no solver); JSONC cases with a generated schema, OpenFOAM ASCII, VTU, NanoVDB/OpenVDB, USD, double-precision restart |
 
+- **From a STEP geometry to a mesh, and to Fluent.** A STEP file from CAD becomes a Gmsh mesh with `tools/mesh/step_mesh.py` (one config JSON), and `ofgpu-convert-mesh` writes that .msh into a case's `constant/polyMesh` and an ANSYS Fluent mesh in one go. The same two steps sit in the Studio as the `mesh_from_step` and `mesh_to_fluent` tools — [Guidebook §5](docs/GUIDEBOOK.en.md#5-making-a-mesh).
+
 ## What it cannot do
 
 - **No MPI and no multi-GPU.** Decomposition, halos, decomposition-invariant reductions and distributed PCG/PBiCGStab are all implemented and gated (§71–§73), but they run in one process on one card. No communication library is linked and no strong-scaling number is published.

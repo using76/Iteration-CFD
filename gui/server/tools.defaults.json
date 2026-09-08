@@ -1,0 +1,58 @@
+{
+  "tools": [
+    {
+      "name": "mesh_from_step",
+      "description": "STEP 형상을 Gmsh 격자로 만든다 (JSON 설정 파일) / Mesh a STEP geometry with Gmsh (JSON config)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "격자 설정 JSON 파일 경로 (스키마는 tools/mesh/README.md). Path to the JSON config (schema in tools/mesh/README.md)"
+          },
+          "extra": {
+            "type": "string",
+            "description": "선택적 추가 인자 토큰, 예: --from-checkpoint z=3.05. Optional extra CLI tokens, e.g. --from-checkpoint z=3.05"
+          }
+        },
+        "required": ["config"]
+      },
+      "impl": {
+        "kind": "command",
+        "argv": ["python", "<repo>/tools/mesh/step_mesh.py", "{{input.config}}", "{{input.extra}}"],
+        "cwd": null
+      }
+    },
+    {
+      "name": "mesh_to_fluent",
+      "description": "Gmsh .msh를 솔버 케이스와 Fluent 메쉬로 변환한다 / Convert a Gmsh .msh to a solver case and a Fluent mesh",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "msh": {
+            "type": "string",
+            "description": "입력 Gmsh 메쉬 (MSH 4.1 ASCII). Input Gmsh mesh (MSH 4.1 ASCII)"
+          },
+          "case": {
+            "type": "string",
+            "description": "출력 케이스 디렉터리 (그 안의 constant/polyMesh에 씀; 기존 polyMesh가 있으면 거절). Output case directory (constant/polyMesh inside; refuses to overwrite an existing polyMesh)"
+          },
+          "fluent": {
+            "type": "string",
+            "description": "출력 Fluent 메쉬 파일. Output Fluent mesh file"
+          },
+          "types": {
+            "type": "string",
+            "description": "선택적 -type 이름=타입 토큰, 예: '-type wall_ground=wall -type inlet=inlet'. Optional -type name=wall tokens, e.g. '-type wall_ground=wall -type inlet=inlet'"
+          }
+        },
+        "required": ["msh", "case", "fluent"]
+      },
+      "impl": {
+        "kind": "command",
+        "argv": ["<OFGPU_BIN_DIR>/ofgpu-convert-mesh", "{{input.msh}}", "{{input.case}}", "-fluent", "{{input.fluent}}", "{{input.types}}"],
+        "cwd": null
+      }
+    }
+  ]
+}
