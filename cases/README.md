@@ -364,3 +364,19 @@ foamFormatConvert -constant -time 0
 (Jayatilleke 열 벽함수, SPEC-LIT §29.3 — OpenFOAM의
 `compressible::alphatJayatillekeWallFunction`도 별칭으로 인식하며 무엇으로
 해석했는지 출력). 모르는 타입은 `calculated`로 처리합니다.
+
+## Gmsh 메쉬 가져오기 — `ofgpu-convert-mesh`
+
+Gmsh 메쉬(MSH 4.1 ASCII)를 케이스 디렉터리의 `constant/polyMesh`로 바꿔 씁니다.
+`wall*`/`empty*`/`symmetry*`로 시작하는 패치 이름에는 타입이 붙고, `-type
+이름=타입`으로 직접 정할 수도 있습니다.
+
+```bash
+ofgpu-convert-mesh in.msh outCase [-type wall_ground=wall]
+```
+
+`-fluent out.msh`를 붙이면 같은 메쉬를 ANSYS Fluent ASCII 메쉬 파일로도 써
+줍니다(Fluent에서 File > Read > Mesh로 읽습니다; 사면체 메쉬 전용). 패치의
+Fluent 존 타입은 기본값(벽은 `wall`, `symmetry*`는 `symmetry`,
+`east`/`inlet*`/`*_source`는 `velocity-inlet`, 나머지는 `pressure-outlet`)이
+적용되고, `-fluentType 이름=존`으로 바꿀 수 있습니다.
