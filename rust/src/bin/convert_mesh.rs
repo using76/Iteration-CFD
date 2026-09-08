@@ -41,15 +41,21 @@
 //!
 //! `-fluent <out.msh>` additionally writes the SAME fixed-up mesh as an
 //! ANSYS Fluent ASCII mesh file (Fluent opens it with File > Read > Mesh),
-//! in the layout Fluent reads cleanly: every index hexadecimal and 1-based,
-//! internal faces in polyMesh node order with c0 = neighbour and c1 =
-//! owner, boundary faces with the nodes REVERSED and c0 = owner (Fluent's
-//! face normal, right-hand rule through the nodes, points into c0), one
-//! face block per patch with zone ids from 10, and one cell element type
-//! per cell (2 = tetrahedron). Tetrahedral meshes are all it covers: a mesh
-//! with a non-triangular face, or a cell whose face count is not four, is
-//! refused by name rather than written as something Fluent would quietly
-//! misread.
+//! in the layout of the **ANSYS FLUENT 12.0 User's Guide, Appendix B "Mesh
+//! File Format", B.3.7 "Faces"**
+//! (<https://www.afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm>),
+//! whose orientation rule is the one this writer follows: *"if you curl the
+//! fingers of your right hand in the order of the nodes, your thumb will
+//! point toward c1."* A polyMesh face's own node order already points from
+//! the owner to the neighbour (out of the domain on a boundary), so the
+//! nodes go out UNTOUCHED on every face - c0 = owner and c1 = neighbour on
+//! an internal face, c1 = 0 on a boundary one ("if a face has a cell only
+//! on one side, then either c0 or c1 is zero"). Every index hexadecimal and
+//! 1-based, one face block per patch with zone ids from 10, and one cell
+//! element type per cell (2 = tetrahedron). Tetrahedral meshes are all it
+//! covers: a mesh with a non-triangular face, or a cell whose face count is
+//! not four, is refused by name rather than written as something Fluent
+//! would quietly misread.
 //!
 //! Each patch's Fluent zone type defaults from the polyMesh type just
 //! applied - a wall stays `wall`, symmetry stays `symmetry` - then from the
@@ -72,9 +78,10 @@
 //! `io/polymesh.rs`; the reader and the writer are covered by those files'
 //! own headers. This one is argument parsing, the type convention and
 //! overrides, the overwrite guard, the printed summary, and the Fluent mesh
-//! writer - laid out to match this project's own reference writer
-//! (`polymesh_to_fluent.py`), whose output Fluent reads cleanly; the Fluent
-//! mesh FILE format is the specification here, not any program's source.
+//! writer - an implementation of a documented file format: the **ANSYS
+//! FLUENT 12.0 User's Guide, Appendix B "Mesh File Format", B.3.7 "Faces"**
+//! (`afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm`) is the
+//! specification here, not any program's source.
 //! No GPL-licensed source was consulted.
 
 use std::collections::HashMap;
@@ -443,15 +450,14 @@ fn n_cells_of(raw: &PolyMeshRaw) -> Label {
 /// and 2 the interior face zone every file declares.
 const FLUENT_FIRST_PATCH_ZONE: usize = 10;
 
-/// Cell element types per line - the reference writer wraps the `(12 ...)`
-/// type list at 40 numbers a line, and Fluent is happy with exactly that.
+/// Cell element types per line: the `(12 ...)` type list is wrapped at 40
+/// numbers a line, a width Fluent reads without complaint.
 const FLUENT_CELL_TYPES_PER_LINE: usize = 40;
 
-/// Coordinates go out at 9 significant digits, C `%g` style - the same
-/// decimal the reference writer's `%.9g` produces, so the two writers'
-/// files are byte-identical apart from the leading `(0 ...)` comment. That
-/// is display precision, not the polyMesh writer's 17: a Fluent mesh is
-/// never read back by ofgpu.
+/// Coordinates go out at 9 significant digits, C `%g` style (the shortest
+/// form that survives a single-precision round trip in Fluent). That is
+/// display precision, not the polyMesh writer's 17: a Fluent mesh is never
+/// read back by ofgpu.
 const FLUENT_POINT_DIGITS: usize = 9;
 
 /// The whole Fluent mesh file, built in memory and handed back - the way
@@ -488,9 +494,11 @@ fn fluent_mesh_text(source: &str, raw: &PolyMeshRaw, zones: &[FluentZone]) -> Re
     }
     out.push_str("))\n");
 
-    // Internal faces: nodes in polyMesh order, c0 = neighbour, c1 = owner -
-    // which is what puts Fluent's face normal (right-hand rule through the
-    // nodes) into c0.
+    // Internal faces: nodes in polyMesh order, c0 = owner and c1 =
+    // neighbour. That is B.3.7's rule - "if you curl the fingers of your
+    // right hand in the order of the nodes, your thumb will point toward
+    // c1" - satisfied WITHOUT touching the node order, because a polyMesh
+    // face's own order already points from the owner to the neighbour.
     out.push_str(&format!("(13 (2 1 {n_if:x} 2 0)(\n"));
     for f in 0..n_if {
         let fv = &raw.faces[f];
@@ -499,15 +507,17 @@ fn fluent_mesh_text(source: &str, raw: &PolyMeshRaw, zones: &[FluentZone]) -> Re
             fv[0] + 1,
             fv[1] + 1,
             fv[2] + 1,
-            raw.neighbour[f] + 1,
-            raw.owner[f] + 1
+            raw.owner[f] + 1,
+            raw.neighbour[f] + 1
         ));
     }
     out.push_str("))\n");
 
-    // One face block per patch: the nodes REVERSED, c0 = owner, c1 = 0.
-    // first/last are the patch's faces in the GLOBAL numbering - polyMesh
-    // order, internal faces first - so startFace and startFace+nFaces, 1-based.
+    // One face block per patch: the same polyMesh node order, c0 = owner,
+    // c1 = 0 - "if a face has a cell only on one side, then either c0 or c1
+    // is zero", and the stored order points out of the domain. first/last
+    // are the patch's faces in the GLOBAL numbering - polyMesh order,
+    // internal faces first - so startFace and startFace+nFaces, 1-based.
     for (pi, patch) in raw.patches.iter().enumerate() {
         out.push_str(&format!(
             "(13 ({:x} {:x} {:x} {:x} 0)(\n",
@@ -521,9 +531,9 @@ fn fluent_mesh_text(source: &str, raw: &PolyMeshRaw, zones: &[FluentZone]) -> Re
             let fv = &raw.faces[f];
             out.push_str(&format!(
                 "3 {:x} {:x} {:x} {:x} 0\n",
-                fv[2] + 1,
-                fv[1] + 1,
                 fv[0] + 1,
+                fv[1] + 1,
+                fv[2] + 1,
                 raw.owner[f] + 1
             ));
         }
@@ -778,7 +788,9 @@ mod tests {
     /// (the first cell to touch it), three boundary faces per patch on
     /// `east` and `top` - so the name-driven default (`east` ->
     /// velocity-inlet) and the fall-through (`top` -> pressure-outlet) both
-    /// fire.
+    /// fire. Every face is wound outward from its owner - toward the
+    /// neighbour on the internal one - the way `read_msh` winds them, which
+    /// is the invariant the ANSYS orientation rule leans on.
     fn two_tet() -> PolyMeshRaw {
         let mut raw = raw_with_patches(&["east", "top"]);
         raw.patches[0].size = 3;
@@ -796,9 +808,9 @@ mod tests {
             vec![0, 1, 3], // east, owner 0
             vec![0, 3, 2],
             vec![1, 2, 3],
-            vec![0, 1, 4], // top, owner 1
-            vec![0, 4, 2],
-            vec![1, 2, 4],
+            vec![0, 4, 1], // top, owner 1
+            vec![0, 2, 4],
+            vec![1, 4, 2],
         ];
         raw.owner = vec![0, 0, 0, 0, 1, 1, 1];
         raw.neighbour = vec![1];
@@ -806,7 +818,7 @@ mod tests {
     }
 
     /// The whole file, byte for byte: the exact section headers, the four
-    /// boundary lines with their nodes REVERSED and `c0 = 1, c1 = 0`, and
+    /// boundary lines in the polyMesh node order with `c0 = 1, c1 = 0`, and
     /// the one-cell `(12 ...)` block holding a single `2`.
     #[test]
     fn a_single_tet_writes_the_exact_fluent_layout() -> Result<()> {
@@ -831,10 +843,10 @@ mod tests {
 (13 (2 1 0 2 0)(
 ))
 (13 (a 1 4 3 0)(
-3 2 3 1 1 0
-3 4 2 1 1 0
-3 3 4 1 1 0
-3 4 3 2 1 0
+3 1 3 2 1 0
+3 1 2 4 1 0
+3 1 4 3 1 0
+3 2 3 4 1 0
 ))
 (12 (1 1 1 1 0)(
 2
@@ -849,7 +861,7 @@ mod tests {
     }
 
     /// The internal face carries the polyMesh node order with `c0 =
-    /// neighbour+1, c1 = owner+1`; the two patch blocks carry the right
+    /// owner+1, c1 = neighbour+1`; the two patch blocks carry the right
     /// first/last hex indices in the global face numbering; and
     /// `-fluentType top=wall` moves the `(13 ...)` type number and the
     /// `(39 ...)` zone together, leaving `east`'s name-driven default alone.
@@ -875,17 +887,17 @@ mod tests {
 0 0 -1
 ))
 (13 (2 1 1 2 0)(
-3 1 3 2 2 1
+3 1 3 2 1 2
 ))
 (13 (a 2 4 a 0)(
-3 4 2 1 1 0
-3 3 4 1 1 0
-3 4 3 2 1 0
+3 1 2 4 1 0
+3 1 4 3 1 0
+3 2 3 4 1 0
 ))
 (13 (b 5 7 5 0)(
-3 5 2 1 2 0
-3 3 5 1 2 0
-3 5 3 2 2 0
+3 1 5 2 2 0
+3 1 3 5 2 0
+3 2 5 3 2 0
 ))
 (12 (1 1 2 1 0)(
 2 2
@@ -908,6 +920,91 @@ mod tests {
         // `east` keeps its name-driven default.
         assert!(text.contains("(13 (a 2 4 a 0)("), "{text}");
         assert!(text.contains("(39 (10 velocity-inlet east)())"), "{text}");
+
+        Ok(())
+    }
+
+    /// The ANSYS rule checked against the GEOMETRY rather than against a
+    /// transcript: each face line the file carries, its nodes taken in the
+    /// written order right-handed, must produce a normal that points toward
+    /// the cell the line names c1 - into the neighbour on an internal face,
+    /// and away from c0 (out of the domain) on a boundary one whose c1 is
+    /// 0.
+    #[test]
+    fn every_written_faces_right_hand_normal_points_toward_c1() -> Result<()> {
+        let raw = two_tet();
+        let text = fluent_mesh_text("geo.msh", &raw, &resolve_fluent_zones(&raw, &HashMap::new())?)?;
+
+        // Each cell's centroid, from the points its own faces touch - on a
+        // tet that is all four vertices, so the mean of them is the
+        // centroid.
+        let n_cells = n_cells_of(&raw) as usize;
+        let mut verts: Vec<Vec<usize>> = vec![Vec::new(); n_cells];
+        for (f, fv) in raw.faces.iter().enumerate() {
+            let cells = std::iter::once(raw.owner[f]).chain(raw.neighbour.get(f).copied());
+            for c in cells {
+                for &v in fv {
+                    let c = c as usize;
+                    if !verts[c].contains(&(v as usize)) {
+                        verts[c].push(v as usize);
+                    }
+                }
+            }
+        }
+        let centroid = |c: usize| -> Vec3 {
+            verts[c]
+                .iter()
+                .fold(Vec3::new(0.0, 0.0, 0.0), |a, &v| a + raw.points[v])
+                / verts[c].len() as Scalar
+        };
+
+        // Every face line, from whichever `(13 ...)` block wrote it:
+        // `3 n0 n1 n2 c0 c1`, hexadecimal, 1-based.
+        let mut lines = Vec::new();
+        for line in text.lines() {
+            let t: Vec<&str> = line.split_whitespace().collect();
+            if t.len() != 6 || t[0] != "3" {
+                continue;
+            }
+            let mut v = [0i64; 5];
+            for (k, s) in t[1..].iter().enumerate() {
+                v[k] = match i64::from_str_radix(s, 16) {
+                    Ok(x) => x,
+                    Err(_) => panic!("a face line must be hexadecimal: '{line}'"),
+                };
+            }
+            lines.push(v);
+        }
+        assert_eq!(
+            lines.len(),
+            raw.faces.len(),
+            "every face must be written exactly once"
+        );
+
+        let point = |n: i64| raw.points[(n - 1) as usize];
+        for &[n0, n1, n2, c0, c1] in &lines {
+            let (a, b, c) = (point(n0), point(n1), point(n2));
+            // The right-hand rule through the WRITTEN node order.
+            let normal = (b - a).cross(c - a);
+            let face_centre = (a + b + c) / 3.0;
+            if c1 == 0 {
+                // Boundary: away from c0 - out of the domain.
+                let outward = face_centre - centroid(c0 as usize - 1);
+                assert!(
+                    normal.dot(outward) > 0.0,
+                    "boundary face {n0} {n1} {n2} (c0 {c0}): its right-hand normal \
+                     points into the owner, not out of the domain"
+                );
+            } else {
+                // Internal: toward the cell the line names c1 - the neighbour.
+                let to_c1 = centroid(c1 as usize - 1) - centroid(c0 as usize - 1);
+                assert!(
+                    normal.dot(to_c1) > 0.0,
+                    "internal face {n0} {n1} {n2} (c0 {c0}, c1 {c1}): its right-hand \
+                     normal does not point toward c1"
+                );
+            }
+        }
 
         Ok(())
     }
