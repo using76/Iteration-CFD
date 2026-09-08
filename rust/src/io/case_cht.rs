@@ -780,20 +780,15 @@ impl ChtCase {
                 }
             };
 
-            // SPEC-LIT 60.3: SPEC-LIT 18's registry is not wired to this
-            // format's fluid side, and a source that is read and dropped is
-            // exactly the 13.4.1 defect.
-            if kind == RegionKind::Fluid && r.source.is_some() {
-                return Err(Error::Config(format!(
-                    "regions/{}/source: a volumetric heat source on a FLUID \
-                     region is not implemented on this format. SPEC-LIT 18's \
-                     registry is what would carry it, and this reader does not \
-                     reach it - so the entry is refused rather than read and \
-                     dropped (SPEC-LIT 13.4.1). Put the source in a solid \
-                     region, or use `ofgpu-lowmach`",
-                    r.name
-                )));
-            }
+            // SPEC-LIT 60.3 refused a source on a fluid region because
+            // SPEC-LIT 18's registry was not wired to this format's fluid
+            // side, and a source that is read and dropped is the 13.4.1
+            // defect. It is wired now: the number lowers into `sources`
+            // exactly as a solid region's does, and `run_flow_case` registers
+            // every region's onto its own cells of the thermal mesh in
+            // `EnergySources` - the same registry, and the same energy
+            // balance, a solid region's source reaches. Nothing is refused
+            // here any more, and nothing is dropped either.
 
             region_names.push(r.name.clone());
             kinds.push(kind);

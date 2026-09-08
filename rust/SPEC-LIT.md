@@ -11758,7 +11758,7 @@ reader checks the case by and no entry states it.
 | a fluid region with no `buoyancy` | error: a closed cavity with no body force has no flow at all, and a case that meant conduction should say `kind: solid` |
 | `numerics.flow` on a case with no fluid region | error, same reason as `buoyancy` |
 | a fluid region with no `numerics.flow` | error listing the four relaxation entries |
-| `source` on a fluid region | error: §18's registry is not wired to this format's fluid side, and a volumetric source that is read and dropped is the §13.4.1 defect |
+| `source` on a fluid region | **accepted** - §18's registry is wired to this format's fluid side now, and the source reaches the same `EnergySources` and the same energy balance a solid region's does; refused while it was not, because a source read and dropped is the §13.4.1 defect |
 | a transient case with a fluid region | error (§59.6) |
 | a fluid `kappa` with three or nine components | a **parse** error naming the path, because `fluid.kappa` is typed as a scalar and every field of this format is `deny_unknown_fields`. An anisotropic fluid conductivity is not a thing |
 | an `empty` patch on an axis with more than one cell | refused by `blockgen`, naming the axis |

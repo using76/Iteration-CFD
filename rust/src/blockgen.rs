@@ -2958,7 +2958,12 @@ fn build_cutcell_fields(
     let _ = nu; // carried for signature parity with `build_initial_fields`; unused here
     let n_cells = centroids.len();
     let plume = buoyant_case(kind);
-    let t_inlet = if kind == CaseKind::Room { ROOM_T_INLET } else { PLUME_T_INLET };
+    let t_inlet = match kind {
+        CaseKind::Room => ROOM_T_INLET,
+        CaseKind::Plume => PLUME_T_INLET,
+        // The isothermal presets are not heated anywhere, inlet included.
+        _ => PLUME_T_AMBIENT,
+    };
     let cavity = kind == CaseKind::Cavity;
 
     struct FP<'a> {
@@ -3036,7 +3041,10 @@ fn build_cutcell_fields(
 
     let mut scalars: Vec<RawScalarField> = Vec::new();
 
-    if plume {
+    // `p` and `T` for every single-phase preset, under the same gate
+    // `build_initial_fields` uses - the cut cell changes the mesh, not what
+    // a momentum driver reads.
+    if writes_p_and_t(kind) {
         let mut pf = RawScalarField {
             name: "p".to_string(),
             dimensions: "[0 2 -2 0 0 0 0]".to_string(),
@@ -3323,6 +3331,25 @@ fn centred_cell_range(nodes: &[Scalar], centre: Scalar, width: Scalar) -> (usize
 /// the numbers (inlet temperature, reference velocity) differ per kind.
 fn buoyant_case(kind: CaseKind) -> bool {
     matches!(kind, CaseKind::Plume | CaseKind::Room)
+}
+
+/// The presets that get a `0/p` and a `0/T`: the buoyant pair, which solve
+/// both, and `channel`, `cavity`, `step` and `big`, which solve neither but
+/// whose drivers read them anyway - `ofgpu-lowmach` requires `U`, `p` and
+/// `T` of any case it starts, so until the generator wrote the pair a fresh
+/// case was not runnable until the fields had been copied in by hand. The
+/// dam break is not here: it is the two-phase path, whose `0/` holds
+/// `alpha.water` and `p_rgh` instead.
+fn writes_p_and_t(kind: CaseKind) -> bool {
+    matches!(
+        kind,
+        CaseKind::Channel
+            | CaseKind::Cavity
+            | CaseKind::Step
+            | CaseKind::Big
+            | CaseKind::Plume
+            | CaseKind::Room
+    )
 }
 
 /// The room's door: 2 m wide x 2 m tall, centred on the +x wall at y = 5,
@@ -3648,8 +3675,8 @@ pub fn write_case_with_wall_model(
 ///
 /// The dam break case is two-phase and carries `alpha.water`, `U` and
 /// `p_rgh` rather than the single-phase fields below; every other case kind
-/// carries `U` and, for the plume only, `p`, `T` and the four turbulence
-/// fields.
+/// carries `U`, the turbulence fields, and `p` and `T` - the momentum drivers
+/// read both whether or not the preset solves them.
 pub fn build_case(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<(HostMesh, InMemoryFields)> {
     if nx < 1 || ny < 1 || nz < 1 {
         return Err(Error::Config(format!(
@@ -4601,7 +4628,12 @@ fn build_initial_fields(
 
     let cavity = kind == CaseKind::Cavity;
     let plume = buoyant_case(kind);
-    let t_inlet = if kind == CaseKind::Room { ROOM_T_INLET } else { PLUME_T_INLET };
+    let t_inlet = match kind {
+        CaseKind::Room => ROOM_T_INLET,
+        CaseKind::Plume => PLUME_T_INLET,
+        // The isothermal presets are not heated anywhere, inlet included.
+        _ => PLUME_T_AMBIENT,
+    };
 
     let (lo, hi) = centre_bounds(g);
     let lx = (hi.x - lo.x).max(1e-30);
@@ -4714,17 +4746,22 @@ fn build_initial_fields(
     //
     // Kinematic pressure, `[0 2 -2 0 0 0 0]` - p/rho, which is what a
     // constant-density incompressible solver carries and what `simple.rs`
-    // assembles. Only the plume gets one: it is the only case here with a
-    // momentum equation to solve, and the others' drivers hold `U` frozen and
-    // would read a `0/p` nothing writes back.
+    // assembles. Every single-phase preset gets one: the momentum drivers
+    // read `p` whether or not the preset gives them a momentum equation to
+    // solve, and until the generator wrote it a fresh `channel` or `cavity`
+    // was not runnable until the field had been copied in by hand.
     //
-    // `fixedValue 0` on the single opening and `zeroGradient` everywhere else
-    // is the whole boundary specification, and it is also what makes the
-    // pressure matrix non-singular: with every patch Neumann the constant is a
-    // null space and `Simple::initialise` would have to pin a cell to remove
-    // it. One Dirichlet face is cheaper and physical - it is the level the room
-    // is open to.
-    if plume {
+    // `fixedValue 0` on the opening and `zeroGradient` everywhere else is the
+    // whole boundary specification, and on the presets that have an opening
+    // it is also what makes the pressure matrix non-singular: with every
+    // patch Neumann the constant is a null space. One Dirichlet face is
+    // cheaper and physical - it is the level the domain is open to. `cavity`
+    // has no opening, so its `p` carries no `fixedValue` anywhere and the
+    // level is left to the solver: `Simple::initialise` recognises a pressure
+    // with no Dirichlet as pinned and, after every solve, subtracts the value
+    // at reference cell 0 - which fixes the level without touching a
+    // gradient, a flux or a velocity.
+    if writes_p_and_t(kind) {
         let mut pf = RawScalarField {
             name: "p".to_string(),
             dimensions: "[0 2 -2 0 0 0 0]".to_string(),
@@ -4745,7 +4782,7 @@ fn build_initial_fields(
                 s.value = vec![0.0];
                 s
             } else {
-                // Walls and the hot inlet alike. A wall imposes no pressure, and
+                // Walls and the inlet alike. A wall imposes no pressure, and
                 // neither does an inlet whose velocity is prescribed: fixing
                 // both `U` and `p` on the same face over-specifies the face.
                 patch_spec("zeroGradient")
@@ -4759,9 +4796,10 @@ fn build_initial_fields(
 
     // ---- T ---------------------------------------------------------------
     //
-    // Only the plume has one. The other cases are isothermal, and a `0/T`
-    // there would be a field nothing solves and nothing reads.
-    if plume {
+    // The buoyant pair solves this; the isothermal presets do not, but
+    // `ofgpu-lowmach` reads `T` unconditionally, so a generated case carries
+    // ambient air everywhere rather than no field at all.
+    if writes_p_and_t(kind) {
         let mut t = RawScalarField {
             name: "T".to_string(),
             dimensions: "[0 0 0 1 0 0 0]".to_string(),
@@ -4877,12 +4915,13 @@ fn build_initial_fields(
     }
 
     println!(
-        "  0/ fields: Uref {}  k {}  epsilon {}  omega {}  nuTilda {}  (nu {})",
+        "  0/ fields: Uref {}  k {}  epsilon {}  omega {}  nuTilda {}  p 0  T {}  (nu {})",
         fmt_g(u_ref),
         fmt_g(k0),
         fmt_g(eps0),
         fmt_g(omega0),
         fmt_g(3.0 * nu),
+        fmt_g(PLUME_T_AMBIENT),
         fmt_g(nu)
     );
 
@@ -6114,11 +6153,18 @@ mod tests {
         &src[open..close]
     }
 
-    /// The other cases have to come out byte for byte as they did before the
-    /// plume was added: no seventh patch, no `0/T`, no Prandtl numbers.
+    /// The cavity used to come out with no `0/p` and no `0/T`: the pair was
+    /// written for the buoyant presets only, and `ofgpu-lowmach` reads both
+    /// unconditionally, so a freshly generated case was not runnable until the
+    /// fields had been copied in by hand. The generator writes them now, so
+    /// what this test pins has moved: the cavity gains exactly those two
+    /// fields and nothing else - no seventh patch, no gravity, no Prandtl
+    /// numbers - and its `p` carries no `fixedValue` anywhere, because the
+    /// cavity has no opening and `simple.rs` pins the level against reference
+    /// cell 0 itself.
     #[test]
-    fn the_existing_cases_are_untouched() {
-        let dir = temp_dir("cavity_unchanged");
+    fn the_cavity_gains_p_and_t_and_nothing_else() {
+        let dir = temp_dir("cavity_p_and_t");
         write_case(&dir, CaseKind::Cavity, 8, 8, 1).expect("write");
 
         let src = fs::read_to_string(dir.join("constant").join("polyMesh").join("boundary"))
@@ -6128,8 +6174,28 @@ mod tests {
             vec!["leftWall", "rightWall", "fixedWall", "movingWall", "back", "front"]
         );
 
-        assert!(!dir.join("0").join("T").exists(), "the cavity grew a T field");
-        assert!(!dir.join("0").join("p").exists(), "the cavity grew a p field");
+        let zero = dir.join("0");
+        let p = fs::read_to_string(zero.join("p")).expect("read p");
+        assert!(p.contains("[0 2 -2 0 0 0 0]"), "p is not kinematic:\n{p}");
+        assert!(p.contains("internalField   uniform 0"), "{p}");
+        // No opening, no Dirichlet: the solver recognises the problem as
+        // pinned and fixes the level itself (the `p` branch above says where).
+        assert!(!p.contains("fixedValue"), "{p}");
+        for wall in ["leftWall", "rightWall", "fixedWall", "movingWall"] {
+            assert!(patch_entry(&p, wall).contains("zeroGradient"), "{p}");
+        }
+        assert!(patch_entry(&p, "back").contains("empty"), "{p}");
+        assert!(patch_entry(&p, "front").contains("empty"), "{p}");
+
+        let t = fs::read_to_string(zero.join("T")).expect("read T");
+        assert!(t.contains("[0 0 0 1 0 0 0]"), "T has the wrong dimensions");
+        assert!(t.contains("internalField   uniform 293.15"), "{t}");
+        for wall in ["leftWall", "rightWall", "fixedWall", "movingWall"] {
+            assert!(patch_entry(&t, wall).contains("zeroGradient"), "{t}");
+        }
+        assert!(patch_entry(&t, "back").contains("empty"), "{t}");
+        assert!(patch_entry(&t, "front").contains("empty"), "{t}");
+
         assert!(!dir.join("constant").join("g").exists(), "the cavity grew gravity");
 
         let props = fs::read_to_string(dir.join("constant").join("physicalProperties"))

@@ -488,8 +488,10 @@ pub struct FlowRegion {
     pub kind: RegionKind,
     pub solid: Option<SolidMaterial>,
     pub fluid: Option<FluidMaterial>,
-    /// Uniform volumetric source `q'''`, W/m^3 - solid only (SPEC-LIT §60.3
-    /// refuses one on a fluid region by name).
+    /// Uniform volumetric source `q'''`, W/m^3, on either kind of region -
+    /// registered into [`crate::energy::EnergySources`] either way, so a
+    /// fluid region's reaches §26's equation exactly as a solid's does
+    /// (SPEC-LIT §60.3 used to refuse one on a fluid region by name).
     pub source: Scalar,
 }
 

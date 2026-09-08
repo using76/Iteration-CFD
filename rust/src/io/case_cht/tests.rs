@@ -903,20 +903,49 @@ fn a_transient_fluid_case_is_refused_naming_what_is_not_gated() {
     assert!(msg.contains("59.6"), "{msg}");
 }
 
-/// SPEC-LIT §60.3: a volumetric source on a fluid region would be read and
-/// dropped, which is the §13.4.1 defect.
+/// SPEC-LIT §60.3: a volumetric source on a fluid region used to be refused,
+/// while §18's registry was not wired to this format's fluid side. It is
+/// wired now: the source lowers into the `FlowCase`, reaches `EnergySources`
+/// by the same registration a solid region's does, and the §13.4.1 pair test
+/// applies unchanged - a fluid that dissipates must be hotter than one that
+/// does not.
 #[test]
-fn a_source_on_a_fluid_region_is_refused_rather_than_dropped() {
+fn a_source_on_a_fluid_region_reaches_the_energy_balance() {
     crate::io::contract::reset_warnings();
+    let Some(gpu) = gpu() else { return };
+
     let text = kp_pair_base().replace(
         r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },"#,
         r#""fluid": { "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 },
       "source": 1000.0,"#,
     );
-    let e = read(&text).expect("parse").lower().expect_err("must refuse");
-    let msg = e.to_string();
-    assert!(msg.contains("source"), "{msg}");
-    assert!(msg.contains("13.4.1"), "{msg}");
+    assert_ne!(text, kp_pair_base(), "the substitution must actually have matched");
+
+    // Accepted, and carried all the way into the FlowCase.
+    let low = read(&text).expect("parse").lower().expect("a fluid source lowers");
+    assert_eq!(low.sources[0], 1000.0, "the fluid region's own source entry");
+    let case = low.flow_case().expect("a fluid case lowers to a FlowCase");
+    assert_eq!(case.regions[0].source, 1000.0);
+
+    let sa = run_flow(&gpu, &kp_pair_base());
+    let sb = run_flow(&gpu, &text);
+    let gap = sa
+        .t
+        .iter()
+        .zip(&sb.t)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+    assert!(
+        gap > 1e-12,
+        "a 1000 W/m^3 source on the fluid changed the field by only {gap} K - the \
+         case said source and the solver ignored it (SPEC-LIT 13.4.1)"
+    );
+    assert!(
+        sb.region_mean(0) > sa.region_mean(0),
+        "a heater on the fluid region must make it HOTTER, not merely different: \
+         {} K against {} K",
+        sb.region_mean(0),
+        sa.region_mean(0)
+    );
 }
 
 /// SPEC-LIT §60.3: `empty` patches come in opposite pairs.
