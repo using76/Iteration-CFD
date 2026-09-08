@@ -106,6 +106,11 @@ impl SolidMask {
 /// The surface's orientation is deliberately irrelevant: parity does not
 /// read normals, and the winding-number arbiter takes `|w|`, so a surface
 /// wound inward classifies identically to one wound outward.
+///
+/// The per-cell combine pass is parallel: contiguous chunks of `c` on
+/// `std::thread::scope` threads when the block is big enough to pay for them
+/// (`PARALLEL_MIN_CELLS`), one serial chunk otherwise. Both shapes run
+/// `combine_cell_range`, so the mask is bit-identical either way.
 pub fn classify(axes: &BlockAxes, surf: &Surface) -> Result<SolidMask> {
     let nodes: [&[Scalar]; 3] = [axes.xn, axes.yn, axes.zn];
     let mut n = [0usize; 3];
@@ -148,37 +153,61 @@ pub fn classify(axes: &BlockAxes, surf: &Surface) -> Result<SolidMask> {
     let mut voted = 0usize;
     let mut arbitrated = 0usize;
 
-    // Cell centres are only needed for the (rare) arbitrated cells, so they
-    // are recomputed on demand rather than materialised for the whole block.
-    let centre = |c: usize| -> Vec3 {
-        let i = c % n[0];
-        let t = c / n[0];
-        let (j, k) = (t % n[1], t / n[1]);
-        Vec3::new(
-            0.5 * (nodes[0][i] + nodes[0][i + 1]),
-            0.5 * (nodes[1][j] + nodes[1][j + 1]),
-            0.5 * (nodes[2][k] + nodes[2][k + 1]),
-        )
-    };
-
-    for c in 0..n_cells {
-        let v = vote[c];
-        let s = match v {
-            0 => false,
-            0b111 => true,
-            _ if !needs_arbiter(v, sure[c]) => {
-                voted += 1;
-                v.count_ones() >= 2
-            }
-            _ => {
-                arbitrated += 1;
-                winding_number(surf, centre(c)).abs() >= 0.5
-            }
-        };
-        if s {
-            n_solid += 1;
+    // The pass is embarrassingly parallel: each cell reads only its own
+    // `vote[c]`/`sure[c]` - fixed once the three `cast_axis` passes are done -
+    // and the immutable surface, and writes exactly its own `solid[c]`, so it
+    // splits into contiguous chunks of `c`, one per thread, under
+    // `std::thread::scope` (not rayon: the READMEs publish this crate's
+    // dependency list and it must stay true). Both shapes below run the same
+    // [`combine_cell_range`] on the same per-cell inputs and the per-chunk
+    // counters are summed in chunk order, so the mask and the three counts
+    // come out exactly what the old serial loop produced. The threads are
+    // for the arbiter tail: an arbitrated cell is O(tris) (module doc), and
+    // one slow cell must not serialise the rest.
+    let n_threads = std::thread::available_parallelism().map_or(1, |p| p.get()).min(n_cells);
+    if n_threads <= 1 || n_cells < PARALLEL_MIN_CELLS {
+        let (solid_n, voted_n, arbitrated_n) =
+            combine_cell_range(&vote, &sure, &mut solid, surf, n, nodes, 0);
+        n_solid += solid_n;
+        voted += voted_n;
+        arbitrated += arbitrated_n;
+    } else {
+        // `div_ceil` keeps the chunk count at or under `n_threads` - one
+        // non-empty chunk per spawned thread, none left idle, none doubled up.
+        let chunk_len = n_cells.div_ceil(n_threads);
+        // The shared inputs go to the workers as copied references: naming
+        // `&vote` inside the `move` closure below would capture `vote` itself
+        // BY MOVE, and the outer `map` closure is `FnMut`, so the second
+        // worker would see a moved-out vector. The references are bound here,
+        // where Copy makes each worker carry its own copy of the borrow. Only
+        // `slab` is exclusive, and each worker's chunk is a disjoint
+        // `chunks_mut` piece of `solid`.
+        let vote_ref = &vote;
+        let sure_ref = &sure;
+        let per_chunk: Vec<(usize, usize, usize)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = solid
+                .chunks_mut(chunk_len)
+                .enumerate()
+                .map(|(chunk, slab)| {
+                    let c0 = chunk * chunk_len;
+                    scope
+                        .spawn(move || combine_cell_range(vote_ref, sure_ref, slab, surf, n, nodes, c0))
+                })
+                .collect();
+            // The per-cell body is infallible - `combine_cell_range` returns a
+            // counter triple, not a `Result` - so a worker can only die by
+            // panicking; `join` re-raises that panic here, exactly what the
+            // serial loop would have done in place.
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("solid-mask combine worker panicked"))
+                .collect()
+        });
+        for (solid_n, voted_n, arbitrated_n) in per_chunk {
+            n_solid += solid_n;
+            voted += voted_n;
+            arbitrated += arbitrated_n;
         }
-        solid[c] = s;
     }
 
     Ok(SolidMask { nx: n[0], ny: n[1], nz: n[2], solid, n_solid, voted, arbitrated })
@@ -192,6 +221,76 @@ fn needs_arbiter(vote: u8, sure: u8) -> bool {
     let majority_solid = vote.count_ones() >= 2;
     let majority_mask = if majority_solid { vote } else { !vote & 0b111 };
     (majority_mask & sure) != majority_mask
+}
+
+/// Below this many cells the whole pass runs serially. The common cell costs
+/// two byte loads, a match and a store - only an arbitrated cell reaches the
+/// O(tris) winding number, and §23.3 keeps those rare - so this many cells is
+/// microseconds of combine work, under what spawning and joining the threads
+/// costs unless an arbiter tail lands in the block. That per-cell cost is
+/// well under the cut-cell pass's (a `nearest_triangle` query every cell,
+/// `cutcell::PARALLEL_MIN_CELLS` at 1 << 12), so the crossover sits higher
+/// here. *DESIGN*.
+const PARALLEL_MIN_CELLS: usize = 1 << 16;
+
+/// One contiguous chunk of the combine pass: block cells `c0 .. c0 +
+/// solid.len()` in the same `c` order the serial loop used, written into
+/// `solid` in place. Returns the chunk's own `(n_solid, voted, arbitrated)`.
+///
+/// This is deliberately the ONLY copy of the per-cell logic - both the serial
+/// and the parallel entry in [`classify`] call it - so the mask is
+/// bit-identical to the serial one by construction, not by coincidence: every
+/// cell is computed by the same instructions on the same inputs (`vote`,
+/// `sure` and `surf` are read-only for the whole pass, and the winding number
+/// is the same pure function of `(surf, cell_centre)` per cell), each `solid` slot
+/// is written by exactly one worker, and the three counters are plain integer
+/// totals summed in chunk order.
+fn combine_cell_range(
+    vote: &[u8],
+    sure: &[u8],
+    solid: &mut [bool],
+    surf: &Surface,
+    n: [usize; 3],
+    nodes: [&[Scalar]; 3],
+    c0: usize,
+) -> (usize, usize, usize) {
+    let (mut n_solid, mut voted, mut arbitrated) = (0usize, 0usize, 0usize);
+    for (local, slot) in solid.iter_mut().enumerate() {
+        let c = c0 + local;
+        let v = vote[c];
+        let s = match v {
+            0 => false,
+            0b111 => true,
+            _ if !needs_arbiter(v, sure[c]) => {
+                voted += 1;
+                v.count_ones() >= 2
+            }
+            _ => {
+                arbitrated += 1;
+                // Cell centres are only needed for the (rare) arbitrated
+                // cells, so they are recomputed on demand rather than
+                // materialised for the whole block.
+                winding_number(surf, cell_centre(n, nodes, c)).abs() >= 0.5
+            }
+        };
+        if s {
+            n_solid += 1;
+        }
+        *slot = s;
+    }
+    (n_solid, voted, arbitrated)
+}
+
+/// The centre of flat cell id `c`: the interval midpoints of its three axes.
+fn cell_centre(n: [usize; 3], nodes: [&[Scalar]; 3], c: usize) -> Vec3 {
+    let i = c % n[0];
+    let t = c / n[0];
+    let (j, k) = (t % n[1], t / n[1]);
+    Vec3::new(
+        0.5 * (nodes[0][i] + nodes[0][i + 1]),
+        0.5 * (nodes[1][j] + nodes[1][j + 1]),
+        0.5 * (nodes[2][k] + nodes[2][k + 1]),
+    )
 }
 
 // ==========================================================================

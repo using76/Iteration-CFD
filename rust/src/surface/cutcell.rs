@@ -463,6 +463,91 @@ fn classify_one_cell(
     }
 }
 
+/// Below this many cells the whole pass runs serially. A cell costs at least
+/// one `nearest_triangle` query and a surface-reachable cell a full `s^3`
+/// lattice, so this many cells is already milliseconds of guaranteed work -
+/// two-plus orders of magnitude over the tens of microseconds spawning and
+/// joining the threads costs - while staying far below any production block
+/// (the race-car case is 2,097,152 cells). *DESIGN*.
+const PARALLEL_MIN_CELLS: usize = 1 << 12;
+
+/// One contiguous chunk of the classification pass: block cells
+/// `c0 .. c0 + out.len()` in the same `c` order the serial loop used, written
+/// into `out` in place. Returns the chunk's own `(n_solid, n_fluid, n_cut)`.
+///
+/// This is deliberately the ONLY copy of the per-cell logic - both the serial
+/// and the parallel entry in [`classify_cutcells`] call it - so the parallel
+/// field is bit-identical to the serial one by construction, not by
+/// coincidence: every cell is computed by the same instructions on the same
+/// inputs (`idx`, `solid` and the axis arrays are read-only for the whole
+/// pass), each `out` slot is written by exactly one worker, and the chunk
+/// counters are plain integer totals summed in chunk order. Nothing inside
+/// `classify_one_cell` is touched, so its floating-point accumulation is
+/// exactly what the serial loop performed.
+fn classify_cell_range(
+    idx: &TriIndex,
+    solid: &[bool],
+    xn: &[Scalar],
+    yn: &[Scalar],
+    zn: &[Scalar],
+    nx: usize,
+    ny: usize,
+    c0: usize,
+    out: &mut [Option<CellFractions>],
+    s: usize,
+) -> (usize, usize, usize) {
+    let (mut n_solid, mut n_fluid, mut n_cut) = (0usize, 0usize, 0usize);
+    for (local, slot) in out.iter_mut().enumerate() {
+        let c = c0 + local;
+        let i = c % nx;
+        let t = c / nx;
+        let (j, k) = (t % ny, t / ny);
+
+        let lo = Vec3::new(xn[i], yn[j], zn[k]);
+        let hi = Vec3::new(xn[i + 1], yn[j + 1], zn[k + 1]);
+        let centre = (lo + hi) * 0.5;
+        let half_diag = 0.5 * (hi - lo).mag();
+        let (_, dist) = idx.nearest_triangle(centre);
+
+        if dist > half_diag {
+            // The surface cannot reach this cell (module doc); trust §23.3.
+            if solid[c] {
+                n_solid += 1;
+            } else {
+                n_fluid += 1;
+                let v_full = (xn[i + 1] - xn[i]) * (yn[j + 1] - yn[j]) * (zn[k + 1] - zn[k]);
+                *slot = Some(CellFractions {
+                    state: CellState::Fluid,
+                    theta: 1.0,
+                    volume: v_full,
+                    centroid: centre,
+                    alpha: [1.0; 6],
+                    cut_sf: Vec3::ZERO,
+                    cut_cf: centre,
+                    cut_tri: 0,
+                    v_full,
+                });
+            }
+            continue;
+        }
+
+        let mut cf = classify_one_cell(idx, xn, yn, zn, i, j, k, s);
+        match cf.state {
+            CellState::Solid => n_solid += 1,
+            CellState::Fluid => {
+                n_fluid += 1;
+                *slot = Some(cf);
+            }
+            CellState::Cut => {
+                cf.cut_tri = idx.nearest_triangle(cf.cut_cf).0;
+                n_cut += 1;
+                *slot = Some(cf);
+            }
+        }
+    }
+    (n_solid, n_fluid, n_cut)
+}
+
 /// Classify every cell of the block into fluid/solid/cut fractions (section
 /// 24). `s` is the supersample lattice size ([`DEFAULT_SUPERSAMPLE`]).
 ///
@@ -470,6 +555,11 @@ fn classify_one_cell(
 /// then refines only the cells the surface can actually reach - see the
 /// module doc for the half-diagonal argument that makes that exact rather
 /// than a heuristic.
+///
+/// The per-cell pass is parallel: contiguous chunks of `c` on
+/// `std::thread::scope` threads when the block is big enough to pay for them
+/// (`PARALLEL_MIN_CELLS`), one serial chunk otherwise. Both shapes run
+/// `classify_cell_range`, so the field is bit-identical either way.
 pub fn classify_cutcells(axes: &BlockAxes, surf: &Surface, s: usize) -> Result<CutCellField> {
     if s == 0 {
         return Err(Error::Config(format!(
@@ -496,51 +586,58 @@ pub fn classify_cutcells(axes: &BlockAxes, surf: &Surface, s: usize) -> Result<C
     let yn = axes.yn;
     let zn = axes.zn;
 
-    for c in 0..n_cells {
-        let i = c % nx;
-        let t = c / nx;
-        let (j, k) = (t % ny, t / ny);
-
-        let lo = Vec3::new(xn[i], yn[j], zn[k]);
-        let hi = Vec3::new(xn[i + 1], yn[j + 1], zn[k + 1]);
-        let centre = (lo + hi) * 0.5;
-        let half_diag = 0.5 * (hi - lo).mag();
-        let (_, dist) = idx.nearest_triangle(centre);
-
-        if dist > half_diag {
-            // The surface cannot reach this cell (module doc); trust §23.3.
-            if mask.solid[c] {
-                n_solid += 1;
-            } else {
-                n_fluid += 1;
-                let v_full = (xn[i + 1] - xn[i]) * (yn[j + 1] - yn[j]) * (zn[k + 1] - zn[k]);
-                cells[c] = Some(CellFractions {
-                    state: CellState::Fluid,
-                    theta: 1.0,
-                    volume: v_full,
-                    centroid: centre,
-                    alpha: [1.0; 6],
-                    cut_sf: Vec3::ZERO,
-                    cut_cf: centre,
-                    cut_tri: 0,
-                    v_full,
-                });
-            }
-            continue;
-        }
-
-        let mut cf = classify_one_cell(&idx, xn, yn, zn, i, j, k, s);
-        match cf.state {
-            CellState::Solid => n_solid += 1,
-            CellState::Fluid => {
-                n_fluid += 1;
-                cells[c] = Some(cf);
-            }
-            CellState::Cut => {
-                cf.cut_tri = idx.nearest_triangle(cf.cut_cf).0;
-                n_cut += 1;
-                cells[c] = Some(cf);
-            }
+    // The pass is embarrassingly parallel: each cell reads only the shared
+    // `TriIndex`, the solid mask and the axis arrays - all immutable for the
+    // whole pass - and writes exactly its own `cells[c]`, so it splits into
+    // contiguous chunks of `c`, one per thread, under `std::thread::scope`
+    // (not rayon: the READMEs publish this crate's dependency list and it
+    // must stay true). Both shapes below run the same `classify_cell_range`
+    // on the same per-cell inputs and the per-chunk counters are summed in
+    // chunk order, so the field and the three counts come out exactly what
+    // the old serial loop produced.
+    let n_threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(n_cells);
+    if n_threads <= 1 || n_cells < PARALLEL_MIN_CELLS {
+        let (solid_n, fluid_n, cut_n) =
+            classify_cell_range(&idx, &mask.solid, xn, yn, zn, nx, ny, 0, &mut cells, s);
+        n_solid += solid_n;
+        n_fluid += fluid_n;
+        n_cut += cut_n;
+    } else {
+        // `div_ceil` keeps the chunk count at or under `n_threads` - one
+        // non-empty chunk per spawned thread, none left idle, none doubled up.
+        let chunk_len = n_cells.div_ceil(n_threads);
+        // The shared inputs go to the workers as copied references: naming
+        // them `&idx` inside the `move` closure below would capture `idx`
+        // itself BY MOVE and hand the whole index to the first worker, so the
+        // references are bound here, where Copy makes each worker carry its
+        // own copy of the borrow. Only `slab` is exclusive, and each worker's
+        // chunk is a disjoint `chunks_mut` piece of `cells`.
+        let idx_ref = &idx;
+        let solid = &mask.solid;
+        let per_chunk: Vec<(usize, usize, usize)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = cells
+                .chunks_mut(chunk_len)
+                .enumerate()
+                .map(|(chunk, slab)| {
+                    let c0 = chunk * chunk_len;
+                    scope.spawn(move || {
+                        classify_cell_range(idx_ref, solid, xn, yn, zn, nx, ny, c0, slab, s)
+                    })
+                })
+                .collect();
+            // The per-cell body is infallible - `classify_one_cell` returns a
+            // `CellFractions`, not a `Result` - so a worker can only die by
+            // panicking; `join` re-raises that panic here, exactly what the
+            // serial loop would have done in place.
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("cut-cell classification worker panicked"))
+                .collect()
+        });
+        for (solid_n, fluid_n, cut_n) in per_chunk {
+            n_solid += solid_n;
+            n_fluid += fluid_n;
+            n_cut += cut_n;
         }
     }
 
