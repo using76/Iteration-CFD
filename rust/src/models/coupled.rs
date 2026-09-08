@@ -709,6 +709,11 @@ impl<'m> CoupledTurbulence for CoupledKOmegaSst<'m> {
             // line too. The pure-SST answer is unchanged, which is what
             // keeps 30.3's selection test reading what it always read.
             "kOmegaSSTLM"
+        } else if self.model.gamma_transition().is_some() {
+            // SPEC-LIT 91.5: a 2015-gamma run says so on its own banner
+            // line as well. The pure-SST answer is unchanged, which is what
+            // keeps 30.3's selection test reading what it always read.
+            "kOmegaSSTGamma"
         } else {
             "kOmegaSST"
         }

@@ -294,6 +294,20 @@ pub struct KOmegaSst<'m> {
     /// needs lives inside [`crate::models::transition::LangtryMenter`],
     /// which is not constructed.
     lm: Option<crate::models::transition::LangtryMenter>,
+
+    /// SPEC-LIT §90: Menter, Smirnov, Liu & Avancha's one-equation `gamma`
+    /// transition model (2015), when the case asked for one.
+    ///
+    /// **`None` is the whole of "the default is unmoved by construction",
+    /// for a third time.** With no transition model attached the code this
+    /// field adds to `correct` is four failed `if let`s - one in
+    /// `update_blending`, one beside `k`'s and `omega`'s time-level
+    /// rotation, one after `sstKSources`, one after `correct_nut` - and
+    /// `cuda/sst.cu` is byte-for-byte what it was. Like LM's this costs not
+    /// even a buffer: every allocation the model needs lives inside
+    /// [`crate::models::menter_gamma::MenterGamma`], which is not
+    /// constructed.
+    gm: Option<crate::models::menter_gamma::MenterGamma>,
 }
 
 impl<'m> KOmegaSst<'m> {
@@ -375,6 +389,7 @@ impl<'m> KOmegaSst<'m> {
             f1_override: None,
             des: None,
             lm: None,
+            gm: None,
             grad_frob: gpu.zeros(nc)?,
         })
     }
@@ -427,12 +442,18 @@ impl<'m> KOmegaSst<'m> {
         if let Some(lm) = &self.lm {
             v.extend(lm.named_fields());
         }
+        // SPEC-LIT §91.1: a 2015-gamma run's `0/` set is four fields - the
+        // one equation this model adds on top of `k` and `omega`. The list
+        // grows exactly when the model does.
+        if let Some(gm) = &self.gm {
+            v.extend(gm.named_fields());
+        }
         v
     }
 
     /// [`Self::named_fields`], mutable - for `0/` upload and `.mcr` restore.
     pub fn named_fields_mut(&mut self) -> Vec<(&'static str, &mut GpuScalarField)> {
-        let Self { k, omega, core, lm, .. } = self;
+        let Self { k, omega, core, lm, gm, .. } = self;
         let mut v = vec![
             ("k", k),
             ("omega", omega),
@@ -440,6 +461,9 @@ impl<'m> KOmegaSst<'m> {
         ];
         if let Some(lm) = lm {
             v.extend(lm.named_fields_mut());
+        }
+        if let Some(gm) = gm {
+            v.extend(gm.named_fields_mut());
         }
         v
     }
@@ -486,6 +510,19 @@ impl<'m> KOmegaSst<'m> {
                     .to_string(),
             ));
         }
+        if lm.is_some() && self.gm.is_some() {
+            return Err(Error::Config(
+                "kOmegaSSTLM and kOmegaSSTGamma cannot both be attached to one \
+                 kOmegaSST (SPEC-LIT 90.9, the same buffer collision it \
+                 records for the hybrid): both stamp what `sstKSources` wrote \
+                 into the k equation's `g_lim` and `sp` - the gamma scaling \
+                 and P_k^lim of (90.15) on top of the `gamma_eff` scaling \
+                 (88.13) - and whichever ran second would silently discard \
+                 the other. Neither paper publishes a two-transition-model \
+                 form and this solver will not invent one"
+                    .to_string(),
+            ));
+        }
         self.lm = lm;
         Ok(())
     }
@@ -499,6 +536,65 @@ impl<'m> KOmegaSst<'m> {
         &mut self,
     ) -> Option<&mut crate::models::transition::LangtryMenter> {
         self.lm.as_mut()
+    }
+
+    /// Attach §90's one-equation `gamma` transition model. `None` (the
+    /// default) leaves this plain SST, bit for bit.
+    ///
+    /// Refused beside a hybrid, for §90.9's arithmetic reason and not a
+    /// modelling one: both replace what `sstKSources` wrote into the k
+    /// equation's `sp` - the hybrid with `beta* omega l_RANS/l_DES` (57.4),
+    /// this model with `max(gamma, 0.1) beta* omega` (90.15's companion,
+    /// 90.14's `D~_k`) - and whichever ran second would silently discard
+    /// the other. Refused beside [`Self::set_transition`]'s model too: two
+    /// transition scalings on one background is the same collision twice.
+    pub fn set_gamma_transition(
+        &mut self,
+        gm: Option<crate::models::menter_gamma::MenterGamma>,
+    ) -> Result<()> {
+        if gm.is_some() && self.des.is_some() {
+            return Err(Error::Config(
+                "kOmegaSSTGamma and a DES hybrid cannot both be attached to \
+                 one kOmegaSST (SPEC-LIT 90.9): both replace what \
+                 `sstKSources` wrote into the k equation's `sp` - the hybrid \
+                 with `beta* omega l_RANS/l_DES` (57.4) and the gamma model \
+                 with `max(gamma, 0.1) beta* omega` (90.14) - and whichever \
+                 ran second would silently discard the other. Menter et al. \
+                 publish no hybrid form and this solver will not invent one"
+                    .to_string(),
+            ));
+        }
+        if gm.is_some() && self.lm.is_some() {
+            return Err(Error::Config(
+                "kOmegaSSTGamma and kOmegaSSTLM cannot both be attached to \
+                 one kOmegaSST (SPEC-LIT 90.9, the buffer collision it \
+                 records for the hybrid): both stamp what `sstKSources` \
+                 wrote into the k equation's `g_lim` and `sp` - the gamma \
+                 scaling and P_k^lim of (90.15) on top of the `gamma_eff` \
+                 scaling (88.13) - and whichever ran second would silently \
+                 discard the other. Neither paper publishes a \
+                 two-transition-model form and this solver will not invent \
+                 one"
+                    .to_string(),
+            ));
+        }
+        self.gm = gm;
+        Ok(())
+    }
+
+    /// §90's transition model, if one is attached - the fields a driver
+    /// reports ride behind this, as [`Self::transition`]'s do.
+    #[must_use]
+    pub fn gamma_transition(
+        &self,
+    ) -> Option<&crate::models::menter_gamma::MenterGamma> {
+        self.gm.as_ref()
+    }
+
+    pub fn gamma_transition_mut(
+        &mut self,
+    ) -> Option<&mut crate::models::menter_gamma::MenterGamma> {
+        self.gm.as_mut()
     }
 
     #[must_use]
@@ -641,6 +737,31 @@ impl<'m> KOmegaSst<'m> {
             lm.stamp_f1(gpu, f1, n)?;
         }
 
+        // SPEC-LIT §90.6: the 2015 model's closed forms, then
+        // `F_1 <- max(F_1, F_3)`, then THE PRODUCTION REPLACEMENT - the
+        // Kato-Launder `nu_t S Omega` written over BOTH production buffers,
+        // `core.g` (what the k equation reads) and `p` (what the omega
+        // equation reads per unit nu_t). HERE, between the LM hook and
+        // `sst_blend_coeffs`, for three ordering reasons, any one of which
+        // alone would decide it: `p` was formed by `sst_production_by_nut`
+        // a few lines above and `core.g` in `update_flow_derived`, so both
+        // exist to be replaced; the wall functions overwrite `core.g` in
+        // wall cells below - which then STAYS the wall-function value,
+        // exactly as for plain SST - so a stamp after them would be
+        // silently discarded there; and the omega equation assembles after
+        // this and reads `p`, so a stamp after it would never be seen.
+        // SST's own production limiter is NOT applied here: `sstKSources`
+        // limits whatever it is handed, and it is handed this (§90.6).
+        //
+        // With no transition model attached this is one failed `if let`.
+        if self.gm.is_some() {
+            let Self { gm, core, k, omega, s, f1, p, .. } = self;
+            let gm = gm.as_mut().expect("checked just above");
+            gm.update_fields(gpu, &core.turb, &k.f, &omega.f, s, &core.grad_u, flow.nu, n)?;
+            gm.stamp_f1(gpu, f1, n)?;
+            gm.stamp_production(gpu, &mut core.g, p, &core.nut.f, s, n)?;
+        }
+
         sst_blend_coeffs(
             gpu,
             &self.sst,
@@ -699,6 +820,12 @@ impl<'m> KOmegaSst<'m> {
         // inside its own solve - where they would be one step behind.
         if let Some(lm) = &mut self.lm {
             lm.advance_time_levels(gpu)?;
+        }
+        // §90.5: `gamma`'s single time level rotates here beside `k`'s and
+        // `omega`'s, so all three equations see the same time levels - the
+        // same reason LM's two rotate here.
+        if let Some(gm) = &mut self.gm {
+            gm.advance_time_levels(gpu)?;
         }
         self.core.ddt.advance(ctrl.delta_t);
 
@@ -898,6 +1025,28 @@ impl<'m> KOmegaSst<'m> {
             lm.stamp_k_sources(gpu, &mut self.g_lim, &mut self.core.sp, n)?;
         }
 
+        // SPEC-LIT §90.6, (90.14)-(90.16): `g_lim <- gamma g_lim + P_k^lim`
+        // - (90.13)'s `gamma P_k` applied to the LIMITED production, plus
+        // the page's additional term - and `sp <- max(gamma, 0.1) sp`,
+        // which is (90.14). Stamped over what `sstKSources` has just
+        // written, and over the hybrid's and LM's stamps if they ran: the
+        // limiter has already been applied to the Kato-Launder `G` this
+        // model replaced in `update_blending`, which is why the stamp sits
+        // HERE and not before `sstKSources`.
+        //
+        // `gamma` is the value `update_blending` formed at the top of this
+        // same `correct`, from the PREVIOUS iteration's `gamma` - §88.6's
+        // one-iteration lag, named there and deliberate for the same
+        // reasons, §81 forbidding the alternative. `cuda/sst.cu` is
+        // untouched, and with no transition model attached this is one
+        // failed `if let`.
+        if self.gm.is_some() {
+            let Self { gm, g_lim, core, s, .. } = self;
+            let gm = gm.as_ref().expect("checked just above");
+            let (sp, nut) = (&mut core.sp, &core.nut.f);
+            gm.stamp_k_sources(gpu, g_lim, sp, nut, s, nu, n)?;
+        }
+
         fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.g_lim, 1.0)?;
 
         // + G_b, both signs (SPEC-LIT 17) - the same route into `k` every
@@ -942,6 +1091,17 @@ impl<'m> KOmegaSst<'m> {
             let Self { lm, core, s, .. } = self;
             let lm = lm.as_mut().expect("checked just above");
             lm.solve(gpu, core, flow, s)?;
+        }
+        // §90.5: `gamma` LAST, after `correct_nut`, through the same
+        // `RasCore` the other two equations just used - so it sees the
+        // `nu_t` this iteration produced rather than the one it started
+        // from. Its solver performance is not returned: `correct`'s
+        // signature is §6.3's and belongs to the two equations SST owns;
+        // `gamma_transition()` carries the field a driver wants to report.
+        if self.gm.is_some() {
+            let Self { gm, core, s, .. } = self;
+            let gm = gm.as_mut().expect("checked just above");
+            gm.solve(gpu, core, flow, s)?;
         }
 
         Ok((w_perf, k_perf))

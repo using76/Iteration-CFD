@@ -2459,6 +2459,12 @@ fn run(o: &Options) -> Result<()> {
     }
     println!();
 
+    // SPEC-LIT 90.5/91.5: the 2015-gamma banner's initial `gamma` range,
+    // printed here because the `turbulence model:` line above ran before any
+    // field was uploaded - this is the state the first outer iteration's
+    // `correct` reads, restart restore included.
+    common::report_gamma_range(&gpu, &turb.output_fields())?;
+
     let rep = run_loop(
         &gpu,
         Fields {

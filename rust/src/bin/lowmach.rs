@@ -2002,6 +2002,11 @@ fn run(o: &Options) -> Result<()> {
     pipeline.start(t0);
     mem.sample(&gpu)?;
 
+    // SPEC-LIT 90.5/91.5: the 2015-gamma banner's initial `gamma` range,
+    // printed here because the `turbulence model:` line above ran before any
+    // field was uploaded - this is the state the first `correct` reads.
+    common::report_gamma_range(&gpu, &turb.output_fields())?;
+
     for step in 0..n_steps {
         if transient {
             s.begin_time_step(&gpu, dt)?;

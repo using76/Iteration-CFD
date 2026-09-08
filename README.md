@@ -61,18 +61,18 @@ Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으�
 
 ## 현황
 
-**2026-09-03 이 작업 트리에서 실제로 돌려 얻은 출력입니다.** NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, 배정밀도.
+**2026-09-05 이 작업 트리에서 실제로 돌려 얻은 출력입니다.** NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, 배정밀도.
 
 ```
-cargo test --release   1,853 passed, 0 failed, 6 ignored   (모든 타깃 합계, 18개 스위트)
-                       1,699 passed, 0 failed, 4 ignored   (lib 크레이트만)
+cargo test --release   1,774 passed, 0 failed, 6 ignored   (모든 타깃 합계, 18개 스위트)
+                       1,645 passed, 0 failed, 4 ignored   (lib 크레이트만)
 
-ofgpu-validate         901 / 901 checks passed
-                       853개는 실시간 계산, 48개는 기록된 측정값 재생
-                       이어서 MISSES 2개와 OPEN 5개를 이름으로 부르는 목록을 출력
+ofgpu-validate         833 / 833 checks passed
+                       788개는 실시간 계산, 45개는 기록된 측정값 재생
+                       이어서 MISSES 2개와 OPEN 6개를 이름으로 부르는 목록을 출력
 ```
 
-그 목록은 손으로 유지되는 것이 아니라, 게이트가 자신의 판정을 보고하는 바로 그 지점에서 들어가는 레지스트리로부터 **생성**됩니다(SPEC-LIT §69). 판정을 출력하는 것과 등록하는 것이 같은 호출이므로 일곱 개 전부가 매 실행 이름으로 불리며, 여덟 번째가 추가되더라도 목록에서 빠질 수 없습니다. **`ofgpu-validate`가 실행하는 모든 항목은 통과합니다. 그것은 "이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다"와 다른 진술이며, 둘을 혼동해서는 안 됩니다.**
+그 목록은 손으로 유지되는 것이 아니라, 게이트가 자신의 판정을 보고하는 바로 그 지점에서 들어가는 레지스트리로부터 **생성**됩니다(SPEC-LIT §69). 판정을 출력하는 것과 등록하는 것이 같은 호출이므로 여덟 개 전부가 매 실행 이름으로 불리며, 아홉 번째가 추가되더라도 목록에서 빠질 수 없습니다. **`ofgpu-validate`가 실행하는 모든 항목은 통과합니다. 그것은 "이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다"와 다른 진술이며, 둘을 혼동해서는 안 됩니다.**
 
 ---
 
@@ -122,7 +122,7 @@ claude mcp add ofgpu -- node mcp\server.mjs
 |---|---|
 | 이산화 | Gauss linear·upwind·linearUpwind·cubic·QUICK·Gamma·blended, TVD 제한자 6종, Green–Gauss·최소제곱 기울기와 제한자(Barth–Jespersen, Venkatakrishnan), 과이완 비직교 보정, steadyState·Euler·BDF2·국소 시간전진 |
 | 압력–속도 | SIMPLE, SIMPLEC, PISO, PIMPLE. Rhie–Chow 보간이며 체적력은 셀 값을 보간하지 않고 면에서 직접 처리 |
-| 난류 | RANS: 표준·realizable·RNG k-ε, Wilcox k-ω, Menter SST, Launder–Sharma 저Re, Spalart-Allmaras(4변종). LES: Smagorinsky, WALE, Deardorff. 하이브리드: DES97·DDES·IDDES. 천이: k-ω SST-LM. 벽 처리: 표준·연속 벽함수, `lowRe` 적분, Jayatilleke 열 벽함수, 거칠기 |
+| 난류 | RANS: 표준·realizable·RNG k-ε, Wilcox k-ω, Menter SST, Launder–Sharma 저Re, Spalart-Allmaras(4변종). LES: Smagorinsky, WALE, Deardorff. 하이브리드: DES97·DDES·IDDES. 천이: k-ω SST-LM, k-ω SST-γ(Menter 2015, Galilean 불변). 벽 처리: 표준·연속 벽함수, `lowRe` 적분, Jayatilleke 열 벽함수, 거칠기 |
 | 다상·수송 | VOF(계면 압축, Zalesak FCT, CSF 표면장력, 정적·이력·동적 접촉각), 다성분 화학종, 일반화 뉴턴 점성 6종, Darcy–Forchheimer 다공성, 비Boussinesq 부력 |
 | 켤레 열전달 | 고체 영역, 접촉저항, 조화평균 계면 전도도, 유입구 하나와 유출구 하나까지의 유체 영역 |
 | 환기·데이터센터 | 팬 성능곡선(AMCA 210 보정), 다공성 점프, 습공기(Hyland–Wexler), RCI·RTI·SHI·RHI 지표 |
@@ -150,7 +150,7 @@ claude mcp add ofgpu -- node mcp\server.mjs
 | §60.5 Gate 5 — 정사각 밀폐공간 켤레 자연대류 (Kaminski & Prakash 1986) | **MISSES**, 전도 지배 쪽에서 3 % 바를: `Kr = 0.1`에서 −7.11 %, `Kr = 10`에서 −0.07 %. 1차 문헌은 유료라 끝내 읽지 못했고 비교는 Belazizia 등(2012)이라는 **2차 출처**에 대한 것 |
 | §68.12 Gate 68-C — Theobald(1981) 소방 수류 90회 | **MISSES**, 기체를 정지시킨 채로: 평균 측정 거리의 **61.29 %**. 항력 없는 진공 괄호가 198.65 %이므로 던지는 거리를 결정하는 것은 유입 공기입니다 |
 
-**판정이 `OPEN`인 것이 다섯 개 더** 있으며 같은 목록의 둘째 그룹으로 출력됩니다. 셋은 §32.4의 평판 채널을 측정값이 아니라 **상관식**(Gnielinski 1976)에 견준 것이고, 넷째 `78-D`는 발표된 두 스플래시 기준이 Weber 수로 4.78배 **서로** 어긋나기 때문이며, 다섯째 §88.10 Gate 88-T는 T3A 평판의 측정된 개시 `Re_x`를 구하지 못해 비교를 닫지 못했기 때문입니다.
+**판정이 `OPEN`인 것이 여섯 개 더** 있으며 같은 목록의 둘째 그룹으로 출력됩니다. 셋은 §32.4의 평판 채널을 측정값이 아니라 **상관식**(Gnielinski 1976)에 견준 것이고, 넷째 `78-D`는 발표된 두 스플래시 기준이 Weber 수로 4.78배 **서로** 어긋나기 때문이며, 다섯째 §88.10 Gate 88-T는 T3A 평판의 측정된 개시 `Re_x`를 구하지 못해 비교를 닫지 못했기 때문이고, 여섯째 §90.10 Gate 90-T는 2015 모형의 T3A 개시 위치로서 88-T와 같은 이유입니다.
 
 ---
 
@@ -160,7 +160,7 @@ claude mcp add ofgpu -- node mcp\server.mjs
 |---|---|
 | **사용자 안내서** (별도 페이지) | 빌드, 케이스 파일, 설정 계약, 실행, 출력, 못 하는 것 |
 | **기술 안내서** (별도 페이지) | 이산화, 경계조건, 압력–속도, 난류, 저마하, 면대면 복사, 검증, GPU 상주·메쉬 적응·성능 |
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 79개 절. 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 81개 절. 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | 파일별 출처와 설계 결정, 라이선스 감사 기록, 서드파티 고지 |
 | [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | 시험 케이스 형상, 그리고 `docs/`의 색인 — 모델 카탈로그, GPU 이식성, 입출력 재설계와 JSONC 스키마, 그리고 `ofgpu-lowmach`의 저-마하 정식화와 벽 열전달 게이트 기록 |
 
@@ -214,6 +214,8 @@ claude mcp add ofgpu -- node mcp\server.mjs
 - Allmaras, S. R., Johnson, F. T., & Spalart, P. R. (2012). Modifications and Clarifications for the Implementation of the Spalart-Allmaras Turbulence Model. *ICCFD7-1902.* `https://www.iccfd.org/iccfd7/assets/pdf/papers/ICCFD7-1902_paper.pdf` — a freely distributed conference paper, **the copy actually read**, and the implementation reference. — §56
 - NASA / Turbulence Modeling Benchmarking Working Group. *Turbulence Modeling Resource — The Spalart-Allmaras Turbulence Model.* `https://tmbwg.github.io/turbmodels/spalart.html` — US government-authored DOCUMENTATION, not source; quoted to the printed digit. — §56
 - Rumsey, C. L., & Spalart, P. R. (2009). *AIAA Journal*, 47, 982–993. — §56 (why the free-stream `nu~/nu` matters)
+- Menter, F. R., Smirnov, P. E., Liu, T., & Avancha, R. (2015). *Flow, Turbulence and Combustion*, 95, 583–619. DOI 10.1007/s10494-015-9622-4. **Paywalled and NOT read**; every digit comes from the NASA/TMBWG Turbulence Modeling Resource page below. — §90
+- NASA / Turbulence Modeling Benchmarking Working Group. *Turbulence Modeling Resource — SST-2003-Menter-Gamma-2015.* `https://tmbwg.github.io/turbmodels/menter_gamma_3eqn.html` — US government-authored DOCUMENTATION, not source; fetched and read 2026-09-05, quoted to the printed digit, including the constant it prints in no equation (§90.3). — §90
 ### 난류 모형 — LES
 - Smagorinsky, J. (1963). *Monthly Weather Review*, 91, 99–164. — §6.5
 - Deardorff, J. W. (1970). *Journal of Fluid Mechanics*, 41, 453–480. — §16.1

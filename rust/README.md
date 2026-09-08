@@ -14,7 +14,7 @@ meteor-cfd의 솔버 크레이트입니다. 호스트는 Rust, 커널은 CUDA C+
 
 수치 코어 전체가 **공개 문헌으로부터 직접 구현**되었습니다. 모든 이산화와 모델은
 [`SPEC-LIT.md`](SPEC-LIT.md)에 원논문 인용과 함께 명세되어 있고, 파일별 출처는
-[`PROVENANCE.md`](PROVENANCE.md)에 있습니다. 105개 소스 파일 전부가 저작권 헤더와
+[`PROVENANCE.md`](PROVENANCE.md)에 있습니다. 179개 소스 파일 전부가 저작권 헤더와
 "No GPL-licensed source was consulted." 줄을 담고 있으며, 이는 산문이 아니라
 시험으로 강제됩니다:
 
@@ -39,10 +39,10 @@ cargo test --release --lib provenance_audit
 ## 검증
 
 ```
-cargo test --release   814 passed, 0 failed, 2 ignored (lib 크레이트)
-                       905 passed, 0 failed, 4 ignored (모든 타깃 합계)
-ofgpu-validate         314 / 314 checks passed
-                       (279개는 실시간 계산, 35개는 기록된 측정값 재생)
+cargo test --release   1,645 passed, 0 failed, 4 ignored (lib 크레이트)
+                       1,774 passed, 0 failed, 6 ignored (모든 타깃 합계)
+ofgpu-validate         833 / 833 checks passed
+                       (788개는 실시간 계산, 45개는 기록된 측정값 재생)
 ```
 
 재생(replay) 항목은 GPU를 수만 반복 돌려야 나오는 측정값이라 `cargo test` 안에서
@@ -102,7 +102,7 @@ cargo test --release
 
 ## 실행
 
-바이너리는 12개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
+바이너리는 16개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
 
 ```bash
 cargo run --release --bin ofgpu-generate-mesh -- channel ../cases/ch 200 120 1

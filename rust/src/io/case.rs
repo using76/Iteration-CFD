@@ -754,8 +754,9 @@ pub struct CaseControls {
     /// `solvers/<its own name>` and `relaxationFactors/equations/<its own
     /// name>`, and reaching for the nearest slot that already exists is the
     /// SPEC-LIT 13.4.1 failure this crate keeps finding. SPEC-LIT 89.2 is
-    /// the instance that forced it: `kOmegaSSTLM` transports `gamma` and
-    /// `ReThetat` besides `k` and `omega`, and
+    /// the instance that forced it: the transition models transport fields
+    /// besides `k` and `omega` - `kOmegaSSTLM` carries `gamma` and
+    /// `ReThetat` (88), and `kOmegaSSTGamma` carries `gamma` (91.2) - and
     /// [`TurbulenceControls::epsilon_solver`] is already doing double duty
     /// for `omega`.
     ///

@@ -167,6 +167,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_les_correction_replays_bitwise"),
     ),
     (
+        "src/models/menter_gamma.rs",
+        Stance::Gate("the_gamma_transition_correction_replays_bitwise"),
+    ),
+    (
         "src/models/spalart_allmaras.rs",
         Stance::Gate("the_spalart_allmaras_correction_replays_bitwise"),
     ),
@@ -294,6 +298,12 @@ pub const REGISTRY: &[(&str, Stance)] = &[
 /// to rise. A module added tomorrow with no gate does not quietly join a
 /// list: it pushes this number past the ceiling and the tests stop, and
 /// raising the ceiling is an edit somebody has to defend in a diff.
+///
+/// Back at 3. The rise to 4 was defended in the diff that made it, for
+/// `src/models/menter_gamma.rs` (SPEC-LIT 90) before anything could ATTACH
+/// the model; the wiring has since landed, the model rides inside the SST
+/// `correct`, and `the_gamma_transition_correction_replays_bitwise` gates
+/// it - which is the fall the ratchet exists to record.
 pub const UNGATED_CEILING: usize = 3;
 
 // ==========================================================================

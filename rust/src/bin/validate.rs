@@ -2648,6 +2648,13 @@ fn run(c: &mut Checks) -> Result<()> {
     );
     check_transition(c)?;
 
+    // SPEC-LIT S90 - the Menter et al. (2015) one-equation gamma model on SST.
+    println!(
+        "
+=== the 2015 gamma transition model (SPEC-LIT 90) ==="
+    );
+    check_gamma_transition(c, &gpu)?;
+
     // SPEC-LIT S66 - the Lagrangian parcel pool, the drag update and the walk.
     println!("
 === Lagrangian parcels (SPEC-LIT 66) ===");
@@ -3080,8 +3087,8 @@ fn check_spalart_allmaras_and_des(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     );
     c.note(
         "S58.3's line - `kOmegaSSTLM` stays refused - no longer holds: S88 implements it, and \
-         the section below is its gate. What stays refused in its place is Menter et al. \
-         (2015)'s one-equation gamma successor (S89.3)",
+         the section below is its gate. Nor is its 2015 one-equation gamma successor refused \
+         any more: S91.3 puts `kOmegaSSTGamma` in the registry beside it, and its gate is S90's",
     );
 
     Ok(())
@@ -3362,19 +3369,36 @@ fn check_transition(c: &mut Checks) -> Result<()> {
     Ok(())
 }
 
-/// The Blasius similarity solution's two integrals - SPEC-LIT §88.7.
+/// The Blasius similarity solution, shot on `f''(0)` - SPEC-LIT §88.7, and
+/// §90.10's `eta*` with it.
 ///
-/// Returns `(int f'(1 - f') d eta, max eta^2 f'')`, the momentum thickness and
-/// the peak vorticity Reynolds number in similarity variables. RK4 with a
-/// secant shot on `f''(0)`; nothing here is the transition model, which is the
-/// point - the constant `2.193` is checked against a profile computed from the
-/// Blasius equation rather than taken from the paper that prints it.
-fn blasius_theta_and_max_rev(eta_max: Scalar, n: usize) -> (Scalar, Scalar) {
+/// RK4 with a secant shot on `f''(0)`; nothing here is a transition model,
+/// which is the point - the constants §88.7 checks (`0.664`, `2.193`) and the
+/// height §90.10's `lambda_B` is evaluated at are measured from the Blasius
+/// equation rather than taken from the paper that prints them.
+struct BlasiusSimilarity {
+    /// `f'(eta_max)`, which the secant shot drives to 1.
+    f_prime_1: Scalar,
+    /// `int f'(1 - f') d eta` - the momentum thickness, `0.664` converged.
+    theta: Scalar,
+    /// `max eta^2 f''` - the peak vorticity Reynolds number in similarity
+    /// variables, §88.7's `2.188440`.
+    rev_max: Scalar,
+    /// `eta*`, the height of that maximum (`eta^2 f''` maximal). The 2015
+    /// correlation's onset switch samples a Blasius layer here: `Re_V` peaks
+    /// at this height, and §90.10's `lambda_B` is `lambda_thL` at it.
+    eta_star: Scalar,
+    /// `f''(eta*)`, with which `lambda_B = -7.57e-3 eta*^3 f''/2 + 0.0128`.
+    fpp_star: Scalar,
+}
+
+fn blasius_similarity(eta_max: Scalar, n: usize) -> BlasiusSimilarity {
     let h = eta_max / n as Scalar;
     let f3 = |y: [Scalar; 3]| -> [Scalar; 3] { [y[1], y[2], -0.5 * y[0] * y[2]] };
-    let march = |fpp0: Scalar| -> (Scalar, Scalar, Scalar) {
+    let march = |fpp0: Scalar| -> (Scalar, Scalar, Scalar, Scalar, Scalar) {
         let mut y = [0.0 as Scalar, 0.0, fpp0];
         let (mut theta, mut rev) = (0.0 as Scalar, 0.0 as Scalar);
+        let (mut eta_star, mut fpp_star) = (0.0 as Scalar, 0.0 as Scalar);
         let mut prev = y[1] * (1.0 - y[1]);
         for i in 0..n {
             let k1 = f3(y);
@@ -3388,9 +3412,14 @@ fn blasius_theta_and_max_rev(eta_max: Scalar, n: usize) -> (Scalar, Scalar) {
             let cur = y[1] * (1.0 - y[1]);
             theta += 0.5 * h * (prev + cur);
             prev = cur;
-            rev = rev.max(eta * eta * y[2]);
+            let cand = eta * eta * y[2];
+            if cand > rev {
+                rev = cand;
+                eta_star = eta;
+                fpp_star = y[2];
+            }
         }
-        (y[1], theta, rev)
+        (y[1], theta, rev, eta_star, fpp_star)
     };
     let (mut a, mut b) = (0.3 as Scalar, 0.4 as Scalar);
     let mut fa = march(a).0 - 1.0;
@@ -3405,8 +3434,601 @@ fn blasius_theta_and_max_rev(eta_max: Scalar, n: usize) -> (Scalar, Scalar) {
         b = cnew;
         fb = march(b).0 - 1.0;
     }
-    let (_, theta, rev) = march(b);
-    (theta, rev)
+    let (f_prime_1, theta, rev_max, eta_star, fpp_star) = march(b);
+    BlasiusSimilarity { f_prime_1, theta, rev_max, eta_star, fpp_star }
+}
+
+/// §88.7's two numbers, the shape its own checks read.
+fn blasius_theta_and_max_rev(eta_max: Scalar, n: usize) -> (Scalar, Scalar) {
+    let s = blasius_similarity(eta_max, n);
+    (s.theta, s.rev_max)
+}
+
+// ==========================================================================
+//  SPEC-LIT §90 - the Menter et al. (2015) one-equation gamma transition
+//  model on SST
+//
+//  The closed forms, `lambda_B` and Gate 90-G's table are host arithmetic
+//  computed live. The device halves of 90-G and 90-R (ii) run on this
+//  machine's GPU through the PUBLIC path only - the `#[cfg(test)]`
+//  instruments of `models::menter_gamma` are not visible to a binary, which
+//  is exactly what 90-R (ii) wants: the Kato-Launder stamp a run uses is
+//  the stamp these gates measure. Gate 90-R (i) is NOT here - it is a
+//  `#[cfg(test)]` gate, and its instrument is one too (§90.10).
+// ==========================================================================
+
+/// **SPEC-LIT §90's gates: the closed forms, `lambda_B`, 90-G, 90-T and
+/// 90-R (ii), live.**
+///
+/// Gate 90-G holds, and the crate's form of a verdict that holds is absence
+/// from the §69 registry - its only two words are for a gate that is wrong -
+/// so 90-G's holding is asserted by its own require rows, the way §88's
+/// leg-1 HOLDS is.
+///
+/// The `f64::from(Scalar)` calls below are the file's own idiom and the
+/// f32 build's widening; the f64 lint set calls each one useless, as it
+/// does §88's block twenty times over. Allowed here so the block adds no
+/// new diagnostic to the tree.
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::useless_conversion)]
+fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::models::menter_gamma::{
+        dv_dy, f_on_lim, f_onset, f_pg, f_turb, gamma_source_split, lambda_theta_l,
+        lambda_theta_l_raw, re_thetac, tu_l, wall_normal, GammaCoeffs, MenterGamma,
+    };
+    use ofgpu::models::{KOmegaSst, KOmegaSstCoeffs};
+    use ofgpu::turbulence::{strain_rate_mag, FlowState, TurbKernels};
+
+    let cf = GammaCoeffs::default();
+
+    // ---- §90.11's host rows, against the reference digits ----------------
+    c.require(
+        "§90.11 F_PG(0) is exactly 1 - the positive branch before its cap",
+        f_pg(0.0, &cf) == 1.0,
+    );
+    let knot_p = 0.5 / cf.c_pg1;
+    let mut stays = true;
+    for l in [0.1 as Scalar, 0.5, 1.0, 2.0, 1.0e6] {
+        stays &= f_pg(l, &cf) == cf.c_pg1_lim;
+    }
+    c.require(
+        "§90.11 F_PG reaches C_PG1lim at lambda = 0.5/14.68 and stays there",
+        f_pg(knot_p, &cf) == cf.c_pg1_lim
+            && f_pg(knot_p * (1.0 - 1e-12), &cf) < cf.c_pg1_lim
+            && stays,
+    );
+    let knot_n = 2.0 / -cf.c_pg2;
+    let mut capped = true;
+    for l in [-0.272_5 as Scalar, -0.3, -1.0, -2.0] {
+        capped &= f_pg(l, &cf) == 3.0;
+    }
+    c.require(
+        "§90.11 the negative branch caps at C_PG2lim = 3 from lambda = -2/7.34",
+        f_pg(-knot_n * (1.0 + 1e-9), &cf) == cf.c_pg2_lim
+            && f_pg(-knot_n * (1.0 - 1e-9), &cf) < cf.c_pg2_lim
+            && capped,
+    );
+    let mut nonneg = true;
+    for i in 0..=100_000 {
+        nonneg &= f_pg(-1.0 + 2.0 * i as Scalar / 100_000.0, &cf) >= 0.0;
+    }
+    c.require("§90.11 F_PG >= 0 over a sweep of lambda_thL in [-1, 1]", nonneg);
+    c.require(
+        "§90.11 lambda_thL clipped at +-1, and a no-op inside the range",
+        lambda_theta_l(1.0e10, 1.0, 1.0) == -1.0
+            && lambda_theta_l(-1.0e6, 1.0, 1.0) == 1.0
+            && lambda_theta_l(1.0, 0.01, 1.5e-5) == lambda_theta_l_raw(1.0, 0.01, 1.5e-5),
+    );
+
+    // Re_thetac's two exact rows, and its monotone fall - strict below the
+    // ulp tail, where 1000 exp(-Tu_L) has fallen under an ulp of C_TU1
+    // (Unit 2 measured that boundary near Tu_L = 28).
+    c.require(
+        "§90.11 Re_thetac(0, 0) = C_TU1 + C_TU2 = 1100 = ReThetacLim, exactly",
+        re_thetac(0.0, 0.0, &cf) == 1100.0,
+    );
+    c.require(
+        "§90.11 Re_thetac(100, 0) = C_TU1 = 100 exactly - the exp term is an ulp short",
+        re_thetac(100.0, 0.0, &cf) == 100.0,
+    );
+    let (mut monotone, mut strict) = (true, true);
+    let mut prev = re_thetac(0.0, 0.0, &cf);
+    for i in 1..=10_000 {
+        let t = 100.0 * i as Scalar / 10_000.0;
+        let v = re_thetac(t, 0.0, &cf);
+        monotone &= v <= prev;
+        if t < 28.0 {
+            strict &= v < prev;
+        }
+        prev = v;
+    }
+    c.require(
+        "§90.11 Re_thetac decreases in Tu_L over [0, 100], strictly below the ulp tail",
+        monotone && strict,
+    );
+
+    // F_turb(2) = e^-1, bit for bit against the machine's own e^-1 - the
+    // half-R_T closure §90.2 pins, and the one transcendental row that does
+    // not need a tolerance on the machine it runs on.
+    c.require(
+        "§90.11 F_turb(2) is e^-1 - the half-R_T closure, bit for bit",
+        f_turb(2.0) == (-1.0 as Scalar).exp(),
+    );
+
+    // The F_onset limits, over a sweep: in [0, 2] with F_onset3 shut off
+    // above R_T = 3.5, and exactly 0 at Re_V = 0 whatever R_T is doing.
+    let (mut fo_lo, mut fo_hi, mut fo_at_rest) = (Scalar::INFINITY, 0.0 as Scalar, true);
+    for i in 0..=200 {
+        let r_t = 10.0 * i as Scalar / 200.0;
+        for j in 0..=200 {
+            let fo = f_onset(2.0e5 * j as Scalar / 200.0, 137.0, r_t);
+            fo_lo = fo_lo.min(fo);
+            fo_hi = fo_hi.max(fo);
+        }
+        fo_at_rest &= f_onset(0.0, 1100.0, r_t) == 0.0;
+    }
+    c.require(
+        "§90.11 F_onset stays in [0, 2] over a sweep, F_onset3 >= 0, 0 at Re_V = 0",
+        fo_lo >= 0.0 && fo_hi <= 2.0 && fo_at_rest,
+    );
+    c.require(
+        "§90.11 F_on^lim is clipped at 3, and 0 below Re_V = 2.2 Re_thetac_lim",
+        f_on_lim(12100.0, 1100.0) == 3.0
+            && f_on_lim(9680.0, 1100.0) == 3.0
+            && f_on_lim(4840.0, 1100.0) == 1.0
+            && f_on_lim(2420.0, 1100.0) == 0.0
+            && f_on_lim(0.0, 1100.0) == 0.0,
+    );
+
+    // The Patankar split (90.12): Sp >= 0 at every state, gamma = 0
+    // included - the absorbing state - and the halves reconstructing
+    // P_gamma - E_gamma through fvm_susp's `source -= min(S, 0) psi`.
+    let mut sp_ok = true;
+    let mut worst_split = 0.0 as Scalar;
+    for (a, b) in [(0.0 as Scalar, 0.0), (0.01, 0.06), (500.0, 25.0)] {
+        for gi in 0..=20 {
+            let g = gi as Scalar / 20.0;
+            let (su, sp, susp) = gamma_source_split(g, a, b, cf.ce2);
+            sp_ok &= su == 0.0 && sp >= 0.0 && susp == -(a + b);
+            let emitted = su - susp * g - sp * g;
+            let want = (a + b) * g - (a + b * cf.ce2) * g * g;
+            worst_split = worst_split.max((emitted - want).abs() / want.abs().max(1e-300));
+        }
+    }
+    c.require("§90.11 the split keeps Sp >= 0 at every state, gamma = 0 included", sp_ok);
+    c.check("§90.11 ... and the halves reconstruct P_gamma - E_gamma", worst_split, 1e-15);
+
+    // ---- lambda_B on the Blasius profile (§90.10), from §88.7's own shot -
+    let blas = blasius_similarity(10.0, 200_000);
+    c.require(
+        "§90.10 the Blasius shot converged - f'(eta_max) is 1 to 1e-9",
+        (blas.f_prime_1 - 1.0).abs() < 1e-9,
+    );
+    let eta3fpp2 = blas.eta_star.powi(3) * blas.fpp_star / 2.0;
+    let lam_b = -7.57e-3 * eta3fpp2 + 0.0128;
+    c.check(
+        "§90.11 lambda_B on the Blasius profile at eta* vs the reference -0.003434",
+        (lam_b - -0.003_434).abs(),
+        1e-4,
+    );
+    c.note(&format!(
+        "§90.10 lambda_B, from this crate's Blasius shot: eta* = {}, f''(eta*) = {}, \
+         eta*^3 f''/2 = {}, F_PG(lambda_B) = {}; the layer reads {} where the \
+         onset switch samples it, against the clean-air 0.0128 the offset exists to sit near",
+        common::g(f64::from(blas.eta_star)),
+        common::g(f64::from(blas.fpp_star)),
+        common::g(f64::from(eta3fpp2)),
+        common::g(f64::from(f_pg(lam_b, &cf))),
+        common::g(f64::from(lam_b)),
+    ));
+
+    // ---- Gate 90-G, the closed-form table - §88.9's five frame shifts ----
+    // The shifts that moved LM2009's Re_theta_eq by +7.9, +15.9, +31.9 and
+    // +82.4 %, run through THIS model's chain: no line of (90.4)-(90.11)
+    // contains a velocity magnitude, so every row reads 0.000 % and the
+    // assertion is bitwise, pass/fail and not a tolerance (§90.10).
+    let (k_g, o_g, d_g, nu_g) = (0.05 as Scalar, 50.0 as Scalar, 0.01 as Scalar, 1.5e-5 as Scalar);
+    let n_g = wall_normal(Vec3::new(0.0, 1.0, 0.0));
+    let p_g = Vec3::new(1.0, 2.0, 0.5);
+    let gm_row = |u0: Scalar| -> (Scalar, Scalar, Scalar, Scalar) {
+        let grad = gm_grad_central(u0, p_g, 0.25);
+        let re_v = d_g * d_g * gm_strain_mag(grad) / nu_g;
+        let lam = lambda_theta_l(dv_dy(n_g, grad), d_g, nu_g);
+        let rtc = re_thetac(tu_l(k_g, o_g, d_g), lam, &cf);
+        (re_v, rtc, f_onset(re_v, rtc, k_g / (nu_g * o_g)), f_pg(lam, &cf))
+    };
+    let base_row = gm_row(5.0);
+    let mut table = format!(
+        "        base  (U = 5.0 m/s): Re_V {:.6}, Re_thetac {:.4}, F_onset {:.4}, F_PG {:.4}\n",
+        base_row.0, base_row.1, base_row.2, base_row.3
+    );
+    for shift in [0.5 as Scalar, 1.0, 2.0, 5.0] {
+        let got = gm_row(5.0 + shift);
+        let pc = |v: Scalar, b: Scalar| 100.0 * (v - b) / b.abs().max(1e-300);
+        table += &format!(
+            "        shift +{:.1} m/s      : Re_V {:+.3} %, Re_thetac {:+.3} %, \
+             F_onset {:+.3} %, F_PG {:+.3} %\n",
+            shift,
+            pc(got.0, base_row.0),
+            pc(got.1, base_row.1),
+            pc(got.2, base_row.2),
+            pc(got.3, base_row.3),
+        );
+        c.require(
+            &format!("S90 Gate 90-G: the frame shift of +{shift:.1} m/s moves nothing, bitwise"),
+            got.0.to_bits() == base_row.0.to_bits()
+                && got.1.to_bits() == base_row.1.to_bits()
+                && got.2.to_bits() == base_row.2.to_bits()
+                && got.3.to_bits() == base_row.3.to_bits(),
+        );
+    }
+    c.note(&format!("Gate 90-G, the closed-form half - 88.9's table through this model's chain at\nk = 0.05, omega = 50, d = 0.01, nu = 1.5e-5:\n{table}       88.9 measured +7.9, +15.9, +31.9 and +82.4 % on LM2009's Re_theta_eq"));
+
+    // ---- Gate 90-G, the device half --------------------------------------
+    // A strained velocity field on the rig's mesh, `grad_u` formed the way
+    // `RasCore::update_flow_derived` forms it - the crate's own Gauss
+    // gradient - then the same field viewed from a frame translated by
+    // +5 m/s. `update_fields` takes no velocity at all, so the only thing a
+    // frame shift can reach is the Gauss round-off of a constant; 1e-12 is
+    // the EXPECTATION (§90.10) and the bound below is loose on purpose, so
+    // a surprise is reported rather than hidden.
+    let hm_gm = gm_block(6)?;
+    let n_gm = hm_gm.n_cells;
+    let mesh_gm = GpuMesh::upload(gpu, &hm_gm)?;
+    let grad_strained = Tensor {
+        xx: 0.2, xy: 0.0, xz: 0.0,
+        yx: 2.0, yy: -0.2, yz: 0.0,
+        zx: 0.0, zy: 0.0, zz: 0.1,
+    };
+    let re_thetac_after = |shift: Vec3| -> Result<Vec<Scalar>> {
+        let u = gm_linear_velocity(gpu, &mesh_gm, &hm_gm, grad_strained, shift)?;
+        let fvk = FvKernels::new(gpu)?;
+        let mut grad_u: DevBuf<Tensor> = gpu.zeros(n_gm)?;
+        fvc_grad_vector(gpu, &fvk, &mut grad_u, &u, &mesh_gm)?;
+        let turb = TurbKernels::new(gpu)?;
+        let mut s_mag: DevBuf<Scalar> = gpu.zeros(n_gm)?;
+        strain_rate_mag(gpu, &turb, &mut s_mag, &grad_u, n_gm)?;
+        let mut kb: DevBuf<Scalar> = gpu.zeros(n_gm)?;
+        let mut wb: DevBuf<Scalar> = gpu.zeros(n_gm)?;
+        gpu.write(&mut kb, &vec![0.05 as Scalar; n_gm])?;
+        gpu.write(&mut wb, &vec![50.0 as Scalar; n_gm])?;
+        let mut yb: DevBuf<Scalar> = gpu.zeros(n_gm)?;
+        gpu.write(
+            &mut yb,
+            &(0..n_gm).map(|i| 1e-4 * (1.0 + 0.01 * i as Scalar)).collect::<Vec<_>>(),
+        )?;
+        let mut gyb: DevBuf<Vec3> = gpu.zeros(n_gm)?;
+        gpu.write(&mut gyb, &vec![Vec3 { x: 0.0, y: 1.0, z: 0.0 }; n_gm])?;
+        let mut gm = MenterGamma::new(gpu, &mesh_gm, cf, Default::default(), &yb, &gyb)?;
+        gpu.write(&mut gm.gamma_mut().f, &vec![1.0 as Scalar; n_gm])?;
+        gm.update_fields(gpu, &turb, &kb, &wb, &s_mag, &grad_u, nu_g, n_gm)?;
+        gpu.download(gm.re_thetac_field())
+    };
+    let rtc_rest = re_thetac_after(Vec3::ZERO)?;
+    let rtc_moved = re_thetac_after(Vec3::new(5.0, 0.0, 0.0))?;
+    let mut worst_gm = 0.0 as Scalar;
+    let mut bits_gm = 0usize;
+    for (a, b) in rtc_rest.iter().zip(&rtc_moved) {
+        worst_gm = worst_gm.max((a - b).abs() / b.abs().max(1e-300));
+        if a.to_bits() == b.to_bits() {
+            bits_gm += 1;
+        }
+    }
+    c.check(
+        "S90 Gate 90-G device: Re_thetac field under a +5 m/s frame shift, Gauss round-off only",
+        worst_gm,
+        1e-9,
+    );
+    c.note(&format!(
+        "Gate 90-G device: worst relative change of the Re_thetac field is {:.3e} \
+         ({} of {} cells bitwise) - expectation 1e-12, and what it measures is the \
+         Gauss gradient of a constant, since update_fields reads no velocity at all",
+        f64::from(worst_gm),
+        bits_gm,
+        n_gm,
+    ));
+
+    // ---- Gate 90-T: the T3A plate -----------------------------------------
+    // The NASA/TMBWG 2D T3A inflow, the same constants §88.10 reads; leg 1
+    // is §88.10's leg 1 verbatim, re-run here so this gate stands without
+    // §88's. The decay closed form is SST's own: D omega/Dt = -beta_2
+    // omega^2 and Dk/Dt = -beta* k omega on the free stream, tau the
+    // affine clock, t = (le + x)/u_inf.
+    let (u_inf, re_per_m, tu_in, nut_ratio, le, tu_le) =
+        (69.44 as Scalar, 2.0e5 as Scalar, 5.855 as Scalar, 11.90 as Scalar, 0.250 as Scalar, 3.300 as Scalar);
+    let sst = KOmegaSstCoeffs::default();
+    let nu_t3a = u_inf / re_per_m;
+    let k_in = 1.5 * (tu_in / 100.0 * u_inf) * (tu_in / 100.0 * u_inf);
+    let omega_in = k_in / (nut_ratio * nu_t3a);
+    let tau = |x: Scalar| 1.0 + sst.beta_2 * omega_in * x / u_inf;
+    let tu_at = |x: Scalar| tu_in * tau(x).powf(-sst.beta_star / (2.0 * sst.beta_2));
+    let k_at = |x: Scalar| k_in * tau(x).powf(-sst.beta_star / sst.beta_2);
+    let omega_at = |x: Scalar| omega_in / tau(x);
+
+    let tu_pred = tu_at(le);
+    let leg1 = (tu_pred - tu_le).abs() / tu_le;
+    c.check(
+        "Gate 90-T leg 1: SST free-stream decay reaches the TMR's leading-edge Tu = 3.300 %",
+        leg1,
+        0.05,
+    );
+    c.note(&format!(
+        "Gate 90-T leg 1: {} % at the leading edge against the published 3.300 % -> {} %. \
+         88-T's leg 1, re-run: the verdict HOLDS on a number it inherits",
+        common::g(f64::from(tu_pred)),
+        common::g(f64::from(100.0 * leg1)),
+    ));
+
+    // Leg 2: where the 2015 onset switch fires, on §88.7's Blasius layer.
+    // max_y Re_V = 2.193 Re_theta there and the switch reaches one at
+    // Re_V = 2.2 Re_thetac, so the onset point is the root of one scalar
+    // equation, bisected over the plate:
+    //   0.664 sqrt(Re_x) (2.193/2.2) = Re_thetac(Tu_L(x), lambda_B)
+    // with Tu_L from the DECAYED free-stream k and omega, uniform across
+    // the layer at their free-stream values, at d = eta* sqrt(nu x/U).
+    let d_at = |x: Scalar| blas.eta_star * (nu_t3a * x / u_inf).sqrt();
+    let tu_l_at = |x: Scalar| tu_l(k_at(le + x), omega_at(le + x), d_at(x));
+    let onset_lhs = |x: Scalar| 0.664 * (re_per_m * x).sqrt() * (2.193 / 2.2);
+    let onset_rhs = |x: Scalar| re_thetac(tu_l_at(x), lam_b, &cf);
+    let (mut lo, mut hi) = (1e-6 as Scalar, 500.0 as Scalar);
+    for _ in 0..300 {
+        let mid = 0.5 * (lo + hi);
+        if onset_lhs(mid) < onset_rhs(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let x_root = 0.5 * (lo + hi);
+    let re_x_root = re_per_m * x_root;
+    c.require(
+        "Gate 90-T leg 2: onset is on the plate, not at the leading edge",
+        re_x_root > 1e3,
+    );
+    c.require(
+        "Gate 90-T leg 2: ... and within the decade the T3 series occupies",
+        re_x_root < 1e6,
+    );
+    c.note(&format!(
+        "Gate 90-T leg 2: Re_x = {} (x = {} m), where Tu_L = {} % and Re_thetac = {}; \
+         88-T's leg 2 root under the 2006 correlation was 8.525e4 - a fact about the \
+         two correlations, not a validation of either",
+        common::g(f64::from(re_x_root)),
+        common::g(f64::from(x_root)),
+        common::g(f64::from(tu_l_at(x_root))),
+        common::g(f64::from(onset_rhs(x_root))),
+    ));
+
+    c.report(GateReport {
+        verdict: Verdict::Open,
+        how: How::Live,
+        gate: "SPEC-LIT S90 Gate 90-T",
+        against: "the ERCOFTAC T3A flat plate's measured transition, on the NASA/TMBWG 2D T3A \
+                  rig (U = 69.44 m/s, Re/m = 2.00e5, Tu = 3.300 % at the leading edge)",
+        headline: format!(
+            "the 2015 correlation's onset switch fires at Re_x = {}, where the local Tu_L has \
+             decayed to {} % and Re_thetac reads {} - but no published digit-level onset \
+             Re_x for T3A was found to hold it against, so the comparison is not closed",
+            common::g(f64::from(re_x_root)),
+            common::g(f64::from(tu_l_at(x_root))),
+            common::g(f64::from(onset_rhs(x_root))),
+        ),
+        detail: vec![
+            format!(
+                "  lambda_B was measured from this crate's Blasius solution rather than taken \
+                 as the clean-air 0.0128: eta* = {}, f''(eta*) = {}, lambda_B = {}, \
+                 F_PG(lambda_B) = {}. The one assumption the root rests on is stated because \
+                 it depends on it: Tu_L(x) is formed from the decayed free-stream k and omega, \
+                 taken uniform across the layer at their free-stream values, at \
+                 d_w = eta* sqrt(nu x/U) - the height printed with the root above.",
+                common::g(f64::from(blas.eta_star)),
+                common::g(f64::from(blas.fpp_star)),
+                common::g(f64::from(lam_b)),
+                common::g(f64::from(f_pg(lam_b, &cf))),
+            ),
+            "  Leg 3 is NOT run, for §88.10's measured reason: on one rig the free-stream \
+             decay is as strong a lever on onset as Tu itself, its 51.9x spread against the \
+             ~10x the T3 series measures is the evidence, and this gate does not repeat that \
+             construction with a new correlation on top of it."
+                .to_string(),
+        ],
+    });
+
+    // ---- Gate 90-R (ii), live on the public path --------------------------
+    // The stamp a run uses - the #[cfg(test)] switch that turns Kato-Launder
+    // off is not visible to a binary, which is the point. KOmegaSst with
+    // MenterGamma attached and the intermittency FROZEN at 1 (gammaMin =
+    // gammaMax = 1, a real setting, §90.8) against plain KOmegaSst on the
+    // same states, three corrects each. On a pure shear S and Omega are the
+    // same number, so the two productions agree in exact arithmetic and
+    // whether they agree bitwise through sstKSources is the measurement; on
+    // a strained field they cannot agree, and that they do not is the only
+    // assertion. Both numbers are the record; neither is a pass/fail
+    // (§90.10). 90-R (i) stays a #[cfg(test)] gate (Unit 4a) - its
+    // instrument, the stamp OFF, is one too.
+    let grad_shear = Tensor {
+        xx: 0.0, xy: 0.0, xz: 0.0,
+        yx: 2.0, yy: 0.0, yz: 0.0,
+        zx: 0.0, zy: 0.0, zz: 0.0,
+    };
+    let rig_k = |grad: Tensor, attach: bool| -> Result<Vec<Scalar>> {
+        let u = gm_linear_velocity(gpu, &mesh_gm, &hm_gm, grad, Vec3::ZERO)?;
+        let phi = GpuSurfaceScalarField::zeros(gpu, &mesh_gm, "phi")?;
+        let flow = FlowState::new(&u, &phi, 1e-5);
+        let ctrl = TurbulenceControls {
+            steady: false,
+            delta_t: 1e-3,
+            k_relax: 1.0,
+            eps_relax: 1.0,
+            ..Default::default()
+        };
+        let wf = ofgpu::field_setup::WallFaces::none(hm_gm.n_boundary_faces);
+        let mut wy: DevBuf<Scalar> = gpu.zeros(n_gm)?;
+        gpu.write(&mut wy, &vec![0.05 as Scalar; n_gm])?;
+        let mut m = KOmegaSst::new(
+            gpu,
+            &hm_gm,
+            &mesh_gm,
+            Default::default(),
+            ctrl,
+            WallFunctionCoeffs::default(),
+            &wf,
+            &wy,
+        )?;
+        gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; n_gm])?;
+        gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; n_gm])?;
+        if attach {
+            let mut gyb: DevBuf<Vec3> = gpu.zeros(n_gm)?;
+            gpu.write(&mut gyb, &vec![Vec3 { x: 0.0, y: 1.0, z: 0.0 }; n_gm])?;
+            let coeffs = GammaCoeffs { gamma_min: 1.0, gamma_max: 1.0, ..cf };
+            let mut gm = MenterGamma::new(gpu, &mesh_gm, coeffs, Default::default(), &wy, &gyb)?;
+            gpu.write(&mut gm.gamma_mut().f, &vec![1.0 as Scalar; n_gm])?;
+            gm.initialise(gpu, &mesh_gm)?;
+            m.set_gamma_transition(Some(gm))?;
+        }
+        m.initialise(gpu, &flow)?;
+        for _ in 0..3 {
+            m.correct(gpu, &flow)?;
+        }
+        gpu.download(&m.k().f)
+    };
+    let k_diff = |plain: &[Scalar], gamma: &[Scalar]| -> (Scalar, usize) {
+        let mut worst = 0.0 as Scalar;
+        let mut bits = 0usize;
+        for (a, b) in plain.iter().zip(gamma) {
+            worst = worst.max((a - b).abs() / b.abs().max(a.abs()).max(1e-300));
+            if a.to_bits() == b.to_bits() {
+                bits += 1;
+            }
+        }
+        (worst, bits)
+    };
+    let (worst_shear, bits_shear) = k_diff(
+        &rig_k(grad_shear, false)?,
+        &rig_k(grad_shear, true)?,
+    );
+    c.note(&format!(
+        "Gate 90-R (ii), pure shear u = (2y, 0, 0) where S = Omega = 2: worst relative \
+         difference of k from plain SST after three corrects is {}, {} of {} cells bitwise - \
+         a measurement, not a pass/fail",
+        common::g(f64::from(worst_shear)),
+        bits_shear,
+        n_gm,
+    ));
+    let grad_strained_rig = Tensor {
+        xx: 2.0, xy: 0.0, xz: 0.0,
+        yx: 0.0, yy: -2.0, yz: 0.0,
+        zx: 0.0, zy: 0.0, zz: 0.0,
+    };
+    let (worst_strain, bits_strain) = k_diff(
+        &rig_k(grad_strained_rig, false)?,
+        &rig_k(grad_strained_rig, true)?,
+    );
+    c.require(
+        "S90 Gate 90-R (ii) the Kato-Launder stamp is live where S != Omega",
+        worst_strain > 1e-6 && bits_strain < n_gm,
+    );
+    c.note(&format!(
+        "Gate 90-R (ii), strained u = (2x, -2y, 0) where S = 4, Omega = 0: worst relative \
+         difference of k is {}, {} of {} cells bitwise - at gamma = 1 this model is SST with \
+         Kato-Launder production, which is the honest form of the reduction claim (90.6)",
+        common::g(f64::from(worst_strain)),
+        bits_strain,
+        n_gm,
+    ));
+    c.note(
+        "Gate 90-R (i) is NOT here, and by design: its instrument - the Kato-Launder stamp \
+         OFF - is a #[cfg(test)] one, never a case setting (90.8), so the bitwise half of \
+         the reduction stays a #[cfg(test)] gate beside the model it instruments \
+         (models::menter_gamma's own suite, Unit 4a), where gammaMin = gammaMax = 1 \
+         reproduces plain kOmegaSST bit for bit in k, omega and nut over three correct steps",
+    );
+
+    Ok(())
+}
+
+/// `grad(U)` by central differences on a dyadic stencil - exact for the
+/// linear field it samples, so a frame shift cannot touch it: the Gate 90-G
+/// construction (§90.7). Row `i` is `dU_j/dx_i`, `Tensor`'s convention, the
+/// one `dv_dy` reads.
+fn gm_grad_central(u0: Scalar, p: Vec3, h: Scalar) -> Tensor {
+    let sample = |q: Vec3| Vec3::new(u0 + 0.25 * q.x + 1.5 * q.y, -0.25 * q.y, 2.0 * q.x);
+    let axes = [Vec3::new(h, 0.0, 0.0), Vec3::new(0.0, h, 0.0), Vec3::new(0.0, 0.0, h)];
+    let mut g = Tensor::ZERO;
+    for (i, e) in axes.iter().enumerate() {
+        let (up, um) = (sample(p + *e), sample(p - *e));
+        let row = Vec3::new(
+            (up.x - um.x) / (2.0 * h),
+            (up.y - um.y) / (2.0 * h),
+            (up.z - um.z) / (2.0 * h),
+        );
+        if i == 0 {
+            g.xx = row.x;
+            g.xy = row.y;
+            g.xz = row.z;
+        } else if i == 1 {
+            g.yx = row.x;
+            g.yy = row.y;
+            g.yz = row.z;
+        } else {
+            g.zx = row.x;
+            g.zy = row.y;
+            g.zz = row.z;
+        }
+    }
+    g
+}
+
+/// `S = sqrt(2 S_ij S_ij)` with `S_ij = (g_ij + g_ji)/2` (90.5, 90.2) - the
+/// strain magnitude `Re_V` reads, written out so the gate's chain stays
+/// visible: velocity field, gradient, closed form.
+fn gm_strain_mag(g: Tensor) -> Scalar {
+    let sxy = 0.5 * (g.xy + g.yx);
+    let sxz = 0.5 * (g.xz + g.zx);
+    let syz = 0.5 * (g.yz + g.zy);
+    let sum = g.xx * g.xx + g.yy * g.yy + g.zz * g.zz
+        + 2.0 * (sxy * sxy + sxz * sxz + syz * syz);
+    (2.0 * sum).sqrt()
+}
+
+/// The §90 rig: a plain 6^3 block with the floor a wall, the shape
+/// `models::menter_gamma`'s own tests run on.
+fn gm_block(n: usize) -> Result<HostMesh> {
+    let mut spec = BlockSpec {
+        x: GradedAxis { lo: 0.0, hi: 1.0, n, expansion: 1.0, two_sided: false },
+        y: GradedAxis { lo: 0.0, hi: 0.2, n, expansion: 1.0, two_sided: false },
+        z: GradedAxis { lo: 0.0, hi: 0.2, n, expansion: 1.0, two_sided: false },
+        ..BlockSpec::default()
+    };
+    for p in [1, 3, 4, 5] {
+        spec.patch_type[p] = "patch".to_string();
+    }
+    blockgen::build_mesh(&spec)
+}
+
+/// `U = G x + u0`, cell values and boundary values both exact -
+/// [`linear_velocity`] with the translated frame's constant, which is what
+/// Gate 90-G's device half adds. Green-Gauss on a uniform block reproduces
+/// the gradient of a linear field exactly given boundary faces at their
+/// analytic value, so the only thing a frame shift can move is round-off.
+fn gm_linear_velocity(
+    gpu: &Gpu,
+    mesh: &GpuMesh,
+    hm: &HostMesh,
+    grad: Tensor,
+    u0: Vec3,
+) -> Result<GpuVectorField> {
+    let at = |p: Vec3| {
+        Vec3::new(
+            grad.xx * p.x + grad.yx * p.y + grad.zx * p.z + u0.x,
+            grad.xy * p.x + grad.yy * p.y + grad.zy * p.z + u0.y,
+            grad.xz * p.x + grad.yz * p.y + grad.zz * p.z + u0.z,
+        )
+    };
+    let mut u = GpuVectorField::zeros(gpu, mesh, "U")?;
+    gpu.write(&mut u.f, &hm.c.iter().map(|p| at(*p)).collect::<Vec<_>>())?;
+    gpu.write(&mut u.bf, &hm.b_cf.iter().map(|p| at(*p)).collect::<Vec<_>>())?;
+    Ok(u)
 }
 
 // ==========================================================================

@@ -23517,7 +23517,9 @@ shift.** The refusal therefore says: `ofgpu` has `kOmegaSSTLM`, here is what
 the 2015 model would fix, and here is the section that measures how much it
 matters. A refusal that names the model this solver DOES have, and the
 specific way that model is weaker, is a better message than either "not
-implemented" or silence.
+implemented" or silence. §90 now implements the 2015 model that refusal
+described, and this paragraph stands as the record of why it was the one
+chosen.
 
 **Unchanged, and rewritten:** `LRR` and `SSG` — §89.6.
 
@@ -23609,7 +23611,7 @@ says where.
 | the fifteen document pairs | each DIFFERENT, each failing by name |
 | the two rig pairs | each DIFFERENT |
 | every refusal | fires, and names the setting |
-| `kOmegaSSTGamma`'s refusal | names `kOmegaSSTLM`, cites 2015, and says "Galilean" |
+| `kOmegaSSTGamma`'s refusal | gone (§91.3): the model is in `REGISTRY`, and §89.3's paragraph stands as the record of why it was built |
 | `LRR`/`SSG`'s refusals | name their papers, say how many equations, name `kOmegaSST`, and DIFFER where the two models differ |
 | §6.1, §6.2, §6.3, §33, §40, §41, §56, §57 outputs | **unchanged, bit for bit**, on a case that names none of this |
 
@@ -23667,3 +23669,860 @@ would be the same failure this whole contract exists to stop.
 **The alternative each names:** `kOmegaSST` (§6.3), or `LaunderSharmaKE`
 (§33) where the near-wall behaviour is what matters. Neither is a
 Reynolds-stress model and the refusals say so.
+---
+
+## 90. The one-equation `gamma` transition model — Menter, Smirnov, Liu & Avancha (2015) on the SST background
+
+**Written from:**
+
+* **NASA / TMBWG, *Turbulence Modeling Resource — SST-2003-Menter-Gamma-2015***,
+  <https://tmbwg.github.io/turbmodels/menter_gamma_3eqn.html> — **fetched and
+  read 2026-09-05**; US-government-authored DOCUMENTATION, not source. The
+  page is marked "under construction" and carries the equations and the
+  constants in full; **every digit below is the page's**, and where the page
+  under-determines the model, §90.3 and §90.5 record the reading chosen here
+  rather than one borrowed from a source that was not read.
+* **Menter, F. R., Smirnov, P. E., Liu, T. & Avancha, R., "A One-Equation
+  Local Correlation-Based Transition Model", *Flow Turbul. Combust.* 95
+  (2015) 583–619** — the model's primary reference, **paywalled and NOT
+  read**. It is cited as such and never quoted.
+* **Menter, Kuntz & Langtry (2003)** — already the source of §6.3; the
+  SST-2003 background this model couples to, and the paper the page itself
+  names as that baseline's reference.
+* **§88 and §89 of this document** — the LM2009 model this one sits beside,
+  and the contract §91 rewrites.
+
+`No GPL-licensed source was consulted.`
+
+§89.3 refused `kOmegaSSTGamma` by name and said why. This section is the
+model that refusal pointed at, written the way §88 was: from the working
+group's page, digit by digit, with every place the page leaves a choice
+open recorded as the choice made rather than smoothed over.
+
+### 90.1 The one equation
+
+```text
+D gamma/Dt = div((nu + nu_t/sigma_gamma) grad gamma) + P_gamma - E_gamma     (90.1)
+```
+
+Kinematic, like everything this crate solves (§6.3, §88.1): the page writes
+`rho` and `mu` into every source, the density divides out, and `rho` never
+appears in a turbulence equation here. `Re_V`, `R_T` and `R_y` below are
+the page's `Re_v`, `R_T` and `R_y` with `mu` replaced by `nu` — that is the
+whole change, and §88.1 is the precedent for making it.
+
+**And it is one equation, not two.** §88.1's second transported field,
+`Re_theta~`, existed to carry an integral quantity — the momentum-thickness
+Reynolds number the correlations need and an unstructured solver cannot
+measure locally. The 2015 model's move is to correlate `Re_thetac` in
+quantities that ARE local — `Tu_L` from `k`, `omega` and the wall distance
+(90.9), `lambda_thL` from a wall-normal strain (90.10) — and the second
+equation disappears with the need for it. What goes with it, and each is
+something §88 paid for somewhere: §88.4's fixed point and its
+`nReThetaSweeps` (there are no sweeps, no convergence measurement, and no
+data-dependent loop count for §81 to worry about); §88.8's `ReThetatMin`
+floor and the kernel floor on `Re_thetac` (there is no transported field
+to floor, and (90.6) is bounded below by `C_TU1 = 100` wherever (90.8)
+holds — §90.8); and `re_thetat_inlet` (§89.1's inlet correlation — the
+page's far-field condition is the literal number `1.0`). §91.1 is the case
+contract for three transported fields, not four.
+
+`k` and `omega` stay §6.3's, modified only where §90.6 says they are.
+`cuda/sst.cu` keeps a zero-line diff, as §88's did.
+
+### 90.2 The closed forms, digit for digit
+
+```text
+P_gamma = F_length S gamma (1 - gamma) F_onset                           (90.2)
+E_gamma = c_a2 Omega gamma F_turb (c_e2 gamma - 1)                       (90.3)
+
+F_onset1 = Re_V/(2.2 Re_thetac)
+F_onset2 = min(F_onset1, 2.0)
+F_onset3 = max(1 - (R_T/3.5)^3, 0)
+F_onset  = max(F_onset2 - F_onset3, 0)                                   (90.4)
+
+Re_V  = d_w^2 S/nu ,   R_T = k/(nu omega) ,   F_turb = exp(-(R_T/2)^4)   (90.5)
+
+S = sqrt(2 S_ij S_ij) ,   Omega = sqrt(2 W_ij W_ij)
+```
+
+with `S_ij` and `W_ij` the strain-rate and vorticity tensors, `S` and
+`Omega` their magnitudes, and `d_w` the wall distance §6.6 computes. `S`
+and `Omega` are §88.3's two, and §40.2's warning about confusing them
+applies to the pairing here too: (90.2) reads `S`, (90.3) reads `Omega`,
+and the two agree only in a pure shear.
+
+Constants, to the printed digit:
+
+| constant | value | | constant | value |
+|---|---|---|---|---|
+| `F_length` | 100.0 | | `C_PG1` | 14.68 |
+| `c_e2` | 50.0 | | `C_PG2` | -7.34 |
+| `c_a2` | 0.06 | | `C_PG3` | 0.00 |
+| `sigma_gamma` | 1.0 | | `C_PG1lim` | 1.5 |
+| `C_TU1` | 100.0 | | `C_PG2lim` | 3.0 |
+| `C_TU2` | 1000.0 | | `Re_thetac_lim` | 1100.0 |
+| `C_TU3` | 1.0 | | `C_k` | 1.0 |
+| | | | `C_sep` | 1.0 |
+
+**The constants that share a name with §88's are not all the same numbers,
+and the differences are the calibration.** One sentence per place a reader
+carrying §88 in their head would reach for the wrong digit:
+
+* **`F_turb` is `exp(-(R_T/2)^4)` here against (88.8)'s
+  `exp(-(R_T/4)^4)`** — the gate on the fully-turbulent state closes at
+  half the turbulence Reynolds number: `F_turb = e^-1` at `R_T = 2` here,
+  at `R_T = 4` there.
+* **The onset denominator is `2.2` against §88.3's `2.193`.** §88.7
+  measured the Blasius ratio as `2.188440` and confirmed `2.193` to
+  0.208 %; the page prints `2.2`. This section does not conjecture which
+  is the better number; it records that they differ, and that (90.4) is
+  where the page's digit lives.
+* **`F_onset2` loses its fourth power.** §88.3's
+  `min(max(F_onset1, F_onset1^4), 2)` is printed here as
+  `min(F_onset1, 2.0)` — the same cap, and the sharpness the fourth power
+  produced is gone with it.
+* **`F_onset3` reads `3.5` against §88.3's `2.5`** — the `R_T` above which
+  the onset switch is held off has moved up by 40 %, in the same
+  expression.
+* **`c_e2` is the same `50`, and `c_a2` the same `0.06`** — and `E_gamma`
+  is (88.6) verbatim, character for character. The destruction term is the
+  one piece of §88 the 2015 model did not touch; what changed around it is
+  `F_turb`'s argument, and the loss of `F_thetat` (§88.5), which is where
+  `c_e2` did its second job.
+* **`F_length` is the constant `100.0` against §88.2's four-piece
+  correlation** — and with it go the published 0.019 % and 0.810 %
+  discontinuities §88.2 records. The 2015 model does not fit `F_length`
+  per momentum thickness; it takes one number, and the fit's seams are not
+  carried over.
+
+What has no successor at all: `c_a1`, `c_e1`, `c_tt`, `s_1`, `sigma_tt`,
+and §88.5's whole separation branch — the page's model has no `gamma_sep`,
+which is why (90.13) needs no upper clamp (§90.6).
+
+### 90.3 `Re_thetac`, `F_PG`, and the constant the page prints in no equation
+
+```text
+Re_thetac(Tu_L, lambda_thL)
+    = C_TU1 + C_TU2 exp[-C_TU3 Tu_L F_PG(lambda_thL)]                   (90.6)
+
+F_PG = min(1 + C_PG1 lambda_thL, C_PG1lim)              lambda_thL >= 0
+F_PG = min(1 + C_PG2 lambda_thL
+             + C_PG3 min[lambda_thL + 0.0681, 0],
+               C_PG2lim)                                 lambda_thL <  0   (90.7)
+
+limiters (published):
+   -1 <= lambda_thL <= 1 ,   F_PG = max(F_PG, 0)                        (90.8)
+```
+
+**The page prints `C_PG2` twice in the negative branch, and then lists
+`C_PG3 = 0.00` in a constant that appears in no equation on the page.**
+As printed, the branch reads `min(1 + C_PG2 lambda_thL + C_PG2
+min[lambda_thL + 0.0681, 0], C_PG2lim)` with `C_PG2 = -7.34`, which makes
+the second term `-7.34 min[lambda_thL + 0.0681, 0]`, live below
+`lambda_thL = -0.0681`, and leaves the tabulated `C_PG3` with no home at
+all. The only reading that gives every printed constant a place is that
+`C_PG3` is the coefficient of `min[lambda_thL + 0.0681, 0]` and the
+branch's second `C_PG2` is the page's slip for it. **That is the reading
+implemented: (90.7)'s second term carries `C_PG3`, default `0.00`, so at
+the printed constants the term vanishes and the negative branch is
+`min(1 - 7.34 lambda_thL, 3.0)`.** The paper that would settle it was not
+read; this subsection is the record of the choice, and claims to be no
+more.
+
+The choice is testable in both directions, and §91.4's rows 24 and 25 are
+the test: at `CPG3 = 1`, `F_PG` differs from its default value on any cell
+with `lambda_thL < -0.0681` and is **bitwise identical** on any cell with
+`lambda_thL >= -0.0681` — the knot is exactly where `min[lambda_thL +
+0.0681, 0]` turns on, so a `CPG3` that moved `F_PG` on the wrong side of
+it would be evidence the term sat on the wrong argument, and the pair
+fails by name in that direction too.
+
+Two properties of (90.6) at the printed constants, because later sections
+lean on both: at `lambda_thL = 0`, `F_PG = 1` exactly and `Re_thetac` is
+`C_TU1 + C_TU2 exp(-C_TU3 Tu_L)` — the two-constant form the printed caps
+give back, and the form a pressure-gradient cap below 1 would silently
+deform; and `Re_thetac` is monotone decreasing in `Tu_L` wherever `F_PG >
+0`, from `C_TU1 + C_TU2 = 1100` at clean air — which is `Re_thetac_lim`
+to the digit, a fact §90.11 states and nothing exploits — down to
+`C_TU1` in the limit the `min(..., 100)` cap of (90.9) creates — not
+because `exp` underflows, `exp(-300)` being representable in `f64`, but
+because `C_TU2 exp(...)` there falls below the ulp of `C_TU1` (`1.4e-14`
+at 100) and the sum rounds to `C_TU1` exactly, the fact §90.11's
+`100 + 1000 e^-100` row states correctly.
+
+### 90.4 `Tu_L`, `lambda_thL`, and the wall normal
+
+```text
+Tu_L       = min(100 sqrt(2k/3)/(omega d_w), 100)                       (90.9)
+
+lambda_thL = -7.57e-3 (dV/dy) d_w^2/nu + 0.0128                         (90.10)
+
+dV/dy      = grad(n . V) . n                                            (90.11)
+```
+
+`V` is the local wall-normal velocity and `y` the wall-normal direction;
+the `min(..., 100)` cap is the page's own, and `Tu_L` is a percentage
+throughout. At `dV/dy = 0` literally, (90.10) reads `lambda_thL = 0.0128`
+and `F_PG = 1.1879` — which is **not** §90.3's `lambda_thL = 0` point, and
+so not the two-constant form either. The offset's job is not at a vanishing
+wall-normal velocity but inside a boundary layer, where `dV/dy` is not
+zero: on a Blasius profile it brings `lambda_thL` at the onset height to
+`-0.0034`, which §90.10's leg 2 computes and prints rather than assumes.
+
+**`n` the page does not define, and this is where the choice is recorded.**
+`n = grad(y)/|grad(y)|`, built from `walldistance`'s `grad_y` and
+**normalised per cell**: §57.6 measured `|grad y|` departing from 1 by
+0.495 over a whole block, so the raw gradient is a direction and not a
+unit vector, and feeding it to (90.11) unnormalised would put that error
+into every `lambda_thL` a mesh's interior carries. `dV/dy ~=
+n_i g_ij n_j` with `g_ij = dU_j/dx_i`, the layout `RasCore::grad_u`
+already holds.
+
+**Freezing `n` under the derivative is a DESIGN choice, named as one.**
+`grad(n . V)` differentiates the normal along with the projection; the
+discrete form above drops the `grad(n)` term, which is undefined wherever
+`|grad y|` turns — exactly where a general mesh's cells sit — and the page
+gives the continuous form and stops at "for a general geometry case". The
+frozen form is what is implemented, and this paragraph is its label.
+
+And where there is no wall in the mesh at all, `|grad y|` is zero, `n` is
+zero with it, and (90.11) is zero: `lambda_thL` is exactly `0.0128`, the
+clean-air value, rather than a NaN. A mesh with no wall is not a case this
+model can mean anything in, and falling back to the correlation's own
+offset constant — the value it reads wherever the wall-normal strain is
+zero — is the honest degenerate answer. It is not the zero-pressure-
+gradient point: that is `lambda_thL = 0`, and §90.10's leg 2 measures
+where a Blasius layer actually sits.
+
+### 90.5 Discretisation — the Patankar split
+
+Under the crate's sign convention `ddt + div - laplacian + Sp psi = Su`
+(§88.5), with `A = F_length S F_onset >= 0` and `B = c_a2 Omega F_turb
+>= 0`, both evaluated at the lagged state:
+
+```text
+P_gamma - E_gamma
+  = A gamma - A gamma^2 + B gamma - B c_e2 gamma^2
+  = (A + B) gamma - (A + B c_e2) gamma^2                               (90.12)
+```
+
+| term | emitted as | sign |
+|---|---|---|
+| `+(A + B) gamma` | `fvm_susp(-(A + B))` | source proportional to the unknown |
+| `-(A + B c_e2) gamma^2` | `fvm_sp((A + B c_e2) gamma_lagged)` | sink, diagonal, `>= 0` |
+
+`Su = 0`: the equation has no explicit source, both halves of (90.12)
+being proportional to `gamma` or its square. The first half is a source
+proportional to the unknown — what `fvm_susp` exists for, with Patankar's
+rule inside it keeping the emitted coefficient safe — and the second is
+linearised about the lagged iterate: `Sp = (A + B c_e2) gamma_lagged`,
+non-negative at every state, checked over a sweep of `gamma`, `A` and `B`
+including the zeros. §88.5's sweep, and §88.5's reason: this split never
+divides by `gamma` anywhere, which matters more here than it did there,
+because the absorbing state recorded below puts `gamma = 0` inside the
+operating envelope rather than outside it.
+
+**`gamma = 0` is an absorbing state, and this model is therefore started
+from 1.** `P_gamma` carries the factor `gamma (1 - gamma)` and `E_gamma`
+the factor `gamma`, so a cell whose `gamma` is exactly zero has zero
+source forever — nothing here rescues a zero. Nothing in §88.5 does
+either: `sqrt(0) = 0`, so LM2009's source is exactly zero at `gamma = 0`
+too, and a literal zero start was never workable there. The difference is
+the growth rate out of a **small** `gamma`, which is where the two models
+part: `sqrt(gamma F_onset)` grows like `sqrt(gamma)`, far faster than
+`gamma` itself, so once diffusion from an inlet at `gamma = 1` has put any
+non-zero value into a cell LM2009 recovers quickly, where this model's
+`A gamma` recovers slowly — exponentially, at rate `A`. **The model is
+started from `gamma = 1`**, the
+page's far-field value; its laminar state is not the starting state but
+the fixed point `gamma = 1/c_e2 = 0.02` of `E_gamma`, reached by decay:
+with `F_onset = 0` the production vanishes and `E_gamma` drives every
+cell toward `1/c_e2`. A `0/gamma` of zero is not refused — it is a
+legitimate thing to ask for, and the absorbing state makes it a stable
+answer rather than a broken one — but the banner prints the initial
+`gamma` range, so the run that started there by accident is visible in
+the log and not only in a laminar result nobody can explain.
+
+The diffusivity is `nu + nu_t/sigma_gamma`, which is
+`RasCore::assemble_transport(r_sigma = 1/sigma_gamma)` — §88.5's entry
+point for `gamma`, in the plain `r_sigma` form and not §41.2's affine
+one: unlike §88's `Re_theta~`, whose `sigma_tt` deliberately multiplied
+the molecular viscosity too, the page's `mu + mu_t/sigma_gamma` is the
+standard shape and the kinematic form divides it straight through.
+
+### 90.6 The coupling into SST, and the production that is not SST's
+
+```text
+P~_k    = gamma P_k ,   P_k = nu_t S Omega                             (90.13)
+D~_k    = max(gamma, 0.1) D_k,SST                                      (90.14)
+
+P_k^lim = 5 C_k max(gamma - 0.2, 0)(1 - gamma) F_on^lim
+            * max(3 C_sep nu - nu_t, 0) S Omega                        (90.15)
+F_on^lim = min[max(Re_V/(2.2 Re_thetac_lim) - 1, 0), 3]                (90.16)
+
+F_1 = max(F_1,SST, F_3) ,   F_3 = exp(-(R_y/120)^8) ,
+R_y = d_w sqrt(k)/nu                                                   (90.17)
+```
+
+The `k` equation reads `P~_k + P_k^lim - D~_k`; the `omega` equation
+reads `alpha P_k/nu_t` — the same un-scaled, un-limited `P_k`, exactly as
+the page prints it. `F_3` is §88.6's `F_3` to the character, `R_y`
+included; what the 2015 model adds to the blending is only the `max` that
+lets SST's own `F_1` win wherever it is already the larger.
+
+**The production is Kato-Launder, in both equations, and the page says
+so. Its note, quoted: "The production term `P_k` is not the standard
+`P_{k,SST}` but the Kato-Launder formulation."** And its closing rule,
+quoted for the tension with it: "Unless stated otherwise above, the
+functional definitions and calibration constants of the underlying
+SST-2003 turbulence model should not be altered when used with the
+`gamma` transition model." The page writes ONE `P_k = mu_t S Omega` and
+reads it in both equations; the note says that `P_k` is not SST's.
+
+**Decision: the Kato-Launder `nu_t S Omega` replaces SST's production in
+BOTH equations, and SST-2003's own `k`-production limiter `min(G, c1
+beta* k omega)` is kept and applied to the Kato-Launder `G` —
+`sstKSources` limits whatever production it is handed, and it is handed
+this one.** The alternative reading — Kato-Launder in `k` only, the
+standard form in `omega` — needs the page to write two productions, and
+it writes one; that is the whole reason it was not chosen, and this
+paragraph is the record of the choice.
+
+Kato-Launder in one sentence, because §6.3 does not contain it: SST's own
+production is `nu_t S^2`, Kato-Launder's is `nu_t S Omega`; the two agree
+in a pure shear, where `S = Omega`, and part company wherever the strain
+has a vortical part — the irrotational strain a stagnation point is made
+of is what the product keeps and `S^2` throws away.
+
+**The consequence, in bold because everything downstream is built on it:
+at `gamma = 1` this model is SST with Kato-Launder production, not SST.**
+Gate 90-R is designed around that fact, not around the convenient version
+of it.
+
+**The stamps, and where they land — §88.6's two buffers, plus the one
+addition the Kato-Launder production forces.** In `update_blending`,
+after the fields of (90.4)-(90.11) are formed, BOTH production buffers
+are replaced: `G`, which the `k` equation reads, and `P`, the production
+per unit `nu_t` that the `omega` equation reads (`alpha P` is `alpha
+G/nu_t`), are stamped with `nu_t S Omega` and `S Omega` respectively. The
+stamp sits in `update_blending` for two ordering reasons, either of which
+alone would decide it: the wall functions overwrite `G` in wall cells
+after `update_blending` runs, and the `omega` equation assembles after it
+— a stamp placed after either would be silently discarded by the same
+mechanism §88.9 refuses a hybrid for.
+
+After `sstKSources`, which has applied SST's own limiter to the replaced
+`G`: `g_lim <- gamma g_lim + P_k^lim` — (90.13) applied to the limited
+production, plus the page's additional term, whose own note says it
+exists "to help with the proper generation of `k` at the transition
+location for arbitrary low values of `Tu`" — and `sp <- max(gamma, 0.1)
+sp`, which is (90.14). `F_1 <- max(F_1, F_3)` lands between `sstBlending`
+and `sstBlendCoeffs`, the page's "a modification to SST `F_1` blending
+function is required with the `gamma` transition model". `cuda/sst.cu`
+keeps a zero-line diff, as §88's did. A case that names no transition
+model launches none of it: `gm` is `None` and every hook is a failed `if
+let`.
+
+**The one lag, the same one.** `gamma` reaches the `k` and `omega`
+equations from the value `update_blending` formed at the top of the same
+`correct`, which was built from the previous iteration's `gamma` — §88.6
+names this lag, the reason it is deliberate, and the §81 rule that
+forbids the alternative, and nothing here changes it.
+
+**Order of work in one `correct`.** `update_blending` — which now also
+forms every field of (90.4)-(90.11), replaces the two production buffers
+and stamps `F_1` — then `omega`, then `k`, then `nu_t`, then `gamma`
+last, so it sees the `nu_t` this iteration produced rather than the one
+it started from; `advance_time_levels` and `gamma`'s solve ride with it,
+after `correct_nut`, through the same `RasCore`. `gamma`'s solver
+performance is not returned from `correct`: that signature is §6.3's and
+belongs to the two equations SST owns.
+
+**What is NOT scaled.** `sstKSources`' `susp` — §88.6's last paragraph,
+unchanged: the Favre dilatation term is not the page's to scale, and no
+factor for it is published here either.
+
+**No upper clamp on (90.13) or (90.14).** §88.6's `min(..., 1)` existed
+because `gamma_eff = max(gamma, gamma_sep)` could exceed 1; the page's
+model has no `gamma_sep`, `gamma` never leaves its own bounds (§90.8),
+and §90.2's closing sentence is true of (90.14) for the same reason it is
+true of (90.13).
+
+### 90.7 What is Galilean invariant, and the measurement that shows it
+
+The page states it in one line, between the correlation constants and the
+coupling: **"This model is Galilean invariant."** The reason it gets to:
+no equation of (90.4)-(90.11) contains a velocity magnitude. `Re_V` reads
+a strain magnitude, `R_T` and `Tu_L` read `k`, `omega` and the wall
+distance, `lambda_thL` reads a wall-normal derivative, and a constant
+added to every cell's velocity changes none of them — a Galilean boost
+leaves every gradient, and so every closed form, untouched. LM2009 could
+not say this: its `Tu` and its time scale `T = 500 nu/U^2` read the
+absolute `|U|`, and §88.9 measured the cost. §88.9's table is the
+"before":
+
+| frame shift | `Re_theta_eq` | change |
+|---|---|---|
+| 0 | 155.64 | — |
+| +0.5 m/s | 167.99 | +7.9 % |
+| +1 m/s | 180.36 | +15.9 % |
+| +2 m/s | 205.30 | +31.9 % |
+| +5 m/s | 283.89 | +82.4 % |
+
+**Gate 90-G runs the same table through this model and expects the defect
+gone bitwise, not merely small.** The closed-form half: `Re_thetac`,
+`F_onset` and `F_PG` recomputed at the same cell states with a constant
+velocity added must be **identical bits** — every row reads `0.000 %`,
+and that is pass/fail, not a tolerance. The device half is a measurement:
+the boost applied through a rig that recomputes `grad_u` moves
+`Re_thetac` by no more than the round-off of a Gauss gradient of a
+constant, expected at or below `1e-12`, and the printed worst relative
+difference is the record whatever it turns out to be. The banner for this
+model says "Galilean invariant (Gate 90-G)" — after §88.9, a line like
+that is a claim with a gate behind it, not a compliment.
+
+### 90.8 The bounds, which are ours
+
+*DESIGN, both.* The page publishes none.
+
+`gamma` is bounded into `[gammaMin, gammaMax]` after its solve, default
+`[0, 1]`, by §88.8's construction. The two may be equal, and `gammaMin =
+gammaMax = 1` is again the fully-turbulent limit — with the one
+difference §90.6's decision creates: Gate 90-R's end-to-end half runs
+with the Kato-Launder stamp switched off, because at `gamma = 1` with
+the stamp on, the model is not plain SST and cannot be compared to it
+bitwise (§90.10).
+
+Nothing else is ours. `Re_thetac` needs no floor — (90.6) is bounded
+below by `C_TU1 = 100` wherever (90.8) holds, the exponent's argument
+then being non-negative — and §88.8's kernel floor on it has no
+successor. `F_PG`, `F_onset` and `F_on^lim` are floored and capped by
+the page's own `max` and `min` terms. §88.8's `ReThetatMin` floors a
+transported field this model does not have; §90.1 counted that among the
+gains, and §90.9 counts the key among the inert.
+
+### 90.9 What is refused, and by name
+
+* **A DES hybrid and this model together.** §88.9's reason, and it is a
+  buffer collision, not a preference: both replace what `sstKSources`
+  wrote into the `k` equation's `sp` — the hybrid with `beta* omega
+  l_RANS/l_DES` (§57.4), this model with `max(gamma, 0.1) beta* omega`
+  (90.14) — and whichever ran second would silently discard the other.
+  The page publishes no hybrid form and none is invented here.
+  `set_gamma_transition` refuses it, naming both models and the buffer.
+* **Gravity.** §88.9's second refusal, for the same reason that matters:
+  the page publishes no buoyant extension, so the one question the
+  coupling asks — does `gamma` scale `G_b` as (90.13) makes it scale
+  `P_k`? — has no published answer, and the two defensible answers
+  differ most in a laminar buoyant layer, where an unscaled `G_b`
+  generates turbulence the intermittency says is not there yet. A case
+  with gravity naming `kOmegaSSTGamma` is refused by name, with
+  `kOmegaSST` as the alternative.
+* **`ce2 <= 1`.** The laminar fixed point `1/c_e2` leaves `[0, 1]`, and
+  `(c_e2 gamma - 1)` goes negative on the whole operating range:
+  `E_gamma` turns from destruction into source and drives `gamma` up
+  with the onset machinery switched off.
+* **`sigmaGamma <= 0`.** A non-positive diffusivity coefficient makes
+  the laplacian anti-diffusive — §88.9's reason for `sigmaf`, and
+  `sigma_gamma` is the same kind of number.
+* **`Flength < 0`.** `P_gamma` changes sign with it: production becomes
+  destruction, and the onset machinery drives `gamma` down exactly where
+  it should drive it up.
+* **`CTU2 < 0`.** The correlation's amplitude: with it negative,
+  `Re_thetac` rises with `Tu_L` instead of falling, and takes the value
+  `C_TU1 + C_TU2` at clean air — non-positive from `C_TU2 = -100` down,
+  where `F_onset1` divides by it.
+* **`ReThetacLim <= 0`.** (90.16) divides by it; a non-positive divisor
+  is a NaN or a sign flip in the term that caps `k`'s production at
+  transition.
+* **`gammaMin > gammaMax`.** §88.8's, unchanged.
+* **`CPG1lim < 1` or `CPG2lim < 1`.** Either cap below 1 bites at
+  `lambda_thL = 0` — `F_PG(0) = min(1, cap) < 1` — and `Re_thetac` stops
+  being `C_TU1 + C_TU2 exp(-C_TU3 Tu_L)` there, the two-constant form
+  §90.3 states and §90.11 checks.
+* **Every inert key, by name.** LM2009's eight — `ca1`, `ce1`,
+  `cThetat`, `s1`, `sigmaf`, `sigmaThetat`, `nReThetaSweeps`,
+  `ReThetatMin` — are read by nothing under this model; a case writing
+  one under `kOmegaSSTGamma` is refused with a message pointing at
+  `kOmegaSSTLM`, where the key IS read (§91.3). §89.4's nine — `Cmu`,
+  `C1`, `C2`, `C3`, `sigmak`, `sigmaEps`, `FlengthCoeff`,
+  `ReThetacCoeff`, `Tu` — keep the refusals they already have.
+* **And one setting deliberately NOT refused: `gammaMin = gammaMax`.**
+  §89.4 says why, and the reason survives the model change: it freezes
+  the intermittency, which is a real thing to ask for.
+
+### 90.10 Gates 90-R, 90-G, 90-T
+
+**Gate 90-R, the reduction — two halves, because §90.6's decision makes
+the obvious statement false.**
+
+**(i) The bitwise half.** With the Kato-Launder stamp switched off — a
+`#[cfg(test)]` instrument in the shape of §88's `seed_stamp_inputs`,
+never a case setting — `gamma = 1` and `F_3 = 0` leave `g_lim`, `sp` and
+`f1` **bitwise** unchanged on 216 cells of awkward magnitudes:
+multiplication by an exact `1.0` is exact, `max(gamma, 0.1)` at `gamma =
+1` multiplies by an exact `1.0`, `P_k^lim` carries the exact factor
+`(1 - gamma) = 0`, and `max(f1, 0.0) = f1` for `f1 >= 0`. And end to
+end: `gammaMin = gammaMax = 1` — a real setting, not a test hook
+(§90.8) — reproduces plain `kOmegaSST` **on every bit of `k`, `omega`
+and `nut` over three `correct` steps**. The only verdict this leg can
+reach is bitwise or fail; there is no tolerance to discuss.
+
+**(ii) The pure-shear half, which is a measurement and not a pass.** With
+the stamp ON at `gamma = 1`, the model is SST with Kato-Launder
+production — §90.6's consequence, and the reason the honest form of "it
+reduces to SST" is a pair of numbers. On a **pure-shear** velocity field
+`S` and `Omega` are the same number, so `nu_t S Omega` and SST's own
+production agree in exact arithmetic: the gate measures whether they
+agree **bitwise** through the crate's actual `sstKSources` path — they
+may differ by operation order — and prints the worst relative
+difference. Then on a strained field, where they cannot agree, it prints
+that difference too. Both numbers are the record; neither is a
+pass/fail.
+
+**Gate 90-G, Galilean invariance.** §90.7 says what it is; this is what
+each leg can reach. The closed-form half — §88.9's table, frame shifts
+of +0.5, +1, +2, +5 m/s at `k = 0.05 m²/s²`, `U = 5 m/s`, recomputed
+through `Re_thetac`, `F_onset` and `F_PG` — is a table whose every row
+must read **`0.000 %`**, bitwise; a row that reads anything else is a
+failure, not a small number. The device half — a constant velocity
+added to every cell, `grad_u` recomputed, the worst relative change of
+the `Re_thetac` field printed — is a measurement to be printed, with
+`1e-12` as the expectation and not as a threshold.
+
+**Gate 90-T, the T3A plate.** **Leg 1 is §88.10's leg 1 — the same
+computation, not a similar one.** The free-stream decay of SST itself
+against the published `Tu = 3.300 %` at the T3A leading edge holds at
+`1.61 %`; it is re-run from this section's registry entry so that the
+gate is runnable without §88's, and its verdict is **HOLDS** on a number
+it inherits.
+
+**Leg 2 — the onset location under the 2015 correlation.** On a Blasius
+layer `max_y Re_V = 2.193 Re_theta` (§88.7), and (90.4)'s switch reaches
+one where `Re_V = 2.2 Re_thetac`, so the onset point is the root of one
+scalar equation:
+
+```text
+0.664 sqrt(Re_x) * (2.193/2.2) = Re_thetac(Tu_L(x), lambda_B)
+```
+
+**`lambda_B` is not the clean-air constant, and the gate computes it.**
+Inside a Blasius layer continuity gives `dV/dy = -dU/dx`, and on §88.7's
+similarity form that is `dV/dy = U eta f''(eta)/(2x)` — not zero, so
+(90.10)'s `dV/dy` term does not drop out. With `d_w^2/nu = eta^2 x/U` the
+`x` cancels, and at any fixed similarity height (90.10) collapses to the
+`x`-independent number
+
+```text
+lambda_B = -7.57e-3 eta^3 f''(eta)/2 + 0.0128
+```
+
+The gate evaluates it at `eta*`, the height of the Blasius `Re_V` maximum
+(`eta^2 f''` maximal — §88.7's substitution), taking `eta*` and
+`f''(eta*)` from the crate's own Blasius solution — §88.7's, the one
+that measured `2.188440` — and prints `eta*`, `lambda_B` and
+`F_PG(lambda_B)` beside the root. The independent computation it is
+expected to reproduce gives `eta* = 2.951`, `f''(eta*) = 0.16689`,
+`eta*^3 f''(eta*)/2 = 2.1445`, `lambda_B = -0.003434`,
+`F_PG(lambda_B) = 1.02520`. The `0.0128` offset is the correlation's
+constant for putting a zero-pressure-gradient layer near `lambda = 0`;
+what the layer actually reads at the onset height is `lambda_B`, and the
+gate measures it from the solution above rather than assuming the
+clean-air value. **One assumption remains, stated because the root
+depends on it:** `Tu_L(x)` is formed from the decayed free-stream `k`
+and `omega`, taken uniform across the layer at their free-stream values
+there, evaluated at `d_w = eta* sqrt(nu x/U)` — the height printed
+beside the root. The root is printed and compared with §88.10's
+`Re_x = 8.525e4`; the comparison is a fact about the two correlations,
+not a validation of either. **Verdict: OPEN**, for §88.10's reason — no
+published digit-level onset `Re_x` for T3A exists to close it against.
+
+**What the run measured, and whose number it is.** The root is
+`Re_x = 22826`, where the assumption gives `Tu_L = 54.6 %` at the onset
+height and `Re_thetac = 100` — the correlation **saturated at `C_TU1`**
+(§88.10's leg 2 root was `8.525e4`). The saturation is the stated
+assumption's, not the model's: (90.9) reads
+`Tu_L = 100 sqrt(2k/3)/(omega d_w)` with the FREE-STREAM `omega` at a
+wall distance `d_w = eta* sqrt(nu x/U)` of order a millimetre, and the
+free-stream `k` divided by so small an `omega d_w` puts `Tu_L` an order
+of magnitude above the free-stream `Tu`. Inside a real boundary layer
+`omega` is far larger than in the free stream — the viscous limit
+`omega = 6 nu/(beta_1 y^2)` at a wall is the extreme of it — and read
+through such a profile the same (90.9) would give a far smaller `Tu_L`.
+§88.10's leg 2 read the free-stream `Tu` directly and did not have this
+exposure, so the two legs are NOT comparable: `22826` against `8.525e4`
+is a statement about the assumption and not about the two correlations.
+Closing the comparison needs an `omega` profile through the layer —
+which is the two-dimensional run §90.12 says does not exist. **The
+verdict stays OPEN.**
+
+**Leg 3 — not claimed.** §88.10's leg 3 measured the reason: on one rig
+the free-stream decay is as strong a lever on onset as `Tu` itself, and
+its 51.9x spread is the evidence. This gate does not repeat the
+construction with a new correlation on top of it.
+
+### 90.11 What must hold
+
+| Check | Expected |
+|---|---|
+| `F_PG(0)` | `1`, exactly — the positive branch before its cap |
+| `F_PG` reaches `C_PG1lim` | at `lambda_thL = 0.5/14.68`, and stays there to `1` |
+| the negative branch's cap | `3.0` for `lambda_thL <= -2/7.34` at the printed constants |
+| `F_PG >= 0` | over a sweep of `lambda_thL` in `[-1, 1]`, every value — the published limiter |
+| `lambda_thL` clipped at `±1` | both ends pinned — the published limiter |
+| `Re_thetac(Tu_L -> 0)` | `1100 = C_TU1 + C_TU2`, which is `Re_thetac_lim` to the digit — stated, not exploited |
+| `Re_thetac(Tu_L = 100, lambda = 0)` | `100 + 1000 e^-100`, which in `f64` is `C_TU1` exactly |
+| `Re_thetac` monotone in `Tu_L` | decreasing, over `[0, 100]`, wherever `F_PG > 0` |
+| `F_turb(2)` | `e^-1` — §90.2's half-`R_T` closure, pinned |
+| the `F_onset` limits | `F_onset2 <= 2`, `F_onset3 >= 0`, `F_onset >= 0` — each pinned |
+| `F_on^lim` clipped at `3` | pinned |
+| the split (90.12) | `Sp >= 0` at every state, and the halves reconstruct `P_gamma - E_gamma` |
+| the absorbing state | a cell at `gamma = 0` stays at `0` through a `correct` |
+| the laminar fixed point | a cell at `gamma = 1` in a laminar layer moves toward `1/c_e2 = 0.02` |
+| the banner | prints the initial `gamma` range |
+| **Gate 90-R (i)** | stamps **bitwise** identities at `gamma = 1`, `F_3 = 0`, 216 cells; `gammaMin = gammaMax = 1` reproduces plain SST **bit for bit** in `k`, `omega`, `nut` over three `correct` steps |
+| **Gate 90-R (ii)** | printed — pure shear, then strained; measurements, not passes |
+| host vs device, every closed form | worst relative difference below `1e-13` over a sweep |
+| **Gate 90-G** | every row of the table `0.000 %`, bitwise; the device number printed |
+| **Gate 90-T leg 1** | `3.3530 %` against the published `3.300 %` — `1.61 %`, **HOLDS**, inherited from §88.10 |
+| `lambda_B` on the Blasius profile | `-7.57e-3 eta*^3 f''(eta*)/2 + 0.0128 = -0.00343` at `eta* = 2.951`, from §88.7's own solution — pinned to `1e-4` absolute |
+| **Gate 90-T leg 2** | root printed with `eta*`, `lambda_B` and `F_PG(lambda_B)`; the one assumption stated — **OPEN**; the printed `Tu_L` is the assumption's (§90.10) |
+| two identical runs | identical bits in `k`, `omega`, `nut`, `gamma` |
+| attaching the model | `named_fields` grows from 3 names to 4 |
+| a hybrid and this model together | refused by name, message naming both and the buffer |
+| the CUDA graph | a transitional `correct` captures and replays bitwise (§81) |
+| §6.3, §57, §88 outputs | **unchanged, bit for bit**, on a case that names none of this |
+
+### 90.12 Validation — what is run, and what is NOT
+
+**Run:** everything §90.11 lists — the closed forms on the host and on
+the device independently, against the page's statement of them, digit by
+digit; the reduction in its two halves; the Galilean table and the
+device number; the T3A legs that are claimed.
+
+**NOT run: a two-dimensional transitional boundary-layer solve.** §88.12's
+reason is §88's, and this unit adds nothing that changes it: there is no
+flat-plate harness in this tree coupling SIMPLE momentum-pressure to a
+RANS closure on a graded boundary-layer mesh with a resolved leading
+edge. Everything in §90.10 is therefore a **one-dimensional** calculation
+on a Blasius profile with the model's own correlations — sharp about the
+correlations and the onset criterion, silent about what the coupled
+equations do to each other in a real layer.
+
+**NOT claimed: the `C_f` distribution through transition.** What the T3
+experiments measure and what a transition model is finally judged on; it
+needs the run above, and the run above does not exist.
+
+**NOT claimed: T3A- or T3B.** §88.10 leg 3's measured reason — the 51.9x
+spread — and Gate 90-T declines to re-run the trend on one rig with a
+new correlation on top of it.
+
+**NOT claimed: crossflow transition, roughness, or a trip.** The page
+publishes none, and neither does this.
+
+**NOT read: the 2015 paper.** §90's header records it — paywalled,
+cited, never quoted — and every digit above is the TMR page's, including
+the one constant the page prints in no equation and the one it prints
+twice; both are §90.3's, and both are recorded as readings rather than
+attributions.
+
+---
+
+## 91. What a `kOmegaSSTGamma` case says, the refusal list that shrank a third time, and the pair tests
+
+§90 is the model. This section is the contract, in the shape §89 gave
+§88's: what a case writes, what is read from where, what moved in the
+refusal list this time, and the §13.4.1 pair tests that prove every entry
+reaches the solver.
+
+`No GPL-licensed source was consulted.`
+
+### 91.1 The dictionary, and the field set that grew from two to three
+
+```text
+constant/momentumTransport:
+
+    simulationType  RAS;
+    RAS
+    {
+        model            kOmegaSSTGamma;
+        turbulence       on;
+
+        // §6.3's, unchanged - the k and omega equations ARE §6.3's
+        betaStar         0.09;   a1 0.31;   b1 1.0;   c1 10.0;
+        sigmaK1          0.85;   sigmaOmega1 0.5;   beta1 0.075;  gamma1 0.5532;
+        sigmaK2          1.0;    sigmaOmega2 0.856; beta2 0.0828; gamma2 0.4403;
+
+        // §90's, to the printed digit
+        Flength          100.0;  ce2  50.0;  ca2  0.06;
+        sigmaGamma       1.0;
+        CTU1             100.0;  CTU2 1000.0;  CTU3 1.0;
+        CPG1             14.68;  CPG2 -7.34;  CPG3 0.0;
+        CPG1lim          1.5;    CPG2lim 3.0;  ReThetacLim 1100.0;
+        Ck               1.0;    Csep 1.0;
+
+        // §90's, and OURS
+        gammaMin         0;      gammaMax 1;   // §90.8
+    }
+```
+
+```text
+system/fvSchemes:      div(phi,gamma)     bounded Gauss limitedLinear 1;
+system/fvSolution:     solvers { gamma { ... } }
+                       relaxationFactors { equations { gamma 0.7; } }
+0/gamma:               1 everywhere (§90.5); wall zeroGradient; inlet fixedValue 1
+```
+
+**The field set grows from two to three.** `transported_fields()` answers
+`["k", "omega", "gamma"]`, in the order they are solved, and
+`named_fields()` grows from three names to four exactly when the model is
+attached. §89.1's restart argument holds with one field fewer: `gamma`
+carries the whole state of the transition, and a writer that emitted only
+`k` and `omega` would leave a restart unable to reproduce the run it
+restarted from.
+
+`dissipation_field()` still answers `Some("omega")`, and §89.1's argument
+carries over whole: `omega` IS the dissipation variable among the three,
+and `gamma` is neither a dissipation nor a working viscosity. Two
+accessors that mean two different things, both honest — §58.1's
+resolution, applied once more.
+
+**Boundary conditions.** `gamma`: `zeroGradient` at a wall — the page's
+`d gamma/dn = 0` — and `fixedValue 1` at an inlet, the page's
+`gamma_farfield = 1.0`. Both are patch types this crate already has, so
+**§90 adds no `BcKind`**, as §89.1 found before it; the design-note
+forecast of a flux-switched renumbering reaching into `.mcr` restart
+files was wrong for LM2009 and is wrong again here. There is no inlet
+correlation to provide, because the far-field value is the literal
+`1.0` — §90.1 counted `re_thetat_inlet` among what the one-equation
+model does not need. `0/gamma` is expected to be `1` everywhere, §90.5's
+starting state; a file of zeros is not refused, because `gamma = 0` is a
+stable state rather than a broken one, and §90.5's banner is what makes
+it visible.
+
+### 91.2 What is read, and from where
+
+Two records, because they come from two files — §89.2's split, kept:
+`GammaSelection` carries the coefficients read from
+`constant/momentumTransport` (`gamma_coeffs`) and the controls read from
+`system/` (`gamma_controls`). Keeping them apart is what lets each pair
+test name the file it exercises.
+
+**Each `system/` entry is read for ITSELF, and §89.2 is the rule.**
+`solvers/gamma`, `relaxationFactors/equations/gamma` and
+`divSchemes/div(phi,gamma)` go through the same public helpers a driver
+uses for `U` and `p`, into `GammaControls`' own three fields — not
+through any slot `TurbulenceControls` already owns, which is the defect
+that made `LmControls` necessary and would make all three inert here.
+Where the case writes no entry of its own, the fallback is `k`'s — the
+closest bounded scalar in the run, for the reason §89.2 gives.
+
+### 91.3 The refusal list, and what moved
+
+**Out:** `kOmegaSSTGamma`. It is in `REGISTRY`, in `available_models()`,
+and `select_turbulence_model` returns `RasModel::KOmegaSstGamma` with a
+populated `gamma_transition` record.
+
+**The refusal §89.3 described is gone, and its three claims moved rather
+than died.** The paper: §90's header cites it, paywalled and unread,
+beside the page every digit actually came from. LM2009's Galilean
+defect: §90.7 owns it now, with §88.9's table as the "before" and Gate
+90-G as the measurement that the successor closes it. The measurement
+itself stays in §88.9, where it was made; what moved is the job of
+pointing at it.
+
+**In: nothing.** `kOmegaSSTLM` stays available — two transition models,
+and the case chooses; nothing is removed to make room. `LRR` and `SSG`
+are unchanged, refusal messages and all (§89.6).
+
+**LM2009's keys are the inert list under this model.** `ca1`, `ce1`,
+`cThetat`, `s1`, `sigmaf`, `sigmaThetat`, `nReThetaSweeps`,
+`ReThetatMin` — read by nothing under `kOmegaSSTGamma`, each refused
+with a message pointing at `kOmegaSSTLM`, where the key IS read. That
+is §89.3's refusal run in reverse, and the two messages now have to
+stay distinct in exactly that direction.
+
+### 91.4 The pair tests
+
+§13.4.1, as §89.4 states it: two cases identical in every byte but one,
+REQUIRED to produce different output, failing by name if they do not.
+
+**Case-document pairs**, built by replacing one substring in one base
+document, so the two really do differ in one place and nowhere else:
+
+| # | The one entry | What must differ |
+|---|---|---|
+| 1 | `model kOmegaSST` → `kOmegaSSTGamma` | the model, and `transported_fields()` |
+| 2 | `Flength 100.0` → `50.0` | the intermittency production |
+| 3 | `ce2 50.0` → `25.0` | the destruction term, and the laminar fixed point |
+| 4 | `ca2 0.06` → `0.12` | the destruction term's rate |
+| 5 | `sigmaGamma 1.0` → `0.5` | the `gamma` diffusivity |
+| 6 | `CTU1 100.0` → `120.0` | the correlation's floor |
+| 7 | `CTU2 1000.0` → `500.0` | the correlation's amplitude |
+| 8 | `CTU3 1.0` → `2.0` | the exponent's rate |
+| 9 | `CPG1 14.68` → `7.34` | the pressure-gradient sensitivity, positive branch |
+| 10 | `CPG2 -7.34` → `-3.67` | the pressure-gradient sensitivity, negative branch |
+| 11 | `CPG3 0.0` → `1.0` | the term dead at the printed constants — rig pair 24 exists because row 11 alone cannot prove where it bites |
+| 12 | `CPG1lim 1.5` → `1.2` | the positive cap |
+| 13 | `CPG2lim 3.0` → `2.0` | the negative cap |
+| 14 | `ReThetacLim 1100.0` → `800.0` | `F_on^lim`, and `P_k^lim` with it |
+| 15 | `Ck 1.0` → `2.0` | `P_k^lim`'s amplitude |
+| 16 | `Csep 1.0` → `2.0` | `P_k^lim`'s `nu_t` cutoff |
+| 17 | `gammaMax 1` → `0.5` | the bound |
+| 18 | `gammaMin 0` → `0.1` | the bound's floor |
+| 19 | `betaStar 0.09` → `0.08` | §6.3's own constant, still read under this model |
+| 20 | `solvers/gamma/tolerance` | `GammaControls::gamma_solver` |
+| 21 | `relaxationFactors/equations/gamma` | `GammaControls::gamma_relax` |
+| 22 | `divSchemes/div(phi,gamma)` | `GammaControls::gamma_conv` |
+
+Rows 20-22 are the §13.4.1 instances this section exists to prevent —
+the three entries every `kOmegaSSTGamma` case writes, inert the moment
+`GammaControls` reaches for a slot somebody else owns.
+
+**Rig pairs**, where a case document cannot reach the quantity:
+
+| # | The one setting | What must differ |
+|---|---|---|
+| 23 | `gamma` frozen at 1 vs frozen at 0.3 | `k` after one `correct`, through (90.13) and (90.14) |
+| 24 | `CPG3 = 0` vs `CPG3 = 1`, a cell with `lambda_thL < -0.0681` | `F_PG` differs |
+| 25 | the same pair, a cell with `lambda_thL >= -0.0681` | **nothing** — bitwise identical, and that is the assertion |
+
+Row 25 is a pair test with a negative requirement, and it is the half
+that makes row 24 mean anything: a `CPG3` that moved `F_PG` above the
+knot would be evidence the term sat on the wrong argument, and §90.3's
+pair fails by name in that direction too.
+
+**Refusals fired by name**, each a separate test asserting the message
+names the setting: `ca1`, `ce1`, `cThetat`, `s1`, `sigmaf`,
+`sigmaThetat`, `nReThetaSweeps`, `ReThetatMin` under `kOmegaSSTGamma`,
+each pointing at `kOmegaSSTLM`; `Cmu`, `C1`, `C2`, `C3`, `sigmak`,
+`sigmaEps`, `FlengthCoeff`, `ReThetacCoeff` and `Tu`, §89.4's list,
+unchanged; `ce2 <= 1`; `sigmaGamma <= 0`; `Flength < 0`; `CTU2 < 0`;
+`ReThetacLim <= 0`; `gammaMin > gammaMax`; `CPG1lim < 1`; `CPG2lim < 1`;
+**gravity** (§90.9, the message naming `G_b` and an alternative); a DES
+hybrid and this model attached together; and `LRR`/`SSG`, §89.6's,
+unchanged. And `gammaMin = gammaMax` remains deliberately NOT refused,
+for §89.4's reason.
+
+### 91.5 What must hold
+
+| Check | Expected |
+|---|---|
+| `kOmegaSSTGamma` in `REGISTRY` and in `available_models()` | and not in any refusal list |
+| `select_turbulence_model` on it | `RasModel::KOmegaSstGamma`, with `gamma_transition` populated |
+| `transported_fields()` | `["k", "omega", "gamma"]` |
+| `dissipation_field()` | `Some("omega")`, unchanged |
+| `driver_for(KOmegaSstGamma)` | names a binary that exists and is NOT `ofgpu-k-omega` — compiler-enforced, the `match` is exhaustive over `RasModel` |
+| `build_coupled` on a `kOmegaSSTGamma` case | builds, and plain `kOmegaSST` through the same route is unchanged |
+| `named_fields()` with and without the model | 3 names and 4 |
+| the banner | says `kOmegaSSTGamma`, prints the initial `gamma` range, says "Galilean invariant (Gate 90-G)" |
+| the twenty-two document pairs | each DIFFERENT, each failing by name |
+| the three rig pairs | 23 and 24 DIFFERENT; 25 bitwise IDENTICAL, which is the assertion |
+| every refusal | fires, and names the setting |
+| an inert key under this model | refused, message naming `kOmegaSSTLM` — §89.3's direction, reversed |
+| two transition models in one case | refused — `set_gamma_transition` on an LM-attached model, `set_transition` on a `gm`-attached one |
+| `LRR`/`SSG`'s refusals | unchanged from §89.6 |
+| §6.1, §6.3, §33, §40, §41, §56, §57, §88 outputs | **unchanged, bit for bit**, on a case that names none of this |
+
+---
