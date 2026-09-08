@@ -8,7 +8,7 @@ Iterations Co., Ltd. · in collaboration with Meteo Simulation Co., Ltd. · Rust
 
 ## Overview
 
-meteor-cfd is an unstructured finite volume CFD solver designed so that the entire time-integration loop stays on the GPU. Once the mesh and fields are uploaded, no device allocation and no field transfer to the host occur inside the loop. It is **single-GPU only**, and what it is for is incompressible and low-Mach flow — RANS/LES/hybrid turbulence, buoyant plumes, variable-density low-Mach flow, two-phase VOF, conjugate heat transfer, surface-to-surface radiation, Lagrangian sprays, and ventilation and data-centre airflow with fan curves and porous jumps. The numerical core is implemented directly from published literature, and every formulation is specified in [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) with a citation to its original paper. Validation uses the method of manufactured solutions, analytical solutions and published benchmarks only — **never a comparison against another CFD code.** A Rust 1.85 host with CUDA C++ kernels; double precision by default, single via the `single` feature; NVIDIA GPUs; cudarc and thiserror are the only dependencies, with AMGX optional.
+meteor-cfd is an unstructured finite volume CFD solver designed so that the entire time-integration loop stays on the GPU. Once the mesh and fields are uploaded, no device allocation and no field transfer to the host occur inside the loop. It is **single-GPU only**, and what it is for is incompressible and low-Mach flow — RANS/LES/hybrid turbulence, buoyant plumes, variable-density low-Mach flow, two-phase VOF, conjugate heat transfer, surface-to-surface radiation, Lagrangian sprays, and ventilation and data-centre airflow with fan curves and porous jumps. The numerical core is implemented directly from published literature, and every formulation is specified in [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) with a citation to its original paper. Validation uses the method of manufactured solutions, analytical solutions and published benchmarks. **The comparison is not yet sufficient, and help with it is very welcome.** A Rust 1.85 host with CUDA C++ kernels; double precision by default, single via the `single` feature; NVIDIA GPUs; cudarc and thiserror are the only dependencies, with AMGX optional.
 
 ---
 
@@ -67,7 +67,7 @@ text is in [`LICENSE`](LICENSE), what a commercial licence covers is in
 
 ## Status
 
-**This is the output of actually running it on this working tree on 2026-09-05**, on an NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, double precision.
+**This is the output of actually running it on this working tree on 2026-09-08**, on an NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, double precision.
 
 ```
 cargo test --release   1,774 passed, 0 failed, 6 ignored   (all targets, 18 suites)
@@ -79,6 +79,19 @@ ofgpu-validate         833 / 833 checks passed
 ```
 
 That list is not maintained by hand: it is **generated** from the registry each gate enters at the point it reports its own verdict (SPEC-LIT §69). Printing a verdict and registering one are the same call, so all eight are named on every run and a ninth could not fail to appear. **Everything `ofgpu-validate` runs passes. That is a different statement from "this project reproduces every published benchmark it compares against", and the two must not be confused.**
+
+---
+
+## Technical guidebook
+
+Installing, a first case, meshing, choosing a solver, reading convergence,
+looking at results, and the causes of the errors you will meet — the one
+document about **use** is [`docs/GUIDEBOOK.en.md`](docs/GUIDEBOOK.en.md). In
+Korean: [`docs/GUIDEBOOK.md`](docs/GUIDEBOOK.md).
+
+If you read one section, read §6, Choosing a solver: `ofgpu-k-epsilon`,
+`ofgpu-k-omega` and `ofgpu-sa` solve **the turbulence equations only, on a
+frozen velocity field**.
 
 ---
 

@@ -2,6 +2,8 @@
 
 | File | Contents |
 |---|---|
+| `GUIDEBOOK.md` | **테크니컬 가이드북** — 설치, 첫 케이스, 격자, 솔버 선택, 수렴 판독, 결과 보기, 문제 해결. 쓰는 법을 다루는 유일한 문서입니다 |
+| `GUIDEBOOK.en.md` | The same guidebook in English |
 | `01-model-catalog.md` | 상류 CFD 배포판의 구성요소 전수 목록 — RAS/LES 모델, 열물리·화학, 다상, 이산화 스킴, 선형 솔버, 메쉬 |
 | `02-gpu-portability.md` | 같은 구성요소들의 GPU 이식 등급 (A~E), 맞는 NVIDIA 라이브러리, 걸림돌, 권장 순서 |
 | `03-esi-vs-foundation.md` | ESI v2606에만 있는 것 / Foundation 12에만 있는 것 |
