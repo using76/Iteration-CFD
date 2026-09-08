@@ -868,24 +868,29 @@ pub fn driver_for(m: RasModel) -> &'static str {
         // which is a different CASE, not a different coefficient set - the
         // coupled drivers are where it is reachable.
         RasModel::LaunderSharmaKE => "ofgpu-buoyant or ofgpu-lowmach",
-        RasModel::KOmega | RasModel::KOmegaSST => "ofgpu-k-omega",
+        RasModel::KOmega => "ofgpu-k-omega",
+        // SST is built only where SPEC-LIT 6.6's wall distance is computed:
+        // `KOmegaSst::new` takes it and checks its length, `build_coupled`
+        // computes it, and `ofgpu-k-omega` does neither.
+        RasModel::KOmegaSST => "ofgpu-buoyant or ofgpu-lowmach",
         // SPEC-LIT S88/S89: the transition model is `kOmegaSST` with two more
         // equations bolted on, and it is reachable exactly where SST is
-        // reachable through `build_coupled`. NOT `ofgpu-k-omega`: that driver
-        // builds `KOmegaSst` directly and would run a transitional case fully
-        // turbulent from the leading edge, which is the plausible converged
-        // wrong answer S13.4 exists to stop.
+        // reachable through `build_coupled`. NOT `ofgpu-k-omega`: SST needs
+        // the wall distance of SPEC-LIT 6.6, which `build_coupled` computes
+        // and that driver does not, so naming it here would have the driver's
+        // own refusal point straight back at it - the circular pointer
+        // S13.4's "name the alternative" exists to stop.
         RasModel::KOmegaSstLM => "ofgpu-buoyant or ofgpu-lowmach",
         // SPEC-LIT 91.5: the 2015 gamma model is `kOmegaSST` with one more
         // equation bolted on, and it is reachable exactly where SST is
         // reachable through `build_coupled` - NOT `ofgpu-k-omega`, which
-        // builds `KOmegaSst` directly and would run a transitional case
-        // fully turbulent from the leading edge (SPEC-LIT 13.4's plausible
-        // converged wrong answer).
+        // computes no wall distance and so could not build SST even if it
+        // accepted the model name (SPEC-LIT 6.6's wall distance is what
+        // `KOmegaSst::new` asks for, and `build_coupled` is what computes it).
         RasModel::KOmegaSstGamma => "ofgpu-buoyant or ofgpu-lowmach",
-        // SPEC-LIT S56/S57: SA and both hybrid backgrounds are reachable
-        // through `models::registry::build_coupled`, which is what the
-        // coupled drivers use - there is no standalone `ofgpu-sa`.
+        // SPEC-LIT S56/S57: SA and its SA-background hybrids have their own
+        // standalone driver in `ofgpu-sa`, which builds the model directly
+        // rather than through `build_coupled`.
         // SPEC-LIT §56.8 refuses SA in a buoyant solver - §17's G_b enters a
         // k equation and it has none - so `ofgpu-sa` is the driver that runs
         // it, and its SA-background hybrids with it. The SST-background
@@ -1156,10 +1161,10 @@ mod tests {
     }
 
     /// SPEC-LIT 91.5: `driver_for(KOmegaSstGamma)` names a binary that
-    /// exists and is NOT `ofgpu-k-omega` - that driver builds `KOmegaSst`
-    /// directly and would run a transitional case fully turbulent from the
-    /// leading edge. The coupled drivers are where `build_coupled` reaches
-    /// the 2015 model, exactly as for `kOmegaSSTLM`.
+    /// exists and is NOT `ofgpu-k-omega` - a driver that computes no wall
+    /// distance cannot build the SST the 2015 model is bolted onto. The
+    /// coupled drivers are where `build_coupled` reaches the 2015 model,
+    /// exactly as for `kOmegaSSTLM`.
     #[test]
     fn the_gamma_model_reaches_the_coupled_drivers() {
         let d = driver_for(RasModel::KOmegaSstGamma);
@@ -1168,5 +1173,21 @@ mod tests {
         assert!(d.contains("ofgpu-lowmach"), "{d}");
         // And the same answer its predecessor gets: one route, two models.
         assert_eq!(d, driver_for(RasModel::KOmegaSstLM));
+    }
+
+    /// SPEC-LIT 6.6: `driver_for(KOmegaSST)` names a binary that exists and
+    /// is NOT `ofgpu-k-omega` - a driver that cannot compute the wall
+    /// distance `KOmegaSst::new` takes cannot be the answer. The coupled
+    /// drivers are where `build_coupled` computes that distance before
+    /// building the model, exactly as for the two transitional models.
+    #[test]
+    fn plain_sst_reaches_the_coupled_drivers() {
+        let d = driver_for(RasModel::KOmegaSST);
+        assert!(!d.contains("ofgpu-k-omega"), "{d}");
+        assert!(d.contains("ofgpu-buoyant"), "{d}");
+        assert!(d.contains("ofgpu-lowmach"), "{d}");
+        // And the same answer the transitional models get: one route, three.
+        assert_eq!(d, driver_for(RasModel::KOmegaSstLM));
+        assert_eq!(d, driver_for(RasModel::KOmegaSstGamma));
     }
 }

@@ -275,6 +275,7 @@ fn the_sst_correction_replays_bitwise() {
     let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
     let ctrl = fixed(1e-3);
     let wf = WallFaces::none(hm.n_boundary_faces);
+    let rough = NutRoughness::none(hm.n_boundary_faces);
     let quiet = Quiet::new(&gpu, &mesh).expect("flow");
     let flow = quiet.state();
     let (y, _gy) = wall_distance(&gpu, hm.n_cells).expect("y");
@@ -292,6 +293,7 @@ fn the_sst_correction_replays_bitwise() {
                 WallFunctionCoeffs::default(),
                 &wf,
                 &y,
+                &rough,
             )?;
             gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; hm.n_cells])?;
             gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; hm.n_cells])?;
@@ -370,6 +372,7 @@ fn the_transition_correction_replays_bitwise() {
     let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
     let ctrl = fixed(1e-3);
     let wf = WallFaces::none(hm.n_boundary_faces);
+    let rough = NutRoughness::none(hm.n_boundary_faces);
     let quiet = Quiet::new(&gpu, &mesh).expect("flow");
     let flow = quiet.state();
     let (y, _gy) = wall_distance(&gpu, hm.n_cells).expect("y");
@@ -387,6 +390,7 @@ fn the_transition_correction_replays_bitwise() {
                 WallFunctionCoeffs::default(),
                 &wf,
                 &y,
+                &rough,
             )?;
             gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; hm.n_cells])?;
             gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; hm.n_cells])?;
@@ -453,6 +457,7 @@ fn the_gamma_transition_correction_replays_bitwise() {
     let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
     let ctrl = fixed(1e-3);
     let wf = WallFaces::none(hm.n_boundary_faces);
+    let rough = NutRoughness::none(hm.n_boundary_faces);
     let quiet = Quiet::new(&gpu, &mesh).expect("flow");
     let flow = quiet.state();
     let (y, gy) = wall_distance(&gpu, hm.n_cells).expect("y");
@@ -463,7 +468,7 @@ fn the_gamma_transition_correction_replays_bitwise() {
         || {
             let mut m = crate::models::k_omega_sst::KOmegaSst::new(
                 &gpu, &hm, &mesh, Default::default(), ctrl,
-                WallFunctionCoeffs::default(), &wf, &y,
+                WallFunctionCoeffs::default(), &wf, &y, &rough,
             )?;
             gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; hm.n_cells])?;
             gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; hm.n_cells])?;

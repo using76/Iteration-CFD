@@ -330,6 +330,7 @@ impl<'m> KOmegaSst<'m> {
         wall: WallFunctionCoeffs,
         wall_faces: &crate::field_setup::WallFaces,
         y: &DevBuf<Scalar>,
+        roughness: &crate::field_setup::NutRoughness,
     ) -> Result<Self> {
         coeffs.check()?;
 
@@ -349,20 +350,11 @@ impl<'m> KOmegaSst<'m> {
         crate::field_ops::copy_field(gpu, &fld, &mut y_own, y, mesh.n_cells)?;
 
         Ok(Self {
-            // No binary in this crate constructs a `KOmegaSst` from a case
-            // file yet (every call site is a unit test), so there is no
-            // case-file `Ks`/`Cs` to thread through here - see the matching
-            // note in `models::les::Les::new`. `NutRoughness::none` makes
-            // every face smooth, exactly SPEC-LIT §29.2's `Ks -> 0` gate.
-            core: RasCore::new(
-                gpu,
-                hm,
-                mesh,
-                ctrl,
-                wall,
-                wall_faces,
-                &crate::field_setup::NutRoughness::none(hm.n_boundary_faces),
-            )?,
+            // Roughness comes from the case file, exactly as
+            // [`crate::models::KOmega::new`] takes it. `NutRoughness::none`
+            // is `Ks = 0`, which leaves every face smooth - SPEC-LIT §29.2's
+            // `Ks -> 0` gate.
+            core: RasCore::new(gpu, hm, mesh, ctrl, wall, wall_faces, roughness)?,
             sst: SstKernels::new(gpu)?,
             fld,
             coeffs,
@@ -1455,6 +1447,7 @@ mod tests {
         let phi = GpuSurfaceScalarField::zeros(gpu, mesh, "phi")?;
         let flow = FlowState::new(&u, &phi, 1e-3);
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
         // No wall in this test: a uniform distance is enough, because F1 is
         // forced and nothing else reads y.
@@ -1469,6 +1462,7 @@ mod tests {
             WallFunctionCoeffs::default(),
             &no_walls,
             &y,
+            &no_roughness,
         )?;
         model.force_f1(Some(f1));
 
@@ -1613,6 +1607,7 @@ mod tests {
             let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
             let flow = FlowState::new(&u, &phi, 1e-3);
             let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+            let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
             let y = gpu.upload(&vec![crate::walldistance::NO_WALL; n])?;
 
             let mut model = KOmegaSst::new(
@@ -1624,6 +1619,7 @@ mod tests {
                 WallFunctionCoeffs::default(),
                 &no_walls,
                 &y,
+                &no_roughness,
             )?;
             model.force_f1(Some(1.0));
             model.set_buoyancy(buoy)?;
@@ -1855,6 +1851,7 @@ mod tests {
         let hm = quiet_box();
         let mesh = GpuMesh::upload(&gpu, &hm)?;
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
         let short: DevBuf<Scalar> = gpu.zeros(hm.n_cells - 1)?;
 
         assert!(KOmegaSst::new(
@@ -1866,6 +1863,7 @@ mod tests {
             WallFunctionCoeffs::default(),
             &no_walls,
             &short,
+            &no_roughness,
         )
         .is_err());
 

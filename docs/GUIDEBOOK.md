@@ -239,7 +239,7 @@ ofgpu-generate-mesh big case 128 -stl car=racecar.stl -cutcell
 | `standard`(기본) | `nutkWallFunction` | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` |
 | `spalding` | `nutUWallFunction` | `kqRWallFunction` | 〃 |
 | `rough` | `nutkRoughWallFunction`(`-Ks` 필수) | `kqRWallFunction` | 〃 |
-| `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `zeroGradient` |
+| `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `epsilon`: `fixedValue`(값 없음 → 0) / `omega`: `zeroGradient` |
 
 자세한 표(LES일 때의 축약 포함)는 [`cases/README.md`](../cases/README.md).
 
@@ -276,6 +276,30 @@ ofgpu-generate-mesh big case 128 -stl car=racecar.stl -cutcell
 | `ofgpu-datacentre` | 데이터센터 룸(팬·타일·습공기·지표) | JSONC |
 
 속도장이 필요하면 **굵게 표시된 것 중에서 고르십시오.**
+
+### 어떤 모델이 어느 드라이버로 가는가
+
+모델 이름이 어느 바이너리에서 돌아가는지는 코드가 정합니다.
+`rust/src/bin/common/mod.rs`의 `driver_for`는 정확히 이렇게 갈립니다:
+
+| 모델 | 드라이버 |
+|---|---|
+| `kEpsilon`, `RealizableKE`, `RNGkEpsilon` | `ofgpu-k-epsilon` |
+| `LaunderSharmaKE` | `ofgpu-buoyant` 또는 `ofgpu-lowmach` |
+| `kOmega` | `ofgpu-k-omega` |
+| `kOmegaSST` | `ofgpu-buoyant` 또는 `ofgpu-lowmach` |
+| `kOmegaSSTLM`, `kOmegaSSTGamma` | `ofgpu-buoyant` 또는 `ofgpu-lowmach` |
+
+마지막 행이 `ofgpu-k-omega`가 아닌 이유: 이 모델들은 SST에 방정식을 더 얹은
+전이 모델이고 `build_coupled`를 통해서만 도달합니다. `ofgpu-k-omega`에서
+돌리면 전이 케이스를 전연에서부터 완전 난류로 풀어 버립니다 — 그럴듯하게
+수렴하는 그릇된 답으로, SPEC-LIT §13.4가 막으려는 바로 그것입니다.
+
+`kOmegaSST`는 마지막 행과 같은 드라이버로 가지만 이유는 다릅니다: SST는 벽
+거리가 필요하고(SPEC-LIT §6.6) `KOmegaSst::new`는 그것을 필수 인자로
+받습니다. `build_coupled`는 모델을 만들기 전에 벽 거리를 계산하지만
+`ofgpu-k-omega`는 전혀 계산하지 않으므로, SST는 `ofgpu-buoyant`와
+`ofgpu-lowmach`를 통해서만 도달합니다.
 
 ### 난류 전용 드라이버는 언제 쓰는가
 

@@ -238,11 +238,11 @@ const TOOLS = [
     name: 'ofgpu_solve',
     title: 'Run a solver',
     description:
-      'Run one of the GPU-resident solvers on a case directory or a *.jsonc case, and return the tail of its log: residuals at each check interval, the wall time, and where the results were written. The whole time-integration loop stays on the device, so a 2-million-cell steady RANS case is seconds to a minute, not hours.',
+      'Run one of the GPU-resident solvers on a case directory or a *.jsonc case, and return the tail of its log: residuals at each check interval, the wall time, and where the results were written. The whole time-integration loop stays on the device, so a 2-million-cell steady RANS case is seconds to a minute, not hours. `k-epsilon`, `k-omega` and `sa` solve the turbulence equations ONLY, on a velocity field they never touch: no U and no p are written and what comes back is the initial field. A case that needs a velocity field must use `lowmach`, `buoyant`, `plume` or `vof`.',
     inputSchema: {
       type: 'object',
       properties: {
-        solver: { type: 'string', enum: Object.keys(SOLVERS), description: 'Which driver to run.' },
+        solver: { type: 'string', enum: Object.keys(SOLVERS), description: 'Which driver to run. `k-epsilon`, `k-omega` and `sa` solve turbulence only on a frozen velocity field; for a velocity field use `lowmach`, `buoyant`, `plume` or `vof`.' },
         casePath: { type: 'string', description: 'Workspace-relative case directory or *.jsonc file.' },
         iterations: { type: 'integer', minimum: 1, description: 'Iterations (or time steps) to run.' },
         checkEvery: { type: 'integer', minimum: 1, description: 'How often to print residuals. Default: iterations / 10.' },

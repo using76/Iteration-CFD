@@ -840,6 +840,7 @@ fn an_attached_hybrid_in_rans_mode_reproduces_sst_bit_for_bit() -> Result<()> {
         let mesh = GpuMesh::upload(&gpu, &hm)?;
         let wd = wall_distance(&gpu, &hm, &mesh, &solver_controls(), 0)?;
         let no_walls = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+        let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
         let ctrl = TurbulenceControls {
             steady: false,
             delta_t: 1e-3,
@@ -859,6 +860,7 @@ fn an_attached_hybrid_in_rans_mode_reproduces_sst_bit_for_bit() -> Result<()> {
             WallFunctionCoeffs::default(),
             &no_walls,
             &wd.y.f,
+            &no_roughness,
         )?;
         if attach {
             m.set_des(Some(DesLengthScale::new(

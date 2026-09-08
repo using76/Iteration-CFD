@@ -249,7 +249,7 @@ row** — so that picking them field by field cannot produce a contradictory mix
 | `standard` (default) | `nutkWallFunction` | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` |
 | `spalding` | `nutUWallFunction` | `kqRWallFunction` | as above |
 | `rough` | `nutkRoughWallFunction` (needs `-Ks`) | `kqRWallFunction` | as above |
-| `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `zeroGradient` |
+| `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `epsilon`: `fixedValue` (no `value`, so 0) / `omega`: `zeroGradient` |
 
 The full table, including how it collapses for LES, is in
 [`cases/README.md`](../cases/README.md).
@@ -288,6 +288,31 @@ field**.
 | `ofgpu-datacentre` | data-centre room (fans, tiles, humidity, metrics) | JSONC |
 
 If you want a velocity field, **pick one of the bold ones.**
+
+### Which model goes to which driver
+
+The code decides which binary a model name means. `driver_for` in
+`rust/src/bin/common/mod.rs` routes them exactly like this:
+
+| Model | Driver |
+|---|---|
+| `kEpsilon`, `RealizableKE`, `RNGkEpsilon` | `ofgpu-k-epsilon` |
+| `LaunderSharmaKE` | `ofgpu-buoyant` or `ofgpu-lowmach` |
+| `kOmega` | `ofgpu-k-omega` |
+| `kOmegaSST` | `ofgpu-buoyant` or `ofgpu-lowmach` |
+| `kOmegaSSTLM`, `kOmegaSSTGamma` | `ofgpu-buoyant` or `ofgpu-lowmach` |
+
+The last row is not `ofgpu-k-omega` for a reason: both models are SST with
+extra equations bolted on, reachable through `build_coupled`, and running one
+in `ofgpu-k-omega` would solve a transitional case fully turbulent from the
+leading edge — the plausible converged wrong answer SPEC-LIT §13.4 exists to
+stop.
+
+`kOmegaSST` sits in the same row for a different reason: SST needs a wall
+distance (SPEC-LIT §6.6). `KOmegaSst::new` takes it as a required argument,
+`build_coupled` computes it before constructing the model, and
+`ofgpu-k-omega` never computes one — so SST is reachable only through
+`ofgpu-buoyant` and `ofgpu-lowmach`.
 
 ### When the turbulence-only drivers are the right tool
 

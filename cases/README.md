@@ -21,7 +21,7 @@ cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [
 | `standard` (기본값) | `nutkWallFunction` | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` | `thermalWallFunction` |
 | `spalding` | `nutUWallFunction` | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` | `thermalWallFunction` |
 | `rough` | `nutkRoughWallFunction`(`-Ks` 필요, `-Cs` 기본 0.5) | `kqRWallFunction` | `epsilonWallFunction`/`omegaWallFunction` | `thermalWallFunction` |
-| `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `zeroGradient` (분자 점성만) | 손대지 않음 — 해상된 서브레이어 자체의 분자 저항을 그대로 둠 |
+| `lowRe` | `nutLowReWallFunction` | `kLowReWallFunction` | `epsilon`: `fixedValue`(값 없음 → 0) / `omega`: `zeroGradient` (분자 점성만) | 손대지 않음 — 해상된 서브레이어 자체의 분자 저항을 그대로 둠 |
 
 `simulationType LES;`인 케이스는 `k`/`epsilon`/`omega` 완결식이 없으므로 위 표는
 `nut` 열 하나로 줄어듭니다 — SPEC-LIT §30.1의 자체 표(§29.1의 유일한 생존
@@ -111,13 +111,19 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 
 ## `racecar` — 외부 공력 샘플
 
-`racecar.stl`(자체 생성 형상 1,040 삼각형)과 `racecar.cmd`(명령 두 줄)만
+`racecar.stl`(자체 생성 형상 1,040 삼각형)과 `racecar.cmd`(세 단계 스크립트)만
 들어 있습니다. 메쉬도 결과도 없습니다 — 합쳐 1 GB가 넘고, 그것을 만드는 것이
 이 프로그램이 하는 일입니다.
 
 ```powershell
 cd cases
-.acecar.cmd          # 메쉬 10-20분(CPU) + 솔브 약 40초(GPU) -> racecar_case```
+.\racecar.cmd          # 메쉬 20-60분(CPU) + 솔브 1-2분(GPU) -> racecar_case
+```
+
+스크립트는 세 단계입니다 — 메쉬를 만들고, `racecar.fields/`에서 `p`와 `T`를
+`0/`로 복사해 넣고, `ofgpu-lowmach`로 풉니다. `racecar.fields/`가 있는
+까닭은 메쉬 생성기가 난류 전용 드라이버가 읽는 필드만 쓰기 때문이고, 운동량을
+풀려면 풀 대상인 압력과 저마하 루프가 요구하는 온도가 더 필요합니다.
 
 자세한 것은 [`racecar.md`](racecar.md) — 크기를 바꾸는 법, 컷셀이 닫힌
 다양체를 요구하는 이유, 뷰어에서 무엇을 보게 되는지까지.

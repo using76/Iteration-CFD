@@ -3863,6 +3863,7 @@ fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             ..Default::default()
         };
         let wf = ofgpu::field_setup::WallFaces::none(hm_gm.n_boundary_faces);
+        let no_rough = ofgpu::field_setup::NutRoughness::none(hm_gm.n_boundary_faces);
         let mut wy: DevBuf<Scalar> = gpu.zeros(n_gm)?;
         gpu.write(&mut wy, &vec![0.05 as Scalar; n_gm])?;
         let mut m = KOmegaSst::new(
@@ -3874,6 +3875,7 @@ fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             WallFunctionCoeffs::default(),
             &wf,
             &wy,
+            &no_rough,
         )?;
         gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; n_gm])?;
         gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; n_gm])?;

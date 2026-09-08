@@ -23605,6 +23605,7 @@ says where.
 | `transported_fields()` | `["k", "omega", "gamma", "ReThetat"]` |
 | `dissipation_field()` | `Some("omega")`, unchanged |
 | `driver_for(KOmegaSstLM)` | names a binary that exists and is NOT `ofgpu-k-omega` — compiler-enforced, because that `match` is exhaustive over `RasModel`, and `ofgpu-k-omega` refuses the model by name and points at what `driver_for` answers |
+| `driver_for(KOmegaSST)` | names a binary that exists and is NOT `ofgpu-k-omega` — SST needs the wall distance of §6.6, which `KOmegaSst::new` takes as an argument and `build_coupled` computes, and which `ofgpu-k-omega` never computes |
 | `build_coupled` on a transitional case | builds, and plain `kOmegaSST` through the same route is unchanged |
 | `named_fields()` with and without the model | 3 names and 5 |
 | the banner | says `kOmegaSSTLM`, and plain SST still says `kOmegaSST` |

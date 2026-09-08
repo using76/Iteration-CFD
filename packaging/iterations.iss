@@ -88,11 +88,11 @@ Source: "{#SrcRoot}\cases\racecar.cmd"; DestDir: "{app}\cases"; Flags: ignorever
 Source: "{#SrcRoot}\cases\racecar.fields\*"; DestDir: "{app}\cases\racecar.fields"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SrcRoot}\tools\racecar_stl.py"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 
-; --- the spec every discretisation is written against -------------------------
 ; --- how to use it -----------------------------------------------------------
 Source: "{#SrcRoot}\docs\GUIDEBOOK.md";    DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SrcRoot}\docs\GUIDEBOOK.en.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 
+; --- the spec every discretisation is written against -------------------------
 Source: "{#SrcRoot}\rust\SPEC-LIT.md";   DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SrcRoot}\rust\PROVENANCE.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SrcRoot}\docs\schema\*";      DestDir: "{app}\docs\schema"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist

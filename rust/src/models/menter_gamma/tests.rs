@@ -1228,6 +1228,7 @@ fn gamma_rig(
     let n = hm.n_cells;
     let mesh = crate::mesh::GpuMesh::upload(gpu, hm)?;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let mut u = crate::field::GpuVectorField::zeros(gpu, &mesh, "U")?;
     gpu.write(&mut u.f, &velocity.to_vec())?;
     let phi = crate::field::GpuSurfaceScalarField::zeros(gpu, &mesh, "phi")?;
@@ -1251,6 +1252,7 @@ fn gamma_rig(
         crate::wallfunctions::WallFunctionCoeffs::default(),
         &wf,
         &wy,
+        &no_roughness,
     )?;
     gpu.write(&mut m.k_mut().f, &vec![k0; n])?;
     gpu.write(&mut m.omega_mut().f, &vec![w0; n])?;
@@ -1598,6 +1600,7 @@ fn attaching_the_model_grows_the_written_field_set() {
     let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let y: DevBuf<Scalar> = gpu.zeros(n).expect("y");
     let gy: DevBuf<Vec3> = gpu.zeros(n).expect("grad y");
 
@@ -1610,6 +1613,7 @@ fn attaching_the_model_grows_the_written_field_set() {
         crate::wallfunctions::WallFunctionCoeffs::default(),
         &wf,
         &y,
+        &no_roughness,
     )
     .expect("sst");
     let names: Vec<&str> = m.named_fields().iter().map(|(nm, _)| *nm).collect();
@@ -1706,6 +1710,7 @@ fn a_hybrid_and_the_gamma_model_together_are_refused_by_name() {
     let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let y: DevBuf<Scalar> = gpu.zeros(n).expect("y");
     let gy: DevBuf<Vec3> = gpu.zeros(n).expect("grad y");
 
@@ -1718,6 +1723,7 @@ fn a_hybrid_and_the_gamma_model_together_are_refused_by_name() {
         crate::wallfunctions::WallFunctionCoeffs::default(),
         &wf,
         &y,
+        &no_roughness,
     )
     .expect("sst");
 
@@ -1767,10 +1773,11 @@ fn two_transition_models_on_one_background_are_refused_by_name() {
     let gy: DevBuf<Vec3> = gpu.zeros(n).expect("grad y");
     let no_ctrl = crate::io::case::TurbulenceControls::default();
     let wall = crate::wallfunctions::WallFunctionCoeffs::default();
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
 
     let build = || {
         crate::models::KOmegaSst::new(
-            &gpu, &hm, &mesh, Default::default(), no_ctrl, wall, &wf, &y,
+            &gpu, &hm, &mesh, Default::default(), no_ctrl, wall, &wf, &y, &no_roughness,
         )
         .expect("sst")
     };

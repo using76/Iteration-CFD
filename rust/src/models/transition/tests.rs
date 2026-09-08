@@ -855,6 +855,7 @@ fn gate_88_r_a_frozen_intermittency_reproduces_plain_sst_bitwise() {
     let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let u = GpuVectorField::zeros(&gpu, &mesh, "U").expect("U");
     let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi").expect("phi");
     let flow = FlowState::new(&u, &phi, 1e-5);
@@ -882,6 +883,7 @@ fn gate_88_r_a_frozen_intermittency_reproduces_plain_sst_bitwise() {
             wall,
             &wf,
             &wy,
+            &no_roughness,
         )
         .expect("sst");
         gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; n]).expect("k");
@@ -1034,6 +1036,7 @@ fn a_transitional_correct_is_bitwise_repeatable() {
     let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let u = GpuVectorField::zeros(&gpu, &mesh, "U").expect("U");
     let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi").expect("phi");
     let flow = FlowState::new(&u, &phi, 1e-5);
@@ -1057,6 +1060,7 @@ fn a_transitional_correct_is_bitwise_repeatable() {
             crate::wallfunctions::WallFunctionCoeffs::default(),
             &wf,
             &wy,
+            &no_roughness,
         )
         .expect("sst");
         gpu.write(&mut m.k_mut().f, &vec![0.02 as Scalar; n]).expect("k");
@@ -1101,6 +1105,7 @@ fn the_intermittency_reaches_the_k_equation() {
     let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let u = GpuVectorField::zeros(&gpu, &mesh, "U").expect("U");
     let phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi").expect("phi");
     let flow = FlowState::new(&u, &phi, 1e-5);
@@ -1123,6 +1128,7 @@ fn the_intermittency_reaches_the_k_equation() {
             crate::wallfunctions::WallFunctionCoeffs::default(),
             &wf,
             &wy,
+            &no_roughness,
         )
         .expect("sst");
         gpu.write(&mut m.k_mut().f, &vec![0.05 as Scalar; n]).expect("k");
@@ -1167,6 +1173,7 @@ fn attaching_the_model_grows_the_written_field_set() {
     let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let y: DevBuf<Scalar> = gpu.zeros(n).expect("y");
 
     let mut m = crate::models::KOmegaSst::new(
@@ -1178,6 +1185,7 @@ fn attaching_the_model_grows_the_written_field_set() {
         crate::wallfunctions::WallFunctionCoeffs::default(),
         &wf,
         &y,
+        &no_roughness,
     )
     .expect("sst");
     let names: Vec<&str> = m.named_fields().iter().map(|(n, _)| *n).collect();
@@ -1201,6 +1209,7 @@ fn a_hybrid_and_a_transition_model_together_are_refused_by_name() {
     let mesh = crate::mesh::GpuMesh::upload(&gpu, &hm).expect("mesh");
     let n = hm.n_cells;
     let wf = crate::field_setup::WallFaces::none(hm.n_boundary_faces);
+    let no_roughness = crate::field_setup::NutRoughness::none(hm.n_boundary_faces);
     let y: DevBuf<Scalar> = gpu.zeros(n).expect("y");
     let gy: DevBuf<Vec3> = gpu.zeros(n).expect("grad y");
 
@@ -1213,6 +1222,7 @@ fn a_hybrid_and_a_transition_model_together_are_refused_by_name() {
         crate::wallfunctions::WallFunctionCoeffs::default(),
         &wf,
         &y,
+        &no_roughness,
     )
     .expect("sst");
 

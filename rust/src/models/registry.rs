@@ -2219,7 +2219,7 @@ pub fn build_coupled<'m>(
                 c1: model_coeff(cc, "c1", d.c1),
             };
             let mut model = KOmegaSst::new(
-                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f,
+                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f, roughness,
             )?;
             if !selection.active {
                 model.freeze_nut(gpu)?;
@@ -2270,7 +2270,7 @@ pub fn build_coupled<'m>(
                 c1: model_coeff(cc, "c1", d.c1),
             };
             let mut model = KOmegaSst::new(
-                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f,
+                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f, roughness,
             )?;
             let lm = LangtryMenter::new(gpu, mesh, sel.coeffs, sel.controls, &wd.y.f)?;
             model.set_transition(Some(lm))?;
@@ -2323,7 +2323,7 @@ pub fn build_coupled<'m>(
                 c1: model_coeff(cc, "c1", d.c1),
             };
             let mut model = KOmegaSst::new(
-                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f,
+                gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f, roughness,
             )?;
             let gm = MenterGamma::new(
                 gpu,
@@ -2432,6 +2432,7 @@ pub fn build_coupled<'m>(
                     };
                     let mut model = KOmegaSst::new(
                         gpu, hm, mesh, coeffs, cc.turb, wall, wall_faces, &wd.y.f,
+                        roughness,
                     )?;
                     model.set_des(Some(des));
                     if !selection.active {
