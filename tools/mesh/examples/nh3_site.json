@@ -1,0 +1,36 @@
+{
+  "step": "C:/Users/sdd32/Desktop/암모니아누출/cfd_optimized_defeatured_recommended.step",
+  "scale": 0.001,
+  "out_dir": "C:/Users/sdd32/Desktop/암모니아누출/mesh",
+  "name": "nh3_site",
+  "fluid": {"tag": 1},
+  "domain_box": [-1250.0, -1250.0, -7.5, 1250.0, 1250.0, 200.0],
+  "outer_tol": 0.05,
+  "solids": {"sink_m": 2.0, "fuse": false, "exclude_tags": []},
+  "repairs": [
+    {"tag": 33, "method": "resample", "cell_m": 1.5, "target_faces": 6000, "lift_z": 3.05}
+  ],
+  "trim": {"below_z": 3.05},
+  "sea_z": 3.05,
+  "points": {
+    "tank_shell":    [-916.9, 349.8],
+    "ESDV1":         [-910.2, 329.3],
+    "skid":          [-869.5, 233.8],
+    "pipe_mid":      [-434.8, 116.9],
+    "ESDV2":         [-23.2,    9.4],
+    "ship_manifold": [  18.5,  -7.5]
+  },
+  "pool_radius_m": 26.0,
+  "roof_patches": {"nh3_source": 306},
+  "sizes": {
+    "min": 1.5, "max": 40.0, "pool": 2.0, "box": 4.0, "growth_from": 2.5,
+    "near_struct": 4.0, "far_struct": 12.0, "near_radius": 400.0,
+    "size_mult": 1.0, "roof_boxes": [2.5, 5.0, 10.0]
+  },
+  "mesh": {"algo2d": 6, "algo3d": 1, "optimize_passes": 5, "threads": 32},
+  "post": {
+    "flat_tets": true, "flat_threshold": 1e-7, "seam_merge_m": 0.02,
+    "sliver_edge_m": 0.6, "sliver_vol_m3": 0.2, "thin_push_m": 0.0
+  },
+  "classification": {"wall_prefix": "wall_", "big_roof_is_ground_m2": 2000.0}
+}
