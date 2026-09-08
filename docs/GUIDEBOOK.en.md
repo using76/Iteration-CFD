@@ -109,7 +109,7 @@ and `PASS`. If that fails, nothing below it can be trusted.
 
 ## 3. Five minutes: a first solve
 
-The race-car sample is the fastest route: one geometry and three commands.
+The race-car sample is the fastest route: one geometry and two commands.
 
 ```powershell
 cd cases
@@ -119,28 +119,27 @@ cd cases
 What the script does:
 
 ```powershell
-# 1. Carve the body out of a 1 m cube tunnel, cut-cell.   20-60 min (CPU)
+# 1. Carve the body out of a 1 m cube tunnel, cut-cell.   minutes (all cores)
 ofgpu-generate-mesh big racecar_case 128 -stl car=racecar.stl -cutcell
 
-# 2. Add the pressure and temperature fields.             instant
-copy racecar.fields\p racecar_case\0\p
-copy racecar.fields\T racecar_case\0\T
-
-# 3. Solve the momentum too.                              1-2 min (GPU)
+# 2. Solve the momentum too.                              1-2 min (GPU)
 ofgpu-lowmach racecar_case -iters 3000 -check 250 -output foam
 ```
 
-Step 1 is slow because the **classification runs on the CPU**: two million cells
-each tested inside-or-outside against the STL, and the ones the surface crosses
-cut open. Step 3 is the GPU-resident loop and takes minutes.
+Step 1's inside/outside classification — two million cells each tested
+against the STL, the ones the surface crosses cut open — now runs on every
+core. Measured on 32 cores, a 96-cube carve of this car went from 559 s to
+48 s, about 11.6x; the 128-cube this sample builds takes minutes. Step 2 is
+the GPU-resident loop and takes minutes.
 
-Why step 2 exists is [§6](#6-choosing-a-solver--where-people-go-wrong). In short:
-the mesh generator writes the fields the **turbulence-only** drivers read, and
-not the `p` and `T` a momentum driver needs.
+The generator also writes `p` and `T` into `0/` itself, so the copy step the
+recipe used to carry is gone. Which driver solves what is
+[§6](#6-choosing-a-solver--where-people-go-wrong) — in short, the
+turbulence-only drivers solve two turbulence equations on a frozen `U`.
 
-When it finishes, `racecar_case/0/` holds `U`, `p`, `T`, `k`, `omega`, `nut` and
-`rho` in OpenFOAM ASCII. Open it in the Studio's 3D viewer, or read it straight
-into ParaView.
+When it finishes, `racecar_case/0/` holds `U`, `p`, `T`, `k`, `epsilon`,
+`omega` and `nut` in OpenFOAM ASCII. Open it in the Studio's 3D viewer, or
+read it straight into ParaView.
 
 Details: [`cases/racecar.md`](../cases/racecar.md).
 
@@ -210,7 +209,10 @@ is a 1 m cube tunnel and takes a **single** cell count (`n³`).
 What comes out is a complete, ready-to-run case: `constant/polyMesh`,
 `constant/physicalProperties`, `constant/momentumTransport`,
 `system/{controlDict,fvSchemes,fvSolution}`, and a `0/` with `U`, `k`, `epsilon`,
-`omega` and `nut`.
+`omega` and `nut` — plus `p` and `T` when the preset is `channel`, `cavity`,
+`step` or `big`, or one of the buoyant pair (`plume`/`room`), on the block and
+the cut-cell path alike. `damBreak` is the one exception: the two-phase path
+puts `alpha.water` and `p_rgh` in `0/` instead.
 
 ### Putting a geometry in
 
@@ -324,12 +326,13 @@ converging on a frozen `U`.
 ### What a momentum driver needs
 
 `ofgpu-lowmach` solves `U` and `p` together, and the low-Mach loop wants a `T`.
-The mesh generator writes neither, so you supply them. The race-car sample ships
-two uniform fields in `cases/racecar.fields/` whose entire content is their
-boundary conditions (`p = 0` fixed at the outlet, zero-gradient elsewhere,
-isothermal 293.15 K).
+The mesh generator writes all three into `0/` itself — for `channel`, `cavity`,
+`step`, `big` and the buoyant pair `plume`/`room`, on the cut-cell path too —
+so a freshly generated case runs as it stands. The `k` and `epsilon`/`omega`
+that a RANS model reads are filled in the same way.
 
-Without them it refuses:
+Without them — a hand-written case missing a field, or a generated `damBreak`
+whose `0/` holds only `alpha.water` and `p_rgh` — it refuses:
 
 ```
 error: cases/racecar_case\0 has no p field;
@@ -520,6 +523,14 @@ is enforced by a test rather than by prose (`provenance_audit`).
   no case format.** All three are specified and gated as a library API, but no
   driver binary reads them from a case file.
 - **Adaptive refinement is wired to no solver.**
+- **No tetrahedral-to-polyhedral dual-mesh conversion.** Reading a tet mesh
+  and solving on it work (Gmsh MSH 4.1, and the face-based model already
+  treats a read tet mesh as a general polyhedral mesh). What is missing is the
+  `polyDualMesh`-style operation that merges the tetrahedra around each node
+  into one polyhedron, and it only becomes a converter once the work starts at
+  revisiting SPEC-LIT's assumption that every face is planar and every cell
+  convex, and at deciding the boundary treatment of the dual — a boundary
+  node's dual cell is open.
 - **AMGX is off by default**, and the selector reports it explicitly as
   "unavailable" when it is off.
 - **No claim that the DES family reproduces published separated-flow
@@ -543,9 +554,11 @@ one that meets it exactly.
 
 ### `has no p field` — the momentum driver refuses
 
-The mesh generator writes only the fields the turbulence-only drivers read. Add
-`0/p`, and `0/T` for the low-Mach loop. `cases/racecar.fields/` in the race-car
-sample is the worked example. See
+You no longer meet this on a generated case — the generator writes `0/p` and
+`0/T` itself (`channel`, `cavity`, `step`, `big`, `plume`, `room`). The ways
+left to meet it: a hand-written case missing the field, a momentum driver
+pointed at a generated `damBreak` whose `0/` holds only `alpha.water` and
+`p_rgh`, or a field file deleted or moved. Put the missing field in `0/`. See
 [§6](#6-choosing-a-solver--where-people-go-wrong).
 
 ### Straight streamlines and a one-colour contour
@@ -577,8 +590,7 @@ equations and changes the solution.
 
 `startTime`, `endTime` and `writeControl` in `system/controlDict` decide that. A
 steady driver writes the final state only, into whichever time directory those
-settings name. Keep a copy of the initial fields elsewhere if you need them —
-that is why `racecar.fields/` exists in the sample.
+settings name. Keep a copy of the initial fields elsewhere if you need them.
 
 ### Refused for an unsupported setting
 

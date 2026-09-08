@@ -33,9 +33,10 @@
 //!
 //! The geometry itself is not computed here; `mesh/geometry.rs` owns it.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::{parse_err, Error, Result};
+use crate::error::{parse_err, Error, IoContext, Result};
 use crate::io::tokenizer::{self, Tok, Tokenizer};
 use crate::mesh::{HostMesh, PatchInfo, PatchKind};
 use crate::{Label, Scalar, Vec3};
@@ -783,12 +784,266 @@ fn append_raw(v: &mut String, t: &Tok) {
 }
 
 // ==========================================================================
+//  Writing
+// ==========================================================================
+
+/// The banner and the fixed part of every `FoamFile` header - byte for byte
+/// what `blockgen`'s writer emits, so a converted mesh and a generated one
+/// are indistinguishable by their headers.
+const BANNER: &str = r#"/*---------------------------------------------------------------------------*\
+| ofgpu  --  GPU-native finite volume CFD                                     |
+|                                                                             |
+| Written in the OpenFOAM ASCII case format so that existing pre- and         |
+| post-processing tools can read it. A file format is not a work: ofgpu is    |
+| an independent implementation, neither derived from nor affiliated with     |
+| OpenFOAM.                                                                   |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       "#;
+
+const SEPARATOR: &str =
+    "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //\n";
+
+const FOOTER_RULE: &str =
+    "// ************************************************************************* //\n";
+
+/// Points are written at 17 significant digits - enough to round-trip an
+/// `f64` exactly, and the same number `blockgen` writes its points at for the
+/// same reason (15 is not; see that file's `TextOut::real`).
+const POINT_DIGITS: usize = 17;
+
+/// Write `raw` as the five polyMesh files into `dir` - the directory itself,
+/// not the case root: [`read_poly_mesh`] probes three locations because every
+/// caller disagrees about which one it is holding, and a writer cannot.
+///
+/// What is written is exactly what [`read_poly_mesh`] reads: the header block
+/// `blockgen::write_poly_mesh` emits, the counted `N (` list forms, and a
+/// `boundary` dictionary carrying `type`, `nFaces`, `startFace` - plus
+/// `neighbourPatch` for a declared cyclic (SPEC-LIT §31.1) - per patch.
+/// [`PatchInfo::start`] counts from the first BOUNDARY face; the `startFace`
+/// written here counts from the first face of the mesh, so the offset is
+/// converted back on the way out. Points go out at [`POINT_DIGITS`], so a
+/// written mesh reads back equal, not merely close.
+///
+/// This is a serialiser, not a validator: a `raw` whose patches are not
+/// contiguous, or whose cyclic pair is half-declared, produces a mesh
+/// [`read_poly_mesh`] refuses. Deliberately - there is one definition of a
+/// good mesh here, and the reader owns it.
+pub fn write_poly_mesh_raw(dir: &Path, raw: &PolyMeshRaw) -> Result<()> {
+    fs::create_dir_all(dir).path(dir)?;
+
+    let n_if = raw.neighbour.len();
+    let note = format!(
+        "nPoints:{}  nCells:{}  nFaces:{}  nInternalFaces:{}",
+        raw.points.len(),
+        n_cells_of(raw),
+        raw.faces.len(),
+        n_if
+    );
+
+    write_points_file(&dir.join("points"), raw)?;
+    write_faces_file(&dir.join("faces"), raw)?;
+    write_label_list_file(&dir.join("owner"), "owner", &note, &raw.owner)?;
+    write_label_list_file(&dir.join("neighbour"), "neighbour", &note, &raw.neighbour)?;
+    write_boundary_file(&dir.join("boundary"), raw)?;
+
+    Ok(())
+}
+
+/// `max(owner, neighbour) + 1`, for the `note` - polyMesh never stores a cell
+/// count, and `build_host_mesh` derives it the same way.
+fn n_cells_of(raw: &PolyMeshRaw) -> Label {
+    raw.owner
+        .iter()
+        .chain(raw.neighbour.iter())
+        .copied()
+        .max()
+        .unwrap_or(-1)
+        + 1
+}
+
+/// Every file is built in memory and written once, the way `io/fields.rs`
+/// writes - and LF everywhere, including on Windows, so the files stay
+/// diffable.
+fn write_file(path: &Path, text: String) -> Result<()> {
+    fs::write(path, text.as_bytes()).path(path)
+}
+
+fn write_header(out: &mut String, cls: &str, object: &str, note: &str) {
+    out.push_str(BANNER);
+    out.push_str(cls);
+    out.push_str(";\n");
+    if !note.is_empty() {
+        out.push_str("    note        \"");
+        out.push_str(note);
+        out.push_str("\";\n");
+    }
+    out.push_str("    location    \"constant/polyMesh\";\n    object      ");
+    out.push_str(object);
+    out.push_str(";\n}\n");
+    out.push_str(SEPARATOR);
+    out.push('\n');
+}
+
+fn write_foam_footer(out: &mut String) {
+    out.push_str("\n\n");
+    out.push_str(FOOTER_RULE);
+}
+
+fn write_points_file(path: &Path, raw: &PolyMeshRaw) -> Result<()> {
+    let mut out = String::new();
+    write_header(&mut out, "vectorField", "points", "");
+
+    out.push_str(&raw.points.len().to_string());
+    out.push_str("\n(\n");
+    for p in &raw.points {
+        out.push('(');
+        out.push_str(&fmt_g_prec(p.x, POINT_DIGITS));
+        out.push(' ');
+        out.push_str(&fmt_g_prec(p.y, POINT_DIGITS));
+        out.push(' ');
+        out.push_str(&fmt_g_prec(p.z, POINT_DIGITS));
+        out.push_str(")\n");
+    }
+    out.push(')');
+    write_foam_footer(&mut out);
+
+    write_file(path, out)
+}
+
+/// One face per line, in blockgen's compact `4(a b c d)` form - a triangle
+/// comes out `3(a b c)`, and the reader takes both that and the long form.
+fn write_faces_file(path: &Path, raw: &PolyMeshRaw) -> Result<()> {
+    let mut out = String::new();
+    write_header(&mut out, "faceList", "faces", "");
+
+    out.push_str(&raw.faces.len().to_string());
+    out.push_str("\n(\n");
+    for f in &raw.faces {
+        out.push_str(&f.len().to_string());
+        out.push('(');
+        for (k, &v) in f.iter().enumerate() {
+            if k > 0 {
+                out.push(' ');
+            }
+            out.push_str(&v.to_string());
+        }
+        out.push_str(")\n");
+    }
+    out.push(')');
+    write_foam_footer(&mut out);
+
+    write_file(path, out)
+}
+
+/// `owner` and `neighbour` are the same shape of file, one label per line -
+/// which is why one writer covers both.
+fn write_label_list_file(path: &Path, object: &str, note: &str, v: &[Label]) -> Result<()> {
+    let mut out = String::new();
+    write_header(&mut out, "labelList", object, note);
+
+    out.push_str(&v.len().to_string());
+    out.push_str("\n(\n");
+    for &a in v {
+        out.push_str(&a.to_string());
+        out.push('\n');
+    }
+    out.push(')');
+    write_foam_footer(&mut out);
+
+    write_file(path, out)
+}
+
+fn write_boundary_file(path: &Path, raw: &PolyMeshRaw) -> Result<()> {
+    let n_if = raw.neighbour.len();
+
+    let mut out = String::new();
+    write_header(&mut out, "polyBoundaryMesh", "boundary", "");
+
+    out.push_str(&raw.patches.len().to_string());
+    out.push_str("\n(\n");
+    for p in &raw.patches {
+        out.push_str("    ");
+        out.push_str(&p.name);
+        out.push_str("\n    {\n        type            ");
+        out.push_str(&p.type_name);
+        out.push_str(";\n");
+        // SPEC-LIT §31.1: the one field the reader needs beyond `type` to
+        // resolve a cyclic pair. A dangling `nbr_patch` index is dropped
+        // here rather than panics, and the reader refuses the result by
+        // naming the patch that has no neighbourPatch - the reader owns
+        // what a good mesh is.
+        if let Some(nbr) = p.nbr_patch.and_then(|j| raw.patches.get(j)) {
+            out.push_str("        neighbourPatch  ");
+            out.push_str(&nbr.name);
+            out.push_str(";\n");
+        }
+        out.push_str("        nFaces          ");
+        out.push_str(&p.size.to_string());
+        out.push_str(";\n        startFace       ");
+        out.push_str(&(n_if + p.start).to_string());
+        out.push_str(";\n    }\n");
+    }
+    out.push(')');
+    write_foam_footer(&mut out);
+
+    write_file(path, out)
+}
+
+/// C's `%.*g` with `sig` significant digits - the same formatter
+/// `blockgen::fmt_g_prec` is, repeated here because the io layer cannot see
+/// blockgen's private copy.
+fn fmt_g_prec(v: Scalar, sig: usize) -> String {
+    let x = v as f64;
+    if x == 0.0 {
+        // printf keeps the sign of a negative zero; so does this.
+        return if x.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+    }
+    if !x.is_finite() {
+        return format!("{x}");
+    }
+
+    // The decimal exponent comes from the formatter rather than from `log10`,
+    // which is off by one at exact powers of ten on some libm builds.
+    let sci = format!("{:.*e}", sig - 1, x);
+    let (mant, exp) = match sci.split_once('e') {
+        Some((m, e)) => (m, e.parse::<i32>().unwrap_or(0)),
+        None => (sci.as_str(), 0),
+    };
+
+    // printf switches to the exponent style below 1e-4 and at or above 10^sig.
+    if exp < -4 || exp >= sig as i32 {
+        format!(
+            "{}e{}{:02}",
+            trim_trailing_zeros(mant),
+            if exp < 0 { '-' } else { '+' },
+            exp.abs()
+        )
+    } else {
+        let dec = (sig as i32 - 1 - exp).max(0) as usize;
+        trim_trailing_zeros(&format!("{:.*}", dec, x))
+    }
+}
+
+fn trim_trailing_zeros(s: &str) -> String {
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+// ==========================================================================
 //  Tests
 // ==========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::msh::parse_msh;
     use std::fs;
 
     // A 2x1x1 box of unit cells. Cell 0 spans x in [0,1], cell 1 x in [1,2],
@@ -1032,6 +1287,113 @@ FoamFile
             let raw = read_poly_mesh(&d)?;
             assert_eq!(raw.faces.len(), 11, "probing failed from {}", d.display());
             assert_eq!(raw.patches.len(), 6);
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    // ---- the round trip --------------------------------------------------
+
+    /// Two unit hexes sharing the x = 1 face - the mesh `msh.rs`'s tests
+    /// build in memory, with its ten boundary faces split over two physical
+    /// surfaces so the round trip has more than one patch to carry. Rebuilt
+    /// here because that builder is private to `msh.rs`'s own test module,
+    /// and the point of the exercise is a mesh that arrived through
+    /// [`parse_msh`], not one constructed in the reader's own terms.
+    const TWO_HEX_TWO_PATCH_MSH: &str = r#"$MeshFormat
+4.1 0 8
+$EndMeshFormat
+$PhysicalNames
+2
+2 1 "lo"
+2 2 "rest"
+$EndPhysicalNames
+$Entities
+0 0 2 1
+1 0 0 0 2 1 1 1 1 0
+2 0 0 0 2 1 1 1 2 0
+5 0 0 0 2 1 1 0 0
+$EndEntities
+$Nodes
+1 12 1 12
+3 1 0 12
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+0 0 0
+1 0 0
+1 1 0
+0 1 0
+0 0 1
+1 0 1
+1 1 1
+0 1 1
+2 0 0
+2 1 0
+2 0 1
+2 1 1
+$EndNodes
+$Elements
+3 12 1 12
+2 1 3 2
+1 1 2 6 5
+2 2 9 11 6
+2 2 3 8
+3 1 4 3 2
+4 5 6 7 8
+5 4 8 7 3
+6 1 5 8 4
+7 2 3 10 9
+8 6 11 12 7
+9 3 7 12 10
+10 9 10 12 11
+3 5 5 2
+11 1 2 3 4 5 6 7 8
+12 2 9 10 3 6 11 12 7
+$EndElements
+"#;
+
+    /// `.msh` in, polyMesh out, and what reads back is what was parsed -
+    /// equal, not close. Writing also has to survive the reader's own
+    /// contiguity and coverage checks, so equality here is two documents
+    /// agreeing, not two parsers being wrong the same way.
+    #[test]
+    fn an_msh_written_as_poly_mesh_reads_back_unchanged() -> Result<()> {
+        let raw = parse_msh(TWO_HEX_TWO_PATCH_MSH, "<memory>")?;
+
+        assert_eq!(raw.points.len(), 12);
+        assert_eq!(raw.neighbour, vec![1], "one internal face");
+        assert_eq!(raw.faces.len(), 11);
+        assert_eq!(raw.patches.len(), 2);
+        assert_eq!(raw.patches.iter().map(|p| p.size).sum::<usize>(), 10);
+
+        let root = scratch("roundtrip");
+        write_poly_mesh_raw(&root, &raw)?;
+        let back = read_poly_mesh(&root)?;
+
+        assert_eq!(back.points, raw.points);
+        assert_eq!(back.faces, raw.faces);
+        assert_eq!(back.owner, raw.owner);
+        assert_eq!(back.neighbour, raw.neighbour);
+
+        assert_eq!(back.patches.len(), raw.patches.len());
+        for (a, b) in back.patches.iter().zip(&raw.patches) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.type_name, b.type_name);
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.start, b.start);
+            assert_eq!(a.size, b.size);
+            assert_eq!(a.nbr_patch, b.nbr_patch);
         }
 
         let _ = fs::remove_dir_all(&root);

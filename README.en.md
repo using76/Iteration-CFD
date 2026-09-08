@@ -118,7 +118,7 @@ program is for.
 
 ```powershell
 cd cases
-.\racecar.cmd     # 10-20 min of meshing (CPU) + about 40 s of solving (GPU)
+.\racecar.cmd     # a few minutes of meshing (all cores, in parallel) + about 40 s of solving (GPU)
 ```
 
 Details in [`cases/racecar.md`](cases/racecar.md).
@@ -159,9 +159,10 @@ The guide, the tool list, and what the server refuses to do:
 - **Crank–Nicolson cannot be used with an under-relaxed equation** — it reports the reason as an error rather than silently falling back to Euler.
 - **Radiation here is surface-to-surface only.** §49/§50 solve grey diffuse exchange across a *transparent* medium; nothing in the volume absorbs, emits or scatters. The `radiationModel` selector recognises `viewFactor` (and `s2s`, the native spelling of the same model) and nothing else — any other value is an **unrecognised setting**, refused with the recognised set beside it rather than substituted for (§13.4). A `constant/radiationProperties` that exists and names no `radiationModel` is refused for the same reason: there is no default for the entry, and a reader that guessed would answer a question the case never asked.
 - **Surface-to-surface radiation, species transport and Lagrangian sprays have no case format.** All three are specified and gated as library APIs, but no driver binary reads an enclosure, a species set or a spray out of a case file (§50.12, §13.4.2).
-- **`ofgpu-generate-mesh` writes no `p` and no `T`.** It writes only what the turbulence-only drivers read — both paths write `U`, `k`, `epsilon`, `omega`, `nut`, and the block path adds `nuTilda` for `ofgpu-sa` — so a momentum driver such as `ofgpu-lowmach` refuses a freshly generated case with `has no p field` and does not start until the two files are supplied by hand. The worked example is `cases/racecar.fields/`, which is why step 2 of `racecar.cmd` copies them.
+- **The one preset for which `ofgpu-generate-mesh` writes neither `p` nor `T` is `damBreak`.** Every other preset — `channel`, `cavity`, `step`, `big`, and the buoyant pair `plume`/`room` — gets both written into `0/` on both generation paths, block and cut cell, so a momentum driver runs a freshly generated case as it stands. `damBreak` is the two-phase path and its `0/` holds `alpha.water` and `p_rgh`; pointing `ofgpu-lowmach` at it still earns `has no p field`. The cut-cell path still writes no `nuTilda` for `ofgpu-sa` — that field is added by the block path only.
 - **Parcels do not create splash children, there is no film transport, and parcels do not absorb radiation** (§78.11, §68.13).
 - **Adaptive refinement is wired to no solver** — face fluxes are not transferred and there is no post-adaptation pressure projection.
+- **No tetrahedral-to-polyhedral dual-mesh conversion.** Reading a tet mesh and solving on it work — the Gmsh MSH 4.1 reader (`io/msh.rs`) accepts Tet, Hex, Prism and Pyramid, and the mesh model is face-based, so a tet mesh is already handled as a general polyhedral mesh once read. What does not exist is the dual-mesh operation that merges the tetrahedra around each node into one polyhedron — what Fluent's polyhedral conversion and OpenFOAM's `polyDualMesh` do to cut cell counts and improve gradient reconstruction on tet meshes; no `polyDualMesh`, `dual_mesh` or `dualMesh` symbol exists in the tree. It is not a small addition: SPEC-LIT already assumes every face planar and every cell convex ("assumes every face planar"), and the faces of a dual mesh are in general neither, so the work starts at revisiting that assumption, and at deciding the boundary treatment of the dual — a boundary node's dual cell is open — before it is a converter.
 - **AMGX is off by default**, and with it off the selector still reports AMGX explicitly as "unavailable".
 - **It is not claimed that the DES family reproduces a published separated-flow statistic**, and Spalart-Allmaras's TMR flat-plate gate is not run (§57.12, §56.11).
 

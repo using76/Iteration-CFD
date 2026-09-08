@@ -103,7 +103,7 @@ ofgpu-probe
 
 ## 3. 5분: 첫 해석
 
-동봉된 경주차 샘플이 가장 빠른 길입니다. 형상 하나와 명령 세 줄입니다.
+동봉된 경주차 샘플이 가장 빠른 길입니다. 형상 하나와 명령 두 줄입니다.
 
 ```powershell
 cd cases
@@ -113,27 +113,26 @@ cd cases
 이 스크립트가 하는 일:
 
 ```powershell
-# 1. 단위 풍동(1 m 정육면체)에 차체를 컷셀로 새깁니다.  20-60분 (CPU)
+# 1. 단위 풍동(1 m 정육면체)에 차체를 컷셀로 새깁니다.  몇 분 (모든 코어 병렬)
 ofgpu-generate-mesh big racecar_case 128 -stl car=racecar.stl -cutcell
 
-# 2. 압력과 온도 필드를 넣습니다.                         즉시
-copy racecar.fields\p racecar_case\0\p
-copy racecar.fields\T racecar_case\0\T
-
-# 3. 운동량까지 풉니다.                                   1-2분 (GPU)
+# 2. 운동량까지 풉니다.                                   1-2분 (GPU)
 ofgpu-lowmach racecar_case -iters 3000 -check 250 -output foam
 ```
 
-1단계가 오래 걸리는 이유는 **형상 분류가 CPU에서 돌기 때문**입니다. 210만 개
-셀 각각을 STL 표면에 대해 안/밖으로 가르고, 표면에 걸친 셀을 잘라내는 작업입니다.
-3단계는 GPU에 상주하는 루프라 몇 분이면 끝납니다.
+1단계의 형상 분류 — 210만 개 셀 각각을 STL 표면에 대해 안/밖으로 가르고, 표면에
+걸친 셀을 잘라내는 작업 — 은 모든 코어에서 병렬로 돕니다. 32코어에서 측정한
+경주차 96³ 조각이 559초에서 48초로 줄었습니다(약 11.6배); 이 샘플 크기인
+128³은 수 분입니다. 2단계는 GPU에 상주하는 루프라 몇 분이면 끝납니다.
 
-2단계가 왜 필요한지는 [§6](#6-솔버-고르기--가장-많이-틀리는-곳)에서 설명합니다.
-요약하면 메쉬 생성기는 **난류 전용 드라이버**가 읽는 필드만 쓰고, 운동량
-드라이버가 필요로 하는 `p`와 `T`는 쓰지 않기 때문입니다.
+`p`와 `T`도 생성기가 `0/`에 직접 쓰므로 예전 레시피에 있던 복사 단계는
+사라졌습니다. 어느 드라이버가 무엇을 푸는지는
+[§6](#6-솔버-고르기--가장-많이-틀리는-곳) — 요약하면 난류 전용 드라이버는
+얼린 `U` 위에서 난류 두 방정식만 풉니다.
 
-끝나면 `racecar_case/0/`에 `U`, `p`, `T`, `k`, `omega`, `nut`, `rho`가 OpenFOAM
-ASCII로 들어 있습니다. Studio의 3D 뷰어로 열거나 ParaView로 바로 읽힙니다.
+끝나면 `racecar_case/0/`에 `U`, `p`, `T`, `k`, `epsilon`, `omega`, `nut`이
+OpenFOAM ASCII로 들어 있습니다. Studio의 3D 뷰어로 열거나 ParaView로 바로
+읽힙니다.
 
 자세한 것은 [`cases/racecar.md`](../cases/racecar.md).
 
@@ -202,7 +201,9 @@ ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
 생성되는 것은 바로 돌릴 수 있는 완전한 케이스입니다 — `constant/polyMesh`,
 `constant/physicalProperties`, `constant/momentumTransport`,
 `system/{controlDict,fvSchemes,fvSolution}`, 그리고 `0/`에 `U`, `k`, `epsilon`,
-`omega`, `nut`.
+`omega`, `nut` — 프리셋이 `channel`·`cavity`·`step`·`big`이거나 부력 쌍
+(`plume`/`room`)이면 여기에 `p`와 `T`까지 들어갑니다(블록·컷셀 양쪽 경로 모두).
+`damBreak`만 예외로, 2상 경로라 `0/`이 `alpha.water`와 `p_rgh`를 담습니다.
 
 ### STL을 넣기
 
@@ -309,12 +310,14 @@ ofgpu-generate-mesh big case 128 -stl car=racecar.stl -cutcell
 
 ### 운동량 드라이버에 필요한 것
 
-`ofgpu-lowmach`는 `U`와 `p`를 함께 풀고, 저마하 루프가 `T`를 요구합니다.
-메쉬 생성기는 그 둘을 쓰지 않으므로 직접 넣어야 합니다. 경주차 샘플은
-`cases/racecar.fields/`에 균일장 두 개를 동봉해 두었습니다 — 내용이라 할 것은
-경계조건뿐입니다(출구 `p = 0` 고정, 나머지 zeroGradient, 등온 293.15 K).
+`ofgpu-lowmach`는 `U`와 `p`를 함께 풀고, 저마하 루프가 `T`를 요구합니다. 메쉬
+생성기는 이 셋을 `0/`에 직접 쓰므로 — `channel`, `cavity`, `step`, `big`과
+부력 쌍 `plume`/`room`이 대상이고 컷셀 경로도 마찬가지 — 갓 생성된 케이스를
+그대로 받아 돌립니다. RANS 모델이 `k`와 `epsilon`/`omega`를 읽는 것도 마찬가지로
+생성기가 채워 둡니다.
 
-없이 돌리면 이렇게 거절합니다:
+없이 돌리면 — 직접 만든 케이스에 필드를 빠뜨렸거나, `0/`이 `alpha.water`와
+`p_rgh`뿐인 생성된 `damBreak`에 들이댄 경우 — 이렇게 거절합니다:
 
 ```
 error: cases/racecar_case\0 has no p field;
@@ -497,6 +500,12 @@ ofgpu-validate
   라이브러리 API로 명세되고 게이트되어 있으나 어느 드라이버도 케이스 파일에서
   읽지 않습니다.
 - **적응 세분화는 어떤 솔버에도 연결되어 있지 않습니다.**
+- **사면체 격자의 다면체 쌍대 변환은 없습니다.** 사면체 격자를 읽고 그 위에서
+  푸는 것은 됩니다(Gmsh MSH 4.1, 면 기반 모델이라 읽힌 사면체는 일반 다면체
+  메쉬로 취급). 없는 것은 절점 둘레의 사면체를 하나의 다면체로 합치는
+  `polyDualMesh`식 쌍대 연산이며, 모든 면이 평면이고 모든 셀이 볼록하다는
+  SPEC-LIT의 가정을 다시 검토하는 일과 경계 절점의 쌍대 셀이 열려 있다는
+  경계 처리의 결정에서 작업이 시작되어야 변환기가 됩니다.
 - **AMGX는 기본 비활성**이며, 비활성 상태에서도 선택기가 명시적으로
   "unavailable"이라고 보고합니다.
 - **DES 계열이 발표된 박리 유동 통계를 재현한다고 주장하지 않습니다.**
@@ -518,9 +527,12 @@ ofgpu-validate
 
 ### `has no p field` — 운동량 드라이버가 거절함
 
-메쉬 생성기는 난류 전용 드라이버가 읽는 필드만 씁니다. `0/p`와 (저마하면)
-`0/T`를 넣어야 합니다. 경주차 샘플의 `cases/racecar.fields/`가 그 예입니다.
-[§6](#6-솔버-고르기--가장-많이-틀리는-곳) 참고.
+생성된 케이스에서는 더 이상 만나지 않습니다 — 생성기가 `0/p`와 `0/T`를 직접
+쓰기 때문입니다(`channel`, `cavity`, `step`, `big`, `plume`, `room`). 만나는
+길은 따로 있습니다: 직접 만든 케이스에 필드를 넣지 않았거나, `0/`이
+`alpha.water`와 `p_rgh`뿐인 생성된 `damBreak`에 운동량 드라이버를 들이댄
+경우, 또는 필드 파일을 지우거나 옮긴 경우입니다. 빠진 필드를 `0/`에 넣으면
+됩니다. [§6](#6-솔버-고르기--가장-많이-틀리는-곳) 참고.
 
 ### 유선이 직선이고 컨투어가 한 색
 
@@ -550,8 +562,7 @@ ofgpu-validate
 
 `system/controlDict`의 `startTime`/`endTime`/`writeControl`이 정합니다. 정상해석
 드라이버는 최종 상태만 쓰며, 어느 시간 디렉터리에 쓸지는 이 설정을 따릅니다.
-초기장을 보존하려면 원본을 따로 두십시오(경주차 샘플의 `racecar.fields/`가
-그 이유로 존재합니다).
+초기장을 보존하려면 원본을 따로 두십시오.
 
 ### 인식되지 않는 설정으로 거절됨
 

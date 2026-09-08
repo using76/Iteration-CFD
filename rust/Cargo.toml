@@ -73,6 +73,10 @@ name = "ofgpu-generate-mesh"
 path = "src/bin/generate_mesh.rs"
 
 [[bin]]
+name = "ofgpu-convert-mesh"
+path = "src/bin/convert_mesh.rs"
+
+[[bin]]
 name = "ofgpu-k-epsilon"
 path = "src/bin/k_epsilon.rs"
 

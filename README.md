@@ -109,7 +109,7 @@ cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -c
 
 ```powershell
 cd cases
-.\racecar.cmd     # 격자 10-20분(CPU) + 솔브 약 40초(GPU)
+.\racecar.cmd     # 격자 몇 분(모든 코어 병렬) + 솔브 약 40초(GPU)
 ```
 
 자세한 것은 [`cases/racecar.md`](cases/racecar.md).
@@ -149,9 +149,10 @@ claude mcp add ofgpu -- node mcp\server.mjs
 - **Crank–Nicolson은 저완화 방정식과 함께 쓸 수 없습니다** — 묵시적으로 Euler로 대체하지 않고 사유를 오류로 보고합니다.
 - **복사는 면대면(surface-to-surface)만 있습니다.** §49/§50은 *투명* 매질을 가로지르는 회색 확산 교환을 풀며, 체적 안에서 흡수·방출·산란하는 것은 없습니다. `radiationModel` 선택기는 `viewFactor`(그리고 같은 모델의 고유 표기 `s2s`)만 **인식**하고 그 밖의 값은 **인식되지 않는 설정**으로, 인식되는 집합을 함께 제시하며 거부됩니다 — 조용한 대체는 없습니다(§13.4). `constant/radiationProperties`가 존재하는데 `radiationModel`을 이름하지 않는 경우도 같은 이유로 거부됩니다: 그 항목에는 기본값이 없으며, 추측하는 리더는 케이스가 묻지 않은 질문에 답하는 셈이기 때문입니다.
 - **면대면 복사·화학종 수송·라그랑주 스프레이는 케이스 형식이 없습니다.** 셋 다 라이브러리 API로 명세되고 게이트되어 있으나 어느 드라이버 바이너리도 케이스 파일에서 밀폐공간·화학종 집합·스프레이를 읽지 않습니다(§50.12, §13.4.2).
-- **`ofgpu-generate-mesh`가 쓰는 필드에는 `p`와 `T`가 없습니다.** 난류 전용 드라이버가 읽는 것만 쓰므로 — 두 생성 경로 모두 `U`, `k`, `epsilon`, `omega`, `nut`을 쓰고 블록 격자 경로는 `ofgpu-sa`용 `nuTilda`를 더 씁니다 — 운동량을 푸는 드라이버인 `ofgpu-lowmach`는 갓 생성된 케이스를 `has no p field`로 거절하고, 사용자가 그 두 파일을 직접 넣기 전까지는 시작하지 않습니다. 실제 예는 `cases/racecar.fields/`입니다 — `racecar.cmd`의 2단계가 그 두 파일을 복사하는 것은 바로 이 때문입니다.
+- **`ofgpu-generate-mesh`가 `p`와 `T`를 쓰지 않는 프리셋은 `damBreak` 하나입니다.** 나머지 — `channel`, `cavity`, `step`, `big`과 부력 쌍 `plume`/`room` — 은 블록·컷셀 두 생성 경로 모두 `0/`에 `p`와 `T`까지 쓰므로 운동량을 푸는 드라이버도 갓 생성된 케이스를 그대로 받아 돌립니다. `damBreak`는 2상 경로라 `0/`이 `alpha.water`와 `p_rgh`를 담고, 여기에 `ofgpu-lowmach`를 들이대면 여전히 `has no p field`로 거절합니다. 컷셀 경로가 `ofgpu-sa`용 `nuTilda`를 쓰지 않는 것도 그대로입니다 — 그 필드는 블록 격자 경로만 더 씁니다.
 - **파셀은 스플래시 자식 액적을 만들지 않고, 막(film) 수송이 없으며, 복사를 흡수하지 않습니다**(§78.11, §68.13).
 - **적응 세분화는 어떤 솔버에도 연결되어 있지 않습니다** — 면 플럭스를 옮기지 않고, 적응 후 압력 투영도 없습니다.
+- **사면체 격자의 다면체 쌍대 변환은 없습니다.** 사면체 격자를 읽고 그 위에서 푸는 것은 됩니다 — Gmsh MSH 4.1 리더(`io/msh.rs`)가 Tet·Hex·Prism·Pyramid를 받고 메쉬 모델이 면 기반이라 읽힌 사면체는 일반 다면체 메쉬로 이미 다뤄집니다. 없는 것은 절점마다 그 둘레의 사면체를 하나의 다면체로 합치는 쌍대 격자 연산으로, Fluent의 다면체 변환과 OpenFOAM의 `polyDualMesh`가 사면체 격자에서 셀 수를 줄이고 기울기 재구성을 개선하려는 그것입니다 — `polyDualMesh`·`dual_mesh`·`dualMesh` 어느 기호도 트리에 없습니다. 작게 추가할 수 없는 이유는 둘입니다: SPEC-LIT은 이미 모든 면이 평면이고 모든 셀이 볼록하다고 가정하는데("assumes every face planar") 쌍대 격자의 면은 일반적으로 둘 다 아니므로 그 가정을 다시 검토하는 일에서, 그리고 경계 절점의 쌍대 셀이 열려 있다는 경계 처리의 결정에서 작업을 시작해야 변환기가 됩니다.
 - **AMGX는 기본 비활성**이며, 비활성 상태에서도 선택기가 AMGX를 "unavailable"로 명시 보고합니다.
 - **DES 계열이 발표된 박리 유동 통계를 재현한다고 주장하지 않으며**, Spalart-Allmaras의 TMR 평판 게이트는 실행하지 않습니다(§57.12, §56.11).
 

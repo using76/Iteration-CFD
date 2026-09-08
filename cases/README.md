@@ -2,7 +2,10 @@
 
 `ofgpu-generate-mesh` writes a complete, ready-to-run case: `constant/polyMesh`,
 `constant/physicalProperties`, `constant/momentumTransport`, `system/{controlDict,
-fvSchemes,fvSolution}` and a `0/` directory with `U`, `k`, `epsilon`, `omega` and `nut`.
+fvSchemes,fvSolution}` and a `0/` directory with `U`, `k`, `epsilon`, `omega`, `nut` —
+and, for `channel`, `cavity`, `step`, `big` and the buoyant pair (`plume`, `room`),
+`p` and `T` too, on the block and the cut-cell path alike. `damBreak` is the one
+exception: the two-phase path puts `alpha.water` and `p_rgh` in `0/` instead.
 
 ```powershell
 cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [-stl [name=]path]... [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-permissive]
@@ -111,19 +114,23 @@ cargo run --release --bin ofgpu-k-omega   -- ..\cases\channelKW -iters 4000 -che
 
 ## `racecar` — 외부 공력 샘플
 
-`racecar.stl`(자체 생성 형상 1,040 삼각형)과 `racecar.cmd`(세 단계 스크립트)만
-들어 있습니다. 메쉬도 결과도 없습니다 — 합쳐 1 GB가 넘고, 그것을 만드는 것이
-이 프로그램이 하는 일입니다.
+`racecar.stl`(자체 생성 형상 1,040 삼각형)과 `racecar.cmd`만 들어 있습니다.
+메쉬도 결과도 없습니다 — 합쳐 1 GB가 넘고, 그것을 만드는 것이 이 프로그램이
+하는 일입니다.
 
 ```powershell
 cd cases
-.\racecar.cmd          # 메쉬 20-60분(CPU) + 솔브 1-2분(GPU) -> racecar_case
+.\racecar.cmd          # 메쉬 몇 분(모든 코어 병렬) + 솔브 1-2분(GPU) -> racecar_case
 ```
 
-스크립트는 세 단계입니다 — 메쉬를 만들고, `racecar.fields/`에서 `p`와 `T`를
-`0/`로 복사해 넣고, `ofgpu-lowmach`로 풉니다. `racecar.fields/`가 있는
-까닭은 메쉬 생성기가 난류 전용 드라이버가 읽는 필드만 쓰기 때문이고, 운동량을
-풀려면 풀 대상인 압력과 저마하 루프가 요구하는 온도가 더 필요합니다.
+레시피는 두 단계입니다 — 메쉬를 만들고, `ofgpu-lowmach`로 풉니다. `p`와 `T`는
+생성기가 `0/`에 직접 쓰므로(`channel`, `cavity`, `step`, `big`과 부력 쌍이 그
+대상) 예전의 복사 단계는 필요 없어졌고, `racecar.fields/`는 그 시절 원본이
+참고용으로 남아 있을 뿐입니다.
+
+메쉬 단계의 형상 분류(`classify`, `classify_cutcells`)는 모든 코어에서 병렬로
+돕니다 — 32코어에서 측정한 경주차 96³ 조각이 559초에서 48초로 줄었습니다(약
+11.6배). 이 샘플 크기인 128³은 수 분입니다.
 
 자세한 것은 [`racecar.md`](racecar.md) — 크기를 바꾸는 법, 컷셀이 닫힌
 다양체를 요구하는 이유, 뷰어에서 무엇을 보게 되는지까지.
