@@ -27,6 +27,7 @@ import {
   surfaceInfo,
   timeSteps,
   upAxisFromGravity,
+  upAxisFromGroundPatch,
   type FieldSource,
   type TimeSeries,
 } from './manifest.js'
@@ -163,13 +164,16 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     throw new Error(`${entry.rel}: no geometry found (no case.jsonc mesh, constant/polyMesh or VTU file)`)
   }
 
-  async function upAxis(entry: Entry): Promise<ViewerDataset['up']> {
+  async function upAxis(entry: Entry, surface: SurfaceGeometry): Promise<ViewerDataset['up']> {
     if (entry.caseInfo?.gravity) return upAxisFromGravity(entry.caseInfo.gravity)
     try {
       const text = await fs.readFile(path.join(entry.root.rootAbs, 'constant', 'g'), 'utf8')
       return upAxisFromGravity(parseGravityFile(text))
     } catch {
-      return 'z'
+      // No gravity to read. The mesh itself still knows: a case with a patch
+      // called bottomWall or floor is a tunnel, and which way that patch faces
+      // is which way is up.
+      return upAxisFromGroundPatch(surface) ?? 'z'
     }
   }
 
@@ -201,7 +205,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
         geometryFidelity: geometry.fidelity,
         units: { length: 'm' },
         bounds: geometry.grid ? { min: [...geometry.grid.bounds.min], max: [...geometry.grid.bounds.max] } : { min: [...surface.bounds.min], max: [...surface.bounds.max] },
-        up: await upAxis(entry),
+        up: await upAxis(entry, surface),
         cellCount: geometry.cellCount,
         grid: geometry.grid ? gridInfo(geometry.grid, geometry.lattice ?? null) : null,
         surface: surfaceInfo(surface),

@@ -2,7 +2,7 @@
 // every slice, streamline and glyph on exactly the meshes that most need them.
 import { describe, expect, it } from 'vitest'
 import { emptyBounds, extendBounds } from '../../formats/geometry.js'
-import { blockLatticeFromCellCenters } from '../manifest.js'
+import { blockLatticeFromCellCenters, upAxisFromGroundPatch } from '../manifest.js'
 
 /**
  * A uniform n^3 block over [0,1]^3 with a solid region removed and the cells
@@ -89,5 +89,41 @@ describe('blockLatticeFromCellCenters', () => {
     expect(r).not.toBeNull()
     expect(r!.grid.dims).toEqual([n, n, n])
     expect(r!.holes).toBe(24 * 24 * 24)
+  })
+})
+
+describe('upAxisFromGroundPatch', () => {
+  /** A patch of `n` triangles whose every vertex normal is `n0`. */
+  function patchSurface(name: string, normal: [number, number, number], tris = 4) {
+    const normals = new Float32Array(tris * 9)
+    const indices = new Uint32Array(tris * 3)
+    for (let t = 0; t < tris; t++) {
+      for (let k = 0; k < 3; k++) {
+        const v = 3 * t + k
+        indices[3 * t + k] = v
+        normals[3 * v] = normal[0]
+        normals[3 * v + 1] = normal[1]
+        normals[3 * v + 2] = normal[2]
+      }
+    }
+    return {
+      patches: [{ name, type: 'wall', triStart: 0, triCount: tris, color: [0, 0, 0] as [number, number, number] }],
+      normals,
+      indices,
+    }
+  }
+
+  it('reads the up axis off a floor that faces y', () => {
+    // What ofgpu-generate-mesh writes: a tunnel with bottomWall at y = 0.
+    expect(upAxisFromGroundPatch(patchSurface('bottomWall', [0, 1, 0]))).toBe('y')
+    expect(upAxisFromGroundPatch(patchSurface('floor', [0, -1, 0]))).toBe('y')
+    expect(upAxisFromGroundPatch(patchSurface('ground', [0, 0, 1]))).toBe('z')
+  })
+
+  it('says nothing when there is nothing to read', () => {
+    expect(upAxisFromGroundPatch(patchSurface('inlet', [1, 0, 0]))).toBeNull()
+    // A "bottomWall" that is not flat in any one axis is not a floor.
+    expect(upAxisFromGroundPatch(patchSurface('bottomWall', [0, 0.6, 0.8]))).toBeNull()
+    expect(upAxisFromGroundPatch({ patches: [], normals: new Float32Array(0), indices: new Uint32Array(0) })).toBeNull()
   })
 })

@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { BlobRef, FieldInfo, FieldTimeInfo, StructuredGridInfo, SurfaceInfo, TimeStepInfo, UpAxis } from '@cfd/shared'
+import type { BlobRef, FieldInfo, FieldTimeInfo, PatchInfo, StructuredGridInfo, SurfaceInfo, TimeStepInfo, UpAxis } from '@cfd/shared'
 import type { CartesianGrid } from '../formats/cartesian.js'
 import { emptyBounds, extendBounds, type Bounds, type SurfaceGeometry } from '../formats/geometry.js'
 import { readPvd } from '../formats/pvd.js'
@@ -317,6 +317,45 @@ export function blockLatticeFromCellCenters(centers: Float32Array, bounds: Bound
     emptyAxis: nx === 1 ? 'x' : ny === 1 ? 'y' : nz === 1 ? 'z' : null,
   }
   return { grid, index, holes }
+}
+
+/**
+ * Which way is up, read off the patch the case calls its floor.
+ *
+ * Without `constant/g` there is nothing to take gravity from, and the fallback
+ * is z -- which is right for the JSONC cases and wrong for every mesh the
+ * generator writes, because those are tunnels with `bottomWall` at y = 0. The
+ * cost of getting it wrong is not cosmetic: the camera's up vector goes with
+ * it, so a view down the spanwise axis becomes a view along the up axis, the
+ * orbit degenerates, and the symmetry plane comes out rolled.
+ *
+ * A floor is flat, so its triangles all point the same way; the axis its normal
+ * lies along is the up axis. Returns null when there is no such patch, or when
+ * its normal does not clearly favour one axis -- the caller keeps its default
+ * rather than acting on a guess.
+ */
+export function upAxisFromGroundPatch(surface: { patches: PatchInfo[]; normals: Float32Array; indices: Uint32Array }): UpAxis | null {
+  const ground = surface.patches.find((p) => /^(bottom(wall)?|floor|ground)$/i.test(p.name))
+  if (!ground || ground.triCount === 0) return null
+  // The average normal over the patch: a flat patch has one, a curved one has
+  // a short average, and the magnitude check below throws that case out.
+  const n = [0, 0, 0]
+  for (let t = ground.triStart; t < ground.triStart + ground.triCount; t++) {
+    for (let k = 0; k < 3; k++) {
+      const v = surface.indices[3 * t + k]
+      n[0] += surface.normals[3 * v]
+      n[1] += surface.normals[3 * v + 1]
+      n[2] += surface.normals[3 * v + 2]
+    }
+  }
+  const len = Math.hypot(n[0], n[1], n[2])
+  if (len < 1e-6) return null
+  const a = [Math.abs(n[0]) / len, Math.abs(n[1]) / len, Math.abs(n[2]) / len]
+  // 0.9 of a unit normal on one axis: a floor, not a wall that happens to be
+  // named like one.
+  if (a[1] > 0.9) return 'y'
+  if (a[2] > 0.9) return 'z'
+  return null
 }
 
 export function upAxisFromGravity(g: [number, number, number] | null): UpAxis {
