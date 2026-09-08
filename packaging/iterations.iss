@@ -80,11 +80,13 @@ Source: "{#SrcRoot}\cases\README.md"; DestDir: "{app}\cases"; Flags: ignoreversi
 
 ; --- the race-car sample: a geometry and a recipe, not a mesh -----------------
 ; The mesh and the results are a gigabyte and are built by racecar.cmd on the
-; user's own GPU; what ships is the 52 kB of STL they are built from.
-Source: "{#SrcRoot}\casesacecar.stl"; DestDir: "{app}\cases"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#SrcRoot}\casesacecar.md";  DestDir: "{app}\cases"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#SrcRoot}\casesacecar.cmd"; DestDir: "{app}\cases"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#SrcRoot}	oolsacecar_stl.py"; DestDir: "{app}	ools"; Flags: ignoreversion skipifsourcedoesntexist
+; user's own GPU; what ships is the 52 kB of STL they are built from, plus the
+; two uniform fields the momentum solver needs and the mesher does not write.
+Source: "{#SrcRoot}\cases\racecar.stl"; DestDir: "{app}\cases"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SrcRoot}\cases\racecar.md";  DestDir: "{app}\cases"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SrcRoot}\cases\racecar.cmd"; DestDir: "{app}\cases"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SrcRoot}\cases\racecar.fields\*"; DestDir: "{app}\cases\racecar.fields"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SrcRoot}\tools\racecar_stl.py"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; --- the spec every discretisation is written against -------------------------
 Source: "{#SrcRoot}\rust\SPEC-LIT.md";   DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist

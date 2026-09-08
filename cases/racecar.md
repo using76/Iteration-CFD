@@ -18,37 +18,66 @@ and a converged solution are built on your own GPU.
 racecar.cmd
 ```
 
-이 스크립트는 아래 두 단계를 순서대로 실행합니다.
+이 스크립트는 아래 세 단계를 순서대로 실행합니다.
 
-## 두 단계 / The two steps
+## 세 단계 / The three steps
 
 ```powershell
 # 1. 단위 풍동(1 m 정육면체)에 차체를 컷셀로 새깁니다.
 ofgpu-generate-mesh big racecar_case 128 -stl car=racecar.stl -cutcell
 
-# 2. k-omega 로 2,500회 풉니다. 결과는 racecar_case\1\ 에 OpenFOAM ASCII 로 쓰입니다.
-ofgpu-k-omega racecar_case -iters 2500 -check 250 -output foam
+# 2. 압력과 온도 필드를 넣습니다 (아래 설명 참고).
+copy racecar.fields\p racecar_case\0\p
+copy racecar.fields\T racecar_case\0\T
+
+# 3. 운동량까지 풉니다. 결과는 racecar_case\1\ 에 OpenFOAM ASCII 로 쓰입니다.
+ofgpu-lowmach racecar_case -iters 3000 -check 250 -output foam
 ```
 
-1단계는 형상 분류가 CPU에서 도는 구간이라 **10–20분** 걸립니다. 2단계는 GPU에
-상주하는 루프라 RTX 5070 Ti 기준 **약 40초** — 초당 1억 3천만 셀-반복입니다.
+1단계는 형상 분류가 CPU에서 도는 구간이라 **20–60분** 걸립니다. 3단계는 GPU에
+상주하는 루프이고, 압력 방정식까지 푸느라 **1–2분**입니다.
 
-Step 1 takes **10–20 minutes**: the inside/outside classification runs on the CPU.
-Step 2 is the GPU-resident loop and takes **about 40 seconds** on an RTX 5070 Ti —
-130 million cell-iterations a second.
+Step 1 takes **20-60 minutes**: the inside/outside classification runs on the CPU.
+Step 3 is the GPU-resident loop and takes **a minute or two** — it solves a pressure
+equation as well as momentum.
 
-`momentumTransport`의 `model`은 생성 직후 `kEpsilon`입니다. k-omega로 풀려면
-`kOmega`로 바꾸거나, `ofgpu-k-epsilon`을 대신 쓰십시오.
+### 왜 2단계가 필요한가 / Why step 2 exists
 
-The generated `momentumTransport` says `kEpsilon`. Change it to `kOmega` to run the
-k-omega driver, or run `ofgpu-k-epsilon` instead.
+메쉬 생성기는 **난류 전용 드라이버**가 읽는 것만 씁니다 — `U`, `k`, `epsilon`,
+`omega`, `nut`. `ofgpu-k-epsilon`과 `ofgpu-k-omega`는 이름 그대로 난류 두
+방정식만 풀고 **속도장은 건드리지 않습니다**(얼린 `U` 위에서 돕니다). 그러니
+그 둘로 이 케이스를 돌리면 유선은 직선이고 컨투어는 균일합니다 — 차체 주위
+유동이 아니라 초기장을 보고 있는 것입니다.
+
+`ofgpu-lowmach`는 `U`와 `p`를 함께 푸는 드라이버이므로 풀 대상인 압력과, 저마하
+루프가 요구하는 온도가 있어야 합니다. 그 둘이 `racecar.fields/`에 있습니다.
+둘 다 균일장이고, 내용이라 할 것은 경계조건뿐입니다 — 출구에서 `p = 0`으로
+압력을 고정하고 나머지는 zeroGradient, 온도는 293.15 K 등온입니다.
+
+The mesh generator writes what the **turbulence-only** drivers read: `U`, `k`,
+`epsilon`, `omega`, `nut`. `ofgpu-k-epsilon` and `ofgpu-k-omega` are exactly that
+— they solve two turbulence equations on a velocity field they never touch. Run
+this case with either and the streamlines come out straight and the contour flat,
+because you are looking at the initial field, not at flow around a car.
+
+`ofgpu-lowmach` solves `U` and `p` together, so it needs a pressure to solve for
+and, in the low-Mach loop, a temperature. Those two live in `racecar.fields/`.
+Both are uniform; the boundary conditions are the whole content — `p = 0` fixed at
+the outlet to reference the pressure, zero-gradient elsewhere, and an isothermal
+293.15 K.
+
+솔버는 돌면서 `0/p`와 `0/T`를 덮어씁니다. `racecar.fields/`가 원본입니다.
+
+The solver overwrites `0/p` and `0/T` as it runs; `racecar.fields/` keeps the
+originals.
 
 ## 무엇을 보게 되는가 / What you get to look at
 
 Studio의 3D 뷰어에서 `racecar_case`를 열면 컷셀 격자 속에 숨어 있던 블록이
 복원되어 절단면·유선·글리프가 모두 살아납니다. 대칭면(z 중앙) 속도 컨투어,
 차체를 감는 유선, 앞바퀴 뒤 횡단면의 속도 벡터가 이 케이스가 보여주려는
-세 가지입니다.
+세 가지입니다. 그 셋은 모두 `U`를 읽으므로, 3단계를 `ofgpu-lowmach`로
+돌렸을 때에만 의미가 있습니다.
 
 Open `racecar_case` in the Studio's 3D viewer and the block hiding inside the
 cut-cell mesh is recovered, so slices, streamlines and glyphs all work. The three

@@ -30,6 +30,10 @@ cases/*
 !cases/racecar.stl
 !cases/racecar.md
 !cases/racecar.cmd
+# The pressure and temperature the momentum solver needs and the mesher does not
+# write. Uniform fields: the boundary conditions are the whole content, so this
+# is 2 kB, not the 40 MB a solved p and T are.
+!cases/racecar.fields/
 # Retired case definitions - kept as dated records of measurements that were
 # taken before a later SPEC-LIT rule made the cases themselves unrunnable.
 # They are records, not cases; cases/retired/README.md says what replaced each.
