@@ -46,6 +46,17 @@
 //! DIFFERENT axis; naming the same axis twice is refused by
 //! `BlockSpec::set_cyclic_axis` itself.
 //!
+//! `-extent xlo xhi ylo yhi zlo zhi` (metres) and `-grading x|y|z=r`
+//! (repeatable, at most once per axis) replace a preset's own block extent
+//! and per-axis cell growth, on the plain, castellated (`-stl`) and cut-cell
+//! (`-stl -cutcell`) paths alike. `r` is the last cell divided by the first
+//! along that axis, so `r > 1` puts the smallest cell at the axis's low end
+//! (the ground when the axis is z). The six block patches keep the preset's
+//! names and types - rename or retype them in `constant/polyMesh/boundary`
+//! and `0/` afterwards. `plume`, `room` and `damBreak` refuse `-extent`:
+//! their windows (and, for damBreak, the water column) are placed from the
+//! preset's own extents, so an overridden box would leave them behind.
+//!
 //! `-wallModel <standard|spalding|rough|lowRe> [-Ks x [-Cs y]]` - SPEC-LIT
 //! §29.1 route (c): expands the named preset into the `k`/`epsilon`/`omega`/
 //! `nut` (and, for a case that solves `T`, the thermal wall function of
@@ -69,9 +80,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use ofgpu::blockgen::{
-    write_carved_case, write_carved_case_with_wall_model, write_case, write_case_cyclic,
-    write_case_cyclic_with_wall_model, write_case_with_wall_model, write_cutcell_case,
-    write_cutcell_case_with_wall_model, CaseKind,
+    write_carved_case_with_override, write_case_with_override, write_cutcell_case_with_override,
+    BlockOverride, CaseKind,
 };
 use ofgpu::io::case::{Roughness, WallTreatment};
 use ofgpu::io::contract;
@@ -88,6 +98,7 @@ fn usage() {
     eprintln!(
         "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak> <outputDir> \
          [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]]\n       \
+         [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]... \
          [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-cyclic x|y|z] \
          [-permissive]\n       \
          ofgpu-generate-mesh big <outputDir> [n] [-stl ...]   # n^3 cells\n\
@@ -108,6 +119,61 @@ fn parse_cyclic_axis(v: &str) -> Result<usize> {
             "-cyclic: \"{v}\" is not supported by ofgpu; available: x, y, z"
         ))),
     }
+}
+
+/// `-extent xlo xhi ylo yhi zlo zhi` - the six numbers following the flag, in
+/// metres, one pair per axis. Only the COUNT and the number-ness are checked
+/// here; whether the values can be honoured (hi > lo, a preset that accepts
+/// an extent at all) is [`BlockOverride::apply`]'s job, so the library
+/// refuses exactly what the command line would.
+fn parse_extent(args: &[String], i: &mut usize) -> Result<[ofgpu::Scalar; 6]> {
+    let names = ["xlo", "xhi", "ylo", "yhi", "zlo", "zhi"];
+    let mut v = [0.0 as ofgpu::Scalar; 6];
+    for (k, slot) in v.iter_mut().enumerate() {
+        *i += 1;
+        let Some(a) = args.get(*i) else {
+            usage();
+            return Err(Error::Config(format!(
+                "-extent needs six numbers xlo xhi ylo yhi zlo zhi (metres), got only {k}"
+            )));
+        };
+        *slot = a
+            .parse::<f64>()
+            .map_err(|_| Error::Config(format!("-extent {}: '{a}' is not a number", names[k])))?
+            as ofgpu::Scalar;
+    }
+    Ok(v)
+}
+
+/// `-grading x|y|z=r` - one axis and its one-sided expansion ratio (last
+/// cell / first cell, so r > 1 puts the smallest cell at the axis's low end).
+fn parse_grading(arg: &str) -> Result<(usize, ofgpu::Scalar)> {
+    let Some((axis, ratio)) = arg.split_once('=') else {
+        return Err(Error::Config(format!(
+            "-grading: '{arg}' needs 'axis=ratio', e.g. z=6"
+        )));
+    };
+    let axis = match axis {
+        "x" => 0usize,
+        "y" => 1,
+        "z" => 2,
+        a => {
+            return Err(Error::Config(format!(
+                "-grading: '{a}' is not an axis - x, y or z"
+            )));
+        }
+    };
+    let r = ratio
+        .parse::<f64>()
+        .map_err(|_| Error::Config(format!("-grading: '{ratio}' is not a number")))?
+        as ofgpu::Scalar;
+    if !(r > 0.0) {
+        return Err(Error::Config(format!(
+            "-grading {arg}: the ratio must be positive (it is last cell / first cell, \
+             1 is uniform)"
+        )));
+    }
+    Ok((axis, r))
 }
 
 /// One `-stl` argument: an optional `name=` prefix and the file path.
@@ -174,6 +240,14 @@ fn run(args: &[String]) -> Result<()> {
     // every other flag combination already produces. Repeatable so a plane
     // channel (two axes) or a fully periodic box (three) can be named.
     let mut cyclic: Vec<usize> = Vec::new();
+    // `-extent`/`-grading`: `None`/[`None`; 3] mean "flag never given", which
+    // keeps the preset exactly as `case_block_spec` built it. An override
+    // holding neither would also be a no-op, but the CLI hands the library
+    // whatever it parsed and lets `BlockOverride::apply` refuse or apply it -
+    // so the library refuses exactly what the CLI would.
+    let mut extent: Option<[ofgpu::Scalar; 6]> = None;
+    let mut grading: [Option<ofgpu::Scalar>; 3] = [None; 3];
+    let mut grading_seen = [false; 3];
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -245,6 +319,25 @@ fn run(args: &[String]) -> Result<()> {
                     Error::Config(format!("-thetaMin: '{v}' is not a number"))
                 })? as ofgpu::Scalar;
             }
+            "-extent" => {
+                extent = Some(parse_extent(args, &mut i)?);
+            }
+            "-grading" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config("-grading needs an axis=ratio argument".to_string()));
+                };
+                let (axis, ratio) = parse_grading(v)?;
+                if grading_seen[axis] {
+                    return Err(Error::Config(format!(
+                        "-grading: axis {} given twice - at most one ratio per axis",
+                        ["x", "y", "z"][axis]
+                    )));
+                }
+                grading_seen[axis] = true;
+                grading[axis] = Some(ratio);
+            }
             _ => positional.push(&args[i]),
         }
         i += 1;
@@ -304,17 +397,20 @@ fn run(args: &[String]) -> Result<()> {
         .transpose()?
         .flatten();
 
+    let over = BlockOverride { extent, grading };
+
     if stl_args.is_empty() {
-        return match (wall_model, cyclic.is_empty()) {
-            (None, true) => write_case(Path::new(dir), kind, nx, ny, nz),
-            (Some(wt), true) => {
-                write_case_with_wall_model(Path::new(dir), kind, nx, ny, nz, wt, roughness)
-            }
-            (None, false) => write_case_cyclic(Path::new(dir), kind, nx, ny, nz, &cyclic),
-            (Some(wt), false) => write_case_cyclic_with_wall_model(
-                Path::new(dir), kind, nx, ny, nz, &cyclic, wt, roughness,
-            ),
-        };
+        return write_case_with_override(
+            Path::new(dir),
+            kind,
+            nx,
+            ny,
+            nz,
+            Some(&over),
+            &cyclic,
+            wall_model,
+            roughness,
+        );
     }
 
     let surface = read_surfaces(&stl_args)?;
@@ -327,27 +423,37 @@ fn run(args: &[String]) -> Result<()> {
 
     if cutcell {
         // ---- the cut-cell path (SPEC-LIT §24) -----------------------------
-        let s = match wall_model {
-            None => write_cutcell_case(
-                Path::new(dir), kind, nx, ny, nz, &surface, supersample, theta_min,
-            )?,
-            Some(wt) => write_cutcell_case_with_wall_model(
-                Path::new(dir), kind, nx, ny, nz, &surface, supersample, theta_min, wt, roughness,
-            )?,
-        };
-        // `write_cutcell_case`/`_with_wall_model` already print their own
-        // [cutcell] summary.
+        let s = write_cutcell_case_with_override(
+            Path::new(dir),
+            kind,
+            nx,
+            ny,
+            nz,
+            &surface,
+            Some(&over),
+            supersample,
+            theta_min,
+            wall_model,
+            roughness,
+        )?;
+        // `write_cutcell_case_with_override` already prints its own [cutcell]
+        // summary, block extent included.
         let _ = s;
         return Ok(());
     }
 
     // ---- the carved path (SPEC-LIT §23) -------------------------------------
-    let s = match wall_model {
-        None => write_carved_case(Path::new(dir), kind, nx, ny, nz, &surface)?,
-        Some(wt) => {
-            write_carved_case_with_wall_model(Path::new(dir), kind, nx, ny, nz, &surface, wt, roughness)?
-        }
-    };
+    let s = write_carved_case_with_override(
+        Path::new(dir),
+        kind,
+        nx,
+        ny,
+        nz,
+        &surface,
+        Some(&over),
+        wall_model,
+        roughness,
+    )?;
 
     println!(
         "[carve] cells: {} block -> {} fluid / {} solid ({} settled by 3-axis vote, \
@@ -388,6 +494,54 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("\nerror: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn extent_reads_exactly_six_numbers() {
+        let a = args(&["prog", "-extent", "-1240", "400", "-800", "500", "3.5", "200", "leftover"]);
+        let mut i = 1usize;
+        let e = parse_extent(&a, &mut i).expect("parse");
+        assert_eq!(e, [-1240.0, 400.0, -800.0, 500.0, 3.5, 200.0]);
+        assert_eq!(i, 7, "the index must rest on the last number consumed");
+    }
+
+    #[test]
+    fn extent_refuses_fewer_than_six_numbers() {
+        let a = args(&["prog", "-extent", "-1240", "400", "-800", "500", "3.5"]);
+        let mut i = 1usize;
+        assert!(parse_extent(&a, &mut i).is_err(), "five numbers must be refused");
+    }
+
+    #[test]
+    fn extent_refuses_a_non_number() {
+        let a = args(&["prog", "-extent", "-1240", "400", "-800", "500", "3.5", "wide"]);
+        let mut i = 1usize;
+        let e = parse_extent(&a, &mut i).expect_err("a non-number must be refused");
+        assert!(e.to_string().contains("not a number"), "{e}");
+    }
+
+    #[test]
+    fn grading_parses_axis_and_ratio() {
+        for (s, axis, r) in [("x=2", 0usize, 2.0), ("y=1.5", 1, 1.5), ("z=6", 2, 6.0)] {
+            let (a, got) = parse_grading(s).expect("parse");
+            assert_eq!((a, got), (axis, r));
+        }
+    }
+
+    #[test]
+    fn grading_refuses_malformed_arguments() {
+        for s in ["w=2", "=2", "z", "z=", "z=abc", "z=0", "z=-3", "x=1=2"] {
+            assert!(parse_grading(s).is_err(), "'{s}' must be refused");
         }
     }
 }
