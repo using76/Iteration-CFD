@@ -12,7 +12,8 @@ one roof patch), and runs the tool four ways:
     1. --dry-run                 import + cut + ground scan, then stop
     2. --stop-after-checkpoint   import + cut + pools, checkpoint, then stop
     3. the full run              -> .msh, .vtk, _summary.json
-    4. --from-checkpoint         the same full run, from the checkpoint of 2
+    4. --from-checkpoint         the same full run, from the checkpoint of 2, with the post
+                                 stage in relative sliver mode (sliver_rel 0.01)
 
 and asserts, for every full run: exit 0; the patches top, west, east, south,
 north, wall_ground_land, wall_buildings, roof and pool_yard exist; tets > 0;
@@ -166,11 +167,20 @@ def main(argv=None):
         p = run(cfg_path, out_dir)
         assert p.returncode == 0, 'the full run exited %d' % p.returncode
         s = check_summary('full run', out_dir, work)
+        assert s['near_touching'] == [], \
+            'the full run recorded near-touching solid pairs: %s' % s['near_touching']
         check_conversion(os.path.join(out_dir, 'selftest.msh'), work)
 
+        # the checkpoint path reruns the post stage, so it carries the relative sliver
+        # thresholds; the other three paths keep the absolute ones
+        cfg['post']['sliver_rel'] = 0.01
+        cfg['post']['sliver_edge_rel'] = 0.25
+        with open(cfg_path, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=1)
         p = run(cfg_path, out_dir, ('--from-checkpoint',))
         assert p.returncode == 0, '--from-checkpoint exited %d' % p.returncode
         s2 = check_summary('--from-checkpoint', out_dir, work)
+        print('  [--] flat-tet notes (relative sliver mode): %s' % s2['flat_tets_notes'])
         # the brep round-trip perturbs coordinates by ~1e-7, which re-seeds the mesher, so the
         # counts only have to agree to within a few per cent, not exactly
         assert abs(s2['tetrahedra'] - s['tetrahedra']) <= 0.05 * s['tetrahedra'], \

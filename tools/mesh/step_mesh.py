@@ -45,6 +45,10 @@ import time
 
 import gmsh
 import numpy as np
+try:
+    from scipy.spatial import cKDTree      # only the near-touching scan of the cut stage needs it
+except ImportError:                        # the scan is a diagnostic: without scipy it is skipped
+    cKDTree = None
 
 # ---------------------------------------------------------------- constants
 # Numbers the reference script hard-codes and the config schema does not name:
@@ -87,7 +91,7 @@ DEFAULTS = {
     'name': 'site',
     'fluid': {'tag': 1, 'largest': False},
     'outer_tol': 0.05,              # tolerance of the top/west/east/south/north tests
-    'solids': {'sink_m': 2.0, 'fuse': False, 'exclude_tags': []},
+    'solids': {'sink_m': 2.0, 'fuse': False, 'exclude_tags': [], 'touch_warn_m': 0.05},
     'repairs': [],                  # [{'tag', 'method', 'cell_m', 'target_faces', 'lift_z', 'brep'}]
     'trim': {'below_z': 3.05},      # or null: no trim
     'sea_z': 3.05,
@@ -99,7 +103,8 @@ DEFAULTS = {
               'size_mult': 1.0, 'roof_boxes': [2.5, 5.0, 10.0]},
     'mesh': {'algo2d': 6, 'algo3d': 1, 'optimize_passes': 5, 'threads': 32},
     'post': {'flat_tets': True, 'flat_threshold': 1e-7, 'seam_merge_m': 0.02,
-             'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0},
+             'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0,
+             'sliver_rel': 0.0, 'sliver_edge_rel': 0.25},
     'classification': {'wall_prefix': 'wall_', 'big_roof_is_ground_m2': 2000.0},
 }
 REQUIRED = ('step', 'out_dir', 'domain_box')
@@ -238,6 +243,8 @@ def load_config(path):
     if not (isinstance(sol['exclude_tags'], list) and
             all(isinstance(t, int) and not isinstance(t, bool) for t in sol['exclude_tags'])):
         errors.append('config.solids.exclude_tags: expected a list of integer solid tags')
+    if not _is_num(sol['touch_warn_m']) or sol['touch_warn_m'] < 0:
+        errors.append('config.solids.touch_warn_m: expected a non-negative distance (0 disables)')
 
     rep_tags = set()
     for i, r in enumerate(cfg['repairs']):
@@ -352,6 +359,9 @@ def load_config(path):
     for k in ('seam_merge_m', 'sliver_edge_m', 'sliver_vol_m3', 'thin_push_m'):
         if not _is_num(p[k]) or p[k] < 0:
             errors.append('config.post.%s: expected a non-negative length/volume' % k)
+    for k in ('sliver_rel', 'sliver_edge_rel'):
+        if not _is_num(p[k]) or p[k] < 0:
+            errors.append('config.post.%s: expected a non-negative ratio' % k)
 
     c = cfg['classification']
     if not isinstance(c['wall_prefix'], str):
@@ -392,6 +402,7 @@ def import_stage(cfg, args, work):
             ck = json.load(f)
         for k in ('points', 'pools', 'solid_bboxes', 'ship_hulls', 'fluid_mass_m3', 'pockets'):
             SUMMARY[k] = ck[k]
+        SUMMARY['near_touching'] = ck.get('near_touching', [])   # checkpoints predating U46 lack it
         SUMMARY['solid_bboxes'] = {int(tg): bb for tg, bb in SUMMARY['solid_bboxes'].items()}
         if set(cfg['points']) != set(SUMMARY['points']):
             die("the config's points %s and the checkpoint's points %s differ; the ground "
@@ -682,6 +693,47 @@ def cut_stage(cfg, args, work):
     n_surf = len(gmsh.model.getBoundary([(3, fluid)], oriented=False))
     log('cut done: fluid tag %d, mass %.4e m^3, %d boundary surfaces, %d pockets dropped'
         % (fluid, masses[0][0], n_surf, len(masses) - 1))
+    # two solids whose vertices stand less than touch_warn_m apart leave a razor-thin fluid gap
+    # the mesher may treat as duplicate points, and whether the 3-D boundary recovery survives
+    # one depends on node numbering luck. Diagnostic only: record the pairs, move and fuse
+    # nothing. Pairs closer than 1 mm OCC/gmsh already merges and are harmless.
+    warn = cfg['solids']['touch_warn_m']
+    near = []
+    if warn > 0 and cKDTree is None:
+        log('near-touching solids: scan skipped (scipy is not installed)')
+    elif warn > 0:
+        vtags = [tg for d, tg in gmsh.model.getEntities(0)]
+        if len(vtags) > 1:
+            V = np.array([gmsh.model.getValue(0, tg, []) for tg in vtags])
+
+            def solids_at(p):
+                return {tg for tg, bb in solid_bbox.items()
+                        if bb[0] - 0.01 <= p[0] <= bb[3] + 0.01
+                        and bb[1] - 0.01 <= p[1] <= bb[4] + 0.01
+                        and bb[2] - 0.01 <= p[2] <= bb[5] + 0.01}
+
+            seen = {}
+            for i, j in cKDTree(V).query_pairs(warn):
+                d = float(np.linalg.norm(V[i] - V[j]))
+                if d <= 1e-3:
+                    continue
+                mid = 0.5 * (V[i] + V[j])
+                key = tuple(np.round(mid, 2))
+                if key not in seen:
+                    seen[key] = {'d': round(d, 4), 'xyz': [round(v, 2) for v in mid],
+                                 'solids': sorted(solids_at(V[i]) | solids_at(V[j]))}
+            near = sorted(seen.values(), key=lambda r: r['d'])
+    for rec in near[:30]:
+        log('near-touching solids: d %.4f m at (%.2f, %.2f, %.2f) solids %s'
+            % (rec['d'], rec['xyz'][0], rec['xyz'][1], rec['xyz'][2], rec['solids']))
+    if len(near) > 30:
+        log('... %d near-touching pair(s) more; the full list is in the summary'
+            % (len(near) - 30))
+    if near:
+        log('near-touching solid vertices: %d pairs - a 3-D boundary-recovery failure usually '
+            'sits at one of them; exclude one solid of the pair with solids.exclude_tags'
+            % len(near))
+    SUMMARY['near_touching'] = near
     gmsh.write(os.path.join(work, '%s_cut.brep' % cfg['name']))   # the pool-failure restore point
     SUMMARY['fluid'] = fluid
     SUMMARY['fluid_mass_m3'] = masses[0][0]
@@ -976,7 +1028,8 @@ def checkpoint_stage(cfg, args, work):
                        'ship_hulls': SUMMARY.get('ship_hulls', []),
                        'solid_bboxes': SUMMARY['solid_bboxes'],
                        'fluid_mass_m3': SUMMARY['fluid_mass_m3'],
-                       'pockets': SUMMARY['pockets']}, f, indent=1)
+                       'pockets': SUMMARY['pockets'],
+                       'near_touching': SUMMARY.get('near_touching', [])}, f, indent=1)
         log('checkpoint written: %s + .json (--from-checkpoint reruns from here)'
             % os.path.basename(ckpt_brep))
     else:
@@ -1230,7 +1283,7 @@ def faces_with_overlapping_triangles():
     return sorted(set(owner[np.tile(np.arange(len(N)), 3)[badedge]].tolist()))
 
 
-def mesh_stage(cfg):
+def mesh_stage(cfg, work):
     stage(9, 'mesh')
     t = time.time()
     m = cfg['mesh']
@@ -1310,6 +1363,11 @@ def mesh_stage(cfg):
             % (m['optimize_passes'], time.time() - t_opt, tet_count()))
         ntet = tet_count()
     if ntet == 0:
+        nt = SUMMARY.get('near_touching') or []
+        if nt:
+            log('near-touching solid vertices (1 mm..5 cm apart) recorded at the cut: %d - '
+                "see summary 'near_touching' - the boundary recovery usually fails at one "
+                'of them' % len(nt))
         surf = os.path.join(work, 'surface_only.msh')
         gmsh.option.setNumber('Mesh.MshFileVersion', 4.1)
         gmsh.option.setNumber('Mesh.Binary', 0)
@@ -1341,7 +1399,8 @@ def quality():
     return q
 
 
-def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_vol, thin_push):
+def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_vol, thin_push,
+                              sliver_rel, sliver_edge_rel):
     """Delete zero-volume tets whose four nodes lie in one planar boundary by re-triangulating
     the boundary underneath them; merge seam node pairs, collapse sliver edges, push thin tets,
     nudge an interior node for the few that touch no boundary triangle.
@@ -1520,9 +1579,21 @@ def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_v
         notes['seam node pairs merged'] = len(alias)
         notes['tets collapsed by the merge'] = int(collapsed.sum())
         notes['triangles collapsed by the merge'] = n_tri_dropped
-    # ---- sliver wedges: collapse edges shorter than sliver_edge inside thin tets
+    # ---- sliver wedges: collapse edges shorter than the limit inside thin tets. The absolute
+    # keys are for meshes whose smallest cells are metres; with sliver_rel > 0 the thresholds
+    # follow the locally refined cell size instead: a tet is thin when |V| < sliver_rel *
+    # e_mean^3 (a regular tet has |V| = 0.11785 e^3, so 0.01 selects tets flatter than about
+    # 8 % of regular) and an edge is collapsible below sliver_edge_rel * e_mean of that tet.
     n_collapsed_edges = n_collapse_rounds = n_reverted = 0
-    if sliver_edge > 0:
+    if sliver_edge > 0 or sliver_rel > 0:
+
+        def edge_mean():
+            Pt = xyz[nmap[T]]
+            em = np.stack([np.linalg.norm(Pt[:, a] - Pt[:, b], axis=1)
+                           for a in range(4) for b in range(a + 1, 4)], axis=1).mean(axis=1)
+            del Pt
+            return em
+
         tri_of_node = {}
         for sf in rows:
             for r_i, r in enumerate(rows[sf]):
@@ -1538,7 +1609,13 @@ def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_v
                 return a[~removed[a]]
 
             vol = volumes(np.arange(len(T)))
-            thin = np.where((~removed) & (np.abs(vol) < sliver_vol))[0]
+            if sliver_rel > 0:
+                e_mean = edge_mean()                          # per tet, recomputed per round
+                edge_lim = sliver_edge_rel * e_mean
+                thin = np.where((~removed) & (np.abs(vol) < sliver_rel * e_mean ** 3))[0]
+            else:
+                edge_lim = np.full(len(T), sliver_edge)
+                thin = np.where((~removed) & (np.abs(vol) < sliver_vol))[0]
             merged_now = 0
             touched = set()
             for i in thin:
@@ -1550,7 +1627,7 @@ def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_v
                 for u in range(4):
                     for v in range(u + 1, 4):
                         d = np.linalg.norm(pts[u] - pts[v])
-                        if d < sliver_edge and (best is None or d < best[0]):
+                        if d < edge_lim[i] and (best is None or d < best[0]):
                             best = (d, int(Q[u]), int(Q[v]))
                 if best is None:
                     continue
@@ -1607,8 +1684,12 @@ def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_v
         notes['sliver edges collapsed'] = n_collapsed_edges
         notes['collapse rounds'] = n_collapse_rounds
         notes['collapses reverted (would invert a tet)'] = n_reverted
-        notes['tets with V < %g m3 left' % sliver_vol] = \
-            int(((~removed) & (np.abs(vol) < sliver_vol)).sum())
+        if sliver_rel > 0:
+            notes['thin tets (|V| < %g e^3) left' % sliver_rel] = \
+                int(((~removed) & (np.abs(vol) < sliver_rel * edge_mean() ** 3)).sum())
+        else:
+            notes['tets with V < %g m3 left' % sliver_vol] = \
+                int(((~removed) & (np.abs(vol) < sliver_vol)).sum())
     # ---- thin tets with no short edge (a wedge between a hull facet and the sea, a roof and a
     # slab): push one node away from the tet's largest face by up to thin_push metres, guarded
     # by every tet around that node
@@ -1721,7 +1802,7 @@ def post_and_write_stage(cfg, out_dir, tag):
     if p['flat_tets']:
         n_removed, n_flat, n_rounds, skipped = remove_flat_boundary_tets(
             fluid, p['flat_threshold'], p['seam_merge_m'], p['sliver_edge_m'],
-            p['sliver_vol_m3'], p['thin_push_m'])
+            p['sliver_vol_m3'], p['thin_push_m'], p['sliver_rel'], p['sliver_edge_rel'])
         log('flat tets: %d found (SICN<0.01), %d tets removed by re-triangulating the boundary '
             'under them (%d rounds); %s' % (n_flat, n_removed, n_rounds, skipped))
         SUMMARY['flat_tets_found'] = n_flat
@@ -1806,7 +1887,7 @@ def main(argv=None):
         checkpoint_stage(cfg, args, work)
         trim_stage(cfg, work)
         groups_and_fields_stage(cfg)
-        mesh_stage(cfg)
+        mesh_stage(cfg, work)
         post_and_write_stage(cfg, out_dir, args.tag)
     finally:
         try:
