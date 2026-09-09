@@ -217,6 +217,13 @@ log says how many solids were replaced, how many corners were snapped, how many 
 a point) or skipped (degenerate outline); the summary carries `solids_hulled` and
 `hull_corners_snapped`.
 
+Wedges: the gap pass also finds every boundary edge whose fluid-side dihedral is under
+30 degrees (a basin slope meeting the water plane, a wall grazing a domain side): the log
+names the places and the smallest angle, the summary keeps them as `wedges`, and the
+triangles on both sides are refined - the cells along such an edge are thin however they
+are sized, so the geometry there has to change (fill the pit, pull the wall back, cut the
+domain short of it).
+
 The absolute sliver thresholds (`sliver_edge_m`, `sliver_vol_m3`) are for meshes whose
 smallest cells are metres; the relative ones (`sliver_rel` above 0, collapsing edges below
 `sliver_edge_rel` × the mean edge) follow the locally refined cell size. On a pool refined
