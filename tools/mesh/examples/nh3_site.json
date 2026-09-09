@@ -6,7 +6,7 @@
   "fluid": {"tag": 1},
   "domain_box": [-1250.0, -1250.0, -7.5, 1250.0, 1250.0, 200.0],
   "outer_tol": 0.05,
-  "solids": {"sink_m": 2.0, "fuse": false, "exclude_tags": []},
+  "solids": {"sink_m": 1.5, "fuse": false, "exclude_tags": []},
   "repairs": [
     {"tag": 33, "method": "resample", "cell_m": 1.5, "target_faces": 6000, "lift_z": 3.05}
   ],

@@ -194,3 +194,12 @@ opencfd/openfoam-default:2312 Docker image, used only as a tool): both files hol
 9,488 cells, nodes and face-cell topology and the same volume 238.396667 m^3; they differ only
 in the orientation convention (foamMeshToFluent writes the inverse of the manual's rule, with
 inward-pointing boundary normals, and types its patches 4 while naming them pressure-outlet).
+
+## A caveat on `solids.sink_m` and `trim.below_z`
+
+Keep the sunk building bases clear of the trim plane. The ammonia site's buildings stand at
+z = 5 and its sea plane is z = 3.05: `sink_m: 2.0` puts every base at exactly 3.0, five
+centimetres under the trim, and the boolean leaves a 5 cm strip of wall under the sea face
+(the run reports it as `faces reaching below: N`, 1,814 there); `sink_m: 1.5` keeps the bases at
+3.5 m, still 1.5 m below the lowest terrain a building floats over (4.7 m), and the count drops
+to zero. Sink enough to bury every floating base, not so much that a base lands on the trim.
