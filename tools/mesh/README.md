@@ -39,7 +39,7 @@ line to `<out_dir>/work/run.log`.
 | # | stage | what happens |
 |---|-------|--------------|
 | 1 | import | STEP in at `scale` (`Geometry.OCCScaling`, so `0.001` for mm STEP); the fluid solid found by tag or as the largest, its mass reported |
-| 2 | cut | per-solid repairs, the sink stretch, optional fuse, one boolean cut, sealed pockets dropped and listed |
+| 2 | cut | per-solid repairs, the sink stretch, optional fuse, one boolean cut, sealed pockets dropped and listed, near-touching solid pairs recorded (see `solids.touch_warn_m`) |
 | 3 | ground heights | per point, an `isInside` scan from z = −1 in 0.25 m steps |
 | 4 | classification | every boundary face into exactly one patch (see below) |
 | 5 | pool discs | one disc per point at its ground height, imprinted one at a time; a failure restores the post-cut checkpoint and the run continues without that pool |
@@ -96,7 +96,10 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
     "sink_m": 2.0,          // stretch every other solid this far below its base, about its
                             // roof (buildings must not float above the terrain)
     "fuse": false,          // fuse the solids before the cut (merges touching/overlapping ones)
-    "exclude_tags": []      // solids left out of the cut entirely (removed from the model)
+    "exclude_tags": [],     // solids left out of the cut entirely (removed from the model)
+    "touch_warn_m": 0.05    // model points 1 mm..this far apart (0 disables) are logged as
+                            // near-touching pairs and stored in the summary's "near_touching":
+                            // razor-thin fluid gaps the mesher may treat as duplicate points
   },
   "repairs": [                            // per solid, applied before the cut
     {"tag": 33, "method": "resample", "cell_m": 1.5, "target_faces": 6000,
@@ -134,11 +137,31 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
     "seam_merge_m": 0.02,    // node pairs closer than this in a flat tet are merged everywhere
     "sliver_edge_m": 0.6,    // edges shorter than this inside a tet under sliver_vol_m3 collapse
     "sliver_vol_m3": 0.2,
+    "sliver_rel": 0.0,       // >0 switches the sliver collapse to relative thresholds: a tet is
+                             // thin when |V| < sliver_rel × (mean edge)³ (a regular tet has
+                             // |V| = 0.11785 × mean edge³, so 0.01 selects tets flatter than
+                             // about 8 % of regular) and sliver_edge_m / sliver_vol_m3 go unused
+    "sliver_edge_rel": 0.25, // in that mode, an edge is collapsible below this × the tet's mean edge
     "thin_push_m": 0.0       // >0: push a node out of thin tets (gamma < 0.02) by up to this
   },
   "classification": {"wall_prefix": "wall_", "big_roof_is_ground_m2": 2000}
 }
 ```
+
+Near-touching solids: two solids whose vertices stand 1 mm..`solids.touch_warn_m` apart
+leave a razor-thin fluid gap that the mesher may treat as duplicate points, and a 3-D
+boundary-recovery failure usually sits at one of the pairs. The cut stage logs each pair
+(`near-touching solids: d 0.0198 m at (1058.99, 1163.57, 5.00) solids [11, 338]`, at most
+30 lines, sorted by distance) and ends with the count plus that hint; the full list lands in
+the summary's `near_touching`, and an empty 3-D mesh names it again before writing
+`work/surface_only.msh`. Diagnostic only — nothing is moved or fused; exclude one solid of
+the pair with `solids.exclude_tags` to remove one side.
+
+The absolute sliver thresholds (`sliver_edge_m`, `sliver_vol_m3`) are for meshes whose
+smallest cells are metres; the relative ones (`sliver_rel` above 0, collapsing edges below
+`sliver_edge_rel` × the mean edge) follow the locally refined cell size. On a pool refined
+to 0.35–0.55 m the absolute keys count every fine tet as thin and the collapse loop makes
+the quality worse; that is what the relative mode is for.
 
 A repair is the reference's route E: the solid's surface meshed at 3 m,
 pymeshlab-uniform-resampled on a `cell_m` grid, quadric-decimated (the
@@ -166,7 +189,10 @@ z = 0 floor), writes a config for it (one point, one roof patch) and runs the
 tool four ways — `--dry-run`, `--stop-after-checkpoint`, the full run, and
 `--from-checkpoint` — asserting each time: exit 0; the patches `top`, `west`,
 `east`, `south`, `north`, `wall_ground_land`, `wall_buildings`, `roof`,
-`pool_yard` exist; tets > 0; no negative volumes in the summary. When
+`pool_yard` exist; tets > 0; no negative volumes in the summary. The full run
+also asserts `near_touching == []` (the tiny STEP has no near-touching pair),
+and the `--from-checkpoint` path reruns the post stage with `sliver_rel: 0.01,
+sliver_edge_rel: 0.25` and prints the flat-tet notes. When
 `rust/target/release/ofgpu-convert-mesh.exe` is built, the mesh is also
 converted to a case's `polyMesh` and to a Fluent mesh. Seconds, no STEP input
 needed.
