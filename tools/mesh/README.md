@@ -105,8 +105,12 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "trim":  {"below_z": 3.05},             // or null: cut everything below this plane away
   "sea_z": 3.05,                          // flat faces at this height (± 0.06) -> wall_sea_surface
   "points": {"tank_shell": [-916.9, 349.8],   // refinement/pool points; ground found by isInside
-             "qcdc_inner": {"x": 18.5, "y": -7.5, "r": 10.5},              // its own radius
-             "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5}},  // an annulus
+             "qcdc_inner": {"x": 18.5, "y": -7.5, "r": 10.5, "h": 0.5},    // its own radius; h > 0
+             "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5, "h": 0.5}},
+                                          // raises the pool: the circle is pulled up h into a
+                                          // cylinder cut from the fluid, its top is the pool
+                                          // patch and its side the wall patch wall_pool_<name>;
+                                          // r_inner > 0 splits the top into a disc and a ring
   "pool_radius_m": 26.0,                  // the radius of every [x, y] point
   "roof_patches": {"nh3_source": 306},    // solid tag whose flat roof becomes its own patch,
                                           // with the 2.5/5/10 m refinement boxes around and
