@@ -66,10 +66,11 @@ ammonia-terminal site, with comments on every block. Every key of
 | `castellation.seed_point` | number[3] | `null` | The keep point `"seed"` needs; required then, ignored otherwise. |
 | `castellation.min_faces` | integer | `4` | A kept cell with fewer faces than this is dropped - a hole in the addressing, not a control volume. |
 | `snap.iterations` | integer | `30` | Snapping iterations, the `k` of eq. (92.5). |
-| `snap.tolerance` | number | `1e-3` | Points closer than this to the surface are considered on it (and the convergence test, in units of `base_size`). |
+| `snap.tolerance` | number | `1e-3` | The dead band and the convergence test of eq. (92.28), as a FRACTION of `domain.base_size`: a point within `tolerance * base_size` of the surface is on it, and the loop stops when no point moves further. |
 | `snap.smoothing_passes` | integer | `3` | Laplacian passes over the displacement field, eq. (92.6). |
 | `snap.smoothing` | number | `0.5` | The smoothing relaxation weight, in `[0, 1]`. |
 | `snap.undo_limit` | integer | `4` | Halvings of a gate-breaking displacement before it is zeroed and the point pinned - eq. (92.7)'s undo. |
+| `snap.max_area_ratio` | number | `4.0` | Eq. (92.32): a wall patch carrying more than this many times its own surface area is geometry the cells never resolved, and the run refuses rather than collapsing the cell that reached it. Must be >= 1. |
 | `layers.patches` | string[] | `[]` | The patches layers are added to; empty means none. |
 | `layers.n` | integer | `0` | Number of layers, eq. (92.9)'s `n`. Zero: no layers. |
 | `layers.first_thickness` | number | `0.05` | The first layer's thickness, metres. |

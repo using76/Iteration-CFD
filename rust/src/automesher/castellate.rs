@@ -894,7 +894,7 @@ fn face_centre(points: &[Vec3], ps: &[crate::Label]) -> Vec3 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::automesher::octree::patch_names;
     use crate::automesher::DomainSpec;
@@ -1065,7 +1065,7 @@ mod tests {
 
     /// The box `[lo, hi]` as 12 OUTWARD-wound triangles, all in patch 0 -
     /// `cube_soup` generalised off `[1, 3]^3`.
-    fn box_soup(lo: [f64; 3], hi: [f64; 3]) -> Vec<(u32, [Vec3; 3])> {
+    pub(crate) fn box_soup(lo: [f64; 3], hi: [f64; 3]) -> Vec<(u32, [Vec3; 3])> {
         let v: [[f64; 3]; 8] = [
             [lo[0], lo[1], lo[2]],
             [hi[0], lo[1], lo[2]],
@@ -1095,13 +1095,13 @@ mod tests {
     }
 
     /// §92.3's default thresholds.
-    fn thresholds() -> crate::automesher::quality::QualityThresholds {
+    pub(crate) fn thresholds() -> crate::automesher::quality::QualityThresholds {
         crate::automesher::quality::QualityThresholds::default()
     }
 
     /// A sphere of radius `r` at `c`: the octahedron subdivided twice - 128
     /// triangles, every vertex ON the sphere, wound outward.
-    fn sphere_soup(r: f64, c: [f64; 3]) -> Vec<(u32, [Vec3; 3])> {
+    pub(crate) fn sphere_soup(r: f64, c: [f64; 3]) -> Vec<(u32, [Vec3; 3])> {
         fn mid(
             a: usize,
             b: usize,

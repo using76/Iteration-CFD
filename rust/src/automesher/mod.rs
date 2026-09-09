@@ -24,6 +24,7 @@
 pub mod castellate;
 pub mod octree;
 pub mod quality;
+pub mod snap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -208,7 +209,10 @@ pub struct SnapSpec {
     /// Snapping iterations, the `k` of eq. (92.5).
     #[serde(default = "d_snap_iters")]
     pub iterations: usize,
-    /// Points closer than this to the surface are considered on it.
+    /// The dead band and the convergence test of SPEC-LIT §92.11 (92.28),
+    /// as a FRACTION of `domain.base_size`: a point within
+    /// `tolerance * base_size` of the surface is on it, and the loop stops
+    /// when no point moves further than that.
     #[serde(default = "d_snap_tol")]
     pub tolerance: f64,
     /// Laplacian smoothing passes over the displacement field, eq. (92.6).
@@ -221,6 +225,11 @@ pub struct SnapSpec {
     /// zero - eq. (92.7)'s undo, §92.3's repair step 1.
     #[serde(default = "d_undo_limit")]
     pub undo_limit: usize,
+    /// (92.32): a wall patch carrying more than this many times its own
+    /// surface area is geometry the cells never resolved, and snapping it
+    /// would collapse the one cell that reached it - refused instead.
+    #[serde(default = "d_max_area_ratio")]
+    pub max_area_ratio: f64,
 }
 
 fn d_snap_iters() -> usize {
@@ -243,6 +252,10 @@ fn d_undo_limit() -> usize {
     4
 }
 
+fn d_max_area_ratio() -> f64 {
+    4.0
+}
+
 impl Default for SnapSpec {
     fn default() -> Self {
         Self {
@@ -251,6 +264,7 @@ impl Default for SnapSpec {
             smoothing_passes: d_smoothing_passes(),
             smoothing: d_smoothing(),
             undo_limit: d_undo_limit(),
+            max_area_ratio: d_max_area_ratio(),
         }
     }
 }
@@ -456,6 +470,12 @@ impl AutomeshConfig {
                 self.refinement.max_level, 6
             )));
         }
+        if !(self.snap.max_area_ratio >= 1.0) {
+            return Err(Error::Mesh(format!(
+                "snap.max_area_ratio: must be >= 1, got {}",
+                self.snap.max_area_ratio
+            )));
+        }
         if !(self.snap.smoothing >= 0.0 && self.snap.smoothing <= 1.0) {
             return Err(Error::Mesh(format!(
                 "snap.smoothing: must lie in [0, 1], got {}",
@@ -577,6 +597,7 @@ mod config_tests {
         cfg.snap.smoothing_passes = 5;
         cfg.snap.smoothing = 0.25;
         cfg.snap.undo_limit = 2;
+        cfg.snap.max_area_ratio = 2.5;
         cfg.layers = LayerSpec {
             patches: vec!["ground".to_string()],
             n: 3,

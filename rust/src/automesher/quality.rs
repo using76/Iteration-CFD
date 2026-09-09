@@ -387,6 +387,23 @@ fn a_max_planar(faces: &[(Vec3, Scalar)]) -> Scalar {
 /// on a bad mesh - a bad mesh is what it reports - so the only `Err` is
 /// `build_host_mesh`'s, for a mesh too broken to load at all.
 pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport> {
+    measure_capped(raw, t, GATE_CELL_CAP)
+}
+
+/// [`measure`] with the subject cap as a parameter. The cap is a REPORTING
+/// cap - a refusal names subjects, it does not enumerate a mesh - and every
+/// count in the report is exact whatever it is set to. §92.11's snapping
+/// guard (92.31) needs the whole failing set rather than a prefix of it and
+/// passes `usize::MAX`; everything a human reads goes through [`measure`].
+///
+/// Written by the supervising session, not by the coding agent: the body is
+/// [`measure`]'s, unchanged except that the six `GATE_CELL_CAP` comparisons
+/// now read `cap`.
+pub fn measure_capped(
+    raw: &PolyMeshRaw,
+    t: &QualityThresholds,
+    cap: usize,
+) -> Result<QualityReport> {
     let n_faces = raw.faces.len();
     let n_if = raw.neighbour.len().min(n_faces);
     let n_bf = n_faces - n_if;
@@ -453,7 +470,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         }
         if !why.is_empty() {
             g7_n += 1;
-            if g7_subjects.len() < GATE_CELL_CAP {
+            if g7_subjects.len() < cap {
                 g7_subjects.push(BadSubject {
                     id: f,
                     centre: None,
@@ -530,7 +547,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         }
         if m.v[c] <= 0.0 {
             g1_n += 1;
-            if g1_cells.len() < GATE_CELL_CAP {
+            if g1_cells.len() < cap {
                 g1_cells.push(BadSubject {
                     id: c,
                     centre: Some(m.c[c]),
@@ -578,7 +595,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         }
         if e >= t.max_closure {
             g2_n += 1;
-            if g2_cells.len() < GATE_CELL_CAP {
+            if g2_cells.len() < cap {
                 g2_cells.push(BadSubject {
                     id: c,
                     centre: Some(m.c[c]),
@@ -655,7 +672,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         }
         if theta >= t.max_non_orth_deg {
             g4_n += 1;
-            if g4_subjects.len() < GATE_CELL_CAP {
+            if g4_subjects.len() < cap {
                 g4_subjects.push(BadSubject {
                     id: f, // the subject is the FACE, not its owner
                     centre: Some(m.cf[f]),
@@ -722,7 +739,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         }
         if tau < t.min_thickness_ratio {
             g5_n += 1;
-            if g5_cells.len() < GATE_CELL_CAP {
+            if g5_cells.len() < cap {
                 g5_cells.push(BadSubject {
                     id: c,
                     centre: Some(m.c[c]),
@@ -800,7 +817,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         }
         if cond >= t.max_cond {
             g6_n += 1;
-            if g6_cells.len() < GATE_CELL_CAP {
+            if g6_cells.len() < cap {
                 g6_cells.push(BadSubject {
                     id: c,
                     centre: Some(m.c[c]),

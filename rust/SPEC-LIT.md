@@ -25562,3 +25562,228 @@ would renumber every face list for nothing.
 | a tree with no solid at all | the walk is a no-op: no cell removed, no wall patch emitted, the same points array |
 
 ---
+
+### 92.11 Snapping: which points move, how far, and what puts them back
+
+The implementation-level companion to §92.2 stage 4, appended after §92.10 for
+the reason §92.10 was appended after §92.9 — every citation already pointing
+into §92.1–§92.10 keeps its number. §92.2 stage 4 gives the displacement
+(92.5), its smoothing (92.6) and the guarded step (92.7). This says which
+points those equations range over, what a neighbour is, what happens where the
+geometry meets the box, what the guard measures and on which cells, and the
+one thing stage 4 refuses to attempt at all.
+
+Nothing in this stage changes the topology. `points` is the only array that
+moves: the face lists, `owner`, `neighbour` and the patches leave stage 4 as
+they entered it, so §2's upper-triangular order and §92.10's monotone
+renumbering are still true afterwards by construction and not by repair.
+
+**The closest point.** `TriIndex::nearest_triangle` returns the triangle and
+the exact distance but not the point the distance was measured to, so this
+stage adds `TriIndex::closest_point`, the barycentric region test of Ericson,
+*Real-Time Collision Detection*, Morgan Kaufmann (2005) §5.1.5 — a textbook,
+read as a textbook — evaluated on the triangle the index already found. It is
+the same projection `nearest_triangle` already runs internally, returning the
+point instead of discarding it, so the two agree on the distance by
+construction and a test asserts it.
+
+**The four sets.** Write "wall face" for a boundary face whose patch name is
+one of the surface's own patch names — §92.10's (92.26) walls, and not the six
+box patches, which are the domain and not the geometry:
+
+```
+B         = { i : point i is carried by at least one wall face }
+W(i)      = { j != i : j shares an EDGE of a wall face with i }
+N(i)      = { j != i : j shares an EDGE of any face with i }
+star(i)   = { c : some face of cell c carries point i }             (92.27)
+```
+
+`W` is the graph (92.6) smooths on — the wall's own surface graph, so a
+displacement is averaged along the wall and not across the fluid — and `N` is
+the graph the interior extension below runs on.
+
+**The displacement, and the dead band.** For a point `i` at iterate `k`, with
+`q_i = closest_point(x_i)` and `eps = snap.tolerance * base_size`:
+
+```
+delta_i   = 0                    if |q_i - x_i| <= eps
+          = q_i - x_i            otherwise                          (92.28)
+```
+
+The dead band is not a nicety. A point that already lies exactly on a triangle
+comes back from the barycentric reconstruction displaced by a rounding error,
+so without (92.28) an axis-aligned box cut on the cell planes — §92.10's own
+test case, where every wall point is already on the geometry — would be
+returned perturbed in the last bits, and would keep being perturbed once per
+iteration for thirty iterations. With it, that mesh comes back bit for bit, and
+a test asserts bit equality rather than a tolerance.
+
+**Smoothing, and the extension into the interior.** (92.6) is a sweep over
+`B`; the interior needs one too, or the first fluid cell behind a wall point
+that moved half a cell absorbs the whole displacement and fails G1 or G5 on its
+own. Both sweeps are Jacobi, `w = snap.smoothing`, run `snap.smoothing_passes`
+times:
+
+```
+d_i^(0)   = delta_i                             i in B
+          = 0                                   i not in B
+
+d_i^(m+1) = (1 - w) delta_i + w mean_{j in W(i)} d_j^(m)      i in B
+          = w mean_{j in N(i)} d_j^(m)                        i not in B
+                                                                    (92.29)
+```
+
+The boundary line is (92.6) verbatim. The interior line is a decayed harmonic
+extension: a point one edge behind the wall takes `w` times what the wall took,
+two edges back `w^2`, and `snap.smoothing_passes` sweeps carry the motion that
+many layers deep and no further, so the reach is bounded by the config and not
+by the mesh. Smoothing the DISPLACEMENT rather than the POSITION is Freitag and
+Ollivier-Gooch's point, quoted in §92.2: a point already on the surface is not
+dragged off it by its neighbours.
+
+**The box wall.** Where the geometry meets the domain — the site's ground plane
+running out to the box sides — a point is carried by a wall face and by a box
+face at once. Moving it off the box plane makes the box patch non-planar and
+the case unreadable; pinning it leaves the staircase the snap exists to remove.
+So it is constrained, not pinned:
+
+```
+for each boundary face carrying i whose patch is a DOMAIN patch:
+    a = the axis of that face's unit normal
+    (d_i)_a <- 0                                                    (92.30)
+
+a domain face whose normal is not axis-aligned to 1e-6 pins i outright
+```
+
+A point on a box edge loses two components and one on a box corner all three,
+which falls out of applying (92.30) once per face without a special case.
+
+**The guarded step, and what the guard measures.** G3 (one cell region) and G7
+(addressing, duplicate faces) are topological: they cannot change under a
+motion of the points, so a mesh that fails either of them fails it on arrival
+and stage 4 refuses at once rather than halving a step that cannot help. The
+guard therefore measures G1, G2, G4, G5 and G6, and the cells it blames are the
+failing cell itself for G1, G2, G5 and G6 and both cells of the failing face
+for G4:
+
+```
+x_i^(k+1) = x_i^(k) + alpha_i d_i,   alpha_i = 1,  alpha_i = 0 if i is PINNED
+
+repeat at most snap.undo_limit times:
+    F = { c : c fails G1, G2, G4, G5 or G6 on the moved mesh }
+    if F is empty: accept the iterate
+    alpha_i <- alpha_i / 2  for every i with star(i) meeting F
+    re-apply from x^(k)
+
+a point still blamed after snap.undo_limit halvings takes alpha_i = 0, is
+PINNED for the rest of the run, and the iterate is ABANDONED whole:
+x^(k+1) = x^(k), which passes the gate because x^(k) did              (92.31)
+```
+
+§92.3 caps the subjects a refusal RECORDS at two hundred, because a refusal
+names subjects and does not enumerate a mesh. (92.31) needs the whole failing
+set and not a prefix of it: halving the two hundred it was told about while
+five thousand cells are inverted would loop until the iteration count ran out
+and then refuse anyway. So the gate's measurement takes the cap as a parameter
+and the guard passes no cap; only the message that reaches a human is capped.
+
+Abandoning the whole iterate rather than accepting a partly-moved mesh is
+what makes the loop finite: every pass either accepts a step or pins at least
+one point, and the points are finite, so no sequence of undos can run forever.
+
+The loop of (92.7) runs `snap.iterations` times, or stops early when
+`max_i |alpha_i d_i| <= eps`. Both the iterations run and the largest remaining
+step are reported, and so are the residual distances `|q_i - x_i|` over `B`
+after the last iterate — the maximum and the 99th percentile — and the counts
+of points that were scaled back at least once and of points that ended PINNED.
+
+**Hanging nodes ride their parents.** A castellated mesh's 2:1 transitions
+carry hanging nodes, and a hanging node is in the point list of only some of
+the faces that touch it. The four quarter-faces on the fine side of a
+transition carry it as a vertex; the coarse cell's own adjacent faces still
+run straight from corner to corner and do not mention it. Those two paths
+along the same edge coincide — so the coarse cell's boundary is closed, and
+(92.12)'s face vectors cancel — only while the hanging node lies on its
+parents' segment. On the lattice it does, exactly. The first displacement that
+does not keep the three collinear opens a crack of the order of the
+displacement itself, and G2 then fails not on one cell but on every cell at
+every transition, at any `alpha`, which no amount of halving can mend. So the
+trial positions are corrected before the gate measures them:
+
+```
+for every hanging node H with parents (A, B), longest parent edge first:
+    x_H  <-  (x_A + x_B) / 2                                        (92.33)
+```
+
+Longest first, because a hanging node's parent may itself be a hanging node of
+a coarser edge — (92.3)'s balance bounds the level jump across a FACE, not
+across an EDGE — and the coarser seat has to be set before the finer one reads
+it. (92.33) runs inside (92.31)'s loop, on the trial positions and after
+`alpha` has been applied, so a halved step and an abandoned one are re-seated
+alike.
+
+The parents are found by geometry and not by arithmetic on (92.20)'s indices:
+`coord` interpolates, so `(coord(qa) + coord(qb)) / 2` and `coord((qa + qb)/2)`
+are two different roundings of one number and a bit-exact midpoint map misses
+most of the hanging nodes there are. A point within a rounding tolerance of an
+edge's midpoint is that edge's hanging node, looked up in a spatial hash of the
+points; a linear search would cost a pass over every point for every edge,
+which is a unit test that passes and a site that never finishes.
+
+What (92.33) costs is recorded rather than hidden: a hanging node cannot be
+snapped on its own, so the wall through a 2:1 transition is only as near the
+geometry as the average of its two parents' displacements puts it. Refining
+the band so that the transition does not sit on the wall is the fix; letting
+the node move and losing closure at every transition is not.
+
+**The one refusal.** A geometry far finer than the cells that reached it cannot
+be snapped to: every wall point of the one cell that happened to contain it is
+pulled onto a shape smaller than the cell, the cell collapses, the guard undoes
+the whole displacement, and thirty iterations later the mesher hands back a
+staircase and calls it a sphere. That is the failure §92.1 exists to refuse, so
+it is refused before any point moves, by area — the one measurement that sees
+it without needing a length scale:
+
+```
+A_mesh(p) = sum of the areas of the wall faces on patch p
+A_surf(p) = Surface::patch_area[p], the area of p's triangles
+
+refuse if A_mesh(p) > snap.max_area_ratio * A_surf(p)               (92.32)
+```
+
+A castellated wall over-reports a smooth surface's area by at most `sqrt(3)`
+(the staircase of a plane of unit normal `n` has `(|nx|+|ny|+|nz|)` times the
+plane's area, maximised at `n = (1,1,1)/sqrt(3)`), so the default limit of 4 is
+loose by more than a factor of two on any geometry the cells resolve at all,
+and a patch whose walls are two hundred times its own area is not a resolved
+geometry by any reading. The test is one-sided on purpose: `A_mesh < A_surf` is
+a patch running partly outside the domain, which is legal, and is not refused.
+The refusal names the patch, both areas and their ratio.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| the topology | untouched — `faces`, `owner`, `neighbour` and `patches` leave stage 4 identical, and only `points` differs |
+| a mesh whose wall points already lie on the geometry | returned bit for bit, by (92.28)'s dead band, and the report says zero residual |
+| a point on a domain patch | stays on that patch's plane exactly, by (92.30); a point on a box edge keeps two coordinates and one on a box corner all three |
+| the mesh stage 4 returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message |
+| a mesh that arrives failing G3 or G7 | refused at once, not halved — no motion of the points can mend either |
+| a displacement that breaks a cell | halved up to `snap.undo_limit` times and then abandoned, never accepted with the cell broken (§92.2 stage 4) |
+| every pinned or scaled-back point | counted in the report; a run that pinned points is not a silent run |
+| a hanging node at a 2:1 transition | on its parents' midpoint at every trial position, by (92.33) — otherwise G2 fails at every transition, at any `alpha`, and stage 4 moves nothing on any refined mesh |
+| a patch whose wall area exceeds `snap.max_area_ratio` times its own | refused by (92.32), naming the patch and both areas, with no mesh written |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box with an axis-aligned cube STL on the cell planes | snapping is the identity, asserted bit for bit on the points array |
+| a box with a sphere STL, refined to level 2 at the surface | the 99th-percentile point-to-surface distance is under 2 % of the radius, the gate passes, and the fluid volume is within 1 % of the box less the STL's own enclosed volume |
+| a sphere STL much smaller than one cell | (92.32) refuses, naming the patch; nothing is written |
+| a gate no displacement can satisfy (a hundredth of a degree of non-orthogonality on an exactly orthogonal mesh) | the step is halved `undo_limit` times, the blamed points are pinned, the iterate is abandoned, and the mesh comes back bit for bit the one that went in, still through the gate |
+| a refined tree's mesh, snapped | G2 holds through every iterate — the test that fails without (92.33) fails on hundreds of cells at once, not on one |
+| a point already on a triangle | `closest_point` returns it to within rounding, and (92.28) then makes the displacement exactly zero |
+| `closest_point` against `nearest_triangle` | the same triangle and the same distance, to the last bits, at points inside a face, beyond an edge and beyond a vertex |
+
+---

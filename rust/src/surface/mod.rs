@@ -402,6 +402,25 @@ impl<'s> TriIndex<'s> {
         best
     }
 
+    /// The closest POINT on the surface to `p`, the triangle carrying it and
+    /// the distance - what `nearest_triangle` measures but does not return.
+    ///
+    /// The triangle is `nearest_triangle`'s and the point is
+    /// `closest_point_on_triangle` on that triangle, so the distance this
+    /// returns is the distance `nearest_triangle` returns, to the bit.
+    /// SPEC-LIT §92.11 (92.28): the target of the automesher's snap.
+    pub fn closest_point(&self, p: Vec3) -> (Vec3, usize, Scalar) {
+        let (t, d) = self.nearest_triangle(p);
+        let tri = self.surf.tris[t];
+        let q = closest_point_on_triangle(
+            p,
+            self.surf.points[tri[0] as usize],
+            self.surf.points[tri[1] as usize],
+            self.surf.points[tri[2] as usize],
+        );
+        (q, t, d)
+    }
+
     /// Visit every triangle in buckets at Chebyshev radius exactly `r`
     /// (buckets outside the grid skipped). Triangles spanning several
     /// buckets are visited more than once; the visitor must be idempotent.
@@ -732,6 +751,80 @@ mod tests {
         let (t, d) = idx.nearest_triangle(Vec3::new(0.5, 0.25, 0.95));
         assert_eq!(t, 2);
         assert!((d - 0.05).abs() < 1e-12, "d = {d}");
+    }
+
+    #[test]
+    fn closest_point_agrees_with_nearest_triangle() {
+        let s = cube();
+        let idx = match TriIndex::new(&s, 0.5) {
+            Ok(i) => i,
+            Err(e) => panic!("index build failed: {e}"),
+        };
+
+        // Inside, outside a face, outside an edge, outside a corner, and
+        // exactly on a triangle: whichever triangle wins, the point and the
+        // distance must be two views of the same measurement.
+        let queries = [
+            Vec3::new(0.5, 0.25, 0.5),
+            Vec3::new(2.0, 0.25, 0.75),
+            Vec3::new(2.0, 2.0, 0.5),
+            Vec3::new(2.0, 2.0, 2.0),
+            Vec3::new(1.0, 0.25, 0.75),
+        ];
+        for (i, p) in queries.iter().enumerate() {
+            let (t, d) = idx.nearest_triangle(*p);
+            let (q, t2, d2) = idx.closest_point(*p);
+            assert_eq!(t2, t, "query {i}: triangle");
+            assert_eq!(d2, d, "query {i}: distance must match to the bit");
+            let mag = (*p - q).mag();
+            assert!((mag - d).abs() < 1e-12, "query {i}: mag {mag} vs d {d}");
+        }
+    }
+
+    #[test]
+    fn closest_point_lands_in_the_right_voronoi_region() {
+        let s = cube();
+        let idx = match TriIndex::new(&s, 0.5) {
+            Ok(i) => i,
+            Err(e) => panic!("index build failed: {e}"),
+        };
+
+        // Face region of the x = 1 face.
+        let (q, _, _) = idx.closest_point(Vec3::new(2.0, 0.25, 0.75));
+        assert!((q.x - 1.0).abs() < 1e-12, "x = {}", q.x);
+        assert!((q.y - 0.25).abs() < 1e-12, "y = {}", q.y);
+        assert!((q.z - 0.75).abs() < 1e-12, "z = {}", q.z);
+
+        // Edge region of x = 1, y = 1.
+        let (q, _, _) = idx.closest_point(Vec3::new(2.0, 2.0, 0.5));
+        assert!((q.x - 1.0).abs() < 1e-12, "x = {}", q.x);
+        assert!((q.y - 1.0).abs() < 1e-12, "y = {}", q.y);
+        assert!((q.z - 0.5).abs() < 1e-12, "z = {}", q.z);
+
+        // Vertex region of the (1, 1, 1) corner.
+        let (q, _, _) = idx.closest_point(Vec3::new(2.0, 2.0, 2.0));
+        assert!((q.x - 1.0).abs() < 1e-12, "x = {}", q.x);
+        assert!((q.y - 1.0).abs() < 1e-12, "y = {}", q.y);
+        assert!((q.z - 1.0).abs() < 1e-12, "z = {}", q.z);
+    }
+
+    #[test]
+    fn a_point_on_the_surface_returns_itself() {
+        let s = cube();
+        let idx = match TriIndex::new(&s, 0.5) {
+            Ok(i) => i,
+            Err(e) => panic!("index build failed: {e}"),
+        };
+
+        // (1, 0.25, 0.75) lies on the x = 1 face: the foot is the point
+        // itself and the distance is zero. The barycentric reconstruction
+        // rounds, so the coordinates are checked to 1e-12, not bit-exactly.
+        let p = Vec3::new(1.0, 0.25, 0.75);
+        let (q, _, d) = idx.closest_point(p);
+        assert!((q.x - 1.0).abs() < 1e-12, "x = {}", q.x);
+        assert!((q.y - 0.25).abs() < 1e-12, "y = {}", q.y);
+        assert!((q.z - 0.75).abs() < 1e-12, "z = {}", q.z);
+        assert!(d <= 1e-12, "d = {d}");
     }
 
     #[test]
