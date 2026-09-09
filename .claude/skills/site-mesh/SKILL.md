@@ -22,12 +22,15 @@ description: STEP 부지 형상에서 수렴하는 사면체 격자를 만들 �
 |---|---|---|
 | `points.<name>` | `{x, y, r, r_inner, h: 0.5}` | 지면에 원을 그려 0.5 m 끌어올린 원기둥. 윗면이 inlet `pool_<name>`, 옆면 `wall_pool_<name>`; `r_inner`로 원판과 링 분리 |
 | `sizes` | `pool 0.35, box 2.5, min 0.3, near_struct 6, far_struct 20, max 60` | 700만 셀 이상; 풀 상자 ±40 m는 0.35 m |
-| `sizes.gap_ratio` | `2.5` | 틈 규칙 h ≤ g/2.5 (표면 삼각형이 마주보는 면까지의 거리 g). 해결 불가한 틈은 요약 `gap_unresolvable`에 나온다 |
+| `sizes.gap_ratio` | `2.5` | 틈 규칙 h ≤ g/2.5 (표면 삼각형이 마주보는 면까지의 거리 g). 해결 불가한 틈은 요약 `gap_unresolvable`에, 얕은 이면각(<30°) 쐐기는 `wedges`에 위치가 나온다 |
 | `solids.hull_beyond_m`, `hull_pad_m`, `fuse` | `150, 1.0, true` | 원천에서 150 m 밖 건물은 볼록껍질 프리즘(+1 m)으로 치환하고 합친 뒤 그룹별로 다시 볼록껍질 — 벽 사이 슬롯·2~5 cm 모서리 틈이 사라진다 |
 | `solids.hull_snap_m` | `0.05` | 프리즘 꼭짓점 스냅 |
 | `solids.touch_warn_m` | `0.05` | 절단 뒤 1 mm~5 cm 근접 정점 쌍을 기록(3-D 실패 지점 후보) |
 | `post` | `sliver_rel 0.02, sliver_edge_rel 0.3, thin_push_m 0.3, min_thickness 0.05, repair_rounds 3` | 셀 크기에 비례하는 sliver 병합·밀어내기, 두께 게이트 τ=3V/A_max^1.5 ≥ 0.05 반복 수정. 절대 임계(`sliver_edge_m 0.6`, `sliver_vol_m3 0.2`)는 미세 격자를 망가뜨리므로 0 |
-| `repairs` | 선박 `resample cell_m 3.0, target_faces 3000, lift_z 3.05` | 1.5 m/6000면이면 상부구조에 1 cm 틈이 남는다 |
+| `repairs` | `[]` | 선박(tag 33)도 원천에서 277 m라 다른 먼 건물처럼 볼록껍질 프리즘이 된다(재표본 1.5 m/6000면은 상부구조에 1 cm 틈, 3 m는 수밀 실패) |
+| `trim.shrink_xy_m` | `600` (도메인 ±650 m) | 원 STEP ±1,250 m의 먼 곳은 지형 계단·기저 경사·벽-출구 접합 쐐기가 무한히 나와 스테디 해가 매번 다른 곳에서 터졌다; ±650 m에서 50회 무발산 |
+| `solids.hull_box_snap_m`, `hull_box_inset_m` | `20, 5` | 경계 20 m 안의 프리즘 꼭짓점을 경계 안쪽 5 m로 당겨 어떤 벽도 출구에 닿지 않게; 띠 안에서 윤곽이 퇴화한 건물은 제거 |
+| `sizes.gap_min_m` | `1.0` | 틈 규칙 세분의 먼 곳 바닥 — 없으면 2,400만 셀로 폭발 |
 | `mesh` | `algo2d 6, algo3d 1, threads 32` | HXT(10)는 좌표를 찍어 주는 진단용으로만 |
 
 설정에 모르는 키(`_note` 등)를 넣으면 도구가 거부한다. 메모는 README.txt에.
@@ -76,7 +79,7 @@ python tools/mesh/diag/field_extremes.py <caseDir> 6 <pool_x> <pool_y>
 | 근접 정점 쌍이 많음 | `scan_near_vertices.py <pools.brep> 0.05` | 솔리드 쌍을 보고 뭉갠다 |
 | 솔버가 셀 하나를 거부(음수 부피·미폐합) | `cell_faces.py <caseDir> <cell>` | 어느 면이 잘못 붙었는지 → 후처리·변환기 문제 |
 | 국소 폭발 | `field_extremes.py` → `inspect_cells.py <caseDir> --near x y z 25` | 얇은 셀(3V/A_max)·비직교 면·슬롯 확인 → 형상 뭉개기 또는 `gap_ratio` |
-| Fluent가 음수 부피 경고 | `fluent_invert.py in.msh out.msh`(절점 순서 반전) | 방향 규약인지(전부 음수) 납작 셀인지(일부) 구분; 배정도(3ddp)로 읽기 |
+| Fluent가 음수 부피 경고 | 2026-09-10 이후 변환기 출력이면 납작 셀(일부만 음수) → 배정도(3ddp)로 읽기; 그 전 파일이면 방향 규약(전부 음수) → `fluent_invert.py in.msh out.msh` | Fluent가 원하는 규약은 매뉴얼 문구의 반대(foamMeshToFluent와 같음) |
 | 유체 솔리드가 필요(다른 격자기·CAD) | `export_fluid.py <trimmed.brep> <out> [--trim 3.05]` | STEP(mm) 1솔리드 |
 
 ## 6. 함정 (전부 겪은 것)

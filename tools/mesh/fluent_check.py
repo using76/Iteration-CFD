@@ -8,7 +8,7 @@
 # Checks: header counts vs bodies; every face's cells exist; each cell closes (sum of its outward
 # face vectors ~ 0) and has positive volume; total volume = box - tetrahedron; boundary faces have
 # exactly one cell and their right-hand normal points OUT of the domain; the c0/c1 orientation
-# convention actually used (ANSYS B.3.7: thumb toward c1) is measured, not assumed; every zone's
+# convention actually used is measured, not assumed (Fluent accepts thumb toward c0, the inverse of B.3.7's sentence); every zone's
 # faces lie on the plane or solid they are named after.
 import re, sys, json
 import numpy as np
