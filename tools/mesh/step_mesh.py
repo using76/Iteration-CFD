@@ -103,11 +103,12 @@ DEFAULTS = {
     'roof_patches': {},             # {'nh3_source': 306}
     'sizes': {'min': 1.5, 'max': 40.0, 'pool': 2.0, 'box': 4.0, 'growth_from': 2.5,
               'near_struct': 4.0, 'far_struct': 12.0, 'near_radius': 400.0,
-              'size_mult': 1.0, 'roof_boxes': [2.5, 5.0, 10.0]},
+              'size_mult': 1.0, 'roof_boxes': [2.5, 5.0, 10.0], 'gap_ratio': 0.0},
     'mesh': {'algo2d': 6, 'algo3d': 1, 'optimize_passes': 5, 'threads': 32},
     'post': {'flat_tets': True, 'flat_threshold': 1e-7, 'seam_merge_m': 0.02,
              'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0,
-             'sliver_rel': 0.0, 'sliver_edge_rel': 0.25},
+             'sliver_rel': 0.0, 'sliver_edge_rel': 0.25, 'min_thickness': 0.0,
+             'repair_rounds': 3},
     'classification': {'wall_prefix': 'wall_', 'big_roof_is_ground_m2': 2000.0},
 }
 REQUIRED = ('step', 'out_dir', 'domain_box')
@@ -345,6 +346,8 @@ def load_config(path):
               'near_radius', 'size_mult'):
         if not _is_num(s[k]) or s[k] <= 0:
             errors.append('config.sizes.%s: expected a positive number' % k)
+    if not _is_num(cfg['sizes']['gap_ratio']) or cfg['sizes']['gap_ratio'] < 0:
+        errors.append('config.sizes.gap_ratio: expected a ratio >= 0 (0 disables the gap pass)')
     if _is_num(s['min']) and _is_num(s['max']) and s['min'] >= s['max']:
         errors.append('config.sizes: min %s must be below max %s' % (s['min'], s['max']))
     if not (isinstance(s['roof_boxes'], list) and len(s['roof_boxes']) == 3
@@ -373,6 +376,10 @@ def load_config(path):
     for k in ('sliver_rel', 'sliver_edge_rel'):
         if not _is_num(p[k]) or p[k] < 0:
             errors.append('config.post.%s: expected a non-negative ratio' % k)
+    if not _is_num(p['min_thickness']) or p['min_thickness'] < 0:
+        errors.append('config.post.min_thickness: expected a thickness ratio >= 0 (0 = no gate)')
+    if not isinstance(p['repair_rounds'], int) or isinstance(p['repair_rounds'], bool) or p['repair_rounds'] < 0:
+        errors.append('config.post.repair_rounds: expected a round count >= 0')
 
     c = cfg['classification']
     if not isinstance(c['wall_prefix'], str):
@@ -1429,10 +1436,117 @@ def groups_and_fields_stage(cfg):
     fmin = F.add('Min')
     F.setNumbers(fmin, 'FieldsList', fields)
     F.setAsBackgroundMesh(fmin)
+    BASE_FIELDS[:] = fields
     log('size fields: %d (near-source structures %d surfaces, far %d)'
         % (len(fields), len(near), len(far)))
     SUMMARY['structures_near_points'] = len(near)
     tick('fields', t)
+
+
+BASE_FIELDS = []                   # the size fields of stage 8, for the gap pass of stage 9
+GAP_GRID = (10.0, 5.0)             # xy and z cell of the grid the gap refinements are boxed on
+GAP_MAX_BOXES = 2500               # the most box fields the gap pass adds (each is cheap to evaluate)
+
+
+def gap_size_pass(cfg, ratio):
+    """Local-feature-size rule h <= g / ratio. From the surface mesh just built, every triangle
+    looks along its inward normal for the nearest triangle facing it (normals opposed, within
+    the triangle's own footprint); that distance g is the width of the slot the triangle sits
+    on, and a cell wider than g / ratio cannot fit in it without turning into a sliver. Where
+    g / ratio is below the local size the triangle is marked for refinement; the marks are
+    binned on a coarse grid and become Box fields so the volume mesh sees them too. Slots
+    narrower than ratio x sizes.min cannot be resolved at all: those are reported, they are
+    what the geometry smear (solids.hull_*) is for. Returns (boxes added, unresolvable spots)."""
+    if cKDTree is None:
+        log('gap size pass skipped (scipy is not installed)')
+        return 0, 0
+    mult = cfg['sizes']['size_mult']
+    smin = cfg['sizes']['min'] * mult
+    fluid = SUMMARY['fluid']
+    ntags, coords, _ = gmsh.model.mesh.getNodes()
+    xyz = np.array(coords).reshape(-1, 3)
+    idx = np.zeros(int(ntags.max()) + 1, dtype=np.int64)
+    idx[ntags] = np.arange(len(ntags))
+    cents, norms, sizes = [], [], []
+    for d, s in gmsh.model.getBoundary([(3, fluid)], oriented=True, combined=True):
+        sign = 1.0 if s > 0 else -1.0
+        et, etags, en = gmsh.model.mesh.getElements(2, abs(s))
+        for typ, nodes in zip(et, en):
+            if typ != 2:
+                continue
+            tri = np.array(nodes, dtype=np.int64).reshape(-1, 3)
+            P = xyz[idx[tri]]
+            n = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+            a2 = np.linalg.norm(n, axis=1)
+            keep = a2 > 1e-14
+            n = -sign * n[keep] / a2[keep][:, None]          # into the fluid
+            cents.append(P[keep].mean(axis=1))
+            norms.append(n)
+            sizes.append(1.52 * np.sqrt(0.5 * a2[keep]))     # the equilateral edge of that area
+    if not cents:
+        return 0, 0
+    C = np.concatenate(cents); N = np.concatenate(norms); E = np.concatenate(sizes)
+    tree = cKDTree(C)
+    gap = np.full(len(C), np.inf)
+    radius = np.maximum(4.0 * E, 2.0)
+    for i, nb in enumerate(tree.query_ball_point(C, radius)):
+        if len(nb) < 2:
+            continue
+        nb = np.array(nb)
+        nb = nb[nb != i]
+        v = C[nb] - C[i]
+        t = v @ N[i]
+        facing = (N[nb] @ N[i] < -0.5) & (t > 0.01)
+        if not facing.any():
+            continue
+        lat = np.linalg.norm(v[facing] - np.outer(t[facing], N[i]), axis=1)
+        ok = lat < E[i] + E[nb][facing]
+        if ok.any():
+            gap[i] = t[facing][ok].min()
+    have = np.isfinite(gap)
+    h_gap = gap / ratio
+    refine = have & (h_gap < 0.9 * E)
+    unres = have & (h_gap < smin)
+    SUMMARY['gap_pass'] = {'triangles': int(len(C)), 'with a facing surface': int(have.sum()),
+                           'refined': int(refine.sum()), 'unresolvable': int(unres.sum())}
+    if unres.any():
+        pts = C[unres]; g = gap[unres]
+        order = np.argsort(g)
+        spots = [{'xyz': [round(float(v), 2) for v in pts[k]], 'gap_m': round(float(g[k]), 3)}
+                 for k in order[:200]]
+        SUMMARY['gap_unresolvable'] = spots
+        for sp in spots[:12]:
+            log('gap %.3f m at (%.1f, %.1f, %.1f) is narrower than %g x sizes.min: not meshable '
+                'without slivers - smear or remove that geometry' % (sp['gap_m'], *sp['xyz'], ratio))
+        if len(spots) > 12:
+            log('... %d unresolvable gap spot(s) more; the full list is in the summary' % (len(spots) - 12))
+    if not refine.any():
+        return 0, int(unres.sum())
+    # bin the refinements on the grid: one Box per occupied cell with the smallest size in it
+    gx, gz = GAP_GRID
+    keys = np.stack([np.floor(C[refine, 0] / gx), np.floor(C[refine, 1] / gx),
+                     np.floor(C[refine, 2] / gz)], axis=1).astype(np.int64)
+    hv = np.maximum(h_gap[refine], smin)
+    cells = {}
+    for k, h in zip(map(tuple, keys), hv):
+        cells[k] = min(cells.get(k, np.inf), h)
+    F = gmsh.model.mesh.field
+    boxes = []
+    for (kx, ky, kz), h in sorted(cells.items(), key=lambda kv: kv[1])[:GAP_MAX_BOXES]:
+        f = F.add('Box')
+        F.setNumber(f, 'XMin', kx * gx - 1.0); F.setNumber(f, 'XMax', (kx + 1) * gx + 1.0)
+        F.setNumber(f, 'YMin', ky * gx - 1.0); F.setNumber(f, 'YMax', (ky + 1) * gx + 1.0)
+        F.setNumber(f, 'ZMin', kz * gz - 1.0); F.setNumber(f, 'ZMax', (kz + 1) * gz + 1.0)
+        F.setNumber(f, 'VIn', float(h)); F.setNumber(f, 'VOut', cfg['sizes']['max'] * mult)
+        F.setNumber(f, 'Thickness', max(4.0 * float(h), gx))
+        boxes.append(f)
+    fmin = F.add('Min')
+    F.setNumbers(fmin, 'FieldsList', BASE_FIELDS + boxes)
+    F.setAsBackgroundMesh(fmin)
+    if len(cells) > GAP_MAX_BOXES:
+        log('gap pass: %d grid cells wanted refinement, only the %d finest became boxes'
+            % (len(cells), GAP_MAX_BOXES))
+    return len(boxes), int(unres.sum())
 
 
 # ------------------------------------------------------------ stage 9: mesh
@@ -1529,30 +1643,46 @@ def mesh_stage(cfg, work):
     gmsh.option.setNumber('Mesh.MaxNumThreads2D', m['threads'])
     gmsh.option.setNumber('Mesh.MaxNumThreads3D', m['threads'])
     gmsh.option.setNumber('Mesh.Optimize', 1)
-    gmsh.model.mesh.generate(1)
 
-    n_fam, n_rew = unify_coincident_curves()
-    SUMMARY['coincident_curve_families'] = n_fam
-    log('coincident curves: %d families, %d curves given their family\'s 1-D nodes'
-        % (n_fam, n_rew))
-    gmsh.model.mesh.generate(2)
-
-    for algo in (5, 1):                                    # Delaunay, then MeshAdapt
-        bad = faces_with_overlapping_triangles()
-        if not bad:
-            break
-        for sf in bad:
-            gmsh.model.mesh.setAlgorithm(2, sf, algo)
-        gmsh.model.mesh.clear([(2, sf) for sf in bad])
+    def surface_mesh():
+        gmsh.model.mesh.generate(1)
+        n_fam, n_rew = unify_coincident_curves()
+        SUMMARY['coincident_curve_families'] = n_fam
+        log('coincident curves: %d families, %d curves given their family\'s 1-D nodes'
+            % (n_fam, n_rew))
         gmsh.model.mesh.generate(2)
-        log('remeshed %d face(s) with overlapping triangles using 2-D algorithm %d: %s'
-            % (len(bad), algo, bad[:10]))
-    bad = faces_with_overlapping_triangles()
-    if bad:
-        log('WARNING: %d face(s) still carry overlapping triangles: %s' % (len(bad), bad[:10]))
-    SUMMARY['faces_remeshed'] = bad
-    ntri = sum(len(e) for e in gmsh.model.mesh.getElements(2)[1])
+        for algo in (5, 1):                                # Delaunay, then MeshAdapt
+            bad = faces_with_overlapping_triangles()
+            if not bad:
+                break
+            for sf in bad:
+                gmsh.model.mesh.setAlgorithm(2, sf, algo)
+            gmsh.model.mesh.clear([(2, sf) for sf in bad])
+            gmsh.model.mesh.generate(2)
+            log('remeshed %d face(s) with overlapping triangles using 2-D algorithm %d: %s'
+                % (len(bad), algo, bad[:10]))
+        bad = faces_with_overlapping_triangles()
+        if bad:
+            log('WARNING: %d face(s) still carry overlapping triangles: %s' % (len(bad), bad[:10]))
+        SUMMARY['faces_remeshed'] = bad
+        return sum(len(e) for e in gmsh.model.mesh.getElements(2)[1])
+
+    ntri = surface_mesh()
     log('2D: %d triangles' % ntri)
+    ratio = cfg['sizes']['gap_ratio']
+    if ratio > 0:
+        t_g = time.time()
+        n_boxes, n_unres = gap_size_pass(cfg, ratio)
+        gp = SUMMARY.get('gap_pass', {})
+        log('gap pass (h <= g/%g): %d triangles, %d face a surface, %d need refinement -> %d box '
+            'fields, %d unresolvable spots, %.0f s' % (ratio, gp.get('triangles', 0),
+                                                       gp.get('with a facing surface', 0),
+                                                       gp.get('refined', 0), n_boxes, n_unres,
+                                                       time.time() - t_g))
+        if n_boxes:
+            gmsh.model.mesh.clear()
+            ntri = surface_mesh()
+            log('2D after the gap pass: %d triangles' % ntri)
     if PRE3D_MERGE > 0:
         # merging + rebuilding the surface BEFORE the 3-D pass makes gmsh drop every tet
         # ('No elements in volume'); the seams are merged after it, in the flat-tet stage
@@ -1634,7 +1764,8 @@ def quality():
 
 
 def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_vol, thin_push,
-                              sliver_rel, sliver_edge_rel):
+                              sliver_rel, sliver_edge_rel, min_thickness=0.0, repair_rounds=3,
+                              keep_boxes=()):
     """Delete zero-volume tets whose four nodes lie in one planar boundary by re-triangulating
     the boundary underneath them; merge seam node pairs, collapse sliver edges, push thin tets,
     nudge an interior node for the few that touch no boundary triangle.
@@ -2005,10 +2136,130 @@ def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_v
             nudged += done
         notes['nudged a node off the plane'] = nudged
         notes['still flat'] = int(len(left) - nudged)
+
+    # ---- the thickness gate, checked and repaired in rounds. tau = 3V / A_max^1.5 is the
+    # cell's height over its largest face divided by that face's size (§92.3 of SPEC-LIT; a
+    # regular tet has tau = 1.24, the ammonia slivers 0.01). Every tet under min_thickness gets
+    # the node opposite its largest face pushed along the face normal by the height the gate
+    # asks for, guarded by every tet around that node; nodes inside a pool's refinement box
+    # are never moved. What is left after the rounds is listed with its position.
+    def thickness(P):
+        v = np.abs(np.einsum('ij,ij->i', P[:, 1] - P[:, 0],
+                             np.cross(P[:, 2] - P[:, 0], P[:, 3] - P[:, 0]))) / 6.0
+        areas = np.stack([0.5 * np.linalg.norm(np.cross(P[:, b] - P[:, a], P[:, c] - P[:, a]), axis=1)
+                          for a, b, c in ((1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2))], axis=1)
+        amax = areas.max(axis=1)
+        return v, areas, amax, 3.0 * v / np.maximum(amax, 1e-300) ** 1.5
+
+    def frozen(node):
+        x, y = xyz[nmap[node]][:2]
+        return any(abs(x - kx) < kh and abs(y - ky) < kh for kx, ky, kh in keep_boxes)
+
+    n_thick_pushed = n_thick_failed = 0
+    if min_thickness > 0:
+        for rnd in range(repair_rounds):
+            order_all = np.argsort(T.ravel())
+            starts_all = np.searchsorted(T.ravel()[order_all], np.arange(int(T.max()) + 2))
+            P = xyz[nmap[T]]
+            v, areas, amax, tau = thickness(P)
+            cand = np.where((~removed) & (tau < min_thickness))[0]
+            if not len(cand):
+                break
+            pushed_now = 0
+            for i in cand:
+                Q = T[i]
+                m4 = int(np.argmax(areas[i]))
+                o = [j for j in range(4) if j != m4]
+                pts = xyz[nmap[Q]]
+                nrm = np.cross(pts[o[1]] - pts[o[0]], pts[o[2]] - pts[o[0]])
+                nrm = nrm / (np.linalg.norm(nrm) + 1e-300)
+                node = int(Q[m4])
+                if frozen(node):
+                    n_thick_failed += 1
+                    continue
+                sign = np.sign(np.dot(pts[m4] - pts[o[0]], nrm)) or 1.0
+                h_now = 3.0 * v[i] / max(amax[i], 1e-300)
+                h_req = 1.1 * min_thickness * math.sqrt(amax[i])
+                step = h_req - h_now
+                if step <= 0:
+                    continue
+                a = order_all[starts_all[node]:starts_all[node + 1]] // 4
+                a = a[~removed[a]]
+                old = xyz[nmap[node]].copy()
+                done = False
+                for frac in (1.0, 0.5, 0.25):
+                    xyz[nmap[node]] = old + sign * frac * step * nrm
+                    v_a = volumes(a)
+                    if (v_a > 1e-9 * L[a] ** 3).all() and \
+                            abs(volumes(np.array([i]))[0]) > abs(v[i]):
+                        done = True
+                        break
+                    xyz[nmap[node]] = old
+                if done:
+                    pushed_now += 1
+                else:
+                    n_thick_failed += 1
+            n_thick_pushed += pushed_now
+            if pushed_now == 0:
+                break
+        vol = volumes(np.arange(len(T)))
+        flat = np.abs(vol) < flat_thr * L ** 3
+    P = xyz[nmap[T]]
+    v, areas, amax, tau = thickness(P)
+    live = ~removed
+    tl = tau[live]
+    notes['thickness: min'] = round(float(tl.min()), 5) if len(tl) else None
+    notes['thickness: cells below 0.05'] = int((tl < 0.05).sum())
+    notes['thickness: cells below 0.02'] = int((tl < 0.02).sum())
+    if min_thickness > 0:
+        notes['thickness: cells below the gate %g' % min_thickness] = int((tl < min_thickness).sum())
+        notes['thickness: nodes pushed'] = n_thick_pushed
+        notes['thickness: pushes refused'] = n_thick_failed
+    worst = np.where(live)[0][np.argsort(tl)[:10]] if len(tl) else []
+    SUMMARY['thickness_gate'] = [{'tet': int(i), 'tau': round(float(tau[i]), 5),
+                                  'xyz': [round(float(c), 2) for c in P[i].mean(axis=0)]}
+                                 for i in worst]
+    # reconcile the triangles with the surviving tets before the rebuild: a patch triangle
+    # must be the face of exactly one tet. The edits above leave triangles that belong to no
+    # tet any more (orphans), that two tets share (an interior face wearing a patch: the
+    # converter turns it into a boundary inside the fluid and seals a pocket) or that appear
+    # twice (a cell with five faces that does not close) - all three break the solver's mesh
+    keep = ~removed
+    Tk = T[keep]
+    base = int(max(int(T.max()), max((max(r) for sf in rows for r in rows[sf] if r), default=0))) + 1
+    Fk = np.concatenate([Tk[:, [0, 1, 2]], Tk[:, [0, 1, 3]], Tk[:, [0, 2, 3]], Tk[:, [1, 2, 3]]])
+    Fk.sort(axis=1)
+    fkey = Fk[:, 0].astype(np.int64) * base * base + Fk[:, 1].astype(np.int64) * base + Fk[:, 2]
+    del Fk
+    ukey, ucnt = np.unique(fkey, return_counts=True)
+    del fkey
+    bkey = ukey[ucnt == 1]
+    tri_ref = [(sf, i) for sf in rows for i, r in enumerate(rows[sf]) if r is not None]
+    if tri_ref:
+        Tri = np.array([sorted(rows[sf][i]) for sf, i in tri_ref], dtype=np.int64)
+        tkey = Tri[:, 0] * base * base + Tri[:, 1] * base + Tri[:, 2]
+        exists = np.isin(tkey, ukey)
+        on_boundary = np.isin(tkey, bkey)
+        first = np.zeros(len(tkey), dtype=bool)
+        first[np.unique(tkey, return_index=True)[1]] = True
+        good = on_boundary & first
+        n_orphan = int((~exists).sum())
+        n_interior = int((exists & ~on_boundary).sum())
+        n_dup = int((on_boundary & ~first).sum())
+        for (sf, i), ok_ in zip(tri_ref, good):
+            if not ok_:
+                rows[sf][i] = None
+        n_missing = int(len(bkey) - np.unique(tkey[good]).size)
+        notes['triangles dropped: orphan'] = n_orphan
+        notes['triangles dropped: interior'] = n_interior
+        notes['triangles dropped: duplicate'] = n_dup
+        notes['boundary faces without a triangle'] = n_missing
+        if n_orphan or n_interior or n_dup or n_missing:
+            log('triangles reconciled with the tets: dropped %d orphan, %d interior, %d duplicate; '
+                '%d boundary tet face(s) carry no patch triangle' % (n_orphan, n_interior, n_dup, n_missing))
     # rebuild the mesh: all nodes on the volume, the surviving tets, the edited triangles
     gmsh.model.mesh.clear()
     gmsh.model.mesh.addNodes(3, fluid, ntags, xyz.ravel())
-    keep = ~removed
     gmsh.model.mesh.addElementsByType(fluid, 4, Ttag[keep], T[keep].ravel())
     for sf in rows:
         ok = [i for i, r in enumerate(rows[sf]) if r is not None]
@@ -2034,9 +2285,18 @@ def post_and_write_stage(cfg, out_dir, tag):
 
     t = time.time()
     if p['flat_tets']:
+        keep_boxes = [(x, y, max(POINT_BOX[0], cfg['pool_specs'][name]['r'] + 15.0))
+                      for name, (x, y) in cfg['points'].items()]
         n_removed, n_flat, n_rounds, skipped = remove_flat_boundary_tets(
             fluid, p['flat_threshold'], p['seam_merge_m'], p['sliver_edge_m'],
-            p['sliver_vol_m3'], p['thin_push_m'], p['sliver_rel'], p['sliver_edge_rel'])
+            p['sliver_vol_m3'], p['thin_push_m'], p['sliver_rel'], p['sliver_edge_rel'],
+            p['min_thickness'], p['repair_rounds'], keep_boxes)
+        gate = SUMMARY.get('thickness_gate') or []
+        if gate:
+            log('thickness gate: worst tau %.4f at (%.1f, %.1f, %.1f); %s' % (
+                gate[0]['tau'], *gate[0]['xyz'],
+                ', '.join('%s %s' % (k.replace('thickness: ', ''), v) for k, v in skipped.items()
+                          if k.startswith('thickness:'))))
         log('flat tets: %d found (SICN<0.01), %d tets removed by re-triangulating the boundary '
             'under them (%d rounds); %s' % (n_flat, n_removed, n_rounds, skipped))
         SUMMARY['flat_tets_found'] = n_flat
