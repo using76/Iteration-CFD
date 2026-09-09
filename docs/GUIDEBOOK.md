@@ -188,6 +188,9 @@ OpenFOAM ASCII 형식을 읽고 씁니다. **이것은 상호운용을 위한 �
 
 ## 5. 격자 만들기
 
+> 큰 부지(수 km, 건물 수백 개)를 격자로 만들 때 무엇이 깨지고 어떤 레시피로 고쳤는지는
+> `docs/08-site-mesh-playbook.md`에, 절차와 명령은 `.claude/skills/site-mesh/SKILL.md`에 있다.
+
 ```powershell
 ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
                     [-cutcell [-s N] [-thetaMin X]]
