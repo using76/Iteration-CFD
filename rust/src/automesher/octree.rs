@@ -604,6 +604,37 @@ fn walk(tree: &Octree, cell_of: &HashMap<u64, usize>, sink: &mut impl FnMut(Face
     }
 }
 
+/// The finest-lattice coordinate of every point [`emit`] numbers, in
+/// `emit`'s own point order: `point_lattice(tree)[i]` is the lattice
+/// triple of `emit(tree, ..).points[i]`. §92.10's pinch test needs the
+/// integer coordinates the float points were made from.
+pub fn point_lattice(tree: &Octree) -> Vec<[u64; 3]> {
+    let leaves = tree.leaves();
+    let mut cell_of: HashMap<u64, usize> = HashMap::with_capacity(leaves.len());
+    for (id, key) in leaves.iter().enumerate() {
+        cell_of.insert(key.pack(), id);
+    }
+    lattice_points(tree, &cell_of)
+}
+
+/// [`emit`]'s pass 1, verbatim: the lattice triples of every face corner the
+/// walk emits, welded into a set by integer identity and sorted into §92.9's
+/// point order. One body, two callers - [`emit`] numbers its points from it
+/// and [`point_lattice`] exposes it - so the two orderings cannot drift.
+fn lattice_points(tree: &Octree, cell_of: &HashMap<u64, usize>) -> Vec<[u64; 3]> {
+    let mut used: HashSet<[u64; 3]> = HashSet::new();
+    walk(tree, cell_of, &mut |r| {
+        for c in quad(&r) {
+            used.insert(c);
+        }
+    });
+    // §92.9's point order: (q_k, q_j, q_i), z slowest, x fastest - the order
+    // stage 0's block numbers its own.
+    let mut pts: Vec<[u64; 3]> = used.drain().collect();
+    pts.sort_unstable_by_key(|q| (q[2], q[1], q[0]));
+    pts
+}
+
 /// Emit the leaf mesh of `tree` over `bg` as a REAL-POINT `PolyMeshRaw`
 /// (§92.9): unique points welded by integer lattice identity, one cell per
 /// leaf in [`Octree::leaves`] order, internal faces by (92.19), the six box
@@ -633,17 +664,9 @@ pub fn emit(
 
     // Pass 1: the point set. A point IS its lattice coordinate - welded by
     // integer identity, with no float comparison and no tolerance anywhere
-    // in this function.
-    let mut used: HashSet<[u64; 3]> = HashSet::new();
-    walk(tree, &cell_of, &mut |r| {
-        for c in quad(&r) {
-            used.insert(c);
-        }
-    });
-    // §92.9's point order: (q_k, q_j, q_i), z slowest, x fastest - the order
-    // stage 0's block numbers its own.
-    let mut pts: Vec<[u64; 3]> = used.drain().collect();
-    pts.sort_unstable_by_key(|q| (q[2], q[1], q[0]));
+    // in this function. `lattice_points` holds the body and `point_lattice`
+    // is its public face, so §92.10's pinch test reads the same numbering.
+    let pts = lattice_points(tree, &cell_of);
     let mut label_of: HashMap<[u64; 3], crate::Label> = HashMap::with_capacity(pts.len());
     for (n, q) in pts.iter().enumerate() {
         label_of.insert(*q, n as crate::Label);
@@ -824,6 +847,36 @@ mod tests {
         assert_eq!(k.ancestor(5).ancestor(3), k.ancestor(3), "ancestor composes");
         assert_eq!(k.ancestor(6), k, "ancestor at own level is self");
         assert_eq!(k.ancestor(9), k, "ancestor past own level is self, panic-free");
+    }
+
+    /// `point_lattice` is `emit`'s point numbering on the integers: same
+    /// length, and every entry lands exactly on the float point - on a tree
+    /// with a 2:1 jump, where coarse and fine points interleave.
+    #[test]
+    fn point_lattice_matches_emit_on_a_two_to_one_tree() {
+        use crate::automesher::DomainSpec;
+        let bg = Background::from_domain(&DomainSpec {
+            extent: [0.0, 4.0, 0.0, 4.0, 0.0, 4.0],
+            base_size: 1.0,
+            grading: [1.0; 3],
+        })
+        .expect("background");
+        let mut tree = Octree::uniform(bg.base_n(), 1).expect("uniform");
+        tree.refine(|k| if k.idx[0] % 2 == 0 { 1 } else { 0 });
+        tree.balance_2to1();
+        tree.check_partition().expect("partition");
+        assert_eq!(tree.max_level_jump(), 1, "a band-refined, balanced tree");
+        let mesh = emit(&tree, &bg, &patch_names()).expect("emit");
+        let lat = point_lattice(&tree);
+        assert_eq!(lat.len(), mesh.points.len());
+        let l = tree.max_level();
+        for (i, q) in lat.iter().enumerate() {
+            let p = mesh.points[i];
+            let xyz = [p.x, p.y, p.z];
+            for a in 0..3 {
+                assert_eq!(bg.coord(a, q[a], l), xyz[a], "axis {a} of point {i}");
+            }
+        }
     }
 
     /// A [3,3,3] tree, max_level 2: base cell [1,1,1] split to level 1, and

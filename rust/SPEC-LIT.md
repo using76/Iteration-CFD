@@ -25379,6 +25379,21 @@ cells are octree leaves of many sizes rather than the cells of one rectilinear
 block, and that the keep-set is decided by a walk (92.24) that `carve_block`
 has no equivalent of.
 
+Two rules about the boundary list are this section's own, and both were
+learned from a case this crate wrote and then refused to read. A patch NAME
+goes into `constant/polyMesh/boundary` as a bare token in front of `{`, so a
+name carrying whitespace, a control character or one of `{}();"'` makes a file
+`io::polymesh::read_poly_mesh` rejects at the line it is on — `solid pump
+house` in an STL is a legal solid and an illegal patch — and stage 3 refuses
+every such name, the six domain names and every surface name alike, before it
+walks a single leaf, so that the answer cannot depend on whether the geometry
+carrying the name happened to reach a cell; the six domain names must likewise
+be distinct, for the reason a surface name may not equal one of them. And because a patch with no faces is not emitted,
+stage 3 REPORTS the wall-face count of every surface patch, in the surface's
+own order and including the zeros: a source square finer than the leaves that
+reached it must be a row saying 0, not an absence discovered when the solver
+looks for its inlet.
+
 **The centre test.** A leaf is FLUID or SOLID by its centre alone. The surface
 cutting through a leaf does not split it and does not remove it — the cut is
 what stage 4 snaps to, and stage 3's business is only to decide which side of
@@ -25419,9 +25434,9 @@ rules run to a joint fixed point, and a third is then checked:
 ```
 repeat until K stops changing:                                      (92.24)
 
-  W1  pinch:  for every edge of the boundary of K carried by FOUR
-              boundary faces, remove one of the two cells that meet
-              along it, by (92.25)
+  W1  pinch:  for every segment of the boundary of K whose star of
+              kept cells is not face-connected, remove one cell of it
+              by (92.25)
 
   W2  region: K <- the component of (92.4) — `largest`, or the one
               containing `castellation.seed_point`
@@ -25436,30 +25451,53 @@ expose a new pinch — the cells that stood between two kept blobs may have left
 with a dropped component — and W1 can disconnect a blob that was held together
 only by the cell it removes.
 
-W1 is the "connected to the fluid only through an edge" repair. In a hex mesh
-an interior edge of a manifold boundary carries exactly two boundary faces; an
-edge carrying four is an hourglass — two kept cells touching along that edge
-with no cell between them, the diagonal pair left behind when both of the
-cells that share their two common faces are solid. It passes §92.3's gate
-untouched, because both cells are perfect hexahedra and the mesh is
+W1 is the "connected to the fluid only through an edge" repair, and it is
+stated on SEGMENTS rather than on edges. A segment of the boundary of K is an
+edge of one of its faces; its STAR is the set of kept cells whose closed box
+contains the segment's midpoint — the cells that meet along it, at whatever
+level. In a mesh stage 4 can snap, that star is face-connected: from any cell
+of it one can walk to any other through faces both of whose cells are in the
+star. A star in two or more components is an hourglass — two kept blobs
+touching along that segment and nothing else, the diagonal pair left behind
+when the cells between them are solid. It passes §92.3's gate untouched,
+because every cell of it is a perfect hexahedron and the mesh is
 face-connected through some other path, and it is stage 4 that it destroys:
 (92.5) pulls both flaps onto the same closest point and inverts both cells.
 Stage 3 is the last place the defect is cheap to see, so stage 3 removes it:
 
 ```
-of the two cells P, Q meeting at a four-face edge, remove
-    the one with fewer face neighbours in K;
+at a segment whose star splits into components C_1 .. C_r, r >= 2, let
+    m           = min |C_i|,
+    candidates  = the cells of every C_i with |C_i| = m;
+remove the candidate with the fewest face neighbours in K;
     on a tie, the one with the larger cell id                       (92.25)
 ```
 
-The neighbour count is a tie-break with a reason — the cell with less of the
-mesh holding it on is the one whose removal costs the least connectivity — and
-the id is a tie-break with no reason at all, present only so that the result
-does not depend on the order the edges are visited in. A point-pinch (two
-cells sharing one vertex and nothing else) is NOT repaired here, and is
-recorded as known: detecting it needs the vertex fans walked, stage 4 is where
-it hurts, and §92.8 gets a row for it rather than this section getting a rule
-it cannot yet test.
+The star is read off the SEGMENT and not off the edge because at a 2:1
+interface the two are not the same thing, and the earlier form of this rule —
+count the boundary faces carrying an edge and call four of them an hourglass —
+is FALSE there. A hanging node splits the edge: the coarse side's face carries
+the whole edge (A,B) while the fine side carries (A,M) and (M,B), the count
+reaches three, and the rule never fires, which is exactly the hourglass §92.9's
+own trees can hold. On a uniform tree the two statements agree cell for cell —
+four carries of one edge is a star of two cells in two components — so the
+correction generalises the rule rather than changing its answers. The midpoint
+identifies the star with no tolerance anywhere: a segment's endpoints are
+integers on the finest lattice (92.20), so TWICE its midpoint is an integer,
+and the star is what the eight lattice octants around that point name. The
+neighbour count is a tie-break with a reason — the cell with less of the mesh
+holding it on is the one whose removal costs the least connectivity — and the
+id is a tie-break with no reason at all, present only so that the result does
+not depend on the order the segments are visited in.
+
+A point-pinch (two cells sharing one vertex and nothing else) is still not
+sought: the probes are segment midpoints, so one is caught only where the
+vertex happens to be the hanging node of a probed segment, and §92.8 keeps its
+row for the general case. What is NOT left to chance any more is the residual.
+After the fixed point the segments are scanned once more; a castellation with
+a surviving pinch is a REFUSAL that names the count and, for up to three of
+them, the midpoint and the cells that meet there. The blind spot this rule had
+was invisible precisely because the walk reported zero and passed the gate.
 
 W3 cannot fire on the hex path — every leaf of §92.9 keeps its six faces or
 more whatever its neighbours do, because a removed neighbour leaves a WALL
