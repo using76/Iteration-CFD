@@ -303,9 +303,13 @@ python tools/mesh/fluent_check.py tester_ours.msh tester_tet_geometry.json
 
 On 2026-09-09 this tester was also run through OpenFOAM's foamMeshToFluent (the official
 opencfd/openfoam-default:2312 Docker image, used only as a tool): both files hold the same
-9,488 cells, nodes and face-cell topology and the same volume 238.396667 m^3; they differ only
-in the orientation convention (foamMeshToFluent writes the inverse of the manual's rule, with
-inward-pointing boundary normals, and types its patches 4 while naming them pressure-outlet).
+9,488 cells, nodes and face-cell topology and the same volume 238.396667 m^3; they differed
+only in the orientation convention. On 2026-09-10 Fluent 2022 R2's own mesh check settled
+it: the file written to the manual's sentence (thumb toward c1) came back with every face
+left-handed and every one of its 7.8 M cells negative, and the file with every face's node
+order reversed (thumb toward c0, boundary normals into the cell - foamMeshToFluent's
+convention) was accepted. The converter has written the reversed order since; `fluent_check.py`
+still measures and reports whichever convention a file follows.
 
 ## A caveat on `solids.sink_m` and `trim.below_z`
 

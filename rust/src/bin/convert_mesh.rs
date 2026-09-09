@@ -45,13 +45,18 @@
 //! in the layout of the **ANSYS FLUENT 12.0 User's Guide, Appendix B "Mesh
 //! File Format", B.3.7 "Faces"**
 //! (<https://www.afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm>),
-//! whose orientation rule is the one this writer follows: *"if you curl the
-//! fingers of your right hand in the order of the nodes, your thumb will
-//! point toward c1."* A polyMesh face's own node order already points from
-//! the owner to the neighbour (out of the domain on a boundary), so the
-//! nodes go out UNTOUCHED on every face - c0 = owner and c1 = neighbour on
-//! an internal face, c1 = 0 on a boundary one ("if a face has a cell only
-//! on one side, then either c0 or c1 is zero"). Every index hexadecimal and
+//! whose orientation rule reads: *"if you curl the fingers of your right
+//! hand in the order of the nodes, your thumb will point toward c1."* Read
+//! literally, that is the polyMesh order (a face's own node order points
+//! from the owner to the neighbour), and the first version of this writer
+//! wrote it untouched. Fluent 2022 R2's own mesh check on a 7.8 M-cell site
+//! mesh written that way reported every face left-handed and every cell
+//! with a negative volume; the file with every face's node order REVERSED
+//! - the convention OpenFOAM's foamMeshToFluent uses, thumb toward c0 and
+//! boundary normals pointing into the cell - is what Fluent accepts. So the
+//! nodes go out REVERSED on every face, c0 = owner and c1 = neighbour on an
+//! internal face, c1 = 0 on a boundary one ("if a face has a cell only on
+//! one side, then either c0 or c1 is zero"). Every index hexadecimal and
 //! 1-based, one face block per patch with zone ids from 10, and one cell
 //! element type per cell (2 = tetrahedron). Tetrahedral meshes are all it
 //! covers: a mesh with a non-triangular face, or a cell whose face count is
@@ -749,30 +754,32 @@ fn fluent_mesh_text(source: &str, raw: &PolyMeshRaw, zones: &[FluentZone]) -> Re
     }
     out.push_str("))\n");
 
-    // Internal faces: nodes in polyMesh order, c0 = owner and c1 =
-    // neighbour. That is B.3.7's rule - "if you curl the fingers of your
-    // right hand in the order of the nodes, your thumb will point toward
-    // c1" - satisfied WITHOUT touching the node order, because a polyMesh
-    // face's own order already points from the owner to the neighbour.
+    // Internal faces: nodes in REVERSED polyMesh order, c0 = owner and c1 =
+    // neighbour. A polyMesh face's own order points from the owner to the
+    // neighbour; Fluent's mesh check calls a face written that way
+    // left-handed (see the module comment), so the right-hand normal Fluent
+    // wants points from the neighbour to the owner - toward c0.
     out.push_str(&format!("(13 (2 1 {n_if:x} 2 0)(\n"));
     for f in 0..n_if {
         let fv = &raw.faces[f];
         out.push_str(&format!(
             "3 {:x} {:x} {:x} {:x} {:x}\n",
-            fv[0] + 1,
-            fv[1] + 1,
             fv[2] + 1,
+            fv[1] + 1,
+            fv[0] + 1,
             raw.owner[f] + 1,
             raw.neighbour[f] + 1
         ));
     }
     out.push_str("))\n");
 
-    // One face block per patch: the same polyMesh node order, c0 = owner,
+    // One face block per patch: the same REVERSED node order, c0 = owner,
     // c1 = 0 - "if a face has a cell only on one side, then either c0 or c1
-    // is zero", and the stored order points out of the domain. first/last
-    // are the patch's faces in the GLOBAL numbering - polyMesh order,
-    // internal faces first - so startFace and startFace+nFaces, 1-based.
+    // is zero"; the stored polyMesh order points out of the domain, so the
+    // reversed one points into the cell, as foamMeshToFluent writes it.
+    // first/last are the patch's faces in the GLOBAL numbering - polyMesh
+    // order, internal faces first - so startFace and startFace+nFaces,
+    // 1-based.
     for (pi, patch) in raw.patches.iter().enumerate() {
         out.push_str(&format!(
             "(13 ({:x} {:x} {:x} {:x} 0)(\n",
@@ -786,9 +793,9 @@ fn fluent_mesh_text(source: &str, raw: &PolyMeshRaw, zones: &[FluentZone]) -> Re
             let fv = &raw.faces[f];
             out.push_str(&format!(
                 "3 {:x} {:x} {:x} {:x} 0\n",
-                fv[0] + 1,
-                fv[1] + 1,
                 fv[2] + 1,
+                fv[1] + 1,
+                fv[0] + 1,
                 raw.owner[f] + 1
             ));
         }
@@ -1099,10 +1106,10 @@ mod tests {
 (13 (2 1 0 2 0)(
 ))
 (13 (a 1 4 3 0)(
-3 1 3 2 1 0
-3 1 2 4 1 0
-3 1 4 3 1 0
-3 2 3 4 1 0
+3 2 3 1 1 0
+3 4 2 1 1 0
+3 3 4 1 1 0
+3 4 3 2 1 0
 ))
 (12 (1 1 1 1 0)(
 2
@@ -1116,7 +1123,7 @@ mod tests {
         Ok(())
     }
 
-    /// The internal face carries the polyMesh node order with `c0 =
+    /// The internal face carries the REVERSED polyMesh node order with `c0 =
     /// owner+1, c1 = neighbour+1`; the two patch blocks carry the right
     /// first/last hex indices in the global face numbering; and
     /// `-fluentType top=wall` moves the `(13 ...)` type number and the
@@ -1143,17 +1150,17 @@ mod tests {
 0 0 -1
 ))
 (13 (2 1 1 2 0)(
-3 1 3 2 1 2
+3 2 3 1 1 2
 ))
 (13 (a 2 4 a 0)(
-3 1 2 4 1 0
-3 1 4 3 1 0
-3 2 3 4 1 0
+3 4 2 1 1 0
+3 3 4 1 1 0
+3 4 3 2 1 0
 ))
 (13 (b 5 7 5 0)(
-3 1 5 2 2 0
-3 1 3 5 2 0
-3 2 5 3 2 0
+3 2 5 1 2 0
+3 5 3 1 2 0
+3 3 5 2 2 0
 ))
 (12 (1 1 2 1 0)(
 2 2
@@ -1180,14 +1187,16 @@ mod tests {
         Ok(())
     }
 
-    /// The ANSYS rule checked against the GEOMETRY rather than against a
-    /// transcript: each face line the file carries, its nodes taken in the
-    /// written order right-handed, must produce a normal that points toward
-    /// the cell the line names c1 - into the neighbour on an internal face,
-    /// and away from c0 (out of the domain) on a boundary one whose c1 is
-    /// 0.
+    /// The orientation Fluent accepts, checked against the GEOMETRY rather
+    /// than against a transcript: each face line the file carries, its
+    /// nodes taken in the written order right-handed, must produce a normal
+    /// that points toward the cell the line names c0 - out of the neighbour
+    /// into the owner on an internal face, and into the owner (into the
+    /// domain) on a boundary one whose c1 is 0. This is the inverse of
+    /// B.3.7's sentence and what foamMeshToFluent writes; Fluent's own mesh
+    /// check called the literal reading left-handed on every face.
     #[test]
-    fn every_written_faces_right_hand_normal_points_toward_c1() -> Result<()> {
+    fn every_written_faces_right_hand_normal_points_toward_c0() -> Result<()> {
         let raw = two_tet();
         let text = fluent_mesh_text("geo.msh", &raw, &resolve_fluent_zones(&raw, &HashMap::new())?)?;
 
@@ -1244,20 +1253,20 @@ mod tests {
             let normal = (b - a).cross(c - a);
             let face_centre = (a + b + c) / 3.0;
             if c1 == 0 {
-                // Boundary: away from c0 - out of the domain.
+                // Boundary: toward c0 - into the owner, into the domain.
                 let outward = face_centre - centroid(c0 as usize - 1);
                 assert!(
-                    normal.dot(outward) > 0.0,
+                    normal.dot(outward) < 0.0,
                     "boundary face {n0} {n1} {n2} (c0 {c0}): its right-hand normal \
-                     points into the owner, not out of the domain"
+                     points out of the domain, not into the owner"
                 );
             } else {
-                // Internal: toward the cell the line names c1 - the neighbour.
+                // Internal: toward the cell the line names c0 - the owner.
                 let to_c1 = centroid(c1 as usize - 1) - centroid(c0 as usize - 1);
                 assert!(
-                    normal.dot(to_c1) > 0.0,
+                    normal.dot(to_c1) < 0.0,
                     "internal face {n0} {n1} {n2} (c0 {c0}, c1 {c1}): its right-hand \
-                     normal does not point toward c1"
+                     normal does not point toward c0"
                 );
             }
         }
