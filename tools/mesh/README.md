@@ -116,6 +116,9 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                             // point, so neighbours share their vertical edges exactly (two
                             // edges millimetres apart are "duplicate points" to the mesher and
                             // the 3-D boundary recovery fails on them); use with "fuse": true
+    "hull_box_snap_m": 0,   // > 0: hull-prism corners closer than this to a domain x/y side
+                            // (after the shrink) move 1 m outside it, so a wall meets the side
+                            // squarely instead of leaving a wedge of fluid narrowing to nothing
     "boolean_tol_m": 0       // > 0: fuse and cut run as fuzzy booleans (Geometry.ToleranceBoolean)
                             // merging entities closer than this; OCC's fuzzy fuse of hundreds of
                             // overlapping prisms failed at 5 cm on the site, snapping did not
@@ -154,6 +157,8 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                             // surface is meshed again. Slots narrower than gap_ratio x min cannot
                             // be meshed without slivers: they are listed in the summary's
                             // "gap_unresolvable" - smear or remove that geometry (solids.hull_*)
+    "gap_min_m": 0,         // the floor of the gap refinement far from the points (0 = min);
+                            // without it the gap rule tripled a site mesh to 24 M tets
     "size_mult": 1.0,      // >1 coarsens every size (a solver-robustness reproducer)
     "roof_boxes": [2.5, 5.0, 10.0]   // the three roof-patch box sizes (near, mid, downwind)
   },

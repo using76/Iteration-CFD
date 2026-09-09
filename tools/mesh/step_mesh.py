@@ -95,9 +95,9 @@ DEFAULTS = {
     'outer_tol': 0.05,              # tolerance of the top/west/east/south/north tests
     'solids': {'sink_m': 2.0, 'fuse': False, 'exclude_tags': [], 'touch_warn_m': 0.05,
                'hull_beyond_m': 0.0, 'hull_pad_m': 1.0, 'hull_snap_m': 0.05,
-               'boolean_tol_m': 0.0},
+               'boolean_tol_m': 0.0, 'hull_box_snap_m': 0.0},
     'repairs': [],                  # [{'tag', 'method', 'cell_m', 'target_faces', 'lift_z', 'brep'}]
-    'trim': {'below_z': 3.05},      # or null: no trim
+    'trim': {'below_z': 3.05, 'shrink_xy_m': 0.0},   # or null: no trim; shrink_xy_m cuts a margin off the x/y sides
     'sea_z': 3.05,
     'points': {},                   # {'tank_shell': [x, y], ...}
     'pool_radius_m': 26.0,
@@ -255,6 +255,8 @@ def load_config(path):
         errors.append('config.solids.hull_pad_m: expected a non-negative pad in metres')
     if not _is_num(sol['hull_snap_m']) or sol['hull_snap_m'] < 0:
         errors.append('config.solids.hull_snap_m: expected a snapping distance >= 0')
+    if not _is_num(sol['hull_box_snap_m']) or sol['hull_box_snap_m'] < 0:
+        errors.append('config.solids.hull_box_snap_m: expected a distance >= 0 (0 = off)')
     if not _is_num(sol['boolean_tol_m']) or sol['boolean_tol_m'] < 0:
         errors.append('config.solids.boolean_tol_m: expected a fuzzy boolean tolerance >= 0 (0 = exact)')
     if not _is_num(sol['touch_warn_m']) or sol['touch_warn_m'] < 0:
@@ -289,6 +291,10 @@ def load_config(path):
             errors.append('config.repairs[%d].lift_z: expected a number of metres (0 to keep it)' % i)
         if 'brep' in r and not isinstance(r['brep'], str):
             errors.append('config.repairs[%d].brep: expected a path string' % i)
+    if cfg['trim'] is not None and isinstance(cfg['trim'], dict):
+        shrink = cfg['trim'].get('shrink_xy_m', 0.0)
+        if not _is_num(shrink) or shrink < 0:
+            errors.append('config.trim.shrink_xy_m: expected a margin >= 0')
     if 'trim' in user and cfg['trim'] is not None:
         if not isinstance(cfg['trim'], dict) or not _is_num(cfg['trim'].get('below_z')):
             errors.append('config.trim: expected {"below_z": metres} or null')
@@ -667,6 +673,20 @@ def hull_corners(tag, bbox, pad):
             continue
         t = ((p1[0] - p0[0]) * d1[1] - (p1[1] - p0[1]) * d1[0]) / den
         corners.append((p0[0] + t * d0[0], p0[1] + t * d0[1]))
+    if BOX_SNAP is not None:
+        # a wall crossing a domain side at a shallow angle leaves a wedge of fluid between the
+        # wall and the side that narrows to nothing - slivers, and where the far field blew up
+        # first. Corners closer than the snap distance to a side move 1 m outside it, so the
+        # wall meets the side squarely and the wedge is inside the prism
+        xmin, ymin, xmax, ymax, dist = BOX_SNAP
+        snapped = []
+        for x, y in corners:
+            if x - xmin < dist: x = xmin - 1.0
+            elif xmax - x < dist: x = xmax + 1.0
+            if y - ymin < dist: y = ymin - 1.0
+            elif ymax - y < dist: y = ymax + 1.0
+            snapped.append((x, y))
+        corners = snapped
     corners = clean_polygon(corners, HULL_FLAT_M)
     if corners is None:
         return None
@@ -793,6 +813,13 @@ def cut_stage(cfg, args, work):
     # nearest point is replaced by the prism of its footprint's convex hull, pushed out by
     # hull_pad_m: neighbours then overlap and the cut merges them, slits and all.
     hull_beyond = cfg['solids']['hull_beyond_m']
+    global BOX_SNAP
+    BOX_SNAP = None
+    if hull_beyond > 0 and cfg['solids']['hull_box_snap_m'] > 0:
+        shrink = float((cfg['trim'] or {}).get('shrink_xy_m', 0.0)) if cfg['trim'] else 0.0
+        db = cfg['domain_box']
+        BOX_SNAP = (db[0] + shrink, db[1] + shrink, db[3] - shrink, db[4] - shrink,
+                    cfg['solids']['hull_box_snap_m'])
     if hull_beyond > 0:
         n_hull, n_kept, n_skipped = 0, 0, 0
         keep_tags = set(cfg['solids']['exclude_tags']) | {r['tag'] for r in cfg['repairs']}
@@ -1323,6 +1350,32 @@ def trim_stage(cfg, work):
         'area %.0f m^2; faces reaching below: %d'
         % (len(masses), len(surfs), n0, z_trim, len(sea),
            sum(gmsh.model.occ.getMass(2, s) for s in sea), len(below)))
+    shrink = float(trim.get('shrink_xy_m', 0.0) or 0.0)
+    if shrink > 0:
+        # the terrain's own edge is a staircase of centimetre steps and the buildings' hull
+        # prisms cross the sides at shallow angles: a margin cut off every x/y side keeps both
+        # away from the outer boundary, and the outer patches move inward with the box
+        db = cfg['domain_box']
+        keep = gmsh.model.occ.addBox(db[0] + shrink, db[1] + shrink, bb[2] - TRIM_MARGIN[1],
+                                     (db[3] - db[0]) - 2 * shrink, (db[4] - db[1]) - 2 * shrink,
+                                     (bb[5] - bb[2]) + 2 * TRIM_MARGIN[1])
+        m_before = gmsh.model.occ.getMass(3, fluid)
+        out, _ = gmsh.model.occ.intersect([(3, fluid)], [(3, keep)], removeObject=True, removeTool=True)
+        gmsh.model.occ.synchronize()
+        vols = gmsh.model.getEntities(3)
+        masses = sorted(((gmsh.model.occ.getMass(3, tg), tg) for d, tg in vols), reverse=True)
+        if not masses:
+            die('the x/y shrink of %g m left no volume' % shrink)
+        for m, tg in masses[1:]:
+            gmsh.model.occ.remove([(3, tg)], recursive=True)
+        gmsh.model.occ.synchronize()
+        fluid = gmsh.model.getEntities(3)[0][1]
+        cfg['domain_box'] = [db[0] + shrink, db[1] + shrink, db[2], db[3] - shrink, db[4] - shrink, db[5]]
+        log('x/y shrink: %g m cut off every side -> domain x[%g,%g] y[%g,%g], mass %.4e -> %.4e m^3, '
+            '%d boundary faces' % (shrink, cfg['domain_box'][0], cfg['domain_box'][3], cfg['domain_box'][1],
+                                   cfg['domain_box'][4], m_before, masses[0][0],
+                                   len(gmsh.model.getBoundary([(3, fluid)], oriented=False))))
+        SUMMARY['trim_shrink_xy_m'] = shrink
     gmsh.write(os.path.join(work, '%s_trimmed.brep' % cfg['name']))
     SUMMARY['fluid'] = fluid
     SUMMARY['trim_below_z'] = z_trim
@@ -1447,6 +1500,7 @@ def groups_and_fields_stage(cfg):
     tick('fields', t)
 
 
+BOX_SNAP = None                    # (xmin, ymin, xmax, ymax, dist): hull corners this near a side go outside it
 BASE_FIELDS = []                   # the size fields of stage 8, for the gap pass of stage 9
 GAP_GRID = (10.0, 5.0)             # xy and z cell of the grid the gap refinements are boxed on
 GAP_MAX_BOXES = 2500               # the most box fields the gap pass adds (each is cheap to evaluate)
