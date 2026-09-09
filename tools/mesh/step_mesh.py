@@ -104,7 +104,8 @@ DEFAULTS = {
     'roof_patches': {},             # {'nh3_source': 306}
     'sizes': {'min': 1.5, 'max': 40.0, 'pool': 2.0, 'box': 4.0, 'growth_from': 2.5,
               'near_struct': 4.0, 'far_struct': 12.0, 'near_radius': 400.0,
-              'size_mult': 1.0, 'roof_boxes': [2.5, 5.0, 10.0], 'gap_ratio': 0.0},
+              'size_mult': 1.0, 'roof_boxes': [2.5, 5.0, 10.0], 'gap_ratio': 0.0,
+              'gap_min_m': 0.0},
     'mesh': {'algo2d': 6, 'algo3d': 1, 'optimize_passes': 5, 'threads': 32},
     'post': {'flat_tets': True, 'flat_threshold': 1e-7, 'seam_merge_m': 0.02,
              'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0,
@@ -349,6 +350,8 @@ def load_config(path):
             errors.append('config.sizes.%s: expected a positive number' % k)
     if not _is_num(cfg['sizes']['gap_ratio']) or cfg['sizes']['gap_ratio'] < 0:
         errors.append('config.sizes.gap_ratio: expected a ratio >= 0 (0 disables the gap pass)')
+    if not _is_num(cfg['sizes']['gap_min_m']) or cfg['sizes']['gap_min_m'] < 0:
+        errors.append('config.sizes.gap_min_m: expected a size >= 0 (0 = sizes.min)')
     if _is_num(s['min']) and _is_num(s['max']) and s['min'] >= s['max']:
         errors.append('config.sizes: min %s must be below max %s' % (s['min'], s['max']))
     if not (isinstance(s['roof_boxes'], list) and len(s['roof_boxes']) == 3
@@ -1512,15 +1515,19 @@ def gap_size_pass(cfg, ratio):
             gap[i] = t[facing][ok].min()
     have = np.isfinite(gap)
     h_gap = gap / ratio
-    refine = have & (h_gap < 0.9 * E)
     unres = have & (h_gap < smin)
+    # the floor: far from the points a slot is not worth cells below gap_min_m (the gap pass
+    # tripled a site mesh to 24 M tets without it); the smear (solids.hull_*) is for those
+    gmin = max(cfg['sizes']['gap_min_m'] * mult, smin)
+    h_gap = np.maximum(h_gap, gmin)
+    refine = have & (h_gap < 0.9 * E)
     # a surface sliver - a triangle whose height is under SLIVER_TRI x its longest edge (three
     # outline nodes nearly in line, a corner half a metre off a 20 m wall) - carries a needle
     # tet whose boundary face the converter cannot wind consistently; refine it to three cells
     # across its height so the outline is resolved instead
     height = 2.0 * Ar / np.maximum(Lm, 1e-12)
     sliver = height < SLIVER_TRI * Lm
-    h_sl = np.where(sliver, np.maximum(3.0 * height, smin), np.inf)
+    h_sl = np.where(sliver, np.maximum(3.0 * height, gmin), np.inf)
     h_gap = np.minimum(h_gap, h_sl)
     refine = refine | sliver
     SUMMARY['gap_pass'] = {'triangles': int(len(C)), 'with a facing surface': int(have.sum()),

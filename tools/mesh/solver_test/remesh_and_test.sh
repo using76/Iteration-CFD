@@ -2,7 +2,7 @@
 # meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
-# Remesh one pool case from its checkpoint, convert it (polyMesh + Fluent), then run the
+# Remesh one pool case (from its checkpoint when one exists, else from the STEP), convert it
 # 6-iteration steady air test on it (fields written every 3 iterations).
 #   remesh_and_test.sh <case> [iters] [write_every]
 set -uo pipefail
@@ -14,8 +14,10 @@ SOLVER="/c/Users/sdd32/Documents/GitHub/Iteration-CFD/rust/target/release/ofgpu-
 ZONES="-fluentType $N=velocity-inlet"
 [ "$N" = "pool_source_QCDC_outer_to_R22p1" ] && ZONES="-fluentType pool_source_QCDC_inner_R10p5=velocity-inlet -fluentType $N=velocity-inlet"
 cd "$ROOT"
-echo "=== remesh $N from its checkpoint"
-cmd //c "$TOOL" "$ROOT/$N/$N.json" --from-checkpoint
+CK=""
+[ -f "$ROOT/$N/mesh/work/${N}_pools.brep" ] && CK="--from-checkpoint"
+echo "=== remesh $N ${CK:-from the STEP}"
+cmd //c "$TOOL" "$ROOT/$N/$N.json" $CK
 rc=$?; echo "step_mesh exit $rc" > "$N/mesh.exit"
 if [ $rc -ne 0 ]; then echo "mesh failed ($rc)"; exec bash; fi
 echo "=== convert"
