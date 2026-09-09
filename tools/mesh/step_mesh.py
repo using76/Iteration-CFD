@@ -274,10 +274,38 @@ def load_config(path):
     if not _is_num(cfg['sea_z']):
         errors.append('config.sea_z: expected a height in metres')
     if not isinstance(cfg['points'], dict):
-        errors.append('config.points: expected {"name": [x, y], ...}')
+        errors.append('config.points: expected {"name": [x, y] or {"x", "y", "r", "r_inner"}, ...}')
     else:
-        for pname, xy in cfg['points'].items():
-            _nums(xy, 2, 'config.points.%s' % pname, errors)
+        # a point is [x, y] (radius = pool_radius_m) or {x, y, r, r_inner}: r is the disc's
+        # radius; r_inner > 0 makes it an annulus (the ring between r_inner and r), so one
+        # centre can carry an inner disc and an outer ring as two separately named patches
+        cfg['pool_specs'] = {}
+        for pname, spec in list(cfg['points'].items()):
+            if isinstance(spec, dict):
+                extra = set(spec) - {'x', 'y', 'r', 'r_inner'}
+                if extra:
+                    errors.append('config.points.%s: unknown keys %s' % (pname, sorted(extra)))
+                if not (_is_num(spec.get('x')) and _is_num(spec.get('y'))):
+                    errors.append('config.points.%s: expected numbers x and y' % pname)
+                    continue
+                r = spec.get('r', cfg['pool_radius_m'])
+                ri = spec.get('r_inner', 0.0)
+                if not _is_num(r) or r <= 0:
+                    errors.append('config.points.%s.r: expected a positive radius' % pname)
+                    continue
+                if not _is_num(ri) or ri < 0 or ri >= r:
+                    errors.append('config.points.%s.r_inner: expected 0 <= r_inner < r' % pname)
+                    continue
+                cfg['pool_specs'][pname] = {'x': float(spec['x']), 'y': float(spec['y']),
+                                            'r': float(r), 'r_inner': float(ri)}
+                cfg['points'][pname] = [float(spec['x']), float(spec['y'])]
+            else:
+                _nums(spec, 2, 'config.points.%s' % pname, errors)
+                ok = (isinstance(spec, list) and len(spec) == 2 and all(_is_num(v) for v in spec)
+                      and _is_num(cfg['pool_radius_m']))
+                if ok:
+                    cfg['pool_specs'][pname] = {'x': float(spec[0]), 'y': float(spec[1]),
+                                                'r': float(cfg['pool_radius_m']), 'r_inner': 0.0}
     if not _is_num(cfg['pool_radius_m']) or cfg['pool_radius_m'] <= 0:
         errors.append('config.pool_radius_m: expected a positive radius')
     if not isinstance(cfg['roof_patches'], dict):
@@ -674,7 +702,9 @@ def ground_stage(cfg, args, work):
     SUMMARY['points'] = {}
     for name, (x, y) in cfg['points'].items():
         zg = ground_z(x, y)
-        SUMMARY['points'][name] = {'x': x, 'y': y, 'z_ground': zg}
+        SUMMARY['points'][name] = {'x': x, 'y': y, 'z_ground': zg,
+                                   'r': cfg['pool_specs'][name]['r'],
+                                   'r_inner': cfg['pool_specs'][name]['r_inner']}
         log('ground under %-14s (%8.1f, %7.1f) -> z_g = %s' % (name, x, y, zg))
         if zg is None:
             die('no fluid found under the point %s at (%.1f, %.1f) between z = %g and %g'
@@ -713,7 +743,6 @@ def classify(cfg):
     box = cfg['domain_box']
     btol = cfg['outer_tol']
     sea_z = cfg['sea_z']
-    pool_r = cfg['pool_radius_m']
     hulls = SUMMARY.get('ship_hulls', [])
     big_m2 = cfg['classification']['big_roof_is_ground_m2']
     pools = SUMMARY['pools']
@@ -736,15 +765,26 @@ def classify(cfg):
             best = None
             for name, (x, y) in cfg['points'].items():
                 zg = SUMMARY['points'][name]['z_ground']
+                pool_r = cfg['pool_specs'][name]['r']
+                pool_ri = cfg['pool_specs'][name]['r_inner']
                 if pools.get(name) != 'imprinted' or abs(b[2] - zg) > POOL_Z_TOL:
                     continue
                 if (b[0] < x - pool_r - POOL_PAD or b[3] > x + pool_r + POOL_PAD or
                         b[1] < y - pool_r - POOL_PAD or b[4] > y + pool_r + POOL_PAD):
                     continue
+                # a ring's pieces are the ones that do NOT fit inside the inner square: the
+                # inner disc (its own point) fits there, the ring's bbox cannot
+                if pool_ri > 0 and (b[0] >= x - pool_ri - POOL_PAD and b[3] <= x + pool_ri + POOL_PAD
+                                    and b[1] >= y - pool_ri - POOL_PAD
+                                    and b[4] <= y + pool_ri + POOL_PAD):
+                    continue
                 cx, cy = 0.5 * (b[0] + b[3]), 0.5 * (b[1] + b[4])
                 r = math.hypot(cx - x, cy - y)
-                if r <= pool_r + POOL_PAD and (best is None or r < best[0]):
-                    best = (r, name)
+                # the smaller radius wins where two pools of one centre both fit (the inner
+                # disc before its ring); otherwise the nearer centre, as before
+                key = (pool_r, r)
+                if r <= pool_r + POOL_PAD and (best is None or key < best[0]):
+                    best = (key, name)
             if best is not None:
                 groups['pool_' + best[1]].append(sf)
                 pooled = True
@@ -815,11 +855,17 @@ def pool_stage(cfg, args, work):
     t = time.time()
     cut_brep = os.path.join(work, '%s_cut.brep' % cfg['name'])
     fluid = SUMMARY['fluid']
-    pool_r = cfg['pool_radius_m']
     for name, (x, y) in cfg['points'].items():
         zg = SUMMARY['points'][name]['z_ground']
+        pool_r = cfg['pool_specs'][name]['r']
+        pool_ri = cfg['pool_specs'][name]['r_inner']
         try:
             disk = gmsh.model.occ.addDisk(x, y, zg, pool_r, pool_r)
+            if pool_ri > 0:                          # an annulus: the ring between r_inner and r
+                hole = gmsh.model.occ.addDisk(x, y, zg, pool_ri, pool_ri)
+                ring, _ = gmsh.model.occ.cut([(2, disk)], [(2, hole)], removeObject=True,
+                                             removeTool=True)
+                disk = ring[0][1]
             _, outmap = gmsh.model.occ.fragment([(3, fluid)], [(2, disk)])
             gmsh.model.occ.synchronize()
             vols = gmsh.model.getEntities(3)
@@ -836,7 +882,9 @@ def pool_stage(cfg, args, work):
                 log('pool %-14s NOT imprinted (ground not planar at z=%.2f)' % (name, zg))
             else:
                 SUMMARY['pools'][name] = 'imprinted'
-                log('pool %-14s imprinted (%d face(s))' % (name, len(on_boundary)))
+                log('pool %-14s imprinted (%d face(s), r %.2f%s)' % (
+                    name, len(on_boundary), pool_r,
+                    ', r_inner %.2f' % pool_ri if pool_ri > 0 else ''))
         except Exception as e:                      # restore the checkpoint, go on without it
             log('pool %-14s FAILED: %s -> restoring the post-cut checkpoint' % (name, e))
             SUMMARY['pools'][name] = 'failed: %s' % e
@@ -970,7 +1018,8 @@ def groups_and_fields_stage(cfg):
 
     for name, (x, y) in cfg['points'].items():
         zg = SUMMARY['points'][name]['z_ground']
-        fields.append(box(x - POINT_BOX[0], x + POINT_BOX[0], y - POINT_BOX[0], y + POINT_BOX[0],
+        half = max(POINT_BOX[0], cfg['pool_specs'][name]['r'] + 15.0)   # a big pool widens its box
+        fields.append(box(x - half, x + half, y - half, y + half,
                           zg - POINT_BOX[1], zg + POINT_BOX[2], cfg['sizes']['pool'],
                           POINT_BOX[3]))                                  # pool + first 10 m
         fields.append(box(x - POINT_BOX_FAR[0], x + POINT_BOX_FAR[0],
