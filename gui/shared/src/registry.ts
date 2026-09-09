@@ -168,6 +168,28 @@ export const BINARIES: BinarySpec[] = [
     usageKind: 'usageFn',
   },
   {
+    name: 'ofgpu-automesher',
+    source: 'src/bin/automesher.rs',
+    purpose: 'Our own mesher (SPEC-LIT §92). Reads an AutomeshConfig JSONC, loads and merges the input STLs, requires a closed surface, runs the §92.2 stage-0 domain check and prints the plan. The meshing stages are not built yet - the run refuses with "not implemented: stage 1" - but -check runs the §92.3 quality gate (G1-G7) on a polyMesh that already exists.',
+    summary: 'Automesher skeleton: config + STL summary + plan; -check runs the §92.3 quality gate.',
+    kind: 'mesh',
+    positionals: [
+      { name: 'config', type: 'path', description: 'AutomeshConfig JSONC file (worked example: tools/automesher/examples/nh3_site.json).' },
+    ],
+    flags: [
+      { name: '-schema', type: 'flag', description: 'Print the JSON Schema of the config to stdout and exit 0 (no config read; other arguments ignored).' },
+      { name: '-check', type: 'path', description: 'Run the §92.3 quality gate on <caseDir>/constant/polyMesh with the config thresholds: measured summary + exit 0, or the refusal naming cells + exit 1.' },
+      { name: '-dryRun', type: 'flag', description: 'Everything up to the surface summary, then exit 0 without attempting the meshing stages.' },
+    ],
+    accepts: [],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: ['foam'], restart: false, csv: false },
+    longRunning: true,
+    gpu: false,
+    usageKind: 'usageFn',
+  },
+  {
     name: 'ofgpu-k-epsilon',
     source: 'src/bin/k_epsilon.rs',
     purpose: 'Solve the k and epsilon transport equations on a frozen velocity field (standard, realizable or RNG k-epsilon, chosen by the case).',

@@ -1,0 +1,80 @@
+// meteor-cfd - ofgpu-automesher example configuration (SPEC-LIT §92).
+//
+// The ammonia-terminal site: 466 solids over 2.5 km x 2.5 km x 200 m, the case
+// §92.1 names as this mesher's yardstick. The STL is one closed surface with
+// two solids, `nh3_source` (the release roof) and `wall_site` (everything
+// else). The fluid box sits STRICTLY inside the surface's own extent in x and
+// y, and starts above sea level at z = 3.05 m + a margin, because the site
+// solid is trimmed at 3.05 and a box that touched it would castellate against
+// a coincident face.
+//
+// JSONC: comments and trailing commas are allowed (io::case_json's reader).
+{
+  "input": {
+    "surfaces": [
+      { "path": "C:/Users/sdd32/Desktop/암모니아누출/hex/site_solid.stl" }
+    ]
+  },
+
+  "domain": {
+    // xlo xhi ylo yhi zlo zhi, metres.
+    "extent": [-1240.0, 1240.0, -1240.0, 1240.0, 3.1, 200.0],
+    // Background cell, metres. 124 x 124 x 10 base cells.
+    "base_size": 20.0,
+    // One-sided expansion per axis, last cell / first cell: the smallest cells
+    // sit at the ground, where the plume is.
+    "grading": [1.0, 1.0, 6.0]
+  },
+
+  "refinement": {
+    // Within 40 m of the buildings, level 2 (5 m); within 120 m, level 1 (10 m).
+    // SPEC-LIT (92.1).
+    "levels": [
+      { "patch": "wall_site",  "bands": [{ "distance": 40.0, "level": 2 },
+                                         { "distance": 120.0, "level": 1 }] },
+      { "patch": "nh3_source", "bands": [{ "distance": 20.0, "level": 3 }] }
+    ],
+    "feature_angle_deg": 30.0,
+    "max_level": 3
+  },
+
+  "castellation": {
+    // Keep the component the free stream is in, not merely the biggest one.
+    // SPEC-LIT (92.4) - this is what drops the sealed pockets under buildings.
+    "keep_region": "seed",
+    "seed_point": [-1200.0, 0.0, 150.0],
+    "min_faces": 4
+  },
+
+  "snap": {
+    "iterations": 30,
+    "tolerance": 1e-3,
+    "smoothing_passes": 3,
+    "smoothing": 0.5,
+    "undo_limit": 4
+  },
+
+  "layers": {
+    "patches": ["wall_site"],
+    "n": 3,
+    "first_thickness": 0.4,
+    "growth": 1.3,
+    "min_thickness": 0.1,
+    "medial_frac": 0.5
+  },
+
+  // SPEC-LIT §92.3's G1-G7. These are the defaults, written out so the example
+  // says what the gate actually is.
+  "quality": {
+    "max_closure": 1e-9,
+    "max_non_orth_deg": 70.0,
+    "report_non_orth_deg": 60.0,
+    "min_thickness_ratio": 0.05,
+    "max_cond": 1e4
+  },
+
+  "output": {
+    "case_dir": "C:/Users/sdd32/Desktop/암모니아누출/automesh/nh3_site",
+    "name": "nh3_site"
+  }
+}
