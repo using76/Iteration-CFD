@@ -247,42 +247,393 @@ ofgpu-generate-mesh big case 128 -stl car=racecar.stl -cutcell
 ### STEP 형상에서 격자로, 그리고 Fluent로
 
 CAD가 주는 것은 STEP 파일이고 솔버가 먹는 것은 격자입니다. 그 사이는 두 단계입니다 —
-Gmsh가 격자를 만들고, 이 저장소의 변환기가 그것을 가져갑니다.
+Gmsh가 격자를 만들고, 이 저장소의 변환기가 그것을 가져갑니다. 이 절은 그 두 단계의
+사용설명서 전체입니다. 요약(스키마, 10단계 파이프라인 표, 검사기 사용법)만 필요하면
+[`tools/mesh/README.md`](../tools/mesh/README.md)가 대신하고, 여기서는 서술을
+담습니다. 실례는 암모니아 누출 부지 하나입니다 — STEP 한 장에서 사면체 360만 개까지,
+아래의 시간은 실제로 돌려 측정한 값입니다.
 
-**STEP을 Gmsh 격자로.** 설정은 JSON 파일 하나입니다. 스키마는
-[`tools/mesh/README.md`](../tools/mesh/README.md)에 있습니다.
+#### 필요한 것
+
+- **STEP 파일 하나.** 단위는 설정의 `scale`이 정합니다. 도구는 파일의 단위 선언을
+  읽지 않고 곱하기만 합니다 — mm STEP이면 `0.001`, 이미 미터면 `1.0`.
+- **Python 3.13**에 `gmsh`, `numpy`, `scipy`, `pymeshlab`. `step_mesh.py`가
+  직접 import하는 것은 gmsh와 numpy이고, 표면 수리 경로([`repairs`](#설정-쓰기))가
+  pymeshlab을 더 요구합니다. 이 문서의 수치는 gmsh 4.14.1 환경에서 얻은 것입니다.
+- **빌드된 변환기** `rust\target\release\ofgpu-convert-mesh.exe` —
+  `cd rust; cargo build --release`로 만듭니다([§2](#2-설치)). Studio 쪽 도구는
+  `OFGPU_BIN_DIR` 환경 변수를 먼저 보고, 없으면 같은 빌드 트리를 찾습니다.
+
+둘 다 갖춰졌는지 확인하는 가장 빠른 길입니다. 작은 STEP을 스스로 만들어 네 가지
+경로로 메시하고(초 단위), 변환기가 빌드되어 있으면 polyMesh와 Fluent 메쉬까지
+검사합니다:
 
 ```powershell
-python tools\mesh\step_mesh.py step.json
+python tools\mesh\selftest.py
 ```
 
-**Gmsh 격자를 케이스와 Fluent 메쉬로.** `ofgpu-convert-mesh`는 하나의 .msh로 두
-가지를 씁니다 — 케이스 디렉터리의 `constant/polyMesh`(위의 (b) 형식이라 바로 돌릴
-수 있고, 상세는 [`cases/README.md`](../cases/README.md))와, `-fluent`를 붙였을 때
-ANSYS Fluent가 읽는 ASCII 메쉬(사면체 격자 전용). 패치 타입은 `wall*`/`empty*`/
-`symmetry*` 접두어로 정해지고 `-type 이름=타입`으로 직접 정할 수 있습니다.
+#### 설정 쓰기
+
+설정은 JSON 파일 하나입니다. 스키마 전체는
+[`tools/mesh/README.md`](../tools/mesh/README.md)에 있고, 모르는 키는 이름과
+함께 거절되며 빠진 키는 기본값을 받습니다. `step`, `out_dir`, `domain_box` 셋만
+필수입니다. 암모니아 부지 전체가 이 한 장입니다
+([`tools/mesh/examples/nh3_site.json`](../tools/mesh/examples/nh3_site.json)):
+
+```json
+{
+  "step": "C:/Users/sdd32/Desktop/암모니아누출/cfd_optimized_defeatured_recommended.step",
+  "scale": 0.001,
+  "out_dir": "C:/Users/sdd32/Desktop/암모니아누출/mesh",
+  "name": "nh3_site",
+  "fluid": {"tag": 1},
+  "domain_box": [-1250.0, -1250.0, -7.5, 1250.0, 1250.0, 200.0],
+  "outer_tol": 0.05,
+  "solids": {"sink_m": 1.5, "fuse": false, "exclude_tags": []},
+  "repairs": [
+    {"tag": 33, "method": "resample", "cell_m": 1.5, "target_faces": 6000, "lift_z": 3.05}
+  ],
+  "trim": {"below_z": 3.05},
+  "sea_z": 3.05,
+  "points": {
+    "tank_shell":    [-916.9, 349.8],
+    "ESDV1":         [-910.2, 329.3],
+    "skid":          [-869.5, 233.8],
+    "pipe_mid":      [-434.8, 116.9],
+    "ESDV2":         [-23.2,    9.4],
+    "ship_manifold": [  18.5,  -7.5]
+  },
+  "pool_radius_m": 26.0,
+  "roof_patches": {"nh3_source": 306},
+  "sizes": {
+    "min": 1.5, "max": 40.0, "pool": 2.0, "box": 4.0, "growth_from": 2.5,
+    "near_struct": 4.0, "far_struct": 12.0, "near_radius": 400.0,
+    "size_mult": 1.0, "roof_boxes": [2.5, 5.0, 10.0]
+  },
+  "mesh": {"algo2d": 6, "algo3d": 1, "optimize_passes": 5, "threads": 32},
+  "post": {
+    "flat_tets": true, "flat_threshold": 1e-7, "seam_merge_m": 0.02,
+    "sliver_edge_m": 0.6, "sliver_vol_m3": 0.2, "thin_push_m": 0.0
+  },
+  "classification": {"wall_prefix": "wall_", "big_roof_is_ground_m2": 2000.0}
+}
+```
+
+키 하나를 바꾸면 무엇이 달라지는가:
+
+| 키 | 바꾸면 |
+|---|---|
+| `step` | 읽을 STEP. 다른 부지는 여기만 바꾸고 시작합니다 |
+| `scale` | STEP 좌표에 곱해지는 값 (`Geometry.OCCScaling`, import 전에 적용). 틀리면 형상이 천 배 커지거나 작아지고, 절단이 예상 질량 검사에서 거절합니다 |
+| `out_dir` | `.msh`/`.vtk`/`_summary.json`과 `work/` 체크포인트가 놓이는 곳 |
+| `name` | 모든 출력과 체크포인트 파일의 접두어 |
+| `fluid` | 어느 imported 고체가 유동 영역인가. 태그를 모를 때는 `{"largest": true}` |
+| `domain_box` | 계산 영역 상자. 여섯 면 중 다섯이 `top`/`west`/`east`/`south`/`north` 패치가 됩니다. 키우면 원역장 셀(`sizes.max`)이 그 부피만큼 더 늘어납니다 |
+| `outer_tol` | 바깥 면 판정의 허용 오차. 바깥 패치가 비어 거절되면 이것부터 올려 봅니다 |
+| `solids.sink_m` | 모든 건물 베이스를 그 지붕을 중심으로 이만큼 아래로 신장합니다 (지형 위에 뜬 베이스가 만드는 머리카락 공기층을 제거). 단 베이스가 trim 평면에 닿지 않게 — 2.0이면 베이스가 정확히 3.0이 되어 1,814면이 trim 밑으로 내려가고, 1.5면 0면입니다 |
+| `solids.fuse` | `true`면 절단 전에 고체들을 fuse합니다. 맞닿거나 겹치는 이웃의 동면과 머리카락 틈을 합쳐 주지만 불리언은 더 무겁습니다 |
+| `solids.exclude_tags` | 절단에서 아예 빠지는 고체 (모델에서 제거) |
+| `repairs[].tag` | 수리로 대체할 고체. 자기교차 고체 — 이 부지에서는 선박 선체 — 전용입니다 |
+| `repairs[].method` | `"resample"` 하나뿐입니다. 3 m로 2-D 메시 → pymeshlab 균일 재샘플링(`cell_m` 격자) → quadric 감쇄(`target_faces`/10000/16000 사다리 중 닫히고 다양체이고 자기교차 없는 가장 거친 것) → 평면 삼각형의 OCC 고체. 결과는 `work/repaired_<tag>.brep`에 캐시되고 `"brep"`로 재사용할 수 있습니다 |
+| `repairs[].cell_m` | 재샘플링 격자. 굵게 하면 선체가 둔해지고 면도 적어집니다 |
+| `repairs[].target_faces` | 감쇄 사다리의 첫 목표. 낮추면 프록시가 거칠어집니다 |
+| `repairs[].lift_z` | 수리 후 올릴 높이. 이 STEP은 선박을 STEP의 z=0에 띄워 두는데 해수면은 +3이라 3.05입니다. 원래 높이를 유지하려면 0 |
+| `trim.below_z` | 이 평면 아래를 상자로 잘라 냅니다. `null`이면 trim 없음. 이 부지가 3.05인 이유: 진짜 해수면은 z=+3인데 절단 평면을 기존 면 바로 위 5 cm에 두면 불리언이 기존 면을 따라 자르지 않고, 잘라 새로 만들어진 평면이 곧 `wall_sea_surface`가 됩니다 |
+| `sea_z` | 이 높이(±0.06)의 평평한 면을 `wall_sea_surface`로 분류합니다. trim과 같은 값으로 둡니다 |
+| `points` | 이름 → (x, y). 점마다 지면 높이를 z=−1부터 0.25 m 간격 스캔으로 찾고, 풀 디스크·±40 m 상자·±150 m 상자·성장 필드가 하나씩 붙습니다. 이름을 바꾸면 체크포인트가 거절하므로 처음부터 다시 돌려야 합니다 |
+| `pool_radius_m` | 각 점에 새겨지는 풀 디스크의 반경. 풀은 그 점의 지면이 평평하다고 가정합니다 |
+| `roof_patches` | 이름 → 고체 태그. 그 고체의 평평한 지붕이 별도 패치가 되고 주위로 세 개의 세분화 상자(지붕 ±60 m, ±250 m, 그리고 −700 m 하풍 팔)가 깔립니다 |
+| `sizes.min` | `Mesh.MeshSizeMin` — 그 어디서도 이보다 짧은 변이 생기지 않는 하한 |
+| `sizes.max` | `Mesh.MeshSizeMax`이자 모든 필드의 바깥 크기 — 원역장 셀 크기 |
+| `sizes.pool` | 각 점의 ±40 m, 지면 +10 m 상자(풀과 그 바로 위) 안의 크기 |
+| `sizes.box` | 각 점의 ±150 m, +30 m 상자(지시서의 세분화 상자) 안의 크기 |
+| `sizes.growth_from` | 점에서 이 크기로 시작해(40 m까지 유지) 700 m에 걸쳐 `max`까지 자랍니다 |
+| `sizes.near_struct` | 점에서 `near_radius` 안의 구조물 가까이 크기 (80 m에 걸쳐 `max`로) |
+| `sizes.far_struct` | 나머지 구조물 가까이 크기 (120 m에 걸쳐 `max`로) |
+| `sizes.near_radius` | near/far 구분 반경 — 점의 (x, y)에서 잰 거리 |
+| `sizes.size_mult` | 1보다 크게 하면 모든 크기(min, max, 상자 VIn, threshold, Thickness)에 곱해집니다. 굵은 격자로 빨리 돌리는 솔버 강건성 재현용 |
+| `sizes.roof_boxes` | 지붕 패치 주변 세 상자의 크기 [가까움, 중간, 하풍] |
+| `mesh.algo2d` | 2-D 알고리즘 (6 = Frontal-Delaunay). 겹치는 삼각형이 남은 면은 5(Delaunay), 그다음 1(MeshAdapt)로 자동 재메시됩니다 |
+| `mesh.algo3d` | **1(Delaunay)로 두십시오.** HXT(10)는 이 부류의 형상에서 경계 복구 중 미완성 Steiner 경로에 걸려 프로세스째 죽습니다. 0개 사면체로 끝나면 도구가 스스로 Delaunay로 재시도합니다 |
+| `mesh.optimize_passes` | gmsh 자체 최적화(변·면 교환 + 스무딩)의 패스 수, 임계 0.5 |
+| `mesh.threads` | 2-D/3-D 스레드 수 |
+| `post.flat_tets` | 3-D 패스 뒤의 평면 사면체 제거 단계. Delaunay는 평면 경계 위에 부피 0 사면체를 남기므로 기본 켭니다 |
+| `post.flat_threshold` | \|V\|가 이 값 × (노드 0에서 가장 긴 변)³보다 작으면 평면 사면체 |
+| `post.seam_merge_m` | 평면 사면체 안의 이보다 가까운 노드쌍을 메쉬 전체에서 병합 (이음새 처리) |
+| `post.sliver_edge_m`, `post.sliver_vol_m3` | 부피가 `sliver_vol_m3`보다 작은 사면체 안의 `sliver_edge_m`보다 짧은 변을 접어 슬리버를 제거 |
+| `post.thin_push_m` | 0보다 크면 gamma < 0.02의 얇은 사면체 노드를 최대 이만큼 밀어냅니다. 선박과 해수면 사이 얇은 쐐기가 남을 때 (예 0.2) |
+| `classification.wall_prefix` | 네 `wall_*` 그룹의 접두어 |
+| `classification.big_roof_is_ground_m2` | 100 × 100 m보다 큰 슬랩의 평면 지붕 중 면적이 이보다 큰 것은 건물이 아니라 지형(`wall_ground_land`)으로 분류합니다 |
+
+설정에 이름이 없는 숫자들 — 점 상자의 ±40/±150 m, 지붕 상자의 ±60/±250 m과 −700 m
+하풍 팔, 성장 거리 40/700 m, 구조물 필드의 0–80/120 m, 지면 스캔의 −1..60 m at
+0.25 m, 선체 판정의 0.5 m 여유, 대형 지붕의 100 × 100 m 형태 검사 — 는 참조
+스크립트가 하드코드했던 값을 그대로 옮긴 것입니다. 그 격자 배치가 이 부지에서
+튜닝된 값입니다.
+
+#### 돌리기
+
+먼저 축소판으로:
 
 ```powershell
-ofgpu-convert-mesh site.msh site_case -fluent site_fluent.msh -type wall_ground=wall
+python tools\mesh\step_mesh.py step.json --dry-run
 ```
 
-**Studio 안에서는 이 두 단계가 도구입니다.** `mesh_from_step`(설정 JSON 경로,
-선택적으로 `--from-checkpoint` 같은 추가 토큰)과 `mesh_to_fluent`(.msh 경로, 케이스
-디렉터리, Fluent 출력 경로, 선택적으로 `-type 이름=타입` 토큰)은 서버가 시작할 때
-`gui/server/tools.defaults.json`에서 읽어 등록하므로 사용자가 따로 만들 필요가
-없습니다. 같은 이름의 사용자 도구를 등록하면 그쪽이 이기고, 실행할 때는 다른 도구와
-마찬가지로 확인을 받습니다.
+import와 절단까지만 돌고 부피·질량·경계 면 수·점별 지면 높이를 인쇄합니다
+(`work/dry_run_summary.json`에도 씁니다). 부지에서 몇 분입니다. 형상이 거절되는
+대부분의 일은 여기서 끝납니다.
 
-**Fluent 쪽에서 읽기.** File > Read > Mesh. 좌표는 미터로 취급하고, 존(zone)
-이름은 패치 이름을 따릅니다 — 벽은 `wall`, `symmetry*`는 `symmetry`,
-`east`/`inlet*`/`*_source`는 `velocity-inlet`, 나머지는 `pressure-outlet`이며
-`-fluentType 이름=존`으로 바꿀 수 있습니다. 읽어 들인 뒤에는 Mesh > Check를
-돌리십시오. 상대가 CGNS를 원한다면 Gmsh 단계에서 `gmsh.write('x.cgns')`로 직접
-쓰는 것이 대안입니다.
+진짜 실행은 콘솔에서 보이게:
 
-Fluent 메쉬 쓰기 형식은 ANSYS FLUENT 12.0 User's Guide 부록 B.3.7을 따릅니다
+```powershell
+.\tools\mesh\run_step_mesh.cmd step.json
+```
+
+이 .cmd는 step_mesh.py를 현재 콘솔에서 돌립니다 — 단계 배너가 생기는 대로
+인쇄됩니다 — 그리고 모든 줄을 `<out_dir>\work\run.log`에도 복사하고, 종료 코드는
+step_mesh.py의 것을 그대로 돌려줍니다.
+
+사이즈를 만지는 반복에는 체크포인트가 있습니다:
+
+```powershell
+python tools\mesh\step_mesh.py step.json --stop-after-checkpoint   # 절단+풀까지
+python tools\mesh\step_mesh.py step.json --from-checkpoint --tag coarse
+```
+
+`--stop-after-checkpoint`는 체크포인트(`work/<name>_pools.brep` + `.json`)를 쓰고
+멈춥니다. `--from-checkpoint`는 그 결과부터 시작합니다 — 미터 단위 체크포인트를
+읽고, 느슨한 면을 걷어내고, 지면 높이와 풀 상태를 `.json`에서 가져옵니다 — 그러므로
+`sizes`나 `post`만 고친 반복은 절단과 풀(부지에서 약 15분)을 다시 하지 않고 trim부터
+몇 분 만에 끝납니다. 설정의 `points`가 체크포인트의 것과 다르면 거절합니다 — 지면
+높이와 풀은 체크포인트에 속합니다. `--tag NAME`은 출력을 `<name>_<NAME>.msh` 등으로
+접미사 붙여 따로 둡니다.
+
+실행은 10단계로 이루어지고, 각 단계가 시작될 때
+`========== [ 7/10] trim  (elapsed ...) ==========` 모양의 배너와 경과 시간을
+찍으며 각 줄 앞에도 경과 초가 붙습니다:
+
+1. **import** — STEP을 `scale`로 읽고(`Geometry.OCCScaling`), 유동 고체를 태그나
+   최대 부피로 찾아 질량을 보고합니다
+2. **cut** — 고체별 수리, 침하 신장, 선택적 fuse, 불리언 절단 한 번, 밀폐 포켓은
+   목록과 함께 제거
+3. **ground heights** — 점마다 z=−1부터 0.25 m 간격의 `isInside` 스캔
+4. **classification** — 모든 경계 면을 정확히 하나의 패치로 (풀 전에 한 번, trim 뒤에
+   다시 보고)
+5. **pool discs** — 점마다 지면 높이에 디스크를 하나씩 새깁니다; 하나가 실패하면
+   절단 직후 체크포인트로 되돌리고 그 풀 없이 계속합니다
+6. **checkpoint** — `work/<name>_pools.brep` + `.json` 기록 (`--stop-after-checkpoint`는
+   여기서 끝)
+7. **trim** — 설정이 null이 아니면 `below_z` 아래를 상자로 절단하고, 새 평면 면 수와
+   면적, trim 평면 밑까지 내려가는 면 수를 보고합니다
+8. **groups + fields** — 물리 그룹과 크기 필드(점 상자, 성장 threshold, near/far
+   구조물 필드, 지붕 상자)를 만들고 Min으로 하나로 합칩니다
+9. **mesh** — `generate(1)`, 코인시던트 곡선 계열 통일, `generate(2)`, 겹치는
+   삼각형이 남은 면 재메시(5, 그다음 1), `generate(3)`, gmsh 최적화
+10. **post + write** — 평면 사면체 제거와 품질 전후 비교, 세 파일 기록
+
+부지에서의 실측:
+
+| 단계 | 걸린 시간 |
+|---|---|
+| import | 12 s |
+| 선박 수리 (repairs) | 60 s |
+| cut | 3 min |
+| pool discs (여섯 점) | 9–11 min |
+| trim | 1.5 min |
+| 2-D 메시 | 20 s |
+| 3-D 메시 | 3 min |
+| post + write | 2 min |
+| **합계 (사면체 약 3.6 M)** | **약 23 min** |
+
+출력은 `out_dir`에 모입니다:
+
+```
+mesh/
+  nh3_site.msh              Gmsh 4.1 ASCII, 물리 그룹 = 패치
+  nh3_site.vtk              바이너리, 보기 전용
+  nh3_site_summary.json     개수·그룹·품질·시간·설정 전체
+  work/
+    nh3_site_cut.brep       절단 직후 (풀 실패 시 복원점)
+    nh3_site_pools.brep     체크포인트 (+ .json) — --from-checkpoint의 시작점
+    nh3_site_trimmed.brep   trim 직후
+    repaired_33.brep        선박 수리 캐시
+    run.log                 run_step_mesh.cmd로 돌렸을 때 모든 줄
+```
+
+`_summary.json`에는 gmsh 버전, 단계별 `timings_s`, 유동 태그와 질량, 고체 bbox,
+수리 치환 기록, 제거된 포켓, 점별 지면 높이, 풀 상태(`imprinted` / `not imprinted` /
+`failed`), 패치별 면 수와 면적(`groups`), trim이 없앤 질량, 겹침으로 재메시한 면,
+삼각형·사면체 개수, 품질(제거 전후), 평면 사면체 단계의 노트, 파일 바이트 수,
+그리고 설정 전체가 들어갑니다.
+
+종료 코드는 셋입니다: **0** 성공(`--dry-run`, `--stop-after-checkpoint` 포함),
+**1** 거절 — 설정의 알 수 없는 키, 유동 태그 없음, 절단 질량 불일치, 빈 바깥
+패치, 분류가 경계 면을 다 덮지 못함 — 메시지가 무엇이 문제인지 이름을 댑니다,
+**3** 3-D 패스가 빈 격자 — 이때 표면 메시가 `work/surface_only.msh`로,
+요약이 `work/failed_summary.json`으로 저장되므로 위의 PLC 오류 지점을 볼 수
+있습니다.
+
+#### 결과 읽기
+
+패치 이름은 분류가 정합니다: `top`/`west`/`east`/`south`/`north`(domain_box의 다섯
+면), `wall_sea_surface`(sea_z의 평면), `wall_ship_hull`(수리된 고체 bbox 주변 0.5 m),
+`wall_buildings`(고체 bbox 안쪽 면), `wall_ground_land`(나머지 전부 + 대형 슬랩의
+평면 지붕), `pool_<점 이름>`(점 지면 높이의 디스크 조각), 그리고 `roof_patches`에
+쓴 이름 하나씩(이 부지에서는 `nh3_source`). `_summary.json`의 `groups`에 패치별 면
+수와 면적이 있으니 어느 패치가 비어 있거나 비정상적으로 넓은지 여기서 봅니다.
+
+품질은 두 측도로 인쇄됩니다 — 3-D 직후와 평면 사면체 제거 뒤 각각:
+
+```
+  minSICN min 0.2999  p1 0.xxx  p5 0.xxx  p50 0.xxx  <0.1: 0  <0: 0
+```
+
+`minSICN`은 부호 있는 최소 역조건수로, 1이 정사면체, 0이 붕괴, 음수가 뒤집힌
+셀입니다. `p1`/`p5`/`p50`은 백분위, `<0.1`은 그 미만의 사면체 수, `<0`은 음의
+부피 수입니다. `<0`이 0이 아니면 그 격자는 솔버로 가면 안 됩니다. (selftest의
+작은 상자는 min 0.2999 근처로 나옵니다.) `gamma`도 같은 모양의 줄로 함께
+인쇄됩니다.
+
+post 단계의 노트는 평면 사면체 몇 개를 발견해 경계를 다시 삼각분할해 몇 개를
+지웠는지, 이음새 노드쌍을 몇 쌍 병합해 사면체·삼각형 몇 개가 접혔는지, 슬리버 변을
+몇 개 접고 몇 번 되돌렸는지(사면체가 뒤집히는 접기는 거부), 얇은 사면체를 몇 개
+밀었는지를 `_summary.json`의 `flat_tets_notes`에 기록합니다.
+
+#### 솔버로
+
+```powershell
+ofgpu-convert-mesh mesh\nh3_site.msh nh3_case -type pool_tank_shell=wall
+```
+
+하나의 .msh로 케이스 디렉터리의 `constant/polyMesh`를 씁니다(위의 (b) 형식). 패치
+타입의 규칙은 이름의 접두어입니다 — `wall`로 시작하면 `wall`, `empty`면 `empty`,
+`symmetry`면 `symmetry`(전부 대소문자 무시), 그 외는 `patch`. 이름은 Gmsh가 쓴 그대로
+유지되고 타입만 정해집니다. `pool_*` 패치는 지면 위의 풀이므로 솔버 입장에서는
+벽입니다 — 벽 처리는 타입에서 고르므로 `patch`로 남겨 두면 벽함수가 전혀 작동하지
+않습니다. `-type 이름=타입`은 반복해 패치별로 정하고 접두어 규칙을 이깁니다. 알 수
+없는 타입 값은 허용 목록(`patch`, `wall`, `mappedWall`, `empty`, `symmetry`,
+`symmetryPlane`, `wedge`, `cyclic`, `cyclicAMI`, `cyclicSlip`, `processor`,
+`processorCyclic`)과 함께 거절됩니다.
+
+변환기가 거절하는 것도 알아 두십시오: 대상 디렉터리에 이미 `constant/polyMesh`가
+있으면 덮어쓰지 않고 거절합니다(어떤 전처리 사슬이 남긴 유일한 사본일 수
+있습니다). 그리고 `-fluent` 출력은 사면체 전용이라, 사각형 면이나 네 면이 아닌 셀은
+이름을 댄 채 거절됩니다.
+
+**한 반복으로 격자부터 점검하십시오.**
+
+```powershell
+ofgpu-buoyant nh3_case -iters 1
+```
+
+필드를 읽기 전에 로더가 격자 통계를 인쇄합니다 — `mesh: <cells> cells, ...` 줄,
+패치 표(이름·타입·면 수), `volume: total ..., min ..., max ...`,
+`non-orthogonality: max ... deg, mean ... deg`, `face closure`,
+`lduAddressing: upper-triangular`. 이 줄들이 부지 격자의 성적표입니다. 변환만 한
+케이스에는 `0/`이 없으므로 그다음은 이렇게 끝납니다:
+
+```
+error: no time directory with initial fields found in nh3_case
+```
+
+**이 거절이 정상입니다** — 격자가 로드되고 구조가 검증되었다는 뜻입니다. 음의
+부피나 비직교각이 마음에 걸리면 이 점검표의 `volume`과 `non-orthogonality` 줄이
+그 증거이고(아래의 문제 해결 표 참고), 이대로 좋으면
+`0/`, `constant/`, `system/`을 채웁니다. 케이스의 구조는
+[§4](#4-케이스의-구조), 필드와 사전의 상세는
+[`cases/README.md`](../cases/README.md), 어느 드라이버가 무엇을 푸는지는
+[§6](#6-솔버-고르기--가장-많이-틀리는-곳) — 부력 케이스인 이 부지는
+`ofgpu-buoyant`로 갑니다.
+
+#### Fluent로
+
+```powershell
+ofgpu-convert-mesh mesh\nh3_site.msh nh3_case -fluent nh3_site_fluent.msh
+```
+
+`-fluent`는 polyMesh에 적용한 것과 **같은** 타입 정리를 ANSYS Fluent가 읽는 ASCII
+메쉬로 씁니다. 형식은 ANSYS FLUENT 12.0 User's Guide 부록 B의 B.3.7 "Faces"입니다
 (공개 미러:
 [afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm](http://afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm)).
+방향 규칙도 그 문서의 것 — "노드 순서대로 오른손 손가락을 말면 엄지가 c1을
+가리킨다" — 을 따르며, 모든 지수는 16진수 1-based입니다.
+
+존(zone) 이름은 패치 이름을 따릅니다. 기본값은 polyMesh 타입을 먼저 따르고(`wall`은
+`wall`, `symmetry`는 `symmetry`), 그다음 이 프로젝트가 입구에 붙이는 이름을
+따릅니다 — `east`, `inlet`으로 시작, `_source`로 끝나는 이름은 `velocity-inlet`,
+나머지는 전부 `pressure-outlet`입니다. Fluent는 읽은 뒤 스스로 재존하므로 기본값은
+출발점일 뿐입니다. `-fluentType 이름=존`으로 하나를 정하면 이 기본값을 이기며,
+모르는 존 이름(`wall`, `velocity-inlet`, `pressure-inlet`, `pressure-outlet`,
+`outflow`, `symmetry`, `interior` 외)은 거절됩니다. 존 번호는 1이 유동 셀 존,
+2가 내부 면 존이고 패치는 10부터 순서대로입니다.
+
+Fluent에서는 File > Read > Mesh로 읽습니다. 좌표는 미터로 취급하고, 읽은 뒤에는
+Mesh > Check를 돌리십시오.
+
+**경로 주의.** Fluent의 Cortex가 한글이 섞인 폴더 경로에서 실패합니다 — 이 부지의
+작업 폴더(`암모니아누출`)가 그랬습니다. Fluent에 읽힐 메쉬 파일은 ASCII로만 된
+경로에 두십시오.
+
+상대가 CGNS를 원한다면 Gmsh 단계에서 `gmsh.write('x.cgns')`로 직접 쓰고 File >
+Import > CGNS로 여는 것이 대안입니다.
+
+**독립 검사.** 변환기가 쓴 파일을 도구 없이 검사할 수 있습니다:
+
+```powershell
+python tools\mesh\tester_mesh.py 0.5
+ofgpu-convert-mesh tester_tet.msh case -fluent tester_ours.msh
+python tools\mesh\fluent_check.py tester_ours.msh tester_tet_geometry.json
+```
+
+`tester_mesh.py`는 알려진 작은 케이스(육면체 상자에서 사면체를 파낸 것)를 만들고,
+`fluent_check.py`는 Fluent ASCII 메쉬를 밑바닥부터 다시 파싱해 헤더 개수와 실체의
+일치, 모든 셀이 닫히고 양의 부피를 갖는 것, 총 부피가 상자−사면체와 같은 것,
+경계 면이 셀 하나를 갖고 법선이 도메인 밖을 가리키는 것, c0/c1 방향 관례(가정하지
+않고 측정합니다), 모든 존이 이름에 맞는 평면·고체 위에 있는 것을 검사합니다.
+2026-09-09에는 이 테스터를 OpenFOAM의 foamMeshToFluent와도 대조했습니다 — 두
+파일의 셀·노드·토폴로지·부피가 같고, 다른 것은 방향 관례뿐이었습니다(상대는
+매뉴얼의 반대를 씁니다).
+
+#### Studio 안에서
+
+이 두 단계는 Studio의 기본 도구로도 등록되어 있습니다. 서버가 시작할 때
+`gui/server/tools.defaults.json`에서 읽으므로 사용자가 만들 필요가 없습니다.
+
+- **`mesh_from_step`** — 입력은 `config`(설정 JSON 경로, 필수)와 `extra`(선택적
+  추가 토큰, 예: `--from-checkpoint`). 실행하는 명령은 콘솔과 같습니다 —
+  `python <repo>\tools\mesh\step_mesh.py <config> <extra>`.
+- **`mesh_to_fluent`** — 입력은 `msh`, `case`, `fluent`(필수)와 `types`(선택적
+  `-type 이름=타입` 토큰). 역시 같은 명령 — `<OFGPU_BIN_DIR>\ofgpu-convert-mesh
+  <msh> <case> -fluent <fluent> <types>`.
+
+선택 필드는 비어 있으면 토큰째 사라지고, 공백을 포함한 값은 단어별로 나뉘어
+인자가 됩니다. `<repo>`는 저장소 루트로 풀리고 `<OFGPU_BIN_DIR>`는 솔버와 같은
+순서(`OFGPU_BIN_DIR` → `rust/target/release` → `rust/target/debug`)로 바이너리를
+찾습니다.
+
+실행은 `custom_tool_run`을 통하고 다른 도구와 마찬가지로 승인을 받습니다. 같은
+이름의 사용자 도구를 `custom_tool_create`로 등록하면 **그쪽이 이깁니다** — 병합은
+사용자 도구를 먼저 두고 기본값은 이름이 겹치지 않을 때만 채웁니다. 기본값이
+사용자의 파일(`gui/config/custom-tools.json`)에 기록되지는 않습니다.
+
+하나만 알아 두십시오: command 도구에는 60초의 시간 상한이 있습니다. 부지 전체
+실행(약 23분)은 이 상한 안에 끝나지 않으므로 콘솔의 `run_step_mesh.cmd`로
+돌리는 것이 맞고, Studio 도구는 `--dry-run`이나 변환 같은 짧은 단계에 씁니다.
+
+#### 문제 해결 — 부지에서 실제로 만난 것
+
+| 증상 | 원인 | 처방 |
+|---|---|---|
+| `algo3d: 10`(HXT)을 고르면 예고 없이 프로세스째 죽는다 | gmsh의 미완성 Steiner 경로가 경계 복구 중 걸린다. 예외가 아니라 죽음이라 잡을 방법이 없다 | `algo3d: 1`(Delaunay)로 두십시오. 다른 알고리즘이 0개 사면체로 끝내면 도구가 스스로 Delaunay로 재시도합니다 |
+| Netgen 최적화가 access violation으로 죽는다 | 이 gmsh 빌드(4.14.1)의 결함 | Netgen은 아예 옵션에 없습니다. gmsh 자체 최적화(`optimize_passes`)를 쓰십시오 |
+| `No elements in volume` — 3-D 패스가 모든 사면체를 버린다 | 3-D 패스 **전에** 중복 노드를 병합했다 | 3-D 전에는 절대 병합하지 마십시오. 이음새 병합은 post 단계의 `seam_merge_m`이 3-D 뒤에 합니다 (2026-09-08에 찾은 작업 경로) |
+| 자기교차 고체(선박 선체)가 볼륨이 되지 않는다 | STEP 자체가 서로를 꿰뚫는 면을 담고 있다 | `repairs`의 `resample` — `cell_m` 격자로 표면을 재샘플링한 닫힌 프록시로 바꿔치기하십시오. 캐시(`work/repaired_<tag>.brep`)를 `brep`로 재사용하면 재수리는 건너뜁니다 |
+| 건물이 지형 위에 떠 있다 | STEP의 베이스가 그 아래 지형보다 위에 있다 | `solids.sink_m`으로 베이스를 묻으십시오. 단 베이스가 trim 평면에 닿지 않게 — 2.0은 베이스를 정확히 3.0에 두어 1,814면이 trim 밑으로 내려가고, 1.5는 0면입니다 |
+| 건물 사이에 머리카락 틈이 있다 | STEP에서 이웃 고체가 몇 센티미터 어긋나 있다 | 고체를 뚱뚱하게 부풀리지 마십시오. 맞닿거나 겹치는 이웃이면 `solids.fuse: true`로 합칩니다 |
+| 3-D 패스가 겹치는 면으로 실패한다 (exit 3) | 틈을 메우려고 고체를 부풀린 대가 — 두 벽이 같은 자리를 차지한다 | 부풀림을 거두십시오. 뜬 베이스는 `sink_m`으로 묻고 맞닿는 고체는 fuse로 합칩니다 |
+| 해수면이 브리프가 말하는 높이에 없다 | 브리프가 틀렸다 | 브리프 대신 기하를 보십시오 — 면적이 맞는 평평한 면을 찾습니다. 이 부지의 해수면은 z=+3이고(z=0의 겉보기 시트는 중복 껍질이다), trim/sea는 그 위 5 cm인 3.05에 둡니다 |
+| 풀이 새겨지지 않았다 (`not imprinted`) | 그 점의 지면이 평평하지 않다 — 디스크가 경사에 파묻힌다 | 풀 디스크는 평평한 지면을 가정합니다. 실행은 그 풀 없이 계속되고 summary에 기록되므로, 필요하면 점을 평평한 자리로 옮기십시오 |
+| GPU 솔버가 얇은 셀에 민감하다 | 선박–해수면, 지붕–슬랩 사이의 얇은 쐐기 | 한 반복 점검의 로더 줄 — `volume: ... min ...`과 `non-orthogonality: max ... deg` — 이 그 증거입니다. `post.thin_push_m`(예 0.2)으로 노드를 밀어 보십시오. 솔버 쪽 대응은 별도 트랜치입니다 |
 
 ---
 

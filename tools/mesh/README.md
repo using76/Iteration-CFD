@@ -52,7 +52,14 @@ sizes or the post settings re-meshes in one run without redoing the boolean
 work. `--dry-run` stops after the cut and prints volumes, masses, surface
 counts and the ground heights. A 3-D mesh that comes out empty writes
 `work/surface_only.msh` + `work/failed_summary.json` and exits **3**; every
-refusal (config, geometry, classification) exits non-zero with a named message.
+refusal (config, geometry, classification) exits **1** with a named message.
+
+The narrative manual for this workflow — every config key explained, the
+ammonia site as a worked example with per-stage timings, the solver and Fluent
+legs, the Studio tools, and the table of failures met on that site — is
+[`docs/GUIDEBOOK.md`](../../docs/GUIDEBOOK.md) §5 "STEP 형상에서 격자로, 그리고
+Fluent로" (English: [`docs/GUIDEBOOK.en.md`](../../docs/GUIDEBOOK.en.md) §5).
+This file stays the terse reference.
 
 ## Patches
 

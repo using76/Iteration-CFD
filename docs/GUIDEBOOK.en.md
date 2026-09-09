@@ -259,45 +259,429 @@ The full table, including how it collapses for LES, is in
 ### From a STEP geometry to a mesh, and to Fluent
 
 CAD hands you a STEP file; the solver eats a mesh. Two steps sit between them —
-Gmsh builds the mesh, and this repository's converter brings it in.
+Gmsh builds the mesh, and this repository's converter brings it in. This section
+is the full manual for those two steps. If you want only the summary — the
+schema, the 10-stage pipeline table, the checkers —
+[`tools/mesh/README.md`](../tools/mesh/README.md) carries it; this section
+carries the narrative. The worked example is one ammonia release site: from a
+single STEP file to about 3.6 M tetrahedra, with the timings below measured on
+that run.
 
-**STEP to a Gmsh mesh.** The setup is a single JSON file. The schema is in
-[`tools/mesh/README.md`](../tools/mesh/README.md).
+#### What you need
+
+- **One STEP file.** Its units are whatever `scale` says they are. The tool
+  never reads the file's unit declaration, it just multiplies — `0.001` for a
+  mm STEP, `1.0` if it is already in metres.
+- **Python 3.13** with `gmsh`, `numpy`, `scipy`, `pymeshlab`. What
+  `step_mesh.py` imports directly is gmsh and numpy; the surface-repair route
+  ([`repairs`](#writing-the-config)) additionally needs pymeshlab. The numbers
+  in this document come from a gmsh 4.14.1 environment.
+- **The built converter** `rust\target\release\ofgpu-convert-mesh.exe` — built
+  by `cd rust; cargo build --release` ([§2](#2-installing)). The Studio-side
+  tool looks at the `OFGPU_BIN_DIR` environment variable first, then at the
+  same build trees.
+
+The fastest way to confirm both are in place — it builds its own tiny STEP,
+meshes it four ways in seconds, and, when the converter is built, checks the
+polyMesh and a Fluent mesh too:
 
 ```powershell
-python tools\mesh\step_mesh.py step.json
+python tools\mesh\selftest.py
 ```
 
-**From the Gmsh mesh to a case and a Fluent mesh.** `ofgpu-convert-mesh` writes
-two things from one .msh — the `constant/polyMesh` of a case directory (format
-(b) above, so it runs as it stands; details in
-[`cases/README.md`](../cases/README.md)), and, with `-fluent`, an ASCII mesh
-ANSYS Fluent reads (tetrahedral meshes only). A patch's type comes from the
-`wall*`/`empty*`/`symmetry*` prefix of its name, or straight from
-`-type name=type`.
+#### Writing the config
+
+The setup is a single JSON file. The full schema is in
+[`tools/mesh/README.md`](../tools/mesh/README.md); unknown keys are refused by
+name, missing keys take their defaults, and only `step`, `out_dir` and
+`domain_box` are required. The whole ammonia site is this one file
+([`tools/mesh/examples/nh3_site.json`](../tools/mesh/examples/nh3_site.json)):
+
+```json
+{
+  "step": "C:/Users/sdd32/Desktop/암모니아누출/cfd_optimized_defeatured_recommended.step",
+  "scale": 0.001,
+  "out_dir": "C:/Users/sdd32/Desktop/암모니아누출/mesh",
+  "name": "nh3_site",
+  "fluid": {"tag": 1},
+  "domain_box": [-1250.0, -1250.0, -7.5, 1250.0, 1250.0, 200.0],
+  "outer_tol": 0.05,
+  "solids": {"sink_m": 1.5, "fuse": false, "exclude_tags": []},
+  "repairs": [
+    {"tag": 33, "method": "resample", "cell_m": 1.5, "target_faces": 6000, "lift_z": 3.05}
+  ],
+  "trim": {"below_z": 3.05},
+  "sea_z": 3.05,
+  "points": {
+    "tank_shell":    [-916.9, 349.8],
+    "ESDV1":         [-910.2, 329.3],
+    "skid":          [-869.5, 233.8],
+    "pipe_mid":      [-434.8, 116.9],
+    "ESDV2":         [-23.2,    9.4],
+    "ship_manifold": [  18.5,  -7.5]
+  },
+  "pool_radius_m": 26.0,
+  "roof_patches": {"nh3_source": 306},
+  "sizes": {
+    "min": 1.5, "max": 40.0, "pool": 2.0, "box": 4.0, "growth_from": 2.5,
+    "near_struct": 4.0, "far_struct": 12.0, "near_radius": 400.0,
+    "size_mult": 1.0, "roof_boxes": [2.5, 5.0, 10.0]
+  },
+  "mesh": {"algo2d": 6, "algo3d": 1, "optimize_passes": 5, "threads": 32},
+  "post": {
+    "flat_tets": true, "flat_threshold": 1e-7, "seam_merge_m": 0.02,
+    "sliver_edge_m": 0.6, "sliver_vol_m3": 0.2, "thin_push_m": 0.0
+  },
+  "classification": {"wall_prefix": "wall_", "big_roof_is_ground_m2": 2000.0}
+}
+```
+
+What changes when you change a key:
+
+| Key | What happens |
+|---|---|
+| `step` | The STEP to read. Another site starts by changing this line alone |
+| `scale` | Multiplied into the STEP coordinates (`Geometry.OCCScaling`, applied BEFORE the import). Get it wrong and the geometry is a thousand times too big or small, and the cut refuses on the expected-mass check |
+| `out_dir` | Where the `.msh`/`.vtk`/`_summary.json` land, and `work/` with them |
+| `name` | The prefix of every output and checkpoint file |
+| `fluid` | Which imported solid is the flow domain. When you do not know the tags, `{"largest": true}` |
+| `domain_box` | The domain box. Five of its six faces become the `top`/`west`/`east`/`south`/`north` patches. Grow it and the far field fills with that much more cell at `sizes.max` |
+| `outer_tol` | Tolerance of the outer-face tests. When an outer patch comes out empty and the run refuses, raise this first |
+| `solids.sink_m` | Stretches every building base this far downwards, about its roof (removes the hairline air layer a floating base leaves above the terrain). But keep the bases off the trim plane: 2.0 puts them at exactly 3.0 and 1,814 faces reach below the trim, 1.5 puts none there |
+| `solids.fuse` | `true` fuses the solids before the cut — merging the coincident faces and hairline slits of touching or overlapping neighbours, at the price of a heavier boolean |
+| `solids.exclude_tags` | Solids left out of the cut entirely (removed from the model) |
+| `repairs[].tag` | The solid to replace with a repair — for self-intersecting solids, which on this site means the ship's hull |
+| `repairs[].method` | Only `"resample"` exists: a 2-D mesh at 3 m → pymeshlab uniform resampling on a `cell_m` grid → quadric decimation (the coarsest of the `target_faces`/10000/16000 ladder that is watertight, manifold and free of self-intersections) → an OCC solid of planar triangles. Cached as `work/repaired_<tag>.brep`; pass `"brep"` to reuse a cache |
+| `repairs[].cell_m` | The resampling grid. Coarser blunts the hull and yields fewer faces |
+| `repairs[].target_faces` | The first target of the decimation ladder. Lower is a cruder proxy |
+| `repairs[].lift_z` | How far the repaired solid is raised afterwards. This STEP floats the ship at the STEP's z = 0 while the sea plane is +3, hence 3.05; 0 keeps the solid's own height |
+| `trim.below_z` | Everything below this plane is cut away with a box; `null` means no trim. This site uses 3.05 because the real sea surface is at z = +3: five centimetres above the existing face, the boolean does not have to cut along a face that is already there, and the plane the cut creates is what becomes `wall_sea_surface` |
+| `sea_z` | Flat faces within ±0.06 of this height are classified `wall_sea_surface`. Keep it at the trim height |
+| `points` | Name → (x, y). Each point gets its ground height found by an isInside scan from z = −1 in 0.25 m steps, and with it a pool disc, a ±40 m box, a ±150 m box and a growth field. Renaming a point makes the checkpoint refuse — ground heights and pools belong to it, so a rename is a rerun from the start |
+| `pool_radius_m` | The radius of the pool disc imprinted at each point. A pool assumes the ground is planar there |
+| `roof_patches` | Name → solid tag. That solid's flat roof becomes its own patch, and three refinement boxes settle around it (roof ±60 m, ±250 m, and a −700 m downwind arm) |
+| `sizes.min` | `Mesh.MeshSizeMin` — the floor: no edge shorter than this anywhere |
+| `sizes.max` | `Mesh.MeshSizeMax` and every field's outside size — the far-field cell size |
+| `sizes.pool` | The size inside each point's ±40 m, ground +10 m box (the pool and the first metres above it) |
+| `sizes.box` | The size inside each point's ±150 m, +30 m box (the refinement box of the brief) |
+| `sizes.growth_from` | The size at a point, held for 40 m and grown to `max` over 700 m |
+| `sizes.near_struct` | The size near structures within `near_radius` of a point (grown to `max` over 80 m) |
+| `sizes.far_struct` | The size near the rest of the structures (over 120 m) |
+| `sizes.near_radius` | The near/far split, measured from the point's (x, y) |
+| `sizes.size_mult` | Above 1, multiplied into every size (min, max, every box's VIn, every threshold, Thickness) — a coarse all-over mesh for a solver-robustness reproducer |
+| `sizes.roof_boxes` | The three sizes of the boxes around a roof patch [near, mid, downwind] |
+| `mesh.algo2d` | The 2-D algorithm (6 = Frontal-Delaunay). Faces left with overlapping triangles are remeshed automatically with 5 (Delaunay), then 1 (MeshAdapt) |
+| `mesh.algo3d` | **Leave it at 1 (Delaunay).** HXT (10) hits gmsh's unfinished Steiner-point path during boundary recovery on this class of geometry and kills the whole process. When another algorithm ends with zero tetrahedra the tool retries with Delaunay itself |
+| `mesh.optimize_passes` | Passes of gmsh's own optimiser (edge/face swaps + smoothing), threshold 0.5 |
+| `mesh.threads` | Threads for the 2-D and 3-D passes |
+| `post.flat_tets` | The flat-tet removal stage after the 3-D pass. Delaunay leaves zero-volume tets on planar boundaries; keep it on |
+| `post.flat_threshold` | A tet is flat when \|V\| < this × (longest edge from node 0)³ |
+| `post.seam_merge_m` | Node pairs closer than this inside a flat tet are merged everywhere (the seam treatment) |
+| `post.sliver_edge_m`, `post.sliver_vol_m3` | Edges shorter than `sliver_edge_m` inside a tet of less than `sliver_vol_m3` are collapsed to kill slivers |
+| `post.thin_push_m` | Above 0, pushes nodes of thin tets (gamma < 0.02) by up to this. For thin wedges left between the hull and the sea plane (e.g. 0.2) |
+| `classification.wall_prefix` | The prefix of the four `wall_*` groups |
+| `classification.big_roof_is_ground_m2` | A flat roof on a slab bigger than 100 × 100 m whose area exceeds this is terrain (`wall_ground_land`), not a building |
+
+The numbers the schema does not name — the points' boxes at ±40/±150 m, the roof
+boxes at ±60/±250 m plus the −700 m downwind arm, the growth distances 40/700 m,
+the structure-field distances 0–80/120 m, the ground scan at −1..60 m in 0.25 m,
+the 0.5 m hull slack, the big roof's 100 × 100 m shape test — are the reference
+script's hard-coded values, ported unchanged. That field layout is what this
+site's mesh was tuned with.
+
+#### Running it
+
+First a scaled-down pass:
 
 ```powershell
-ofgpu-convert-mesh site.msh site_case -fluent site_fluent.msh -type wall_ground=wall
+python tools\mesh\step_mesh.py step.json --dry-run
 ```
 
-**Inside the Studio the two steps are tools.** `mesh_from_step` (the path of the
-config JSON, optionally extra tokens such as `--from-checkpoint`) and
-`mesh_to_fluent` (the .msh path, the case directory, the Fluent output path,
-optionally `-type name=type` tokens) are read out of
-`gui/server/tools.defaults.json` and registered when the server starts, so
-nothing needs to be created by hand. A user tool of the same name wins, and
-running either asks for approval like every other tool.
+It stops after the import and the cut and prints volumes, masses, surface
+counts and the ground heights under the points (also written to
+`work/dry_run_summary.json`). Minutes on this site; most geometry refusals end
+here.
 
-**Reading it on the Fluent side.** File > Read > Mesh. Coordinates are treated
-as metres, and the zone names follow the patch names — walls are `wall`,
-`symmetry*` is `symmetry`, `east`/`inlet*`/`*_source` are `velocity-inlet`, the
-rest is `pressure-outlet`, with `-fluentType name=zone` to change one. After
-reading, run Mesh > Check. If the counterpart wants CGNS instead, the
-alternative is writing it straight from the Gmsh step with `gmsh.write('x.cgns')`.
+Then the real run, visible in its own console:
 
-The Fluent mesh writer follows Appendix B.3.7 of the ANSYS FLUENT 12.0 User's
-Guide (public mirror:
+```powershell
+.\tools\mesh\run_step_mesh.cmd step.json
+```
+
+That .cmd runs step_mesh.py in the current console — the stage banners print as
+they happen — copies every line to `<out_dir>\work\run.log` as well, and passes
+step_mesh.py's exit code straight through.
+
+For iterating on sizes there is the checkpoint:
+
+```powershell
+python tools\mesh\step_mesh.py step.json --stop-after-checkpoint   # cut + pools
+python tools\mesh\step_mesh.py step.json --from-checkpoint --tag coarse
+```
+
+`--stop-after-checkpoint` writes the checkpoint (`work/<name>_pools.brep` +
+`.json`) and stops. `--from-checkpoint` starts from it — reads the
+metre-space checkpoint, drops loose surfaces, takes the ground heights and the
+pool outcomes from the `.json` — so a repeat that only changes `sizes` or
+`post` skips the cut and the pools (about 15 minutes on this site) and re-meshes
+from the trim in minutes. It refuses when the config's `points` differ from the
+checkpoint's — the ground heights and the pools belong to it. `--tag NAME`
+suffixes the outputs to `<name>_<NAME>.msh` and so on, keeping runs apart.
+
+The run is ten stages, each announcing itself with a banner shaped like
+`========== [ 7/10] trim  (elapsed ...) ==========` and the elapsed seconds;
+every line is prefixed with the elapsed seconds too:
+
+1. **import** — the STEP in at `scale` (`Geometry.OCCScaling`), the fluid solid
+   found by tag or as the largest, its mass reported
+2. **cut** — per-solid repairs, the sink stretch, the optional fuse, one boolean
+   cut, sealed pockets dropped and listed
+3. **ground heights** — per point, an isInside scan from z = −1 in 0.25 m steps
+4. **classification** — every boundary face into exactly one patch (reported
+   before the pools and again after the trim)
+5. **pool discs** — one disc per point at its ground height; when one fails the
+   run restores the post-cut checkpoint and continues without that pool
+6. **checkpoint** — writes `work/<name>_pools.brep` + `.json`
+   (`--stop-after-checkpoint` ends here)
+7. **trim** — unless the config's trim is null, cuts everything below
+   `below_z` with a box and reports the new flat faces' count and area, and how
+   many faces reach below the trim plane
+8. **groups + fields** — physical groups and the size fields (point boxes,
+   growth thresholds, near/far structure fields, roof boxes), combined with a Min
+9. **mesh** — `generate(1)`, coincident-curve families unified, `generate(2)`,
+   faces with overlapping triangles remeshed (5, then 1), `generate(3)`, the
+   gmsh optimiser
+10. **post + write** — flat-tet removal with quality before and after, the three
+    output files
+
+Measured on this site:
+
+| Stage | Time |
+|---|---|
+| import | 12 s |
+| ship repair (repairs) | 60 s |
+| cut | 3 min |
+| pool discs (six points) | 9–11 min |
+| trim | 1.5 min |
+| 2-D meshing | 20 s |
+| 3-D meshing | 3 min |
+| post + write | 2 min |
+| **Total (about 3.6 M tets)** | **about 23 min** |
+
+The outputs land in `out_dir`:
+
+```
+mesh/
+  nh3_site.msh              Gmsh 4.1 ASCII, physical groups = the patches
+  nh3_site.vtk              binary, for viewing only
+  nh3_site_summary.json     counts, groups, quality, timings, the whole config
+  work/
+    nh3_site_cut.brep       just after the cut (the pool-failure restore point)
+    nh3_site_pools.brep     the checkpoint (+ .json) — where --from-checkpoint starts
+    nh3_site_trimmed.brep   just after the trim
+    repaired_33.brep        the ship-repair cache
+    run.log                 every line, when run through run_step_mesh.cmd
+```
+
+`_summary.json` holds the gmsh version, the per-stage `timings_s`, the fluid
+tag and mass, the solid bounding boxes, the repair replacements, the dropped
+pockets, the ground height per point, the pool outcomes (`imprinted` / `not
+imprinted` / `failed`), each patch's surface count and area (`groups`), the mass
+the trim removed, the faces remeshed for overlaps, the triangle and tetrahedron
+counts, the quality (before and after the flat-tet stage), the flat-tet notes,
+the file sizes in bytes, and the whole config.
+
+Three exit codes: **0** success (including `--dry-run` and
+`--stop-after-checkpoint`), **1** refusal — an unknown config key, a missing
+fluid tag, a cut mass that disagrees, an empty outer patch, a classification
+that fails to cover the boundary — with a message that names the problem, and
+**3** the 3-D pass came out empty — in which case the surface mesh is saved to
+`work/surface_only.msh` and the summary to `work/failed_summary.json`, so the
+PLC error's point can be inspected.
+
+#### Reading the result
+
+The patch names come from the classification: `top`/`west`/`east`/`south`/
+`north` (five faces of the domain box), `wall_sea_surface` (the flat faces at
+`sea_z`), `wall_ship_hull` (within 0.5 m of a repaired solid's bbox),
+`wall_buildings` (faces inside a solid's bbox), `wall_ground_land` (everything
+else, plus the flat roofs of very large slabs), `pool_<point name>` (the
+disc-sized pieces at a point's ground height), and one patch per `roof_patches`
+name (`nh3_source` here). `_summary.json`'s `groups` has each patch's surface
+count and area — that is where you see a patch that came out empty or
+suspiciously wide.
+
+Quality prints twice, after the 3-D pass and again after the flat-tet stage,
+in two measures:
+
+```
+  minSICN min 0.2999  p1 0.xxx  p5 0.xxx  p50 0.xxx  <0.1: 0  <0: 0
+```
+
+`minSICN` is the minimum signed inverse condition number: 1 is a regular
+tetrahedron, 0 is collapsed, negative is inverted. `p1`/`p5`/`p50` are
+percentiles, `<0.1` the count of tets below 0.1, `<0` the count of negative
+volumes. **A `<0` above zero means the mesh must not reach a solver.** (The
+selftest's little box lands near 0.2999.) `gamma` prints as a line of the same
+shape alongside.
+
+The post notes, in `_summary.json`'s `flat_tets_notes`, record how many flat
+tets were found and removed by re-triangulating the boundary under them, how
+many seam node pairs were merged and how many tets and triangles collapsed with
+them, how many sliver edges were collapsed and how many collapses were reverted
+(one that would invert a tet is refused), and how many thin tets were pushed.
+
+#### To the solver
+
+```powershell
+ofgpu-convert-mesh mesh\nh3_site.msh nh3_case -type pool_tank_shell=wall
+```
+
+writes the `constant/polyMesh` of a case directory from one .msh (format (b)
+above). A patch's type follows the prefix of its name — starting with `wall`
+gives `wall`, `empty` gives `empty`, `symmetry` gives `symmetry` (all
+case-insensitive), anything else keeps `patch`. The NAME stays exactly as Gmsh
+wrote it; only the type changes. The `pool_*` patches sit on the ground, so for
+the solver they are walls — wall treatment is picked from the TYPE, so a pool
+left as a plain `patch` would never see a wall function. `-type name=type`,
+repeatable per patch, wins over the prefix convention; a value that means
+nothing is refused with the accepted list (`patch`, `wall`, `mappedWall`,
+`empty`, `symmetry`, `symmetryPlane`, `wedge`, `cyclic`, `cyclicAMI`,
+`cyclicSlip`, `processor`, `processorCyclic`).
+
+Two more refusals worth knowing: a target directory that already holds a
+`constant/polyMesh` is refused rather than overwritten (it may be the only copy
+some pre-processing chain produced), and `-fluent` output covers tetrahedral
+meshes only — a quadrilateral face, or a cell with a face count other than
+four, is refused by name.
+
+**Check the mesh with a one-iteration run first.**
+
+```powershell
+ofgpu-buoyant nh3_case -iters 1
+```
+
+Before it touches any field, the loader prints the mesh statistics — the
+`mesh: <cells> cells, ...` line, the patch table (name, type, face count),
+`volume: total ..., min ..., max ...`, `non-orthogonality: max ... deg, mean
+... deg`, `face closure`, `lduAddressing: upper-triangular`. Those lines are
+this mesh's report card. A freshly converted case has no `0/`, so what follows
+is:
+
+```
+error: no time directory with initial fields found in nh3_case
+```
+
+**That refusal is the expected, healthy outcome** — the mesh loaded and its
+structure checked out. If the volume or the non-orthogonality worries you, see
+the troubleshooting table below; if it reads well, fill in `0/`,
+`constant/` and `system/`. The shape of a case is [§4](#4-the-shape-of-a-case),
+the field and dictionary details are in
+[`cases/README.md`](../cases/README.md), and which driver solves what is
+[§6](#6-choosing-a-solver--where-people-go-wrong) — this site is a buoyant
+case, so it goes to `ofgpu-buoyant`.
+
+#### To Fluent
+
+```powershell
+ofgpu-convert-mesh mesh\nh3_site.msh nh3_case -fluent nh3_site_fluent.msh
+```
+
+`-fluent` writes the SAME fixed-up mesh as an ASCII mesh ANSYS Fluent reads. The
+format is Appendix B "Mesh File Format", B.3.7 "Faces" of the ANSYS FLUENT 12.0
+User's Guide (public mirror:
 [afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm](http://afs.enea.it/project/neptunius/docs/fluent/html/ug/node1471.htm)).
+The orientation rule is that document's too — "if you curl the fingers of your
+right hand in the order of the nodes, your thumb will point toward c1" — and
+every index is hexadecimal and 1-based.
+
+Zone names follow the patch names. The defaults take the polyMesh type first (a
+`wall` stays `wall`, `symmetry` stays `symmetry`), then the names this project
+gives its inlets — `east`, a name starting with `inlet`, one ending with
+`_source` become `velocity-inlet`, and everything else `pressure-outlet`.
+Fluent re-zones after reading anyway, so a default only has to be a sane
+starting point; `-fluentType name=zone` sets one outright and wins over the
+defaults, and a zone outside `wall`, `velocity-inlet`, `pressure-inlet`,
+`pressure-outlet`, `outflow`, `symmetry`, `interior` is refused. The zone ids
+run 1 for the fluid cell zone, 2 for the interior face zone, and the patches
+from 10 up in order.
+
+In Fluent: File > Read > Mesh. Coordinates are treated as metres, and after
+reading run Mesh > Check.
+
+**A path caveat.** Fluent's Cortex fails on a folder path with Korean
+characters in it — this site's working folder was one. Put the mesh file Fluent
+will read on an ASCII-only path.
+
+If the counterpart wants CGNS instead, the alternative is writing it straight
+from the Gmsh step with `gmsh.write('x.cgns')` and opening it with File >
+Import > CGNS.
+
+**Checking it independently.** The file the converter wrote can be checked
+without Fluent:
+
+```powershell
+python tools\mesh\tester_mesh.py 0.5
+ofgpu-convert-mesh tester_tet.msh case -fluent tester_ours.msh
+python tools\mesh\fluent_check.py tester_ours.msh tester_tet_geometry.json
+```
+
+`tester_mesh.py` builds a small known case (a hexahedral box with a tetrahedron
+cut out of its middle) and `fluent_check.py` parses any Fluent ASCII mesh from
+scratch and checks that the header counts match the bodies, that every cell
+closes and has positive volume, that the total volume equals box minus
+tetrahedron, that boundary faces have one cell and their normals point out of
+the domain, which c0/c1 orientation convention the file actually follows
+(measured, not assumed), and that every zone lies on the plane or solid it is
+named after. On 2026-09-09 this tester was also compared against OpenFOAM's
+foamMeshToFluent: both files hold the same cells, nodes, topology and volume,
+and differ only in the orientation convention (the counterpart writes the
+inverse of the manual's rule).
+
+#### In the Studio
+
+Both steps are also registered as Studio default tools. The server reads them
+out of `gui/server/tools.defaults.json` when it starts, so nothing needs to be
+created by hand.
+
+- **`mesh_from_step`** — inputs: `config` (the path of the config JSON,
+  required) and `extra` (optional extra CLI tokens, e.g. `--from-checkpoint`).
+  It runs the same command as the console — `python <repo>\tools\mesh\step_mesh.py
+  <config> <extra>`.
+- **`mesh_to_fluent`** — inputs: `msh`, `case`, `fluent` (required) and
+  `types` (optional `-type name=type` tokens). The same command again —
+  `<OFGPU_BIN_DIR>\ofgpu-convert-mesh <msh> <case> -fluent <fluent> <types>`.
+
+An optional field left empty contributes no token at all, and a value holding
+whitespace becomes one argument per word. `<repo>` resolves to the repository
+root, and `<OFGPU_BIN_DIR>` finds the binary the way the solvers are found
+(`OFGPU_BIN_DIR` → `rust/target/release` → `rust/target/debug`).
+
+Running goes through `custom_tool_run` and asks for approval like every other
+tool. A user tool of the same name, registered with `custom_tool_create`,
+**wins**: the merge puts the user's tools first and a default only fills a name
+the user has not taken. Defaults are never written into the user's file
+(`gui/config/custom-tools.json`).
+
+One thing to know: command tools have a 60-second time cap. A full site run
+(about 23 minutes) does not fit inside it — that belongs in a console through
+`run_step_mesh.cmd` — and the Studio tools are for short stages such as
+`--dry-run` and the conversions.
+
+#### Troubleshooting — the failures met on this site
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| Choosing `algo3d: 10` (HXT) kills the whole process without warning | gmsh's unfinished Steiner-point path, hit during boundary recovery. It is a kill, not an exception, so nothing can catch it | Leave `algo3d: 1` (Delaunay). When another algorithm ends with zero tets the tool retries with Delaunay itself |
+| Netgen's optimiser dies with an access violation | A defect of this gmsh build (4.14.1) | Netgen is not offered at all; use gmsh's own optimiser (`optimize_passes`) |
+| `No elements in volume` — the 3-D pass drops every tet | Nodes were merged BEFORE the 3-D pass | Never merge before the 3-D pass. The seam merge is the post stage's `seam_merge_m`, after it (the working route, found 2026-09-08) |
+| A self-intersecting solid (the ship's hull) yields no volume | The STEP itself carries faces that cross each other | `repairs` with `resample` — replace it with a closed proxy resampled on a `cell_m` grid. Reuse the cache (`work/repaired_<tag>.brep`) via `brep` to skip the repair |
+| A building floats above the terrain | The STEP's base sits above the ground under it | Bury it with `solids.sink_m`. But keep bases off the trim plane — 2.0 lands them at exactly 3.0 and 1,814 faces reach below the trim, 1.5 lands none |
+| Hairline gaps between buildings | Neighbouring solids stand a few centimetres apart in the STEP | Do not fatten the solids. Where neighbours touch or overlap, `solids.fuse: true` |
+| The 3-D pass fails on overlapping facets (exit 3) | The price of fattening a solid to close a gap — two walls now occupy the same place | Undo the fatten. Bases are buried with `sink_m`, touching solids are merged with `fuse` |
+| The sea surface is not where the brief says | The brief is wrong | Look at the geometry, not the brief — find the flat face with the right area. This site's sea is at z = +3 (the apparent sheet at z = 0 is a duplicate shell); trim/sea go five centimetres above it, at 3.05 |
+| A pool comes out `not imprinted` | The ground at that point is not planar — the disc came back embedded in a slope | Pool discs assume planar ground. The run continues without the pool and the summary says so; move the point to flat ground if the pool matters |
+| The GPU solver is sensitive to thin cells | Thin wedges between the hull and the sea plane, a roof and a slab | The loader's `volume: ... min ...` and `non-orthogonality: max ... deg` lines are the evidence — see the one-iteration check above. Try `post.thin_push_m` (e.g. 0.2). The solver-side work on this is a separate tranche |
 
 ---
 
