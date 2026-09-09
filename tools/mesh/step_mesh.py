@@ -84,6 +84,7 @@ PRE3D_MERGE = 0.0                  # OFF: merging seams BEFORE the 3-D pass make
                                    # seams are merged after it, in the flat-tet stage
 THIN_SICN = 0.02                   # a thin tet for the push stage: gamma below this
 SLIVER_ROUNDS = 8
+HULL_FLAT_M = 0.05                 # a hull corner less than this off its neighbours' line is dropped
 PUSH_ROUNDS = 3
 
 DEFAULTS = {
@@ -91,7 +92,9 @@ DEFAULTS = {
     'name': 'site',
     'fluid': {'tag': 1, 'largest': False},
     'outer_tol': 0.05,              # tolerance of the top/west/east/south/north tests
-    'solids': {'sink_m': 2.0, 'fuse': False, 'exclude_tags': [], 'touch_warn_m': 0.05},
+    'solids': {'sink_m': 2.0, 'fuse': False, 'exclude_tags': [], 'touch_warn_m': 0.05,
+               'hull_beyond_m': 0.0, 'hull_pad_m': 1.0, 'hull_snap_m': 0.05,
+               'boolean_tol_m': 0.0},
     'repairs': [],                  # [{'tag', 'method', 'cell_m', 'target_faces', 'lift_z', 'brep'}]
     'trim': {'below_z': 3.05},      # or null: no trim
     'sea_z': 3.05,
@@ -243,6 +246,14 @@ def load_config(path):
     if not (isinstance(sol['exclude_tags'], list) and
             all(isinstance(t, int) and not isinstance(t, bool) for t in sol['exclude_tags'])):
         errors.append('config.solids.exclude_tags: expected a list of integer solid tags')
+    if not _is_num(sol['hull_beyond_m']) or sol['hull_beyond_m'] < 0:
+        errors.append('config.solids.hull_beyond_m: expected a distance >= 0 (0 disables)')
+    if not _is_num(sol['hull_pad_m']) or sol['hull_pad_m'] < 0:
+        errors.append('config.solids.hull_pad_m: expected a non-negative pad in metres')
+    if not _is_num(sol['hull_snap_m']) or sol['hull_snap_m'] < 0:
+        errors.append('config.solids.hull_snap_m: expected a snapping distance >= 0')
+    if not _is_num(sol['boolean_tol_m']) or sol['boolean_tol_m'] < 0:
+        errors.append('config.solids.boolean_tol_m: expected a fuzzy boolean tolerance >= 0 (0 = exact)')
     if not _is_num(sol['touch_warn_m']) or sol['touch_warn_m'] < 0:
         errors.append('config.solids.touch_warn_m: expected a non-negative distance (0 disables)')
 
@@ -589,8 +600,148 @@ def repair_one(cfg, entry, work):
     return brep
 
 
+def hull_corners(tag, bbox, pad):
+    """The footprint of solid `tag` as its convex hull pushed out by `pad` (ccw corners), with
+    the solid's z range; None when the outline is degenerate (fewer than three hull corners)."""
+    verts = gmsh.model.getBoundary([(3, tag)], combined=False, oriented=False, recursive=True)
+    xy = np.array([gmsh.model.getValue(0, p, [])[:2] for d, p in verts if d == 0])
+    if len(xy) < 3:
+        return None
+    # convex hull of the footprint (monotone chain), counter-clockwise
+    pts = sorted(set(map(tuple, np.round(xy, 6))))
+    if len(pts) < 3:
+        return None
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    def turns_left(o, a, b):
+        # a corner survives only if it stands more than HULL_FLAT_M off the line o-b: a wall
+        # whose vertices are millimetres out of line would otherwise leave hull edges of
+        # millimetres, and the fuse of neighbouring prisms turns those into sliver faces
+        c = cross(o, a, b)
+        base = math.hypot(b[0] - o[0], b[1] - o[1])
+        return c > 0 and (base < 1e-9 or c / base > HULL_FLAT_M)
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and not turns_left(lower[-2], lower[-1], p):
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and not turns_left(upper[-2], upper[-1], p):
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1] + upper[:-1]
+    if len(hull) < 3:
+        return None
+    # push every edge outwards by pad and intersect consecutive edge lines
+    n = len(hull)
+    lines = []
+    for i in range(n):
+        (x0, y0), (x1, y1) = hull[i], hull[(i + 1) % n]
+        ex, ey = x1 - x0, y1 - y0
+        L = math.hypot(ex, ey)
+        if L < 1e-9:
+            continue
+        nx, ny = ey / L, -ex / L                      # outward normal of a ccw polygon
+        lines.append(((x0 + pad * nx, y0 + pad * ny), (ex / L, ey / L)))
+    if len(lines) < 3:
+        return None
+    corners = []
+    for i in range(len(lines)):
+        (p0, d0), (p1, d1) = lines[i - 1], lines[i]
+        den = d0[0] * d1[1] - d0[1] * d1[0]
+        if abs(den) < 1e-12:                          # parallel consecutive edges: keep the joint
+            corners.append((p1[0], p1[1]))
+            continue
+        t = ((p1[0] - p0[0]) * d1[1] - (p1[1] - p0[1]) * d1[0]) / den
+        corners.append((p0[0] + t * d0[0], p0[1] + t * d0[1]))
+    corners = clean_polygon(corners, HULL_FLAT_M)
+    if corners is None:
+        return None
+    z0, z1 = bbox[2], bbox[5]
+    if z1 - z0 < 0.05:
+        return None
+    return corners, z0, z1
+
+
+def clean_polygon(corners, tol):
+    """Drop corners closer than `tol` to their predecessor and corners less than `tol` off the
+    line through their neighbours (the wrap-around pair included), until nothing changes;
+    None when fewer than three corners remain."""
+    pts = [tuple(c) for c in corners]
+    changed = True
+    while changed and len(pts) >= 3:
+        changed = False
+        n = len(pts)
+        for i in range(n):
+            a, b, c = pts[i - 1], pts[i], pts[(i + 1) % n]
+            if math.hypot(b[0] - a[0], b[1] - a[1]) < tol:
+                del pts[i]
+                changed = True
+                break
+            base = math.hypot(c[0] - a[0], c[1] - a[1])
+            off = abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / max(base, 1e-12)
+            if off < tol:
+                del pts[i]
+                changed = True
+                break
+    return pts if len(pts) >= 3 else None
+
+
+def snap_corners(prisms, tol):
+    """Corners of different prisms closer than `tol` become one point (the first seen), so
+    neighbouring prisms share their vertices exactly and the fuse merges their edges instead
+    of leaving two vertical edges millimetres apart - the mesher treats those as duplicate
+    points and the 3-D boundary recovery fails on them."""
+    if tol <= 0 or cKDTree is None:
+        return 0
+    flat = [(i, j, c) for i, (corners, z0, z1) in prisms.items() for j, c in enumerate(corners)]
+    if len(flat) < 2:
+        return 0
+    P = np.array([c for i, j, c in flat])
+    tree = cKDTree(P)
+    parent = list(range(len(flat)))
+
+    def root(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for a, b in tree.query_pairs(tol):
+        ra, rb = root(a), root(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    moved = 0
+    for k, (i, j, c) in enumerate(flat):
+        r = root(k)
+        if r != k:
+            prisms[i][0][j] = tuple(P[r])
+            moved += 1
+    return moved
+
+
+def build_prism(corners, z0, z1):
+    """An OCC prism over the polygon `corners` (ccw) from z0 to z1: (tag, bbox) or None."""
+    corners = clean_polygon(corners, HULL_FLAT_M)      # snapping may have merged neighbours
+    if corners is None:
+        return None
+    ptags = [gmsh.model.occ.addPoint(x, y, z0) for x, y in corners]
+    ltags = [gmsh.model.occ.addLine(ptags[i], ptags[(i + 1) % len(ptags)]) for i in range(len(ptags))]
+    loop = gmsh.model.occ.addCurveLoop(ltags)
+    face = gmsh.model.occ.addPlaneSurface([loop])
+    out = gmsh.model.occ.extrude([(2, face)], 0, 0, z1 - z0)
+    vols = [t for d, t in out if d == 3]
+    if len(vols) != 1:
+        return None
+    xs, ys = [c[0] for c in corners], [c[1] for c in corners]
+    # the bbox from the corners: the prism is not synchronised into the model yet
+    return vols[0], [min(xs), min(ys), z0, max(xs), max(ys), z1]
+
+
 def cut_stage(cfg, args, work):
-    """Repairs, the sink stretch, the optional fuse, the boolean cut, pockets dropped."""
+    """Repairs, the far-solid hull smear, the sink stretch, the optional fuse, the boolean cut,
+    pockets dropped."""
     stage(2, 'cut')
     t = time.time()
     fluid = SUMMARY['fluid']
@@ -624,6 +775,51 @@ def cut_stage(cfg, args, work):
                               bbox[1], bbox[4], bbox[2], bbox[5]))
         solid_bbox.pop(entry['tag'], None)
 
+    # far from every release point a building's exact outline does not matter, but the slits
+    # between neighbouring solids do: walls a few centimetres to a metre apart leave a slot
+    # narrower than the local cell, which the mesher can only fill with slivers, and those are
+    # where the steady solution blows up. So every solid farther than hull_beyond_m from the
+    # nearest point is replaced by the prism of its footprint's convex hull, pushed out by
+    # hull_pad_m: neighbours then overlap and the cut merges them, slits and all.
+    hull_beyond = cfg['solids']['hull_beyond_m']
+    if hull_beyond > 0:
+        n_hull, n_kept, n_skipped = 0, 0, 0
+        keep_tags = set(cfg['solids']['exclude_tags']) | {r['tag'] for r in cfg['repairs']}
+        pool_xy = list(cfg['points'].values())
+        prisms = {}
+        for tg in sorted(solid_bbox):
+            if tg in keep_tags:
+                continue
+            b = solid_bbox[tg]
+            cx, cy = 0.5 * (b[0] + b[3]), 0.5 * (b[1] + b[4])
+            if min(math.hypot(cx - px, cy - py) for px, py in pool_xy) <= hull_beyond:
+                n_kept += 1
+                continue
+            made = hull_corners(tg, b, cfg['solids']['hull_pad_m'])
+            if made is None:
+                n_skipped += 1
+                continue
+            prisms[tg] = [list(made[0]), made[1], made[2]]
+        n_snapped = snap_corners(prisms, cfg['solids']['hull_snap_m'])
+        for tg, (corners, z0, z1) in prisms.items():
+            made = build_prism(corners, z0, z1)
+            if made is None:
+                n_skipped += 1
+                continue
+            new_tag, new_bbox = made
+            gmsh.model.occ.remove([(3, tg)], recursive=True)
+            solid_bbox.pop(tg)
+            solid_bbox[new_tag] = new_bbox
+            n_hull += 1
+        gmsh.model.occ.synchronize()
+        log('solids beyond %.0f m of the points replaced by padded convex-hull prisms: %d '
+            '(pad %.2f m, %d corners snapped onto neighbours within %.2f m); %d kept as '
+            'modelled (near a point), %d skipped (degenerate outline)'
+            % (hull_beyond, n_hull, cfg['solids']['hull_pad_m'], n_snapped,
+               cfg['solids']['hull_snap_m'], n_kept, n_skipped))
+        SUMMARY['solids_hulled'] = n_hull
+        SUMMARY['hull_corners_snapped'] = n_snapped
+
     # the buildings' bases can sit above the terrain under them, which leaves a hairline air
     # layer the mesher fills with slivers the solver cannot survive: stretch every other solid
     # downwards about its roof, so the base sinks sink_m into the ground; roofs and walls stay
@@ -655,6 +851,13 @@ def cut_stage(cfg, args, work):
         log('excluded from the cut and removed: tags %s' % sorted(cfg['solids']['exclude_tags']))
         SUMMARY['solids_excluded'] = sorted(cfg['solids']['exclude_tags'])
 
+    # a fuzzy boolean merges the near-coincident vertices and edges that overlapping tools
+    # (padded hull prisms crossing each other) would otherwise leave millimetres apart; it must
+    # be on for the fuse as well as for the cut, or the fuse creates exactly those vertices
+    if cfg['solids']['boolean_tol_m'] > 0:
+        gmsh.option.setNumber('Geometry.ToleranceBoolean', cfg['solids']['boolean_tol_m'])
+        log('boolean tolerance (fuzzy fuse and cut): %.4f m' % cfg['solids']['boolean_tol_m'])
+
     # neighbouring solids touch, overlap or stand a few centimetres apart in the STEP, which
     # leaves coincident faces and hairline slits in the fluid; fusing them first merges all that
     if cfg['solids']['fuse'] and len(tools) > 1:
@@ -665,11 +868,42 @@ def cut_stage(cfg, args, work):
         log('solids fused: -> %d solids, %.0f s' % (len(tools), time.time() - t_f))
         SUMMARY['solids_fused'] = len(tools)
         solid_bbox = {tg: list(gmsh.model.getBoundingBox(3, tg)) for d, tg in tools}
+    # the union of two prisms whose walls are nearly in line keeps a step of centimetres
+    # between them - a face of a few square centimetres with edges of millimetres, which the
+    # mesher can only fill with slivers (OCC's shape healing removes them but leaves a shape
+    # the 3-D mesher refuses). So each fused group of far solids is replaced once more by the
+    # prism of its own convex hull: one convex block per group, no steps, no slits
+    if hull_beyond > 0 and cfg['solids']['fuse'] and len(tools) > 1:
+        t_g = time.time()
+        far_tags = [tg for d, tg in tools if tg not in repaired]
+        prisms = {}
+        for tg in far_tags:
+            made = hull_corners(tg, solid_bbox[tg], 0.0)
+            if made is not None:
+                prisms[tg] = [list(made[0]), made[1], made[2]]
+        n_snapped = snap_corners(prisms, cfg['solids']['hull_snap_m'])
+        n_groups = 0
+        for tg, (corners, z0, z1) in prisms.items():
+            made = build_prism(corners, z0, z1)
+            if made is None:
+                continue
+            new_tag, new_bbox = made
+            gmsh.model.occ.remove([(3, tg)], recursive=True)
+            solid_bbox.pop(tg, None)
+            solid_bbox[new_tag] = new_bbox
+            n_groups += 1
+        gmsh.model.occ.synchronize()
+        tools = [(3, tg) for tg in solid_bbox if tg not in repaired]
+        log('fused groups replaced by the prisms of their convex hulls: %d (%d corners '
+            'snapped), %.0f s' % (n_groups, n_snapped, time.time() - t_g))
+        SUMMARY['fused_groups_hulled'] = n_groups
     tools += [(3, tg) for tg in repaired]
 
     tool_mass = sum(gmsh.model.occ.getMass(3, tg) for d, tg in tools)
     out, _ = gmsh.model.occ.cut([(3, fluid)], tools, removeObject=True, removeTool=True)
     gmsh.model.occ.synchronize()
+    if cfg['solids']['boolean_tol_m'] > 0:
+        gmsh.option.setNumber('Geometry.ToleranceBoolean', 0.0)   # the pool cuts stay exact
     masses = sorted(((gmsh.model.occ.getMass(3, tg), tg) for d, tg in out), reverse=True)
     if not masses:
         die('the cut returned no volume at all - nothing to mesh')
