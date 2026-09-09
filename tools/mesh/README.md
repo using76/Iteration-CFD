@@ -97,9 +97,22 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                             // roof (buildings must not float above the terrain)
     "fuse": false,          // fuse the solids before the cut (merges touching/overlapping ones)
     "exclude_tags": [],     // solids left out of the cut entirely (removed from the model)
-    "touch_warn_m": 0.05    // model points 1 mm..this far apart (0 disables) are logged as
+    "touch_warn_m": 0.05,   // model points 1 mm..this far apart (0 disables) are logged as
                             // near-touching pairs and stored in the summary's "near_touching":
                             // razor-thin fluid gaps the mesher may treat as duplicate points
+    "hull_beyond_m": 0,     // > 0: every solid whose bbox centre is farther than this from the
+                            // nearest point is replaced by the prism of its footprint's convex
+                            // hull (its own z range), pushed out by hull_pad_m, so neighbouring
+                            // far buildings overlap and the cut merges their slits; repaired and
+                            // excluded solids are left alone (see "Far-solid smear" below)
+    "hull_pad_m": 1.0,
+    "hull_snap_m": 0.05,    // prism corners of different solids closer than this become one
+                            // point, so neighbours share their vertical edges exactly (two
+                            // edges millimetres apart are "duplicate points" to the mesher and
+                            // the 3-D boundary recovery fails on them); use with "fuse": true
+    "boolean_tol_m": 0       // > 0: fuse and cut run as fuzzy booleans (Geometry.ToleranceBoolean)
+                            // merging entities closer than this; OCC's fuzzy fuse of hundreds of
+                            // overlapping prisms failed at 5 cm on the site, snapping did not
   },
   "repairs": [                            // per solid, applied before the cut
     {"tag": 33, "method": "resample", "cell_m": 1.5, "target_faces": 6000,
@@ -156,6 +169,19 @@ boundary-recovery failure usually sits at one of the pairs. The cut stage logs e
 the summary's `near_touching`, and an empty 3-D mesh names it again before writing
 `work/surface_only.msh`. Diagnostic only — nothing is moved or fused; exclude one solid of
 the pair with `solids.exclude_tags` to remove one side.
+
+Far-solid smear (`solids.hull_beyond_m` > 0): on the ammonia site the steady solution first
+blew up 1.2 km from the release, in a 0.2–0.4 m slot between the walls of two neighbouring
+blocks — a slot narrower than the 20 m far-field cell, which the mesher can only fill with
+slivers — and the luck-dependent 3-D failures sat at 2–5 cm corner gaps of the same kind. Far
+from every point a building's outline does not matter, so each far solid becomes the prism of
+its footprint's convex hull pushed out by `hull_pad_m` (1 m closes every slit up to 2 m wide;
+the prisms overlap and the cut merges them). Where two buildings shared a wall line the padded
+corners land millimetres apart, so corners of different prisms within `hull_snap_m` are snapped
+onto one point before the prisms are built and `fuse: true` then merges the shared edges. The
+log says how many solids were replaced, how many corners were snapped, how many were kept (near
+a point) or skipped (degenerate outline); the summary carries `solids_hulled` and
+`hull_corners_snapped`.
 
 The absolute sliver thresholds (`sliver_edge_m`, `sliver_vol_m3`) are for meshes whose
 smallest cells are metres; the relative ones (`sliver_rel` above 0, collapsing edges below
