@@ -66,7 +66,7 @@
   // SPEC-LIT §92.3's G1-G7. These are the defaults, written out so the example
   // says what the gate actually is.
   "quality": {
-    "max_closure": 1e-9,
+    "max_closure": 1e-10,
     "max_non_orth_deg": 70.0,
     "report_non_orth_deg": 60.0,
     "min_thickness_ratio": 0.05,

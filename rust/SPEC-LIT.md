@@ -16260,6 +16260,16 @@ later in the numbering, so every emitted internal face already has
 `(owner, neighbour)` and nothing more. The generator **asserts** this rather
 than assuming it, and errors by name if it is ever false.
 
+**The level cap is 6.** `mesh::refined::build` refuses a balanced level field
+whose maximum is past it, by name — `refinement level {lmax} is past this
+generator's limit of 6`. The bound is the voxel map above, not the tree: the
+map is built on the FINEST grid, so a base cell at level `l` owns `(2^l)^3`
+voxels — 262 144 at level 6, eight times that per level after — and the map is
+what a deeper mesh exhausts first. Every caller that offers a level is bounded
+by this number and refuses before it builds anything; §92.2's octree is one,
+and refuses a `refinement.max_level` past 6 in the config, before any geometry
+is read.
+
 This is a generator, not an adapt: **nothing in this module changes a mesh after
 it is built.** §75 is where a mesh does change, and its emitter is required to
 agree with this one bit for bit on every mesh both can express.
@@ -24574,9 +24584,11 @@ feeds it.
 
 All three emit the same thing: a **real-point** `PolyMeshRaw` — `points`,
 `faces`, `owner`, `neighbour`, `patches` — written by
-`io::polymesh::write_poly_mesh_raw`, satisfying §2's mesh model (owner <
-neighbour on internal faces, upper-triangular order, contiguous patches,
-polygonal faces, convex-ish cells). The synthetic quads the cut-cell writer
+`io::polymesh::write_poly_mesh_raw`, satisfying §1's addressing contract
+(owner < neighbour on internal faces, the upper-triangular order §74.2 also
+emits, each patch one contiguous run of boundary faces as
+`io::polymesh::PatchInfo` records it) and §2's geometry (polygonal faces,
+convex-ish cells). The synthetic quads the cut-cell writer
 of §24 emits are a reporting convenience and are **not** what this module
 produces.
 
@@ -24805,7 +24817,7 @@ G1  positive volume
       V_c > 0                                  for every cell c       (92.11)
 
 G2  closure
-      E_c = | sum_{f in F(c)} s_{c,f} Sf | / V_c^(2/3) < 1e-9         (92.12)
+      E_c = | sum_{f in F(c)} s_{c,f} Sf | / V_c^(2/3) < 1e-10        (92.12)
 
 G3  one region
       n_regions( mesh::geometry::cell_regions ) == 1
@@ -24816,7 +24828,11 @@ G4  non-orthogonality, internal faces
       max_f theta_f < 70 deg;  #{ f : theta_f > 60 deg } is REPORTED
 
 G5  thickness
-      A_max(c) = max_{f in F(c)} |Sf|
+      n_c(f)   = s_{c,f} Sf / |Sf|       the outward unit normal at c
+      P(c)     = the partition of F(c) in which f and g share a part when
+                 n_c(f) . n_c(g) >= cos 5 deg
+      A_max(c) = max_{p in P(c)} sum_{f in p} |Sf|
+                 the largest PLANAR FACE GROUP, not the largest face
       h_c      = sqrt( A_max(c) )        the local cell size
       tau_c    = 3 V_c / ( A_max(c) h_c ) = 3 V_c / A_max(c)^(3/2)    (92.14)
       tau_c >= 0.05                             for every cell c
@@ -24837,7 +24853,17 @@ G7  addressing
 G1 and G2 are §2's own preconditions: a negative volume is an inverted cell
 and every flux through it has the wrong sign; a cell that does not close has
 a mis-wound face and the divergence of a constant field is not zero in it.
-`1e-9` is §10's own closure tolerance, quoted rather than re-chosen.
+`1e-10` is `mesh::geometry::CLOSURE_LIMIT`, the number `print_report`
+already refuses a mesh on, quoted rather than re-chosen — so a mesh that
+leaves the mesher cannot fail the solver's own closure check on the way in.
+§10 requires closure "to round-off" and states **no number**; there was
+nothing there to quote, and an earlier draft of this section that said there
+was has been corrected. The tolerance is not a shape tolerance: closure
+telescopes to zero exactly whenever each face's `Sf` is computed once and
+used with opposite signs by its two cells, so what is left is round-off times
+the cell's face-area-to-`V^(2/3)` ratio — 82 for the ammonia sliver, giving
+~1e-14 on a correctly wound mesh, four decades inside the limit. A mesh that
+misses `1e-10` has a mis-wound face, not a thin cell.
 
 G3 is the ammonia case's first defect. A sealed pocket is a set of cells with
 no path to any outlet; the pressure equation on it is singular up to a
@@ -24853,9 +24879,9 @@ face at 68 degrees is a curiosity, four thousand is a mesh.
 
 G5 is the second defect, and (92.14) is chosen so that it is dimensionless
 and needs no octree bookkeeping to evaluate. `3 V_c / A_max(c)` is the height
-of the pyramid on the cell's largest face that has the cell's volume — the
-cell's thickness in the direction that matters. Dividing by `h_c =
-sqrt(A_max)`, the side of the square with that face's area, makes the ratio a
+of the pyramid on the cell's largest planar face group (below) that has the
+cell's volume — the cell's thickness in the direction that matters. Dividing
+by `h_c = sqrt(A_max)`, the side of the square of that area, makes the ratio a
 pure shape number: a cube gives `tau = 3`, and a plate of thickness `t`
 spanning `L` gives `tau = 3t/L`. The ammonia mesh's 5 cm cell over 13 m gives
 `tau = 0.0115`, and the threshold `0.05` fails it by a factor of four while
@@ -24863,6 +24889,33 @@ passing a cut cell holding 10 % of its parent's volume (`tau = 0.3`). *DESIGN*:
 the alternative reference length, the octree leaf size `h_l` the cell was born
 from, is not used because the gate must also be runnable on a mesh read off
 disk, where no level array exists.
+
+`A_max(c)` is the largest **planar face group** and not the largest single
+face, and that is a correction a review of the first implementation forced
+rather than a refinement. A per-face maximum is a topology number wearing a
+geometry number's clothes, and §74's own 2:1 interface undresses it: the
+coarse cell at an interface owns four coplanar quarter-faces where a uniform
+cell owns one, so `A_max` drops by four and `tau` rises by `4^(3/2) = 8`. The
+same 13 m x 13 m x 5 cm sliver — the ammonia case's own defect — measures
+`A_max = 169`, `tau = 0.011538` and is refused when its large faces are whole,
+and `A_max = 42.25`, `tau = 0.092308` and **passes** when they are split; the
+one defect this gate exists to catch was invisible at the one topology the
+octree makes everywhere. Summing `|Sf|` over the faces whose outward normals
+agree restores the geometry: four quarters read as the one face they are. The
+partition is built greedily and in face order — a face joins the first group
+whose representative normal (its own first face's) it agrees with, or starts a
+group of its own — because on the shapes this gate sees the groups are
+separated by tens of degrees and the greedy answer is the answer.
+Three properties of the grouping matter. It is by **outward** normal, so a
+slab's top and bottom stay two groups instead of merging into one of twice
+the area; on a convex cell a supporting plane in a given direction touches one
+face, so two faces sharing an outward normal share a plane and the group is a
+plane. `5 deg` is *DESIGN*: exactly coplanar split faces need only exact
+agreement, a snapped interface bows by far less than that, and the smallest
+separation between two genuinely distinct faces of a hex or a cut cell is tens
+of degrees. And where the grouping is wrong it is wrong **conservatively** — a
+larger `A_max` is a smaller `tau` — so a mistake here costs a refusal, never a
+silent pass.
 
 G6 catches the cell no scalar metric does: one whose faces are nearly
 coplanar, so that the area tensor `T_c` — the Green-Gauss gradient's own
@@ -24876,9 +24929,29 @@ measured. `1e4` is *DESIGN*: it is four decades of the six an f64 residual
 can afford to lose, and no mesh this crate has solved on comes within two
 decades of it.
 
-G7 is §2's addressing contract, stated as a check rather than assumed. A
-duplicated face is two matrix entries for one flux; a broken ordering makes
-every gather kernel in the crate read the wrong cell.
+G6 is not an aspect-ratio limit, and the arithmetic says by how much. On a box
+cell `a x b x c` the area tensor is exactly `diag(2bc, 2ac, 2ab)`, so with
+`a >= b >= c`, `cond = a/c`, `tau = 3abc/(ab)^(3/2)` and
+
+```
+tau_c * cond(T_c) = 3 sqrt(a/b)                                     (92.16)
+```
+
+On a slab `L x L x t` that is exactly 3: G5's `0.05` is `cond = 60`, and G6's
+`1e4` is 167 times looser and **cannot fire first** unless the slab's own
+large face is a needle of aspect ratio past `2.8e4`. G6 therefore earns its
+place only on the shapes G5 cannot see — cut cells and snapped wedges, whose
+faces can be near-coplanar at a respectable thickness ratio — and its number
+is calibrated by argument, not by a measurement on a box, which is what (92.16)
+records rather than hides.
+
+G7 is §1's addressing contract — the lower/diagonal/upper storage and the
+upper-triangular order §74.2 also emits against — stated as a check rather
+than assumed. A duplicated face is two matrix entries for one flux; a broken
+ordering makes every gather kernel in the crate read the wrong cell. G7 runs
+on the RAW arrays, before `build_host_mesh`, because `build_host_mesh` refuses
+a mis-ordered mesh itself and a defect this gate can name must not surface as
+an opaque load error.
 
 **The repair sequence.** A failing cell is not immediately a refusal. In
 order, and each step re-measures:
@@ -24909,14 +24982,39 @@ order, and each step re-measures:
    mesher that ships a mesh it knows is bad has moved the failure into a
    solver run that costs a thousand times more to diagnose.
 
-The message form, fixed here so that tests can assert it:
+The message form, fixed here so that tests can assert it — one block per
+failed gate, in gate order, at most ten subjects listed and the rest counted:
 
 ```
 automesher: quality gate G5 (thickness) failed on 3 cell(s)
   cell 118237 at (412.500000, -88.250000, 6.775000): tau = 0.011538, need >= 0.05
   cell 118240 at (412.500000, -88.250000, 6.825000): tau = 0.019221, need >= 0.05
-  ...
+  ... and 1 more
 ```
+
+A gate's **subject** is what it measures, and the header counts subjects, not
+cells indiscriminately: G4 measures faces and says `face(s)`, and a cell with
+three bad faces is three of them. Each gate prints its own symbol, its own
+number format and its own comparison; `value = ` is not one of them:
+
+| gate | subject | symbol | value format | comparison | a line |
+|---|---|---|---|---|---|
+| G1 | cell | `V` | `{:.6e}` | `need > 0` | `cell 4 at (0.500000, 0.500000, 0.500000): V = -1.250000e-2, need > 0` |
+| G2 | cell | `E` | `{:.3e}` | `need < {:e}` | `cell 41 at (...): E = 4.271e-9, need < 1e-10` |
+| G3 | the mesh | — | — | — | `automesher: quality gate G3 (one cell region) failed: the mesh is 2 region(s): ...` |
+| G4 | face | `theta` | `{:.3}` | `need < {}` | `face 91 at (1.000000, 0.500000, 0.500000) between cell 0 and cell 1: theta = 71.565, need < 70` |
+| G5 | cell | `tau` | `{:.6}` | `need >= {}` | as above |
+| G6 | cell | `cond` | `{:.3e}` | `need < {:e}` | `cell 0 at (...): cond = 1.000e6, need < 1e4` |
+| G7 | face | — | — | — | `face 10: repeats the point set of face 7` |
+
+G1's comparison is `> 0`, not `>= 0`: (92.11) is strict and a cell of exactly
+zero volume is refused, so `need >= 0` printed beside a refused `V = 0` would
+contradict the check it reports. G7's four sub-checks each name their face in
+their own words — `repeats the point set of face {g}`, `owner {o} >= neighbour
+{n}`, `out of ascending (owner, neighbour) order after face {g}`, `repeats the
+(owner, neighbour) pair of face {g}` — and G7 has no centroid to print,
+because at G7 no geometry has been built. Every gate's header count is the
+**true** number of failing subjects; the listing is capped, the count is not.
 
 ### 92.4 The tetrahedral path — tranche 2
 
@@ -24972,7 +25070,10 @@ because it is the defect the ammonia run actually had.
 Not implemented. A polyhedral mesh is the **node-dual** of a tetrahedral one:
 one polyhedron per tetrahedral vertex, its faces built from the circumcentres
 (or barycentres) of the tetrahedra around each incident edge. Peric,
-*ERCOFTAC Bulletin* **62** (2004) 25-29, is the description of why a CFD code
+*ERCOFTAC Bulletin* **62** (2004) — "Flow Simulation Using Control Volumes of
+Arbitrary Polyhedral Shape"; the bulletin publishes no page numbers, so the
+range an earlier draft printed is **unverified and has been dropped** — is the
+description of why a CFD code
 wants them — roughly four times fewer cells than the tetrahedra they come
 from, each with ten-or-more neighbours, so the gradient is reconstructed from
 many directions and the diffusion operator is better conditioned. ANSYS
@@ -25032,9 +25133,10 @@ later tranche can overturn them on evidence rather than taste:
 
 The GPU literature is named so that the tranche-3 decision starts from it
 rather than from scratch: Karras, *Proc. High Performance Graphics 2012*
-33-40 — parallel BVH, octree and k-d tree construction in a single pass over
-Morton codes (Eurographics Digital Library; **not indexed in Crossref**, so no
-DOI is quoted) — is the construction that would make the distance queries of
+33-37 — parallel BVH, octree and k-d tree construction in a single pass over
+Morton codes (Eurographics Digital Library, DOI `10.2312/EGGH/HPG12/033-037`,
+which resolves through **DataCite and not Crossref**, so §92's Crossref sweep
+returns 404 for it and the DOI is quoted from the Eurographics record) — is the construction that would make the distance queries of
 (92.1) device-resident; and Cao, Nanjappa, Gao & Tan, *Proc. I3D 2014* 47-54
 (DOI `10.1145/2556700.2556710`), gDel3D, is the state of the art for a GPU
 Delaunay triangulation and therefore what §92.4's generation stage would have
@@ -25047,9 +25149,9 @@ that as a stated absence rather than an omission.
 |---|---|
 | the output of every path | a real-point `PolyMeshRaw`, written by `io::polymesh::write_poly_mesh_raw` |
 | every emitted mesh | passes G1-G7 of §92.3, or the run refused |
-| a refusal | names the gate, the cell id, the centroid, the measured value and the threshold |
-| `AutomeshConfig` | round-trips through serde, and `emit_schema` is generated from the same types that parse it (§13.4's rule, as `io::case_json` applies it) |
-| an unknown config key | refused by name, `deny_unknown_fields` |
+| a refusal | names the gate, the subject it failed on (a cell, or a face for G4 and G7) and its id, its centroid, the measured value and the threshold, in §92.3's exact per-gate form |
+| `AutomeshConfig` | round-trips through serde, and `emit_schema` is generated from the same types that parse it, as `io::case_json` does it |
+| an unknown config key | refused by name, `deny_unknown_fields` — §13.4's rule |
 | a domain that does not contain the surface bbox | refused before any meshing work |
 | an open (non-watertight) surface | refused with the open-edge count, §23.2's check reused |
 | the 2:1 interface | §74's conventions, bit for bit — the coarse cell owns four split faces |
@@ -25058,6 +25160,10 @@ that as a stated absence rather than an omission.
 | a patch whose layers fail the gate | keeps its snapped boundary, and the run says so by patch name |
 | `tau_c` on a unit cube | exactly 3 |
 | `cond(T_c)` on a unit cube | exactly 1 |
+| `tau_c` on a slab `L x L x t` | `3t/L`, the SAME number whether each large face is one face or four coplanar quarter-faces — (92.14)'s planar grouping |
+| `tau_c cond(T_c)` on a slab `L x L x t` | exactly 3 — (92.16); so G5's `0.05` is `cond = 60` and G6 is 167 times looser on a box |
+| a gate that stops refusing | **fails a test**: G1-G7 each have a refusal test beside the pass test, so disabling any one threshold turns the suite red |
+| a refusal line | asserted character for character against §92.3's table |
 | G4 on a block mesh | 0 degrees |
 | the GPU | **nothing runs on it** in tranche 1, by decision (§92.6), not by omission |
 | §2, §23, §24, §74 outputs | **unchanged** — this module reads those, and rewrites none of them |

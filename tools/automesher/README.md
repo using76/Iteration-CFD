@@ -61,7 +61,7 @@ ammonia-terminal site, with comments on every block. Every key of
 | `refinement.levels[].patch` | string | *(required)* | Patch (STL solid) name the bands apply to. |
 | `refinement.levels[].bands` | array | *(required)* | `[{distance, level}, ...]` - within `distance` of the patch, at least `level` (eq. 92.1). |
 | `refinement.feature_angle_deg` | number | `30.0` | Dihedral angle past which a triangulation edge is a feature edge (eq. 92.2). |
-| `refinement.max_level` | integer | `2` | The level cap `l(c)` is min'd with (eq. 92.1); 6 is the §74.2 octree cap. |
+| `refinement.max_level` | integer | `2` | The level cap `l(c)` is min'd with (eq. 92.1); 6 is the octree cap §74.2 states and `mesh::refined::build` enforces. |
 | `castellation.keep_region` | string | `"largest"` | Which connected component of the fluid survives eq. (92.4): `"largest"` or `"seed"`. |
 | `castellation.seed_point` | number[3] | `null` | The keep point `"seed"` needs; required then, ignored otherwise. |
 | `castellation.min_faces` | integer | `4` | A kept cell with fewer faces than this is dropped - a hole in the addressing, not a control volume. |
@@ -76,7 +76,7 @@ ammonia-terminal site, with comments on every block. Every key of
 | `layers.growth` | number | `1.3` | The expansion from one layer to the next; must be > 0. |
 | `layers.min_thickness` | number | `0.1` | Total thickness below which the layers are dropped. |
 | `layers.medial_frac` | number | `0.5` | Fraction of the local medial-axis distance below which the layers are dropped (eq. 92.10). |
-| `quality.max_closure` | number | `1e-9` | G2 (92.12): `\|sum s Sf\| / V^(2/3)` stays under this. |
+| `quality.max_closure` | number | `1e-10` | G2 (92.12): `\|sum s Sf\| / V^(2/3)` stays under this - `mesh::geometry::CLOSURE_LIMIT`, the crate's own. |
 | `quality.max_non_orth_deg` | number | `70.0` | G4 (92.13): max internal-face non-orthogonality, degrees. |
 | `quality.report_non_orth_deg` | number | `60.0` | G4: faces past this are counted and reported, not refused. |
 | `quality.min_thickness_ratio` | number | `0.05` | G5 (92.14): `tau_c = 3 V_c / A_max^(3/2)` stays at or above this. |
@@ -116,25 +116,33 @@ Units 2-7 are the stages themselves.
 SPEC-LIT §92.3's seven checks - the precondition every stage must hold, and
 the report `-check` prints. The mesher **refuses rather than ship a bad mesh**:
 a stage that cannot keep the mesh inside these ends the run, naming the gate,
-the cell ids, their centroids to six figures, the measured values and the
-thresholds.
+the subject it failed on (a cell, or a face for G4 and G7) and its id, its
+centroid to six figures, the measured value and the threshold - the per-gate
+form §92.3 fixes, `tau = 0.011538, need >= 0.05` and not `value = ...`. The
+header counts every failing subject even though only ten are listed.
 
 | Gate | Check | Threshold | Config knob |
 |---|---|---|---|
 | G1 | positive volume, `V_c > 0` (92.11) | every cell, no knob | - |
-| G2 | closure, `\|sum s Sf\| / V_c^(2/3)` (92.12) | `< 1e-9` | `quality.max_closure` |
+| G2 | closure, `\|sum s Sf\| / V_c^(2/3)` (92.12) | `< 1e-10` | `quality.max_closure` |
 | G3 | one cell region (`cell_regions`) | exactly 1, no knob | - |
 | G4 | non-orthogonality, internal faces (92.13) | max `< 70 deg`; faces past 60 deg reported | `quality.max_non_orth_deg`, `quality.report_non_orth_deg` |
-| G5 | thickness, `tau_c = 3 V_c / A_max^(3/2)` (92.14) | `>= 0.05` | `quality.min_thickness_ratio` |
+| G5 | thickness, `tau_c = 3 V_c / A_max^(3/2)` (92.14), `A_max` the largest PLANAR FACE GROUP (faces whose outward normals agree to within 5 deg, summed) so a split 2:1 face measures as the one face it is | `>= 0.05` | `quality.min_thickness_ratio` |
 | G6 | gradient conditioning, `cond(T_c)` (92.15) | `< 1e4` | `quality.max_cond` |
 | G7 | addressing (owner < neighbour, upper-triangular order, no duplicate faces) | pass/fail, no knob | - |
 
 ## Licence note
 
 Nothing GPL-licensed was consulted for §92 or for this unit: not
-`snappyHexMesh`, not cfMesh, not TetGen, not CGAL's GPL modules. The
-specification's sources are the **OpenFOAM User Guide** (documentation, for
-the castellation / snapping / layer-addition stage list), the papers §92 cites
+`snappyHexMesh`, not cfMesh, not TetGen, not CGAL's GPL modules, and not the
+octree families p4est (GPL-2.0-or-later), libsc (LGPL-2.1) or t8code (GPL-2.0).
+The specification's documentation sources are named exactly in
+`rust/PROVENANCE.md`: CFD Direct's *OpenFOAM v12 User Guide* §5.5 ((c)
+2015-2025 CFD Direct Ltd) and ESI-OpenCFD's *OpenFOAM User Guide* meshing
+chapter ((c) OpenCFD Ltd, CC BY-NC-ND 4.0), read for the castellation /
+snapping / layer-addition stage list, the distance-band shape and the
+30-degree feature-angle default, with no text, figure or table reproduced;
+the papers §92 cites
 (Schneiders 1996; Ito, Shih & Soni 2009; Marechal 2009; Owen, Staten &
 Sorensen 2011; Isaac, Burstedde & Ghattas 2012; Freitag & Ollivier-Gooch 1997;
 Garimella & Shephard 2000), and Ericson's *Real-Time Collision Detection*

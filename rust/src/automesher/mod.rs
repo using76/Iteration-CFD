@@ -314,7 +314,8 @@ impl Default for LayerSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QualitySpec {
-    /// G2 (92.12): |sum s Sf| / V^(2/3) must stay under this.
+    /// G2 (92.12): |sum s Sf| / V^(2/3) must stay under this (the crate's
+    /// own `mesh::geometry::CLOSURE_LIMIT`).
     #[serde(default = "d_max_closure")]
     pub max_closure: f64,
     /// G4 (92.13): max internal-face non-orthogonality, degrees.
@@ -332,7 +333,7 @@ pub struct QualitySpec {
 }
 
 fn d_max_closure() -> f64 {
-    1e-9
+    1e-10
 }
 
 fn d_max_non_orth() -> f64 {

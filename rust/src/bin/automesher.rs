@@ -127,15 +127,19 @@ fn run(args: &[String]) -> Result<()> {
 
 /// `-check <caseDir>`: §92.3's gate on a mesh that already exists, at
 /// `<caseDir>/constant/polyMesh`, measured against THIS config's thresholds.
-/// The one mode that is complete today: `check` returns the report when every
-/// gate passed, and the refusal - the report §92.3 fixed the format of - as
-/// `Error::Mesh` when one failed, which `main` prints with exit status 1.
+/// The run always prints the summary - the refusal a run most needs it is
+/// the one that used to lose it - and then the refusal, the report §92.3
+/// fixed the format of, as `Error::Mesh` when a gate failed, which `main`
+/// prints with exit status 1.
 fn check_mode(cfg: &AutomeshConfig, case_dir: &Path) -> Result<()> {
     let raw = read_poly_mesh(case_dir)?;
     let t = cfg.quality.thresholds();
-    let rep = automesher::quality::check(&raw, &t)?;
+    let rep = automesher::quality::measure(&raw, &t)?;
     // `summary` ends mid-line by design; this is the whole run's output.
     println!("{}", rep.summary());
+    if !rep.passed() {
+        return Err(Error::Mesh(rep.refusal_text()));
+    }
     Ok(())
 }
 

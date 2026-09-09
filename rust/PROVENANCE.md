@@ -312,6 +312,8 @@ anyone.
 | The distinction between a `work` (excused) and a `document` (checked) held only while the path did. Both took the same branch when the file could not be read, so hiding `docs/07-lowmach-solver.md` turned a deliberately broken citation into it from a failure into a SILENT PASS — one `git mv` from a promise that had stopped being kept with nothing said. A missing `document` now fails its citations, and a test fails first and names the file |
 | An ambiguous form is worth removing before it is worth counting. §80.4 ratcheted the bare `SNN.M` and left `(SNN.M)` — 357 citations — bounded by nothing, so the ledger's stated purpose ("the next file to add one fails the build") was false for a quarter of the population. Resolving `(SNN.M)` exactly like `(NN.M)` costs EIGHT corrections in the whole tree, every one a subsection written in the parenthesised spelling and one of them inside a user-facing refusal message. The same tightening applied to the bare form fails 586 sites, which is why that one is ratcheted and this one is not. The replacement spelling is form B, `(SPEC-LIT 78.7)`, because all five files are ASCII-only — no `.cu` file in this tree contains a single `§` |
 | A rule loose in one direction manufactures false findings as readily as it excuses true ones, and §80 printed one of each. Its own "at least one real dangling reference inside `SPEC-LIT.md`" was `(S36.1)` in §62.6, argued from §36 labelling no equations. §36 labels none — which is exactly the case where the parenthesised form resolves against HEADINGS, and §36.1 is a heading. The citation was correct all along |
+| G5's reference length: `A_max(c)` is the largest PLANAR FACE GROUP of a cell — the faces whose OUTWARD unit normals agree to within 5 degrees, their `\|Sf\|` summed — and not the largest single face, so that the four coplanar quarter-faces §74's 2:1 interface gives a coarse cell read as the one face they geometrically are. A per-face maximum let the ammonia case's own 13 m x 13 m x 5 cm sliver through the gate at a refinement interface (`tau` 0.0115 whole, 0.0923 split — a factor of `4^(3/2)`), which is the defect the gate exists to refuse. The 5-degree tolerance and the outward orientation are ours; the grouping errs conservatively (a larger `A_max` is a smaller `tau`), so it can cost a refusal and never a silent pass | `src/automesher/quality.rs` | §92.3 |
+| G6's conditioning limit `cond(T_c) < 1e4` — four decades of the six an f64 residual can afford to lose. Recorded with what it does NOT do: on a box cell `tau_c cond(T_c) = 3 sqrt(a/b)`, so on a slab G5's `0.05` is already `cond = 60` and G6 is 167 times looser; G6 earns its place only on the near-coplanar shapes G5 cannot see | `src/automesher/quality.rs` | §92.3 |
 | The 2015 gamma model's production is Kato–Launder `nu_t S Omega` in BOTH the `k` and the `omega` equation, stamped over SST's own production wherever the model is attached, with SST-2003's `k`-production limiter re-applied to the Kato–Launder `G`. The TMR page writes ONE `P_k`, reads it in both equations and notes it is not SST's; the alternative reading — Kato–Launder in `k` only, the standard form in `omega` — needs the page to write two productions, and it writes one. The consequence is stated in the spec and measured in Gate 90-R: at `gamma = 1` this model is SST with Kato–Launder production, not plain SST | `src/models/k_omega_sst.rs`, `cuda/gmtrans.cu` | §90.6 |
 
 ## GPU plumbing and tooling — original
@@ -361,18 +363,43 @@ and they are a larger share of the value than their line counts suggest.
 `ofgpu-automesher` (SPEC-LIT §92) is this project's own mesher. **No GPL mesher
 source was opened**: OpenFOAM's `snappyHexMesh` (GPL-3.0), cfMesh (GPL-3.0),
 TetGen (AGPL-3.0) and CGAL's GPL modules were all identified as GPL before
-anything was read, and none of them was read. The **OpenFOAM User Guide**'s
-`snappyHexMesh` chapter is DOCUMENTATION, and it is the source for the stage
-list (castellation → snapping → layer addition) and for the shape of the
-`refinementSurfaces` distance bands only; every equation in §92.2 comes from the
-papers below or is derived in §92 itself. Gmsh (GPL-2.0-or-later) is **run as an
-external process** by `tools/mesh/step_mesh.py` and, in tranche 2, by §92.4; it
-is never linked and its source is never read.
+anything was read, and none of them was read. The octree families §92.2's
+stage 1 stands next to are named here for the same reason §74 and §75 name
+them: **p4est (GPL-2.0-or-later), libsc (LGPL-2.1) and t8code (GPL-2.0)** were
+identified as GPL/LGPL before anything was read and none was read — the 2:1
+balance §92.2 reuses is `mesh::refined::balance_2to1`, this repository's own
+(§74.2), and Isaac, Burstedde & Ghattas (2012) is cited as a PAPER.
+
+**The documentation, named exactly.** "The OpenFOAM User Guide" is not one
+document, and §92 leans on it for four facts, so both documents that name is
+used for are recorded: CFD Direct's *OpenFOAM v12 User Guide* §5.5 "Mesh
+generation with snappyHexMesh" (`doc.cfd.direct/openfoam/user-guide-v12/
+snappyhexmesh`, © 2015-2025 CFD Direct Ltd, website documentation under CFD
+Direct's terms of use, no Creative Commons grant stated), and ESI-OpenCFD's
+*OpenFOAM User Guide* meshing chapter (`openfoam.com/documentation/guides`,
+© OpenCFD Ltd, **CC BY-NC-ND 4.0** — attribution, non-commercial, no
+derivatives; both checked 2026-09-09). Neither is Open Source and neither's
+terms permit redistributing its text, which is why **no text, figure, table or
+dictionary listing from either is reproduced anywhere in this repository**.
+What §92 takes from them is four facts and one documented default, restated in
+this document's own voice: the stage list (castellation → snapping → layer
+addition), the shape of a distance-band refinement specification, the
+displacement smoothing in the snapping stage, and the 30-degree feature angle.
+The equations of §92.2 come from the papers below or are derived in §92 itself,
+and the config key names are deliberately NOT `snappyHexMeshDict`'s (§92 and
+the `src/automesher/mod.rs` row below). ANSYS Fluent's *User's Guide* — the
+"polyhedra from tetrahedra" conversion §92.5 cites, ANSYS Inc., proprietary
+documentation licensed to its users — is read the same way and reproduced the
+same amount: nothing.
+
+Gmsh (GPL-2.0-or-later) is **run as an external process** by
+`tools/mesh/step_mesh.py` and, in tranche 2, by §92.4; it is never linked and
+its source is never read.
 
 | File | SPEC-LIT | Primary sources |
 |---|---|---|
 | `src/automesher/mod.rs` | §92.1, §92.2 | **ORIGINAL** — the module's own configuration tree, in the serde + `schemars` shape `src/io/case_json.rs` established, with `deny_unknown_fields` throughout so a mistyped key is refused by name (§13.4). The field set is the stage list of §92.2 and nothing else; no other mesher's dictionary was consulted, and in particular `snappyHexMeshDict` was NOT copied — the names here (`base_size`, `bands`, `keep_region`, `medial_frac`) are this document's |
-| `src/automesher/quality.rs` | §92.3, §2.1, §2.2, §2.4 | **ORIGINAL** — the seven-check gate G1–G7 of §92.3 and the refusal that names the cell and its centroid. G1, G2 and G4 measure what `mesh::geometry::check` already measures and G3 calls `mesh::geometry::cell_regions`; what is new is that they are a PRECONDITION on emitting a mesh. **G5**'s dimensionless thickness `tau_c = 3 V_c / A_max^(3/2)` and **G6**'s condition number of the face-area tensor `sum_f Sf Sf^T/|Sf|` are *DESIGN* (§92.3), chosen so the gate needs no octree bookkeeping and runs on a mesh read off disk. **Mavriplis, AIAA 2003-3986** (DOI `10.2514/6.2003-3986`) — the conditioning analysis of gradient reconstruction that is why a condition number, rather than a face-area ratio, is the quantity G6 measures. **Knupp, *SIAM J. Sci. Comput.* 23 (2001) 193** (DOI `10.1137/S1064827500371499`) and **Knupp, *Engineering with Computers* 28 (2011) 419** (DOI `10.1007/s00366-011-0230-1`) — what "quality" means in the repair sequence's smoothing step. **Freitag & Ollivier-Gooch, *Int. J. Numer. Meth. Engng* 40 (1997) 3979** (DOI `10.1002/(SICI)1097-0207(19971115)40:21<3979::AID-NME251>3.0.CO;2-9`) — smart Laplacian smoothing, and the "keep the step only if the worst metric improved" rule the repair sequence follows. The symmetric-3x3 eigenvalue closed form is the characteristic polynomial, textbook algebra, from no source |
+| `src/automesher/quality.rs` | §92.3, §2.1, §2.2, §2.4 | **ORIGINAL** — the seven-check gate G1–G7 of §92.3 and the refusal that names the cell and its centroid. G1, G2 and G4 measure what `mesh::geometry::check` already measures and G3 calls `mesh::geometry::cell_regions`; what is new is that they are a PRECONDITION on emitting a mesh. **G5**'s dimensionless thickness `tau_c = 3 V_c / A_max^(3/2)`, its reference length (`A_max` is the largest PLANAR FACE GROUP — faces whose outward normals agree to within 5 degrees, summed — so that §74's four coplanar quarter-faces at a 2:1 interface read as the one face they geometrically are) and **G6**'s condition number of the face-area tensor `sum_f Sf Sf^T/|Sf|` with its `1e4` limit are *DESIGN* (§92.3), chosen so the gate needs no octree bookkeeping and runs on a mesh read off disk. G2's `1e-10` is NOT design: it is `mesh::geometry::CLOSURE_LIMIT`, this crate's own, quoted. **Mavriplis, AIAA 2003-3986** (DOI `10.2514/6.2003-3986`) — the conditioning analysis of gradient reconstruction that is why a condition number, rather than a face-area ratio, is the quantity G6 measures. **Knupp, *SIAM J. Sci. Comput.* 23 (2001) 193** (DOI `10.1137/S1064827500371499`) and **Knupp, *Engineering with Computers* 28 (2011) 419** (DOI `10.1007/s00366-011-0230-1`) — what "quality" means in the repair sequence's smoothing step. **Freitag & Ollivier-Gooch, *Int. J. Numer. Meth. Engng* 40 (1997) 3979** (DOI `10.1002/(SICI)1097-0207(19971115)40:21<3979::AID-NME251>3.0.CO;2-9`) — smart Laplacian smoothing, and the "keep the step only if the worst metric improved" rule the repair sequence follows. The symmetric-3x3 eigenvalue closed form is the characteristic polynomial, textbook algebra, from no source |
 | `src/bin/automesher.rs` | §92.2, §92.3 | **ORIGINAL** — argument parsing, config reading, the surface summary, the `-check` mode that runs §92.3's gate on an existing `constant/polyMesh`, and a named refusal for every stage not yet implemented. No numerics |
 | `../tools/automesher/README.md`, `../tools/automesher/examples/nh3_site.json` | §92 | **ORIGINAL** — the tool's documentation and the ammonia-site worked example of §92.1. The site geometry is the user's own data |
 
@@ -383,14 +410,18 @@ Staten & Sorensen (2011, DOI `10.1007/978-3-642-24734-7_9`); Isaac, Burstedde &
 Ghattas (2012, DOI `10.1109/IPDPS.2012.47`, already §74's); Garimella & Shephard
 (2000, DOI `10.1002/1097-0207(20000910/20)49:1/2<193::AID-NME929>3.0.CO;2-R`);
 Cheng et al. (2000, DOI `10.1145/355483.355487`); Peric, *ERCOFTAC Bulletin* 62
-(2004) 25; Geuzaine & Remacle (2009, DOI `10.1002/nme.2579`); Hu et al. (2020,
+(2004), "Flow Simulation Using Control Volumes of Arbitrary Polyhedral Shape"
+(the bulletin publishes no page numbers; the article, author, bulletin and year
+are confirmed, the page range is not and is not quoted); Geuzaine & Remacle (2009, DOI `10.1002/nme.2579`); Hu et al. (2020,
 DOI `10.1145/3386569.3392385`, fTetWild, **MPL-2.0 and therefore readable — not
-yet read**); Karras, *HPG 2012* 33 (Eurographics Digital Library, not in
-Crossref); Cao, Nanjappa, Gao & Tan (2014, DOI `10.1145/2556700.2556710`) — are
+yet read**); Karras, *HPG 2012* 33-37 (Eurographics Digital Library, DOI
+`10.2312/EGGH/HPG12/033-037`, which resolves through **DataCite, not
+Crossref**); Cao, Nanjappa, Gao & Tan (2014, DOI `10.1145/2556700.2556710`) — are
 listed here so the record is complete, and **none of them has been implemented
 yet**. Every DOI in this block was checked against Crossref on 2026-09-09 by
 fetching `api.crossref.org/works/<doi>` and comparing title, container and year;
-Karras (2012) is not indexed by Crossref and no DOI is quoted for it.
+Karras (2012) is not indexed by Crossref — its DOI is a DataCite one and is
+quoted as such, and its page range is the Eurographics record's 33-37.
 
 ## Case format interoperability — format
 

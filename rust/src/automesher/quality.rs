@@ -38,6 +38,14 @@ use crate::{Label, Scalar, Vec3};
 /// cells; it does not enumerate a mesh.
 pub const GATE_CELL_CAP: usize = 200;
 
+/// G5 groups a cell's faces into planar face groups by outward unit normal:
+/// a face joins the first group whose representative normal agrees with it to
+/// within this angle (§92.3 (92.14)). The gate compares against this angle's
+/// cosine; exactly coplanar split faces need only exact agreement, and the
+/// smallest separation between two genuinely distinct faces of a hex or a cut
+/// cell is tens of degrees.
+pub const PLANAR_GROUP_DEG: Scalar = 5.0;
+
 // ==========================================================================
 //  The gates
 // ==========================================================================
@@ -47,7 +55,7 @@ pub const GATE_CELL_CAP: usize = 200;
 pub enum Gate {
     /// (92.11) `V_c > 0` for every cell.
     Volume,
-    /// (92.12) `|sum_f s_cf Sf| / V_c^(2/3) < 1e-9`.
+    /// (92.12) `|sum_f s_cf Sf| / V_c^(2/3) < 1e-10`.
     Closure,
     /// `mesh::geometry::cell_regions` leaves the mesh in one piece.
     Regions,
@@ -57,7 +65,8 @@ pub enum Gate {
     Thickness,
     /// (92.15) the Green-Gauss area tensor's condition number.
     Conditioning,
-    /// §2's addressing contract, stated as a check.
+    /// §1's addressing contract - the lower/diagonal/upper storage and the
+    /// upper-triangular order §74.2 emits against - stated as a check.
     Addressing,
 }
 
@@ -74,14 +83,42 @@ impl Gate {
             Gate::Addressing => "G7 (addressing)",
         }
     }
+
+    /// What the gate names in its refusal block: a cell for G1, G2, G5 and
+    /// G6; a face for G4 and G7. G3 names the mesh and never lists any.
+    pub fn subject(self) -> Subject {
+        match self {
+            Gate::Volume | Gate::Closure | Gate::Thickness | Gate::Conditioning => {
+                Subject::Cell
+            }
+            Gate::NonOrth | Gate::Addressing => Subject::Face,
+            Gate::Regions => Subject::Cell,
+        }
+    }
+}
+
+/// What a gate names: a cell for G1, G2, G5 and G6; a face for G4 and G7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subject {
+    Cell,
+    Face,
+}
+
+/// The noun a refusal's header counts: `cell` or `face`.
+fn noun(s: Subject) -> &'static str {
+    match s {
+        Subject::Cell => "cell",
+        Subject::Face => "face",
+    }
 }
 
 /// The gate's numbers. Each is quoted from §92.3 rather than re-chosen there,
 /// so this type only carries them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QualityThresholds {
-    /// G2: a closure error above this means a mis-wound face. §10's own
-    /// tolerance, quoted.
+    /// G2: a closure error above this means a mis-wound face.
+    /// `mesh::geometry::CLOSURE_LIMIT`, the crate's own, quoted; §10 states
+    /// no number.
     pub max_closure: Scalar,
     /// G4: where §2.4's explicit non-orthogonal correction stops being a
     /// correction and starts being the whole term (`1/cos(70 deg)` is 2.9).
@@ -98,7 +135,7 @@ pub struct QualityThresholds {
 impl Default for QualityThresholds {
     fn default() -> Self {
         Self {
-            max_closure: 1e-9,
+            max_closure: 1e-10,
             max_non_orth_deg: 70.0,
             report_non_orth_deg: 60.0,
             min_thickness_ratio: 0.05,
@@ -107,29 +144,37 @@ impl Default for QualityThresholds {
     }
 }
 
-/// One cell a gate failed on: its id, its centroid, the measured value.
-#[derive(Debug, Clone, Copy)]
-pub struct BadCell {
-    pub cell: usize,
-    pub centre: Vec3,
+/// One subject a gate failed on.
+#[derive(Debug, Clone)]
+pub struct BadSubject {
+    /// Cell id, or face id for G4 and G7.
+    pub id: usize,
+    /// The cell centre, or the face centre for G4. `None` for G7, which runs
+    /// before any geometry is built and has no centroid to print.
+    pub centre: Option<Vec3>,
+    /// The measured value; 0.0 for G7, whose failure is categorical.
     pub value: Scalar,
+    /// G4's `between cell 0 and cell 1`, G7's `repeats the point set of face
+    /// 7`. Empty where the line is value-and-threshold alone.
+    pub why: String,
 }
 
 /// One gate's failure: the gate, the threshold it was measured against, the
-/// cells that failed it - empty when the failure is mesh-wide, as G3's is -
-/// and a note carrying what the cells cannot.
+/// subjects that failed it - empty when the failure is mesh-wide, as G3's is
+/// - and a note carrying what the subjects cannot.
 #[derive(Debug, Clone)]
 pub struct GateFailure {
     pub gate: Gate,
     pub threshold: Scalar,
-    /// How many cells failed this gate IN TOTAL. `cells` holds at most
+    /// How many subjects failed this gate IN TOTAL. `subjects` holds at most
     /// [`GATE_CELL_CAP`] of them, so this is the number a refusal prints -
     /// "failed on 200 cell(s)" on a mesh with five thousand bad cells would
     /// be a false report, not a short one.
     pub n_failed: usize,
-    /// The recorded prefix of the failing cells, capped at
-    /// [`GATE_CELL_CAP`]. A refusal names cells; it does not enumerate a mesh.
-    pub cells: Vec<BadCell>,
+    /// The recorded prefix of the failing subjects, capped at
+    /// [`GATE_CELL_CAP`]. A refusal names subjects; it does not enumerate a
+    /// mesh.
+    pub subjects: Vec<BadSubject>,
     pub note: String,
 }
 
@@ -224,21 +269,12 @@ impl QualityReport {
     }
 }
 
-/// The comparison a gate's cell line states. `None` where no per-line
-/// threshold makes sense: G3 carries no cells, and G7's cells name faces.
-fn need(gate: Gate) -> Option<&'static str> {
-    match gate {
-        Gate::Volume | Gate::Thickness => Some(">="),
-        Gate::Closure | Gate::NonOrth | Gate::Conditioning => Some("<"),
-        Gate::Regions | Gate::Addressing => None,
-    }
-}
-
 impl QualityReport {
     /// The refusal §92.3's repair sequence ends in: one block per failed
-    /// gate, in gate order, naming the gate, the cell ids, their centroids
-    /// to six figures, the measured values and the thresholds. At most ten
-    /// cells are listed per block; the rest are counted.
+    /// gate, in gate order, naming the gate, the subject ids, their centres
+    /// to six figures where geometry exists, the measured values and the
+    /// thresholds, each gate in its own words. At most ten subjects are
+    /// listed per block; the rest are counted.
     pub fn refusal_text(&self) -> String {
         if self.failures.is_empty() {
             return String::from("automesher: quality gate passed");
@@ -246,7 +282,7 @@ impl QualityReport {
         let mut blocks: Vec<String> = Vec::with_capacity(self.failures.len());
         for f in &self.failures {
             let mut b = String::new();
-            if f.cells.is_empty() {
+            if f.subjects.is_empty() {
                 b.push_str(&format!(
                     "automesher: quality gate {} failed: {}",
                     f.gate.name(),
@@ -255,26 +291,50 @@ impl QualityReport {
                 blocks.push(b);
                 continue;
             }
+            let total = f.n_failed.max(f.subjects.len());
             b.push_str(&format!(
-                "automesher: quality gate {} failed on {} cell(s)",
+                "automesher: quality gate {} failed on {} {}(s)",
                 f.gate.name(),
-                f.n_failed.max(f.cells.len())
+                total,
+                noun(f.gate.subject())
             ));
-            let listed = f.cells.len().min(10);
-            for c in &f.cells[..listed] {
-                b.push_str(&format!(
-                    "\n  cell {} at ({:.6}, {:.6}, {:.6})",
-                    c.cell, c.centre.x, c.centre.y, c.centre.z
-                ));
-                match need(f.gate) {
-                    Some(op) => b.push_str(&format!(
-                        ": value = {:.6}, need {} {}",
-                        c.value, op, f.threshold
+            let listed = f.subjects.len().min(10);
+            for s in &f.subjects[..listed] {
+                let c = s.centre.unwrap_or(Vec3::ZERO);
+                match f.gate {
+                    Gate::Volume => b.push_str(&format!(
+                        "\n  cell {} at ({:.6}, {:.6}, {:.6}): \
+                         V = {:.6e}, need > 0",
+                        s.id, c.x, c.y, c.z, s.value
                     )),
-                    None => b.push_str(": face addressing"),
+                    Gate::Closure => b.push_str(&format!(
+                        "\n  cell {} at ({:.6}, {:.6}, {:.6}): \
+                         E = {:.3e}, need < {:e}",
+                        s.id, c.x, c.y, c.z, s.value, f.threshold
+                    )),
+                    Gate::NonOrth => b.push_str(&format!(
+                        "\n  face {} at ({:.6}, {:.6}, {:.6}) {}: \
+                         theta = {:.3}, need < {}",
+                        s.id, c.x, c.y, c.z, s.why, s.value, f.threshold
+                    )),
+                    Gate::Thickness => b.push_str(&format!(
+                        "\n  cell {} at ({:.6}, {:.6}, {:.6}): \
+                         tau = {:.6}, need >= {}",
+                        s.id, c.x, c.y, c.z, s.value, f.threshold
+                    )),
+                    Gate::Conditioning => b.push_str(&format!(
+                        "\n  cell {} at ({:.6}, {:.6}, {:.6}): \
+                         cond = {:.3e}, need < {:e}",
+                        s.id, c.x, c.y, c.z, s.value, f.threshold
+                    )),
+                    Gate::Addressing => b.push_str(&format!(
+                        "\n  face {}: {}",
+                        s.id, s.why
+                    )),
+                    // G3 carries no subjects; the mesh-wide branch above ran.
+                    Gate::Regions => {}
                 }
             }
-            let total = f.n_failed.max(f.cells.len());
             if total > listed {
                 b.push_str(&format!("\n  ... and {} more", total - listed));
             }
@@ -297,6 +357,32 @@ fn list_faces(ids: &[usize]) -> String {
     parts.join(", ")
 }
 
+/// §92.3 (92.14)'s `A_max(c)`: the summed `|Sf|` of the largest PLANAR FACE
+/// GROUP, not the largest single face. `faces` carries `(n_c(f), |Sf|)` per
+/// face of the cell, `n_c(f)` its OUTWARD unit normal at this cell; a face
+/// joins the first group whose representative normal `g` satisfies
+/// `g . n_c(f) >= cos [`PLANAR_GROUP_DEG`]`, else starts its own group.
+/// Grouping by outward normal is what keeps a slab's top and bottom two
+/// groups instead of one of twice the area, and four coplanar quarter-faces
+/// of a 2:1 interface the one face they are.
+fn a_max_planar(faces: &[(Vec3, Scalar)]) -> Scalar {
+    let cos_tol = PLANAR_GROUP_DEG.to_radians().cos();
+    let mut groups: Vec<(Vec3, Scalar)> = Vec::new();
+    for (n, area) in faces {
+        match groups
+            .iter_mut()
+            .find(|(g, _): &&mut (Vec3, Scalar)| g.dot(*n) >= cos_tol)
+        {
+            Some((_, a)) => *a += *area,
+            None => groups.push((*n, *area)),
+        }
+    }
+    groups
+        .iter()
+        .map(|(_, a)| *a)
+        .fold(0.0, Scalar::max)
+}
+
 /// Measure everything §92.3 measures, on the mesh as it stands. Never fails
 /// on a bad mesh - a bad mesh is what it reports - so the only `Err` is
 /// `build_host_mesh`'s, for a mesh too broken to load at all.
@@ -310,96 +396,86 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
     // and a refusal this gate can name must not surface as an opaque load
     // error. So the addressing sub-checks run on the raw arrays, and only a
     // mesh that passes all four reaches `build_host_mesh`.
-    let mut not_lt: Vec<usize> = Vec::new();
-    let mut unsorted: Vec<usize> = Vec::new();
-    let mut dup_pairs: Vec<(usize, usize)> = Vec::new();
-    let mut pairs: BTreeMap<(Label, Label), usize> = BTreeMap::new();
-    for f in 0..n_if {
-        let (o, n) = (raw.owner[f], raw.neighbour[f]);
-        if o >= n {
-            not_lt.push(f);
-        }
-        if f > 0 && (o, n) <= (raw.owner[f - 1], raw.neighbour[f - 1]) {
-            unsorted.push(f);
-        }
-        match pairs.get(&(o, n)) {
-            Some(&first) => {
-                if dup_pairs.len() < GATE_CELL_CAP {
-                    dup_pairs.push((f, first));
-                }
-            }
-            None => {
-                pairs.insert((o, n), f);
-            }
-        }
-    }
-
+    // Pass 1: the FIRST face carrying each sorted point set, and the FIRST
+    // internal face carrying each (owner, neighbour) pair.
     let mut point_sets: BTreeMap<Vec<Label>, usize> = BTreeMap::new();
-    let mut n_duplicate_faces = 0usize;
-    let mut dup_faces: Vec<(usize, usize)> = Vec::new();
     for f in 0..n_faces {
         let mut key = raw.faces[f].clone();
         key.sort_unstable();
-        match point_sets.get(&key) {
-            Some(&first) => {
-                n_duplicate_faces += 1;
-                if dup_faces.len() < GATE_CELL_CAP {
-                    dup_faces.push((f, first));
-                }
-            }
-            None => {
-                point_sets.insert(key, f);
-            }
-        }
+        point_sets.entry(key).or_insert(f);
+    }
+    let mut pairs: BTreeMap<(Label, Label), usize> = BTreeMap::new();
+    for f in 0..n_if {
+        pairs.entry((raw.owner[f], raw.neighbour[f])).or_insert(f);
     }
 
-    let ldu_ordered = not_lt.is_empty() && unsorted.is_empty();
-    let mut g7_notes: Vec<String> = Vec::new();
-    let mut g7_cells: Vec<BadCell> = Vec::new();
-    if !not_lt.is_empty() {
-        g7_notes.push(format!(
-            "face(s) with owner >= neighbour: {}",
-            list_faces(&not_lt)
-        ));
-    }
-    if !unsorted.is_empty() {
-        g7_notes.push(format!(
-            "internal face(s) out of ascending (owner, neighbour) order: {}",
-            list_faces(&unsorted)
-        ));
-    }
-    let dup_face_ids: Vec<usize> = dup_faces.iter().map(|&(f, _)| f).collect();
-    if !dup_face_ids.is_empty() {
-        g7_notes.push(format!(
-            "face(s) repeating an earlier face's point set: {}",
-            list_faces(&dup_face_ids)
-        ));
-    }
-    let dup_pair_ids: Vec<usize> = dup_pairs.iter().map(|&(f, _)| f).collect();
-    if !dup_pair_ids.is_empty() {
-        g7_notes.push(format!(
-            "internal face(s) repeating an earlier (owner, neighbour) pair: {}",
-            list_faces(&dup_pair_ids)
-        ));
-    }
-    if !g7_notes.is_empty() {
-        for ids in [&not_lt, &unsorted, &dup_face_ids, &dup_pair_ids] {
-            for &f in ids.iter().take(GATE_CELL_CAP) {
-                g7_cells.push(BadCell {
-                    cell: f,
-                    centre: Vec3::ZERO,
+    // Pass 2: every face against both maps, all four conditions at once. A
+    // face that fires several sub-checks is ONE failing face carrying all
+    // its reasons; the count is exact and only the recorded subjects are
+    // capped.
+    let (mut n_not_lt, mut n_unsorted, mut n_dup_pairs) =
+        (0usize, 0usize, 0usize);
+    let mut n_duplicate_faces = 0usize;
+    let mut g7_n = 0usize;
+    let mut g7_subjects: Vec<BadSubject> = Vec::new();
+    for f in 0..n_faces {
+        let mut why: Vec<String> = Vec::new();
+        if f < n_if {
+            let (o, n) = (raw.owner[f], raw.neighbour[f]);
+            if o >= n {
+                n_not_lt += 1;
+                why.push(format!("owner {} >= neighbour {}", o, n));
+            }
+            if f > 0 && (o, n) <= (raw.owner[f - 1], raw.neighbour[f - 1]) {
+                n_unsorted += 1;
+                why.push(format!(
+                    "out of ascending (owner, neighbour) order after face {}",
+                    f - 1
+                ));
+            }
+            if let Some(&first) = pairs.get(&(o, n)) {
+                if first != f {
+                    n_dup_pairs += 1;
+                    why.push(format!(
+                        "repeats the (owner, neighbour) pair of face {}",
+                        first
+                    ));
+                }
+            }
+        }
+        let mut key = raw.faces[f].clone();
+        key.sort_unstable();
+        if let Some(&first) = point_sets.get(&key) {
+            if first != f {
+                n_duplicate_faces += 1;
+                why.push(format!("repeats the point set of face {}", first));
+            }
+        }
+        if !why.is_empty() {
+            g7_n += 1;
+            if g7_subjects.len() < GATE_CELL_CAP {
+                g7_subjects.push(BadSubject {
+                    id: f,
+                    centre: None,
                     value: 0.0,
+                    why: why.join("; "),
                 });
             }
         }
     }
+    let ldu_ordered = n_not_lt == 0 && n_unsorted == 0;
 
-    if !g7_notes.is_empty() {
+    if g7_n > 0 {
         // No geometry was built, so nothing past G7 is measured. Zeroes, and
         // the note says so - a NaN would print as a number that was read.
-        let mut note = g7_notes.join("; ");
-        note.push_str("; no geometry was measured, so every measured number \
-                       in this report is 0.0");
+        let note = format!(
+            "face(s) with owner >= neighbour: {}; internal face(s) out of \
+             ascending (owner, neighbour) order: {}; face(s) repeating an \
+             earlier face's point set: {}; internal face(s) repeating an \
+             earlier (owner, neighbour) pair: {}; no geometry was measured, \
+             so every measured number in this report is 0.0",
+            n_not_lt, n_unsorted, n_duplicate_faces, n_dup_pairs
+        );
         let n_cells = raw
             .owner
             .iter()
@@ -428,8 +504,8 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
             failures: vec![GateFailure {
                 gate: Gate::Addressing,
                 threshold: 0.0,
-                n_failed: g7_cells.len(),
-                cells: g7_cells,
+                n_failed: g7_n,
+                subjects: g7_subjects,
                 note,
             }],
         });
@@ -443,16 +519,23 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
     // ---- G1 positive volume (92.11) ---------------------------------------
     // A negative volume is an inverted cell, and every flux through it has
     // the wrong sign.
-    let mut g1_cells: Vec<BadCell> = Vec::new();
+    let mut min_volume = Scalar::INFINITY;
+    let mut min_volume_cell = 0usize;
+    let mut g1_cells: Vec<BadSubject> = Vec::new();
     let mut g1_n = 0usize;
     for c in 0..n_cells {
+        if m.v[c] < min_volume {
+            min_volume = m.v[c];
+            min_volume_cell = c;
+        }
         if m.v[c] <= 0.0 {
             g1_n += 1;
             if g1_cells.len() < GATE_CELL_CAP {
-                g1_cells.push(BadCell {
-                    cell: c,
-                    centre: m.c[c],
+                g1_cells.push(BadSubject {
+                    id: c,
+                    centre: Some(m.c[c]),
                     value: m.v[c],
+                    why: String::new(),
                 });
             }
         }
@@ -462,7 +545,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
             gate: Gate::Volume,
             threshold: 0.0,
             n_failed: g1_n,
-            cells: g1_cells,
+            subjects: g1_cells,
             note: String::new(),
         });
     }
@@ -470,7 +553,9 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
     // ---- G2 closure (92.12) ------------------------------------------------
     // The report carries `MeshReport`'s worst closure; the failure names
     // every cell past the tolerance, which the report does not.
-    let mut g2_cells: Vec<BadCell> = Vec::new();
+    let mut max_closure_e = 0.0;
+    let mut max_closure_cell = 0usize;
+    let mut g2_cells: Vec<BadSubject> = Vec::new();
     let mut g2_n = 0usize;
     for c in 0..n_cells {
         let v = m.v[c];
@@ -487,13 +572,18 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
             s += m.b_sf[m.bcf_face[k] as usize]; // boundary faces are +1
         }
         let e = s.mag() / v.powf(2.0 / 3.0);
+        if e > max_closure_e {
+            max_closure_e = e;
+            max_closure_cell = c;
+        }
         if e >= t.max_closure {
             g2_n += 1;
             if g2_cells.len() < GATE_CELL_CAP {
-                g2_cells.push(BadCell {
-                    cell: c,
-                    centre: m.c[c],
+                g2_cells.push(BadSubject {
+                    id: c,
+                    centre: Some(m.c[c]),
                     value: e,
+                    why: String::new(),
                 });
             }
         }
@@ -503,7 +593,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
             gate: Gate::Closure,
             threshold: t.max_closure,
             n_failed: g2_n,
-            cells: g2_cells,
+            subjects: g2_cells,
             note: String::new(),
         });
     }
@@ -512,14 +602,16 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
     // A sealed pocket's pressure equation is singular up to a constant; the
     // solve stalls or wanders. The gate's job is to make the mesher unable
     // to emit one, so the failure is mesh-wide and carries no cells.
-    let (n_regions, _) = crate::mesh::geometry::cell_regions(&m);
+    // `MeshReport` already walked the regions; taking `r.n_regions` keeps
+    // the mesh from being swept a second time for a number in hand.
+    let n_regions = r.n_regions;
     let region_sizes = r.region_sizes.clone();
     if n_regions != 1 {
         failures.push(GateFailure {
             gate: Gate::Regions,
             threshold: 1.0,
             n_failed: 0,
-            cells: Vec::new(),
+            subjects: Vec::new(),
             note: format!(
                 "the mesh is {} region(s): {}",
                 n_regions,
@@ -529,10 +621,15 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
     }
 
     // ---- G4 non-orthogonality (92.13) ---------------------------------------
-    let mut g4_cells: Vec<BadCell> = Vec::new();
-    let mut g4_faces: Vec<usize> = Vec::new();
-    let mut g4_n = 0usize;
+    // The report's non-orth numbers come from THIS loop, so the summary and
+    // the refusal can never disagree: max and mean are over the internal
+    // faces the loop measured, and the mean is 0.0 when it measured none.
+    let mut max_non_orth = 0.0;
+    let mut theta_sum = 0.0;
+    let mut n_theta = 0usize;
     let mut n_over_report = 0usize;
+    let mut g4_n = 0usize;
+    let mut g4_subjects: Vec<BadSubject> = Vec::new();
     for f in 0..m.n_internal_faces {
         let (p, nb) = (m.owner[f] as usize, m.neighbour[f] as usize);
         let (Some(&cp), Some(&cn)) = (m.c.get(p), m.c.get(nb)) else {
@@ -548,51 +645,73 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
             .clamp(-1.0, 1.0)
             .acos()
             .to_degrees();
+        theta_sum += theta;
+        n_theta += 1;
+        if theta > max_non_orth {
+            max_non_orth = theta;
+        }
         if theta > t.report_non_orth_deg {
             n_over_report += 1;
         }
         if theta >= t.max_non_orth_deg {
             g4_n += 1;
-            if g4_cells.len() < GATE_CELL_CAP {
-                g4_cells.push(BadCell {
-                    cell: p, // the owner, since d starts there
-                    centre: cp,
+            if g4_subjects.len() < GATE_CELL_CAP {
+                g4_subjects.push(BadSubject {
+                    id: f, // the subject is the FACE, not its owner
+                    centre: Some(m.cf[f]),
                     value: theta,
+                    why: format!("between cell {} and cell {}", p, nb),
                 });
-                g4_faces.push(f);
             }
         }
     }
     if g4_n > 0 {
+        let ids: Vec<usize> = g4_subjects.iter().map(|s| s.id).collect();
         failures.push(GateFailure {
             gate: Gate::NonOrth,
             threshold: t.max_non_orth_deg,
             n_failed: g4_n,
-            cells: g4_cells,
-            note: format!("face(s) past the limit: {}", list_faces(&g4_faces)),
+            subjects: g4_subjects,
+            note: format!("face(s) past the limit: {}", list_faces(&ids)),
         });
     }
 
     // ---- G5 thickness (92.14) -----------------------------------------------
     // 3 V_c / A_max^(3/2) is the thickness of the cell in the direction that
     // matters, made dimensionless by the side of the square with its largest
-    // face's area. A cube is 3; a plate of thickness t spanning L is 3t/L.
+    // planar face group's area. A cube is 3; a plate of thickness t spanning
+    // L is 3t/L.
     let mut min_tau = Scalar::INFINITY;
     let mut min_tau_cell = 0usize;
-    let mut g5_cells: Vec<BadCell> = Vec::new();
+    let mut g5_cells: Vec<BadSubject> = Vec::new();
     let mut g5_n = 0usize;
     for c in 0..n_cells {
         let v = m.v[c];
         if v <= 0.0 {
             continue; // G1 already has these
         }
-        let mut a_max: Scalar = 0.0;
+        // The cell's faces as (outward unit normal, |Sf|): +Sf where the cell
+        // owns the face, -Sf where it neighbours it; boundary faces are
+        // always outward. Faces with |Sf| <= 0 are skipped.
+        let mut c_faces: Vec<(Vec3, Scalar)> = Vec::new();
         for k in m.cf_offset[c] as usize..m.cf_offset[c + 1] as usize {
-            a_max = a_max.max(m.mag_sf[m.cf_face[k] as usize]);
+            let f = m.cf_face[k] as usize;
+            let mag = m.mag_sf[f];
+            if mag <= 0.0 {
+                continue;
+            }
+            let sign = if m.cf_own[k] != 0 { 1.0 } else { -1.0 };
+            c_faces.push((m.sf[f] * (sign / mag), mag));
         }
         for k in m.bcf_offset[c] as usize..m.bcf_offset[c + 1] as usize {
-            a_max = a_max.max(m.b_mag_sf[m.bcf_face[k] as usize]);
+            let bf = m.bcf_face[k] as usize;
+            let mag = m.b_mag_sf[bf];
+            if mag <= 0.0 {
+                continue;
+            }
+            c_faces.push((m.b_sf[bf] * (1.0 / mag), mag));
         }
+        let a_max = a_max_planar(&c_faces);
         if a_max <= 0.0 {
             continue;
         }
@@ -604,10 +723,11 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         if tau < t.min_thickness_ratio {
             g5_n += 1;
             if g5_cells.len() < GATE_CELL_CAP {
-                g5_cells.push(BadCell {
-                    cell: c,
-                    centre: m.c[c],
+                g5_cells.push(BadSubject {
+                    id: c,
+                    centre: Some(m.c[c]),
                     value: tau,
+                    why: String::new(),
                 });
             }
         }
@@ -617,7 +737,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
             gate: Gate::Thickness,
             threshold: t.min_thickness_ratio,
             n_failed: g5_n,
-            cells: g5_cells,
+            subjects: g5_cells,
             note: String::new(),
         });
     }
@@ -629,7 +749,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
     // cube gives T_c = 2 h^2 I, cond = 1 exactly (§92.7).
     let mut max_cond = 0.0;
     let mut max_cond_cell = 0usize;
-    let mut g6_cells: Vec<BadCell> = Vec::new();
+    let mut g6_cells: Vec<BadSubject> = Vec::new();
     let mut g6_n = 0usize;
     for c in 0..n_cells {
         if m.v[c] <= 0.0 {
@@ -681,10 +801,11 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         if cond >= t.max_cond {
             g6_n += 1;
             if g6_cells.len() < GATE_CELL_CAP {
-                g6_cells.push(BadCell {
-                    cell: c,
-                    centre: m.c[c],
+                g6_cells.push(BadSubject {
+                    id: c,
+                    centre: Some(m.c[c]),
                     value: cond,
+                    why: String::new(),
                 });
             }
         }
@@ -694,7 +815,7 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
             gate: Gate::Conditioning,
             threshold: t.max_cond,
             n_failed: g6_n,
-            cells: g6_cells,
+            subjects: g6_cells,
             note: String::new(),
         });
     }
@@ -706,14 +827,22 @@ pub fn measure(raw: &PolyMeshRaw, t: &QualityThresholds) -> Result<QualityReport
         n_internal_faces: m.n_internal_faces,
         n_boundary_faces: m.n_boundary_faces,
         n_points: m.n_points,
-        min_volume: r.min_volume,
-        min_volume_cell: r.min_volume_cell,
-        max_closure: r.max_closure_error,
-        max_closure_cell: r.max_closure_cell,
+        min_volume: if min_volume.is_finite() {
+            min_volume
+        } else {
+            0.0
+        },
+        min_volume_cell,
+        max_closure: max_closure_e,
+        max_closure_cell,
         n_regions,
         region_sizes,
-        max_non_orth_deg: r.max_non_orth_deg,
-        mean_non_orth_deg: r.mean_non_orth_deg,
+        max_non_orth_deg: max_non_orth,
+        mean_non_orth_deg: if n_theta > 0 {
+            theta_sum / n_theta as Scalar
+        } else {
+            0.0
+        },
         n_non_orth_over_report: n_over_report,
         min_thickness_ratio: if min_tau.is_finite() {
             min_tau
@@ -829,8 +958,11 @@ mod tests {
             "max non-orth {} deg",
             rep.max_non_orth_deg
         );
+        // §92.7: a cube's tau_c is exactly 3. The loose `> 0.5` this
+        // replaced is why a broken G5 reference length survived a
+        // mutation test.
         assert!(
-            rep.min_thickness_ratio > 0.5,
+            (rep.min_thickness_ratio - 3.0).abs() < 1e-12,
             "min tau {}",
             rep.min_thickness_ratio
         );
@@ -897,12 +1029,16 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("G1 (positive volume)"), "{msg}");
         assert!(msg.contains("cell "), "{msg}");
+        // (92.11) is a strict inequality; the refusal must not say
+        // `need >= 0` beside a cell it just refused.
+        assert!(msg.contains("V = "), "{msg}");
+        assert!(msg.contains("need > 0"), "{msg}");
 
         let rep = measure(&raw, &QualityThresholds::default()).unwrap();
         assert!(
             rep.failures.iter().any(|f| {
                 f.gate == Gate::Volume
-                    && f.cells.iter().any(|c| c.cell == 0)
+                    && f.subjects.iter().any(|c| c.id == 0)
             }),
             "G1 did not name cell 0: {}",
             rep.summary()
@@ -941,11 +1077,12 @@ mod tests {
                 gate: Gate::Volume,
                 threshold: 0.0,
                 n_failed: 5000,
-                cells: (0..GATE_CELL_CAP)
-                    .map(|c| BadCell {
-                        cell: c,
-                        centre: Vec3::ZERO,
+                subjects: (0..GATE_CELL_CAP)
+                    .map(|c| BadSubject {
+                        id: c,
+                        centre: Some(Vec3::ZERO),
                         value: -1.0,
+                        why: String::new(),
                     })
                     .collect(),
                 note: String::new(),
@@ -1018,5 +1155,319 @@ mod tests {
         // G3 fired, the winding or a formula is wrong.
         assert_eq!(rep.failures.len(), 1, "{}", rep.summary());
         assert_eq!(rep.failures[0].gate, Gate::Regions);
+    }
+
+    // ------------------------------------------------------------------------
+    // AM-1e: a refusal test per gate. The standard every test here meets: if
+    // that gate's threshold were changed so the gate never refuses, the test
+    // fails - each one asserts the gate FIRED, not that a number came back.
+    // ------------------------------------------------------------------------
+
+    /// A uniform block over [0, xh] x [0, yh] x [0, zh] with xn x yn x zn
+    /// cells, all six patches `wall`, no windows, no cyclics - the shape
+    /// [`cube_block_mesh`] builds, parameterised.
+    fn block(
+        xh: Scalar,
+        xn: usize,
+        yh: Scalar,
+        yn: usize,
+        zh: Scalar,
+        zn: usize,
+    ) -> PolyMeshRaw {
+        use crate::blockgen::{BlockSpec, GradedAxis};
+        let ax = |hi: Scalar, n: usize| GradedAxis {
+            lo: 0.0,
+            hi,
+            n,
+            expansion: 1.0,
+            two_sided: false,
+        };
+        let b = BlockSpec {
+            x: ax(xh, xn),
+            y: ax(yh, yn),
+            z: ax(zh, zn),
+            patch_name: ["xmin", "xmax", "ymin", "ymax", "zmin", "zmax"]
+                .map(String::from),
+            patch_type: ["wall"; 6].map(String::from),
+            windows: vec![],
+            cyclic: vec![],
+        };
+        crate::blockgen::raw_mesh(&b).unwrap()
+    }
+
+    /// The ammonia site's own defect: 5 cm spanning 13 m. §92.3 prints
+    /// tau = 0.0115 for it; the gate must refuse it and nothing else about
+    /// the block.
+    #[test]
+    fn the_ammonia_sliver_fails_g5_and_nothing_else() {
+        let raw = block(13.0, 1, 13.0, 1, 0.05, 1);
+        let rep = measure(&raw, &QualityThresholds::default()).unwrap();
+        assert!(
+            (rep.min_thickness_ratio - 0.011_538_461_538).abs() < 1e-9,
+            "tau {}",
+            rep.min_thickness_ratio
+        );
+        assert_eq!(rep.failures.len(), 1, "{}", rep.summary());
+        assert_eq!(rep.failures[0].gate, Gate::Thickness);
+        assert_eq!(rep.failures[0].n_failed, 1);
+    }
+
+    /// §92.3's planar grouping, and the reason it exists: the SAME 13 x 13 x
+    /// 0.05 slab built as ONE cell whose two large faces are four coplanar
+    /// quads each must measure the same tau as the whole-face slab of
+    /// [`the_ammonia_sliver_fails_g5_and_nothing_else`]. Before the grouping
+    /// this measured 0.092308 and passed - a factor of 4^(3/2) = 8 - which
+    /// is how the one defect the gate exists to refuse walked through it at
+    /// a 2:1 interface.
+    #[test]
+    fn the_same_sliver_measures_the_same_tau_whole_or_split() {
+        let (l, t) = (13.0, 0.05);
+        // A 3x3 grid of points on z = 0 (ids 0..9) and its copy at z = t
+        // (ids 9..18); point (i, j) is id i + 3 j, at (i l/2, j l/2).
+        let mut points: Vec<Vec3> = Vec::new();
+        for z in [0.0, t] {
+            for j in 0..3 {
+                for i in 0..3 {
+                    points.push(Vec3::new(
+                        i as Scalar * l / 2.0,
+                        j as Scalar * l / 2.0,
+                        z,
+                    ));
+                }
+            }
+        }
+        let at = |i: usize, j: usize, top: bool| {
+            (i + 3 * j) as Label + if top { 9 } else { 0 }
+        };
+        let mut q: Vec<[Label; 4]> = Vec::new();
+        for j in 0..2 {
+            for i in 0..2 {
+                // z-min, outward -z; z-max, outward +z.
+                q.push([
+                    at(i, j, false),
+                    at(i, j + 1, false),
+                    at(i + 1, j + 1, false),
+                    at(i + 1, j, false),
+                ]);
+                q.push([
+                    at(i, j, true),
+                    at(i + 1, j, true),
+                    at(i + 1, j + 1, true),
+                    at(i, j + 1, true),
+                ]);
+            }
+        }
+        // The four sides, corner to corner, outward-wound.
+        q.push([at(0, 0, false), at(2, 0, false), at(2, 0, true), at(0, 0, true)]);
+        q.push([at(0, 2, false), at(0, 2, true), at(2, 2, true), at(2, 2, false)]);
+        q.push([at(0, 0, false), at(0, 0, true), at(0, 2, true), at(0, 2, false)]);
+        q.push([at(2, 0, false), at(2, 2, false), at(2, 2, true), at(2, 0, true)]);
+        let raw = PolyMeshRaw {
+            points,
+            faces: q.iter().map(|k| k.to_vec()).collect(),
+            owner: vec![0; q.len()],
+            neighbour: Vec::new(),
+            patches: vec![crate::mesh::PatchInfo {
+                name: String::from("walls"),
+                type_name: String::from("wall"),
+                kind: crate::mesh::PatchKind::Wall,
+                start: 0,
+                size: q.len(),
+                nbr_patch: None,
+            }],
+        };
+        let whole = block(13.0, 1, 13.0, 1, 0.05, 1);
+        let split = measure(&raw, &QualityThresholds::default()).unwrap();
+        let whole = measure(&whole, &QualityThresholds::default()).unwrap();
+        assert!(
+            (split.min_thickness_ratio - whole.min_thickness_ratio).abs() < 1e-12,
+            "split {} vs whole {}",
+            split.min_thickness_ratio,
+            whole.min_thickness_ratio
+        );
+        assert!(
+            split.failures.iter().any(|f| f.gate == Gate::Thickness),
+            "G5 did not fire on the split slab: {}",
+            split.summary()
+        );
+    }
+
+    /// Every internal face of a block sheared by `p.x += 3 p.z` sits at
+    /// atan(3) = 71.565 deg, past G4's 70. G4's subject is the FACE, and the
+    /// block's two internal faces both fail.
+    #[test]
+    fn a_sheared_block_fails_g4_naming_the_face() {
+        let mut raw = block(1.0, 1, 1.0, 1, 1.0, 3);
+        for p in &mut raw.points {
+            p.x += 3.0 * p.z;
+        }
+        let rep = measure(&raw, &QualityThresholds::default()).unwrap();
+        assert!(
+            (rep.max_non_orth_deg - 71.565).abs() < 1e-2,
+            "max non-orth {} deg",
+            rep.max_non_orth_deg
+        );
+        assert_eq!(rep.failures.len(), 1, "{}", rep.summary());
+        assert_eq!(rep.failures[0].gate, Gate::NonOrth);
+        assert_eq!(rep.failures[0].n_failed, 2);
+        assert_eq!(rep.n_non_orth_over_report, 2);
+        let text = rep.refusal_text();
+        assert!(text.contains("failed on 2 face(s)"), "{text}");
+        assert!(text.contains("between cell"), "{text}");
+        assert!(text.contains("theta = 71.565, need < 70"), "{text}");
+    }
+
+    /// The control that keeps the test above honest: the same block sheared
+    /// by 2.5 sits at atan(2.5) = 68.199 deg - past the 60 deg report mark,
+    /// inside the 70 deg refusal - so `check` SUCCEEDS while the report
+    /// still counts both faces. Without it the test above could pass because
+    /// the shear broke something else.
+    #[test]
+    fn a_shear_below_seventy_is_reported_not_refused() {
+        let mut raw = block(1.0, 1, 1.0, 1, 1.0, 3);
+        for p in &mut raw.points {
+            p.x += 2.5 * p.z;
+        }
+        let rep = check(&raw, &QualityThresholds::default())
+            .expect("68.199 deg is inside the 70 deg refusal");
+        assert_eq!(rep.n_non_orth_over_report, 2);
+        assert!(
+            (rep.max_non_orth_deg - 68.199).abs() < 1e-2,
+            "max non-orth {} deg",
+            rep.max_non_orth_deg
+        );
+    }
+
+    /// G2 (closure) is the gate nothing exercised at all before this test.
+    /// Reversing internal face 0 un-winds it: the two cells that share it no
+    /// longer close, and both are named.
+    #[test]
+    fn a_reversed_face_winding_fails_g2() {
+        let mut raw = cube_block_mesh();
+        raw.faces[0].reverse();
+        let rep = measure(&raw, &QualityThresholds::default()).unwrap();
+        let g2 = rep
+            .failures
+            .iter()
+            .find(|f| f.gate == Gate::Closure)
+            .expect("G2 must fire on a reversed face");
+        assert_eq!(g2.n_failed, 2, "{}", rep.summary());
+        let text = rep.refusal_text();
+        assert!(text.contains("E = "), "{text}");
+        assert!(text.contains("need < 1e-10"), "{text}");
+    }
+
+    /// A 1 x 1 x 1e-6 slab: cond(T_c) = 1e6, a hundred times past G6's 1e4.
+    /// G5 fires here too - on a slab that is expected - so G6 is asserted by
+    /// name.
+    #[test]
+    fn a_collapsed_cell_fails_g6() {
+        let raw = block(1.0, 1, 1.0, 1, 1.0e-6, 1);
+        let rep = measure(&raw, &QualityThresholds::default()).unwrap();
+        assert!(
+            (rep.max_cond - 1.0e6).abs() < 1.0e-3 * 1.0e6,
+            "cond {}",
+            rep.max_cond
+        );
+        assert!(
+            rep.failures.iter().any(|f| f.gate == Gate::Conditioning),
+            "G6 must fire on the collapsed cell: {}",
+            rep.summary()
+        );
+        assert!(
+            rep.refusal_text()
+                .contains("cond = 1.000e6, need < 1e4"),
+            "{}",
+            rep.refusal_text()
+        );
+    }
+
+    /// SPEC-LIT (92.16): on a box `tau_c * cond(T_c) = 3 sqrt(a/b)`, which
+    /// on a slab L x L x t is exactly 3. G5's 0.05 is there cond = 60, so
+    /// G6's 1e4 is 167 times looser and can never fire first on a box. This
+    /// records what G6 is actually for: the shapes G5 cannot see.
+    #[test]
+    fn on_a_slab_tau_times_cond_is_exactly_three() {
+        for t in [1.0e-1, 1.0e-2, 1.0e-3, 1.0e-4] {
+            let raw = block(1.0, 1, 1.0, 1, t, 1);
+            let rep = measure(&raw, &QualityThresholds::default()).unwrap();
+            let prod = rep.min_thickness_ratio * rep.max_cond;
+            assert!(
+                (prod - 3.0).abs() < 1e-9,
+                "t = {t}: tau {} * cond {} = {}",
+                rep.min_thickness_ratio,
+                rep.max_cond,
+                prod
+            );
+        }
+    }
+
+    /// A duplicated face is two matrix entries for one flux. G7 runs on the
+    /// raw arrays, before `build_host_mesh`, and names the face that repeats
+    /// an earlier face's point set.
+    #[test]
+    fn a_duplicated_face_fails_g7_naming_the_face() {
+        let mut raw = block(1.0, 2, 1.0, 1, 1.0, 1);
+        let n = raw.faces.len();
+        raw.faces[n - 1] = raw.faces[n - 2].clone();
+        let msg = check(&raw, &QualityThresholds::default())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("G7 (addressing)"), "{msg}");
+        assert!(msg.contains("repeats the point set of face"), "{msg}");
+    }
+
+    /// A mesh out of upper-triangular order must surface as the G7 refusal
+    /// that names the face, not as `build_host_mesh`'s opaque load error.
+    #[test]
+    fn broken_ldu_order_fails_g7_by_name() {
+        let mut raw = block(1.0, 3, 1.0, 1, 1.0, 1);
+        raw.owner.swap(0, 1);
+        raw.neighbour.swap(0, 1);
+        let msg = check(&raw, &QualityThresholds::default())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("G7 (addressing)"), "{msg}");
+        assert!(msg.contains("face "), "{msg}");
+    }
+
+    /// `n_failed` counts EVERY broken face; `subjects` holds at most
+    /// [`GATE_CELL_CAP`] of them. Until today G7 reported the capped 200 as
+    /// if it were the total.
+    #[test]
+    fn g7_counts_every_broken_face_not_only_the_ones_it_lists() {
+        let mut raw = block(1.0, 300, 1.0, 1, 1.0, 1);
+        let n_if = raw.neighbour.len();
+        assert_eq!(n_if, 299);
+        for f in 0..n_if {
+            let o = raw.owner[f];
+            raw.owner[f] = raw.neighbour[f];
+            raw.neighbour[f] = o;
+        }
+        let rep = measure(&raw, &QualityThresholds::default()).unwrap();
+        let g7 = rep
+            .failures
+            .iter()
+            .find(|f| f.gate == Gate::Addressing)
+            .expect("G7 must fire on every face with owner > neighbour");
+        assert_eq!(g7.n_failed, 299);
+        assert_eq!(g7.subjects.len(), GATE_CELL_CAP);
+        let text = rep.refusal_text();
+        assert!(text.contains("failed on 299 face(s)"), "{text}");
+    }
+
+    /// §92.3 fixed the refusal line's exact form so that tests could assert
+    /// it. This is that line, character for character, on the ammonia
+    /// sliver of [`the_ammonia_sliver_fails_g5_and_nothing_else`].
+    #[test]
+    fn a_refusal_line_is_exactly_what_section_92_3_fixed() {
+        let raw = block(13.0, 1, 13.0, 1, 0.05, 1);
+        let rep = measure(&raw, &QualityThresholds::default()).unwrap();
+        assert_eq!(
+            rep.refusal_text(),
+            "automesher: quality gate G5 (thickness) failed on 1 cell(s)\n  \
+             cell 0 at (6.500000, 6.500000, 0.025000): tau = 0.011538, \
+             need >= 0.05"
+        );
     }
 }
