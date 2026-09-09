@@ -127,7 +127,11 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
     {"tag": 33, "method": "resample", "cell_m": 1.5, "target_faces": 6000,
      "lift_z": 3.05, "brep": "optional path to reuse"}
   ],
-  "trim":  {"below_z": 3.05},             // or null: cut everything below this plane away
+  "trim":  {"below_z": 3.05,              // or null: cut everything below this plane away
+            "shrink_xy_m": 0},            // > 0: a margin cut off every x/y side after the z trim,
+                                          // the outer patches moving inward with the box - the
+                                          // terrain STEP's own edge is a staircase of centimetre
+                                          // steps and hull prisms cross the sides at shallow angles
   "sea_z": 3.05,                          // flat faces at this height (± 0.06) -> wall_sea_surface
   "points": {"tank_shell": [-916.9, 349.8],   // refinement/pool points; ground found by isInside
              "qcdc_inner": {"x": 18.5, "y": -7.5, "r": 10.5, "h": 0.5},    // its own radius; h > 0
