@@ -119,6 +119,9 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
     "hull_box_snap_m": 0,   // > 0: hull-prism corners closer than this to a domain x/y side
                             // (after the shrink) move 1 m outside it, so a wall meets the side
                             // squarely instead of leaving a wedge of fluid narrowing to nothing
+    "hull_box_inset_m": 0,  // > 0: those corners move this far INSIDE the side instead, so no far
+                            // wall touches an outlet at all - a wall-outlet junction, even a square
+                            // one, was where the steady solution broke next
     "boolean_tol_m": 0       // > 0: fuse and cut run as fuzzy booleans (Geometry.ToleranceBoolean)
                             // merging entities closer than this; OCC's fuzzy fuse of hundreds of
                             // overlapping prisms failed at 5 cm on the site, snapping did not
