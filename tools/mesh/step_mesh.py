@@ -833,7 +833,7 @@ def cut_stage(cfg, args, work):
         BOX_SNAP = (db[0] + shrink, db[1] + shrink, db[3] - shrink, db[4] - shrink,
                     cfg['solids']['hull_box_snap_m'], cfg['solids']['hull_box_inset_m'])
     if hull_beyond > 0:
-        n_hull, n_kept, n_skipped = 0, 0, 0
+        n_hull, n_kept, n_skipped, n_dropped = 0, 0, 0, 0
         keep_tags = set(cfg['solids']['exclude_tags']) | {r['tag'] for r in cfg['repairs']}
         pool_xy = list(cfg['points'].values())
         prisms = {}
@@ -847,7 +847,16 @@ def cut_stage(cfg, args, work):
                 continue
             made = hull_corners(tg, b, cfg['solids']['hull_pad_m'])
             if made is None:
-                n_skipped += 1
+                if BOX_SNAP is not None and (b[0] < BOX_SNAP[0] + BOX_SNAP[4] or b[1] < BOX_SNAP[1] + BOX_SNAP[4]
+                                             or b[3] > BOX_SNAP[2] - BOX_SNAP[4] or b[4] > BOX_SNAP[3] - BOX_SNAP[4]):
+                    # its outline collapsed onto a side's inset line: the solid lies in the band
+                    # along the domain side. Kept as modelled it would straddle the outlet, so it
+                    # goes; the far field this close to the boundary is not resolved anyway
+                    gmsh.model.occ.remove([(3, tg)], recursive=True)
+                    solid_bbox.pop(tg)
+                    n_dropped += 1
+                else:
+                    n_skipped += 1
                 continue
             prisms[tg] = [list(made[0]), made[1], made[2]]
         n_snapped = snap_corners(prisms, cfg['solids']['hull_snap_m'])
@@ -864,10 +873,11 @@ def cut_stage(cfg, args, work):
         gmsh.model.occ.synchronize()
         log('solids beyond %.0f m of the points replaced by padded convex-hull prisms: %d '
             '(pad %.2f m, %d corners snapped onto neighbours within %.2f m); %d kept as '
-            'modelled (near a point), %d skipped (degenerate outline)'
-            % (hull_beyond, n_hull, cfg['solids']['hull_pad_m'], n_snapped,
-               cfg['solids']['hull_snap_m'], n_kept, n_skipped))
+            'modelled (near a point), %d skipped (degenerate outline), %d dropped (in the band '
+            'along a domain side)' % (hull_beyond, n_hull, cfg['solids']['hull_pad_m'], n_snapped,
+                                       cfg['solids']['hull_snap_m'], n_kept, n_skipped, n_dropped))
         SUMMARY['solids_hulled'] = n_hull
+        SUMMARY['solids_dropped_at_sides'] = n_dropped
         SUMMARY['hull_corners_snapped'] = n_snapped
 
     # the buildings' bases can sit above the terrain under them, which leaves a hairline air
