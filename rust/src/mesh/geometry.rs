@@ -697,6 +697,100 @@ fn non_orth_split(sf: Vec3, d: Vec3) -> (Scalar, Vec3) {
 //  Checking
 // ==========================================================================
 
+/// The connected components of the cell graph, joined by the internal faces.
+///
+/// Returns `(n_regions, region_of)`: how many regions there are, and one
+/// region label per cell in `0..n_regions`, numbered in the order the regions
+/// first touch a cell - a property of the cell order alone, so two runs over
+/// the same mesh agree label for label.
+///
+/// A normal mesh is one region. Two or more mean the mesh is several disjoint
+/// pieces: either a legitimate multi-domain case - two rooms joined by a solid
+/// wall - or, the case that forced this pass, the sealed pockets a tetrahedral
+/// generator leaves under buildings, whose every face is internal to the
+/// pocket or a boundary face of the enclosing wall. With `p` zeroGradient on
+/// that wall the pocket's block of the pressure matrix is singular, the
+/// pressure there drifts to 1e16, and the OpenFOAM-style normalisation (a mean
+/// over ALL cells) carries that poison into every normalised residual - so the
+/// count has to be known at load, not discovered in the solver log.
+///
+/// Union-find over the `(owner, neighbour)` pairs with path halving: O(cells
+/// + internal faces) and a `u32` per cell, negligible next to the geometry
+/// pass that fills `v` and `c`. The per-cell labels are NOT kept on
+/// [`MeshReport`] - a report is a summary - so a consumer that needs them (the
+/// mesh converter dropping the pockets, a per-region pressure reference later)
+/// calls this directly. Faces whose addressing points outside the cells are
+/// skipped: `check` is what reports a broken mesh, so this has to survive one.
+pub fn cell_regions(m: &HostMesh) -> (usize, Vec<u32>) {
+    let n_cells = m.n_cells;
+    let n_if = m
+        .n_internal_faces
+        .min(m.owner.len())
+        .min(m.neighbour.len());
+
+    // The root of `x`'s tree, halving the path on the way up: every node on
+    // it is re-hung from its grandparent, which keeps the trees flat without
+    // a rank array.
+    fn find(parent: &mut [u32], mut x: usize) -> usize {
+        while parent[x] != x as u32 {
+            parent[x] = parent[parent[x] as usize];
+            x = parent[x] as usize;
+        }
+        x
+    }
+
+    // Every cell starts as its own region; the internal faces join them.
+    let mut parent: Vec<u32> = (0..n_cells as u32).collect();
+    for f in 0..n_if {
+        let (a, b) = (m.owner[f], m.neighbour[f]);
+        if a < 0 || b < 0 {
+            continue;
+        }
+        let (a, b) = (a as usize, b as usize);
+        if a >= n_cells || b >= n_cells {
+            continue;
+        }
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent[ra] = rb as u32;
+        }
+    }
+
+    // Compact the roots to dense labels in cell order. `region_of[root]`
+    // holds the region's label while it is being handed out; every cell of
+    // the region copies it from there.
+    let mut region_of = vec![u32::MAX; n_cells];
+    let mut n_regions = 0usize;
+    for c in 0..n_cells {
+        let root = find(&mut parent, c);
+        if region_of[root] == u32::MAX {
+            region_of[root] = n_regions as u32;
+            n_regions += 1;
+        }
+        region_of[c] = region_of[root];
+    }
+
+    (n_regions, region_of)
+}
+
+/// The region sizes as the report lines print them,
+/// `(343466, 9, 4, 3, 3, 2, 1, 1, 1 cells)`. At most 12 sizes are listed,
+/// a `...` standing for the rest, so a mesh cut into thousands of pieces
+/// prints one line and not thousands of numbers.
+pub fn region_sizes_text(sizes: &[usize]) -> String {
+    const MAX_LISTED: usize = 12;
+
+    let mut parts: Vec<String> = sizes
+        .iter()
+        .take(MAX_LISTED)
+        .map(|s| s.to_string())
+        .collect();
+    if sizes.len() > MAX_LISTED {
+        parts.push("...".to_string());
+    }
+    format!("({} cells)", parts.join(", "))
+}
+
 /// Measure the mesh. Infallible by contract - this is what reports a broken
 /// mesh, so it has to survive one, including one whose arrays were never
 /// filled at all.
@@ -817,6 +911,19 @@ pub fn check(m: &HostMesh) -> MeshReport {
         }
     }
 
+    // ---- cell regions -----------------------------------------------------
+    // One region is a mesh; more are sealed pockets or a second domain, and
+    // the pressure equation is the thing that breaks on them - see
+    // `cell_regions`.
+    let (n_regions, region_of) = cell_regions(m);
+    let mut region_sizes = vec![0usize; n_regions];
+    for &r in &region_of {
+        region_sizes[r as usize] += 1;
+    }
+    // Largest first, the way the report line reads them; ties keep the
+    // region-label order.
+    region_sizes.sort_unstable_by(|a, b| b.cmp(a));
+
     MeshReport {
         total_volume,
         min_volume,
@@ -827,6 +934,8 @@ pub fn check(m: &HostMesh) -> MeshReport {
         max_closure_error,
         max_closure_cell,
         ldu_ordered,
+        n_regions,
+        region_sizes,
     }
 }
 
@@ -883,6 +992,21 @@ pub fn print_report(m: &HostMesh) {
             "NOT upper-triangular"
         }
     );
+
+    // The regions line is on stdout deliberately, warning or not: it is the
+    // line to read back when a pressure solve later reports ZERO iterations,
+    // and a redirected log has to carry it.
+    if r.n_regions > 1 {
+        println!(
+            "  regions: {} {} - every region but the largest is sealed off \
+             from the rest of the mesh; a pressure equation with no Dirichlet \
+             face in a region is singular",
+            r.n_regions,
+            region_sizes_text(&r.region_sizes)
+        );
+    } else {
+        println!("  regions: {}", r.n_regions);
+    }
 
     if m.n_cells > 0 && r.min_volume <= 0.0 {
         eprintln!(
@@ -1330,6 +1454,85 @@ mod tests {
         assert_eq!(r.min_volume, 0.0);
         assert_eq!(r.max_closure_error, 0.0);
         assert!(r.ldu_ordered);
+    }
+
+    // ---- cell regions -----------------------------------------------------
+
+    #[test]
+    fn a_whole_box_is_one_region() {
+        let m = built([3, 2, 2], Vec3::new(0.5, 0.25, 2.0));
+        let r = m.check();
+        assert_eq!(r.n_regions, 1);
+        assert_eq!(r.region_sizes, vec![m.n_cells]);
+    }
+
+    /// The block-mesh picture of what the tetrahedral site meshes arrive
+    /// with: cut every internal face between the left and the right half and
+    /// the halves become two sealed regions of the right sizes - each one's
+    /// every remaining face a boundary face, which is exactly the situation
+    /// that makes a zeroGradient-p pressure block singular.
+    #[test]
+    fn two_halves_with_no_face_between_them_are_two_regions() {
+        let (mut m, points, faces) = box_mesh([2, 2, 1], Vec3::new(1.0, 1.0, 1.0));
+        m.compute_geometry(&points, &faces).expect("geometry");
+
+        // A 2x2x1 block numbers its cells 0 1 / 2 3, and its four internal
+        // faces, sorted by (owner, neighbour), join (0,1) and (2,3) in x and
+        // (0,2) and (1,3) in y. Cutting the x pairs seals {0,2} off from
+        // {1,3}.
+        let cut: [(Label, Label); 2] = [(0, 1), (2, 3)];
+        let mut owner = Vec::new();
+        let mut neighbour = Vec::new();
+        for f in 0..m.n_internal_faces {
+            let pair = (m.owner[f], m.neighbour[f]);
+            if cut.contains(&pair) {
+                continue;
+            }
+            owner.push(pair.0);
+            neighbour.push(pair.1);
+        }
+        m.owner = owner;
+        m.neighbour = neighbour;
+        m.n_internal_faces = m.owner.len();
+
+        let r = m.check();
+        assert_eq!(r.n_regions, 2);
+        assert_eq!(r.region_sizes, vec![2, 2]);
+    }
+
+    /// A cell with no internal face at all - the whole mesh a single sealed
+    /// pocket - is a region of one. The all-boundary case `cell_regions`
+    /// exists for, at its smallest.
+    #[test]
+    fn a_lone_cell_is_a_region_of_one() {
+        let m = built([1, 1, 1], Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(m.n_internal_faces, 0);
+
+        let r = m.check();
+        assert_eq!(r.n_regions, 1);
+        assert_eq!(r.region_sizes, vec![1]);
+    }
+
+    #[test]
+    fn an_empty_mesh_has_no_regions() {
+        let r = HostMesh::default().check();
+        assert_eq!(r.n_regions, 0);
+        assert!(r.region_sizes.is_empty());
+    }
+
+    /// The sizes line lists twelve sizes and hands the rest to an ellipsis,
+    /// so a mesh cut into thousands of pieces still prints one line.
+    #[test]
+    fn the_region_sizes_line_lists_twelve_sizes_then_an_ellipsis() {
+        assert_eq!(
+            region_sizes_text(&[343466, 9, 4, 3, 3, 2, 1, 1, 1]),
+            "(343466, 9, 4, 3, 3, 2, 1, 1, 1 cells)"
+        );
+
+        let many = vec![500; 15];
+        let text = region_sizes_text(&many);
+        assert!(text.contains("..."), "{text}");
+        assert_eq!(text.matches("500").count(), 12, "{text}");
     }
 
     // ---- boundary metrics -------------------------------------------------

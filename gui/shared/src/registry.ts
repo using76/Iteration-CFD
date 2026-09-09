@@ -157,6 +157,7 @@ export const BINARIES: BinarySpec[] = [
       { name: '-type', type: 'string', repeatable: true, description: '`patchName=type` — patch type override (wall, patch, empty, symmetry ...).' },
       { name: '-fluent', type: 'path', description: 'Also write an ANSYS Fluent ASCII mesh to this path (tetrahedral meshes only).' },
       { name: '-fluentType', type: 'string', repeatable: true, description: '`patchName=zone` — Fluent zone override (wall, velocity-inlet, pressure-inlet, pressure-outlet, outflow, symmetry, interior).' },
+      { name: '-keepRegions', type: 'flag', description: 'Keep every cell region (default: keep the largest and drop the sealed pockets, printing the regions: line).' },
     ],
     accepts: [],
     builds: [],

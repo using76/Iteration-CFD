@@ -25,7 +25,10 @@ rust/target/release/ofgpu-convert-mesh <out_dir>/<name>.msh <caseDir> -fluent <n
 ```
 
 Every patch whose name starts with `wall` becomes type `wall` on conversion;
-`-fluentType <patch>=<zone>` overrides a zone.
+`-fluentType <patch>=<zone>` overrides a zone. Sealed cell pockets (whole regions
+cut off from the rest of the mesh, the kind a mesher leaves under buildings) are
+dropped by default and the `regions:` line says so; `-keepRegions` converts every
+region instead.
 
 On Windows, `run_step_mesh.cmd <config.json> [flags]` runs the tool in the
 current console — the stage banners print as they happen — and copies every

@@ -10,6 +10,7 @@
 //! ```text
 //! ofgpu-convert-mesh <in.msh> <outCaseDir> [-type <patchName>=<type>]...
 //!                     [-fluent <out.msh>] [-fluentType <patchName>=<zone>]...
+//!                     [-keepRegions]
 //! ```
 //!
 //! Reads `in.msh` (MSH 4.1 ASCII, `io/msh.rs`) and writes it as
@@ -74,6 +75,35 @@
 //! pre-processing chain produced, and nothing about the command line says
 //! the operator expected them to be replaced.
 //!
+//! # Sealed cell regions
+//!
+//! A tetrahedral generator can seal pockets of cells under buildings: whole
+//! clusters whose every face is internal to the cluster or a boundary face of
+//! the surrounding wall. Nothing joins a pocket to the rest of the mesh, so
+//! with `p` zeroGradient on that wall the pocket's block of the pressure
+//! matrix is singular - the pressure there drifts to 1e16, poisons the mean
+//! the linear solver normalises residuals over, and from then on the run
+//! marches against a dead pressure equation reporting ZERO iterations. The
+//! converter counts the cell regions (`mesh::geometry::cell_regions`) and, by
+//! default, keeps the largest and drops the rest - their cells, their internal
+//! faces and their boundary faces, the kept cells renumbered and the patch
+//! order and the upper-triangular face order kept - and says so:
+//!
+//! ```text
+//! regions: 9; dropped 8 sealed region(s), 24 cell(s), 77 face(s) (19 internal, 58 on wall_ground_land)
+//! kept region: 343466 cells
+//! ```
+//!
+//! The drop is refused once it stops being pocket-sized: more than 1 % of the
+//! cells, or a largest region under ten times the second, is not a pocket but
+//! a second domain, and that is the operator's decision, not a default's.
+//! `-keepRegions` is the way to record it: keep every region, convert the mesh
+//! as it stands, print only the `regions:` line. The Fluent writer sees the
+//! SAME mesh either way, because both writers share the one in-memory
+//! polyMesh. A converted mesh that still carries more than one region says so
+//! at load - the solver's own `regions:` line is the thing to read when a
+//! pressure solve reports zero iterations.
+//!
 //! Provenance: ORIGINAL - the command-line front end to `io/msh.rs` and
 //! `io/polymesh.rs`; the reader and the writer are covered by those files'
 //! own headers. This one is argument parsing, the type convention and
@@ -91,8 +121,9 @@ use std::process::ExitCode;
 
 use ofgpu::error::IoContext;
 use ofgpu::io::msh::read_msh;
-use ofgpu::io::polymesh::{PolyMeshRaw, write_poly_mesh_raw};
+use ofgpu::io::polymesh::{PolyMeshRaw, build_host_mesh, write_poly_mesh_raw};
 use ofgpu::mesh::PatchKind;
+use ofgpu::mesh::geometry::{cell_regions, region_sizes_text};
 use ofgpu::{Error, Label, Result, Scalar};
 
 /// Every `-type` value that means something - the strings
@@ -138,7 +169,7 @@ impl TypeRule {
 fn usage() {
     eprintln!(
         "usage: ofgpu-convert-mesh <in.msh> <outCaseDir> [-type <patchName>=<type>]... \
-         [-fluent <out.msh>] [-fluentType <patchName>=<zone>]..."
+         [-fluent <out.msh>] [-fluentType <patchName>=<zone>]... [-keepRegions]"
     );
 }
 
@@ -332,9 +363,12 @@ fn run(args: &[String]) -> Result<()> {
     // it, parsed with the same last-one-wins rule.
     let mut fluent_out: Option<&String> = None;
     let mut fluent_overrides: HashMap<String, String> = HashMap::new();
+    // `-keepRegions`: count the cell regions, keep every one, decide nothing.
+    let mut keep_regions = false;
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
+            "-keepRegions" => keep_regions = true,
             "-type" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
@@ -394,6 +428,9 @@ fn run(args: &[String]) -> Result<()> {
     // Types before the write, so the boundary file on disk carries what the
     // summary below prints.
     let rules = apply_patch_types(&mut raw, &overrides);
+    // The region pass before either write: the polyMesh and the Fluent mesh
+    // must be the same kept mesh, and a refusal here must write nothing.
+    handle_cell_regions(&mut raw, keep_regions)?;
     write_poly_mesh_raw(&dir, &raw)?;
 
     // polyMesh never stores a cell count - derive it the way
@@ -444,6 +481,224 @@ fn n_cells_of(raw: &PolyMeshRaw) -> Label {
         .max()
         .unwrap_or(-1)
         + 1
+}
+
+// ==========================================================================
+//  Sealed cell regions
+// ==========================================================================
+
+/// A drop stops being pocket-sized - and becomes the operator's decision -
+/// above either of these. 1 % of the cells is a generous ceiling for what a
+/// mesher leaves under buildings (the ammonia site's eight pockets were
+/// 0.007 %); a largest region under ten times the second means the mesh is
+/// two domains of comparable size, which no default should collapse.
+const DROP_MAX_CELL_FRACTION_PCT: usize = 1;
+const DROP_MIN_REGION_RATIO: usize = 10;
+
+/// Count the mesh's cell regions and, unless `keep_regions`, drop every one
+/// but the largest - the pockets a tetrahedral generator seals under
+/// buildings, whose every face is internal to the pocket or a boundary face
+/// of the wall around it. Must run before either write, so that the polyMesh
+/// and the Fluent mesh are the SAME kept mesh and a refusal leaves the case
+/// directory untouched.
+///
+/// A mesh of one region passes through untouched. A mesh of several is either
+/// repaired (the default), refused when the drop stops being pocket-sized
+/// (a second domain is the operator's call), or kept whole under
+/// `-keepRegions` - which then only prints the `regions:` line.
+fn handle_cell_regions(raw: &mut PolyMeshRaw, keep_regions: bool) -> Result<()> {
+    // `build_host_mesh` fills the addressing `cell_regions` walks, and as a
+    // side effect validates it: owner < neighbour, patches in range. A mesh
+    // it refuses would have been refused by the loader minutes later, with
+    // the files already on disk.
+    let host = build_host_mesh(raw)?;
+    let (n_regions, region_of) = cell_regions(&host);
+    let n_cells = n_cells_of(raw) as usize;
+
+    let mut sizes = vec![0usize; n_regions];
+    for &r in &region_of {
+        sizes[r as usize] += 1;
+    }
+    // Region labels ordered by size, largest first; ties keep label order,
+    // so "the largest region" is deterministic on a mesh cut in equal halves.
+    let mut by_size: Vec<u32> = (0..n_regions as u32).collect();
+    by_size.sort_unstable_by(|a, b| sizes[*b as usize].cmp(&sizes[*a as usize]));
+
+    if n_regions <= 1 {
+        if keep_regions {
+            println!("regions: {n_regions}");
+        }
+        return Ok(());
+    }
+    if keep_regions {
+        // Largest first, the way the loader's own `regions:` line reads.
+        let mut desc = sizes.clone();
+        desc.sort_unstable_by(|a, b| b.cmp(a));
+        println!("regions: {n_regions} {}", region_sizes_text(&desc));
+        return Ok(());
+    }
+
+    let largest = by_size[0] as usize;
+    let second = sizes[by_size[1] as usize];
+    let dropped_cells = n_cells - sizes[largest];
+
+    if dropped_cells * 100 > n_cells * DROP_MAX_CELL_FRACTION_PCT
+        || sizes[largest] < DROP_MIN_REGION_RATIO * second
+    {
+        return Err(Error::Config(format!(
+            "convert_mesh: the mesh holds {n_regions} cell regions and keeping \
+             only the largest would drop {dropped_cells} of {n_cells} cells \
+             (the largest is {:.1}x the second); that is not a sealed pocket \
+             but a second domain - pass -keepRegions to convert the mesh as \
+             it stands, or split it into one mesh per domain first",
+            sizes[largest] as f64 / second as f64
+        )));
+    }
+
+    let (dropped_internal, dropped_boundary) = keep_region(raw, &region_of, largest as u32);
+    let dropped_faces = dropped_internal + dropped_boundary.iter().map(|(_, k)| k).sum::<usize>();
+
+    println!(
+        "{}",
+        dropped_regions_message(
+            n_regions,
+            dropped_cells,
+            dropped_faces,
+            dropped_internal,
+            &dropped_boundary
+        )
+    );
+    println!("kept region: {} cells", sizes[largest]);
+
+    Ok(())
+}
+
+/// The `regions:` line a drop prints - the region count, then what went away
+/// in cells and faces, the faces split into internal and per patch, so the
+/// operator can see at a glance which wall the pockets sat under.
+fn dropped_regions_message(
+    n_regions: usize,
+    dropped_cells: usize,
+    dropped_faces: usize,
+    dropped_internal: usize,
+    dropped_boundary: &[(String, usize)],
+) -> String {
+    let mut where_: Vec<String> = vec![format!("{dropped_internal} internal")];
+    where_.extend(
+        dropped_boundary
+            .iter()
+            .map(|(name, k)| format!("{k} on {name}")),
+    );
+
+    format!(
+        "regions: {n_regions}; dropped {} sealed region(s), {dropped_cells} \
+         cell(s), {dropped_faces} face(s) ({})",
+        n_regions - 1,
+        where_.join(", ")
+    )
+}
+
+/// Keep one region's cells and their faces; drop the rest, in place.
+///
+/// Kept cells renumber to `0..n_kept` in their old order, which is what keeps
+/// every invariant the writers and the solver assume: a filtered subsequence
+/// of faces sorted by (owner, neighbour) is still sorted, and an
+/// order-preserving renumbering preserves every comparison - so the
+/// upper-triangular face order survives untouched. The kept internal faces
+/// stay a prefix and the kept boundary faces stay patch-contiguous in patch
+/// order, so the patch table needs only its `start`/`size` recounted; a patch
+/// whose every face sat on dropped pockets stays, empty, in its place. Points
+/// are left alone - an unused point is harmless, and renumbering them would
+/// rewrite every face for nothing.
+///
+/// Because a region is a connected component, no face of a kept cell touches
+/// a dropped one: a kept cell's every face is kept, so nothing about the kept
+/// cells changes but their numbering.
+///
+/// Returns the dropped face counts: internal faces, then boundary faces per
+/// patch in patch order, patches with nothing dropped left out.
+fn keep_region(
+    raw: &mut PolyMeshRaw,
+    region_of: &[u32],
+    keep: u32,
+) -> (usize, Vec<(String, usize)>) {
+    let n_if = raw.neighbour.len();
+    let n_faces = raw.faces.len();
+    let in_region = |c: Label| region_of[c as usize] == keep;
+
+    // Per-patch survival, counted while the addressing still names the old
+    // cells, and the starts the kept faces will sit at.
+    let mut dropped_per_patch = vec![0usize; raw.patches.len()];
+    let mut kept_start = vec![0usize; raw.patches.len()];
+    let mut start = 0usize;
+    for (p, pi) in raw.patches.iter().enumerate() {
+        kept_start[p] = start;
+        for bf in pi.start..pi.start + pi.size {
+            if !in_region(raw.owner[n_if + bf]) {
+                dropped_per_patch[p] += 1;
+            }
+        }
+        start += pi.size - dropped_per_patch[p];
+    }
+
+    // Internal faces first, compacted in place: the write cursor never
+    // passes the read cursor, so each swap only shifts an already-kept face
+    // out of the way, to be picked up again when the cursor reaches it.
+    let mut w = 0usize;
+    for f in 0..n_if {
+        if in_region(raw.owner[f]) {
+            raw.faces.swap(w, f);
+            raw.owner.swap(w, f);
+            raw.neighbour.swap(w, f);
+            w += 1;
+        }
+    }
+    let n_if_kept = w;
+    let dropped_internal = n_if - n_if_kept;
+
+    // Then the boundary faces, down to just behind them.
+    for bf in n_if..n_faces {
+        if in_region(raw.owner[bf]) {
+            raw.faces.swap(w, bf);
+            raw.owner.swap(w, bf);
+            w += 1;
+        }
+    }
+
+    raw.faces.truncate(w);
+    raw.owner.truncate(w);
+    raw.neighbour.truncate(n_if_kept);
+
+    // The kept cells, renumbered in their old order.
+    let mut new_cell = vec![-1 as Label; region_of.len()];
+    let mut next: Label = 0;
+    for (c, &r) in region_of.iter().enumerate() {
+        if r == keep {
+            new_cell[c] = next;
+            next += 1;
+        }
+    }
+    for o in raw.owner.iter_mut() {
+        *o = new_cell[*o as usize];
+    }
+    for n in raw.neighbour.iter_mut() {
+        *n = new_cell[*n as usize];
+    }
+
+    for (p, pi) in raw.patches.iter_mut().enumerate() {
+        pi.start = kept_start[p];
+        pi.size -= dropped_per_patch[p];
+    }
+
+    let dropped_boundary: Vec<(String, usize)> = raw
+        .patches
+        .iter()
+        .zip(&dropped_per_patch)
+        .filter(|(_, d)| **d > 0)
+        .map(|(pi, d)| (pi.name.clone(), *d))
+        .collect();
+
+    (dropped_internal, dropped_boundary)
 }
 
 /// Fluent zone ids for the patches start at 10: 1 is the fluid cell zone
@@ -707,6 +962,7 @@ fn trim_trailing_zeros(s: &str) -> String {
 mod tests {
     use super::*;
     use ofgpu::Vec3;
+    use ofgpu::io::polymesh::read_poly_mesh;
     use ofgpu::mesh::PatchInfo;
 
     /// The four patches every check here starts from, each the bare `patch`
@@ -1065,6 +1321,397 @@ mod tests {
         assert!(msg.contains("tetrahedral"), "{msg}");
 
         Ok(())
+    }
+
+    // ---- the sealed cell regions ------------------------------------------
+
+    /// A scratch directory for the round trips, the way `io/polymesh.rs`'s
+    /// tests make theirs.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut d = std::env::temp_dir();
+        d.push(format!(
+            "ofgpu-convert-mesh-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// `two_tet` plus a third tet 10 m to +x whose four faces are ALL
+    /// boundary on a patch of their own: a sealed pocket beside the two-cell
+    /// region the mesh is really made of - 11 faces, 1 of them internal,
+    /// 3 cells in 2 regions.
+    fn two_tet_with_a_sealed_third() -> PolyMeshRaw {
+        let mut raw = two_tet();
+        raw.patches.push(PatchInfo {
+            name: "walls".to_string(),
+            type_name: "wall".to_string(),
+            kind: PatchKind::Wall,
+            start: 6,
+            size: 4,
+            nbr_patch: None,
+        });
+        raw.points.extend([
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(11.0, 0.0, 0.0),
+            Vec3::new(10.0, 1.0, 0.0),
+            Vec3::new(10.0, 0.0, 1.0),
+        ]);
+        // Points 5..8, wound outward from cell 2 - `one_tet`'s face list
+        // shifted by the five points the two-cell region already holds - the
+        // way `read_msh` winds them.
+        raw.faces.extend([
+            vec![5, 7, 6],
+            vec![5, 6, 8],
+            vec![5, 8, 7],
+            vec![6, 7, 8],
+        ]);
+        raw.owner.extend([2; 4]);
+        raw
+    }
+
+    /// An `nx x ny x 1` slab of hexahedra with cell `(px, py)` sealed off:
+    /// every internal face touching it moved to boundary on a patch of its
+    /// own, owned by the pocket cell - which is exactly how a sealed pocket
+    /// looks in a polyMesh, the surrounding mesh closed by the pocket's own
+    /// faces. Polygonal faces are fine: the drop works on the polyMesh, not
+    /// on the tet-only Fluent writer.
+    ///
+    /// Cells `nx*ny`, internal faces `2 nx ny - nx - ny`, boundary faces
+    /// `2 nx ny + 2 nx + 2 ny`, plus the pocket's reclassified faces.
+    fn hex_slab_with_pocket(nx: usize, ny: usize, px: usize, py: usize) -> PolyMeshRaw {
+        let pt = |i: usize, j: usize, k: usize| -> Label {
+            (i + (nx + 1) * (j + (ny + 1) * k)) as Label
+        };
+        let cell = |i: usize, j: usize| -> Label { (i + nx * j) as Label };
+
+        let mut points = Vec::with_capacity(2 * (nx + 1) * (ny + 1));
+        for k in 0..2 {
+            for j in 0..=ny {
+                for i in 0..=nx {
+                    points.push(Vec3::new(
+                        i as Scalar,
+                        j as Scalar,
+                        k as Scalar,
+                    ));
+                }
+            }
+        }
+
+        // Internal faces, generated cell by cell, which sorts them by
+        // (owner, neighbour).
+        let mut internal: Vec<(Label, Label, Vec<Label>)> = Vec::new();
+        // Boundary faces, one bucket per patch, so the patch order of the
+        // written boundary file is the bucket order.
+        const XMIN: usize = 0;
+        const XMAX: usize = 1;
+        const YMIN: usize = 2;
+        const YMAX: usize = 3;
+        const ZMIN: usize = 4;
+        const ZMAX: usize = 5;
+        const POCKET: usize = 6;
+        let names = [
+            "xmin", "xmax", "ymin", "ymax", "zmin", "zmax", "wall_pocket",
+        ];
+        let mut buckets: Vec<Vec<(Label, Vec<Label>)>> = vec![Vec::new(); names.len()];
+
+        for j in 0..ny {
+            for i in 0..nx {
+                buckets[ZMIN].push((
+                    cell(i, j),
+                    vec![
+                        pt(i, j, 0),
+                        pt(i + 1, j, 0),
+                        pt(i + 1, j + 1, 0),
+                        pt(i, j + 1, 0),
+                    ],
+                ));
+                buckets[ZMAX].push((
+                    cell(i, j),
+                    vec![
+                        pt(i, j, 1),
+                        pt(i, j + 1, 1),
+                        pt(i + 1, j + 1, 1),
+                        pt(i + 1, j, 1),
+                    ],
+                ));
+                if i == 0 {
+                    buckets[XMIN].push((
+                        cell(i, j),
+                        vec![
+                            pt(i, j, 0),
+                            pt(i, j, 1),
+                            pt(i, j + 1, 1),
+                            pt(i, j + 1, 0),
+                        ],
+                    ));
+                }
+                if i == nx - 1 {
+                    buckets[XMAX].push((
+                        cell(i, j),
+                        vec![
+                            pt(i + 1, j, 0),
+                            pt(i + 1, j + 1, 0),
+                            pt(i + 1, j + 1, 1),
+                            pt(i + 1, j, 1),
+                        ],
+                    ));
+                }
+                if j == 0 {
+                    buckets[YMIN].push((
+                        cell(i, j),
+                        vec![
+                            pt(i, j, 0),
+                            pt(i + 1, j, 0),
+                            pt(i + 1, j, 1),
+                            pt(i, j, 1),
+                        ],
+                    ));
+                }
+                if j == ny - 1 {
+                    buckets[YMAX].push((
+                        cell(i, j),
+                        vec![
+                            pt(i, j + 1, 0),
+                            pt(i, j + 1, 1),
+                            pt(i + 1, j + 1, 1),
+                            pt(i + 1, j + 1, 0),
+                        ],
+                    ));
+                }
+
+                if i + 1 < nx {
+                    internal.push((
+                        cell(i, j),
+                        cell(i + 1, j),
+                        vec![
+                            pt(i + 1, j, 0),
+                            pt(i + 1, j, 1),
+                            pt(i + 1, j + 1, 1),
+                            pt(i + 1, j + 1, 0),
+                        ],
+                    ));
+                }
+                if j + 1 < ny {
+                    internal.push((
+                        cell(i, j),
+                        cell(i, j + 1),
+                        vec![
+                            pt(i, j + 1, 0),
+                            pt(i, j + 1, 1),
+                            pt(i + 1, j + 1, 1),
+                            pt(i + 1, j + 1, 0),
+                        ],
+                    ));
+                }
+            }
+        }
+
+        // Seal (px, py): its internal faces become boundary faces of its own
+        // patch, owned by the pocket cell.
+        let pocket = cell(px, py);
+        let pocket_faces: Vec<Vec<Label>> = internal
+            .iter()
+            .filter(|(o, n, _)| *o == pocket || *n == pocket)
+            .map(|(_, _, fv)| fv.clone())
+            .collect();
+        internal.retain(|(o, n, _)| *o != pocket && *n != pocket);
+        for fv in pocket_faces {
+            buckets[POCKET].push((pocket, fv));
+        }
+
+        let n_if = internal.len();
+        let mut raw = raw_with_patches(&[]);
+        raw.points = points;
+        raw.faces = Vec::with_capacity(n_if + buckets.iter().map(|b| b.len()).sum::<usize>());
+        raw.owner = Vec::with_capacity(raw.faces.capacity());
+        raw.neighbour = Vec::with_capacity(n_if);
+        for (o, n, fv) in &internal {
+            raw.faces.push(fv.clone());
+            raw.owner.push(*o);
+            raw.neighbour.push(*n);
+        }
+        let mut start = 0usize;
+        raw.patches = names
+            .iter()
+            .zip(&buckets)
+            .map(|(name, b)| {
+                let pi = PatchInfo {
+                    name: (*name).to_string(),
+                    type_name: "patch".to_string(),
+                    kind: PatchKind::Generic,
+                    start,
+                    size: b.len(),
+                    nbr_patch: None,
+                };
+                start += b.len();
+                for (o, fv) in b {
+                    raw.faces.push(fv.clone());
+                    raw.owner.push(*o);
+                }
+                pi
+            })
+            .collect();
+        raw
+    }
+
+    /// The pocket is its own region; the default keeps the two-cell region,
+    /// drops the pocket, and the polyMesh that lands on disk carries the
+    /// reduced counts.
+    #[test]
+    fn the_default_drops_a_sealed_pocket_and_the_written_polymesh_shows_it() -> Result<()> {
+        // The regions are what the count says they are before anything moves.
+        let probe = two_tet_with_a_sealed_third();
+        let host = build_host_mesh(&probe)?;
+        let (n_regions, region_of) = cell_regions(&host);
+        assert_eq!(n_regions, 2);
+        assert_eq!(region_of, vec![0, 0, 1]);
+
+        let mut raw = probe;
+        let (dropped_internal, dropped_boundary) = keep_region(&mut raw, &region_of, 0);
+        assert_eq!(dropped_internal, 0, "the pocket adds no internal faces");
+        assert_eq!(dropped_boundary, vec![("walls".to_string(), 4)]);
+
+        // 7 faces survive: 1 internal + 3 east + 3 top; cells 0 and 1 keep
+        // their numbers, the pocket's 2 is gone.
+        assert_eq!(raw.neighbour.len(), 1);
+        assert_eq!(raw.faces.len(), 7);
+        assert_eq!(raw.owner.len(), 7);
+        assert_eq!(n_cells_of(&raw), 2);
+        assert_eq!(raw.neighbour, vec![1]);
+        // The patches keep their order; the pocket's own is empty in place.
+        let names: Vec<&str> = raw.patches.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["east", "top", "walls"]);
+        assert_eq!(
+            raw.patches[2].start, 6,
+            "walls starts after the six kept boundary faces"
+        );
+        assert_eq!(raw.patches[2].size, 0);
+
+        // And the polyMesh that lands on disk is the reduced one.
+        let dir = scratch("drop-pocket");
+        write_poly_mesh_raw(&dir, &raw)?;
+        let back = read_poly_mesh(&dir)?;
+        assert_eq!(back.neighbour.len(), 1);
+        assert_eq!(back.faces.len(), 7);
+        assert_eq!(n_cells_of(&back), 2);
+        assert_eq!(back.patches.len(), 3);
+        assert_eq!((back.patches[2].start, back.patches[2].size), (6, 0));
+
+        Ok(())
+    }
+
+    /// A 12 x 12 slab with one sealed cell clears both refusal thresholds
+    /// (0.7 % of the cells, largest 143x the second), so the default path
+    /// really drops it - and the counts come out as the arithmetic says.
+    #[test]
+    fn a_pocket_in_a_big_mesh_is_dropped_by_default() -> Result<()> {
+        let (nx, ny) = (12usize, 12usize);
+        let mut raw = hex_slab_with_pocket(nx, ny, 1, 1);
+
+        // 144 cells; 264 - 4 internal faces, four of them moved to boundary
+        // to seal the pocket; 336 + 4 boundary faces, four on wall_pocket.
+        assert_eq!(n_cells_of(&raw), (nx * ny) as Label);
+        assert_eq!(raw.neighbour.len(), 2 * nx * ny - nx - ny - 4);
+        assert_eq!(
+            raw.faces.len(),
+            2 * nx * ny - nx - ny - 4 + 2 * nx * ny + 2 * nx + 2 * ny + 4
+        );
+
+        handle_cell_regions(&mut raw, false)?;
+
+        assert_eq!(n_cells_of(&raw), (nx * ny - 1) as Label);
+        assert_eq!(raw.neighbour.len(), 2 * nx * ny - nx - ny - 4);
+        // The pocket's six boundary faces go with it: four on wall_pocket,
+        // its own zmin and zmax. The four sealing faces were already boundary
+        // when they moved, so the internal count loses exactly the four that
+        // joined the pocket to its neighbours, and the slab's own 336 boundary
+        // faces lose the pocket's two.
+        assert_eq!(raw.faces.len(), 2 * nx * ny - nx - ny - 4 + 2 * nx * ny + 2 * nx + 2 * ny - 2);
+        assert_eq!(raw.faces.len(), raw.owner.len());
+        // Every patch survives in order; only the pocket's own is empty, and
+        // it starts where the sum of the kept faces before it says.
+        let sizes: Vec<usize> = raw.patches.iter().map(|p| p.size).collect();
+        assert_eq!(
+            sizes,
+            [nx, nx, ny, ny, nx * ny - 1, nx * ny - 1, 0],
+            "the pocket's own zmin/zmax faces are dropped with it"
+        );
+        let wall_pocket = raw.patches.last().unwrap();
+        assert_eq!(wall_pocket.start, 2 * nx + 2 * ny + 2 * nx * ny - 2);
+
+        Ok(())
+    }
+
+    /// `-keepRegions`: everything stays exactly as it arrived, however many
+    /// regions the mesh holds.
+    #[test]
+    fn keep_regions_keeps_every_region_and_touches_nothing() -> Result<()> {
+        let mut raw = two_tet_with_a_sealed_third();
+        let before = raw.clone();
+        handle_cell_regions(&mut raw, true)?;
+        assert_eq!(raw.faces, before.faces);
+        assert_eq!(raw.owner, before.owner);
+        assert_eq!(raw.neighbour, before.neighbour);
+        // `PatchInfo` carries no `PartialEq`; the fields that the drop would
+        // rewrite are the ones worth comparing.
+        let patch_id = |p: &PatchInfo| (p.name.clone(), p.start, p.size);
+        let same: Vec<_> = raw
+            .patches
+            .iter()
+            .zip(&before.patches)
+            .map(|(a, b)| (patch_id(a), patch_id(b)))
+            .collect();
+        assert!(same.iter().all(|(a, b)| a == b));
+        assert_eq!(raw.patches.len(), before.patches.len());
+        Ok(())
+    }
+
+    /// A pocket that is a third of the mesh fails both thresholds - that is
+    /// a second domain, and the refusal names it and the way out.
+    #[test]
+    fn a_second_region_that_is_not_pocket_sized_is_refused() {
+        let mut raw = two_tet_with_a_sealed_third();
+        let msg = match handle_cell_regions(&mut raw, false) {
+            Err(e) => e.to_string(),
+            Ok(()) => panic!("dropping 1 of 3 cells (a third of the mesh) must be refused"),
+        };
+        assert!(msg.contains("2 cell regions"), "{msg}");
+        assert!(msg.contains("second domain"), "{msg}");
+        assert!(msg.contains("-keepRegions"), "{msg}");
+        // A refusal decides nothing: the mesh is untouched for the next run.
+        assert_eq!(raw.faces.len(), 11);
+        assert_eq!(n_cells_of(&raw), 3);
+    }
+
+    /// The `regions:` line, spelled out: counts first, then the faces split
+    /// into internal and per patch.
+    #[test]
+    fn the_drop_message_splits_the_faces_into_internal_and_per_patch() {
+        let msg = dropped_regions_message(
+            9,
+            24,
+            77,
+            19,
+            &[("wall_ground_land".to_string(), 58)],
+        );
+        assert_eq!(
+            msg,
+            "regions: 9; dropped 8 sealed region(s), 24 cell(s), 77 face(s) \
+             (19 internal, 58 on wall_ground_land)"
+        );
+
+        // No boundary face dropped - the line does not end in a dangling
+        // comma.
+        assert_eq!(
+            dropped_regions_message(2, 1, 3, 3, &[]),
+            "regions: 2; dropped 1 sealed region(s), 1 cell(s), 3 face(s) \
+             (3 internal)"
+        );
     }
 }
 
