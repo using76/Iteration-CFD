@@ -86,6 +86,7 @@ THIN_SICN = 0.02                   # a thin tet for the push stage: gamma below 
 SLIVER_ROUNDS = 8
 HULL_FLAT_M = 1.0                  # a hull corner less than this off its neighbours' line is dropped
 SLIVER_TRI = 0.05                  # a surface triangle whose height is below this x its longest edge
+WEDGE_DEG = 30.0                   # a boundary edge whose fluid-side dihedral is below this is a wedge
 PUSH_ROUNDS = 3
 
 DEFAULTS = {
@@ -1536,7 +1537,7 @@ def gap_size_pass(cfg, ratio):
     xyz = np.array(coords).reshape(-1, 3)
     idx = np.zeros(int(ntags.max()) + 1, dtype=np.int64)
     idx[ntags] = np.arange(len(ntags))
-    cents, norms, sizes, lmax, areas = [], [], [], [], []
+    cents, norms, sizes, lmax, areas, tri_nodes = [], [], [], [], [], []
     for d, s in gmsh.model.getBoundary([(3, fluid)], oriented=True, combined=True):
         sign = 1.0 if s > 0 else -1.0
         et, etags, en = gmsh.model.mesh.getElements(2, abs(s))
@@ -1553,6 +1554,7 @@ def gap_size_pass(cfg, ratio):
             norms.append(n)
             sizes.append(1.52 * np.sqrt(0.5 * a2[keep]))     # the equilateral edge of that area
             Pk = P[keep]
+            tri_nodes.append(tri[keep])
             lmax.append(np.max(np.stack([np.linalg.norm(Pk[:, 1] - Pk[:, 0], axis=1),
                                          np.linalg.norm(Pk[:, 2] - Pk[:, 1], axis=1),
                                          np.linalg.norm(Pk[:, 0] - Pk[:, 2], axis=1)], axis=1), axis=1))
@@ -1560,7 +1562,45 @@ def gap_size_pass(cfg, ratio):
     if not cents:
         return 0, 0
     C = np.concatenate(cents); N = np.concatenate(norms); E = np.concatenate(sizes)
-    Lm = np.concatenate(lmax); Ar = np.concatenate(areas)
+    Lm = np.concatenate(lmax); Ar = np.concatenate(areas); TN = np.concatenate(tri_nodes)
+    # wedges: an edge shared by two boundary triangles whose fluid-side dihedral is under
+    # WEDGE_DEG (inward normals more than 180 - WEDGE_DEG apart) - a basin slope meeting the
+    # water plane, a wall meeting a domain side at a grazing angle. The cells along such an
+    # edge are thin whatever the size field says; the geometry has to change (fill the pit,
+    # pull the wall back). Reported and stored; the triangles on both sides are refined so
+    # the thin cells are at least small
+    ekey = np.concatenate([np.sort(TN[:, [0, 1]], axis=1), np.sort(TN[:, [1, 2]], axis=1),
+                           np.sort(TN[:, [2, 0]], axis=1)])
+    eown = np.concatenate([np.arange(len(TN))] * 3)
+    order = np.lexsort((ekey[:, 1], ekey[:, 0]))
+    ekey, eown = ekey[order], eown[order]
+    same = (ekey[1:] == ekey[:-1]).all(axis=1)
+    ia, ib = eown[:-1][same], eown[1:][same]
+    cosn = np.einsum('ij,ij->i', N[ia], N[ib])
+    wedge = cosn < math.cos(math.radians(180.0 - WEDGE_DEG))
+    n_wedge = int(wedge.sum())
+    wedge_tris = np.zeros(len(C), dtype=bool)
+    wedge_tris[ia[wedge]] = True
+    wedge_tris[ib[wedge]] = True
+    if n_wedge:
+        mids = 0.5 * (C[ia[wedge]] + C[ib[wedge]])
+        angs = np.degrees(np.arccos(np.clip(-cosn[wedge], -1, 1)))
+        # cluster on a 20 m grid so the report names places, not edges
+        keys = np.floor(mids[:, :2] / 20.0).astype(np.int64)
+        clusters = {}
+        for k, m, a_ in zip(map(tuple, keys), mids, angs):
+            c = clusters.setdefault(k, [0, m, 90.0])
+            c[0] += 1
+            if a_ < c[2]:
+                c[1], c[2] = m, a_
+        rows = sorted(clusters.values(), key=lambda r: r[2])
+        SUMMARY['wedges'] = [{'edges': int(r[0]), 'xyz': [round(float(v), 1) for v in r[1]],
+                              'dihedral_deg': round(float(r[2]), 1)} for r in rows[:200]]
+        for r in rows[:8]:
+            log('wedge: %d edge(s) around (%.1f, %.1f, %.1f), fluid-side dihedral down to %.1f deg'
+                % (r[0], r[1][0], r[1][1], r[1][2], r[2]))
+        log('wedges: %d boundary edge(s) with a fluid-side dihedral under %g deg in %d place(s) - '
+            'thin cells however they are sized; change the geometry there' % (n_wedge, WEDGE_DEG, len(rows)))
     tree = cKDTree(C)
     gap = np.full(len(C), np.inf)
     radius = np.maximum(4.0 * E, 2.0)
@@ -1594,10 +1634,12 @@ def gap_size_pass(cfg, ratio):
     sliver = height < SLIVER_TRI * Lm
     h_sl = np.where(sliver, np.maximum(3.0 * height, gmin), np.inf)
     h_gap = np.minimum(h_gap, h_sl)
-    refine = refine | sliver
+    h_w = np.where(wedge_tris, np.maximum(E / 3.0, gmin), np.inf)
+    h_gap = np.minimum(h_gap, h_w)
+    refine = refine | sliver | wedge_tris
     SUMMARY['gap_pass'] = {'triangles': int(len(C)), 'with a facing surface': int(have.sum()),
                            'refined': int(refine.sum()), 'unresolvable': int(unres.sum()),
-                           'surface slivers': int(sliver.sum())}
+                           'surface slivers': int(sliver.sum()), 'wedge edges': n_wedge}
     if unres.any():
         pts = C[unres]; g = gap[unres]
         order = np.argsort(g)
