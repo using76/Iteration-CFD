@@ -42,6 +42,13 @@
 //! every ray, so they classify in step 1 at no extra cost - no retry ray is
 //! even consulted per cell, and neither the vote nor the winding number
 //! does any work for them.
+//!
+//! The same pipeline is available per point: [`classify_points`] runs it at
+//! arbitrary points instead of a block's cell centres, which is what the
+//! automesher's octree castellation asks of a leaf centre (SPEC-LIT
+//! §92.10, eq. (92.23)).
+
+use std::collections::HashMap;
 
 use crate::error::{Error, Result};
 use crate::{Scalar, Vec3};
@@ -94,6 +101,21 @@ impl SolidMask {
     pub fn is_solid(&self, i: usize, j: usize, k: usize) -> bool {
         self.solid[i + self.nx * (j + self.ny * k)]
     }
+}
+
+/// §23.3's classification evaluated at arbitrary points rather than at the
+/// cells of a block - SPEC-LIT §92.10 (92.23), what the automesher's
+/// castellation asks of a leaf centre.
+#[derive(Debug, Clone, Default)]
+pub struct PointMask {
+    /// One flag per input point, in input order: `true` = inside `surf`.
+    pub solid: Vec<bool>,
+    /// How many came out solid.
+    pub n_solid: usize,
+    /// How many were settled by the 2-1 majority vote (§23.3 step 3).
+    pub voted: usize,
+    /// How many needed the winding-number arbiter (§23.3 step 4).
+    pub arbitrated: usize,
 }
 
 // ==========================================================================
@@ -233,6 +255,22 @@ fn needs_arbiter(vote: u8, sure: u8) -> bool {
 /// here. *DESIGN*.
 const PARALLEL_MIN_CELLS: usize = 1 << 16;
 
+/// The §23.3 combine for one subject: `(solid, was_voted, was_arbitrated)`.
+/// `centre` is called ONLY on the arbiter path - materialising a centre for
+/// every subject is the cost `combine_cell_range` deliberately avoids.
+fn decide(surf: &Surface, vote: u8, sure: u8, centre: impl FnOnce() -> Vec3) -> (bool, bool, bool) {
+    match vote {
+        0 => (false, false, false),
+        0b111 => (true, false, false),
+        _ if !needs_arbiter(vote, sure) => (vote.count_ones() >= 2, true, false),
+        _ => (
+            winding_number(surf, centre()).abs() >= 0.5,
+            false,
+            true,
+        ),
+    }
+}
+
 /// One contiguous chunk of the combine pass: block cells `c0 .. c0 +
 /// solid.len()` in the same `c` order the serial loop used, written into
 /// `solid` in place. Returns the chunk's own `(n_solid, voted, arbitrated)`.
@@ -257,22 +295,10 @@ fn combine_cell_range(
     let (mut n_solid, mut voted, mut arbitrated) = (0usize, 0usize, 0usize);
     for (local, slot) in solid.iter_mut().enumerate() {
         let c = c0 + local;
-        let v = vote[c];
-        let s = match v {
-            0 => false,
-            0b111 => true,
-            _ if !needs_arbiter(v, sure[c]) => {
-                voted += 1;
-                v.count_ones() >= 2
-            }
-            _ => {
-                arbitrated += 1;
-                // Cell centres are only needed for the (rare) arbitrated
-                // cells, so they are recomputed on demand rather than
-                // materialised for the whole block.
-                winding_number(surf, cell_centre(n, nodes, c)).abs() >= 0.5
-            }
-        };
+        let (s, was_voted, was_arbitrated) =
+            decide(surf, vote[c], sure[c], || cell_centre(n, nodes, c));
+        voted += was_voted as usize;
+        arbitrated += was_arbitrated as usize;
         if s {
             n_solid += 1;
         }
@@ -291,6 +317,126 @@ fn cell_centre(n: [usize; 3], nodes: [&[Scalar]; 3], c: usize) -> Vec3 {
         0.5 * (nodes[1][j] + nodes[1][j + 1]),
         0.5 * (nodes[2][k] + nodes[2][k + 1]),
     )
+}
+
+// ==========================================================================
+//  Per-point classification - SPEC-LIT §92.10 (92.23)
+// ==========================================================================
+
+/// Classify `pts` against `surf` by §23.3's pipeline: three-axis column
+/// parity, jittered retry, majority vote, winding-number arbitration.
+///
+/// `scale` is the ONE ray-jitter length for every point (SPEC-LIT §92.10:
+/// the caller's finest cell edge) and the `TriIndex` bucket hint. It must be
+/// finite and positive.
+///
+/// Points sharing both tangential coordinates bit for bit - which is what
+/// leaves in one column of the same lattice do - are cast as one column, so
+/// the run costs the three ray sets per column that a block cast costs, not
+/// three per point. The walk is serial: the threads live in [`classify`]'s
+/// block combine alone.
+pub fn classify_points(surf: &Surface, pts: &[Vec3], scale: Scalar) -> Result<PointMask> {
+    if pts.is_empty() {
+        return Ok(PointMask::default());
+    }
+    if !(scale > 0.0) || !scale.is_finite() {
+        return Err(Error::Mesh(format!(
+            "classify_points: scale must be finite and positive, got {scale}"
+        )));
+    }
+
+    // Bit `ax` of `vote[i]` is the axis-`ax` column's answer (set = solid);
+    // bit `ax` of `sure[i]` says whether that answer was firm - the same
+    // per-subject encoding the block combine reads.
+    let mut vote = vec![0u8; pts.len()];
+    let mut sure = vec![0u8; pts.len()];
+
+    for ax in 0..3 {
+        let rotated;
+        let rs: &Surface = if ax == 0 {
+            surf
+        } else {
+            rotated = rotate_surface(surf, ax)?;
+            &rotated
+        };
+        let idx = TriIndex::new(rs, scale)?;
+
+        let rp: Vec<Vec3> = pts.iter().map(|&p| rot_point(p, ax)).collect();
+
+        // Group the point indices by the exact bit patterns of the two
+        // tangential coordinates - no tolerance anywhere. First-appearance
+        // order keeps the run deterministic (the map only names slots).
+        let mut slot_of: HashMap<(u64, u64), usize> = HashMap::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (i, r) in rp.iter().enumerate() {
+            let key = (r.y.to_bits(), r.z.to_bits());
+            let slot = *slot_of.entry(key).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[slot].push(i);
+        }
+
+        let (j1y, j1z) = jitter1();
+        let (j2y, j2z) = jitter2();
+
+        for g in &mut groups {
+            g.sort_by(|&a, &b| rp[a].x.total_cmp(&rp[b].x));
+            let (y, z) = (rp[g[0]].y, rp[g[0]].z);
+            let casts: Vec<Scalar> = g.iter().map(|&i| rp[i].x).collect();
+
+            let mut p0 = vec![false; g.len()];
+            let mut p1 = vec![false; g.len()];
+            let mut p2 = vec![false; g.len()];
+
+            parity_fill(&idx.crossings_x(y, z), &casts, &mut p0);
+            parity_fill(&idx.crossings_x(y + j1y * scale, z + j1z * scale), &casts, &mut p1);
+
+            let mut have_retry = false;
+            for (m, &i) in g.iter().enumerate() {
+                let (v, firm) = if p0[m] == p1[m] {
+                    (p0[m], true)
+                } else {
+                    if !have_retry {
+                        parity_fill(
+                            &idx.crossings_x(y + j2y * scale, z + j2z * scale),
+                            &casts,
+                            &mut p2,
+                        );
+                        have_retry = true;
+                    }
+                    if p2[m] == p1[m] {
+                        // The two jittered rays agree against the base ray:
+                        // the base ray grazed a feature. Firm.
+                        (p1[m], true)
+                    } else {
+                        // Base and retry against the first jitter: the
+                        // column itself is unstable here.
+                        (p0[m], false)
+                    }
+                };
+                if v {
+                    vote[i] |= 1 << ax;
+                }
+                if firm {
+                    sure[i] |= 1 << ax;
+                }
+            }
+        }
+    }
+
+    let mut mask =
+        PointMask { solid: vec![false; pts.len()], n_solid: 0, voted: 0, arbitrated: 0 };
+    for (i, slot) in mask.solid.iter_mut().enumerate() {
+        let (s, was_voted, was_arbitrated) = decide(surf, vote[i], sure[i], || pts[i]);
+        mask.voted += was_voted as usize;
+        mask.arbitrated += was_arbitrated as usize;
+        if s {
+            mask.n_solid += 1;
+        }
+        *slot = s;
+    }
+    Ok(mask)
 }
 
 // ==========================================================================
@@ -338,18 +484,22 @@ fn parity_fill(hits: &[(Scalar, usize)], centres: &[Scalar], out: &mut [bool]) {
     }
 }
 
+/// The cyclic coordinate rotation behind [`rotate_surface`]: original axis
+/// `ax` becomes x. [`classify_points`] rotates its points with the same
+/// function, so a point and the surface see one identical rotation per axis.
+fn rot_point(p: Vec3, ax: usize) -> Vec3 {
+    match ax {
+        1 => Vec3::new(p.y, p.z, p.x),
+        2 => Vec3::new(p.z, p.x, p.y),
+        _ => p,
+    }
+}
+
 /// The surface with its coordinates cyclically rotated so original axis
 /// `ax` becomes x. A cyclic permutation is a proper rotation: windings,
 /// areas and closedness are exactly preserved, so `crossings_x` on the
 /// rotated copy is the axis-`ax` column cast on the original.
 fn rotate_surface(surf: &Surface, ax: usize) -> Result<Surface> {
-    let rot = |p: Vec3| -> Vec3 {
-        match ax {
-            1 => Vec3::new(p.y, p.z, p.x),
-            2 => Vec3::new(p.z, p.x, p.y),
-            _ => p,
-        }
-    };
     let soup: Vec<SoupTri> = surf
         .tris
         .iter()
@@ -358,9 +508,9 @@ fn rotate_surface(surf: &Surface, ax: usize) -> Result<Surface> {
             (
                 surf.tri_patch[t],
                 [
-                    rot(surf.points[tri[0] as usize]),
-                    rot(surf.points[tri[1] as usize]),
-                    rot(surf.points[tri[2] as usize]),
+                    rot_point(surf.points[tri[0] as usize], ax),
+                    rot_point(surf.points[tri[1] as usize], ax),
+                    rot_point(surf.points[tri[2] as usize], ax),
                 ],
             )
         })
@@ -567,5 +717,83 @@ mod tests {
         };
         assert_eq!(m.n_solid, 1000);
         assert_eq!(m.arbitrated, 0);
+    }
+
+    /// On a uniform block the two entry points see the same rays: every
+    /// cell centre classified per point must match the block mask exactly.
+    #[test]
+    fn classify_points_agrees_with_classify_cell_for_cell() {
+        let s = unit_cube();
+        let xn = uniform(-1.0, 2.0, 9);
+        let axes = BlockAxes { xn: &xn, yn: &xn, zn: &xn };
+        let m = match classify(&axes, &s) {
+            Ok(m) => m,
+            Err(e) => panic!("classify failed: {e}"),
+        };
+
+        // The 729 cell centres in the flat `i + nx*(j + ny*k)` order.
+        let mut centres = Vec::with_capacity(729);
+        for k in 0..9 {
+            for j in 0..9 {
+                for i in 0..9 {
+                    centres.push(Vec3::new(
+                        0.5 * (xn[i] + xn[i + 1]),
+                        0.5 * (xn[j] + xn[j + 1]),
+                        0.5 * (xn[k] + xn[k + 1]),
+                    ));
+                }
+            }
+        }
+
+        let pm = match classify_points(&s, &centres, 1.0 / 3.0) {
+            Ok(p) => p,
+            Err(e) => panic!("classify_points failed: {e}"),
+        };
+
+        assert_eq!(pm.solid.len(), m.solid.len());
+        for (idx, (&pc, &cc)) in pm.solid.iter().zip(m.solid.iter()).enumerate() {
+            assert_eq!(pc, cc, "point {idx} and its cell disagree");
+        }
+        assert_eq!(pm.n_solid, m.n_solid);
+        assert_eq!(pm.voted, m.voted);
+        assert_eq!(pm.arbitrated, m.arbitrated);
+    }
+
+    /// The cube's centre is solid, a point well outside is not.
+    #[test]
+    fn a_point_inside_and_a_point_outside() {
+        let s = unit_cube();
+        let pts = [Vec3::new(0.5, 0.5, 0.5), Vec3::new(5.0, -3.0, 2.0)];
+        let pm = match classify_points(&s, &pts, 0.1) {
+            Ok(p) => p,
+            Err(e) => panic!("classify_points failed: {e}"),
+        };
+        assert_eq!(pm.solid, vec![true, false]);
+        assert_eq!(pm.n_solid, 1);
+    }
+
+    /// An empty point list is an empty mask - and builds no index.
+    #[test]
+    fn an_empty_point_list_is_an_empty_mask() {
+        let s = unit_cube();
+        let pm = match classify_points(&s, &[], 0.1) {
+            Ok(p) => p,
+            Err(e) => panic!("classify_points failed: {e}"),
+        };
+        assert!(pm.solid.is_empty());
+        assert_eq!((pm.n_solid, pm.voted, pm.arbitrated), (0, 0, 0));
+    }
+
+    /// A non-positive or non-finite `scale` is refused, naming the value.
+    #[test]
+    fn a_non_positive_scale_is_refused() {
+        let s = unit_cube();
+        let pts = [Vec3::new(0.5, 0.5, 0.5)];
+        for bad in [0.0, -1.0, Scalar::NAN] {
+            match classify_points(&s, &pts, bad) {
+                Ok(_) => panic!("scale {bad} must be refused"),
+                Err(e) => assert!(e.to_string().contains(format!("{bad}").as_str())),
+            }
+        }
     }
 }

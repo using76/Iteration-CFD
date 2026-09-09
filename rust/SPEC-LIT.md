@@ -25360,3 +25360,167 @@ they join the same maximum, and (92.22) does not change.
 | a tree built to a level the surface does not reach | identical, key for key, to the unrefined one - a band that contains nothing refines nothing |
 
 ---
+
+### 92.10 Castellation: which leaves survive, and the walls they leave behind
+
+The implementation-level companion to §92.2 stage 3, appended after §92.9 for
+the same reason §92.9 was appended after §92.8 — every citation already
+pointing into §92.1–§92.9 keeps its number. §92.2 stage 3 says *what*
+castellation is and gives the keep-set (92.4); this says how a leaf is
+classified, in what order the removal rules run, which cell a rule removes
+when two are equally guilty, and what the exposed faces become.
+
+`blockgen::carve_block` (§23.4) is the cut-cell twin of this stage and its
+conventions are reused, not re-invented: a wall face takes the patch name of
+the STL solid whose triangle is nearest the face centre, a surface patch whose
+name collides with a domain patch is a refusal rather than a silent rename,
+and a wall patch with no faces is not emitted. What is new here is that the
+cells are octree leaves of many sizes rather than the cells of one rectilinear
+block, and that the keep-set is decided by a walk (92.24) that `carve_block`
+has no equivalent of.
+
+**The centre test.** A leaf is FLUID or SOLID by its centre alone. The surface
+cutting through a leaf does not split it and does not remove it — the cut is
+what stage 4 snaps to, and stage 3's business is only to decide which side of
+the wall the cell is on:
+
+```
+c(P)      = the centre of leaf P: the mean of its two corner coordinates
+            on each axis, which by (92.20)'s linearity inside a base cell
+            is the exact centroid of the hexahedron
+
+solid(P)  = inside(surf, c(P))                                      (92.23)
+```
+
+`inside` is §23.3's pipeline — three-axis column parity, jittered retry,
+majority vote, winding-number arbitration — evaluated at a POINT rather than
+at a rectilinear block's cell centre (`surface::classify::classify_points`,
+the generalisation §92.2 stage 3 promised). Two things about it are this
+section's, not §23.3's:
+
+* The jitter length is the FINEST leaf edge in the tree, `h_min = h_0 / 2^L`,
+  and not the local cell size, because the points come from leaves of
+  different sizes and one length has to serve them all. §23.3's offsets are
+  about `3e-4` of the length they are given, so the retry ray stays inside
+  even the smallest leaf it is cast for, and on a coarse leaf it is merely
+  further from a rational grid feature than it needs to be.
+* Points sharing both tangential coordinates EXACTLY — bit for bit, which is
+  what leaves in one column of the same (92.20) lattice do — are cast as one
+  column, so a uniform tree costs the three ray sets per column that §23.3's
+  block cast costs, and not three per cell.
+
+The orientation of the surface is irrelevant, as it is in §23.3: parity reads
+no normals and the arbiter takes `|w|`.
+
+**The removal walk.** Let `K_0 = { P : not solid(P) }` and write `nbr(P)` for
+the face neighbours of `P` — §92.9's (92.19) faces, at whatever level. Two
+rules run to a joint fixed point, and a third is then checked:
+
+```
+repeat until K stops changing:                                      (92.24)
+
+  W1  pinch:  for every edge of the boundary of K carried by FOUR
+              boundary faces, remove one of the two cells that meet
+              along it, by (92.25)
+
+  W2  region: K <- the component of (92.4) — `largest`, or the one
+              containing `castellation.seed_point`
+
+then W3  starved: a kept cell with fewer than `castellation.min_faces`
+              faces is removed and named
+```
+
+Each rule only ever removes cells, `K_0` is finite, and no rule can put a cell
+back, so the loop terminates. It is a loop and not a sequence because W2 can
+expose a new pinch — the cells that stood between two kept blobs may have left
+with a dropped component — and W1 can disconnect a blob that was held together
+only by the cell it removes.
+
+W1 is the "connected to the fluid only through an edge" repair. In a hex mesh
+an interior edge of a manifold boundary carries exactly two boundary faces; an
+edge carrying four is an hourglass — two kept cells touching along that edge
+with no cell between them, the diagonal pair left behind when both of the
+cells that share their two common faces are solid. It passes §92.3's gate
+untouched, because both cells are perfect hexahedra and the mesh is
+face-connected through some other path, and it is stage 4 that it destroys:
+(92.5) pulls both flaps onto the same closest point and inverts both cells.
+Stage 3 is the last place the defect is cheap to see, so stage 3 removes it:
+
+```
+of the two cells P, Q meeting at a four-face edge, remove
+    the one with fewer face neighbours in K;
+    on a tie, the one with the larger cell id                       (92.25)
+```
+
+The neighbour count is a tie-break with a reason — the cell with less of the
+mesh holding it on is the one whose removal costs the least connectivity — and
+the id is a tie-break with no reason at all, present only so that the result
+does not depend on the order the edges are visited in. A point-pinch (two
+cells sharing one vertex and nothing else) is NOT repaired here, and is
+recorded as known: detecting it needs the vertex fans walked, stage 4 is where
+it hurts, and §92.8 gets a row for it rather than this section getting a rule
+it cannot yet test.
+
+W3 cannot fire on the hex path — every leaf of §92.9 keeps its six faces or
+more whatever its neighbours do, because a removed neighbour leaves a WALL
+face where the internal face was, not a hole. It is checked anyway: it costs
+one pass over the owner array, `castellation.min_faces` is in the config
+because stages 4 and 5 can merge faces, and a check that cannot fire today is
+how the stage that makes it fire is caught on the day it does.
+
+**The walls.** Every face of (92.19) between a kept cell and a removed one
+becomes a boundary face; every box-patch face of a removed cell is dropped
+with its cell:
+
+```
+patch(f)  = patch_names[ tri_patch[ nearest_triangle(x_f) ] ]       (92.26)
+
+x_f       = the face's centre;  Sf points OUT of the fluid, so a face
+            whose owner was removed has its point list reversed and is
+            re-owned by the kept side
+```
+
+which is `carve_block`'s rule (§23.4), reused so that a case's boundary
+conditions attach to the geometry the user named whichever of the two meshers
+built the mesh. The wall patches are emitted in the SURFACE's patch order and
+not in the order the walk happened to expose them, so the boundary file is a
+function of the STL; a patch with no faces is not emitted; a patch whose name
+collides with one of the six box patches is a refusal, because a duplicate
+name in the boundary file is a mesh the solver reads wrongly.
+
+**Order.** Cells are renumbered by scanning the old ids ascending — a MONOTONE
+map — so the surviving internal faces are still sorted by `(owner, neighbour)`
+and §2's upper-triangular order is inherited rather than repaired: no
+`adapt::rebuild::ldu_permutation` runs in this stage, and the order is
+asserted before emission. Faces are re-listed internal-first, then the six box
+patches in slot order with their faces in their original relative order, then
+the wall patches. Points are NOT renumbered and none is dropped: an unused
+point is legal in the mesh format and costs one `Vec3`, while dropping it
+would renumber every face list for nothing.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| a surface entirely outside the domain | every leaf fluid, and the castellated mesh is §92.9's emitted mesh, cell for cell and face for face |
+| a leaf whose centre is inside the surface | removed, whether or not the surface cuts it; a leaf whose centre is outside is kept, likewise |
+| an axis-aligned box STL cut from a block on its own cell planes | the wall faces lie ON those planes exactly — no tolerance, because the points are (92.20)'s lattice points |
+| the fluid volume against an analytic solid | within one cell layer's worth of volume, and better as the level rises |
+| a solid that seals a pocket (a slab under a lid) | the pocket is a separate component of (92.4) and is dropped; the emitted mesh has one cell region |
+| every exposed face | on a wall patch named by (92.26); no exposed face is left internal, and no removed cell's face survives |
+| the emitted mesh | `owner < neighbour`, upper-triangular, and G1–G7 of §92.3 pass |
+| the removed cells | counted by the rule that removed them (solid, pinch, off-region, starved) and reported, with the bounding box of each dropped component (§92.2 stage 3) |
+| `blockgen::carve_block` and `surface::classify::classify` | **unchanged** — `classify_points` is added beside `classify`, and both go through the same vote and the same arbiter |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box with an axis-aligned cube STL inside, its faces on cell planes | every wall face lies exactly on a cube plane; the kept cell count is the analytic one; one region; G1–G7 pass |
+| a box with a sphere STL inside, 32 cells per axis | the fluid volume is within 5 % of `V_box - 4/3 pi r^3` |
+| a slab that runs PAST the domain wall, sealing the layer beneath it against the box's own patches | the cells under the slab are a second component and are dropped; the mesh has one region, and every wall face is the slab's top plane exactly — the tetrahedral failure of §92.1, refused |
+| a diagonal pair of kept cells sharing one edge | W1 removes exactly one of them, and the same one whichever order the edges are visited in |
+| a surface whose STL solid is named `xMin` | a refusal naming the collision, not a mesh with two `xMin` patches |
+| a tree with no solid at all | the walk is a no-op: no cell removed, no wall patch emitted, the same points array |
+
+---

@@ -1584,6 +1584,23 @@ impl<'s> BandIndex<'s> {
     }
 }
 
+/// A leaf's centre and its three edge lengths, in metres - the same (92.20)
+/// evaluation [`leaf_centre_half_diag`] reports, with the per-axis edges the
+/// centre test's `h_min` needs. The one place this arithmetic is written.
+pub(crate) fn leaf_centre_edges(
+    bg: &Background,
+    l: u32,
+    k: LeafKey,
+) -> (crate::Vec3, [crate::Scalar; 3]) {
+    let lo = k.lower_corner(l);
+    let s = k.size_on_finest(l);
+    let x = [bg.coord(0, lo[0], l), bg.coord(0, lo[0] + s, l)];
+    let y = [bg.coord(1, lo[1], l), bg.coord(1, lo[1] + s, l)];
+    let z = [bg.coord(2, lo[2], l), bg.coord(2, lo[2] + s, l)];
+    let c = crate::Vec3::new(0.5 * (x[0] + x[1]), 0.5 * (y[0] + y[1]), 0.5 * (z[0] + z[1]));
+    (c, [x[1] - x[0], y[1] - y[0], z[1] - z[0]])
+}
+
 /// A leaf's centre and half its diagonal, in metres: (92.20) evaluated at the
 /// two ends of the leaf's own span on the finest lattice - `l` is the TREE's
 /// `max_level`, `bg.coord`'s third argument. These are the two numbers
@@ -1593,14 +1610,8 @@ fn leaf_centre_half_diag(
     l: u32,
     k: LeafKey,
 ) -> (crate::Vec3, crate::Scalar) {
-    let lo = k.lower_corner(l);
-    let s = k.size_on_finest(l);
-    let x = [bg.coord(0, lo[0], l), bg.coord(0, lo[0] + s, l)];
-    let y = [bg.coord(1, lo[1], l), bg.coord(1, lo[1] + s, l)];
-    let z = [bg.coord(2, lo[2], l), bg.coord(2, lo[2] + s, l)];
-    let c = crate::Vec3::new(0.5 * (x[0] + x[1]), 0.5 * (y[0] + y[1]), 0.5 * (z[0] + z[1]));
-    let d = crate::Vec3::new(x[1] - x[0], y[1] - y[0], z[1] - z[0]);
-    (c, 0.5 * d.mag())
+    let (c, e) = leaf_centre_edges(bg, l, k);
+    (c, 0.5 * crate::Vec3::new(e[0], e[1], e[2]).mag())
 }
 
 /// §92.2 stage 1: refine `tree` until every leaf carries the level
