@@ -21,6 +21,7 @@
 //! format fixed there so tests can assert it. No GPL-licensed source was
 //! consulted.
 
+pub mod octree;
 pub mod quality;
 
 use schemars::JsonSchema;

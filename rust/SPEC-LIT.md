@@ -25190,3 +25190,173 @@ is not a gate: the second and third rows exist to prove it can, and to prove
 that when it does it says which cell.
 
 ---
+
+### 92.9 The octree in memory, and the mesh it emits
+
+Appended after §92.8 rather than inserted into §92.2, so that every citation
+already pointing into §92.1-§92.8 keeps its number. This is the
+implementation-level companion to §92.2 stages 1 and 2: what a leaf *is*, how
+a leaf finds its neighbour, where a point's coordinate comes from, and which
+of the two cells at a 2:1 interface emits the face between them. §92.2 says
+what the octree refines and why; this says what the octree is.
+
+`mesh::refined` (§74) is the static twin of this: it carries ONE level per
+base cell and expands it into `(2^l)^3` leaves at emission time, so its
+balance sweep (`mesh::refined::balance_2to1`) is a fixed point over an array
+indexed by base cell. Here the level is per LEAF, the leaf set is sparse, and
+there is no array to sweep - so the sweep of (92.3) is restated as (92.21)
+over the leaf set. The two must agree wherever both can express the same
+tree, which is §92.8's unit-2 row.
+
+**The leaf.** Over the stage-0 base grid of `n = [nx, ny, nz]` cells, a leaf
+is an integer key: a level and an index in that level's own lattice.
+
+```
+leaf      = (l, i, j, k),   0 <= l <= L = max_level,
+            0 <= i < nx 2^l,  0 <= j < ny 2^l,  0 <= k < nz 2^l    (92.17)
+
+split(l, i, j, k)
+          = { (l+1, 2i+a, 2j+b, 2k+c) : a, b, c in {0, 1} }
+
+anc(l', (l, i, j, k))
+          = (l', i >> (l - l'), j >> (l - l'), k >> (l - l')),  l' <= l  (92.18)
+```
+
+The leaf set is a partition of the domain: exactly one key on every ancestor
+chain is present. That invariant is what makes the neighbour lookup below a
+lookup rather than a tree walk, and it is asserted, not assumed - a key whose
+ancestor or whose descendant is also present is a refusal, because the mesh
+it would emit has a cell counted twice.
+
+**Neighbour, and who emits the face.** For a leaf `P = (l, i, j, k)` and one
+of the six face directions `d = (axis, sign)`, let `m` be the neighbour index
+at `P`'s own level. Exactly one of four cases holds, and each names its
+emitter:
+
+```
+m outside [0, n_axis 2^l)      -> a boundary face on the box patch of d
+leaf(l, m) present             -> an internal face, emitted only if sign = +
+leaf(l', anc(l', m)) present,
+        l' < l (P is finer)    -> an internal face, emitted by P
+otherwise (the neighbour is
+        finer than P)          -> not emitted here; the finer side emits  (92.19)
+```
+
+(92.19) is §74's convention restated per leaf, and it is the reason the
+convention survives: **every internal face is a whole face of the finer of
+the two cells it separates.** A coarse cell against four finer neighbours
+therefore carries four faces on that side, each of them a full face of a
+finer cell, and `sum_f Sf = 0` closes on the coarse cell exactly because the
+four sub-areas sum to the parent area exactly - the argument §74 makes, not a
+new one. The equal-level case is emitted on the `+` side alone so that a pair
+is emitted once.
+
+**Points, welded by integer identity.** No point in this module is compared
+to another point by distance. A point is an integer coordinate `q` on the
+finest lattice, `q_a in [0, n_a 2^L]`; a leaf `(l, i, j, k)` has its eight
+corners at `i s` and `(i+1) s` with `s = 2^(L - l)`, and two leaves share a
+corner iff their integer coordinates are equal. The coordinate itself comes
+from the base grid's graded node array `X_a` (`blockgen::graded_nodes` on the
+same `GradedAxis` stage 0 built), interpolated linearly inside the base cell
+the lattice point falls in:
+
+```
+b         = q_a >> L,     t = (q_a - (b << L)) / 2^L,     t in [0, 1)
+
+x_a(q_a)  = X_a[b] + t ( X_a[b+1] - X_a[b] )                       (92.20)
+```
+
+with `x_a(n_a 2^L) = X_a[n_a]`. At `t = 0` this is `X_a[b]` **exactly** - one
+array read, no arithmetic - so a tree with no refinement reproduces
+`blockgen::raw_mesh`'s points bit for bit. Points are numbered in
+lexicographic `(q_k, q_j, q_i)` order, which is the order stage 0's block
+numbers its own, so the reproduction is of the ARRAY and not merely of the
+set. Grading is honoured on the base cells and each base cell is subdivided
+uniformly inside itself; a graded octree cell is not smoothly graded, and
+that is the documented trade for (92.20)'s exactness.
+
+**Order.** Cells are numbered in lexicographic `(q_k, q_j, q_i)` order of the
+leaf's lower corner, which for an unrefined tree is stage 0's own cell order.
+That order does NOT make the `+axis` neighbour later in the numbering - a
+fine leaf high in `z` can face a coarse leaf whose lower corner is lower in
+`z` - so a face built with `owner > neighbour` is flipped, its point list
+reversed so `Sf` keeps pointing from owner to neighbour, and the internal
+faces are then sorted by `(owner, neighbour)`. That is §2's upper-triangular
+order, reached by construction and asserted before emission rather than
+repaired afterwards by `adapt::rebuild::ldu_permutation`.
+
+**2:1 balance over a sparse leaf set.** (92.3) restated as (92.21):
+
+```
+repeat until nothing changes:
+  for every leaf P = (l, i, j, k), for each of the 6 directions d:
+      let m be P's neighbour index at level l, inside the domain
+      if the first present key among anc(l2, m), l2 = l-1 .. 0, has l2 < l-1,
+          split that key                                           (92.21)
+```
+
+Read from the FINER side, which is what makes it a lookup: a leaf asks who is
+on the other side, and if that neighbour is two or more levels coarser, the
+neighbour splits. Levels only rise, a split is a function of the key alone,
+and integer `max` is associative, so the fixed point does not depend on the
+order the leaves are visited - §74.2's argument, unchanged. The split in
+(92.21) produces a level at most `l - 1 < L`, so **balance can never exceed
+`max_level`**: the cap of §92.2 stage 1 is not a second constraint that
+balance has to be checked against. Isaac, Burstedde & Ghattas (DOI
+`10.1109/IPDPS.2012.47`) remains named and not implemented, for §74.2's
+reason.
+
+**The level a leaf is asked for.** (92.1)'s `l_dist` is evaluated per patch
+that `refinement.levels` NAMES - one `surface::TriIndex` per named patch, built
+over that patch's triangles alone - so the maximum of (92.1) is taken over the
+patches the config asked about and not over the surface's every solid. The
+ammonia site of §92.1 has 466 of them, and 466 nearest-triangle queries per
+leaf is not a mesher. A patch the config does not name refines nothing, which
+is the same statement as "no band contains `c`".
+
+(92.1) measures from the cell CENTRE, so a band narrower than the leaf it is
+measured on would let the surface pass straight through an unrefined leaf. The
+surface term closes that hole:
+
+```
+r_c       = half the diagonal of leaf c
+d_p(c)    = distance from c's centre to the nearest triangle of patch p
+
+l_surf(c) = max over patches p with d_p(c) <= r_c of max_L band_p(L)   (92.22)
+
+l(c)      = min( max( l_dist(c), l_surf(c) ), max_level )
+```
+
+A leaf whose bounding sphere touches a named patch is refined to the deepest
+level that patch's bands ask for anywhere; it errs toward refining, never away
+from it, and it needs no triangle-box intersection test to say so. `l_feat`
+(92.2) and `l_region` are stages this unit does not build; when they arrive
+they join the same maximum, and (92.22) does not change.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| a tree with every leaf at level 0 | the same cell count, the same total volume and the SAME points array, bit for bit, as `blockgen::raw_mesh` for the same block |
+| one base cell refined to level `l` | exactly `(2^l)^3` leaves, and the leaf set is a partition - no key is both present and an ancestor of a present key |
+| the level jump across any internal face, after (92.21) | at most 1 |
+| the face between a coarse leaf and a finer neighbour | four faces, each a whole face of the finer leaf, owned by the coarse one (§74) |
+| a point | an integer lattice coordinate; welded by integer identity, never by distance, and never by a tolerance |
+| `x_a` at an unrefined lattice point | `X_a[b]` exactly, by (92.20)'s `t = 0` branch |
+| the emitted mesh | `owner < neighbour` on every internal face, upper-triangular, and G1-G7 of §92.3 pass |
+| 10^6 leaves | emitted in under 10 s on one core; this unit introduces no thread pool, by decision |
+| a leaf the surface passes through | refined to the deepest band level of the patch it touches, (92.22) - a band narrower than the cell cannot hide the surface |
+| a patch `refinement.levels` does not name | refines nothing, and costs no distance query |
+| `mesh::refined` and `blockgen` | **unchanged** - this module reads their conventions and rewrites neither |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box, no surface inside it | leaf count `nx ny nz`; the points array bit-identical to `blockgen::raw_mesh`'s; total volume the box's; G1-G7 pass |
+| a box with a small sphere STL inside | only the leaves (92.1)'s band reaches refine; the refined leaf count is the analytic one for one level; closure `< 1e-12`; one cell region; maximum level jump 1 |
+| a small solid at the centre of a box | exactly the base cells the band reaches refine, the leaf count is the analytic one, and every leaf outside stays at level 0 |
+| (92.21) | idempotent, and independent of the order the leaf set is visited - §74.2's own balance test, run on the sparse tree |
+| a tree built to a level the surface does not reach | identical, key for key, to the unrefined one - a band that contains nothing refines nothing |
+
+---
