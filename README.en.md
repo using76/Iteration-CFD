@@ -175,6 +175,8 @@ The guide, the tool list, and what the server refuses to do:
 | §60.5 Gate 5 — conjugate natural convection in a square enclosure (Kaminski & Prakash 1986) | **MISSES** its 3 % bar at the conduction-dominated end: −7.11 % at `Kr = 0.1`, −0.07 % at `Kr = 10`. The primary reference is paywalled and was never read, so the comparison is against Belazizia et al. (2012), a **secondary source** |
 | §68.12 Gate 68-C — Theobald's (1981) 90 hose streams | **MISSES with the gas held at rest**: the throws average **61.29 %** of the measured range, while a vacuum bracket with no drag reaches 198.65 %, so what decides the throw is entrained air |
 
+What kind of verification each section is, **what it was compared against** (a paper, benchmark numbers, a correlation, public data, or the repository's own record), and that material's address (DOI/URL) are tabulated in [`docs/GUIDEBOOK.en.md`](docs/GUIDEBOOK.en.md) §11, "Every check, one by one".
+
 **Six more verdicts are `OPEN`** and are printed as a second group of the same list. Three hold §32.4's plane channel against a **correlation rather than a measurement** (Gnielinski 1976); the fourth, `78-D`, is open because the two published splash criteria disagree with **each other** by a factor of 4.78 in Weber number; the fifth, §88.10 Gate 88-T, because no measured onset `Re_x` for the T3A flat plate could be found to close the comparison against; and the sixth, §90.10 Gate 90-T — the 2015 model's onset location on T3A — for the same reason as 88-T.
 
 ---
