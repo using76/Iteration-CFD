@@ -34,6 +34,12 @@ On Windows, `run_step_mesh.cmd <config.json> [flags]` runs the tool in the
 current console — the stage banners print as they happen — and copies every
 line to `<out_dir>/work/run.log`.
 
+> The site playbook — what broke a 2.5 km site mesh and the recipe that fixed it (far-solid
+> convex hulls, the gap rule, the thickness gate), the review gates and the diagnosis scripts —
+> is `docs/08-site-mesh-playbook.md`; the step-by-step procedure for a session is the
+> `site-mesh` skill (`.claude/skills/site-mesh/SKILL.md`). Diagnosis scripts live in `diag/`,
+> the six-iteration steady air test in `solver_test/`, a full recipe in `examples/pool_ring_case.json`.
+
 ## The pipeline (10 stages, checkpointed)
 
 | # | stage | what happens |

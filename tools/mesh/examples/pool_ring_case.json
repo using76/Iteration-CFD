@@ -1,0 +1,96 @@
+{
+  "step": "C:/path/to/site.step",
+  "scale": 0.001,
+  "out_dir": "C:/path/to/pool_cases/pool_source_QCDC_outer_to_R22p1/mesh",
+  "name": "pool_source_QCDC_outer_to_R22p1",
+  "fluid": {
+    "tag": 1
+  },
+  "domain_box": [
+    -1250.0,
+    -1250.0,
+    -7.5,
+    1250.0,
+    1250.0,
+    200.0
+  ],
+  "outer_tol": 0.05,
+  "solids": {
+    "sink_m": 1.5,
+    "fuse": true,
+    "exclude_tags": [],
+    "hull_beyond_m": 150.0,
+    "hull_pad_m": 1.0,
+    "boolean_tol_m": 0.0,
+    "hull_snap_m": 0.05
+  },
+  "repairs": [
+    {
+      "tag": 33,
+      "method": "resample",
+      "cell_m": 3.0,
+      "target_faces": 3000,
+      "lift_z": 3.05
+    }
+  ],
+  "trim": {
+    "below_z": 3.05
+  },
+  "sea_z": 3.05,
+  "points": {
+    "source_QCDC_inner_R10p5": {
+      "x": 18.5,
+      "y": -7.5,
+      "r": 10.5,
+      "h": 0.5
+    },
+    "source_QCDC_outer_to_R22p1": {
+      "x": 18.5,
+      "y": -7.5,
+      "r": 22.1,
+      "r_inner": 10.5,
+      "h": 0.5
+    }
+  },
+  "pool_radius_m": 26.0,
+  "roof_patches": {},
+  "sizes": {
+    "min": 0.3,
+    "max": 60.0,
+    "pool": 0.34,
+    "box": 2.5,
+    "growth_from": 2.5,
+    "near_struct": 6.0,
+    "far_struct": 20.0,
+    "near_radius": 400.0,
+    "size_mult": 1.0,
+    "roof_boxes": [
+      2.5,
+      5.0,
+      10.0
+    ],
+    "gap_ratio": 2.5
+  },
+  "mesh": {
+    "algo2d": 6,
+    "algo3d": 1,
+    "optimize_passes": 5,
+    "threads": 32
+  },
+  "post": {
+    "flat_tets": true,
+    "flat_threshold": 1e-07,
+    "seam_merge_m": 0.02,
+    "sliver_edge_m": 0.0,
+    "sliver_vol_m3": 0.2,
+    "thin_push_m": 0.3,
+    "sliver_rel": 0.02,
+    "sliver_edge_rel": 0.3,
+    "min_thickness": 0.05,
+    "repair_rounds": 3
+  },
+  "classification": {
+    "wall_prefix": "wall_",
+    "big_roof_is_ground_m2": 2000.0
+  }
+}
