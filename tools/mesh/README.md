@@ -71,7 +71,10 @@ This file stays the terse reference.
 (within 0.5 m of a repaired solid's bbox), `wall_buildings` (faces inside a
 solid's bbox), `wall_ground_land` (the rest, plus the flat roofs of slabs
 bigger than 100 × 100 m and `big_roof_is_ground_m2`), `pool_<point>` (flat
-disc-sized pieces at a point's ground height), and one patch per
+disc-sized pieces at a point's ground height — a point given as
+`{"x", "y", "r", "r_inner"}` carries its own radius, and `r_inner > 0` makes
+it a ring, so an inner disc and an outer ring at one centre are two patches
+whose pieces are told apart by whether they fit inside the inner square), and one patch per
 `roof_patches` name (a solid's flat roof). `wall_prefix` renames the four
 `wall_*` groups.
 
@@ -101,8 +104,10 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   ],
   "trim":  {"below_z": 3.05},             // or null: cut everything below this plane away
   "sea_z": 3.05,                          // flat faces at this height (± 0.06) -> wall_sea_surface
-  "points": {"tank_shell": [-916.9, 349.8]},  // refinement/pool points; ground found by isInside
-  "pool_radius_m": 26.0,
+  "points": {"tank_shell": [-916.9, 349.8],   // refinement/pool points; ground found by isInside
+             "qcdc_inner": {"x": 18.5, "y": -7.5, "r": 10.5},              // its own radius
+             "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5}},  // an annulus
+  "pool_radius_m": 26.0,                  // the radius of every [x, y] point
   "roof_patches": {"nh3_source": 306},    // solid tag whose flat roof becomes its own patch,
                                           // with the 2.5/5/10 m refinement boxes around and
                                           // downwind (-x) of it
