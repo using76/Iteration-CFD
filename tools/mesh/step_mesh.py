@@ -84,7 +84,8 @@ PRE3D_MERGE = 0.0                  # OFF: merging seams BEFORE the 3-D pass make
                                    # seams are merged after it, in the flat-tet stage
 THIN_SICN = 0.02                   # a thin tet for the push stage: gamma below this
 SLIVER_ROUNDS = 8
-HULL_FLAT_M = 0.05                 # a hull corner less than this off its neighbours' line is dropped
+HULL_FLAT_M = 1.0                  # a hull corner less than this off its neighbours' line is dropped
+SLIVER_TRI = 0.05                  # a surface triangle whose height is below this x its longest edge
 PUSH_ROUNDS = 3
 
 DEFAULTS = {
@@ -1467,7 +1468,7 @@ def gap_size_pass(cfg, ratio):
     xyz = np.array(coords).reshape(-1, 3)
     idx = np.zeros(int(ntags.max()) + 1, dtype=np.int64)
     idx[ntags] = np.arange(len(ntags))
-    cents, norms, sizes = [], [], []
+    cents, norms, sizes, lmax, areas = [], [], [], [], []
     for d, s in gmsh.model.getBoundary([(3, fluid)], oriented=True, combined=True):
         sign = 1.0 if s > 0 else -1.0
         et, etags, en = gmsh.model.mesh.getElements(2, abs(s))
@@ -1483,9 +1484,15 @@ def gap_size_pass(cfg, ratio):
             cents.append(P[keep].mean(axis=1))
             norms.append(n)
             sizes.append(1.52 * np.sqrt(0.5 * a2[keep]))     # the equilateral edge of that area
+            Pk = P[keep]
+            lmax.append(np.max(np.stack([np.linalg.norm(Pk[:, 1] - Pk[:, 0], axis=1),
+                                         np.linalg.norm(Pk[:, 2] - Pk[:, 1], axis=1),
+                                         np.linalg.norm(Pk[:, 0] - Pk[:, 2], axis=1)], axis=1), axis=1))
+            areas.append(0.5 * a2[keep])
     if not cents:
         return 0, 0
     C = np.concatenate(cents); N = np.concatenate(norms); E = np.concatenate(sizes)
+    Lm = np.concatenate(lmax); Ar = np.concatenate(areas)
     tree = cKDTree(C)
     gap = np.full(len(C), np.inf)
     radius = np.maximum(4.0 * E, 2.0)
@@ -1507,8 +1514,18 @@ def gap_size_pass(cfg, ratio):
     h_gap = gap / ratio
     refine = have & (h_gap < 0.9 * E)
     unres = have & (h_gap < smin)
+    # a surface sliver - a triangle whose height is under SLIVER_TRI x its longest edge (three
+    # outline nodes nearly in line, a corner half a metre off a 20 m wall) - carries a needle
+    # tet whose boundary face the converter cannot wind consistently; refine it to three cells
+    # across its height so the outline is resolved instead
+    height = 2.0 * Ar / np.maximum(Lm, 1e-12)
+    sliver = height < SLIVER_TRI * Lm
+    h_sl = np.where(sliver, np.maximum(3.0 * height, smin), np.inf)
+    h_gap = np.minimum(h_gap, h_sl)
+    refine = refine | sliver
     SUMMARY['gap_pass'] = {'triangles': int(len(C)), 'with a facing surface': int(have.sum()),
-                           'refined': int(refine.sum()), 'unresolvable': int(unres.sum())}
+                           'refined': int(refine.sum()), 'unresolvable': int(unres.sum()),
+                           'surface slivers': int(sliver.sum())}
     if unres.any():
         pts = C[unres]; g = gap[unres]
         order = np.argsort(g)
@@ -1520,6 +1537,9 @@ def gap_size_pass(cfg, ratio):
                 'without slivers - smear or remove that geometry' % (sp['gap_m'], *sp['xyz'], ratio))
         if len(spots) > 12:
             log('... %d unresolvable gap spot(s) more; the full list is in the summary' % (len(spots) - 12))
+    if sliver.any():
+        log('gap pass: %d surface sliver triangle(s) (height < %g x longest edge) marked for '
+            'refinement' % (int(sliver.sum()), SLIVER_TRI))
     if not refine.any():
         return 0, int(unres.sum())
     # bin the refinements on the grid: one Box per occupied cell with the smallest size in it
@@ -2055,6 +2075,31 @@ def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_v
         else:
             notes['tets with V < %g m3 left' % sliver_vol] = \
                 int(((~removed) & (np.abs(vol) < sliver_vol)).sum())
+    # ---- twins: merging nodes (the seam merge, the edge collapses) can make two tets that shared
+    # three nodes coincide in all four - both kept, a face is then shared by three tets and the
+    # converter refuses the mesh. Keep the first of every set of identical tets.
+    live_idx = np.where(~removed)[0]
+    if len(live_idx):
+        srt = np.sort(T[live_idx], axis=1)
+        _, first = np.unique(srt, axis=0, return_index=True)
+        twins = np.ones(len(live_idx), dtype=bool)
+        twins[first] = False
+        if twins.any():
+            removed[live_idx[twins]] = True
+        notes['twin tets removed'] = int(twins.sum())
+        # and a face shared by more than two tets is reported (it should not survive the above)
+        Tk = T[~removed]
+        base_k = int(T.max()) + 1
+        Fk = np.concatenate([Tk[:, [0, 1, 2]], Tk[:, [0, 1, 3]], Tk[:, [0, 2, 3]], Tk[:, [1, 2, 3]]])
+        Fk.sort(axis=1)
+        fk = Fk[:, 0].astype(np.int64) * base_k * base_k + Fk[:, 1].astype(np.int64) * base_k + Fk[:, 2]
+        del Fk
+        _, cnt_k = np.unique(fk, return_counts=True)
+        del fk
+        notes['faces shared by more than two tets'] = int((cnt_k > 2).sum())
+        vol = volumes(np.arange(len(T)))
+        flat = np.abs(vol) < flat_thr * L ** 3
+
     # ---- thin tets with no short edge (a wedge between a hull facet and the sea, a roof and a
     # slab): push one node away from the tet's largest face by up to thin_push metres, guarded
     # by every tet around that node
