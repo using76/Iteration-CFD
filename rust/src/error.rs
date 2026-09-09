@@ -42,6 +42,13 @@ pub enum Error {
 
     #[error("{0}")]
     Config(String),
+
+    /// An outer iteration produced a residual or a flux imbalance that is not
+    /// a finite number. Its own variant, rather than a `Config` string,
+    /// because a divergence is a result about the case (too coarse, too hot,
+    /// too large a step) and the one outcome a driver must never write out.
+    #[error("diverged at outer iteration {iteration}: {what}")]
+    Diverged { iteration: usize, what: String },
 }
 
 // DriverError is a plain enum without an Error impl, so From has to be manual.

@@ -230,6 +230,82 @@ pub struct SimplePerformance {
     pub continuity_error: Scalar,
 }
 
+/// A NaN-propagating maximum, for folds over residuals.
+///
+/// `f64::max` returns the non-NaN argument, so a fold over it can lose a
+/// diverged component entirely - the one number that must not vanish is the
+/// one `max` drops. `std`'s `maximum` propagates but is still feature-gated
+/// on the toolchain this crate builds with, so the semantics live here: any
+/// NaN in, NaN out, and every convergence test downstream refuses it.
+pub fn nan_propagating_max(a: Scalar, b: Scalar) -> Scalar {
+    if a.is_nan() || b.is_nan() {
+        Scalar::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+impl SimplePerformance {
+    /// Why this iteration's numbers are unusable, when one of them is not
+    /// finite.
+    ///
+    /// `None` while every residual and the flux imbalance are finite. `Some`
+    /// names each offender and then carries the iteration's whole residual
+    /// line, because a divergence report with no numbers in it leaves the
+    /// reader guessing how far gone the run was - and the driver's own report
+    /// for this iteration never prints, since the error outruns it.
+    pub fn divergence_reason(&self) -> Option<String> {
+        let mut bad: Vec<String> = Vec::new();
+        for (name, q) in ["Ux", "Uy", "Uz"].iter().zip(&self.u) {
+            if !q.initial_residual.is_finite() {
+                bad.push(format!(
+                    "{name} residual is not finite ({:.3e})",
+                    q.initial_residual
+                ));
+            }
+        }
+        if !self.p.initial_residual.is_finite() {
+            bad.push(format!(
+                "p residual is not finite ({:.3e})",
+                self.p.initial_residual
+            ));
+        }
+        if !self.continuity_error.is_finite() {
+            bad.push(format!(
+                "max |sum_f phi| is not finite ({:.3e})",
+                self.continuity_error
+            ));
+        }
+        if bad.is_empty() {
+            return None;
+        }
+
+        // The same numbers the driver's residual block prints, NaN included -
+        // a finite-looking residual is worth seeing next to a NaN flux.
+        let line = format!(
+            "the iteration's residuals were Ux {:.3e} Uy {:.3e} Uz {:.3e} p {:.3e} \
+             max |sum_f phi| {:.3e}",
+            self.u[0].initial_residual,
+            self.u[1].initial_residual,
+            self.u[2].initial_residual,
+            self.p.initial_residual,
+            self.continuity_error
+        );
+        Some(format!("{}; {line}", bad.join("; ")))
+    }
+}
+
+/// The worst of the three momentum residuals, NaN-propagating.
+///
+/// A plain `max` fold lets one diverged component vanish from the comparison;
+/// [`nan_propagating_max`] hands a NaN on, and the control test below then
+/// refuses it.
+fn worst_u_residual(u: &[SolverPerformance; 3]) -> Scalar {
+    u.iter()
+        .map(|q| q.initial_residual)
+        .fold(0.0 as Scalar, nan_propagating_max)
+}
+
 /// What one call to [`Simple::solve_step`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PimplePerformance {
@@ -310,6 +386,13 @@ pub struct Simple<'m> {
     pinned: bool,
     reference_cell: usize,
 
+    /// How many outer correctors this solver has run, the number a divergence
+    /// report names. It counts every call to [`Self::correct_outer_impl`],
+    /// including a driver's warm-up iteration, so it is a count of outer
+    /// iterations rather than of a driver's steps - the two differ wherever a
+    /// driver runs more than one of either.
+    outer_correctors: usize,
+
     /// SPEC-LIT §52/§53's fan patches and porous jumps, when a driver
     /// attached any.
     ///
@@ -366,6 +449,7 @@ impl<'m> Simple<'m> {
             residual_control: None,
             pinned: false,
             reference_cell: 0,
+            outer_correctors: 0,
             flow_devices: None,
 
             fvk: FvKernels::new(gpu)?,
@@ -653,6 +737,10 @@ impl<'m> Simple<'m> {
             return Ok(SimplePerformance::default());
         }
 
+        // Numbered before it runs, so a divergence inside this very iteration
+        // reports the iteration it happened in.
+        self.outer_correctors += 1;
+
         // inletOutlet switches on the sign of the face flux, so the fractions
         // have to follow the flux the last iteration produced before anything
         // reads them.
@@ -764,11 +852,27 @@ impl<'m> Simple<'m> {
             0.0
         };
 
-        Ok(SimplePerformance {
+        let perf = SimplePerformance {
             u: u_perf,
             p: p_perf,
             continuity_error,
-        })
+        };
+
+        // The run stops HERE rather than limping on. The negated comparison in
+        // `all_satisfied` already keeps NaN from reading as converged, but the
+        // iterations after a NaN one would still poison every field the driver
+        // writes at the end, and a time directory of NaN dressed up as a
+        // result is the outcome this error exists to prevent. Checked after
+        // the flux imbalance is measured so the report carries the one number
+        // that usually blows up first.
+        if let Some(what) = perf.divergence_reason() {
+            return Err(Error::Diverged {
+                iteration: self.outer_correctors,
+                what,
+            });
+        }
+
+        Ok(perf)
     }
 
     /// One SIMPLE iteration - one outer corrector, relaxed.
@@ -802,11 +906,7 @@ impl<'m> Simple<'m> {
         // `U` is reported as the WORST of the three components: a control on
         // "U" that only watched `Ux` would stop a run whose cross-flow had not
         // converged at all.
-        let u_res = perf
-            .u
-            .iter()
-            .map(|q| q.initial_residual)
-            .fold(0.0 as Scalar, Scalar::max);
+        let u_res = worst_u_residual(&perf.u);
 
         rc.all_satisfied(&[
             ("U", u_res),
@@ -2329,6 +2429,48 @@ mod tests {
         assert!((c.momentum.u_relax - 0.7).abs() < 1e-12);
         assert!((c.p_relax - 0.3).abs() < 1e-12);
         assert!((c.momentum.u_relax + c.p_relax - 1.0).abs() < 1e-12);
+    }
+
+    // ----------------------------------------------------------------------
+    //  Divergence - the "U" fold and the guard's reason, both plain data, so
+    //  neither needs a device
+    // ----------------------------------------------------------------------
+
+    fn perf_at(r: Scalar) -> SolverPerformance {
+        SolverPerformance { initial_residual: r, ..SolverPerformance::default() }
+    }
+
+    /// The "U" control entry is the worst of the three components, and a NaN
+    /// component IS the worst thing a component can be: the fold must hand it
+    /// on in any position, so `all_satisfied` can fail it.
+    #[test]
+    fn the_u_residual_fold_hands_a_nan_on() {
+        assert_eq!(worst_u_residual(&[perf_at(1.0), perf_at(3.0), perf_at(2.0)]), 3.0);
+        assert!(worst_u_residual(&[perf_at(1.0), perf_at(Scalar::NAN), perf_at(2.0)]).is_nan());
+        assert!(worst_u_residual(&[perf_at(1.0), perf_at(2.0), perf_at(Scalar::NAN)]).is_nan());
+    }
+
+    /// Finite numbers name nothing; a NaN pressure residual names itself and
+    /// carries the whole residual line, since the driver's own report for this
+    /// iteration never prints.
+    #[test]
+    fn the_divergence_reason_names_the_offender_and_the_numbers() {
+        let ok = SimplePerformance {
+            u: [perf_at(4e-1), perf_at(4e-1), perf_at(3e-1)],
+            p: perf_at(1e-6),
+            continuity_error: 1e-12,
+        };
+        assert_eq!(ok.divergence_reason(), None);
+
+        let bad = SimplePerformance {
+            u: [perf_at(4.417e-1), perf_at(8.622e-1), perf_at(7.942e-1)],
+            p: perf_at(Scalar::NAN),
+            continuity_error: 0.0,
+        };
+        let why = bad.divergence_reason().expect("a NaN p residual is a divergence");
+        assert!(why.contains("p residual is not finite"), "{why}");
+        assert!(why.contains("Ux 4.417e-1"), "{why}");
+        assert!(why.contains("max |sum_f phi| 0.000e0"), "{why}");
     }
 
     // ----------------------------------------------------------------------

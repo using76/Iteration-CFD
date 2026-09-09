@@ -1124,7 +1124,10 @@ impl ResidualControl {
             for (field, res) in residuals {
                 if key == field || alternation_matches(key, field) {
                     matched = true;
-                    if *res > *tol {
+                    // `!(res <= tol)`, not `res > tol`: a NaN residual
+                    // compares false against everything, so the positive form
+                    // would wave it through as converged.
+                    if !(*res <= *tol) {
                         return false;
                     }
                 }
@@ -2700,6 +2703,20 @@ mod tests {
         // No entries at all means the run has no residual criterion, which is
         // NOT the same as "converged".
         assert!(!ResidualControl::default().all_satisfied(&[("p", 0.0)]));
+    }
+
+    /// A NaN residual is not a small residual. `NaN > tol` is false, so only
+    /// the negated form of the comparison keeps a diverged field from being
+    /// reported as converged - and `Scalar::NAN` rather than a literal, so the
+    /// test holds at both precisions.
+    #[test]
+    fn nan_residual_never_satisfies_a_control() {
+        let d = FoamDict::parse("SIMPLE { residualControl { p 1e-3; } }", "fvSolution").unwrap();
+        let rc = ResidualControl::read(&d);
+
+        assert!(!rc.all_satisfied(&[("p", Scalar::NAN)]));
+        assert!(rc.all_satisfied(&[("p", 5e-4)]));
+        assert!(!rc.all_satisfied(&[("p", 2e-3)]));
     }
 
     #[test]

@@ -142,7 +142,7 @@ use ofgpu::pressure::{
     SystemProbe,
 };
 use ofgpu::scalar_transport::{weighted_stats, ScalarTransport, ScalarTransportCoeffs};
-use ofgpu::simple::{Simple, SimpleControls};
+use ofgpu::simple::{nan_propagating_max, Simple, SimpleControls};
 use ofgpu::{Error, Gpu, GpuMesh, Graph, HostMesh, Label, Result, Scalar, Vec3};
 
 #[path = "common/mod.rs"]
@@ -1175,22 +1175,29 @@ impl Default for Residuals {
 impl Residuals {
     /// The largest of the seven, for the steady convergence test a case with
     /// no `residualControl` falls back to.
+    ///
+    /// Folded with [`nan_propagating_max`], not `max`: `max` returns the
+    /// non-NaN argument, so one diverged component would vanish from the
+    /// comparison and the fallback test would then pass it. A NaN survives
+    /// the fold here, and the `<` below refuses it.
     fn worst(&self) -> Scalar {
         self.u
             .iter()
             .copied()
             .chain([self.p, self.k, self.eps, self.t])
-            .fold(0.0 as Scalar, Scalar::max)
+            .fold(0.0 as Scalar, nan_propagating_max)
     }
 
     /// The same numbers, labelled with the field names a `residualControl`
     /// dictionary uses.
     ///
     /// `U` carries the largest of its three components: the entry names the
-    /// vector, so the vector is converged when all of it is.
+    /// vector, so the vector is converged when all of it is. The NaN-safe
+    /// fold for the same reason `worst` gives - a NaN component has to reach
+    /// the control test, which fails it, not vanish on the way there.
     fn by_field(&self) -> [(&'static str, Scalar); 5] {
         [
-            ("U", self.u.iter().copied().fold(0.0 as Scalar, Scalar::max)),
+            ("U", self.u.iter().copied().fold(0.0 as Scalar, nan_propagating_max)),
             ("p", self.p),
             ("k", self.k),
             (self.diss_name, self.eps),
