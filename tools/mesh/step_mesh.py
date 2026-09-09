@@ -95,7 +95,7 @@ DEFAULTS = {
     'outer_tol': 0.05,              # tolerance of the top/west/east/south/north tests
     'solids': {'sink_m': 2.0, 'fuse': False, 'exclude_tags': [], 'touch_warn_m': 0.05,
                'hull_beyond_m': 0.0, 'hull_pad_m': 1.0, 'hull_snap_m': 0.05,
-               'boolean_tol_m': 0.0, 'hull_box_snap_m': 0.0},
+               'boolean_tol_m': 0.0, 'hull_box_snap_m': 0.0, 'hull_box_inset_m': 0.0},
     'repairs': [],                  # [{'tag', 'method', 'cell_m', 'target_faces', 'lift_z', 'brep'}]
     'trim': {'below_z': 3.05, 'shrink_xy_m': 0.0},   # or null: no trim; shrink_xy_m cuts a margin off the x/y sides
     'sea_z': 3.05,
@@ -255,6 +255,8 @@ def load_config(path):
         errors.append('config.solids.hull_pad_m: expected a non-negative pad in metres')
     if not _is_num(sol['hull_snap_m']) or sol['hull_snap_m'] < 0:
         errors.append('config.solids.hull_snap_m: expected a snapping distance >= 0')
+    if not _is_num(sol['hull_box_inset_m']) or sol['hull_box_inset_m'] < 0:
+        errors.append('config.solids.hull_box_inset_m: expected a distance >= 0 (0 = snap outside)')
     if not _is_num(sol['hull_box_snap_m']) or sol['hull_box_snap_m'] < 0:
         errors.append('config.solids.hull_box_snap_m: expected a distance >= 0 (0 = off)')
     if not _is_num(sol['boolean_tol_m']) or sol['boolean_tol_m'] < 0:
@@ -678,13 +680,22 @@ def hull_corners(tag, bbox, pad):
         # wall and the side that narrows to nothing - slivers, and where the far field blew up
         # first. Corners closer than the snap distance to a side move 1 m outside it, so the
         # wall meets the side squarely and the wedge is inside the prism
-        xmin, ymin, xmax, ymax, dist = BOX_SNAP
+        # ... unless the wall is pulled back instead: with hull_box_inset_m the corners move to
+        # inset metres INSIDE the side, so no wall touches an outlet at all (the wall-outlet
+        # junction itself, even at a right angle, was where the steady solution broke next)
+        xmin, ymin, xmax, ymax, dist, inset = BOX_SNAP
         snapped = []
         for x, y in corners:
-            if x - xmin < dist: x = xmin - 1.0
-            elif xmax - x < dist: x = xmax + 1.0
-            if y - ymin < dist: y = ymin - 1.0
-            elif ymax - y < dist: y = ymax + 1.0
+            if inset > 0:
+                if x - xmin < dist: x = xmin + inset
+                elif xmax - x < dist: x = xmax - inset
+                if y - ymin < dist: y = ymin + inset
+                elif ymax - y < dist: y = ymax - inset
+            else:
+                if x - xmin < dist: x = xmin - 1.0
+                elif xmax - x < dist: x = xmax + 1.0
+                if y - ymin < dist: y = ymin - 1.0
+                elif ymax - y < dist: y = ymax + 1.0
             snapped.append((x, y))
         corners = snapped
     corners = clean_polygon(corners, HULL_FLAT_M)
@@ -819,7 +830,7 @@ def cut_stage(cfg, args, work):
         shrink = float((cfg['trim'] or {}).get('shrink_xy_m', 0.0)) if cfg['trim'] else 0.0
         db = cfg['domain_box']
         BOX_SNAP = (db[0] + shrink, db[1] + shrink, db[3] - shrink, db[4] - shrink,
-                    cfg['solids']['hull_box_snap_m'])
+                    cfg['solids']['hull_box_snap_m'], cfg['solids']['hull_box_inset_m'])
     if hull_beyond > 0:
         n_hull, n_kept, n_skipped = 0, 0, 0
         keep_tags = set(cfg['solids']['exclude_tags']) | {r['tag'] for r in cfg['repairs']}
@@ -1500,7 +1511,7 @@ def groups_and_fields_stage(cfg):
     tick('fields', t)
 
 
-BOX_SNAP = None                    # (xmin, ymin, xmax, ymax, dist): hull corners this near a side go outside it
+BOX_SNAP = None                    # (xmin, ymin, xmax, ymax, dist, inset): hull corners this near a side go outside it (inset 0) or inset m inside
 BASE_FIELDS = []                   # the size fields of stage 8, for the gap pass of stage 9
 GAP_GRID = (10.0, 5.0)             # xy and z cell of the grid the gap refinements are boxed on
 GAP_MAX_BOXES = 2500               # the most box fields the gap pass adds (each is cheap to evaluate)
