@@ -199,6 +199,7 @@ source. A file format is not a work.
 ```powershell
 ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
                     [-cutcell [-s N] [-thetaMin X]]
+                    [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]...
                     [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]]
                     [-cyclic x|y|z] [-permissive]
 ```
@@ -213,6 +214,24 @@ What comes out is a complete, ready-to-run case: `constant/polyMesh`,
 `step` or `big`, or one of the buoyant pair (`plume`/`room`), on the block and
 the cut-cell path alike. `damBreak` is the one exception: the two-phase path
 puts `alpha.water` and `p_rgh` in `0/` instead.
+
+### A block the size of your site — `-extent`, `-grading`
+
+```powershell
+ofgpu-generate-mesh big site 320 260 40 -extent -1240 400 -800 500 3.5 200 -grading z=6 -stl site=site.stl -cutcell
+```
+
+When a preset's fixed extent (`big` is a unit cube) cannot hold a real site,
+`-extent xlo xhi ylo yhi zlo zhi` (metres) sets the block's six faces directly
+and `-grading x|y|z=r` sets the cell growth along one axis (last cell divided
+by first cell) — `r > 1` puts the smallest cell at the axis's low end (the
+ground when the axis is z). Both flags apply to the plain path, to `-stl`
+castellation and to `-cutcell` alike. The block's six patches keep the
+preset's names and types (for `big`: `inlet` at xMin, `outlet` at xMax,
+`bottomWall`, `topWall`, `backWall` at yMin, `frontWall` at yMax) — rename or
+retype them in `constant/polyMesh/boundary` and `0/` afterwards. `plume`,
+`room` and `damBreak` refuse `-extent`: their openings (and, for damBreak,
+the water column) are placed from the preset's own extents.
 
 ### Putting a geometry in
 

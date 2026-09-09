@@ -127,6 +127,8 @@ export const BINARIES: BinarySpec[] = [
       { name: '-cutcell', type: 'flag', description: 'Embedded-boundary cut cells instead of castellation (needs -stl).' },
       { name: '-s', type: 'int', default: 16, description: 'Cut-cell supersample lattice size.', requires: '-cutcell' },
       { name: '-thetaMin', type: 'float', default: 0.2, description: 'Small-cell merge threshold.', requires: '-cutcell' },
+      { name: '-extent', type: 'string', description: 'Six numbers `xlo xhi ylo yhi zlo zhi` in metres - replace the preset block extent. Refused with plume/room/damBreak (their openings and water column are placed from the preset extents).' },
+      { name: '-grading', type: 'string', repeatable: true, description: '`x|y|z=ratio` - one-sided cell growth on that axis: last cell / first cell, so ratio > 1 puts the smallest cell at the low end (the ground for z).' },
       { name: '-wallModel', type: 'enum', values: ['standard', 'spalding', 'rough', 'lowRe'], description: 'Wall-treatment preset written into 0/ (SPEC-LIT §29.1).' },
       { name: '-Ks', type: 'float', description: 'Sand-grain roughness height in m.', requires: '-wallModel' },
       { name: '-Cs', type: 'float', default: 0.5, description: 'Roughness constant.', requires: '-wallModel' },

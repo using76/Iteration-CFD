@@ -2724,7 +2724,8 @@ pub fn write_cutcell_case(
     theta_min: Scalar,
 ) -> Result<CutCellSummary> {
     write_cutcell_case_impl(
-        case_dir, kind, nx, ny, nz, surface, s, theta_min, WallTreatment::Standard, None, false,
+        case_dir, kind, nx, ny, nz, surface, None, s, theta_min, WallTreatment::Standard, None,
+        false,
     )
 }
 
@@ -2747,7 +2748,43 @@ pub fn write_cutcell_case_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<CutCellSummary> {
-    write_cutcell_case_impl(case_dir, kind, nx, ny, nz, surface, s, theta_min, wall, roughness, true)
+    write_cutcell_case_impl(
+        case_dir, kind, nx, ny, nz, surface, None, s, theta_min, wall, roughness, true,
+    )
+}
+
+/// [`write_cutcell_case`]/[`write_cutcell_case_with_wall_model`] plus an
+/// optional user-given [`BlockOverride`] on the block being cut. `wall`
+/// follows the same `None` = legacy `standard`/adiabatic convention as
+/// [`write_case_with_override`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_cutcell_case_with_override(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    surface: &Surface,
+    over: Option<&BlockOverride>,
+    s: usize,
+    theta_min: Scalar,
+    wall: Option<WallTreatment>,
+    roughness: Option<Roughness>,
+) -> Result<CutCellSummary> {
+    write_cutcell_case_impl(
+        case_dir,
+        kind,
+        nx,
+        ny,
+        nz,
+        surface,
+        over,
+        s,
+        theta_min,
+        wall.unwrap_or(WallTreatment::Standard),
+        roughness,
+        wall.is_some(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2758,6 +2795,7 @@ fn write_cutcell_case_impl(
     ny: usize,
     nz: usize,
     surface: &Surface,
+    over: Option<&BlockOverride>,
     s: usize,
     theta_min: Scalar,
     wall: WallTreatment,
@@ -2779,7 +2817,12 @@ fn write_cutcell_case_impl(
         ));
     }
 
-    let b = case_block_spec(kind, nx, ny, nz);
+    let mut b = case_block_spec(kind, nx, ny, nz);
+    // Applied before anything reads the block, so the cut, the fields and the
+    // console summary below all see the overridden extent.
+    if let Some(o) = over {
+        o.apply(&mut b, kind)?;
+    }
     let (block, raw, summary, _v_out, c_out) = cutcell_case_raw(&b, surface, s, theta_min)?;
 
     write_raw_poly_mesh_ascii(case_dir, &raw, summary.n_cells_out)?;
@@ -2809,10 +2852,11 @@ fn write_cutcell_case_impl(
 
     println!(
         "[cutcell] {} x {} x {} block, s = {}, theta_min = {}: {} solid, {} fluid, \
-         {} cut ({} merged) -> {} cells",
+         {} cut ({} merged) -> {} cells, block x [{}, {}] y [{}, {}] z [{}, {}]",
         nx, ny, nz, summary.supersample, summary.theta_min,
         summary.n_solid, summary.n_fluid_full, summary.n_cut, summary.n_merged,
-        summary.n_cells_out
+        summary.n_cells_out,
+        b.x.lo, b.x.hi, b.y.lo, b.y.hi, b.z.lo, b.z.hi
     );
     if summary.wall_faces.is_empty() {
         println!("[cutcell] no new wall faces - the surface encloses no cell centres");
@@ -3588,12 +3632,101 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
     (nu, u_ref, half_height)
 }
 
+/// A user-given block extent and per-axis grading, applied on top of whatever
+/// [`case_block_spec`] built - the library side of `ofgpu-generate-mesh`'s
+/// `-extent`/`-grading`, so a programmatic caller refuses exactly what the
+/// command line refuses. The real site this exists for is a closed STL of
+/// ground, quays, buildings and a ship: nothing a unit-cube `big` preset can
+/// be stretched over without this.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockOverride {
+    /// `None`, or `[xlo, xhi, ylo, yhi, zlo, zhi]` in metres.
+    pub extent: Option<[Scalar; 6]>,
+    /// One expansion ratio per axis (0=x, 1=y, 2=z), `None` = leave the
+    /// preset's own grading alone. Indexed by axis, so a repeated axis is not
+    /// even expressible - a second `-grading z=r` is refused at the command
+    /// line before one of these is ever built.
+    pub grading: [Option<Scalar>; 3],
+}
+
+impl Default for BlockOverride {
+    fn default() -> Self {
+        Self { extent: None, grading: [None; 3] }
+    }
+}
+
+impl BlockOverride {
+    /// Apply the extent and the grading to `b`, refusing what cannot be
+    /// honoured (see the field docs). `kind` is needed only for the
+    /// windowed-preset refusal, whose message names the preset.
+    pub fn apply(&self, b: &mut BlockSpec, kind: CaseKind) -> Result<()> {
+        if let Some([xlo, xhi, ylo, yhi, zlo, zhi]) = self.extent {
+            // The plume's floor inlet and the room's door are `PatchWindow`s
+            // snapped to cell centres of the preset's own nodes, and the dam
+            // break's water column is placed the same way: `case_block_spec`
+            // has already computed them by the time an override could run, so
+            // an overridden box would leave every one of them hanging where
+            // the old box was. Grading needs no such refusal - a window is a
+            // cell-INDEX range, still valid whatever the nodes do.
+            if matches!(kind, CaseKind::Plume | CaseKind::Room | CaseKind::DamBreak) {
+                return Err(Error::Config(format!(
+                    "-extent: preset '{}' places its openings (and, for damBreak, its water \
+                     column) from its own extents, so an overridden block would leave them \
+                     behind - give -extent with one of big, channel, cavity, step",
+                    kind.as_str()
+                )));
+            }
+            // `!(hi > lo)` rather than `hi <= lo` so a NaN bound is refused
+            // too, the way `fill_graded` treats a NaN ratio.
+            for (name, lo, hi) in [("x", xlo, xhi), ("y", ylo, yhi), ("z", zlo, zhi)] {
+                if !(hi > lo) {
+                    return Err(Error::Config(format!(
+                        "-extent: axis {name} needs hi > lo, got [{lo}, {hi}]"
+                    )));
+                }
+            }
+            b.x.lo = xlo;
+            b.x.hi = xhi;
+            b.y.lo = ylo;
+            b.y.hi = yhi;
+            b.z.lo = zlo;
+            b.z.hi = zhi;
+        }
+
+        for (axis, r) in self.grading.iter().enumerate() {
+            let Some(r) = r else { continue };
+            if !(*r > 0.0) {
+                return Err(Error::Config(format!(
+                    "-grading {}=...: the ratio must be positive - it is last cell / first \
+                     cell, 1 is uniform, and r > 1 puts the smallest cell at the axis's low \
+                     end - got {r}",
+                    ["x", "y", "z"][axis]
+                )));
+            }
+            let a = match axis {
+                0 => &mut b.x,
+                1 => &mut b.y,
+                _ => &mut b.z,
+            };
+            // A user-given ratio is one-sided by definition (last/first), so
+            // it replaces whatever two-sided wall-to-wall grading the preset
+            // had rather than being read as one.
+            a.expansion = *r;
+            a.two_sided = false;
+        }
+
+        Ok(())
+    }
+}
+
 /// Write a complete runnable case: polyMesh, `constant/`, `system/` and a `0/`
 /// directory whose fields are real per-cell profiles rather than a uniform
 /// guess.
 pub fn write_case(case_dir: &Path, kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, WallTreatment::Standard, None, false, &[])
-        .map(|_| ())
+    write_case_impl(
+        case_dir, kind, nx, ny, nz, None, None, WallTreatment::Standard, None, false, &[],
+    )
+    .map(|_| ())
 }
 
 /// [`write_case`], with the two opposite patches of each of `axes` (0=x,
@@ -3621,6 +3754,7 @@ pub fn write_case_cyclic(
         ny,
         nz,
         None,
+        None,
         WallTreatment::Standard,
         None,
         false,
@@ -3643,8 +3777,10 @@ pub fn write_case_cyclic_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, axes)
-        .map(|_| ())
+    write_case_impl(
+        case_dir, kind, nx, ny, nz, None, None, wall, roughness, true, axes,
+    )
+    .map(|_| ())
 }
 
 /// [`write_case`], with SPEC-LIT §29.1's `wallTreatment` preset (route c)
@@ -3662,7 +3798,51 @@ pub fn write_case_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<()> {
-    write_case_impl(case_dir, kind, nx, ny, nz, None, wall, roughness, true, &[]).map(|_| ())
+    write_case_impl(
+        case_dir, kind, nx, ny, nz, None, None, wall, roughness, true, &[],
+    )
+    .map(|_| ())
+}
+
+/// [`write_case`], [`write_case_with_wall_model`] and [`write_case_cyclic`]
+/// in one entry point, with an optional user-given [`BlockOverride`] on the
+/// block: `cyclic` empty is the plain case, `wall` `None` is the legacy
+/// hardcoded `standard` row with the adiabatic `T` - the exact `write_case`
+/// default, which is why `wall` is an `Option` here rather than a
+/// `WallTreatment` (passing `Standard` unconditionally would silently turn
+/// §29.3's thermal wall function on for a caller that never asked for any
+/// wall model) - and `Some(w)` the matching `_with_wall_model` behaviour.
+/// `ofgpu-generate-mesh` calls this once for its whole no-STL path instead of
+/// matching over the four flag combinations.
+///
+/// `over` of `None`, or an all-`None` [`BlockOverride`] (its
+/// [`BlockOverride::apply`] is then a no-op), reproduces the preset exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn write_case_with_override(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    over: Option<&BlockOverride>,
+    cyclic: &[usize],
+    wall: Option<WallTreatment>,
+    roughness: Option<Roughness>,
+) -> Result<()> {
+    write_case_impl(
+        case_dir,
+        kind,
+        nx,
+        ny,
+        nz,
+        None,
+        over,
+        wall.unwrap_or(WallTreatment::Standard),
+        roughness,
+        wall.is_some(),
+        cyclic,
+    )
+    .map(|_| ())
 }
 
 /// Build a complete runnable case's mesh and `0/` fields entirely in memory -
@@ -3713,7 +3893,7 @@ pub fn write_carved_case(
     surface: &Surface,
 ) -> Result<CarveSummary> {
     match write_case_impl(
-        case_dir, kind, nx, ny, nz, Some(surface), WallTreatment::Standard, None, false, &[],
+        case_dir, kind, nx, ny, nz, Some(surface), None, WallTreatment::Standard, None, false, &[],
     )? {
         Some(s) => Ok(s),
         // Unreachable: the impl returns a summary whenever a surface went in.
@@ -3735,8 +3915,45 @@ pub fn write_carved_case_with_wall_model(
     wall: WallTreatment,
     roughness: Option<Roughness>,
 ) -> Result<CarveSummary> {
-    match write_case_impl(case_dir, kind, nx, ny, nz, Some(surface), wall, roughness, true, &[])? {
+    match write_case_impl(
+        case_dir, kind, nx, ny, nz, Some(surface), None, wall, roughness, true, &[],
+    )? {
         Some(s) => Ok(s),
+        None => Err(Error::Mesh("carve produced no summary".to_string())),
+    }
+}
+
+/// [`write_carved_case`]/[`write_carved_case_with_wall_model`] plus an
+/// optional user-given [`BlockOverride`] on the block the surface carves.
+/// `wall` follows the same `None` = legacy `standard`/adiabatic convention
+/// as [`write_case_with_override`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_carved_case_with_override(
+    case_dir: &Path,
+    kind: CaseKind,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    surface: &Surface,
+    over: Option<&BlockOverride>,
+    wall: Option<WallTreatment>,
+    roughness: Option<Roughness>,
+) -> Result<CarveSummary> {
+    match write_case_impl(
+        case_dir,
+        kind,
+        nx,
+        ny,
+        nz,
+        Some(surface),
+        over,
+        wall.unwrap_or(WallTreatment::Standard),
+        roughness,
+        wall.is_some(),
+        &[],
+    )? {
+        Some(s) => Ok(s),
+        // Unreachable: the impl returns a summary whenever a surface went in.
         None => Err(Error::Mesh("carve produced no summary".to_string())),
     }
 }
@@ -3749,6 +3966,7 @@ fn write_case_impl(
     ny: usize,
     nz: usize,
     surface: Option<&Surface>,
+    over: Option<&BlockOverride>,
     wall: WallTreatment,
     roughness: Option<Roughness>,
     thermal_wall: bool,
@@ -3761,6 +3979,11 @@ fn write_case_impl(
     }
 
     let mut b = case_block_spec(kind, nx, ny, nz);
+    // Applied before anything reads the block - the carve, the fields and the
+    // console summary below all see the overridden extent.
+    if let Some(o) = over {
+        o.apply(&mut b, kind)?;
+    }
     // SPEC-LIT §31.1/§34.2: only reachable through `write_case_cyclic`, which
     // never carries a `surface` - carving and cyclic pairing together is a
     // combination nothing has asked for yet, so it stays unreachable through
@@ -3881,12 +4104,18 @@ fn write_case_impl(
     }
 
     println!(
-        "{}: {} x {} x {} = {} cells -> {}",
+        "{}: {} x {} x {} = {} cells, block x [{}, {}] y [{}, {}] z [{}, {}] -> {}",
         kind.as_str(),
         nx,
         ny,
         nz,
         n_cells_out,
+        b.x.lo,
+        b.x.hi,
+        b.y.lo,
+        b.y.hi,
+        b.z.lo,
+        b.z.hi,
         case_dir.display()
     );
 
@@ -6975,6 +7204,142 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+    // ------------------------------------------------------------------
+    //  `-extent`/`-grading`: BlockOverride
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn override_sets_extent_and_grading() {
+        let mut b = case_block_spec(CaseKind::Big, 4, 4, 4);
+        let ov = BlockOverride {
+            extent: Some([-10.0, 20.0, -5.0, 5.0, 0.0, 3.0]),
+            grading: [None, None, Some(4.0)],
+        };
+        ov.apply(&mut b, CaseKind::Big).expect("apply");
+
+        assert_eq!((b.x.lo, b.x.hi), (-10.0, 20.0));
+        assert_eq!((b.y.lo, b.y.hi), (-5.0, 5.0));
+        assert_eq!((b.z.lo, b.z.hi), (0.0, 3.0));
+        // r > 1 is last cell / first cell, so it is ONE-SIDED: the smallest
+        // cell sits at `lo` and the preset's two-sided reading is gone.
+        assert_eq!(b.z.expansion, 4.0);
+        assert!(!b.z.two_sided);
+        // Untouched axes keep the preset's own grading (`big` is uniform).
+        assert_eq!(b.x.expansion, 1.0);
+        assert_eq!(b.y.expansion, 1.0);
+        assert!(!b.x.two_sided && !b.y.two_sided);
+    }
+
+    #[test]
+    fn override_refuses_windowed_presets() {
+        // These three place their openings (or the water column) from the
+        // preset's own extents, so an overridden box would leave them behind.
+        for kind in [CaseKind::Plume, CaseKind::Room, CaseKind::DamBreak] {
+            let mut b = case_block_spec(kind, 4, 4, 4);
+            let ov = BlockOverride {
+                extent: Some([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
+                grading: [None; 3],
+            };
+            assert!(
+                ov.apply(&mut b, kind).is_err(),
+                "{} must refuse an -extent",
+                kind.as_str()
+            );
+        }
+
+        for kind in [CaseKind::Big, CaseKind::Channel, CaseKind::Cavity, CaseKind::Step] {
+            let mut b = case_block_spec(kind, 4, 4, 4);
+            let ov = BlockOverride {
+                extent: Some([-10.0, 20.0, -5.0, 5.0, 0.0, 3.0]),
+                grading: [None; 3],
+            };
+            ov.apply(&mut b, kind)
+                .unwrap_or_else(|e| panic!("{} must accept an -extent: {e}", kind.as_str()));
+        }
+
+        // The refusal is extent-scoped: a window is a cell-INDEX range, still
+        // valid whatever the graded nodes do, so grading alone is accepted
+        // even where the extent is not.
+        let mut b = case_block_spec(CaseKind::Plume, 4, 4, 4);
+        let ov = BlockOverride { extent: None, grading: [None, None, Some(4.0)] };
+        ov.apply(&mut b, CaseKind::Plume).expect("grading-only on a windowed preset");
+        assert_eq!(b.z.expansion, 4.0);
+    }
+
+    #[test]
+    fn override_refuses_inverted_extent() {
+        for extent in [
+            [20.0, -10.0, -5.0, 5.0, 0.0, 3.0], // x hi < lo
+            [-10.0, 20.0, 5.0, -5.0, 0.0, 3.0], // y hi < lo
+            [-10.0, 20.0, -5.0, 5.0, 3.0, 0.0], // z hi < lo
+            [1.0, 1.0, 0.0, 1.0, 0.0, 3.0],     // hi == lo is a zero-width axis
+        ] {
+            let mut b = case_block_spec(CaseKind::Big, 4, 4, 4);
+            let ov = BlockOverride { extent: Some(extent), grading: [None; 3] };
+            assert!(ov.apply(&mut b, CaseKind::Big).is_err(), "extent {extent:?}");
+        }
+    }
+
+    #[test]
+    fn override_refuses_non_positive_grading() {
+        for r in [0.0, -2.0, Scalar::NAN] {
+            let mut b = case_block_spec(CaseKind::Big, 4, 4, 4);
+            let ov = BlockOverride { extent: None, grading: [None, Some(r), None] };
+            assert!(ov.apply(&mut b, CaseKind::Big).is_err(), "ratio {r}");
+        }
+    }
+
+    /// The whole cut-cell path with an override: the mesh on disk must span
+    /// exactly the given extent (cut-face points lie inside; the block
+    /// corners ARE the extent), whatever the preset's own unit cube said.
+    #[test]
+    fn cutcell_with_override_writes_block() {
+        use crate::io::polymesh::read_poly_mesh;
+
+        let s = cuboid_surface(Vec3::new(-2.5, -2.5, 0.75), Vec3::new(12.5, 2.5, 2.25), "boxWall");
+        let dir = temp_dir("cutcell_override");
+        let ov = BlockOverride {
+            extent: Some([-10.0, 20.0, -5.0, 5.0, 0.0, 3.0]),
+            grading: [None, None, Some(4.0)],
+        };
+        let summary = write_cutcell_case_with_override(
+            &dir, CaseKind::Big, 6, 6, 6, &s, Some(&ov), DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN,
+            None, None,
+        )
+        .expect("write_cutcell_case_with_override");
+        assert!(summary.n_cells_out > 0);
+
+        let raw = read_poly_mesh(&dir).expect("read points back");
+        // Each of the six extent PLANES must carry written points - that is
+        // what pins the override to the geometry on disk. (The block CORNERS
+        // are not usable here, and not because of the override: every face of
+        // this assembly is a `synthetic_quad` with corners `centroid +-
+        // sqrt(area)/2` in-plane, so on a non-square grid not even a full
+        // cell's corner lands on its own vertex - the unit-cube preset shows
+        // the same overshoot, points at y = -0.013 on a [0, 1] block. The
+        // faces that lie ON an extent plane keep that axis coordinate exact
+        // though: a synthetic quad only spreads IN the plane.)
+        let (xlo, xhi, ylo, yhi, zlo, zhi) = (-10.0, 20.0, -5.0, 5.0, 0.0, 3.0);
+        // Loose enough to mean the same thing under the `single` feature.
+        let tol = 1e-4;
+        let on_plane = |axis: usize, v: Scalar, p: Vec3| {
+            let c = [p.x, p.y, p.z][axis];
+            (c - v).abs() < tol
+        };
+        for (axis, lo, hi) in [(0usize, xlo, xhi), (1, ylo, yhi), (2, zlo, zhi)] {
+            for want in [lo, hi] {
+                assert!(
+                    raw.points.iter().any(|p| on_plane(axis, want, *p)),
+                    "no point on the {} = {} extent face",
+                    ["x", "y", "z"][axis],
+                    want
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// The room's door window: on the +x slot, named `outlet`, snapped to
     /// roughly 2 m x 2 m starting at the floor.
     #[test]

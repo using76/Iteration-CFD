@@ -8,7 +8,7 @@ and, for `channel`, `cavity`, `step`, `big` and the buoyant pair (`plume`, `room
 exception: the two-phase path puts `alpha.water` and `p_rgh` in `0/` instead.
 
 ```powershell
-cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [-stl [name=]path]... [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-permissive]
+cargo run --release --bin ofgpu-generate-mesh -- <case> <outputDir> [nx ny nz] [-stl [name=]path]... [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]... [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-permissive]
 ```
 
 ### `-wallModel` — 벽 처리 프리셋 (SPEC-LIT §29.1)

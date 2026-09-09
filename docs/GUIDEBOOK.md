@@ -191,6 +191,7 @@ OpenFOAM ASCII 형식을 읽고 씁니다. **이것은 상호운용을 위한 �
 ```powershell
 ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
                     [-cutcell [-s N] [-thetaMin X]]
+                    [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]...
                     [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]]
                     [-cyclic x|y|z] [-permissive]
 ```
@@ -204,6 +205,23 @@ ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
 `omega`, `nut` — 프리셋이 `channel`·`cavity`·`step`·`big`이거나 부력 쌍
 (`plume`/`room`)이면 여기에 `p`와 `T`까지 들어갑니다(블록·컷셀 양쪽 경로 모두).
 `damBreak`만 예외로, 2상 경로라 `0/`이 `alpha.water`와 `p_rgh`를 담습니다.
+
+### 부지에 맞춘 블록 — `-extent`, `-grading`
+
+```powershell
+ofgpu-generate-mesh big site 320 260 40 -extent -1240 400 -800 500 3.5 200 -grading z=6 -stl site=site.stl -cutcell
+```
+
+프리셋의 고정 크기(`big`은 단위 정육면체)로는 실제 부지를 담을 수 없을 때,
+`-extent xlo xhi ylo yhi zlo zhi`(미터)가 블록의 여섯 면을 직접 정하고
+`-grading x|y|z=r`은 그 축의 셀 성장비(마지막 셀 / 첫 셀)를 정합니다 — `r > 1`이면
+가장 작은 셀이 축의 `lo` 끝(z축이면 지면)에 놓입니다. 두 플래그는 일반 경로는
+물론 `-stl` 캐스텔레이션과 `-cutcell`에도 함께 적용됩니다. 블록의 여섯 패치는
+프리셋의 이름과 타입을 그대로 유지합니다(`big`이면 xMin `inlet`, xMax `outlet`,
+`bottomWall`, `topWall`, yMin `backWall`, yMax `frontWall`) — 필요하면 나중에
+`constant/polyMesh/boundary`와 `0/`에서 이름이나 타입을 고치십시오. `plume`,
+`room`, `damBreak`는 개구부와 물기둥을 프리셋 자체 크기에서 놓으므로 `-extent`를
+거부합니다.
 
 ### STL을 넣기
 
