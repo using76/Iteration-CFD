@@ -538,6 +538,28 @@ ofgpu-convert-mesh mesh\nh3_site.msh nh3_case -type pool_tank_shell=wall
 있습니다). 그리고 `-fluent` 출력은 사면체 전용이라, 사각형 면이나 네 면이 아닌 셀은
 이름을 댄 채 거절됩니다.
 
+격자기가 건물 아래에 봉인된 셀 포켓을 남기기도 합니다: 모든 면이 포켓 안의
+내부면이거나 둘러싼 벽 패치(`wall_ground_land`)의 경계면뿐인 셀 무리입니다.
+포켓을 본격과 잇는 면이 하나도 없으므로 그 벽에 `p`가 zeroGradient이면 포켓의
+압력 블록은 특이행렬이 되고, 압력은 1e16으로 흘러가 선형솔버가 잔차를 정규화하는
+전체 셀 평균을 오염시킵니다 — 4회 반복부터 압력 솔버는 반복 0회를 보고하고,
+나머지 계산은 죽은 압력식을 향해 걸어갑니다. 변환기는 셀 영역을 세고
+기본값으로 가장 큰 영역만 남겨 나머지를 버립니다 — 셀과 내부면과 경계면을
+지우고 셀 번호를 다시 매기되 패치 순서와 상삼각 면 순서는 그대로 두고 — 이렇게
+말합니다:
+
+```
+regions: 9; dropped 8 sealed region(s), 24 cell(s), 77 face(s) (19 internal, 58 on wall_ground_land)
+kept region: 343466 cells
+```
+
+버림이 포켓 크기를 넘으면 거절합니다: 전체 셀의 1 %가 넘거나 가장 큰 영역이
+두 번째의 10배가 못 되면 그것은 포켓이 아니라 두 번째 도메인이므로 결정은
+기본값이 아니라 사용자의 몫입니다. `-keepRegions`이 그 결정을 기록하는
+방법입니다 — 모든 영역을 그대로 변환하고 `regions:` 줄만 인쇄합니다. 그래도
+여러 영역이 남은 케이스라면 로더가 알려 줍니다: 압력 솔버가 반복 0회를
+보고하기 시작하면 가장 먼저 읽을 것이 로더의 `regions:` 줄입니다.
+
 **한 반복으로 격자부터 점검하십시오.**
 
 ```powershell
@@ -547,7 +569,7 @@ ofgpu-buoyant nh3_case -iters 1
 필드를 읽기 전에 로더가 격자 통계를 인쇄합니다 — `mesh: <cells> cells, ...` 줄,
 패치 표(이름·타입·면 수), `volume: total ..., min ..., max ...`,
 `non-orthogonality: max ... deg, mean ... deg`, `face closure`,
-`lduAddressing: upper-triangular`. 이 줄들이 부지 격자의 성적표입니다. 변환만 한
+`lduAddressing: upper-triangular`, `regions: 1`. 이 줄들이 부지 격자의 성적표입니다. 변환만 한
 케이스에는 `0/`이 없으므로 그다음은 이렇게 끝납니다:
 
 ```

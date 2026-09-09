@@ -255,6 +255,14 @@ pub struct MeshReport {
     /// (owner, neighbour) - the upper-triangular order the LDU addressing and
     /// every gather kernel assume.
     pub ldu_ordered: bool,
+    /// How many disjoint cell regions the internal faces leave the mesh in:
+    /// 1 for a mesh that is one piece. Sealed pockets a mesher left behind -
+    /// the case that forced this field - stand out as regions of a few cells
+    /// beside the one the domain is made of. Per-cell labels: see
+    /// `mesh::geometry::cell_regions`.
+    pub n_regions: usize,
+    /// Cells per region, largest first; empty on a mesh with no cells.
+    pub region_sizes: Vec<usize>,
 }
 
 impl HostMesh {

@@ -574,6 +574,32 @@ some pre-processing chain produced), and `-fluent` output covers tetrahedral
 meshes only — a quadrilateral face, or a cell with a face count other than
 four, is refused by name.
 
+A tetrahedral generator can also leave sealed pockets of cells under
+buildings: clusters whose every face is internal to the cluster or a boundary
+face of the wall around it (`wall_ground_land` here). Nothing joins a pocket
+to the rest of the mesh, so with `p` zeroGradient on that wall the pocket's
+block of the pressure matrix is singular — the pressure there drifts to 1e16
+and poisons the all-cells mean the linear solver normalises its residuals
+over, and from iteration 4 on the pressure solve reports ZERO iterations
+while the rest of the run marches against a dead pressure equation. The
+converter counts the cell regions and, by default, keeps the largest and
+drops the rest — cells, internal faces and boundary faces removed, the kept
+cells renumbered, patch order and the upper-triangular face order kept — and
+says so:
+
+```
+regions: 9; dropped 8 sealed region(s), 24 cell(s), 77 face(s) (19 internal, 58 on wall_ground_land)
+kept region: 343466 cells
+```
+
+A drop that stops being pocket-sized is refused: more than 1 % of the cells,
+or a largest region under ten times the second, is not a pocket but a second
+domain, and that is the operator's decision, not a default's. `-keepRegions`
+is how to record it — convert every region as the mesh stands and print only
+the `regions:` line. A case that still carries more than one region says so
+at load: when a pressure solve starts reporting zero iterations, the loader's
+`regions:` line is the first thing to read.
+
 **Check the mesh with a one-iteration run first.**
 
 ```powershell
@@ -583,9 +609,9 @@ ofgpu-buoyant nh3_case -iters 1
 Before it touches any field, the loader prints the mesh statistics — the
 `mesh: <cells> cells, ...` line, the patch table (name, type, face count),
 `volume: total ..., min ..., max ...`, `non-orthogonality: max ... deg, mean
-... deg`, `face closure`, `lduAddressing: upper-triangular`. Those lines are
-this mesh's report card. A freshly converted case has no `0/`, so what follows
-is:
+... deg`, `face closure`, `lduAddressing: upper-triangular`, `regions: 1`.
+Those lines are this mesh's report card. A freshly converted case has no
+`0/`, so what follows is:
 
 ```
 error: no time directory with initial fields found in nh3_case
