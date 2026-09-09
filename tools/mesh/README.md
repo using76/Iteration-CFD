@@ -140,6 +140,14 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
     "near_struct": 4,      // size within structures nearer than near_radius to a point
     "far_struct": 12,      // size near the rest of the structures
     "near_radius": 400,    // the near/far split, from the point's (x, y)
+    "gap_ratio": 0,         // >0: the local-feature-size rule h <= g/gap_ratio. After the surface
+                            // mesh, every triangle measures g, the distance along its inward
+                            // normal to the nearest triangle facing it (a slot between two walls,
+                            // a wall over the ground); where g/gap_ratio is below the local size
+                            // the spot is refined (Box fields on a 10 x 10 x 5 m grid) and the
+                            // surface is meshed again. Slots narrower than gap_ratio x min cannot
+                            // be meshed without slivers: they are listed in the summary's
+                            // "gap_unresolvable" - smear or remove that geometry (solids.hull_*)
     "size_mult": 1.0,      // >1 coarsens every size (a solver-robustness reproducer)
     "roof_boxes": [2.5, 5.0, 10.0]   // the three roof-patch box sizes (near, mid, downwind)
   },
@@ -155,7 +163,15 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                              // |V| = 0.11785 × mean edge³, so 0.01 selects tets flatter than
                              // about 8 % of regular) and sliver_edge_m / sliver_vol_m3 go unused
     "sliver_edge_rel": 0.25, // in that mode, an edge is collapsible below this × the tet's mean edge
-    "thin_push_m": 0.0       // >0: push a node out of thin tets (gamma < 0.02) by up to this
+    "thin_push_m": 0.0,      // >0: push a node out of thin tets (gamma < 0.02) by up to this
+    "min_thickness": 0.0,    // >0: the thickness gate tau = 3V/A_max^1.5 (regular tet 1.24, the
+                             // site's slivers 0.01): every tet below it has the node opposite its
+                             // largest face pushed along the normal by the height the gate asks,
+                             // guarded against inverting any tet around; nodes inside a pool's
+                             // refinement box never move; repeated repair_rounds times, then the
+                             // survivors are counted (notes "thickness: ...") and the worst ten
+                             // listed in the summary's "thickness_gate" with their positions
+    "repair_rounds": 3
   },
   "classification": {"wall_prefix": "wall_", "big_roof_is_ground_m2": 2000}
 }
