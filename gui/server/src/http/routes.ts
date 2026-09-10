@@ -10,6 +10,7 @@ import type { DatasetService } from '../datasets/types.js'
 import { compileUserRegex, UnsafeRegexError } from '../regex.js'
 import type { CaseSchema } from '../registry/schema.js'
 import type { RunManager, StartRunOptions } from '../runs/types.js'
+import { LINE_SAMPLE_MAX_POINTS, LINE_SAMPLE_POINTS, SampleError, lineSample, type SampleComponent } from '../tools/sample.js'
 import { fsTree, readWorkspaceFile, writeWorkspaceFile } from '../workspace/fs.js'
 import { gitStatus as defaultGitStatus, type GitStatus } from '../workspace/git.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
@@ -175,6 +176,36 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     if (!rootParam) throw new HttpError(400, 'root is required')
     const r = resolveInWorkspace(root, rootParam, { mustExist: true })
     return datasets.discover(r.rel)
+  })
+  router.get('/api/results/sample', async ({ query }) => {
+    const dir = query.get('dir')
+    if (!dir) throw new HttpError(400, 'dir is required')
+    const field = query.get('field')
+    if (!field) throw new HttpError(400, 'field is required')
+    const triple = (name: string): [number, number, number] => {
+      const parts = (query.get(name) ?? '').split(',').map((v) => Number(v))
+      if (parts.length !== 3 || parts.some((v) => !Number.isFinite(v))) throw new HttpError(400, `${name} must be x,y,z`)
+      return parts as [number, number, number]
+    }
+    const nRaw = query.get('n')
+    let n = LINE_SAMPLE_POINTS
+    if (nRaw !== null && nRaw !== '') {
+      n = Number(nRaw)
+      if (!Number.isInteger(n) || n < 2 || n > LINE_SAMPLE_MAX_POINTS) throw new HttpError(400, `n must be an integer in [2, ${LINE_SAMPLE_MAX_POINTS}]`)
+    }
+    const componentRaw = query.get('component')
+    let component: SampleComponent = 'magnitude'
+    if (componentRaw === 'x' || componentRaw === 'y' || componentRaw === 'z') component = componentRaw
+    else if (componentRaw && componentRaw !== 'magnitude') throw new HttpError(400, 'component must be magnitude, x, y or z')
+    const p0 = triple('p0')
+    const p1 = triple('p1')
+    const r = resolveInWorkspace(root, dir, { mustExist: true })
+    try {
+      return await lineSample({ rootAbs: r.abs, rootRel: r.rel || '.', time: query.get('time'), field, component, p0, p1, n })
+    } catch (err) {
+      if (err instanceof SampleError) throw new HttpError(err.code === 'NOT_FOUND' ? 404 : 400, err.message)
+      throw err
+    }
   })
 
   return router

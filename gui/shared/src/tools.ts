@@ -16,6 +16,7 @@ export const TOOL_NAMES = [
   'run_stop',
   'results_discover',
   'field_stats',
+  'line_sample',
   'residuals_get',
   'viewer_command',
   'plot_residuals',
@@ -57,6 +58,7 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   run_stop: { name: 'run_stop', kind: 'mutate', policy: 'ask', label: { ko: '실행 중단', en: 'Stop run' } },
   results_discover: { name: 'results_discover', kind: 'read', policy: 'auto', label: { ko: '결과 탐색', en: 'Discover results' } },
   field_stats: { name: 'field_stats', kind: 'read', policy: 'auto', label: { ko: '필드 통계', en: 'Field statistics' } },
+  line_sample: { name: 'line_sample', kind: 'read', policy: 'auto', label: { ko: '선 샘플링', en: 'Sample along a line' } },
   residuals_get: { name: 'residuals_get', kind: 'read', policy: 'auto', label: { ko: '잔차 조회', en: 'Get residuals' } },
   viewer_command: { name: 'viewer_command', kind: 'ui', policy: 'auto', label: { ko: '3D 뷰어', en: '3D viewer' } },
   plot_residuals: { name: 'plot_residuals', kind: 'ui', policy: 'auto', label: { ko: '잔차 플롯', en: 'Plot residuals' } },
@@ -122,6 +124,10 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       return ko ? `결과 ${(r.times as unknown[] | undefined)?.length ?? 0}개 시간 스텝 발견` : `Found ${(r.times as unknown[] | undefined)?.length ?? 0} result time steps`
     case 'field_stats':
       return ko ? `${String(i.field ?? '')} 통계 계산` : `Computed ${String(i.field ?? '')} statistics`
+    case 'line_sample': {
+      const pts = (r.values as unknown[] | undefined)?.length ?? 0
+      return ko ? `${String(i.field ?? '')} 선 샘플링 (${fmtInt(pts)}개 지점)` : `Sampled ${String(i.field ?? '')} along ${fmtInt(pts)} points`
+    }
     case 'residuals_get':
       return ko ? '잔차 시계열 조회' : 'Fetched residual series'
     case 'viewer_command': {

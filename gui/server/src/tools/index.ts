@@ -17,6 +17,7 @@ import { guiControl, guiState } from './gui.js'
 import { meshGenerate } from './mesh.js'
 import { fieldStats, residualsGet, resultsDiscover } from './results.js'
 import { runLog, runStart, runStatus, runStop, runWait } from './run.js'
+import { lineSampleTool } from './sample.js'
 import { shellExec } from './shell.js'
 import { specLookup } from './spec.js'
 import { suggestFollowups } from './suggest.js'
@@ -41,6 +42,7 @@ export const TOOLS: ToolDef[] = [
   runStop,
   resultsDiscover,
   fieldStats,
+  lineSampleTool,
   residualsGet,
   viewerCommand,
   plotResiduals,
