@@ -10,8 +10,14 @@ export const CONTEXT_PREFIX = '[context]'
 export const RUN_NOTICE_PREFIX = '[run notice]'
 export const BUDGET_EXHAUSTED_TEXT = 'Tool budget exhausted: summarise what you did and what remains, without calling tools.'
 
+// Appended to the static system prompt here rather than in prompts/system.ts
+// so the registry-generated prompt stays about the solver; both halves are
+// constant, so the cache_control breakpoint keeps hitting.
+export const GUI_CONTROL_PARAGRAPH =
+  'You can also steer the operator\'s screen directly with gui_control: select_tab, show_field, select_step, open_panel (AI Assistant, Properties, Inspector), set_tool, set_projection, fit_view, show_overlay (axes, colorbars), set_centerline, run (start/stop) and notify (a toast on their screen). Call gui_state to read what the screen currently shows — before assuming what the user is looking at, and after changing it — and say in one short sentence what you changed on their screen.'
+
 export function systemParam(): BetaTextBlockParam[] {
-  return [{ type: 'text', text: STATIC_SYSTEM, cache_control: { type: 'ephemeral' } }]
+  return [{ type: 'text', text: `${STATIC_SYSTEM}\n\n${GUI_CONTROL_PARAGRAPH}`, cache_control: { type: 'ephemeral' } }]
 }
 
 export interface VolatileFacts {

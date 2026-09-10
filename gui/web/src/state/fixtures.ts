@@ -157,7 +157,9 @@ export const FRAMES: Record<ServerMsg['t'], ServerMsg> = {
     runId: 'r_1',
     items: [{ id: 'r_1:7', severity: 'error', message: 'error: kOmegaSST is not supported by ofgpu; available: kEpsilon', source: 'solver', path: 'cases/plume.jsonc', line: null, col: null, runId: 'r_1', logSeq: 7, hint: 'Use one of the listed values in the case file.' }],
   },
+  'ui.command': { t: 'ui.command', requestId: 'uq_1', cmd: { type: 'show_field', field: 'Velocity' } },
   gpu: { t: 'gpu', gpu: { state: 'busy', name: 'Demo GPU', memUsedMB: 9000, memTotalMB: 16303, source: 'demo' } },
+  host: { t: 'host', host: { cpu: 37.5, memUsedGb: 12.4, memTotalGb: 32, ts: NOW } },
   output: { t: 'output', level: 'info', text: 'dataset cached', ts: NOW },
 }
 

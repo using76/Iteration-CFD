@@ -349,6 +349,14 @@ export function applyEvent(state: SessionData, msg: ServerMsg, now: number = Dat
     case 'dataset.progress':
       return { state: { ...state, datasetProgress: { ...state.datasetProgress, [msg.progress.datasetId]: msg.progress } }, effects: NO_EFFECTS }
 
+    // The UI bridge (ui.command / ui.state) is driven by the Iteration GUI
+    // shell, not by this studio web app: the frames are accepted so the
+    // switch stays exhaustive, and change nothing here.
+    case 'ui.command':
+      return { state, effects: NO_EFFECTS }
+    case 'host':
+      return { state, effects: NO_EFFECTS }
+
     case 'fs.changed':
       return { state, effects: [{ type: 'fs.changed', paths: msg.paths }] }
     case 'problems': {

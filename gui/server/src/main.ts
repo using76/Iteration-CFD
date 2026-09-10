@@ -7,6 +7,7 @@ import type { AgentService } from './agent/types.js'
 import { loadConfig, type ServerConfig } from './config.js'
 import { createDatasetService } from './datasets/service.js'
 import type { DatasetService } from './datasets/types.js'
+import { startHostSampler } from './host.js'
 import { buildHello, registerApiRoutes, webDistDir } from './http/routes.js'
 import { Router } from './http/router.js'
 import { createHttpServer } from './http/server.js'
@@ -140,6 +141,7 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
   })
   runs.gpuMonitor.onChange((gpu) => hub.broadcast({ t: 'gpu', gpu }))
   datasets.onProgress((progress) => hub.broadcast({ t: 'dataset.progress', progress }))
+  const hostSampler = startHostSampler(hub, log.child('host'))
   const problems = createProblemsTracker({ runs, hub })
 
   agent = tryCreate('agent service', () => createAgentService({ config, hub, runs, datasets }), unavailableAgent, log)
@@ -171,6 +173,7 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
     if (closing) return closing
     closing = (async () => {
       log.info('shutting down')
+      hostSampler.stop()
       problems.close()
       await watcher?.close()
       hub.close()

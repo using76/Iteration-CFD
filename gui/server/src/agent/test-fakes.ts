@@ -5,11 +5,11 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DEFAULT_VIEWER_STATE, type ClientMsg, type GpuState, type LogLine, type MetricRecord, type ResidualRecord, type RunInfo, type ServerMsg, type ViewerCommand, type ViewerResult } from '@cfd/shared'
+import { DEFAULT_VIEWER_STATE, type ClientMsg, type GpuState, type LogLine, type MetricRecord, type ResidualRecord, type RunInfo, type ServerMsg, type UiCommand, type UiState, type ViewerCommand, type ViewerResult } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunEvent, RunManager, StartRunOptions, WaitOptions } from '../runs/types.js'
-import type { ClientConn, Hub } from '../ws/types.js'
+import type { ClientConn, Hub, UiRequestResult } from '../ws/types.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 export const GUI_DIR = path.resolve(here, '..', '..', '..')
@@ -61,6 +61,11 @@ export interface FakeHub extends Hub {
   sent: ServerMsg[]
   viewerResult: ((cmd: ViewerCommand) => ViewerResult) | null
   viewerCalls: ViewerCommand[]
+  /** What getUiState hands back; null is "no client has reported its screen". */
+  uiState: UiState | null
+  /** How the fake screen answers a ui.command; null is "no studio UI is open". */
+  uiResult: ((cmd: UiCommand) => UiRequestResult) | null
+  uiCalls: UiCommand[]
   of<T extends ServerMsg['t']>(t: T): Array<Extract<ServerMsg, { t: T }>>
   clear(): void
 }
@@ -70,6 +75,9 @@ export function fakeHub(): FakeHub {
   const hub: FakeHub = {
     sent,
     viewerCalls: [],
+    uiState: null,
+    uiCalls: [],
+    uiResult: () => ({ ok: true, state: hub.uiState, error: null }),
     viewerResult: (cmd) => ({ ok: true, state: { ...DEFAULT_VIEWER_STATE, datasetName: 'plume', cellCount: 82320, field: 'U', layers: [] }, error: null, image: cmd.type === 'screenshot' ? { base64: 'iVBORw0KGgo=', mime: 'image/png', width: 8, height: 8 } : null }),
     of: (t) => sent.filter((m) => m.t === t) as never,
     clear: () => sent.splice(0, sent.length),
@@ -89,6 +97,12 @@ export function fakeHub(): FakeHub {
       if (!hub.viewerResult) return { ok: false, state: null, error: { code: 'NO_VIEWER', message: 'no viewer' }, image: null }
       return hub.viewerResult(cmd)
     },
+    getUiState: () => hub.uiState,
+    async requestUi(cmd) {
+      hub.uiCalls.push(cmd)
+      if (!hub.uiResult) return { ok: false, state: null, error: { code: 'NO_UI', message: 'no studio UI is open' } }
+      return hub.uiResult(cmd)
+    },
     onClientMessage: () => () => {},
     onClientOpen: () => () => {},
     onClientClose: () => () => {},
@@ -103,6 +117,7 @@ export function fakeClient(sessionId: string | null = null): ClientConn & { sent
     sessionId,
     runs: new Set(),
     viewerState: null,
+    uiState: null,
     sent,
     of: (t) => sent.filter((m) => m.t === t) as never,
     send: (m) => {

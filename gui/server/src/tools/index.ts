@@ -13,6 +13,7 @@ import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } f
 import { customToolCreate, customToolRun } from './custom.js'
 import { fileList, fileRead, fileSearch, fileWrite } from './files.js'
 import { gpuInfo } from './gpu.js'
+import { guiControl, guiState } from './gui.js'
 import { meshGenerate } from './mesh.js'
 import { fieldStats, residualsGet, resultsDiscover } from './results.js'
 import { runLog, runStart, runStatus, runStop, runWait } from './run.js'
@@ -43,6 +44,8 @@ export const TOOLS: ToolDef[] = [
   residualsGet,
   viewerCommand,
   plotResiduals,
+  guiControl,
+  guiState,
   fileRead,
   fileList,
   fileSearch,

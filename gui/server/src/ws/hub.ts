@@ -13,13 +13,15 @@ import {
   type ServerHello,
   type ServerMsg,
   type SessionSummary,
+  type UiCommand,
+  type UiState,
   type ViewerCommand,
   type ViewerResult,
   type ViewerState,
 } from '@cfd/shared'
 import { silentLogger, type Logger } from '../log.js'
 import type { RunManager } from '../runs/types.js'
-import type { ClientConn, ClientMsgHandler, Hub } from './types.js'
+import type { ClientConn, ClientMsgHandler, Hub, UiRequestResult } from './types.js'
 
 export const HEARTBEAT_MS = 20_000
 export const IDLE_CLOSE_MS = 60_000
@@ -27,6 +29,7 @@ export const LOG_FLUSH_MS = 50
 export const REPLAY_BATCH = 500
 export const NO_VIEWER_WAIT_MS = 5_000
 export const VIEWER_TIMEOUT_MS = 30_000
+export const UI_TIMEOUT_MS = 5_000
 
 export interface HubDeps {
   hello(): ServerHello
@@ -51,15 +54,26 @@ interface PendingViewer {
   timer: NodeJS.Timeout
 }
 
+interface PendingUi {
+  clientId: string
+  resolve: (r: UiRequestResult) => void
+  timer: NodeJS.Timeout
+}
+
 interface Client extends ClientConn {
   ws: WebSocket
   lastActive: number
   lastViewerAt: number
+  lastUiAt: number
   logBatches: Map<string, { lines: LogLine[]; timer: NodeJS.Timeout }>
 }
 
 function viewerError(code: ViewerResult['error'] extends infer E ? (E extends { code: infer C } ? C : never) : never, message: string): ViewerResult {
   return { ok: false, state: null, error: { code, message }, image: null }
+}
+
+function uiError(code: string, message: string): UiRequestResult {
+  return { ok: false, state: null, error: { code, message } }
 }
 
 export function createHub(deps: HubDeps): HubHandle {
@@ -70,6 +84,7 @@ export function createHub(deps: HubDeps): HubHandle {
   const closeHandlers = new Set<(c: ClientConn) => void>()
   const pendingViewer = new Map<string, PendingViewer>()
   const viewerWaiters = new Set<(c: Client | null) => void>()
+  const pendingUi = new Map<string, PendingUi>()
   let counter = 0
   const wss = new WebSocketServer({ noServer: true })
 
@@ -146,6 +161,19 @@ export function createHub(deps: HubDeps): HubHandle {
     for (const w of viewerWaiters) w(c)
   }
 
+  function resolveUi(requestId: string, result: UiRequestResult) {
+    const p = pendingUi.get(requestId)
+    if (!p) return
+    pendingUi.delete(requestId)
+    clearTimeout(p.timer)
+    p.resolve(result)
+  }
+
+  function noteUi(c: Client, state: UiState) {
+    c.uiState = state
+    c.lastUiAt = Date.now()
+  }
+
   async function dispatch(c: Client, msg: ClientMsg) {
     switch (msg.t) {
       case 'ping':
@@ -171,6 +199,12 @@ export function createHub(deps: HubDeps): HubHandle {
       case 'viewer.result':
         if (msg.result.state) noteViewer(c, msg.result.state)
         resolveViewer(msg.requestId, msg.result)
+        return
+      case 'ui.state':
+        noteUi(c, msg.state)
+        return
+      case 'ui.result':
+        resolveUi(msg.requestId, { ok: msg.ok, state: c.uiState ?? null, error: msg.ok ? null : { code: 'UI_ERROR', message: msg.error ?? 'the UI rejected the command' } })
         return
       default:
         break
@@ -203,9 +237,11 @@ export function createHub(deps: HubDeps): HubHandle {
       sessionId: null,
       runs: new Set(),
       viewerState: null,
+      uiState: null,
       ws,
       lastActive: Date.now(),
       lastViewerAt: 0,
+      lastUiAt: 0,
       logBatches: new Map(),
       send: (msg) => send(client, msg),
       close: (code, reason) => ws.close(code, reason),
@@ -237,6 +273,7 @@ export function createHub(deps: HubDeps): HubHandle {
       clients.delete(id)
       for (const b of client.logBatches.values()) clearTimeout(b.timer)
       for (const [reqId, p] of pendingViewer) if (p.clientId === id) resolveViewer(reqId, viewerError('NO_VIEWER', 'the viewer client disconnected'))
+      for (const [reqId, p] of pendingUi) if (p.clientId === id) resolveUi(reqId, uiError('NO_UI', 'the UI client disconnected'))
       for (const h of closeHandlers) {
         try {
           h(client)
@@ -293,6 +330,19 @@ export function createHub(deps: HubDeps): HubHandle {
     })
   }
 
+  // Every browser tab hosts the studio UI, so unlike pickViewer there is no
+  // "has it mounted" tier: any open client can carry a command, the tab with
+  // the session open is just the better target.
+  function pickUi(sessionId: string | null | undefined): Client | null {
+    const open = [...clients.values()].filter((c) => c.ws.readyState === c.ws.OPEN)
+    if (!open.length) return null
+    const inSession = sessionId ? open.filter((c) => c.sessionId === sessionId) : []
+    const candidates = inSession.length ? inSession : open
+    const score = (c: Client) => (sessionId && c.sessionId === sessionId ? 1e15 : 0) + Math.max(c.lastActive, c.lastUiAt)
+    candidates.sort((a, b) => score(b) - score(a))
+    return candidates[0]
+  }
+
   const hub: HubHandle = {
     wss,
     accept,
@@ -321,6 +371,24 @@ export function createHub(deps: HubDeps): HubHandle {
         rawSend(client, { t: 'viewer.command', requestId, cmd })
       })
     },
+    getUiState(sessionId) {
+      const client = pickUi(sessionId)
+      return client?.uiState ?? null
+    },
+    requestUi(cmd: UiCommand, opts = {}) {
+      const timeoutMs = opts.timeoutMs ?? UI_TIMEOUT_MS
+      const client = pickUi(opts.sessionId)
+      if (!client) return Promise.resolve(uiError('NO_UI', 'no connected client has the studio UI open'))
+      const requestId = `ui_${Date.now().toString(36)}_${(++counter).toString(36)}`
+      return new Promise<UiRequestResult>((resolve) => {
+        const timer = setTimeout(() => {
+          pendingUi.delete(requestId)
+          resolve(uiError('TIMEOUT', `the UI did not answer ${cmd.type} within ${timeoutMs} ms`))
+        }, timeoutMs)
+        pendingUi.set(requestId, { clientId: client.id, resolve, timer })
+        rawSend(client, { t: 'ui.command', requestId, cmd })
+      })
+    },
     onClientMessage(handler) {
       msgHandlers.add(handler)
       return () => msgHandlers.delete(handler)
@@ -337,6 +405,7 @@ export function createHub(deps: HubDeps): HubHandle {
       clearInterval(heartbeat)
       for (const c of clients.values()) c.ws.close(1001, 'server shutting down')
       for (const [id, p] of pendingViewer) resolveViewer(id, viewerError('NO_VIEWER', 'server shutting down'))
+      for (const [id, p] of pendingUi) resolveUi(id, uiError('NO_UI', 'server shutting down'))
       wss.close()
     },
   }

@@ -267,6 +267,68 @@ export const UserContextSchema = z.object({
 export type UserContext = z.infer<typeof UserContextSchema>
 
 // ---------------------------------------------------------------------------
+// UI control: the assistant steering the operator's screen (tabs, panels,
+// view, selection) and reading back what is on it. Same shape as the viewer
+// bridge: the server forwards a ui.command with a requestId, the client
+// answers ui.result for that requestId and pushes ui.state whenever the
+// projection of the screen changes.
+// ---------------------------------------------------------------------------
+
+export const UiCommandSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('select_tab'), tab: z.string().describe('Tab id or label, e.g. "velocity" or "Residuals"') }),
+  z.object({ type: z.literal('show_field'), field: z.enum(['Temperature', 'Velocity', 'Pressure']) }),
+  z.object({ type: z.literal('select_step'), step: z.string().describe('Project tree step id') }),
+  z.object({ type: z.literal('open_panel'), panel: z.enum(['AI Assistant', 'Properties', 'Inspector']) }),
+  z.object({ type: z.literal('set_tool'), tool: z.enum(['select', 'move', 'pan', 'box']) }),
+  z.object({ type: z.literal('set_projection'), projection: z.enum(['Perspective', 'Orthographic']) }),
+  z.object({ type: z.literal('fit_view') }),
+  z.object({ type: z.literal('show_overlay'), what: z.enum(['axes', 'colorbars']), on: z.boolean() }),
+  z.object({ type: z.literal('set_centerline'), quantity: z.string() }),
+  z.object({ type: z.literal('run'), action: z.enum(['run', 'stop']) }),
+  z.object({ type: z.literal('notify'), level: z.enum(['info', 'warning', 'error']), text: z.string().describe('Shown as a toast on the operator\'s screen') }),
+])
+export type UiCommand = z.infer<typeof UiCommandSchema>
+export type UiCommandType = UiCommand['type']
+
+export const UiSelectionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('none') }),
+  z.object({ kind: z.literal('cell'), id: z.number(), center: z.tuple([z.number(), z.number(), z.number()]) }),
+])
+export type UiSelection = z.infer<typeof UiSelectionSchema>
+
+export const UiSimStateSchema = z.object({
+  status: z.string().nullable(),
+  iteration: z.number().nullable(),
+  maxIterations: z.number().nullable(),
+})
+export type UiSimState = z.infer<typeof UiSimStateSchema>
+
+export const UiStateSchema = z.object({
+  activeTab: z.string().nullable(),
+  activeStep: z.string().nullable(),
+  rightTab: z.string().nullable(),
+  tool: z.string().nullable(),
+  frame: z.number().nullable(),
+  projection: z.string().nullable(),
+  showAxes: z.boolean().nullable(),
+  showColorBars: z.boolean().nullable(),
+  selection: UiSelectionSchema.nullable(),
+  runId: z.string().nullable(),
+  sim: UiSimStateSchema.nullable(),
+})
+export type UiState = z.infer<typeof UiStateSchema>
+
+export const HostStateSchema = z.object({
+  /** Whole-system CPU use, 0-100. */
+  cpu: z.number(),
+  memUsedGb: z.number(),
+  memTotalGb: z.number(),
+  /** ms since epoch of the sample. */
+  ts: z.number(),
+})
+export type HostState = z.infer<typeof HostStateSchema>
+
+// ---------------------------------------------------------------------------
 // Client -> server
 // ---------------------------------------------------------------------------
 
@@ -283,6 +345,8 @@ export const ClientMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('tool.deny'), sessionId: z.string(), toolUseIds: z.array(z.string()), reason: z.string().nullable() }),
   z.object({ t: z.literal('viewer.result'), requestId: z.string(), result: ViewerResultSchema }),
   z.object({ t: z.literal('viewer.state'), state: ViewerStateSchema }),
+  z.object({ t: z.literal('ui.state'), state: UiStateSchema }),
+  z.object({ t: z.literal('ui.result'), requestId: z.string(), ok: z.boolean(), error: z.string().nullable() }),
   z.object({ t: z.literal('run.subscribe'), runId: z.string(), fromSeq: z.number() }),
   z.object({ t: z.literal('run.unsubscribe'), runId: z.string() }),
   z.object({ t: z.literal('run.stop'), runId: z.string() }),
@@ -342,10 +406,12 @@ export const ServerMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('viewer.open'), path: z.string(), runId: z.string().nullable() }),
   z.object({ t: z.literal('residuals.open'), runId: z.string() }),
   z.object({ t: z.literal('dataset.progress'), progress: DatasetProgressSchema }),
+  z.object({ t: z.literal('ui.command'), requestId: z.string(), cmd: UiCommandSchema }),
 
   z.object({ t: z.literal('fs.changed'), paths: z.array(z.string()) }),
   z.object({ t: z.literal('problems'), source: z.enum(['schema', 'semantic', 'solver', 'server']), path: z.string().nullable(), runId: z.string().nullable(), items: z.array(ProblemSchema) }),
   z.object({ t: z.literal('gpu'), gpu: GpuStateSchema }),
+  z.object({ t: z.literal('host'), host: HostStateSchema }),
   z.object({ t: z.literal('output'), level: z.enum(['info', 'warning', 'error']), text: z.string(), ts: z.number() }),
 ])
 export type ServerMsg = z.infer<typeof ServerMsgSchema>

@@ -19,6 +19,8 @@ export const TOOL_NAMES = [
   'residuals_get',
   'viewer_command',
   'plot_residuals',
+  'gui_control',
+  'gui_state',
   'file_read',
   'file_list',
   'file_search',
@@ -58,6 +60,8 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   residuals_get: { name: 'residuals_get', kind: 'read', policy: 'auto', label: { ko: '잔차 조회', en: 'Get residuals' } },
   viewer_command: { name: 'viewer_command', kind: 'ui', policy: 'auto', label: { ko: '3D 뷰어', en: '3D viewer' } },
   plot_residuals: { name: 'plot_residuals', kind: 'ui', policy: 'auto', label: { ko: '잔차 플롯', en: 'Plot residuals' } },
+  gui_control: { name: 'gui_control', kind: 'ui', policy: 'auto', label: { ko: '화면 제어', en: 'Drive the UI' } },
+  gui_state: { name: 'gui_state', kind: 'read', policy: 'auto', label: { ko: '화면 상태', en: 'UI state' } },
   file_read: { name: 'file_read', kind: 'read', policy: 'auto', label: { ko: '파일 읽기', en: 'Read file' } },
   file_list: { name: 'file_list', kind: 'read', policy: 'auto', label: { ko: '디렉터리 목록', en: 'List directory' } },
   file_search: { name: 'file_search', kind: 'read', policy: 'auto', label: { ko: '코드 검색', en: 'Search files' } },
@@ -141,6 +145,28 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
     }
     case 'plot_residuals':
       return ko ? '잔차 차트 열기' : 'Opened residual chart'
+    case 'gui_control': {
+      const t = String(i.type ?? '')
+      const arg = String(i.field ?? i.tab ?? i.step ?? i.panel ?? i.tool ?? i.projection ?? i.quantity ?? i.action ?? '')
+      const overlay = i.what !== undefined ? `${String(i.what)} ${i.on ? 'on' : 'off'}` : ''
+      const map: Record<string, [string, string]> = {
+        select_tab: [`탭 ${arg} 열기`, `Opened tab ${arg}`],
+        show_field: [`필드 ${arg} 표시`, `Showing field ${arg}`],
+        select_step: [`스텝 ${arg} 선택`, `Selected step ${arg}`],
+        open_panel: [`패널 ${arg} 열기`, `Opened panel ${arg}`],
+        set_tool: [`도구 ${arg} 선택`, `Set tool ${arg}`],
+        set_projection: [`투영 ${arg} 전환`, `Set projection ${arg}`],
+        fit_view: ['화면 맞춤', 'Fit the view'],
+        show_overlay: [`오버레이 ${overlay}`, `Turned overlay ${overlay}`],
+        set_centerline: [`중심선 수량 ${arg} 설정`, `Set centerline quantity ${arg}`],
+        run: [arg === 'stop' ? '실행 중단 요청' : '실행 시작 요청', arg === 'stop' ? 'Asked the UI to stop the run' : 'Asked the UI to start the run'],
+        notify: [`화면 알림: ${String(i.text ?? '').slice(0, 60)}`, `Notified the operator: ${String(i.text ?? '').slice(0, 60)}`],
+      }
+      const pair = map[t] ?? [`화면 명령 ${t}`, `UI command ${t}`]
+      return ko ? `GUI: ${pair[0]}` : `GUI: ${pair[1]}`
+    }
+    case 'gui_state':
+      return ko ? (r.state ? '화면 상태 조회' : '연결된 화면 없음') : r.state ? 'Read the UI state' : 'No UI connected'
     case 'file_read':
       return ko ? `파일 읽음 (${String(i.path ?? '')})` : `Read ${String(i.path ?? '')}`
     case 'file_list':
