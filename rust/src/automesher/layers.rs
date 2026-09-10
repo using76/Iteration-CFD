@@ -5,13 +5,15 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-//! Wall layers - SPEC-LIT §92.13: the normal a point grows along
-//! (92.40)-(92.42), the thickness it is allowed (92.43)-(92.45), and the
-//! shrink that moves the boundary inward (92.46)-(92.47). The stack itself
-//! is (92.9) and the medial limit is (92.10), both of §92.2 stage 6. This
-//! unit inserts NO cells and changes NO topology: `Shrunk::mesh` differs
-//! from its input in `points` alone, and the extrusion that fills the gap
-//! is the next unit's.
+//! Wall layers - SPEC-LIT §92.13, §92.2's stage 6 end to end: the normal a
+//! point grows along (92.40)-(92.42), the thickness it is allowed
+//! (92.43)-(92.45), the shrink that moves the boundary inward
+//! (92.46)-(92.47), and the extrusion that fills the gap it opened
+//! (92.48)-(92.50), with (92.51)'s refusal in front of it. The stack itself
+//! is (92.9) and the medial limit is (92.10), both of §92.2 stage 6.
+//! [`shrink`] alone changes no topology - its mesh differs from its input in
+//! `points` alone - and [`add_layers`] is the whole stage: shrink, extrude,
+//! renumber, and §92.3's gate.
 //!
 //! The construction is the standard one - shrink the boundary inward, fill
 //! the gap - and it is Garimella & Shephard's, *Int. J. Numer. Meth. Engng*
@@ -39,7 +41,10 @@ use crate::surface::{Surface, TriIndex};
 use crate::{Scalar, Vec3};
 
 use super::quality::{self, Gate, QualityThresholds};
+use std::collections::HashMap;
+
 use super::snap::{face_area_vector, find_hanging};
+use crate::adapt::rebuild::ldu_permutation;
 use super::LayerSpec;
 
 // ==========================================================================
@@ -836,6 +841,753 @@ fn relax(
 }
 
 // ==========================================================================
+//  The extrusion
+// ==========================================================================
+
+/// (92.48): where every layer point's copies went, so a caller - and a
+/// test - can find them without re-deriving the numbering.
+#[derive(Debug, Clone)]
+pub struct Extrusion {
+    /// Per INPUT point: its slot in `L`, or -1.
+    pub slot_of_point: Vec<i32>,
+    /// `[n + 1][|L|]`: the point id of level `k` for slot `s`. Level `n` is
+    /// the input point itself.
+    pub level_point: Vec<Vec<u32>>,
+    /// The input face id of each layer face, in the order the cell blocks
+    /// were laid out: layer face `j` owns cells `first_cell + j*n .. +n`.
+    pub layer_faces: Vec<usize>,
+    /// The input mesh's cell count - the first layer cell's id.
+    pub first_cell: usize,
+    pub n: usize,
+}
+
+/// (92.50), per patch.
+#[derive(Debug, Clone)]
+pub struct PatchLayers {
+    pub name: String,
+    /// 0 when the patch was dropped.
+    pub n_layers: usize,
+    pub n_faces: usize,
+    pub area: Scalar,
+    /// The fraction of the patch's AREA that got the full stack.
+    pub full_area_frac: Scalar,
+    /// The area-weighted mean of the fraction of `T` actually achieved.
+    pub mean_frac: Scalar,
+    /// `Some(reason)` when the patch lost its layers.
+    pub dropped: Option<String>,
+}
+
+/// What the extrusion did, for the run log and the tests.
+#[derive(Debug, Clone)]
+pub struct LayerReport {
+    pub patches: Vec<PatchLayers>,
+    pub n_layer_cells: usize,
+    pub n_layer_points: usize,
+    pub n_side_internal: usize,
+    pub n_side_boundary: usize,
+    /// Side faces that came from cutting an edge at a hanging node (92.49).
+    pub n_split_sides: usize,
+    pub retreats: usize,
+}
+
+impl LayerReport {
+    /// A few lines for a run log, in `SnapReport::summary`'s style.
+    pub fn summary(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&format!(
+            "layers: {} cell(s) behind {} face(s), {} new point(s), {} retreat(s)\n",
+            self.n_layer_cells,
+            self.patches.iter().map(|p| p.n_faces).sum::<usize>(),
+            self.n_layer_points,
+            self.retreats
+        ));
+        s.push_str(&format!(
+            "layers: {} internal side face(s), {} boundary side face(s), {} from a split edge\n",
+            self.n_side_internal, self.n_side_boundary, self.n_split_sides
+        ));
+        for p in &self.patches {
+            match &p.dropped {
+                Some(reason) => s.push_str(&format!("layers: {reason}\n")),
+                None => s.push_str(&format!(
+                    "layers: patch \"{}\": {} layer(s) on {} face(s), area {:.3e}, full {:.1}%, mean frac {:.3}\n",
+                    p.name, p.n_layers, p.n_faces, p.area,
+                    100.0 * p.full_area_frac, p.mean_frac
+                )),
+            }
+        }
+        s
+    }
+}
+
+/// What [`add_layers`] hands back: the mesh, the report, the map of the
+/// extrusion, and §92.3's gate on the result.
+#[derive(Debug, Clone)]
+pub struct Layered {
+    pub mesh: PolyMeshRaw,
+    pub report: LayerReport,
+    pub extrusion: Extrusion,
+    pub quality: quality::QualityReport,
+}
+
+/// SPEC-LIT §92.2 stage 6 / §92.13 end to end: shrink, extrude, renumber,
+/// pass §92.3's gate.
+pub fn add_layers(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    spec: &LayerSpec,
+    t: &QualityThresholds,
+) -> Result<Layered> {
+    let st = stack(spec)?;
+    let n = st.n;
+    // A patch name that is not a patch of the mesh is refused here, naming
+    // it, before any normal is computed - whatever `n` is.
+    let named = if spec.patches.is_empty() {
+        Vec::new()
+    } else {
+        resolve_patches(mesh, spec)?
+    };
+    let n_points = mesh.points.len();
+    let n_faces = mesh.faces.len();
+    let n_internal = mesh.neighbour.len().min(n_faces);
+    let first_cell = mesh
+        .owner
+        .iter()
+        .chain(mesh.neighbour.iter())
+        .copied()
+        .max()
+        .map_or(0, |m| m as usize + 1);
+    let shrunk = shrink(mesh, surf, spec, t)?;
+    let field = &shrunk.field;
+    // Nothing to do: no layers were asked for, or every named patch gave
+    // its layers up in the shrink. The input mesh comes back bit for bit.
+    if n == 0 || field.faces.is_empty() {
+        let mut patches = Vec::new();
+        for &p in &named {
+            let patch = &mesh.patches[p];
+            let reason = match shrunk.dropped.iter().find(|(nm, _)| nm == &patch.name) {
+                Some((_, r)) => format!("patch \"{}\": {r}", patch.name),
+                None if n == 0 => format!(
+                    "patch \"{}\": layers.n is zero - no layers were requested",
+                    patch.name
+                ),
+                None => format!("patch \"{}\": the patch carries no layer face", patch.name),
+            };
+            patches.push(PatchLayers {
+                name: patch.name.clone(),
+                n_layers: 0,
+                n_faces: patch.size,
+                area: patch_area(mesh, n_internal, patch),
+                full_area_frac: 0.0,
+                mean_frac: 0.0,
+                dropped: Some(reason),
+            });
+        }
+        let report = LayerReport {
+            patches,
+            n_layer_cells: 0,
+            n_layer_points: 0,
+            n_side_internal: 0,
+            n_side_boundary: 0,
+            n_split_sides: 0,
+            retreats: shrunk.retreats,
+        };
+        // §92.3's gate, run on the mesh that came back - which is the
+        // input's, so this is a formality that costs nothing.
+        let quality = quality::check(mesh, t)?;
+        return Ok(Layered {
+            mesh: shrunk.mesh,
+            report,
+            extrusion: Extrusion {
+                slot_of_point: vec![-1; n_points],
+                level_point: vec![Vec::new(); n + 1],
+                layer_faces: Vec::new(),
+                first_cell,
+                n,
+            },
+            quality,
+        });
+    }
+
+    // (92.51)'s early refusal, BEFORE any cell is inserted: G5 would refuse
+    // every one of these cells, and the user must see the arithmetic, not a
+    // gate failure on some cell id.
+    let mut h_min = Scalar::INFINITY;
+    for &f in &field.faces {
+        let face = &mesh.faces[f];
+        for k in 0..face.len() {
+            let d = (mesh.points[face[k] as usize]
+                - mesh.points[face[(k + 1) % face.len()] as usize])
+                .mag();
+            if d < h_min {
+                h_min = d;
+            }
+        }
+    }
+    let ratio = 3.0 * st.t[0] / h_min;
+    if !(ratio >= t.min_thickness_ratio) {
+        return Err(Error::Mesh(format!(
+            "layers: the first layer is thinner than the quality gate allows - \
+             3 * {} / {} = {} < min_thickness_ratio = {} (92.51); every layer \
+             cell would fail G5, so none is inserted",
+            st.t[0], h_min, ratio, t.min_thickness_ratio
+        )));
+    }
+    // The field's displacement is the APPLIED one - the doc comment on
+    // `Field` says so - so the level positions of (92.48) are exact
+    // interpolations between the wall and where the shrink put it. Checked,
+    // because every level copy is wrong if this is not.
+    for i in 0..n_points {
+        if !field.is_layer[i] {
+            continue;
+        }
+        let want = mesh.points[i] + field.disp[i];
+        let e = (shrunk.mesh.points[i] - want).mag();
+        if e > 1e-12 {
+            return Err(Error::Mesh(format!(
+                "layers: the shrink's points disagree with its own field at \
+                 point {i} by {e:.3e} - the extrusion would not interpolate \
+                 between the wall and the shrunk mesh"
+            )));
+        }
+    }
+
+    // The slots: L is the set of layer points, in input-point order. A
+    // level copy of slot `s` is a new point after all the input's, so the
+    // input's point ids are unchanged.
+    let mut slot_of_point = vec![-1i32; n_points];
+    let mut slots: Vec<usize> = Vec::new();
+    for i in 0..n_points {
+        if field.is_layer[i] {
+            slot_of_point[i] = slots.len() as i32;
+            slots.push(i);
+        }
+    }
+    let n_l = slots.len();
+    let mut points = shrunk.mesh.points.clone();
+    points.reserve(n_l * n);
+    let mut level_point: Vec<Vec<u32>> = vec![vec![0u32; n_l]; n + 1];
+    for (s, &i) in slots.iter().enumerate() {
+        // Level n is the input point itself, already moved by the shrink.
+        level_point[n][s] = i as u32;
+        for k in 0..n {
+            level_point[k][s] = (n_points + s * n + k) as u32;
+            // (92.48): x_i^(k) = x_i^orig + f_k D_i, from the INPUT point.
+            points.push(mesh.points[i] + field.disp[i] * st.f[k]);
+        }
+    }
+
+    // The faces' bookkeeping the sides and the boundary read: which input
+    // face is a layer face, which layer face sits at which block index,
+    // and the box diagonal the zero-area test is scaled by.
+    let mut is_layer_face = vec![false; n_faces];
+    for &f in &field.faces {
+        is_layer_face[f] = true;
+    }
+    let mut layer_j = vec![-1i32; n_faces];
+    for (j, &f) in field.faces.iter().enumerate() {
+        layer_j[f] = j as i32;
+    }
+    let mut b_lo = mesh.points[0];
+    let mut b_hi = mesh.points[0];
+    for q in &mesh.points {
+        b_lo = b_lo.cmpt_min(*q);
+        b_hi = b_hi.cmpt_max(*q);
+    }
+    let diag2 = (b_hi - b_lo).mag_sqr();
+
+
+    // ---- the sides: (92.49)'s segments ------------------------------
+    // NOT `snap::find_hanging`: that map is keyed by the hanging NODE and
+    // keeps only the node's LONGEST parent edge, so a node that is the
+    // midpoint of a wall edge and of a longer internal edge would be
+    // missing from the wall's map and this segment would come out
+    // unmatched. The cut is built here, over the BOUNDARY faces alone.
+    let mut used_by_boundary = vec![false; n_points];
+    for f in n_internal..n_faces {
+        for &p in &mesh.faces[f] {
+            used_by_boundary[p as usize] = true;
+        }
+    }
+    let mp = Midpoints::new(&shrunk.mesh.points, &used_by_boundary);
+    let mut face_segs: Vec<Vec<Vec<(u32, u32)>>> = vec![Vec::new(); n_faces];
+    let mut seg_faces: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for f in n_internal..n_faces {
+        let face = &mesh.faces[f];
+        let mut per_edge: Vec<Vec<(u32, u32)>> = Vec::with_capacity(face.len());
+        for k in 0..face.len() {
+            let a = face[k] as u32;
+            let b = face[(k + 1) % face.len()] as u32;
+            let segs = split_edge(&mp, a, b, 0)?;
+            for &(u, v) in &segs {
+                let key = if u < v { (u, v) } else { (v, u) };
+                seg_faces.entry(key).or_default().push(f);
+            }
+            per_edge.push(segs);
+        }
+        face_segs[f] = per_edge;
+    }
+    let mut patch_of_bface = vec![usize::MAX; n_faces];
+    for (p, patch) in mesh.patches.iter().enumerate() {
+        for j in 0..patch.size {
+            let f = n_internal + patch.start + j;
+            if f < n_faces {
+                patch_of_bface[f] = p;
+            }
+        }
+    }
+    let mut n_side_internal = 0usize;
+    let mut n_side_boundary = 0usize;
+    let mut n_split_sides = 0usize;
+    let mut internal_sides: Vec<(usize, usize, Vec<crate::Label>)> = Vec::new();
+    let mut boundary_sides: Vec<Vec<(usize, usize, usize, crate::Label, Vec<crate::Label>)>> =
+        vec![Vec::new(); mesh.patches.len()];
+    // The mean of a layer cell's own level-k and level-k+1 points: where
+    // its centre sits, to aim the quad's winding with.
+    let cell_mean = |j: usize, k: usize| -> Vec3 {
+        let face = &mesh.faces[field.faces[j]];
+        let mut c = Vec3::ZERO;
+        for &pt in face {
+            let s = slot_of_point[pt as usize] as usize;
+            c = c
+                + (points[level_point[k][s] as usize]
+                    + points[level_point[k + 1][s] as usize])
+                    * 0.5;
+        }
+        c / (face.len() as Scalar)
+    };
+    for (j, &f) in field.faces.iter().enumerate() {
+        let face = &mesh.faces[f];
+        for (e, _) in face.iter().enumerate() {
+            let cut = face_segs[f][e].len() > 1;
+            // The segments came back in order along the edge as the face
+            // winds it, so each (u, v) is directed already.
+            for (si, &(u, v)) in face_segs[f][e].iter().enumerate() {
+                // Written by the supervising session. The cut is made at
+                // any midpoint a BOUNDARY face carries, so a layer face
+                // that is COARSER than the non-layer patch beside it is cut
+                // at a point that has no normal, no thickness and no level
+                // copies - and the indexing below would take slot -1. That
+                // shape does not arise on the cases this stage is built for
+                // (the wall is the refined patch and the box sides are at
+                // base level), and supporting it needs a side face that
+                // spans a whole edge while its partner is cut, which is the
+                // terminating topology §92.13 defers to tranche 2. So it is
+                // REFUSED by name rather than reached as a panic.
+                if slot_of_point[u as usize] < 0 || slot_of_point[v as usize] < 0 {
+                    return Err(Error::Mesh(format!(
+                        "layers: the edge of layer face {f} was cut at a point                          that is not a layer point - segment ({u}, {v}), points                          {:?} and {:?}. A layer patch coarser than the patch                          beside it is not supported in tranche 1 (SPEC-LIT                          §92.13); refine the layer patch to at least the level                          of its neighbour, or take the layers off it",
+                        points[u as usize], points[v as usize]
+                    )));
+                }
+                let su = slot_of_point[u as usize] as usize;
+                let sv = slot_of_point[v as usize] as usize;
+                let key = if u < v { (u, v) } else { (v, u) };
+                let partners: Vec<usize> = seg_faces[&key]
+                    .iter()
+                    .copied()
+                    .filter(|&g| g != f)
+                    .collect();
+                if partners.len() != 1 {
+                    return Err(Error::Mesh(format!(
+                        "layers: the segment ({u}, {v}) of layer face {f} - points \
+                         {:?}, {:?} - is carried by {} boundary face(s) besides \
+                         itself, expected exactly one (92.49): the layer patch \
+                         has an open rim",
+                        points[u as usize],
+                        points[v as usize],
+                        partners.len()
+                    )));
+                }
+                let g = partners[0];
+                for k in 0..n {
+                    // (92.49)'s quad, read off the level positions.
+                    let mut quad: Vec<crate::Label> = vec![
+                        level_point[k][su] as crate::Label,
+                        level_point[k][sv] as crate::Label,
+                        level_point[k + 1][sv] as crate::Label,
+                        level_point[k + 1][su] as crate::Label,
+                    ];
+                    let a_vec = face_area_vector(&points, &quad);
+                    if a_vec.mag() < 1e-14 * diag2 {
+                        return Err(Error::Mesh(format!(
+                            "layers: the side quad of segment ({u}, {v}) at level {k} \
+                             of layer face {f} has area {:.3e} - the thickness went \
+                             to zero where it was not allowed to",
+                            a_vec.mag()
+                        )));
+                    }
+                    let mut x_q = Vec3::ZERO;
+                    for &q in &quad {
+                        x_q = x_q + points[q as usize];
+                    }
+                    let x_q = x_q / 4.0;
+                    // Do not reason about the winding: compute it.
+                    if is_layer_face[g] {
+                        if f < g {
+                            let jg = layer_j[g] as usize;
+                            let cf = first_cell + j * n + k;
+                            let cg = first_cell + jg * n + k;
+                            let (own, nbr, jo, jn) = if cf < cg {
+                                (cf, cg, j, jg)
+                            } else {
+                                (cg, cf, jg, j)
+                            };
+                            let x_own = cell_mean(jo, k);
+                            let x_nbr = cell_mean(jn, k);
+                            if a_vec.dot(x_nbr - x_own) < 0.0 {
+                                quad.reverse();
+                            }
+                            internal_sides.push((own, nbr, quad));
+                            n_side_internal += 1;
+                            if cut {
+                                n_split_sides += 1;
+                            }
+                        }
+                    } else {
+                        let x_own = cell_mean(j, k);
+                        if a_vec.dot(x_q - x_own) < 0.0 {
+                            quad.reverse();
+                        }
+                        boundary_sides[patch_of_bface[g]].push((
+                            f,
+                            k,
+                            si,
+                            (first_cell + j * n + k) as crate::Label,
+                            quad,
+                        ));
+                        n_side_boundary += 1;
+                        if cut {
+                            n_split_sides += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The assembly: the input's internal faces, unchanged, in order; then
+    // every level 1..n face of (92.48); then the internal side faces.
+    let mut faces: Vec<Vec<crate::Label>> = Vec::new();
+    let mut owner: Vec<crate::Label> = Vec::new();
+    let mut neighbour: Vec<crate::Label> = Vec::new();
+    for f in 0..n_internal {
+        faces.push(mesh.faces[f].clone());
+        owner.push(mesh.owner[f]);
+        neighbour.push(mesh.neighbour[f]);
+    }
+    for (j, &f) in field.faces.iter().enumerate() {
+        let face = &mesh.faces[f];
+        for k in 1..=n {
+            if k < n {
+                // Levels 1..n-1 carry the REVERSED point list: the owner is
+                // nearer the wall, so the normal has to point inward.
+                let mut ps: Vec<crate::Label> = face
+                    .iter()
+                    .map(|p| level_point[k][slot_of_point[*p as usize] as usize] as crate::Label)
+                    .collect();
+                ps.reverse();
+                faces.push(ps);
+                owner.push((first_cell + j * n + k - 1) as crate::Label);
+                neighbour.push((first_cell + j * n + k) as crate::Label);
+            } else {
+                // Level n is the input's own face, unchanged, now internal
+                // with the layer's last cell as its neighbour.
+                faces.push(face.clone());
+                owner.push(mesh.owner[f]);
+                neighbour.push((first_cell + j * n + n - 1) as crate::Label);
+            }
+        }
+    }
+    for (o, nb, ps) in internal_sides {
+        faces.push(ps);
+        owner.push(o as crate::Label);
+        neighbour.push(nb as crate::Label);
+    }
+    // §2's upper-triangular order, restored over the whole internal block:
+    // the sort runs on a copy of the face list, the owner and the
+    // neighbour, so the three stay aligned.
+    let perm = ldu_permutation(&owner, &neighbour)?;
+    let mut sorted_faces: Vec<Vec<crate::Label>> = Vec::with_capacity(faces.len());
+    let mut sorted_owner: Vec<crate::Label> = Vec::with_capacity(owner.len());
+    let mut sorted_neighbour: Vec<crate::Label> = Vec::with_capacity(neighbour.len());
+    for pi in perm {
+        let pi = pi as usize;
+        sorted_faces.push(faces[pi].clone());
+        sorted_owner.push(owner[pi]);
+        sorted_neighbour.push(neighbour[pi]);
+    }
+    let (mut faces, mut owner, neighbour) = (sorted_faces, sorted_owner, sorted_neighbour);
+
+    // The boundary, patch by patch in the INPUT's patch order: a layer
+    // patch's level-0 copies in the input's order, a non-layer patch's own
+    // faces in the input's order, then the side faces (92.49) put on that
+    // patch, in (layer face id, level, segment index) order.
+    let mut patches_out: Vec<crate::mesh::PatchInfo> = Vec::with_capacity(mesh.patches.len());
+    let mut n_boundary = 0usize;
+    for (p, patch) in mesh.patches.iter().enumerate() {
+        let start = n_boundary;
+        if field.patches.contains(&p) {
+            for jj in 0..patch.size {
+                let f = n_internal + patch.start + jj;
+                let ps: Vec<crate::Label> = mesh.faces[f]
+                    .iter()
+                    .map(|q| level_point[0][slot_of_point[*q as usize] as usize] as crate::Label)
+                    .collect();
+                faces.push(ps);
+                owner.push((first_cell + layer_j[f] as usize * n) as crate::Label);
+                n_boundary += 1;
+            }
+        } else {
+            for jj in 0..patch.size {
+                let f = n_internal + patch.start + jj;
+                faces.push(mesh.faces[f].clone());
+                owner.push(mesh.owner[f]);
+                n_boundary += 1;
+            }
+        }
+        let mut sides = std::mem::take(&mut boundary_sides[p]);
+        sides.sort_by_key(|s| (s.0, s.1, s.2));
+        for s in sides {
+            faces.push(s.4);
+            owner.push(s.3 as crate::Label);
+            n_boundary += 1;
+        }
+        patches_out.push(crate::mesh::PatchInfo {
+            name: patch.name.clone(),
+            type_name: patch.type_name.clone(),
+            kind: patch.kind,
+            start,
+            size: n_boundary - start,
+            nbr_patch: patch.nbr_patch,
+        });
+    }
+
+    let out = PolyMeshRaw {
+        points,
+        faces,
+        owner,
+        neighbour,
+        patches: patches_out,
+    };
+    // §92.3's gate: its refusal is this stage's, unwrapped no further.
+    let quality = quality::check(&out, t)?;
+
+    // (92.50), per patch, area-weighted, `A_f` off the LEVEL-0 face, and
+    // `tau_f` the fraction of the nominal `T` the face actually got.
+    let mut patches_rep = Vec::new();
+    for &p in &named {
+        let patch = &mesh.patches[p];
+        match field.patches.iter().position(|&q| q == p) {
+            None => {
+                let reason = match shrunk.dropped.iter().find(|(nm, _)| nm == &patch.name) {
+                    Some((_, r)) => format!("patch \"{}\": {r}", patch.name),
+                    None => {
+                        format!("patch \"{}\": the patch carries no layer face", patch.name)
+                    }
+                };
+                patches_rep.push(PatchLayers {
+                    name: patch.name.clone(),
+                    n_layers: 0,
+                    n_faces: patch.size,
+                    area: patch_area(mesh, n_internal, patch),
+                    full_area_frac: 0.0,
+                    mean_frac: 0.0,
+                    dropped: Some(reason),
+                });
+            }
+            Some(_) => {
+                let mut area = 0.0;
+                let mut full = 0.0;
+                let mut wsum = 0.0;
+                let mut nf = 0usize;
+                for (j, &f) in field.faces.iter().enumerate() {
+                    if field.face_patch[j] != p {
+                        continue;
+                    }
+                    nf += 1;
+                    let ps0: Vec<crate::Label> = mesh.faces[f]
+                        .iter()
+                        .map(|q| level_point[0][slot_of_point[*q as usize] as usize] as crate::Label)
+                        .collect();
+                    let a = face_area_vector(&out.points, &ps0).mag();
+                    let tau_min = mesh
+                        .faces[f]
+                        .iter()
+                        .map(|q| field.disp[*q as usize].mag())
+                        .fold(Scalar::INFINITY, Scalar::min);
+                    let tau = tau_min / st.total;
+                    area += a;
+                    if tau >= 1.0 - 1e-9 {
+                        full += a;
+                    }
+                    wsum += a * tau;
+                }
+                patches_rep.push(PatchLayers {
+                    name: patch.name.clone(),
+                    n_layers: n,
+                    n_faces: nf,
+                    area,
+                    full_area_frac: if area > 0.0 { full / area } else { 0.0 },
+                    mean_frac: if area > 0.0 { wsum / area } else { 0.0 },
+                    dropped: None,
+                });
+            }
+        }
+    }
+    let report = LayerReport {
+        patches: patches_rep,
+        n_layer_cells: n * field.faces.len(),
+        n_layer_points: n * slots.len(),
+        n_side_internal,
+        n_side_boundary,
+        n_split_sides,
+        retreats: shrunk.retreats,
+    };
+    Ok(Layered {
+        mesh: out,
+        report,
+        extrusion: Extrusion {
+            slot_of_point,
+            level_point,
+            layer_faces: field.faces.clone(),
+            first_cell,
+            n,
+        },
+        quality,
+    })
+}
+
+/// The patch's total boundary area, off the INPUT mesh's own faces - what a
+/// dropped row reports, and what (92.50) sums.
+fn patch_area(mesh: &PolyMeshRaw, n_internal: usize, patch: &crate::mesh::PatchInfo) -> Scalar {
+    let n_faces = mesh.faces.len();
+    let mut area = 0.0;
+    for j in 0..patch.size {
+        let f = n_internal + patch.start + j;
+        if f < n_faces {
+            area += face_area_vector(&mesh.points, &mesh.faces[f]).mag();
+        }
+    }
+    area
+}
+
+/// The nearest boundary-carried point within tolerance of an edge's
+/// midpoint - `find_hanging`'s hash, keyed by the EDGE rather than by the
+/// node, for the reason the segments above state. One tolerance for the
+/// whole mesh, a bucket a thousand tolerances wide, a 27-bucket probe:
+/// `find_hanging`'s shape, copied.
+struct Midpoints<'a> {
+    points: &'a [Vec3],
+    used: &'a [bool],
+    tol: Scalar,
+    lo: Vec3,
+    h: Scalar,
+    grid: HashMap<[i64; 3], Vec<u32>>,
+}
+
+impl<'a> Midpoints<'a> {
+    fn new(points: &'a [Vec3], used: &'a [bool]) -> Self {
+        if points.is_empty() {
+            return Self {
+                points,
+                used,
+                tol: 1.0,
+                lo: Vec3::ZERO,
+                h: 1000.0,
+                grid: HashMap::new(),
+            };
+        }
+        let mut lo = points[0];
+        let mut hi = points[0];
+        for p in points {
+            lo = lo.cmpt_min(*p);
+            hi = hi.cmpt_max(*p);
+        }
+        let diag = (hi - lo).mag();
+        let tol = 1e-9 * diag.max(1.0);
+        let h = 1000.0 * tol;
+        let key = |p: Vec3| -> [i64; 3] {
+            [
+                ((p.x - lo.x) / h).floor() as i64,
+                ((p.y - lo.y) / h).floor() as i64,
+                ((p.z - lo.z) / h).floor() as i64,
+            ]
+        };
+        let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+        for (i, p) in points.iter().enumerate() {
+            grid.entry(key(*p)).or_default().push(i as u32);
+        }
+        Self {
+            points,
+            used,
+            tol,
+            lo,
+            h,
+            grid,
+        }
+    }
+
+    /// The nearest boundary-carried point within tolerance of the midpoint
+    /// of `(a, b)`, ties to the lower point id. The endpoints themselves
+    /// never come back.
+    fn at(&self, a: u32, b: u32) -> Option<u32> {
+        let m = (self.points[a as usize] + self.points[b as usize]) * 0.5;
+        let c = [
+            ((m.x - self.lo.x) / self.h).floor() as i64,
+            ((m.y - self.lo.y) / self.h).floor() as i64,
+            ((m.z - self.lo.z) / self.h).floor() as i64,
+        ];
+        let mut best = (Scalar::INFINITY, u32::MAX);
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let Some(bucket) = self.grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz])
+                    else {
+                        continue;
+                    };
+                    for &i in bucket {
+                        if i == a || i == b || !self.used[i as usize] {
+                            continue;
+                        }
+                        let d = (self.points[i as usize] - m).mag();
+                        if d <= self.tol && (d, i) < best {
+                            best = (d, i);
+                        }
+                    }
+                }
+            }
+        }
+        if best.1 == u32::MAX {
+            None
+        } else {
+            Some(best.1)
+        }
+    }
+}
+
+/// (92.49)'s cut: `(a, b)` is split at every boundary-carried point lying
+/// at its midpoint, recursively, until no hanging node lies inside a
+/// segment. The segments come back in order along `(a, b)`. The recursion
+/// is capped at four cuts - generous over the one a 2:1 transition needs -
+/// and a deeper chain is a refusal naming the edge.
+fn split_edge(mp: &Midpoints, a: u32, b: u32, depth: u32) -> Result<Vec<(u32, u32)>> {
+    let Some(m) = mp.at(a, b) else {
+        return Ok(vec![(a, b)]);
+    };
+    if depth >= 4 {
+        return Err(Error::Mesh(format!(
+            "layers: the edge ({a}, {b}) - points {:?}, {:?} - needed more \
+             than four cuts at hanging nodes (92.49)",
+            mp.points[a as usize],
+            mp.points[b as usize]
+        )));
+    }
+    let mut segs = split_edge(mp, a, m, depth + 1)?;
+    segs.extend(split_edge(mp, m, b, depth + 1)?);
+    Ok(segs)
+}
+
+// ==========================================================================
 //  Tests
 // ==========================================================================
 
@@ -1295,5 +2047,545 @@ mod tests {
         let rep = quality::check(&shrunk.mesh, &thresholds()).expect("gate");
         assert!(rep.passed());
         assert_eq!(rep.n_regions, 1);
+    }
+
+    // ---- AM-U6b: the extrusion --------------------------------------
+
+    use crate::io::polymesh::build_host_mesh;
+
+    /// The cube castellated but NOT snapped: snap is what grinds grazing
+    /// slivers into the wall - sub-cell edges a tenth of a cell wide - and
+    /// the layer cells that grow behind them then fail the gate's G4 in
+    /// droves (360 faces on the sphere, 6 on the cube, at any thickness or
+    /// smoothing the spec offers). The castellated wall lies flat on the
+    /// cell planes, the layer cells behind it are clean prisms, and the
+    /// gate passes with room to spare (33.9 deg worst non-orthogonality on
+    /// the cube). The curve cases keep their snap tests in the shrink half
+    /// of the module; the extrusion's own promises are tested where they
+    /// can hold.
+    fn castellated_cube_case() -> (Surface, PolyMeshRaw) {
+        let (mut tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 1);
+        // The cube's faces sit ON the level-1 cell planes (0.5), so the
+        // castellation cuts nothing: the body comes out an exact 3x3x3
+        // stack of cells, and each face carries a 3x3 grid of wall faces.
+        // That middle matters: on a cube that straddles the planes the
+        // castellated wall is ONE cell, every wall point is a corner of
+        // three walls at once, and (92.40)'s average gives each point a
+        // diagonal normal - no face would carry a single direction at all.
+        let surf = Surface::from_soup(
+            box_soup([1.0, 1.0, 1.0], [2.5, 2.5, 2.5]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "cube".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 1 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 1,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        (surf, cast.mesh)
+    }
+
+    /// The gap case: two slabs in a [0,5]^3 domain at base size 1, no
+    /// refinement. Each slab must hold a background leaf CENTRE for the
+    /// leaf classification to keep any cell and give it walls at all
+    /// ((92.23) classifies by leaf centre), so the slabs sit astride the
+    /// cell planes z = 2 and z = 3: the fluid between the facing walls is
+    /// the one cell z in [2, 3], the walls 1.0 apart. Castellated, not
+    /// snapped: the wall faces lie on the cell planes, which is all the
+    /// shrink and the extrusion read.
+    fn castellated_gap_case() -> (Surface, PolyMeshRaw) {
+        let (tree, bg) = setup([0.0, 5.0, 0.0, 5.0, 0.0, 5.0], 1.0, 1);
+        let mut soup = box_soup([1.0, 1.0, 1.05], [3.0, 3.0, 1.55]);
+        soup.extend(
+            box_soup([1.0, 1.0, 3.45], [3.0, 3.0, 3.95])
+                .into_iter()
+                .map(|(p, t)| (p + 1, t)),
+        );
+        let surf = Surface::from_soup(
+            soup,
+            vec!["lower".to_string(), "upper".to_string()],
+        )
+        .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        (surf, cast.mesh)
+    }
+
+    /// The gap spec: a nominal first thickness the cell limit and the
+    /// march's medial limit both clamp - the wall cells are 1.0 across, so
+    /// the cell limit is 0.5 a wall, and the wall cell between the slabs
+    /// puts the medial axis within 0.5 * g of each wall ((92.45)'s bound).
+    fn gap_layers(min_thickness: f64) -> LayerSpec {
+        LayerSpec {
+            patches: vec!["lower".to_string(), "upper".to_string()],
+            n: 3,
+            first_thickness: 0.4,
+            growth: 1.3,
+            min_thickness,
+            ..LayerSpec::default()
+        }
+    }
+
+    /// The cube spec the extrusion tests run with: three thin layers, the
+    /// flat-wall normals left exact, the thickness floor off so the patch
+    /// always survives the shrink.
+    fn cube_layers(first_thickness: f64) -> LayerSpec {
+        LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness,
+            normal_passes: 0,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        }
+    }
+
+    fn cell_count(m: &PolyMeshRaw) -> usize {
+        m.owner
+            .iter()
+            .chain(m.neighbour.iter())
+            .copied()
+            .max()
+            .map_or(0, |x| x as usize + 1)
+    }
+
+    #[test]
+    fn add_layers_with_no_layers_is_the_identity() {
+        let (surf, mesh) = snapped_sphere_case();
+        let mut spec = sphere_layers(0.02);
+        spec.n = 0;
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        assert_eq!(out.mesh.points, mesh.points);
+        assert_eq!(out.mesh.faces, mesh.faces);
+        assert_eq!(out.mesh.owner, mesh.owner);
+        assert_eq!(out.mesh.neighbour, mesh.neighbour);
+        assert_eq!(out.mesh.patches.len(), mesh.patches.len());
+        for (a, b) in out.mesh.patches.iter().zip(mesh.patches.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.start, b.start);
+            assert_eq!(a.size, b.size);
+        }
+        assert_eq!(out.report.n_layer_cells, 0);
+        assert_eq!(out.extrusion.first_cell, cell_count(&mesh));
+        assert_eq!(out.extrusion.n, 0);
+        assert!(out.quality.passed());
+    }
+
+    #[test]
+    fn a_body_gets_three_layers_behind_every_wall_face() {
+        let (surf, mesh) = castellated_cube_case();
+        let spec = cube_layers(0.02);
+        let big_c = cell_count(&mesh);
+        let p_in = mesh.points.len();
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        let n_layers = 3usize;
+        assert_eq!(
+            out.report.n_layer_cells,
+            n_layers * out.extrusion.layer_faces.len()
+        );
+        let f = out.extrusion.layer_faces.len();
+        let slot_count = out
+            .extrusion
+            .slot_of_point
+            .iter()
+            .filter(|&&s| s >= 0)
+            .count();
+        assert_eq!(cell_count(&out.mesh), big_c + n_layers * f);
+        assert_eq!(out.mesh.points.len(), p_in + n_layers * slot_count);
+        // The layer patch's boundary faces all own layer cells, one per
+        // input face, in the input's order.
+        let n_internal = out.mesh.neighbour.len();
+        let patch = out
+            .mesh
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("cube patch")
+            .clone();
+        assert_eq!(patch.size, f, "one level-0 face per layer face");
+        for b in 0..patch.size {
+            let fi = n_internal + patch.start + b;
+            assert!(
+                out.mesh.owner[fi] as usize >= big_c,
+                "boundary face {b} of the layer patch owns cell {}",
+                out.mesh.owner[fi]
+            );
+        }
+        assert!(out.quality.passed());
+        assert_eq!(out.quality.n_regions, 1);
+        // The achieved first-layer thickness, off the host geometry, on
+        // the faces whose points carry ONE normal - a face at a stepped
+        // corner carries two or three walls' average normal ((92.40)'s
+        // rule), and its v/A reads only the one wall's share of it, not
+        // the thickness.
+        let st = stack(&spec).expect("stack");
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let idx = TriIndex::new(&surf, 0.05).expect("index");
+        let fd = field(&mesh, &idx, &patches, &spec, &st).expect("field");
+        let host = build_host_mesh(&out.mesh).expect("host");
+        let mut n_prism = 0usize;
+        for j in 0..f {
+            let pts = &mesh.faces[fd.faces[j]];
+            let u = fd.normal[pts[0] as usize];
+            if pts.iter().any(|&p| (fd.normal[p as usize] - u).mag() > 1e-12) {
+                continue;
+            }
+            let dom = u.x.abs().max(u.y.abs()).max(u.z.abs());
+            if dom < 1.0 - 1e-12 {
+                continue;
+            }
+            let cell = out.extrusion.first_cell + j * n_layers;
+            let bf = patch.start + j;
+            let h = host.v[cell] / host.b_mag_sf[bf];
+            assert!(
+                (h - 0.02).abs() <= 0.05 * 0.02,
+                "layer {j}: v/A = {h}, want 0.02 to 5%"
+            );
+            n_prism += 1;
+        }
+        assert!(n_prism > 0, "no wall face carried a single normal");
+    }
+
+    #[test]
+    fn a_cube_gets_exact_prisms_on_its_flat_faces() {
+        let (surf, mesh) = castellated_cube_case();
+        let spec = cube_layers(0.02);
+        let st = stack(&spec).expect("stack");
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        // The exactness below reads the PROPOSED field, so the case must
+        // not have retreated.
+        assert_eq!(out.report.retreats, 0, "the case retreated");
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let idx = TriIndex::new(&surf, 0.05).expect("index");
+        let fd = field(&mesh, &idx, &patches, &spec, &st).expect("field");
+        let mut n_cell_faces = vec![0u32; cell_count(&out.mesh)];
+        for (fi, _) in out.mesh.faces.iter().enumerate() {
+            n_cell_faces[out.mesh.owner[fi] as usize] += 1;
+            if fi < out.mesh.neighbour.len() {
+                n_cell_faces[out.mesh.neighbour[fi] as usize] += 1;
+            }
+        }
+        // A point's normal is a flat side's inward unit normal when the
+        // dominant component is the whole vector.
+        let flat = |nn: Vec3| -> Option<Vec3> {
+            let c = [nn.x.abs(), nn.y.abs(), nn.z.abs()];
+            let ax = if c[0] >= c[1] && c[0] >= c[2] {
+                0
+            } else if c[1] >= c[2] {
+                1
+            } else {
+                2
+            };
+            if (c[ax] - 1.0).abs() > 1e-12 {
+                return None;
+            }
+            let mut v = [0.0; 3];
+            v[ax] = nn.component(ax).signum();
+            Some(Vec3::new(v[0], v[1], v[2]))
+        };
+        let mut n_qual = 0usize;
+        for (j, &fa) in fd.faces.iter().enumerate() {
+            let pts = &mesh.faces[fa];
+            let mut sides: Vec<Vec3> = Vec::new();
+            let mut ok = true;
+            for &p in pts {
+                match flat(fd.normal[p as usize]) {
+                    Some(u) => sides.push(u),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok || sides.iter().any(|u| (*u - sides[0]).mag() > 1e-12) {
+                continue;
+            }
+            // And ONE displacement, so the prism is exact.
+            let d0 = fd.disp[pts[0] as usize];
+            if pts
+                .iter()
+                .any(|&p| (fd.disp[p as usize] - d0).mag() > 1e-12)
+            {
+                continue;
+            }
+            n_qual += 1;
+            let nu = sides[0];
+            for k in 0..3 {
+                let cell = out.extrusion.first_cell + j * 3 + k;
+                assert_eq!(
+                    n_cell_faces[cell], 6,
+                    "layer cell {cell} of face {j} is not a hexahedron"
+                );
+            }
+            let slots: Vec<usize> = pts
+                .iter()
+                .map(|&p| out.extrusion.slot_of_point[p as usize] as usize)
+                .collect();
+            for k in 0..3 {
+                let mut step = Vec3::ZERO;
+                for &s in &slots {
+                    let a = out.mesh.points[out.extrusion.level_point[k][s] as usize];
+                    let b = out.mesh.points[out.extrusion.level_point[k + 1][s] as usize];
+                    step = step + (b - a);
+                }
+                let h = step.dot(nu) / (slots.len() as Scalar);
+                assert!(
+                    (h - st.t[k]).abs() <= 1e-9,
+                    "face {j} level {k}: spacing {h} vs t = {}",
+                    st.t[k]
+                );
+            }
+        }
+        assert!(n_qual > 0, "no layer face sat wholly inside a flat side");
+    }
+
+    #[test]
+    fn the_counts_and_the_ordering_hold() {
+        let cube = {
+            let (surf, mesh) = castellated_cube_case();
+            (surf, mesh, cube_layers(0.02))
+        };
+        let gap = {
+            let (surf, mesh) = castellated_gap_case();
+            (surf, mesh, gap_layers(0.0))
+        };
+        for (surf, mesh, spec) in [cube, gap] {
+            let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+            let n_internal = out.mesh.neighbour.len();
+            let mut prev: Option<(crate::Label, crate::Label)> = None;
+            for fi in 0..n_internal {
+                let pair = (out.mesh.owner[fi], out.mesh.neighbour[fi]);
+                assert!(pair.0 < pair.1, "face {fi}: owner not below neighbour");
+                if let Some(p) = prev {
+                    assert!(p < pair, "face {fi}: (owner, neighbour) not increasing");
+                }
+                prev = Some(pair);
+            }
+            let mut run = 0usize;
+            for p in &out.mesh.patches {
+                assert_eq!(p.start, run, "patch {} start", p.name);
+                run += p.size;
+            }
+            assert_eq!(out.mesh.faces.len() - n_internal, run);
+        }
+    }
+
+    #[test]
+    fn a_gap_narrower_than_the_stack_retreats_instead_of_inverting() {
+        let (surf, mesh) = castellated_gap_case();
+        let spec = gap_layers(0.0);
+        let p_in = mesh.points.len();
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        assert!(out.quality.passed());
+        assert!(
+            out.quality.min_volume > 0.0,
+            "min cell volume {}",
+            out.quality.min_volume
+        );
+        for p in &out.report.patches {
+            assert!(p.dropped.is_none(), "patch dropped: {:?}", p.dropped);
+            assert!(p.n_layers > 0);
+            assert!(
+                p.mean_frac > 0.0 && p.mean_frac < 1.0,
+                "patch {}: mean_frac {} - not a retreat",
+                p.name,
+                p.mean_frac
+            );
+        }
+        assert_eq!(out.report.patches.len(), 2);
+        // The SPEC's bounds, point by point. No displacement past its own
+        // half-cell limit - the wall cells are 1.0 - and no layer point
+        // past (92.45)'s T_i <= medial_frac * d_medial, the march asked
+        // again along the very normal the field grew along. Between two
+        // plates the march is caught at s = g / (2 - kappa) - kappa's
+        // margin over the medial axis at g / 2, the bias
+        // `two_plates_give_half_the_gap` documents - so a wall point that
+        // FACES the other slab lands under medial_frac * g / 2; at the
+        // slabs' rim the march meets a SIDE wall instead, farther out,
+        // and the half-cell bound is the one that holds.
+        let st = stack(&spec).expect("stack");
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let idx = TriIndex::new(&surf, 0.05).expect("index");
+        let fd = field(&mesh, &idx, &patches, &spec, &st).expect("field");
+        for i in 0..p_in {
+            let d = out.mesh.points[i] - mesh.points[i];
+            assert!(
+                d.mag() <= 0.5 + 1e-12,
+                "point {i}: |disp| = {} past the half-cell limit",
+                d.mag()
+            );
+            if !fd.is_layer[i] || fd.pinned[i] {
+                continue;
+            }
+            let m = medial_distance(
+                &idx,
+                mesh.points[i],
+                fd.normal[i],
+                st.total / spec.medial_frac,
+            );
+            let lim = if m.is_finite() {
+                spec.medial_frac * m
+            } else {
+                0.5
+            };
+            assert!(
+                d.mag() <= lim + 1e-12,
+                "point {i}: |disp| = {d:.6} past {lim:.6}, march {m:.6}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_gap_with_a_floor_drops_the_patch_by_name() {
+        let (surf, mesh) = castellated_gap_case();
+        let spec = gap_layers(0.9);
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        assert_eq!(out.report.n_layer_cells, 0);
+        assert_eq!(out.report.patches.len(), 2);
+        for p in &out.report.patches {
+            assert_eq!(p.n_layers, 0);
+            let d = p
+                .dropped
+                .as_ref()
+                .unwrap_or_else(|| panic!("patch {} was not dropped", p.name));
+            assert!(d.contains(&p.name), "the reason does not name it: {d}");
+        }
+        // The returned mesh is the input, bit for bit.
+        assert_eq!(out.mesh.points, mesh.points);
+        assert_eq!(out.mesh.faces, mesh.faces);
+        assert_eq!(out.mesh.owner, mesh.owner);
+        assert_eq!(out.mesh.neighbour, mesh.neighbour);
+        assert_eq!(out.mesh.patches.len(), mesh.patches.len());
+        for (a, b) in out.mesh.patches.iter().zip(mesh.patches.iter()) {
+            assert_eq!(a.size, b.size);
+        }
+    }
+
+    #[test]
+    fn a_two_to_one_transition_emits_split_sides() {
+        // A distance band cannot make a 2:1 transition on a wall - every
+        // cell carrying a wall face is already at the band's finest level.
+        // What does is FEATURE refinement: every cell the surface passes
+        // through is at least level 1 (0.5), and the feature-edge pull of
+        // the refinement stage takes the cells near one of the cube's 12
+        // feature edges to level 2 (0.25). The middle of each face stays
+        // at level 1, so the wall carries 2:1 - 48 T-junction edges on
+        // this case. Castellated, not snapped: the snap grinds slivers
+        // into the wall that the layer cells behind fail the gate on.
+        let (mut tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            box_soup([1.1; 3], [3.1; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "cube".to_string(),
+                bands: vec![DistanceBand {
+                    distance: 0.0,
+                    level: 1,
+                }],
+                feature_level: 2,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let lspec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 2,
+            first_thickness: 0.01,
+            normal_passes: 0,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        let out =
+            add_layers(&cast.mesh, &surf, &lspec, &thresholds()).expect("layers");
+        // If this is zero the case did not do what it was built for, and
+        // the test must fail, not pass quietly.
+        assert!(
+            out.report.n_split_sides > 0,
+            "n_split_sides = 0 - the case has no 2:1 transition on the wall"
+        );
+        assert!(
+            out.report.patches.iter().all(|p| p.dropped.is_none()),
+            "dropped: {:?}",
+            out.report.patches
+        );
+        build_host_mesh(&out.mesh).expect("host");
+        assert!(out.quality.passed());
+        assert_eq!(out.quality.n_regions, 1);
+        assert!(
+            out.quality.max_closure < 1e-12,
+            "max closure {:.3e}",
+            out.quality.max_closure
+        );
+    }
+
+    #[test]
+    fn a_layer_thinner_than_the_gate_allows_is_refused_with_the_arithmetic() {
+        let (surf, mesh) = castellated_cube_case();
+        // A two-hundredth of the wall face size: 3 t_1 / h is far under
+        // G5's 0.05, so the run is refused before any cell is inserted.
+        let spec = cube_layers(0.5 / 200.0);
+        let e = add_layers(&mesh, &surf, &spec, &thresholds()).unwrap_err();
+        let msg = e.to_string();
+        // h_min, the same scan the refusal runs: the shortest edge among
+        // the layer faces, on the input mesh.
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let patch = mesh
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("cube patch");
+        let mut h_min = f64::INFINITY;
+        for j in 0..patch.size {
+            let face = &mesh.faces[n_internal + patch.start + j];
+            for k in 0..face.len() {
+                let d = (mesh.points[face[k] as usize]
+                    - mesh.points[face[(k + 1) % face.len()] as usize])
+                    .mag();
+                h_min = h_min.min(d);
+            }
+        }
+        let t1 = spec.first_thickness;
+        let ratio = 3.0 * t1 / h_min;
+        assert!(ratio < 0.05, "the case is not thin enough: {ratio}");
+        assert!(msg.contains("min_thickness_ratio"), "{msg}");
+        assert!(
+            msg.contains(&format!("3 * {t1} / {h_min}")),
+            "no arithmetic in: {msg}"
+        );
+        assert!(msg.contains(&format!("{ratio}")), "{msg}");
     }
 }

@@ -17208,7 +17208,7 @@ needs to reach.
 
 | asked for | answer |
 |---|---|
-| **any `fvSchemes`, `controlDict` or case-file entry that turns adaptation on** | **There is none, and that is deliberate.** Nothing in a time loop calls any of the above. A case that asked for adaptive refinement would be asking for something no solver in this crate does, and the honest answer is that the machinery exists, is measured, and is not wired in. §75.11 is the list of what would have to land first. |
+| **any `fvSchemes`, `controlDict` or case-file entry that turns adaptation on** | **There is none, and that is deliberate.** Nothing in a time loop calls any of the above. One thing outside a time loop does: §92.13's layer insertion changes the cell count and restores §2's upper-triangular order with `rebuild::ldu_permutation`, which is a pure function of `(owner, neighbour)` and is on the supported list above. `adapt::tests::no_time_loop_reaches_the_adapt` names that file explicitly rather than exempting a directory. A case that asked for adaptive refinement would be asking for something no solver in this crate does, and the honest answer is that the machinery exists, is measured, and is not wired in. §75.11 is the list of what would have to land first. |
 | the Jasak–Gosman a-posteriori residual estimator | Recognised, not implemented. It needs the assembled matrix of the equation being adapted for, and this section's criteria take a field and a gradient. **Use the Löhner indicator**, which is the cheap first cut of the same idea and is what Part 2's driver falls back to. |
 | the Pope LES resolution index `M = k_sgs/(k_res + k_sgs)` | Recognised, not implemented. `k_res` is a running variance and therefore three extra fields of state that must themselves be restricted and prolonged on every adapt — a decision about the field registry, not about the criterion. **Use the Löhner indicator on velocity magnitude.** |
 | divergence-free prolongation of the face flux | Not implemented, not started. The face flux `phi_f` is not transferred at all. §75.11. |
@@ -26365,6 +26365,30 @@ and the threshold, so the user sees the trade rather than a gate failure on
 cell 12345. Giving layer cells their own thickness rule is a change to §92.3's
 gate and belongs to whoever makes that decision, not to this stage.
 
+**What the layer stage INHERITS from the wall it grows on.** G4 measures
+internal faces. A wall face is a boundary face, so the angle between its normal
+and the line from its owner cell's centre to its own centre is never measured —
+until a layer cell is put behind it and that boundary face becomes the level-`n`
+internal face of (92.48). Then it is, and whatever the earlier stages left
+there is what G4 reads. Measured on this section's own cases:
+
+| the wall | median angle | p99 | max | faces past 70 deg |
+|---|---|---|---|---|
+| a castellated cube on the cell planes | 0.0 | 0.0 | 0.0 | 0 of 54 |
+| the same cube snapped | 16.6 | 38.9 | 38.9 | 0 of 24 |
+| a snapped sphere, level 2 | 51.6 | 80.2 | 80.3 | **408 of 2592** |
+
+so the snapped sphere cannot carry layers at G4's `70` and no choice of
+thickness, smoothing or layer count changes it — the angle is a property of the
+cut cell's centroid against its own wall face, and the layer stage only exposes
+it. This is stated rather than worked around: the mesher does not weaken G4 to
+make its own output pass. It is also why the validation below runs on a cube
+and not on the sphere §92.2's stage list would suggest, and why the ammonia
+site of §92.1 is expected to be the FIRST row of that table and not the third —
+its walls are axis-aligned planes, cut on the cell planes, where the angle is
+zero. The instrument that would move the third row is a wall-face/owner-centre
+alignment step in stage 4, which is not this section's and is not written.
+
 **What this stage does NOT do.** The layer count is uniform over a patch: a
 point that cannot carry the stack costs its whole patch, not just its own
 faces. Terminating a layer stack part-way across a patch needs a face topology
@@ -26396,12 +26420,13 @@ solver can run.
 
 | Case | The test |
 |---|---|
-| a box minus a sphere, 3 layers | every wall face has exactly 3 layer cells behind it; the achieved first-layer thickness is within 5 % of `first_thickness`; the gate passes; one region |
-| a box minus a cube, 3 layers, `normal_passes = 0` | on the faces whose points are all interior to a flat side, the layer cells are exact hexahedra and the level spacing is `t_1, t_2, t_3` to 1e-9 |
+| a box minus a cube, castellated on the cell planes, 3 layers | every wall face has exactly 3 layer cells behind it; on the faces carrying ONE normal the achieved `V/A` is within 5 % of `first_thickness`; the gate passes; one region. NOT the sphere §92.2's stage list would suggest — the paragraph above measures why |
+| the same case, `normal_passes = 0` | on the faces whose points all carry one flat side's normal and one displacement, the layer cells are hexahedra and the level spacing is `t_1, t_2, t_3` to 1e-9 |
 | a slot narrower than twice the requested stack | the run retreats: the gate passes, `mean_frac < 1` is reported, and no cell has negative volume — the failure this section exists to refuse |
 | the same slot with `min_thickness` above what fits | the patch is dropped by name, and the returned mesh is the snapped mesh bit for bit |
 | the cell and point counts, on every case above | exactly `C + n F` and `P + n |L|` |
-| a mesh with a 2:1 transition on the layer patch | the split side faces are emitted, the mesh loads, and G2 is under 1e-12 |
+| a mesh with a 2:1 transition on the layer patch | built by FEATURE refinement, since a distance band cannot make one — every cell carrying a wall face is already at the band's finest level; the split side faces are emitted, the mesh loads, and G2 is under 1e-12 |
+| a layer patch COARSER than the non-layer patch beside it | refused by name — the cut of (92.49) would fall on a point with no level copies, and the side face that would span a whole edge against a cut partner is the terminating topology of tranche 2 |
 | `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
 
 ---
