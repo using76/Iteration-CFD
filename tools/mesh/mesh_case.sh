@@ -52,7 +52,10 @@ OUTU="$(cygpath -u "$OUT" 2>/dev/null || echo "$OUT")"
 W="$OUTU/work"
 mkdir -p "$W"
 rm -f "$CASEDIR/mesh.exit"
-[ $GEOM = 1 ] && rm -f "$W/${NAME}_trimmed.brep"      # so the export waits for this run's trim
+# a run from the STEP rewrites the checkpoint and the trim; drop the old files so the geometry
+# export waits for this run's (a stale brep would look "stable" at once)
+[ -z "$FROM_CK" ] && rm -f "$W/${NAME}_pools.brep" "$W/${NAME}_pools.json" "$W/${NAME}_cut.brep"
+[ $GEOM = 1 ] && rm -f "$W/${NAME}_trimmed.brep"
 
 echo "=== step_mesh $NAME ${FROM_CK:-from the STEP}"
 cmd //c "$(cygpath -w "$TOOL" 2>/dev/null || echo "$TOOL")" "$CFGW" $FROM_CK &
