@@ -24,7 +24,8 @@
     "boolean_tol_m": 0.0,
     "hull_snap_m": 0.05,
     "hull_box_snap_m": 20.0,
-    "hull_box_inset_m": 5.0
+    "hull_box_inset_m": 5.0,
+    "base_below_sea_m": 1.0
   },
   "repairs": [],
   "trim": {

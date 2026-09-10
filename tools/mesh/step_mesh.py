@@ -96,7 +96,8 @@ DEFAULTS = {
     'outer_tol': 0.05,              # tolerance of the top/west/east/south/north tests
     'solids': {'sink_m': 2.0, 'fuse': False, 'exclude_tags': [], 'touch_warn_m': 0.05,
                'hull_beyond_m': 0.0, 'hull_pad_m': 1.0, 'hull_snap_m': 0.05,
-               'boolean_tol_m': 0.0, 'hull_box_snap_m': 0.0, 'hull_box_inset_m': 0.0},
+               'boolean_tol_m': 0.0, 'hull_box_snap_m': 0.0, 'hull_box_inset_m': 0.0,
+               'base_below_sea_m': 0.0},
     'repairs': [],                  # [{'tag', 'method', 'cell_m', 'target_faces', 'lift_z', 'brep'}]
     'trim': {'below_z': 3.05, 'shrink_xy_m': 0.0},   # or null: no trim; shrink_xy_m cuts a margin off the x/y sides
     'sea_z': 3.05,
@@ -246,6 +247,9 @@ def load_config(path):
     sol = cfg['solids']
     if not _is_num(sol['sink_m']) or sol['sink_m'] < 0:
         errors.append('config.solids.sink_m: expected a non-negative number of metres')
+    if not _is_num(sol['base_below_sea_m']) or sol['base_below_sea_m'] < 0:
+        errors.append('config.solids.base_below_sea_m: expected a non-negative number of metres '
+                      '(0 disables; every base is pushed at least this far below sea_z)')
     if not isinstance(sol['fuse'], bool):
         errors.append('config.solids.fuse: expected true or false')
     if not (isinstance(sol['exclude_tags'], list) and
@@ -888,21 +892,37 @@ def cut_stage(cfg, args, work):
     # layer the mesher fills with slivers the solver cannot survive: stretch every other solid
     # downwards about its roof, so the base sinks sink_m into the ground; roofs and walls stay
     sink = cfg['solids']['sink_m']
+    # a solid standing over water (a pier building, a hull prism straddling the shore) has
+    # water under its sunk base too - a slab of fluid sink_m thin under sea_z + ground height -
+    # so with base_below_sea_m every base ends at least that far under the sea plane: on land
+    # the extra depth is inside the ground and changes nothing, over water the trim cuts it
+    below_sea = cfg['solids']['base_below_sea_m']
+    sea_floor = cfg['sea_z'] - below_sea if below_sea > 0 else None
     tools = []
+    n_deeper = 0
     for tg in sorted(solid_bbox):
         if tg in cfg['solids']['exclude_tags']:
             continue
         tools.append((3, tg))
-        if sink > 0:
-            b = solid_bbox[tg]
+        b = solid_bbox[tg]
+        sink_tg = sink
+        if sea_floor is not None and b[2] - sink < sea_floor + 1e-6 and b[2] - sink > sea_floor - 1e-6:
+            pass
+        elif sea_floor is not None and b[2] - sink > sea_floor:
+            sink_tg = b[2] - sea_floor
+            n_deeper += 1
+        if sink_tg > 0:
             h, w, dp = b[5] - b[2], b[3] - b[0], b[4] - b[1]
             if h > 0.05 and w > 0.05 and dp > 0.05:
                 gmsh.model.occ.dilate([(3, tg)], 0.5 * (b[0] + b[3]), 0.5 * (b[1] + b[4]), b[5],
-                                      1.0, 1.0, (h + sink) / h)
-    if sink > 0 and tools:
+                                      1.0, 1.0, (h + sink_tg) / h)
+    if (sink > 0 or n_deeper) and tools:
         gmsh.model.occ.synchronize()
-        log('solids stretched %.1f m below their bases (about the roof centre): none floats' % sink)
+        log('solids stretched %.1f m below their bases (about the roof centre): none floats%s' % (
+            sink, '; %d of them deeper, to %.2f m below sea_z %.2f (base_below_sea_m %.1f)' % (
+                n_deeper, below_sea, cfg['sea_z'], below_sea) if n_deeper else ''))
         SUMMARY['solids_sink_m'] = sink
+        SUMMARY['solids_sunk_below_sea'] = n_deeper
 
     # solids left out of the cut entirely leave the model: they would else stay as volumes
     # the mesher has no physical group for

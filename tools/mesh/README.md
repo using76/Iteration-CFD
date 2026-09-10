@@ -115,6 +115,8 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "domain_box": [xmin, ymin, zmin, xmax, ymax, zmax],  // required; the outer faces are classified against it
   "outer_tol":  0.05,                     // tolerance of the top/west/east/south/north tests
   "solids": {
+    "base_below_sea_m": 0.0, // > 0: every base ends at least this far under sea_z (a solid over
+                            // water would else leave a slab of fluid under its sunk base)
     "sink_m": 2.0,          // stretch every other solid this far below its base, about its
                             // roof (buildings must not float above the terrain)
     "fuse": false,          // fuse the solids before the cut (merges touching/overlapping ones)
@@ -335,3 +337,9 @@ centimetres under the trim, and the boolean leaves a 5 cm strip of wall under th
 (the run reports it as `faces reaching below: N`, 1,814 there); `sink_m: 1.5` keeps the bases at
 3.5 m, still 1.5 m below the lowest terrain a building floats over (4.7 m), and the count drops
 to zero. Sink enough to bury every floating base, not so much that a base lands on the trim.
+
+A solid standing over water is the exception: its sunk base (3.5 m) still floats 0.45 m above
+the sea plane, and that slab of fluid under it is where the three-inlet mesh kept a cell the
+thickness gate could not repair (tau 0.024 at the north-east corner, a fused hull prism straddling
+the shore). `base_below_sea_m: 1.0` pushes every base to at least 2.05 m — inside the ground on
+land, and cut away by the trim over water, so the prism wall meets the sea face at a right angle.
