@@ -112,7 +112,8 @@ DEFAULTS = {
              'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0,
              'sliver_rel': 0.0, 'sliver_edge_rel': 0.25, 'min_thickness': 0.0,
              'repair_rounds': 3},
-    'classification': {'wall_prefix': 'wall_', 'big_roof_is_ground_m2': 2000.0},
+    'classification': {'wall_prefix': 'wall_', 'pool_prefix': 'pool_',
+                       'big_roof_is_ground_m2': 2000.0},
 }
 REQUIRED = ('step', 'out_dir', 'domain_box')
 REPAIR_KEYS = {'tag', 'method', 'cell_m', 'target_faces', 'lift_z', 'brep'}
@@ -397,6 +398,9 @@ def load_config(path):
     c = cfg['classification']
     if not isinstance(c['wall_prefix'], str):
         errors.append('config.classification.wall_prefix: expected a string')
+    if not isinstance(c['pool_prefix'], str):
+        errors.append('config.classification.pool_prefix: expected a string ("" names the '
+                      'inlet after the point itself)')
     if not _is_num(c['big_roof_is_ground_m2']) or c['big_roof_is_ground_m2'] <= 0:
         errors.append('config.classification.big_roof_is_ground_m2: expected an area in m^2')
 
@@ -1084,14 +1088,17 @@ def ground_stage(cfg, args, work):
 def classify(cfg):
     """Every boundary surface of the fluid into exactly one named group."""
     prefix = cfg['classification']['wall_prefix']
+    # a point's inlet is pool_prefix + point ('pool_' by default; '' names the patch after the
+    # point itself, e.g. inlet1) and a raised pool's side wall_prefix + pool_prefix + point
+    pp = cfg['classification']['pool_prefix']
     names = ('top', 'west', 'east', 'south', 'north',
              prefix + 'sea_surface', prefix + 'ship_hull', prefix + 'buildings',
              prefix + 'ground_land')
     groups = {k: [] for k in names}
     for name in cfg['points']:
-        groups['pool_' + name] = []
+        groups[pp + name] = []
         if cfg['pool_specs'][name]['h'] > 0:
-            groups[prefix + 'pool_' + name] = []      # the cylinder's side
+            groups[prefix + pp + name] = []           # the cylinder's side
     for name in cfg['roof_patches']:
         groups[name] = []
     box = cfg['domain_box']
@@ -1141,7 +1148,7 @@ def classify(cfg):
                 if r <= pool_r + POOL_PAD and (best is None or key < best[0]):
                     best = (key, name)
             if best is not None:
-                groups['pool_' + best[1]].append(sf)
+                groups[pp + best[1]].append(sf)
                 pooled = True
         if pooled:
             continue
@@ -1161,7 +1168,7 @@ def classify(cfg):
                     if side is None or sp['r'] > cfg['pool_specs'][side]['r']:
                         side = name
             if side is not None:
-                groups[prefix + 'pool_' + side].append(sf)
+                groups[prefix + pp + side].append(sf)
                 continue
         roofed = False
         for rname, rtag in cfg['roof_patches'].items():
