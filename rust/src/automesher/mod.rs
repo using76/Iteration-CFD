@@ -23,6 +23,7 @@
 
 pub mod castellate;
 pub mod features;
+pub mod layers;
 pub mod octree;
 pub mod quality;
 pub mod snap;
@@ -306,9 +307,28 @@ pub struct LayerSpec {
     /// The total thickness below which the layers are dropped.
     #[serde(default = "d_min_thickness")]
     pub min_thickness: f64,
-    /// Fraction of the local cell size below which the layers are dropped.
+    /// The fraction of the medial distance `m(i)` the stack may take, eq.
+    /// (92.10)/(92.45).
     #[serde(default = "d_medial_frac")]
     pub medial_frac: f64,
+    /// (92.41): smoothing passes over the point normals. Zero leaves them
+    /// the area-weighted average of (92.40), which is what a flat wall
+    /// needs to stay exact.
+    #[serde(default = "d_normal_passes")]
+    pub normal_passes: usize,
+    /// (92.45): the fraction of the LOCAL CELL SIZE the stack may take.
+    #[serde(default = "d_cell_frac")]
+    pub cell_frac: f64,
+    /// (92.41) and (92.46)'s `w`.
+    #[serde(default = "d_layer_smoothing")]
+    pub smoothing: f64,
+    /// (92.46)'s passes into the interior.
+    #[serde(default = "d_layer_smoothing_passes")]
+    pub smoothing_passes: usize,
+    /// (92.47): how many times the thickness is halved before the patch
+    /// loses its layers.
+    #[serde(default = "d_retreat_limit")]
+    pub retreat_limit: usize,
 }
 
 fn d_first_thickness() -> f64 {
@@ -327,6 +347,26 @@ fn d_medial_frac() -> f64 {
     0.5
 }
 
+fn d_normal_passes() -> usize {
+    3
+}
+
+fn d_cell_frac() -> f64 {
+    0.5
+}
+
+fn d_layer_smoothing() -> f64 {
+    0.5
+}
+
+fn d_layer_smoothing_passes() -> usize {
+    4
+}
+
+fn d_retreat_limit() -> usize {
+    4
+}
+
 impl Default for LayerSpec {
     fn default() -> Self {
         Self {
@@ -336,6 +376,11 @@ impl Default for LayerSpec {
             growth: d_growth(),
             min_thickness: d_min_thickness(),
             medial_frac: d_medial_frac(),
+            normal_passes: d_normal_passes(),
+            cell_frac: d_cell_frac(),
+            smoothing: d_layer_smoothing(),
+            smoothing_passes: d_layer_smoothing_passes(),
+            retreat_limit: d_retreat_limit(),
         }
     }
 }
@@ -629,6 +674,11 @@ mod config_tests {
             growth: 1.2,
             min_thickness: 0.05,
             medial_frac: 0.4,
+            normal_passes: 2,
+            cell_frac: 0.45,
+            smoothing: 0.3,
+            smoothing_passes: 5,
+            retreat_limit: 3,
         };
         cfg.quality.max_non_orth_deg = 65.0;
         cfg.quality.report_non_orth_deg = 50.0;

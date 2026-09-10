@@ -26035,3 +26035,373 @@ in the report's corner count rather than silent.
 | `feat` against a linear scan over the segments | the same point and the same distance, at points beside a segment, beyond its end, and on it |
 
 ---
+
+### 92.13 Layers: the normal a point grows along, the thickness it is allowed, and the cells that fill the gap
+
+The implementation-level companion to §92.2 stage 6, appended after §92.12 for
+the reason §92.12 was appended after §92.11 — every citation already pointing
+into §92.1–§92.12 keeps its number. §92.2 stage 6 gives the stack (92.9) and
+the medial-axis limit (92.10). This says which points the stack is grown from,
+what the normal at one of them is, how the medial distance is MEASURED with the
+queries this crate actually has, what the shrink does to the mesh behind the
+wall, what the retreat gives up when the gate refuses, and exactly which cells
+and faces the extrusion emits.
+
+This is the first stage that changes the TOPOLOGY. Stages 1–4 moved points;
+here `points`, `faces`, `owner`, `neighbour` and every patch's size all change,
+so §2's upper-triangular order is restored by `adapt::rebuild::ldu_permutation`
+at the end rather than inherited, and §92.3's gate is run on the result exactly
+as the earlier stages run it on theirs.
+
+The construction is the standard one — shrink the boundary inward, fill the gap
+— and it is Garimella & Shephard's, *Int. J. Numer. Meth. Engng* **49** (2000)
+193–218 (DOI
+`10.1002/1097-0207(20000910/20)49:1/2<193::AID-NME929>3.0.CO;2-R`), already
+cited in §92.2. snappyHexMesh is GPL and is not opened; the OpenFOAM *User
+Guide*'s prose description of layer addition is the only thing consulted about
+it, and it is cited in §92.2.
+
+**Which faces grow layers.** Write `P_L` for the patches `layers.patches`
+names. A name that is not a patch of the mesh is a refusal, not a silent
+no-op: the geometry it names either was never reached by a cell (§92.10 reports
+that patch as a row of zero) or is misspelled, and both are the user's to fix.
+A *layer face* is a boundary face of a patch in `P_L`; a *layer point* is a
+point at least one layer face carries; `L` is the set of them. `n = layers.n`;
+`n = 0`, or an empty `layers.patches`, returns the mesh bit for bit.
+
+**The point normal.** Boundary faces are wound outward, so the inward unit
+normal of a layer face `f` is `-Sf/|Sf|`, and the normal at a layer point is
+its area-weighted average — which is the sum of the inward area vectors,
+normalised, so no weight has to be written down:
+
+```
+Lf(i)    = the layer faces carrying point i
+
+n_i^(0)  = normalise( - sum_{f in Lf(i)} Sf ),   i in L                (92.40)
+```
+
+Area weighting is what makes the normal at a 2:1 transition the normal of the
+surface and not of the face count: four fine faces and one coarse face meeting
+at a point carry the same area on each side, and (92.40) reads them that way.
+The average is then smoothed on the wall's own graph — `W(i)` of (92.27),
+restricted to `L` — and renormalised after every pass, `layers.normal_passes`
+times, with `w = layers.smoothing`:
+
+```
+n_i^(m+1) = normalise( (1 - w) n_i^(m) + w mean_{j in W(i) ^ L} n_j^(m) )
+                                                                       (92.41)
+```
+
+`normal_passes = 0` turns the smoothing off, and then a flat wall's normal is
+the sum of parallel area vectors: its DOMINANT COMPONENT comes back exact in
+every bit, and the two transverse components carry up to one ulp of dust — on a
+triangulated face the mean of three equal coordinates does not round back to
+that coordinate, and the face centroid inside `face_area_vector` is where the
+dust enters. Measured worst case on the box-minus-cube mesh: 1.2e-16. That is
+what lets the box-minus-cube case assert an exact prism to 1e-9 rather than to
+a loose tolerance; whole-vector bit equality would need the area-vector helper
+changed, and this section does not ask for that.
+
+**Where a layer meets something that is not a layer.** A layer point can also
+be carried by a boundary face that is NOT a layer face: the box side the ground
+plane runs out to, or a wall patch the config did not ask layers on. Moving it
+off that face's plane makes the patch non-planar and the case unreadable, so
+the normal is constrained into the plane rather than the point pinned — the
+same instrument as (92.30), stated for a general face normal because a wall
+that is not a layer wall need not be axis-aligned:
+
+```
+U(i)   = { unit outward normals of the NON-layer boundary faces carrying i },
+         deduped to 1e-6
+
+|U| = 0:  n_i unchanged
+|U| = 1:  n_i <- normalise( n_i - (n_i . u) u )
+|U| = 2:  n_i <- normalise( +- u_1 x u_2 ), the sign that agrees with n_i
+|U| >= 3: point i is PINNED
+
+and a projection leaving |n_i| < 0.1 before renormalisation pins i too (92.42)
+```
+
+Two constraints leave exactly one direction — the line where the two planes
+meet — which is why the case is a cross product and not a second projection: a
+point on the box's vertical edge where the ground plane reaches it may slide
+only up and down, and (92.42) says so exactly. Three independent constraints
+leave nothing, and a pinned point is a point with no thickness, which by the
+rule below costs its patch its layers.
+
+**The stack, and the level schedule.** (92.9) gives `t_k` and `T`. The
+extrusion needs the fractions, once, globally — every point uses the same
+schedule, which is what makes a hanging node's copies stay the midpoint of its
+parents' copies at every level:
+
+```
+f_0 = 0,  f_k = (sum_{j=1}^{k} t_j) / T,  f_n = 1                      (92.43)
+```
+
+**The medial distance, measured with the query the crate has.** (92.10) wants
+the distance from `x_i` to the medial axis. There is no medial-axis
+construction here and none is wanted; what is wanted is the distance at which
+the layer stack would run into a DIFFERENT piece of wall. `TriIndex` answers
+unsigned distance and closest point, so the march is written in those alone.
+On a flat wall `dist(x_i + s n_i) = s` exactly; a second wall approaching makes
+it less. The test has to reject the two cases where it is less for a reason
+that is not a second wall — a convex corner, where the closest point is the
+launch point itself, and a concave corner, where it is the foot of the same
+neighbourhood — so it asks for BOTH a short distance and a closest point far
+along the surface from where the march started:
+
+```
+y(s)   = x_i + s n_i
+q(s)   = closest_point(y(s))
+
+hit(s) <=> |q(s) - y(s)| <= (1 - kappa) s   AND   |q(s) - x_i| > c s
+
+s_max  = T / layers.medial_frac        kappa = 1/8        c = 3/2
+
+m(i)   = min { s in (0, s_max] : hit(s) },  +inf when none             (92.44)
+```
+
+`s_max` is set so that the limit `medial_frac * m(i)` can never bind above the
+nominal `T`, and so the march never runs further than the answer could matter.
+`m` is found by sampling `s_max j / 8`, `j = 1..8`, for the first `j` that hits
+and then six bisections between `s_{j-1}` and `s_j`: fourteen closest-point
+queries per layer point, bounded, deterministic, and an APPROXIMATION — a gap
+narrower than `s_max / 8` that opens and closes between two samples is missed,
+and what catches it then is the gate, not this. `kappa` and `c` are this
+project's own. At a convex 90-degree edge `q(s) = x_i` and `|q - x_i| = 0`, so
+`hit` is false at every `s`: the layers grow, which is right, because the
+fluid's medial axis is nowhere near a convex corner. At a concave 90-degree
+corner `|q - x_i| = s/sqrt(2) < 3s/2`, so `hit` is false there too: the corner
+shrinks into itself and the stack is not cut. Two walls a gap `g` apart give
+`|q(s) - y(s)| = g - s`, so the first hit is at
+
+```
+s = g / (2 - kappa) = 8g/15 = 0.533 g                                  (92.52)
+```
+
+— `kappa`'s margin PAST the medial axis at `g/2`, never before it. `m(i)` is
+therefore a slight over-estimate of the medial distance, by `kappa/(2 - kappa)`
+= 6.7 %, and the direction of the error is the one to have: `medial_frac`
+defaults to `1/2`, so the stack still stops at `0.267 g`, comfortably short of
+the axis.
+
+**The thickness a point is allowed.** (92.10) with the local cell size added,
+because a stack that fits between the walls can still eat the cell it grows
+into:
+
+```
+h_i    = min { |x_j - x_i| : j a neighbour of i along an edge of a layer face }
+
+T_i    = min( T,  layers.medial_frac * m(i),  layers.cell_frac * h_i )
+T_i    = 0   if i is pinned by (92.42)
+
+D_i    = T_i n_i          the displacement vector, and the array the
+                          retreat scales and the hanging nodes average (92.45)
+```
+
+**The shrink.** The boundary moves inward by `D_i` and the interior takes the
+displacement as (92.29)'s extension takes the snap's, so the one cell behind
+the wall does not absorb all of it. The boundary values are FIXED — they are
+the thickness, not a suggestion — and only the interior relaxes, for
+`layers.smoothing_passes` passes:
+
+```
+d_i^(0)   = D_i     i in L;   0   i a boundary point not in L;   0   otherwise
+
+d_i^(m+1) = D_i                                      i in L
+          = 0                                        i boundary, not in L
+          = w mean_{j in N(i)} d_j^(m)               i interior
+
+then, longest parent edge first, every hanging node rides its parents:
+          d_h <- (d_a + d_b) / 2                                       (92.46)
+```
+
+The thickness a point actually CARRIES is `|d_i|` after the averaging and after
+the retreats, not the `T_i` (92.45) proposed, and the report (92.50) reads
+`|d_i|`. The averaging can drive it to zero: a hanging node on a layer face
+whose PARENTS lie on a coarse face of a patch that is not a layer patch takes
+the mean of two zeros. A layer point that ends with `|d_i| = 0` on a patch that
+is still trying to keep its layers would extrude a side face of zero area, so
+it costs that patch its layers by the same rule (92.47) drops a patch under the
+floor — the check is `|d_i| > 0` on every layer point, unconditional, whatever
+`min_thickness` is set to.
+
+The hanging-node line is (92.33)'s, for (92.33)'s reason and one more: because
+`d_h` is the mean of its parents' whole DISPLACEMENT VECTORS and (92.43)'s
+schedule is global, the hanging node's copy at level `k` is the exact midpoint
+of its parents' copies at level `k`, at every level, so the split side faces of
+the paragraph after next close exactly.
+
+**The retreat.** The shrunk mesh — the mesh with the boundary moved and no
+cells added yet — is measured by §92.3's gate. G3 and G7 cannot be mended by
+moving points and are refused at once, as stage 4 refuses them. For the rest,
+the ladder is thickness first and layers second, which is the order §92.2 stage
+6 states:
+
+```
+repeat up to layers.retreat_limit times:
+    fail = the cells §92.3 named (for G4, both cells of the named face)
+    if fail is empty: accept
+    D_i <- D_i / 2   for every layer point i carried by a cell of fail
+    re-run (92.46)
+
+if still failing after the last retreat: the patch loses its layers
+if any T_i < layers.min_thickness * T at accept: that patch loses its layers
+                                                                       (92.47)
+```
+
+Losing layers is a decision about a PATCH, and the failing cells name points,
+not patches, so the patch that loses them is the one carrying the most failing
+layer points, ties to the lower patch index, ONE patch per round; the whole
+stage — (92.40) through (92.47) — is then recomputed from the input mesh with
+that patch removed from `P_L`, because a point it shared with a patch that
+keeps its layers is now constrained by (92.42) into the dropped patch's plane
+and its normal is a different vector. The outer loop therefore runs at most
+`|P_L|` times and terminates.
+
+A patch that loses its layers keeps its snapped boundary, is reported by name
+with the reason, and the run continues — §92.2 stage 6's own sentence. When
+every named patch has lost its layers the returned mesh is the input mesh, bit
+for bit.
+
+**The extrusion.** Levels are counted from the wall: level 0 is the wall where
+it was, level `n` is where the shrink put it. Level `n` is the mesh's own
+point; levels `0..n-1` are new:
+
+```
+x_i^(k) = x_i^orig + f_k D_i,   k = 0..n,   i in L
+
+point ids:   level k < n -> a new point;  level n -> point i itself
+cells:       layer face j gets n cells, c(j,k) = C + j n + k, k = 0..n-1,
+             where C is the cell count of the input mesh and c(j,k) lies
+             between level k and level k+1
+faces:       level 0     -> a BOUNDARY face on the layer face's own patch,
+                            the layer face's point list at level 0, its
+                            winding unchanged (outward)
+             level k     -> INTERNAL, owner c(j,k-1), neighbour c(j,k),
+             1<=k<=n-1      the point list REVERSED (owner is nearer the
+                            wall, so the normal has to point inward)
+             level n     -> the input mesh's own face, point list and winding
+                            unchanged, now INTERNAL with owner its original
+                            cell and neighbour c(j,n-1)                (92.48)
+```
+
+Owner is below neighbour in every one of those by construction, because layer
+cells are numbered after every original cell and `c(j,k-1) < c(j,k)`.
+
+**The sides, and the 2:1 transitions.** A layer face's edge may carry a hanging
+node — a coarse wall face beside four fine ones is normal on an octree mesh,
+and on the WALL it costs nothing because boundary faces need not match each
+other. Once the gap is filled it costs something: the side faces become
+internal, and an internal face has to match. So every edge is first cut into
+SEGMENTS at the hanging nodes that lie on it (`find_hanging`'s map, applied
+until no hanging node lies inside a segment), and a side face is emitted per
+segment per level:
+
+```
+for each segment (u, v) of each layer face f, at each level k:
+    the quad is (u^(k), v^(k), v^(k+1), u^(k+1)), wound so that its area
+    vector points from its owner cell to its neighbour cell
+
+    segment carried by two layer faces f, g:  INTERNAL, between c(f,k)
+                                              and c(g,k)
+    segment carried by one layer face and a non-layer boundary face g:
+                                              BOUNDARY, on g's patch
+    segment carried by one layer face alone:  a refusal - the layer patch
+                                              has an open rim          (92.49)
+```
+
+A coarse layer cell therefore emits TWO side faces where its fine neighbours
+emit one each, which is §92.9's 2:1 convention on the wall's own edges, and the
+closure of the coarse cell is exact rather than approximate: with the hanging
+node the exact midpoint of its parents at every level, the two half strips'
+directed edges cancel the whole edge of the level polygon in the
+`(1/2) sum p x p'` term for term, so G2 sees zero and not a rounding error.
+This is why (92.46) averages the parents' displacement vectors and (92.43)'s
+schedule is global; it is the same argument as (92.33)'s, one dimension up.
+
+**Assembly.** Internal faces are the input's, plus every level `1..n` face,
+plus the internal side faces; `ldu_permutation` puts them in (2)'s order.
+Boundary faces are, patch by patch in the input's patch order: the patch's own
+faces — for a layer patch, its level-0 copies, in the input's order — followed
+by the side faces (92.49) put on that patch. Patch names, types and relative
+order are the input's; only the sizes change.
+
+**The report.** Per patch, area-weighted, because a layer addition that quietly
+achieved 12 % of what was asked for is the failure mode the report exists to
+make visible:
+
+```
+A_f       = |Sf| of layer face f at level 0
+tau_f     = ( min_{i in f} T_i ) / T          the fraction f actually got
+
+full      = sum { A_f : tau_f >= 1 - 1e-9 } / sum A_f
+mean_frac = sum A_f tau_f / sum A_f                                    (92.50)
+```
+
+`full` is the fraction of the patch's area that received the full stack;
+`mean_frac` is the fraction of the nominal thickness the patch received on
+average. A dropped patch reports `n_layers = 0` and the reason.
+
+**G5 and a thin layer, which is the one place the gate and this stage pull
+against each other.** A layer cell is a slab by construction. Its largest
+planar face group (§92.3) is one of the two level faces — the other has the
+opposite outward normal and is a group of its own — so on a wall face of size
+`h` carrying a layer of thickness `t`,
+
+```
+tau = 3 V / A_max^(3/2) = 3 h^2 t / h^3 = 3 t / h                      (92.51)
+```
+
+and G5's `0.05` therefore refuses any layer thinner than `h / 60`. That is not
+a bug in either: the ammonia sliver of §92.1 was `tau = 0.0115`, and a gate
+that let it through would let a 5 cm cell span 13 m. But a `y+ ~ 1` first layer
+is `h / 100` or finer, so the two cannot both be had at these numbers, and this
+section does not resolve it by weakening G5 — G5 is why the mesher exists.
+What it does instead is REFUSE EARLY and say the arithmetic: before any cell is
+inserted, `add_layers` computes `3 t_1 / h` on the smallest layer face and, if
+it is under `quality.min_thickness_ratio`, refuses naming `t_1`, `h`, the ratio
+and the threshold, so the user sees the trade rather than a gate failure on
+cell 12345. Giving layer cells their own thickness rule is a change to §92.3's
+gate and belongs to whoever makes that decision, not to this stage.
+
+**What this stage does NOT do.** The layer count is uniform over a patch: a
+point that cannot carry the stack costs its whole patch, not just its own
+faces. Terminating a layer stack part-way across a patch needs a face topology
+that closes the stack where it stops — a step the boundary has to carry — and
+that is tranche 2's, together with the tetrahedral path. The consequence is
+stated rather than hidden: on a patch with one pinned point the report says
+`dropped`, and the mesh that comes back is the snapped one, which is a mesh the
+solver can run.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| `layers.n = 0`, or no patch named | the input mesh, bit for bit, and a report of no layers |
+| a patch name that is not a patch of the mesh | refused, naming it, before any normal is computed |
+| a flat wall, `normal_passes = 0` | every layer cell is a prism whose height is `t_k` exactly, to 1e-9 |
+| every emitted mesh | passes G1–G7 of §92.3, or the run refused with §92.3's own message |
+| the cell count | `C + n * (number of layer faces)`, exactly |
+| the point count | `P + n * |L|`, exactly |
+| a layer patch's boundary faces | the same count as before, one level-0 face per input face, in the input's order |
+| a non-layer patch | keeps its own faces, in order, and gains only the side faces (92.49) gave it |
+| a 2:1 transition inside a layer patch | the coarse cell carries two side faces there, the fine cells one each, and G2 is zero to 1e-12 |
+| two walls a gap `g` apart | `T_i <= medial_frac * g / 2` on both, by (92.44); no cell is inverted and none has to be repaired |
+| a patch that cannot carry its stack | `n_layers = 0`, the reason named, the rest of the mesh unchanged, and the run continues |
+| `owner < neighbour` on every internal face | by construction for the level faces, by `ldu_permutation` for the whole array |
+| a first layer thinner than `h/60` | refused before any cell is inserted, naming `3 t_1 / h` and `quality.min_thickness_ratio` (92.51) — not discovered as a G5 failure on an inserted cell |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box minus a sphere, 3 layers | every wall face has exactly 3 layer cells behind it; the achieved first-layer thickness is within 5 % of `first_thickness`; the gate passes; one region |
+| a box minus a cube, 3 layers, `normal_passes = 0` | on the faces whose points are all interior to a flat side, the layer cells are exact hexahedra and the level spacing is `t_1, t_2, t_3` to 1e-9 |
+| a slot narrower than twice the requested stack | the run retreats: the gate passes, `mean_frac < 1` is reported, and no cell has negative volume — the failure this section exists to refuse |
+| the same slot with `min_thickness` above what fits | the patch is dropped by name, and the returned mesh is the snapped mesh bit for bit |
+| the cell and point counts, on every case above | exactly `C + n F` and `P + n |L|` |
+| a mesh with a 2:1 transition on the layer patch | the split side faces are emitted, the mesh loads, and G2 is under 1e-12 |
+| `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
+
+---

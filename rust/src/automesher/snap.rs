@@ -687,7 +687,7 @@ fn claim_corners(
 
 /// The polygon's area vector, fanned about the mean of its own points -
 /// the construction `mesh::geometry` runs, on the raw arrays.
-fn face_area_vector(points: &[Vec3], face: &[Label]) -> Vec3 {
+pub(crate) fn face_area_vector(points: &[Vec3], face: &[Label]) -> Vec3 {
     let mut c = Vec3::ZERO;
     for &p in face {
         c = c + points[p as usize];
@@ -719,7 +719,7 @@ fn face_area_vector(points: &[Vec3], face: &[Label]) -> Vec3 {
 /// Written by the supervising session, not by the coding agent: the rule and
 /// the ordering are the coding agent's, the bucketing replaced its O(edges x
 /// points) fallback scan.
-fn find_hanging(points: &[Vec3], faces: &[Vec<Label>]) -> Vec<(u32, [u32; 2])> {
+pub(crate) fn find_hanging(points: &[Vec3], faces: &[Vec<Label>]) -> Vec<(u32, [u32; 2])> {
     if points.is_empty() {
         return Vec::new();
     }
