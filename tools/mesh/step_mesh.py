@@ -118,7 +118,7 @@ DEFAULTS = {
     'post': {'flat_tets': True, 'flat_threshold': 1e-7, 'seam_merge_m': 0.02,
              'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0,
              'sliver_rel': 0.0, 'sliver_edge_rel': 0.25, 'min_thickness': 0.0,
-             'repair_rounds': 3},
+             'repair_rounds': 3, 'improve_below': 0.0, 'improve_rounds': 3},
     'classification': {'wall_prefix': 'wall_', 'pool_prefix': 'pool_',
                        'big_roof_is_ground_m2': 2000.0},
 }
@@ -417,6 +417,11 @@ def load_config(path):
         errors.append('config.post.min_thickness: expected a thickness ratio >= 0 (0 = no gate)')
     if not isinstance(p['repair_rounds'], int) or isinstance(p['repair_rounds'], bool) or p['repair_rounds'] < 0:
         errors.append('config.post.repair_rounds: expected a round count >= 0')
+    if not _is_num(p['improve_below']) or not 0 <= p['improve_below'] < 1:
+        errors.append('config.post.improve_below: expected a SICN target in [0, 1) (0 disables the '
+                      'worst-cell pass)')
+    if not isinstance(p['improve_rounds'], int) or isinstance(p['improve_rounds'], bool) or p['improve_rounds'] < 0:
+        errors.append('config.post.improve_rounds: expected a round count >= 0')
 
     c = cfg['classification']
     if not isinstance(c['wall_prefix'], str):
@@ -1979,7 +1984,7 @@ def quality():
 
 def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_vol, thin_push,
                               sliver_rel, sliver_edge_rel, min_thickness=0.0, repair_rounds=3,
-                              keep_boxes=()):
+                              keep_boxes=(), improve_below=0.0, improve_rounds=3):
     """Delete zero-volume tets whose four nodes lie in one planar boundary by re-triangulating
     the boundary underneath them; merge seam node pairs, collapse sliver edges, push thin tets,
     nudge an interior node for the few that touch no boundary triangle.
@@ -2443,6 +2448,153 @@ def remove_flat_boundary_tets(fluid, flat_thr, seam_merge, sliver_edge, sliver_v
                 break
         vol = volumes(np.arange(len(T)))
         flat = np.abs(vol) < flat_thr * L ** 3
+    # ---- the worst cells: a local optimisation of their movable nodes ----------------------
+    # Every live tet whose SICN is under improve_below has each of its nodes tried at a few
+    # candidate positions - fractions of the way to the centroid of the node's neighbours, and
+    # steps away from the tet's opposite face - and keeps the candidate that raises the minimum
+    # SICN of all tets around the node the most. An interior node moves freely; a boundary node
+    # whose surface triangles all lie in one plane and one patch slides within that plane, so
+    # the geometry and the patch areas are kept exactly; a node on a patch boundary, a curved
+    # surface or an edge stays. A sliding node's surface triangles must keep their orientation
+    # and at least half their area. SICN here is gmsh's: 3 det J / (|J|_F |adj J|_F) with J the
+    # Jacobian of the map from the regular tet (1 for regular, 0 for flat, < 0 for inverted).
+    n_imp_moved = n_imp_stuck = 0
+    if improve_below > 0:
+        W_inv = np.linalg.inv(np.array([[1.0, 0.5, 0.5],
+                                        [0.0, math.sqrt(3.0) / 2.0, math.sqrt(3.0) / 6.0],
+                                        [0.0, 0.0, math.sqrt(2.0 / 3.0)]]))
+
+        def sicn(idx):
+            P = xyz[nmap[T[idx]]]
+            E = np.stack([P[:, 1] - P[:, 0], P[:, 2] - P[:, 0], P[:, 3] - P[:, 0]], axis=2)
+            J = E @ W_inv
+            c1, c2, c3 = J[:, :, 0], J[:, :, 1], J[:, :, 2]
+            adj = np.stack([np.cross(c2, c3), np.cross(c3, c1), np.cross(c1, c2)], axis=1)
+            det = np.einsum('ij,ij->i', c1, adj[:, 0])
+            fro = np.sqrt((J * J).sum(axis=(1, 2))) * np.sqrt((adj * adj).sum(axis=(1, 2)))
+            return 3.0 * det / np.maximum(fro, 1e-300)
+
+        def sicn_all():
+            out = np.empty(len(T))
+            for s0 in range(0, len(T), 2000000):
+                idx = np.arange(s0, min(s0 + 2000000, len(T)))
+                out[idx] = sicn(idx)
+            return out
+
+        live_mask = ~removed
+        q_all = sicn_all()
+        q_before = q_all[live_mask]
+        imp_stats = {'min': float(q_before.min()), 'below_target': int((q_before < improve_below).sum()),
+                     'below_0.2': int((q_before < 0.2).sum()), 'below_0.3': int((q_before < 0.3).sum())}
+        # the live surface triangles with their surface and patch, and per node: its triangles
+        tri_list, tri_sf = [], []
+        for sf in rows:
+            for r in rows[sf]:
+                if r is not None:
+                    tri_list.append(r)
+                    tri_sf.append(sf)
+        TRI = np.array(tri_list, dtype=np.int64).reshape(-1, 3)
+        sf_patch = {}
+        for sf in rows:
+            pg = gmsh.model.getPhysicalGroupsForEntity(2, sf)
+            sf_patch[sf] = int(pg[0]) if len(pg) else -1
+        TRI_patch = np.array([sf_patch[sf] for sf in tri_sf], dtype=np.int64)
+        torder = np.argsort(TRI.ravel(), kind='stable')
+        tflat = TRI.ravel()[torder]
+
+        def tri_star(node):
+            a0 = np.searchsorted(tflat, node)
+            a1 = np.searchsorted(tflat, node, side='right')
+            return torder[a0:a1] // 3
+
+        def tri_geom(ts):
+            Pt = xyz[nmap[TRI[ts]]]
+            n = np.cross(Pt[:, 1] - Pt[:, 0], Pt[:, 2] - Pt[:, 0])
+            a = np.linalg.norm(n, axis=1)
+            return n / (a[:, None] + 1e-300), a
+
+        order_all = np.argsort(T.ravel(), kind='stable')
+        flat_all = T.ravel()[order_all]
+
+        def tet_star(node):
+            a0 = np.searchsorted(flat_all, node)
+            a1 = np.searchsorted(flat_all, node, side='right')
+            a = order_all[a0:a1] // 4
+            return a[~removed[a]]
+
+        for rnd in range(improve_rounds):
+            bad = np.where(live_mask & (q_all < improve_below))[0]
+            if not len(bad):
+                break
+            moved_now = 0
+            for i in bad:
+                if q_all[i] >= improve_below:
+                    continue
+                for m4 in range(4):
+                    node = int(T[i, m4])
+                    ts = tri_star(node)
+                    plane = None
+                    if len(ts):
+                        # a boundary node: slidable only inside one plane of one patch
+                        nrm_t, area_t = tri_geom(ts)
+                        if (TRI_patch[ts] == TRI_patch[ts[0]]).all() and \
+                                (nrm_t @ nrm_t[0] > 0.9998).all():
+                            plane = nrm_t.mean(axis=0)
+                            plane = plane / (np.linalg.norm(plane) + 1e-300)
+                        else:
+                            n_imp_stuck += 1
+                            continue
+                    a = tet_star(node)
+                    if not len(a):
+                        continue
+                    x0 = xyz[nmap[node]].copy()
+                    q0 = sicn(a).min()
+                    # candidates: towards the neighbours' centroid, away from the opposite face
+                    nb = np.unique(T[a])
+                    nb = nb[nb != node]
+                    d_lap = xyz[nmap[nb]].mean(axis=0) - x0
+                    o = [j for j in range(4) if j != m4]
+                    pts = xyz[nmap[T[i]]]
+                    nrm = np.cross(pts[o[1]] - pts[o[0]], pts[o[2]] - pts[o[0]])
+                    nrm = nrm / (np.linalg.norm(nrm) + 1e-300)
+                    if np.dot(pts[m4] - pts[o[0]], nrm) < 0:
+                        nrm = -nrm
+                    cands = [f * d_lap for f in (0.25, 0.5, 1.0)]
+                    cands += [s * L[i] * nrm for s in (0.1, 0.25, 0.5)]
+                    cands += [0.5 * d_lap + 0.25 * L[i] * nrm]
+                    if plane is not None:
+                        cands = [d - np.dot(d, plane) * plane for d in cands]
+                    best, best_q = None, q0
+                    for d in cands:
+                        if np.linalg.norm(d) < 1e-9:
+                            continue
+                        xyz[nmap[node]] = x0 + d
+                        q = sicn(a).min()
+                        ok = q > best_q + 1e-4
+                        if ok and plane is not None:
+                            n_new, a_new = tri_geom(ts)
+                            ok = (n_new @ plane > 0.999).all() and (a_new >= 0.5 * area_t).all()
+                        if ok:
+                            best, best_q = d, q
+                    xyz[nmap[node]] = x0 + best if best is not None else x0
+                    if best is not None:
+                        moved_now += 1
+                        q_all[a] = sicn(a)
+                    else:
+                        n_imp_stuck += 1
+            n_imp_moved += moved_now
+            if moved_now == 0:
+                break
+        q_after = q_all[live_mask]
+        imp_stats.update({'after: min': float(q_after.min()),
+                          'after: below_target': int((q_after < improve_below).sum()),
+                          'after: below_0.2': int((q_after < 0.2).sum()),
+                          'after: below_0.3': int((q_after < 0.3).sum()),
+                          'nodes moved': n_imp_moved, 'nodes stuck': n_imp_stuck})
+        notes['worst cells (SICN < %g)' % improve_below] = imp_stats
+        SUMMARY['worst_cells'] = imp_stats
+        vol = volumes(np.arange(len(T)))
+        flat = np.abs(vol) < flat_thr * L ** 3
     P = xyz[nmap[T]]
     v, areas, amax, tau = thickness(P)
     live = ~removed
@@ -2529,7 +2681,15 @@ def post_and_write_stage(cfg, out_dir, tag):
         n_removed, n_flat, n_rounds, skipped = remove_flat_boundary_tets(
             fluid, p['flat_threshold'], p['seam_merge_m'], p['sliver_edge_m'],
             p['sliver_vol_m3'], p['thin_push_m'], p['sliver_rel'], p['sliver_edge_rel'],
-            p['min_thickness'], p['repair_rounds'], keep_boxes)
+            p['min_thickness'], p['repair_rounds'], keep_boxes, p['improve_below'],
+            p['improve_rounds'])
+        wc = SUMMARY.get('worst_cells')
+        if wc:
+            log('worst cells (SICN < %g): %d -> %d, below 0.2: %d -> %d, below 0.3: %d -> %d, '
+                'min %.4f -> %.4f; nodes moved %d, stuck %d' % (
+                    p['improve_below'], wc['below_target'], wc['after: below_target'],
+                    wc['below_0.2'], wc['after: below_0.2'], wc['below_0.3'], wc['after: below_0.3'],
+                    wc['min'], wc['after: min'], wc['nodes moved'], wc['nodes stuck']))
         gate = SUMMARY.get('thickness_gate') or []
         if gate:
             log('thickness gate: worst tau %.4f at (%.1f, %.1f, %.1f); %s' % (
