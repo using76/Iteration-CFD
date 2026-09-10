@@ -4,16 +4,17 @@
 # No GPL-licensed source was consulted.
 # Export the fluid region (one solid) of a step_mesh checkpoint as STEP (mm, like the original
 # STEP) and as a binary STL surface mesh (metres).
-#   python export_fluid.py <fluid.brep> <out_basename> [--trim z] [--stl-size m]
+#   python export_fluid.py <fluid.brep> <out_basename> [--trim z] [--stl-size m] [--no-stl | --stl-only]
 import sys, os, time, gmsh
 src = sys.argv[1]; base = sys.argv[2]
-trim = None; stl_size = 2.0; stl_only = False
+trim = None; stl_size = 2.0; stl_only = False; no_stl = False
 a = sys.argv[3:]
 while a:
     k = a.pop(0)
     if k == '--trim': trim = float(a.pop(0))
     elif k == '--stl-size': stl_size = float(a.pop(0))
     elif k == '--stl-only': stl_only = True
+    elif k == '--no-stl': no_stl = True          # the STEP solid only, no surface mesh
 t0 = time.time()
 gmsh.initialize(); gmsh.option.setNumber('General.Terminal', 0)
 gmsh.option.setNumber('Geometry.OCCScaling', 1.0)
@@ -43,6 +44,8 @@ if not stl_only:
     print('wrote %s.step (%.0f MB, mm) in %.0f s' % (base, os.path.getsize(base + '.step') / 1e6, time.time() - t0), flush=True)
     gmsh.model.occ.dilate(gmsh.model.getEntities(), 0, 0, 0, 0.001, 0.001, 0.001)
     gmsh.model.occ.synchronize()
+if no_stl:
+    gmsh.finalize(); raise SystemExit(0)
 # STL: a surface mesh in metres
 gmsh.option.setNumber('Mesh.MeshSizeMin', stl_size / 4)
 gmsh.option.setNumber('Mesh.MeshSizeMax', stl_size)

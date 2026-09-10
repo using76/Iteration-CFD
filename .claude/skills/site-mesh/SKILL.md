@@ -32,6 +32,7 @@ description: STEP 부지 형상에서 수렴하는 사면체 격자를 만들 �
 | `solids.hull_box_snap_m`, `hull_box_inset_m` | `20, 5` | 경계 20 m 안의 프리즘 꼭짓점을 경계 안쪽 5 m로 당겨 어떤 벽도 출구에 닿지 않게; 띠 안에서 윤곽이 퇴화한 건물은 제거 |
 | `sizes.gap_min_m` | `1.0` | 틈 규칙 세분의 먼 곳 바닥 — 없으면 2,400만 셀로 폭발 |
 | `mesh` | `algo2d 6, algo3d 1, threads 32` | HXT(10)는 좌표를 찍어 주는 진단용으로만 |
+| `classification.pool_prefix` | `""` (기본 `pool_`) | 점 이름이 그대로 inlet 패치 이름이 된다 — 점 `inlet1`·`inlet2`·`inlet3` → 패치 `inlet1`…, 옆면 `wall_inlet1`…; 변환기는 `inlet`으로 시작하는 이름을 velocity-inlet으로 기본 배정한다. 한 형상에 원천 여러 개(원판+링+다른 원판)를 넣을 때 |
 
 설정에 모르는 키(`_note` 등)를 넣으면 도구가 거부한다. 메모는 README.txt에.
 

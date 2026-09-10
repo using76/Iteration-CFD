@@ -82,7 +82,11 @@ disc-sized pieces at a point's ground height — a point given as
 it a ring, so an inner disc and an outer ring at one centre are two patches
 whose pieces are told apart by whether they fit inside the inner square), and one patch per
 `roof_patches` name (a solid's flat roof). `wall_prefix` renames the four
-`wall_*` groups.
+`wall_*` groups; `pool_prefix` (default `pool_`) is what goes in front of a
+point's name for its inlet patch — `""` names the patch after the point itself,
+so points `inlet1`, `inlet2`, `inlet3` give patches `inlet1`… and sides
+`wall_inlet1`… (the converter's Fluent default already makes a name that
+starts with `inlet` a velocity-inlet).
 
 ## Config schema
 
@@ -191,7 +195,7 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                              // listed in the summary's "thickness_gate" with their positions
     "repair_rounds": 3
   },
-  "classification": {"wall_prefix": "wall_", "big_roof_is_ground_m2": 2000}
+  "classification": {"wall_prefix": "wall_", "pool_prefix": "pool_", "big_roof_is_ground_m2": 2000}
 }
 ```
 
