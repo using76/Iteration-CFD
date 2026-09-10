@@ -36,15 +36,23 @@ description: STEP 부지 형상에서 수렴하는 사면체 격자를 만들 �
 
 설정에 모르는 키(`_note` 등)를 넣으면 도구가 거부한다. 메모는 README.txt에.
 
+## 1b. 원천 여러 개를 한 형상에 (예: `examples/pool_three_inlets.json`)
+
+- `points`에 원천을 모두 적는다. 같은 중심의 원판+링은 두 점으로: `inlet1 {r 10.5}`, `inlet2 {r 22.1, r_inner 10.5}` — 큰 원기둥이 작은 것을 잘라내므로 옆면은 큰 반지름(`wall_inlet2`)만 남고, 윗면은 안쪽 원판(inlet1)과 링(inlet2)으로 나뉜다. 다른 중심의 원판은 `inlet3 {r 22.1}`.
+- `classification.pool_prefix`를 `""`로 두면 패치 이름이 점 이름 그대로(`inlet1`…)가 되고 변환기가 `inlet*`을 velocity-inlet으로 잡는다.
+- 원기둥끼리의 틈은 셀 두세 개 이상(0.35 m 격자면 0.8 m 이상)이어야 한다. 틈 규칙이 나머지를 세분한다.
+- 절단의 `hull_beyond_m`은 가장 가까운 점 기준이라 원천이 여럿이면 자세히 남는 건물이 늘어난다. 셀 수는 원천 상자 수만큼 는다(원판·링·원판 세 개: 1,198만 셀, 단일 케이스 780만~840만).
+
 ## 2. 실행
 
 ```
-tools\mesh\run_step_mesh.cmd <case>.json                # 처음부터 (STEP → 절단 → 풀 → 체크포인트 → 격자)
+tools/mesh/mesh_case.sh <case>.json [--from-checkpoint]  # 한 번에: 격자 → geometry/fluid_<name>.step → polyMesh + Fluent(inlet은 자동 velocity-inlet)
+tools\mesh\run_step_mesh.cmd <case>.json                # 격자만, 처음부터 (STEP → 절단 → 풀 → 체크포인트 → 격자)
 tools\mesh\run_step_mesh.cmd <case>.json --from-checkpoint   # 크기·후처리만 바꿀 때 (절단 생략)
 ofgpu-convert-mesh <case>.msh <caseDir> -fluent <case>_fluent.msh -fluentType pool_<name>=velocity-inlet
 ```
 
-여러 케이스는 납품 폴더의 `run_all.cmd [케이스…]`(체크포인트가 있으면 자동 재개)로. 절단 뒤 로그에서 확인할 것:
+`mesh_case.sh`는 Bash에서 `cmd //c start "" "C:\Program Files\Git\bin\bash.exe" <repo>/tools/mesh/mesh_case.sh <case>.json`으로 띄운다. 결과는 케이스 폴더(`<case>.json`이 있는 곳)의 `mesh/`, `geometry/`, `case/`, `<name>_fluent.msh`, `mesh.exit`(`step_mesh exit N` + `convert exit N`). 여러 케이스는 이 줄을 순서대로 부르는 셸 루프로(한 번에 하나: 800만 셀 격자 하나가 메모리를 다 쓴다). 절단 뒤 로그에서 확인할 것:
 
 - `solids beyond … replaced by padded convex-hull prisms: N` / `fused groups replaced …: M`
 - `near-touching solid vertices: K pairs` — 20개 이하면 정상, 100개 이상이면 프리즘 교차 정점이 남은 것

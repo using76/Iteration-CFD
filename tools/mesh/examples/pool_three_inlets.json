@@ -1,0 +1,99 @@
+{
+  "step": "C:/path/to/site.step",
+  "scale": 0.001,
+  "out_dir": "C:/path/to/pool_cases/pool_three_inlets/mesh",
+  "name": "pool_three_inlets",
+  "fluid": {
+    "tag": 1
+  },
+  "domain_box": [
+    -1250.0,
+    -1250.0,
+    -7.5,
+    1250.0,
+    1250.0,
+    200.0
+  ],
+  "outer_tol": 0.05,
+  "solids": {
+    "sink_m": 1.5,
+    "fuse": true,
+    "exclude_tags": [],
+    "hull_beyond_m": 150.0,
+    "hull_pad_m": 1.0,
+    "boolean_tol_m": 0.0,
+    "hull_snap_m": 0.05,
+    "hull_box_snap_m": 20.0,
+    "hull_box_inset_m": 5.0
+  },
+  "repairs": [],
+  "trim": {
+    "below_z": 3.05,
+    "shrink_xy_m": 600.0
+  },
+  "sea_z": 3.05,
+  "points": {
+    "inlet1": {
+      "x": 18.5,
+      "y": -7.5,
+      "r": 10.5,
+      "h": 0.5
+    },
+    "inlet2": {
+      "x": 18.5,
+      "y": -7.5,
+      "r": 22.1,
+      "r_inner": 10.5,
+      "h": 0.5
+    },
+    "inlet3": {
+      "x": -23.2,
+      "y": 9.4,
+      "r": 22.1,
+      "h": 0.5
+    }
+  },
+  "pool_radius_m": 26.0,
+  "roof_patches": {},
+  "sizes": {
+    "min": 0.3,
+    "max": 60.0,
+    "pool": 0.35,
+    "box": 2.5,
+    "growth_from": 2.5,
+    "near_struct": 6.0,
+    "far_struct": 20.0,
+    "near_radius": 400.0,
+    "size_mult": 1.0,
+    "roof_boxes": [
+      2.5,
+      5.0,
+      10.0
+    ],
+    "gap_ratio": 2.5,
+    "gap_min_m": 1.0
+  },
+  "mesh": {
+    "algo2d": 6,
+    "algo3d": 1,
+    "optimize_passes": 5,
+    "threads": 32
+  },
+  "post": {
+    "flat_tets": true,
+    "flat_threshold": 1e-07,
+    "seam_merge_m": 0.02,
+    "sliver_edge_m": 0.0,
+    "sliver_vol_m3": 0.2,
+    "thin_push_m": 0.3,
+    "sliver_rel": 0.02,
+    "sliver_edge_rel": 0.3,
+    "min_thickness": 0.05,
+    "repair_rounds": 3
+  },
+  "classification": {
+    "wall_prefix": "wall_",
+    "pool_prefix": "",
+    "big_roof_is_ground_m2": 2000.0
+  }
+}

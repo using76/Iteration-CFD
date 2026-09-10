@@ -52,6 +52,16 @@
    제거되고 `regions:` 줄에 개수가 남는다. Fluent 존: pool_* velocity-inlet, wall_* wall, top/west/south/
    north pressure-outlet, east velocity-inlet.
 
+### 2b. 원천 여러 개를 한 형상에
+
+세 케이스(원판 R10.5, 그 둘레 링 10.5~22.1, 다른 중심의 원판 R22.1)를 한 격자로 만들 때는
+`points`에 세 점을 적고 `classification.pool_prefix`를 `""`로 둔다(패치 `inlet1`·`inlet2`·`inlet3`,
+옆면 `wall_inlet2`·`wall_inlet3`; 안쪽 원기둥의 옆면은 큰 원기둥에 잘려 없다). 변환기는 `inlet*`을
+velocity-inlet으로 기본 배정한다. 두 R22.1 원기둥 사이 0.79 m 틈은 틈 규칙이 세분했고, 결과는
+1,198만 셀(단일 케이스 780만~840만)로 같은 레시피에서 품질도 같았다. 전체 사슬(격자 → 유체 솔리드
+STEP → polyMesh + Fluent)은 `tools/mesh/mesh_case.sh <case>.json`, 레시피는
+`tools/mesh/examples/pool_three_inlets.json`.
+
 ## 3. 검토 게이트
 
 | 검사 | 도구 | 통과 기준 |
