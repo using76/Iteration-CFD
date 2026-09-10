@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "probe:llm": "tsx scripts/llm-probe.ts"
+    "probe:llm": "tsx scripts/llm-probe.ts",
+    "drive": "tsx scripts/ai-drive.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

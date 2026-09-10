@@ -7,5 +7,5 @@
     "rootDir": "..",
     "allowImportingTsExtensions": false
   },
-  "include": ["src", "../shared/src"]
+  "include": ["src", "scripts", "../shared/src"]
 }

@@ -71,6 +71,21 @@ npm run build          # vite build + tsc
 npm run e2e            # Playwright: 데모 모드로 메쉬 → 실행 → 잔차 → 뷰어 (WebGL2 강제)
 ```
 
+## 헤드리스 드라이브 (ai-drive)
+
+브라우저 없이 서버의 WS 클라이언트로 접속해 어시스턴트에게 일을 시키고, 스트리밍 텍스트·툴 호출·실행 진행·종료를 콘솔에 프린트하는 스크립트입니다. 승인 카드와 `gui_control` 명령에 GUI 대신 답하므로, 화면 없이 시뮬레이션 한 판을 통째로 돌릴 수 있습니다.
+
+```bash
+cd gui
+CFD_LLM=mock CFD_DEMO=1 npx tsx server/src/main.ts &          # 서버 (모의 솔버 + 대본형 어시스턴트)
+npm run drive -- --autopilot --ui --case cases/plume.jsonc     # 헤드리스 실행, 끝나면 VERDICT 한 줄
+```
+
+- `--autopilot` — `autoApprove: 'all'`로 둔다. 없으면 `'reads'`로 두고 받는 `tool.approval_request`를 프린트한 뒤 모두 승인한다.
+- `--ui` — GUI가 없을 때 그 자리를 대신한다: 시작에 `ui.state`를 보내고 모든 `ui.command`에 `ui.result ok:true`로 답한다(`gui_control`·`gui_state`가 동작).
+- `--url`(기본 `ws://127.0.0.1:$CFD_PORT/ws`, `CFD_PORT`가 없으면 8787), `--case`(기본 `cases/plume.jsonc`), `--prompt`, `--timeout`(초, 기본 900).
+- 실행이 done/converged로 끝나고 마지막 어시스턴트 메시지에 텍스트가 있으면 exit 0, 아니면 1. 실행을 요구하지 않은 프롬프트(예: 화면만 조작)는 어시스턴트 답변만 있으면 exit 0. 실제 LLM은 `CFD_LLM=zai CFD_DEMO=1 npx tsx server/src/main.ts` 로. `CFD_LLM`을 빼면 셸에 있는 `ANTHROPIC_API_KEY`나 `~/.claude/zai-key`가 먼저 잡히므로, 대본형 어시스턴트를 원할 때는 `CFD_LLM=mock`을 명시한다.
+
 ## 실제 GPU 기기에서의 체크리스트
 
 1. `cargo build --release`(CUDA 13, VS 2022)로 바이너리를 만들고 `OFGPU_BIN_DIR`를 가리킵니다.
