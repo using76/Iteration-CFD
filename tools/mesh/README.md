@@ -34,6 +34,18 @@ On Windows, `run_step_mesh.cmd <config.json> [flags]` runs the tool in the
 current console — the stage banners print as they happen — and copies every
 line to `<out_dir>/work/run.log`.
 
+`mesh_case.sh <case.json> [--from-checkpoint] [--no-geometry] [--no-fluent]` is
+the whole chain for one case: `run_step_mesh.cmd`, the fluid solid of the meshed
+domain exported as STEP (`<case dir>/geometry/fluid_<name>.step`, and
+`_full.step` before the trim) as soon as the trim has run, then the converter
+with every point's inlet patch typed `velocity-inlet` — `case/constant/polyMesh`,
+`<name>_fluent.msh`, `convert.log` and `mesh.exit` in the case directory. Launch
+it in its own console from Bash. `examples/pool_three_inlets.json` is a case with
+three sources in one geometry (a disc, the ring around it, another disc) whose
+patches are named after the points (`classification.pool_prefix` `""`);
+`examples/pool_ring_case.json` the single-source form. The steady air test that
+judges a mesh is `solver_test/` (`test_cases.sh <iters> <write> <caseDir>...`).
+
 > The site playbook — what broke a 2.5 km site mesh and the recipe that fixed it (far-solid
 > convex hulls, the gap rule, the thickness gate), the review gates and the diagnosis scripts —
 > is `docs/08-site-mesh-playbook.md`; the step-by-step procedure for a session is the

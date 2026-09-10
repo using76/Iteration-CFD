@@ -56,13 +56,16 @@ patches = re.findall(r'\n\s*([A-Za-z_][\w]*)\s*\{\s*type\s+(\w+);', btxt)
 assert patches, 'no patches found in constant/polyMesh/boundary'
 names = [n for n, t in patches]
 kinds = dict(patches)
-INLET, OUTLETS, SOURCE = 'east', ['west', 'south', 'north', 'top'], os.path.basename(os.path.dirname(os.path.normpath(case)))
+INLET, OUTLETS = 'east', ['west', 'south', 'north', 'top']
 for n in [INLET] + OUTLETS:
     assert n in kinds, 'patch %s missing (have %s)' % (n, names)
-if SOURCE not in kinds:
-    SOURCE = None                                   # a test mesh without the release roof
-walls = [n for n, t in patches if t == 'wall'] + [n for n, t in patches if n.startswith('pool_') and n != SOURCE]   # other pools closed
-others = [n for n in names if n not in walls + [INLET, SOURCE] + OUTLETS]
+# the sources: the patch named like the case directory (pool_<case>) and every patch whose name
+# starts with 'inlet' (a geometry with several sources, classification.pool_prefix ""); all of
+# them release at U_SRC. Other pool_* patches are closed (walls).
+CASE_NAME = os.path.basename(os.path.dirname(os.path.normpath(case)))
+SOURCES = [n for n in names if n == CASE_NAME or n.lower().startswith('inlet')]
+walls = [n for n, t in patches if t == 'wall'] + [n for n, t in patches if n.startswith('pool_') and n not in SOURCES]   # other pools closed
+others = [n for n in names if n not in walls + [INLET] + SOURCES + OUTLETS]
 assert not others, 'patches with no rule: %s (type them as walls in ofgpu-convert-mesh)' % others
 
 
@@ -76,7 +79,7 @@ def field(obj, cls, dims, internal, rules):
 
 def U(n):
     if n == INLET: return [('type', 'fixedValue'), ('value', 'uniform (%g 0 0)' % -U_WIND)]
-    if n == SOURCE: return [('type', 'fixedValue'), ('value', 'uniform (0 0 %g)' % U_SRC)]
+    if n in SOURCES: return [('type', 'fixedValue'), ('value', 'uniform (0 0 %g)' % U_SRC)]
     if n in OUTLETS: return [('type', 'inletOutlet'), ('inletValue', 'uniform (0 0 0)'), ('value', 'uniform (0 0 0)')]
     return [('type', 'noSlip')]
 
@@ -88,21 +91,21 @@ def p(n):
 
 def T(n):
     if n == INLET: return [('type', 'fixedValue'), ('value', 'uniform %g' % T_AMB)]
-    if n == SOURCE: return [('type', 'fixedValue'), ('value', 'uniform %.2f' % T_SRC)]
+    if n in SOURCES: return [('type', 'fixedValue'), ('value', 'uniform %.2f' % T_SRC)]
     if n in OUTLETS: return [('type', 'inletOutlet'), ('inletValue', 'uniform %g' % T_AMB), ('value', 'uniform %g' % T_AMB)]
     return [('type', 'zeroGradient')]
 
 
 def k(n):
     if n == INLET: return [('type', 'fixedValue'), ('value', 'uniform %.4g' % K_WIND)]
-    if n == SOURCE: return [('type', 'fixedValue'), ('value', 'uniform %.4g' % K_SRC)]
+    if n in SOURCES: return [('type', 'fixedValue'), ('value', 'uniform %.4g' % K_SRC)]
     if n in OUTLETS: return [('type', 'inletOutlet'), ('inletValue', 'uniform %.4g' % K_WIND), ('value', 'uniform %.4g' % K_WIND)]
     return [('type', 'kqRWallFunction'), ('value', 'uniform %.4g' % K_WIND)]
 
 
 def eps(n):
     if n == INLET: return [('type', 'fixedValue'), ('value', 'uniform %.4g' % E_WIND)]
-    if n == SOURCE: return [('type', 'fixedValue'), ('value', 'uniform %.4g' % E_SRC)]
+    if n in SOURCES: return [('type', 'fixedValue'), ('value', 'uniform %.4g' % E_SRC)]
     if n in OUTLETS: return [('type', 'inletOutlet'), ('inletValue', 'uniform %.4g' % E_WIND), ('value', 'uniform %.4g' % E_WIND)]
     return [('type', 'epsilonWallFunction'), ('value', 'uniform %.4g' % E_WIND)]
 
@@ -149,5 +152,5 @@ for rel, text in files.items():
 print('case written to %s: patches %s' % (case, names))
 print('  walls: %s' % walls)
 print('  wind %g m/s -x through %s (k %.3g eps %.3g); outlets %s at p = 0; source %s: (0 0 %g) m/s, T %.1f K (pure NH3 analogy, k %.3g eps %.3g)' % (
-    U_WIND, INLET, K_WIND, E_WIND, OUTLETS, SOURCE, U_SRC, T_SRC, K_SRC, E_SRC))
+    U_WIND, INLET, K_WIND, E_WIND, OUTLETS, SOURCES, U_SRC, T_SRC, K_SRC, E_SRC))
 print('  %d SIMPLE iterations, write at the end' % ITERS)
