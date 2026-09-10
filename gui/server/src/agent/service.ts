@@ -19,6 +19,7 @@ import { createMockLlm } from './mockLlm.js'
 import { loadPolicyOverrides, type PolicyOverrides } from './policy.js'
 import { runNoticeText } from './prompt.js'
 import { buildQuickMessage } from './quick.js'
+import { createZaiClient } from './zai.js'
 import { appendUserTurn, createSessionStore, newId, stateOf, summaryOf, type SessionRecord, type SessionStore } from './session.js'
 import type { AgentService } from './types.js'
 
@@ -56,7 +57,7 @@ const AGENT_FRAMES = new Set<ClientMsg['t']>(['session.open', 'session.new', 'se
 export function createAgentService(deps: AgentServiceDeps): AgentService {
   const { config, hub, runs, datasets } = deps
   const store = deps.store ?? createSessionStore(config.sessionsDir, config.model)
-  const llm = deps.llm ?? (config.llm === 'mock' ? createMockLlm({ model: config.model }) : createAnthropicClient(config))
+  const llm = deps.llm ?? (config.llm === 'mock' ? createMockLlm({ model: config.model }) : config.llm === 'zai' ? createZaiClient(config) : createAnthropicClient(config))
   const overrides = deps.overrides ?? loadPolicyOverrides(config.configDir)
   const runtimes = new Map<string, SessionRuntime>()
   let customTools: Array<{ name: string; description: string }> = []

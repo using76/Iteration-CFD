@@ -1,6 +1,6 @@
-// The one interface the agent loop streams from. The Anthropic wrapper and
-// the scripted mock both produce the SDK's raw stream events and a final
-// BetaMessage, so loop.ts is identical in real and demo mode.
+// The one interface the agent loop streams from. The Anthropic wrapper, the
+// z.ai (GLM) wrapper and the scripted mock all produce the SDK's raw stream
+// events and a final BetaMessage, so loop.ts is identical in real and demo mode.
 import type { BetaMessage, BetaMessageParam, BetaRawMessageStreamEvent, BetaTextBlockParam, BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import type { SessionSettings } from '@cfd/shared'
 
@@ -19,7 +19,7 @@ export interface LlmStream {
 }
 
 export interface LlmClient {
-  kind: 'anthropic' | 'mock'
+  kind: 'anthropic' | 'zai' | 'mock'
   model: string
   stream(params: LlmStreamParams): LlmStream
 }

@@ -8,7 +8,8 @@
     "start": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "probe:llm": "tsx scripts/llm-probe.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

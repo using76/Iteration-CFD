@@ -117,7 +117,7 @@ export type Problem = z.infer<typeof ProblemSchema>
 export const ServerHelloSchema = z.object({
   version: z.string(),
   mode: z.enum(['real', 'demo']),
-  llm: z.enum(['anthropic', 'mock']),
+  llm: z.enum(['anthropic', 'zai', 'mock']),
   model: z.string(),
   gpu: GpuStateSchema,
   workspaceRoot: z.string(),

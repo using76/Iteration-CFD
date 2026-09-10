@@ -75,9 +75,14 @@ function tryCreate<T>(what: string, create: () => T, fallback: (reason: string) 
 }
 
 function requireApiKey(config: ServerConfig, log: Logger): void {
-  if (config.llm !== 'anthropic' || config.allowNoApiKey) return
+  if (config.llm === 'mock' || config.allowNoApiKey) return
+  if (config.llm === 'zai') {
+    if (config.zai?.key) return
+    log.error(`No z.ai API key. Set ZAI_API_KEY, or put the key in CFD_ZAI_KEY_FILE (default ${config.zai?.keyFile ?? '~/.claude/zai-key'}); or run CFD_LLM=anthropic with ANTHROPIC_API_KEY, or CFD_ALLOW_NO_API_KEY=1 / CFD_DEMO=1 for the scripted mock assistant.`)
+    process.exit(1)
+  }
   if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) return
-  log.error('ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) is not set. Set it, or start with CFD_ALLOW_NO_API_KEY=1 / CFD_LLM=mock / CFD_DEMO=1 to use the scripted mock assistant.')
+  log.error('No API key for the Anthropic client. Set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); or run CFD_LLM=zai with ZAI_API_KEY (or the key file ~/.claude/zai-key); or start with CFD_ALLOW_NO_API_KEY=1 / CFD_LLM=mock / CFD_DEMO=1 to use the scripted mock assistant.')
   process.exit(1)
 }
 
