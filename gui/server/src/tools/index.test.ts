@@ -41,6 +41,35 @@ describe('tool registry', () => {
     expect(sanitizeSchema({ $schema: 'x', type: 'object', properties: { a: { type: 'integer', minimum: -Number.MAX_SAFE_INTEGER } } })).toEqual({ type: 'object', properties: { a: { type: 'integer' } }, additionalProperties: false })
   })
 
+  it('gives every tool an object root, so a union tool is not a bare oneOf', () => {
+    for (const d of toolDefinitions()) {
+      expect(d.input_schema.type, d.name).toBe('object')
+      expect(d.input_schema.properties, d.name).toBeTruthy()
+    }
+    const gui = toolDefinitions().find((d) => d.name === 'gui_control')?.input_schema as { properties: Record<string, { enum?: string[]; description?: string }>; required?: string[]; oneOf?: unknown[] }
+    expect(gui.required).toEqual(['type'])
+    expect(gui.properties.type.enum).toContain('show_field')
+    // The branches survive underneath, and the discriminator says what each one wants.
+    expect(gui.oneOf?.length).toBeGreaterThan(5)
+    expect(gui.properties.type.description).toMatch(/show_field \(field\)/)
+    expect(Object.keys(gui.properties)).toEqual(expect.arrayContaining(['tab', 'field', 'panel', 'text']))
+  })
+
+  it('merges a union branch by branch: one enum for the discriminator, anyOf for what differs', () => {
+    const out = sanitizeSchema({
+      $schema: 'x',
+      anyOf: [
+        { type: 'object', properties: { kind: { type: 'string', const: 'a' }, n: { type: 'integer' } }, required: ['kind', 'n'] },
+        { type: 'object', properties: { kind: { type: 'string', const: 'b' }, n: { type: 'string' } }, required: ['kind'] },
+      ],
+    }) as { type: string; required: string[]; properties: Record<string, Record<string, unknown>>; additionalProperties: boolean }
+    expect(out.type).toBe('object')
+    expect(out.required).toEqual(['kind'])
+    expect(out.additionalProperties).toBe(false)
+    expect(out.properties.kind).toEqual({ type: 'string', enum: ['a', 'b'], description: 'a (n), b' })
+    expect(out.properties.n).toEqual({ anyOf: [{ type: 'integer' }, { type: 'string' }] })
+  })
+
   it('rejects invalid input with INVALID_INPUT before running', async () => {
     const r = await runTool('run_wait', { runId: 'x' }, ctx())
     expect(r.ok).toBe(false)

@@ -74,7 +74,79 @@ export function getTool(name: string): ToolDef | undefined {
 
 const SAFE = Number.MAX_SAFE_INTEGER
 
-/** Strip `$schema` and the ±MAX_SAFE_INTEGER bounds zod adds to integers; keep every object closed (additionalProperties:false). */
+type Node = Record<string, unknown>
+
+const isObjectBranch = (b: unknown): b is Node => typeof b === 'object' && b !== null && (b as Node).type === 'object' && !!(b as Node).properties
+
+const stringChoices = (spec: Node): string[] | null => {
+  if (typeof spec.const === 'string') return [spec.const]
+  if (Array.isArray(spec.enum) && spec.enum.every((v) => typeof v === 'string')) return spec.enum as string[]
+  return null
+}
+
+/** Two branches say the same thing when only their prose differs. */
+const shapeKey = (spec: Node): string => JSON.stringify({ ...spec, description: undefined })
+
+/** One property seen in several branches: the same spec, one string enum, or an `anyOf` of what differs. */
+function mergeSpecs(specs: Node[]): Node {
+  const distinct = new Map<string, Node>()
+  for (const s of specs) if (!distinct.has(shapeKey(s))) distinct.set(shapeKey(s), s)
+  if (distinct.size === 1) return specs.find((s) => typeof s.description === 'string') ?? specs[0]
+  const choices = specs.map(stringChoices)
+  if (choices.every((c) => c !== null)) {
+    const description = specs.find((s) => typeof s.description === 'string')?.description
+    return { type: 'string', enum: [...new Set(choices.flat() as string[])], ...(description ? { description } : {}) }
+  }
+  return { anyOf: [...distinct.values()] }
+}
+
+/** `select_tab (tab), show_field (field), fit_view` - what each branch wants beyond the discriminator. */
+function branchHint(branches: Node[], key: string): string {
+  return branches
+    .map((b) => {
+      const name = ((b.properties as Node)[key] as Node).const as string
+      const extra = (Array.isArray(b.required) ? (b.required as string[]) : []).filter((r) => r !== key)
+      return extra.length ? `${name} (${extra.join(', ')})` : name
+    })
+    .join(', ')
+}
+
+/**
+ * A discriminated union reaches us as a bare `oneOf`: no `type`, no `properties`.
+ * Weaker models answer that shape with `{}` and every call dies in validation, so
+ * give the root an object envelope - the union of the branches' properties, the
+ * discriminator as one enum naming what each variant needs - and keep the branches
+ * underneath, which still decide what is actually valid.
+ */
+function envelopeUnion(root: Node): Node {
+  const key = Array.isArray(root.oneOf) ? 'oneOf' : Array.isArray(root.anyOf) ? 'anyOf' : null
+  if (!key || root.type !== undefined || root.properties !== undefined) return root
+  const branches = root[key] as unknown[]
+  if (!branches.length || !branches.every(isObjectBranch)) return root
+  const objects = branches as Node[]
+
+  const specs = new Map<string, Node[]>()
+  for (const b of objects) {
+    for (const [name, spec] of Object.entries(b.properties as Node)) {
+      const list = specs.get(name) ?? []
+      list.push(spec as Node)
+      specs.set(name, list)
+    }
+  }
+  const properties: Node = {}
+  for (const [name, list] of specs) properties[name] = mergeSpecs(list)
+
+  const required = (Array.isArray(objects[0].required) ? (objects[0].required as string[]) : []).filter((name) =>
+    objects.every((b) => Array.isArray(b.required) && (b.required as string[]).includes(name)),
+  )
+  // The discriminator: required everywhere and a literal in every branch.
+  const discriminator = required.find((name) => objects.every((b) => typeof ((b.properties as Node)[name] as Node)?.const === 'string'))
+  if (discriminator) properties[discriminator] = { ...(properties[discriminator] as Node), description: branchHint(objects, discriminator) }
+
+  return { type: 'object', properties, ...(required.length ? { required } : {}), additionalProperties: false, [key]: branches }
+}
+
+/** Strip `$schema` and the ±MAX_SAFE_INTEGER bounds zod adds to integers; keep every object closed (additionalProperties:false); give a bare union an object root. */
 export function sanitizeSchema(schema: unknown): Record<string, unknown> {
   const walk = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(walk)
@@ -89,7 +161,8 @@ export function sanitizeSchema(schema: unknown): Record<string, unknown> {
     if (out.type === 'object' && out.properties && out.additionalProperties === undefined) out.additionalProperties = false
     return out
   }
-  return walk(schema) as Record<string, unknown>
+  const out = walk(schema)
+  return (typeof out === 'object' && out !== null ? envelopeUnion(out as Node) : out) as Record<string, unknown>
 }
 
 let definitions: BetaTool[] | null = null

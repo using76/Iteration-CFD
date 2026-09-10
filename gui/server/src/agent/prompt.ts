@@ -51,6 +51,8 @@ export function buildVolatileContext(f: VolatileFacts): string {
   if (recent.length) lines.push('Recent runs:', ...recent.map(runLine))
   if (f.context?.activeFile) lines.push(`User's active file: ${f.context.activeFile}`)
   if (f.context?.activeRun) lines.push(`User's selected run: ${f.context.activeRun}`)
+  if (f.context?.activeStep) lines.push(`User's active step: ${f.context.activeStep}`)
+  if (f.context?.activeTab) lines.push(`User's active tab: ${f.context.activeTab}`)
   lines.push(`Custom tools: ${f.customTools.length ? f.customTools.join(', ') : 'none'}`)
   lines.push(`UI language: ${f.locale === 'ko' ? 'Korean' : 'English'}`)
   lines.push(`Local time: ${f.now.toISOString()}`)

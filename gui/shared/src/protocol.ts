@@ -259,6 +259,9 @@ export type QuickAction = z.infer<typeof QuickActionSchema>
 export const UserContextSchema = z.object({
   activeFile: z.string().nullable(),
   activeRun: z.string().nullable(),
+  /** The project-tree step and left tab the user is looking at; older clients omit them. */
+  activeStep: z.string().nullable().optional(),
+  activeTab: z.string().nullable().optional(),
   /** Workspace-relative paths mentioned with @ or dropped in. */
   attachments: z.array(z.string()),
   /** Selected text in the editor, if any (kept short by the client). */
@@ -308,7 +311,8 @@ export const UiStateSchema = z.object({
   activeStep: z.string().nullable(),
   rightTab: z.string().nullable(),
   tool: z.string().nullable(),
-  frame: z.number().nullable(),
+  /** The coordinate frame the GUI shows: a name ('Global'/'Local') or a frame index. */
+  frame: z.union([z.number(), z.string()]).nullable(),
   projection: z.string().nullable(),
   showAxes: z.boolean().nullable(),
   showColorBars: z.boolean().nullable(),
