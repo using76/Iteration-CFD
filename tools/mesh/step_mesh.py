@@ -107,8 +107,14 @@ DEFAULTS = {
     'sizes': {'min': 1.5, 'max': 40.0, 'pool': 2.0, 'box': 4.0, 'growth_from': 2.5,
               'near_struct': 4.0, 'far_struct': 12.0, 'near_radius': 400.0,
               'size_mult': 1.0, 'roof_boxes': [2.5, 5.0, 10.0], 'gap_ratio': 0.0,
-              'gap_min_m': 0.0},
-    'mesh': {'algo2d': 6, 'algo3d': 1, 'optimize_passes': 5, 'threads': 32},
+              'gap_min_m': 0.0,
+              # the plume box of every point: downwind (-x) and upwind (+x) reach, half width
+              # (+-y), height above the ground, its size and the transition outside it; off
+              # while size is 0
+              'plume': {'downwind_m': 0.0, 'upwind_m': 0.0, 'half_width_m': 0.0,
+                        'height_m': 0.0, 'size': 0.0, 'thickness_m': 60.0}},
+    'mesh': {'algo2d': 6, 'algo3d': 1, 'optimize_passes': 5, 'relocate_passes': 0,
+             'smoothing': 1, 'threads': 32},
     'post': {'flat_tets': True, 'flat_threshold': 1e-7, 'seam_merge_m': 0.02,
              'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0,
              'sliver_rel': 0.0, 'sliver_edge_rel': 0.25, 'min_thickness': 0.0,
@@ -371,6 +377,16 @@ def load_config(path):
     if not (isinstance(s['roof_boxes'], list) and len(s['roof_boxes']) == 3
             and all(_is_num(v) and v > 0 for v in s['roof_boxes'])):
         errors.append('config.sizes.roof_boxes: expected three positive sizes [near, mid, far]')
+    pl = s['plume']
+    for k in ('downwind_m', 'upwind_m', 'half_width_m', 'height_m', 'size', 'thickness_m'):
+        if not _is_num(pl[k]) or pl[k] < 0:
+            errors.append('config.sizes.plume.%s: expected a number >= 0' % k)
+    if _is_num(pl['size']) and pl['size'] > 0 and not (
+            _is_num(pl['half_width_m']) and pl['half_width_m'] > 0 and _is_num(pl['height_m'])
+            and pl['height_m'] > 0 and _is_num(pl['downwind_m']) and _is_num(pl['upwind_m'])
+            and pl['downwind_m'] + pl['upwind_m'] > 0):
+        errors.append('config.sizes.plume: a size needs a box (downwind_m + upwind_m, half_width_m '
+                      'and height_m all > 0)')
 
     m = cfg['mesh']
     if not isinstance(m['algo2d'], int) or isinstance(m['algo2d'], bool) or not 1 <= m['algo2d'] <= 9:
@@ -380,6 +396,9 @@ def load_config(path):
     if not isinstance(m['optimize_passes'], int) or isinstance(m['optimize_passes'], bool) \
             or m['optimize_passes'] < 0:
         errors.append('config.mesh.optimize_passes: expected a pass count >= 0')
+    for k in ('relocate_passes', 'smoothing'):
+        if not isinstance(m[k], int) or isinstance(m[k], bool) or m[k] < 0:
+            errors.append('config.mesh.%s: expected a pass count >= 0' % k)
     if not isinstance(m['threads'], int) or isinstance(m['threads'], bool) or m['threads'] < 1:
         errors.append('config.mesh.threads: expected a thread count >= 1')
 
@@ -1489,6 +1508,13 @@ def groups_and_fields_stage(cfg):
                           y - POINT_BOX_FAR[0], y + POINT_BOX_FAR[0],
                           zg - POINT_BOX_FAR[1], zg + POINT_BOX_FAR[2], cfg['sizes']['box'],
                           POINT_BOX_FAR[3]))                              # the refinement box
+        pl = cfg['sizes']['plume']
+        if pl['size'] > 0:
+            # the plume box: the wind blows towards -x, so it reaches downwind_m that way and
+            # upwind_m the other, +-half_width_m across, from 1 m under the ground to height_m
+            fields.append(box(x - pl['downwind_m'], x + pl['upwind_m'],
+                              y - pl['half_width_m'], y + pl['half_width_m'],
+                              zg - 1.0, zg + pl['height_m'], pl['size'], pl['thickness_m']))
         d = F.add('Distance')
         F.setNumbers(d, 'PointsList', [gmsh.model.occ.addPoint(x, y, zg + 2)])
         gmsh.model.occ.synchronize()
@@ -1814,6 +1840,9 @@ def mesh_stage(cfg, work):
     gmsh.option.setNumber('Mesh.MaxNumThreads2D', m['threads'])
     gmsh.option.setNumber('Mesh.MaxNumThreads3D', m['threads'])
     gmsh.option.setNumber('Mesh.Optimize', 1)
+    # Laplacian smoothing steps of the surface meshes (done in the surfaces' parametric space,
+    # so the nodes stay on the geometry); gmsh's default is 1
+    gmsh.option.setNumber('Mesh.Smoothing', m['smoothing'])
 
     def surface_mesh():
         gmsh.model.mesh.generate(1)
@@ -1897,6 +1926,20 @@ def mesh_stage(cfg, work):
         log('gmsh optimiser: %d pass(es), threshold 0.5, %.0f s -> %d tetrahedra'
             % (m['optimize_passes'], time.time() - t_opt, tet_count()))
         ntet = tet_count()
+    # node relocation (gmsh's Relocate3D): every interior node moves to the position that
+    # maximises the quality of the tets around it; surface and curve nodes and the connectivity
+    # stay (checked on a live OCC model: zero boundary motion), so the patches are untouched.
+    # It lifts the bulk of the distribution (p1, p5) - the worst cells, which have three nodes
+    # on a boundary, are the flat-tet and thickness passes' job. NOT to be run on a mesh read
+    # back from a .msh: there it moves boundary nodes too
+    if ntet and m['relocate_passes']:
+        t_opt = time.time()
+        log('node relocation: %d pass(es) of Relocate3D; quality before:' % m['relocate_passes'])
+        q0 = quality()
+        gmsh.model.mesh.optimize('Relocate3D', force=True, niter=m['relocate_passes'])
+        log('  after %.0f s:' % (time.time() - t_opt))
+        q1 = quality()
+        SUMMARY['relocation'] = {'passes': m['relocate_passes'], 'before': q0, 'after': q1}
     if ntet == 0:
         nt = SUMMARY.get('near_touching') or []
         if nt:

@@ -184,10 +184,19 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                             // "gap_unresolvable" - smear or remove that geometry (solids.hull_*)
     "gap_min_m": 0,         // the floor of the gap refinement far from the points (0 = min);
                             // without it the gap rule tripled a site mesh to 24 M tets
+    "plume": {"downwind_m": 0, "upwind_m": 0, "half_width_m": 0, "height_m": 0,
+              "size": 0, "thickness_m": 60},
+                            // a box of this size at every point: downwind_m towards -x
+                            // (the wind blows that way), upwind_m towards +x, +-half_width_m,
+                            // from 1 m under the ground to height_m; off while size is 0
     "size_mult": 1.0,      // >1 coarsens every size (a solver-robustness reproducer)
     "roof_boxes": [2.5, 5.0, 10.0]   // the three roof-patch box sizes (near, mid, downwind)
   },
-  "mesh":  {"algo2d": 6, "algo3d": 1, "optimize_passes": 5, "threads": 32},
+  "mesh":  {"algo2d": 6, "algo3d": 1, "optimize_passes": 5, "threads": 32,
+            "relocate_passes": 0,   // passes of gmsh's Relocate3D after the optimiser: interior
+                                    // nodes move to the quality-optimal spot, boundary nodes and
+                                    // connectivity stay (5 lifts the p1/p5 quality markedly)
+            "smoothing": 1},        // Laplacian smoothing steps of the surface meshes (gmsh default 1)
   "post":  {
     "flat_tets": true,       // the flat-tet stage after the 3-D pass
     "flat_threshold": 1e-7,  // a tet is flat when |V| < this × (longest edge from node 0)³
