@@ -22,6 +22,7 @@
 //! consulted.
 
 pub mod castellate;
+pub mod features;
 pub mod octree;
 pub mod quality;
 pub mod snap;
@@ -133,6 +134,11 @@ pub struct RefinementBand {
     /// `[[distance_m, level], ...]` - within `distance` of the patch, at
     /// least `level`. SPEC-LIT §92.2 (92.1).
     pub bands: Vec<DistanceBand>,
+    /// (92.37): a leaf within its own longest edge of one of this patch's
+    /// feature edges (92.34) is refined to this level. Zero, the default, is
+    /// no feature refinement.
+    #[serde(default)]
+    pub feature_level: u32,
 }
 
 /// One distance band of [`RefinementBand`].
@@ -230,6 +236,12 @@ pub struct SnapSpec {
     /// would collapse the one cell that reached it - refused instead.
     #[serde(default = "d_max_area_ratio")]
     pub max_area_ratio: f64,
+    /// (92.38): a boundary point whose surface target lies within
+    /// `feature_tolerance * base_size` of a feature edge is snapped onto the
+    /// edge instead, and onto a corner when it claims one (92.39). Zero
+    /// turns the attraction off.
+    #[serde(default = "d_feature_tolerance")]
+    pub feature_tolerance: f64,
 }
 
 fn d_snap_iters() -> usize {
@@ -256,6 +268,10 @@ fn d_max_area_ratio() -> f64 {
     4.0
 }
 
+fn d_feature_tolerance() -> f64 {
+    0.5
+}
+
 impl Default for SnapSpec {
     fn default() -> Self {
         Self {
@@ -265,6 +281,7 @@ impl Default for SnapSpec {
             smoothing: d_smoothing(),
             undo_limit: d_undo_limit(),
             max_area_ratio: d_max_area_ratio(),
+            feature_tolerance: d_feature_tolerance(),
         }
     }
 }
@@ -482,6 +499,12 @@ impl AutomeshConfig {
                 self.snap.smoothing
             )));
         }
+        if !(self.snap.feature_tolerance.is_finite() && self.snap.feature_tolerance >= 0.0) {
+            return Err(Error::Mesh(format!(
+                "snap.feature_tolerance: must be >= 0 and finite, got {}",
+                self.snap.feature_tolerance
+            )));
+        }
         let q = &self.quality;
         for (field, value) in [
             ("quality.max_closure", q.max_closure),
@@ -583,6 +606,7 @@ mod config_tests {
                     DistanceBand { distance: 4.0, level: 1 },
                     DistanceBand { distance: 1.0, level: 2 },
                 ],
+                feature_level: 0,
             }],
             feature_angle_deg: 45.0,
             max_level: 3,

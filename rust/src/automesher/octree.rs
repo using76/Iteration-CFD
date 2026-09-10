@@ -1279,6 +1279,7 @@ mod tests {
             levels: vec![RefinementBand {
                 patch: patch.to_string(),
                 bands: vec![DistanceBand { distance, level }],
+                feature_level: 0,
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
@@ -1491,18 +1492,21 @@ mod tests {
         let spec = band_spec("box", 0.01, 1);
 
         // The two terms, separated: `half_diag = 0` switches (92.22) off.
+        // `h = 1.0` is the level-0 cell's own longest edge; this spec's
+        // `feature_level` is 0, so (92.37) asks nothing whatever `h` is.
         let parts = band_surfaces(&surf, &spec).expect("band surfaces");
-        let idx = BandIndex::new(&parts, &spec, 1.0).expect("band index");
+        let fs = extract(&surf, spec.feature_angle_deg).expect("features");
+        let idx = BandIndex::new(&parts, &surf, &fs, &spec, 1.0).expect("band index");
         let centre = crate::Vec3::new(3.5, 3.5, 3.5);
-        assert_eq!(idx.level_at(centre, 0.0), 0, "(92.1) alone must not refine this cell");
+        assert_eq!(idx.level_at(centre, 0.0, 1.0), 0, "(92.1) alone must not refine this cell");
         assert_eq!(
-            idx.level_at(centre, 3.0f64.sqrt() / 2.0),
+            idx.level_at(centre, 3.0f64.sqrt() / 2.0, 1.0),
             1,
             "(92.22) must refine a cell the surface passes through"
         );
         // And the ring is outside both: 1.299 m away, past the half-diagonal.
         let ring = crate::Vec3::new(2.5, 3.5, 3.5);
-        assert_eq!(idx.level_at(ring, 3.0f64.sqrt() / 2.0), 0, "the ring is not touched");
+        assert_eq!(idx.level_at(ring, 3.0f64.sqrt() / 2.0, 1.0), 0, "the ring is not touched");
 
         // The whole stage then refines exactly the eight cells the box sits in.
         let mut tree = Octree::uniform(bg.base_n(), 1).expect("tree");
@@ -1513,6 +1517,198 @@ mod tests {
             assert_eq!(leaf.level, u32::from(inside), "leaf {:?} at the wrong level", leaf);
         }
         assert_gate(&tree, &bg, 8.0 * 8.0 * 8.0);
+    }
+
+    /// §92.12 (92.37): a leaf within its own longest edge of one of a
+    /// patch's feature edges carries that patch's `feature_level`. The cube
+    /// sits OFF the lattice on purpose, so no centre lands on a band
+    /// boundary and no tie is being hidden.
+    #[test]
+    fn a_cube_s_edges_pull_the_octree_to_the_feature_level() {
+        let bg = Background::from_domain(&crate::automesher::DomainSpec {
+            extent: [0.0, 4.0, 0.0, 4.0, 0.0, 4.0],
+            base_size: 1.0,
+            grading: [1.0; 3],
+        })
+        .expect("background");
+        assert_eq!(bg.base_n(), [4, 4, 4]);
+        let surf = Surface::from_soup(
+            box_soup([1.3, 1.3, 1.3], [2.3, 2.3, 2.3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "cube".to_string(),
+                bands: vec![],
+                feature_level: 2,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        let mut tree = Octree::uniform(bg.base_n(), 2).expect("tree");
+        let (splits, _bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        assert!(splits > 0, "the cube's edges must refine something");
+        assert_eq!(tree.max_level_jump(), 1);
+        tree.check_partition().expect("partition");
+        // The cube's 12 edges, as segments, and the distance to the nearest
+        // one - point-to-segment arithmetic written here, sharing nothing
+        // with BandIndex or the feature index.
+        let (lo, hi) = ([1.3f64; 3], [2.3f64; 3]);
+        let mut edges: Vec<([f64; 3], [f64; 3])> = Vec::new();
+        for &x in &[lo[0], hi[0]] {
+            for &y in &[lo[1], hi[1]] {
+                edges.push(([x, y, lo[2]], [x, y, hi[2]]));
+            }
+        }
+        for &y in &[lo[1], hi[1]] {
+            for &z in &[lo[2], hi[2]] {
+                edges.push(([lo[0], y, z], [hi[0], y, z]));
+            }
+        }
+        for &z in &[lo[2], hi[2]] {
+            for &x in &[lo[0], hi[0]] {
+                edges.push(([x, lo[1], z], [x, hi[1], z]));
+            }
+        }
+        assert_eq!(edges.len(), 12, "a cube carries 12 edges");
+        let edge_dist = |p: [f64; 3]| -> f64 {
+            let mut best = f64::INFINITY;
+            for (a, b) in &edges {
+                let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+                let t = (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2])
+                    / (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]);
+                let t = t.clamp(0.0, 1.0);
+                let q = [a[0] + t * ab[0], a[1] + t * ab[1], a[2] + t * ab[2]];
+                let d = ((p[0] - q[0]).powi(2)
+                    + (p[1] - q[1]).powi(2)
+                    + (p[2] - q[2]).powi(2))
+                .sqrt();
+                best = best.min(d);
+            }
+            best
+        };
+        // (92.37)'s promise, leaf by leaf: within its own longest edge of a
+        // cube edge means at the feature level.
+        let l = tree.max_level();
+        for leaf in tree.leaves() {
+            let (c, e) = leaf_centre_edges(&bg, l, leaf);
+            let h = e[0].max(e[1]).max(e[2]);
+            let d = edge_dist([c.x, c.y, c.z]);
+            if d <= h {
+                assert_eq!(
+                    leaf.level, 2,
+                    "leaf {:?} centre is {d} from an edge, inside its own h = {h}",
+                    leaf
+                );
+            }
+        }
+        // Far from every cube edge, level 0: the [3,4]^3 corner, a full
+        // metre past anything the band or the balance pass could pull.
+        assert!(
+            tree.contains(LeafKey { level: 0, idx: [3, 3, 3] }),
+            "corner [3,3,3] split - the band reached a metre past the cube"
+        );
+        // The count the geometry implies, on the plain lattice: a level-2
+        // cell exists exactly where its level-0 centre sits within 1.0 m of
+        // an edge AND its level-1 centre within 0.5 m - refinement splits
+        // down and never up, and balance (92.21) only ever splits BELOW the
+        // level that triggered it, so it adds no level-2 leaf. A band
+        // around 12 edges, not merely "some".
+        let mut want2 = 0usize;
+        for i in 0..16usize {
+            for j in 0..16usize {
+                for k in 0..16usize {
+                    let c0 = [
+                        ((i / 4) as f64 + 0.5) * 1.0,
+                        ((j / 4) as f64 + 0.5) * 1.0,
+                        ((k / 4) as f64 + 0.5) * 1.0,
+                    ];
+                    let c1 = [
+                        ((i / 2) as f64 + 0.5) * 0.5,
+                        ((j / 2) as f64 + 0.5) * 0.5,
+                        ((k / 2) as f64 + 0.5) * 0.5,
+                    ];
+                    if edge_dist(c0) <= 1.0 && edge_dist(c1) <= 0.5 {
+                        want2 += 1;
+                    }
+                }
+            }
+        }
+        assert!(want2 >= 48, "the oracle saw only {} level-2 cells - 12 edges x 4 long", want2);
+        let got2 = tree.leaves().iter().filter(|lf| lf.level == 2).count();
+        assert_eq!(got2, want2, "level-2 leaves, the lattice oracle says {}", want2);
+    }
+
+    /// (92.37) at its default `feature_level: 0` is invisible: the same
+    /// config with the feature entry present but zero yields exactly the
+    /// leaves the empty `levels` list yields - the same run the code made
+    /// before §92.12's refinement, element by element.
+    #[test]
+    fn feature_level_zero_changes_nothing() {
+        let bg = Background::from_domain(&crate::automesher::DomainSpec {
+            extent: [0.0, 4.0, 0.0, 4.0, 0.0, 4.0],
+            base_size: 1.0,
+            grading: [1.0; 3],
+        })
+        .expect("background");
+        let surf = Surface::from_soup(
+            box_soup([1.3, 1.3, 1.3], [2.3, 2.3, 2.3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let base = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "cube".to_string(),
+                bands: vec![],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        let none = RefinementSpec { levels: vec![], feature_angle_deg: 30.0, max_level: 2 };
+        let mut with_zero = Octree::uniform(bg.base_n(), 2).expect("tree");
+        refine_to_surface(&mut with_zero, &bg, &surf, &base).expect("refine");
+        let mut without = Octree::uniform(bg.base_n(), 2).expect("tree");
+        refine_to_surface(&mut without, &bg, &surf, &none).expect("refine");
+        let zero_leaves: Vec<_> =
+            with_zero.leaves().into_iter().map(|lf| (lf.level, lf.idx)).collect();
+        let none_leaves: Vec<_> =
+            without.leaves().into_iter().map(|lf| (lf.level, lf.idx)).collect();
+        assert_eq!(zero_leaves.len(), none_leaves.len(), "the same number of leaves");
+        for (z, n) in zero_leaves.iter().zip(none_leaves.iter()) {
+            assert_eq!(z, n, "feature_level: 0 changed the leaf set");
+        }
+    }
+
+    /// A smooth sphere asks for nothing: its largest fold is 22.08 degrees,
+    /// under the 30-degree default, so the feature set is empty and
+    /// `feature_level: 2` refines not one cell.
+    #[test]
+    fn a_smooth_sphere_asks_for_no_feature_refinement() {
+        let bg = Background::from_domain(&crate::automesher::DomainSpec {
+            extent: [0.0, 4.0, 0.0, 4.0, 0.0, 4.0],
+            base_size: 1.0,
+            grading: [1.0; 3],
+        })
+        .expect("background");
+        let surf = Surface::from_soup(sphere_soup([2.0; 3], 1.0), vec!["sphere".to_string()])
+            .expect("surface");
+        let fs = crate::automesher::features::extract(&surf, 30.0).expect("features");
+        assert!(fs.is_empty(), "a smooth sphere has no feature edge: {}", fs.summary());
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "sphere".to_string(),
+                bands: vec![],
+                feature_level: 2,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        let mut tree = Octree::uniform(bg.base_n(), 2).expect("tree");
+        let (splits, bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        assert_eq!((splits, bal, tree.len()), (0, 0, 64), "not one cell refined");
     }
 }
 
@@ -1527,6 +1723,7 @@ mod tests {
 // refines nothing. Provenance: ORIGINAL. No GPL-licensed source was
 // consulted.
 
+use super::features::{FeatureIndex, FeatureSet, extract};
 use super::{DistanceBand, RefinementSpec};
 use crate::surface::{SoupTri, Surface, TriIndex};
 
@@ -1579,17 +1776,36 @@ pub fn band_surfaces(surf: &Surface, spec: &RefinementSpec) -> Result<Vec<Surfac
 /// each patch `refinement.levels` NAMES, over that patch's triangles alone.
 /// A patch the config does not name is not indexed and refines nothing.
 pub struct BandIndex<'s> {
-    /// One index per `refinement.levels[]` entry, paired with that entry's
-    /// bands.
-    parts: Vec<(TriIndex<'s>, Vec<DistanceBand>)>,
+    /// One entry per `refinement.levels[]` entry, in that order.
+    parts: Vec<BandPart<'s>>,
+}
+
+/// One `refinement.levels[]` entry's queries: the patch's triangles for
+/// (92.1)/(92.22), its bands, and - only when the entry asks for feature
+/// refinement - the patch's own feature edges, bucketed out of the WHOLE
+/// surface's feature set.
+struct BandPart<'s> {
+    tri: TriIndex<'s>,
+    bands: Vec<DistanceBand>,
+    /// The patch's feature edges, bucketed - `None` while `feat_level` is
+    /// zero, the config's default.
+    feat: Option<FeatureIndex<'s>>,
+    /// This entry's `refinement.levels[].feature_level` - SPEC-LIT §92.12,
+    /// eq. (92.37).
+    feat_level: u32,
 }
 
 impl<'s> BandIndex<'s> {
-    /// One [`TriIndex`] per sub-surface of [`band_surfaces`], paired with that
-    /// entry's bands. `parts` must be `band_surfaces(surf, spec)`'s output for
-    /// the same `spec`; refuse if the lengths disagree.
+    /// One [`BandPart`] per sub-surface of [`band_surfaces`], in that order.
+    /// `parts` must be `band_surfaces(surf, spec)`'s output for the same
+    /// `surf` and `spec`; refuse if the lengths disagree. `fs` is the WHOLE
+    /// surface's feature set, extracted once by the caller; an entry whose
+    /// `feature_level` is above zero indexes it down to its own patch
+    /// (§92.12, eq. 92.37), an entry at the default zero indexes nothing.
     pub fn new(
         parts: &'s [Surface],
+        surf: &Surface,
+        fs: &'s FeatureSet,
         spec: &RefinementSpec,
         cell_hint: crate::Scalar,
     ) -> Result<BandIndex<'s>> {
@@ -1602,23 +1818,50 @@ impl<'s> BandIndex<'s> {
             )));
         }
         let mut indexed = Vec::with_capacity(parts.len());
-        for (surf, band) in parts.iter().zip(&spec.levels) {
-            indexed.push((TriIndex::new(surf, cell_hint)?, band.bands.clone()));
+        for (part, band) in parts.iter().zip(&spec.levels) {
+            // The patch id the entry's name carries in the FULL surface -
+            // `fs.edge_patches` are full-surface ids. A patch the surface
+            // lacks is refused, the same refusal [`band_surfaces`] makes.
+            let Some(patch_id) = surf.patch_names.iter().position(|n| n == &band.patch) else {
+                return Err(Error::Mesh(format!(
+                    "BandIndex::new: a refinement band names patch {:?}, but the surface's \
+                     patches are {:?} - a patch the surface lacks refines nothing",
+                    band.patch, surf.patch_names
+                )));
+            };
+            let feat = if band.feature_level > 0 {
+                Some(FeatureIndex::for_patch(fs, cell_hint, patch_id as u32)?)
+            } else {
+                None
+            };
+            indexed.push(BandPart {
+                tri: TriIndex::new(part, cell_hint)?,
+                bands: band.bands.clone(),
+                feat_level: band.feature_level,
+                feat,
+            });
         }
         Ok(BandIndex { parts: indexed })
     }
 
-    /// (92.1) + (92.22) for one leaf: `centre` is the leaf's centre and
-    /// `half_diag` half its diagonal. Returns the level the bands ask for,
-    /// UNCAPPED (`Octree::refine` applies `max_level`).
-    pub fn level_at(&self, centre: crate::Vec3, half_diag: crate::Scalar) -> u32 {
+    /// (92.1) + (92.22) + §92.12's (92.37) for one leaf: `centre` is the
+    /// leaf's centre, `half_diag` half its diagonal, and `h` the leaf's
+    /// longest edge - the cell size (92.37) measures with. Returns the level
+    /// the bands and the feature edges ask for, UNCAPPED (`Octree::refine`
+    /// applies `max_level`).
+    pub fn level_at(
+        &self,
+        centre: crate::Vec3,
+        half_diag: crate::Scalar,
+        h: crate::Scalar,
+    ) -> u32 {
         let mut asked = 0u32;
-        for (index, bands) in &self.parts {
-            let (_, d) = index.nearest_triangle(centre);
+        for part in &self.parts {
+            let (_, d) = part.tri.nearest_triangle(centre);
             // (92.1): the deepest band whose distance the cell centre falls
             // inside.
             let mut l = 0u32;
-            for band in bands {
+            for band in &part.bands {
                 if d <= band.distance {
                     l = l.max(band.level);
                 }
@@ -1627,8 +1870,20 @@ impl<'s> BandIndex<'s> {
             // refined to the deepest level that patch's bands ask for
             // anywhere - it errs toward refining, never away from it.
             if d <= half_diag {
-                for band in bands {
+                for band in &part.bands {
                     l = l.max(band.level);
+                }
+            }
+            // §92.12 (92.37): a leaf within its own longest edge of one of
+            // the patch's feature edges asks that patch's `feature_level`,
+            // uncapped exactly like the band levels.
+            if part.feat_level > 0 {
+                if let Some((_, df, _)) =
+                    part.feat.as_ref().and_then(|f| f.closest_edge_point(centre))
+                {
+                    if df <= h {
+                        l = l.max(part.feat_level);
+                    }
                 }
             }
             asked = asked.max(l);
@@ -1657,7 +1912,9 @@ pub(crate) fn leaf_centre_edges(
 /// A leaf's centre and half its diagonal, in metres: (92.20) evaluated at the
 /// two ends of the leaf's own span on the finest lattice - `l` is the TREE's
 /// `max_level`, `bg.coord`'s third argument. These are the two numbers
-/// (92.1) and (92.22) measure from.
+/// (92.1) and (92.22) measure from; (92.37) reads its own `h` off
+/// [`leaf_centre_edges`] instead, so this survives for the tests alone.
+#[cfg(test)]
 fn leaf_centre_half_diag(
     bg: &Background,
     l: u32,
@@ -1668,8 +1925,8 @@ fn leaf_centre_half_diag(
 }
 
 /// §92.2 stage 1: refine `tree` until every leaf carries the level
-/// (92.1)/(92.22) asks of it, then 2:1 balance it (92.21). Returns
-/// `(refine_splits, balance_splits)`. The cap is the tree's own
+/// (92.1)/(92.22)/§92.12's (92.37) ask of it, then 2:1 balance it (92.21).
+/// Returns `(refine_splits, balance_splits)`. The cap is the tree's own
 /// `max_level` - [`Octree::refine`] applies it, and (92.21)'s splits sit
 /// below the level that triggered them, so balance never passes it (§74.2).
 pub fn refine_to_surface(
@@ -1679,6 +1936,19 @@ pub fn refine_to_surface(
     spec: &RefinementSpec,
 ) -> Result<(usize, usize)> {
     let parts = band_surfaces(surf, spec)?;
+    // §92.12: the WHOLE surface's feature edges, extracted ONCE - the
+    // per-entry indexes below filter it to their own patch (92.37). Not
+    // extracted at all when no entry asks for feature refinement: the walk
+    // is over every triangle of the surface, and a config that did not ask
+    // for it must not pay for it.
+    //
+    // The `wants_features` guard is the supervising session's.
+    let wants_features = spec.levels.iter().any(|b| b.feature_level > 0);
+    let fs = if wants_features {
+        extract(surf, spec.feature_angle_deg)?
+    } else {
+        FeatureSet::empty(spec.feature_angle_deg)
+    };
     // §23.4's "~ the mesh spacing": the smallest base cell edge, the finest
     // spacing any query of this tree can be asked on.
     let mut cell_hint = crate::Scalar::INFINITY;
@@ -1695,11 +1965,15 @@ pub fn refine_to_surface(
              stage 0 needs a positive cell size"
         )));
     }
-    let idx = BandIndex::new(&parts, spec, cell_hint)?;
+    let idx = BandIndex::new(&parts, surf, &fs, spec, cell_hint)?;
     let l = tree.max_level();
     let splits = tree.refine(|k| {
-        let (c, hd) = leaf_centre_half_diag(bg, l, k);
-        idx.level_at(c, hd)
+        let (c, e) = leaf_centre_edges(bg, l, k);
+        // (92.22) measures with the half-diagonal, (92.37) with the cell's
+        // own longest edge - both straight off the same three edge lengths.
+        let hd = 0.5 * crate::Vec3::new(e[0], e[1], e[2]).mag();
+        let h = e[0].max(e[1]).max(e[2]);
+        idx.level_at(c, hd, h)
     });
     let bal = tree.balance_2to1();
     tree.check_partition()?;

@@ -24758,8 +24758,12 @@ for a point i whose closest feature entity is a corner v:
     x_i       <- v         if |v - x_i| <= feature_snap_dist,  PINNED
 ```
 
-Feature snapping runs BEFORE stage 4 and its points are pinned during it, so
-the surface snap cannot pull a resolved edge back into a curve.
+This paragraph originally read that feature snapping runs BEFORE stage 4 with
+its points pinned during it. **That ordering is superseded by §92.12**, which
+runs the attraction inside stage 4's own loop — after the surface target is
+computed and before the gate measures — and keeps (92.8)'s projection
+unchanged as (92.38)'s edge branch. §92.12 says why the pin was the wrong
+instrument.
 
 **Stage 6 — layers.** Prismatic layers are added by displacing the boundary
 INWARD and inserting cells in the gap, which is the standard inward-extrusion
@@ -25785,5 +25789,249 @@ The refusal names the patch, both areas and their ratio.
 | a refined tree's mesh, snapped | G2 holds through every iterate — the test that fails without (92.33) fails on hundreds of cells at once, not on one |
 | a point already on a triangle | `closest_point` returns it to within rounding, and (92.28) then makes the displacement exactly zero |
 | `closest_point` against `nearest_triangle` | the same triangle and the same distance, to the last bits, at points inside a face, beyond an edge and beyond a vertex |
+
+---
+
+### 92.12 Feature edges and corners: what the triangulation calls sharp, and what refinement and snapping do with it
+
+Appended after §92.11 for the reason §92.11 was appended after §92.10 — every
+citation already pointing into §92.1–§92.11 keeps its number. §92.2 stage 1
+names `l_feat` in (92.2) and stage 4's (92.5) pulls a point onto the closest
+point of the surface; this section says what a feature edge is, what a corner
+is, which cells the edges refine, and what stage 4 does with a point that has
+landed near one.
+
+**Why the closest-point map is not enough.** (92.28) sends a boundary point to
+the nearest point of the triangulation. On a smooth surface that is the whole
+answer. On a sharp edge it is not: the closest-point map is discontinuous
+across the edge, each point near it lands on whichever of the two faces is
+nearer, and the edge itself — a set of measure zero, which no nearest-point
+query ever returns — is occupied by nothing. A cube snapped by (92.28) alone
+comes back chamfered by half a cell along all twelve of its edges, and the
+chamfer does not shrink with refinement: it is a fixed fraction of the local
+cell size. The fix is the one the OpenFOAM *User Guide*'s `snappyHexMesh`
+chapter describes in prose as **explicit feature snapping** — extract the sharp
+edges as curves, refine to them, and snap the points that land near one onto
+the curve rather than onto the faces. That prose is what was read; the
+implementation below is this document's.
+
+Marechal, *Proc. 18th International Meshing Roundtable* (2009) 65-84 (DOI
+`10.1007/978-3-642-04319-2_5`), already cited in §92.2, is the octree-hex
+literature's treatment of sharp features and is why the refinement criterion
+(92.37) is a band about the edge curve rather than a curvature test on the
+triangles.
+
+**The feature edges.** Write `T(e)` for the triangles incident on an undirected
+edge `e` of the triangulation, and `n_i` for triangle `i`'s unit normal, which
+`Surface` recomputes from the winding and never reads from the file:
+
+```
+theta(e) = acos( clamp( n_i . n_j, -1, 1 ) ),   T(e) = {i, j}
+
+F = { e : |T(e)| = 2  and  theta(e) > feature_angle_deg }
+  U { e : |T(e)| != 2 }                                           (92.34)
+```
+
+The second set is not a special case bolted on. An edge with one triangle is
+the boundary of an open sheet — the surface stops there, there is no second
+normal to compare, and the line where a sheet ends is exactly a line the mesh
+must hold. An edge with three or more is a non-manifold junction, three sheets
+meeting along a line, and that line is a feature by the same argument. Both are
+already counted by `Surface::edge_defects` (§23.2), so a surface that arrives
+with defects gets them treated as geometry rather than silently smoothed.
+
+`theta` is the angle between the NORMALS, not between the faces: a flat
+continuation gives `theta = 0` and a fold of ninety degrees gives `theta = 90`,
+so `feature_angle_deg` reads as "how far from flat", which is the sense the
+User Guide's own default of 30 degrees is quoted in.
+
+**Corners, and the polylines between them.** Take the graph `G = (V, F)` on the
+surface points the feature edges carry, and let `deg(v)` be a point's number of
+feature edges. For a point of degree 2 with edges to `a` and `b`, write the
+turn as the angle by which the curve changes direction there:
+
+```
+turn(v) = pi - acos( clamp( u_a . u_b, -1, 1 ) ),
+          u_a = (x_a - x_v)/|x_a - x_v|,  u_b = (x_b - x_v)/|x_b - x_v|
+
+C = { v : deg(v) != 2 }
+  U { v : deg(v) = 2  and  turn(v) > feature_angle_deg }          (92.35)
+```
+
+A point where three or more feature edges meet is a corner because the curve
+branches there and no single tangent exists; a point of degree 1 is a corner
+because the curve ends there; a degree-2 point that turns more than the feature
+angle is a corner because a polyline through it would cut the geometry it is
+supposed to hold. A straight-through vertex has `u_a . u_b = -1` and `turn = 0`,
+which is why the turn is written as the supplement.
+
+The polylines are the maximal chains of `F` whose interior points are all
+degree-2 non-corners. A chain runs from a corner to a corner; a cycle carrying
+no corner at all — a cylinder's rim is the case that matters — is a CLOSED
+polyline, and is cut at its lowest-numbered point so that the output does not
+depend on the order the edges were discovered in. Every feature edge lies on
+exactly one polyline, and the count of polylines and of corners is what a test
+asserts about a cube (12 and 8) and about a capped cylinder (2 and 0).
+
+**The distance to the feature set.** The query both later uses need is the
+closest point of `F` to a point `p`, which is the closest point of a SEGMENT,
+minimised over the segments:
+
+```
+t*      = clamp( (p - x_a).(x_b - x_a) / |x_b - x_a|^2 , 0, 1 )
+proj(p) = x_a + t* (x_b - x_a)
+
+feat(p) = argmin over e in F of |p - proj_e(p)|                   (92.36)
+```
+
+evaluated through a uniform bucket grid over the segments, built once, exactly
+as `TriIndex` (§23.4) buckets triangles: the segment count is a hundredth of
+the triangle count on any real geometry, and a linear scan is a unit test that
+passes and a site that never finishes.
+
+**Refinement (§92.2 stage 1's `l_feat`).** (92.2) leaves `feature_dist_p`
+unfixed; it is fixed here at the cell's own size, which is the only choice that
+needs no second length in the config and no tuning per geometry:
+
+```
+F_p       = { e in F : some triangle of T(e) belongs to patch p }
+h(c)      = the leaf's longest edge
+
+l_feat(c) = max { feature_level_p : dist(centre(c), F_p) <= h(c) } (92.37)
+```
+
+`feature_level_p` is `refinement.levels[p].feature_level`, defaulting to zero —
+no feature refinement unless the config asks for it, so every mesh built before
+this section is bitwise what it was. The band being the cell's own size is what
+makes the criterion scale-free: a cell one cell away from an edge refines, its
+children are half the size and so the band is half as wide, and the process
+stops exactly at `feature_level_p` or at `max_level`, whichever comes first.
+The criterion is evaluated on the leaf's centre, like (92.1), and (92.22)'s
+bounding-sphere rule is not repeated for it — a leaf whose centre is further
+than its own longest edge from the curve has the curve outside it.
+
+**What this supersedes in §92.2.** Stage 5 as first written ran feature
+snapping BEFORE stage 4 and pinned its points through it. That order decides
+which feature entity a point belongs to from the CASTELLATED positions — the
+staircase, before any point has been pulled onto the geometry — which is the
+worst information the run will ever have; and a pinned point then drops out of
+(92.29)'s smoothing, so the wall between two pinned points is averaged by
+neighbours that no longer include them. Worst of all, a pin cannot be undone:
+(92.31) exists to halve and abandon a displacement that breaks a cell, and a
+point placed on a corner before the loop began is outside its reach. Running
+the attraction inside the loop fixes all three — the target is a function of
+the current position and is re-decided at every iterate, the moved points stay
+in the smoothing graph, and a feature snap that breaks a cell is halved and
+abandoned exactly like any other displacement. (92.8)'s projection is
+unchanged; it is (92.38)'s edge branch, evaluated at `q_i` instead of at
+`x_i`.
+
+**Feature snapping (§92.2 stage 4).** The attraction runs where the User Guide
+puts it — after the surface snap, before the quality check — which in the loop
+of §92.11 means: (92.28) computes `q_i`, this replaces `q_i` by a point on a
+polyline or on a corner, and (92.29)-(92.31) then smooth, constrain and guard
+the displacement exactly as they did. Nothing about the guard changes; a
+feature snap that breaks a cell is halved and abandoned like any other.
+
+```
+tau     = snap.feature_tolerance * base_size
+d_e(i)  = |feat(q_i) - q_i|,  d_c(i) = |corner nearest q_i - q_i|
+
+target_i = the corner            if d_c(i) <= tau and i CLAIMS it
+         = feat(q_i)             else if d_e(i) <= tau
+         = q_i                   otherwise                        (92.38)
+```
+
+The measurement is from `q_i`, the surface point, and not from `x_i`: a
+castellated point sits up to half a diagonal off the geometry, and a test on
+`x_i` would attract points that belong on a face a cell away from the edge.
+`snap.feature_tolerance` defaults to 0.5 — half a base cell, which is the
+furthest a wall point of a cell the edge passes through can be from it — and a
+value of zero turns the attraction off entirely, which is what the second
+validation row below runs and what makes "a surface with no feature edges is
+returned bit for bit" testable on a surface that HAS them.
+
+**Where the attraction actually earns its place, and where (92.28) already
+had the answer.** A CONVEX feature seen from the fluid — the edge of a solid
+block — has an outward Voronoi wedge, and for a point inside that wedge the
+nearest point of the triangulation IS a point of the edge, or the corner
+itself. So on a convex geometry (92.28) alone already lands SOME points on the
+curve, and the measured difference the attraction makes is narrower than the
+chamfer argument above suggests: it takes the points whose nearest surface
+point is on a FACE but which sit within `tau` of the curve, so the whole edge
+carries points rather than only the few the wedge caught, and it puts a point
+on every corner rather than on the ones a cell happened to straddle. On a
+CONCAVE feature — the reentrant edge where a building meets the ground, which
+is the site's own case — no fluid point ever projects onto the curve, the
+nearest point is always on one of the two faces, and the attraction is the only
+thing that puts a mesh point there at all. Both are (92.38); only the second is
+a difference of kind.
+
+**What bounds the precision.** (92.28)'s dead band stops a point once it is
+within `eps = snap.tolerance * base_size` of its target, and (92.38) makes that
+target the feature entity, so a run at the default `tolerance = 1e-3` occupies
+an edge to about `eps` and not to machine precision. Occupation to a micron is
+a matter of asking for it — `tolerance` at `1e-9`, and enough iterations for
+(92.29)'s smoothing to run the pull to its fixed point — and the validation
+below runs the case both ways for exactly that reason. Neither is a defect: the
+band is what makes stage 4 terminate, and a wall point a millimetre along a
+metre-scale edge is a wall point on the edge.
+
+**A corner is claimed by one point, and only one.** (92.38)'s corner branch has
+a failure mode that the edge branch does not: a corner is a single position, so
+every boundary point sent to it arrives at the same coordinates, and two points
+at one position are a zero-area face, a zero-volume cell, and a mesh the gate
+refuses. So a corner admits exactly one point:
+
+```
+cand(k) = { i in B, not pinned : the corner nearest x_i is corner k }
+
+claim(k) = argmin over i in cand(k) of |x_i - corner_k|,
+           ties broken by the lower point index                   (92.39)
+```
+
+and a point within `tau` of a corner it did not claim falls through to the edge
+branch, which is what it wanted anyway — the polylines meet at the corner, so
+the nearest edge point to it is near the corner too. The claim is recomputed at
+every iterate from the current positions, so a point that drifts past another
+does not keep a corner it is no longer nearest to, and it is a total function
+of the positions, so the result does not depend on the order points are
+visited in.
+
+The candidate set is what makes the claim affordable: `cand` is read off one
+nearest-corner query per boundary point, so the whole assignment costs `|B|`
+queries and not `|B|` times the corner count. It also makes the claim a
+MATCHING by construction — a point is a candidate for exactly one corner, so no
+point is ever sent to two — and it costs the case where a corner's own nearest
+point is nearer to a different corner: that corner is then unclaimed for the
+iterate, its points take the edge branch, and the edges through it hold it
+anyway. A corner that stays unclaimed while the mesh is refined enough to
+resolve it does not occur on any case run here; if it ever does, it is visible
+in the report's corner count rather than silent.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| a cube's triangulation, at any feature angle in (0, 90) | 12 feature edges, 12 polylines, 8 corners — exactly, by (92.34) and (92.35) |
+| a capped cylinder of `n` sides, `n >= 12`, at 30 degrees | `2n` feature edges, 2 closed polylines, 0 corners: the rims are features, the side seams are not |
+| a smooth sphere's triangulation at 30 degrees | no feature edges at all, and the feature stage is then the identity on refinement and on snapping |
+| `feature_level` absent from the config | no feature refinement, and stage 1 is bitwise what §92.2 alone gives |
+| a leaf further than its own longest edge from every feature edge | not refined by (92.37) |
+| two boundary points near one corner | at most one of them is moved onto it, by (92.39); the other takes the edge branch |
+| the mesh feature snapping returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message — the guard of (92.31) is unchanged |
+| a surface with no feature edges | `snap` returns exactly what it returned before this section, bit for bit |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a cube STL | the 12 edges and 8 corners are extracted exactly, and each corner carries 3 feature edges |
+| a capped cylinder STL | exactly the two rims, as two closed polylines, no corners |
+| a box minus a cube offset by 0.3 of a cell from the lattice, at the default `tolerance` | every one of the cube's 12 edges and all 8 of its corners carry a mesh point within `2 eps` — the precision the dead band allows — the gate passes, and the topology is untouched |
+| the same case with `tolerance = 1e-9` and 60 iterations | every edge and every corner occupied to within 1e-6, the gate still passing: the band, not the attraction, is what the default run's `eps` measures |
+| the same case with `feature_tolerance = 0` | no point takes either branch of (92.38), the run is bit for bit the run before this section, and seven of the eight corners have no mesh point within 0.1 of them. The eighth is the one the geometry hands to (92.28) for free: the castellated block's own corner faces it up the body diagonal from 0.2 of a cell, and a point outside a CONVEX corner projects onto the corner — measured, and asserted as measured rather than as wished |
+| the snapped mesh of the cube case | no two points within 1e-9 of each other — what (92.39) buys, asserted directly rather than inferred from the gate |
+| `feat` against a linear scan over the segments | the same point and the same distance, at points beside a segment, beyond its end, and on it |
 
 ---

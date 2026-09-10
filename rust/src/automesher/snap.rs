@@ -19,6 +19,12 @@
 //! (92.30), and a patch the cells never resolved is refused by (92.32)
 //! before any point moves.
 //!
+//! §92.12's feature snapping runs inside the same loop: (92.28)'s target is
+//! replaced - when a feature edge, or a corner some one point claims, lies
+//! within `snap.feature_tolerance * base_size` of the surface point - by
+//! that edge or corner (92.38). A corner admits exactly one point, its
+//! claim under (92.39), recomputed from the positions of every iterate.
+//!
 //! (92.33) is the one this file found rather than implemented: a castellated
 //! mesh's 2:1 transitions carry hanging nodes, points that are the midpoint
 //! of another face's edge. §92.3's closure gate cancels a cell's face
@@ -42,6 +48,7 @@ use crate::io::polymesh::PolyMeshRaw;
 use crate::surface::{Surface, TriIndex};
 use crate::{Label, Scalar, Vec3};
 
+use super::features::{self, FeatureIndex};
 use super::quality::{self, Gate, QualityReport, QualityThresholds};
 use super::SnapSpec;
 
@@ -71,6 +78,13 @@ pub struct SnapReport {
     pub n_pinned: usize,
     /// Iterates abandoned whole by (92.31).
     pub n_abandoned: usize,
+    /// Feature edges (92.34) the surface carried, and corners (92.35).
+    pub n_feature_edges: usize,
+    pub n_feature_corners: usize,
+    /// Points whose LAST iterate took (92.38)'s edge branch, and its corner
+    /// branch. Counted from the last iterate that ran, not cumulatively.
+    pub n_snapped_to_edge: usize,
+    pub n_snapped_to_corner: usize,
 }
 
 impl SnapReport {
@@ -95,6 +109,14 @@ impl SnapReport {
             "snap: {} point(s) scaled back, {} pinned, {} iterate(s) abandoned\n",
             self.n_scaled_back, self.n_pinned, self.n_abandoned
         ));
+        s.push_str(&format!(
+            "snap: {} feature edge(s), {} corner(s); last iterate {} point(s) \
+             to an edge, {} to a corner\n",
+            self.n_feature_edges,
+            self.n_feature_corners,
+            self.n_snapped_to_edge,
+            self.n_snapped_to_corner
+        ));
         s
     }
 }
@@ -114,11 +136,14 @@ pub struct Snapped {
 /// SPEC-LIT §92.2 stage 4 / §92.11: displace the boundary points of `mesh`
 /// onto `surf`, smooth the displacement, and undo whatever breaks §92.3's
 /// gate. `base_size` is `domain.base_size`, the length `snap.tolerance`
-/// scales (92.28). Only `mesh.points` changes.
+/// scales (92.28). `feature_angle_deg` is §92.12's dihedral, the angle
+/// (92.34) classifies the feature edges at and (92.38) snaps onto them by.
+/// Only `mesh.points` changes.
 pub fn snap(
     mesh: &PolyMeshRaw,
     surf: &Surface,
     base_size: Scalar,
+    feature_angle_deg: Scalar,
     spec: &SnapSpec,
     t: &QualityThresholds,
 ) -> Result<Snapped> {
@@ -325,6 +350,29 @@ pub fn snap(
     let hanging = find_hanging(&mesh.points, &mesh.faces);
     // The index, built once, outside the loop.
     let idx = TriIndex::new(surf, base_size)?;
+    // (92.38)'s attraction, prepared once: the surface's sharp edges
+    // (92.34) chained into polylines and indexed for (92.36) queries. A
+    // `feature_tolerance` of zero turns the stage off entirely - no
+    // extraction, no index - and a surface carrying no feature edge is the
+    // identity either way. `tau` measures the branch tests in `base_size`s.
+    let tau = spec.feature_tolerance * base_size;
+    let fset = if spec.feature_tolerance > 0.0 {
+        Some(features::extract(surf, feature_angle_deg)?)
+    } else {
+        None
+    };
+    let fidx = match &fset {
+        Some(fs) if !fs.is_empty() => Some(FeatureIndex::new(fs, base_size)?),
+        _ => None,
+    };
+    // The corners by their slot in the feature set, so (92.39)'s claim can
+    // be a Vec over the corners while `closest_corner` answers in point ids.
+    let corner_slot: HashMap<u32, usize> = fset.as_ref().map_or(HashMap::new(), |fs| {
+        fs.corners.iter().enumerate().map(|(s, &c)| (c, s)).collect()
+    });
+    let n_corners = fset.as_ref().map_or(0, |fs| fs.corners.len());
+    let mut claim: Vec<Option<u32>> = vec![None; n_corners];
+    let mut corner_of_point: Vec<i32> = vec![-1; n_points];
     let eps = spec.tolerance * base_size;
     let w = spec.smoothing;
     let mut pts = mesh.points.clone();
@@ -332,20 +380,80 @@ pub fn snap(
     let mut scaled_back = vec![false; n_points];
     let mut report = SnapReport {
         n_boundary_points: is_b.iter().filter(|&&b| b).count(),
+        n_feature_edges: fset.as_ref().map_or(0, |fs| fs.edges.len()),
+        n_feature_corners: n_corners,
         ..SnapReport::default()
     };
     for k in 0..spec.iterations {
-        // (92.28): the pull toward the closest point, dead-banded by eps.
+        // (92.39): the corner claim, recomputed from the positions THIS
+        // iterate starts from - a total function of them, so no order of
+        // visiting decides who owns a corner, and a point that drifts past
+        // another does not keep a corner it is no longer nearest to.
+        if let Some(fi) = &fidx {
+            claim_corners(
+                fi,
+                &corner_slot,
+                &pts,
+                &is_b,
+                &pinned,
+                &mut claim,
+                &mut corner_of_point,
+            );
+        }
+        // (92.28): the pull toward the closest point, dead-banded by eps -
+        // the band measured against the FINAL target of (92.38), so a point
+        // already on the feature it belongs to is not pulled again.
         let mut delta = vec![Vec3::ZERO; n_points];
+        let mut took_edge = 0usize;
+        let mut took_corner = 0usize;
         for i in 0..n_points {
             if !is_b[i] || pinned[i] {
                 continue;
             }
-            let (q, _, d) = idx.closest_point(pts[i]);
-            if d > eps {
-                delta[i] = q - pts[i];
+            let (q_surf, _, d) = idx.closest_point(pts[i]);
+            // (92.38): corner first, but only the corner this point claims;
+            // else the feature edge, when one is within tau of the surface
+            // point - the measurement is from `q`, never from `x_i`, which
+            // sits up to half a diagonal off the geometry.
+            let mut q = q_surf;
+            let mut branch = 0u8;
+            if let Some(fi) = &fidx {
+                if let Some((cq, dc, c)) = fi.closest_corner(q) {
+                    let claims = corner_slot
+                        .get(&c)
+                        .map_or(false, |&s| corner_of_point[i] == s as i32);
+                    if dc <= tau && claims {
+                        q = cq;
+                        branch = 2;
+                    }
+                }
+                if branch == 0 {
+                    if let Some((eq, de, _)) = fi.closest_edge_point(q) {
+                        if de <= tau {
+                            q = eq;
+                            branch = 1;
+                        }
+                    }
+                }
+            }
+            match branch {
+                2 => took_corner += 1,
+                1 => took_edge += 1,
+                _ => {}
+            }
+            if branch == 0 {
+                if d > eps {
+                    delta[i] = q - pts[i];
+                }
+            } else {
+                let off = q - pts[i];
+                if off.mag() > eps {
+                    delta[i] = off;
+                }
             }
         }
+        report.n_snapped_to_edge = took_edge;
+        report.n_snapped_to_corner = took_corner;
         // (92.29): Jacobi sweeps over the DISPLACEMENT - on the wall's own
         // surface graph inside B, on the whole point graph outside it - into
         // a fresh vector each pass, never in place. A point with no
@@ -512,6 +620,70 @@ pub fn snap(
 // ==========================================================================
 //  Helpers
 // ==========================================================================
+
+/// (92.39): the corner claim, from the CURRENT positions - for every corner
+/// `k`, the boundary point `i` of `B`, not pinned, minimising
+/// `|x_i - corner_k|`, ties to the lower `i`, stored as `claim[k]` with
+/// `corner_of_point` its reverse. Overwrites both arrays whole.
+///
+/// A corner admits exactly one point: two points sent to one corner
+/// position are a zero-area face, a zero-volume cell, and a mesh the gate
+/// refuses. The candidate set is (92.39)'s `cand(k)` - the points whose
+/// NEAREST corner is `k`, read off one `closest_corner` query each, so the
+/// whole assignment costs |B| queries and not |B| times the corner count.
+/// That set also makes the claim a matching by construction: a point is a
+/// candidate for exactly one corner, so no point can be sent to two, and no
+/// second pass is needed to resolve contention. What it costs is stated in
+/// §92.12: a corner whose own nearest point is nearer to a different corner
+/// goes unclaimed for that iterate, and its points take the edge branch.
+///
+/// The candidate rule, and the removal of a second-choice fallback that
+/// could never fire (a point appears in exactly one corner's candidate
+/// list), are the supervising session's, not the coding agent's.
+fn claim_corners(
+    fi: &FeatureIndex,
+    corner_slot: &HashMap<u32, usize>,
+    pts: &[Vec3],
+    is_b: &[bool],
+    pinned: &[bool],
+    claim: &mut [Option<u32>],
+    corner_of_point: &mut [i32],
+) {
+    for c in claim.iter_mut() {
+        *c = None;
+    }
+    for o in corner_of_point.iter_mut() {
+        *o = -1;
+    }
+    let n_corners = claim.len();
+    if n_corners == 0 {
+        return;
+    }
+    // Per corner the nearest of its own candidates, ordered by (distance,
+    // point index) so a tie goes to the lower point.
+    let mut best = vec![(Scalar::INFINITY, u32::MAX); n_corners];
+    for (i, b) in is_b.iter().enumerate() {
+        if !b || pinned[i] {
+            continue;
+        }
+        if let Some((_, d, c)) = fi.closest_corner(pts[i]) {
+            let s = match corner_slot.get(&c) {
+                Some(&s) => s,
+                None => continue,
+            };
+            let cand = (d, i as u32);
+            if cand < best[s] {
+                best[s] = cand;
+            }
+        }
+    }
+    for (s, &(d, i)) in best.iter().enumerate() {
+        if d.is_finite() {
+            claim[s] = Some(i);
+            corner_of_point[i as usize] = s as i32;
+        }
+    }
+}
 
 /// The polygon's area vector, fanned about the mean of its own points -
 /// the construction `mesh::geometry` runs, on the raw arrays.
@@ -701,7 +873,7 @@ mod tests {
         )
         .expect("castellate");
         let snapped =
-            snap(&cast.mesh, &surf, 1.0, &SnapSpec::default(), &thresholds())
+            snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
                 .expect("snap");
         assert_eq!(snapped.mesh.points.len(), cast.mesh.points.len());
         for (a, b) in snapped.mesh.points.iter().zip(cast.mesh.points.iter()) {
@@ -742,6 +914,7 @@ mod tests {
             levels: vec![RefinementBand {
                 patch: "sphere".to_string(),
                 bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
@@ -757,7 +930,7 @@ mod tests {
         )
         .expect("castellate");
         let snapped =
-            snap(&cast.mesh, &surf, 1.0, &SnapSpec::default(), &thresholds())
+            snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
                 .expect("snap");
         eprintln!("{}", snapped.report.summary());
         assert!(
@@ -806,7 +979,7 @@ mod tests {
             &thresholds(),
         )
         .expect("castellate");
-        let err = snap(&cast.mesh, &surf, 1.0, &SnapSpec::default(), &thresholds())
+        let err = snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
             .expect_err("a sphere finer than a cell is refused");
         let msg = format!("{err}");
         assert!(
@@ -849,7 +1022,7 @@ mod tests {
         let mut t = thresholds();
         t.max_non_orth_deg = 1e-3;
         t.report_non_orth_deg = 1e-3;
-        let snapped = snap(&cast.mesh, &surf, 1.0, &SnapSpec::default(), &t)
+        let snapped = snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &t)
             .expect("the arrival mesh is orthogonal, so the gate is satisfiable");
         eprintln!("{}", snapped.report.summary());
         assert!(
@@ -881,6 +1054,7 @@ mod tests {
             levels: vec![RefinementBand {
                 patch: "dome".to_string(),
                 bands: vec![DistanceBand { distance: 0.0, level: 1 }],
+                feature_level: 0,
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
@@ -896,7 +1070,7 @@ mod tests {
         )
         .expect("castellate");
         let snapped =
-            snap(&cast.mesh, &surf, 1.0, &SnapSpec::default(), &thresholds())
+            snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
                 .expect("snap - the one-sided area test lets the dome through");
         eprintln!("{}", snapped.report.summary());
         // (92.30) holds the box plane exactly, on every point the zMin
@@ -920,5 +1094,320 @@ mod tests {
             }
         }
         assert!(snapped.quality.passed());
+    }
+
+    /// The unit's common case: the [0,4]^3 domain at base size 1, the tree
+    /// at level 1 around the geometry, and a cube spanning [1.3, 2.3]^3 -
+    /// offset by 0.3 of a BASE cell, so no cube face lies on a cell plane.
+    /// Returns the surface and the castellated mesh; the caller snaps.
+    fn cube_case() -> (Surface, PolyMeshRaw) {
+        let (mut tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 1);
+        let surf = Surface::from_soup(
+            box_soup([1.3; 3], [2.3; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "cube".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 1 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 1,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        (surf, cast.mesh)
+    }
+
+    /// The `a_sphere_is_snapped_onto_the_sphere` case, built once: the
+    /// refined tree, the surface, the castellated mesh.
+    fn sphere_case() -> (Surface, PolyMeshRaw) {
+        let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "sphere".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        (surf, cast.mesh)
+    }
+
+    /// Point-to-SEGMENT distance - the acceptance test measures along an
+    /// edge, not to its infinite line.
+    fn seg_dist(p: Vec3, a: Vec3, b: Vec3) -> f64 {
+        let ab = b - a;
+        let t = ((p - a).dot(ab) / ab.mag_sqr()).clamp(0.0, 1.0);
+        (p - a - ab * t).mag()
+    }
+
+    /// The cube's 12 edges as segments, and its 8 corners, from its corners
+    /// `lo` and `hi`.
+    fn cube_frame(lo: Vec3, hi: Vec3) -> (Vec<(Vec3, Vec3)>, Vec<Vec3>) {
+        let mut segs = Vec::new();
+        for d in 0..3 {
+            for m0 in [false, true] {
+                for m1 in [false, true] {
+                    let e1 = (d + 1) % 3;
+                    let e2 = (d + 2) % 3;
+                    let at = |on: bool, ax: usize| {
+                        if on { hi.component(ax) } else { lo.component(ax) }
+                    };
+                    let mut a = [0.0; 3];
+                    a[d] = lo.component(d);
+                    a[e1] = at(m0, e1);
+                    a[e2] = at(m1, e2);
+                    let mut b = a;
+                    b[d] = hi.component(d);
+                    segs.push((Vec3::new(a[0], a[1], a[2]), Vec3::new(b[0], b[1], b[2])));
+                }
+            }
+        }
+        let mut corners = Vec::new();
+        for cx in [lo.x, hi.x] {
+            for cy in [lo.y, hi.y] {
+                for cz in [lo.z, hi.z] {
+                    corners.push(Vec3::new(cx, cy, cz));
+                }
+            }
+        }
+        (segs, corners)
+    }
+
+    #[test]
+    fn a_cube_off_the_lattice_gets_its_edges_and_corners() {
+        let (surf, cast) = cube_case();
+        // The run at SnapSpec::default(). (92.28)'s dead band bounds stage
+        // 4's own precision at eps = tolerance * base_size - 1e-3 at the
+        // default - and the band measures the FINAL target of (92.38), so a
+        // point stops within eps of the edge or corner it was pulled to.
+        // The defaults still occupy every entity, and pass the gate with
+        // the topology unchanged.
+        let defaults =
+            snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap at the defaults");
+        eprintln!("{}", defaults.report.summary());
+        // The cube's triangulation carries its 12 edges and 8 corners
+        // exactly, by (92.34) and (92.35).
+        assert_eq!(defaults.report.n_feature_edges, 12);
+        assert_eq!(defaults.report.n_feature_corners, 8);
+        assert_eq!(defaults.report.n_snapped_to_corner, 8);
+        assert!(defaults.report.n_snapped_to_edge > 0);
+        let (segs, corners) =
+            cube_frame(Vec3::new(1.3, 1.3, 1.3), Vec3::new(2.3, 2.3, 2.3));
+        assert_eq!(segs.len(), 12);
+        assert_eq!(corners.len(), 8);
+        // Occupied to the precision the dead band defines: every entity
+        // carries a point within 2 eps.
+        for (a, b) in &segs {
+            let best = defaults
+                .mesh
+                .points
+                .iter()
+                .map(|p| seg_dist(*p, *a, *b))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                best <= 2e-3,
+                "at the defaults no point within 2 eps of the edge ({:?}) - ({:?}): {:e}",
+                a, b, best
+            );
+        }
+        for c in &corners {
+            let best = defaults
+                .mesh
+                .points
+                .iter()
+                .map(|p| (*p - *c).mag())
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                best <= 2e-3,
+                "at the defaults no point within 2 eps of the corner {:?}: {:e}",
+                c, best
+            );
+        }
+        assert!(defaults.quality.passed());
+        assert_eq!(defaults.mesh.faces, cast.faces);
+        assert_eq!(defaults.mesh.owner, cast.owner);
+        assert_eq!(defaults.mesh.neighbour, cast.neighbour);
+        // The micron gate: the same case with (92.28)'s dead band tightened
+        // to 1e-9 and the iteration cap raised to 60 - every other field
+        // the default - so the pull runs to its fixed point instead of
+        // stopping at the band. Then every point the (92.38) branches took
+        // sits ON its target: within 1e-6 of each edge SEGMENT, and each of
+        // the 8 corners occupied - by one point, which
+        // two_points_cannot_take_one_corner asserts directly.
+        let spec = SnapSpec {
+            tolerance: 1e-9,
+            iterations: 60,
+            ..SnapSpec::default()
+        };
+        let snapped = snap(&cast, &surf, 1.0, 30.0, &spec, &thresholds())
+            .expect("snap with the band tightened");
+        eprintln!("{}", snapped.report.summary());
+        for (a, b) in &segs {
+            let best = snapped
+                .mesh
+                .points
+                .iter()
+                .map(|p| seg_dist(*p, *a, *b))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                best <= 1e-6,
+                "no point on the edge ({:?}) - ({:?}): closest {:e}",
+                a, b, best
+            );
+        }
+        for c in &corners {
+            let best = snapped
+                .mesh
+                .points
+                .iter()
+                .map(|p| (*p - *c).mag())
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                best <= 1e-6,
+                "no point on the corner {:?}: closest {:e}",
+                c, best
+            );
+        }
+        assert!(snapped.quality.passed());
+        assert_eq!(snapped.mesh.faces, cast.faces);
+        assert_eq!(snapped.mesh.owner, cast.owner);
+        assert_eq!(snapped.mesh.neighbour, cast.neighbour);
+    }
+
+    #[test]
+    fn with_feature_snapping_off_the_corners_are_not_occupied() {
+        let (surf, cast) = cube_case();
+        let spec = SnapSpec {
+            feature_tolerance: 0.0,
+            ..SnapSpec::default()
+        };
+        let a = snap(&cast, &surf, 1.0, 30.0, &spec, &thresholds()).expect("snap a");
+        let b = snap(&cast, &surf, 1.0, 30.0, &spec, &thresholds()).expect("snap b");
+        eprintln!("{}", a.report.summary());
+        assert_eq!(a.report.n_snapped_to_edge, 0);
+        assert_eq!(a.report.n_snapped_to_corner, 0);
+        // Determinism: what the pre-change code produced is what the stage
+        // at zero tolerance still produces, bit for bit.
+        assert_eq!(a.mesh.points.len(), b.mesh.points.len());
+        for (p, q) in a.mesh.points.iter().zip(b.mesh.points.iter()) {
+            assert_eq!(p.x.to_bits(), q.x.to_bits());
+            assert_eq!(p.y.to_bits(), q.y.to_bits());
+            assert_eq!(p.z.to_bits(), q.z.to_bits());
+        }
+        // The chamfer (92.38) exists to mend: with the attraction off, the
+        // nearest-point map never returns an edge, and no point is TAKEN to
+        // a corner. One caveat this geometry really has: the solid block's
+        // corner (2.5, 2.5, 2.5) faces the cube's own (2.3, 2.3, 2.3) up
+        // the body diagonal from 0.2 of a cell, and to a point outside a
+        // convex corner the closest point of the triangulation IS the
+        // corner - so (92.28) alone walks it there and the dead band stops
+        // it within eps. That is the one point the feature stage would have
+        // claimed; every other corner keeps every point at least 0.1 away,
+        // and nowhere does a point come within the 1e-6 of occupation the
+        // acceptance test holds the stage to.
+        let (_, corners) = cube_frame(Vec3::new(1.3, 1.3, 1.3), Vec3::new(2.3, 2.3, 2.3));
+        // The one corner (92.28) reaches on its own is named by its
+        // coordinates, not by its position in the list.
+        let free = Vec3::new(2.3, 2.3, 2.3);
+        for c in corners.iter() {
+            let best = a
+                .mesh
+                .points
+                .iter()
+                .map(|p| (*p - *c).mag())
+                .fold(f64::INFINITY, f64::min);
+            if (*c - free).mag() < 1e-12 {
+                assert!(
+                    best > 1e-6 && best <= 2e-3,
+                    "the body-diagonal corner {:?}: nearest point {:e} - \
+                     expected the dead-banded face pull, nothing more",
+                    c, best
+                );
+            } else {
+                assert!(
+                    best >= 0.1,
+                    "a point sits {:e} from the corner {:?} with the stage off",
+                    best, c
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_sphere_is_unchanged_by_the_feature_stage() {
+        let (surf, cast) = sphere_case();
+        // `sphere_soup` folds no edge further than 22.08 degrees, so at 30
+        // the feature set is empty and the stage is the identity - with the
+        // tolerance on or off, bit for bit the same mesh.
+        let on = snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+            .expect("snap with the stage on");
+        let off_spec = SnapSpec {
+            feature_tolerance: 0.0,
+            ..SnapSpec::default()
+        };
+        let off = snap(&cast, &surf, 1.0, 30.0, &off_spec, &thresholds())
+            .expect("snap with the stage off");
+        eprintln!("{}", on.report.summary());
+        assert_eq!(on.report.n_feature_edges, 0);
+        assert_eq!(on.report.n_feature_corners, 0);
+        assert_eq!(on.report.n_snapped_to_edge, 0);
+        assert_eq!(on.report.n_snapped_to_corner, 0);
+        assert_eq!(on.mesh.points.len(), off.mesh.points.len());
+        for (p, q) in on.mesh.points.iter().zip(off.mesh.points.iter()) {
+            assert_eq!(p.x.to_bits(), q.x.to_bits());
+            assert_eq!(p.y.to_bits(), q.y.to_bits());
+            assert_eq!(p.z.to_bits(), q.z.to_bits());
+        }
+    }
+
+    /// What (92.39) buys: a corner admits one point, so no two points of
+    /// the snapped mesh share a position - two at one position are a
+    /// zero-area face and a zero-volume cell. O(n^2) on the unit's own
+    /// small case.
+    #[test]
+    fn two_points_cannot_take_one_corner() {
+        let (surf, cast) = cube_case();
+        let snapped =
+            snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap");
+        let pts = &snapped.mesh.points;
+        for i in 0..pts.len() {
+            for j in (i + 1)..pts.len() {
+                let d = (pts[i] - pts[j]).mag();
+                assert!(
+                    d >= 1e-9,
+                    "points {i} and {j} collapsed onto each other: {d:e}"
+                );
+            }
+        }
     }
 }

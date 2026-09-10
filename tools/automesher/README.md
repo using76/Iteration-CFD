@@ -60,6 +60,7 @@ ammonia-terminal site, with comments on every block. Every key of
 | `refinement.levels` | array | `[]` | Per-patch distance bands; empty means no band-driven refinement. |
 | `refinement.levels[].patch` | string | *(required)* | Patch (STL solid) name the bands apply to. |
 | `refinement.levels[].bands` | array | *(required)* | `[{distance, level}, ...]` - within `distance` of the patch, at least `level` (eq. 92.1). |
+| `refinement.levels[].feature_level` | integer | `0` | A leaf within its own longest edge of one of this patch's feature edges (eq. 92.34) refines to this level (eq. 92.37); 0 is no feature refinement. |
 | `refinement.feature_angle_deg` | number | `30.0` | Dihedral angle past which a triangulation edge is a feature edge (eq. 92.2). |
 | `refinement.max_level` | integer | `2` | The level cap `l(c)` is min'd with (eq. 92.1); 6 is the octree cap §74.2 states and `mesh::refined::build` enforces. |
 | `castellation.keep_region` | string | `"largest"` | Which connected component of the fluid survives eq. (92.4): `"largest"` or `"seed"`. |
@@ -71,6 +72,7 @@ ammonia-terminal site, with comments on every block. Every key of
 | `snap.smoothing` | number | `0.5` | The smoothing relaxation weight, in `[0, 1]`. |
 | `snap.undo_limit` | integer | `4` | Halvings of a gate-breaking displacement before it is zeroed and the point pinned - eq. (92.7)'s undo. |
 | `snap.max_area_ratio` | number | `4.0` | Eq. (92.32): a wall patch carrying more than this many times its own surface area is geometry the cells never resolved, and the run refuses rather than collapsing the cell that reached it. Must be >= 1. |
+| `snap.feature_tolerance` | number | `0.5` | Eq. (92.38): a boundary point whose surface target lies within this fraction of `domain.base_size` of a feature edge is snapped onto the edge instead, and onto the corner it claims (92.39). Zero turns the attraction off. Must be >= 0. |
 | `layers.patches` | string[] | `[]` | The patches layers are added to; empty means none. |
 | `layers.n` | integer | `0` | Number of layers, eq. (92.9)'s `n`. Zero: no layers. |
 | `layers.first_thickness` | number | `0.05` | The first layer's thickness, metres. |
