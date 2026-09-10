@@ -30,7 +30,7 @@
   "repairs": [],
   "trim": {
     "below_z": 3.05,
-    "shrink_xy_m": 600.0
+    "shrink_xy_m": 0.0
   },
   "sea_z": 3.05,
   "points": {
@@ -58,7 +58,7 @@
   "roof_patches": {},
   "sizes": {
     "min": 0.3,
-    "max": 12.0,
+    "max": 20.0,
     "pool": 0.35,
     "box": 2.5,
     "growth_from": 2.5,
