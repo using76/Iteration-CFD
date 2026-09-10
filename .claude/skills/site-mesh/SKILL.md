@@ -32,7 +32,9 @@ description: STEP 부지 형상에서 수렴하는 사면체 격자를 만들 �
 | `solids.base_below_sea_m` | `1.0` | 모든 솔리드 바닥을 해수면(`sea_z`) 아래 1 m까지 내린다. 물 위에 선 건물(해안에 걸친 프리즘)은 `sink_m 1.5`로도 바닥이 해수면 위 0.45 m에 떠서 그 밑 얇은 유체층에 두께 게이트가 못 고치는 셀(τ 0.024)이 남았다; 육지에선 땅속이라 무해, 물 위에선 트림이 잘라 벽이 해수면과 직각으로 만난다 |
 | `solids.hull_box_snap_m`, `hull_box_inset_m` | `20, 5` | 경계 20 m 안의 프리즘 꼭짓점을 경계 안쪽 5 m로 당겨 어떤 벽도 출구에 닿지 않게; 띠 안에서 윤곽이 퇴화한 건물은 제거 |
 | `sizes.gap_min_m` | `1.0` | 틈 규칙 세분의 먼 곳 바닥 — 없으면 2,400만 셀로 폭발 |
+| `sizes.plume` | `{downwind_m, upwind_m, half_width_m, height_m, size, thickness_m}` | 점마다 풍하(−x) 플룸 상자를 `size`로 세분. 전 영역 상한을 내리는 대신 플룸이 지나는 지면 층만 잘게 — 도메인 3.3억 m³는 2.5 m 균일이면 4억 셀, 10 m 균일도 700만 |
 | `mesh` | `algo2d 6, algo3d 1, threads 32` | HXT(10)는 좌표를 찍어 주는 진단용으로만 |
+| `mesh.relocate_passes`, `smoothing` | `5, 3` | 3-D 생성 뒤 Relocate3D 노드 재배치 5회(내부 절점만 이동, 경계·연결 유지 — 라이브 모델에서만; .msh를 다시 읽어 돌리면 경계 절점이 움직인다)와 표면 라플라시안 스무딩 3단계. 품질 분포(p1·p5)를 올린다; 최악 셀은 flat tet·두께 게이트 몫 |
 | `classification.pool_prefix` | `""` (기본 `pool_`) | 점 이름이 그대로 inlet 패치 이름이 된다 — 점 `inlet1`·`inlet2`·`inlet3` → 패치 `inlet1`…, 옆면 `wall_inlet1`…; 변환기는 `inlet`으로 시작하는 이름을 velocity-inlet으로 기본 배정한다. 한 형상에 원천 여러 개(원판+링+다른 원판)를 넣을 때 |
 
 설정에 모르는 키(`_note` 등)를 넣으면 도구가 거부한다. 메모는 README.txt에.
