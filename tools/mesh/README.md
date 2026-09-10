@@ -216,7 +216,13 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                              // refinement box never move; repeated repair_rounds times, then the
                              // survivors are counted (notes "thickness: ...") and the worst ten
                              // listed in the summary's "thickness_gate" with their positions
-    "repair_rounds": 3
+    "repair_rounds": 3,
+    "improve_below": 0,     // > 0: every tet under this SICN has its nodes tried at a few
+                            // positions (towards the neighbours' centroid, away from the
+                            // opposite face) and keeps the one that raises the minimum SICN of
+                            // the tets around the node; interior nodes move freely, a boundary
+                            // node slides only inside one plane of one patch, the rest stay
+    "improve_rounds": 3
   },
   "classification": {"wall_prefix": "wall_", "pool_prefix": "pool_", "big_roof_is_ground_m2": 2000}
 }
