@@ -24,9 +24,14 @@ ofgpu-automesher <config.json> [-schema] [-check <caseDir>] [-dryRun]
 - `ofgpu-automesher <config.json>` - the meshing path. Reads and validates the
   config, loads and merges `input.surfaces[]`, requires a closed surface,
   runs the §92.2 stage-0 domain check, prints the surface summary and the
-  plan, and then - unit 1 ships the skeleton, unit 2 builds stage 1 - refuses:
+  plan, and then refuses:
   `not implemented: stage 1 (octree refinement) - SPEC-LIT §92.2; tranche 1 unit 2`,
-  exit status 1. Nothing is written.
+  exit status 1. Nothing is written. **This is the DRIVER, not the stages.**
+  Stages 1-6 are built and tested in the library
+  (`rust/src/automesher/{octree,castellate,features,snap,layers}.rs`); what is
+  missing is the wiring from a config file through them, so every measurement
+  quoted below and in §92.13 was taken by driving the library directly. Wiring
+  the driver is its own unit.
 - `ofgpu-automesher <config.json> -check <caseDir>` - **fully working.** Reads
   `<caseDir>/constant/polyMesh` and runs the §92.3 quality gate (G1-G7) with
   the config's `quality` thresholds. Every gate passed: the measured summary,
@@ -79,6 +84,11 @@ ammonia-terminal site, with comments on every block. Every key of
 | `layers.growth` | number | `1.3` | The expansion from one layer to the next; must be > 0. |
 | `layers.min_thickness` | number | `0.1` | Total thickness below which the layers are dropped. |
 | `layers.medial_frac` | number | `0.5` | Fraction of the local medial-axis distance below which the layers are dropped (eq. 92.10). |
+| `layers.cell_frac` | number | `0.5` | Eq. (92.45): the fraction of the LOCAL CELL SIZE `h_i` the whole stack may take, where `h_i` is the shortest edge of the layer faces carrying point `i` - on a snapped mesh that is the CUT cell's edge, not the octree leaf's. This is usually the limiter that binds, so read the achieved first layer in metres off the run's `layers: patch ...` line rather than assuming `first_thickness` was delivered. |
+| `layers.normal_passes` | integer | `3` | Eq. (92.41): smoothing passes over the point normals. Zero leaves them the area-weighted average of (92.40), which is what keeps a flat wall's prisms exact. |
+| `layers.smoothing` | number | `0.5` | Eqs. (92.41) and (92.46)'s `w`. |
+| `layers.smoothing_passes` | integer | `4` | Eq. (92.46): passes of the displacement into the interior. |
+| `layers.retreat_limit` | integer | `4` | Eq. (92.47): how many times the thickness is halved - on the EXTRUDED mesh - before the patch loses its layers by name. |
 | `quality.max_closure` | number | `1e-10` | G2 (92.12): `\|sum s Sf\| / V^(2/3)` stays under this - `mesh::geometry::CLOSURE_LIMIT`, the crate's own. |
 | `quality.max_non_orth_deg` | number | `70.0` | G4 (92.13): max internal-face non-orthogonality, degrees. |
 | `quality.report_non_orth_deg` | number | `60.0` | G4: faces past this are counted and reported, not refused. |
@@ -112,7 +122,22 @@ Units 2-7 are the stages themselves.
    corners pinned (eq. 92.8), before stage 4 and pinned through it.
    **Unit 6.**
 6. **Layers** - inward prismatic extrusion (92.9)-(92.10) with the medial-axis
-   limit, gate-checked per patch. **Unit 7.**
+   limit, gate-checked per patch.
+
+   **`layers.patches` is supported on a wall that CASTELLATES ONTO THE CELL
+   PLANES.** On a snapped wall it is attempted and usually given up: stage 4
+   always runs before stage 6, so the wall face the layer stage turns into an
+   internal face carries whatever non-orthogonality the snap left on it, and
+   §92.13's table measures a snapped sphere at 74-80 degrees against G4's 70 -
+   at every surface resolution from 128 to 8192 triangles, at octree level 3,
+   and at every thickness tried. A snapped axis-aligned box is not safe
+   either: its convex edges tangle the stack (37 folded cells at one offset,
+   an outright negative volume at another). When that happens the patch loses
+   its layers BY NAME, the run returns the snapped mesh, and the summary says
+   which patch and why - it does not refuse with a list of faces you cannot
+   act on. Moving that line needs either a wall-face/owner-centre alignment
+   step in stage 4 or a G4 rule of its own for a newly internalised wall face;
+   both change numbers §92.3 fixes and neither is written.
 
 ## The quality gate
 

@@ -494,15 +494,16 @@ pub struct Shrunk {
     pub dropped: Vec<(String, String)>,
 }
 
-/// Shrink the boundary inward by the layer thickness and relax the interior
-/// behind it, until the gate is satisfied or the patches give their layers
-/// up. `spec.n == 0`, or an empty `layers.patches`, returns the input mesh
-/// bit for bit.
-pub fn shrink(
+/// [`shrink`]'s body at a CALLER'S patch set and per-point retreat cap: the
+/// ladder runs over `patches0` alone, and every layer point's proposed
+/// displacement and thickness come in already scaled by `caps[i]`.
+fn shrink_on(
     mesh: &PolyMeshRaw,
     surf: &Surface,
     spec: &LayerSpec,
     t: &QualityThresholds,
+    patches0: &[usize],
+    caps: &[Scalar],
 ) -> Result<Shrunk> {
     let n_faces = mesh.faces.len();
     let n_internal = mesh.neighbour.len().min(n_faces);
@@ -516,7 +517,6 @@ pub fn shrink(
         });
     }
     let st = stack(spec)?;
-    let all_patches = resolve_patches(mesh, spec)?;
     // The two gates moving points cannot mend, refused at once on the
     // input, as stage 4 refuses them.
     let arrival = quality::measure_capped(mesh, t, quality::GATE_CELL_CAP)?;
@@ -530,7 +530,7 @@ pub fn shrink(
     // The index is built ONCE: the hint is the mean layer-face edge length,
     // or a hundredth of the surface's diagonal when no face is a layer face.
     let mut is_layer_face = vec![false; n_faces];
-    for &p in &all_patches {
+    for &p in patches0 {
         let patch = &mesh.patches[p];
         for j in 0..patch.size {
             let f = n_internal + patch.start + j;
@@ -610,7 +610,7 @@ pub fn shrink(
     // recomputing from the input mesh, because a point the dropped patch
     // shared is now constrained into that patch's plane and its normal is a
     // different vector. At most `all_patches.len()` rounds.
-    let mut patches = all_patches.clone();
+    let mut patches = patches0.to_vec();
     let mut dropped: Vec<(String, String)> = Vec::new();
     let mut retreats = 0usize;
     loop {
@@ -623,6 +623,14 @@ pub fn shrink(
             });
         }
         let mut f = field(mesh, &idx, &patches, spec, &st)?;
+        // (92.47)'s retreat, carried in from the EXTRUSION's own ladder: the
+        // caller's cap scales what this round proposes, point by point.
+        for i in 0..f.is_layer.len() {
+            if f.is_layer[i] {
+                f.disp[i] = f.disp[i] * caps[i];
+                f.thickness[i] = f.thickness[i] * caps[i];
+            }
+        }
         // The retreat ladder: halve D at the layer points the failing cells
         // carry, re-run the relaxation, and try again, up to
         // `retreat_limit` times.
@@ -676,7 +684,7 @@ pub fn shrink(
                 }
                 break;
             }
-            let fail_pts = failing_points(&rep, mesh, n_internal, &f, &cell_points);
+            let fail_pts = failing_points(&rep, mesh, n_internal, &f.is_layer, &cell_points);
             if halvings >= spec.retreat_limit {
                 give_up = Some((fail_pts, format!(
                     "the gate still failed after {halvings} retreat(s)"
@@ -742,14 +750,45 @@ pub fn shrink(
     }
 }
 
+/// Shrink the boundary inward by the layer thickness and relax the interior
+/// behind it, until the gate is satisfied or the patches give their layers
+/// up. `spec.n == 0`, or an empty `layers.patches`, returns the input mesh
+/// bit for bit.
+pub fn shrink(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    spec: &LayerSpec,
+    t: &QualityThresholds,
+) -> Result<Shrunk> {
+    let n_points = mesh.points.len();
+    if spec.n == 0 || spec.patches.is_empty() {
+        return Ok(Shrunk {
+            mesh: mesh.clone(),
+            field: empty_field(n_points),
+            retreats: 0,
+            dropped: Vec::new(),
+        });
+    }
+    let all_patches = resolve_patches(mesh, spec)?;
+    shrink_on(
+        mesh,
+        surf,
+        spec,
+        t,
+        &all_patches,
+        &vec![1.0 as Scalar; n_points],
+    )
+}
+
 /// The layer points the gate's failure blames: the subject cell for the
 /// cell-named gates, both cells of the face for G4 - whose subject is a
-/// FACE, not a cell id. G3 and G7 name no cell a retreat can serve.
+/// FACE, not a cell id. G3 and G7 name no cell a retreat can serve. The
+/// `is_layer` flags index the same points `cell_points` names.
 fn failing_points(
     rep: &quality::QualityReport,
     mesh: &PolyMeshRaw,
     n_internal: usize,
-    f: &Field,
+    is_layer: &[bool],
     cell_points: &[Vec<u32>],
 ) -> Vec<usize> {
     let mut is_fail = vec![false; cell_points.len()];
@@ -776,7 +815,7 @@ fn failing_points(
             }
         }
     }
-    let mut seen = vec![false; f.is_layer.len()];
+    let mut seen = vec![false; is_layer.len()];
     let mut out = Vec::new();
     for (c, bad) in is_fail.iter().enumerate() {
         if !bad {
@@ -784,7 +823,7 @@ fn failing_points(
         }
         for &p in &cell_points[c] {
             let i = p as usize;
-            if f.is_layer[i] && !seen[i] {
+            if is_layer[i] && !seen[i] {
                 seen[i] = true;
                 out.push(i);
             }
@@ -873,6 +912,15 @@ pub struct PatchLayers {
     pub full_area_frac: Scalar,
     /// The area-weighted mean of the fraction of `T` actually achieved.
     pub mean_frac: Scalar,
+    /// The first layer ASKED for, metres - `st.t[0]`, `0.0` when no stack
+    /// exists (`spec.n == 0`).
+    pub t1_requested: Scalar,
+    /// The area-weighted mean first layer ACHIEVED, metres - `st.t[0] *
+    /// mean_frac`. `0.0` on a dropped patch.
+    pub t1_mean: Scalar,
+    /// The smallest first layer ACHIEVED over the patch's faces, metres -
+    /// `st.t[0] * min_f tau_f`. `0.0` on a dropped patch.
+    pub t1_min: Scalar,
     /// `Some(reason)` when the patch lost its layers.
     pub dropped: Option<String>,
 }
@@ -908,11 +956,19 @@ impl LayerReport {
         for p in &self.patches {
             match &p.dropped {
                 Some(reason) => s.push_str(&format!("layers: {reason}\n")),
-                None => s.push_str(&format!(
-                    "layers: patch \"{}\": {} layer(s) on {} face(s), area {:.3e}, full {:.1}%, mean frac {:.3}\n",
-                    p.name, p.n_layers, p.n_faces, p.area,
-                    100.0 * p.full_area_frac, p.mean_frac
-                )),
+                None => {
+                    let mut line = format!(
+                        "layers: patch \"{}\": {} layer(s) on {} face(s), area {:.3e}, full {:.1}%, mean frac {:.3}, first layer {:.3e} m of {:.3e} requested (min {:.3e} m)",
+                        p.name, p.n_layers, p.n_faces, p.area,
+                        100.0 * p.full_area_frac, p.mean_frac,
+                        p.t1_mean, p.t1_requested, p.t1_min
+                    );
+                    if p.full_area_frac == 0.0 {
+                        line.push_str(" - NO face received the full stack");
+                    }
+                    line.push('\n');
+                    s.push_str(&line);
+                }
             }
         }
         s
@@ -931,21 +987,210 @@ pub struct Layered {
 
 /// SPEC-LIT §92.2 stage 6 / §92.13 end to end: shrink, extrude, renumber,
 /// pass §92.3's gate.
+///
+/// The retreat ladder lives HERE, and it measures the EXTRUDED mesh, not the
+/// shrunk one: each round runs the whole extrusion, reads §92.3's gate off
+/// the mesh WITH its layer cells, and answers a failure with (92.47)'s
+/// retreats - the offending layer points' thickness halved, the run
+/// re-attempted - and, when the retreats run out, with the patch carrying
+/// the most offending points losing its layers by name while the run
+/// continues. What the shrink alone passes, the extrusion can still break -
+/// a snapped wall carries its own non-orthogonality into the level-n face -
+/// so no defect the extrusion introduces may end the run (SPEC-LIT §92.13,
+/// (92.47)).
 pub fn add_layers(
     mesh: &PolyMeshRaw,
     surf: &Surface,
     spec: &LayerSpec,
     t: &QualityThresholds,
 ) -> Result<Layered> {
-    let st = stack(spec)?;
-    let n = st.n;
-    // A patch name that is not a patch of the mesh is refused here, naming
-    // it, before any normal is computed - whatever `n` is.
-    let named = if spec.patches.is_empty() {
+    let mut patches = if spec.patches.is_empty() {
         Vec::new()
     } else {
         resolve_patches(mesh, spec)?
     };
+    let mut caps = vec![1.0 as Scalar; mesh.points.len()];
+    let mut halvings = 0usize;
+    let mut extra_retreats = 0usize;
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    let n_points = mesh.points.len();
+    let n_faces = mesh.faces.len();
+    let n_internal = mesh.neighbour.len().min(n_faces);
+    loop {
+        let mut a = attempt(mesh, surf, spec, t, &patches, &caps)?;
+        // The attempt passed the gate on the extruded mesh: the run
+        // continues, and every patch an earlier round gave up carries its
+        // row - zero layers, the reason, the input mesh's own face count and
+        // area - alongside the patches that kept theirs.
+        if a.quality.passed() {
+            // A dropped row still names the first layer ASKED for, where a
+            // stack exists at all.
+            let t1_requested = if spec.n == 0 {
+                0.0
+            } else {
+                stack(spec)?.t[0]
+            };
+            for (name, reason) in &dropped {
+                if a
+                    .report
+                    .patches
+                    .iter()
+                    .any(|p| &p.name == name)
+                {
+                    continue;
+                }
+                let patch = mesh
+                    .patches
+                    .iter()
+                    .find(|p| &p.name == name)
+                    .expect("a dropped patch name is a patch of the mesh");
+                a.report.patches.push(PatchLayers {
+                    name: name.clone(),
+                    n_layers: 0,
+                    n_faces: patch.size,
+                    area: patch_area(mesh, n_internal, patch),
+                    full_area_frac: 0.0,
+                    mean_frac: 0.0,
+                    t1_requested,
+                    t1_mean: 0.0,
+                    t1_min: 0.0,
+                    dropped: Some(format!("patch \"{name}\": {reason}")),
+                });
+            }
+            a.report.retreats += extra_retreats;
+            return Ok(a);
+        }
+        // No layer cell was inserted, so the gate's failure is the INPUT
+        // mesh's own - no retreat on layer points can mend it.
+        if patches.is_empty() || a.extrusion.layer_faces.is_empty() {
+            return Err(Error::Mesh(a.quality.refusal_text()));
+        }
+        // The layer points to halve, read off the EXTRUDED mesh: a failing
+        // cell may be a layer cell, whose points are level copies, so every
+        // face point is mapped back to its INPUT id before the failing
+        // cells' point sets are built.
+        let n = a.extrusion.n;
+        let mut slots = vec![
+            0usize;
+            a.extrusion
+                .slot_of_point
+                .iter()
+                .filter(|&&s| s >= 0)
+                .count()
+        ];
+        for (i, &s) in a.extrusion.slot_of_point.iter().enumerate() {
+            if s >= 0 {
+                slots[s as usize] = i;
+            }
+        }
+        let orig_of =
+            |p: crate::Label| -> usize {
+                let p = p as usize;
+                if p < n_points { p } else { slots[(p - n_points) / n] }
+            };
+        let n_faces_out = a.mesh.faces.len();
+        let n_internal_out = a.mesh.neighbour.len().min(n_faces_out);
+        let n_cells_out = a
+            .mesh
+            .owner
+            .iter()
+            .chain(a.mesh.neighbour.iter())
+            .copied()
+            .max()
+            .map_or(0, |m| m as usize + 1);
+        let mut cell_points: Vec<Vec<u32>> = vec![Vec::new(); n_cells_out];
+        for (f, face) in a.mesh.faces.iter().enumerate() {
+            for &p in face {
+                cell_points[a.mesh.owner[f] as usize].push(orig_of(p) as u32);
+            }
+            if f < n_internal_out {
+                for &p in face {
+                    cell_points[a.mesh.neighbour[f] as usize].push(orig_of(p) as u32);
+                }
+            }
+        }
+        for list in cell_points.iter_mut() {
+            list.sort_unstable();
+            list.dedup();
+        }
+        let is_layer: Vec<bool> = a
+            .extrusion
+            .slot_of_point
+            .iter()
+            .map(|&s| s >= 0)
+            .collect();
+        let fail_pts =
+            failing_points(&a.quality, &a.mesh, n_internal_out, &is_layer, &cell_points);
+        if fail_pts.is_empty() || halvings >= spec.retreat_limit {
+            // The patch that loses its layers: the one carrying the most
+            // offending layer points, ties to the lower patch index. An
+            // empty list blames the first patch - the gate failed on cells
+            // no layer point reaches.
+            let mut counts = vec![0usize; patches.len()];
+            for (k, &p) in patches.iter().enumerate() {
+                let patch = &mesh.patches[p];
+                let mut seen = vec![false; n_points];
+                for j in 0..patch.size {
+                    let fa = n_internal + patch.start + j;
+                    if fa >= n_faces {
+                        continue;
+                    }
+                    for &pt in &mesh.faces[fa] {
+                        seen[pt as usize] = true;
+                    }
+                }
+                for &i in &fail_pts {
+                    if seen[i] {
+                        counts[k] += 1;
+                    }
+                }
+            }
+            let mut victim = 0usize;
+            for k in 1..counts.len() {
+                if counts[k] > counts[victim] {
+                    victim = k;
+                }
+            }
+            let vp = patches[victim];
+            let reason = format!(
+                "the gate still failed after {halvings} retreat(s) on the layer \
+                 cells themselves - the extruded mesh could not be brought inside the \
+                 gate: layers are supported on a wall that castellates onto the cell \
+                 planes, and a snapped wall carries its own non-orthogonality into the \
+                 level-n face (SPEC-LIT 92.13)"
+            );
+            dropped.push((mesh.patches[vp].name.clone(), reason));
+            patches.remove(victim);
+            // Written by the supervising session: each halving already counted
+            // itself in the else branch, so adding `halvings` again here
+            // double-counted (92.50)'s retreat total.
+            caps = vec![1.0 as Scalar; n_points];
+            halvings = 0;
+        } else {
+            for &i in &fail_pts {
+                caps[i] = caps[i] * 0.5;
+            }
+            halvings += 1;
+            extra_retreats += 1;
+        }
+    }
+}
+
+/// One run of the extrusion, at a FIXED patch set and per-point retreat cap:
+/// [`add_layers`]' ladder calls this once per round and reads
+/// `quality.passed()` - an attempt does not refuse on the gate, because a
+/// gate failure on the layer cells is what the ladder retreats on.
+fn attempt(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    spec: &LayerSpec,
+    t: &QualityThresholds,
+    patches0: &[usize],
+    caps: &[Scalar],
+) -> Result<Layered> {
+    let st = stack(spec)?;
+    let n = st.n;
+    let named = patches0.to_vec();
     let n_points = mesh.points.len();
     let n_faces = mesh.faces.len();
     let n_internal = mesh.neighbour.len().min(n_faces);
@@ -956,7 +1201,7 @@ pub fn add_layers(
         .copied()
         .max()
         .map_or(0, |m| m as usize + 1);
-    let shrunk = shrink(mesh, surf, spec, t)?;
+    let shrunk = shrink_on(mesh, surf, spec, t, patches0, caps)?;
     let field = &shrunk.field;
     // Nothing to do: no layers were asked for, or every named patch gave
     // its layers up in the shrink. The input mesh comes back bit for bit.
@@ -979,6 +1224,9 @@ pub fn add_layers(
                 area: patch_area(mesh, n_internal, patch),
                 full_area_frac: 0.0,
                 mean_frac: 0.0,
+                t1_requested: if n == 0 { 0.0 } else { st.t[0] },
+                t1_mean: 0.0,
+                t1_min: 0.0,
                 dropped: Some(reason),
             });
         }
@@ -1141,20 +1389,6 @@ pub fn add_layers(
     let mut internal_sides: Vec<(usize, usize, Vec<crate::Label>)> = Vec::new();
     let mut boundary_sides: Vec<Vec<(usize, usize, usize, crate::Label, Vec<crate::Label>)>> =
         vec![Vec::new(); mesh.patches.len()];
-    // The mean of a layer cell's own level-k and level-k+1 points: where
-    // its centre sits, to aim the quad's winding with.
-    let cell_mean = |j: usize, k: usize| -> Vec3 {
-        let face = &mesh.faces[field.faces[j]];
-        let mut c = Vec3::ZERO;
-        for &pt in face {
-            let s = slot_of_point[pt as usize] as usize;
-            c = c
-                + (points[level_point[k][s] as usize]
-                    + points[level_point[k + 1][s] as usize])
-                    * 0.5;
-        }
-        c / (face.len() as Scalar)
-    };
     for (j, &f) in field.faces.iter().enumerate() {
         let face = &mesh.faces[f];
         for (e, _) in face.iter().enumerate() {
@@ -1216,25 +1450,28 @@ pub fn add_layers(
                             a_vec.mag()
                         )));
                     }
-                    let mut x_q = Vec3::ZERO;
-                    for &q in &quad {
-                        x_q = x_q + points[q as usize];
-                    }
-                    let x_q = x_q / 4.0;
-                    // Do not reason about the winding: compute it.
+                    // The side quad is wound by the topology, a CONSTANT,
+                    // not by a measurement. Directed as `f` winds its
+                    // segment and stepped inward by `w`, its area vector is
+                    // d x w = n_out x d - the INTERIOR direction of face
+                    // `f`, always. So the quad as constructed points INTO
+                    // `f`'s own layer cell `cf`, and a face is wound out of
+                    // its owner: `cf` takes the reversed list, the other
+                    // cell `cg` the list as constructed. (The dot product
+                    // against a cell centre this replaced reads ~zero at
+                    // the convex edges of a snapped wall and flips the quad
+                    // there.)
                     if is_layer_face[g] {
                         if f < g {
                             let jg = layer_j[g] as usize;
                             let cf = first_cell + j * n + k;
                             let cg = first_cell + jg * n + k;
-                            let (own, nbr, jo, jn) = if cf < cg {
-                                (cf, cg, j, jg)
+                            let (own, nbr) = if cf < cg {
+                                (cf, cg)
                             } else {
-                                (cg, cf, jg, j)
+                                (cg, cf)
                             };
-                            let x_own = cell_mean(jo, k);
-                            let x_nbr = cell_mean(jn, k);
-                            if a_vec.dot(x_nbr - x_own) < 0.0 {
+                            if own == cf {
                                 quad.reverse();
                             }
                             internal_sides.push((own, nbr, quad));
@@ -1244,10 +1481,10 @@ pub fn add_layers(
                             }
                         }
                     } else {
-                        let x_own = cell_mean(j, k);
-                        if a_vec.dot(x_q - x_own) < 0.0 {
-                            quad.reverse();
-                        }
+                        // The owner is `f`'s own layer cell, and the quad
+                        // as constructed points into it: the boundary side
+                        // is ALWAYS the reversed list.
+                        quad.reverse();
                         boundary_sides[patch_of_bface[g]].push((
                             f,
                             k,
@@ -1369,8 +1606,14 @@ pub fn add_layers(
         neighbour,
         patches: patches_out,
     };
-    // §92.3's gate: its refusal is this stage's, unwrapped no further.
-    let quality = quality::check(&out, t)?;
+    // This stage's own closure check first, so a face it mis-wound is
+    // blamed here rather than read by the gate as bad geometry.
+    check_extrusion_closes(&out, first_cell)?;
+    // §92.3's gate, MEASURED only: an attempt does not refuse on it - the
+    // caller reads `quality.passed()` and retreats. `usize::MAX` lifts the
+    // per-cell cap, so the report names every failing cell the ladder's
+    // `failing_points` needs.
+    let quality = quality::measure_capped(&out, t, usize::MAX)?;
 
     // (92.50), per patch, area-weighted, `A_f` off the LEVEL-0 face, and
     // `tau_f` the fraction of the nominal `T` the face actually got.
@@ -1392,6 +1635,9 @@ pub fn add_layers(
                     area: patch_area(mesh, n_internal, patch),
                     full_area_frac: 0.0,
                     mean_frac: 0.0,
+                    t1_requested: st.t[0],
+                    t1_mean: 0.0,
+                    t1_min: 0.0,
                     dropped: Some(reason),
                 });
             }
@@ -1399,6 +1645,7 @@ pub fn add_layers(
                 let mut area = 0.0;
                 let mut full = 0.0;
                 let mut wsum = 0.0;
+                let mut tau_min_all = Scalar::INFINITY;
                 let mut nf = 0usize;
                 for (j, &f) in field.faces.iter().enumerate() {
                     if field.face_patch[j] != p {
@@ -1421,14 +1668,21 @@ pub fn add_layers(
                         full += a;
                     }
                     wsum += a * tau;
+                    tau_min_all = tau_min_all.min(tau);
                 }
+                let mean_frac = if area > 0.0 { wsum / area } else { 0.0 };
                 patches_rep.push(PatchLayers {
                     name: patch.name.clone(),
                     n_layers: n,
                     n_faces: nf,
                     area,
                     full_area_frac: if area > 0.0 { full / area } else { 0.0 },
-                    mean_frac: if area > 0.0 { wsum / area } else { 0.0 },
+                    mean_frac,
+                    t1_requested: st.t[0],
+                    t1_mean: st.t[0] * mean_frac,
+                    // The achieved first layer the WORST face got: the
+                    // limiter's own number, in metres.
+                    t1_min: st.t[0] * if area > 0.0 { tau_min_all } else { 0.0 },
                     dropped: None,
                 });
             }
@@ -1455,6 +1709,75 @@ pub fn add_layers(
         },
         quality,
     })
+}
+
+/// The extrusion's own check on its own output, run BEFORE §92.3's gate:
+/// every cell's faces must close to 1e-12 RELATIVE - `|sum +-Sf| / sum |Sf|`
+/// - which a closed polyhedron satisfies exactly whatever its shape. A cell
+/// that fails did not get a bad geometry from the user: it got a face this
+/// stage wound backwards or emitted with no area, and the message says so,
+/// because G2's threshold is absolute against `V^(2/3)` and a small
+/// mis-wound face in a large cell slips under it (SPEC-LIT 92.13).
+fn check_extrusion_closes(out: &PolyMeshRaw, first_cell: usize) -> Result<()> {
+    // A closed polyhedron closes exactly whatever its shape, so the bound
+    // needs no threshold from the config.
+    const RELATIVE_CLOSURE: Scalar = 1.0e-12;
+    let n_internal = out.neighbour.len().min(out.faces.len());
+    let n_cells = out
+        .owner
+        .iter()
+        .chain(out.neighbour.iter())
+        .copied()
+        .max()
+        .map_or(0, |c| c as usize + 1);
+    let mut s = vec![Vec3::ZERO; n_cells];
+    let mut a = vec![0.0; n_cells];
+    // The mean of the points the cell's faces carry - message-grade only.
+    let mut centroid = vec![Vec3::ZERO; n_cells];
+    let mut n_pts = vec![0usize; n_cells];
+    for f in 0..out.faces.len() {
+        let sf = face_area_vector(&out.points, &out.faces[f]);
+        let o = out.owner[f] as usize;
+        s[o] = s[o] + sf;
+        a[o] += sf.mag();
+        for &p in &out.faces[f] {
+            centroid[o] = centroid[o] + out.points[p as usize];
+            n_pts[o] += 1;
+        }
+        if f < n_internal {
+            let nb = out.neighbour[f] as usize;
+            s[nb] = s[nb] - sf;
+            a[nb] += sf.mag();
+            for &p in &out.faces[f] {
+                centroid[nb] = centroid[nb] + out.points[p as usize];
+                n_pts[nb] += 1;
+            }
+        }
+    }
+    for c in 0..n_cells {
+        if a[c] == 0.0 {
+            continue;
+        }
+        let ratio = s[c].mag() / a[c];
+        if ratio > RELATIVE_CLOSURE {
+            let kind = if c >= first_cell {
+                "a LAYER cell"
+            } else {
+                "an input cell"
+            };
+            let ctr = centroid[c] / n_pts[c] as Scalar;
+            return Err(Error::Mesh(format!(
+                "layers: cell {c} ({kind}) does not close: \
+                 |sum +-Sf| / sum |Sf| = {ratio:.3e} > {RELATIVE_CLOSURE:.0e}; \
+                 the cell sits at ({:.6}, {:.6}, {:.6}), the mean of the \
+                 points its faces carry. Its faces were assembled by the \
+                 layer extrusion itself, so this is a fault of the mesher, \
+                 not of the geometry, and should be reported.",
+                ctr.x, ctr.y, ctr.z
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The patch's total boundary area, off the INPUT mesh's own faces - what a
@@ -1624,6 +1947,42 @@ mod tests {
         let (mut tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 1);
         let surf = Surface::from_soup(
             box_soup([1.3; 3], [2.3; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "cube".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 1 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 1,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped =
+            snap::snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap");
+        (surf, snapped.mesh)
+    }
+
+    /// A box standing on the domain floor, castellated and SNAPPED: the
+    /// shape the extrusion actually meets, since stage 4 always runs before
+    /// stage 6. Its convex edges are where the side quads' winding is
+    /// decided.
+    fn snapped_floor_box_case() -> (Surface, PolyMeshRaw) {
+        let (mut tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 1);
+        let surf = Surface::from_soup(
+            box_soup([1.13, 1.13, -1.0], [2.63, 2.63, 2.13]),
             vec!["cube".to_string()],
         )
         .expect("surface");
@@ -2587,5 +2946,241 @@ mod tests {
             "no arithmetic in: {msg}"
         );
         assert!(msg.contains(&format!("{ratio}")), "{msg}");
+    }
+
+    #[test]
+    fn a_snapped_wall_closes_exactly() {
+        let (surf, mesh) = snapped_floor_box_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        // The thresholds are loosened past any refusal on purpose: the
+        // assertion below is CLOSURE, not a quality number, and a closed
+        // polyhedron satisfies it exactly whatever its shape - so this
+        // test catches a mis-wound face and nothing else.
+        let t = QualityThresholds {
+            max_closure: 1e30,
+            max_non_orth_deg: 179.9,
+            min_thickness_ratio: 0.0,
+            max_cond: 1e300,
+            ..thresholds()
+        };
+        let out = add_layers(&mesh, &surf, &spec, &t)
+            .expect("layers on a snapped box standing on the floor");
+        let m = &out.mesh;
+        let n_internal = m.neighbour.len().min(m.faces.len());
+        let n_cells = m
+            .owner
+            .iter()
+            .chain(m.neighbour.iter())
+            .copied()
+            .max()
+            .map_or(0, |c| c as usize + 1);
+        let mut s = vec![Vec3::ZERO; n_cells];
+        let mut a = vec![0.0; n_cells];
+        for fi in 0..m.faces.len() {
+            let sf = face_area_vector(&m.points, &m.faces[fi]);
+            let o = m.owner[fi] as usize;
+            s[o] = s[o] + sf;
+            a[o] += sf.mag();
+            if fi < n_internal {
+                let nb = m.neighbour[fi] as usize;
+                s[nb] = s[nb] - sf;
+                a[nb] += sf.mag();
+            }
+        }
+        for c in 0..n_cells {
+            let ratio = s[c].mag() / a[c];
+            assert!(
+                ratio < 1e-12,
+                "cell {c} does not close: |sum +-Sf| / sum |Sf| = {ratio:.3e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backwards_side_face_is_caught_before_the_gate() {
+        let (surf, mesh) = castellated_cube_case();
+        let out = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("layers on the castellated cube");
+        let mut m = out.mesh;
+        let first_cell = out.extrusion.first_cell;
+        let n_internal = m.neighbour.len().min(m.faces.len());
+        // The mesh as assembled must close, or the case did not do what it
+        // was built for and the rest of the test means nothing.
+        assert!(
+            check_extrusion_closes(&m, first_cell).is_ok(),
+            "the assembled mesh does not close"
+        );
+        // Reverse the first internal face a layer cell owns: one mis-wound
+        // face is exactly the fault the check exists to catch.
+        let f = (0..n_internal)
+            .find(|&f| m.owner[f] as usize >= first_cell)
+            .expect("the case has layer cells on internal faces");
+        m.faces[f].reverse();
+        let msg = check_extrusion_closes(&m, first_cell)
+            .expect_err("a reversed face must fail the closure check")
+            .to_string();
+        // Only the two cells the face belongs to lost closure, so the cell
+        // the check stops on is one of them; `(` anchors the id against a
+        // longer id sharing the prefix.
+        assert!(msg.contains("layers"), "{msg}");
+        assert!(
+            [m.owner[f] as usize, m.neighbour[f] as usize]
+                .iter()
+                .any(|&c| msg.contains(&format!("cell {c} ("))),
+            "no incident cell named in: {msg}"
+        );
+    }
+
+    /// The snapped SPHERE cannot carry layers at G4's 70 degrees - 92.13
+    /// measures why - and the specified answer (92.47) is that the patch
+    /// loses its layers BY NAME and the run continues, not that the run
+    /// stops naming hundreds of faces the user cannot act on.
+    #[test]
+    fn a_wall_the_layers_cannot_survive_loses_them_by_name() {
+        let (surf, mesh) = snapped_sphere_case();
+        let before = cell_count(&mesh);
+        let out = add_layers(&mesh, &surf, &sphere_layers(0.05), &thresholds())
+            .expect("the patch loses its layers by name; the run continues");
+        assert_eq!(cell_count(&out.mesh), before, "no layer cell survives");
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "sphere")
+            .expect("the report carries a row for the sphere");
+        assert_eq!(row.n_layers, 0);
+        let reason = row.dropped.as_ref().expect("the row says why");
+        assert!(!reason.is_empty());
+        println!("layers: the sphere row's reason: {reason}");
+        assert!(
+            out.report.summary().contains("sphere"),
+            "{}",
+            out.report.summary()
+        );
+    }
+
+    /// Written by the supervising session. The OUTER ladder of (92.47), the
+    /// one that measures the EXTRUDED mesh: a snapped box standing on the
+    /// floor passes the shrink's own gate and then fails on the layer cells
+    /// themselves, so the thickness retreats `retreat_limit` times and the
+    /// patch loses its layers BY NAME - `add_layers` returns the snapped
+    /// mesh and the reason, and does NOT refuse with a list of faces the
+    /// user cannot act on. The sphere case above gives up inside the shrink,
+    /// so it does not reach this path; this one does.
+    #[test]
+    fn a_snapped_wall_retreats_on_the_extruded_mesh_then_gives_up_by_name() {
+        let (surf, mesh) = snapped_floor_box_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        let before = cell_count(&mesh);
+        let out = add_layers(&mesh, &surf, &spec, &thresholds())
+            .expect("a wall that cannot carry layers is not a refusal");
+        assert_eq!(
+            cell_count(&out.mesh),
+            before,
+            "the patch gave its layers up, so no cell was added"
+        );
+        assert_eq!(
+            out.report.retreats, spec.retreat_limit,
+            "the ladder took every retreat before giving up"
+        );
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the named patch has a row");
+        assert_eq!(row.n_layers, 0);
+        let reason = row.dropped.as_ref().expect("the row says why");
+        assert!(reason.contains("retreat"), "{reason}");
+        assert!(reason.contains("92.13"), "{reason}");
+        assert!(
+            reason.contains("castellates onto the cell planes"),
+            "the reason tells the user what IS supported: {reason}"
+        );
+        assert!(out.report.summary().contains("cube"), "{}", out.report.summary());
+    }
+
+    /// The report says the first layer it ACHIEVED, in metres, because the
+    /// fraction alone hides a limiter the user did not write down
+    /// (SPEC-LIT 92.13, (92.50)).
+    #[test]
+    fn the_report_says_the_achieved_first_layer_in_metres() {
+        let (surf, mesh) = castellated_cube_case();
+        let out = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("layers");
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the named patch has a row");
+        assert!(row.dropped.is_none(), "{:?}", row.dropped);
+        assert!(
+            (row.t1_requested - 0.02).abs() < 1e-12,
+            "t1_requested = {}",
+            row.t1_requested
+        );
+        assert!(
+            (row.t1_mean - 0.02 * row.mean_frac).abs() < 1e-12,
+            "t1_mean {} vs 0.02 * mean_frac {}",
+            row.t1_mean,
+            row.mean_frac
+        );
+        assert!(
+            0.0 < row.t1_min && row.t1_min <= row.t1_mean + 1e-12,
+            "t1_min {} vs t1_mean {}",
+            row.t1_min,
+            row.t1_mean
+        );
+        let s = out.report.summary();
+        assert!(s.contains("first layer"), "{s}");
+        assert!(s.contains("requested"), "{s}");
+        assert!(!s.contains("NO face received the full stack"), "{s}");
+
+        // The same wall, a limiter chosen to BITE without tripping G5:
+        // `cell_frac * h = 0.10 * 0.5 = 0.05` binds against the stack's
+        // T = 0.02 + 0.026 + 0.0338 = 0.0798, so tau = 0.627 and the
+        // achieved first layer is about 0.0125 m, not the 0.02 asked for.
+        let spec = LayerSpec {
+            cell_frac: 0.10,
+            ..cube_layers(0.02)
+        };
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the named patch has a row");
+        assert!(
+            row.dropped.is_none(),
+            "the limiter bites but the patch survives: {:?}",
+            row.dropped
+        );
+        assert!(
+            row.t1_mean < row.t1_requested,
+            "t1_mean {} vs t1_requested {}",
+            row.t1_mean,
+            row.t1_requested
+        );
+        assert!(
+            (row.t1_mean - 0.05 / 0.0798 * 0.02).abs() < 1e-3,
+            "t1_mean {} vs 0.02 * tau, tau = 0.05/0.0798",
+            row.t1_mean
+        );
     }
 }

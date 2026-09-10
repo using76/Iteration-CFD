@@ -26232,23 +26232,42 @@ schedule is global, the hanging node's copy at level `k` is the exact midpoint
 of its parents' copies at level `k`, at every level, so the split side faces of
 the paragraph after next close exactly.
 
-**The retreat.** The shrunk mesh — the mesh with the boundary moved and no
-cells added yet — is measured by §92.3's gate. G3 and G7 cannot be mended by
-moving points and are refused at once, as stage 4 refuses them. For the rest,
-the ladder is thickness first and layers second, which is the order §92.2 stage
-6 states:
+**The retreat, and WHICH MESH it measures.** The ladder is thickness first and
+layers second, which is the order §92.2 stage 6 states. It runs twice, on the
+two meshes this stage produces, because a defect can be introduced by either
+half of it and only the second half makes cells:
 
 ```
+INNER, on the SHRUNK mesh - boundary moved, no cell added yet:
 repeat up to layers.retreat_limit times:
     fail = the cells §92.3 named (for G4, both cells of the named face)
     if fail is empty: accept
     D_i <- D_i / 2   for every layer point i carried by a cell of fail
     re-run (92.46)
 
-if still failing after the last retreat: the patch loses its layers
+OUTER, on the EXTRUDED mesh - the mesh the caller would receive:
+repeat up to layers.retreat_limit times:
+    extrude (92.48)-(92.49), assemble, measure §92.3's gate on the RESULT
+    if it passes: accept
+    fail = the cells §92.3 named, layer cells included; a layer cell
+           c(j,k) names the points of its own layer face
+    D_i <- D_i / 2   for every layer point i of fail, and re-run the
+           WHOLE stage (92.40)-(92.47) with that cap in force
+
+either ladder, if still failing after the last retreat: the patch loses
+its layers, and the stage restarts with it removed from P_L
 if any T_i < layers.min_thickness * T at accept: that patch loses its layers
                                                                        (92.47)
 ```
+
+The outer ladder is not decoration. An earlier form of this section had only
+the inner one, which gates a mesh differing from its input in `points` ALONE —
+so it never measured a layer cell at all, and every defect the EXTRUSION
+introduced was TERMINAL: the run refused instead of thinning, and the refusal
+named hundreds of faces on a wall the user could do nothing about. With the
+outer ladder the specified behaviour is what happens: the thickness retreats,
+and a wall that still cannot carry a stack loses its layers by name and the run
+continues on the snapped mesh.
 
 Losing layers is a decision about a PATCH, and the failing cells name points,
 not patches, so the patch that loses them is the one carrying the most failing
@@ -26311,6 +26330,31 @@ for each segment (u, v) of each layer face f, at each level k:
                                               has an open rim          (92.49)
 ```
 
+**The winding of a side face is a CONSTANT of the construction, not a
+measurement.** Write `d` for the segment as `f` winds it and `w` for the step
+from level `k` to level `k+1`, which is inward, `w = -Sf/|Sf|`. The quad's area
+vector is
+
+```
+    d x w  =  -(d x n_out)  =  n_out x d                               (92.53)
+```
+
+and `n_out x d` is exactly the direction of the INTERIOR of face `f` — walk the
+boundary of a face in its winding direction and its interior is on that side.
+So the list as (92.49) writes it always points INTO `f`'s own layer cell
+`c(f,k)`, and the face wound OUT of that cell is that list REVERSED. Hence: a
+boundary side face, whose owner is `c(f,k)`, is always the reversed list; an
+internal side face between `c(f,k)` and `c(g,k)` is the reversed list when
+`c(f,k)` is the owner and the list as written when `c(g,k)` is. Nothing here is
+measured, and nothing here may be: deciding the winding instead by the sign of
+`Sf . (x_nbr - x_own)` is wrong, because at the convex edges of a SNAPPED wall
+that inner product goes to zero and comes back with the wrong sign. Measured on
+a snapped box standing on the domain floor, base `1.0`, one level, three
+layers: 9 of 324 internal side quads came out mis-wound, leaving 13 cells open
+with a worst `|sum +-Sf| / sum |Sf|` of 2.96e-1. The castellated version of the
+same box was clean, which is why this was not seen until the extrusion was run
+on a snapped wall.
+
 A coarse layer cell therefore emits TWO side faces where its fine neighbours
 emit one each, which is §92.9's 2:1 convention on the wall's own edges, and the
 closure of the coarse cell is exact rather than approximate: with the hanging
@@ -26319,6 +26363,27 @@ directed edges cancel the whole edge of the level polygon in the
 `(1/2) sum p x p'` term for term, so G2 sees zero and not a rounding error.
 This is why (92.46) averages the parents' displacement vectors and (92.43)'s
 schedule is global; it is the same argument as (92.33)'s, one dimension up.
+
+**The extrusion checks its own work, before §92.3 sees it.** Every cell of the
+assembled mesh is required to close RELATIVELY:
+
+```
+E_c = |sum_f s_cf Sf| / sum_f |Sf|  <  1e-12,   s_cf = +1 owner, -1 neighbour
+                                                                       (92.54)
+```
+
+(92.54) is the one check in this section that needs no threshold from the
+config and admits no argument about geometry: a closed polyhedron satisfies it
+EXACTLY, whatever its shape, so a cell that fails it did not receive a bad
+geometry from the user — it received a face this stage wound backwards or
+emitted with no area. G2 cannot serve here. G2 measures `|sum Sf| / V^(2/3)`,
+an absolute closure against the cell's own size, and a mis-wound face of area
+`a` in a cell whose `V^(2/3)` is above roughly `2 x 10^10 a` passes both G2 and
+the extrusion's own zero-area guard, reaching the solver with an inverted flux
+sign. The refusal (92.54) raises names the cell, its centroid, whether it is a
+layer cell or one of the input's, and says in words that it is a fault of the
+MESHER and not of the geometry — which is also why no retreat is attempted on
+it: a retreat cannot mend a face that is the wrong way round.
 
 **Assembly.** Internal faces are the input's, plus every level `1..n` face,
 plus the internal side faces; `ldu_permutation` puts them in (2)'s order.
@@ -26336,12 +26401,27 @@ A_f       = |Sf| of layer face f at level 0
 tau_f     = ( min_{i in f} T_i ) / T          the fraction f actually got
 
 full      = sum { A_f : tau_f >= 1 - 1e-9 } / sum A_f
-mean_frac = sum A_f tau_f / sum A_f                                    (92.50)
+mean_frac = sum A_f tau_f / sum A_f
+
+t1_f      = t_1 tau_f      the first layer f ACTUALLY got, in metres,
+                           since x^(1) - x^(0) = f_1 D_i and f_1 = t_1 / T
+t1_mean   = t_1 mean_frac          t1_min = t_1 min_f tau_f            (92.50)
 ```
 
 `full` is the fraction of the patch's area that received the full stack;
 `mean_frac` is the fraction of the nominal thickness the patch received on
 average. A dropped patch reports `n_layers = 0` and the reason.
+
+The report prints `t1_mean` and `t1_min` IN METRES beside the fractions,
+because the fraction alone hides a limiter the user did not write down. On the
+snapped sphere the run reported `full 0.0%, mean frac 0.346` and the binding
+limiter was `cell_frac * h_i` — raising `cell_frac` from 0.5 to 0.9 raised
+`mean_frac` to 0.623, exactly in proportion — so a user who asked for
+`first_thickness = 0.05` was handed 0.017 with nothing saying so, and the `y+`
+they sized for was out by a factor of three. `h_i` is (92.45)'s: the shortest
+edge of the layer faces at that point, which on a snapped mesh is the CUT
+cell's edge and not the octree leaf's. When `full` is zero the line says so in
+words as well.
 
 **G5 and a thin layer, which is the one place the gate and this stage pull
 against each other.** A layer cell is a slab by construction. Its largest
@@ -26381,13 +26461,39 @@ there is what G4 reads. Measured on this section's own cases:
 so the snapped sphere cannot carry layers at G4's `70` and no choice of
 thickness, smoothing or layer count changes it — the angle is a property of the
 cut cell's centroid against its own wall face, and the layer stage only exposes
-it. This is stated rather than worked around: the mesher does not weaken G4 to
-make its own output pass. It is also why the validation below runs on a cube
-and not on the sphere §92.2's stage list would suggest, and why the ammonia
-site of §92.1 is expected to be the FIRST row of that table and not the third —
-its walls are axis-aligned planes, cut on the cell planes, where the angle is
-zero. The instrument that would move the third row is a wall-face/owner-centre
-alignment step in stage 4, which is not this section's and is not written.
+it. Measured on the sphere by sweeping everything a user could turn: the
+surface from 128 to 8192 triangles gives a maximum of 77.1 / 72.3 / 73.1 / 73.9
+degrees, the octree at level 3 gives 75.4, `cell_frac = 0.30` gives 76.6, and
+ONE very thin layer gives 79.8 — worse, not better; below `cell_frac = 0.10` the
+patch loses its layers by name instead. This is stated rather than worked
+around: the mesher does not weaken G4 to make its own output pass. It is also
+why the validation below runs on a cube and not on the sphere §92.2's stage list
+would suggest.
+
+**The ammonia site is NOT the favourable first row, and the earlier claim that
+it was is withdrawn.** That claim read the site's walls off its geometry —
+axis-aligned planes — and forgot the pipeline: stage 4 always runs before stage
+6, so the wall this stage meets is a SNAPPED wall whatever lies underneath it,
+and a snapped axis-aligned box is already enough to tangle the stack at its
+convex edges. Measured, on a box standing on the domain floor in `[0,4]^3`,
+base `1.0`, one level of refinement, three layers: 37 layer cells FOLD — a fold
+the signed volume hides, found by requiring every pyramid of the decomposition
+to be positive — with a smallest `|V|` of 3.2e-10; at another offset of the same
+box a layer cell comes out with `V = -1.278e-8` and G1 refuses it outright,
+with `max_closure` at 1e30, `max_non_orth_deg` at 179.9, `min_thickness_ratio`
+at 0 and `max_cond` at 1e300. So, as this section stands, layers are VALIDATED
+ON A CASTELLATED WALL — one whose faces lie on the cell planes — and on a
+snapped wall they are attempted, retreated and given up by name (92.47) rather
+than shipped. `tools/automesher/README.md` says the same thing to the user.
+
+The instrument that would move the third row is either a wall-face/owner-centre
+alignment step in stage 4 — placing the level-0 point along the WALL FACE's own
+normal instead of along (92.40)'s averaged point normal, so that a newly
+internalised wall face is aligned with the line to its owner's centre — or a G4
+rule of its own for that face, since `70` was calibrated on a face between two
+ordinary cells and is measuring a different quantity here. Both change numbers
+this document fixes; both belong to whoever owns §92.3, and neither is
+written.
 
 **What this stage does NOT do.** The layer count is uniform over a patch: a
 point that cannot carry the stack costs its whole patch, not just its own
@@ -26405,7 +26511,7 @@ solver can run.
 | `layers.n = 0`, or no patch named | the input mesh, bit for bit, and a report of no layers |
 | a patch name that is not a patch of the mesh | refused, naming it, before any normal is computed |
 | a flat wall, `normal_passes = 0` | every layer cell is a prism whose height is `t_k` exactly, to 1e-9 |
-| every emitted mesh | passes G1–G7 of §92.3, or the run refused with §92.3's own message |
+| every emitted mesh | passes G1–G7 of §92.3 — or the ladder (92.47) thinned the stack until it did, or the patch lost its layers by name and the snapped mesh came back, or the run refused with §92.3's own message. In that order: a gate failure is never returned |
 | the cell count | `C + n * (number of layer faces)`, exactly |
 | the point count | `P + n * |L|`, exactly |
 | a layer patch's boundary faces | the same count as before, one level-0 face per input face, in the input's order |
@@ -26415,6 +26521,11 @@ solver can run.
 | a patch that cannot carry its stack | `n_layers = 0`, the reason named, the rest of the mesh unchanged, and the run continues |
 | `owner < neighbour` on every internal face | by construction for the level faces, by `ldu_permutation` for the whole array |
 | a first layer thinner than `h/60` | refused before any cell is inserted, naming `3 t_1 / h` and `quality.min_thickness_ratio` (92.51) — not discovered as a G5 failure on an inserted cell |
+| every cell of every emitted mesh | closes to `1e-12` RELATIVE (92.54), checked BEFORE §92.3's gate; a cell that does not is a MESHER fault and is refused as one, naming the cell |
+| a side face's winding | fixed by the topology (92.53), never by the sign of a dot product against a cell centre |
+| a snapped wall | closes exactly all the same — (92.54) holds on it even where the gate does not |
+| a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
+| the report of a patch that kept its layers | says the achieved first layer in METRES (`t1_mean`, `t1_min`), not only as a fraction |
 
 **Validation**
 
@@ -26428,5 +26539,10 @@ solver can run.
 | a mesh with a 2:1 transition on the layer patch | built by FEATURE refinement, since a distance band cannot make one — every cell carrying a wall face is already at the band's finest level; the split side faces are emitted, the mesh loads, and G2 is under 1e-12 |
 | a layer patch COARSER than the non-layer patch beside it | refused by name — the cut of (92.49) would fall on a point with no level copies, and the side face that would span a whole edge against a cut partner is the terminating topology of tranche 2 |
 | `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
+| a box standing on the domain floor, SNAPPED, 3 layers | every cell closes to `1e-12` relative. The assertion is closure and not a quality number, so it catches a mis-wound face and nothing else; the thresholds are opened past every refusal on purpose. Before (92.53) was applied: 13 cells open, worst `2.96e-1` |
+| one internal face of an emitted mesh reversed by hand | (92.54) refuses it, naming that cell — the check is not vacuous |
+| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured, the sphere gives up in the INNER ladder — two halvings take the applied thickness under `min_thickness * T = 1.995e-2` — so it never reaches the outer one; the row below is the case that does |
+| the same box, at `quality`'s own thresholds | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
+| the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
 
 ---
