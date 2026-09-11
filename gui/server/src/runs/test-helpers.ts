@@ -74,6 +74,7 @@ function baseConfig(tmp: string, root: string): ServerConfig {
     allowRemote: false,
     authToken: null,
     maxConcurrentRuns: 4,
+    longToolTimeoutMs: 15 * 60_000,
     logLevel: 'error',
   }
 }

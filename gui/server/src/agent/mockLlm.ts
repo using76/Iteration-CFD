@@ -255,7 +255,7 @@ function scenarioMesh(f: Facts): MockPlan {
   if (!last) {
     const kind = meshKindIn(f.userText)
     const outputDir = caseIn(f.userText, `cases/${kind}`)
-    return useTools([text(ko ? `${kind} 프리셋으로 구조 격자를 생성하겠습니다 (\`${outputDir}\`).` : `I will generate a structured mesh from the ${kind} preset into \`${outputDir}\`.`), tool('mesh_generate', { kind, outputDir, cells: null, stl: null, cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null })])
+    return useTools([text(ko ? `${kind} 프리셋으로 구조 격자를 생성하겠습니다 (\`${outputDir}\`).` : `I will generate a structured mesh from the ${kind} preset into \`${outputDir}\`.`), tool('mesh_generate', { kind, outputDir, cells: null, stl: null, cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null, waitSeconds: 120 })])
   }
   if (last.name === 'mesh_generate') {
     if (!last.ok) return done([text(ko ? `메쉬 생성이 실패했습니다: ${String((last.data.error as { message?: string } | undefined)?.message ?? last.data.error ?? '알 수 없는 오류')}` : `Mesh generation failed: ${String((last.data.error as { message?: string } | undefined)?.message ?? last.data.error ?? 'unknown error')}`)])

@@ -44,6 +44,12 @@ export interface ServerConfig {
   allowRemote: boolean
   authToken: string | null
   maxConcurrentRuns: number
+  /**
+   * How long a tool declared `kind: 'long'` (meshing) may block before the
+   * agent loop gives up on it. The default tool timeout is two minutes, which
+   * a mesh outlives; CFD_LONG_TOOL_TIMEOUT_MS moves this one.
+   */
+  longToolTimeoutMs: number
   logLevel: 'debug' | 'info' | 'warn' | 'error'
 }
 
@@ -66,6 +72,13 @@ function readVersion(guiDir: string): string {
 /** The default Anthropic-compatible z.ai endpoint. */
 export const DEFAULT_ZAI_BASE_URL = 'https://api.z.ai/api/anthropic'
 export const DEFAULT_ZAI_KEY_FILE = path.join(os.homedir(), '.claude', 'zai-key')
+
+/** A positive millisecond count from the environment, or the fallback when it is absent or nonsense. */
+function positiveMs(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
 
 function resolveTilde(file: string): string {
   return file === '~' || file.startsWith('~/') ? path.join(os.homedir(), file.slice(1)) : file
@@ -136,6 +149,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowRemote: env.CFD_ALLOW_REMOTE === '1',
     authToken: env.CFD_AUTH_TOKEN ?? null,
     maxConcurrentRuns: Number(env.CFD_MAX_RUNS ?? 4),
+    longToolTimeoutMs: positiveMs(env.CFD_LONG_TOOL_TIMEOUT_MS, 15 * 60_000),
     logLevel: (env.CFD_LOG_LEVEL as ServerConfig['logLevel']) ?? 'info',
   }
 }

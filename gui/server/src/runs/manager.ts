@@ -330,6 +330,9 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
       if (closing) throw new RunRequestError(503, 'the server is shutting down')
       const { spec, casePath, outputRoot } = validate(opts)
       const id = `r_${++counter}`
+      // A mesh run a client started without saying so is still a mesh run:
+      // the label is how a client tells mesh runs from solver runs.
+      const label = opts.label ?? (spec.kind === 'mesh' ? 'mesh' : null)
       const iters = opts.args.find((a) => a.flag === '-iters')
       const info: RunInfo = {
         id,
@@ -355,7 +358,7 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
         device: config.demo ? 'demo' : '',
         logLines: 0,
         mode: config.demo ? 'demo' : 'real',
-        label: opts.label,
+        label,
       }
       const r: LiveRun = {
         info,

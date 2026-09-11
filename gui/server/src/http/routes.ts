@@ -9,6 +9,7 @@ import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import { compileUserRegex, UnsafeRegexError } from '../regex.js'
 import type { CaseSchema } from '../registry/schema.js'
+import { MeshSummaryError, meshSummaryForCase } from '../formats/meshSummary.js'
 import type { RunManager, StartRunOptions } from '../runs/types.js'
 import { LINE_SAMPLE_MAX_POINTS, LINE_SAMPLE_POINTS, SampleError, lineSample, type SampleComponent } from '../tools/sample.js'
 import { fsTree, readWorkspaceFile, writeWorkspaceFile } from '../workspace/fs.js'
@@ -204,6 +205,18 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
       return await lineSample({ rootAbs: r.abs, rootRel: r.rel || '.', time: query.get('time'), field, component, p0, p1, n })
     } catch (err) {
       if (err instanceof SampleError) throw new HttpError(err.code === 'NOT_FOUND' ? 404 : 400, err.message)
+      throw err
+    }
+  })
+
+  router.get('/api/mesh/summary', async ({ query }) => {
+    const dir = query.get('dir')
+    if (!dir) throw new HttpError(400, 'dir is required')
+    const r = resolveInWorkspace(root, dir, { mustExist: true })
+    try {
+      return await meshSummaryForCase(root, r.rel)
+    } catch (err) {
+      if (err instanceof MeshSummaryError && err.code === 'NOT_FOUND') throw new HttpError(404, err.message)
       throw err
     }
   })

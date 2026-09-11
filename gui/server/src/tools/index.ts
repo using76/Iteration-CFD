@@ -210,6 +210,17 @@ function issues(err: z.ZodError): string {
   return err.issues.map((i) => `${i.path.length ? i.path.join('.') : '(root)'}: ${i.message}`).join('; ')
 }
 
+/**
+ * How long this tool may block: its own timeoutMs if it names one, the
+ * configured long-tool budget if it is a `kind: 'long'` tool (meshing), and
+ * otherwise the default two minutes.
+ */
+export function toolTimeoutMs(tool: ToolDef, ctx: Pick<ToolContext, 'config'>): number {
+  if (tool.timeoutMs !== undefined) return tool.timeoutMs
+  if (tool.kind === 'long') return ctx.config.longToolTimeoutMs
+  return TOOL_TIMEOUT_MS
+}
+
 export async function runTool(name: string, input: unknown, ctx: ToolContext): Promise<ToolResult> {
   const tool = byName.get(name)
   if (!tool) return fail('UNKNOWN_TOOL', `no tool named ${name}`)
@@ -217,7 +228,7 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext): P
   if (!parsed.success) return fail('INVALID_INPUT', `invalid input for ${name}: ${issues(parsed.error)}`)
   if (ctx.signal.aborted) return fail('CANCELLED', 'cancelled by user')
   try {
-    const result = await withTimeout(tool.run(parsed.data, ctx), tool.timeoutMs ?? TOOL_TIMEOUT_MS, ctx.signal, name)
+    const result = await withTimeout(tool.run(parsed.data, ctx), toolTimeoutMs(tool, ctx), ctx.signal, name)
     return await capResult(result, ctx)
   } catch (err) {
     const message = errorMessage(err)

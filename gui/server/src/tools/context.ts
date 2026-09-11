@@ -50,6 +50,12 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
   run(input: z.infer<S>, ctx: ToolContext): Promise<ToolResult>
   /** Tools that legitimately block longer than the default 120 s (run_wait). */
   timeoutMs?: number
+  /**
+   * 'long': this tool waits on work measured in minutes (a mesh), so the
+   * registry gives it config.longToolTimeoutMs instead of TOOL_TIMEOUT_MS.
+   * An explicit timeoutMs still wins.
+   */
+  kind?: 'long'
 }
 
 export function fail(code: string, message: string): ToolResult {

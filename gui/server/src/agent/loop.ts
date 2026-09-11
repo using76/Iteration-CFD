@@ -109,7 +109,7 @@ export async function approvalPreview(name: string, input: unknown, workspaceRoo
       return [String(i.binary), i.casePath ? String(i.casePath) : '', ...(Array.isArray(i.positionals) ? (i.positionals as string[]) : []), formatArgs((i.args as Array<{ flag: string; value: unknown }>) ?? [])].filter(Boolean).join(' ')
     case 'mesh_generate': {
       const m = meshArgs(input as Parameters<typeof meshArgs>[0])
-      return ['ofgpu-generate-mesh', ...m.positionals, formatArgs(m.args)].filter(Boolean).join(' ')
+      return [m.binary, ...m.positionals, formatArgs(m.args)].filter(Boolean).join(' ')
     }
     case 'file_write': {
       const content = typeof i.content === 'string' ? i.content : ''

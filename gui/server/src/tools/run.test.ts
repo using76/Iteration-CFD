@@ -65,17 +65,37 @@ describe('run tools', () => {
     expect(parseMeshCells(['mesh: 120,448 cells, 3 faces', 'other'])).toBe(120448)
     expect(parseMeshCells(['channel: 200 x 120 x 1 = 24000 cells -> cases/channel'])).toBe(24000)
     expect(parseMeshCells(['nothing'])).toBeNull()
-    const args = meshArgs({ kind: 'channel', outputDir: 'cases/channel', cells: [10, 20, 1], stl: [{ name: 'body', path: 'geo/body.stl' }], cutcell: true, wallModel: 'rough', Ks: 0.001, Cs: null, cyclic: ['x'], permissive: true })
+    const args = meshArgs({
+      kind: 'channel',
+      outputDir: 'cases/channel',
+      cells: [10, 20, 1],
+      stl: [{ name: 'body', path: 'geo/body.stl' }],
+      cutcell: true,
+      s: 8,
+      thetaMin: 0.3,
+      extent: [0, 1, 0, 2, 0, 0.5],
+      grading: [{ axis: 'z', ratio: 20 }],
+      wallModel: 'rough',
+      Ks: 0.001,
+      Cs: null,
+      cyclic: ['x'],
+      permissive: true,
+    })
+    expect(args.binary).toBe('ofgpu-generate-mesh')
     expect(args.positionals).toEqual(['channel', 'cases/channel', '10', '20', '1'])
     expect(args.args).toEqual([
       { flag: '-stl', value: 'body=geo/body.stl' },
       { flag: '-cutcell', value: true },
+      { flag: '-s', value: 8 },
+      { flag: '-thetaMin', value: 0.3 },
+      { flag: '-extent', value: '0 1 0 2 0 0.5' },
+      { flag: '-grading', value: 'z=20' },
       { flag: '-wallModel', value: 'rough' },
       { flag: '-Ks', value: 0.001 },
       { flag: '-cyclic', value: 'x' },
       { flag: '-permissive', value: true },
     ])
-    const r = await runTool('mesh_generate', { kind: 'channel', outputDir: 'cases/channel', cells: null, stl: null, cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null }, ctx())
+    const r = await runTool('mesh_generate', { kind: 'channel', outputDir: 'cases/channel', cells: null, stl: null, cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null, waitSeconds: 30 }, ctx())
     expect(r.ok).toBe(true)
     const data = r.data as { cells: number; status: string; outputDir: string; solvers: string[] }
     expect(data.cells).toBe(24000)
@@ -83,8 +103,42 @@ describe('run tools', () => {
     expect(data.outputDir).toBe('cases/channel')
     expect(data.solvers).toContain('ofgpu-k-epsilon')
     expect(runs.started.at(-1)?.binary).toBe('ofgpu-generate-mesh')
+    expect(runs.started.at(-1)?.label).toBe('mesh channel')
     const bad = await runTool('mesh_generate', { kind: 'channel', outputDir: 'cases/c2', cells: null, stl: null, cutcell: true, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null }, ctx())
     expect(bad.error?.code).toBe('INVALID')
+    const supersample = await runTool('mesh_generate', { kind: 'channel', outputDir: 'cases/c2b', cells: null, stl: null, cutcell: null, s: 8, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null }, ctx())
+    expect(supersample.error?.code).toBe('INVALID')
+    expect(supersample.error?.message).toContain('cutcell')
+  })
+
+  it('mesh_generate returns the run id immediately unless waitSeconds is given', async () => {
+    const immediate = await runTool('mesh_generate', { kind: 'cavity', outputDir: 'cases/cav', cells: null, stl: null, cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null }, ctx())
+    expect(immediate.ok).toBe(true)
+    const data = immediate.data as { runId: string; status: string; stillRunning: boolean; cells: number | null }
+    expect(runs.runs.has(data.runId)).toBe(true)
+    expect(['queued', 'running', 'done']).toContain(data.status)
+    expect(data.cells).toBeNull()
+  })
+
+  it('mesh_generate runs the automesher form and derives the -check directory from the config', async () => {
+    await fsp.mkdir(path.join(ws.root, 'mesh'), { recursive: true })
+    await fsp.writeFile(
+      path.join(ws.root, 'mesh', 'box_sphere.json'),
+      '{\n  "input": { "surfaces": [{ "path": "mesh/box_sphere.stl" }] },\n  "domain": { "extent": [-5, 5, -5, 5, 0, 10], "base_size": 1 },\n  "output": { "case_dir": "cases/sphere_case", "name": "box_sphere" }\n}\n',
+    )
+    const r = await runTool('mesh_generate', { config: 'mesh/box_sphere.json', kind: undefined, outputDir: undefined, cells: null, stl: null, cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null, check: true, tag: 'try2', stopAfter: 'snap', waitSeconds: 30 }, ctx())
+    expect(r.ok).toBe(true)
+    const started = runs.started.at(-1)
+    expect(started?.binary).toBe('ofgpu-automesher')
+    expect(started?.positionals).toEqual(['mesh/box_sphere.json'])
+    expect(started?.label).toBe('mesh automesher')
+    expect(started?.args).toEqual([
+      { flag: '-stopAfter', value: 'snap' },
+      { flag: '-tag', value: 'try2' },
+      { flag: '-check', value: 'cases/sphere_case_try2' },
+    ])
+    const both = await runTool('mesh_generate', { config: 'mesh/box_sphere.json', kind: 'cavity', outputDir: undefined, cells: null, stl: null, cutcell: null, wallModel: null, Ks: null, Cs: null, cyclic: null, permissive: null }, ctx())
+    expect(both.error?.code).toBe('INVALID')
   })
 
   it('mesh_generate confines the -stl path to the workspace', async () => {

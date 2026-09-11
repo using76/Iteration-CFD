@@ -170,8 +170,8 @@ export const BINARIES: BinarySpec[] = [
   {
     name: 'ofgpu-automesher',
     source: 'src/bin/automesher.rs',
-    purpose: 'Our own mesher (SPEC-LIT §92). Reads an AutomeshConfig JSONC, loads and merges the input STLs, requires a closed surface, runs the §92.2 stage-0 domain check and prints the plan. The meshing stages are not built yet - the run refuses with "not implemented: stage 1" - but -check runs the §92.3 quality gate (G1-G7) on a polyMesh that already exists.',
-    summary: 'Automesher skeleton: config + STL summary + plan; -check runs the §92.3 quality gate.',
+    purpose: 'Our own mesher (SPEC-LIT §92, hex-dominant path). Reads an AutomeshConfig JSONC, loads and merges the input STLs, requires a closed surface, runs the §92.2 stage-0 domain check, then the §92.14 pipeline - octree refinement, castellation, snapping, layers - printing a banner before each stage. When every §92.3 gate (G1-G7) holds it writes <case_dir>/constant/polyMesh and <name>_summary.json; a failed gate names the cells and writes neither. -check runs the gate on a polyMesh that already exists; -dryRun stops after the surface summary. The tetrahedral (§92.4) and polyhedral (§92.5) paths are specified but not implemented.',
+    summary: 'Automesher: config + STLs to a gate-checked hex-dominant polyMesh; -check judges an existing mesh; -dryRun checks a config.',
     kind: 'mesh',
     positionals: [
       { name: 'config', type: 'path', description: 'AutomeshConfig JSONC file (worked example: tools/automesher/examples/nh3_site.json).' },

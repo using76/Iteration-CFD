@@ -2,7 +2,7 @@ import { TOOL_NAMES } from '@cfd/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { fakeDatasets, fakeHub, fakeRuns, makeWorkspace, type TempWorkspace } from '../agent/test-fakes.js'
 import type { ToolContext } from './context.js'
-import { RESULT_CAP_BYTES, runTool, sanitizeSchema, toolDefinitions, toolResultBlock, TOOLS } from './index.js'
+import { RESULT_CAP_BYTES, runTool, sanitizeSchema, toolDefinitions, toolResultBlock, TOOL_TIMEOUT_MS, toolTimeoutMs, TOOLS } from './index.js'
 
 function walk(node: unknown, visit: (obj: Record<string, unknown>) => void): void {
   if (Array.isArray(node)) return node.forEach((n) => walk(n, visit))
@@ -68,6 +68,17 @@ describe('tool registry', () => {
     expect(out.additionalProperties).toBe(false)
     expect(out.properties.kind).toEqual({ type: 'string', enum: ['a', 'b'], description: 'a (n), b' })
     expect(out.properties.n).toEqual({ anyOf: [{ type: 'integer' }, { type: 'string' }] })
+  })
+
+  it('gives a long tool the configured mesh budget and everything else two minutes', () => {
+    const config = { ...ws.config, longToolTimeoutMs: 9 * 60_000 }
+    const mesh = TOOLS.find((t) => t.name === 'mesh_generate')!
+    expect(mesh.kind).toBe('long')
+    expect(toolTimeoutMs(mesh, { config })).toBe(9 * 60_000)
+    expect(toolTimeoutMs(TOOLS.find((t) => t.name === 'case_read')!, { config })).toBe(TOOL_TIMEOUT_MS)
+    // run_wait names its own budget, so the long-tool setting does not move it.
+    const wait = TOOLS.find((t) => t.name === 'run_wait')!
+    expect(toolTimeoutMs(wait, { config })).toBe(wait.timeoutMs)
   })
 
   it('rejects invalid input with INVALID_INPUT before running', async () => {

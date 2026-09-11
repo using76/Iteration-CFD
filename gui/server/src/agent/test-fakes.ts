@@ -50,6 +50,7 @@ export async function makeWorkspace(opts: { plume?: boolean; spec?: boolean } = 
     allowRemote: false,
     authToken: null,
     maxConcurrentRuns: 4,
+    longToolTimeoutMs: 15 * 60_000,
     logLevel: 'error',
   }
   return { tmp, root, config, cleanup: () => fsp.rm(tmp, { recursive: true, force: true }) }
