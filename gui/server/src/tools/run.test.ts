@@ -112,7 +112,8 @@ describe('run tools', () => {
     expect(none.error?.code).toBe('NO_VIEWER')
     const plot = await runTool('plot_residuals', { runId: 'r_1', fields: null, yScale: null }, ctx())
     expect(plot.ok).toBe(true)
-    expect(hub.of('residuals.open').at(-1)?.runId).toBe('r_1')
+    // the chart opens by driving the screen, like every other UI command
+    expect(hub.uiCalls.at(-1)).toEqual({ type: 'show_chart', chart: 'residuals', runId: 'r_1' })
     const gpu = await runTool('gpu_info', {}, ctx())
     expect((gpu.data as { state: string; availableBinaries: string[] }).state).toBe('demo')
   })

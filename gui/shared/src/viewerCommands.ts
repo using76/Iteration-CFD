@@ -1,11 +1,77 @@
 // Viewer command surface. ONE schema, used by the `viewer_command` Claude tool
 // (server), the WebSocket `viewer.command` frame, and the client-side store.
-// Optional keys are `.nullable()` rather than `.optional()` so the same schema
-// converts cleanly to a JSON Schema the model can fill in.
+// Optional keys are `.nullish()` - nullable for the clean JSON Schema
+// conversion, optional because a weaker model omits them.
+//
+// Numeric and boolean leaves are coerced: a weaker model sends
+// "timeIndex": "0" or enabled: "true", and the strict schema used to refuse
+// the whole command for it. The coerced leaves accept the string form and
+// still parse to real numbers and booleans - no string ever reaches the
+// viewer store.
 import { z } from 'zod'
 
-export const Vec3Schema = z.tuple([z.number(), z.number(), z.number()])
+/**
+ * `n` numbers the model JSON-encoded into one string ("[-2, 1]", "[0, 0, 1]"):
+ * the array back, or null when the string is not that. Numeric strings inside
+ * the array count, so "[\"0\", \"0\", \"1\"]" parses too.
+ */
+function jsonNumbers(s: string, n: number): number[] | null {
+  try {
+    const v: unknown = JSON.parse(s)
+    if (Array.isArray(v) && v.length === n && v.every((x) => typeof x === 'number' || typeof x === 'string')) {
+      const nums = v.map((x) => Number(x))
+      if (nums.every((x) => Number.isFinite(x))) return nums
+    }
+  } catch {
+    // not JSON: the caller raises the issue
+  }
+  return null
+}
+
+/**
+ * A point or direction: three numbers, the numeric strings, or the whole vector
+ * JSON-encoded in one string - the same mistake RangeTupleSchema forgives, and
+ * the model that made it there makes it here (origin, normal, position, target).
+ * Junk still fails.
+ */
+export const Vec3Schema = z.union([
+  z.tuple([z.coerce.number(), z.coerce.number(), z.coerce.number()]),
+  z.string().transform((s, ctx) => {
+    const v = jsonNumbers(s, 3)
+    if (v) return [v[0], v[1], v[2]] as [number, number, number]
+    ctx.addIssue({ code: 'custom', message: 'expected [x, y, z], the numeric strings, or a JSON-encoded "[x, y, z]"' })
+    return z.NEVER
+  }),
+])
 export type Vec3 = z.infer<typeof Vec3Schema>
+
+/** A time step: a whole number, or the literal 'last' - either as a string. */
+export const TimeIndexSchema = z.union([z.coerce.number().int(), z.literal('last')])
+export type TimeIndex = z.infer<typeof TimeIndexSchema>
+
+/** A boolean, or the string form a weaker model sends. Not z.coerce.boolean(), which would read "false" as true. */
+export const Boolish = z.union([z.boolean(), z.enum(['true', 'false'])]).transform((v) => v !== 'false')
+export type Boolish = z.infer<typeof Boolish>
+
+/** A position along an axis: a world coordinate or a fraction of the domain. */
+const AxisPositionSchema = z.union([z.coerce.number(), z.object({ fraction: z.coerce.number() })])
+
+/**
+ * A [min, max] colour range: a two-number tuple, an array of numeric strings,
+ * or - what GLM-5.3-Flash actually sent - the whole tuple JSON-encoded in one
+ * string ("[-2, 1]"). The string form must still parse to a real pair; junk
+ * fails.
+ */
+export const RangeTupleSchema = z.union([
+  z.tuple([z.coerce.number(), z.coerce.number()]),
+  z.string().transform((s, ctx) => {
+    const v = jsonNumbers(s, 2)
+    if (v) return [v[0], v[1]] as [number, number]
+    ctx.addIssue({ code: 'custom', message: 'expected [min, max], the numeric strings, or a JSON-encoded "[min, max]"' })
+    return z.NEVER
+  }),
+])
+export type RangeTuple = z.infer<typeof RangeTupleSchema>
 
 export const ColormapNameSchema = z.enum(['viridis', 'turbo', 'coolwarm', 'jet', 'greyscale', 'inferno'])
 export type ColormapName = z.infer<typeof ColormapNameSchema>
@@ -19,7 +85,7 @@ export type RepresentationMode = z.infer<typeof RepresentationModeSchema>
 export const CameraPresetSchema = z.enum(['iso', '+x', '-x', '+y', '-y', '+z', '-z', 'fit'])
 export type CameraPreset = z.infer<typeof CameraPresetSchema>
 
-const nullableId = z.string().nullable().describe('Layer id. Null lets the viewer pick one; reuse an id to replace that layer.')
+const nullableId = z.string().nullish().describe('Layer id. Null/omitted lets the viewer pick one; reuse an id to replace that layer.')
 
 export const ViewerCommandSchema = z.discriminatedUnion('type', [
   z.object({
@@ -27,29 +93,29 @@ export const ViewerCommandSchema = z.discriminatedUnion('type', [
     path: z
       .string()
       .describe('Workspace-relative path: a case.jsonc, a case/output directory, a time directory, a .vtu or a .pvd file'),
-    timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().describe('Time step to show; null = last'),
-    field: z.string().nullable().describe('Field to colour by once loaded; null = U (or the first field)'),
+    timeIndex: TimeIndexSchema.nullish().describe('Time step to show; null/omitted = last'),
+    field: z.string().nullish().describe('Field to colour by once loaded; null/omitted = U (or the first field)'),
   }),
   z.object({
     type: z.literal('setField'),
     field: z.string(),
-    component: FieldComponentSchema.nullable(),
-    range: z.union([z.tuple([z.number(), z.number()]), z.literal('auto'), z.literal('global')]).nullable(),
-    colormap: ColormapNameSchema.nullable(),
-    log: z.boolean().nullable(),
+    component: FieldComponentSchema.nullish(),
+    range: z.union([RangeTupleSchema, z.literal('auto'), z.literal('global')]).nullish(),
+    colormap: ColormapNameSchema.nullish(),
+    log: Boolish.nullish(),
   }),
   z.object({
     type: z.literal('setRepresentation'),
     mode: RepresentationModeSchema,
-    opacity: z.number().nullable(),
-    patches: z.union([z.array(z.string()), z.literal('all')]).nullable(),
-    shading: z.enum(['pbr', 'flat']).nullable(),
+    opacity: z.coerce.number().nullish(),
+    patches: z.union([z.array(z.string()), z.literal('all')]).nullish(),
+    shading: z.enum(['pbr', 'flat']).nullish(),
   }),
   z.object({
     type: z.literal('addSlice'),
     id: nullableId,
     axis: z.enum(['x', 'y', 'z']),
-    position: z.union([z.number(), z.object({ fraction: z.number() })]).describe('World coordinate along the axis, or {fraction:0..1} of the domain'),
+    position: AxisPositionSchema.describe('World coordinate along the axis, or {fraction:0..1} of the domain'),
   }),
   z.object({
     type: z.literal('addPlane'),
@@ -61,50 +127,50 @@ export const ViewerCommandSchema = z.discriminatedUnion('type', [
     type: z.literal('addIsoSurface'),
     id: nullableId,
     field: z.string(),
-    values: z.array(z.number()).min(1),
+    values: z.array(z.coerce.number()).min(1),
   }),
   z.object({
     type: z.literal('addStreamlines'),
     id: nullableId,
-    field: z.string().nullable().describe('Vector field; null = U'),
+    field: z.string().nullish().describe('Vector field; null = U'),
     seed: z.union([
-      z.object({ line: z.tuple([Vec3Schema, Vec3Schema]), count: z.number().int() }),
-      z.object({ plane: z.enum(['x', 'y', 'z']), position: z.union([z.number(), z.object({ fraction: z.number() })]), grid: z.tuple([z.number().int(), z.number().int()]) }),
+      z.object({ line: z.tuple([Vec3Schema, Vec3Schema]), count: z.coerce.number().int() }),
+      z.object({ plane: z.enum(['x', 'y', 'z']), position: AxisPositionSchema, grid: z.tuple([z.coerce.number().int(), z.coerce.number().int()]) }),
     ]),
-    style: z.enum(['line', 'tube']).nullable(),
-    maxLength: z.number().nullable(),
-    direction: z.enum(['forward', 'backward', 'both']).nullable(),
+    style: z.enum(['line', 'tube']).nullish(),
+    maxLength: z.coerce.number().nullish(),
+    direction: z.enum(['forward', 'backward', 'both']).nullish(),
   }),
   z.object({
     type: z.literal('addGlyphs'),
     id: nullableId,
-    field: z.string().nullable(),
-    stride: z.number().int().nullable(),
-    scale: z.number().nullable(),
-    onSlice: z.string().nullable().describe('Slice layer id to place glyphs on; null = whole volume'),
+    field: z.string().nullish(),
+    stride: z.coerce.number().int().nullish(),
+    scale: z.coerce.number().nullish(),
+    onSlice: z.string().nullish().describe('Slice layer id to place glyphs on; null = whole volume'),
   }),
   z.object({ type: z.literal('remove'), id: z.string() }),
   z.object({ type: z.literal('clear') }),
   z.object({
     type: z.literal('setClipBox'),
-    enabled: z.boolean(),
-    min: Vec3Schema.nullable(),
-    max: Vec3Schema.nullable(),
+    enabled: Boolish,
+    min: Vec3Schema.nullish(),
+    max: Vec3Schema.nullish(),
   }),
-  z.object({ type: z.literal('setTime'), index: z.union([z.number().int(), z.literal('last')]) }),
+  z.object({ type: z.literal('setTime'), index: TimeIndexSchema }),
   z.object({
     type: z.literal('setCamera'),
-    preset: CameraPresetSchema.nullable(),
-    position: Vec3Schema.nullable(),
-    target: Vec3Schema.nullable(),
-    projection: z.enum(['perspective', 'orthographic']).nullable(),
+    preset: CameraPresetSchema.nullish(),
+    position: Vec3Schema.nullish(),
+    target: Vec3Schema.nullish(),
+    projection: z.enum(['perspective', 'orthographic']).nullish(),
   }),
   z.object({ type: z.literal('setQuality'), level: z.enum(['low', 'medium', 'high']) }),
   z.object({
     type: z.literal('screenshot'),
-    width: z.number().int().nullable(),
-    height: z.number().int().nullable(),
-    includeLegend: z.boolean().nullable(),
+    width: z.coerce.number().int().nullish(),
+    height: z.coerce.number().int().nullish(),
+    includeLegend: Boolish.nullish(),
   }),
   z.object({ type: z.literal('getState') }),
 ])

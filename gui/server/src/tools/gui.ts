@@ -11,7 +11,7 @@ const UI_COMMAND_TIMEOUT_MS = 5_000
 export const guiControl: ToolDef<typeof UiCommandSchema> = {
   name: 'gui_control',
   description:
-    "Drive the operator's screen in the studio UI: open a left tab, show a result field (Temperature/Velocity/Pressure), select a project-tree step, open a right panel (AI Assistant/Properties/Inspector), set the mouse tool, switch perspective/orthographic, fit the view, toggle the axes or color-bar overlays, set the centerline quantity, start or stop the run, or show a toast notice. Call gui_state first when unsure what is on screen.",
+    "Drive the operator's screen in the studio UI. Screen: open a left tab, show a result field (Temperature/Velocity/Pressure), select a project-tree step, open a right panel (AI Assistant/Properties/Inspector), set the mouse tool, switch perspective/orthographic, fit the view, toggle the axes or color-bar overlays, set the centerline quantity, start or stop the run, show a toast notice, open or close a workspace tab, set the UI language. Workspace: open_case / save_case, set_run_setting, start_run / stop_run, open_mesh_dialog / start_mesh, show_chart (residuals|metrics|surface), open_result, set_post (colormap, range, component, representation, opacity, patches, log), add_layer / remove_layer, set_camera, probe. Call gui_state first when unsure what is on screen.",
   schema: UiCommandSchema,
   async run(cmd, ctx) {
     const res = await ctx.hub.requestUi(cmd, { timeoutMs: UI_COMMAND_TIMEOUT_MS, sessionId: ctx.sessionId })

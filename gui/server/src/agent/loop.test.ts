@@ -7,7 +7,7 @@ import { setSchemaValidator, structuralValidate } from '../tools/case.js'
 import type { LlmClient } from './llm.js'
 import { MAX_TOOL_ROUNDS, runTurn } from './loop.js'
 import { makeMessage, mockEvents, type MockPlan } from './mockLlm.js'
-import { BUDGET_EXHAUSTED_TEXT, runNoticeText } from './prompt.js'
+import { BUDGET_EXHAUSTED_TEXT, runNoticeUserText } from './prompt.js'
 import { appendUserTurn, type SessionRecord } from './session.js'
 import { fakeRuns, makeWorkspace, type TempWorkspace } from './test-fakes.js'
 import { makeDeps, textOf, toolResultsOf, toolUsesOf, until, type TestDeps } from './test-util.js'
@@ -431,7 +431,7 @@ describe('run notices', () => {
     await runs.start({ binary: 'ofgpu-k-epsilon', casePath: 'cases/plume.jsonc', args: [{ flag: '-iters', value: 400 }], positionals: [], label: null, sessionId: null })
     await until(() => runs.get('r_1')?.status === 'done')
     const rec = deps.store.create({ locale: 'en' })
-    const notice = runNoticeText(runs.get('r_1')!, 'en')
+    const notice = runNoticeUserText(runs.get('r_1')!, 'en')
     expect(notice.startsWith('[run notice] run r_1 (ofgpu-k-epsilon, cases/plume.jsonc) ended with status done after 400 iterations')).toBe(true)
     const ui = appendUserTurn(rec, { role: 'user', content: notice }, { synthetic: true })
     expect(ui?.synthetic).toBe(true)

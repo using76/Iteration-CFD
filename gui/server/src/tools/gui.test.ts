@@ -5,7 +5,7 @@ import type { UiRequestResult } from '../ws/types.js'
 import type { Hub } from '../ws/types.js'
 import type { ToolContext } from './context.js'
 import { guiControl, guiState } from './gui.js'
-import { toolDefinitions, TOOLS } from './index.js'
+import { runTool, toolDefinitions, TOOLS } from './index.js'
 
 // A hub whose UI bridge records the command and answers only when the test
 // delivers the ui.result, or when the same 5 s timeout the real hub uses fires.
@@ -106,6 +106,25 @@ describe('gui_control', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('forwards the workspace commands the shell units add', async () => {
+    const fake = fakeUiHub()
+    const after: UiState = { ...screenState, case: { path: 'cases/plume.jsonc', name: 'plume', dirty: false }, tabs: [{ id: 't1', kind: 'viewer', label: '3D' }] }
+    const p = guiControl.run({ type: 'open_case', path: 'cases/plume.jsonc' }, ctx(fake.hub))
+    expect(fake.pending[0].cmd).toEqual({ type: 'open_case', path: 'cases/plume.jsonc' })
+    fake.pending[0].resolve({ ok: true, state: after, error: null })
+    const r = await p
+    expect(r.ok).toBe(true)
+    expect((r.data as { state: UiState }).state?.case).toEqual({ path: 'cases/plume.jsonc', name: 'plume', dirty: false })
+  })
+
+  it('forgives the string numbers and booleans a weaker model sends', async () => {
+    const fake = fakeUiHub()
+    const p = runTool('gui_control', { type: 'probe', x: '12.5', y: '40' }, ctx(fake.hub))
+    expect(fake.pending[0].cmd).toEqual({ type: 'probe', x: 12.5, y: 40 })
+    fake.pending[0].resolve({ ok: true, state: screenState, error: null })
+    expect(await p).toMatchObject({ ok: true, data: { ok: true, command: 'probe', state: screenState } })
   })
 })
 

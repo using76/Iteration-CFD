@@ -2,7 +2,7 @@
 // map. This file is the single owner of every name that crosses the wire.
 // Both sides validate frames with the zod schemas below.
 import { z } from 'zod'
-import { ViewerCommandSchema, ViewerResultSchema, ViewerStateSchema } from './viewerCommands'
+import { Boolish, CameraPresetSchema, ColormapNameSchema, FieldComponentSchema, RangeTupleSchema, RepresentationModeSchema, TimeIndexSchema, ViewerCommandSchema, ViewerLayerSummarySchema, ViewerResultSchema, ViewerStateSchema } from './viewerCommands'
 import type { DatasetProgress } from './viewerDataset'
 
 // ---------------------------------------------------------------------------
@@ -289,6 +289,61 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('set_centerline'), quantity: z.string() }),
   z.object({ type: z.literal('run'), action: z.enum(['run', 'stop']) }),
   z.object({ type: z.literal('notify'), level: z.enum(['info', 'warning', 'error']), text: z.string().describe('Shown as a toast on the operator\'s screen') }),
+  // The workspace commands the GUI shell units add: cases, runs, meshing,
+  // charts and tabs. Optional keys are `.nullish()` (see viewerCommands.ts);
+  // numeric leaves are coerced so the string form a weaker model sends still
+  // parses.
+  z.object({ type: z.literal('open_case'), path: z.string().describe('Workspace-relative case file or directory to open') }),
+  z.object({ type: z.literal('save_case') }),
+  z.object({
+    type: z.literal('set_run_setting'),
+    binary: z.string().nullish().describe('Registry binary whose settings to edit; null = the one on screen'),
+    flag: z.string().nullish().describe('Setting flag, e.g. "-iters"; null = clear it'),
+    // String first on purpose: the flag's own type lives in the registry's FlagSpec,
+    // and the GUI's run-settings form coerces "4000" and "true" by that type. Turning
+    // every numeric-looking string into a number here would decide it in the wrong place.
+    value: z.union([z.string(), z.coerce.number(), Boolish]).nullish().describe('New value; a string is passed through as typed and the GUI coerces it by the flag\'s type'),
+  }),
+  z.object({ type: z.literal('start_run') }),
+  z.object({ type: z.literal('stop_run') }),
+  z.object({
+    type: z.literal('open_mesh_dialog'),
+    preset: z.string().nullish().describe('Mesh preset kind, e.g. "channel"'),
+    cells: z.coerce.number().int().nullish().describe('Cells per direction'),
+    outputDir: z.string().nullish().describe('Workspace-relative output directory'),
+  }),
+  z.object({ type: z.literal('start_mesh') }),
+  z.object({
+    type: z.literal('show_chart'),
+    chart: z.enum(['residuals', 'metrics', 'surface']),
+    runId: z.string().nullish().describe('Run whose data the chart shows'),
+  }),
+  z.object({
+    type: z.literal('open_result'),
+    path: z.string().describe('Workspace-relative result path (case/output dir, time dir, .vtu or .pvd)'),
+    timeIndex: TimeIndexSchema.nullish().describe('Time step to show; null = last'),
+  }),
+  z.object({
+    type: z.literal('set_post'),
+    colormap: ColormapNameSchema.nullish(),
+    range: z.union([RangeTupleSchema, z.literal('auto'), z.literal('global')]).nullish(),
+    component: FieldComponentSchema.nullish(),
+    representation: RepresentationModeSchema.nullish(),
+    opacity: z.coerce.number().nullish(),
+    patches: z.union([z.array(z.string()), z.literal('all')]).nullish(),
+    log: Boolish.nullish(),
+  }),
+  z.object({
+    type: z.literal('add_layer'),
+    kind: z.string().describe('Layer kind: slice, plane, isoSurface, streamlines, glyphs'),
+    args: z.record(z.string(), z.unknown()).describe('Layer options, e.g. {axis:"x", position:0.5}'),
+  }),
+  z.object({ type: z.literal('remove_layer'), id: z.string() }),
+  z.object({ type: z.literal('set_camera'), preset: CameraPresetSchema }),
+  z.object({ type: z.literal('probe'), x: z.coerce.number(), y: z.coerce.number().describe('Screen coordinates in pixels from the top left') }),
+  z.object({ type: z.literal('open_tab'), kind: z.string().describe('Tab kind, e.g. "viewer", "chart", "log"'), label: z.string().nullish() }),
+  z.object({ type: z.literal('close_tab'), id: z.string() }),
+  z.object({ type: z.literal('set_locale'), locale: z.enum(['ko', 'en']) }),
 ])
 export type UiCommand = z.infer<typeof UiCommandSchema>
 export type UiCommandType = UiCommand['type']
@@ -306,6 +361,42 @@ export const UiSimStateSchema = z.object({
 })
 export type UiSimState = z.infer<typeof UiSimStateSchema>
 
+export const UiCaseStateSchema = z.object({
+  path: z.string().nullable(),
+  name: z.string().nullable(),
+  /** True when the case has unsaved edits. */
+  dirty: z.boolean().nullable(),
+})
+export type UiCaseState = z.infer<typeof UiCaseStateSchema>
+
+export const UiRunStateSchema = z.object({
+  id: z.string().nullable(),
+  status: z.string().nullable(),
+  iteration: z.number().nullable(),
+  /** Planned iterations when known. */
+  target: z.number().nullable(),
+})
+export type UiRunState = z.infer<typeof UiRunStateSchema>
+
+export const UiViewerStateSchema = z.object({
+  datasetId: z.string().nullable(),
+  field: z.string().nullable(),
+  /** Physical time value shown, when the dataset has times. */
+  time: z.number().nullable(),
+  colormap: z.string().nullable(),
+  range: z.tuple([z.number(), z.number()]).nullable(),
+  representation: z.string().nullable(),
+  layers: z.array(ViewerLayerSummarySchema).nullish(),
+})
+export type UiViewerState = z.infer<typeof UiViewerStateSchema>
+
+export const UiTabSchema = z.object({
+  id: z.string(),
+  kind: z.string().nullable(),
+  label: z.string().nullable(),
+})
+export type UiTab = z.infer<typeof UiTabSchema>
+
 export const UiStateSchema = z.object({
   activeTab: z.string().nullable(),
   activeStep: z.string().nullable(),
@@ -319,6 +410,18 @@ export const UiStateSchema = z.object({
   selection: UiSelectionSchema.nullable(),
   runId: z.string().nullable(),
   sim: UiSimStateSchema.nullable(),
+  // What the model reads to know what it is steering. Every field is
+  // `.nullish()`: the GUI fills what it has, and an older client that sends
+  // none of them still passes validation.
+  case: UiCaseStateSchema.nullish(),
+  tabs: z.array(UiTabSchema).nullish(),
+  run: UiRunStateSchema.nullish(),
+  viewer: UiViewerStateSchema.nullish(),
+  /** Number of open problems (errors + warnings) the GUI shows. */
+  problems: z.number().nullish(),
+  /** The GUI's own connection state, e.g. "connected" or "reconnecting". */
+  connection: z.string().nullish(),
+  locale: z.enum(['ko', 'en']).nullish(),
 })
 export type UiState = z.infer<typeof UiStateSchema>
 

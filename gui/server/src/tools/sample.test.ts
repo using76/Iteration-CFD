@@ -95,6 +95,16 @@ describe('line_sample tool', () => {
     expect((await sample({ resultDir: '../outside' })).error?.code).toBe('OUTSIDE_WORKSPACE')
   })
 
+  it('forgives the numeric strings a weaker model sends for p0/p1/n', async () => {
+    const r = await sample({ p0: ['0', '0', '0'], p1: ['4', '2', '1'], n: '5' })
+    expect(r.ok).toBe(true)
+    expect((r.data as LineSampleResult).values).toHaveLength(5)
+    expect((r.data as LineSampleResult).time).toBe('100')
+    // but junk is still refused
+    expect((await sample({ p0: ['a', '0', '0'] })).error?.code).toBe('INVALID_INPUT')
+    expect((await sample({ n: 'five' })).error?.code).toBe('INVALID_INPUT')
+  })
+
   it('re-reads the geometry after the case is re-meshed in place', async () => {
     // its own case, so the shared fixture keeps the mesh the other tests count on
     const dir = path.join(ws.root, 'cases', 'recut')

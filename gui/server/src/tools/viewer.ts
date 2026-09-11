@@ -57,13 +57,24 @@ const PlotSchema = z.object({
   yScale: z.enum(['log', 'linear']).nullable(),
 })
 
+const PLOT_UI_TIMEOUT_MS = 5_000
+
 export const plotResiduals: ToolDef<typeof PlotSchema> = {
   name: 'plot_residuals',
-  description: 'Open the residual chart panel for a run in the UI.',
+  description: "Open the residual chart panel for a run on the operator's screen and report what the screen answered.",
   schema: PlotSchema,
   async run(input, ctx) {
     if (!ctx.runs.get(input.runId)) return { ok: false, data: { error: { code: 'NO_SUCH_RUN', message: `no run ${input.runId}` } }, error: { code: 'NO_SUCH_RUN', message: `no run ${input.runId}` } }
+    const data = { ok: true, runId: input.runId, chart: 'residuals' as const, fields: input.fields, yScale: input.yScale ?? 'log' }
+    // The chart is shown by driving the screen like any other UI command, so
+    // the tool result carries the screen's own answer (and the state after).
+    const res = await ctx.hub.requestUi({ type: 'show_chart', chart: 'residuals', runId: input.runId }, { timeoutMs: PLOT_UI_TIMEOUT_MS, sessionId: ctx.sessionId })
+    if (res.ok) return { ...okResult({ ...data, shown: true, state: res.state }), runId: input.runId }
+    // Nothing confirmed the bridge (no client at all, or one that does not
+    // answer ui.command yet): keep the data-only answer, say so, and still
+    // reach for the residuals.open frame an older shell renders.
     ctx.hub.sendToSession(ctx.sessionId, { t: 'residuals.open', runId: input.runId })
-    return okResult({ ok: true, runId: input.runId, fields: input.fields, yScale: input.yScale ?? 'log' }, { runId: input.runId })
+    const why = res.error?.code === 'NO_UI' ? 'no screen was attached' : `the screen did not confirm the chart (${res.error?.code}: ${res.error?.message ?? 'no answer'})`
+    return { ...okResult({ ...data, shown: false, notice: `${why}; the residuals panel was requested anyway` }), runId: input.runId }
   },
 }

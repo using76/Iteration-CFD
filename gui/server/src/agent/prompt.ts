@@ -13,8 +13,17 @@ export const BUDGET_EXHAUSTED_TEXT = 'Tool budget exhausted: summarise what you 
 // Appended to the static system prompt here rather than in prompts/system.ts
 // so the registry-generated prompt stays about the solver; both halves are
 // constant, so the cache_control breakpoint keeps hitting.
-export const GUI_CONTROL_PARAGRAPH =
-  'You can also steer the operator\'s screen directly with gui_control: select_tab, show_field, select_step, open_panel (AI Assistant, Properties, Inspector), set_tool, set_projection, fit_view, show_overlay (axes, colorbars), set_centerline, run (start/stop) and notify (a toast on their screen). Call gui_state to read what the screen currently shows — before assuming what the user is looking at, and after changing it — and say in one short sentence what you changed on their screen.'
+export const GUI_CONTROL_PARAGRAPH = `You can also steer the operator's screen directly with gui_control: select_tab, show_field, select_step, open_panel (AI Assistant, Properties, Inspector), set_tool, set_projection, fit_view, show_overlay (axes, colorbars), set_centerline, run (start/stop) and notify (a toast on their screen).
+The workspace commands, one line each:
+- open_case {path}: open a case in the studio; save_case: save it (the screen reports dirty when there are unsaved edits).
+- set_run_setting {binary, flag, value}: change one run setting on the panel; start_run / stop_run: press the run or stop button.
+- open_mesh_dialog {preset, cells, outputDir}: open the mesh dialog prefilled; start_mesh: start the mesh it shows.
+- show_chart {chart, runId}: open a chart panel (residuals | metrics | surface); open_result {path, timeIndex}: load a result into the viewer.
+- set_post {colormap, range, component, representation, opacity, patches, log}: change how the result is rendered.
+- add_layer {kind, args} / remove_layer {id}: add or remove a viewer layer (slice, plane, isoSurface, streamlines, glyphs).
+- set_camera {preset}: snap the view (iso, +x, -x, +y, -y, +z, -z, fit); probe {x, y}: read the value under a screen point.
+- open_tab {kind, label} / close_tab {id}: arrange the workspace tabs; set_locale {locale}: switch the UI language (ko | en).
+Call gui_state to read what the screen currently shows — before assuming what the user is looking at, and after changing it. When the operator asks to see something, do it with gui_control (viewer_command for the 3D scene) instead of describing how, then say in one short sentence what you changed on their screen.`
 
 export function systemParam(): BetaTextBlockParam[] {
   return [{ type: 'text', text: `${STATIC_SYSTEM}\n\n${GUI_CONTROL_PARAGRAPH}`, cache_control: { type: 'ephemeral' } }]
@@ -79,11 +88,17 @@ export function foldContextIntoUser(messages: BetaMessageParam[], text: string):
   return [...out, { role: 'user', content: [{ type: 'text', text: `${CONTEXT_PREFIX}\n${text}` }] }]
 }
 
+/** The screen-facing text of the notice: no prefix, no words in the operator's mouth. */
 export function runNoticeText(run: RunInfo, locale: 'ko' | 'en'): string {
   const written = run.written.length ? run.written[run.written.length - 1] : null
   if (locale === 'ko') {
     const status = { done: '완료', failed: '실패', killed: '중단', diverged: '발산', running: '실행 중', queued: '대기' }[run.status]
-    return `${RUN_NOTICE_PREFIX} 실행 ${run.id} (${run.binary}${run.casePath ? `, ${run.casePath}` : ''})이(가) ${run.iter}회 반복 후 ${status} 상태로 끝났습니다.${written ? ` 결과: ${written}.` : ''}${run.error ? ` 오류: ${run.error}` : ''} 결과를 짧게 요약하고 다음 단계를 제안해 주세요.`
+    return `실행 ${run.id} (${run.binary}${run.casePath ? `, ${run.casePath}` : ''})이(가) ${run.iter}회 반복 후 ${status} 상태로 끝났습니다.${written ? ` 결과: ${written}.` : ''}${run.error ? ` 오류: ${run.error}` : ''} 결과를 짧게 요약하고 다음 단계를 제안해 주세요.`
   }
-  return `${RUN_NOTICE_PREFIX} run ${run.id} (${run.binary}${run.casePath ? `, ${run.casePath}` : ''}) ended with status ${run.status} after ${run.iter} iterations.${written ? ` Results: ${written}.` : ''}${run.error ? ` Error: ${run.error}` : ''} Summarise the outcome briefly and suggest the next step.`
+  return `run ${run.id} (${run.binary}${run.casePath ? `, ${run.casePath}` : ''}) ended with status ${run.status} after ${run.iter} iterations.${written ? ` Results: ${written}.` : ''}${run.error ? ` Error: ${run.error}` : ''} Summarise the outcome briefly and suggest the next step.`
+}
+
+/** What the model receives: the same notice as a marked user turn, so it knows the words are the system's, not the operator's. */
+export function runNoticeUserText(run: RunInfo, locale: 'ko' | 'en'): string {
+  return `${RUN_NOTICE_PREFIX} ${runNoticeText(run, locale)}`
 }

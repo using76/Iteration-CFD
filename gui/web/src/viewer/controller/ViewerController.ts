@@ -259,7 +259,7 @@ export class ViewerController {
   private async load(cmd: Extract<ViewerCommand, { type: 'load' }>): Promise<void> {
     this.setLoading(true, 'loading')
     try {
-      const ds = await this.loader.open(cmd.path, cmd.timeIndex, (m) => this.setLoading(true, m))
+      const ds = await this.loader.open(cmd.path, cmd.timeIndex ?? null, (m) => this.setLoading(true, m))
       const previous = this.dataset
       if (previous && previous.manifest.id !== ds.manifest.id) {
         await this.compute().evict(`${previous.manifest.id}/`)
@@ -325,7 +325,7 @@ export class ViewerController {
       sel.rangeMode = cmd.range
       sel.lockedRange = null
     }
-    if (cmd.log !== null) sel.log = cmd.log
+    if (cmd.log != null) sel.log = cmd.log
     this.field = sel
     if (cmd.colormap) this.setColormap(cmd.colormap)
     void ds
@@ -399,8 +399,8 @@ export class ViewerController {
   private async setRepresentation(cmd: Extract<ViewerCommand, { type: 'setRepresentation' }>): Promise<void> {
     const ds = this.requireDataset()
     this.display.representation = cmd.mode
-    if (cmd.opacity !== null) this.display.opacity = Math.min(1, Math.max(0, cmd.opacity))
-    if (cmd.patches !== null) {
+    if (cmd.opacity != null) this.display.opacity = Math.min(1, Math.max(0, cmd.opacity))
+    if (cmd.patches != null) {
       if (Array.isArray(cmd.patches)) {
         const known = new Set(ds.manifest.surface.patches.map((p) => p.name))
         const bad = cmd.patches.filter((p) => !known.has(p))
@@ -408,7 +408,7 @@ export class ViewerController {
       }
       this.display.patches = cmd.patches
     }
-    if (cmd.shading !== null) this.display.shading = cmd.shading
+    if (cmd.shading != null) this.display.shading = cmd.shading
     this.view?.setDisplay(this.display, ds.manifest)
   }
 
@@ -429,13 +429,13 @@ export class ViewerController {
   private async addSlice(cmd: Extract<ViewerCommand, { type: 'addSlice' }>): Promise<void> {
     this.requireGrid()
     const position = this.resolvePosition(cmd.axis, cmd.position)
-    await this.upsertLayer({ id: this.layerId(cmd.id, 'slice'), type: 'slice', axis: cmd.axis, position })
+    await this.upsertLayer({ id: this.layerId(cmd.id ?? null, 'slice'), type: 'slice', axis: cmd.axis, position })
   }
 
   private async addPlane(cmd: Extract<ViewerCommand, { type: 'addPlane' }>): Promise<void> {
     this.requireGrid()
     if (Math.hypot(...cmd.normal) === 0) throw new ViewerError('INVALID', 'plane normal must be non-zero')
-    await this.upsertLayer({ id: this.layerId(cmd.id, 'plane'), type: 'plane', origin: cmd.origin, normal: cmd.normal })
+    await this.upsertLayer({ id: this.layerId(cmd.id ?? null, 'plane'), type: 'plane', origin: cmd.origin, normal: cmd.normal })
   }
 
   private async addIso(cmd: Extract<ViewerCommand, { type: 'addIsoSurface' }>): Promise<void> {
@@ -447,7 +447,7 @@ export class ViewerController {
     // the grid's own index and are fine.
     if (ds.manifest.grid?.index) throw new ViewerError('NO_STRUCTURED_GRID', 'ISO_CUTCELL: iso-surfaces are not available on a cut-cell mesh yet; slices, streamlines and glyphs are')
     const info = this.requireField(cmd.field)
-    await this.upsertLayer({ id: this.layerId(cmd.id, 'iso'), type: 'iso', field: info.name, values: cmd.values })
+    await this.upsertLayer({ id: this.layerId(cmd.id ?? null, 'iso'), type: 'iso', field: info.name, values: cmd.values })
   }
 
   private async addStreamlines(cmd: Extract<ViewerCommand, { type: 'addStreamlines' }>): Promise<void> {
@@ -455,12 +455,12 @@ export class ViewerController {
     const info = this.requireVector(cmd.field ?? 'U')
     const seed = 'line' in cmd.seed ? { line: cmd.seed.line, count: cmd.seed.count } : { plane: cmd.seed.plane, position: this.resolvePosition(cmd.seed.plane, cmd.seed.position), grid: cmd.seed.grid }
     await this.upsertLayer({
-      id: this.layerId(cmd.id, 'streamlines'),
+      id: this.layerId(cmd.id ?? null, 'streamlines'),
       type: 'streamlines',
       field: info.name,
       seed,
       style: cmd.style ?? 'line',
-      maxLength: cmd.maxLength,
+      maxLength: cmd.maxLength ?? null,
       direction: cmd.direction ?? 'both',
     })
   }
@@ -468,11 +468,11 @@ export class ViewerController {
   private async addGlyphs(cmd: Extract<ViewerCommand, { type: 'addGlyphs' }>): Promise<void> {
     this.requireGrid()
     const info = this.requireVector(cmd.field ?? 'U')
-    if (cmd.onSlice !== null) {
+    if (cmd.onSlice != null) {
       const target = this.layers.get(cmd.onSlice)
       if (!target || target.spec.type !== 'slice') throw new ViewerError('NO_SUCH_LAYER', `no slice layer "${cmd.onSlice}". Layers: ${[...this.layers.keys()].join(', ') || 'none'}`)
     }
-    await this.upsertLayer({ id: this.layerId(cmd.id, 'glyphs'), type: 'glyphs', field: info.name, stride: Math.max(1, cmd.stride ?? 2), scale: cmd.scale ?? 1, onSlice: cmd.onSlice })
+    await this.upsertLayer({ id: this.layerId(cmd.id ?? null, 'glyphs'), type: 'glyphs', field: info.name, stride: Math.max(1, cmd.stride ?? 2), scale: cmd.scale ?? 1, onSlice: cmd.onSlice ?? null })
   }
 
   private layerId(requested: string | null, type: string): string {
@@ -593,7 +593,7 @@ export class ViewerController {
   // ---- camera / screenshot ------------------------------------------------
 
   private setCamera(cmd: Extract<ViewerCommand, { type: 'setCamera' }>): void {
-    this.applyCamera({ preset: cmd.preset, position: cmd.position, target: cmd.target, projection: cmd.projection })
+    this.applyCamera({ preset: cmd.preset ?? null, position: cmd.position ?? null, target: cmd.target ?? null, projection: cmd.projection ?? null })
   }
 
   private applyCamera(opts: Parameters<SceneView['setCamera']>[0]): void {

@@ -222,7 +222,19 @@ async function drive(opts: Options): Promise<number> {
   // A plausible projection of a studio screen; gui_control commands mutate it
   // and run frames keep its sim section moving, so gui_state reads something
   // true about the "screen" this script is hosting.
-  const uiState: UiState = { activeTab: 'ai', activeStep: null, rightTab: null, tool: 'select', frame: null, projection: 'Perspective', showAxes: true, showColorBars: true, selection: null, runId: null, sim: null }
+  const uiState: UiState = {
+    activeTab: 'ai', activeStep: null, rightTab: null, tool: 'select', frame: null, projection: 'Perspective',
+    showAxes: true, showColorBars: true, selection: null, runId: null, sim: null,
+    case: null, tabs: [], run: null, viewer: null, problems: 0, connection: 'connected', locale: 'en',
+  }
+  let standInTab = 0
+  let standInLayer = 0
+
+  /** The dataset section of the stand-in screen, made the first time a result is opened. */
+  function standInViewer(): NonNullable<UiState['viewer']> {
+    uiState.viewer ??= { datasetId: null, field: null, time: null, colormap: null, range: null, representation: null, layers: [] }
+    return uiState.viewer
+  }
 
   function applyUiCommand(cmd: UiCommand): void {
     switch (cmd.type) {
@@ -235,6 +247,53 @@ async function drive(opts: Options): Promise<number> {
         if (cmd.what === 'axes') uiState.showAxes = cmd.on
         else uiState.showColorBars = cmd.on
         break
+      case 'show_field': standInViewer().field = cmd.field; break
+      // The workspace commands: the stand-in screen has to *change*, or gui_state
+      // reads back the same empty screen after every gui_control and the model
+      // cannot tell a command that worked from one that did nothing.
+      case 'open_case':
+        uiState.case = { path: cmd.path, name: cmd.path.split(/[\\/]/).pop() ?? cmd.path, dirty: false }
+        break
+      case 'save_case':
+        if (uiState.case) uiState.case = { ...uiState.case, dirty: false }
+        break
+      case 'open_tab': {
+        standInTab += 1
+        const id = `tab_${standInTab}`
+        uiState.tabs = [...(uiState.tabs ?? []), { id, kind: cmd.kind, label: cmd.label ?? cmd.kind }]
+        uiState.activeTab = id
+        break
+      }
+      case 'close_tab':
+        uiState.tabs = (uiState.tabs ?? []).filter((t) => t.id !== cmd.id)
+        if (uiState.activeTab === cmd.id) uiState.activeTab = uiState.tabs.at(-1)?.id ?? 'ai'
+        break
+      case 'show_chart': uiState.activeTab = cmd.chart; break
+      case 'open_result': {
+        const v = standInViewer()
+        v.datasetId = cmd.path
+        v.time = typeof cmd.timeIndex === 'number' ? cmd.timeIndex : v.time
+        break
+      }
+      case 'set_post': {
+        const v = standInViewer()
+        if (cmd.colormap != null) v.colormap = cmd.colormap
+        if (Array.isArray(cmd.range)) v.range = [cmd.range[0], cmd.range[1]]
+        if (cmd.representation != null) v.representation = cmd.representation
+        break
+      }
+      case 'add_layer': {
+        standInLayer += 1
+        const v = standInViewer()
+        v.layers = [...(v.layers ?? []), { id: `${cmd.kind}_${standInLayer}`, type: cmd.kind, summary: JSON.stringify(cmd.args) }]
+        break
+      }
+      case 'remove_layer': {
+        const v = standInViewer()
+        v.layers = (v.layers ?? []).filter((l) => l.id !== cmd.id)
+        break
+      }
+      case 'set_locale': uiState.locale = cmd.locale; break
       default: break
     }
   }
@@ -248,6 +307,7 @@ async function drive(opts: Options): Promise<number> {
     if (!opts.ui) return
     uiState.runId = r.id
     uiState.sim = { status: r.status, iteration: r.iter, maxIterations: r.targetIter }
+    uiState.run = { id: r.id, status: r.status, iteration: r.iter, target: r.targetIter }
     pushUiState()
   }
 

@@ -153,7 +153,7 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       return ko ? '잔차 차트 열기' : 'Opened residual chart'
     case 'gui_control': {
       const t = String(i.type ?? '')
-      const arg = String(i.field ?? i.tab ?? i.step ?? i.panel ?? i.tool ?? i.projection ?? i.quantity ?? i.action ?? '')
+      const arg = String(i.field ?? i.tab ?? i.step ?? i.panel ?? i.tool ?? i.projection ?? i.quantity ?? i.action ?? i.path ?? i.kind ?? i.id ?? i.chart ?? i.locale ?? i.preset ?? '')
       const overlay = i.what !== undefined ? `${String(i.what)} ${i.on ? 'on' : 'off'}` : ''
       const map: Record<string, [string, string]> = {
         select_tab: [`탭 ${arg} 열기`, `Opened tab ${arg}`],
@@ -167,6 +167,23 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
         set_centerline: [`중심선 수량 ${arg} 설정`, `Set centerline quantity ${arg}`],
         run: [arg === 'stop' ? '실행 중단 요청' : '실행 시작 요청', arg === 'stop' ? 'Asked the UI to stop the run' : 'Asked the UI to start the run'],
         notify: [`화면 알림: ${String(i.text ?? '').slice(0, 60)}`, `Notified the operator: ${String(i.text ?? '').slice(0, 60)}`],
+        open_case: [`케이스 ${arg} 열기`, `Opened case ${arg}`],
+        save_case: ['케이스 저장 요청', 'Asked the UI to save the case'],
+        set_run_setting: [`실행 설정 ${String(i.flag ?? '')} 변경`, `Changed run setting ${String(i.flag ?? '')}`],
+        start_run: ['실행 시작 요청', 'Asked the UI to start the run'],
+        stop_run: ['실행 중단 요청', 'Asked the UI to stop the run'],
+        open_mesh_dialog: ['메쉬 대화상자 열기', 'Opened the mesh dialog'],
+        start_mesh: ['메쉬 생성 시작 요청', 'Asked the UI to start the mesh'],
+        show_chart: [`${arg === '' ? '차트' : arg} 차트 열기`, `Opened the ${arg === '' ? 'chart' : arg} chart`],
+        open_result: [`결과 ${arg} 열기`, `Opened result ${arg}`],
+        set_post: ['표시 설정 변경', 'Changed the post-processing settings'],
+        add_layer: [`${arg} 레이어 추가`, `Added a ${arg} layer`],
+        remove_layer: [`레이어 ${arg} 제거`, `Removed layer ${arg}`],
+        set_camera: [`카메라 ${arg} 전환`, `Set camera ${arg}`],
+        probe: ['화면 위치 값 조회', 'Probed the value under a screen point'],
+        open_tab: [`탭 ${arg} 열기`, `Opened tab ${arg}`],
+        close_tab: [`탭 ${arg} 닫기`, `Closed tab ${arg}`],
+        set_locale: [`UI 언어를 ${arg}(으)로 전환`, `Switched the UI language to ${arg}`],
       }
       const pair = map[t] ?? [`화면 명령 ${t}`, `UI command ${t}`]
       return ko ? `GUI: ${pair[0]}` : `GUI: ${pair[1]}`

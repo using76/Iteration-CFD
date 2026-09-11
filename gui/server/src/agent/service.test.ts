@@ -92,7 +92,9 @@ describe('agent service', () => {
     expect(client.of('error').at(-1)?.message).toMatch(/already active/)
     await agent.handleClientMessage(client, { t: 'turn.cancel', sessionId: id })
     await until(() => hub.of('turn.done').length === 1)
-    expect(hub.of('session.state').length).toBeGreaterThan(0)
+    // the cancelled turn's session.state is sent from the turn promise's own
+    // continuation, one microtask *after* turn.done: wait for it, do not race it
+    await until(() => hub.of('session.state').length > 0)
     const state = agent.getSessionState(id)!
     expect(state.turnActive).toBe(false)
     const last = state.messages[state.messages.length - 1]
@@ -148,8 +150,11 @@ describe('agent service', () => {
     agent.notifyRunEnded(runId)
     await until(() => hub.of('turn.done').length === 1)
     const state = agent.getSessionState(id)!
-    const notice = state.messages.find((m) => m.role === 'user' && m.synthetic)
-    expect(notice?.blocks[0]).toMatchObject({ kind: 'text', text: expect.stringContaining('[run notice] run r_') })
+    // The notice arrives as a system line on an assistant message - never as
+    // words in the operator's mouth.
+    const notice = state.messages.find((m) => m.role === 'assistant' && m.synthetic)
+    expect(notice?.blocks[0]).toMatchObject({ kind: 'notice', level: 'info', text: expect.stringContaining('run r_') })
+    expect(state.messages.some((m) => m.role === 'user' && m.synthetic)).toBe(false)
     expect(state.messages.at(-1)?.role).toBe('assistant')
     runs.finishAfterMs = 5
   })

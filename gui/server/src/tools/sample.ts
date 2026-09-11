@@ -4,6 +4,7 @@
 // nearest-cell lookups on a bucket grid.
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { Vec3Schema } from '@cfd/shared'
 import { z } from 'zod'
 import { scalarAt } from '../datasets/stats.js'
 import { buildCartesianGrid, cartesianCellCenters } from '../formats/cartesian.js'
@@ -292,16 +293,16 @@ function sampleAlong(mesh: MeshBundle, data: ArrayLike<number>, components: 1 | 
 // Tool
 // ---------------------------------------------------------------------------
 
-const tuple3 = (what: string) => z.tuple([z.number(), z.number(), z.number()]).describe(what)
-
 const SampleSchema = z.object({
   resultDir: z.string().describe('Result root (case or output directory)'),
   time: z.string().nullable().describe('Time directory label, e.g. "1" or "0.5"; null = latest'),
   field: z.string().describe('Field name, e.g. U, p, k, epsilon, T'),
   component: z.enum(['magnitude', 'x', 'y', 'z']).nullable().describe('Vector component; null = magnitude'),
-  p0: tuple3('Line start (x, y, z) in metres'),
-  p1: tuple3('Line end (x, y, z) in metres'),
-  n: z.number().int().min(2).max(LINE_SAMPLE_MAX_POINTS).nullable().describe(`Samples along the line (default ${LINE_SAMPLE_POINTS})`),
+  // Vec3Schema and the coerced n accept the numeric strings a weaker model
+  // sends, and still parse to real numbers.
+  p0: Vec3Schema.describe('Line start (x, y, z) in metres'),
+  p1: Vec3Schema.describe('Line end (x, y, z) in metres'),
+  n: z.coerce.number().int().min(2).max(LINE_SAMPLE_MAX_POINTS).nullable().describe(`Samples along the line (default ${LINE_SAMPLE_POINTS})`),
 })
 
 export const lineSampleTool: ToolDef<typeof SampleSchema> = {

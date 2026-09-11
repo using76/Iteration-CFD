@@ -3,7 +3,7 @@
 // driven by the client frames the hub hands over.
 import fsp from 'node:fs/promises'
 import type { BetaMessageParam, BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import type { ClientMsg, ClientMsgOf, ServerMsg, SessionState, SessionSummary, UserContext } from '@cfd/shared'
+import type { ClientMsg, ClientMsgOf, ServerMsg, SessionState, SessionSummary, UiMessage, UserContext } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
@@ -17,7 +17,7 @@ import type { LlmClient } from './llm.js'
 import { runTurn, type TurnOutcome } from './loop.js'
 import { createMockLlm } from './mockLlm.js'
 import { loadPolicyOverrides, type PolicyOverrides } from './policy.js'
-import { runNoticeText } from './prompt.js'
+import { runNoticeText, runNoticeUserText } from './prompt.js'
 import { buildQuickMessage } from './quick.js'
 import { createZaiClient } from './zai.js'
 import { appendUserTurn, createSessionStore, newId, stateOf, summaryOf, type SessionRecord, type SessionStore } from './session.js'
@@ -316,8 +316,23 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     if (!rec || !rec.settings.notifyOnRunEnd) return
     const rt = runtime(rec.id)
     if (rt.active) return
-    const ui = appendUserTurn(rec, { role: 'user', content: runNoticeText(run, rec.settings.locale) }, { synthetic: true })
-    if (ui) hub.sendToSession(rec.id, { t: 'msg.user', sessionId: rec.id, message: ui })
+    // The model still answers a user turn - the API needs one - but the screen
+    // shows a system notice on an assistant message: the operator never sees
+    // words attributed to them that they did not write.
+    rec.messages.push({ role: 'user', content: runNoticeUserText(run, rec.settings.locale) })
+    const level = run.status === 'failed' || run.status === 'diverged' ? 'error' : run.status === 'killed' ? 'warning' : 'info'
+    const ui: UiMessage = {
+      id: newId('m'),
+      role: 'assistant',
+      blocks: [{ kind: 'notice', level, text: runNoticeText(run, rec.settings.locale) }],
+      createdAt: Date.now(),
+      stopReason: null,
+      model: null,
+      suggestions: [],
+      synthetic: true,
+    }
+    rec.ui.push(ui)
+    hub.sendToSession(rec.id, { t: 'msg.done', sessionId: rec.id, message: ui })
     void store.save(rec).then(() => startTurn(rec))
   }
 
