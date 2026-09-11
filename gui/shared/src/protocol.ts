@@ -359,10 +359,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     // "Tmax" finds the log's "T[max]") and refused with the list when it is not one.
     type: z.literal('show_metric'),
     metric: z.string().nullish().describe('Metric the run reported, e.g. "Tmax", "dt", "alphaCo"; null leaves the pick alone'),
-    slot: z
-      .union([z.coerce.number().int(), z.enum(['1', '2'])])
-      .nullish()
-      .describe('Which axis the metric goes on: 1 = left (default), 2 = right'),
+    slot: z.coerce.number().int().nullish().describe('Which axis the metric goes on: 1 = left (default), 2 = right'),
     mode: z.enum(['metrics', 'sweeps']).nullish().describe('Switch the card between the metric picker and the linear-solver sweep counts'),
   }),
   z.object({
