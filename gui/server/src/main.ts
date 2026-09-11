@@ -1,6 +1,7 @@
 // Server entry point: config -> state directories -> case schema -> dataset
 // service -> run manager -> hub -> agent service -> HTTP/WS server, with the
 // run/gpu/problems/watcher events wired into the hub.
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import { createAgentService } from './agent/service.js'
 import type { AgentService } from './agent/types.js'
@@ -204,6 +205,13 @@ async function main(): Promise<void> {
     )
     setTimeout(() => process.exit(1), 8000).unref()
   }
+  // A death must always leave one line naming the reason. The logger buffers through
+  // the event loop, which an `exit` handler has already left, so this one writes the
+  // line synchronously on fd 2 - the only kind of write that survives process.exit().
+  process.on('exit', (code) => {
+    if (code !== 0) fs.writeSync(2, `[cfd-server] exiting with code ${code}\n`)
+  })
+  process.on('beforeExit', (code) => log.info(`event loop drained (code ${code})`))
   process.on('SIGINT', () => stop('SIGINT'))
   process.on('SIGTERM', () => stop('SIGTERM'))
   // A write stream that loses its file, a socket that errors after its handler

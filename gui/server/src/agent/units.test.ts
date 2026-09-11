@@ -281,6 +281,25 @@ describe('prompt', () => {
     expect(Array.isArray(last.content) && last.content[1].type === 'text' ? last.content[1].text : '').toBe('[context]\nCTX')
     expect(folded[0].content).toBe('hi')
   })
+
+  it('lists the five NEWEST finished runs, in the order RunManager.list() hands them over', () => {
+    // list() is newest-first; taking the tail handed the model r_1..r_5 out of a store of
+    // eighty and it told the user the run history had been lost.
+    const finished = (n: number): RunInfo =>
+      ({ id: `r_${n}`, binary: 'ofgpu-k-epsilon', status: 'done', iter: 2000, targetIter: 2000, casePath: 'cases/plume.jsonc', written: [], error: null }) as unknown as RunInfo
+    const text = buildVolatileContext({
+      workspaceRoot: '/w',
+      mode: 'demo',
+      gpu: fakeRuns().gpu(),
+      runs: [88, 87, 86, 85, 84, 83, 2, 1].map(finished), // newest first, as list() returns them
+      context: null,
+      customTools: [],
+      locale: 'en',
+      now: new Date('2026-09-11T00:00:00Z'),
+    })
+    for (const id of ['r_88', 'r_87', 'r_86', 'r_85', 'r_84']) expect(text).toContain(`- run ${id} |`)
+    for (const id of ['r_83', 'r_2', 'r_1']) expect(text).not.toContain(`- run ${id} |`)
+  })
 })
 
 describe('quick actions', () => {

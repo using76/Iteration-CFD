@@ -145,7 +145,7 @@ export function extractFacts(messages: BetaMessageParam[]): Facts {
 // The script
 // ---------------------------------------------------------------------------
 
-type Scenario = 'refuse' | 'long' | 'error' | 'shell' | 'mesh' | 'explain' | 'edit' | 'viewer' | 'run' | 'default'
+type Scenario = 'refuse' | 'long' | 'error' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'run' | 'default'
 
 export function detectScenario(text: string): Scenario {
   const t = text.toLowerCase()
@@ -157,6 +157,8 @@ export function detectScenario(text: string): Scenario {
   if (/\berror\b|오류|\bexplain\b|설명/.test(t)) return 'explain'
   if (/\bedit\b|수정|바꿔|\bchange\b/.test(t)) return 'edit'
   if (/\b3d\b|viewer|뷰어|시각화|render/.test(t)) return 'viewer'
+  // the workbench screen itself, not the 3-D scene: a tab, a panel, a step
+  if (/\bgui\b|\btab\b|\bswitch to\b|show (?:me )?(?:the )?(?:velocity|pressure|temperature)\b|탭|화면/.test(t)) return 'gui'
   if (/\brun\b|solver|실행|솔버/.test(t)) return 'run'
   return 'default'
 }
@@ -290,6 +292,30 @@ function scenarioRun(f: Facts): MockPlan {
   return done([text(wait ? runSummaryText(ko, wait.data) : ko ? '실행 결과를 확인하지 못했습니다.' : 'The run result could not be read.')])
 }
 
+/**
+ * The screen-driving scenario: one `gui_control` call, then a word about what moved.
+ * Without it demo mode could not show the ui.command bridge at all - PLAN §4.1's
+ * "gui_control from the assistant switches the GUI's tab" had no deterministic proof,
+ * and the e2e test for it could only skip itself.
+ */
+function scenarioGui(f: Facts): MockPlan {
+  const ko = f.korean
+  const t = f.userText.toLowerCase()
+  const field = /pressure|압력/.test(t) ? 'Pressure' : /temperature|온도/.test(t) ? 'Temperature' : 'Velocity'
+  const last = f.lastResult
+  if (!last) {
+    return useTools([
+      text(ko ? `${field} 탭으로 전환합니다.` : `Switching the workbench to the ${field} tab.`),
+      tool('gui_control', { type: 'show_field', field }),
+    ])
+  }
+  if (last.name === 'gui_control' && !last.ok) {
+    const code = String((last.data.error as { code?: string } | undefined)?.code ?? '')
+    return done([text(ko ? `화면 전환에 실패했습니다: ${code}` : `The screen could not be switched: ${code}`)])
+  }
+  return done([text(ko ? `${field} 탭을 열었습니다. 다른 화면이 필요하면 말씀해 주세요.` : `The ${field} tab is open now. Say the word if you want another view.`)])
+}
+
 function scenarioViewer(f: Facts): MockPlan {
   const ko = f.korean
   const last = f.lastResult
@@ -403,6 +429,8 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
       return scenarioExplain(f)
     case 'edit':
       return scenarioEdit(f)
+    case 'gui':
+      return scenarioGui(f)
     case 'viewer':
       return scenarioViewer(f)
     case 'run':

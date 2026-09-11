@@ -40,7 +40,10 @@ function runLine(r: RunInfo): string {
 export function buildVolatileContext(f: VolatileFacts): string {
   const gpu = f.gpu.name ? `${f.gpu.state} (${f.gpu.name}${f.gpu.memUsedMB !== null && f.gpu.memTotalMB !== null ? `, ${f.gpu.memUsedMB}/${f.gpu.memTotalMB} MB` : ''})` : f.gpu.state
   const active = f.runs.filter((r) => r.status === 'running' || r.status === 'queued')
-  const recent = f.runs.filter((r) => r.status !== 'running' && r.status !== 'queued').slice(-5)
+  // RunManager.list() is newest-first, so the five most recent finished runs are the
+  // *head* of the filtered list. Taking the tail handed the model the five oldest runs
+  // in the store and it read that as "the run history was lost".
+  const recent = f.runs.filter((r) => r.status !== 'running' && r.status !== 'queued').slice(0, 5)
   const lines = [
     `Workspace root: ${f.workspaceRoot}`,
     `Mode: ${f.mode}${f.mode === 'demo' ? ' (mock solver and mock results; no GPU)' : ''}`,

@@ -84,6 +84,17 @@ function resolveZaiKey(env: NodeJS.ProcessEnv): { key: string | null; keyFile: s
   }
 }
 
+/**
+ * A token budget out of the environment. A typo (`CFD_ZAI_MAX_TOKENS=64k`) used to reach
+ * the request body as NaN, serialise as null and come back from z.ai as an opaque 400;
+ * the default is a far better answer than a turn that cannot be made.
+ */
+function positiveNumber(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const guiDir = env.CFD_GUI_DIR ? path.resolve(env.CFD_GUI_DIR) : guiDirFromHere()
   const workspaceRoot = path.resolve(env.CFD_WORKSPACE ?? path.resolve(guiDir, '..'))
@@ -91,8 +102,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const zai = {
     baseUrl: env.CFD_LLM_BASE_URL?.trim() || DEFAULT_ZAI_BASE_URL,
     ...resolveZaiKey(env),
-    thinkingTokens: Number(env.CFD_ZAI_THINKING_TOKENS ?? 4096),
-    maxTokens: Number(env.CFD_ZAI_MAX_TOKENS ?? 64000),
+    thinkingTokens: positiveNumber(env.CFD_ZAI_THINKING_TOKENS, 4096),
+    maxTokens: positiveNumber(env.CFD_ZAI_MAX_TOKENS, 64000),
   }
   const anthropicKey = Boolean(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN)
   const hasKey = anthropicKey || zai.key !== null
@@ -100,7 +111,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   // The key that resolved decides the client. Picking 'anthropic' just because *some* key exists
   // would make a machine that carries only ~/.claude/zai-key refuse to boot (main.ts would find no
   // ANTHROPIC_API_KEY and exit), including in demo mode, which used to fall back to the mock.
-  const llm: 'anthropic' | 'zai' | 'mock' = llmEnv ?? (anthropicKey ? 'anthropic' : zai.key ? 'zai' : demo ? 'mock' : 'anthropic')
+  // Demo mode is documented as needing neither a GPU nor a key (gui/README.md, PLAN.md
+  // §0): it must not spend whatever key happens to sit on this machine. CFD_LLM still
+  // overrides, which is how the GLM suite asks demo mode for a real model.
+  const llm: 'anthropic' | 'zai' | 'mock' = llmEnv ?? (demo ? 'mock' : anthropicKey ? 'anthropic' : zai.key ? 'zai' : 'anthropic')
   return {
     version: readVersion(guiDir),
     host: env.CFD_HOST ?? '127.0.0.1',
@@ -113,7 +127,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     configDir: path.join(guiDir, 'config'),
     demo,
     llm,
-    model: env.CFD_MODEL ?? (llm === 'zai' ? 'glm-5.3-flash' : 'claude-opus-5'),
+    model: env.CFD_MODEL ?? (llm === 'zai' ? 'glm-5.3-flash' : llm === 'mock' ? 'mock-assistant' : 'claude-opus-5'),
     hasKey,
     allowNoApiKey: env.CFD_ALLOW_NO_API_KEY === '1' || llm === 'mock',
     zai,

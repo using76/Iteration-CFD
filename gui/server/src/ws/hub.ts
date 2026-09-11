@@ -204,7 +204,10 @@ export function createHub(deps: HubDeps): HubHandle {
         noteUi(c, msg.state)
         return
       case 'ui.result':
-        resolveUi(msg.requestId, { ok: msg.ok, state: c.uiState ?? null, error: msg.ok ? null : { code: 'UI_ERROR', message: msg.error ?? 'the UI rejected the command' } })
+        // the frame's own state is the post-command screen; c.uiState is only the last
+        // throttled report, which for a command inside the 250 ms window is the old one
+        if (msg.state) noteUi(c, msg.state)
+        resolveUi(msg.requestId, { ok: msg.ok, state: msg.state ?? c.uiState ?? null, error: msg.ok ? null : { code: 'UI_ERROR', message: msg.error ?? 'the UI rejected the command' } })
         return
       default:
         break

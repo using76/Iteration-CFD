@@ -142,6 +142,9 @@ describe('loadConfig z.ai resolution', () => {
     ZAI_API_KEY: undefined,
     CFD_ZAI_KEY_FILE: undefined,
     CFD_LLM_BASE_URL: undefined,
+    CFD_ZAI_THINKING_TOKENS: undefined,
+    CFD_ZAI_MAX_TOKENS: undefined,
+    CFD_MODEL: undefined,
     ...over,
   })
 
@@ -189,11 +192,32 @@ describe('loadConfig z.ai resolution', () => {
     // Only a z.ai key: 'zai', never 'anthropic' - otherwise main.ts refuses to boot for want of an
     // ANTHROPIC_API_KEY on a machine that has a perfectly good key.
     expect(loadConfig(env({ CFD_ZAI_KEY_FILE: absent, ZAI_API_KEY: 'zk' })).llm).toBe('zai')
-    expect(loadConfig(env({ CFD_DEMO: '1', CFD_ZAI_KEY_FILE: absent, ZAI_API_KEY: 'zk' })).llm).toBe('zai')
     // An Anthropic key still wins the default, and the model default follows the client.
     const both = loadConfig(env({ CFD_ZAI_KEY_FILE: absent, ZAI_API_KEY: 'zk', ANTHROPIC_API_KEY: 'sk-a' }))
     expect(both.llm).toBe('anthropic')
     expect(both.model).toBe('claude-opus-5')
     expect(loadConfig(env({ CFD_DEMO: '1', CFD_ZAI_KEY_FILE: absent })).llm).toBe('mock')
+  })
+
+  it('keeps demo mode on the scripted mock whatever key is on the machine, unless CFD_LLM says otherwise', () => {
+    const absent = path.join(os.tmpdir(), `zai-key-absent-${process.pid}`)
+    // README line 29 and PLAN §0 both advertise `CFD_DEMO=1` as needing no key; picking
+    // the client from whatever key happened to be on disk spent it behind that promise.
+    const demoZai = loadConfig(env({ CFD_DEMO: '1', CFD_ZAI_KEY_FILE: absent, ZAI_API_KEY: 'zk' }))
+    expect(demoZai.llm).toBe('mock')
+    expect(demoZai.model).toBe('mock-assistant')
+    expect(loadConfig(env({ CFD_DEMO: '1', CFD_ZAI_KEY_FILE: absent, ANTHROPIC_API_KEY: 'sk-a' })).llm).toBe('mock')
+    // and the GLM suite's own command still reaches GLM
+    expect(loadConfig(env({ CFD_DEMO: '1', CFD_LLM: 'zai', ZAI_API_KEY: 'zk' })).llm).toBe('zai')
+  })
+
+  it('falls back to the default token budgets when the env carries junk', () => {
+    const absent = path.join(os.tmpdir(), `zai-key-absent-${process.pid}`)
+    const bad = loadConfig(env({ CFD_ZAI_KEY_FILE: absent, ZAI_API_KEY: 'zk', CFD_ZAI_THINKING_TOKENS: '4k', CFD_ZAI_MAX_TOKENS: '' }))
+    expect(bad.zai?.thinkingTokens).toBe(4096)
+    expect(bad.zai?.maxTokens).toBe(64000)
+    const good = loadConfig(env({ CFD_ZAI_KEY_FILE: absent, ZAI_API_KEY: 'zk', CFD_ZAI_THINKING_TOKENS: '2048', CFD_ZAI_MAX_TOKENS: '32000' }))
+    expect(good.zai?.thinkingTokens).toBe(2048)
+    expect(good.zai?.maxTokens).toBe(32000)
   })
 })

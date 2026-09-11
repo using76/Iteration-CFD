@@ -350,7 +350,10 @@ export const ClientMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('viewer.result'), requestId: z.string(), result: ViewerResultSchema }),
   z.object({ t: z.literal('viewer.state'), state: ViewerStateSchema }),
   z.object({ t: z.literal('ui.state'), state: UiStateSchema }),
-  z.object({ t: z.literal('ui.result'), requestId: z.string(), ok: z.boolean(), error: z.string().nullable() }),
+  // `state` is the screen *after* the command ran. Without it the hub could only answer
+  // with the last ui.state the client pushed, and that report is rate-limited to 4/s -
+  // so a command inside the window handed the model the screen as it was before.
+  z.object({ t: z.literal('ui.result'), requestId: z.string(), ok: z.boolean(), error: z.string().nullable(), state: UiStateSchema.nullish() }),
   z.object({ t: z.literal('run.subscribe'), runId: z.string(), fromSeq: z.number() }),
   z.object({ t: z.literal('run.unsubscribe'), runId: z.string() }),
   z.object({ t: z.literal('run.stop'), runId: z.string() }),
@@ -457,6 +460,21 @@ export interface FsTreeNode {
   tags: Array<'case' | 'results' | 'time' | 'vtk' | 'jsonc' | 'rust' | 'docs'>
 }
 
+export const FS_TAGS = ['case', 'results', 'time', 'vtk', 'jsonc', 'rust', 'docs'] as const
+
+/** The tree node as it comes off the wire; the REST answers are validated like the frames. */
+export const FsTreeNodeSchema: z.ZodType<FsTreeNode> = z.lazy(() =>
+  z.object({
+    name: z.string(),
+    path: z.string(),
+    kind: z.enum(['dir', 'file']),
+    size: z.number().nullable(),
+    mtime: z.number().nullable(),
+    children: z.array(FsTreeNodeSchema).nullable(),
+    tags: z.array(z.enum(FS_TAGS)),
+  }),
+)
+
 export interface FsFileResponse {
   path: string
   content: string
@@ -465,6 +483,14 @@ export interface FsFileResponse {
   mtime: number
   size: number
 }
+
+export const FsFileResponseSchema = z.object({
+  path: z.string(),
+  content: z.string(),
+  hash: z.string(),
+  mtime: z.number(),
+  size: z.number(),
+})
 
 export interface FsWriteRequest {
   path: string

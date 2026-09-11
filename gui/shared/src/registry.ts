@@ -177,6 +177,8 @@ export const BINARIES: BinarySpec[] = [
       { name: 'config', type: 'path', description: 'AutomeshConfig JSONC file (worked example: tools/automesher/examples/nh3_site.json).' },
     ],
     flags: [
+      { name: '-stopAfter', type: 'enum', values: ['octree', 'castellate', 'snap', 'features', 'layers'], description: 'The stop rule of SPEC-LIT §92.14: the stages up to and including STAGE run and the mesh that stage returned is written. "features" is a spelling of "snap".' },
+      { name: '-tag', type: 'string', description: "This run's output is its own: the case directory and the mesh name each gain _NAME, so two runs of one config do not overwrite each other. NAME is a suffix, not a path." },
       { name: '-schema', type: 'flag', description: 'Print the JSON Schema of the config to stdout and exit 0 (no config read; other arguments ignored).' },
       { name: '-check', type: 'path', description: 'Run the §92.3 quality gate on <caseDir>/constant/polyMesh with the config thresholds: measured summary + exit 0, or the refusal naming cells + exit 1.' },
       { name: '-dryRun', type: 'flag', description: 'Everything up to the surface summary, then exit 0 without attempting the meshing stages.' },
