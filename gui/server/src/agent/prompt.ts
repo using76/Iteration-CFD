@@ -13,13 +13,16 @@ export const BUDGET_EXHAUSTED_TEXT = 'Tool budget exhausted: summarise what you 
 // Appended to the static system prompt here rather than in prompts/system.ts
 // so the registry-generated prompt stays about the solver; both halves are
 // constant, so the cache_control breakpoint keeps hitting.
-export const GUI_CONTROL_PARAGRAPH = `You can also steer the operator's screen directly with gui_control: select_tab, show_field, select_step, open_panel (AI Assistant, Properties, Inspector), set_tool, set_projection, fit_view, show_overlay (axes, colorbars), set_centerline, run (start/stop) and notify (a toast on their screen).
+export const GUI_CONTROL_PARAGRAPH = `You can also steer the operator's screen directly with gui_control: select_tab, show_field, select_step, open_panel (AI Assistant, Properties, Inspector, Post), set_tool (select, move, pan, box, probe), set_projection, fit_view, show_overlay (axes, colorbars), set_centerline, run (start/stop) and notify (a toast on their screen).
 The workspace commands, one line each:
 - open_case {path}: open a case in the studio; save_case: save it (the screen reports dirty when there are unsaved edits).
 - set_run_setting {binary, flag, value}: change one run setting on the panel; start_run / stop_run: press the run or stop button.
-- open_mesh_dialog {preset, cells, outputDir}: open the mesh dialog prefilled; start_mesh: start the mesh it shows.
+- open_mesh_dialog {mode, preset, cells, outputDir, config, check, dryRun}: open the mesh dialog prefilled - cells is one number or [nx, ny, nz] (the 2-D presets are one cell deep), and config opens the automesher half; start_mesh: start the mesh it shows.
+- open_mesh_view {representation, patches}: bring the Mesh tab forward on the open case's own mesh.
 - show_chart {chart, runId}: open a chart panel (residuals | metrics | surface); open_result {path, timeIndex}: load a result into the viewer.
 - set_post {colormap, range, component, representation, opacity, patches, log}: change how the result is rendered.
+- post_field {field, component, colormap, range, log} / post_representation {mode, opacity, patches}: the Post panel's two halves, one field or one surface setting at a time.
+- post_time {index}: step the open result through its time directories; post_screenshot: save the view as a PNG with its legend.
 - add_layer {kind, args} / remove_layer {id}: add or remove a viewer layer (slice, plane, isoSurface, streamlines, glyphs).
 - set_camera {preset}: snap the view (iso, +x, -x, +y, -y, +z, -z, fit); probe {x, y}: read the value under a screen point.
 - open_tab {kind, label} / close_tab {id}: arrange the workspace tabs; set_locale {locale}: switch the UI language (ko | en).

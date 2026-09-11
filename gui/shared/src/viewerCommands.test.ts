@@ -111,8 +111,47 @@ describe('ui command coercion and the workspace commands', () => {
       { type: 'open_tab', kind: 'chart', label: 'Residuals' },
       { type: 'close_tab', id: 'tab_3' },
       { type: 'set_locale', locale: 'ko' },
+      { type: 'open_mesh_dialog', mode: 'automesher', config: 'tools/automesher/examples/nh3_site.json', dryRun: true },
+      { type: 'open_mesh_view', representation: 'surfaceEdges', patches: 'all' },
+      { type: 'post_field', field: 'U', component: 'magnitude', colormap: 'viridis', range: [0, 7], log: false },
+      { type: 'post_representation', mode: 'wireframe', opacity: 0.5, patches: ['inlet'] },
+      { type: 'post_time', index: 'last' },
+      { type: 'post_screenshot' },
     ] as const
     for (const cmd of cmds) expect(UiCommandSchema.safeParse(JSON.parse(JSON.stringify(cmd))).success, cmd.type).toBe(true)
+  })
+
+  it('takes the mesh cells as one number or as three, and the automesher form by name', () => {
+    // One number fills all three axes; the 2-D presets need nz said separately.
+    expect(parseOk(UiCommandSchema, { type: 'open_mesh_dialog', preset: 'channel', cells: '80' }).cells).toBe(80)
+    expect(parseOk(UiCommandSchema, { type: 'open_mesh_dialog', preset: 'cavity', cells: ['128', '128', '1'] }).cells).toEqual([128, 128, 1])
+    const auto = parseOk(UiCommandSchema, { type: 'open_mesh_dialog', mode: 'automesher', config: 'x.json', check: 'cases/site', dryRun: 'true' })
+    expect([auto.mode, auto.config, auto.check, auto.dryRun]).toEqual(['automesher', 'x.json', 'cases/site', true])
+    expect(UiCommandSchema.safeParse({ type: 'open_mesh_dialog', cells: [1, 2] }).success).toBe(false)
+  })
+
+  it('coerces the post commands the Post panel answers', () => {
+    const f = parseOk(UiCommandSchema, { type: 'post_field', field: 'T', range: '[300, 400]', log: 'true' })
+    expect([f.range, f.log]).toEqual([[300, 400], true])
+    expect(parseOk(UiCommandSchema, { type: 'post_representation', mode: 'surface', opacity: '0.25' }).opacity).toBe(0.25)
+    expect(parseOk(UiCommandSchema, { type: 'post_time', index: '2' }).index).toBe(2)
+    expect(UiCommandSchema.safeParse({ type: 'post_field' }).success).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'post_representation', mode: 'shaded' }).success).toBe(false)
+  })
+
+  it('carries what the probe read back in ui.state, and parses a selection without it', () => {
+    const withValue = parseOk(UiStateSchema, {
+      activeTab: null, activeStep: null, rightTab: 'Post', tool: 'probe', frame: null, projection: null, showAxes: null, showColorBars: null,
+      selection: { kind: 'cell', id: 81202, center: [0.48, 1.97, 3], value: 0.3993, field: 'U', patch: 'ceiling' },
+      runId: null, sim: null,
+    })
+    expect(withValue.selection).toMatchObject({ id: 81202, value: 0.3993, field: 'U', patch: 'ceiling' })
+    const bare = parseOk(UiStateSchema, {
+      activeTab: null, activeStep: null, rightTab: null, tool: null, frame: null, projection: null, showAxes: null, showColorBars: null,
+      selection: { kind: 'cell', id: 3, center: [0, 0, 0] },
+      runId: null, sim: null,
+    })
+    expect(bare.selection).toMatchObject({ kind: 'cell', id: 3 })
   })
 
   it('keeps every pre-existing variant working', () => {

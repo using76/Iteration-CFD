@@ -281,8 +281,8 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('select_tab'), tab: z.string().describe('Tab id or label, e.g. "velocity" or "Residuals"') }),
   z.object({ type: z.literal('show_field'), field: z.enum(['Temperature', 'Velocity', 'Pressure']) }),
   z.object({ type: z.literal('select_step'), step: z.string().describe('Project tree step id') }),
-  z.object({ type: z.literal('open_panel'), panel: z.enum(['AI Assistant', 'Properties', 'Inspector']) }),
-  z.object({ type: z.literal('set_tool'), tool: z.enum(['select', 'move', 'pan', 'box']) }),
+  z.object({ type: z.literal('open_panel'), panel: z.enum(['AI Assistant', 'Properties', 'Inspector', 'Post']) }),
+  z.object({ type: z.literal('set_tool'), tool: z.enum(['select', 'move', 'pan', 'box', 'probe']) }),
   z.object({ type: z.literal('set_projection'), projection: z.enum(['Perspective', 'Orthographic']) }),
   z.object({ type: z.literal('fit_view') }),
   z.object({ type: z.literal('show_overlay'), what: z.enum(['axes', 'colorbars']), on: z.boolean() }),
@@ -308,9 +308,19 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('stop_run') }),
   z.object({
     type: z.literal('open_mesh_dialog'),
+    mode: z.enum(['preset', 'automesher']).nullish().describe('Which half of the dialog to open; the default follows whichever of preset/config is given'),
     preset: z.string().nullish().describe('Mesh preset kind, e.g. "channel"'),
-    cells: z.coerce.number().int().nullish().describe('Cells per direction'),
+    // One number fills all three axes, which is wrong for every 2-D preset
+    // (channel, cavity, step, damBreak run one cell deep): [nx, ny, nz] says
+    // it exactly.
+    cells: z
+      .union([z.coerce.number().int(), z.tuple([z.coerce.number().int(), z.coerce.number().int(), z.coerce.number().int()])])
+      .nullish()
+      .describe('Cells: one number for every direction, or [nx, ny, nz]'),
     outputDir: z.string().nullish().describe('Workspace-relative output directory'),
+    config: z.string().nullish().describe('Automesher form: workspace-relative AutomeshConfig JSONC'),
+    check: z.string().nullish().describe('Automesher form: -check this existing case directory instead of meshing'),
+    dryRun: Boolish.nullish().describe('Automesher form: -dryRun (read the config and report the plan, mesh nothing)'),
   }),
   z.object({ type: z.literal('start_mesh') }),
   z.object({
@@ -344,13 +354,49 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('open_tab'), kind: z.string().describe('Tab kind, e.g. "viewer", "chart", "log"'), label: z.string().nullish() }),
   z.object({ type: z.literal('close_tab'), id: z.string() }),
   z.object({ type: z.literal('set_locale'), locale: z.enum(['ko', 'en']) }),
+  // The Post panel's own commands. set_post still sets colour map, range,
+  // component, representation, opacity and patches in one call; these name the
+  // panel's two halves separately, move time on an already-open result (which
+  // only open_result could do), and take the screenshot the operator's Snapshot
+  // button takes.
+  z.object({
+    type: z.literal('post_field'),
+    field: z.string().describe('Field to colour by, e.g. "U" or "T"'),
+    component: FieldComponentSchema.nullish(),
+    colormap: ColormapNameSchema.nullish(),
+    range: z.union([RangeTupleSchema, z.literal('auto'), z.literal('global')]).nullish(),
+    log: Boolish.nullish().describe('Log10 colour scale'),
+  }),
+  z.object({
+    type: z.literal('post_representation'),
+    mode: RepresentationModeSchema,
+    opacity: z.coerce.number().nullish(),
+    patches: z.union([z.array(z.string()), z.literal('all')]).nullish(),
+  }),
+  z.object({ type: z.literal('post_time'), index: TimeIndexSchema.describe('Time step index, or "last"') }),
+  z.object({ type: z.literal('post_screenshot') }),
+  z.object({
+    type: z.literal('open_mesh_view'),
+    representation: RepresentationModeSchema.nullish().describe('How the mesh is drawn; default surface + edges'),
+    patches: z.union([z.array(z.string()), z.literal('all')]).nullish(),
+  }),
 ])
 export type UiCommand = z.infer<typeof UiCommandSchema>
 export type UiCommandType = UiCommand['type']
 
 export const UiSelectionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('none') }),
-  z.object({ kind: z.literal('cell'), id: z.number(), center: z.tuple([z.number(), z.number(), z.number()]) }),
+  z.object({
+    kind: z.literal('cell'),
+    id: z.number(),
+    center: z.tuple([z.number(), z.number(), z.number()]),
+    // What the probe tool read there. Optional so a client that only picks a
+    // cell still parses - and so the model can read back the number it asked
+    // the operator's screen for instead of only the cell id.
+    value: z.number().nullish(),
+    field: z.string().nullish(),
+    patch: z.string().nullish(),
+  }),
 ])
 export type UiSelection = z.infer<typeof UiSelectionSchema>
 

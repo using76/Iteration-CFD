@@ -94,7 +94,10 @@ export const ViewerCommandSchema = z.discriminatedUnion('type', [
       .string()
       .describe('Workspace-relative path: a case.jsonc, a case/output directory, a time directory, a .vtu or a .pvd file'),
     timeIndex: TimeIndexSchema.nullish().describe('Time step to show; null/omitted = last'),
-    field: z.string().nullish().describe('Field to colour by once loaded; null/omitted = U (or the first field)'),
+    field: z
+      .string()
+      .nullish()
+      .describe('Field to colour by once loaded; null/omitted = U (or the first field); "none" draws the geometry itself with no colouring (what the Mesh tab wants)'),
   }),
   z.object({
     type: z.literal('setField'),
