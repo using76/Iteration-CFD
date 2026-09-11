@@ -9,7 +9,8 @@ import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import { compileUserRegex, UnsafeRegexError } from '../regex.js'
 import type { CaseSchema } from '../registry/schema.js'
-import { MeshSummaryError, meshSummaryForCase } from '../formats/meshSummary.js'
+import { readCaseJsonc } from '../formats/casejsonc.js'
+import { MeshSummaryError, meshSummaryForCase, parseBoundaryTextSafe } from '../formats/meshSummary.js'
 import type { RunManager, StartRunOptions } from '../runs/types.js'
 import { LINE_SAMPLE_MAX_POINTS, LINE_SAMPLE_POINTS, SampleError, lineSample, type SampleComponent } from '../tools/sample.js'
 import { fsTree, readWorkspaceFile, writeWorkspaceFile } from '../workspace/fs.js'
@@ -207,6 +208,36 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
       if (err instanceof SampleError) throw new HttpError(err.code === 'NOT_FOUND' ? 404 : 400, err.message)
       throw err
     }
+  })
+
+  // The boundary editor's patch list. The mesh is the truth when it exists -
+  // a polyMesh boundary file names every patch the solver will actually see -
+  // and the case file's own `patches` rules are the answer before the case is
+  // meshed. Neither there is `source: 'none'` with an empty list, not a 404:
+  // "this case has no patches yet" is an answer, not a failure.
+  router.get('/api/case/patches', async ({ query }) => {
+    const pathParam = query.get('path')
+    if (!pathParam) throw new HttpError(400, 'path is required')
+    const r = resolveInWorkspace(root, pathParam, { mustExist: true })
+    // discover() resolves a JSONC case to the `<stem>_jsonc` directory its mesh
+    // is written into, and an OpenFOAM directory to itself.
+    const results = await datasets.discover(r.rel)
+    const boundary = await parseBoundaryTextSafe(path.join(root, results.root, 'constant', 'polyMesh', 'boundary'))
+    if (boundary && boundary.length > 0) {
+      return { patches: boundary.map((p) => ({ name: p.name, type: p.type, nFaces: p.nFaces, startFace: p.startFace })), source: 'polyMesh' as const }
+    }
+    const caseJsonc = results.caseJsonc ?? (r.rel.endsWith('.jsonc') ? r.rel : null)
+    if (caseJsonc) {
+      const info = await readCaseJsonc(path.join(root, caseJsonc), caseJsonc)
+      const json = info.json
+      const declared = json !== null && typeof json === 'object' && Array.isArray((json as { patches?: unknown }).patches) ? ((json as { patches: unknown[] }).patches) : []
+      const patches = declared
+        .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
+        .map((p) => ({ name: String(p.match ?? ''), type: p.kind === undefined || p.kind === null ? '' : String(p.kind), nFaces: 0, startFace: 0 }))
+        .filter((p) => p.name !== '')
+      if (patches.length > 0) return { patches, source: 'case' as const }
+    }
+    return { patches: [], source: 'none' as const }
   })
 
   router.get('/api/mesh/summary', async ({ query }) => {

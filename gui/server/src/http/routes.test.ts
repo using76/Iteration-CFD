@@ -140,6 +140,34 @@ describe('api routes', () => {
     expect(await json('/api/results?root=cases')).toMatchObject({ root: 'cases' })
     expect((await get('/api/results?root=..')).status).toBe(403)
   })
+
+  it('answers the case patch list from the mesh, then the case file, then with none', async () => {
+    // No polyMesh: the case file's own rules, named by `match` and typed by `kind`.
+    const declared = await json('/api/case/patches?path=cases/plume.jsonc')
+    expect(declared.source).toBe('case')
+    expect(declared.patches.map((p: { name: string }) => p.name)).toEqual(['inlet', 'outlet', '.*'])
+    expect(declared.patches[0]).toEqual({ name: 'inlet', type: 'inlet', nFaces: 0, startFace: 0 })
+
+    // A polyMesh beside the case wins: the boundary file's own names, types and face ranges.
+    const meshed = path.join(ws.root, 'cases', 'meshed', 'constant', 'polyMesh')
+    fs.mkdirSync(meshed, { recursive: true })
+    fs.writeFileSync(
+      path.join(meshed, 'boundary'),
+      ['FoamFile { version 2.0; format ascii; class polyBoundaryMesh; object boundary; }', '2', '(', 'inlet { type patch; nFaces 40; startFace 100; }', 'walls { type wall; nFaces 60; startFace 140; }', ')'].join('\n'),
+    )
+    const fromMesh = await json('/api/case/patches?path=cases/meshed')
+    expect(fromMesh.source).toBe('polyMesh')
+    expect(fromMesh.patches).toEqual([
+      { name: 'inlet', type: 'patch', nFaces: 40, startFace: 100 },
+      { name: 'walls', type: 'wall', nFaces: 60, startFace: 140 },
+    ])
+
+    // Neither is an answer, not a 404.
+    fs.mkdirSync(path.join(ws.root, 'cases', 'bare'), { recursive: true })
+    expect(await json('/api/case/patches?path=cases/bare')).toEqual({ patches: [], source: 'none' })
+    expect((await get('/api/case/patches')).status).toBe(400)
+    expect((await get('/api/case/patches?path=..')).status).toBe(403)
+  })
 })
 
 describe('auth token', () => {

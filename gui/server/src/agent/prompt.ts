@@ -15,11 +15,15 @@ export const BUDGET_EXHAUSTED_TEXT = 'Tool budget exhausted: summarise what you 
 // constant, so the cache_control breakpoint keeps hitting.
 export const GUI_CONTROL_PARAGRAPH = `You can also steer the operator's screen directly with gui_control: select_tab, show_field, select_step, open_panel (AI Assistant, Properties, Inspector, Post), set_tool (select, move, pan, box, probe), set_projection, fit_view, show_overlay (axes, colorbars), set_centerline, run (start/stop) and notify (a toast on their screen).
 The workspace commands, one line each:
-- open_case {path}: open a case in the studio; save_case: save it (the screen reports dirty when there are unsaved edits).
-- set_run_setting {binary, flag, value}: change one run setting on the panel; start_run / stop_run: press the run or stop button.
+- open_case {path}: open a case in the studio; save_case {force}: save it (the screen reports dirty when there are unsaved edits, and refuses a case whose validation found errors unless force is set).
+- validate_case {path}: check the case and publish the findings to the Problems list without writing; new_case {template, name, dir}: create one from "empty" or a mesh preset and open it.
+- set_run_setting {binary, flag, value}: change one run setting on the panel; start_run / stop_run {runId}: press the run or stop button.
+- follow_run {runId}: follow a run from the Runs tab, so the log, the charts and the status bar are about that run.
 - open_mesh_dialog {mode, preset, cells, outputDir, config, check, dryRun}: open the mesh dialog prefilled - cells is one number or [nx, ny, nz] (the 2-D presets are one cell deep), and config opens the automesher half; start_mesh: start the mesh it shows.
 - open_mesh_view {representation, patches}: bring the Mesh tab forward on the open case's own mesh.
 - show_chart {chart, runId}: open a chart panel (residuals | metrics | surface); open_result {path, timeIndex}: load a result into the viewer.
+- show_metric {metric, slot, mode}: pick what the metrics card draws - a metric this run reported, on the left (slot 1) or right (slot 2) axis, or mode "sweeps" for the linear-solver sweep counts.
+- set_log_filter {text, streams, follow}: narrow the Log tab to lines containing text, to the stdout/stderr/system chips given, and follow the tail or stop following.
 - set_post {colormap, range, component, representation, opacity, patches, log}: change how the result is rendered.
 - post_field {field, component, colormap, range, log} / post_representation {mode, opacity, patches}: the Post panel's two halves, one field or one surface setting at a time.
 - post_time {index}: step the open result through its time directories; post_screenshot: save the view as a PNG with its legend.

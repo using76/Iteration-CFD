@@ -294,7 +294,23 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   // numeric leaves are coerced so the string form a weaker model sends still
   // parses.
   z.object({ type: z.literal('open_case'), path: z.string().describe('Workspace-relative case file or directory to open') }),
-  z.object({ type: z.literal('save_case') }),
+  z.object({
+    type: z.literal('save_case'),
+    // The operator's "Save anyway": the case editor refuses a write whose
+    // validation found errors, and this is the same press that overrides it.
+    // Without it the model could be told about a finding and have no way past.
+    force: Boolish.nullish().describe('Save even though the case validation found errors ("Save anyway")'),
+  }),
+  z.object({
+    type: z.literal('validate_case'),
+    path: z.string().nullish().describe('Case to validate; null = the one on screen'),
+  }),
+  z.object({
+    type: z.literal('new_case'),
+    template: z.string().describe('"empty", or a mesh preset kind (channel, cavity, step, ...) to build the case from'),
+    name: z.string().describe('Case name, without the .jsonc suffix'),
+    dir: z.string().nullish().describe('Workspace-relative directory to write it in; null = cases/'),
+  }),
   z.object({
     type: z.literal('set_run_setting'),
     binary: z.string().nullish().describe('Registry binary whose settings to edit; null = the one on screen'),
@@ -305,7 +321,16 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     value: z.union([z.string(), z.coerce.number(), Boolish]).nullish().describe('New value; a string is passed through as typed and the GUI coerces it by the flag\'s type'),
   }),
   z.object({ type: z.literal('start_run') }),
-  z.object({ type: z.literal('stop_run') }),
+  z.object({
+    type: z.literal('stop_run'),
+    // The Runs tab shows every run, not only the followed one, so the id names
+    // which row's Stop is pressed; null keeps the old meaning, the run on screen.
+    runId: z.string().nullish().describe('Run to stop; null = the run the window is following'),
+  }),
+  z.object({
+    type: z.literal('follow_run'),
+    runId: z.string().describe('Run to follow: subscribe to its log and point the Log tab, the charts and the status bar at it'),
+  }),
   z.object({
     type: z.literal('open_mesh_dialog'),
     mode: z.enum(['preset', 'automesher']).nullish().describe('Which half of the dialog to open; the default follows whichever of preset/config is given'),
@@ -327,6 +352,29 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     type: z.literal('show_chart'),
     chart: z.enum(['residuals', 'metrics', 'surface']),
     runId: z.string().nullish().describe('Run whose data the chart shows'),
+  }),
+  z.object({
+    // The metrics card draws whatever the run reported, so the metric is a free
+    // string matched against that run's own names (case- and punctuation-blind:
+    // "Tmax" finds the log's "T[max]") and refused with the list when it is not one.
+    type: z.literal('show_metric'),
+    metric: z.string().nullish().describe('Metric the run reported, e.g. "Tmax", "dt", "alphaCo"; null leaves the pick alone'),
+    slot: z
+      .union([z.coerce.number().int(), z.enum(['1', '2'])])
+      .nullish()
+      .describe('Which axis the metric goes on: 1 = left (default), 2 = right'),
+    mode: z.enum(['metrics', 'sweeps']).nullish().describe('Switch the card between the metric picker and the linear-solver sweep counts'),
+  }),
+  z.object({
+    // The Log tab's chips, filter and follow-tail. Every field is optional, so
+    // one call can narrow the text without touching the streams or the tail.
+    type: z.literal('set_log_filter'),
+    text: z.string().nullish().describe('Substring the log lines must contain; null or "" clears the filter'),
+    streams: z
+      .array(z.enum(['stdout', 'stderr', 'system']))
+      .nullish()
+      .describe('Streams to show; null leaves the chips alone'),
+    follow: Boolish.nullish().describe('Follow the tail of the log'),
   }),
   z.object({
     type: z.literal('open_result'),

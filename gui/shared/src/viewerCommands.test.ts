@@ -88,6 +88,15 @@ describe('ui command coercion and the workspace commands', () => {
     expect(parseOk(UiCommandSchema, { type: 'set_run_setting', binary: null, flag: '-iters', value: '4000' }).value).toBe('4000')
     expect(parseOk(UiCommandSchema, { type: 'set_run_setting', binary: null, flag: '-iters', value: 4000 }).value).toBe(4000)
     expect(parseOk(UiCommandSchema, { type: 'set_run_setting', binary: null, flag: '-permissive', value: 'true' }).value).toBe('true')
+    // The three controls the shell units added reach the model with the same coercions:
+    // "Save anyway" as a string boolean, a stop aimed at a row that is not the followed
+    // run, and the metrics card's axis slot sent as "2".
+    expect(parseOk(UiCommandSchema, { type: 'save_case', force: 'true' }).force).toBe(true)
+    expect(parseOk(UiCommandSchema, { type: 'stop_run', runId: 'r_7' }).runId).toBe('r_7')
+    expect(parseOk(UiCommandSchema, { type: 'show_metric', metric: 'Tmax', slot: '2' }).slot).toBe(2)
+    expect(parseOk(UiCommandSchema, { type: 'set_log_filter', follow: 'false' }).follow).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'set_log_filter', streams: ['stdout', 'telepathy'] }).success).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'show_metric', mode: 'guesswork' }).success).toBe(false)
   })
 
   it('round-trips every new workspace command through a JSON wire frame', () => {
@@ -117,6 +126,11 @@ describe('ui command coercion and the workspace commands', () => {
       { type: 'post_representation', mode: 'wireframe', opacity: 0.5, patches: ['inlet'] },
       { type: 'post_time', index: 'last' },
       { type: 'post_screenshot' },
+      { type: 'validate_case', path: 'cases/plume.jsonc' },
+      { type: 'new_case', template: 'channel', name: 'duct', dir: 'cases' },
+      { type: 'follow_run', runId: 'r_9' },
+      { type: 'show_metric', metric: 'Tmax', slot: 2, mode: 'metrics' },
+      { type: 'set_log_filter', text: 'iteration 250', streams: ['stdout', 'stderr'], follow: true },
     ] as const
     for (const cmd of cmds) expect(UiCommandSchema.safeParse(JSON.parse(JSON.stringify(cmd))).success, cmd.type).toBe(true)
   })
