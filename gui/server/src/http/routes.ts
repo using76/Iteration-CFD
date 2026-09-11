@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, MESH_PRESETS, MODELS, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, PIPELINES, MESH_PRESETS, MODELS, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
@@ -70,7 +70,7 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
 
   router.get('/api/health', () => ({ ok: true, version: config.version, mode: config.demo ? 'demo' : 'real' }))
   router.get('/api/hello', () => buildHello(config, runs))
-  router.get('/api/registry', () => ({ binaries: BINARIES, models: MODELS, pickLists: schema.pickLists, meshPresets: MESH_PRESETS }))
+  router.get('/api/registry', () => ({ binaries: BINARIES, pipelines: PIPELINES, models: MODELS, pickLists: schema.pickLists, meshPresets: MESH_PRESETS }))
   router.get('/api/schema/case-1.json', ({ res }) => {
     res.writeHead(200, { 'content-type': 'application/schema+json; charset=utf-8', 'cache-control': 'no-cache' })
     res.end(schema.text)

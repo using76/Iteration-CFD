@@ -88,6 +88,52 @@ export interface DispatchOptions {
   cwd: string
 }
 
+/**
+ * One argv entry as cmd.exe reads it. EVERY entry is quoted, not only the ones
+ * that contain whitespace: cmd's separators (& | < > ^) are live in the
+ * unquoted part of the line, so a bare `--tag x&whoami` - which a run request
+ * may carry, since a `string` flag value is only checked for being a non-empty
+ * string - ended the script's command and started a second one. Inside double
+ * quotes those characters are literal, and Windows argv parsing strips the
+ * quotes again, so the script still sees `x&whoami` as one argument.
+ */
+export function quoteForCmd(s: string): string {
+  return `"${s.replace(/"/g, '""')}"`
+}
+
+/** The one line cmd.exe /s /c receives for a pipeline: the script and every argument, each quoted. */
+export function pipelineCommandLine(script: string, argv: string[]): string {
+  return [script, ...argv].map(quoteForCmd).join(' ')
+}
+
+/**
+ * A pipeline entry is a command script (mesh-step -> tools/mesh/
+ * run_step_mesh.cmd), not a Cargo binary: run it through the shell with the
+ * workspace as cwd, exactly the shape the demo path builds (command + a
+ * leading argv). Its stdout/stderr are ordinary pipes, so the run log shows
+ * the pipeline's stage banners as they happen; killTree's taskkill /T reaches
+ * the python child through the shell. The mock has no persona for these, so
+ * they run for real in demo mode too.
+ */
+function dispatchPipeline(opts: DispatchOptions, spec: NonNullable<ReturnType<typeof getBinary>>, env: NodeJS.ProcessEnv): SpawnedRun {
+  if (process.platform !== 'win32') throw new RunRequestError(400, `${opts.binary} is a Windows command script (${spec.source}); it can only be run on Windows`)
+  const script = path.isAbsolute(spec.source) ? spec.source : path.join(opts.config.workspaceRoot, spec.source)
+  if (!fs.existsSync(script)) throw new RunRequestError(400, `${spec.source} is not on this machine (looked for ${script})`)
+  const comspec = process.env.comspec ?? 'cmd.exe'
+  const line = pipelineCommandLine(script, opts.argv)
+  const child = spawn(comspec, ['/d', '/s', '/c', `"${line}"`], {
+    cwd: opts.cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    // /s makes cmd strip exactly the outer quotes we added; verbatim keeps
+    // node from re-quoting the line around them.
+    windowsVerbatimArguments: true,
+    detached: false,
+  })
+  return { child, argv: [script, ...opts.argv], mode: 'real' }
+}
+
 export function dispatch(opts: DispatchOptions): SpawnedRun {
   const spec = getBinary(opts.binary)
   if (!spec) throw new RunRequestError(400, `unknown binary ${opts.binary}`)
@@ -101,6 +147,8 @@ export function dispatch(opts: DispatchOptions): SpawnedRun {
     CFD_WORKSPACE: opts.config.workspaceRoot,
     CFD_MOCK_SPEED: String(opts.config.mockSpeed),
   })
+
+  if (spec.pipeline) return dispatchPipeline(opts, spec, env)
 
   if (opts.config.demo) {
     const { command, leading } = mockCliEntry()

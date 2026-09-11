@@ -2,7 +2,7 @@
 // at module load, with NO timestamps or per-session facts so that the
 // cache_control breakpoint on it keeps hitting. Volatile facts go into the
 // per-request system message built in agent/prompt.ts.
-import { BINARIES, MESH_PRESETS, MODELS, PICK_LISTS, type BinarySpec } from '@cfd/shared'
+import { BINARIES, MESH_PRESETS, MODELS, PICK_LISTS, PIPELINES, type BinarySpec } from '@cfd/shared'
 
 function flagLine(b: BinarySpec): string {
   const pos = b.positionals.map((p) => (p.optional ? `[${p.name}]` : `<${p.name}>`)).join(' ')
@@ -24,6 +24,11 @@ function registryDigest(): string {
     lines.push(`- ${b.name} [${b.kind}, ${accepts}${b.gpu ? ', GPU' : ''}]: ${b.summary}`)
     lines.push(`  ${flagLine(b)}`)
     if (b.builds.length) lines.push(`  builds: ${b.builds.join(', ')}`)
+  }
+  lines.push('', '### Pipelines (scripts started like a binary through run_start: casePath null, the config as the positional)')
+  for (const b of PIPELINES) {
+    lines.push(`- ${b.name} [${b.kind}, script ${b.source}${b.longRunning ? ', long-running' : ''}]: ${b.summary}`)
+    lines.push(`  ${flagLine(b)}`)
   }
   lines.push('', '### Turbulence models -> drivers that build them')
   for (const m of MODELS) {

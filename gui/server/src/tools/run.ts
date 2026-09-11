@@ -1,6 +1,6 @@
 // Solver / analysis runs: start (validated by the run manager against the
 // registry), wait, status, log window and stop.
-import { BINARY_NAMES, driversFor, getBinary, isJsonCase, RunStatusSchema, type RunInfo } from '@cfd/shared'
+import { BINARY_NAMES, driversFor, getBinary, isJsonCase, PIPELINES, RunStatusSchema, type RunInfo } from '@cfd/shared'
 import { z } from 'zod'
 import { compileUserRegex } from '../regex.js'
 import type { RunManager } from '../runs/types.js'
@@ -47,8 +47,12 @@ const ArgSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean(), z.null()]).describe('Value; true for bare flags such as -permissive'),
 })
 
+// The script pipelines beside the ofgpu binaries, so the model can start mesh-step
+// the way the REST route and the GUI already can.
+const STARTABLE = [...BINARY_NAMES, ...PIPELINES.map((p) => p.name)] as [string, ...string[]]
+
 const StartSchema = z.object({
-  binary: z.enum(BINARY_NAMES as [string, ...string[]]).describe('ofgpu binary name'),
+  binary: z.enum(STARTABLE).describe('ofgpu binary name, or the mesh-step pipeline (the STEP -> Gmsh meshing script: casePath null, its JSON config as the one positional)'),
   casePath: z.string().nullable().describe('Workspace-relative case (.jsonc file or OpenFOAM directory); null for binaries that take no case'),
   args: z.array(ArgSchema).describe('Flags from the registry for this binary'),
   positionals: z.array(z.string()).nullable().describe('Extra positional arguments (bench nx ny nz); the case is added automatically'),

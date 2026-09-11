@@ -4,7 +4,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { BINARIES, MODELS } from '@cfd/shared'
+import { BINARIES, BINARY_NAMES, getBinary, MODELS, PIPELINES } from '@cfd/shared'
 import { REPO_ROOT } from '../runs/test-helpers.js'
 
 const RUST = path.join(REPO_ROOT, 'rust')
@@ -74,6 +74,23 @@ describe('registry <-> rust sources', () => {
     const corpus = files.map(read).join('\n')
     for (const m of MODELS) expect(corpus.includes(m.name), `model ${m.name}`).toBe(true)
     for (const m of MODELS) for (const d of m.drivers) expect(BINARIES.map((b) => b.name), `${m.name} driver ${d}`).toContain(d)
+  })
+
+  it('keeps the mesh-step pipeline out of the Cargo list and in step with step_mesh.py\'s own argparse', () => {
+    const step = PIPELINES.find((p) => p.name === 'mesh-step')!
+    expect(step.pipeline).toBe(true)
+    expect(BINARY_NAMES).not.toContain('mesh-step')
+    expect(getBinary('mesh-step')).toBe(step)
+    expect(fs.existsSync(path.join(REPO_ROOT, step.source)), step.source).toBe(true)
+    // the script the .cmd wraps declares the flags; the registry must offer exactly those
+    const py = read(path.join(REPO_ROOT, 'tools', 'mesh', 'step_mesh.py'))
+    const declared = [...py.matchAll(/ap\.add_argument\('(--[a-z-]+)'/g)].map((m) => m[1]).sort()
+    expect(step.flags.map((f) => f.name).sort()).toEqual(declared)
+    expect(py).toMatch(/ap\.add_argument\('config'/)
+    expect(step.positionals.map((p) => p.name)).toEqual(['config'])
+    // --tag takes a value, the other three are bare
+    expect(step.flags.find((f) => f.name === '--tag')?.type).toBe('string')
+    for (const f of step.flags.filter((x) => x.name !== '--tag')) expect(f.type, f.name).toBe('flag')
   })
 
   it('agrees with driver_for on which driver builds the k-epsilon family', () => {

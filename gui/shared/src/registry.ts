@@ -54,6 +54,8 @@ export interface BinarySpec {
   usageKind: UsageKind
   /** One-line summary shown in the CFD Tools panel and the system prompt. */
   summary: string
+  /** Set on a script pipeline (PIPELINES): a command script run through the shell, not a Cargo binary. */
+  pipeline?: boolean
 }
 
 const OUTPUT_LIST: FlagSpec = {
@@ -467,8 +469,41 @@ export const BINARIES: BinarySpec[] = [
 
 export const BINARY_NAMES = BINARIES.map((b) => b.name)
 
+/**
+ * Script pipelines a client can start beside the ofgpu-* binaries. They are
+ * not Cargo [[bin]] targets, so they stay out of BINARIES (the server's sync
+ * test pins that list to rust/Cargo.toml) and out of BINARY_NAMES (a .cmd is
+ * not something findBinary would ever see). dispatch() runs them through the
+ * shell; everything else - validation, queueing, the streamed log - is the
+ * ordinary run path.
+ */
+export const PIPELINES: BinarySpec[] = [
+  {
+    name: 'mesh-step',
+    source: 'tools/mesh/run_step_mesh.cmd',
+    purpose: 'Run the STEP -> Gmsh meshing pipeline (tools/mesh/step_mesh.py via run_step_mesh.cmd): one JSON config in, a Gmsh 4.1 mesh, a binary .vtk and a summary JSON out, checkpointed per stage. Stage banners stream to the run log as they happen.',
+    summary: 'STEP pipeline: one JSON config to a Gmsh mesh + summary, checkpointed, banners in the log.',
+    kind: 'mesh',
+    positionals: [{ name: 'config', type: 'path', description: 'Pipeline JSON config (see tools/mesh/examples/); read from the workspace, so pass a workspace path.' }],
+    flags: [
+      { name: '--from-checkpoint', type: 'flag', description: 'Start from the saved pool checkpoint (work/<name>_pools.brep), skipping the boolean work.' },
+      { name: '--stop-after-checkpoint', type: 'flag', description: 'Stop after the checkpoint stage; the next run can reuse it with --from-checkpoint.' },
+      { name: '--tag', type: 'string', description: 'Suffix for this run: outputs and the mesh name gain _NAME, so two runs of one config do not overwrite each other.' },
+      { name: '--dry-run', type: 'flag', description: 'Stop after the cut and print volumes, masses, surface counts and ground heights without meshing.' },
+    ],
+    accepts: [],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: [], restart: false, csv: false },
+    longRunning: true,
+    gpu: false,
+    usageKind: 'none',
+    pipeline: true,
+  },
+]
+
 export function getBinary(name: string): BinarySpec | undefined {
-  return BINARIES.find((b) => b.name === name)
+  return BINARIES.find((b) => b.name === name) ?? PIPELINES.find((b) => b.name === name)
 }
 
 // ---------------------------------------------------------------------------
