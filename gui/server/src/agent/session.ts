@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import { DEFAULT_SESSION_SETTINGS, type PendingApproval, type SessionSettings, type SessionState, type SessionSummary, type ToolCallRecord, type UiMessage } from '@cfd/shared'
+import { DEFAULT_SESSION_SETTINGS, type CustomToolSummary, type PendingApproval, type SessionSettings, type SessionState, type SessionSummary, type ToolCallRecord, type UiMessage } from '@cfd/shared'
 import { projectUser } from './ui-projection.js'
 
 export interface SessionRecord {
@@ -20,6 +20,8 @@ export interface SessionRecord {
   toolCalls: ToolCallRecord[]
   runs: string[]
   allowedTools: string[]
+  /** The case the conversation was about (the last active file or quick-action case a turn named); absent in records written before it was kept. */
+  casePath?: string | null
 }
 
 export const TITLE_MAX = 60
@@ -45,10 +47,10 @@ export function newSessionRecord(model: string, settings: Partial<SessionSetting
 }
 
 export function summaryOf(rec: SessionRecord): SessionSummary {
-  return { id: rec.id, title: rec.title, createdAt: rec.createdAt, updatedAt: rec.updatedAt, messageCount: rec.ui.length }
+  return { id: rec.id, title: rec.title, createdAt: rec.createdAt, updatedAt: rec.updatedAt, messageCount: rec.ui.length, casePath: rec.casePath ?? null }
 }
 
-export function stateOf(rec: SessionRecord, extra: { pendingApprovals: PendingApproval[]; turnActive: boolean; customTools: Array<{ name: string; description: string }> }): SessionState {
+export function stateOf(rec: SessionRecord, extra: { pendingApprovals: PendingApproval[]; turnActive: boolean; customTools: CustomToolSummary[] }): SessionState {
   return { id: rec.id, title: rec.title, createdAt: rec.createdAt, updatedAt: rec.updatedAt, settings: rec.settings, messages: rec.ui, pendingApprovals: extra.pendingApprovals, runs: rec.runs, turnActive: extra.turnActive, customTools: extra.customTools }
 }
 

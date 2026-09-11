@@ -55,7 +55,9 @@ describe('agent service', () => {
     client.sessionId = id
     await agent.handleClientMessage(client, { t: 'settings.set', sessionId: id, patch: { locale: 'en' } })
     hub.clear()
-    await agent.handleClientMessage(client, { t: 'user.message', sessionId: id, text: 'change cases/plume.jsonc endTime to 7', context: { ...ctx, attachments: ['cases/plume.jsonc', 'missing.txt'] } })
+    await agent.handleClientMessage(client, { t: 'user.message', sessionId: id, text: 'change cases/plume.jsonc endTime to 7', context: { ...ctx, activeFile: 'cases/plume.jsonc', attachments: ['cases/plume.jsonc', 'missing.txt'] } })
+    // the case the window had open is what the history list shows the conversation was about
+    expect(agent.listSessions().find((s) => s.id === id)?.casePath).toBe('cases/plume.jsonc')
     const echoed = hub.of('msg.user')[0].message
     expect(echoed.blocks[0]).toEqual({ kind: 'text', text: 'change cases/plume.jsonc endTime to 7' })
     expect(echoed.blocks.filter((b) => b.kind === 'notice').map((b) => (b.kind === 'notice' ? b.text : ''))).toEqual([expect.stringMatching(/^@cases\/plume\.jsonc \(\d+ bytes\)$/), expect.stringMatching(/^@missing\.txt: /)])
@@ -77,8 +79,9 @@ describe('agent service', () => {
     await until(() => hub.of('turn.done').length === 1)
     expect(hub.of('tool.approval_request')).toHaveLength(0)
     expect(await fsp.readFile(path.join(ws.root, 'cases/plume.jsonc'), 'utf8')).toContain('"endTime": 8')
-    const raw = JSON.parse(await fsp.readFile(path.join(ws.config.sessionsDir, `${id}.json`), 'utf8')) as { allowedTools: string[] }
+    const raw = JSON.parse(await fsp.readFile(path.join(ws.config.sessionsDir, `${id}.json`), 'utf8')) as { allowedTools: string[]; casePath: string | null }
     expect(raw.allowedTools).toEqual(['case_edit'])
+    expect(raw.casePath).toBe('cases/plume.jsonc')
   })
 
   it('rejects a second turn while one is active and cancels on turn.cancel', async () => {

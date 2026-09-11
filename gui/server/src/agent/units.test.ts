@@ -282,6 +282,18 @@ describe('prompt', () => {
     expect(folded[0].content).toBe('hi')
   })
 
+  it('tells the model which language to answer in, and that is the only thing the locale changes', () => {
+    const facts = { workspaceRoot: '/w', mode: 'demo' as const, gpu: fakeRuns().gpu(), runs: [], context: null, customTools: [], now: new Date('2026-09-11T00:00:00Z') }
+    const ko = buildVolatileContext({ ...facts, locale: 'ko' })
+    const en = buildVolatileContext({ ...facts, locale: 'en' })
+    expect(ko).toContain('Reply to the operator in Korean, keeping code, paths, flags and field names exactly as written.')
+    expect(en).toContain('Reply to the operator in English, keeping code, paths, flags and field names exactly as written.')
+    expect(en.replace('in English', 'in Korean')).toBe(ko)
+    // in the volatile half, so a mid-session switch lands on the next turn without touching the cached static prompt
+    expect(systemParam()[0].text).not.toContain('Reply to the operator')
+    expect(ko).not.toContain('UI language:')
+  })
+
   it('lists the five NEWEST finished runs, in the order RunManager.list() hands them over', () => {
     // list() is newest-first; taking the tail handed the model r_1..r_5 out of a store of
     // eighty and it told the user the run history had been lost.

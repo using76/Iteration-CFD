@@ -101,7 +101,7 @@ export function fakeRunManager(): FakeRuns {
 
 export function fakeAgent(): AgentService & { sessions: Map<string, SessionState>; handled: string[] } {
   const sessions = new Map<string, SessionState>()
-  const summary = (s: SessionState): SessionSummary => ({ id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt, messageCount: s.messages.length })
+  const summary = (s: SessionState): SessionSummary => ({ id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt, messageCount: s.messages.length, casePath: null })
   const svc = {
     sessions,
     handled: [] as string[],

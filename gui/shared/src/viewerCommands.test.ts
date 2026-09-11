@@ -131,8 +131,46 @@ describe('ui command coercion and the workspace commands', () => {
       { type: 'follow_run', runId: 'r_9' },
       { type: 'show_metric', metric: 'Tmax', slot: 2, mode: 'metrics' },
       { type: 'set_log_filter', text: 'iteration 250', streams: ['stdout', 'stderr'], follow: true },
+      { type: 'open_boundary_editor' },
+      { type: 'set_patch', patch: 'inlet', kind: 'velocity-inlet' },
+      { type: 'set_patch', patch: 'inlet', field: 'U', value: [0, 0, 3] },
+      { type: 'set_patch', patch: 'floor', field: 'T', bc: { type: 'fixedFluxTemperature', q: 500 } },
+      { type: 'set_patch', patch: 'ceiling', reset: true },
+      { type: 'open_session', sessionId: 's_mtvzd2ku0001' },
+      { type: 'set_setting', effort: 'max', autoApprove: 'reads' },
+      { type: 'run_custom_tool', name: 'field_stats', input: { path: 'cases/plume_jsonc' } },
+      { type: 'split_view', on: true },
+      { type: 'focus_view', view: 'B' },
+      { type: 'open_result_in_view', view: 'B', path: 'cases/plumeB/4000', timeIndex: 'last' },
+      { type: 'link_cameras', on: false },
+      { type: 'compare_run', runId: 'r_2' },
+      { type: 'compare_run', runId: null },
     ] as const
     for (const cmd of cmds) expect(UiCommandSchema.safeParse(JSON.parse(JSON.stringify(cmd))).success, cmd.type).toBe(true)
+  })
+
+  it('takes the boundary-editor, session and comparison commands with the same coercions, and refuses what is not in their vocabulary', () => {
+    // A vector value stays a vector, a one-element array is not read as its number, and a
+    // string number is a number; bc drops the nulls a weaker model sends for absent keys.
+    expect(parseOk(UiCommandSchema, { type: 'set_patch', patch: 'inlet', field: 'U', value: ['0', '0', '3'] }).value).toEqual([0, 0, 3])
+    expect(parseOk(UiCommandSchema, { type: 'set_patch', patch: 'inlet', field: 'p', value: [5] }).value).toEqual([5])
+    expect(parseOk(UiCommandSchema, { type: 'set_patch', patch: 'inlet', field: 'T', value: '310' }).value).toBe(310)
+    expect(parseOk(UiCommandSchema, { type: 'set_patch', patch: 'floor', field: 'T', bc: { type: 'zeroGradient', value: null, inletValue: null, q: null } }).bc).toEqual({ type: 'zeroGradient' })
+    expect(parseOk(UiCommandSchema, { type: 'set_patch', patch: 'floor', field: 'T', bc: { type: 'fixedFluxTemperature', q: '500' } }).bc).toEqual({ type: 'fixedFluxTemperature', q: 500 })
+    expect(parseOk(UiCommandSchema, { type: 'set_patch', patch: 'ceiling', reset: 'true' }).reset).toBe(true)
+    expect(UiCommandSchema.safeParse({ type: 'set_patch', patch: 'inlet', kind: 'cyclic' }).success).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'set_patch', patch: 'inlet', field: 'alpha' }).success).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'set_patch', kind: 'empty' }).success).toBe(false)
+    // Settings keep the session schema's own vocabulary; the split's booleans coerce.
+    expect(parseOk(UiCommandSchema, { type: 'set_setting', notifyOnRunEnd: 'false', locale: 'ko' })).toEqual({ type: 'set_setting', notifyOnRunEnd: false, locale: 'ko' })
+    expect(UiCommandSchema.safeParse({ type: 'set_setting', effort: 'extreme' }).success).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'set_setting', autoApprove: 'writes' }).success).toBe(false)
+    expect(parseOk(UiCommandSchema, { type: 'split_view', on: 'true' }).on).toBe(true)
+    expect(parseOk(UiCommandSchema, { type: 'link_cameras', on: 'false' }).on).toBe(false)
+    expect(parseOk(UiCommandSchema, { type: 'open_result_in_view', view: 'A', path: 'cases/plumeB/1', timeIndex: '0' }).timeIndex).toBe(0)
+    expect(UiCommandSchema.safeParse({ type: 'focus_view', view: 'C' }).success).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'compare_run' }).success).toBe(false)
+    expect(UiCommandSchema.safeParse({ type: 'run_custom_tool', name: 'x', input: ['not', 'an', 'object'] }).success).toBe(false)
   })
 
   it('takes the mesh cells as one number or as three, and the automesher form by name', () => {

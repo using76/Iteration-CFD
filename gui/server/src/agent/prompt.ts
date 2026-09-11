@@ -30,6 +30,9 @@ The workspace commands, one line each:
 - add_layer {kind, args} / remove_layer {id}: add or remove a viewer layer (slice, plane, isoSurface, streamlines, glyphs).
 - set_camera {preset}: snap the view (iso, +x, -x, +y, -y, +z, -z, fit); probe {x, y}: read the value under a screen point.
 - open_tab {kind, label} / close_tab {id}: arrange the workspace tabs; set_locale {locale}: switch the UI language (ko | en).
+- open_boundary_editor: show the open case's patches with their types; set_patch {patch, kind, field, value, bc, reset}: give a patch one of the editor's types (velocity-inlet, pressure-outlet, no-slip-wall, fixed-temperature-wall, heat-flux-wall, slip-wall, symmetry, empty), or write one field's condition (field + value for fixedValue, or bc for the full condition), or reset it to the solver's default; the edit lands in the case text and save_case writes it.
+- open_session {sessionId}: reopen an earlier conversation; set_setting {autoApprove, effort, notifyOnRunEnd, locale}: change the session's settings, only the fields given; run_custom_tool {name, input}: run a registered custom tool from the list.
+- split_view {on}: show or close a second viewport half; focus_view {view}: make A or B the half the panels act on; open_result_in_view {view, path, timeIndex}: load a result into one half; link_cameras {on}: mirror the leader's camera into the other half; compare_run {runId}: overlay a second run on the residual chart (null removes it).
 Call gui_state to read what the screen currently shows — before assuming what the user is looking at, and after changing it. When the operator asks to see something, do it with gui_control (viewer_command for the 3D scene) instead of describing how, then say in one short sentence what you changed on their screen.`
 
 export function systemParam(): BetaTextBlockParam[] {
@@ -53,6 +56,16 @@ function runLine(r: RunInfo): string {
   return `- run ${r.id} | ${r.binary} | ${r.status} | ${progress}${tail ? ` | ${tail}` : ''}`
 }
 
+/**
+ * The one sentence that makes the model answer in the operator's language. It
+ * sits in the volatile context, not the cached static prompt, so the session's
+ * locale setting is read every turn and a switch mid-conversation lands on the
+ * next reply; code, paths, flags and field names stay as written either way.
+ */
+export function languageInstruction(locale: 'ko' | 'en'): string {
+  return `Reply to the operator in ${locale === 'ko' ? 'Korean' : 'English'}, keeping code, paths, flags and field names exactly as written.`
+}
+
 export function buildVolatileContext(f: VolatileFacts): string {
   const gpu = f.gpu.name ? `${f.gpu.state} (${f.gpu.name}${f.gpu.memUsedMB !== null && f.gpu.memTotalMB !== null ? `, ${f.gpu.memUsedMB}/${f.gpu.memTotalMB} MB` : ''})` : f.gpu.state
   const active = f.runs.filter((r) => r.status === 'running' || r.status === 'queued')
@@ -73,7 +86,7 @@ export function buildVolatileContext(f: VolatileFacts): string {
   if (f.context?.activeStep) lines.push(`User's active step: ${f.context.activeStep}`)
   if (f.context?.activeTab) lines.push(`User's active tab: ${f.context.activeTab}`)
   lines.push(`Custom tools: ${f.customTools.length ? f.customTools.join(', ') : 'none'}`)
-  lines.push(`UI language: ${f.locale === 'ko' ? 'Korean' : 'English'}`)
+  lines.push(languageInstruction(f.locale))
   lines.push(`Local time: ${f.now.toISOString()}`)
   return lines.join('\n')
 }

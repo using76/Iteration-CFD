@@ -226,8 +226,18 @@ export const SessionSummarySchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   messageCount: z.number(),
+  /** The case the conversation was about: the last active file or quick-action case its turns named; older clients omit it. */
+  casePath: z.string().nullable().optional(),
 })
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
+
+export const CustomToolSummarySchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  /** JSON Schema (object) of the tool input; absent on older servers. */
+  inputSchema: z.record(z.string(), z.unknown()).optional(),
+})
+export type CustomToolSummary = z.infer<typeof CustomToolSummarySchema>
 
 export const SessionStateSchema = z.object({
   id: z.string(),
@@ -240,8 +250,8 @@ export const SessionStateSchema = z.object({
   /** Run ids started from this session. */
   runs: z.array(z.string()),
   turnActive: z.boolean(),
-  /** Custom tools registered in this workspace (name + description). */
-  customTools: z.array(z.object({ name: z.string(), description: z.string() })),
+  /** Custom tools registered in this workspace: name, description and the JSON Schema of the input, so a run form can be built per field. */
+  customTools: z.array(CustomToolSummarySchema),
 })
 export type SessionState = z.infer<typeof SessionStateSchema>
 
@@ -276,6 +286,36 @@ export type UserContext = z.infer<typeof UserContextSchema>
 // answers ui.result for that requestId and pushes ui.state whenever the
 // projection of the screen changes.
 // ---------------------------------------------------------------------------
+
+/** The boundary editor's type select, as the GUI's PATCH_PRESETS spell it. */
+export const PATCH_PRESET_IDS = ['velocity-inlet', 'pressure-outlet', 'no-slip-wall', 'fixed-temperature-wall', 'heat-flux-wall', 'slip-wall', 'symmetry', 'empty'] as const
+export const PatchPresetIdSchema = z.enum(PATCH_PRESET_IDS)
+export type PatchPresetId = z.infer<typeof PatchPresetIdSchema>
+/** The fields a patch rule may carry a condition for, in schema order. */
+export const PATCH_FIELDS = ['U', 'p', 'T', 'k', 'epsilon', 'omega', 'nut'] as const
+export const PatchFieldSchema = z.enum(PATCH_FIELDS)
+export type PatchField = z.infer<typeof PatchFieldSchema>
+// Array first: z.coerce.number() reads a one-element array as that number.
+const NumberOrVector = z.union([z.array(z.coerce.number()), z.coerce.number()])
+/** One per-field condition as the case carries it; nulls a weaker model sends for absent keys are dropped. */
+export const PatchBcSchema = z
+  .object({
+    type: z.string().describe('Condition type: fixedValue, zeroGradient, inletOutlet, fixedFluxTemperature, thermalWallFunction, calculated or a wall function'),
+    value: NumberOrVector.nullish(),
+    inletValue: NumberOrVector.nullish(),
+    q: z.coerce.number().nullish().describe('Heat flux (W/m²) for fixedFluxTemperature'),
+  })
+  .transform((b) => {
+    const out: { type: string; value?: number | number[]; inletValue?: number | number[]; q?: number } = { type: b.type }
+    if (b.value != null) out.value = b.value
+    if (b.inletValue != null) out.inletValue = b.inletValue
+    if (b.q != null) out.q = b.q
+    return out
+  })
+export type PatchBc = z.infer<typeof PatchBcSchema>
+/** The two halves of a split viewport. */
+export const ViewIdSchema = z.enum(['A', 'B'])
+export type ViewId = z.infer<typeof ViewIdSchema>
 
 export const UiCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('select_tab'), tab: z.string().describe('Tab id or label, e.g. "velocity" or "Residuals"') }),
@@ -425,6 +465,47 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     representation: RepresentationModeSchema.nullish().describe('How the mesh is drawn; default surface + edges'),
     patches: z.union([z.array(z.string()), z.literal('all')]).nullish(),
   }),
+  // The boundary editor: one patch's type, or one of its field conditions, or
+  // its rule taken away. `kind` is the editor's own type select (the eight
+  // engineering presets), not the format's five `patches[].kind` values - the
+  // editor writes those, plus the per-field conditions a preset implies.
+  z.object({
+    type: z.literal('set_patch'),
+    patch: z.string().describe('Patch name as the mesh spells it, e.g. "inlet"'),
+    kind: PatchPresetIdSchema.nullish().describe('Boundary-editor type to give the patch; null leaves the type alone'),
+    field: PatchFieldSchema.nullish().describe("With value or bc: write just this field's condition"),
+    value: NumberOrVector.nullish().describe('Shorthand for {type: "fixedValue", value} on the named field: a number, or [x, y, z] for U'),
+    bc: PatchBcSchema.nullish().describe('The full condition when fixedValue is not it, e.g. {type: "zeroGradient"} or {type: "fixedFluxTemperature", q: 500}'),
+    reset: Boolish.nullish().describe("Take the patch's own rule away so it goes back to the solver's default"),
+  }),
+  z.object({ type: z.literal('open_boundary_editor') }),
+  // The assistant's home: reopen a conversation, change a session setting,
+  // run a registered custom tool from its list.
+  z.object({ type: z.literal('open_session'), sessionId: z.string().describe('Session id, as the session list names it') }),
+  z.object({
+    type: z.literal('set_setting'),
+    autoApprove: SessionSettingsSchema.shape.autoApprove.nullish().describe('Which tool calls run without asking: none, reads, all'),
+    effort: SessionSettingsSchema.shape.effort.nullish(),
+    notifyOnRunEnd: Boolish.nullish().describe('Tell the assistant when a run ends'),
+    locale: SessionSettingsSchema.shape.locale.nullish(),
+  }),
+  z.object({
+    type: z.literal('run_custom_tool'),
+    name: z.string().describe('The registered tool name'),
+    input: z.record(z.string(), z.unknown()).nullish().describe('The tool input as a JSON object; omitted for a tool that takes none'),
+  }),
+  // Comparison: the viewport split into two halves, each with its own result,
+  // and a second run overlaid on the residual chart.
+  z.object({ type: z.literal('split_view'), on: Boolish.describe('Show the second viewport half (true) or close it (false)') }),
+  z.object({ type: z.literal('focus_view'), view: ViewIdSchema.describe('Which half takes the focused border and the panels; needs split_view first') }),
+  z.object({
+    type: z.literal('open_result_in_view'),
+    view: ViewIdSchema,
+    path: z.string().describe('Workspace-relative result path, as open_result takes it'),
+    timeIndex: TimeIndexSchema.nullish().describe('Time step to show; null = last'),
+  }),
+  z.object({ type: z.literal('link_cameras'), on: Boolish.describe("Mirror the leader's camera into the follower (true) or free them (false); needs split_view first") }),
+  z.object({ type: z.literal('compare_run'), runId: z.string().nullable().describe('Run to overlay on the residual chart; null removes the overlay') }),
 ])
 export type UiCommand = z.infer<typeof UiCommandSchema>
 export type UiCommandType = UiCommand['type']

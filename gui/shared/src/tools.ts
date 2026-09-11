@@ -194,6 +194,19 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
         open_tab: [`탭 ${arg} 열기`, `Opened tab ${arg}`],
         close_tab: [`탭 ${arg} 닫기`, `Closed tab ${arg}`],
         set_locale: [`UI 언어를 ${arg}(으)로 전환`, `Switched the UI language to ${arg}`],
+        set_patch: [
+          i.reset ? `패치 ${String(i.patch ?? '')} 규칙 초기화` : `패치 ${String(i.patch ?? '')} ${String(i.kind ?? i.field ?? '')} 설정`,
+          i.reset ? `Reset patch ${String(i.patch ?? '')}` : `Set patch ${String(i.patch ?? '')} ${String(i.kind ?? i.field ?? '')}`,
+        ],
+        open_boundary_editor: ['경계조건 편집기 열기', 'Opened the boundary editor'],
+        open_session: [`대화 ${String(i.sessionId ?? '')} 열기`, `Opened session ${String(i.sessionId ?? '')}`],
+        set_setting: [`설정 변경 (${Object.keys(i).filter((k) => k !== 'type' && i[k] != null).join(', ')})`, `Changed settings (${Object.keys(i).filter((k) => k !== 'type' && i[k] != null).join(', ')})`],
+        run_custom_tool: [`사용자 도구 ${String(i.name ?? '')} 실행`, `Ran custom tool ${String(i.name ?? '')}`],
+        split_view: [i.on ? '뷰포트 분할' : '뷰포트 분할 해제', i.on ? 'Split the viewport' : 'Closed the split view'],
+        focus_view: [`뷰 ${String(i.view ?? '')} 선택`, `Focused view ${String(i.view ?? '')}`],
+        open_result_in_view: [`뷰 ${String(i.view ?? '')}에 결과 ${arg} 열기`, `Opened result ${arg} in view ${String(i.view ?? '')}`],
+        link_cameras: [i.on ? '카메라 연동' : '카메라 연동 해제', i.on ? 'Linked the cameras' : 'Unlinked the cameras'],
+        compare_run: [i.runId ? `실행 ${String(i.runId)} 잔차 비교` : '잔차 비교 해제', i.runId ? `Compared run ${String(i.runId)} on the residual chart` : 'Removed the residual comparison'],
       }
       const pair = map[t] ?? [`화면 명령 ${t}`, `UI command ${t}`]
       return ko ? `GUI: ${pair[0]}` : `GUI: ${pair[1]}`

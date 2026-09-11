@@ -3,7 +3,7 @@
 // driven by the client frames the hub hands over.
 import fsp from 'node:fs/promises'
 import type { BetaMessageParam, BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import type { ClientMsg, ClientMsgOf, ServerMsg, SessionState, SessionSummary, UiMessage, UserContext } from '@cfd/shared'
+import type { ClientMsg, ClientMsgOf, CustomToolSummary, ServerMsg, SessionState, SessionSummary, UiMessage, UserContext } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
@@ -60,11 +60,11 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
   const llm = deps.llm ?? (config.llm === 'mock' ? createMockLlm({ model: config.model }) : config.llm === 'zai' ? createZaiClient(config) : createAnthropicClient(config))
   const overrides = deps.overrides ?? loadPolicyOverrides(config.configDir)
   const runtimes = new Map<string, SessionRuntime>()
-  let customTools: Array<{ name: string; description: string }> = []
+  let customTools: CustomToolSummary[] = []
 
   const refreshCustomTools = async () => {
     // The shipped defaults too, so the prompt names tools the user never registered.
-    customTools = mergeTools(await loadCustomTools(config.configDir)).map((t) => ({ name: t.name, description: t.description }))
+    customTools = mergeTools(await loadCustomTools(config.configDir)).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
   }
   void refreshCustomTools()
 
@@ -180,6 +180,9 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     rt.starting = true
     try {
       rt.context = msg.context
+      // The session list shows the case a conversation was about: the open case
+      // the window reports as its active file, kept with the record.
+      if (msg.context.activeFile) rec.casePath = msg.context.activeFile
       const text = msg.text.trim()
       const { blocks, notices } = await attachmentBlocks(msg.context)
       if (!text && !blocks.length) return client.send({ t: 'error', message: 'empty message', fatal: false })
@@ -205,6 +208,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     rt.starting = true
     try {
       const built = buildQuickMessage({ action: msg.action, casePath: msg.casePath, runId: msg.runId, activeFile: rt.context?.activeFile ?? null, locale: rec.settings.locale, runs })
+      if (msg.casePath) rec.casePath = msg.casePath
       const ui = appendUserTurn(rec, { role: 'user', content: built.text }, { synthetic: true, entitle: true })
       if (ui) hub.sendToSession(rec.id, { t: 'msg.user', sessionId: rec.id, message: ui })
       await store.save(rec)
