@@ -11,6 +11,7 @@ import { toWorkspaceRel } from '../workspace/paths.js'
 import { caseCreate, caseEdit, caseRead, caseValidate } from './case.js'
 import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { customToolCreate, customToolRun } from './custom.js'
+import { forgive } from './forgive.js'
 import { fileList, fileRead, fileSearch, fileWrite } from './files.js'
 import { gpuInfo } from './gpu.js'
 import { guiControl, guiState } from './gui.js'
@@ -178,6 +179,17 @@ export function toolDefinitions(): BetaTool[] {
   return definitions
 }
 
+/**
+ * A tool input as the model meant it: the literal "null" / "undefined" / ""
+ * a weaker model sends for a field it wanted to leave out are resolved
+ * against the tool's own schema (see forgive.ts) before zod judges the call.
+ * An unknown tool's input passes through untouched.
+ */
+export function forgiveToolInput(name: string, input: unknown): unknown {
+  const def = toolDefinitions().find((d) => d.name === name)
+  return def ? forgive(input, def.input_schema) : input
+}
+
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
@@ -224,7 +236,7 @@ export function toolTimeoutMs(tool: ToolDef, ctx: Pick<ToolContext, 'config'>): 
 export async function runTool(name: string, input: unknown, ctx: ToolContext): Promise<ToolResult> {
   const tool = byName.get(name)
   if (!tool) return fail('UNKNOWN_TOOL', `no tool named ${name}`)
-  const parsed = tool.schema.safeParse(input)
+  const parsed = tool.schema.safeParse(forgiveToolInput(name, input))
   if (!parsed.success) return fail('INVALID_INPUT', `invalid input for ${name}: ${issues(parsed.error)}`)
   if (ctx.signal.aborted) return fail('CANCELLED', 'cancelled by user')
   try {

@@ -10,7 +10,7 @@ import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
 import { isToolResult, previewCaseEdit, type CaseEditInput } from '../tools/case.js'
 import { fail, type ToolContext, type ToolResult } from '../tools/context.js'
-import { getTool, runTool, toolDefinitions, toolResultBlock } from '../tools/index.js'
+import { forgiveToolInput, getTool, runTool, toolDefinitions, toolResultBlock } from '../tools/index.js'
 import { meshArgs } from '../tools/mesh.js'
 import type { Hub } from '../ws/types.js'
 import { describeError, isAbortError, isRetryableError, isSystemRoleRejection } from './anthropic.js'
@@ -24,6 +24,14 @@ import { createStreamProjector, projectAssistant, type AssistantExtras, type UiS
 export const MAX_TOOL_ROUNDS = 40
 export const MAX_TOKENS = 64_000
 export const RETRY_DELAY_MS = 2000
+/**
+ * A round whose tool calls are byte-for-byte the previous round's, this many
+ * times in a row, ends the turn: the model is looping, and each pass costs a
+ * model call and a tool call and tells the operator nothing new. Seen live:
+ * suggest_followups twenty times after the work was done, each with a
+ * "everything is finished" paragraph, until the 40-round budget stopped it.
+ */
+export const MAX_IDENTICAL_ROUNDS = 3
 
 export interface TurnDeps {
   config: ServerConfig
@@ -146,6 +154,10 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
   let retried = false
   let budgetNoticeSent = false
   let lastAssistantUi: UiMessage | null = null
+  /** Rounds that called suggest_followups: the tool is for once at the end, a second call is the model going round again. */
+  let suggestRounds = 0
+  let lastRoundSignature: string | null = null
+  let identicalRounds = 0
   const firstMessageId = newId('m')
   emit({ t: 'turn.start', sessionId, turnId, messageId: firstMessageId })
 
@@ -290,6 +302,13 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       return finish('done')
     }
 
+    // The loop guards: the same calls again, or suggest_followups again.
+    const signature = JSON.stringify(toolUses.map((tu) => [tu.name, tu.input]))
+    identicalRounds = signature === lastRoundSignature ? identicalRounds + 1 : 1
+    lastRoundSignature = signature
+    const onlySuggest = toolUses.every((tu) => tu.name === 'suggest_followups')
+    if (onlySuggest) suggestRounds++
+
     const results = await executeRound(toolUses, calls)
     const blocks: BetaToolResultBlockParam[] = []
     const extras: AssistantExtras = { diffs: [], images: [] }
@@ -310,6 +329,15 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     await persist()
     emit({ t: 'msg.done', sessionId, message: ui })
     if (signal.aborted) return finish('cancelled')
+    // suggest_followups is the end of a turn, once. The first call is answered so
+    // the model can still write its closing text; a second round of nothing but
+    // chips is the model re-ending a turn it already ended, and the chips it
+    // just sent are what the screen shows.
+    if (onlySuggest && suggestRounds >= 2) return finish('done')
+    if (identicalRounds >= MAX_IDENTICAL_ROUNDS) {
+      emit({ t: 'turn.warning', sessionId, turnId, message: `The same tool call was repeated ${identicalRounds} times in a row; ending the turn.` })
+      return finish('done')
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -347,7 +375,8 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
         settle(tu, call, tu.input, fail('UNKNOWN_TOOL', `no tool named ${tu.name}`))
         continue
       }
-      const parsed = tool.schema.safeParse(tu.input)
+      // "null" spelled as a string is the model leaving a field out (forgive.ts)
+      const parsed = tool.schema.safeParse(forgiveToolInput(tu.name, tu.input))
       if (!parsed.success) {
         settle(tu, call, tu.input, fail('INVALID_INPUT', `invalid input for ${tu.name}: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`))
         continue

@@ -5,7 +5,7 @@ import type { BetaMessage, BetaRawMessageStreamEvent, BetaRefusalStopDetails } f
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { setSchemaValidator, structuralValidate } from '../tools/case.js'
 import type { LlmClient } from './llm.js'
-import { MAX_TOOL_ROUNDS, runTurn } from './loop.js'
+import { MAX_IDENTICAL_ROUNDS, MAX_TOOL_ROUNDS, runTurn } from './loop.js'
 import { makeMessage, mockEvents, type MockPlan } from './mockLlm.js'
 import { BUDGET_EXHAUSTED_TEXT, runNoticeUserText } from './prompt.js'
 import { appendUserTurn, type SessionRecord } from './session.js'
@@ -329,7 +329,8 @@ describe('stop reasons and errors', () => {
   })
 
   it('stops after the tool budget with the budget user message', async () => {
-    const deps = makeDeps(ws, { llm: constantLlm({ blocks: [{ type: 'tool_use', name: 'gpu_info', input: {} }], stopReason: 'tool_use' }) })
+    // a different input each round: the same call three times over is the identical-round guard's case, below
+    const deps = makeDeps(ws, { llm: constantLlm((n) => ({ blocks: [{ type: 'tool_use', name: 'gpu_info', input: { round: n } }], stopReason: 'tool_use' })) })
     const rec = session(deps, 'loop forever')
     const outcome = await runTurn(rec, 't15', new AbortController().signal, deps)
     expect(outcome.status).toBe('done')
@@ -340,6 +341,16 @@ describe('stop reasons and errors', () => {
     expect(last[0].is_error).toBe(true)
     expect(JSON.parse(last[0].content).error.code).toBe('BUDGET')
     for (const m of rec.messages) if (m.role === 'assistant') expect(toolResultsOf(rec.messages[rec.messages.indexOf(m) + 1]).length).toBe(1)
+  })
+
+  it('ends the turn when the same tool call comes back three rounds running', async () => {
+    const deps = makeDeps(ws, { llm: constantLlm({ blocks: [{ type: 'tool_use', name: 'gpu_info', input: {} }], stopReason: 'tool_use' }) })
+    const rec = session(deps, 'loop forever')
+    const outcome = await runTurn(rec, 't15b', new AbortController().signal, deps)
+    expect(outcome.status).toBe('done')
+    expect(outcome.rounds).toBe(MAX_IDENTICAL_ROUNDS)
+    expect(deps.hub.of('turn.warning').map((w) => w.message)).toEqual([expect.stringMatching(/repeated 3 times/)])
+    expect(rec.messages.find((m) => m.role === 'user' && textOf(m) === BUDGET_EXHAUSTED_TEXT)).toBeUndefined()
   })
 
   it('folds the volatile context into the user turn when the API rejects role system', async () => {
