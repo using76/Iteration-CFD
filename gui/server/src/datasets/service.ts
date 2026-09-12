@@ -137,8 +137,8 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       return { geometry: { source: 'cartesian', fidelity: 'exact', grid, cellCount, cellCenters: null }, surface, warnings }
     }
     if (caseInfo && !caseInfo.mesh) warnings.push(`${path.basename(root.caseJsoncAbs ?? '')}: mesh block is not a cartesian mesh; geometry taken from the results`)
-    if (root.hasPolyMesh) {
-      const r = await pool.run({ op: 'polyMesh', dir: path.join(root.rootAbs, 'constant', 'polyMesh') })
+    if (root.polyMeshDirAbs) {
+      const r = await pool.run({ op: 'polyMesh', dir: root.polyMeshDirAbs })
       if (r.lattice) return { geometry: { source: 'polymesh', fidelity: 'exact', grid: r.lattice, cellCount: r.nCells, cellCenters: r.cellCenters }, surface: r.surface, warnings }
       // A cut-cell mesh is a block with the body carved out of it. The exact
       // detector cannot see that; this one can, and it is what makes slices and
@@ -353,7 +353,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     return entry.ready
   }
 
-  async function parseField(entry: Entry, src: FieldSource, components: 1 | 3, cellCount: number): Promise<Float32Array> {
+  async function parseField(entry: Entry, src: FieldSource, components: number, cellCount: number): Promise<Float32Array> {
     if (src.kind === 'foam') {
       const r = await pool.run({ op: 'foamField', path: path.join(src.dirAbs, src.file), nCells: cellCount })
       if (r.components !== components) throw new Error(`${src.dirName}/${src.file}: has ${r.components} components, expected ${components}`)
@@ -442,8 +442,8 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
 
   async function cellCountOf(root: ResultRoot, caseInfo: CaseJsoncInfo | null): Promise<number | null> {
     if (caseInfo?.mesh) return caseInfo.mesh.cells[0] * caseInfo.mesh.cells[1] * caseInfo.mesh.cells[2]
-    if (root.hasPolyMesh) {
-      const note = await readOwnerHeaderNote(path.join(root.rootAbs, 'constant', 'polyMesh')).catch(() => ({}) as Record<string, number>)
+    if (root.polyMeshDirAbs) {
+      const note = await readOwnerHeaderNote(root.polyMeshDirAbs).catch(() => ({}) as Record<string, number>)
       if (Number.isFinite(note.nCells)) return note.nCells
     }
     let vtuAbs = root.vtk.find((v) => v.kind === 'vtu')?.abs ?? null

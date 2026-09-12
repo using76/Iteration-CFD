@@ -76,7 +76,23 @@ export type RangeTuple = z.infer<typeof RangeTupleSchema>
 export const ColormapNameSchema = z.enum(['viridis', 'turbo', 'coolwarm', 'jet', 'greyscale', 'inferno'])
 export type ColormapName = z.infer<typeof ColormapNameSchema>
 
-export const FieldComponentSchema = z.enum(['magnitude', 'x', 'y', 'z'])
+export const FieldComponentSchema = z.enum([
+  'magnitude',
+  'x',
+  'y',
+  'z',
+  'xx',
+  'yy',
+  'zz',
+  'xy',
+  'yz',
+  'xz',
+  'vonMises',
+  'principal1',
+  'principal2',
+  'principal3',
+  'hydrostatic',
+])
 export type FieldComponent = z.infer<typeof FieldComponentSchema>
 
 export const RepresentationModeSchema = z.enum(['surface', 'surfaceEdges', 'wireframe', 'outline', 'points'])
@@ -98,6 +114,10 @@ export const ViewerCommandSchema = z.discriminatedUnion('type', [
       .string()
       .nullish()
       .describe('Field to colour by once loaded; null/omitted = U (or the first field); "none" draws the geometry itself with no colouring (what the Mesh tab wants)'),
+    region: z
+      .string()
+      .nullish()
+      .describe('Region of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); null/omitted = the first region that has something to open. The GUI forwards it from G4; until then it drops the key'),
   }),
   z.object({
     type: z.literal('setField'),
@@ -106,6 +126,11 @@ export const ViewerCommandSchema = z.discriminatedUnion('type', [
     range: z.union([RangeTupleSchema, z.literal('auto'), z.literal('global')]).nullish(),
     colormap: ColormapNameSchema.nullish(),
     log: Boolish.nullish(),
+  }),
+  z.object({
+    type: z.literal('setWarp'),
+    field: z.string().nullable().describe('Displacement field to warp the surface by: a 3-component POINT field (e.g. u_point); null removes the warp'),
+    scale: z.coerce.number().describe('Warp scale as a pure number; 1 = the true deformed shape, 0 removes the warp'),
   }),
   z.object({
     type: z.literal('setRepresentation'),
@@ -199,6 +224,10 @@ export const ViewerStateSchema = z.object({
   field: z.string().nullable(),
   component: FieldComponentSchema.nullable(),
   range: z.tuple([z.number(), z.number()]).nullable(),
+  /** Deformed-shape warp (G4 draws it): displacement field name and a pure-number scale; null = not warped. */
+  warp: z
+    .object({ field: z.string(), scale: z.number() })
+    .nullish(),
   colormap: ColormapNameSchema,
   representation: RepresentationModeSchema,
   time: z.object({ index: z.number(), value: z.number(), count: z.number() }).nullable(),
@@ -245,6 +274,7 @@ export const DEFAULT_VIEWER_STATE: ViewerState = {
   field: null,
   component: null,
   range: null,
+  warp: null,
   colormap: 'turbo',
   representation: 'surface',
   time: null,

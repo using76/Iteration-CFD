@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { writeFoamField } from './foam.js'
-import { fieldTimeFallback, listTimeDirs, parseTimeName, resolveResultRoot } from './results.js'
+import { caseRootOfPolyMesh, fieldTimeFallback, findPolyMeshDir, listTimeDirs, parseTimeName, resolveResultRoot } from './results.js'
 
 let root: string
 let base: string
@@ -85,12 +85,27 @@ describe('resolveResultRoot', () => {
     expect(r.kind).toBe('foamCase')
     expect(r.rootAbs).toBe(root)
     expect(r.hasPolyMesh).toBe(true)
+    expect(r.polyMeshDirAbs).toBe(path.join(root, 'constant', 'polyMesh'))
     expect(r.caseJsoncAbs).toBeNull()
     expect(r.vtk.map((v) => [path.basename(v.abs), v.kind])).toEqual([
       ['case.pvd', 'pvd'],
       ['case_000001.vtu', 'vtu'],
       ['parcels.vtp', 'vtp'],
     ])
+  })
+
+  test('a region directory holding polyMesh/ is a foam case root', async () => {
+    const flap = path.join(base, 'layout', 'flap')
+    await fs.mkdir(path.join(flap, 'polyMesh'), { recursive: true })
+    await fs.writeFile(path.join(flap, 'polyMesh', 'points'), 'FoamFile { class vectorField; object points; }\n0()\n')
+    const r = await resolveResultRoot(flap)
+    expect(r.kind).toBe('foamCase')
+    expect(r.hasPolyMesh).toBe(true)
+    expect(r.polyMeshDirAbs).toBe(path.join(flap, 'polyMesh'))
+    expect(caseRootOfPolyMesh(path.join('x', 'constant', 'polyMesh'))).toBe('x')
+    expect(caseRootOfPolyMesh(path.join('x', 'polyMesh'))).toBe('x')
+    expect(caseRootOfPolyMesh('x')).toBe('x')
+    expect(await findPolyMeshDir(path.join(flap, 'polyMesh', 'points'))).toBeNull()
   })
 
   test('time directory resolves to its parent', async () => {

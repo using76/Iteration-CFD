@@ -1,6 +1,6 @@
 // Field-to-pixel and field-to-vertex sampling used by the worker (and inline
 // in tests / headless mode). No DOM, no three.js.
-import type { FieldComponent } from '@cfd/shared'
+import { tensorScalarAt, type FieldComponent, type FieldInfo } from '@cfd/shared'
 import type { Axis, StructuredGrid } from '../data/StructuredGrid'
 import { planeBasis, planeBoxPolygon, type V3 } from './clipPolygon'
 
@@ -19,9 +19,15 @@ export function applyTransform(v: number, transform: ScalarTransform): number {
   return Math.log10(v > transform.floor ? v : transform.floor)
 }
 
-/** Scalar view of a field: the magnitude or one component of a vector, or the scalar itself. */
-export function scalarOf(field: Float32Array, components: 1 | 3, component: FieldComponent | null): Float32Array {
+/** Scalar view of a field: the magnitude or one component of a vector, a tensor scalar, or the scalar itself. */
+export function scalarOf(field: Float32Array, components: FieldInfo['components'], component: FieldComponent | null): Float32Array {
   if (components === 1) return field
+  if (components === 6 || components === 9) {
+    const n = field.length / components
+    const out = new Float32Array(n)
+    for (let i = 0; i < n; i++) out[i] = tensorScalarAt(field, components, i, component ?? 'vonMises')
+    return out
+  }
   const n = field.length / 3
   const out = new Float32Array(n)
   if (component === 'x' || component === 'y' || component === 'z') {

@@ -168,6 +168,7 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
         screenshot: ['스크린샷 촬영', 'Took screenshot'],
         setRepresentation: ['표현 방식 변경', 'Changed representation'],
         setTime: ['시간 스텝 변경', 'Changed time step'],
+        setWarp: ['변형 형상 표시', 'Warped by displacement'],
         clear: ['뷰어 초기화', 'Cleared viewer'],
       }
       const pair = map[t] ?? [`뷰어 명령 ${t}`, `Viewer command ${t}`]

@@ -774,7 +774,7 @@ function mapperBounds(range: [number, number], transform: ScalarTransform): [num
   return hi > lo ? [lo, hi] : [lo, lo + 1]
 }
 
-export function fieldTitle(sel: { name: string; components: 1 | 3; component: FieldComponent | null; unit: string | null }): string {
+export function fieldTitle(sel: { name: string; components: FieldInfo['components']; component: FieldComponent | null; unit: string | null }): string {
   const base = sel.components === 3 ? (sel.component && sel.component !== 'magnitude' ? `${sel.name}${sel.component}` : `|${sel.name}|`) : sel.name
   return sel.unit ? `${base} (${sel.unit})` : base
 }

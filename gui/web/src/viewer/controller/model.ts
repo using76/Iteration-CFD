@@ -1,5 +1,5 @@
 // Renderer-independent viewer model: what is shown, not how it is drawn.
-import type { ColormapName, FieldComponent, RepresentationMode, Vec3 } from '@cfd/shared'
+import type { ColormapName, FieldComponent, FieldInfo, RepresentationMode, Vec3 } from '@cfd/shared'
 import type { ComputeResult } from '../worker/protocol'
 
 export type QualityLevel = 'low' | 'medium' | 'high'
@@ -8,7 +8,7 @@ export type ViewerTool = 'select' | 'pan' | 'rotate' | 'zoom' | 'section'
 
 export interface FieldSelection {
   name: string
-  components: 1 | 3
+  components: FieldInfo['components']
   component: FieldComponent | null
   unit: string | null
   rangeMode: 'auto' | 'global' | 'locked'

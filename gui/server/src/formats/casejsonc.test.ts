@@ -106,3 +106,60 @@ describe('extractCartesianSpec', () => {
     expect(info.initialFields).toEqual([])
   })
 })
+
+describe('dieStack.cht.jsonc', () => {
+  test('four block regions and three interfaces', async () => {
+    const info = await readCaseJsonc(path.join(casesDir, 'dieStack.cht.jsonc'), 'cases/dieStack.cht.jsonc')
+    expect(info.regions.map((r) => r.name)).toEqual(['die', 'solder', 'spreader', 'grease'])
+    expect(info.regions.every((r) => r.kind === 'solid')).toBe(true)
+    expect(info.regions[0].mesh?.kind).toBe('block')
+    if (info.regions[0].mesh?.kind !== 'block') throw new Error('die mesh should be a block')
+    expect(info.regions[0].mesh.spec.cells).toEqual([10, 10, 4])
+    expect(info.regions[0].mesh.spec.boundaries.zmin).toBe('dieToSolder')
+    expect(info.regions[0].patches[0]).toEqual({ match: 'dieTop', kind: 'wall' })
+    expect(info.regions[3].mechanics).toBeNull()
+    expect(info.interfaces.length).toBe(3)
+    expect(info.interfaces[2].regions).toEqual(['spreader', 'grease'])
+    expect(info.interfaces[2].patches).toEqual(['spreaderToGrease', 'greaseToSpreader'])
+    expect(info.regionsManifest).toBeNull()
+  })
+
+  test('a mechanics block, a polyMesh region and mesh.regions are read', () => {
+    const text = `{
+      "name": "stack",
+      "mesh": { "regions": "mesh/regions.json" },
+      "regions": [
+        {
+          "name": "flap",
+          "kind": "solid",
+          "mesh": { "polyMesh": "mesh/flap/polyMesh" },
+          "mechanics": {
+            "material": { "E": 130e9, "nu": 0.3, "alpha": 2.3e-5, "TRef": 300 },
+            "patches": [{ "match": "clamp", "u": { "type": "fixedDisplacement", "value": [0, 0, 0] } }]
+          },
+          "patches": [{ "match": "clamp", "T": { "type": "zeroGradient" } }]
+        },
+        { "name": "base", "kind": "solid", "mesh": { "polyMesh": "mesh/base/polyMesh" } }
+      ],
+      "interfaces": [{ "regionA": "base", "patchA": "baseToFlap", "regionB": "flap", "patchB": "flapToBase" }],
+      "run": { "steady": true, "mode": "stress" }
+    }`
+    const info = caseInfoFromText(text, 'cases/stack.cht.jsonc')
+    expect(info.regions.length).toBe(2)
+    const flap = info.regions[0]
+    expect(flap.mechanics?.material?.E).toBe(130e9)
+    expect(flap.mechanics?.material?.TRef).toBe(300)
+    expect(flap.mechanics?.zones).toEqual([])
+    expect(flap.mechanics?.patches[0]).toEqual({ match: 'clamp', type: 'fixedDisplacement' })
+    expect(info.regions[1].mesh).toEqual({ kind: 'polyMesh', path: 'mesh/base/polyMesh' })
+    expect(info.regionsManifest).toBe('mesh/regions.json')
+    expect(info.mode).toBe('stress')
+    expect(info.interfaces.length).toBe(1)
+    // a plain case has empty arrays and nulls
+    const plain = caseInfoFromText('{"name":"x"}', 'x.jsonc')
+    expect(plain.regions).toEqual([])
+    expect(plain.interfaces).toEqual([])
+    expect(plain.mode).toBeNull()
+    expect(plain.regionsManifest).toBeNull()
+  })
+})

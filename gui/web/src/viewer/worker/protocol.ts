@@ -2,7 +2,7 @@
 // the worker's own blob cache under dataset-scoped keys; a request that names
 // a key the worker does not hold is answered with `missing` and retried by the
 // client after uploading the blobs.
-import type { FieldComponent } from '@cfd/shared'
+import type { FieldComponent, FieldInfo } from '@cfd/shared'
 import type { TypedArray } from '../data/BlobCache'
 import type { Axis } from '../data/StructuredGrid'
 import type { MapperSpec, ScalarTransform } from './sampling'
@@ -19,7 +19,7 @@ export interface GridKeys {
 
 export interface FieldRef {
   key: string
-  components: 1 | 3
+  components: FieldInfo['components']
   component: FieldComponent | null
 }
 

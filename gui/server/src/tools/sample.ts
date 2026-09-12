@@ -271,7 +271,7 @@ export async function lineSample(input: LineSampleInput): Promise<LineSampleResu
   return sampleAlong(mesh, field.data, field.components, input, len, timeDir.name)
 }
 
-function sampleAlong(mesh: MeshBundle, data: ArrayLike<number>, components: 1 | 3, input: LineSampleInput, len: number, time: string): LineSampleResult {
+function sampleAlong(mesh: MeshBundle, data: ArrayLike<number>, components: number, input: LineSampleInput, len: number, time: string): LineSampleResult {
   const n = input.n
   const s: number[] = new Array(n)
   const x: number[] = new Array(n)

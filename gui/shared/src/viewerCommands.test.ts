@@ -35,6 +35,19 @@ describe('viewer command coercion', () => {
     expect(ViewerCommandSchema.safeParse({ type: 'load', path: 'x', timeIndex: 'latest', field: null }).success).toBe(false)
   })
 
+  it('setWarp, load.region and the tensor components parse, with a string scale coerced', () => {
+    const warp = parseOk(ViewerCommandSchema, { type: 'setWarp', field: 'u_point', scale: '20' })
+    expect(warp.scale).toBe(20)
+    expect(warp.field).toBe('u_point')
+    const off = parseOk(ViewerCommandSchema, { type: 'setWarp', field: null, scale: 0 })
+    expect(off.field).toBeNull()
+    expect(off.scale).toBe(0)
+    expect(parseOk(ViewerCommandSchema, { type: 'setField', field: 'sigma', component: 'vonMises' }).component).toBe('vonMises')
+    expect(ViewerCommandSchema.safeParse({ type: 'setField', field: 'sigma', component: 'yx' }).success).toBe(false)
+    expect(parseOk(ViewerCommandSchema, { type: 'load', path: 'x', region: 'flap' }).region).toBe('flap')
+    expect(parseOk(ViewerCommandSchema, { type: 'load', path: 'x' }).region).toBeUndefined()
+  })
+
   it('reads a 3-vector JSON-encoded in one string, the same mistake the range forgives', () => {
     const plane = parseOk(ViewerCommandSchema, { type: 'addPlane', id: null, origin: '[0, 0, 0]', normal: '[0, 0, 1]' })
     expect(plane.origin).toEqual([0, 0, 0])

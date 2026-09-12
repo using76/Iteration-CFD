@@ -517,6 +517,7 @@ export function polyMeshBoundarySurface(mesh: PolyMesh, cellCenters?: Float32Arr
   const normals = new Float32Array(3 * nVerts)
   const indices = new Uint32Array(3 * nTris)
   const cellOfTri = new Uint32Array(nTris)
+  const pointOfVertex = new Uint32Array(nVerts)
   const bounds = emptyBounds()
   const patches: SurfaceGeometry['patches'] = []
   let v = 0
@@ -550,6 +551,7 @@ export function polyMeshBoundarySurface(mesh: PolyMesh, cellCenters?: Float32Arr
       const base = v
       for (let k = 0; k < n; k++) {
         const pt = 3 * mesh.faceIndices[a + k]
+        pointOfVertex[v] = mesh.faceIndices[a + k]
         const x = mesh.points[pt]
         const y = mesh.points[pt + 1]
         const z = mesh.points[pt + 2]
@@ -576,7 +578,7 @@ export function polyMeshBoundarySurface(mesh: PolyMesh, cellCenters?: Float32Arr
     bounds.min = [0, 0, 0]
     bounds.max = [0, 0, 0]
   }
-  return { positions, normals, indices: indices.subarray(0, 3 * t), cellOfTri: cellOfTri.subarray(0, t), patches, bounds }
+  return { positions, normals, indices: indices.subarray(0, 3 * t), cellOfTri: cellOfTri.subarray(0, t), pointOfVertex: pointOfVertex.subarray(0, v), patches, bounds }
 }
 
 // ---------------------------------------------------------------------------

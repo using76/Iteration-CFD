@@ -23,7 +23,7 @@ export interface FoamFieldHeader {
 export interface FoamField {
   name: string
   header: FoamFieldHeader
-  components: 1 | 3
+  components: 1 | 3 | 6 | 9
   /** Number of tuples in `data`. */
   count: number
   data: Float32Array
@@ -134,10 +134,10 @@ export function headerFromDict(map: Map<string, string>, dimensions: string | nu
 class FieldSink implements NumberSink {
   data: Float32Array
   n = 0
-  components: 0 | 1 | 3
+  components: 0 | 1 | 3 | 6 | 9
   constructor(
     private readonly expectedTuples: number | null,
-    componentsHint: 0 | 1 | 3,
+    componentsHint: 0 | 1 | 3 | 6 | 9,
   ) {
     this.components = componentsHint
     const tuples = expectedTuples ?? 1024
@@ -155,7 +155,7 @@ class FieldSink implements NumberSink {
     }
     this.data[this.n++] = value
   }
-  finish(): { data: Float32Array; components: 1 | 3; count: number } {
+  finish(): { data: Float32Array; components: 1 | 3 | 6 | 9; count: number } {
     const comps = this.components === 0 ? 1 : this.components
     if (this.n % comps !== 0) throw new FoamSyntaxError(`list holds ${this.n} numbers, not a multiple of ${comps}`)
     const count = this.n / comps
@@ -197,7 +197,7 @@ class FieldParser {
   uniformValue: number[] | null = null
   compactCount = 0
   declaredCount: number | null = null
-  componentsHint: 0 | 1 | 3 = 0
+  componentsHint: 0 | 1 | 3 | 6 | 9 = 0
   seenInternal = false
 
   private state: ParserState = 'top'
@@ -261,7 +261,10 @@ class FieldParser {
           return
         }
         if (tok.kind === 'word') {
-          if (tok.text.includes('vector')) this.componentsHint = 3
+          // symmTensor must be tested before tensor: the word contains it
+          if (tok.text.includes('symmTensor')) this.componentsHint = 6
+          else if (tok.text.includes('tensor')) this.componentsHint = 9
+          else if (tok.text.includes('vector')) this.componentsHint = 3
           else if (tok.text.includes('scalar')) this.componentsHint = 1
           return
         }
@@ -546,7 +549,7 @@ function assemble(parser: FieldParser, name: string, nCells: number | null): Foa
   if (!parser.seenInternal) throw new FoamSyntaxError('no internalField entry')
   if (parser.uniformValue) {
     const v = parser.uniformValue
-    const comps: 1 | 3 = v.length === 3 ? 3 : 1
+    const comps: 1 | 3 | 6 | 9 = v.length === 3 ? 3 : v.length === 6 ? 6 : v.length === 9 ? 9 : 1
     if (v.length !== comps) throw new FoamSyntaxError(`uniform value has ${v.length} components`)
     const count = nCells ?? 1
     const data = new Float32Array(count * comps)

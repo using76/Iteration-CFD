@@ -796,6 +796,21 @@ export interface FsSearchHit {
   text: string
 }
 
+export interface RegionEntry {
+  name: string
+  kind: 'fluid' | 'solid' | null
+  material: string | null
+  /** What `open {region}` opens: the result when there is one, else the mesh, else null (nothing to open yet). Workspace-relative in a response; absolute inside formats/regions.ts. */
+  path: string | null
+  /** A directory `open` classifies as a foam case root for this region's mesh (holds constant/polyMesh/ or polyMesh/). */
+  meshPath: string | null
+  /** The polyMesh directory itself (holds points/faces/owner/neighbour/boundary); what the patches route reads. */
+  polyMeshDir: string | null
+  resultPath: string | null
+  source: 'vtu' | 'dir' | 'polyMesh' | null
+  cellCount: number | null
+}
+
 export interface ResultsResponse {
   root: string
   caseJsonc: string | null

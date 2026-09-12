@@ -296,4 +296,30 @@ describe('writeFoamField round trips', () => {
     for (let i = 0; i < n; i += 997) expect(back.data[i]).toBe(data[i])
     expect(back.data[n - 1]).toBe(data[n - 1])
   })
+
+  test('symmTensor and tensor lists read as 6 and 9 components', () => {
+    const symm = parseFoamFieldText(
+      'FoamFile { class volSymmTensorField; object sigma; }\ndimensions [1 -1 -2 0 0 0 0];\ninternalField   nonuniform List<symmTensor> 2((1 2 3 4 5 6) (7 8 9 10 11 12));\nboundaryField { }\n',
+      'sigma',
+    )
+    expect(symm.components).toBe(6)
+    expect(symm.count).toBe(2)
+    expect(symm.data[3]).toBe(4)
+    expect(symm.data[11]).toBe(12)
+    const full = parseFoamFieldText(
+      'FoamFile { class volTensorField; object tau; }\ndimensions [1 -1 -2 0 0 0 0];\ninternalField   nonuniform List<tensor> 1((1 2 3 4 5 6 7 8 9));\nboundaryField { }\n',
+      'tau',
+    )
+    expect(full.components).toBe(9)
+    expect(full.count).toBe(1)
+    expect(full.data[8]).toBe(9)
+    const uni = parseFoamFieldText(
+      'FoamFile { class volSymmTensorField; object s2; }\ndimensions [0 0 0 0 0 0 0];\ninternalField   uniform (1 2 3 4 5 6);\nboundaryField { }\n',
+      's2',
+      { nCells: 3 },
+    )
+    expect(uni.components).toBe(6)
+    expect(uni.count).toBe(3)
+    expect(uni.data[17]).toBe(6)
+  })
 })

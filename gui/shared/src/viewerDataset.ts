@@ -62,12 +62,14 @@ export interface SurfaceInfo {
   cellOfTri: BlobRef
   triangleCount: number
   vertexCount: number
+  /** u32, components 1: the mesh point id under each surface vertex (the same point appears under every vertex copied from it). Absent for a synthetic, cartesian or proxy-VTU surface. */
+  pointOfVertex?: BlobRef | null
 }
 
 export interface FieldTimeInfo {
   /** Index into `ViewerDataset.times`. */
   timeIndex: number
-  /** Blob with cellCount tuples of `components` floats. */
+  /** Blob with cellCount tuples (a cell-located field) or pointCount tuples (a point-located field) of `components` floats. */
   blob: BlobRef
   /** Range of the scalar (magnitude for vectors) at this time; null until parsed. */
   range: { min: number; max: number } | null
@@ -77,8 +79,8 @@ export interface FieldTimeInfo {
 
 export interface FieldInfo {
   name: string
-  components: 1 | 3
-  location: 'cell'
+  components: 1 | 3 | 6 | 9
+  location: 'cell' | 'point'
   /** Range over the times parsed so far (magnitude for vectors). */
   range: { min: number; max: number } | null
   unit: string | null
@@ -104,6 +106,8 @@ export interface ViewerDataset {
   bounds: { min: [number, number, number]; max: [number, number, number] }
   up: UpAxis
   cellCount: number
+  /** Mesh points, when the surface carries pointOfVertex (polyMesh, real-point VTU); null otherwise. */
+  pointCount?: number | null
   grid: StructuredGridInfo | null
   surface: SurfaceInfo
   fields: FieldInfo[]

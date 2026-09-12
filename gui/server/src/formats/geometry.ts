@@ -9,6 +9,8 @@ export interface SurfaceGeometry {
   indices: Uint32Array
   /** Owner cell of each triangle. */
   cellOfTri: Uint32Array
+  /** u32, one per surface vertex: the mesh point id that vertex was copied from (real-point surfaces only). */
+  pointOfVertex?: Uint32Array
   patches: PatchInfo[]
   bounds: { min: [number, number, number]; max: [number, number, number] }
 }

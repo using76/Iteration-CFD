@@ -3,7 +3,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { buildCartesianGrid, cartesianCellCenters, cartesianToPolyMesh, type CartesianSpec } from './cartesian.js'
-import { readVtuArray, readVtuCellData, readVtuInfo, readVtuLabels, tangentFrame, vtuBoundarySurface, writeVtuFromPolyMesh } from './vtu.js'
+import { polyMeshBoundarySurface } from './polymesh.js'
+import { readVtuArray, readVtuCellData, readVtuInfo, readVtuLabels, readVtuPointData, tangentFrame, vtuBoundarySurface, writeVtuFromPolyMesh, writeVtuPoints } from './vtu.js'
 
 let dir: string
 beforeAll(async () => {
@@ -98,7 +99,9 @@ describe('VTU round trip (2x2x2)', () => {
     const time = (await readVtuArray(info, 'FieldData', 'TIME')) as Float64Array
     expect(time[0]).toBe(0.5)
 
-    const { surface, cellCenters } = await vtuBoundarySurface(info)
+    const { surface, cellCenters, sharedPoints } = await vtuBoundarySurface(info)
+    expect(sharedPoints).toBe(false)
+    expect(surface.pointOfVertex).toBeUndefined()
     expect(surface.indices.length / 3).toBe(48)
     expect(surface.patches).toHaveLength(1)
     expect(surface.patches[0].name).toBe('boundary')
@@ -133,5 +136,69 @@ describe('VTU round trip (2x2x2)', () => {
       expect(c[1]).toBeCloseTo(n[1], 10)
       expect(c[2]).toBeCloseTo(n[2], 10)
     }
+  })
+
+  test('real-point VTU: PointData, a 9-tensor, pointOfVertex on both surfaces', async () => {
+    const grid = buildCartesianGrid(spec)
+    const mesh = cartesianToPolyMesh(grid, spec)
+    // polyMesh surface: pointOfVertex is the mesh point id under each vertex
+    const pm = polyMeshBoundarySurface(mesh)
+    const pmPv = pm.pointOfVertex!
+    expect(pmPv.length).toBe(pm.positions.length / 3)
+    for (let v = 0; v < pmPv.length; v++) {
+      for (let a = 0; a < 3; a++) expect(pm.positions[3 * v + a]).toBe(Math.fround(mesh.points[3 * pmPv[v] + a]))
+    }
+    // real-point VTU: 27 shared mesh points, 8 polyhedral cells
+    const uPoint = Float64Array.from({ length: 81 }, (_, i) => i * 0.5 - 20)
+    const uCell = Float64Array.from({ length: 24 }, (_, i) => i)
+    const sigma = Float64Array.from({ length: 72 }, (_, i) => (i % 9) * 1000 + Math.floor(i / 9))
+    const file = path.join(dir, 'VTK', 'region_flap.vtu')
+    await writeVtuPoints(file, mesh, {
+      time: 0,
+      cellData: [
+        { name: 'T', components: 1, data: Float64Array.from({ length: 8 }, (_, i) => 300 + i) },
+        { name: 'u', components: 3, data: uCell },
+        { name: 'sigma', components: 9, data: sigma },
+      ],
+      pointData: [
+        { name: 'T', components: 1, data: Float64Array.from({ length: 27 }, (_, i) => i) },
+        { name: 'u', components: 3, data: uPoint },
+      ],
+    })
+
+    const bytes = await fs.readFile(file)
+    const head = bytes.toString('latin1', 0, bytes.indexOf('_', bytes.indexOf('<AppendedData')))
+    expect(head).toContain('NumberOfPoints="27"')
+    expect(head).toContain('NumberOfCells="8"')
+    expect(head).toContain('<CellData Scalars="T" Vectors="u" Tensors="sigma">')
+    expect(head).toContain('<PointData Scalars="T" Vectors="u">')
+    const info = await readVtuInfo(file)
+    const names = info.arrays.map((a) => `${a.section}:${a.name}:${a.type}x${a.components}`)
+    expect(names.slice(-2)).toEqual(['PointData:T:Float64x1', 'PointData:u:Float64x3'])
+
+    const up = await readVtuPointData(info, 'u')
+    expect(up.components).toBe(3)
+    expect(up.data.length).toBe(81)
+    for (let k = 0; k < 81; k++) expect(up.data[k]).toBe(Math.fround(uPoint[k]))
+    const sig = await readVtuCellData(info, 'sigma')
+    expect(sig.components).toBe(9)
+
+    const res = await vtuBoundarySurface(info)
+    expect(res.sharedPoints).toBe(true)
+    expect(res.nPoints).toBe(27)
+    expect(res.surface.indices.length / 3).toBe(48)
+    expect(res.domainBounds.min).toEqual([0, 0, 0])
+    expect(res.domainBounds.max[0]).toBeCloseTo(2, 12)
+    expect(res.domainBounds.max[1]).toBeCloseTo(2, 12)
+    expect(res.domainBounds.max[2]).toBeCloseTo(2, 12)
+    const pv = res.surface.pointOfVertex!
+    expect(pv.length).toBe(res.surface.positions.length / 3)
+    const pts = (await readVtuArray(info, 'Points', 'Points')) as Float64Array
+    for (let v = 0; v < pv.length; v++) {
+      for (let a = 0; a < 3; a++) expect(res.surface.positions[3 * v + a]).toBe(Math.fround(pts[3 * pv[v] + a]))
+    }
+    // a wrong-length array is refused, naming the field and both counts
+    const f2 = path.join(dir, 'VTK', 'bad.vtu')
+    await expect(writeVtuPoints(f2, mesh, { time: 0, cellData: [{ name: 'T', components: 1, data: new Float64Array(7) }], pointData: [] })).rejects.toThrow(/T.*7.*8/)
   })
 })

@@ -161,7 +161,7 @@ export async function scanSeries(root: ResultRoot): Promise<TimeSeries> {
 export async function datasetFingerprint(rel: string, root: ResultRoot, series: TimeSeries): Promise<string> {
   const parts = [rel, root.kind, root.rootAbs, root.timeDir ?? '', ...series.fingerprint]
   if (root.caseJsoncAbs) parts.push(`jsonc@${await mtimeOf(root.caseJsoncAbs)}`)
-  if (root.hasPolyMesh) parts.push(`polyMesh@${await mtimeOf(path.join(root.rootAbs, 'constant', 'polyMesh', 'points'))}`)
+  if (root.polyMeshDirAbs) parts.push(`polyMesh@${await mtimeOf(path.join(root.polyMeshDirAbs, 'points'))}`)
   // A re-run that changes the dictionaries but reuses the time directory names
   // is the case this catches; the field files themselves are stamped per file
   // in series.fingerprint.

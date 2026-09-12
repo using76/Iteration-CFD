@@ -226,9 +226,8 @@ export async function readVtuLabels(info: VtuInfo, section: VtuSection, name: st
   }
 }
 
-/** A CellData array as Float32 tuples. */
-export async function readVtuCellData(info: VtuInfo, name: string): Promise<{ components: number; data: Float32Array }> {
-  const arr = findArray(info, 'CellData', name)
+async function readVtuData(info: VtuInfo, section: 'CellData' | 'PointData', name: string): Promise<{ components: number; data: Float32Array }> {
+  const arr = findArray(info, section, name)
   const fh = await fs.open(info.path, 'r')
   try {
     const { start, bytes } = await blockExtent(fh, info, arr)
@@ -261,6 +260,16 @@ export async function readVtuCellData(info: VtuInfo, name: string): Promise<{ co
   } finally {
     await fh.close()
   }
+}
+
+/** A CellData array as Float32 tuples. */
+export async function readVtuCellData(info: VtuInfo, name: string): Promise<{ components: number; data: Float32Array }> {
+  return readVtuData(info, 'CellData', name)
+}
+
+/** A PointData array as Float32 tuples (twin of readVtuCellData). */
+export async function readVtuPointData(info: VtuInfo, name: string): Promise<{ components: number; data: Float32Array }> {
+  return readVtuData(info, 'PointData', name)
 }
 
 /** Points as Float32 xyz (Float64 files are converted chunk by chunk). */
@@ -404,7 +413,7 @@ async function forEachLabel(fh: fs.FileHandle, info: VtuInfo, arr: VtuArrayInfo,
  * Also returns face-centroid-averaged cell centres. Streaming over the faces
  * block; memory O(faces) but never a copy of the whole file.
  */
-export async function vtuBoundarySurface(info: VtuInfo): Promise<{ surface: SurfaceGeometry; cellCenters: Float32Array; domainBounds: Bounds }> {
+export async function vtuBoundarySurface(info: VtuInfo): Promise<{ surface: SurfaceGeometry; cellCenters: Float32Array; domainBounds: Bounds; nPoints: number; sharedPoints: boolean }> {
   const fh = await fs.open(info.path, 'r')
   try {
     const points = await readPointsF32(fh, info)
@@ -534,6 +543,7 @@ export async function vtuBoundarySurface(info: VtuInfo): Promise<{ surface: Surf
     const normals = new Float32Array(3 * nVerts)
     const indices = new Uint32Array(3 * nTris)
     const cellOfTri = new Uint32Array(nTris)
+    const pointOfVertex = new Uint32Array(nVerts)
     const bounds = emptyBounds()
     // Boundary face centroids sit exactly on the domain boundary, unlike the
     // synthetic quads around them, so they give the true extent of a box domain.
@@ -572,6 +582,7 @@ export async function vtuBoundarySurface(info: VtuInfo): Promise<{ surface: Surf
       const base = v
       for (let k = 0; k < n; k++) {
         const p = 3 * table.ids[s + k]
+        pointOfVertex[v] = table.ids[s + k]
         positions[3 * v] = points[p]
         positions[3 * v + 1] = points[p + 1]
         positions[3 * v + 2] = points[p + 2]
@@ -595,15 +606,27 @@ export async function vtuBoundarySurface(info: VtuInfo): Promise<{ surface: Surf
       domainBounds.min = [...bb.min]
       domainBounds.max = [...bb.max]
     }
+    // A real mesh shares points across faces (a hexahedron's corner sits under
+    // three faces); the proxy writer's fresh quad points never do.
+    const seen = new Uint8Array(nPoints)
+    let sharedPoints = false
+    for (let i = 0; i < v; i++) {
+      if (seen[pointOfVertex[i]]) {
+        sharedPoints = true
+        break
+      }
+      seen[pointOfVertex[i]] = 1
+    }
     const surface: SurfaceGeometry = {
       positions,
       normals,
       indices: indices.subarray(0, 3 * t),
       cellOfTri: cellOfTri.subarray(0, t),
+      ...(sharedPoints ? { pointOfVertex: pointOfVertex.subarray(0, v) } : {}),
       patches: [{ name: 'boundary', type: 'patch', triStart: 0, triCount: t, color: patchColor(0) }],
       bounds,
     }
-    return { surface, cellCenters, domainBounds }
+    return { surface, cellCenters, domainBounds, nPoints: info.nPoints, sharedPoints }
   } finally {
     await fh.close()
   }
@@ -849,6 +872,234 @@ export async function writeVtuFromPolyMesh(filePath: string, mesh: PolyMesh, opt
     out.f64(opts.time)
     // fields
     for (const f of opts.cellData) {
+      await out.reserve(8)
+      out.u64(8 * f.data.length)
+      for (let i = 0; i < f.data.length; i += GROUP) {
+        const end = Math.min(f.data.length, i + GROUP)
+        await out.reserve(8 * (end - i))
+        for (let j = i; j < end; j++) out.f64(f.data[j])
+      }
+    }
+    await out.flush()
+    await out.text('\n  </AppendedData>\n</VTKFile>\n')
+  } finally {
+    await fh.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Real-point writing (rust/src/io/vtu.rs write_vtu_points, unit S2)
+// ---------------------------------------------------------------------------
+
+export interface VtuDataArray {
+  name: string
+  components: 1 | 3 | 9
+  data: Float32Array | Float64Array
+}
+
+export interface VtuPointsWriteOptions {
+  time: number
+  cellData: VtuDataArray[]
+  pointData: VtuDataArray[]
+}
+
+/** One data section (CellData/PointData); attributes only for component counts that occur, in Scalars/Vectors/Tensors order. Empty when there is no array. */
+function dataSectionXml(tag: 'CellData' | 'PointData', arrays: VtuDataArray[], offsets: number[]): string {
+  if (!arrays.length) return ''
+  let xml = `      <${tag}`
+  const scalars = arrays.find((f) => f.components === 1)?.name
+  const vectors = arrays.find((f) => f.components === 3)?.name
+  const tensors = arrays.find((f) => f.components === 9)?.name
+  if (scalars) xml += ` Scalars="${scalars}"`
+  if (vectors) xml += ` Vectors="${vectors}"`
+  if (tensors) xml += ` Tensors="${tensors}"`
+  xml += '>\n'
+  arrays.forEach((f, i) => {
+    xml += `        <DataArray type="Float64" Name="${f.name}" NumberOfComponents="${f.components}" format="appended" offset="${offsets[i]}"/>\n`
+  })
+  return xml + `      </${tag}>\n`
+}
+
+/**
+ * Write a polyMesh with its REAL shared points (S2): connectivity lists each
+ * cell's distinct point ids ascending; the faces stream lists a face in stored
+ * order under its owner cell and reversed under its neighbour, so every face
+ * of every cell points outward.
+ */
+export async function writeVtuPoints(filePath: string, mesh: PolyMesh, opts: VtuPointsWriteOptions): Promise<void> {
+  for (const f of opts.cellData) {
+    if (f.data.length !== mesh.nCells * f.components) throw new Error(`writeVtuPoints: field ${f.name} has ${f.data.length / f.components} value(s), mesh has ${mesh.nCells} cell(s)`)
+  }
+  for (const f of opts.pointData) {
+    if (f.data.length !== mesh.nPoints * f.components) throw new Error(`writeVtuPoints: field ${f.name} has ${f.data.length / f.components} value(s), mesh has ${mesh.nPoints} point(s)`)
+  }
+  const cf = cellFaces(mesh)
+  const entries = cf.faces.length
+  // distinct point ids per cell, ascending (mark holds the last cell that claimed each point)
+  const mark = new Int32Array(mesh.nPoints).fill(-1)
+  const connOffsets = new Uint32Array(mesh.nCells + 1)
+  let connTotal = 0
+  for (let c = 0; c < mesh.nCells; c++) {
+    let cnt = 0
+    for (let k = cf.offsets[c]; k < cf.offsets[c + 1]; k++) {
+      const f = cf.faces[k]
+      for (let j = mesh.faceOffsets[f]; j < mesh.faceOffsets[f + 1]; j++) {
+        const p = mesh.faceIndices[j]
+        if (mark[p] !== c) {
+          mark[p] = c
+          cnt++
+        }
+      }
+    }
+    connOffsets[c + 1] = connTotal += cnt
+  }
+  const connIds = new Int32Array(connTotal)
+  {
+    let cursor = 0
+    mark.fill(-1)
+    for (let c = 0; c < mesh.nCells; c++) {
+      const start = cursor
+      for (let k = cf.offsets[c]; k < cf.offsets[c + 1]; k++) {
+        const f = cf.faces[k]
+        for (let j = mesh.faceOffsets[f]; j < mesh.faceOffsets[f + 1]; j++) {
+          const p = mesh.faceIndices[j]
+          if (mark[p] !== c) {
+            mark[p] = c
+            connIds[cursor++] = p
+          }
+        }
+      }
+      connIds.subarray(start, cursor).sort()
+    }
+  }
+  let facePtsTotal = 0
+  for (let c = 0; c < mesh.nCells; c++) {
+    for (let k = cf.offsets[c]; k < cf.offsets[c + 1]; k++) facePtsTotal += mesh.faceOffsets[cf.faces[k] + 1] - mesh.faceOffsets[cf.faces[k]]
+  }
+  const sizes = {
+    points: 24 * mesh.nPoints,
+    connectivity: 8 * connTotal,
+    offsets: 8 * mesh.nCells,
+    types: mesh.nCells,
+    faces: 8 * (mesh.nCells + entries + facePtsTotal),
+    faceoffsets: 8 * mesh.nCells,
+    time: 8,
+  }
+  let cursor = 0
+  const place = (bytes: number): number => {
+    const off = cursor
+    cursor += 8 + bytes
+    return off
+  }
+  const offPoints = place(sizes.points)
+  const offConnectivity = place(sizes.connectivity)
+  const offOffsets = place(sizes.offsets)
+  const offTypes = place(sizes.types)
+  const offFaces = place(sizes.faces)
+  const offFaceoffsets = place(sizes.faceoffsets)
+  const offTime = place(sizes.time)
+  const cellOffsets = opts.cellData.map((f) => place(8 * f.data.length))
+  const pointOffsets = opts.pointData.map((f) => place(8 * f.data.length))
+
+  let xml = '<VTKFile type="UnstructuredGrid" version="1.0" byte_order="LittleEndian" header_type="UInt64">\n'
+  xml += '  <UnstructuredGrid>\n'
+  xml += `    <Piece NumberOfPoints="${mesh.nPoints}" NumberOfCells="${mesh.nCells}">\n`
+  xml += '      <FieldData>\n'
+  xml += `        <DataArray type="Float64" Name="TIME" NumberOfTuples="1" format="appended" offset="${offTime}"/>\n`
+  xml += '      </FieldData>\n'
+  xml += '      <Points>\n'
+  xml += `        <DataArray type="Float64" NumberOfComponents="3" format="appended" offset="${offPoints}"/>\n`
+  xml += '      </Points>\n'
+  xml += '      <Cells>\n'
+  xml += `        <DataArray type="Int64" Name="connectivity" format="appended" offset="${offConnectivity}"/>\n`
+  xml += `        <DataArray type="Int64" Name="offsets" format="appended" offset="${offOffsets}"/>\n`
+  xml += `        <DataArray type="UInt8" Name="types" format="appended" offset="${offTypes}"/>\n`
+  xml += `        <DataArray type="Int64" Name="faces" format="appended" offset="${offFaces}"/>\n`
+  xml += `        <DataArray type="Int64" Name="faceoffsets" format="appended" offset="${offFaceoffsets}"/>\n`
+  xml += '      </Cells>\n'
+  xml += dataSectionXml('CellData', opts.cellData, cellOffsets)
+  xml += dataSectionXml('PointData', opts.pointData, pointOffsets)
+  xml += '    </Piece>\n'
+  xml += '  </UnstructuredGrid>\n'
+  xml += '  <AppendedData encoding="raw">\n_'
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const fh = await fs.open(filePath, 'w')
+  try {
+    const out = new BinaryOut(fh)
+    await out.text(xml)
+    const GROUP = 4096
+
+    // points: the mesh's own coordinates, shared by every face touching them
+    await out.reserve(8)
+    out.u64(sizes.points)
+    for (let i = 0; i < mesh.points.length; i += GROUP) {
+      const end = Math.min(mesh.points.length, i + GROUP)
+      await out.reserve(8 * (end - i))
+      for (let j = i; j < end; j++) out.f64(mesh.points[j])
+    }
+    // connectivity: the cell's distinct point ids, ascending
+    await out.reserve(8)
+    out.u64(sizes.connectivity)
+    for (let i = 0; i < connIds.length; i += GROUP) {
+      const end = Math.min(connIds.length, i + GROUP)
+      await out.reserve(8 * (end - i))
+      for (let j = i; j < end; j++) out.i64(connIds[j])
+    }
+    // offsets
+    await out.reserve(8)
+    out.u64(sizes.offsets)
+    for (let c = 0; c < mesh.nCells; c += GROUP) {
+      const end = Math.min(mesh.nCells, c + GROUP)
+      await out.reserve(8 * (end - c))
+      for (let j = c; j < end; j++) out.i64(connOffsets[j + 1])
+    }
+    // types
+    await out.reserve(8)
+    out.u64(sizes.types)
+    for (let c = 0; c < mesh.nCells; c += GROUP) {
+      const end = Math.min(mesh.nCells, c + GROUP)
+      await out.reserve(end - c)
+      for (let j = c; j < end; j++) out.u8(VTK_POLYHEDRON)
+    }
+    // faces: nFaces, then (nPts, ids...) per face — stored order under the
+    // owner cell, reversed under the neighbour, so every face points outward
+    await out.reserve(8)
+    out.u64(sizes.faces)
+    for (let c = 0; c < mesh.nCells; c++) {
+      const nf = cf.offsets[c + 1] - cf.offsets[c]
+      let bytes = 8 * (1 + nf)
+      for (let k = cf.offsets[c]; k < cf.offsets[c + 1]; k++) bytes += 8 * (mesh.faceOffsets[cf.faces[k] + 1] - mesh.faceOffsets[cf.faces[k]])
+      await out.reserve(bytes)
+      out.i64(nf)
+      for (let k = cf.offsets[c]; k < cf.offsets[c + 1]; k++) {
+        const f = cf.faces[k]
+        const a = mesh.faceOffsets[f]
+        const n = mesh.faceOffsets[f + 1] - a
+        out.i64(n)
+        if (mesh.owner[f] === c) {
+          for (let q = 0; q < n; q++) out.i64(mesh.faceIndices[a + q])
+        } else {
+          for (let q = n - 1; q >= 0; q--) out.i64(mesh.faceIndices[a + q])
+        }
+      }
+    }
+    // faceoffsets: cumulative length of the faces stream
+    await out.reserve(8)
+    out.u64(sizes.faceoffsets)
+    let acc = 0
+    for (let c = 0; c < mesh.nCells; c++) {
+      acc++
+      for (let k = cf.offsets[c]; k < cf.offsets[c + 1]; k++) acc += 1 + (mesh.faceOffsets[cf.faces[k] + 1] - mesh.faceOffsets[cf.faces[k]])
+      await out.reserve(8)
+      out.i64(acc)
+    }
+    // TIME
+    await out.reserve(16)
+    out.u64(8)
+    out.f64(opts.time)
+    // cell and point fields
+    for (const f of [...opts.cellData, ...opts.pointData]) {
       await out.reserve(8)
       out.u64(8 * f.data.length)
       for (let i = 0; i < f.data.length; i += GROUP) {

@@ -4,7 +4,7 @@
 // running a task inline when no worker can be started.
 import { Worker, isMainThread, parentPort } from 'node:worker_threads'
 import type { CartesianGrid } from '../formats/cartesian.js'
-import { readFoamField } from '../formats/foam.js'
+import { readFoamField, type FoamField } from '../formats/foam.js'
 import type { Bounds, SurfaceGeometry } from '../formats/geometry.js'
 import { detectLattice, polyMeshBoundarySurface, polyMeshCellCenters, readPolyMesh, type PolyMeshPatch } from '../formats/polymesh.js'
 import { readVtuCellData, readVtuInfo, vtuBoundarySurface, type VtuArrayInfo } from '../formats/vtu.js'
@@ -19,7 +19,7 @@ export interface FoamFieldResult {
   op: 'foamField'
   name: string
   class: string
-  components: 1 | 3
+  components: FoamField['components']
   count: number
   data: Float32Array
   uniform: boolean

@@ -40,6 +40,8 @@ export interface ResultRoot {
   vtk: Array<{ abs: string; kind: 'pvd' | 'vtu' | 'vtp' }>
   /** For 'vtu' / 'pvd': the file that was opened explicitly (it alone defines the time series). */
   vtkFile: string | null
+  /** The polyMesh directory when this root has one (constant/polyMesh, polyMesh, or the directory itself). */
+  polyMeshDirAbs: string | null
   hasPolyMesh: boolean
 }
 
@@ -157,8 +159,25 @@ async function listVtk(rootAbs: string): Promise<ResultRoot['vtk']> {
   return out
 }
 
-async function hasPolyMeshAt(rootAbs: string): Promise<boolean> {
-  return isFile(path.join(rootAbs, 'constant', 'polyMesh', 'points'))
+/**
+ * The polyMesh directory under `dirAbs`, probed as `<dir>/constant/polyMesh`,
+ * `<dir>/polyMesh` and `<dir>` itself (holding points/ directly, what a §C
+ * region directory does); null when none of them holds a points file (so a
+ * file path or a .msh yields null).
+ */
+export async function findPolyMeshDir(dirAbs: string): Promise<string | null> {
+  if (await isFile(path.join(dirAbs, 'constant', 'polyMesh', 'points'))) return path.join(dirAbs, 'constant', 'polyMesh')
+  if (await isFile(path.join(dirAbs, 'polyMesh', 'points'))) return path.join(dirAbs, 'polyMesh')
+  if (await isFile(path.join(dirAbs, 'points'))) return dirAbs
+  return null
+}
+
+/** `<x>/constant/polyMesh` -> `<x>`, `<x>/polyMesh` -> `<x>`, anything else -> itself: the foam case root of a polyMesh directory. */
+export function caseRootOfPolyMesh(polyMeshDirAbs: string): string {
+  let dir = polyMeshDirAbs
+  if (path.basename(dir) === 'polyMesh') dir = path.dirname(dir)
+  if (path.basename(dir) === 'constant') dir = path.dirname(dir)
+  return dir
 }
 
 /** `<dir>/<stem>_jsonc` -> `<dir>/<stem>.jsonc` (or .json) when that file exists. */
@@ -179,18 +198,19 @@ async function hasTimeDirs(rootAbs: string): Promise<boolean> {
 
 async function classifyDir(absPath: string): Promise<ResultRoot> {
   const caseJsoncAbs = await siblingCaseJsonc(absPath)
-  const [polyMesh, vtk] = await Promise.all([hasPolyMeshAt(absPath), listVtk(absPath)])
-  if (caseJsoncAbs) return { kind: 'outputDir', rootAbs: absPath, caseJsoncAbs, timeDir: null, vtk, vtkFile: null, hasPolyMesh: polyMesh }
+  const [polyMeshDir, vtk] = await Promise.all([findPolyMeshDir(absPath), listVtk(absPath)])
+  const polyMesh = polyMeshDir !== null
+  if (caseJsoncAbs) return { kind: 'outputDir', rootAbs: absPath, caseJsoncAbs, timeDir: null, vtk, vtkFile: null, polyMeshDirAbs: polyMeshDir, hasPolyMesh: polyMesh }
   if (polyMesh || (await isDir(path.join(absPath, 'system'))) || (await isDir(path.join(absPath, '0')))) {
-    return { kind: 'foamCase', rootAbs: absPath, caseJsoncAbs: null, timeDir: null, vtk, vtkFile: null, hasPolyMesh: polyMesh }
+    return { kind: 'foamCase', rootAbs: absPath, caseJsoncAbs: null, timeDir: null, vtk, vtkFile: null, polyMeshDirAbs: polyMeshDir, hasPolyMesh: polyMesh }
   }
-  if (await hasTimeDirs(absPath)) return { kind: 'outputDir', rootAbs: absPath, caseJsoncAbs: null, timeDir: null, vtk, vtkFile: null, hasPolyMesh: polyMesh }
+  if (await hasTimeDirs(absPath)) return { kind: 'outputDir', rootAbs: absPath, caseJsoncAbs: null, timeDir: null, vtk, vtkFile: null, polyMeshDirAbs: polyMeshDir, hasPolyMesh: polyMesh }
   if (Object.keys(await listVolFields(absPath)).length > 0) {
     const parentAbs = path.dirname(absPath)
     const parent = await classifyDir(parentAbs)
     return { ...parent, kind: 'timeDir', rootAbs: parentAbs, timeDir: path.basename(absPath) }
   }
-  return { kind: 'outputDir', rootAbs: absPath, caseJsoncAbs: null, timeDir: null, vtk, vtkFile: null, hasPolyMesh: polyMesh }
+  return { kind: 'outputDir', rootAbs: absPath, caseJsoncAbs: null, timeDir: null, vtk, vtkFile: null, polyMeshDirAbs: polyMeshDir, hasPolyMesh: polyMesh }
 }
 
 /** Classify what a path points at and where its results live (JSONC -> <stem>_jsonc/, case dir -> itself, time dir -> parent, ...). */
@@ -200,16 +220,16 @@ export async function resolveResultRoot(absPath: string): Promise<ResultRoot> {
   const ext = path.extname(absPath).toLowerCase()
   if (ext === '.jsonc' || ext === '.json') {
     const rootAbs = jsonCaseOutputDir(absPath)
-    const [vtk, polyMesh] = await Promise.all([listVtk(rootAbs), hasPolyMeshAt(rootAbs)])
-    return { kind: 'jsoncCase', rootAbs, caseJsoncAbs: absPath, timeDir: null, vtk, vtkFile: null, hasPolyMesh: polyMesh }
+    const [vtk, polyMeshDir] = await Promise.all([listVtk(rootAbs), findPolyMeshDir(rootAbs)])
+    return { kind: 'jsoncCase', rootAbs, caseJsoncAbs: absPath, timeDir: null, vtk, vtkFile: null, polyMeshDirAbs: polyMeshDir, hasPolyMesh: polyMeshDir !== null }
   }
   if (ext === '.vtu' || ext === '.pvd' || ext === '.vtp') {
     const dir = path.dirname(absPath)
     const rootAbs = path.basename(dir) === 'VTK' ? path.dirname(dir) : dir
-    const [caseJsoncAbs, polyMesh, listed] = await Promise.all([siblingCaseJsonc(rootAbs), hasPolyMeshAt(rootAbs), listVtk(rootAbs)])
+    const [caseJsoncAbs, polyMeshDir, listed] = await Promise.all([siblingCaseJsonc(rootAbs), findPolyMeshDir(rootAbs), listVtk(rootAbs)])
     const kind = ext === '.pvd' ? 'pvd' : 'vtu'
     const vtk = listed.some((v) => v.abs === absPath) ? listed : [{ abs: absPath, kind: ext.slice(1) as 'pvd' | 'vtu' | 'vtp' }, ...listed]
-    return { kind, rootAbs, caseJsoncAbs, timeDir: null, vtk, vtkFile: absPath, hasPolyMesh: polyMesh }
+    return { kind, rootAbs, caseJsoncAbs, timeDir: null, vtk, vtkFile: absPath, polyMeshDirAbs: polyMeshDir, hasPolyMesh: polyMeshDir !== null }
   }
   throw new Error(`not a case, result directory or VTK file: ${absPath}`)
 }
