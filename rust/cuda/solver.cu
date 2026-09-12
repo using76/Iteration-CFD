@@ -600,6 +600,28 @@ extern "C" __global__ void solBroadcastScaled
 }
 
 
+//- v = psi outside [offset, offset+n), xRef[0]*factor inside it: the masked
+//  reference vector of the region's own system (see src/solver.rs
+//  device_norm_factor_ranged). With offset 0 and n == nCells this writes
+//  exactly what solBroadcastScaled writes, which is what keeps the ranged
+//  norm over the whole system bitwise equal to the global one.
+extern "C" __global__ void solMaskedReference
+(
+    ofscalar* __restrict__ dst,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ xRef,
+    ofscalar factor,
+    oflabel offset,
+    oflabel n,
+    oflabel nCells
+)
+{
+    const oflabel i = (oflabel)OFGPU_TID;
+    if (i >= nCells) return;
+    dst[i] = (i >= offset && i < offset + n) ? xRef[0]*factor : psi[i];
+}
+
+
 // ---- preconditioners -----------------------------------------------------
 //
 //  Only two exist here: none, and Jacobi. An incomplete factorisation (Saad

@@ -1928,3 +1928,164 @@ fn the_solid_side_iteration_replays_bitwise() {
     .expect("SPEC-LIT 81.7: the solid side must capture and replay bitwise");
     println!("  conjugate heat: {report}");
 }
+
+// ==========================================================================
+//  The per-region residual (SPEC-LIT 8.4 on each region's own rows)
+// ==========================================================================
+
+/// The host `CpuLdu` of the matrix AS SOLVED, downloaded from the device -
+/// what the per-region partition identity is measured on.
+fn host_ldu(gpu: &Gpu, cht: &ConjugateHeat<'_>) -> crate::reference::CpuLdu {
+    let hl = crate::ldu::HostLduMatrix::download(gpu, cht.matrix()).expect("host ldu");
+    crate::reference::CpuLdu {
+        n_cells: hl.n_cells,
+        n_internal_faces: hl.n_internal_faces,
+        n_boundary_faces: hl.n_boundary_faces,
+        diag: hl.diag,
+        upper: hl.upper,
+        lower: hl.lower,
+        source: hl.source,
+        internal_coeffs: hl.internal_coeffs,
+        boundary_coeffs: hl.boundary_coeffs,
+    }
+}
+
+/// **Gate 1's rig, read through the per-region numbers.** The region
+/// residuals partition the global one (`r_g N_g = sum_k r_k N_k`), each
+/// region's `converged` is its own criterion, and both regions see the same
+/// iteration count - there is one solve.
+#[test]
+fn the_per_region_residuals_partition_the_global_residual() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(12, 0.010, 9, 0.020);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 1.4, 148.0, 380.0, 300.0);
+    cht.controls_mut().solver.tolerance = 1e-6;
+
+    let perf = cht.correct(&gpu).expect("solve");
+    assert_eq!(perf.regions.len(), tm.regions.len(), "one entry per region");
+
+    let ld = host_ldu(&gpu, &cht);
+    let psi = gpu.download(&cht.field().f).expect("T");
+
+    let r_g = crate::reference::residual(&psi, &ld, &tm.host) as f64;
+    let n_g = crate::reference::norm_factor(&psi, &ld, &tm.host) as f64;
+    let mut sum = 0.0;
+    for reg in tm.regions.iter() {
+        let rows = reg.cells();
+        let r_k = crate::reference::residual_ranged(&psi, &ld, &tm.host, rows.clone()) as f64;
+        let n_k = crate::reference::norm_factor_ranged(&psi, &ld, &tm.host, rows) as f64;
+        sum += r_k * n_k;
+    }
+
+    let lhs = r_g * n_g;
+    let err = if lhs > 0.0 { (lhs - sum).abs() / lhs } else { sum };
+    assert!(err <= 1e-10, "partition error {err:e}");
+
+    for (k, rp) in perf.regions.iter().enumerate() {
+        assert_eq!(
+            rp.converged,
+            rp.final_residual <= 1e-6,
+            "region {k}: converged must be its own abs criterion"
+        );
+        assert_eq!(rp.n_iterations, perf.global.n_iterations, "one solve");
+    }
+
+    println!("  per-region residuals on Gate 1's rig (r_g = {r_g:.3e}):");
+    for (k, rp) in perf.regions.iter().enumerate() {
+        println!(
+            "    region {} '{}': initial {:.3e} -> final {:.3e}, {} iterations, converged {}",
+            k, tm.regions[k].name, f64::from(rp.initial_residual),
+            f64::from(rp.final_residual), rp.n_iterations, rp.converged
+        );
+    }
+}
+
+/// With `report_residuals` off nothing about a region is measured - not the
+/// residual, not the row scale - and "not looked at" is not "converged".
+/// The capture gate's controls: this is the configuration a CUDA graph runs.
+#[test]
+fn no_region_residual_is_measured_when_residuals_are_not_reported() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(12, 0.010, 9, 0.020);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 1.4, 148.0, 380.0, 300.0);
+
+    let s = &mut cht.controls_mut().solver;
+    s.report_residuals = false;
+    s.fixed_iters = true;
+    s.max_iter = 4;
+    s.solver = LinearSolverKind::PBiCGStab;
+    s.precon = Preconditioner::Dilu;
+
+    let perf = cht.correct(&gpu).expect("solve");
+    assert!(perf.regions.is_empty(), "no region number without reporting");
+    assert!(!perf.all_converged(), "unmeasured is not converged");
+    assert!(cht.row_scale().is_none(), "row scale is report-only too");
+}
+
+/// The row scale (the region's MEAN `|diag|`) of the silicon slab over the
+/// mould slab is the conductivity ratio 200, within 5 %: `diag` of an
+/// interior cell is `2 k |Sf|/Delta`, equal cells, so the ratio of the MEANS
+/// is `k_si/k_mc` up to the two end cells and the interface cell, `O(1/n)`
+/// - a plain sum would carry the 20:40 cell-count ratio and stop meaning
+/// conductivity at all.
+///
+/// An epoxy mould compound conducts 0.6-0.9 W/(m K); 0.74 is chosen so the
+/// ratio against silicon's 148 is EXACTLY 200 - the number the gate wants,
+/// not a datasheet value.
+#[test]
+fn the_row_scale_ratio_is_the_conductivity_ratio() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(20, 0.001, 40, 0.002);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 148.0, 0.74, 380.0, 300.0);
+
+    cht.correct(&gpu).expect("solve");
+    let rs = cht.row_scale().expect("measured on the first reporting correct");
+    let ratio = rs[0] / rs[1];
+    println!("  row scale ratio silicon/mould: {ratio:.4} (conductivity ratio 200)");
+    assert!(
+        (ratio / 200.0 - 1.0).abs() <= 0.05,
+        "row scale ratio {ratio} vs conductivity ratio 200"
+    );
+}
+
+/// The bitwise claim on a matrix that HAS coupled interface entries
+/// (`b_nbr_cell >= 0`), which the dense rig of
+/// `the_ranged_norm_over_the_full_range_is_the_global_norm_to_the_bit` does
+/// not: over the full range, the ranged norm is the global norm, to the bit.
+#[test]
+fn the_full_range_norm_is_bitwise_the_global_one_on_a_conjugate_matrix() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(12, 0.010, 9, 0.020);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 1.4, 148.0, 380.0, 300.0);
+    cht.correct(&gpu).expect("solve");
+
+    let k = crate::solver::SolverKernels::new(&gpu).expect("kernels");
+    let mut w = crate::solver::SolverWorkspace::for_mesh(&gpu, &gm).expect("workspace");
+    let n = tm.host.n_cells;
+
+    crate::solver::device_norm_factor(&gpu, &k, &mut w, &cht.field().f, cht.matrix(), &gm)
+        .expect("global");
+    let g = gpu.download(&w.norm_factor).expect("dl")[0];
+    let apsi = gpu.download(&w.apsi).expect("dl");
+
+    crate::solver::device_norm_factor_ranged(
+        &gpu, &k, &mut w, &cht.field().f, cht.matrix(), &gm, 0, n,
+    )
+    .expect("ranged");
+    let gr = gpu.download(&w.norm_factor).expect("dl")[0];
+    let apsir = gpu.download(&w.apsi).expect("dl");
+
+    assert_eq!(g.to_bits(), gr.to_bits(), "norm factor on a coupled matrix");
+    assert!(
+        apsi.iter().zip(&apsir).all(|(x, y)| x.to_bits() == y.to_bits()),
+        "apsi differs on a coupled matrix"
+    );
+}

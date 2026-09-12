@@ -2616,6 +2616,11 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== conjugate heat transfer (SPEC-LIT 46, 47, 48) ===");
     check_conjugate_heat_transfer(c, &gpu)?;
 
+    // The per-region residual - planned as the section after 92; a later
+    // unit writes the heading, this gate runs the numbers.
+    println!("\n=== the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows) ===");
+    check_per_region_residual(c, &gpu)?;
+
     // SPEC-LIT S59/S60 - the FLUID side of that interface, and S47.12's Gate
     // 5, which S47.14 recorded as not run.
     println!("
@@ -4609,6 +4614,228 @@ fn check_conjugate_heat_transfer(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         );
     }
 
+
+    Ok(())
+}
+
+
+/// **Gate 93-B - the per-region residual on a 200:1 conductivity stack.**
+/// Silicon on mould compound, the series slab of Carslaw & Jaeger ch. I; both
+/// numbers of the plan: what the nominal global 1e-6 says about each region,
+/// and what it takes to give every region 1e-8. Check rows only: a gate that
+/// passes registers nothing (SPEC-LIT 69.2).
+fn check_per_region_residual(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::{
+        mark_coupled_faces, Conduction, ConjugateControls, ConjugateHeat, InterfaceRequest,
+        PairingTolerances, RegionInput, RegionKind, SolidMaterial, ThermalMesh,
+    };
+    use ofgpu::field::BcKind;
+    use ofgpu::io::case::{LinearSolverKind, Preconditioner};
+    use ofgpu::ldu::HostLduMatrix;
+
+    /// A fresh solve at `tol`: new, mark, the two fixed values, seed 340.
+    fn build<'m>(
+        gpu: &Gpu,
+        gm: &'m GpuMesh,
+        tm: &ThermalMesh,
+        cond: &Conduction,
+        tol: Scalar,
+    ) -> Result<ConjugateHeat<'m>> {
+        let ctrl = ConjugateControls {
+            solver: SolverControls {
+                solver: LinearSolverKind::PCG,
+                precon: Preconditioner::Dic,
+                tolerance: tol,
+                rel_tol: 0.0,
+                max_iter: 4000,
+                ..SolverControls::default()
+            },
+            ..ConjugateControls::default()
+        };
+        let mut cht = ConjugateHeat::new(gpu, gm, tm, cond, ctrl)?;
+        mark_coupled_faces(gpu, cht.field_mut(), tm)?;
+
+        // T_hot on silicon xMin, T_cold on mould xMax; every other patch
+        // stays zero-gradient.
+        for (region, patch, v) in
+            [(0usize, "xMin", 380.0 as Scalar), (1usize, "xMax", 300.0 as Scalar)]
+        {
+            let mut kind = gpu.download(&cht.field().bc_kind).expect("kind");
+            let mut fr = gpu.download(&cht.field().fr).expect("fr");
+            let mut rv = gpu.download(&cht.field().ref_value).expect("rv");
+            for bf in tm.patch_range(region, patch)? {
+                kind[bf] = BcKind::FixedValue as Label;
+                fr[bf] = 1.0;
+                rv[bf] = v;
+            }
+            gpu.write(&mut cht.field_mut().bc_kind, &kind)?;
+            gpu.write(&mut cht.field_mut().fr, &fr)?;
+            gpu.write(&mut cht.field_mut().ref_value, &rv)?;
+        }
+
+        let seed = vec![340.0 as Scalar; tm.host.n_cells];
+        let f = cht.field_mut();
+        gpu.write(&mut f.f, &seed)?;
+        gpu.write(&mut f.f0, &seed)?;
+        gpu.write(&mut f.f00, &seed)?;
+        Ok(cht)
+    }
+
+    c.note(
+        "Gate 93-B: silicon (k = 148) on mould compound (k = 0.74), 200:1, 1 mm / 2 mm, \
+         20 + 40 cells, T = 380 / 300 K",
+    );
+
+    // The series slab: silicon 1 mm (20 cells) on mould 2 mm (40 cells),
+    // 5.0e-5 m cells in BOTH, so the interface has 4 faces and the FV
+    // scheme represents the piecewise-linear closed form exactly - the only
+    // error left is the linear solve's.
+    let l_si = 1.0e-3 as Scalar;
+    let l_mc = 2.0e-3 as Scalar;
+    let (k_si, k_mc) = (148.0 as Scalar, 0.74 as Scalar);
+    let (t_hot, t_cold) = (380.0 as Scalar, 300.0 as Scalar);
+
+    let a = cht_block([20, 4, 1], Vec3::ZERO, Vec3::new(l_si, 2.0e-4, 5.0e-5))?;
+    let b = cht_block(
+        [40, 4, 1],
+        Vec3::new(l_si, 0.0, 0.0),
+        Vec3::new(l_si + l_mc, 2.0e-4, 5.0e-5),
+    )?;
+    let tm = ThermalMesh::build(
+        &[
+            RegionInput { name: "silicon".into(), kind: RegionKind::Solid, mesh: &a },
+            RegionInput { name: "mould".into(), kind: RegionKind::Solid, mesh: &b },
+        ],
+        &[InterfaceRequest::new(0, "xMax", 1, "xMin", 0.0)],
+        PairingTolerances::default(),
+    )?;
+    // An epoxy mould compound conducts 0.6-0.9 W/(m K); 0.74 is chosen for
+    // the exact 200:1 ratio against silicon, not read from a datasheet.
+    let cond = Conduction::uniform_per_region(
+        &tm,
+        &[
+            SolidMaterial::isotropic("silicon", 2330.0, 700.0, k_si),
+            SolidMaterial::isotropic("mould", 1900.0, 1000.0, k_mc),
+        ],
+    )?;
+    let gm = GpuMesh::upload(gpu, &tm.host)?;
+
+    // ---- leg A - the nominal global 1e-6 --------------------------------
+    let mut cht = build(gpu, &gm, &tm, &cond, 1.0e-6)?;
+    let perf_a = cht.correct(gpu)?;
+    c.require(
+        "Gate 93-B leg A: the global solve met its nominal tolerance 1e-6",
+        perf_a.global.converged,
+    );
+
+    // The partition identity, on the matrix AS SOLVED, downloaded to the
+    // host mirror.
+    let hl = HostLduMatrix::download(gpu, cht.matrix())?;
+    let ld = cpu::CpuLdu {
+        n_cells: hl.n_cells,
+        n_internal_faces: hl.n_internal_faces,
+        n_boundary_faces: hl.n_boundary_faces,
+        diag: hl.diag,
+        upper: hl.upper,
+        lower: hl.lower,
+        source: hl.source,
+        internal_coeffs: hl.internal_coeffs,
+        boundary_coeffs: hl.boundary_coeffs,
+    };
+    let psi = gpu.download(&cht.field().f)?;
+    // r_g and r_k are BOTH taken on the same converged field, through the
+    // host mirror. The solve's own `global.final_residual` is scaled by the
+    // norm of the INITIAL field (the relative-to-start convention), so
+    // mixing it with the converged field's norm factors would break the
+    // identity by exactly that scale ratio - 1.26 here.
+    let n_g = cpu::norm_factor(&psi, &ld, &tm.host) as f64;
+    let r_g = cpu::residual(&psi, &ld, &tm.host) as f64;
+    let lhs = r_g * n_g;
+    let mut sum = 0.0;
+    for reg in tm.regions.iter() {
+        let rows = reg.cells();
+        sum += cpu::residual_ranged(&psi, &ld, &tm.host, rows.clone()) as f64
+            * cpu::norm_factor_ranged(&psi, &ld, &tm.host, rows) as f64;
+    }
+    let err = if lhs > 0.0 { (lhs - sum).abs() / lhs } else { sum };
+    c.check(
+        "Gate 93-B leg A: r_g N_g = sum_k r_k N_k - the region residuals partition the global one",
+        err,
+        1e-10,
+    );
+
+    // The row scale: the mean |diag| per region of the matrix as solved.
+    // Interior diag is `2 k |Sf|/Delta` on BOTH sides (equal cells), so the
+    // ratio of the means is the conductivity ratio 200 up to the end cells
+    // and the interface cell, O(1/n).
+    let rs = cht.row_scale().expect("measured on the reporting pass");
+    let ratio = rs[0] / rs[1];
+    c.check(
+        "Gate 93-B: row scale silicon/mould = the conductivity ratio 200, within 5 %",
+        (ratio / 200.0 - 1.0).abs(),
+        0.05,
+    );
+
+    // The two numbers of the plan, one line per region.
+    let max_rs = rs.iter().copied().fold(0.0 as Scalar, Scalar::max);
+    for (k, reg) in tm.regions.iter().enumerate() {
+        let rp = &perf_a.regions[k];
+        c.note(&format!(
+            "Gate 93-B leg A: region '{}': initial {:.3e} -> final {:.3e} ({:.2e} of r_g), \
+             row-scale share {:.3e}",
+            reg.name,
+            f64::from(rp.initial_residual),
+            f64::from(rp.final_residual),
+            if r_g > 0.0 { f64::from(rp.final_residual) / r_g } else { 0.0 },
+            f64::from(rs[k] / max_rs),
+        ));
+    }
+
+    // ---- leg B - tighten the GLOBAL tolerance until every region is 1e-8
+    let q_exact = (t_hot - t_cold) / (l_si / k_si + l_mc / k_mc);
+    let t_i_exact = t_hot - q_exact * l_si / k_si;
+    let area: Scalar = tm.pairs.iter().map(|p| tm.host.b_mag_sf[p.bf_a as usize]).sum();
+
+    let mut found = false;
+    let (mut found_tol, mut found_iters) = (0.0 as Scalar, 0usize);
+    let (mut q_got, mut t_i_got) = (0.0 as Scalar, 0.0 as Scalar);
+    for &tol in &[1.0e-8, 1.0e-10, 1.0e-12, 1.0e-14] {
+        let mut cht = build(gpu, &gm, &tm, &cond, tol)?;
+        let perf = cht.correct(gpu)?;
+        if perf.regions.iter().all(|rp| rp.final_residual <= 1.0e-8) {
+            found = true;
+            found_tol = tol;
+            found_iters = perf.global.n_iterations;
+            let flux = cht.interface_flux(gpu)?;
+            q_got = -flux.into_a / area;
+            let bt = gpu.download(&cht.field().bf)?;
+            let n_p = tm.pairs.len() as Scalar;
+            t_i_got = tm.pairs.iter().map(|p| bt[p.bf_a as usize]).sum::<Scalar>() / n_p;
+            break;
+        }
+    }
+
+    c.require(
+        "Gate 93-B leg B: some global tolerance in [1e-8 .. 1e-14] gives every region 1e-8 on its own rows",
+        found,
+    );
+    if found {
+        c.note(&format!(
+            "Gate 93-B leg B: the global tolerance that gave every region 1e-8 was {found_tol:e} \
+             ({found_iters} iterations; leg A took {})",
+            perf_a.global.n_iterations
+        ));
+    }
+    c.check(
+        "Gate 93-B leg B: q = dT/(L_si/k_si + L_mc/k_mc) - the series slab",
+        (q_got / q_exact - 1.0).abs(),
+        1e-5,
+    );
+    c.check(
+        "Gate 93-B leg B: the interface temperature is T_hot - q L_si/k_si",
+        (t_i_got - t_i_exact).abs() / (t_hot - t_cold),
+        1e-5,
+    );
 
     Ok(())
 }

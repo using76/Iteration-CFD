@@ -334,6 +334,64 @@ fn report(low: &LoweredChtCase, sol: &ChtSolution) {
     }
 
     println!("\n  steps {} | last residual {:.3e}", sol.steps, f64::from(sol.residual));
+
+    // The per-region story behind that global number (the §13.4.2 rule of
+    // saying what was used, applied to the linear solve): one line per
+    // region, and a converged verdict that has LOOKED at every region
+    // rather than one that only saw the global residual.
+    if sol.region_residuals.is_empty() {
+        println!(
+            "  per-region residuals: not measured (reportResiduals is off); converged: not observed"
+        );
+    } else {
+        let regions = &sol.mesh.regions;
+        let w = regions.iter().map(|r| r.name.len()).max().unwrap_or(0) + 2;
+        let max_rs = sol.region_row_scale.iter().copied().fold(0.0 as Scalar, Scalar::max);
+        println!(
+            "\n  linear solve per region (SPEC-LIT 8.4 on each region's own rows; \
+             row scale = mean |diag| per cell; tolerance {:.3e}, relTol {:.3e}):",
+            f64::from(low.solver.tolerance),
+            f64::from(low.solver.rel_tol)
+        );
+        for (i, reg) in regions.iter().enumerate() {
+            let rp = &sol.region_residuals[i];
+            let share = if max_rs > 0.0 {
+                sol.region_row_scale[i] / max_rs
+            } else {
+                0.0
+            };
+            println!(
+                "    region {:<w$} row scale {:.3e} of largest | residual initial {:.3e} -> \
+                 final {:.3e} | {}",
+                format!("'{}'", reg.name),
+                f64::from(share),
+                f64::from(rp.initial_residual),
+                f64::from(rp.final_residual),
+                if rp.converged { "met" } else { "NOT met" },
+                w = w
+            );
+        }
+        if sol.converged {
+            println!("  converged: yes");
+        } else if let Some((i, rp)) = sol
+            .region_residuals
+            .iter()
+            .enumerate()
+            .find(|(_, rp)| !rp.converged)
+        {
+            println!(
+                "  converged: no - region '{}' final {:.3e} > tolerance {:.3e}; the global \
+                 residual {:.3e} does not see it",
+                regions[i].name,
+                f64::from(rp.final_residual),
+                f64::from(low.solver.tolerance),
+                f64::from(sol.residual)
+            );
+        } else {
+            println!("  converged: no - the global solve did not converge");
+        }
+    }
+
     for (i, name) in low.region_names.iter().enumerate() {
         let (lo, hi) = sol.region_range(i);
         println!(

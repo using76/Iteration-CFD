@@ -1414,6 +1414,46 @@ pub fn residual(psi: &[Scalar], a: &CpuLdu, m: &HostMesh) -> Scalar {
     s / norm_factor(psi, a, m)
 }
 
+/// SPEC-LIT section 8.4 on the rows `rows` of `a`, as the region's own
+/// system: `x_ref` is the mean over `rows`, the reference vector is `psi`
+/// outside `rows` and `x_ref` inside, and both sums run over `rows` only.
+/// A region's rows are the contiguous cell range
+/// `ThermalRegion::cells()` of the concatenated mesh.
+///
+/// `rows == 0..m.n_cells` is [`norm_factor`] to the bit: the same sum, in
+/// the same order, over the same terms.
+pub fn norm_factor_ranged(psi: &[Scalar], a: &CpuLdu, m: &HostMesh, rows: std::ops::Range<usize>) -> Scalar {
+    if rows.is_empty() {
+        return Scalar::EPSILON;
+    }
+
+    let x_ref = psi[rows.clone()].iter().sum::<Scalar>() / (rows.len() as Scalar);
+    let mut v = psi.to_vec();
+    for c in rows.clone() {
+        v[c] = x_ref;
+    }
+
+    let mut a_psi = Vec::new();
+    amul(&mut a_psi, psi, a, m);
+    let mut a_v = Vec::new();
+    amul(&mut a_v, &v, a, m);
+
+    let mut norm = 0.0 as Scalar;
+    for c in rows {
+        norm += (a_psi[c] - a_v[c]).abs() + (a.source[c] - a_v[c]).abs();
+    }
+    norm + Scalar::EPSILON
+}
+
+/// `sum_rows |b - A psi| / norm_factor_ranged` - the region's own residual
+/// of SPEC-LIT section 8.4.
+pub fn residual_ranged(psi: &[Scalar], a: &CpuLdu, m: &HostMesh, rows: std::ops::Range<usize>) -> Scalar {
+    let mut a_psi = Vec::new();
+    amul(&mut a_psi, psi, a, m);
+    let s: Scalar = rows.clone().map(|c| (a.source[c] - a_psi[c]).abs()).sum();
+    s / norm_factor_ranged(psi, a, m, rows)
+}
+
 // ==========================================================================
 //  Tests
 //
@@ -1663,5 +1703,40 @@ mod tests {
             }
         }
         assert!((a.source[0] - a.diag[0] * 3.25).abs() < 1e-12);
+    }
+
+    /// The ranged host norm over EVERY row is `norm_factor` exactly, and the
+    /// region residuals partition the global one - the host mirror of the
+    /// device's ranged reduction.
+    #[test]
+    fn the_ranged_norm_over_every_row_is_the_norm_to_the_bit() {
+        let m = mesh("ranged", [3, 3, 2], false, 1.0);
+
+        let gamma: Vec<Scalar> = m.mag_sf.to_vec();
+        let b_gamma: Vec<Scalar> = m.b_mag_sf.to_vec();
+        let bc = CpuScalarBc::dirichlet(&vec![0.0; m.n_boundary_faces]);
+
+        let mut a = CpuLdu::new(&m);
+        fvm_laplacian(&mut a, &m, &gamma, &b_gamma, &bc, -1.0);
+        let su: Vec<Scalar> = (0..m.n_cells).map(|c| 1.0 + 0.1 * (c as Scalar)).collect();
+        fvm_su(&mut a, &m, &su, 1.0);
+        add_boundary_contributions(&mut a, &m);
+
+        let n = m.n_cells;
+        let psi: Vec<Scalar> = (0..n).map(|c| 1.0 + 0.3 * (c as Scalar).sin()).collect();
+
+        let full = norm_factor_ranged(&psi, &a, &m, 0..n);
+        let global = norm_factor(&psi, &a, &m);
+        assert_eq!(full, global, "ranged over 0..n must be the norm, to the bit");
+
+        let r_g = residual(&psi, &a, &m);
+        let lhs = r_g * global;
+        let mut sum = 0.0 as Scalar;
+        for rows in [0..5, 5..n] {
+            sum += residual_ranged(&psi, &a, &m, rows.clone())
+                * norm_factor_ranged(&psi, &a, &m, rows);
+        }
+        let err = (lhs - sum).abs() / lhs;
+        assert!(err <= 1e-12, "host partition error {err:e}");
     }
 }

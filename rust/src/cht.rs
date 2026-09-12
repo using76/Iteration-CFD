@@ -1502,6 +1502,36 @@ impl Default for ConjugateControls {
     }
 }
 
+/// What one [`ConjugateHeat::correct`] did: the global solve, and SPEC-LIT
+/// §8.4 applied to each region's own rows (the ranged reduction of
+/// `solver::residual_ranged`). `regions` is empty when
+/// `SolverControls::report_residuals` is off - the per-region numbers cost a
+/// host round-trip each and are refused inside a capture the same way the
+/// global residual is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConjugatePerformance {
+    pub global: SolverPerformance,
+    /// One per `ThermalMesh::regions`, in that order. `initial_residual`/
+    /// `final_residual` are the region's own §8.4 numbers before and after
+    /// the linear solve; `n_iterations` is the global count (there is one
+    /// solve); `converged` is `finish_solve`'s `abs || rel` criterion on the
+    /// region's own numbers.
+    pub regions: Vec<SolverPerformance>,
+}
+
+impl ConjugatePerformance {
+    /// True only when the global solve converged AND every region was
+    /// measured AND met the criterion. An unmeasured run
+    /// (`report_residuals` off) is `false`: "not looked at" is not
+    /// "converged" (the rule `SolverPerformance::converged` already
+    /// follows).
+    pub fn all_converged(&self) -> bool {
+        self.global.converged
+            && self.regions.iter().all(|r| r.converged)
+            && !self.regions.is_empty()
+    }
+}
+
 /// `(rho c) dT/dt = div(K grad T) + q'''` over a concatenated fluid+solid
 /// mesh, with the interface of §47 - SPEC-LIT (S46.1) and (S47.10) with the
 /// convective term left out.
@@ -1537,6 +1567,13 @@ pub struct ConjugateHeat<'m> {
     timek: TimeKernels,
     solk: SolverKernels,
     ws: SolverWorkspace,
+
+    /// The regions of the thermal mesh, in build order - each one's rows are
+    /// the contiguous cell range its per-region residual reduces over.
+    regions: Vec<ThermalRegion>,
+    /// The mean `|diag|` per cell of each region, of the matrix as solved
+    /// (report-only); `None` until the first `correct` that reports.
+    row_scale: Option<Vec<Scalar>>,
 }
 
 impl<'m> ConjugateHeat<'m> {
@@ -1567,6 +1604,8 @@ impl<'m> ConjugateHeat<'m> {
             timek: TimeKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
             ws: SolverWorkspace::for_mesh(gpu, m)?,
+            regions: tm.regions.clone(),
+            row_scale: None,
         })
     }
 
@@ -1620,6 +1659,18 @@ impl<'m> ConjugateHeat<'m> {
 
     pub fn controls_mut(&mut self) -> &mut ConjugateControls {
         &mut self.ctrl
+    }
+
+    /// The regions of the thermal mesh, in build order.
+    pub fn regions(&self) -> &[ThermalRegion] {
+        &self.regions
+    }
+
+    /// The region's mean `|diag|` of the matrix as solved (the row scale;
+    /// `Σ|diag|` divided by the region's cell count); `None` until the first
+    /// `correct` that reports.
+    pub fn row_scale(&self) -> Option<&[Scalar]> {
+        self.row_scale.as_deref()
     }
 
     /// Rewrite the interface triples from the CURRENT `T`, then evaluate the
@@ -1704,11 +1755,18 @@ impl<'m> ConjugateHeat<'m> {
     /// (SPEC-LIT §47.3), so the coupled system is solved as one matrix and
     /// one pass is the whole of it for a linear problem. That is the claim
     /// §47.12's Gate 1 measures.
-    pub fn correct(&mut self, gpu: &Gpu) -> Result<SolverPerformance> {
+    pub fn correct(&mut self, gpu: &Gpu) -> Result<ConjugatePerformance> {
         let m = self.m;
         if m.n_cells == 0 {
-            return Ok(SolverPerformance::default());
+            return Ok(ConjugatePerformance::default());
         }
+
+        // The per-region numbers cost one host round-trip each, so they are
+        // gated on `report_residuals` exactly as `finish_solve` is - and a
+        // capture never pays for them.
+        let measure = self.ctrl.solver.report_residuals;
+        let mut initial: Vec<Scalar> = Vec::new();
+        let mut regions: Vec<SolverPerformance> = Vec::new();
 
         let mut perf = SolverPerformance::default();
         for _pass in 0..=self.ctrl.n_non_orth_correctors {
@@ -1720,6 +1778,34 @@ impl<'m> ConjugateHeat<'m> {
             }
             ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
 
+            initial.clear();
+            if measure {
+                // The row scale is a property of the ASSEMBLED matrix, so it
+                // is measured once, on the first reporting pass.
+                if self.row_scale.is_none() {
+                    let mut rs = Vec::with_capacity(self.regions.len());
+                    for r in &self.regions {
+                        let (o, n) = (r.cell_offset, r.n_cells);
+                        // The MEAN |diag| of the region, not the sum: an
+                        // interior cell's diag is `2 k |Sf|/Delta`, so the
+                        // ratio of the means is the ratio of the `k`s, while
+                        // a sum would also carry the regions' cell-count
+                        // ratio and stop meaning conductivity at all.
+                        let sum = solver::abs_sum_ranged(
+                            gpu, &self.solk, &mut self.ws, &self.a.diag, o, n,
+                        )?;
+                        rs.push(if n == 0 { 0.0 } else { sum / n as Scalar });
+                    }
+                    self.row_scale = Some(rs);
+                }
+                for i in 0..self.regions.len() {
+                    let (o, n) = (self.regions[i].cell_offset, self.regions[i].n_cells);
+                    initial.push(solver::residual_ranged(
+                        gpu, &self.solk, &mut self.ws, &self.t.f, &self.a, m, o, n,
+                    )?);
+                }
+            }
+
             perf = solver::solve(
                 gpu,
                 &self.solk,
@@ -1729,6 +1815,24 @@ impl<'m> ConjugateHeat<'m> {
                 &mut self.ws,
                 &self.ctrl.solver,
             )?;
+
+            regions.clear();
+            if measure {
+                for i in 0..self.regions.len() {
+                    let (o, n) = (self.regions[i].cell_offset, self.regions[i].n_cells);
+                    let last = solver::residual_ranged(
+                        gpu, &self.solk, &mut self.ws, &self.t.f, &self.a, m, o, n,
+                    )?;
+                    let met = Self::region_met(&self.ctrl.solver, initial[i], last);
+                    regions.push(SolverPerformance {
+                        initial_residual: initial[i],
+                        final_residual: last,
+                        n_iterations: perf.n_iterations,
+                        converged: met,
+                    });
+                }
+            }
+
             field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)?;
         }
 
@@ -1741,7 +1845,14 @@ impl<'m> ConjugateHeat<'m> {
         // consistent with the solution that was just computed. It is NOT a
         // second coupling iteration: `T` is not touched.
         self.update_interfaces(gpu)?;
-        Ok(perf)
+        Ok(ConjugatePerformance { global: perf, regions })
+    }
+
+    /// `finish_solve`'s criterion, applied to one region's own numbers: the
+    /// absolute tolerance, or the relative one against the region's own
+    /// initial residual.
+    fn region_met(ctrl: &SolverControls, initial: Scalar, last: Scalar) -> bool {
+        last <= ctrl.tolerance || (ctrl.rel_tol > 0.0 && last <= ctrl.rel_tol * initial)
     }
 
     /// Rotate the time levels, for a transient run.
@@ -1792,6 +1903,15 @@ pub struct ChtSolution {
     pub steps: usize,
     /// The last linear solve's final residual.
     pub residual: Scalar,
+    /// One per region, in `mesh.regions` order: the LAST step's per-region
+    /// §8.4 residuals (`ConjugatePerformance::regions`); empty when
+    /// residuals were not reported.
+    pub region_residuals: Vec<SolverPerformance>,
+    /// The region's mean `|diag|` of the matrix as solved; empty when
+    /// residuals were not reported.
+    pub region_row_scale: Vec<Scalar>,
+    /// `ConjugatePerformance::all_converged` of the last step.
+    pub converged: bool,
 }
 
 impl ChtSolution {
@@ -1989,10 +2109,9 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
         n as usize
     };
 
-    let mut residual = 0.0;
+    let mut last = ConjugatePerformance::default();
     for _ in 0..steps {
-        let perf = cht.correct(gpu)?;
-        residual = perf.final_residual;
+        last = cht.correct(gpu)?;
         if !case.steady {
             cht.advance_time_step(gpu)?;
         }
@@ -2003,7 +2122,18 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     let t = gpu.download(&cht.field().f)?;
     let bt = gpu.download(&cht.field().bf)?;
 
-    Ok(ChtSolution { mesh: tm, t, bt, interface, pair_flux, steps, residual })
+    Ok(ChtSolution {
+        mesh: tm,
+        t,
+        bt,
+        interface,
+        pair_flux,
+        steps,
+        residual: last.global.final_residual,
+        region_residuals: last.regions.clone(),
+        region_row_scale: cht.row_scale().map(<[Scalar]>::to_vec).unwrap_or_default(),
+        converged: last.all_converged(),
+    })
 }
 
 pub mod flow;

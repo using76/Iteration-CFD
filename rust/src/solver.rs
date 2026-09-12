@@ -179,6 +179,9 @@ pub struct SolverKernels {
     pub copy: CudaFunction,
     pub sub: CudaFunction,
     pub broadcast_scaled: CudaFunction,
+    /// The masked reference vector of a §47.4 region's own system; see
+    /// [`device_norm_factor_ranged`].
+    pub masked_reference: CudaFunction,
     pub invert_diag: CudaFunction,
     pub precond_jacobi: CudaFunction,
     pub p_update: CudaFunction,
@@ -219,6 +222,7 @@ impl SolverKernels {
             copy: k.func("solCopy")?,
             sub: k.func("solSub")?,
             broadcast_scaled: k.func("solBroadcastScaled")?,
+            masked_reference: k.func("solMaskedReference")?,
             invert_diag: k.func("solInvertDiag")?,
             precond_jacobi: k.func("solPrecondJacobi")?,
             p_update: k.func("solPUpdate")?,
@@ -1190,6 +1194,164 @@ pub fn device_norm_factor(
             .launch(cfg)?;
     }
     finish_sum(gpu, k, &mut w.norm_factor, &w.partials, nparts, NORM_EPS)
+}
+
+/// SPEC-LIT §8.4 on the rows `offset..offset + n` of a system whose other rows belong to other
+/// regions of a §47.4 concatenated mesh: the region's own system `A_kk psi_k = b_k - A_kj psi_j`.
+/// Writes `w.norm_factor`; leaves `w.apsi = A·psi` over ALL cells; clobbers `w.tmp`, `w.y`, `w.x_ref`,
+/// `w.partials`. Device-resident, no host round-trip. With `offset == 0 && n == a.n_cells` it is
+/// [`device_norm_factor`] to the bit.
+#[allow(clippy::too_many_arguments)]
+pub fn device_norm_factor_ranged(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    psi: &DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    offset: usize,
+    n: usize,
+) -> Result<()> {
+    if offset + n > a.n_cells {
+        return Err(Error::Config(format!(
+            "solver: rows {offset}..{} lie outside a system of {} cells",
+            offset + n,
+            a.n_cells
+        )));
+    }
+    if n == 0 {
+        return gpu.fill_zero(&mut w.norm_factor);
+    }
+    check_workspace(w, a.n_cells)?;
+    let nl = to_label(n)?;
+    let ncl = to_label(a.n_cells)?;
+
+    // x_ref = mean(psi over the region's rows). 1/n is a property of the
+    // region's slice of the mesh, not of the solution.
+    let view = psi.slice(offset..offset + n);
+    let (cfg, nparts) = reduce_geometry(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.sum1)
+            .arg(&mut w.partials)
+            .arg(&view)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    finish_sum(gpu, k, &mut w.x_ref, &w.partials, nparts, 0.0)?;
+
+    // v = x_ref inside the region's rows, psi outside them (cudarc 0.19
+    // accepts a CudaView as a launch argument).
+    let inv_n = 1.0 / (n as Scalar);
+    let ol = to_label(offset)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.masked_reference)
+            .arg(&mut w.tmp)
+            .arg(psi)
+            .arg(&w.x_ref)
+            .arg(&inv_n)
+            .arg(&ol)
+            .arg(&nl)
+            .arg(&ncl)
+            .launch(cfg_for(a.n_cells))?;
+    }
+
+    amul(gpu, k, &mut w.y, &w.tmp, a, m)?;
+    amul(gpu, k, &mut w.apsi, psi, a, m)?;
+
+    let apsi_v = w.apsi.slice(offset..offset + n);
+    let src_v = a.source.slice(offset..offset + n);
+    let y_v = w.y.slice(offset..offset + n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.norm_factor1)
+            .arg(&mut w.partials)
+            .arg(&apsi_v)
+            .arg(&src_v)
+            .arg(&y_v)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    finish_sum(gpu, k, &mut w.norm_factor, &w.partials, nparts, NORM_EPS)
+}
+
+/// `Σ_{c in offset..offset+n} |b_c - (A·psi)_c| / norm_ranged` - the region's §8.4 residual, on the
+/// host. ONE host round-trip (`collect_report`), so never inside a capture: callers gate it on
+/// `SolverControls::report_residuals`, exactly as `finish_solve` does.
+#[allow(clippy::too_many_arguments)]
+pub fn residual_ranged(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    psi: &DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    offset: usize,
+    n: usize,
+) -> Result<Scalar> {
+    if offset + n > a.n_cells {
+        return Err(Error::Config(format!(
+            "solver: rows {offset}..{} lie outside a system of {} cells",
+            offset + n,
+            a.n_cells
+        )));
+    }
+    if n == 0 {
+        return Ok(0.0);
+    }
+    device_norm_factor_ranged(gpu, k, w, psi, a, m, offset, n)?;
+    vec_sub(gpu, k, &mut w.tmp, &a.source, &w.apsi, a.n_cells)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    let view = w.tmp.slice(offset..offset + n);
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.sum_mag1)
+            .arg(&mut w.partials)
+            .arg(&view)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    finish_sum(gpu, k, &mut w.final_res, &w.partials, nparts, 0.0)?;
+    let mut perf = SolverPerformance::default();
+    collect_report(gpu, k, w, &mut perf)?;
+    Ok(perf.final_residual)
+}
+
+/// `Σ_{i in offset..offset+n} |x_i|` on the host - the row scale of a region is this over `a.diag`.
+/// One host round-trip; report-only.
+pub fn abs_sum_ranged(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    x: &DevBuf<Scalar>,
+    offset: usize,
+    n: usize,
+) -> Result<Scalar> {
+    if offset + n > x.len() {
+        return Err(Error::Config(format!(
+            "solver: rows {offset}..{} lie outside a system of {} cells",
+            offset + n,
+            x.len()
+        )));
+    }
+    if n == 0 {
+        return Ok(0.0);
+    }
+    let (cfg, nparts) = reduce_geometry(n);
+    let view = x.slice(offset..offset + n);
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.sum_mag1)
+            .arg(&mut w.partials)
+            .arg(&view)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    finish_sum(gpu, k, &mut w.final_res, &w.partials, nparts, 0.0)?;
+    Ok(gpu.download(&w.final_res)?[0])
 }
 
 // ==========================================================================
@@ -3224,6 +3386,145 @@ mod tests {
         assert_eq!(
             effective_preconditioner(Preconditioner::Diagonal, &w).expect("jacobi"),
             Preconditioner::Diagonal
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    //  The per-region residual (SPEC-LIT section 8.4 on a region's own rows)
+    // ----------------------------------------------------------------------
+
+    /// The ranged norm over the FULL range is the global norm, to the bit:
+    /// the same launches over the same addresses, so the claim is by
+    /// construction and the test only confirms it.
+    #[test]
+    fn the_ranged_norm_over_the_full_range_is_the_global_norm_to_the_bit() {
+        let n = 19;
+        let Some(r) = rig(n, 2024, false) else { return };
+        let hpsi: Vec<f64> = noise(n, 55).iter().map(|v| 0.5 + v).collect();
+        let dpsi: Vec<Scalar> = hpsi.iter().map(|v| *v as Scalar).collect();
+        let psi = r.gpu.upload(&dpsi).expect("psi");
+        let mut w = SolverWorkspace::for_mesh(&r.gpu, &r.m).expect("workspace");
+
+        device_norm_factor(&r.gpu, &r.k, &mut w, &psi, &r.a, &r.m).expect("norm");
+        let g = r.gpu.download(&w.norm_factor).expect("dl")[0];
+        let apsi = r.gpu.download(&w.apsi).expect("dl");
+
+        device_norm_factor_ranged(&r.gpu, &r.k, &mut w, &psi, &r.a, &r.m, 0, n)
+            .expect("ranged");
+        let gr = r.gpu.download(&w.norm_factor).expect("dl")[0];
+        let apsir = r.gpu.download(&w.apsi).expect("dl");
+
+        assert_eq!(g.to_bits(), gr.to_bits(), "norm factor");
+        assert!(
+            apsi.iter().zip(&apsir).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "apsi differs elementwise"
+        );
+    }
+
+    /// The ranged norm is section 8.4 applied to the region's OWN system:
+    /// `x_ref` is the mean over the region's rows, the reference vector is
+    /// `psi` outside them and `x_ref` inside, and both sums run over the
+    /// region's rows only. Checked against the dense formula on the host.
+    #[test]
+    fn the_ranged_norm_is_the_regions_own_system() {
+        let n = 19;
+        let Some(r) = rig(n, 2024, false) else { return };
+        let hpsi: Vec<f64> = noise(n, 55).iter().map(|v| 0.5 + v).collect();
+        let dpsi: Vec<Scalar> = hpsi.iter().map(|v| *v as Scalar).collect();
+        let psi = r.gpu.upload(&dpsi).expect("psi");
+        let mut w = SolverWorkspace::for_mesh(&r.gpu, &r.m).expect("workspace");
+
+        let (offset, nreg) = (7, 12);
+        let x_ref = hpsi[offset..offset + nreg].iter().sum::<f64>() / nreg as f64;
+        let mut v = hpsi.clone();
+        for c in v.iter_mut().take(offset + nreg).skip(offset) {
+            *c = x_ref;
+        }
+        let a_psi = r.dense.matvec(&hpsi);
+        let a_v = r.dense.matvec(&v);
+        let want: f64 = (offset..offset + nreg)
+            .map(|c| (a_psi[c] - a_v[c]).abs() + (r.b[c] - a_v[c]).abs())
+            .sum();
+
+        device_norm_factor_ranged(&r.gpu, &r.k, &mut w, &psi, &r.a, &r.m, offset, nreg)
+            .expect("ranged");
+        let got = r.gpu.download(&w.norm_factor).expect("dl")[0] as f64;
+        assert!(
+            (got - want).abs() / want < ROUNDOFF,
+            "ranged norm {got:.15e} vs region's own system {want:.15e}"
+        );
+    }
+
+    /// The region numerators partition the global one:
+    /// `r_g N_g = sum_k r_k N_k` to summation round-off, device numbers
+    /// only - the one exact statement relating the per-region numbers to
+    /// the global one.
+    #[test]
+    fn the_ranged_residuals_partition_the_global_residual() {
+        let n = 19;
+        let Some(r) = rig(n, 2024, false) else { return };
+        let hpsi: Vec<f64> = noise(n, 55).iter().map(|v| 0.5 + v).collect();
+        let dpsi: Vec<Scalar> = hpsi.iter().map(|v| *v as Scalar).collect();
+        let psi = r.gpu.upload(&dpsi).expect("psi");
+        let mut w = SolverWorkspace::for_mesh(&r.gpu, &r.m).expect("workspace");
+
+        let r_g = residual_ranged(&r.gpu, &r.k, &mut w, &psi, &r.a, &r.m, 0, n)
+            .expect("global");
+        let n_g = r.gpu.download(&w.norm_factor).expect("dl")[0];
+
+        let mut sum = 0.0 as Scalar;
+        for (offset, nreg) in [(0, 7), (7, 12)] {
+            let r_k = residual_ranged(&r.gpu, &r.k, &mut w, &psi, &r.a, &r.m, offset, nreg)
+                .expect("region");
+            let n_k = r.gpu.download(&w.norm_factor).expect("dl")[0];
+            sum += r_k * n_k;
+        }
+
+        let lhs = r_g * n_g;
+        assert!(lhs > 0.0, "psi is noise, not the solution: lhs {lhs:e}");
+        let err = (lhs - sum).abs() / lhs;
+        assert!(err <= 1e-12, "partition error {err:e}");
+    }
+
+    /// A range outside the system is an error that names the ranges, not a
+    /// silent clamp.
+    #[test]
+    fn a_range_outside_the_system_is_refused_by_name() {
+        let n = 19;
+        let Some(r) = rig(n, 2024, false) else { return };
+        let hpsi: Vec<f64> = noise(n, 55).iter().map(|v| 0.5 + v).collect();
+        let dpsi: Vec<Scalar> = hpsi.iter().map(|v| *v as Scalar).collect();
+        let psi = r.gpu.upload(&dpsi).expect("psi");
+        let mut w = SolverWorkspace::for_mesh(&r.gpu, &r.m).expect("workspace");
+
+        let e = device_norm_factor_ranged(&r.gpu, &r.k, &mut w, &psi, &r.a, &r.m, 15, 10)
+            .expect_err("15 + 10 > 19")
+            .to_string();
+        assert!(e.contains("outside"), "{e}");
+
+        let e = abs_sum_ranged(&r.gpu, &r.k, &mut w, &psi, 15, 10)
+            .expect_err("15 + 10 > 19")
+            .to_string();
+        assert!(e.contains("outside"), "{e}");
+    }
+
+    /// `abs_sum_ranged` is the host sum of magnitudes over the range.
+    #[test]
+    fn abs_sum_ranged_is_the_host_sum() {
+        let n = 19;
+        let Some(r) = rig(n, 2024, false) else { return };
+        let hpsi: Vec<f64> = noise(n, 55).iter().map(|v| 0.5 + v).collect();
+        let dpsi: Vec<Scalar> = hpsi.iter().map(|v| *v as Scalar).collect();
+        let psi = r.gpu.upload(&dpsi).expect("psi");
+        let mut w = SolverWorkspace::for_mesh(&r.gpu, &r.m).expect("workspace");
+
+        let (offset, nreg) = (3, 8);
+        let got = abs_sum_ranged(&r.gpu, &r.k, &mut w, &psi, offset, nreg).expect("sum");
+        let want: f64 = hpsi[offset..offset + nreg].iter().map(|v| v.abs()).sum();
+        let got = got as f64;
+        assert!(
+            (got - want).abs() / want < ROUNDOFF,
+            "device {got:.15e} vs host {want:.15e}"
         );
     }
 }
