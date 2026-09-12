@@ -106,6 +106,8 @@ deformation.** Size: S under a week, M a few weeks, L a quarter.
 
 ## C. The staged plan
 
+> **Note (2026-09-12).** Section numbers were re-allocated on 2026-09-12 - see `docs/10-fsi-solid-mesh-plan.md` §D; §99 is reserved by the citation audit (`xref::tests::a_reserved_number_has_no_heading`, SPEC-LIT §80.3) and may never carry a real section. The headings below and the §H table carry the new numbers (99->100, 100->101, 101->102, 102->103, 103->104, 104->105, 106->107, 105->108); prose references inside the stages keep the numbers they were written with and read through that table.
+
 Section numbers run from **§93**, the first vacant address (§0 rule 6: numbers are addresses, not an
 ordering, and a number is allocated only when the section is written). Each stage ends in something
 measured and registered through `Checks::report(GateReport{..})` so §69's three relations hold.
@@ -286,7 +288,7 @@ Detailed in §D. Two sections.
 
 ### Stage 3 — Properties that are functions, and sources that vary (4 weeks)
 
-#### §99 — `k(T)`, `cp(T)`, `mu(T)`, `alpha(T)`, `E(T)`, and `q'''(x, t, T)`
+#### §100 — `k(T)`, `cp(T)`, `mu(T)`, `alpha(T)`, `E(T)`, and `q'''(x, t, T)`
 
 * **Modules.** New `src/properties.rs` (`Property = Constant | Table | Polynomial`, with a device
   evaluator); `src/energy.rs` (`GasProperties` becomes a transport model; `update_k_eff` and
@@ -324,7 +326,7 @@ Detailed in §D. Two sections.
 
 ### Stage 4 — The two regimes with no gate (6 weeks)
 
-#### §100 — The turbulent conjugate interface
+#### §101 — The turbulent conjugate interface
 
 * **Modules.** `src/cht/flow.rs` (instantiate a model from `crate::turbulence`, concatenate `nut` onto
   the thermal mesh through (S59.3)'s existing mask, and delete the zero allocations at 947–949);
@@ -348,7 +350,7 @@ Detailed in §D. Two sections.
 * **Refusal.** A wall-function fluid side whose `y+` leaves the range §29.1's preset was gated in; a
   conjugate interface whose two sides disagree about whether the fluid face is resolved or modelled.
 
-#### §101 — The buoyant wall, and the Rayleigh numbers the drivers actually run at
+#### §102 — The buoyant wall, and the Rayleigh numbers the drivers actually run at
 
 * **Modules.** `src/wallfunctions.rs` and `cuda/wallfunctions.cu` (a buoyant velocity scale
   `u_* = (g beta q_w nu / (rho c_p))^{1/4}` beside `y_plus_of`/`t_plus`); §29.1's `wallTreatment`
@@ -377,7 +379,7 @@ Detailed in §D. Two sections.
 
 ### Stage 5 — Time (8 weeks)
 
-#### §102 — Time in a conjugate run: the scheme a case can name, the per-region clock, the controller, and the duty cycle a stress solve rides
+#### §103 — Time in a conjugate run: the scheme a case can name, the per-region clock, the controller, and the duty cycle a stress solve rides
 
 * **Modules.** `src/io/case_cht.rs` (a `ddtScheme` entry; narrowing the `has_fluid && !steady`
   refusal); `src/cht.rs::run_case` (take the scheme through `TimeState::coeffs` instead of hard-coding
@@ -414,7 +416,7 @@ Detailed in §D. Two sections.
 
 ### Stage 6 — The record (3 weeks)
 
-#### §103 — A gate registry a driver can print into, and the report a reviewer reads
+#### §104 — A gate registry a driver can print into, and the report a reviewer reads
 
 * **Modules.** The `GateReport` registry lifted out of `src/bin/validate.rs` into the library so a
   driver can register and print through the same call §69 requires; new `src/report.rs` generating the
@@ -655,6 +657,48 @@ row says otherwise.
 | 9 | 5 (§102) | **The transient conjugate coupling is unstable** at the `(rho c)` ratio of O(1e3) §59.6 refuses on, once the two regions are on different clocks. | Verstraete & Scholl's numerical Biot number, computed and printed **per interface on the existing steady cases** before any transient code is written. It costs one reduction, and it says in advance which of the shipped cases would be stable. |
 | 10 | all | **Scope drift into the deferred list.** Participating media, AMI, block coupling, plasticity and phase change are each individually defensible and collectively a second year. | The refusal list is the control: every deferred item is refused **by name, in code**, at the stage that would otherwise be tempted to start it. A refusal that names the paper is cheaper than a half-built model, and it is this repository's own habit. |
 
+### F.1a Measured (TS-0, 2026-09-12)
+
+Risk 1's experiment was run as written (`src/solid/prototype.rs`, `the_risk_one_sweep`, the 20^3 and 40^3 blocks with one face fixed, a uniform `Delta T`, tolerance 1e-5, 2000 outer iterations at most; `observed` is the measured contraction of the outer loop, `predicted` is `1/(2(1 - nu))`). The table is the log, verbatim:
+
+```
+   nu       mesh  aitken  passes   outer   observed  predicted   conv   cg iters  residual
+  0.2       20^3   false       1      54     0.8678     0.6250   true       9802   3.68e-6
+  0.2       20^3   false       3      31     0.8317     0.6250   true       5613   2.73e-6
+  0.2       20^3    true       1      42     0.8051     0.6250   true       7630   2.16e-5
+  0.2       20^3    true       3      16     0.5039     0.6250   true       2964   4.32e-6
+  0.3       20^3   false       1      58     0.8797     0.7143   true      10676   3.90e-6
+  0.3       20^3   false       3      35     0.7967     0.7143   true       6431   3.66e-6
+  0.3       20^3    true       1      41     0.8352     0.7143   true       7520   7.13e-6
+  0.3       20^3    true       3      20     0.6190     0.7143   true       3754   3.40e-5
+ 0.45       20^3   false       1      43     1.4160     0.9091  false       9288   7.25e-1  DIVERGED
+ 0.45       20^3   false       3      74     1.2155     0.9091  false      15901   9.05e-1  DIVERGED
+ 0.45       20^3    true       1     211     0.9428     0.9091   true      38577   5.51e-6
+ 0.45       20^3    true       3      71     0.9185     0.9091   true      13080   4.27e-6
+ 0.49       20^3   false       1      29     1.6771     0.9804  false       6267   7.25e-1  DIVERGED
+ 0.49       20^3   false       3      39     1.4629     0.9804  false       8415   7.68e-1  DIVERGED
+ 0.49       20^3    true       1    2000     1.0000     0.9804  false     389450   2.88e-4
+ 0.49       20^3    true       3     615     0.9780     0.9804   true     113265   7.10e-6
+  0.2       40^3   false       1      56     0.8841     0.6250   true      19871   5.18e-6
+  0.2       40^3   false       3      31     0.8193     0.6250   true      11093   4.37e-6
+  0.2       40^3    true       1      38     0.8109     0.6250   true      13630   8.17e-6
+  0.2       40^3    true       3      20     0.6166     0.6250   true       7237   2.31e-6
+  0.3       40^3   false       1      60     0.8963     0.7143   true      21509   5.89e-6
+  0.3       40^3   false       3      35     0.7008     0.7143   true      12792   6.39e-6
+  0.3       40^3    true       1      43     0.7553     0.7143   true      15445   2.76e-5
+  0.3       40^3    true       3      23     0.6816     0.7143   true       8430   9.69e-6
+ 0.45       40^3   false       1      44     1.4016     0.9091  false      18808   7.17e-1  DIVERGED
+ 0.45       40^3   false       3      58     1.2838     0.9091  false      24545   9.42e-1  DIVERGED
+ 0.45       40^3    true       1     213     0.9592     0.9091   true      77209   1.41e-5
+ 0.45       40^3    true       3      62     0.8891     0.9091   true      22747   1.17e-5
+ 0.49       40^3   false       1      30     1.6579     0.9804  false      12860   7.24e-1  DIVERGED
+ 0.49       40^3   false       3      35     1.5209     0.9804  false      14878   8.65e-1  DIVERGED
+ 0.49       40^3    true       1    2000     1.0000     0.9804  false     745799   7.65e-5
+ 0.49       40^3    true       3     606     0.9800     0.9804   true     216444   1.19e-5
+```
+
+What it decides: **Aitken delta-squared and the traction condition solved at the face are mandatory in §95** - bare Picard diverges at `nu = 0.45` and `0.49` whether the boundary is passed once or three times, and even where it converges its contraction (0.87 at `nu = 0.2`) is worse than the derivation, while Aitken with three boundary passes converges at every `nu` tried (16 / 20 / 71 outer iterations at 0.2 / 0.3 / 0.45, observed 0.50 / 0.62 / 0.92 against the predicted 0.625 / 0.714 / 0.909). **The near-incompressible refusal threshold is read off the sweep, not argued**: at `nu = 0.49` Aitken needs 615 outer iterations on the orthogonal block and does not converge in 2000 on the jittered one, so §95 refuses above the `nu` at which the measured cost is still affordable rather than at a number chosen in advance; the interior alone (every boundary prescribed by displacement) tracks `1/(2(1 - nu))` to two digits at every `nu`, which locates the slowness in the free surface, and free expansion carries stress below 1e-7 of `(3 lambda + 2 mu) alpha Delta T`.
+
 ---
 
 ## G. What this plan does not do
@@ -672,7 +716,7 @@ actually asks for.
 
 ## H. Review additions (Fable 5.1, 2026-09-11)
 
-### H.1 A second track: the mesh that moves — §104–§106
+### H.1 A second track: the mesh that moves — §105, §107 and §108
 
 §A.3 item 1 demotes mesh motion as "a solver-wide programme starting at the space conservation
 law", and for the thermo-mechanical goal that ruling stands. But the same programme is the base of
@@ -682,9 +726,9 @@ therefore planned here as **Track B**, to start after Stage 1 has shipped, in th
 
 | § | unit | what it owns | size | gate |
 |---|---|---|---|---|
-| **§104** | **Arbitrary Lagrangian–Eulerian motion and the space conservation law** | point motion (prescribed rigid-body, and a Laplacian / inverse-distance smoothing solve on `fv::fvm_laplacian`); the swept-volume mesh flux `phi_mesh` per face computed with the same time scheme as the transported quantity (Demirdžić & Perić 1988, DOI 10.1002/fld.1650080906; Thomas & Lombard 1979, DOI 10.2514/3.61273); cell volumes advanced by the swept volumes so `V^{n+1} - V^n = dt · Σ_f phi_mesh,f` holds to round-off (the space conservation law); `phi - phi_mesh` in every convective term; the moving-wall velocity condition; the per-step geometry recompute on the device that §82/§83 already own | M | **104-A** uniform flow on a mesh in prescribed rigid motion stays uniform to round-off (the SCL test); **104-B** a translating/expanding box with an exact solution, time order measured through §94; **104-C** the oscillating-cylinder Strouhal lock-in band (Williamson & Roshko 1988, DOI 10.1016/S0889-9746(88)90058-8) |
-| **§105** | **A mesh fit for VOF** | an adapt criterion (§75) on `|grad alpha|` that tracks the interface with a hysteresis band; a `freeSurfaceBand` refinement box in the automesher (§92); the wetted-wall layer treatment; and, only if the measurement asks for it, a geometric (PLIC) reconstruction beside §20's algebraic compression | S–M | **105-A** §20's existing dam-break gate re-run with the interface-tracking adapt, the interface thickness in cells reported at each level; **105-B** the Martin & Moyce front position at half the uniform-mesh cost |
-| **§106** | **Overset (chimera)** | hole cutting against the body mesh; donor search through §92's octree / §66–§67's mesh walk; interpolation stencils (inverse distance, then gradient-corrected) written as off-diagonal CSR entries through §48's coupled-entry path; the pressure-equation flux correction for the non-conservative interpolation; orphan handling refused by name (Steger, Dougherty & Benek 1983, AIAA 83-1944; Chesshire & Henshaw 1990, DOI 10.1016/0021-9991(90)90196-8; Benek, Buning & Steger 1985, AIAA 85-1523) | L | **106-A** a static overset of two boxes reproduces the single-mesh Poiseuille solution to discretisation error; **106-B** a body moving through a background mesh (needs §104) conserves mass to a stated bound, the deficit printed; **106-C** the cylinder-in-crossflow drag band |
+| **§105** | **Arbitrary Lagrangian–Eulerian motion and the space conservation law** | point motion (prescribed rigid-body, and a Laplacian / inverse-distance smoothing solve on `fv::fvm_laplacian`); the swept-volume mesh flux `phi_mesh` per face computed with the same time scheme as the transported quantity (Demirdžić & Perić 1988, DOI 10.1002/fld.1650080906; Thomas & Lombard 1979, DOI 10.2514/3.61273); cell volumes advanced by the swept volumes so `V^{n+1} - V^n = dt · Σ_f phi_mesh,f` holds to round-off (the space conservation law); `phi - phi_mesh` in every convective term; the moving-wall velocity condition; the per-step geometry recompute on the device that §82/§83 already own | M | **104-A** uniform flow on a mesh in prescribed rigid motion stays uniform to round-off (the SCL test); **104-B** a translating/expanding box with an exact solution, time order measured through §94; **104-C** the oscillating-cylinder Strouhal lock-in band (Williamson & Roshko 1988, DOI 10.1016/S0889-9746(88)90058-8) |
+| **§108** | **A mesh fit for VOF** | an adapt criterion (§75) on `|grad alpha|` that tracks the interface with a hysteresis band; a `freeSurfaceBand` refinement box in the automesher (§92); the wetted-wall layer treatment; and, only if the measurement asks for it, a geometric (PLIC) reconstruction beside §20's algebraic compression | S–M | **105-A** §20's existing dam-break gate re-run with the interface-tracking adapt, the interface thickness in cells reported at each level; **105-B** the Martin & Moyce front position at half the uniform-mesh cost |
+| **§107** | **Overset (chimera)** | hole cutting against the body mesh; donor search through §92's octree / §66–§67's mesh walk; interpolation stencils (inverse distance, then gradient-corrected) written as off-diagonal CSR entries through §48's coupled-entry path; the pressure-equation flux correction for the non-conservative interpolation; orphan handling refused by name (Steger, Dougherty & Benek 1983, AIAA 83-1944; Chesshire & Henshaw 1990, DOI 10.1016/0021-9991(90)90196-8; Benek, Buning & Steger 1985, AIAA 85-1523) | L | **106-A** a static overset of two boxes reproduces the single-mesh Poiseuille solution to discretisation error; **106-B** a body moving through a background mesh (needs §104) conserves mass to a stated bound, the deficit printed; **106-C** the cylinder-in-crossflow drag band |
 
 §104 also unblocks §D.5 item 10: the displacement of a solid region moving the fluid mesh is one
 call into §104's smoother, and the refusal there becomes a capability.
