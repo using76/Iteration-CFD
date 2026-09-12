@@ -43,7 +43,7 @@
 //!     splitting and its `!$OMP CRITICAL` write-back are deliberately not
 //!     taken.
 //!   ofgpu `SPEC-LIT.md` §2.4, §3.2, §3.4, §4, §13.3, §13.4, §15.5, §26,
-//!     §29.3, §31, §32.2, §46, §47, §49.3
+//!     §29.3, §31, §32.2, §46, §47, §49.3, §93
 //!
 //! OpenFOAM, SU2, preCICE, Code_Saturne, deal.II and MOOSE are GPL or LGPL
 //! and were not opened. No permissively-licensed unstructured finite-volume
@@ -1079,6 +1079,113 @@ impl ThermalMesh {
         }
         f
     }
+
+    /// SPEC-LIT §93.1: the entries of a concatenated assembly that belong to
+    /// ONE region, downloaded. The three offset/count pairs of
+    /// [`ThermalRegion`] slice the six arrays of `a`; the region's boundary
+    /// faces come with their `PatchKind::Interface` mask, because Gate 93-A
+    /// compares the boundary coefficients only on the faces that are NOT
+    /// interface faces (on those the union's Robin triple and a single
+    /// region's ordinary patch differ by construction - §47.2).
+    ///
+    /// `Err` on a region index out of range.
+    pub fn region_rows(&self, gpu: &Gpu, a: &GpuLduMatrix, region: usize) -> Result<RegionRows> {
+        let Some(r) = self.regions.get(region) else {
+            return Err(Error::Config(format!(
+                "region_rows: region {region} out of range ({} regions)",
+                self.regions.len()
+            )));
+        };
+        let (c0, c1) = (r.cell_offset, r.cell_offset + r.n_cells);
+        let (f0, f1) = (
+            r.internal_face_offset,
+            r.internal_face_offset + r.n_internal_faces,
+        );
+        let (b0, b1) = (
+            r.boundary_face_offset,
+            r.boundary_face_offset + r.n_boundary_faces,
+        );
+        let diag = gpu.download(&a.diag)?;
+        let upper = gpu.download(&a.upper)?;
+        let lower = gpu.download(&a.lower)?;
+        let source = gpu.download(&a.source)?;
+        let internal_coeffs = gpu.download(&a.internal_coeffs)?;
+        let boundary_coeffs = gpu.download(&a.boundary_coeffs)?;
+        Ok(RegionRows {
+            diag: diag[c0..c1].to_vec(),
+            source: source[c0..c1].to_vec(),
+            upper: upper[f0..f1].to_vec(),
+            lower: lower[f0..f1].to_vec(),
+            internal_coeffs: internal_coeffs[b0..b1].to_vec(),
+            boundary_coeffs: boundary_coeffs[b0..b1].to_vec(),
+            interface_face: (b0..b1)
+                .map(|bf| self.host.b_kind[bf] == PatchKind::Interface as Label)
+                .collect(),
+        })
+    }
+}
+
+/// SPEC-LIT §93.1: the entries of a concatenated assembly that belong to ONE
+/// region, downloaded.
+#[derive(Debug, Clone)]
+pub struct RegionRows {
+    pub diag: Vec<Scalar>,
+    pub source: Vec<Scalar>,
+    pub upper: Vec<Scalar>,
+    pub lower: Vec<Scalar>,
+    pub internal_coeffs: Vec<Scalar>,
+    pub boundary_coeffs: Vec<Scalar>,
+    /// Per boundary face of the region: `b_kind == PatchKind::Interface`.
+    pub interface_face: Vec<bool>,
+}
+
+/// `Ok(None)` when every entry agrees in every bit (`to_bits()`),
+/// `Ok(Some((n_differing, first_index)))` otherwise; `Err` when the lengths
+/// differ. Gate 93-A's comparator (SPEC-LIT §93.8): a bitwise claim has no
+/// tolerance argument to weaken.
+pub fn bitwise_mismatch(got: &[Scalar], want: &[Scalar]) -> Result<Option<(usize, usize)>> {
+    if got.len() != want.len() {
+        return Err(Error::Config(format!(
+            "bitwise_mismatch: {} entries against {}",
+            got.len(),
+            want.len()
+        )));
+    }
+    let (mut n, mut first) = (0usize, usize::MAX);
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        if g.to_bits() != w.to_bits() {
+            n += 1;
+            if first == usize::MAX {
+                first = i;
+            }
+        }
+    }
+    Ok(if n == 0 { None } else { Some((n, first)) })
+}
+
+/// SPEC-LIT §93.8: the entries of `a` on NON-interface boundary faces,
+/// compacted, with a map back to the ORIGINAL boundary-face index
+/// (`out.1[j]` is the boundary face `out.0[j]` came from). `Err` when
+/// `a.len() != interface_face.len()`.
+pub fn non_interface_entries(
+    a: &[Scalar],
+    interface_face: &[bool],
+) -> Result<(Vec<Scalar>, Vec<usize>)> {
+    if a.len() != interface_face.len() {
+        return Err(Error::Config(format!(
+            "non_interface_entries: {} values against {} interface flags",
+            a.len(),
+            interface_face.len()
+        )));
+    }
+    let (mut v, mut idx) = (Vec::new(), Vec::new());
+    for (i, (&x, &is_interface)) in a.iter().zip(interface_face).enumerate() {
+        if !is_interface {
+            v.push(x);
+            idx.push(i);
+        }
+    }
+    Ok((v, idx))
 }
 
 /// Quantise a face centre so that two faces which are the same face hash

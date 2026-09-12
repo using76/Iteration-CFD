@@ -26546,3 +26546,456 @@ solver can run.
 | the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
 
 ---
+
+## 93. An equation that lives on a region — the per-region residual, the points a run keeps, and the tensor it can write
+
+§47.4 made the conjugate thermal mesh one array concatenation and one face
+coefficient, and §47.2 made the interface one kernel writing both sides of
+every pair. Three things that construction could not say were left standing.
+The solve reported ONE §8.4 residual over the union, so a region that had
+quietly stopped converging hid behind the number the union printed. The mesh
+handed to the writers kept cells and patches but no points, so a VTU could
+carry only cell data on degraded polygons. And `FieldValues` had two arms,
+so no run could write a tensor anywhere. This section states what three
+pieces of work landed about those gaps: the per-region residual (a ranged
+reduction over the rows a region already owns), the points a run keeps (the
+raw geometry carried through lowering and concatenated in §47.4's order),
+and this section's own three refusals - the Mach number a low-Mach run
+prints and refuses on, the partition that may not cut a §47.4 interface
+face, and a refusal menu that names only what a case can say.
+
+Written from:
+
+* ofgpu `SPEC-LIT.md` §3.5 (the inverse-distance weight the cell-to-point
+  interpolation applies), §8.4 (the norm the per-region residual restates
+  over a region's rows), §13.4 (saying what was used; §13.4.1 the inert
+  setting and §13.4.2 the start-up block), §25 (the low-Mach premise and
+  its `R_s`), §44 (the writers), §46 and §47 (the solid equation, the
+  Robin triple of §47.2 and the concatenated thermal mesh of §47.4),
+  §49.3 (a mesh's points live outside the `HostMesh`), §59.9 (the shape
+  of the last subsection), §69.2 (a passing gate registers nothing) and
+  §71 (the decomposition).
+* H. Jasak, "Error Analysis and Estimation for the Finite Volume Method
+  with Applications to Fluid Flows", PhD thesis, Imperial College (1996),
+  and F. Moukalled, L. Mangani, M. Darwish, "The Finite Volume Method in
+  Computational Fluid Dynamics", Springer (2016) - the sources §3.5's
+  weight already rests on, which the points half of this section applies.
+* Kitware's published "VTK File Formats" description, cited by
+  `io/vtu.rs`'s own header - the `PointData` block and the 6→9 component
+  expansion of §93.4.
+* H. S. Carslaw and J. C. Jaeger, *Conduction of Heat in Solids*, 2nd ed.,
+  ch. I - the 1-D series slab of Gate 93-B, the same closed form §47.12
+  already uses.
+
+The sound speed of (93.6) is stated, not cited: with `p = rho R_s T` and
+`p rho^-gamma = const` along an isentrope, `c^2 = (dp/drho)_s = gamma
+R_s T` - the perfect-gas isentropic value, and no book was consulted for
+it.
+
+No GPL-licensed source was consulted.
+
+### 93.1 The restriction — which rows are a region's
+
+`ThermalRegion` has always stored three offset/count pairs; until now
+nothing read them (`src/cht.rs`). Read as a restriction, they say which
+rows of the concatenated system are a region's own:
+
+```
+For region r of a concatenated ThermalMesh,
+  rows(r)  = cells(r) = [cell_offset, cell_offset + n_cells)
+  faces(r) = [internal_face_offset, internal_face_offset + n_internal_faces)
+  bfaces(r)= [boundary_face_offset, boundary_face_offset + n_boundary_faces)
+A_r psi_r = b_r is the assembly over rows(r) and faces(r) only, with the faces of
+PatchKind::Interface entering as boundary faces of r.                                   (93.1)
+```
+
+The last clause is §47.4's construction rather than a new statement: the
+interface faces ARE boundary faces of each region (`b_kind` is
+`PatchKind::Interface`, `b_nbr_cell` names the cell on the other side in
+the concatenated numbering), and §47.2 consequence 2 is what makes the two
+regions' rows of those faces two descriptions of one coefficient rather
+than two coefficients. A region's equation, then, is not a new assembly:
+it is a SLICE of the one assembly §47.4 already builds.
+
+### 93.2 The per-region residual norm
+
+§8.4's normalisation, restricted to the rows of (93.1) and measured on the
+device:
+
+```
+x_ref,r = mean over cells(r) of psi                                                       (93.2)
+v       = psi outside cells(r),  x_ref,r inside cells(r)          (the masked reference vector)
+norm_r  = sum_{P in cells(r)} |A psi - A v|_P + sum_{P in cells(r)} |b - A v|_P + eps      (93.3)
+res_r   = sum_{P in cells(r)} |b - A psi|_P / norm_r
+region r met its tolerance  iff  res_r <= tol  or
+                             (rel_tol > 0 and res_r <= rel_tol * res_r,initial)
+converged(union)  iff  the global solve converged, AND every region was measured,
+                       AND every region met its tolerance                                 (93.4)
+```
+
+(93.3)'s reference vector is the MASKED one: `psi` outside the region's
+rows, the constant `x_ref,r` inside them - not a global constant broadcast
+over the whole vector. A global constant makes the row sums of the
+conduction operator vanish, so on a region with no Dirichlet face the norm
+would collapse to the residual itself and `res_r` would sit at 1 for ever;
+the masked vector is a small perturbation of `psi`, which is also why the
+norm over the FULL range is the global norm to the bit - with
+`offset = 0` and `n = n_cells` the masked vector IS `psi`.
+
+What landed, by name. `solver::device_norm_factor_ranged`,
+`solver::residual_ranged` and `solver::abs_sum_ranged` (`src/solver.rs`);
+ONE new kernel, `solMaskedReference` (`cuda/solver.cu`), writing the
+masked vector; the host mirrors `reference::norm_factor_ranged` and
+`reference::residual_ranged` (`src/reference.rs`). One norm/flag pair per
+solver workspace: the ranged reduction reuses the same partial-sum
+buffers the global norm does, and the per-region numbers cost one host
+round-trip each, so they are gated on `SolverControls::report_residuals`
+exactly as the global residual is - a capture never pays for them.
+(93.4) is `ConjugatePerformance::all_converged` (`src/cht.rs`),
+`self.global.converged && self.regions.iter().all(|r| r.converged) &&
+!self.regions.is_empty()`, with the per-region flag from
+`ConjugateHeat::region_met`: `last <= ctrl.tolerance || (ctrl.rel_tol >
+0.0 && last <= ctrl.rel_tol * initial)`. A union that was never measured
+is NOT converged - "not looked at" is not "converged".
+
+### 93.3 Saying what was used — the start-up block and the `converged` refusal
+
+§13.4.2's contract, applied to the linear solve on a union: a per-region
+tolerance is DERIVED (each region's rows carry their own scale), so the
+derivation is printed, not implied. `ofgpu-cht` (`src/bin/cht.rs`) prints
+one block with the solve and one verdict after it. The block's header and
+its per-region line are these shapes (the numbers are the three-region
+die/solder/spreader stack at tolerance 1e-14, with the row-scale share
+column elided here; Gate 93-B's rows in §93.8 carry real shares):
+
+```
+  linear solve per region (SPEC-LIT 8.4 on each region's own rows; row scale = mean |diag| per cell; tolerance 1.000e-14, relTol 0.000e+00):
+    region 'die' row scale ... of largest | residual initial 1.000e0 -> final 9.440e-14 | NOT met
+    region 'solder' row scale ... of largest | residual initial 1.000e0 -> final 3.665e-13 | NOT met
+```
+
+and, when a region misses, the run does not say `converged`. It says,
+exactly:
+
+```
+  converged: no - region 'die' final 9.440e-14 > tolerance 1.000e-14; the global residual 8.494e-12 does not see it
+```
+
+The global residual 8.494e-12 is a converged-looking number that hides
+three regions missing a 1e-14 tolerance - the defect the refusal exists
+for. A run with `report_residuals` off prints `per-region residuals: not
+measured (reportResiduals is off); converged: not observed` and refuses
+`converged`: (93.4)'s "every region was measured" clause, said at the one
+place a reader would otherwise have been misled.
+
+### 93.4 Points retained through lowering, the VTU with real points, `PointData`, and the tensor a run writes
+
+`HostMesh` keeps `n_points` and nothing else (§49.3), so the point set and
+the face polygons travel beside it: `LoweredChtCase.raw` holds one
+`PolyMeshRaw` per region (bitwise what `blockgen::raw_mesh` built the
+region's mesh from), `ThermalRegion::n_points` counts each region's own,
+and `ThermalMesh::attach_points` concatenates them in §47.4's order -
+region `r`'s point `p` lands at the sum of the `n_points` of the regions
+before it, and points are NOT merged across an interface (each region
+keeps its own copy, exactly the way `build` offsets cells and faces).
+`ThermalMesh::to_raw` hands the concatenation back as one `PolyMeshRaw`,
+with owners from `host.owner` then `host.b_face_cells` and patches
+verbatim. Both are refused by name when they cannot tell the truth:
+`attach_points` refuses a raw whose counts disagree with the region's,
+and `to_raw` refuses to run before `attach_points`.
+
+The cell-to-point interpolation is `io::pointfield.rs`'s `cell_to_point`,
+the crate's own inverse-distance weight of §3.5:
+
+```
+phi_p = ( sum_{c in C(p)} w_pc phi_c ) / ( sum_{c in C(p)} w_pc )
+C(p)  = { owner(f), neighbour(f) : face f of the raw mesh lists point p },
+        each cell counted once
+w_pc  = 1 / max(|x_p - C_c|, tiny),   tiny = Scalar::MIN_POSITIVE
+the w_pc are stored NORMALISED, sum_c w_pc = 1 for every point             (93.5)
+```
+
+The normalised weights mean the vector and tensor gathers run the SAME
+loop componentwise, so the scalar, vector and tensor results agree bit
+for bit. `tiny` guards the division for a point that sits on a cell
+centre. On a uniform block an interior point's cells sit at mirror-image
+offsets and a linear field is reproduced to rounding; a boundary point's
+cells all lie on one side of it, and the interpolation carries an
+accepted `O(h)` one-sided bias there. `io::pointfield.rs` is written from
+the same two works §3.5 names - Jasak (1996) and Moukalled et al. (2016),
+whose sections 3.3.2 and 9.3 are where that weight comes from.
+
+`vtu::write_vtu_points` writes the polyMesh itself - shared points, every
+face wound outward for the cell that emits it, a `<PointData>` block -
+from the same published Kitware "VTK File Formats" description
+`io/vtu.rs`'s header cites, and a symmetric tensor expands 6→9 row-major
+(`xx xy xz / yx yy yz / zx zy zz` from the six symmetric components). The
+USD and VDB writers take the six components as scalars named `.xx` ...
+`.zz`. The pre-existing CellData path is bitwise unchanged - pinned by
+`vtu::tests::the_cell_data_path_writes_the_same_bytes_as_before_s2`'s
+FNV-1a digest - so the new block could only appear where a tensor or a
+point field is present.
+
+### 93.5 The Mach number a low-Mach run prints
+
+§25's regime is "Mach ≪ 1 with density ratios of 3-4 - strong heating, low
+speed", and its formulation filters acoustics by splitting
+`p = p0(t) + p~(x,t)` with `p~ ≪ p0`. A run that prints no Mach number
+cannot say whether that premise holds for it; this one now does, from
+terms `GasProperties` already carries (`gamma`, and `R_s = R/W` of §25's
+`rho = p0/(R_s T)`):
+
+```
+M_P    = |u_P| / sqrt(gamma R_s T_P)                                                      (93.6)
+M_max  = max_P M_P ,     M_mean = sum_P M_P V_P / sum_P V_P                               (93.7)
+```
+
+`gamma R_s T` is the perfect-gas isentropic sound speed squared, stated
+in the Written-from paragraph above; no gas-dynamics text is cited. Both
+numbers are HOST reductions over fields the driver has already downloaded
+for its iteration line - `energy::mach_number` on host slices,
+`GasState::mach` on the device fields (`src/energy.rs`) - no kernel, no
+capture-registry entry. The max is taken by a plain `>` so a NaN never
+becomes it, and no value is ever an `Err`: a non-positive `T_P` gives a
+NaN `M_P` that the mean carries through, which is the honest answer for a
+temperature the gas law cannot stand behind.
+
+*DESIGN*: the limit is `M_max > 0.3`. At `M = 0.3` the isentropic density
+ratio is already
+
+```
+rho/rho0 = (1 + (gamma-1)/2 M^2)^(-1/(gamma-1)) = (1 + 0.2 M^2)^-2.5 = 0.956
+```
+
+for `gamma = 1.4` - a 4.4 % density change - which is where "Mach much
+less than 1" stops being a description of the run. The threshold is a
+design choice, not a measurement; the number, the cell holding the max
+and the moment are in every refusal §93.6 lists.
+
+`ofgpu-lowmach` (`src/bin/lowmach.rs`) prints `M max (cell) mean` in the
+start-up banner, on every `iter` line and on every `written to` line, and
+`energy::refuse_above_low_mach` judges it at the banner and after every
+outer iteration - the premise is re-checked on the field each iteration
+produced, not only on the initial one, so the run stops (or warns) the
+step it leaves the regime. The initial field's banner line names the
+threshold and the `-permissive` way through.
+
+### 93.6 What is refused, and by name
+
+§46.4's shape: what a run will not do, with the number that was wrong.
+
+* A union may not print `converged` unless the global solve converged AND
+  every region was measured AND every region met its tolerance - (93.4),
+  with `ofgpu-cht`'s refusal of §93.3 as its user-facing half.
+* `ofgpu-lowmach` refuses `M_max > 0.3` (`energy::LOW_MACH_LIMIT`, §93.5's
+  *DESIGN*). The strict refusal names the number, the cell, the moment,
+  §25's premise, the 0.956 density ratio, §93.6 and `-permissive`; under
+  `-permissive` one `contract::warn_once` names the same things and the
+  run continues.
+* `Decomposition::from_map` refuses a partition that puts the two cells
+  of a `PatchKind::Interface` boundary face on different parts. The
+  message names the face count, the pair count, the first offending face,
+  its patch and both cells' parts, and states the precondition: §47.2
+  consequence 2 makes interface conservation the property of ONE kernel
+  launch over ONE interface-pair list writing both sides, so two parts
+  would recompute `h_G` from two copies and could differ in the last bit.
+* `psychro::refuse_condensation`'s `available` menu names only entries a
+  `DcCase` can carry: supersaturation reporting, the humidity block's
+  `barometricPressure`/`virtualTemperature`,
+  `fans[].supplyRelativeHumidity`, `tiles[].plenumRelativeHumidity`. The
+  former menu named a "coil-surface saturated boundary condition" that
+  existed in no case format - the §13.4.1 class of a promise printed to
+  the user that nothing could reach.
+
+### 93.7 What must hold
+
+The residual unit's tests, by name:
+
+* `solver::tests::the_ranged_norm_over_the_full_range_is_the_global_norm_to_the_bit`
+  and `solver::tests::abs_sum_ranged_is_the_host_sum` - the ranged
+  reduction over the whole system is the global one, to the bit.
+* `solver::tests::the_ranged_norm_is_the_regions_own_system` and
+  `reference::tests::the_ranged_norm_over_every_row_is_the_norm_to_the_bit`
+  - the mask of (93.3) is the region's own reference, on device and host.
+* `solver::tests::a_range_outside_the_system_is_refused_by_name` - rows
+  outside the system are refused, not clamped.
+* `cht::tests::the_full_range_norm_is_bitwise_the_global_one_on_a_conjugate_matrix`,
+  `cht::tests::the_per_region_residuals_partition_the_global_residual`,
+  `cht::tests::no_region_residual_is_measured_when_residuals_are_not_reported`
+  and `cht::tests::the_row_scale_ratio_is_the_conductivity_ratio` - the
+  same four properties on a real conjugate matrix, plus the unmeasured
+  case's gate.
+* `ofgpu-validate`'s Gate 93-B rows (§93.8): the partition identity
+  `r_g N_g = sum_k r_k N_k`, the row-scale ratio against the conductivity
+  ratio, and both series-slab numbers.
+
+The points unit's tests, by name:
+`io::pointfield::tests::a_linear_field_is_exact_at_interior_points_and_bounded_at_boundary_points`,
+`io::pointfield::tests::the_vertex_mean_of_a_linear_point_field_is_the_cell_centre_value`,
+`io::pointfield::tests::the_round_trip_is_exact_on_interior_cells_of_a_uniform_block`,
+`io::pointfield::tests::the_vector_and_tensor_gathers_agree_with_the_scalar_one_componentwise`,
+`io::pointfield::tests::weights_sum_to_one_and_the_adjacency_of_a_block_is_what_geometry_says`,
+`io::pointfield::tests::it_refuses_a_field_of_the_wrong_length_by_name`;
+`vtu::tests::the_cell_data_path_writes_the_same_bytes_as_before_s2` (the
+CellData path is bitwise unchanged),
+`vtu::tests::tensor_cell_data_has_nine_components_row_major`,
+`vtu::tests::write_vtu_points_shares_points_and_winds_faces_outward`,
+`vtu::tests::write_vtu_points_refuses_wrong_lengths_by_name`,
+`vtu::tests::the_point_vtu_is_read_back_by_the_python_reader`, and
+`cht::tests::the_attached_points_rebuild_the_concatenated_geometry_and_write_one_vtu`
+(`to_raw` rebuilds `build`'s geometry, and one VTU comes off the
+concatenation).
+
+This unit's tests, by name:
+
+* `energy::tests::the_mach_number_is_speed_over_the_isentropic_sound_speed`
+  - (93.6)-(93.7) against values computed in the test from the same
+  `props.r_s()`/`gamma`; max, cell and volume mean to 1e-14 relative; a
+  length mismatch refused with `mach_number` in the message.
+* `energy::tests::a_mach_number_above_the_low_mach_limit_is_refused_by_name`
+  - `Err` at 0.31 naming `0.31`, `cell 7`, the moment, `0.3`, `§25` and
+  `-permissive`; `Ok` at 0.3 exactly; `Ok` at 0.31 under `-permissive`.
+* `decompose::tests::a_partition_may_not_cut_an_interface_face` - the
+  region-wise split of two coupled slabs is refused naming `§47.2` and
+  `8 interface face(s) (4 pair(s)`; a y-split that keeps every pair on
+  one part builds with `n_cut_couples == 0`.
+* `psychro::tests::wet_bulb_as_a_field_and_condensation_are_refused_by_name`
+  - extended: the condensation menu names `supplyRelativeHumidity` and
+  `plenumRelativeHumidity` and contains no `coil`; the test takes the
+  permissive-flag guard first.
+* `lowmach_tests::defaults_are_open_and_steady` still passes with the
+  Mach plumbing in the driver.
+* `cht::tests::region_rows_have_the_region_s_own_lengths` - a region's
+  downloaded rows have the region's OWN `n_cells`, `n_internal_faces` and
+  `n_boundary_faces` lengths; its interface mask is true on exactly its side
+  of the coupling's pairs (twice the pair count over the two regions) and is
+  all-false on a single-region mesh.
+* `cht::tests::gate_93a_a_region_s_rows_are_bitwise_the_region_alone` -
+  Gate 93-A's lib twin: for both regions of a coupled [6,3,2]+[4,3,2] pair
+  (k = 1.4 against 148, `r_c = 1e-4`), the pre-fold `diag`/`upper`/`lower`/
+  `source` of the region's rows equal the single-region assembly in every
+  bit, and so do the boundary coefficients on the non-interface faces - the
+  single side masked by the union's interface mask, which is the same face
+  set.
+
+### 93.8 Validation — Gate 93-A (bitwise restriction) and Gate 93-B (silicon on mould compound)
+
+**Gate 93-A** is §93.1's restriction made a measurement: for each region of
+a coupled pair, after ONE `assemble` and BEFORE
+`add_boundary_contributions`, the union's `diag[cells(r)]`,
+`upper[faces(r)]`, `lower[faces(r)]` and `source[cells(r)]` equal the
+region-alone assembly entry for entry in every bit (`to_bits()`), and so do
+`internal_coeffs`/`boundary_coeffs` on every boundary face of r that is NOT
+an interface face. Not claimed: the interface faces' coefficients - they are
+§47.2's Robin triple on the union and an ordinary patch alone, different by
+construction - and not the solved field, which §47.2's last paragraph
+settles at the end of this section. Why the four arrays CAN be bitwise:
+`fvLapFaces` is per internal face from `gamma_mag_sf[f]` and
+`delta_coeffs[f]`, both copied by `ThermalMesh::build`; `fvLapDiag` gathers
+each cell's own internal faces through the cell-to-face CSR, which
+`build_cell_face_maps` rebuilds in the same ascending face order because the
+concatenation offsets every face of a region by one constant; `fvm_su` is
+`V_P q_P`; `Conduction::build` is face-local. Nothing in the pre-fold
+assembly of a region's rows can see another region.
+
+The gate is stated for the steady, orthogonal-correction-free assembly, and
+it requires that assembly: `ConjugateControls::default()` sets
+`ddt: DdtCoeffs::ZERO` and `n_non_orth_correctors: 0`, both twins assert the
+two values, and with correctors on the gate would be comparing two different
+equations - the non-orth correction reads `fvc_grad_scalar` over the WHOLE
+union, whose boundary term at a face that is an interface on the union and
+an ordinary patch alone is not the same number.
+
+The fixture, both twins: a [6,3,2] block of 2 x 5 x 5 mm cells (k = 1.4) on
+a [4,3,2] block of the same cells (k = 148) at `r_c = 1e-4` in the lib twin
+(`cht::tests::gate_93a_a_region_s_rows_are_bitwise_the_region_alone`);
+`cht_block` slabs [12,6,1] (k = 1.4) + [9,6,1] (k = 148) at `r_c` in
+{0, 5e-3} in `ofgpu-validate` (`check_region_restriction`, under the banner
+`an equation that lives on a region - Gate 93-A (SPEC-LIT 93)`). 380 K on
+the one outer x wall and 300 K on the other, on the union and on the single
+alike; `q = 1.0e5 (1 + 0.1 c_local)` per cell of local index `c_local`;
+seed 340 K; ONE `assemble`, no `update_interfaces`, no fold, no solve. The
+single side of the boundary-coefficient compare is masked by the UNION's
+interface mask: the region's boundary faces are concatenated in the
+region's own order, so local index `k` is the same face on both sides, and
+the face that became the interface is excluded from the single too - alone
+it is an ordinary patch, on the union it is the Robin triple, and comparing
+them would compare two different boundary-value problems. Measured
+2026-09-13 on this run:
+
+```
+  ok   S93 Gate 93-A: region 0 rc 0: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 0 rc 0: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 0 rc 0.005: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 0 rc 0.005: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0.005: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0.005: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+```
+
+A MISSES on any combination is ONE `GateReport` under `SPEC-LIT S93 Gate
+93-A`, naming the region, the `r_c`, the array and the first differing
+index with both values, and its failing `require` rows carry the tally - a
+FINDING reported (§0 rule 3), never the operators touched to reach a pass.
+This run found none: the eight rows above are all the gate prints.
+
+A passing gate registers nothing (§69.2), so Gate 93-B is check rows in
+`ofgpu-validate` (`src/bin/validate.rs`, `check_per_region_residual`),
+under the banner `the per-region residual - Gate 93-B (SPEC-LIT 8.4 on
+each region's rows)`. Configuration as landed: silicon (k = 148 W/(m K))
+on mould compound (k = 0.74), the exact 200:1 conductivity ratio, 1 mm on
+2 mm at 20 + 40 cells of 5.0e-5 m in both regions, so the FV scheme
+represents the piecewise-linear closed form exactly and the only error
+left is the linear solve's; T = 380 / 300 K on the outer walls; the 1-D
+series slab of Carslaw & Jaeger ch. I. Measured 2026-09-13 on this run:
+
+```
+  ok   Gate 93-B leg A: the global solve met its nominal tolerance 1e-6err 0.000e+00  tol 0.000e+00
+  ok   Gate 93-B leg A: r_g N_g = sum_k r_k N_k - the region residuals partition the global oneerr 0.000e+00  tol 1.000e-10
+  ok   Gate 93-B: row scale silicon/mould = the conductivity ratio 200, within 5 %err 1.388e-02  tol 5.000e-02
+        Gate 93-B leg A: region 'silicon': initial 1.000e0 -> final 6.002e-5 (2.41e2 of r_g), row-scale share 1.000e0
+        Gate 93-B leg A: region 'mould': initial 1.000e0 -> final 1.047e-6 (4.20e0 of r_g), row-scale share 5.070e-3
+  ok   Gate 93-B leg B: some global tolerance in [1e-8 .. 1e-14] gives every region 1e-8 on its own rowserr 0.000e+00  tol 0.000e+00
+        Gate 93-B leg B: the global tolerance that gave every region 1e-8 was 1e-10 (52 iterations; leg A took 46)
+  ok   Gate 93-B leg B: q = dT/(L_si/k_si + L_mc/k_mc) - the series slaberr 3.352e-10  tol 1.000e-05
+  ok   Gate 93-B leg B: the interface temperature is T_hot - q L_si/k_sierr 5.599e-13  tol 1.000e-05
+```
+
+What the numbers say, measured and not asserted (§46.4's rule): at the
+nominal global 1e-6 the soft region's own residual (mould, 1.047e-6) sits
+beside the tolerance while the stiff region's (silicon, 6.002e-5) is 241
+times `r_g` measured on the same field - the union's single number
+genuinely does not see the stiff region's state. Tightening the GLOBAL
+tolerance to 1e-10 is what it takes to give every region 1e-8 on its own
+rows, and the series-slab agreement (q to 3.352e-10 relative, the
+interface temperature to 5.599e-13 of the 80 K span) says the converged
+answer is the physics. The run that measured both gates ended `847/847
+checks passed`, Gate 93-B's rows identical to the run that first measured
+them.
+
+### 93.9 What is claimed, and what is not
+
+Claimed: the ranged norm over the full range is the global norm to the
+bit, on the dense rig and on a conjugate matrix whose interface rows are
+coupled; the per-region residuals partition the global one as
+`r_g N_g = sum_k r_k N_k`; the CellData VTU path is bitwise unchanged,
+pinned by its FNV-1a digest; the Mach number is a report and a refusal,
+not a model - no equation of §25 or §26 changed by its arrival; and Gate
+93-A's: the pre-fold `diag`, `upper`, `lower` and `source` of a region's
+rows of the concatenated assembly - and the boundary coefficients on the
+non-interface boundary faces - are the region built alone, bit for bit
+(§93.8).
+
+Not claimed: a bitwise SOLVED field on a union. §47.2's own last
+paragraph: "the solved field on a two-region mesh is not bitwise
+identical to the same field solved on the fluid region alone, because the
+two are different-sized linear systems whose Krylov iterates are different
+numbers" - the matrix contribution is what is asserted exactly. And no
+region-restricted SOLVE exists anywhere in this: the solid is solved on
+its own region mesh, the union is solved as ONE system, and (93.1)
+restricts what a measurement READS, not what the solver RUNS. Nothing
+here says anything about the observed-order section planned next; it does
+not exist yet, and this section cites no number for it.
+
+---

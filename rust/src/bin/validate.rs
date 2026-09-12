@@ -2621,6 +2621,11 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows) ===");
     check_per_region_residual(c, &gpu)?;
 
+    // SPEC-LIT 93 - Gate 93-A: a region's rows of the concatenated assembly
+    // are the region alone, bit for bit.
+    println!("\n=== an equation that lives on a region - Gate 93-A (SPEC-LIT 93) ===");
+    check_region_restriction(c, &gpu)?;
+
     // SPEC-LIT S59/S60 - the FLUID side of that interface, and S47.12's Gate
     // 5, which S47.14 recorded as not run.
     println!("
@@ -4836,6 +4841,235 @@ fn check_per_region_residual(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         (t_i_got - t_i_exact).abs() / (t_hot - t_cold),
         1e-5,
     );
+
+    Ok(())
+}
+
+
+/// **SPEC-LIT §93.8 Gate 93-A.** A region's rows of the concatenated assembly
+/// are the region alone. After ONE `assemble`, before any fold, the union's
+/// `diag[cells(r)]`, `upper[faces(r)]`, `lower[faces(r)]` and
+/// `source[cells(r)]` equal the region-alone assembly entry for entry in
+/// every bit, and so do `internal_coeffs`/`boundary_coeffs` on every
+/// boundary face of the region that is NOT an interface face. A MISSES here
+/// is a finding, not something the operators get touched for.
+#[allow(clippy::too_many_lines)]
+fn check_region_restriction(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::{
+        bitwise_mismatch, mark_coupled_faces, non_interface_entries, Conduction,
+        ConjugateControls, ConjugateHeat, InterfaceRequest, PairingTolerances, RegionInput,
+        RegionKind, SolidMaterial, ThermalMesh,
+    };
+    use ofgpu::io::case::{LinearSolverKind, Preconditioner};
+
+    let controls = || ConjugateControls {
+        solver: SolverControls {
+            solver: LinearSolverKind::PCG,
+            precon: Preconditioner::Dic,
+            tolerance: 1e-30,
+            rel_tol: 0.0,
+            max_iter: 4000,
+            ..SolverControls::default()
+        },
+        ..ConjugateControls::default()
+    };
+    let ctrl = controls();
+    assert_eq!(ctrl.n_non_orth_correctors, 0, "the gate needs no non-orth correction");
+    assert!(
+        ctrl.ddt == ofgpu::timescheme::DdtCoeffs::ZERO,
+        "the gate is the steady assembly"
+    );
+
+    c.note(
+        "Gate 93-A: slabs [12,6,1] (k = 1.4) + [9,6,1] (k = 148), r_c in {0, 5e-3}; \
+         the interface faces are excluded by construction (SPEC-LIT 93.8)",
+    );
+
+    /// Dirichlet on the given patches, the per-local-index source, seed 340,
+    /// assemble. BOTH sides of a comparison get the SAME boundary-value
+    /// problem - a patch left zero-gradient on the union while its
+    /// single-region twin is fixed is two different equations, not a miss.
+    fn drive(
+        gpu: &Gpu,
+        cht: &mut ConjugateHeat<'_>,
+        tm: &ThermalMesh,
+        bcs: &[(usize, &str, Scalar)],
+    ) -> Result<()> {
+        use ofgpu::field::BcKind;
+        mark_coupled_faces(gpu, cht.field_mut(), tm)?;
+        let mut kind = gpu.download(&cht.field().bc_kind)?;
+        let mut fr = gpu.download(&cht.field().fr)?;
+        let mut rv = gpu.download(&cht.field().ref_value)?;
+        for &(region, patch, v) in bcs {
+            for bf in tm.patch_range(region, patch)? {
+                kind[bf] = BcKind::FixedValue as Label;
+                fr[bf] = 1.0;
+                rv[bf] = v;
+            }
+        }
+        gpu.write(&mut cht.field_mut().bc_kind, &kind)?;
+        gpu.write(&mut cht.field_mut().fr, &fr)?;
+        gpu.write(&mut cht.field_mut().ref_value, &rv)?;
+        let mut q = gpu.download(cht.source_mut())?;
+        for r in cht.regions() {
+            for local in 0..r.n_cells {
+                q[r.cell_offset + local] = 1.0e5 * (1.0 + 0.1 * local as Scalar);
+            }
+        }
+        gpu.write(cht.source_mut(), &q)?;
+        let seed = vec![340.0 as Scalar; tm.host.n_cells];
+        let f = cht.field_mut();
+        gpu.write(&mut f.f, &seed)?;
+        gpu.write(&mut f.f0, &seed)?;
+        gpu.write(&mut f.f00, &seed)?;
+        cht.assemble(gpu)
+    }
+
+    let mut reported = false;
+    for &r_c in &[0.0 as Scalar, 5.0e-3 as Scalar] {
+        let a = cht_block([12, 6, 1], Vec3::ZERO, Vec3::new(0.010, 0.02, 0.02))?;
+        let b = cht_block(
+            [9, 6, 1],
+            Vec3::new(0.010, 0.0, 0.0),
+            Vec3::new(0.030, 0.02, 0.02),
+        )?;
+        let tm = ThermalMesh::build(
+            &[
+                RegionInput { name: "a".into(), kind: RegionKind::Solid, mesh: &a },
+                RegionInput { name: "b".into(), kind: RegionKind::Solid, mesh: &b },
+            ],
+            &[InterfaceRequest::new(0, "xMax", 1, "xMin", r_c)],
+            PairingTolerances::default(),
+        )?;
+        let cond = Conduction::uniform_per_region(
+            &tm,
+            &[
+                SolidMaterial::isotropic("a", 2000.0, 800.0, 1.4),
+                SolidMaterial::isotropic("b", 1000.0, 1200.0, 148.0),
+            ],
+        )?;
+        let gm = GpuMesh::upload(gpu, &tm.host)?;
+        let mut cht = ConjugateHeat::new(gpu, &gm, &tm, &cond, controls())?;
+        // The SAME boundary-value problem the singles get: 380 K on a's outer
+        // x wall, 300 K on b's.
+        drive(gpu, &mut cht, &tm, &[(0, "xMin", 380.0), (1, "xMax", 300.0)])?;
+
+        for r in 0..tm.regions.len() {
+            let (mesh, k, patch, v) = if r == 0 {
+                (&a, 1.4 as Scalar, "xMin", 380.0 as Scalar)
+            } else {
+                (&b, 148.0 as Scalar, "xMax", 300.0 as Scalar)
+            };
+            let stm = ThermalMesh::build(
+                &[RegionInput { name: "s".into(), kind: RegionKind::Solid, mesh }],
+                &[],
+                PairingTolerances::default(),
+            )?;
+            let scond = Conduction::uniform_per_region(
+                &stm,
+                &[SolidMaterial::isotropic(
+                    if r == 0 { "a" } else { "b" },
+                    if r == 0 { 2000.0 } else { 1000.0 },
+                    if r == 0 { 800.0 } else { 1200.0 },
+                    k,
+                )],
+            )?;
+            let sgm = GpuMesh::upload(gpu, &stm.host)?;
+            let mut scht = ConjugateHeat::new(gpu, &sgm, &stm, &scond, controls())?;
+            drive(gpu, &mut scht, &stm, &[(0, patch, v)])?;
+
+            let u = tm.region_rows(gpu, cht.matrix(), r)?;
+            let s = stm.region_rows(gpu, scht.matrix(), 0)?;
+
+            let mut ok_four = true;
+            for (name, got, want) in [
+                ("diag", &u.diag, &s.diag),
+                ("upper", &u.upper, &s.upper),
+                ("lower", &u.lower, &s.lower),
+                ("source", &u.source, &s.source),
+            ] {
+                if let Some((n, i)) = bitwise_mismatch(got, want)? {
+                    ok_four = false;
+                    if !reported {
+                        c.report(GateReport {
+                            verdict: Verdict::Misses,
+                            how: How::Live,
+                            gate: "SPEC-LIT S93 Gate 93-A",
+                            against: "the same region assembled alone - SPEC-LIT 47.2's \
+                                      bitwise-contribution claim in 59.9's bitwise-unmoved \
+                                      shape",
+                            headline: format!(
+                                "region {r}, rc {r_c}: {n} of {} entries of {name} differ; \
+                                 first at index {i}: union {:e}, alone {:e}",
+                                got.len(),
+                                got[i],
+                                want[i]
+                            ),
+                            detail: vec![],
+                        });
+                        reported = true;
+                    }
+                }
+            }
+            c.require(
+                &format!(
+                    "S93 Gate 93-A: region {r} rc {r_c}: diag/upper/lower/source of the \
+                     union's rows are the region alone, BITWISE"
+                ),
+                ok_four,
+            );
+
+            assert!(
+                s.interface_face.iter().all(|&f| !f),
+                "a single-region mesh has no interface faces"
+            );
+            // The single side is masked by the UNION's interface mask: the
+            // region's boundary faces are concatenated in the region's own
+            // order, so local index `k` is the same face on both sides - on
+            // the single mesh it is the patch that became the interface, and
+            // it is excluded there too (alone it is an ordinary zero-gradient
+            // patch, on the union it is §47.2's Robin triple).
+            let mut ok_bc = true;
+            for (ug, sg) in [
+                (&u.internal_coeffs, &s.internal_coeffs),
+                (&u.boundary_coeffs, &s.boundary_coeffs),
+            ] {
+                let (uv, ui) = non_interface_entries(ug, &u.interface_face)?;
+                let (sv, _) = non_interface_entries(sg, &u.interface_face)?;
+                if let Some((n, j)) = bitwise_mismatch(&uv, &sv)? {
+                    ok_bc = false;
+                    if !reported {
+                        c.report(GateReport {
+                            verdict: Verdict::Misses,
+                            how: How::Live,
+                            gate: "SPEC-LIT S93 Gate 93-A",
+                            against: "the same region assembled alone - SPEC-LIT 47.2's \
+                                      bitwise-contribution claim in 59.9's bitwise-unmoved \
+                                      shape",
+                            headline: format!(
+                                "region {r}, rc {r_c}: {n} of {} entries of the boundary \
+                                 coefficients differ on non-interface faces; first at \
+                                 boundary face {}: union {:e}, alone {:e}",
+                                uv.len(),
+                                ui[j],
+                                uv[j],
+                                sv[j]
+                            ),
+                            detail: vec![],
+                        });
+                        reported = true;
+                    }
+                }
+            }
+            c.require(
+                &format!(
+                    "S93 Gate 93-A: region {r} rc {r_c}: boundary coefficients on \
+                     non-interface faces, BITWISE"
+                ),
+                ok_bc,
+            );
+        }
+    }
 
     Ok(())
 }

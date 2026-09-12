@@ -291,12 +291,19 @@ pub fn enhancement_bias(t: Scalar, p_atm: Scalar, f_e: Scalar) -> (Scalar, Scala
 }
 
 /// SPEC-LIT §54.5: field-level condensation is a different model. Refused by
-/// name.
+/// name. The menu names only entries a DcCase can carry (SPEC-LIT §93.6):
+/// its former "coil-surface saturated boundary condition" existed in no case
+/// format.
 pub fn refuse_condensation(what: &str) -> Result<()> {
     unsupported_note(
         what,
         "condensation",
-        &["supersaturation reporting", "a coil-surface saturated boundary condition"],
+        &[
+            "supersaturation reporting (the §54.5 report row: cell count and worst excess)",
+            "humidity.barometricPressure / humidity.virtualTemperature (the humidity block)",
+            "fans[].supplyRelativeHumidity",
+            "tiles[].plenumRelativeHumidity",
+        ],
         "field-level condensation (fog) is a saturation-constrained source with its \
          own inner iteration - a different model, not a switch on this one, and not \
          needed for the market SPEC-LIT S54 was written for. What this solver does \

@@ -325,6 +325,7 @@ fn the_molar_mass_caveat_fires_only_where_it_matters() {
 
 #[test]
 fn wet_bulb_as_a_field_and_condensation_are_refused_by_name() {
+    let _g = crate::io::contract::permissive_test_guard();
     crate::io::contract::set_permissive(false);
 
     let e = refuse_wet_bulb_field("output/fields").unwrap_err().to_string();
@@ -335,6 +336,10 @@ fn wet_bulb_as_a_field_and_condensation_are_refused_by_name() {
     let e = refuse_condensation("physics/humidity/condensation").unwrap_err().to_string();
     assert!(e.contains("REPORT supersaturation"), "{e}");
     assert!(e.contains("silently clipping"), "{e}");
+    // SPEC-LIT §93.6: the menu names only what a DcCase can carry.
+    assert!(e.contains("supplyRelativeHumidity"), "{e}");
+    assert!(e.contains("plenumRelativeHumidity"), "{e}");
+    assert!(!e.contains("coil"), "no case format ever had a coil BC: {e}");
 }
 
 /// The host-side wet bulb converges, and gives the right answer at the two

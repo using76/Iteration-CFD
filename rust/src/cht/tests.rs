@@ -2208,3 +2208,207 @@ fn the_attached_points_rebuild_the_concatenated_geometry_and_write_one_vtu() {
     let err = tm2.to_raw().unwrap_err().to_string();
     assert!(err.contains("attach_points"), "{err}");
 }
+
+// ==========================================================================
+//  SPEC-LIT §93.1/§93.8 - Gate 93-A: a region's rows of the concatenated
+//  assembly are the region alone
+// ==========================================================================
+
+/// **SPEC-LIT §93.1.** The slice [`ThermalMesh::region_rows`] returns has the
+/// region's OWN three lengths, and its interface mask is exactly the faces
+/// the coupling marked `PatchKind::Interface` on that region's side - zero of
+/// them on a mesh built with no interface at all.
+#[test]
+fn region_rows_have_the_region_s_own_lengths() {
+    let Some(gpu) = gpu() else { return };
+
+    let a = block([6, 3, 2], Vec3::new(0.002, 0.005, 0.005), Vec3::ZERO);
+    let b = block(
+        [4, 3, 2],
+        Vec3::new(0.002, 0.005, 0.005),
+        Vec3::new(0.012, 0.0, 0.0),
+    );
+    let tm = couple(&a, &b, 1.0e-4);
+    let cond = Conduction::uniform_per_region(
+        &tm,
+        &[
+            SolidMaterial::isotropic("a", 2000.0, 800.0, 1.4),
+            SolidMaterial::isotropic("b", 1000.0, 1200.0, 148.0),
+        ],
+    )
+    .expect("conduction");
+    let gm = upload(&gpu, &tm.host);
+    let cht = ConjugateHeat::new(&gpu, &gm, &tm, &cond, tight_controls()).expect("cht");
+
+    let mut marked = 0usize;
+    for (r, m) in tm.regions.iter().enumerate() {
+        let rows = tm.region_rows(&gpu, cht.matrix(), r).expect("region_rows");
+        assert_eq!(rows.diag.len(), m.n_cells, "region {r} diag");
+        assert_eq!(rows.source.len(), m.n_cells, "region {r} source");
+        assert_eq!(rows.upper.len(), m.n_internal_faces, "region {r} upper");
+        assert_eq!(rows.lower.len(), m.n_internal_faces, "region {r} lower");
+        assert_eq!(
+            rows.internal_coeffs.len(),
+            m.n_boundary_faces,
+            "region {r} internal_coeffs"
+        );
+        assert_eq!(
+            rows.boundary_coeffs.len(),
+            m.n_boundary_faces,
+            "region {r} boundary_coeffs"
+        );
+        // The 2x3 shared cross-section is 6 pairs; each region's own boundary
+        // slice carries exactly its side of them, so the pair count on each
+        // region and twice the pair count over both.
+        let on_region = rows.interface_face.iter().filter(|&&f| f).count();
+        assert_eq!(on_region, tm.pairs.len(), "region {r} interface faces");
+        marked += on_region;
+    }
+    assert_eq!(
+        marked,
+        2 * tm.pairs.len(),
+        "both sides of every pair, across the two regions"
+    );
+
+    // A mesh with no coupling has no interface faces at all.
+    let one = one_region(&a);
+    let cond1 = Conduction::uniform_per_region(
+        &one,
+        &[SolidMaterial::isotropic("a", 2000.0, 800.0, 1.4)],
+    )
+    .expect("conduction");
+    let gm1 = upload(&gpu, &one.host);
+    let cht1 = ConjugateHeat::new(&gpu, &gm1, &one, &cond1, tight_controls()).expect("cht");
+    let rows = one
+        .region_rows(&gpu, cht1.matrix(), 0)
+        .expect("region_rows");
+    assert!(
+        rows.interface_face.iter().all(|&f| !f),
+        "a single-region mesh has no interface faces"
+    );
+}
+
+/// **SPEC-LIT §93.8 Gate 93-A, the lib twin.** After ONE `assemble`, before
+/// any fold: a region's `diag`/`upper`/`lower`/`source` rows of the
+/// concatenated assembly are the same region built ALONE, in every bit
+/// (`to_bits()`), and so are `internal_coeffs`/`boundary_coeffs` on every
+/// boundary face that is NOT an interface face. The interface faces
+/// themselves are excluded by construction - §47.2's Robin triple on the
+/// union, an ordinary patch alone. The gate is stated for the steady,
+/// correction-free assembly, and asserts the two control values.
+#[test]
+fn gate_93a_a_region_s_rows_are_bitwise_the_region_alone() {
+    let Some(gpu) = gpu() else { return };
+
+    let ctrl = tight_controls();
+    assert_eq!(ctrl.n_non_orth_correctors, 0, "the gate needs no non-orth correction");
+    assert!(ctrl.ddt == DdtCoeffs::ZERO, "the gate is the steady assembly");
+
+    let a_mat = || SolidMaterial::isotropic("a", 2000.0, 800.0, 1.4);
+    let b_mat = || SolidMaterial::isotropic("b", 1000.0, 1200.0, 148.0);
+
+    let a = block([6, 3, 2], Vec3::new(0.002, 0.005, 0.005), Vec3::ZERO);
+    let b = block(
+        [4, 3, 2],
+        Vec3::new(0.002, 0.005, 0.005),
+        Vec3::new(0.012, 0.0, 0.0),
+    );
+    let tm = couple(&a, &b, 1.0e-4);
+    let cond =
+        Conduction::uniform_per_region(&tm, &[a_mat(), b_mat()]).expect("conduction");
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = ConjugateHeat::new(&gpu, &gm, &tm, &cond, ctrl).expect("cht");
+    mark_coupled_faces(&gpu, cht.field_mut(), &tm).expect("mark");
+    fix_value(&gpu, cht.field_mut(), tm.patch_range(0, "xmin").unwrap(), 380.0);
+    fix_value(&gpu, cht.field_mut(), tm.patch_range(1, "xmax").unwrap(), 300.0);
+    let mut q = gpu.download(cht.source_mut()).expect("q");
+    for r in cht.regions() {
+        for local in 0..r.n_cells {
+            q[r.cell_offset + local] = 1.0e5 * (1.0 + 0.1 * local as Scalar);
+        }
+    }
+    gpu.write(cht.source_mut(), &q).expect("q");
+    seed(&gpu, &mut cht, &vec![340.0 as Scalar; tm.host.n_cells]);
+    cht.assemble(&gpu).expect("assemble");
+
+    for r in 0..tm.regions.len() {
+        let (mesh, k) = if r == 0 {
+            (&a, 1.4 as Scalar)
+        } else {
+            (&b, 148.0 as Scalar)
+        };
+        let stm = one_region(mesh);
+        let scond = Conduction::uniform_per_region(
+            &stm,
+            &[if r == 0 {
+                a_mat()
+            } else {
+                SolidMaterial::isotropic("b", 1000.0, 1200.0, k)
+            }],
+        )
+        .expect("conduction");
+        let sgm = upload(&gpu, &stm.host);
+        let mut scht = ConjugateHeat::new(&gpu, &sgm, &stm, &scond, tight_controls())
+            .expect("cht");
+        let (patch, v) = if r == 0 { ("xmin", 380.0) } else { ("xmax", 300.0) };
+        fix_value(&gpu, scht.field_mut(), stm.patch_range(0, patch).unwrap(), v);
+        let mut sq = gpu.download(scht.source_mut()).expect("q");
+        for local in 0..stm.host.n_cells {
+            sq[local] = 1.0e5 * (1.0 + 0.1 * local as Scalar);
+        }
+        gpu.write(scht.source_mut(), &sq).expect("q");
+        seed(&gpu, &mut scht, &vec![340.0 as Scalar; stm.host.n_cells]);
+        scht.assemble(&gpu).expect("assemble");
+
+        let u = tm.region_rows(&gpu, cht.matrix(), r).expect("union rows");
+        let s = stm.region_rows(&gpu, scht.matrix(), 0).expect("single rows");
+
+        for (name, got, want) in [
+            ("diag", &u.diag, &s.diag),
+            ("upper", &u.upper, &s.upper),
+            ("lower", &u.lower, &s.lower),
+            ("source", &u.source, &s.source),
+        ] {
+            if let Some((n, i)) = bitwise_mismatch(got, want).expect("compare") {
+                panic!(
+                    "Gate 93-A: region {r}: {n} of {} entries of {name} differ; \
+                     first at index {i}: union {:e}, alone {:e}",
+                    got.len(),
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+
+        assert!(
+            s.interface_face.iter().all(|&f| !f),
+            "a single-region mesh has no interface faces"
+        );
+        // The single side is masked by the UNION's interface mask: the region's
+        // boundary faces are concatenated in the region's own order, so
+        // `u.interface_face[k]` marks exactly the face that local index `k` is
+        // on both sides - on the single mesh it is the patch that became the
+        // interface (a's "xmax", b's "xmin"), and it is excluded there too,
+        // because alone it is an ordinary zero-gradient patch and on the union
+        // it is §47.2's Robin triple. What remains is the same face set.
+        for (name, ug, sg) in [
+            ("internal_coeffs", &u.internal_coeffs, &s.internal_coeffs),
+            ("boundary_coeffs", &u.boundary_coeffs, &s.boundary_coeffs),
+        ] {
+            let (uv, ui) =
+                non_interface_entries(ug, &u.interface_face).expect("mask");
+            let (sv, _) = non_interface_entries(sg, &u.interface_face).expect("mask");
+            if let Some((n, j)) = bitwise_mismatch(&uv, &sv).expect("compare") {
+                panic!(
+                    "Gate 93-A: region {r}: {n} of {} entries of {name} on \
+                     non-interface faces differ; first at boundary face {}: \
+                     union {:e}, alone {:e}",
+                    uv.len(),
+                    ui[j],
+                    uv[j],
+                    sv[j]
+                );
+            }
+        }
+    }
+}
