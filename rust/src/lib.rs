@@ -46,6 +46,7 @@
 //! source was consulted.
 
 pub mod adapt;
+pub mod automesher;
 pub mod decompose;
 pub mod device;
 pub mod distsolve;

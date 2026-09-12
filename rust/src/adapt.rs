@@ -2331,10 +2331,19 @@ mod tests {
         // exempt a future `src/parcels/transfer.rs` from the claim without
         // anyone noticing, which is the failure mode this whole test exists to
         // rule out.
+        // `automesher/layers.rs` is on this list, and it is the only entry
+        // that is not part of the adapt itself: §92.13's layer insertion
+        // changes the cell count, so it restores §2's upper-triangular order
+        // with `rebuild::ldu_permutation`, a pure function of `(owner,
+        // neighbour)` that §75.9 lists as a SUPPORTED API. The mesher is not
+        // a time loop - it runs once, before any solver exists - so the claim
+        // this test guards is untouched by it. Added by the supervising
+        // session with §75.9 amended to say so.
         let allowed = [
             "adapt.rs",
             "adapt/rebuild.rs",
             "adapt/transfer.rs",
+            "automesher/layers.rs",
             "bin/validate.rs",
             "lib.rs",
         ];

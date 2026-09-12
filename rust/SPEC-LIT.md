@@ -16260,6 +16260,16 @@ later in the numbering, so every emitted internal face already has
 `(owner, neighbour)` and nothing more. The generator **asserts** this rather
 than assuming it, and errors by name if it is ever false.
 
+**The level cap is 6.** `mesh::refined::build` refuses a balanced level field
+whose maximum is past it, by name — `refinement level {lmax} is past this
+generator's limit of 6`. The bound is the voxel map above, not the tree: the
+map is built on the FINEST grid, so a base cell at level `l` owns `(2^l)^3`
+voxels — 262 144 at level 6, eight times that per level after — and the map is
+what a deeper mesh exhausts first. Every caller that offers a level is bounded
+by this number and refuses before it builds anything; §92.2's octree is one,
+and refuses a `refinement.max_level` past 6 in the config, before any geometry
+is read.
+
 This is a generator, not an adapt: **nothing in this module changes a mesh after
 it is built.** §75 is where a mesh does change, and its emitter is required to
 agree with this one bit for bit on every mesh both can express.
@@ -17198,7 +17208,7 @@ needs to reach.
 
 | asked for | answer |
 |---|---|
-| **any `fvSchemes`, `controlDict` or case-file entry that turns adaptation on** | **There is none, and that is deliberate.** Nothing in a time loop calls any of the above. A case that asked for adaptive refinement would be asking for something no solver in this crate does, and the honest answer is that the machinery exists, is measured, and is not wired in. §75.11 is the list of what would have to land first. |
+| **any `fvSchemes`, `controlDict` or case-file entry that turns adaptation on** | **There is none, and that is deliberate.** Nothing in a time loop calls any of the above. One thing outside a time loop does: §92.13's layer insertion changes the cell count and restores §2's upper-triangular order with `rebuild::ldu_permutation`, which is a pure function of `(owner, neighbour)` and is on the supported list above. `adapt::tests::no_time_loop_reaches_the_adapt` names that file explicitly rather than exempting a directory. A case that asked for adaptive refinement would be asking for something no solver in this crate does, and the honest answer is that the machinery exists, is measured, and is not wired in. §75.11 is the list of what would have to land first. |
 | the Jasak–Gosman a-posteriori residual estimator | Recognised, not implemented. It needs the assembled matrix of the equation being adapted for, and this section's criteria take a field and a gradient. **Use the Löhner indicator**, which is the cheap first cut of the same idea and is what Part 2's driver falls back to. |
 | the Pope LES resolution index `M = k_sgs/(k_res + k_sgs)` | Recognised, not implemented. `k_res` is a running variance and therefore three extra fields of state that must themselves be restricted and prolonged on every adapt — a decision about the field registry, not about the criterion. **Use the Löhner indicator on velocity magnitude.** |
 | divergence-free prolongation of the face flux | Not implemented, not started. The face flux `phi_f` is not transferred at all. §75.11. |
@@ -24525,5 +24535,2014 @@ for §89.4's reason.
 | two transition models in one case | refused — `set_gamma_transition` on an LM-attached model, `set_transition` on a `gm`-attached one |
 | `LRR`/`SSG`'s refusals | unchanged from §89.6 |
 | §6.1, §6.3, §33, §40, §41, §56, §57, §88 outputs | **unchanged, bit for bit**, on a case that names none of this |
+
+---
+
+## 92. `automesher` — our own mesher, the hex-dominant path, and the gate a cell has to pass to leave it
+
+Every mesh this crate has solved on came from somewhere else: §23's block
+generator carves a structured block against an STL and leaves stair steps,
+§24 softens those into cut cells, §74 builds a 2:1-refined box for the
+operators to be measured on, and `tools/mesh/step_mesh.py` drives Gmsh from
+outside the process for anything a block cannot express. None of those is a
+mesher for real geometry. This section specifies one.
+
+The name is `automesher`, the binary `ofgpu-automesher`, and the module
+`rust/src/automesher/`. Tranche 1 is the hex-dominant path — a background
+block, an octree refined against the surface, castellation, snapping, and
+prismatic layers — because that is the path whose output this crate's solver
+already runs on. Tetrahedra (§92.4) and polyhedra (§92.5) are specified here
+so the module's shape is chosen for all three, and implemented later.
+
+`No GPL-licensed source was consulted.` In particular **OpenFOAM's
+`snappyHexMesh` is GPL-3.0 and was not opened**; the OpenFOAM *User Guide*
+chapter that describes it is DOCUMENTATION and was read, and is cited as
+such throughout §92.2. cfMesh (GPL-3.0), TetGen (AGPL-3.0) and CGAL's GPL
+modules were not opened either. Gmsh is GPL-2.0-or-later and is **run as an
+external process in §92.4, never linked and never read**.
+
+### 92.1 Why this exists, and the three mesh types
+
+The ammonia-terminal site is the yardstick: 466 solids over 2.5 km x 2.5 km
+x 200 m, meshed as Gmsh tetrahedra. What came back was not merely inaccurate,
+it was *unsolvable*: sealed pockets under buildings (disjoint cell regions
+with no path to an outlet), cells 5 cm thick spanning 13 m at building feet,
+and 3852 faces past 87 degrees of non-orthogonality. `ofgpu-buoyant` diverged
+inside 50 iterations. The hex cut-cell mesh of the same site converged.
+
+So the requirement is not "a mesher". It is a mesher that **cannot hand the
+solver a mesh with any of those four defects in it**, and that says which
+one it found, in which cell, at which point in space, when it refuses. §92.3
+is that gate, and it is the module's centre; §92.2 is the pipeline that
+feeds it.
+
+| Type | Tranche | Where it is specified | Status |
+|---|---|---|---|
+| hex-dominant (octree + snap + layers) | 1 | §92.2 | this section implements it |
+| tetrahedral (external generator + our repair) | 2 | §92.4 | specified, not implemented |
+| polyhedral (node-dual of a tetrahedral mesh) | 3 | §92.5 | specified, not implemented |
+
+All three emit the same thing: a **real-point** `PolyMeshRaw` — `points`,
+`faces`, `owner`, `neighbour`, `patches` — written by
+`io::polymesh::write_poly_mesh_raw`, satisfying §1's addressing contract
+(owner < neighbour on internal faces, the upper-triangular order §74.2 also
+emits, each patch one contiguous run of boundary faces as
+`io::polymesh::PatchInfo` records it) and §2's geometry (polygonal faces,
+convex-ish cells). The synthetic quads the cut-cell writer
+of §24 emits are a reporting convenience and are **not** what this module
+produces.
+
+### 92.2 The hex-dominant pipeline
+
+The stage list is the one the OpenFOAM *User Guide*'s `snappyHexMesh`
+chapter documents — castellation, snapping, layer addition — and the
+octree-hex literature specifies the interior of each stage: Schneiders,
+*Engineering with Computers* **12** (1996) 168-177 (DOI
+`10.1007/BF01198732`) for grid-based hexahedral generation as a whole; Ito,
+Shih & Soni, *Int. J. Numer. Meth. Engng* **77** (2009) 1809-1833 (DOI
+`10.1002/nme.2470`) for the octree refinement templates; Marechal, *Proc.
+18th International Meshing Roundtable* (2009) 65-84 (DOI
+`10.1007/978-3-642-04319-2_5`) for sharp-feature handling on an octree hex
+mesh; Owen, Staten & Sorensen, *Proc. 20th International Meshing Roundtable*
+(2011) 161-178 (DOI `10.1007/978-3-642-24734-7_9`) for the overlay-grid
+(Sculpt) construction and its parallel decomposition. Every DOI in §92 was
+checked against Crossref on 2026-09-09 by fetching
+`api.crossref.org/works/<doi>` and comparing title, container and year.
+
+**Stage 0 — the background block.** A `blockgen::BlockSpec` over the domain
+extent with `base_size` as the target cell size and an optional per-axis
+grading, exactly as §23.4 already builds one. Nothing new: the block is
+`blockgen::raw_mesh`'s, and the octree of stage 1 subdivides its cells rather
+than replacing them. The domain must contain the surface's bounding box with
+at least one base cell of margin, or the run refuses before any work is done.
+
+**Stage 1 — octree refinement.** Each base cell carries an integer level; a
+cell at level `l` is `(2^l)^3` leaves of size `h_l = base_size / 2^l`. The
+level a cell wants is the maximum over three criteria — a distance band, a
+surface-curvature/feature band, and an explicit region — capped at
+`max_level`:
+
+```
+d(c)    = distance from cell centre c to the nearest triangle of patch p,
+          via surface::TriIndex::nearest_triangle
+
+l_dist(c) = max over patches p of
+              max { L : d(c) <= band_p(L) }, 0 if no band contains c    (92.1)
+
+l_feat(c) = feature_level_p   if c is within feature_dist_p of an edge e
+                              whose dihedral angle exceeds feature_angle_deg
+            0                 otherwise                                 (92.2)
+
+l(c)    = min( max( l_dist(c), l_feat(c), l_region(c) ), max_level )
+```
+
+`band_p(L)` is the config's `refinement.levels` for patch `p`: a list of
+`(distance, level)` pairs, read as "within this distance of this patch, at
+least this level", which is the form the User Guide's `refinementSurfaces` /
+`refinementRegions` documentation describes and the form a site engineer
+already thinks in. A feature edge is an edge of the triangulation whose two
+incident triangles' normals subtend more than `feature_angle_deg`; the
+default is 30 degrees, which is the value the User Guide uses in its own
+examples and is a documented default, not a copied constant.
+
+**Stage 2 — 2:1 balance.** §74.2's fixed point, unchanged, and reusing its
+implementation (`mesh::refined::balance_2to1`):
+
+```
+repeat until nothing changes:
+    for every cell P:
+        l(P) <- max( l(P), max_{N face-adjacent to P} l(N) - 1 )         (92.3)
+```
+
+Levels only rise and integer `max` is associative, so the fixed point does
+not depend on visiting order; the sweep terminates in at most `max l`
+passes. Isaac, Burstedde & Ghattas, *IPDPS 2012* 426 (DOI
+`10.1109/IPDPS.2012.47`) is the O(1)-ripple algorithm, **named and not
+implemented**, for §74.2's reason: at the sizes this mesher runs at the
+fixed-point sweep is not the cost, and it is order-independent by
+construction.
+
+The 2:1 interface's face conventions are §74's and must stay §74's: the
+coarse cell owns four split faces, each a real polygon over real points, and
+the skewness correction of §74.4 is what the solver then applies. A mesher
+that invented a second convention would make §74's measured constants wrong
+for half the meshes in the tree.
+
+**Stage 3 — castellation, and the connectivity walk.** Classify every leaf
+against the surface with §23.3's parity ray casting (`surface::classify`,
+whose `SolidMask` is per rectilinear block cell and generalises to per leaf),
+then keep the fluid side. The keep-set is **not** "every fluid cell": it is
+the connected component that contains the seed point, which is what removes
+the sealed pockets the tetrahedral run left under buildings.
+
+```
+K_0     = { leaves classified FLUID }
+seed    = the config's keep point, or the FLUID leaf nearest the domain
+          centroid if none is given
+K       = the connected component of K_0 containing seed, where two leaves
+          are connected iff they share a face of positive area         (92.4)
+dropped = K_0 \ K
+```
+
+`K` is computed with the same union-find `mesh::geometry::cell_regions`
+uses, and `dropped` is reported by count and by the bounding box of each
+dropped component — a mesher that silently deletes 900 cells under a
+building has told the user nothing. `castellation.keep_region` selects
+`largest` (the biggest component) or `seed` (the component containing the
+keep point); `castellation.min_faces` drops a kept cell that ends up with
+fewer than that many faces, because a two-faced cell is a hole in the
+addressing, not a control volume.
+
+Boundary faces exposed by the removal take the patch name of the STL solid
+whose triangle is nearest the face centroid — §23.4's rule, reused, so that
+a case's boundary conditions attach to the geometry the user named.
+
+**Stage 4 — snapping.** Castellation is first-order at the wall (§23.5);
+snapping is what buys back the geometry. Every boundary point of the
+castellated mesh is displaced to the closest point on the surface, the
+displacement field is smoothed, and any displacement that would break the
+gate of §92.3 is undone.
+
+`TriIndex::nearest_triangle` returns the triangle and the exact distance but
+not the closest POINT, so this stage adds `TriIndex::closest_point(p) ->
+(Vec3, tri)`: the standard barycentric region test on the triangle the index
+already found (Ericson, *Real-Time Collision Detection*, Morgan Kaufmann
+(2005) §5.1.5 — a textbook, read as a textbook). Then, for boundary point
+`i` at iterate `k`:
+
+```
+delta_i^(k)   = closest_point(x_i^(k)) - x_i^(k)                       (92.5)
+
+smoothed:
+  dbar_i      = (1 - w) delta_i + w * mean_{j in N(i)} delta_j          (92.6)
+  applied for smoothing_passes sweeps, w = snap.smoothing (default 0.5),
+  N(i) = the boundary points sharing a boundary face edge with i
+
+x_i^(k+1)     = x_i^(k) + alpha^(k) dbar_i^(k),  alpha^(0) = 1          (92.7)
+
+quality-guarded undo:
+  if the gate of 92.3 fails on any cell of the point star of i,
+     halve alpha for that point and re-apply; after undo_limit halvings
+     (default 4) set alpha_i = 0 and mark i PINNED for the rest of the run
+```
+
+(92.6) is the displacement smoothing the User Guide's snapping description
+calls for and Freitag & Ollivier-Gooch, *Int. J. Numer. Meth. Engng* **40**
+(1997) 3979-4002 (DOI
+`10.1002/(SICI)1097-0207(19971115)40:21<3979::AID-NME251>3.0.CO;2-9`)
+analyse as smart Laplacian smoothing: smooth the *displacement*, not the
+*position*, so that a point already on the surface is not dragged off it by
+its neighbours. (92.7)'s guard is the half-step line search; that a
+displacement is *undone* rather than *accepted with a worse cell* is the
+whole difference between this mesher and the one that produced the 87-degree
+faces.
+
+Convergence: the loop runs `snap.iterations` times (default 30) or stops
+early when `max_i |dbar_i| < snap.tolerance * base_size` (default 1e-3).
+Both the iteration count and the largest remaining displacement are printed.
+
+**Stage 5 — feature snapping.** Points near a feature edge (92.2) are
+projected onto the *edge*, not onto the surface, and points near a corner
+where three or more feature edges meet are pinned to the corner. Marechal
+(2009) is the reference: an octree hex mesh reproduces a sharp edge only if
+some mesh edge is made to lie along it, and projecting to the nearest
+surface point rounds every corner off.
+
+```
+for a point i whose closest feature entity is edge e = (a, b):
+    t         = clamp( (x_i - a) . (b - a) / |b - a|^2 , 0, 1 )
+    proj_i    = a + t (b - a)
+    x_i       <- proj_i    if |proj_i - x_i| <= feature_snap_dist       (92.8)
+
+for a point i whose closest feature entity is a corner v:
+    x_i       <- v         if |v - x_i| <= feature_snap_dist,  PINNED
+```
+
+This paragraph originally read that feature snapping runs BEFORE stage 4 with
+its points pinned during it. **That ordering is superseded by §92.12**, which
+runs the attraction inside stage 4's own loop — after the surface target is
+computed and before the gate measures — and keeps (92.8)'s projection
+unchanged as (92.38)'s edge branch. §92.12 says why the pin was the wrong
+instrument.
+
+**Stage 6 — layers.** Prismatic layers are added by displacing the boundary
+INWARD and inserting cells in the gap, which is the standard inward-extrusion
+construction and the one Garimella & Shephard, *Int. J. Numer. Meth. Engng*
+**49** (2000) 193-218 (DOI
+`10.1002/1097-0207(20000910/20)49:1/2<193::AID-NME929>3.0.CO;2-R`) specify,
+including the limit that makes it survive a concave corner.
+
+```
+n layers with first thickness t_1 and growth r:
+
+  t_k       = t_1 r^(k-1),  k = 1..n                                   (92.9)
+  T         = sum_{k=1}^{n} t_k = t_1 (r^n - 1)/(r - 1),  r != 1
+                                = n t_1,                    r = 1
+
+medial-axis limit at boundary point i:
+
+  T_i       = min( T, medial_frac * m(i) )                            (92.10)
+  m(i)      = distance from x_i to the nearest point of the medial axis,
+              approximated as half the distance from x_i to the nearest
+              surface point that is NOT in x_i's own patch neighbourhood
+
+  if T_i < min_thickness * T:  no layers are grown at i at all
+```
+
+(92.10) is Garimella & Shephard's rule and the reason it is here is
+geometric, not cosmetic: at the foot of a building two walls approach, the
+medial axis is halfway between them, and a layer stack of the nominal
+thickness grown from both walls would intersect — which is exactly how a 5
+cm cell spanning 13 m gets made. Refusing to grow the stack where it does
+not fit is what keeps the gate satisfiable. The thickness a patch actually
+received is reported per patch as a fraction of the nominal, because a layer
+addition that quietly achieved 12 % of what was asked for is the failure
+mode this report exists to make visible.
+
+Layers are added last, after the gate has already passed on the snapped
+mesh, and every inserted cell is put through the gate again before the layer
+is kept; a patch whose layers fail the gate loses its layers and keeps its
+snapped boundary, and the run says so by patch name.
+
+### 92.3 The quality gate, and the repair sequence
+
+The gate is a function of a `PolyMeshRaw` alone. It builds a `HostMesh`
+through `io::polymesh::build_host_mesh`, which runs §2's geometry sweep, and
+then measures seven things. Nothing here is new physics; what is new is that
+the answers are a **precondition on leaving the mesher**, not a report the
+user is invited to read.
+
+Notation: `F(c)` is the set of faces of cell `c`; `s_{c,f}` is `+1` when `c`
+owns `f` and `-1` when it neighbours it; `Sf` is the outward area vector of
+face `f` as §2.1 computes it; `V_c` and `C_c` are §2.2's volume and centroid.
+
+```
+G1  positive volume
+      V_c > 0                                  for every cell c       (92.11)
+
+G2  closure
+      E_c = | sum_{f in F(c)} s_{c,f} Sf | / V_c^(2/3) < 1e-10        (92.12)
+
+G3  one region
+      n_regions( mesh::geometry::cell_regions ) == 1
+
+G4  non-orthogonality, internal faces
+      d_f     = C_N - C_P
+      theta_f = arccos( (Sf . d_f) / (|Sf| |d_f|) )                   (92.13)
+      max_f theta_f < 70 deg;  #{ f : theta_f > 60 deg } is REPORTED
+
+G5  thickness
+      n_c(f)   = s_{c,f} Sf / |Sf|       the outward unit normal at c
+      P(c)     = the partition of F(c) in which f and g share a part when
+                 n_c(f) . n_c(g) >= cos 5 deg
+      A_max(c) = max_{p in P(c)} sum_{f in p} |Sf|
+                 the largest PLANAR FACE GROUP, not the largest face
+      h_c      = sqrt( A_max(c) )        the local cell size
+      tau_c    = 3 V_c / ( A_max(c) h_c ) = 3 V_c / A_max(c)^(3/2)    (92.14)
+      tau_c >= 0.05                             for every cell c
+
+G6  gradient conditioning
+      T_c      = sum_{f in F(c)} Sf Sf^T / |Sf|      (a 3x3 SPD matrix)
+      cond(T_c) = lambda_max(T_c) / lambda_min(T_c) < 1e4             (92.15)
+
+G7  addressing
+      no two faces share the same set of points;
+      no two internal faces share the same (owner, neighbour) pair;
+      owner[f] < neighbour[f] and (owner, neighbour) strictly ascending
+      (MeshReport::ldu_ordered)
+```
+
+**Why these seven, and why these numbers.**
+
+G1 and G2 are §2's own preconditions: a negative volume is an inverted cell
+and every flux through it has the wrong sign; a cell that does not close has
+a mis-wound face and the divergence of a constant field is not zero in it.
+`1e-10` is `mesh::geometry::CLOSURE_LIMIT`, the number `print_report`
+already refuses a mesh on, quoted rather than re-chosen — so a mesh that
+leaves the mesher cannot fail the solver's own closure check on the way in.
+§10 requires closure "to round-off" and states **no number**; there was
+nothing there to quote, and an earlier draft of this section that said there
+was has been corrected. The tolerance is not a shape tolerance: closure
+telescopes to zero exactly whenever each face's `Sf` is computed once and
+used with opposite signs by its two cells, so what is left is round-off times
+the cell's face-area-to-`V^(2/3)` ratio — 82 for the ammonia sliver, giving
+~1e-14 on a correctly wound mesh, four decades inside the limit. A mesh that
+misses `1e-10` has a mis-wound face, not a thin cell.
+
+G3 is the ammonia case's first defect. A sealed pocket is a set of cells with
+no path to any outlet; the pressure equation on it is singular up to a
+constant and the solve either stalls or wanders. `cell_regions` already
+computes it and `convert_mesh.rs` already knows how to drop the small
+components; the gate's job is to make the mesher unable to *emit* them.
+
+G4 is the third defect. 70 degrees is where the explicit non-orthogonal
+correction of §2.4 stops being a correction and starts being the whole
+term — `1/cos(70 deg)` is 2.9, and at the measured 87 degrees it is 19.
+Reporting the count past 60 rather than only the maximum is deliberate: one
+face at 68 degrees is a curiosity, four thousand is a mesh.
+
+G5 is the second defect, and (92.14) is chosen so that it is dimensionless
+and needs no octree bookkeeping to evaluate. `3 V_c / A_max(c)` is the height
+of the pyramid on the cell's largest planar face group (below) that has the
+cell's volume — the cell's thickness in the direction that matters. Dividing
+by `h_c = sqrt(A_max)`, the side of the square of that area, makes the ratio a
+pure shape number: a cube gives `tau = 3`, and a plate of thickness `t`
+spanning `L` gives `tau = 3t/L`. The ammonia mesh's 5 cm cell over 13 m gives
+`tau = 0.0115`, and the threshold `0.05` fails it by a factor of four while
+passing a cut cell holding 10 % of its parent's volume (`tau = 0.3`). *DESIGN*:
+the alternative reference length, the octree leaf size `h_l` the cell was born
+from, is not used because the gate must also be runnable on a mesh read off
+disk, where no level array exists.
+
+`A_max(c)` is the largest **planar face group** and not the largest single
+face, and that is a correction a review of the first implementation forced
+rather than a refinement. A per-face maximum is a topology number wearing a
+geometry number's clothes, and §74's own 2:1 interface undresses it: the
+coarse cell at an interface owns four coplanar quarter-faces where a uniform
+cell owns one, so `A_max` drops by four and `tau` rises by `4^(3/2) = 8`. The
+same 13 m x 13 m x 5 cm sliver — the ammonia case's own defect — measures
+`A_max = 169`, `tau = 0.011538` and is refused when its large faces are whole,
+and `A_max = 42.25`, `tau = 0.092308` and **passes** when they are split; the
+one defect this gate exists to catch was invisible at the one topology the
+octree makes everywhere. Summing `|Sf|` over the faces whose outward normals
+agree restores the geometry: four quarters read as the one face they are. The
+partition is built greedily and in face order — a face joins the first group
+whose representative normal (its own first face's) it agrees with, or starts a
+group of its own — because on the shapes this gate sees the groups are
+separated by tens of degrees and the greedy answer is the answer.
+Three properties of the grouping matter. It is by **outward** normal, so a
+slab's top and bottom stay two groups instead of merging into one of twice
+the area; on a convex cell a supporting plane in a given direction touches one
+face, so two faces sharing an outward normal share a plane and the group is a
+plane. `5 deg` is *DESIGN*: exactly coplanar split faces need only exact
+agreement, a snapped interface bows by far less than that, and the smallest
+separation between two genuinely distinct faces of a hex or a cut cell is tens
+of degrees. And where the grouping is wrong it is wrong **conservatively** — a
+larger `A_max` is a smaller `tau` — so a mistake here costs a refusal, never a
+silent pass.
+
+G6 catches the cell no scalar metric does: one whose faces are nearly
+coplanar, so that the area tensor `T_c` — the Green-Gauss gradient's own
+operator, `grad phi ~ V^-1 sum_f phi_f Sf` — is nearly singular and the
+reconstructed gradient in the collapsed direction is noise divided by nothing.
+For a cube `T_c = 2 h^2 I` and `cond = 1` exactly. Mavriplis, *AIAA
+2003-3986* (DOI `10.2514/6.2003-3986`) is the analysis of the same
+conditioning question for the least-squares gradient and is why the
+condition number, rather than a min-max face-area ratio, is the quantity
+measured. `1e4` is *DESIGN*: it is four decades of the six an f64 residual
+can afford to lose, and no mesh this crate has solved on comes within two
+decades of it.
+
+G6 is not an aspect-ratio limit, and the arithmetic says by how much. On a box
+cell `a x b x c` the area tensor is exactly `diag(2bc, 2ac, 2ab)`, so with
+`a >= b >= c`, `cond = a/c`, `tau = 3abc/(ab)^(3/2)` and
+
+```
+tau_c * cond(T_c) = 3 sqrt(a/b)                                     (92.16)
+```
+
+On a slab `L x L x t` that is exactly 3: G5's `0.05` is `cond = 60`, and G6's
+`1e4` is 167 times looser and **cannot fire first** unless the slab's own
+large face is a needle of aspect ratio past `2.8e4`. G6 therefore earns its
+place only on the shapes G5 cannot see — cut cells and snapped wedges, whose
+faces can be near-coplanar at a respectable thickness ratio — and its number
+is calibrated by argument, not by a measurement on a box, which is what (92.16)
+records rather than hides.
+
+G7 is §1's addressing contract — the lower/diagonal/upper storage and the
+upper-triangular order §74.2 also emits against — stated as a check rather
+than assumed. A duplicated face is two matrix entries for one flux; a broken
+ordering makes every gather kernel in the crate read the wrong cell. G7 runs
+on the RAW arrays, before `build_host_mesh`, because `build_host_mesh` refuses
+a mis-ordered mesh itself and a defect this gate can name must not surface as
+an opaque load error.
+
+**The repair sequence.** A failing cell is not immediately a refusal. In
+order, and each step re-measures:
+
+1. **Undo.** The displacement that made the cell fail is halved and
+   re-applied, up to `undo_limit` times, then set to zero (92.7). This is the
+   only repair available during snapping, and it is the one that fires
+   almost always, because the castellated mesh before it was already inside
+   the gate.
+2. **Local smoothing.** The point star of the failing cell is smoothed
+   against an objective rather than an average: move each free point to
+   reduce the worst algebraic quality in its star, in the sense of Knupp,
+   *SIAM J. Sci. Comput.* **23** (2001) 193-218 (DOI
+   `10.1137/S1064827500371499`), whose Jacobian-based metrics are what
+   "quality" means here; the node-local optimisation that later became the
+   target-matrix paradigm is Knupp, *Engineering with Computers* **28**
+   (2011) 419-429 (DOI `10.1007/s00366-011-0230-1`). Freitag &
+   Ollivier-Gooch (1997) is the smart-Laplacian/optimisation combination
+   this follows: take the Laplacian step, keep it only if the worst metric
+   in the star improved.
+3. **Cell removal.** The cell is deleted and its faces re-exposed as
+   boundary, on the pattern `bin/convert_mesh.rs::handle_cell_regions`
+   already uses. Removal can create a new region, so G3 is re-run
+   afterwards, always.
+4. **Refusal, by name.** If the cell still fails, the mesher stops and says:
+   the gate that failed, the cell id, its centroid to six figures, the
+   measured value and the threshold. Refusal is the correct outcome; a
+   mesher that ships a mesh it knows is bad has moved the failure into a
+   solver run that costs a thousand times more to diagnose.
+
+The message form, fixed here so that tests can assert it — one block per
+failed gate, in gate order, at most ten subjects listed and the rest counted:
+
+```
+automesher: quality gate G5 (thickness) failed on 3 cell(s)
+  cell 118237 at (412.500000, -88.250000, 6.775000): tau = 0.011538, need >= 0.05
+  cell 118240 at (412.500000, -88.250000, 6.825000): tau = 0.019221, need >= 0.05
+  ... and 1 more
+```
+
+A gate's **subject** is what it measures, and the header counts subjects, not
+cells indiscriminately: G4 measures faces and says `face(s)`, and a cell with
+three bad faces is three of them. Each gate prints its own symbol, its own
+number format and its own comparison; `value = ` is not one of them:
+
+| gate | subject | symbol | value format | comparison | a line |
+|---|---|---|---|---|---|
+| G1 | cell | `V` | `{:.6e}` | `need > 0` | `cell 4 at (0.500000, 0.500000, 0.500000): V = -1.250000e-2, need > 0` |
+| G2 | cell | `E` | `{:.3e}` | `need < {:e}` | `cell 41 at (...): E = 4.271e-9, need < 1e-10` |
+| G3 | the mesh | — | — | — | `automesher: quality gate G3 (one cell region) failed: the mesh is 2 region(s): ...` |
+| G4 | face | `theta` | `{:.3}` | `need < {}` | `face 91 at (1.000000, 0.500000, 0.500000) between cell 0 and cell 1: theta = 71.565, need < 70` |
+| G5 | cell | `tau` | `{:.6}` | `need >= {}` | as above |
+| G6 | cell | `cond` | `{:.3e}` | `need < {:e}` | `cell 0 at (...): cond = 1.000e6, need < 1e4` |
+| G7 | face | — | — | — | `face 10: repeats the point set of face 7` |
+
+G1's comparison is `> 0`, not `>= 0`: (92.11) is strict and a cell of exactly
+zero volume is refused, so `need >= 0` printed beside a refused `V = 0` would
+contradict the check it reports. G7's four sub-checks each name their face in
+their own words — `repeats the point set of face {g}`, `owner {o} >= neighbour
+{n}`, `out of ascending (owner, neighbour) order after face {g}`, `repeats the
+(owner, neighbour) pair of face {g}` — and G7 has no centroid to print,
+because at G7 no geometry has been built. Every gate's header count is the
+**true** number of failing subjects; the listing is capped, the count is not.
+
+### 92.4 The tetrahedral path — tranche 2
+
+Not implemented in tranche 1. Specified here because §92.3's gate is the
+same gate, and because the ammonia case is the proof that the interesting
+work in a tetrahedral path is not the generation but the **repair**.
+
+**Generation is external.** Gmsh (Geuzaine & Remacle, *Int. J. Numer. Meth.
+Engng* **79** (2009) 1309-1331, DOI `10.1002/nme.2579`) is **GPL-2.0-or-later**
+and is therefore run as a separate process over its own file formats, exactly
+as `tools/mesh/step_mesh.py` already runs it: **no Gmsh source is read and no
+Gmsh code is linked**. fTetWild (Hu, Schneider, Wang, Zorin & Panozzo, *ACM
+Trans. Graph.* **39**(4) (2020) 117, DOI `10.1145/3386569.3392385`) is
+**MPL-2.0** and therefore readable; its envelope-based approach is the
+alternative generator, and its licence would have to be recorded in
+`PROVENANCE.md` before a line of it is opened. TetGen is **AGPL-3.0** and
+CGAL's mesh_3 is **GPL**: neither may be read or linked, ever.
+
+**Repair is ours**, and it is four moves, applied in order to the cells the
+gate names:
+
+```
+R1  point moving      x_v <- argmin over the star of v of the worst
+                      metric among tau_c (92.14) and cond(T_c) (92.15);
+                      boundary points move only in the surface's tangent
+                      plane, feature points only along their edge
+
+R2  2-3 / 3-2 flips   Freitag & Ollivier-Gooch's swaps: replace two
+                      tetrahedra sharing a face by three sharing an edge,
+                      and the reverse, keeping the swap only when the worst
+                      metric in the affected set improves
+
+R3  sliver exudation  Cheng, Dey, Edelsbrunner, Facello & Teng, J. ACM
+                      47(5) (2000) 883-904 (DOI 10.1145/355483.355487):
+                      assign weights to vertices so that the weighted
+                      Delaunay triangulation has no sliver, i.e. remove
+                      the sliver by moving the triangulation rather than
+                      the points
+
+R4  pocket removal    92.2 stage 3's connectivity walk (92.4), unchanged:
+                      keep the component containing the seed, report every
+                      dropped component by bounding box
+```
+
+R1 and R2 are Freitag & Ollivier-Gooch's own pairing, and their result — that
+swapping and smoothing alternated beat either alone — is why they are ordered
+this way rather than run to convergence separately. R3 is named here because
+a sliver is the one defect R1 and R2 provably cannot always remove, and
+because it is the defect the ammonia run actually had.
+
+### 92.5 The polyhedral path — tranche 3
+
+Not implemented. A polyhedral mesh is the **node-dual** of a tetrahedral one:
+one polyhedron per tetrahedral vertex, its faces built from the circumcentres
+(or barycentres) of the tetrahedra around each incident edge. Peric,
+*ERCOFTAC Bulletin* **62** (2004) — "Flow Simulation Using Control Volumes of
+Arbitrary Polyhedral Shape"; the bulletin publishes no page numbers, so the
+range an earlier draft printed is **unverified and has been dropped** — is the
+description of why a CFD code
+wants them — roughly four times fewer cells than the tetrahedra they come
+from, each with ten-or-more neighbours, so the gradient is reconstructed from
+many directions and the diffusion operator is better conditioned. ANSYS
+Fluent's user documentation describes the same construction and its
+"polyhedra from tetrahedra" conversion, and is DOCUMENTATION, cited as such;
+no Fluent source exists to read.
+
+Three things that construction must satisfy here, and none of them is
+automatic:
+
+1. **The boundary is preserved.** A boundary tetrahedral vertex's dual cell
+   is closed by the boundary triangles around it, not by circumcentres, so
+   the polyhedral surface is the tetrahedral surface and the patch names
+   survive.
+2. **Features are preserved.** A vertex on a feature edge must keep the edge
+   as an edge of its dual cell; the barycentric dual does this and the
+   circumcentric one does not when a tetrahedron is obtuse — which is why
+   the barycentric dual is the default and the circumcentric one is an
+   option, not the reverse.
+3. **Faces are planar enough.** A dual face is a polygon through several
+   circumcentres and is generally NOT planar. §2.1's fan triangulation about
+   the vertex average handles mild non-planarity, so the gate adds a
+   planarity measure — the maximum distance from a face's points to its own
+   best-fit plane, over `sqrt(|Sf|)` — and refuses above `0.05`, the same
+   shape tolerance G5 uses.
+
+The gate of §92.3 applies unchanged: (92.11)-(92.15) are stated over `F(c)`
+and make no assumption that a cell is a hexahedron.
+
+### 92.6 Speed, and which half of this belongs on the GPU
+
+The stages split cleanly, and the split is not close:
+
+| Stage | Shape | Where |
+|---|---|---|
+| inside/outside classification | one independent ray column per (y, z) | data-parallel |
+| distance to surface, per cell | one independent BVH query per cell | data-parallel |
+| quality metrics (92.11)-(92.15) | one independent reduction per cell | data-parallel |
+| displacement smoothing (92.6) | Jacobi sweep over a fixed point graph | data-parallel |
+| 2:1 balance (92.3) | fixed point over a mutating level array | topological |
+| connectivity walk (92.4) | union-find | topological |
+| face emission, renumbering, LDU sort | a scan and a sort over topology | topological |
+| layer insertion | changes the cell count | topological |
+
+**The decision for tranche 1 is CPU-first, with `rayon` over the
+data-parallel rows and nothing on the device.** The reasons, stated so a
+later tranche can overturn them on evidence rather than taste:
+
+1. The mesher runs **once** per case, for minutes; the solver runs for
+   hours. A 10x mesher speed-up that costs a week is worth less than the
+   same week spent on §92.3's repair sequence.
+2. The topological half is more than half the wall clock on the ammonia
+   case's shape, and it does not move to the device without being redesigned
+   rather than ported.
+3. Every stage that would go to the device has to hand back a `PolyMeshRaw`
+   on the host anyway, because that is what `write_poly_mesh_raw` takes.
+
+The GPU literature is named so that the tranche-3 decision starts from it
+rather than from scratch: Karras, *Proc. High Performance Graphics 2012*
+33-37 — parallel BVH, octree and k-d tree construction in a single pass over
+Morton codes (Eurographics Digital Library, DOI `10.2312/EGGH/HPG12/033-037`,
+which resolves through **DataCite and not Crossref**, so §92's Crossref sweep
+returns 404 for it and the DOI is quoted from the Eurographics record) — is the construction that would make the distance queries of
+(92.1) device-resident; and Cao, Nanjappa, Gao & Tan, *Proc. I3D 2014* 47-54
+(DOI `10.1145/2556700.2556710`), gDel3D, is the state of the art for a GPU
+Delaunay triangulation and therefore what §92.4's generation stage would have
+to beat to be worth writing at all. Neither is implemented, and §92.7 records
+that as a stated absence rather than an omission.
+
+### 92.7 What must hold
+
+| Check | Expected |
+|---|---|
+| the output of every path | a real-point `PolyMeshRaw`, written by `io::polymesh::write_poly_mesh_raw` |
+| every emitted mesh | passes G1-G7 of §92.3, or the run refused |
+| a refusal | names the gate, the subject it failed on (a cell, or a face for G4 and G7) and its id, its centroid, the measured value and the threshold, in §92.3's exact per-gate form |
+| `AutomeshConfig` | round-trips through serde, and `emit_schema` is generated from the same types that parse it, as `io::case_json` does it |
+| an unknown config key | refused by name, `deny_unknown_fields` — §13.4's rule |
+| a domain that does not contain the surface bbox | refused before any meshing work |
+| an open (non-watertight) surface | refused with the open-edge count, §23.2's check reused |
+| the 2:1 interface | §74's conventions, bit for bit — the coarse cell owns four split faces |
+| levels | capped at `max_level`, and `max_level > 6` refused (§74.2's limit) |
+| dropped components after (92.4) | reported by count and bounding box, never silent |
+| a patch whose layers fail the gate | keeps its snapped boundary, and the run says so by patch name |
+| `tau_c` on a unit cube | exactly 3 |
+| `cond(T_c)` on a unit cube | exactly 1 |
+| `tau_c` on a slab `L x L x t` | `3t/L`, the SAME number whether each large face is one face or four coplanar quarter-faces — (92.14)'s planar grouping |
+| `tau_c cond(T_c)` on a slab `L x L x t` | exactly 3 — (92.16); so G5's `0.05` is `cond = 60` and G6 is 167 times looser on a box |
+| a gate that stops refusing | **fails a test**: G1-G7 each have a refusal test beside the pass test, so disabling any one threshold turns the suite red |
+| a refusal line | asserted character for character against §92.3's table |
+| G4 on a block mesh | 0 degrees |
+| the GPU | **nothing runs on it** in tranche 1, by decision (§92.6), not by omission |
+| §2, §23, §24, §74 outputs | **unchanged** — this module reads those, and rewrites none of them |
+
+### 92.8 Validation
+
+Per unit, and each row is a test that exists rather than a test that is
+planned. Unit 1 is the gate and the skeleton; the rest are listed so the
+tranche's shape is on the record.
+
+| Unit | What it adds | The test |
+|---|---|---|
+| 1 | `AutomeshConfig`, `quality.rs`, the binary skeleton | a block mesh passes all seven gates; a mesh with one point pushed through its opposite face fails G1 **naming the cell**; a mesh cut into two components fails G3 |
+| 2 | the true octree, levels from (92.1)/(92.2), balance (92.3) | levels reproduce §74's static generator on a case both can express; balance is idempotent and order-independent (§74.2's own test, on the new tree) |
+| 3 | castellation and the connectivity walk (92.4) | an axis-aligned cuboid gives the analytic cell count (§23.5); a box with a sealed inner void drops exactly the void's cells and reports its bounding box |
+| 4 | snapping (92.5)-(92.7) | a sphere's boundary points land on the sphere to within `snap.tolerance`; the gate holds after every iterate; a case engineered to fail the gate on a displacement is shown to have undone it |
+| 5 | feature snapping (92.8) | a cube's twelve edges each carry mesh edges within `feature_snap_dist`; the corner count is 8 |
+| 6 | layers (92.9)-(92.10) | the achieved thickness matches `t_1 (r^n - 1)/(r - 1)` on a flat wall; at a concave corner the medial-axis limit reduces it and the run reports the fraction |
+| 7 | the ammonia site, end to end | the gate passes on the real 466-solid site, and `ofgpu-buoyant` runs on the result without diverging — the yardstick of §92.1, and the only test that decides whether this section was worth writing |
+
+The three gate tests of unit 1 are the ones that matter most, because every
+later unit's acceptance is "the gate still passes". A gate that cannot fail
+is not a gate: the second and third rows exist to prove it can, and to prove
+that when it does it says which cell.
+
+---
+
+### 92.9 The octree in memory, and the mesh it emits
+
+Appended after §92.8 rather than inserted into §92.2, so that every citation
+already pointing into §92.1-§92.8 keeps its number. This is the
+implementation-level companion to §92.2 stages 1 and 2: what a leaf *is*, how
+a leaf finds its neighbour, where a point's coordinate comes from, and which
+of the two cells at a 2:1 interface emits the face between them. §92.2 says
+what the octree refines and why; this says what the octree is.
+
+`mesh::refined` (§74) is the static twin of this: it carries ONE level per
+base cell and expands it into `(2^l)^3` leaves at emission time, so its
+balance sweep (`mesh::refined::balance_2to1`) is a fixed point over an array
+indexed by base cell. Here the level is per LEAF, the leaf set is sparse, and
+there is no array to sweep - so the sweep of (92.3) is restated as (92.21)
+over the leaf set. The two must agree wherever both can express the same
+tree, which is §92.8's unit-2 row.
+
+**The leaf.** Over the stage-0 base grid of `n = [nx, ny, nz]` cells, a leaf
+is an integer key: a level and an index in that level's own lattice.
+
+```
+leaf      = (l, i, j, k),   0 <= l <= L = max_level,
+            0 <= i < nx 2^l,  0 <= j < ny 2^l,  0 <= k < nz 2^l    (92.17)
+
+split(l, i, j, k)
+          = { (l+1, 2i+a, 2j+b, 2k+c) : a, b, c in {0, 1} }
+
+anc(l', (l, i, j, k))
+          = (l', i >> (l - l'), j >> (l - l'), k >> (l - l')),  l' <= l  (92.18)
+```
+
+The leaf set is a partition of the domain: exactly one key on every ancestor
+chain is present. That invariant is what makes the neighbour lookup below a
+lookup rather than a tree walk, and it is asserted, not assumed - a key whose
+ancestor or whose descendant is also present is a refusal, because the mesh
+it would emit has a cell counted twice.
+
+**Neighbour, and who emits the face.** For a leaf `P = (l, i, j, k)` and one
+of the six face directions `d = (axis, sign)`, let `m` be the neighbour index
+at `P`'s own level. Exactly one of four cases holds, and each names its
+emitter:
+
+```
+m outside [0, n_axis 2^l)      -> a boundary face on the box patch of d
+leaf(l, m) present             -> an internal face, emitted only if sign = +
+leaf(l', anc(l', m)) present,
+        l' < l (P is finer)    -> an internal face, emitted by P
+otherwise (the neighbour is
+        finer than P)          -> not emitted here; the finer side emits  (92.19)
+```
+
+(92.19) is §74's convention restated per leaf, and it is the reason the
+convention survives: **every internal face is a whole face of the finer of
+the two cells it separates.** A coarse cell against four finer neighbours
+therefore carries four faces on that side, each of them a full face of a
+finer cell, and `sum_f Sf = 0` closes on the coarse cell exactly because the
+four sub-areas sum to the parent area exactly - the argument §74 makes, not a
+new one. The equal-level case is emitted on the `+` side alone so that a pair
+is emitted once.
+
+**Points, welded by integer identity.** No point in this module is compared
+to another point by distance. A point is an integer coordinate `q` on the
+finest lattice, `q_a in [0, n_a 2^L]`; a leaf `(l, i, j, k)` has its eight
+corners at `i s` and `(i+1) s` with `s = 2^(L - l)`, and two leaves share a
+corner iff their integer coordinates are equal. The coordinate itself comes
+from the base grid's graded node array `X_a` (`blockgen::graded_nodes` on the
+same `GradedAxis` stage 0 built), interpolated linearly inside the base cell
+the lattice point falls in:
+
+```
+b         = q_a >> L,     t = (q_a - (b << L)) / 2^L,     t in [0, 1)
+
+x_a(q_a)  = X_a[b] + t ( X_a[b+1] - X_a[b] )                       (92.20)
+```
+
+with `x_a(n_a 2^L) = X_a[n_a]`. At `t = 0` this is `X_a[b]` **exactly** - one
+array read, no arithmetic - so a tree with no refinement reproduces
+`blockgen::raw_mesh`'s points bit for bit. Points are numbered in
+lexicographic `(q_k, q_j, q_i)` order, which is the order stage 0's block
+numbers its own, so the reproduction is of the ARRAY and not merely of the
+set. Grading is honoured on the base cells and each base cell is subdivided
+uniformly inside itself; a graded octree cell is not smoothly graded, and
+that is the documented trade for (92.20)'s exactness.
+
+**Order.** Cells are numbered in lexicographic `(q_k, q_j, q_i)` order of the
+leaf's lower corner, which for an unrefined tree is stage 0's own cell order.
+That order does NOT make the `+axis` neighbour later in the numbering - a
+fine leaf high in `z` can face a coarse leaf whose lower corner is lower in
+`z` - so a face built with `owner > neighbour` is flipped, its point list
+reversed so `Sf` keeps pointing from owner to neighbour, and the internal
+faces are then sorted by `(owner, neighbour)`. That is §2's upper-triangular
+order, reached by construction and asserted before emission rather than
+repaired afterwards by `adapt::rebuild::ldu_permutation`.
+
+**2:1 balance over a sparse leaf set.** (92.3) restated as (92.21):
+
+```
+repeat until nothing changes:
+  for every leaf P = (l, i, j, k), for each of the 6 directions d:
+      let m be P's neighbour index at level l, inside the domain
+      if the first present key among anc(l2, m), l2 = l-1 .. 0, has l2 < l-1,
+          split that key                                           (92.21)
+```
+
+Read from the FINER side, which is what makes it a lookup: a leaf asks who is
+on the other side, and if that neighbour is two or more levels coarser, the
+neighbour splits. Levels only rise, a split is a function of the key alone,
+and integer `max` is associative, so the fixed point does not depend on the
+order the leaves are visited - §74.2's argument, unchanged. The split in
+(92.21) produces a level at most `l - 1 < L`, so **balance can never exceed
+`max_level`**: the cap of §92.2 stage 1 is not a second constraint that
+balance has to be checked against. Isaac, Burstedde & Ghattas (DOI
+`10.1109/IPDPS.2012.47`) remains named and not implemented, for §74.2's
+reason.
+
+**The level a leaf is asked for.** (92.1)'s `l_dist` is evaluated per patch
+that `refinement.levels` NAMES - one `surface::TriIndex` per named patch, built
+over that patch's triangles alone - so the maximum of (92.1) is taken over the
+patches the config asked about and not over the surface's every solid. The
+ammonia site of §92.1 has 466 of them, and 466 nearest-triangle queries per
+leaf is not a mesher. A patch the config does not name refines nothing, which
+is the same statement as "no band contains `c`".
+
+(92.1) measures from the cell CENTRE, so a band narrower than the leaf it is
+measured on would let the surface pass straight through an unrefined leaf. The
+surface term closes that hole:
+
+```
+r_c       = half the diagonal of leaf c
+d_p(c)    = distance from c's centre to the nearest triangle of patch p
+
+l_surf(c) = max over patches p with d_p(c) <= r_c of max_L band_p(L)   (92.22)
+
+l(c)      = min( max( l_dist(c), l_surf(c) ), max_level )
+```
+
+A leaf whose bounding sphere touches a named patch is refined to the deepest
+level that patch's bands ask for anywhere; it errs toward refining, never away
+from it, and it needs no triangle-box intersection test to say so. `l_feat`
+(92.2) and `l_region` are stages this unit does not build; when they arrive
+they join the same maximum, and (92.22) does not change.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| a tree with every leaf at level 0 | the same cell count, the same total volume and the SAME points array, bit for bit, as `blockgen::raw_mesh` for the same block |
+| one base cell refined to level `l` | exactly `(2^l)^3` leaves, and the leaf set is a partition - no key is both present and an ancestor of a present key |
+| the level jump across any internal face, after (92.21) | at most 1 |
+| the face between a coarse leaf and a finer neighbour | four faces, each a whole face of the finer leaf, owned by the coarse one (§74) |
+| a point | an integer lattice coordinate; welded by integer identity, never by distance, and never by a tolerance |
+| `x_a` at an unrefined lattice point | `X_a[b]` exactly, by (92.20)'s `t = 0` branch |
+| the emitted mesh | `owner < neighbour` on every internal face, upper-triangular, and G1-G7 of §92.3 pass |
+| 10^6 leaves | emitted in under 10 s on one core; this unit introduces no thread pool, by decision |
+| a leaf the surface passes through | refined to the deepest band level of the patch it touches, (92.22) - a band narrower than the cell cannot hide the surface |
+| a patch `refinement.levels` does not name | refines nothing, and costs no distance query |
+| `mesh::refined` and `blockgen` | **unchanged** - this module reads their conventions and rewrites neither |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box, no surface inside it | leaf count `nx ny nz`; the points array bit-identical to `blockgen::raw_mesh`'s; total volume the box's; G1-G7 pass |
+| a box with a small sphere STL inside | only the leaves (92.1)'s band reaches refine; the refined leaf count is the analytic one for one level; closure `< 1e-12`; one cell region; maximum level jump 1 |
+| a small solid at the centre of a box | exactly the base cells the band reaches refine, the leaf count is the analytic one, and every leaf outside stays at level 0 |
+| (92.21) | idempotent, and independent of the order the leaf set is visited - §74.2's own balance test, run on the sparse tree |
+| a tree built to a level the surface does not reach | identical, key for key, to the unrefined one - a band that contains nothing refines nothing |
+
+---
+
+### 92.10 Castellation: which leaves survive, and the walls they leave behind
+
+The implementation-level companion to §92.2 stage 3, appended after §92.9 for
+the same reason §92.9 was appended after §92.8 — every citation already
+pointing into §92.1–§92.9 keeps its number. §92.2 stage 3 says *what*
+castellation is and gives the keep-set (92.4); this says how a leaf is
+classified, in what order the removal rules run, which cell a rule removes
+when two are equally guilty, and what the exposed faces become.
+
+`blockgen::carve_block` (§23.4) is the cut-cell twin of this stage and its
+conventions are reused, not re-invented: a wall face takes the patch name of
+the STL solid whose triangle is nearest the face centre, a surface patch whose
+name collides with a domain patch is a refusal rather than a silent rename,
+and a wall patch with no faces is not emitted. What is new here is that the
+cells are octree leaves of many sizes rather than the cells of one rectilinear
+block, and that the keep-set is decided by a walk (92.24) that `carve_block`
+has no equivalent of.
+
+Two rules about the boundary list are this section's own, and both were
+learned from a case this crate wrote and then refused to read. A patch NAME
+goes into `constant/polyMesh/boundary` as a bare token in front of `{`, so a
+name carrying whitespace, a control character or one of `{}();"'` makes a file
+`io::polymesh::read_poly_mesh` rejects at the line it is on — `solid pump
+house` in an STL is a legal solid and an illegal patch — and stage 3 refuses
+every such name, the six domain names and every surface name alike, before it
+walks a single leaf, so that the answer cannot depend on whether the geometry
+carrying the name happened to reach a cell; the six domain names must likewise
+be distinct, for the reason a surface name may not equal one of them. And because a patch with no faces is not emitted,
+stage 3 REPORTS the wall-face count of every surface patch, in the surface's
+own order and including the zeros: a source square finer than the leaves that
+reached it must be a row saying 0, not an absence discovered when the solver
+looks for its inlet.
+
+**The centre test.** A leaf is FLUID or SOLID by its centre alone. The surface
+cutting through a leaf does not split it and does not remove it — the cut is
+what stage 4 snaps to, and stage 3's business is only to decide which side of
+the wall the cell is on:
+
+```
+c(P)      = the centre of leaf P: the mean of its two corner coordinates
+            on each axis, which by (92.20)'s linearity inside a base cell
+            is the exact centroid of the hexahedron
+
+solid(P)  = inside(surf, c(P))                                      (92.23)
+```
+
+`inside` is §23.3's pipeline — three-axis column parity, jittered retry,
+majority vote, winding-number arbitration — evaluated at a POINT rather than
+at a rectilinear block's cell centre (`surface::classify::classify_points`,
+the generalisation §92.2 stage 3 promised). Two things about it are this
+section's, not §23.3's:
+
+* The jitter length is the FINEST leaf edge in the tree, `h_min = h_0 / 2^L`,
+  and not the local cell size, because the points come from leaves of
+  different sizes and one length has to serve them all. §23.3's offsets are
+  about `3e-4` of the length they are given, so the retry ray stays inside
+  even the smallest leaf it is cast for, and on a coarse leaf it is merely
+  further from a rational grid feature than it needs to be.
+* Points sharing both tangential coordinates EXACTLY — bit for bit, which is
+  what leaves in one column of the same (92.20) lattice do — are cast as one
+  column, so a uniform tree costs the three ray sets per column that §23.3's
+  block cast costs, and not three per cell.
+
+The orientation of the surface is irrelevant, as it is in §23.3: parity reads
+no normals and the arbiter takes `|w|`.
+
+**The removal walk.** Let `K_0 = { P : not solid(P) }` and write `nbr(P)` for
+the face neighbours of `P` — §92.9's (92.19) faces, at whatever level. Two
+rules run to a joint fixed point, and a third is then checked:
+
+```
+repeat until K stops changing:                                      (92.24)
+
+  W1  pinch:  for every segment of the boundary of K whose star of
+              kept cells is not face-connected, remove one cell of it
+              by (92.25)
+
+  W2  region: K <- the component of (92.4) — `largest`, or the one
+              containing `castellation.seed_point`
+
+then W3  starved: a kept cell with fewer than `castellation.min_faces`
+              faces is removed and named
+```
+
+Each rule only ever removes cells, `K_0` is finite, and no rule can put a cell
+back, so the loop terminates. It is a loop and not a sequence because W2 can
+expose a new pinch — the cells that stood between two kept blobs may have left
+with a dropped component — and W1 can disconnect a blob that was held together
+only by the cell it removes.
+
+W1 is the "connected to the fluid only through an edge" repair, and it is
+stated on SEGMENTS rather than on edges. A segment of the boundary of K is an
+edge of one of its faces; its STAR is the set of kept cells whose closed box
+contains the segment's midpoint — the cells that meet along it, at whatever
+level. In a mesh stage 4 can snap, that star is face-connected: from any cell
+of it one can walk to any other through faces both of whose cells are in the
+star. A star in two or more components is an hourglass — two kept blobs
+touching along that segment and nothing else, the diagonal pair left behind
+when the cells between them are solid. It passes §92.3's gate untouched,
+because every cell of it is a perfect hexahedron and the mesh is
+face-connected through some other path, and it is stage 4 that it destroys:
+(92.5) pulls both flaps onto the same closest point and inverts both cells.
+Stage 3 is the last place the defect is cheap to see, so stage 3 removes it:
+
+```
+at a segment whose star splits into components C_1 .. C_r, r >= 2, let
+    m           = min |C_i|,
+    candidates  = the cells of every C_i with |C_i| = m;
+remove the candidate with the fewest face neighbours in K;
+    on a tie, the one with the larger cell id                       (92.25)
+```
+
+The star is read off the SEGMENT and not off the edge because at a 2:1
+interface the two are not the same thing, and the earlier form of this rule —
+count the boundary faces carrying an edge and call four of them an hourglass —
+is FALSE there. A hanging node splits the edge: the coarse side's face carries
+the whole edge (A,B) while the fine side carries (A,M) and (M,B), the count
+reaches three, and the rule never fires, which is exactly the hourglass §92.9's
+own trees can hold. On a uniform tree the two statements agree cell for cell —
+four carries of one edge is a star of two cells in two components — so the
+correction generalises the rule rather than changing its answers. The midpoint
+identifies the star with no tolerance anywhere: a segment's endpoints are
+integers on the finest lattice (92.20), so TWICE its midpoint is an integer,
+and the star is what the eight lattice octants around that point name. The
+neighbour count is a tie-break with a reason — the cell with less of the mesh
+holding it on is the one whose removal costs the least connectivity — and the
+id is a tie-break with no reason at all, present only so that the result does
+not depend on the order the segments are visited in.
+
+A point-pinch (two cells sharing one vertex and nothing else) is still not
+sought: the probes are segment midpoints, so one is caught only where the
+vertex happens to be the hanging node of a probed segment, and §92.8 keeps its
+row for the general case. What is NOT left to chance any more is the residual.
+After the fixed point the segments are scanned once more; a castellation with
+a surviving pinch is a REFUSAL that names the count and, for up to three of
+them, the midpoint and the cells that meet there. The blind spot this rule had
+was invisible precisely because the walk reported zero and passed the gate.
+
+W3 cannot fire on the hex path — every leaf of §92.9 keeps its six faces or
+more whatever its neighbours do, because a removed neighbour leaves a WALL
+face where the internal face was, not a hole. It is checked anyway: it costs
+one pass over the owner array, `castellation.min_faces` is in the config
+because stages 4 and 5 can merge faces, and a check that cannot fire today is
+how the stage that makes it fire is caught on the day it does.
+
+**The walls.** Every face of (92.19) between a kept cell and a removed one
+becomes a boundary face; every box-patch face of a removed cell is dropped
+with its cell:
+
+```
+patch(f)  = patch_names[ tri_patch[ nearest_triangle(x_f) ] ]       (92.26)
+
+x_f       = the face's centre;  Sf points OUT of the fluid, so a face
+            whose owner was removed has its point list reversed and is
+            re-owned by the kept side
+```
+
+which is `carve_block`'s rule (§23.4), reused so that a case's boundary
+conditions attach to the geometry the user named whichever of the two meshers
+built the mesh. The wall patches are emitted in the SURFACE's patch order and
+not in the order the walk happened to expose them, so the boundary file is a
+function of the STL; a patch with no faces is not emitted; a patch whose name
+collides with one of the six box patches is a refusal, because a duplicate
+name in the boundary file is a mesh the solver reads wrongly.
+
+**Order.** Cells are renumbered by scanning the old ids ascending — a MONOTONE
+map — so the surviving internal faces are still sorted by `(owner, neighbour)`
+and §2's upper-triangular order is inherited rather than repaired: no
+`adapt::rebuild::ldu_permutation` runs in this stage, and the order is
+asserted before emission. Faces are re-listed internal-first, then the six box
+patches in slot order with their faces in their original relative order, then
+the wall patches. Points are NOT renumbered and none is dropped: an unused
+point is legal in the mesh format and costs one `Vec3`, while dropping it
+would renumber every face list for nothing.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| a surface entirely outside the domain | every leaf fluid, and the castellated mesh is §92.9's emitted mesh, cell for cell and face for face |
+| a leaf whose centre is inside the surface | removed, whether or not the surface cuts it; a leaf whose centre is outside is kept, likewise |
+| an axis-aligned box STL cut from a block on its own cell planes | the wall faces lie ON those planes exactly — no tolerance, because the points are (92.20)'s lattice points |
+| the fluid volume against an analytic solid | within one cell layer's worth of volume, and better as the level rises |
+| a solid that seals a pocket (a slab under a lid) | the pocket is a separate component of (92.4) and is dropped; the emitted mesh has one cell region |
+| every exposed face | on a wall patch named by (92.26); no exposed face is left internal, and no removed cell's face survives |
+| the emitted mesh | `owner < neighbour`, upper-triangular, and G1–G7 of §92.3 pass |
+| the removed cells | counted by the rule that removed them (solid, pinch, off-region, starved) and reported, with the bounding box of each dropped component (§92.2 stage 3) |
+| `blockgen::carve_block` and `surface::classify::classify` | **unchanged** — `classify_points` is added beside `classify`, and both go through the same vote and the same arbiter |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box with an axis-aligned cube STL inside, its faces on cell planes | every wall face lies exactly on a cube plane; the kept cell count is the analytic one; one region; G1–G7 pass |
+| a box with a sphere STL inside, 32 cells per axis | the fluid volume is within 5 % of `V_box - 4/3 pi r^3` |
+| a slab that runs PAST the domain wall, sealing the layer beneath it against the box's own patches | the cells under the slab are a second component and are dropped; the mesh has one region, and every wall face is the slab's top plane exactly — the tetrahedral failure of §92.1, refused |
+| a diagonal pair of kept cells sharing one edge | W1 removes exactly one of them, and the same one whichever order the edges are visited in |
+| a surface whose STL solid is named `xMin` | a refusal naming the collision, not a mesh with two `xMin` patches |
+| a tree with no solid at all | the walk is a no-op: no cell removed, no wall patch emitted, the same points array |
+
+---
+
+### 92.11 Snapping: which points move, how far, and what puts them back
+
+The implementation-level companion to §92.2 stage 4, appended after §92.10 for
+the reason §92.10 was appended after §92.9 — every citation already pointing
+into §92.1–§92.10 keeps its number. §92.2 stage 4 gives the displacement
+(92.5), its smoothing (92.6) and the guarded step (92.7). This says which
+points those equations range over, what a neighbour is, what happens where the
+geometry meets the box, what the guard measures and on which cells, and the
+one thing stage 4 refuses to attempt at all.
+
+Nothing in this stage changes the topology. `points` is the only array that
+moves: the face lists, `owner`, `neighbour` and the patches leave stage 4 as
+they entered it, so §2's upper-triangular order and §92.10's monotone
+renumbering are still true afterwards by construction and not by repair.
+
+**The closest point.** `TriIndex::nearest_triangle` returns the triangle and
+the exact distance but not the point the distance was measured to, so this
+stage adds `TriIndex::closest_point`, the barycentric region test of Ericson,
+*Real-Time Collision Detection*, Morgan Kaufmann (2005) §5.1.5 — a textbook,
+read as a textbook — evaluated on the triangle the index already found. It is
+the same projection `nearest_triangle` already runs internally, returning the
+point instead of discarding it, so the two agree on the distance by
+construction and a test asserts it.
+
+**The four sets.** Write "wall face" for a boundary face whose patch name is
+one of the surface's own patch names — §92.10's (92.26) walls, and not the six
+box patches, which are the domain and not the geometry:
+
+```
+B         = { i : point i is carried by at least one wall face }
+W(i)      = { j != i : j shares an EDGE of a wall face with i }
+N(i)      = { j != i : j shares an EDGE of any face with i }
+star(i)   = { c : some face of cell c carries point i }             (92.27)
+```
+
+`W` is the graph (92.6) smooths on — the wall's own surface graph, so a
+displacement is averaged along the wall and not across the fluid — and `N` is
+the graph the interior extension below runs on.
+
+**The displacement, and the dead band.** For a point `i` at iterate `k`, with
+`q_i = closest_point(x_i)` and `eps = snap.tolerance * base_size`:
+
+```
+delta_i   = 0                    if |q_i - x_i| <= eps
+          = q_i - x_i            otherwise                          (92.28)
+```
+
+The dead band is not a nicety. A point that already lies exactly on a triangle
+comes back from the barycentric reconstruction displaced by a rounding error,
+so without (92.28) an axis-aligned box cut on the cell planes — §92.10's own
+test case, where every wall point is already on the geometry — would be
+returned perturbed in the last bits, and would keep being perturbed once per
+iteration for thirty iterations. With it, that mesh comes back bit for bit, and
+a test asserts bit equality rather than a tolerance.
+
+**Smoothing, and the extension into the interior.** (92.6) is a sweep over
+`B`; the interior needs one too, or the first fluid cell behind a wall point
+that moved half a cell absorbs the whole displacement and fails G1 or G5 on its
+own. Both sweeps are Jacobi, `w = snap.smoothing`, run `snap.smoothing_passes`
+times:
+
+```
+d_i^(0)   = delta_i                             i in B
+          = 0                                   i not in B
+
+d_i^(m+1) = (1 - w) delta_i + w mean_{j in W(i)} d_j^(m)      i in B
+          = w mean_{j in N(i)} d_j^(m)                        i not in B
+                                                                    (92.29)
+```
+
+The boundary line is (92.6) verbatim. The interior line is a decayed harmonic
+extension: a point one edge behind the wall takes `w` times what the wall took,
+two edges back `w^2`, and `snap.smoothing_passes` sweeps carry the motion that
+many layers deep and no further, so the reach is bounded by the config and not
+by the mesh. Smoothing the DISPLACEMENT rather than the POSITION is Freitag and
+Ollivier-Gooch's point, quoted in §92.2: a point already on the surface is not
+dragged off it by its neighbours.
+
+**The box wall.** Where the geometry meets the domain — the site's ground plane
+running out to the box sides — a point is carried by a wall face and by a box
+face at once. Moving it off the box plane makes the box patch non-planar and
+the case unreadable; pinning it leaves the staircase the snap exists to remove.
+So it is constrained, not pinned:
+
+```
+for each boundary face carrying i whose patch is a DOMAIN patch:
+    a = the axis of that face's unit normal
+    (d_i)_a <- 0                                                    (92.30)
+
+a domain face whose normal is not axis-aligned to 1e-6 pins i outright
+```
+
+A point on a box edge loses two components and one on a box corner all three,
+which falls out of applying (92.30) once per face without a special case.
+
+**The guarded step, and what the guard measures.** G3 (one cell region) and G7
+(addressing, duplicate faces) are topological: they cannot change under a
+motion of the points, so a mesh that fails either of them fails it on arrival
+and stage 4 refuses at once rather than halving a step that cannot help. The
+guard therefore measures G1, G2, G4, G5 and G6, and the cells it blames are the
+failing cell itself for G1, G2, G5 and G6 and both cells of the failing face
+for G4:
+
+```
+x_i^(k+1) = x_i^(k) + alpha_i d_i,   alpha_i = 1,  alpha_i = 0 if i is PINNED
+
+repeat at most snap.undo_limit times:
+    F = { c : c fails G1, G2, G4, G5 or G6 on the moved mesh }
+    if F is empty: accept the iterate
+    alpha_i <- alpha_i / 2  for every i with star(i) meeting F
+    re-apply from x^(k)
+
+a point still blamed after snap.undo_limit halvings takes alpha_i = 0, is
+PINNED for the rest of the run, and the iterate is ABANDONED whole:
+x^(k+1) = x^(k), which passes the gate because x^(k) did              (92.31)
+```
+
+§92.3 caps the subjects a refusal RECORDS at two hundred, because a refusal
+names subjects and does not enumerate a mesh. (92.31) needs the whole failing
+set and not a prefix of it: halving the two hundred it was told about while
+five thousand cells are inverted would loop until the iteration count ran out
+and then refuse anyway. So the gate's measurement takes the cap as a parameter
+and the guard passes no cap; only the message that reaches a human is capped.
+
+Abandoning the whole iterate rather than accepting a partly-moved mesh is
+what makes the loop finite: every pass either accepts a step or pins at least
+one point, and the points are finite, so no sequence of undos can run forever.
+
+The loop of (92.7) runs `snap.iterations` times, or stops early when
+`max_i |alpha_i d_i| <= eps`. Both the iterations run and the largest remaining
+step are reported, and so are the residual distances `|q_i - x_i|` over `B`
+after the last iterate — the maximum and the 99th percentile — and the counts
+of points that were scaled back at least once and of points that ended PINNED.
+
+**Hanging nodes ride their parents.** A castellated mesh's 2:1 transitions
+carry hanging nodes, and a hanging node is in the point list of only some of
+the faces that touch it. The four quarter-faces on the fine side of a
+transition carry it as a vertex; the coarse cell's own adjacent faces still
+run straight from corner to corner and do not mention it. Those two paths
+along the same edge coincide — so the coarse cell's boundary is closed, and
+(92.12)'s face vectors cancel — only while the hanging node lies on its
+parents' segment. On the lattice it does, exactly. The first displacement that
+does not keep the three collinear opens a crack of the order of the
+displacement itself, and G2 then fails not on one cell but on every cell at
+every transition, at any `alpha`, which no amount of halving can mend. So the
+trial positions are corrected before the gate measures them:
+
+```
+for every hanging node H with parents (A, B), longest parent edge first:
+    x_H  <-  (x_A + x_B) / 2                                        (92.33)
+```
+
+Longest first, because a hanging node's parent may itself be a hanging node of
+a coarser edge — (92.3)'s balance bounds the level jump across a FACE, not
+across an EDGE — and the coarser seat has to be set before the finer one reads
+it. (92.33) runs inside (92.31)'s loop, on the trial positions and after
+`alpha` has been applied, so a halved step and an abandoned one are re-seated
+alike.
+
+The parents are found by geometry and not by arithmetic on (92.20)'s indices:
+`coord` interpolates, so `(coord(qa) + coord(qb)) / 2` and `coord((qa + qb)/2)`
+are two different roundings of one number and a bit-exact midpoint map misses
+most of the hanging nodes there are. A point within a rounding tolerance of an
+edge's midpoint is that edge's hanging node, looked up in a spatial hash of the
+points; a linear search would cost a pass over every point for every edge,
+which is a unit test that passes and a site that never finishes.
+
+What (92.33) costs is recorded rather than hidden: a hanging node cannot be
+snapped on its own, so the wall through a 2:1 transition is only as near the
+geometry as the average of its two parents' displacements puts it. Refining
+the band so that the transition does not sit on the wall is the fix; letting
+the node move and losing closure at every transition is not.
+
+**The one refusal.** A geometry far finer than the cells that reached it cannot
+be snapped to: every wall point of the one cell that happened to contain it is
+pulled onto a shape smaller than the cell, the cell collapses, the guard undoes
+the whole displacement, and thirty iterations later the mesher hands back a
+staircase and calls it a sphere. That is the failure §92.1 exists to refuse, so
+it is refused before any point moves, by area — the one measurement that sees
+it without needing a length scale:
+
+```
+A_mesh(p) = sum of the areas of the wall faces on patch p
+A_surf(p) = Surface::patch_area[p], the area of p's triangles
+
+refuse if A_mesh(p) > snap.max_area_ratio * A_surf(p)               (92.32)
+```
+
+A castellated wall over-reports a smooth surface's area by at most `sqrt(3)`
+(the staircase of a plane of unit normal `n` has `(|nx|+|ny|+|nz|)` times the
+plane's area, maximised at `n = (1,1,1)/sqrt(3)`), so the default limit of 4 is
+loose by more than a factor of two on any geometry the cells resolve at all,
+and a patch whose walls are two hundred times its own area is not a resolved
+geometry by any reading. The test is one-sided on purpose: `A_mesh < A_surf` is
+a patch running partly outside the domain, which is legal, and is not refused.
+The refusal names the patch, both areas and their ratio.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| the topology | untouched — `faces`, `owner`, `neighbour` and `patches` leave stage 4 identical, and only `points` differs |
+| a mesh whose wall points already lie on the geometry | returned bit for bit, by (92.28)'s dead band, and the report says zero residual |
+| a point on a domain patch | stays on that patch's plane exactly, by (92.30); a point on a box edge keeps two coordinates and one on a box corner all three |
+| the mesh stage 4 returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message |
+| a mesh that arrives failing G3 or G7 | refused at once, not halved — no motion of the points can mend either |
+| a displacement that breaks a cell | halved up to `snap.undo_limit` times and then abandoned, never accepted with the cell broken (§92.2 stage 4) |
+| every pinned or scaled-back point | counted in the report; a run that pinned points is not a silent run |
+| a hanging node at a 2:1 transition | on its parents' midpoint at every trial position, by (92.33) — otherwise G2 fails at every transition, at any `alpha`, and stage 4 moves nothing on any refined mesh |
+| a patch whose wall area exceeds `snap.max_area_ratio` times its own | refused by (92.32), naming the patch and both areas, with no mesh written |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box with an axis-aligned cube STL on the cell planes | snapping is the identity, asserted bit for bit on the points array |
+| a box with a sphere STL, refined to level 2 at the surface | the 99th-percentile point-to-surface distance is under 2 % of the radius, the gate passes, and the fluid volume is within 1 % of the box less the STL's own enclosed volume |
+| a sphere STL much smaller than one cell | (92.32) refuses, naming the patch; nothing is written |
+| a gate no displacement can satisfy (a hundredth of a degree of non-orthogonality on an exactly orthogonal mesh) | the step is halved `undo_limit` times, the blamed points are pinned, the iterate is abandoned, and the mesh comes back bit for bit the one that went in, still through the gate |
+| a refined tree's mesh, snapped | G2 holds through every iterate — the test that fails without (92.33) fails on hundreds of cells at once, not on one |
+| a point already on a triangle | `closest_point` returns it to within rounding, and (92.28) then makes the displacement exactly zero |
+| `closest_point` against `nearest_triangle` | the same triangle and the same distance, to the last bits, at points inside a face, beyond an edge and beyond a vertex |
+
+---
+
+### 92.12 Feature edges and corners: what the triangulation calls sharp, and what refinement and snapping do with it
+
+Appended after §92.11 for the reason §92.11 was appended after §92.10 — every
+citation already pointing into §92.1–§92.11 keeps its number. §92.2 stage 1
+names `l_feat` in (92.2) and stage 4's (92.5) pulls a point onto the closest
+point of the surface; this section says what a feature edge is, what a corner
+is, which cells the edges refine, and what stage 4 does with a point that has
+landed near one.
+
+**Why the closest-point map is not enough.** (92.28) sends a boundary point to
+the nearest point of the triangulation. On a smooth surface that is the whole
+answer. On a sharp edge it is not: the closest-point map is discontinuous
+across the edge, each point near it lands on whichever of the two faces is
+nearer, and the edge itself — a set of measure zero, which no nearest-point
+query ever returns — is occupied by nothing. A cube snapped by (92.28) alone
+comes back chamfered by half a cell along all twelve of its edges, and the
+chamfer does not shrink with refinement: it is a fixed fraction of the local
+cell size. The fix is the one the OpenFOAM *User Guide*'s `snappyHexMesh`
+chapter describes in prose as **explicit feature snapping** — extract the sharp
+edges as curves, refine to them, and snap the points that land near one onto
+the curve rather than onto the faces. That prose is what was read; the
+implementation below is this document's.
+
+Marechal, *Proc. 18th International Meshing Roundtable* (2009) 65-84 (DOI
+`10.1007/978-3-642-04319-2_5`), already cited in §92.2, is the octree-hex
+literature's treatment of sharp features and is why the refinement criterion
+(92.37) is a band about the edge curve rather than a curvature test on the
+triangles.
+
+**The feature edges.** Write `T(e)` for the triangles incident on an undirected
+edge `e` of the triangulation, and `n_i` for triangle `i`'s unit normal, which
+`Surface` recomputes from the winding and never reads from the file:
+
+```
+theta(e) = acos( clamp( n_i . n_j, -1, 1 ) ),   T(e) = {i, j}
+
+F = { e : |T(e)| = 2  and  theta(e) > feature_angle_deg }
+  U { e : |T(e)| != 2 }                                           (92.34)
+```
+
+The second set is not a special case bolted on. An edge with one triangle is
+the boundary of an open sheet — the surface stops there, there is no second
+normal to compare, and the line where a sheet ends is exactly a line the mesh
+must hold. An edge with three or more is a non-manifold junction, three sheets
+meeting along a line, and that line is a feature by the same argument. Both are
+already counted by `Surface::edge_defects` (§23.2), so a surface that arrives
+with defects gets them treated as geometry rather than silently smoothed.
+
+`theta` is the angle between the NORMALS, not between the faces: a flat
+continuation gives `theta = 0` and a fold of ninety degrees gives `theta = 90`,
+so `feature_angle_deg` reads as "how far from flat", which is the sense the
+User Guide's own default of 30 degrees is quoted in.
+
+**Corners, and the polylines between them.** Take the graph `G = (V, F)` on the
+surface points the feature edges carry, and let `deg(v)` be a point's number of
+feature edges. For a point of degree 2 with edges to `a` and `b`, write the
+turn as the angle by which the curve changes direction there:
+
+```
+turn(v) = pi - acos( clamp( u_a . u_b, -1, 1 ) ),
+          u_a = (x_a - x_v)/|x_a - x_v|,  u_b = (x_b - x_v)/|x_b - x_v|
+
+C = { v : deg(v) != 2 }
+  U { v : deg(v) = 2  and  turn(v) > feature_angle_deg }          (92.35)
+```
+
+A point where three or more feature edges meet is a corner because the curve
+branches there and no single tangent exists; a point of degree 1 is a corner
+because the curve ends there; a degree-2 point that turns more than the feature
+angle is a corner because a polyline through it would cut the geometry it is
+supposed to hold. A straight-through vertex has `u_a . u_b = -1` and `turn = 0`,
+which is why the turn is written as the supplement.
+
+The polylines are the maximal chains of `F` whose interior points are all
+degree-2 non-corners. A chain runs from a corner to a corner; a cycle carrying
+no corner at all — a cylinder's rim is the case that matters — is a CLOSED
+polyline, and is cut at its lowest-numbered point so that the output does not
+depend on the order the edges were discovered in. Every feature edge lies on
+exactly one polyline, and the count of polylines and of corners is what a test
+asserts about a cube (12 and 8) and about a capped cylinder (2 and 0).
+
+**The distance to the feature set.** The query both later uses need is the
+closest point of `F` to a point `p`, which is the closest point of a SEGMENT,
+minimised over the segments:
+
+```
+t*      = clamp( (p - x_a).(x_b - x_a) / |x_b - x_a|^2 , 0, 1 )
+proj(p) = x_a + t* (x_b - x_a)
+
+feat(p) = argmin over e in F of |p - proj_e(p)|                   (92.36)
+```
+
+evaluated through a uniform bucket grid over the segments, built once, exactly
+as `TriIndex` (§23.4) buckets triangles: the segment count is a hundredth of
+the triangle count on any real geometry, and a linear scan is a unit test that
+passes and a site that never finishes.
+
+**Refinement (§92.2 stage 1's `l_feat`).** (92.2) leaves `feature_dist_p`
+unfixed; it is fixed here at the cell's own size, which is the only choice that
+needs no second length in the config and no tuning per geometry:
+
+```
+F_p       = { e in F : some triangle of T(e) belongs to patch p }
+h(c)      = the leaf's longest edge
+
+l_feat(c) = max { feature_level_p : dist(centre(c), F_p) <= h(c) } (92.37)
+```
+
+`feature_level_p` is `refinement.levels[p].feature_level`, defaulting to zero —
+no feature refinement unless the config asks for it, so every mesh built before
+this section is bitwise what it was. The band being the cell's own size is what
+makes the criterion scale-free: a cell one cell away from an edge refines, its
+children are half the size and so the band is half as wide, and the process
+stops exactly at `feature_level_p` or at `max_level`, whichever comes first.
+The criterion is evaluated on the leaf's centre, like (92.1), and (92.22)'s
+bounding-sphere rule is not repeated for it — a leaf whose centre is further
+than its own longest edge from the curve has the curve outside it.
+
+**What this supersedes in §92.2.** Stage 5 as first written ran feature
+snapping BEFORE stage 4 and pinned its points through it. That order decides
+which feature entity a point belongs to from the CASTELLATED positions — the
+staircase, before any point has been pulled onto the geometry — which is the
+worst information the run will ever have; and a pinned point then drops out of
+(92.29)'s smoothing, so the wall between two pinned points is averaged by
+neighbours that no longer include them. Worst of all, a pin cannot be undone:
+(92.31) exists to halve and abandon a displacement that breaks a cell, and a
+point placed on a corner before the loop began is outside its reach. Running
+the attraction inside the loop fixes all three — the target is a function of
+the current position and is re-decided at every iterate, the moved points stay
+in the smoothing graph, and a feature snap that breaks a cell is halved and
+abandoned exactly like any other displacement. (92.8)'s projection is
+unchanged; it is (92.38)'s edge branch, evaluated at `q_i` instead of at
+`x_i`.
+
+**Feature snapping (§92.2 stage 4).** The attraction runs where the User Guide
+puts it — after the surface snap, before the quality check — which in the loop
+of §92.11 means: (92.28) computes `q_i`, this replaces `q_i` by a point on a
+polyline or on a corner, and (92.29)-(92.31) then smooth, constrain and guard
+the displacement exactly as they did. Nothing about the guard changes; a
+feature snap that breaks a cell is halved and abandoned like any other.
+
+```
+tau     = snap.feature_tolerance * base_size
+d_e(i)  = |feat(q_i) - q_i|,  d_c(i) = |corner nearest q_i - q_i|
+
+target_i = the corner            if d_c(i) <= tau and i CLAIMS it
+         = feat(q_i)             else if d_e(i) <= tau
+         = q_i                   otherwise                        (92.38)
+```
+
+The measurement is from `q_i`, the surface point, and not from `x_i`: a
+castellated point sits up to half a diagonal off the geometry, and a test on
+`x_i` would attract points that belong on a face a cell away from the edge.
+`snap.feature_tolerance` defaults to 0.5 — half a base cell, which is the
+furthest a wall point of a cell the edge passes through can be from it — and a
+value of zero turns the attraction off entirely, which is what the second
+validation row below runs and what makes "a surface with no feature edges is
+returned bit for bit" testable on a surface that HAS them.
+
+**Where the attraction actually earns its place, and where (92.28) already
+had the answer.** A CONVEX feature seen from the fluid — the edge of a solid
+block — has an outward Voronoi wedge, and for a point inside that wedge the
+nearest point of the triangulation IS a point of the edge, or the corner
+itself. So on a convex geometry (92.28) alone already lands SOME points on the
+curve, and the measured difference the attraction makes is narrower than the
+chamfer argument above suggests: it takes the points whose nearest surface
+point is on a FACE but which sit within `tau` of the curve, so the whole edge
+carries points rather than only the few the wedge caught, and it puts a point
+on every corner rather than on the ones a cell happened to straddle. On a
+CONCAVE feature — the reentrant edge where a building meets the ground, which
+is the site's own case — no fluid point ever projects onto the curve, the
+nearest point is always on one of the two faces, and the attraction is the only
+thing that puts a mesh point there at all. Both are (92.38); only the second is
+a difference of kind.
+
+**What bounds the precision.** (92.28)'s dead band stops a point once it is
+within `eps = snap.tolerance * base_size` of its target, and (92.38) makes that
+target the feature entity, so a run at the default `tolerance = 1e-3` occupies
+an edge to about `eps` and not to machine precision. Occupation to a micron is
+a matter of asking for it — `tolerance` at `1e-9`, and enough iterations for
+(92.29)'s smoothing to run the pull to its fixed point — and the validation
+below runs the case both ways for exactly that reason. Neither is a defect: the
+band is what makes stage 4 terminate, and a wall point a millimetre along a
+metre-scale edge is a wall point on the edge.
+
+**A corner is claimed by one point, and only one.** (92.38)'s corner branch has
+a failure mode that the edge branch does not: a corner is a single position, so
+every boundary point sent to it arrives at the same coordinates, and two points
+at one position are a zero-area face, a zero-volume cell, and a mesh the gate
+refuses. So a corner admits exactly one point:
+
+```
+cand(k) = { i in B, not pinned : the corner nearest x_i is corner k }
+
+claim(k) = argmin over i in cand(k) of |x_i - corner_k|,
+           ties broken by the lower point index                   (92.39)
+```
+
+and a point within `tau` of a corner it did not claim falls through to the edge
+branch, which is what it wanted anyway — the polylines meet at the corner, so
+the nearest edge point to it is near the corner too. The claim is recomputed at
+every iterate from the current positions, so a point that drifts past another
+does not keep a corner it is no longer nearest to, and it is a total function
+of the positions, so the result does not depend on the order points are
+visited in.
+
+The candidate set is what makes the claim affordable: `cand` is read off one
+nearest-corner query per boundary point, so the whole assignment costs `|B|`
+queries and not `|B|` times the corner count. It also makes the claim a
+MATCHING by construction — a point is a candidate for exactly one corner, so no
+point is ever sent to two — and it costs the case where a corner's own nearest
+point is nearer to a different corner: that corner is then unclaimed for the
+iterate, its points take the edge branch, and the edges through it hold it
+anyway. A corner that stays unclaimed while the mesh is refined enough to
+resolve it does not occur on any case run here; if it ever does, it is visible
+in the report's corner count rather than silent.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| a cube's triangulation, at any feature angle in (0, 90) | 12 feature edges, 12 polylines, 8 corners — exactly, by (92.34) and (92.35) |
+| a capped cylinder of `n` sides, `n >= 12`, at 30 degrees | `2n` feature edges, 2 closed polylines, 0 corners: the rims are features, the side seams are not |
+| a smooth sphere's triangulation at 30 degrees | no feature edges at all, and the feature stage is then the identity on refinement and on snapping |
+| `feature_level` absent from the config | no feature refinement, and stage 1 is bitwise what §92.2 alone gives |
+| a leaf further than its own longest edge from every feature edge | not refined by (92.37) |
+| two boundary points near one corner | at most one of them is moved onto it, by (92.39); the other takes the edge branch |
+| the mesh feature snapping returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message — the guard of (92.31) is unchanged |
+| a surface with no feature edges | `snap` returns exactly what it returned before this section, bit for bit |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a cube STL | the 12 edges and 8 corners are extracted exactly, and each corner carries 3 feature edges |
+| a capped cylinder STL | exactly the two rims, as two closed polylines, no corners |
+| a box minus a cube offset by 0.3 of a cell from the lattice, at the default `tolerance` | every one of the cube's 12 edges and all 8 of its corners carry a mesh point within `2 eps` — the precision the dead band allows — the gate passes, and the topology is untouched |
+| the same case with `tolerance = 1e-9` and 60 iterations | every edge and every corner occupied to within 1e-6, the gate still passing: the band, not the attraction, is what the default run's `eps` measures |
+| the same case with `feature_tolerance = 0` | no point takes either branch of (92.38), the run is bit for bit the run before this section, and seven of the eight corners have no mesh point within 0.1 of them. The eighth is the one the geometry hands to (92.28) for free: the castellated block's own corner faces it up the body diagonal from 0.2 of a cell, and a point outside a CONVEX corner projects onto the corner — measured, and asserted as measured rather than as wished |
+| the snapped mesh of the cube case | no two points within 1e-9 of each other — what (92.39) buys, asserted directly rather than inferred from the gate |
+| `feat` against a linear scan over the segments | the same point and the same distance, at points beside a segment, beyond its end, and on it |
+
+---
+
+### 92.13 Layers: the normal a point grows along, the thickness it is allowed, and the cells that fill the gap
+
+The implementation-level companion to §92.2 stage 6, appended after §92.12 for
+the reason §92.12 was appended after §92.11 — every citation already pointing
+into §92.1–§92.12 keeps its number. §92.2 stage 6 gives the stack (92.9) and
+the medial-axis limit (92.10). This says which points the stack is grown from,
+what the normal at one of them is, how the medial distance is MEASURED with the
+queries this crate actually has, what the shrink does to the mesh behind the
+wall, what the retreat gives up when the gate refuses, and exactly which cells
+and faces the extrusion emits.
+
+This is the first stage that changes the TOPOLOGY. Stages 1–4 moved points;
+here `points`, `faces`, `owner`, `neighbour` and every patch's size all change,
+so §2's upper-triangular order is restored by `adapt::rebuild::ldu_permutation`
+at the end rather than inherited, and §92.3's gate is run on the result exactly
+as the earlier stages run it on theirs.
+
+The construction is the standard one — shrink the boundary inward, fill the gap
+— and it is Garimella & Shephard's, *Int. J. Numer. Meth. Engng* **49** (2000)
+193–218 (DOI
+`10.1002/1097-0207(20000910/20)49:1/2<193::AID-NME929>3.0.CO;2-R`), already
+cited in §92.2. snappyHexMesh is GPL and is not opened; the OpenFOAM *User
+Guide*'s prose description of layer addition is the only thing consulted about
+it, and it is cited in §92.2.
+
+**Which faces grow layers.** Write `P_L` for the patches `layers.patches`
+names. A name that is not a patch of the mesh is a refusal, not a silent
+no-op: the geometry it names either was never reached by a cell (§92.10 reports
+that patch as a row of zero) or is misspelled, and both are the user's to fix.
+A *layer face* is a boundary face of a patch in `P_L`; a *layer point* is a
+point at least one layer face carries; `L` is the set of them. `n = layers.n`;
+`n = 0`, or an empty `layers.patches`, returns the mesh bit for bit.
+
+**The point normal.** Boundary faces are wound outward, so the inward unit
+normal of a layer face `f` is `-Sf/|Sf|`, and the normal at a layer point is
+its area-weighted average — which is the sum of the inward area vectors,
+normalised, so no weight has to be written down:
+
+```
+Lf(i)    = the layer faces carrying point i
+
+n_i^(0)  = normalise( - sum_{f in Lf(i)} Sf ),   i in L                (92.40)
+```
+
+Area weighting is what makes the normal at a 2:1 transition the normal of the
+surface and not of the face count: four fine faces and one coarse face meeting
+at a point carry the same area on each side, and (92.40) reads them that way.
+The average is then smoothed on the wall's own graph — `W(i)` of (92.27),
+restricted to `L` — and renormalised after every pass, `layers.normal_passes`
+times, with `w = layers.smoothing`:
+
+```
+n_i^(m+1) = normalise( (1 - w) n_i^(m) + w mean_{j in W(i) ^ L} n_j^(m) )
+                                                                       (92.41)
+```
+
+`normal_passes = 0` turns the smoothing off, and then a flat wall's normal is
+the sum of parallel area vectors: its DOMINANT COMPONENT comes back exact in
+every bit, and the two transverse components carry up to one ulp of dust — on a
+triangulated face the mean of three equal coordinates does not round back to
+that coordinate, and the face centroid inside `face_area_vector` is where the
+dust enters. Measured worst case on the box-minus-cube mesh: 1.2e-16. That is
+what lets the box-minus-cube case assert an exact prism to 1e-9 rather than to
+a loose tolerance; whole-vector bit equality would need the area-vector helper
+changed, and this section does not ask for that.
+
+**Where a layer meets something that is not a layer.** A layer point can also
+be carried by a boundary face that is NOT a layer face: the box side the ground
+plane runs out to, or a wall patch the config did not ask layers on. Moving it
+off that face's plane makes the patch non-planar and the case unreadable, so
+the normal is constrained into the plane rather than the point pinned — the
+same instrument as (92.30), stated for a general face normal because a wall
+that is not a layer wall need not be axis-aligned:
+
+```
+U(i)   = { unit outward normals of the NON-layer boundary faces carrying i },
+         deduped to 1e-6
+
+|U| = 0:  n_i unchanged
+|U| = 1:  n_i <- normalise( n_i - (n_i . u) u )
+|U| = 2:  n_i <- normalise( +- u_1 x u_2 ), the sign that agrees with n_i
+|U| >= 3: point i is PINNED
+
+and a projection leaving |n_i| < 0.1 before renormalisation pins i too (92.42)
+```
+
+Two constraints leave exactly one direction — the line where the two planes
+meet — which is why the case is a cross product and not a second projection: a
+point on the box's vertical edge where the ground plane reaches it may slide
+only up and down, and (92.42) says so exactly. Three independent constraints
+leave nothing, and a pinned point is a point with no thickness, which by the
+rule below costs its patch its layers.
+
+**The stack, and the level schedule.** (92.9) gives `t_k` and `T`. The
+extrusion needs the fractions, once, globally — every point uses the same
+schedule, which is what makes a hanging node's copies stay the midpoint of its
+parents' copies at every level:
+
+```
+f_0 = 0,  f_k = (sum_{j=1}^{k} t_j) / T,  f_n = 1                      (92.43)
+```
+
+**The medial distance, measured with the query the crate has.** (92.10) wants
+the distance from `x_i` to the medial axis. There is no medial-axis
+construction here and none is wanted; what is wanted is the distance at which
+the layer stack would run into a DIFFERENT piece of wall. `TriIndex` answers
+unsigned distance and closest point, so the march is written in those alone.
+On a flat wall `dist(x_i + s n_i) = s` exactly; a second wall approaching makes
+it less. The test has to reject the two cases where it is less for a reason
+that is not a second wall — a convex corner, where the closest point is the
+launch point itself, and a concave corner, where it is the foot of the same
+neighbourhood — so it asks for BOTH a short distance and a closest point far
+along the surface from where the march started:
+
+```
+y(s)   = x_i + s n_i
+q(s)   = closest_point(y(s))
+
+hit(s) <=> |q(s) - y(s)| <= (1 - kappa) s   AND   |q(s) - x_i| > c s
+
+s_max  = T / layers.medial_frac        kappa = 1/8        c = 3/2
+
+m(i)   = min { s in (0, s_max] : hit(s) },  +inf when none             (92.44)
+```
+
+`s_max` is set so that the limit `medial_frac * m(i)` can never bind above the
+nominal `T`, and so the march never runs further than the answer could matter.
+`m` is found by sampling `s_max j / 8`, `j = 1..8`, for the first `j` that hits
+and then six bisections between `s_{j-1}` and `s_j`: fourteen closest-point
+queries per layer point, bounded, deterministic, and an APPROXIMATION — a gap
+narrower than `s_max / 8` that opens and closes between two samples is missed,
+and what catches it then is the gate, not this. `kappa` and `c` are this
+project's own. At a convex 90-degree edge `q(s) = x_i` and `|q - x_i| = 0`, so
+`hit` is false at every `s`: the layers grow, which is right, because the
+fluid's medial axis is nowhere near a convex corner. At a concave 90-degree
+corner `|q - x_i| = s/sqrt(2) < 3s/2`, so `hit` is false there too: the corner
+shrinks into itself and the stack is not cut. Two walls a gap `g` apart give
+`|q(s) - y(s)| = g - s`, so the first hit is at
+
+```
+s = g / (2 - kappa) = 8g/15 = 0.533 g                                  (92.52)
+```
+
+— `kappa`'s margin PAST the medial axis at `g/2`, never before it. `m(i)` is
+therefore a slight over-estimate of the medial distance, by `kappa/(2 - kappa)`
+= 6.7 %, and the direction of the error is the one to have: `medial_frac`
+defaults to `1/2`, so the stack still stops at `0.267 g`, comfortably short of
+the axis.
+
+**The thickness a point is allowed.** (92.10) with the local cell size added,
+because a stack that fits between the walls can still eat the cell it grows
+into:
+
+```
+h_i    = min { |x_j - x_i| : j a neighbour of i along an edge of a layer face }
+
+T_i    = min( T,  layers.medial_frac * m(i),  layers.cell_frac * h_i )
+T_i    = 0   if i is pinned by (92.42)
+
+D_i    = T_i n_i          the displacement vector, and the array the
+                          retreat scales and the hanging nodes average (92.45)
+```
+
+**The shrink.** The boundary moves inward by `D_i` and the interior takes the
+displacement as (92.29)'s extension takes the snap's, so the one cell behind
+the wall does not absorb all of it. The boundary values are FIXED — they are
+the thickness, not a suggestion — and only the interior relaxes, for
+`layers.smoothing_passes` passes:
+
+```
+d_i^(0)   = D_i     i in L;   0   i a boundary point not in L;   0   otherwise
+
+d_i^(m+1) = D_i                                      i in L
+          = 0                                        i boundary, not in L
+          = w mean_{j in N(i)} d_j^(m)               i interior
+
+then, longest parent edge first, every hanging node rides its parents:
+          d_h <- (d_a + d_b) / 2                                       (92.46)
+```
+
+The thickness a point actually CARRIES is `|d_i|` after the averaging and after
+the retreats, not the `T_i` (92.45) proposed, and the report (92.50) reads
+`|d_i|`. The averaging can drive it to zero: a hanging node on a layer face
+whose PARENTS lie on a coarse face of a patch that is not a layer patch takes
+the mean of two zeros. A layer point that ends with `|d_i| = 0` on a patch that
+is still trying to keep its layers would extrude a side face of zero area, so
+it costs that patch its layers by the same rule (92.47) drops a patch under the
+floor — the check is `|d_i| > 0` on every layer point, unconditional, whatever
+`min_thickness` is set to.
+
+The hanging-node line is (92.33)'s, for (92.33)'s reason and one more: because
+`d_h` is the mean of its parents' whole DISPLACEMENT VECTORS and (92.43)'s
+schedule is global, the hanging node's copy at level `k` is the exact midpoint
+of its parents' copies at level `k`, at every level, so the split side faces of
+the paragraph after next close exactly.
+
+**The retreat, and WHICH MESH it measures.** The ladder is thickness first and
+layers second, which is the order §92.2 stage 6 states. It runs twice, on the
+two meshes this stage produces, because a defect can be introduced by either
+half of it and only the second half makes cells:
+
+```
+INNER, on the SHRUNK mesh - boundary moved, no cell added yet:
+repeat up to layers.retreat_limit times:
+    fail = the cells §92.3 named (for G4, both cells of the named face)
+    if fail is empty: accept
+    D_i <- D_i / 2   for every layer point i carried by a cell of fail
+    re-run (92.46)
+
+OUTER, on the EXTRUDED mesh - the mesh the caller would receive:
+repeat up to layers.retreat_limit times:
+    extrude (92.48)-(92.49), assemble, measure §92.3's gate on the RESULT
+    if it passes: accept
+    fail = the cells §92.3 named, layer cells included; a layer cell
+           c(j,k) names the points of its own layer face
+    D_i <- D_i / 2   for every layer point i of fail, and re-run the
+           WHOLE stage (92.40)-(92.47) with that cap in force
+
+either ladder, if still failing after the last retreat: the patch loses
+its layers, and the stage restarts with it removed from P_L
+if any T_i < layers.min_thickness * T at accept: that patch loses its layers
+                                                                       (92.47)
+```
+
+The outer ladder is not decoration. An earlier form of this section had only
+the inner one, which gates a mesh differing from its input in `points` ALONE —
+so it never measured a layer cell at all, and every defect the EXTRUSION
+introduced was TERMINAL: the run refused instead of thinning, and the refusal
+named hundreds of faces on a wall the user could do nothing about. With the
+outer ladder the specified behaviour is what happens: the thickness retreats,
+and a wall that still cannot carry a stack loses its layers by name and the run
+continues on the snapped mesh.
+
+Losing layers is a decision about a PATCH, and the failing cells name points,
+not patches, so the patch that loses them is the one carrying the most failing
+layer points, ties to the lower patch index, ONE patch per round; the whole
+stage — (92.40) through (92.47) — is then recomputed from the input mesh with
+that patch removed from `P_L`, because a point it shared with a patch that
+keeps its layers is now constrained by (92.42) into the dropped patch's plane
+and its normal is a different vector. The outer loop therefore runs at most
+`|P_L|` times and terminates.
+
+A patch that loses its layers keeps its snapped boundary, is reported by name
+with the reason, and the run continues — §92.2 stage 6's own sentence. When
+every named patch has lost its layers the returned mesh is the input mesh, bit
+for bit.
+
+**The extrusion.** Levels are counted from the wall: level 0 is the wall where
+it was, level `n` is where the shrink put it. Level `n` is the mesh's own
+point; levels `0..n-1` are new:
+
+```
+x_i^(k) = x_i^orig + f_k D_i,   k = 0..n,   i in L
+
+point ids:   level k < n -> a new point;  level n -> point i itself
+cells:       layer face j gets n cells, c(j,k) = C + j n + k, k = 0..n-1,
+             where C is the cell count of the input mesh and c(j,k) lies
+             between level k and level k+1
+faces:       level 0     -> a BOUNDARY face on the layer face's own patch,
+                            the layer face's point list at level 0, its
+                            winding unchanged (outward)
+             level k     -> INTERNAL, owner c(j,k-1), neighbour c(j,k),
+             1<=k<=n-1      the point list REVERSED (owner is nearer the
+                            wall, so the normal has to point inward)
+             level n     -> the input mesh's own face, point list and winding
+                            unchanged, now INTERNAL with owner its original
+                            cell and neighbour c(j,n-1)                (92.48)
+```
+
+Owner is below neighbour in every one of those by construction, because layer
+cells are numbered after every original cell and `c(j,k-1) < c(j,k)`.
+
+**The sides, and the 2:1 transitions.** A layer face's edge may carry a hanging
+node — a coarse wall face beside four fine ones is normal on an octree mesh,
+and on the WALL it costs nothing because boundary faces need not match each
+other. Once the gap is filled it costs something: the side faces become
+internal, and an internal face has to match. So every edge is first cut into
+SEGMENTS at the hanging nodes that lie on it (`find_hanging`'s map, applied
+until no hanging node lies inside a segment), and a side face is emitted per
+segment per level:
+
+```
+for each segment (u, v) of each layer face f, at each level k:
+    the quad is (u^(k), v^(k), v^(k+1), u^(k+1)), wound so that its area
+    vector points from its owner cell to its neighbour cell
+
+    segment carried by two layer faces f, g:  INTERNAL, between c(f,k)
+                                              and c(g,k)
+    segment carried by one layer face and a non-layer boundary face g:
+                                              BOUNDARY, on g's patch
+    segment carried by one layer face alone:  a refusal - the layer patch
+                                              has an open rim          (92.49)
+```
+
+**The winding of a side face is a CONSTANT of the construction, not a
+measurement.** Write `d` for the segment as `f` winds it and `w` for the step
+from level `k` to level `k+1`, which is inward, `w = -Sf/|Sf|`. The quad's area
+vector is
+
+```
+    d x w  =  -(d x n_out)  =  n_out x d                               (92.53)
+```
+
+and `n_out x d` is exactly the direction of the INTERIOR of face `f` — walk the
+boundary of a face in its winding direction and its interior is on that side.
+So the list as (92.49) writes it always points INTO `f`'s own layer cell
+`c(f,k)`, and the face wound OUT of that cell is that list REVERSED. Hence: a
+boundary side face, whose owner is `c(f,k)`, is always the reversed list; an
+internal side face between `c(f,k)` and `c(g,k)` is the reversed list when
+`c(f,k)` is the owner and the list as written when `c(g,k)` is. Nothing here is
+measured, and nothing here may be: deciding the winding instead by the sign of
+`Sf . (x_nbr - x_own)` is wrong, because at the convex edges of a SNAPPED wall
+that inner product goes to zero and comes back with the wrong sign. Measured on
+a snapped box standing on the domain floor, base `1.0`, one level, three
+layers: 9 of 324 internal side quads came out mis-wound, leaving 13 cells open
+with a worst `|sum +-Sf| / sum |Sf|` of 2.96e-1. The castellated version of the
+same box was clean, which is why this was not seen until the extrusion was run
+on a snapped wall.
+
+A coarse layer cell therefore emits TWO side faces where its fine neighbours
+emit one each, which is §92.9's 2:1 convention on the wall's own edges, and the
+closure of the coarse cell is exact rather than approximate: with the hanging
+node the exact midpoint of its parents at every level, the two half strips'
+directed edges cancel the whole edge of the level polygon in the
+`(1/2) sum p x p'` term for term, so G2 sees zero and not a rounding error.
+This is why (92.46) averages the parents' displacement vectors and (92.43)'s
+schedule is global; it is the same argument as (92.33)'s, one dimension up.
+
+**The extrusion checks its own work, before §92.3 sees it.** Every cell of the
+assembled mesh is required to close RELATIVELY:
+
+```
+E_c = |sum_f s_cf Sf| / sum_f |Sf|  <  1e-12,   s_cf = +1 owner, -1 neighbour
+                                                                       (92.54)
+```
+
+(92.54) is the one check in this section that needs no threshold from the
+config and admits no argument about geometry: a closed polyhedron satisfies it
+EXACTLY, whatever its shape, so a cell that fails it did not receive a bad
+geometry from the user — it received a face this stage wound backwards or
+emitted with no area. G2 cannot serve here. G2 measures `|sum Sf| / V^(2/3)`,
+an absolute closure against the cell's own size, and a mis-wound face of area
+`a` in a cell whose `V^(2/3)` is above roughly `2 x 10^10 a` passes both G2 and
+the extrusion's own zero-area guard, reaching the solver with an inverted flux
+sign. The refusal (92.54) raises names the cell, its centroid, whether it is a
+layer cell or one of the input's, and says in words that it is a fault of the
+MESHER and not of the geometry — which is also why no retreat is attempted on
+it: a retreat cannot mend a face that is the wrong way round.
+
+**Assembly.** Internal faces are the input's, plus every level `1..n` face,
+plus the internal side faces; `ldu_permutation` puts them in (2)'s order.
+Boundary faces are, patch by patch in the input's patch order: the patch's own
+faces — for a layer patch, its level-0 copies, in the input's order — followed
+by the side faces (92.49) put on that patch. Patch names, types and relative
+order are the input's; only the sizes change.
+
+**The report.** Per patch, area-weighted, because a layer addition that quietly
+achieved 12 % of what was asked for is the failure mode the report exists to
+make visible:
+
+```
+A_f       = |Sf| of layer face f at level 0
+tau_f     = ( min_{i in f} T_i ) / T          the fraction f actually got
+
+full      = sum { A_f : tau_f >= 1 - 1e-9 } / sum A_f
+mean_frac = sum A_f tau_f / sum A_f
+
+t1_f      = t_1 tau_f      the first layer f ACTUALLY got, in metres,
+                           since x^(1) - x^(0) = f_1 D_i and f_1 = t_1 / T
+t1_mean   = t_1 mean_frac          t1_min = t_1 min_f tau_f            (92.50)
+```
+
+`full` is the fraction of the patch's area that received the full stack;
+`mean_frac` is the fraction of the nominal thickness the patch received on
+average. A dropped patch reports `n_layers = 0` and the reason.
+
+The report prints `t1_mean` and `t1_min` IN METRES beside the fractions,
+because the fraction alone hides a limiter the user did not write down. On the
+snapped sphere the run reported `full 0.0%, mean frac 0.346` and the binding
+limiter was `cell_frac * h_i` — raising `cell_frac` from 0.5 to 0.9 raised
+`mean_frac` to 0.623, exactly in proportion — so a user who asked for
+`first_thickness = 0.05` was handed 0.017 with nothing saying so, and the `y+`
+they sized for was out by a factor of three. `h_i` is (92.45)'s: the shortest
+edge of the layer faces at that point, which on a snapped mesh is the CUT
+cell's edge and not the octree leaf's. When `full` is zero the line says so in
+words as well.
+
+**G5 and a thin layer, which is the one place the gate and this stage pull
+against each other.** A layer cell is a slab by construction. Its largest
+planar face group (§92.3) is one of the two level faces — the other has the
+opposite outward normal and is a group of its own — so on a wall face of size
+`h` carrying a layer of thickness `t`,
+
+```
+tau = 3 V / A_max^(3/2) = 3 h^2 t / h^3 = 3 t / h                      (92.51)
+```
+
+and G5's `0.05` therefore refuses any layer thinner than `h / 60`. That is not
+a bug in either: the ammonia sliver of §92.1 was `tau = 0.0115`, and a gate
+that let it through would let a 5 cm cell span 13 m. But a `y+ ~ 1` first layer
+is `h / 100` or finer, so the two cannot both be had at these numbers, and this
+section does not resolve it by weakening G5 — G5 is why the mesher exists.
+What it does instead is REFUSE EARLY and say the arithmetic: before any cell is
+inserted, `add_layers` computes `3 t_1 / h` on the smallest layer face and, if
+it is under `quality.min_thickness_ratio`, refuses naming `t_1`, `h`, the ratio
+and the threshold, so the user sees the trade rather than a gate failure on
+cell 12345. Giving layer cells their own thickness rule is a change to §92.3's
+gate and belongs to whoever makes that decision, not to this stage.
+
+**What the layer stage INHERITS from the wall it grows on.** G4 measures
+internal faces. A wall face is a boundary face, so the angle between its normal
+and the line from its owner cell's centre to its own centre is never measured —
+until a layer cell is put behind it and that boundary face becomes the level-`n`
+internal face of (92.48). Then it is, and whatever the earlier stages left
+there is what G4 reads. Measured on this section's own cases:
+
+| the wall | median angle | p99 | max | faces past 70 deg |
+|---|---|---|---|---|
+| a castellated cube on the cell planes | 0.0 | 0.0 | 0.0 | 0 of 54 |
+| the same cube snapped | 16.6 | 38.9 | 38.9 | 0 of 24 |
+| a snapped sphere, level 2 | 51.6 | 80.2 | 80.3 | **408 of 2592** |
+
+so the snapped sphere cannot carry layers at G4's `70` and no choice of
+thickness, smoothing or layer count changes it — the angle is a property of the
+cut cell's centroid against its own wall face, and the layer stage only exposes
+it. Measured on the sphere by sweeping everything a user could turn: the
+surface from 128 to 8192 triangles gives a maximum of 77.1 / 72.3 / 73.1 / 73.9
+degrees, the octree at level 3 gives 75.4, `cell_frac = 0.30` gives 76.6, and
+ONE very thin layer gives 79.8 — worse, not better; below `cell_frac = 0.10` the
+patch loses its layers by name instead. This is stated rather than worked
+around: the mesher does not weaken G4 to make its own output pass. It is also
+why the validation below runs on a cube and not on the sphere §92.2's stage list
+would suggest.
+
+**The ammonia site is NOT the favourable first row, and the earlier claim that
+it was is withdrawn.** That claim read the site's walls off its geometry —
+axis-aligned planes — and forgot the pipeline: stage 4 always runs before stage
+6, so the wall this stage meets is a SNAPPED wall whatever lies underneath it,
+and a snapped axis-aligned box is already enough to tangle the stack at its
+convex edges. Measured, on a box standing on the domain floor in `[0,4]^3`,
+base `1.0`, one level of refinement, three layers: 37 layer cells FOLD — a fold
+the signed volume hides, found by requiring every pyramid of the decomposition
+to be positive — with a smallest `|V|` of 3.2e-10; at another offset of the same
+box a layer cell comes out with `V = -1.278e-8` and G1 refuses it outright,
+with `max_closure` at 1e30, `max_non_orth_deg` at 179.9, `min_thickness_ratio`
+at 0 and `max_cond` at 1e300. So, as this section stands, layers are VALIDATED
+ON A CASTELLATED WALL — one whose faces lie on the cell planes — and on a
+snapped wall they are attempted, retreated and given up by name (92.47) rather
+than shipped. `tools/automesher/README.md` says the same thing to the user.
+
+The instrument that would move the third row is either a wall-face/owner-centre
+alignment step in stage 4 — placing the level-0 point along the WALL FACE's own
+normal instead of along (92.40)'s averaged point normal, so that a newly
+internalised wall face is aligned with the line to its owner's centre — or a G4
+rule of its own for that face, since `70` was calibrated on a face between two
+ordinary cells and is measuring a different quantity here. Both change numbers
+this document fixes; both belong to whoever owns §92.3, and neither is
+written.
+
+**What this stage does NOT do.** The layer count is uniform over a patch: a
+point that cannot carry the stack costs its whole patch, not just its own
+faces. Terminating a layer stack part-way across a patch needs a face topology
+that closes the stack where it stops — a step the boundary has to carry — and
+that is tranche 2's, together with the tetrahedral path. The consequence is
+stated rather than hidden: on a patch with one pinned point the report says
+`dropped`, and the mesh that comes back is the snapped one, which is a mesh the
+solver can run.
+
+**What must hold**
+
+| Check | Expected |
+|---|---|
+| `layers.n = 0`, or no patch named | the input mesh, bit for bit, and a report of no layers |
+| a patch name that is not a patch of the mesh | refused, naming it, before any normal is computed |
+| a flat wall, `normal_passes = 0` | every layer cell is a prism whose height is `t_k` exactly, to 1e-9 |
+| every emitted mesh | passes G1–G7 of §92.3 — or the ladder (92.47) thinned the stack until it did, or the patch lost its layers by name and the snapped mesh came back, or the run refused with §92.3's own message. In that order: a gate failure is never returned |
+| the cell count | `C + n * (number of layer faces)`, exactly |
+| the point count | `P + n * |L|`, exactly |
+| a layer patch's boundary faces | the same count as before, one level-0 face per input face, in the input's order |
+| a non-layer patch | keeps its own faces, in order, and gains only the side faces (92.49) gave it |
+| a 2:1 transition inside a layer patch | the coarse cell carries two side faces there, the fine cells one each, and G2 is zero to 1e-12 |
+| two walls a gap `g` apart | `T_i <= medial_frac * g / 2` on both, by (92.44); no cell is inverted and none has to be repaired |
+| a patch that cannot carry its stack | `n_layers = 0`, the reason named, the rest of the mesh unchanged, and the run continues |
+| `owner < neighbour` on every internal face | by construction for the level faces, by `ldu_permutation` for the whole array |
+| a first layer thinner than `h/60` | refused before any cell is inserted, naming `3 t_1 / h` and `quality.min_thickness_ratio` (92.51) — not discovered as a G5 failure on an inserted cell |
+| every cell of every emitted mesh | closes to `1e-12` RELATIVE (92.54), checked BEFORE §92.3's gate; a cell that does not is a MESHER fault and is refused as one, naming the cell |
+| a side face's winding | fixed by the topology (92.53), never by the sign of a dot product against a cell centre |
+| a snapped wall | closes exactly all the same — (92.54) holds on it even where the gate does not |
+| a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
+| the report of a patch that kept its layers | says the achieved first layer in METRES (`t1_mean`, `t1_min`), not only as a fraction |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box minus a cube, castellated on the cell planes, 3 layers | every wall face has exactly 3 layer cells behind it; on the faces carrying ONE normal the achieved `V/A` is within 5 % of `first_thickness`; the gate passes; one region. NOT the sphere §92.2's stage list would suggest — the paragraph above measures why |
+| the same case, `normal_passes = 0` | on the faces whose points all carry one flat side's normal and one displacement, the layer cells are hexahedra and the level spacing is `t_1, t_2, t_3` to 1e-9 |
+| a slot narrower than twice the requested stack | the run retreats: the gate passes, `mean_frac < 1` is reported, and no cell has negative volume — the failure this section exists to refuse |
+| the same slot with `min_thickness` above what fits | the patch is dropped by name, and the returned mesh is the snapped mesh bit for bit |
+| the cell and point counts, on every case above | exactly `C + n F` and `P + n |L|` |
+| a mesh with a 2:1 transition on the layer patch | built by FEATURE refinement, since a distance band cannot make one — every cell carrying a wall face is already at the band's finest level; the split side faces are emitted, the mesh loads, and G2 is under 1e-12 |
+| a layer patch COARSER than the non-layer patch beside it | refused by name — the cut of (92.49) would fall on a point with no level copies, and the side face that would span a whole edge against a cut partner is the terminating topology of tranche 2 |
+| `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
+| a box standing on the domain floor, SNAPPED, 3 layers | every cell closes to `1e-12` relative. The assertion is closure and not a quality number, so it catches a mis-wound face and nothing else; the thresholds are opened past every refusal on purpose. Before (92.53) was applied: 13 cells open, worst `2.96e-1` |
+| one internal face of an emitted mesh reversed by hand | (92.54) refuses it, naming that cell — the check is not vacuous |
+| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured, the sphere gives up in the INNER ladder — two halvings take the applied thickness under `min_thickness * T = 1.995e-2` — so it never reaches the outer one; the row below is the case that does |
+| the same box, at `quality`'s own thresholds | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
+| the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
 
 ---

@@ -815,6 +815,37 @@ const FOOTER_RULE: &str =
 /// same reason (15 is not; see that file's `TextOut::real`).
 const POINT_DIGITS: usize = 17;
 
+/// The names this crate's own reader can read back. A patch name is written
+/// into `constant/polyMesh/boundary` as a bare token followed by `{`, so a
+/// name carrying whitespace, a control character or one of `{}();"'` makes
+/// a file [`read_poly_mesh`] refuses - the mesher must refuse it first.
+/// `what` names the caller's field in the message (e.g. "surface patch").
+pub fn check_patch_name(name: &str, what: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::Mesh(format!(
+            "empty {what} name - a patch the boundary file carries has to be \
+             named"
+        )));
+    }
+    if let Some(ch) = name.chars().find(|c| c.is_whitespace() || c.is_control()) {
+        return Err(Error::Mesh(format!(
+            "{what} name '{name}' carries a whitespace or control character \
+             ({:?}) - the boundary file holds each name as one bare token",
+            ch.escape_debug().to_string()
+        )));
+    }
+    if let Some(ch) = name
+        .chars()
+        .find(|c| matches!(c, '{' | '}' | '(' | ')' | ';' | '"' | '\''))
+    {
+        return Err(Error::Mesh(format!(
+            "{what} name '{name}' carries '{ch}', which the boundary file's \
+             patch entry grammar reserves"
+        )));
+    }
+    Ok(())
+}
+
 /// Write `raw` as the five polyMesh files into `dir` - the directory itself,
 /// not the case root: [`read_poly_mesh`] probes three locations because every
 /// caller disagrees about which one it is holding, and a writer cannot.
@@ -1603,5 +1634,21 @@ $EndElements
             patches: Vec::new(),
         };
         assert!(build_host_mesh(&raw).is_err());
+    }
+
+    /// The rule is "readable back": the names a mesher legally emits pass,
+    /// and each refusal names the name that made the boundary file unreadable.
+    #[test]
+    fn check_patch_name_passes_the_readables_and_refuses_the_rest() {
+        for name in ["nh3_source", "wall_site", "xMin", "pump-house.2"] {
+            check_patch_name(name, "surface patch")
+                .unwrap_or_else(|e| panic!("'{name}' is legal: {e}"));
+        }
+        for name in ["", "pump house", "a;b", "{x}"] {
+            let err = check_patch_name(name, "surface patch")
+                .expect_err("an unwritable name is a refusal");
+            let msg = format!("{err}");
+            assert!(msg.contains(name), "'{name}' named in the refusal: {msg}");
+        }
     }
 }
