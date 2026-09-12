@@ -642,6 +642,33 @@ fn every_shipped_cht_case_lowers() {
     assert!(checked > 0, "no *.cht.jsonc case was found under {}", dir.display());
 }
 
+/// `lower()` keeps one raw polyMesh per region, bitwise what the matching
+/// `meshes[r]` was built from: `build_mesh` IS `build_host_mesh(&raw_mesh(b)?)`,
+/// so the counts must agree exactly - the point set and face polygons
+/// `HostMesh` does not keep travel with the case (SPEC-LIT §49.3's pattern).
+#[test]
+fn lowering_keeps_the_raw_mesh_of_every_region() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cases/dieStack.cht.jsonc");
+    let case = super::read_cht_case(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let low = case.lower().unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+    assert_eq!(low.raw.len(), low.meshes.len(), "one raw mesh per region");
+    for (r, (raw, m)) in low.raw.iter().zip(&low.meshes).enumerate() {
+        assert_eq!(raw.points.len(), m.n_points, "region {r} point count");
+        assert_eq!(
+            raw.faces.len(),
+            m.n_internal_faces + m.n_boundary_faces,
+            "region {r} face count"
+        );
+        assert_eq!(
+            raw.neighbour.len(),
+            m.n_internal_faces,
+            "region {r} internal-face count"
+        );
+    }
+}
+
 // ==========================================================================
 //  SPEC-LIT §60 - the fluid region: what it says, what is refused, and the
 //  §13.4.1 pair tests

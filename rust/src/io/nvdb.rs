@@ -102,7 +102,7 @@
 
 use crate::error::{Error, IoContext, Result};
 use crate::io::output_types::{FieldValues, OutputField};
-use crate::{Scalar, Vec3};
+use crate::{Scalar, Tensor, Vec3};
 use std::path::Path;
 
 // ============================================================================
@@ -160,7 +160,9 @@ impl UniformGrid {
 /// Write `fields` on `grid` to `path` as a sequence of NanoVDB segments -
 /// see the module doc. A `FieldValues::Vector` field becomes four segments
 /// (`name.x`, `name.y`, `name.z`, `name.mag`); a `FieldValues::Scalar` field
-/// becomes one.
+/// becomes one; a `FieldValues::Tensor` field becomes six segments
+/// (`name.xx`, `name.xy`, `name.xz`, `name.yy`, `name.yz`, `name.zz`) and is
+/// refused unless symmetric ([`check_symmetric`]).
 pub fn write(
     path: impl AsRef<Path>,
     grid: &UniformGrid,
@@ -197,6 +199,22 @@ pub fn write(
                 append_segment(&mut out, grid, &format!("{}.z", field.name), &zs, precision)?;
                 append_segment(&mut out, grid, &format!("{}.mag", field.name), &mags, precision)?;
             }
+            FieldValues::Tensor(v) => {
+                check_len(field.name, v.len(), n)?;
+                check_symmetric("nvdb", field.name, v)?;
+                let xx: Vec<Scalar> = v.iter().map(|t| t.xx).collect();
+                let xy: Vec<Scalar> = v.iter().map(|t| t.xy).collect();
+                let xz: Vec<Scalar> = v.iter().map(|t| t.xz).collect();
+                let yy: Vec<Scalar> = v.iter().map(|t| t.yy).collect();
+                let yz: Vec<Scalar> = v.iter().map(|t| t.yz).collect();
+                let zz: Vec<Scalar> = v.iter().map(|t| t.zz).collect();
+                append_segment(&mut out, grid, &format!("{}.xx", field.name), &xx, precision)?;
+                append_segment(&mut out, grid, &format!("{}.xy", field.name), &xy, precision)?;
+                append_segment(&mut out, grid, &format!("{}.xz", field.name), &xz, precision)?;
+                append_segment(&mut out, grid, &format!("{}.yy", field.name), &yy, precision)?;
+                append_segment(&mut out, grid, &format!("{}.yz", field.name), &yz, precision)?;
+                append_segment(&mut out, grid, &format!("{}.zz", field.name), &zz, precision)?;
+            }
         }
     }
 
@@ -209,6 +227,28 @@ fn check_len(field: &str, got: usize, want: usize) -> Result<()> {
             field: field.to_string(),
             msg: format!("{got} values but the grid has {want} cells"),
         });
+    }
+    Ok(())
+}
+
+/// A volume grid carries the SIX components of a SYMMETRIC tensor, so a
+/// tensor field is refused here rather than silently written as six scalars
+/// of a general one. Shared by `nvdb` and `vdb`, whose refusal is identical.
+pub(crate) fn check_symmetric(what: &str, name: &str, v: &[Tensor]) -> Result<()> {
+    let mut asym = 0.0 as Scalar;
+    let mut scale = 0.0 as Scalar;
+    for t in v {
+        asym = asym.max((t.xy - t.yx).abs()).max((t.xz - t.zx).abs()).max((t.yz - t.zy).abs());
+        for x in [t.xx, t.xy, t.xz, t.yx, t.yy, t.yz, t.zx, t.zy, t.zz] {
+            scale = scale.max(x.abs());
+        }
+    }
+    if asym > 1e-12 * scale {
+        return Err(Error::Config(format!(
+            "{what}: tensor field '{name}' is not symmetric (max |T - T^T| = {asym:e} \
+             against max |T| = {scale:e}); a volume grid carries the six components \
+             of a symmetric tensor - write the nine as scalars yourself for a general one"
+        )));
     }
     Ok(())
 }
@@ -1699,5 +1739,65 @@ mod tests {
 
         let grid = make_grid(2, 2, 2);
         assert!(write("x.nvdb", &grid, &[], Precision::F32).is_err());
+    }
+
+    #[test]
+    fn a_symmetric_tensor_becomes_six_segments() {
+        let grid = make_grid(4, 3, 2);
+        let mut s = vec![Tensor::ZERO; grid.n()];
+        for k in 0..grid.nz {
+            for j in 0..grid.ny {
+                for i in 0..grid.nx {
+                    let a = i as Scalar;
+                    s[grid.idx(i, j, k)] = Tensor {
+                        xx: a + 1.0, xy: a + 2.0, xz: a + 3.0,
+                        yx: a + 2.0, yy: a + 5.0, yz: a + 6.0,
+                        zx: a + 3.0, zy: a + 6.0, zz: a + 9.0,
+                    };
+                }
+            }
+        }
+        let path = scratch("tensor");
+        write(&path, &grid, &[OutputField::tensor("S", &s)], Precision::F32).expect("write");
+
+        let bytes = std::fs::read(&path).expect("read back");
+        let segments = read_all(&bytes);
+        let names: Vec<&str> = segments.iter().map(|seg| seg.name.as_str()).collect();
+        assert_eq!(names, ["S.xx", "S.xy", "S.xz", "S.yy", "S.yz", "S.zz"]);
+
+        let seg_xy = &segments[1];
+        for k in 0..grid.nz {
+            for j in 0..grid.ny {
+                for i in 0..grid.nx {
+                    let idx = grid.idx(i, j, k);
+                    // F32 narrows every value on the way into the file, so
+                    // the comparison goes through the same narrowing.
+                    let want_xy = (s[idx].xy as f32) as f64;
+                    assert_eq!(seg_xy.values[idx], want_xy);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_asymmetric_tensor_is_refused_by_name() {
+        let grid = make_grid(2, 2, 2);
+        let s = vec![
+            Tensor { xx: 1.0, xy: 2.0, xz: 0.0, yx: 3.0, yy: 1.0, yz: 0.0,
+                     zx: 0.0, zy: 0.0, zz: 1.0 };
+            grid.n()
+        ];
+        let path = scratch("asym");
+        let err = write(&path, &grid, &[OutputField::tensor("S", &s)], Precision::F32)
+            .unwrap_err();
+        match err {
+            Error::Config(msg) => {
+                assert!(msg.contains("not symmetric"), "refusal: {msg}");
+                assert!(msg.contains("'S'"), "refusal must name the field: {msg}");
+            }
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

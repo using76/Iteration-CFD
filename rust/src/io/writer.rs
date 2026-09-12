@@ -388,6 +388,14 @@ impl ResultWriter for UsdaWriter {
                         self.push_frame(format!("{}.{suffix}", f.name), t, file.clone());
                     }
                 }
+                // A volume frame carries one scalar per grid, so a tensor
+                // becomes its six components; the values are inspected by no
+                // one here (the symmetry gate is the volume writers').
+                FieldValues::Tensor(_) => {
+                    for suffix in ["xx", "xy", "xz", "yy", "yz", "zz"] {
+                        self.push_frame(format!("{}.{suffix}", f.name), t, file.clone());
+                    }
+                }
             }
         }
 
@@ -611,6 +619,38 @@ mod tests {
         assert!(text.contains("case_000000.vdb"));
         assert!(text.contains("case_000001.vdb"));
         assert!(text.contains("def GeomSubset"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tensor field becomes six frames `name.xx .. name.zz` (the writer
+    /// replaces `.` by `_` in volume names), inspecting no values.
+    #[test]
+    fn usda_writer_names_six_tensor_frames() {
+        let dir = tmp("usda_tensor");
+        std::fs::create_dir_all(&dir).unwrap();
+        let scene = dir.join("scene.usda");
+        let mut w = UsdaWriter::new(&scene, "vdb", "case", "vdb");
+        let m = mesh_2x1x1();
+        let vals = vec![1.0 as Scalar; m.n_cells];
+        let s = vec![crate::Tensor::ZERO; m.n_cells];
+        let foam: [FoamField; 0] = [];
+
+        let fields = [OutputField::scalar("T", &vals), OutputField::tensor("S", &s)];
+        let ctx = WriteCtx {
+            time: 0.0,
+            step: 0,
+            name: "ignored",
+            mesh: &m,
+            cart: None,
+            fields: &fields,
+            foam: &foam,
+        };
+        w.write_step(&ctx).unwrap();
+
+        let text = std::fs::read_to_string(&scene).unwrap();
+        assert!(text.contains("def Volume \"S_xx\""), "scene: {text}");
+        assert!(text.contains("def Volume \"S_zz\""), "scene: {text}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

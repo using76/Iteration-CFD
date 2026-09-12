@@ -13,6 +13,11 @@
 //! from ParaView's documented `.pvd` "Collection" reader format. No VTK, ITK
 //! or ParaView source was consulted - only the published format description.
 //!
+//! `write_vtu_points` is the same format written from a `PolyMeshRaw`: the
+//! polyMesh's own shared points and real face polygons, the caller keeps the
+//! raw geometry and hands it over (SPEC-LIT §49.3's pattern), so an
+//! interchange reader sees the mesh the solver was actually built from.
+//!
 //! Cross-references into `SPEC-LIT.md`:
 //! * The cell -> face CSR this writer walks (`cf_offset`/`cf_face`/`cf_own`,
 //!   `bcf_offset`/`bcf_face`) is `HostMesh`'s own layout, motivated in
@@ -54,8 +59,9 @@ use std::path::Path;
 
 use crate::error::{Error, IoContext, Result};
 use crate::io::output_types::{FieldValues, OutputField};
+use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::HostMesh;
-use crate::{Scalar, Vec3};
+use crate::{Label, Scalar, Vec3};
 
 const VTK_POLYHEDRON: u8 = 42;
 
@@ -294,6 +300,17 @@ pub fn write_vtu(
                 3usize,
                 Block::f64(v.iter().flat_map(|p| [p.x as f64, p.y as f64, p.z as f64])),
             ),
+            // VTK's `Tensors` DataArray: 9 components, row-major
+            // `xx xy xz yx yy yz zx zy zz` - the crate's own Tensor field
+            // order. A symmetric tensor is written in full (xy and yx both
+            // present).
+            FieldValues::Tensor(v) => (
+                9usize,
+                Block::f64(v.iter().flat_map(|t| {
+                    [t.xx as f64, t.xy as f64, t.xz as f64, t.yx as f64, t.yy as f64,
+                     t.yz as f64, t.zx as f64, t.zy as f64, t.zz as f64]
+                })),
+            ),
         };
         let offset = app.push(block);
         field_meta.push(FieldMeta { name: f.name.to_string(), n_comp, offset });
@@ -347,12 +364,22 @@ pub fn write_vtu(
             .iter()
             .find(|f| f.n_comp == 3)
             .map(|f| f.name.as_str());
+        // The first 9-component field names the block's Tensors attribute -
+        // emitted ONLY when a tensor is present, so the bytes of a
+        // scalar/vector-only CellData block are unchanged.
+        let tensors = field_meta
+            .iter()
+            .find(|f| f.n_comp == 9)
+            .map(|f| f.name.as_str());
         xml.push_str("      <CellData");
         if let Some(s) = scalars {
             xml.push_str(&format!(" Scalars=\"{s}\""));
         }
         if let Some(v) = vectors {
             xml.push_str(&format!(" Vectors=\"{v}\""));
+        }
+        if let Some(t) = tensors {
+            xml.push_str(&format!(" Tensors=\"{t}\""));
         }
         xml.push_str(">\n");
         for f in &field_meta {
@@ -512,6 +539,270 @@ pub fn write_pvd(path: &Path, series: &[(Scalar, std::path::PathBuf)]) -> Result
 }
 
 // ---------------------------------------------------------------------------
+// The polyMesh's own polygons
+// ---------------------------------------------------------------------------
+
+/// `n_cells = max(owner, neighbour) + 1` - the same derivation
+/// `io::polymesh::build_host_mesh` makes, kept as its own pass so this
+/// writer stays a function of `PolyMeshRaw` alone.
+fn n_cells_of(raw: &PolyMeshRaw) -> usize {
+    let mut n = 0i64;
+    for &c in raw.owner.iter().chain(raw.neighbour.iter()) {
+        n = n.max(i64::from(c) + 1);
+    }
+    n as usize
+}
+
+/// The per-cell face lists of a raw polyMesh, built with one counting pass:
+/// every face appears once for its owner (all faces) and once for its
+/// neighbour (internal faces only). `n_cells` must come from [`n_cells_of`].
+fn raw_cell_faces(raw: &PolyMeshRaw, n_cells: usize) -> Result<Vec<Vec<usize>>> {
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); n_cells];
+    for (f, &c) in raw.owner.iter().enumerate() {
+        let c = usize::try_from(c).map_err(|_| {
+            Error::Mesh(format!("write_vtu_points: face {f} has negative owner {c}"))
+        })?;
+        // `n_cells` is max(owner, neighbour) + 1, so only a negative label
+        // can fall outside it.
+        out[c].push(f);
+    }
+    for (f, &c) in raw.neighbour.iter().enumerate() {
+        let c = usize::try_from(c).map_err(|_| {
+            Error::Mesh(format!("write_vtu_points: face {f} has negative neighbour {c}"))
+        })?;
+        out[c].push(f);
+    }
+    Ok(out)
+}
+
+/// The five VTK arrays from the polyMesh's own polygons, SHARING the
+/// polyMesh's points: `connectivity` is each cell's distinct point ids in
+/// ascending order, and every face is wound outward for the cell that emits
+/// it - stored order for its owner, reversed for its neighbour (SPEC-LIT §1:
+/// `Sf` is the outward area vector, owner -> neighbour). The same five
+/// arrays `build_geometry` fills for `write_vtu`'s synthetic quads.
+fn build_geometry_from_raw(raw: &PolyMeshRaw) -> Result<Geometry> {
+    let n_cells = n_cells_of(raw);
+    let cell_faces = raw_cell_faces(raw, n_cells)?;
+
+    let mut geo = Geometry {
+        points: raw.points.clone(),
+        connectivity: Vec::new(),
+        offsets: Vec::with_capacity(n_cells),
+        types: vec![VTK_POLYHEDRON; n_cells],
+        faces: Vec::new(),
+        faceoffsets: Vec::with_capacity(n_cells),
+    };
+
+    for (c, fs) in cell_faces.iter().enumerate() {
+        let mut pts: Vec<i64> = Vec::new();
+        let mut records: Vec<i64> = Vec::new();
+        for &f in fs {
+            let list = &raw.faces[f];
+            // A face is this cell's owner OR its neighbour, never both
+            // (`owner[f] < neighbour[f]`), so exactly one winding applies.
+            let outward = raw.owner[f] == c as Label;
+            records.push(list.len() as i64);
+            if outward {
+                for &p in list.iter() {
+                    records.push(p as i64);
+                }
+            } else {
+                for &p in list.iter().rev() {
+                    records.push(p as i64);
+                }
+            }
+            for &p in list {
+                let id = p as i64;
+                if !pts.contains(&id) {
+                    pts.push(id);
+                }
+            }
+        }
+        pts.sort_unstable();
+        geo.connectivity.extend_from_slice(&pts);
+        geo.offsets.push(geo.connectivity.len() as i64);
+        geo.faces.push(fs.len() as i64);
+        geo.faces.extend_from_slice(&records);
+        geo.faceoffsets.push(geo.faces.len() as i64);
+    }
+    Ok(geo)
+}
+
+/// One named field's appended block, and the record the XML section is
+/// written from.
+struct FieldBlock {
+    name: String,
+    n_comp: usize,
+    offset: u64,
+}
+
+fn push_field_block(app: &mut AppendedWriter, f: &OutputField) -> FieldBlock {
+    let (n_comp, block) = match &f.values {
+        FieldValues::Scalar(v) => (1usize, Block::f64(v.iter().map(|&x| x as f64))),
+        FieldValues::Vector(v) => (
+            3usize,
+            Block::f64(v.iter().flat_map(|p| [p.x as f64, p.y as f64, p.z as f64])),
+        ),
+        // Nine row-major components `xx xy xz yx yy yz zx zy zz` - the same
+        // published Kitware convention `write_vtu`'s tensor arm encodes.
+        FieldValues::Tensor(v) => (
+            9usize,
+            Block::f64(v.iter().flat_map(|t| {
+                [t.xx as f64, t.xy as f64, t.xz as f64, t.yx as f64, t.yy as f64,
+                 t.yz as f64, t.zx as f64, t.zy as f64, t.zz as f64]
+            })),
+        ),
+    };
+    let offset = app.push(block);
+    FieldBlock { name: f.name.to_string(), n_comp, offset }
+}
+
+/// One `<CellData>`/`<PointData>` section. `Scalars=`/`Vectors=`/`Tensors=`
+/// name the first field of each arity, and `Tensors` is emitted only when a
+/// tensor is present - the same attribute assembly `write_vtu` makes.
+fn write_data_section(xml: &mut String, tag: &str, fields: &[FieldBlock]) {
+    if fields.is_empty() {
+        return;
+    }
+    let attribute = |n_comp: usize, spelling: &str| {
+        fields
+            .iter()
+            .find(|f| f.n_comp == n_comp)
+            .map(|f| format!(" {spelling}=\"{}\"", f.name))
+    };
+    xml.push_str(&format!("      <{tag}"));
+    for (n_comp, spelling) in [(1usize, "Scalars"), (3, "Vectors"), (9, "Tensors")] {
+        if let Some(a) = attribute(n_comp, spelling) {
+            xml.push_str(&a);
+        }
+    }
+    xml.push_str(">\n");
+    for f in fields {
+        xml.push_str(&format!(
+            "        <DataArray type=\"Float64\" Name=\"{}\" NumberOfComponents=\"{}\" format=\"appended\" offset=\"{}\"/>\n",
+            f.name, f.n_comp, f.offset
+        ));
+    }
+    xml.push_str(&format!("      </{tag}>\n"));
+}
+
+/// Write one serial `.vtu` from the polyMesh's own points and polygons -
+/// SPEC-LIT §44.1's `exact` interchange promise, kept with the real
+/// polyhedra instead of [`write_vtu`]'s reconstructed quads. The raw
+/// geometry is the caller's to keep (SPEC-LIT §49.3's pattern); this writer
+/// never touches `HostMesh`.
+///
+/// Points are SHARED: `NumberOfPoints` is `raw.points.len()`, and a point
+/// written for one cell's face is the same id its neighbour's copy of the
+/// face uses. Every cell is a `VTK_POLYHEDRON` with its real faces wound
+/// outward for the cell that emits them - stored order for its owner,
+/// reversed for its neighbour, which is SPEC-LIT §1's `Sf` convention
+/// (owner -> neighbour) read as a winding rule. `cell` fields become a
+/// `<CellData>` block and `point` fields a `<PointData>` block; a tensor
+/// field is 9 row-major components in either one, and the first
+/// 9-component field of a block names its `Tensors` attribute.
+pub fn write_vtu_points(
+    path: &Path,
+    raw: &PolyMeshRaw,
+    cell: &[OutputField],
+    point: &[OutputField],
+    time: Option<Scalar>,
+) -> Result<()> {
+    let n_cells = n_cells_of(raw);
+    let n_points = raw.points.len();
+    for f in cell {
+        if f.len() != n_cells {
+            return Err(Error::Field {
+                field: f.name.to_string(),
+                msg: format!("has {} value(s), mesh has {} cell(s)", f.len(), n_cells),
+            });
+        }
+    }
+    for f in point {
+        if f.len() != n_points {
+            return Err(Error::Field {
+                field: f.name.to_string(),
+                msg: format!("has {} value(s), mesh has {} point(s)", f.len(), n_points),
+            });
+        }
+    }
+
+    let geo = build_geometry_from_raw(raw)?;
+
+    let mut app = AppendedWriter::default();
+    let off_points = app.push(Block::f64(
+        geo.points.iter().flat_map(|p| [p.x as f64, p.y as f64, p.z as f64]),
+    ));
+    let off_connectivity = app.push(Block::i64(geo.connectivity.iter().copied()));
+    let off_offsets = app.push(Block::i64(geo.offsets.iter().copied()));
+    let off_types = app.push(Block::u8(geo.types.iter().copied()));
+    let off_faces = app.push(Block::i64(geo.faces.iter().copied()));
+    let off_faceoffsets = app.push(Block::i64(geo.faceoffsets.iter().copied()));
+    let off_time = time.map(|t| app.push(Block::f64([t as f64])));
+
+    let cell_blocks: Vec<FieldBlock> =
+        cell.iter().map(|f| push_field_block(&mut app, f)).collect();
+    let point_blocks: Vec<FieldBlock> =
+        point.iter().map(|f| push_field_block(&mut app, f)).collect();
+
+    let mut xml = String::new();
+    xml.push_str("<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" byte_order=\"LittleEndian\" header_type=\"UInt64\">\n");
+    xml.push_str("  <UnstructuredGrid>\n");
+    xml.push_str(&format!(
+        "    <Piece NumberOfPoints=\"{n_points}\" NumberOfCells=\"{n_cells}\">\n"
+    ));
+
+    if let Some(off) = off_time {
+        xml.push_str("      <FieldData>\n");
+        xml.push_str(&format!(
+            "        <DataArray type=\"Float64\" Name=\"TIME\" NumberOfTuples=\"1\" format=\"appended\" offset=\"{off}\"/>\n"
+        ));
+        xml.push_str("      </FieldData>\n");
+    }
+
+    xml.push_str("      <Points>\n");
+    xml.push_str(&format!(
+        "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"appended\" offset=\"{off_points}\"/>\n"
+    ));
+    xml.push_str("      </Points>\n");
+
+    xml.push_str("      <Cells>\n");
+    xml.push_str(&format!(
+        "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"appended\" offset=\"{off_connectivity}\"/>\n"
+    ));
+    xml.push_str(&format!(
+        "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"appended\" offset=\"{off_offsets}\"/>\n"
+    ));
+    xml.push_str(&format!(
+        "        <DataArray type=\"UInt8\" Name=\"types\" format=\"appended\" offset=\"{off_types}\"/>\n"
+    ));
+    xml.push_str(&format!(
+        "        <DataArray type=\"Int64\" Name=\"faces\" format=\"appended\" offset=\"{off_faces}\"/>\n"
+    ));
+    xml.push_str(&format!(
+        "        <DataArray type=\"Int64\" Name=\"faceoffsets\" format=\"appended\" offset=\"{off_faceoffsets}\"/>\n"
+    ));
+    xml.push_str("      </Cells>\n");
+
+    write_data_section(&mut xml, "CellData", &cell_blocks);
+    write_data_section(&mut xml, "PointData", &point_blocks);
+
+    xml.push_str("    </Piece>\n");
+    xml.push_str("  </UnstructuredGrid>\n");
+    xml.push_str("  <AppendedData encoding=\"raw\">\n_");
+
+    let appended_bytes = app.into_bytes();
+
+    let mut out = std::fs::File::create(path).path(path)?;
+    out.write_all(xml.as_bytes()).path(path)?;
+    out.write_all(&appended_bytes).path(path)?;
+    out.write_all(b"\n  </AppendedData>\n</VTKFile>\n").path(path)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -520,6 +811,10 @@ mod tests {
     use super::*;
     use crate::mesh::topology::tests::box_mesh;
     use crate::mesh::HostMesh;
+    // `Tensor` is named only by the tests (the writer reaches the variant
+    // through `FieldValues`), so it is imported here and not above.
+    use crate::Tensor;
+    use crate::blockgen::{BlockSpec, GradedAxis};
 
     /// Minimal internal reader: pulls every `format="appended" offset="N"`
     /// DataArray out of the XML preamble (name -> byte offset) and hands back
@@ -724,5 +1019,320 @@ mod tests {
         let raw = block_at(&p, off);
         assert_eq!(raw.len(), m.n_cells * 3 * 8);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// FNV-1a 64 (Fowler-Noll-Vo), the byte-exactness guard for the
+    /// pre-existing CellData path of `write_vtu`.
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    const PINNED_FNV1A: u64 = 0xe6a717026b8aeb14;
+
+    /// The CellData path is byte-for-byte what it was before this unit: same
+    /// 2x1x1 mesh, same scalar+vector fields, same time, same bytes.
+    #[test]
+    fn the_cell_data_path_writes_the_same_bytes_as_before_s2() {
+        let m = mesh_2x1x1();
+        let p_vals: Vec<Scalar> = (0..m.n_cells).map(|i| 1.5 * (i as Scalar) + 0.25).collect();
+        let u_vals: Vec<Vec3> = (0..m.n_cells)
+            .map(|i| Vec3::new(i as Scalar, 2.0 * i as Scalar, -(i as Scalar)))
+            .collect();
+        let fields = vec![
+            OutputField::scalar("p", &p_vals),
+            OutputField::vector("U", &u_vals),
+        ];
+        let path = std::env::temp_dir().join("ofgpu_s2_celldata_pin.vtu");
+        write_vtu(&path, &m, &fields, Some(0.5)).expect("write_vtu");
+        let bytes = std::fs::read(&path).expect("read back");
+        let _ = std::fs::remove_file(&path);
+        let got = fnv1a64(&bytes);
+        assert_eq!(got, PINNED_FNV1A, "cell-data VTU bytes changed: fnv1a = {got:#018x}");
+    }
+
+    /// A tensor CellData field reads back bit-exact as 9 row-major
+    /// components, and the block names it in its `Tensors` attribute.
+    #[test]
+    fn tensor_cell_data_has_nine_components_row_major() {
+        let m = mesh_2x1x1();
+        let tensors: Vec<Tensor> = (0..m.n_cells)
+            .map(|i| Tensor {
+                xx: i as Scalar + 1.0, xy: i as Scalar + 2.0, xz: i as Scalar + 3.0,
+                yx: i as Scalar + 4.0, yy: i as Scalar + 5.0, yz: i as Scalar + 6.0,
+                zx: i as Scalar + 7.0, zy: i as Scalar + 8.0, zz: i as Scalar + 9.0,
+            })
+            .collect();
+        let p_vals = vec![0.5 as Scalar; m.n_cells];
+        let fields = vec![
+            OutputField::scalar("p", &p_vals),
+            OutputField::tensor("S", &tensors),
+        ];
+        let path = std::env::temp_dir().join("ofgpu_s2_tensor_celldata.vtu");
+        write_vtu(&path, &m, &fields, None).expect("write_vtu");
+        let bytes = std::fs::read(&path).expect("read back");
+        let p = parse(&bytes);
+
+        assert!(
+            find_bytes(&bytes, b"Tensors=\"S\"").is_some(),
+            "CellData must carry Tensors=\"S\""
+        );
+
+        let raw = block_at(&p, p.offsets["S"]);
+        assert_eq!(raw.len(), m.n_cells * 9 * 8);
+        let read: Vec<f64> = raw
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        for (ci, t) in tensors.iter().enumerate() {
+            let want = [t.xx, t.xy, t.xz, t.yx, t.yy, t.yz, t.zx, t.zy, t.zz];
+            for (k, w) in want.iter().enumerate() {
+                assert_eq!(read[ci * 9 + k], *w as f64, "cell {ci} component {k} row-major");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A 3x2x2 uniform block as a raw polyMesh: 36 points, 12 cells, 20
+    /// internal faces, 32 boundary faces.
+    fn raw_3x2x2() -> PolyMeshRaw {
+        let axis = |n: usize| GradedAxis {
+            lo: 0.0,
+            hi: 1.0,
+            n,
+            expansion: 1.0,
+            two_sided: false,
+        };
+        let spec = BlockSpec {
+            x: axis(3),
+            y: axis(2),
+            z: axis(2),
+            patch_type: ["patch", "patch", "patch", "patch", "patch", "patch"].map(String::from),
+            ..Default::default()
+        };
+        crate::blockgen::raw_mesh(&spec).expect("raw 3x2x2")
+    }
+
+    /// The point writer shares the polyMesh's own points, emits one real
+    /// `VTK_POLYHEDRON` per cell (8 distinct ids, 6 face records on a hex),
+    /// and winds every face outward: the Newell normal of each face record,
+    /// from the file's own points, points the same way as (face centroid -
+    /// cell vertex mean).
+    #[test]
+    fn write_vtu_points_shares_points_and_winds_faces_outward() {
+        let raw = raw_3x2x2();
+        let n_cells = super::n_cells_of(&raw);
+        let cells: Vec<Scalar> = (0..n_cells).map(|i| i as Scalar).collect();
+        let tensors: Vec<Tensor> = (0..n_cells)
+            .map(|_| Tensor {
+                xx: 2.0, xy: 0.5, xz: 0.0,
+                yx: 0.5, yy: 2.0, yz: 0.25,
+                zx: 0.0, zy: 0.25, zz: 2.0,
+            })
+            .collect();
+        let n_pts = raw.points.len();
+        let u: Vec<Vec3> =
+            (0..n_pts).map(|i| Vec3::new(i as Scalar, -(i as Scalar), 1.0)).collect();
+        let tp: Vec<Scalar> = (0..n_pts).map(|i| 0.5 * (i as Scalar)).collect();
+        let cell_fields =
+            vec![OutputField::scalar("T", &cells), OutputField::tensor("S", &tensors)];
+        let point_fields = vec![OutputField::vector("u", &u), OutputField::scalar("Tp", &tp)];
+
+        let path = std::env::temp_dir().join("ofgpu_s2_points_geom.vtu");
+        write_vtu_points(&path, &raw, &cell_fields, &point_fields, None).expect("write_vtu_points");
+        let bytes = std::fs::read(&path).expect("read back");
+        let _ = std::fs::remove_file(&path);
+        let p = parse(&bytes);
+
+        assert_eq!(p.n_points, n_pts, "points are shared");
+        assert_eq!(p.n_points, 36);
+        assert_eq!(p.n_cells, 12);
+
+        // The file's points are the polyMesh's own, bit-exact.
+        let pts_raw = block_at(&p, p.offsets["unnamed"]);
+        assert_eq!(pts_raw.len(), p.n_points * 3 * 8);
+        let flat: Vec<f64> = pts_raw
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let pts: Vec<Vec3> = flat.chunks_exact(3).map(|t| Vec3::new(t[0], t[1], t[2])).collect();
+        for (i, q) in raw.points.iter().enumerate() {
+            assert_eq!(pts[i].x, q.x as f64, "point {i} is the polyMesh's own");
+            assert_eq!(pts[i].y, q.y as f64);
+            assert_eq!(pts[i].z, q.z as f64);
+        }
+        assert_winding_and_offsets(&p, &pts);
+    }
+
+    /// Walks every cell's `faces` records: 6 faces and 8 distinct ascending
+    /// ids on every hex, `faceoffsets` exact, and every face's Newell normal
+    /// - from the file's own points, in record order - has positive dot with
+    /// (face centroid - cell vertex mean), i.e. the winding is outward.
+    fn assert_winding_and_offsets(p: &Parsed, pts: &[Vec3]) {
+        let connectivity = read_i64_block(p, "connectivity");
+        let offsets = read_i64_block(p, "offsets");
+        let faces = read_i64_block(p, "faces");
+        let faceoffsets = read_i64_block(p, "faceoffsets");
+        assert_eq!(*offsets.last().unwrap(), connectivity.len() as i64);
+
+        let mut cursor = 0usize;
+        for c in 0..p.n_cells {
+            let lo = if c == 0 { 0 } else { offsets[c - 1] as usize };
+            let hi = offsets[c] as usize;
+            let ids = &connectivity[lo..hi];
+            let mut distinct = ids.to_vec();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), 8, "cell {c} has 8 distinct corner ids");
+            assert_eq!(ids, &distinct[..], "cell {c} ids ascend");
+
+            let mut vm = Vec3::ZERO;
+            for &id in ids {
+                vm = vm + pts[id as usize];
+            }
+            vm = vm * (1.0 / 8.0);
+            assert_newell_outward(pts, &faces, &faceoffsets, c, &mut cursor, vm);
+        }
+        assert_eq!(cursor, faces.len(), "faces section walked to its end");
+    }
+
+    /// One cell's face records, starting at `faces[*cursor]` = the cell's
+    /// face count: every record's Newell normal - computed from the file's
+    /// own points, in the record's own order - has positive dot with (face
+    /// centroid - cell vertex mean) `vm`, i.e. the winding is outward.
+    /// Leaves `*cursor` at the next cell's record.
+    fn assert_newell_outward(
+        pts: &[Vec3],
+        faces: &[i64],
+        faceoffsets: &[i64],
+        c: usize,
+        cursor: &mut usize,
+        vm: Vec3,
+    ) {
+        let n_faces = faces[*cursor] as usize;
+        assert_eq!(n_faces, 6, "cell {c} has 6 face records");
+        let mut walk = *cursor + 1;
+        for k in 0..n_faces {
+            let n_pts = faces[walk] as usize;
+            let mut nrm = Vec3::ZERO;
+            let mut cen = Vec3::ZERO;
+            for i in 0..n_pts {
+                let a = pts[faces[walk + 1 + i] as usize];
+                let b = pts[faces[walk + 1 + (i + 1) % n_pts] as usize];
+                nrm = nrm
+                    + Vec3::new(
+                        (a.y - b.y) * (a.z + b.z),
+                        (a.z - b.z) * (a.x + b.x),
+                        (a.x - b.x) * (a.y + b.y),
+                    );
+                cen = cen + a;
+            }
+            cen = cen * (1.0 / n_pts as Scalar);
+            assert!(nrm.dot(cen - vm) > 0.0, "cell {c} face {k} is not wound outward");
+            walk += 1 + n_pts;
+        }
+        assert_eq!(walk as i64, faceoffsets[c], "faceoffsets exact for cell {c}");
+        *cursor = walk;
+    }
+
+    /// A cell field short of `n_cells` and a point field short of `n_points`
+    /// are both refused, naming the offending field.
+    #[test]
+    fn write_vtu_points_refuses_wrong_lengths_by_name() {
+        let raw = raw_3x2x2();
+        let n_cells = super::n_cells_of(&raw);
+        let short_cell = vec![0.0 as Scalar; n_cells - 1];
+        let short_point = vec![0.0 as Scalar; raw.points.len() - 1];
+        let path = std::env::temp_dir().join("ofgpu_s2_points_bad.vtu");
+
+        let err = write_vtu_points(
+            &path,
+            &raw,
+            &[OutputField::scalar("badcell", &short_cell)],
+            &[],
+            None,
+        )
+        .unwrap_err();
+        match err {
+            Error::Field { field, .. } => assert_eq!(field, "badcell"),
+            other => panic!("expected Error::Field, got {other:?}"),
+        }
+
+        let err = write_vtu_points(
+            &path,
+            &raw,
+            &[],
+            &[OutputField::scalar("badpoint", &short_point)],
+            None,
+        )
+        .unwrap_err();
+        match err {
+            Error::Field { field, .. } => assert_eq!(field, "badpoint"),
+            other => panic!("expected Error::Field, got {other:?}"),
+        }
+    }
+
+    /// The point VTU is read back by `../tools/vtu_read.py` - through `vtk`
+    /// when it is installed, through the script's own appended-data parser
+    /// otherwise, and the two must agree when both are available. Vacuously
+    /// green only where `python` cannot even be spawned; any other failure
+    /// is this test's failure. The artefact is left in `temp_dir()` on
+    /// purpose: the Verify section re-runs the reader on it by hand.
+    #[test]
+    fn the_point_vtu_is_read_back_by_the_python_reader() {
+        let raw = raw_3x2x2();
+        let n_cells = super::n_cells_of(&raw);
+        let cells: Vec<Scalar> = (0..n_cells).map(|i| i as Scalar).collect();
+        let tensors: Vec<Tensor> = (0..n_cells)
+            .map(|_| Tensor {
+                xx: 2.0, xy: 0.5, xz: 0.0,
+                yx: 0.5, yy: 2.0, yz: 0.25,
+                zx: 0.0, zy: 0.25, zz: 2.0,
+            })
+            .collect();
+        let n_pts = raw.points.len();
+        let u: Vec<Vec3> =
+            (0..n_pts).map(|i| Vec3::new(i as Scalar, -(i as Scalar), 1.0)).collect();
+        let tp: Vec<Scalar> = (0..n_pts).map(|i| 0.5 * (i as Scalar)).collect();
+
+        let path = std::env::temp_dir().join("ofgpu_s2_points.vtu");
+        write_vtu_points(
+            &path,
+            &raw,
+            &[OutputField::scalar("T", &cells), OutputField::tensor("S", &tensors)],
+            &[OutputField::vector("u", &u), OutputField::scalar("Tp", &tp)],
+            None,
+        )
+        .expect("write_vtu_points");
+
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/vtu_read.py");
+        let out = std::process::Command::new("python")
+            .arg(&script)
+            .arg(&path)
+            .arg("--points").arg("36")
+            .arg("--cells").arg("12")
+            .arg("--cell").arg("S:9")
+            .arg("--cell").arg("T:1")
+            .arg("--point").arg("u:3")
+            .arg("--point").arg("Tp:1")
+            .arg("--symmetric").arg("S")
+            .output();
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("python not spawnable ({e}); the python-reader check passes vacuously");
+                return;
+            }
+        };
+        assert!(
+            out.status.success(),
+            "tools/vtu_read.py rejected the point VTU: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

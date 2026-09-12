@@ -12,8 +12,10 @@
 
 use super::*;
 
+use crate::blockgen::{self, BlockSpec, GradedAxis};
 use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner};
+use crate::io::polymesh::build_host_mesh;
 use crate::mesh::topology::tests::box_mesh;
 
 fn gpu() -> Option<Gpu> {
@@ -2088,4 +2090,121 @@ fn the_full_range_norm_is_bitwise_the_global_one_on_a_conjugate_matrix() {
         apsi.iter().zip(&apsir).all(|(x, y)| x.to_bits() == y.to_bits()),
         "apsi differs on a coupled matrix"
     );
+}
+
+// ==========================================================================
+// The raw geometry attached to the concatenated mesh
+// ==========================================================================
+
+/// SPEC-LIT §47.4's concatenation, over points: `attach_points` places each
+/// region's points after the regions before it, refuses a raw whose counts
+/// disagree with the region's own mesh, and the `PolyMeshRaw` `to_raw()`
+/// yields rebuilds the concatenated geometry `build` computed - which then
+/// writes as ONE point VTU carrying both regions' own polygons. Host-only;
+/// no GPU.
+#[test]
+fn the_attached_points_rebuild_the_concatenated_geometry_and_write_one_vtu() {
+    use crate::io::vtu::write_vtu_points;
+
+    let axis = |lo: Scalar, hi: Scalar, n: usize| GradedAxis {
+        lo,
+        hi,
+        n,
+        expansion: 1.0,
+        two_sided: false,
+    };
+    let spec = |x: GradedAxis| BlockSpec {
+        x,
+        y: axis(0.0, 1.0, 2),
+        z: axis(0.0, 1.0, 2),
+        patch_type: ["patch", "patch", "patch", "patch", "patch", "patch"].map(String::from),
+        ..Default::default()
+    };
+    let raw_a = blockgen::raw_mesh(&spec(axis(0.0, 1.0, 2))).expect("raw A");
+    let raw_b = blockgen::raw_mesh(&spec(axis(1.0, 2.0, 3))).expect("raw B");
+    let mesh_a = build_host_mesh(&raw_a).expect("mesh A");
+    let mesh_b = build_host_mesh(&raw_b).expect("mesh B");
+    assert_eq!(raw_a.points.len(), 27);
+    assert_eq!(raw_b.points.len(), 36);
+
+    let regions = [
+        RegionInput { name: "left".into(), kind: RegionKind::Solid, mesh: &mesh_a },
+        RegionInput { name: "right".into(), kind: RegionKind::Solid, mesh: &mesh_b },
+    ];
+    // A's xMax faces and B's xMin faces are the same 2x2 grid at x = 1, so
+    // the centroid pairing succeeds.
+    let interfaces = [InterfaceRequest::new(0, "xMax", 1, "xMin", 0.0)];
+    let mut tm =
+        ThermalMesh::build(&regions, &interfaces, PairingTolerances::default())
+            .expect("thermal mesh");
+
+    assert_eq!(tm.regions[0].n_points, 27);
+    assert_eq!(tm.regions[1].n_points, 36);
+    assert_eq!(tm.host.n_points, 63);
+
+    tm.attach_points(&[&raw_a, &raw_b]).expect("attach_points");
+    assert_eq!(tm.points.len(), 63);
+    assert_eq!(
+        tm.faces.len(),
+        tm.host.n_internal_faces + tm.host.n_boundary_faces,
+        "one polygon per concatenated face"
+    );
+
+    // `to_raw()` rebuilds the concatenated geometry `build` computed.
+    let m2 = build_host_mesh(&tm.to_raw().expect("to_raw")).expect("build_host_mesh");
+    let mut acc: (Scalar, Scalar) = (0.0, 0.0);
+    fn scan3(a: &[Vec3], b: &[Vec3], acc: &mut (Scalar, Scalar)) {
+        for (x, y) in a.iter().zip(b.iter()) {
+            for (u, v) in [(x.x, y.x), (x.y, y.y), (x.z, y.z)] {
+                acc.0 = acc.0.max((u - v).abs());
+                acc.1 = acc.1.max(u.abs());
+            }
+        }
+    }
+    fn scan1(a: &[Scalar], b: &[Scalar], acc: &mut (Scalar, Scalar)) {
+        for (u, v) in a.iter().zip(b.iter()) {
+            acc.0 = acc.0.max((u - v).abs());
+            acc.1 = acc.1.max(u.abs());
+        }
+    }
+    scan1(&tm.host.v, &m2.v, &mut acc);
+    scan3(&tm.host.c, &m2.c, &mut acc);
+    scan3(&tm.host.sf, &m2.sf, &mut acc);
+    scan3(&tm.host.cf, &m2.cf, &mut acc);
+    scan3(&tm.host.b_sf, &m2.b_sf, &mut acc);
+    scan3(&tm.host.b_cf, &m2.b_cf, &mut acc);
+    let (max_diff, max_mag) = acc;
+    println!(
+        "rebuilt concatenated geometry: max |difference| = {max_diff:e} against max |value| = {max_mag:e}"
+    );
+    assert!(max_diff <= 1e-12 * max_mag, "rebuilt geometry differs");
+
+    // The concatenated mesh writes as one point VTU sharing all 63 points.
+    let path = std::env::temp_dir().join("ofgpu_s2_concat.vtu");
+    write_vtu_points(&path, &tm.to_raw().unwrap(), &[], &[], None).expect("write_vtu_points");
+    let bytes = std::fs::read(&path).expect("read back");
+    let _ = std::fs::remove_file(&path);
+    let marker = b"encoding=\"raw\">\n_";
+    let start = bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("appended marker");
+    let head = std::str::from_utf8(&bytes[..start]).expect("ascii preamble");
+    let i = head.find("NumberOfPoints=\"").expect("NumberOfPoints") + 16;
+    let rest = &head[i..];
+    let n: usize = rest[..rest.find('"').unwrap()].parse().unwrap();
+    assert_eq!(n, 63, "one shared point set over both regions");
+
+    // A fresh build refuses the swapped raws, naming the region and both
+    // counts, and refuses to_raw at all until points are attached.
+    let mut tm2 = ThermalMesh::build(&regions, &interfaces, PairingTolerances::default())
+        .expect("thermal mesh 2");
+    let err = tm2.attach_points(&[&raw_b, &raw_a]).unwrap_err().to_string();
+    println!("swapped attach refusal: {err}");
+    assert!(err.contains("left"), "{err}");
+    assert!(err.contains("27"), "{err}");
+    assert!(err.contains("36"), "{err}");
+    assert!(tm2.points.is_empty() && tm2.faces.is_empty(), "refusal writes nothing");
+    let err = tm2.to_raw().unwrap_err().to_string();
+    assert!(err.contains("attach_points"), "{err}");
 }

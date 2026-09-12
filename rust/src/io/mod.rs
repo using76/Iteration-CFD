@@ -64,6 +64,7 @@ pub mod case_json;
 pub mod case_cht;
 pub mod case_dc;
 pub mod output_types;
+pub mod pointfield;
 pub mod writer;
 pub mod output_plan;
 

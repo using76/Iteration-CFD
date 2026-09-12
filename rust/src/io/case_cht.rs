@@ -76,6 +76,7 @@ use crate::error::{Error, Result};
 use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner, SolverControls};
 use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis};
+use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
 use crate::mesh::HostMesh;
 use crate::{Label, Scalar};
 
@@ -491,6 +492,11 @@ pub struct LoweredChtCase {
     pub region_names: Vec<String>,
     pub kinds: Vec<RegionKind>,
     pub meshes: Vec<HostMesh>,
+    /// One raw polyMesh per region, in region order - bitwise what
+    /// `blockgen::raw_mesh` built the matching `meshes[r]` from. `HostMesh`
+    /// keeps no point set and no face polygons (SPEC-LIT §49.3), so the raw
+    /// geometry travels with the lowered case instead.
+    pub raw: Vec<PolyMeshRaw>,
     /// `[n_regions]` the conduction entry for every region. A **fluid**
     /// region's entry is a placeholder built from its own `rho`/`cp`/`kappa`
     /// - SPEC-LIT (S59.3) masks every coefficient it produces on a fluid face
@@ -602,6 +608,7 @@ impl ChtCase {
         let mut region_names = Vec::new();
         let mut kinds = Vec::new();
         let mut meshes = Vec::new();
+        let mut raws = Vec::new();
         let mut materials = Vec::new();
         let mut fluids: Vec<Option<FluidMaterial>> = Vec::new();
         let mut sources = Vec::new();
@@ -710,7 +717,7 @@ impl ChtCase {
                     }
                 }
             }
-            let mesh = build_region_mesh(r, &empties, &flow_patches)?;
+            let (mesh, rmesh) = build_region_mesh(r, &empties, &flow_patches)?;
 
             let (mat, fluid) = match (kind, &r.material, &r.fluid) {
                 (RegionKind::Solid, Some(m), None) => {
@@ -793,6 +800,7 @@ impl ChtCase {
             region_names.push(r.name.clone());
             kinds.push(kind);
             meshes.push(mesh);
+            raws.push(rmesh);
             materials.push(mat);
             fluids.push(fluid);
             sources.push(r.source.unwrap_or(0.0) as Scalar);
@@ -1222,6 +1230,7 @@ impl ChtCase {
             region_names,
             kinds,
             meshes,
+            raw: raws,
             materials,
             fluids,
             buoyancy,
@@ -1306,7 +1315,7 @@ fn lower_precon(name: &str) -> Result<Preconditioner> {
 /// region's become `wall`, because they are no-slip walls in the momentum
 /// sense (SPEC-LIT §60.2) and `momFluxIsPrescribed` asks the mesh, not the
 /// case.
-fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Result<HostMesh> {
+fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Result<(HostMesh, PolyMeshRaw)> {
     let b = &r.mesh.bounds;
     let axis = |i: usize| -> Result<GradedAxis> {
         let (lo, hi) = (b.min[i] as Scalar, b.max[i] as Scalar);
@@ -1388,7 +1397,13 @@ fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Resu
         windows: Vec::new(),
         cyclic: Vec::new(),
     };
-    blockgen::build_mesh(&spec)
+    // `build_mesh` is `build_host_mesh(&raw_mesh(b)?)` by definition
+    // (blockgen keeps the two in step under that exact identity); handing
+    // the raw mesh back alongside costs nothing and is what the per-region
+    // VTU writer and `attach_points` consume.
+    let raw = blockgen::raw_mesh(&spec)?;
+    let mesh = build_host_mesh(&raw)?;
+    Ok((mesh, raw))
 }
 
 fn apply_grading(

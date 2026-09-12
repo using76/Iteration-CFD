@@ -43,7 +43,7 @@
 //!     splitting and its `!$OMP CRITICAL` write-back are deliberately not
 //!     taken.
 //!   ofgpu `SPEC-LIT.md` §2.4, §3.2, §3.4, §4, §13.3, §13.4, §15.5, §26,
-//!     §29.3, §31, §32.2, §46, §47
+//!     §29.3, §31, §32.2, §46, §47, §49.3
 //!
 //! OpenFOAM, SU2, preCICE, Code_Saturne, deal.II and MOOSE are GPL or LGPL
 //! and were not opened. No permissively-licensed unstructured finite-volume
@@ -84,6 +84,7 @@ use crate::field::{BcKind, GpuScalarField};
 use crate::field_ops::{self, FieldKernels};
 use crate::fv::{self, FvKernels, SnGradScheme};
 use crate::io::case::SolverControls;
+use crate::io::polymesh::PolyMeshRaw;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
@@ -420,6 +421,11 @@ pub struct ThermalRegion {
     pub kind: RegionKind,
     pub cell_offset: usize,
     pub n_cells: usize,
+    /// The region's own point count. `attach_points` refuses a raw whose
+    /// points disagree with it, and it is what places region `r`'s points at
+    /// the sum of the `n_points` of the regions before it - §47.4's
+    /// concatenation, over points.
+    pub n_points: usize,
     pub internal_face_offset: usize,
     pub n_internal_faces: usize,
     pub boundary_face_offset: usize,
@@ -542,6 +548,15 @@ pub struct ThermalMesh {
     /// sum over all of them.
     pub interface_ranges: Vec<(String, std::ops::Range<usize>)>,
     pub report: InterfaceReport,
+    /// The concatenated point set, region by region - empty until
+    /// [`Self::attach_points`] fills it. `HostMesh` keeps no points
+    /// (SPEC-LIT §49.3), so the raw geometry is attached by the caller
+    /// instead of being grown onto the mesh.
+    pub points: Vec<Vec3>,
+    /// The concatenated face polygons, in §47.4's layout - every region's
+    /// internal faces first, then every region's boundary faces - empty
+    /// until [`Self::attach_points`] fills it.
+    pub faces: Vec<Vec<Label>>,
 }
 
 impl ThermalMesh {
@@ -599,6 +614,7 @@ impl ThermalMesh {
                 kind: r.kind,
                 cell_offset: host.n_cells,
                 n_cells: m.n_cells,
+                n_points: m.n_points,
                 internal_face_offset: host.n_internal_faces,
                 n_internal_faces: m.n_internal_faces,
                 boundary_face_offset: host.n_boundary_faces,
@@ -697,6 +713,8 @@ impl ThermalMesh {
             pairs: Vec::new(),
             interface_ranges: Vec::new(),
             report: InterfaceReport::default(),
+            points: Vec::new(),
+            faces: Vec::new(),
         };
 
         for req in interfaces {
@@ -705,6 +723,95 @@ impl ThermalMesh {
 
         m.host.build_cell_face_maps();
         Ok(m)
+    }
+
+    /// Attach the raw geometry every region was built from: §47.4's
+    /// concatenation, over points and face polygons. Points are NOT merged
+    /// across an interface - each region keeps its own copy - so region
+    /// `r`'s point p lands at `P_r + p` with `P_r` the sum of the `n_points`
+    /// of the regions before it, exactly the way `build` offsets cells and
+    /// faces. The raw meshes stay the caller's (SPEC-LIT §49.3).
+    ///
+    /// Every region is checked BEFORE anything is written, so a refusal
+    /// leaves `points`/`faces` empty.
+    pub fn attach_points(&mut self, raws: &[&PolyMeshRaw]) -> Result<()> {
+        if raws.len() != self.regions.len() {
+            return Err(Error::Mesh(format!(
+                "ThermalMesh::attach_points: {} raw meshes for {} regions",
+                raws.len(),
+                self.regions.len()
+            )));
+        }
+        for (i, (r, raw)) in self.regions.iter().zip(raws).enumerate() {
+            let checks = [
+                (r.n_points, "points", raw.points.len()),
+                (r.n_internal_faces + r.n_boundary_faces, "faces", raw.faces.len()),
+                (r.n_internal_faces, "neighbours", raw.neighbour.len()),
+                (r.n_internal_faces + r.n_boundary_faces, "owners", raw.owner.len()),
+            ];
+            for (want, what, got) in checks {
+                if got != want {
+                    return Err(Error::Mesh(format!(
+                        "ThermalMesh::attach_points: region {i} ('{}') has {want} \
+                         {what} but the raw mesh has {got}",
+                        r.name
+                    )));
+                }
+            }
+        }
+
+        let mut points = Vec::new();
+        // §47.4's layout, over face polygons: every region's INTERNAL faces
+        // first (in region order), then every region's boundary faces - so
+        // region r's internal face f lands at `internal_face_offset_r + f`
+        // and its boundary face bf at `n_if_total + boundary_face_offset_r +
+        // bf`, aligned with `host.owner`/`host.b_face_cells`.
+        let n_if_total: usize = self.regions.iter().map(|r| r.n_internal_faces).sum();
+        let mut faces =
+            vec![Vec::new(); n_if_total + self.host.n_boundary_faces];
+        for (r, raw) in self.regions.iter().zip(raws) {
+            let p_off = points.len() as Label;
+            points.extend_from_slice(&raw.points);
+            for (f, list) in raw.faces.iter().enumerate() {
+                let global = if f < r.n_internal_faces {
+                    r.internal_face_offset + f
+                } else {
+                    n_if_total + r.boundary_face_offset + (f - r.n_internal_faces)
+                };
+                faces[global] = list.iter().map(|&p| p + p_off).collect();
+            }
+        }
+        self.points = points;
+        self.faces = faces;
+        Ok(())
+    }
+
+    /// The concatenated mesh as a `PolyMeshRaw`, ready for
+    /// `io::vtu::write_vtu_points`: faces internal first (every region's own
+    /// raw is internal first and the regions are in order), owners from
+    /// `host.owner` then `host.b_face_cells`, patches verbatim - `couple`
+    /// has already renamed them `<region>:<patch>` and re-kinded the
+    /// interface ones, and `build_host_mesh` copies patches through without
+    /// re-pairing anything but `Cyclic`.
+    pub fn to_raw(&self) -> Result<PolyMeshRaw> {
+        if self.points.is_empty() {
+            return Err(Error::Mesh(
+                "ThermalMesh::to_raw: no points were attached - call attach_points \
+                 with every region's raw mesh first (SPEC-LIT §49.3)"
+                    .to_string(),
+            ));
+        }
+        let mut owner =
+            Vec::with_capacity(self.host.n_internal_faces + self.host.n_boundary_faces);
+        owner.extend_from_slice(&self.host.owner);
+        owner.extend_from_slice(&self.host.b_face_cells);
+        Ok(PolyMeshRaw {
+            points: self.points.clone(),
+            faces: self.faces.clone(),
+            owner,
+            neighbour: self.host.neighbour.clone(),
+            patches: self.host.patches.clone(),
+        })
     }
 
     fn patch_index(&self, region: usize, name: &str) -> Result<usize> {
@@ -1991,7 +2098,12 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
         })
         .collect();
 
-    let tm = ThermalMesh::build(&regions, &case.interfaces, case.tolerances)?;
+    let mut tm = ThermalMesh::build(&regions, &case.interfaces, case.tolerances)?;
+    // The raw geometry travels with the lowered case; attaching it gives
+    // `ChtSolution.mesh.points` the real point set, which the per-region
+    // point VTU writes from.
+    let raws: Vec<&PolyMeshRaw> = case.raw.iter().collect();
+    tm.attach_points(&raws)?;
     let cond = Conduction::uniform_per_region(&tm, &case.materials)?;
     let gm = GpuMesh::upload(gpu, &tm.host)?;
 

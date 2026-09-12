@@ -18,7 +18,7 @@
 //! `PROVENANCE.md`, *New I/O formats and machinery*. No GPL-licensed source was
 //! consulted.
 
-use crate::{Scalar, Vec3};
+use crate::{Scalar, Tensor, Vec3};
 
 /// Borrowed cell-centred data for one field.
 ///
@@ -30,6 +30,8 @@ use crate::{Scalar, Vec3};
 pub enum FieldValues<'a> {
     Scalar(&'a [Scalar]),
     Vector(&'a [Vec3]),
+    /// One 3x3 tensor per cell, row-major `xx xy xz / yx yy yz / zx zy zz`.
+    Tensor(&'a [Tensor]),
 }
 
 /// One named output field.
@@ -46,8 +48,15 @@ impl<'a> OutputField<'a> {
     pub fn vector(name: &'a str, v: &'a [Vec3]) -> Self {
         Self { name, values: FieldValues::Vector(v) }
     }
+    pub fn tensor(name: &'a str, v: &'a [Tensor]) -> Self {
+        Self { name, values: FieldValues::Tensor(v) }
+    }
     pub fn len(&self) -> usize {
-        match self.values { FieldValues::Scalar(s) => s.len(), FieldValues::Vector(v) => v.len() }
+        match self.values {
+            FieldValues::Scalar(s) => s.len(),
+            FieldValues::Vector(v) => v.len(),
+            FieldValues::Tensor(t) => t.len(),
+        }
     }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 }
