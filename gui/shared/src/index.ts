@@ -1,6 +1,7 @@
 export * from './protocol'
 export * from './viewerCommands'
 export * from './viewerDataset'
+export * from './geometry'
 export * from './residuals'
 export * from './registry'
 export * from './tools'

@@ -168,6 +168,31 @@ describe('api routes', () => {
     expect((await get('/api/case/patches')).status).toBe(400)
     expect((await get('/api/case/patches?path=..')).status).toBe(403)
   })
+
+  it('geometry_routes', async () => {
+    fs.mkdirSync(path.join(ws.root, 'cases'), { recursive: true })
+    fs.writeFileSync(path.join(ws.root, 'cases', 'tet.stl'), 'solid tet\nfacet normal 0 0 0\nouter loop\nvertex 0 0 0\nvertex 0 1 0\nvertex 1 0 0\nendloop\nendfacet\nfacet normal 0 0 0\nouter loop\nvertex 0 0 0\nvertex 0 0 1\nvertex 0 1 0\nendloop\nendfacet\nfacet normal 0 0 0\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 0 1\nendloop\nendfacet\nfacet normal 0 0 0\nouter loop\nvertex 1 0 0\nvertex 0 1 0\nvertex 0 0 1\nendloop\nendfacet\nendsolid tet\n')
+    const opened = (await (await postJson(`${base}/api/geometry/open`, { path: 'cases/tet.stl' })).json()) as Loose
+    expect(opened.info.triangleCount).toBe(4)
+    const id = opened.id as string
+    expect(((await json(`/api/geometry/${id}`)) as Loose).id).toBe(id)
+    const blob = await get(`/api/geometry/${id}/blob/positions`)
+    expect(blob.status).toBe(200)
+    expect(blob.headers.get('content-type')).toBe('application/octet-stream')
+    expect(blob.headers.get('content-length')).toBe('48')
+    expect((await get(`/api/geometry/${id}/blob/colours`)).status).toBe(400)
+    expect((await get('/api/geometry/nope')).status).toBe(404)
+    expect((await postJson(`${base}/api/geometry/open`, { path: '../x.stl' })).status).toBe(403)
+    expect((await postJson(`${base}/api/geometry/open`, { path: 'README.md' })).status).toBe(400)
+    expect((await postJson(`${base}/api/geometry/${id}/save`, { path: 'cases/tet2.stl' })).status).toBe(200)
+    expect((await postJson(`${base}/api/geometry/${id}/save`, { path: 'cases/tet2.stl' })).status).toBe(409)
+    const over = { path: 'cases/tet2.stl', overwrite: true, transform: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }
+    expect((await postJson(`${base}/api/geometry/${id}/save`, over)).status).toBe(200)
+    expect(broadcasts.at(-1)).toEqual({ t: 'fs.changed', paths: ['cases/tet2.stl'] })
+    expect((((await (await fetch(`${base}/api/geometry/${id}`, { method: 'DELETE' })).json()) as Loose)).evicted).toBe(id)
+    expect((await get(`/api/geometry/${id}/blob/positions`)).status).toBe(404)
+    expect(((await json('/api/registry')) as Loose).pipelines.map((p: { name: string }) => p.name)).toContain('mesh-step')
+  })
 })
 
 describe('auth token', () => {

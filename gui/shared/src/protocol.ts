@@ -733,6 +733,7 @@ export const REST = {
   runs: '/api/runs',
   sessions: '/api/sessions',
   datasets: '/api/datasets',
+  geometry: '/api/geometry',
   results: '/api/results',
   ws: '/ws',
 } as const

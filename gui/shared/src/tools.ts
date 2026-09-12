@@ -17,6 +17,9 @@ export const TOOL_NAMES = [
   'results_discover',
   'field_stats',
   'line_sample',
+  'geometry_open',
+  'geometry_info',
+  'geometry_save',
   'residuals_get',
   'viewer_command',
   'plot_residuals',
@@ -59,6 +62,9 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   results_discover: { name: 'results_discover', kind: 'read', policy: 'auto', label: { ko: '결과 탐색', en: 'Discover results' } },
   field_stats: { name: 'field_stats', kind: 'read', policy: 'auto', label: { ko: '필드 통계', en: 'Field statistics' } },
   line_sample: { name: 'line_sample', kind: 'read', policy: 'auto', label: { ko: '선 샘플링', en: 'Sample along a line' } },
+  geometry_open: { name: 'geometry_open', kind: 'read', policy: 'auto', label: { ko: '지오메트리 열기', en: 'Open geometry' } },
+  geometry_info: { name: 'geometry_info', kind: 'read', policy: 'auto', label: { ko: '지오메트리 정보', en: 'Geometry info' } },
+  geometry_save: { name: 'geometry_save', kind: 'mutate', policy: 'ask', label: { ko: '지오메트리 저장', en: 'Save geometry' } },
   residuals_get: { name: 'residuals_get', kind: 'read', policy: 'auto', label: { ko: '잔차 조회', en: 'Get residuals' } },
   viewer_command: { name: 'viewer_command', kind: 'ui', policy: 'auto', label: { ko: '3D 뷰어', en: '3D viewer' } },
   plot_residuals: { name: 'plot_residuals', kind: 'ui', policy: 'auto', label: { ko: '잔차 플롯', en: 'Plot residuals' } },
@@ -127,6 +133,24 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
     case 'line_sample': {
       const pts = (r.values as unknown[] | undefined)?.length ?? 0
       return ko ? `${String(i.field ?? '')} 선 샘플링 (${fmtInt(pts)}개 지점)` : `Sampled ${String(i.field ?? '')} along ${fmtInt(pts)} points`
+    }
+    case 'geometry_open': {
+      const base = String(r.path ?? i.path ?? '').split(/[\\/]/).pop() ?? ''
+      const n = fmtInt(Number(r.triangleCount ?? 0))
+      if (r.closed) return ko ? `${base} 열기: 삼각형 ${n}개, 닫힌 면` : `Opened ${base}: ${n} triangles, closed`
+      const k = fmtInt(Number(r.openEdges ?? 0))
+      return ko ? `${base} 열기: 삼각형 ${n}개, 열린 모서리 ${k}개` : `Opened ${base}: ${n} triangles, ${k} open edges`
+    }
+    case 'geometry_info': {
+      const base = String(r.path ?? i.path ?? '').split(/[\\/]/).pop() || String(i.id ?? '')
+      const n = fmtInt(Number(r.triangleCount ?? 0))
+      const s = fmtInt((r.solids as unknown[] | undefined)?.length ?? 0)
+      return ko ? `지오메트리 조회 (${base}: 삼각형 ${n}개, 솔리드 ${s}개)` : `Geometry info (${base}: ${n} triangles, ${s} solids)`
+    }
+    case 'geometry_save': {
+      const base = String(r.path ?? i.path ?? '').split(/[\\/]/).pop() ?? ''
+      const n = fmtInt(Number(r.triangleCount ?? 0))
+      return ko ? `지오메트리 저장 (${base}, 삼각형 ${n}개)` : `Saved geometry ${base} (${n} triangles)`
     }
     case 'residuals_get':
       return ko ? '잔차 시계열 조회' : 'Fetched residual series'
