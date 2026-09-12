@@ -333,6 +333,60 @@ are checked; a `--keep` run leaves `out_regions/selftest.msh` for M4. When
 converted to a case's `polyMesh` and to a Fluent mesh. Seconds, no STEP input
 needed.
 
+## Regions: one polyMesh per volume
+
+M3's `.msh` becomes a region layout — one complete, standalone polyMesh per
+named volume, every shared face a boundary face of BOTH regions in a patch
+pair whose k-th faces coincide, and a `regions.json` naming it all:
+
+```
+python tools/mesh/regions_from_msh.py <mesh.msh> <outDir> [--material R=N]... [--fluid NAME] [--overwrite]
+python tools/mesh/regions_check.py <outDir>/regions.json
+```
+
+The layout on disk:
+
+```
+outDir/
+  regions.json
+  fluid/polyMesh/{points,faces,owner,neighbour,boundary}
+  building/polyMesh/{...}
+```
+
+`regions.json` is docs/10-fsi-solid-mesh-plan.md §C: `version` 1, `units`,
+`regions` (`name`, `kind`, relative `polyMesh`, and `material` on a solid),
+`interfaces` (`regions`, `patches`, `faces`, `tolerance`), `source` (tool,
+version, geometry basename, config flags — no paths). The region order puts
+the fluid first (the volume named by `--fluid`, default `fluid`), then every
+other volume by ascending physical tag; `--fluid none` makes every region
+solid. A shared face becomes the patch pair `<a>_to_<b>` / `<b>_to_<a>` in
+identical order — the k-th face of one is the reversed k-th face of the
+other — so the solver can pair by index. Patch types follow convert_mesh.rs's
+convention: a case-insensitive `wall`/`empty`/`symmetry` prefix, else
+`patch`; an interface patch is always `patch`. Boundary faces no physical
+surface covers become `defaultFaces` (warned). The five files of every
+polyMesh are byte-identical to what `ofgpu-convert-mesh` writes for the same
+single-volume mesh — `polymesh_write.py` is the Rust writer's byte-for-byte
+twin (same banner, `%.17g` points, face order, boundary padding).
+
+Refused by name, writing nothing: a volume without exactly one physical name,
+a mesh with no `$PhysicalNames` section, a face shared by three cells, a
+volume name carrying `_to_`, `--fluent` (the Fluent writer is tet-only and
+single cell zone), an existing `regions.json` without `--overwrite`,
+`--fluid`/`--material` naming no volume. `regions_check.py` refuses a layout
+that breaks R1 (a region complete and standalone, positive pyramid volumes),
+R2 (the paired faces coincident within the manifest tolerance, reported as
+centroid / area / normal worsts), R3 (the pair names and types) or R6 (the
+§C keys, relative paths, five files): exit 0, or 1 with one line per
+violation, or 2 on usage. `regions_selftest.py` builds six gmsh meshes (tet
+and transfinite hex), runs the tool and the checker on them and demands byte
+equality with the Rust converter:
+`python tools/mesh/regions_selftest.py [--keep DIR] [--msh PATH]`.
+
+The face dedup is pure Python (a dict keyed by each face's sorted vertex
+tuple), built for benchmark-sized meshes: a 10 M-tet site mesh takes minutes
+and gigabytes.
+
 ## Known limits
 
 - **3-D Delaunay only (`algo3d: 1`).** HXT (10) is faster but on this class of
