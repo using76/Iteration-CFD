@@ -22,6 +22,7 @@
 //! consulted.
 
 pub mod castellate;
+pub mod driver;
 pub mod features;
 pub mod layers;
 pub mod octree;
@@ -464,6 +465,11 @@ impl QualitySpec {
 pub struct OutputSpec {
     pub case_dir: String,
     pub name: String,
+    /// (92.56): rename the final mesh's patches on the way out — the octree's
+    /// `xMin`..`zMax` and the STL's own solid names become the names the case's
+    /// boundary conditions are written against. Absent keys leave a patch alone.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub patch_names: std::collections::BTreeMap<String, String>,
 }
 
 // ==========================================================================
@@ -624,7 +630,11 @@ mod config_tests {
             snap: SnapSpec::default(),
             layers: LayerSpec::default(),
             quality: QualitySpec::default(),
-            output: OutputSpec { case_dir: "out".to_string(), name: "site".to_string() },
+            output: OutputSpec {
+                case_dir: "out".to_string(),
+                name: "site".to_string(),
+                patch_names: std::collections::BTreeMap::new(),
+            },
         }
     }
 

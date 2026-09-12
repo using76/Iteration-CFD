@@ -6,60 +6,87 @@
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! `ofgpu-automesher` - this crate's own mesher, SPEC-LIT §92's hex-dominant
-//! path.
+//! path, all of it: §92.14's driver runs the four stages of (92.55) behind
+//! one command, and this file is the command.
 //!
 //! ```text
-//! ofgpu-automesher <config.json> [-schema] [-check <caseDir>] [-dryRun]
+//! ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME]
+//!                                 [-check [<caseDir>]] [-dryRun] [-schema]
 //! ```
-//!
-//! Tranche 1 unit 1 is the SKELETON of the pipeline: everything around the
-//! meshing runs for real - the config is read and validated, the STLs are
-//! read, merged and required closed, the surface summary and the plan are
-//! printed, and §92.2 stage 0's margin check refuses a domain that cannot
-//! hold the geometry - and then the run stops at the first stage that is
-//! not built yet:
-//!
-//! ```text
-//! error: not implemented: stage 1 (octree refinement) - SPEC-LIT §92.2;
-//! tranche 1 unit 2
-//! ```
-//!
-//! A mesher that promised more than its stages deliver would be the §92.1
-//! failure again from the other side, so the refusal is the contract: no
-//! file is written, and exit status 1 says the run did not mesh.
 //!
 //! The modes:
 //!
-//! - default: the path above - everything up to stage 1's refusal.
-//! - `-dryRun`: the same path, stopping after the surface summary with exit
-//!   0 - what a config check wants before a long run is queued.
-//! - `-check <caseDir>`: §92.3's gate on a mesh that ALREADY exists, read
-//!   from `<caseDir>/constant/polyMesh`, with the config's thresholds. This
-//!   mode is complete: it prints the measured numbers and exits 0, or prints
-//!   the refusal and exits 1. A gate failure is not a crash; its text is the
-//!   report §92.3 fixed the format of.
+//! - default: the config is read and validated, the STLs are read, merged
+//!   and required closed, the surface summary and the plan are printed, and
+//!   §92.2 stage 0's margin check refuses a domain that cannot hold the
+//!   geometry - then the stages run. Each one prints its banner BEFORE it
+//!   runs (§92.14.1) and gates its own output before returning it (§92.3);
+//!   the run writes `<case_dir>/constant/polyMesh` and
+//!   `<case_dir>/<name>_summary.json` only after the last stage returned
+//!   Ok, so a refusal - a failed gate, a bad `output.patch_names` map -
+//!   writes NOTHING and exits 1 (§92.14.4).
+//! - `-stopAfter STAGE`: (92.55)'s stop rule. The stages up to and
+//!   including STAGE run and the mesh that stage returned is written and
+//!   exits 0. STAGE is one of `octree`, `castellate`, `snap`, `layers`,
+//!   with `features` accepted as a spelling of `snap`: §92.12 folded the
+//!   feature attraction into snap's own loop, so no mesh exists between
+//!   them. A stopped run is not a way to get an ungated mesh out - every
+//!   stop point has already passed the gate.
+//! - `-tag NAME`: this run's output is its own - the case directory becomes
+//!   `<output.case_dir>_<NAME>` and the name `<output.name>_<NAME>`,
+//!   `tools/mesh/step_mesh.py --tag`'s convention adapted to a case
+//!   directory, so two tagged runs of one config do not overwrite each
+//!   other's `constant/polyMesh`. NAME is a suffix, not a path: empty, or
+//!   carrying `/` or `\`, is refused.
+//! - `-check [<caseDir>]`: §92.3's gate on a polyMesh that ALREADY exists,
+//!   read from `<caseDir>/constant/polyMesh` with the config's thresholds.
+//!   The directory is OPTIONAL: it is consumed when the next token exists,
+//!   does not start with `-`, and the `<config.json>` positional has
+//!   already been read; otherwise `-check` takes no argument and the
+//!   config's own (tag-adjusted) `output.case_dir` is checked. It measures
+//!   and prints and does not write: exit 0, or the refusal and exit 1.
+//!   A gate failure is not a crash; its text is the report §92.3 fixed the
+//!   format of.
+//! - `-dryRun`: everything up to the surface summary with exit 0 - what a
+//!   config check wants before a long run is queued.
 //! - `-schema`: the JSON Schema of the config, generated from the SAME
 //!   types that parse it, on stdout with exit 0. No config is read, and
 //!   every other argument is ignored.
 //!
-//! Provenance: ORIGINAL - the command-line front end to
-//! `automesher` (SPEC-LIT §92's config tree and §92.3's gate, both covered
-//! by that module's own header) and to `surface::stl` and `io::polymesh`,
+//! Provenance: ORIGINAL - the command-line front end to `automesher`'s
+//! driver (SPEC-LIT §92.14) and to `surface::stl` and `io::polymesh`,
 //! whose readers are covered by their files. This file is argument parsing,
-//! the surface summary, stage 0's margin check, the plan, and the refusal.
-//! No GPL-licensed source was consulted.
+//! the surface summary, stage 0's margin check, the plan, and the two
+//! writes. No GPL-licensed source was consulted.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Instant;
 
-use ofgpu::automesher::{self, AutomeshConfig};
-use ofgpu::io::polymesh::read_poly_mesh;
+use ofgpu::automesher::{self, driver, AutomeshConfig};
+use ofgpu::error::IoContext;
+use ofgpu::io::polymesh::{read_poly_mesh, write_poly_mesh_raw};
 use ofgpu::surface::{stl::read_stl, Surface};
 use ofgpu::{Error, Result, Scalar};
 
 fn usage() {
     eprintln!(
-        "usage: ofgpu-automesher <config.json> [-schema] [-check <caseDir>] [-dryRun]"
+        "usage: ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME]
+                        [-check [<caseDir>]] [-dryRun] [-schema]
+  -stopAfter STAGE: the stop rule of SPEC-LIT §92.14 - the stages up to and
+    including STAGE run and the mesh STAGE returned is written. STAGE is
+    octree, castellate, snap or layers; features is a spelling of snap.
+  -tag NAME: this run's output is its own - the case directory and the mesh
+    name each gain _NAME, so two runs of one config do not overwrite each
+    other. NAME is a suffix, not a path.
+  -check [<caseDir>]: the quality gate on a mesh that already exists
+    (SPEC-LIT §92.14.5). The directory is optional: it is consumed when the
+    next token exists, does not start with a dash, and the config positional
+    has already been read; without it the config's own (tag-adjusted) case
+    directory is checked. It measures and prints and does not write.
+  -dryRun: everything up to the surface summary, then exit 0.
+  -schema: the config's JSON Schema on stdout, no config read."
     );
 }
 
@@ -67,23 +94,62 @@ fn run(args: &[String]) -> Result<()> {
     // ---- flags and positionals --------------------------------------------
     let mut config_arg: Option<&String> = None;
     let mut schema = false;
+    let mut check = false;
     let mut check_dir: Option<&String> = None;
     let mut dry_run = false;
+    let mut stop_after: Option<&String> = None;
+    let mut tag: Option<&String> = None;
 
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
             "-schema" => schema = true,
             "-dryRun" => dry_run = true,
-            "-check" => {
+            "-stopAfter" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
                     usage();
                     return Err(Error::Config(
-                        "-check needs a <caseDir> argument".to_string(),
+                        "-stopAfter needs a STAGE argument".to_string(),
                     ));
                 };
-                check_dir = Some(v);
+                stop_after = Some(v);
+            }
+            "-tag" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config(
+                        "-tag needs a NAME argument".to_string(),
+                    ));
+                };
+                // The tag is a suffix of the case directory and the mesh
+                // name, never a path of its own: an empty one, or one
+                // carrying a separator, would smuggle a directory change
+                // through a string concatenation.
+                if v.is_empty() || v.contains('/') || v.contains('\\') {
+                    usage();
+                    return Err(Error::Config(format!(
+                        "-tag: '{v}' is a NAME - a suffix, not a path; an \
+                         empty NAME or one containing / or \\ is refused"
+                    )));
+                }
+                tag = Some(v);
+            }
+            "-check" => {
+                // §92.14.5: the directory is optional. It is consumed when
+                // the next token exists, does not start with '-' and the
+                // <config.json> positional has already been read; otherwise
+                // -check takes no argument and checks the config's own
+                // (tag-adjusted) case directory. Either way the flag itself
+                // selects check mode.
+                check = true;
+                if let Some(v) = args.get(i + 1) {
+                    if !v.starts_with('-') && config_arg.is_some() {
+                        check_dir = Some(v);
+                        i += 1;
+                    }
+                }
             }
             a if a.starts_with('-') => {
                 usage();
@@ -116,13 +182,30 @@ fn run(args: &[String]) -> Result<()> {
             "a <config.json> positional is required, or pass -schema".to_string(),
         ));
     };
-    let cfg = automesher::read_config(Path::new(config_arg))?;
+    let mut cfg = automesher::read_config(Path::new(config_arg))?;
     cfg.validate()?;
 
-    if let Some(case_dir) = check_dir {
-        return check_mode(&cfg, Path::new(case_dir));
+    // -tag gives this run an output of its own: both fields are suffixed
+    // HERE, before anything downstream reads them, so everything from this
+    // point on - check_mode's default directory, driver::run, and (92.57)'s
+    // summary, which must record the directory that was actually written -
+    // sees the adjusted names.
+    if let Some(t) = tag {
+        cfg.output.case_dir = format!("{}_{}", cfg.output.case_dir, t);
+        cfg.output.name = format!("{}_{}", cfg.output.name, t);
     }
-    meshing_mode(&cfg, dry_run)
+
+    // §92.14.5: -check measures a mesh that already exists - the directory
+    // named after the flag, or the config's own (tag-adjusted)
+    // output.case_dir when none was.
+    if check {
+        let dir = match check_dir {
+            Some(d) => Path::new(d),
+            None => Path::new(&cfg.output.case_dir),
+        };
+        return check_mode(&cfg, dir);
+    }
+    meshing_mode(&cfg, config_arg, dry_run, stop_after)
 }
 
 /// `-check <caseDir>`: §92.3's gate on a mesh that already exists, at
@@ -132,6 +215,10 @@ fn run(args: &[String]) -> Result<()> {
 /// fixed the format of, as `Error::Mesh` when a gate failed, which `main`
 /// prints with exit status 1.
 fn check_mode(cfg: &AutomeshConfig, case_dir: &Path) -> Result<()> {
+    println!(
+        "ofgpu-automesher: checking {} (SPEC-LIT §92.14.5)",
+        case_dir.display()
+    );
     let raw = read_poly_mesh(case_dir)?;
     let t = cfg.quality.thresholds();
     let rep = automesher::quality::measure(&raw, &t)?;
@@ -143,9 +230,16 @@ fn check_mode(cfg: &AutomeshConfig, case_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The meshing path: everything the pipeline's front half does, then the
-/// refusal of the first stage that is not built.
-fn meshing_mode(cfg: &AutomeshConfig, dry_run: bool) -> Result<()> {
+/// The meshing path: everything the pipeline's front half does, then
+/// §92.14's driver through the four stages of (92.55), and on Ok the two
+/// writes - `constant/polyMesh` and (92.57)'s summary beside it. The config
+/// arrives with `output.case_dir`/`output.name` already tag-adjusted.
+fn meshing_mode(
+    cfg: &AutomeshConfig,
+    config_path: &str,
+    dry_run: bool,
+    stop_after: Option<&String>,
+) -> Result<()> {
     println!("ofgpu-automesher (SPEC-LIT §92, hex-dominant path)");
 
     let surf = read_input_surface(cfg)?;
@@ -163,11 +257,46 @@ fn meshing_mode(cfg: &AutomeshConfig, dry_run: bool) -> Result<()> {
     check_domain(cfg, &surf)?;
     print_plan(cfg);
 
-    Err(Error::Mesh(
-        "not implemented: stage 1 (octree refinement) - SPEC-LIT §92.2; \
-         tranche 1 unit 2"
-            .to_string(),
-    ))
+    // (92.55)'s stop rule. `Stage::parse`'s error message is already the
+    // right one - it names the five spellings - so there is no second
+    // parser here.
+    let stop = stop_after.map(|s| driver::Stage::parse(s)).transpose()?;
+
+    let t0 = Instant::now();
+    // The driver owns the text of every progress line (§92.14.1); this
+    // binary owns only where the lines go. The flush is the Windows
+    // console's doing: a console line-buffers, a pipe block-buffers, and
+    // run_automesher.cmd pipes the run into a log, so without it a stage
+    // that takes forty minutes would put its banner on screen after it
+    // returned instead of before it started.
+    let out = driver::run(cfg, &surf, stop, &mut |line| {
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+    })?;
+
+    // §92.14.4: nothing is written until the pipeline has returned Ok, so a
+    // refusal anywhere above - a failed gate, a refused rename - leaves no
+    // case directory and no summary behind. From here on every write is of
+    // a mesh that left its stage through the gate.
+    println!("{}", out.quality.summary());
+    let case_dir = Path::new(&cfg.output.case_dir);
+    let poly_dir = case_dir.join("constant").join("polyMesh");
+    write_poly_mesh_raw(&poly_dir, &out.mesh)?;
+    let summary_path = case_dir.join(format!("{}_summary.json", cfg.output.name));
+    let summary = driver::summary_json(cfg, config_path, &surf, &out);
+    let text = serde_json::to_string_pretty(&summary).map_err(|e| {
+        Error::Config(format!("summary {}: {e}", summary_path.display()))
+    })?;
+    std::fs::write(&summary_path, text).path(&summary_path)?;
+
+    println!(
+        "ofgpu-automesher: wrote {} ({} cells)",
+        poly_dir.display(),
+        out.quality.n_cells
+    );
+    println!("ofgpu-automesher: wrote {}", summary_path.display());
+    println!("ofgpu-automesher: total {:.1} s", t0.elapsed().as_secs_f64());
+    Ok(())
 }
 
 /// Read every `input.surfaces[]` entry and merge them into the ONE surface

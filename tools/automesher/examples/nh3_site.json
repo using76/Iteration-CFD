@@ -8,6 +8,11 @@
 // solid is trimmed at 3.05 and a box that touched it would castellate against
 // a coincident face.
 //
+// The window is the plume's, not the site's: the wind blows towards -x, so the
+// box reaches 400 m upwind of the release and 1240 m downwind of it, and 800 m
+// / 500 m to either side. Meshing the whole 2.5 km square at this resolution
+// buys nothing the plume can use.
+//
 // JSONC: comments and trailing commas are allowed (io::case_json's reader).
 {
   "input": {
@@ -17,32 +22,44 @@
   },
 
   "domain": {
-    // xlo xhi ylo yhi zlo zhi, metres.
-    "extent": [-1240.0, 1240.0, -1240.0, 1240.0, 3.1, 200.0],
-    // Background cell, metres. 124 x 124 x 10 base cells.
+    // xlo xhi ylo yhi zlo zhi, metres. 82 x 65 x 10 base cells.
+    "extent": [-1240.0, 400.0, -800.0, 500.0, 3.5, 200.0],
+    // Background cell, metres.
     "base_size": 20.0,
-    // One-sided expansion per axis, last cell / first cell: the smallest cells
-    // sit at the ground, where the plume is.
-    "grading": [1.0, 1.0, 6.0]
+    // No expansion. A graded z was tried and dropped: it makes the first base
+    // cell 6.9 m tall, and the refinement then divides THAT, so every level-3
+    // leaf at the ground becomes 2.5 x 2.5 x 0.86 m and the cell count near
+    // triples for resolution the plume does not need. The octree already puts
+    // the small cells at the ground; grading on top of it pays twice.
+    "grading": [1.0, 1.0, 1.0]
   },
 
   "refinement": {
-    // Within 40 m of the buildings, level 2 (5 m); within 120 m, level 1 (10 m).
-    // SPEC-LIT (92.1).
+    // (92.1). Within 5 m of the buildings, level 3 (2.5 m); within 40 m,
+    // level 2 (5 m). The release roof is the thing the answer is about, so it
+    // gets level 4 (1.25 m) within 12 m.
+    //
+    // The bands are SHORT on purpose. `wall_site` includes the terrain, so a
+    // band of width w over this 1640 x 1300 m window costs
+    // 2.1e6 * w / h^3 cells: at level 3 (h = 2.46 m) a 20 m band alone is
+    // 2.8 million cells before a single building is resolved. Refining the
+    // ground is what the ground band buys; refining the AIR above it is what
+    // a long band spends on.
     "levels": [
-      { "patch": "wall_site",  "bands": [{ "distance": 40.0, "level": 2 },
-                                         { "distance": 120.0, "level": 1 }] },
-      { "patch": "nh3_source", "bands": [{ "distance": 20.0, "level": 3 }] }
+      { "patch": "wall_site",  "bands": [{ "distance": 5.0, "level": 3 },
+                                         { "distance": 40.0, "level": 2 }] },
+      { "patch": "nh3_source", "bands": [{ "distance": 12.0, "level": 4 }] }
     ],
     "feature_angle_deg": 30.0,
-    "max_level": 3
+    "max_level": 4
   },
 
   "castellation": {
     // Keep the component the free stream is in, not merely the biggest one.
     // SPEC-LIT (92.4) - this is what drops the sealed pockets under buildings.
+    // The seed is high and upwind, in open air.
     "keep_region": "seed",
-    "seed_point": [-1200.0, 0.0, 150.0],
+    "seed_point": [350.0, 400.0, 180.0],
     "min_faces": 4
   },
 
@@ -51,10 +68,15 @@
     "tolerance": 1e-3,
     "smoothing_passes": 3,
     "smoothing": 0.5,
-    "undo_limit": 4
+    "undo_limit": 4,
+    "max_area_ratio": 4.0,
+    "feature_tolerance": 0.5
   },
 
   "layers": {
+    // Attempted, and on a SNAPPED wall usually given up by name - see the
+    // pipeline note in ../README.md. The run continues either way and the
+    // summary says which patch kept what.
     "patches": ["wall_site"],
     "n": 3,
     "first_thickness": 0.4,
@@ -75,6 +97,18 @@
 
   "output": {
     "case_dir": "C:/Users/sdd32/Desktop/암모니아누출/automesh/nh3_site",
-    "name": "nh3_site"
+    "name": "nh3_site",
+    // (92.56): the names case_nh3/make_case.py writes its boundary conditions
+    // against. The wind blows towards -x and enters through the +x face, so
+    // `east` is xMax; `wall_sea` is the sea surface under the site. The two
+    // STL solid names, `wall_site` and `nh3_source`, are left alone.
+    "patch_names": {
+      "xMax": "east",
+      "xMin": "west",
+      "yMin": "south",
+      "yMax": "north",
+      "zMax": "top",
+      "zMin": "wall_sea"
+    }
   }
 }

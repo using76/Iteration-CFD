@@ -1,0 +1,94 @@
+// meteor-cfd - ofgpu-automesher example configuration (SPEC-LIT §92).
+//
+// The smallest config that exercises the WHOLE pipeline: a 1 m sphere in the
+// middle of a 10 m box, refined to level 3 at the wall, snapped, and given two
+// layers. It runs in seconds on one core, which is what makes it the config to
+// try a change against before the site config is queued.
+//
+// Make the geometry first (the repository carries no binary assets):
+//
+//     cd tools/automesher/examples
+//     python make_box_sphere_stl.py box_sphere.stl
+//     ..\..\..\rust\target\release\ofgpu-automesher box_sphere.json
+//
+// JSONC: comments and trailing commas are allowed (io::case_json's reader).
+{
+  "input": {
+    "surfaces": [
+      { "path": "box_sphere.stl" }
+    ]
+  },
+
+  "domain": {
+    // xlo xhi ylo yhi zlo zhi, metres. The sphere sits at (5, 5, 5) with a
+    // radius of 1, so it clears the sides by 4 m - four base cells, and stage
+    // 0 asks for one.
+    "extent": [0.0, 10.0, 0.0, 10.0, 0.0, 10.0],
+    // 10 x 10 x 10 base cells. Level 3 is 1.25 m / 8 = 0.125 m at the wall.
+    "base_size": 1.0,
+    "grading": [1.0, 1.0, 1.0]
+  },
+
+  "refinement": {
+    // (92.1): within 0.5 m of the sphere, level 3; within 2 m, level 2.
+    "levels": [
+      { "patch": "sphere", "bands": [{ "distance": 0.5, "level": 3 },
+                                     { "distance": 2.0, "level": 2 }] }
+    ],
+    "feature_angle_deg": 30.0,
+    "max_level": 3
+  },
+
+  "castellation": {
+    // A sphere leaves nothing sealed, so `largest` and `seed` agree here; the
+    // seed is written out anyway because it is the mode a site config wants and
+    // an example that omits it teaches the wrong habit.
+    "keep_region": "seed",
+    "seed_point": [0.5, 0.5, 0.5],
+    "min_faces": 4
+  },
+
+  "snap": {
+    "iterations": 30,
+    "tolerance": 1e-3,
+    "smoothing_passes": 3,
+    "smoothing": 0.5,
+    "undo_limit": 4,
+    "max_area_ratio": 4.0,
+    "feature_tolerance": 0.5
+  },
+
+  "layers": {
+    "patches": ["sphere"],
+    "n": 2,
+    "first_thickness": 0.02,
+    "growth": 1.3,
+    "min_thickness": 0.1,
+    "medial_frac": 0.5
+  },
+
+  // SPEC-LIT §92.3's G1-G7, written out so the example says what the gate is.
+  "quality": {
+    "max_closure": 1e-10,
+    "max_non_orth_deg": 70.0,
+    "report_non_orth_deg": 60.0,
+    "min_thickness_ratio": 0.05,
+    "max_cond": 1e4
+  },
+
+  "output": {
+    "case_dir": "box_sphere_case",
+    "name": "box_sphere",
+    // (92.56): the octree's own six names become the ones a wind-tunnel case
+    // writes its boundary conditions against. `sphere` is the STL's solid name
+    // and is left alone.
+    "patch_names": {
+      "xMin": "inlet",
+      "xMax": "outlet",
+      "yMin": "side_y0",
+      "yMax": "side_y1",
+      "zMin": "ground",
+      "zMax": "top"
+    }
+  }
+}

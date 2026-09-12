@@ -26545,4 +26545,158 @@ solver can run.
 | the same box, at `quality`'s own thresholds | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
 | the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
 
+### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
+
+The implementation-level companion to §92.2 as a whole, appended after §92.13
+for the reason §92.12 was appended after §92.11 — every citation already
+pointing into §92.1–§92.13 keeps its number. §92.9–§92.13 each specify one
+stage, and each stage is a library function with its own tests. This specifies
+the thing that runs them in order: `ofgpu-automesher`, one command, one config
+file, one polyMesh.
+
+The driver is not a convenience. Until it existed every number quoted in §92
+had been taken by driving the library from a test, which means the pipeline had
+never been run the way a site engineer runs it — and two decisions belong to no
+stage, so until there was a driver nobody owned them: **when a run stops**, and
+**what the patches of the written case are called**.
+
+#### 92.14.1 The stage sequence, and the stop rule
+
+The stages that produce a
+mesh, in order, are the four that return one:
+
+```
+S         = [ octree, castellate, snap, layers ]                      (92.55)
+
+stopAfter = s in S:  the stages up to and including s are run, the mesh
+                     s returned is written, and the run exits 0
+stopAfter absent:    every stage in S is run
+```
+
+Stage 0 (the background block) and stage 2 (the 2:1 balance) are not in (92.55)
+because neither returns a mesh of its own: stage 0 is the block the octree
+subdivides and stage 2 is the fixed point `refine_to_surface` reaches before it
+returns. `features` is accepted as a spelling of `snap`, and only that: §92.2's
+stage 5 was folded into stage 4's own loop by §92.12, so there is no point in
+the pipeline between the two at which a mesh exists to write. A driver that
+offered `-stopAfter features` as a separate stop would be claiming an
+intermediate state the mesher does not have.
+
+A stopped run is not a way to get an ungated mesh out of the mesher. Every
+stage of (92.55) runs §92.3's gate on its own output before returning it —
+`castellate`, `snap` and `add_layers` each carry a `QualityReport` that has
+already passed — so whatever a stop writes has passed G1–G7. What a stop
+changes is how much geometry the mesh has, not whether it is solvable.
+
+**Progress.** Each stage prints its banner BEFORE it runs and its elapsed wall
+time after:
+
+```
+=== stage 2/4  castellate ===
+--- castellate: 412.8 s
+```
+
+The banner comes first because the run this matters for is the one that does
+not finish: a stage that never returns must at least have said which stage it
+was. The elapsed time per stage is what the summary of (92.57) records and what
+a later run is planned against.
+
+#### 92.14.2 The names the case gets
+
+The mesh that leaves the last stage carries
+the six domain patch names the octree gave it (§92.9's `xMin`, `xMax`, `yMin`,
+`yMax`, `zMin`, `zMax`) and one patch per STL solid that castellation walled
+(§92.10). Neither set is what a case's boundary conditions are written against:
+a site case has an `east` the wind enters through and a `wall_sea` under it.
+`output.patch_names` is the map, applied to the final mesh just before it is
+written:
+
+```
+for every patch p of the mesh that is about to be written:
+
+  name'(p) = output.patch_names[ name(p) ]   if that key is present
+           = name(p)                          otherwise               (92.56)
+
+refused, before anything is written:
+  - a key that names no patch of the mesh          (a typo silently ignored
+                                                    is a case wired to a
+                                                    patch that is not there)
+  - a value that io::polymesh's own reader would refuse as a patch name
+  - two patches that would end up with the SAME name
+```
+
+The rename happens HERE and not in a script afterwards for one reason: a script
+that rewrites `constant/polyMesh/boundary` is a second reader of the one file
+the solver may not be allowed to guess at, and it runs after the mesh has been
+declared good. Renaming inside the driver puts the new names through the same
+patch-name check and the same writer that produced them.
+
+#### 92.14.3 The summary the run leaves
+
+A mesh on disk with no record of what
+made it is a mesh nobody can reproduce, and the per-stage times are the only
+input a plan for the next run has. The driver writes, beside the case:
+
+```
+<case_dir>/<name>_summary.json =
+{ "tool", "config_path", "name", "case_dir",
+  "stopped_after",                     -- the stage, or null for a full run
+  "surface":  { "n_triangles", "n_points", "bbox", "patches": [ ... ] },
+  "stages":   [ { "stage", "seconds", <that stage's own counts> }, ... ],
+  "mesh":     { "n_points", "n_cells", "n_internal_faces",
+                "n_boundary_faces",
+                "patches": [ { "name", "kind", "size" }, ... ] },
+  "quality":  { the measured numbers of §92.3's report, gate by gate },
+  "total_seconds",
+  "config":   the config exactly as it parsed }                       (92.57)
+```
+
+`config` is the parsed struct re-serialised, not the file's bytes: what it
+records is the config the run actually used, defaults filled in, which is the
+thing a second run has to match. The patch list is the FINAL one, after
+(92.56).
+
+#### 92.14.4 What a refusal writes
+
+Nothing. When any stage's gate fails, the
+run prints §92.3's refusal — the gate, the cell ids, their centroids, the
+measured values — and exits 1 with no `constant/polyMesh` and no summary
+beside it. A half-written polyMesh left next to a failed run is precisely the
+artefact §92.1 exists to prevent someone pointing a solver at; if the mesh is
+wanted for inspection anyway, the stop rule of (92.55) is how it is asked for,
+and `-check` is how a mesh that already exists is judged.
+
+#### 92.14.5 `-check`
+
+`-check` runs §92.3's gate, with this config's
+thresholds, on a polyMesh that already exists — the config's own
+`output.case_dir` by default, or a directory named after the flag. It measures
+and prints and does not write. It is the mode that answers "is this mesh
+solvable", about a mesh from this mesher, from `ofgpu-convert-mesh`, or from
+anywhere else.
+
+**What must hold**
+
+| Claim | Why it holds |
+|---|---|
+| a written mesh has passed G1–G7 | every stage of (92.55) gates its own output, and the driver writes only what a stage returned |
+| a refused run leaves no mesh | the writer is called after the last stage returns Ok, and a failed gate is an `Err` from inside the stage |
+| a stopped run writes a real mesh | the stop points of (92.55) are exactly the stages that return a `PolyMeshRaw`; there is no partial state to write |
+| `-stopAfter features` and `-stopAfter snap` are the same run | §92.12 put the feature attraction inside stage 4's loop; no mesh exists between them |
+| the patch names in `boundary` are the ones the case asks for | (92.56) is applied before `write_poly_mesh_raw`, and its refusals fire before anything is written |
+| the summary describes the mesh that was written | it is built from the final `PolyMeshRaw` and the final report, after (92.56) |
+| a stage that hangs has been named | the banner of §92.14.1 is printed before the stage is called, not after it returns |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| a box with a sphere in it, full pipeline | the run reaches the layer stage, writes `constant/polyMesh` and the summary, and exits 0; `-check` on the written case passes with the same numbers the run printed |
+| the same config with `-stopAfter octree` | a mesh with no wall patch is written, its cell count is the leaf count, and the summary's `stopped_after` is `"octree"` |
+| `-stopAfter features` against `-stopAfter snap` | the two runs write identical `points` files |
+| a `patch_names` key that names no patch | refused by name, and `constant/polyMesh` does not exist afterwards |
+| two `patch_names` values that collide | refused naming both source patches |
+| a config whose gate cannot be met | exit 1, §92.3's refusal on stderr, and no `constant/polyMesh` and no `<name>_summary.json` written |
+| the summary's `mesh.patches` | equals the boundary file's patches, name for name and size for size |
+
 ---
