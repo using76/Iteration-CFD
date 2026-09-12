@@ -332,14 +332,22 @@ def print_info(rep):
 def export_model(out_path, tags, names, stl_size=None):
     fmt = format_of(out_path)
     if fmt == 'step':
-        occ = gmsh.model.occ
-        # OCC's STEP writer declares mm: dilate x1000, write, dilate back, so the
-        # model stays in metres whatever scale it was read at (export_fluid.py:40-46)
-        occ.dilate(gmsh.model.getEntities(), 0, 0, 0, 1000, 1000, 1000)
-        occ.synchronize()
-        gmsh.write(out_path)
-        occ.dilate(gmsh.model.getEntities(), 0, 0, 0, 0.001, 0.001, 0.001)
-        occ.synchronize()
+        # occ.dilate is a GENERAL transform that re-approximates curved faces
+        # (probed: 4.4e-4 relative on a sphere), so the exact mm export goes
+        # out through a BREP and back in at OCCScaling = 1000, a uniform
+        # gp_Trsf that is exact (2.5e-15 on the cut box, 0 on a sphere).
+        # Tags may renumber: nothing reads the model by tag after this -
+        # sidecar_for runs before it (cmd_export, run_edit).
+        tmp = out_path + '.tmp.brep'
+        gmsh.write(tmp)                      # every entity, metres, exact
+        gmsh.model.remove(); gmsh.model.add('mm')
+        gmsh.option.setNumber('Geometry.OCCScaling', 1000.0)
+        gmsh.model.occ.importShapes(tmp); gmsh.model.occ.synchronize()
+        gmsh.write(out_path)                 # the model IS in mm now
+        gmsh.model.remove(); gmsh.model.add('m')
+        gmsh.option.setNumber('Geometry.OCCScaling', 1.0)
+        gmsh.model.occ.importShapes(tmp); gmsh.model.occ.synchronize()
+        os.remove(tmp)
     elif fmt == 'brep':
         gmsh.write(out_path)     # metres as is; a shared face stays single
     elif fmt == 'xao':
@@ -366,7 +374,7 @@ def export_model(out_path, tags, names, stl_size=None):
 
 
 def sidecar_for(out_path, tags, names, ops):
-    # measured in metres, before the STEP dilate dance; scale is the OUTPUT
+    # measured in metres, before the export replaces the model (E1); scale is the OUTPUT
     # format's default, so info on the new file converts records correctly
     return {'version': 1, 'tool': 'geom_tool', 'units': 'm',
             'scale': DEFAULT_SCALE[format_of(out_path)],
@@ -449,7 +457,7 @@ def parse_args(argv):
     p = argparse.ArgumentParser(
         prog='geom_tool',
         description="List and export geometry files on gmsh's OpenCASCADE kernel.")
-    sub = p.add_subparsers(dest='cmd', required=True, metavar='{info,export}')
+    sub = p.add_subparsers(dest='cmd', required=True, metavar='{info,export,edit}')
     pi = sub.add_parser('info', help='list the solids (or IGES surfaces / STL faces) of a file')
     pi.add_argument('file', help='a .step/.stp/.brep/.iges/.igs/.xao/.stl file')
     pi.add_argument('--json', metavar='OUT',
@@ -462,6 +470,12 @@ def parse_args(argv):
     pe.add_argument('--scale', type=float, default=None, help='file units -> metres')
     pe.add_argument('--stl-size', type=float, default=None, dest='stl_size',
                     help='surface mesh size in metres for an STL export (default D/20)')
+    pd = sub.add_parser('edit', help='apply the named operations of an ops file, write the result')
+    pd.add_argument('file', help='the file to read (.step/.stp/.brep/.xao)')
+    pd.add_argument('--ops', required=True, help='the JSON file of operations')
+    pd.add_argument('--out', required=True, help='output path; the extension picks the format')
+    pd.add_argument('--scale', type=float, default=None,
+                    help='file units -> metres (default: STEP/IGES 0.001, others 1.0)')
     return p.parse_args(argv)
 
 
@@ -470,6 +484,9 @@ def main(argv=None):
     args = parse_args(argv)
     if args.cmd == 'info':
         return cmd_info(args)
+    if args.cmd == 'edit':
+        import geom_edit
+        return geom_edit.run_edit(args, sys.modules[__name__])
     return cmd_export(args)
 
 

@@ -7,6 +7,7 @@
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -234,7 +235,212 @@ def test_refusals(top):
     os.remove(os.path.join(top, 'empty.stl'))
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals)
+def build_brep(path, boxes, cylinders=()):
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber('General.Terminal', 0)
+        for x, y, z, dx, dy, dz in boxes:
+            gmsh.model.occ.addBox(x, y, z, dx, dy, dz)
+        for x, y, z, dx, dy, dz, r in cylinders:
+            gmsh.model.occ.addCylinder(x, y, z, dx, dy, dz, r)
+        gmsh.model.occ.synchronize()
+        gmsh.write(path)
+    finally:
+        gmsh.finalize()
+
+
+def write_ops(path, ops):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'version': 1, 'ops': ops}, f, indent=1)
+    return path
+
+
+def tag_at(rep, centroid, tol=1e-6):
+    hits = [s for s in rep['solids'] if close3(s['centroid'], centroid, tol)]
+    assert len(hits) == 1, (centroid, [(s['tag'], s['centroid']) for s in rep['solids']])
+    return hits[0]['tag']
+
+
+def expect_refusal(src, ops, out, *needles):
+    ops_path = write_ops(os.path.join(os.path.dirname(out), 'refuse_ops.json'), ops)
+    r = run('edit', src, '--ops', ops_path, '--out', out, expect=2)
+    for needle in needles:
+        assert needle in r.stderr, (needle, r.stderr[-400:])
+    assert not os.path.exists(out), out
+    return r
+
+
+def test_edit_refusals(top):
+    d = work(top, 'edit_refuse')
+    src = os.path.join(d, 'two.brep')
+    build_brep(src, [(0, 0, 0, 1, 1, 1), (3, 0, 0, 1, 1, 1)])
+    run('info', src, '--json', os.path.join(d, 'i.json'))
+    rep = load(os.path.join(d, 'i.json'))
+    assert [s['name'] for s in rep['solids']] == ['solid_1', 'solid_2'], rep['solids']
+    out = os.path.join(d, 'edited.step')
+    expect_refusal(src, [{'op': 'shrink'}], out, 'ops[0].op', 'shrink', 'set_material')
+    expect_refusal(src, [{'op': 'rename', 'solids': ['solid_1'], 'name': 'x'}], out,
+                   'ops[0].solids', 'did you mean "solid"')
+    expect_refusal(src, [{'op': 'box', 'name': 'bx', 'origin': [0, 0, 0]}], out,
+                   'ops[0].size')
+    expect_refusal(src, [{'op': 'translate', 'solids': ['solid_1'], 'by': [1, 2]}], out,
+                   'ops[0].by')
+    expect_refusal(src, [{'op': 'rename', 'solid': 'nothing', 'name': 'x'}], out,
+                   'nothing', 'solid_1')
+    ops_path = write_ops(os.path.join(d, 'ops_same.json'),
+                         [{'op': 'rename', 'solid': 'solid_1', 'name': 'x'}])
+    r = run('edit', src, '--ops', ops_path, '--out', src, expect=2)
+    assert 'same file' in r.stderr and os.path.isfile(src), r.stderr[-300:]
+    expect_refusal(src, [{'op': 'rename', 'solid': 'solid_1', 'name': 'x'}],
+                   os.path.join(d, 'x.stl'), '.stl')
+    stl = os.path.join(d, 'in.stl')
+    with open(stl, 'w', encoding='utf-8') as f:
+        f.write('solid x\nendsolid x\n')
+    expect_refusal(stl, [{'op': 'rename', 'solid': 'solid_1', 'name': 'x'}], out, 'surfaces')
+    assert not os.path.exists(out), out
+
+
+def test_edit_cut_closed_form(top):
+    d = work(top, 'edit_cut')
+    src = os.path.join(d, 'cut.brep')
+    build_brep(src, [(0, 0, 0, 2, 1, 1)])
+    run('info', src, '--json', os.path.join(d, 'i.json'))
+    t = tag_at(load(os.path.join(d, 'i.json')), (1.0, 0.5, 0.5))
+    ops_path = write_ops(os.path.join(d, 'ops.json'), [
+        {'op': 'cylinder', 'name': 'hole', 'origin': [1, 0.5, -1], 'axis': [0, 0, 3],
+         'radius': 0.2},
+        {'op': 'rename', 'solid': t, 'name': 'block'},
+        {'op': 'cut', 'object': ['block'], 'tools': ['hole']}])
+    out = os.path.join(d, 'cut.step')
+    run('edit', src, '--ops', ops_path, '--out', out)
+    v_closed = 2.0 - math.pi * 0.04
+    doc = load(os.path.join(d, 'cut.geom.json'))
+    ss = doc['solids']
+    assert len(ss) == 1 and ss[0]['name'] == 'block', ss
+    assert rel(ss[0]['volume'], v_closed) <= 1e-9, (ss[0]['volume'], v_closed)
+    assert close3(ss[0]['centroid'], (1.0, 0.5, 0.5), 1e-9), ss[0]
+    assert [e['op']['op'] for e in doc['ops']] == ['cylinder', 'rename', 'cut'], doc['ops']
+    run('info', out, '--json', os.path.join(d, 'i2.json'))
+    s = load(os.path.join(d, 'i2.json'))['solids']
+    assert len(s) == 1 and s[0]['name'] == 'block' and s[0]['matched'] == 'centroid', s
+    assert rel(s[0]['volume'], v_closed) <= 1e-9, (s[0]['volume'], v_closed)
+    assert close3(s[0]['centroid'], (1.0, 0.5, 0.5), 1e-9), s[0]
+    print('  [ok] cut V=%.12f  sidecar rel=%.2e  info rel=%.2e'
+          % (ss[0]['volume'], rel(ss[0]['volume'], v_closed), rel(s[0]['volume'], v_closed)),
+          flush=True)
+
+
+def test_edit_fragment_three_pieces(top):
+    d = work(top, 'edit_frag')
+    # the two operands OVERLAP, and M1's import runs removeAllDuplicates - on
+    # overlapping solids OCC resolves the overlap itself, i.e. the input would
+    # arrive pre-fragmented (probed: a brep of these three boxes imports as
+    # FOUR solids). xao is the one input format the loader does not dedup.
+    src = os.path.join(d, 'frag.xao')
+    build_brep(src, [(0, 0, 0, 1, 1, 1), (0.5, 0, 0, 1, 1, 1), (5, 5, 5, 1, 1, 1)])
+    run('info', src, '--json', os.path.join(d, 'i.json'))
+    rep = load(os.path.join(d, 'i.json'))
+    ops_path = write_ops(os.path.join(d, 'ops.json'), [
+        {'op': 'rename', 'solid': tag_at(rep, (0.5, 0.5, 0.5)), 'name': 'a'},
+        {'op': 'rename', 'solid': tag_at(rep, (1.0, 0.5, 0.5)), 'name': 'b'},
+        {'op': 'rename', 'solid': tag_at(rep, (5.5, 5.5, 5.5)), 'name': 'c'},
+        {'op': 'set_material', 'solid': 'c', 'material': 'steel'},
+        {'op': 'fragment', 'object': ['a'], 'tools': ['b']}])
+    out = os.path.join(d, 'frag.step')
+    run('edit', src, '--ops', ops_path, '--out', out)
+    doc = load(os.path.join(d, 'frag.geom.json'))
+    ss = {s['name']: s for s in doc['solids']}
+    assert set(ss) == {'a', 'a_b', 'b', 'c'} and len(doc['solids']) == 4, doc['solids']
+    for nm, c in (('a', (0.25, 0.5, 0.5)), ('a_b', (0.75, 0.5, 0.5)),
+                  ('b', (1.25, 0.5, 0.5))):
+        assert rel(ss[nm]['volume'], 0.5) <= 1e-9, (nm, ss[nm]['volume'])
+        assert close3(ss[nm]['centroid'], c, 1e-9), (nm, ss[nm]['centroid'])
+    v_sum = ss['a']['volume'] + ss['a_b']['volume'] + ss['b']['volume']
+    assert rel(v_sum, 1.5) <= 1e-9, v_sum
+    assert rel(ss['c']['volume'], 1.0) <= 1e-9 and ss['c']['material'] == 'steel', ss['c']
+    assert len(doc['ops']) == 5 and doc['ops'][4]['op']['op'] == 'fragment', doc['ops']
+    print('  [ok] fragment V(a)=%.12f V(a_b)=%.12f V(b)=%.12f sum=%.12f'
+          % (ss['a']['volume'], ss['a_b']['volume'], ss['b']['volume'], v_sum), flush=True)
+
+
+def test_edit_rename_round_trip(top):
+    d = work(top, 'edit_rt')
+    src = os.path.join(d, 'rt.brep')
+    build_brep(src, [(0, 0, 0, 1, 1, 1), (3, 0, 0, 1, 2, 1), (6, 0, 0, 1, 3, 1)])
+    run('info', src, '--json', os.path.join(d, 'i.json'))
+    rep = load(os.path.join(d, 'i.json'))
+    op1 = [{'op': 'rename', 'solid': tag_at(rep, (0.5, 0.5, 0.5)), 'name': 'keep'},
+           {'op': 'set_material', 'solid': 'keep', 'material': 'steel'},
+           {'op': 'rename', 'solid': tag_at(rep, (3.5, 1.0, 0.5)), 'name': 'gone'},
+           {'op': 'rename', 'solid': tag_at(rep, (6.5, 1.5, 0.5)), 'name': 'other'}]
+    rt1 = os.path.join(d, 'rt1.step')
+    run('edit', src, '--ops', write_ops(os.path.join(d, 'ops1.json'), op1), '--out', rt1)
+    j1 = os.path.join(d, 'i1.json')
+    run('info', rt1, '--json', j1)
+    s1 = {s['name']: s for s in load(j1)['solids']}
+    assert set(s1) == {'keep', 'gone', 'other'} and s1['keep']['material'] == 'steel', s1
+    rt2 = os.path.join(d, 'rt2.step')
+    run('edit', rt1, '--ops', write_ops(os.path.join(d, 'ops2.json'),
+        [{'op': 'delete', 'solids': ['gone']}]), '--out', rt2)
+    j2 = os.path.join(d, 'i2.json')
+    run('info', rt2, '--json', j2)
+    rep2 = load(j2)
+    s2 = {s['name']: s for s in rep2['solids']}
+    assert len(rep2['solids']) == 2 and {s['tag'] for s in rep2['solids']} == {1, 2}, \
+        rep2['solids']
+    assert all(s['matched'] == 'centroid' for s in rep2['solids']), rep2['solids']
+    assert rel(s2['keep']['volume'], 1.0) <= 1e-9 and s2['keep']['material'] == 'steel', \
+        s2['keep']
+    assert close3(s2['keep']['centroid'], (0.5, 0.5, 0.5), 1e-9), s2['keep']
+    assert rel(s2['other']['volume'], 3.0) <= 1e-9, s2['other']
+    assert close3(s2['other']['centroid'], (6.5, 1.5, 0.5), 1e-9), s2['other']
+    doc2 = load(os.path.join(d, 'rt2.geom.json'))
+    assert len(doc2['ops']) == 5 and doc2['ops'][4]['op']['op'] == 'delete', doc2['ops']
+    assert doc2['ops'][0]['op'] == op1[0], doc2['ops'][0]
+    print('  [ok] round trip: tags after the 2nd edit: %s'
+          % sorted(s['tag'] for s in rep2['solids']), flush=True)
+
+
+def test_edit_transforms(top):
+    d = work(top, 'edit_tf')
+    src = os.path.join(d, 'tf.brep')
+    build_brep(src, [(0, 0, 0, 2, 1, 1), (10, 0, 0, 1, 2, 3), (20, 0, 0, 1, 1, 1),
+                     (30, 0, 0, 1, 1, 1), (60, 0, 0, 2, 2, 2)])
+    run('info', src, '--json', os.path.join(d, 'i.json'))
+    rep = load(os.path.join(d, 'i.json'))
+    before = {'t': (1, 0.5, 0.5), 'r': (10.5, 1.0, 1.5), 's': (20.5, 0.5, 0.5),
+              'm': (30.5, 0.5, 0.5), 'f': (61.0, 1.0, 1.0)}
+    tags = {nm: tag_at(rep, c) for nm, c in before.items()}
+    ops_path = write_ops(os.path.join(d, 'ops.json'),
+        [{'op': 'rename', 'solid': tags[nm], 'name': nm} for nm in ('t', 'r', 's', 'm', 'f')]
+        + [{'op': 'translate', 'solids': ['t'], 'by': [1, 2, 3]},
+           {'op': 'rotate', 'solids': ['r'], 'point': [10, 0, 0], 'axis': [0, 0, 1],
+            'angle_deg': 90},
+           {'op': 'scale', 'solids': ['s'], 'point': [20, 0, 0], 'factors': [2, 3, 4]},
+           {'op': 'mirror', 'solids': ['m'], 'plane': [1, 0, 0, -40]},
+           {'op': 'scale', 'solids': ['f'], 'point': [60, 0, 0], 'factor': 0.5}])
+    out = os.path.join(d, 'tf.step')
+    run('edit', src, '--ops', ops_path, '--out', out)
+    want = {'t': (2, (2, 2.5, 3.5)), 'r': (6, (9, 0.5, 1.5)), 's': (24, (21, 1.5, 2)),
+            'm': (1, (49.5, 0.5, 0.5)), 'f': (1, (60.5, 0.5, 0.5))}
+    docs = (load(os.path.join(d, 'tf.geom.json')),)
+    run('info', out, '--json', os.path.join(d, 'i2.json'))
+    docs = (docs[0], load(os.path.join(d, 'i2.json')))
+    for doc in docs:
+        ss = {s['name']: s for s in doc['solids']}
+        assert set(ss) == set(want), sorted(ss)
+        for nm, (v, c) in want.items():
+            assert rel(ss[nm]['volume'], v) <= 1e-9, (nm, ss[nm]['volume'], v)
+            for x, y in zip(ss[nm]['centroid'], c):
+                assert abs(x - y) <= 1e-9 * (1 + abs(y)), (nm, ss[nm]['centroid'], c)
+    sc_by_name = {s['name']: s for s in docs[0]['solids']}
+    assert {nm: sc_by_name[nm]['tag'] for nm in tags} == tags, docs[0]['solids']
+    print('  [ok] transforms centroids: %s'
+          % '; '.join('%s (%.3f, %.3f, %.3f)' % (nm, *ss[nm]['centroid'])
+                      for nm in ('t', 'r', 's', 'm', 'f')), flush=True)
+
+
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms)
 
 
 def main(argv=None):
