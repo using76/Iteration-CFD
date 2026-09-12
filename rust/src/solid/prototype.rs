@@ -149,118 +149,13 @@ use crate::{Result, Scalar, Tensor, Vec3};
 use crate::fv::SnGradScheme;
 
 // ==========================================================================
-//  The material
+//  The material and the boundary statement - moved to the solver, re-exported
 // ==========================================================================
 
-/// Isotropic linear thermo-elasticity, in the two engineering constants a
-/// case would state plus the expansion coefficient (Timoshenko & Goodier
-/// ch. 1; Boley & Weiner ch. 1). `T_ref` is not here because the prototype
-/// carries `T - T_ref` directly.
-///
-/// The Lamé conversion is the one the plan's §D.1 writes; it is kept here and
-/// not in [`crate::solid`] because the plan's case-format unit owns the
-/// validated, case-facing `MechanicalMaterial` and a prototype has no
-/// business pre-empting it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Material {
-    /// Young's modulus `E` [Pa].
-    pub e: Scalar,
-    /// Poisson's ratio `nu`, in `(-1, 0.5)`.
-    pub nu: Scalar,
-    /// Linear thermal expansion coefficient `alpha` [1/K].
-    pub alpha: Scalar,
-}
-
-impl Material {
-    /// Steel, near enough for an experiment whose answer is a ratio: `E = 200
-    /// GPa`, `nu` as given, `alpha = 1.2e-5 / K`.
-    pub fn steel(nu: Scalar) -> Self {
-        Self { e: 200.0e9, nu, alpha: 1.2e-5 }
-    }
-
-    /// `mu = E / (2(1 + nu))`.
-    #[inline]
-    pub fn mu(self) -> Scalar {
-        self.e / (2.0 * (1.0 + self.nu))
-    }
-
-    /// `lambda = E nu / ((1 + nu)(1 - 2 nu))`.
-    #[inline]
-    pub fn lambda(self) -> Scalar {
-        self.e * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))
-    }
-
-    /// `2 mu + lambda`, the implicit coefficient of the split.
-    #[inline]
-    pub fn implicit_gamma(self) -> Scalar {
-        2.0 * self.mu() + self.lambda()
-    }
-
-    /// `3 lambda + 2 mu = E / (1 - 2 nu)`, the bulk factor the thermal term
-    /// carries.
-    #[inline]
-    pub fn three_lambda_two_mu(self) -> Scalar {
-        3.0 * self.lambda() + 2.0 * self.mu()
-    }
-
-    /// The plan's derived contraction, `(mu + lambda)/(2 mu + lambda)`, which
-    /// reduces to `1/(2(1 - nu))`. Computed from the Lamé constants and NOT
-    /// from the closed form, so that the identity is something the tests can
-    /// check rather than something this file assumes.
-    #[inline]
-    pub fn predicted_contraction(self) -> Scalar {
-        (self.mu() + self.lambda()) / self.implicit_gamma()
-    }
-}
-
-// ==========================================================================
-//  Boundary conditions, one component at a time
-// ==========================================================================
-
-/// What one displacement component does on one patch.
-///
-/// Per component and not per patch, because a symmetry plane is a fixed
-/// normal component beside two free tangential ones, and the segregated split
-/// solves one component at a time anyway: expressing it per component costs
-/// nothing and is the only way a symmetry plane can be stated at all.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CompBc {
-    /// `u_i = value` on the face.
-    Fixed(Scalar),
-    /// `(sigma . n)_i = value` on the face. `Traction(0)` is a free surface.
-    Traction(Scalar),
-}
-
-/// The six patches of a block, in `blockgen`'s `-x +x -y +y -z +z` order.
-pub type PatchBcs = [[CompBc; 3]; 6];
-
-/// Every face free.
-pub fn all_free() -> PatchBcs {
-    [[CompBc::Traction(0.0); 3]; 6]
-}
-
-/// The experiment's own configuration: `-x` fully fixed, the other five
-/// faces traction-free. One fixed face is the minimum that removes all six
-/// rigid-body modes without imposing a strain, and it is what the plan's
-/// risk-1 row asks for by name.
-pub fn fixed_minus_x() -> PatchBcs {
-    let mut b = all_free();
-    b[0] = [CompBc::Fixed(0.0); 3];
-    b
-}
-
-/// Three symmetry planes at `-x`, `-y`, `-z`, the other three free: the
-/// unrestrained block of the plan's Gate 95-B. It removes the rigid-body
-/// modes and imposes **no** strain, so `u = alpha dT x` and `sigma = 0` are
-/// the exact solution of the continuous problem AND - the field being linear
-/// - of the discrete one.
-pub fn free_expansion() -> PatchBcs {
-    let mut b = all_free();
-    for axis in 0..3 {
-        b[2 * axis][axis] = CompBc::Fixed(0.0);
-    }
-    b
-}
+// Both moved to the solver in the unit that put the operator on the device;
+// re-exported so the tests below read as written.
+pub use super::Material;
+pub use super::bc::{all_free, fixed_minus_x, free_expansion, CompBc, PatchBcs};
 
 // ==========================================================================
 //  Tensor contractions, in SPEC-LIT §1's index convention
@@ -599,7 +494,7 @@ impl Prototype {
     /// many times to go round it before the source is assembled - and how
     /// many is the right number is not obvious in advance, which is why it is
     /// a field and not a constant, and why the sweep reports it.
-    fn correct_boundary(&mut self) {
+    pub fn correct_boundary(&mut self) {
         for _ in 0..self.boundary_passes.max(1) {
             fvc_grad_vector(&mut self.grad, &self.u, &self.ub, &self.mesh);
             self.update_ref_grad();
@@ -769,7 +664,7 @@ impl Prototype {
     /// if the two are evaluated from the same gradient, which across a
     /// boundary correction they are not: that second arrangement still
     /// amplified, by 15.7.
-    fn assemble_source(&mut self) {
+    pub fn assemble_source(&mut self) {
         let m = &self.mesh;
         for c in 0..m.n_cells {
             self.rhs[c] = Vec3::ZERO;
@@ -844,7 +739,7 @@ impl Prototype {
     /// trick to make the experiment look cheap - it is what any outer loop
     /// does - and it changes no fixed point, only how much work the inner
     /// solver has to do to get to it.
-    fn apply_map(&mut self, out: &mut [Vec3]) -> usize {
+    pub fn apply_map(&mut self, out: &mut [Vec3]) -> usize {
         self.correct_boundary();
         self.assemble_source();
         let mut its = 0;
@@ -988,6 +883,14 @@ impl Prototype {
         }
         worst
     }
+
+    /// The assembled system of one displacement component, for the tests that
+    /// diff the device operator against this one.
+    pub fn system(&self, i: usize) -> &CpuLdu { &self.a[i] }
+    /// The boundary triple of one displacement component.
+    pub fn boundary_triple(&self, i: usize) -> &CpuScalarBc { &self.bc[i] }
+    /// The boundary gradient of the last [`Prototype::correct_boundary`].
+    pub fn boundary_gradient(&self) -> &[Tensor] { &self.b_grad }
 }
 
 /// The Euclidean norm of a cell vector field.
