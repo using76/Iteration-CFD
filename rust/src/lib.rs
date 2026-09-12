@@ -81,6 +81,7 @@ pub mod precon;
 pub mod pressure;
 pub mod scalar_transport;
 pub mod simple;
+pub mod solid;
 pub mod solver;
 pub mod sources;
 pub mod species;
