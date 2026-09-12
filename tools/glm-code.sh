@@ -55,6 +55,9 @@ fi
 [ -n "${prompt//[[:space:]]/}" ] || { echo "glm-code: empty prompt" >&2; exit 2; }
 
 # 자식 프로세스만 z.ai 로 향한다. 부모 셸의 환경은 건드리지 않는다.
+# 지시문은 stdin 으로 넘긴다: Windows 의 명령줄 한도(약 32 KB)를 넘는 브리프를
+# 인자로 주면 claude.exe 가 "Argument list too long" 으로 뜨지도 못한다 (2026-09-12 실측, 51 KB 브리프).
+printf '%s' "$prompt" | \
 ANTHROPIC_BASE_URL="$BASE_URL" \
 ANTHROPIC_AUTH_TOKEN="$key" \
 ANTHROPIC_API_KEY="$key" \
@@ -65,6 +68,6 @@ CLAUDE_CODE_MAX_CONTEXT_TOKENS="${GLM_MAX_CONTEXT_TOKENS:-256000}" \
 MAX_THINKING_TOKENS="${GLM_THINKING_TOKENS:-4096}" \
 CLAUDE_CODE_MAX_OUTPUT_TOKENS="${GLM_MAX_OUTPUT_TOKENS:-64000}" \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-  claude -p "$prompt" \
+  claude -p \
     --model sonnet \
     ${GLM_PERMISSION_MODE:+--permission-mode "$GLM_PERMISSION_MODE"}
