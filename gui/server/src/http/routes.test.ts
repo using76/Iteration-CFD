@@ -258,4 +258,47 @@ describe('cht routes', () => {
     const whole = await json('/api/case/patches?path=cases/dieStack.cht.jsonc')
     expect(whole).toEqual({ patches: [], source: 'none' })
   })
+
+  it('answers the region layout with a cell count per region', async () => {
+    // A docs/10 §C layout written by hand: two regions, one interface, and the
+    // owner header note only on the fluid side (M4's writer puts it there).
+    const meshDir = path.join(ws.root, 'cases', 'site', 'mesh')
+    fs.mkdirSync(path.join(meshDir, 'fluid', 'polyMesh'), { recursive: true })
+    fs.mkdirSync(path.join(meshDir, 'flap', 'polyMesh'), { recursive: true })
+    fs.writeFileSync(
+      path.join(meshDir, 'regions.json'),
+      JSON.stringify({
+        version: 1,
+        units: 'm',
+        regions: [
+          { name: 'fluid', kind: 'fluid', polyMesh: 'fluid/polyMesh' },
+          { name: 'flap', kind: 'solid', polyMesh: 'flap/polyMesh', material: 'steel' },
+        ],
+        interfaces: [{ regions: ['fluid', 'flap'], patches: ['fluid_to_flap', 'flap_to_fluid'], faces: 240, tolerance: 1e-9 }],
+        source: { tool: 'step_mesh', version: '1.0', geometry: 'site.step', config: 'site.json' },
+      }),
+    )
+    fs.writeFileSync(
+      path.join(meshDir, 'fluid', 'polyMesh', 'owner'),
+      ['FoamFile { version 2.0; format ascii; class labelList; location "0"; object owner; }', '    note        "nPoints:100  nCells:240  nFaces:700  nInternalFaces:460";', '460', '(', '0 1 2', ')'].join('\n'),
+    )
+    fs.writeFileSync(path.join(meshDir, 'fluid', 'polyMesh', 'boundary'), 'FoamFile { version 2.0; format ascii; class polyBoundaryMesh; object boundary; }')
+    fs.writeFileSync(path.join(meshDir, 'flap', 'polyMesh', 'boundary'), 'FoamFile { version 2.0; format ascii; class polyBoundaryMesh; object boundary; }')
+
+    const layout = await json('/api/mesh/regions?dir=cases/site/mesh')
+    expect(layout.dir).toBe('cases/site/mesh')
+    expect(layout.version).toBe(1)
+    expect(layout.units).toBe('m')
+    expect(layout.regions[0]).toEqual({ name: 'fluid', kind: 'fluid', polyMesh: 'fluid/polyMesh', material: null, cells: 240, ok: true, error: null })
+    expect(layout.regions[1].cells).toBeNull()
+    expect(layout.regions[1].material).toBe('steel')
+    expect(layout.interfaces).toEqual([{ regions: ['fluid', 'flap'], patches: ['fluid_to_flap', 'flap_to_fluid'], faces: 240, tolerance: 1e-9 }])
+    expect(layout.source).toMatchObject({ tool: 'step_mesh' })
+
+    expect((await get('/api/mesh/regions')).status).toBe(400)
+    expect((await get('/api/mesh/regions?dir=..')).status).toBe(403)
+    expect((await get('/api/mesh/regions?dir=cases/site')).status).toBe(404)
+    fs.writeFileSync(path.join(meshDir, 'regions.json'), '{ not json')
+    expect((await get('/api/mesh/regions?dir=cases/site/mesh')).status).toBe(400)
+  })
 })

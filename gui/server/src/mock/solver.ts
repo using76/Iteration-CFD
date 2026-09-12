@@ -683,21 +683,39 @@ async function runCht(c: LoadedCase, args: MockArgs, io: SolverIo, env: SolverEn
     io.out('  region solid1: 40 x 20 x 20 cells, k = 16 W/m/K')
     io.out('  region solid2: 40 x 20 x 20 cells, k = 401 W/m/K')
   }
+  const regionNames = regions.length ? regions.map((r) => r.name) : ['solid1', 'solid2']
   const iters = c.run ? Math.max(1, Math.round(c.run.endTime / (c.run.deltaT || 1))) : 400
   io.out('')
   io.out(`iterating ${iters} times, relax T 0.9`)
   const tau = iters / 12
+  let metAll = false
   for (let it = 1; it <= iters; it++) {
     if (it % 25 === 0 || it === 1) {
       const res = Math.max(1e-7, 0.5 * Math.exp(-it / tau) * (1 + 0.15 * noise()))
-      io.out(`iter ${String(it).padStart(6)}  T res ${sci(res)} (${Math.max(1, Math.round(10 * Math.exp(-it / tau)) + 1)})  interface flux ${g(120 * (1 - Math.exp(-it / tau)))} W`)
+      // One T[<region>] pair per region - the brackets are what the cht
+      // residual style keys on (grammar A in shared/src/residuals.ts).
+      const pairs = regionNames.map((n, i) => `T[${n}] ${sci(res * (i + 1))}`).join('  ')
+      io.out(`iter ${String(it).padStart(6)}  T res ${sci(res)} (${Math.max(1, Math.round(10 * Math.exp(-it / tau)) + 1)})  ${pairs}  interface flux ${g(120 * (1 - Math.exp(-it / tau)))} W`)
       await sleep(paceMs(25, env))
       if (it > 1 && res < 1e-5) {
-        io.out('converged: every residualControl entry met')
+        metAll = true
         break
       }
     }
   }
+  // S1's end-of-run report (grammar B in shared/src/residuals.ts): one line
+  // per region, then the verdict. The metric records carry iter null, so they
+  // ride the exit frame instead of opening a new chart iteration.
+  io.out('')
+  for (const [i, n] of regionNames.entries()) {
+    const finalRes = metAll ? 3.2e-15 * (i + 1) : 2.7e-13 * (i + 1)
+    io.out(`    region '${n}'  row scale ${g(1 / (i + 1))} of largest | residual initial 1.0e+00 -> final ${sci(finalRes)} | ${finalRes <= 1e-14 ? 'met' : 'NOT met'}`)
+  }
+  if (metAll) io.out('  converged: yes')
+  else
+    io.out(
+      `  converged: no - region '${regionNames[regionNames.length - 1]}' final ${sci(2.7e-13 * regionNames.length)} > tolerance 1.000e-14; the global residual ${sci(3.2e-15)} does not see it`,
+    )
   io.out('')
   io.out('interface solid1/solid2: q = 120.000 W, T_interface = 318.42 K')
   // The demo writes the VTUs whether or not the case has an output block, so

@@ -17,6 +17,7 @@ export type ResidualStyle =
   | 'vof'
   | 'datacentre'
   | 'generic'
+  | 'cht'
   | 'none'
 
 export interface ParsedResidual {
@@ -135,6 +136,22 @@ const RE_DC_FAN = new RegExp(String.raw`([\w.-]+): Q = (${NUM}) m\^3/s, dp = (${
 const RE_GENERIC_HEAD = /^\s*(?:iter(?:ation)?|step)\s*:?\s*(\d+)\s*:?\s+(.*)$/i
 const RE_GENERIC_PAIR = new RegExp(String.raw`(?<![\w/|])([A-Za-z_][\w|]*)\s*(?:res(?:idual)?)?\s*[:=]?\s+(${NUM})(?:\s+\((\d+)\))?`, 'g')
 const GENERIC_SKIP = new Set(['iter', 'iteration', 'step', 'wall', 'time', 'in', 'iters', 'sub', 'max', 'min', 'pa', 'k'])
+
+// cht: an iteration line carries the plain pairs the generic scan finds PLUS
+// one `T[<region>]` pair per region - the brackets are what make the line cht's
+// (grammar A; the demo's runCht prints exactly this shape):
+//   iter     12  T res 1.200e-03 (4)  T[die] 3.100e-04  T[solder] 2.000e-04
+const RE_CHT_HEAD = /^\s*(?:iter(?:ation)?|step|outer)\s*:?\s*(\d+)\b(.*)$/i
+const RE_CHT_TAGGED = new RegExp(
+  String.raw`(?<![\w/|\]])([A-Za-z_]\w*)\[([A-Za-z_][\w-]*)\]\s*(?:res(?:idual)?)?\s*[:=]?\s+(${NUM})(?:\s+\((\d+)\))?`,
+  'g',
+)
+// cht grammar B - S1's end-of-run report line (src/bin/cht.rs §13.4.2):
+//   region 'die'      row scale 1.000e+00 of largest | residual initial 4.1e-01 -> final 3.2e-15 | met
+const RE_CHT_REGION_LINE = new RegExp(String.raw`^\s*region\s+'([^']+)'.*?\bresidual\b(.*)$`, 'i')
+// S1's not-converged verdict line - RE_CONVERGED would read it as a converged
+// event and the run manager would light the green dot on a failed run.
+const RE_CHT_NOT_CONVERGED = /^\s*converged:\s*no\b/i
 
 function normaliseName(raw: string): string {
   return FIELD_ALIASES[raw] ?? raw
@@ -276,6 +293,60 @@ function parseGeneric(line: string): ParsedLine | null {
 }
 
 /**
+ * cht grammar A: one iteration line whose `<field>[<region>]` pairs make it a
+ * cht line. Without a tagged pair the line is the generic branch's, unchanged.
+ * The plain pairs come from parseGeneric (which ignores bracketed names), the
+ * tagged pairs merge into them under `${field}[${region}]` - no alias, no
+ * `_`-split, so a series is named exactly what the driver printed.
+ */
+function parseChtHead(line: string): ParsedLine | null {
+  const m = line.match(RE_CHT_HEAD)
+  if (!m) return null
+  const tagged: Record<string, number> = {}
+  const taggedIters: Record<string, number> = {}
+  let found = false
+  for (const p of m[2].matchAll(RE_CHT_TAGGED)) {
+    const name = `${p[1]}[${p[2]}]`
+    const v = num(p[3])
+    if (!Number.isFinite(v) && !Number.isNaN(v)) continue
+    tagged[name] = v
+    if (p[4] !== undefined) taggedIters[name] = Number(p[4])
+    found = true
+  }
+  if (!found) return null
+  const g = parseGeneric(line)
+  const fields = g && g.kind === 'residual' ? g.rec.fields : {}
+  const solverIters = g && g.kind === 'residual' && g.rec.solverIters ? g.rec.solverIters : {}
+  Object.assign(fields, tagged)
+  Object.assign(solverIters, taggedIters)
+  return {
+    kind: 'residual',
+    rec: { iter: Number(m[1]), time: null, wall: null, fields, solverIters: Object.keys(solverIters).length ? solverIters : null },
+    raw: line,
+  }
+}
+
+/**
+ * cht grammar B: S1's end-of-run region line. The LAST number on the line is
+ * the region's final residual; `met` / `NOT met` becomes a 1/0 metric beside
+ * it. iter stays null, so the pair rides the run's exit frame instead of
+ * opening a new iteration on the chart.
+ */
+function parseChtRegionLine(line: string): ParsedLine | null {
+  const m = line.match(RE_CHT_REGION_LINE)
+  if (!m) return null
+  const nums = [...m[2].matchAll(new RegExp(NUM, 'g'))]
+  if (!nums.length) return null
+  const last = num(nums[nums.length - 1][0])
+  const met = /\bNOT\s+met\b/i.test(line) ? 0 : /\bmet\b/i.test(line) ? 1 : 0
+  return {
+    kind: 'metric',
+    rec: { iter: null, time: null, metrics: { [`residual[${m[1]}]`]: last, [`met[${m[1]}]`]: met } },
+    raw: line,
+  }
+}
+
+/**
  * Stateful line parser. `feed(line)` returns zero or more parsed events. The
  * buoyant driver spreads one report over three lines, which is why this is a
  * class and not a pure function.
@@ -289,6 +360,10 @@ export class LogLineParser {
   feed(rawLine: string): ParsedLine[] {
     const line = rawLine.replace(/\r$/, '')
     if (!line.trim()) return []
+    // S1's `converged: no - ...` verdict reaches parseCommon otherwise (it
+    // matches RE_CONVERGED) and would mark a failed run converged. `yes` (and
+    // every other driver's verdict) still goes through.
+    if (this.style === 'cht' && RE_CHT_NOT_CONVERGED.test(line)) return []
     const common = parseCommon(line)
     if (common) return [common]
     if (this.style === 'none') return []
@@ -321,20 +396,31 @@ export class LogLineParser {
         const d = parseDatacentre(s)
         return d ? [d] : []
       }
-      case 'generic': {
-        const st = parseSteady(s)
-        if (st) return [st]
-        const lm = parseLowmach(s)
-        if (lm) return [lm]
-        const vf = parseVof(s)
-        if (vf.length) return vf
-        const b = this.feedBuoyant(s)
-        if (b.length) return b
-        const g = parseGeneric(s)
-        return g ? [g] : []
+      case 'cht': {
+        const rl = parseChtRegionLine(s)
+        if (rl) return [rl]
+        const ch = parseChtHead(s)
+        if (ch) return [ch]
+        return this.feedGeneric(s)
       }
+      case 'generic':
+        return this.feedGeneric(s)
     }
     return []
+  }
+
+  /** The `generic` branch's body, shared with `cht`'s fall-through. */
+  private feedGeneric(s: string): ParsedLine[] {
+    const st = parseSteady(s)
+    if (st) return [st]
+    const lm = parseLowmach(s)
+    if (lm) return [lm]
+    const vf = parseVof(s)
+    if (vf.length) return vf
+    const b = this.feedBuoyant(s)
+    if (b.length) return b
+    const g = parseGeneric(s)
+    return g ? [g] : []
   }
 
   private feedBuoyant(s: string): ParsedLine[] {

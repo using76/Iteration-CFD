@@ -373,7 +373,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('open_mesh_dialog'),
-    mode: z.enum(['preset', 'automesher']).nullish().describe('Which half of the dialog to open; the default follows whichever of preset/config is given'),
+    mode: z.enum(['preset', 'automesher', 'regions']).nullish().describe('Which half of the dialog to open; the default follows whichever of preset/config/layoutDir is given'),
     preset: z.string().nullish().describe('Mesh preset kind, e.g. "channel"'),
     // One number fills all three axes, which is wrong for every 2-D preset
     // (channel, cavity, step, damBreak run one cell deep): [nx, ny, nz] says
@@ -384,6 +384,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
       .describe('Cells: one number for every direction, or [nx, ny, nz]'),
     outputDir: z.string().nullish().describe('Workspace-relative output directory'),
     config: z.string().nullish().describe('Automesher form: workspace-relative AutomeshConfig JSONC'),
+    layoutDir: z.string().nullish().describe('Regions form: workspace-relative layout directory the region meshes write into (regions.json + <region>/polyMesh)'),
     check: z.string().nullish().describe('Automesher form: -check this existing case directory instead of meshing'),
     dryRun: Boolish.nullish().describe('Automesher form: -dryRun (read the config and report the plan, mesh nothing)'),
   }),
@@ -417,6 +418,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     type: z.literal('open_result'),
     path: z.string().describe('Workspace-relative result path (case/output dir, time dir, .vtu or .pvd)'),
     timeIndex: TimeIndexSchema.nullish().describe('Time step to show; null = last'),
+    region: z.string().nullish().describe('Region of a multi-region case, named as regions.json / the case spell it; null = the whole root'),
   }),
   z.object({
     type: z.literal('set_post'),
@@ -473,6 +475,11 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('post_time'), index: TimeIndexSchema.describe('Time step index, or "last"') }),
   z.object({ type: z.literal('post_screenshot') }),
+  z.object({
+    type: z.literal('post_warp'),
+    field: z.string().nullish().describe('Point displacement field to deform the drawn surface by; null removes the warp'),
+    scale: z.coerce.number().nullish().describe('Deformation scale as a pure number; 1 = the true deformed shape, 0 removes the warp'),
+  }),
   z.object({
     type: z.literal('open_mesh_view'),
     representation: RepresentationModeSchema.nullish().describe('How the mesh is drawn; default surface + edges'),

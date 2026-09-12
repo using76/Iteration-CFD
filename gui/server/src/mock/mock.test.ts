@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { classifyLine } from '@cfd/shared'
 import { parseMockArgs, UsageError } from './args.js'
 import { g, sci } from './format.js'
 import { presetSpec, faceCount, foamPatchesFor, bcContext } from './mesh.js'
@@ -137,6 +138,29 @@ describe('mock ofgpu-cht', () => {
       expect(lines.some((l) => l.includes('region flap: 2 x 2 x 2 cells, mechanics'))).toBe(true)
       expect(lines.some((l) => l.includes('region base: 2 x 2 x 1 cells'))).toBe(true)
       expect(lines.some((l) => l.startsWith('demo: writing'))).toBe(false)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('the demo cht run prints per-region residual lines the cht style parses', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cht-demo-'))
+    try {
+      await makeRegionCase(path.join(dir, 'cases'))
+      const args = parseMockArgs('ofgpu-cht', [path.join(dir, 'cases', 'stack.cht.jsonc')])
+      const lines: string[] = []
+      const io: SolverIo = { out: (l) => lines.push(l), err: (l) => lines.push(l) }
+      const code = await runMockSolver(args, io, { speed: 1000, fail: false, workspace: null })
+      expect(code).toBe(0)
+      // Grammar A: an iteration line carries a T[<region>] pair per region.
+      const tagged = lines.filter((l) => classifyLine(l, 'cht').some((e) => e.kind === 'residual' && Object.keys(e.rec.fields).some((f) => f.startsWith('T['))))
+      expect(tagged.length).toBeGreaterThan(0)
+      const first = classifyLine(tagged[0], 'cht').find((e) => e.kind === 'residual')
+      if (first?.kind !== 'residual') throw new Error('unreachable')
+      expect(Object.keys(first.rec.fields)).toContain('T[base]')
+      // Grammar B: S1's end-of-run report, one line per region, then the verdict.
+      expect(lines.some((l) => /^\s+region '.*' +row scale .* \| residual initial .* -> final .* \| (met|NOT met)$/.test(l))).toBe(true)
+      expect(lines.some((l) => l === '  converged: yes' || l.startsWith('  converged: no - region '))).toBe(true)
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }

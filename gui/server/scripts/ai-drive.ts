@@ -277,8 +277,13 @@ async function drive(opts: Options): Promise<number> {
       case 'show_chart': uiState.activeTab = cmd.chart; break
       case 'open_result': {
         const v = standInViewer()
-        v.datasetId = cmd.path
+        v.datasetId = cmd.region ? `${cmd.path}#${cmd.region}` : cmd.path
         v.time = typeof cmd.timeIndex === 'number' ? cmd.timeIndex : v.time
+        break
+      }
+      case 'post_warp': {
+        const v = standInViewer()
+        ;(v as { warp?: unknown }).warp = cmd.field ? { field: cmd.field, scale: cmd.scale ?? 1 } : null
         break
       }
       case 'set_post': {

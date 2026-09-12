@@ -254,4 +254,13 @@ describe('ui command coercion and the workspace commands', () => {
     expect(UiStateSchema.safeParse(old).success).toBe(true)
     expect(UiStateSchema.safeParse({ ...full, case: null, tabs: null, run: null, viewer: null, problems: null, connection: null, locale: null }).success).toBe(true)
   })
+
+  it('post_warp and a regional open_result parse', () => {
+    expect(parseOk(UiCommandSchema, { type: 'post_warp', field: 'u_point', scale: '2' })).toMatchObject({ type: 'post_warp', field: 'u_point', scale: 2 })
+    const off = parseOk(UiCommandSchema, { type: 'post_warp', field: null })
+    expect(off.field).toBeNull()
+    expect(off.scale).toBeUndefined()
+    expect(parseOk(UiCommandSchema, { type: 'open_result', path: 'cases/x', region: 'flap' })).toMatchObject({ region: 'flap' })
+    expect(parseOk(UiCommandSchema, { type: 'open_mesh_dialog', mode: 'regions', layoutDir: 'cases/site/mesh' })).toMatchObject({ mode: 'regions', layoutDir: 'cases/site/mesh' })
+  })
 })

@@ -46,7 +46,7 @@ export interface BinarySpec {
   accepts: CaseFormat[]
   /** Turbulence models this driver can construct. */
   builds: string[]
-  residualStyle: 'kEpsilon' | 'kOmega' | 'sa' | 'plume' | 'buoyant' | 'lowmach' | 'vof' | 'datacentre' | 'generic' | 'none'
+  residualStyle: 'kEpsilon' | 'kOmega' | 'sa' | 'plume' | 'buoyant' | 'lowmach' | 'vof' | 'datacentre' | 'generic' | 'cht' | 'none'
   writes: { formats: OutputFormat[]; restart: boolean; csv: boolean }
   longRunning: boolean
   /** Whether the run needs the GPU (serialised on the single-GPU queue). */
@@ -345,7 +345,7 @@ export const BINARIES: BinarySpec[] = [
     flags: [{ name: '-csv', type: 'path', description: 'Write interface/region results to this CSV.' }],
     accepts: ['jsonc'],
     builds: ['laminar'],
-    residualStyle: 'generic',
+    residualStyle: 'cht',
     writes: { formats: ['vtu'], restart: false, csv: true },
     longRunning: true,
     gpu: true,
@@ -519,6 +519,32 @@ export const PIPELINES: BinarySpec[] = [
       { name: '--stop-after-checkpoint', type: 'flag', description: 'Stop after the checkpoint stage; the next run can reuse it with --from-checkpoint.' },
       { name: '--tag', type: 'string', description: 'Suffix for this run: outputs and the mesh name gain _NAME, so two runs of one config do not overwrite each other.' },
       { name: '--dry-run', type: 'flag', description: 'Stop after the cut and print volumes, masses, surface counts and ground heights without meshing.' },
+    ],
+    accepts: [],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: [], restart: false, csv: false },
+    longRunning: true,
+    gpu: false,
+    usageKind: 'none',
+    pipeline: true,
+  },
+  {
+    name: 'regions-from-msh',
+    source: 'tools/mesh/regions_from_msh.py',
+    purpose: 'Split a Gmsh 4.1 mesh with named volumes (a step_mesh.py run with regions.solids) into docs/10 §C\'s region layout: one polyMesh per volume under <outDir>/<region>/polyMesh, the regions.json manifest beside them, and the fluid/solid interface pairs written as <this>_to_<other> patches (R1-R6).',
+    summary: 'Region layout: a Gmsh mesh with named volumes to regions.json + one polyMesh per region.',
+    kind: 'mesh',
+    positionals: [
+      { name: 'msh', type: 'path', description: 'Gmsh 4.1 mesh with named volumes (a step_mesh.py run with regions.solids)' },
+      { name: 'outDir', type: 'path', description: 'Layout directory: regions.json + <region>/polyMesh per volume' },
+    ],
+    flags: [
+      { name: '--fluid', type: 'string', description: 'Which volume is the fluid (default: the one named fluid; "none" for a solid-only layout)' },
+      { name: '--material', type: 'string', repeatable: true, description: 'REGION=NAME, recorded in regions.json' },
+      { name: '--units', type: 'string', description: 'regions.json units (default m)' },
+      { name: '--tolerance', type: 'float', description: 'Interface pairing tolerance written to regions.json (default 1e-9)' },
+      { name: '--overwrite', type: 'flag', description: 'Replace an outDir that already holds regions.json' },
     ],
     accepts: [],
     builds: [],

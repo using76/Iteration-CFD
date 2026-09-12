@@ -15,6 +15,7 @@ import { readCaseJsonc } from '../formats/casejsonc.js'
 import { BOX_FACES } from '../formats/cartesian.js'
 import { discoverRegions } from '../formats/regions.js'
 import { MeshSummaryError, meshSummaryForCase, parseBoundaryTextSafe } from '../formats/meshSummary.js'
+import { RegionLayoutError, readRegionLayout } from '../formats/regionsLayout.js'
 import { resolveResultRoot } from '../formats/results.js'
 import type { RunManager, StartRunOptions } from '../runs/types.js'
 import { LINE_SAMPLE_MAX_POINTS, LINE_SAMPLE_POINTS, SampleError, lineSample, type SampleComponent } from '../tools/sample.js'
@@ -349,6 +350,20 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
       return await meshSummaryForCase(root, r.rel)
     } catch (err) {
       if (err instanceof MeshSummaryError && err.code === 'NOT_FOUND') throw new HttpError(404, err.message)
+      throw err
+    }
+  })
+  // One row per region of a docs/10 §C layout: the manifest plus what the
+  // regions' own polyMesh directories say (present, cell count from the owner
+  // header's note). Same shape as /api/mesh/summary: workspace-relative `dir`.
+  router.get('/api/mesh/regions', async ({ query }) => {
+    const dir = query.get('dir')
+    if (!dir) throw new HttpError(400, 'dir is required')
+    const r = resolveInWorkspace(root, dir, { mustExist: true })
+    try {
+      return await readRegionLayout(root, r.rel)
+    } catch (err) {
+      if (err instanceof RegionLayoutError) throw new HttpError(err.code === 'NOT_FOUND' ? 404 : 400, err.message)
       throw err
     }
   })

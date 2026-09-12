@@ -136,3 +136,52 @@ describe('generic style', () => {
     expect(classifyLine('iter     40  |U| res 0.0012  |p| res 3.400e-05  contErr 1e-07', 'generic')[0].kind).toBe('residual')
   })
 })
+
+describe('cht driver', () => {
+  it('parses the per-region pairs of one iteration line into one record', () => {
+    const out = classifyLine('iter     12  T res 1.200e-03 (4)  T[die] 3.100e-04  T[solder] 2.000e-04', 'cht')
+    expect(out).toHaveLength(1)
+    const r = out[0]
+    expect(r.kind).toBe('residual')
+    if (r.kind !== 'residual') return
+    expect(r.rec.iter).toBe(12)
+    expect(r.rec.fields).toEqual({ T: 1.2e-3, 'T[die]': 3.1e-4, 'T[solder]': 2.0e-4 })
+    expect(r.rec.solverIters).toEqual({ T: 4 })
+  })
+
+  it("reads S1's report line as an end-of-run metric", () => {
+    const die = classifyLine("    region 'die'      row scale 1.000e+00 of largest | residual initial 4.1e-01 -> final 3.2e-15 | met", 'cht')
+    expect(die).toHaveLength(1)
+    expect(die[0].kind).toBe('metric')
+    if (die[0].kind !== 'metric') return
+    expect(die[0].rec.metrics).toEqual({ 'residual[die]': 3.2e-15, 'met[die]': 1 })
+    expect(die[0].rec.iter).toBeNull()
+    const solder = classifyLine("    region 'solder'   row scale 2.4e-02 of largest   | residual initial 1.0e+00 -> final 2.7e-13 | NOT met", 'cht')
+    expect(solder[0].kind).toBe('metric')
+    if (solder[0].kind !== 'metric') return
+    expect(solder[0].rec.metrics).toEqual({ 'residual[solder]': 2.7e-13, 'met[solder]': 0 })
+    expect(solder[0].rec.iter).toBeNull()
+  })
+
+  it('a NOT-converged verdict is not a converged event', () => {
+    expect(
+      classifyLine("  converged: no - region 'solder' final 2.7e-13 > tolerance 1.000e-14; the global residual 3.2e-15 does not see it", 'cht'),
+    ).toEqual([])
+    expect(classifyLine('  converged: yes', 'cht')).toEqual([{ kind: 'converged', message: 'yes' }])
+  })
+
+  it('keeps every generic line', () => {
+    const lines = [
+      'Iter 1000: Continuity: 2.3e-3  U: 4.1e-4  k: 6.2e-4  ε: 8.1e-4',
+      'iter     40  |U| res 0.0012  |p| res 3.400e-05  contErr 1e-07  T [300, 373.15] K  rho [0.95, 1.18] kg/m3  p0 101325 Pa  dp0/dt 0.5 Pa/s',
+      'step    12  t =       0.01  dt     0.0005  alphaCo      0.3  x2 sub  p_rgh 1.2345678901234567e-03 -> 1.2e-05 in 14 iters  continuity 3.4e-09  alpha [-1.0e-06, 1]',
+    ]
+    for (const l of lines) expect(classifyLine(l, 'cht')).toEqual(classifyLine(l, 'generic'))
+    // The lowmach line keeps generic's exact routing: parseLowmach's residual
+    // (lowmachMetrics is the 'lowmach' style's own extra, and cht must stay
+    // byte-for-byte what generic was).
+    const lm = classifyLine(lines[1], 'cht')
+    expect(lm).toHaveLength(1)
+    expect(lm[0].kind === 'residual' && lm[0].rec.fields).toEqual({ U: 0.0012, p: 3.4e-5, continuity: 1e-7 })
+  })
+})
