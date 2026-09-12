@@ -183,4 +183,20 @@ impl SolidBcs {
         }
         gpu.write(&mut self.ref_value, values)
     }
+
+    /// Setup only (`gpu.write`): a per-face traction, for a load that varies
+    /// over a patch - the end-loaded cantilever's parabolic shear on its
+    /// free end is the case that asked for it. `0` in a `Fixed` component;
+    /// which component is `Fixed` and which is `Traction` on each face comes
+    /// from the `per_patch` table `new` was given, this writes values only.
+    pub fn set_traction_values(&mut self, gpu: &Gpu, values: &[Vec3]) -> Result<()> {
+        if values.len() != self.n_boundary_faces {
+            return Err(Error::Config(format!(
+                "solid: {} per-face tractions for {} boundary faces",
+                values.len(),
+                self.n_boundary_faces
+            )));
+        }
+        gpu.write(&mut self.traction, values)
+    }
 }

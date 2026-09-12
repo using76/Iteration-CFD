@@ -428,3 +428,98 @@ fn a_linear_displacement_is_reproduced_on_a_graded_block() {
         );
     }
 }
+
+// ==========================================================================
+//  The outer-loop unit's host refusals (no GPU)
+// ==========================================================================
+
+#[test]
+fn nu_outside_the_thermodynamic_range_is_refused() {
+    for nu in [-1.5, -1.0, 0.5, 0.6] {
+        let msg = Material { e: 200e9, nu, alpha: 1.2e-5 }
+            .validate()
+            .expect_err("outside the open interval (-1, 0.5)");
+        assert!(msg.to_string().contains("(-1, 0.5)"), "{msg}");
+    }
+    for nu in [-0.5, 0.0, 0.2, 0.45] {
+        assert!(
+            Material { e: 200e9, nu, alpha: 1.2e-5 }.validate().is_ok(),
+            "nu = {nu} is inside the interval and at or below the measured edge"
+        );
+    }
+}
+
+#[test]
+fn nu_above_the_measured_edge_is_refused_naming_block_coupling() {
+    for nu in [0.4501, 0.46, 0.49] {
+        let msg = Material { e: 200e9, nu, alpha: 1.2e-5 }
+            .validate()
+            .expect_err("above the measured edge");
+        let msg = msg.to_string();
+        assert!(msg.contains("0.45"), "{msg}");
+        assert!(msg.contains("block-coupled"), "{msg}");
+        assert!(msg.contains("615"), "{msg}");
+    }
+    assert!(Material { e: 200e9, nu: 0.45, alpha: 1.2e-5 }.validate().is_ok());
+
+    for e in [0.0, -1.0] {
+        let msg = Material { e, nu: 0.3, alpha: 1.2e-5 }
+            .validate()
+            .expect_err("a modulus is positive");
+        assert!(msg.to_string().contains("not positive"), "{msg}");
+    }
+}
+
+#[test]
+fn every_not_built_feature_is_refused_by_name() {
+    let cases: &[(NotBuilt, &str, &str)] = &[
+        (NotBuilt::FiniteStrain, "finite strain", "small strain"),
+        (NotBuilt::Plasticity, "plasticity", "J2"),
+        (NotBuilt::Contact, "contact", "active set"),
+        (NotBuilt::Fracture, "fracture", "not built"),
+        (NotBuilt::Inertia, "Newmark", "rho_infinity"),
+        (NotBuilt::Orthotropic, "orthotropic", "alignment"),
+        (NotBuilt::TwoWayCoupling { delta: 1.06e-2 }, "two-way", "delta"),
+        (NotBuilt::BlockCoupled, "block-coupled", "3x3"),
+    ];
+    for (what, a, b) in cases {
+        let msg = refuse(*what, "mechanics").to_string();
+        assert!(
+            msg.contains(a) && msg.contains(b) && msg.contains("mechanics"),
+            "{msg}"
+        );
+    }
+}
+
+#[test]
+fn the_two_way_coupling_parameter_is_one_percent_for_steel() {
+    let steel = Material::steel(0.3);
+    let d = two_way_coupling_delta(&steel, 7850.0, 470.0, 293.0);
+    assert!((d - 1.0619e-2).abs() <= 2.0e-6, "delta = {d:.4e}");
+    let hot = two_way_coupling_delta(&steel, 7850.0, 470.0, 586.0);
+    assert!(
+        (hot - 2.0 * d).abs() <= 1.0e-15 * hot.abs(),
+        "delta is linear in T_0: {hot:.6e} vs twice {d:.6e}"
+    );
+}
+
+#[test]
+fn a_displacement_that_should_have_moved_the_mesh_is_refused() {
+    let hm = prototype::block(10).expect("block");
+    let n = hm.c.len();
+    let small = vec![Vec3::new(0.005, 0.0, 0.0); n];
+    let ratio = mesh_motion_ratio(&small, &hm);
+    assert!((ratio - 0.05).abs() <= 1.0e-12, "ratio = {ratio:.6}");
+    assert!(refuse_displacement_reaching_the_fluid(ratio).is_ok());
+
+    let big = vec![Vec3::new(0.02, 0.0, 0.0); n];
+    let ratio = mesh_motion_ratio(&big, &hm);
+    assert!((ratio - 0.2).abs() <= 1.0e-12, "ratio = {ratio:.6}");
+    let msg = refuse_displacement_reaching_the_fluid(ratio)
+        .expect_err("a fifth of a cell is mesh motion")
+        .to_string();
+    assert!(
+        msg.contains("space conservation law") && msg.contains("0.1"),
+        "{msg}"
+    );
+}

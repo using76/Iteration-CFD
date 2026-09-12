@@ -266,6 +266,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_displacement_iteration_replays_bitwise"),
     ),
     (
+        "src/solid/outer.rs",
+        Stance::Refused(
+            "the Aitken outer loop reads ||r|| and two dot products back to the \
+             host every iteration to choose omega and to stop; the region inside \
+             one iteration - one Picard application - is what the displacement \
+             module's capture gate replays bitwise (src/solid/displacement.rs). \
+             Alternative: the device reduction - the norm, both dot products and \
+             the update as kernels, omega chosen without a download; not \
+             implemented",
+        ),
+    ),
+    (
         "src/solver.rs",
         Stance::Gate("the_fixed_iteration_solve_replays_bitwise"),
     ),
