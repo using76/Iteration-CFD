@@ -1,8 +1,14 @@
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseMockArgs, UsageError } from './args.js'
 import { g, sci } from './format.js'
 import { presetSpec, faceCount, foamPatchesFor, bcContext } from './mesh.js'
 import { analyticFields, uniformGrid } from './fields.js'
+import { readVtuInfo } from '../formats/vtu.js'
+import { makeRegionCase } from '../datasets/fixtures/makeCase.js'
+import { runMockSolver, type SolverIo } from './solver.js'
 
 describe('number formatting ports', () => {
   it('g() matches rust g_prec(x, 6)', () => {
@@ -105,5 +111,34 @@ describe('analytic fields', () => {
     expect(v.alpha[0]).toBe(1)
     expect(v.alpha[49]).toBe(0)
     expect(v.p_rgh[0]).toBeGreaterThan(0)
+  })
+})
+
+describe('mock ofgpu-cht', () => {
+  it('ofgpu-cht writes one real-point VTU per region in demo mode', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cht-demo-'))
+    try {
+      await makeRegionCase(path.join(dir, 'cases'))
+      // The fixture already wrote the VTUs; remove them so this run is the writer.
+      await fs.rm(path.join(dir, 'cases', 'stack.cht_jsonc'), { recursive: true, force: true })
+      const args = parseMockArgs('ofgpu-cht', [path.join(dir, 'cases', 'stack.cht.jsonc')])
+      const lines: string[] = []
+      const io: SolverIo = { out: (l) => lines.push(l), err: (l) => lines.push(l) }
+      const code = await runMockSolver(args, io, { speed: 1000, fail: false, workspace: null })
+      expect(code).toBe(0)
+      const vtk = path.join(dir, 'cases', 'stack.cht_jsonc', 'VTK')
+      expect(lines.filter((l) => l.startsWith('vtu: '))).toHaveLength(2)
+      const flap = await readVtuInfo(path.join(vtk, 'flap.vtu'))
+      expect(flap.arrays.filter((a) => a.section === 'CellData').map((a) => a.name)).toEqual(['T', 'u', 'sigma', 'vonMises', 'sigmaPrincipal', 'magU'])
+      expect(flap.arrays.filter((a) => a.section === 'PointData').map((a) => a.name)).toEqual(['T', 'u'])
+      const base = await readVtuInfo(path.join(vtk, 'base.vtu'))
+      expect(base.arrays.filter((a) => a.section === 'CellData').map((a) => a.name)).toEqual(['T'])
+      expect(base.arrays.filter((a) => a.section === 'PointData').map((a) => a.name)).toEqual(['T'])
+      expect(lines.some((l) => l.includes('region flap: 2 x 2 x 2 cells, mechanics'))).toBe(true)
+      expect(lines.some((l) => l.includes('region base: 2 x 2 x 1 cells'))).toBe(true)
+      expect(lines.some((l) => l.startsWith('demo: writing'))).toBe(false)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 })

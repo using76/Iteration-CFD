@@ -19,7 +19,7 @@ function flagLine(b: BinarySpec): string {
 function registryDigest(): string {
   const lines: string[] = []
   lines.push('### Binaries (name, purpose, accepted case formats)')
-  for (const b of BINARIES) {
+  for (const b of BINARIES.filter((b) => !b.pending)) {
     const accepts = b.accepts.length ? b.accepts.join('|') : 'no case'
     lines.push(`- ${b.name} [${b.kind}, ${accepts}${b.gpu ? ', GPU' : ''}]: ${b.summary}`)
     lines.push(`  ${flagLine(b)}`)
@@ -72,6 +72,7 @@ ${registryDigest()}
 
 ## Viewer rules
 - viewer_command load (a case.jsonc, output directory, time directory or .vtu/.pvd) first; it returns while the dataset is still loading. Then setField / addSlice / addStreamlines / addIsoSurface / addGlyphs / setCamera as needed. Interior layers (slices, streamlines, iso-surfaces, glyphs) are hidden by an opaque boundary surface: after adding one, call setRepresentation with opacity around 0.3 (or mode 'outline') so they are visible. Take a screenshot when the user asks to see the result, and describe what the image shows.
+- A stress result (sigma, 9 components) is coloured by setField with component vonMises, principal1..3, hydrostatic or xx..xz; setWarp {field: 'u_point', scale} shows the deformed shape (scale 1 = true, null removes it); a multi-region case (.cht.jsonc) is opened per region with load {path, region} — results_discover lists the regions.
 - plot_residuals opens the residual chart for a run.
 
 ## Approvals

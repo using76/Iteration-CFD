@@ -819,6 +819,8 @@ export interface ResultsResponse {
   times: Array<{ label: string; value: number; fields: string[] }>
   vtk: Array<{ path: string; kind: 'pvd' | 'vtu' | 'vtp' }>
   cellCount: number | null
+  /** Regions of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); empty for a single-region root. */
+  regions: RegionEntry[]
 }
 
 export interface StartRunRequest {

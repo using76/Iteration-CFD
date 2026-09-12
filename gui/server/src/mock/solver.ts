@@ -11,11 +11,12 @@ import { extractCartesianSpec, readCaseJsonc } from '../formats/casejsonc.js'
 import { formatTimeName } from '../formats/foam.js'
 import { detectLattice, readPolyMesh, type PolyMesh } from '../formats/polymesh.js'
 import { writePvd, type PvdEntry } from '../formats/pvd.js'
-import { writeVtuFromPolyMesh } from '../formats/vtu.js'
+import { writeVtuFromPolyMesh, writeVtuPoints } from '../formats/vtu.js'
 import type { MockArgs } from './args.js'
 import { analyticFields, uniformGrid, type AnalyticFields } from './fields.js'
 import { g, noiseSource, sci, sleep } from './format.js'
 import { bcContext, gridFor, writeFieldSet, type FieldWrite, type PatchDesc } from './mesh.js'
+import { regionFieldArrays } from './regionFields.js'
 
 export const DEMO_DEVICE = 'NVIDIA GeForce RTX 4090 (demo)'
 /** 45 s for 4000 iterations at speed 1. */
@@ -659,8 +660,29 @@ async function runDatacentre(c: LoadedCase, io: SolverIo, env: SolverEnv, noise:
 
 async function runCht(c: LoadedCase, args: MockArgs, io: SolverIo, env: SolverEnv, noise: () => number): Promise<number> {
   io.out(`ofgpu-cht | case '${c.name}' | steady | conduction (SPEC-LIT 46/47)`)
-  io.out('  region solid1: 40 x 20 x 20 cells, k = 16 W/m/K')
-  io.out('  region solid2: 40 x 20 x 20 cells, k = 401 W/m/K')
+  // One banner line per REAL region (block regions only; an imported mesh has
+  // no demo VTU), and one real-point VTU per region after the loop, using the
+  // SAME analytic family as the makeRegionCase fixture.
+  let regions: Awaited<ReturnType<typeof readCaseJsonc>>['regions'] = []
+  if (c.format === 'jsonc') {
+    try {
+      regions = (await readCaseJsonc(c.caseAbs, c.casePath)).regions
+    } catch {
+      regions = []
+    }
+  }
+  for (const r of regions) {
+    if (r.mesh?.kind !== 'block') {
+      io.out(`  region ${r.name}: imported mesh, demo writes no VTU for it`)
+      continue
+    }
+    const cells = r.mesh.spec.cells
+    io.out(`  region ${r.name}: ${cells[0]} x ${cells[1]} x ${cells[2]} cells${r.mechanics !== null ? ', mechanics' : ''}`)
+  }
+  if (!regions.length) {
+    io.out('  region solid1: 40 x 20 x 20 cells, k = 16 W/m/K')
+    io.out('  region solid2: 40 x 20 x 20 cells, k = 401 W/m/K')
+  }
   const iters = c.run ? Math.max(1, Math.round(c.run.endTime / (c.run.deltaT || 1))) : 400
   io.out('')
   io.out(`iterating ${iters} times, relax T 0.9`)
@@ -678,6 +700,18 @@ async function runCht(c: LoadedCase, args: MockArgs, io: SolverIo, env: SolverEn
   }
   io.out('')
   io.out('interface solid1/solid2: q = 120.000 W, T_interface = 318.42 K')
+  // The demo writes the VTUs whether or not the case has an output block, so
+  // the GUI has something to open before S9's cases ship.
+  for (const r of regions) {
+    if (r.mesh?.kind !== 'block') continue
+    if (!c.hasOutputBlock) io.out(`demo: writing VTK/${r.name}.vtu although the case has no output block`)
+    const spec = r.mesh.spec
+    const mesh = cartesianToPolyMesh(gridFor(spec), spec)
+    const { cellData, pointData } = regionFieldArrays(mesh, spec.bounds, r.mechanics !== null)
+    await fsp.mkdir(path.join(c.outputRootAbs, 'VTK'), { recursive: true })
+    await writeVtuPoints(path.join(c.outputRootAbs, 'VTK', `${r.name}.vtu`), mesh, { time: 0, cellData, pointData })
+    io.out(`vtu: ${path.join(c.outputRoot, 'VTK', `${r.name}.vtu`)}`)
+  }
   const csv = args.str('-csv')
   if (csv) {
     await fsp.writeFile(path.resolve(csv), 'region,cell,T\nsolid1,0,320.1\nsolid2,0,316.7\n')

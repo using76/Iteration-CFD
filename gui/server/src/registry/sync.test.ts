@@ -38,13 +38,16 @@ const flagTokens = (text: string) => new Set([...text.matchAll(/(?<=[\s[])(-[A-Z
 describe('registry <-> rust sources', () => {
   it('lists exactly the Cargo [[bin]] targets with their source paths', () => {
     const cargo = cargoBins().sort((a, b) => a.name.localeCompare(b.name))
-    const reg = BINARIES.map((b) => ({ name: b.name, path: b.source })).sort((a, b) => a.name.localeCompare(b.name))
+    const reg = BINARIES.filter((b) => !b.pending).map((b) => ({ name: b.name, path: b.source })).sort((a, b) => a.name.localeCompare(b.name))
     expect(reg).toEqual(cargo)
-    for (const b of BINARIES) expect(fs.existsSync(path.join(RUST, b.source)), b.source).toBe(true)
+    for (const b of BINARIES.filter((b) => !b.pending)) expect(fs.existsSync(path.join(RUST, b.source)), b.source).toBe(true)
+    // A pending entry is a promise the tree keeps honest: as long as the flag
+    // is set, the Cargo target must NOT exist yet.
+    for (const b of BINARIES.filter((b) => b.pending)) expect(fs.existsSync(path.join(RUST, b.source)), `${b.name} is pending but ${b.source} exists: drop pending and pin it`).toBe(false)
   })
 
   it('has the same flag set as every fn usage()', () => {
-    for (const b of BINARIES.filter((x) => x.usageKind === 'usageFn')) {
+    for (const b of BINARIES.filter((x) => !x.pending && x.usageKind === 'usageFn')) {
       const usage = usageText(read(path.join(RUST, b.source)))
       const inUsage = [...flagTokens(usage)].sort()
       const inSpec = b.flags.map((f) => f.name).sort()
@@ -53,7 +56,7 @@ describe('registry <-> rust sources', () => {
   })
 
   it('mentions every registry flag in the const USAGE binaries', () => {
-    for (const b of BINARIES.filter((x) => x.usageKind === 'constUsage')) {
+    for (const b of BINARIES.filter((x) => !x.pending && x.usageKind === 'constUsage')) {
       const usage = constUsage(read(path.join(RUST, b.source)))
       for (const f of b.flags) expect(usage, `${b.name} ${f.name}`).toContain(f.name)
       const tokens = [...flagTokens(usage)].filter((t) => t.length > 2)

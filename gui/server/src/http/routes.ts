@@ -12,7 +12,10 @@ import { compileUserRegex, UnsafeRegexError } from '../regex.js'
 import { geometryService } from '../tools/geometry.js'
 import type { CaseSchema } from '../registry/schema.js'
 import { readCaseJsonc } from '../formats/casejsonc.js'
+import { BOX_FACES } from '../formats/cartesian.js'
+import { discoverRegions } from '../formats/regions.js'
 import { MeshSummaryError, meshSummaryForCase, parseBoundaryTextSafe } from '../formats/meshSummary.js'
+import { resolveResultRoot } from '../formats/results.js'
 import type { RunManager, StartRunOptions } from '../runs/types.js'
 import { LINE_SAMPLE_MAX_POINTS, LINE_SAMPLE_POINTS, SampleError, lineSample, type SampleComponent } from '../tools/sample.js'
 import { fsTree, readWorkspaceFile, writeWorkspaceFile } from '../workspace/fs.js'
@@ -29,6 +32,8 @@ export interface ApiDeps {
   agent: AgentService
   datasets: DatasetService
   schema: CaseSchema
+  /** The OPTIONAL cht schema (the solver generates docs/schema/cht-1.json); a getter, so a test can flip it between assertions. */
+  chtSchema?: () => CaseSchema | null
   gitStatus?: (cwd: string) => Promise<GitStatus>
 }
 
@@ -42,7 +47,7 @@ const StartRunSchema = z.object({
 })
 
 const FsWriteSchema = z.object({ path: z.string(), content: z.string(), baseHash: z.string().nullable().default(null) })
-const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().default(null), field: z.string().nullable().default(null) })
+const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().default(null), field: z.string().nullable().default(null), region: z.string().nullable().default(null).describe('Region of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); null = the first region that has something to open') })
 const GeometryOpenSchema = z.object({ path: z.string() })
 const GeometrySaveSchema = z.object({
   path: z.string(),
@@ -85,6 +90,13 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
   router.get('/api/schema/case-1.json', ({ res }) => {
     res.writeHead(200, { 'content-type': 'application/schema+json; charset=utf-8', 'cache-control': 'no-cache' })
     res.end(schema.text)
+    return RESPONDED
+  })
+  router.get('/api/schema/cht-1.json', ({ res }) => {
+    const cht = deps.chtSchema?.() ?? null
+    if (!cht) throw new HttpError(404, "docs/schema/cht-1.json is not in this workspace (the solver's §96 unit generates it)")
+    res.writeHead(200, { 'content-type': 'application/schema+json; charset=utf-8', 'cache-control': 'no-cache' })
+    res.end(cht.text)
     return RESPONDED
   })
 
@@ -166,7 +178,7 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
   router.post('/api/datasets/open', async (ctx) => {
     const body = await ctx.json(DatasetOpenSchema)
     const r = resolveInWorkspace(root, body.path, { mustExist: true })
-    return datasets.open(r.rel, { timeIndex: body.timeIndex ?? undefined, preferField: body.field })
+    return datasets.open(r.rel, { timeIndex: body.timeIndex ?? undefined, preferField: body.field, region: body.region })
   })
   router.get('/api/datasets/:id', ({ params }) => {
     const d = datasets.get(params.id)
@@ -275,6 +287,39 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     const pathParam = query.get('path')
     if (!pathParam) throw new HttpError(400, 'path is required')
     const r = resolveInWorkspace(root, pathParam, { mustExist: true })
+    // One region of a multi-region case: the region's own polyMesh boundary
+    // when it has one, else the six names of its block mesh — interface
+    // patches (named in interfaces[]) win over the case's kind rules.
+    const regionParam = query.get('region')
+    if (regionParam) {
+      const info = await readCaseJsonc(r.abs, r.rel)
+      const region = info.regions.find((x) => x.name === regionParam)
+      if (!region) throw new HttpError(404, `no region "${regionParam}" in ${r.rel}; regions: ${info.regions.map((x) => x.name).join(', ')}`)
+      const rootResult = await resolveResultRoot(r.abs)
+      const entries = await discoverRegions(rootResult, info)
+      const entry = entries.find((e) => e.name === regionParam)
+      if (entry?.polyMeshDir) {
+        const boundary = await parseBoundaryTextSafe(path.join(entry.polyMeshDir, 'boundary'))
+        if (boundary && boundary.length > 0) {
+          return { patches: boundary.map((p) => ({ name: p.name, type: p.type, nFaces: p.nFaces, startFace: p.startFace })), source: 'polyMesh' as const }
+        }
+      }
+      if (region.mesh?.kind === 'block') {
+        const spec = region.mesh.spec
+        const interfacePatches = new Set<string>()
+        for (const iface of info.interfaces) {
+          if (iface.regions[0] === regionParam) interfacePatches.add(iface.patches[0])
+          if (iface.regions[1] === regionParam) interfacePatches.add(iface.patches[1])
+        }
+        const patches = BOX_FACES.map((face) => {
+          const name = spec.boundaries[face]
+          const rule = region.patches.find((p) => p.match === name)
+          return { name, type: interfacePatches.has(name) ? 'interface' : rule ? rule.kind : 'patch', nFaces: 0, startFace: 0 }
+        })
+        return { patches, source: 'case' as const }
+      }
+      return { patches: [], source: 'none' as const }
+    }
     // discover() resolves a JSONC case to the `<stem>_jsonc` directory its mesh
     // is written into, and an OpenFOAM directory to itself.
     const results = await datasets.discover(r.rel)

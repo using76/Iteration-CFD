@@ -7,6 +7,7 @@ import { applyEdits, findNodeAtLocation, modify, parseTree, type JSONPath, type 
 import { driversFor, getModel, isJsonCase, MESH_PRESETS, MODELS, PICK_LISTS, type CaseFormat, type Problem } from '@cfd/shared'
 import { z } from 'zod'
 import { caseInfoFromText, type CaseJsoncInfo } from '../formats/casejsonc.js'
+import { getChtSchema, schemaFileFor, type CaseSchemaFile } from '../registry/schema.js'
 import { errorMessage, fail, okResult, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { unifiedDiff } from './diff.js'
 import { resolveTool } from './paths.js'
@@ -38,6 +39,7 @@ interface RegistryLike {
 
 interface SchemaModuleLike {
   getCaseSchema(candidates?: string[]): { validate(json: unknown): PointerError[] }
+  getChtSchema?(candidates?: string[]): { validate(json: unknown): PointerError[] } | null
 }
 
 const REQUIRED_TOP = ['name', 'mesh', 'physics', 'patches', 'initial', 'numerics', 'run']
@@ -58,7 +60,40 @@ export function structuralValidate(json: unknown): PointerError[] {
   return errors
 }
 
-let schemaValidatorPromise: Promise<SchemaValidator> | null = null
+/** Structural rules for a .cht.jsonc, used while docs/schema/cht-1.json is absent (the solver generates it). */
+export function structuralValidateCht(json: unknown): PointerError[] {
+  const errors: PointerError[] = []
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return [{ pointer: '/', message: 'case must be a JSON object' }]
+  const obj = json as Record<string, unknown>
+  for (const key of ['name', 'regions', 'initial', 'run']) if (!(key in obj)) errors.push({ pointer: `/${key}`, message: `must have required property '${key}'` })
+  const regions = obj.regions
+  if (!Array.isArray(regions) || regions.length === 0) {
+    errors.push({ pointer: '/regions', message: 'must be a non-empty array of regions' })
+    return errors
+  }
+  const manifest = typeof obj.mesh === 'object' && obj.mesh !== null && !Array.isArray(obj.mesh) ? (obj.mesh as Record<string, unknown>) : null
+  const hasManifest = manifest !== null && typeof manifest.regions === 'string'
+  let fluidSeen = false
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i]
+    if (typeof r !== 'object' || r === null || Array.isArray(r)) {
+      errors.push({ pointer: `/regions/${i}`, message: 'must be an object' })
+      continue
+    }
+    const reg = r as Record<string, unknown>
+    if (typeof reg.name !== 'string' || reg.name === '') errors.push({ pointer: `/regions/${i}/name`, message: 'must be a non-empty string' })
+    const hasMesh = typeof reg.mesh === 'object' && reg.mesh !== null && !Array.isArray(reg.mesh)
+    if (!hasMesh && !hasManifest) errors.push({ pointer: `/regions/${i}/mesh`, message: 'a region needs a mesh, or the case needs mesh.regions naming a regions.json' })
+    if (reg.kind !== undefined && reg.kind !== 'solid' && reg.kind !== 'fluid') errors.push({ pointer: `/regions/${i}/kind`, message: 'must be one of solid, fluid' })
+    if (reg.kind === 'fluid') {
+      if (i !== 0 || fluidSeen) errors.push({ pointer: `/regions/${i}/kind`, message: 'a fluid region must be region 0, and there may be at most one (SPEC-LIT 47.14)' })
+      fluidSeen = true
+    }
+  }
+  return errors
+}
+
+const schemaValidatorPromises = new Map<CaseSchemaFile, Promise<SchemaValidator>>()
 
 async function importOptional<T>(specifier: string): Promise<T | null> {
   try {
@@ -68,9 +103,24 @@ async function importOptional<T>(specifier: string): Promise<T | null> {
   }
 }
 
-function loadSchemaValidator(workspaceRoot: string): Promise<SchemaValidator> {
-  if (schemaValidatorPromise) return schemaValidatorPromise
-  schemaValidatorPromise = (async () => {
+function loadSchemaValidator(workspaceRoot: string, file: CaseSchemaFile): Promise<SchemaValidator> {
+  const cached = schemaValidatorPromises.get(file)
+  if (cached) return cached
+  const task = (async (): Promise<SchemaValidator> => {
+    if (file === 'cht-1.json') {
+      // The cht schema validates against cht-1 (NOT the registry, which only
+      // knows case-1); without the file the structural region rules apply.
+      const schemaMod = await importOptional<SchemaModuleLike>('../registry/schema.js')
+      if (schemaMod?.getChtSchema) {
+        try {
+          const schema = schemaMod.getChtSchema([path.join(workspaceRoot, 'docs', 'schema', 'cht-1.json')])
+          if (schema) return (json: unknown) => schema.validate(json).map((e) => ({ pointer: e.pointer, message: e.message }))
+        } catch {
+          // a present-but-invalid schema file falls back to the structural rules
+        }
+      }
+      return structuralValidateCht
+    }
     const registry = await importOptional<{ getRegistry?: () => RegistryLike }>('../registry/index.js')
     if (registry?.getRegistry) {
       try {
@@ -91,12 +141,17 @@ function loadSchemaValidator(workspaceRoot: string): Promise<SchemaValidator> {
     }
     return structuralValidate
   })()
-  return schemaValidatorPromise
+  schemaValidatorPromises.set(file, task)
+  return task
 }
 
-/** Tests inject a validator; null restores the lazy lookup. */
-export function setSchemaValidator(v: SchemaValidator | null): void {
-  schemaValidatorPromise = v ? Promise.resolve(v) : null
+/** Tests inject a validator for ONE file (case-1 by default); null restores every lazy lookup. */
+export function setSchemaValidator(v: SchemaValidator | null, file: CaseSchemaFile = 'case-1.json'): void {
+  if (v === null) {
+    schemaValidatorPromises.clear()
+    return
+  }
+  schemaValidatorPromises.set(file, Promise.resolve(v))
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +194,47 @@ export function semanticChecks(json: unknown): { errors: PointerError[]; warning
     warnings.push({ pointer: '/numerics/algorithm/kind', message: `ddt "${numerics.ddt}" is transient but the algorithm is SIMPLE (SPEC-LIT §31.3: use PISO/PIMPLE or steadyState)` })
   }
   if (Array.isArray(json.patches) && json.patches.length === 0) warnings.push({ pointer: '/patches', message: 'no patch rules: every boundary falls back to the driver defaults' })
+  // --- multi-region (.cht.jsonc) documents ---
+  if (Array.isArray(json.regions)) {
+    const names = new Map<string, number>()
+    const known = new Set<string>()
+    let fluidSeen = false
+    let mechanicsSeen = false
+    for (let i = 0; i < json.regions.length; i++) {
+      const r = json.regions[i]
+      if (!isObject(r)) continue
+      if (typeof r.name === 'string') {
+        if (names.has(r.name)) errors.push({ pointer: `/regions/${i}/name`, message: `duplicate region name "${r.name}" (first used by region ${names.get(r.name)})` })
+        else names.set(r.name, i)
+        known.add(r.name)
+      }
+      if (r.kind === 'fluid') {
+        if (i !== 0 || fluidSeen) errors.push({ pointer: `/regions/${i}/kind`, message: 'a fluid region must be region 0, and there may be at most one (SPEC-LIT 47.14)' })
+        fluidSeen = true
+      }
+      if (r.mechanics !== undefined) {
+        if (r.kind === 'fluid') errors.push({ pointer: `/regions/${i}/mechanics`, message: 'mechanics on a fluid region: the solver refuses it (S9)' })
+        else mechanicsSeen = true
+      }
+    }
+    if (Array.isArray(json.interfaces)) {
+      for (let i = 0; i < json.interfaces.length; i++) {
+        const iface = json.interfaces[i]
+        if (!isObject(iface)) continue
+        for (const key of ['regionA', 'regionB']) {
+          const name = iface[key]
+          if (typeof name === 'string' && !known.has(name)) errors.push({ pointer: `/interfaces/${i}/${key}`, message: `interface names unknown region "${name}"; known: ${[...known].join(', ') || 'none'}` })
+        }
+      }
+    }
+    const mode = isObject(json.run) ? json.run.mode : undefined
+    if (typeof mode === 'string' && mode === 'stress' && !mechanicsSeen) {
+      errors.push({ pointer: '/run/mode', message: 'run.mode "stress" needs at least one region with a mechanics block; nothing would be solved' })
+    }
+    if (mechanicsSeen && (mode === undefined || mode === 'thermal')) {
+      errors.push({ pointer: '/run/mode', message: `mechanics is written but mode is ${mode === 'thermal' ? 'thermal' : 'absent'}; the solver refuses this pair in both directions (SPEC-LIT 13.4.1)` })
+    }
+  }
   return { errors, warnings }
 }
 
@@ -217,14 +313,21 @@ function toProblems(relPath: string, text: string, source: 'schema' | 'semantic'
 
 export async function validateCaseText(text: string, relPath: string, workspaceRoot: string): Promise<ValidationReport> {
   const info = caseInfoFromText(text, relPath)
+  const file = schemaFileFor(relPath)
   const parseErrors: PointerError[] = info.errors.map((e) => ({ pointer: '/', message: `parse error at line ${e.line}:${e.col}: ${e.message}` }))
-  const schemaErrors = info.json === null || parseErrors.length ? [] : (await loadSchemaValidator(workspaceRoot))(info.json)
+  const schemaErrors = info.json === null || parseErrors.length ? [] : (await loadSchemaValidator(workspaceRoot, file))(info.json)
   const sem = info.json === null ? { errors: [], warnings: [] } : semanticChecks(info.json)
+  const warnings = [...sem.warnings]
+  // The cht schema is generated by the solver; while the workspace has none,
+  // say so once so a green structural report is not mistaken for full coverage.
+  if (file === 'cht-1.json' && info.json !== null && getChtSchema() === null) {
+    warnings.push({ pointer: '/', message: 'docs/schema/cht-1.json is not in this workspace (the solver generates it); structural checks only' })
+  }
   const errors = [...parseErrors, ...schemaErrors, ...sem.errors]
   const format: CaseFormat = 'jsonc'
-  const suggestedDrivers = driversFor(info.model && getModel(info.model) ? info.model : null, format)
-  const problems = [...toProblems(relPath, text, 'schema', 'error', [...parseErrors, ...schemaErrors]), ...toProblems(relPath, text, 'semantic', 'error', sem.errors), ...toProblems(relPath, text, 'semantic', 'warning', sem.warnings)]
-  return { ok: errors.length === 0, format, errors, warnings: sem.warnings, suggestedDrivers, problems, model: info.model }
+  const suggestedDrivers = info.regions.length > 0 ? ['ofgpu-cht'] : driversFor(info.model && getModel(info.model) ? info.model : null, format)
+  const problems = [...toProblems(relPath, text, 'schema', 'error', [...parseErrors, ...schemaErrors]), ...toProblems(relPath, text, 'semantic', 'error', sem.errors), ...toProblems(relPath, text, 'semantic', 'warning', warnings)]
+  return { ok: errors.length === 0, format, errors, warnings, suggestedDrivers, problems, model: info.model }
 }
 
 function broadcastProblems(ctx: ToolContext, relPath: string, problems: Problem[]): void {
@@ -239,6 +342,7 @@ function broadcastProblems(ctx: ToolContext, relPath: string, problems: Problem[
 function jsoncSummary(info: CaseJsoncInfo) {
   const json = isObject(info.json) ? info.json : {}
   const patches = Array.isArray(json.patches) ? json.patches.filter(isObject).map((p) => ({ match: String(p.match ?? ''), kind: p.kind === undefined ? null : String(p.kind) })) : []
+  const cellsOf = (spec: { cells: [number, number, number] }): number => spec.cells[0] * spec.cells[1] * spec.cells[2]
   return {
     name: info.name,
     cells: info.mesh ? info.mesh.cells[0] * info.mesh.cells[1] * info.mesh.cells[2] : null,
@@ -251,6 +355,16 @@ function jsoncSummary(info: CaseJsoncInfo) {
     output: info.output,
     initialFields: info.initialFields,
     gravity: info.gravity,
+    regions: info.regions.map((r) => ({
+      name: r.name,
+      kind: r.kind,
+      cells: r.mesh?.kind === 'block' ? cellsOf(r.mesh.spec) : null,
+      mesh: r.mesh?.kind ?? null,
+      material: r.hasMaterial,
+      mechanics: r.mechanics !== null,
+    })),
+    interfaces: info.interfaces.length,
+    mode: info.mode,
   }
 }
 
@@ -320,7 +434,7 @@ export const caseRead: ToolDef<typeof ReadSchema> = {
       summary: jsoncSummary(info),
       outputDir: info.outputDir,
       parseErrors: info.errors.map((e) => `${e.line}:${e.col} ${e.message}`),
-      suggestedDrivers: driversFor(info.model && getModel(info.model) ? info.model : null, 'jsonc'),
+      suggestedDrivers: info.regions.length > 0 ? ['ofgpu-cht'] : driversFor(info.model && getModel(info.model) ? info.model : null, 'jsonc'),
     })
   },
 }

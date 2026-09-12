@@ -6,7 +6,8 @@ import { applyCaseEdits, pointerToJsonPath, previewCaseEdit, semanticChecks, set
 import type { ToolContext } from './context.js'
 import { unifiedDiff } from './diff.js'
 import { runTool } from './index.js'
-import { parseTree } from 'jsonc-parser'
+import { REPO_ROOT } from '../runs/test-helpers.js'
+import { parse as parseJsoncText, parseTree } from 'jsonc-parser'
 
 let ws: TempWorkspace
 let hub: FakeHub
@@ -173,5 +174,53 @@ describe('case_read and case_create', () => {
     ])
     expect(data.summary.run.endTime).toBe(500)
     expect(data.suggestedDrivers).toEqual(['ofgpu-k-omega', 'ofgpu-buoyant', 'ofgpu-lowmach'])
+  })
+})
+
+describe('cht cases', () => {
+  it('a .cht.jsonc is validated by region rules and read with its regions', async () => {
+    const text = await fsp.readFile(path.join(REPO_ROOT, 'cases', 'dieStack.cht.jsonc'), 'utf8')
+    await fsp.writeFile(path.join(ws.root, 'cases', 'dieStack.cht.jsonc'), text)
+    const v = await runTool('case_validate', { path: 'cases/dieStack.cht.jsonc' }, ctx())
+    const vd = v.data as { ok: boolean; suggestedDrivers: string[]; warnings: Array<{ message: string }>; errors: Array<{ pointer: string; message: string }> }
+    expect(v.ok).toBe(true)
+    expect(vd.ok, JSON.stringify(vd.errors)).toBe(true)
+    expect(vd.warnings.some((w) => /cht-1\.json/.test(w.message))).toBe(true)
+    expect(vd.suggestedDrivers).toEqual(['ofgpu-cht'])
+
+    // a fluid region carrying mechanics is refused at the region pointer
+    const bad = parseJsoncText(text) as unknown as Record<string, unknown>
+    const badRegions = bad.regions as Array<Record<string, unknown>>
+    badRegions[0].kind = 'fluid'
+    badRegions[0].mechanics = { patches: [] }
+    await fsp.writeFile(path.join(ws.root, 'cases', 'bad.cht.jsonc'), JSON.stringify(bad))
+    const b = await runTool('case_validate', { path: 'cases/bad.cht.jsonc' }, ctx())
+    const bd = b.data as { ok: boolean; errors: Array<{ pointer: string }> }
+    expect(bd.errors.map((e) => e.pointer)).toContain('/regions/0/mechanics')
+
+    // stress mode with no mechanics anywhere
+    const stress = parseJsoncText(text) as unknown as Record<string, unknown>
+    ;(stress.run as Record<string, unknown>).mode = 'stress'
+    await fsp.writeFile(path.join(ws.root, 'cases', 'stress.cht.jsonc'), JSON.stringify(stress))
+    const s = await runTool('case_validate', { path: 'cases/stress.cht.jsonc' }, ctx())
+    const sd = s.data as { ok: boolean; errors: Array<{ pointer: string }> }
+    expect(sd.errors.map((e) => e.pointer)).toContain('/run/mode')
+
+    // mechanics without mode: stress is refused the other way, too
+    const mech = parseJsoncText(text) as unknown as Record<string, unknown>
+    ;(mech.regions as Array<Record<string, unknown>>)[0].mechanics = { patches: [] }
+    await fsp.writeFile(path.join(ws.root, 'cases', 'mech.cht.jsonc'), JSON.stringify(mech))
+    const m = await runTool('case_validate', { path: 'cases/mech.cht.jsonc' }, ctx())
+    const md = m.data as { ok: boolean; errors: Array<{ pointer: string }> }
+    expect(md.errors.map((e) => e.pointer)).toContain('/run/mode')
+
+    // case_read summarises the regions
+    const r = await runTool('case_read', { path: 'cases/dieStack.cht.jsonc' }, ctx())
+    const rd = r.data as { summary: { regions: Array<{ name: string; cells: number | null; mechanics: boolean }>; interfaces: number; mode: string | null }; suggestedDrivers: string[] }
+    expect(rd.summary.regions.map((x) => x.name)).toEqual(['die', 'solder', 'spreader', 'grease'])
+    expect(rd.summary.regions[0].cells).toBe(400)
+    expect(rd.summary.interfaces).toBe(3)
+    expect(rd.summary.mode === null || rd.summary.mode === 'stress').toBe(true)
+    expect(rd.suggestedDrivers).toEqual(['ofgpu-cht'])
   })
 })

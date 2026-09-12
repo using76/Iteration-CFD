@@ -320,7 +320,7 @@ export function fakeDatasets(): DatasetService & { opened: string[] } {
     async fieldStats(root: string, time: string, field: string) {
       return { field, component: 'magnitude' as const, time, count: 3, min: 0, max: 2, mean: 1, rms: 1.2, histogram: { edges: [0, 1, 2], counts: [1, 2] }, argmin: 0, argmax: 2, root }
     },
-    discover: async (relRoot: string) => ({ root: relRoot, caseJsonc: null, hasPolyMesh: false, hasVtu: false, times: [{ label: '1', value: 1, fields: ['U', 'p'] }], vtk: [], cellCount: 82320 }),
+    discover: async (relRoot: string) => ({ root: relRoot, caseJsonc: null, hasPolyMesh: false, hasVtu: false, times: [{ label: '1', value: 1, fields: ['U', 'p'] }], vtk: [], cellCount: 82320, regions: [] }),
     onProgress: () => () => {},
     evict: () => {},
     cacheBytes: () => 0,

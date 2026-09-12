@@ -2,10 +2,11 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { vonMisesOf } from '@cfd/shared'
 import { writeFoamField } from '../../formats/foam.js'
 import { BlobStore } from '../blobs.js'
 import { latticeFromCellCenters, parseGravityFile, upAxisFromGravity } from '../manifest.js'
-import { computeFieldStats, scalarRange } from '../stats.js'
+import { computeFieldStats, scalarAt, scalarRange } from '../stats.js'
 import { createWorkerPool } from '../worker.js'
 
 let dir: string
@@ -135,5 +136,27 @@ describe('worker pool', () => {
     expect(r.class).toBe('volScalarField')
     await inline.close()
     await expect(inline.run({ op: 'foamField', path: file, nCells: null })).rejects.toThrow(/closed/)
+  })
+})
+
+describe('tensor components', () => {
+  test('tensor components through scalarAt and computeFieldStats', () => {
+    const data = Float32Array.from([-1e6, 2e5, 0, 2e5, -5e5, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])
+    const vM0 = vonMisesOf(-1e6, -5e5, 0, 2e5, 0, 0)
+    const stats = computeFieldStats({ field: 'sigma', time: '0', data, components: 9, component: 'vonMises' })
+    expect(Math.abs(stats.max - vM0)).toBeLessThanOrEqual(Math.abs(vM0) * 1e-6)
+    const xx = computeFieldStats({ field: 'sigma', time: '0', data, components: 9, component: 'xx' })
+    expect(xx.min).toBe(-1e6)
+    expect(xx.argmin).toBe(0)
+    for (const i of [0, 1]) {
+      const s1 = scalarAt(data, 9, i, 'principal1')
+      const s2 = scalarAt(data, 9, i, 'principal2')
+      const s3 = scalarAt(data, 9, i, 'principal3')
+      expect(s1).toBeGreaterThanOrEqual(s2)
+      expect(s2).toBeGreaterThanOrEqual(s3)
+    }
+    expect(scalarAt(data, 9, 1, 'hydrostatic')).toBe(1)
+    expect(scalarRange(data, 9)).toEqual({ min: stats.min, max: stats.max })
+    expect(() => computeFieldStats({ field: 'U', time: '0', data: Float32Array.from([1, 0, 0, 2, 0, 0]), components: 3, component: 'xx' })).toThrow(/needs a tensor/)
   })
 })

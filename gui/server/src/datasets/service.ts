@@ -3,12 +3,13 @@
 // disk under config.cacheDir.
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { DatasetOpenResponse, DatasetProgress, DatasetSource, DatasetStage, FieldTimeInfo, GeometryFidelity, ResultsResponse, ViewerDataset } from '@cfd/shared'
+import type { DatasetOpenResponse, DatasetProgress, DatasetSource, DatasetStage, FieldComponent, FieldTimeInfo, GeometryFidelity, RegionEntry, ResultsResponse, ViewerDataset } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import { buildCartesianGrid, cartesianBoundarySurface, cartesianCellCenters, type CartesianGrid } from '../formats/cartesian.js'
 import { readCaseJsonc, type CaseJsoncInfo } from '../formats/casejsonc.js'
 import type { SurfaceGeometry } from '../formats/geometry.js'
 import { readOwnerHeaderNote } from '../formats/polymesh.js'
+import { discoverRegions } from '../formats/regions.js'
 import { listTimeDirs, parseTimeName, resolveResultRoot, type ResultRoot } from '../formats/results.js'
 import { readPvd } from '../formats/pvd.js'
 import { readVtuInfo } from '../formats/vtu.js'
@@ -54,6 +55,8 @@ interface Geometry {
   fidelity: GeometryFidelity
   grid: CartesianGrid | null
   cellCount: number
+  /** Mesh points, when the geometry carries them (polyMesh, real-point VTU); null otherwise. */
+  pointCount: number | null
   cellCenters: Float32Array | null
   /** Present only for a lattice with holes (a cut-cell mesh). */
   lattice?: { index: Int32Array; holes: number } | null
@@ -113,6 +116,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     await blobs.put(id, 'surface.normals', surface.normals)
     await blobs.put(id, 'surface.indices', surface.indices)
     await blobs.put(id, 'surface.cellOfTri', surface.cellOfTri)
+    if (surface.pointOfVertex) await blobs.put(id, 'surface.pointOfVertex', surface.pointOfVertex)
   }
 
   async function storeGrid(id: string, grid: CartesianGrid): Promise<void> {
@@ -134,32 +138,35 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       const grid = buildCartesianGrid(caseInfo.mesh)
       const surface = cartesianBoundarySurface(grid, caseInfo.mesh)
       const cellCount = grid.dims[0] * grid.dims[1] * grid.dims[2]
-      return { geometry: { source: 'cartesian', fidelity: 'exact', grid, cellCount, cellCenters: null }, surface, warnings }
+      return { geometry: { source: 'cartesian', fidelity: 'exact', grid, cellCount, pointCount: null, cellCenters: null }, surface, warnings }
     }
     if (caseInfo && !caseInfo.mesh) warnings.push(`${path.basename(root.caseJsoncAbs ?? '')}: mesh block is not a cartesian mesh; geometry taken from the results`)
     if (root.polyMeshDirAbs) {
       const r = await pool.run({ op: 'polyMesh', dir: root.polyMeshDirAbs })
-      if (r.lattice) return { geometry: { source: 'polymesh', fidelity: 'exact', grid: r.lattice, cellCount: r.nCells, cellCenters: r.cellCenters }, surface: r.surface, warnings }
+      if (r.lattice) return { geometry: { source: 'polymesh', fidelity: 'exact', grid: r.lattice, cellCount: r.nCells, pointCount: r.nPoints, cellCenters: r.cellCenters }, surface: r.surface, warnings }
       // A cut-cell mesh is a block with the body carved out of it. The exact
       // detector cannot see that; this one can, and it is what makes slices and
       // streamlines work on an external-aerodynamics case.
       const block = r.cellCenters ? blockLatticeFromCellCenters(r.cellCenters, r.surface.bounds) : null
       if (block) {
         warnings.push(`structured block recovered from the cut-cell mesh: ${block.grid.dims.join(' x ')}, ${block.holes.toLocaleString()} site(s) inside the body`)
-        return { geometry: { source: 'polymesh', fidelity: 'exact', grid: block.grid, cellCount: r.nCells, cellCenters: r.cellCenters, lattice: { index: block.index, holes: block.holes } }, surface: r.surface, warnings }
+        return { geometry: { source: 'polymesh', fidelity: 'exact', grid: block.grid, cellCount: r.nCells, pointCount: r.nPoints, cellCenters: r.cellCenters, lattice: { index: block.index, holes: block.holes } }, surface: r.surface, warnings }
       }
       warnings.push('polyMesh is not a structured lattice: slices, iso-surfaces and streamlines are unavailable')
-      return { geometry: { source: 'polymesh', fidelity: 'exact', grid: null, cellCount: r.nCells, cellCenters: r.cellCenters }, surface: r.surface, warnings }
+      return { geometry: { source: 'polymesh', fidelity: 'exact', grid: null, cellCount: r.nCells, pointCount: r.nPoints, cellCenters: r.cellCenters }, surface: r.surface, warnings }
     }
     const vtuTime = series.times.find((t) => t.source.kind === 'vtu')
     const vtuFile = vtuTime && vtuTime.source.kind === 'vtu' ? vtuTime.source.fileAbs : root.vtk.find((v) => v.kind === 'vtu')?.abs
     if (vtuFile) {
       const r = await pool.run({ op: 'vtuGeometry', path: vtuFile })
-      warnings.push('geometry reconstructed from a VTU written as face-centred quads (visualisation proxy, not the true mesh)')
+      // A real-point VTU carries the solver's own mesh points under the drawn
+      // surface; the face-centred quads are the writer's proxy for files that
+      // do not (the demo fixtures of the old writer).
+      if (!r.sharedPoints) warnings.push('geometry reconstructed from a VTU written as face-centred quads (visualisation proxy, not the true mesh)')
       const grid = latticeFromCellCenters(r.cellCenters, r.domainBounds)
       if (grid) warnings.push('structured grid reconstructed from VTU cell centres')
       else warnings.push('VTU cell centres do not form a lattice: slices, iso-surfaces and streamlines are unavailable')
-      return { geometry: { source: 'vtu', fidelity: 'proxy', grid, cellCount: r.nCells, cellCenters: r.cellCenters }, surface: r.surface, warnings }
+      return { geometry: { source: 'vtu', fidelity: r.sharedPoints ? 'exact' : 'proxy', grid, cellCount: r.nCells, pointCount: r.sharedPoints ? r.nPoints : null, cellCenters: r.cellCenters }, surface: r.surface, warnings }
     }
     throw new Error(`${entry.rel}: no geometry found (no case.jsonc mesh, constant/polyMesh or VTU file)`)
   }
@@ -188,6 +195,9 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       entry.geometry = built.geometry
       const { geometry, surface } = built
       const warnings = [...entry.series.warnings, ...built.warnings]
+      if (geometry.pointCount === null) {
+        for (const f of entry.series.fields) if (f.location === 'point') warnings.push(`"${f.name}" lives on the mesh points, which this geometry does not carry: the field is not served`)
+      }
       for (const t of entry.series.times) {
         if (t.source.kind === 'vtu' && t.source.nCells !== geometry.cellCount) warnings.push(`${t.label}: ${t.source.nCells} cells, geometry has ${geometry.cellCount}`)
       }
@@ -207,9 +217,10 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
         bounds: geometry.grid ? { min: [...geometry.grid.bounds.min], max: [...geometry.grid.bounds.max] } : { min: [...surface.bounds.min], max: [...surface.bounds.max] },
         up: await upAxis(entry, surface),
         cellCount: geometry.cellCount,
+        pointCount: geometry.pointCount,
         grid: geometry.grid ? gridInfo(geometry.grid, geometry.lattice ?? null) : null,
         surface: surfaceInfo(surface),
-        fields: fieldInfos(entry.series, geometry.cellCount),
+        fields: fieldInfos(entry.series, geometry.cellCount, geometry.pointCount),
         times: timeSteps(entry.series),
         meta: {
           caseName: entry.caseInfo?.name ?? path.basename(entry.root.rootAbs),
@@ -264,7 +275,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
   async function restore(entry: Entry): Promise<boolean> {
     const manifest = await blobs.readManifest(entry.id)
     if (!manifest) return false
-    const needed = ['surface.positions', 'surface.normals', 'surface.indices', 'surface.cellOfTri', ...(manifest.grid ? ['grid.x', 'grid.y', 'grid.z'] : [])]
+    const needed = ['surface.positions', 'surface.normals', 'surface.indices', 'surface.cellOfTri', ...(manifest.surface.pointOfVertex ? ['surface.pointOfVertex'] : []), ...(manifest.grid ? ['grid.x', 'grid.y', 'grid.z'] : [])]
     for (const key of needed) if (!(await blobs.exists(entry.id, key))) return false
     let grid: CartesianGrid | null = null
     if (entry.caseInfo?.mesh && manifest.source === 'cartesian') grid = buildCartesianGrid(entry.caseInfo.mesh)
@@ -274,9 +285,9 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       const nodes = { x: Float64Array.from(f32(x)), y: Float64Array.from(f32(y)), z: Float64Array.from(f32(z)) }
       grid = { dims: [...manifest.grid.dims], nodes, bounds: { min: [...manifest.bounds.min], max: [...manifest.bounds.max] }, uniform: manifest.grid.uniform, emptyAxis: manifest.grid.emptyAxis }
     }
-    entry.geometry = { source: manifest.source, fidelity: manifest.geometryFidelity, grid, cellCount: manifest.cellCount, cellCenters: null }
+    entry.geometry = { source: manifest.source, fidelity: manifest.geometryFidelity, grid, cellCount: manifest.cellCount, pointCount: manifest.pointCount ?? null, cellCenters: null }
     // Ranges are recomputed lazily; the field list follows the current scan so new time steps show up.
-    manifest.fields = fieldInfos(entry.series, manifest.cellCount)
+    manifest.fields = fieldInfos(entry.series, manifest.cellCount, manifest.pointCount ?? null)
     manifest.times = timeSteps(entry.series)
     for (const f of manifest.fields) {
       for (const pt of f.perTime) {
@@ -320,11 +331,26 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
 
   // ---- public API -----------------------------------------------------------
 
-  async function open(relPath: string, opts: { timeIndex?: number | 'last'; preferField?: string | null } = {}): Promise<DatasetOpenResponse> {
+  async function open(relPath: string, opts: { timeIndex?: number | 'last'; preferField?: string | null; region?: string | null; viaRegion?: boolean } = {}): Promise<DatasetOpenResponse> {
     const resolved = resolveInWorkspace(config.workspaceRoot, relPath, { mustExist: true })
     const root = await resolveResultRoot(resolved.abs)
-    const series = await scanSeries(root)
     const caseInfo = root.caseJsoncAbs ? await readCaseJsonc(root.caseJsoncAbs, toWorkspaceRel(config.workspaceRoot, root.caseJsoncAbs)) : null
+    // A multi-region root is never opened as one stitched series (two meshes
+    // are not two time steps): `open {region}` picks that region, and a
+    // region-less open of a root (case or directory, NOT an explicit VTU/PVD
+    // file) takes the first region that has something to open — the SAME
+    // dataset either way (same id, same cache). The redirect happens once:
+    // the region's path is already a concrete dataset.
+    const regions = await discoverRegions(root, caseInfo)
+    if (opts.region) {
+      const chosen = regions.find((r) => r.name === opts.region)
+      if (!chosen) throw new Error(`no region "${opts.region}" in ${resolved.rel}; regions: ${regions.map((r) => r.name).join(', ') || 'none'}`)
+      if (!chosen.path) throw new Error(`region "${opts.region}" has nothing to open yet (no VTK/${opts.region}.vtu and no polyMesh)`)
+      return open(toWorkspaceRel(config.workspaceRoot, chosen.path), { timeIndex: opts.timeIndex, preferField: opts.preferField, viaRegion: true })
+    }
+    const first = regions.find((r) => r.path !== null)
+    if (first && first.path !== null && !opts.viaRegion && root.vtkFile === null) return open(toWorkspaceRel(config.workspaceRoot, first.path), { timeIndex: opts.timeIndex, preferField: opts.preferField, viaRegion: true })
+    const series = await scanSeries(root)
     const id = await datasetFingerprint(resolved.rel, root, series)
     const existing = entries.get(id)
     if (existing) {
@@ -353,16 +379,16 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     return entry.ready
   }
 
-  async function parseField(entry: Entry, src: FieldSource, components: number, cellCount: number): Promise<Float32Array> {
+  async function parseField(entry: Entry, src: FieldSource, components: number, count: number): Promise<Float32Array> {
     if (src.kind === 'foam') {
-      const r = await pool.run({ op: 'foamField', path: path.join(src.dirAbs, src.file), nCells: cellCount })
+      const r = await pool.run({ op: 'foamField', path: path.join(src.dirAbs, src.file), nCells: count })
       if (r.components !== components) throw new Error(`${src.dirName}/${src.file}: has ${r.components} components, expected ${components}`)
-      if (r.count !== cellCount) throw new Error(`${src.dirName}/${src.file}: ${r.count} values for ${cellCount} cells`)
+      if (r.count !== count) throw new Error(`${src.dirName}/${src.file}: ${r.count} values for ${count} cells`)
       return r.data
     }
-    const r = await pool.run({ op: 'vtuCellData', path: src.fileAbs, name: src.array })
+    const r = await pool.run(src.section === 'PointData' ? { op: 'vtuPointData', path: src.fileAbs, name: src.array } : { op: 'vtuCellData', path: src.fileAbs, name: src.array })
     if (r.components !== components) throw new Error(`${path.basename(src.fileAbs)}: ${src.array} has ${r.components} components, expected ${components}`)
-    if (r.data.length !== cellCount * components) throw new Error(`${path.basename(src.fileAbs)}: ${src.array} has ${r.data.length / r.components} values for ${cellCount} cells`)
+    if (r.data.length !== count * components) throw new Error(`${path.basename(src.fileAbs)}: ${src.array} has ${r.data.length / r.components} values for ${count} tuples`)
     return r.data
   }
 
@@ -383,7 +409,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       if (!buf) {
         const src = entry.series.fields.find((f) => f.name === field)?.perTime.get(timeIndex)
         if (!src) throw new Error(`${entry.rel}: no source for "${field}" at time index ${timeIndex}`)
-        const data = await parseField(entry, src, info.components, manifest.cellCount)
+        const data = await parseField(entry, src, info.components, info.location === 'point' ? manifest.pointCount ?? 0 : manifest.cellCount)
         buf = await blobs.put(id, pt.blob.key, data)
       }
       pt.range = scalarRange(f32(buf), info.components)
@@ -425,7 +451,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     return idx
   }
 
-  async function fieldStats(relRoot: string, time: string, field: string, component: 'magnitude' | 'x' | 'y' | 'z' = 'magnitude', region: { min: [number, number, number]; max: [number, number, number] } | null = null): Promise<FieldStats> {
+  async function fieldStats(relRoot: string, time: string, field: string, component: FieldComponent = 'magnitude', region: { min: [number, number, number]; max: [number, number, number] } | null = null): Promise<FieldStats> {
     const opened = await open(relRoot)
     if (opened.status === 'error') throw new Error(opened.error ?? 'dataset failed to load')
     const manifest = await whenReady(opened.datasetId)
@@ -433,6 +459,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     const timeIndex = timeIndexFor(manifest, time)
     const pt = await ensureField(opened.datasetId, field, timeIndex)
     const info = manifest.fields.find((f) => f.name === field)!
+    if (region && info.location === 'point') throw new Error(`${relRoot}: region statistics need a cell field ("${field}" lives on the mesh points)`)
     const buf = await blobs.get(opened.datasetId, pt.blob.key)
     if (!buf) throw new Error(`${relRoot}: blob ${pt.blob.key} vanished`)
     const cellCenters = region ? await cellCentersOf(entry) : null
@@ -465,6 +492,10 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     const root = await resolveResultRoot(resolved.abs)
     const caseInfo = root.caseJsoncAbs ? await readCaseJsonc(root.caseJsoncAbs, toWorkspaceRel(config.workspaceRoot, root.caseJsoncAbs)) : null
     const dirs = await listTimeDirs(root.rootAbs)
+    // Paths come back ABSOLUTE from the discovery; a response speaks
+    // workspace-relative everywhere.
+    const toRel = (p: string | null): string | null => (p !== null ? toWorkspaceRel(config.workspaceRoot, p) : null)
+    const regions: RegionEntry[] = (await discoverRegions(root, caseInfo)).map((r) => ({ ...r, path: toRel(r.path), meshPath: toRel(r.meshPath), polyMeshDir: toRel(r.polyMeshDir), resultPath: toRel(r.resultPath) }))
     return {
       root: toWorkspaceRel(config.workspaceRoot, root.rootAbs),
       caseJsonc: root.caseJsoncAbs ? toWorkspaceRel(config.workspaceRoot, root.caseJsoncAbs) : null,
@@ -473,6 +504,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       times: dirs.map((d, i) => ({ label: d.name, value: d.value ?? i, fields: d.fields })),
       vtk: root.vtk.map((v) => ({ path: toWorkspaceRel(config.workspaceRoot, v.abs), kind: v.kind })),
       cellCount: await cellCountOf(root, caseInfo),
+      regions,
     }
   }
 

@@ -1,21 +1,26 @@
 // Field statistics for the `field_stats` tool and the manifest ranges.
 // Accumulation in Float64 even though the blobs are Float32.
+import { tensorScalarAt, type FieldComponent } from '@cfd/shared'
 import type { FieldStats } from './types.js'
 
-export type StatComponent = 'magnitude' | 'x' | 'y' | 'z' | 'scalar'
+export type StatComponent = FieldComponent | 'scalar'
 
-const COMPONENT_INDEX: Record<StatComponent, number> = { magnitude: -1, scalar: 0, x: 0, y: 1, z: 2 }
+const VECTOR_INDEX: Record<'magnitude' | 'scalar' | 'x' | 'y' | 'z', number> = { magnitude: -1, scalar: 0, x: 0, y: 1, z: 2 }
 
-/** Scalar value of tuple i under the chosen component. */
+/** Names that only a 6/9-component tensor can answer; refused by name on a scalar or vector field. */
+const TENSOR_ONLY: ReadonlySet<string> = new Set(['xx', 'yy', 'zz', 'xy', 'yz', 'xz', 'vonMises', 'principal1', 'principal2', 'principal3', 'hydrostatic'])
+
+/** Scalar value of tuple i under the chosen component; a 6/9 tensor answers through the shared closed forms. */
 export function scalarAt(data: ArrayLike<number>, components: number, i: number, component: StatComponent): number {
   if (components === 1) return data[i]
+  if (components === 6 || components === 9) return tensorScalarAt(data, components, i, component === 'scalar' ? 'vonMises' : component)
   if (component === 'magnitude' || component === 'scalar') {
     const x = data[3 * i]
     const y = data[3 * i + 1]
     const z = data[3 * i + 2]
     return Math.sqrt(x * x + y * y + z * z)
   }
-  return data[3 * i + COMPONENT_INDEX[component]]
+  return data[3 * i + VECTOR_INDEX[component as 'x']]
 }
 
 /** Min/max of the scalar (magnitude for vectors), ignoring NaN; null when nothing finite. */
@@ -47,6 +52,9 @@ const BINS = 16
 
 export function computeFieldStats(input: FieldStatsInput): FieldStats {
   const { data, components, region } = input
+  if (TENSOR_ONLY.has(input.component) && components !== 6 && components !== 9) {
+    throw new Error(`"${input.field}" has ${components} components; component "${input.component}" needs a tensor`)
+  }
   const component: StatComponent = components === 1 ? 'scalar' : input.component === 'scalar' ? 'magnitude' : input.component
   const n = Math.floor(data.length / components)
   const centers = input.cellCenters ?? null

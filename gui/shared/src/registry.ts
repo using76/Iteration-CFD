@@ -56,6 +56,14 @@ export interface BinarySpec {
   summary: string
   /** Set on a script pipeline (PIPELINES): a command script run through the shell, not a Cargo binary. */
   pipeline?: boolean
+  /**
+   * Declared before its Cargo [[bin]] exists in this tree. The sync test
+   * skips a pending entry's Cargo/usage pins and instead asserts its source is
+   * still absent, so the flag cannot outlive the binary's arrival;
+   * `availableBinaries` never offers it and the static system prompt does not
+   * list it.
+   */
+  pending?: boolean
 }
 
 const OUTPUT_LIST: FlagSpec = {
@@ -330,15 +338,15 @@ export const BINARIES: BinarySpec[] = [
   {
     name: 'ofgpu-cht',
     source: 'src/bin/cht.rs',
-    purpose: 'Multi-region conduction with conjugate interfaces, and conjugate natural convection in a closed cavity (SPEC-LIT §46/§47, §59/§60).',
-    summary: 'Conjugate heat transfer (JSONC case), optional CSV.',
+    purpose: 'Multi-region conduction with conjugate interfaces, conjugate natural convection in a closed cavity (SPEC-LIT §46/§47, §59/§60), and - with a `mechanics` block on a solid region and `"run": {"mode": "stress"}` - the thermo-elastic displacement of §95 solved after the thermal solve (SPEC-LIT §96). The case\'s `output` block (`{"exact": {"format": "vtu"}}`) writes one real-point VTU per region under `<stem>_jsonc/VTK/<region>.vtu` with T (cell + point) and, for a mechanical region, u (cell + point), sigma (9 components), vonMises, sigmaPrincipal and magU.',
+    summary: 'Conjugate heat transfer and thermal stress (JSONC case); one VTU per region, optional CSV.',
     kind: 'solver',
     positionals: [{ name: 'case', type: 'path', description: 'A .jsonc CHT case file.' }],
     flags: [{ name: '-csv', type: 'path', description: 'Write interface/region results to this CSV.' }],
     accepts: ['jsonc'],
     builds: ['laminar'],
     residualStyle: 'generic',
-    writes: { formats: [], restart: false, csv: true },
+    writes: { formats: ['vtu'], restart: false, csv: true },
     longRunning: true,
     gpu: true,
     usageKind: 'constUsage',
@@ -464,6 +472,27 @@ export const BINARIES: BinarySpec[] = [
     longRunning: false,
     gpu: true,
     usageKind: 'none',
+  },
+  {
+    name: 'ofgpu-regions',
+    source: 'src/bin/regions.rs',
+    pending: true,
+    purpose: 'The region layout of docs/10 §C: `split <polyMeshDir> <outDir> [-fluid <zone>]` turns one polyMesh with cellZones into one polyMesh per zone plus regions.json (R7); `check <regions.json>` prints the layout and solver pairing reports and refuses a layout that breaks R1-R6; `list <regions.json>` lists the regions. Declared ahead of its Cargo target (solver unit S11); offered once the binary exists.',
+    summary: 'Region layout: split a zoned polyMesh, check or list a regions.json.',
+    kind: 'mesh',
+    positionals: [
+      { name: 'command', type: 'enum', values: ['split', 'check', 'list'], description: 'split | check | list' },
+      { name: 'input', type: 'path', description: 'polyMesh directory (split) or regions.json (check, list)' },
+      { name: 'outDir', type: 'path', optional: true, description: 'Output directory (split only)' },
+    ],
+    flags: [{ name: '-fluid', type: 'string', description: 'split: the cellZone that is the fluid region (the others are solids).' }],
+    accepts: [],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: ['foam'], restart: false, csv: false },
+    longRunning: false,
+    gpu: false,
+    usageKind: 'constUsage',
   },
 ]
 

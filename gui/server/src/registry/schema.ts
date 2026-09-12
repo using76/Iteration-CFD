@@ -104,6 +104,26 @@ export function schemaCandidates(workspaceRoot: string, guiDir: string): string[
   return [path.join(workspaceRoot, 'docs', 'schema', 'case-1.json'), path.resolve(guiDir, '..', 'docs', 'schema', 'case-1.json')]
 }
 
+export type CaseSchemaFile = 'case-1.json' | 'cht-1.json'
+
+/** A .cht.jsonc (or .cht.json) document is validated against the cht schema, everything else against case-1. */
+export function schemaFileFor(relPath: string): CaseSchemaFile {
+  return /\.cht\.jsonc?$/i.test(relPath) ? 'cht-1.json' : 'case-1.json'
+}
+
+export function schemaCandidatesFor(workspaceRoot: string, guiDir: string, file: CaseSchemaFile): string[] {
+  return [path.join(workspaceRoot, 'docs', 'schema', file), path.resolve(guiDir, '..', 'docs', 'schema', file)]
+}
+
+/** The schema when it exists, null when it does not; a present-but-invalid file still throws. */
+export function loadOptionalCaseSchema(candidates: string[]): CaseSchema | null {
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue
+    return compileCaseSchema(p, fs.readFileSync(p, 'utf8'))
+  }
+  return null
+}
+
 export function loadCaseSchema(candidates: string[]): CaseSchema {
   for (const p of candidates) {
     if (!fs.existsSync(p)) continue
@@ -125,4 +145,24 @@ export function getCaseSchema(candidates?: string[]): CaseSchema {
 
 export function setCaseSchema(schema: CaseSchema): void {
   singleton = schema
+}
+
+// The cht schema is OPTIONAL: the solver generates docs/schema/cht-1.json, so
+// a workspace may not carry one. A null is cached too (a chtLoaded flag, not
+// a `!singleton` test).
+let chtSingleton: CaseSchema | null = null
+let chtLoaded = false
+
+export function getChtSchema(candidates?: string[]): CaseSchema | null {
+  if (!chtLoaded) {
+    chtLoaded = true
+    const fallback = schemaCandidatesFor(process.env.CFD_WORKSPACE ?? path.resolve(process.cwd(), '..'), path.resolve(process.cwd()), 'cht-1.json')
+    chtSingleton = loadOptionalCaseSchema(candidates ?? fallback)
+  }
+  return chtSingleton
+}
+
+export function setChtSchema(schema: CaseSchema | null): void {
+  chtLoaded = true
+  chtSingleton = schema
 }

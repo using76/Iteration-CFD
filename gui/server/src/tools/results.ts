@@ -1,6 +1,7 @@
 // Result inspection: time directories / VTK files, field statistics and the
 // residual history of a run.
 import { z } from 'zod'
+import { FieldComponentSchema } from '@cfd/shared'
 import { errorMessage, fail, okResult, type ToolDef } from './context.js'
 import { resolveTool } from './paths.js'
 
@@ -27,7 +28,7 @@ const StatsSchema = z.object({
   root: z.string().describe('Result root (case or output directory)'),
   time: z.string().describe('Time directory label, e.g. "1" or "0.5"'),
   field: z.string().describe('Field name, e.g. U, p, k, epsilon, T'),
-  component: z.enum(['magnitude', 'x', 'y', 'z']).nullable().describe('Vector component; null = magnitude'),
+  component: FieldComponentSchema.nullable().describe('Scalar of the field: magnitude, x/y/z for vectors; for a stress tensor (sigma, 6 or 9 components) vonMises, principal1..3, hydrostatic or xx/yy/zz/xy/yz/xz; null = magnitude (von Mises for a tensor)'),
   region: z.object({ min: z.tuple([z.number(), z.number(), z.number()]), max: z.tuple([z.number(), z.number(), z.number()]) }).nullable().describe('Restrict to cells whose centre lies in this box'),
 })
 

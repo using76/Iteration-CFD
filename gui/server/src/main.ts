@@ -14,7 +14,7 @@ import { Router } from './http/router.js'
 import { createHttpServer } from './http/server.js'
 import { createLogger, type Logger } from './log.js'
 import { createProblemsTracker } from './problems.js'
-import { loadCaseSchema, schemaCandidates, setCaseSchema, type CaseSchema } from './registry/schema.js'
+import { loadCaseSchema, loadOptionalCaseSchema, schemaCandidates, schemaCandidatesFor, setCaseSchema, setChtSchema, type CaseSchema } from './registry/schema.js'
 import { createRunManager, type RunManagerHandle } from './runs/manager.js'
 import { loadDefaultTools, setDefaultTools } from './tools/defaults.js'
 import { createWorkspaceWatcher, type WorkspaceWatcher } from './workspace/watch.js'
@@ -94,6 +94,11 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
 
   const schema = loadCaseSchema(schemaCandidates(config.workspaceRoot, config.guiDir))
   setCaseSchema(schema)
+  // The cht schema is OPTIONAL: the solver's §96 unit generates
+  // docs/schema/cht-1.json, so a workspace may not carry one yet.
+  const chtSchema = loadOptionalCaseSchema(schemaCandidatesFor(config.workspaceRoot, config.guiDir, 'cht-1.json'))
+  setChtSchema(chtSchema)
+  log.info(chtSchema ? `cht schema: ${chtSchema.path}` : 'cht schema: none (docs/schema/cht-1.json not found)')
   // The shipped custom tools go under the user's own before anything can run one.
   const defaultTools = await loadDefaultTools(config, log.child('tools'))
   setDefaultTools(defaultTools)
@@ -169,7 +174,7 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
   }
 
   // ---- http ---------------------------------------------------------------
-  const router = registerApiRoutes(new Router(), { config, hub, runs, agent, datasets, schema })
+  const router = registerApiRoutes(new Router(), { config, hub, runs, agent, datasets, schema, chtSchema: () => chtSchema })
   const httpServer = createHttpServer({ config, router, hub, staticDir: webDistDir(config), log: log.child('http') })
   const address = await httpServer.listen()
   log.info(`http://${address.host}:${address.port}  mode=${config.demo ? 'demo' : 'real'} llm=${config.llm} model=${config.model} gpu=${runs.gpu().state} workspace=${config.workspaceRoot}${webDistDir(config) ? '' : ' (web not built; use the Vite dev server)'}`)

@@ -1,9 +1,10 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { parse as parseJsonc } from 'jsonc-parser'
 import { describe, expect, it } from 'vitest'
 import { PICK_LISTS } from '@cfd/shared'
-import { loadCaseSchema, mergePickLists } from './schema.js'
+import { getChtSchema, loadCaseSchema, loadOptionalCaseSchema, mergePickLists, schemaCandidatesFor, schemaFileFor, setChtSchema } from './schema.js'
 import { REPO_ROOT } from '../runs/test-helpers.js'
 
 const schema = loadCaseSchema([path.join(REPO_ROOT, 'docs', 'schema', 'case-1.json')])
@@ -47,5 +48,34 @@ describe('case schema', () => {
 
   it('throws a clear error when the schema file is missing', () => {
     expect(() => loadCaseSchema(['/nowhere/case-1.json'])).toThrow(/case schema not found/)
+  })
+})
+
+describe('cht schema', () => {
+  it('schemaFileFor and the optional cht schema', () => {
+    expect(schemaFileFor('cases/dieStack.cht.jsonc')).toBe('cht-1.json')
+    expect(schemaFileFor('x/y.CHT.JSON')).toBe('cht-1.json')
+    expect(schemaFileFor('cases/plume.jsonc')).toBe('case-1.json')
+    expect(loadOptionalCaseSchema([path.join(os.tmpdir(), 'no-such-dir', 'cht-1.json')])).toBeNull()
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cht-schema-'))
+    try {
+      const file = path.join(dir, 'cht-1.json')
+      fs.writeFileSync(
+        file,
+        '{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"ChtCase","type":"object","properties":{"name":{"type":"string"},"regions":{"type":"array"}},"required":["name","regions"]}',
+      )
+      const cht = loadOptionalCaseSchema([file])
+      expect(cht?.schema.title).toBe('ChtCase')
+      const errors = cht!.validate({ regions: [] })
+      expect(errors[0].pointer).toBe('/name')
+      expect(errors[0].message).toContain('name')
+      setChtSchema(cht)
+      expect(getChtSchema()).not.toBeNull()
+      setChtSchema(null)
+      expect(getChtSchema()).toBeNull()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+    expect(schemaCandidatesFor('/ws', '/gui', 'cht-1.json').every((p) => p.endsWith(path.join('docs', 'schema', 'cht-1.json')))).toBe(true)
   })
 })

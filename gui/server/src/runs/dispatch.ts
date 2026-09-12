@@ -63,10 +63,11 @@ export function findBinary(config: Pick<ServerConfig, 'binDir' | 'workspaceRoot'
   return null
 }
 
-/** Which ofgpu-* binaries this machine can actually run right now. */
+/** Which ofgpu-* binaries this machine can actually run right now. A pending entry (declared before its binary exists) is never offered, demo mode included. */
 export function availableBinaries(config: Pick<ServerConfig, 'binDir' | 'workspaceRoot' | 'demo'>, names: readonly string[]): string[] {
-  if (config.demo) return [...names]
-  return names.filter((n) => findBinary(config, n) !== null)
+  const offered = names.filter((n) => !getBinary(n)?.pending)
+  if (config.demo) return offered
+  return offered.filter((n) => findBinary(config, n) !== null)
 }
 
 function mockCliEntry(): { command: string; leading: string[] } {

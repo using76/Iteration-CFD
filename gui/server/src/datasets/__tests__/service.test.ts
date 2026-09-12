@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import type { DatasetProgress } from '@cfd/shared'
 import { loadConfig } from '../../config.js'
 import { cartesianCellCenters } from '../../formats/cartesian.js'
-import { analyticFields, makeFoamCase, makeJsoncCase, makeVtuSeries } from '../fixtures/makeCase.js'
+import { analyticFields, makeFoamCase, makeJsoncCase, makeRegionCase, makeVtuSeries } from '../fixtures/makeCase.js'
 import { createDatasetService, type DatasetServiceHandle } from '../service.js'
 
 let workspace: string
@@ -19,6 +19,7 @@ beforeAll(async () => {
   await makeJsoncCase(cases)
   await makeFoamCase(path.join(workspace, 'foamCase'))
   await makeVtuSeries(path.join(workspace, 'vtkCase'))
+  await makeRegionCase(cases)
   const config = loadConfig({ CFD_WORKSPACE: workspace, CFD_GUI_DIR: path.join(workspace, 'gui'), CFD_DEMO: '1' })
   service = createDatasetService({ config, workers: 2 })
   jsoncRel = 'cases/fixture.jsonc'
@@ -279,6 +280,53 @@ describe('VTU series', () => {
     expect(r.hasVtu).toBe(true)
     expect(r.cellCount).toBe(64)
     expect(r.vtk.map((v) => v.kind)).toEqual(['pvd', 'vtu', 'vtu'])
+    expect(r.regions).toEqual([])
+  })
+})
+
+describe('region VTU and multi-region roots', () => {
+  test('region VTU: point fields, a tensor, pointOfVertex and pointCount', async () => {
+    const rel = 'cases/stack.cht_jsonc/VTK/flap.vtu'
+    const opened = await service.open(rel)
+    const m = await service.whenReady(opened.datasetId)
+    expect(m.geometryFidelity).toBe('exact')
+    expect(m.pointCount).toBe(27)
+    expect(m.cellCount).toBe(8)
+    expect(m.fields.map((f) => f.name)).toEqual(['T', 'T_point', 'magU', 'sigma', 'sigmaPrincipal', 'u', 'u_point', 'vonMises'])
+    const sigma = m.fields.find((f) => f.name === 'sigma')!
+    expect(sigma.components).toBe(9)
+    const uPoint = m.fields.find((f) => f.name === 'u_point')!
+    expect(uPoint.location).toBe('point')
+    expect(uPoint.unit).toBe('m')
+    const uBlob = await service.blob(opened.datasetId, uPoint.perTime[0].blob.key)
+    expect(uBlob!.byteLength).toBe(12 * 27)
+    expect(m.surface.pointOfVertex!.count).toBe(m.surface.vertexCount)
+    const written = await service.fieldStats(rel, '0', 'vonMises')
+    const byTensor = await service.fieldStats(rel, '0', 'sigma', 'vonMises')
+    expect(Math.abs(byTensor.max - written.max)).toBeLessThanOrEqual(Math.abs(written.max) * 1e-4)
+    const noComp = await service.fieldStats(rel, '0', 'sigma')
+    expect(Math.abs(noComp.max - written.max)).toBeLessThanOrEqual(Math.abs(written.max) * 1e-4)
+    const p1 = await service.fieldStats(rel, '0', 'sigma', 'principal1')
+    const p3 = await service.fieldStats(rel, '0', 'sigma', 'principal3')
+    expect(p1.max).toBeGreaterThanOrEqual(p3.max)
+    await expect(service.fieldStats(rel, '0', 'T', 'vonMises')).rejects.toThrow(/needs a tensor/)
+  })
+
+  test('open by region resolves the region VTU, region-less open takes the first, discover lists the regions', async () => {
+    const byRegion = await service.open('cases/stack.cht.jsonc', { region: 'flap' })
+    const m = await service.whenReady(byRegion.datasetId)
+    expect(m.path).toBe('cases/stack.cht_jsonc/VTK/flap.vtu')
+    expect(m.cellCount).toBe(8)
+    const first = await service.open('cases/stack.cht.jsonc')
+    const mf = await service.whenReady(first.datasetId)
+    expect(mf.path).toBe('cases/stack.cht_jsonc/VTK/base.vtu')
+    expect(mf.cellCount).toBe(4)
+    await expect(service.open('cases/stack.cht.jsonc', { region: 'nope' })).rejects.toThrow(/flap/)
+    const r = await service.discover('cases/stack.cht.jsonc')
+    expect(r.regions.map((x) => [x.name, x.source, x.path])).toEqual([
+      ['base', 'vtu', 'cases/stack.cht_jsonc/VTK/base.vtu'],
+      ['flap', 'vtu', 'cases/stack.cht_jsonc/VTK/flap.vtu'],
+    ])
   })
 })
 

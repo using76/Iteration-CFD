@@ -33,7 +33,7 @@ export function compactState(state: ViewerState | null) {
 export const viewerCommand: ToolDef<typeof ViewerCommandSchema> = {
   name: 'viewer_command',
   description:
-    'Control the 3D result viewer in the user\'s browser: load a case/result path (non-blocking; the dataset keeps loading), colour by a field, add slices / cut planes / iso-surfaces / streamlines / glyphs, set camera, time step, clip box, take a screenshot (returned as an image) or read the current state. Load first, then add layers.',
+    'Control the 3D result viewer in the user\'s browser: load a case/result path (or one region of a multi-region case with load {path, region}; non-blocking; the dataset keeps loading), colour by a field (tensor scalars incl. vonMises for sigma), show the deformed shape with setWarp {field, scale}, add slices / cut planes / iso-surfaces / streamlines / glyphs, set camera, time step, clip box, take a screenshot (returned as an image) or read the current state. Load first, then add layers.',
   schema: ViewerCommandSchema,
   async run(cmd, ctx) {
     const res = await ctx.hub.requestViewer(cmd, { timeoutMs: cmd.type === 'load' ? LOAD_TIMEOUT_MS : COMMAND_TIMEOUT_MS, sessionId: ctx.sessionId })

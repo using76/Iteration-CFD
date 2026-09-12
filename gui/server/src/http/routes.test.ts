@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ServerMsg } from '@cfd/shared'
-import { loadCaseSchema } from '../registry/schema.js'
+import { loadCaseSchema, loadOptionalCaseSchema, type CaseSchema } from '../registry/schema.js'
 import { makeTempWorkspace, REPO_ROOT, testConfig, type TempWorkspace } from '../runs/test-helpers.js'
 import { registerApiRoutes } from './routes.js'
 import { Router } from './router.js'
@@ -13,6 +13,7 @@ let ws: TempWorkspace
 let srv: HttpServerHandle
 let base: string
 let runs: FakeRuns
+let cht: CaseSchema | null = null
 const broadcasts: ServerMsg[] = []
 const agent = fakeAgent()
 const datasets = fakeDatasets()
@@ -28,7 +29,7 @@ beforeAll(async () => {
   runs.lines.set('r_1', [1, 2, 3].map((seq) => ({ seq, stream: 'stdout' as const, text: `line ${seq}`, ts: seq })))
   runs.residualRecs.set('r_1', [{ seq: 1, iter: 1, time: null, wall: null, fields: { k: 0.5 }, solverIters: null, raw: '1 k res 0.5' }])
   const schema = loadCaseSchema([path.join(REPO_ROOT, 'docs', 'schema', 'case-1.json')])
-  const router = registerApiRoutes(new Router(), { config, hub: { broadcast: (m) => broadcasts.push(m) }, runs, agent, datasets, schema, gitStatus: async () => ({ available: true, branch: 'main', upstream: null, ahead: 0, behind: 0, changes: [], error: null }) })
+  const router = registerApiRoutes(new Router(), { config, hub: { broadcast: (m) => broadcasts.push(m) }, runs, agent, datasets, schema, chtSchema: () => cht, gitStatus: async () => ({ available: true, branch: 'main', upstream: null, ahead: 0, behind: 0, changes: [], error: null }) })
   srv = createHttpServer({ config, router, hub: null, staticDir: null })
   base = `http://127.0.0.1:${(await srv.listen()).port}`
 })
@@ -209,5 +210,52 @@ describe('auth token', () => {
     } finally {
       await s.close()
     }
+  })
+})
+
+describe('cht routes', () => {
+  it('serves cht-1.json when the workspace has it, 404 otherwise', async () => {
+    const missing = await get('/api/schema/cht-1.json')
+    expect(missing.status).toBe(404)
+    expect(((await missing.json()) as { error: string }).error).toMatch(/cht-1\.json/)
+    const schemaDir = path.join(ws.root, 'docs', 'schema')
+    fs.mkdirSync(schemaDir, { recursive: true })
+    const file = path.join(schemaDir, 'cht-1.json')
+    fs.writeFileSync(
+      file,
+      '{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"ChtCase","type":"object","properties":{"name":{"type":"string"},"regions":{"type":"array"}},"required":["name","regions"]}',
+    )
+    cht = loadOptionalCaseSchema([file])
+    const served = await get('/api/schema/cht-1.json')
+    expect(served.status).toBe(200)
+    expect(served.headers.get('content-type')).toContain('application/schema+json')
+    expect((await served.text()).includes('"ChtCase"')).toBe(true)
+    cht = null
+  })
+
+  it('opens a dataset by region and answers a region patch list from the case', async () => {
+    const opened = await postJson(`${base}/api/datasets/open`, { path: 'cases/plume.jsonc', region: 'flap' })
+    expect(opened.status).toBe(200)
+    expect(datasets.opened.at(-1)).toBe('cases/plume.jsonc')
+    expect(datasets.openedOpts.at(-1)?.region).toBe('flap')
+
+    fs.mkdirSync(path.join(ws.root, 'cases'), { recursive: true })
+    fs.copyFileSync(path.join(REPO_ROOT, 'cases', 'dieStack.cht.jsonc'), path.join(ws.root, 'cases', 'dieStack.cht.jsonc'))
+    const die = await json('/api/case/patches?path=cases/dieStack.cht.jsonc&region=die')
+    expect(die.source).toBe('case')
+    expect(die.patches).toHaveLength(6)
+    expect(die.patches.map((p: { name: string }) => p.name)).toEqual(['dieSideXMin', 'dieSideXMax', 'dieSideYMin', 'dieSideYMax', 'dieToSolder', 'dieTop'])
+    const byName = new Map<string, string>(die.patches.map((p: { name: string; type: string }) => [p.name, p.type]))
+    expect(byName.get('dieToSolder')).toBe('interface')
+    expect(byName.get('dieTop')).toBe('wall')
+    expect(byName.get('dieSideXMin')).toBe('wall')
+
+    const nope = await get('/api/case/patches?path=cases/dieStack.cht.jsonc&region=nope')
+    expect(nope.status).toBe(404)
+    expect(((await nope.json()) as { error: string }).error).toMatch(/die, solder, spreader, grease/)
+
+    // Without region the route is byte-for-byte what it was.
+    const whole = await json('/api/case/patches?path=cases/dieStack.cht.jsonc')
+    expect(whole).toEqual({ patches: [], source: 'none' })
   })
 })

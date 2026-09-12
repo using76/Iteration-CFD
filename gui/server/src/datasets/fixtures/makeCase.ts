@@ -7,9 +7,10 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { buildCartesianGrid, cartesianCellCenters, cartesianToPolyMesh, type CartesianGrid, type CartesianSpec } from '../../formats/cartesian.js'
 import { writeFoamField } from '../../formats/foam.js'
-import { writePolyMesh } from '../../formats/polymesh.js'
+import { writePolyMesh, type PolyMesh } from '../../formats/polymesh.js'
 import { writePvd } from '../../formats/pvd.js'
-import { writeVtuFromPolyMesh } from '../../formats/vtu.js'
+import { writeVtuFromPolyMesh, writeVtuPoints } from '../../formats/vtu.js'
+import { regionFieldArrays } from '../../mock/regionFields.js'
 
 export const FIXTURE_SPEC: CartesianSpec = {
   bounds: { min: [0, 0, 0], max: [4, 2, 1] },
@@ -132,4 +133,71 @@ export async function makeVtuSeries(dir: string): Promise<{ pvd: string; grid: C
   const pvd = path.join(vtk, 'series.pvd')
   await writePvd(pvd, entries)
   return { pvd, grid }
+}
+
+// ---------------------------------------------------------------------------
+// Two-region CHT fixture (dieStack shape): base + flap, one interface, a
+// mechanics block on flap, one real-point VTU per region.
+// ---------------------------------------------------------------------------
+
+const regionSpec = (min: [number, number, number], max: [number, number, number], cells: [number, number, number], prefix: string, zMinName: string, zMaxName: string): CartesianSpec => ({
+  bounds: { min, max },
+  cells,
+  grading: null,
+  boundaries: { xmin: `${prefix}SideXMin`, xmax: `${prefix}SideXMax`, ymin: `${prefix}SideYMin`, ymax: `${prefix}SideYMax`, zmin: zMinName, zmax: zMaxName },
+  regions: [],
+  cyclic: [],
+  patchTypes: {},
+})
+
+export const REGION_STACK_JSONC = `// generated two-region fixture
+{
+  "name": "stack",
+  "regions": [
+    {
+      "name": "base",
+      "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0, 0, 0], "max": [1, 1, 0.5] },
+        "cells": [2, 2, 1],
+        "boundaries": { "xmin": "baseSideXMin", "xmax": "baseSideXMax", "ymin": "baseSideYMin", "ymax": "baseSideYMax", "zmin": "baseBottom", "zmax": "baseToFlap" }
+      }
+    },
+    {
+      "name": "flap",
+      "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0, 0, 0.5], "max": [1, 1, 1] },
+        "cells": [2, 2, 2],
+        "boundaries": { "xmin": "flapSideXMin", "xmax": "flapSideXMax", "ymin": "flapSideYMin", "ymax": "flapSideYMax", "zmin": "flapToBase", "zmax": "flapTop" }
+      },
+      "mechanics": { "material": { "E": 2.0e11, "nu": 0.3, "alpha": 1.2e-5 }, "patches": [] }
+    }
+  ],
+  "interfaces": [{ "regionA": "base", "patchA": "baseToFlap", "regionB": "flap", "patchB": "flapToBase" }],
+  "initial": { "T": 300 },
+  "run": { "steady": true, "mode": "stress" },
+  "output": { "exact": { "format": "vtu" } }
+}
+`
+
+/** `<dir>/stack.cht.jsonc` + `<dir>/stack.cht_jsonc/VTK/{base,flap}.vtu` written through writeVtuPoints. */
+export async function makeRegionCase(dir: string): Promise<{ jsonc: string; out: string; meshes: Record<string, PolyMesh> }> {
+  const out = path.join(dir, 'stack.cht_jsonc')
+  await fs.mkdir(path.join(out, 'VTK'), { recursive: true })
+  const jsonc = path.join(dir, 'stack.cht.jsonc')
+  await fs.writeFile(jsonc, REGION_STACK_JSONC)
+  const parts: Array<{ name: string; spec: CartesianSpec; mechanical: boolean }> = [
+    { name: 'base', spec: regionSpec([0, 0, 0], [1, 1, 0.5], [2, 2, 1], 'base', 'baseBottom', 'baseToFlap'), mechanical: false },
+    { name: 'flap', spec: regionSpec([0, 0, 0.5], [1, 1, 1], [2, 2, 2], 'flap', 'flapToBase', 'flapTop'), mechanical: true },
+  ]
+  const meshes: Record<string, PolyMesh> = {}
+  for (const p of parts) {
+    const grid = buildCartesianGrid(p.spec)
+    const mesh = cartesianToPolyMesh(grid, p.spec)
+    const { cellData, pointData } = regionFieldArrays(mesh, p.spec.bounds, p.mechanical)
+    await writeVtuPoints(path.join(out, 'VTK', `${p.name}.vtu`), mesh, { time: 0, cellData, pointData })
+    meshes[p.name] = mesh
+  }
+  return { jsonc, out, meshes }
 }

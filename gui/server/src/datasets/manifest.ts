@@ -11,7 +11,7 @@ import { readPvd } from '../formats/pvd.js'
 import { listTimeDirs, fieldTimeFallback, type ResultRoot, type TimeDirInfo } from '../formats/results.js'
 import { readVtuInfo, type VtuArrayInfo } from '../formats/vtu.js'
 
-export type FieldSource = { kind: 'foam'; dirAbs: string; dirName: string; file: string } | { kind: 'vtu'; fileAbs: string; array: string }
+export type FieldSource = { kind: 'foam'; dirAbs: string; dirName: string; file: string } | { kind: 'vtu'; fileAbs: string; array: string; section: 'CellData' | 'PointData' }
 
 export interface SeriesTime {
   index: number
@@ -22,7 +22,9 @@ export interface SeriesTime {
 
 export interface SeriesField {
   name: string
-  components: 1 | 3
+  components: 1 | 3 | 6 | 9
+  /** Where the values live; a point field's blobs carry pointCount tuples. */
+  location: 'cell' | 'point'
   /** Source per time index after OpenFOAM-style fallback; absent when no earlier step carries the field. */
   perTime: Map<number, FieldSource>
 }
@@ -36,7 +38,7 @@ export interface TimeSeries {
   fingerprint: string[]
 }
 
-const UNITS: Record<string, string> = { U: 'm/s', T: 'K', p: 'm^2/s^2', p_rgh: 'm^2/s^2', k: 'm^2/s^2', epsilon: 'm^2/s^3', omega: '1/s', nut: 'm^2/s', nuTilda: 'm^2/s', rho: 'kg/m^3', alpha: '-', phi: 'm^3/s' }
+const UNITS: Record<string, string> = { U: 'm/s', T: 'K', p: 'm^2/s^2', p_rgh: 'm^2/s^2', k: 'm^2/s^2', epsilon: 'm^2/s^3', omega: '1/s', nut: 'm^2/s', nuTilda: 'm^2/s', rho: 'kg/m^3', alpha: '-', phi: 'm^3/s', u: 'm', magU: 'm', sigma: 'Pa', vonMises: 'Pa', sigmaPrincipal: 'Pa' }
 
 export function fieldUnit(name: string): string | null {
   return UNITS[name] ?? null
@@ -51,15 +53,17 @@ async function mtimeOf(p: string): Promise<string> {
   }
 }
 
-function componentsOfClass(cls: string): 1 | 3 | null {
+function componentsOfClass(cls: string): 1 | 3 | 6 | 9 | null {
   if (cls === 'volScalarField') return 1
   if (cls === 'volVectorField') return 3
+  if (cls === 'volSymmTensorField') return 6
+  if (cls === 'volTensorField') return 9
   return null
 }
 
 export function foamSeries(dirs: TimeDirInfo[]): TimeSeries {
   const times: SeriesTime[] = dirs.map((d, index) => ({ index, value: d.value ?? index, label: d.name, source: { kind: 'foam', dirAbs: d.abs } }))
-  const names = new Map<string, 1 | 3>()
+  const names = new Map<string, 1 | 3 | 6 | 9>()
   const warnings: string[] = []
   const skipped = new Set<string>()
   for (const d of dirs) {
@@ -80,7 +84,7 @@ export function foamSeries(dirs: TimeDirInfo[]): TimeSeries {
       const src = fieldTimeFallback(dirs, name, i)
       if (src && componentsOfClass(src.fieldClasses[name]) === components) perTime.set(i, { kind: 'foam', dirAbs: src.abs, dirName: src.name, file: name })
     }
-    fields.push({ name, components, perTime })
+    fields.push({ name, components, location: 'cell', perTime })
   }
   const fingerprint = dirs.map((d) => `${d.name}@${d.mtimeMs}:${d.fields.map((f) => `${f}@${d.fieldStamps[f] ?? 'missing'}`).join(',')}`)
   return { kind: 'foam', times, fields, warnings, fingerprint }
@@ -123,26 +127,35 @@ async function vtuStepsOf(root: ResultRoot): Promise<{ steps: VtuStep[]; warning
 export async function vtuSeries(root: ResultRoot): Promise<TimeSeries> {
   const { steps, warnings } = await vtuStepsOf(root)
   const times: SeriesTime[] = steps.map((s, index) => ({ index, value: s.value, label: s.label, source: { kind: 'vtu', fileAbs: s.fileAbs, nCells: s.nCells } }))
-  const names = new Map<string, 1 | 3>()
+  // Both sections; a PointData array whose name is also a CellData array (in
+  // any step) is published as <name>_point — the FieldSource keeps the ARRAY
+  // name and its section, so the reader never re-derives it from the manifest.
+  const cells = new Map<string, 1 | 3 | 6 | 9>()
+  const points = new Map<string, 1 | 3 | 6 | 9>()
   for (const s of steps) {
     for (const a of s.arrays) {
-      if (a.section !== 'CellData' || a.offset < 0) continue
-      if (a.components !== 1 && a.components !== 3) continue
-      if (!names.has(a.name)) names.set(a.name, a.components)
+      if (a.offset < 0) continue
+      if (a.components !== 1 && a.components !== 3 && a.components !== 6 && a.components !== 9) continue
+      if (a.section === 'CellData') cells.set(a.name, a.components)
+      if (a.section === 'PointData') points.set(a.name, a.components)
     }
   }
+  const plan: Array<{ array: string; published: string; components: 1 | 3 | 6 | 9; section: 'CellData' | 'PointData' }> = []
+  for (const [name, components] of cells) plan.push({ array: name, published: name, components, section: 'CellData' })
+  for (const [name, components] of points) plan.push({ array: name, published: cells.has(name) ? `${name}_point` : name, components, section: 'PointData' })
+  plan.sort((a, b) => (a.published < b.published ? -1 : a.published > b.published ? 1 : 0))
   const fields: SeriesField[] = []
-  for (const [name, components] of [...names].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+  for (const e of plan) {
     const perTime = new Map<number, FieldSource>()
     for (let i = 0; i < steps.length; i++) {
       for (let j = i; j >= 0; j--) {
-        if (steps[j].arrays.some((a) => a.section === 'CellData' && a.name === name && a.components === components)) {
-          perTime.set(i, { kind: 'vtu', fileAbs: steps[j].fileAbs, array: name })
+        if (steps[j].arrays.some((a) => a.section === e.section && a.name === e.array && a.components === e.components)) {
+          perTime.set(i, { kind: 'vtu', fileAbs: steps[j].fileAbs, array: e.array, section: e.section })
           break
         }
       }
     }
-    fields.push({ name, components, perTime })
+    fields.push({ name: e.published, components: e.components, location: e.section === 'PointData' ? 'point' : 'cell', perTime })
   }
   const fingerprint = await Promise.all(steps.map(async (s) => `${s.label}@${await mtimeOf(s.fileAbs)}`))
   return { kind: 'vtu', times, fields, warnings, fingerprint }
@@ -409,6 +422,7 @@ export function surfaceInfo(surface: SurfaceGeometry): SurfaceInfo {
     cellOfTri: u32Ref('surface.cellOfTri', triangleCount, 1),
     triangleCount,
     vertexCount,
+    ...(surface.pointOfVertex ? { pointOfVertex: u32Ref('surface.pointOfVertex', vertexCount, 1) } : {}),
   }
 }
 
@@ -421,18 +435,22 @@ export function parseFieldBlobKey(key: string): { name: string; timeIndex: numbe
   return m ? { name: m[1], timeIndex: Number(m[2]) } : null
 }
 
-export function fieldInfos(series: TimeSeries, cellCount: number): FieldInfo[] {
-  return series.fields.map((f) => {
+export function fieldInfos(series: TimeSeries, cellCount: number, pointCount: number | null): FieldInfo[] {
+  // A point-located field has nothing to hang its values on when the geometry
+  // carries no mesh points (a proxy-quad VTU); it is dropped, and `load` names
+  // it in a warning.
+  return series.fields.filter((f) => f.location !== 'point' || pointCount !== null).map((f) => {
+    const count = f.location === 'point' ? pointCount ?? 0 : cellCount
     const perTime: FieldTimeInfo[] = []
     for (const [timeIndex, src] of [...f.perTime].sort((a, b) => a[0] - b[0])) {
       perTime.push({
         timeIndex,
-        blob: f32Ref(fieldBlobKey(f.name, timeIndex), cellCount, f.components),
+        blob: f32Ref(fieldBlobKey(f.name, timeIndex), count, f.components),
         range: null,
         sourceDir: src.kind === 'foam' ? src.dirName : path.basename(src.fileAbs),
       })
     }
-    return { name: f.name, components: f.components, location: 'cell', range: null, unit: fieldUnit(f.name), perTime }
+    return { name: f.name, components: f.components, location: f.location, range: null, unit: fieldUnit(f.name.replace(/_point$/, '')), perTime }
   })
 }
 

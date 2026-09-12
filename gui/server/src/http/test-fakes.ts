@@ -134,11 +134,13 @@ export function fakeAgent(): AgentService & { sessions: Map<string, SessionState
   return svc as unknown as AgentService & { sessions: Map<string, SessionState>; handled: string[] }
 }
 
-export function fakeDatasets(): DatasetService & { opened: string[] } {
+export function fakeDatasets(): DatasetService & { opened: string[]; openedOpts: Array<{ region?: string | null } | undefined> } {
   const svc = {
     opened: [] as string[],
-    async open(relPath: string) {
+    openedOpts: [] as Array<{ region?: string | null } | undefined>,
+    async open(relPath: string, opts?: { region?: string | null }) {
       svc.opened.push(relPath)
+      svc.openedOpts.push(opts)
       return { datasetId: 'd_1', status: 'loading' as const, manifest: null, error: null }
     },
     get: () => undefined,
@@ -149,10 +151,10 @@ export function fakeDatasets(): DatasetService & { opened: string[] } {
     fieldStats: async () => {
       throw new Error('not in the fake')
     },
-    discover: async (relRoot: string) => ({ root: relRoot, caseJsonc: null, hasPolyMesh: false, hasVtu: false, times: [], vtk: [], cellCount: null }),
+    discover: async (relRoot: string) => ({ root: relRoot, caseJsonc: null, hasPolyMesh: false, hasVtu: false, times: [], vtk: [], cellCount: null, regions: [] }),
     onProgress: () => () => {},
     evict: () => {},
     cacheBytes: () => 0,
   }
-  return svc as unknown as DatasetService & { opened: string[] }
+  return svc as unknown as DatasetService & { opened: string[]; openedOpts: Array<{ region?: string | null } | undefined> }
 }

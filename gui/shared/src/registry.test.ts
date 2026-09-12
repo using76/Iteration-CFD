@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkArgValue, type FlagSpec } from './registry.js'
+import { checkArgValue, getBinary, type FlagSpec } from './registry.js'
 
 const spec = (type: FlagSpec['type'], name = '-x'): FlagSpec => ({ name, type, description: 'test' }) as FlagSpec
 
@@ -29,5 +29,14 @@ describe('checkArgValue', () => {
     expect(checkArgValue(spec('flag'), 3)).toMatch(/takes no value/)
     expect(checkArgValue(spec('string'), 'cases/plume.jsonc')).toBeNull()
     expect(checkArgValue(spec('string'), '')).toMatch(/expects a string/)
+  })
+})
+
+describe('pending binaries', () => {
+  it('a pending binary is in BINARIES with its flag but marked pending', () => {
+    const regions = getBinary('ofgpu-regions')
+    expect(regions?.pending).toBe(true)
+    expect(regions?.flags.map((f) => f.name)).toEqual(['-fluid'])
+    expect(getBinary('ofgpu-cht')?.writes.formats).toEqual(['vtu'])
   })
 })

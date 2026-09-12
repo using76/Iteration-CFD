@@ -7,13 +7,14 @@ import type { CartesianGrid } from '../formats/cartesian.js'
 import { readFoamField, type FoamField } from '../formats/foam.js'
 import type { Bounds, SurfaceGeometry } from '../formats/geometry.js'
 import { detectLattice, polyMeshBoundarySurface, polyMeshCellCenters, readPolyMesh, type PolyMeshPatch } from '../formats/polymesh.js'
-import { readVtuCellData, readVtuInfo, vtuBoundarySurface, type VtuArrayInfo } from '../formats/vtu.js'
+import { readVtuCellData, readVtuPointData, readVtuInfo, vtuBoundarySurface, type VtuArrayInfo } from '../formats/vtu.js'
 
 export type WorkerTask =
   | { op: 'foamField'; path: string; nCells: number | null }
   | { op: 'polyMesh'; dir: string }
   | { op: 'vtuGeometry'; path: string }
   | { op: 'vtuCellData'; path: string; name: string }
+  | { op: 'vtuPointData'; path: string; name: string }
 
 export interface FoamFieldResult {
   op: 'foamField'
@@ -28,6 +29,8 @@ export interface FoamFieldResult {
 export interface PolyMeshResult {
   op: 'polyMesh'
   nCells: number
+  /** Mesh points of the polyMesh. */
+  nPoints: number
   surface: SurfaceGeometry
   cellCenters: Float32Array
   lattice: CartesianGrid | null
@@ -37,6 +40,10 @@ export interface PolyMeshResult {
 export interface VtuGeometryResult {
   op: 'vtuGeometry'
   nCells: number
+  /** Points of the VTU mesh (real shared points, when the file carries them). */
+  nPoints: number
+  /** True when the drawn surface re-uses mesh points under more than one vertex (a real-point VTU). */
+  sharedPoints: boolean
   surface: SurfaceGeometry
   cellCenters: Float32Array
   /** Extent of the boundary face centroids (the true box, not the proxy quads). */
@@ -51,7 +58,13 @@ export interface VtuCellDataResult {
   data: Float32Array
 }
 
-export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult
+export interface VtuPointDataResult {
+  op: 'vtuPointData'
+  components: number
+  data: Float32Array
+}
+
+export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult
 export type ResultOf<T extends WorkerTask> = Extract<WorkerResult, { op: T['op'] }>
 
 export async function runTask(task: WorkerTask): Promise<WorkerResult> {
@@ -65,17 +78,22 @@ export async function runTask(task: WorkerTask): Promise<WorkerResult> {
       const cellCenters = polyMeshCellCenters(mesh)
       const surface = polyMeshBoundarySurface(mesh, cellCenters)
       const lattice = detectLattice(mesh, cellCenters)
-      return { op: 'polyMesh', nCells: mesh.nCells, surface, cellCenters, lattice, patches: mesh.boundary }
+      return { op: 'polyMesh', nCells: mesh.nCells, nPoints: mesh.nPoints, surface, cellCenters, lattice, patches: mesh.boundary }
     }
     case 'vtuGeometry': {
       const info = await readVtuInfo(task.path)
-      const { surface, cellCenters, domainBounds } = await vtuBoundarySurface(info)
-      return { op: 'vtuGeometry', nCells: info.nCells, surface, cellCenters, domainBounds, time: info.time, arrays: info.arrays }
+      const { surface, cellCenters, domainBounds, nPoints, sharedPoints } = await vtuBoundarySurface(info)
+      return { op: 'vtuGeometry', nCells: info.nCells, nPoints, sharedPoints, surface, cellCenters, domainBounds, time: info.time, arrays: info.arrays }
     }
     case 'vtuCellData': {
       const info = await readVtuInfo(task.path)
       const { components, data } = await readVtuCellData(info, task.name)
       return { op: 'vtuCellData', components, data }
+    }
+    case 'vtuPointData': {
+      const info = await readVtuInfo(task.path)
+      const { components, data } = await readVtuPointData(info, task.name)
+      return { op: 'vtuPointData', components, data }
     }
   }
 }
@@ -89,6 +107,7 @@ function transferables(result: WorkerResult): ArrayBuffer[] {
   switch (result.op) {
     case 'foamField':
     case 'vtuCellData':
+    case 'vtuPointData':
       add(result.data)
       break
     case 'polyMesh':
@@ -97,6 +116,7 @@ function transferables(result: WorkerResult): ArrayBuffer[] {
       add(result.surface.normals)
       add(result.surface.indices)
       add(result.surface.cellOfTri)
+      add(result.surface.pointOfVertex)
       add(result.cellCenters)
       if (result.op === 'polyMesh' && result.lattice) {
         add(result.lattice.nodes.x)
