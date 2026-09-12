@@ -19,7 +19,9 @@ removal). One run writes
     <out_dir>/work/                       checkpoints, repaired solids, run.log
 
 and `ofgpu-convert-mesh <out_dir>/<name>.msh <caseDir> -fluent <name>_fluent.msh`
-takes the mesh to the solver and to Fluent.
+takes the mesh to the solver and to Fluent. A `regions` block keeps declared
+solids as their own volumes, fragmented with the fluid (conformal shared
+faces); see README "Regions".
 
 The pipeline, its order and its checkpoints are ported stage for stage from the
 ammonia site mesh (nh3_site_mesh.py, proven on a 3.65 M-cell mesh), with the
@@ -40,6 +42,7 @@ import difflib
 import json
 import math
 import os
+import re
 import sys
 import time
 
@@ -104,6 +107,7 @@ DEFAULTS = {
     'points': {},                   # {'tank_shell': [x, y], ...}
     'pool_radius_m': 26.0,
     'roof_patches': {},             # {'nh3_source': 306}
+    'regions': {'solids': [], 'interface_names': True},
     'sizes': {'min': 1.5, 'max': 40.0, 'pool': 2.0, 'box': 4.0, 'growth_from': 2.5,
               'near_struct': 4.0, 'far_struct': 12.0, 'near_radius': 400.0,
               'size_mult': 1.0, 'roof_boxes': [2.5, 5.0, 10.0], 'gap_ratio': 0.0,
@@ -112,7 +116,8 @@ DEFAULTS = {
               # (+-y), height above the ground, its size and the transition outside it; off
               # while size is 0
               'plume': {'downwind_m': 0.0, 'upwind_m': 0.0, 'half_width_m': 0.0,
-                        'height_m': 0.0, 'size': 0.0, 'thickness_m': 60.0}},
+                        'height_m': 0.0, 'size': 0.0, 'thickness_m': 60.0},
+              'regions': {}},
     'mesh': {'algo2d': 6, 'algo3d': 1, 'optimize_passes': 5, 'relocate_passes': 0,
              'smoothing': 1, 'threads': 32},
     'post': {'flat_tets': True, 'flat_threshold': 1e-7, 'seam_merge_m': 0.02,
@@ -124,6 +129,9 @@ DEFAULTS = {
 }
 REQUIRED = ('step', 'out_dir', 'domain_box')
 REPAIR_KEYS = {'tag', 'method', 'cell_m', 'target_faces', 'lift_z', 'brep'}
+REGION_KEYS = {'tag', 'name', 'kind', 'material', 'outer'}
+REGION_SIZE_KEYS = {'size', 'reach_m'}
+REGION_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 # ------------------------------------------------------------------- output
@@ -432,11 +440,270 @@ def load_config(path):
     if not _is_num(c['big_roof_is_ground_m2']) or c['big_roof_is_ground_m2'] <= 0:
         errors.append('config.classification.big_roof_is_ground_m2: expected an area in m^2')
 
+    validate_regions(cfg, errors)
     if errors:
         die('the config %s is rejected:\n  - %s' % (path, '\n  - '.join(errors)))
     cfg['step'] = os.path.abspath(os.path.expanduser(cfg['step']))
     cfg['out_dir'] = os.path.abspath(os.path.expanduser(cfg['out_dir']))
     return cfg
+
+
+def validate_regions(cfg, errors):
+    """C3 V1-V9: every regions/sizes.regions key checked by name; entries normalised in place."""
+    reg = cfg['regions']
+    if not isinstance(reg, dict):
+        errors.append('config.regions: expected {"solids": [...], "interface_names": true}')
+        return
+    if not isinstance(reg['interface_names'], bool):
+        errors.append('config.regions.interface_names: expected true or false')
+    solids = reg['solids']
+    if not isinstance(solids, list):
+        errors.append('config.regions.solids: expected a list of {"tag", "name"} objects')
+        solids = []
+    wp = cfg['classification']['wall_prefix']
+    pp = cfg['classification']['pool_prefix']
+    taken = {'top', 'west', 'east', 'south', 'north', 'fluid', wp + 'sea_surface',
+             wp + 'ship_hull', wp + 'buildings', wp + 'ground_land'}
+    taken |= set(cfg['points']) | {pp + n for n in cfg['points']} | set(cfg['roof_patches'])
+    names, outers, tags = set(), set(), set()
+    rep_tags = {r.get('tag') for r in cfg['repairs'] if isinstance(r, dict)}
+    roof_tags = set(cfg['roof_patches'].values())
+    for i, ent in enumerate(solids):
+        if not isinstance(ent, dict):
+            errors.append('config.regions.solids[%d]: expected an object' % i)
+            continue
+        for k in sorted(set(ent) - REGION_KEYS):
+            near = difflib.get_close_matches(k, sorted(REGION_KEYS), 1)
+            errors.append('unknown key "config.regions.solids[%d].%s"%s' % (
+                i, k, ' - did you mean "%s"?' % near[0] if near else ''))
+        if not isinstance(ent.get('tag'), int) or isinstance(ent.get('tag'), bool):
+            errors.append('config.regions.solids[%d].tag: expected an integer solid tag' % i)
+        elif ent['tag'] in tags:
+            errors.append('config.regions.solids[%d].tag: solid %d is declared twice'
+                          % (i, ent['tag']))
+        elif cfg['fluid']['largest'] is False and ent['tag'] == cfg['fluid']['tag']:
+            errors.append('config.regions.solids[%d].tag: solid %d is the fluid itself'
+                          % (i, ent['tag']))
+        else:
+            tags.add(ent['tag'])
+        nm = ent.get('name')
+        if not isinstance(nm, str) or not REGION_NAME.match(nm):
+            errors.append('config.regions.solids[%d].name: expected [A-Za-z_][A-Za-z0-9_]*' % i)
+        elif nm in taken or nm in names:
+            errors.append('config.regions.solids[%d].name: "%s" is already a fixed, pool, roof '
+                          'or region name' % (i, nm))
+        else:
+            names.add(nm)
+
+        if ent.get('kind', 'solid') != 'solid':
+            errors.append('config.regions.solids[%d].kind: only "solid" is implemented '
+                          '(a second fluid region has no consumer yet)' % i)
+        mat = ent.get('material')
+        if mat is not None and (not isinstance(mat, str) or not mat):
+            errors.append('config.regions.solids[%d].material: expected a non-empty string' % i)
+        od = ent.get('outer')
+        if od is not None and (not isinstance(od, str) or not REGION_NAME.match(od)):
+            errors.append('config.regions.solids[%d].outer: expected [A-Za-z_][A-Za-z0-9_]*' % i)
+        elif od is not None and (od in names or od in outers):
+            errors.append('config.regions.solids[%d].outer: "%s" collides with a region name '
+                          'or another outer' % (i, od))
+        else:
+            outers.add(od)
+        where = (('in solids.exclude_tags' if ent.get('tag') in cfg['solids']['exclude_tags']
+                  else '') or ('repaired' if ent.get('tag') in rep_tags else '')
+                 or ('a roof_patches solid' if ent.get('tag') in roof_tags else ''))
+        if where:
+            errors.append('config.regions.solids[%d].tag: solid %s is also %s - a declared '
+                          'region is kept as modelled' % (i, ent.get('tag'), where))
+
+    if solids:
+        if cfg['trim'] is not None:
+            errors.append('config.trim: must be null with regions (trim keeps only the largest '
+                          'volume)')
+        if cfg['repairs']:
+            errors.append('config.repairs: must be empty with regions (a repaired solid cannot '
+                          'also be a kept region)')
+        if cfg['post']['flat_tets']:
+            errors.append('config.post.flat_tets: must be false with regions (the flat-tet '
+                          "stage rebuilds the fluid's mesh alone)")
+        if cfg['sizes']['gap_ratio']:
+            errors.append('config.sizes.gap_ratio: must be 0 with regions (its surface pass '
+                          'reads the fluid alone)')
+    for nm2, sr in cfg['sizes']['regions'].items():
+        if nm2 not in names:
+            errors.append('config.sizes.regions.%s: no declared region of this name' % nm2)
+        elif not isinstance(sr, dict):
+            errors.append('config.sizes.regions.%s: expected {"size", "reach_m"}' % nm2)
+        else:
+            for k in sorted(set(sr) - REGION_SIZE_KEYS):
+                near = difflib.get_close_matches(k, sorted(REGION_SIZE_KEYS), 1)
+                errors.append('unknown key "config.sizes.regions.%s.%s"%s' % (
+                    nm2, k, ' - did you mean "%s"?' % near[0] if near else ''))
+            for k in ('size', 'reach_m'):
+                if k in sr and (not _is_num(sr[k]) or sr[k] <= 0):
+                    errors.append('config.sizes.regions.%s.%s: expected a positive number'
+                                  % (nm2, k))
+    for ent in solids:
+        if not isinstance(ent, dict) or ent.get('name') not in names:
+            continue
+        ent.setdefault('kind', 'solid')
+        ent['material'] = ent.get('material')
+        ent.setdefault('outer', '%s_outer' % ent['name'])
+        sr = cfg['sizes']['regions'].setdefault(ent['name'], {})
+        if isinstance(sr, dict):
+            sr.setdefault('size', cfg['sizes']['near_struct'])
+            sr.setdefault('reach_m', NEAR_FAR[0])
+
+
+def declared_regions(cfg):
+    """The normalised regions.solids entries in config order ([] when none)."""
+    reg = cfg['regions']
+    return reg['solids'] if isinstance(reg, dict) else []
+
+
+def declared_tags(cfg):
+    """{entry['tag'] for entry in declared_regions(cfg)}."""
+    return set(ent['tag'] for ent in declared_regions(cfg))
+
+
+def interface_group(a, b, cfg):
+    """'<a>_to_<b>' - the one physical-group name of the faces regions a and b share."""
+    return '%s_to_%s' % (a, b)
+
+
+def record_regions(cfg, fluid):
+    """import_stage: SUMMARY['regions'][name] = {tag, kind, material, outer, mass_m3, centroid};
+    dies when a declared tag is not an imported solid or is the fluid."""
+    declared = declared_regions(cfg)
+    if not declared:
+        return
+    tags = set(tg for d, tg in gmsh.model.getEntities(3))
+    for i, ent in enumerate(declared):
+        if ent['tag'] == fluid or ent['tag'] not in tags:
+            die('import: regions.solids[%d]: tag %d is not one of the imported solids %s '
+                '(or is the fluid)' % (i, ent['tag'], sorted(tags)))
+        c = gmsh.model.occ.getCenterOfMass(3, ent['tag'])
+        SUMMARY['regions'][ent['name']] = {
+            'tag': ent['tag'], 'kind': ent['kind'], 'material': ent['material'],
+            'outer': ent['outer'], 'mass_m3': gmsh.model.occ.getMass(3, ent['tag']),
+            'centroid': [float(v) for v in c]}
+
+
+def match_region_volumes(regions, vols, fluid, where):
+    """After a BREP re-import: give every region record the tag of the volume (not the fluid)
+    whose mass agrees to 1e-6 relative and whose centroid lies within 1e-6 x the model's bbox
+    diagonal; exactly one candidate per region or die('%s: region %s matches %d volumes')."""
+    bb = gmsh.model.getBoundingBox(-1, -1)
+    diag = math.dist(bb[:3], bb[3:])
+    for name, rec in regions.items():
+        cand = []
+        for d, tg in vols:
+            if tg == fluid:
+                continue
+            if abs(gmsh.model.occ.getMass(3, tg) - rec['mass_m3']) > 1e-6 * abs(rec['mass_m3']):
+                continue
+            if math.dist(gmsh.model.occ.getCenterOfMass(3, tg), rec['centroid']) <= 1e-6 * diag:
+                cand.append(tg)
+        if len(cand) != 1:
+            die('%s: region %s matches %d volumes' % (where, name, len(cand)))
+        rec['tag'] = cand[0]
+
+
+def fragment_regions(cfg, fluid, solid_bbox):
+    """cut_stage: occ.fragment the fluid with the declared solids (D1-D2), re-key solid_bbox and
+    SUMMARY['regions'][*]['tag'], check the masses (EXPECT_SLACK, D6), set SUMMARY['fluid_mass_m3'];
+    returns the fluid's new tag (unchanged when nothing is declared)."""
+    declared = declared_regions(cfg)
+    if not declared:
+        return fluid
+    occ = gmsh.model.occ
+    fluid_before = occ.getMass(3, fluid)
+    tools = [(3, SUMMARY['regions'][ent['name']]['tag']) for ent in declared]
+    out, outmap = occ.fragment([(3, fluid)], tools)
+    occ.synchronize()
+    tool_pieces = set(dt for m in outmap[1:] for dt in m)
+    own = [dt for dt in outmap[0] if dt not in tool_pieces]
+    if len(own) != 1:
+        die('cut: the fragment left %d fluid volumes, expected 1' % len(own))
+    fluid = own[0][1]
+
+    for i, ent in enumerate(declared):
+        rec = SUMMARY['regions'][ent['name']]
+        if len(outmap[1 + i]) != 1:
+            die('cut: region %s came out of the fragment as %d pieces - it must lie wholly '
+                'inside the fluid' % (ent['name'], len(outmap[1 + i])))
+        new = outmap[1 + i][0][1]
+        mass = occ.getMass(3, new)
+        if abs(mass - rec['mass_m3']) > 1e-9 * abs(rec['mass_m3']):
+            die('cut: region %s mass %.6e after the fragment, was %.6e'
+                % (ent['name'], mass, rec['mass_m3']))
+        shared = set(s for d, s in gmsh.model.getBoundary([(3, fluid)], oriented=False)) & \
+            set(s for d, s in gmsh.model.getBoundary([(3, new)], oriented=False))
+        if new != ent['tag']:
+            solid_bbox[new] = solid_bbox.pop(ent['tag'], None)
+        rec['tag'] = new
+        rec['shared_with_fluid'] = len(shared)
+        log('region %-14s tag %d -> %d, %.4e m^3, %d face(s) shared with the fluid'
+            % (ent['name'], ent['tag'], new, mass, len(shared)))
+    fluid_after = occ.getMass(3, fluid)
+    expect = fluid_before - sum(SUMMARY['regions'][ent['name']]['mass_m3'] for ent in declared)
+    if abs(fluid_after - expect) / abs(expect) > EXPECT_SLACK:
+        die('cut: the fluid is %.4e m^3 after the fragment, expected %.4e (fluid %.4e minus '
+            'the %d declared region(s))' % (fluid_after, expect, fluid_before, len(declared)))
+    for ent in declared:
+        m = SUMMARY['regions'][ent['name']]['mass_m3']
+        if m >= fluid_after:
+            die('cut: region %s (%.4e m^3) is not smaller than the fluid (%.4e m^3) - the '
+                'fluid must outweigh every declared region' % (ent['name'], m, fluid_after))
+    SUMMARY['fluid_mass_m3'] = fluid_after
+    return fluid
+
+
+def interface_faces(cfg):
+    """{name: sorted surface tags shared by the fluid and region name} - the fluid's boundary
+    set intersected with each declared solid's, in config order."""
+    declared = declared_regions(cfg)
+    if not declared:
+        return {}
+    fset = set(s for d, s in gmsh.model.getBoundary([(3, SUMMARY['fluid'])], oriented=False))
+    return {ent['name']: sorted(fset & set(s for d, s in gmsh.model.getBoundary(
+        [(3, SUMMARY['regions'][ent['name']]['tag'])], oriented=False))) for ent in declared}
+
+
+def region_groups(cfg):
+    """{group_name: sorted surface tags} for the declared solids' own 2-D groups: '<a>_to_<b>'
+    for each pair (a before b in config order) that shares faces, and each solid's `outer` group
+    for the rest; appends the solid-solid pairs to SUMMARY['interfaces'] and fills
+    SUMMARY['regions'][name]['groups']."""
+    declared = declared_regions(cfg)
+    if not declared:
+        return {}
+    faces = {ent['name']: set(s for d, s in gmsh.model.getBoundary(
+        [(3, SUMMARY['regions'][ent['name']]['tag'])], oriented=False)) for ent in declared}
+    fset = set(s for d, s in gmsh.model.getBoundary([(3, SUMMARY['fluid'])], oriented=False))
+    out = {}
+    for i, a in enumerate(declared):
+        for b in declared[i + 1:]:
+            shared = sorted(faces[a['name']] & faces[b['name']])
+            if not shared:
+                continue
+            gname = interface_group(a['name'], b['name'], cfg)
+            out[gname] = shared
+            SUMMARY.setdefault('interfaces', []).append({
+                'regions': [a['name'], b['name']], 'group': gname, 'surfaces': len(shared),
+                'area_m2': round(sum(gmsh.model.occ.getMass(2, s) for s in shared), 1)})
+
+    for ent in declared:
+        rest = set(faces[ent['name']])
+        for other in faces:
+            if other != ent['name']:
+                rest -= faces[other]
+        rest -= fset
+        out[ent['outer']] = sorted(rest)
+        SUMMARY['regions'][ent['name']]['groups'] = {
+            ent['outer']: {'surfaces': len(rest),
+                           'area_m2': round(sum(gmsh.model.occ.getMass(2, s) for s in rest), 1)}}
+    return out
 
 
 # ------------------------------------------------------------ stage 1: import
@@ -458,13 +725,22 @@ def import_stage(cfg, args, work):
         gmsh.model.occ.importShapes(ckpt_brep)
         gmsh.model.occ.synchronize()
         vols = gmsh.model.getEntities(3)
-        if len(vols) != 1:
-            die('the checkpoint %s holds %d volumes, expected 1' % (ckpt_brep, len(vols)))
-        fluid = vols[0][1]
+        expected = 1 + len(declared_regions(cfg))
+        if len(vols) != expected:
+            die('the checkpoint %s holds %d volumes, expected %d (the fluid and %d declared '
+                'region(s))' % (ckpt_brep, len(vols), expected, len(declared_regions(cfg))))
+        fluid = max(vols, key=lambda dt: gmsh.model.occ.getMass(3, dt[1]))[1]
         with open(ckpt_json, encoding='utf-8') as f:
             ck = json.load(f)
         for k in ('points', 'pools', 'solid_bboxes', 'ship_hulls', 'fluid_mass_m3', 'pockets'):
             SUMMARY[k] = ck[k]
+        SUMMARY['regions'] = ck.get('regions', {})
+        if bool(declared_regions(cfg)) != bool(SUMMARY['regions']):
+            die("--from-checkpoint: the config declares %d region(s) but the checkpoint carries "
+                '%d - rerun without --from-checkpoint' % (
+                    len(declared_regions(cfg)), len(SUMMARY['regions'])))
+        if SUMMARY['regions']:
+            match_region_volumes(SUMMARY['regions'], vols, fluid, 'checkpoint')
         SUMMARY['near_touching'] = ck.get('near_touching', [])   # checkpoints predating U46 lack it
         SUMMARY['solid_bboxes'] = {int(tg): bb for tg, bb in SUMMARY['solid_bboxes'].items()}
         if set(cfg['points']) != set(SUMMARY['points']):
@@ -474,7 +750,7 @@ def import_stage(cfg, args, work):
         SUMMARY['from_checkpoint'] = True
         # faces that survived a failed pool imprint (a disc embedded in a slope) are not part
         # of the boundary; left in the model they get meshed and confuse the 3-D pass
-        bset = set(sf for d, sf in gmsh.model.getBoundary([(3, fluid)], oriented=False))
+        bset = set(sf for v in vols for d, sf in gmsh.model.getBoundary([v], oriented=False))
         loose = [(2, sf) for d, sf in gmsh.model.getEntities(2) if sf not in bset]
         if loose:
             gmsh.model.occ.remove(loose, recursive=True)
@@ -514,6 +790,7 @@ def import_stage(cfg, args, work):
     SUMMARY['solids_imported'] = len(vols) - 1
     # every solid's bbox drives the classification; healing may renumber but a bbox does not move
     SUMMARY['solid_bboxes'] = {tg: list(gmsh.model.getBoundingBox(3, tg)) for tg in tags if tg != fluid}
+    record_regions(cfg, fluid)
     tick('import', t)
 
 
@@ -866,7 +1143,8 @@ def cut_stage(cfg, args, work):
                     cfg['solids']['hull_box_snap_m'], cfg['solids']['hull_box_inset_m'])
     if hull_beyond > 0:
         n_hull, n_kept, n_skipped, n_dropped = 0, 0, 0, 0
-        keep_tags = set(cfg['solids']['exclude_tags']) | {r['tag'] for r in cfg['repairs']}
+        keep_tags = set(cfg['solids']['exclude_tags']) | {r['tag'] for r in cfg['repairs']} | \
+            declared_tags(cfg)
         pool_xy = list(cfg['points'].values())
         prisms = {}
         for tg in sorted(solid_bbox):
@@ -925,7 +1203,7 @@ def cut_stage(cfg, args, work):
     tools = []
     n_deeper = 0
     for tg in sorted(solid_bbox):
-        if tg in cfg['solids']['exclude_tags']:
+        if tg in cfg['solids']['exclude_tags'] or tg in declared_tags(cfg):
             continue
         tools.append((3, tg))
         b = solid_bbox[tg]
@@ -1008,8 +1286,11 @@ def cut_stage(cfg, args, work):
     tools += [(3, tg) for tg in repaired]
 
     tool_mass = sum(gmsh.model.occ.getMass(3, tg) for d, tg in tools)
-    out, _ = gmsh.model.occ.cut([(3, fluid)], tools, removeObject=True, removeTool=True)
-    gmsh.model.occ.synchronize()
+    if tools:
+        out, _ = gmsh.model.occ.cut([(3, fluid)], tools, removeObject=True, removeTool=True)
+        gmsh.model.occ.synchronize()
+    else:                      # every other solid is a declared region: nothing to cut
+        out = [(3, fluid)]
     if cfg['solids']['boolean_tol_m'] > 0:
         gmsh.option.setNumber('Geometry.ToleranceBoolean', 0.0)   # the pool cuts stay exact
     masses = sorted(((gmsh.model.occ.getMass(3, tg), tg) for d, tg in out), reverse=True)
@@ -1029,9 +1310,12 @@ def cut_stage(cfg, args, work):
     if masses[1:]:
         gmsh.model.occ.remove([(3, tg) for m, tg in masses[1:]], recursive=True)
         gmsh.model.occ.synchronize()
+    fluid = fragment_regions(cfg, fluid, solid_bbox)
     vols = gmsh.model.getEntities(3)
-    if len(vols) != 1:
-        die('after the cut the model holds %d volumes, expected 1 (the fluid)' % len(vols))
+    expected = 1 + len(declared_regions(cfg))
+    if len(vols) != expected:
+        die('after the cut the model holds %d volumes, expected %d (the fluid and %d declared '
+            'region(s))' % (len(vols), expected, len(declared_regions(cfg))))
     n_surf = len(gmsh.model.getBoundary([(3, fluid)], oriented=False))
     log('cut done: fluid tag %d, mass %.4e m^3, %d boundary surfaces, %d pockets dropped'
         % (fluid, masses[0][0], n_surf, len(masses) - 1))
@@ -1078,7 +1362,7 @@ def cut_stage(cfg, args, work):
     SUMMARY['near_touching'] = near
     gmsh.write(os.path.join(work, '%s_cut.brep' % cfg['name']))   # the pool-failure restore point
     SUMMARY['fluid'] = fluid
-    SUMMARY['fluid_mass_m3'] = masses[0][0]
+    SUMMARY['fluid_mass_m3'] = gmsh.model.occ.getMass(3, fluid)
     SUMMARY['solid_bboxes'] = solid_bbox
     tick('cut', t)
 
@@ -1115,9 +1399,17 @@ def ground_stage(cfg, args, work):
         n_surf = len(gmsh.model.getBoundary([(3, fluid)], oriented=False))
         print('', flush=True)
         log('DRY RUN: stopping after the import and the boolean cut')
-        print('  volumes        : 1 (fluid tag %d)%s' % (
-            fluid, ', %d sealed pockets dropped' % len(SUMMARY['pockets'])
+        n_decl = len(declared_regions(cfg))
+        print('  volumes        : %d (fluid tag %d)%s' % (
+            1 + n_decl, fluid, ', %d sealed pockets dropped' % len(SUMMARY['pockets'])
             if SUMMARY['pockets'] else ''), flush=True)
+        if n_decl:
+            d_iface = interface_faces(cfg)
+            for ent in declared_regions(cfg):
+                rec = SUMMARY['regions'][ent['name']]
+                print('  region %-14s tag %d, %.4e m^3, %d shared face(s)' % (
+                    ent['name'], rec['tag'], rec['mass_m3'],
+                    len(d_iface.get(ent['name'], []))), flush=True)
         print('  masses         : fluid %.4e m^3' % SUMMARY['fluid_mass_m3'], flush=True)
         print('  surface count  : %d boundary surfaces' % n_surf, flush=True)
         for name, p in SUMMARY['points'].items():
@@ -1158,7 +1450,13 @@ def classify(cfg):
                 sb[2] >= bb[2] - pad and sb[5] <= bb[5] + pad)
 
     fluid = SUMMARY['fluid']
+    iface = interface_faces(cfg)
+    skip = set(s for v in iface.values() for s in v)
+    for name, faces in iface.items():
+        groups[interface_group('fluid', name, cfg)] = list(faces)
     for d, sf in gmsh.model.getBoundary([(3, fluid)], oriented=False):
+        if sf in skip:
+            continue
         b = gmsh.model.getBoundingBox(2, sf)
         flat = (b[5] - b[2]) < FLAT_TOL
         # a pool piece is a flat face at z_g whose bbox lies inside the disc's square and whose
@@ -1255,6 +1553,12 @@ def classify(cfg):
                     groups[prefix + 'buildings'].append(sf)
             else:
                 groups[prefix + 'ground_land'].append(sf)
+    if iface:
+        SUMMARY['interfaces'] = [
+            {'regions': ['fluid', name], 'group': interface_group('fluid', name, cfg),
+             'surfaces': len(faces),
+             'area_m2': round(sum(gmsh.model.occ.getMass(2, sf) for sf in faces), 1)}
+            for name, faces in iface.items()]
     return groups
 
 
@@ -1355,6 +1659,8 @@ def pool_stage(cfg, args, work):
             gmsh.model.occ.synchronize()
             vols = gmsh.model.getEntities(3)
             fluid = max(vols, key=lambda dt: gmsh.model.occ.getMass(3, dt[1]))[1]
+            if SUMMARY.get('regions'):
+                match_region_volumes(SUMMARY['regions'], vols, fluid, 'cut checkpoint')
             for k in list(SUMMARY['pools']):
                 if SUMMARY['pools'][k] == 'imprinted':
                     SUMMARY['pools'][k] = 'lost when a later pool failed and the checkpoint was restored'
@@ -1374,7 +1680,8 @@ def checkpoint_stage(cfg, args, work):
                        'solid_bboxes': SUMMARY['solid_bboxes'],
                        'fluid_mass_m3': SUMMARY['fluid_mass_m3'],
                        'pockets': SUMMARY['pockets'],
-                       'near_touching': SUMMARY.get('near_touching', [])}, f, indent=1)
+                       'near_touching': SUMMARY.get('near_touching', []),
+                       'regions': SUMMARY.get('regions', {})}, f, indent=1)
         log('checkpoint written: %s + .json (--from-checkpoint reruns from here)'
             % os.path.basename(ckpt_brep))
     else:
@@ -1467,9 +1774,23 @@ def groups_and_fields_stage(cfg):
     report_groups(cfg, groups)
 
     gmsh.model.addPhysicalGroup(3, [SUMMARY['fluid']], name='fluid')
+    for ent in declared_regions(cfg):
+        gmsh.model.addPhysicalGroup(3, [SUMMARY['regions'][ent['name']]['tag']], name=ent['name'])
+    rg = region_groups(cfg)
+    quiet = set() if cfg['regions']['interface_names'] else set(
+        rec['group'] for rec in SUMMARY.get('interfaces', []))
     for k, v in groups.items():
-        if v:
+        if v and k not in quiet:
             gmsh.model.addPhysicalGroup(2, v, name=k)
+    for k, v in rg.items():
+        if not v:
+            continue
+        area = sum(gmsh.model.occ.getMass(2, sf) for sf in v)
+        SUMMARY['groups'][k] = {'surfaces': len(v), 'area_m2': round(area, 1)}
+        if k in quiet:
+            continue
+        gmsh.model.addPhysicalGroup(2, v, name=k)
+        log('  %-18s %5d surface(s)  %12.1f m^2' % (k, len(v), area))
 
     mult = cfg['sizes']['size_mult']
     smin, smax = cfg['sizes']['min'] * mult, cfg['sizes']['max'] * mult
@@ -1570,6 +1891,16 @@ def groups_and_fields_stage(cfg):
         F.setNumbers(d, 'SurfacesList', far)
         F.setNumber(d, 'Sampling', NEAR_FAR_SAMPLING[1])
         fields.append(threshold(d, cfg['sizes']['far_struct'], 0, cfg['sizes']['max'], NEAR_FAR[1]))
+    for ent in declared_regions(cfg):
+        rz = cfg['sizes']['regions'][ent['name']]
+        faces_r = [s for d, s in gmsh.model.getBoundary(
+            [(3, SUMMARY['regions'][ent['name']]['tag'])], oriented=False)]
+        d = F.add('Distance')
+        F.setNumbers(d, 'SurfacesList', faces_r)
+        F.setNumber(d, 'Sampling', NEAR_FAR_SAMPLING[0])
+        fields.append(threshold(d, rz['size'], 0, cfg['sizes']['max'], rz['reach_m']))
+        log('region field %s: size %g within %g m of %d surfaces'
+            % (ent['name'], rz['size'], rz['reach_m'], len(faces_r)))
     fmin = F.add('Min')
     F.setNumbers(fmin, 'FieldsList', fields)
     F.setAsBackgroundMesh(fmin)
@@ -2708,6 +3039,12 @@ def post_and_write_stage(cfg, out_dir, tag):
         log('flat-tet stage disabled (config.post.flat_tets = false)')
     SUMMARY['tetrahedra'] = int(len(gmsh.model.mesh.getElements(3)[1][0]))
     SUMMARY['triangles'] = sum(len(e) for e in gmsh.model.mesh.getElements(2)[1])
+    SUMMARY['fluid_tetrahedra'] = int(sum(
+        len(t) for t in gmsh.model.mesh.getElements(3, fluid)[1]))
+    for ent in declared_regions(cfg):
+        SUMMARY['regions'][ent['name']]['tetrahedra'] = int(sum(
+            len(t) for t in gmsh.model.mesh.getElements(
+                3, SUMMARY['regions'][ent['name']]['tag'])[1]))
     tick('flat', t)
 
     t = time.time()
@@ -2759,7 +3096,7 @@ def main(argv=None):
     out_dir, work = cfg['out_dir'], os.path.join(cfg['out_dir'], 'work')
     os.makedirs(work, exist_ok=True)
     SUMMARY.update({'gmsh': gmsh.__version__, 'timings_s': {}, 'points': {}, 'groups': {},
-                    'pools': {}, 'pockets': []})
+                    'pools': {}, 'pockets': [], 'regions': {}})
     if args.from_checkpoint and args.stop_after_checkpoint:
         die('--from-checkpoint and --stop-after-checkpoint together would do nothing')
     gmsh.initialize()

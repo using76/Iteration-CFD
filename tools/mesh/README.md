@@ -165,6 +165,11 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "roof_patches": {"nh3_source": 306},    // solid tag whose flat roof becomes its own patch,
                                           // with the 2.5/5/10 m refinement boxes around and
                                           // downwind (-x) of it
+  "regions": {                            // solids kept as their own volumes (see "Regions")
+    "solids": [ {"tag": 2, "name": "building", "kind": "solid",
+                 "material": "concrete", "outer": "building_outer"} ],
+    "interface_names": true               // false: no 2-D group for the shared faces
+  },
   "sizes": {
     "min": 1.5,            // Mesh.MeshSizeMin
     "max": 40.0,           // Mesh.MeshSizeMax and every field's VOut
@@ -190,6 +195,7 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                             // (the wind blows that way), upwind_m towards +x, +-half_width_m,
                             // from 1 m under the ground to height_m; off while size is 0
     "size_mult": 1.0,      // >1 coarsens every size (a solver-robustness reproducer)
+    "regions": {"building": {"size": 3.0, "reach_m": 20.0}},   // per declared region (see "Regions")
     "roof_boxes": [2.5, 5.0, 10.0]   // the three roof-patch box sizes (near, mid, downwind)
   },
   "mesh":  {"algo2d": 6, "algo3d": 1, "optimize_passes": 5, "threads": 32,
@@ -278,6 +284,33 @@ distances 0–80/120 m, the ground scan's −1..60 m at 0.25 m, the 0.5 m hull
 slack, the 2000 m² big-roof area's 100 × 100 m shape test) are ported
 unchanged; they are the field layout the site mesh was tuned with.
 
+## Regions
+
+A `regions.solids` entry `{"tag", "name", "kind": "solid", "material",
+"outer"}` keeps one imported solid as its own volume: never cut, sunk or
+hulled — after the cut the fluid is `occ.fragment`ed with it, so every face
+they share is one OCC surface, meshed once (conformal interface). Each volume
+gets its 3-D group (`fluid`, `<name>`); the shared faces get one 2-D group
+`fluid_to_<name>` (`<a>_to_<b>` between two declared solids, config order);
+the solid's remaining faces get `<name>_outer` (`outer` renames it).
+`interface_names: false` writes no 2-D group for the shared faces —
+`ofgpu-convert-mesh -keepRegions` then yields one merged mesh with the
+interface internal; the summary still reports it. Every declared solid gets a
+Distance/Threshold field over all of its faces (`sizes.regions.<name>`:
+`size` default `sizes.near_struct`, `reach_m` default 80 m). Refused by name
+with regions: `trim` (keeps only the largest volume), `repairs`,
+`post.flat_tets` (rebuilds the fluid's mesh alone), `sizes.gap_ratio` (reads
+the fluid alone), a declared tag that is also excluded, repaired or a
+`roof_patches` solid, a tag that is the fluid's or not in the STEP, a `name`
+colliding with `fluid`, a fixed patch, a point or a roof patch; the fluid
+must outweigh every declared solid, and a solid partly outside the fluid is
+refused (the fragment must leave one piece per solid). The summary carries
+`regions.<name>` (tag, kind, material, outer, mass_m3, centroid,
+shared_with_fluid, groups, tetrahedra), `interfaces`, `fluid_tetrahedra` and
+`groups.fluid_to_<name>`; the checkpoint carries `regions`, and
+`--from-checkpoint` re-identifies each region by mass and centroid. M4's
+`regions_from_msh.py` is the consumer of the names this writes.
+
 ## The self-test
 
 ```
@@ -292,7 +325,10 @@ tool four ways — `--dry-run`, `--stop-after-checkpoint`, the full run, and
 `pool_yard` exist; tets > 0; no negative volumes in the summary. The full run
 also asserts `near_touching == []` (the tiny STEP has no near-touching pair),
 and the `--from-checkpoint` path reruns the post stage with `sliver_rel: 0.01,
-sliver_edge_rel: 0.25` and prints the flat-tet notes. When
+sliver_edge_rel: 0.25` and prints the flat-tet notes. With the building
+declared as a region, the tool runs three more times (dry-run, full,
+from-checkpoint) plus one with `interface_names: false`, and four refusals
+are checked; a `--keep` run leaves `out_regions/selftest.msh` for M4. When
 `rust/target/release/ofgpu-convert-mesh.exe` is built, the mesh is also
 converted to a case's `polyMesh` and to a Fluent mesh. Seconds, no STEP input
 needed.
