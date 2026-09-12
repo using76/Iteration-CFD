@@ -303,18 +303,31 @@ export function createHub(deps: HubDeps): HubHandle {
     return client
   }
 
+  /**
+   * The clients a command for `sessionId` may land on. A session's commands go
+   * only to the tabs that have that session open: falling back to "any open
+   * client" let a turn whose own window had gone (a tab closed mid-turn, a
+   * headless ai-drive, another operator's tab) drive a stranger's screen -
+   * replacing their dataset and layers mid-sequence, which their own model then
+   * read as its commands failing. Without a session (a test, a broadcast-style
+   * caller) every open client is still a candidate.
+   */
+  function candidatesFor(sessionId: string | null | undefined): Client[] {
+    const open = [...clients.values()].filter((c) => c.ws.readyState === c.ws.OPEN)
+    return sessionId ? open.filter((c) => c.sessionId === sessionId) : open
+  }
+
   function pickViewer(sessionId: string | null | undefined): Client | null {
     // Prefer a client that already reported a viewer state; the shell opens
-    // the viewer tab on demand, so any client of the session (or any client
-    // at all) can still host the command.
-    const open = [...clients.values()].filter((c) => c.ws.readyState === c.ws.OPEN)
-    const withViewer = open.filter((c) => c.viewerState !== null)
-    const inSession = sessionId ? open.filter((c) => c.sessionId === sessionId) : []
-    const candidates = withViewer.length ? withViewer : inSession.length ? inSession : open
+    // the viewer tab on demand, so any client of the session can still host
+    // the command.
+    const candidates = candidatesFor(sessionId)
     if (!candidates.length) return null
-    const score = (c: Client) => (sessionId && c.sessionId === sessionId ? 1e15 : 0) + (c.viewerState ? 1e12 : 0) + Math.max(c.lastActive, c.lastViewerAt)
-    candidates.sort((a, b) => score(b) - score(a))
-    return candidates[0]
+    const withViewer = candidates.filter((c) => c.viewerState !== null)
+    const pool = withViewer.length ? withViewer : candidates
+    const score = (c: Client) => (c.viewerState ? 1e12 : 0) + Math.max(c.lastActive, c.lastViewerAt)
+    pool.sort((a, b) => score(b) - score(a))
+    return pool[0]
   }
 
   function waitForViewer(ms: number, sessionId: string | null | undefined): Promise<Client | null> {
@@ -325,6 +338,8 @@ export function createHub(deps: HubDeps): HubHandle {
       }, ms)
       const waiter = (c: Client | null) => {
         if (!c) return
+        // a viewer that reported for another session is not this session's
+        if (sessionId && c.sessionId !== sessionId) return
         viewerWaiters.delete(waiter)
         clearTimeout(timer)
         resolve(pickViewer(sessionId) ?? c)
@@ -334,14 +349,12 @@ export function createHub(deps: HubDeps): HubHandle {
   }
 
   // Every browser tab hosts the studio UI, so unlike pickViewer there is no
-  // "has it mounted" tier: any open client can carry a command, the tab with
-  // the session open is just the better target.
+  // "has it mounted" tier: any client of the session can carry a command, the
+  // most recently active one is the better target.
   function pickUi(sessionId: string | null | undefined): Client | null {
-    const open = [...clients.values()].filter((c) => c.ws.readyState === c.ws.OPEN)
-    if (!open.length) return null
-    const inSession = sessionId ? open.filter((c) => c.sessionId === sessionId) : []
-    const candidates = inSession.length ? inSession : open
-    const score = (c: Client) => (sessionId && c.sessionId === sessionId ? 1e15 : 0) + Math.max(c.lastActive, c.lastUiAt)
+    const candidates = candidatesFor(sessionId)
+    if (!candidates.length) return null
+    const score = (c: Client) => Math.max(c.lastActive, c.lastUiAt)
     candidates.sort((a, b) => score(b) - score(a))
     return candidates[0]
   }
@@ -363,7 +376,7 @@ export function createHub(deps: HubDeps): HubHandle {
     async requestViewer(cmd: ViewerCommand, opts = {}) {
       const timeoutMs = opts.timeoutMs ?? VIEWER_TIMEOUT_MS
       const client = pickViewer(opts.sessionId) ?? (await waitForViewer(Math.min(NO_VIEWER_WAIT_MS, timeoutMs), opts.sessionId))
-      if (!client) return viewerError('NO_VIEWER', 'no connected client has the 3D viewer open')
+      if (!client) return viewerError('NO_VIEWER', opts.sessionId ? 'no window with this session open has the 3D viewer; the operator may have closed it' : 'no connected client has the 3D viewer open')
       const requestId = `vc_${Date.now().toString(36)}_${(++counter).toString(36)}`
       return new Promise<ViewerResult>((resolve) => {
         const timer = setTimeout(() => {
@@ -381,7 +394,7 @@ export function createHub(deps: HubDeps): HubHandle {
     requestUi(cmd: UiCommand, opts = {}) {
       const timeoutMs = opts.timeoutMs ?? UI_TIMEOUT_MS
       const client = pickUi(opts.sessionId)
-      if (!client) return Promise.resolve(uiError('NO_UI', 'no connected client has the studio UI open'))
+      if (!client) return Promise.resolve(uiError('NO_UI', opts.sessionId ? 'no window has this session open; the operator may have closed it, so the screen cannot be driven from here' : 'no connected client has the studio UI open'))
       const requestId = `ui_${Date.now().toString(36)}_${(++counter).toString(36)}`
       return new Promise<UiRequestResult>((resolve) => {
         const timer = setTimeout(() => {

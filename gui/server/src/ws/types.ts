@@ -35,21 +35,25 @@ export interface Hub {
   /** True when at least one client reported a mounted viewer. */
   hasViewerClient(): boolean
   /**
-   * Forward a viewer command to the most recently active viewer client and
-   * await its `viewer.result`. Rejects with a ViewerResult-shaped error
-   * ({ok:false, error:{code:'NO_VIEWER'|'TIMEOUT'}}) rather than throwing.
+   * Forward a viewer command to the session's most recently active viewer
+   * client (any viewer client when no session is named) and await its
+   * `viewer.result`. Rejects with a ViewerResult-shaped error
+   * ({ok:false, error:{code:'NO_VIEWER'|'TIMEOUT'}}) rather than throwing;
+   * a session whose windows are all gone gets NO_VIEWER, never a stranger's.
    */
   requestViewer(cmd: ViewerCommand, opts?: { timeoutMs?: number; sessionId?: string | null }): Promise<ViewerResult>
   /**
-   * Latest UiState reported by the client that owns the session, falling back
-   * to the most recently active client; null when none has reported one.
+   * Latest UiState reported by the client that has the session open (the most
+   * recently active one when several do); null when none has reported one.
    */
   getUiState(sessionId?: string | null): UiState | null
   /**
-   * Forward a UI command to the client that owns the session (or the most
-   * recently active one) and await its `ui.result` for that requestId. Never
-   * throws: a timeout, a vanished client or no client at all resolves with
-   * { ok:false, error:{ code:'TIMEOUT'|'NO_UI' } }.
+   * Forward a UI command to the client that has the session open (the most
+   * recently active one when several do; any client when no session is named)
+   * and await its `ui.result` for that requestId. Never throws: a timeout, a
+   * vanished client or no client of the session resolves with
+   * { ok:false, error:{ code:'TIMEOUT'|'NO_UI' } } - another session's window
+   * is never adopted.
    */
   requestUi(cmd: UiCommand, opts?: { timeoutMs?: number; sessionId?: string | null }): Promise<UiRequestResult>
   onClientMessage(handler: ClientMsgHandler): () => void

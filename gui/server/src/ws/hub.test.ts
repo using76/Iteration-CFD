@@ -167,6 +167,51 @@ describe('hub', () => {
     expect(await late).toMatchObject({ ok: false, error: { code: 'NO_VIEWER' } })
   })
 
+  it("never drives another session's window: ui and viewer commands go only to the session's own clients", async () => {
+    // Two tabs, two sessions. A turn of s_A whose own tab has gone must be told
+    // NO_UI / NO_VIEWER rather than land on s_B's screen.
+    const a = new Client(url)
+    const b = new Client(url)
+    await Promise.all([a.open(), b.open()])
+    await Promise.all([a.next('hello'), b.next('hello')])
+    a.send({ t: 'session.open', sessionId: 's_A' })
+    b.send({ t: 'session.open', sessionId: 's_B' })
+    b.send({ t: 'viewer.state', state: { ...DEFAULT_VIEWER_STATE, backend: 'webgl2' } })
+    b.send({ t: 'ui.state', state: { activeTab: 'viewport', activeStep: null, rightTab: null, tool: null, frame: null, projection: null, showAxes: null, showColorBars: null, selection: null, runId: null, sim: null } })
+    await new Promise((r) => setTimeout(r, 30))
+
+    // s_A has a tab but no viewer state: its own tab, not s_B's viewer, gets the command
+    const pA = hub.requestUi({ type: 'fit_view' }, { sessionId: 's_A', timeoutMs: 1000 })
+    const cmdA = await a.next('ui.command')
+    expect(cmdA.cmd).toEqual({ type: 'fit_view' })
+    a.send({ t: 'ui.result', requestId: cmdA.requestId, ok: true, error: null })
+    expect((await pA).ok).toBe(true)
+    expect(b.frames.filter((f) => f.t === 'ui.command')).toHaveLength(0)
+    expect(hub.getUiState('s_A')).toBeNull()
+    expect(hub.getUiState('s_B')?.activeTab).toBe('viewport')
+
+    const vA = hub.requestViewer({ type: 'clear' }, { sessionId: 's_A', timeoutMs: 200 })
+    const vcmd = await a.next('viewer.command', 1000)
+    a.send({ t: 'viewer.result', requestId: vcmd.requestId, result: { ok: true, state: null, error: null, image: null } })
+    expect((await vA).ok).toBe(true)
+    expect(b.frames.filter((f) => f.t === 'viewer.command')).toHaveLength(0)
+
+    // s_A's tab closes mid-turn: its next commands are refused by name, s_B is left alone
+    a.close()
+    await new Promise((r) => setTimeout(r, 50))
+    const gone = await hub.requestUi({ type: 'fit_view' }, { sessionId: 's_A', timeoutMs: 500 })
+    expect(gone).toMatchObject({ ok: false, error: { code: 'NO_UI' } })
+    const goneViewer = await hub.requestViewer({ type: 'clear' }, { sessionId: 's_A', timeoutMs: 300 })
+    expect(goneViewer).toMatchObject({ ok: false, error: { code: 'NO_VIEWER' } })
+    expect(b.frames.filter((f) => f.t === 'ui.command' || f.t === 'viewer.command')).toHaveLength(0)
+    // and s_B's own commands still reach s_B
+    const pB = hub.requestUi({ type: 'fit_view' }, { sessionId: 's_B', timeoutMs: 1000 })
+    const cmdB = await b.next('ui.command')
+    b.send({ t: 'ui.result', requestId: cmdB.requestId, ok: true, error: null })
+    expect((await pB).ok).toBe(true)
+    b.close()
+  })
+
   it('routes other messages to the registered handler and tracks the session', async () => {
     const seen: string[] = []
     const off = hub.onClientMessage((client, msg) => {
