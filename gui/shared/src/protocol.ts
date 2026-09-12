@@ -2,7 +2,7 @@
 // map. This file is the single owner of every name that crosses the wire.
 // Both sides validate frames with the zod schemas below.
 import { z } from 'zod'
-import { Boolish, CameraPresetSchema, ColormapNameSchema, FieldComponentSchema, RangeTupleSchema, RepresentationModeSchema, TimeIndexSchema, ViewerCommandSchema, ViewerLayerSummarySchema, ViewerResultSchema, ViewerStateSchema } from './viewerCommands'
+import { Boolish, CameraPresetSchema, ColormapNameSchema, FieldComponentSchema, RangeTupleSchema, RepresentationModeSchema, TimeIndexSchema, Vec3Schema, ViewerCommandSchema, ViewerLayerSummarySchema, ViewerResultSchema, ViewerStateSchema } from './viewerCommands'
 import type { DatasetProgress } from './viewerDataset'
 
 // ---------------------------------------------------------------------------
@@ -435,7 +435,20 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('remove_layer'), id: z.string() }),
   z.object({ type: z.literal('set_camera'), preset: CameraPresetSchema }),
-  z.object({ type: z.literal('probe'), x: z.coerce.number(), y: z.coerce.number().describe('Screen coordinates in pixels from the top left') }),
+  // The probe: window pixels are what the mouse sends, but a model steering blind
+  // cannot aim them - it has no window to look at. So the same command also takes
+  // the canvas as a unit square (fx, fy: 0..1 from the top left of the 3-D view,
+  // 0.5/0.5 the middle), a world point the cell is looked up for, or "center".
+  // ui.state's viewer.viewport says how big the canvas is, in pixels.
+  z.object({
+    type: z.literal('probe'),
+    x: z.coerce.number().nullish().describe('Window x in pixels from the left (with y)'),
+    y: z.coerce.number().nullish().describe('Window y in pixels from the top (with x)'),
+    fx: z.coerce.number().nullish().describe('Fraction 0..1 across the 3-D canvas, left to right (with fy)'),
+    fy: z.coerce.number().nullish().describe('Fraction 0..1 down the 3-D canvas, top to bottom (with fx)'),
+    point: Vec3Schema.nullish().describe('World point [x, y, z]: the cell containing it is read'),
+    at: z.literal('center').nullish().describe('"center": the middle of the canvas'),
+  }),
   z.object({ type: z.literal('open_tab'), kind: z.string().describe('Tab kind, e.g. "viewer", "chart", "log"'), label: z.string().nullish() }),
   z.object({ type: z.literal('close_tab'), id: z.string() }),
   z.object({ type: z.literal('set_locale'), locale: z.enum(['ko', 'en']) }),
@@ -559,6 +572,8 @@ export const UiViewerStateSchema = z.object({
   range: z.tuple([z.number(), z.number()]).nullable(),
   representation: z.string().nullable(),
   layers: z.array(ViewerLayerSummarySchema).nullish(),
+  /** The 3-D canvas in CSS pixels, so a probe can be aimed; null with no canvas mounted. */
+  viewport: z.object({ width: z.number(), height: z.number() }).nullish(),
 })
 export type UiViewerState = z.infer<typeof UiViewerStateSchema>
 
