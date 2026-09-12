@@ -150,6 +150,18 @@ impl How {
     }
 }
 
+/// SPEC-LIT §94.3: what a gate says about its own discretisation error. A verdict that says
+/// neither is refused by `Checks::audit_and_summarise`'s third row.
+enum Uncertainty {
+    /// One mesh, and the gate says so; the string is the reason.
+    SingleMesh(&'static str),
+    /// Three or more meshes, through `ofgpu::vv` - (94.1)-(94.9).
+    Study(ofgpu::vv::GridStudy),
+}
+
+/// The declaration every existing single-mesh verdict carries.
+const ONE_MESH_AS_RUN: &str = "one mesh, as the section runs it; no refinement sequence in this run";
+
 /// One gate's non-passing verdict, registered AT THE POINT IT IS REPORTED.
 struct GateReport {
     verdict: Verdict,
@@ -165,6 +177,9 @@ struct GateReport {
     /// The rest of the verdict. Printed where the gate is and NOT repeated in
     /// the summary: a diagnosis belongs beside the table it came from.
     detail: Vec<String>,
+    /// §94.3; `None` is refused at the audit, not at `report`, because
+    /// `report` moves no tally - §69.6 row 7.
+    uncertainty: Option<Uncertainty>,
 }
 
 /// The running tally, and the one line each check prints.
@@ -320,9 +335,9 @@ impl Checks {
             "\n{n_miss} gates carry the verdict {}, and {n_open} the verdict {}. This list is \
              GENERATED from the registry each of them entered at the point it reported \
              (SPEC-LIT S69): printing a verdict and registering one are the same call, and the \
-             two rows above hold the two halves of that - no unregistered verdict was printed, \
-             and every registered gate is named here. SPEC-LIT and the READMEs carry each in \
-             full.\n",
+             three rows above hold the three parts of that - no unregistered verdict was \
+             printed, every registered gate is named here, and every registered gate declares \
+             its mesh study (SPEC-LIT 94.3). SPEC-LIT and the READMEs carry each in full.\n",
             Verdict::Misses.word(),
             Verdict::Open.word(),
         );
@@ -339,6 +354,16 @@ impl Checks {
                 for line in wrap(&format!("against {}: {}", g.against, g.headline), 84) {
                     out += &format!("      {line}\n");
                 }
+                let study = match &g.uncertainty {
+                    Some(Uncertainty::SingleMesh(reason)) => {
+                        format!("mesh study: one mesh - {reason}")
+                    }
+                    Some(Uncertainty::Study(s)) => format!("mesh study: {}", s.one_line()),
+                    None => "mesh study: NOT DECLARED (SPEC-LIT 94.3)".to_string(),
+                };
+                for line in wrap(&study, 84) {
+                    out += &format!("      {line}\n");
+                }
             }
         }
         out
@@ -348,7 +373,7 @@ impl Checks {
     /// returning the summary text so `main` prints the very string that was
     /// audited rather than a second one built the same way.
     ///
-    /// Two rows, in the tally like any other:
+    /// Three rows, in the tally like any other:
     ///
     /// 1. every line this run printed that shouts a verdict word came from
     ///    [`Self::report`]. A note saying a gate missed without registering it
@@ -356,7 +381,10 @@ impl Checks {
     /// 2. every gate in the registry is named in the text below. That one is a
     ///    tautology as `gate_summary` is written today, and it is asserted
     ///    anyway, because the failure it guards is somebody rewriting
-    ///    `gate_summary` back into a hand-maintained list.
+    ///    `gate_summary` back into a hand-maintained list;
+    /// 3. every gate in the registry declares its mesh study - one mesh by
+    ///    name, or the (94.9) estimate (SPEC-LIT 94.3). `None` is the one
+    ///    state a verdict may not reach the summary in.
     fn audit_and_summarise(&mut self) -> String {
         let summary = self.gate_summary();
 
@@ -387,6 +415,21 @@ impl Checks {
         self.require(
             "the summary's gate list names every gate in the registry (S69.3)",
             unnamed.is_empty(),
+        );
+
+        let undeclared: Vec<&str> = self
+            .gates
+            .iter()
+            .filter(|g| g.uncertainty.is_none())
+            .map(|g| g.gate)
+            .collect();
+        for name in &undeclared {
+            println!("        registered gate without a mesh study, SPEC-LIT 94.3: {name}");
+        }
+        self.require(
+            "every registered gate declares its mesh study - one mesh by name, or the (94.9) \
+             estimate (SPEC-LIT 94.3)",
+            undeclared.is_empty(),
         );
 
         summary
@@ -1860,28 +1903,32 @@ impl Manufactured {
     }
 }
 
-/// Solve `-lap(psi) = f` on one mesh and return the volume-weighted L2 error.
-fn mms_error(
+/// SPEC-LIT §94.4: `mms_error`'s solve, split from its mesh so Gates 94-A
+/// and 94-B can run the manufactured-source machinery on coefficients that
+/// are not `|Sf|`. Solve `-div(gamma grad psi) = lam psi_exact` with the
+/// exact Dirichlet value on every non-empty boundary face, `n_non_orth`
+/// explicit correction passes, and return the volume-weighted L2 error. The
+/// body is `mms_error`'s, moved; `mms_error` builds the mesh and the
+/// isotropic `gamma = |Sf|` and calls this, so the three §10 rows are
+/// bitwise what they were (§94.6 diffs them).
+fn mms_solve(
     gpu: &Gpu,
     k: &Kernels,
-    spec: &MeshSpec,
+    m: &HostMesh,
+    gamma: &[Scalar],
+    b_gamma: &[Scalar],
+    mf: &Manufactured,
+    lam: Scalar,
     n_non_orth: usize,
-    tag: &str,
-) -> Result<(Scalar, usize)> {
-    let m = make_mesh(&scratch_dir(tag), spec)?;
-    let gm = GpuMesh::upload(gpu, &m)?;
-
-    let mf = Manufactured::new(spec.l, spec.two_d);
-    let lam = mf.lambda();
+) -> Result<Scalar> {
+    let gm = GpuMesh::upload(gpu, m)?;
 
     let exact: Vec<Scalar> = (0..m.n_cells).map(|c| mf.at(m.c[c])).collect();
     let su: Vec<Scalar> = exact.iter().map(|v| lam * *v).collect();
     let b_exact: Vec<Scalar> = (0..m.n_boundary_faces).map(|i| mf.at(m.b_cf[i])).collect();
 
-    let gamma: Vec<Scalar> = m.mag_sf.to_vec();
-    let b_gamma = boundary_gamma(&m, 1.0);
-    let d_gamma = gpu.upload(&gamma)?;
-    let d_b_gamma = gpu.upload(&b_gamma)?;
+    let d_gamma = gpu.upload(gamma)?;
+    let d_b_gamma = gpu.upload(b_gamma)?;
     let d_su = gpu.upload(&su)?;
 
     // Dirichlet with the exact face value everywhere the patch is not empty.
@@ -1947,7 +1994,32 @@ fn mms_error(
         vol += f64::from(m.v[c]);
     }
 
-    Ok(((l2 / vol).sqrt() as Scalar, m.n_cells))
+    Ok((l2 / vol).sqrt() as Scalar)
+}
+
+/// Solve `-lap(psi) = f` on one mesh and return the volume-weighted L2
+/// error. The §10 wrapper: the isotropic `gamma = |Sf|` on every face,
+/// through [`mms_solve`], whose body this was before SPEC-LIT §94 split it.
+fn mms_error(
+    gpu: &Gpu,
+    k: &Kernels,
+    spec: &MeshSpec,
+    n_non_orth: usize,
+    tag: &str,
+) -> Result<(Scalar, usize)> {
+    let m = make_mesh(&scratch_dir(tag), spec)?;
+    let mf = Manufactured::new(spec.l, spec.two_d);
+    let l2 = mms_solve(
+        gpu,
+        k,
+        &m,
+        &m.mag_sf.to_vec(),
+        &boundary_gamma(&m, 1.0),
+        &mf,
+        mf.lambda(),
+        n_non_orth,
+    )?;
+    Ok((l2, m.n_cells))
 }
 
 /// Refine once and report the observed order, `log2(e_coarse/e_fine)`.
@@ -1987,6 +2059,363 @@ fn check_mms(
     Ok(())
 }
 
+// ==========================================================================
+//  Observed order and reported uncertainty - SPEC-LIT section 94
+// ==========================================================================
+
+/// SPEC-LIT §94.4 Gate 94-A = §46.7 Gate 46-B: `-div(K grad psi) = f`, `K =
+/// diag(1, 10, 100)` in the mesh axes, `psi = sin(kx x) sin(ky y) sin(kz z)`,
+/// `f = (1 kx^2 + 10 ky^2 + 100 kz^2) psi`, on three uniform blocks with `r
+/// = 2`. The face coefficients are `Conduction::uniform_per_region`'s
+/// (§46.3), consumed by `fvm_laplacian` exactly as the conjugate driver
+/// consumes them - no second tensor path.
+fn check_observed_order_anisotropic(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
+    use ofgpu::cht::{
+        Conduction, Conductivity, PairingTolerances, RegionInput, RegionKind, SolidMaterial,
+        ThermalMesh,
+    };
+    use ofgpu::vv::{self, Level};
+
+    let mut errs: Vec<Level> = Vec::new();
+    let mut worst_res: Scalar = 0.0;
+    for n in [8usize, 16, 32] {
+        let m = make_mesh(
+            &scratch_dir("vv94a"),
+            &MeshSpec { n: [n, n, n], ..Default::default() },
+        )?;
+        let tm = ThermalMesh::build(
+            &[RegionInput { name: "s".into(), kind: RegionKind::Solid, mesh: &m }],
+            &[],
+            PairingTolerances::default(),
+        )?;
+        let cond = Conduction::uniform_per_region(
+            &tm,
+            &[SolidMaterial {
+                name: "aniso".into(),
+                rho: 1.0,
+                c: 1.0,
+                k: Conductivity::Diagonal(Vec3::new(1.0, 10.0, 100.0)),
+            }],
+        )?;
+        worst_res = worst_res.max(cond.worst_residual);
+            // The eigenvalue is weighted by K's own diagonal; the `Manufactured`
+        // fields are private to this file, so read them directly.
+        let mf = Manufactured::new([1.0, 0.7, 0.4], false);
+        let lam = (mf.kx * mf.kx + 10.0 * mf.ky * mf.ky + 100.0 * mf.kz * mf.kz) as Scalar;
+        let l2 = mms_solve(
+            gpu,
+            k,
+            &tm.host,
+            &cond.gamma_mag_sf,
+            &cond.b_gamma_mag_sf,
+            &mf,
+            lam,
+            0,
+        )?;
+        let h = vv::h_of(0.28, tm.host.n_cells, 3)?;
+        errs.push(Level { h, value: l2 });
+    }
+    errs.reverse();
+    let study = vv::grid_study(&errs)?;
+    let p = f64::from(study.triplet.p.unwrap_or(0.0));
+    c.note(&format!(
+        "Gate 94-A (SPEC-LIT 46.7 Gate 46-B, k = diag(1, 10, 100), uniform blocks 8/16/32, \
+         r = 2): L2 at 8 = {}, at 16 = {}, at 32 = {}; {}",
+        sci(f64::from(errs[2].value), 3),
+        sci(f64::from(errs[1].value), 3),
+        sci(f64::from(errs[0].value), 3),
+        study.one_line(),
+    ));
+    c.require(
+        "Gate 94-A: the three L2 errors fall monotonically",
+        errs[0].value < errs[1].value && errs[1].value < errs[2].value,
+    );
+    let shortfall = 0.0f64.max(1.9 - p).max(p - 2.1);
+    c.check(
+        "Gate 94-A (Gate 46-B): observed order p in [1.9, 2.1] on k = 1:10:100",
+        shortfall as Scalar,
+        0.0,
+    );
+    c.check(
+        "Gate 94-A: the SPEC-LIT 46.4 anisotropy residual is zero on the axis-aligned block",
+        worst_res,
+        1e-14,
+    );
+    Ok(())
+}
+
+/// A sheared block with no file on disk: `blockgen::raw_mesh(&b)` + `p.x +=
+/// s * p.z` on every point + `build_host_mesh(&raw)`; all six patches
+/// `patch`, names the `BlockSpec` defaults.
+fn sheared_block(n: [usize; 3], lo: Vec3, hi: Vec3, s: Scalar) -> Result<HostMesh> {
+    let axis = |i: usize| GradedAxis {
+        lo: [lo.x, lo.y, lo.z][i],
+        hi: [hi.x, hi.y, hi.z][i],
+        n: n[i],
+        expansion: 1.0,
+        two_sided: false,
+    };
+    let b = BlockSpec {
+        x: axis(0),
+        y: axis(1),
+        z: axis(2),
+        patch_type: ["patch", "patch", "patch", "patch", "patch", "patch"].map(String::from),
+        ..BlockSpec::default()
+    };
+    let mut raw = blockgen::raw_mesh(&b)?;
+    for p in raw.points.iter_mut() {
+        p.x += s * p.z;
+    }
+    build_host_mesh(&raw)
+}
+
+/// One level of one leg of SPEC-LIT §94.4 Gate 94-B. `R_c = 0` is leg 1 (the
+/// field with the z-dependence the suppressed correction sees), `R_c > 0` is
+/// leg 2 (the xi-only field with the contact jump). Returns (h,
+/// volume-weighted L2 error over both regions, worst interface-jump error
+/// relative to `R_c` - 0 when `R_c = 0`).
+fn mms_interface(
+    gpu: &Gpu,
+    n: [usize; 3],
+    r_c: Scalar,
+    s: Scalar,
+) -> Result<(Scalar, Scalar, Scalar)> {
+    use ofgpu::cht::{
+        mark_coupled_faces, Conduction, ConjugateControls, ConjugateHeat, InterfaceRequest,
+        PairingTolerances, RegionInput, RegionKind, SolidMaterial, ThermalMesh,
+    };
+    use ofgpu::field::BcKind;
+    use ofgpu::io::case::{LinearSolverKind, Preconditioner};
+    use ofgpu::vv;
+
+    let leg1 = r_c == 0.0;
+    let (ka, kb) = (1.0 as Scalar, 100.0 as Scalar);
+    let a = sheared_block(n, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.5, 0.7, 0.4), s)?;
+    let b = sheared_block(n, Vec3::new(0.5, 0.0, 0.0), Vec3::new(1.0, 0.7, 0.4), s)?;
+    // The 3.8e-3 default refuses a face leaning 1 - cos(20 deg) = 0.0603 off
+    // its normal; widening `non_orth` for this gate is the gate's fixture,
+    // printed, not a change to cht.rs's refusal (SPEC-LIT 94.4).
+    let tm = ThermalMesh::build(
+        &[
+            RegionInput { name: "a".into(), kind: RegionKind::Solid, mesh: &a },
+            RegionInput { name: "b".into(), kind: RegionKind::Solid, mesh: &b },
+        ],
+        &[InterfaceRequest::new(0, "xMax", 1, "xMin", r_c)],
+        PairingTolerances { non_orth: 0.07, ..PairingTolerances::default() },
+    )?;
+    let cond = Conduction::uniform_per_region(
+        &tm,
+        &[
+            SolidMaterial::isotropic("a", 1.0, 1.0, ka),
+            SolidMaterial::isotropic("b", 1.0, 1.0, kb),
+        ],
+    )?;
+    // The manufactured fields of SPEC-LIT §94.4, as written there: xi = x -
+    // s z, xi_i = 1/2, c = |grad xi| = sqrt(1 + s^2); the region is xi's
+    // side, and no cell or face centroid sits on the plane.
+    let xi_i = 0.5 as Scalar;
+    let c_norm = (1.0 + f64::from(s) * f64::from(s)).sqrt();
+    let ky = PI / 0.7;
+    let kz = PI / 0.4;
+    let side = |p: Vec3| f64::from(p.x - s * p.z) < f64::from(xi_i);
+    let g_of = |p: Vec3| -> f64 {
+        let xi = f64::from(p.x - s * p.z);
+        let k = if side(p) { f64::from(ka) } else { f64::from(kb) };
+        if leg1 {
+            (xi - f64::from(xi_i)) / (k * c_norm)
+        } else {
+            // `+R_c` on side B, not `-R_c`: (S47.1) points `n` from A to B and
+            // `q_G = n . q = -k dT/dn`, so a field with `k dT/dn = +sin(ky y)`
+            // has `q_G = -sin(ky y)`, and (S47.3) `T_A - T_B = R_c q_G` is
+            // `-R_c sin(ky y)`. The jump is manufactured with the sign the
+            // interface condition actually carries.
+            (if side(p) { 1.0 } else { 1.0 + f64::from(r_c) })
+                + (xi - f64::from(xi_i)) / (k * c_norm)
+        }
+    };
+    let t_exact = |p: Vec3| -> Scalar {
+        if leg1 {
+            (g_of(p) * (ky * f64::from(p.y)).sin() * (kz * f64::from(p.z)).sin()) as Scalar
+        } else {
+            (g_of(p) * (ky * f64::from(p.y)).sin()) as Scalar
+        }
+    };
+    let source = |p: Vec3| -> Scalar {
+        let k = if side(p) { f64::from(ka) } else { f64::from(kb) };
+        let sy = (ky * f64::from(p.y)).sin();
+        if leg1 {
+            let main = k * (ky * ky + kz * kz) * g_of(p) * sy * (kz * f64::from(p.z)).sin();
+            let cross = 2.0 * f64::from(s) * kz / c_norm * sy * (kz * f64::from(p.z)).cos();
+            (main + cross) as Scalar
+        } else {
+            (k * ky * ky * g_of(p) * sy) as Scalar
+        }
+    };
+    if tm
+        .host
+        .c
+        .iter()
+        .zip(tm.cell_region())
+        .any(|(p, r)| (if side(*p) { 0 } else { 1 }) != r as usize)
+    {
+        return Err(ofgpu::Error::Config(
+            "mms_interface: a cell's xi = x - s z side disagrees with the region the \
+             pairing put it in (SPEC-LIT 94.4)"
+                .to_string(),
+        ));
+    }
+    let gm = GpuMesh::upload(gpu, &tm.host)?;
+    let controls = ConjugateControls {
+        n_non_orth_correctors: 3,
+        solver: SolverControls {
+            solver: LinearSolverKind::PCG,
+            precon: Preconditioner::Dic,
+            tolerance: 1e-12,
+            rel_tol: 0.0,
+            max_iter: 20000,
+            ..SolverControls::default()
+        },
+        ..ConjugateControls::default()
+    };
+    let mut cht = ConjugateHeat::new(gpu, &gm, &tm, &cond, controls)?;
+    mark_coupled_faces(gpu, cht.field_mut(), &tm)?;
+    // Dirichlet with the exact face value on every boundary face that is not
+    // an interface face - the shape of check_conjugate_heat_transfer's `fix`.
+    let iface = tm.interface_faces();
+    let mut kind = gpu.download(&cht.field().bc_kind)?;
+    let mut fr = gpu.download(&cht.field().fr)?;
+    let mut rv = gpu.download(&cht.field().ref_value)?;
+    for bf in 0..tm.host.n_boundary_faces {
+        if !iface[bf] {
+            kind[bf] = BcKind::FixedValue as Label;
+            fr[bf] = 1.0;
+            rv[bf] = t_exact(tm.host.b_cf[bf]);
+        }
+    }
+    gpu.write(&mut cht.field_mut().bc_kind, &kind)?;
+    gpu.write(&mut cht.field_mut().fr, &fr)?;
+    gpu.write(&mut cht.field_mut().ref_value, &rv)?;
+    let q: Vec<Scalar> = (0..tm.host.n_cells).map(|cc| source(tm.host.c[cc])).collect();
+    gpu.write(cht.source_mut(), &q)?;
+    let _ = cht.correct(gpu)?;
+
+    let got = gpu.download(&cht.field().f)?;
+    let (mut l2, mut vol) = (0.0f64, 0.0f64);
+    for cc in 0..tm.host.n_cells {
+        let e = f64::from(got[cc] - t_exact(tm.host.c[cc]));
+        l2 += e * e * f64::from(tm.host.v[cc]);
+        vol += f64::from(tm.host.v[cc]);
+    }
+    let mut worst_jump: f64 = 0.0;
+    if r_c > 0.0 {
+        let bt = gpu.download(&cht.field().bf)?;
+        for p in &tm.pairs {
+            let bfa = p.bf_a as usize;
+            let jump = f64::from(bt[bfa] - bt[p.bf_b as usize]);
+            let want = -f64::from(r_c) * (ky * f64::from(tm.host.b_cf[bfa].y)).sin();
+            worst_jump = worst_jump.max((jump - want).abs() / f64::from(r_c));
+        }
+    }
+    let h = vv::h_of(0.28, tm.host.n_cells, 3)?;
+    Ok((h, (l2 / vol).sqrt() as Scalar, worst_jump as Scalar))
+}
+
+/// SPEC-LIT §94.4 Gate 94-B. Two solid regions A (x in [0, 1/2], k_A = 1)
+/// and B (x in [1/2, 1], k_B = 100) on [0,1] x [0, 0.7] x [0, 0.4], every
+/// point sheared `x += s z` with `s = tan(20 deg)`, so the interface plane
+/// `xi = x - s z = 1/2` leans 20 deg off the cell-centre line and §47.3's
+/// suppressed correction is what the order measures. Three levels n = [8, 6,
+/// 4] per region, doubled twice (r = 2); the plan's one order bar is
+/// `p >= 0.9` on both legs.
+fn check_observed_order_interface(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::{InterfaceRequest, PairingTolerances, RegionInput, RegionKind, ThermalMesh};
+    use ofgpu::vv::{self, Level};
+
+    let s = 20.0f64.to_radians().tan() as Scalar;
+    let levels: [[usize; 3]; 3] = [[8, 6, 4], [16, 12, 8], [32, 24, 16]];
+    // The pairing, on the finest level: the widened tolerance is the gate's
+    // fixture setting, printed, and the angle it admits is what the legs
+    // measure against.
+    {
+        let a = sheared_block(levels[2], Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.5, 0.7, 0.4), s)?;
+        let b = sheared_block(levels[2], Vec3::new(0.5, 0.0, 0.0), Vec3::new(1.0, 0.7, 0.4), s)?;
+        let tm = ThermalMesh::build(
+            &[
+                RegionInput { name: "a".into(), kind: RegionKind::Solid, mesh: &a },
+                RegionInput { name: "b".into(), kind: RegionKind::Solid, mesh: &b },
+            ],
+            &[InterfaceRequest::new(0, "xMax", 1, "xMin", 0.0)],
+            PairingTolerances { non_orth: 0.07, ..PairingTolerances::default() },
+        )?;
+        c.note(
+            "Gate 94-B: two regions, k = 1 : 100, the interface 20 deg off-normal (x += \
+             tan(20 deg) z). PairingTolerances::non_orth widened to 0.07 for this gate \
+             ONLY - the 3.8e-3 default would refuse a mesh leaning 1 - cos(20 deg) = \
+             0.0603 off the normal, and widening it IS the gate's point",
+        );
+        c.check(
+            "Gate 94-B: the pairing report's interface angle is 20.0 deg off-normal",
+            (tm.report.non_orth_deg() - 20.0).abs(),
+            0.01,
+        );
+        let agree = tm.host.c.iter().zip(tm.cell_region()).all(|(p, r)| {
+            let want = if f64::from(p.x - s * p.z) < 0.5 { 0 } else { 1 };
+            r as usize == want
+        });
+        c.require(
+            "Gate 94-B: every cell's xi = x - s z side is the region the pairing put it in",
+            agree,
+        );
+    }
+
+    for (leg, &r_c) in [0.0 as Scalar, 5.0e-3 as Scalar].iter().enumerate() {
+        let mut lv: Vec<Level> = Vec::new();
+        let mut worst_jump: Scalar = 0.0;
+        for &n in &levels {
+            let (h, l2, jump) = mms_interface(gpu, n, r_c, s)?;
+            lv.push(Level { h, value: l2 });
+            worst_jump = jump;
+        }
+        lv.reverse();
+        let study = vv::grid_study(&lv)?;
+        let p = f64::from(study.triplet.p.unwrap_or(0.0));
+        c.note(&format!(
+            "Gate 94-B leg {} (R_c = {}): L2 {} / {} / {} (fine first); {}",
+            leg + 1,
+            if leg == 0 { "0" } else { "5e-3" },
+            sci(f64::from(lv[0].value), 3),
+            sci(f64::from(lv[1].value), 3),
+            sci(f64::from(lv[2].value), 3),
+            study.one_line(),
+        ));
+        c.require(
+            &format!("Gate 94-B leg {}: the three L2 errors fall", leg + 1),
+            lv[0].value < lv[1].value && lv[1].value < lv[2].value,
+        );
+        if leg == 0 {
+            c.check(
+                "Gate 94-B leg 1 (R_c = 0, interface 20 deg off-normal, SPEC-LIT 47.3's \
+                 suppressed correction): observed order p >= 0.9",
+                (0.9 - p).max(0.0) as Scalar,
+                0.0,
+            );
+        } else {
+            c.check(
+                "Gate 94-B leg 2 (R_c = 5e-3, the contact jump across the tilted plane): \
+                 observed order p >= 0.9",
+                (0.9 - p).max(0.0) as Scalar,
+                0.0,
+            );
+            c.check(
+                "Gate 94-B leg 2: the interface jump is -R_c sin(ky y) - (S47.3) with q_G = \
+                 -k dT/dn - within 5 % of R_c on the finest mesh",
+                worst_jump,
+                0.05,
+            );
+        }
+    }
+    Ok(())
+}
 // ==========================================================================
 //  7. Buoyancy - SPEC-LIT sections 9 and 5.1, section 10 rows "Buoyancy sign"
 //     and "Hydrostatic"
@@ -2489,6 +2918,11 @@ fn run(c: &mut Checks) -> Result<()> {
         },
         0,
     )?;
+
+    // ---- observed order and reported uncertainty -------------------------
+    println!("\n=== observed order and reported uncertainty (SPEC-LIT 94) ===");
+    check_observed_order_anisotropic(c, &gpu, &k)?;
+    check_observed_order_interface(c, &gpu)?;
 
     // ---- buoyancy --------------------------------------------------------
     println!("\n=== buoyancy ===");
@@ -3287,6 +3721,7 @@ fn check_transition(c: &mut Checks) -> Result<()> {
         verdict: Verdict::Open,
         how: How::Live,
         gate: "SPEC-LIT S88 Gate 88-T",
+        uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
         against: "the ERCOFTAC T3A flat plate's measured transition, on the NASA/TMBWG 2D T3A \
                   rig (U = 69.44 m/s, Re/m = 2.00e5, Tu = 3.300 % at the leading edge)",
         headline: format!(
@@ -3813,6 +4248,7 @@ fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         verdict: Verdict::Open,
         how: How::Live,
         gate: "SPEC-LIT S90 Gate 90-T",
+        uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
         against: "the ERCOFTAC T3A flat plate's measured transition, on the NASA/TMBWG 2D T3A \
                   rig (U = 69.44 m/s, Re/m = 2.00e5, Tu = 3.300 % at the leading edge)",
         headline: format!(
@@ -4995,6 +5431,7 @@ fn check_region_restriction(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                             verdict: Verdict::Misses,
                             how: How::Live,
                             gate: "SPEC-LIT S93 Gate 93-A",
+                            uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
                             against: "the same region assembled alone - SPEC-LIT 47.2's \
                                       bitwise-contribution claim in 59.9's bitwise-unmoved \
                                       shape",
@@ -5043,6 +5480,7 @@ fn check_region_restriction(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                             verdict: Verdict::Misses,
                             how: How::Live,
                             gate: "SPEC-LIT S93 Gate 93-A",
+                            uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
                             against: "the same region assembled alone - SPEC-LIT 47.2's \
                                       bitwise-contribution claim in 59.9's bitwise-unmoved \
                                       shape",
@@ -5094,6 +5532,14 @@ fn check_region_restriction(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 /// `n` is the cell count across the whole `1 x 1` enclosure. The wall takes
 /// `0.2 n` columns and the air `0.8 n`, which makes every cell square.
 /// `kappa_s` IS the conductivity ratio `Kr`, because the fluid's is 1.
+/// SPEC-LIT §60.5's table at Ra = 1e4, `Nu` at the cold wall, meshes 40x40 /
+/// 60x60 / 80x80 (h = 1/n). (Kr, [Nu_80, Nu_60, Nu_40])
+const KP_LEVELS: [(Scalar, [Scalar; 3]); 3] = [
+    (0.1, [0.38080, 0.38079, 0.38086]),
+    (1.0, [1.52290, 1.52382, 1.52659]),
+    (10.0, [2.26916, 2.27158, 2.27841]),
+];
+
 fn kp_document(n: usize, kappa_s: Scalar, ra: Scalar, iterations: usize, residual: Scalar) -> String {
     let dz = 1.0 / n as f64;
     let n_solid = (0.2 * n as f64).round() as usize;
@@ -5511,12 +5957,17 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     );
 
     {
+        use ofgpu::vv;
         const N: usize = 40;
         const RA: Scalar = 1.0e4;
         // Belazizia et al. (2012) Fig. 6, at Ra = 1e4, D = 0.2, Pr = 0.7.
         const PUBLISHED: [(Scalar, Scalar); 3] = [(0.1, 0.41), (1.0, 1.57), (10.0, 2.28)];
 
         let mut measured = Vec::new();
+        // SPEC-LIT 94-C: the three E +/- u_val lines and the Kr = 0.1 study
+        // the registered verdict carries, built as the loop walks the table.
+        let mut study_kr_0_1: Option<vv::GridStudy> = None;
+        let mut lines: Vec<String> = Vec::new();
         for &(kr, pubv) in &PUBLISHED {
             let nu = run_kp_document(gpu, &kp_document(N, kr, RA, 6000, 1e-7), N, true)?;
             let floor = 1.0 / (0.2 / kr + 0.8);
@@ -5557,6 +6008,42 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                 nu.cold >= floor * (1.0 - 1e-9),
             );
             measured.push((kr, pubv, nu.cold, floor));
+            // SPEC-LIT 94-C: the study the gate's own three tabulated levels
+            // stand on, replayed from the SPEC-LIT 60.5 table (the live run
+            // is one level), and the (94.10) comparison against the same
+            // secondary datum the percentages above use.
+            let &(_, tab) = KP_LEVELS
+                .iter()
+                .find(|(k, _)| *k == kr)
+                .expect("every Kr here is a row of KP_LEVELS");
+            c.check(
+                &format!(
+                    "Gate 5 at Kr = {kr}: the live 40x40 Nu agrees with SPEC-LIT 60.5's \
+                     tabulated 40x40 (transcription guard)"
+                ),
+                (nu.cold / tab[2] - 1.0).abs(),
+                0.01,
+            );
+            let study = vv::grid_study(&[
+                vv::Level { h: 1.0 / 80.0, value: tab[0] },
+                vv::Level { h: 1.0 / 60.0, value: tab[1] },
+                vv::Level { h: 1.0 / 40.0, value: tab[2] },
+            ])?;
+            let val = vv::validation(tab[0], pubv, study.u_fine, 0.0, 0.0);
+            c.note(&format!(
+                "Gate 5 at Kr = {kr}, SPEC-LIT 94.3 (levels replayed from the table, \
+                 arithmetic live): {}",
+                study.one_line()
+            ));
+            let line = val.one_line("Nu");
+            c.note(&format!(
+                "Gate 5 at Kr = {kr}, (94.10) with u_D = 0 (Belazizia et al. quote no \
+                 uncertainty on their table): {line}"
+            ));
+            lines.push(line);
+            if kr == 0.1 {
+                study_kr_0_1 = Some(study);
+            }
         }
 
         // The conductivity ratio is the ONLY parameter the benchmark varies,
@@ -5595,6 +6082,9 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                 verdict: Verdict::Misses,
                 how: How::Live,
                 gate: "SPEC-LIT S60.5 Gate 5",
+                uncertainty: Some(Uncertainty::Study(
+                    study_kr_0_1.expect("Kr = 0.1 is the first row"),
+                )),
                 against: "Kaminski & Prakash (1986), conjugate natural convection in a \
                           square enclosure - through the open-access SECONDARY table of \
                           Belazizia et al. (2012), the primary being paywalled and never \
@@ -5606,7 +6096,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                     f64::from(100.0 * worst),
                     f64::from(100.0 * (nu10 / pub10 - 1.0).abs()),
                 ),
-                detail: Vec::new(),
+                detail: lines,
             });
             c.note(
                 "  DIAGNOSIS, from the numbers above and not from the model: the disagreement \
@@ -5679,6 +6169,15 @@ const QM_FIG4: [(f64, f64, f64, f64); 2] = [
     // (Kawano, bar low, bar high, Qu & Mudawar)
     (0.116, 0.080, 0.152, 0.083), // R_t,in,  Fig. 4(b)
     (0.222, 0.156, 0.288, 0.249), // R_t,out, Fig. 4(c)
+];
+
+/// SPEC-LIT §79.12's four levels: (cells, R_t,in, R_t,out); h = cells^(-1/3).
+/// Level 4 first (finest).
+const QM_LEVELS: [(usize, Scalar, Scalar); 4] = [
+    (259_350, 0.09289, 0.23507),
+    (115_200, 0.09239, 0.23490),
+    (48_600, 0.09163, 0.23459),
+    (14_400, 0.09050, 0.23374),
 ];
 
 /// The nine-box unit cell as a case document - SPEC-LIT §79.8 and §79.9.
@@ -6018,6 +6517,89 @@ fn check_forced_convection(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         f64::from(100.0 * d_out),
     ));
 
+    // SPEC-LIT 94-C, retrofitted onto Gate 6: the four tabulated levels of
+    // SPEC-LIT 79.12 carry the study and the (94.10) comparison, and the
+    // live two levels are guarded against the same table so a transcription
+    // cannot drift. Replayed inputs, live arithmetic - the live run is two
+    // levels and the two finest are minutes each (SPEC-LIT 79.12).
+    {
+        use ofgpu::vv;
+
+        let mut guard: Scalar = 0.0;
+        for r in &runs {
+            let row = QM_LEVELS.iter().find(|(cells, _, _)| *cells == r.cells);
+            c.require(
+                &format!(
+                    "Gate 6: the live {} cells are a row of SPEC-LIT 79.12's table",
+                    r.cells
+                ),
+                row.is_some(),
+            );
+            let &(_, t_in, t_out) = row.expect("the live level is a row of the table");
+            guard = guard.max((r.r_in / t_in - 1.0).abs());
+            guard = guard.max((r.r_out / t_out - 1.0).abs());
+        }
+        c.check(
+            "Gate 6: the live level-1 and level-2 R_t,in / R_t,out agree with SPEC-LIT \
+             79.12's table (transcription guard)",
+            guard,
+            0.01,
+        );
+        let mut all: Vec<(&str, vv::GridStudy, vv::GridStudy)> = Vec::new();
+        for (k, &name) in ["R_t,in", "R_t,out"].iter().enumerate() {
+            let levels: Vec<vv::Level> = QM_LEVELS
+                .iter()
+                .map(|&(cells, r_in, r_out)| vv::Level {
+                    h: (cells as f64).powf(-1.0 / 3.0) as Scalar,
+                    value: if k == 0 { r_in } else { r_out },
+                })
+                .collect();
+            let four = vv::grid_study(&levels)?;
+            let three = vv::grid_study(&levels[..3])?;
+            c.note(&format!(
+                "Gate 6 {name}, SPEC-LIT 94.3, four levels replayed from the table (Eça & \
+                 Hoekstra): {}",
+                four.one_line()
+            ));
+            c.note(&format!(
+                "Gate 6 {name}, SPEC-LIT 94.3, finest triplet (Celik): {}",
+                three.one_line()
+            ));
+            let (kawano, lo, hi, _) = QM_FIG4[k];
+            let u_d = ((hi - lo) / 2.0) as Scalar;
+            let val = vv::validation(levels[0].value, kawano as Scalar, four.u_fine, 0.0, u_d);
+            c.note(&format!(
+                "Gate 6 {name}, u_D = half the digitised Fig. 4 bar: {}",
+                val.one_line(name)
+            ));
+            c.check(
+                &format!("Gate 6 {name}, (94.10): |E| <= u_val"),
+                (f64::from(val.e).abs() - f64::from(val.u_val)).max(0.0) as Scalar,
+                0.0,
+            );
+            all.push((name, four, three));
+        }
+        let pw = |s: &vv::GridStudy| s.p.map(f64::from).unwrap_or(f64::NAN);
+        let (n0, f0, t0) = &all[0];
+        let (n1, f1, t1) = &all[1];
+        c.note(&format!(
+            "Gate 6, SPEC-LIT 94.3: the four-level fit and the finest triplet disagree on \
+             {n0}'s order - p = {:.2} over the four levels against {:.2} on the triplet, \
+             phi_0 {:.5} against phi_ext {:.5} - and agree on {n1}, {:.2} against {:.2} \
+             (phi_0 {:.5}, phi_ext {:.5}). The table's own ~0.094 is the triplet's limit; \
+             the four-level fit says {:.4} +/- {:.4} - both inside Kawano's bar.",
+            pw(f0),
+            pw(t0),
+            f64::from(f0.phi_ext),
+            f64::from(t0.phi_ext),
+            pw(f1),
+            pw(t1),
+            f64::from(f1.phi_ext),
+            f64::from(t1.phi_ext),
+            f64::from(f0.phi_ext),
+            f64::from(f0.u_fine),
+        ));
+    }
     // The verdict. Both resistances against the digitised error bars.
     let names = ["R_t,in (Fig. 4b)", "R_t,out (Fig. 4c)"];
     let mine = [fine.r_in, fine.r_out];
@@ -10125,6 +10707,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
         verdict: Verdict::Open,
         how: How::Replayed,
         gate: "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg",
+        uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
         against: "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction \
                   factor, +-10 % band",
         headline: format!(
@@ -10523,6 +11106,7 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
         verdict: Verdict::Open,
         how: How::Replayed,
         gate: "SPEC-LIT S32.4 verdict 1 (absolute prediction), resolved leg",
+        uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
         against: "Gnielinski (1976) evaluated at the Petukhov smooth-PIPE f, +-10 % band",
         headline: format!(
             "resolved leg Nu is {miss:+.1}% of it - outside the band by {:.1} points, \
@@ -10551,6 +11135,7 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
         verdict: Verdict::Open,
         how: How::Replayed,
         gate: "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), resolved leg",
+        uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
         against: "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction \
                   factor, +-10 % band",
         headline: format!(
@@ -12729,6 +13314,7 @@ fn theobald_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             verdict: Verdict::Misses,
             how: How::Live,
             gate: "SPEC-LIT S68.12 Gate 68-C",
+            uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
             against: "Theobald (1981), 90 hose streams, maximum throw, at the shape of the \
                       FDS Validation Guide's own metric for this quantity - +-10 % bias, \
                       30 % scatter",
@@ -15978,6 +16564,7 @@ mod verdict_registry {
             against: "an invented measurement",
             headline: "it is out".to_string(),
             detail: Vec::new(),
+            uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
         }
     }
 
@@ -16088,6 +16675,22 @@ mod verdict_registry {
             "{} (Reynolds analogy): outside the band",
             Verdict::Open.word()
         )));
+    }
+
+    /// **§94.3.** A verdict that does not say which mesh study it stands on
+    /// fails the audit's third row - and the summary names it NOT DECLARED.
+    #[test]
+    fn an_undeclared_mesh_study_fails_the_audit() {
+        let mut c = Checks::new();
+        let mut g = a_report("SPEC-LIT S99.4 Gate 99-Y", Verdict::Misses);
+        g.uncertainty = None;
+        c.report(g);
+        let s = c.audit_and_summarise();
+        assert_eq!(
+            c.failures, 1,
+            "a gate without a mesh study has to fail SPEC-LIT 94.3's row"
+        );
+        assert!(s.contains("NOT DECLARED"), "{s}");
     }
 
     /// The generated list's only piece of formatting, held to keeping every
@@ -17460,6 +18063,7 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         verdict: Verdict::Open,
         how: How::Live,
         gate: "78-D",
+        uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
         against: "Bai & Gosman SAE 950283 (1995) against Mundo, Sommerfeld & Tropea, \
                   Int. J. Multiphase Flow 21 (1995) 151",
         headline: format!(

@@ -89,6 +89,7 @@ pub mod species;
 pub mod timescheme;
 pub mod turbulence;
 pub mod vof;
+pub mod vv;
 pub mod walldistance;
 pub mod wallfunctions;
 

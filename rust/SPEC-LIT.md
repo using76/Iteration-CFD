@@ -11922,6 +11922,22 @@ very benchmark; mesh convergence. **NOT established: agreement with Kaminski
 the honest status of §47.12's Gate 5 after this pass, and it is a better
 status than "not run" by exactly the amount above.
 
+**§94's numbers, added when §94 was written.** The three levels of the
+table at `Ra = 1e4`, run through §94's procedure with the levels replayed
+from the table and the arithmetic live: the Kr = 0.1 sequence is
+OSCILLATORY at the table's own five-digit precision, so no order is
+reported and the uncertainty comes from the fixed-exponent fits -
+`U_fine = 9.943e-5`; Kr = 1 observes `p = 2.145`, `phi_ext = 1.521650e0`,
+`U_fine = 3.747e-3`; Kr = 10 observes `p = 1.966`, `phi_ext = 2.265978e0`,
+`U_fine = 3.978e-3`. The comparisons against Belazizia et al., in §94.3's
+form with `u_D = 0` (they state no uncertainty on their table): Kr = 0.1
+`E = S - D = -2.920e-2 +/- 9.943e-5` (`-7.12 % +/- 0.02 %` of D); Kr = 1
+`E = S - D = -4.710e-2 +/- 3.747e-3` (`-3.00 % +/- 0.24 %`); Kr = 10
+`E = S - D = -1.084e-2 +/- 3.978e-3` (`-0.48 % +/- 0.17 %`). At every
+ratio `|E| > u_val` - the disagreement is NOT the mesh, which is the
+arithmetic beneath the diagnosis above, and it is why the verdict carries
+the Kr = 0.1 study with it into the registry.
+
 ### 60.6 Gate 6 - Qu & Mudawar (2002)
 
 *Int. J. Heat Mass Transfer* **45** 3973-3985, DOI
@@ -19591,6 +19607,21 @@ Kawano's `0.080` and `0.152`, and `0.235` between `0.156` and `0.288`.
    that flatness IS the artefact rather than evidence against it. It is small
    because the two-sided grading puts the last column `20 um` from the exit.
 
+**§94's numbers, added when §94 was written.** The four tabulated levels
+through Eça & Hoekstra's procedure, and the finest triplet alone through
+Celik's, replayed from the table with the arithmetic live. `R_t,in`: the
+four-level fit observes `p = 0.531`, `phi_0 = 0.09652`, `U_fine = 4.582e-3`
+- the triplet observes `p = 1.277`, `phi_ext = 0.09410`; the table's own
+`~0.094` is the triplet's limit, while the four-level fit says
+`0.0965 +/- 0.0046` - both inside Kawano's bar. `R_t,out`: `p = 1.896`,
+`phi_0 = 2.353255e-1` against the triplet's `p = 1.927`,
+`phi_ext = 2.353185e-1` - the two readings agree. The comparisons against
+Kawano's digitised point, `u_D` = half the digitised Fig. 4 bar:
+`R_t,in: E = S - D = -2.311e-2 +/- 3.629e-2` (`-19.92 % +/- 31.28 %` of D)
+and `R_t,out: E = S - D = +1.307e-2 +/- 6.600e-2` (`5.89 % +/- 29.73 %`) -
+both `|E| <= u_val`, so the comparison cannot see a modelling error at this
+resolution, and the verdict above stands with that sentence beside it.
+
 ### 79.13 What must hold, and what was measured
 
 | Check | Expected | Measured |
@@ -26999,3 +27030,300 @@ here says anything about the observed-order section planned next; it does
 not exist yet, and this section cites no number for it.
 
 ---
+
+## 94. Observed order and reported uncertainty — what a multi-mesh gate must say, and what a single-mesh gate must admit
+
+Roache's 1994 "perspective" paper put it as plainly as it has ever been put:
+a grid-convergence study is REPORTED or it DID NOT HAPPEN. Every number a
+gate publishes is the number of a discretisation whose error nobody can see
+unless the sequence of meshes it stands on is laid out beside it, with the
+order the sequence observed and an uncertainty that says how far the finest
+answer may still sit from the exact one. This section makes that part of
+what a gate IS: a gate that ran on several meshes reports its observed order
+and its uncertainty, in the words of the papers below, and a gate that ran
+on one mesh says so - by name, in the summary, beside its verdict.
+
+What existed before: three manufactured-solution rows near the top of the
+run that solve on two meshes apiece and print a two-level `log2` order;
+Gate 5 (§60.5) and Gate 6 (§79.12), which compare against published tables
+and carry level-to-level percentages and, for Gate 6, a geometric-sum
+extrapolation; and no gate carried an uncertainty at all. The §69 registry
+recorded WHAT a non-passing gate concluded, and nothing about the
+discretisation the conclusion stood on.
+
+The rule this section adds to §69 is a fourth relation beside
+(69.5)-(69.7): for every g in G, study(g) is declared. `GateReport` carries
+an `uncertainty`, and a verdict that reaches the summary without one - one
+mesh named, or the (94.9) estimate attached - fails the audit's third row
+(§94.3). Nothing any solver computes is changed by this section; §94.6's
+before-and-after diff is the proof.
+
+Written from:
+
+* ofgpu `SPEC-LIT.md` §0 (the rules, and rule 3's DESIGN marks), §2.4 (the
+  over-relaxed correction whose order the manufactured-solution rows
+  measure), §3.2, §46.3 and §46.4 (the face coefficients and the anisotropic
+  residual), §46.7 (Gate 46-B), §47.3 (the suppressed interface correction),
+  §47.12, §60.5 and §79.12 (the two tabulated gates), §69 (the registry the
+  `uncertainty` field extends), §80 (the citation forms this section's own
+  labels follow), §93 and this section.
+* P. J. Roache, *J. Fluids Eng.* 116 (1994) 405-413, DOI `10.1115/1.2910291`
+  - the Grid Convergence Index.
+* I. B. Celik, U. Ghia, P. J. Roache, C. J. Freitas, H. Coleman & P. Raad,
+  *J. Fluids Eng.* 130 (2008) 078001, DOI `10.1115/1.2960953` - the
+  reporting procedure, transcribed in §94.1.
+* L. Eça & M. Hoekstra, *J. Comput. Phys.* 262 (2014) 104-130, DOI
+  `10.1016/j.jcp.2014.01.006` - the least-squares estimates and the
+  uncertainty, transcribed in §94.2.
+* H. W. Coleman & F. Stern, "Uncertainties and CFD Code Validation",
+  *J. Fluids Eng.* 119 (1997) 795-803 - the validation metric of §94.3.
+* P. J. Roache, *J. Fluids Eng.* 124 (2002) 4-10, DOI `10.1115/1.1436090` -
+  manufactured solutions as code verification.
+
+No GPL-licensed source was consulted.
+
+### 94.1 The typical cell size and the observed order
+
+Level 1 of a sequence is the FINEST mesh; `h` grows along the sequence. The
+typical cell size, the ratios and differences, the observed order, the
+Richardson extrapolation and the index - (94.1)-(94.2) and (94.4)-(94.5) are
+Celik et al. (2008) section 2's five steps, the index itself Roache (1994):
+
+```
+  h = ( (1/N) sum_{i=1}^{N} V_i )^{1/3}   (3-D);   h = ( (1/N) sum A_i )^{1/2}   (2-D)          (94.1)
+  r21 = h_2/h_1,  r32 = h_3/h_2,  eps21 = phi_1 - phi_2,  eps32 = phi_2 - phi_3,  R = eps21/eps32   (94.2)
+  p = | ln|eps32/eps21| + q(p) | / ln(r21),   q(p) = ln( (r21^p - s)/(r32^p - s) ),  s = sign(eps32/eps21)   (94.3)
+  phi_ext = ( r21^p phi_1 - phi_2 ) / ( r21^p - 1 )                                                (94.4)
+  e_a = |(phi_1 - phi_2)/phi_1|,   GCI_fine = F_s e_a / (r21^p - 1),   F_s = 1.25                   (94.5)
+```
+
+(94.3) is solved as a fixed point: start from `p_0 = |ln|eps32/eps21|| /
+ln(r21)` - which is exact when `r21 = r32`, because then `q = 0` - and
+iterate `p_{k+1} = |ln|eps32/eps21| + q(p_k)| / ln(r21)` until
+`|p_{k+1} - p_k| < 1e-12` or 200 iterations, then refuse by name. `0 < R <
+1` is monotone convergence, `R > 1` monotone divergence, `R < 0` oscillatory
+(converging when `|R| < 1`, diverging when `|R| > 1`); (94.3)-(94.5) are
+evaluated ONLY for monotone convergence. For `R < 0` or `R > 1` the order
+"cannot be established" - oscillatory convergence is anomalous, Eça &
+Hoekstra 2014's section 2.4.2 - `p` is `None`, and the uncertainty comes
+from (94.6)-(94.9) with the alternative estimators of §94.2.
+
+DESIGN: three levels are the minimum everywhere in this crate, and `F_s =
+1.25` is Celik's three-level value. Roache (1994) recommends `F_s = 3` for a
+two-level estimate; this crate never makes one (`grid_study` refuses two),
+because a two-level order assumes the very thing the study exists to
+measure. The run's three existing manufactured-solution rows keep their
+two-level `log2` orders and their own bar untouched - adding a level would
+change what the run measures, and §69.7's diff is this section's proof that
+it changed no measurement.
+
+### 94.2 The least-squares estimate and the uncertainty
+
+When the finest triplet is not monotone, or its observed order falls outside
+`[0.5, 2]`, the order is not what carries the uncertainty - a fit is. The
+error forms, the weighted least-squares objective, the weights, the standard
+deviation of a fit, the data-range parameter and the uncertainty (Eça &
+Hoekstra 2014, their eqs. (1), (5)-(7), (8)-(11), (16), (19)-(21)):
+
+```
+  eps_RE = alpha h_i^p,   eps_1 = alpha h_i,   eps_2 = alpha h_i^2,   eps_12 = alpha_1 h_i + alpha_2 h_i^2   (94.6a)
+  S_X(phi_0, alpha, [p]) = sum_i w_i ( phi_i - (phi_0 + eps_X(h_i)) )^2   minimised,  X in {RE, 1, 2, 12}   (94.6b)
+  w_i = 1 (unweighted)   or   w_i = (1/h_i) / sum_j (1/h_j) (weighted);   nw_i = 1  or  n_g w_i          (94.6c)
+  sigma_X = sqrt( sum_i nw_i ( phi_i - fit_X(h_i) )^2 / (n_g - n_par) ),  n_par = 3 (RE, 12) or 2 (1, 2)   (94.7)
+  delta_phi = ( max_i phi_i - min_i phi_i ) / (n_g - 1);   F_s = 1.25 if 0.5 <= p < 2.1 and sigma < delta_phi, else 3   (94.8)
+  U(phi_1) = F_s |eps(phi_1)| + sigma + |phi_1 - fit(h_1)|                       if sigma <  delta_phi   (94.9a)
+  U(phi_1) = 3 (sigma/delta_phi) ( |eps(phi_1)| + sigma + |phi_1 - fit(h_1)| )   if sigma >= delta_phi   (94.9b)
+```
+
+The procedure, Appendix A of that paper transcribed (the paper wants
+`n_g >= 4`; this crate applies it from `n_g = 3` with the
+degrees-of-freedom rule below):
+
+1. If the finest triplet's behaviour is not monotone, `p` cannot be
+   established - the SIX fixed-exponent fits (`eps_1`, `eps_2`, `eps_12`,
+   each weighted and unweighted; `eps_12` only when its degrees of freedom
+   are positive) are tried and the smallest `sigma` wins. Otherwise `eps_RE`
+   is fitted weighted and unweighted (on exactly three levels both are the
+   exact triplet solution (94.3)-(94.4) with `sigma = 0`). Let `I` be the
+   fits with `0.5 <= p <= 2` (the paper's bounds, inclusive, compared in
+   `f64` with no tolerance). If `I` is not empty, `eps = eps_RE` from the fit
+   in `I` with the smaller `sigma`, done. Otherwise let `p*` be the `p` of
+   the better fit: `p* > 2` means the FOUR fixed-exponent fits (`eps_1`,
+   `eps_2`, weighted and unweighted); `p* < 0.5` means the six. The study's
+   `p` is `Some(p*)` - or the in-range fit's `p` - whenever the triplet is
+   monotone, `None` otherwise: the order is REPORTED even when a
+   fixed-exponent estimator carries the uncertainty.
+2. `delta_phi` by (94.8), over ALL levels.
+3. `F_s` by (94.8): `1.25` only when the CHOSEN estimator is `eps_RE` with
+   `0.5 <= p < 2.1` and `sigma < delta_phi`; every fixed-exponent choice
+   gets `F_s = 3`.
+4. `U(phi_1)` by (94.9a) or (94.9b), evaluated at the FINEST level.
+
+Degrees of freedom: a fit whose `n_g - n_par <= 0` is not attempted - on
+three levels `eps_RE` and `eps_12` have no residual freedom (`eps_RE` is
+then the exact triplet solution, and `eps_12` is skipped). Ties in
+"smallest sigma" (exact equality) go to the earlier fit in the order listed:
+unweighted before weighted, `eps_1` before `eps_2` before `eps_12`.
+
+DESIGN: the outer minimisation of `S_RE` over `p` is a golden-section
+search on `[0.05, 8]`, 200 iterations, `p` the bracket midpoint - for fixed
+`p` the fit is linear in `(phi_0, alpha)`, one weighted normal-equations
+solve, so the search reaches the minimiser the paper reaches through
+`dS/dp = 0` (its Appendix B.2) and never divides by a vanishing derivative.
+
+### 94.3 What a gate must say
+
+The comparison against a published datum is Coleman & Stern's (1997)
+validation metric, the form ASME V&V 20-2009 adopted - `S` is the
+simulation's finest-level value, `D` the reference datum, `u_D` its stated
+uncertainty (`0` where the reference states none, and said so where it is
+`0`), `u_input = 0` in every gate here because the gates' inputs are exact
+(declared in the print), and `u_num = U(phi_1)` of (94.9):
+
+```
+  E = S - D,     u_val = sqrt( u_num^2 + u_input^2 + u_D^2 ),     u_num = U(phi_1) of (94.9)          (94.10)
+```
+
+`E +/- u_val` is what is printed, in the units of the quantity and, beside
+it, as a percentage of `D`. The reading rule travels with the numbers:
+`|E| <= u_val` means the comparison cannot see a modelling error at this
+resolution; `|E| > u_val` means the disagreement is NOT the mesh, and the
+verdict the gate already carries stands with that sentence beside it.
+
+A gate declares what it stands on through one field:
+
+```
+  GateReport.uncertainty : Option<Uncertainty>
+  Uncertainty = SingleMesh(reason) | Study(GridStudy)
+  for every g in G, study(g) is declared                                       (the fourth §69 relation)
+```
+
+- not a fenced equation but the shape of the rule: a verdict that says
+neither "one mesh, and why that is the whole sequence there is" nor "the
+(94.9) estimate from these levels" fails `audit_and_summarise`'s third row.
+The
+declaration is refused at the AUDIT, not at `report`, because `report` moves
+no tally (§69.6 row 7) and a refusal inside `report` would leave a printed
+verdict unregistered - the defect §69.2 exists for. The summary prints one
+`mesh study:` line per registered gate, generated with the list it sits in;
+a passing multi-mesh gate registers no verdict (§69), so its study is
+printed as note rows beside its checks instead.
+
+DESIGN: the audit-row refusal rather than a constructor refusal is also
+what keeps `registering_a_verdict_moves_no_tally` true - the new field
+describes, and only the audit judges.
+
+---
+
+### 94.4 The gates
+
+**Gate 94-A = §46.7's Gate 46-B, run live.** The anisotropic manufactured
+field `psi = sin(kx x) sin(ky y) sin(kz z)` with `K = diag(1, 10, 100)` in
+the mesh axes and `f = (1 kx^2 + 10 ky^2 + 100 kz^2) psi`, on three uniform
+blocks of `8^3`, `16^3` and `32^3` cells, `r = 2`. The face coefficients
+are `Conduction::uniform_per_region`'s (§46.3), consumed by `fvm_laplacian`
+exactly as the conjugate driver consumes them - there is no second tensor
+path. `h` is (94.1) on the exact block volume `0.28`. The rows: the three
+L2 errors fall; the observed order inside `[1.9, 2.1]` on the finest
+triplet, the bar §46.7 states, and `p = 0` if no order could be
+established so the check fails by the whole bar; `U_fine` printed through
+`GridStudy::one_line()`; and §46.4's anisotropy residual is zero on the
+axis-aligned block (checked at `1e-14`).
+
+**Gate 94-B, run live, two legs.** Two solid regions, `k = 1 : 100`, on
+`[0,1] x [0, 0.7] x [0, 0.4]`, every point sheared `x += tan(20 deg) z`, so
+the interface plane `xi = x - s z = 1/2` leans 20 deg off the cell-centre
+line and §47.3's suppressed correction is what the order measures. Three
+levels per region (`8x6x4`, doubled twice, `r = 2`). The pairing's default
+tolerance refuses a face leaning `1 - cos(20 deg) = 0.0603` off its normal,
+so `PairingTolerances::non_orth` is widened to `0.07` FOR THIS GATE and
+printed as such - cht.rs's default and its refusal are untouched, and
+measuring what the suppressed correction costs at 20 deg IS the gate's
+result. Leg 1 (`R_c = 0`) manufactures the field with the z-dependence the
+suppressed correction sees; leg 2 (`R_c = 5e-3`) manufactures the xi-only
+field whose interface jump is `-R_c sin(ky y)` exactly. The MINUS is (S47.1)
+and (S47.3) read together and is not a free choice: `n` points A to B, the
+flux `q_G = n . q = -k dT/dn`, and this field's `k dT/dn = +sin(ky y)`, so
+`T_A - T_B = R_c q_G = -R_c sin(ky y)` and side B's constant carries `+R_c`.
+Both legs face ONE order bar, the plan's: `p >= 0.9`, fail below it, and no
+other order bar exists for 94-B - leg 2 also checks its jump against
+`-R_c sin(ky y)` within 5 % of `R_c` on the finest mesh. Both legs print
+their three L2s and the
+study line; if a leg's order comes out oscillatory or diverging the row
+still prints `p = n/a` and the check fails with the whole bar.
+
+### 94.5 What must hold
+
+| claim | what holds it |
+|---|---|
+| an exact power sequence returns its own order, extrapolation and index to 1e-12, and its `u_fine` to 1e-10 | `vv::tests::an_exact_power_sequence_gives_its_order_back` |
+| unequal refinement ratios recover a non-integer order as a fixed point | `vv::tests::unequal_refinement_ratios_recover_a_non_integer_order` |
+| an oscillatory triplet has no order and a safety factor of three | `vv::tests::an_oscillatory_triplet_has_no_order_and_a_safety_factor_of_three` |
+| §60.5's Kr = 1 and Kr = 10 rows have their order, and an order above 2 falls to the fixed-exponent fits while still being reported | `vv::tests::the_kaminski_prakash_table_has_its_order` |
+| §79.12's four levels fit, and the finest triplet disagrees with the four-level fit on `R_t,in` | `vv::tests::the_qu_mudawar_levels_fit_and_the_finest_triplet_disagree_on_r_in` |
+| the least-squares fit recovers an exact four-level power series, weighted and unweighted | `vv::tests::the_least_squares_fit_recovers_an_exact_power_series` |
+| scatter larger than the data range triples the uncertainty through (94.9b) | `vv::tests::scatter_larger_than_the_data_range_triples_the_uncertainty` |
+| the validation metric is the difference and the root-sum-square | `vv::tests::the_validation_metric_is_the_difference_and_the_root_sum_square` |
+| the estimators refuse a sequence they cannot read, by name | `vv::tests::the_estimators_refuse_a_sequence_they_cannot_read` |
+| a verdict that does not say which mesh study it stands on fails the audit's third row, and every other registered gate declares one mesh by name | `verdict_registry::an_undeclared_mesh_study_fails_the_audit`, beside the seven registry tests that were already there |
+| Gate 94-A: the anisotropic MMS through the tensor path observes second order on the triplet | live rows `Gate 94-A ...` in the run |
+| Gate 94-B: the two-region MMS across the 20 deg interface reports its order on both legs against the one bar, and leg 2's jump is the contact jump within 5 % | live rows `Gate 94-B ...` in the run |
+| Gate 94-C: the tabulated levels carry a study and an `E +/- u_val` line each, and the live levels agree with the tables they replay | live rows `Gate 5 ...` and `Gate 6 ...` in the run, and the summary's `mesh study:` line |
+| the three existing MMS rows, Gate 5's and Gate 6's measured numbers are bitwise unchanged | the §69.7 before/after diff, tabulated in §94.6 |
+| §94's headings and equation labels resolve, and the ambiguous ASCII form has not grown | `cargo test --release --lib -- xref` (all 13 tests) |
+| the new module carries its provenance and its counts | `provenance_audit` (both tests), the PROVENANCE row and the NOTICE count |
+| `src/vv.rs` claims no device-module row: no kernel-launch builder token, no `solve`/`update`/`step`/`correct`/`advance` | `capture::registry` stays green |
+
+### 94.6 What was measured
+
+The §69.7 diff, before against after: the BEFORE run is the baseline the
+section's first landing left in `target/vv-before.txt`, `847/847 checks
+passed`; the AFTER run, with Gates 94-A, 94-B and 94-C in, prints
+`866/866 checks passed` - 866 = 847 + the section's 19 new checks, every one
+of them passing. The diff is 93 changed lines: 18 removed, 75 added. Every one of
+the 18 removed lines is a stopwatch table row (15) or a reformatted
+count/summary line (3: the count itself, the live/replayed sentence, and the
+registry summary's sentence, which §94.3 reworded); NOT ONE carries an
+`err`, `Nu`, `R_t` or `order` number. The
+three manufactured-solution rows, Gate 5's and Gate 6's measured numbers are
+the same lines in both files, bitwise - the `mms_solve` split moved a body
+and changed no launch.
+
+| gate | what was measured |
+|---|---|
+| 94-A | L2 `4.579e-3` / `1.138e-3` / `2.841e-4` at 8/16/32; monotone, `p = 2.010`, `phi_ext = -4.687098e-6`, `U_fine = 8.655e-4` (Fs 3, second order, unweighted); anisotropy residual `2.220e-16`. PASS on all four rows |
+| 94-B leg 1 | L2 `1.870e-4` / `7.511e-4` / `3.022e-3` (fine first); monotone, `p = 2.009`, `phi_ext = -3.486373e-6`, `U_fine = 5.708e-4` (Fs 3, second order, unweighted); pairing angle `20.0 deg` (err `1.2e-12`); region-by-xi agrees with the pairing on every cell. PASS |
+| 94-B leg 2 | L2 `1.526e-4` / `6.462e-4` / `2.845e-3` (fine first); monotone, `p = 2.155`, `phi_ext = -4.927315e-5`, `U_fine = 5.975e-4` (Fs 3, second order, unweighted); the interface jump matches `-R_c sin(ky y)` to `2.304e-2` of `R_c` on the finest mesh (tolerance `0.05`). PASS on all three rows. This leg first ran with side B's constant written `1 - R_c`, and failed all three: the measured jump came out about `-0.97 R_c sin(ky y)` against an expected `+R_c sin(ky y)`, a `1.936 R_c` miss, and the L2 errors did not fall. The reversal was the manufactured field's, not the solver's - (S47.1) points `n` from A to B and `q_G = -k dT/dn`, so a field with `k dT/dn = +sin(ky y)` has `T_A - T_B = R_c q_G = -R_c sin(ky y)`. The sign was corrected in the field and in the expected jump; nothing in `cht.rs` was touched and no bar was moved |
+| 94-C, §60.5 | Kr = 0.1: oscillatory at the table's own precision (`p = n/a`), `phi_ext = 3.807657e-1`, `U_fine = 9.943e-5`; `E = -2.920e-2 +/- 9.943e-5` (`-7.12 % +/- 0.02 %` of D) - `|E| > u_val`. Kr = 1: `p = 2.145`, `phi_ext = 1.521650e0`, `U_fine = 3.747e-3`; `E = -4.710e-2 +/- 3.747e-3` (`-3.00 % +/- 0.24 %`) - `|E| > u_val`. Kr = 10: `p = 1.966`, `phi_ext = 2.265978e0`, `U_fine = 3.978e-3` (Fs 1.25, power series); `E = -1.084e-2 +/- 3.978e-3` (`-0.48 % +/- 0.17 %`) - `|E| > u_val`. `u_D = 0` throughout, Belazizia et al. state none. The live 40x40 agrees with the table to better than 1 % at all three ratios |
+| 94-C, §79.12 | `R_t,in`: four levels `p = 0.531`, `phi_0 = 9.651541e-2`, `U_fine = 4.582e-3`; finest triplet `p = 1.277`, `phi_ext = 9.410148e-2`, `U_fine = 1.514e-3`; `E = -2.311e-2 +/- 3.629e-2` (`-19.92 % +/- 31.28 %`) - `|E| <= u_val`. `R_t,out`: four levels `p = 1.896`, `phi_0 = 2.353255e-1`, `U_fine = 3.200e-4`; triplet `p = 1.927`, `phi_ext = 2.353185e-1`, `U_fine = 3.107e-4`; `E = +1.307e-2 +/- 6.600e-2` (`5.89 % +/- 29.73 %`) - `|E| <= u_val`. `u_D` = half the digitised Fig. 4 bar. The live two levels agree with the table to better than 1 % |
+
+Gate 5's registered verdict now carries the Kr = 0.1 study - the worst
+point, the one the headline names - and its three `E +/- u_val` lines as
+detail; the summary's `mesh study:` line for it reads `3 levels,
+oscillatory, p = n/a, phi_ext = 3.807657e-1, U_fine = 9.943e-5`. The run's
+exit code is 0 and no gate changed its verdict: §94 added rows, an
+uncertainty to each registered verdict, and nothing else.
+
+### 94.7 What this section does not do
+
+No Richardson-corrected answer is ever used as a result. `phi_ext` is
+printed beside the sequence so the reader can see where the levels are
+heading, and nothing more: the numbers a gate holds are the finest level's,
+and the verdicts of §60.5 and §79.12 were read off those before this
+section existed and are read off them still - which is exactly what the
+before/after diff of §94.6 is for.
+
+No time-step study. What §94 measures is a SPATIAL discretisation; a
+temporal one belongs to the mesh-motion work when that section is written,
+and this one names no number for it rather than squat on one.
+
+No §13.4.1 pair test here: Gate 94-C's four-level and triplet fits are a
+disagreement between two readings of one table, not between two cases, and
+no case setting exists to pair them on.
+
+`u_input = 0` in every gate here, declared in every print. The gates'
+inputs are exact - manufactured data, tabulated references, digitised bars
+- so there is no input uncertainty to carry; the one place a reference
+carries a stated uncertainty, Gate 6 against Kawano's bar, carries it as
+`u_D`, and where a reference states none, Gate 5 against Belazizia et al.,
+the zero is printed rather than passed over in silence.
