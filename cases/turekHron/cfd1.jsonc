@@ -1,0 +1,43 @@
+// meteor-cfd case skeleton - the Turek & Hron CFD1 benchmark.
+//
+// S. Turek & J. Hron, "Proposal for numerical benchmarking of fluid-structure
+// interaction between an elastic object and laminar incompressible flow",
+// LNCSE 53, Springer (2006) 371-385, DOI 10.1007/3-540-34596-5_15, the CFD1
+// row: the same channel and inflow as FSI1, but "taking the flag as a rigid
+// object" - the flap's surface is a wall, there is one fluid region and no
+// interfaces. Reference, their level 6+0 (589824 elements), N per unit
+// depth: drag = 14.2929, lift = 1.11905.
+//
+// SKELETON - no driver reads this file yet: S10 lands `mesh.polyMesh`, S15
+// the parabolic inlet with its ramp; keys marked `S15` are invented here as
+// that unit's planned shape and are refused by `deny_unknown_fields` until
+// it lands; every other key is S10 / docs/case-example.json verbatim.
+//
+// The mesh beside this file is regenerated, not kept:
+//   python tools/mesh/examples/turek_hron.py --level 1
+{
+  "name": "turekHron_cfd1",
+  "regions": [
+    { "name": "fluid", "kind": "fluid",
+      "mesh": { "polyMesh": "mesh/fluid/polyMesh" },   // S10: a region reads its polyMesh,
+                                                       // path relative to this case file
+      // nu = mu/rho = 1.0e-3 m^2/s, Ubar = 0.2 m/s, Re = 20 (Turek & Hron 2006, CFD1).
+      "fluid": { "rho": 1000.0, "mu": 1.0 },
+      "patches": [
+        { "match": "inlet", "kind": "inlet",
+          // v(0,y) = 1.5 Ubar y (H - y) / (H/2)^2 = 1.5 Ubar (4.0/0.1681) y (0.41 - y);
+          // ramp v(t,0,y) = v(0,y) (1 - cos(pi t / 2)) / 2 for t < 2.0, v(0,y) otherwise.
+          "U": { "type": "parabolic", "mean": 0.2, "across": "y", "from": 0.0, "to": 0.41,   // S15
+                 "direction": [1, 0, 0], "ramp": { "kind": "cosine", "until": 2.0 } },        // S15
+          "p": { "type": "zeroGradient" } },
+        { "match": "outlet", "kind": "open", "p": { "type": "fixedValue", "value": 0.0 } },
+        { "match": "(empty_front|empty_back)", "kind": "empty" },
+        { "match": "(wall_top|wall_bottom|cylinder)", "kind": "wall" },
+        { "match": "fluid_to_flap", "kind": "wall" }   // the flag, rigid: no interface in CFD1
+      ] }
+  ],
+  "initial": { "U": [0, 0, 0], "p": 0.0 },
+  "run": { "steady": true },
+  "reference": { "source": "Turek & Hron 2006, CFD1, level 6+0 (589824 el)",
+                 "drag": 14.2929, "lift": 1.11905 }
+}

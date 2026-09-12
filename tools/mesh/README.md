@@ -387,6 +387,65 @@ The face dedup is pure Python (a dict keyed by each face's sorted vertex
 tuple), built for benchmark-sized meshes: a 10 M-tet site mesh takes minutes
 and gigabytes.
 
+## Benchmark recipes (tools/mesh/examples/*.py)
+
+Five recipes mesh the benchmark geometries of the FSI / solid-mesh plan
+(docs/10-fsi-solid-mesh-plan.md §I M5) as hex region layouts and hand the
+`.msh` to M4's converter:
+
+```
+python tools/mesh/examples/turek_hron.py     [--level 1|2|3] [--out DIR] [--dz 0.02]
+python tools/mesh/examples/bimetal_strip.py  [--level 1|2|3] [--out DIR]
+python tools/mesh/examples/thick_cylinder.py [--level 1|2|3] [--out DIR]
+python tools/mesh/examples/cantilever.py     [--level 1|2|3] [--out DIR]
+python tools/mesh/examples/selftest_recipes.py [--keep] [--full]
+```
+
+`turek_hron.py` is the Turek & Hron (2006) FSI benchmark: the 2.5 × 0.41
+channel, the cylinder r = 0.05 at (0.2, 0.2) and the elastic flap
+[0.2, 0.6] × [0.19, 0.21] minus the disk, a 2-D OCC fragment extruded one
+cell with recombine (`dz` 0.02, forces are F / dz). Measured on the reference
+machine (gmsh seconds / M4 seconds in the sidecar's `timings_s`):
+
+| level | h_near | h_far | fluid cells | flap cells | cylinder faces | seconds |
+|---|---|---|---|---|---|---|
+| 1 | 0.005   | 0.04 | 6188  | 298  | 60  | 0.2 gmsh, 10 M4 |
+| 2 | 0.0025  | 0.02 | 25145 | 1146 | 118 | 1.0 gmsh, 38 M4 |
+| 3 | 0.00125 | 0.01 | 98220 | 4524 | measured by `--full` | 6.8 gmsh, 146 M4 |
+
+Patches: `fluid_to_flap` / `flap_to_fluid` (the interface, the wetted flap
+surface), `empty_front`, `empty_back`, `inlet`, `outlet`, `wall_top`,
+`wall_bottom`, `cylinder`, `flap_fixed` (the clamp, the flap's face on the
+cylinder). Level 1 lands in `cases/turekHron/mesh` — the path the two case
+skeletons `cases/turekHron/fsi1.jsonc` and `cfd1.jsonc` name — and levels 2
+and 3 default to `mesh_L2` / `mesh_L3` beside it. Every recipe writes a
+sidecar `<out>/<recipe>.json`: `recipe`, `level`, `gmsh`, `units`,
+`timings_s`, the per-region `cells` / `patches` / `elements`, the
+`interfaces` with the pairing worsts, plus per recipe — Turek-Hron: `dz`,
+`h_near`, `h_far`, `flap_length_m` (0.35101, the free length after the disk
+subtraction), `point_A`, `flap_cells_across`, `cylinder_faces`,
+`interface_faces`; bimetal: `L`, `w`, `h1`, `h2`, `n` and `zones` — the two
+S9 `bounds` boxes (`lower` z 0..h1, `upper` z h1..2h1) with their measured
+cell counts. S9 assigns materials per closed box on the cell centroid, so no
+cell-index list is written anywhere; `nz` is even so the bond plane is a
+mesh plane.
+
+The three solids are transfinite hex, one solid region each (`--fluid none`):
+`bimetal_strip.py` (`strip`, 50·5·8 = 2000 cells at level 1, patches
+`fixed_end`, `free_end`, `bottom`, `top`, `side_y0`, `side_y1`),
+`thick_cylinder.py` (`cylinder`, the quarter annulus r 0.05 → 0.10, z 0..0.02,
+nr·nt·nz = 192 at level 1, patches `inner`, `outer`, `zmin`, `zmax`,
+`symmetry_x0`, `symmetry_y0` — typed `symmetry` by the name convention) and
+`cantilever.py` (`beam`, 40·4·4 = 640 cells at level 1, the cantilever
+patches, the sidecar carrying `I`, `A`, `beta1_L` and the two closed forms
+the S7/S8 gates check against). Their default `--out cases/<recipe>_L<level>`
+is git-ignored, and so is everything under `cases/turekHron/mesh*` — the
+layouts are regenerated, never cloned.
+
+`python tools/mesh/examples/selftest_recipes.py` runs every recipe at level 1
+plus Turek-Hron level 2 under `tempfile.mkdtemp` and asserts the M5 table;
+`--full` adds level 3 and the three solids at level 2.
+
 ## Known limits
 
 - **3-D Delaunay only (`algo3d: 1`).** HXT (10) is faster but on this class of
