@@ -236,6 +236,12 @@ async function drive(opts: Options): Promise<number> {
     return uiState.viewer
   }
 
+  /** The Geometry-tab section of the stand-in screen, made the first time a geometry command lands. */
+  function standInGeometry(): NonNullable<UiState['geometry']> {
+    uiState.geometry ??= { id: null, path: null, triangleCount: null, closed: null, openEdges: null, solids: [], selected: null, edits: 0, dirty: false }
+    return uiState.geometry
+  }
+
   function applyUiCommand(cmd: UiCommand): void {
     switch (cmd.type) {
       case 'select_tab': uiState.activeTab = cmd.tab; break
@@ -294,6 +300,52 @@ async function drive(opts: Options): Promise<number> {
         break
       }
       case 'set_locale': uiState.locale = cmd.locale; break
+      // The Geometry tab: the stand-in answers with one plausible part so the
+      // model can read back what it just asked the screen to do.
+      case 'geometry_open':
+      case 'geometry_import_step': {
+        const g = standInGeometry()
+        g.id = cmd.path
+        g.path = cmd.path
+        g.triangleCount = 0
+        g.closed = true
+        g.openEdges = 0
+        g.solids = [{ name: 'body', triangles: 0, visible: true }]
+        break
+      }
+      case 'geometry_part': {
+        const g = standInGeometry()
+        const solid = g.solids.find((s) => s.name === cmd.name) ?? g.solids[0]
+        if (solid) {
+          if (cmd.action === 'rename' && cmd.newName) solid.name = cmd.newName
+          else if (cmd.action === 'select') { g.selected = cmd.name; solid.visible = true }
+          else if (cmd.action === 'keep_only') for (const s of g.solids) s.visible = s === solid
+          else if (cmd.action === 'drop') solid.visible = false
+          else solid.visible = cmd.action === 'show'
+        }
+        break
+      }
+      case 'geometry_transform': {
+        const g = standInGeometry()
+        if (cmd.op === 'undo') g.edits = Math.max(0, g.edits - 1)
+        else if (cmd.op === 'redo') g.edits += 1
+        else if (cmd.op === 'reset') g.edits = 0
+        else g.edits += 1
+        g.dirty = true
+        break
+      }
+      case 'geometry_boolean': {
+        const g = standInGeometry()
+        g.solids = [{ name: cmd.a, triangles: 0, visible: true }]
+        break
+      }
+      case 'geometry_save': {
+        const g = standInGeometry()
+        g.path = cmd.path
+        g.edits = 0
+        g.dirty = false
+        break
+      }
       default: break
     }
   }

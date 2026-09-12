@@ -519,6 +519,29 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('link_cameras'), on: Boolish.describe("Mirror the leader's camera into the follower (true) or free them (false); needs split_view first") }),
   z.object({ type: z.literal('compare_run'), runId: z.string().nullable().describe('Run to overlay on the residual chart; null removes the overlay') }),
+  // The Geometry tab (unit G3): the surface the mesh starts from, its parts, a transform, a save.
+  z.object({ type: z.literal('geometry_open'), path: z.string().describe('Workspace-relative .stl/.obj to open in the Geometry tab (a .step/.stp goes through geometry_import_step)') }),
+  z.object({ type: z.literal('geometry_import_step'), path: z.string().describe('Workspace-relative .step/.stp: the server converts it and every solid becomes one part') }),
+  z.object({
+    type: z.literal('geometry_part'),
+    name: z.string().describe('Part name as the parts list shows it'),
+    action: z.enum(['show', 'hide', 'keep_only', 'drop', 'select', 'rename']).describe('keep_only hides every other part; drop hides this one; select highlights it'),
+    newName: z.string().nullish().describe('With action rename: the new name'),
+  }),
+  z.object({
+    type: z.literal('geometry_transform'),
+    op: z.enum(['translate', 'rotate', 'scale', 'mirror', 'undo', 'redo', 'reset']),
+    value: z.union([Vec3Schema, z.coerce.number()]).nullish().describe('translate: metres [x,y,z]; rotate: degrees about x, y, z (x first); scale: one factor or [sx,sy,sz]; mirror: the plane normal'),
+    pivot: z.enum(['centre', 'origin']).nullish().describe('rotate/scale/mirror about the bounds centre (default) or the origin'),
+  }),
+  z.object({ type: z.literal('geometry_boolean'), op: z.enum(['fuse', 'cut', 'common']), a: z.string().describe('Object part'), b: z.string().describe('Tool part') }),
+  z.object({
+    type: z.literal('geometry_save'),
+    path: z.string().describe('Workspace-relative .stl to write'),
+    binary: Boolish.nullish().describe('Binary STL (default true; forced to ASCII when parts were renamed)'),
+    keepVisibleOnly: Boolish.nullish().describe('Write only the visible parts'),
+    overwrite: Boolish.nullish(),
+  }),
 ])
 export type UiCommand = z.infer<typeof UiCommandSchema>
 export type UiCommandType = UiCommand['type']
@@ -577,6 +600,20 @@ export const UiViewerStateSchema = z.object({
 })
 export type UiViewerState = z.infer<typeof UiViewerStateSchema>
 
+export const UiGeometryStateSchema = z.object({
+  id: z.string().nullable(),
+  path: z.string().nullable(),
+  triangleCount: z.number().nullable(),
+  closed: z.boolean().nullable(),
+  openEdges: z.number().nullable(),
+  solids: z.array(z.object({ name: z.string(), triangles: z.number(), visible: z.boolean() })),
+  selected: z.string().nullable(),
+  /** Active local edits (the undo cursor). */
+  edits: z.number(),
+  dirty: z.boolean(),
+})
+export type UiGeometryState = z.infer<typeof UiGeometryStateSchema>
+
 export const UiTabSchema = z.object({
   id: z.string(),
   kind: z.string().nullable(),
@@ -604,6 +641,7 @@ export const UiStateSchema = z.object({
   tabs: z.array(UiTabSchema).nullish(),
   run: UiRunStateSchema.nullish(),
   viewer: UiViewerStateSchema.nullish(),
+  geometry: UiGeometryStateSchema.nullish(),
   /** Number of open problems (errors + warnings) the GUI shows. */
   problems: z.number().nullish(),
   /** The GUI's own connection state, e.g. "connected" or "reconnecting". */

@@ -61,6 +61,26 @@ describe('ui bridge frames', () => {
     expect(roundTripServer(host)).toEqual(host)
   })
 
+  it('round-trips the six geometry commands', () => {
+    const cmds: ServerMsg[] = [
+      { t: 'ui.command', requestId: 'g_1', cmd: { type: 'geometry_open', path: 'cases/x.stl' } },
+      { t: 'ui.command', requestId: 'g_2', cmd: { type: 'geometry_import_step', path: 'cases/x.step' } },
+      { t: 'ui.command', requestId: 'g_3', cmd: { type: 'geometry_part', name: 'a', action: 'rename', newName: 'body' } },
+      { t: 'ui.command', requestId: 'g_4', cmd: { type: 'geometry_transform', op: 'translate', value: [1, 2, 3], pivot: 'centre' } },
+      { t: 'ui.command', requestId: 'g_5', cmd: { type: 'geometry_boolean', op: 'cut', a: 'a', b: 'b' } },
+      { t: 'ui.command', requestId: 'g_6', cmd: { type: 'geometry_save', path: 'tmp/y.stl', binary: true, keepVisibleOnly: true, overwrite: true } },
+    ]
+    for (const m of cmds) expect(roundTripServer(m)).toEqual(m)
+    const state: ClientMsg = {
+      t: 'ui.state',
+      state: {
+        ...fullState,
+        geometry: { id: 'g1', path: 'cases/x.stl', triangleCount: 8, closed: true, openEdges: 0, solids: [{ name: 'a', triangles: 4, visible: true }, { name: 'b', triangles: 4, visible: false }], selected: 'b', edits: 2, dirty: true },
+      },
+    }
+    expect(roundTripClient(state)).toEqual(state)
+  })
+
   it('rejects unknown ui command types and unknown fields', () => {
     expect(ClientMsgSchema.safeParse({ t: 'ui.state', state: { activeTab: 'x' } }).success).toBe(false)
     expect(ClientMsgSchema.safeParse({ t: 'ui.result', requestId: 'u_1', ok: true }).success).toBe(false)

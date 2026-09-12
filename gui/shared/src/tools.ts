@@ -178,7 +178,7 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       return ko ? '잔차 차트 열기' : 'Opened residual chart'
     case 'gui_control': {
       const t = String(i.type ?? '')
-      const arg = String(i.field ?? i.tab ?? i.step ?? i.panel ?? i.tool ?? i.projection ?? i.quantity ?? i.action ?? i.path ?? i.kind ?? i.id ?? i.chart ?? i.locale ?? i.preset ?? '')
+      const arg = String(i.field ?? i.tab ?? i.step ?? i.panel ?? i.tool ?? i.projection ?? i.quantity ?? i.action ?? i.path ?? i.kind ?? i.id ?? i.chart ?? i.locale ?? i.preset ?? i.op ?? i.name ?? i.a ?? '')
       const overlay = i.what !== undefined ? `${String(i.what)} ${i.on ? 'on' : 'off'}` : ''
       const map: Record<string, [string, string]> = {
         select_tab: [`탭 ${arg} 열기`, `Opened tab ${arg}`],
@@ -232,6 +232,12 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
         open_result_in_view: [`뷰 ${String(i.view ?? '')}에 결과 ${arg} 열기`, `Opened result ${arg} in view ${String(i.view ?? '')}`],
         link_cameras: [i.on ? '카메라 연동' : '카메라 연동 해제', i.on ? 'Linked the cameras' : 'Unlinked the cameras'],
         compare_run: [i.runId ? `실행 ${String(i.runId)} 잔차 비교` : '잔차 비교 해제', i.runId ? `Compared run ${String(i.runId)} on the residual chart` : 'Removed the residual comparison'],
+        geometry_open: [`지오메트리 ${arg} 열기`, `Opened geometry ${arg}`],
+        geometry_import_step: [`STEP ${arg} 가져오기`, `Imported STEP ${arg}`],
+        geometry_part: [`부품 ${String(i.name ?? '')} ${String(i.action ?? '')}`, `Part ${String(i.name ?? '')}: ${String(i.action ?? '')}`],
+        geometry_transform: [`지오메트리 변환 ${String(i.op ?? '')}`, `Geometry transform ${String(i.op ?? '')}`],
+        geometry_boolean: [`불리언 ${String(i.op ?? '')} (${String(i.a ?? '')}, ${String(i.b ?? '')})`, `Boolean ${String(i.op ?? '')} of ${String(i.a ?? '')} and ${String(i.b ?? '')}`],
+        geometry_save: [`지오메트리 ${arg} 저장 요청`, `Asked the UI to save the geometry to ${arg}`],
       }
       const pair = map[t] ?? [`화면 명령 ${t}`, `UI command ${t}`]
       return ko ? `GUI: ${pair[0]}` : `GUI: ${pair[1]}`
