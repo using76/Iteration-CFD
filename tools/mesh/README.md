@@ -165,6 +165,11 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "roof_patches": {"nh3_source": 306},    // solid tag whose flat roof becomes its own patch,
                                           // with the 2.5/5/10 m refinement boxes around and
                                           // downwind (-x) of it
+  "regions": {                            // solids kept as their own volumes (see "Regions")
+    "solids": [ {"tag": 2, "name": "building", "kind": "solid",
+                 "material": "concrete", "outer": "building_outer"} ],
+    "interface_names": true               // false: no 2-D group for the shared faces
+  },
   "sizes": {
     "min": 1.5,            // Mesh.MeshSizeMin
     "max": 40.0,           // Mesh.MeshSizeMax and every field's VOut
@@ -190,6 +195,7 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
                             // (the wind blows that way), upwind_m towards +x, +-half_width_m,
                             // from 1 m under the ground to height_m; off while size is 0
     "size_mult": 1.0,      // >1 coarsens every size (a solver-robustness reproducer)
+    "regions": {"building": {"size": 3.0, "reach_m": 20.0}},   // per declared region (see "Regions")
     "roof_boxes": [2.5, 5.0, 10.0]   // the three roof-patch box sizes (near, mid, downwind)
   },
   "mesh":  {"algo2d": 6, "algo3d": 1, "optimize_passes": 5, "threads": 32,
@@ -278,6 +284,33 @@ distances 0–80/120 m, the ground scan's −1..60 m at 0.25 m, the 0.5 m hull
 slack, the 2000 m² big-roof area's 100 × 100 m shape test) are ported
 unchanged; they are the field layout the site mesh was tuned with.
 
+## Regions
+
+A `regions.solids` entry `{"tag", "name", "kind": "solid", "material",
+"outer"}` keeps one imported solid as its own volume: never cut, sunk or
+hulled — after the cut the fluid is `occ.fragment`ed with it, so every face
+they share is one OCC surface, meshed once (conformal interface). Each volume
+gets its 3-D group (`fluid`, `<name>`); the shared faces get one 2-D group
+`fluid_to_<name>` (`<a>_to_<b>` between two declared solids, config order);
+the solid's remaining faces get `<name>_outer` (`outer` renames it).
+`interface_names: false` writes no 2-D group for the shared faces —
+`ofgpu-convert-mesh -keepRegions` then yields one merged mesh with the
+interface internal; the summary still reports it. Every declared solid gets a
+Distance/Threshold field over all of its faces (`sizes.regions.<name>`:
+`size` default `sizes.near_struct`, `reach_m` default 80 m). Refused by name
+with regions: `trim` (keeps only the largest volume), `repairs`,
+`post.flat_tets` (rebuilds the fluid's mesh alone), `sizes.gap_ratio` (reads
+the fluid alone), a declared tag that is also excluded, repaired or a
+`roof_patches` solid, a tag that is the fluid's or not in the STEP, a `name`
+colliding with `fluid`, a fixed patch, a point or a roof patch; the fluid
+must outweigh every declared solid, and a solid partly outside the fluid is
+refused (the fragment must leave one piece per solid). The summary carries
+`regions.<name>` (tag, kind, material, outer, mass_m3, centroid,
+shared_with_fluid, groups, tetrahedra), `interfaces`, `fluid_tetrahedra` and
+`groups.fluid_to_<name>`; the checkpoint carries `regions`, and
+`--from-checkpoint` re-identifies each region by mass and centroid. M4's
+`regions_from_msh.py` is the consumer of the names this writes.
+
 ## The self-test
 
 ```
@@ -292,10 +325,126 @@ tool four ways — `--dry-run`, `--stop-after-checkpoint`, the full run, and
 `pool_yard` exist; tets > 0; no negative volumes in the summary. The full run
 also asserts `near_touching == []` (the tiny STEP has no near-touching pair),
 and the `--from-checkpoint` path reruns the post stage with `sliver_rel: 0.01,
-sliver_edge_rel: 0.25` and prints the flat-tet notes. When
+sliver_edge_rel: 0.25` and prints the flat-tet notes. With the building
+declared as a region, the tool runs three more times (dry-run, full,
+from-checkpoint) plus one with `interface_names: false`, and four refusals
+are checked; a `--keep` run leaves `out_regions/selftest.msh` for M4. When
 `rust/target/release/ofgpu-convert-mesh.exe` is built, the mesh is also
 converted to a case's `polyMesh` and to a Fluent mesh. Seconds, no STEP input
 needed.
+
+## Regions: one polyMesh per volume
+
+M3's `.msh` becomes a region layout — one complete, standalone polyMesh per
+named volume, every shared face a boundary face of BOTH regions in a patch
+pair whose k-th faces coincide, and a `regions.json` naming it all:
+
+```
+python tools/mesh/regions_from_msh.py <mesh.msh> <outDir> [--material R=N]... [--fluid NAME] [--overwrite]
+python tools/mesh/regions_check.py <outDir>/regions.json
+```
+
+The layout on disk:
+
+```
+outDir/
+  regions.json
+  fluid/polyMesh/{points,faces,owner,neighbour,boundary}
+  building/polyMesh/{...}
+```
+
+`regions.json` is docs/10-fsi-solid-mesh-plan.md §C: `version` 1, `units`,
+`regions` (`name`, `kind`, relative `polyMesh`, and `material` on a solid),
+`interfaces` (`regions`, `patches`, `faces`, `tolerance`), `source` (tool,
+version, geometry basename, config flags — no paths). The region order puts
+the fluid first (the volume named by `--fluid`, default `fluid`), then every
+other volume by ascending physical tag; `--fluid none` makes every region
+solid. A shared face becomes the patch pair `<a>_to_<b>` / `<b>_to_<a>` in
+identical order — the k-th face of one is the reversed k-th face of the
+other — so the solver can pair by index. Patch types follow convert_mesh.rs's
+convention: a case-insensitive `wall`/`empty`/`symmetry` prefix, else
+`patch`; an interface patch is always `patch`. Boundary faces no physical
+surface covers become `defaultFaces` (warned). The five files of every
+polyMesh are byte-identical to what `ofgpu-convert-mesh` writes for the same
+single-volume mesh — `polymesh_write.py` is the Rust writer's byte-for-byte
+twin (same banner, `%.17g` points, face order, boundary padding).
+
+Refused by name, writing nothing: a volume without exactly one physical name,
+a mesh with no `$PhysicalNames` section, a face shared by three cells, a
+volume name carrying `_to_`, `--fluent` (the Fluent writer is tet-only and
+single cell zone), an existing `regions.json` without `--overwrite`,
+`--fluid`/`--material` naming no volume. `regions_check.py` refuses a layout
+that breaks R1 (a region complete and standalone, positive pyramid volumes),
+R2 (the paired faces coincident within the manifest tolerance, reported as
+centroid / area / normal worsts), R3 (the pair names and types) or R6 (the
+§C keys, relative paths, five files): exit 0, or 1 with one line per
+violation, or 2 on usage. `regions_selftest.py` builds six gmsh meshes (tet
+and transfinite hex), runs the tool and the checker on them and demands byte
+equality with the Rust converter:
+`python tools/mesh/regions_selftest.py [--keep DIR] [--msh PATH]`.
+
+The face dedup is pure Python (a dict keyed by each face's sorted vertex
+tuple), built for benchmark-sized meshes: a 10 M-tet site mesh takes minutes
+and gigabytes.
+
+## Benchmark recipes (tools/mesh/examples/*.py)
+
+Five recipes mesh the benchmark geometries of the FSI / solid-mesh plan
+(docs/10-fsi-solid-mesh-plan.md §I M5) as hex region layouts and hand the
+`.msh` to M4's converter:
+
+```
+python tools/mesh/examples/turek_hron.py     [--level 1|2|3] [--out DIR] [--dz 0.02]
+python tools/mesh/examples/bimetal_strip.py  [--level 1|2|3] [--out DIR]
+python tools/mesh/examples/thick_cylinder.py [--level 1|2|3] [--out DIR]
+python tools/mesh/examples/cantilever.py     [--level 1|2|3] [--out DIR]
+python tools/mesh/examples/selftest_recipes.py [--keep] [--full]
+```
+
+`turek_hron.py` is the Turek & Hron (2006) FSI benchmark: the 2.5 × 0.41
+channel, the cylinder r = 0.05 at (0.2, 0.2) and the elastic flap
+[0.2, 0.6] × [0.19, 0.21] minus the disk, a 2-D OCC fragment extruded one
+cell with recombine (`dz` 0.02, forces are F / dz). Measured on the reference
+machine (gmsh seconds / M4 seconds in the sidecar's `timings_s`):
+
+| level | h_near | h_far | fluid cells | flap cells | cylinder faces | seconds |
+|---|---|---|---|---|---|---|
+| 1 | 0.005   | 0.04 | 6188  | 298  | 60  | 0.2 gmsh, 10 M4 |
+| 2 | 0.0025  | 0.02 | 25145 | 1146 | 118 | 1.0 gmsh, 38 M4 |
+| 3 | 0.00125 | 0.01 | 98220 | 4524 | measured by `--full` | 6.8 gmsh, 146 M4 |
+
+Patches: `fluid_to_flap` / `flap_to_fluid` (the interface, the wetted flap
+surface), `empty_front`, `empty_back`, `inlet`, `outlet`, `wall_top`,
+`wall_bottom`, `cylinder`, `flap_fixed` (the clamp, the flap's face on the
+cylinder). Level 1 lands in `cases/turekHron/mesh` — the path the two case
+skeletons `cases/turekHron/fsi1.jsonc` and `cfd1.jsonc` name — and levels 2
+and 3 default to `mesh_L2` / `mesh_L3` beside it. Every recipe writes a
+sidecar `<out>/<recipe>.json`: `recipe`, `level`, `gmsh`, `units`,
+`timings_s`, the per-region `cells` / `patches` / `elements`, the
+`interfaces` with the pairing worsts, plus per recipe — Turek-Hron: `dz`,
+`h_near`, `h_far`, `flap_length_m` (0.35101, the free length after the disk
+subtraction), `point_A`, `flap_cells_across`, `cylinder_faces`,
+`interface_faces`; bimetal: `L`, `w`, `h1`, `h2`, `n` and `zones` — the two
+S9 `bounds` boxes (`lower` z 0..h1, `upper` z h1..2h1) with their measured
+cell counts. S9 assigns materials per closed box on the cell centroid, so no
+cell-index list is written anywhere; `nz` is even so the bond plane is a
+mesh plane.
+
+The three solids are transfinite hex, one solid region each (`--fluid none`):
+`bimetal_strip.py` (`strip`, 50·5·8 = 2000 cells at level 1, patches
+`fixed_end`, `free_end`, `bottom`, `top`, `side_y0`, `side_y1`),
+`thick_cylinder.py` (`cylinder`, the quarter annulus r 0.05 → 0.10, z 0..0.02,
+nr·nt·nz = 192 at level 1, patches `inner`, `outer`, `zmin`, `zmax`,
+`symmetry_x0`, `symmetry_y0` — typed `symmetry` by the name convention) and
+`cantilever.py` (`beam`, 40·4·4 = 640 cells at level 1, the cantilever
+patches, the sidecar carrying `I`, `A`, `beta1_L` and the two closed forms
+the S7/S8 gates check against). Their default `--out cases/<recipe>_L<level>`
+is git-ignored, and so is everything under `cases/turekHron/mesh*` — the
+layouts are regenerated, never cloned.
+
+`python tools/mesh/examples/selftest_recipes.py` runs every recipe at level 1
+plus Turek-Hron level 2 under `tempfile.mkdtemp` and asserts the M5 table;
+`--full` adds level 3 and the three solids at level 2.
 
 ## Known limits
 

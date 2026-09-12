@@ -43,6 +43,9 @@ if [ -z "$key" ]; then
 fi
 
 # 지시문: -f 로 파일에서 읽거나, 인자 전체를 이어 붙이거나, stdin.
+# 자식에게는 항상 stdin 으로 넘긴다: Windows 는 명령줄을 32,767자에서 자르므로
+# 32 KB 를 넘는 브리프를 인자로 주면 "Argument list too long" 으로 시작조차 못 한다
+# (2026-09-12 실측, 46 KB 브리프). `claude -p` 는 인자가 없으면 stdin 을 읽는다.
 if [ "${1:-}" = "-f" ]; then
   [ -n "${2:-}" ] || { echo "glm-code: -f needs a file" >&2; exit 2; }
   prompt="$(cat "$2")"
@@ -70,4 +73,5 @@ CLAUDE_CODE_MAX_OUTPUT_TOKENS="${GLM_MAX_OUTPUT_TOKENS:-64000}" \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   claude -p \
     --model sonnet \
-    ${GLM_PERMISSION_MODE:+--permission-mode "$GLM_PERMISSION_MODE"}
+    ${GLM_PERMISSION_MODE:+--permission-mode "$GLM_PERMISSION_MODE"} \
+    < <(printf '%s\n' "$prompt")

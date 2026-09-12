@@ -38,6 +38,11 @@ cases/*
 # taken before a later SPEC-LIT rule made the cases themselves unrunnable.
 # They are records, not cases; cases/retired/README.md says what replaced each.
 !cases/retired/
+# Turek-Hron FSI benchmark: the two case skeletons are text; the meshes that
+# tools/mesh/examples/turek_hron.py writes beside them are regenerated, not kept.
+!cases/turekHron/
+cases/turekHron/mesh/
+cases/turekHron/mesh_L*/
 
 # ------------------------------------------------------------- results -----
 *.png

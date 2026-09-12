@@ -14,7 +14,7 @@ meteor-cfd의 솔버 크레이트입니다. 호스트는 Rust, 커널은 CUDA C+
 
 수치 코어 전체가 **공개 문헌으로부터 직접 구현**되었습니다. 모든 이산화와 모델은
 [`SPEC-LIT.md`](SPEC-LIT.md)에 원논문 인용과 함께 명세되어 있고, 파일별 출처는
-[`PROVENANCE.md`](PROVENANCE.md)에 있습니다. 179개 소스 파일 전부가 저작권 헤더와
+[`PROVENANCE.md`](PROVENANCE.md)에 있습니다. 189개 소스 파일 전부가 저작권 헤더와
 "No GPL-licensed source was consulted." 줄을 담고 있으며, 이는 산문이 아니라
 시험으로 강제됩니다:
 
@@ -102,7 +102,7 @@ cargo test --release
 
 ## 실행
 
-바이너리는 16개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
+바이너리는 18개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
 
 ```bash
 cargo run --release --bin ofgpu-generate-mesh -- channel ../cases/ch 200 120 1
@@ -116,6 +116,9 @@ cargo run --release --bin ofgpu-lowmach -- ../cases/channelPeriodicFluxWF.jsonc 
 # 2상 유동 (SPEC-LIT §20). Martin & Moyce (1952)의 댐 브레이크:
 cargo run --release --bin ofgpu-generate-mesh -- damBreak ../cases/dam
 cargo run --release --bin ofgpu-vof           -- ../cases/dam -endTime 0.25 -surge
+
+# 자체 격자기 (SPEC-LIT §92). STL과 설정 JSON에서 constant/polyMesh를 만듭니다:
+cargo run --release --bin ofgpu-automesher -- ../tools/automesher/examples/box_sphere.json
 ```
 
 케이스 목록과 각 케이스가 무엇을 재는지는 [`../cases/README.md`](../cases/README.md)에
@@ -153,10 +156,11 @@ rust/
     ├── io/{case_json,contract,schemes,regex,output_types}.rs JSONC 케이스 · §13.4 계약
     ├── io/{msh,vtu,vdb,nvdb,usda}.rs        메쉬 입력·출력 형식
     ├── surface/{classify,cutcell,stl,obj}.rs  STL 컷셀
+    ├── automesher/{octree,castellate,features,snap,layers,quality,driver}.rs  자체 격자기 (§92)
     ├── vof.rs                                 2상 VOF
     ├── blockgen.rs restart.rs potential_flow.rs
     ├── reference.rs                           독립 CPU 구현 (검증 전용)
-    └── bin/                                   바이너리 16개
+    └── bin/                                   바이너리 18개
 ```
 
 ## 알려진 제약

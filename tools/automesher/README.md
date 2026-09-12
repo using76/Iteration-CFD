@@ -12,45 +12,87 @@ is solvable is not worth running, so this one measures its own output against
 the §92.3 gate before it will emit anything.
 
 Tranche 1 implements the **hex-dominant path** (octree refinement,
-castellation, snapping, layers). The tetrahedral path is §92.4 and the
-polyhedral path is §92.5; both are specified there and neither is implemented.
+castellation, snapping, layers) and is complete: one command takes a config
+file to a `constant/polyMesh` a solver can be pointed at. The tetrahedral path
+is §92.4 and the polyhedral path is §92.5; both are specified there and neither
+is implemented.
 
 ## Usage
 
 ```text
-ofgpu-automesher <config.json> [-schema] [-check <caseDir>] [-dryRun]
+ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME] [-check [<caseDir>]]
+                               [-dryRun] [-schema]
 ```
 
-- `ofgpu-automesher <config.json>` - the meshing path. Reads and validates the
-  config, loads and merges `input.surfaces[]`, requires a closed surface,
-  runs the §92.2 stage-0 domain check, prints the surface summary and the
-  plan, and then refuses:
-  `not implemented: stage 1 (octree refinement) - SPEC-LIT §92.2; tranche 1 unit 2`,
-  exit status 1. Nothing is written. **This is the DRIVER, not the stages.**
-  Stages 1-6 are built and tested in the library
-  (`rust/src/automesher/{octree,castellate,features,snap,layers}.rs`); what is
-  missing is the wiring from a config file through them, so every measurement
-  quoted below and in §92.13 was taken by driving the library directly. Wiring
-  the driver is its own unit.
-- `ofgpu-automesher <config.json> -check <caseDir>` - **fully working.** Reads
-  `<caseDir>/constant/polyMesh` and runs the §92.3 quality gate (G1-G7) with
-  the config's `quality` thresholds. Every gate passed: the measured summary,
-  exit 0. Any gate failed: the refusal naming the gate, the cell ids, their
-  centroids and the measured values, exit 1. This is how a mesh that already
-  exists - from this mesher, a converter, or anywhere else - is judged before
-  the solvers are pointed at it.
-- `ofgpu-automesher <config.json> -dryRun` - everything up to and including
-  the surface summary, then exit 0 without attempting the meshing stages.
-  What a config check wants before queuing a long run.
-- `ofgpu-automesher -schema` - the JSON Schema of the config on stdout, exit
-  0, generated from the same types that parse it. No config is read and every
-  other argument is ignored.
+- `ofgpu-automesher <config.json>` - the meshing path, SPEC-LIT §92.14. Reads
+  and validates the config, loads and merges `input.surfaces[]`, requires a
+  closed surface, runs the §92.2 stage-0 domain check, then runs the four
+  stages of (92.55) in order - `octree`, `castellate`, `snap`, `layers` -
+  printing a banner **before** each one and its elapsed seconds after, so a
+  stage that takes forty minutes has said which stage it is. On success it
+  writes `<case_dir>/constant/polyMesh` and `<case_dir>/<name>_summary.json`
+  and exits 0. On a gate failure it prints §92.3's refusal - the gate, the cell
+  ids, their centroids, the measured values - and exits 1 **having written
+  neither file** (§92.14.4).
+- `-stopAfter STAGE` - stop after `octree`, `castellate`, `snap` or `layers`
+  and write what that stage returned. `features` is accepted and means `snap`:
+  §92.12 folded §92.2's stage 5 into stage 4's own loop, so there is no point
+  in the pipeline between them at which a mesh exists (§92.14.1). A stopped run
+  is not a way to get an ungated mesh - every stage gates its own output before
+  returning it.
+- `-tag NAME` - give this run its own output: the case directory becomes
+  `<output.case_dir>_<NAME>` and the mesh name `<output.name>_<NAME>`, so two
+  variants of one config do not overwrite each other's `constant/polyMesh`.
+  This is `tools/mesh/step_mesh.py --tag`'s convention.
+- `-check [<caseDir>]` - §92.14.5: run the §92.3 gate on a polyMesh that
+  ALREADY exists, with this config's `quality` thresholds, and write nothing.
+  The directory defaults to the config's own (tag-adjusted) `output.case_dir`;
+  a directory named after the flag overrides it. Every gate passed: the
+  measured summary, exit 0. Any gate failed: the refusal, exit 1. This is how a
+  mesh from this mesher, from `ofgpu-convert-mesh`, or from anywhere else is
+  judged before a solver is pointed at it.
+- `-dryRun` - everything up to and including the surface summary, then exit 0
+  without attempting the meshing stages. What a config check wants before
+  queuing a long run.
+- `-schema` - the JSON Schema of the config on stdout, exit 0, generated from
+  the same types that parse it. No config is read and every other argument is
+  ignored.
+
+### The files in this directory
+
+| File | What it is |
+|---|---|
+| `run_automesher.cmd` | Runs the mesher in a visible console with every line also copied to `<case_dir>/work/run.log`. The long runs go through this. |
+| `sections.py` | Draws xy / yz / zx sections of a written polyMesh - the actual face polygons, not a block sketch. How a mesh is looked at before a solver is pointed at it. |
+| `examples/box_sphere.json` | The smallest config that exercises the whole pipeline: a 1 m sphere in a 10 m box. Seconds to run; the config to try a change against. |
+| `examples/make_box_sphere_stl.py` | Writes `box_sphere.stl` - a generator rather than a checked-in binary asset. |
+| `examples/nh3_site.json` | The ammonia-terminal site of §92.1, the mesher's own yardstick. |
+
+A first run, end to end:
+
+```bat
+cargo build --release --bin ofgpu-automesher
+cd tools\automesher\examples
+python make_box_sphere_stl.py box_sphere.stl
+..\..\..\rust\target\release\ofgpu-automesher box_sphere.json
+..\..\..\rust\target\release\ofgpu-automesher box_sphere.json -check
+python ..\sections.py box_sphere_case 5 5 5 sections
+```
+
+### From Claude Studio
+
+`gui/server/tools.defaults.json` ships the mesher as the tool `automesh`
+(`config`, plus an optional `extra` string of CLI tokens such as
+`-stopAfter snap -tag try2`), beside `mesh_from_step` and `mesh_to_fluent`. It
+resolves the binary the way the solver runs do, through `<OFGPU_BIN_DIR>`.
 
 ## The config schema
 
 JSONC (comments and trailing commas allowed, unknown keys refused by name).
-The worked example is [`examples/nh3_site.json`](examples/nh3_site.json) - the
-ammonia-terminal site, with comments on every block. Every key of
+The worked examples are [`examples/box_sphere.json`](examples/box_sphere.json) -
+a sphere in a box, seconds to run - and
+[`examples/nh3_site.json`](examples/nh3_site.json) - the ammonia-terminal site.
+Both carry comments on every block. Every key of
 `AutomeshConfig` (`rust/src/automesher/mod.rs`):
 
 | Key | Type | Default | What it does |
@@ -94,35 +136,45 @@ ammonia-terminal site, with comments on every block. Every key of
 | `quality.report_non_orth_deg` | number | `60.0` | G4: faces past this are counted and reported, not refused. |
 | `quality.min_thickness_ratio` | number | `0.05` | G5 (92.14): `tau_c = 3 V_c / A_max^(3/2)` stays at or above this. |
 | `quality.max_cond` | number | `1e4` | G6 (92.15): `cond(T_c)` stays under this. |
-| `output.case_dir` | string | *(required)* | The case directory the mesh is written to. |
+| `output.case_dir` | string | *(required)* | The case directory the mesh is written to (`<case_dir>/constant/polyMesh`). |
 | `output.name` | string | *(required)* | The mesh's name within the case. |
+| `output.patch_names` | object | `{}` | Eq. (92.56): rename the final mesh's patches on the way out, `{"xMin": "west", ...}` - the octree's own six names and the STL's solid names become the names the case's boundary conditions are written against. A key that names no patch, a value the polyMesh reader would refuse, and two patches that would collide are all refused before anything is written. |
 
 ## The pipeline
 
-SPEC-LIT §92.2's seven stages, and which tranche-1 unit implements each.
-Unit 1 is this unit: the binary skeleton, the config tree, and the §92.3 gate.
-Units 2-7 are the stages themselves.
+SPEC-LIT §92.2's stages, and where each one lives. All of them are built;
+§92.14 is the driver that runs them in order.
 
-0. **The background block** - a `blockgen::BlockSpec` over `domain.extent`
-   with `base_size` as the target cell size and `domain.grading` per axis;
-   the domain-and-surface containment check, then the plan. Unit 1: the check
-   and the plan run here, and `blockgen` (§23.4) already builds the block.
-1. **Octree refinement** - per-cell level from distance bands, feature edges
-   and explicit regions, capped at `refinement.max_level` (eq. 92.1). **Unit
-   2 - the stage the skeleton currently refuses at.**
-2. **2:1 balance** - the level fixed point of §74.2 (eq. 92.3), on §74's face
-   conventions. **Unit 3** (reusing `mesh::refined::balance_2to1`).
-3. **Castellation** - parity classification (§23.3), keep the connected
-   component eq. (92.4) names, drop the sealed pockets by name and count.
-   **Unit 4.**
-4. **Snapping** - boundary points to the closest surface point (92.5), the
-   displacement field smoothed (92.6), gate-breaking displacements undone
-   (92.7). **Unit 5.**
-5. **Feature snapping** - points near a feature edge projected onto the edge,
-   corners pinned (eq. 92.8), before stage 4 and pinned through it.
-   **Unit 6.**
-6. **Layers** - inward prismatic extrusion (92.9)-(92.10) with the medial-axis
-   limit, gate-checked per patch.
+0. **The background block** (`automesher::octree::Background`) - a
+   `blockgen::BlockSpec` over `domain.extent` with `base_size` as the target
+   cell size and `domain.grading` per axis. The domain and the surface must
+   hold each other with one `base_size` of margin, or the run refuses before
+   any work is done, naming the axis and both numbers. A surface that spans
+   PAST the domain on both sides of an axis - the site-solid setup - is the
+   legitimate other case and is said in the log, not refused.
+1. **Octree refinement** (`octree::refine_to_surface`, §92.9) - per-cell level
+   from the distance bands (92.1), the feature edges (92.37) and the level cap
+   (92.1). `-stopAfter octree` writes the leaf mesh itself: the six domain
+   patches, no wall.
+2. **2:1 balance** (`Octree::balance_2to1`, §74.2's fixed point, eq. 92.3) -
+   inside stage 1, on §74's face conventions: the coarse cell owns four split
+   faces, each a real polygon over real points.
+3. **Castellation** (`castellate::castellate`, §92.10) - parity classification
+   (92.23), the connected-component keep-set (92.4), the pinch rule (92.25),
+   and the walls (92.26) named after the STL solid nearest each exposed face.
+   The dropped components are reported by count and by bounding box: a mesher
+   that silently deletes 900 cells under a building has told you nothing.
+4. **Snapping** (`snap::snap`, §92.11) - boundary points to the closest surface
+   point (92.5), the displacement field smoothed (92.6), and any displacement
+   that breaks the §92.3 gate halved up to `snap.undo_limit` times and then
+   abandoned (92.7). This is the stage that buys back the geometry
+   castellation's staircase lost.
+5. **Feature snapping** (§92.12) - **inside stage 4's loop**, not after it:
+   (92.38) pulls a point whose surface target is near a feature edge onto the
+   edge, and (92.39) onto a corner that claims it. `-stopAfter features` is
+   therefore `-stopAfter snap`; there is no mesh between them.
+6. **Layers** (`layers::add_layers`, §92.13) - the shrink, the extrusion, and
+   the retreat ladder (92.47).
 
    **`layers.patches` is supported on a wall that CASTELLATES ONTO THE CELL
    PLANES.** On a snapped wall it is attempted and usually given up: stage 4
@@ -138,6 +190,29 @@ Units 2-7 are the stages themselves.
    act on. Moving that line needs either a wall-face/owner-centre alignment
    step in stage 4 or a G4 rule of its own for a newly internalised wall face;
    both change numbers §92.3 fixes and neither is written.
+
+## What a run writes
+
+Two files, and only after every stage has returned (§92.14.4 - a refused run
+writes nothing at all):
+
+- `<case_dir>/constant/polyMesh` - `points`, `faces`, `owner`, `neighbour`,
+  `boundary`, written by `io::polymesh::write_poly_mesh_raw`. **Real points**:
+  the face lists are the actual polygons of the actual cells, not the synthetic
+  quads the cut-cell writer emits, so `sections.py` can draw them and any
+  polyMesh reader can read them.
+- `<case_dir>/<name>_summary.json` - (92.57): the tool, the config path, the
+  stage the run stopped after (or `null`), the surface's counts and bounding
+  box, one row per stage with its wall-clock seconds and its own counts, the
+  final mesh's counts and patch list, the §92.3 report gate by gate, the total
+  seconds, and **the config as it parsed**, defaults filled in. A mesh on disk
+  with no record of what made it is a mesh nobody can reproduce, and the
+  per-stage times are the only input a plan for the next run has.
+
+The patch names in `boundary` are the ones `output.patch_names` asked for
+(92.56), applied inside the mesher just before the write - not by a script
+afterwards, because a script that rewrites `boundary` is a second reader of the
+one file the solver may not be allowed to guess at.
 
 ## The quality gate
 
@@ -158,6 +233,27 @@ header counts every failing subject even though only ten are listed.
 | G5 | thickness, `tau_c = 3 V_c / A_max^(3/2)` (92.14), `A_max` the largest PLANAR FACE GROUP (faces whose outward normals agree to within 5 deg, summed) so a split 2:1 face measures as the one face it is | `>= 0.05` | `quality.min_thickness_ratio` |
 | G6 | gradient conditioning, `cond(T_c)` (92.15) | `< 1e4` | `quality.max_cond` |
 | G7 | addressing (owner < neighbour, upper-triangular order, no duplicate faces) | pass/fail, no knob | - |
+
+## Troubleshooting
+
+The mesher's failures are refusals with a named cause, so start from the exact
+message. The ones that actually happen:
+
+| What you see | What it is | What to do |
+|---|---|---|
+| `domain.extent: on z the surface neither sits inside the domain with one base_size of margin nor spans past it on both sides` | Stage 0. The surface ENDS inside the domain, leaving an edge with no solid behind it for castellation to cut against. | Either pull `domain.extent` in so the surface spans past it on that axis (the site setup), or push it out so the surface clears it by `base_size` (the wind-tunnel setup). |
+| `surface ... open edges` from `require_closed` | The STL is not closed, and (92.23)'s parity classification through a hole is a coin toss. | Repair the STL. `tools/mesh/step_mesh.py`'s geometry stage or any STL repair will do; the mesher will not guess. |
+| `castellate: no cell survived the walk` | The keep-set (92.4) is empty: usually `castellation.seed_point` is inside the solid, or outside the domain. | Put the seed in open fluid - for a site, high and upwind, e.g. `[-1200, 0, 150]`. |
+| a large `removed.off_region` and dropped boxes under buildings | Working as intended: those are the sealed pockets §92.1 exists for. | Read the boxes in the log. If one of them is a region you wanted, the seed is on the wrong side of a wall. |
+| `snap: patch "X" carries N times its own surface area` (92.32) | The cells never resolved that geometry, and snapping would collapse the one cell that reached it. | Raise `refinement.max_level` or add a tighter distance band for that patch. Raising `snap.max_area_ratio` hides the problem instead of fixing it. |
+| `layers: patch "X": ...` with `n_layers: 0` and a reason | The retreat ladder (92.47) gave up. On a SNAPPED wall this is the expected outcome - see the pipeline note above. | Read the reason. The run continued and the mesh is the snapped one; if you need the layers, the wall has to castellate onto the cell planes. |
+| `layers: patch "X": 3 layer(s) ... first layer 4.0e-03 m of 4.0e-01 requested` | (92.45)'s cell-size limiter bound, not `first_thickness`. | This is the number to quote, not `first_thickness`. Refine the wall if you need a thicker stack. |
+| gate G4 fails at 70-80 degrees on a snapped wall | (92.13). The snap traded a staircase for a slanted face. | Refine that patch, or relax `quality.max_non_orth_deg` **only** if the solver settings can carry it (`uncorrected` Laplacian, `nNonOrthogonalCorrectors 0`) - and say so in the case. |
+| the run is silent for a long time | It is not: the banner of §92.14.1 is printed before each stage. If nothing new has appeared for an hour, the named stage is the one to look at. | `refinement.max_level` and the base grid together set the leaf count; halving `base_size` is 8x the work. Run `-dryRun` first and read the plan line. |
+
+Sizing, from the site run: the plan line prints the base grid and the finest
+cell before any work is done, and `-stopAfter octree` is the cheap way to learn
+the leaf count a config will produce before paying for castellation.
 
 ## Licence note
 
