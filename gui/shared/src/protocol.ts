@@ -519,7 +519,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('link_cameras'), on: Boolish.describe("Mirror the leader's camera into the follower (true) or free them (false); needs split_view first") }),
   z.object({ type: z.literal('compare_run'), runId: z.string().nullable().describe('Run to overlay on the residual chart; null removes the overlay') }),
-  // The Geometry tab (unit G3): the surface the mesh starts from, its parts, a transform, a save.
+  // The Geometry tab: the surface the mesh starts from, its parts, a transform, a save.
   z.object({ type: z.literal('geometry_open'), path: z.string().describe('Workspace-relative .stl/.obj to open in the Geometry tab (a .step/.stp goes through geometry_import_step)') }),
   z.object({ type: z.literal('geometry_import_step'), path: z.string().describe('Workspace-relative .step/.stp: the server converts it and every solid becomes one part') }),
   z.object({
