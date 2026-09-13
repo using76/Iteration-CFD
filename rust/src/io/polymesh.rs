@@ -622,6 +622,15 @@ fn read_faces_file(path: &Path) -> Result<Vec<Vec<Label>>> {
 /// `N{i}`, or a bare `( ... )`.
 fn read_label_list_file(path: &Path) -> Result<Vec<Label>> {
     let mut ts = open(path)?;
+    let v = read_label_list(&mut ts)?;
+    ts.check_scan_error()?;
+    Ok(v)
+}
+
+/// The list body [`read_label_list_file`] reads, already past the
+/// `FoamFile` header - shared with [`read_cell_zones`], whose `cellLabels`
+/// entries are lists of the same three shapes embedded in a dictionary.
+fn read_label_list(ts: &mut Tokenizer) -> Result<Vec<Label>> {
     let mut v = Vec::new();
 
     if ts.is_punct('(') {
@@ -630,7 +639,6 @@ fn read_label_list_file(path: &Path) -> Result<Vec<Label>> {
             v.push(ts.expect_label()?);
         }
         ts.expect_punct(')')?;
-        ts.check_scan_error()?;
         return Ok(v);
     }
 
@@ -643,7 +651,6 @@ fn read_label_list_file(path: &Path) -> Result<Vec<Label>> {
         ts.next()?;
         let a = ts.expect_label()?;
         ts.expect_punct('}')?;
-        ts.check_scan_error()?;
         return Ok(vec![a; n as usize]);
     }
 
@@ -653,7 +660,6 @@ fn read_label_list_file(path: &Path) -> Result<Vec<Label>> {
         v.push(ts.expect_label()?);
     }
     ts.expect_punct(')')?;
-    ts.check_scan_error()?;
     Ok(v)
 }
 
@@ -733,6 +739,70 @@ fn read_boundary_file(path: &Path) -> Result<Vec<RawPatchEntry>> {
         out.push(e);
     }
 
+    ts.expect_punct(')')?;
+    ts.check_scan_error()?;
+    Ok(out)
+}
+
+/// `cellZones`: which cells belong to which zone, as the layout split
+/// (SPEC-LIT §97) needs. `N ( name { type cellZone; cellLabels
+/// List<label> 3(0 1 2); } ... )` - the list in either the compact `3(...)`
+/// or the long counted form, with or without the `List<label>` word; every
+/// other key of the zone dictionary is skipped. The three polyMesh
+/// locations are probed exactly as [`read_poly_mesh`] does.
+pub fn read_cell_zones(dir: &Path) -> Result<Vec<(String, Vec<Label>)>> {
+    let dir = find_poly_mesh_dir(dir)?;
+    let path = dir.join("cellZones");
+    if !path.is_file() {
+        return Err(Error::Mesh(format!(
+            "{}: no cellZones file. `ofgpu-regions split` needs a cellZones \
+             file naming every cell's zone; a Gmsh multi-volume mesh becomes \
+             a layout through tools/mesh/regions_from_msh.py instead",
+            path.display()
+        )));
+    }
+    let mut ts = open(&path)?;
+    let nz = ts.expect_label()?;
+    if nz < 0 {
+        return ts.err("negative zone count");
+    }
+    ts.expect_punct('(')?;
+
+    let mut out: Vec<(String, Vec<Label>)> = Vec::with_capacity(nz as usize);
+    for _ in 0..nz {
+        let name = ts.expect_word()?;
+        ts.expect_punct('{')?;
+        let mut labels: Option<Vec<Label>> = None;
+        while !ts.done() && !ts.is_punct('}') {
+            if ts.is_punct(';') {
+                ts.next()?;
+                continue;
+            }
+            if ts.peek_at(0).is_some_and(|t| t.is_punct_any()) {
+                return ts.err("expected a keyword");
+            }
+            let k = ts.expect_word()?;
+            if k == "cellLabels" {
+                if ts.is_word("List<label>") {
+                    ts.next()?;
+                }
+                labels = Some(read_label_list(&mut ts)?);
+                if ts.is_punct(';') {
+                    ts.next()?;
+                }
+            } else {
+                ts.skip_entry()?;
+            }
+        }
+        ts.expect_punct('}')?;
+        let labels = labels.ok_or_else(|| {
+            Error::Parse {
+                path: path.display().to_string(),
+                msg: format!("zone '{name}' has no cellLabels - a cellZone names the cells it holds"),
+            }
+        })?;
+        out.push((name, labels));
+    }
     ts.expect_punct(')')?;
     ts.check_scan_error()?;
     Ok(out)
@@ -1650,5 +1720,95 @@ $EndElements
             let msg = format!("{err}");
             assert!(msg.contains(name), "'{name}' named in the refusal: {msg}");
         }
+    }
+
+    const CZ_COMPACT: &str = "\
+FoamFile { version 2.0; format ascii; class regIOobject; object cellZones; }
+2
+(
+lower
+{
+    type cellZone;
+    cellLabels      List<label> 3(0 1 2);
+}
+upper
+{
+    type cellZone;
+    cellLabels      3{5};
+}
+)
+";
+
+    const CZ_LONG: &str = "\
+FoamFile { version 2.0; format ascii; class regIOobject; object cellZones; }
+1
+(
+upper
+{
+    type cellZone;
+    cellLabels      List<label>
+3
+(
+3
+4
+5
+)
+;
+}
+)
+";
+
+    fn cell_zones_case(tag: &str, text: &str) -> Vec<(String, Vec<Label>)> {
+        let d = scratch(tag);
+        let pm = d.join("polyMesh");
+        fs::create_dir_all(&pm).unwrap();
+        fs::write(pm.join("points"), "").unwrap();
+        fs::write(pm.join("cellZones"), text).unwrap();
+        let z = read_cell_zones(&d).unwrap();
+        fs::remove_dir_all(&d).ok();
+        z
+    }
+
+    /// Both list forms read back the same; a zone without `cellLabels` is
+    /// refused by name; the missing-file refusal names the split tool and
+    /// the Gmsh route.
+    #[test]
+    fn cell_zones_read_back_in_both_list_forms_and_refuse_a_zone_without_labels() {
+        // the compact zone reads back `3{5}` as three fives - the
+        // all-equal short form owner/neighbour take
+        assert_eq!(
+            cell_zones_case("cz", CZ_COMPACT),
+            [
+                ("lower".to_string(), vec![0, 1, 2]),
+                ("upper".to_string(), vec![5, 5, 5]),
+            ]
+        );
+        assert_eq!(
+            cell_zones_case("cz", CZ_LONG),
+            [("upper".to_string(), vec![3, 4, 5])]
+        );
+        let d = scratch("cz-missing");
+        let pm = d.join("polyMesh");
+        fs::create_dir_all(&pm).unwrap();
+        fs::write(pm.join("points"), "").unwrap();
+        let msg = read_cell_zones(&d).expect_err("no cellZones").to_string();
+        assert!(
+            msg.contains("cellZones")
+                && msg.contains("ofgpu-regions split")
+                && msg.contains("regions_from_msh.py"),
+            "{msg}"
+        );
+        fs::write(pm.join("cellZones"), "1
+(
+empty
+{
+    type cellZone;
+}
+)
+")
+            .unwrap();
+        let e = read_cell_zones(&d).expect_err("zone without labels");
+        assert!(e.to_string().contains("'empty'"), "{}", e);
+        fs::remove_dir_all(&d).ok();
     }
 }

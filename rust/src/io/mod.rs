@@ -62,6 +62,7 @@ pub mod nvdb;
 pub mod vdb;
 pub mod case_json;
 pub mod case_cht;
+pub mod regions;
 pub mod case_dc;
 pub mod output_types;
 pub mod pointfield;
