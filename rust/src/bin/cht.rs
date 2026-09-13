@@ -41,10 +41,15 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[path = "common/mod.rs"]
+mod common;
+use common::output_root;
+
 use ofgpu::cht::flow::{run_flow_case, ChtFlowSolution};
 use ofgpu::cht::{run_case, ChtSolution};
 use ofgpu::error::{IoContext, Result};
 use ofgpu::io::case_cht::{read_cht_case, LoweredChtCase};
+use ofgpu::solid::case::{banner_lines, run_stress, summary_lines, thermal_converged, write_region_vtu};
 use ofgpu::{Gpu, Scalar};
 
 fn main() -> ExitCode {
@@ -98,7 +103,11 @@ ofgpu-cht <case.jsonc> [-csv <out.csv>]
 Multi-region conduction with conjugate interfaces - SPEC-LIT 46/47 - and,
 when a region says \"kind\": \"fluid\", conjugate natural convection in a
 closed cavity - SPEC-LIT 59/60.
-Writes a per-cell temperature CSV when -csv is given.";
+Writes a per-cell temperature CSV when -csv is given.
+
+A `mechanics` block on a solid region and `\"mode\": \"stress\"` on `run`
+solve SPEC-LIT 95's displacement after the thermal solve (SPEC-LIT 96);
+the case's output block (`exact.format: vtu`) writes one VTU per region.";
 
 fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
     let case = read_cht_case(case_path)?;
@@ -154,6 +163,11 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
         );
     }
 
+    // SPEC-LIT 13.4.2: say what the mechanical half will use, BEFORE the run.
+    for line in banner_lines(&low) {
+        println!("{line}");
+    }
+
     let gpu = Gpu::new(0)?;
     println!("  device {}", gpu.ctx().name()?);
 
@@ -172,6 +186,27 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
 
     let sol = run_case(&gpu, &low)?;
     report(&low, &sol);
+
+    // SPEC-LIT 96.2: `mode stress` refuses to go on unless every region's
+    // thermal solve converged, then solves 95's displacement per region.
+    let stress = if low.stress {
+        thermal_converged(&low, &sol)?;
+        let stress = run_stress(&gpu, &low, &sol)?;
+        for line in summary_lines(&low, &stress) {
+            println!("{line}");
+        }
+        Some(stress)
+    } else {
+        None
+    };
+
+    if low.output.is_some() {
+        let dir = output_root(case_path).join("VTK");
+        let paths = write_region_vtu(&dir, &low, &sol, stress.as_deref().unwrap_or(&[]))?;
+        for p in &paths {
+            println!("  wrote {}", p.display());
+        }
+    }
 
     if let Some(path) = csv {
         write_csv(path, &sol)?;

@@ -11,6 +11,7 @@
 | `06-mesh-oss-2024.md` | 메쉬 관련 오픈소스 지형 조사 |
 | `07-lowmach-solver.md` | `ofgpu-lowmach`의 저-마하 정식화 — SPEC-LIT §25/§26, §29.3의 벽 열전달, 그리고 §32의 Nusselt 게이트가 네 번 재측정된 전체 기록 |
 | `08-site-mesh-playbook.md` | 부지 사면체 격자 플레이북 — 슬롯·슬리버·근접 틈이 격자를 망가뜨린 경위와 레시피(먼 건물 볼록껍질 치환, 틈 규칙, 두께 게이트), 검토 게이트, 진단 스크립트 |
+| `11-thermal-stress.md` | 케이스에서 열응력까지 — `ofgpu-cht`의 `mode: stress`가 `mechanics` 블록을 읽어 전도 해 뒤 선형 열변형을 풀고 영역별 VTU를 쓰는 법. 거부 목록과 실측된 두 케이스(`bimetalStrip`의 티모셴코 2.7 %, `dieStack`) 포함 |
 | `case-example.json` | `05`가 예시로 드는 JSONC 케이스 한 개 |
 | `schema/case-1.json` | JSONC 케이스 스키마. 리더가 쓰는 Rust 타입에서 `schemars`로 생성합니다 — 손으로 쓴 것이 아니라 생성된 것이므로 리더와 어긋날 수 없습니다 |
 | `_build_catalog.py` | `01`과 `02`를 생성한 스크립트 (아래 설명 참조) |

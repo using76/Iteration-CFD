@@ -27915,3 +27915,217 @@ kappa_ref = 6 (alpha2 - alpha1) DeltaT (1 + m)^2
 R = max |sigma_yy| over the bond cells with |x - l/2| <= h
   / max |sigma_xx| over ALL cells with |x - l/2| <= h                        (S95.20)
 ```
+
+## 96. What a thermo-elastic case says, the refusal list, and the pair tests
+
+§95 is the solver. This section is the contract that reaches it from a case,
+in the shape §91 gave §90's: what a `*.cht.jsonc` document writes, what is
+read from where, what the refusal list refuses, and the §13.4.1 pair tests
+that prove every entry reaches the solver. It extends §47.14's multi-region
+conduction format in place: a region that says nothing about `mechanics`
+lowers to exactly what it always lowered to, and every refusal below is new
+with this section.
+
+`No GPL-licensed source was consulted.`
+
+### 96.1 The dictionary
+
+§47.14's document gains a `mechanics` block per solid region, a `mode` word
+on `run`, and §44.1's `output` block on the case:
+
+```jsonc
+"regions": [ { "name": "die", "kind": "solid", "mesh": {...}, "material": {...},
+    "mechanics": {
+      // EXACTLY ONE of `material` / `materials`
+      "material":  { "E": 130e9, "nu": 0.28, "alpha": 2.6e-6, "TRef": 300.0 },
+      "materials": [ { "name": "copper", "bounds": { "min": [..], "max": [..] },
+                       "material": { "E": 120e9, "nu": 0.3, "alpha": 17e-6, "TRef": 300.0 } } ],
+      "bond": "series",    // optional; "series" (default) or "linear"; only with `materials`
+      "patches": [         // EVERY non-empty patch of the region's mesh, exactly once
+        { "match": "clamp",  "u": { "type": "fixedDisplacement", "value": [0.0, 0.0, 0.0] } },
+        { "match": "base",   "u": { "type": "fixedDisplacement", "value": [null, null, 0.0] } },
+        { "match": "loaded", "u": { "type": "traction", "value": [1.0e6, 0.0, 0.0] } },
+        { "match": "mid",    "u": { "type": "symmetry" } },
+        { "match": "top",    "u": { "type": "free" } } ],
+      "solver": { "tolerance": 1e-6, "maxOuter": 500 }   // both optional, these are the defaults
+    } } ],
+"run":    { "steady": true, "mode": "stress" },      // "thermal" (default) | "stress"
+"output": { "exact": { "format": "vtu" } }           // §44.1's block, unchanged
+```
+
+| Key | Meaning |
+|---|---|
+| `material` | one elastic material for the whole region: `E` [Pa], `nu`, `alpha` [1/K], and `TRef` [K], the stress-free temperature the thermal strain `alpha (T - TRef)` is measured from |
+| `materials` | docs/10's R4 zone list instead: ONE region holding two bonded materials, each entry a `name`, a closed `bounds` box and a `material` of its own |
+| `bond` | how the zones share their faces: `"series"` (the default) or `"linear"`; only legal with `materials`, because one material has no bond face |
+| `patches` | every non-empty patch of the region's mesh, exactly once - interface patches included, the §47.14 rule carried over whole |
+| `fixedDisplacement` | `u_i = value` on the face; `null` in a component leaves that component traction-free |
+| `traction` | `(sigma . n)_i = value` [Pa] on the face, global axes; `traction [0,0,0]` is a free surface |
+| `symmetry` | the normal component fixed 0, the tangential traction 0 - the axis is the patch's slot in `-x +x -y +y -z +z`, divided by two |
+| `free` | traction `(0, 0, 0)` |
+| `solver` | `tolerance` (default `1e-6`) is the outer loop's stop, `maxOuter` (default `500`) its iteration cap |
+| `run.mode` | `"thermal"` (the default, §47.14's conduction) or `"stress"` |
+| `output` | §44.1's block; on this run only `exact.format: "vtu"`, written once, is accepted |
+
+**The zone rule is docs/10's R4.** A bonded two-material solid is ONE region
+with a `materials` list, not two regions - bonded solids share cells' faces
+internally, and the series coefficient is written at the bond faces. The
+zones tile the region by the CLOSED box test on the cell CENTROID: cell `c`
+is in zone `z` exactly when `bounds.min[i] <= c[i] <= bounds.max[i]` for all
+three axes, measured on the centroids `mesh.c` the block itself produced,
+and every cell must land in exactly one zone or the lowering refuses.
+
+### 96.2 What is read, and from where
+
+The write side is `solid::case`, and it owns no numerics: every equation it
+reaches is §95's, and every number it prints comes from a type that already
+existed. What the bridge itself decides is worth saying.
+
+**Each mechanical region reads its OWN mesh, never the concatenation.**
+`LoweredChtCase.meshes[r]` is the region's complete `HostMesh`, and that is
+what the displacement operator is built on — docs/10's decision B2, kept:
+§95's kernels launch over a whole mesh, and the cheapest faithful
+restriction of §47.4's concatenated lattice to one region is the region's
+own lattice, which the case already holds. What the region reads from the
+conjugate solution is two slices: `T` as the cells `sol.t[cells()]` of its
+`ThermalRegion`, and `bT` as `sol.bt[boundary_face_offset ..
++ n_boundary_faces]` — §47.4's concatenation preserves each region's own
+boundary-face order, so the slice needs no gathering.
+
+**The thermal verdict is §93's, read and never re-derived.** A stress run
+refuses to go on unless every region's own §8.4 residual met
+`numerics.tolerance` in the last thermal solve — the flag `run_case`
+already computed (`converged` is true only when the last global solve
+converged AND every region met `finish_solve`'s criterion on its own
+rows) — and the refusal names the first region that missed, its final
+residual and the tolerance, with `raise numerics.maxIter or loosen
+numerics.tolerance` as what to do. Residuals that were never reported are
+a refusal naming `report_residuals`, not a pass: unmeasured is not
+converged. The measured §8.4 floor is why `dieStack.cht.jsonc` carries
+`numerics.tolerance: 1e-11` (each region's final sits at 9.4e-14 to
+1.6e-12 of its own initial value, and `maxIter` is already an order
+beyond the Krylov space) and why `bimetalStrip.cht.jsonc` carries a trace
+source: a steady solution that is a CONSTANT makes the §8.4
+normalisation `sum(|A psi - A x_bar| + |b - A x_bar|)` a 0/0, and no
+tolerance can judge the noise that comes out.
+
+**One `numerics` block serves all four solves.** The conduction matrix and
+each of the three displacement components read the same `SolverControls` —
+one PCG/DIC block, one `tolerance`, one `maxIter` — because the case has
+one linear-solve quality statement to make and four systems of the same
+mesh to make it about. The outer loop's own knobs come from
+`mechanics.solver`: `decades = -log10(tolerance)`, `max_outer = maxOuter`,
+three boundary sub-passes, and the acceleration §95.3 measured.
+
+**The boundary table.** Every entry of 96.1 lowers to §95's per-component
+statement, indexed by the region mesh's patch order:
+
+| 96.1's spelling | component rows |
+|---|---|
+| `fixedDisplacement [a, b, c]` | `Fixed(v)` where given, `Traction(0)` where `null` |
+| `traction [tx, ty, tz]` | `Traction(t)` per component |
+| `symmetry` | `Fixed(0)` on the patch's axis (its slot in `-x +x -y +y -z +z`, divided by two), `Traction(0)` on the other two |
+| `free` | three `Traction(0)` |
+
+An `empty` patch is never named (96.3 row 12) and is filled with three
+`Traction(0)` that no kernel reads. The table lands in
+`check_patches`, which refuses a component fixed on no patch — the
+singular rigid translation §95.2 measured.
+
+**The read-out.** `outer::solve`'s last act is the boundary correction, so
+the gradient the stress read-out consumes already belongs to the accepted
+`u` — nothing here calls `correct_boundary` and nothing recomputes a
+gradient. The stress read is §95.8's per-cell entry (`compute_with` on the
+operator's own material arrays), not the one-material form, because a
+`materials` region would be read with the wrong constants the moment it
+grew a second zone. `point_displacement` puts `u` on the mesh's own
+points through §93's interpolator.
+
+**The output, and why not the pipeline.** `run_case` returns one state, so
+a stress run writes once, after the summary: one `<case stem>_jsonc/VTK/<region>.vtu`
+per region through §44.1's `exact` writer — the real-point writer, not
+`OutputPipeline`, whose `WriteCtx` carries ONE mesh and cell fields only
+and would flatten §47.4's regions into a lattice no region owns. Cell
+fields, in this order and with these names: `T`, then for a mechanical
+region `u`, `sigma` (9 at write time), `vonMises`, `sigmaPrincipal`,
+`magU`; point fields `T` and `u`. A region without `mechanics` — and
+every region of a thermal-mode run that names `output` — writes `T` only.
+`-csv` is unchanged (T only).
+
+### 96.3 The refusal list
+
+Every message names the setting's JSON path (`regions/<name>/mechanics/...`,
+`run/mode`, `output/...`) and what to do instead. Rows 1-19 are refused in
+the lowering and proved by host tests in `io::case_cht::tests`; rows 20-21
+are runtime refusals, proved with the driver.
+
+| # | refused, by name |
+|---|---|
+| 1 | `E <= 0`, `nu` outside (-1, 0.5), `alpha` not finite - through `solid::Material::validate`'s own messages with the JSON path prefixed; and `alpha < 0` in the lowering: a negative expansion coefficient is a sign error, not a material. Every message carries the number |
+| 2 | `nu` above the measured edge 0.45 - §95's own message, which names the block-coupled route |
+| 3 | `alpha > 0` without `TRef` - the thermal strain is `alpha (T - TRef)`; no `TRef`, no strain |
+| 4 | `TRef` with `alpha == 0` - a reference nothing reads (§13.4.1) |
+| 5 | `rho` in an elastic material - nothing in §95's static solve reads a density; the dynamic solid is docs/10's address 106b |
+| 6 | `mechanics.solver.ddtScheme` - §95's inertia refusal, which names Newmark, HHT and generalised-alpha and `rho_infinity` |
+| 7 | `mechanics.solver.relaxation`, any value - the outer loop is Aitken delta-squared on the increment and its first omega is 1; delete it |
+| 8 | `mechanics` on a `"kind": "fluid"` region |
+| 9 | `material` and `materials` both given, or neither; `materials: []` counts as neither |
+| 10 | a cell in no zone - the count and the first uncovered cell's centroid |
+| 11 | a cell in two zones - both zone names and the centroid |
+| 12 | `mechanics.patches`: a non-empty patch unnamed, a patch named twice, a name that is not in `mesh.boundaries`, an `empty` patch named - it contributes to no surface integral |
+| 13 | `bond` with a single `material` - one material has no bond face; a `bond` that is neither `series` nor `linear` |
+| 14 | `"mode": "stress"` with no region carrying `mechanics`; `mechanics` present with `"mode": "thermal"` - both directions (§13.4.1) |
+| 15 | `"mode": "stress"` with a fluid region - the fluid side of a thermo-elastic run is docs/10's address 106 (WF-B) |
+| 16 | `"mode": "stress"` on a transient case - the §93 verdict is a steady residual; time in a stress run is docs/10's address 103 |
+| 17 | the `output` block accepts exactly `exact.format: "vtu"`, once: `output.visualisation` (a multi-region mesh is not one Cartesian lattice), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
+| 18 | `output` on a case with a fluid region - the flow path's VTU is a follow-up, not in this unit |
+| 19 | `mode` that is neither `thermal` nor `stress`, refused listing both |
+
+An `output` field the run did not compute is UNREACHABLE in this format: the
+only field list the block can name is `visualisation.fields`, and row 17
+refuses that block whole.
+
+### 96.4 The pair tests
+
+§13.4.1, as §91.4 states it: two case documents identical in every byte but
+one, REQUIRED to produce different output, failing by name if they do not.
+All ten run on the 160-cell bar of the shared fixtures, in seconds, and all
+ten start by asserting the two documents actually differ. The measured
+numbers are from the run that wrote this section (RTX 5070 Ti, f64).
+
+| # | the one entry turned (`a` → `b`) | what must differ | measured |
+|---|---|---|---|
+| 1 | `alpha` 1.2e-5 → 2.4e-5 | `max|du| > 0.5 max|u_a|` — the thermal strain doubles | du 5.484e-5, |u_a| 5.484e-5 |
+| 2 | `E` 200 GPa → 100 GPa | `|vm_a - vm_b| > 0.3 vm_a` — with a thermal load and displacement/zero-traction BCs only, `u` is INDEPENDENT of `E` (the equation is homogeneous in it), so the pair asserts on the STRESS, which scales with `E` | 1.132e7 → 5.660e6 Pa |
+| 3 | `nu` 0.3 → 0.2 | `max|du| > 1e-3 max|u_a|` | du 1.853e-7, |u_a| 5.484e-5 |
+| 4 | `TRef` 300 → 350 | `max|du| > 0.2 max|u_a|` — the load halves | du 5.777e-5, |u_a| 5.484e-5 |
+| 5 | `traction` x 0 → 1 MPa | `max|du| > 1e-4 max|u_a|` | du 4.742e-7, |u_a| 5.484e-5 |
+| 6 | `fixedDisplacement` x 0 → 1e-4 | `max|du| > 0.1 max|u_a|` | du 1.000e-4, |u_a| 5.484e-5 |
+| 7 | `ymin` free → `symmetry` | `max|du| > 1e-2 max|u_a|` | du 4.827e-5, |u_a| 5.484e-5 |
+| 8 | `solver.tolerance` 1e-8 → 1e-2 | the outer iteration counts differ, both converged | 17 → 5 |
+| 9 | `solver.maxOuter` 500 → 2 | `a` converges; `b`'s `run_stress` is refused naming the region and the knob (96.3 row 21) | refusal at 2 iterations |
+| 10 | `bond` series → `linear` | `max|du| > 1e-6 max|u_a|` — the same pair Gate 95-E runs as its second leg | du 1.375e-6, |u_a| 6.099e-5 |
+
+Row 2 is the interesting shape: a pair test whose knob CANNOT move `u` and
+what it does about it. The failure message of every row says "the case said
+<knob> and the solver ignored it (SPEC-LIT 13.4.1)".
+
+### 96.5 What must hold
+
+| Check | Expected |
+|---|---|
+| the dictionary reads | `a_mechanics_block_reads_and_lowers`: one zone, `zone_of_cell` all zero, six patch conditions, `tolerance` 1e-8, `maxOuter` 500; an unknown key is a `deny_unknown_fields` error naming its path |
+| rows 1-19 of 96.3 | each refused by name, one host test per row, every message naming the JSON path and what to do instead |
+| a thermal case that says none of this | lowers to `mechanics == [None; n]`, `stress == false`, `output == None` — bitwise what §47.14 always lowered to, and every §47.14 test passes unchanged |
+| `output` on a stress case | lowers to a `vtu`-only plan: `exact.formats == [vtu]`, no visualisation, no restart |
+| rows 1-2 fire from the lowering with §95's own messages | `Material::validate`'s words behind the JSON path; `bond` lowers to §95.8's enum (`linear` → `Linear`, absent → `Series`) |
+| the verdict | names the first region that missed, its residual and the tolerance; `Ok` when every region met; unreported residuals are a refusal naming `report_residuals` |
+| the boundary table | every spelling of 96.1 lands on its component row; an unnamed `empty` patch is three `Traction(0)`; an unknown name is refused by name |
+| the shipped die stack, stress mode | three entries named die, solder, spreader in region order, each converged, each `max|u| > 0`, the grease skipped |
+| the shipped bimetal strip | tip `d_y` = -2.1291e-5 m measured against -2.0728e-5 m from (S95.19)'s constant (2.7 %, inside the 10 % band), sign negative; 565 outer iterations |
+| the written VTU | one file per region with the field names and order of 96.2, read back by the python reader: 1536 cells, `sigma` 9 and symmetric, `u` on points, `T` in both blocks |
+| Gate 96-A | all ten pairs of 96.4 DIFFERENT, each failing by name; the ten `pair_*` tests of §60/§79 unchanged |
+| the banner | every zone named with E, nu, alpha, TRef, mu, lambda, 2mu+lambda, the predicted contraction, the coupling parameter delta, and the ν edge 0.45 by number; a region without `mechanics` says "no mechanics - thermal only" |
+| the driver | prints the banner before the run, the summary after it, and every VTU path; `-csv` unchanged; a fluid case takes the §59/§60 path, where 96.3 rows 15 and 18 refuse `stress` and `output` before it |
+| the schema | `docs/schema/cht-1.json` regenerated byte-for-byte, `docs/schema/case-1.json` untouched |
+| the case files | `every_shipped_cht_case_lowers` walks both; `the_shipped_die_stack_case_matches_its_closed_form` passes on the tolerance the contingency chose |

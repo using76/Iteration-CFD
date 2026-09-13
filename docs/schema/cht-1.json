@@ -1,0 +1,1155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChtCase",
+  "description": "A multi-region conduction case.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "buoyancy": {
+      "description": "SPEC-LIT §9's face body force. **Required by a fluid region and\nrefused without one** - a body force on a stack of solids is a setting\nthe solver would ignore, which is the §13.4.1 defect.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChtBuoyancy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "initial": {
+      "$ref": "#/$defs/ChtInitial"
+    },
+    "interfaces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChtInterface"
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "numerics": {
+      "$ref": "#/$defs/ChtNumerics",
+      "default": {
+        "maxIter": 2000,
+        "nNonOrthogonalCorrectors": 0,
+        "preconditioner": "DIC",
+        "solver": "PCG",
+        "tolerance": 1e-12
+      }
+    },
+    "output": {
+      "description": "SPEC-LIT §44.1's `output` block, unchanged - on this format it\nselects the per-region VTU write (§96.2). Resolved through\n`OutputPlan::from_json` at lowering, with §96.3 row 17's refusals\napplied; refused whole on a case with a fluid region (row 18).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonOutput"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "regions": {
+      "description": "At least one. Region order fixes the concatenated cell numbering\n(SPEC-LIT §47.4), so it is the case's own decision and not this\nreader's.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChtRegion"
+      }
+    },
+    "run": {
+      "$ref": "#/$defs/ChtRun"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "regions",
+    "initial",
+    "run"
+  ],
+  "$defs": {
+    "ChtBoundaries": {
+      "type": "object",
+      "properties": {
+        "xmax": {
+          "type": "string"
+        },
+        "xmin": {
+          "type": "string"
+        },
+        "ymax": {
+          "type": "string"
+        },
+        "ymin": {
+          "type": "string"
+        },
+        "zmax": {
+          "type": "string"
+        },
+        "zmin": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "xmin",
+        "xmax",
+        "ymin",
+        "ymax",
+        "zmin",
+        "zmax"
+      ]
+    },
+    "ChtBuoyancy": {
+      "description": "SPEC-LIT §9's `constant/g` and `TRef`, as a conjugate case states them.",
+      "type": "object",
+      "properties": {
+        "TRef": {
+          "description": "The reference temperature of `b = g(TRef/T - 1)`, K.",
+          "type": "number",
+          "format": "double"
+        },
+        "g": {
+          "description": "Gravitational acceleration, m/s^2.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "g",
+        "TRef"
+      ]
+    },
+    "ChtElastic": {
+      "description": "The elastic constants of one material or one zone - SPEC-LIT §96.1.\n\nValidated at lowering by [`crate::solid::Material::validate`], which is\nwhere `E <= 0`, the `nu` range and the measured 0.45 edge are refused\n(§96.3 rows 1-2); this struct carries no logic of its own.",
+      "type": "object",
+      "properties": {
+        "E": {
+          "description": "Young's modulus `E`, Pa.",
+          "type": "number",
+          "format": "double"
+        },
+        "TRef": {
+          "description": "The stress-free temperature, K: the thermal strain is\n`alpha (T - TRef)`, so `alpha > 0` without it is refused (§96.3\nrow 3), and it without `alpha` is a reference nothing reads (row 4).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "alpha": {
+          "description": "Linear thermal expansion coefficient `alpha`, 1/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "nu": {
+          "description": "Poisson's ratio, in (-1, 0.5) and at most the measured edge 0.45.",
+          "type": "number",
+          "format": "double"
+        },
+        "rho": {
+          "description": "ALWAYS refused (§96.3 row 5): nothing in §95's static solve reads a\ndensity. Present as a field, rather than left to\n`deny_unknown_fields`, so the message can say WHY - the same idiom\n`JsonExact::precision` uses.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "E",
+        "nu",
+        "alpha"
+      ]
+    },
+    "ChtElasticZone": {
+      "description": "One bonded material of a `materials` zone list - docs/10's R4. The zone\nis the CLOSED box test on the cell CENTROID, and every cell must land in\nexactly one zone (§96.3 rows 10-11).",
+      "type": "object",
+      "properties": {
+        "bounds": {
+          "description": "The closed box the zone's cells' centroids must fall in.",
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "material": {
+          "description": "The zone's elastic constants.",
+          "$ref": "#/$defs/ChtElastic"
+        },
+        "name": {
+          "description": "The zone's name, as the refusal and the banner print it.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "bounds",
+        "material"
+      ]
+    },
+    "ChtFlow": {
+      "description": "SPEC-LIT §60.1's `numerics.flow` block - the SIMPLE loop's own settings.",
+      "type": "object",
+      "properties": {
+        "divSchemeT": {
+          "description": "`div(phi,T)`.",
+          "type": "string",
+          "default": "Gauss linear"
+        },
+        "divSchemeU": {
+          "description": "`div(phi,U)`, a `divSchemes` entry - SPEC-LIT §11.",
+          "type": "string",
+          "default": "Gauss linear"
+        },
+        "pMaxIter": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1000,
+          "minimum": 0
+        },
+        "pTolerance": {
+          "type": "number",
+          "format": "double",
+          "default": 1e-14
+        },
+        "relaxP": {
+          "description": "The pressure FIELD's explicit relaxation. Patankar §6.7 pairs it with\n`relaxU` as `alpha_p ~ 1 - alpha_U`; SIMPLEC permits `1.0`.",
+          "type": "number",
+          "format": "double"
+        },
+        "relaxT": {
+          "description": "`T`'s implicit under-relaxation.",
+          "type": "number",
+          "format": "double"
+        },
+        "relaxU": {
+          "description": "Momentum's implicit under-relaxation, SPEC-LIT §5.2.",
+          "type": "number",
+          "format": "double"
+        },
+        "residual": {
+          "description": "Stop when all three initial residuals are below this. `0` runs the\nfull `run.iterations`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "simplec": {
+          "description": "SIMPLEC (SPEC-LIT §5.3) rather than plain SIMPLE.",
+          "type": "boolean",
+          "default": false
+        },
+        "uMaxIter": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1000,
+          "minimum": 0
+        },
+        "uTolerance": {
+          "type": "number",
+          "format": "double",
+          "default": 1e-14
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "relaxU",
+        "relaxP",
+        "relaxT"
+      ]
+    },
+    "ChtFluid": {
+      "description": "A fluid region's constant properties - SPEC-LIT §60.2.\n\nFour numbers, and `Pr = mu cp/kappa` is DERIVED from them and printed\nrather than stated: a case that stated both could contradict itself, and\nthe reader would have to pick a winner.",
+      "type": "object",
+      "properties": {
+        "cp": {
+          "description": "`c_p`, J/(kg K).",
+          "type": "number",
+          "format": "double"
+        },
+        "kappa": {
+          "description": "`k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not\na thing, and three or nine components are a §13.4 error.",
+          "type": "number",
+          "format": "double"
+        },
+        "mu": {
+          "description": "Dynamic viscosity, Pa s.",
+          "type": "number",
+          "format": "double"
+        },
+        "rho": {
+          "description": "`rho_f` at `buoyancy.TRef`, kg/m^3.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rho",
+        "cp",
+        "kappa",
+        "mu"
+      ]
+    },
+    "ChtInitial": {
+      "type": "object",
+      "properties": {
+        "T": {
+          "description": "Uniform initial temperature, K. Per-region initial fields are not\nimplemented; a case that needs one should say so and be told, rather\nthan have this reader guess.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "T"
+      ]
+    },
+    "ChtInterface": {
+      "description": "One conformal interface between two regions - SPEC-LIT §47.4/§47.5.",
+      "type": "object",
+      "properties": {
+        "Rc": {
+          "description": "The contact resistance, m^2 K/W. Absent is perfect contact.\n\nMutually exclusive with `thicknessLayers`/`kappaLayers`: a case that\nwrites both has said the same number twice and this reader has no\nbusiness deciding which one it meant.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "kappaLayers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "patchA": {
+          "type": "string"
+        },
+        "patchB": {
+          "type": "string"
+        },
+        "regionA": {
+          "type": "string"
+        },
+        "regionB": {
+          "type": "string"
+        },
+        "thicknessLayers": {
+          "description": "OpenFOAM's spelling of the same thing, summed by SPEC-LIT (S47.11):\n`R_c = sum_i t_i/k_i`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "regionA",
+        "patchA",
+        "regionB",
+        "patchB"
+      ]
+    },
+    "ChtKappa": {
+      "description": "`kappa` written either way. A user with an isotropic material should not\nhave to type a one-element list, and one with an anisotropic material\nshould not have to type three separate entries.",
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      ]
+    },
+    "ChtMaterial": {
+      "description": "SPEC-LIT §46.5's three entries.",
+      "type": "object",
+      "properties": {
+        "c": {
+          "description": "`c_s`, J/(kg K).",
+          "type": "number",
+          "format": "double"
+        },
+        "kappa": {
+          "description": "`k_s`: one number for an isotropic material, three for `diag(kx,ky,kz)`\nin the MESH axes. Nine is a §13.4 error naming the two that are\nimplemented - SPEC-LIT §46.4.",
+          "$ref": "#/$defs/ChtKappa"
+        },
+        "rho": {
+          "description": "`rho_s`, kg/m^3.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rho",
+        "c",
+        "kappa"
+      ]
+    },
+    "ChtMechanicalBc": {
+      "description": "What a patch can say about `u` - §95's per-component statement, reached\nby name and lowered into [`LoweredMechanicalBc`].",
+      "oneOf": [
+        {
+          "description": "`u_i = value` per component; `null` leaves that component\ntraction-free.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fixedDisplacement"
+            },
+            "value": {
+              "description": "Per axis; `null` is traction-free in that component.",
+              "type": "array",
+              "items": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "`(sigma . n)_i = value`, Pa, global axes. `traction [0,0,0]` is a\nfree surface.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "traction"
+            },
+            "value": {
+              "description": "The traction vector, Pa.",
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "The normal component fixed 0, the tangential traction 0. The axis\nis the patch's slot in `-x +x -y +y -z +z`, divided by two.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "symmetry"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Traction `(0, 0, 0)`.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "free"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ChtMechanicalPatchRule": {
+      "description": "One `mechanics.patches` rule - the [`ChtPatchRule`] shape carried over:\nthe exact patch name, one condition.",
+      "type": "object",
+      "properties": {
+        "match": {
+          "description": "The patch name, as `mesh.boundaries` spells it. An interface patch\nis named here too - the displacement problem does not read the\nthermal `interfaces` block.",
+          "type": "string"
+        },
+        "u": {
+          "description": "The mechanical condition on the face.",
+          "$ref": "#/$defs/ChtMechanicalBc"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "match",
+        "u"
+      ]
+    },
+    "ChtMechanics": {
+      "description": "SPEC-LIT §96.1's `mechanics` block: the elastic half of a thermo-elastic\nregion. `Some` on a solid region whose §95 displacement is to be solved\nafter the thermal one; refused on a fluid one (§96.3 row 8), and legal\nonly with `\"mode\": \"stress\"` on `run`, in both directions (row 14).",
+      "type": "object",
+      "properties": {
+        "bond": {
+          "description": "How the zones meet at their shared faces: `\"series\"` (the default) or\n`\"linear\"`. Only legal with [`Self::materials`] - one material has no\nbond face (§96.3 row 13).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "material": {
+          "description": "One elastic material for the whole region - or [`Self::materials`]'s\nzone list instead, and never both (§96.3 row 9).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtElastic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materials": {
+          "description": "docs/10's R4 zone list: a bonded two-material solid (a bimetal strip)\nis ONE region with one entry per material, not two regions.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ChtElasticZone"
+          }
+        },
+        "patches": {
+          "description": "Every non-empty patch of the region's mesh, exactly once - interface\npatches included, the module doc's rule carried over whole.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChtMechanicalPatchRule"
+          }
+        },
+        "solver": {
+          "description": "The outer loop's own settings. Both knobs optional, both defaulted.",
+          "$ref": "#/$defs/ChtSolidSolver",
+          "default": {
+            "maxOuter": 500,
+            "tolerance": 1e-6
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "patches"
+      ]
+    },
+    "ChtNumerics": {
+      "type": "object",
+      "properties": {
+        "flow": {
+          "description": "The outer loop's own settings. **Required by a fluid region and\nrefused without one**, for the same §13.4.1 reason as `buoyancy`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtFlow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxIter": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "nNonOrthogonalCorrectors": {
+          "description": "Non-orthogonal corrector passes - SPEC-LIT §2.4. Zero on an\northogonal mesh, where the correction is identically zero.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "preconditioner": {
+          "description": "`DIC`, `DILU` or `diagonal`.",
+          "type": "string"
+        },
+        "solver": {
+          "description": "`PCG` (the default - a pure conduction matrix is symmetric, including\nits coupled interface entries, SPEC-LIT §47.2) or `PBiCGStab`.",
+          "type": "string"
+        },
+        "tolerance": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "solver",
+        "preconditioner",
+        "tolerance",
+        "maxIter"
+      ]
+    },
+    "ChtPatchRule": {
+      "description": "One patch's temperature condition, and - on a fluid region - what the patch\nIS.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "$ref": "#/$defs/ChtScalarBc"
+        },
+        "U": {
+          "description": "The inlet velocity vector, m/s - required on an `inlet` and refused\nanywhere else. Uniform over the patch: SPEC-LIT §79.4's\nflux-establishment pass takes one normal speed, and a profile is\nrefused by name rather than averaged.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "kind": {
+          "description": "`\"wall\"` (the default), `\"inlet\"` or `\"outlet\"` - SPEC-LIT §79.2.\n\nThis is the entry §60.2 said did not exist. Until §79 every non-`empty`\npatch of a fluid region was a no-slip wall and the document had no\nspelling for anything else, which is why §60.6's Gate 6 was\nUNREACHABLE rather than refused. An `inlet` carries [`Self::u`] and a\n`fixedValue` `T`; an `outlet` carries neither and takes `inletOutlet`\nor `zeroGradient`. Only a FLUID region may say either.",
+          "type": "string",
+          "default": "wall"
+        },
+        "match": {
+          "description": "The patch name, as `mesh.boundaries` spells it. Exact, not a pattern:\na conduction stack has a handful of named faces and a pattern would\nonly make it possible to match none of them by accident.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "match",
+        "T"
+      ]
+    },
+    "ChtRegion": {
+      "description": "One region: a block of cells, one material, its own boundary conditions.",
+      "type": "object",
+      "properties": {
+        "fluid": {
+          "description": "A **fluid** region's four constant properties - SPEC-LIT §60.2.\nRequired on a fluid region and refused on a solid one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtFluid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "description": "`\"solid\"` or `\"fluid\"` - SPEC-LIT §60.2. Anything else is a §13.4\nerror listing both. A fluid region must be the FIRST region and there\ncan be at most one (§47.4's numbering invariant).",
+          "type": "string",
+          "default": "solid"
+        },
+        "material": {
+          "description": "A **solid** region's material - SPEC-LIT §46.5. Required on a solid\nregion and refused on a fluid one, which carries [`Self::fluid`]\ninstead.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtMaterial"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mechanics": {
+          "description": "SPEC-LIT §96.1's `mechanics` block: `Some` on a solid region whose\n§95 displacement is solved after the thermal one. Refused on a fluid\nregion (§96.3 row 8), and legal only with `\"mode\": \"stress\"` on\n`run` - in both directions (row 14).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtMechanics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mesh": {
+          "$ref": "#/$defs/ChtRegionMesh"
+        },
+        "name": {
+          "type": "string"
+        },
+        "patches": {
+          "description": "One rule per patch. Every patch must appear here or in an\n`interfaces` entry; see the module doc.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChtPatchRule"
+          }
+        },
+        "source": {
+          "description": "Uniform volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1). The\ndie's own dissipation, in the case this format exists for.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "mesh"
+      ]
+    },
+    "ChtRegionMesh": {
+      "description": "An axis-aligned block. Patch names are the case's, one per face.",
+      "type": "object",
+      "properties": {
+        "boundaries": {
+          "description": "The six face names, `-x +x -y +y -z +z`.",
+          "$ref": "#/$defs/ChtBoundaries"
+        },
+        "bounds": {
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "grading": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGrading"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "bounds",
+        "cells",
+        "boundaries"
+      ]
+    },
+    "ChtRun": {
+      "description": "Steady, or a fixed-step transient.",
+      "type": "object",
+      "properties": {
+        "deltaT": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "endTime": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "iterations": {
+          "description": "Outer SIMPLE iterations. **Required by a fluid region and refused\nwithout one**; meaningless on a pure-conduction case, where the\ncoupled system is solved in one pass (SPEC-LIT §47.3).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "mode": {
+          "description": "`\"thermal\"` (the default - §46's conduction, what this format has\nalways solved) or `\"stress\"` (§96.1's thermo-elastic run: after the\nthermal solve converges, every solid region carrying a `mechanics`\nblock has §95's displacement solved on it). Anything else is refused\nlisting both (§96.3 row 19).",
+          "type": "string",
+          "default": "thermal"
+        },
+        "steady": {
+          "description": "`true`: drop `dT/dt` and solve the steady problem - SPEC-LIT §46.1's\nquasi-steady solid, which is a control flag and not a second code\npath.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChtScalarBc": {
+      "description": "What a patch can say about `T` - SPEC-LIT §4's triple, reached by name.",
+      "oneOf": [
+        {
+          "description": "A held temperature, K.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "fixedValue"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "description": "Adiabatic.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "zeroGradient"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A prescribed wall heat flux, W/m^2, positive INTO the solid -\nSPEC-LIT §32.2.",
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "fixedFluxTemperature"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "q"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §79.5's outflow condition: `zeroGradient` while the flux\nleaves, `fixedValue inletValue` on any face where it comes back in.\n\nLegal ONLY on an `outlet` patch. On a wall the flux is identically\nzero, so the switch would never fire and the condition would be\n`zeroGradient` wearing another name - a setting the case can say and\nthe solver ignores, which is the §13.4.1 defect.",
+          "type": "object",
+          "properties": {
+            "inletValue": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "inletOutlet"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "inletValue"
+          ]
+        },
+        {
+          "description": "The 2-D front/back plane: the patch contributes to no surface integral\nat all.\n\nSpelled as a `T` condition rather than as a mesh flag because the\nformat's one rule is that **every patch is named exactly once** (module\ndoc), and a mesh flag that silently claimed two patches would be\nexactly the \"adiabatic unless you say otherwise\" default that rule\nexists to stop. `empty` patches come in opposite pairs and the axis\nthey lie on must have one cell; `blockgen` refuses anything else,\nnaming the axis.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "empty"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ChtSolidSolver": {
+      "description": "The outer displacement loop's own settings - SPEC-LIT §96.1. Two knobs,\nboth optional and defaulted; the two entries that are NOT offered\n(`relaxation`, `ddtScheme`) are present as fields so their refusals can\nsay why, exactly as `JsonExact::precision` does.",
+      "type": "object",
+      "properties": {
+        "ddtScheme": {
+          "description": "ALWAYS refused (§96.3 row 6) through §95's inertia refusal:\nNewmark, HHT and generalised-alpha are not built.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxOuter": {
+          "description": "The outer loop's iteration cap. Default `500`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 500,
+          "minimum": 0
+        },
+        "relaxation": {
+          "description": "ALWAYS refused (§96.3 row 7): the outer loop is Aitken delta-squared\non the increment and its first omega is 1 - a static relaxation\nfactor is not offered.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tolerance": {
+          "description": "The outer loop's stop: the residual decades it must fall. Default\n`1e-6`.",
+          "type": "number",
+          "format": "double",
+          "default": 1e-6
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonBounds": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "min": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "JsonExact": {
+      "description": "Interchange with the polyhedra preserved - SPEC-LIT S44.1.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "description": "`vtu` or `openfoam` (`foam`), or a comma list. A volume format is an\nerror naming `visualisation`.",
+          "type": "string"
+        },
+        "interval": {
+          "description": "Seconds of physical time between writes; absent is \"once, at the\nend\" - SPEC-LIT S44.4.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "precision": {
+          "description": "**Always a SPEC-LIT S44.3 error.** Present as a field, rather than\nleft to `deny_unknown_fields`, so the message can say *why* - a lossy\n\"exact\" format is a contradiction in the name - and name\n`visualisation.precision`, where reduced precision belongs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "format"
+      ]
+    },
+    "JsonGrading": {
+      "description": "[`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is\nuniform; a present one is validated and lowered by\n[`apply_axis_grading`].",
+      "type": "object",
+      "properties": {
+        "x": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "y": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "z": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonGradingAxis": {
+      "description": "One axis's worth of [`crate::blockgen::GradedAxis`] grading:\n`expansion` is the ratio `GradedAxis::expansion` documents (last cell over\nfirst for one-sided, centre over wall for `twoSided`) and must be\nstrictly positive - `0` or negative is not a cell-size ratio for any\nmesh, checked in [`apply_axis_grading`] rather than left for `blockgen` to\nsilently degenerate to uniform (`GradedAxis::default`'s own `!(r > 0)`\nguard exists so a bad ratio never produces NaN coordinates, not so a bad\ncase file goes unnoticed - SPEC-LIT §13.4).",
+      "type": "object",
+      "properties": {
+        "expansion": {
+          "type": "number",
+          "format": "double"
+        },
+        "twoSided": {
+          "description": "`true`: grade symmetrically toward BOTH ends of the axis (a channel's\ntwo walls); `false` (the default - most cases graded toward only one\nend, e.g. a pipe's single wall or a boundary layer growing off one\nplate, name that explicitly rather than leaving it to a default that\nsilently picks a physical setup for them): one-sided, `hi`'s cell\n`expansion` times `lo`'s.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expansion"
+      ]
+    },
+    "JsonOutput": {
+      "description": "What this run writes: three sub-blocks, three purposes - SPEC-LIT S44.\n\nThis block was a S13.4 refusal in its entirety until S44, and the reason\nis worth keeping: three of its knobs (`visualisation.fields`,\n`visualisation.precision`, `restart.keep`) had no implementation anywhere\nin the crate, so honouring `format` and `interval` because they happened\nto exist and dropping the other three in silence would have manufactured\nS13.4.1's own defect inside its fix. S44 builds all three\n([`crate::io::output_plan::FieldSelection`],\n[`crate::io::nvdb::Precision`] on both volume writers, and\n[`crate::restart::Checkpoints`]) and then honours the block whole.\n\nResolution, and every S13.4 refusal, is\n[`crate::io::output_plan::OutputPlan::from_json`]. A case that carries\nthis block must NOT also name `-output`/`-writeInterval`/`-restartWrite`\non the command line: those are the same settings said twice, and naming\nboth is an error rather than a silent winner (S44.6).",
+      "type": "object",
+      "properties": {
+        "exact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonExact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restart": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRestart"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visualisation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonVisualisation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonRestart": {
+      "description": "This solver's own state, to resume from - SPEC-LIT S44.1/S44.5.",
+      "type": "object",
+      "properties": {
+        "interval": {
+          "description": "Seconds of physical time between checkpoints; absent is \"once, at\nthe end\".",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "keep": {
+          "description": "How many checkpoints to retain. `0` keeps every one of them -\nSPEC-LIT S44.5, and the safe reading of a zero is the one that\ndeletes nothing.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "precision": {
+          "description": "**Always a SPEC-LIT S44.3 error**, for a sharper reason than\n`exact`'s: S5.1's argument for carrying `phi` in a checkpoint is that\na re-derived flux is not the conservative one, and a rounded one is\nnot either.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "keep"
+      ]
+    },
+    "JsonVisualisation": {
+      "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these five entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
+      "type": "object",
+      "properties": {
+        "fields": {
+          "description": "Which cell fields to write, and in what order. Absent is every field\nthe run has - SPEC-LIT S44.2.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "format": {
+          "description": "`vdb`, `nvdb`, or a comma list of them. A format from `exact`'s\ncolumn (`vtu`, `openfoam`) is an error naming `exact`; `usda` is an\nerror naming `usdScene`.",
+          "type": "string"
+        },
+        "interval": {
+          "description": "Seconds of physical time between writes. Absent (or `0`) is\n\"the final state, once\" - SPEC-LIT S44.4. Was REQUIRED before S44.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "precision": {
+          "description": "`fp32` (the default) or `fp16` - SPEC-LIT S44.3. This is the ONE\nplace in the case format where reduced precision is legitimate.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usdScene": {
+          "description": "Also write a `.usda` scene referencing the volume files.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "format"
+      ]
+    }
+  }
+}

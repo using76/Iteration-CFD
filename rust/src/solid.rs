@@ -79,6 +79,7 @@ pub const SLENDERNESS_MAX: Scalar = 5.0;
 pub const MOTION_RATIO_MAX: Scalar = 0.1;
 
 pub mod bc;
+pub mod case;
 pub mod displacement;
 pub mod fixtures;
 pub mod materials;

@@ -707,7 +707,7 @@ python tools\mesh\fluent_check.py tester_ours.msh tester_tet_geometry.json
 | `ofgpu-buoyant` | **U, p**, T, 부력 | 디렉터리 |
 | `ofgpu-plume` | **U, p**, T, 부력 플룸 | 디렉터리 |
 | `ofgpu-vof` | **U, p**, α — 2상 자유표면 | 디렉터리 |
-| `ofgpu-cht` | 다영역 전도 + 켤레 자연대류 | JSONC |
+| `ofgpu-cht` | 다영역 전도 + 켤레 자연대류 + 열응력 | JSONC |
 | `ofgpu-datacentre` | 데이터센터 룸(팬·타일·습공기·지표) | JSONC |
 
 속도장이 필요하면 **굵게 표시된 것 중에서 고르십시오.**

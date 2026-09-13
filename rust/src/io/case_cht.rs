@@ -75,10 +75,12 @@ use crate::fv::DivScheme;
 use crate::error::{Error, Result};
 use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner, SolverControls};
-use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis};
+use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis, JsonOutput};
+use crate::io::output_plan::{OutputFormat, OutputPlan};
 use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
 use crate::mesh::HostMesh;
-use crate::{Label, Scalar};
+use crate::solid::{BondTreatment, Material, NotBuilt};
+use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
 //  1. The document
@@ -106,6 +108,12 @@ pub struct ChtCase {
     pub run: ChtRun,
     #[serde(default)]
     pub numerics: ChtNumerics,
+    /// SPEC-LIT §44.1's `output` block, unchanged - on this format it
+    /// selects the per-region VTU write (§96.2). Resolved through
+    /// `OutputPlan::from_json` at lowering, with §96.3 row 17's refusals
+    /// applied; refused whole on a case with a fluid region (row 18).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<JsonOutput>,
 }
 
 /// SPEC-LIT §9's `constant/g` and `TRef`, as a conjugate case states them.
@@ -139,6 +147,12 @@ pub struct ChtRegion {
     /// Required on a fluid region and refused on a solid one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fluid: Option<ChtFluid>,
+    /// SPEC-LIT §96.1's `mechanics` block: `Some` on a solid region whose
+    /// §95 displacement is solved after the thermal one. Refused on a fluid
+    /// region (§96.3 row 8), and legal only with `"mode": "stress"` on
+    /// `run` - in both directions (row 14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanics: Option<ChtMechanics>,
     /// Uniform volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1). The
     /// die's own dissipation, in the case this format exists for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,6 +366,13 @@ pub struct ChtRun {
     /// path.
     #[serde(default)]
     pub steady: bool,
+    /// `"thermal"` (the default - §46's conduction, what this format has
+    /// always solved) or `"stress"` (§96.1's thermo-elastic run: after the
+    /// thermal solve converges, every solid region carrying a `mechanics`
+    /// block has §95's displacement solved on it). Anything else is refused
+    /// listing both (§96.3 row 19).
+    #[serde(default = "thermal_mode")]
+    pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_time: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +382,10 @@ pub struct ChtRun {
     /// coupled system is solved in one pass (SPEC-LIT §47.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<u32>,
+}
+
+fn thermal_mode() -> String {
+    "thermal".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -443,6 +468,166 @@ impl Default for ChtNumerics {
 }
 
 // ==========================================================================
+//  1b. The mechanics block - SPEC-LIT §96
+// ==========================================================================
+
+/// SPEC-LIT §96.1's `mechanics` block: the elastic half of a thermo-elastic
+/// region. `Some` on a solid region whose §95 displacement is to be solved
+/// after the thermal one; refused on a fluid one (§96.3 row 8), and legal
+/// only with `"mode": "stress"` on `run`, in both directions (row 14).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtMechanics {
+    /// One elastic material for the whole region - or [`Self::materials`]'s
+    /// zone list instead, and never both (§96.3 row 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<ChtElastic>,
+    /// docs/10's R4 zone list: a bonded two-material solid (a bimetal strip)
+    /// is ONE region with one entry per material, not two regions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materials: Option<Vec<ChtElasticZone>>,
+    /// How the zones meet at their shared faces: `"series"` (the default) or
+    /// `"linear"`. Only legal with [`Self::materials`] - one material has no
+    /// bond face (§96.3 row 13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bond: Option<String>,
+    /// Every non-empty patch of the region's mesh, exactly once - interface
+    /// patches included, the module doc's rule carried over whole.
+    pub patches: Vec<ChtMechanicalPatchRule>,
+    /// The outer loop's own settings. Both knobs optional, both defaulted.
+    #[serde(default)]
+    pub solver: ChtSolidSolver,
+}
+
+/// The elastic constants of one material or one zone - SPEC-LIT §96.1.
+///
+/// Validated at lowering by [`crate::solid::Material::validate`], which is
+/// where `E <= 0`, the `nu` range and the measured 0.45 edge are refused
+/// (§96.3 rows 1-2); this struct carries no logic of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtElastic {
+    /// Young's modulus `E`, Pa.
+    #[serde(rename = "E")]
+    pub e: f64,
+    /// Poisson's ratio, in (-1, 0.5) and at most the measured edge 0.45.
+    pub nu: f64,
+    /// Linear thermal expansion coefficient `alpha`, 1/K.
+    pub alpha: f64,
+    /// The stress-free temperature, K: the thermal strain is
+    /// `alpha (T - TRef)`, so `alpha > 0` without it is refused (§96.3
+    /// row 3), and it without `alpha` is a reference nothing reads (row 4).
+    #[serde(rename = "TRef", default, skip_serializing_if = "Option::is_none")]
+    pub t_ref: Option<f64>,
+    /// ALWAYS refused (§96.3 row 5): nothing in §95's static solve reads a
+    /// density. Present as a field, rather than left to
+    /// `deny_unknown_fields`, so the message can say WHY - the same idiom
+    /// `JsonExact::precision` uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rho: Option<f64>,
+}
+
+/// One bonded material of a `materials` zone list - docs/10's R4. The zone
+/// is the CLOSED box test on the cell CENTROID, and every cell must land in
+/// exactly one zone (§96.3 rows 10-11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtElasticZone {
+    /// The zone's name, as the refusal and the banner print it.
+    pub name: String,
+    /// The closed box the zone's cells' centroids must fall in.
+    pub bounds: JsonBounds,
+    /// The zone's elastic constants.
+    pub material: ChtElastic,
+}
+
+/// One `mechanics.patches` rule - the [`ChtPatchRule`] shape carried over:
+/// the exact patch name, one condition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtMechanicalPatchRule {
+    /// The patch name, as `mesh.boundaries` spells it. An interface patch
+    /// is named here too - the displacement problem does not read the
+    /// thermal `interfaces` block.
+    #[serde(rename = "match")]
+    pub match_: String,
+    /// The mechanical condition on the face.
+    pub u: ChtMechanicalBc,
+}
+
+/// What a patch can say about `u` - §95's per-component statement, reached
+/// by name and lowered into [`LoweredMechanicalBc`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum ChtMechanicalBc {
+    /// `u_i = value` per component; `null` leaves that component
+    /// traction-free.
+    #[serde(rename = "fixedDisplacement")]
+    FixedDisplacement {
+        /// Per axis; `null` is traction-free in that component.
+        value: [Option<f64>; 3],
+    },
+    /// `(sigma . n)_i = value`, Pa, global axes. `traction [0,0,0]` is a
+    /// free surface.
+    #[serde(rename = "traction")]
+    Traction {
+        /// The traction vector, Pa.
+        value: [f64; 3],
+    },
+    /// The normal component fixed 0, the tangential traction 0. The axis
+    /// is the patch's slot in `-x +x -y +y -z +z`, divided by two.
+    #[serde(rename = "symmetry")]
+    Symmetry,
+    /// Traction `(0, 0, 0)`.
+    #[serde(rename = "free")]
+    Free,
+}
+
+/// The outer displacement loop's own settings - SPEC-LIT §96.1. Two knobs,
+/// both optional and defaulted; the two entries that are NOT offered
+/// (`relaxation`, `ddtScheme`) are present as fields so their refusals can
+/// say why, exactly as `JsonExact::precision` does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChtSolidSolver {
+    /// The outer loop's stop: the residual decades it must fall. Default
+    /// `1e-6`.
+    #[serde(default = "default_solid_tolerance")]
+    pub tolerance: f64,
+    /// The outer loop's iteration cap. Default `500`.
+    #[serde(default = "default_solid_max_outer")]
+    pub max_outer: u32,
+    /// ALWAYS refused (§96.3 row 7): the outer loop is Aitken delta-squared
+    /// on the increment and its first omega is 1 - a static relaxation
+    /// factor is not offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relaxation: Option<f64>,
+    /// ALWAYS refused (§96.3 row 6) through §95's inertia refusal:
+    /// Newmark, HHT and generalised-alpha are not built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddt_scheme: Option<String>,
+}
+
+impl Default for ChtSolidSolver {
+    fn default() -> Self {
+        Self {
+            tolerance: default_solid_tolerance(),
+            max_outer: default_solid_max_outer(),
+            relaxation: None,
+            ddt_scheme: None,
+        }
+    }
+}
+
+fn default_solid_tolerance() -> f64 {
+    1e-6
+}
+
+fn default_solid_max_outer() -> u32 {
+    500
+}
+
+// ==========================================================================
 //  2. Reading
 // ==========================================================================
 
@@ -485,6 +670,66 @@ impl LoweredBc {
     }
 }
 
+/// SPEC-LIT §96.2: one elastic zone of a region's `mechanics` block,
+/// validated and in [`crate::solid::Material`]'s own units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredElasticZone {
+    /// The zone's name, as the case spelled it.
+    pub name: String,
+    /// The zone's validated constants.
+    pub material: crate::solid::Material,
+    /// The zone's `TRef`, K - present because §96.3 row 3 required it
+    /// whenever `alpha > 0`.
+    pub t_ref: Scalar,
+}
+
+/// A mechanical patch condition, resolved onto §95's per-component
+/// statement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoweredMechanicalBc {
+    /// `u_i = value` per component; `None` is traction-free in that
+    /// component.
+    Fixed([Option<Scalar>; 3]),
+    /// `(sigma . n) = value`, Pa, global axes.
+    Traction(Vec3),
+    /// The normal component fixed 0, the tangential traction 0, on `axis`.
+    Symmetry {
+        /// The axis the plane is normal to: the patch's slot in
+        /// `-x +x -y +y -z +z`, divided by two.
+        axis: usize,
+    },
+    /// Traction `(0, 0, 0)`.
+    Free,
+}
+
+/// `mechanics.solver`, resolved - SPEC-LIT §96.2.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SolidOuterControls {
+    /// The outer loop's stop.
+    pub tolerance: Scalar,
+    /// The outer loop's iteration cap.
+    pub max_outer: usize,
+}
+
+/// A region's `mechanics` block, everything resolved - what
+/// `crate::solid::case` (SPEC-LIT §96.2) reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredMechanics {
+    /// The region's index.
+    pub region: usize,
+    /// One zone at least - the whole region, when the case named one
+    /// `material`.
+    pub zones: Vec<LoweredElasticZone>,
+    /// `[meshes[region].n_cells]`: the zone of every cell.
+    pub zone_of_cell: Vec<usize>,
+    /// How zones meet: `series` (the default) or `linear`.
+    pub bond: crate::solid::BondTreatment,
+    /// `(patch name, condition)`, every non-empty patch exactly once.
+    pub patch_bcs: Vec<(String, LoweredMechanicalBc)>,
+    /// The outer loop's settings.
+    pub solver: SolidOuterControls,
+}
+
 /// Everything [`crate::cht`] needs, with every name already resolved.
 #[derive(Debug)]
 pub struct LoweredChtCase {
@@ -497,6 +742,17 @@ pub struct LoweredChtCase {
     /// keeps no point set and no face polygons (SPEC-LIT §49.3), so the raw
     /// geometry travels with the lowered case instead.
     pub raw: Vec<PolyMeshRaw>,
+    /// `[n_regions]`, `Some` exactly on a solid region carrying §96.1's
+    /// `mechanics` block. Everything resolved and refused at lowering; read
+    /// by `crate::solid::case` (§96.2).
+    pub mechanics: Vec<Option<LoweredMechanics>>,
+    /// `run.mode == "stress"`: §96.2's thermo-elastic run. Refused without a
+    /// region carrying `mechanics`, and refused WITH one in thermal mode.
+    pub stress: bool,
+    /// The case's `output` block, resolved through
+    /// [`crate::io::output_plan::OutputPlan::from_json`] with §96.3 row 17's
+    /// refusals applied. `None` when the case says nothing.
+    pub output: Option<crate::io::output_plan::OutputPlan>,
     /// `[n_regions]` the conduction entry for every region. A **fluid**
     /// region's entry is a placeholder built from its own `rho`/`cp`/`kappa`
     /// - SPEC-LIT (S59.3) masks every coefficient it produces on a fluid face
@@ -614,6 +870,9 @@ impl ChtCase {
         let mut sources = Vec::new();
         // Which patches of which region have been spoken for, and by what.
         let mut claimed: Vec<BTreeMap<String, &'static str>> = Vec::new();
+        // SPEC-LIT §96.2: one lowered `mechanics` per region, `None` when
+        // the region says nothing.
+        let mut mechanics: Vec<Option<LoweredMechanics>> = Vec::new();
 
         for (i, r) in self.regions.iter().enumerate() {
             let kind = match r.kind.as_str() {
@@ -719,6 +978,12 @@ impl ChtCase {
             }
             let (mesh, rmesh) = build_region_mesh(r, &empties, &flow_patches)?;
 
+            // SPEC-LIT §96.2: the region's `mechanics` block, if it says
+            // one, lowered against the mesh just built - it is the mesh's
+            // own centroids and patch slots the zones and the symmetry axes
+            // are measured on.
+            let mech = lower_mechanics(i, r, &mesh, &empties)?;
+
             let (mat, fluid) = match (kind, &r.material, &r.fluid) {
                 (RegionKind::Solid, Some(m), None) => {
                     let mat = SolidMaterial {
@@ -805,6 +1070,7 @@ impl ChtCase {
             fluids.push(fluid);
             sources.push(r.source.unwrap_or(0.0) as Scalar);
             claimed.push(seen);
+            mechanics.push(mech);
         }
 
         if kinds.iter().filter(|k| **k == RegionKind::Fluid).count() > 1 {
@@ -1225,12 +1491,127 @@ impl ChtCase {
             ..SolverControls::default()
         };
 
+        // ---- SPEC-LIT §96.3 rows 14-16, 18-19: the run mode --------------
+        let stress = match self.run.mode.as_str() {
+            "thermal" => false,
+            "stress" => true,
+            other => {
+                crate::io::contract::unsupported(
+                    "run/mode",
+                    other,
+                    &["thermal", "stress"],
+                    "NOTHING - the mode is which physics runs, not a spelling, \
+                     and this is refused under -permissive too",
+                    (),
+                )?;
+                return Err(Error::Config(format!(
+                    "run/mode: \"{other}\" is neither `thermal` nor `stress`, \
+                     and cannot be substituted even under -permissive - there \
+                     is no third mode to run instead"
+                )));
+            }
+        };
+        if stress && mechanics.iter().all(|m| m.is_none()) {
+            return Err(Error::Config(
+                "run/mode: \"stress\" names SPEC-LIT §95's displacement solve, \
+                 but no region carries a `mechanics` block - nothing would read \
+                 it. Add `mechanics` to a solid region, or drop the mode (the \
+                 default `thermal` is what this format has always solved)"
+                    .to_string(),
+            ));
+        }
+        if !stress {
+            for r in &self.regions {
+                if r.mechanics.is_some() {
+                    return Err(Error::Config(format!(
+                        "regions/{}/mechanics: a `mechanics` block needs \
+                         `run.mode` \"stress\" - with the default \"thermal\" \
+                         nothing would read it, which is the setting the solver \
+                         ignores that SPEC-LIT 13.4.1 exists to stop",
+                        r.name
+                    )));
+                }
+            }
+        }
+        if stress && has_fluid {
+            return Err(Error::Config(
+                "run/mode: \"stress\" on a case with a fluid region - the fluid \
+                 side of a thermo-elastic run is docs/10's address 106 (WF-B), \
+                 not this format's. Drop the mode, or the fluid region"
+                    .to_string(),
+            ));
+        }
+        if stress && !self.run.steady {
+            return Err(Error::Config(
+                "run/mode: \"stress\" on a transient case - the SPEC-LIT 93 \
+                 verdict is a steady residual, and time in a stress run is \
+                 docs/10's address 103. Set run.steady to true"
+                    .to_string(),
+            ));
+        }
+        if self.output.is_some() && has_fluid {
+            return Err(Error::Config(
+                "output: a case with a fluid region cannot carry an `output` \
+                 block yet - the flow path's VTU is a follow-up, not in this \
+                 unit. Delete the block, or make every region solid"
+                    .to_string(),
+            ));
+        }
+
+        // ---- the output block, resolved last (SPEC-LIT §96.3 row 17) -----
+        let output = match &self.output {
+            Some(o) => {
+                let mut plan = OutputPlan::from_json(o)?;
+                // A multi-region mesh is not one Cartesian lattice, so there
+                // is no voxel grid to sample onto.
+                plan.refuse_visualisation_on_a_non_cartesian_mesh(false)?;
+                plan.refuse_restart("ofgpu-cht", "run the case again")?;
+                let foam = plan
+                    .exact
+                    .as_ref()
+                    .is_some_and(|e| e.formats.contains(&OutputFormat::Foam));
+                if foam {
+                    return Err(Error::Config(
+                        "output/exact/format: one polyMesh per region is \
+                         docs/10's address 97 layout, S11 - this run writes \
+                         `vtu` only. Say \"format\": \"vtu\""
+                            .to_string(),
+                    ));
+                }
+                let interval = plan.exact.as_ref().map_or(0.0, |e| e.interval);
+                if interval > 0.0 {
+                    if self.run.steady {
+                        plan.refuse_interval_when_steady(
+                            "ofgpu-cht",
+                            "set run.steady to false and give endTime/deltaT; \
+                             the thermal transient then writes its final state \
+                             only, because ofgpu-cht's run_case returns one \
+                             state (SPEC-LIT 47.14)",
+                        )?;
+                    } else {
+                        return Err(Error::Config(
+                            "output/exact/interval: a positive interval names a \
+                             schedule this run has no clock for - ofgpu-cht's \
+                             run_case returns one state, the final one. Drop the \
+                             interval (SPEC-LIT 44.4)"
+                                .to_string(),
+                        ));
+                    }
+                }
+                Some(plan)
+            }
+            None => None,
+        };
+
         Ok(LoweredChtCase {
             name: self.name.clone(),
             region_names,
             kinds,
             meshes,
             raw: raws,
+            mechanics,
+            stress,
+            output,
             materials,
             fluids,
             buoyancy,
@@ -1248,6 +1629,292 @@ impl ChtCase {
             tolerances: PairingTolerances::default(),
         })
     }
+}
+
+/// SPEC-LIT §96.2: one region's `mechanics` block, lowered against the mesh
+/// `build_region_mesh` just built - every patch name resolved, every zone's
+/// cells found, and §96.3's rows 1-13 raised here.
+fn lower_mechanics(
+    i: usize,
+    r: &ChtRegion,
+    mesh: &HostMesh,
+    empties: &[&str],
+) -> Result<Option<LoweredMechanics>> {
+    let Some(mech) = &r.mechanics else {
+        return Ok(None);
+    };
+    let path = format!("regions/{}/mechanics", r.name);
+
+    // Row 8: a fluid region has no displacement to solve.
+    if r.kind != "solid" {
+        return Err(Error::Config(format!(
+            "{path}: region '{}' is \"fluid\" - a fluid carries `fluid`, not \
+             `material`, and has no §95 displacement to solve. `mechanics` \
+             belongs on a solid region",
+            r.name
+        )));
+    }
+
+    // Row 9: exactly one spelling of the material.
+    if mech.material.is_some() && mech.materials.is_some() {
+        return Err(Error::Config(format!(
+            "{path}: EXACTLY ONE of `material` and `materials` must be given - \
+             both were. They are two spellings of one answer and this reader \
+             will not choose between them (SPEC-LIT 96.3 row 9)"
+        )));
+    }
+    if mech.material.is_none() && mech.materials.as_ref().map_or(true, Vec::is_empty)
+    {
+        return Err(Error::Config(format!(
+            "{path}: neither `material` nor `materials` was given - an empty \
+             `materials` list is neither (SPEC-LIT 96.3 row 9). Name one \
+             `material`, or the zones of a bonded solid"
+        )));
+    }
+
+    // The zones, validated under their own paths (§96.3 rows 1-5). A single
+    // `material` is one zone named after the region.
+    let mut zones = Vec::new();
+    if let Some(m) = &mech.material {
+        let (material, t_ref) = lower_elastic(m, &format!("{path}/material"))?;
+        zones.push(LoweredElasticZone {
+            name: r.name.clone(),
+            material,
+            t_ref,
+        });
+    } else if let Some(list) = &mech.materials {
+        for z in list {
+            let (material, t_ref) =
+                lower_elastic(&z.material, &format!("{path}/materials/{}", z.name))?;
+            zones.push(LoweredElasticZone {
+                name: z.name.clone(),
+                material,
+                t_ref,
+            });
+        }
+    }
+
+    // The zone of every cell: the closed box test on the CENTROID, exactly
+    // as §96.1 states it. A single material tiles by construction.
+    let zone_of_cell = if mech.material.is_some() {
+        vec![0usize; mesh.n_cells]
+    } else {
+        let list: &[ChtElasticZone] = mech.materials.as_deref().unwrap_or(&[]);
+        let mut of = vec![usize::MAX; mesh.n_cells];
+        for (zi, z) in list.iter().enumerate() {
+            for (ci, ctr) in mesh.c.iter().enumerate() {
+                let ctrs = [ctr.x, ctr.y, ctr.z];
+                let in_box = (0..3).all(|a| {
+                    z.bounds.min[a] as Scalar <= ctrs[a] && ctrs[a] <= z.bounds.max[a] as Scalar
+                });
+                if in_box {
+                    if of[ci] != usize::MAX {
+                        return Err(Error::Config(format!(
+                            "{path}/materials: zones '{}' and '{}' both claim the \
+                             cell at ({:.6}, {:.6}, {:.6}) m - a cell is in \
+                             exactly one zone (SPEC-LIT 96.3 row 11)",
+                            list[of[ci]].name,
+                            z.name,
+                            ctr.x,
+                            ctr.y,
+                            ctr.z
+                        )));
+                    }
+                    of[ci] = zi;
+                }
+            }
+        }
+        let uncovered: Vec<usize> =
+            (0..mesh.n_cells).filter(|ci| of[*ci] == usize::MAX).collect();
+        if let Some(first) = uncovered.first() {
+            let ctr = &mesh.c[*first];
+            return Err(Error::Config(format!(
+                "{path}/materials: {} cells are in no zone - the first is the \
+                 cell whose centroid is ({:.6}, {:.6}, {:.6}) m. The zones' \
+                 bounds must tile the region, closed boxes on the cell \
+                 centroids (SPEC-LIT 96.3 row 10)",
+                uncovered.len(),
+                ctr.x,
+                ctr.y,
+                ctr.z
+            )));
+        }
+        of
+    };
+
+    // Row 13: the bond treatment, only where there is a bond face.
+    let bond = match &mech.bond {
+        None => BondTreatment::Series,
+        Some(word) => {
+            if zones.len() < 2 {
+                return Err(Error::Config(format!(
+                    "{path}/bond: \"{word}\" was given but the region names one \
+                     `material` - one material has no bond face. `bond` is only \
+                     legal with `materials` (SPEC-LIT 96.3 row 13)"
+                )));
+            }
+            match word.as_str() {
+                "series" => BondTreatment::Series,
+                "linear" => BondTreatment::Linear,
+                other => {
+                    crate::io::contract::unsupported(
+                        &format!("{path}/bond"),
+                        other,
+                        &["series", "linear"],
+                        "NOTHING - how two zones share a face is physics, not a \
+                         spelling, and this is refused under -permissive too",
+                        (),
+                    )?;
+                    return Err(Error::Config(format!(
+                        "{path}/bond: \"{other}\" is neither `series` nor \
+                         `linear`, and cannot be substituted even under \
+                         -permissive"
+                    )));
+                }
+            }
+        }
+    };
+
+    // Row 12: every non-empty patch, exactly once - the module doc's rule
+    // carried over to the displacement statement.
+    let names = r.mesh.boundaries.names();
+    let mut named: Vec<&str> = Vec::new();
+    let mut patch_bcs = Vec::new();
+    for rule in &mech.patches {
+        let name = rule.match_.as_str();
+        let slot = names.iter().position(|n| *n == name).ok_or_else(|| {
+            Error::Config(format!(
+                "{path}/patches: no patch '{name}'. The region has: {}",
+                names.join(", ")
+            ))
+        })?;
+        if empties.contains(&name) {
+            return Err(Error::Config(format!(
+                "{path}/patches: patch '{name}' is `empty` - it contributes to \
+                 no surface integral at all and carries no mechanical condition. \
+                 Name only the region's non-empty patches"
+            )));
+        }
+        if named.contains(&name) {
+            return Err(Error::Config(format!(
+                "{path}/patches: patch '{name}' is named twice. A patch carries \
+                 ONE condition"
+            )));
+        }
+        named.push(name);
+        let bc = match &rule.u {
+            ChtMechanicalBc::FixedDisplacement { value } => LoweredMechanicalBc::Fixed([
+                value[0].map(|v| v as Scalar),
+                value[1].map(|v| v as Scalar),
+                value[2].map(|v| v as Scalar),
+            ]),
+            ChtMechanicalBc::Traction { value } => LoweredMechanicalBc::Traction(Vec3::new(
+                value[0] as Scalar,
+                value[1] as Scalar,
+                value[2] as Scalar,
+            )),
+            // The axis is the slot in `-x +x -y +y -z +z`, divided by two.
+            ChtMechanicalBc::Symmetry => LoweredMechanicalBc::Symmetry { axis: slot / 2 },
+            ChtMechanicalBc::Free => LoweredMechanicalBc::Free,
+        };
+        patch_bcs.push((rule.match_.clone(), bc));
+    }
+    let unnamed: Vec<&str> = (0..6)
+        .filter(|s| !empties.contains(&names[*s]) && !named.contains(&names[*s]))
+        .map(|s| names[s])
+        .collect();
+    if !unnamed.is_empty() {
+        return Err(Error::Config(format!(
+            "{path}/patches: these patches carry no mechanical condition: {}. \
+             Every non-empty patch of the region must be named exactly once - \
+             the thermal `patches` and `interfaces` blocks do not reach the \
+             displacement problem (SPEC-LIT 96.3 row 12)",
+            unnamed.join(", ")
+        )));
+    }
+
+    // Rows 6-7: the two `solver` entries that are not offered, present as
+    // fields precisely so these refusals can say why.
+    if mech.solver.ddt_scheme.is_some() {
+        return Err(crate::solid::refuse(
+            NotBuilt::Inertia,
+            &format!("{path}/solver/ddtScheme"),
+        ));
+    }
+    if mech.solver.relaxation.is_some() {
+        return Err(Error::Config(format!(
+            "{path}/solver/relaxation: a static relaxation factor is not \
+             offered - the outer loop is Aitken delta-squared on the increment \
+             and its first omega is 1 (SPEC-LIT §95). Delete `relaxation`"
+        )));
+    }
+    let solver = SolidOuterControls {
+        tolerance: mech.solver.tolerance as Scalar,
+        max_outer: mech.solver.max_outer as usize,
+    };
+
+    Ok(Some(LoweredMechanics {
+        region: i,
+        zones,
+        zone_of_cell,
+        bond,
+        patch_bcs,
+        solver,
+    }))
+}
+
+/// One elastic material, validated under its JSON path - SPEC-LIT §96.3
+/// rows 1-5. [`crate::solid::Material::validate`] refuses `E <= 0`, the `nu`
+/// range and the measured 0.45 edge with its own messages; this wraps it
+/// with the path and adds what the case format knows that the struct does
+/// not: `alpha < 0`, the `TRef` pairing, and `rho`.
+fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
+    if let Some(rho) = m.rho {
+        return Err(Error::Config(format!(
+            "{path}/rho = {rho}: nothing in SPEC-LIT 95's static solve reads a \
+             density - no inertia, no self-weight; the dynamic solid is \
+             docs/10's address 106b. Delete it (the thermal `material.rho` is \
+             the region's density)"
+        )));
+    }
+    let mat = Material {
+        e: m.e as Scalar,
+        nu: m.nu as Scalar,
+        alpha: m.alpha as Scalar,
+    };
+    mat.validate()
+        .map_err(|e| Error::Config(format!("{path}: {e}")))?;
+    if mat.alpha < 0.0 {
+        return Err(Error::Config(format!(
+            "{path}/alpha = {:e} is negative - a negative expansion coefficient \
+             is a sign error, not a material",
+            mat.alpha
+        )));
+    }
+    let t_ref = match m.t_ref {
+        Some(t) => {
+            if mat.alpha == 0.0 {
+                return Err(Error::Config(format!(
+                    "{path}/TRef = {t} is given with alpha = 0 - a reference \
+                     nothing reads, which is the setting the solver ignores \
+                     (SPEC-LIT 13.4.1). Delete TRef, or give the alpha it scales"
+                )));
+            }
+            t as Scalar
+        }
+        None => {
+            if mat.alpha > 0.0 {
+                return Err(Error::Config(format!(
+                    "{path}/TRef: alpha = {} is given but TRef is not - the \
+                     thermal strain is alpha (T - TRef); no TRef, no strain. \
+                     Give TRef, the stress-free temperature",
+                    mat.alpha
+                )));
+            }
+            0.0
+        }
+    };
+    Ok((mat, t_ref))
 }
 
 fn lower_bc(bc: &ChtScalarBc) -> LoweredBc {
@@ -1423,6 +2090,14 @@ fn apply_grading(
     a.expansion = g.expansion as Scalar;
     a.two_sided = g.two_sided;
     Ok(())
+}
+
+/// The JSON Schema for [`ChtCase`], generated from these same types by
+/// `schemars` - the same discipline `crate::io::case_json::emit_schema` runs
+/// under: the schema cannot disagree with the reader, because it IS the
+/// reader's own types, printed (SPEC-LIT §96.1).
+pub fn emit_cht_schema() -> String {
+    serde_json::to_string_pretty(&schemars::schema_for!(ChtCase)).unwrap_or_default()
 }
 
 #[cfg(test)]

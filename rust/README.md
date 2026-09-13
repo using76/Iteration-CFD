@@ -116,6 +116,10 @@ cargo run --release --bin ofgpu-lowmach -- ../cases/channelPeriodicFluxWF.jsonc 
 # 2상 유동 (SPEC-LIT §20). Martin & Moyce (1952)의 댐 브레이크:
 cargo run --release --bin ofgpu-generate-mesh -- damBreak ../cases/dam
 cargo run --release --bin ofgpu-vof           -- ../cases/dam -endTime 0.25 -surge
+
+# 다영역 전도 + 열응력 (SPEC-LIT §46/§47/§95/§96). 티모셴코(1925) 바이메탈 띠 —
+# 전도 해 뒤 각 영역의 열변형을 풀고 <case>_jsonc/VTK/에 영역별 VTU를 씁니다:
+cargo run --release --bin ofgpu-cht -- ../cases/bimetalStrip.cht.jsonc
 ```
 
 케이스 목록과 각 케이스가 무엇을 재는지는 [`../cases/README.md`](../cases/README.md)에

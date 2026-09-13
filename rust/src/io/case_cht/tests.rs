@@ -1839,3 +1839,1014 @@ fn the_nine_box_decomposition_is_the_single_box_it_was_cut_from() {
         "SPEC-LIT 79.8: nine boxes against one, {worst} K over {span} K = {rel} relative"
     );
 }
+
+// ==========================================================================
+//  SPEC-LIT §96 - the stress fixtures, shared with the driver unit
+// ==========================================================================
+
+/// One steel bar, clamped at x = 0, held at 300 K there and 400 K at x = 0.1
+/// (a linear T), TRef 300: every argument is a &str substituted ONCE, so two
+/// documents of a pair differ in one substring.
+#[allow(clippy::too_many_arguments)]
+fn stress_block(
+    mech_material: &str,
+    ymin_u: &str,
+    traction_x: &str,
+    clamp_ux: &str,
+    tol: &str,
+    max_outer: &str,
+    mech_extra: &str,
+    mode: &str,
+    case_extra: &str,
+) -> String {
+    format!(
+        r#"{{
+  // A bar heating from 300 K at the clamp to 400 K at the tip; TRef 300.
+  "name": "bar",
+  "regions": [
+    {{
+      "name": "bar",
+      "kind": "solid",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.1, 0.02, 0.02] }},
+        "cells": [10, 4, 4],
+        "boundaries": {{
+          "xmin": "clamp", "xmax": "hot",
+          "ymin": "ymin", "ymax": "ymax",
+          "zmin": "zmin", "zmax": "zmax"
+        }}
+      }},
+      "material": {{ "rho": 7800.0, "c": 460.0, "kappa": 45.0 }},
+      "patches": [
+        {{ "match": "clamp", "T": {{ "type": "fixedValue", "value": 300.0 }} }},
+        {{ "match": "hot",   "T": {{ "type": "fixedValue", "value": 400.0 }} }},
+        {{ "match": "ymin",  "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "ymax",  "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "zmin",  "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "zmax",  "T": {{ "type": "zeroGradient" }} }}
+      ],
+      "mechanics": {{
+        {mech_material},
+        "patches": [
+          {{ "match": "clamp", "u": {{ "type": "fixedDisplacement", "value": [{clamp_ux}, 0.0, 0.0] }} }},
+          {{ "match": "hot",   "u": {{ "type": "traction", "value": [{traction_x}, 0.0, 0.0] }} }},
+          {{ "match": "ymin",  "u": {ymin_u} }},
+          {{ "match": "ymax",  "u": {{ "type": "free" }} }},
+          {{ "match": "zmin",  "u": {{ "type": "free" }} }},
+          {{ "match": "zmax",  "u": {{ "type": "free" }} }}
+        ],
+        "solver": {{ "tolerance": {tol}, "maxOuter": {max_outer} }}{mech_extra}
+      }}
+    }}
+  ],
+  "initial": {{ "T": 350.0 }},
+  "run": {{ "steady": true, "mode": "{mode}" }},
+  "numerics": {{
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-12, "maxIter": 4000
+  }}{case_extra}
+}}"#
+    )
+}
+
+/// The `material` entry of a stress document - the four numbers a pair test
+/// turns, substituted ONCE.
+fn steel(alpha: &str, e: &str, nu: &str, t_ref: &str) -> String {
+    format!(r#""material": {{ "E": {e}, "nu": {nu}, "alpha": {alpha}, "TRef": {t_ref} }}"#)
+}
+
+/// The bonded two-zone `materials` list - copper from x = 0 to 0.05, steel
+/// from 0.05 to 0.1, tiling the bar exactly (docs/10's R4).
+fn two_zones() -> String {
+    r#""materials": [
+          { "name": "copper", "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.05, 0.02, 0.02] },
+            "material": { "E": 120e9, "nu": 0.3, "alpha": 17e-6, "TRef": 300.0 } },
+          { "name": "steel", "bounds": { "min": [0.05, 0.0, 0.0], "max": [0.1, 0.02, 0.02] },
+            "material": { "E": 200e9, "nu": 0.3, "alpha": 12e-6, "TRef": 300.0 } }
+        ]"#
+    .to_string()
+}
+
+/// `{ "type": "free" }`, spelled once so a pair test can swap it.
+const FREE: &str = r#"{ "type": "free" }"#;
+
+fn default_stress() -> String {
+    stress_block(
+        &steel("1.2e-5", "200e9", "0.3", "300.0"),
+        FREE,
+        "0.0",
+        "0.0",
+        "1e-8",
+        "500",
+        "",
+        "stress",
+        "",
+    )
+}
+
+fn bond_block(bond: &str) -> String {
+    stress_block(
+        &two_zones(),
+        FREE,
+        "0.0",
+        "0.0",
+        "1e-8",
+        "500",
+        &format!(r#", "bond": "{bond}""#),
+        "stress",
+        "",
+    )
+}
+
+/// Appends an `output` block before the document's closing brace - the
+/// fixture's `{case_extra}` slot, reached by replace so the helper works on
+/// any of the builders above.
+fn with_output(doc: &str, output: &str) -> String {
+    let text = doc.replace("  }\n}", &format!("  }},\n  \"output\": {output}\n}}"));
+    assert_ne!(text, doc, "the output slot must exist");
+    text
+}
+
+// ==========================================================================
+//  SPEC-LIT §96 - the mechanics block reads and lowers
+// ==========================================================================
+
+/// The block reads, lowers, and every unknown key is a parse error naming
+/// its JSON path (the `deny_unknown_fields` rule every format here runs
+/// under).
+#[test]
+fn a_mechanics_block_reads_and_lowers() {
+    let case = read(&default_stress()).expect("parse");
+    let low = case.lower().expect("lower");
+    assert_eq!(low.mechanics.len(), 1);
+    let m = low.mechanics[0].as_ref().expect("bar carries mechanics");
+    assert!(low.stress);
+    assert_eq!(m.zones.len(), 1);
+    assert_eq!(m.zones[0].name, "bar");
+    assert_eq!(m.zones[0].material.e, 200.0e9);
+    assert_eq!(m.zones[0].material.nu, 0.3);
+    assert_eq!(m.zones[0].t_ref, 300.0);
+    assert_eq!(m.zone_of_cell, vec![0; low.meshes[0].n_cells]);
+    assert_eq!(m.patch_bcs.len(), 6);
+    assert_eq!(m.solver.tolerance, 1e-8);
+    assert_eq!(m.solver.max_outer, 500);
+
+    // A mistyped key is a parse error naming the key, not a silent drop.
+    let typo = default_stress().replace(r#""maxOuter": 500"#, r#""maxOutre": 500"#);
+    assert_ne!(typo, default_stress(), "the substitution must change the text");
+    let e = read(&typo).expect_err("must refuse");
+    assert!(e.to_string().contains("maxOutre"), "{e}");
+}
+
+/// The thermal format is bitwise what it was: no `mechanics`, no `mode`, no
+/// `output`, and the lowered case carries the None/false/None defaults.
+#[test]
+fn a_thermal_case_lowers_to_no_mechanics() {
+    let low = read(&default_slab()).expect("parse").lower().expect("lower");
+    assert_eq!(low.mechanics, vec![None, None]);
+    assert!(!low.stress);
+    assert!(low.output.is_none());
+}
+
+/// An `output` block lowers to the resolved plan: `vtu`, once, nothing else
+/// named.
+#[test]
+fn an_output_block_lowers_to_a_vtu_plan() {
+    let text = with_output(&default_stress(), r#"{ "exact": { "format": "vtu" } }"#);
+    let low = read(&text).expect("parse").lower().expect("lower");
+    let plan = low.output.expect("the block lowers to a plan");
+    assert_eq!(
+        plan.exact.expect("exact").formats,
+        vec![crate::io::output_plan::OutputFormat::Vtu]
+    );
+    assert!(plan.vis.is_none());
+    assert!(plan.restart.is_none());
+}
+
+/// The zones' materials went through `Material::validate` (rows 1-2 above)
+/// and `bond` lowers to the S8 enum: `linear` spelled in the JSON, `series`
+/// the default when the word is absent.
+#[test]
+fn bond_lowers_to_s8s_enum() {
+    let low = read(&bond_block("linear"))
+        .expect("parse")
+        .lower()
+        .expect("lower");
+    let m = low.mechanics[0].as_ref().expect("mechanics");
+    assert_eq!(m.bond, crate::solid::BondTreatment::Linear);
+    assert_eq!(m.zones.len(), 2);
+    assert_eq!(m.zones[0].name, "copper");
+    assert_eq!(m.zones[0].material.e, 120.0e9);
+    assert_eq!(m.zone_of_cell[0], 0);
+    let series = read(&bond_block("series"))
+        .expect("parse")
+        .lower()
+        .expect("lower");
+    assert_eq!(
+        series.mechanics[0].as_ref().expect("mechanics").bond,
+        crate::solid::BondTreatment::Series
+    );
+    let absent = read(&default_stress()).expect("parse").lower().expect("lower");
+    assert_eq!(
+        absent.mechanics[0].as_ref().expect("mechanics").bond,
+        crate::solid::BondTreatment::Series
+    );
+}
+
+// ==========================================================================
+//  SPEC-LIT §96.3 - the refusal list, rows 1-19
+// ==========================================================================
+
+/// Row 1: a bad elastic constant is refused naming the number, all three
+/// ways - `E <= 0`, `nu` outside (-1, 0.5), and a negative `alpha`.
+#[test]
+fn a_bad_elastic_constant_is_refused_naming_the_number() {
+    let cases = [
+        (r#""E": 200e9"#, r#""E": -1.0"#, "-1"),
+        (r#""nu": 0.3"#, r#""nu": 0.6"#, "0.6"),
+        (r#""alpha": 1.2e-5"#, r#""alpha": -1e-5"#, "-1e-5"),
+    ];
+    for (from, to, number) in cases {
+        let text = default_stress().replace(from, to);
+        assert_ne!(text, default_stress(), "{from} -> {to} changed nothing");
+        let e = read(&text).expect("parse").lower().expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(msg.contains(number), "{msg}");
+        assert!(msg.contains("mechanics/material"), "{msg}");
+    }
+}
+
+/// Row 2: `nu` above the measured edge is S6's own refusal, which names the
+/// block-coupled route.
+#[test]
+fn a_near_incompressible_solid_is_refused_naming_the_route() {
+    let text = default_stress().replace(r#""nu": 0.3"#, r#""nu": 0.46"#);
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("0.46"), "{msg}");
+    assert!(msg.contains("block-coupled"), "{msg}");
+}
+
+/// Row 3: `alpha > 0` without `TRef` - no reference, no thermal strain.
+#[test]
+fn alpha_without_tref_is_refused() {
+    let text = default_stress().replace(r#", "TRef": 300.0"#, "");
+    assert_ne!(text, default_stress(), "TRef must actually be dropped");
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("TRef"), "{msg}");
+    assert!(msg.contains("no TRef, no strain"), "{msg}");
+}
+
+/// Row 4: `TRef` with `alpha == 0` - a reference nothing reads.
+#[test]
+fn tref_without_alpha_is_refused() {
+    let text = default_stress().replace(r#""alpha": 1.2e-5"#, r#""alpha": 0.0"#);
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("nothing reads"), "{msg}");
+    assert!(msg.contains("TRef"), "{msg}");
+}
+
+/// Row 5: `rho` in an ELASTIC material - the static solve reads no density.
+#[test]
+fn rho_in_mechanics_is_refused_naming_the_static_solve() {
+    let text = default_stress().replace(
+        r#""TRef": 300.0 }"#,
+        r#""TRef": 300.0, "rho": 7800.0 }"#,
+    );
+    assert_ne!(text, default_stress());
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("static solve"), "{msg}");
+    assert!(msg.contains("106b"), "{msg}");
+    assert!(msg.contains("rho"), "{msg}");
+}
+
+/// Row 6: a `ddtScheme` on displacement is §95's inertia refusal, naming
+/// Newmark and `rho_infinity`.
+#[test]
+fn a_ddt_scheme_on_displacement_is_refused_naming_newmark() {
+    let text = default_stress().replace(
+        r#""maxOuter": 500 }"#,
+        r#""maxOuter": 500, "ddtScheme": "Newmark" }"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("Newmark"), "{msg}");
+    assert!(msg.contains("rho_infinity"), "{msg}");
+    assert!(msg.contains("ddtScheme"), "{msg}");
+}
+
+/// Row 7: a static relaxation factor, any value - the outer loop is Aitken
+/// delta-squared and its first omega is 1.
+#[test]
+fn relaxation_in_mechanics_is_refused_naming_aitken() {
+    let text = default_stress().replace(
+        r#""maxOuter": 500 }"#,
+        r#""maxOuter": 500, "relaxation": 0.7 }"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("Aitken"), "{msg}");
+    assert!(msg.contains("relaxation"), "{msg}");
+}
+
+/// Row 8: `mechanics` on a fluid region.
+#[test]
+fn mechanics_on_a_fluid_region_is_refused() {
+    let text = duct_base().replace(
+        r#""fluid": { "rho": 1000.0, "cp": 4000.0, "kappa": 0.6, "mu": 1.0e-3 },"#,
+        r#""fluid": { "rho": 1000.0, "cp": 4000.0, "kappa": 0.6, "mu": 1.0e-3 },
+      "mechanics": {
+        "material": { "E": 2e9, "nu": 0.3, "alpha": 1e-4, "TRef": 300.0 },
+        "patches": [
+          { "match": "west", "u": { "type": "fixedDisplacement", "value": [0.0, 0.0, 0.0] } },
+          { "match": "east", "u": { "type": "free" } },
+          { "match": "floor", "u": { "type": "free" } },
+          { "match": "waterToWall", "u": { "type": "free" } }
+        ]
+      },"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("water"), "{msg}");
+    assert!(msg.contains("mechanics"), "{msg}");
+}
+
+/// Row 9: exactly one spelling of the material - both, neither, and the
+/// empty `materials` list that counts as neither.
+#[test]
+fn one_material_spelling_exactly() {
+    let steel_mat = steel("1.2e-5", "200e9", "0.3", "300.0");
+    let cases = [
+        ("both", default_stress().replace(
+            &steel_mat,
+            r#""materials": [], "material": { "E": 200e9, "nu": 0.3, "alpha": 1.2e-5, "TRef": 300.0 }"#,
+        )),
+        ("neither", default_stress().replace(&steel_mat, r#""bond": "series""#)),
+        ("empty list", default_stress().replace(&steel_mat, r#""materials": []"#)),
+    ];
+    for (what, text) in cases {
+        let e = read(&text).expect("parse").lower().expect_err("must refuse");
+        let msg = e.to_string();
+        assert!(
+            msg.to_lowercase().contains("exactly one") || msg.contains("neither"),
+            "{what}: {msg}"
+        );
+        assert!(msg.contains("mechanics"), "{what}: {msg}");
+    }
+}
+
+/// Row 10: a cell in no zone - the count and the first uncovered centroid.
+#[test]
+fn a_cell_in_no_zone_is_refused() {
+    let text = bond_block("series").replace(
+        r#""min": [0.05, 0.0, 0.0]"#,
+        r#""min": [0.06, 0.0, 0.0]"#,
+    );
+    assert_ne!(text, bond_block("series"));
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("16 cells are in no zone"), "{msg}");
+    assert!(msg.contains("centroid"), "{msg}");
+}
+
+/// Row 11: a cell in two zones - both zone names and the centroid.
+#[test]
+fn a_cell_in_two_zones_is_refused() {
+    let text = bond_block("series").replace(
+        r#""min": [0.05, 0.0, 0.0]"#,
+        r#""min": [0.04, 0.0, 0.0]"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("copper") && msg.contains("steel"), "{msg}");
+    assert!(msg.contains("exactly one zone"), "{msg}");
+}
+
+/// Row 12: `mechanics.patches` - a non-empty patch unnamed, named twice, a
+/// name that is not in `mesh.boundaries`, and an `empty` patch named.
+#[test]
+fn every_mechanical_patch_is_named_exactly_once() {
+    // (a) zmax's rule dropped: the patch carries no mechanical condition.
+    let a = default_stress().replace(
+        r#",
+          { "match": "zmax",  "u": { "type": "free" } }"#,
+        "",
+    );
+    assert_ne!(a, default_stress(), "the rule must actually be dropped");
+    let e = read(&a).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("zmax"), "{msg}");
+    assert!(msg.contains("no mechanical condition"), "{msg}");
+
+    // (b) named twice: clamp's rule duplicated over zmin.
+    let b = default_stress().replace(
+        r#"{ "match": "zmin",  "u": { "type": "free" } }"#,
+        r#"{ "match": "clamp", "u": { "type": "free" } }"#,
+    );
+    let e = read(&b).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("twice"), "{msg}");
+
+    // (c) a name that is not in mesh.boundaries.
+    let c = default_stress().replace(
+        r#"{ "match": "zmin",  "u": { "type": "free" } }"#,
+        r#"{ "match": "bottom", "u": { "type": "free" } }"#,
+    );
+    let e = read(&c).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("no patch 'bottom'"), "{msg}");
+
+    // (d) an `empty` patch named: the z pair becomes `empty` on a one-cell
+    // axis (blockgen refuses anything else), zmax's mechanical rule is
+    // dropped, and `zmin` is named.
+    let d = default_stress()
+        .replace(r#""cells": [10, 4, 4]"#, r#""cells": [10, 4, 1]"#)
+        .replace(
+            r#"{ "match": "zmin",  "T": { "type": "zeroGradient" } },
+        { "match": "zmax",  "T": { "type": "zeroGradient" } }"#,
+            r#"{ "match": "zmin",  "T": { "type": "empty" } },
+        { "match": "zmax",  "T": { "type": "empty" } }"#,
+        )
+        .replace(
+            r#",
+          { "match": "zmax",  "u": { "type": "free" } }"#,
+            "",
+        );
+    assert_ne!(d, default_stress());
+    let e = read(&d).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("contributes to no surface integral"), "{msg}");
+    assert!(msg.contains("zmin"), "{msg}");
+}
+
+/// Row 13: `bond` needs two materials and a known treatment.
+#[test]
+fn bond_needs_two_materials_and_a_known_treatment() {
+    let single = stress_block(
+        &steel("1.2e-5", "200e9", "0.3", "300.0"),
+        FREE,
+        "0.0",
+        "0.0",
+        "1e-8",
+        "500",
+        r#", "bond": "series""#,
+        "stress",
+        "",
+    );
+    let e = read(&single).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("no bond face"), "{msg}");
+
+    let e = read(&bond_block("glue"))
+        .expect("parse")
+        .lower()
+        .expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("glue"), "{msg}");
+    assert!(msg.contains("series") && msg.contains("linear"), "{msg}");
+}
+
+/// Row 14, both directions: `"mode": "stress"` with no `mechanics` anywhere,
+/// and `mechanics` present with the default `"thermal"`.
+#[test]
+fn mode_and_mechanics_are_refused_in_both_directions() {
+    let no_mech = default_slab().replace(
+        r#""run": { "steady": true }"#,
+        r#""run": { "steady": true, "mode": "stress" }"#,
+    );
+    let e = read(&no_mech).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("run/mode"), "{msg}");
+    assert!(msg.contains("mechanics"), "{msg}");
+
+    let thermal = default_stress().replace(r#""mode": "stress""#, r#""mode": "thermal""#);
+    let e = read(&thermal).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("mechanics"), "{msg}");
+    assert!(msg.contains("stress"), "{msg}");
+}
+
+/// Row 15: `"mode": "stress"` with a fluid region - the fluid side of a
+/// thermo-elastic run is docs/10's address 106 (WF-B).
+#[test]
+fn stress_with_a_fluid_region_is_refused() {
+    let text = duct_base()
+        .replace(
+            r#""material": { "rho": 2000.0, "c": 700.0, "kappa": 100.0 },"#,
+            r#""material": { "rho": 2000.0, "c": 700.0, "kappa": 100.0 },
+      "mechanics": {
+        "material": { "E": 200e9, "nu": 0.3, "alpha": 1.2e-5, "TRef": 300.0 },
+        "patches": [
+          { "match": "lidWest", "u": { "type": "fixedDisplacement", "value": [0.0, 0.0, 0.0] } },
+          { "match": "lidEast", "u": { "type": "free" } },
+          { "match": "wallToWater", "u": { "type": "free" } },
+          { "match": "heated", "u": { "type": "free" } }
+        ]
+      },"#,
+        )
+        .replace(
+            r#""run": { "steady": true, "iterations": 400 },"#,
+            r#""run": { "steady": true, "iterations": 400, "mode": "stress" },"#,
+        );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("run/mode"), "{msg}");
+    assert!(msg.contains("106"), "{msg}");
+}
+
+/// Row 16: `"mode": "stress"` on a transient case - the §93 verdict is a
+/// steady residual.
+#[test]
+fn stress_on_a_transient_case_is_refused() {
+    let text = default_stress().replace(
+        r#""run": { "steady": true, "mode": "stress" }"#,
+        r#""run": { "steady": false, "endTime": 1.0, "deltaT": 0.1, "mode": "stress" }"#,
+    );
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("steady"), "{msg}");
+    assert!(msg.contains("103"), "{msg}");
+}
+
+/// Row 18: `output` on a case with a fluid region - the flow path's VTU is a
+/// follow-up, not in this unit.
+#[test]
+fn output_on_a_fluid_case_is_refused() {
+    let text = with_output(&duct_base(), r#"{ "exact": { "format": "vtu" } }"#);
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("output"), "{msg}");
+    assert!(msg.contains("follow-up"), "{msg}");
+}
+
+/// Row 19: a mode that is neither spelling, refused listing both.
+#[test]
+fn an_unknown_run_mode_is_refused_listing_both() {
+    let text = default_stress().replace(r#""mode": "stress""#, r#""mode": "creep""#);
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("creep"), "{msg}");
+    assert!(msg.contains("thermal"), "{msg}");
+    assert!(msg.contains("stress"), "{msg}");
+}
+
+/// Row 17: the `output` block on this format accepts exactly
+/// `exact.format: "vtu"`, once - four sub-cases, the fourth in both
+/// steady and transient dress.
+#[test]
+fn the_output_block_on_cht_accepts_exactly_vtu_once() {
+    // (1) `output.visualisation` - a multi-region mesh is not one Cartesian
+    // lattice, so there is no voxel grid to sample onto.
+    let vis = with_output(&default_stress(), r#"{ "visualisation": { "format": "vdb" } }"#);
+    let e = read(&vis).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("visualisation"), "{msg}");
+    assert!(msg.contains("Cartesian"), "{msg}");
+
+    // (2) `output.restart` - the driver writes no checkpoint of any kind.
+    let restart = with_output(&default_stress(), r#"{ "restart": { "keep": 2 } }"#);
+    let e = read(&restart).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("ofgpu-cht"), "{msg}");
+    assert!(msg.contains("checkpoint"), "{msg}");
+
+    // (3) `exact.format` naming openfoam - one polyMesh per region is
+    // docs/10's address 97 layout.
+    let foam = with_output(&default_stress(), r#"{ "exact": { "format": "openfoam" } }"#);
+    let e = read(&foam).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("polyMesh per region"), "{msg}");
+
+    // (4a) a positive interval on a steady run - §44.4's refusal.
+    let interval = with_output(
+        &default_stress(),
+        r#"{ "exact": { "format": "vtu", "interval": 2.0 } }"#,
+    );
+    let e = read(&interval).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("interval"), "{msg}");
+    assert!(msg.contains("steady"), "{msg}");
+
+    // (4b) ... on a transient THERMAL one (a transient STRESS run is row 16):
+    // the driver's run_case returns one state.
+    let transient = default_slab().replace(
+        r#""run": { "steady": true }"#,
+        r#""run": { "steady": false, "endTime": 2.0, "deltaT": 0.5 }"#,
+    );
+    let text = with_output(&transient, r#"{ "exact": { "format": "vtu", "interval": 2.0 } }"#);
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("one state"), "{msg}");
+}
+
+// ==========================================================================
+//  SPEC-LIT §96 - the generated schema, the case_json trio carried over
+// ==========================================================================
+
+/// The generated schema is a real artifact: written once by this test, then
+/// only ever compared against, never hand-edited.
+#[test]
+fn cht_schema_writes_to_docs_schema_directory() {
+    let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/schema");
+    std::fs::create_dir_all(&out_dir).expect("create docs/schema");
+    let out_path = out_dir.join("cht-1.json");
+    std::fs::write(&out_path, emit_cht_schema()).expect("write docs/schema/cht-1.json");
+    assert!(out_path.exists());
+}
+
+/// The shipped schema IS the generated one. Line endings are normalised
+/// because git may check the file out with CRLF; nothing else is.
+#[test]
+fn the_shipped_cht_schema_is_the_generated_one() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/schema/cht-1.json");
+    let shipped = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let norm = |s: &str| s.replace("\r\n", "\n").trim_end().to_string();
+    assert_eq!(
+        norm(&shipped),
+        norm(&emit_cht_schema()),
+        "docs/schema/cht-1.json has drifted from emit_cht_schema(); regenerate it"
+    );
+}
+
+/// The mechanics block is DOCUMENTED by the schema, word for word: the serde
+/// renames are the JSON keys a user types, and `ChtRun::mode`'s doc comment
+/// is the only place the word `stress` reaches it.
+#[test]
+fn cht_schema_documents_the_mechanics_block() {
+    let text = emit_cht_schema();
+    for word in [
+        "mechanics",
+        "fixedDisplacement",
+        "traction",
+        "symmetry",
+        "free",
+        "stress",
+        "TRef",
+        "bond",
+        "materials",
+        "maxOuter",
+    ] {
+        assert!(text.contains(word), "the schema must document '{word}'");
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT 96 - the driver unit: the bridge, and Gate 96-A's pairs
+// ==========================================================================
+
+use crate::solid::case::{self, RegionStress};
+use crate::cht::ChtSolution;
+
+/// The whole `mode: stress` path of SPEC-LIT 96.2 - parse, lower, run the
+/// thermal solve, demand its verdict, solve the stress - so a pair test
+/// turns one knob of the case and reads the answer.
+fn run_stress_doc(gpu: &Gpu, text: &str) -> (LoweredChtCase, ChtSolution, Vec<RegionStress>) {
+    let case = read(text).expect("parse");
+    let low = case.lower().expect("lower");
+    let sol = run_case(gpu, &low).expect("run");
+    case::thermal_converged(&low, &sol).expect("thermal converged");
+    let stress = case::run_stress(gpu, &low, &sol).expect("stress");
+    (low, sol, stress)
+}
+
+/// `max_c |u_a - u_b|`, the biggest cell-to-cell move between two runs.
+fn du(a: &[Vec3], b: &[Vec3]) -> Scalar {
+    a.iter().zip(b).fold(0.0 as Scalar, |m, (x, y)| m.max((*x - *y).mag()))
+}
+
+fn umax(a: &[Vec3]) -> Scalar {
+    a.iter().map(|x| x.mag()).fold(0.0 as Scalar, Scalar::max)
+}
+
+fn vm_max(s: &[RegionStress]) -> Scalar {
+    s[0].von_mises.iter().copied().fold(0.0 as Scalar, Scalar::max)
+}
+
+/// SPEC-LIT 96.2: `stress` mode refuses to go on unless the thermal solve's
+/// own per-region verdict says every region met the criterion - here, a
+/// `numerics.tolerance` no f64 solve can reach, so the refusal names the
+/// region and the number the case asked for.
+#[test]
+fn stress_on_an_unconverged_thermal_solve_is_refused_naming_the_region() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress().replace(r#""tolerance": 1e-12"#, r#""tolerance": 1e-30"#);
+    assert_ne!(a, default_stress(), "the substitution must change the document");
+    let case = read(&a).expect("parse");
+    let low = case.lower().expect("lower");
+    let sol = run_case(&gpu, &low).expect("run");
+    let e = case::thermal_converged(&low, &sol).expect_err("must refuse");
+    let m = e.to_string();
+    assert!(m.contains("bar"), "{m}");
+    assert!(m.contains("1e-30"), "{m}");
+}
+
+/// The banner (SPEC-LIT 13.4.2) names every zone with its constants, the
+/// predicted contraction, the coupling parameter, and the measured `nu`
+/// edge by number; a region without `mechanics` says so in one line.
+#[test]
+fn the_stress_banner_names_every_zone() {
+    let case = read(&bond_block("series")).expect("parse");
+    let low = case.lower().expect("lower");
+    let banner = case::banner_lines(&low).join("\n");
+    for what in ["copper", "steel", "predicted", "delta", "0.45"] {
+        assert!(banner.contains(what), "banner is missing '{what}':\n{banner}");
+    }
+}
+
+// ==========================================================================
+//  Gate 96-A - the ten pair tests (SPEC-LIT 13.4.1): two runs differing in
+//  exactly one setting of the case file must write DIFFERENT output.
+// ==========================================================================
+
+#[test]
+fn pair_alpha_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(
+        &steel("1.2e-5", "200e9", "0.3", "300.0"),
+        &steel("2.4e-5", "200e9", "0.3", "300.0"),
+    );
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+    println!("pair alpha: du = {d:.6e}, umax(a) = {u:.6e}");
+    assert!(d > 0.5 * u, "du = {d} against umax(a) = {u}: the case said alpha \
+        and the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+/// With a thermal load and displacement/zero-traction BCs only, `u` is
+/// independent of `E` - the displacement equation is homogeneous in `E` -
+/// so this pair asserts on the STRESS, which scales with `E`.
+#[test]
+fn pair_e_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(
+        &steel("1.2e-5", "200e9", "0.3", "300.0"),
+        &steel("1.2e-5", "100e9", "0.3", "300.0"),
+    );
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (va, vb) = (vm_max(&sa), vm_max(&sb));
+    println!("pair E: vm_max(a) = {va:.6e}, vm_max(b) = {vb:.6e}");
+    assert!((va - vb).abs() > 0.3 * va, "|{va} - {vb}|: the case said E and \
+        the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+#[test]
+fn pair_nu_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(
+        &steel("1.2e-5", "200e9", "0.3", "300.0"),
+        &steel("1.2e-5", "200e9", "0.2", "300.0"),
+    );
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+    println!("pair nu: du = {d:.6e}, umax(a) = {u:.6e}");
+    assert!(d > 1e-3 * u, "du = {d} against umax(a) = {u}: the case said nu \
+        and the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+#[test]
+fn pair_tref_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(
+        &steel("1.2e-5", "200e9", "0.3", "300.0"),
+        &steel("1.2e-5", "200e9", "0.3", "350.0"),
+    );
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+    println!("pair TRef: du = {d:.6e}, umax(a) = {u:.6e}");
+    assert!(d > 0.2 * u, "du = {d} against umax(a) = {u}: the case said TRef \
+        and the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+#[test]
+fn pair_traction_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(
+        r#""type": "traction", "value": [0.0,"#,
+        r#""type": "traction", "value": [1e6,"#,
+    );
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+    println!("pair traction: du = {d:.6e}, umax(a) = {u:.6e}");
+    assert!(d > 1e-4 * u, "du = {d} against umax(a) = {u}: the case said \
+        traction and the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+#[test]
+fn pair_fixed_displacement_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(
+        r#""type": "fixedDisplacement", "value": [0.0,"#,
+        r#""type": "fixedDisplacement", "value": [1e-4,"#,
+    );
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+    println!("pair fixedDisplacement: du = {d:.6e}, umax(a) = {u:.6e}");
+    assert!(d > 0.1 * u, "du = {d} against umax(a) = {u}: the case said \
+        fixedDisplacement and the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+#[test]
+fn pair_symmetry_versus_free_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(FREE, r#"{ "type": "symmetry" }"#);
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+    println!("pair symmetry/free: du = {d:.6e}, umax(a) = {u:.6e}");
+    assert!(d > 1e-2 * u, "du = {d} against umax(a) = {u}: the case said \
+        symmetry and the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+#[test]
+fn pair_tolerance_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(r#""tolerance": 1e-8"#, r#""tolerance": 1e-2"#);
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (na, nb) = (sa[0].report.iterations, sb[0].report.iterations);
+    println!("pair tolerance: iterations(a) = {na}, iterations(b) = {nb}");
+    assert!(na != nb, "the case said mechanics/solver/tolerance and the solver \
+        ignored it (SPEC-LIT 13.4.1)");
+    assert!(sa[0].report.converged && sb[0].report.converged);
+}
+
+#[test]
+fn pair_max_outer_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(r#""maxOuter": 500"#, r#""maxOuter": 2"#);
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    assert!(sa[0].report.converged, "a (maxOuter 500) must converge");
+    // `b` by hand: `run_stress` is Err naming the region and the knob
+    // (SPEC-LIT 96.3 row 21).
+    let case = read(&b).expect("parse");
+    let low = case.lower().expect("lower");
+    let sol = run_case(&gpu, &low).expect("run");
+    case::thermal_converged(&low, &sol).expect("thermal converged");
+    let e = case::run_stress(&gpu, &low, &sol).expect_err("maxOuter 2 must refuse");
+    let m = e.to_string();
+    println!("pair maxOuter: refusal = {m}");
+    assert!(m.contains("maxOuter"), "{m}");
+    assert!(m.contains("bar"), "{m}");
+}
+
+#[test]
+fn pair_bond_treatment_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = bond_block("series");
+    let b = bond_block("linear");
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+    println!("pair bond: du = {d:.6e}, umax(a) = {u:.6e}");
+    assert!(d > 1e-6 * u, "du = {d} against umax(a) = {u}: the case said bond \
+        and the solver ignored it (SPEC-LIT 13.4.1)");
+}
+
+/// The shipped bimetal strip, end to end: the conduction solve meets its
+/// criterion, the outer loop converges, and the tip deflection matches
+/// Timoshenko's 1925 closed form (SPEC-LIT (S95.19) carries the same
+/// constant) to 10 % with the right sign. `kappa` is rebuilt here from the
+/// case's own constants, never transcribed.
+#[test]
+fn the_bimetal_strip_case_reproduces_timoshenko() {
+    let Some(gpu) = gpu() else { return };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cases/bimetalStrip.cht.jsonc");
+    let case = super::read_cht_case(&path).expect("read cases/bimetalStrip.cht.jsonc");
+    let low = case.lower().expect("lower");
+    let sol = run_case(&gpu, &low).expect("run");
+    case::thermal_converged(&low, &sol).expect("thermal converged");
+    let stress = case::run_stress(&gpu, &low, &sol).expect("stress");
+    assert_eq!(stress.len(), 1, "one mechanical region");
+    let s = &stress[0];
+    assert!(s.report.converged);
+
+    let m = &low.meshes[0];
+    // The cells of the last x column, their mean centroid x, and the mean
+    // u_y across them - the tip.
+    let last: Vec<usize> =
+        (0..m.n_cells).filter(|&c| m.c[c].x > 0.06 - 0.06 / 96.0).collect();
+    assert!(!last.is_empty());
+    let x_c = last.iter().map(|&c| m.c[c].x).sum::<Scalar>() / last.len() as Scalar;
+    let d_meas = last.iter().map(|&c| s.u[c].y).sum::<Scalar>() / last.len() as Scalar;
+
+    // Timoshenko 1925 (SPEC-LIT (S95.19)): m = a1/a2, n = E1/E2.
+    let (a1, a2) = (0.005 as Scalar, 0.005 as Scalar);
+    let h = a1 + a2;
+    let (mm, n) = (a1 / a2, 200.0e9 / 100.0e9);
+    let (alpha1, alpha2, d_t) = (1.2e-5 as Scalar, 2.0e-5 as Scalar, 10.0 as Scalar);
+    let kappa = 6.0 * (alpha2 - alpha1) * d_t * (1.0 + mm) * (1.0 + mm)
+        / (h * (3.0 * (1.0 + mm) * (1.0 + mm) + (1.0 + mm * n) * (mm * mm + 1.0 / (mm * n))));
+    let d_exp = -kappa * x_c * x_c / 2.0;
+    let err = ((d_meas - d_exp) / d_exp).abs();
+    println!(
+        "bimetal: kappa = {kappa:.7} /m, x_c = {x_c:.6} m, expected d_y = {d_exp:.4e} m, \
+         measured d_y = {d_meas:.4e} m, error {:.3} %, outer iterations {}",
+        100.0 * err,
+        s.report.iterations
+    );
+    assert!(err <= 0.10, "tip deflection {d_meas} against closed form {d_exp}: {err} %");
+    assert!(d_meas < 0.0, "brass on top bends the tip DOWN (-y), got {d_meas}");
+}
+
+/// The written VTU is S2's own point format, read back by S2's own python
+/// reader: 1536 cells, `sigma` 9 and symmetric, `u` on points, `T` in both
+/// blocks.
+#[test]
+fn the_written_region_vtu_is_read_back() {
+    let Some(gpu) = gpu() else { return };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cases/bimetalStrip.cht.jsonc");
+    let case = super::read_cht_case(&path).expect("read");
+    let low = case.lower().expect("lower");
+    let sol = run_case(&gpu, &low).expect("run");
+    let stress = case::run_stress(&gpu, &low, &sol).expect("stress");
+    let dir = std::env::temp_dir().join("ofgpu_s9_vtk");
+    let paths = case::write_region_vtu(&dir, &low, &sol, &stress).expect("write");
+    assert_eq!(paths.len(), 1, "one region, one VTU");
+
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tools/vtu_read.py");
+    let out = std::process::Command::new("python")
+        .arg(&script)
+        .arg(&paths[0])
+        .arg("--cells").arg("1536")
+        .arg("--cell").arg("T:1")
+        .arg("--cell").arg("sigma:9")
+        .arg("--cell").arg("vonMises:1")
+        .arg("--cell").arg("magU:1")
+        .arg("--cell").arg("sigmaPrincipal:3")
+        .arg("--cell").arg("u:3")
+        .arg("--point").arg("u:3")
+        .arg("--point").arg("T:1")
+        .arg("--symmetric").arg("sigma")
+        .output();
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("python not spawnable ({e}); the python-reader check passes vacuously");
+            return;
+        }
+    };
+    assert!(
+        out.status.success(),
+        "tools/vtu_read.py rejected the region VTU: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The shipped die stack in `mode: stress`: three regions carry
+/// `mechanics`, each is solved on its OWN mesh with its own slice of the
+/// conjugate field, the grease is skipped, and every run converges
+/// (SPEC-LIT 96.2). Prints the summary the driver prints.
+#[test]
+fn the_shipped_die_stack_case_runs_in_stress_mode() {
+    let Some(gpu) = gpu() else { return };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cases/dieStack.cht.jsonc");
+    let case = super::read_cht_case(&path).expect("read cases/dieStack.cht.jsonc");
+    let low = case.lower().expect("lower");
+    let sol = run_case(&gpu, &low).expect("run");
+    case::thermal_converged(&low, &sol).expect("thermal converged");
+    let stress = case::run_stress(&gpu, &low, &sol).expect("stress");
+
+    let names: Vec<&str> = stress.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["die", "solder", "spreader"], "one entry per mechanical region, in order");
+    for s in &stress {
+        assert!(s.report.converged, "region '{}' did not converge", s.name);
+        assert!(s.max_u > 0.0, "region '{}' did not move", s.name);
+    }
+    for line in case::summary_lines(&low, &stress) {
+        println!("{line}");
+    }
+}
