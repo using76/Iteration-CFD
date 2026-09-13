@@ -26,7 +26,10 @@
       ch. 1 - Duhamel-Neumann and the free-expansion state
     S. P. Timoshenko, J. N. Goodier, "Theory of Elasticity", 3rd ed.,
       McGraw-Hill (1970) ch. 1 - the Lame conversion
-    ofgpu SPEC-LIT.md sections 1, 2.4, 3.2, 3.5, 4, 8.2, 8.4, 21 and 81
+    Z. Tukovic, A. Ivankovic & A. Karac, Int. J. Numer. Methods Eng. 93
+      (2013) 400-419, DOI 10.1002/nme.4390 - the bond face's displacement
+      from traction continuity with one-sided normal derivatives
+    ofgpu SPEC-LIT.md sections 1, 2.4, 3.2, 3.5, 4, 8.2, 8.4, 21, 81 and 95.8
 
   OpenFOAM and solids4foam are GPL and were not opened; the kernels are the
   device port of src/solid/prototype.rs, diffed against it stage by stage.
@@ -353,10 +356,10 @@ extern "C" __global__ void solidTractionRefGrad
     const ofvec3* __restrict__ bSf,
     const ofscalar* __restrict__ bT,
     const oflabel* __restrict__ bKind,
-    ofscalar mu,
-    ofscalar lam,
-    ofscalar thermalCoeff,
-    ofscalar tRef,
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ lambda,
+    const ofscalar* __restrict__ betaAlpha,
+    const ofscalar* __restrict__ tRef,
     oflabel nBf
 )
 {
@@ -368,18 +371,18 @@ extern "C" __global__ void solidTractionRefGrad
     const ofscalar m = sqrt(dot3(bSf[b], bSf[b]));
     const ofvec3 n = (m > OFGPU_DBL_MIN) ? scaleV(bSf[b], (ofscalar)1/m)
                                          : mkvec(0, 0, 0);
-    const ofscalar thermal = thermalCoeff*(bT[b] - tRef);
-    const ofscalar gamma = 2*mu + lam;
+    const ofscalar thermal = betaAlpha[c]*(bT[b] - tRef[c]);
+    const ofscalar gamma = 2*mu[c] + lambda[c];
     const oftensor g = grad[c];
     const oftensor gt = subT(g, outerT(n, dotLeft(n, g)));
     const ofvec3 dr = dotRight(gt, n);
     const ofvec3 t = traction[b];
     const ofscalar tn = dot3(t, n);
     const ofscalar drn = dot3(dr, n);
-    const ofscalar normal = (tn - mu*drn - lam*traceT(gt) + thermal)/gamma;
+    const ofscalar normal = (tn - mu[c]*drn - lambda[c]*traceT(gt) + thermal)/gamma;
     const ofvec3 tangential = subV
     (
-        scaleV(subV(t, scaleV(n, tn)), (ofscalar)1/mu),
+        scaleV(subV(t, scaleV(n, tn)), (ofscalar)1/mu[c]),
         subV(dr, scaleV(n, drn))
     );
     const ofvec3 r = addV(scaleV(n, normal), tangential);
@@ -420,8 +423,15 @@ extern "C" __global__ void solidDivSigmaExp
     const oflabel* __restrict__ cfOwn,
     const oflabel* __restrict__ bcfOffset,
     const oflabel* __restrict__ bcfFace,
-    ofscalar mu,
-    ofscalar lam,
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ lambda,
+    const oflabel* __restrict__ faceBond,
+    const ofvec3* __restrict__ bondT,
+    const ofvec3* __restrict__ u,
+    const ofscalar* __restrict__ gammaMagSf,
+    const ofscalar* __restrict__ deltaCoeffs,
+    const ofvec3* __restrict__ nonOrthCorr,
+    const ofscalar* __restrict__ magSf,
     oflabel nCells
 )
 {
@@ -435,8 +445,26 @@ extern "C" __global__ void solidDivSigmaExp
         const oflabel f = cfFace[j];
         const oflabel o = owner[f];
         const oflabel nb = neighbour[f];
-        const oftensor gf = faceTensor(grad[o], grad[nb], w[f]);
-        const ofvec3 q = deferredTraction(mu, lam, gf, sf[f]);
+        const ofvec3 q = (faceBond[f] >= 0)
+            ? subV
+            (
+                // The bond face carries its own traction already: the
+                // face's explicit contribution is t_f |Sf| minus the
+                // implicit share and the non-orthogonal correction the
+                // matrix carries, so the fixed point holds t_f |Sf| on any
+                // mesh (SPEC-LIT 95.8, (S95.12)).
+                scaleV(bondT[faceBond[f]], magSf[f]),
+                scaleV
+                (
+                    addV
+                    (
+                        scaleV(subV(u[nb], u[o]), deltaCoeffs[f]),
+                        dotLeft(nonOrthCorr[f], faceTensor(grad[o], grad[nb], w[f]))
+                    ),
+                    gammaMagSf[f]
+                )
+            )
+            : deferredTraction(mu[c], lambda[c], faceTensor(grad[o], grad[nb], w[f]), sf[f]);
         acc = addV(acc, cfOwn[j] ? q : scaleV(q, (ofscalar)-1));
     }
 
@@ -444,7 +472,7 @@ extern "C" __global__ void solidDivSigmaExp
     {
         const oflabel b = bcfFace[j];
         if (bKind[b] == OFPATCH_EMPTY) continue;
-        ofvec3 q = deferredTraction(mu, lam, bGrad[b], bSf[b]);
+        ofvec3 q = deferredTraction(mu[c], lambda[c], bGrad[b], bSf[b]);
         for (oflabel i = 0; i < 3; ++i)
         {
             if (!((mask[b] >> i) & 1)) setVecCmpt(q, i, 0);
@@ -485,8 +513,9 @@ extern "C" __global__ void solidThermalLoad
     const oflabel* __restrict__ cfOwn,
     const oflabel* __restrict__ bcfOffset,
     const oflabel* __restrict__ bcfFace,
-    ofscalar thermalCoeff,
-    ofscalar tRef,
+    const ofscalar* __restrict__ betaAlpha,
+    const ofscalar* __restrict__ tRef,
+    const oflabel* __restrict__ faceBond,
     oflabel nCells
 )
 {
@@ -498,10 +527,14 @@ extern "C" __global__ void solidThermalLoad
     for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
     {
         const oflabel f = cfFace[j];
+        // A bond face's thermal share is inside its traction already
+        // (through theta of the bond-face solve), so it contributes here
+        // nothing (SPEC-LIT 95.8).
+        if (faceBond[f] >= 0) continue;
         const oflabel o = owner[f];
         const oflabel nb = neighbour[f];
         const ofscalar tf = w[f]*t[o] + (1 - w[f])*t[nb];
-        const ofvec3 q = scaleV(sf[f], thermalCoeff*(tf - tRef));
+        const ofvec3 q = scaleV(sf[f], betaAlpha[c]*(tf - tRef[c]));
         acc = addV(acc, cfOwn[j] ? q : scaleV(q, (ofscalar)-1));
     }
 
@@ -509,7 +542,7 @@ extern "C" __global__ void solidThermalLoad
     {
         const oflabel b = bcfFace[j];
         if (bKind[b] == OFPATCH_EMPTY) continue;
-        ofvec3 q = scaleV(bSf[b], thermalCoeff*(bT[b] - tRef));
+        ofvec3 q = scaleV(bSf[b], betaAlpha[c]*(bT[b] - tRef[c]));
         for (oflabel i = 0; i < 3; ++i)
         {
             if (!((mask[b] >> i) & 1)) setVecCmpt(q, i, 0);
@@ -552,4 +585,186 @@ extern "C" __global__ void solidBoundaryTraction
     }
 
     source[c] += acc;
+}
+
+// ==========================================================================
+//  The bond faces - two materials bonded inside one solid region
+//  (SPEC-LIT 95.8). One thread per bond face, then one thread per cell.
+// ==========================================================================
+
+OFGPU_DEV oftensor scaleT(const oftensor& a, ofscalar s)
+{
+    oftensor t;
+    t.xx = a.xx*s; t.xy = a.xy*s; t.xz = a.xz*s;
+    t.yx = a.yx*s; t.yy = a.yy*s; t.yz = a.yz*s;
+    t.zx = a.zx*s; t.zy = a.zy*s; t.zz = a.zz*s;
+    return t;
+}
+
+//- What one bond face says, written into bondU[b] and bondT[b]. Mode 0 is
+//  the Series treatment: the face displacement is solved for the traction
+//  the two sides agree on, with one-sided normal derivatives and an
+//  interpolated tangential gradient (Tukovic, Ivankovic & Karac 2013), and
+//  the face traction is the owner side's. Mode 1 is the Linear treatment:
+//  the face is any face, the constants interpolated linearly.
+extern "C" __global__ void solidBondFace
+(
+    ofvec3* __restrict__ bondU,
+    ofvec3* __restrict__ bondT,
+    const oflabel* __restrict__ bondFace,
+    const ofvec3* __restrict__ u,
+    const oftensor* __restrict__ grad,
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ lambda,
+    const ofscalar* __restrict__ betaAlpha,
+    const ofscalar* __restrict__ tRef,
+    const ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ sf,
+    const ofscalar* __restrict__ magSf,
+    const ofvec3* __restrict__ cf,
+    const ofvec3* __restrict__ c,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    oflabel mode,
+    oflabel nBond
+)
+{
+    const oflabel b = OFGPU_TID;
+    if (b >= nBond) return;
+
+    const oflabel f = bondFace[b];
+    const oflabel o = owner[f];
+    const oflabel nb = neighbour[f];
+    const ofscalar m = magSf[f];
+    const ofvec3 n = (m > OFGPU_DBL_MIN) ? scaleV(sf[f], (ofscalar)1/m)
+                                         : mkvec(0, 0, 0);
+    const ofscalar dp = fabs(dot3(sf[f], subV(cf[f], c[o])))/m;
+    const ofscalar dn = fabs(dot3(sf[f], subV(c[nb], cf[f])))/m;
+    const ofscalar ww = w[f];
+    const oftensor gf = faceTensor(grad[o], grad[nb], ww);
+    const ofscalar tf = ww*t[o] + (1 - ww)*t[nb];
+    const ofscalar thetaP = betaAlpha[o]*(tf - tRef[o]);
+    const ofscalar thetaN = betaAlpha[nb]*(tf - tRef[nb]);
+    const oftensor gt = subT(gf, outerT(n, dotLeft(n, gf)));
+    const ofvec3 r = dotRight(gt, n);
+
+    ofvec3 uf;
+    if (mode == 0)
+    {
+        const ofscalar aP = (2*mu[o] + lambda[o])/dp;
+        const ofscalar aN = (2*mu[nb] + lambda[nb])/dn;
+        const ofscalar bP = mu[o]/dp;
+        const ofscalar bN = mu[nb]/dn;
+        const ofscalar ufn =
+        (
+            aP*dot3(u[o], n) + aN*dot3(u[nb], n)
+            + (lambda[nb] - lambda[o])*traceT(gt)
+            - (thetaN - thetaP)
+        )/(aP + aN);
+        const ofvec3 uft = scaleV
+        (
+            addV
+            (
+                addV
+                (
+                    scaleV(subV(u[o], scaleV(n, dot3(u[o], n))), bP),
+                    scaleV(subV(u[nb], scaleV(n, dot3(u[nb], n))), bN)
+                ),
+                scaleV(r, mu[nb] - mu[o])
+            ),
+            (ofscalar)1/(bP + bN)
+        );
+        uf = addV(scaleV(n, ufn), uft);
+    }
+    else
+    {
+        uf = addV(scaleV(u[o], ww), scaleV(u[nb], 1 - ww));
+    }
+    bondU[b] = uf;
+
+    ofvec3 tf_;
+    if (mode == 0)
+    {
+        const ofvec3 gP = scaleV(subV(uf, u[o]), (ofscalar)1/dp);
+        const ofscalar gpn = dot3(gP, n);
+        tf_ = addV
+        (
+            addV
+            (
+                addV
+                (
+                    addV
+                    (
+                        scaleV(gP, mu[o]),
+                        scaleV(n, (mu[o] + lambda[o])*gpn)
+                    ),
+                    scaleV(r, mu[o])
+                ),
+                scaleV(n, lambda[o]*traceT(gt))
+            ),
+            scaleV(n, -thetaP)
+        );
+    }
+    else
+    {
+        const ofscalar muF = ww*mu[o] + (1 - ww)*mu[nb];
+        const ofscalar lamF = ww*lambda[o] + (1 - ww)*lambda[nb];
+        const ofscalar thetaF = ww*thetaP + (1 - ww)*thetaN;
+        tf_ = subV
+        (
+            addV
+            (
+                scaleV(addV(dotLeft(n, gf), dotRight(gf, n)), muF),
+                scaleV(n, lamF*traceT(gf))
+            ),
+            scaleV(n, thetaF)
+        );
+    }
+    bondT[b] = tf_;
+}
+
+//- The Green-Gauss correction at the bond cells: the bond face's share of a
+//  cell's gradient sum is rewritten from the interpolated displacement the
+//  plain sweep used to the displacement the bond face solved for. One
+//  thread per cell, gathered over the cell's internal faces; a thread
+//  writes only its own grad[c].
+extern "C" __global__ void solidBondGradCorr
+(
+    oftensor* __restrict__ grad,
+    const ofvec3* __restrict__ bondU,
+    const oflabel* __restrict__ faceBond,
+    const ofvec3* __restrict__ u,
+    const ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ sf,
+    const ofscalar* __restrict__ v,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    oftensor acc;
+    acc.xx = 0; acc.xy = 0; acc.xz = 0;
+    acc.yx = 0; acc.yy = 0; acc.yz = 0;
+    acc.zx = 0; acc.zy = 0; acc.zz = 0;
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+        if (faceBond[f] < 0) continue;
+        const oflabel o = owner[f];
+        const oflabel nb = neighbour[f];
+        const ofvec3 uf = bondU[faceBond[f]];
+        const ofvec3 du = subV(uf, addV(scaleV(u[o], w[f]), scaleV(u[nb], 1 - w[f])));
+        const oftensor t = outerT(sf[f], du);
+        acc = cfOwn[j] ? addT(acc, t) : subT(acc, t);
+    }
+
+    grad[c] = addT(grad[c], scaleT(acc, (ofscalar)1/v[c]));
 }

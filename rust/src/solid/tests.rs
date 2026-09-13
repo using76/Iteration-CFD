@@ -613,3 +613,239 @@ fn a_displacement_that_should_have_moved_the_mesh_is_refused() {
         "{msg}"
     );
 }
+
+// ==========================================================================
+//  Two materials bonded in one region
+// ==========================================================================
+
+/// Device vs host on a two-material jittered block: the bond face values,
+/// the corrected cell gradient, the solved boundary gradient's free
+/// components, the assembled right-hand side and the stress readout each
+/// match the host mirrors of the same algebra. One pass, so the host can
+/// replay the sub-pass sequence step by step.
+#[test]
+fn the_bond_kernels_match_the_host_mirrors() {
+    use super::materials::{
+        bond_face_values, bond_grad_correction, rhs_mirror, traction_ref_grad_mirror, CellMaterial,
+    };
+    use super::stress::{stress_of, StressFields};
+    use crate::reference::fvc_grad_vector;
+
+    let Some(gpu) = gpu() else { return };
+    let a = Material::steel(0.3);
+    let b = Material { e: 100e9, nu: 0.3, alpha: 2.0e-5 };
+    let hm = prototype::jittered_block(10, 0.25).expect("block");
+    let gm = upload(&gpu, &hm);
+    let n = hm.n_cells;
+    let nbf = hm.n_boundary_faces;
+
+    let low: Vec<Label> = (0..n as Label).filter(|&c| hm.c[c as usize].x < 0.5).collect();
+    let high: Vec<Label> = (0..n as Label).filter(|&c| hm.c[c as usize].x >= 0.5).collect();
+    let map = MaterialMap::from_cell_lists(
+        &[("steel", a, None, low), ("brass", b, None, high)],
+        n,
+        BondTreatment::Series,
+    )
+    .expect("map");
+
+    let mut d = Displacement::with_materials(&gpu, &gm, &hm, &map, &fixed_minus_x(), tight())
+        .expect("displacement");
+    d.passes = 1;
+
+    let t: Vec<Scalar> = (0..n).map(|c| 300.0 + 20.0 * hm.c[c].x).collect();
+    let bt: Vec<Scalar> = (0..nbf).map(|bf| 300.0 + 20.0 * hm.b_cf[bf].x).collect();
+    d.set_temperature(&gpu, &t, &bt, 300.0).expect("temperature");
+    let u: Vec<Vec3> = hm
+        .c
+        .iter()
+        .map(|c| Vec3::new(1e-3 * c.x * c.x, 1e-3 * c.x * c.y, 1e-3 * c.y * c.z))
+        .collect();
+    let ub0: Vec<Vec3> = hm
+        .b_cf
+        .iter()
+        .map(|c| Vec3::new(1e-3 * c.x * c.x, 1e-3 * c.x * c.y, 1e-3 * c.y * c.z))
+        .collect();
+    d.set_displacement(&gpu, &u, &ub0).expect("displacement");
+    d.correct_boundary(&gpu).expect("correct");
+    d.assemble_rhs(&gpu).expect("rhs");
+
+    let pc = map.per_cell();
+    let t_ref_pc = map.t_ref_per_cell(300.0);
+    let bonds = map.bonds(&hm).expect("bonds");
+    let (gamma_mag_sf, _) = map.implicit_coefficients(&hm);
+    let mask = gpu.download(&d.bcs.mask).expect("mask");
+    let fixed: Vec<[bool; 3]> = mask
+        .iter()
+        .map(|&mk| [(mk >> 0) & 1 == 1, (mk >> 1) & 1 == 1, (mk >> 2) & 1 == 1])
+        .collect();
+    let traction_h = gpu.download(&d.bcs.traction).expect("traction");
+
+    // Host, in the device's order. The bond values a plain gradient
+    // produced, then the correction they cause: the sub-pass hands its
+    // traction kernel the CORRECTED gradient, so the mirror replays that.
+    let bond_values_on = |grad: &[Tensor]| -> (Vec<Vec3>, Vec<Vec3>) {
+        let mut bu = Vec::new();
+        let mut btl = Vec::new();
+        for &f in &bonds.bond_face {
+            let fu = f as usize;
+            let (o, nb) = (hm.owner[fu] as usize, hm.neighbour[fu] as usize);
+            let bf = bond_face_values(
+                map.bond,
+                hm.weights[fu],
+                hm.sf[fu],
+                hm.cf[fu],
+                hm.c[o],
+                hm.c[nb],
+                u[o],
+                u[nb],
+                grad[o],
+                grad[nb],
+                t[o],
+                t[nb],
+                CellMaterial::of(&pc, &t_ref_pc, o),
+                CellMaterial::of(&pc, &t_ref_pc, nb),
+            );
+            bu.push(bf.u_f);
+            btl.push(bf.t_f);
+        }
+        (bu, btl)
+    };
+
+    let mut g1 = Vec::new();
+    fvc_grad_vector(&mut g1, &u, &ub0, &hm);
+    let (b1_u, _b1_t) = bond_values_on(&g1);
+    bond_grad_correction(&mut g1, &bonds, &u, &b1_u, &hm);
+    let ref_grad_h = traction_ref_grad_mirror(&pc, &t_ref_pc, &g1, &traction_h, &bt, &fixed, &hm);
+    let rg_dev = gpu.download(&d.u.ref_grad).expect("ref_grad");
+    for i in 0..3usize {
+        let mut dev = Vec::new();
+        let mut host = Vec::new();
+        for bf in 0..nbf {
+            if (mask[bf] >> i) & 1 == 0 {
+                dev.push(rg_dev[bf].component(i));
+                host.push(ref_grad_h[bf].component(i));
+            }
+        }
+        let r = rel_max(&dev, &host);
+        println!("  ref_grad[{i}]: rel = {r:e}");
+        assert!(r <= 1e-12, "ref_grad[{i}]: {r:e}");
+    }
+
+    // The final sweep: the plain gradient from the RE-EVALUATED boundary
+    // values, the bond faces off it, the correction into the two bond
+    // cells, then the boundary gradient from the corrected gradient.
+    let ub1 = gpu.download(&d.u.bf).expect("ub");
+    let mut g2 = Vec::new();
+    fvc_grad_vector(&mut g2, &u, &ub1, &hm);
+    let (bond_u_h, bond_t_h) = bond_values_on(&g2);
+    let r = rel_max(
+        &flat3(&gpu.download(&d.bond_u).expect("bond_u")),
+        &flat3(&bond_u_h),
+    );
+    println!("  bond_u: rel = {r:e}");
+    assert!(r <= 1e-12, "bond_u: {r:e}");
+
+    let bond_t_dev = gpu.download(&d.bond_t).expect("bond_t");
+    let r = rel_max(&flat3(&bond_t_dev), &flat3(&bond_t_h));
+    println!("  bond_t: rel = {r:e}");
+    assert!(r <= 1e-12, "bond_t: {r:e}");
+
+    bond_grad_correction(&mut g2, &bonds, &u, &bond_u_h, &hm);
+    let r = rel_max(
+        &flat9(&gpu.download(&d.grad).expect("grad")),
+        &flat9(&g2),
+    );
+    println!("  grad: rel = {r:e}");
+    assert!(r <= 1e-12, "grad: {r:e}");
+
+    let grad_dev = gpu.download(&d.grad).expect("grad");
+    let b_grad_dev = gpu.download(&d.b_grad).expect("b_grad");
+    let rhs_h = rhs_mirror(
+        &pc,
+        &t_ref_pc,
+        &bonds,
+        &bond_t_dev,
+        &gamma_mag_sf,
+        &u,
+        &grad_dev,
+        &b_grad_dev,
+        &t,
+        &bt,
+        &fixed,
+        &hm,
+    );
+    let r = rel_max(&flat3(&gpu.download(&d.rhs).expect("rhs")), &flat3(&rhs_h));
+    println!("  rhs: rel = {r:e}");
+    assert!(r <= 1e-12, "rhs: {r:e}");
+
+    let mut fields = StressFields::new(&gpu, n).expect("stress fields");
+    fields
+        .compute_with(&gpu, &d.cells, &d.grad, &d.u.f, &d.t)
+        .expect("stress");
+    let sigma = gpu.download(&fields.sigma).expect("sigma");
+    let sigma_h: Vec<Tensor> = (0..n)
+        .map(|c| stress_of(pc.mu[c], pc.lambda[c], pc.alpha[c], grad_dev[c], t[c] - t_ref_pc[c]))
+        .collect();
+    let r = rel_max(&flat9(&sigma), &flat9(&sigma_h));
+    println!("  sigma: rel = {r:e}");
+    assert!(r <= 1e-12, "sigma: {r:e}");
+}
+
+/// A one-material map is the one-material operator, to the bit: the
+/// map-taking constructor and S5's own constructor build the same
+/// coefficients, solve the same systems and leave the same `next`, `grad`
+/// and `rhs`, every component's bits equal - and the map makes no bond
+/// faces to boot.
+#[test]
+fn a_one_material_map_leaves_s5_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let mat = Material::steel(0.3);
+    let hm = prototype::block(20).expect("block");
+    let gm = upload(&gpu, &hm);
+    let n = hm.n_cells;
+    let nbf = hm.n_boundary_faces;
+
+    let mut d1 =
+        Displacement::new(&gpu, &gm, &hm, mat, &fixed_minus_x(), tight()).expect("new");
+    let map = MaterialMap::uniform("steel", mat, n);
+    let mut d2 = Displacement::with_materials(&gpu, &gm, &hm, &map, &fixed_minus_x(), tight())
+        .expect("with_materials");
+    assert_eq!(d2.n_bond(), 0);
+
+    let t = vec![T_REF + DT; n];
+    let bt = vec![T_REF + DT; nbf];
+    d1.set_temperature(&gpu, &t, &bt, T_REF).expect("t1");
+    d2.set_temperature(&gpu, &t, &bt, T_REF).expect("t2");
+
+    let mut out1 = gpu.zeros(n).expect("zeros");
+    let mut out2 = gpu.zeros(n).expect("zeros");
+    d1.apply(&gpu, &mut out1).expect("apply 1");
+    d2.apply(&gpu, &mut out2).expect("apply 2");
+
+    let bits3 = |v: &[Vec3]| -> Vec<u64> {
+        v.iter().flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).collect()
+    };
+    let bits9 = |v: &[Tensor]| -> Vec<u64> {
+        v.iter()
+            .flat_map(|s| {
+                [s.xx.to_bits(), s.xy.to_bits(), s.xz.to_bits(), s.yx.to_bits(),
+                 s.yy.to_bits(), s.yz.to_bits(), s.zx.to_bits(), s.zy.to_bits(),
+                 s.zz.to_bits()]
+            })
+            .collect()
+    };
+
+    let next1 = gpu.download(&out1).expect("next1");
+    let next2 = gpu.download(&out2).expect("next2");
+    assert_eq!(bits3(&next1), bits3(&next2), "next");
+    assert_eq!(
+        bits9(&gpu.download(&d1.grad).expect("grad1")),
+        bits9(&gpu.download(&d2.grad).expect("grad2")),
+        "grad"
+    );
+    assert_eq!(
+        bits3(&gpu.download(&d1.rhs).expect("rhs1")),
+        bits3(&gpu.download(&d2.rhs).expect("rhs2")),
+        "rhs"
+    );
+}

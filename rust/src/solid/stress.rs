@@ -41,6 +41,8 @@ use crate::error::{Error, Result};
 use crate::io::pointfield::PointInterpolator;
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::HostMesh;
+use crate::solid::displacement::DeviceMaterials;
+use crate::solid::materials::PerCell;
 use crate::solid::Material;
 use crate::{Label, Scalar, Tensor, Vec3};
 use cudarc::driver::{CudaFunction, PushKernelArg};
@@ -126,6 +128,32 @@ impl StressFields {
         t: &DevBuf<Scalar>,
         t_ref: Scalar,
     ) -> Result<()> {
+        // A read-out at the end of a run, outside the iteration: the four
+        // uniform uploads are the price of keeping this signature, accepted
+        // by design. The per-cell entry a bonded region takes is
+        // [`Self::compute_with`].
+        let n = self.n_cells;
+        let pc = PerCell {
+            mu: vec![mat.mu(); n],
+            lambda: vec![mat.lambda(); n],
+            alpha: vec![mat.alpha; n],
+            beta_alpha: vec![mat.three_lambda_two_mu() * mat.alpha; n],
+        };
+        let cells = DeviceMaterials::upload(gpu, &pc, &vec![t_ref; n])?;
+        self.compute_with(gpu, &cells, grad_u, u, t)
+    }
+
+    /// The per-cell entry: the stress kernel reads the operator's own
+    /// material arrays, so a bonded region reads its stress out of the same
+    /// kernels a one-material region always used.
+    pub fn compute_with(
+        &mut self,
+        gpu: &Gpu,
+        cells: &DeviceMaterials,
+        grad_u: &DevBuf<Tensor>,
+        u: &DevBuf<Vec3>,
+        t: &DevBuf<Scalar>,
+    ) -> Result<()> {
         let n = self.n_cells;
         for (what, len) in [("grad_u", grad_u.len()), ("u", u.len()), ("t", t.len())] {
             if len != n {
@@ -134,7 +162,6 @@ impl StressFields {
                 )));
             }
         }
-        let (mu, lambda, alpha) = (mat.mu(), mat.lambda(), mat.alpha);
         let nl = n as Label;
         let named = |e: cudarc::driver::DriverError, what: &'static str| {
             Error::Config(format!("solid stress: {what} launch failed: {e:?}"))
@@ -145,10 +172,10 @@ impl StressFields {
                 .arg(&mut self.sigma)
                 .arg(grad_u)
                 .arg(t)
-                .arg(&t_ref)
-                .arg(&mu)
-                .arg(&lambda)
-                .arg(&alpha)
+                .arg(&cells.t_ref)
+                .arg(&cells.mu)
+                .arg(&cells.lambda)
+                .arg(&cells.alpha)
                 .arg(&nl)
                 .launch(cfg_for(n))
                 .map_err(|e| named(e, "solidStress"))?;

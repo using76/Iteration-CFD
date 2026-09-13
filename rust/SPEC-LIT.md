@@ -27729,3 +27729,59 @@ No boundary-point stress extrapolation. §94's order study on cell-centre
 stress is what the stress section measures; extrapolating to a boundary POINT
 is a second scheme with a second order, and it gets its own paragraph and its
 own gate when it is written, not a silent reuse of this one.
+
+### 95.8 Two materials bonded in one region — the series (2 mu + lambda) face coefficient and the traction-continuous bond face
+
+*(prose written from the measured numbers; pending.)*
+
+```text
+theta_s = beta_alpha_s (T_f - T_ref_s)                                       (S95.9)
+```
+
+```text
+u_f.n     = [ a_P (u_P.n) + a_N (u_N.n) + (lambda_N - lambda_P) tr(G_t)
+              - (theta_N - theta_P) ] / (a_P + a_N),    a_s = gamma_s / d_s
+u_f,t     = [ b_P u_P,t + b_N u_N,t + (mu_N - mu_P) r ] / (b_P + b_N),
+              b_s = mu_s / d_s,   r = G_t.n
+u_f       = n (u_f.n) + u_f,t                                                (S95.10)
+```
+
+```text
+t_f = mu_P g_P + (mu_P + lambda_P)(g_P.n) n + mu_P r
+      + lambda_P tr(G_t) n - theta_P n,        g_P = (u_f - u_P) / d_P       (S95.11)
+```
+
+```text
+q_f = t_f |Sf| - gamma_mag_sf[f] ( Delta_f (u_N - u_P) + k_f . G_f )         (S95.12)
+```
+
+```text
+du_f = u_f - (w u_P + (1 - w) u_N)                                           (S95.13)
+```
+
+```text
+gamma_mag_sf[f] = mag_sf[f] / ((1 - w)/gamma_P + w/gamma_N)                  (S95.14)
+```
+
+```text
+L_c = -beta_alpha_c ( SUM internal f, not bond,  s_f (T_f - t_ref_c) Sf
+                    + SUM boundary b, fixed i,      (T_b - t_ref_c) Sf_b,i ) (S95.15)
+```
+
+```text
+t_f = mu_f (n.G_f + G_f.n) + lambda_f tr(G_f) n - theta_f n                  (S95.16)
+```
+
+### 95.9 Gate 95-E — the bimetal strip, and the interface stress a linear bond leaves behind
+
+*(prose written from the measured numbers; pending.)*
+
+```text
+kappa_ref = 6 (alpha2 - alpha1) DeltaT (1 + m)^2
+            / ( h [ 3 (1 + m)^2 + (1 + m n)(m^2 + 1/(m n)) ] )               (S95.19)
+```
+
+```text
+R = max |sigma_yy| over the bond cells with |x - l/2| <= h
+  / max |sigma_xx| over ALL cells with |x - l/2| <= h                        (S95.20)
+```

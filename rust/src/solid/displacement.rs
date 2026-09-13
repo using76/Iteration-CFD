@@ -92,7 +92,34 @@ use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Tensor, Vec3};
 
 use super::bc::{CompBc, SolidBcs};
+use super::materials::{Bonds, BondTreatment, MaterialMap, PerCell};
 use super::Material;
+
+/// The per-cell material arrays the displacement and stress kernels read,
+/// resident for the operator's whole life. On a one-material map every
+/// entry is that material's own constant, and the kernels' arithmetic is
+/// the one-material operator's to the bit.
+pub struct DeviceMaterials {
+    pub mu: DevBuf<Scalar>,
+    pub lambda: DevBuf<Scalar>,
+    pub alpha: DevBuf<Scalar>,
+    pub beta_alpha: DevBuf<Scalar>,
+    pub t_ref: DevBuf<Scalar>,
+}
+
+impl DeviceMaterials {
+    /// Resident once, at construction; `t_ref` is rewritten by
+    /// [`Displacement::set_temperature`], the rest never moves.
+    pub fn upload(gpu: &Gpu, pc: &PerCell, t_ref: &[Scalar]) -> Result<Self> {
+        Ok(Self {
+            mu: gpu.upload(&pc.mu)?,
+            lambda: gpu.upload(&pc.lambda)?,
+            alpha: gpu.upload(&pc.alpha)?,
+            beta_alpha: gpu.upload(&pc.beta_alpha)?,
+            t_ref: gpu.upload(t_ref)?,
+        })
+    }
+}
 
 /// Entry points of `cuda/solid.cu`, resolved once.
 struct SolidKernels {
@@ -106,6 +133,8 @@ struct SolidKernels {
     div_sigma_exp: CudaFunction,
     thermal_load: CudaFunction,
     boundary_traction: CudaFunction,
+    bond_face: CudaFunction,
+    bond_grad_corr: CudaFunction,
 }
 
 impl SolidKernels {
@@ -122,6 +151,8 @@ impl SolidKernels {
             div_sigma_exp: k.func("solidDivSigmaExp")?,
             thermal_load: k.func("solidThermalLoad")?,
             boundary_traction: k.func("solidBoundaryTraction")?,
+            bond_face: k.func("solidBondFace")?,
+            bond_grad_corr: k.func("solidBondGradCorr")?,
         })
     }
 }
@@ -206,6 +237,21 @@ pub struct Displacement<'m> {
     /// `[n_cells]` deferred stress + thermal load, computed once per
     /// application and folded into all three components.
     pub rhs: DevBuf<Vec3>,
+    /// The material map the operator was built from - host-only; the
+    /// kernels see [`Self::cells`].
+    pub map: MaterialMap,
+    /// The per-cell material arrays on the device.
+    pub cells: DeviceMaterials,
+    /// The bond faces, as the host sees them.
+    pub bonds: Bonds,
+    face_bond: DevBuf<Label>,
+    bond_face: DevBuf<Label>,
+    /// `[n_bond]` what each bond face says: the face displacement and the
+    /// face traction, rewritten by every sub-pass.
+    pub bond_u: DevBuf<Vec3>,
+    pub bond_t: DevBuf<Vec3>,
+    /// The treatment the bond faces carry: 0 Series, 1 Linear.
+    bond_mode: Label,
     /// `F(u)`, written by `apply_inner`; `picard_step` and `apply` copy it
     /// out, so both share one body.
     next: DevBuf<Vec3>,
@@ -229,7 +275,9 @@ impl<'m> Displacement<'m> {
     /// Validate the material, check the host mesh against the device one,
     /// scatter the boundary statement, size the solver workspace, and
     /// allocate every buffer - once; nothing here allocates again.
-    #[allow(clippy::too_many_lines)]
+    /// The one-material constructor, kept so no existing call site changes:
+    /// one material everywhere, no bond faces. The map-taking constructor
+    /// is [`Self::with_materials`].
     pub fn new(
         gpu: &Gpu,
         m: &'m GpuMesh,
@@ -238,7 +286,35 @@ impl<'m> Displacement<'m> {
         per_patch: &[[CompBc; 3]],
         ctrl: SolverControls,
     ) -> Result<Self> {
-        material.validate()?;
+        Self::with_materials(
+            gpu,
+            m,
+            host,
+            &MaterialMap::uniform("material", material, host.n_cells),
+            per_patch,
+            ctrl,
+        )
+    }
+
+    /// The operator on a region carrying several bonded materials. Every
+    /// material is validated; the implicit coefficients come from the map -
+    /// the series value at a bond face, the one-material number to the bit
+    /// on every other face; the per-cell arrays are uploaded once; the bond
+    /// faces are found on the host mesh and refused if it is degenerate
+    /// there (SPEC-LIT §95.8). `T_ref` starts at zero on every cell and is
+    /// written by [`Self::set_temperature`].
+    #[allow(clippy::too_many_lines)]
+    pub fn with_materials(
+        gpu: &Gpu,
+        m: &'m GpuMesh,
+        host: &HostMesh,
+        map: &MaterialMap,
+        per_patch: &[[CompBc; 3]],
+        ctrl: SolverControls,
+    ) -> Result<Self> {
+        for mat in &map.materials {
+            mat.validate()?;
+        }
         if host.n_cells != m.n_cells {
             return Err(Error::Config(format!(
                 "solid: the host mesh has {} cells but the device mesh has {}",
@@ -249,19 +325,19 @@ impl<'m> Displacement<'m> {
         let bcs = SolidBcs::new(gpu, host, per_patch)?;
         let ws = SolverWorkspace::for_mesh(gpu, m)?;
 
-        // `(2 mu + lambda)|Sf|`, host-built exactly as the prototype builds
-        // it: the implicit gamma is a constant, so this never changes.
-        let gamma = material.implicit_gamma();
-        let gamma_mag_sf: Vec<Scalar> = (0..host.n_internal_faces)
-            .map(|f| gamma * host.mag_sf[f])
-            .collect();
-        let b_gamma_mag_sf: Vec<Scalar> = (0..host.n_boundary_faces)
-            .map(|bf| gamma * host.b_mag_sf[bf])
-            .collect();
+        // The implicit coefficient per face, host-built from the map: the
+        // series value at a bond face, coefficient times magnitude to the
+        // bit on every same-material face. Never changes after this.
+        let (gamma_mag_sf, b_gamma_mag_sf) = map.implicit_coefficients(host);
+        let bonds = map.bonds(host)?;
+        let nb = bonds.n_bond().max(1);
+        let mut bond_face = bonds.bond_face.clone();
+        bond_face.resize(nb, 0);
+        let cells = DeviceMaterials::upload(gpu, &map.per_cell(), &vec![0.0 as Scalar; m.n_cells])?;
 
         Ok(Self {
             m,
-            material,
+            material: map.materials[0],
             bcs,
             ctrl,
             sn_grad: SnGradScheme::Corrected,
@@ -273,6 +349,17 @@ impl<'m> Displacement<'m> {
             grad: gpu.zeros(m.n_cells)?,
             b_grad: gpu.zeros(m.n_boundary_faces)?,
             rhs: gpu.zeros(m.n_cells)?,
+            map: map.clone(),
+            cells,
+            face_bond: gpu.upload(&bonds.face_bond)?,
+            bond_face: gpu.upload(&bond_face)?,
+            bond_u: gpu.zeros(nb)?,
+            bond_t: gpu.zeros(nb)?,
+            bond_mode: match map.bond {
+                BondTreatment::Series => 0,
+                BondTreatment::Linear => 1,
+            },
+            bonds,
             next: gpu.zeros(m.n_cells)?,
             a: GpuLduMatrix::new(gpu, m)?,
             ws,
@@ -286,6 +373,73 @@ impl<'m> Displacement<'m> {
             solk: SolverKernels::new(gpu)?,
             sk: SolidKernels::new(gpu)?,
         })
+    }
+
+    /// How many bond faces the region carries - zero on a one-material map,
+    /// which is the switch every bond kernel launch here reads.
+    pub fn n_bond(&self) -> usize {
+        self.bonds.n_bond()
+    }
+
+    /// The two bond kernels, run after a plain gradient sweep: what each
+    /// bond face says (its displacement and traction, from the cell
+    /// gradients the sweep just produced), then the Green-Gauss correction
+    /// that carries the face's own displacement into the two bond cells'
+    /// gradients. Skipped entirely on a one-material map - a host branch on
+    /// a host integer, so a capture around this sequence stays valid.
+    fn run_bond_kernels(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.bonds.n_bond() == 0 {
+            return Ok(());
+        }
+        let nbond = self.bonds.n_bond() as Label;
+        let nl = self.m.n_cells as Label;
+        let n = self.m.n_cells;
+        let mode = self.bond_mode;
+        unsafe {
+            let f = self.sk.bond_face.clone();
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(&mut self.bond_u)
+                .arg(&mut self.bond_t)
+                .arg(&self.bond_face)
+                .arg(&self.u.f)
+                .arg(&self.grad)
+                .arg(&self.t)
+                .arg(&self.cells.mu)
+                .arg(&self.cells.lambda)
+                .arg(&self.cells.beta_alpha)
+                .arg(&self.cells.t_ref)
+                .arg(&self.m.weights)
+                .arg(&self.m.sf)
+                .arg(&self.m.mag_sf)
+                .arg(&self.m.cf)
+                .arg(&self.m.c)
+                .arg(&self.m.owner)
+                .arg(&self.m.neighbour)
+                .arg(&mode)
+                .arg(&nbond)
+                .launch(cfg_for(self.bonds.n_bond()))?;
+        }
+        unsafe {
+            let f = self.sk.bond_grad_corr.clone();
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(&mut self.grad)
+                .arg(&self.bond_u)
+                .arg(&self.face_bond)
+                .arg(&self.u.f)
+                .arg(&self.m.weights)
+                .arg(&self.m.sf)
+                .arg(&self.m.v)
+                .arg(&self.m.owner)
+                .arg(&self.m.neighbour)
+                .arg(&self.m.cf_offset)
+                .arg(&self.m.cf_face)
+                .arg(&self.m.cf_own)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
     }
 
     /// Setup only (`gpu.write`): the temperature field and its boundary
@@ -315,6 +469,9 @@ impl<'m> Displacement<'m> {
         }
         gpu.write(&mut self.t, t)?;
         gpu.write(&mut self.bt, bt)?;
+        // The per-cell `T_ref`: a material's own value where the map
+        // overrides, the region's scalar where it does not.
+        gpu.write(&mut self.cells.t_ref, &self.map.t_ref_per_cell(t_ref))?;
         self.t_ref = t_ref;
         Ok(())
     }
@@ -353,13 +510,9 @@ impl<'m> Displacement<'m> {
         let nbf = self.m.n_boundary_faces;
         for _ in 0..self.passes.max(1) {
             fv::fvc_grad_vector(gpu, &self.fvk, &mut self.grad, &self.u, self.m)?;
+            self.run_bond_kernels(gpu)?;
             if nbf > 0 {
                 let nl = nbf as Label;
-                let mu = self.material.mu();
-                let lam = self.material.lambda();
-                let thermal_coeff =
-                    self.material.three_lambda_two_mu() * self.material.alpha;
-                let t_ref = self.t_ref;
                 let f = self.sk.traction_ref_grad.clone();
                 unsafe {
                     gpu.stream()
@@ -372,10 +525,10 @@ impl<'m> Displacement<'m> {
                         .arg(&self.m.b_sf)
                         .arg(&self.bt)
                         .arg(&self.m.b_kind)
-                        .arg(&mu)
-                        .arg(&lam)
-                        .arg(&thermal_coeff)
-                        .arg(&t_ref)
+                        .arg(&self.cells.mu)
+                        .arg(&self.cells.lambda)
+                        .arg(&self.cells.beta_alpha)
+                        .arg(&self.cells.t_ref)
                         .arg(&nl)
                         .launch(cfg_for(nbf))?;
                 }
@@ -396,6 +549,7 @@ impl<'m> Displacement<'m> {
             }
         }
         fv::fvc_grad_vector(gpu, &self.fvk, &mut self.grad, &self.u, self.m)?;
+        self.run_bond_kernels(gpu)?;
         if nbf > 0 {
             let nl = nbf as Label;
             let f = self.sk.boundary_gradient.clone();
@@ -427,11 +581,6 @@ impl<'m> Displacement<'m> {
             return Ok(());
         }
         let nl = n as Label;
-        let mu = self.material.mu();
-        let lam = self.material.lambda();
-        let thermal_coeff =
-            self.material.three_lambda_two_mu() * self.material.alpha;
-        let t_ref = self.t_ref;
         {
             let f = self.sk.div_sigma_exp.clone();
             unsafe {
@@ -452,8 +601,15 @@ impl<'m> Displacement<'m> {
                     .arg(&self.m.cf_own)
                     .arg(&self.m.bcf_offset)
                     .arg(&self.m.bcf_face)
-                    .arg(&mu)
-                    .arg(&lam)
+                    .arg(&self.cells.mu)
+                    .arg(&self.cells.lambda)
+                    .arg(&self.face_bond)
+                    .arg(&self.bond_t)
+                    .arg(&self.u.f)
+                    .arg(&self.gamma_mag_sf)
+                    .arg(&self.m.delta_coeffs)
+                    .arg(&self.m.non_orth_corr)
+                    .arg(&self.m.mag_sf)
                     .arg(&nl)
                     .launch(cfg_for(n))?;
             }
@@ -477,8 +633,9 @@ impl<'m> Displacement<'m> {
                 .arg(&self.m.cf_own)
                 .arg(&self.m.bcf_offset)
                 .arg(&self.m.bcf_face)
-                .arg(&thermal_coeff)
-                .arg(&t_ref)
+                .arg(&self.cells.beta_alpha)
+                .arg(&self.cells.t_ref)
+                .arg(&self.face_bond)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }

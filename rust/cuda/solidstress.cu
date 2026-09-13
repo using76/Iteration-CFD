@@ -57,7 +57,10 @@ extern "C" __global__ void solidStress
     oftensor* __restrict__ sigma,
     const oftensor* __restrict__ gradU,
     const ofscalar* __restrict__ t,
-    ofscalar tRef, ofscalar mu, ofscalar lambda, ofscalar alpha,
+    const ofscalar* __restrict__ tRef,
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ lambda,
+    const ofscalar* __restrict__ alpha,
     oflabel n
 )
 {
@@ -65,21 +68,21 @@ extern "C" __global__ void solidStress
     if (i >= n) return;
 
     const oftensor g = gradU[i];
-    const ofscalar dT = t[i] - tRef;
+    const ofscalar dT = t[i] - tRef[i];
 
     oftensor s;
-    s.xx = (g.xx + g.xx) * mu;
-    s.xy = (g.xy + g.yx) * mu;
-    s.xz = (g.xz + g.zx) * mu;
-    s.yx = (g.yx + g.xy) * mu;
-    s.yy = (g.yy + g.yy) * mu;
-    s.yz = (g.yz + g.zy) * mu;
-    s.zx = (g.zx + g.xz) * mu;
-    s.zy = (g.zy + g.yz) * mu;
-    s.zz = (g.zz + g.zz) * mu;
+    s.xx = (g.xx + g.xx) * mu[i];
+    s.xy = (g.xy + g.yx) * mu[i];
+    s.xz = (g.xz + g.zx) * mu[i];
+    s.yx = (g.yx + g.xy) * mu[i];
+    s.yy = (g.yy + g.yy) * mu[i];
+    s.yz = (g.yz + g.zy) * mu[i];
+    s.zx = (g.zx + g.xz) * mu[i];
+    s.zy = (g.zy + g.yz) * mu[i];
+    s.zz = (g.zz + g.zz) * mu[i];
 
-    const ofscalar d = lambda * ((g.xx + g.yy) + g.zz)
-        - (3.0 * lambda + 2.0 * mu) * alpha * dT;
+    const ofscalar d = lambda[i] * ((g.xx + g.yy) + g.zz)
+        - (3.0 * lambda[i] + 2.0 * mu[i]) * alpha[i] * dT;
     s.xx += d;
     s.yy += d;
     s.zz += d;
