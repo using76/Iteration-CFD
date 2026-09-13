@@ -48,12 +48,19 @@
 //!    [`crate::io::polymesh::build_host_mesh`], unchanged from what a
 //!    `constant/polyMesh` reader would hand it.
 //!
+//! Volume physical tags and entity tags are DISCARDED: a multi-volume file
+//! arrives here as ONE mesh, with the faces the volumes share internal and no
+//! interface patch between them. Nothing in the mesh keeps a trace of the
+//! split, so [`parse_msh_with_volumes`] returns the number of distinct volume
+//! entities that carried cells - the only thing a caller can refuse a
+//! multi-volume file on (SPEC-LIT §97.2).
+//!
 //! `$PhysicalNames` missing entirely means the mesh has no patch identity at
 //! all (every boundary face would be `defaultFaces`) - the section-13.4
 //! contract makes that a loud error rather than a silently patch-less mesh;
 //! `-permissive` accepts it and puts everything in `defaultFaces`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use crate::error::{Error, IoContext, Result};
@@ -160,14 +167,28 @@ fn elem_shape(elem_type: i64) -> Option<ElemShape> {
 // ==========================================================================
 
 pub fn read_msh(path: impl AsRef<Path>) -> Result<PolyMeshRaw> {
+    read_msh_with_volumes(path).map(|(raw, _)| raw)
+}
+
+/// [`read_msh`] plus the number of DISTINCT volume entities that carried
+/// cells (`entity_dim == 3` element blocks, by `entity_tag`). The mesh itself
+/// keeps no trace of them - every cell lands in one region - so this count is
+/// the only thing a caller can refuse a multi-volume file on. SPEC-LIT
+/// §97.2.
+pub fn read_msh_with_volumes(path: impl AsRef<Path>) -> Result<(PolyMeshRaw, usize)> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).path(path)?;
-    parse_msh(&text, &path.display().to_string())
+    parse_msh_with_volumes(&text, &path.display().to_string())
 }
 
 /// Parse from memory - public so tests need no fixture files on disk, the
 /// same shape as [`crate::surface::stl::parse_stl`].
 pub fn parse_msh(text: &str, origin: &str) -> Result<PolyMeshRaw> {
+    parse_msh_with_volumes(text, origin).map(|(raw, _)| raw)
+}
+
+/// [`parse_msh`] plus the count [`read_msh_with_volumes`] documents.
+pub fn parse_msh_with_volumes(text: &str, origin: &str) -> Result<(PolyMeshRaw, usize)> {
     let mut lx = Lex::new(text, origin);
 
     lx.expect_tok("$MeshFormat")?;
@@ -227,11 +248,12 @@ pub fn parse_msh(text: &str, origin: &str) -> Result<PolyMeshRaw> {
 
     // ---- $Elements -------------------------------------------------------
     lx.expect_tok("$Elements")?;
-    let (cells, surf_patch_of_face) =
+    let (cells, surf_patch_of_face, n_volume_entities) =
         read_elements(&mut lx, &tag_to_idx, &surf_phys, &phys_names)?;
     lx.expect_tok("$EndElements")?;
 
-    build_raw_mesh(points, cells, surf_patch_of_face)
+    let raw = build_raw_mesh(points, cells, surf_patch_of_face)?;
+    Ok((raw, n_volume_entities))
 }
 
 // ==========================================================================
@@ -360,12 +382,16 @@ struct Cell {
 /// smaller index" property the face-dedup step below relies on). Surface
 /// (triangle/quadrangle) elements resolve to a patch name through the
 /// entity's physical tag and are recorded by their sorted vertex key.
+///
+/// Also returns the number of DISTINCT volume entities (`entity_tag` of the
+/// `entity_dim == 3` blocks) that carried cells - SPEC-LIT §97.2's refusal
+/// count, and the only trace of a multi-volume split that survives the parse.
 fn read_elements(
     lx: &mut Lex,
     tag_to_idx: &HashMap<i64, u32>,
     surf_phys: &HashMap<i64, Vec<i64>>,
     phys_names: &HashMap<(i64, i64), String>,
-) -> Result<(Vec<Cell>, HashMap<Vec<u32>, String>)> {
+) -> Result<(Vec<Cell>, HashMap<Vec<u32>, String>, usize)> {
     let n_blocks = lx.int()?;
     let n_elements = lx.int()?;
     let _min_tag = lx.int()?;
@@ -373,6 +399,7 @@ fn read_elements(
 
     let mut cells: Vec<Cell> = Vec::new();
     let mut surf_patch_of_face: HashMap<Vec<u32>, String> = HashMap::new();
+    let mut volume_entities: BTreeSet<i64> = BTreeSet::new();
 
     let mut n_read = 0i64;
     for _ in 0..n_blocks {
@@ -403,6 +430,9 @@ fn read_elements(
         } else {
             None
         };
+        if matches!(shape, ElemShape::Cell(..)) {
+            volume_entities.insert(entity_tag);
+        }
 
         for _ in 0..n_in_block {
             let _elem_tag = lx.int()?;
@@ -442,7 +472,7 @@ fn read_elements(
         ));
     }
 
-    Ok((cells, surf_patch_of_face))
+    Ok((cells, surf_patch_of_face, volume_entities.len()))
 }
 
 // ==========================================================================
@@ -696,6 +726,13 @@ mod tests {
         parse_msh(text, "<memory>")
     }
 
+    /// `parse`, keeping the volume-entity count - §97.2's refusal input.
+    fn parse_counted(text: &str) -> Result<(PolyMeshRaw, usize)> {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        parse_msh_with_volumes(text, "<memory>")
+    }
+
     /// One unit hexahedron, physical surface "walls" covering all six faces
     /// (one physical surface per Gmsh geometric side, all sharing the same
     /// physical tag/name so the whole cube is one patch). Node tags are
@@ -832,6 +869,53 @@ $EndElements
             hex0 = to_tags(&hex0),
             hex1 = to_tags(&hex1),
         )
+    }
+
+    /// `two_hex_msh()` cut into TWO volume entities: cell 0 stays in volume
+    /// 7, cell 1 moves to a new volume 8, and the shared x = 1 face is still
+    /// one face the dedup step makes internal. The mesh is otherwise the same
+    /// file - which is exactly the point: nothing in the mesh but the volume
+    /// entity count can tell the two apart (SPEC-LIT §97.2).
+    fn two_hex_two_volumes_msh() -> String {
+        let a = two_hex_msh().replace(
+            "0 0 0 1\n7 0 0 0 2 1 1 0 0\n",
+            "0 0 0 2\n7 0 0 0 1 1 1 0 0\n8 1 0 0 2 1 1 0 0\n",
+        );
+        assert_ne!(a, two_hex_msh(), "the $Entities replacement did not land");
+        let b = a.replace("1 2 1 2\n3 5 5 2\n", "2 2 1 2\n3 7 5 1\n");
+        assert_ne!(b, a, "the $Elements header replacement did not land");
+        // The long needle is deliberate: a shorter one such as "\n2 " also
+        // matches inside the $PhysicalNames block.
+        let c = b.replace(
+            "\n2 2 9 10 3 6 11 12 7\n",
+            "\n3 8 5 1\n2 2 9 10 3 6 11 12 7\n",
+        );
+        assert_ne!(c, b, "the element-line replacement did not land");
+        c
+    }
+
+    /// The volume-entity count survives the parse: one volume in the plain
+    /// fixture, two in the split one - same cells, same faces, same mesh
+    /// otherwise, which is why a caller that cannot count volumes cannot
+    /// refuse a file that is really several regions.
+    #[test]
+    fn the_volume_count_survives_the_parse() {
+        let one = parse_counted(&two_hex_msh()).expect("one-volume parse");
+        assert_eq!(one.1, 1, "one volume entity carried both cells");
+        let two = parse_counted(&two_hex_two_volumes_msh()).expect("two-volume parse");
+        assert_eq!(two.1, 2, "two distinct volume entities carried cells");
+
+        // The MESHES are identical, which is the trap: 2 cells, 1 internal
+        // face, 10 boundary faces, in both.
+        for (raw, n) in [one, two] {
+            assert_eq!(raw.owner.iter().max(), Some(&1), "{n} volumes: 2 cells");
+            assert_eq!(raw.neighbour.len(), 1, "{n} volumes: 1 internal face");
+            assert_eq!(
+                raw.faces.len() - raw.neighbour.len(),
+                10,
+                "{n} volumes: 10 boundary faces"
+            );
+        }
     }
 
     #[test]

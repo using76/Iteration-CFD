@@ -73,6 +73,45 @@
     "run"
   ],
   "$defs": {
+    "ChtBlockMesh": {
+      "description": "The block form - what [`ChtRegionMesh`] alone was before §97, field for\nfield unchanged. An axis-aligned block; patch names are the case's, one\nper face.",
+      "type": "object",
+      "properties": {
+        "boundaries": {
+          "description": "The six face names, `-x +x -y +y -z +z`.",
+          "$ref": "#/$defs/ChtBoundaries"
+        },
+        "bounds": {
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "grading": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGrading"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "bounds",
+        "cells",
+        "boundaries"
+      ]
+    },
     "ChtBoundaries": {
       "type": "object",
       "properties": {
@@ -652,6 +691,19 @@
         "T"
       ]
     },
+    "ChtPolyMeshRef": {
+      "description": "The imported form - SPEC-LIT §97.1. `polyMesh` is a path RELATIVE TO THE\nCASE FILE'S DIRECTORY: a polyMesh directory, or a case root / `constant`\nholding one - the three probes [`read_poly_mesh`] makes - or a `.msh`\nfile with ONE volume entity.",
+      "type": "object",
+      "properties": {
+        "polyMesh": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "polyMesh"
+      ]
+    },
     "ChtRegion": {
       "description": "One region: a block of cells, one material, its own boundary conditions.",
       "type": "object",
@@ -723,42 +775,14 @@
       ]
     },
     "ChtRegionMesh": {
-      "description": "An axis-aligned block. Patch names are the case's, one per face.",
-      "type": "object",
-      "properties": {
-        "boundaries": {
-          "description": "The six face names, `-x +x -y +y -z +z`.",
-          "$ref": "#/$defs/ChtBoundaries"
+      "description": "One region's mesh: an axis-aligned block this reader builds, or a\npolyMesh (or a single-volume `.msh`) read from disk - SPEC-LIT §97.1.\n\nUntagged, with the block form FIRST, so every document written before §97\ndeserialises exactly as it always did. Each form is a newtype over its own\n`deny_unknown_fields` struct - not a struct variant - so a mistyped key is\nrefused under either form, and a document carrying both `polyMesh` and\n`cells` matches neither variant and is a parse error.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChtBlockMesh"
         },
-        "bounds": {
-          "$ref": "#/$defs/JsonBounds"
-        },
-        "cells": {
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "format": "uint32",
-            "minimum": 0
-          },
-          "maxItems": 3,
-          "minItems": 3
-        },
-        "grading": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/JsonGrading"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        {
+          "$ref": "#/$defs/ChtPolyMeshRef"
         }
-      },
-      "additionalProperties": false,
-      "required": [
-        "bounds",
-        "cells",
-        "boundaries"
       ]
     },
     "ChtRun": {

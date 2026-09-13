@@ -111,7 +111,9 @@ the case's output block (`exact.format: vtu`) writes one VTU per region.";
 
 fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
     let case = read_cht_case(case_path)?;
-    let low = case.lower()?;
+    // The case directory is what a region's `polyMesh` path is resolved
+    // against (SPEC-LIT 97.2); all-block cases never touch it.
+    let low = case.lower_in(case_path.parent())?;
 
     println!(
         "ofgpu-cht | case '{}' | {} | {}",

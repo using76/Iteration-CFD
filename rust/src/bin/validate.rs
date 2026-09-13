@@ -73,7 +73,7 @@ use ofgpu::fv::{
 };
 use ofgpu::io::case::{LinearSolverKind, Preconditioner, SolverControls, WallFunctionCoeffs};
 use ofgpu::io::msh::parse_msh;
-use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
+use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh, write_poly_mesh_raw};
 use ofgpu::ldu::{CsrPattern, GpuLduMatrix};
 use ofgpu::ldu_ops::{
     add_boundary_contributions, amul, csr_fill, relax, set_fixed_cells, set_values, LduKernels,
@@ -3137,6 +3137,9 @@ fn run(c: &mut Checks) -> Result<()> {
     check_thick_cylinder(c, &gpu)?;
     println!("\n=== Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) ===");
     check_solid_bimetal(c, &gpu)?;
+
+    // SPEC-LIT S97 - the imported region, and Gate 97-A.
+    check_imported_region(c, &gpu)?;
     c.replaying(check_kays_crawford_experiment_replay);
 
     Ok(())
@@ -18484,5 +18487,124 @@ fn check_solid_bimetal(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             uncertainty: Some(Uncertainty::Study(study)),
         });
     }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §97 - the imported region
+// ==========================================================================
+
+/// Gate 97-A: the shipped die stack, every region written out through
+/// `write_poly_mesh_raw` and read back as a `polyMesh` region, must
+/// reproduce the block run BIT FOR BIT - `t`, `bt`, `steps`, `residual` and
+/// the pair fluxes. Both runs go through the same `build_host_mesh`, so any
+/// difference is a mesh-path defect, not a tolerance question. One mesh, so
+/// a verdict here is single-mesh by name (§94.3): bit-for-bit identity
+/// leaves no discretisation error to extrapolate.
+fn check_imported_region(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::run_case;
+    use ofgpu::io::case_cht::{read_cht_case, ChtPolyMeshRef, ChtRegionMesh};
+
+    println!("\n=== the imported region (SPEC-LIT 97) ===");
+    println!("  -- S97 Gate 97-A: cases/dieStack.cht.jsonc through write_poly_mesh_raw, bit for bit --");
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/dieStack.cht.jsonc");
+    let case = match read_cht_case(&path) {
+        Ok(case) => case,
+        Err(e) => {
+            c.skip("S97 Gate 97-A: the shipped die stack case", &e.to_string());
+            return Ok(());
+        }
+    };
+    let low_a = case.lower()?;
+    let sol_a = run_case(gpu, &low_a)?;
+
+    let dir = scratch_dir("s97_diestack");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (i, name) in low_a.region_names.iter().enumerate() {
+        write_poly_mesh_raw(&dir.join(name).join("polyMesh"), &low_a.raw[i])?;
+    }
+
+    let mut case_b = case.clone();
+    for r in &mut case_b.regions {
+        r.mesh = ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
+            poly_mesh: format!("{}/polyMesh", r.name),
+        });
+    }
+    let low_b = case_b.lower_in(Some(&dir))?;
+    for (i, name) in low_a.region_names.iter().enumerate() {
+        c.require(
+            &format!(
+                "S97 Gate 97-A: region '{name}' reads back with the block mesh's cells and patches"
+            ),
+            low_b.meshes[i].n_cells == low_a.meshes[i].n_cells
+                && low_b.meshes[i].patches.len() == low_a.meshes[i].patches.len(),
+        );
+        c.note(&format!("  region {i} '{name}': {} cells", low_a.meshes[i].n_cells));
+    }
+
+    let sol_b = run_case(gpu, &low_b)?;
+    let t_eq = sol_a.t == sol_b.t;
+    let bt_eq = sol_a.bt == sol_b.bt;
+    let steps_eq = sol_a.steps == sol_b.steps;
+    let res_eq = sol_a.residual == sol_b.residual;
+    let flux_eq = sol_a.pair_flux == sol_b.pair_flux;
+    // On a mismatch, name the first differing index and both values - the
+    // cause is in the mesh path (a point printed short, a patch type lost, a
+    // region built through a different constructor), and this is where to look.
+    let first_diff = |what: &str, a: &[Scalar], b: &[Scalar]| {
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            if x != y {
+                c.note(&format!("  {what}: first difference at [{i}]: {x} against {y}"));
+                return;
+            }
+        }
+        c.note(&format!("  {what}: differs in length {} against {}", a.len(), b.len()));
+    };
+    if !t_eq {
+        first_diff("cell temperature T", &sol_a.t, &sol_b.t);
+    }
+    if !bt_eq {
+        first_diff("boundary temperature bt", &sol_a.bt, &sol_b.bt);
+    }
+    if !flux_eq {
+        first_diff("pair flux A", &sol_a.pair_flux.0, &sol_b.pair_flux.0);
+        first_diff("pair flux B", &sol_a.pair_flux.1, &sol_b.pair_flux.1);
+    }
+    if !steps_eq {
+        c.note(&format!("  steps: {} against {}", sol_a.steps, sol_b.steps));
+    }
+    if !res_eq {
+        c.note(&format!("  residual: {:.6e} against {:.6e}", sol_a.residual, sol_b.residual));
+    }
+
+    let equal = t_eq && bt_eq && steps_eq && res_eq && flux_eq;
+    c.require("S97 Gate 97-A: imported dieStack reproduces the block run bit for bit", equal);
+    let (_, t_junction) = sol_a.region_range(0);
+    let compared = sol_a.t.len() + sol_a.bt.len() + sol_a.pair_flux.0.len() + sol_a.pair_flux.1.len();
+    c.note(&format!(
+        "  junction temperature {t_junction:.4} K; {compared} cell and face values compared \
+         with `==`, plus steps = {} and the final residual, all identical",
+        sol_a.steps
+    ));
+    if !equal {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "S97 Gate 97-A imported region",
+            against: "the shipped dieStack case against itself, block form vs polyMesh form",
+            headline: "the imported case did not reproduce the block run bit for bit".to_string(),
+            detail: vec![
+                "  a mismatch here is a mesh-path defect (a point printed short, a patch \
+                 type lost, a region built through a different constructor), and the first \
+                 differing index is printed above - not a tolerance to loosen"
+                    .to_string(),
+            ],
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one mesh, bit-for-bit identity; no discretisation error to extrapolate",
+            )),
+        });
+    }
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

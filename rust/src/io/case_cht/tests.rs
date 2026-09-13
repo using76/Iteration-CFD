@@ -2850,3 +2850,509 @@ fn the_shipped_die_stack_case_runs_in_stress_mode() {
         println!("{line}");
     }
 }
+
+// ==========================================================================
+//  SPEC-LIT §97 - the imported region
+// ==========================================================================
+
+use crate::io::polymesh::{write_poly_mesh_raw, PolyMeshRaw};
+
+/// §97 test rig: lower `text` as a block case, write every region's mesh
+/// through `write_poly_mesh_raw` under `<base>/<region>/polyMesh`, and hand
+/// back the SAME document with every region's mesh swapped for a `polyMesh`
+/// reference - the starting point every refusal below mutates. `case_dir`
+/// for the lowering is `base` itself.
+fn imported_case(base: &std::path::Path, text: &str) -> ChtCase {
+    let case = read(text).expect("parse");
+    let low = case.lower().expect("lower as blocks");
+    for (i, name) in low.region_names.iter().enumerate() {
+        write_poly_mesh_raw(&base.join(name).join("polyMesh"), &low.raw[i])
+            .expect("write region polyMesh");
+    }
+    let mut imported = case.clone();
+    for r in &mut imported.regions {
+        r.mesh = ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
+            poly_mesh: format!("{}/polyMesh", r.name),
+        });
+    }
+    imported
+}
+
+/// A private per-test scratch root, cleared before and after.
+fn s97_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ofgpu_s97_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create s97 scratch dir");
+    dir
+}
+
+/// Requirement 1: a `polyMesh` region lowers from disk, a `bounds`/`cells`
+/// region lowers exactly as before, and the two forms mix in one case. The
+/// imported region reaches `build_host_mesh` with the SAME raw the block
+/// path built, so the meshes agree bitwise.
+#[test]
+fn a_region_may_come_from_a_poly_mesh_on_disk() {
+    let base = s97_dir("mixed");
+    let blocks = read(&default_slab()).expect("parse");
+    let low_a = blocks.lower().expect("block lower");
+    let mut case = imported_case(&base, &default_slab());
+    // Leave region 0 a block; import region 1 only.
+    case.regions[0].mesh = blocks.regions[0].mesh.clone();
+    let low_b = case.lower_in(Some(&base)).expect("lower from disk");
+
+    assert_eq!(low_b.meshes[0].n_cells, 12, "block region unmoved");
+    assert_eq!(low_b.meshes[1].n_cells, 9, "imported region same cell count");
+    for r in 0..2 {
+        assert_eq!(low_b.raw[r].points, low_a.raw[r].points);
+        assert_eq!(low_b.raw[r].faces, low_a.raw[r].faces);
+        assert_eq!(low_b.raw[r].owner, low_a.raw[r].owner);
+        assert_eq!(low_b.raw[r].neighbour, low_a.raw[r].neighbour);
+        let names = |m: &crate::mesh::HostMesh| {
+            m.patches.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&low_b.meshes[r]), names(&low_a.meshes[r]));
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Requirement 2: a mistyped key is a parse error under EITHER form, and a
+/// document carrying both forms matches neither variant of the untagged
+/// enum - `polyMesh` and `cells` in one `mesh` is refused, not merged.
+#[test]
+fn a_mesh_block_with_a_mistyped_key_is_refused_in_both_forms() {
+    // Block form, key mistyped.
+    let text = default_slab().replace(r#""cells": [12, 1, 1]"#, r#""celss": [12, 1, 1]"#);
+    let e = read(&text).expect_err("block typo must refuse");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("celss") || msg.contains("variant") || msg.contains("unknown field"),
+        "{msg}"
+    );
+
+    // Imported form, key mistyped - the metal region's mesh block rewritten.
+    let text = default_slab().replace(
+        r#""cells": [9, 1, 1],"#,
+        r#""polyMeshh": "metal/polyMesh","#,
+    );
+    let e = read(&text).expect_err("polyMesh typo must refuse");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("polyMeshh") || msg.contains("variant"),
+        "{msg}"
+    );
+
+    // Both forms in one `mesh` - neither variant matches, so it is a parse
+    // error and not a merge.
+    let text = default_slab().replace(
+        r#""cells": [9, 1, 1],"#,
+        r#""cells": [9, 1, 1], "polyMesh": "metal/polyMesh","#,
+    );
+    let e = read(&text).expect_err("both forms must refuse");
+    assert!(!e.to_string().is_empty());
+}
+
+/// Requirement 3: a `patches` rule naming a patch the IMPORTED mesh does not
+/// have is refused listing the mesh's OWN patch names - the boundary file's,
+/// not a block's six.
+#[test]
+fn a_rule_naming_a_patch_the_imported_mesh_does_not_have_is_refused() {
+    let base = s97_dir("ghost_rule");
+    let mut case = imported_case(&base, &default_slab());
+    case.regions[0].patches.push(ChtPatchRule {
+        match_: "ghost".to_string(),
+        kind: "wall".to_string(),
+        u: None,
+        t: ChtScalarBc::ZeroGradient,
+    });
+    let e = case.lower_in(Some(&base)).expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("ghost"), "{msg}");
+    assert!(msg.contains("toMetal"), "the message must list what IS there: {msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Requirement 4: a patch of the imported mesh that no rule and no interface
+/// names is refused by `region:patch` - the module doc's rule, now reached
+/// from disk.
+#[test]
+fn an_imported_patch_with_no_condition_is_refused() {
+    let base = s97_dir("unnamed");
+    let mut case = imported_case(&base, &default_slab());
+    // Drop the `hot` rule; nothing else names it.
+    case.regions[0].patches.remove(0);
+    let e = case.lower_in(Some(&base)).expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("insulation:hot"), "{msg}");
+    assert!(msg.contains("no condition"), "{msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Requirement 8: `lower()` carries no case directory, and a document with a
+/// `polyMesh` region is refused by name rather than resolved against
+/// nothing.
+#[test]
+fn lower_without_a_directory_refuses_a_poly_mesh_region() {
+    let base = s97_dir("no_dir");
+    let case = imported_case(&base, &default_slab());
+    let e = case.lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("lower_in"), "{msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Requirement 5, three sub-cases in one test: a `polyMesh` path that is
+/// ABSOLUTE, that does not EXIST, or that resolves OUTSIDE the case
+/// directory is refused by name, under
+/// `regions/<name>/mesh/polyMesh` (SPEC-LIT §97.2).
+#[test]
+fn a_mesh_path_outside_the_case_directory_is_refused() {
+    let base = s97_dir("paths");
+    let case_dir = base.join("case");
+    std::fs::create_dir_all(&case_dir).expect("create the case dir");
+    let blocks = read(&default_slab()).expect("parse");
+    let low = blocks.lower().expect("lower as blocks");
+
+    // A real mesh OUTSIDE the case directory, for the third sub-case.
+    let outside = base.join("outside");
+    write_poly_mesh_raw(&outside.join("die").join("polyMesh"), &low.raw[0])
+        .expect("write the outside mesh");
+
+    let attempt = |path: String| {
+        let mut case = blocks.clone();
+        case.regions[0].mesh =
+            ChtRegionMesh::PolyMesh(ChtPolyMeshRef { poly_mesh: path });
+        case.lower_in(Some(&case_dir))
+    };
+
+    // 1. absolute.
+    let abs = outside.join("die").join("polyMesh");
+    assert!(abs.is_absolute(), "the fixture itself must be absolute");
+    let e = attempt(abs.display().to_string()).expect_err("absolute must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("mesh/polyMesh") && msg.contains("absolute"), "{msg}");
+
+    // 2. missing.
+    let e = attempt("no_such_mesh/polyMesh".to_string()).expect_err("missing must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("does not exist"), "{msg}");
+    assert!(
+        msg.contains("no_such_mesh"),
+        "the joined path is printed: {msg}"
+    );
+
+    // 3. outside.
+    let e = attempt("../outside/die/polyMesh".to_string()).expect_err("outside must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("outside the case"), "{msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A two-hex MSH 4.1 text, in ONE volume entity or TWO - the same mesh
+/// `io::msh`'s own fixture builds, written out here because that fixture is
+/// private to its module. Two volumes, one mesh: the shared x = 1 face is
+/// still a single internal face, and nothing in the file but the volume
+/// count says the cells belong to two regions.
+fn hex_pair_msh(volumes: usize) -> String {
+    let (entities, elements) = if volumes == 2 {
+        (
+            "0 0 0 2\n7 0 0 0 1 1 1 0 0\n8 1 0 0 2 1 1 0 0\n",
+            "2 2 1 2\n3 7 5 1\n1 1 2 3 4 5 6 7 8\n3 8 5 1\n2 2 9 10 3 6 11 12 7\n",
+        )
+    } else {
+        (
+            "0 0 0 1\n7 0 0 0 2 1 1 0 0\n",
+            "1 2 1 2\n3 5 5 2\n1 1 2 3 4 5 6 7 8\n2 2 9 10 3 6 11 12 7\n",
+        )
+    };
+    format!(
+        "$MeshFormat
+4.1 0 8
+$EndMeshFormat
+$PhysicalNames
+1
+2 1 \"walls\"
+$EndPhysicalNames
+$Entities
+{entities}$EndEntities
+$Nodes
+1 12 1 12
+3 1 0 12
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+0.0 0.0 0.0
+1.0 0.0 0.0
+1.0 1.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+1.0 0.0 1.0
+1.0 1.0 1.0
+0.0 1.0 1.0
+2.0 0.0 0.0
+2.0 1.0 0.0
+2.0 0.0 1.0
+2.0 1.0 1.0
+$EndNodes
+$Elements
+{elements}$EndElements
+"
+    )
+}
+
+/// Requirement 6: a `.msh` with SEVERAL volume entities is refused naming
+/// `tools/mesh/regions_from_msh.py` and `ofgpu-regions`, while a ONE-volume
+/// `.msh` lowers as a region.
+#[test]
+fn a_msh_with_several_volumes_is_refused_naming_the_layout_route() {
+    let base = s97_dir("msh_volumes");
+    std::fs::write(base.join("one.msh"), hex_pair_msh(1)).expect("write one.msh");
+    std::fs::write(base.join("two.msh"), hex_pair_msh(2)).expect("write two.msh");
+    // The two-hex file names no physical SURFACE, so every boundary face
+    // lands in `defaultFaces` - the only patch a rule has to name here.
+    let doc = |msh: &str| {
+        format!(
+            r#"{{
+  "name": "mshRegion",
+  "regions": [ {{ "name": "pair",
+      "mesh": {{ "polyMesh": "{msh}" }},
+      "material": {{ "rho": 1000.0, "c": 800.0, "kappa": 1.0 }},
+      "patches": [ {{ "match": "defaultFaces", "T": {{ "type": "zeroGradient" }} }} ] }} ],
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true }}
+}}"#
+        )
+    };
+
+    // One volume: the file lowers, and its two cells arrive as one region.
+    let low = read(&doc("one.msh"))
+        .expect("parse")
+        .lower_in(Some(&base))
+        .expect("a one-volume .msh lowers");
+    assert_eq!(low.region_names, ["pair"]);
+    assert_eq!(low.meshes[0].n_cells, 2);
+
+    // Two volumes: refused, naming the layout route.
+    let e = read(&doc("two.msh"))
+        .expect("parse")
+        .lower_in(Some(&base))
+        .expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("2 volume entities"), "{msg}");
+    assert!(msg.contains("regions_from_msh.py"), "{msg}");
+    assert!(msg.contains("ofgpu-regions"), "{msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A unit-cube `PolyMeshRaw` with ONE patch covering all six faces - the
+/// smallest mesh an imported-region refusal can be exercised on. The patch
+/// type is the caller's, because what is under test is exactly the mesh's
+/// own patch TYPE.
+fn cube_raw(name: &str, type_name: &str, kind: crate::mesh::PatchKind) -> PolyMeshRaw {
+    let v = |x: f64, y: f64, z: f64| crate::Vec3::new(x, y, z);
+    PolyMeshRaw {
+        points: vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(1.0, 1.0, 0.0),
+            v(0.0, 1.0, 0.0),
+            v(0.0, 0.0, 1.0),
+            v(1.0, 0.0, 1.0),
+            v(1.0, 1.0, 1.0),
+            v(0.0, 1.0, 1.0),
+        ],
+        faces: vec![
+            vec![3, 2, 1, 0],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+        owner: vec![0; 6],
+        neighbour: vec![],
+        patches: vec![crate::mesh::PatchInfo {
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            kind,
+            start: 0,
+            size: 6,
+            nbr_patch: None,
+        }],
+    }
+}
+
+/// Requirement 7, both directions: an `empty` patch of an imported mesh must
+/// carry the `empty` rule, and an `empty` rule must land on a patch the mesh
+/// itself types `empty` - only the mesh can make one.
+#[test]
+fn an_imported_empty_patch_must_carry_the_empty_rule_and_vice_versa() {
+    let base = s97_dir("empty_agreement");
+
+    // Mesh says `empty`, the case says zeroGradient.
+    write_poly_mesh_raw(&base.join("thin").join("polyMesh"), &cube_raw("front", "empty", crate::mesh::PatchKind::Empty))
+        .expect("write the empty-patched mesh");
+    let text = format!(
+        r#"{{
+  "name": "importedThin",
+  "regions": [ {{ "name": "solid",
+      "mesh": {{ "polyMesh": "thin/polyMesh" }},
+      "material": {{ "rho": 1000.0, "c": 800.0, "kappa": 1.0 }},
+      "patches": [ {{ "match": "front", "T": {{ "type": "zeroGradient" }} }} ] }} ],
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true }}
+}}"#
+    );
+    let e = read(&text).expect("parse").lower_in(Some(&base)).expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("front") && msg.contains("empty"), "{msg}");
+
+    // The case says `empty`, the mesh says `patch`.
+    write_poly_mesh_raw(&base.join("thick").join("polyMesh"), &cube_raw("shell", "patch", crate::mesh::PatchKind::Generic))
+        .expect("write the generic-patched mesh");
+    let text = text
+        .replace("thin/polyMesh", "thick/polyMesh")
+        .replace(
+            r#"{ "match": "front", "T": { "type": "zeroGradient" } }"#,
+            r#"{ "match": "shell", "T": { "type": "empty" } }"#,
+        );
+    let e = read(&text).expect("parse").lower_in(Some(&base)).expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("shell") && msg.contains("empty"), "{msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Requirement 7: a `cyclic` (or `processor`) patch of an imported region is
+/// refused by name - a periodic conducting region is not gated.
+#[test]
+fn a_cyclic_patch_in_an_imported_region_is_refused() {
+    let base = s97_dir("cyclic");
+    // The declared couple must satisfy the READER first (a cyclic patch
+    // carries its neighbourPatch), so the refusal below is the imported
+    // region's own and not the boundary file's.
+    let mut raw = cube_raw("periodic", "cyclic", crate::mesh::PatchKind::Cyclic);
+    raw.patches[0].nbr_patch = Some(0);
+    write_poly_mesh_raw(&base.join("ring").join("polyMesh"), &raw)
+        .expect("write the cyclic-patched mesh");
+    let text = r#"
+{ "name": "importedRing",
+  "regions": [ { "name": "solid",
+      "mesh": { "polyMesh": "ring/polyMesh" },
+      "material": { "rho": 1000.0, "c": 800.0, "kappa": 1.0 },
+      "patches": [ { "match": "periodic", "T": { "type": "zeroGradient" } } ] } ],
+  "initial": { "T": 300.0 },
+  "run": { "steady": true }
+}"#;
+    let e = read(text).expect("parse").lower_in(Some(&base)).expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("periodic") && msg.contains("cyclic"), "{msg}");
+    assert!(msg.contains("31"), "the unexercised section is named: {msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Requirement 7: an `inlet`/`outlet` rule on an imported `wall`-typed patch
+/// is refused - an opening is `patch`, not `wall` (SPEC-LIT §79.2), the same
+/// distinction the block build writes.
+#[test]
+fn an_opening_on_an_imported_wall_typed_patch_is_refused() {
+    let base = s97_dir("wall_opening");
+    write_poly_mesh_raw(
+        &base.join("water").join("polyMesh"),
+        &cube_raw("port", "wall", crate::mesh::PatchKind::Wall),
+    )
+    .expect("write the wall-patched mesh");
+    let text = r#"
+{ "name": "importedWater",
+  "regions": [ { "name": "water", "kind": "fluid",
+      "mesh": { "polyMesh": "water/polyMesh" },
+      "fluid": { "rho": 998.0, "cp": 4182.0, "kappa": 0.6, "mu": 1.0e-3 },
+      "patches": [ { "match": "port", "kind": "inlet", "U": [0.1, 0.0, 0.0],
+                     "T": { "type": "fixedValue", "value": 300.0 } } ] } ],
+  "initial": { "T": 300.0 },
+  "run": { "steady": true }
+}"#;
+    let e = read(text).expect("parse").lower_in(Some(&base)).expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("port"), "{msg}");
+    assert!(msg.contains("wall"), "{msg}");
+    assert!(msg.contains("79.2"), "{msg}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **Gate 97-A, the lib twin.** The shipped die stack, every region written
+/// out through `write_poly_mesh_raw` and read back as a `polyMesh` region,
+/// must reproduce the block run BIT FOR BIT: `t`, `bt`, `steps`, `residual`
+/// and the pair fluxes, `==` with no tolerance. Both lowerings reach
+/// `build_host_mesh` from the same five numbers, so any difference is a mesh
+/// path and not a physics.
+#[test]
+fn the_shipped_case_round_trips_through_poly_mesh_bit_for_bit() {
+    let Some(gpu) = gpu() else { return };
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/dieStack.cht.jsonc");
+    let case = super::read_cht_case(&path).expect("read cases/dieStack.cht.jsonc");
+    let low_a = case.lower().expect("lower the block case");
+    let sol_a = run_case(&gpu, &low_a).expect("run the block case");
+
+    let dir = std::env::temp_dir().join(format!("ofgpu_s97_diestack_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (i, name) in low_a.region_names.iter().enumerate() {
+        write_poly_mesh_raw(&dir.join(name).join("polyMesh"), &low_a.raw[i])
+            .expect("write the region polyMesh");
+    }
+    let mut case_b = case.clone();
+    for r in &mut case_b.regions {
+        r.mesh = ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
+            poly_mesh: format!("{}/polyMesh", r.name),
+        });
+    }
+    let low_b = case_b.lower_in(Some(&dir)).expect("lower the imported case");
+    for (i, name) in low_a.region_names.iter().enumerate() {
+        assert_eq!(
+            low_b.meshes[i].n_cells,
+            low_a.meshes[i].n_cells,
+            "region '{name}' reads back with a different cell count"
+        );
+        let names = |m: &crate::mesh::HostMesh| {
+            m.patches.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&low_b.meshes[i]), names(&low_a.meshes[i]));
+    }
+    let sol_b = run_case(&gpu, &low_b).expect("run the imported case");
+
+    let same = |what: &str, a: &[Scalar], b: &[Scalar]| {
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert_eq!(x, y, "{what}: first differing value at [{i}]");
+        }
+        assert_eq!(a.len(), b.len(), "{what}: different lengths");
+    };
+    same("cell temperature t", &sol_a.t, &sol_b.t);
+    same("boundary temperature bt", &sol_a.bt, &sol_b.bt);
+    same("pair flux (a side)", &sol_a.pair_flux.0, &sol_b.pair_flux.0);
+    same("pair flux (b side)", &sol_a.pair_flux.1, &sol_b.pair_flux.1);
+    assert_eq!(sol_a.steps, sol_b.steps, "step count");
+    assert_eq!(sol_a.residual, sol_b.residual, "final residual");
+
+    let cells: Vec<usize> = low_a.meshes.iter().map(|m| m.n_cells).collect();
+    let (_, t_junction) = sol_a.region_range(0);
+    println!("S97 Gate 97-A: regions {:?} cells {:?}", low_a.region_names, cells);
+    println!("S97 Gate 97-A: junction temperature {t_junction:.4} K, reproduced identically");
+    println!(
+        "S97 Gate 97-A: {} cell values, {} boundary values, {} flux pairs, steps {}, \
+         residual {:.3e} - all identical",
+        sol_a.t.len(),
+        sol_a.bt.len(),
+        sol_a.pair_flux.0.len(),
+        sol_a.steps,
+        sol_a.residual
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

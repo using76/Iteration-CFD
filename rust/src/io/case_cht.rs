@@ -59,7 +59,7 @@
 //! case comes to say something the solver ignores.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -77,8 +77,8 @@ use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner, SolverControls};
 use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis, JsonOutput};
 use crate::io::output_plan::{OutputFormat, OutputPlan};
-use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
-use crate::mesh::HostMesh;
+use crate::io::polymesh::{build_host_mesh, read_poly_mesh, PolyMeshRaw};
+use crate::mesh::{HostMesh, PatchKind};
 use crate::solid::{BondTreatment, Material, NotBuilt};
 use crate::{Label, Scalar, Vec3};
 
@@ -167,16 +167,44 @@ fn solid_kind() -> String {
     "solid".to_string()
 }
 
-/// An axis-aligned block. Patch names are the case's, one per face.
+/// One region's mesh: an axis-aligned block this reader builds, or a
+/// polyMesh (or a single-volume `.msh`) read from disk - SPEC-LIT §97.1.
+///
+/// Untagged, with the block form FIRST, so every document written before §97
+/// deserialises exactly as it always did. Each form is a newtype over its own
+/// `deny_unknown_fields` struct - not a struct variant - so a mistyped key is
+/// refused under either form, and a document carrying both `polyMesh` and
+/// `cells` matches neither variant and is a parse error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChtRegionMesh {
+    Block(ChtBlockMesh),
+    PolyMesh(ChtPolyMeshRef),
+}
+
+/// The block form - what [`ChtRegionMesh`] alone was before §97, field for
+/// field unchanged. An axis-aligned block; patch names are the case's, one
+/// per face.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ChtRegionMesh {
+pub struct ChtBlockMesh {
     pub bounds: JsonBounds,
     pub cells: [u32; 3],
     /// The six face names, `-x +x -y +y -z +z`.
     pub boundaries: ChtBoundaries,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grading: Option<JsonGrading>,
+}
+
+/// The imported form - SPEC-LIT §97.1. `polyMesh` is a path RELATIVE TO THE
+/// CASE FILE'S DIRECTORY: a polyMesh directory, or a case root / `constant`
+/// holding one - the three probes [`read_poly_mesh`] makes - or a `.msh`
+/// file with ONE volume entity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtPolyMeshRef {
+    #[serde(rename = "polyMesh")]
+    pub poly_mesh: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -840,9 +868,20 @@ impl LoweredChtCase {
 pub const AMBIENT_PRESSURE: Scalar = 101_325.0;
 
 impl ChtCase {
-    /// Resolve every name, build every block, and refuse everything §13.4
-    /// says must be refused.
+    /// [`Self::lower_in`]`(None)`: every all-block case ever written needs no
+    /// disk, and this is what it lowers through. A document with a `polyMesh`
+    /// region is refused here BY NAME - the path is relative to the case
+    /// file's directory, and with no directory there is nothing to resolve it
+    /// against (SPEC-LIT §97.2).
     pub fn lower(&self) -> Result<LoweredChtCase> {
+        self.lower_in(None)
+    }
+
+    /// Resolve every name, build or READ every region mesh, and refuse
+    /// everything §13.4 and §97.2 say must be refused. `case_dir` is the
+    /// directory holding the case file (`ofgpu-cht` passes
+    /// `case_path.parent()`); `None` is [`Self::lower`], block regions only.
+    pub fn lower_in(&self, case_dir: Option<&Path>) -> Result<LoweredChtCase> {
         if self.regions.is_empty() {
             return Err(Error::Config(format!(
                 "{}: a conduction case needs at least one region",
@@ -870,6 +909,10 @@ impl ChtCase {
         let mut sources = Vec::new();
         // Which patches of which region have been spoken for, and by what.
         let mut claimed: Vec<BTreeMap<String, &'static str>> = Vec::new();
+        // §97.2: each region's own patch names, as the BUILT mesh spells
+        // them - the two listing refusals below read these, because an
+        // imported region's names are the mesh's, not the document's.
+        let mut all_patch_names: Vec<Vec<String>> = Vec::new();
         // SPEC-LIT §96.2: one lowered `mechanics` per region, `None` when
         // the region says nothing.
         let mut mechanics: Vec<Option<LoweredMechanics>> = Vec::new();
@@ -913,15 +956,9 @@ impl ChtCase {
                 )));
             }
 
-            // Every patch of every region, listed before anything claims one.
-            let mut seen: BTreeMap<String, &'static str> = BTreeMap::new();
-            for n in r.mesh.boundaries.names() {
-                seen.entry(n.to_string()).or_insert("unnamed");
-            }
-
-            // Which patches are `empty` has to be known BEFORE the block is
-            // built, because it is the mesh's patch TYPE and not a condition
-            // written onto it afterwards.
+            // Which patches are `empty` has to be known BEFORE the mesh is
+            // built or read, because it is the mesh's patch TYPE and not a
+            // condition written onto it afterwards.
             let empties: Vec<&str> = r
                 .patches
                 .iter()
@@ -976,13 +1013,26 @@ impl ChtCase {
                     }
                 }
             }
-            let (mesh, rmesh) = build_region_mesh(r, &empties, &flow_patches)?;
+            let (mesh, rmesh) =
+                build_region_mesh(r, kind, &empties, &flow_patches, case_dir)?;
+
+            // SPEC-LIT §97.2: for an IMPORTED region the patch list lives on
+            // disk, not in the document - so the `seen` set, and every
+            // refusal below that lists a region's patches, reads the BUILT
+            // mesh's patch names. For a block the two lists are the same six
+            // names in the same order, so no existing message moves.
+            let patch_names: Vec<String> =
+                mesh.patches.iter().map(|p| p.name.clone()).collect();
+            let mut seen: BTreeMap<String, &'static str> = BTreeMap::new();
+            for n in &patch_names {
+                seen.entry(n.clone()).or_insert("unnamed");
+            }
 
             // SPEC-LIT §96.2: the region's `mechanics` block, if it says
             // one, lowered against the mesh just built - it is the mesh's
             // own centroids and patch slots the zones and the symmetry axes
             // are measured on.
-            let mech = lower_mechanics(i, r, &mesh, &empties)?;
+            let mech = lower_mechanics(i, r, &mesh, &empties, &patch_names)?;
 
             let (mat, fluid) = match (kind, &r.material, &r.fluid) {
                 (RegionKind::Solid, Some(m), None) => {
@@ -1070,6 +1120,7 @@ impl ChtCase {
             fluids.push(fluid);
             sources.push(r.source.unwrap_or(0.0) as Scalar);
             claimed.push(seen);
+            all_patch_names.push(patch_names);
             mechanics.push(mech);
         }
 
@@ -1109,7 +1160,7 @@ impl ChtCase {
                             "interfaces[{i}]: region '{}' has no patch '{patch}'. It \
                              has: {}",
                             region_names[r],
-                            self.regions[r].mesh.boundaries.names().join(", ")
+                            all_patch_names[r].join(", ")
                         )))
                     }
                     Some(slot) if *slot != "unnamed" => {
@@ -1169,7 +1220,7 @@ impl ChtCase {
                             "regions/{}/patches: no patch '{}'. The region has: {}",
                             region.name,
                             rule.match_,
-                            region.mesh.boundaries.names().join(", ")
+                            all_patch_names[r].join(", ")
                         )))
                     }
                     Some(slot) if *slot != "unnamed" => {
@@ -1639,6 +1690,7 @@ fn lower_mechanics(
     r: &ChtRegion,
     mesh: &HostMesh,
     empties: &[&str],
+    patch_names: &[String],
 ) -> Result<Option<LoweredMechanics>> {
     let Some(mech) = &r.mechanics else {
         return Ok(None);
@@ -1776,16 +1828,16 @@ fn lower_mechanics(
     };
 
     // Row 12: every non-empty patch, exactly once - the module doc's rule
-    // carried over to the displacement statement.
-    let names = r.mesh.boundaries.names();
+    // carried over to the displacement statement. The names are the BUILT
+    // mesh's (§97.2): for an imported region they are the boundary file's.
     let mut named: Vec<&str> = Vec::new();
     let mut patch_bcs = Vec::new();
     for rule in &mech.patches {
         let name = rule.match_.as_str();
-        let slot = names.iter().position(|n| *n == name).ok_or_else(|| {
+        let slot = patch_names.iter().position(|n| n == name).ok_or_else(|| {
             Error::Config(format!(
                 "{path}/patches: no patch '{name}'. The region has: {}",
-                names.join(", ")
+                patch_names.join(", ")
             ))
         })?;
         if empties.contains(&name) {
@@ -1819,9 +1871,10 @@ fn lower_mechanics(
         };
         patch_bcs.push((rule.match_.clone(), bc));
     }
-    let unnamed: Vec<&str> = (0..6)
-        .filter(|s| !empties.contains(&names[*s]) && !named.contains(&names[*s]))
-        .map(|s| names[s])
+    let unnamed: Vec<&str> = patch_names
+        .iter()
+        .map(|n| n.as_str())
+        .filter(|n| !empties.contains(n) && !named.contains(n))
         .collect();
     if !unnamed.is_empty() {
         return Err(Error::Config(format!(
@@ -1969,30 +2022,73 @@ fn lower_precon(name: &str) -> Result<Preconditioner> {
     }
 }
 
-/// One region's block, through the same `blockgen` every other case uses.
+/// Build or read one region's mesh - SPEC-LIT §97.1.
 ///
-/// `empties` is the patch names the case gave `"T": { "type": "empty" }` -
-/// SPEC-LIT §60.2's 2-D front and back. They have to be known here rather than
-/// written on afterwards, because `empty` is the mesh's patch TYPE: an
-/// `empty` face contributes to no surface integral at all, which is a
-/// property of the topology and not a boundary condition.
+/// Block: through `blockgen` exactly as before (`raw_mesh` +
+/// `build_host_mesh`). PolyMesh: `resolve_mesh_path` ->
+/// `read_poly_mesh` (or `read_msh_with_volumes` when the path ends in
+/// `.msh`, case-insensitively) -> `check_imported_patches` ->
+/// `build_host_mesh`, the SAME constructor a block region reaches, which is
+/// what makes Gate 97-A a bit-for-bit statement rather than a tolerance.
 ///
-/// A solid region's other faces stay plain `patch`, which is what §47.14's
-/// format has always done and what a conduction stack wants. A **fluid**
-/// region's become `wall`, because they are no-slip walls in the momentum
-/// sense (SPEC-LIT §60.2) and `momFluxIsPrescribed` asks the mesh, not the
-/// case.
-fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Result<(HostMesh, PolyMeshRaw)> {
-    let b = &r.mesh.bounds;
+/// `empties` and `openings` name the patches that are the mesh's patch TYPE
+/// rather than a condition written on afterwards (SPEC-LIT §60.2's 2-D front
+/// and back, §79.2's inlet and outlet): an `empty` face contributes to no
+/// surface integral at all, which is a property of the topology and not a
+/// boundary condition. On the block form a solid region's other faces stay
+/// plain `patch`, and a **fluid** region's become `wall` - no-slip walls in
+/// the momentum sense (§60.2); on the IMPORTED form the mesh's own types
+/// stand, and [`check_imported_patches`] refuses the combinations the case
+/// and the mesh can disagree on.
+fn build_region_mesh(
+    r: &ChtRegion,
+    kind: RegionKind,
+    empties: &[&str],
+    openings: &[&str],
+    case_dir: Option<&Path>,
+) -> Result<(HostMesh, PolyMeshRaw)> {
+    let b = match &r.mesh {
+        ChtRegionMesh::Block(b) => b,
+        ChtRegionMesh::PolyMesh(pr) => {
+            let path = resolve_mesh_path(&r.name, case_dir, &pr.poly_mesh)?;
+            let is_msh = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("msh"));
+            let raw = if is_msh {
+                let (raw, n_vol) = crate::io::msh::read_msh_with_volumes(&path)?;
+                if n_vol > 1 {
+                    return Err(Error::Config(format!(
+                        "regions/{}/mesh/polyMesh: '{}' is a `.msh` with {n_vol} \
+                         volume entities. A `.msh` with {n_vol} volumes is several \
+                         regions in one file, and this reader keeps one region per \
+                         mesh - the volume tags are discarded by `io::msh`, so the \
+                         faces the volumes share would come out internal with no \
+                         interface patch between them. Write the region layout with \
+                         `tools/mesh/regions_from_msh.py` and load it through \
+                         `ofgpu-regions` (SPEC-LIT 97)",
+                        r.name, pr.poly_mesh
+                    )));
+                }
+                raw
+            } else {
+                read_poly_mesh(&path)?
+            };
+            check_imported_patches(&r.name, kind, &raw, empties, openings)?;
+            let mesh = build_host_mesh(&raw)?;
+            return Ok((mesh, raw));
+        }
+    };
+    let bounds = &b.bounds;
     let axis = |i: usize| -> Result<GradedAxis> {
-        let (lo, hi) = (b.min[i] as Scalar, b.max[i] as Scalar);
+        let (lo, hi) = (bounds.min[i] as Scalar, bounds.max[i] as Scalar);
         if !(hi > lo) {
             return Err(Error::Config(format!(
                 "regions/{}/mesh/bounds: axis {i} runs from {lo} to {hi}",
                 r.name
             )));
         }
-        if r.mesh.cells[i] == 0 {
+        if b.cells[i] == 0 {
             return Err(Error::Config(format!(
                 "regions/{}/mesh/cells: axis {i} has no cells",
                 r.name
@@ -2001,11 +2097,11 @@ fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Resu
         let mut a = GradedAxis {
             lo,
             hi,
-            n: r.mesh.cells[i] as usize,
+            n: b.cells[i] as usize,
             expansion: 1.0,
             two_sided: false,
         };
-        let g = r.mesh.grading.as_ref().and_then(|g| match i {
+        let g = b.grading.as_ref().and_then(|g| match i {
             0 => g.x.as_ref(),
             1 => g.y.as_ref(),
             _ => g.z.as_ref(),
@@ -2014,7 +2110,7 @@ fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Resu
         Ok(a)
     };
 
-    let names = r.mesh.boundaries.names();
+    let names = b.boundaries.names();
     let base = if r.kind == "fluid" { "wall" } else { "patch" };
     let n_empty = names.iter().filter(|n| empties.contains(n)).count();
     // `empty` faces come in OPPOSITE pairs, and blockgen's own check
@@ -2071,6 +2167,121 @@ fn build_region_mesh(r: &ChtRegion, empties: &[&str], openings: &[&str]) -> Resu
     let raw = blockgen::raw_mesh(&spec)?;
     let mesh = build_host_mesh(&raw)?;
     Ok((mesh, raw))
+}
+
+/// §97.2's path refusals, in this order. On success the JOINED path is
+/// returned - not the canonical one, so the reader's own error messages keep
+/// printing the path as the case spelled it against the case directory.
+fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
+    let path = Path::new(p);
+    // 1. No directory at all. `lower()` is this shape, and a polyMesh path
+    //    is RELATIVE TO THE CASE FILE'S DIRECTORY - there is nothing to
+    //    resolve it against.
+    let Some(dir) = case_dir else {
+        return Err(Error::Config(format!(
+            "regions/{region}/mesh/polyMesh: '{p}' is relative to the case file's \
+             directory, and this document was lowered without one. Call \
+             `ChtCase::lower_in(Some(&case_dir))` - as `ofgpu-cht` does with \
+             `case_path.parent()` - to import a polyMesh region"
+        )));
+    };
+    // 0. `Path::new("case.cht.jsonc").parent()` is `Some("")`, which IS the
+    //    current directory and says so.
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    // 2. Absolute.
+    if path.is_absolute() {
+        return Err(Error::Config(format!(
+            "regions/{region}/mesh/polyMesh: '{p}' is absolute. The path must be \
+             RELATIVE to the case file's directory - a case that only opens from \
+             one absolute location is a case that cannot be moved (SPEC-LIT 97.2)"
+        )));
+    }
+    // 3. Missing.
+    let joined = dir.join(path);
+    if !joined.exists() {
+        return Err(Error::Config(format!(
+            "regions/{region}/mesh/polyMesh: '{}' does not exist (case directory \
+             '{}'). A polyMesh directory, a case root or `constant` holding one, \
+             or a single-volume `.msh` file",
+            joined.display(),
+            dir.display()
+        )));
+    }
+    // 4. Outside.
+    let inside = dir
+        .canonicalize()
+        .ok()
+        .map(|root| joined.canonicalize().ok().is_some_and(|p| p.starts_with(root)))
+        .unwrap_or(false);
+    if !inside {
+        return Err(Error::Config(format!(
+            "regions/{region}/mesh/polyMesh: '{}' resolves outside the case \
+             directory '{}'. A case is self-contained: its regions' meshes live \
+             under the directory the case file is in (SPEC-LIT 97.2)",
+            joined.display(),
+            dir.display()
+        )));
+    }
+    Ok(joined)
+}
+
+/// §97.2's patch-TYPE refusals on an imported region. The patch list is the
+/// mesh's own `boundary` file, and the case must agree with it where the two
+/// can disagree: an `empty` is a patch type AND a rule, so it is checked in
+/// both directions, and an opening is `patch`, not `wall`.
+fn check_imported_patches(
+    region: &str,
+    kind: RegionKind,
+    raw: &PolyMeshRaw,
+    empties: &[&str],
+    openings: &[&str],
+) -> Result<()> {
+    for p in &raw.patches {
+        if matches!(p.kind, PatchKind::Cyclic | PatchKind::Processor) {
+            return Err(Error::Config(format!(
+                "regions/{region}/mesh/polyMesh: patch '{}' is of type '{}' - a \
+                 periodic or decomposed conducting region is not gated; SPEC-LIT \
+                 31's cyclic pair on a concatenated thermal mesh is unexercised",
+                p.name, p.type_name
+            )));
+        }
+        let is_empty = matches!(p.kind, PatchKind::Empty);
+        if is_empty && !empties.contains(&p.name.as_str()) {
+            return Err(Error::Config(format!(
+                "regions/{region}: patch '{}' is of type `empty` in the mesh but \
+                 carries no `empty` rule in the case. The mesh's patch types are \
+                 the mesh's own - write {{ \"match\": \"{}\", \"T\": {{ \"type\": \
+                 \"empty\" }} }} (SPEC-LIT 97.2)",
+                p.name, p.name
+            )));
+        }
+        if !is_empty && empties.contains(&p.name.as_str()) {
+            return Err(Error::Config(format!(
+                "regions/{region}: patch '{}' carries an `empty` rule but the mesh's \
+                 boundary file types it '{}'. An `empty` patch contributes to no \
+                 surface integral at all, and only the mesh can make one",
+                p.name, p.type_name
+            )));
+        }
+    }
+    if kind == RegionKind::Fluid {
+        for name in openings {
+            let Some(p) = raw.patches.iter().find(|p| p.name == *name) else {
+                continue; // named in the mesh or not, the unnamed-patch rule reports it
+            };
+            if matches!(p.kind, PatchKind::Wall) {
+                return Err(Error::Config(format!(
+                    "regions/{region}/mesh/polyMesh: patch '{}' is of type `wall`, \
+                     and the case names it an opening. An opening is `patch`, not \
+                     `wall` - SPEC-LIT 79.2, the same distinction the block build \
+                     writes: `PatchKind::Wall` is what a wall function targets, and \
+                     an outlet is not a wall",
+                    p.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_grading(
