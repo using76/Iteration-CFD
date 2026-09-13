@@ -198,8 +198,10 @@ describe('cht cases', () => {
     const bd = b.data as { ok: boolean; errors: Array<{ pointer: string }> }
     expect(bd.errors.map((e) => e.pointer)).toContain('/regions/0/mechanics')
 
-    // stress mode with no mechanics anywhere
+    // stress mode with no mechanics anywhere (the shipped case carries mechanics on every
+    // solid region since the solver's stress unit, so this variant strips them first)
     const stress = parseJsoncText(text) as unknown as Record<string, unknown>
+    for (const r of stress.regions as Array<Record<string, unknown>>) delete r.mechanics
     ;(stress.run as Record<string, unknown>).mode = 'stress'
     await fsp.writeFile(path.join(ws.root, 'cases', 'stress.cht.jsonc'), JSON.stringify(stress))
     const s = await runTool('case_validate', { path: 'cases/stress.cht.jsonc' }, ctx())
@@ -209,6 +211,7 @@ describe('cht cases', () => {
     // mechanics without mode: stress is refused the other way, too
     const mech = parseJsoncText(text) as unknown as Record<string, unknown>
     ;(mech.regions as Array<Record<string, unknown>>)[0].mechanics = { patches: [] }
+    delete (mech.run as Record<string, unknown>).mode
     await fsp.writeFile(path.join(ws.root, 'cases', 'mech.cht.jsonc'), JSON.stringify(mech))
     const m = await runTool('case_validate', { path: 'cases/mech.cht.jsonc' }, ctx())
     const md = m.data as { ok: boolean; errors: Array<{ pointer: string }> }
