@@ -503,6 +503,96 @@ fn the_two_way_coupling_parameter_is_one_percent_for_steel() {
     );
 }
 
+/// A box of the given sides, meshed uniformly, with the axes permuted by
+/// `rot` - so that a test can ask whether the slenderness measure depends on
+/// which way round the beam was drawn, which it must not.
+fn box_mesh(sides: [Scalar; 3], cells: [usize; 3], rot: usize) -> HostMesh {
+    let axis = |hi: Scalar, n: usize| GradedAxis {
+        lo: 0.0,
+        hi,
+        n,
+        expansion: 1.0,
+        two_sided: false,
+    };
+    let i = |k: usize| (k + rot) % 3;
+    crate::blockgen::build_mesh(&BlockSpec {
+        x: axis(sides[i(0)], cells[i(0)]),
+        y: axis(sides[i(1)], cells[i(1)]),
+        z: axis(sides[i(2)], cells[i(2)]),
+        patch_type: ["patch", "patch", "patch", "patch", "patch", "patch"].map(String::from),
+        ..Default::default()
+    })
+    .expect("a uniform box is a mesh")
+}
+
+/// The slenderness of a box is the box's own aspect ratio, whichever way
+/// round it was drawn - and a direction the mesh spans with one cell is not
+/// counted, because it is a slab thickness and not something the body bends
+/// in. The plane-strain cantilever of `docs/09-thermal-structural-plan.md`
+/// §F.1b is exactly that case, and counting its thickness would score it 80
+/// instead of 10.
+#[test]
+fn slenderness_is_the_bodys_own_aspect_ratio_and_ignores_a_slab_thickness() {
+    for rot in 0..3 {
+        let cube = box_mesh([1.0, 1.0, 1.0], [8, 8, 8], rot);
+        assert!(
+            (slenderness(&cube) - 1.0).abs() < 1e-9,
+            "rot {rot}: a cube scored {}",
+            slenderness(&cube)
+        );
+        // The §F.1b beam: 2.0 span, 0.2 depth, ONE cell of 0.025 through the
+        // thickness between two symmetry planes.
+        let beam = box_mesh([2.0, 0.2, 0.025], [80, 8, 1], rot);
+        assert!(
+            (slenderness(&beam) - 10.0).abs() < 0.2,
+            "rot {rot}: the 10:1 plane-strain beam scored {}",
+            slenderness(&beam)
+        );
+        // A rod the mesh resolves in all three directions.
+        let rod = box_mesh([2.0, 0.1, 0.1], [80, 4, 4], rot);
+        assert!(
+            (slenderness(&rod) - 20.0).abs() < 0.5,
+            "rot {rot}: a 20:1 rod scored {}",
+            slenderness(&rod)
+        );
+        // A plate bends for the same reason a beam does, and is scored the
+        // same way: the thin direction is resolved, so it counts.
+        let plate = box_mesh([1.0, 1.0, 0.1], [20, 20, 4], rot);
+        assert!(
+            (slenderness(&plate) - 10.0).abs() < 0.5,
+            "rot {rot}: a 10:1 plate scored {}",
+            slenderness(&plate)
+        );
+    }
+}
+
+/// The bending refusal fires by name on the body the measurement could not
+/// converge, and lets through the ones it could: it names the slenderness it
+/// measured, the sweep it read the edge off, and the block-coupled matrix as
+/// the route.
+#[test]
+fn a_bending_dominated_slender_body_is_refused_naming_block_coupling() {
+    let compact = box_mesh([0.2, 0.2, 0.025], [8, 8, 1], 0);
+    refuse_bending_dominated_slender_body(&compact)
+        .expect("a 1:1 body converges and must not be refused");
+    let five = box_mesh([1.0, 0.2, 0.025], [40, 8, 1], 0);
+    refuse_bending_dominated_slender_body(&five)
+        .expect("5:1 is the measured edge and is accepted");
+    let ten = box_mesh([2.0, 0.2, 0.025], [80, 8, 1], 0);
+    let Err(Error::Config(msg)) = refuse_bending_dominated_slender_body(&ten) else {
+        panic!("the 10:1 cantilever was not refused");
+    };
+    for want in [
+        "slenderness",
+        "bending-dominated",
+        "F.1b",
+        "block-coupled",
+        "10.1016/j.compstruc.2016.07.004",
+    ] {
+        assert!(msg.contains(want), "the refusal does not say {want:?}: {msg}");
+    }
+}
+
 #[test]
 fn a_displacement_that_should_have_moved_the_mesh_is_refused() {
     let hm = prototype::block(10).expect("block");

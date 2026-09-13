@@ -27327,3 +27327,405 @@ inputs are exact - manufactured data, tabulated references, digitised bars
 carries a stated uncertainty, Gate 6 against Kawano's bar, carries it as
 `u_D`, and where a reference states none, Gate 5 against Belazizia et al.,
 the zero is printed rather than passed over in silence.
+
+---
+
+## 95. The thermo-elastic solid — the segregated displacement loop, what it converges on, and the shape it refuses by name
+
+A solid region is handed a temperature and gives back a displacement. The
+temperature comes from §46's conduction on the concatenated mesh and the
+coupling is ONE-WAY: the energy equation never sees the strain rate, and
+§95.5 prints how large that omission is instead of hiding it. The strain is
+small, the material is isotropic and linear, the mesh does not move.
+
+Three scalar systems, not one vector system. §1's LDU storage holds one
+coefficient per face, so a `3x3` block per face cannot be expressed at all
+without a second matrix format; the displacement components are therefore
+coupled through the right-hand side and the coupling is driven out by an
+outer iteration. That decision is the whole of this section's difficulty:
+the outer iteration converges on some bodies and not on others, and which is
+which was MEASURED before it was written down, not argued. §46.4 is the
+precedent — an estimate written into a specification and corrected
+afterwards by the test that measured it — and `docs/09-thermal-structural-plan.md`
+§F.1a and §F.1b are the two measurements this section stands on.
+
+Written from:
+
+* ofgpu `SPEC-LIT.md` §1 (the LDU storage the block matrix does not fit),
+  §2.4 (the over-relaxed non-orthogonal correction), §3.2 (the Gauss
+  laplacian the implicit half is), §3.5 (the Green-Gauss gradient the
+  deferred half is built from), §4 (the one mixed boundary triple), §8.2 and
+  §8.4 (the conjugate-gradient solve and its residual normalisation), §21
+  (the multi-coloured incomplete-Cholesky preconditioner), §46 and §46.4
+  (the conduction this is coupled to, and the measure-then-refuse voice),
+  §69 (the verdict registry), §80 (the citation forms), §94 (observed order
+  and reported uncertainty).
+* I. Demirdžić & S. Muzaferija, *Int. J. Numer. Methods Eng.* 37 (1994)
+  3751-3766, DOI `10.1002/nme.1620372110` — the segregated cell-centred
+  finite-volume formulation, and the statement that a boundary face's
+  contribution to the equilibrium sum IS the traction prescribed there.
+* I. Demirdžić & S. Muzaferija, *Comput. Methods Appl. Mech. Eng.* 125
+  (1995) 235-255, DOI `10.1016/0045-7825(95)00800-G` — the coupled
+  fluid/heat/stress arrangement of which this is one region.
+* H. Jasak & H. G. Weller, *Int. J. Numer. Methods Eng.* 48 (2000) 267-287,
+  DOI `10.1002/(SICI)1097-0207(20000520)48:2<267::AID-NME884>3.0.CO;2-Q` —
+  the `(2 mu + lambda)` implicit split and its convergence behaviour.
+* I. Demirdžić & D. Martinović, *Comput. Methods Appl. Mech. Eng.* 109
+  (1993) 331-349, DOI `10.1016/0045-7825(93)90085-C` — the thermal-strain
+  term in finite-volume form.
+* B. A. Boley & J. H. Weiner, *Theory of Thermal Stresses*, Wiley (1960)
+  ch. 1 — Duhamel-Neumann, and the free-expansion state §95.6 gates on. A
+  book; no DOI.
+* S. P. Timoshenko & J. N. Goodier, *Theory of Elasticity*, 3rd ed.,
+  McGraw-Hill (1970) ch. 1-3 — small-strain isotropic elasticity, the Lamé
+  conversion, and the end-loaded cantilever of §95.4. A book; no DOI.
+* U. Küttler & W. A. Wall, *Comput. Mech.* 43 (2008) 61-72, DOI
+  `10.1007/s00466-008-0255-5` §3.2 — Aitken delta-squared dynamic relaxation
+  of a partitioned fixed point, in the vector form of (95.7).
+* D. G. Anderson, *J. ACM* 12 (1965) 547, and H. F. Walker & P. Ni, *SIAM J.
+  Numer. Anal.* 49 (2011) 1715-1735, DOI `10.1137/10078356X`, Algorithm 2 —
+  Anderson acceleration, which is what (95.8) runs.
+* J. Degroote, K.-J. Bathe & J. Vierendeels, *Comput. Struct.* 87 (2009)
+  793-801, DOI `10.1016/j.compstruc.2008.11.013` — IQN-ILS: the same
+  least-squares mixing applied to an interface displacement. Named because it
+  is why the accelerator measured here is the one a partitioned
+  fluid-structure coupling would reach for.
+* P. Cardiff & I. Demirdžić, *Arch. Comput. Methods Eng.* 28 (2021)
+  3721-3780, DOI `10.1007/s11831-020-09523-0` — the thirty-year review; the
+  degradation of a segregated solution as `nu -> 0.5` is a published
+  observation, and §95.4 is what turns it into a number for THIS
+  discretisation.
+* P. Cardiff, Ž. Tuković, H. Jasak & A. Ivanković, *Comput. Struct.* 175
+  (2016) 100-122, DOI `10.1016/j.compstruc.2016.07.004` — the block-coupled
+  finite-volume matrix. **Named as the route both of §95.5's measured
+  refusals have to take, and NOT implemented.**
+* O. K. Smith, *Comm. ACM* 4 (1961) 168, DOI `10.1145/355578.366316` — the
+  eigenvalues of a symmetric `3x3` in closed form, which is how (95.10) is
+  computed.
+
+**OpenFOAM and solids4foam are GPL and were not opened**; no solid-mechanics
+solver of any licence was consulted. No GPL-licensed source was consulted.
+
+### 95.1 The equation, and the split that makes it three scalar systems
+
+Quasi-static equilibrium of an isotropic linear thermo-elastic solid, in the
+small-strain Duhamel-Neumann form (Boley & Weiner ch. 1):
+
+```
+  div(sigma) = 0,      eps = 1/2 ( grad u + grad u^T )                                    (95.1)
+  sigma = 2 mu eps + lambda tr(eps) I - (3 lambda + 2 mu) alpha (T - T_ref) I             (95.2)
+```
+
+Integrated over a cell and split the way Jasak & Weller (2000) split it,
+with Demirdžić & Martinović (1993)'s thermal term:
+
+```
+  sum_f  (2 mu + lambda) grad(u).Sf                                       implicit
+    + sum_f [ mu grad(u)^T + lambda tr(grad u) I - (mu + lambda) grad(u) ].Sf   deferred
+    - sum_f (3 lambda + 2 mu) alpha (T_f - T_ref) Sf                      thermal
+    = 0                                                                                   (95.3)
+```
+
+The implicit term is §3.2's Gauss laplacian per displacement component with
+`gammaMagSf = (2 mu + lambda)|Sf|`, carrying §2.4's over-relaxed
+non-orthogonal correction; the deferred and thermal terms are surface
+integrals of quantities §3.5's Green-Gauss gradient already produces. The
+ratio of the two groups is what an outer iteration has to contract:
+
+```
+  |deferred| / |implicit| = (mu + lambda)/(2 mu + lambda) = 1/(2(1 - nu))                 (95.4)
+```
+
+0.625 at `nu = 0.2`, 0.714 at 0.3, 0.909 at 0.45, 0.980 at 0.49. **(95.4) is
+a derivation and not a measurement**, and §95.4 is where it meets one: the
+loop is printed against it on every run, and the two are not the same number
+in either direction.
+
+**DESIGN — the implicit coefficient is not a free knob.** (95.3) stays exact
+for any `kappa` if the implicit half becomes `kappa (2 mu + lambda)
+grad(u).Sf` and `(kappa - 1)(2 mu + lambda) grad(u).Sf` is subtracted from
+the deferred half: in the CONTINUUM the fixed point is untouched and only the
+iteration matrix moves. On the mesh it is not: the implicit half is §3.2's
+compact laplacian and the half moved out is §3.5's wide Green-Gauss gradient,
+and the cancellation is exact only to discretisation order. Measured on the
+block with one fixed face, `kappa = 2` moves the peak converged displacement
+by `1.8e-2` of its own size at `h = 1/8` and `1.5e-2` at `h = 1/16`. `kappa`
+is available in the host prototype for exactly this measurement and is fixed
+at one everywhere else.
+
+### 95.2 The boundary: the traction solved AT the face
+
+Demirdžić & Muzaferija (1994) make the boundary statement exactly: a
+boundary face's contribution to the equilibrium sum **is** the traction
+prescribed there. So a traction face adds `t |Sf|` and nothing else — no
+diagonal, no deferred term of its own. What the condition then has to supply
+is the boundary DISPLACEMENT, because §3.5's gradient needs a face value,
+and that value is obtained by inverting the traction. Writing
+`grad(u)|_b = G_t + n (x) refGrad`, where `G_t` is the cell gradient with its
+normal-derivative row struck out, and substituting into `sigma.n = t`:
+
+```
+  (2 mu + lambda) (refGrad.n) = t.n - mu (G_t.n).n - lambda tr(G_t)
+                                  + (3 lambda + 2 mu) alpha (T - T_ref)                   (95.5)
+  mu refGrad_t                = t_t - mu (G_t.n)_t
+  u_b = u_P + refGrad / Delta_b                                       (§4's triple, fr = 0)
+```
+
+— the continuum statement that a traction boundary sees `2 mu + lambda`
+normally and `mu` tangentially. **This is ORIGINAL to this repository** and
+it is the difference between a loop that converges and one that does not: the
+naive arrangement, which splits `(2 mu + lambda)` off at the face and lags
+everything else through the extrapolated cell gradient, AMPLIFIES by 22.4 per
+outer iteration at `nu = 0.2` where (95.4) predicts a contraction of 0.625.
+Because `G_t` is the previous iteration's gradient, the traction boundary is
+itself part of the fixed point; the circularity between the face value and
+the gradient is closed by `boundary_passes` sub-passes before each assembly,
+and three is the measured default (§95.4).
+
+The statement is **per component and not per patch** — `Fixed(value)` or
+`Traction(value)` for each of the three — because a symmetry plane is one
+fixed normal component beside two free tangential ones, and there is no other
+way to write it at all. Also ORIGINAL.
+
+### 95.3 The outer loop, and how the increment is relaxed
+
+`F(u)` is one application of the map: correct the boundary, assemble the
+source from the current gradient, solve the three systems. The loop drives
+the residual of that map — not the increment it applies, which with any
+relaxation is a different quantity — down six decades:
+
+```
+  r_k      = F(u_k) - u_k,     ||r_k||_2 = sqrt( sum_c |r_{k,c}|^2 )
+  stop     when ||r_k|| <= 1e-decades * ||r_1||;   diverged when ||r_k|| > 1e6 ||r_1||    (95.6)
+  observed = geometric mean of the last ten ||r_k||/||r_{k-1}||
+```
+
+Three relaxations, exclusive, named in one enumeration so that a call site
+cannot ask for a combination that means nothing:
+
+```
+  None      u_{k+1} = u_k + r_k
+  Aitken    omega_k = -omega_{k-1} ( r_{k-1}.(r_k - r_{k-1}) ) / |r_k - r_{k-1}|^2
+            u_{k+1} = u_k + omega_k r_k                                                   (95.7)
+  Anderson(m)
+            dF_j = r_{j+1} - r_j,   dG_j = F(u_{j+1}) - F(u_j),   j over the last m
+            gamma  = argmin || r_k - dF gamma ||_2
+            u_{k+1} = F(u_k) - dG gamma                                                   (95.8)
+```
+
+(95.7) is Küttler & Wall (2008) §3.2 in its vector form, uncapped — the cap
+in the paper is for the first factor of a new time step, which a quasi-static
+run does not have. (95.8) is Walker & Ni (2011) Algorithm 2 at `beta = 1`;
+`Anderson(0)` keeps no columns and IS `None`, to the bit. **The least-squares
+solve is by modified Gram-Schmidt and not by the normal equations**: the
+columns are differences of residuals spanning the decades the loop is
+dropping, `dF^T dF` carries the square of that condition number, and a
+`gamma` read off it would be arithmetic noise long before the loop finished.
+A column that orthogonalises to nothing is dropped — its `gamma` entry set to
+zero — rather than divided by.
+
+**DESIGN — five host operations per outer iteration.** Everything inside one
+`F(u)` is device work: three §8.2 solves, the boundary sub-passes, the
+deferred gather. The vector operations BETWEEN applications — the residual,
+its norm, the least-squares solve, the update — run on the HOST, on a
+downloaded copy of `F(u)`, in the prototype's summation order. That costs one
+download and one upload of the displacement per outer iteration, which is
+well under a millisecond beside three conjugate-gradient solves, and it buys
+a twin test with no second reduction order in the way: the device loop is
+held to the host prototype's iteration count and norm history, measured to
+`9e-10` on the Anderson path and `6e-5` on the Aitken path at `nu = 0.45`. A
+device reduction is the later optimisation, and it is not free.
+
+Divergence is `Error::Diverged` carrying the two norms, the Poisson ratio and
+the relaxation — **never a flag and never a quiet stop at the cap**. A run
+that stops at its cap with a residual it calls small relative to nothing is
+the one a user would read as an answer, which is the whole reason §95.5
+refuses rather than reports.
+
+### 95.4 What was measured
+
+Two sweeps, both on the host prototype, both `#[ignore]`d tests whose output
+is the table. The first (`docs/09-thermal-structural-plan.md` §F.1a, TS-0) is
+a COMPACT body: a `20^3` and a `40^3` block, one face fixed, the other five
+traction-free, a uniform `Delta T`. The second (§F.1b, this section's own) is
+the end-loaded cantilever of Timoshenko & Goodier ch. 3 at four aspect ratios
+and three meshes, isothermal, the closed form's parabolic shear on the free
+end and the closed form's own displacement on the built-in end.
+
+What the compact body says: bare Picard DIVERGES at `nu = 0.45` and `0.49`
+whether the boundary is passed once or three times; three boundary sub-passes
+roughly halve the outer count of one; Aitken converges at every `nu` tried,
+at 16 / 20 / 71 outer iterations at `nu = 0.2 / 0.3 / 0.45` against (95.4)'s
+predicted 0.625 / 0.714 / 0.909; and the interior alone — every boundary
+prescribed by displacement — tracks (95.4) to two digits at every `nu`, which
+locates the slowness in the free surface and nowhere else.
+
+What the slender body says, six decades or 2000 outer iterations, `nu = 0.3`,
+cubic cells (`stall` = the cap reached with the contraction still at 0.95 to
+1.00; `DIVG` = the million-fold detector of (95.6)):
+
+```
+                          Picard   +Aitken   AA(3)   AA(5)   AA(10)
+    20^3 block, nu=0.45     DIVG        71      41      30       26
+    1:1   beam               171        49      30      24       20
+    2.5:1 beam               896     stall      64      39      153
+    5:1   beam             stall     stall    1041     306     DIVG
+    10:1  beam             stall     stall   stall   stall     DIVG
+
+    5:1  beam  20x4  AA(5) stall      40x8  AA(5) 306      80x16 AA(5) 331
+    10:1 beam  40x4  AA(5) stall      80x8  AA(5) stall    160x16 AA(5) stall
+
+    kappa = 1.5 / 2 / 4 (§95.1) on the 10:1 beam: stall, stall, stall
+```
+
+Three things follow, and each of them is a decision this section makes.
+
+**One — Anderson acceleration is the loop's relaxation, at depth five.** It
+is the only depth measured that beat Aitken on every case Aitken finishes AND
+converged two cases Aitken cannot reach at all. Depth ten is faster on the
+compact body and then diverges on both slender beams, which is the
+instability Walker & Ni's filtering is about and which this loop does not
+carry; depth three is uniformly weaker. On the very case §F.1a measured at 71
+outer iterations, depth five takes 30.
+
+**Two — the compact-body measurement did not describe the whole space.**
+§F.1a measured a cube, and everything sized on it — the twelve-week stage
+plan, the `nu` threshold, the expectation that Aitken is sufficient — is a
+statement about compact bodies. Aitken is not merely slower on a slender beam
+than on a cube; at 2.5:1 it is WORSE THAN NO RELAXATION AT ALL (bare Picard
+converges in 896, Aitken stalls), which is a thing a contraction estimate of
+the form (95.4) cannot express, because (95.4) has no geometry in it.
+
+**Three — the mechanism is bending, and it is structural.** The implicit half
+of (95.3) is a laplacian per component and is DECOUPLED: no term in it lets
+one displacement component's derivative drive another. Bending is carried
+entirely by the off-diagonal pair `du_x/dy` and `du_y/dx`, which lives in the
+deferred half. On a compact body the deferred half is a correction; on a
+slender body in bending it IS the stiffness, the outer loop is doing all the
+work, and the spectral radius of its iteration matrix goes to one. The
+measurement is consistent with that at every row: the failure tracks the
+SHAPE, is the same at `nu = 0.2` and `0.3`, and does not move when the mesh
+is refined by four.
+
+### 95.5 What §95 refuses, by name
+
+**A Poisson ratio outside `(-1, 0.5)`** — the Lamé constants change sign or
+blow up (Timoshenko & Goodier ch. 1).
+
+**A Poisson ratio above 0.45**, the measured edge of §F.1a: 71 outer
+iterations at 0.45 on the `20^3` block, 615 at 0.49, and no convergence in
+2000 at 0.49 on the jittered block. Read off the sweep and not off (95.4).
+The route is the block-coupled matrix.
+
+**A bending-dominated slender body**, the measured edge of §F.1b. The
+criterion is computed, printed and stated:
+
+```
+  x_bar = sum_c V_c x_c / sum_c V_c
+  C     = sum_c V_c (x_c - x_bar)(x_c - x_bar)^T / sum_c V_c                              (95.9)
+  L_i   = sqrt( 12 (lambda_i(C) + h^2/12) ),    h = ( sum_c V_c / N_c )^{1/3}
+  S     = max L_i / min L_i,   over the i with L_i > 1.5 h                                (95.10)
+  refuse when S > 5
+```
+
+Why that criterion, in four sentences. `C` is a tensor, so the equivalent box
+`L_i` it produces is the body's own and does not have to be aligned with
+anything — a bounding box would have to be, and a beam laid diagonally across
+the axes would read as compact. The `h^2/12` is each cell's own spread about
+its own centre, which a covariance of cell CENTRES omits; adding it back makes
+a uniform box score its own aspect ratio exactly rather than a percent or two
+above it. A principal direction the mesh spans with about one cell is DROPPED,
+because that direction is a slab thickness and not a direction the body can
+bend in: the plane-strain cantilever of §F.1b is one cell thick between two
+symmetry planes, and counting its thickness would score that beam at 80 and
+call every two-dimensional case in this repository slender. And a thin
+direction the mesh DOES resolve is kept, so a plate is slender in this measure
+exactly as a beam is — which is right, because a plate bends for the same
+reason.
+
+What the criterion is honestly a proxy FOR: the quantity that decides whether
+the loop contracts is the spectral radius of its iteration matrix, which no
+solver can afford to compute. (95.10) is the geometric statement §F.1b
+measured that radius against, over four aspect ratios and three meshes, and it
+is offered on that evidence and on no other. The threshold five is the last
+ratio measured to converge (306 and 331 outer iterations on two meshes a
+refinement apart); ten is measured not to converge on any mesh with any
+relaxation; the ratios between them are not measured, and five is the
+conservative end of that interval for the same reason 0.45 is.
+
+The route for both is **Cardiff, Tuković, Jasak & Ivanković (2016)**: a
+block-coupled matrix that solves the three components at once and never
+defers the coupling. It is not built, and §1's one-entry-per-face LDU storage
+is why.
+
+**A displacement that has reached the fluid mesh** — `max|u| / min_c
+V_c^{1/3}` above 0.1. An ALE step obeying the space conservation law needs a
+mesh-motion solver, which is not built.
+
+**Finite strain, plasticity, contact, fracture, inertia, an orthotropic
+stiffness on a non-aligned mesh, and the two-way coupling** — each refused by
+name with the route that would take it, in the voice §46.4 set. The two-way
+refusal PRINTS the size of what it omits:
+
+```
+  delta = (3 lambda + 2 mu)^2 alpha^2 T_0 / ((lambda + 2 mu) rho_s c_s)                   (95.11)
+```
+
+about one percent for steel at room temperature (Boley & Weiner ch. 1-2) —
+the number that makes the one-way coupling an approximation with a KNOWN size
+rather than an unexamined one.
+
+### 95.6 The gates release 1 stands on, and the one that is not written
+
+**Gate 95-B, free expansion.** Three symmetry planes, three free faces, a
+uniform `Delta T`: `u = alpha Delta T x` and `sigma = 0` are the exact
+solution of the continuous problem and — the field being linear — of the
+discrete one too. Measured on the device: the fixed point is reached, the
+gradient equals `alpha Delta T I` and the relative stress is below `1e-12` of
+`(3 lambda + 2 mu) alpha Delta T`. Single-mesh by nature and declared so
+under §94.3.
+
+**Gate 95-C, the linear-displacement patch test.** `u = A x + b` prescribed
+face by face on a graded orthogonal block is reproduced to `1e-12` of `|u|`;
+on the jittered block the defect is REPORTED with the mesh's measured
+non-orthogonality beside it rather than asserted away.
+
+**Gate 95-F, the contraction table.** The device twin of §F.1a: the outer
+count, the observed contraction and the predicted one at `nu = 0.2 / 0.3 /
+0.45`, held to the sweep's own numbers, with bare Picard's divergence at 0.45
+reproduced by name.
+
+**Gate 95-A, the end-loaded cantilever, IS NOT WRITTEN.** It was to measure
+observed order on displacement and on cell-centre stress against Timoshenko &
+Goodier ch. 3 on three meshes at `r = 2`, through §94. §F.1b is why it is
+not: at the slenderness that makes a cantilever a bending problem the loop
+does not converge, and an order read off a solve that stopped at its cap is
+not a number. **The cantilever is not discarded — it becomes the refusal's
+test**: the 10:1 beam is the body (95.10) must score above five and refuse by
+name, and the 1:1 and 5:1 beams are the bodies it must let through. When the
+block-coupled matrix exists, Gate 95-A is what it has to earn.
+
+**Said plainly: release 1's solid verdict stands on the compact-body gates** —
+95-B, 95-C, 95-F, and the thick-walled cylinder under a radial temperature
+field that the stress section adds. A slender body is refused, with its
+measurement in the message. That is a smaller claim than the plan opened
+with, and it is the one the measurement supports.
+
+### 95.7 What this section does not do
+
+No block-coupled matrix, and therefore no near-incompressible solid and no
+slender one. Both are refused above with the paper that would take them.
+
+No large deflection. The Turek-Hron flap of the fluid-structure programme is
+17.5:1 slender and deflects centimetres on a 35 cm span; it is beyond this
+section on BOTH counts, and the mesh-motion and coupling sections wait on the
+block matrix rather than being built on a loop that stalls.
+
+No mesh motion, no inertia, no time. The displacement equation here has no
+`ddt` term at all; a transient solid is a different section and is named, not
+squatted on.
+
+No boundary-point stress extrapolation. §94's order study on cell-centre
+stress is what the stress section measures; extrapolating to a boundary POINT
+is a second scheme with a second order, and it gets its own paragraph and its
+own gate when it is written, not a silent reuse of this one.

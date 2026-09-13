@@ -35,15 +35,14 @@
 //! quickly, is [`outer`]'s work; [`displacement`] never iterates the map
 //! on its own.
 //!
-//! The displacement equation itself has **no SPEC-LIT section yet**. The plan
-//! reserves the ninety-fifth for it, and nothing in this module may cite that
-//! number until the section exists - §80's audit fails the build on a
-//! citation whose address is vacant, and the whole point of §0 rule 6 is that
-//! an address is either occupied or it is not. What the prototype cites are the sections it
-//! genuinely reuses: §1's LDU storage, §2.4's over-relaxed non-orthogonal
-//! correction, §3.2's Gauss laplacian, §3.5's Green-Gauss gradient, §4's one
-//! mixed boundary triple, §8.2's conjugate gradients and §8.4's residual
-//! normalisation.
+//! The displacement equation is **SPEC-LIT §95**, written by the unit that
+//! measured the slender body: §95.1 the split, §95.2 the traction solved at
+//! the face, §95.3 the outer loop and its three relaxations, §95.4 the two
+//! sweeps, §95.5 the refusals this file carries, §95.6 the gates release 1
+//! stands on and the one that is not written. What it reuses it cites: §1's
+//! LDU storage, §2.4's over-relaxed non-orthogonal correction, §3.2's Gauss
+//! laplacian, §3.5's Green-Gauss gradient, §4's one mixed boundary triple,
+//! §8.2's conjugate gradients and §8.4's residual normalisation.
 
 use crate::mesh::HostMesh;
 use crate::{Error, Result, Scalar, Vec3};
@@ -54,6 +53,15 @@ use crate::{Error, Result, Scalar, Vec3};
 /// 2000 at 0.49 on a jittered block) and not off the algebra. Inclusive:
 /// `nu = 0.45` is accepted, anything above is refused.
 pub const NU_MAX: Scalar = 0.45;
+
+/// The largest slenderness a solid region may have before the segregated
+/// loop refuses it, read off the sweep of
+/// `docs/09-thermal-structural-plan.md` §F.1b and not off any argument: the
+/// end-loaded cantilever converges at 5:1 in 306 and 331 outer iterations on
+/// two meshes a refinement apart, and at 10:1 reaches six decades on NO mesh,
+/// with NO accelerator, in 2000 outer iterations. Inclusive: 5 is accepted,
+/// anything above is refused.
+pub const SLENDERNESS_MAX: Scalar = 5.0;
 
 /// The largest `max|u| / min_c V_c^(1/3)` a coupled case may report before
 /// the driver has to refuse it: past a tenth of its own smallest cell the
@@ -272,6 +280,162 @@ pub fn refuse(what: NotBuilt, setting: &str) -> Error {
 pub fn two_way_coupling_delta(m: &Material, rho: Scalar, c: Scalar, t0: Scalar) -> Scalar {
     let bulk = m.three_lambda_two_mu();
     bulk * bulk * m.alpha * m.alpha * t0 / ((m.lambda() + 2.0 * m.mu()) * rho * c)
+}
+
+// ==========================================================================
+//  Slenderness - the shape the segregated loop cannot solve
+// ==========================================================================
+
+/// The eigenvalues of a symmetric `3x3`, largest first, by the trigonometric
+/// closed form of O. K. Smith, *Comm. ACM* 4 (1961) 168, DOI
+/// 10.1145/355578.366316.
+///
+/// A closed form and not a Jacobi sweep: three eigenvalues of one symmetric
+/// matrix is exactly the problem the closed form was written for, it has no
+/// iteration count to tune, and this matrix is a covariance - positive
+/// semi-definite, so the arc-cosine's argument is only ever pushed out of
+/// `[-1, 1]` by round-off, which is what the clamp is for.
+fn symmetric_eigenvalues(c: [[Scalar; 3]; 3]) -> [Scalar; 3] {
+    let q = (c[0][0] + c[1][1] + c[2][2]) / 3.0;
+    let mut p2 = 0.0 as Scalar;
+    for i in 0..3 {
+        for j in 0..3 {
+            let d = if i == j { c[i][j] - q } else { c[i][j] };
+            p2 += d * d;
+        }
+    }
+    let p = (p2 / 6.0).sqrt();
+    if !(p > 0.0) {
+        // Isotropic: a sphere's covariance, three equal eigenvalues.
+        return [q, q, q];
+    }
+    let mut b = [[0.0 as Scalar; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            b[i][j] = (if i == j { c[i][j] - q } else { c[i][j] }) / p;
+        }
+    }
+    let det = b[0][0] * (b[1][1] * b[2][2] - b[1][2] * b[2][1])
+        - b[0][1] * (b[1][0] * b[2][2] - b[1][2] * b[2][0])
+        + b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]);
+    let phi = (det / 2.0).clamp(-1.0, 1.0).acos() / 3.0;
+    let e0 = q + 2.0 * p * phi.cos();
+    let e2 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::FRAC_PI_3).cos();
+    // The trace is exact, so the middle one costs no third cosine.
+    [e0, c[0][0] + c[1][1] + c[2][2] - e0 - e2, e2]
+}
+
+/// How slender a solid region is: the ratio of its longest to its shortest
+/// RESOLVED principal extent, computed from the mesh alone.
+///
+/// The volume-weighted covariance of the cell centres,
+/// `C = sum_c V_c (x_c - x_bar)(x_c - x_bar)^T / sum_c V_c`, has eigenvalues
+/// `L_i^2/12` for a box of sides `L_i`, so `L_i = sqrt(12 lambda_i)` is the
+/// body's own equivalent box - and because `C` is a tensor, that box does not
+/// have to be aligned with anything. A bounding box would have to be, and a
+/// beam laid diagonally across the axes would read as compact.
+///
+/// A principal direction the mesh spans with about one cell -
+/// `L_i / (V/N)^(1/3)` below `1.5` - is DROPPED before the ratio is taken.
+/// That direction is a slab thickness, not a direction the body can bend in:
+/// the plane-strain cantilever of `docs/09-thermal-structural-plan.md`
+/// §F.1b is one cell thick between two
+/// symmetry planes, and counting its thickness would give that beam a
+/// slenderness of 80 and call every two-dimensional case in the repository
+/// slender. A thin direction the mesh DOES resolve is kept, so a plate is
+/// slender in this measure exactly as a beam is - which is right, because a
+/// plate bends for the same reason.
+///
+/// What it is a proxy for, said plainly: the quantity that actually decides
+/// whether the segregated loop contracts is the spectral radius of its
+/// iteration matrix, and that is not a thing a solver can afford to compute.
+/// The slenderness is the geometric statement `docs/09-thermal-structural-plan.md`
+/// §F.1b measured that radius
+/// against, over four aspect ratios and three meshes, and it is offered as
+/// the criterion on that evidence and on no other.
+pub fn slenderness(m: &HostMesh) -> Scalar {
+    let total: Scalar = m.v.iter().sum();
+    if !(total > 0.0) || m.n_cells == 0 {
+        return 1.0;
+    }
+    let mut bar = Vec3::ZERO;
+    for (c, v) in m.c.iter().zip(m.v.iter()) {
+        bar += *c * (*v / total);
+    }
+    let mut cov = [[0.0 as Scalar; 3]; 3];
+    for (c, v) in m.c.iter().zip(m.v.iter()) {
+        let d = [c.x - bar.x, c.y - bar.y, c.z - bar.z];
+        for i in 0..3 {
+            for j in 0..3 {
+                cov[i][j] += d[i] * d[j] * (*v / total);
+            }
+        }
+    }
+    let lambda = symmetric_eigenvalues(cov);
+    let h = (total / m.n_cells as Scalar).cbrt();
+    // Each cell's own spread about its own centre, which a covariance of
+    // cell CENTRES omits. For a uniform axis of `n` cells of size `h` the
+    // centres have variance `(L^2 - h^2)/12`, so adding `h^2/12` back makes
+    // the equivalent extent exactly `L` - which is why a uniform box scores
+    // its own aspect ratio and not something a percent or two above it. It is
+    // exact for a cubic cell and a small over-correction for a stretched one,
+    // in the direction that UNDER-states slenderness: the measure does not
+    // refuse a body for the shape of its cells.
+    let own = h * h / 12.0;
+    let resolved: Vec<Scalar> = lambda
+        .iter()
+        .map(|l| (12.0 * (l.max(0.0) + own)).sqrt())
+        .filter(|len| *len > 1.5 * h)
+        .collect();
+    match (
+        resolved.iter().fold(0.0 as Scalar, |a, b| a.max(*b)),
+        resolved.iter().fold(Scalar::INFINITY, |a, b| a.min(*b)),
+    ) {
+        (hi, lo) if lo > 0.0 && lo.is_finite() => hi / lo,
+        _ => 1.0,
+    }
+}
+
+/// Refuses a solid region the segregated displacement loop is measured not to
+/// converge on: a bending-dominated slender body.
+///
+/// Why it is refused rather than attempted and reported: what the loop does
+/// on a 10:1 cantilever is not slow convergence, it is a fixed-point residual
+/// that stops falling at a contraction of 0.95 to 1.00 and stays there to the
+/// cap - and a run that stops at its cap with a residual it calls small
+/// relative to nothing is the one a user would read as an answer.
+/// `docs/09-thermal-structural-plan.md` §F.1b measured it at `nu = 0.2` and
+/// `0.3`, with bare Picard, with Aitken, with Anderson at depths 3, 5 and
+/// 10, and with the implicit coefficient of the split enlarged by 1.5, 2 and
+/// 4, on three meshes a refinement apart.
+///
+/// **Why bending.** The implicit half of the Jasak & Weller (2000) split is a
+/// laplacian per displacement component, and it is DECOUPLED - it carries no
+/// term in which one component's derivative drives another. Bending is
+/// carried entirely by the off-diagonal pair `du_x/dy` and `du_y/dx`, which
+/// lives in the deferred half. On a compact body the deferred half is a
+/// correction; on a slender one in bending it is the stiffness, the outer
+/// loop is doing all the work, and its spectral radius goes to one. That is
+/// the mechanism the measurement is consistent with, and it is why the
+/// criterion is a shape and not a material.
+///
+/// The route is the block-coupled matrix - P. Cardiff, Ž. Tuković, H. Jasak,
+/// A. Ivanković, *Comput. Struct.* 175 (2016) 100-122, DOI
+/// 10.1016/j.compstruc.2016.07.004 - which solves all three components at
+/// once and never defers the coupling at all. It is not built: a `3x3`
+/// coefficient per face breaks SPEC-LIT §1's one-entry-per-face LDU storage.
+pub fn refuse_bending_dominated_slender_body(m: &HostMesh) -> Result<()> {
+    let s = slenderness(m);
+    // The relative slack is so that the body the sweep MEASURED at 5:1 -
+    // whose discrete slenderness is five to round-off - lands on the accepted
+    // side of its own measurement, and not so that a sixth of a percent of
+    // slenderness is forgiven.
+    if s > SLENDERNESS_MAX * (1.0 + 1.0e-9) {
+        return Err(Error::Config(format!(
+            "solid: the region's slenderness is {s:.2}, above the measured edge              {SLENDERNESS_MAX} - the segregated displacement loop does not converge on a              bending-dominated slender body. docs/09-thermal-structural-plan.md F.1b              measured the end-loaded cantilever converging in 306 and 331 outer              iterations at 5:1 on two meshes, and stalling at a contraction of 0.95 to              1.00 at 10:1 on every mesh, with bare Picard, with Aitken, with Anderson at              three depths and with the implicit split enlarged three ways. The route is a              block-coupled solve (Cardiff, Tuković, Jasak & Ivanković 2016, DOI              10.1016/j.compstruc.2016.07.004), which is not built"
+        )));
+    }
+    Ok(())
 }
 
 /// `max|u| / h_min`, with `h_min = min_c V_c^(1/3)`: how far the solid has

@@ -54,8 +54,9 @@
 //!     (2003), DOI 10.1137/1.9780898718003, §10.2-10.3 - the incomplete
 //!     factorisation whose diagonal-only form is what SPEC-LIT §21
 //!     multi-colours on the device and what [`dic_factor`] builds here
-//!   ofgpu `SPEC-LIT.md` §1, §2.3, §2.4, §3.2, §3.5, §4, §8.2, §8.4, §10,
-//!     §21, §46.4
+//!   ofgpu `SPEC-LIT.md` §95 - the section the measurements below are
+//!     §95.4 of - and §1, §2.3, §2.4, §3.2, §3.5, §4, §8.2, §8.4, §10, §21,
+//!     §46.4
 //!
 //! OpenFOAM and solids4foam are GPL and were not opened; neither was any
 //! other solid-mechanics solver of any licence. The discretisation below is
@@ -369,6 +370,18 @@ pub struct Prototype {
     /// extrapolation, kept because the difference between them is one of the
     /// numbers the experiment reports.
     pub boundary_gradient_correction: bool,
+    /// `kappa`: the factor the implicit coefficient of the split is
+    /// multiplied by, with the same amount moved into the deferred term so
+    /// that implicit plus deferred is still `sigma.Sf`.
+    ///
+    /// One is the split Jasak & Weller (2000) write and the only value any
+    /// solver runs. It is a field because the *continuum* split is exact for
+    /// every `kappa` - the fixed point of the map does not depend on it, only
+    /// the iteration matrix does - so `kappa` is a candidate accelerator whose
+    /// worth is a thing to measure, not to argue. Read
+    /// [`Prototype::new_with_implicit_scale`] for what it does and does not
+    /// leave alone.
+    pub implicit_scale: Scalar,
 
     /// Displacement, per cell.
     pub u: Vec<Vec3>,
@@ -410,9 +423,46 @@ pub struct Prototype {
 impl Prototype {
     /// Build the three systems and everything about them that does not change.
     pub fn new(mesh: HostMesh, material: Material, d_temp: Scalar, bcs: &PatchBcs) -> Self {
+        Self::new_with_implicit_scale(mesh, material, d_temp, bcs, 1.0)
+    }
+
+    /// [`Prototype::new`] with the implicit coefficient of the split
+    /// multiplied by `implicit_scale` and the same amount moved into the
+    /// deferred surface integral, so that implicit plus deferred is still
+    /// `sigma.Sf` and the continuous fixed point is unchanged.
+    ///
+    /// ```text
+    /// implicit:  kappa (2 mu + lambda) grad(u).Sf
+    /// deferred:  [ mu grad(u)^T + lambda tr(grad u) I - (mu + lambda) grad(u)
+    ///              - (3 lambda + 2 mu) alpha dT I ].Sf
+    ///            - (kappa - 1)(2 mu + lambda) grad(u).Sf
+    /// ```
+    ///
+    /// What that costs in honesty, said here rather than discovered later:
+    /// the two halves are evaluated by DIFFERENT discrete operators - the
+    /// implicit one by SPEC-LIT §3.2's compact laplacian with §2.4's
+    /// correction, the deferred one by §3.5's Green-Gauss gradient
+    /// interpolated to the face - so on an internal face the cancellation is
+    /// exact in the continuum and only to discretisation order on the mesh.
+    /// A `kappa` other than one therefore moves the converged displacement by
+    /// that difference, and the sweep that uses this reports the movement
+    /// instead of assuming it away. At a boundary face the cancellation IS
+    /// exact: a fixed component's deferred term is evaluated from
+    /// [`Prototype::update_boundary_gradient`]'s face gradient, whose normal
+    /// row is the same `Delta_b (u_b - u_P)` the implicit term uses, and a
+    /// traction component contributes `t |Sf|` and nothing else, with
+    /// [`Prototype::update_ref_grad`]'s solved form producing the face's true
+    /// normal derivative from `t` whatever `kappa` is.
+    pub fn new_with_implicit_scale(
+        mesh: HostMesh,
+        material: Material,
+        d_temp: Scalar,
+        bcs: &PatchBcs,
+        implicit_scale: Scalar,
+    ) -> Self {
         let n_c = mesh.n_cells;
         let n_bf = mesh.n_boundary_faces;
-        let gamma = material.implicit_gamma();
+        let gamma = material.implicit_gamma() * implicit_scale;
 
         let gamma_mag_sf: Vec<Scalar> =
             (0..mesh.n_internal_faces).map(|f| gamma * mesh.mag_sf[f]).collect();
@@ -470,6 +520,7 @@ impl Prototype {
             linear_cap: 5000,
             boundary_passes: 3,
             boundary_gradient_correction: true,
+            implicit_scale,
             a,
             rd,
             bc,
@@ -587,7 +638,10 @@ impl Prototype {
                 n * normal + tangential
             } else {
                 let q = deferred_traction(self.material, g, self.d_temp, self.mesh.b_sf[bf]);
-                let gb = self.b_gamma_mag_sf[bf];
+                // The UNSCALED coefficient: this branch inverts the original
+                // split, whose implicit half is `(2 mu + lambda)` whatever
+                // `implicit_scale` is doing to the matrix.
+                let gb = self.b_gamma_mag_sf[bf] / self.implicit_scale;
                 if gb > 0.0 {
                     (t * self.mesh.b_mag_sf[bf] - q) * (1.0 / gb)
                 } else {
@@ -666,6 +720,10 @@ impl Prototype {
     /// amplified, by 15.7.
     pub fn assemble_source(&mut self) {
         let m = &self.mesh;
+        // What `implicit_scale` moved OUT of the deferred group and into the
+        // implicit one, put back here with the opposite sign. Zero - and so
+        // arithmetically absent - at the only scale a solver runs.
+        let moved = (self.implicit_scale - 1.0) * self.material.implicit_gamma();
         for c in 0..m.n_cells {
             self.rhs[c] = Vec3::ZERO;
         }
@@ -674,7 +732,10 @@ impl Prototype {
             let n = m.neighbour[f] as usize;
             let w = m.weights[f];
             let gf = self.grad[p] * w + self.grad[n] * (1.0 - w);
-            let q = deferred_traction(self.material, gf, self.d_temp, m.sf[f]);
+            let mut q = deferred_traction(self.material, gf, self.d_temp, m.sf[f]);
+            if moved != 0.0 {
+                q -= dot_left(m.sf[f], gf) * moved;
+            }
             self.rhs[p] += q;
             self.rhs[n] -= q;
         }
@@ -683,7 +744,10 @@ impl Prototype {
                 continue;
             }
             let c = m.b_face_cells[bf] as usize;
-            let q = deferred_traction(self.material, self.b_grad[bf], self.d_temp, m.b_sf[bf]);
+            let mut q = deferred_traction(self.material, self.b_grad[bf], self.d_temp, m.b_sf[bf]);
+            if moved != 0.0 {
+                q -= dot_left(m.b_sf[bf], self.b_grad[bf]) * moved;
+            }
             for i in 0..3 {
                 if self.b_fixed[bf][i] {
                     let v = self.rhs[c].component(i) + q.component(i);
@@ -832,6 +896,147 @@ impl Prototype {
         report
     }
 
+    /// Setup only: the prescribed traction on ONE boundary face, replacing
+    /// what the per-patch table put there.
+    ///
+    /// A patch-uniform table cannot state a load that varies over the patch,
+    /// and the end-loaded cantilever's free end carries a parabolic shear
+    /// (Timoshenko & Goodier, *Theory of Elasticity*, 3rd ed. 1970, ch. 3)
+    /// whose depth integral IS the end load. Which components of the face are
+    /// `Traction` and which are `Fixed` is settled by the table
+    /// [`Prototype::new`] was given and is not changed here; this writes
+    /// values.
+    pub fn set_face_traction(&mut self, bf: usize, t: Vec3) {
+        self.b_traction[bf] = t;
+    }
+
+    /// Setup only: the prescribed displacement on ONE boundary face, for the
+    /// components the per-patch table made `Fixed`. The matrix does not
+    /// depend on `ref_value` - only on `fr` - so this needs no reassembly.
+    pub fn set_face_fixed_value(&mut self, bf: usize, v: Vec3) {
+        for i in 0..3 {
+            if self.b_fixed[bf][i] {
+                self.bc[i].ref_value[bf] = v.component(i);
+            }
+        }
+    }
+
+    /// The same fixed point as [`Prototype::run`], reached by ANDERSON
+    /// ACCELERATION of depth `depth` instead of by Aitken relaxation.
+    ///
+    /// Anderson (*J. ACM* 12 (1965) 547) in the form and notation of H. F.
+    /// Walker & P. Ni, *SIAM J. Numer. Anal.* 49 (2011) 1715-1735, DOI
+    /// 10.1137/10078356X, Algorithm 2, with `beta = 1`:
+    ///
+    /// ```text
+    /// g_k = F(u_k),  f_k = g_k - u_k
+    /// m_k = min(depth, k)
+    /// gamma = argmin || f_k - [ df_{k-m_k} ... df_{k-1} ] gamma ||_2
+    /// u_{k+1} = g_k - [ dg_{k-m_k} ... dg_{k-1} ] gamma
+    /// ```
+    ///
+    /// where `df_j = f_{j+1} - f_j` and `dg_j = g_{j+1} - g_j`. `depth = 0`
+    /// keeps no columns and is bare Picard, which is what
+    /// `anderson_of_depth_zero_is_bare_picard` holds it to.
+    ///
+    /// Aitken is the one-column member of this family restricted to a scalar
+    /// step (Kuettler & Wall 2008, DOI 10.1007/s00466-008-0255-5); the same
+    /// least-squares combination over an interface displacement is IQN-ILS,
+    /// J. Degroote, K.-J. Bathe & J. Vierendeels, *Comput. Struct.* 87 (2009)
+    /// 793-801, DOI 10.1016/j.compstruc.2008.11.013 - so what is measured
+    /// here is also the accelerator a partitioned fluid-structure coupling
+    /// would reach for.
+    ///
+    /// The least-squares solve is on the HOST, by modified Gram-Schmidt on
+    /// the residual differences ([`anderson_gamma`]): `depth <= 10` columns
+    /// of a few thousand entries is nothing beside three preconditioned
+    /// conjugate-gradient solves, and a normal-equation solve on differences
+    /// spanning six decades is the one arrangement that would make the
+    /// measurement a measurement of its own round-off.
+    pub fn run_anderson(&mut self, depth: usize, decades: Scalar, cap: usize) -> OuterReport {
+        let n_c = self.mesh.n_cells;
+        let mut report = OuterReport {
+            predicted_contraction: self.material.predicted_contraction(),
+            ..Default::default()
+        };
+        let mut g = vec![Vec3::ZERO; n_c];
+        let mut f = vec![Vec3::ZERO; n_c];
+        let mut g_prev = vec![Vec3::ZERO; n_c];
+        let mut f_prev = vec![Vec3::ZERO; n_c];
+        let mut d_f: Vec<Vec<Vec3>> = Vec::new();
+        let mut d_g: Vec<Vec<Vec3>> = Vec::new();
+        let mut first = 0.0 as Scalar;
+        let mut prev_norm = 0.0 as Scalar;
+
+        for k in 1..=cap {
+            report.linear_iterations += self.apply_map(&mut g);
+            for c in 0..n_c {
+                f[c] = g[c] - self.u[c];
+            }
+            let norm = l2(&f);
+            report.norms.push(norm);
+            report.iterations = k;
+            if !norm.is_finite() || (k > 1 && norm > first * 1.0e6) {
+                report.diverged = true;
+                break;
+            }
+            if k == 1 {
+                first = norm;
+            } else {
+                report.ratios.push(if prev_norm > 0.0 { norm / prev_norm } else { 0.0 });
+                if norm <= first * (10.0 as Scalar).powf(-decades) {
+                    report.converged = true;
+                    for c in 0..n_c {
+                        self.u[c] += f[c];
+                    }
+                    break;
+                }
+                let mut df = vec![Vec3::ZERO; n_c];
+                let mut dg = vec![Vec3::ZERO; n_c];
+                for c in 0..n_c {
+                    df[c] = f[c] - f_prev[c];
+                    dg[c] = g[c] - g_prev[c];
+                }
+                d_f.push(df);
+                d_g.push(dg);
+                while d_f.len() > depth {
+                    d_f.remove(0);
+                    d_g.remove(0);
+                }
+            }
+
+            if d_f.is_empty() {
+                // `u + (g - u)` and not `g`: the two differ in the last bit,
+                // and writing the increment is what makes `depth = 0` bare
+                // Picard to the BIT rather than to a tolerance.
+                for c in 0..n_c {
+                    self.u[c] += f[c];
+                }
+            } else {
+                let gamma = anderson_gamma(&d_f, &f);
+                for c in 0..n_c {
+                    let mut v = g[c];
+                    for (j, col) in d_g.iter().enumerate() {
+                        v -= col[c] * gamma[j];
+                    }
+                    self.u[c] = v;
+                }
+                // Not a relaxation factor: the one-norm of the least-squares
+                // combination, which is what says whether the columns have
+                // gone linearly dependent.
+                report.omegas.push(gamma.iter().map(|x| x.abs()).sum());
+            }
+            f_prev.copy_from_slice(&f);
+            g_prev.copy_from_slice(&g);
+            prev_norm = norm;
+        }
+
+        self.correct_boundary();
+        report.observed_contraction =
+            OuterReport::geometric_mean_of_last(&report.ratios, 10);
+        report
+    }
+
     /// Cauchy stress per cell, from the converged gradient.
     pub fn stress_field(&self) -> Vec<Tensor> {
         self.grad
@@ -915,6 +1120,71 @@ fn l2(v: &[Vec3]) -> Scalar {
 /// A zero denominator means the two residuals are identical - the loop has
 /// stopped moving - and the previous factor is kept rather than a NaN being
 /// produced.
+/// The inner product of two cell vector fields, in the same sequential order
+/// [`l2`] sums in.
+fn field_dot(a: &[Vec3], b: &[Vec3]) -> Scalar {
+    a.iter().zip(b.iter()).map(|(x, y)| x.dot(*y)).sum()
+}
+
+/// `argmin_gamma || rhs - C gamma ||_2` for the few columns of an Anderson
+/// mixing, by MODIFIED Gram-Schmidt with back substitution.
+///
+/// Modified Gram-Schmidt and not the normal equations: the columns are
+/// differences of residuals that span the decades the loop is dropping, so
+/// `C^T C` carries the square of that condition number and a `gamma` solved
+/// from it is arithmetic noise long before the loop has finished. A column
+/// that orthogonalises to nothing - which is what a stalled direction looks
+/// like - is DROPPED rather than divided by: its `gamma` entry is set to zero
+/// and the remaining columns are asked to do the work, which is the standard
+/// filtering of Walker & Ni (2011) in its cheapest form.
+fn anderson_gamma(cols: &[Vec<Vec3>], rhs: &[Vec3]) -> Vec<Scalar> {
+    let m = cols.len();
+    let scale = cols.iter().map(|c| l2(c)).fold(0.0 as Scalar, |a, b| a.max(b));
+    let mut q: Vec<Vec<Vec3>> = Vec::with_capacity(m);
+    let mut r = vec![vec![0.0 as Scalar; m]; m];
+    let mut live = vec![true; m];
+
+    for j in 0..m {
+        let mut v = cols[j].clone();
+        for i in 0..j {
+            if !live[i] {
+                continue;
+            }
+            let d = field_dot(&q[i], &v);
+            r[i][j] = d;
+            for (vc, qc) in v.iter_mut().zip(q[i].iter()) {
+                *vc -= *qc * d;
+            }
+        }
+        let nrm = l2(&v);
+        if !(nrm > 1.0e-12 * scale) {
+            live[j] = false;
+            r[j][j] = 1.0;
+            q.push(vec![Vec3::ZERO; rhs.len()]);
+        } else {
+            r[j][j] = nrm;
+            let inv = 1.0 / nrm;
+            for vc in v.iter_mut() {
+                *vc = *vc * inv;
+            }
+            q.push(v);
+        }
+    }
+
+    let mut gamma = vec![0.0 as Scalar; m];
+    for i in (0..m).rev() {
+        if !live[i] {
+            continue;
+        }
+        let mut acc = field_dot(&q[i], rhs);
+        for j in (i + 1)..m {
+            acc -= r[i][j] * gamma[j];
+        }
+        gamma[i] = acc / r[i][i];
+    }
+    gamma
+}
+
 fn aitken_omega(prev: Scalar, r_prev: &[Vec3], r: &[Vec3]) -> Scalar {
     let mut num = 0.0 as Scalar;
     let mut den = 0.0 as Scalar;
@@ -1242,6 +1512,364 @@ mod tests {
             p.equilibrium_residual() <= 1e-4,
             "the Aitken run finished on an equation residual of {:e}",
             p.equilibrium_residual()
+        );
+    }
+
+    // ======================================================================
+    //  The slender cantilever - the region TS-0's sweep never entered
+    // ======================================================================
+
+    /// A beam of span `l` along `x`, depth `2c` in `y` and ONE cell through
+    /// the thickness in `z`, whose cells are cubes when `n_x/l == n_y/(2c)`.
+    ///
+    /// Six real patches, `blockgen`'s `-x +x -y +y -z +z` slot order: the
+    /// `-z`/`+z` pair is named rather than left empty, because an empty face
+    /// contributes to no surface integral and would delete two of the six
+    /// tractions of a three-dimensional stress problem - the same reason
+    /// [`block`] names all six.
+    fn cantilever_mesh(n_x: usize, n_y: usize, l: Scalar, c: Scalar) -> HostMesh {
+        let axis = |lo: Scalar, hi: Scalar, n: usize| GradedAxis {
+            lo,
+            hi,
+            n,
+            expansion: 1.0,
+            two_sided: false,
+        };
+        blockgen::build_mesh(&BlockSpec {
+            x: axis(0.0, l, n_x),
+            y: axis(-c, c, n_y),
+            z: axis(0.0, 2.0 * c / n_y as Scalar, 1),
+            patch_type: ["patch", "patch", "patch", "patch", "patch", "patch"]
+                .map(String::from),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// Timoshenko & Goodier, *Theory of Elasticity*, 3rd ed. (1970) ch. 3:
+    /// the cantilever loaded at its free end. Origin at the FREE end on the
+    /// neutral axis, `x` toward the built-in end at `x = l`, `y` in
+    /// `[-c, c]`, unit thickness, `I = 2c^3/3`, load `P` in `+y` at `x = 0`.
+    /// Plane strain through `E' = E/(1 - nu^2)`, `nu' = nu/(1 - nu)`, `G`
+    /// unchanged (ch. 2). The rigid-body constant is fixed by "a vertical
+    /// element of the cross-section at the built-in end remains vertical".
+    ///
+    /// Only what the sweep needs: the end load's own traction, the clamp's
+    /// own displacement, and the tip deflection the converged runs are
+    /// checked against. The gate that measures ORDER is a separate matter and
+    /// is not this test's business.
+    struct CantileverExact {
+        p: Scalar,
+        l: Scalar,
+        c: Scalar,
+        i: Scalar,
+        e_p: Scalar,
+        nu_p: Scalar,
+        g: Scalar,
+    }
+
+    impl CantileverExact {
+        fn new(e: Scalar, nu: Scalar, l: Scalar, c: Scalar, p: Scalar) -> Self {
+            Self {
+                p,
+                l,
+                c,
+                i: 2.0 * c * c * c / 3.0,
+                e_p: e / (1.0 - nu * nu),
+                nu_p: nu / (1.0 - nu),
+                g: e / (2.0 * (1.0 + nu)),
+            }
+        }
+
+        /// `-P (c^2 - y^2)/(2I)`. Its depth integral is `-P`, so the parabolic
+        /// shear the free end carries IS the end load and nothing is left to a
+        /// Saint-Venant end effect.
+        fn sigma_xy(&self, y: Scalar) -> Scalar {
+            -self.p * (self.c * self.c - y * y) / (2.0 * self.i)
+        }
+
+        fn u(&self, x: Scalar, y: Scalar) -> Scalar {
+            -self.p * x * x * y / (2.0 * self.e_p * self.i)
+                - self.nu_p * self.p * y * y * y / (6.0 * self.e_p * self.i)
+                + self.p * y * y * y / (6.0 * self.i * self.g)
+                + self.p * self.l * self.l * y / (2.0 * self.e_p * self.i)
+        }
+
+        fn v(&self, x: Scalar, y: Scalar) -> Scalar {
+            self.nu_p * self.p * x * y * y / (2.0 * self.e_p * self.i)
+                + self.p * x * x * x / (6.0 * self.e_p * self.i)
+                - (self.p * self.c * self.c / (2.0 * self.i * self.g)
+                    + self.p * self.l * self.l / (2.0 * self.e_p * self.i))
+                    * x
+                + self.p * self.l * self.l * self.l / (3.0 * self.e_p * self.i)
+                + self.p * self.c * self.c * self.l / (2.0 * self.i * self.g)
+        }
+
+        /// `v(0, y)`, which does not depend on `y`.
+        fn tip(&self) -> Scalar {
+            self.p * self.l * self.l * self.l / (3.0 * self.e_p * self.i)
+                + self.p * self.c * self.c * self.l / (2.0 * self.i * self.g)
+        }
+    }
+
+    /// The end-loaded cantilever, built on a [`Prototype`] with an optional
+    /// implicit scale: the free end carries the closed form's parabolic
+    /// shear face by face, the built-in end carries the closed form's own
+    /// displacement face by face, the two faces of the slab are symmetry
+    /// planes (`u_z = 0`), and `-y`/`+y` are free. Isothermal - `d_temp = 0`
+    /// puts the thermal load at zero on every face, which is the state the
+    /// closed form is a solution of.
+    fn cantilever(
+        n_x: usize,
+        n_y: usize,
+        l: Scalar,
+        c: Scalar,
+        nu: Scalar,
+        kappa: Scalar,
+    ) -> (Prototype, CantileverExact) {
+        let e = 200.0e9;
+        let exact = CantileverExact::new(e, nu, l, c, 1.0e5);
+        let mat = Material { e, nu, alpha: 1.2e-5 };
+        let mut bcs = all_free();
+        bcs[1] = [CompBc::Fixed(0.0); 3];
+        bcs[4][2] = CompBc::Fixed(0.0);
+        bcs[5][2] = CompBc::Fixed(0.0);
+        let mesh = cantilever_mesh(n_x, n_y, l, c);
+        let mut p = Prototype::new_with_implicit_scale(mesh, mat, 0.0, &bcs, kappa);
+        for bf in 0..p.mesh.n_boundary_faces {
+            let y = p.mesh.b_cf[bf].y;
+            match p.mesh.b_patch[bf] as usize {
+                0 => p.set_face_traction(bf, Vec3::new(0.0, -exact.sigma_xy(y), 0.0)),
+                1 => p.set_face_fixed_value(
+                    bf,
+                    Vec3::new(exact.u(exact.l, y), exact.v(exact.l, y), 0.0),
+                ),
+                _ => {}
+            }
+        }
+        (p, exact)
+    }
+
+    /// The `|Sf|`-weighted mean of `u_y` over the loaded end, which is the
+    /// discrete reading of the closed form's `v(0, y)`.
+    fn tip_deflection(p: &Prototype) -> Scalar {
+        let (mut w, mut v) = (0.0 as Scalar, 0.0 as Scalar);
+        for bf in 0..p.mesh.n_boundary_faces {
+            if p.mesh.b_patch[bf] as usize == 0 {
+                w += p.mesh.b_mag_sf[bf];
+                v += p.mesh.b_mag_sf[bf] * p.ub[bf].y;
+            }
+        }
+        v / w
+    }
+
+    /// Keeping no columns at all is bare Picard, exactly - the property that
+    /// makes [`Prototype::run_anderson`] a superset of the loop it is being
+    /// compared against rather than a second loop with its own habits.
+    #[test]
+    fn anderson_of_depth_zero_is_bare_picard() {
+        let mat = Material::steel(0.3);
+        let mut a = Prototype::new(block(8).unwrap(), mat, DT, &fixed_minus_x());
+        let picard = a.run(false, 4.0, 200);
+        let mut b = Prototype::new(block(8).unwrap(), mat, DT, &fixed_minus_x());
+        let anderson = b.run_anderson(0, 4.0, 200);
+        assert_eq!(picard.iterations, anderson.iterations);
+        assert_eq!(picard.norms, anderson.norms);
+        for (x, y) in a.u.iter().zip(b.u.iter()) {
+            assert_eq!(*x, *y);
+        }
+    }
+
+    /// The least-squares solve, against a problem whose answer is known: two
+    /// orthogonal columns and a right-hand side that is `2` of the first and
+    /// `-3` of the second plus something orthogonal to both.
+    #[test]
+    fn the_anderson_least_squares_is_a_least_squares() {
+        let c0 = vec![Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO];
+        let c1 = vec![Vec3::new(0.0, 2.0, 0.0), Vec3::ZERO];
+        let rhs = vec![Vec3::new(2.0, -6.0, 7.0), Vec3::new(0.0, 0.0, 5.0)];
+        let g = anderson_gamma(&[c0.clone(), c1.clone()], &rhs);
+        assert!((g[0] - 2.0).abs() < 1e-14, "{g:?}");
+        assert!((g[1] + 3.0).abs() < 1e-14, "{g:?}");
+        // A column that repeats another carries no information, and asking a
+        // normal-equation solve for it would be a division by zero.
+        let g = anderson_gamma(&[c0.clone(), c0], &rhs);
+        assert!(g.iter().all(|x| x.is_finite()), "{g:?}");
+    }
+
+    /// `implicit_scale` moves the iteration matrix, and moves the CONVERGED
+    /// DISPLACEMENT too - by the difference between the two discrete
+    /// operators the exact cancellation is written between, which is a
+    /// quantity that vanishes under refinement and is not small at any mesh a
+    /// person would run.
+    ///
+    /// This is the test that stops `kappa` being described as free. The
+    /// continuum split is exact for every `kappa`; the discrete one is not,
+    /// because the implicit half is SPEC-LIT §3.2's compact laplacian and the
+    /// half moved out of the deferred group is §3.5's Green-Gauss gradient
+    /// interpolated to the face. On the block with one fixed face - whose
+    /// continuous stress is singular along every edge where the fixed face
+    /// meets a free one - `kappa = 2` was measured to move the peak
+    /// displacement by 1.8e-2 of its own size at `h = 1/8` and 1.5e-2 at
+    /// `h = 1/16`: a drift that is not going away on any mesh a person would
+    /// run. `kappa` buys whatever iteration count it buys by changing the
+    /// answer, and that is the sentence it is refused on.
+    #[test]
+    fn a_larger_implicit_coefficient_moves_the_converged_displacement() {
+        let mat = Material::steel(0.3);
+        let drift = |n: usize| -> Scalar {
+            let mut one = Prototype::new(block(n).unwrap(), mat, DT, &fixed_minus_x());
+            let a = one.run(true, 8.0, 400);
+            let mut two = Prototype::new_with_implicit_scale(
+                block(n).unwrap(),
+                mat,
+                DT,
+                &fixed_minus_x(),
+                2.0,
+            );
+            let b = two.run(true, 8.0, 400);
+            assert!(a.converged && b.converged, "{} {}", a.iterations, b.iterations);
+            let scale = one.u.iter().map(|v| v.mag()).fold(0.0 as Scalar, |x, y| x.max(y));
+            one.u
+                .iter()
+                .zip(two.u.iter())
+                .map(|(x, y)| (*x - *y).mag())
+                .fold(0.0 as Scalar, |x, y| x.max(y))
+                / scale
+        };
+        let coarse = drift(8);
+        let fine = drift(16);
+        assert!(
+            coarse > 1.0e-3 && fine > 1.0e-3,
+            "kappa = 2 moved the converged displacement by {coarse:.3e} of its own size \
+             at h = 1/8 and {fine:.3e} at h = 1/16 - if those have fallen to nothing the \
+             drift is no longer what decided against kappa, and the decision written in \
+             docs/09-thermal-structural-plan.md F.1b has to be re-read"
+        );
+    }
+
+    /// **The slender-cantilever sweep**, printed. `#[ignore]`d for the same
+    /// reason [`the_risk_one_sweep`] is: minutes of arithmetic whose product
+    /// is a table for a document, not a verdict a build should wait on.
+    ///
+    /// ```text
+    /// cargo test --release --lib -- \
+    ///     solid::prototype::tests::the_slender_cantilever_sweep --ignored --nocapture
+    /// ```
+    ///
+    /// What it answers: TS-0's sweep measured a COMPACT body - a `20^3` block
+    /// with one face fixed - and `docs/09-thermal-structural-plan.md` §F.1a's
+    /// numbers are that region's. An end-loaded cantilever is the other
+    /// region: bending, where the deformation is carried by the off-diagonal
+    /// `du_x/dy` / `du_y/dx` pair that lives ENTIRELY in the deferred half of
+    /// the split, while the implicit half is a decoupled laplacian per
+    /// component that knows nothing about it. The three candidates are the
+    /// baseline, Anderson acceleration at three depths, and a larger implicit
+    /// coefficient at three factors, all on the same 10:1 beam.
+    #[test]
+    #[ignore = "the measurement itself - minutes; run it with --ignored --nocapture"]
+    fn the_slender_cantilever_sweep() {
+        const CAP: usize = 2000;
+        const DECADES: Scalar = 6.0;
+        let (c, n_y) = (0.1, 8_usize);
+        let cells_per_c = n_y as Scalar / (2.0 * c);
+
+        println!(
+            "\n  case                          candidate        outer   observed  predicted  \
+             conv   cg iters   tip rel err"
+        );
+        let row = |case: &str, cand: &str, r: &OuterReport, tip: Scalar| {
+            println!(
+                "  {case:<28}  {cand:<14}  {:6}  {:9.4}  {:9.4}  {:>5}  {:9}  {:>12}",
+                r.iterations,
+                r.observed_contraction,
+                r.predicted_contraction,
+                if r.diverged { "DIVG" } else if r.converged { "true" } else { "false" },
+                r.linear_iterations,
+                if r.converged { format!("{tip:.3e}") } else { "-".to_string() },
+            );
+        };
+
+        // Every candidate at every aspect ratio, so that the 1:1 row is a
+        // CONTROL for its own candidate: same boundary topology, same load,
+        // same material, compact body. An accelerator that does not beat the
+        // loop on the case the loop already solves is an accelerator that is
+        // not working, and there would be no reading a negative result off
+        // it.
+        for (l, label) in [(0.2, "1:1"), (0.5, "2.5:1"), (1.0, "5:1"), (2.0, "10:1")] {
+            let n_x = (l * cells_per_c).round() as usize;
+            for nu in [0.2, 0.3] {
+                for aitken in [true, false] {
+                    let (mut p, exact) = cantilever(n_x, n_y, l, c, nu, 1.0);
+                    let r = p.run(aitken, DECADES, CAP);
+                    let tip = (tip_deflection(&p) - exact.tip()).abs() / exact.tip();
+                    row(
+                        &format!("{label} beam, nu = {nu}"),
+                        if aitken { "Picard+Aitken" } else { "Picard" },
+                        &r,
+                        tip,
+                    );
+                }
+            }
+            for depth in [3_usize, 5, 10] {
+                let (mut p, exact) = cantilever(n_x, n_y, l, c, 0.3, 1.0);
+                let r = p.run_anderson(depth, DECADES, CAP);
+                let tip = (tip_deflection(&p) - exact.tip()).abs() / exact.tip();
+                row(&format!("{label} beam, nu = 0.3"), &format!("Anderson m={depth}"), &r, tip);
+            }
+            for kappa in [1.5, 2.0, 4.0] {
+                let (mut p, exact) = cantilever(n_x, n_y, l, c, 0.3, kappa);
+                let r = p.run(true, DECADES, CAP);
+                let tip = (tip_deflection(&p) - exact.tip()).abs() / exact.tip();
+                row(&format!("{label} beam, nu = 0.3"), &format!("kappa = {kappa}"), &r, tip);
+            }
+            println!();
+        }
+
+        // Does the edge move with the mesh? A threshold the refusal is set
+        // at has to be a statement about the BODY, and one mesh cannot tell
+        // a slenderness limit from a resolution limit.
+        for (l, label) in [(1.0, "5:1"), (2.0, "10:1")] {
+            for ny in [4_usize, 8, 16] {
+                let n_x = (l * ny as Scalar / (2.0 * c)).round() as usize;
+                let (mut p, exact) = cantilever(n_x, ny, l, c, 0.3, 1.0);
+                let r = p.run_anderson(5, DECADES, CAP);
+                let tip = (tip_deflection(&p) - exact.tip()).abs() / exact.tip();
+                row(
+                    &format!("{label} beam, {n_x}x{ny}"),
+                    "Anderson m=5",
+                    &r,
+                    tip,
+                );
+            }
+        }
+        println!();
+
+        // The compact body of `docs/09-thermal-structural-plan.md` F.1a, with
+        // the same two accelerators on it: the row that says the Anderson
+        // written here IS an accelerator, measured where the plan's own sweep
+        // already knows the answer (71 outer iterations with Aitken).
+        for depth in [0_usize, 3, 5, 10] {
+            let mut p = Prototype::new(block(20).unwrap(), Material::steel(0.45), DT, &fixed_minus_x());
+            let r = p.run_anderson(depth, DECADES, CAP);
+            row("20^3 block, nu = 0.45", &format!("Anderson m={depth}"), &r, Scalar::NAN);
+        }
+        {
+            let mut p = Prototype::new(block(20).unwrap(), Material::steel(0.45), DT, &fixed_minus_x());
+            let r = p.run(true, DECADES, CAP);
+            row("20^3 block, nu = 0.45", "Picard+Aitken", &r, Scalar::NAN);
+        }
+
+        println!(
+            "\n  beams: cubic cells of side 2c/{n_y} on a depth of 0.2 and the span the\n  \
+             aspect ratio names; E = 200 GPa, nu as the row says, end load P = 1e5,\n  \
+             isothermal. Block: the compact body of docs/09-thermal-structural-plan.md\n  \
+             F.1a, one face fixed, uniform dT = {DT}. Six decades of the fixed-point\n  \
+             residual or {CAP} outer iterations. 'tip rel err' is the |Sf|-weighted mean\n  \
+             of u_y over the loaded end against Timoshenko & Goodier's v(0, y), printed\n  \
+             only where the loop converged - a number read off a stalled solve is not a\n  \
+             number - and on the kappa rows it is also what the moved split did to the\n  \
+             answer, the same mesh and the same load being solved."
         );
     }
 

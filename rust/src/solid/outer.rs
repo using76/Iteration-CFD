@@ -15,6 +15,14 @@
 //!   U. Küttler, W. A. Wall, *Comput. Mech.* 43 (2008) 61-72, DOI
 //!     10.1007/s00466-008-0255-5 - Aitken delta-squared dynamic relaxation of
 //!     a partitioned fixed point, §3.2, in the vector form used here
+//!   H. F. Walker, P. Ni, *SIAM J. Numer. Anal.* 49 (2011) 1715-1735, DOI
+//!     10.1137/10078356X - Anderson acceleration of a fixed-point iteration,
+//!     Algorithm 2 with `beta = 1`, which is what [`Relaxation::Anderson`]
+//!     runs; the original is D. G. Anderson, *J. ACM* 12 (1965) 547
+//!   J. Degroote, K.-J. Bathe, J. Vierendeels, *Comput. Struct.* 87 (2009)
+//!     793-801, DOI 10.1016/j.compstruc.2008.11.013 - IQN-ILS: the same
+//!     least-squares mixing over an interface displacement, which is why the
+//!     accelerator measured here is the one a partitioned coupling wants
 //!   H. Jasak, H. G. Weller, *Int. J. Numer. Methods Eng.* 48 (2000) 267-287,
 //!     DOI 10.1002/(SICI)1097-0207(20000520)48:2<267::AID-NME884>3.0.CO;2-Q -
 //!     the `(2 mu + lambda)` implicit split whose deferred part is what the
@@ -35,9 +43,11 @@
 //!     McGraw-Hill (1970) ch. 3 - the end-loaded cantilever, the closed form
 //!     the validation binary's cantilever gate measures against
 //!   `docs/09-thermal-structural-plan.md` §F.1a - the sweep whose counts and
-//!     contractions the twin test is held to
-//!   ofgpu `SPEC-LIT.md` §1, §2.4, §3.2, §3.5, §4, §8.2, §8.4, §21, §46.4,
-//!     §69, §94
+//!     contractions the twin test is held to, and §F.1b - the slender-body
+//!     sweep that chose [`ANDERSON_DEPTH`] and drew the slenderness refusal
+//!   ofgpu `SPEC-LIT.md` §95 - the section this loop IS (§95.3 the loop and
+//!     its three relaxations, §95.4 what was measured, §95.5 the refusals) -
+//!     and §1, §2.4, §3.2, §3.5, §4, §8.2, §8.4, §21, §46.4, §69, §94
 //!
 //! OpenFOAM and solids4foam are GPL and were not opened; no solid-mechanics
 //! solver of any licence was consulted. No GPL-licensed source was consulted.
@@ -61,7 +71,7 @@
 //!
 //! ```text
 //! u = u_0 (zero, or what the caller left in the displacement field)
-//! omega = 1;  first = 0;  prev_norm = 0
+//! omega = 1;  first = 0;  prev_norm = 0;  dF = [];  dG = []
 //! for k in 1..=max_outer:
 //!     next = F(u)     # boundary_passes sub-passes, source, three solves
 //!     r    = next - u ;  norm = ||r||_2 = sqrt(sum_c |r_c|^2)    (host)
@@ -74,9 +84,12 @@
 //!         if aitken:  omega = aitken_omega(omega, r_prev, r)
 //!         if norm <= first * 10^(-decades):
 //!             converged = true;  u += omega * r;  break
+//!         if anderson(m):  dF.push(r - r_prev);  dG.push(next - next_prev)
+//!                          trim both to the last m
 //!     if aitken:  omegas.push(omega)
-//!     u += omega * r
-//!     r_prev = r;  prev_norm = norm
+//!     if dF empty:  u += omega * r
+//!     else:         gamma = argmin ||r - dF gamma||;  u = next - dG gamma
+//!     r_prev = r;  next_prev = next;  prev_norm = norm
 //! then: correct_boundary once - the gradient the caller reads stress from
 //!       belongs to the accepted u;  observed = geometric mean of the last
 //!       10 ratios;  motion_ratio = max|u| / min_c V_c^(1/3);  print one line
@@ -97,13 +110,59 @@ use super::motion_ratio_of;
 //  Controls and report
 // ==========================================================================
 
+/// How the increment is relaxed between two applications of the map.
+///
+/// Named rather than a pair of booleans because the three are exclusive and
+/// a call site has to say which one it wants: a `bool` and a depth beside it
+/// can be set to a combination that means nothing, and the loop would have
+/// to pick a winner silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relaxation {
+    /// Bare Picard: `u += F(u) - u`, no relaxation at all. What the
+    /// divergence measurement and its twin test want, and nothing else.
+    None,
+    /// Aitken delta-squared dynamic relaxation, Küttler & Wall (2008) §3.2 -
+    /// one scalar factor chosen from the last two residuals.
+    Aitken,
+    /// Anderson acceleration of depth `m`: the least-squares combination of
+    /// the last `m` residual differences (Anderson, *J. ACM* 12 (1965) 547;
+    /// H. F. Walker & P. Ni, *SIAM J. Numer. Anal.* 49 (2011) 1715-1735, DOI
+    /// 10.1137/10078356X, Algorithm 2 with `beta = 1`). `Anderson(0)` keeps
+    /// no columns and IS [`Relaxation::None`].
+    ///
+    /// The same mixing applied to an interface displacement is IQN-ILS
+    /// (J. Degroote, K.-J. Bathe & J. Vierendeels, *Comput. Struct.* 87
+    /// (2009) 793-801, DOI 10.1016/j.compstruc.2008.11.013), so this is also
+    /// the accelerator a partitioned coupling would reach for.
+    Anderson(usize),
+}
+
+/// The depth the measurement chose: `docs/09-thermal-structural-plan.md`
+/// §F.1b's sweep, on the host prototype, six decades of the fixed-point
+/// residual.
+///
+/// ```text
+///                       Picard  +Aitken  AA(3)  AA(5)  AA(10)
+///   20^3 block, nu=0.45   DIVG      71     41     30      26
+///   1:1   beam, nu=0.3     171      49     30     24      20
+///   2.5:1 beam, nu=0.3     896   stall     64     39     153
+///   5:1   beam, nu=0.3   stall    stall   1041    306    DIVG
+///   10:1  beam, nu=0.3   stall    stall  stall  stall    DIVG
+/// ```
+///
+/// Five, because it is the only depth measured that beat Aitken on every
+/// case where Aitken finishes AND converged both slender cases that Aitken
+/// cannot reach at all; ten is faster on the compact body and then diverges
+/// on the two slender ones, which is the instability the column filtering
+/// of Walker & Ni (2011) is about and which this loop does not carry.
+pub const ANDERSON_DEPTH: usize = 5;
+
 /// The outer loop's controls: the relaxation, the decades of fixed-point
 /// residual to drop, the cap, and the boundary sub-passes per application.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OuterControls {
-    /// Aitken delta-squared relaxation. `false` gives bare Picard - which is
-    /// what the divergence measurement and its twin test want.
-    pub aitken: bool,
+    /// How the increment is relaxed.
+    pub relaxation: Relaxation,
     /// Decades of `||r||` below the first residual that mean convergence.
     pub decades: Scalar,
     /// Outer iterations never exceeded.
@@ -115,7 +174,12 @@ pub struct OuterControls {
 
 impl Default for OuterControls {
     fn default() -> Self {
-        Self { aitken: true, decades: 6.0, max_outer: 2000, boundary_passes: 3 }
+        Self {
+            relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+            decades: 6.0,
+            max_outer: 2000,
+            boundary_passes: 3,
+        }
     }
 }
 
@@ -200,6 +264,68 @@ fn l2(v: &[Vec3]) -> Scalar {
     v.iter().map(|a| a.mag_sqr()).sum::<Scalar>().sqrt()
 }
 
+/// The inner product of two cell vector fields, in [`l2`]'s order.
+fn field_dot(a: &[Vec3], b: &[Vec3]) -> Scalar {
+    a.iter().zip(b.iter()).map(|(x, y)| x.dot(*y)).sum()
+}
+
+/// `argmin_gamma || rhs - C gamma ||_2` by MODIFIED Gram-Schmidt, copied
+/// from `src/solid/prototype.rs`'s `anderson_gamma` so the two are one
+/// algorithm and the twin test compares a loop, not two arithmetics.
+///
+/// Modified Gram-Schmidt and not the normal equations: the columns are
+/// differences of residuals spanning the decades the loop is dropping, and
+/// `C^T C` carries the square of that condition number. A column that
+/// orthogonalises to nothing is dropped - its `gamma` entry set to zero -
+/// rather than divided by.
+pub(crate) fn anderson_gamma(cols: &[Vec<Vec3>], rhs: &[Vec3]) -> Vec<Scalar> {
+    let m = cols.len();
+    let scale = cols.iter().map(|c| l2(c)).fold(0.0 as Scalar, |a, b| a.max(b));
+    let mut q: Vec<Vec<Vec3>> = Vec::with_capacity(m);
+    let mut r = vec![vec![0.0 as Scalar; m]; m];
+    let mut live = vec![true; m];
+
+    for j in 0..m {
+        let mut v = cols[j].clone();
+        for i in 0..j {
+            if !live[i] {
+                continue;
+            }
+            let d = field_dot(&q[i], &v);
+            r[i][j] = d;
+            for (vc, qc) in v.iter_mut().zip(q[i].iter()) {
+                *vc -= *qc * d;
+            }
+        }
+        let nrm = l2(&v);
+        if !(nrm > 1.0e-12 * scale) {
+            live[j] = false;
+            r[j][j] = 1.0;
+            q.push(vec![Vec3::ZERO; rhs.len()]);
+        } else {
+            r[j][j] = nrm;
+            let inv = 1.0 / nrm;
+            for vc in v.iter_mut() {
+                *vc = *vc * inv;
+            }
+            q.push(v);
+        }
+    }
+
+    let mut gamma = vec![0.0 as Scalar; m];
+    for i in (0..m).rev() {
+        if !live[i] {
+            continue;
+        }
+        let mut acc = field_dot(&q[i], rhs);
+        for j in (i + 1)..m {
+            acc -= r[i][j] * gamma[j];
+        }
+        gamma[i] = acc / r[i][i];
+    }
+    gamma
+}
+
 // ==========================================================================
 //  The loop
 // ==========================================================================
@@ -224,6 +350,13 @@ pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Resul
     let mut next = gpu.zeros(n_c)?;
     let mut r: Vec<Vec3> = vec![Vec3::ZERO; n_c];
     let mut r_prev: Vec<Vec3> = vec![Vec3::ZERO; n_c];
+    let mut g_prev: Vec<Vec3> = vec![Vec3::ZERO; n_c];
+    let mut d_f: Vec<Vec<Vec3>> = Vec::new();
+    let mut d_g: Vec<Vec<Vec3>> = Vec::new();
+    let depth = match ctrl.relaxation {
+        Relaxation::Anderson(m) => m,
+        _ => 0,
+    };
     let mut omega = 1.0 as Scalar;
     let mut first = 0.0 as Scalar;
     let mut prev_norm = 0.0 as Scalar;
@@ -244,8 +377,8 @@ pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Resul
                 what: format!(
                     "the segregated displacement fixed point grew from {first:.3e} to \
                      {norm:.3e} at nu = {:.2} (a million-fold): the Picard loop does not \
-                     contract here; aitken = {}, boundary_passes = {}",
-                    d.material.nu, ctrl.aitken, ctrl.boundary_passes
+                     contract here; relaxation = {:?}, boundary_passes = {}",
+                    d.material.nu, ctrl.relaxation, ctrl.boundary_passes
                 ),
             });
         }
@@ -255,7 +388,7 @@ pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Resul
             omega = 1.0;
         } else {
             report.ratios.push(if prev_norm > 0.0 { norm / prev_norm } else { 0.0 });
-            if ctrl.aitken {
+            if ctrl.relaxation == Relaxation::Aitken {
                 omega = aitken_omega(omega, &r_prev, &r);
             }
             if norm <= first * (10.0 as Scalar).powf(-ctrl.decades) {
@@ -266,15 +399,47 @@ pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Resul
                 gpu.write(&mut d.u.f, &u)?;
                 break;
             }
+            if depth > 0 {
+                // The two difference columns of this iteration, then the
+                // window trimmed to `depth` - the prototype's order.
+                let mut df = vec![Vec3::ZERO; n_c];
+                let mut dg = vec![Vec3::ZERO; n_c];
+                for c in 0..n_c {
+                    df[c] = r[c] - r_prev[c];
+                    dg[c] = f[c] - g_prev[c];
+                }
+                d_f.push(df);
+                d_g.push(dg);
+                while d_f.len() > depth {
+                    d_f.remove(0);
+                    d_g.remove(0);
+                }
+            }
         }
-        if ctrl.aitken {
+        if ctrl.relaxation == Relaxation::Aitken {
             report.omegas.push(omega);
         }
-        for c in 0..n_c {
-            u[c] += r[c] * omega;
+        if d_f.is_empty() {
+            for c in 0..n_c {
+                u[c] += r[c] * omega;
+            }
+        } else {
+            let gamma = anderson_gamma(&d_f, &r);
+            for c in 0..n_c {
+                let mut v = f[c];
+                for (j, col) in d_g.iter().enumerate() {
+                    v -= col[c] * gamma[j];
+                }
+                u[c] = v;
+            }
+            // Not a relaxation factor: the one-norm of the least-squares
+            // combination, which is what says whether the columns have gone
+            // linearly dependent.
+            report.omegas.push(gamma.iter().map(|x| x.abs()).sum());
         }
         gpu.write(&mut d.u.f, &u)?;
         r_prev.copy_from_slice(&r);
+        g_prev.copy_from_slice(&f);
         prev_norm = norm;
     }
 
@@ -284,14 +449,15 @@ pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Resul
     report.observed_contraction = observed_contraction(&report.ratios, 10);
     report.motion_ratio = motion_ratio_of(&u, &vols);
     println!(
-        "solid outer: nu={:.3} outer={} converged={} observed={:.4} predicted={:.4} \
-         omega_last={:.3} linear_iters={} motion_ratio={:.3e}",
+        "solid outer: nu={:.3} relaxation={:?} outer={} converged={} observed={:.4} \
+         predicted={:.4} omega_last={:.3} linear_iters={} motion_ratio={:.3e}",
         d.material.nu,
+        ctrl.relaxation,
         report.iterations,
         report.converged,
         report.observed_contraction,
         report.predicted_contraction,
-        omega,
+        report.omegas.last().copied().unwrap_or(omega),
         report.linear_iterations,
         report.motion_ratio
     );
@@ -366,7 +532,12 @@ mod tests {
             let rep = solve(
                 &gpu,
                 &mut d,
-                &OuterControls { aitken: true, decades: 6.0, max_outer: 300, boundary_passes: 3 },
+                &OuterControls {
+                    relaxation: Relaxation::Aitken,
+                    decades: 6.0,
+                    max_outer: 300,
+                    boundary_passes: 3,
+                },
             )
             .expect("the device twin converges wherever the prototype does");
             assert!(rep.converged, "nu = {nu}: device run did not converge");
@@ -419,6 +590,68 @@ mod tests {
         }
     }
 
+    /// The Anderson path is the prototype's `run_anderson` on the device,
+    /// held to the same count and the same norm history as the Aitken twin
+    /// above - and, on the compact body of
+    /// `docs/09-thermal-structural-plan.md` §F.1a, it is measured to be
+    /// FASTER than Aitken, which is why it is the default. An accelerator
+    /// that did not beat the loop on the case the loop already solves would
+    /// be an accelerator that is not working, and this is the assertion that
+    /// says it is.
+    #[test]
+    fn the_device_anderson_loop_is_the_prototypes_twin() {
+        let Some(gpu) = gpu() else { return };
+        let nu = 0.45;
+        let hm_h = prototype::block(20).expect("block");
+        let mut p = Prototype::new(hm_h, Material::steel(nu), 100.0, &fixed_minus_x());
+        let host = p.run_anderson(ANDERSON_DEPTH, 6.0, 300);
+        assert!(host.converged, "the prototype's Anderson run did not converge");
+
+        let hm = prototype::block(20).expect("block");
+        let gm = GpuMesh::upload(&gpu, &hm).expect("upload");
+        let mut d = device_displacement(&gpu, &gm, &hm, nu);
+        let rep = solve(&gpu, &mut d, &OuterControls { max_outer: 300, ..Default::default() })
+            .expect("the device twin converges wherever the prototype does");
+        assert!(rep.converged, "the device Anderson run did not converge");
+        assert!(
+            (rep.iterations as i64 - host.iterations as i64).abs() <= 2,
+            "device outer {} vs prototype {}",
+            rep.iterations,
+            host.iterations
+        );
+        // A least-squares combination of residual differences amplifies the
+        // gap between the two inner solves harder than one Aitken scalar
+        // does, so the bar here is looser than the Aitken twin's 1e-4 - and
+        // it is the measured gap, printed beside it, not a drafted one.
+        let common = rep.norms.len().min(host.norms.len());
+        let dev = (0..common)
+            .map(|k| (rep.norms[k] - host.norms[k]).abs() / host.norms[k])
+            .fold(0.0 as Scalar, f64::max);
+        println!("solid outer (Anderson twin): outer={} norm-dev={dev:.3e}", rep.iterations);
+        assert!(dev <= 1.0e-2, "norm histories differ by {dev:.3e}");
+        let u_d = gpu.download(&d.u.f).expect("download");
+        let max_u = p.u.iter().map(|a| a.mag()).fold(0.0 as Scalar, f64::max);
+        let du = p.u.iter().zip(u_d.iter()).map(|(h, dv)| (*h - *dv).mag()).fold(0.0, f64::max);
+        assert!(du <= 1.0e-5 * max_u, "|du| = {du:e}");
+
+        // The reason it is the default: fewer outer iterations than Aitken
+        // on the very case F.1a measured at 71.
+        let mut q = Prototype::new(
+            prototype::block(20).expect("block"),
+            Material::steel(nu),
+            100.0,
+            &fixed_minus_x(),
+        );
+        let aitken = q.run(true, 6.0, 300);
+        assert!(
+            host.iterations < aitken.iterations,
+            "Anderson took {} outer iterations where Aitken took {} - the depth in \
+             ANDERSON_DEPTH was chosen on the opposite measurement",
+            host.iterations,
+            aitken.iterations
+        );
+    }
+
     /// Bare Picard at nu = 0.45 diverges on the device too - and named:
     /// `Err(Error::Diverged)` saying what grew; or, if the residual reaches
     /// the cap before the detector trips, the prototype's own disjunction.
@@ -431,7 +664,12 @@ mod tests {
         match solve(
             &gpu,
             &mut d,
-            &OuterControls { aitken: false, decades: 6.0, max_outer: 300, boundary_passes: 3 },
+            &OuterControls {
+                relaxation: Relaxation::None,
+                decades: 6.0,
+                max_outer: 300,
+                boundary_passes: 3,
+            },
         ) {
             Err(Error::Diverged { what, .. }) => assert!(
                 what.contains("does not contract") && what.contains("nu = 0.45"),

@@ -699,6 +699,58 @@ Risk 1's experiment was run as written (`src/solid/prototype.rs`, `the_risk_one_
 
 What it decides: **Aitken delta-squared and the traction condition solved at the face are mandatory in §95** - bare Picard diverges at `nu = 0.45` and `0.49` whether the boundary is passed once or three times, and even where it converges its contraction (0.87 at `nu = 0.2`) is worse than the derivation, while Aitken with three boundary passes converges at every `nu` tried (16 / 20 / 71 outer iterations at 0.2 / 0.3 / 0.45, observed 0.50 / 0.62 / 0.92 against the predicted 0.625 / 0.714 / 0.909). **The near-incompressible refusal threshold is read off the sweep, not argued**: at `nu = 0.49` Aitken needs 615 outer iterations on the orthogonal block and does not converge in 2000 on the jittered one, so §95 refuses above the `nu` at which the measured cost is still affordable rather than at a number chosen in advance; the interior alone (every boundary prescribed by displacement) tracks `1/(2(1 - nu))` to two digits at every `nu`, which locates the slowness in the free surface, and free expansion carries stress below 1e-7 of `(3 lambda + 2 mu) alpha Delta T`.
 
+### F.1b Measured again, on the shape F.1a never entered (S6b, 2026-09-13)
+
+F.1a measured a **compact** body - a `20^3` and a `40^3` block with one face fixed - and everything sized on it is
+a statement about compact bodies. Gate 95-A's end-loaded cantilever is the other shape, and it could not be earned:
+the segregated loop does not converge on a bending-dominated slender body at all. Measured on the host prototype
+(`src/solid/prototype.rs`, `the_slender_cantilever_sweep`), Timoshenko & Goodier ch. 3's cantilever, isothermal,
+cubic cells, six decades of the fixed-point residual or 2000 outer iterations, `nu = 0.2` and `0.3`; `stall` is the
+cap reached with the observed contraction still between 0.95 and 1.00, `DIVG` is the million-fold divergence
+detector:
+
+```
+                          Picard   +Aitken   AA(3)   AA(5)   AA(10)
+    20^3 block, nu=0.45     DIVG        71      41      30       26
+    1:1   beam, nu=0.3       171        49      30      24       20
+    2.5:1 beam, nu=0.3       896     stall      64      39      153
+    5:1   beam, nu=0.3     stall     stall    1041     306     DIVG
+    10:1  beam, nu=0.3     stall     stall   stall   stall     DIVG
+
+    5:1  beam  20x4 AA(5) stall    40x8 AA(5) 306      80x16  AA(5) 331
+    10:1 beam  40x4 AA(5) stall    80x8 AA(5) stall    160x16 AA(5) stall
+
+    kappa = 1.5 / 2 / 4 on the 10:1 beam (the implicit coefficient of the split
+    enlarged, the same amount moved into the deferred term): stall, stall, stall
+```
+
+What it decides. **(1) Anderson acceleration at depth five becomes the outer loop's relaxation** (`Relaxation` in
+`src/solid/outer.rs`, mirrored by `Prototype::run_anderson`; Anderson, *J. ACM* 12 (1965) 547; Walker & Ni, SIAM J.
+Numer. Anal. 49 (2011) 1715-1735, DOI 10.1137/10078356X; the same mixing over an interface is IQN-ILS, Degroote,
+Bathe & Vierendeels, DOI 10.1016/j.compstruc.2008.11.013). It is the only depth measured that beat Aitken on every
+case Aitken finishes and converged two slender cases Aitken cannot reach; on the very case F.1a measured at 71
+outer iterations it takes 30. Depth ten diverges on both slender beams. **(2) A larger implicit coefficient is
+refused, not adopted**: it accelerated nothing, and because the implicit half is the compact laplacian while the
+half moved out is the wide Green-Gauss gradient, `kappa = 2` moved the converged displacement by 1.8e-2 of its own
+size at `h = 1/8` and 1.5e-2 at `h = 1/16` - it buys iteration count by changing the answer. **(3) Gate 95-A is NOT
+written, and SPEC-LIT 95 gains a refusal by name instead**: a body whose slenderness (the volume-weighted
+covariance of the cell centres, its unresolved principal direction dropped) exceeds **5** is refused with the
+measurement in the message and the block-coupled matrix (Cardiff, Tukovic, Jasak & Ivankovic 2016, DOI
+10.1016/j.compstruc.2016.07.004) named as the route; the cantilever becomes that refusal's test. Release 1's solid
+verdict therefore stands on the compact-body gates - 95-B free expansion, 95-C the patch test, 95-F the
+contraction table, and S7's thick cylinder - and on nothing slender.
+
+Why bending, in one sentence: the implicit half of the Jasak & Weller split is a decoupled laplacian per
+component, bending is carried entirely by the off-diagonal `du_x/dy` / `du_y/dx` pair that lives in the deferred
+half, so on a slender body in bending the outer loop is doing all the work and the spectral radius of its
+iteration matrix goes to one - which is why the criterion is a shape and not a material, and why the failure is
+the same at `nu = 0.2` and `0.3` and does not move when the mesh is refined by four.
+
+Risk 1 above is therefore **half retired and half re-opened**: the contraction at engineering Poisson ratios is
+measured and affordable on a compact body (Anderson at 30 outer iterations at `nu = 0.45`), and the shape the risk
+row never named - slenderness - is what actually forces lens 4's block matrix. It moves ahead of the FSI sections,
+not ahead of release 1.
+
 ---
 
 ## G. What this plan does not do

@@ -37,12 +37,22 @@ repository already has, and all of it gated.
    holds (facts-solver-solid §11.2). The conjugate temperature stays on the concatenated mesh; a solid region
    reads its `T` as the slice `cells()` of that field (concatenation preserves order). §93's per-region
    residual is a ranged reduction over that slice, not a new matrix.
-3. **The solid solver is Part I's §95 with the prototype's design made binding.** TS-0 measured that bare
-   Picard on a body with a free surface diverges at ν = 0.45 and 0.49 and contracts at 0.87 (not the derived
-   0.625) at ν = 0.2; Aitken Δ² plus a traction condition solved at the face with three sub-passes converges at
-   every ν tried (71 outer iterations at 0.45). Aitken and the face-solved traction are therefore mandatory;
-   the near-incompressible refusal is read off the sweep; and the host prototype (`src/solid/prototype.rs`)
-   becomes the reference the device kernels are diffed against, which is this repository's own pattern.
+3. **The solid solver is Part I's §95 with the prototype's design made binding — and it is a COMPACT-BODY
+   solver.** TS-0 measured that bare Picard on a body with a free surface diverges at ν = 0.45 and 0.49 and
+   contracts at 0.87 (not the derived 0.625) at ν = 0.2; Aitken Δ² plus a traction condition solved at the face
+   with three sub-passes converges at every ν tried (71 outer iterations at 0.45). **S6b then measured the shape
+   TS-0 never entered** (`docs/09` §F.1b): the end-loaded cantilever stalls at an observed contraction of 0.95–1.00
+   from about 2.5:1 upward under Aitken, and at 10:1 under everything tried — bare Picard, Aitken, Anderson at
+   depths 3/5/10, and the implicit coefficient of the split enlarged 1.5/2/4× — on three meshes and at ν = 0.2 and
+   0.3. Three things are therefore binding. **Anderson acceleration at depth five is the outer loop's relaxation**
+   (Walker & Ni 2011, DOI 10.1137/10078356X; the same mixing over an interface is IQN-ILS, Degroote, Bathe &
+   Vierendeels, DOI 10.1016/j.compstruc.2008.11.013): it beats Aitken everywhere Aitken finishes (30 outer
+   iterations at ν = 0.45 against 71) and converges 2.5:1 and 5:1, which Aitken cannot reach. The face-solved
+   traction stays mandatory. And **a bending-dominated slender body is refused by name** — slenderness above 5,
+   computed from the volume-weighted covariance of the cell centres — with the block-coupled matrix (Cardiff,
+   Tuković, Jasak & Ivanković 2016, DOI 10.1016/j.compstruc.2016.07.004) named as the route. Gate 95-A is not
+   written; the cantilever is the refusal's test; release 1 stands on 95-B, 95-C, 95-F and S7's thick cylinder.
+   The host prototype (`src/solid/prototype.rs`) remains the reference the device kernels are diffed against.
 4. **Mesh motion is ALE with the space conservation law, on the buffers the mesh already has.** The device
    geometry recompute exists as four kernels producing all sixteen arrays (`cuda/meshgeom.cu`), but re-uploads
    its inputs every call; `GpuMesh` buffers are `pub DevBuf` and kernels index them directly, so the ALE step
@@ -139,7 +149,7 @@ registry tests cite, so it may never carry a real section. Part I's numbers ther
 |---|---|---|
 | 93 | per-region residual; points retained through lowering; VTU with real points, PointData, `Tensor`; the small refusals | 93 |
 | 94 | observed order, GCI, `uncertainty` on `GateReport` | 94 |
-| 95 | the thermo-elastic solid, on its region mesh, Aitken mandatory | 95 |
+| 95 | the thermo-elastic solid, on its region mesh; Anderson(5) the measured relaxation; ν > 0.45 and slenderness > 5 refused by name (S6b) | 95 |
 | 96 | the case (`mechanics`, `stress` mode, `output` for `ofgpu-cht`, `docs/schema/cht-1.json`), pair tests | 96 |
 | 97 | the imported region, the region layout, `ofgpu-regions` | 97 |
 | 98 | a face that exchanges heat with something not meshed | 98 |
@@ -152,6 +162,7 @@ registry tests cite, so it may never carry a real section. Part I's numbers ther
 | 106 | fluid–structure interaction (a: steady conformal; b: dynamic solid; c: IQN-ILS; d: non-conformal mapping) | — |
 | 107 | overset | 106 |
 | 108 | a mesh fit for VOF | 105 |
+| 109 | **the block-coupled matrix** — the route both of §95's measured refusals name, and what §106 waits on (S6b) | — |
 
 `docs/09-thermal-structural-plan.md` is amended by S0 with this table and is otherwise unchanged.
 
@@ -185,6 +196,12 @@ supervisor, not the coder, commits.
 | **WF-C** | S23 (§101) · S24 (§102) · S25 (§103) · S26 (§104) · S27–S29 (§107) · S30 (§108) ‖ G7 | after WF-B's review |
 
 ## G. Risks, and what is measured first
+
+0. **MEASURED, and it changed the plan (S6b, 2026-09-13): the segregated loop does not do bending.** The risk
+   this list did not carry. `docs/09` §F.1b's sweep is the measurement and decision 3 above is the consequence:
+   Anderson at depth five replaces Aitken, a slenderness above 5 is refused by name, Gate 95-A is not written, and
+   the block-coupled matrix moves from "named for later" to **the section §106 waits on**. Nothing in Stage 1's
+   compact-body gates changes; everything slender does.
 
 1. **GLM writing CUDA against a 26,000-line spec.** Every kernel unit ships a scatter-shaped host mirror in
    `reference.rs` (or reuses the prototype's) and the supervisor diffs device against host to 1e-12 before
@@ -505,6 +522,21 @@ colour by von Mises, cut; then the same by the assistant through `ai-drive.ts` w
 fixed; both repos committed (never pushed from `Iteration-CFD`; `iteration-gui` pushed only when the user says).
 
 ## J. Unit catalogue — WF-B and WF-C (titles and gates; briefs written when WF-A is reviewed)
+
+**§106 waits on the block-coupled matrix, and the block matrix is the next section written (S6b, 2026-09-13).**
+The Turek–Hron flap is 350 mm long and 20 mm thick — **17.5:1**. `docs/09` §F.1b measured the segregated
+displacement loop stalling at an observed contraction of 0.95–1.00 on a 10:1 cantilever on three meshes, at
+ν = 0.2 and 0.3, with bare Picard, with Aitken, with Anderson at depths 3, 5 and 10, and with the implicit
+coefficient of the split enlarged three ways; §95 refuses a slenderness above 5 by name for that reason. A solid
+solver that refuses the flap cannot carry S15–S18, whatever the fluid side does. So the order changes: **§109, the
+block-coupled matrix of Cardiff, Tuković, Jasak & Ivanković (2016, DOI 10.1016/j.compstruc.2016.07.004), is
+written before §106** — three components in one matrix, a 3×3 coefficient per face, which needs a second matrix
+format beside SPEC-LIT §1's one-entry-per-face LDU and is therefore a unit of its own, not an option on the
+existing solve. Gate 95-A, the end-loaded cantilever at observed order through §94, is what §109 has to earn, and
+it is written with §109 and not before. S12–S14 (§105, ALE and the space conservation law) are **unaffected** —
+they are fluid and mesh work and do not touch the solid loop — and may proceed in parallel. S15–S18 do not start
+until §109's cantilever passes.
+
 
 **S12 §105a** resident geometry (points `DevBuf`, face CSR, scratch resident; `GpuGeometry::recompute_in_place(gm)`),
 swept-volume kernel per face (fan about `x_avg`, same order as `face_geometry`), volume history `v0/v00`, ALE
