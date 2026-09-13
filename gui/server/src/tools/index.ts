@@ -13,6 +13,7 @@ import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } f
 import { customToolCreate, customToolRun } from './custom.js'
 import { forgive } from './forgive.js'
 import { fileList, fileRead, fileSearch, fileWrite } from './files.js'
+import { geometryEdit, geometryImportStep, meshRegions, regionsCheck } from './geomTool.js'
 import { geometryInfo, geometryOpen, geometrySave } from './geometry.js'
 import { gpuInfo } from './gpu.js'
 import { guiControl, guiState } from './gui.js'
@@ -48,6 +49,10 @@ export const TOOLS: ToolDef[] = [
   geometryOpen,
   geometryInfo,
   geometrySave,
+  geometryImportStep,
+  geometryEdit,
+  meshRegions,
+  regionsCheck,
   residualsGet,
   viewerCommand,
   plotResiduals,

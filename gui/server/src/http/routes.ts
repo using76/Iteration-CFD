@@ -4,12 +4,14 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, PIPELINES, MESH_PRESETS, MODELS, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, DEFAULT_SESSION_SETTINGS, PIPELINES, MESH_PRESETS, MODELS, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import { compileUserRegex, UnsafeRegexError } from '../regex.js'
 import { geometryService } from '../tools/geometry.js'
+import { geometryEdit, geometryImportStep } from '../tools/geomTool.js'
+import type { ToolContext, ToolResult } from '../tools/context.js'
 import type { CaseSchema } from '../registry/schema.js'
 import { readCaseJsonc } from '../formats/casejsonc.js'
 import { BOX_FACES } from '../formats/cartesian.js'
@@ -36,6 +38,46 @@ export interface ApiDeps {
   /** The OPTIONAL cht schema (the solver generates docs/schema/cht-1.json); a getter, so a test can flip it between assertions. */
   chtSchema?: () => CaseSchema | null
   gitStatus?: (cwd: string) => Promise<GitStatus>
+}
+
+const ImportStepSchema = z.object({
+  path: z.string(),
+  tags: z.array(z.number().int()).nullable().default(null),
+  stlSize: z.number().positive().nullable().default(null),
+})
+const GeometryEditSchema = z.object({
+  path: z.string(),
+  ops: z.string(), // JSON TEXT of the ops array
+  out: z.string(),
+  overwrite: z.boolean().nullable().default(null),
+})
+
+/** A Hub for a route: only `broadcast` is real; the other, client-facing members belong to a websocket session and say so. */
+function routeHub(deps: ApiDeps): Hub {
+  const no = (m: string) => () => { throw new Error(`hub.${m} is not available to an HTTP route`) }
+  return {
+    broadcast: (msg) => deps.hub.broadcast(msg),
+    sendToSession: no('sendToSession'), sendToRun: no('sendToRun'), clients: no('clients'),
+    hasViewerClient: () => false, requestViewer: no('requestViewer'), getUiState: () => null,
+    requestUi: no('requestUi'), onClientMessage: no('onClientMessage'),
+    onClientOpen: no('onClientOpen'), onClientClose: no('onClientClose'),
+  }
+}
+
+/** The ToolContext a route hands a ToolDef it calls directly: no session, no approval, an abort signal nobody fires. */
+function httpToolContext(deps: ApiDeps, root: string): ToolContext {
+  return {
+    config: deps.config, hub: routeHub(deps), runs: deps.runs, datasets: deps.datasets,
+    sessionId: 'http', signal: new AbortController().signal, workspaceRoot: root,
+    settings: DEFAULT_SESSION_SETTINGS, toolUseId: 'http-' + Date.now().toString(36),
+  }
+}
+
+/** Turns a refused ToolResult into the HTTP answer the Geometry tab reads. */
+function toolHttpError(r: ToolResult): HttpError {
+  const code = r.error?.code ?? 'INVALID'
+  const status = code === 'NOT_FOUND' ? 404 : code === 'EXISTS' ? 409 : code === 'OUTSIDE_WORKSPACE' ? 403 : 400
+  return new HttpError(status, r.error?.message ?? 'tool failed', { code })
 }
 
 const StartRunSchema = z.object({
@@ -241,6 +283,23 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
   router.delete('/api/geometry/:id', async ({ params }) => {
     if (!(await geometry.remove(params.id))) throw new HttpError(404, `no such geometry: ${params.id}`)
     return { evicted: params.id }
+  })
+  // The GUI has no client-side tool-call frame, so the STEP import and the
+  // boolean group reach the server over HTTP: two routes wrap the two ToolDefs
+  // (path confinement is the tools' own resolveTool; OUTSIDE_WORKSPACE comes
+  // back as 403 through toolHttpError). mesh_regions and regions_check get no
+  // route - they start runs the client already watches over the websocket.
+  router.post('/api/geometry/import-step', async (rc) => {
+    const body = await rc.json(ImportStepSchema)
+    const r = await geometryImportStep.run(body, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
+  })
+  router.post('/api/geometry/edit', async (rc) => {
+    const body = await rc.json(GeometryEditSchema)
+    const r = await geometryEdit.run(body, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
   })
   router.get('/api/results', ({ query }) => {
     const rootParam = query.get('root')

@@ -4,7 +4,7 @@
 // second command.
 import { describe, expect, it } from 'vitest'
 import { STATIC_SYSTEM } from '../prompts/system.js'
-import { availableBinaries, buildArgv, pipelineCommandLine, quoteForCmd } from './dispatch.js'
+import { availableBinaries, buildArgv, pipelineCommandLine, pipelineSpawn, quoteForCmd } from './dispatch.js'
 
 describe('pipeline command line', () => {
   it('quotes every argument, doubling embedded quotes, so cmd separators stay literal', () => {
@@ -18,6 +18,22 @@ describe('pipeline command line', () => {
     expect(line).toBe('"C:\\ws\\tools\\mesh\\run_step_mesh.cmd" "cases/foo.json" "--tag" "x&whoami" "--dry-run"')
     // nothing is left outside a quote pair
     expect(line.replace(/"[^"]*"/g, '').trim()).toBe('')
+  })
+})
+
+describe('pipeline spawn', () => {
+  it('py_pipeline_spawn: a .py runs exec-style with nothing quoted, a .cmd keeps the quoted cmd.exe line, anything else is refused', () => {
+    expect(pipelineSpawn({ name: 'geom-tool', source: 'tools/geom/geom_tool.py' }, 'C:\\ws\\tools\\geom\\geom_tool.py', ['info', 'a b.step', '--json', 'x&y.json'], 'python', 'cmd.exe')).toEqual({
+      command: 'python',
+      args: ['C:\\ws\\tools\\geom\\geom_tool.py', 'info', 'a b.step', '--json', 'x&y.json'],
+      verbatim: false,
+    })
+    expect(pipelineSpawn({ name: 'mesh-step', source: 'tools/mesh/run_step_mesh.cmd' }, 'C:\\ws\\tools\\mesh\\run_step_mesh.cmd', ['cases/foo.json', '--tag', 'x&whoami', '--dry-run'], 'python', 'cmd.exe')).toEqual({
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', '""C:\\ws\\tools\\mesh\\run_step_mesh.cmd" "cases/foo.json" "--tag" "x&whoami" "--dry-run""'],
+      verbatim: true,
+    })
+    expect(() => pipelineSpawn({ name: 'x', source: 'tools/x.sh' }, 'C:\\ws\\tools\\x.sh', [], 'python', 'cmd.exe')).toThrow(/\.cmd or a \.py/)
   })
 })
 

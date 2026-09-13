@@ -12,7 +12,7 @@ import type { Readable } from 'node:stream'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { getBinary, type StartRunRequest } from '@cfd/shared'
+import { getBinary, type BinarySpec, type StartRunRequest } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import { scrubbedEnv } from '../env.js'
 import { RunRequestError } from './types.js'
@@ -107,29 +107,42 @@ export function pipelineCommandLine(script: string, argv: string[]): string {
   return [script, ...argv].map(quoteForCmd).join(' ')
 }
 
+/** How a pipeline script is started: a .cmd through cmd.exe with every argument quoted (Windows only); a .py through the interpreter, exec-style, on any platform. */
+export function pipelineSpawn(spec: Pick<BinarySpec, 'name' | 'source'>, script: string, argv: string[], python: string, comspec: string): { command: string; args: string[]; verbatim: boolean } {
+  if (/\.cmd$/i.test(spec.source) || /\.bat$/i.test(spec.source)) {
+    if (process.platform !== 'win32') throw new RunRequestError(400, `${spec.name} is a Windows command script (${spec.source}); it can only be run on Windows`)
+    return { command: comspec, args: ['/d', '/s', '/c', `"${pipelineCommandLine(script, argv)}"`], verbatim: true }
+  }
+  // A .py handed to cmd.exe would run by file association (the py launcher or
+  // nothing); spawned exec-style it needs no quoting at all - the SRV4
+  // finding (every argv entry is quoted) taken to its end: there is no shell
+  // left to misquote.
+  if (/\.py$/i.test(spec.source)) return { command: python, args: [script, ...argv], verbatim: false }
+  throw new RunRequestError(400, `${spec.name}: a pipeline source must be a .cmd or a .py script (got ${spec.source})`)
+}
+
 /**
  * A pipeline entry is a command script (mesh-step -> tools/mesh/
- * run_step_mesh.cmd), not a Cargo binary: run it through the shell with the
- * workspace as cwd, exactly the shape the demo path builds (command + a
- * leading argv). Its stdout/stderr are ordinary pipes, so the run log shows
- * the pipeline's stage banners as they happen; killTree's taskkill /T reaches
- * the python child through the shell. The mock has no persona for these, so
- * they run for real in demo mode too.
+ * run_step_mesh.cmd) or a Python script (geom-tool, regions-from-msh), not a
+ * Cargo binary: run it with the workspace as cwd, exactly the shape the demo
+ * path builds (command + a leading argv). Its stdout/stderr are ordinary
+ * pipes, so the run log shows the pipeline's stage banners as they happen;
+ * killTree's taskkill /T reaches the python child through the shell. The mock
+ * has no persona for these, so they run for real in demo mode too.
  */
 function dispatchPipeline(opts: DispatchOptions, spec: NonNullable<ReturnType<typeof getBinary>>, env: NodeJS.ProcessEnv): SpawnedRun {
-  if (process.platform !== 'win32') throw new RunRequestError(400, `${opts.binary} is a Windows command script (${spec.source}); it can only be run on Windows`)
   const script = path.isAbsolute(spec.source) ? spec.source : path.join(opts.config.workspaceRoot, spec.source)
   if (!fs.existsSync(script)) throw new RunRequestError(400, `${spec.source} is not on this machine (looked for ${script})`)
-  const comspec = process.env.comspec ?? 'cmd.exe'
-  const line = pipelineCommandLine(script, opts.argv)
-  const child = spawn(comspec, ['/d', '/s', '/c', `"${line}"`], {
+  const { command, args, verbatim } = pipelineSpawn(spec, script, opts.argv, opts.config.python ?? 'python', process.env.comspec ?? 'cmd.exe')
+  const child = spawn(command, args, {
     cwd: opts.cwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
     // /s makes cmd strip exactly the outer quotes we added; verbatim keeps
-    // node from re-quoting the line around them.
-    windowsVerbatimArguments: true,
+    // node from re-quoting the line around them. A .py pipeline spawns
+    // exec-style, so verbatim is false there and nothing is re-quoted.
+    windowsVerbatimArguments: verbatim,
     detached: false,
   })
   return { child, argv: [script, ...opts.argv], mode: 'real' }

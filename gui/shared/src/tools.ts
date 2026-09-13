@@ -20,6 +20,10 @@ export const TOOL_NAMES = [
   'geometry_open',
   'geometry_info',
   'geometry_save',
+  'geometry_import_step',
+  'geometry_edit',
+  'mesh_regions',
+  'regions_check',
   'residuals_get',
   'viewer_command',
   'plot_residuals',
@@ -65,6 +69,10 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   geometry_open: { name: 'geometry_open', kind: 'read', policy: 'auto', label: { ko: '지오메트리 열기', en: 'Open geometry' } },
   geometry_info: { name: 'geometry_info', kind: 'read', policy: 'auto', label: { ko: '지오메트리 정보', en: 'Geometry info' } },
   geometry_save: { name: 'geometry_save', kind: 'mutate', policy: 'ask', label: { ko: '지오메트리 저장', en: 'Save geometry' } },
+  geometry_import_step: { name: 'geometry_import_step', kind: 'long', policy: 'ask', label: { ko: 'STEP 가져오기', en: 'Import STEP' } },
+  geometry_edit: { name: 'geometry_edit', kind: 'mutate', policy: 'ask', label: { ko: '지오메트리 편집', en: 'Edit geometry' } },
+  mesh_regions: { name: 'mesh_regions', kind: 'long', policy: 'ask', label: { ko: '영역 격자 생성', en: 'Mesh regions' } },
+  regions_check: { name: 'regions_check', kind: 'read', policy: 'auto', label: { ko: '영역 레이아웃 검사', en: 'Check regions' } },
   residuals_get: { name: 'residuals_get', kind: 'read', policy: 'auto', label: { ko: '잔차 조회', en: 'Get residuals' } },
   viewer_command: { name: 'viewer_command', kind: 'ui', policy: 'auto', label: { ko: '3D 뷰어', en: '3D viewer' } },
   plot_residuals: { name: 'plot_residuals', kind: 'ui', policy: 'auto', label: { ko: '잔차 플롯', en: 'Plot residuals' } },
@@ -151,6 +159,35 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       const base = String(r.path ?? i.path ?? '').split(/[\\/]/).pop() ?? ''
       const n = fmtInt(Number(r.triangleCount ?? 0))
       return ko ? `지오메트리 저장 (${base}, 삼각형 ${n}개)` : `Saved geometry ${base} (${n} triangles)`
+    }
+    case 'geometry_import_step': {
+      const base = String(i.path ?? '').split(/[\\/]/).pop() ?? ''
+      const s = fmtInt((r.solids as unknown[] | undefined)?.length ?? 0)
+      const n = fmtInt(Number(r.triangleCount ?? 0))
+      return ko ? `${base} 가져옴: 솔리드 ${s}개, 삼각형 ${n}개` : `Imported ${base}: ${s} solids, ${n} triangles`
+    }
+    case 'geometry_edit': {
+      const base = String(i.path ?? '').split(/[\\/]/).pop() ?? ''
+      const outBase = String(i.out ?? '').split(/[\\/]/).pop() ?? ''
+      const k = fmtInt((r.applied as unknown[] | undefined)?.length ?? 0)
+      const s = fmtInt((r.solids as unknown[] | undefined)?.length ?? 0)
+      return ko ? `${base} 편집 -> ${outBase} (${k}개 연산, 솔리드 ${s}개)` : `Edited ${base} -> ${outBase} (${k} ops, ${s} solids)`
+    }
+    case 'mesh_regions': {
+      if (r.manifest) {
+        const regions = fmtInt((r.regions as unknown[] | undefined)?.length ?? 0)
+        const ifs = fmtInt((r.interfaces as unknown[] | undefined)?.length ?? 0)
+        return ko ? `영역 레이아웃 ${String(r.layout ?? '')}: 영역 ${regions}개, 인터페이스 ${ifs}개` : `Region layout ${String(r.layout ?? '')}: ${regions} regions, ${ifs} interfaces`
+      }
+      const ids = (r.runIds as string[] | undefined) ?? []
+      const last = ids[ids.length - 1] ?? ''
+      return ko ? `${String(r.stage ?? '')} 시작 (${last})` : `Started ${String(r.stage ?? '')} (${last})`
+    }
+    case 'regions_check': {
+      const base = String(i.manifest ?? '').split(/[\\/]/).pop() ?? ''
+      if (r.ok) return ko ? `레이아웃 통과 (${base})` : `Layout OK (${base})`
+      const v = fmtInt((r.violations as unknown[] | undefined)?.length ?? 0)
+      return ko ? `레이아웃 위반 ${v}건` : `Layout violates ${v} rule(s)`
     }
     case 'residuals_get':
       return ko ? '잔차 시계열 조회' : 'Fetched residual series'

@@ -51,6 +51,8 @@ export interface ServerConfig {
    */
   longToolTimeoutMs: number
   logLevel: 'debug' | 'info' | 'warn' | 'error'
+  /** CFD_PYTHON: the interpreter `.py` pipelines and the geometry tools are spawned with; default `python`. */
+  python?: string
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -151,5 +153,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxConcurrentRuns: Number(env.CFD_MAX_RUNS ?? 4),
     longToolTimeoutMs: positiveMs(env.CFD_LONG_TOOL_TIMEOUT_MS, 15 * 60_000),
     logLevel: (env.CFD_LOG_LEVEL as ServerConfig['logLevel']) ?? 'info',
+    python: env.CFD_PYTHON ?? 'python',
   }
 }

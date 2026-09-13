@@ -45,6 +45,34 @@ const get = (p: string) => fetch(`${base}${p}`)
 const json = async (p: string): Promise<Loose> => (await get(p)).json()
 const postJson = (u: string, body: unknown, method = 'POST') => fetch(u, { method, body: JSON.stringify(body), headers: { 'content-type': 'application/json' } })
 
+// Stubs for the geometry tool routes: the real scripts land with the
+// feat/automesher branch and need gmsh, so the test writes lookalikes that
+// record argv and emit the canned info document and tetrahedron STL.
+const GEOM_STUB = `import json, os, sys
+def flag(name):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else None
+cmd, f = sys.argv[1], sys.argv[2]
+if cmd == 'info':
+    doc = {"version":1,"tool":"geom_tool","file":f,"format":"step","scale":0.001,"units":"m","duplicates_removed":None,"sidecar":None,"note":"stub note","surfaces":[],"discrete":[],"solids":[{"tag":1,"name":"block","material":None,"matched":"centroid","volume":2.0,"bbox":[0,0,0,2,1,1],"centroid":[1,0.5,0.5],"n_faces":6,"closed":True},{"tag":2,"name":"hole","material":"steel","matched":"tag","volume":0.1256637061435917,"bbox":[0.8,0.3,-1,1.2,0.7,2],"centroid":[1,0.5,0.5],"n_faces":3,"closed":True}]}
+    open(flag('--json'), 'w', encoding='utf-8').write(json.dumps(doc))
+    sys.exit(0)
+if cmd == 'export':
+    b = os.path.splitext(os.path.basename(f))[0]
+    k = int(b.split('part-')[1]) if 'part-' in b else 1
+    v = [(0,0,0),(k,0,0),(0,k,0),(0,0,k)]; lines = ['solid part']
+    for a, c, d in [(0,2,1),(0,1,3),(0,3,2),(1,2,3)]:
+        lines += ['facet normal 0 0 0', 'outer loop'] + ['vertex %d %d %d' % v[i] for i in (a, c, d)] + ['endloop', 'endfacet']
+    open(flag('--out'), 'w', encoding='utf-8').write(chr(10).join(lines + ['endsolid part']) + chr(10))
+    sys.exit(0)
+if cmd == 'edit':
+    ops = json.load(open(flag('--ops'), encoding='utf-8')); out = flag('--out')
+    open(out, 'w', encoding='utf-8').write(open(f, encoding='utf-8').read() if os.path.getsize(f) else 'stub')
+    print('ops[0] %s: block, hole -> block' % ops['ops'][0]['op'])
+    sys.exit(0)
+print('geom_tool: unknown command', file=sys.stderr)
+sys.exit(2)
+`
+
 describe('api routes', () => {
   it('health, hello, registry and the schema', async () => {
     expect(await json('/api/health')).toEqual({ ok: true, version: '0.0.0-test', mode: 'demo' })
@@ -193,6 +221,27 @@ describe('api routes', () => {
     expect((((await (await fetch(`${base}/api/geometry/${id}`, { method: 'DELETE' })).json()) as Loose)).evicted).toBe(id)
     expect((await get(`/api/geometry/${id}/blob/positions`)).status).toBe(404)
     expect(((await json('/api/registry')) as Loose).pipelines.map((p: { name: string }) => p.name)).toContain('mesh-step')
+  })
+
+  it('geometry_tool_routes', async () => {
+    for (const d of ['tools/geom', 'tools/mesh']) fs.mkdirSync(path.join(ws.root, ...d.split('/')), { recursive: true })
+    fs.writeFileSync(path.join(ws.root, 'tools', 'geom', 'geom_tool.py'), GEOM_STUB, 'utf8')
+    fs.writeFileSync(path.join(ws.root, 'cases', 'two.step'), '', 'utf8')
+    const imported = (await (await postJson(`${base}/api/geometry/import-step`, { path: 'cases/two.step', tags: null, stlSize: null })).json()) as Loose
+    expect(typeof imported.id).toBe('string')
+    expect(imported.triangleCount).toBe(8)
+    expect(imported.solids).toHaveLength(2)
+    expect(imported.step.spawns).toBe(5)
+    expect(imported.info).toBeUndefined()
+    const editBody = { path: 'cases/two.step', ops: '[{"op":"cut","object":["block"],"tools":["hole"]}]', out: 'cases/two_cut.step' }
+    const edited = (await (await postJson(`${base}/api/geometry/edit`, editBody)).json()) as Loose
+    expect(edited.path).toBe('cases/two_cut.step')
+    expect(edited.applied).toEqual(['ops[0] cut: block, hole -> block'])
+    expect(broadcasts.at(-1)).toEqual({ t: 'fs.changed', paths: ['cases/two_cut.step'] })
+    expect((await postJson(`${base}/api/geometry/edit`, editBody)).status).toBe(409)
+    expect((await postJson(`${base}/api/geometry/edit`, { ...editBody, path: '../x.step' })).status).toBe(403)
+    expect((await postJson(`${base}/api/geometry/edit`, { ...editBody, ops: '[]', out: 'cases/z.step' })).status).toBe(400)
+    expect((await postJson(`${base}/api/geometry/import-step`, { path: 'cases/none.step', tags: null, stlSize: null })).status).toBe(404)
   })
 })
 

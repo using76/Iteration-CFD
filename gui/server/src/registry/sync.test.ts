@@ -96,6 +96,38 @@ describe('registry <-> rust sources', () => {
     for (const f of step.flags.filter((x) => x.name !== '--tag')) expect(f.type, f.name).toBe('flag')
   })
 
+  it('geometry_pipelines_shape: geom-tool and regions-from-msh are .py pipelines beside the binaries', () => {
+    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh'])
+    for (const [name, positionals] of [['geom-tool', ['command', 'file']], ['regions-from-msh', ['msh', 'outDir']]] as const) {
+      const pipeline = PIPELINES.find((p) => p.name === name)!
+      expect(pipeline.pipeline).toBe(true)
+      expect(BINARY_NAMES).not.toContain(name)
+      expect(getBinary(name)).toBe(pipeline)
+      expect(pipeline.source.endsWith('.py'), pipeline.source).toBe(true)
+      expect(pipeline.kind).toBe('mesh')
+      expect(pipeline.gpu).toBe(false)
+      expect(pipeline.positionals.map((p) => p.name)).toEqual([...positionals])
+    }
+    const geom = PIPELINES.find((p) => p.name === 'geom-tool')!
+    expect(geom.flags.map((f) => f.name).sort()).toEqual(['--json', '--ops', '--out', '--scale', '--stl-size'])
+    const regions = PIPELINES.find((p) => p.name === 'regions-from-msh')!
+    expect(regions.flags.map((f) => f.name).sort()).toEqual(['--fluid', '--material', '--overwrite', '--tolerance', '--units'])
+    expect(regions.flags.some((f) => f.name === '--fluent')).toBe(false)
+    expect(regions.flags.find((f) => f.name === '--material')?.repeatable).toBe(true)
+    expect(regions.flags.find((f) => f.name === '--overwrite')?.type).toBe('flag')
+    // The scripts land with the feat/automesher branch (M1-M4) and are not
+    // asserted to exist here; when one is present, every registry flag must be
+    // declared by its argparse. The script may declare more (--fluent, which
+    // M4 refuses by name), so the check is a subset, not an equality.
+    for (const pipeline of [geom, regions]) {
+      const abs = path.join(REPO_ROOT, pipeline.source)
+      if (!fs.existsSync(abs)) continue
+      const py = fs.readFileSync(abs, 'utf8')
+      const declared = [...py.matchAll(/add_argument\('(--[a-z-]+)'/g)].map((m) => m[1])
+      for (const f of pipeline.flags) expect(declared, `${pipeline.name} ${f.name}`).toContain(f.name)
+    }
+  })
+
   it('agrees with driver_for on which driver builds the k-epsilon family', () => {
     const common = read(path.join(RUST, 'src', 'bin', 'common', 'mod.rs'))
     expect(common).toMatch(/RasModel::KEpsilon \| RasModel::RealizableKE \| RasModel::RNGkEpsilon => "ofgpu-k-epsilon"/)
