@@ -41,10 +41,15 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[path = "common/mod.rs"]
+mod common;
+use common::output_root;
+
 use ofgpu::cht::flow::{run_flow_case, ChtFlowSolution};
 use ofgpu::cht::{run_case, ChtSolution};
 use ofgpu::error::{IoContext, Result};
 use ofgpu::io::case_cht::{read_cht_case, LoweredChtCase};
+use ofgpu::solid::case::{banner_lines, run_stress, summary_lines, thermal_converged, write_region_vtu};
 use ofgpu::{Gpu, Scalar};
 
 fn main() -> ExitCode {
@@ -98,11 +103,17 @@ ofgpu-cht <case.jsonc> [-csv <out.csv>]
 Multi-region conduction with conjugate interfaces - SPEC-LIT 46/47 - and,
 when a region says \"kind\": \"fluid\", conjugate natural convection in a
 closed cavity - SPEC-LIT 59/60.
-Writes a per-cell temperature CSV when -csv is given.";
+Writes a per-cell temperature CSV when -csv is given.
+
+A `mechanics` block on a solid region and `\"mode\": \"stress\"` on `run`
+solve SPEC-LIT 95's displacement after the thermal solve (SPEC-LIT 96);
+the case's output block (`exact.format: vtu`) writes one VTU per region.";
 
 fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
     let case = read_cht_case(case_path)?;
-    let low = case.lower()?;
+    // The case directory is what a region's `polyMesh` path is resolved
+    // against (SPEC-LIT 97.2); all-block cases never touch it.
+    let low = case.lower_in(case_path.parent())?;
 
     println!(
         "ofgpu-cht | case '{}' | {} | {}",
@@ -154,6 +165,11 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
         );
     }
 
+    // SPEC-LIT 13.4.2: say what the mechanical half will use, BEFORE the run.
+    for line in banner_lines(&low) {
+        println!("{line}");
+    }
+
     let gpu = Gpu::new(0)?;
     println!("  device {}", gpu.ctx().name()?);
 
@@ -172,6 +188,27 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
 
     let sol = run_case(&gpu, &low)?;
     report(&low, &sol);
+
+    // SPEC-LIT 96.2: `mode stress` refuses to go on unless every region's
+    // thermal solve converged, then solves 95's displacement per region.
+    let stress = if low.stress {
+        thermal_converged(&low, &sol)?;
+        let stress = run_stress(&gpu, &low, &sol)?;
+        for line in summary_lines(&low, &stress) {
+            println!("{line}");
+        }
+        Some(stress)
+    } else {
+        None
+    };
+
+    if low.output.is_some() {
+        let dir = output_root(case_path).join("VTK");
+        let paths = write_region_vtu(&dir, &low, &sol, stress.as_deref().unwrap_or(&[]))?;
+        for p in &paths {
+            println!("  wrote {}", p.display());
+        }
+    }
 
     if let Some(path) = csv {
         write_csv(path, &sol)?;
@@ -334,6 +371,64 @@ fn report(low: &LoweredChtCase, sol: &ChtSolution) {
     }
 
     println!("\n  steps {} | last residual {:.3e}", sol.steps, f64::from(sol.residual));
+
+    // The per-region story behind that global number (the §13.4.2 rule of
+    // saying what was used, applied to the linear solve): one line per
+    // region, and a converged verdict that has LOOKED at every region
+    // rather than one that only saw the global residual.
+    if sol.region_residuals.is_empty() {
+        println!(
+            "  per-region residuals: not measured (reportResiduals is off); converged: not observed"
+        );
+    } else {
+        let regions = &sol.mesh.regions;
+        let w = regions.iter().map(|r| r.name.len()).max().unwrap_or(0) + 2;
+        let max_rs = sol.region_row_scale.iter().copied().fold(0.0 as Scalar, Scalar::max);
+        println!(
+            "\n  linear solve per region (SPEC-LIT 8.4 on each region's own rows; \
+             row scale = mean |diag| per cell; tolerance {:.3e}, relTol {:.3e}):",
+            f64::from(low.solver.tolerance),
+            f64::from(low.solver.rel_tol)
+        );
+        for (i, reg) in regions.iter().enumerate() {
+            let rp = &sol.region_residuals[i];
+            let share = if max_rs > 0.0 {
+                sol.region_row_scale[i] / max_rs
+            } else {
+                0.0
+            };
+            println!(
+                "    region {:<w$} row scale {:.3e} of largest | residual initial {:.3e} -> \
+                 final {:.3e} | {}",
+                format!("'{}'", reg.name),
+                f64::from(share),
+                f64::from(rp.initial_residual),
+                f64::from(rp.final_residual),
+                if rp.converged { "met" } else { "NOT met" },
+                w = w
+            );
+        }
+        if sol.converged {
+            println!("  converged: yes");
+        } else if let Some((i, rp)) = sol
+            .region_residuals
+            .iter()
+            .enumerate()
+            .find(|(_, rp)| !rp.converged)
+        {
+            println!(
+                "  converged: no - region '{}' final {:.3e} > tolerance {:.3e}; the global \
+                 residual {:.3e} does not see it",
+                regions[i].name,
+                f64::from(rp.final_residual),
+                f64::from(low.solver.tolerance),
+                f64::from(sol.residual)
+            );
+        } else {
+            println!("  converged: no - the global solve did not converge");
+        }
+    }
+
     for (i, name) in low.region_names.iter().enumerate() {
         let (lo, hi) = sol.region_range(i);
         println!(

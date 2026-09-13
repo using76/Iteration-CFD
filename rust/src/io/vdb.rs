@@ -224,7 +224,9 @@ fn ceil_div(a: usize, b: usize) -> usize {
 /// Write `fields` on `grid` to `path` as a single `.vdb` archive - see the
 /// module doc. A `FieldValues::Vector` field becomes four grids (`name.x`,
 /// `name.y`, `name.z`, `name.mag`); a `FieldValues::Scalar` field becomes
-/// one.
+/// one; a `FieldValues::Tensor` field becomes six grids (`name.xx`,
+/// `name.xy`, `name.xz`, `name.yy`, `name.yz`, `name.zz`) and is refused
+/// unless symmetric (the same gate `nvdb` applies).
 ///
 /// `precision` is SPEC-LIT S44.3's `output.visualisation.precision`:
 /// [`Precision::F32`] is the plain `FloatTree` every `.vdb` this crate has
@@ -261,6 +263,16 @@ pub fn write(
                 segments.push((format!("{}.y", field.name), v.iter().map(|p| p.y).collect()));
                 segments.push((format!("{}.z", field.name), v.iter().map(|p| p.z).collect()));
                 segments.push((format!("{}.mag", field.name), v.iter().map(|p| p.mag()).collect()));
+            }
+            FieldValues::Tensor(v) => {
+                check_len(field.name, v.len(), n)?;
+                crate::io::nvdb::check_symmetric("vdb", field.name, v)?;
+                segments.push((format!("{}.xx", field.name), v.iter().map(|t| t.xx).collect()));
+                segments.push((format!("{}.xy", field.name), v.iter().map(|t| t.xy).collect()));
+                segments.push((format!("{}.xz", field.name), v.iter().map(|t| t.xz).collect()));
+                segments.push((format!("{}.yy", field.name), v.iter().map(|t| t.yy).collect()));
+                segments.push((format!("{}.yz", field.name), v.iter().map(|t| t.yz).collect()));
+                segments.push((format!("{}.zz", field.name), v.iter().map(|t| t.zz).collect()));
             }
         }
     }
@@ -1374,6 +1386,43 @@ mod tests {
         assert!(g.values[9].is_infinite() && g.values[9] > 0.0, "65520 overflows to +inf");
         assert!(g.values[10].is_infinite() && g.values[10] < 0.0);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_symmetric_tensor_becomes_six_grids() {
+        let grid = make_grid(4, 3, 2);
+        let mut s = vec![crate::Tensor::ZERO; grid.n()];
+        for k in 0..grid.nz {
+            for j in 0..grid.ny {
+                for i in 0..grid.nx {
+                    let a = i as Scalar;
+                    s[grid.idx(i, j, k)] = crate::Tensor {
+                        xx: a + 1.0, xy: a + 2.0, xz: a + 3.0,
+                        yx: a + 2.0, yy: a + 5.0, yz: a + 6.0,
+                        zx: a + 3.0, zy: a + 6.0, zz: a + 9.0,
+                    };
+                }
+            }
+        }
+        let path = scratch("tensor");
+        write(&path, &grid, &[OutputField::tensor("S", &s)], Precision::F32).expect("write");
+
+        let bytes = std::fs::read(&path).expect("read back");
+        let grids = read_all(&bytes);
+        let names: Vec<&str> = grids.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["S.xx", "S.xy", "S.xz", "S.yy", "S.yz", "S.zz"]);
+
+        let g_xy = &grids[1];
+        for k in 0..grid.nz {
+            for j in 0..grid.ny {
+                for i in 0..grid.nx {
+                    let idx = grid.idx(i, j, k);
+                    let want_xy = (s[idx].xy as f32) as f64;
+                    assert_eq!(g_xy.values[idx], want_xy);
+                }
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 }

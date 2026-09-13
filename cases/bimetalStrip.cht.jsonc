@@ -1,0 +1,110 @@
+// meteor-cfd case - SPEC-LIT §46/§47 conduction carrying SPEC-LIT §95's
+// thermo-elastic solid, run by `ofgpu-cht`.
+//
+// A bimetal thermostat strip, 60 x 10 x 0.625 mm, one cell thick in z:
+// 5 mm of steel below (y in [0, 5 mm]), 5 mm of brass above (y in [5 mm,
+// 10 mm]) - SPEC-LIT §95.9's Gate 95-E fixture, written as a CASE. Both end
+// faces are held at 303.15 K, the four long faces are adiabatic, and a
+// TRACE volumetric source (1e3 W/m^3) lifts the interior by a 0.009 K
+// parabola - measured range 303.1502 .. 303.1590 K - so against TRef
+// 293.15 K the thermal load is dT = 10 K everywhere to within 0.09 %.
+// The source is there for the RESIDUAL, not for the answer: a steady
+// solution that is a CONSTANT makes SPEC-LIT 8.4's normalisation a 0/0,
+// and no tolerance can judge the noise that comes out of it (SPEC-LIT
+// 96.2 says so). The case is a thermal-stress case, not a heat-transfer
+// case, and `rho`, `c` and `kappa` below are carried by the format.
+//
+// The two metals are ONE region with a `materials` zone list - docs/10's
+// rule R4: bonded solids share cells' faces internally, and the series
+// (2 mu + lambda) coefficient is written at the bond faces (SPEC-LIT
+// §95.8). `bond` is absent, which spells `series`.
+//
+// The front and back faces (zmin/zmax) are REAL traction-free patches, not
+// `empty`: traction-free z faces make the one-cell strip PLANE STRESS,
+// which is exactly the state the closed form below assumes - no
+// plane-strain conversion needed.
+//
+// Mechanical boundaries: the clamp (xmin) is fully fixed; every other face
+// is free. That removes the six rigid-body modes and imposes no strain
+// beyond the clamp itself.
+//
+// THE CLOSED FORM. Timoshenko, "Analysis of bi-metal thermostats", J. Opt.
+// Soc. Am. 11 (1925) 233, DOI 10.1364/JOSA.11.000233 - the curvature of a
+// two-layer strip of thicknesses a1 (steel), a2 (brass), h = a1 + a2,
+// m = a1/a2, n = E1/E2, under uniform dT, free of external load. With
+// m = 1, n = 2, dT = 10 K, alpha2 - alpha1 = 8e-6 /K, h = 0.01 m:
+//
+//   kappa = 6 (alpha2 - alpha1) dT (1 + m)^2
+//           / ( h [ 3 (1 + m)^2 + (1 + m n) (m^2 + 1/(m n)) ] )
+//         = 6 * 8e-6 * 10 * 4 / ( 0.01 * (12 + 4.5) )
+//         = 0.0116364 1/m
+//
+// which is the constant SPEC-LIT (S95.19) carries for the same numbers.
+// The small-deflection tip deflection of a strip clamped at x = 0 is
+// v(x) = kappa x^2 / 2, and the sign: brass (the larger alpha) is on TOP,
+// so the convex side is up and the tip moves in -y.
+//
+// MEASURED, on an RTX 5070 Ti in f64: mean tip d_y = -2.1291e-5 m over
+// the last x column (x_c = 0.059688 m) against -2.0728e-5 m from the
+// closed form - 2.7 % deep, inside the 10 % band, sign negative as the
+// constant predicts - in 565 outer iterations (tolerance 1e-6, observed
+// contraction 0.79 against the predicted 0.71). The residual 2.7 % is the
+// segregated loop's own discretisation on the 96 x 16 x 1 mesh, the same
+// shape Gate 95-E measured at 0.6 % on its fixture; the case adds the
+// trace source and the free tip patch the fixture does not have.
+// `io::case_cht::tests::the_bimetal_strip_case_reproduces_timoshenko`
+// rebuilds kappa from these numbers and asserts the band and the sign.
+{
+  "name": "bimetalStrip",
+  "regions": [
+    {
+      "name": "strip",
+      "kind": "solid",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.06, 0.01, 0.000625] },
+        "cells": [96, 16, 1],
+        "boundaries": {
+          "xmin": "clamp", "xmax": "tip",
+          "ymin": "bottom", "ymax": "top",
+          "zmin": "front", "zmax": "back"
+        }
+      },
+      "material": { "rho": 8000.0, "c": 400.0, "kappa": 50.0 },
+      "source": 1.0e3,
+      "patches": [
+        { "match": "clamp",  "T": { "type": "fixedValue", "value": 303.15 } },
+        { "match": "tip",    "T": { "type": "fixedValue", "value": 303.15 } },
+        { "match": "bottom", "T": { "type": "zeroGradient" } },
+        { "match": "top",    "T": { "type": "zeroGradient" } },
+        { "match": "front",  "T": { "type": "zeroGradient" } },
+        { "match": "back",   "T": { "type": "zeroGradient" } }
+      ],
+      "mechanics": {
+        "materials": [
+          { "name": "steel", "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.06, 0.005, 0.000625] },
+            "material": { "E": 200e9, "nu": 0.3, "alpha": 1.2e-5, "TRef": 293.15 } },
+          { "name": "brass", "bounds": { "min": [0.0, 0.005, 0.0], "max": [0.06, 0.01, 0.000625] },
+            "material": { "E": 100e9, "nu": 0.3, "alpha": 2.0e-5, "TRef": 293.15 } }
+        ],
+        "patches": [
+          { "match": "clamp",  "u": { "type": "fixedDisplacement", "value": [0.0, 0.0, 0.0] } },
+          { "match": "tip",    "u": { "type": "free" } },
+          { "match": "bottom", "u": { "type": "free" } },
+          { "match": "top",    "u": { "type": "free" } },
+          { "match": "front",  "u": { "type": "free" } },
+          { "match": "back",   "u": { "type": "free" } }
+        ],
+        "solver": { "tolerance": 1e-6, "maxOuter": 2000 }
+      }
+    }
+  ],
+  "initial": { "T": 303.15 },
+  "run": { "steady": true, "mode": "stress" },
+  "output": { "exact": { "format": "vtu" } },
+  "numerics": {
+    "solver": "PCG",
+    "preconditioner": "DIC",
+    "tolerance": 1e-8,
+    "maxIter": 4000
+  }
+}

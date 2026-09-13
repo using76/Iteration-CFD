@@ -43,7 +43,7 @@
 //!     splitting and its `!$OMP CRITICAL` write-back are deliberately not
 //!     taken.
 //!   ofgpu `SPEC-LIT.md` §2.4, §3.2, §3.4, §4, §13.3, §13.4, §15.5, §26,
-//!     §29.3, §31, §32.2, §46, §47
+//!     §29.3, §31, §32.2, §46, §47, §49.3, §93
 //!
 //! OpenFOAM, SU2, preCICE, Code_Saturne, deal.II and MOOSE are GPL or LGPL
 //! and were not opened. No permissively-licensed unstructured finite-volume
@@ -84,6 +84,7 @@ use crate::field::{BcKind, GpuScalarField};
 use crate::field_ops::{self, FieldKernels};
 use crate::fv::{self, FvKernels, SnGradScheme};
 use crate::io::case::SolverControls;
+use crate::io::polymesh::PolyMeshRaw;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
@@ -420,6 +421,11 @@ pub struct ThermalRegion {
     pub kind: RegionKind,
     pub cell_offset: usize,
     pub n_cells: usize,
+    /// The region's own point count. `attach_points` refuses a raw whose
+    /// points disagree with it, and it is what places region `r`'s points at
+    /// the sum of the `n_points` of the regions before it - §47.4's
+    /// concatenation, over points.
+    pub n_points: usize,
     pub internal_face_offset: usize,
     pub n_internal_faces: usize,
     pub boundary_face_offset: usize,
@@ -542,6 +548,15 @@ pub struct ThermalMesh {
     /// sum over all of them.
     pub interface_ranges: Vec<(String, std::ops::Range<usize>)>,
     pub report: InterfaceReport,
+    /// The concatenated point set, region by region - empty until
+    /// [`Self::attach_points`] fills it. `HostMesh` keeps no points
+    /// (SPEC-LIT §49.3), so the raw geometry is attached by the caller
+    /// instead of being grown onto the mesh.
+    pub points: Vec<Vec3>,
+    /// The concatenated face polygons, in §47.4's layout - every region's
+    /// internal faces first, then every region's boundary faces - empty
+    /// until [`Self::attach_points`] fills it.
+    pub faces: Vec<Vec<Label>>,
 }
 
 impl ThermalMesh {
@@ -599,6 +614,7 @@ impl ThermalMesh {
                 kind: r.kind,
                 cell_offset: host.n_cells,
                 n_cells: m.n_cells,
+                n_points: m.n_points,
                 internal_face_offset: host.n_internal_faces,
                 n_internal_faces: m.n_internal_faces,
                 boundary_face_offset: host.n_boundary_faces,
@@ -697,6 +713,8 @@ impl ThermalMesh {
             pairs: Vec::new(),
             interface_ranges: Vec::new(),
             report: InterfaceReport::default(),
+            points: Vec::new(),
+            faces: Vec::new(),
         };
 
         for req in interfaces {
@@ -705,6 +723,95 @@ impl ThermalMesh {
 
         m.host.build_cell_face_maps();
         Ok(m)
+    }
+
+    /// Attach the raw geometry every region was built from: §47.4's
+    /// concatenation, over points and face polygons. Points are NOT merged
+    /// across an interface - each region keeps its own copy - so region
+    /// `r`'s point p lands at `P_r + p` with `P_r` the sum of the `n_points`
+    /// of the regions before it, exactly the way `build` offsets cells and
+    /// faces. The raw meshes stay the caller's (SPEC-LIT §49.3).
+    ///
+    /// Every region is checked BEFORE anything is written, so a refusal
+    /// leaves `points`/`faces` empty.
+    pub fn attach_points(&mut self, raws: &[&PolyMeshRaw]) -> Result<()> {
+        if raws.len() != self.regions.len() {
+            return Err(Error::Mesh(format!(
+                "ThermalMesh::attach_points: {} raw meshes for {} regions",
+                raws.len(),
+                self.regions.len()
+            )));
+        }
+        for (i, (r, raw)) in self.regions.iter().zip(raws).enumerate() {
+            let checks = [
+                (r.n_points, "points", raw.points.len()),
+                (r.n_internal_faces + r.n_boundary_faces, "faces", raw.faces.len()),
+                (r.n_internal_faces, "neighbours", raw.neighbour.len()),
+                (r.n_internal_faces + r.n_boundary_faces, "owners", raw.owner.len()),
+            ];
+            for (want, what, got) in checks {
+                if got != want {
+                    return Err(Error::Mesh(format!(
+                        "ThermalMesh::attach_points: region {i} ('{}') has {want} \
+                         {what} but the raw mesh has {got}",
+                        r.name
+                    )));
+                }
+            }
+        }
+
+        let mut points = Vec::new();
+        // §47.4's layout, over face polygons: every region's INTERNAL faces
+        // first (in region order), then every region's boundary faces - so
+        // region r's internal face f lands at `internal_face_offset_r + f`
+        // and its boundary face bf at `n_if_total + boundary_face_offset_r +
+        // bf`, aligned with `host.owner`/`host.b_face_cells`.
+        let n_if_total: usize = self.regions.iter().map(|r| r.n_internal_faces).sum();
+        let mut faces =
+            vec![Vec::new(); n_if_total + self.host.n_boundary_faces];
+        for (r, raw) in self.regions.iter().zip(raws) {
+            let p_off = points.len() as Label;
+            points.extend_from_slice(&raw.points);
+            for (f, list) in raw.faces.iter().enumerate() {
+                let global = if f < r.n_internal_faces {
+                    r.internal_face_offset + f
+                } else {
+                    n_if_total + r.boundary_face_offset + (f - r.n_internal_faces)
+                };
+                faces[global] = list.iter().map(|&p| p + p_off).collect();
+            }
+        }
+        self.points = points;
+        self.faces = faces;
+        Ok(())
+    }
+
+    /// The concatenated mesh as a `PolyMeshRaw`, ready for
+    /// `io::vtu::write_vtu_points`: faces internal first (every region's own
+    /// raw is internal first and the regions are in order), owners from
+    /// `host.owner` then `host.b_face_cells`, patches verbatim - `couple`
+    /// has already renamed them `<region>:<patch>` and re-kinded the
+    /// interface ones, and `build_host_mesh` copies patches through without
+    /// re-pairing anything but `Cyclic`.
+    pub fn to_raw(&self) -> Result<PolyMeshRaw> {
+        if self.points.is_empty() {
+            return Err(Error::Mesh(
+                "ThermalMesh::to_raw: no points were attached - call attach_points \
+                 with every region's raw mesh first (SPEC-LIT §49.3)"
+                    .to_string(),
+            ));
+        }
+        let mut owner =
+            Vec::with_capacity(self.host.n_internal_faces + self.host.n_boundary_faces);
+        owner.extend_from_slice(&self.host.owner);
+        owner.extend_from_slice(&self.host.b_face_cells);
+        Ok(PolyMeshRaw {
+            points: self.points.clone(),
+            faces: self.faces.clone(),
+            owner,
+            neighbour: self.host.neighbour.clone(),
+            patches: self.host.patches.clone(),
+        })
     }
 
     fn patch_index(&self, region: usize, name: &str) -> Result<usize> {
@@ -972,6 +1079,113 @@ impl ThermalMesh {
         }
         f
     }
+
+    /// SPEC-LIT §93.1: the entries of a concatenated assembly that belong to
+    /// ONE region, downloaded. The three offset/count pairs of
+    /// [`ThermalRegion`] slice the six arrays of `a`; the region's boundary
+    /// faces come with their `PatchKind::Interface` mask, because Gate 93-A
+    /// compares the boundary coefficients only on the faces that are NOT
+    /// interface faces (on those the union's Robin triple and a single
+    /// region's ordinary patch differ by construction - §47.2).
+    ///
+    /// `Err` on a region index out of range.
+    pub fn region_rows(&self, gpu: &Gpu, a: &GpuLduMatrix, region: usize) -> Result<RegionRows> {
+        let Some(r) = self.regions.get(region) else {
+            return Err(Error::Config(format!(
+                "region_rows: region {region} out of range ({} regions)",
+                self.regions.len()
+            )));
+        };
+        let (c0, c1) = (r.cell_offset, r.cell_offset + r.n_cells);
+        let (f0, f1) = (
+            r.internal_face_offset,
+            r.internal_face_offset + r.n_internal_faces,
+        );
+        let (b0, b1) = (
+            r.boundary_face_offset,
+            r.boundary_face_offset + r.n_boundary_faces,
+        );
+        let diag = gpu.download(&a.diag)?;
+        let upper = gpu.download(&a.upper)?;
+        let lower = gpu.download(&a.lower)?;
+        let source = gpu.download(&a.source)?;
+        let internal_coeffs = gpu.download(&a.internal_coeffs)?;
+        let boundary_coeffs = gpu.download(&a.boundary_coeffs)?;
+        Ok(RegionRows {
+            diag: diag[c0..c1].to_vec(),
+            source: source[c0..c1].to_vec(),
+            upper: upper[f0..f1].to_vec(),
+            lower: lower[f0..f1].to_vec(),
+            internal_coeffs: internal_coeffs[b0..b1].to_vec(),
+            boundary_coeffs: boundary_coeffs[b0..b1].to_vec(),
+            interface_face: (b0..b1)
+                .map(|bf| self.host.b_kind[bf] == PatchKind::Interface as Label)
+                .collect(),
+        })
+    }
+}
+
+/// SPEC-LIT §93.1: the entries of a concatenated assembly that belong to ONE
+/// region, downloaded.
+#[derive(Debug, Clone)]
+pub struct RegionRows {
+    pub diag: Vec<Scalar>,
+    pub source: Vec<Scalar>,
+    pub upper: Vec<Scalar>,
+    pub lower: Vec<Scalar>,
+    pub internal_coeffs: Vec<Scalar>,
+    pub boundary_coeffs: Vec<Scalar>,
+    /// Per boundary face of the region: `b_kind == PatchKind::Interface`.
+    pub interface_face: Vec<bool>,
+}
+
+/// `Ok(None)` when every entry agrees in every bit (`to_bits()`),
+/// `Ok(Some((n_differing, first_index)))` otherwise; `Err` when the lengths
+/// differ. Gate 93-A's comparator (SPEC-LIT §93.8): a bitwise claim has no
+/// tolerance argument to weaken.
+pub fn bitwise_mismatch(got: &[Scalar], want: &[Scalar]) -> Result<Option<(usize, usize)>> {
+    if got.len() != want.len() {
+        return Err(Error::Config(format!(
+            "bitwise_mismatch: {} entries against {}",
+            got.len(),
+            want.len()
+        )));
+    }
+    let (mut n, mut first) = (0usize, usize::MAX);
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        if g.to_bits() != w.to_bits() {
+            n += 1;
+            if first == usize::MAX {
+                first = i;
+            }
+        }
+    }
+    Ok(if n == 0 { None } else { Some((n, first)) })
+}
+
+/// SPEC-LIT §93.8: the entries of `a` on NON-interface boundary faces,
+/// compacted, with a map back to the ORIGINAL boundary-face index
+/// (`out.1[j]` is the boundary face `out.0[j]` came from). `Err` when
+/// `a.len() != interface_face.len()`.
+pub fn non_interface_entries(
+    a: &[Scalar],
+    interface_face: &[bool],
+) -> Result<(Vec<Scalar>, Vec<usize>)> {
+    if a.len() != interface_face.len() {
+        return Err(Error::Config(format!(
+            "non_interface_entries: {} values against {} interface flags",
+            a.len(),
+            interface_face.len()
+        )));
+    }
+    let (mut v, mut idx) = (Vec::new(), Vec::new());
+    for (i, (&x, &is_interface)) in a.iter().zip(interface_face).enumerate() {
+        if !is_interface {
+            v.push(x);
+            idx.push(i);
+        }
+    }
+    Ok((v, idx))
 }
 
 /// Quantise a face centre so that two faces which are the same face hash
@@ -1502,6 +1716,36 @@ impl Default for ConjugateControls {
     }
 }
 
+/// What one [`ConjugateHeat::correct`] did: the global solve, and SPEC-LIT
+/// §8.4 applied to each region's own rows (the ranged reduction of
+/// `solver::residual_ranged`). `regions` is empty when
+/// `SolverControls::report_residuals` is off - the per-region numbers cost a
+/// host round-trip each and are refused inside a capture the same way the
+/// global residual is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConjugatePerformance {
+    pub global: SolverPerformance,
+    /// One per `ThermalMesh::regions`, in that order. `initial_residual`/
+    /// `final_residual` are the region's own §8.4 numbers before and after
+    /// the linear solve; `n_iterations` is the global count (there is one
+    /// solve); `converged` is `finish_solve`'s `abs || rel` criterion on the
+    /// region's own numbers.
+    pub regions: Vec<SolverPerformance>,
+}
+
+impl ConjugatePerformance {
+    /// True only when the global solve converged AND every region was
+    /// measured AND met the criterion. An unmeasured run
+    /// (`report_residuals` off) is `false`: "not looked at" is not
+    /// "converged" (the rule `SolverPerformance::converged` already
+    /// follows).
+    pub fn all_converged(&self) -> bool {
+        self.global.converged
+            && self.regions.iter().all(|r| r.converged)
+            && !self.regions.is_empty()
+    }
+}
+
 /// `(rho c) dT/dt = div(K grad T) + q'''` over a concatenated fluid+solid
 /// mesh, with the interface of §47 - SPEC-LIT (S46.1) and (S47.10) with the
 /// convective term left out.
@@ -1537,6 +1781,13 @@ pub struct ConjugateHeat<'m> {
     timek: TimeKernels,
     solk: SolverKernels,
     ws: SolverWorkspace,
+
+    /// The regions of the thermal mesh, in build order - each one's rows are
+    /// the contiguous cell range its per-region residual reduces over.
+    regions: Vec<ThermalRegion>,
+    /// The mean `|diag|` per cell of each region, of the matrix as solved
+    /// (report-only); `None` until the first `correct` that reports.
+    row_scale: Option<Vec<Scalar>>,
 }
 
 impl<'m> ConjugateHeat<'m> {
@@ -1567,6 +1818,8 @@ impl<'m> ConjugateHeat<'m> {
             timek: TimeKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
             ws: SolverWorkspace::for_mesh(gpu, m)?,
+            regions: tm.regions.clone(),
+            row_scale: None,
         })
     }
 
@@ -1620,6 +1873,18 @@ impl<'m> ConjugateHeat<'m> {
 
     pub fn controls_mut(&mut self) -> &mut ConjugateControls {
         &mut self.ctrl
+    }
+
+    /// The regions of the thermal mesh, in build order.
+    pub fn regions(&self) -> &[ThermalRegion] {
+        &self.regions
+    }
+
+    /// The region's mean `|diag|` of the matrix as solved (the row scale;
+    /// `Σ|diag|` divided by the region's cell count); `None` until the first
+    /// `correct` that reports.
+    pub fn row_scale(&self) -> Option<&[Scalar]> {
+        self.row_scale.as_deref()
     }
 
     /// Rewrite the interface triples from the CURRENT `T`, then evaluate the
@@ -1704,11 +1969,18 @@ impl<'m> ConjugateHeat<'m> {
     /// (SPEC-LIT §47.3), so the coupled system is solved as one matrix and
     /// one pass is the whole of it for a linear problem. That is the claim
     /// §47.12's Gate 1 measures.
-    pub fn correct(&mut self, gpu: &Gpu) -> Result<SolverPerformance> {
+    pub fn correct(&mut self, gpu: &Gpu) -> Result<ConjugatePerformance> {
         let m = self.m;
         if m.n_cells == 0 {
-            return Ok(SolverPerformance::default());
+            return Ok(ConjugatePerformance::default());
         }
+
+        // The per-region numbers cost one host round-trip each, so they are
+        // gated on `report_residuals` exactly as `finish_solve` is - and a
+        // capture never pays for them.
+        let measure = self.ctrl.solver.report_residuals;
+        let mut initial: Vec<Scalar> = Vec::new();
+        let mut regions: Vec<SolverPerformance> = Vec::new();
 
         let mut perf = SolverPerformance::default();
         for _pass in 0..=self.ctrl.n_non_orth_correctors {
@@ -1720,6 +1992,34 @@ impl<'m> ConjugateHeat<'m> {
             }
             ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
 
+            initial.clear();
+            if measure {
+                // The row scale is a property of the ASSEMBLED matrix, so it
+                // is measured once, on the first reporting pass.
+                if self.row_scale.is_none() {
+                    let mut rs = Vec::with_capacity(self.regions.len());
+                    for r in &self.regions {
+                        let (o, n) = (r.cell_offset, r.n_cells);
+                        // The MEAN |diag| of the region, not the sum: an
+                        // interior cell's diag is `2 k |Sf|/Delta`, so the
+                        // ratio of the means is the ratio of the `k`s, while
+                        // a sum would also carry the regions' cell-count
+                        // ratio and stop meaning conductivity at all.
+                        let sum = solver::abs_sum_ranged(
+                            gpu, &self.solk, &mut self.ws, &self.a.diag, o, n,
+                        )?;
+                        rs.push(if n == 0 { 0.0 } else { sum / n as Scalar });
+                    }
+                    self.row_scale = Some(rs);
+                }
+                for i in 0..self.regions.len() {
+                    let (o, n) = (self.regions[i].cell_offset, self.regions[i].n_cells);
+                    initial.push(solver::residual_ranged(
+                        gpu, &self.solk, &mut self.ws, &self.t.f, &self.a, m, o, n,
+                    )?);
+                }
+            }
+
             perf = solver::solve(
                 gpu,
                 &self.solk,
@@ -1729,6 +2029,24 @@ impl<'m> ConjugateHeat<'m> {
                 &mut self.ws,
                 &self.ctrl.solver,
             )?;
+
+            regions.clear();
+            if measure {
+                for i in 0..self.regions.len() {
+                    let (o, n) = (self.regions[i].cell_offset, self.regions[i].n_cells);
+                    let last = solver::residual_ranged(
+                        gpu, &self.solk, &mut self.ws, &self.t.f, &self.a, m, o, n,
+                    )?;
+                    let met = Self::region_met(&self.ctrl.solver, initial[i], last);
+                    regions.push(SolverPerformance {
+                        initial_residual: initial[i],
+                        final_residual: last,
+                        n_iterations: perf.n_iterations,
+                        converged: met,
+                    });
+                }
+            }
+
             field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)?;
         }
 
@@ -1741,7 +2059,14 @@ impl<'m> ConjugateHeat<'m> {
         // consistent with the solution that was just computed. It is NOT a
         // second coupling iteration: `T` is not touched.
         self.update_interfaces(gpu)?;
-        Ok(perf)
+        Ok(ConjugatePerformance { global: perf, regions })
+    }
+
+    /// `finish_solve`'s criterion, applied to one region's own numbers: the
+    /// absolute tolerance, or the relative one against the region's own
+    /// initial residual.
+    fn region_met(ctrl: &SolverControls, initial: Scalar, last: Scalar) -> bool {
+        last <= ctrl.tolerance || (ctrl.rel_tol > 0.0 && last <= ctrl.rel_tol * initial)
     }
 
     /// Rotate the time levels, for a transient run.
@@ -1792,6 +2117,15 @@ pub struct ChtSolution {
     pub steps: usize,
     /// The last linear solve's final residual.
     pub residual: Scalar,
+    /// One per region, in `mesh.regions` order: the LAST step's per-region
+    /// §8.4 residuals (`ConjugatePerformance::regions`); empty when
+    /// residuals were not reported.
+    pub region_residuals: Vec<SolverPerformance>,
+    /// The region's mean `|diag|` of the matrix as solved; empty when
+    /// residuals were not reported.
+    pub region_row_scale: Vec<Scalar>,
+    /// `ConjugatePerformance::all_converged` of the last step.
+    pub converged: bool,
 }
 
 impl ChtSolution {
@@ -1871,7 +2205,12 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
         })
         .collect();
 
-    let tm = ThermalMesh::build(&regions, &case.interfaces, case.tolerances)?;
+    let mut tm = ThermalMesh::build(&regions, &case.interfaces, case.tolerances)?;
+    // The raw geometry travels with the lowered case; attaching it gives
+    // `ChtSolution.mesh.points` the real point set, which the per-region
+    // point VTU writes from.
+    let raws: Vec<&PolyMeshRaw> = case.raw.iter().collect();
+    tm.attach_points(&raws)?;
     let cond = Conduction::uniform_per_region(&tm, &case.materials)?;
     let gm = GpuMesh::upload(gpu, &tm.host)?;
 
@@ -1989,10 +2328,9 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
         n as usize
     };
 
-    let mut residual = 0.0;
+    let mut last = ConjugatePerformance::default();
     for _ in 0..steps {
-        let perf = cht.correct(gpu)?;
-        residual = perf.final_residual;
+        last = cht.correct(gpu)?;
         if !case.steady {
             cht.advance_time_step(gpu)?;
         }
@@ -2003,7 +2341,18 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     let t = gpu.download(&cht.field().f)?;
     let bt = gpu.download(&cht.field().bf)?;
 
-    Ok(ChtSolution { mesh: tm, t, bt, interface, pair_flux, steps, residual })
+    Ok(ChtSolution {
+        mesh: tm,
+        t,
+        bt,
+        interface,
+        pair_flux,
+        steps,
+        residual: last.global.final_residual,
+        region_residuals: last.regions.clone(),
+        region_row_scale: cht.row_scale().map(<[Scalar]>::to_vec).unwrap_or_default(),
+        converged: last.all_converged(),
+    })
 }
 
 pub mod flow;

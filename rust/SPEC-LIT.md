@@ -11922,6 +11922,22 @@ very benchmark; mesh convergence. **NOT established: agreement with Kaminski
 the honest status of §47.12's Gate 5 after this pass, and it is a better
 status than "not run" by exactly the amount above.
 
+**§94's numbers, added when §94 was written.** The three levels of the
+table at `Ra = 1e4`, run through §94's procedure with the levels replayed
+from the table and the arithmetic live: the Kr = 0.1 sequence is
+OSCILLATORY at the table's own five-digit precision, so no order is
+reported and the uncertainty comes from the fixed-exponent fits -
+`U_fine = 9.943e-5`; Kr = 1 observes `p = 2.145`, `phi_ext = 1.521650e0`,
+`U_fine = 3.747e-3`; Kr = 10 observes `p = 1.966`, `phi_ext = 2.265978e0`,
+`U_fine = 3.978e-3`. The comparisons against Belazizia et al., in §94.3's
+form with `u_D = 0` (they state no uncertainty on their table): Kr = 0.1
+`E = S - D = -2.920e-2 +/- 9.943e-5` (`-7.12 % +/- 0.02 %` of D); Kr = 1
+`E = S - D = -4.710e-2 +/- 3.747e-3` (`-3.00 % +/- 0.24 %`); Kr = 10
+`E = S - D = -1.084e-2 +/- 3.978e-3` (`-0.48 % +/- 0.17 %`). At every
+ratio `|E| > u_val` - the disagreement is NOT the mesh, which is the
+arithmetic beneath the diagnosis above, and it is why the verdict carries
+the Kr = 0.1 study with it into the registry.
+
 ### 60.6 Gate 6 - Qu & Mudawar (2002)
 
 *Int. J. Heat Mass Transfer* **45** 3973-3985, DOI
@@ -19591,6 +19607,21 @@ Kawano's `0.080` and `0.152`, and `0.235` between `0.156` and `0.288`.
    that flatness IS the artefact rather than evidence against it. It is small
    because the two-sided grading puts the last column `20 um` from the exit.
 
+**§94's numbers, added when §94 was written.** The four tabulated levels
+through Eça & Hoekstra's procedure, and the finest triplet alone through
+Celik's, replayed from the table with the arithmetic live. `R_t,in`: the
+four-level fit observes `p = 0.531`, `phi_0 = 0.09652`, `U_fine = 4.582e-3`
+- the triplet observes `p = 1.277`, `phi_ext = 0.09410`; the table's own
+`~0.094` is the triplet's limit, while the four-level fit says
+`0.0965 +/- 0.0046` - both inside Kawano's bar. `R_t,out`: `p = 1.896`,
+`phi_0 = 2.353255e-1` against the triplet's `p = 1.927`,
+`phi_ext = 2.353185e-1` - the two readings agree. The comparisons against
+Kawano's digitised point, `u_D` = half the digitised Fig. 4 bar:
+`R_t,in: E = S - D = -2.311e-2 +/- 3.629e-2` (`-19.92 % +/- 31.28 %` of D)
+and `R_t,out: E = S - D = +1.307e-2 +/- 6.600e-2` (`5.89 % +/- 29.73 %`) -
+both `|E| <= u_val`, so the comparison cannot see a modelling error at this
+resolution, and the verdict above stands with that sentence beside it.
+
 ### 79.13 What must hold, and what was measured
 
 | Check | Expected | Measured |
@@ -26698,5 +26729,1715 @@ anywhere else.
 | two `patch_names` values that collide | refused naming both source patches |
 | a config whose gate cannot be met | exit 1, §92.3's refusal on stderr, and no `constant/polyMesh` and no `<name>_summary.json` written |
 | the summary's `mesh.patches` | equals the boundary file's patches, name for name and size for size |
+
+---
+
+## 93. An equation that lives on a region — the per-region residual, the points a run keeps, and the tensor it can write
+
+§47.4 made the conjugate thermal mesh one array concatenation and one face
+coefficient, and §47.2 made the interface one kernel writing both sides of
+every pair. Three things that construction could not say were left standing.
+The solve reported ONE §8.4 residual over the union, so a region that had
+quietly stopped converging hid behind the number the union printed. The mesh
+handed to the writers kept cells and patches but no points, so a VTU could
+carry only cell data on degraded polygons. And `FieldValues` had two arms,
+so no run could write a tensor anywhere. This section states what three
+pieces of work landed about those gaps: the per-region residual (a ranged
+reduction over the rows a region already owns), the points a run keeps (the
+raw geometry carried through lowering and concatenated in §47.4's order),
+and this section's own three refusals - the Mach number a low-Mach run
+prints and refuses on, the partition that may not cut a §47.4 interface
+face, and a refusal menu that names only what a case can say.
+
+Written from:
+
+* ofgpu `SPEC-LIT.md` §3.5 (the inverse-distance weight the cell-to-point
+  interpolation applies), §8.4 (the norm the per-region residual restates
+  over a region's rows), §13.4 (saying what was used; §13.4.1 the inert
+  setting and §13.4.2 the start-up block), §25 (the low-Mach premise and
+  its `R_s`), §44 (the writers), §46 and §47 (the solid equation, the
+  Robin triple of §47.2 and the concatenated thermal mesh of §47.4),
+  §49.3 (a mesh's points live outside the `HostMesh`), §59.9 (the shape
+  of the last subsection), §69.2 (a passing gate registers nothing) and
+  §71 (the decomposition).
+* H. Jasak, "Error Analysis and Estimation for the Finite Volume Method
+  with Applications to Fluid Flows", PhD thesis, Imperial College (1996),
+  and F. Moukalled, L. Mangani, M. Darwish, "The Finite Volume Method in
+  Computational Fluid Dynamics", Springer (2016) - the sources §3.5's
+  weight already rests on, which the points half of this section applies.
+* Kitware's published "VTK File Formats" description, cited by
+  `io/vtu.rs`'s own header - the `PointData` block and the 6→9 component
+  expansion of §93.4.
+* H. S. Carslaw and J. C. Jaeger, *Conduction of Heat in Solids*, 2nd ed.,
+  ch. I - the 1-D series slab of Gate 93-B, the same closed form §47.12
+  already uses.
+
+The sound speed of (93.6) is stated, not cited: with `p = rho R_s T` and
+`p rho^-gamma = const` along an isentrope, `c^2 = (dp/drho)_s = gamma
+R_s T` - the perfect-gas isentropic value, and no book was consulted for
+it.
+
+No GPL-licensed source was consulted.
+
+### 93.1 The restriction — which rows are a region's
+
+`ThermalRegion` has always stored three offset/count pairs; until now
+nothing read them (`src/cht.rs`). Read as a restriction, they say which
+rows of the concatenated system are a region's own:
+
+```
+For region r of a concatenated ThermalMesh,
+  rows(r)  = cells(r) = [cell_offset, cell_offset + n_cells)
+  faces(r) = [internal_face_offset, internal_face_offset + n_internal_faces)
+  bfaces(r)= [boundary_face_offset, boundary_face_offset + n_boundary_faces)
+A_r psi_r = b_r is the assembly over rows(r) and faces(r) only, with the faces of
+PatchKind::Interface entering as boundary faces of r.                                   (93.1)
+```
+
+The last clause is §47.4's construction rather than a new statement: the
+interface faces ARE boundary faces of each region (`b_kind` is
+`PatchKind::Interface`, `b_nbr_cell` names the cell on the other side in
+the concatenated numbering), and §47.2 consequence 2 is what makes the two
+regions' rows of those faces two descriptions of one coefficient rather
+than two coefficients. A region's equation, then, is not a new assembly:
+it is a SLICE of the one assembly §47.4 already builds.
+
+### 93.2 The per-region residual norm
+
+§8.4's normalisation, restricted to the rows of (93.1) and measured on the
+device:
+
+```
+x_ref,r = mean over cells(r) of psi                                                       (93.2)
+v       = psi outside cells(r),  x_ref,r inside cells(r)          (the masked reference vector)
+norm_r  = sum_{P in cells(r)} |A psi - A v|_P + sum_{P in cells(r)} |b - A v|_P + eps      (93.3)
+res_r   = sum_{P in cells(r)} |b - A psi|_P / norm_r
+region r met its tolerance  iff  res_r <= tol  or
+                             (rel_tol > 0 and res_r <= rel_tol * res_r,initial)
+converged(union)  iff  the global solve converged, AND every region was measured,
+                       AND every region met its tolerance                                 (93.4)
+```
+
+(93.3)'s reference vector is the MASKED one: `psi` outside the region's
+rows, the constant `x_ref,r` inside them - not a global constant broadcast
+over the whole vector. A global constant makes the row sums of the
+conduction operator vanish, so on a region with no Dirichlet face the norm
+would collapse to the residual itself and `res_r` would sit at 1 for ever;
+the masked vector is a small perturbation of `psi`, which is also why the
+norm over the FULL range is the global norm to the bit - with
+`offset = 0` and `n = n_cells` the masked vector IS `psi`.
+
+What landed, by name. `solver::device_norm_factor_ranged`,
+`solver::residual_ranged` and `solver::abs_sum_ranged` (`src/solver.rs`);
+ONE new kernel, `solMaskedReference` (`cuda/solver.cu`), writing the
+masked vector; the host mirrors `reference::norm_factor_ranged` and
+`reference::residual_ranged` (`src/reference.rs`). One norm/flag pair per
+solver workspace: the ranged reduction reuses the same partial-sum
+buffers the global norm does, and the per-region numbers cost one host
+round-trip each, so they are gated on `SolverControls::report_residuals`
+exactly as the global residual is - a capture never pays for them.
+(93.4) is `ConjugatePerformance::all_converged` (`src/cht.rs`),
+`self.global.converged && self.regions.iter().all(|r| r.converged) &&
+!self.regions.is_empty()`, with the per-region flag from
+`ConjugateHeat::region_met`: `last <= ctrl.tolerance || (ctrl.rel_tol >
+0.0 && last <= ctrl.rel_tol * initial)`. A union that was never measured
+is NOT converged - "not looked at" is not "converged".
+
+### 93.3 Saying what was used — the start-up block and the `converged` refusal
+
+§13.4.2's contract, applied to the linear solve on a union: a per-region
+tolerance is DERIVED (each region's rows carry their own scale), so the
+derivation is printed, not implied. `ofgpu-cht` (`src/bin/cht.rs`) prints
+one block with the solve and one verdict after it. The block's header and
+its per-region line are these shapes (the numbers are the three-region
+die/solder/spreader stack at tolerance 1e-14, with the row-scale share
+column elided here; Gate 93-B's rows in §93.8 carry real shares):
+
+```
+  linear solve per region (SPEC-LIT 8.4 on each region's own rows; row scale = mean |diag| per cell; tolerance 1.000e-14, relTol 0.000e+00):
+    region 'die' row scale ... of largest | residual initial 1.000e0 -> final 9.440e-14 | NOT met
+    region 'solder' row scale ... of largest | residual initial 1.000e0 -> final 3.665e-13 | NOT met
+```
+
+and, when a region misses, the run does not say `converged`. It says,
+exactly:
+
+```
+  converged: no - region 'die' final 9.440e-14 > tolerance 1.000e-14; the global residual 8.494e-12 does not see it
+```
+
+The global residual 8.494e-12 is a converged-looking number that hides
+three regions missing a 1e-14 tolerance - the defect the refusal exists
+for. A run with `report_residuals` off prints `per-region residuals: not
+measured (reportResiduals is off); converged: not observed` and refuses
+`converged`: (93.4)'s "every region was measured" clause, said at the one
+place a reader would otherwise have been misled.
+
+### 93.4 Points retained through lowering, the VTU with real points, `PointData`, and the tensor a run writes
+
+`HostMesh` keeps `n_points` and nothing else (§49.3), so the point set and
+the face polygons travel beside it: `LoweredChtCase.raw` holds one
+`PolyMeshRaw` per region (bitwise what `blockgen::raw_mesh` built the
+region's mesh from), `ThermalRegion::n_points` counts each region's own,
+and `ThermalMesh::attach_points` concatenates them in §47.4's order -
+region `r`'s point `p` lands at the sum of the `n_points` of the regions
+before it, and points are NOT merged across an interface (each region
+keeps its own copy, exactly the way `build` offsets cells and faces).
+`ThermalMesh::to_raw` hands the concatenation back as one `PolyMeshRaw`,
+with owners from `host.owner` then `host.b_face_cells` and patches
+verbatim. Both are refused by name when they cannot tell the truth:
+`attach_points` refuses a raw whose counts disagree with the region's,
+and `to_raw` refuses to run before `attach_points`.
+
+The cell-to-point interpolation is `io::pointfield.rs`'s `cell_to_point`,
+the crate's own inverse-distance weight of §3.5:
+
+```
+phi_p = ( sum_{c in C(p)} w_pc phi_c ) / ( sum_{c in C(p)} w_pc )
+C(p)  = { owner(f), neighbour(f) : face f of the raw mesh lists point p },
+        each cell counted once
+w_pc  = 1 / max(|x_p - C_c|, tiny),   tiny = Scalar::MIN_POSITIVE
+the w_pc are stored NORMALISED, sum_c w_pc = 1 for every point             (93.5)
+```
+
+The normalised weights mean the vector and tensor gathers run the SAME
+loop componentwise, so the scalar, vector and tensor results agree bit
+for bit. `tiny` guards the division for a point that sits on a cell
+centre. On a uniform block an interior point's cells sit at mirror-image
+offsets and a linear field is reproduced to rounding; a boundary point's
+cells all lie on one side of it, and the interpolation carries an
+accepted `O(h)` one-sided bias there. `io::pointfield.rs` is written from
+the same two works §3.5 names - Jasak (1996) and Moukalled et al. (2016),
+whose sections 3.3.2 and 9.3 are where that weight comes from.
+
+`vtu::write_vtu_points` writes the polyMesh itself - shared points, every
+face wound outward for the cell that emits it, a `<PointData>` block -
+from the same published Kitware "VTK File Formats" description
+`io/vtu.rs`'s header cites, and a symmetric tensor expands 6→9 row-major
+(`xx xy xz / yx yy yz / zx zy zz` from the six symmetric components). The
+USD and VDB writers take the six components as scalars named `.xx` ...
+`.zz`. The pre-existing CellData path is bitwise unchanged - pinned by
+`vtu::tests::the_cell_data_path_writes_the_same_bytes_as_before_s2`'s
+FNV-1a digest - so the new block could only appear where a tensor or a
+point field is present.
+
+### 93.5 The Mach number a low-Mach run prints
+
+§25's regime is "Mach ≪ 1 with density ratios of 3-4 - strong heating, low
+speed", and its formulation filters acoustics by splitting
+`p = p0(t) + p~(x,t)` with `p~ ≪ p0`. A run that prints no Mach number
+cannot say whether that premise holds for it; this one now does, from
+terms `GasProperties` already carries (`gamma`, and `R_s = R/W` of §25's
+`rho = p0/(R_s T)`):
+
+```
+M_P    = |u_P| / sqrt(gamma R_s T_P)                                                      (93.6)
+M_max  = max_P M_P ,     M_mean = sum_P M_P V_P / sum_P V_P                               (93.7)
+```
+
+`gamma R_s T` is the perfect-gas isentropic sound speed squared, stated
+in the Written-from paragraph above; no gas-dynamics text is cited. Both
+numbers are HOST reductions over fields the driver has already downloaded
+for its iteration line - `energy::mach_number` on host slices,
+`GasState::mach` on the device fields (`src/energy.rs`) - no kernel, no
+capture-registry entry. The max is taken by a plain `>` so a NaN never
+becomes it, and no value is ever an `Err`: a non-positive `T_P` gives a
+NaN `M_P` that the mean carries through, which is the honest answer for a
+temperature the gas law cannot stand behind.
+
+*DESIGN*: the limit is `M_max > 0.3`. At `M = 0.3` the isentropic density
+ratio is already
+
+```
+rho/rho0 = (1 + (gamma-1)/2 M^2)^(-1/(gamma-1)) = (1 + 0.2 M^2)^-2.5 = 0.956
+```
+
+for `gamma = 1.4` - a 4.4 % density change - which is where "Mach much
+less than 1" stops being a description of the run. The threshold is a
+design choice, not a measurement; the number, the cell holding the max
+and the moment are in every refusal §93.6 lists.
+
+`ofgpu-lowmach` (`src/bin/lowmach.rs`) prints `M max (cell) mean` in the
+start-up banner, on every `iter` line and on every `written to` line, and
+`energy::refuse_above_low_mach` judges it at the banner and after every
+outer iteration - the premise is re-checked on the field each iteration
+produced, not only on the initial one, so the run stops (or warns) the
+step it leaves the regime. The initial field's banner line names the
+threshold and the `-permissive` way through.
+
+### 93.6 What is refused, and by name
+
+§46.4's shape: what a run will not do, with the number that was wrong.
+
+* A union may not print `converged` unless the global solve converged AND
+  every region was measured AND every region met its tolerance - (93.4),
+  with `ofgpu-cht`'s refusal of §93.3 as its user-facing half.
+* `ofgpu-lowmach` refuses `M_max > 0.3` (`energy::LOW_MACH_LIMIT`, §93.5's
+  *DESIGN*). The strict refusal names the number, the cell, the moment,
+  §25's premise, the 0.956 density ratio, §93.6 and `-permissive`; under
+  `-permissive` one `contract::warn_once` names the same things and the
+  run continues.
+* `Decomposition::from_map` refuses a partition that puts the two cells
+  of a `PatchKind::Interface` boundary face on different parts. The
+  message names the face count, the pair count, the first offending face,
+  its patch and both cells' parts, and states the precondition: §47.2
+  consequence 2 makes interface conservation the property of ONE kernel
+  launch over ONE interface-pair list writing both sides, so two parts
+  would recompute `h_G` from two copies and could differ in the last bit.
+* `psychro::refuse_condensation`'s `available` menu names only entries a
+  `DcCase` can carry: supersaturation reporting, the humidity block's
+  `barometricPressure`/`virtualTemperature`,
+  `fans[].supplyRelativeHumidity`, `tiles[].plenumRelativeHumidity`. The
+  former menu named a "coil-surface saturated boundary condition" that
+  existed in no case format - the §13.4.1 class of a promise printed to
+  the user that nothing could reach.
+
+### 93.7 What must hold
+
+The residual unit's tests, by name:
+
+* `solver::tests::the_ranged_norm_over_the_full_range_is_the_global_norm_to_the_bit`
+  and `solver::tests::abs_sum_ranged_is_the_host_sum` - the ranged
+  reduction over the whole system is the global one, to the bit.
+* `solver::tests::the_ranged_norm_is_the_regions_own_system` and
+  `reference::tests::the_ranged_norm_over_every_row_is_the_norm_to_the_bit`
+  - the mask of (93.3) is the region's own reference, on device and host.
+* `solver::tests::a_range_outside_the_system_is_refused_by_name` - rows
+  outside the system are refused, not clamped.
+* `cht::tests::the_full_range_norm_is_bitwise_the_global_one_on_a_conjugate_matrix`,
+  `cht::tests::the_per_region_residuals_partition_the_global_residual`,
+  `cht::tests::no_region_residual_is_measured_when_residuals_are_not_reported`
+  and `cht::tests::the_row_scale_ratio_is_the_conductivity_ratio` - the
+  same four properties on a real conjugate matrix, plus the unmeasured
+  case's gate.
+* `ofgpu-validate`'s Gate 93-B rows (§93.8): the partition identity
+  `r_g N_g = sum_k r_k N_k`, the row-scale ratio against the conductivity
+  ratio, and both series-slab numbers.
+
+The points unit's tests, by name:
+`io::pointfield::tests::a_linear_field_is_exact_at_interior_points_and_bounded_at_boundary_points`,
+`io::pointfield::tests::the_vertex_mean_of_a_linear_point_field_is_the_cell_centre_value`,
+`io::pointfield::tests::the_round_trip_is_exact_on_interior_cells_of_a_uniform_block`,
+`io::pointfield::tests::the_vector_and_tensor_gathers_agree_with_the_scalar_one_componentwise`,
+`io::pointfield::tests::weights_sum_to_one_and_the_adjacency_of_a_block_is_what_geometry_says`,
+`io::pointfield::tests::it_refuses_a_field_of_the_wrong_length_by_name`;
+`vtu::tests::the_cell_data_path_writes_the_same_bytes_as_before_s2` (the
+CellData path is bitwise unchanged),
+`vtu::tests::tensor_cell_data_has_nine_components_row_major`,
+`vtu::tests::write_vtu_points_shares_points_and_winds_faces_outward`,
+`vtu::tests::write_vtu_points_refuses_wrong_lengths_by_name`,
+`vtu::tests::the_point_vtu_is_read_back_by_the_python_reader`, and
+`cht::tests::the_attached_points_rebuild_the_concatenated_geometry_and_write_one_vtu`
+(`to_raw` rebuilds `build`'s geometry, and one VTU comes off the
+concatenation).
+
+This unit's tests, by name:
+
+* `energy::tests::the_mach_number_is_speed_over_the_isentropic_sound_speed`
+  - (93.6)-(93.7) against values computed in the test from the same
+  `props.r_s()`/`gamma`; max, cell and volume mean to 1e-14 relative; a
+  length mismatch refused with `mach_number` in the message.
+* `energy::tests::a_mach_number_above_the_low_mach_limit_is_refused_by_name`
+  - `Err` at 0.31 naming `0.31`, `cell 7`, the moment, `0.3`, `§25` and
+  `-permissive`; `Ok` at 0.3 exactly; `Ok` at 0.31 under `-permissive`.
+* `decompose::tests::a_partition_may_not_cut_an_interface_face` - the
+  region-wise split of two coupled slabs is refused naming `§47.2` and
+  `8 interface face(s) (4 pair(s)`; a y-split that keeps every pair on
+  one part builds with `n_cut_couples == 0`.
+* `psychro::tests::wet_bulb_as_a_field_and_condensation_are_refused_by_name`
+  - extended: the condensation menu names `supplyRelativeHumidity` and
+  `plenumRelativeHumidity` and contains no `coil`; the test takes the
+  permissive-flag guard first.
+* `lowmach_tests::defaults_are_open_and_steady` still passes with the
+  Mach plumbing in the driver.
+* `cht::tests::region_rows_have_the_region_s_own_lengths` - a region's
+  downloaded rows have the region's OWN `n_cells`, `n_internal_faces` and
+  `n_boundary_faces` lengths; its interface mask is true on exactly its side
+  of the coupling's pairs (twice the pair count over the two regions) and is
+  all-false on a single-region mesh.
+* `cht::tests::gate_93a_a_region_s_rows_are_bitwise_the_region_alone` -
+  Gate 93-A's lib twin: for both regions of a coupled [6,3,2]+[4,3,2] pair
+  (k = 1.4 against 148, `r_c = 1e-4`), the pre-fold `diag`/`upper`/`lower`/
+  `source` of the region's rows equal the single-region assembly in every
+  bit, and so do the boundary coefficients on the non-interface faces - the
+  single side masked by the union's interface mask, which is the same face
+  set.
+
+### 93.8 Validation — Gate 93-A (bitwise restriction) and Gate 93-B (silicon on mould compound)
+
+**Gate 93-A** is §93.1's restriction made a measurement: for each region of
+a coupled pair, after ONE `assemble` and BEFORE
+`add_boundary_contributions`, the union's `diag[cells(r)]`,
+`upper[faces(r)]`, `lower[faces(r)]` and `source[cells(r)]` equal the
+region-alone assembly entry for entry in every bit (`to_bits()`), and so do
+`internal_coeffs`/`boundary_coeffs` on every boundary face of r that is NOT
+an interface face. Not claimed: the interface faces' coefficients - they are
+§47.2's Robin triple on the union and an ordinary patch alone, different by
+construction - and not the solved field, which §47.2's last paragraph
+settles at the end of this section. Why the four arrays CAN be bitwise:
+`fvLapFaces` is per internal face from `gamma_mag_sf[f]` and
+`delta_coeffs[f]`, both copied by `ThermalMesh::build`; `fvLapDiag` gathers
+each cell's own internal faces through the cell-to-face CSR, which
+`build_cell_face_maps` rebuilds in the same ascending face order because the
+concatenation offsets every face of a region by one constant; `fvm_su` is
+`V_P q_P`; `Conduction::build` is face-local. Nothing in the pre-fold
+assembly of a region's rows can see another region.
+
+The gate is stated for the steady, orthogonal-correction-free assembly, and
+it requires that assembly: `ConjugateControls::default()` sets
+`ddt: DdtCoeffs::ZERO` and `n_non_orth_correctors: 0`, both twins assert the
+two values, and with correctors on the gate would be comparing two different
+equations - the non-orth correction reads `fvc_grad_scalar` over the WHOLE
+union, whose boundary term at a face that is an interface on the union and
+an ordinary patch alone is not the same number.
+
+The fixture, both twins: a [6,3,2] block of 2 x 5 x 5 mm cells (k = 1.4) on
+a [4,3,2] block of the same cells (k = 148) at `r_c = 1e-4` in the lib twin
+(`cht::tests::gate_93a_a_region_s_rows_are_bitwise_the_region_alone`);
+`cht_block` slabs [12,6,1] (k = 1.4) + [9,6,1] (k = 148) at `r_c` in
+{0, 5e-3} in `ofgpu-validate` (`check_region_restriction`, under the banner
+`an equation that lives on a region - Gate 93-A (SPEC-LIT 93)`). 380 K on
+the one outer x wall and 300 K on the other, on the union and on the single
+alike; `q = 1.0e5 (1 + 0.1 c_local)` per cell of local index `c_local`;
+seed 340 K; ONE `assemble`, no `update_interfaces`, no fold, no solve. The
+single side of the boundary-coefficient compare is masked by the UNION's
+interface mask: the region's boundary faces are concatenated in the
+region's own order, so local index `k` is the same face on both sides, and
+the face that became the interface is excluded from the single too - alone
+it is an ordinary patch, on the union it is the Robin triple, and comparing
+them would compare two different boundary-value problems. Measured
+2026-09-13 on this run:
+
+```
+  ok   S93 Gate 93-A: region 0 rc 0: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 0 rc 0: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 0 rc 0.005: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 0 rc 0.005: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0.005: diag/upper/lower/source of the union's rows are the region alone, BITWISEerr 0.000e+00  tol 0.000e+00
+  ok   S93 Gate 93-A: region 1 rc 0.005: boundary coefficients on non-interface faces, BITWISEerr 0.000e+00  tol 0.000e+00
+```
+
+A MISSES on any combination is ONE `GateReport` under `SPEC-LIT S93 Gate
+93-A`, naming the region, the `r_c`, the array and the first differing
+index with both values, and its failing `require` rows carry the tally - a
+FINDING reported (§0 rule 3), never the operators touched to reach a pass.
+This run found none: the eight rows above are all the gate prints.
+
+A passing gate registers nothing (§69.2), so Gate 93-B is check rows in
+`ofgpu-validate` (`src/bin/validate.rs`, `check_per_region_residual`),
+under the banner `the per-region residual - Gate 93-B (SPEC-LIT 8.4 on
+each region's rows)`. Configuration as landed: silicon (k = 148 W/(m K))
+on mould compound (k = 0.74), the exact 200:1 conductivity ratio, 1 mm on
+2 mm at 20 + 40 cells of 5.0e-5 m in both regions, so the FV scheme
+represents the piecewise-linear closed form exactly and the only error
+left is the linear solve's; T = 380 / 300 K on the outer walls; the 1-D
+series slab of Carslaw & Jaeger ch. I. Measured 2026-09-13 on this run:
+
+```
+  ok   Gate 93-B leg A: the global solve met its nominal tolerance 1e-6err 0.000e+00  tol 0.000e+00
+  ok   Gate 93-B leg A: r_g N_g = sum_k r_k N_k - the region residuals partition the global oneerr 0.000e+00  tol 1.000e-10
+  ok   Gate 93-B: row scale silicon/mould = the conductivity ratio 200, within 5 %err 1.388e-02  tol 5.000e-02
+        Gate 93-B leg A: region 'silicon': initial 1.000e0 -> final 6.002e-5 (2.41e2 of r_g), row-scale share 1.000e0
+        Gate 93-B leg A: region 'mould': initial 1.000e0 -> final 1.047e-6 (4.20e0 of r_g), row-scale share 5.070e-3
+  ok   Gate 93-B leg B: some global tolerance in [1e-8 .. 1e-14] gives every region 1e-8 on its own rowserr 0.000e+00  tol 0.000e+00
+        Gate 93-B leg B: the global tolerance that gave every region 1e-8 was 1e-10 (52 iterations; leg A took 46)
+  ok   Gate 93-B leg B: q = dT/(L_si/k_si + L_mc/k_mc) - the series slaberr 3.352e-10  tol 1.000e-05
+  ok   Gate 93-B leg B: the interface temperature is T_hot - q L_si/k_sierr 5.599e-13  tol 1.000e-05
+```
+
+What the numbers say, measured and not asserted (§46.4's rule): at the
+nominal global 1e-6 the soft region's own residual (mould, 1.047e-6) sits
+beside the tolerance while the stiff region's (silicon, 6.002e-5) is 241
+times `r_g` measured on the same field - the union's single number
+genuinely does not see the stiff region's state. Tightening the GLOBAL
+tolerance to 1e-10 is what it takes to give every region 1e-8 on its own
+rows, and the series-slab agreement (q to 3.352e-10 relative, the
+interface temperature to 5.599e-13 of the 80 K span) says the converged
+answer is the physics. The run that measured both gates ended `847/847
+checks passed`, Gate 93-B's rows identical to the run that first measured
+them.
+
+### 93.9 What is claimed, and what is not
+
+Claimed: the ranged norm over the full range is the global norm to the
+bit, on the dense rig and on a conjugate matrix whose interface rows are
+coupled; the per-region residuals partition the global one as
+`r_g N_g = sum_k r_k N_k`; the CellData VTU path is bitwise unchanged,
+pinned by its FNV-1a digest; the Mach number is a report and a refusal,
+not a model - no equation of §25 or §26 changed by its arrival; and Gate
+93-A's: the pre-fold `diag`, `upper`, `lower` and `source` of a region's
+rows of the concatenated assembly - and the boundary coefficients on the
+non-interface boundary faces - are the region built alone, bit for bit
+(§93.8).
+
+Not claimed: a bitwise SOLVED field on a union. §47.2's own last
+paragraph: "the solved field on a two-region mesh is not bitwise
+identical to the same field solved on the fluid region alone, because the
+two are different-sized linear systems whose Krylov iterates are different
+numbers" - the matrix contribution is what is asserted exactly. And no
+region-restricted SOLVE exists anywhere in this: the solid is solved on
+its own region mesh, the union is solved as ONE system, and (93.1)
+restricts what a measurement READS, not what the solver RUNS. Nothing
+here says anything about the observed-order section planned next; it does
+not exist yet, and this section cites no number for it.
+
+---
+
+## 94. Observed order and reported uncertainty — what a multi-mesh gate must say, and what a single-mesh gate must admit
+
+Roache's 1994 "perspective" paper put it as plainly as it has ever been put:
+a grid-convergence study is REPORTED or it DID NOT HAPPEN. Every number a
+gate publishes is the number of a discretisation whose error nobody can see
+unless the sequence of meshes it stands on is laid out beside it, with the
+order the sequence observed and an uncertainty that says how far the finest
+answer may still sit from the exact one. This section makes that part of
+what a gate IS: a gate that ran on several meshes reports its observed order
+and its uncertainty, in the words of the papers below, and a gate that ran
+on one mesh says so - by name, in the summary, beside its verdict.
+
+What existed before: three manufactured-solution rows near the top of the
+run that solve on two meshes apiece and print a two-level `log2` order;
+Gate 5 (§60.5) and Gate 6 (§79.12), which compare against published tables
+and carry level-to-level percentages and, for Gate 6, a geometric-sum
+extrapolation; and no gate carried an uncertainty at all. The §69 registry
+recorded WHAT a non-passing gate concluded, and nothing about the
+discretisation the conclusion stood on.
+
+The rule this section adds to §69 is a fourth relation beside
+(69.5)-(69.7): for every g in G, study(g) is declared. `GateReport` carries
+an `uncertainty`, and a verdict that reaches the summary without one - one
+mesh named, or the (94.9) estimate attached - fails the audit's third row
+(§94.3). Nothing any solver computes is changed by this section; §94.6's
+before-and-after diff is the proof.
+
+Written from:
+
+* ofgpu `SPEC-LIT.md` §0 (the rules, and rule 3's DESIGN marks), §2.4 (the
+  over-relaxed correction whose order the manufactured-solution rows
+  measure), §3.2, §46.3 and §46.4 (the face coefficients and the anisotropic
+  residual), §46.7 (Gate 46-B), §47.3 (the suppressed interface correction),
+  §47.12, §60.5 and §79.12 (the two tabulated gates), §69 (the registry the
+  `uncertainty` field extends), §80 (the citation forms this section's own
+  labels follow), §93 and this section.
+* P. J. Roache, *J. Fluids Eng.* 116 (1994) 405-413, DOI `10.1115/1.2910291`
+  - the Grid Convergence Index.
+* I. B. Celik, U. Ghia, P. J. Roache, C. J. Freitas, H. Coleman & P. Raad,
+  *J. Fluids Eng.* 130 (2008) 078001, DOI `10.1115/1.2960953` - the
+  reporting procedure, transcribed in §94.1.
+* L. Eça & M. Hoekstra, *J. Comput. Phys.* 262 (2014) 104-130, DOI
+  `10.1016/j.jcp.2014.01.006` - the least-squares estimates and the
+  uncertainty, transcribed in §94.2.
+* H. W. Coleman & F. Stern, "Uncertainties and CFD Code Validation",
+  *J. Fluids Eng.* 119 (1997) 795-803 - the validation metric of §94.3.
+* P. J. Roache, *J. Fluids Eng.* 124 (2002) 4-10, DOI `10.1115/1.1436090` -
+  manufactured solutions as code verification.
+
+No GPL-licensed source was consulted.
+
+### 94.1 The typical cell size and the observed order
+
+Level 1 of a sequence is the FINEST mesh; `h` grows along the sequence. The
+typical cell size, the ratios and differences, the observed order, the
+Richardson extrapolation and the index - (94.1)-(94.2) and (94.4)-(94.5) are
+Celik et al. (2008) section 2's five steps, the index itself Roache (1994):
+
+```
+  h = ( (1/N) sum_{i=1}^{N} V_i )^{1/3}   (3-D);   h = ( (1/N) sum A_i )^{1/2}   (2-D)          (94.1)
+  r21 = h_2/h_1,  r32 = h_3/h_2,  eps21 = phi_1 - phi_2,  eps32 = phi_2 - phi_3,  R = eps21/eps32   (94.2)
+  p = | ln|eps32/eps21| + q(p) | / ln(r21),   q(p) = ln( (r21^p - s)/(r32^p - s) ),  s = sign(eps32/eps21)   (94.3)
+  phi_ext = ( r21^p phi_1 - phi_2 ) / ( r21^p - 1 )                                                (94.4)
+  e_a = |(phi_1 - phi_2)/phi_1|,   GCI_fine = F_s e_a / (r21^p - 1),   F_s = 1.25                   (94.5)
+```
+
+(94.3) is solved as a fixed point: start from `p_0 = |ln|eps32/eps21|| /
+ln(r21)` - which is exact when `r21 = r32`, because then `q = 0` - and
+iterate `p_{k+1} = |ln|eps32/eps21| + q(p_k)| / ln(r21)` until
+`|p_{k+1} - p_k| < 1e-12` or 200 iterations, then refuse by name. `0 < R <
+1` is monotone convergence, `R > 1` monotone divergence, `R < 0` oscillatory
+(converging when `|R| < 1`, diverging when `|R| > 1`); (94.3)-(94.5) are
+evaluated ONLY for monotone convergence. For `R < 0` or `R > 1` the order
+"cannot be established" - oscillatory convergence is anomalous, Eça &
+Hoekstra 2014's section 2.4.2 - `p` is `None`, and the uncertainty comes
+from (94.6)-(94.9) with the alternative estimators of §94.2.
+
+DESIGN: three levels are the minimum everywhere in this crate, and `F_s =
+1.25` is Celik's three-level value. Roache (1994) recommends `F_s = 3` for a
+two-level estimate; this crate never makes one (`grid_study` refuses two),
+because a two-level order assumes the very thing the study exists to
+measure. The run's three existing manufactured-solution rows keep their
+two-level `log2` orders and their own bar untouched - adding a level would
+change what the run measures, and §69.7's diff is this section's proof that
+it changed no measurement.
+
+### 94.2 The least-squares estimate and the uncertainty
+
+When the finest triplet is not monotone, or its observed order falls outside
+`[0.5, 2]`, the order is not what carries the uncertainty - a fit is. The
+error forms, the weighted least-squares objective, the weights, the standard
+deviation of a fit, the data-range parameter and the uncertainty (Eça &
+Hoekstra 2014, their eqs. (1), (5)-(7), (8)-(11), (16), (19)-(21)):
+
+```
+  eps_RE = alpha h_i^p,   eps_1 = alpha h_i,   eps_2 = alpha h_i^2,   eps_12 = alpha_1 h_i + alpha_2 h_i^2   (94.6a)
+  S_X(phi_0, alpha, [p]) = sum_i w_i ( phi_i - (phi_0 + eps_X(h_i)) )^2   minimised,  X in {RE, 1, 2, 12}   (94.6b)
+  w_i = 1 (unweighted)   or   w_i = (1/h_i) / sum_j (1/h_j) (weighted);   nw_i = 1  or  n_g w_i          (94.6c)
+  sigma_X = sqrt( sum_i nw_i ( phi_i - fit_X(h_i) )^2 / (n_g - n_par) ),  n_par = 3 (RE, 12) or 2 (1, 2)   (94.7)
+  delta_phi = ( max_i phi_i - min_i phi_i ) / (n_g - 1);   F_s = 1.25 if 0.5 <= p < 2.1 and sigma < delta_phi, else 3   (94.8)
+  U(phi_1) = F_s |eps(phi_1)| + sigma + |phi_1 - fit(h_1)|                       if sigma <  delta_phi   (94.9a)
+  U(phi_1) = 3 (sigma/delta_phi) ( |eps(phi_1)| + sigma + |phi_1 - fit(h_1)| )   if sigma >= delta_phi   (94.9b)
+```
+
+The procedure, Appendix A of that paper transcribed (the paper wants
+`n_g >= 4`; this crate applies it from `n_g = 3` with the
+degrees-of-freedom rule below):
+
+1. If the finest triplet's behaviour is not monotone, `p` cannot be
+   established - the SIX fixed-exponent fits (`eps_1`, `eps_2`, `eps_12`,
+   each weighted and unweighted; `eps_12` only when its degrees of freedom
+   are positive) are tried and the smallest `sigma` wins. Otherwise `eps_RE`
+   is fitted weighted and unweighted (on exactly three levels both are the
+   exact triplet solution (94.3)-(94.4) with `sigma = 0`). Let `I` be the
+   fits with `0.5 <= p <= 2` (the paper's bounds, inclusive, compared in
+   `f64` with no tolerance). If `I` is not empty, `eps = eps_RE` from the fit
+   in `I` with the smaller `sigma`, done. Otherwise let `p*` be the `p` of
+   the better fit: `p* > 2` means the FOUR fixed-exponent fits (`eps_1`,
+   `eps_2`, weighted and unweighted); `p* < 0.5` means the six. The study's
+   `p` is `Some(p*)` - or the in-range fit's `p` - whenever the triplet is
+   monotone, `None` otherwise: the order is REPORTED even when a
+   fixed-exponent estimator carries the uncertainty.
+2. `delta_phi` by (94.8), over ALL levels.
+3. `F_s` by (94.8): `1.25` only when the CHOSEN estimator is `eps_RE` with
+   `0.5 <= p < 2.1` and `sigma < delta_phi`; every fixed-exponent choice
+   gets `F_s = 3`.
+4. `U(phi_1)` by (94.9a) or (94.9b), evaluated at the FINEST level.
+
+Degrees of freedom: a fit whose `n_g - n_par <= 0` is not attempted - on
+three levels `eps_RE` and `eps_12` have no residual freedom (`eps_RE` is
+then the exact triplet solution, and `eps_12` is skipped). Ties in
+"smallest sigma" (exact equality) go to the earlier fit in the order listed:
+unweighted before weighted, `eps_1` before `eps_2` before `eps_12`.
+
+DESIGN: the outer minimisation of `S_RE` over `p` is a golden-section
+search on `[0.05, 8]`, 200 iterations, `p` the bracket midpoint - for fixed
+`p` the fit is linear in `(phi_0, alpha)`, one weighted normal-equations
+solve, so the search reaches the minimiser the paper reaches through
+`dS/dp = 0` (its Appendix B.2) and never divides by a vanishing derivative.
+
+### 94.3 What a gate must say
+
+The comparison against a published datum is Coleman & Stern's (1997)
+validation metric, the form ASME V&V 20-2009 adopted - `S` is the
+simulation's finest-level value, `D` the reference datum, `u_D` its stated
+uncertainty (`0` where the reference states none, and said so where it is
+`0`), `u_input = 0` in every gate here because the gates' inputs are exact
+(declared in the print), and `u_num = U(phi_1)` of (94.9):
+
+```
+  E = S - D,     u_val = sqrt( u_num^2 + u_input^2 + u_D^2 ),     u_num = U(phi_1) of (94.9)          (94.10)
+```
+
+`E +/- u_val` is what is printed, in the units of the quantity and, beside
+it, as a percentage of `D`. The reading rule travels with the numbers:
+`|E| <= u_val` means the comparison cannot see a modelling error at this
+resolution; `|E| > u_val` means the disagreement is NOT the mesh, and the
+verdict the gate already carries stands with that sentence beside it.
+
+A gate declares what it stands on through one field:
+
+```
+  GateReport.uncertainty : Option<Uncertainty>
+  Uncertainty = SingleMesh(reason) | Study(GridStudy)
+  for every g in G, study(g) is declared                                       (the fourth §69 relation)
+```
+
+- not a fenced equation but the shape of the rule: a verdict that says
+neither "one mesh, and why that is the whole sequence there is" nor "the
+(94.9) estimate from these levels" fails `audit_and_summarise`'s third row.
+The
+declaration is refused at the AUDIT, not at `report`, because `report` moves
+no tally (§69.6 row 7) and a refusal inside `report` would leave a printed
+verdict unregistered - the defect §69.2 exists for. The summary prints one
+`mesh study:` line per registered gate, generated with the list it sits in;
+a passing multi-mesh gate registers no verdict (§69), so its study is
+printed as note rows beside its checks instead.
+
+DESIGN: the audit-row refusal rather than a constructor refusal is also
+what keeps `registering_a_verdict_moves_no_tally` true - the new field
+describes, and only the audit judges.
+
+---
+
+### 94.4 The gates
+
+**Gate 94-A = §46.7's Gate 46-B, run live.** The anisotropic manufactured
+field `psi = sin(kx x) sin(ky y) sin(kz z)` with `K = diag(1, 10, 100)` in
+the mesh axes and `f = (1 kx^2 + 10 ky^2 + 100 kz^2) psi`, on three uniform
+blocks of `8^3`, `16^3` and `32^3` cells, `r = 2`. The face coefficients
+are `Conduction::uniform_per_region`'s (§46.3), consumed by `fvm_laplacian`
+exactly as the conjugate driver consumes them - there is no second tensor
+path. `h` is (94.1) on the exact block volume `0.28`. The rows: the three
+L2 errors fall; the observed order inside `[1.9, 2.1]` on the finest
+triplet, the bar §46.7 states, and `p = 0` if no order could be
+established so the check fails by the whole bar; `U_fine` printed through
+`GridStudy::one_line()`; and §46.4's anisotropy residual is zero on the
+axis-aligned block (checked at `1e-14`).
+
+**Gate 94-B, run live, two legs.** Two solid regions, `k = 1 : 100`, on
+`[0,1] x [0, 0.7] x [0, 0.4]`, every point sheared `x += tan(20 deg) z`, so
+the interface plane `xi = x - s z = 1/2` leans 20 deg off the cell-centre
+line and §47.3's suppressed correction is what the order measures. Three
+levels per region (`8x6x4`, doubled twice, `r = 2`). The pairing's default
+tolerance refuses a face leaning `1 - cos(20 deg) = 0.0603` off its normal,
+so `PairingTolerances::non_orth` is widened to `0.07` FOR THIS GATE and
+printed as such - cht.rs's default and its refusal are untouched, and
+measuring what the suppressed correction costs at 20 deg IS the gate's
+result. Leg 1 (`R_c = 0`) manufactures the field with the z-dependence the
+suppressed correction sees; leg 2 (`R_c = 5e-3`) manufactures the xi-only
+field whose interface jump is `-R_c sin(ky y)` exactly. The MINUS is (S47.1)
+and (S47.3) read together and is not a free choice: `n` points A to B, the
+flux `q_G = n . q = -k dT/dn`, and this field's `k dT/dn = +sin(ky y)`, so
+`T_A - T_B = R_c q_G = -R_c sin(ky y)` and side B's constant carries `+R_c`.
+Both legs face ONE order bar, the plan's: `p >= 0.9`, fail below it, and no
+other order bar exists for 94-B - leg 2 also checks its jump against
+`-R_c sin(ky y)` within 5 % of `R_c` on the finest mesh. Both legs print
+their three L2s and the
+study line; if a leg's order comes out oscillatory or diverging the row
+still prints `p = n/a` and the check fails with the whole bar.
+
+### 94.5 What must hold
+
+| claim | what holds it |
+|---|---|
+| an exact power sequence returns its own order, extrapolation and index to 1e-12, and its `u_fine` to 1e-10 | `vv::tests::an_exact_power_sequence_gives_its_order_back` |
+| unequal refinement ratios recover a non-integer order as a fixed point | `vv::tests::unequal_refinement_ratios_recover_a_non_integer_order` |
+| an oscillatory triplet has no order and a safety factor of three | `vv::tests::an_oscillatory_triplet_has_no_order_and_a_safety_factor_of_three` |
+| §60.5's Kr = 1 and Kr = 10 rows have their order, and an order above 2 falls to the fixed-exponent fits while still being reported | `vv::tests::the_kaminski_prakash_table_has_its_order` |
+| §79.12's four levels fit, and the finest triplet disagrees with the four-level fit on `R_t,in` | `vv::tests::the_qu_mudawar_levels_fit_and_the_finest_triplet_disagree_on_r_in` |
+| the least-squares fit recovers an exact four-level power series, weighted and unweighted | `vv::tests::the_least_squares_fit_recovers_an_exact_power_series` |
+| scatter larger than the data range triples the uncertainty through (94.9b) | `vv::tests::scatter_larger_than_the_data_range_triples_the_uncertainty` |
+| the validation metric is the difference and the root-sum-square | `vv::tests::the_validation_metric_is_the_difference_and_the_root_sum_square` |
+| the estimators refuse a sequence they cannot read, by name | `vv::tests::the_estimators_refuse_a_sequence_they_cannot_read` |
+| a verdict that does not say which mesh study it stands on fails the audit's third row, and every other registered gate declares one mesh by name | `verdict_registry::an_undeclared_mesh_study_fails_the_audit`, beside the seven registry tests that were already there |
+| Gate 94-A: the anisotropic MMS through the tensor path observes second order on the triplet | live rows `Gate 94-A ...` in the run |
+| Gate 94-B: the two-region MMS across the 20 deg interface reports its order on both legs against the one bar, and leg 2's jump is the contact jump within 5 % | live rows `Gate 94-B ...` in the run |
+| Gate 94-C: the tabulated levels carry a study and an `E +/- u_val` line each, and the live levels agree with the tables they replay | live rows `Gate 5 ...` and `Gate 6 ...` in the run, and the summary's `mesh study:` line |
+| the three existing MMS rows, Gate 5's and Gate 6's measured numbers are bitwise unchanged | the §69.7 before/after diff, tabulated in §94.6 |
+| §94's headings and equation labels resolve, and the ambiguous ASCII form has not grown | `cargo test --release --lib -- xref` (all 13 tests) |
+| the new module carries its provenance and its counts | `provenance_audit` (both tests), the PROVENANCE row and the NOTICE count |
+| `src/vv.rs` claims no device-module row: no kernel-launch builder token, no `solve`/`update`/`step`/`correct`/`advance` | `capture::registry` stays green |
+
+### 94.6 What was measured
+
+The §69.7 diff, before against after: the BEFORE run is the baseline the
+section's first landing left in `target/vv-before.txt`, `847/847 checks
+passed`; the AFTER run, with Gates 94-A, 94-B and 94-C in, prints
+`866/866 checks passed` - 866 = 847 + the section's 19 new checks, every one
+of them passing. The diff is 93 changed lines: 18 removed, 75 added. Every one of
+the 18 removed lines is a stopwatch table row (15) or a reformatted
+count/summary line (3: the count itself, the live/replayed sentence, and the
+registry summary's sentence, which §94.3 reworded); NOT ONE carries an
+`err`, `Nu`, `R_t` or `order` number. The
+three manufactured-solution rows, Gate 5's and Gate 6's measured numbers are
+the same lines in both files, bitwise - the `mms_solve` split moved a body
+and changed no launch.
+
+| gate | what was measured |
+|---|---|
+| 94-A | L2 `4.579e-3` / `1.138e-3` / `2.841e-4` at 8/16/32; monotone, `p = 2.010`, `phi_ext = -4.687098e-6`, `U_fine = 8.655e-4` (Fs 3, second order, unweighted); anisotropy residual `2.220e-16`. PASS on all four rows |
+| 94-B leg 1 | L2 `1.870e-4` / `7.511e-4` / `3.022e-3` (fine first); monotone, `p = 2.009`, `phi_ext = -3.486373e-6`, `U_fine = 5.708e-4` (Fs 3, second order, unweighted); pairing angle `20.0 deg` (err `1.2e-12`); region-by-xi agrees with the pairing on every cell. PASS |
+| 94-B leg 2 | L2 `1.526e-4` / `6.462e-4` / `2.845e-3` (fine first); monotone, `p = 2.155`, `phi_ext = -4.927315e-5`, `U_fine = 5.975e-4` (Fs 3, second order, unweighted); the interface jump matches `-R_c sin(ky y)` to `2.304e-2` of `R_c` on the finest mesh (tolerance `0.05`). PASS on all three rows. This leg first ran with side B's constant written `1 - R_c`, and failed all three: the measured jump came out about `-0.97 R_c sin(ky y)` against an expected `+R_c sin(ky y)`, a `1.936 R_c` miss, and the L2 errors did not fall. The reversal was the manufactured field's, not the solver's - (S47.1) points `n` from A to B and `q_G = -k dT/dn`, so a field with `k dT/dn = +sin(ky y)` has `T_A - T_B = R_c q_G = -R_c sin(ky y)`. The sign was corrected in the field and in the expected jump; nothing in `cht.rs` was touched and no bar was moved |
+| 94-C, §60.5 | Kr = 0.1: oscillatory at the table's own precision (`p = n/a`), `phi_ext = 3.807657e-1`, `U_fine = 9.943e-5`; `E = -2.920e-2 +/- 9.943e-5` (`-7.12 % +/- 0.02 %` of D) - `|E| > u_val`. Kr = 1: `p = 2.145`, `phi_ext = 1.521650e0`, `U_fine = 3.747e-3`; `E = -4.710e-2 +/- 3.747e-3` (`-3.00 % +/- 0.24 %`) - `|E| > u_val`. Kr = 10: `p = 1.966`, `phi_ext = 2.265978e0`, `U_fine = 3.978e-3` (Fs 1.25, power series); `E = -1.084e-2 +/- 3.978e-3` (`-0.48 % +/- 0.17 %`) - `|E| > u_val`. `u_D = 0` throughout, Belazizia et al. state none. The live 40x40 agrees with the table to better than 1 % at all three ratios |
+| 94-C, §79.12 | `R_t,in`: four levels `p = 0.531`, `phi_0 = 9.651541e-2`, `U_fine = 4.582e-3`; finest triplet `p = 1.277`, `phi_ext = 9.410148e-2`, `U_fine = 1.514e-3`; `E = -2.311e-2 +/- 3.629e-2` (`-19.92 % +/- 31.28 %`) - `|E| <= u_val`. `R_t,out`: four levels `p = 1.896`, `phi_0 = 2.353255e-1`, `U_fine = 3.200e-4`; triplet `p = 1.927`, `phi_ext = 2.353185e-1`, `U_fine = 3.107e-4`; `E = +1.307e-2 +/- 6.600e-2` (`5.89 % +/- 29.73 %`) - `|E| <= u_val`. `u_D` = half the digitised Fig. 4 bar. The live two levels agree with the table to better than 1 % |
+
+Gate 5's registered verdict now carries the Kr = 0.1 study - the worst
+point, the one the headline names - and its three `E +/- u_val` lines as
+detail; the summary's `mesh study:` line for it reads `3 levels,
+oscillatory, p = n/a, phi_ext = 3.807657e-1, U_fine = 9.943e-5`. The run's
+exit code is 0 and no gate changed its verdict: §94 added rows, an
+uncertainty to each registered verdict, and nothing else.
+
+### 94.7 What this section does not do
+
+No Richardson-corrected answer is ever used as a result. `phi_ext` is
+printed beside the sequence so the reader can see where the levels are
+heading, and nothing more: the numbers a gate holds are the finest level's,
+and the verdicts of §60.5 and §79.12 were read off those before this
+section existed and are read off them still - which is exactly what the
+before/after diff of §94.6 is for.
+
+No time-step study. What §94 measures is a SPATIAL discretisation; a
+temporal one belongs to the mesh-motion work when that section is written,
+and this one names no number for it rather than squat on one.
+
+No §13.4.1 pair test here: Gate 94-C's four-level and triplet fits are a
+disagreement between two readings of one table, not between two cases, and
+no case setting exists to pair them on.
+
+`u_input = 0` in every gate here, declared in every print. The gates'
+inputs are exact - manufactured data, tabulated references, digitised bars
+- so there is no input uncertainty to carry; the one place a reference
+carries a stated uncertainty, Gate 6 against Kawano's bar, carries it as
+`u_D`, and where a reference states none, Gate 5 against Belazizia et al.,
+the zero is printed rather than passed over in silence.
+
+---
+
+## 95. The thermo-elastic solid — the segregated displacement loop, what it converges on, and the shape it refuses by name
+
+A solid region is handed a temperature and gives back a displacement. The
+temperature comes from §46's conduction on the concatenated mesh and the
+coupling is ONE-WAY: the energy equation never sees the strain rate, and
+§95.5 prints how large that omission is instead of hiding it. The strain is
+small, the material is isotropic and linear, the mesh does not move.
+
+Three scalar systems, not one vector system. §1's LDU storage holds one
+coefficient per face, so a `3x3` block per face cannot be expressed at all
+without a second matrix format; the displacement components are therefore
+coupled through the right-hand side and the coupling is driven out by an
+outer iteration. That decision is the whole of this section's difficulty:
+the outer iteration converges on some bodies and not on others, and which is
+which was MEASURED before it was written down, not argued. §46.4 is the
+precedent — an estimate written into a specification and corrected
+afterwards by the test that measured it — and `docs/09-thermal-structural-plan.md`
+§F.1a and §F.1b are the two measurements this section stands on.
+
+Written from:
+
+* ofgpu `SPEC-LIT.md` §1 (the LDU storage the block matrix does not fit),
+  §2.4 (the over-relaxed non-orthogonal correction), §3.2 (the Gauss
+  laplacian the implicit half is), §3.5 (the Green-Gauss gradient the
+  deferred half is built from), §4 (the one mixed boundary triple), §8.2 and
+  §8.4 (the conjugate-gradient solve and its residual normalisation), §21
+  (the multi-coloured incomplete-Cholesky preconditioner), §46 and §46.4
+  (the conduction this is coupled to, and the measure-then-refuse voice),
+  §69 (the verdict registry), §80 (the citation forms), §94 (observed order
+  and reported uncertainty).
+* I. Demirdžić & S. Muzaferija, *Int. J. Numer. Methods Eng.* 37 (1994)
+  3751-3766, DOI `10.1002/nme.1620372110` — the segregated cell-centred
+  finite-volume formulation, and the statement that a boundary face's
+  contribution to the equilibrium sum IS the traction prescribed there.
+* I. Demirdžić & S. Muzaferija, *Comput. Methods Appl. Mech. Eng.* 125
+  (1995) 235-255, DOI `10.1016/0045-7825(95)00800-G` — the coupled
+  fluid/heat/stress arrangement of which this is one region.
+* H. Jasak & H. G. Weller, *Int. J. Numer. Methods Eng.* 48 (2000) 267-287,
+  DOI `10.1002/(SICI)1097-0207(20000520)48:2<267::AID-NME884>3.0.CO;2-Q` —
+  the `(2 mu + lambda)` implicit split and its convergence behaviour.
+* I. Demirdžić & D. Martinović, *Comput. Methods Appl. Mech. Eng.* 109
+  (1993) 331-349, DOI `10.1016/0045-7825(93)90085-C` — the thermal-strain
+  term in finite-volume form.
+* B. A. Boley & J. H. Weiner, *Theory of Thermal Stresses*, Wiley (1960)
+  ch. 1 — Duhamel-Neumann, and the free-expansion state §95.6 gates on. A
+  book; no DOI.
+* S. P. Timoshenko & J. N. Goodier, *Theory of Elasticity*, 3rd ed.,
+  McGraw-Hill (1970) ch. 1-3 — small-strain isotropic elasticity, the Lamé
+  conversion, and the end-loaded cantilever of §95.4. A book; no DOI.
+* U. Küttler & W. A. Wall, *Comput. Mech.* 43 (2008) 61-72, DOI
+  `10.1007/s00466-008-0255-5` §3.2 — Aitken delta-squared dynamic relaxation
+  of a partitioned fixed point, in the vector form of (95.7).
+* D. G. Anderson, *J. ACM* 12 (1965) 547, and H. F. Walker & P. Ni, *SIAM J.
+  Numer. Anal.* 49 (2011) 1715-1735, DOI `10.1137/10078356X`, Algorithm 2 —
+  Anderson acceleration, which is what (95.8) runs.
+* J. Degroote, K.-J. Bathe & J. Vierendeels, *Comput. Struct.* 87 (2009)
+  793-801, DOI `10.1016/j.compstruc.2008.11.013` — IQN-ILS: the same
+  least-squares mixing applied to an interface displacement. Named because it
+  is why the accelerator measured here is the one a partitioned
+  fluid-structure coupling would reach for.
+* P. Cardiff & I. Demirdžić, *Arch. Comput. Methods Eng.* 28 (2021)
+  3721-3780, DOI `10.1007/s11831-020-09523-0` — the thirty-year review; the
+  degradation of a segregated solution as `nu -> 0.5` is a published
+  observation, and §95.4 is what turns it into a number for THIS
+  discretisation.
+* P. Cardiff, Ž. Tuković, H. Jasak & A. Ivanković, *Comput. Struct.* 175
+  (2016) 100-122, DOI `10.1016/j.compstruc.2016.07.004` — the block-coupled
+  finite-volume matrix. **Named as the route both of §95.5's measured
+  refusals have to take, and NOT implemented.**
+* O. K. Smith, *Comm. ACM* 4 (1961) 168, DOI `10.1145/355578.366316` — the
+  eigenvalues of a symmetric `3x3` in closed form, which is how (95.10) is
+  computed.
+
+**OpenFOAM and solids4foam are GPL and were not opened**; no solid-mechanics
+solver of any licence was consulted. No GPL-licensed source was consulted.
+
+### 95.1 The equation, and the split that makes it three scalar systems
+
+Quasi-static equilibrium of an isotropic linear thermo-elastic solid, in the
+small-strain Duhamel-Neumann form (Boley & Weiner ch. 1):
+
+```
+  div(sigma) = 0,      eps = 1/2 ( grad u + grad u^T )                                    (95.1)
+  sigma = 2 mu eps + lambda tr(eps) I - (3 lambda + 2 mu) alpha (T - T_ref) I             (95.2)
+```
+
+Integrated over a cell and split the way Jasak & Weller (2000) split it,
+with Demirdžić & Martinović (1993)'s thermal term:
+
+```
+  sum_f  (2 mu + lambda) grad(u).Sf                                       implicit
+    + sum_f [ mu grad(u)^T + lambda tr(grad u) I - (mu + lambda) grad(u) ].Sf   deferred
+    - sum_f (3 lambda + 2 mu) alpha (T_f - T_ref) Sf                      thermal
+    = 0                                                                                   (95.3)
+```
+
+The implicit term is §3.2's Gauss laplacian per displacement component with
+`gammaMagSf = (2 mu + lambda)|Sf|`, carrying §2.4's over-relaxed
+non-orthogonal correction; the deferred and thermal terms are surface
+integrals of quantities §3.5's Green-Gauss gradient already produces. The
+ratio of the two groups is what an outer iteration has to contract:
+
+```
+  |deferred| / |implicit| = (mu + lambda)/(2 mu + lambda) = 1/(2(1 - nu))                 (95.4)
+```
+
+0.625 at `nu = 0.2`, 0.714 at 0.3, 0.909 at 0.45, 0.980 at 0.49. **(95.4) is
+a derivation and not a measurement**, and §95.4 is where it meets one: the
+loop is printed against it on every run, and the two are not the same number
+in either direction.
+
+**DESIGN — the implicit coefficient is not a free knob.** (95.3) stays exact
+for any `kappa` if the implicit half becomes `kappa (2 mu + lambda)
+grad(u).Sf` and `(kappa - 1)(2 mu + lambda) grad(u).Sf` is subtracted from
+the deferred half: in the CONTINUUM the fixed point is untouched and only the
+iteration matrix moves. On the mesh it is not: the implicit half is §3.2's
+compact laplacian and the half moved out is §3.5's wide Green-Gauss gradient,
+and the cancellation is exact only to discretisation order. Measured on the
+block with one fixed face, `kappa = 2` moves the peak converged displacement
+by `1.8e-2` of its own size at `h = 1/8` and `1.5e-2` at `h = 1/16`. `kappa`
+is available in the host prototype for exactly this measurement and is fixed
+at one everywhere else.
+
+### 95.2 The boundary: the traction solved AT the face
+
+Demirdžić & Muzaferija (1994) make the boundary statement exactly: a
+boundary face's contribution to the equilibrium sum **is** the traction
+prescribed there. So a traction face adds `t |Sf|` and nothing else — no
+diagonal, no deferred term of its own. What the condition then has to supply
+is the boundary DISPLACEMENT, because §3.5's gradient needs a face value,
+and that value is obtained by inverting the traction. Writing
+`grad(u)|_b = G_t + n (x) refGrad`, where `G_t` is the cell gradient with its
+normal-derivative row struck out, and substituting into `sigma.n = t`:
+
+```
+  (2 mu + lambda) (refGrad.n) = t.n - mu (G_t.n).n - lambda tr(G_t)
+                                  + (3 lambda + 2 mu) alpha (T - T_ref)                   (95.5)
+  mu refGrad_t                = t_t - mu (G_t.n)_t
+  u_b = u_P + refGrad / Delta_b                                       (§4's triple, fr = 0)
+```
+
+— the continuum statement that a traction boundary sees `2 mu + lambda`
+normally and `mu` tangentially. **This is ORIGINAL to this repository** and
+it is the difference between a loop that converges and one that does not: the
+naive arrangement, which splits `(2 mu + lambda)` off at the face and lags
+everything else through the extrapolated cell gradient, AMPLIFIES by 22.4 per
+outer iteration at `nu = 0.2` where (95.4) predicts a contraction of 0.625.
+Because `G_t` is the previous iteration's gradient, the traction boundary is
+itself part of the fixed point; the circularity between the face value and
+the gradient is closed by `boundary_passes` sub-passes before each assembly,
+and three is the measured default (§95.4).
+
+The statement is **per component and not per patch** — `Fixed(value)` or
+`Traction(value)` for each of the three — because a symmetry plane is one
+fixed normal component beside two free tangential ones, and there is no other
+way to write it at all. Also ORIGINAL.
+
+### 95.3 The outer loop, and how the increment is relaxed
+
+`F(u)` is one application of the map: correct the boundary, assemble the
+source from the current gradient, solve the three systems. The loop drives
+the residual of that map — not the increment it applies, which with any
+relaxation is a different quantity — down six decades:
+
+```
+  r_k      = F(u_k) - u_k,     ||r_k||_2 = sqrt( sum_c |r_{k,c}|^2 )
+  stop     when ||r_k|| <= 1e-decades * ||r_1||;   diverged when ||r_k|| > 1e6 ||r_1||    (95.6)
+  observed = geometric mean of the last ten ||r_k||/||r_{k-1}||
+```
+
+Three relaxations, exclusive, named in one enumeration so that a call site
+cannot ask for a combination that means nothing:
+
+```
+  None      u_{k+1} = u_k + r_k
+  Aitken    omega_k = -omega_{k-1} ( r_{k-1}.(r_k - r_{k-1}) ) / |r_k - r_{k-1}|^2
+            u_{k+1} = u_k + omega_k r_k                                                   (95.7)
+  Anderson(m)
+            dF_j = r_{j+1} - r_j,   dG_j = F(u_{j+1}) - F(u_j),   j over the last m
+            gamma  = argmin || r_k - dF gamma ||_2
+            u_{k+1} = F(u_k) - dG gamma                                                   (95.8)
+```
+
+(95.7) is Küttler & Wall (2008) §3.2 in its vector form, uncapped — the cap
+in the paper is for the first factor of a new time step, which a quasi-static
+run does not have. (95.8) is Walker & Ni (2011) Algorithm 2 at `beta = 1`;
+`Anderson(0)` keeps no columns and IS `None`, to the bit. **The least-squares
+solve is by modified Gram-Schmidt and not by the normal equations**: the
+columns are differences of residuals spanning the decades the loop is
+dropping, `dF^T dF` carries the square of that condition number, and a
+`gamma` read off it would be arithmetic noise long before the loop finished.
+A column that orthogonalises to nothing is dropped — its `gamma` entry set to
+zero — rather than divided by.
+
+**DESIGN — five host operations per outer iteration.** Everything inside one
+`F(u)` is device work: three §8.2 solves, the boundary sub-passes, the
+deferred gather. The vector operations BETWEEN applications — the residual,
+its norm, the least-squares solve, the update — run on the HOST, on a
+downloaded copy of `F(u)`, in the prototype's summation order. That costs one
+download and one upload of the displacement per outer iteration, which is
+well under a millisecond beside three conjugate-gradient solves, and it buys
+a twin test with no second reduction order in the way: the device loop is
+held to the host prototype's iteration count and norm history, measured to
+`9e-10` on the Anderson path and `6e-5` on the Aitken path at `nu = 0.45`. A
+device reduction is the later optimisation, and it is not free.
+
+Divergence is `Error::Diverged` carrying the two norms, the Poisson ratio and
+the relaxation — **never a flag and never a quiet stop at the cap**. A run
+that stops at its cap with a residual it calls small relative to nothing is
+the one a user would read as an answer, which is the whole reason §95.5
+refuses rather than reports.
+
+### 95.4 What was measured
+
+Two sweeps, both on the host prototype, both `#[ignore]`d tests whose output
+is the table. The first (`docs/09-thermal-structural-plan.md` §F.1a, TS-0) is
+a COMPACT body: a `20^3` and a `40^3` block, one face fixed, the other five
+traction-free, a uniform `Delta T`. The second (§F.1b, this section's own) is
+the end-loaded cantilever of Timoshenko & Goodier ch. 3 at four aspect ratios
+and three meshes, isothermal, the closed form's parabolic shear on the free
+end and the closed form's own displacement on the built-in end.
+
+What the compact body says: bare Picard DIVERGES at `nu = 0.45` and `0.49`
+whether the boundary is passed once or three times; three boundary sub-passes
+roughly halve the outer count of one; Aitken converges at every `nu` tried,
+at 16 / 20 / 71 outer iterations at `nu = 0.2 / 0.3 / 0.45` against (95.4)'s
+predicted 0.625 / 0.714 / 0.909; and the interior alone — every boundary
+prescribed by displacement — tracks (95.4) to two digits at every `nu`, which
+locates the slowness in the free surface and nowhere else.
+
+What the slender body says, six decades or 2000 outer iterations, `nu = 0.3`,
+cubic cells (`stall` = the cap reached with the contraction still at 0.95 to
+1.00; `DIVG` = the million-fold detector of (95.6)):
+
+```
+                          Picard   +Aitken   AA(3)   AA(5)   AA(10)
+    20^3 block, nu=0.45     DIVG        71      41      30       26
+    1:1   beam               171        49      30      24       20
+    2.5:1 beam               896     stall      64      39      153
+    5:1   beam             stall     stall    1041     306     DIVG
+    10:1  beam             stall     stall   stall   stall     DIVG
+
+    5:1  beam  20x4  AA(5) stall      40x8  AA(5) 306      80x16 AA(5) 331
+    10:1 beam  40x4  AA(5) stall      80x8  AA(5) stall    160x16 AA(5) stall
+
+    kappa = 1.5 / 2 / 4 (§95.1) on the 10:1 beam: stall, stall, stall
+```
+
+Three things follow, and each of them is a decision this section makes.
+
+**One — Anderson acceleration is the loop's relaxation, at depth five.** It
+is the only depth measured that beat Aitken on every case Aitken finishes AND
+converged two cases Aitken cannot reach at all. Depth ten is faster on the
+compact body and then diverges on both slender beams, which is the
+instability Walker & Ni's filtering is about and which this loop does not
+carry; depth three is uniformly weaker. On the very case §F.1a measured at 71
+outer iterations, depth five takes 30.
+
+**Two — the compact-body measurement did not describe the whole space.**
+§F.1a measured a cube, and everything sized on it — the twelve-week stage
+plan, the `nu` threshold, the expectation that Aitken is sufficient — is a
+statement about compact bodies. Aitken is not merely slower on a slender beam
+than on a cube; at 2.5:1 it is WORSE THAN NO RELAXATION AT ALL (bare Picard
+converges in 896, Aitken stalls), which is a thing a contraction estimate of
+the form (95.4) cannot express, because (95.4) has no geometry in it.
+
+**Three — the mechanism is bending, and it is structural.** The implicit half
+of (95.3) is a laplacian per component and is DECOUPLED: no term in it lets
+one displacement component's derivative drive another. Bending is carried
+entirely by the off-diagonal pair `du_x/dy` and `du_y/dx`, which lives in the
+deferred half. On a compact body the deferred half is a correction; on a
+slender body in bending it IS the stiffness, the outer loop is doing all the
+work, and the spectral radius of its iteration matrix goes to one. The
+measurement is consistent with that at every row: the failure tracks the
+SHAPE, is the same at `nu = 0.2` and `0.3`, and does not move when the mesh
+is refined by four.
+
+### 95.5 What §95 refuses, by name
+
+**A Poisson ratio outside `(-1, 0.5)`** — the Lamé constants change sign or
+blow up (Timoshenko & Goodier ch. 1).
+
+**A Poisson ratio above 0.45**, the measured edge of §F.1a: 71 outer
+iterations at 0.45 on the `20^3` block, 615 at 0.49, and no convergence in
+2000 at 0.49 on the jittered block. Read off the sweep and not off (95.4).
+The route is the block-coupled matrix.
+
+**A bending-dominated slender body**, the measured edge of §F.1b. The
+criterion is computed, printed and stated:
+
+```
+  x_bar = sum_c V_c x_c / sum_c V_c
+  C     = sum_c V_c (x_c - x_bar)(x_c - x_bar)^T / sum_c V_c                              (95.9)
+  L_i   = sqrt( 12 (lambda_i(C) + h^2/12) ),    h = ( sum_c V_c / N_c )^{1/3}
+  S     = max L_i / min L_i,   over the i with L_i > 1.5 h                                (95.10)
+  refuse when S > 5
+```
+
+Why that criterion, in four sentences. `C` is a tensor, so the equivalent box
+`L_i` it produces is the body's own and does not have to be aligned with
+anything — a bounding box would have to be, and a beam laid diagonally across
+the axes would read as compact. The `h^2/12` is each cell's own spread about
+its own centre, which a covariance of cell CENTRES omits; adding it back makes
+a uniform box score its own aspect ratio exactly rather than a percent or two
+above it. A principal direction the mesh spans with about one cell is DROPPED,
+because that direction is a slab thickness and not a direction the body can
+bend in: the plane-strain cantilever of §F.1b is one cell thick between two
+symmetry planes, and counting its thickness would score that beam at 80 and
+call every two-dimensional case in this repository slender. And a thin
+direction the mesh DOES resolve is kept, so a plate is slender in this measure
+exactly as a beam is — which is right, because a plate bends for the same
+reason.
+
+What the criterion is honestly a proxy FOR: the quantity that decides whether
+the loop contracts is the spectral radius of its iteration matrix, which no
+solver can afford to compute. (95.10) is the geometric statement §F.1b
+measured that radius against, over four aspect ratios and three meshes, and it
+is offered on that evidence and on no other. The threshold five is the last
+ratio measured to converge (306 and 331 outer iterations on two meshes a
+refinement apart); ten is measured not to converge on any mesh with any
+relaxation; the ratios between them are not measured, and five is the
+conservative end of that interval for the same reason 0.45 is.
+
+The route for both is **Cardiff, Tuković, Jasak & Ivanković (2016)**: a
+block-coupled matrix that solves the three components at once and never
+defers the coupling. It is not built, and §1's one-entry-per-face LDU storage
+is why.
+
+**A displacement that has reached the fluid mesh** — `max|u| / min_c
+V_c^{1/3}` above 0.1. An ALE step obeying the space conservation law needs a
+mesh-motion solver, which is not built.
+
+**Finite strain, plasticity, contact, fracture, inertia, an orthotropic
+stiffness on a non-aligned mesh, and the two-way coupling** — each refused by
+name with the route that would take it, in the voice §46.4 set. The two-way
+refusal PRINTS the size of what it omits:
+
+```
+  delta = (3 lambda + 2 mu)^2 alpha^2 T_0 / ((lambda + 2 mu) rho_s c_s)                   (95.11)
+```
+
+about one percent for steel at room temperature (Boley & Weiner ch. 1-2) —
+the number that makes the one-way coupling an approximation with a KNOWN size
+rather than an unexamined one.
+
+### 95.6 The gates release 1 stands on, and the one that is not written
+
+**Gate 95-B, free expansion.** Three symmetry planes, three free faces, a
+uniform `Delta T`: `u = alpha Delta T x` and `sigma = 0` are the exact
+solution of the continuous problem and — the field being linear — of the
+discrete one too. Measured on the device: the fixed point is reached, the
+gradient equals `alpha Delta T I` and the relative stress is below `1e-12` of
+`(3 lambda + 2 mu) alpha Delta T`. Single-mesh by nature and declared so
+under §94.3.
+
+**Gate 95-C, the linear-displacement patch test.** `u = A x + b` prescribed
+face by face on a graded orthogonal block is reproduced to `1e-12` of `|u|`;
+on the jittered block the defect is REPORTED with the mesh's measured
+non-orthogonality beside it rather than asserted away.
+
+**Gate 95-F, the contraction table.** The device twin of §F.1a: the outer
+count, the observed contraction and the predicted one at `nu = 0.2 / 0.3 /
+0.45`, held to the sweep's own numbers, with bare Picard's divergence at 0.45
+reproduced by name.
+
+**Gate 95-A, the end-loaded cantilever, IS NOT WRITTEN.** It was to measure
+observed order on displacement and on cell-centre stress against Timoshenko &
+Goodier ch. 3 on three meshes at `r = 2`, through §94. §F.1b is why it is
+not: at the slenderness that makes a cantilever a bending problem the loop
+does not converge, and an order read off a solve that stopped at its cap is
+not a number. **The cantilever is not discarded — it becomes the refusal's
+test**: the 10:1 beam is the body (95.10) must score above five and refuse by
+name, and the 1:1 and 5:1 beams are the bodies it must let through. When the
+block-coupled matrix exists, Gate 95-A is what it has to earn.
+
+**Said plainly: release 1's solid verdict stands on the compact-body gates** —
+95-B, 95-C, 95-F, and the thick-walled cylinder under a radial temperature
+field that the stress section adds. A slender body is refused, with its
+measurement in the message. That is a smaller claim than the plan opened
+with, and it is the one the measurement supports.
+
+### 95.7 What this section does not do
+
+No block-coupled matrix, and therefore no near-incompressible solid and no
+slender one. Both are refused above with the paper that would take them.
+
+No large deflection. The Turek-Hron flap of the fluid-structure programme is
+17.5:1 slender and deflects centimetres on a 35 cm span; it is beyond this
+section on BOTH counts, and the mesh-motion and coupling sections wait on the
+block matrix rather than being built on a loop that stalls.
+
+No mesh motion, no inertia, no time. The displacement equation here has no
+`ddt` term at all; a transient solid is a different section and is named, not
+squatted on.
+
+No boundary-point stress extrapolation. §94's order study on cell-centre
+stress is what the stress section measures; extrapolating to a boundary POINT
+is a second scheme with a second order, and it gets its own paragraph and its
+own gate when it is written, not a silent reuse of this one.
+
+### 95.8 Two materials bonded in one region — the series (2 mu + lambda) face coefficient and the traction-continuous bond face
+
+Two bonded materials live in ONE region - the plan's rule, and the reason
+nothing here needs a second mesh or a coupled face. Every cell carries its
+own `mu`, `lambda`, `alpha` and `T_ref`, delivered by a material map built
+from cell lists: one entry per material, each naming the cells it owns, and
+a map whose single entry spans the region IS the one-material operator,
+unchanged. A face whose two cells belong to DIFFERENT materials is a bond
+face; a face between two cells of the same material is the one-material
+operator's own face, coefficient times magnitude, to the bit.
+
+The map refuses by name: a cell listed under two materials (naming both
+materials and the cell), a cell listed under none, a cell index past the
+region's end, a material name used twice, and a material whose constants
+fail their own validation, whose message is passed through. A bond face
+whose one-sided distances `d_P` or `d_N` are not positive is refused as a
+MESH defect, not a material one - a cell centre has landed on its own face.
+The operator's own refusal list is §95.5's and is not repeated here.
+
+At a bond face the implicit coefficient of the split is the series value
+(S95.14) - §46.2's face form with `2 mu + lambda` in the place of `k`,
+Patankar's series resistance read at an elastic jump: what is continuous
+across the bond is the flux, so what interpolates is the resistance, and
+the linearly interpolated coefficient is wrong by `(1+r)^2/(4r)` at
+`w = 1/2` in exactly the way §46.2 measures for conduction. The face
+displacement and traction are not an average at all but a SOLVED condition:
+the traction is continuous across the bond, each side evaluated with its
+own one-sided normal derivative - Tuković, Ivanković & Karač 2013.
+(S95.9) is each side's thermal eigentraction; (S95.10) solves the normal
+and tangential face displacement that makes the two sides' tractions equal;
+(S95.11) is the face traction that follows, and evaluating it from the N
+side with `g_N = (u_N - u_f)/d_N` gives the same vector - twenty
+deterministic face sets replay both sides and hold them to 1e-12. The
+derivation is the wall solve of §95.2 with the other cell in the wall's
+place: substitute `G = G_t + n (x) g` into `sigma . n` using
+`n . G_t = 0`, `tr G = tr G_t + g . n` and `G . n = r + n (g . n)`, write
+it on each side with its own one-sided `g`, set the two equal, and split
+normal from tangential. (S95.13) is what the two bond cells' gradients
+then make of the solved face value: Green-Gauss with the bond face's
+displacement in the place of the interpolation, scattered
+`Sf (x) du_f / V` into each side. On an aligned mesh it lands only in the
+normal row, which (S95.10) never reads; the corrected rows are what the
+stress readout and the bond cells' other faces use.
+
+*DESIGN* marks, said where they are choices. The tangential gradient the
+two sides share is the interpolated `G_f` with its normal row struck - only
+the normal row is replaced by the solved one-sided derivative. The face's
+explicit contribution is (S95.12): its own traction LESS the matrix's
+implicit share and the non-orthogonal correction the matrix already
+carries, so the fixed point carries exactly `t_f |Sf|` on any mesh,
+orthogonal or not. That subtraction is exact for `SnGradScheme::Corrected`
+- limiter scale 1, which the operator fixes - and a limited scheme would
+leave a residual; stated here rather than silently inherited. And the
+same-material branch of the face coefficient is written as the product,
+not as the series form with equal resistances: `(1-w)/g + w/g` is not
+`1/g` to the bit, and a one-material map must reproduce the one-material
+kernel exactly, not to round-off.
+
+The thermal load stays per cell: every cell's load is its own
+`(3 lambda + 2 mu) alpha (T - T_ref)`. (S95.15) states what that load IS,
+not the order it is summed in - the per-cell coefficient is evaluated
+inside each face's term, so a one-material region reproduces the
+uniform-material kernel to the bit, and the one-material gates' numbers
+before and after the map are identical. A bond face is skipped because its
+thermal share is already inside `t_f` through (S95.9).
+
+The Linear foil. A bond face may instead be treated like any other face
+with every constant interpolated linearly - (S95.16), the naive form. It
+is a case-reachable setting, printed by name, never refused. What it
+misses: the exact `eps_yy = -nu eps_xx + (1+nu) alpha DeltaT` jumps across
+the bond with `alpha`, and a linearly interpolated face displacement
+misses that kink - an O(1) error in the bond cells' `G_yy` that
+refinement does not remove. The plan's second leg was worded
+"interpolating `(3 lambda + 2 mu) alpha` linearly is shown not to converge
+under refinement"; that is redefined here to what is measurable: a bond
+face that interpolates the displacement linearly interpolates every
+coefficient with it, and what a cell-centred solver measures is not a
+coefficient's convergence but the stress the face leaves in the bond
+cells - the ratio (S95.20) that §95.9's table holds. With equal moduli and
+a linear field the two treatments differ only in the normal traction, by
+`(2w - 1)(theta_P - theta_N)`, zero at `w = 1/2` - held to 1e-12 by the
+section's own test, which is why the gate needs the unequal moduli and
+unequal distances the strip has.
+
+```text
+theta_s = beta_alpha_s (T_f - T_ref_s)                                       (S95.9)
+```
+
+```text
+u_f.n     = [ a_P (u_P.n) + a_N (u_N.n) + (lambda_N - lambda_P) tr(G_t)
+              - (theta_N - theta_P) ] / (a_P + a_N),    a_s = gamma_s / d_s
+u_f,t     = [ b_P u_P,t + b_N u_N,t + (mu_N - mu_P) r ] / (b_P + b_N),
+              b_s = mu_s / d_s,   r = G_t.n
+u_f       = n (u_f.n) + u_f,t                                                (S95.10)
+```
+
+```text
+t_f = mu_P g_P + (mu_P + lambda_P)(g_P.n) n + mu_P r
+      + lambda_P tr(G_t) n - theta_P n,        g_P = (u_f - u_P) / d_P       (S95.11)
+```
+
+```text
+q_f = t_f |Sf| - gamma_mag_sf[f] ( Delta_f (u_N - u_P) + k_f . G_f )         (S95.12)
+```
+
+```text
+du_f = u_f - (w u_P + (1 - w) u_N)                                           (S95.13)
+```
+
+```text
+gamma_mag_sf[f] = mag_sf[f] / ((1 - w)/gamma_P + w/gamma_N)                  (S95.14)
+```
+
+```text
+L_c = -beta_alpha_c ( SUM internal f, not bond,  s_f (T_f - t_ref_c) Sf
+                    + SUM boundary b, fixed i,      (T_b - t_ref_c) Sf_b,i ) (S95.15)
+```
+
+```text
+t_f = mu_f (n.G_f + G_f.n) + lambda_f tr(G_f) n - theta_f n                  (S95.16)
+```
+
+### 95.9 Gate 95-E — the bimetal strip, and the interface stress a linear bond leaves behind
+
+The gate is a bimetal cantilever strip: `l = 0.06 m`, `h = 0.01 m`, one
+cell thick, steel below the bond line - `E = 200 GPa`, `alpha = 1.2e-5 /K`
+- and brass above it, `E = 100 GPa`, `alpha = 2.0e-5 /K`, `nu = 0.3` in
+both, heated ten kelvin from `T_ref = 293.15 K`, the `-x` face clamped and
+every other face free. Three meshes, 48x8, 96x16 and 192x32 at `r = 2`;
+the outer loop is the shipped default, Anderson at depth five, and it
+converged on every leg, 306 to 796 outer iterations. The annulus gate of
+§95.6 remains the quarter ring with symmetry cuts; the bond faces here are
+internal faces of one region, no coupled-face path is involved, and
+nothing in this section tests a cyclic pair.
+
+The expected curvature is (S95.19): `kappa_ref = 0.0116364 /m` at these
+numbers. The measured one is the least-squares slope of `eps_xx` along the
+mid column of the deformed strip; the interface ratio is (S95.20) over the
+window `|x - l/2| <= h`, two strip thicknesses clear of each end. Both
+treatments, six legs:
+
+  treatment  mesh     kappa         error     R
+  series     48x8     1.206063e-2   3.65 %    5.0084e-1
+  linear     48x8     1.368483e-2   17.60 %   1.0414e+0
+  series     96x16    1.184918e-2   1.83 %    4.4115e-1
+  linear     96x16    1.234864e-2   6.12 %    9.5852e-1
+  series     192x32   1.170483e-2   0.59 %    4.1729e-1
+  linear     192x32   1.184579e-2   1.80 %    9.2709e-1
+
+Expected, then measured. Expected: the strip curls toward the steel at the
+closed form's curvature to two percent on the finest mesh. Measured:
+`kappa = 1.170483e-2`, 0.59 % low, the tip's mid cell at
+`u_y = -2.125748e-5` beside the small-deflection value
+`-kappa l^2/2 = -2.106870e-5`. Expected: the series bond's ratio falls
+under refinement toward its floor. Measured: monotone,
+`5.0084e-1 -> 4.4115e-1 -> 4.1729e-1`, observed order `p = 1.323`.
+Expected, on the plan's original wording: the linear bond's ratio would
+not converge under refinement. Measured, and the section says what it
+found rather than what it hoped: the linear ratio fell too, at
+`p = 1.399` - `1.0414e+0 -> 9.5852e-1 -> 9.2709e-1` - but it did not fall
+onto the series bond's. The ratio of the two held at 2.08, 2.17 and 2.22
+across the sequence: a linear bond face does not leave an error that
+refinement removes, it leaves the series bond's own floor times a constant
+the mesh does not touch - the interface stress the series bond does not
+have, which is what (S95.20) exists to expose. The curvature itself is
+nearly blind to the treatment - 1.80 % at the finest on the linear bond -
+because it is carried by the free axial strain, not by the bond; the
+second leg asserts `R_linear > 2 R_series`, which held on every mesh.
+
+The curvature's own observed order is `p = 0.551`, reported as measured
+with the study beside it - `phi_ext = 1.139437e-2`, `U_fine = 3.881e-4`,
+three levels, monotone - and the two-percent assertion is made against the
+closed form on the finest mesh, not against the extrapolation. In
+`ofgpu-validate` the gate is `check_solid_bimetal`, three meshes, both
+treatments, and a passing gate registers nothing.
+
+```text
+kappa_ref = 6 (alpha2 - alpha1) DeltaT (1 + m)^2
+            / ( h [ 3 (1 + m)^2 + (1 + m n)(m^2 + 1/(m n)) ] )               (S95.19)
+```
+
+```text
+R = max |sigma_yy| over the bond cells with |x - l/2| <= h
+  / max |sigma_xx| over ALL cells with |x - l/2| <= h                        (S95.20)
+```
+
+## 96. What a thermo-elastic case says, the refusal list, and the pair tests
+
+§95 is the solver. This section is the contract that reaches it from a case,
+in the shape §91 gave §90's: what a `*.cht.jsonc` document writes, what is
+read from where, what the refusal list refuses, and the §13.4.1 pair tests
+that prove every entry reaches the solver. It extends §47.14's multi-region
+conduction format in place: a region that says nothing about `mechanics`
+lowers to exactly what it always lowered to, and every refusal below is new
+with this section.
+
+`No GPL-licensed source was consulted.`
+
+### 96.1 The dictionary
+
+§47.14's document gains a `mechanics` block per solid region, a `mode` word
+on `run`, and §44.1's `output` block on the case:
+
+```jsonc
+"regions": [ { "name": "die", "kind": "solid", "mesh": {...}, "material": {...},
+    "mechanics": {
+      // EXACTLY ONE of `material` / `materials`
+      "material":  { "E": 130e9, "nu": 0.28, "alpha": 2.6e-6, "TRef": 300.0 },
+      "materials": [ { "name": "copper", "bounds": { "min": [..], "max": [..] },
+                       "material": { "E": 120e9, "nu": 0.3, "alpha": 17e-6, "TRef": 300.0 } } ],
+      "bond": "series",    // optional; "series" (default) or "linear"; only with `materials`
+      "patches": [         // EVERY non-empty patch of the region's mesh, exactly once
+        { "match": "clamp",  "u": { "type": "fixedDisplacement", "value": [0.0, 0.0, 0.0] } },
+        { "match": "base",   "u": { "type": "fixedDisplacement", "value": [null, null, 0.0] } },
+        { "match": "loaded", "u": { "type": "traction", "value": [1.0e6, 0.0, 0.0] } },
+        { "match": "mid",    "u": { "type": "symmetry" } },
+        { "match": "top",    "u": { "type": "free" } } ],
+      "solver": { "tolerance": 1e-6, "maxOuter": 500 }   // both optional, these are the defaults
+    } } ],
+"run":    { "steady": true, "mode": "stress" },      // "thermal" (default) | "stress"
+"output": { "exact": { "format": "vtu" } }           // §44.1's block, unchanged
+```
+
+| Key | Meaning |
+|---|---|
+| `material` | one elastic material for the whole region: `E` [Pa], `nu`, `alpha` [1/K], and `TRef` [K], the stress-free temperature the thermal strain `alpha (T - TRef)` is measured from |
+| `materials` | docs/10's R4 zone list instead: ONE region holding two bonded materials, each entry a `name`, a closed `bounds` box and a `material` of its own |
+| `bond` | how the zones share their faces: `"series"` (the default) or `"linear"`; only legal with `materials`, because one material has no bond face |
+| `patches` | every non-empty patch of the region's mesh, exactly once - interface patches included, the §47.14 rule carried over whole |
+| `fixedDisplacement` | `u_i = value` on the face; `null` in a component leaves that component traction-free |
+| `traction` | `(sigma . n)_i = value` [Pa] on the face, global axes; `traction [0,0,0]` is a free surface |
+| `symmetry` | the normal component fixed 0, the tangential traction 0 - the axis is the patch's slot in `-x +x -y +y -z +z`, divided by two |
+| `free` | traction `(0, 0, 0)` |
+| `solver` | `tolerance` (default `1e-6`) is the outer loop's stop, `maxOuter` (default `500`) its iteration cap |
+| `run.mode` | `"thermal"` (the default, §47.14's conduction) or `"stress"` |
+| `output` | §44.1's block; on this run only `exact.format: "vtu"`, written once, is accepted |
+
+**The zone rule is docs/10's R4.** A bonded two-material solid is ONE region
+with a `materials` list, not two regions - bonded solids share cells' faces
+internally, and the series coefficient is written at the bond faces. The
+zones tile the region by the CLOSED box test on the cell CENTROID: cell `c`
+is in zone `z` exactly when `bounds.min[i] <= c[i] <= bounds.max[i]` for all
+three axes, measured on the centroids `mesh.c` the block itself produced,
+and every cell must land in exactly one zone or the lowering refuses.
+
+### 96.2 What is read, and from where
+
+The write side is `solid::case`, and it owns no numerics: every equation it
+reaches is §95's, and every number it prints comes from a type that already
+existed. What the bridge itself decides is worth saying.
+
+**Each mechanical region reads its OWN mesh, never the concatenation.**
+`LoweredChtCase.meshes[r]` is the region's complete `HostMesh`, and that is
+what the displacement operator is built on — docs/10's decision B2, kept:
+§95's kernels launch over a whole mesh, and the cheapest faithful
+restriction of §47.4's concatenated lattice to one region is the region's
+own lattice, which the case already holds. What the region reads from the
+conjugate solution is two slices: `T` as the cells `sol.t[cells()]` of its
+`ThermalRegion`, and `bT` as `sol.bt[boundary_face_offset ..
++ n_boundary_faces]` — §47.4's concatenation preserves each region's own
+boundary-face order, so the slice needs no gathering.
+
+**The thermal verdict is §93's, read and never re-derived.** A stress run
+refuses to go on unless every region's own §8.4 residual met
+`numerics.tolerance` in the last thermal solve — the flag `run_case`
+already computed (`converged` is true only when the last global solve
+converged AND every region met `finish_solve`'s criterion on its own
+rows) — and the refusal names the first region that missed, its final
+residual and the tolerance, with `raise numerics.maxIter or loosen
+numerics.tolerance` as what to do. Residuals that were never reported are
+a refusal naming `report_residuals`, not a pass: unmeasured is not
+converged. The measured §8.4 floor is why `dieStack.cht.jsonc` carries
+`numerics.tolerance: 1e-11` (each region's final sits at 9.4e-14 to
+1.6e-12 of its own initial value, and `maxIter` is already an order
+beyond the Krylov space) and why `bimetalStrip.cht.jsonc` carries a trace
+source: a steady solution that is a CONSTANT makes the §8.4
+normalisation `sum(|A psi - A x_bar| + |b - A x_bar|)` a 0/0, and no
+tolerance can judge the noise that comes out.
+
+**One `numerics` block serves all four solves.** The conduction matrix and
+each of the three displacement components read the same `SolverControls` —
+one PCG/DIC block, one `tolerance`, one `maxIter` — because the case has
+one linear-solve quality statement to make and four systems of the same
+mesh to make it about. The outer loop's own knobs come from
+`mechanics.solver`: `decades = -log10(tolerance)`, `max_outer = maxOuter`,
+three boundary sub-passes, and the acceleration §95.3 measured.
+
+**The boundary table.** Every entry of 96.1 lowers to §95's per-component
+statement, indexed by the region mesh's patch order:
+
+| 96.1's spelling | component rows |
+|---|---|
+| `fixedDisplacement [a, b, c]` | `Fixed(v)` where given, `Traction(0)` where `null` |
+| `traction [tx, ty, tz]` | `Traction(t)` per component |
+| `symmetry` | `Fixed(0)` on the patch's axis (its slot in `-x +x -y +y -z +z`, divided by two), `Traction(0)` on the other two |
+| `free` | three `Traction(0)` |
+
+An `empty` patch is never named (96.3 row 12) and is filled with three
+`Traction(0)` that no kernel reads. The table lands in
+`check_patches`, which refuses a component fixed on no patch — the
+singular rigid translation §95.2 measured.
+
+**The read-out.** `outer::solve`'s last act is the boundary correction, so
+the gradient the stress read-out consumes already belongs to the accepted
+`u` — nothing here calls `correct_boundary` and nothing recomputes a
+gradient. The stress read is §95.8's per-cell entry (`compute_with` on the
+operator's own material arrays), not the one-material form, because a
+`materials` region would be read with the wrong constants the moment it
+grew a second zone. `point_displacement` puts `u` on the mesh's own
+points through §93's interpolator.
+
+**The output, and why not the pipeline.** `run_case` returns one state, so
+a stress run writes once, after the summary: one `<case stem>_jsonc/VTK/<region>.vtu`
+per region through §44.1's `exact` writer — the real-point writer, not
+`OutputPipeline`, whose `WriteCtx` carries ONE mesh and cell fields only
+and would flatten §47.4's regions into a lattice no region owns. Cell
+fields, in this order and with these names: `T`, then for a mechanical
+region `u`, `sigma` (9 at write time), `vonMises`, `sigmaPrincipal`,
+`magU`; point fields `T` and `u`. A region without `mechanics` — and
+every region of a thermal-mode run that names `output` — writes `T` only.
+`-csv` is unchanged (T only).
+
+### 96.3 The refusal list
+
+Every message names the setting's JSON path (`regions/<name>/mechanics/...`,
+`run/mode`, `output/...`) and what to do instead. Rows 1-19 are refused in
+the lowering and proved by host tests in `io::case_cht::tests`; rows 20-21
+are runtime refusals, proved with the driver.
+
+| # | refused, by name |
+|---|---|
+| 1 | `E <= 0`, `nu` outside (-1, 0.5), `alpha` not finite - through `solid::Material::validate`'s own messages with the JSON path prefixed; and `alpha < 0` in the lowering: a negative expansion coefficient is a sign error, not a material. Every message carries the number |
+| 2 | `nu` above the measured edge 0.45 - §95's own message, which names the block-coupled route |
+| 3 | `alpha > 0` without `TRef` - the thermal strain is `alpha (T - TRef)`; no `TRef`, no strain |
+| 4 | `TRef` with `alpha == 0` - a reference nothing reads (§13.4.1) |
+| 5 | `rho` in an elastic material - nothing in §95's static solve reads a density; the dynamic solid is docs/10's address 106b |
+| 6 | `mechanics.solver.ddtScheme` - §95's inertia refusal, which names Newmark, HHT and generalised-alpha and `rho_infinity` |
+| 7 | `mechanics.solver.relaxation`, any value - the outer loop is Aitken delta-squared on the increment and its first omega is 1; delete it |
+| 8 | `mechanics` on a `"kind": "fluid"` region |
+| 9 | `material` and `materials` both given, or neither; `materials: []` counts as neither |
+| 10 | a cell in no zone - the count and the first uncovered cell's centroid |
+| 11 | a cell in two zones - both zone names and the centroid |
+| 12 | `mechanics.patches`: a non-empty patch unnamed, a patch named twice, a name that is not in `mesh.boundaries`, an `empty` patch named - it contributes to no surface integral |
+| 13 | `bond` with a single `material` - one material has no bond face; a `bond` that is neither `series` nor `linear` |
+| 14 | `"mode": "stress"` with no region carrying `mechanics`; `mechanics` present with `"mode": "thermal"` - both directions (§13.4.1) |
+| 15 | `"mode": "stress"` with a fluid region - the fluid side of a thermo-elastic run is docs/10's address 106 (WF-B) |
+| 16 | `"mode": "stress"` on a transient case - the §93 verdict is a steady residual; time in a stress run is docs/10's address 103 |
+| 17 | the `output` block accepts exactly `exact.format: "vtu"`, once: `output.visualisation` (a multi-region mesh is not one Cartesian lattice), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
+| 18 | `output` on a case with a fluid region - the flow path's VTU is a follow-up, not in this unit |
+| 19 | `mode` that is neither `thermal` nor `stress`, refused listing both |
+
+An `output` field the run did not compute is UNREACHABLE in this format: the
+only field list the block can name is `visualisation.fields`, and row 17
+refuses that block whole.
+
+### 96.4 The pair tests
+
+§13.4.1, as §91.4 states it: two case documents identical in every byte but
+one, REQUIRED to produce different output, failing by name if they do not.
+All ten run on the 160-cell bar of the shared fixtures, in seconds, and all
+ten start by asserting the two documents actually differ. The measured
+numbers are from the run that wrote this section (RTX 5070 Ti, f64).
+
+| # | the one entry turned (`a` → `b`) | what must differ | measured |
+|---|---|---|---|
+| 1 | `alpha` 1.2e-5 → 2.4e-5 | `max|du| > 0.5 max|u_a|` — the thermal strain doubles | du 5.484e-5, |u_a| 5.484e-5 |
+| 2 | `E` 200 GPa → 100 GPa | `|vm_a - vm_b| > 0.3 vm_a` — with a thermal load and displacement/zero-traction BCs only, `u` is INDEPENDENT of `E` (the equation is homogeneous in it), so the pair asserts on the STRESS, which scales with `E` | 1.132e7 → 5.660e6 Pa |
+| 3 | `nu` 0.3 → 0.2 | `max|du| > 1e-3 max|u_a|` | du 1.853e-7, |u_a| 5.484e-5 |
+| 4 | `TRef` 300 → 350 | `max|du| > 0.2 max|u_a|` — the load halves | du 5.777e-5, |u_a| 5.484e-5 |
+| 5 | `traction` x 0 → 1 MPa | `max|du| > 1e-4 max|u_a|` | du 4.742e-7, |u_a| 5.484e-5 |
+| 6 | `fixedDisplacement` x 0 → 1e-4 | `max|du| > 0.1 max|u_a|` | du 1.000e-4, |u_a| 5.484e-5 |
+| 7 | `ymin` free → `symmetry` | `max|du| > 1e-2 max|u_a|` | du 4.827e-5, |u_a| 5.484e-5 |
+| 8 | `solver.tolerance` 1e-8 → 1e-2 | the outer iteration counts differ, both converged | 17 → 5 |
+| 9 | `solver.maxOuter` 500 → 2 | `a` converges; `b`'s `run_stress` is refused naming the region and the knob (96.3 row 21) | refusal at 2 iterations |
+| 10 | `bond` series → `linear` | `max|du| > 1e-6 max|u_a|` — the same pair Gate 95-E runs as its second leg | du 1.375e-6, |u_a| 6.099e-5 |
+
+Row 2 is the interesting shape: a pair test whose knob CANNOT move `u` and
+what it does about it. The failure message of every row says "the case said
+<knob> and the solver ignored it (SPEC-LIT 13.4.1)".
+
+### 96.5 What must hold
+
+| Check | Expected |
+|---|---|
+| the dictionary reads | `a_mechanics_block_reads_and_lowers`: one zone, `zone_of_cell` all zero, six patch conditions, `tolerance` 1e-8, `maxOuter` 500; an unknown key is a `deny_unknown_fields` error naming its path |
+| rows 1-19 of 96.3 | each refused by name, one host test per row, every message naming the JSON path and what to do instead |
+| a thermal case that says none of this | lowers to `mechanics == [None; n]`, `stress == false`, `output == None` — bitwise what §47.14 always lowered to, and every §47.14 test passes unchanged |
+| `output` on a stress case | lowers to a `vtu`-only plan: `exact.formats == [vtu]`, no visualisation, no restart |
+| rows 1-2 fire from the lowering with §95's own messages | `Material::validate`'s words behind the JSON path; `bond` lowers to §95.8's enum (`linear` → `Linear`, absent → `Series`) |
+| the verdict | names the first region that missed, its residual and the tolerance; `Ok` when every region met; unreported residuals are a refusal naming `report_residuals` |
+| the boundary table | every spelling of 96.1 lands on its component row; an unnamed `empty` patch is three `Traction(0)`; an unknown name is refused by name |
+| the shipped die stack, stress mode | three entries named die, solder, spreader in region order, each converged, each `max|u| > 0`, the grease skipped |
+| the shipped bimetal strip | tip `d_y` = -2.1291e-5 m measured against -2.0728e-5 m from (S95.19)'s constant (2.7 %, inside the 10 % band), sign negative; 565 outer iterations |
+| the written VTU | one file per region with the field names and order of 96.2, read back by the python reader: 1536 cells, `sigma` 9 and symmetric, `u` on points, `T` in both blocks |
+| Gate 96-A | all ten pairs of 96.4 DIFFERENT, each failing by name; the ten `pair_*` tests of §60/§79 unchanged |
+| the banner | every zone named with E, nu, alpha, TRef, mu, lambda, 2mu+lambda, the predicted contraction, the coupling parameter delta, and the ν edge 0.45 by number; a region without `mechanics` says "no mechanics - thermal only" |
+| the driver | prints the banner before the run, the summary after it, and every VTU path; `-csv` unchanged; a fluid case takes the §59/§60 path, where 96.3 rows 15 and 18 refuse `stress` and `output` before it |
+| the schema | `docs/schema/cht-1.json` regenerated byte-for-byte, `docs/schema/case-1.json` untouched |
+| the case files | `every_shipped_cht_case_lowers` walks both; `the_shipped_die_stack_case_matches_its_closed_form` passes on the tolerance the contingency chose |
+
+## 97. The imported region, the region layout, and `ofgpu-regions`
+
+§47.14's format built every region itself, out of a `bounds` box and six
+numbers. This section opens the mesh half: a region's `"mesh"` may now name
+a polyMesh on disk - a polyMesh directory, a case root or `constant`
+directory holding one, or a single-volume `.msh` file - and the region
+lowers from it into exactly the `HostMesh` a block reaches, through the same
+`build_host_mesh`, so §47.4's concatenated thermal mesh cannot tell the two
+forms apart. The region LAYOUT - `mesh/regions.json`, `ofgpu-regions`, the
+split of a multi-volume mesh into this format's one-region cases - is a
+later section of this number; this one is the one-region contract that
+layout composes, and it is gated bit for bit in 97.4 rather than to a
+tolerance.
+
+`No GPL-licensed source was consulted.`
+
+### 97.1 What the case can say — a region mesh is a block or a polyMesh
+
+A region's `mesh` block is now one of two forms, and the document that says
+nothing new reads exactly as it always did:
+
+```jsonc
+// the block form - what every case written before §97 says, unchanged
+"mesh": {
+  "bounds": { "min": [0.0, 0.0, 0.00295], "max": [0.010, 0.010, 0.00365] },
+  "cells":  [10, 10, 4],
+  "boundaries": { "xmin": "dieSideXMin", "xmax": "dieSideXMax",
+                  "ymin": "dieSideYMin", "ymax": "dieSideYMax",
+                  "zmin": "dieToSolder", "zmax": "dieTop" }
+}
+
+// the imported form - the same die region, meshed elsewhere
+"mesh": { "polyMesh": "die/polyMesh" }
+```
+
+*DESIGN*: the two forms are an untagged enum with the block form FIRST - so
+an existing document deserialises as before - and each form is a newtype
+over its own `deny_unknown_fields` struct, not a struct variant, because
+each keeps its own unknown-field refusal that way. A document carrying both
+`polyMesh` and `cells` matches neither variant: a parse error, not a merge.
+
+*DESIGN*: the `polyMesh` path is RELATIVE TO THE CASE FILE'S DIRECTORY and
+is never absolute. A case that opens only from one absolute location is a
+case that cannot be moved, and a case directory that can reach outside
+itself is not self-contained; both are refused (97.2). The path may name a
+polyMesh directory, or a case root / `constant` directory holding one -
+`read_poly_mesh` probes all three - or a `.msh` file, which is accepted with
+EXACTLY ONE volume entity (97.2 says what happens with more).
+
+---
+
+### 97.2 What is refused, by name
+
+Every refusal is a lowering error naming `regions/<name>/mesh/polyMesh` (or
+the patch, with the region's own patch list beside it) and what to do
+instead - the §13.4.1 discipline, applied to a mesh the case did not build:
+
+| refused, by name |
+|---|
+| a path that is ABSOLUTE - the mesh must be relative to the case file's directory |
+| a path that DOES NOT EXIST under the case directory - the joined path is printed |
+| a path that RESOLVES OUTSIDE the case directory (canonicalised, so `../` cannot walk out) - a case is self-contained |
+| a `.msh` with SEVERAL volume entities - naming the count, the file, and the route: write the region layout with `tools/mesh/regions_from_msh.py` and load it through `ofgpu-regions` |
+| a patch of the imported mesh typed `cyclic` or `processor` - §31's cyclic pair on a concatenated thermal mesh is unexercised, and a decomposed conducting region is not gated |
+| a patch typed `empty` in the mesh with no `empty` rule in the case, or an `empty` rule on a patch the mesh does not type `empty` - refused BOTH ways, naming the patch and its type |
+| on a FLUID region, an `inlet`/`outlet` rule naming a patch the mesh types `wall` - an opening is `patch`, not `wall` (§79.2, the same distinction the block build writes) |
+| a `patches` rule or an `interfaces` entry naming a patch the mesh does not have - listing the mesh's OWN patch names |
+| a patch of the imported mesh that no rule and no interface names - the §47.14 rule, refused by `region:patch` |
+| `lower()` on a document with a `polyMesh` region - there is no directory to resolve the path against; `lower_in(Some(&case_dir))` is named |
+
+The `.msh` volume refusal is not paranoia about a format corner. `io::msh`
+DISCARDS volume physical tags and entity tags: a two-volume file arrives as
+ONE mesh, the faces the volumes share internal, with no interface patch
+between the two halves - silently, because nothing in the mesh keeps a trace
+of the split. `parse_msh_with_volumes` returns the count of distinct volume
+entities that carried cells, which is the ONLY thing a caller can refuse a
+multi-volume file on, and this reader refuses above one.
+
+---
+
+### 97.3 What is taken as the mesh says it, and what must hold
+
+The patch TYPES of an imported mesh are the mesh's own. The block build
+writes `wall` on a fluid region's non-opening faces because §60.2's cavity
+has no other kind of face; an imported mesh is not corrected to match, and
+no type is rewritten behind the file. What a type MEANS is unchanged:
+`PatchKind::Wall` on the conjugate fluid side is §32's wall function's
+address, and §59.6 refuses a wall-function fluid side there already, so a
+mesh that says `wall` on a fluid region reaches the same refusal the block
+form reaches - at the run, by name, not silently.
+
+The case and the mesh must AGREE where the two can disagree, and the mesh
+has the last word on the topology: an `empty` is a patch type and a rule at
+once, so 97.2 checks it in both directions. What must hold:
+
+| Check | Expected |
+|---|---|
+| the imported form lowers | `a_region_may_come_from_a_poly_mesh_on_disk`: one block region beside one imported region, and the imported raw - points, faces, owner, neighbour - bitwise what the block path built |
+| a mistyped key | a parse error under either form; `polyMesh` and `cells` in one `mesh` matches neither variant |
+| a rule or interface naming an absent patch | refused listing the mesh's own patch names (`a_rule_naming_a_patch_the_imported_mesh_does_not_have_is_refused`) |
+| an unnamed imported patch | refused by `region:patch` (`an_imported_patch_with_no_condition_is_refused`) |
+| the path | absolute / missing / outside each refused by name, three sub-cases of one test |
+| the `.msh` route | one volume lowers (`the_volume_count_survives_the_parse` counts it), several volumes refused naming `regions_from_msh.py` and `ofgpu-regions` |
+| the patch types | `empty` agreement both ways; `cyclic` refused naming §31; an opening on a `wall`-typed patch refused naming §79.2 |
+| no directory | `lower()` refuses a `polyMesh` document naming `lower_in`; `ofgpu-cht` passes `case_path.parent()` |
+| the block form | every existing test of §46/§47/§79/§96 unchanged - `Block` is the first variant, and a document without `polyMesh` deserialises as before |
+
+What is NOT claimed. No FLUID region imported and RUN is gated here: the
+lowering accepts one, and the refusals a fluid case reaches on the way are
+§79.2's and §59.6's own, but a full conjugate run on an imported fluid mesh
+- the Turek-Hron flap's mesh, the wall-function fluid side - is gated when a
+later section is written; nothing here should be read as having run one. No
+`cellZones` reading, no `mesh/regions.json` manifest, and no
+`ofgpu-regions` splitter: those are 97.5 onward.
+
+---
+
+### 97.4 Gate 97-A — the shipped case, written out and read back
+
+The gate is the shipped §47.14 case run twice: `cases/dieStack.cht.jsonc`
+lowered as written, and the SAME document with every region's mesh swapped
+for `"polyMesh": "<region>/polyMesh"` after `write_poly_mesh_raw` has
+written each region's raw mesh to disk. Points go out at 17 significant
+digits, so what reads back is what was written, and both lowerings hand
+`build_host_mesh` identical `points`, `faces`, `owner`, `neighbour` and
+patches - hence identical `HostMesh`es, hence §47.4's identical
+concatenation, hence identical kernels in identical order. The comparison is
+`==` on the converged fields with NO tolerance:
+
+| Quantity | Block run | Imported run |
+|---|---|---|
+| die / solder / spreader / grease cells | 400 / 200 / 800 / 300 | 400 / 200 / 800 / 300 |
+| junction temperature | 649.7118 K | 649.7118 K |
+| cell temperature values compared | 1700 | identical, `==` |
+| boundary temperature values compared | 1480 | identical, `==` |
+| interface flux pairs compared | 300 | identical, `==` |
+| steps | 1 | 1 |
+| final residual | 1.209e-11 | identical, `==` |
+
+Measured by `io::case_cht::tests::the_shipped_case_round_trips_through_poly_mesh_bit_for_bit`
+and by `ofgpu-validate`'s `S97 Gate 97-A` line. A
+mismatch here would be a mesh-path defect - a point printed short, a patch
+type lost, a region built through a different constructor - and the gate
+prints the first differing index rather than offering a tolerance to loosen.
+
+The gate is single-mesh by name (§94.3): one mesh, and the claim is
+bit-for-bit identity, so there is no discretisation error to extrapolate and
+no refinement sequence to run. The declaration is attached to the gate's own
+verdict should it ever carry one, and the reason is the gate's: *one mesh,
+bit-for-bit identity; no discretisation error to extrapolate*.
+
+Every region of the stack goes through the route, including the grease that
+carries no `mechanics` - the import changes where a mesh COMES FROM and
+nothing about what the solver reads from it, which is the whole claim of the
+section.
 
 ---

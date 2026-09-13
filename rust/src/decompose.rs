@@ -48,6 +48,9 @@
 //! Apache-2.0** (verified 2026-08-31 from `LICENSE` at
 //! `github.com/KarypisLab/METIS`) and could be linked, and is deliberately not
 //! - §71.2 gives the reasons. No GPL-licensed source was consulted.
+//!
+//! SPEC-LIT §93.6: a partition may not cut a §47.4 interface face - see
+//! [`Decomposition::from_map`].
 
 use crate::error::{Error, Result};
 use crate::ldu::HostLduMatrix;
@@ -388,9 +391,10 @@ pub struct Decomposition {
     /// two boundary faces, so the decomposition holds
     /// `n_global_boundary_faces + 2 n_cut_faces` boundary faces in total.
     pub n_cut_faces: usize,
-    /// Coupled boundary faces (cyclic, conjugate interface) whose partner cell
-    /// landed on another part. These need no new patch - they keep their own -
-    /// but they do put a cell in the halo.
+    /// Coupled boundary faces (cyclic; a conjugate interface cut is refused,
+    /// SPEC-LIT §93.6) whose partner cell landed on another part. These need
+    /// no new patch - they keep their own - but they do put a cell in the
+    /// halo.
     pub n_cut_couples: usize,
 }
 
@@ -504,6 +508,8 @@ impl Decomposition {
             }
         }
         let mut n_cut_couples = 0usize;
+        let mut n_cut_interface = 0usize;
+        let mut first_cut_interface: Option<Label> = None;
         for bf in 0..nbf {
             let nc = m.b_nbr_cell[bf];
             if nc < 0 {
@@ -511,9 +517,33 @@ impl Decomposition {
             }
             let pc = cell_part[m.b_face_cells[bf] as usize];
             if cell_part[nc as usize] != pc {
+                // SPEC-LIT §93.6: an interface face may not be cut at all -
+                // §47.2 consequence 2, refused by name below.
+                if m.b_kind[bf] == PatchKind::Interface as Label {
+                    n_cut_interface += 1;
+                    if first_cut_interface.is_none() {
+                        first_cut_interface = Some(bf as Label);
+                    }
+                }
                 n_cut_couples += 1;
                 need[pc as usize].push(nc);
             }
+        }
+        if let Some(first_bf) = first_cut_interface {
+            let c = m.b_face_cells[first_bf as usize];
+            let nc = m.b_nbr_cell[first_bf as usize];
+            let (pc, pn) = (cell_part[c as usize], cell_part[nc as usize]);
+            let patch = &m.patches[m.b_patch[first_bf as usize] as usize].name;
+            let pairs = n_cut_interface / 2;
+            return Err(Error::Config(format!(
+                "decompose: the partition cuts {n_cut_interface} interface face(s) ({pairs} \
+                 pair(s), both sides counted); the first is boundary face {first_bf} of patch \
+                 \"{patch}\" (cell {c} on part {pc}, its partner cell {nc} on part {pn}). \
+                 SPEC-LIT §47.2 consequence 2 makes interface conservation the property of ONE \
+                 kernel launch over ONE interface-pair list writing both sides, so both cells of \
+                 every interface pair must be on the same part - choose a partition that does \
+                 not cross a §47.4 interface (SPEC-LIT §93.6)"
+            )));
         }
         for h in need.iter_mut() {
             h.sort_unstable_by_key(|&g| (cell_part[g as usize], g));
@@ -1368,6 +1398,59 @@ pub(crate) mod tests {
         let short = PartitionMethod::Explicit(vec![0, 1]);
         let msg = partition(&m, 2, &short).expect_err("must refuse").to_string();
         assert!(msg.contains("2 entries"), "{msg}");
+    }
+
+    /// SPEC-LIT §93.6: the two cells of a `PatchKind::Interface` boundary
+    /// face may not land on different parts - §47.2 consequence 2 makes
+    /// interface conservation the property of ONE kernel launch over ONE
+    /// interface-pair list. The fixture is `cht::tests::block`'s: two
+    /// coupled slabs built from `box_mesh` (whose patch names are the
+    /// lower-case `xmin xmax ...` of `src/mesh/topology.rs`).
+    #[test]
+    fn a_partition_may_not_cut_an_interface_face() {
+        use crate::cht::{InterfaceRequest, PairingTolerances, RegionInput, RegionKind, ThermalMesh};
+
+        let d = Vec3::new(0.1, 0.1, 0.1);
+        let (mut a, pa, fa) = box_mesh([4, 2, 2], d);
+        a.compute_geometry(&pa, &fa).expect("geometry");
+        a.build_cell_face_maps();
+        let (mut b, mut pb, fb) = box_mesh([4, 2, 2], d);
+        for p in pb.iter_mut() {
+            p.x += 0.4;
+        }
+        b.compute_geometry(&pb, &fb).expect("geometry");
+        b.build_cell_face_maps();
+
+        let tm = ThermalMesh::build(
+            &[
+                RegionInput { name: "a".into(), kind: RegionKind::Solid, mesh: &a },
+                RegionInput { name: "b".into(), kind: RegionKind::Solid, mesh: &b },
+            ],
+            &[InterfaceRequest::new(0, "xmax", 1, "xmin", 0.0)],
+            PairingTolerances::default(),
+        )
+        .expect("two coupled slabs");
+
+        // Region-wise: every cell of a on part 0, every cell of b on part 1.
+        // The 2x2 shared face is 4 pairs = 8 boundary faces, one per side,
+        // and the split cuts every one of them.
+        let region_wise: Vec<Label> = (0..tm.host.n_cells)
+            .map(|c| (c >= a.n_cells) as Label)
+            .collect();
+        let msg = Decomposition::from_map(&tm.host, 2, region_wise)
+            .expect_err("the region-wise split cuts every interface face")
+            .to_string();
+        assert!(msg.contains("§47.2"), "{msg}");
+        assert!(msg.contains("8 interface face(s) (4 pair(s)"), "{msg}");
+
+        // A y-split keeps the two cells of every interface pair - which
+        // share y and z - on the same part, so it is legal.
+        let y_split: Vec<Label> =
+            tm.host.c.iter().map(|p| (p.y >= 0.1) as Label).collect();
+        let dec = Decomposition::from_map(&tm.host, 2, y_split)
+            .expect("the y-split keeps every interface pair on one part");
+        assert_eq!(dec.n_parts, 2);
+        assert_eq!(dec.n_cut_couples, 0);
     }
 
     // ----------------------------------------------------------------------

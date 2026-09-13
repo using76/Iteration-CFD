@@ -12,8 +12,10 @@
 
 use super::*;
 
+use crate::blockgen::{self, BlockSpec, GradedAxis};
 use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner};
+use crate::io::polymesh::build_host_mesh;
 use crate::mesh::topology::tests::box_mesh;
 
 fn gpu() -> Option<Gpu> {
@@ -1927,4 +1929,486 @@ fn the_solid_side_iteration_replays_bitwise() {
     )
     .expect("SPEC-LIT 81.7: the solid side must capture and replay bitwise");
     println!("  conjugate heat: {report}");
+}
+
+// ==========================================================================
+//  The per-region residual (SPEC-LIT 8.4 on each region's own rows)
+// ==========================================================================
+
+/// The host `CpuLdu` of the matrix AS SOLVED, downloaded from the device -
+/// what the per-region partition identity is measured on.
+fn host_ldu(gpu: &Gpu, cht: &ConjugateHeat<'_>) -> crate::reference::CpuLdu {
+    let hl = crate::ldu::HostLduMatrix::download(gpu, cht.matrix()).expect("host ldu");
+    crate::reference::CpuLdu {
+        n_cells: hl.n_cells,
+        n_internal_faces: hl.n_internal_faces,
+        n_boundary_faces: hl.n_boundary_faces,
+        diag: hl.diag,
+        upper: hl.upper,
+        lower: hl.lower,
+        source: hl.source,
+        internal_coeffs: hl.internal_coeffs,
+        boundary_coeffs: hl.boundary_coeffs,
+    }
+}
+
+/// **Gate 1's rig, read through the per-region numbers.** The region
+/// residuals partition the global one (`r_g N_g = sum_k r_k N_k`), each
+/// region's `converged` is its own criterion, and both regions see the same
+/// iteration count - there is one solve.
+#[test]
+fn the_per_region_residuals_partition_the_global_residual() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(12, 0.010, 9, 0.020);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 1.4, 148.0, 380.0, 300.0);
+    cht.controls_mut().solver.tolerance = 1e-6;
+
+    let perf = cht.correct(&gpu).expect("solve");
+    assert_eq!(perf.regions.len(), tm.regions.len(), "one entry per region");
+
+    let ld = host_ldu(&gpu, &cht);
+    let psi = gpu.download(&cht.field().f).expect("T");
+
+    let r_g = crate::reference::residual(&psi, &ld, &tm.host) as f64;
+    let n_g = crate::reference::norm_factor(&psi, &ld, &tm.host) as f64;
+    let mut sum = 0.0;
+    for reg in tm.regions.iter() {
+        let rows = reg.cells();
+        let r_k = crate::reference::residual_ranged(&psi, &ld, &tm.host, rows.clone()) as f64;
+        let n_k = crate::reference::norm_factor_ranged(&psi, &ld, &tm.host, rows) as f64;
+        sum += r_k * n_k;
+    }
+
+    let lhs = r_g * n_g;
+    let err = if lhs > 0.0 { (lhs - sum).abs() / lhs } else { sum };
+    assert!(err <= 1e-10, "partition error {err:e}");
+
+    for (k, rp) in perf.regions.iter().enumerate() {
+        assert_eq!(
+            rp.converged,
+            rp.final_residual <= 1e-6,
+            "region {k}: converged must be its own abs criterion"
+        );
+        assert_eq!(rp.n_iterations, perf.global.n_iterations, "one solve");
+    }
+
+    println!("  per-region residuals on Gate 1's rig (r_g = {r_g:.3e}):");
+    for (k, rp) in perf.regions.iter().enumerate() {
+        println!(
+            "    region {} '{}': initial {:.3e} -> final {:.3e}, {} iterations, converged {}",
+            k, tm.regions[k].name, f64::from(rp.initial_residual),
+            f64::from(rp.final_residual), rp.n_iterations, rp.converged
+        );
+    }
+}
+
+/// With `report_residuals` off nothing about a region is measured - not the
+/// residual, not the row scale - and "not looked at" is not "converged".
+/// The capture gate's controls: this is the configuration a CUDA graph runs.
+#[test]
+fn no_region_residual_is_measured_when_residuals_are_not_reported() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(12, 0.010, 9, 0.020);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 1.4, 148.0, 380.0, 300.0);
+
+    let s = &mut cht.controls_mut().solver;
+    s.report_residuals = false;
+    s.fixed_iters = true;
+    s.max_iter = 4;
+    s.solver = LinearSolverKind::PBiCGStab;
+    s.precon = Preconditioner::Dilu;
+
+    let perf = cht.correct(&gpu).expect("solve");
+    assert!(perf.regions.is_empty(), "no region number without reporting");
+    assert!(!perf.all_converged(), "unmeasured is not converged");
+    assert!(cht.row_scale().is_none(), "row scale is report-only too");
+}
+
+/// The row scale (the region's MEAN `|diag|`) of the silicon slab over the
+/// mould slab is the conductivity ratio 200, within 5 %: `diag` of an
+/// interior cell is `2 k |Sf|/Delta`, equal cells, so the ratio of the MEANS
+/// is `k_si/k_mc` up to the two end cells and the interface cell, `O(1/n)`
+/// - a plain sum would carry the 20:40 cell-count ratio and stop meaning
+/// conductivity at all.
+///
+/// An epoxy mould compound conducts 0.6-0.9 W/(m K); 0.74 is chosen so the
+/// ratio against silicon's 148 is EXACTLY 200 - the number the gate wants,
+/// not a datasheet value.
+#[test]
+fn the_row_scale_ratio_is_the_conductivity_ratio() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(20, 0.001, 40, 0.002);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 148.0, 0.74, 380.0, 300.0);
+
+    cht.correct(&gpu).expect("solve");
+    let rs = cht.row_scale().expect("measured on the first reporting correct");
+    let ratio = rs[0] / rs[1];
+    println!("  row scale ratio silicon/mould: {ratio:.4} (conductivity ratio 200)");
+    assert!(
+        (ratio / 200.0 - 1.0).abs() <= 0.05,
+        "row scale ratio {ratio} vs conductivity ratio 200"
+    );
+}
+
+/// The bitwise claim on a matrix that HAS coupled interface entries
+/// (`b_nbr_cell >= 0`), which the dense rig of
+/// `the_ranged_norm_over_the_full_range_is_the_global_norm_to_the_bit` does
+/// not: over the full range, the ranged norm is the global norm, to the bit.
+#[test]
+fn the_full_range_norm_is_bitwise_the_global_one_on_a_conjugate_matrix() {
+    let Some(gpu) = gpu() else { return };
+    let (a, b) = two_slabs(12, 0.010, 9, 0.020);
+    let tm = couple(&a, &b, 0.0);
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = slab_solver(&gpu, &gm, &tm, 1.4, 148.0, 380.0, 300.0);
+    cht.correct(&gpu).expect("solve");
+
+    let k = crate::solver::SolverKernels::new(&gpu).expect("kernels");
+    let mut w = crate::solver::SolverWorkspace::for_mesh(&gpu, &gm).expect("workspace");
+    let n = tm.host.n_cells;
+
+    crate::solver::device_norm_factor(&gpu, &k, &mut w, &cht.field().f, cht.matrix(), &gm)
+        .expect("global");
+    let g = gpu.download(&w.norm_factor).expect("dl")[0];
+    let apsi = gpu.download(&w.apsi).expect("dl");
+
+    crate::solver::device_norm_factor_ranged(
+        &gpu, &k, &mut w, &cht.field().f, cht.matrix(), &gm, 0, n,
+    )
+    .expect("ranged");
+    let gr = gpu.download(&w.norm_factor).expect("dl")[0];
+    let apsir = gpu.download(&w.apsi).expect("dl");
+
+    assert_eq!(g.to_bits(), gr.to_bits(), "norm factor on a coupled matrix");
+    assert!(
+        apsi.iter().zip(&apsir).all(|(x, y)| x.to_bits() == y.to_bits()),
+        "apsi differs on a coupled matrix"
+    );
+}
+
+// ==========================================================================
+// The raw geometry attached to the concatenated mesh
+// ==========================================================================
+
+/// SPEC-LIT §47.4's concatenation, over points: `attach_points` places each
+/// region's points after the regions before it, refuses a raw whose counts
+/// disagree with the region's own mesh, and the `PolyMeshRaw` `to_raw()`
+/// yields rebuilds the concatenated geometry `build` computed - which then
+/// writes as ONE point VTU carrying both regions' own polygons. Host-only;
+/// no GPU.
+#[test]
+fn the_attached_points_rebuild_the_concatenated_geometry_and_write_one_vtu() {
+    use crate::io::vtu::write_vtu_points;
+
+    let axis = |lo: Scalar, hi: Scalar, n: usize| GradedAxis {
+        lo,
+        hi,
+        n,
+        expansion: 1.0,
+        two_sided: false,
+    };
+    let spec = |x: GradedAxis| BlockSpec {
+        x,
+        y: axis(0.0, 1.0, 2),
+        z: axis(0.0, 1.0, 2),
+        patch_type: ["patch", "patch", "patch", "patch", "patch", "patch"].map(String::from),
+        ..Default::default()
+    };
+    let raw_a = blockgen::raw_mesh(&spec(axis(0.0, 1.0, 2))).expect("raw A");
+    let raw_b = blockgen::raw_mesh(&spec(axis(1.0, 2.0, 3))).expect("raw B");
+    let mesh_a = build_host_mesh(&raw_a).expect("mesh A");
+    let mesh_b = build_host_mesh(&raw_b).expect("mesh B");
+    assert_eq!(raw_a.points.len(), 27);
+    assert_eq!(raw_b.points.len(), 36);
+
+    let regions = [
+        RegionInput { name: "left".into(), kind: RegionKind::Solid, mesh: &mesh_a },
+        RegionInput { name: "right".into(), kind: RegionKind::Solid, mesh: &mesh_b },
+    ];
+    // A's xMax faces and B's xMin faces are the same 2x2 grid at x = 1, so
+    // the centroid pairing succeeds.
+    let interfaces = [InterfaceRequest::new(0, "xMax", 1, "xMin", 0.0)];
+    let mut tm =
+        ThermalMesh::build(&regions, &interfaces, PairingTolerances::default())
+            .expect("thermal mesh");
+
+    assert_eq!(tm.regions[0].n_points, 27);
+    assert_eq!(tm.regions[1].n_points, 36);
+    assert_eq!(tm.host.n_points, 63);
+
+    tm.attach_points(&[&raw_a, &raw_b]).expect("attach_points");
+    assert_eq!(tm.points.len(), 63);
+    assert_eq!(
+        tm.faces.len(),
+        tm.host.n_internal_faces + tm.host.n_boundary_faces,
+        "one polygon per concatenated face"
+    );
+
+    // `to_raw()` rebuilds the concatenated geometry `build` computed.
+    let m2 = build_host_mesh(&tm.to_raw().expect("to_raw")).expect("build_host_mesh");
+    let mut acc: (Scalar, Scalar) = (0.0, 0.0);
+    fn scan3(a: &[Vec3], b: &[Vec3], acc: &mut (Scalar, Scalar)) {
+        for (x, y) in a.iter().zip(b.iter()) {
+            for (u, v) in [(x.x, y.x), (x.y, y.y), (x.z, y.z)] {
+                acc.0 = acc.0.max((u - v).abs());
+                acc.1 = acc.1.max(u.abs());
+            }
+        }
+    }
+    fn scan1(a: &[Scalar], b: &[Scalar], acc: &mut (Scalar, Scalar)) {
+        for (u, v) in a.iter().zip(b.iter()) {
+            acc.0 = acc.0.max((u - v).abs());
+            acc.1 = acc.1.max(u.abs());
+        }
+    }
+    scan1(&tm.host.v, &m2.v, &mut acc);
+    scan3(&tm.host.c, &m2.c, &mut acc);
+    scan3(&tm.host.sf, &m2.sf, &mut acc);
+    scan3(&tm.host.cf, &m2.cf, &mut acc);
+    scan3(&tm.host.b_sf, &m2.b_sf, &mut acc);
+    scan3(&tm.host.b_cf, &m2.b_cf, &mut acc);
+    let (max_diff, max_mag) = acc;
+    println!(
+        "rebuilt concatenated geometry: max |difference| = {max_diff:e} against max |value| = {max_mag:e}"
+    );
+    assert!(max_diff <= 1e-12 * max_mag, "rebuilt geometry differs");
+
+    // The concatenated mesh writes as one point VTU sharing all 63 points.
+    let path = std::env::temp_dir().join("ofgpu_s2_concat.vtu");
+    write_vtu_points(&path, &tm.to_raw().unwrap(), &[], &[], None).expect("write_vtu_points");
+    let bytes = std::fs::read(&path).expect("read back");
+    let _ = std::fs::remove_file(&path);
+    let marker = b"encoding=\"raw\">\n_";
+    let start = bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("appended marker");
+    let head = std::str::from_utf8(&bytes[..start]).expect("ascii preamble");
+    let i = head.find("NumberOfPoints=\"").expect("NumberOfPoints") + 16;
+    let rest = &head[i..];
+    let n: usize = rest[..rest.find('"').unwrap()].parse().unwrap();
+    assert_eq!(n, 63, "one shared point set over both regions");
+
+    // A fresh build refuses the swapped raws, naming the region and both
+    // counts, and refuses to_raw at all until points are attached.
+    let mut tm2 = ThermalMesh::build(&regions, &interfaces, PairingTolerances::default())
+        .expect("thermal mesh 2");
+    let err = tm2.attach_points(&[&raw_b, &raw_a]).unwrap_err().to_string();
+    println!("swapped attach refusal: {err}");
+    assert!(err.contains("left"), "{err}");
+    assert!(err.contains("27"), "{err}");
+    assert!(err.contains("36"), "{err}");
+    assert!(tm2.points.is_empty() && tm2.faces.is_empty(), "refusal writes nothing");
+    let err = tm2.to_raw().unwrap_err().to_string();
+    assert!(err.contains("attach_points"), "{err}");
+}
+
+// ==========================================================================
+//  SPEC-LIT §93.1/§93.8 - Gate 93-A: a region's rows of the concatenated
+//  assembly are the region alone
+// ==========================================================================
+
+/// **SPEC-LIT §93.1.** The slice [`ThermalMesh::region_rows`] returns has the
+/// region's OWN three lengths, and its interface mask is exactly the faces
+/// the coupling marked `PatchKind::Interface` on that region's side - zero of
+/// them on a mesh built with no interface at all.
+#[test]
+fn region_rows_have_the_region_s_own_lengths() {
+    let Some(gpu) = gpu() else { return };
+
+    let a = block([6, 3, 2], Vec3::new(0.002, 0.005, 0.005), Vec3::ZERO);
+    let b = block(
+        [4, 3, 2],
+        Vec3::new(0.002, 0.005, 0.005),
+        Vec3::new(0.012, 0.0, 0.0),
+    );
+    let tm = couple(&a, &b, 1.0e-4);
+    let cond = Conduction::uniform_per_region(
+        &tm,
+        &[
+            SolidMaterial::isotropic("a", 2000.0, 800.0, 1.4),
+            SolidMaterial::isotropic("b", 1000.0, 1200.0, 148.0),
+        ],
+    )
+    .expect("conduction");
+    let gm = upload(&gpu, &tm.host);
+    let cht = ConjugateHeat::new(&gpu, &gm, &tm, &cond, tight_controls()).expect("cht");
+
+    let mut marked = 0usize;
+    for (r, m) in tm.regions.iter().enumerate() {
+        let rows = tm.region_rows(&gpu, cht.matrix(), r).expect("region_rows");
+        assert_eq!(rows.diag.len(), m.n_cells, "region {r} diag");
+        assert_eq!(rows.source.len(), m.n_cells, "region {r} source");
+        assert_eq!(rows.upper.len(), m.n_internal_faces, "region {r} upper");
+        assert_eq!(rows.lower.len(), m.n_internal_faces, "region {r} lower");
+        assert_eq!(
+            rows.internal_coeffs.len(),
+            m.n_boundary_faces,
+            "region {r} internal_coeffs"
+        );
+        assert_eq!(
+            rows.boundary_coeffs.len(),
+            m.n_boundary_faces,
+            "region {r} boundary_coeffs"
+        );
+        // The 2x3 shared cross-section is 6 pairs; each region's own boundary
+        // slice carries exactly its side of them, so the pair count on each
+        // region and twice the pair count over both.
+        let on_region = rows.interface_face.iter().filter(|&&f| f).count();
+        assert_eq!(on_region, tm.pairs.len(), "region {r} interface faces");
+        marked += on_region;
+    }
+    assert_eq!(
+        marked,
+        2 * tm.pairs.len(),
+        "both sides of every pair, across the two regions"
+    );
+
+    // A mesh with no coupling has no interface faces at all.
+    let one = one_region(&a);
+    let cond1 = Conduction::uniform_per_region(
+        &one,
+        &[SolidMaterial::isotropic("a", 2000.0, 800.0, 1.4)],
+    )
+    .expect("conduction");
+    let gm1 = upload(&gpu, &one.host);
+    let cht1 = ConjugateHeat::new(&gpu, &gm1, &one, &cond1, tight_controls()).expect("cht");
+    let rows = one
+        .region_rows(&gpu, cht1.matrix(), 0)
+        .expect("region_rows");
+    assert!(
+        rows.interface_face.iter().all(|&f| !f),
+        "a single-region mesh has no interface faces"
+    );
+}
+
+/// **SPEC-LIT §93.8 Gate 93-A, the lib twin.** After ONE `assemble`, before
+/// any fold: a region's `diag`/`upper`/`lower`/`source` rows of the
+/// concatenated assembly are the same region built ALONE, in every bit
+/// (`to_bits()`), and so are `internal_coeffs`/`boundary_coeffs` on every
+/// boundary face that is NOT an interface face. The interface faces
+/// themselves are excluded by construction - §47.2's Robin triple on the
+/// union, an ordinary patch alone. The gate is stated for the steady,
+/// correction-free assembly, and asserts the two control values.
+#[test]
+fn gate_93a_a_region_s_rows_are_bitwise_the_region_alone() {
+    let Some(gpu) = gpu() else { return };
+
+    let ctrl = tight_controls();
+    assert_eq!(ctrl.n_non_orth_correctors, 0, "the gate needs no non-orth correction");
+    assert!(ctrl.ddt == DdtCoeffs::ZERO, "the gate is the steady assembly");
+
+    let a_mat = || SolidMaterial::isotropic("a", 2000.0, 800.0, 1.4);
+    let b_mat = || SolidMaterial::isotropic("b", 1000.0, 1200.0, 148.0);
+
+    let a = block([6, 3, 2], Vec3::new(0.002, 0.005, 0.005), Vec3::ZERO);
+    let b = block(
+        [4, 3, 2],
+        Vec3::new(0.002, 0.005, 0.005),
+        Vec3::new(0.012, 0.0, 0.0),
+    );
+    let tm = couple(&a, &b, 1.0e-4);
+    let cond =
+        Conduction::uniform_per_region(&tm, &[a_mat(), b_mat()]).expect("conduction");
+    let gm = upload(&gpu, &tm.host);
+    let mut cht = ConjugateHeat::new(&gpu, &gm, &tm, &cond, ctrl).expect("cht");
+    mark_coupled_faces(&gpu, cht.field_mut(), &tm).expect("mark");
+    fix_value(&gpu, cht.field_mut(), tm.patch_range(0, "xmin").unwrap(), 380.0);
+    fix_value(&gpu, cht.field_mut(), tm.patch_range(1, "xmax").unwrap(), 300.0);
+    let mut q = gpu.download(cht.source_mut()).expect("q");
+    for r in cht.regions() {
+        for local in 0..r.n_cells {
+            q[r.cell_offset + local] = 1.0e5 * (1.0 + 0.1 * local as Scalar);
+        }
+    }
+    gpu.write(cht.source_mut(), &q).expect("q");
+    seed(&gpu, &mut cht, &vec![340.0 as Scalar; tm.host.n_cells]);
+    cht.assemble(&gpu).expect("assemble");
+
+    for r in 0..tm.regions.len() {
+        let (mesh, k) = if r == 0 {
+            (&a, 1.4 as Scalar)
+        } else {
+            (&b, 148.0 as Scalar)
+        };
+        let stm = one_region(mesh);
+        let scond = Conduction::uniform_per_region(
+            &stm,
+            &[if r == 0 {
+                a_mat()
+            } else {
+                SolidMaterial::isotropic("b", 1000.0, 1200.0, k)
+            }],
+        )
+        .expect("conduction");
+        let sgm = upload(&gpu, &stm.host);
+        let mut scht = ConjugateHeat::new(&gpu, &sgm, &stm, &scond, tight_controls())
+            .expect("cht");
+        let (patch, v) = if r == 0 { ("xmin", 380.0) } else { ("xmax", 300.0) };
+        fix_value(&gpu, scht.field_mut(), stm.patch_range(0, patch).unwrap(), v);
+        let mut sq = gpu.download(scht.source_mut()).expect("q");
+        for local in 0..stm.host.n_cells {
+            sq[local] = 1.0e5 * (1.0 + 0.1 * local as Scalar);
+        }
+        gpu.write(scht.source_mut(), &sq).expect("q");
+        seed(&gpu, &mut scht, &vec![340.0 as Scalar; stm.host.n_cells]);
+        scht.assemble(&gpu).expect("assemble");
+
+        let u = tm.region_rows(&gpu, cht.matrix(), r).expect("union rows");
+        let s = stm.region_rows(&gpu, scht.matrix(), 0).expect("single rows");
+
+        for (name, got, want) in [
+            ("diag", &u.diag, &s.diag),
+            ("upper", &u.upper, &s.upper),
+            ("lower", &u.lower, &s.lower),
+            ("source", &u.source, &s.source),
+        ] {
+            if let Some((n, i)) = bitwise_mismatch(got, want).expect("compare") {
+                panic!(
+                    "Gate 93-A: region {r}: {n} of {} entries of {name} differ; \
+                     first at index {i}: union {:e}, alone {:e}",
+                    got.len(),
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+
+        assert!(
+            s.interface_face.iter().all(|&f| !f),
+            "a single-region mesh has no interface faces"
+        );
+        // The single side is masked by the UNION's interface mask: the region's
+        // boundary faces are concatenated in the region's own order, so
+        // `u.interface_face[k]` marks exactly the face that local index `k` is
+        // on both sides - on the single mesh it is the patch that became the
+        // interface (a's "xmax", b's "xmin"), and it is excluded there too,
+        // because alone it is an ordinary zero-gradient patch and on the union
+        // it is §47.2's Robin triple. What remains is the same face set.
+        for (name, ug, sg) in [
+            ("internal_coeffs", &u.internal_coeffs, &s.internal_coeffs),
+            ("boundary_coeffs", &u.boundary_coeffs, &s.boundary_coeffs),
+        ] {
+            let (uv, ui) =
+                non_interface_entries(ug, &u.interface_face).expect("mask");
+            let (sv, _) = non_interface_entries(sg, &u.interface_face).expect("mask");
+            if let Some((n, j)) = bitwise_mismatch(&uv, &sv).expect("compare") {
+                panic!(
+                    "Gate 93-A: region {r}: {n} of {} entries of {name} on \
+                     non-interface faces differ; first at boundary face {}: \
+                     union {:e}, alone {:e}",
+                    uv.len(),
+                    ui[j],
+                    uv[j],
+                    sv[j]
+                );
+            }
+        }
+    }
 }

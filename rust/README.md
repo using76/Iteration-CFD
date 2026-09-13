@@ -119,6 +119,9 @@ cargo run --release --bin ofgpu-vof           -- ../cases/dam -endTime 0.25 -sur
 
 # 자체 격자기 (SPEC-LIT §92). STL과 설정 JSON에서 constant/polyMesh를 만듭니다:
 cargo run --release --bin ofgpu-automesher -- ../tools/automesher/examples/box_sphere.json
+# 다영역 전도 + 열응력 (SPEC-LIT §46/§47/§95/§96). 티모셴코(1925) 바이메탈 띠 —
+# 전도 해 뒤 각 영역의 열변형을 풀고 <case>_jsonc/VTK/에 영역별 VTU를 씁니다:
+cargo run --release --bin ofgpu-cht -- ../cases/bimetalStrip.cht.jsonc
 ```
 
 케이스 목록과 각 케이스가 무엇을 재는지는 [`../cases/README.md`](../cases/README.md)에

@@ -144,8 +144,8 @@ use std::time::Instant;
 
 use ofgpu::device::DevBuf;
 use ofgpu::energy::{
-    kays_crawford_prt, DomainKind, Energy, EnergyControls, GasProperties, GasState, PrtModel,
-    KAYS_CRAWFORD_C,
+    kays_crawford_prt, mach_number, refuse_above_low_mach, DomainKind, Energy, EnergyControls,
+    GasProperties, GasState, LOW_MACH_LIMIT, MachReport, PrtModel, KAYS_CRAWFORD_C,
 };
 use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField};
 use ofgpu::field_ops::{update_inlet_outlet_scalar, FieldKernels};
@@ -354,6 +354,10 @@ pub struct IterReport {
     pub rho_max: Scalar,
     pub p0: Scalar,
     pub dp0dt: Scalar,
+    /// SPEC-LIT §93.5: the Mach number of the field as it stands after this
+    /// unit of work - the number the banner printed at start-up and the one
+    /// `refuse_above_low_mach` judges at the end of every iteration.
+    pub mach: MachReport,
     /// False the moment `T`, `rho`, `U` or `p` is caught holding a NaN or an
     /// infinity - the §25/§26 gate this driver exists to demonstrate.
     pub finite: bool,
@@ -467,6 +471,10 @@ pub fn outer_iteration(
     let rho = gpu.download(&gas.rho().f)?;
     let u = gpu.download(&s.u().f)?;
     let p = gpu.download(&s.p().f)?;
+    // SPEC-LIT §93.5: a HOST reduction over fields this report already has
+    // in hand - no kernel, no capture-registry entry.
+    let v = gpu.download(&m.v)?;
+    let mach = mach_number(gas.props(), &u, &t, &v)?;
 
     let finite = t.iter().all(|v| v.is_finite())
         && rho.iter().all(|v| v.is_finite())
@@ -494,6 +502,7 @@ pub fn outer_iteration(
         rho_max,
         p0: gas.p0(),
         dp0dt: gas.dp0dt(),
+        mach,
         finite,
     })
 }
@@ -501,7 +510,7 @@ pub fn outer_iteration(
 fn print_report(iter: usize, r: &IterReport) {
     println!(
         "iter {iter:6}  |U| res {}  |p| res {}  contErr {}  T [{}, {}] K  rho [{}, {}] kg/m3  \
-         p0 {} Pa  dp0/dt {} Pa/s{}",
+         p0 {} Pa  dp0/dt {} Pa/s  M max {} (cell {}) mean {}{}",
         g(f64::from(r.u_residual)),
         sci(f64::from(r.p_residual), 3),
         g(f64::from(r.continuity_error)),
@@ -511,6 +520,9 @@ fn print_report(iter: usize, r: &IterReport) {
         g(f64::from(r.rho_max)),
         g(f64::from(r.p0)),
         g(f64::from(r.dp0dt)),
+        g(f64::from(r.mach.max)),
+        r.mach.cell_of_max,
+        g(f64::from(r.mach.volume_mean)),
         if r.finite { "" } else { "  *** NaN/Inf ***" },
     );
 }
@@ -569,6 +581,10 @@ fn write_time(
     fields: &InitialFields,
     raw_turb: &[(&'static str, RawScalarField)],
     raw_rho_seed: &RawScalarField,
+    // SPEC-LIT §93.5: the Mach number of the state being written - the last
+    // one `outer_iteration` reported, carried here so the file's own line
+    // says what the iteration line said.
+    mach: MachReport,
 ) -> Result<()> {
     let out_root = output_root(case_path);
     let name = format_time_name(t);
@@ -633,7 +649,12 @@ fn write_time(
         foam: &foam_fields,
     };
     if pipeline.write(&ctx, f64::from(t), force)? {
-        println!("    written to {}", out_root.join(&name).display());
+        println!(
+            "    written to {}  M max {} mean {}",
+            out_root.join(&name).display(),
+            g(f64::from(mach.max)),
+            g(f64::from(mach.volume_mean)),
+        );
     }
     Ok(())
 }
@@ -2007,6 +2028,20 @@ fn run(o: &Options) -> Result<()> {
     // field was uploaded - this is the state the first `correct` reads.
     common::report_gamma_range(&gpu, &turb.output_fields())?;
 
+    // SPEC-LIT §93.5: the Mach number of the state the run starts from,
+    // printed in the banner and enforced at every iteration below.
+    let m0 = gas.mach(&gpu, s.u(), energy.field())?;
+    println!(
+        "  Mach number (SPEC-LIT §93.5) on the initial field: M max {} (cell {}) mean {}; \
+         the §25 premise is M << 1 and the run refuses above {} (-permissive warns instead)",
+        g(f64::from(m0.max)),
+        m0.cell_of_max,
+        g(f64::from(m0.volume_mean)),
+        g(f64::from(LOW_MACH_LIMIT))
+    );
+    refuse_above_low_mach(&m0, "the initial field")?;
+    let mut last_mach = m0;
+
     for step in 0..n_steps {
         if transient {
             s.begin_time_step(&gpu, dt)?;
@@ -2057,6 +2092,12 @@ fn run(o: &Options) -> Result<()> {
             return Err(Error::Config("solution diverged (NaN/Inf)".to_string()));
         }
 
+        // SPEC-LIT §93.6: the premise is re-checked on the field every
+        // iteration produced, not only on the initial one - the run stops
+        // (or warns, under -permissive) the step it leaves the regime.
+        refuse_above_low_mach(&report.mach, &format!("step {step}"))?;
+        last_mach = report.mach;
+
         if step % o.check_every.max(1) as usize == 0 || step + 1 == n_steps {
             print_report(step, &report);
         }
@@ -2082,6 +2123,7 @@ fn run(o: &Options) -> Result<()> {
                 &fields,
                 &raw_turb,
                 &raw_rho_seed,
+                last_mach,
             )?;
         }
 
@@ -2132,6 +2174,7 @@ fn run(o: &Options) -> Result<()> {
         &fields,
         &raw_turb,
         &raw_rho_seed,
+        last_mach,
     )?;
     // ... and a final checkpoint, for the same reason, when the case asked
     // for a series at all.

@@ -82,12 +82,14 @@ pub mod precon;
 pub mod pressure;
 pub mod scalar_transport;
 pub mod simple;
+pub mod solid;
 pub mod solver;
 pub mod sources;
 pub mod species;
 pub mod timescheme;
 pub mod turbulence;
 pub mod vof;
+pub mod vv;
 pub mod walldistance;
 pub mod wallfunctions;
 

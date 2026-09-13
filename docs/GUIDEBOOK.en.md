@@ -758,7 +758,7 @@ field**.
 | `ofgpu-buoyant` | **U, p**, T, buoyancy | directory |
 | `ofgpu-plume` | **U, p**, T, buoyant plume | directory |
 | `ofgpu-vof` | **U, p**, α — two-phase free surface | directory |
-| `ofgpu-cht` | multi-region conduction + conjugate natural convection | JSONC |
+| `ofgpu-cht` | multi-region conduction + conjugate natural convection + thermal stress | JSONC |
 | `ofgpu-datacentre` | data-centre room (fans, tiles, humidity, metrics) | JSONC |
 
 If you want a velocity field, **pick one of the bold ones.**

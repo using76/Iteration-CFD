@@ -48,6 +48,35 @@
 // §47.6, the two limits of §47.12's Gate 2) but no case format reaches it
 // yet, and `ofgpu-cht` refuses a `"kind": "fluid"` region by name rather than
 // building a solid and calling it one.
+//
+// THE MECHANICS HALF (SPEC-LIT §96). After the conduction solve converges,
+// the die, the solder and the spreader each have SPEC-LIT §95's linear
+// thermo-elastic displacement solved on their own mesh, from their own
+// dT = T - TRef. The elastic numbers are ROUND REPRESENTATIVE VALUES - no
+// handbook was transcribed, and this case gates that the chain runs and
+// writes, not a stress number. The one cited source is silicon's expansion
+// coefficient: Okada & Tokumaru, J. Appl. Phys. 56 (1984) 314, DOI
+// 10.1063/1.333965 (alpha_Si = 2.6e-6 /K at 300 K). Three idealisations are
+// stated because they are all load-bearing:
+//
+// 1. Every interface face of a mechanical region carries
+//    `fixedDisplacement [null, null, 0.0]` - the frictionless-rigid-plane
+//    idealisation of a bond: the face may slide, it may not lift. Its
+//    consequence: `u_z = 0` on BOTH faces of the solder and of the
+//    spreader suppresses their through-thickness expansion entirely.
+//    The faithful alternative is one region with a `materials` zone list
+//    (docs/10's R4; `bimetalStrip.cht.jsonc` is that route).
+// 2. `*SideXMin` and `*SideYMin` are `symmetry`: the modelled 10 x 10 mm is
+//    ONE QUADRANT of a 20 x 20 mm package mirrored in both planes. Without
+//    them x- and y-translation and the rotation about z are unconstrained,
+//    and the displacement operator refuses the singular component systems
+//    by name (SPEC-LIT §95.2).
+// 3. The peak stress the run prints is a LINEAR-ELASTIC number on a joint
+//    that in reality yields: read it as a comparison between cases, not as
+//    a margin against a proof stress.
+//
+// The grease carries no `mechanics`: a grease joint has no stiffness worth
+// modelling, and the region writes its temperature only.
 {
   "name": "dieStack",
 
@@ -83,7 +112,19 @@
         { "match": "dieSideXMax",  "T": { "type": "zeroGradient" } },
         { "match": "dieSideYMin",  "T": { "type": "zeroGradient" } },
         { "match": "dieSideYMax",  "T": { "type": "zeroGradient" } }
-      ]
+      ],
+      "mechanics": {
+        "material": { "E": 130e9, "nu": 0.28, "alpha": 2.6e-6, "TRef": 300.0 },
+        "patches": [
+          { "match": "dieToSolder",   "u": { "type": "fixedDisplacement", "value": [null, null, 0.0] } },
+          { "match": "dieSideXMin",   "u": { "type": "symmetry" } },
+          { "match": "dieSideYMin",   "u": { "type": "symmetry" } },
+          { "match": "dieSideXMax",   "u": { "type": "free" } },
+          { "match": "dieSideYMax",   "u": { "type": "free" } },
+          { "match": "dieTop",        "u": { "type": "free" } }
+        ],
+        "solver": { "tolerance": 1e-6, "maxOuter": 2000 }
+      }
     },
 
     {
@@ -108,7 +149,19 @@
         { "match": "solderSideXMax", "T": { "type": "zeroGradient" } },
         { "match": "solderSideYMin", "T": { "type": "zeroGradient" } },
         { "match": "solderSideYMax", "T": { "type": "zeroGradient" } }
-      ]
+      ],
+      "mechanics": {
+        "material": { "E": 30e9, "nu": 0.40, "alpha": 24e-6, "TRef": 300.0 },
+        "patches": [
+          { "match": "solderToSpreader", "u": { "type": "fixedDisplacement", "value": [null, null, 0.0] } },
+          { "match": "solderToDie",      "u": { "type": "fixedDisplacement", "value": [null, null, 0.0] } },
+          { "match": "solderSideXMin",   "u": { "type": "symmetry" } },
+          { "match": "solderSideYMin",   "u": { "type": "symmetry" } },
+          { "match": "solderSideXMax",   "u": { "type": "free" } },
+          { "match": "solderSideYMax",   "u": { "type": "free" } }
+        ],
+        "solver": { "tolerance": 1e-6, "maxOuter": 2000 }
+      }
     },
 
     {
@@ -129,7 +182,19 @@
         { "match": "spreaderSideXMax", "T": { "type": "zeroGradient" } },
         { "match": "spreaderSideYMin", "T": { "type": "zeroGradient" } },
         { "match": "spreaderSideYMax", "T": { "type": "zeroGradient" } }
-      ]
+      ],
+      "mechanics": {
+        "material": { "E": 120e9, "nu": 0.34, "alpha": 17e-6, "TRef": 300.0 },
+        "patches": [
+          { "match": "spreaderToGrease",  "u": { "type": "fixedDisplacement", "value": [null, null, 0.0] } },
+          { "match": "spreaderToSolder",  "u": { "type": "fixedDisplacement", "value": [null, null, 0.0] } },
+          { "match": "spreaderSideXMin",  "u": { "type": "symmetry" } },
+          { "match": "spreaderSideYMin",  "u": { "type": "symmetry" } },
+          { "match": "spreaderSideXMax",  "u": { "type": "free" } },
+          { "match": "spreaderSideYMax",  "u": { "type": "free" } }
+        ],
+        "solver": { "tolerance": 1e-6, "maxOuter": 2000 }
+      }
     },
 
     {
@@ -184,7 +249,7 @@
   ],
 
   "initial": { "T": 300.0 },
-  "run": { "steady": true },
+  "run": { "steady": true, "mode": "stress" },
 
   "numerics": {
     // A pure conduction matrix is symmetric INCLUDING its coupled interface
@@ -192,9 +257,22 @@
     // and §48.3's extended check now verifies both halves - so PCG with an
     // incomplete-Cholesky preconditioner is legal here and is the right
     // choice.
+    //
+    // tolerance 1e-11, not the 1e-14 this file carried when it was
+    // conduction-only: the per-region §8.4 residual of three of the four
+    // regions floors at 9.4e-14 .. 1.6e-12 of its own initial value in f64
+    // (each region's linear solve already runs its 4000-5000 iterations
+    // against a Krylov space a tenth of that size), and SPEC-LIT §96.2
+    // refuses to solve displacement on a region whose thermal verdict is
+    // NOT met. 1e-11 is the smallest power of ten every region meets
+    // (measured finals: die 9.4e-14, solder 3.7e-13, spreader 1.6e-12,
+    // grease 1.7e-15). The temperature field moves by less than its last
+    // printed digit; the closed-form test above is unaffected.
     "solver": "PCG",
     "preconditioner": "DIC",
-    "tolerance": 1e-14,
+    "tolerance": 1e-11,
     "maxIter": 5000
-  }
+  },
+
+  "output": { "exact": { "format": "vtu" } }
 }

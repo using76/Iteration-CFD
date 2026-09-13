@@ -26,6 +26,7 @@
 //!     (the density-ratio buoyancy this module's gas state feeds), S13
 //!     (`ddtSchemes`, S13.4's unsupported-setting contract) and S18 (the
 //!     volumetric source registry pattern [`EnergySources`] specialises)
+//!     and §93.5 (the Mach number a low-Mach run prints and refuses on);
 //!   Jayatilleke, *Prog. Heat Mass Transfer* 1 (1969) 193-330 - the sublayer
 //!     resistance correction to the thermal log law, SPEC-LIT S29.3
 //!     ([`Self::set_thermal_wall`]; the law itself and its device kernel live
@@ -137,7 +138,7 @@ use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
-use crate::field::{GpuScalarField, GpuSurfaceScalarField};
+use crate::field::{GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
 use crate::fv::{self, DivScheme, FvKernels, GradScheme, SnGradScheme};
 use crate::io::case::SolverControls;
@@ -802,6 +803,119 @@ impl<'m> GasState<'m> {
         self.p0_0 = self.p0;
         self.p0_00 = self.p0;
     }
+
+    /// [`mach_number`] on `u.f`, `t.f` and this mesh's cell volumes,
+    /// downloaded - SPEC-LIT §93.5. Three host round-trips; a diagnostic,
+    /// never in the loop's hot path.
+    pub fn mach(
+        &self,
+        gpu: &Gpu,
+        u: &GpuVectorField,
+        t: &GpuScalarField,
+    ) -> Result<MachReport> {
+        let u = gpu.download(&u.f)?;
+        let t = gpu.download(&t.f)?;
+        let v = gpu.download(&self.m.v)?;
+        mach_number(&self.props, &u, &t, &v)
+    }
+}
+
+// ==========================================================================
+//  §93.5  The Mach number a low-Mach run prints and refuses on
+// ==========================================================================
+
+/// SPEC-LIT §93.5: the Mach number of a low-Mach run, from cell values.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MachReport {
+    /// The largest cell Mach number, (93.6) over the cells. A NaN never
+    /// becomes it (the comparison is a plain `>`), so a field whose every
+    /// cell is NaN leaves this at `-inf` and the mean carries the NaN.
+    pub max: Scalar,
+    /// The cell that holds [`Self::max`].
+    pub cell_of_max: usize,
+    /// The volume-weighted mean over the cells, (93.7).
+    pub volume_mean: Scalar,
+}
+
+/// SPEC-LIT §93.5 (*DESIGN*): above this the §25 premise is no longer a
+/// description of the run. At `M = 0.3` the isentropic density ratio
+/// `rho/rho0 = (1 + 0.2 M^2)^-2.5` is already `0.956` for `gamma = 1.4` -
+/// a 4.4 % density change, which is where "Mach much less than 1" stops
+/// describing what the run is doing to the equations it solves.
+pub const LOW_MACH_LIMIT: Scalar = 0.3;
+
+/// (93.6)-(93.7) on host slices: `M_P = |u_P| / sqrt(gamma R_s T_P)`, the
+/// max by a plain `>` so a NaN never becomes the max, and
+/// `volume_mean = sum(M_P V_P) / sum(V_P)`. `Err` (message begins
+/// `mach_number:`) when the three lengths differ or are zero; never `Err`
+/// on the VALUES - a non-positive `T_P` gives a NaN `M_P`, the plain `>`
+/// leaves it out of the max, and the mean carries it through as a NaN,
+/// which is the honest answer for a temperature the gas law cannot stand
+/// behind. `gamma R_s T_P` is not guarded: [`GasProperties::validate`]
+/// does not bound `gamma` either.
+pub fn mach_number(
+    props: &GasProperties,
+    u: &[Vec3],
+    t: &[Scalar],
+    v: &[Scalar],
+) -> Result<MachReport> {
+    if u.is_empty() || u.len() != t.len() || u.len() != v.len() {
+        return Err(Error::Config(format!(
+            "mach_number: {} velocity, {} temperature and {} volume value(s); \
+             the three slices must be the same non-zero length",
+            u.len(),
+            t.len(),
+            v.len()
+        )));
+    }
+    let rs = props.r_s();
+    let mut max = Scalar::NEG_INFINITY;
+    let mut cell_of_max = 0usize;
+    let mut m_sum = 0.0;
+    let mut v_sum = 0.0;
+    for (i, ((ut, &tt), &vv)) in u.iter().zip(t).zip(v).enumerate() {
+        let speed = (ut.x * ut.x + ut.y * ut.y + ut.z * ut.z).sqrt();
+        let m = speed / (props.gamma * rs * tt).sqrt();
+        if m > max {
+            max = m;
+            cell_of_max = i;
+        }
+        m_sum += m * vv;
+        v_sum += vv;
+    }
+    Ok(MachReport { max, cell_of_max, volume_mean: m_sum / v_sum })
+}
+
+/// SPEC-LIT §93.6: `Err(Error::Config)` when `r.max > LOW_MACH_LIMIT` and the
+/// run is strict; under `-permissive` one [`contract::warn_once`] and
+/// `Ok(())`. `when` names the moment ("the initial field", "step 12").
+pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
+    if r.max <= LOW_MACH_LIMIT {
+        return Ok(());
+    }
+    if !contract::permissive() {
+        return Err(Error::Config(format!(
+            "ofgpu-lowmach: max Mach number {:.3} at cell {} ({}) is above {}; \
+             SPEC-LIT §25's formulation filters acoustics on the premise M << 1 \
+             (p~ << p0), and at M = 0.3 the isentropic density ratio \
+             rho/rho0 = (1 + 0.2 M^2)^-2.5 is already 0.956, a 4.4 % density \
+             change. The run stops (SPEC-LIT §93.6); -permissive continues \
+             with a warning",
+            r.max, r.cell_of_max, when, LOW_MACH_LIMIT
+        )));
+    }
+    contract::warn_once(
+        "lowMach.machNumber",
+        &format!(
+            "-permissive: max Mach number {:.3} at cell {} ({}) is above {}; \
+             SPEC-LIT §25's premise M << 1 no longer holds (at M = 0.3 \
+             rho/rho0 = 0.956 already, a 4.4 % density change) and the \
+             acoustic filtering is unjustified - continuing because \
+             -permissive was given (SPEC-LIT §93.6)",
+            r.max, r.cell_of_max, when, LOW_MACH_LIMIT
+        ),
+    );
+    Ok(())
 }
 
 // ==========================================================================
@@ -2614,6 +2728,60 @@ mod tests {
     // ----------------------------------------------------------------------
     //  GasProperties / GasState
     // ----------------------------------------------------------------------
+
+    // ----------------------------------------------------------------------
+    //  §93.5  The Mach number a low-Mach run prints and refuses on
+    // ----------------------------------------------------------------------
+
+    /// (93.6) IS `|u| / sqrt(gamma R_s T)`: the expected values are computed
+    /// here from the same `props.r_s()`/`gamma` the implementation reads, so
+    /// the test can only pass if the formula, the max and the volume mean
+    /// all agree to rounding.
+    #[test]
+    fn the_mach_number_is_speed_over_the_isentropic_sound_speed() {
+        let props = GasProperties::default();
+        let u = [Vec3::new(34.72, 0.0, 0.0), Vec3::new(0.0, 3.0, 4.0)];
+        let t = [300.0 as Scalar, 600.0];
+        let v = [1.0 as Scalar, 3.0];
+
+        let m0 = 34.72 / (1.4 * props.r_s() * 300.0).sqrt();
+        let m1 = 5.0 / (1.4 * props.r_s() * 600.0).sqrt();
+
+        let r = mach_number(&props, &u, &t, &v).expect("two cells");
+        assert!((r.max - m0).abs() <= 1e-14 * m0.abs(), "{} vs {m0}", r.max);
+        assert_eq!(r.cell_of_max, 0);
+        let mean_want = (m0 + 3.0 * m1) / 4.0;
+        assert!(
+            (r.volume_mean - mean_want).abs() <= 1e-14 * mean_want.abs(),
+            "{} vs {mean_want}",
+            r.volume_mean
+        );
+
+        let e = mach_number(&props, &u[..1], &t, &v).unwrap_err().to_string();
+        assert!(e.contains("mach_number"), "{e}");
+    }
+
+    /// The refusal of §93.6: strict mode stops the run by name, `-permissive`
+    /// warns and continues. Takes the guard FIRST - the flag is process-wide.
+    #[test]
+    fn a_mach_number_above_the_low_mach_limit_is_refused_by_name() {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let hot = MachReport { max: 0.31, cell_of_max: 7, volume_mean: 0.2 };
+        let e = refuse_above_low_mach(&hot, "step 12").unwrap_err().to_string();
+        for wanted in ["0.31", "cell 7", "step 12", "0.3", "§25", "-permissive"] {
+            assert!(e.contains(wanted), "{wanted:?} not in {e}");
+        }
+
+        let ok = MachReport { max: LOW_MACH_LIMIT, cell_of_max: 7, volume_mean: 0.2 };
+        refuse_above_low_mach(&ok, "step 12").expect("at the limit is not above it");
+
+        crate::io::contract::set_permissive(true);
+        refuse_above_low_mach(&hot, "step 12")
+            .expect("-permissive warns instead of refusing");
+        crate::io::contract::set_permissive(false);
+    }
 
     // ----------------------------------------------------------------------
     //  §37  Kays-Crawford's variable turbulent Prandtl number
