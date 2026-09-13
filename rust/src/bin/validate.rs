@@ -3133,6 +3133,8 @@ fn run(c: &mut Checks) -> Result<()> {
     check_buckingham_reiner(c);
     check_contact_angle_jurin(c);
     check_non_newtonian_channel(c, &gpu, &k)?;
+    println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes) ===");
+    check_thick_cylinder(c, &gpu)?;
     c.replaying(check_kays_crawford_experiment_replay);
 
     Ok(())
@@ -18118,5 +18120,206 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         .count();
     c.require("78: the three refusals are refused by name", refusals == 3);
 
+    Ok(())
+}
+
+// ==========================================================================
+//  Gate 95-D - the thick cylinder heated through the conduction solver
+// ==========================================================================
+
+/// The thermomechanical chain on three quarter-annulus meshes: the steady
+/// log temperature from the conduction solver, the displacement from the
+/// outer loop, then the stress readout - each stress component held against
+/// the thick-walled cylinder's closed form (Timoshenko & Goodier, *Theory
+/// of Elasticity*, 3rd ed., the thermal-stress chapter's long circular
+/// cylinder; Boley & Weiner, *Theory of Thermal Stresses*, ch. 9), plane
+/// strain, on the mean von Mises a mesh study. A pass prints and registers
+/// nothing; a miss is one report carrying the study.
+fn check_thick_cylinder(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::{
+        Conduction, ConjugateControls, ConjugateHeat, PairingTolerances, RegionInput, RegionKind,
+        SolidMaterial, ThermalMesh,
+    };
+    use ofgpu::solid::fixtures;
+    use ofgpu::solid::stress::{cylindrical, StressFields};
+    use ofgpu::solid::{
+        displacement::Displacement,
+        outer::{self, OuterControls, Relaxation},
+        Material,
+    };
+    use ofgpu::vv;
+
+    let controls = || ConjugateControls {
+        solver: SolverControls {
+            solver: LinearSolverKind::PCG,
+            precon: Preconditioner::Dic,
+            tolerance: 1e-30,
+            rel_tol: 0.0,
+            max_iter: 4000,
+            ..SolverControls::default()
+        },
+        ..ConjugateControls::default()
+    };
+    let fix = |t: &mut GpuScalarField, faces: std::ops::Range<usize>, v: Scalar| {
+        let mut kind = gpu.download(&t.bc_kind).expect("kind");
+        let mut fr = gpu.download(&t.fr).expect("fr");
+        let mut rv = gpu.download(&t.ref_value).expect("rv");
+        for bf in faces {
+            kind[bf] = BcKind::FixedValue as Label;
+            fr[bf] = 1.0;
+            rv[bf] = v;
+        }
+        gpu.write(&mut t.bc_kind, &kind).expect("kind");
+        gpu.write(&mut t.fr, &fr).expect("fr");
+        gpu.write(&mut t.ref_value, &rv).expect("rv");
+    };
+    let solve_controls = || SolverControls {
+        solver: LinearSolverKind::PCG,
+        precon: Preconditioner::Dic,
+        tolerance: 1e-14,
+        rel_tol: 0.0,
+        max_iter: 5000,
+        min_iter: 0,
+        check_interval: 1,
+        fixed_iters: false,
+        report_residuals: true,
+    };
+
+    let (r_in, r_out) = (0.5 as Scalar, 1.0 as Scalar);
+    let mat = Material { e: 200.0e9, nu: 0.3, alpha: 1.2e-5 };
+    let d_t_inner = 100.0 as Scalar; // T(inner) - T_ref = 400 - 300
+    let scale = fixtures::thick_cylinder_scale(r_in, r_out, mat.e, mat.nu, mat.alpha, d_t_inner);
+    let datum =
+        fixtures::thick_cylinder_mean_von_mises(r_in, r_out, mat.e, mat.nu, mat.alpha, d_t_inner);
+
+    let mut e_rs = [0.0 as Scalar; 3];
+    let mut e_ts = [0.0 as Scalar; 3];
+    let mut e_zs = [0.0 as Scalar; 3];
+    let mut e_rts = [0.0 as Scalar; 3];
+    let mut f_hs = [0.0 as Scalar; 3];
+    let mut outer_its = [0usize; 3];
+    let mut levels: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+
+    for (idx, nr) in [12usize, 24, 48].into_iter().enumerate() {
+        let ann = fixtures::annulus(nr, 2 * nr, 2, r_in, r_out)?;
+        let tm = ThermalMesh::build(
+            &[RegionInput { name: "ring".into(), kind: RegionKind::Solid, mesh: &ann.mesh }],
+            &[],
+            PairingTolerances::default(),
+        )?;
+        let cond = Conduction::uniform_per_region(
+            &tm,
+            &[SolidMaterial::isotropic("steel", 7850.0, 460.0, 45.0)],
+        )?;
+        let gm = GpuMesh::upload(gpu, &tm.host)?;
+        let mut cht = ConjugateHeat::new(gpu, &gm, &tm, &cond, controls())?;
+        fix(cht.field_mut(), tm.patch_range(0, "inner")?, 400.0);
+        fix(cht.field_mut(), tm.patch_range(0, "outer")?, 300.0);
+        let warm = vec![350.0 as Scalar; tm.host.n_cells];
+        let f = cht.field_mut();
+        gpu.write(&mut f.f, &warm)?;
+        gpu.write(&mut f.f0, &warm)?;
+        gpu.write(&mut f.f00, &warm)?;
+        cht.correct(gpu)?; // steady and linear: one solve
+        let t = gpu.download(&cht.field().f)?;
+        let bt = gpu.download(&cht.field().bf)?;
+
+        let mut d = Displacement::new(
+            gpu,
+            &gm,
+            &tm.host,
+            mat,
+            &fixtures::quarter_annulus_plane_strain_bcs(),
+            solve_controls(),
+        )?;
+        d.set_temperature(gpu, &t, &bt, 300.0)?;
+        let rep = outer::solve(
+            gpu,
+            &mut d,
+            &OuterControls {
+                relaxation: Relaxation::Aitken,
+                decades: 8.0,
+                max_outer: 400,
+                boundary_passes: 3,
+            },
+        )?;
+        c.require(&format!("Gate 95-D: outer loop converged, nr = {nr}"), rep.converged);
+
+        // outer::solve ends in the boundary correction, so the gradient it
+        // left belongs to the accepted u; the readout derives nothing anew.
+        let mut sf = StressFields::new(gpu, tm.host.n_cells)?;
+        sf.compute(gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref)?;
+        let h = sf.download(gpu)?;
+
+        let n_cells = tm.host.n_cells;
+        let mut e_r = 0.0 as Scalar;
+        let mut e_t = 0.0 as Scalar;
+        let mut e_z = 0.0 as Scalar;
+        let mut e_rt = 0.0 as Scalar;
+        let mut f_num = 0.0 as Scalar;
+        let mut f_den = 0.0 as Scalar;
+        for cell in 0..n_cells {
+            let ctr = tm.host.c[cell];
+            let rho = (ctr.x * ctr.x + ctr.y * ctr.y).sqrt();
+            let (rr, tt, zz, rt) = cylindrical(h.sigma[cell], ctr);
+            let (sr, st, sz) = fixtures::thick_cylinder_stress(
+                rho, r_in, r_out, mat.e, mat.nu, mat.alpha, d_t_inner,
+            );
+            e_r = e_r.max((rr - sr).abs());
+            e_t = e_t.max((tt - st).abs());
+            e_z = e_z.max((zz - sz).abs());
+            e_rt = e_rt.max(rt.abs());
+            f_num += h.von_mises[cell] * tm.host.v[cell];
+            f_den += tm.host.v[cell];
+        }
+        e_rs[idx] = e_r / scale;
+        e_ts[idx] = e_t / scale;
+        e_zs[idx] = e_z / scale;
+        e_rts[idx] = e_rt / scale;
+        f_hs[idx] = f_num / f_den;
+        outer_its[idx] = rep.iterations;
+        // The level size is the RADIAL spacing, written by hand rather than
+        // taken over the whole mesh: the two z layers stay two at every
+        // refinement, so the cell count grows fourfold per level while the
+        // spacing the solution varies over halves, and a mesh-wide size
+        // would misstate the order reported below.
+        levels.push(vv::Level { h: (r_out - r_in) / nr as Scalar, value: f_hs[idx] });
+        let line = format!(
+            "nr={nr:>3} cells={n_cells:>6} outer={:>4} e_rr={:.3e} e_tt={:.3e} e_zz={:.3e} e_rt={:.3e} F_h={:.6e}",
+            outer_its[idx], e_rs[idx], e_ts[idx], e_zs[idx], e_rts[idx], f_hs[idx]
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+
+    let ln2 = (2.0 as Scalar).ln();
+    let p_hoop = (e_ts[1] / e_ts[2]).ln() / ln2;
+    c.check("Gate 95-D: sigma_rr on the finest mesh (nr = 48), Linf / S", e_rs[2], 0.01);
+    c.check("Gate 95-D: sigma_thetatheta on the finest mesh (nr = 48), Linf / S", e_ts[2], 0.01);
+    c.check("Gate 95-D: sigma_zz on the finest mesh (nr = 48), Linf / S", e_zs[2], 0.01);
+    c.note(&format!("  max|sigma_rtheta|/S on the finest mesh: {:.3e}", e_rts[2]));
+    c.note(&format!("  observed order of the hoop-stress error: p = {p_hoop:.3}"));
+    // The study reads the FINEST level first.
+    levels.reverse();
+    let study = vv::grid_study(&levels)?;
+    c.note(&format!("  mean von Mises: {}", study.one_line()));
+    let val = vv::validation(f_hs[2], datum, study.u_fine, 0.0, 0.0);
+    c.note(&format!("  {}", val.one_line("mean von Mises, finest mesh")));
+
+    if e_rs[2] > 0.01 || e_ts[2] > 0.01 || e_zs[2] > 0.01 {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-D thick cylinder",
+            against: "Timoshenko & Goodier closed form, plane strain, three meshes r = 2",
+            headline: format!(
+                "e_rr {:.2e} e_tt {:.2e} e_zz {:.2e} on the finest mesh, hoop-stress order p = {p_hoop:.2}",
+                e_rs[2], e_ts[2], e_zs[2]
+            ),
+            detail,
+            uncertainty: Some(Uncertainty::Study(study)),
+        });
+    }
     Ok(())
 }

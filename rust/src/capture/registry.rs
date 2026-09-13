@@ -278,6 +278,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         ),
     ),
     (
+        "src/solid/stress.rs",
+        Stance::Outside("stress, von Mises, principal stresses, the hydrostatic/deviatoric split and |u| are read out from the converged displacement when a result is written, not inside the outer iteration; the fixtures are host-only"),
+    ),
+    (
         "src/solver.rs",
         Stance::Gate("the_fixed_iteration_solve_replays_bitwise"),
     ),

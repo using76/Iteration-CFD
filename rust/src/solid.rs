@@ -43,6 +43,14 @@
 //! LDU storage, §2.4's over-relaxed non-orthogonal correction, §3.2's Gauss
 //! laplacian, §3.5's Green-Gauss gradient, §4's one mixed boundary triple,
 //! §8.2's conjugate gradients and §8.4's residual normalisation.
+//!
+//! Two later children read rather than solve. [`stress`] turns the
+//! converged displacement into the fields a user reads - Cauchy stress,
+//! von Mises, principal stresses, the hydrostatic/deviatoric split, |u|,
+//! the cylindrical components and the point displacement. [`fixtures`]
+//! builds the quarter-annulus ring and the thick cylinder's closed forms
+//! that the validation binary's Gate 95-D measures the whole chain
+//! against.
 
 use crate::mesh::HostMesh;
 use crate::{Error, Result, Scalar, Vec3};
@@ -70,8 +78,10 @@ pub const MOTION_RATIO_MAX: Scalar = 0.1;
 
 pub mod bc;
 pub mod displacement;
+pub mod fixtures;
 pub mod outer;
 pub mod prototype;
+pub mod stress;
 #[cfg(test)]
 mod tests;
 
