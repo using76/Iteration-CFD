@@ -3135,6 +3135,8 @@ fn run(c: &mut Checks) -> Result<()> {
     check_non_newtonian_channel(c, &gpu, &k)?;
     println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes) ===");
     check_thick_cylinder(c, &gpu)?;
+    println!("\n=== Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) ===");
+    check_solid_bimetal(c, &gpu)?;
     c.replaying(check_kays_crawford_experiment_replay);
 
     Ok(())
@@ -18316,6 +18318,167 @@ fn check_thick_cylinder(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             headline: format!(
                 "e_rr {:.2e} e_tt {:.2e} e_zz {:.2e} on the finest mesh, hoop-stress order p = {p_hoop:.2}",
                 e_rs[2], e_ts[2], e_zs[2]
+            ),
+            detail,
+            uncertainty: Some(Uncertainty::Study(study)),
+        });
+    }
+    Ok(())
+}
+
+fn check_solid_bimetal(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::fixtures;
+    use ofgpu::solid::materials::MaterialMap;
+    use ofgpu::solid::stress::StressFields;
+    use ofgpu::solid::{
+        bc::fixed_minus_x, displacement::Displacement, outer, BondTreatment, Material,
+    };
+    use ofgpu::vv;
+
+    let (l, h) = (0.06 as Scalar, 0.01 as Scalar);
+    let kappa_ref = 0.0116364 as Scalar; // (S95.19) at the gate's numbers
+    let solve_controls = || SolverControls {
+        solver: LinearSolverKind::PCG,
+        precon: Preconditioner::Dic,
+        tolerance: 1e-14,
+        rel_tol: 0.0,
+        max_iter: 5000,
+        min_iter: 0,
+        check_interval: 1,
+        fixed_iters: false,
+        report_residuals: true,
+    };
+
+    let mut kappa_s = [0.0 as Scalar; 3];
+    let mut r_s = [0.0 as Scalar; 3];
+    let mut r_l = [0.0 as Scalar; 3];
+    let mut err_fine = Scalar::INFINITY;
+    let mut outer_its = [[0usize; 3]; 2];
+    let mut all_converged = true;
+    let mut levels_k: Vec<vv::Level> = Vec::new();
+    let mut levels_rs: Vec<vv::Level> = Vec::new();
+    let mut levels_rl: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+
+    for (idx, ny) in [8usize, 16, 32].into_iter().enumerate() {
+        let nx = 6 * ny;
+        let (hm, low, high) = fixtures::bimetal_strip(nx, ny, l, h, 0.005)?;
+        let n = hm.n_cells;
+        let nbf = hm.n_boundary_faces;
+        for (tr, bond) in [BondTreatment::Series, BondTreatment::Linear].into_iter().enumerate() {
+            let map = MaterialMap::from_cell_lists(
+                &[
+                    ("steel", Material { e: 200.0e9, nu: 0.3, alpha: 1.2e-5 }, None, low.clone()),
+                    ("brass", Material { e: 100.0e9, nu: 0.3, alpha: 2.0e-5 }, None, high.clone()),
+                ],
+                n,
+                bond,
+            )?;
+            let bonds = map.bonds(&hm)?;
+            let gm = GpuMesh::upload(gpu, &hm)?;
+            let mut d = Displacement::with_materials(
+                gpu, &gm, &hm, &map, &fixed_minus_x(), solve_controls(),
+            )?;
+            d.set_temperature(gpu, &vec![303.15; n], &vec![303.15; nbf], 293.15)?;
+            let rep = outer::solve(gpu, &mut d, &outer::OuterControls::default())?;
+            all_converged &= rep.converged;
+            let grad = gpu.download(&d.grad)?;
+            let (kappa, _) = fixtures::strip_curvature(&hm, &grad, l, nx);
+            let mut sf = StressFields::new(gpu, n)?;
+            sf.compute_with(gpu, &d.cells, &d.grad, &d.u.f, &d.t)?;
+            let host = sf.download(gpu)?;
+            let ratio = fixtures::bond_stress_ratio(&hm, &host.sigma, &bonds, l, h);
+            let err = (kappa / kappa_ref - 1.0).abs();
+            let tr_name = if tr == 0 { "series" } else { "linear" };
+            let line = format!(
+                "{tr_name:<7} {nx:>3}x{ny:<2}  kappa={kappa:.6e}  error={:5.2}%  \
+                 R={ratio:.4e}  outer={:>4}  converged={}",
+                err * 100.0, rep.iterations, rep.converged
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+            if tr == 0 {
+                kappa_s[idx] = kappa;
+                r_s[idx] = ratio;
+                levels_k.push(vv::Level { h: h / ny as Scalar, value: kappa });
+                levels_rs.push(vv::Level { h: h / ny as Scalar, value: ratio });
+                if idx == 2 {
+                    err_fine = err;
+                    let u = gpu.download(&d.u.f)?;
+                    let (mut tip, mut best) = (0usize, Scalar::INFINITY);
+                    for cc in 0..n {
+                        let dist = (hm.c[cc].x - l).abs() + (hm.c[cc].y - h * 0.5).abs();
+                        if dist < best {
+                            best = dist;
+                            tip = cc;
+                        }
+                    }
+                    c.note(&format!(
+                        "  tip u_y = {:.6e} at ({:.5},{:.5})   -kappa l^2/2 = {:.6e}",
+                        u[tip].y, hm.c[tip].x, hm.c[tip].y, -kappa * l * l * 0.5
+                    ));
+                }
+            } else {
+                r_l[idx] = ratio;
+                levels_rl.push(vv::Level { h: h / ny as Scalar, value: ratio });
+            }
+            outer_its[tr][idx] = rep.iterations;
+        }
+    }
+
+    // The studies read the FINEST level first; the loop pushed coarsest first.
+    levels_k.reverse();
+    levels_rs.reverse();
+    levels_rl.reverse();
+    let ord = |lv: &[vv::Level]| {
+        vv::observed_order(&[lv[0].clone(), lv[1].clone(), lv[2].clone()])
+    };
+    let ord_k = ord(&levels_k)?;
+    let ord_rs = ord(&levels_rs)?;
+    let ord_rl = ord(&levels_rl)?;
+    let p_of = |t: &vv::Triplet| {
+        t.p.map(|p| format!("{p:.3}")).unwrap_or_else(|| "n/a".to_string())
+    };
+    c.note(&format!(
+        "  observed order of kappa (series): p = {}, behaviour = {:?}",
+        p_of(&ord_k), ord_k.behaviour
+    ));
+    c.note(&format!(
+        "  observed order of R (series):     p = {}, behaviour = {:?}",
+        p_of(&ord_rs), ord_rs.behaviour
+    ));
+    c.note(&format!(
+        "  observed order of R (linear):     p = {}, behaviour = {:?}",
+        p_of(&ord_rl), ord_rl.behaviour
+    ));
+    let study = vv::grid_study(&levels_k)?;
+    c.note(&format!("  kappa (series): {}", study.one_line()));
+    c.note(&format!(
+        "  outer iterations: series {:?}, linear {:?}",
+        outer_its[0], outer_its[1]
+    ));
+
+    c.check(
+        "95-E bimetal curvature vs Timoshenko 1925 (S95.19), 192x32 series",
+        err_fine,
+        0.02,
+    );
+    c.require("95-E series R falls under refinement", r_s[2] < r_s[0]);
+    c.require(
+        "95-E linear bond keeps an interface stress the series bond removes (S95.20)",
+        r_l[2] > 2.0 * r_s[2],
+    );
+
+    if err_fine > 0.02 || r_s[2] >= r_s[0] || r_l[2] <= 2.0 * r_s[2] || !all_converged {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-E bimetal strip",
+            against: "Timoshenko 1925 closed-form curvature (S95.19), three meshes r = 2, both bond treatments",
+            headline: format!(
+                "kappa/k_ref - 1 = {err_fine:.2e} on the finest series mesh, \
+                 R_linear/R_series = {:.2}",
+                r_l[2] / r_s[2]
             ),
             detail,
             uncertainty: Some(Uncertainty::Study(study)),

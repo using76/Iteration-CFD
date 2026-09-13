@@ -27732,7 +27732,87 @@ own gate when it is written, not a silent reuse of this one.
 
 ### 95.8 Two materials bonded in one region — the series (2 mu + lambda) face coefficient and the traction-continuous bond face
 
-*(prose written from the measured numbers; pending.)*
+Two bonded materials live in ONE region - the plan's rule, and the reason
+nothing here needs a second mesh or a coupled face. Every cell carries its
+own `mu`, `lambda`, `alpha` and `T_ref`, delivered by a material map built
+from cell lists: one entry per material, each naming the cells it owns, and
+a map whose single entry spans the region IS the one-material operator,
+unchanged. A face whose two cells belong to DIFFERENT materials is a bond
+face; a face between two cells of the same material is the one-material
+operator's own face, coefficient times magnitude, to the bit.
+
+The map refuses by name: a cell listed under two materials (naming both
+materials and the cell), a cell listed under none, a cell index past the
+region's end, a material name used twice, and a material whose constants
+fail their own validation, whose message is passed through. A bond face
+whose one-sided distances `d_P` or `d_N` are not positive is refused as a
+MESH defect, not a material one - a cell centre has landed on its own face.
+The operator's own refusal list is §95.5's and is not repeated here.
+
+At a bond face the implicit coefficient of the split is the series value
+(S95.14) - §46.2's face form with `2 mu + lambda` in the place of `k`,
+Patankar's series resistance read at an elastic jump: what is continuous
+across the bond is the flux, so what interpolates is the resistance, and
+the linearly interpolated coefficient is wrong by `(1+r)^2/(4r)` at
+`w = 1/2` in exactly the way §46.2 measures for conduction. The face
+displacement and traction are not an average at all but a SOLVED condition:
+the traction is continuous across the bond, each side evaluated with its
+own one-sided normal derivative - Tuković, Ivanković & Karač 2013.
+(S95.9) is each side's thermal eigentraction; (S95.10) solves the normal
+and tangential face displacement that makes the two sides' tractions equal;
+(S95.11) is the face traction that follows, and evaluating it from the N
+side with `g_N = (u_N - u_f)/d_N` gives the same vector - twenty
+deterministic face sets replay both sides and hold them to 1e-12. The
+derivation is the wall solve of §95.2 with the other cell in the wall's
+place: substitute `G = G_t + n (x) g` into `sigma . n` using
+`n . G_t = 0`, `tr G = tr G_t + g . n` and `G . n = r + n (g . n)`, write
+it on each side with its own one-sided `g`, set the two equal, and split
+normal from tangential. (S95.13) is what the two bond cells' gradients
+then make of the solved face value: Green-Gauss with the bond face's
+displacement in the place of the interpolation, scattered
+`Sf (x) du_f / V` into each side. On an aligned mesh it lands only in the
+normal row, which (S95.10) never reads; the corrected rows are what the
+stress readout and the bond cells' other faces use.
+
+*DESIGN* marks, said where they are choices. The tangential gradient the
+two sides share is the interpolated `G_f` with its normal row struck - only
+the normal row is replaced by the solved one-sided derivative. The face's
+explicit contribution is (S95.12): its own traction LESS the matrix's
+implicit share and the non-orthogonal correction the matrix already
+carries, so the fixed point carries exactly `t_f |Sf|` on any mesh,
+orthogonal or not. That subtraction is exact for `SnGradScheme::Corrected`
+- limiter scale 1, which the operator fixes - and a limited scheme would
+leave a residual; stated here rather than silently inherited. And the
+same-material branch of the face coefficient is written as the product,
+not as the series form with equal resistances: `(1-w)/g + w/g` is not
+`1/g` to the bit, and a one-material map must reproduce the one-material
+kernel exactly, not to round-off.
+
+The thermal load stays per cell: every cell's load is its own
+`(3 lambda + 2 mu) alpha (T - T_ref)`. (S95.15) states what that load IS,
+not the order it is summed in - the per-cell coefficient is evaluated
+inside each face's term, so a one-material region reproduces the
+uniform-material kernel to the bit, and the one-material gates' numbers
+before and after the map are identical. A bond face is skipped because its
+thermal share is already inside `t_f` through (S95.9).
+
+The Linear foil. A bond face may instead be treated like any other face
+with every constant interpolated linearly - (S95.16), the naive form. It
+is a case-reachable setting, printed by name, never refused. What it
+misses: the exact `eps_yy = -nu eps_xx + (1+nu) alpha DeltaT` jumps across
+the bond with `alpha`, and a linearly interpolated face displacement
+misses that kink - an O(1) error in the bond cells' `G_yy` that
+refinement does not remove. The plan's second leg was worded
+"interpolating `(3 lambda + 2 mu) alpha` linearly is shown not to converge
+under refinement"; that is redefined here to what is measurable: a bond
+face that interpolates the displacement linearly interpolates every
+coefficient with it, and what a cell-centred solver measures is not a
+coefficient's convergence but the stress the face leaves in the bond
+cells - the ratio (S95.20) that §95.9's table holds. With equal moduli and
+a linear field the two treatments differ only in the normal traction, by
+`(2w - 1)(theta_P - theta_N)`, zero at `w = 1/2` - held to 1e-12 by the
+section's own test, which is why the gate needs the unequal moduli and
+unequal distances the strip has.
 
 ```text
 theta_s = beta_alpha_s (T_f - T_ref_s)                                       (S95.9)
@@ -27774,7 +27854,57 @@ t_f = mu_f (n.G_f + G_f.n) + lambda_f tr(G_f) n - theta_f n                  (S9
 
 ### 95.9 Gate 95-E — the bimetal strip, and the interface stress a linear bond leaves behind
 
-*(prose written from the measured numbers; pending.)*
+The gate is a bimetal cantilever strip: `l = 0.06 m`, `h = 0.01 m`, one
+cell thick, steel below the bond line - `E = 200 GPa`, `alpha = 1.2e-5 /K`
+- and brass above it, `E = 100 GPa`, `alpha = 2.0e-5 /K`, `nu = 0.3` in
+both, heated ten kelvin from `T_ref = 293.15 K`, the `-x` face clamped and
+every other face free. Three meshes, 48x8, 96x16 and 192x32 at `r = 2`;
+the outer loop is the shipped default, Anderson at depth five, and it
+converged on every leg, 306 to 796 outer iterations. The annulus gate of
+§95.6 remains the quarter ring with symmetry cuts; the bond faces here are
+internal faces of one region, no coupled-face path is involved, and
+nothing in this section tests a cyclic pair.
+
+The expected curvature is (S95.19): `kappa_ref = 0.0116364 /m` at these
+numbers. The measured one is the least-squares slope of `eps_xx` along the
+mid column of the deformed strip; the interface ratio is (S95.20) over the
+window `|x - l/2| <= h`, two strip thicknesses clear of each end. Both
+treatments, six legs:
+
+  treatment  mesh     kappa         error     R
+  series     48x8     1.206063e-2   3.65 %    5.0084e-1
+  linear     48x8     1.368483e-2   17.60 %   1.0414e+0
+  series     96x16    1.184918e-2   1.83 %    4.4115e-1
+  linear     96x16    1.234864e-2   6.12 %    9.5852e-1
+  series     192x32   1.170483e-2   0.59 %    4.1729e-1
+  linear     192x32   1.184579e-2   1.80 %    9.2709e-1
+
+Expected, then measured. Expected: the strip curls toward the steel at the
+closed form's curvature to two percent on the finest mesh. Measured:
+`kappa = 1.170483e-2`, 0.59 % low, the tip's mid cell at
+`u_y = -2.125748e-5` beside the small-deflection value
+`-kappa l^2/2 = -2.106870e-5`. Expected: the series bond's ratio falls
+under refinement toward its floor. Measured: monotone,
+`5.0084e-1 -> 4.4115e-1 -> 4.1729e-1`, observed order `p = 1.323`.
+Expected, on the plan's original wording: the linear bond's ratio would
+not converge under refinement. Measured, and the section says what it
+found rather than what it hoped: the linear ratio fell too, at
+`p = 1.399` - `1.0414e+0 -> 9.5852e-1 -> 9.2709e-1` - but it did not fall
+onto the series bond's. The ratio of the two held at 2.08, 2.17 and 2.22
+across the sequence: a linear bond face does not leave an error that
+refinement removes, it leaves the series bond's own floor times a constant
+the mesh does not touch - the interface stress the series bond does not
+have, which is what (S95.20) exists to expose. The curvature itself is
+nearly blind to the treatment - 1.80 % at the finest on the linear bond -
+because it is carried by the free axial strain, not by the bond; the
+second leg asserts `R_linear > 2 R_series`, which held on every mesh.
+
+The curvature's own observed order is `p = 0.551`, reported as measured
+with the study beside it - `phi_ext = 1.139437e-2`, `U_fine = 3.881e-4`,
+three levels, monotone - and the two-percent assertion is made against the
+closed form on the finest mesh, not against the extrapolation. In
+`ofgpu-validate` the gate is `check_solid_bimetal`, three meshes, both
+treatments, and a passing gate registers nothing.
 
 ```text
 kappa_ref = 6 (alpha2 - alpha1) DeltaT (1 + m)^2

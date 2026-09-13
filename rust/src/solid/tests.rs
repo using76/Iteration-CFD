@@ -849,3 +849,115 @@ fn a_one_material_map_leaves_s5_bitwise() {
         "rhs"
     );
 }
+
+/// One bimetal-strip case at one mesh and one bond treatment: the host
+/// mesh, its device twin, the material map and the bond faces. Steel below
+/// the bond line, brass above it, both inheriting the region's `T_ref`;
+/// the caller states the temperature, the displacement boundary and the
+/// outer-loop controls.
+fn bimetal_case(
+    gpu: &Gpu,
+    nx: usize,
+    ny: usize,
+    bond: BondTreatment,
+) -> crate::Result<(HostMesh, GpuMesh, MaterialMap, super::materials::Bonds)> {
+    let (hm, low, high) = fixtures::bimetal_strip(nx, ny, 0.06, 0.01, 0.005)?;
+    let n = hm.n_cells;
+    let map = MaterialMap::from_cell_lists(
+        &[
+            ("steel", Material { e: 200.0e9, nu: 0.3, alpha: 1.2e-5 }, None, low),
+            ("brass", Material { e: 100.0e9, nu: 0.3, alpha: 2.0e-5 }, None, high),
+        ],
+        n,
+        bond,
+    )?;
+    let bonds = map.bonds(&hm)?;
+    let gm = upload(gpu, &hm);
+    Ok((hm, gm, map, bonds))
+}
+
+/// The bonded strip, heated ten kelvin, curls toward the steel; on the
+/// finest mesh its measured curvature is the closed form (S95.19) to two
+/// percent, with the outer loop converged.
+#[test]
+fn gate_95_e_the_bimetal_curvature_is_timoshenko_s() {
+    let Some(gpu) = gpu() else { return };
+    let (hm, gm, map, _bonds) = bimetal_case(&gpu, 192, 32, BondTreatment::Series).expect("case");
+    let mut d = Displacement::with_materials(&gpu, &gm, &hm, &map, &fixed_minus_x(), tight())
+        .expect("displacement");
+    let n = hm.n_cells;
+    let nbf = hm.n_boundary_faces;
+    d.set_temperature(&gpu, &vec![303.15; n], &vec![303.15; nbf], 293.15)
+        .expect("temperature");
+    let rep = outer::solve(&gpu, &mut d, &outer::OuterControls::default()).expect("outer solve");
+    println!(
+        "solid outer: outer={} converged={} observed={:.4} predicted={:.4} motion_ratio={:.3e}",
+        rep.iterations, rep.converged, rep.observed_contraction, rep.predicted_contraction,
+        rep.motion_ratio
+    );
+    println!("{}", map.describe(d.n_bond()));
+    assert!(rep.converged, "the outer loop did not converge");
+
+    let grad = gpu.download(&d.grad).expect("grad");
+    let (kappa, e0) = fixtures::strip_curvature(&hm, &grad, 0.06, 192);
+    let kappa_ref = 0.0116364; // (S95.19) at the gate's numbers
+    let err = (kappa / kappa_ref - 1.0).abs();
+    println!("kappa = {kappa:.6e}  kappa_ref = {kappa_ref}  err = {err:.3e}  e0 = {e0:.3e}");
+    assert!(kappa > 0.0, "the strip must curl toward the steel");
+    assert!(err <= 0.02, "curvature off by {err:.3e} relative");
+
+    let u = gpu.download(&d.u.f).expect("u");
+    let (mut tip, mut best) = (0usize, Scalar::INFINITY);
+    for c in 0..n {
+        let dist = (hm.c[c].x - 0.06).abs() + (hm.c[c].y - 0.005).abs();
+        if dist < best {
+            best = dist;
+            tip = c;
+        }
+    }
+    let geo = -kappa * 0.06 * 0.06 * 0.5;
+    println!(
+        "tip u_y = {:.6e} at ({:.5},{:.5})   -kappa l^2/2 = {geo:.6e}",
+        u[tip].y, hm.c[tip].x, hm.c[tip].y
+    );
+}
+
+/// The linear bond face - the constants interpolated like any other face's
+/// - leaves an interface stress the traction-continuous series bond does
+/// not (S95.20), on the middle mesh of the gate's sequence.
+#[test]
+fn the_linear_bond_leaves_an_interface_stress_the_series_bond_removes() {
+    let Some(gpu) = gpu() else { return };
+    let mut ratio = [0.0 as Scalar; 2];
+    let mut kappa = [0.0 as Scalar; 2];
+    for (i, bond) in [BondTreatment::Series, BondTreatment::Linear].into_iter().enumerate() {
+        let (hm, gm, map, bonds) = bimetal_case(&gpu, 96, 16, bond).expect("case");
+        let mut d = Displacement::with_materials(&gpu, &gm, &hm, &map, &fixed_minus_x(), tight())
+            .expect("displacement");
+        let n = hm.n_cells;
+        let nbf = hm.n_boundary_faces;
+        d.set_temperature(&gpu, &vec![303.15; n], &vec![303.15; nbf], 293.15)
+            .expect("temperature");
+        let rep = outer::solve(&gpu, &mut d, &outer::OuterControls::default())
+            .expect("outer solve");
+        assert!(rep.converged, "outer loop, treatment {i}");
+        let grad = gpu.download(&d.grad).expect("grad");
+        let (k, _) = fixtures::strip_curvature(&hm, &grad, 0.06, 96);
+        let mut sf = stress::StressFields::new(&gpu, n).expect("stress fields");
+        sf.compute_with(&gpu, &d.cells, &d.grad, &d.u.f, &d.t).expect("stress");
+        let host = sf.download(&gpu).expect("stress download");
+        let r = fixtures::bond_stress_ratio(&hm, &host.sigma, &bonds, 0.06, 0.01);
+        let name = if i == 0 { "series" } else { "linear" };
+        println!("{name}: kappa = {k:.6e}  R = {r:.6e}  outer = {}", rep.iterations);
+        println!("{}", map.describe(d.n_bond()));
+        ratio[i] = r;
+        kappa[i] = k;
+    }
+    println!("R_linear / R_series = {:.3}", ratio[1] / ratio[0]);
+    assert!(
+        ratio[1] > 2.0 * ratio[0],
+        "R_linear = {:.4e}, R_series = {:.4e}",
+        ratio[1],
+        ratio[0]
+    );
+}

@@ -26,7 +26,8 @@
 //! The ring is a QUARTER of the annulus, cut at `theta = 0` and
 //! `theta = pi/2` and closed with symmetry planes; a full ring with a
 //! theta cyclic pair needs a coupled-face path the displacement operator
-//! does not have yet, and is the bonded-solid unit's to add.
+//! does not have yet, and is not built here - it belongs with the region
+//! and interface work, which is where the coupled-face path is.
 //!
 //! OpenFOAM and solids4foam are GPL and were not opened; no
 //! solid-mechanics solver of any licence was consulted. The fixture and
@@ -34,12 +35,13 @@
 //! No GPL-licensed source was consulted.
 
 use crate::blockgen::{self, BlockSpec, GradedAxis};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
 use crate::mesh::HostMesh;
 use crate::solid::bc::PatchBcs;
 use crate::solid::bc::CompBc;
-use crate::{Scalar, Vec3};
+use crate::solid::materials::Bonds;
+use crate::{Label, Scalar, Tensor, Vec3};
 use std::f64::consts::FRAC_PI_2;
 
 /// The quarter ring and the raw mesh it came from: `r in [r_in, r_out]`,
@@ -62,8 +64,8 @@ pub struct Annulus {
 /// per-component `Fixed(0)` normal + `Traction(0)` tangential statement
 /// the displacement operator's boundary table already carries - and are
 /// axis-aligned (`y = 0`, `x = 0`) after the point map below. The full
-/// ring with a cyclic pair is the bonded-solid unit's, once the operator
-/// couples faces.
+/// ring with a cyclic pair is not built here and belongs with the region
+/// and interface work, which is where the coupled-face path is.
 ///
 /// The block is built in `(r, theta, z)` coordinates and every point is
 /// then mapped `(x, y, z) -> (x cos y, x sin y, z)` - a map with a
@@ -206,6 +208,110 @@ pub fn thick_cylinder_mean_von_mises(r_in: Scalar, r_out: Scalar, e: Scalar, nu:
     sum * h / 3.0 * 2.0 / (r_out * r_out - r_in * r_in)
 }
 
+/// A cantilever strip `x in [0, l]`, `y in [0, h]`, ONE cell thick in `z`
+/// (`z in [0, h/ny]`), square cells - `nx/l == ny/h` is the caller's job
+/// and is not checked here. All six patches are real `patch`es, so the
+/// boundary statement is the caller's to make. Returns the mesh, the cells
+/// below the bond line (`c.y < a1`, exactly `nx` per cell row, the lower
+/// material) and the cells above it. An `a1` that does not lie on a cell
+/// face would cut cells in half; it is refused by name.
+pub fn bimetal_strip(
+    nx: usize,
+    ny: usize,
+    l: Scalar,
+    h: Scalar,
+    a1: Scalar,
+) -> Result<(HostMesh, Vec<Label>, Vec<Label>)> {
+    let frac = a1 / h * ny as Scalar;
+    if (frac - frac.round()).abs() > 1e-9 {
+        return Err(Error::Config(format!(
+            "bimetal_strip: the bond height a1 = {a1} does not lie on a cell \
+             face of ny = {ny} cells over h = {h} (a1/h*ny = {frac}); the two \
+             materials would cut through cells instead of meeting at a face"
+        )));
+    }
+    let axis = |lo, hi, n| GradedAxis { lo, hi, n, expansion: 1.0, two_sided: false };
+    let spec = BlockSpec {
+        x: axis(0.0, l, nx),
+        y: axis(0.0, h, ny),
+        z: axis(0.0, h / ny as Scalar, 1),
+        patch_name: ["xMin", "xMax", "yMin", "yMax", "zMin", "zMax"].map(String::from),
+        patch_type: ["patch"; 6].map(String::from),
+        windows: Vec::new(),
+        cyclic: Vec::new(),
+    };
+    let raw = blockgen::raw_mesh(&spec)?;
+    let mesh = build_host_mesh(&raw)?;
+    let lower: Vec<Label> =
+        (0..mesh.n_cells as Label).filter(|&c| mesh.c[c as usize].y < a1).collect();
+    let upper: Vec<Label> =
+        (0..mesh.n_cells as Label).filter(|&c| mesh.c[c as usize].y > a1).collect();
+    Ok((mesh, lower, upper))
+}
+
+/// The curvature of the deformed strip, read off the cell gradients along
+/// the column `i = nx/2` - `l/2` itself is a cell FACE, so the column is
+/// the one just past it: every cell with
+/// `|c.x - (l/2 + 0.5 l/nx)| < 0.25 l/nx`, exactly `ny` cells for an even
+/// `nx`. Along that column the axial strain `eps_xx = grad[c].xx` is
+/// least-squares fitted as `eps_xx = e0 + kappa y_c`; the slope is the
+/// curvature, the intercept the strain at the mid-plane. Returns
+/// `(kappa, e0)`.
+pub fn strip_curvature(m: &HostMesh, grad: &[Tensor], l: Scalar, nx: usize) -> (Scalar, Scalar) {
+    let dx = l / nx as Scalar;
+    let mid = l * 0.5 + 0.5 * dx;
+    let (mut sy, mut syy, mut sg, mut syg, mut n) =
+        (0.0, 0.0, 0.0, 0.0, 0.0 as Scalar);
+    for c in 0..m.n_cells {
+        if (m.c[c].x - mid).abs() < 0.25 * dx {
+            let (y, g) = (m.c[c].y, grad[c].xx);
+            n += 1.0;
+            sy += y;
+            syy += y * y;
+            sg += g;
+            syg += y * g;
+        }
+    }
+    let nf = n;
+    let kappa = (nf * syg - sy * sg) / (nf * syy - sy * sy);
+    let e0 = (sg - kappa * sy) / nf;
+    (kappa, e0)
+}
+
+/// The interface stress a bond treatment leaves behind, as a ratio
+/// (SPEC-LIT (S95.20)): the largest `|sigma_yy|` over the BOND cells - the
+/// owner and the neighbour of every bond face - with `|c.x - l/2| <= h`,
+/// over the largest `|sigma_xx|` over ALL cells in the same window. The
+/// exact state has `sigma_yy = 0` in the bond cells, so the ratio measures
+/// exactly the stress the treatment invents there; the window sits `2 h`
+/// clear of each end, where the clamp's and the free end's own reaction
+/// has decayed to the Saint-Venant floor.
+pub fn bond_stress_ratio(
+    m: &HostMesh,
+    sigma: &[Tensor],
+    bonds: &Bonds,
+    l: Scalar,
+    h: Scalar,
+) -> Scalar {
+    let in_window = |x: Scalar| (x - l * 0.5).abs() <= h;
+    let mut s_yy = 0.0 as Scalar;
+    for &f in &bonds.bond_face {
+        let fu = f as usize;
+        for c in [m.owner[fu] as usize, m.neighbour[fu] as usize] {
+            if in_window(m.c[c].x) {
+                s_yy = s_yy.max(sigma[c].yy.abs());
+            }
+        }
+    }
+    let mut s_xx = 0.0 as Scalar;
+    for c in 0..m.n_cells {
+        if in_window(m.c[c].x) {
+            s_xx = s_xx.max(sigma[c].xx.abs());
+        }
+    }
+    s_yy / s_xx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +396,47 @@ mod tests {
         // The end temperatures, exactly.
         assert_eq!(thick_cylinder_temperature(ri, ri, ro, 400.0, 300.0), 400.0);
         assert_eq!(thick_cylinder_temperature(ro, ri, ro, 400.0, 300.0), 300.0);
+    }
+
+    /// The strip splits exactly on the cell face at `a1`: 384 cells in two
+    /// halves of 192, 48 internal faces joining the two materials, all six
+    /// patches real `patch`es, the mesh closed with volume everywhere - and
+    /// an `a1` between two faces is refused by name.
+    #[test]
+    fn the_bimetal_strip_splits_on_a_face() {
+        let (m, low, high) = bimetal_strip(48, 8, 0.06, 0.01, 0.005).expect("strip");
+        assert_eq!(low.len(), 192, "cells below the bond line");
+        assert_eq!(high.len(), 192, "cells above the bond line");
+        let r = m.check();
+        println!(
+            "strip: closure={:.3e} minV={:.3e} nonorth={:.3e}deg",
+            r.max_closure_error, r.min_volume, r.max_non_orth_deg
+        );
+        assert!(r.max_closure_error <= 1e-12, "closure {:.3e}", r.max_closure_error);
+        assert!(r.min_volume > 0.0, "negative cell volume");
+        let got: Vec<(&str, usize, &str)> = m
+            .patches
+            .iter()
+            .map(|p| (p.name.as_str(), p.size, p.type_name.as_str()))
+            .collect();
+        for (name, size, ty) in &got {
+            println!("  {name} {size} {ty}");
+        }
+        assert!(got.iter().all(|(_, _, ty)| *ty == "patch"), "every patch a patch");
+        let mut is_low = vec![false; m.n_cells];
+        for &c in &low {
+            is_low[c as usize] = true;
+        }
+        let bonds = (0..m.n_internal_faces)
+            .filter(|&f| is_low[m.owner[f] as usize] != is_low[m.neighbour[f] as usize])
+            .count();
+        println!("strip: bond faces = {bonds}");
+        assert_eq!(bonds, 48, "one bond face per x column");
+
+        let err = bimetal_strip(48, 8, 0.06, 0.01, 0.0047);
+        let msg = format!("{err:?}");
+        println!("a1 = 0.0047: {msg}");
+        assert!(msg.contains("0.0047"), "the refusal names the height: {msg}");
+        assert!(msg.contains("cell face"), "the refusal says what is wrong: {msg}");
     }
 }

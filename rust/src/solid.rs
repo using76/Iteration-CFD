@@ -39,7 +39,9 @@
 //! measured the slender body: §95.1 the split, §95.2 the traction solved at
 //! the face, §95.3 the outer loop and its three relaxations, §95.4 the two
 //! sweeps, §95.5 the refusals this file carries, §95.6 the gates release 1
-//! stands on and the one that is not written. What it reuses it cites: §1's
+//! stands on and the one that is not written, §95.8 the bond between two
+//! materials in one region and §95.9 the bimetal gate that measures it.
+//! What it reuses it cites: §1's
 //! LDU storage, §2.4's over-relaxed non-orthogonal correction, §3.2's Gauss
 //! laplacian, §3.5's Green-Gauss gradient, §4's one mixed boundary triple,
 //! §8.2's conjugate gradients and §8.4's residual normalisation.
