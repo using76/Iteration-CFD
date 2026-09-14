@@ -4,6 +4,7 @@
 // ActionEngine stays an interface only (N4 implements it).
 
 import type { ObjectTypeApiName, PropertyApiName } from './types.js'
+import { BINARY_NAMES, PIPELINES } from '../registry.js'
 
 export interface Principal {
   kind: 'user' | 'agent' | 'server'
@@ -39,6 +40,7 @@ export type ValueSource =
   | { from: 'currentUser' }
   | { from: 'currentTime' }
   | { from: 'server'; provide: 'mintedId' | 'createdId' | 'gitHead' | 'gitDirty' }  // OURS, see §8.1
+  | { from: 'prepared'; key: string }          // OURS (N4): the action's preparer produced it
 export type EditRule =
   | { rule: 'createObject';         objectType: ObjectTypeApiName; primaryKey: ValueSource; properties: Record<PropertyApiName, ValueSource> }
   | { rule: 'modifyObject';         objectType: ObjectTypeApiName; target: ValueSource;     properties: Record<PropertyApiName, ValueSource> }
@@ -60,7 +62,7 @@ export interface ActionPermission {
 export type SideEffect =
   | { effect: 'notify';  when: 'after'; channel: 'session' | 'desktop'; template: string }
   | { effect: 'webhook'; when: 'before' | 'after'; target: string; body: Record<string, ValueSource> }
-  | { effect: 'spawn';   when: 'after'; manager: 'runs'; request: Record<string, ValueSource> }
+  | { effect: 'spawn';   when: 'before' | 'after'; manager: 'runs'; request: Record<string, ValueSource> }
 export interface ActionTypeDef {
   apiName: string                 // camelCase verb phrase: startRun, approveMesh
   displayName: string
@@ -73,6 +75,7 @@ export interface ActionTypeDef {
   criteria: Criterion[]
   permission: ActionPermission
   sideEffects: SideEffect[]
+  prepare?: string | null         // OURS (N4): key into the preparer registry; absent means none
   maxEdits: number                // <= 10000; R:106 "up to 10,000 objects per Action"
   ontologyVersion: string
 }
@@ -127,6 +130,83 @@ export interface ActionEngine {
   reject(proposalId: string, approver: Principal, reason: string): Promise<void>
 }
 
-/** Empty by decision: startRun needs N0's `Run.gitSha` and acceptGateVerdict needs R1's gate JSON
- *  (facts-aip-contract.md §8.2, §8.3). N4 fills this array; the validator below already checks it. */
-export const ACTION_TYPES: ActionTypeDef[] = []
+// N4's first action (C5): the spawn is a BEFORE effect, so the Run's key is the manager's own id (D-C).
+export const START_RUN: ActionTypeDef = {
+  apiName: 'startRun',
+  displayName: 'Start a solver run',
+  description: 'Start an ofgpu binary on a case. Creates a Run at status queued, links it to its Driver, Case and Commit, then spawns the process. Flags are validated against the registry; unknown flags are refused.',
+  parameters: [
+    { apiName: 'binary', displayName: 'Binary', required: true, default: null,
+      description: 'Registry binary or pipeline name',
+      type: { t: 'enum', values: [...BINARY_NAMES, ...PIPELINES.map((p) => p.name)] } },
+    { apiName: 'casePath', displayName: 'Case', required: false, default: null,
+      description: 'Workspace-relative .jsonc file or OpenFOAM directory; null for binaries that take no case',
+      type: { t: 'workspacePath', mustExist: true, extensions: ['.jsonc', ''] } },
+    { apiName: 'args', displayName: 'Flags', required: false, default: [],
+      description: 'Registry flags for this binary',
+      type: { t: 'array', maxItems: 32, of: { t: 'struct', fields: { flag: { t: 'string' }, value: { t: 'string' } } } } },
+    { apiName: 'positionals', displayName: 'Positionals', required: false, default: [],
+      description: 'Extra positional arguments; the case is added automatically',
+      type: { t: 'array', maxItems: 8, of: { t: 'string' } } },
+    { apiName: 'label', displayName: 'Label', required: false, default: null,
+      description: 'Short label shown in the run list',
+      type: { t: 'string', maxLength: 80 } },
+  ],
+  prepare: 'startRun',
+  rules: [
+    // N4 D-Q: every non-nullable Run property is written, or N2's put() raises MISSING_PROPERTY.
+    // The key order here IS the card's value order (N4 C4).
+    { rule: 'createObject', objectType: 'Run',
+      primaryKey: { from: 'prepared', key: 'spawnedRunId' },
+      properties: {
+        runId:     { from: 'prepared', key: 'spawnedRunId' },
+        label:     { from: 'parameter', parameter: 'label' },
+        binary:    { from: 'parameter', parameter: 'binary' },
+        argv:      { from: 'prepared', key: 'argv' },
+        casePath:  { from: 'parameter', parameter: 'casePath' },
+        status:    { from: 'static', value: 'queued' },
+        iter:      { from: 'static', value: 0 },
+        written:   { from: 'static', value: [] },
+        converged: { from: 'static', value: false },
+        logLines:  { from: 'static', value: 0 },
+        mode:      { from: 'prepared', key: 'mode' },
+        startedAt: { from: 'currentTime' },
+        startedBy: { from: 'currentUser' },
+        gitSha:    { from: 'prepared', key: 'gitSha' },
+        gitDirty:  { from: 'prepared', key: 'gitDirty' } } },
+    { rule: 'createLink', linkType: 'executed',
+      from: { from: 'prepared', key: 'spawnedRunId' },
+      to:   { from: 'parameter', parameter: 'binary' }, properties: {} },
+    { rule: 'createLink', linkType: 'runs',
+      from: { from: 'prepared', key: 'spawnedRunId' },
+      to:   { from: 'parameter', parameter: 'casePath' }, properties: {} },
+    // N1's D-m: atCommit is fk('Run','gitSha') and declares NO link properties. Its validator
+    // (AT-RULE-TARGET) refuses a createLink whose properties key is not declared on the link type,
+    // so this MUST stay {}. The dirty flag is Run.gitDirty, above.
+    { rule: 'createLink', linkType: 'atCommit',
+      from: { from: 'prepared', key: 'spawnedRunId' },
+      to:   { from: 'prepared', key: 'gitSha' }, properties: {} },
+  ],
+  functionRule: null,
+  criteria: [
+    { id: 'binaryExists',         severity: 'block', message: 'unknown binary; available: {{available}}',                       params: {} },
+    { id: 'flagsTypeCheck',       severity: 'block', message: '{{binary}} has no option {{flag}}',                              params: {} },
+    { id: 'positionalArity',      severity: 'block', message: '{{binary}} needs {{required}} positional argument(s)',           params: {} },
+    { id: 'pathsInsideWorkspace', severity: 'block', message: '{{path}} is outside the workspace',                              params: {} },
+    { id: 'pathExists',           severity: 'block', message: '{{path}} does not exist',                                        params: {} },
+    { id: 'caseFormatAccepted',   severity: 'block', message: '{{binary}} does not read {{format}}; use one of: {{alt}}',       params: {} },
+    { id: 'gpuNotBusy',           severity: 'warn',  message: 'a GPU solver is already running ({{running}}); this run queues', params: {} },
+  ],
+  permission: { submitters: ['user', 'agent'], requiresApproval: true, policy: 'ask' },
+  sideEffects: [
+    { effect: 'spawn',  when: 'before', manager: 'runs',
+      request: { binary: { from: 'parameter', parameter: 'binary' }, casePath: { from: 'parameter', parameter: 'casePath' },
+                 args: { from: 'parameter', parameter: 'args' }, positionals: { from: 'parameter', parameter: 'positionals' },
+                 label: { from: 'parameter', parameter: 'label' } } },
+    { effect: 'notify', when: 'after', channel: 'session', template: 'run {{spawnedRunId}} started ({{binary}})' },
+  ],
+  maxEdits: 8,
+  ontologyVersion: '0.1.0',
+}
+
+export const ACTION_TYPES: ActionTypeDef[] = [START_RUN]   // filled by N4 Run 1 (D-H)

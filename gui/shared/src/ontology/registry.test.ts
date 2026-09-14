@@ -86,10 +86,10 @@ const START_RUN: ActionTypeDef = {
 }
 
 describe('the shipped ontology', () => {
-  it('declares twelve object types, thirteen link types and no action types, all at version 0.1.0', () => {
+  it('declares twelve object types, thirteen link types and one action type, all at version 0.1.0', () => {
     expect(OBJECT_TYPES.length).toBe(12)
     expect(LINK_TYPES.length).toBe(13)
-    expect(ACTION_TYPES.length).toBe(0)
+    expect(ACTION_TYPES.length).toBe(1)
     expect(ONTOLOGY_VERSION).toBe('0.1.0')
     for (const t of OBJECT_TYPES) expect(t.ontologyVersion).toBe(ONTOLOGY_VERSION)
     for (const l of LINK_TYPES) expect(l.ontologyVersion).toBe(ONTOLOGY_VERSION)
@@ -144,14 +144,14 @@ describe('the registry N4 and N5 build on', () => {
   it('lists object, link, action and link side names sorted, for the tool enums N5 will emit', () => {
     expect(ONTOLOGY.objectTypeNames()).toEqual(OBJECT_TYPES.map((t) => t.apiName).sort())
     expect(ONTOLOGY.linkTypeNames()).toEqual(LINK_TYPES.map((l) => l.apiName).sort())
-    expect(ONTOLOGY.actionTypeNames()).toEqual([])
+    expect(ONTOLOGY.actionTypeNames()).toEqual(['startRun'])
     const sides = [...new Set(LINK_TYPES.flatMap((l) => [l.from.apiName, l.to.apiName]))].sort()
     expect(ONTOLOGY.linkSideNames()).toEqual(sides)
     expect(new Set(ONTOLOGY.linkSideNames()).size).toBe(15)
     expect(ONTOLOGY.linkSideNames().length).toBe(15)
     expect(ONTOLOGY.objectTypes.length).toBe(12)
     expect(ONTOLOGY.linkTypes.length).toBe(13)
-    expect(ONTOLOGY.actionTypes.length).toBe(0)
+    expect(ONTOLOGY.actionTypes.length).toBe(1)
   })
 
   it('walks the links out of Run and the links into Run', () => {
