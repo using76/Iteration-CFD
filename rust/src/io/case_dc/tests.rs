@@ -316,6 +316,24 @@ fn pair_test_case_ashrae_class_and_sample_set() {
     assert_eq!(a.racks[0].samples.len(), 3, "`thirds` is three points per rack");
 }
 
+/// The 5th edition's H1 travels the whole way from the JSONC document to the
+/// lowered case, with no change to the reader itself.
+#[test]
+fn pair_test_case_ashrae_class_h1_reaches_the_lowered_case() {
+    let a = base().lower().expect("base");
+    let h = variant("\"ashraeClass\": \"A1\"", "\"ashraeClass\": \"H1\"")
+        .lower()
+        .expect("H1 must lower");
+    assert_eq!(h.class, AshraeClass::H1);
+    assert_eq!(h.class.envelope(), (5.0, 18.0, 22.0, 25.0));
+    // SPEC-LIT S13.4.1, sharpened: A1 and H1 differ in BOTH bands, so BOTH RCI
+    // denominators move. A1 has 5 K of headroom above 27 C and 3 K below 18 C;
+    // H1 has 3 K above 22 C and 13 K below 18 C.
+    assert_ne!(a.class.envelope().2, h.class.envelope().2, "recommended high");
+    assert_ne!(a.class.envelope().3, h.class.envelope().3, "allowable high");
+    assert_ne!(a.class.envelope().0, h.class.envelope().0, "allowable low");
+}
+
 /// `virtualTemperature` on and off must reach the lowered case, because it is
 /// the one setting §54.4 puts on the momentum path.
 #[test]

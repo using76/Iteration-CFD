@@ -9585,8 +9585,21 @@ Written from:
   original.
 * ASHRAE Technical Committee 9.9, *Thermal Guidelines for Data Processing
   Environments*, 5th ed., ASHRAE (2021), ISBN 978-1-947192-90-4 — the Class
-  A1–A4 **recommended** (18–27 C) and **allowable** envelopes RCI is measured
-  against.
+  A1–A4 and H1 **recommended** and **allowable** envelopes RCI is measured
+  against. **The book is paywalled and was not opened**; every number in §55.1
+  comes from the public column below, written by members of the same committee,
+  and not one sentence of the book is reproduced here.
+* D. Quirk, J. Davidson, R. Schmidt, "ASHRAE's Data Center Thermal Guidelines —
+  Air-Cooled Evolution", *ASHRAE Journal*, May 2022, pp. 54–58 — the **public**
+  statement of the 5th edition's five air classes, and the source of H1's
+  5–25 C allowable and 18–22 C recommended bands. (c) 2022 ASHRAE; **numeric
+  values only**, the column's own text is not reproduced.
+* P. Mathew, S. Ganguly, S. Greenberg, D. Sartor, *Self-benchmarking Guide for
+  Data Centers: Metrics, Benchmarks, Actions*, LBNL for NYSERDA, 13 July 2009,
+  `https://www.osti.gov/servlets/purl/983248` — prepared under US-Government
+  sponsorship, no restrictive licence. Its metric A1 is the supply-to-return
+  delta-T and its metric A4 is airflow efficiency in W/cfm, better-practice
+  value 0.5 W/cfm. Both are reported by §55.4 as **context**, never as a gate.
 * E. Wibron, A.-L. Ljung, T. S. Lundström, *Energies* **12**(8) (2019) 1473.
   DOI `10.3390/en12081473` — **CC-BY-4.0, licence verified live via the
   Crossref REST API**; publishes RCI and RTI for six containment
@@ -9599,9 +9612,11 @@ Written from:
 * ISO/IEC 30134-2, *Data centres — Key performance indicators — Part 2: Power
   usage effectiveness (PUE)*; European equivalent EN 50600-4-2; The Green
   Grid, *PUE: A Comprehensive Examination of the Metric* (2012). **The current
-  edition was not verifiable from here** (the ISO catalogue returns HTTP 403),
-  so no standard number is printed in a report as if it had been checked —
-  see §55.4.
+  edition is ed. 2.0, published 2026-01-16** — 35 pp., ICS 27.015/35.020,
+  JTC 1/SC 39, IEC webstore publication 111538, CHF 159. That **catalogue
+  metadata** is the whole of what was read; the standard's **text is paywalled
+  and was not opened**, so no number is printed in a report as if it had been
+  checked and no PUE is computed — see §55.4.
 * ofgpu `SPEC-LIT.md` §8.4 (the reduction), §18 (the heat-release zones that
   are the denominator), §44 (the `output` block this extends), §52 (the fan
   power), §54 (humidity, which the envelope also constrains).
@@ -9610,9 +9625,9 @@ No GPL-licensed source was consulted.
 
 ### 55.1 RCI — how far outside the envelope the rack inlets are
 
-Over `n` rack-inlet sample temperatures `T_x`, with the ASHRAE recommended
-range `[T_lo_rec, T_hi_rec] = [18, 27] C` and the class's allowable range
-`[T_lo_all, T_hi_all]`:
+Over `n` rack-inlet sample temperatures `T_x`, with the class's own recommended
+range `[T_lo_rec, T_hi_rec]` and its own allowable range `[T_lo_all, T_hi_all]`
+— **both** belong to the class, and neither is a constant:
 
 ```
     RCI_HI = [ 1 - SUM_x max(0, T_x - T_hi_rec)
@@ -9622,11 +9637,39 @@ range `[T_lo_rec, T_hi_rec] = [18, 27] C` and the class's allowable range
 ```
 
 100 % means no inlet is outside the recommended range at all. The class is a
-**setting**: A1–A4 have different allowable envelopes (A1 15–32 C, A2
-10–35 C, A3 5–40 C, A4 5–45 C) and a case that names a class and gets A1's
-numbers is the §13.4.1 defect, so the class is read, the four temperatures are
-**printed**, and two cases differing only in the class must produce different
-indices.
+**setting**, and both of its bands belong to it:
+
+| class | recommended | allowable | what it is |
+|---|---|---|---|
+| A1 | 18–27 C | 15–32 C | tightly controlled, mission-critical |
+| A2 | 18–27 C | 10–35 C | some control of environmental parameters |
+| A3 | 18–27 C | 5–40 C | wider range, chiller-less in most climates |
+| A4 | 18–27 C | 5–45 C | wider still, outdoor air-cooled |
+| H1 | **18–22 C** | **5–25 C** | high-density air-cooled servers |
+
+The 5th edition (2021) added **H1**, and it is the one class whose
+**recommended** band is not 18–27 C. A solver that hard-codes 18/27 is right
+for four classes and structurally wrong for the fifth, so `envelope()` returns
+all four temperatures from the class arm and the index hard-codes nothing. A
+case that names a class and silently gets A1's numbers is the §13.4.1 defect,
+so the class is read, its four temperatures are **printed**, and two cases
+differing only in the class must produce different indices.
+
+**H1 against A1 is the sharpest form of that pair test**, and it is the one the
+tests use, because the two classes differ in the denominator of `RCI_HI`
+(3 K against 5 K) **and** in the denominator of `RCI_LO` (13 K against 3 K).
+H1 is the stricter index above the band and the more forgiving one below it. A
+pair test that checked only the high index would still pass on a solver that
+had gone on hard-coding the recommended band, which is why both halves are
+required.
+
+Every number in that table is the public ASHRAE Journal column's; the
+5th-edition book itself is paywalled and was not opened. Secondary sources that
+describe H1 as a liquid-cooled class with an 18–22 C *coolant* supply are
+contradicted by that column, which is written by TC 9.9 members, describes H1
+as a high-density air-cooled class and plots it on the same air psychrometric
+chart as A1–A4. The column wins, and this paragraph exists so that the next
+reader does not re-open the question.
 
 **The sample set is a setting too, and this is not a detail.** RCI is defined
 over *rack-inlet sample points*, and its value depends on which points those
@@ -9704,11 +9747,43 @@ the single most valuable number in a data-centre report, because supply
 temperature is what buys free-cooling hours and free-cooling hours are what
 move PUE.
 
-**No standard number is printed as if it had been checked.** The ISO/IEC
-30134-2 edition could not be verified from this environment, so the report
-names The Green Grid's 2012 white paper as the readable background, states the
-three quantities above as inputs, and does **not** compute a PUE. A solver
-that printed a PUE would be printing a facility number from a room model.
+**No standard number is printed as if it had been checked.** The current
+edition is ISO/IEC 30134-2:2026, ed. 2.0, published 2026-01-16, IEC webstore
+publication 111538 — that is catalogue metadata, and it is all of the standard
+that was read. Its **text is paywalled and was not opened**, so the report
+names the edition and what it costs, names The Green Grid's 2012 white paper as
+the readable background, states the three quantities above as inputs, and does
+**not** compute a PUE. Knowing which edition is current does not make a room
+model able to compute a facility energy ratio; a solver that printed a PUE
+would still be printing a facility number from a room model.
+
+**Two air-management numbers travel with the fan power.** Both come from the
+LBNL Self-benchmarking Guide, both are reported as **context and never as a
+gate**:
+
+```
+    dT            = T_return - T_supply                 [K]      LBNL metric A1
+    AE            = W_fan / Q_supply                    [W/cfm]  LBNL metric A4
+    Q_supply[cfm] = Q_supply[m^3/s] x 60 / 0.3048^3
+```
+
+`dT` is free: `T_return` and `T_supply` are already the flux-weighted means
+`RTI` divides, so naming their difference costs no reduction at all, and it is
+what an air audit reads first — a low supply temperature together with a small
+`dT` is the signature of bypass, which is what `RTI < 100 %` says in a
+different unit. `AE` is the fan shaft power of (S55.5) over the supply patch's
+own `SUM |phi_f|`, which §55.5's flux-weighted mean already returns as its
+second value, so it costs no reduction either.
+
+LBNL's better-practice figure is **0.5 W/cfm**, and the report prints it as
+context beside the computed value rather than failing a run that misses it. The
+published figure is a whole-facility supply-**plus**-return fan power over
+supply-plus-exhaust airflow; this is a room model's supply fans over one patch.
+The two are not the same measurement, and a report that quietly compared them
+would be inventing a verdict. The conversion constant is exact by definition —
+the international foot is exactly 0.3048 m, so `1 m^3/s = 2118.8800032893155
+cfm` — and the W/(L/s) reading of the same number is printed beside it so that
+nobody has to carry the foot around.
 
 ### 55.5 The reductions
 
