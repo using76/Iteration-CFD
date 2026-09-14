@@ -216,6 +216,24 @@ struct Checks {
     /// The device `run` named in its banner - `(name, "sm_<cc>")`. `None`
     /// until `run` reaches the GPU, and `None` for ever on the abort path.
     device: Option<(String, String)>,
+    /// The per-check table this run took, in the order it took them. One row
+    /// per [`Self::check`] and one per [`Self::skip`]; a note is not a check
+    /// and pushes nothing. `json::build_document` reads it directly - `json`
+    /// is a descendant module, so these private fields are visible to it and
+    /// no accessor exists.
+    rows: Vec<json::Row>,
+    /// The sequence behind a row's `seq`. Incremented immediately before each
+    /// push and never anywhere else, so `runId + seq` - `Check`'s primary key
+    /// in `AIP ontology/DOMAIN-MODEL.md`'s check table - is contiguous from 1.
+    seq: usize,
+    /// The gate whose scope is open, if any. One gate, never a stack: a check
+    /// has one parent or none (`AIP ontology/DOMAIN-MODEL.md`'s check table makes
+    /// `Check` -> `Gate` n:1).
+    gate: Option<&'static str>,
+    /// Gates that registered a verdict while their own scope was NOT the open
+    /// one. The audit's fourth row is built from this, which is what makes the
+    /// parent edge true by construction rather than by anyone remembering.
+    orphan_verdicts: Vec<&'static str>,
     /// Every line this struct has printed, and whether the gate registry
     /// printed it. [`Checks::audit_and_summarise`] is the only reason it is
     /// kept: a verdict word on a line the registry did not print is a verdict
@@ -234,6 +252,10 @@ impl Checks {
             in_replay: false,
             gates: Vec::new(),
             device: None,
+            rows: Vec::new(),
+            seq: 0,
+            gate: None,
+            orphan_verdicts: Vec::new(),
             transcript: RefCell::new(Vec::new()),
         }
     }
@@ -246,6 +268,20 @@ impl Checks {
         self.in_replay = true;
         f(self);
         self.in_replay = false;
+    }
+
+    /// Open a gate's scope. Every row taken until [`Self::leave_gate`] names
+    /// this gate. Re-entering REPLACES the open gate; that is what a section
+    /// reporting two verdicts in a row needs, and it is why there is no
+    /// separate `switch_gate`. It asserts nothing: a misplaced scope is a
+    /// failed audit row (S69.4), not a panic 40 minutes into a run.
+    fn enter_gate(&mut self, gate: &'static str) {
+        self.gate = Some(gate);
+    }
+
+    /// End the open gate's scope. Rows taken after it name no gate.
+    fn leave_gate(&mut self) {
+        self.gate = None;
     }
 
     fn check(&mut self, what: &str, err: Scalar, tol: Scalar) {
@@ -271,6 +307,9 @@ impl Checks {
             ),
             false,
         );
+
+        self.seq += 1;
+        self.rows.push(json::check_row(self.seq, what, f64::from(err), f64::from(tol), ok, self.in_replay, self.gate));
     }
 
     /// A yes/no check with no meaningful error magnitude.
@@ -283,6 +322,9 @@ impl Checks {
     fn skip(&mut self, what: &str, why: &str) {
         self.skipped += 1;
         self.emit(format!("  skip  {what:<52}{why}"), false);
+
+        self.seq += 1;
+        self.rows.push(json::skip_row(self.seq, what, why, self.gate));
     }
 
     fn note(&self, line: &str) {
@@ -316,6 +358,9 @@ impl Checks {
     /// whatever the physics verdict is - is asserted beside it with
     /// [`Self::check`] and [`Self::require`], exactly as before.
     fn report(&mut self, g: GateReport) {
+        if self.gate != Some(g.gate) {
+            self.orphan_verdicts.push(g.gate);
+        }
         self.emit(
             format!(
                 "        ** {} {} ** ({}): {}",
@@ -342,9 +387,10 @@ impl Checks {
             "\n{n_miss} gates carry the verdict {}, and {n_open} the verdict {}. This list is \
              GENERATED from the registry each of them entered at the point it reported \
              (SPEC-LIT S69): printing a verdict and registering one are the same call, and the \
-             three rows above hold the three parts of that - no unregistered verdict was \
-             printed, every registered gate is named here, and every registered gate declares \
-             its mesh study (SPEC-LIT 94.3). SPEC-LIT and the READMEs carry each in full.\n",
+             four rows above hold the four parts of that - no unregistered verdict was \
+             printed, every registered gate is named here, every registered gate declares \
+             its mesh study (SPEC-LIT 94.3), and every registered verdict was reported inside \
+             its own gate scope (S69.4). SPEC-LIT and the READMEs carry each in full.\n",
             Verdict::Misses.word(),
             Verdict::Open.word(),
         );
@@ -380,7 +426,7 @@ impl Checks {
     /// returning the summary text so `main` prints the very string that was
     /// audited rather than a second one built the same way.
     ///
-    /// Three rows, in the tally like any other:
+    /// Four rows, in the tally like any other:
     ///
     /// 1. every line this run printed that shouts a verdict word came from
     ///    [`Self::report`]. A note saying a gate missed without registering it
@@ -392,6 +438,12 @@ impl Checks {
     /// 3. every gate in the registry declares its mesh study - one mesh by
     ///    name, or the (94.9) estimate (SPEC-LIT 94.3). `None` is the one
     ///    state a verdict may not reach the summary in.
+    /// 4. every gate in the registry registered its verdict while its OWN
+    ///    scope was the open one (S69.4). This is what makes a check row's
+    ///    gate parent true by construction: if a section reports a verdict
+    ///    outside the scope it opened, the parent on every row it took is
+    ///    wrong, and this row fails the run rather than letting a quietly
+    ///    mis-parented table reach the importer.
     fn audit_and_summarise(&mut self) -> String {
         let summary = self.gate_summary();
 
@@ -437,6 +489,15 @@ impl Checks {
             "every registered gate declares its mesh study - one mesh by name, or the (94.9) \
              estimate (SPEC-LIT 94.3)",
             undeclared.is_empty(),
+        );
+
+        let orphans: Vec<&str> = self.orphan_verdicts.clone();
+        for name in &orphans {
+            println!("        verdict registered outside its own gate scope (S69.4): {name}");
+        }
+        self.require(
+            "every registered verdict was reported inside its own gate scope (S69.4)",
+            orphans.is_empty(),
         );
 
         summary
@@ -2981,7 +3042,9 @@ fn run(c: &mut Checks) -> Result<()> {
     check_fixed_flux_identity(c);
     check_nu_correlations(c);
     check_realised_friction_factor(c)?;
+    c.enter_gate("SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg");
     c.replaying(check_thermal_wall_function_gate_verdict_replay);
+    c.leave_gate();
 
     // ---- Launder-Sharma low-Re k-epsilon: the damping functions
     //      (SPEC-LIT 33.3) -------------------------------------------------
@@ -3021,7 +3084,9 @@ fn run(c: &mut Checks) -> Result<()> {
     // that it has an actual steady state to measure.
     println!("\n=== the bulk-temperature thermostat (SPEC-LIT 35) ===");
     check_thermostat_sign_and_steady_offset(c, &gpu)?;
+    c.enter_gate("SPEC-LIT S32.4 verdict 1 (absolute prediction), resolved leg");
     c.replaying(check_resolved_leg_gate_verdict_replay);
+    c.leave_gate();
 
     // SPEC-LIT §35.3.2's uniform-vs-massFlux experiment, on both meshes -
     // the measurement that decided whether the uniform sink's distribution
@@ -3066,13 +3131,17 @@ fn run(c: &mut Checks) -> Result<()> {
     // SPEC-LIT 93 - Gate 93-A: a region's rows of the concatenated assembly
     // are the region alone, bit for bit.
     println!("\n=== an equation that lives on a region - Gate 93-A (SPEC-LIT 93) ===");
+    c.enter_gate("SPEC-LIT S93 Gate 93-A");
     check_region_restriction(c, &gpu)?;
+    c.leave_gate();
 
     // SPEC-LIT S59/S60 - the FLUID side of that interface, and S47.12's Gate
     // 5, which S47.14 recorded as not run.
     println!("
 === the conjugate fluid/solid interface (SPEC-LIT 59, 60) ===");
+    c.enter_gate("SPEC-LIT S60.5 Gate 5");
     check_conjugate_fluid(c, &gpu)?;
+    c.leave_gate();
     check_forced_convection(c, &gpu)?;
 
     // SPEC-LIT S49/S50/S51 - surface-to-surface radiation.
@@ -3098,14 +3167,18 @@ fn run(c: &mut Checks) -> Result<()> {
         "
 === gamma-Re_theta transition (SPEC-LIT 88, 89) ==="
     );
+    c.enter_gate("SPEC-LIT S88 Gate 88-T");
     check_transition(c)?;
+    c.leave_gate();
 
     // SPEC-LIT S90 - the Menter et al. (2015) one-equation gamma model on SST.
     println!(
         "
 === the 2015 gamma transition model (SPEC-LIT 90) ==="
     );
+    c.enter_gate("SPEC-LIT S90 Gate 90-T");
     check_gamma_transition(c, &gpu)?;
+    c.leave_gate();
 
     // SPEC-LIT S66 - the Lagrangian parcel pool, the drag update and the walk.
     println!("
@@ -3135,19 +3208,27 @@ fn run(c: &mut Checks) -> Result<()> {
     // SPEC-LIT S78 - the droplet-wall impact map, and the mass it leaves there.
     println!("
 === droplet-wall impact (SPEC-LIT 78) ===");
+    c.enter_gate("78-D");
     check_droplet_wall_impact(c, &gpu)?;
+    c.leave_gate();
 
     // SPEC-LIT S38.9 and S39.7 - the two sections added last.
     check_buckingham_reiner(c);
     check_contact_angle_jurin(c);
     check_non_newtonian_channel(c, &gpu, &k)?;
     println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes) ===");
+    c.enter_gate("Gate 95-D thick cylinder");
     check_thick_cylinder(c, &gpu)?;
+    c.leave_gate();
     println!("\n=== Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) ===");
+    c.enter_gate("Gate 95-E bimetal strip");
     check_solid_bimetal(c, &gpu)?;
+    c.leave_gate();
 
     // SPEC-LIT S97 - the imported region, and Gate 97-A.
+    c.enter_gate("S97 Gate 97-A imported region");
     check_imported_region(c, &gpu)?;
+    c.leave_gate();
     c.replaying(check_kays_crawford_experiment_replay);
 
     Ok(())
@@ -11176,6 +11257,7 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     // factor. It used to be asserted as a pass at +6.8%; that rested on an
     // `f` inferred from the body force, which the direct measurement then
     // showed to be 11% high. At the measured `f` it is +15.2% - outside.
+    c.enter_gate("SPEC-LIT S32.4 verdict 2 (Reynolds analogy), resolved leg");
     c.report(GateReport {
         verdict: Verdict::Open,
         how: How::Replayed,
@@ -12982,7 +13064,10 @@ fn check_parcel_coupling(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     // ==================================================================
     //  Gate 68-C: Theobald (1981) hose streams
     // ==================================================================
-    theobald_gate(c, gpu)
+    c.enter_gate("SPEC-LIT S68.12 Gate 68-C");
+    let theobald = theobald_gate(c, gpu);
+    c.leave_gate();
+    theobald
 }
 
 /// The 90 Theobald (1981) hose-stream experiments, and what this solver makes
@@ -16661,7 +16746,9 @@ mod verdict_registry {
     #[test]
     fn a_registered_verdict_passes_and_reaches_the_summary() {
         let mut c = Checks::new();
+        c.enter_gate("SPEC-LIT S99.9 Gate 99-Z");
         c.report(a_report("SPEC-LIT S99.9 Gate 99-Z", Verdict::Misses));
+        c.leave_gate();
         let summary = c.audit_and_summarise();
         assert_eq!(c.failures, 0, "a registered verdict must not fail either row");
         assert!(summary.contains("SPEC-LIT S99.9 Gate 99-Z"), "{summary}");
@@ -16673,9 +16760,13 @@ mod verdict_registry {
     #[test]
     fn misses_and_open_verdicts_are_counted_and_grouped_separately() {
         let mut c = Checks::new();
+        c.enter_gate("S99.1 Gate A");
         c.report(a_report("S99.1 Gate A", Verdict::Misses));
+        c.enter_gate("S99.2 Gate B");
         c.report(a_report("S99.2 Gate B", Verdict::Open));
+        c.enter_gate("S99.3 Gate C");
         c.report(a_report("S99.3 Gate C", Verdict::Misses));
+        c.leave_gate();
         let summary = c.audit_and_summarise();
         assert_eq!(c.failures, 0);
         assert!(
@@ -16729,7 +16820,9 @@ mod verdict_registry {
         let mut c = Checks::new();
         let mut g = a_report("SPEC-LIT S99.4 Gate 99-Y", Verdict::Misses);
         g.uncertainty = None;
+        c.enter_gate("SPEC-LIT S99.4 Gate 99-Y");
         c.report(g);
+        c.leave_gate();
         let s = c.audit_and_summarise();
         assert_eq!(
             c.failures, 1,
@@ -18645,4 +18738,130 @@ fn check_imported_region(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+/// The scope, the audit row and this file's own source - the three things a
+/// test in the parent file can see that a test in `json` cannot. The row
+/// CONTENTS live in `json::tests` (the fields are private to that module);
+/// this module asserts on the scope itself, on the tally the audit moves,
+/// and on the map from every reported gate to a scope that names it.
+#[cfg(test)]
+mod gate_parent {
+    use super::*;
+
+    /// This file's own text at compile time. Named `SRC`, not `SOURCE`, so it
+    /// does not clash with `verdict_registry`'s constant of the same purpose.
+    const SRC: &str = include_str!("validate.rs");
+
+    fn a_report(gate: &'static str, verdict: Verdict) -> GateReport {
+        GateReport {
+            verdict,
+            how: How::Live,
+            gate,
+            against: "an invented measurement",
+            headline: "it is out".to_string(),
+            detail: Vec::new(),
+            uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
+        }
+    }
+
+    /// A note is not a check and pushes no row; a require funnels through
+    /// `check` and pushes exactly one. So: 2 checks + 1 require + 1 skip is
+    /// 4 rows, and the row count is the tally it is derived from.
+    #[test]
+    fn a_note_is_not_a_row_and_a_require_is() {
+        let mut c = Checks::new();
+        c.check("one", 0.0, 1.0);
+        c.check("two", 0.0, 1.0);
+        c.require("three", true);
+        c.skip("four", "not attempted on this machine");
+        c.note("a note is not a check");
+        assert_eq!(c.rows.len(), 4);
+        assert_eq!(c.rows.len(), c.total + c.skipped);
+    }
+
+    /// The scope is a field, not an argument: opened, replaced, closed.
+    #[test]
+    fn the_scope_opens_and_closes() {
+        let mut c = Checks::new();
+        assert_eq!(c.gate, None);
+        c.enter_gate("S99.1 Gate A");
+        assert_eq!(c.gate, Some("S99.1 Gate A"));
+        c.enter_gate("S99.2 Gate B");
+        assert_eq!(c.gate, Some("S99.2 Gate B"));
+        c.leave_gate();
+        assert_eq!(c.gate, None);
+    }
+
+    /// A verdict registered while its own scope WAS the open one: all four
+    /// audit rows hold, and the summary names the gate.
+    #[test]
+    fn a_verdict_reported_inside_its_gate_passes_the_audit() {
+        let mut c = Checks::new();
+        c.enter_gate("SPEC-LIT S99.9 Gate 99-Z");
+        c.report(a_report("SPEC-LIT S99.9 Gate 99-Z", Verdict::Misses));
+        c.leave_gate();
+        let summary = c.audit_and_summarise();
+        assert_eq!(c.failures, 0, "{summary}");
+        assert!(summary.contains("SPEC-LIT S99.9 Gate 99-Z"), "{summary}");
+    }
+
+    /// The parent edge is true by construction: a verdict registered with no
+    /// scope open is a mis-parented row table, and the audit fails the run.
+    #[test]
+    fn a_verdict_reported_outside_its_gate_fails_the_audit() {
+        let mut c = Checks::new();
+        c.report(a_report("SPEC-LIT S99.9 Gate 99-Z", Verdict::Misses));
+        c.audit_and_summarise();
+        assert_eq!(c.failures, 1);
+    }
+
+    /// ...and a verdict registered under ANOTHER gate's scope fails too.
+    #[test]
+    fn a_verdict_whose_scope_names_another_gate_fails_the_audit() {
+        let mut c = Checks::new();
+        c.enter_gate("S99.1 Gate A");
+        c.report(a_report("S99.2 Gate B", Verdict::Misses));
+        c.audit_and_summarise();
+        assert_eq!(c.failures, 1);
+    }
+
+    /// The map, at the source level: every gate literal this file reports a
+    /// verdict with has an `enter_gate` call spelling the very
+    /// same string. 13 occurrences, 12 distinct - one gate reports twice.
+    /// The Y set also picks up one junk entry from this test's own scanner
+    /// line; that is harmless, because only the subset direction is asserted.
+    #[test]
+    fn every_reported_gate_has_a_scope() {
+        let needle = concat!("enter_gate", "(\"");
+        let mut reported: Vec<&str> = Vec::new();
+        let mut scopes: Vec<&str> = Vec::new();
+        for line in SRC.lines() {
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("gate: \"") {
+                if let Some(end) = rest.find('"') {
+                    reported.push(&rest[..end]);
+                }
+            }
+            let mut from = 0;
+            while let Some(at) = line[from..].find(needle) {
+                let start = from + at + needle.len();
+                let rest = &line[start..];
+                if let Some(end) = rest.find('"') {
+                    scopes.push(&rest[..end]);
+                }
+                from = start;
+            }
+        }
+        assert_eq!(reported.len(), 13, "13 gate literals, found {reported:?}");
+        let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
+        assert_eq!(distinct.len(), 12, "12 distinct names, got {distinct:?}");
+        let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
+        for name in &distinct {
+            assert!(
+                scope_set.contains(name),
+                "no enter_gate scope spells the reported gate {name:?}"
+            );
+        }
+    }
 }

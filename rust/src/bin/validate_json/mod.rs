@@ -153,7 +153,7 @@ fn triplet_json(t: &ofgpu::vv::Triplet) -> TripletJson {
     }
 }
 
-/// The document itself: fourteen keys, always all of them, in this order.
+/// The document itself: fifteen keys, always all of them, in this order.
 /// Absence is spelled `null`, never an omitted key.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,8 +172,7 @@ pub(crate) struct RunDoc<'a> {
     machine: Machine,
     totals: Totals,
     gates: &'a [super::GateReport],
-    // R2 appends `rows: &'a [Row]` HERE, as the last field. Leave the
-    // order of everything above it alone.
+    rows: &'a [Row],
 }
 
 // The four crate-root types cannot carry `#[derive(serde::Serialize)]`: a
@@ -349,6 +348,103 @@ pub(crate) fn machine(device: Option<&(String, String)>) -> Machine {
     }
 }
 
+/// Whether a row is a comparison or a check that was not attempted. It is
+/// the one key that tells a NaN error apart from a skip, both of which
+/// reach the importer as `"err": null`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RowKind {
+    Check,
+    Skip,
+}
+
+/// One row of the per-check table: what was compared, against what, whether
+/// it held, and the gate whose scope it was taken under. Ten keys, always
+/// all ten, absence spelled `null` - the column set an importer keyed on
+/// `runId + seq` can rely on (`AIP ontology/DOMAIN-MODEL.md`'s check table).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Row {
+    seq: usize,
+    kind: RowKind,
+    what: String,
+    err: Option<f64>,
+    tol: Option<f64>,
+    ok: Option<bool>,
+    replayed: Option<bool>,
+    why: Option<String>,
+    /// `"nan"`, `"inf"`, `"-inf"`, or `None` when the error was finite.
+    ///
+    /// `serde_json` writes a non-finite `f64` as `null`, so a NaN error and a
+    /// skip both reach the importer with `"err": null`. `kind` tells them
+    /// apart; this says which non-finite the number was.
+    non_finite: Option<&'static str>,
+    /// The gate whose scope was open when this row was taken - its name, which
+    /// is its primary key in `AIP ontology/DOMAIN-MODEL.md`'s check table. `None` is not
+    /// a defect: it is the honest statement that this check is not under a gate
+    /// the registry names.
+    gate: Option<&'static str>,
+}
+
+/// `None` when `x` is finite; otherwise the word for which non-finite it is.
+/// Called by [`check_row`] from the `f64` it already has, so `validate.rs`
+/// never learns what the wire format calls a NaN.
+pub(crate) fn non_finite_word(x: f64) -> Option<&'static str> {
+    if x.is_finite() {
+        None
+    } else if x.is_nan() {
+        Some("nan")
+    } else if x > 0.0 {
+        Some("inf")
+    } else {
+        Some("-inf")
+    }
+}
+
+/// One comparison as a row. `err` is `None` when the number was not finite -
+/// `serde_json` refuses a non-finite `f64` outright, and `non_finite` is
+/// where the fact goes instead, so `validate.rs` never learns what the wire
+/// format calls a NaN.
+pub(crate) fn check_row(
+    seq: usize,
+    what: &str,
+    err: f64,
+    tol: f64,
+    ok: bool,
+    replayed: bool,
+    gate: Option<&'static str>,
+) -> Row {
+    Row {
+        seq,
+        kind: RowKind::Check,
+        what: what.to_string(),
+        err: if err.is_finite() { Some(err) } else { None },
+        tol: if tol.is_finite() { Some(tol) } else { None },
+        ok: Some(ok),
+        replayed: Some(replayed),
+        why: None,
+        non_finite: non_finite_word(err),
+        gate,
+    }
+}
+
+/// A check that was not attempted, as a row. It has no error, so `err`,
+/// `tol`, `ok` and `replayed` are all `null`, and `why` carries the reason.
+pub(crate) fn skip_row(seq: usize, what: &str, why: &str, gate: Option<&'static str>) -> Row {
+    Row {
+        seq,
+        kind: RowKind::Skip,
+        what: what.to_string(),
+        err: None,
+        tol: None,
+        ok: None,
+        replayed: None,
+        why: Some(why.to_string()),
+        non_finite: None,
+        gate,
+    }
+}
+
 /// The document of one run: the tally read off `Checks`, every gate it
 /// registered, the machine, the commit, the clock. The commit is probed here,
 /// once, because this is the one moment the process knows it is recording.
@@ -384,6 +480,7 @@ pub(crate) fn build_document<'a>(
             replayed: c.replayed,
         },
         gates: c.gates.as_slice(),
+        rows: c.rows.as_slice(),
     }
 }
 
@@ -560,19 +657,7 @@ mod tests {
         );
     }
 
-    /// This unit's boundary against the row-table unit: the gate document
-    /// carries no per-check table, and this test exists to be deleted by the
-    /// unit that adds one.
-    #[test]
-    fn the_document_carries_no_check_rows() {
-        let c = Checks::new();
-        let doc = build_document(&c, "v_test", &[], 0, 1, 0.0, 0, None);
-        let v = serde_json::to_value(&doc).unwrap();
-        assert!(v.get("rows").is_none());
-        assert!(v.get("checks").is_none());
-    }
-
-    /// The fourteen keys of the contract, and only those; `machine`'s six
+    /// The fifteen keys of the contract, and only those; `machine`'s six
     /// keys are what prove the `rename_all = "camelCase"` attribute is on
     /// the derived structs.
     #[test]
@@ -592,10 +677,11 @@ mod tests {
             keys,
             [
                 "aborted", "argv", "cwd", "endedAt", "exitCode", "gates", "gitDirty",
-                "gitSha", "machine", "runId", "schema", "startedAt", "totals", "wallSeconds",
+                "gitSha", "machine", "rows", "runId", "schema", "startedAt", "totals",
+                "wallSeconds",
             ]
         );
-        assert_eq!(obj.len(), 14);
+        assert_eq!(obj.len(), 15);
         assert_eq!(obj["schema"], "ofgpu-validate/1");
         assert_eq!(obj["aborted"], serde_json::Value::Null);
         let machine = obj["machine"].as_object().unwrap();
@@ -670,5 +756,126 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["schema"], "ofgpu-validate/1");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A check taken with no gate scope open carries `gate: null` - the
+    /// honest statement that it is not under a gate the registry names.
+    #[test]
+    fn a_row_outside_a_gate_has_a_null_parent() {
+        let mut c = Checks::new();
+        c.check("x", 0.0, 1.0);
+        assert_eq!(c.rows[0].gate, None);
+        let v = serde_json::to_value(&c.rows[0]).unwrap();
+        assert_eq!(v["gate"], serde_json::Value::Null);
+    }
+
+    /// A check taken inside a gate's scope names that gate, and the scope
+    /// ends where `leave_gate` says it ends.
+    #[test]
+    fn a_row_inside_a_gate_carries_its_name() {
+        let mut c = Checks::new();
+        c.enter_gate("S99.1 Gate A");
+        c.check("x", 0.0, 1.0);
+        c.leave_gate();
+        c.check("y", 0.0, 1.0);
+        assert_eq!(c.rows[0].gate, Some("S99.1 Gate A"));
+        assert_eq!(c.rows[1].gate, None);
+        assert_eq!((c.rows[0].seq, c.rows[1].seq), (1, 2));
+    }
+
+    /// One gate, never a stack: entering a second gate REPLACES the first.
+    /// This is the shape `check_resolved_leg_gate_verdict_replay` relies on.
+    #[test]
+    fn entering_a_second_gate_replaces_the_first() {
+        let mut c = Checks::new();
+        c.enter_gate("S99.1 Gate A");
+        c.check("x", 0.0, 1.0);
+        c.enter_gate("S99.2 Gate B");
+        c.check("y", 0.0, 1.0);
+        c.leave_gate();
+        c.check("z", 0.0, 1.0);
+        assert_eq!(c.rows[0].gate, Some("S99.1 Gate A"));
+        assert_eq!(c.rows[1].gate, Some("S99.2 Gate B"));
+        assert_eq!(c.rows[2].gate, None);
+    }
+
+    /// A skip is a row in the SAME sequence as the checks, and it carries
+    /// the gate it was skipped under.
+    #[test]
+    fn a_skip_row_carries_its_gate_too() {
+        let mut c = Checks::new();
+        c.enter_gate("S99.1 Gate A");
+        c.check("x", 0.0, 1.0);
+        c.skip("cuFFT Poisson", "no cuFFT on this device");
+        c.check("y", 0.0, 1.0);
+        c.leave_gate();
+        let v = serde_json::to_value(&c.rows[1]).unwrap();
+        assert_eq!(v["kind"], "skip");
+        assert_eq!(v["err"], serde_json::Value::Null);
+        assert_eq!(v["tol"], serde_json::Value::Null);
+        assert_eq!(v["ok"], serde_json::Value::Null);
+        assert_eq!(v["replayed"], serde_json::Value::Null);
+        assert_eq!(v["why"], "no cuFFT on this device");
+        assert_eq!(v["gate"], "S99.1 Gate A");
+        assert_eq!((c.rows[0].seq, c.rows[1].seq, c.rows[2].seq), (1, 2, 3));
+        assert_eq!((c.skipped, c.total), (1, 2));
+    }
+
+    /// A non-finite error serialises `err: null` AND says which non-finite
+    /// it was; the check itself still fails exactly as it always did.
+    #[test]
+    fn a_non_finite_error_says_which_one_it_was() {
+        let mut c = Checks::new();
+        c.check("x", Scalar::NAN, 1.0);
+        let v = serde_json::to_value(&c.rows[0]).unwrap();
+        assert_eq!(v["err"], serde_json::Value::Null);
+        assert_eq!(v["nonFinite"], "nan");
+        assert_eq!(v["ok"], false);
+        assert_eq!(c.failures, 1);
+        assert_eq!(non_finite_word(f64::INFINITY), Some("inf"));
+        assert_eq!(non_finite_word(f64::NEG_INFINITY), Some("-inf"));
+        assert_eq!(non_finite_word(0.0), None);
+    }
+
+    /// The column set an importer keyed on `runId + seq` can rely on: the
+    /// same ten keys on every row, none optional.
+    #[test]
+    fn every_row_has_the_same_ten_keys() {
+        let mut c = Checks::new();
+        c.enter_gate("S99.1 Gate A");
+        c.check("gated", 0.0, 1.0);
+        c.leave_gate();
+        c.check("ungated", 0.0, 1.0);
+        c.skip("cuFFT Poisson", "no cuFFT on this device");
+        let want = [
+            "err", "gate", "kind", "nonFinite", "ok", "replayed", "seq", "tol", "what", "why",
+        ];
+        for row in &c.rows {
+            let v = serde_json::to_value(row).unwrap();
+            let obj = v.as_object().unwrap();
+            let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, want, "{keys:?}");
+            assert_eq!(obj.len(), 10);
+        }
+    }
+
+    /// The document R1 writes carries the gate on its rows - built in memory
+    /// here, with no GPU, no process and no file.
+    #[test]
+    fn the_document_rows_carry_their_gate() {
+        let mut c = Checks::new();
+        c.enter_gate("S99.1 Gate A");
+        c.check("gated", 0.0, 1.0);
+        c.skip("cuFFT Poisson", "no cuFFT on this device");
+        c.leave_gate();
+        c.check("ungated", 0.0, 1.0);
+        let argv = vec!["ofgpu-validate".to_string()];
+        let doc = build_document(&c, "v_test", &argv, 0, 1, 0.001, 0, None);
+        let v = serde_json::to_value(&doc).unwrap();
+        assert_eq!(v["rows"][0]["gate"], "S99.1 Gate A");
+        assert_eq!(v["rows"][1]["gate"], "S99.1 Gate A");
+        assert_eq!(v["rows"][2]["gate"], serde_json::Value::Null);
+        assert_eq!(v["rows"].as_array().unwrap().len(), 3);
     }
 }
