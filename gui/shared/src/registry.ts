@@ -47,7 +47,8 @@ export interface BinarySpec {
   /** Turbulence models this driver can construct. */
   builds: string[]
   residualStyle: 'kEpsilon' | 'kOmega' | 'sa' | 'plume' | 'buoyant' | 'lowmach' | 'vof' | 'datacentre' | 'generic' | 'cht' | 'none'
-  writes: { formats: OutputFormat[]; restart: boolean; csv: boolean }
+  /** `json` is set only where the driver writes a JSON document of its own; absent means it writes none. */
+  writes: { formats: OutputFormat[]; restart: boolean; csv: boolean; json?: boolean }
   longRunning: boolean
   /** Whether the run needs the GPU (serialised on the single-GPU queue). */
   gpu: boolean
@@ -358,11 +359,17 @@ export const BINARIES: BinarySpec[] = [
     summary: 'Data-centre airflow with fans and rack metrics (JSONC case).',
     kind: 'solver',
     positionals: [{ name: 'case', type: 'path', description: 'A .jsonc data-centre case file.' }],
-    flags: [{ name: '-csv', type: 'path', description: 'Write rack/fan metrics to this CSV.' }, PERMISSIVE],
+    flags: [
+      { name: '-json', type: 'path', description: 'Write the whole SPEC-LIT S55 report as one JSON document (schema "ofgpu-datacentre/1"): every metric, every caveat, the continuity closure and the fan operating points as fields.' },
+      { name: '-run-id', type: 'string', description: 'The run id stamped into the -json document. Default: v_<compact UTC stamp of the start>.' },
+      { name: '-csv', type: 'path', description: 'Write rack/fan metrics to this CSV.' },
+      { name: '-schema', type: 'flag', description: 'Print the JSON Schema of the .dc.jsonc case format to stdout and exit 0 (no case read; other arguments ignored).' },
+      PERMISSIVE,
+    ],
     accepts: ['jsonc'],
     builds: ['kEpsilon'],
     residualStyle: 'datacentre',
-    writes: { formats: ['foam'], restart: false, csv: true },
+    writes: { formats: [], restart: false, csv: true, json: true },
     longRunning: true,
     gpu: true,
     usageKind: 'constUsage',
