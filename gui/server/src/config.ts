@@ -17,6 +17,8 @@ export interface ServerConfig {
   runsDir: string
   cacheDir: string
   configDir: string
+  /** Absolute path of gui/ontology (the mirror's SQLite file lives here). */
+  ontologyDir: string
   /** CFD_DEMO=1: never spawn the real binaries; use the mock solver. */
   demo: boolean
   /** Which LLM client the agent loop uses. Demo mode defaults to the scripted mock. */
@@ -140,6 +142,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     runsDir: path.join(guiDir, 'runs'),
     cacheDir: path.join(guiDir, '.cache'),
     configDir: path.join(guiDir, 'config'),
+    ontologyDir: env.CFD_ONTOLOGY_DIR ? path.resolve(env.CFD_ONTOLOGY_DIR) : path.join(guiDir, 'ontology'),
     demo,
     llm,
     model: env.CFD_MODEL ?? (llm === 'zai' ? 'glm-5.3-flash' : llm === 'mock' ? 'mock-assistant' : 'claude-opus-5'),

@@ -41,6 +41,7 @@ export async function makeWorkspace(opts: { plume?: boolean; spec?: boolean } = 
     runsDir: path.join(tmp, 'runs'),
     cacheDir: path.join(tmp, 'cache'),
     configDir: path.join(tmp, 'config'),
+    ontologyDir: path.join(tmp, 'ontology'),
     demo: true,
     llm: 'mock',
     model: 'claude-opus-5',
