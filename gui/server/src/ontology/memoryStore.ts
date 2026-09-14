@@ -61,8 +61,33 @@ export function createMemoryActionStore(): MemoryActionStore {
     },
     listEditLog() { return log.map((e) => JSON.parse(JSON.stringify(e)) as EditLogEntry) },
     transaction<T>(fn: () => T): T {
+      // N2's tx semantics, emulated: BEGIN, and on ANY throw ROLLBACK — the whole snapshot is
+      // restored so "nothing was written" holds exactly as it does on the real store.
+      const objSnap = [...objects.entries()].map(([k, v]) =>
+        [k, { objectType: v.objectType, props: { ...v.props }, sourcePath: v.sourcePath }] as [string, { objectType: string; props: Record<string, unknown>; sourcePath: string }])
+      const linkSnap = links.map((l) => ({ edit: { ...l.edit, props: { ...l.edit.props } }, sourcePath: l.sourcePath }))
+      const logSnap = log.map((e) => JSON.parse(JSON.stringify(e)) as EditLogEntry)
+      const callsAt = calls.length
+      const writesAt = writes
       inTx = true
-      try { return fn() } finally { inTx = false }
+      try {
+        const r = fn()
+        if (r !== null && typeof r === 'object' && typeof (r as { then?: unknown }).then === 'function')
+          throw new Error('tx(body) is synchronous: body returned a promise (ASYNC_TX)')
+        return r
+      } catch (e) {
+        objects.clear()
+        for (const [k, v] of objSnap) objects.set(k, v)
+        links.length = 0
+        links.push(...linkSnap)
+        log.length = 0
+        log.push(...logSnap)
+        calls.length = callsAt
+        writes = writesAt
+        throw e
+      } finally {
+        inTx = false
+      }
     },
   }
   return store

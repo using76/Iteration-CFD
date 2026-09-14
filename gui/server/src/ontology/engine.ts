@@ -13,6 +13,7 @@ import { coerceParams } from './params.js'
 import { evaluateCriteria, type CriterionContext } from './criteria.js'
 import { PREPARERS } from './prepare.js'
 import { computeEditSet } from './editset.js'
+import { applyProposal } from './apply.js'
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) {
@@ -137,8 +138,6 @@ export function createActionEngine(deps: ActionEngineDeps): OntologyActionEngine
       return Promise.resolve()
     },
 
-    apply() {
-      return Promise.reject(new EngineError('NOT_IMPLEMENTED', 'apply lands in Run 2 of N4'))
-    },
+    apply: (proposalId, approver) => applyProposal(proposalId, approver, { proposals, deps }),
   }
 }

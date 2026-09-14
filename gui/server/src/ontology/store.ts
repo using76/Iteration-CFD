@@ -339,6 +339,10 @@ export interface OntologyStore {
 
   meta(key: string): string | null
   setMeta(key: string, value: string): void
+  /** Raw handle, lent to N4's action engine for its append-only `edit_log` table. The store itself
+   *  never reads or writes edit_log; lending the handle is what lets the log row land inside the
+   *  same tx() as the edits (facts-aip-contract.md D5). Never open a second DatabaseSync. */
+  raw(): DatabaseSync
   close(): void
 }
 
@@ -719,6 +723,7 @@ class OntologyStoreImpl implements OntologyStore {
     this.stmt(META_UPSERT).run(key, value)
   }
 
+  raw(): DatabaseSync { return this.db }
   close(): void {
     if (this.closed) return
     this.closed = true

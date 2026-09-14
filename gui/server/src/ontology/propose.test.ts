@@ -209,10 +209,10 @@ describe('engine', () => {
     expect(store.writes).toBe(0)
   })
 
-  it('apply is not implemented in this run, and reject writes nothing', async () => {
+  it('apply refuses a proposal that is not authorised, and reject writes nothing', async () => {
     const p = await engine.propose('startRun', PARAMS, AGENT)
     const applyErr = await rejectionOf(engine.apply(p.proposalId, null))
-    expect(applyErr.code).toBe('NOT_IMPLEMENTED')
+    expect(applyErr.code).toBe('NOT_AUTHORISED')
     const p2 = await engine.propose('startRun', PARAMS, AGENT)
     await engine.reject(p2.proposalId, USER, 'no')
     expect(engine.get(p2.proposalId)?.state).toBe('rejected')
