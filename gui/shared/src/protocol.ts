@@ -12,6 +12,16 @@ import type { DatasetProgress } from './viewerDataset'
 export const RunStatusSchema = z.enum(['queued', 'running', 'done', 'failed', 'killed', 'diverged'])
 export type RunStatus = z.infer<typeof RunStatusSchema>
 
+/** Grouped machine scalars; `hostname` is the Machine primary key and the struct's main field. */
+export const MachineRefSchema = z.object({
+  hostname: z.string(),
+  /** GPU name as the monitor last cached it; '' when no GPU is known (D9). */
+  gpu: z.string(),
+  /** process.platform, the string ServerHello already carries. */
+  platform: z.string(),
+})
+export type MachineRef = z.infer<typeof MachineRefSchema>
+
 export const RunInfoSchema = z.object({
   id: z.string(),
   /** Registry binary name, e.g. "ofgpu-k-epsilon". */
@@ -48,6 +58,16 @@ export const RunInfoSchema = z.object({
   logLines: z.number(),
   mode: z.enum(['real', 'demo']),
   label: z.string().nullable(),
+  /** Full 40-hex sha of the workspace HEAD when the run was created; null outside a repository. */
+  gitSha: z.string().nullable().optional(),
+  /** True when tracked content differed from HEAD (untracked files are ignored); null when unknown. */
+  gitDirty: z.boolean().nullable().optional(),
+  /** Primary key of the Case this run is a run of: workspace-relative, forward slashes. */
+  caseId: z.string().nullable().optional(),
+  /** Mesh primary key, `<summary path>#<name>`; null when the mesh has no summary, and for a mesh run. */
+  meshId: z.string().nullable().optional(),
+  /** The Machine this run ran on: N1's struct, `hostname` its main field. Null only when unreadable. */
+  machine: MachineRefSchema.nullable().optional(),
 })
 export type RunInfo = z.infer<typeof RunInfoSchema>
 

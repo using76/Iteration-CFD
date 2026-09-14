@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ClientMsgSchema, ServerMsgSchema, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
+import { ClientMsgSchema, RunInfoSchema, ServerMsgSchema, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
 
 // A wire frame must survive JSON.stringify -> parse -> zod parse unchanged:
 // that is exactly the path every message takes in the browser and the server.
@@ -86,5 +86,62 @@ describe('ui bridge frames', () => {
     expect(ClientMsgSchema.safeParse({ t: 'ui.result', requestId: 'u_1', ok: true }).success).toBe(false)
     expect(ServerMsgSchema.safeParse({ t: 'ui.command', requestId: 'u_1', cmd: { type: 'reboot' } }).success).toBe(false)
     expect(ServerMsgSchema.safeParse({ t: 'ui.command', requestId: 'u_1', cmd: { type: 'show_field', field: 'Salinity' } }).success).toBe(false)
+  })
+})
+
+// The 24 keys every run.json on disk carries, in their on-disk order (the
+// literal at runs/manager.ts).
+const legacyRunInfo = {
+  id: 'r_1',
+  binary: 'ofgpu-k-epsilon',
+  argv: ['ofgpu-k-epsilon', 'cases/plume.jsonc'],
+  cwd: '',
+  casePath: 'cases/plume.jsonc',
+  outputRoot: 'cases/plume_jsonc',
+  status: 'done',
+  pid: null,
+  startedAt: '2026-09-15T00:00:00.000Z',
+  endedAt: '2026-09-15T00:01:00.000Z',
+  exitCode: 0,
+  signal: null,
+  iter: 10,
+  targetIter: 100,
+  time: null,
+  endTime: null,
+  lastResidual: null,
+  written: [],
+  error: null,
+  converged: false,
+  device: '',
+  logLines: 0,
+  mode: 'demo',
+  label: null,
+}
+
+describe('run info provenance', () => {
+  it('a legacy 24-key record still parses, and the five provenance keys survive a round trip', () => {
+    const legacy = RunInfoSchema.parse(legacyRunInfo)
+    expect(legacy.gitSha).toBeUndefined()
+    expect(legacy.id).toBe('r_1')
+    const full = RunInfoSchema.parse(
+      JSON.parse(
+        JSON.stringify({
+          ...legacyRunInfo,
+          gitSha: 'a'.repeat(40),
+          gitDirty: false,
+          caseId: 'cases/plume.jsonc',
+          meshId: 'cases/box/constant/polyMesh/.meshSummary.json#box',
+          machine: { hostname: 'H', gpu: '', platform: 'win32' },
+        }),
+      ),
+    )
+    expect(full.gitSha).toBe('a'.repeat(40))
+    expect(full.gitDirty).toBe(false)
+    expect(full.caseId).toBe('cases/plume.jsonc')
+    expect(full.meshId).toBe('cases/box/constant/polyMesh/.meshSummary.json#box')
+    expect(full.machine).toEqual({ hostname: 'H', gpu: '', platform: 'win32' })
+  })
+  it('refuses a machine that is a bare string, because N1 declares a struct', () => {
+    expect(RunInfoSchema.safeParse({ ...legacyRunInfo, machine: 'H' }).success).toBe(false)
   })
 })

@@ -13,6 +13,7 @@ import { createGpuMonitor, type GpuMonitor } from '../gpu/index.js'
 import { silentLogger, type Logger } from '../log.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
 import { availableBinaries as detectBinaries, buildArgv, dispatch, killTree } from './dispatch.js'
+import { collectRunProvenance } from './provenance.js'
 import { loadPastRuns, nullRunFiles, openRun, readPastLog, readPastSeries, type RunFiles } from './store.js'
 import { isTerminal, RunRequestError, type LogWindow, type RunEvent, type RunManagerHandle, type StartRunOptions, type WaitOptions } from './types.js'
 
@@ -334,6 +335,12 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
       // the label is how a client tells mesh runs from solver runs.
       const label = opts.label ?? (spec.kind === 'mesh' ? 'mesh' : null)
       const iters = opts.args.find((a) => a.flag === '-iters')
+      const prov = await collectRunProvenance({
+        workspaceRoot: config.workspaceRoot,
+        probeRel: casePath ?? outputRoot,
+        isMeshRun: spec.kind === 'mesh',
+        gpuName: gpuMonitor.state().name,
+      })
       const info: RunInfo = {
         id,
         binary: spec.name,
@@ -359,6 +366,11 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
         logLines: 0,
         mode: config.demo ? 'demo' : 'real',
         label,
+        gitSha: prov.gitSha,
+        gitDirty: prov.gitDirty,
+        caseId: prov.caseId,
+        meshId: prov.meshId,
+        machine: prov.machine,
       }
       const r: LiveRun = {
         info,
