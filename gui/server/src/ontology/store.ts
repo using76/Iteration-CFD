@@ -17,6 +17,7 @@ import path from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type { BaseType, LinkTypeDef, ObjectTypeDef, OntologyRegistry, PropertyDef } from '@cfd/shared'
 import { silentLogger, type Logger } from '../log.js'
+import { applyCorpusMigrations, makeCorpusStore, type CorpusStore } from '../corpus/schema.js'
 
 export type OntologyStoreErrorCode =
   | 'UNKNOWN_TYPE' | 'UNKNOWN_PROPERTY' | 'MISSING_PROPERTY' | 'PK_MISMATCH'
@@ -313,6 +314,11 @@ export interface OntologyStore {
   readonly ontologyVersion: string
   readonly opened: OpenOutcome
 
+  /** The L1 corpus on the same connection. It can write `document`, `chunk`,
+   *  `object_chunk` and the `candidate_*` / `unmapped_span` staging tables, and
+   *  nothing else. */
+  readonly corpus: CorpusStore
+
   put(row: ObjectInput): void
   putMany(rows: ObjectInput[]): number
   get(type: string, id: string): ObjectRow | null
@@ -339,6 +345,7 @@ export interface OntologyStore {
 class OntologyStoreImpl implements OntologyStore {
   readonly path: string
   readonly ontologyVersion: string
+  readonly corpus: CorpusStore
   private readonly db: DatabaseSync
   private readonly ont: OntologyRegistry
   private readonly log: Logger
@@ -360,6 +367,8 @@ class OntologyStoreImpl implements OntologyStore {
     this.hash = createHash('sha256').update(this.ddlStatements().join('\n')).digest('hex').slice(0, 16)
     try {
       this.migrate()
+      applyCorpusMigrations(this.db, this.log)
+      this.corpus = makeCorpusStore(this.db, (body) => this.tx(body))
     } catch (e) {
       // A refused open (MIRROR_* failures) must not leave the file locked.
       RAW.delete(this)

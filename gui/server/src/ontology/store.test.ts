@@ -11,6 +11,7 @@ import type { LinkTypeDef, ObjectTypeDef, OntologyRegistry, PropertyDef } from '
 import { loadConfig } from '../config.js'
 import { silentLogger, type Logger } from '../log.js'
 import { OntologyStoreError, debugSql, openOntologyStore, ontologyDbPath, resolveLinkSide, type OntologyStore } from './store.js'
+import { corpusTableNames } from '../corpus/schema.js'
 
 let dir: string
 beforeAll(() => {
@@ -125,8 +126,11 @@ describe('ontology store', () => {
   it('generates_one_table_per_object_type_from_the_real_registry', () => {
     const s = memStore(ONTOLOGY)
     const names = debugSql(s, "SELECT name FROM sqlite_master WHERE type = 'table'").map((r) => String(r.name)).sort()
-    expect(names).toEqual(['links', 'meta', ...ONTOLOGY.objectTypes.map((t) => `obj_${t.apiName}`)].sort())
-    expect(names.length).toBe(ONTOLOGY.objectTypes.length + 2)
+    // The L1 corpus storey is migrated into the same file on open and is not
+    // generated from the registry; this test is about the generated half.
+    const generated = names.filter((n) => !corpusTableNames().includes(n))
+    expect(generated).toEqual(['links', 'meta', ...ONTOLOGY.objectTypes.map((t) => `obj_${t.apiName}`)].sort())
+    expect(generated.length).toBe(ONTOLOGY.objectTypes.length + 2)
     s.close()
   })
 
