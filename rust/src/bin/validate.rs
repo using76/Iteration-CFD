@@ -96,6 +96,9 @@ use ofgpu::{cfg_for, DevBuf, Gpu, GpuMesh, KernelSet, Label, Result, Scalar, Ten
 #[path = "common/mod.rs"]
 mod common;
 
+#[path = "validate_json/mod.rs"]
+mod json;
+
 use common::sci;
 
 // ==========================================================================
@@ -210,6 +213,9 @@ struct Checks {
     /// (SPEC-LIT §69.3), which is the whole reason a gate cannot report a
     /// verdict on this screen and be absent from the summary.
     gates: Vec<GateReport>,
+    /// The device `run` named in its banner - `(name, "sm_<cc>")`. `None`
+    /// until `run` reaches the GPU, and `None` for ever on the abort path.
+    device: Option<(String, String)>,
     /// Every line this struct has printed, and whether the gate registry
     /// printed it. [`Checks::audit_and_summarise`] is the only reason it is
     /// kept: a verdict word on a line the registry did not print is a verdict
@@ -227,6 +233,7 @@ impl Checks {
             replayed: 0,
             in_replay: false,
             gates: Vec::new(),
+            device: None,
             transcript: RefCell::new(Vec::new()),
         }
     }
@@ -2764,6 +2771,7 @@ fn run(c: &mut Checks) -> Result<()> {
         gpu.ctx().name()?,
         common::precision_name()
     );
+    c.device = Some((gpu.ctx().name()?, format!("sm_{major}{minor}")));
 
     let k = Kernels::new(&gpu)?;
 
@@ -9615,43 +9623,73 @@ fn adapt_step(
 }
 
 fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().collect();
+    let started_ms = json::epoch_ms(std::time::SystemTime::now());
+    let t0 = std::time::Instant::now();
+
+    let (out, run_id) = match (json::json_path(&argv), json::run_id(&argv, started_ms)) {
+        (Ok(p), Ok(id)) => (p, id),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("\n{e}");
+            return ExitCode::from(2);
+        }
+    };
+
     let mut c = Checks::new();
+    let mut aborted: Option<String> = None;
 
     if let Err(e) = run(&mut c) {
         eprintln!("\nvalidation aborted: {e}");
-        return ExitCode::from(2);
-    }
-
-    // SPEC-LIT S69. The last two rows of the run are the run auditing what
-    // it is about to say about itself, and they hand back the gate list the
-    // summary prints - so what is printed below is the very text that was
-    // audited, not a second one built the same way. Nothing here is a
-    // hand-maintained list any more; the four sentences that used to name
-    // four of the six gates that miss are gone, and with them the fifth
-    // gate's verdict that was claimed to be printed in a block which never
-    // printed it.
-    let gates = c.audit_and_summarise();
-
-    println!("\n{}/{} checks passed", c.total - c.failures, c.total);
-    println!(
-        "{} computed live, {} replayed from recorded measurements \
-         (docs/07-lowmach-solver.md S1.1: the wall-function gate verdict, the resolved leg's \
-         mesh resolution, the resolved leg's gate verdict, the thermostat-weighting \
-         experiment, the bounded-convection isolation, and the Kays-Crawford Prt \
-         experiment)",
-        c.total - c.replayed,
-        c.replayed,
-    );
-    print!("{gates}");
-    if c.skipped > 0 {
-        println!("{} checks skipped", c.skipped);
-    }
-
-    if c.failures == 0 {
-        ExitCode::SUCCESS
+        aborted = Some(e.to_string());
     } else {
-        ExitCode::from(1)
+        // SPEC-LIT S69. The last two rows of the run are the run auditing what
+        // it is about to say about itself, and they hand back the gate list the
+        // summary prints - so what is printed below is the very text that was
+        // audited, not a second one built the same way. Nothing here is a
+        // hand-maintained list any more; the four sentences that used to name
+        // four of the six gates that miss are gone, and with them the fifth
+        // gate's verdict that was claimed to be printed in a block which never
+        // printed it.
+        let gates = c.audit_and_summarise();
+
+        println!("\n{}/{} checks passed", c.total - c.failures, c.total);
+        println!(
+            "{} computed live, {} replayed from recorded measurements \
+             (docs/07-lowmach-solver.md S1.1: the wall-function gate verdict, the resolved leg's \
+             mesh resolution, the resolved leg's gate verdict, the thermostat-weighting \
+             experiment, the bounded-convection isolation, and the Kays-Crawford Prt \
+             experiment)",
+            c.total - c.replayed,
+            c.replayed,
+        );
+        print!("{gates}");
+        if c.skipped > 0 {
+            println!("{} checks skipped", c.skipped);
+        }
     }
+
+    let code: u8 = if aborted.is_some() { 2 } else if c.failures == 0 { 0 } else { 1 };
+
+    if let Some(path) = out {
+        let ended_ms = json::epoch_ms(std::time::SystemTime::now());
+        let doc = json::build_document(
+            &c,
+            &run_id,
+            &argv,
+            started_ms,
+            ended_ms,
+            t0.elapsed().as_secs_f64(),
+            code,
+            aborted,
+        );
+        if let Err(e) = json::write_document(&path, &doc) {
+            eprintln!("\n{e}");
+            return ExitCode::from(2);
+        }
+        println!("run document written to {}", path.display());
+    }
+
+    ExitCode::from(code)
 }
 
 // ==========================================================================
