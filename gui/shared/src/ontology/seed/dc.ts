@@ -7,14 +7,18 @@ import type { OntologyRegistry } from '../registry.js'
 import { DC_CONCEPTS, DC_CONCEPT_LINKS } from './dc.concepts.js'
 import { DC_EQUATIONS } from './dc.equations.js'
 import { DC_MODELS, DC_CAPABILITIES, DC_CAPABILITY_LINKS } from './dc.capabilities.js'
+import { DC_METRICS, DC_METRIC_LINKS } from './dc.metrics.js'
+import { DC_STANDARDS, DC_CLAUSES, DC_STANDARD_LINKS } from './dc.standards.js'
 import {
   DC_L1_TYPES, DC_PUBLIC_SOURCE_IDS, DC_SEED_SOURCES, DC_SPEC_SECTIONS,
   type DcSeed, type DcSeedProblem, type DcSeedProblemCode, type SeedLink, type SeedObject,
 } from './dc.types.js'
 
 export const DC_SEED: DcSeed = Object.freeze({
-  objects: Object.freeze([...DC_CONCEPTS, ...DC_EQUATIONS, ...DC_MODELS, ...DC_CAPABILITIES]),
-  links:   Object.freeze([...DC_CONCEPT_LINKS, ...DC_CAPABILITY_LINKS]),
+  objects: Object.freeze([...DC_CONCEPTS, ...DC_EQUATIONS, ...DC_MODELS, ...DC_CAPABILITIES,
+                          ...DC_METRICS, ...DC_STANDARDS, ...DC_CLAUSES]),
+  links:   Object.freeze([...DC_CONCEPT_LINKS, ...DC_CAPABILITY_LINKS,
+                          ...DC_METRIC_LINKS, ...DC_STANDARD_LINKS]),
 })
 
 // The server-side twin of this lookup is N2's `resolveLinkSide`
@@ -128,9 +132,13 @@ export function validateDcSeed(registry: OntologyRegistry, seed: DcSeed): DcSeed
       if (l.fromType !== 'MetricDef' || l.fromId !== row.id || l.accessor !== 'computedBy') return false
       const resolved = resolveSeedLink(registry, l)
       if (resolved === null) return false
+      // O1 declares `computes` Capability-to-MetricDef, and the seed names it
+      // from the metric side, so the Capability may sit on either end of the
+      // oriented link: find whichever end is the Capability.
       const o = orientedLink(resolved.def, resolved.direction, l)
-      const target = byKey.get(`${o.toType}::${o.toId}`)
-      return target !== undefined && target.type === 'Capability' && target.props.kind === 'provides'
+      const capId = o.fromType === 'Capability' ? o.fromId : o.toId
+      const target = byKey.get(`Capability::${capId}`)
+      return target !== undefined && target.props.kind === 'provides'
     })
     if (!provides) {
       push(row, 'DANGLING_COMPUTED_BY', 'computedBy', `a computed MetricDef must reach a providing Capability through computedBy; '${row.id}' does not`)

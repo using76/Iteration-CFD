@@ -24,8 +24,8 @@ describe('the data-centre seed', () => {
     expect(count('Equation')).toBe(20)
     expect(count('Model')).toBe(15)
     expect(count('Capability')).toBe(23)
-    expect(DC_SEED.objects.length).toBe(73)
-    expect(DC_SEED.links.length).toBe(33)
+    expect(DC_SEED.objects.length).toBe(146)
+    expect(DC_SEED.links.length).toBe(46)
   })
 
   it('every seeded row validates against the registry', () => {
@@ -128,7 +128,7 @@ describe('the data-centre seed', () => {
 
   it('every seeded link resolves to a declared link type and two seeded rows', () => {
     const inputs = toLinkInputs(DC_ONTOLOGY, DC_SEED)
-    expect(inputs.length).toBe(33)
+    expect(inputs.length).toBe(46)
     const byKey = new Map(DC_SEED.objects.map((r) => [`${r.type}::${r.id}`, r]))
     for (const l of inputs) {
       expect(byKey.get(`${l.fromType}::${l.fromId}`), `${l.fromType} '${l.fromId}'`).toBeDefined()
@@ -144,5 +144,68 @@ describe('the data-centre seed', () => {
 
   it('no seeded id is a fact sheet row label', () => {
     for (const row of DC_SEED.objects) expect(row.id).not.toMatch(/^[MSB][0-9]{1,2}[a-z]?$/)
+  })
+
+  it("every equation's latex survives the TypeScript string it is written in", () => {
+    const equations = DC_SEED.objects.filter((r) => r.type === 'Equation')
+    expect(equations.length).toBe(20)
+    // Every control character: code points 0-8 and 10-31.
+    const hasControl = (s: string): boolean =>
+      [...s].some((ch) => { const c = ch.codePointAt(0) ?? 0; return c <= 8 || (c >= 10 && c <= 31) })
+    for (const e of equations) {
+      const latex = e.props.latex as string
+      expect(typeof latex, e.id).toBe('string')
+      expect(hasControl(latex), `${e.id} latex carries a control character: ${JSON.stringify(latex)}`).toBe(false)
+    }
+    const mustContain: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ['EQ-B7', ['\\epsilon']],
+      ['EQ-C6', ['\\nabla']],
+      ['EQ-T1', ['\\nu_t', '\\varepsilon']],
+      ['EQ-T9', ['\\kappa']],
+      ['EQ-B2', ['\\beta']],
+      ['EQ-B4', ['\\beta']],
+      ['EQ-M1', ['\\dot{Q}']],
+      ['EQ-M3', ['\\rho']],
+      ['EQ-M4', ['\\sigma']],
+      ['EQ-M5', ['\\Delta p']],
+      ['EQ-M6', ['\\eta_{total}']],
+      ['EQ-M7', ['\\lvert']],
+      ['EQ-M8', ['\\sigma']],
+      ['EQ-M11', ['\\exp']],
+      ['EQ-D-RCI', ['\\times']],
+      ['EQ-D-RTI', ['\\times']],
+      ['EQ-D-SHI', ['\\delta']],
+      ['EQ-D-PUE', ['\\text']],
+    ]
+    for (const [id, parts] of mustContain) {
+      const e = equations.find((x) => x.id === id)
+      expect(e, id).toBeDefined()
+      for (const part of parts) {
+        expect((e!.props.latex as string).includes(part), `${id} latex lost '${part}'`).toBe(true)
+      }
+    }
+  })
+
+  it('refuses a row with a missing property and a row with an undeclared enum value', () => {
+    const concept = DC_SEED.objects.find((r) => r.type === 'Concept')
+    expect(concept).toBeDefined()
+    if (concept === undefined) return
+    const withoutOneLine: Record<string, unknown> = { ...concept.props }
+    delete withoutOneLine.oneLine
+    const missing = validateDcSeed(DC_ONTOLOGY, {
+      objects: [{ ...concept, props: withoutOneLine }],
+      links: [],
+    })
+    expect(missing.length).toBe(1)
+    expect(missing[0].code).toBe('MISSING_PROPERTY')
+    expect(missing[0].property).toBe('oneLine')
+    const badEnum = validateDcSeed(DC_ONTOLOGY, {
+      objects: [{ ...concept, props: { ...concept.props, status: 'sometimes' } }],
+      links: [],
+    })
+    expect(badEnum.length).toBe(1)
+    expect(badEnum[0].code).toBe('BAD_ENUM')
+    expect(badEnum[0].property).toBe('status')
+    expect(badEnum[0].message).toContain('sometimes')
   })
 })

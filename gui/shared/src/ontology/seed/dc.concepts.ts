@@ -50,7 +50,6 @@ export const DC_CONCEPT_LINKS: readonly SeedLink[] = Object.freeze([
   dcLink('Concept', 'expressedBy', conceptId('dehumidification'), 'EQ-M11', SRC),
   dcLink('Concept', 'expressedBy', conceptId('containment'), 'EQ-M7', SRC),
   dcLink('Concept', 'expressedBy', conceptId('free-cooling'), 'EQ-D-PUE', SRC),
-  // capture has no expressedBy link on purpose: its absence is already carried
-  // by the CAP-SPECIES row, and one fact has one carrier.
+  dcLink('Concept', 'expressedBy', conceptId('capture'), 'EQ-C6', SRC),
   dcLink('Concept', 'refusedBy', conceptId('condensation'), 'refuse_condensation', SRC),
 ])
