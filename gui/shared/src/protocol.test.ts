@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ClientMsgSchema, RunInfoSchema, ServerMsgSchema, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
+import { CHAT_TIMEOUT_MAX_MS, ChatRequestSchema, ClientMsgSchema, REST, RunInfoSchema, ServerMsgSchema, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
 
 // A wire frame must survive JSON.stringify -> parse -> zod parse unchanged:
 // that is exactly the path every message takes in the browser and the server.
@@ -143,5 +143,23 @@ describe('run info provenance', () => {
   })
   it('refuses a machine that is a bare string, because N1 declares a struct', () => {
     expect(RunInfoSchema.safeParse({ ...legacyRunInfo, machine: 'H' }).success).toBe(false)
+  })
+})
+
+describe('chat REST schemas', () => {
+  it('ChatRequestSchema fills its defaults and bounds timeoutMs', () => {
+    expect(ChatRequestSchema.parse({ text: 'hi' })).toEqual({
+      sessionId: null,
+      text: 'hi',
+      attachments: [],
+      attachmentIds: [],
+      activeFile: null,
+      autoApprove: null,
+      locale: null,
+      timeoutMs: null,
+    })
+    expect(ChatRequestSchema.safeParse({ text: 'hi', timeoutMs: CHAT_TIMEOUT_MAX_MS + 1 }).success).toBe(false)
+    expect(ChatRequestSchema.safeParse({}).success).toBe(false)
+    expect(REST.chat).toBe('/api/chat')
   })
 })

@@ -1,6 +1,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { ChatResponse } from '@cfd/shared'
 import { setSchemaValidator, structuralValidate } from '../tools/case.js'
 import { createMockLlm } from './mockLlm.js'
 import { createAgentService } from './service.js'
@@ -170,4 +171,56 @@ describe('agent service', () => {
     expect(state.customTools).toEqual([])
     expect(agent.createSession().id).toBeTruthy()
   })
+
+  let r: ChatResponse
+  it('chat() creates a session, runs a whole turn and returns the turn messages', async () => {
+    r = await agent.chat({ sessionId: null, text: 'what is this repository?', attachments: ['cases/plume.jsonc', '../../etc/passwd'], attachmentIds: [], activeFile: null, autoApprove: 'all', locale: 'en', timeoutMs: 20000 })
+    expect(r.status).toBe('done')
+    expect(r.sessionId).toMatch(/^s_/)
+    expect(r.turnId).toMatch(/^t_/)
+    expect(r.messages[0].role).toBe('user')
+    expect(r.messages[0].blocks[0]).toEqual({ kind: 'text', text: 'what is this repository?' })
+    const last = r.messages.at(-1)!
+    expect(last.role).toBe('assistant')
+    expect(last.blocks.filter((b) => b.kind === 'text').map((b) => (b.kind === 'text' ? b.text : '')).join('\n')).toContain('meteor-cfd')
+    expect(r.pendingApprovals).toEqual([])
+    expect(r.runs).toEqual([])
+    expect(agent.getSessionState(r.sessionId)!.turnActive).toBe(false)
+    // the attachments reached the UserContext (the @ notice) and the settings patch landed
+    expect(r.messages[0].blocks.some((b) => b.kind === 'notice' && b.text.includes('cases/plume.jsonc'))).toBe(true)
+    expect(agent.getSessionState(r.sessionId)!.settings.autoApprove).toBe('all')
+    expect(agent.getSessionState(r.sessionId)!.settings.locale).toBe('en')
+    // the escape was refused by resolveInWorkspace before any read and became a notice, never content
+    expect(r.messages[0].blocks.some((b) => b.kind === 'notice' && b.text.includes('outside the workspace'))).toBe(true)
+    expect(JSON.stringify(r.messages).includes('root:')).toBe(false)
+    expect(r.rounds).toBeGreaterThanOrEqual(2)
+  })
+
+  it('chat() continues an existing session and returns only the new turn', async () => {
+    const r2 = await agent.chat({ sessionId: r.sessionId, text: 'what is this repository?', attachments: [], attachmentIds: [], activeFile: null, autoApprove: 'all', locale: 'en', timeoutMs: 20000 })
+    expect(r2.sessionId).toBe(r.sessionId)
+    expect(r2.messages.length).toBeGreaterThanOrEqual(2)
+    expect(r2.messages[0].blocks[0]).toMatchObject({ kind: 'text', text: 'what is this repository?' })
+    expect(agent.getSessionState(r.sessionId)!.messages.length).toBe(r.messages.length + r2.messages.length)
+  })
+
+  it('chat() refuses a second turn with 409, an unknown session with 404 and an empty message with 400', async () => {
+    const id = agent.createSession().id
+    const p = agent.chat({ sessionId: id, text: 'what is this repository?', attachments: [], attachmentIds: [], activeFile: null, autoApprove: 'all', locale: 'en', timeoutMs: 20000 })
+    await expect(agent.chat({ sessionId: id, text: 'what is this repository?', attachments: [], attachmentIds: [], activeFile: null, autoApprove: 'all', locale: 'en', timeoutMs: 20000 })).rejects.toMatchObject({ status: 409 })
+    await p
+    await expect(agent.chat({ sessionId: 's_nope', text: 'hi', attachments: [], attachmentIds: [], activeFile: null, autoApprove: null, locale: null, timeoutMs: null })).rejects.toMatchObject({ status: 404 })
+    const n = agent.listSessions().length
+    await expect(agent.chat({ sessionId: null, text: '   ', attachments: [], attachmentIds: [], activeFile: null, autoApprove: null, locale: null, timeoutMs: null })).rejects.toMatchObject({ status: 400 })
+    expect(agent.listSessions().length).toBe(n)
+  })
+
+  it('chat() answers timeout without cancelling the turn', async () => {
+    const svc = createAgentService({ config: ws.config, hub: fakeHub(), runs: fakeRuns(), datasets: fakeDatasets(), llm: createMockLlm({ delayMs: 100 }), retryDelayMs: 5 })
+    const rt = await svc.chat({ sessionId: null, text: 'what is this repository?', attachments: [], attachmentIds: [], activeFile: null, autoApprove: 'all', locale: 'en', timeoutMs: 1000 })
+    expect(rt.status).toBe('timeout')
+    expect(rt.messages[0].role).toBe('user')
+    await until(() => svc.getSessionState(rt.sessionId)!.turnActive === false, 20000)
+    await svc.shutdown()
+  }, 20_000)
 })

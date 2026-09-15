@@ -1,5 +1,5 @@
 // In-memory stand-ins for the services the HTTP/WS layers delegate to.
-import type { GpuState, LogLine, MetricRecord, ResidualRecord, RunInfo, SessionState, SessionSummary } from '@cfd/shared'
+import type { ChatRequest, ChatResponse, GpuState, LogLine, MetricRecord, ResidualRecord, RunInfo, SessionState, SessionSummary } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunEvent, RunManager } from '../runs/types.js'
@@ -99,12 +99,14 @@ export function fakeRunManager(): FakeRuns {
   return fake
 }
 
-export function fakeAgent(): AgentService & { sessions: Map<string, SessionState>; handled: string[] } {
+export function fakeAgent(): AgentService & { sessions: Map<string, SessionState>; handled: string[]; chatRequests: ChatRequest[]; chatImpl: ((r: ChatRequest) => Promise<ChatResponse>) | null } {
   const sessions = new Map<string, SessionState>()
   const summary = (s: SessionState): SessionSummary => ({ id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt, messageCount: s.messages.length, casePath: null })
   const svc = {
     sessions,
     handled: [] as string[],
+    chatRequests: [] as ChatRequest[],
+    chatImpl: null as ((r: ChatRequest) => Promise<ChatResponse>) | null,
     async handleClientMessage(_client: unknown, msg: { t: string }) {
       svc.handled.push(msg.t)
       return true
@@ -128,10 +130,17 @@ export function fakeAgent(): AgentService & { sessions: Map<string, SessionState
       return s
     },
     deleteSession: (id: string) => sessions.delete(id),
+    async chat(r: ChatRequest): Promise<ChatResponse> {
+      svc.chatRequests.push(r)
+      if (svc.chatImpl) return svc.chatImpl(r)
+      return { sessionId: r.sessionId ?? 's_1', turnId: 't_1', status: 'done', rounds: 1, model: 'mock-assistant',
+        usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        messages: [], pendingApprovals: [], runs: [] }
+    },
     notifyRunEnded: () => {},
     shutdown: async () => {},
   }
-  return svc as unknown as AgentService & { sessions: Map<string, SessionState>; handled: string[] }
+  return svc as unknown as AgentService & { sessions: Map<string, SessionState>; handled: string[]; chatRequests: ChatRequest[]; chatImpl: ((r: ChatRequest) => Promise<ChatResponse>) | null }
 }
 
 export function fakeDatasets(): DatasetService & { opened: string[]; openedOpts: Array<{ region?: string | null } | undefined> } {

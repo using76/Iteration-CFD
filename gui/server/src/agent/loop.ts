@@ -4,7 +4,7 @@
 // stops. Every stop_reason, cancellation and error path leaves the history
 // consistent (each tool_use has exactly one tool_result) before turn.done.
 import type { BetaContentBlockParam, BetaMessage, BetaToolResultBlockParam, BetaToolUseBlock, BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import { summarizeToolCall, toolLabel, type ServerMsg, type ToolCallRecord, type UiMessage, type UserContext } from '@cfd/shared'
+import { summarizeToolCall, toolLabel, type ServerMsg, type ToolCallRecord, type UiMessage, type Usage, type UserContext } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
@@ -57,9 +57,8 @@ export interface TurnOutcome {
   status: TurnStatus
   rounds: number
   model: string | null
+  usage: Usage
 }
-
-type Usage = ReturnType<typeof emptyUsage>
 
 function addUsage(total: Usage, u: BetaUsage | undefined): void {
   if (!u) return
@@ -184,7 +183,7 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     }
     await persist()
     emit({ t: 'turn.done', sessionId, turnId, usage, model })
-    return { status, rounds, model }
+    return { status, rounds, model, usage }
   }
 
   /**
@@ -260,7 +259,7 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       }
       await persist()
       emit({ t: 'turn.error', sessionId, turnId, message: describeError(err), retryable: isRetryableError(err) })
-      return { status: 'error', rounds, model }
+      return { status: 'error', rounds, model, usage }
     }
 
     rounds++

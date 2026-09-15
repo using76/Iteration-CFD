@@ -4,7 +4,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import { createAgentService } from './agent/service.js'
-import type { AgentService } from './agent/types.js'
+import { ChatError, type AgentService } from './agent/types.js'
 import { loadConfig, type ServerConfig } from './config.js'
 import { createDatasetService } from './datasets/service.js'
 import type { DatasetService } from './datasets/types.js'
@@ -58,6 +58,9 @@ function unavailableAgent(reason: string): AgentService {
     getSessionState: () => null,
     createSession: () => {
       throw new Error(`assistant unavailable: ${reason}`)
+    },
+    chat: async () => {
+      throw new ChatError(503, `assistant unavailable: ${reason}`)
     },
     deleteSession: () => false,
     notifyRunEnded: () => {},

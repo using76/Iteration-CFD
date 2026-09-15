@@ -797,6 +797,7 @@ export const REST = {
   gitStatus: '/api/git/status',
   runs: '/api/runs',
   sessions: '/api/sessions',
+  chat: '/api/chat',
   datasets: '/api/datasets',
   attachments: '/api/attachments',
   geometry: '/api/geometry',
@@ -897,3 +898,48 @@ export interface StartRunRequest {
   positionals: string[]
   label: string | null
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/chat: a whole conversation turn over one HTTP POST (N7)
+// ---------------------------------------------------------------------------
+
+/** How long POST /api/chat holds the response open. The cap stays under Node's 300 s
+ *  server.requestTimeout: a turn that needs longer is driven over /ws. */
+export const CHAT_TIMEOUT_DEFAULT_MS = 120_000
+export const CHAT_TIMEOUT_MAX_MS = 240_000
+
+export const ChatRequestSchema = z.object({
+  /** null starts a new session; the answer's sessionId is how you continue it. */
+  sessionId: z.string().nullable().default(null),
+  text: z.string(),
+  /** Workspace-relative paths, exactly as UserContext.attachments. */
+  attachments: z.array(z.string()).default([]),
+  /** Attachment object ids minted by POST /api/attachments. */
+  attachmentIds: z.array(z.string()).default([]),
+  activeFile: z.string().nullable().default(null),
+  /** Applied to the session before the turn; there is no approver on this transport. */
+  autoApprove: SessionSettingsSchema.shape.autoApprove.nullable().default(null),
+  locale: SessionSettingsSchema.shape.locale.nullable().default(null),
+  timeoutMs: z.number().int().min(1000).max(CHAT_TIMEOUT_MAX_MS).nullable().default(null),
+})
+export type ChatRequest = z.infer<typeof ChatRequestSchema>
+
+/** 'timeout' is not a TurnStatus: the turn is still running and the caller polls
+ *  GET /api/sessions/:id until turnActive is false. */
+export const ChatStatusSchema = z.enum(['done', 'error', 'refusal', 'cancelled', 'timeout'])
+
+export const ChatResponseSchema = z.object({
+  sessionId: z.string(),
+  turnId: z.string(),
+  status: ChatStatusSchema,
+  rounds: z.number(),
+  model: z.string().nullable(),
+  usage: UsageSchema,
+  /** The UI messages this turn appended: the user turn first, the assistant turns after. */
+  messages: z.array(UiMessageSchema),
+  /** Non-empty only when the turn is waiting on an approval nobody can give here. */
+  pendingApprovals: z.array(PendingApprovalSchema),
+  /** Run ids this turn started. */
+  runs: z.array(z.string()),
+})
+export type ChatResponse = z.infer<typeof ChatResponseSchema>

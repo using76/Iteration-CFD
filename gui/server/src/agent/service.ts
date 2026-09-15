@@ -3,7 +3,8 @@
 // driven by the client frames the hub hands over.
 import fsp from 'node:fs/promises'
 import type { BetaMessageParam, BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import type { ClientMsg, ClientMsgOf, CustomToolSummary, ServerMsg, SessionState, SessionSummary, UiMessage, UserContext } from '@cfd/shared'
+import type { ChatRequest, ChatResponse, ClientMsg, ClientMsgOf, CustomToolSummary, PendingApproval, ServerMsg, SessionSettings, SessionState, SessionSummary, UiMessage, UserContext } from '@cfd/shared'
+import { CHAT_TIMEOUT_DEFAULT_MS } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
@@ -14,7 +15,7 @@ import type { Hub, ClientConn } from '../ws/types.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
 import { createAnthropicClient } from './anthropic.js'
 import { createApprovalManager, type ApprovalManager } from './approvals.js'
-import type { LlmClient } from './llm.js'
+import { emptyUsage, type LlmClient } from './llm.js'
 import { runTurn, type TurnOutcome } from './loop.js'
 import { createMockLlm } from './mockLlm.js'
 import { loadPolicyOverrides, type PolicyOverrides } from './policy.js'
@@ -22,7 +23,7 @@ import { runNoticeText, runNoticeUserText } from './prompt.js'
 import { buildQuickMessage } from './quick.js'
 import { createZaiClient } from './zai.js'
 import { appendUserTurn, createSessionStore, newId, stateOf, summaryOf, type SessionRecord, type SessionStore } from './session.js'
-import type { AgentService } from './types.js'
+import { ChatError, type AgentService } from './types.js'
 
 export interface AgentServiceDeps {
   config: ServerConfig
@@ -101,9 +102,9 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     return state(rec)
   }
 
-  function startTurn(rec: SessionRecord): boolean {
+  function startTurn(rec: SessionRecord): string | null {
     const rt = runtime(rec.id)
-    if (rt.active) return false
+    if (rt.active) return null
     const turnId = newId('t')
     const controller = new AbortController()
     const done = runTurn(rec, turnId, controller.signal, {
@@ -123,7 +124,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     })
       .catch((err: unknown): TurnOutcome => {
         hub.sendToSession(rec.id, { t: 'turn.error', sessionId: rec.id, turnId, message: `internal error: ${(err as Error).message}`, retryable: false })
-        return { status: 'error', rounds: 0, model: null }
+        return { status: 'error', rounds: 0, model: null, usage: emptyUsage() }
       })
       .then(async (outcome) => {
         if (rt.active?.turnId === turnId) rt.active = null
@@ -133,7 +134,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
         return outcome
       })
     rt.active = { turnId, controller, done }
-    return true
+    return turnId
   }
 
   function cancelTurn(rec: SessionRecord): void {
@@ -199,6 +200,66 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       if (!startTurn(rec)) client.send({ t: 'error', message: 'a turn is already active in this session; cancel it first', fatal: false })
     } finally {
       rt.starting = false
+    }
+  }
+
+  /** N7: the REST entry a program drives. Everything up to the userMessage call is
+   *  synchronous, so two concurrent POSTs cannot both pass the guard. */
+  async function chat(req: ChatRequest): Promise<ChatResponse> {
+    const patch: Partial<SessionSettings> = {}
+    if (req.autoApprove) patch.autoApprove = req.autoApprove
+    if (req.locale) patch.locale = req.locale
+    const fresh = req.sessionId === null
+    const rec = req.sessionId === null ? store.create(patch) : store.get(req.sessionId)
+    if (!rec) throw new ChatError(404, `no session ${req.sessionId}`)
+    const rt = runtime(rec.id)
+    const busy = rt.active !== null || rt.starting
+    if (busy) throw new ChatError(409, 'a turn is already active in this session; cancel it first')
+    if (!fresh && Object.keys(patch).length) rec.settings = { ...rec.settings, ...patch }
+    const uiBefore = rec.ui.length
+    const runsBefore = rec.runs.length
+    // No attachmentIds key: UserContextSchema has none today and CONTRACT §13 makes that N6's line.
+    const context: UserContext = {
+      activeFile: req.activeFile, activeRun: null, activeStep: null, activeTab: null,
+      attachments: req.attachments, selection: null,
+    }
+    const errors: string[] = []
+    const conn: ClientConn = {
+      id: 'http', sessionId: rec.id, runs: new Set(), viewerState: null, uiState: null,
+      send: (m) => { if (m.t === 'error') errors.push(m.message) },
+      close: () => {},
+    }
+    await userMessage(conn, { t: 'user.message', sessionId: rec.id, text: req.text, context })
+    if (errors.length) {
+      // A session created here must not survive a refusal, or it is an orphan.
+      if (fresh) await store.delete(rec.id)
+      throw new ChatError(errors[0] === 'empty message' ? 400 : 409, errors[0])
+    }
+    // userMessage set rt.active before its first await; the busy boolean above kept
+    // the checker from narrowing the property to null in the meantime.
+    const active = rt.active
+    if (!active) throw new ChatError(500, 'the turn did not start')
+    if (fresh) broadcastList()
+    const timeoutMs = req.timeoutMs ?? CHAT_TIMEOUT_DEFAULT_MS
+    let timedOut = false
+    let approvalsAtTimeout: PendingApproval[] = []
+    const outcome = await Promise.race([
+      active.done,
+      new Promise<null>((resolve) => {
+        const t = setTimeout(() => { timedOut = true; approvalsAtTimeout = rt.approvals.pending(); resolve(null) }, timeoutMs)
+        void active.done.finally(() => clearTimeout(t))
+      }),
+    ])
+    return {
+      sessionId: rec.id,
+      turnId: active.turnId,
+      status: timedOut || !outcome ? 'timeout' : outcome.status,
+      rounds: outcome?.rounds ?? 0,
+      model: outcome?.model ?? null,
+      usage: outcome?.usage ?? emptyUsage(),
+      messages: rec.ui.slice(uiBefore),
+      pendingApprovals: timedOut ? approvalsAtTimeout : rt.approvals.pending(),
+      runs: rec.runs.slice(runsBefore),
     }
   }
 
@@ -350,6 +411,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       return rec ? state(rec) : null
     },
     createSession,
+    chat,
     deleteSession: (id) => {
       const exists = store.get(id) !== undefined
       if (exists) void deleteSession(id)

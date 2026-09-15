@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, DEFAULT_SESSION_SETTINGS, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
@@ -235,6 +235,9 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     return s
   })
   router.delete('/api/sessions/:id', ({ params }) => ({ deleted: agent.deleteSession(params.id) }))
+  // A whole turn over one request: the WebSocket is the GUI's transport, this is a program's.
+  // The response is held until the turn ends or timeoutMs expires; see ChatResponse.status.
+  router.post('/api/chat', async (ctx) => agent.chat(await ctx.json(ChatRequestSchema)))
 
   // ---- datasets ----------------------------------------------------------
   router.post('/api/datasets/open', async (ctx) => {
