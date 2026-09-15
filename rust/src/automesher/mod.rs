@@ -24,6 +24,7 @@
 pub mod castellate;
 pub mod driver;
 pub mod features;
+pub mod identity;
 pub mod layers;
 pub mod octree;
 pub mod quality;

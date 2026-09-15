@@ -21,7 +21,7 @@ is implemented.
 
 ```text
 ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME] [-check [<caseDir>]]
-                               [-dryRun] [-schema]
+                               [-runId ID] [-dryRun] [-schema]
 ```
 
 - `ofgpu-automesher <config.json>` - the meshing path, SPEC-LIT §92.14. Reads
@@ -44,6 +44,10 @@ ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME] [-check [<caseDir>
   `<output.case_dir>_<NAME>` and the mesh name `<output.name>_<NAME>`, so two
   variants of one config do not overwrite each other's `constant/polyMesh`.
   This is `tools/mesh/step_mesh.py --tag`'s convention.
+- `-runId ID` - the run this mesh belongs to, recorded in the summary's identity
+  block: 1 to 64 characters from `[A-Za-z0-9._-]`, refused otherwise before any
+  meshing starts. Without the flag `OFGPU_RUN_ID` is used, and without that the
+  summary records `run_id: null`.
 - `-check [<caseDir>]` - §92.14.5: run the §92.3 gate on a polyMesh that
   ALREADY exists, with this config's `quality` thresholds, and write nothing.
   The directory defaults to the config's own (tag-adjusted) `output.case_dir`;

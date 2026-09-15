@@ -26747,6 +26747,7 @@ input a plan for the next run has. The driver writes, beside the case:
 <case_dir>/<name>_summary.json =
 { "tool", "config_path", "name", "case_dir",
   "stopped_after",                     -- the stage, or null for a full run
+  "identity": { "schema", "mesh_id", "run_id", "tool", "written_at", "host" },
   "surface":  { "n_triangles", "n_points", "bbox", "patches": [ ... ] },
   "stages":   [ { "stage", "seconds", <that stage's own counts> }, ... ],
   "mesh":     { "n_points", "n_cells", "n_internal_faces",
@@ -26761,6 +26762,12 @@ input a plan for the next run has. The driver writes, beside the case:
 records is the config the run actually used, defaults filled in, which is the
 thing a second run has to match. The patch list is the FINAL one, after
 (92.56).
+
+`identity` is the mesh's own name and the run's. `mesh_id` is
+`"m_" + fnv1a64(<case_dir as configured, '\' -> '/', no trailing '/'> + newline + <name>)` in 16 hex digits — deterministic,
+because the mesh at a directory is one mesh however many times it is re-made — and `run_id` is
+the run that asked for it (`-runId`, else `OFGPU_RUN_ID`, else null). `tools/mesh/step_mesh.py`
+writes the same six keys, so one reader covers both meshers.
 
 #### 92.14.4 What a refusal writes
 
