@@ -107,6 +107,7 @@ const gpuNotBusy: Predicate = (ctx) => {
   return { ok: false, vars: { running: busy.map((r) => r.id).join(', ') } }
 }
 
+import { DC_PREDICATES } from './actions.dc.js'
 export const PREDICATES: Record<string, Predicate> = {
   binaryExists,
   flagsTypeCheck,
@@ -115,6 +116,7 @@ export const PREDICATES: Record<string, Predicate> = {
   pathExists,
   caseFormatAccepted,
   gpuNotBusy,
+  ...DC_PREDICATES,
 }
 
 /** {{name}} -> vars.name; a key absent from vars is left as written, never blanked. */

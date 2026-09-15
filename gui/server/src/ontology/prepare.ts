@@ -36,6 +36,8 @@ export const startRunPrepare: Preparer = async (ctx, phase, before) => {
   }
 }
 
+import { DC_PREPARERS } from './actions.dc.js'
 export const PREPARERS: Record<string, Preparer> = {
   startRun: startRunPrepare,
+  ...DC_PREPARERS,
 }
