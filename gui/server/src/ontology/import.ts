@@ -5,7 +5,7 @@
 // The remedy is deleting gui/ontology/ontology.db and re-importing - a full
 // re-import is cheap at this size (facts-data.md §7: 15-25 MB over 9.7 MB of source).
 import type { PropertyDef } from '@cfd/shared'
-import { ONTOLOGY, type OntologyRegistry } from '@cfd/shared'
+import { DC_ONTOLOGY, ONTOLOGY, type OntologyRegistry } from '@cfd/shared'
 import type { OntologyStore } from './store.js'
 import { foldCases } from './folds/cases.js'
 import { foldCommits } from './folds/git.js'
@@ -13,6 +13,7 @@ import { foldMeshes } from './folds/meshes.js'
 import { foldRegions } from './folds/regions.js'
 import { foldRuns } from './folds/runs.js'
 import { foldSessions } from './folds/sessions.js'
+import { foldDcCases, foldDcReports } from './import.dc.js'
 import type { FoldContext, FoldReport, LinkKey, MirrorLink, MirrorRow, MirrorWriter, TypeKey } from './folds/base.js'
 import { emptyFoldReport } from './folds/base.js'
 
@@ -45,6 +46,10 @@ export interface ImportOptions {
   extraMeshRoots?: string[]
   /** Run the git fold. Default true; the fixture tests pass false. */
   git?: boolean
+  /** Run the two data-centre folds. Default true; N3's own fold-count test passes false. */
+  dc?: boolean
+  /** Absolute paths of report documents OUTSIDE the workspace to also fold. Default []. */
+  dcReportPaths?: string[]
   /** Injected clock, so a test can prove importedAt did not move. Default () => new Date().toISOString(). */
   now?: () => string
 }
@@ -68,8 +73,8 @@ export function memoryWriter(): MirrorWriter & { rows: MirrorRow[]; links: Mirro
   const rows: MirrorRow[] = []
   const links: MirrorLink[] = []
   return {
-    hasObjectType: (n) => ONTOLOGY.objectType(n) !== null,
-    hasLinkType: (n) => ONTOLOGY.linkType(n) !== null,
+    hasObjectType: (n) => DC_ONTOLOGY.objectType(n) !== null,
+    hasLinkType: (n) => DC_ONTOLOGY.linkType(n) !== null,
     getRow: async (t, id) => byKey.get(t + ' ' + id) ?? null,
     putRow: async (row) => {
       const key = row.objectType + ' ' + row.primaryKey
@@ -178,7 +183,7 @@ export function writerFromStore(store: OntologyStore, ontology: OntologyRegistry
  *  cases -> meshes -> regions -> commits -> runs -> sessions. Run->Case and Run->Commit need
  *  Case and Commit present; Session->Run and ToolCall->Run need Run present; the Mesh->Run edge
  *  (`usesMesh`, the only one touching both) is resolved in the run fold via pendingRunMeshLinks. */
-const FOLDS: Array<(ctx: FoldContext) => Promise<FoldReport[]>> = [foldCases, foldMeshes, foldRegions, foldCommits, foldRuns, foldSessions]
+const FOLDS: Array<(ctx: FoldContext) => Promise<FoldReport[]>> = [foldCases, foldMeshes, foldRegions, foldCommits, foldRuns, foldSessions, foldDcCases, foldDcReports]
 
 export async function importAll(opts: ImportOptions): Promise<ImportReport> {
   const now = opts.now ?? (() => new Date().toISOString())
@@ -198,6 +203,9 @@ export async function importAll(opts: ImportOptions): Promise<ImportReport> {
   const folds: FoldReport[] = []
   const errors: ImportReport['errors'] = []
   for (const fold of FOLDS) {
+    // The data-centre folds default on; a guarded one pushes no report at all, so dc:false
+    // reproduces the eleven-fold importer exactly.
+    if ((fold === foldDcCases || fold === foldDcReports) && opts.dc === false) continue
     if (fold === foldCommits && opts.git === false) {
       // The fixture tests pass git:false: no spawn, but the Commit report still exists (C4).
       folds.push(emptyCommitReport())

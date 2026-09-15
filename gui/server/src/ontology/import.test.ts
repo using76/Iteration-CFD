@@ -74,7 +74,7 @@ describe('the importer', () => {
   test('importAll reports one fold per object type, in the order Case, Mesh, MeshQualityReport, MeshPatch, RegionLayout, Region, Interface, Commit, Run, Session, ToolCall', async () => {
     await buildSharedTree()
     const writer = memoryWriter()
-    const report = await importAll({ workspaceRoot: root, guiDir: root, writer, ontologyVersion: ONTOLOGY_VERSION, git: false })
+    const report = await importAll({ workspaceRoot: root, guiDir: root, writer, ontologyVersion: ONTOLOGY_VERSION, git: false, dc: false })
     expect(report.folds.map((f) => f.type)).toEqual(FOLD_TYPES)
     const sum = report.folds.reduce((n, f) => n + f.inserted, 0)
     expect(report.totals.inserted).toBe(sum)
