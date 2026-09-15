@@ -190,6 +190,7 @@ export const BINARIES: BinarySpec[] = [
     flags: [
       { name: '-stopAfter', type: 'enum', values: ['octree', 'castellate', 'snap', 'features', 'layers'], description: 'The stop rule of SPEC-LIT §92.14: the stages up to and including STAGE run and the mesh that stage returned is written. "features" is a spelling of "snap".' },
       { name: '-tag', type: 'string', description: "This run's output is its own: the case directory and the mesh name each gain _NAME, so two runs of one config do not overwrite each other. NAME is a suffix, not a path." },
+      { name: '-runId', type: 'string', description: "The run this mesh belongs to, recorded in the summary's identity block. 1 to 64 characters from [A-Za-z0-9._-]; without it OFGPU_RUN_ID is used, and without that the summary records run_id: null." },
       { name: '-schema', type: 'flag', description: 'Print the JSON Schema of the config to stdout and exit 0 (no config read; other arguments ignored).' },
       { name: '-check', type: 'path', description: 'Run the §92.3 quality gate on <caseDir>/constant/polyMesh with the config thresholds: measured summary + exit 0, or the refusal naming cells + exit 1.' },
       { name: '-dryRun', type: 'flag', description: 'Everything up to the surface summary, then exit 0 without attempting the meshing stages.' },
@@ -525,6 +526,7 @@ export const PIPELINES: BinarySpec[] = [
       { name: '--from-checkpoint', type: 'flag', description: 'Start from the saved pool checkpoint (work/<name>_pools.brep), skipping the boolean work.' },
       { name: '--stop-after-checkpoint', type: 'flag', description: 'Stop after the checkpoint stage; the next run can reuse it with --from-checkpoint.' },
       { name: '--tag', type: 'string', description: 'Suffix for this run: outputs and the mesh name gain _NAME, so two runs of one config do not overwrite each other.' },
+      { name: '--run-id', type: 'string', description: 'The run this mesh belongs to, recorded in the summary identity block (1 to 64 characters from [A-Za-z0-9._-]); OFGPU_RUN_ID is the fallback.' },
       { name: '--dry-run', type: 'flag', description: 'Stop after the cut and print volumes, masses, surface counts and ground heights without meshing.' },
     ],
     accepts: [],
