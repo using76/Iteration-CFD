@@ -798,6 +798,7 @@ export const REST = {
   runs: '/api/runs',
   sessions: '/api/sessions',
   datasets: '/api/datasets',
+  attachments: '/api/attachments',
   geometry: '/api/geometry',
   results: '/api/results',
   ontology: '/api/ontology',
