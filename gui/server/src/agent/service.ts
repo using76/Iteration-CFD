@@ -9,6 +9,7 @@ import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
 import { loadCustomTools } from '../tools/custom.js'
 import { mergeTools } from '../tools/defaults.js'
+import { ontologyPreviewFor } from '../ontology/handle.js'
 import type { Hub, ClientConn } from '../ws/types.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
 import { createAnthropicClient } from './anthropic.js'
@@ -117,6 +118,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       customTools: () => customTools.map((t) => t.name),
       userContext: () => rt.context,
       emit: (msg: ServerMsg) => hub.sendToSession(rec.id, msg),
+      ontologyPreview: ontologyPreviewFor({ config, runs, hub }, rec.id),
       retryDelayMs: deps.retryDelayMs,
     })
       .catch((err: unknown): TurnOutcome => {

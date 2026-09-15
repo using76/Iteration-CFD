@@ -47,6 +47,8 @@ export interface TurnDeps {
   emit(msg: ServerMsg): void
   retryDelayMs?: number
   now?: () => Date
+  /** The ontology proposal preview, supplied by agent/service.ts (N5). Undefined degrades to a blank card. */
+  ontologyPreview?: ProposalPreview
 }
 
 export type TurnStatus = 'done' | 'error' | 'refusal' | 'cancelled'
@@ -102,8 +104,11 @@ function formatArgs(args: Array<{ flag: string; value: unknown }>): string {
   return args.map((a) => (a.value === true || a.value === null ? a.flag : `${a.flag} ${String(a.value)}`)).join(' ')
 }
 
+/** A proposal's edit-set summary, when the ontology engine is wired in (N5/CONTRACT §9). */
+export type ProposalPreview = (name: string, input: unknown, toolUseId: string) => Promise<string | null>
+
 /** The preview text on the approval card. */
-export async function approvalPreview(name: string, input: unknown, workspaceRoot: string): Promise<string | null> {
+export async function approvalPreview(name: string, input: unknown, workspaceRoot: string, ontology?: ProposalPreview, toolUseId = ''): Promise<string | null> {
   const i = (input ?? {}) as Record<string, unknown>
   switch (name) {
     case 'case_edit': {
@@ -135,7 +140,7 @@ export async function approvalPreview(name: string, input: unknown, workspaceRoo
     case 'shell_exec':
       return Array.isArray(i.argv) ? (i.argv as string[]).join(' ') : null
     default:
-      return null
+      return ontology ? await ontology(name, input, toolUseId) : null
   }
 }
 
@@ -402,7 +407,7 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     }
 
     if (asks.length) {
-      const previews = await Promise.all(asks.map((a) => approvalPreview(a.tu.name, a.input, deps.config.workspaceRoot).catch(() => null)))
+      const previews = await Promise.all(asks.map((a) => approvalPreview(a.tu.name, a.input, deps.config.workspaceRoot, deps.ontologyPreview, a.tu.id).catch(() => null)))
       const req = deps.approvals.request(
         turnId,
         asks.map((a, i) => ({ toolUseId: a.tu.id, name: a.tu.name, input: a.input, summary: toolLabel(a.tu.name, locale), preview: previews[i] })),

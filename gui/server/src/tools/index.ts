@@ -18,6 +18,7 @@ import { geometryInfo, geometryOpen, geometrySave } from './geometry.js'
 import { gpuInfo } from './gpu.js'
 import { guiControl, guiState } from './gui.js'
 import { meshGenerate } from './mesh.js'
+import { ontologyAct, ontologyApply, ontologyQuery } from './ontology.js'
 import { fieldStats, residualsGet, resultsDiscover } from './results.js'
 import { runLog, runStart, runStatus, runStop, runWait } from './run.js'
 import { lineSampleTool } from './sample.js'
@@ -68,6 +69,9 @@ export const TOOLS: ToolDef[] = [
   customToolRun,
   shellExec,
   suggestFollowups,
+  ontologyQuery,
+  ontologyAct,
+  ontologyApply,
 ]
 
 const byName = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]))

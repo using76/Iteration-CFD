@@ -39,6 +39,9 @@ export const TOOL_NAMES = [
   'custom_tool_run',
   'shell_exec',
   'suggest_followups',
+  'ontology_query',
+  'ontology_act',
+  'ontology_apply',
 ] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
@@ -88,6 +91,9 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   custom_tool_run: { name: 'custom_tool_run', kind: 'mutate', policy: 'ask', label: { ko: '사용자 도구 실행', en: 'Run custom tool' } },
   shell_exec: { name: 'shell_exec', kind: 'mutate', policy: 'never', label: { ko: '셸 명령', en: 'Shell command' } },
   suggest_followups: { name: 'suggest_followups', kind: 'ui', policy: 'auto', label: { ko: '후속 제안', en: 'Suggestions' } },
+  ontology_query: { name: 'ontology_query', kind: 'read', policy: 'auto', label: { ko: '온톨로지 조회', en: 'Query the ontology' } },
+  ontology_act: { name: 'ontology_act', kind: 'mutate', policy: 'ask', label: { ko: '변경 제안', en: 'Propose a change' } },
+  ontology_apply: { name: 'ontology_apply', kind: 'mutate', policy: 'auto', label: { ko: '제안 적용', en: 'Apply a proposal' } },
 }
 
 export function toolPolicy(name: string): ToolPolicy {
@@ -302,6 +308,14 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       return ko ? '셸 명령 실행' : 'Ran shell command'
     case 'suggest_followups':
       return ko ? '후속 제안' : 'Suggested follow-ups'
+    case 'ontology_query':
+      return ko ? `온톨로지 조회: ${String(i.objectType ?? '')} ${fmtInt((r.objects as unknown[] | undefined)?.length ?? 0)}건` : `Queried ${String(i.objectType ?? '')} (${fmtInt((r.objects as unknown[] | undefined)?.length ?? 0)} objects)`
+    case 'ontology_act':
+      return r.state === 'rejected'
+        ? (ko ? `제안 거부됨: ${String(i.action ?? '')} (차단 ${(r.blocking as unknown[] | undefined)?.length ?? 0}건)` : `Proposal rejected: ${String(i.action ?? '')} (${(r.blocking as unknown[] | undefined)?.length ?? 0} blocking)`)
+        : (ko ? `제안 생성: ${String(i.action ?? '')} (객체 ${r.objects ?? 0}, 링크 ${r.links ?? 0})` : `Proposed ${String(i.action ?? '')} (${r.objects ?? 0} objects, ${r.links ?? 0} links)`)
+    case 'ontology_apply':
+      return ko ? `적용됨: ${String(r.action ?? '')} (${String(r.editId ?? '')})` : `Applied ${String(r.action ?? '')} (edit ${String(r.editId ?? '')})`
     default:
       return name
   }

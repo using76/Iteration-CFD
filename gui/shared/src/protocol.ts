@@ -800,6 +800,7 @@ export const REST = {
   datasets: '/api/datasets',
   geometry: '/api/geometry',
   results: '/api/results',
+  ontology: '/api/ontology',
   ws: '/ws',
 } as const
 

@@ -4,11 +4,15 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, DEFAULT_SESSION_SETTINGS, PIPELINES, MESH_PRESETS, MODELS, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, DEFAULT_SESSION_SETTINGS, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import { compileUserRegex, UnsafeRegexError } from '../regex.js'
+import { EngineError } from '../ontology/engine.js'
+import { ontologyHandle, type OntologyHandle } from '../ontology/handle.js'
+import { isQueryFailure, runOntologyQuery, type OntologyQuery, type QueryFailure } from '../ontology/query.js'
+import { whereSchema } from '../tools/ontology.js'
 import { geometryService } from '../tools/geometry.js'
 import { geometryEdit, geometryImportStep } from '../tools/geomTool.js'
 import type { ToolContext, ToolResult } from '../tools/context.js'
@@ -38,6 +42,8 @@ export interface ApiDeps {
   /** The OPTIONAL cht schema (the solver generates docs/schema/cht-1.json); a getter, so a test can flip it between assertions. */
   chtSchema?: () => CaseSchema | null
   gitStatus?: (cwd: string) => Promise<GitStatus>
+  /** Injected by tests; defaults to the memoised store+engine handle over the config's own mirror. */
+  ontology?: () => Promise<OntologyHandle>
 }
 
 const ImportStepSchema = z.object({
@@ -78,6 +84,19 @@ function toolHttpError(r: ToolResult): HttpError {
   const code = r.error?.code ?? 'INVALID'
   const status = code === 'NOT_FOUND' ? 404 : code === 'EXISTS' ? 409 : code === 'OUTSIDE_WORKSPACE' ? 403 : 400
   return new HttpError(status, r.error?.message ?? 'tool failed', { code })
+}
+
+/** N5's query refusals: an absent object is a 404, everything else is the caller's bad request. */
+function queryFailureStatus(code: QueryFailure['code']): number {
+  return code === 'NOT_FOUND' ? 404 : 400
+}
+
+/** N4's eleven engine codes, mapped like toolHttpError maps tool codes (CONTRACT §7). */
+function engineFailureStatus(code: string): number {
+  if (code === 'NOT_FOUND') return 404
+  if (code === 'FORBIDDEN') return 403
+  if (['ALREADY_APPLIED', 'EXPIRED', 'REJECTED', 'NOT_APPLICABLE', 'NOT_RENDERED', 'NOT_AUTHORISED'].includes(code)) return 409
+  return 400
 }
 
 const StartRunSchema = z.object({
@@ -423,6 +442,110 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
       return await readRegionLayout(root, r.rel)
     } catch (err) {
       if (err instanceof RegionLayoutError) throw new HttpError(err.code === 'NOT_FOUND' ? 404 : 400, err.message)
+      throw err
+    }
+  })
+
+  // ---- ontology (docs/12 §C N5): the mirror read over REST, plus the human's propose/apply.
+  // One query function and one engine handle as the tools use; the only differences are that the
+  // tool trims its answer and gates apply on an executed ontology_act, and these routes do neither.
+  const ontology = deps.ontology ?? (() => ontologyHandle({ config, runs, hub: undefined }))
+
+  router.get('/api/ontology/types', () => ({
+    version: ONTOLOGY.version,
+    objectTypes: ONTOLOGY.objectTypeNames(),
+    linkTypes: ONTOLOGY.linkTypeNames(),
+    actionTypes: ONTOLOGY.actionTypeNames(),
+  }))
+
+  router.get('/api/ontology/objects', async ({ query }) => {
+    const type = query.get('type')
+    if (!type) throw new HttpError(400, 'type is required')
+    if (!ONTOLOGY.objectType(type)) throw new HttpError(400, `unknown object type: ${type}`)
+    let where: OntologyQuery['where'] = null
+    const raw = query.get('where')
+    if (raw !== null && raw !== '') {
+      try {
+        where = z.array(whereSchema).nullable().parse(JSON.parse(raw))
+      } catch {
+        throw new HttpError(400, 'where is not valid JSON for the query filter')
+      }
+    }
+    const r = await runOntologyQuery(await ontology(), {
+      objectType: type,
+      id: null,
+      where,
+      orderBy: query.get('orderBy'),
+      descending: query.get('descending') === null ? null : query.get('descending') === 'true',
+      limit: query.get('limit') === null || query.get('limit') === '' ? null : intParam(query, 'limit', 25),
+      cursor: query.get('cursor'),
+      traverse: query.get('traverse'),
+      properties: query.get('properties') ? query.get('properties')!.split(',').map((s) => s.trim()).filter(Boolean) : null,
+    }, { trimTo: null })
+    if (isQueryFailure(r)) throw new HttpError(queryFailureStatus(r.code), r.message)
+    return r
+  })
+
+  // The :id is percent-encoded by the caller (router.ts decodes per segment), so a primary key
+  // containing '/' — cases/plume.jsonc — resolves.
+  router.get('/api/ontology/object/:id', async ({ params, query }) => {
+    const type = query.get('type')
+    if (!type) throw new HttpError(400, 'type is required')
+    if (!ONTOLOGY.objectType(type)) throw new HttpError(400, `unknown object type: ${type}`)
+    const r = await runOntologyQuery(await ontology(), {
+      objectType: type, id: params.id, where: null, orderBy: null, descending: null, limit: null, cursor: null, traverse: null, properties: null,
+    }, { trimTo: null })
+    if (isQueryFailure(r)) throw new HttpError(queryFailureStatus(r.code), r.message)
+    if (r.objects.length === 0) throw new HttpError(404, `no such object: ${type}/${params.id}`)
+    return r.objects[0]
+  })
+
+  router.get('/api/ontology/links', async ({ query }) => {
+    const type = query.get('type')
+    const id = query.get('id')
+    const link = query.get('link')
+    if (!type || !id || !link) throw new HttpError(400, 'type, id and link are required')
+    const r = await runOntologyQuery(await ontology(), {
+      objectType: type, id, where: null, orderBy: null, descending: null, limit: null, cursor: null, traverse: link, properties: null,
+    }, { trimTo: null })
+    if (isQueryFailure(r)) throw new HttpError(queryFailureStatus(r.code), r.message)
+    return { links: r.links, linked: r.linked }
+  })
+
+  const OntologyProposeSchema = z.object({
+    action: z.string(),
+    parameters: z.record(z.string(), z.unknown()).nullable().default(null),
+    sessionId: z.string().nullable().default(null),
+  })
+
+  // A human is calling the server directly: propose writes nothing, apply authorises on the
+  // operator's behalf and then applies. The agent's approved-gate map does not apply here.
+  router.post('/api/ontology/propose', async (ctx) => {
+    const body = await ctx.json(OntologyProposeSchema)
+    const principal: Principal = { kind: 'user', id: 'local', sessionId: body.sessionId }
+    try {
+      return await (await ontology()).engine.propose(body.action, body.parameters ?? {}, principal)
+    } catch (err) {
+      if (err instanceof EngineError) throw new HttpError(engineFailureStatus(err.code), err.message, { code: err.code })
+      throw err
+    }
+  })
+
+  router.post('/api/ontology/apply', async (ctx) => {
+    const body = await ctx.json(z.object({ proposalId: z.string() }))
+    const principal: Principal = { kind: 'user', id: 'local', sessionId: null }
+    try {
+      const engine = (await ontology()).engine
+      try {
+        engine.authorise(body.proposalId, principal)
+      } catch (err) {
+        // authorise refuses every state but 'rendered'; when it refuses, apply still runs and
+        // names the precise reason (ALREADY_APPLIED / EXPIRED / NOT_AUTHORISED), writing nothing.
+        if (!(err instanceof EngineError && err.code === 'NOT_RENDERED')) throw err
+      }
+      return await engine.apply(body.proposalId, principal)
+    } catch (err) {
+      if (err instanceof EngineError) throw new HttpError(engineFailureStatus(err.code), err.message, { code: err.code })
       throw err
     }
   })
