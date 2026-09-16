@@ -149,8 +149,12 @@ export const QueryResultWireSchema = z.object({
 // ---- the summary-line grammar (the whole specification of parseEditSummary) ----
 // Five line forms, matched after trimEnd(); nothing else is a line of an edit summary.
 
-const OBJECT_LINE  = /^(create|modify|delete) (\S+) (\S+?)(?: \((.*)\))?$/
-const LINK_LINE    = /^([+-]) link (\S+) -> (\S+) (\S+?)(?: \((.*)\))?$/
+const OBJECT_LINE  = /^(create|modify|delete) (\S+) ("[^"]*"|\S+?)(?: \((.*)\))?$/
+const LINK_LINE    = /^([+-]) link (\S+) -> (\S+) ("[^"]*"|\S+?)(?: \((.*)\))?$/
+/** An id containing whitespace is written quoted by the importer, because a primary key such as
+ *  `JRC:CoC:2024 / 5.3.1` has spaces in it and the line grammar is whitespace-separated. The
+ *  unquoted form is unchanged, so every summary written before this existed still parses. */
+const unquote = (s: string): string => (s.startsWith('"') && s.endsWith('"') ? s.slice(1, -1) : s)
 const BLOCKED_LINE = /^blocked: (.+)$/
 const MORE_LINE    = /^(?:…|\.\.\.) and (\d+) more$/
 
@@ -166,12 +170,12 @@ export function parseEditSummary(text: string | null | undefined): EditSummaryVi
     if (!line.trim()) continue
     let m = OBJECT_LINE.exec(line)
     if (m) {
-      view.objects.push({ op: m[1] as EditLineView['op'], objectType: m[2], id: m[3], note: m[4] ?? null })
+      view.objects.push({ op: m[1] as EditLineView['op'], objectType: m[2], id: unquote(m[3]), note: m[4] ?? null })
       continue
     }
     m = LINK_LINE.exec(line)
     if (m) {
-      view.links.push({ op: m[1] === '+' ? 'create' : 'delete', linkType: m[2], toType: m[3], toId: m[4], note: m[5] ?? null })
+      view.links.push({ op: m[1] === '+' ? 'create' : 'delete', linkType: m[2], toType: m[3], toId: unquote(m[4]), note: m[5] ?? null })
       continue
     }
     m = BLOCKED_LINE.exec(line)
