@@ -3,8 +3,9 @@
 // Each is an edit a human approves: the class, a rack's airflow, a fan curve
 // scaled to a room-only model, a tile's K scaled for partial coverage, the run
 // budget, accepting a run's closure, assessing a number, asserting compliance.
-// Types only from actions.js, so the only runtime edge is actions.js importing
-// this file's DC_ACTION_TYPES — no module cycle at load.
+// Types only from actions.js, and actions.js never imports this file: the base
+// ONTOLOGY is built without DC types, so DC_ACTION_TYPES reaches a registry only
+// through buildDcRegistry({ actions }) — no module cycle, no AT-RULE-TARGET at load.
 import type { ActionTypeDef } from './actions.js'
 
 export const SET_ASHRAE_CLASS: ActionTypeDef = {
@@ -273,6 +274,210 @@ export const SET_RUN_BUDGET: ActionTypeDef = {
   ontologyVersion: '0.1.0',
 }
 
-export const DC_ACTION_TYPES: ActionTypeDef[] = [
+
+export const ACCEPT_RUN: ActionTypeDef = {
+  apiName: 'acceptRun',
+  displayName: 'Accept a run closure',
+  description:
+    'Record that a person accepted the flow closure a data-centre run achieved, with the threshold ' +
+    'they accepted it against and why. The driver prints the net imbalance over the largest opening ' +
+    'and then discards it; this is what makes a tolerated imbalance a row somebody signed.',
+  parameters: [
+    { apiName: 'runId', displayName: 'Run', required: true, default: null,
+      description: 'The run id, which is also the DcMetricReport and PatchFlowBalance primary key',
+      type: { t: 'string', maxLength: 64 } },
+    { apiName: 'continuityRatioMax', displayName: 'Accepted closure', required: true, default: null,
+      description: 'Largest net imbalance, as a fraction of the largest opening, that this run is accepted at',
+      type: { t: 'double', min: 0 } },
+    { apiName: 'rationale', displayName: 'Rationale', required: true, default: null,
+      description: 'Why this closure is acceptable for this study, in one sentence',
+      type: { t: 'string', minLength: 8, maxLength: 400 } },
+  ],
+  prepare: 'acceptRun',
+  rules: [
+    { rule: 'createOrModifyObject', objectType: 'AcceptanceCriterion',
+      primaryKey: { from: 'prepared', key: 'criterionId' },
+      properties: {
+        metricApiName: { from: 'static', value: 'CONTINUITY_RATIO' },
+        operator:      { from: 'static', value: 'lte' },
+        threshold:     { from: 'parameter', parameter: 'continuityRatioMax' },
+        clauseId:      { from: 'static', value: null },
+        setBy:         { from: 'currentUser' },
+        setAt:         { from: 'currentTime' },
+        rationale:     { from: 'parameter', parameter: 'rationale' } } },
+    { rule: 'createOrModifyObject', objectType: 'AcceptanceVerdict',
+      primaryKey: { from: 'prepared', key: 'verdictId' },
+      properties: {
+        reportId:          { from: 'parameter', parameter: 'runId' },
+        criterionId:       { from: 'prepared', key: 'criterionId' },
+        word:              { from: 'prepared', key: 'word' },
+        measured:          { from: 'prepared', key: 'measured' },
+        threshold:         { from: 'parameter', parameter: 'continuityRatioMax' },
+        margin:            { from: 'prepared', key: 'margin' },
+        assertedBy:        { from: 'currentUser' },
+        assertedByKind:    { from: 'prepared', key: 'assertedByKind' },
+        assertedAt:        { from: 'currentTime' },
+        notAssessedReason: { from: 'static', value: null } } },
+    { rule: 'createLink', linkType: 'assessedAgainst',
+      from: { from: 'prepared', key: 'verdictId' }, to: { from: 'prepared', key: 'criterionId' }, properties: {} },
+    { rule: 'createLink', linkType: 'assessedBy',
+      from: { from: 'parameter', parameter: 'runId' }, to: { from: 'prepared', key: 'verdictId' }, properties: {} },
+  ],
+  functionRule: null,
+  criteria: [
+    { id: 'dcRowExists', severity: 'block', message: 'no {{type}} {{id}} in the mirror; import the run report first',
+      params: { objectType: 'PatchFlowBalance', idParam: 'runId' } },
+    { id: 'dcRowExists', severity: 'block', message: 'no {{type}} {{id}} in the mirror; import the run report first',
+      params: { objectType: 'DcMetricReport', idParam: 'runId' } },
+    { id: 'dcAsserterKindIsKnown', severity: 'block',
+      message: 'principal kind {{kind}} is neither a human nor an agent, so no verdict can name it', params: {} },
+    { id: 'dcClosureOutsideThreshold', severity: 'warn',
+      message: 'run {{id}} closed to {{measured}}, and you are accepting {{threshold}}: the arithmetic says {{word}}',
+      params: {} },
+  ],
+  permission: { submitters: ['user', 'agent'], requiresApproval: true, policy: 'ask' },
+  sideEffects: [],
+  maxEdits: 4,
+  ontologyVersion: '0.1.0',
+}
+
+export const ASSESS_AGAINST_STANDARD: ActionTypeDef = {
+  apiName: 'assessAgainstStandard',
+  displayName: 'Assess a report against a threshold',
+  description:
+    'Set the threshold one reported metric is judged against, name the standard clause it comes from, and ' +
+    'record the measured value, the threshold and the margin. The word stays NOT-ASSESSED: an agent may ' +
+    'propose the arithmetic, only a person may assert the verdict.',
+  parameters: [
+    { apiName: 'reportId', displayName: 'Report', required: true, default: null,
+      description: 'The DcMetricReport primary key, which is the run id',
+      type: { t: 'string', maxLength: 64 } },
+    { apiName: 'metricApiName', displayName: 'Metric', required: true, default: null,
+      description: 'Which reported number is being judged',
+      type: { t: 'enum', values: ['RCI_HI', 'RCI_LO', 'RTI', 'SHI', 'RHI', 'T_SUPPLY', 'T_RETURN',
+                                  'DT_EQUIPMENT', 'T_INLET_MAX', 'CONTINUITY_RATIO', 'FAN_SHAFT_POWER', 'IT_HEAT'] } },
+    { apiName: 'operator', displayName: 'Operator', required: true, default: null,
+      description: 'How the measured value must stand to the threshold: lt, lte, gt, gte, eq or ne, spelled as AcceptanceCriterion.operator spells them',
+      type: { t: 'enum', values: ['lt', 'lte', 'gt', 'gte', 'eq', 'ne'] } },
+    { apiName: 'threshold', displayName: 'Threshold', required: true, default: null,
+      description: 'The number the metric is judged against, in the unit the metric is reported in',
+      type: { t: 'double' } },
+    { apiName: 'clauseId', displayName: 'Clause', required: false, default: null,
+      description: 'The standard-clause locator this threshold comes from, as an id such as ASHRAE:TC9.9:5 / Table 3 / class A2. Never the clause text',
+      type: { t: 'string', maxLength: 200 } },
+    { apiName: 'rationale', displayName: 'Rationale', required: true, default: null,
+      description: 'Why this threshold applies to this room, in one sentence, in your own words',
+      type: { t: 'string', minLength: 8, maxLength: 400 } },
+  ],
+  prepare: 'assessAgainstStandard',
+  rules: [
+    { rule: 'createOrModifyObject', objectType: 'AcceptanceCriterion',
+      primaryKey: { from: 'prepared', key: 'criterionId' },
+      properties: {
+        metricApiName: { from: 'parameter', parameter: 'metricApiName' },
+        operator:      { from: 'parameter', parameter: 'operator' },
+        threshold:     { from: 'parameter', parameter: 'threshold' },
+        clauseId:      { from: 'parameter', parameter: 'clauseId' },
+        setBy:         { from: 'currentUser' },
+        setAt:         { from: 'currentTime' },
+        rationale:     { from: 'parameter', parameter: 'rationale' } } },
+    { rule: 'createOrModifyObject', objectType: 'AcceptanceVerdict',
+      primaryKey: { from: 'prepared', key: 'verdictId' },
+      properties: {
+        reportId:          { from: 'parameter', parameter: 'reportId' },
+        criterionId:       { from: 'prepared', key: 'criterionId' },
+        word:              { from: 'static', value: 'NOT-ASSESSED' },
+        measured:          { from: 'prepared', key: 'measured' },
+        threshold:         { from: 'parameter', parameter: 'threshold' },
+        margin:            { from: 'prepared', key: 'margin' },
+        assertedBy:        { from: 'currentUser' },
+        assertedByKind:    { from: 'prepared', key: 'assertedByKind' },
+        assertedAt:        { from: 'currentTime' },
+        notAssessedReason: { from: 'static', value: 'awaiting an engineer: apply assertCompliance' } } },
+    { rule: 'createLink', linkType: 'assessedAgainst',
+      from: { from: 'prepared', key: 'verdictId' }, to: { from: 'prepared', key: 'criterionId' }, properties: {} },
+    { rule: 'createLink', linkType: 'assessedBy',
+      from: { from: 'parameter', parameter: 'reportId' }, to: { from: 'prepared', key: 'verdictId' }, properties: {} },
+  ],
+  functionRule: null,
+  criteria: [
+    { id: 'dcRowExists', severity: 'block', message: 'no {{type}} {{id}} in the mirror; import the run report first',
+      params: { objectType: 'DcMetricReport', idParam: 'reportId' } },
+    { id: 'dcMetricIsReported', severity: 'block',
+      message: '{{metric}} is not a number this report carries; it reports: {{available}}', params: {} },
+    { id: 'dcAsserterKindIsKnown', severity: 'block',
+      message: 'principal kind {{kind}} is neither a human nor an agent, so no verdict can name it', params: {} },
+    { id: 'dcClauseLooksLikeALocator', severity: 'warn',
+      message: '{{clauseId}} is not in the form standardId, space, slash, space, locator, so no clause row will ever resolve it',
+      params: {} },
+  ],
+  permission: { submitters: ['user', 'agent'], requiresApproval: true, policy: 'ask' },
+  sideEffects: [],
+  maxEdits: 4,
+  ontologyVersion: '0.1.0',
+}
+
+export const ASSERT_COMPLIANCE: ActionTypeDef = {
+  apiName: 'assertCompliance',
+  displayName: 'Assert compliance',
+  description:
+    'A person states the acceptance verdict for one assessed metric of one report, and is named in it. ' +
+    'Only a user principal may submit this action: an agent may do the arithmetic, and may not sign it.',
+  parameters: [
+    { apiName: 'reportId', displayName: 'Report', required: true, default: null,
+      description: 'The DcMetricReport primary key, which is the run id',
+      type: { t: 'string', maxLength: 64 } },
+    { apiName: 'criterionId', displayName: 'Criterion', required: true, default: null,
+      description: 'The AcceptanceCriterion this verdict is asserted against',
+      type: { t: 'string', maxLength: 64 } },
+    { apiName: 'word', displayName: 'Verdict', required: true, default: null,
+      description: 'MEETS, MARGINAL, FAILS or NOT-ASSESSED. This vocabulary is design acceptance and is never the solver verification vocabulary',
+      type: { t: 'enum', values: ['MEETS', 'MARGINAL', 'FAILS', 'NOT-ASSESSED'] } },
+    { apiName: 'notAssessedReason', displayName: 'Why not assessed', required: false, default: null,
+      description: 'Required when the word is NOT-ASSESSED, and null otherwise',
+      type: { t: 'string', maxLength: 400 } },
+    { apiName: 'rationale', displayName: 'Rationale', required: true, default: null,
+      description: 'The engineering judgement behind the word, in one sentence',
+      type: { t: 'string', minLength: 8, maxLength: 400 } },
+  ],
+  prepare: 'assertCompliance',
+  rules: [
+    { rule: 'modifyObject', objectType: 'AcceptanceVerdict',
+      target: { from: 'prepared', key: 'verdictId' },
+      properties: {
+        word:              { from: 'parameter', parameter: 'word' },
+        assertedBy:        { from: 'currentUser' },
+        assertedByKind:    { from: 'prepared', key: 'assertedByKind' },
+        assertedAt:        { from: 'currentTime' },
+        notAssessedReason: { from: 'parameter', parameter: 'notAssessedReason' } } },
+  ],
+  functionRule: null,
+  criteria: [
+    { id: 'dcVerdictExists', severity: 'block',
+      message: 'no AcceptanceVerdict {{verdictId}}; assess the report against this criterion first', params: {} },
+    { id: 'dcAsserterIsHuman', severity: 'block',
+      message: 'principal kind {{kind}} may not assert compliance; only a human principal may', params: {} },
+    { id: 'dcCriterionCitesClause', severity: 'block',
+      message: 'criterion {{criterionId}} cites no standard clause; compliance is asserted against a clause, and a run closure a person accepted is not one',
+      params: {} },
+    { id: 'dcNotAssessedNeedsReason', severity: 'block', message: 'a NOT-ASSESSED verdict must say why', params: {} },
+    { id: 'dcWordAgreesWithArithmetic', severity: 'warn',
+      message: 'measured {{measured}} against {{operator}} {{threshold}} reads {{computed}}, and you are asserting {{word}}',
+      params: {} },
+  ],
+  permission: { submitters: ['user'], requiresApproval: true, policy: 'ask' },
+  sideEffects: [],
+  maxEdits: 2,
+  ontologyVersion: '0.1.0',
+}
+
+/** The five case decisions of Run 1. */
+export const DC_CASE_ACTION_TYPES: ActionTypeDef[] = [
   SET_ASHRAE_CLASS, SET_RACK_AIRFLOW, SCALE_FAN_CURVE, SCALE_TILE_LOSS, SET_RUN_BUDGET,
 ]
+/** The three judgements of Run 2. */
+export const DC_ACCEPTANCE_ACTION_TYPES: ActionTypeDef[] = [
+  ACCEPT_RUN, ASSESS_AGAINST_STANDARD, ASSERT_COMPLIANCE,
+]
+/** Every data-centre action, in declaration order. */
+export const DC_ACTION_TYPES: ActionTypeDef[] = [...DC_CASE_ACTION_TYPES, ...DC_ACCEPTANCE_ACTION_TYPES]

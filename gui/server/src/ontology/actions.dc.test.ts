@@ -3,7 +3,7 @@
 // below validates the declarations at load.
 import { describe, expect, it } from 'vitest'
 import { ACTION_TYPES, ONTOLOGY_VERSION, buildDcRegistry } from '@cfd/shared'
-import { DC_ACTION_TYPES } from '../../../shared/src/ontology/actions.dc.js'
+import { DC_ACTION_TYPES, DC_CASE_ACTION_TYPES } from '../../../shared/src/ontology/actions.dc.js'
 import { REPO_ROOT, fakeRuns } from '../agent/test-fakes.js'
 import { createActionEngine } from './engine.js'
 import { paramJsonSchema } from './params.js'
@@ -29,10 +29,10 @@ function seeded() {
 
 describe('registry', () => {
   it('the five case actions are declared once and reach the tool enum', () => {
-    expect(DC_ACTION_TYPES.length).toBe(5)
-    expect(new Set(DC_ACTION_TYPES.map((d) => d.apiName)).size).toBe(5)
-    for (const n of DC_ACTION_TYPES.map((d) => d.apiName)) expect(REG.actionTypeNames()).toContain(n)
-    for (const d of DC_ACTION_TYPES) {
+    expect(DC_CASE_ACTION_TYPES.length).toBe(5)
+    expect(new Set(DC_CASE_ACTION_TYPES.map((d) => d.apiName)).size).toBe(5)
+    for (const n of DC_CASE_ACTION_TYPES.map((d) => d.apiName)) expect(REG.actionTypeNames()).toContain(n)
+    for (const d of DC_CASE_ACTION_TYPES) {
       expect(d.ontologyVersion).toBe(ONTOLOGY_VERSION)
       expect(d.sideEffects).toEqual([])
       expect(d.functionRule).toBeNull()
@@ -204,14 +204,14 @@ describe('every case action', () => {
     // The fixture seeds four rows, so the assertion is on the delta: none.
     const writes = store.writes
     const calls = store.calls.length
-    for (const d of DC_ACTION_TYPES) await engine.propose(d.apiName, GOOD[d.apiName] ?? {}, USER)
+    for (const d of DC_CASE_ACTION_TYPES) await engine.propose(d.apiName, GOOD[d.apiName] ?? {}, USER)
     expect(store.writes).toBe(writes)
     expect(store.log.length).toBe(0)
     expect(store.calls.length).toBe(calls)
   })
 
   it('requires approval, policy ask, and a user may submit', () => {
-    for (const d of DC_ACTION_TYPES) {
+    for (const d of DC_CASE_ACTION_TYPES) {
       expect(d.permission.requiresApproval).toBe(true)
       expect(d.permission.policy).toBe('ask')
       expect(d.permission.submitters).toContain('user')
@@ -220,7 +220,7 @@ describe('every case action', () => {
   })
 
   it('no parameter is optional and no schema is a bare oneOf', () => {
-    for (const d of DC_ACTION_TYPES) {
+    for (const d of DC_CASE_ACTION_TYPES) {
       const s = paramJsonSchema(d.parameters)
       expect(((s.required as unknown[] | undefined) ?? []).length).toBe(d.parameters.length)
       expect(s.additionalProperties).toBe(false)
@@ -231,7 +231,7 @@ describe('every case action', () => {
 
   it('writes no seeded type, no result row and no corpus row', () => {
     const types = new Set<string>()
-    for (const d of DC_ACTION_TYPES) for (const r of d.rules ?? []) {
+    for (const d of DC_CASE_ACTION_TYPES) for (const r of d.rules ?? []) {
       if (r.rule === 'createLink' || r.rule === 'deleteLink') continue
       expect(r.rule).not.toBe('deleteObject')
       if (r.rule === 'deleteObject') continue
@@ -241,7 +241,7 @@ describe('every case action', () => {
     expect([...types].sort()).toEqual(['ConvergenceCriterion', 'DcCase', 'DcFan', 'DcRack', 'DcTile'])
     // The objectType set proves no rule targets Run, Case, seeded or corpus types;
     // the sweep catches stray mentions ('"Case"' would trip on displayName).
-    const s = JSON.stringify(DC_ACTION_TYPES)
+    const s = JSON.stringify(DC_CASE_ACTION_TYPES)
     for (const t of ['Standard', 'MetricDef', 'Concept', 'Equation', 'Capability',
                      'candidate_', 'chunk', 'document', 'unmapped_span', 'sourcePath'])
       expect(s).not.toContain(t)

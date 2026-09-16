@@ -5,6 +5,7 @@
 // apply. A predicate returns { ok, vars } and every var its criterion message
 // names, and never refuses for a reason another criterion owns.
 import { createHash } from 'node:crypto'
+import type { Principal } from '@cfd/shared'
 import type { Predicate, PredicateOutcome, CriterionContext } from './criteria.js'
 import type { Preparer } from './prepare.js'
 
@@ -30,12 +31,21 @@ export function dcCriterionId(subjectId: string, metricApiName: string, operator
 export function dcVerdictWord(measured: number, operator: string, threshold: number): 'MEETS' | 'MARGINAL' | 'FAILS' {
   if (Math.abs(measured - threshold) <= 0.05 * Math.abs(threshold)) return 'MARGINAL'
   const pass =
-    operator === '<=' ? measured <= threshold :
-    operator === '<'  ? measured <  threshold :
-    operator === '>=' ? measured >= threshold :
-    operator === '>'  ? measured >  threshold :
-                        measured === threshold
+    operator === 'lte' ? measured <= threshold :
+    operator === 'lt'  ? measured <  threshold :
+    operator === 'gte' ? measured >= threshold :
+    operator === 'gt'  ? measured >  threshold :
+    operator === 'ne'  ? measured !== threshold :
+                         measured === threshold
   return pass ? 'MEETS' : 'FAILS'
+}
+
+/** The principal kind a verdict names: 'user' asserts as a human, 'agent' as an agent, and
+ *  any other kind (the server's) is one no verdict can name, so a criterion refuses it. */
+export function dcAsserterKind(principal: Principal): 'human' | 'agent' | null {
+  if (principal.kind === 'user') return 'human'
+  if (principal.kind === 'agent') return 'agent'
+  return null
 }
 
 const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v))
@@ -124,6 +134,71 @@ export const DC_PREDICATES: Record<string, Predicate> = {
     if (any) return { ok: true, vars: {} }
     return { ok: false, vars: {} }
   },
+
+  // The three judgements: a preparer computes the arithmetic once, a predicate only names
+  // what failed, and a warn never stops a proposal — only severity 'block' rejects.
+
+  dcClosureOutsideThreshold: (ctx): PredicateOutcome => {
+    if (ctx.prepared.word === 'MEETS') return { ok: true, vars: {} }
+    return { ok: false, vars: { id: str(ctx.params.runId), measured: str(ctx.prepared.measured),
+                                threshold: str(ctx.params.continuityRatioMax), word: str(ctx.prepared.word) } }
+  },
+
+  dcMetricIsReported: (ctx): PredicateOutcome => {
+    const metric = str(ctx.params.metricApiName)
+    const prop = DC_METRIC_PROPERTY[metric]
+    const v = prop !== undefined && ctx.store.getObject('DcMetricReport', str(ctx.params.reportId)) !== null
+      ? ctx.store.getObject('DcMetricReport', str(ctx.params.reportId))?.[prop]
+      : null
+    if (typeof v === 'number' && Number.isFinite(v)) return { ok: true, vars: {} }
+    return { ok: false, vars: { metric, available: Object.keys(DC_METRIC_PROPERTY).join(', ') } }
+  },
+
+  dcClauseLooksLikeALocator: (ctx): PredicateOutcome => {
+    const clauseId = ctx.params.clauseId
+    if (clauseId == null || /^[^\s/]+ \/ .+$/.test(String(clauseId))) return { ok: true, vars: {} }
+    return { ok: false, vars: { clauseId: str(clauseId) } }
+  },
+
+  dcVerdictExists: (ctx): PredicateOutcome => {
+    const verdictId = str(ctx.prepared.verdictId)
+    if (ctx.store.getObject('AcceptanceVerdict', verdictId)) return { ok: true, vars: {} }
+    return { ok: false, vars: { verdictId } }
+  },
+
+  dcCriterionCitesClause: (ctx): PredicateOutcome => {
+    const criterionId = str(ctx.params.criterionId)
+    const clause = ctx.store.getObject('AcceptanceCriterion', criterionId)?.clauseId
+    if (typeof clause === 'string' && clause !== '') return { ok: true, vars: {} }
+    return { ok: false, vars: { criterionId } }
+  },
+
+  dcNotAssessedNeedsReason: (ctx): PredicateOutcome => {
+    if (ctx.params.word !== 'NOT-ASSESSED') return { ok: true, vars: {} }
+    const reason = ctx.params.notAssessedReason
+    if (typeof reason === 'string' && reason !== '') return { ok: true, vars: {} }
+    return { ok: false, vars: {} }
+  },
+
+  dcWordAgreesWithArithmetic: (ctx): PredicateOutcome => {
+    const measured = ctx.prepared.measured
+    if (typeof measured !== 'number' || !Number.isFinite(measured) || ctx.prepared.computed === ctx.params.word)
+      return { ok: true, vars: {} }
+    return { ok: false, vars: { measured: str(measured), operator: str(ctx.prepared.operator),
+                                threshold: str(ctx.prepared.threshold), computed: str(ctx.prepared.computed),
+                                word: str(ctx.params.word) } }
+  },
+
+  dcAsserterKindIsKnown: (ctx): PredicateOutcome => {
+    if (ctx.prepared.assertedByKind === 'human' || ctx.prepared.assertedByKind === 'agent')
+      return { ok: true, vars: {} }
+    return { ok: false, vars: { kind: str(ctx.principal.kind) } }
+  },
+
+  dcAsserterIsHuman: (ctx): PredicateOutcome => {
+    if (ctx.prepared.assertedByKind === 'human') return { ok: true, vars: {} }
+    return { ok: false, vars: { kind: str(ctx.principal.kind) } }
+  },
 }
 
 /** Read-only preparers, keyed by the action's prepare field. A missing row
@@ -145,6 +220,63 @@ export const DC_PREPARERS: Record<string, Preparer> = {
     return {
       runBlock: { ...current, iterations: ctx.params.iterations },
       stopCriterionId: `${String(ctx.params.dcCaseId)}#stop`,
+    }
+  },
+
+  // acceptRun: the closure the run achieved, judged at the threshold a human names.
+  acceptRun: async (ctx) => {
+    const runId = String(ctx.params.runId)
+    const threshold = Number(ctx.params.continuityRatioMax)
+    const balance = ctx.store.getObject('PatchFlowBalance', runId)
+    const raw = balance ? Number(balance.netOverLargest) : null
+    const measured = raw !== null && Number.isFinite(raw) ? raw : null
+    const criterionId = dcCriterionId(runId, 'CONTINUITY_RATIO', 'lte', threshold)
+    return {
+      criterionId,
+      verdictId: `${runId}#${criterionId}`,
+      measured,
+      word: measured !== null ? dcVerdictWord(measured, 'lte', threshold) : null,
+      margin: measured !== null ? measured - threshold : null,
+      assertedByKind: dcAsserterKind(ctx.principal),
+    }
+  },
+
+  assessAgainstStandard: async (ctx) => {
+    const reportId = String(ctx.params.reportId)
+    const metric = String(ctx.params.metricApiName)
+    const operator = String(ctx.params.operator)
+    const threshold = Number(ctx.params.threshold)
+    const report = ctx.store.getObject('DcMetricReport', reportId)
+    const prop = DC_METRIC_PROPERTY[metric]
+    const raw = report && prop !== undefined ? report[prop] : null
+    const measured = typeof raw === 'number' && Number.isFinite(raw) ? raw : null
+    const criterionId = dcCriterionId(reportId, metric, operator, threshold)
+    return {
+      criterionId,
+      verdictId: `${reportId}#${criterionId}`,
+      measured,
+      // Computed for the warning only: the rule writes NOT-ASSESSED, a human says the word.
+      word: measured !== null ? dcVerdictWord(measured, operator, threshold) : null,
+      margin: measured !== null ? measured - threshold : null,
+      assertedByKind: dcAsserterKind(ctx.principal),
+    }
+  },
+
+  assertCompliance: async (ctx) => {
+    const verdictId = `${String(ctx.params.reportId)}#${String(ctx.params.criterionId)}`
+    const verdict = ctx.store.getObject('AcceptanceVerdict', verdictId)
+    const criterion = ctx.store.getObject('AcceptanceCriterion', String(ctx.params.criterionId))
+    const measured = typeof verdict?.measured === 'number' ? verdict.measured : null
+    const threshold = typeof criterion?.threshold === 'number' ? criterion.threshold : null
+    const operator = typeof criterion?.operator === 'string' ? criterion.operator : null
+    const computable = measured !== null && threshold !== null && operator !== null
+    return {
+      verdictId,
+      measured,
+      threshold,
+      operator,
+      computed: computable ? dcVerdictWord(measured, operator as string, threshold as number) : null,
+      assertedByKind: dcAsserterKind(ctx.principal),
     }
   },
 }
