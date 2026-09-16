@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { ONTOLOGY, TOOL_META, TOOL_NAMES, summarizeToolCall, toolPolicy } from '@cfd/shared'
+import { DC_ONTOLOGY as ONTOLOGY, TOOL_META, TOOL_NAMES, summarizeToolCall, toolPolicy } from '@cfd/shared'
 import { z } from 'zod'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { approvalPreview } from '../agent/loop.js'
@@ -41,7 +41,7 @@ function ctx(over: Partial<ToolContext> = {}): ToolContext {
 }
 
 function nulls(over: Record<string, unknown>): Record<string, unknown> {
-  return { id: null, where: null, orderBy: null, descending: null, limit: null, cursor: null, traverse: null, properties: null, ...over }
+  return { id: null, where: null, orderBy: null, descending: null, limit: null, cursor: null, traverse: null, properties: null, mode: null, text: null, ...over }
 }
 
 const rowCount = (): number => ['Run', 'Driver', 'Case', 'Commit'].reduce((n: number, t) => n + h.store.count(t), 0)
@@ -86,7 +86,8 @@ describe('ontology tools', () => {
     expect(enumOf(a.properties.action)).toEqual(ONTOLOGY.actionTypeNames())
     const sides = ONTOLOGY.linkTypes.flatMap((l) => [l.from.apiName, l.to.apiName]).filter((v, i, arr) => arr.indexOf(v) === i).sort()
     expect(enumOf(q.properties.traverse)).toEqual(sides)
-    expect(enumOf(q.properties.traverse)!.length).toBeLessThanOrEqual(40)
+    // C6 Run 1: the registry is DC_ONTOLOGY, whose 73 side names need a higher ceiling than N5's 40.
+    expect(enumOf(q.properties.traverse)!.length).toBeLessThanOrEqual(96)
     expect(ACTION_HINT.length).toBeLessThanOrEqual(1200)
     expect(ACTION_HINT).toContain('startRun (binary, casePath, args, positionals, label)')
   })
@@ -121,7 +122,7 @@ describe('ontology tools', () => {
       const props = s.properties as Record<string, unknown>
       expect((s.required as string[]).slice().sort()).toEqual(Object.keys(props).slice().sort())
     }
-    expect(Object.keys(defs[0].properties as object).length).toBe(9)
+    expect(Object.keys(defs[0].properties as object).length).toBe(11)
     expect(Object.keys(defs[1].properties as object).length).toBe(2)
     expect(Object.keys(defs[2].properties as object).length).toBe(1)
     const q = defs[0].properties as Record<string, unknown>

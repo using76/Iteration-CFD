@@ -308,8 +308,14 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       return ko ? '셸 명령 실행' : 'Ran shell command'
     case 'suggest_followups':
       return ko ? '후속 제안' : 'Suggested follow-ups'
-    case 'ontology_query':
+    case 'ontology_query': {
+      if ((r as Record<string, unknown>).kind === 'ontologyContext') {
+        const p = fmtInt((r.chunks as unknown[] | undefined)?.length ?? 0)
+        const o = fmtInt((r.objects as unknown[] | undefined)?.length ?? 0)
+        return ko ? `온톨로지 검색: 구절 ${p}개, 객체 ${o}건` : `Searched the ontology (${p} passages, ${o} objects)`
+      }
       return ko ? `온톨로지 조회: ${String(i.objectType ?? '')} ${fmtInt((r.objects as unknown[] | undefined)?.length ?? 0)}건` : `Queried ${String(i.objectType ?? '')} (${fmtInt((r.objects as unknown[] | undefined)?.length ?? 0)} objects)`
+    }
     case 'ontology_act':
       return r.state === 'rejected'
         ? (ko ? `제안 거부됨: ${String(i.action ?? '')} (차단 ${(r.blocking as unknown[] | undefined)?.length ?? 0}건)` : `Proposal rejected: ${String(i.action ?? '')} (${(r.blocking as unknown[] | undefined)?.length ?? 0} blocking)`)

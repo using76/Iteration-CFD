@@ -9,9 +9,10 @@
 // createStoreActionStore (wired in ontology/handle.ts) and its preview exports
 // ONTOLOGY_ACT_TOOL / proposalByToolUseId (ontology/preview.ts); N0's gitHead (read once per
 // process in ontology/handle.ts).
-import { ONTOLOGY, type Principal, type Proposal } from '@cfd/shared'
+import { DC_ONTOLOGY as ONTOLOGY, type Principal, type Proposal } from '@cfd/shared'
 import { z } from 'zod'
 import { APPROVAL_TTL_MS } from '../agent/approvals.js'
+import { isSearchFailure, SEARCH_MODEL_BYTES, searchCorpus } from '../corpus/retrieve.js'
 import { ontologyHandle } from '../ontology/handle.js'
 import { EngineError } from '../ontology/engine.js'
 import { isQueryFailure, QUERY_MODEL_BYTES, runOntologyQuery } from '../ontology/query.js'
@@ -27,10 +28,10 @@ if (OBJECT_TYPE_NAMES.length === 0) throw new Error('ontology.ts: the registry d
 if (SIDE_NAMES.length === 0) throw new Error('ontology.ts: the registry declares no link types; N1 must land first')
 if (ACTION_NAMES.length === 0) throw new Error('ontology.ts: the registry declares no action types; N1/N4 must land first')
 
-const SIDE_ENUM = (SIDE_NAMES.length <= 40 ? SIDE_NAMES : SIDE_NAMES.slice(0, 40)) as [string, ...string[]]
+const SIDE_ENUM = (SIDE_NAMES.length <= 96 ? SIDE_NAMES : SIDE_NAMES.slice(0, 96)) as [string, ...string[]]
 const SIDE_DESC =
   'A link accessor on objectType: follow it one hop from every matched object and return the far side too. One hop only; null for no hop.' +
-  (SIDE_NAMES.length > 40 ? ' (truncated to 40)' : '')
+  (SIDE_NAMES.length > 96 ? ' (truncated to 96)' : '')
 
 /** "<apiName> (<paramNames>)" one clause per action, joined by ' · ' — the enum's own contract,
  *  grown from the registry so the two can never drift. Capped at 1,200 chars on a clause boundary. */
@@ -58,6 +59,8 @@ const QuerySchema = z.object({
   cursor: z.string().nullable().describe("Opaque cursor from a previous result's nextCursor; null for the first page."),
   traverse: z.enum(SIDE_ENUM).nullable().describe(SIDE_DESC),
   properties: z.array(z.string()).max(30).nullable().describe('Property api names to return; null returns the primary key, the title and up to 12 more.'),
+  mode: z.enum(['objects', 'search']).nullable().describe('"objects" (or null) reads typed rows only; "search" also returns document passages with their clause locators.'),
+  text: z.string().nullable().describe('The question in the user\'s own words, when mode is "search"; null otherwise.'),
 })
 
 const ActSchema = z.object({
@@ -106,9 +109,27 @@ function engineErrorCode(err: unknown): string {
 export const ontologyQuery: ToolDef<typeof QuerySchema> = {
   name: 'ontology_query',
   description:
-    'Read objects and their links from the ontology. Pick an objectType from the enum, filter on its properties, optionally walk one link. Read-only: it can never change anything. Use ontology_act to propose a change.',
+    'Read objects and their links from the ontology. Pick an objectType from the enum, filter on its properties, optionally walk one link. Read-only: it can never change anything. Use ontology_act to propose a change. Set mode to "search" and put the question in text to get document passages with their clause locators beside the typed rows.',
   schema: QuerySchema,
   async run(input, ctx) {
+    if (input.mode === 'search') {
+      if (input.text == null || input.text.trim() === '')
+        return fail('SEARCH_WITHOUT_TEXT', 'mode is "search" but text is null; put the question in text, or set mode to "objects".')
+      if (input.id != null)
+        return fail('ID_IN_SEARCH', 'id and mode "search" cannot be used together; search resolves the object from text. Set id to null, or set mode to "objects".')
+      if (input.cursor != null)
+        return fail('CURSOR_IN_SEARCH', 'cursor and mode "search" cannot be used together; a search returns one page of at most 6 passages. Set cursor to null, or set mode to "objects".')
+      const h = await ontologyHandle({ config: ctx.config, runs: ctx.runs, hub: undefined })
+      const r = await searchCorpus(
+        h,
+        { objectType: input.objectType, text: input.text, traverse: input.traverse, where: input.where, orderBy: input.orderBy, descending: input.descending, limit: input.limit, properties: input.properties },
+        { trimTo: SEARCH_MODEL_BYTES },
+      )
+      if (isSearchFailure(r)) return fail(r.code, r.message)
+      return okResult(r)
+    }
+    if (input.text != null)
+      return fail('TEXT_WITHOUT_SEARCH', `text is set but mode is "${input.mode}"; set mode to "search" to use it, or set text to null.`)
     const h = await ontologyHandle({ config: ctx.config, runs: ctx.runs, hub: undefined })
     const r = await runOntologyQuery(h, input, { trimTo: QUERY_MODEL_BYTES })
     if (isQueryFailure(r)) return fail(r.code, r.message)

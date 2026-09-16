@@ -4,7 +4,7 @@
 // ontology_act and ontology_apply: both tools, both routes and the preview hold ONE engine, and
 // the engine holds the proposals. A restart loses them; ontology_apply then answers NOT_FOUND
 // and the model re-proposes — accepted behaviour, no proposal table in this unit.
-import { ONTOLOGY, type ActionTypeDef } from '@cfd/shared'
+import { DC_ONTOLOGY as ONTOLOGY, type ActionTypeDef } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import type { RunManager } from '../runs/types.js'
 import type { Hub } from '../ws/types.js'
@@ -52,7 +52,7 @@ async function build(deps: OntologyDeps): Promise<OntologyHandle> {
   const engine = createActionEngine({
     actions: ONTOLOGY.actionTypes as ActionTypeDef[],
     registry: ONTOLOGY,
-    store: installProposeImport(store),
+    store: installProposeImport(store, ONTOLOGY),
     server: {
       workspaceRoot: deps.config.workspaceRoot,
       now: () => Date.now(),

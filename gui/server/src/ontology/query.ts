@@ -3,7 +3,7 @@
 // message) and the route into the right status without either catching by message. The store
 // filters by equality only (N2), so non-eq clauses are evaluated here in code under a scan cap,
 // and paging is this file's cursor, not the store's.
-import { ONTOLOGY } from '@cfd/shared'
+import { DC_ONTOLOGY as ONTOLOGY } from '@cfd/shared'
 import { resolveLinkSide } from './store.js'
 import type { OntologyStoreError } from './store.js'
 import type { OntologyHandle } from './handle.js'
