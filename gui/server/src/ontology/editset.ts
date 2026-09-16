@@ -7,6 +7,13 @@ import type { LinkTypeDef, OntologyRegistry } from '@cfd/shared'
 import type { ActionStore } from './engine.js'
 import { EngineError } from './engine.js'
 
+/** A function-backed action computes its edit set from data, not from a static EditRule[].
+ *  N1's AT-RULES-XOR makes `rules: null` + `functionRule: '<name>'` the legal second arm;
+ *  this registry is where the name is resolved. Registered by the unit that owns the action. */
+export type EditFunction = (def: ActionTypeDef, ctx: EditContext) => EditSet
+export const EDIT_FUNCTIONS: Record<string, EditFunction> = {}
+export function registerEditFunction(name: string, fn: EditFunction): void { EDIT_FUNCTIONS[name] = fn }
+
 export interface EditContext {
   params: Record<string, unknown>
   prepared: Record<string, unknown>
@@ -136,6 +143,15 @@ function linkEditFor(rule: EditRule, ctx: EditContext): LinkEdit | null {
 }
 
 export function computeEditSet(def: ActionTypeDef, ctx: EditContext): EditSet {
+  if (def.functionRule !== null) {
+    const fn = EDIT_FUNCTIONS[def.functionRule.function]
+    if (!fn) throw new EngineError('NOT_APPLICABLE', `action ${def.apiName} names edit function ${def.functionRule.function}, which nothing registered`)
+    const set = fn(def, ctx)
+    if (set.objects.length + set.links.length > def.maxEdits) throw new EngineError('TOO_MANY_EDITS', `${def.apiName} would write ${set.objects.length + set.links.length} edits; maxEdits is ${def.maxEdits}`)
+    const bad = checkRuleOrder(set.objects)
+    if (bad) throw new EngineError('INVALID_RULE_ORDER', bad)
+    return set
+  }
   const objects: ObjectEdit[] = []
   const sources: Array<Record<string, ValueSource>> = []
   const links: LinkEdit[] = []

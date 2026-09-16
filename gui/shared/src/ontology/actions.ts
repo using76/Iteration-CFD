@@ -5,6 +5,7 @@
 
 import type { ObjectTypeApiName, PropertyApiName } from './types.js'
 import { BINARY_NAMES, PIPELINES } from '../registry.js'
+import { PROPOSE_IMPORT } from './actions.dc.js'
 
 export interface Principal {
   kind: 'user' | 'agent' | 'server'
@@ -275,4 +276,4 @@ export const ATTACH_FILE: ActionTypeDef = {
   ontologyVersion: '0.1.0',
 }
 
-export const ACTION_TYPES: ActionTypeDef[] = [START_RUN, ATTACH_FILE]
+export const ACTION_TYPES: ActionTypeDef[] = [START_RUN, ATTACH_FILE, PROPOSE_IMPORT]

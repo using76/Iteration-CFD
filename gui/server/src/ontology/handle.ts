@@ -13,8 +13,8 @@ import { gitHead } from '../workspace/git.js'
 import { createActionEngine, type OntologyActionEngine } from './engine.js'
 import type { ProposalPreview } from '../agent/loop.js'
 import { ONTOLOGY_ACT_TOOL, createProposalPreview } from './preview.js'
-import { createStoreActionStore } from './storeAdapter.js'
 import { ontologyDbPath, openOntologyStore, type OntologyStore } from './store.js'
+import { installProposeImport } from '../corpus/importBatch.js'
 
 export interface OntologyDeps {
   config: ServerConfig
@@ -52,7 +52,7 @@ async function build(deps: OntologyDeps): Promise<OntologyHandle> {
   const engine = createActionEngine({
     actions: ONTOLOGY.actionTypes as ActionTypeDef[],
     registry: ONTOLOGY,
-    store: createStoreActionStore(store),
+    store: installProposeImport(store),
     server: {
       workspaceRoot: deps.config.workspaceRoot,
       now: () => Date.now(),

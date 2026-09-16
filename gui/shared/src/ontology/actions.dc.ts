@@ -3,9 +3,8 @@
 // Each is an edit a human approves: the class, a rack's airflow, a fan curve
 // scaled to a room-only model, a tile's K scaled for partial coverage, the run
 // budget, accepting a run's closure, assessing a number, asserting compliance.
-// Types only from actions.js, and actions.js never imports this file: the base
-// ONTOLOGY is built without DC types, so DC_ACTION_TYPES reaches a registry only
-// through buildDcRegistry({ actions }) — no module cycle, no AT-RULE-TARGET at load.
+// actions.js imports only PROPOSE_IMPORT from here (rule-less, so no AT-RULE-TARGET at load);
+// this file's import of actions.js is type-only, so there is no runtime cycle.
 import type { ActionTypeDef } from './actions.js'
 
 export const SET_ASHRAE_CLASS: ActionTypeDef = {
@@ -481,3 +480,44 @@ export const DC_ACCEPTANCE_ACTION_TYPES: ActionTypeDef[] = [
 ]
 /** Every data-centre action, in declaration order. */
 export const DC_ACTION_TYPES: ActionTypeDef[] = [...DC_CASE_ACTION_TYPES, ...DC_ACCEPTANCE_ACTION_TYPES]
+
+/** C5: the corpus import. The first function-backed action — its edit set is computed from the
+ *  candidate rows at propose time (editset.ts), not from a static rule list. Registered beside
+ *  N1's ACTION_TYPES by actions.ts, and deliberately NOT a member of DC_ACTION_TYPES: buildDcRegistry
+ *  spreads that array on top of ACTION_TYPES, and a double registration would refuse the apiName. */
+export const PROPOSE_IMPORT: ActionTypeDef = {
+  apiName: 'proposeImport',
+  displayName: 'Import a reviewed batch of extracted candidates',
+  description:
+    'Turn one batch of extracted candidate rows into one proposal. Every candidate is re-checked by the ' +
+    'mapping gate; accepted ones become object and link edits, refused ones are listed by the cell that ' +
+    'refused them and imported for nobody. Approving writes the objects, the links and their source spans ' +
+    'in one transaction. Nothing is written until a human approves.',
+  parameters: [
+    { apiName: 'batchId', displayName: 'Batch', required: true, default: null,
+      description: 'The extraction batch to import; every candidate row of one extraction pass carries it',
+      type: { t: 'string', minLength: 1, maxLength: 128 } },
+    { apiName: 'maxObjects', displayName: 'Object cap', required: false, default: 200,
+      description: 'Refuse the whole batch when it proposes more objects than this. Never truncates.',
+      type: { t: 'integer', min: 1, max: 200 } },
+    { apiName: 'includeLinks', displayName: 'Include links', required: false, default: true,
+      description: 'Import the batch candidate links as well as its objects',
+      type: { t: 'boolean' } },
+    { apiName: 'note', displayName: 'Reviewer note', required: false, default: null,
+      description: 'One line the reviewer wants kept on the edit-log row; not stored on any object',
+      type: { t: 'string', maxLength: 200 } },
+  ],
+  prepare: 'proposeImport',
+  rules: null,
+  functionRule: { function: 'proposeImport' },
+  criteria: [
+    { id: 'batchNotEmpty',      severity: 'block', message: 'no candidate rows carry batch {{batchId}}',                       params: {} },
+    { id: 'batchWithinCap',     severity: 'block', message: 'batch {{batchId}} proposes {{count}} objects; the cap is {{cap}}', params: {} },
+    { id: 'noStoredClauseText', severity: 'block', message: '{{candidateId}} carries a property named "text"; a clause is a locator, our own one-line claim, and a public value only when a public source states it', params: {} },
+    { id: 'candidatesRefused',  severity: 'warn',  message: '{{refused}} of {{total}} candidates were refused and are not imported; the first is {{first}}', params: {} },
+  ],
+  permission: { submitters: ['user', 'agent'], requiresApproval: true, policy: 'ask' },
+  sideEffects: [],
+  maxEdits: 400,
+  ontologyVersion: '0.1.0',
+}
