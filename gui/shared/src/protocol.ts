@@ -294,6 +294,8 @@ export const UserContextSchema = z.object({
   activeTab: z.string().nullable().optional(),
   /** Workspace-relative paths mentioned with @ or dropped in. */
   attachments: z.array(z.string()),
+  /** Attachment object ids (POST /api/attachments); older clients omit them. */
+  attachmentIds: z.array(z.string()).default([]),
   /** Selected text in the editor, if any (kept short by the client). */
   selection: z.string().nullable(),
 })

@@ -34,7 +34,7 @@ export const actions = {
       t: 'user.message',
       sessionId: sid,
       text: trimmed,
-      context: { activeFile: selectActiveFile(ui), activeRun: activeRunId(), attachments, selection },
+      context: { activeFile: selectActiveFile(ui), activeRun: activeRunId(), attachments, attachmentIds: [], selection },
     })
     if (ok) {
       useSessionStore.getState().setLastUserText(trimmed)

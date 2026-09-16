@@ -508,7 +508,7 @@ async function drive(opts: Options): Promise<number> {
     t: 'user.message',
     sessionId: session.id,
     text: prompt,
-    context: { activeFile: opts.casePath, activeRun: null, attachments: [opts.casePath], selection: null },
+    context: { activeFile: opts.casePath, activeRun: null, attachments: [opts.casePath], attachmentIds: [], selection: null },
   })
 
   const timeout = setTimeout(() => finish(`timeout after ${opts.timeoutSec}s`), opts.timeoutSec * 1000)

@@ -2,15 +2,18 @@
 // approval brokers, the quick actions and the run-end notifications, all
 // driven by the client frames the hub hands over.
 import fsp from 'node:fs/promises'
-import type { BetaMessageParam, BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import type { ChatRequest, ChatResponse, ClientMsg, ClientMsgOf, CustomToolSummary, PendingApproval, ServerMsg, SessionSettings, SessionState, SessionSummary, UiMessage, UserContext } from '@cfd/shared'
+import type { BetaContentBlockParam, BetaMessageParam, BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
+import type { ChatRequest, ChatResponse, ClientMsg, ClientMsgOf, CustomToolSummary, PendingApproval, ServerMsg, SessionSettings, SessionState, SessionSummary, UiBlock, UiMessage, UserContext } from '@cfd/shared'
 import { CHAT_TIMEOUT_DEFAULT_MS } from '@cfd/shared'
+import { attachmentObjectBlocks, dehydrateAttachmentImages, MAX_ATTACHMENT_IDS, visionMode } from '../attachments/blocks.js'
+import { looksBinary } from '../attachments/sniff.js'
+import { createAttachmentStore } from '../attachments/store.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { RunManager } from '../runs/types.js'
 import { loadCustomTools } from '../tools/custom.js'
 import { mergeTools } from '../tools/defaults.js'
-import { ontologyPreviewFor } from '../ontology/handle.js'
+import { ontologyHandle, ontologyPreviewFor } from '../ontology/handle.js'
 import type { Hub, ClientConn } from '../ws/types.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
 import { createAnthropicClient } from './anthropic.js'
@@ -128,6 +131,9 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       })
       .then(async (outcome) => {
         if (rt.active?.turnId === turnId) rt.active = null
+        // The image goes home the moment the turn ends; only its <attachment/>
+        // reference stays in the history and in the session file (D12).
+        if (dehydrateAttachmentImages(rec)) await store.save(rec)
         await refreshCustomTools()
         if (outcome.status === 'cancelled') sendState(rec)
         broadcastList()
@@ -145,9 +151,10 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     rt.approvals.cancelAll('cancelled by user')
   }
 
-  async function attachmentBlocks(context: UserContext): Promise<{ blocks: BetaTextBlockParam[]; notices: string[] }> {
-    const blocks: BetaTextBlockParam[] = []
+  async function attachmentBlocks(context: UserContext): Promise<{ blocks: BetaContentBlockParam[]; notices: string[]; warnings: string[] }> {
+    const blocks: BetaContentBlockParam[] = []
     const notices: string[] = []
+    const warnings: string[] = []
     for (const rel of context.attachments.slice(0, MAX_ATTACHMENTS)) {
       try {
         const r = resolveInWorkspace(config.workspaceRoot, rel, { mustExist: true })
@@ -160,6 +167,13 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
         }
         const buf = await fsp.readFile(r.abs)
         const truncated = buf.length > ATTACHMENT_CAP
+        // A NUL byte in the first 8 KB means binary: name the file, never utf8-decode
+        // it into silent mojibake (D14, the 16 KB truncation defect the row names).
+        if (looksBinary(buf.subarray(0, 8 * 1024))) {
+          blocks.push({ type: 'text', text: `<file path="${r.rel}" bytes="${buf.length}" binary="true" note="binary file; post it to /api/attachments to show it to the model"/>` })
+          notices.push(`@${r.rel} (${buf.length} bytes, binary — not shown as text)`)
+          continue
+        }
         const text = buf.subarray(0, ATTACHMENT_CAP).toString('utf8')
         blocks.push({ type: 'text', text: `<file path="${r.rel}"${truncated ? ` truncated="true" bytes="${buf.length}"` : ''}>\n${text}\n</file>` })
         notices.push(`@${r.rel} (${buf.length} bytes${truncated ? ', truncated to 16 KB' : ''})`)
@@ -168,8 +182,25 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
         notices.push(`@${rel}: ${(err as Error).message}`)
       }
     }
+    if (context.attachmentIds.length) {
+      try {
+        // N5's memoised handle: the same instance the REST routes hold, so there is no second database.
+        const handle = await ontologyHandle({ config, runs, hub: undefined })
+        const attached = await attachmentObjectBlocks(context.attachmentIds, { mode: visionMode(config), store: createAttachmentStore(config), mirror: handle.store })
+        blocks.push(...attached.blocks)
+        notices.push(...attached.notices)
+        warnings.push(...attached.warnings)
+      } catch (err) {
+        // An unreachable mirror or store must never fail the turn: name each id,
+        // exactly the way an unknown one is named (C13).
+        for (const id of context.attachmentIds.slice(0, MAX_ATTACHMENT_IDS)) {
+          blocks.push({ type: 'text', text: `<attachment id="${id}" error="${(err as Error).message}"/>` })
+          notices.push(`attachment ${id}: ${(err as Error).message}`)
+        }
+      }
+    }
     if (context.selection) blocks.push({ type: 'text', text: `<selection${context.activeFile ? ` file="${context.activeFile}"` : ''}>\n${context.selection.slice(0, ATTACHMENT_CAP)}\n</selection>` })
-    return { blocks, notices }
+    return { blocks, notices, warnings }
   }
 
   async function userMessage(client: ClientConn, msg: ClientMsgOf<'user.message'>): Promise<void> {
@@ -183,17 +214,20 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     rt.starting = true
     try {
       rt.context = msg.context
+      // A crashed turn must not carry its base64 into this turn's history or file (D12).
+      dehydrateAttachmentImages(rec)
       // The session list shows the case a conversation was about: the open case
       // the window reports as its active file, kept with the record.
       if (msg.context.activeFile) rec.casePath = msg.context.activeFile
       const text = msg.text.trim()
-      const { blocks, notices } = await attachmentBlocks(msg.context)
+      const { blocks, notices, warnings } = await attachmentBlocks(msg.context)
       if (!text && !blocks.length) return client.send({ t: 'error', message: 'empty message', fatal: false })
-      const content: BetaTextBlockParam[] = [...(text ? [{ type: 'text', text } as BetaTextBlockParam] : []), ...blocks]
+      const content: BetaContentBlockParam[] = [...(text ? [{ type: 'text', text } as BetaContentBlockParam] : []), ...blocks]
       const message: BetaMessageParam = { role: 'user', content: text && !blocks.length ? text : content }
-      const ui = appendUserTurn(rec, message, { synthetic: false, notices, entitle: true })
+      const ui = appendUserTurn(rec, message, { synthetic: false, notices, warnings, entitle: true })
       if (ui) {
-        if (blocks.length && text) ui.blocks = [{ kind: 'text', text }, ...ui.blocks.filter((b) => b.kind === 'notice')]
+        // The bubble never carries the image bytes: text, then notices and warnings only.
+        if (blocks.length) ui.blocks = [...(text ? [{ kind: 'text', text } as UiBlock] : []), ...ui.blocks.filter((b) => b.kind === 'notice')]
         hub.sendToSession(rec.id, { t: 'msg.user', sessionId: rec.id, message: ui })
       }
       await store.save(rec)
@@ -218,10 +252,9 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     if (!fresh && Object.keys(patch).length) rec.settings = { ...rec.settings, ...patch }
     const uiBefore = rec.ui.length
     const runsBefore = rec.runs.length
-    // No attachmentIds key: UserContextSchema has none today and CONTRACT §13 makes that N6's line.
     const context: UserContext = {
       activeFile: req.activeFile, activeRun: null, activeStep: null, activeTab: null,
-      attachments: req.attachments, selection: null,
+      attachments: req.attachments, attachmentIds: req.attachmentIds, selection: null,
     }
     const errors: string[] = []
     const conn: ClientConn = {

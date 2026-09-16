@@ -23,6 +23,8 @@ export interface ServerConfig {
   demo: boolean
   /** Which LLM client the agent loop uses. Demo mode defaults to the scripted mock. */
   llm: 'anthropic' | 'zai' | 'mock'
+  /** CFD_VISION=blocks|describe: how an image attachment reaches the model; default per provider (attachments/blocks.ts). */
+  vision?: 'blocks' | 'describe'
   model: string
   /** True when either the Anthropic key or a z.ai key resolved. Optional so hand-built test configs need none. */
   hasKey?: boolean
@@ -145,6 +147,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ontologyDir: env.CFD_ONTOLOGY_DIR ? path.resolve(env.CFD_ONTOLOGY_DIR) : path.join(guiDir, 'ontology'),
     demo,
     llm,
+    vision: env.CFD_VISION === 'blocks' || env.CFD_VISION === 'describe' ? env.CFD_VISION : undefined,
     model: env.CFD_MODEL ?? (llm === 'zai' ? 'glm-5.3-flash' : llm === 'mock' ? 'mock-assistant' : 'claude-opus-5'),
     hasKey,
     allowNoApiKey: env.CFD_ALLOW_NO_API_KEY === '1' || llm === 'mock',

@@ -221,7 +221,7 @@ describe('hub', () => {
     await c.open()
     await c.next('hello')
     c.send({ t: 'session.open', sessionId: 's_7' })
-    c.send({ t: 'user.message', sessionId: 's_7', text: 'hi', context: { activeFile: null, activeRun: null, attachments: [], selection: null } })
+    c.send({ t: 'user.message', sessionId: 's_7', text: 'hi', context: { activeFile: null, activeRun: null, attachments: [], attachmentIds: [], selection: null } })
     await new Promise((r) => setTimeout(r, 30))
     expect(seen).toEqual(['session.open:s_7', 'user.message:s_7'])
     // Deleting or renaming another session names a target; it must not move

@@ -267,7 +267,7 @@ describe('prompt', () => {
       mode: 'demo',
       gpu: runs.gpu(),
       runs: [{ id: 'r_1', binary: 'ofgpu-k-epsilon', status: 'running', iter: 120, targetIter: 400, casePath: 'cases/plume.jsonc', written: [], error: null } as unknown as RunInfo],
-      context: { activeFile: 'cases/plume.jsonc', activeRun: 'r_1', attachments: [], selection: null },
+      context: { activeFile: 'cases/plume.jsonc', activeRun: 'r_1', attachments: [], attachmentIds: [], selection: null },
       customTools: ['t1'],
       locale: 'ko',
       now: new Date('2026-09-07T00:00:00Z'),
