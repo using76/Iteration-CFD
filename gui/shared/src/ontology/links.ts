@@ -1,4 +1,4 @@
-// gui/shared/src/ontology/links.ts — the thirteen link types. Sides follow D-h:
+// gui/shared/src/ontology/links.ts — the fourteen link types. Sides follow D-h:
 // from.apiName reads on the from object, to.apiName on the to object. There is
 // no producedBy and no second Mesh-Run edge: the edge is usesMesh (D-q).
 import type { LinkTypeDef, PropertyDef } from './types.js'
@@ -115,4 +115,20 @@ const touched: LinkTypeDef = {
   ontologyVersion: V,
 }
 
-export const LINK_TYPES: LinkTypeDef[] = [executed, runs, atCommit, usesMesh, hasPatch, gradedBy, contains, declares, joins, usesLayout, belongsTo, started, touched]
+const attachedTo: LinkTypeDef = {
+  apiName: 'attachedTo', displayName: 'Attached to', cardinality: 'MANY_TO_MANY',
+  // OURS and UNVERIFIED (fact sheet §6.1: attachments are uncovered by the research).
+  // One link type points at ONE subject type — the LinkSide shape has no polymorphism —
+  // and the subject today is the Session the file arrived on; N6's upload route
+  // creates this edge. Many-to-many because one screenshot can be evidence on
+  // more than one subject (R:155).
+  from: { apiName: 'attachedTo', displayName: 'Subjects', objectType: 'Attachment' },
+  to: { apiName: 'attachments', displayName: 'Attachments', objectType: 'Session' },
+  backing: { kind: 'joinTable', projection: 'attachedTo' },
+  properties: [
+    { apiName: 'role', displayName: 'Role', baseType: 'string', nullable: false, description: 'Why the file is attached.', valueType: 'enum', enumValues: ['evidence', 'request', 'result', 'reference'] },
+  ],
+  ontologyVersion: V,
+}
+
+export const LINK_TYPES: LinkTypeDef[] = [executed, runs, atCommit, usesMesh, hasPatch, gradedBy, contains, declares, joins, usesLayout, belongsTo, started, touched, attachedTo]

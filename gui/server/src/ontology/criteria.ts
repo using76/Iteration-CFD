@@ -4,6 +4,8 @@
 // name before anyone approves it. A failing predicate is the only thing that knows which flag or
 // path failed, so message vars come from PredicateOutcome.vars, never from the parameters.
 import fs from 'node:fs'
+import path from 'node:path'
+import fsp from 'node:fs/promises'
 import type { ActionTypeDef, Criterion, Principal } from '@cfd/shared'
 import { BINARY_NAMES, checkArgValue, driversFor, getBinary, isJsonCase } from '@cfd/shared'
 import type { ActionServerContext, ActionStore } from './engine.js'
@@ -60,7 +62,7 @@ const positionalArity: Predicate = (ctx) => {
 
 /** The confinement half of manager.ts:133-137, with mustExist: false (N4 D-M). */
 const pathsInsideWorkspace: Predicate = (ctx) => {
-  const p = str(ctx.params.casePath)
+  const p = str(ctx.params.casePath ?? ctx.params.path)   // startRun's casePath, attachFile's path (N4 Run 3)
   if (!p) return OK
   try {
     resolveInWorkspace(ctx.server.workspaceRoot, p, { mustExist: false })
@@ -74,7 +76,7 @@ const pathsInsideWorkspace: Predicate = (ctx) => {
 /** The existence half of manager.ts:133-137, split out (N4 D-M) so a missing file is never
  *  reported as an outside path: a refusal that names the wrong reason is worse than none. */
 const pathExists: Predicate = (ctx) => {
-  const p = str(ctx.params.casePath)
+  const p = str(ctx.params.casePath ?? ctx.params.path)   // startRun's casePath, attachFile's path (N4 Run 3)
   if (!p) return OK
   let abs: string
   try {
@@ -107,6 +109,60 @@ const gpuNotBusy: Predicate = (ctx) => {
   return { ok: false, vars: { running: busy.map((r) => r.id).join(', ') } }
 }
 
+// ---- attachFile (N4 Run 3, C12): the filename extension is the whole judgement --------
+
+/** 20 MB, fact sheet §6.4. Declared beside the predicate that reads it. */
+export const ATTACHMENT_SIZE_CAP = 20 * 1024 * 1024
+
+const MEDIA_BY_EXT: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
+  '.pdf': 'application/pdf', '.txt': 'text/plain', '.json': 'application/json',
+  '.step': 'model/step', '.stp': 'model/step',
+}
+export const ATTACHMENT_MEDIA_TYPES: readonly string[] = Object.freeze([...new Set(Object.values(MEDIA_BY_EXT))])
+
+/** The media type a filename's extension alone decides (C12); octet-stream when unknown.
+ *  The preparer's mediaType and this predicate judge by the SAME table, never two. */
+export function mediaTypeFor(name: string): string {
+  return MEDIA_BY_EXT[path.extname(name).toLowerCase()] ?? 'application/octet-stream'
+}
+
+/** No magic-byte sniffing: the extension table above decides, octet-stream refuses. */
+const mediaTypeSupported: Predicate = (ctx) => {
+  const name = str(ctx.params.filename) || path.basename(str(ctx.params.path))
+  if (mediaTypeFor(name) === 'application/octet-stream') return { ok: false, vars: { path: str(ctx.params.path) } }
+  return OK
+}
+
+/** The size half of fact sheet §6.4's 20 MB cap. A stat failure is pathExists' answer, not ours. */
+const sizeUnderCap: Predicate = async (ctx) => {
+  const p = str(ctx.params.path)
+  try {
+    const abs = resolveInWorkspace(ctx.server.workspaceRoot, p, { mustExist: false }).abs
+    const st = await fsp.stat(abs)
+    if (st.size > ATTACHMENT_SIZE_CAP) return { ok: false, vars: { path: p, bytes: String(st.size), cap: String(ATTACHMENT_SIZE_CAP) } }
+  } catch { /* missing or outside: pathExists / pathsInsideWorkspace already named it */ }
+  return OK
+}
+
+/** Fires only when a subject is named (C12); the store is the port, never the mirror directly. */
+const subjectExists: Predicate = (ctx) => {
+  const subjectId = ctx.params.subjectId
+  if (subjectId === null || subjectId === undefined || subjectId === '') return OK
+  const subjectType = str(ctx.params.subjectType)
+  if (!ctx.store.getObject(subjectType, str(subjectId))) return { ok: false, vars: { subjectType, subjectId: str(subjectId) } }
+  return OK
+}
+
+/** A warn, never a block: re-attaching the same file is one object modified, not a second one. */
+const notAlreadyAttached: Predicate = (ctx) => {
+  const sha = str(ctx.prepared.sha256)
+  if (!sha) return OK
+  const existing = ctx.store.getObject('Attachment', sha)
+  if (!existing) return OK
+  return { ok: false, vars: { filename: str(existing.filename ?? ctx.params.filename), attachmentId: sha } }
+}
+
 import { DC_PREDICATES } from './actions.dc.js'
 export const PREDICATES: Record<string, Predicate> = {
   binaryExists,
@@ -116,6 +172,10 @@ export const PREDICATES: Record<string, Predicate> = {
   pathExists,
   caseFormatAccepted,
   gpuNotBusy,
+  mediaTypeSupported,
+  sizeUnderCap,
+  subjectExists,
+  notAlreadyAttached,
   ...DC_PREDICATES,
 }
 

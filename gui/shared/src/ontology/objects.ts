@@ -1,4 +1,4 @@
-// gui/shared/src/ontology/objects.ts — the twelve object types, one const per
+// gui/shared/src/ontology/objects.ts — the thirteen object types, one const per
 // type. Every property name, enum word and count comes from the tree (protocol.ts,
 // casejsonc.ts, meshSummary.ts, regions.ts, session.ts, registry.ts, quality.rs,
 // facts-data.md) — never invented.
@@ -321,4 +321,34 @@ const ToolCall: ObjectTypeDef = {
   ontologyVersion: '0.1.0',
 }
 
-export const OBJECT_TYPES: ObjectTypeDef[] = [Run, Case, Driver, Commit, Mesh, MeshPatch, MeshQualityReport, RegionLayout, Region, Interface, Session, ToolCall]
+/** One file attached to a conversation (N4 Run 3, fact sheet §6.3 — ours and
+ *  UNVERIFIED against Palantir). actionCreatedOnly (N1 D-e): no importer — N4's
+ *  attachFile action and N6's upload route are its only writers, so the
+ *  projection is empty and the bytes stay on disk, referenced by storedPath. */
+const Attachment: ObjectTypeDef = {
+  apiName: 'Attachment', displayName: 'Attachment', pluralName: 'Attachments',
+  description: 'One file attached to a conversation, keyed by its sha256; the bytes stay on disk and only a hash, a size, a media type and a capped text extract are stored.',
+  icon: 'attachment',
+  source: { projection: '', paths: [] },
+  actionCreatedOnly: true,
+  primaryKey: 'attachmentId', titleKey: 'filename',
+  properties: [
+    p('attachmentId', 'string', 'Attachment', 'sha256 of the file contents; the same file attached twice is one object.', false, { valueType: 'sha256' }),
+    p('filename', 'string', 'Filename', 'The name the file arrived under.'),
+    p('mediaType', 'string', 'Media type', "The filename extension's MIME type, never a content sniff.", false, en(['image/png', 'image/jpeg', 'image/webp', 'application/pdf', 'text/plain', 'application/json', 'model/step', 'application/octet-stream'])),
+    p('kind', 'string', 'Kind', 'The semantic kind, separate from the media type.', false, en(['screenshot', 'photo', 'drawing', 'geometry', 'report', 'log', 'other'])),
+    p('bytes', 'long', 'Bytes', 'File size in bytes.'),
+    p('storedPath', 'string', 'Stored path', 'Workspace-relative path the bytes already live at; never the bytes themselves.', false, wp),
+    p('width', 'integer', 'Width', 'Image width in pixels; null until an image decoder runs.', true),
+    p('height', 'integer', 'Height', 'Image height in pixels; null until an image decoder runs.', true),
+    p('caption', 'string', 'Caption', 'Human or model text about the file.', true),
+    p('tags', 'array', 'Tags', 'Free tags; empty when none.', false, arr('string')),
+    p('addedBy', 'string', 'Added by', 'Principal id that attached the file.'),
+    p('addedAt', 'timestamp', 'Added at', 'When the file was attached.'),
+    p('sessionId', 'string', 'Session', 'The conversation the file arrived on; null when unknown.', true),
+    p('textExtract', 'string', 'Text extract', 'At most 16 KB of UTF-8, and only for text/plain and application/json, so the chat fold keeps working unchanged.', true),
+  ],
+  ontologyVersion: '0.1.0',
+}
+
+export const OBJECT_TYPES: ObjectTypeDef[] = [Run, Case, Driver, Commit, Mesh, MeshPatch, MeshQualityReport, RegionLayout, Region, Interface, Session, ToolCall, Attachment]

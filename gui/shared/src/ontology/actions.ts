@@ -209,4 +209,70 @@ export const START_RUN: ActionTypeDef = {
   ontologyVersion: '0.1.0',
 }
 
-export const ACTION_TYPES: ActionTypeDef[] = [START_RUN]   // filled by N4 Run 1 (D-H)
+// N4 Run 3's second action (C12): a file becomes one Attachment keyed by its sha256, and the
+// bytes never leave the preparer — only a hash, a size, a media type and a capped extract.
+export const ATTACH_FILE: ActionTypeDef = {
+  apiName: 'attachFile',
+  displayName: 'Attach a file',
+  description: 'Record a workspace file as an Attachment object, keyed by its sha256, and optionally link it to a subject. The file is not copied and its bytes are never sent to the model; only a hash, a size, a media type and — for text and JSON only — a capped extract.',
+  parameters: [
+    { apiName: 'path', displayName: 'Path', required: true, default: null,
+      description: 'Workspace-relative path of the file to attach',
+      type: { t: 'workspacePath', mustExist: true, extensions: null } },
+    { apiName: 'filename', displayName: 'Filename', required: false, default: null,
+      description: 'The name the file arrived under; defaults to the path basename and decides the media type',
+      type: { t: 'string', maxLength: 200 } },
+    { apiName: 'kind', displayName: 'Kind', required: true, default: null,
+      description: 'The semantic kind of the file',
+      type: { t: 'enum', values: ['screenshot', 'photo', 'drawing', 'geometry', 'report', 'log', 'other'] } },
+    { apiName: 'subjectType', displayName: 'Subject type', required: false, default: null,
+      description: 'Object type to link the attachment to; Session today (one link type names one subject type)',
+      type: { t: 'enum', values: ['Session'] } },
+    { apiName: 'subjectId', displayName: 'Subject id', required: false, default: null,
+      description: 'Primary key of the subject; the attachedTo link is created only when this is named',
+      type: { t: 'string' } },
+    { apiName: 'caption', displayName: 'Caption', required: false, default: null,
+      description: 'Human or model text about the file',
+      type: { t: 'string', maxLength: 200 } },
+  ],
+  prepare: 'attachFile',
+  rules: [
+    { rule: 'createOrModifyObject', objectType: 'Attachment',
+      primaryKey: { from: 'prepared', key: 'sha256' },
+      properties: {
+        attachmentId: { from: 'prepared', key: 'sha256' },
+        filename:     { from: 'prepared', key: 'filename' },
+        mediaType:    { from: 'prepared', key: 'mediaType' },
+        kind:         { from: 'parameter', parameter: 'kind' },
+        bytes:        { from: 'prepared', key: 'bytes' },
+        storedPath:   { from: 'prepared', key: 'storedPath' },
+        width:        { from: 'static', value: null },
+        height:       { from: 'static', value: null },
+        caption:      { from: 'parameter', parameter: 'caption' },
+        tags:         { from: 'static', value: [] },
+        addedBy:      { from: 'currentUser' },
+        addedAt:      { from: 'currentTime' },
+        sessionId:    { from: 'prepared', key: 'sessionId' },
+        textExtract:  { from: 'prepared', key: 'textExtract' } } },
+    // dropped by the empty-far-side rule when subjectId is null (N4 C6)
+    { rule: 'createLink', linkType: 'attachedTo',
+      from: { from: 'prepared', key: 'sha256' },
+      to:   { from: 'parameter', parameter: 'subjectId' },
+      properties: { role: { from: 'static', value: 'evidence' } } },
+  ],
+  functionRule: null,
+  criteria: [
+    { id: 'pathsInsideWorkspace', severity: 'block', message: '{{path}} is outside the workspace',            params: {} },
+    { id: 'pathExists',           severity: 'block', message: '{{path}} does not exist',                      params: {} },
+    { id: 'mediaTypeSupported',   severity: 'block', message: '{{path}} has no supported media type',         params: {} },
+    { id: 'sizeUnderCap',         severity: 'block', message: '{{path}} is {{bytes}} bytes; the cap is {{cap}}', params: {} },
+    { id: 'subjectExists',        severity: 'block', message: '{{subjectType}} {{subjectId}} does not exist', params: {} },
+    { id: 'notAlreadyAttached',   severity: 'warn',  message: '{{filename}} is already attached as {{attachmentId}}', params: {} },
+  ],
+  permission: { submitters: ['user', 'agent'], requiresApproval: true, policy: 'ask' },
+  sideEffects: [],
+  maxEdits: 4,
+  ontologyVersion: '0.1.0',
+}
+
+export const ACTION_TYPES: ActionTypeDef[] = [START_RUN, ATTACH_FILE]
