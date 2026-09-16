@@ -1,0 +1,75 @@
+{
+  "note": "Authored from brief C3 contract C11, not captured live. Replace with a live capture when a key is available; no test reads this field.",
+  "model": "glm-5.3-flash",
+  "turns": [
+    {
+      "locator": "55.1", "stopReason": "tool_use", "text": null,
+      "toolUse": { "name": "propose_candidates", "input": {
+        "candidates": [
+          { "properties": {
+              "apiName": { "value": "RCI_HI", "quote": "RCI_HI = [ 1 - SUM_x max(0, T_x - T_hi_rec)" },
+              "unit": { "value": "%", "quote": "x 100 %" },
+              "ideal": { "value": "100 %", "quote": "100 %" } } },
+          { "properties": {
+              "apiName": { "value": "RCI_LO", "quote": "RCI_LO = [ 1 - SUM_x max(0, T_lo_rec - T_x)" },
+              "unit": { "value": "%", "quote": "x 100 %" },
+              "ideal": { "value": "100 %", "quote": "100 %" } } }
+        ],
+        "unmapped": [] } }
+    },
+    {
+      "locator": "55.2", "stopReason": "tool_use", "text": null,
+      "toolUse": { "name": "propose_candidates", "input": {
+        "candidates": [
+          { "properties": {
+              "apiName": { "value": "RTI", "quote": "RTI = (T_return - T_supply) / dT_equipment x 100 %" },
+              "unit": { "value": "%", "quote": "x 100 %" } },
+            "links": [
+              { "linkApiName": "constrainedBy", "targetPrimaryKey": "AC-DC-RTI",
+                "quote": "RTI = (T_return - T_supply) / dT_equipment x 100 %" } ] },
+          { "properties": {
+              "apiName": { "value": "RTI_BEST", "quote": "RTI is the best metric" },
+              "unit": { "value": "%", "quote": "x 100 %" } } }
+        ],
+        "unmapped": [] } }
+    },
+    {
+      "locator": "55.3", "stopReason": "tool_use", "text": null,
+      "toolUse": { "name": "propose_candidates", "input": {
+        "candidates": [
+          { "properties": {
+              "apiName": { "value": "SHI", "quote": "SHI = dQ/(Q + dQ)" },
+              "ideal": { "value": "0", "quote": "SHI -> 0" } } },
+          { "properties": {
+              "apiName": { "value": "RHI", "quote": "RHI = Q/(Q + dQ) = 1 - SHI" } } }
+        ],
+        "unmapped": [
+          { "quote": "SHI + RHI == 1",
+            "why": "an identity the implementation is gated on, not a property of either metric definition" }
+        ] } }
+    },
+    {
+      "locator": "55.1", "stopReason": "tool_use", "text": null,
+      "toolUse": { "name": "propose_candidates", "input": {} }
+    },
+    {
+      "locator": "55.1", "stopReason": "tool_use", "text": null,
+      "toolUse": { "name": "propose_candidates", "input": {} }
+    },
+    {
+      "locator": "55.1", "stopReason": "end_turn",
+      "text": "I could not find any metric definitions in this passage.",
+      "toolUse": null
+    },
+    {
+      "locator": "55.3", "stopReason": "tool_use", "text": null,
+      "toolUse": { "name": "propose_candidates", "input": {
+        "candidates": [
+          { "properties": {
+              "apiName": { "value": null, "quote": null },
+              "ideal": { "value": "0", "quote": "SHI -> 0" } } }
+        ],
+        "unmapped": [] } }
+    }
+  ]
+}
