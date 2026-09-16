@@ -1,7 +1,7 @@
 // gui/shared/src/ontology/registry.ts — the validator and the runtime registry.
 // Pure functions over literals: validateOntology collects every problem, and
 // buildRegistry throws OntologyError naming every error. No I/O, no storage.
-import { ACTION_TYPES, type ActionTypeDef, type EditRule, type ParamDef, type ParamType, type SideEffect, type ValueSource } from './actions.js'
+import { ACTION_TYPES, type ActionTypeDef, type EditRule, type ParamDef, type ParamType, type ValueSource } from './actions.js'
 import { LINK_TYPES } from './links.js'
 import { OBJECT_TYPES } from './objects.js'
 import { RESERVED_API_NAMES, type LinkTypeDef, type ObjectTypeDef, type PropertyDef } from './types.js'
