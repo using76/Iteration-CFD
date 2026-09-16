@@ -145,13 +145,16 @@ export function extractFacts(messages: BetaMessageParam[]): Facts {
 // The script
 // ---------------------------------------------------------------------------
 
-type Scenario = 'refuse' | 'long' | 'error' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'run' | 'default'
+type Scenario = 'refuse' | 'long' | 'error' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'run' | 'default'
 
 export function detectScenario(text: string): Scenario {
   const t = text.toLowerCase()
   if (t.includes('refuse-test')) return 'refuse'
   if (t.includes('long-test')) return 'long'
   if (t.includes('error-test')) return 'error'
+  // first of the natural arms: every ontology prompt also carries a word a later
+  // arm claims (case, run, mesh, show) and the ladder returns on the first match
+  if (/\bontology\b|온톨로지/.test(t)) return 'ontology'
   if (/\bshell\b|셸|쉘/.test(t)) return 'shell'
   if (/\bmesh\b|메쉬|격자/.test(t)) return 'mesh'
   if (/\berror\b|오류|\bexplain\b|설명/.test(t)) return 'explain'
@@ -316,6 +319,58 @@ function scenarioGui(f: Facts): MockPlan {
   return done([text(ko ? `${field} 탭을 열었습니다. 다른 화면이 필요하면 말씀해 주세요.` : `The ${field} tab is open now. Say the word if you want another view.`)])
 }
 
+const QUERY = 'ontology_query'
+const ACT = 'ontology_act'
+const APPLY = 'ontology_apply'
+
+/**
+ * The ontology scenario: a read leg (one ontology_query, then a count) and a write
+ * leg (query, then an attachFile proposal, then its apply). The denied-proposal
+ * branch after ACT matters: a denied tool_result arrives is_error with the error
+ * JSON, and without this branch the turn would repeat its call until the
+ * identical-round budget ended it instead of answering.
+ */
+function scenarioOntology(f: Facts): MockPlan {
+  const ko = f.korean
+  const last = f.lastResult
+  const writing = /\bregister\b|등록/.test(f.userText)
+  if (!last) {
+    return useTools([
+      text(ko ? '온톨로지에서 첨부를 조회합니다.' : 'Reading the attachments from the ontology.'),
+      tool(QUERY, { objectType: 'Attachment', id: null, where: null, orderBy: null, descending: null, limit: 25, cursor: null, traverse: null, properties: null }),
+    ])
+  }
+  if (last.name === QUERY && !last.ok) {
+    const code = String((last.data.error as { code?: string } | undefined)?.code ?? '')
+    return done([text(ko ? `온톨로지를 읽지 못했습니다: ${code}` : `The ontology could not be read: ${code}`)])
+  }
+  if (last.name === QUERY && !writing) {
+    const n = Array.isArray(last.data.objects) ? last.data.objects.length : 0
+    return done([text(ko ? `온톨로지에 첨부 ${n}개가 있습니다.` : `${n} attachments are in the ontology.`)])
+  }
+  if (last.name === QUERY) {
+    // the prompt carries the path and the mock echoes it: a hard-coded demo path
+    // would propose a file that exists only while the e2e suite runs
+    const path = f.userText.match(/([\w./-]+\.(?:png|jpg|jpeg|jsonc|json|step|stl))/)?.[1] ?? 'cases/plume.jsonc'
+    return useTools([
+      text(ko ? `\`${path}\` 파일을 온톨로지에 등록합니다.` : `Registering \`${path}\` in the ontology.`),
+      tool(ACT, { action: 'attachFile', parameters: { path, filename: null, kind: 'screenshot', subjectType: null, subjectId: null, caption: 'e2e ontology probe' } }),
+    ])
+  }
+  if (last.name === ACT && !last.ok) {
+    const msg = String((last.data.error as { message?: string } | undefined)?.message ?? 'refused')
+    return done([text(ko ? `제안이 거부되었습니다: ${msg}` : `The proposal was refused: ${msg}`)])
+  }
+  if (last.name === ACT) {
+    return useTools([tool(APPLY, { proposalId: String(last.data.proposalId) })])
+  }
+  if (last.name === APPLY && !last.ok) {
+    const code = String((last.data.error as { code?: string } | undefined)?.code ?? '')
+    return done([text(ko ? `제안을 적용하지 못했습니다: ${code}` : `The proposal could not be applied: ${code}`)])
+  }
+  return done([text(ko ? '온톨로지에 등록했습니다. 첨부를 조회하면 확인할 수 있습니다.' : 'The attachment is registered in the ontology. Query the attachments to see it.')])
+}
+
 function scenarioViewer(f: Facts): MockPlan {
   const ko = f.korean
   const last = f.lastResult
@@ -421,6 +476,8 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
         return { blocks: [], stopReason: 'end_turn', throwError: new Anthropic.RateLimitError(429, { type: 'error', error: { type: 'rate_limit_error', message: 'mock rate limit' } }, 'mock rate limit', new Headers()) }
       }
       return done([text(f.korean ? '재시도 후 정상적으로 응답했습니다.' : 'Recovered after the retry; this is the normal answer.')])
+    case 'ontology':
+      return scenarioOntology(f)
     case 'shell':
       return scenarioShell(f)
     case 'mesh':

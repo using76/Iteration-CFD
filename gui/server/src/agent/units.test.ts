@@ -13,7 +13,7 @@ import { appendUserTurn, createSessionStore, repairDanglingToolUses, stateOf, ti
 import { fakeRuns, makeWorkspace, type TempWorkspace } from './test-fakes.js'
 import { until } from './test-util.js'
 import { createStreamProjector, projectAssistant, projectUser } from './ui-projection.js'
-import { detectScenario, extractFacts } from './mockLlm.js'
+import { detectScenario, extractFacts, planResponse } from './mockLlm.js'
 
 let ws: TempWorkspace
 beforeAll(async () => {
@@ -356,5 +356,28 @@ describe('mock script', () => {
     expect(facts.results).toHaveLength(1)
     expect(facts.korean).toBe(false)
     expect(TOOL_NAMES).toContain('suggest_followups')
+  })
+
+  it('detects the ontology scenario and still reads the typed text past an image block', () => {
+    expect(detectScenario('register cases/x.png in the ontology')).toBe('ontology')
+    expect(detectScenario('온톨로지에서 첨부를 조회해줘')).toBe('ontology')
+    // the ontology arm sits first of the natural ones: this prompt also matches run
+    expect(detectScenario('run the case')).toBe('run')
+    const messages: BetaMessageParam[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+          { type: 'text', text: 'what does the ontology know about the attachments on this case' },
+        ],
+      },
+    ]
+    // humanTextOf reads the FIRST text block, so the image riding ahead of the typed
+    // text must not detune the script: the answer is still the Attachment query
+    const plan = planResponse(messages, { errorThrown: false })
+    expect(plan.stopReason).toBe('tool_use')
+    const call = plan.blocks.find((b) => b.type === 'tool_use') as { name: string; input: Record<string, unknown> } | undefined
+    expect(call?.name).toBe('ontology_query')
+    expect((call?.input as { objectType?: string }).objectType).toBe('Attachment')
   })
 })
