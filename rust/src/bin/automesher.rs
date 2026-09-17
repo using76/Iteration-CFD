@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME]
-//!                                 [-check [<caseDir>]] [-dryRun] [-schema]
+//!                    [-runId ID] [-check [<caseDir>]] [-dryRun] [-schema]
 //! ```
 //!
 //! The modes:
@@ -38,6 +38,10 @@
 //!   directory, so two tagged runs of one config do not overwrite each
 //!   other's `constant/polyMesh`. NAME is a suffix, not a path: empty, or
 //!   carrying `/` or `\`, is refused.
+//! - `-runId ID`: the run this mesh belongs to, recorded in the summary's
+//!   identity block (92.57). 1 to 64 characters from `[A-Za-z0-9._-]`;
+//!   without it `OFGPU_RUN_ID` is used, and without that the summary
+//!   records `run_id: null`.
 //! - `-check [<caseDir>]`: §92.3's gate on a polyMesh that ALREADY exists,
 //!   read from `<caseDir>/constant/polyMesh` with the config's thresholds.
 //!   The directory is OPTIONAL: it is consumed when the next token exists,
@@ -64,7 +68,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use ofgpu::automesher::{self, driver, AutomeshConfig};
+use ofgpu::automesher::{self, driver, identity, AutomeshConfig};
 use ofgpu::error::IoContext;
 use ofgpu::io::polymesh::{read_poly_mesh, write_poly_mesh_raw};
 use ofgpu::surface::{stl::read_stl, Surface};
@@ -73,13 +77,16 @@ use ofgpu::{Error, Result, Scalar};
 fn usage() {
     eprintln!(
         "usage: ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME]
-                        [-check [<caseDir>]] [-dryRun] [-schema]
+                        [-runId ID] [-check [<caseDir>]] [-dryRun] [-schema]
   -stopAfter STAGE: the stop rule of SPEC-LIT §92.14 - the stages up to and
     including STAGE run and the mesh STAGE returned is written. STAGE is
     octree, castellate, snap or layers; features is a spelling of snap.
   -tag NAME: this run's output is its own - the case directory and the mesh
     name each gain _NAME, so two runs of one config do not overwrite each
     other. NAME is a suffix, not a path.
+  -runId ID: the run this mesh belongs to, recorded in the summary's identity
+    block. 1 to 64 characters from [A-Za-z0-9._-]; without it OFGPU_RUN_ID is
+    used, and without that the summary records run_id: null.
   -check [<caseDir>]: the quality gate on a mesh that already exists
     (SPEC-LIT §92.14.5). The directory is optional: it is consumed when the
     next token exists, does not start with a dash, and the config positional
@@ -99,6 +106,7 @@ fn run(args: &[String]) -> Result<()> {
     let mut dry_run = false;
     let mut stop_after: Option<&String> = None;
     let mut tag: Option<&String> = None;
+    let mut run_id_flag: Option<&String> = None;
 
     let mut i = 1usize;
     while i < args.len() {
@@ -135,6 +143,26 @@ fn run(args: &[String]) -> Result<()> {
                     )));
                 }
                 tag = Some(v);
+            }
+            "-runId" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config(
+                        "-runId needs an ID argument".to_string(),
+                    ));
+                };
+                // The check runs during argument parsing, so a typo is
+                // refused before the config is even read - not 40 minutes
+                // into a mesh.
+                if !identity::is_run_id(v) {
+                    usage();
+                    return Err(Error::Config(format!(
+                        "-runId: '{v}' is not a run id - 1 to 64 characters \
+                         from [A-Za-z0-9._-]"
+                    )));
+                }
+                run_id_flag = Some(v);
             }
             "-check" => {
                 // §92.14.5: the directory is optional. It is consumed when
@@ -205,7 +233,13 @@ fn run(args: &[String]) -> Result<()> {
         };
         return check_mode(&cfg, dir);
     }
-    meshing_mode(&cfg, config_arg, dry_run, stop_after)
+    // C3's resolution order: the flag, else the environment, else null. The
+    // flag was already validated in the loop; the environment only warns.
+    let run_id = match run_id_flag {
+        Some(v) => Some(v.clone()),
+        None => identity::run_id_from_env("ofgpu-automesher"),
+    };
+    meshing_mode(&cfg, config_arg, dry_run, stop_after, run_id)
 }
 
 /// `-check <caseDir>`: §92.3's gate on a mesh that already exists, at
@@ -239,6 +273,7 @@ fn meshing_mode(
     config_path: &str,
     dry_run: bool,
     stop_after: Option<&String>,
+    run_id: Option<String>,
 ) -> Result<()> {
     println!("ofgpu-automesher (SPEC-LIT §92, hex-dominant path)");
 
@@ -283,7 +318,8 @@ fn meshing_mode(
     let poly_dir = case_dir.join("constant").join("polyMesh");
     write_poly_mesh_raw(&poly_dir, &out.mesh)?;
     let summary_path = case_dir.join(format!("{}_summary.json", cfg.output.name));
-    let summary = driver::summary_json(cfg, config_path, &surf, &out);
+    let ident = identity::MeshIdentity::new("ofgpu-automesher", case_dir, &cfg.output.name, run_id);
+    let summary = driver::summary_json(cfg, config_path, &surf, &out, &ident);
     let text = serde_json::to_string_pretty(&summary).map_err(|e| {
         Error::Config(format!("summary {}: {e}", summary_path.display()))
     })?;

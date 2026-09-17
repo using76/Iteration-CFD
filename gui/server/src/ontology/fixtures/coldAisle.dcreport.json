@@ -1,0 +1,45 @@
+{
+  "schema": "ofgpu-datacentre/1",
+  "runId": "r_900",
+  "casePath": "cases/room.dc.jsonc",
+  "caseSha256": null,
+  "caseName": "coldAisleFixture",
+  "startedAt": "2026-09-15T01:12:03.000Z",
+  "endedAt": "2026-09-15T01:14:41.000Z",
+  "wallSeconds": 158.0,
+  "gitSha": "e4fac2d111111111111111111111111111111111",
+  "gitDirty": false,
+  "machine": { "hostname": null, "os": "windows", "arch": "x86_64",
+               "device": "NVIDIA GeForce RTX 4090", "computeCapability": "89", "precision": "double" },
+  "nCells": 4320,
+  "nBoundaryFaces": 1656,
+  "iterations": 600,
+  "ashraeClass": "A1",
+  "rciSamples": "thirds",
+  "notes": ["every patch is claimed exactly once by a fan, a tile or a patch rule"],
+  "report": {
+    "rciHi": 91.733, "rciLo": 100.0, "nSamples": 6,
+    "rti": 80.576, "shi": 0.354185, "rhi": 0.645815,
+    "tSupply": 291.15, "tReturn": 299.8, "dtEquipment": 10.7349,
+    "dtMeasured": false,
+    "pue": { "fanPower": 19.819, "fanPowerEach": [19.819], "itHeat": 14500.0,
+             "freeCoolingCeiling": null }
+  },
+  "fans": [ { "patch": "ceilingReturn", "q": 2.217, "dp": 5.5425,
+              "shaftPower": 19.819, "outerResidualPct": 0.031 } ],
+  "tInletMax": 301.42,
+  "rackInlets": [ { "name": "rackA", "inletT": 298.6 }, { "name": "rackB", "inletT": 295.1 } ],
+  "patchFlow": [
+    { "patch": "floorSupply", "q": -1.390 }, { "patch": "corridorGrille", "q": -0.827 },
+    { "patch": "ceilingReturn", "q": 2.217 }, { "patch": "southWall", "q": 0.0 },
+    { "patch": "northWall", "q": 0.0 }, { "patch": "westWall", "q": 0.0 }
+  ],
+  "continuity": { "net": 9.3114e-10, "largestOpening": 2.217, "netOverLargest": 4.2e-10 },
+  "supersaturation": { "cells": 0, "worstExcess": 0.0 },
+  "caveats": [
+    { "kind": "porousJump53.6", "specRef": "S53.6",
+      "text": "a porous jump is a face resistance: do not read a near-tile velocity field off it" },
+    { "kind": "asymmetricMatrix52.2", "specRef": "S52.2",
+      "text": "a fan patch makes the pressure matrix non-separable; the direct path is unavailable" }
+  ]
+}

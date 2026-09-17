@@ -40,3 +40,12 @@ describe('pending binaries', () => {
     expect(getBinary('ofgpu-cht')?.writes.formats).toEqual(['vtu'])
   })
 })
+
+describe('ofgpu-datacentre writes what the driver writes', () => {
+  it('claims no field format, a CSV and one JSON document', () => {
+    const dc = getBinary('ofgpu-datacentre')!
+    // registry.ts:365 said ['foam'] and there is no foam writer in datacentre.rs.
+    expect(dc.writes).toEqual({ formats: [], restart: false, csv: true, json: true })
+    expect(dc.flags.map((f) => f.name)).toEqual(['-json', '-run-id', '-csv', '-schema', '-permissive'])
+  })
+})

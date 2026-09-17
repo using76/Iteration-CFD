@@ -64,6 +64,7 @@ function baseConfig(tmp: string, root: string): ServerConfig {
     runsDir: path.join(tmp, 'runs'),
     cacheDir: path.join(tmp, 'cache'),
     configDir: path.join(tmp, 'config'),
+    ontologyDir: path.join(tmp, 'ontology'),
     demo: true,
     llm: 'mock',
     model: 'claude-opus-5',

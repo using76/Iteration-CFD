@@ -12,6 +12,16 @@ import type { DatasetProgress } from './viewerDataset'
 export const RunStatusSchema = z.enum(['queued', 'running', 'done', 'failed', 'killed', 'diverged'])
 export type RunStatus = z.infer<typeof RunStatusSchema>
 
+/** Grouped machine scalars; `hostname` is the Machine primary key and the struct's main field. */
+export const MachineRefSchema = z.object({
+  hostname: z.string(),
+  /** GPU name as the monitor last cached it; '' when no GPU is known (D9). */
+  gpu: z.string(),
+  /** process.platform, the string ServerHello already carries. */
+  platform: z.string(),
+})
+export type MachineRef = z.infer<typeof MachineRefSchema>
+
 export const RunInfoSchema = z.object({
   id: z.string(),
   /** Registry binary name, e.g. "ofgpu-k-epsilon". */
@@ -48,6 +58,16 @@ export const RunInfoSchema = z.object({
   logLines: z.number(),
   mode: z.enum(['real', 'demo']),
   label: z.string().nullable(),
+  /** Full 40-hex sha of the workspace HEAD when the run was created; null outside a repository. */
+  gitSha: z.string().nullable().optional(),
+  /** True when tracked content differed from HEAD (untracked files are ignored); null when unknown. */
+  gitDirty: z.boolean().nullable().optional(),
+  /** Primary key of the Case this run is a run of: workspace-relative, forward slashes. */
+  caseId: z.string().nullable().optional(),
+  /** Mesh primary key, `<summary path>#<name>`; null when the mesh has no summary, and for a mesh run. */
+  meshId: z.string().nullable().optional(),
+  /** The Machine this run ran on: N1's struct, `hostname` its main field. Null only when unreadable. */
+  machine: MachineRefSchema.nullable().optional(),
 })
 export type RunInfo = z.infer<typeof RunInfoSchema>
 
@@ -274,6 +294,8 @@ export const UserContextSchema = z.object({
   activeTab: z.string().nullable().optional(),
   /** Workspace-relative paths mentioned with @ or dropped in. */
   attachments: z.array(z.string()),
+  /** Attachment object ids (POST /api/attachments); older clients omit them. */
+  attachmentIds: z.array(z.string()).default([]),
   /** Selected text in the editor, if any (kept short by the client). */
   selection: z.string().nullable(),
 })
@@ -777,9 +799,12 @@ export const REST = {
   gitStatus: '/api/git/status',
   runs: '/api/runs',
   sessions: '/api/sessions',
+  chat: '/api/chat',
   datasets: '/api/datasets',
+  attachments: '/api/attachments',
   geometry: '/api/geometry',
   results: '/api/results',
+  ontology: '/api/ontology',
   ws: '/ws',
 } as const
 
@@ -875,3 +900,48 @@ export interface StartRunRequest {
   positionals: string[]
   label: string | null
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/chat: a whole conversation turn over one HTTP POST (N7)
+// ---------------------------------------------------------------------------
+
+/** How long POST /api/chat holds the response open. The cap stays under Node's 300 s
+ *  server.requestTimeout: a turn that needs longer is driven over /ws. */
+export const CHAT_TIMEOUT_DEFAULT_MS = 120_000
+export const CHAT_TIMEOUT_MAX_MS = 240_000
+
+export const ChatRequestSchema = z.object({
+  /** null starts a new session; the answer's sessionId is how you continue it. */
+  sessionId: z.string().nullable().default(null),
+  text: z.string(),
+  /** Workspace-relative paths, exactly as UserContext.attachments. */
+  attachments: z.array(z.string()).default([]),
+  /** Attachment object ids minted by POST /api/attachments. */
+  attachmentIds: z.array(z.string()).default([]),
+  activeFile: z.string().nullable().default(null),
+  /** Applied to the session before the turn; there is no approver on this transport. */
+  autoApprove: SessionSettingsSchema.shape.autoApprove.nullable().default(null),
+  locale: SessionSettingsSchema.shape.locale.nullable().default(null),
+  timeoutMs: z.number().int().min(1000).max(CHAT_TIMEOUT_MAX_MS).nullable().default(null),
+})
+export type ChatRequest = z.infer<typeof ChatRequestSchema>
+
+/** 'timeout' is not a TurnStatus: the turn is still running and the caller polls
+ *  GET /api/sessions/:id until turnActive is false. */
+export const ChatStatusSchema = z.enum(['done', 'error', 'refusal', 'cancelled', 'timeout'])
+
+export const ChatResponseSchema = z.object({
+  sessionId: z.string(),
+  turnId: z.string(),
+  status: ChatStatusSchema,
+  rounds: z.number(),
+  model: z.string().nullable(),
+  usage: UsageSchema,
+  /** The UI messages this turn appended: the user turn first, the assistant turns after. */
+  messages: z.array(UiMessageSchema),
+  /** Non-empty only when the turn is waiting on an approval nobody can give here. */
+  pendingApprovals: z.array(PendingApprovalSchema),
+  /** Run ids this turn started. */
+  runs: z.array(z.string()),
+})
+export type ChatResponse = z.infer<typeof ChatResponseSchema>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gitStatus, parsePorcelain } from './git.js'
+import { gitHead, gitStatus, parsePorcelain } from './git.js'
 import { REPO_ROOT } from '../runs/test-helpers.js'
 
 describe('git status', () => {
@@ -24,5 +24,16 @@ describe('git status', () => {
     const none = await gitStatus('/')
     expect(none.available).toBe(false)
     expect(none.changes).toEqual([])
+  })
+})
+
+describe('git head', () => {
+  it('reads the sha and the dirty flag of a real repository', async () => {
+    const h = await gitHead(REPO_ROOT)
+    expect(h.sha).toMatch(/^[0-9a-f]{40}$/)
+    expect(typeof h.dirty).toBe('boolean')
+  })
+  it('degrades to nulls outside a repository', async () => {
+    await expect(gitHead('/')).resolves.toEqual({ sha: null, dirty: null })
   })
 })

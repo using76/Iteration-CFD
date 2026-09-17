@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ServerMsg } from '@cfd/shared'
+import { ChatError } from '../agent/types.js'
 import { loadCaseSchema, loadOptionalCaseSchema, type CaseSchema } from '../registry/schema.js'
 import { makeTempWorkspace, REPO_ROOT, testConfig, type TempWorkspace } from '../runs/test-helpers.js'
 import { registerApiRoutes } from './routes.js'
@@ -349,5 +350,33 @@ describe('cht routes', () => {
     expect((await get('/api/mesh/regions?dir=cases/site')).status).toBe(404)
     fs.writeFileSync(path.join(meshDir, 'regions.json'), '{ not json')
     expect((await get('/api/mesh/regions?dir=cases/site/mesh')).status).toBe(400)
+  })
+
+})
+
+describe('chat route', () => {
+  it('POST /api/chat forwards the request to the agent and maps its errors', async () => {
+    const res = await postJson(base + '/api/chat', { text: 'hi', attachmentIds: ['at_1'], autoApprove: 'all' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Loose
+    expect(body.sessionId).toBe('s_1')
+    expect(body.status).toBe('done')
+    expect(agent.chatRequests.at(-1)).toEqual({ sessionId: null, text: 'hi', attachments: [], attachmentIds: ['at_1'], activeFile: null, autoApprove: 'all', locale: null, timeoutMs: null })
+    agent.chatImpl = async () => {
+      throw new ChatError(409, 'a turn is already active in this session; cancel it first')
+    }
+    const refused = await postJson(base + '/api/chat', { text: 'hi' })
+    expect(refused.status).toBe(409)
+    const refusedBody = (await refused.json()) as Loose
+    expect(refusedBody.error).toBe('a turn is already active in this session; cancel it first')
+    agent.chatImpl = null
+    const invalid = await postJson(base + '/api/chat', {})
+    expect(invalid.status).toBe(400)
+    expect(Array.isArray(((await invalid.json()) as Loose).issues)).toBe(true)
+  })
+
+  it('POST /api/chat refuses a body that is not application/json', async () => {
+    const res = await fetch(base + '/api/chat', { method: 'POST', body: '{"text":"hi"}', headers: { 'content-type': 'text/plain' } })
+    expect(res.status).toBe(415)
   })
 })

@@ -1,0 +1,653 @@
+{
+  "goldSetId": "spec-lit-52-55",
+  "ontologyVersion": "0.1.0",
+  "documentId": "doc:spec-lit",
+  "sourcePath": "rust/SPEC-LIT.md",
+  "seedSource": "gui/shared/src/ontology/seed/dc.ts",
+  "objects": [
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-B7",
+      "locator": "54.7",
+      "evidence": "virtual temperature at `Y_v = 0`",
+      "properties": {
+        "id": "EQ-B7",
+        "name": "Virtual temperature",
+        "latex": "T_v = T (1 + (1/\\epsilon - 1) Y_v)",
+        "symbols": [{"symbol": "T_v", "unit": "K", "meaning": "virtual temperature"}, {"symbol": "T", "unit": "K", "meaning": "dry-bulb absolute temperature"}, {"symbol": "Y_v", "unit": "kg/kg", "meaning": "vapour mass fraction"}, {"symbol": "\\epsilon", "unit": "dimensionless", "meaning": "ratio of molar masses, 0.621945"}],
+        "validity": "Exact, not a linearisation. The coefficient is 0.607858. At 25 C a move from 20 to 80 per cent relative humidity shifts `T_v` by about 2.1 K, which is a sixth of a typical rack temperature rise",
+        "specSection": "S54.7",
+        "citation": "This project's own specification, section 54.4; `\\epsilon` from Gatley, Herrmann & Kretzschmar, HVAC&R Research 14(5) (2008) 655-662, DOI 10.1080/10789669.2008.10391032",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-P6",
+      "locator": "54.3",
+      "evidence": "(S54.2)–(S54.5) are the **ideal-gas** psychrometrics.",
+      "properties": {
+        "id": "EQ-P6",
+        "name": "Dew-point temperature",
+        "latex": "t_d = 6.54 + 14.526 a + 0.7389 a^2 + 0.09486 a^3 + 0.4569 p_w^{0.1984}",
+        "symbols": [{"symbol": "t_d", "unit": "degrees Celsius", "meaning": "dew-point temperature"}, {"symbol": "a", "unit": "dimensionless", "meaning": "natural logarithm of `p_w`"}, {"symbol": "p_w", "unit": "kPa", "meaning": "water-vapour partial pressure"}],
+        "validity": "The form above holds from 0 to 93 C; below 0 C the two-term branch `t_d = 6.09 + 12.608 a + 0.4959 a^2` applies. `p_w` is in kilopascals, not pascals — the commonest error in this relation",
+        "specSection": "S54.3",
+        "citation": "ASHRAE Handbook-Fundamentals psychrometrics chapter, equations 37 and 38, as transcribed in this project's own specification; implemented at `rust/src/psychro.rs`",
+        "verification": "PARTIAL"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-M3",
+      "locator": "55.2",
+      "evidence": "it is `Q_IT/(rho c_p mdot_IT)`",
+      "properties": {
+        "id": "EQ-M3",
+        "name": "Power to airflow",
+        "latex": "\\dot{Q}_{IT} = \\rho \\dot{V} c_p \\Delta T_{rack}",
+        "symbols": [{"symbol": "Q-dot_IT", "unit": "W", "meaning": "total IT power"}, {"symbol": "rho", "unit": "kg/m3", "meaning": "air density"}, {"symbol": "V-dot", "unit": "m3/s", "meaning": "volume flow through the rack"}, {"symbol": "c_p", "unit": "J/kg/K", "meaning": "specific heat"}, {"symbol": "Delta T_rack", "unit": "K", "meaning": "air temperature rise across the rack"}],
+        "validity": "Steady, all IT power to air, no loss to the slab. At 1.2 kg/m3 and 1005 J/kg/K the coefficient is about 1206, so 8 kW at an 11 K rise is about 0.60 m3/s — which is why the shipped case pairs 8000 W with 0.62 m3/s",
+        "specSection": "S55.2",
+        "citation": "This project's own specification, section 55.2; the first law",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-M4",
+      "locator": "52.1",
+      "evidence": "A fan patch may face either way.",
+      "properties": {
+        "id": "EQ-M4",
+        "name": "Fan curve as a boundary condition",
+        "latex": "p_b = p_a - \\sigma F(Q_{dev}), \\quad F(Q) = \\Delta p_{fan}(Q)/\\rho_{ref}",
+        "symbols": [{"symbol": "p_b", "unit": "m2/s2", "meaning": "kinematic pressure on the far side"}, {"symbol": "p_a", "unit": "m2/s2", "meaning": "kinematic pressure on the near side"}, {"symbol": "sigma", "unit": "dimensionless", "meaning": "direction sign, plus one for outflow and minus one for inflow"}, {"symbol": "Q_dev", "unit": "m3/s", "meaning": "the device's own gathered volume flow"}, {"symbol": "Delta p_fan", "unit": "Pa", "meaning": "manufacturer pressure rise"}, {"symbol": "rho_ref", "unit": "kg/m3", "meaning": "reference density"}],
+        "validity": "Pressure is kinematic throughout this solver, which is the commonest unit error when a component model is coupled to it. The quadratic form is written odd, `Q` times the absolute value of `Q`, never `Q` squared: the even form makes the reverse branch a positive-feedback runaway",
+        "specSection": "S52",
+        "citation": "This project's own specification, section 52; the external gate is the NIST FDS fan verification case, US public domain; AMCA 210 and ASHRAE 51 are paywalled and were not opened",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-M5",
+      "locator": "52.5",
+      "evidence": "dp(rho, N) = dp_curve(Q N_curve/N) * (rho/rho_curve) * (N/N_curve)^2",
+      "properties": {
+        "id": "EQ-M5",
+        "name": "Fan affinity laws",
+        "latex": "Q_2/Q_1 = N_2/N_1, \\quad \\Delta p_2/\\Delta p_1 = (N_2/N_1)^2 (\\rho_2/\\rho_1), \\quad P_2/P_1 = (N_2/N_1)^3 (\\rho_2/\\rho_1)",
+        "symbols": [{"symbol": "Q", "unit": "m3/s", "meaning": "volume flow"}, {"symbol": "N", "unit": "any consistent unit", "meaning": "rotational speed"}, {"symbol": "Delta p", "unit": "Pa", "meaning": "pressure rise"}, {"symbol": "rho", "unit": "kg/m3", "meaning": "density"}, {"symbol": "P", "unit": "W", "meaning": "shaft power"}],
+        "validity": "Geometric similarity, fixed diameter, Reynolds number high enough that efficiency does not move with speed; fails at deep turndown. The correction is applied at every evaluation, not once: a 40 C return is 6.4 per cent less dense than the 20 C a curve is usually measured at",
+        "specSection": "S52.5",
+        "citation": "Buckingham-pi derivation, Bhattacharjee, arXiv:1211.0676 (open); the ASHRAE Handbook fan chapter is paywalled and was not opened",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-M6",
+      "locator": "55.5",
+      "evidence": "one scalar per fan",
+      "properties": {
+        "id": "EQ-M6",
+        "name": "Fan shaft power",
+        "latex": "W_{fan} = Q \\Delta p_{fan}(Q) / \\eta_{total}",
+        "symbols": [{"symbol": "W_fan", "unit": "W", "meaning": "shaft power at the converged operating point"}, {"symbol": "Q", "unit": "m3/s", "meaning": "the device's volume flow"}, {"symbol": "Delta p_fan", "unit": "Pa", "meaning": "pressure rise at that flow"}, {"symbol": "eta_total", "unit": "dimensionless", "meaning": "total efficiency, greater than zero and at most one"}],
+        "validity": "Efficiency outside that interval is refused by name. Summed over fans, this is one of the three numbers a facility model can honestly take from a room model",
+        "specSection": "S55.5",
+        "citation": "This project's own specification, sections 55.4 and 55.5; implemented at `rust/src/fan.rs`",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-M7",
+      "locator": "53.1",
+      "evidence": "dp_kin = -R(|phi_f|) phi_f ,",
+      "properties": {
+        "id": "EQ-M7",
+        "name": "Porous jump, a resistive face",
+        "latex": "\\Delta p_{kin} = -R(\\lvert\\phi_f\\rvert)\\, \\phi_f, \\quad R = (r_{visc} + r_{inert} \\lvert\\phi_f\\rvert / a_f)/a_f",
+        "symbols": [{"symbol": "Delta p_kin", "unit": "m2/s2", "meaning": "kinematic pressure jump"}, {"symbol": "phi_f", "unit": "m3/s", "meaning": "face volume flux"}, {"symbol": "a_f", "unit": "m2", "meaning": "face area"}, {"symbol": "r_visc", "unit": "1/s", "meaning": "viscous resistance, kinematic viscosity times thickness over permeability"}, {"symbol": "r_inert", "unit": "1/m", "meaning": "inertial resistance, half the inertial coefficient times thickness"}],
+        "validity": "`R` is never negative, which is what makes the condition unconditionally stable with no sign branch. Scalars stay continuous across it — a jump is not a baffle. The tile form is the special case with `r_visc` zero and `r_inert` equal to half the loss coefficient",
+        "specSection": "S53",
+        "citation": "This project's own specification, section 53; implemented at `rust/src/fan.rs`",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-M8",
+      "locator": "53.6",
+      "evidence": "A pure pressure-jump tile gets the **flow rate** right and the **jet** wrong.",
+      "properties": {
+        "id": "EQ-M8",
+        "name": "Tile loss coefficient from open-area ratio",
+        "latex": "K(\\sigma) = [0.707 (1-\\sigma)^{0.375} + (1-\\sigma)]^2 / \\sigma^2",
+        "symbols": [{"symbol": "K", "unit": "dimensionless", "meaning": "loss coefficient on the approach velocity"}, {"symbol": "sigma", "unit": "dimensionless", "meaning": "open-area ratio, greater than zero and at most one"}],
+        "validity": "Thin-plate form, referred to the approach velocity. It gives 30.68 at a quarter open, 4.370 at half and 2.937 at 0.56 — the gates are the two limits, `K` to zero as `sigma` approaches one and `K` to infinity as `sigma` approaches zero, and the specification records that a quoted value of about 4 at 0.56 is contradicted by the formula. The derived `K` is always printed",
+        "specSection": "S53.6",
+        "citation": "Idelchik, Handbook of Hydraulic Resistance, 4th ed., Begell (2007) — paywalled; the formula as transcribed in this project's own specification",
+        "verification": "PARTIAL"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-D-RCI",
+      "locator": "55.1",
+      "evidence": "RCI_HI = [ 1 - SUM_x max(0, T_x - T_hi_rec)",
+      "properties": {
+        "id": "EQ-D-RCI",
+        "name": "Rack Cooling Index",
+        "latex": "RCI_{HI} = [1 - \\sum_x \\max(0, T_x - T_{hi,rec}) / ((T_{hi,all} - T_{hi,rec}) n)] \\times 100\\%",
+        "symbols": [{"symbol": "RCI_HI", "unit": "per cent", "meaning": "high-side rack cooling index"}, {"symbol": "T_x", "unit": "K", "meaning": "one rack-inlet sample temperature"}, {"symbol": "T_hi,rec", "unit": "K", "meaning": "the class's recommended high limit"}, {"symbol": "T_hi,all", "unit": "K", "meaning": "the class's allowable high limit"}, {"symbol": "n", "unit": "dimensionless", "meaning": "number of sample points"}],
+        "validity": "100 per cent means no inlet is outside the recommended band at all; zero means every inlet sits at the allowable limit. **The value depends on which sample points are used**, so the sample set is part of the definition and is reported with the number. The low-side form is the mirror, with a recommended-low minus allowable-low denominator. The envelope is stored in Celsius and converted to kelvin before comparison",
+        "specSection": "S55.1",
+        "citation": "Herrlin, \"Rack cooling effectiveness in data centers and telecom central offices: the Rack Cooling Index\", ASHRAE Transactions 111(2) (2005) 725-731, no DOI — paywalled; the formula as transcribed in this project's own specification",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-D-RTI",
+      "locator": "55.2",
+      "evidence": "RTI = (T_return - T_supply) / dT_equipment x 100 %",
+      "properties": {
+        "id": "EQ-D-RTI",
+        "name": "Return Temperature Index",
+        "latex": "RTI = (T_r - T_s)/\\Delta T_{equipment} \\times 100\\%",
+        "symbols": [{"symbol": "RTI", "unit": "per cent", "meaning": "return temperature index"}, {"symbol": "T_r", "unit": "K", "meaning": "flux-weighted return-air temperature"}, {"symbol": "T_s", "unit": "K", "meaning": "flux-weighted supply-air temperature"}, {"symbol": "Delta T_equipment", "unit": "K", "meaning": "mean air temperature rise across the IT equipment"}],
+        "validity": "Below 100 per cent is bypass, above is recirculation, 100 is ideal. At steady state with all IT heat leaving through the return it equals the ratio of IT mass flow to supply mass flow, so **halving the supply flow exactly doubles it, whatever the geometry** — a gate that needs no external data. The two temperatures must be flux-weighted patch means, never area means",
+        "specSection": "S55.2",
+        "citation": "Herrlin, \"Airflow and cooling performance of data centers: two performance metrics\", ASHRAE Transactions 114(2) (2008) 182-187, no DOI — paywalled; the formula as printed in the LBNL self-benchmarking guide",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-D-SHI",
+      "locator": "55.3",
+      "evidence": "RHI = Q/(Q + dQ) = 1 - SHI",
+      "properties": {
+        "id": "EQ-D-SHI",
+        "name": "Supply and Return Heat Index",
+        "latex": "SHI = \\delta Q/(Q + \\delta Q), \\quad RHI = 1 - SHI",
+        "symbols": [{"symbol": "SHI", "unit": "dimensionless", "meaning": "supply heat index"}, {"symbol": "RHI", "unit": "dimensionless", "meaning": "return heat index"}, {"symbol": "delta Q", "unit": "W", "meaning": "pre-heat picked up by the cold air before it reaches the racks"}, {"symbol": "Q", "unit": "W", "meaning": "useful heat pickup at the racks"}],
+        "validity": "`SHI` approaching zero is ideal. The implementation forms the denominator once and subtracts, so the two sum to exactly one in floating point — a property of the implementation, gated as such. Here `Q` is the stated rack power, not a measured mass flow times a measured rise, so the pair holds only under the heat-zone modelling assumption",
+        "specSection": "S55.3",
+        "citation": "Sharma, Bash & Patel, \"Dimensionless parameters for evaluation of thermal design and performance of large-scale data centers\", AIAA 2002-3091, DOI 10.2514/6.2002-3091 — paywalled; the form as carried in this project's own specification",
+        "verification": "PARTIAL"
+      }
+    },
+    {
+      "objectType": "Equation",
+      "primaryKey": "EQ-D-PUE",
+      "locator": "55.4",
+      "evidence": "honestly labelled as PUE *inputs*",
+      "properties": {
+        "id": "EQ-D-PUE",
+        "name": "The three inputs a room model can offer towards a facility ratio",
+        "latex": "\\{W_{fan},\\ \\dot{Q}_{IT},\\ \\max T_s\\ \\text{with}\\ RCI_{HI} = 100\\%\\}",
+        "symbols": [{"symbol": "W_fan", "unit": "W", "meaning": "total fan shaft power at the converged operating points"}, {"symbol": "Q-dot_IT", "unit": "W", "meaning": "total IT heat from the cell-zone releases"}, {"symbol": "max T_s", "unit": "K", "meaning": "the highest supply temperature at which the high-side index stays at 100 per cent"}],
+        "validity": "**This is not a PUE and no PUE is computed from it.** The third input is the free-cooling ceiling, and it is absent on every run today because the supply-temperature sweep that would find it is parsed and never read",
+        "specSection": "S55.4",
+        "citation": "This project's own specification, section 55.4; implemented at `rust/src/dcmetrics.rs`",
+        "verification": "VERIFIED"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "constantPressure",
+      "locator": "52.5",
+      "evidence": "error naming `constantPressure`",
+      "properties": {
+        "apiName": "constantPressure",
+        "family": "fanCurve",
+        "constants": {},
+        "equationIds": ["EQ-M4", "EQ-M5"],
+        "specSection": "S52.5"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "quadratic",
+      "locator": "52.5",
+      "evidence": "on a `quadratic` curve",
+      "properties": {
+        "apiName": "quadratic",
+        "family": "fanCurve",
+        "constants": {},
+        "equationIds": ["EQ-M4", "EQ-M5"],
+        "specSection": "S52.5"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "table",
+      "locator": "52.5",
+      "evidence": "The table is interpolated by a **monotone Hermite cubic**",
+      "properties": {
+        "apiName": "table",
+        "family": "fanCurve",
+        "constants": {},
+        "equationIds": ["EQ-M4", "EQ-M5"],
+        "specSection": "S52.5"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "K",
+      "locator": "53.4",
+      "evidence": "`K` directly, which is what a tile datasheet gives and what avoids the",
+      "properties": {
+        "apiName": "K",
+        "family": "tile",
+        "constants": {},
+        "equationIds": ["EQ-M7"],
+        "specSection": "S53.4"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "openAreaRatio",
+      "locator": "53.4",
+      "evidence": "A case that writes `openAreaRatio` gets `K` **printed**, so the",
+      "properties": {
+        "apiName": "openAreaRatio",
+        "family": "tile",
+        "constants": {},
+        "equationIds": ["EQ-M7", "EQ-M8"],
+        "specSection": "S53.4"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "darcyForchheimer",
+      "locator": "53.4",
+      "evidence": "approach velocity, the published thin-plate form is",
+      "properties": {
+        "apiName": "darcyForchheimer",
+        "family": "tile",
+        "constants": {},
+        "equationIds": ["EQ-M7"],
+        "specSection": "S53.4"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "A1",
+      "locator": "55.1",
+      "evidence": "tightly controlled, mission-critical",
+      "properties": {
+        "apiName": "A1",
+        "family": "ashraeClass",
+        "constants": {"tLoAllowableC": 15, "tLoRecommendedC": 18, "tHiRecommendedC": 27, "tHiAllowableC": 32},
+        "equationIds": ["EQ-D-RCI"],
+        "specSection": "S55.1"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "A2",
+      "locator": "55.1",
+      "evidence": "some control of environmental parameters",
+      "properties": {
+        "apiName": "A2",
+        "family": "ashraeClass",
+        "constants": {"tLoAllowableC": 10, "tLoRecommendedC": 18, "tHiRecommendedC": 27, "tHiAllowableC": 35},
+        "equationIds": ["EQ-D-RCI"],
+        "specSection": "S55.1"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "A3",
+      "locator": "55.1",
+      "evidence": "wider range, chiller-less in most climates",
+      "properties": {
+        "apiName": "A3",
+        "family": "ashraeClass",
+        "constants": {"tLoAllowableC": 5, "tLoRecommendedC": 18, "tHiRecommendedC": 27, "tHiAllowableC": 40},
+        "equationIds": ["EQ-D-RCI"],
+        "specSection": "S55.1"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "A4",
+      "locator": "55.1",
+      "evidence": "wider still, outdoor air-cooled",
+      "properties": {
+        "apiName": "A4",
+        "family": "ashraeClass",
+        "constants": {"tLoAllowableC": 5, "tLoRecommendedC": 18, "tHiRecommendedC": 27, "tHiAllowableC": 45},
+        "equationIds": ["EQ-D-RCI"],
+        "specSection": "S55.1"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "H1",
+      "locator": "55.1",
+      "evidence": "high-density air-cooled servers",
+      "properties": {
+        "apiName": "H1",
+        "family": "ashraeClass",
+        "constants": {"tLoAllowableC": 5, "tLoRecommendedC": 18, "tHiRecommendedC": 22, "tHiAllowableC": 25},
+        "equationIds": ["EQ-D-RCI"],
+        "specSection": "S55.1"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "thirds",
+      "locator": "55.1",
+      "evidence": "three points per rack at 1/6, 1/2 and 5/6 of rack height",
+      "properties": {
+        "apiName": "thirds",
+        "family": "rciSamples",
+        "constants": {"heightFractions": [0.1667, 0.5, 0.8333]},
+        "equationIds": ["EQ-D-RCI"],
+        "specSection": "S55.1"
+      }
+    },
+    {
+      "objectType": "Model",
+      "primaryKey": "faces",
+      "locator": "55.1",
+      "evidence": "every rack-inlet face sample, unweighted",
+      "properties": {
+        "apiName": "faces",
+        "family": "rciSamples",
+        "constants": {},
+        "equationIds": ["EQ-D-RCI"],
+        "specSection": "S55.1"
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "CAP-PSYCHRO",
+      "locator": "54.1",
+      "evidence": "There is no new transport equation and no new solver",
+      "properties": {
+        "tag": "CAP-PSYCHRO",
+        "kind": "provides",
+        "module": "rust/src/psychro.rs",
+        "anchor": "rust/src/psychro.rs:216",
+        "specSection": "S54",
+        "reason": "Humidity is one transported vapour fraction; the psychrometric state is computed on the device and supersaturation is reported with a cell count and a worst excess, never clipped. The real-gas enhancement factor is named and not implemented, and the resulting bias is printed."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "CAP-FAN",
+      "locator": "52.5",
+      "evidence": "applied at every evaluation",
+      "properties": {
+        "tag": "CAP-FAN",
+        "kind": "provides",
+        "module": "rust/src/fan.rs",
+        "anchor": "rust/src/fan.rs:102",
+        "specSection": "S52",
+        "reason": "One curve per whole patch, corrected for density and speed at every evaluation. A curve with fewer than two points, a non-increasing flow column, a rising pressure branch, a non-positive maximum pressure or flow, a non-positive curve density or speed, or an efficiency outside the half-open unit interval is refused by name in `FanCurve::validate`. A fan condition on any field but pressure is structurally impossible: only the fan module rewrites the triple."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "CAP-JUMP",
+      "locator": "53.1",
+      "evidence": "`R >= 0` always, which is what makes §53.2 unconditionally stable",
+      "properties": {
+        "tag": "CAP-JUMP",
+        "kind": "provides",
+        "module": "rust/src/fan.rs",
+        "anchor": "rust/src/fan.rs:638",
+        "specSection": "S53",
+        "reason": "A data-centre case can only produce the boundary-patch form; the internal-face form exists and no case key reaches it. A jump condition on a non-pressure field is structurally impossible, and the model gets the flow rate right and the near-tile jet wrong, which the report says on every run that has a jump."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "CAP-DCMETRICS",
+      "locator": "55.5",
+      "evidence": "All of them go through `solver::device_sum` on a gathered contribution buffer",
+      "properties": {
+        "tag": "CAP-DCMETRICS",
+        "kind": "provides",
+        "module": "rust/src/dcmetrics.rs",
+        "anchor": "rust/src/dcmetrics.rs:180",
+        "specSection": "S55",
+        "reason": "The reductions are deterministic and fixed-partition. An ASHRAE class the solver does not know, a sample set it does not know, and a metric patch that is unknown or has no faces are each refused by name with the menu printed."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "refuse_baffle_insertion",
+      "locator": "53.5",
+      "evidence": "is a topology mutation and is refused by name.**",
+      "properties": {
+        "tag": "refuse_baffle_insertion",
+        "kind": "refuses",
+        "module": "rust/src/fan.rs",
+        "anchor": "rust/src/fan.rs:654",
+        "specSection": "S53.5",
+        "reason": "Splitting an existing internal face into a coincident pair of boundary faces is a topology mutation this solver does not perform. The two routes that exist are to emit the coincident pair at mesh-generation time, or to model the plenum as a separate region and use the boundary form. A jump on an ordinary internal face needs no baffle; what it cannot do is make the scalars jump, which is the only thing a baffle adds. The case key exists so that this refusal can fire.",
+        "permissiveFallback": "Under the permissive switch the refusal returns an empty internal-face jump, and the caller **discards it**: the tile falls through to its ordinary lowering and becomes a boundary porous jump on the same patch, with the scalars continuous. The behaviour is safe; the comment above the call site describes it wrongly, and D1 fixes that comment."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "refuse_capacitance_fft",
+      "locator": "52.9",
+      "evidence": "**It is not built.**",
+      "properties": {
+        "tag": "refuse_capacitance_fft",
+        "kind": "refuses",
+        "module": "rust/src/fan.rs",
+        "anchor": "rust/src/fan.rs:674",
+        "specSection": "S52.9",
+        "reason": "A fan patch makes a face neither uniformly Dirichlet nor uniformly Neumann, and a jump makes the coefficient non-constant, so the direct Fourier pressure path is not available on a room that has either. The rank-one correction that would put it back is named and not implemented.",
+        "permissiveFallback": "pbicgstab"
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "refuse_condensation",
+      "locator": "54.5",
+      "evidence": "**Field-level condensation (fog) is refused by name.**",
+      "properties": {
+        "tag": "refuse_condensation",
+        "kind": "refuses",
+        "module": "rust/src/psychro.rs",
+        "anchor": "rust/src/psychro.rs:297",
+        "specSection": "S54.5",
+        "reason": "A saturation-constrained source with its own inner iteration is a different model. What is offered instead: supersaturation is reported with a cell count and the worst excess, and the case may set a barometric pressure, virtual temperature, a fan supply relative humidity and a tile plenum relative humidity. No case key reaches this refusal today, so it is documented rather than fired."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "refuse_wet_bulb_field",
+      "locator": "54.5",
+      "evidence": "**Wet bulb is a reporting quantity; nothing in the physics needs it.**",
+      "properties": {
+        "tag": "refuse_wet_bulb_field",
+        "kind": "refuses",
+        "module": "rust/src/psychro.rs",
+        "anchor": "rust/src/psychro.rs:320",
+        "specSection": "S54.5",
+        "reason": "A per-cell root find with a data-dependent trip count is not capturable as a fixed graph. What is offered instead: the report's host-side wet bulb, the dew point and the relative humidity. No case key reaches this refusal today."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "refuse_scattered_rack",
+      "locator": "55.5",
+      "evidence": "reduction is refused by name, with the contiguous-list alternative stated.",
+      "properties": {
+        "tag": "refuse_scattered_rack",
+        "kind": "refuses",
+        "module": "rust/src/dcmetrics.rs",
+        "anchor": "rust/src/dcmetrics.rs:422",
+        "specSection": "S55.5",
+        "reason": "Reducing over a scattered index list is a segmented reduction, which is deterministic but is not this project's single reduction shape, and no second reduction kernel is added for one metric. What is offered instead: give each rack its own patch, which is also what makes the per-rack heat flows reportable one by one."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "CAP-TRANSIENT-DC",
+      "locator": "55.2",
+      "evidence": "exactly: both numerator and denominator are the same heat divided by a mass",
+      "properties": {
+        "tag": "CAP-TRANSIENT-DC",
+        "kind": "absent",
+        "module": "rust/src/io/case_dc.rs",
+        "anchor": "rust/src/io/case_dc.rs:379",
+        "specSection": "S55",
+        "reason": "The data-centre run is steady by construction: a fixed outer-iteration count, a steady turbulence control, and a run block with no time step and no end time. A cooling-unit failure, a load ramp and a ride-through cannot be asked for. The first file to change is `rust/src/io/case_dc.rs`."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "CAP-SWEEP-DC",
+      "locator": "55.4",
+      "evidence": "from a short parametric sweep",
+      "properties": {
+        "tag": "CAP-SWEEP-DC",
+        "kind": "absent",
+        "module": "rust/src/io/case_dc.rs",
+        "anchor": "rust/src/io/case_dc.rs:351",
+        "specSection": "S55.4",
+        "reason": "The supply-temperature sweep key is parsed and never read, so the free-cooling ceiling is absent from every report. This is the defect class the case format exists to prevent, live in the shipped format. D4 implements it; the first files to change are `rust/src/io/case_dc.rs`, where the key is read, and `rust/src/bin/datacentre.rs`, where the ceiling is written."
+      }
+    },
+    {
+      "objectType": "Capability",
+      "primaryKey": "CAP-COIL",
+      "locator": "52.10",
+      "evidence": "plenum that is fine and is the case this exists for.",
+      "properties": {
+        "tag": "CAP-COIL",
+        "kind": "absent",
+        "module": "rust/src/io/case_dc.rs",
+        "anchor": "rust/src/io/case_dc.rs:165",
+        "specSection": "S52",
+        "reason": "The only cooling device the format carries is a fan patch with a pressure-flow curve. There is no coil, no sensible and latent split, no return-air control and no supply-temperature set point, so a real air handler cannot be expressed and its dehumidification cannot be accounted. The first file to change is `rust/src/io/case_dc.rs`."
+      }
+    },
+    {
+      "objectType": "MetricDef",
+      "primaryKey": "RCI_HI",
+      "locator": "55.1",
+      "evidence": "denominator of `RCI_HI`",
+      "properties": {
+        "apiName": "RCI_HI",
+        "unit": "%",
+        "range": "at most 100",
+        "ideal": "100",
+        "status": "computed",
+        "equationId": "EQ-D-RCI",
+        "definitionSource": "Herrlin:ASHRAE-Trans-111(2):2005"
+      }
+    },
+    {
+      "objectType": "MetricDef",
+      "primaryKey": "RCI_LO",
+      "locator": "55.1",
+      "evidence": "RCI_LO = [ 1 - SUM_x max(0, T_lo_rec - T_x)",
+      "properties": {
+        "apiName": "RCI_LO",
+        "unit": "%",
+        "range": "at most 100",
+        "ideal": "100",
+        "status": "computed",
+        "equationId": "EQ-D-RCI",
+        "definitionSource": "Herrlin:ASHRAE-Trans-111(2):2005"
+      }
+    },
+    {
+      "objectType": "MetricDef",
+      "primaryKey": "RTI",
+      "locator": "55.2",
+      "evidence": "`< 100 %` is bypass, `> 100 %` is recirculation",
+      "properties": {
+        "apiName": "RTI",
+        "unit": "%",
+        "range": "0 and above",
+        "ideal": "100",
+        "status": "computed",
+        "equationId": "EQ-D-RTI",
+        "definitionSource": "Herrlin:ASHRAE-Trans-114(2):2008"
+      }
+    },
+    {
+      "objectType": "MetricDef",
+      "primaryKey": "SHI",
+      "locator": "55.3",
+      "evidence": "`SHI -> 0` is ideal.",
+      "properties": {
+        "apiName": "SHI",
+        "unit": "-",
+        "range": "0 to 1",
+        "ideal": "0",
+        "status": "computed",
+        "equationId": "EQ-D-SHI",
+        "definitionSource": "Sharma:AIAA-2002-3091:2002"
+      }
+    },
+    {
+      "objectType": "MetricDef",
+      "primaryKey": "RHI",
+      "locator": "55.3",
+      "evidence": "identity and is checked as one",
+      "properties": {
+        "apiName": "RHI",
+        "unit": "-",
+        "range": "0 to 1",
+        "ideal": "1",
+        "status": "computed",
+        "equationId": "EQ-D-SHI",
+        "definitionSource": "Sharma:AIAA-2002-3091:2002"
+      }
+    },
+    {
+      "objectType": "MetricDef",
+      "primaryKey": "FAN_SHAFT_POWER",
+      "locator": "55.4",
+      "evidence": "W_fan = Q dp_fan(Q)/eta_total",
+      "properties": {
+        "apiName": "FAN_SHAFT_POWER",
+        "unit": "W",
+        "range": "0 and above",
+        "ideal": "no single value",
+        "status": "computed",
+        "equationId": "EQ-M6",
+        "definitionSource": "doc:speclit"
+      }
+    }
+  ],
+  "links": [
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "constantPressure", "toType": "Capability", "toId": "CAP-FAN", "locator": "52.5"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "quadratic", "toType": "Capability", "toId": "CAP-FAN", "locator": "52.5"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "table", "toType": "Capability", "toId": "CAP-FAN", "locator": "52.5"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "K", "toType": "Capability", "toId": "CAP-JUMP", "locator": "53.4"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "openAreaRatio", "toType": "Capability", "toId": "CAP-JUMP", "locator": "53.4"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "darcyForchheimer", "toType": "Capability", "toId": "CAP-JUMP", "locator": "53.4"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "A1", "toType": "Capability", "toId": "CAP-DCMETRICS", "locator": "55.1"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "A2", "toType": "Capability", "toId": "CAP-DCMETRICS", "locator": "55.1"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "A3", "toType": "Capability", "toId": "CAP-DCMETRICS", "locator": "55.1"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "A4", "toType": "Capability", "toId": "CAP-DCMETRICS", "locator": "55.1"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "H1", "toType": "Capability", "toId": "CAP-DCMETRICS", "locator": "55.1"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "thirds", "toType": "Capability", "toId": "CAP-DCMETRICS", "locator": "55.1"},
+    {"linkType": "implementedBy", "fromType": "Model", "fromId": "faces", "toType": "Capability", "toId": "CAP-DCMETRICS", "locator": "55.1"},
+    {"linkType": "computes", "fromType": "Capability", "fromId": "CAP-DCMETRICS", "toType": "MetricDef", "toId": "RCI_HI", "locator": "55.1"},
+    {"linkType": "computes", "fromType": "Capability", "fromId": "CAP-DCMETRICS", "toType": "MetricDef", "toId": "RCI_LO", "locator": "55.1"},
+    {"linkType": "computes", "fromType": "Capability", "fromId": "CAP-DCMETRICS", "toType": "MetricDef", "toId": "RTI", "locator": "55.2"},
+    {"linkType": "computes", "fromType": "Capability", "fromId": "CAP-DCMETRICS", "toType": "MetricDef", "toId": "SHI", "locator": "55.3"},
+    {"linkType": "computes", "fromType": "Capability", "fromId": "CAP-DCMETRICS", "toType": "MetricDef", "toId": "RHI", "locator": "55.3"},
+    {"linkType": "computes", "fromType": "Capability", "fromId": "CAP-FAN", "toType": "MetricDef", "toId": "FAN_SHAFT_POWER", "locator": "55.5"},
+    {"linkType": "defines", "fromType": "Equation", "fromId": "EQ-D-RTI", "toType": "MetricDef", "toId": "RTI", "locator": "55.2"},
+    {"linkType": "defines", "fromType": "Equation", "fromId": "EQ-M6", "toType": "MetricDef", "toId": "FAN_SHAFT_POWER", "locator": "55.5"}
+  ]
+}

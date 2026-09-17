@@ -59,3 +59,27 @@ export function gitStatus(cwd: string): Promise<GitStatus> {
     })
   })
 }
+
+/** HEAD of a working tree, and whether tracked content differs from it. */
+export interface GitHead {
+  /** Full 40-hex sha, or null when cwd is not a git repository (or git is absent). */
+  sha: string | null
+  /** True when `git status --porcelain --untracked-files=no` printed anything; null when unknown. */
+  dirty: boolean | null
+}
+
+export function gitHead(cwd: string): Promise<GitHead> {
+  const opts = { cwd, timeout: 3_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env: scrubbedEnv() }
+  const sha = new Promise<string | null>((resolve) => {
+    execFile('git', ['rev-parse', 'HEAD'], opts, (err, stdout) => {
+      const s = err ? '' : String(stdout).trim()
+      resolve(/^[0-9a-f]{40}$/.test(s) ? s : null)
+    })
+  })
+  const dirty = new Promise<boolean | null>((resolve) => {
+    execFile('git', ['status', '--porcelain=v1', '--untracked-files=no'], opts, (err, stdout) => {
+      resolve(err ? null : String(stdout).trim() !== '')
+    })
+  })
+  return Promise.all([sha, dirty]).then(([s, d]) => ({ sha: s, dirty: d }))
+}

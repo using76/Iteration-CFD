@@ -1,0 +1,45 @@
+{
+  "document": {
+    "documentId": "doc:speclit-52-55",
+    "title": "SPEC-LIT sections 52-55 - fans, porous jumps, humidity and the data-centre metrics",
+    "tier": "A",
+    "licence": "Prosperity-3.0.0 (ours)",
+    "isPaywalled": false,
+    "sourcePath": "rust/SPEC-LIT.md"
+  },
+  "chunks": [
+    {
+      "chunkId": "doc:speclit-52-55#55.1#1",
+      "documentId": "doc:speclit-52-55",
+      "locator": "55.1",
+      "part": 1,
+      "heading": "### 55.1 RCI — how far outside the envelope the rack inlets are",
+      "text": "### 55.1 RCI — how far outside the envelope the rack inlets are\n\nOver `n` rack-inlet sample temperatures `T_x`, with the class's own recommended\nrange `[T_lo_rec, T_hi_rec]` and its own allowable range `[T_lo_all, T_hi_all]`\n— **both** belong to the class, and neither is a constant:\n\n```\n    RCI_HI = [ 1 - SUM_x max(0, T_x - T_hi_rec)\n                   / ((T_hi_all - T_hi_rec) n) ] x 100 %\n    RCI_LO = [ 1 - SUM_x max(0, T_lo_rec - T_x)\n                   / ((T_lo_rec - T_lo_all) n) ] x 100 %             (S55.1)\n```\n\n100 % means no inlet is outside the recommended range at all. The class is a\n**setting**, and both of its bands belong to it:\n\n| class | recommended | allowable | what it is |\n|---|---|---|---|\n| A1 | 18–27 C | 15–32 C | tightly controlled, mission-critical |\n| A2 | 18–27 C | 10–35 C | some control of environmental parameters |\n| A3 | 18–27 C | 5–40 C | wider range, chiller-less in most climates |\n| A4 | 18–27 C | 5–45 C | wider still, outdoor air-cooled |\n| H1 | **18–22 C** | **5–25 C** | high-density air-cooled servers |\n\nThe 5th edition (2021) added **H1**, and it is the one class whose\n**recommended** band is not 18–27 C. A solver that hard-codes 18/27 is right\nfor four classes and structurally wrong for the fifth, so `envelope()` returns\nall four temperatures from the class arm and the index hard-codes nothing. A\ncase that names a class and silently gets A1's numbers is the §13.4.1 defect,\nso the class is read, its four temperatures are **printed**, and two cases\ndiffering only in the class must produce different indices.\n\n**H1 against A1 is the sharpest form of that pair test**, and it is the one the\ntests use, because the two classes differ in the denominator of `RCI_HI`\n(3 K against 5 K) **and** in the denominator of `RCI_LO` (13 K against 3 K).\nH1 is the stricter index above the band and the more forgiving one below it. A\npair test that checked only the high index would still pass on a solver that\nhad gone on hard-coding the recommended band, which is why both halves are\nrequired.\n\nEvery number in that table is the public ASHRAE Journal column's; the\n5th-edition book itself is paywalled and was not opened. Secondary sources that\ndescribe H1 as a liquid-cooled class with an 18–22 C *coolant* supply are\ncontradicted by that column, which is written by TC 9.9 members, describes H1\nas a high-density air-cooled class and plots it on the same air psychrometric\nchart as A1–A4. The column wins, and this paragraph exists so that the next\nreader does not re-open the question.\n\n**The sample set is a setting too, and this is not a detail.** RCI is defined\nover *rack-inlet sample points*, and its value depends on which points those\nare. Two sample sets are offered and both are printed:\n\n| `samples` | what it is |\n|---|---|\n| `faces` | every rack-inlet face sample, unweighted — mesh-dependent, and the report says so |\n| `thirds` | three points per rack at 1/6, 1/2 and 5/6 of rack height, Herrlin's own convention — mesh-independent |\n\nA case that says nothing gets **`thirds`**, because that is the convention the\nindex was defined with, and because a mesh-dependent index that silently\nchanges when the mesh is refined is worse than one that is explicit about its\nsample set. `n` is reported either way.\n\n",
+      "charStart": 72658,
+      "charEnd": 75926,
+      "ordinal": 0
+    },
+    {
+      "chunkId": "doc:speclit-52-55#55.2#1",
+      "documentId": "doc:speclit-52-55",
+      "locator": "55.2",
+      "part": 1,
+      "heading": "### 55.2 RTI — bypass and recirculation in one number",
+      "text": "### 55.2 RTI — bypass and recirculation in one number\n\n```\n    RTI = (T_return - T_supply) / dT_equipment x 100 %               (S55.2)\n```\n\n(Herrlin 2008). `< 100 %` is bypass, `> 100 %` is recirculation, `= 100 %` is\nperfect air management. `T_return` and `T_supply` are **flux-weighted** patch\nmeans — `SUM |phi_f| T_f / SUM |phi_f|` — not area means: the return\ntemperature that matters is the one the returning *air* carries, and an area\nmean over a patch with a non-uniform velocity profile is a different number.\n\n`dT_equipment` is the rise across the IT equipment. Where the racks are\nmodelled as flow-through devices it is measured; where they are heat-release\nzones with a stated flow it is `Q_IT/(rho c_p mdot_IT)`. Which of the two was\nused is **printed**, because they are not the same measurement.\n\n**The identity that makes (S55.2) checkable.** At steady state with all the IT\nheat leaving through the CRAC return,\n\n```\n    RTI = mdot_IT / mdot_supply                                      (S55.3)\n```\n\nexactly: both numerator and denominator are the same heat divided by a mass\nflow. So **halving the supply flow exactly doubles RTI**, whatever the\ngeometry, and that is a gate the solver can be held to without any external\ndata (§55.8).\n\n",
+      "charStart": 75926,
+      "charEnd": 77181,
+      "ordinal": 1
+    },
+    {
+      "chunkId": "doc:speclit-52-55#55.3#1",
+      "documentId": "doc:speclit-52-55",
+      "locator": "55.3",
+      "part": 1,
+      "heading": "### 55.3 SHI and RHI — where the cold air was spoiled",
+      "text": "### 55.3 SHI and RHI — where the cold air was spoiled\n\n```\n    SHI = dQ/(Q + dQ) ,     RHI = Q/(Q + dQ) = 1 - SHI\n    dQ = SUM_racks mdot c_p (T_in,rack - T_supply)     pre-heat of cold air\n    Q  = SUM_racks mdot c_p (T_out,rack - T_in,rack)   useful IT heat pickup\n                                                                     (S55.4)\n```\n\n(Sharma, Bash & Patel 2002). `SHI -> 0` is ideal. `SHI + RHI == 1` is an\nidentity and is checked as one, not as an approximation: both are computed\nfrom the same two reductions, so the sum is `(dQ + Q)/(Q + dQ)`, exactly 1 in\nfloating point as long as neither is formed twice. That is a constraint on the\n**implementation**, and §55.7 gates it.\n\n",
+      "charStart": 77181,
+      "charEnd": 77876,
+      "ordinal": 2
+    }
+  ]
+}

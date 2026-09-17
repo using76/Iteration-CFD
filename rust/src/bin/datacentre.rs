@@ -14,7 +14,8 @@
 //! and reports what it did. No GPL-licensed source was consulted.
 //!
 //! ```text
-//! ofgpu-datacentre <case.jsonc> [-csv <out.csv>] [-permissive]
+//! ofgpu-datacentre <case.jsonc> [-json <out.json>] [-run-id <id>] [-csv <out.csv>]
+//!                  [-schema] [-permissive]
 //! ```
 //!
 //! # What it solves
@@ -41,6 +42,7 @@ use std::process::ExitCode;
 
 use ofgpu::dcmetrics::{
     dt_equipment_from_heat, rci_hi, rci_lo, rti, shi_rhi, MetricReport, Metrics, PueInputs,
+    RciSamples,
 };
 use ofgpu::error::Result;
 use ofgpu::fan::FlowDevices;
@@ -58,22 +60,56 @@ use ofgpu::turbulence::TurbulenceControls;
 use ofgpu::{Gpu, Label, Scalar, Vec3};
 
 const USAGE: &str = "\
-ofgpu-datacentre <case.jsonc> [-csv <out.csv>] [-permissive]
+ofgpu-datacentre <case.jsonc> [-json <out.json>] [-run-id <id>] [-csv <out.csv>]
+                 [-schema] [-permissive]
 
   SPEC-LIT S52 to S55: a data-centre room with fan curves, porous-jump tiles,
   humidity and the RCI/RTI/SHI metrics a customer report must contain.
 
-  -csv <path>     write the metric history
+  -json <path>    write the whole S55 report as one JSON document
+  -run-id <id>    the run this document belongs to (default: v_<UTC stamp>)
+  -csv <path>     write a final snapshot of the metrics, one row per quantity
+  -schema         print the case format's JSON Schema on stdout and exit 0
   -permissive     downgrade unsupported-setting errors to warnings";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let mut case_path: Option<PathBuf> = None;
     let mut csv: Option<PathBuf> = None;
+    let mut json: Option<PathBuf> = None;
+    let mut run_id: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-json" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => json = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("-json needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "-run-id" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => run_id = Some(p.clone()),
+                    None => {
+                        eprintln!("-run-id needs a value");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            // -schema needs no case: the schema is generated from the SAME
+            // types that parse one, so it exists before any file is read.
+            // Every other argument on the line is ignored, the way a schema
+            // request reads.
+            "-schema" => {
+                println!("{}", ofgpu::io::case_dc::emit_dc_schema());
+                return ExitCode::SUCCESS;
+            }
             "-csv" => {
                 i += 1;
                 match args.get(i) {
@@ -103,7 +139,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    match run(&case_path, csv.as_deref()) {
+    match run(&case_path, csv.as_deref(), json.as_deref(), run_id.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("\nofgpu-datacentre: {e}");
@@ -112,7 +148,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
+fn run(
+    case_path: &Path,
+    csv: Option<&Path>,
+    json: Option<&Path>,
+    run_id: Option<&str>,
+) -> Result<()> {
+    let started_ms = epoch_ms(std::time::SystemTime::now());
     let case = DcCase::read(case_path)?;
     let lowered = case.lower()?;
 
@@ -132,6 +174,23 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
 
     if let Some(p) = csv {
         write_csv(p, &lowered, &sol)?;
+        println!("\nwrote {}", p.display());
+    }
+    if let Some(p) = json {
+        let ended_ms = epoch_ms(std::time::SystemTime::now());
+        let rid = match run_id {
+            Some(v) => v.to_string(),
+            None => format!("v_{}", compact_stamp(started_ms)),
+        };
+        // A failed device probe is a `null` in the document, never an aborted
+        // run - no `?` on either call.
+        let ctx = gpu.ctx();
+        let device = match (ctx.name(), ctx.compute_capability()) {
+            (Ok(n), Ok((major, minor))) => Some((n, format!("{major}{minor}"))),
+            _ => None,
+        };
+        let meta = DocMeta { run_id: &rid, case_path, started_ms, ended_ms, device };
+        write_document(p, &build_document(&lowered, &sol, &meta))?;
         println!("\nwrote {}", p.display());
     }
     Ok(())
@@ -155,6 +214,11 @@ struct RoomSolution {
     /// Every patch's net volumetric flow, m^3/s, outward positive. They must
     /// sum to zero.
     patch_flow: Vec<(String, Scalar)>,
+    /// What the LAST iteration's assembled system turned out to be - the
+    /// separability, symmetry and coefficient constancy the printed
+    /// paragraph reports. Carried out of the loop so the document can say it
+    /// too.
+    probe: Option<ProbeSummary>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -218,7 +282,7 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
         p.start..p.start + p.size
     };
 
-    // S52.4: `fr` is seeded at 1, not 0. Both conditions have `fr` in
+    // §52.4: `fr` is seeded at 1, not 0. Both conditions have `fr` in
     // `(0, 1]` for every finite curve slope and resistance, so a fan or tile
     // patch ALWAYS pins the pressure level - and `Simple::initialise` decides
     // whether to pin a reference cell by reading `fr` before `crate::fan` has
@@ -248,7 +312,7 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
             // owns the flux - which is the whole point of a fan or a jump on
             // `p`. The cost is that an inflow's velocity is the extrapolated
             // interior one, so the near-opening jet is wrong; that is the same
-            // limitation S53.6 already records for a pressure-jump tile, and
+            // limitation §53.6 already records for a pressure-jump tile, and
             // for the same reason.
             u_kind[bf] = BcKind::ZeroGradient as Label;
             u_fr[bf] = 0.0;
@@ -395,7 +459,7 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
     let mut humidity: Option<(ScalarTransport<'_>, Psychrometrics)> = match lc.humidity {
         None => None,
         Some(h) => {
-            // S54.1: one more transported scalar on the SAME conservative
+            // §54.1: one more transported scalar on the SAME conservative
             // phi. The diffusivity is carried through the Prandtl-number slot
             // as a Schmidt number, which is the same coefficient in the same
             // place - `D_eff = D + nu_t/Sc_t`.
@@ -458,10 +522,11 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
     let mut backend = ofgpu::pressure::PbicgstabBackend::new(lc.solver.clone());
     backend.setup(gpu, hm, &mesh, &SystemProbe::default())?;
     let mut probed = false;
+    let mut probe_out: Option<ProbeSummary> = None;
 
     // ---- the outer loop ----------------------------------------------------
     for it in 0..lc.run.iterations {
-        // S54.4: the buoyancy field. With humidity ON it is the virtual
+        // §54.4: the buoyancy field. With humidity ON it is the virtual
         // temperature; with humidity off it is `T` itself, and
         // `momentum::update_buoyancy` is the SAME unmodified function either
         // way - which is what makes the dry default bit-for-bit unmoved.
@@ -481,7 +546,7 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
             simple.correct_outer(gpu, &mut backend, turb.nut(), t_for_buoyancy, false)?;
         }
 
-        // SPEC-LIT S52.8: the cost of a fan curve is the cuFFT direct Poisson
+        // SPEC-LIT §52.8: the cost of a fan curve is the cuFFT direct Poisson
         // backend, and it must be PRINTED rather than quietly fallen back
         // from. Probed off the REAL assembled system at the LAST iteration,
         // not the first: on the first, `Q` is zero, so a quadratic curve has
@@ -506,23 +571,17 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
                 probe.constant_coefficient
             );
             if !probe.separable_bcs || !probe.constant_coefficient {
-                println!(
-                    "  the cuFFT direct Poisson backend is NOT available on this \
-                     system, and PBiCGStab is used instead. SPEC-LIT S52.8: a fan \
-                     curve makes a patch face neither uniformly Dirichlet nor \
-                     uniformly Neumann, and S53.2's jump makes the face coefficient \
-                     non-constant. That is the biggest cost of these two features and \
-                     it is printed, not hidden; S52.9 names the Woodbury correction \
-                     that would put the direct path back and says it is not built."
-                );
+                println!("  {FFT_UNAVAILABLE_TEXT}");
             }
             if !probe.symmetric {
-                println!(
-                    "  WARNING: the pressure matrix is NOT symmetric. SPEC-LIT S52.2 \
-                     and S53.2 both say it should be - a fan is a symmetric rank-1 \
-                     downdate and a jump divides upper and lower by the same number."
-                );
+                println!("  {ASYMMETRIC_MATRIX_TEXT}");
             }
+            probe_out = Some(ProbeSummary {
+                separable_bcs: probe.separable_bcs,
+                symmetric: probe.symmetric,
+                constant_coefficient: probe.constant_coefficient,
+                non_separable_reason: probe.non_separable_reason.clone(),
+            });
         }
 
         let flow = simple.flow_state();
@@ -682,6 +741,7 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
         supersaturation,
         molar_caveat,
         patch_flow,
+        probe: probe_out,
     })
 }
 
@@ -726,17 +786,14 @@ fn print_report(lc: &LoweredDcCase, s: &RoomSolution) {
 
     println!("
 --- flow through every opening (m^3/s, outward positive) ---");
-    let mut net = 0.0 as Scalar;
-    let mut scale = 0.0 as Scalar;
+    let (net, _scale, ratio) = continuity_of(&s.patch_flow);
     for (n, q) in &s.patch_flow {
         println!("  {n:<16} {q:12.5}");
-        net += q;
-        scale = scale.max(q.abs());
     }
     println!(
         "  {:<16} {net:12.5}   <- must be zero; {:.2e} of the largest opening",
         "NET",
-        f64::from(if scale > 0.0 { net.abs() / scale } else { 0.0 })
+        f64::from(ratio)
     );
 
     println!("\n--- fans (S52) ---");
@@ -748,11 +805,10 @@ fn print_report(lc: &LoweredDcCase, s: &RoomSolution) {
         // between them IS the outer-iteration residual of the operating
         // point, and it is printed rather than left for a reader to notice.
         if let Some((_, qp)) = s.patch_flow.iter().find(|(n, _)| n == patch) {
-            let d = (q - qp).abs() / qp.abs().max(1e-30);
             println!(
                 "    the patch itself carried {qp:.5} m^3/s at the last corrector; the \
                  {:.2} % gap is the operating point's own outer residual (S52.6)",
-                100.0 * d
+                outer_residual_pct(*q, *qp)
             );
         }
     }
@@ -763,11 +819,7 @@ fn print_report(lc: &LoweredDcCase, s: &RoomSolution) {
     }
     if let Some((cells, worst)) = s.supersaturation {
         if cells > 0 {
-            println!(
-                "\n--- S54.5 ---\n  {cells} cell(s) are supersaturated, worst excess \
-                 {worst:.6} kg/kg. Y_v is REPORTED and not clipped: field-level \
-                 condensation is a different model and is refused by name."
-            );
+            println!("\n--- S54.5 ---\n  {}", supersaturation_text(cells, worst));
         } else {
             println!("\nno cell is supersaturated.");
         }
@@ -807,4 +859,925 @@ fn write_csv(path: &Path, lc: &LoweredDcCase, s: &RoomSolution) -> Result<()> {
         path: path.display().to_string(),
         msg: e.to_string(),
     })
+}
+
+// ==========================================================================
+//  5. The JSON document - one file per run
+// ==========================================================================
+
+// The document's camelCase keys come from these field names through
+// `rename_all`, never hand-written: `rci_hi` serialises as `rciHi`,
+// `n_boundary_faces` as `nBoundaryFaces`, `case_sha256` as `caseSha256`.
+
+/// The `machine` block: where and on what the run happened. `hostname` is
+/// `None` rather than a fiction when the environment names no host.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DcMachine {
+    hostname: Option<String>,
+    os: &'static str,
+    arch: &'static str,
+    device: Option<String>,
+    compute_capability: Option<String>,
+    precision: &'static str,
+}
+
+/// The PUE inputs (S55.5) - not a PUE, as `MetricReport::describe` says.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PueDoc<'a> {
+    fan_power: Scalar,
+    fan_power_each: &'a [Scalar],
+    it_heat: Scalar,
+    free_cooling_ceiling: Option<Scalar>,
+}
+
+/// The S55 report, field for field what `print_report` prints.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportDoc<'a> {
+    rci_hi: Scalar,
+    rci_lo: Scalar,
+    n_samples: usize,
+    rti: Scalar,
+    shi: Scalar,
+    rhi: Scalar,
+    t_supply: Scalar,
+    t_return: Scalar,
+    dt_equipment: Scalar,
+    dt_measured: bool,
+    pue: PueDoc<'a>,
+}
+
+/// One fan's operating point. `outer_residual_pct` is `None` when the fan's
+/// patch is absent from `patch_flow`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FanDoc<'a> {
+    patch: &'a str,
+    q: Scalar,
+    dp: Scalar,
+    shaft_power: Scalar,
+    outer_residual_pct: Option<Scalar>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RackInletDoc<'a> {
+    name: &'a str,
+    inlet_t: Scalar,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchFlowDoc<'a> {
+    patch: &'a str,
+    q: Scalar,
+}
+
+/// The whole-boundary closure, computed once and printed and serialised.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContinuityDoc {
+    net: Scalar,
+    largest_opening: Scalar,
+    net_over_largest: Scalar,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupersaturationDoc {
+    cells: usize,
+    worst_excess: Scalar,
+}
+
+/// One caveat: the kind is spelled with the section it comes from, so a
+/// reader of the document knows where the text's authority lives.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaveatDoc {
+    kind: &'static str,
+    spec_ref: &'static str,
+    text: String,
+}
+
+/// The document itself. The FIELD ORDER is the document's key order and must
+/// not be rearranged: a reader diffing two runs reads it top to bottom.
+/// No key is ever omitted - an unknown value serialises as `null`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DcReportDoc<'a> {
+    schema: &'static str,
+    run_id: &'a str,
+    case_path: String,
+    case_sha256: Option<String>,
+    case_name: &'a str,
+    started_at: String,
+    ended_at: String,
+    wall_seconds: f64,
+    git_sha: Option<String>,
+    git_dirty: Option<bool>,
+    machine: DcMachine,
+    n_cells: usize,
+    n_boundary_faces: usize,
+    iterations: u32,
+    ashrae_class: String,
+    rci_samples: &'static str,
+    notes: &'a [String],
+    report: ReportDoc<'a>,
+    fans: Vec<FanDoc<'a>>,
+    t_inlet_max: Scalar,
+    rack_inlets: Vec<RackInletDoc<'a>>,
+    patch_flow: Vec<PatchFlowDoc<'a>>,
+    continuity: ContinuityDoc,
+    supersaturation: Option<SupersaturationDoc>,
+    caveats: Vec<CaveatDoc>,
+}
+
+/// The four numbers the outer probe found, carried out of the loop so the
+/// document can say what the printed paragraph says.
+#[derive(Debug, Clone)]
+struct ProbeSummary {
+    separable_bcs: bool,
+    symmetric: bool,
+    constant_coefficient: bool,
+    // Carried beside its three booleans so the reason travels with them; the
+    // printed paragraph and the caveat text quote it from `SystemProbe`
+    // itself, so nothing reads the copy here yet.
+    #[allow(dead_code)]
+    non_separable_reason: String,
+}
+
+/// Everything the document needs that is not in `LoweredDcCase` or
+/// `RoomSolution`: the command line's own answers and the clock.
+struct DocMeta<'a> {
+    run_id: &'a str,
+    case_path: &'a Path,
+    started_ms: i64,
+    ended_ms: i64,
+    device: Option<(String, String)>,
+}
+
+/// Milliseconds since the Unix epoch. The document's clock is one i64, split
+/// with `div_euclid`/`rem_euclid` - never `/` and `%`, which drift on the
+/// pre-1970 instants a back-dated stamp would carry.
+fn epoch_ms(t: std::time::SystemTime) -> i64 {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as i64,
+        Err(e) => -(e.duration().as_millis() as i64),
+    }
+}
+
+/// A civil date from a Unix day: Howard Hinnant's `civil_from_days`
+/// (chrono-Compatible Low-Level Date Algorithms,
+/// howardhinnant.github.io/date_algorithms.html, public domain), exact over
+/// the whole proleptic Gregorian calendar. Unix time ignores leap seconds
+/// and so does this.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (y + i64::from(m <= 2), m, d)
+}
+
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`, always UTC.
+fn iso8601_utc(epoch_ms: i64) -> String {
+    let days = epoch_ms.div_euclid(86_400_000);
+    let ms_of_day = epoch_ms.rem_euclid(86_400_000);
+    let (y, m, d) = civil_from_days(days);
+    let (hh, mm, ss, mmm) = (
+        ms_of_day / 3_600_000,
+        (ms_of_day % 3_600_000) / 60_000,
+        (ms_of_day % 60_000) / 1000,
+        ms_of_day % 1000,
+    );
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{mmm:03}Z")
+}
+
+/// `20260915T011203Z` - the compact stamp a default run id is minted from.
+fn compact_stamp(epoch_ms: i64) -> String {
+    let days = epoch_ms.div_euclid(86_400_000);
+    let ms_of_day = epoch_ms.rem_euclid(86_400_000);
+    let (y, m, d) = civil_from_days(days);
+    let (hh, mm, ss) =
+        (ms_of_day / 3_600_000, (ms_of_day % 3_600_000) / 60_000, (ms_of_day % 60_000) / 1000);
+    format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}Z")
+}
+
+/// `(gitSha, gitDirty)` read from the repository the CASE lives in - the
+/// same rule and the same failure mode as `ofgpu-validate`'s probe. Any
+/// failure - `git` absent, non-zero status, non-UTF-8 output - yields
+/// `(None, None)`: a tree with no git yields a document whose `gitSha` and
+/// `gitDirty` are `null` together, never one of them alone.
+fn git_probe(dir: &Path) -> (Option<String>, Option<bool>) {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    };
+    let sha = run(&["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+    let dirty = run(&["status", "--porcelain"]).map(|s| !s.trim().is_empty());
+    match (sha, dirty) {
+        (Some(sha), Some(dirty)) if !sha.is_empty() => (Some(sha), Some(dirty)),
+        _ => (None, None),
+    }
+}
+
+/// The words `bin/common/mod.rs`'s `device_banner` renders - copied, not
+/// imported, so this binary keeps its own small dependency surface.
+fn precision_word() -> &'static str {
+    if std::mem::size_of::<Scalar>() == 4 {
+        "float"
+    } else {
+        "double"
+    }
+}
+
+fn machine(device: Option<&(String, String)>) -> DcMachine {
+    let (dev, cc) = match device {
+        Some((n, c)) => (Some(n.clone()), Some(c.clone())),
+        None => (None, None),
+    };
+    DcMachine {
+        hostname: std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .ok(),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        device: dev,
+        compute_capability: cc,
+        precision: precision_word(),
+    }
+}
+
+/// The case's own spelling of the sample set (`thirds`/`faces`), so one
+/// value has one spelling across the axis - never the Rust `Debug` form.
+fn rci_samples_word(s: RciSamples) -> &'static str {
+    match s {
+        RciSamples::Faces => "faces",
+        RciSamples::Thirds => "thirds",
+    }
+}
+
+/// The whole-boundary closure of the flow-through table, computed once and
+/// read by `print_report` and the document alike. Returns
+/// `(net, largest_opening, net_over_largest)`; the ratio is `0.0` when no
+/// opening carries flow, exactly as the print has always shown.
+fn continuity_of(patch_flow: &[(String, Scalar)]) -> (Scalar, Scalar, Scalar) {
+    let mut net = 0.0 as Scalar;
+    let mut scale = 0.0 as Scalar;
+    for (_, q) in patch_flow {
+        net += *q;
+        scale = scale.max(q.abs());
+    }
+    let ratio = if scale > 0.0 { net.abs() / scale } else { 0.0 as Scalar };
+    (net, scale, ratio)
+}
+
+/// The operating point's own outer residual, in per cent - the gap the fan
+/// block prints.
+fn outer_residual_pct(q: Scalar, q_patch: Scalar) -> Scalar {
+    100.0 * (q - q_patch).abs() / q_patch.abs().max(1e-30)
+}
+
+/// The paragraph `print_report` prints when the direct Poisson path is out
+/// of reach - one const so the printed text and the document's caveat text
+/// cannot drift.
+const FFT_UNAVAILABLE_TEXT: &str = "the cuFFT direct Poisson backend is NOT available on this \
+     system, and PBiCGStab is used instead. SPEC-LIT S52.8: a fan \
+     curve makes a patch face neither uniformly Dirichlet nor \
+     uniformly Neumann, and S53.2's jump makes the face coefficient \
+     non-constant. That is the biggest cost of these two features and \
+     it is printed, not hidden; S52.9 names the Woodbury correction \
+     that would put the direct path back and says it is not built.";
+
+/// The sentence `print_report` prints when the assembled matrix came out
+/// asymmetric - same const discipline as [`FFT_UNAVAILABLE_TEXT`].
+const ASYMMETRIC_MATRIX_TEXT: &str = "WARNING: the pressure matrix is NOT symmetric. SPEC-LIT S52.2 \
+     and S53.2 both say it should be - a fan is a symmetric rank-1 \
+     downdate and a jump divides upper and lower by the same number.";
+
+/// The supersaturation sentence (S54.5), without the `--- S54.5 ---` banner,
+/// which stays a print-side concern.
+fn supersaturation_text(cells: usize, worst: Scalar) -> String {
+    format!(
+        "{cells} cell(s) are supersaturated, worst excess \
+         {worst:.6} kg/kg. Y_v is REPORTED and not clipped: field-level \
+         condensation is a different model and is refused by name."
+    )
+}
+
+/// The five caveat kinds and the section each one's text answers to, in the
+/// document's fixed order. A kind outside these five does not exist. Both
+/// spellings live in this one table so the document and its tests read the
+/// same five pairs.
+const CAVEATS: [(&str, &str); 5] = [
+    ("porousJump53.6", "S53.6"),
+    ("molarMass54.4", "S54.4"),
+    ("supersaturation54.5", "S54.5"),
+    ("fftUnavailable52.8", "S52.8"),
+    ("asymmetricMatrix52.2", "S52.2"),
+];
+
+/// The caveats the run earned, in the document's fixed order, each only when
+/// it fired. Five kinds exist; no sixth kind does.
+fn caveats_of(s: &RoomSolution) -> Vec<CaveatDoc> {
+    let mut out = Vec::new();
+    let mut push = |which: usize, text: String| {
+        let (kind, spec_ref) = CAVEATS[which];
+        out.push(CaveatDoc { kind, spec_ref, text });
+    };
+    if let Some(c) = &s.jump_caveat {
+        push(0, c.clone());
+    }
+    if let Some(c) = &s.molar_caveat {
+        push(1, c.clone());
+    }
+    if let Some((cells, worst)) = s.supersaturation {
+        if cells > 0 {
+            push(2, supersaturation_text(cells, worst));
+        }
+    }
+    if let Some(p) = &s.probe {
+        if !p.separable_bcs || !p.constant_coefficient {
+            push(3, FFT_UNAVAILABLE_TEXT.to_string());
+        }
+        if !p.symmetric {
+            push(4, ASYMMETRIC_MATRIX_TEXT.to_string());
+        }
+    }
+    out
+}
+
+/// Assemble the document from what the run already produced. It borrows:
+/// the allocations are the three `Vec`s, the four `String`s and the caveats.
+fn build_document<'a>(
+    lc: &'a LoweredDcCase,
+    s: &'a RoomSolution,
+    m: &'a DocMeta<'a>,
+) -> DcReportDoc<'a> {
+    let (net, largest_opening, net_over_largest) = continuity_of(&s.patch_flow);
+    let (git_sha, git_dirty) = git_probe(m.case_path.parent().unwrap_or(Path::new(".")));
+    let fans = s
+        .fans
+        .iter()
+        .map(|(patch, q, dp, w)| {
+            let outer = s
+                .patch_flow
+                .iter()
+                .find(|(n, _)| n == patch)
+                .map(|(_, qp)| outer_residual_pct(*q, *qp));
+            FanDoc {
+                patch,
+                q: *q,
+                dp: *dp,
+                shaft_power: *w,
+                outer_residual_pct: outer,
+            }
+        })
+        .collect();
+    DcReportDoc {
+        schema: "ofgpu-datacentre/1",
+        run_id: m.run_id,
+        // The string the writer already holds: no absolutisation and no
+        // canonicalisation, only the path separator made portable.
+        case_path: m.case_path.display().to_string().replace('\\', "/"),
+        // No digest of the case bytes is computed in Rust in this version;
+        // the key stays present and null so a later one can fill it.
+        case_sha256: None,
+        case_name: &lc.name,
+        started_at: iso8601_utc(m.started_ms),
+        ended_at: iso8601_utc(m.ended_ms),
+        wall_seconds: (m.ended_ms - m.started_ms) as f64 / 1000.0,
+        git_sha,
+        git_dirty,
+        machine: machine(m.device.as_ref()),
+        n_cells: lc.mesh.n_cells,
+        n_boundary_faces: lc.mesh.n_boundary_faces,
+        iterations: lc.run.iterations,
+        ashrae_class: format!("{:?}", lc.class),
+        rci_samples: rci_samples_word(lc.samples),
+        notes: &lc.notes,
+        report: ReportDoc {
+            rci_hi: s.report.rci_hi,
+            rci_lo: s.report.rci_lo,
+            n_samples: s.report.n_samples,
+            rti: s.report.rti,
+            shi: s.report.shi,
+            rhi: s.report.rhi,
+            t_supply: s.report.t_supply,
+            t_return: s.report.t_return,
+            dt_equipment: s.report.dt_equipment,
+            dt_measured: s.report.dt_measured,
+            pue: PueDoc {
+                fan_power: s.report.pue.fan_power,
+                fan_power_each: &s.report.pue.fan_power_each,
+                it_heat: s.report.pue.it_heat,
+                free_cooling_ceiling: s.report.pue.free_cooling_ceiling,
+            },
+        },
+        fans,
+        t_inlet_max: s.t_inlet_max,
+        rack_inlets: s
+            .rack_inlets
+            .iter()
+            .map(|(name, t)| RackInletDoc { name, inlet_t: *t })
+            .collect(),
+        patch_flow: s
+            .patch_flow
+            .iter()
+            .map(|(patch, q)| PatchFlowDoc { patch, q: *q })
+            .collect(),
+        continuity: ContinuityDoc {
+            net,
+            largest_opening,
+            net_over_largest,
+        },
+        supersaturation: s
+            .supersaturation
+            .map(|(cells, worst)| SupersaturationDoc { cells, worst_excess: worst }),
+        caveats: caveats_of(s),
+    }
+}
+
+/// Write the document: parent directory first, then the pretty JSON and one
+/// trailing newline. Every failure becomes the same `Error::Parse` the CSV
+/// writer raises, so the driver has one file-writing failure shape.
+fn write_document(path: &Path, doc: &DcReportDoc) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| ofgpu::error::Error::Parse {
+                path: path.display().to_string(),
+                msg: e.to_string(),
+            })?;
+        }
+    }
+    let mut text = serde_json::to_string_pretty(doc).map_err(|e| ofgpu::error::Error::Parse {
+        path: path.display().to_string(),
+        msg: e.to_string(),
+    })?;
+    text.push('\n');
+    std::fs::write(path, text).map_err(|e| ofgpu::error::Error::Parse {
+        path: path.display().to_string(),
+        msg: e.to_string(),
+    })
+}
+
+// ==========================================================================
+//  6. The tests - host only, one fixture
+// ==========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 25 keys of the document, in document order. Order is asserted on
+    /// the PRETTY TEXT, never on the parsed object: `serde_json::Map` sorts.
+    const TOP_KEYS: [&str; 25] = [
+        "schema", "runId", "casePath", "caseSha256", "caseName", "startedAt", "endedAt",
+        "wallSeconds", "gitSha", "gitDirty", "machine", "nCells", "nBoundaryFaces", "iterations",
+        "ashraeClass", "rciSamples", "notes", "report", "fans", "tInletMax", "rackInlets",
+        "patchFlow", "continuity", "supersaturation", "caveats",
+    ];
+
+    /// The smallest complete case this format accepts. Transcribed from
+    /// `crate::io::case_dc::tests::BASE`, which lives in a `#[cfg(test)]`
+    /// module of the library and so cannot be imported from a binary.
+    /// `"name"` is the only change.
+    const CASE: &str = r#"{
+  "name": "d1",
+  "room": {
+    "bounds": { "min": [0,0,0], "max": [2.0, 1.0, 1.5] },
+    "cells": [8, 4, 6],
+    "boundaries": {
+      "xMin": "west", "xMax": "east",
+      "yMin": "south", "yMax": "north",
+      "zMin": "supply", "zMax": "ret"
+    }
+  },
+  "air": { "nu": 1.5e-5, "rho": 1.2, "cp": 1005, "pr": 0.71, "prt": 0.85,
+           "tRef": 295.15, "gravity": [0,0,-9.81] },
+  "fans": [
+    { "patch": "ret", "direction": "outflow",
+      "curve": { "type": "quadratic", "dpMax": 8.0, "QMax": 1.0,
+                 "rhoCurve": 1.2, "speedCurve": 1.0, "speed": 1.0,
+                 "efficiency": 0.62 },
+      "ambientPressure": 0.0, "relaxation": 0.5 }
+  ],
+  "tiles": [
+    { "patch": "supply", "K": 300.0, "plenumPressure": 4.0,
+      "plenumTemperature": 291.15, "plenumRelativeHumidity": 0.45 }
+  ],
+  "racks": [
+    { "name": "r1", "zone": { "min": [0.8,0.2,0.1], "max": [1.2,0.8,1.0] },
+      "power": 2000.0, "flow": 0.15,
+      "inletSamples": { "min": [0.5,0.2,0.1], "max": [0.8,0.8,1.0] } }
+  ],
+  "patches": [
+    { "patch": "west", "kind": "adiabaticWall" },
+    { "patch": "east", "kind": "adiabaticWall" },
+    { "patch": "south", "kind": "adiabaticWall" },
+    { "patch": "north", "kind": "adiabaticWall" }
+  ],
+  "humidity": { "d": 2.5e-5, "scT": 0.7, "barometricPressure": 101325.0,
+                "virtualTemperature": true },
+  "metrics": { "ashraeClass": "A1", "rciSamples": "thirds",
+               "supplyPatch": "supply", "returnPatch": "ret" },
+  "run": { "iterations": 20, "reportEvery": 0, "initialTemperature": 295.15 },
+  "numerics": { "uRelax": 0.7, "pRelax": 0.3, "tRelax": 0.7,
+                "tolerance": 1e-8, "maxIterations": 200 }
+}"#;
+
+    fn lowered() -> LoweredDcCase {
+        DcCase::parse(CASE, "d1").unwrap().lower().unwrap()
+    }
+
+    /// The all-firing fixture: every number the tests expect below is one of
+    /// these. The `patch_flow` sum is a tiny non-zero residue in binary on
+    /// purpose - the closure is a real number, and `continuity_of` is the
+    /// only thing allowed to compute it.
+    fn solution() -> RoomSolution {
+        RoomSolution {
+            report: MetricReport {
+                rci_hi: 91.733,
+                rci_lo: 100.0,
+                n_samples: 6,
+                rti: 80.576,
+                shi: 0.354185,
+                rhi: 0.645815,
+                t_supply: 291.15,
+                t_return: 299.8,
+                dt_equipment: 10.7349,
+                dt_measured: false,
+                pue: PueInputs {
+                    fan_power: 19.819,
+                    fan_power_each: vec![19.819],
+                    it_heat: 14500.0,
+                    free_cooling_ceiling: None,
+                },
+            },
+            fans: vec![("ret".to_string(), 2.217, 5.5425, 19.819)],
+            jump_caveat: Some("a jump caveat".to_string()),
+            t_inlet_max: 301.42,
+            rack_inlets: vec![("r1".to_string(), 298.6)],
+            supersaturation: Some((3, 0.0004)),
+            molar_caveat: Some("a molar caveat".to_string()),
+            patch_flow: vec![
+                ("supply".to_string(), -1.390),
+                ("south".to_string(), -0.827),
+                ("ret".to_string(), 2.217),
+                ("west".to_string(), 0.0),
+                ("east".to_string(), 0.0),
+                ("north".to_string(), 0.0),
+            ],
+            probe: Some(ProbeSummary {
+                separable_bcs: false,
+                symmetric: false,
+                constant_coefficient: false,
+                non_separable_reason: "a fan patch".to_string(),
+            }),
+        }
+    }
+
+    /// The pretty document text for a fixture, with a fixed clock and case
+    /// path so the tests are deterministic.
+    fn doc_text(lc: &LoweredDcCase, sol: &RoomSolution, run_id: Option<&str>) -> String {
+        let rid = run_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("v_{}", compact_stamp(0)));
+        let meta = DocMeta {
+            run_id: &rid,
+            case_path: Path::new("d1.dc.jsonc"),
+            started_ms: 0,
+            ended_ms: 0,
+            device: None,
+        };
+        serde_json::to_string_pretty(&build_document(lc, sol, &meta)).unwrap()
+    }
+
+    fn value(sol: &RoomSolution, run_id: Option<&str>) -> serde_json::Value {
+        let lc = lowered();
+        serde_json::from_str(&doc_text(&lc, sol, run_id)).unwrap()
+    }
+
+    #[test]
+    fn the_document_has_the_twenty_five_keys_in_order() {
+        let text = doc_text(&lowered(), &solution(), Some("r_1"));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 25);
+        let nl = '\n';
+        let mut last = 0;
+        for k in TOP_KEYS {
+            let at = text
+                .find(&format!("{nl}  \"{k}\":"))
+                .unwrap_or_else(|| panic!("top-level key `{k}` missing from the document"));
+            assert!(at > last, "top-level key `{k}` is out of order");
+            last = at;
+        }
+    }
+
+    #[test]
+    fn every_absent_value_is_null_not_a_missing_key() {
+        let mut s = solution();
+        s.jump_caveat = None;
+        s.molar_caveat = None;
+        s.supersaturation = None;
+        s.probe = None;
+        s.fans[0].0 = "absent".to_string();
+        let v = value(&s, None);
+        for k in ["caseSha256", "supersaturation"] {
+            assert!(v[k].is_null(), "{k} must be null, never omitted");
+        }
+        assert!(v["machine"]["device"].is_null());
+        assert!(v["machine"]["computeCapability"].is_null());
+        assert!(v["report"]["pue"]["freeCoolingCeiling"].is_null());
+        assert!(v["fans"][0]["outerResidualPct"].is_null());
+        assert_eq!(v["caveats"].as_array().unwrap().len(), 0);
+        for k in TOP_KEYS {
+            assert!(v.get(k).is_some(), "key `{k}` is missing");
+        }
+    }
+
+    #[test]
+    fn json_rci_hi_equals_the_printed_one_bit_for_bit() {
+        let s = solution();
+        let v = value(&s, Some("r_1"));
+        let json_hi = v["report"]["rciHi"].as_f64().unwrap();
+        #[cfg(not(feature = "single"))]
+        assert_eq!(json_hi.to_bits(), f64::from(s.report.rci_hi).to_bits());
+        assert_eq!(
+            format!("{json_hi:8.3}"),
+            format!("{:8.3}", f64::from(s.report.rci_hi))
+        );
+    }
+
+    #[test]
+    fn continuity_is_one_computation_printed_and_serialised() {
+        let s = solution();
+        let v = value(&s, None);
+        let (n, l, r) = continuity_of(&s.patch_flow);
+        assert_eq!(
+            v["continuity"]["net"].as_f64().unwrap().to_bits(),
+            f64::from(n).to_bits()
+        );
+        assert_eq!(
+            v["continuity"]["largestOpening"].as_f64().unwrap().to_bits(),
+            f64::from(l).to_bits()
+        );
+        assert_eq!(
+            v["continuity"]["netOverLargest"].as_f64().unwrap().to_bits(),
+            f64::from(r).to_bits()
+        );
+        assert_eq!(l, 2.217);
+        assert!(n.abs() < 1e-15);
+    }
+
+    #[test]
+    fn every_caveat_text_is_the_printed_one() {
+        let s = solution();
+        let v = value(&s, None);
+        let caveats = v["caveats"].as_array().unwrap();
+        assert_eq!(
+            caveats[0]["text"].as_str().unwrap(),
+            s.jump_caveat.as_deref().unwrap()
+        );
+        assert_eq!(
+            caveats[1]["text"].as_str().unwrap(),
+            s.molar_caveat.as_deref().unwrap()
+        );
+        assert_eq!(
+            caveats[2]["text"].as_str().unwrap(),
+            supersaturation_text(3, 0.0004)
+        );
+        assert_eq!(caveats[3]["text"].as_str().unwrap(), FFT_UNAVAILABLE_TEXT);
+        assert_eq!(
+            caveats[4]["text"].as_str().unwrap(),
+            ASYMMETRIC_MATRIX_TEXT
+        );
+    }
+
+    #[test]
+    fn the_five_caveat_kinds_are_spelled_exactly_once_each() {
+        let v = value(&solution(), None);
+        let caveats = v["caveats"].as_array().unwrap();
+        assert_eq!(caveats.len(), CAVEATS.len());
+        for (c, (kind, spec_ref)) in caveats.iter().zip(CAVEATS) {
+            assert_eq!(c["kind"].as_str().unwrap(), kind);
+            assert_eq!(c["specRef"].as_str().unwrap(), spec_ref);
+        }
+        // The spelling itself, against the contract and not only against the
+        // table that produced it: each kind ends in its section number, and
+        // the specRef is that number with the S in front.
+        assert_eq!(
+            CAVEATS.map(|(k, _)| k),
+            [
+                "porousJump53.6",
+                "molarMass54.4",
+                "supersaturation54.5",
+                "fftUnavailable52.8",
+                "asymmetricMatrix52.2"
+            ]
+        );
+        for (k, r) in CAVEATS {
+            assert_eq!(r, format!("S{}", &k[k.len() - 4..]));
+        }
+
+        let mut nothing = solution();
+        nothing.jump_caveat = None;
+        nothing.molar_caveat = None;
+        nothing.supersaturation = None;
+        nothing.probe = None;
+        assert_eq!(value(&nothing, None)["caveats"].as_array().unwrap().len(), 0);
+
+        // `cells == 0` fires no caveat but keeps the object: the case DID ask
+        // for humidity, so the key says so with a zero count.
+        let mut dry = solution();
+        dry.jump_caveat = None;
+        dry.molar_caveat = None;
+        dry.probe = None;
+        dry.supersaturation = Some((0, 0.0));
+        let v2 = value(&dry, None);
+        assert_eq!(v2["caveats"].as_array().unwrap().len(), 0);
+        assert!(v2["supersaturation"].is_object());
+    }
+
+    #[test]
+    fn the_sample_set_is_spelled_the_way_the_case_spells_it() {
+        let s = solution();
+        let v = value(&s, None);
+        assert_eq!(v["rciSamples"], "thirds");
+        assert_eq!(v["ashraeClass"], "A1");
+
+        let faces_case = CASE.replacen("\"thirds\"", "\"faces\"", 1);
+        assert_ne!(faces_case, CASE);
+        let lc = DcCase::parse(&faces_case, "d1").unwrap().lower().unwrap();
+        let vf: serde_json::Value = serde_json::from_str(&doc_text(&lc, &s, None)).unwrap();
+        assert_eq!(vf["rciSamples"], "faces");
+
+        let a2_case = CASE.replacen("\"A1\"", "\"A2\"", 1);
+        assert_ne!(a2_case, CASE);
+        let lc2 = DcCase::parse(&a2_case, "d1").unwrap().lower().unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&doc_text(&lc2, &s, None)).unwrap();
+        assert_eq!(v2["ashraeClass"], "A2");
+
+        for w in ["Thirds", "Faces"] {
+            assert_ne!(v["rciSamples"].as_str().unwrap(), w);
+            assert_ne!(vf["rciSamples"].as_str().unwrap(), w);
+        }
+    }
+
+    #[test]
+    fn iso8601_utc_renders_three_known_instants() {
+        assert_eq!(iso8601_utc(0), "1970-01-01T00:00:00.000Z");
+        // What `div_euclid` buys: the instant BEFORE the epoch renders whole.
+        assert_eq!(iso8601_utc(-1), "1969-12-31T23:59:59.999Z");
+        assert_eq!(iso8601_utc(951_782_400_000), "2000-02-29T00:00:00.000Z");
+    }
+
+    #[test]
+    fn compact_stamp_drops_the_separators_and_the_milliseconds() {
+        assert_eq!(compact_stamp(951_782_400_000), "20000229T000000Z");
+    }
+
+    #[test]
+    fn the_run_id_is_the_flag_else_the_stamp() {
+        let v = value(&solution(), Some("r_412"));
+        assert_eq!(v["runId"], "r_412");
+        // doc_text stamps runs with `started_ms = 0`, so the default id is
+        // the compact stamp of the epoch.
+        let v2 = value(&solution(), None);
+        assert_eq!(v2["runId"], "v_19700101T000000Z");
+    }
+
+    #[test]
+    fn a_non_finite_metric_serialises_as_null() {
+        let mut s = solution();
+        s.report.rci_hi = Scalar::NAN;
+        let v = value(&s, None);
+        assert!(v["report"]["rciHi"].is_null());
+        let path = std::env::temp_dir().join("d1_nan_test.json");
+        let rid = "r_nan".to_string();
+        let meta = DocMeta {
+            run_id: &rid,
+            case_path: Path::new("d1.dc.jsonc"),
+            started_ms: 0,
+            ended_ms: 0,
+            device: None,
+        };
+        let lc = lowered();
+        write_document(&path, &build_document(&lc, &s, &meta)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let w: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(w["report"]["rciHi"].is_null());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_document_is_written_whole_and_rereads() {
+        let path = std::env::temp_dir().join("d1_doc_test.json");
+        let lc = lowered();
+        let rid = "r_1".to_string();
+        let meta = DocMeta {
+            run_id: &rid,
+            case_path: Path::new("d1.dc.jsonc"),
+            started_ms: 0,
+            ended_ms: 0,
+            device: None,
+        };
+        write_document(&path, &build_document(&lc, &solution(), &meta)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with('\n'));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["schema"], "ofgpu-datacentre/1");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// The test that GENERATES the shipped schema: written once here, then
+    /// only ever compared against, never hand-edited.
+    #[test]
+    fn dc_schema_writes_to_docs_schema_directory() {
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/schema");
+        std::fs::create_dir_all(&out_dir).expect("create docs/schema");
+        let out_path = out_dir.join("dc-1.json");
+        std::fs::write(&out_path, ofgpu::io::case_dc::emit_dc_schema())
+            .expect("write docs/schema/dc-1.json");
+        assert!(out_path.exists());
+    }
+
+    #[test]
+    fn the_shipped_dc_schema_is_the_generated_one() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/schema/dc-1.json");
+        let shipped = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let norm = |s: &str| s.replace("\r\n", "\n").trim_end().to_string();
+        assert_eq!(
+            norm(&shipped),
+            norm(&ofgpu::io::case_dc::emit_dc_schema()),
+            "docs/schema/dc-1.json has drifted from emit_dc_schema(); regenerate it"
+        );
+    }
+
+    #[test]
+    fn the_schema_names_every_key_the_shipped_case_uses() {
+        let text = ofgpu::io::case_dc::emit_dc_schema();
+        let schema: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let case =
+            DcCase::read(Path::new("../cases/coldAisle.dc.jsonc")).expect("the shipped case parses");
+        case.lower().expect("the shipped case lowers");
+        let used = serde_json::to_value(&case).unwrap();
+        let props = schema["properties"].as_object().expect("schema properties");
+        for k in used.as_object().unwrap().keys() {
+            assert!(props.contains_key(k), "the schema does not name `{k}`");
+        }
+        assert!(
+            schema.get("$defs").or_else(|| schema.get("definitions")).is_some(),
+            "the nested case types must be defined somewhere"
+        );
+        for word in [
+            "supplyTemperatureSweep",
+            "ashraeClass",
+            "plenumPressure",
+            "inletSamples",
+            "openAreaRatio",
+            "baffle",
+        ] {
+            assert!(text.contains(word), "the schema must document '{word}'");
+        }
+    }
+
+    #[test]
+    fn a_misspelt_sweep_key_is_refused_naming_the_key() {
+        let bad = CASE.replacen(
+            "\"metrics\": {",
+            "\"metrics\": { \"supplyTemperatureSwep\": [10.0, 20.0, 5.0],",
+            1,
+        );
+        assert_ne!(bad, CASE);
+        let err = DcCase::parse(&bad, "d1").unwrap_err().to_string();
+        assert!(err.contains("supplyTemperatureSwep"), "{err}");
+        assert!(err.contains("metrics"), "{err}");
+        let schema: serde_json::Value =
+            serde_json::from_str(&ofgpu::io::case_dc::emit_dc_schema()).unwrap();
+        let defs = schema
+            .get("$defs")
+            .or_else(|| schema.get("definitions"))
+            .expect("schema definitions");
+        assert_eq!(
+            defs["DcMetricsSpec"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+    }
 }

@@ -418,6 +418,7 @@ pub fn summary_json(
     config_path: &str,
     surf: &Surface,
     out: &PipelineOutput,
+    ident: &crate::automesher::identity::MeshIdentity,
 ) -> serde_json::Value {
     let stages: Vec<serde_json::Value> = out
         .stages
@@ -500,6 +501,7 @@ pub fn summary_json(
         },
         "total_seconds": out.total_seconds,
         "config": serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
+        "identity": ident.to_json(),
     })
 }
 
@@ -716,7 +718,13 @@ mod tests {
             .insert("xMin".to_string(), "west".to_string());
         let surf = cube_surface();
         let (out, _) = run_recording(&cfg, &surf, None);
-        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
 
         // The four stages, in order, each with its own counts spliced in.
         let stages = s["stages"].as_array().unwrap();
@@ -752,6 +760,35 @@ mod tests {
 
         // `config` is the parsed struct re-serialised: it parses BACK to the
         // config the run actually used.
+        let back: AutomeshConfig = serde_json::from_value(s["config"].clone()).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn summary_json_carries_the_identity_block() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new("out"),
+            "cube",
+            Some("r_42".to_string()),
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let i = &s["identity"];
+        assert_eq!(i["schema"], 1);
+        assert_eq!(i["tool"], "ofgpu-automesher");
+        assert_eq!(i["run_id"], "r_42");
+        let mid = i["mesh_id"].as_str().expect("mesh_id");
+        assert!(mid.starts_with("m_") && mid.len() == 18, "{mid}");
+        let wa = i["written_at"].as_str().expect("written_at");
+        assert_eq!(wa.len(), 20, "{wa}");
+        assert!(wa.ends_with('Z'), "{wa}");
+        assert!(i["host"].is_string() || i["host"].is_null(), "{}", i["host"]);
+        // The new block disturbed nothing: the mesh numbers and the config
+        // round-trip are exactly what they were.
+        assert_eq!(s["mesh"]["n_cells"].as_u64().unwrap() as usize, out.quality.n_cells);
         let back: AutomeshConfig = serde_json::from_value(s["config"].clone()).unwrap();
         assert_eq!(back, cfg);
     }

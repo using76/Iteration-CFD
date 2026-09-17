@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 STEP_MESH = os.path.join(HERE, 'step_mesh.py')
 CONVERTER = os.path.join(REPO, 'rust', 'target', 'release', 'ofgpu-convert-mesh.exe')
+
+sys.path.insert(0, HERE)
+from mesh_identity import mesh_id  # noqa: E402
 
 PATCHES = ('top', 'west', 'east', 'south', 'north',
            'wall_ground_land', 'wall_buildings', 'roof', 'pool_yard')
@@ -125,7 +129,7 @@ def run(cfg_path, out, extra=()):
     return p
 
 
-def check_summary(label, out_dir, work):
+def check_summary(label, out_dir, work, run_id=None):
     with open(os.path.join(out_dir, 'selftest_summary.json'), encoding='utf-8') as f:
         s = json.load(f)
     for patch in PATCHES:
@@ -138,6 +142,17 @@ def check_summary(label, out_dir, work):
     assert s['pools']['yard'] == 'imprinted', '%s: pool not imprinted: %s' % (label, s['pools'])
     assert s['points']['yard']['z_ground'] == 0.0, '%s: ground under the point: %s' % (
         label, s['points']['yard'])
+    ident = s['identity']
+    assert sorted(ident) == ['host', 'mesh_id', 'run_id', 'schema', 'tool', 'written_at'], \
+        '%s: the identity block is not the six keys: %r' % (label, sorted(ident))
+    assert ident['schema'] == 1 and ident['tool'] == 'step_mesh', \
+        '%s: wrong identity schema/tool: %r' % (label, ident)
+    assert ident['mesh_id'] == mesh_id(out_dir, 'selftest'), \
+        '%s: mesh_id %s is not the directory and the name' % (label, ident['mesh_id'])
+    assert re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$', ident['written_at']), \
+        '%s: written_at is not ISO-8601 UTC: %r' % (label, ident['written_at'])
+    assert ident['run_id'] == run_id, \
+        '%s: run_id %r is not %r' % (label, ident['run_id'], run_id)
     print('  [%s] %d tets, %d tris, minSICN min %.4f, patches %s' % (
         label, s['tetrahedra'], s['triangles'], s['quality_after_flat_removal']['minSICN']['min'],
         ', '.join(sorted(s['groups']))))
@@ -282,6 +297,10 @@ def main(argv=None):
         assert 'DRY RUN' in p.stdout and 'surface count' in p.stdout, \
             '--dry-run did not print the volumes, masses, surface counts and ground heights'
         assert 'z_g = 0.0' in p.stdout, '--dry-run did not print the ground heights'
+        with open(os.path.join(out_dir, 'work', 'dry_run_summary.json'), encoding='utf-8') as f:
+            d = json.load(f)['identity']
+        assert d['run_id'] is None and d['tool'] == 'step_mesh' and d['schema'] == 1, \
+            'the dry-run summary carries no usable identity: %r' % d
 
         p = run(cfg_path, out_dir, ('--stop-after-checkpoint',))
         assert p.returncode == 0, '--stop-after-checkpoint exited %d' % p.returncode
@@ -289,9 +308,9 @@ def main(argv=None):
             os.path.isfile(os.path.join(out_dir, 'work', 'selftest_pools.json')), \
             '--stop-after-checkpoint wrote no checkpoint'
 
-        p = run(cfg_path, out_dir)
+        p = run(cfg_path, out_dir, ('--run-id', 'r_selftest'))
         assert p.returncode == 0, 'the full run exited %d' % p.returncode
-        s = check_summary('full run', out_dir, work)
+        s = check_summary('full run', out_dir, work, run_id='r_selftest')
         assert s['near_touching'] == [], \
             'the full run recorded near-touching solid pairs: %s' % s['near_touching']
         check_conversion(os.path.join(out_dir, 'selftest.msh'), work)

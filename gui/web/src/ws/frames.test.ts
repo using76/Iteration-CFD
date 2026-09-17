@@ -34,7 +34,7 @@ describe('encodeClientFrame', () => {
     const msgs: ClientMsg[] = [
       { t: 'ping', ts: 1 },
       { t: 'session.open', sessionId: null },
-      { t: 'user.message', sessionId: 's', text: 'hi', context: { activeFile: null, activeRun: null, attachments: [], selection: null } },
+      { t: 'user.message', sessionId: 's', text: 'hi', context: { activeFile: null, activeRun: null, attachments: [], attachmentIds: [], selection: null } },
       { t: 'run.subscribe', runId: 'r', fromSeq: 12 },
       { t: 'viewer.result', requestId: 'q', result: { ok: false, state: null, error: { code: 'NO_VIEWER', message: 'x' }, image: null } },
       { t: 'quick', sessionId: 's', action: 'mesh', casePath: 'cases/plume.jsonc', runId: null },

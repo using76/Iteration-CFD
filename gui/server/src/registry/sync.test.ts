@@ -91,9 +91,13 @@ describe('registry <-> rust sources', () => {
     expect(step.flags.map((f) => f.name).sort()).toEqual(declared)
     expect(py).toMatch(/ap\.add_argument\('config'/)
     expect(step.positionals.map((p) => p.name)).toEqual(['config'])
-    // --tag takes a value, the other three are bare
-    expect(step.flags.find((f) => f.name === '--tag')?.type).toBe('string')
-    for (const f of step.flags.filter((x) => x.name !== '--tag')) expect(f.type, f.name).toBe('flag')
+    // a flag argparse gives a metavar takes a value; the rest are bare. Read that from the
+    // script rather than naming the flags here, so a new one cannot be typed wrongly in silence.
+    const takesValue = new Set(
+      [...py.matchAll(/ap\.add_argument\('(--[a-z-]+)'[^)]*metavar=/g)].map((m) => m[1]),
+    )
+    expect(takesValue.size, 'argparse declares at least one value-taking flag').toBeGreaterThan(0)
+    for (const f of step.flags) expect(f.type, f.name).toBe(takesValue.has(f.name) ? 'string' : 'flag')
   })
 
   it('geometry_pipelines_shape: geom-tool and regions-from-msh are .py pipelines beside the binaries', () => {

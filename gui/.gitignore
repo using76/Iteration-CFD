@@ -15,3 +15,11 @@ dist/
 /e2e/screenshots/
 /config/custom-tools.json
 /config/policy.local.json
+
+# The ontology mirror (N2): a SQLite file rebuilt from the repo by the importer,
+# plus the WAL sidecars that exist only while a process holds it open. The
+# definitions themselves are TypeScript under shared/src/ontology/ and ARE committed,
+# and a future MIGRATIONS/*.sql must stay committable - so ignore the files, not the directory.
+/ontology/*.db
+/ontology/*.db-wal
+/ontology/*.db-shm

@@ -7,6 +7,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import type { LogLine, MetricRecord, ResidualRecord, RunInfo } from '@cfd/shared'
 import type { Logger } from '../log.js'
+import { normalizeProvenance } from './provenance.js'
 
 export interface RunFiles {
   dir: string
@@ -117,7 +118,7 @@ export async function loadPastRuns(runsDir: string, log: Logger): Promise<RunInf
         run.error = run.error ?? 'the server stopped while this run was going'
         run.endedAt = run.endedAt ?? new Date().toISOString()
       }
-      out.push(run)
+      out.push(normalizeProvenance(run))
     } catch {
       // No run.json, or unreadable: nothing to restore for this directory.
     }

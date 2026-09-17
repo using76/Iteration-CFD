@@ -11,6 +11,12 @@
 // API) - is the ABSTRACT's own statement that RTI rose from ~40 % to >80 %
 // when the supply flow was halved; the paper's full text was not reachable
 // from this environment and S55.8 says so.
+//
+// H1's envelope numbers are the public ASHRAE Journal column of May 2022
+// (Quirk, Davidson & Schmidt, pp. 54-58; the 5th-edition book itself is
+// paywalled and was NOT opened), and the two air-management readings - the
+// supply-to-return delta-T and airflow efficiency - are the LBNL
+// Self-benchmarking Guide for Data Centers (LBNL for NYSERDA, 2009).
 // No GPL-licensed source was consulted.
 
 use super::*;
@@ -42,7 +48,13 @@ fn block(n: [usize; 3], d: Vec3) -> HostMesh {
 /// (S55.1)'s two anchors, and its linearity between them.
 #[test]
 fn gate_55a_rci_is_100_inside_the_band_and_0_at_the_allowable_limit() {
-    for class in [AshraeClass::A1, AshraeClass::A2, AshraeClass::A3, AshraeClass::A4] {
+    for class in [
+        AshraeClass::A1,
+        AshraeClass::A2,
+        AshraeClass::A3,
+        AshraeClass::A4,
+        AshraeClass::H1,
+    ] {
         let (la, lr, hr, ha) = class.envelope();
 
         // Every sample inside the recommended range: no excess at all.
@@ -94,16 +106,68 @@ fn pair_test_the_ashrae_class_changes_the_index() {
     // A4's envelope is wider, so the same excess is a smaller fraction of it.
     assert!(a4 > a1, "the wider envelope must be the more forgiving index");
 
-    // And the four envelopes really are four different pairs.
+    // And the five envelopes really are five different pairs.
     let mut seen = Vec::new();
-    for c in [AshraeClass::A1, AshraeClass::A2, AshraeClass::A3, AshraeClass::A4] {
+    for c in [AshraeClass::A1, AshraeClass::A2, AshraeClass::A3, AshraeClass::A4, AshraeClass::H1] {
         let e = c.envelope();
         assert!(!seen.contains(&e), "class {c:?} duplicates another envelope");
         seen.push(e);
-        // The recommended band is the same for all four - ASHRAE's own rule.
-        assert_eq!((e.1, e.2), (18.0, 27.0));
+        // The recommended band belongs to the CLASS. It is 18-27 C for A1-A4
+        // and 18-22 C for the 5th edition's H1; a solver that hard-coded
+        // 18/27 was right four times out of five.
+        let want = if c == AshraeClass::H1 { (18.0, 22.0) } else { (18.0, 27.0) };
+        assert_eq!((e.1, e.2), want, "class {c:?} recommended band");
         assert!(e.0 < e.1 && e.2 < e.3, "the allowable range must contain the recommended one");
     }
+}
+
+/// The unit's gate: H1 and A1 differ in BOTH indices, because BOTH of H1's
+/// bands differ from A1's. A solver that regressed to a hard-coded 18/27
+/// recommended band still fails the LOW half - its RCI_LO denominator would
+/// be A1's 3 K where H1's is 13 K - so every message below names which half
+/// differed and the two denominators.
+#[test]
+fn pair_test_h1_and_a1_differ_in_both_rci_hi_and_rci_lo() {
+    assert_eq!(AshraeClass::H1.envelope(), (5.0, 18.0, 22.0, 25.0));
+
+    // One sample 4 K outside the band, n = 1: the closed forms, written out.
+    let hi_a1 = rci_hi(4.0, 1, AshraeClass::A1);
+    let hi_h1 = rci_hi(4.0, 1, AshraeClass::H1);
+    let lo_a1 = rci_lo(4.0, 1, AshraeClass::A1);
+    let lo_h1 = rci_lo(4.0, 1, AshraeClass::H1);
+    assert!(
+        rel(hi_a1, (1.0 - 4.0 / 5.0) * 100.0) < 1e-13,
+        "HIGH half, A1: denominator 32-27 = 5 K; got {hi_a1}"
+    );
+    assert!(
+        rel(hi_h1, (1.0 - 4.0 / 3.0) * 100.0) < 1e-13,
+        "HIGH half, H1: denominator 25-22 = 3 K; got {hi_h1}"
+    );
+    assert!(
+        rel(lo_a1, (1.0 - 4.0 / 3.0) * 100.0) < 1e-13,
+        "LOW half, A1: denominator 18-15 = 3 K; got {lo_a1}"
+    );
+    assert!(
+        rel(lo_h1, (1.0 - 4.0 / 13.0) * 100.0) < 1e-13,
+        "LOW half, H1: denominator 18-5 = 13 K; got {lo_h1}"
+    );
+
+    // ... and the two halves really do move, both of them.
+    assert!(
+        rel(hi_a1, hi_h1) > 1e-6,
+        "HIGH half did not move (H1 3 K against A1 5 K): {hi_a1} vs {hi_h1}"
+    );
+    assert!(
+        rel(lo_a1, lo_h1) > 1e-6,
+        "LOW half did not move (H1 13 K against A1 3 K): {lo_a1} vs {lo_h1}"
+    );
+    assert!(hi_h1 < hi_a1, "H1 is the STRICTER index above the band: {hi_h1} vs {hi_a1}");
+    assert!(lo_h1 > lo_a1, "H1 is the more FORGIVING index below it: {lo_h1} vs {lo_a1}");
+
+    // describe() prints H1's own bands with no code change to it.
+    let d = AshraeClass::H1.describe();
+    assert!(d.contains("recommended 18-22 C"), "{d}");
+    assert!(d.contains("allowable 5-25 C"), "{d}");
 }
 
 #[test]
@@ -114,6 +178,11 @@ fn an_unknown_ashrae_class_is_refused_by_name() {
     assert!(e.contains("A1, A2, A3, A4"), "{e}");
     assert!(e.contains("ALLOWABLE"), "the message must say what the class decides: {e}");
     assert!(AshraeClass::A1.describe().contains("15-32 C"));
+    assert_eq!(AshraeClass::from_name("H1").unwrap(), AshraeClass::H1);
+    assert_eq!(AshraeClass::from_name("h1").unwrap(), AshraeClass::H1);
+    assert!(e.contains("A1, A2, A3, A4, H1"), "the message must name FIVE classes: {e}");
+    assert!(e.contains("18-22"), "it must say H1's recommended band is its own: {e}");
+    assert!(AshraeClass::H1.describe().contains("5-25 C"));
 }
 
 #[test]
@@ -162,6 +231,22 @@ fn gate_55a_rti_is_the_flow_ratio_and_halving_the_supply_doubles_it() {
 
     assert!(dt_equipment_from_heat(1.0, 0.0, 1005.0).is_err());
     assert!(dt_equipment_from_heat(1.0, 1.0, 0.0).is_err());
+}
+
+/// LBNL Self-benchmarking Guide metric A1: the supply-to-return rise is a
+/// named number, and (S55.2) divides exactly it.
+#[test]
+fn the_supply_to_return_delta_t_is_a_named_number() {
+    let (ts, tr) = (291.15 as Scalar, 299.15 as Scalar);
+    assert_eq!(delta_t(tr, ts), 8.0); // 299.15 - 291.15 is exactly 8.0 in f64
+    let r = MetricReport { t_supply: ts, t_return: tr, ..Default::default() };
+    assert_eq!(r.delta_t(), 8.0);
+    // (S55.2) divides exactly this difference - the two cannot drift apart.
+    let dt_eq = 10.0 as Scalar;
+    assert!(rel(rti(tr, ts, dt_eq), delta_t(tr, ts) / dt_eq * 100.0) < 1e-15);
+    // The sign convention is return MINUS supply: a return colder than the
+    // supply is a negative dT, not an absolute value.
+    assert_eq!(delta_t(ts, tr), -8.0);
 }
 
 /// (S55.4): `SHI + RHI == 1` **exactly**, in floating point, because the two
@@ -213,10 +298,52 @@ fn the_report_offers_pue_inputs_and_not_a_pue() {
     assert!(d.contains("not a PUE"), "{d}");
     assert!(d.contains("CFD cannot compute"), "{d}");
     assert!(d.contains("not swept"), "an unswept ceiling must say so, not guess: {d}");
-    assert!(d.contains("ISO/IEC 30134-2"), "the unverified standard must be named: {d}");
+    assert!(d.contains("ISO/IEC 30134-2"), "the standard must be named with its edition: {d}");
+    assert!(d.contains("ISO/IEC 30134-2:2026"), "the edition is known now: {d}");
+    assert!(d.contains("2026-01-16"), "the publication date is what makes it checkable: {d}");
+    assert!(d.contains("111538"), "the IEC publication number is how a user buys it: {d}");
+    assert!(d.contains("paywalled"), "the TEXT is still unread and the report must say so: {d}");
+    assert!(!d.contains("not verifiable"), "the stale wording must be gone: {d}");
+    assert!(d.contains("not a PUE"), "the refusal survives knowing the edition: {d}");
 
     let p = PueInputs { free_cooling_ceiling: Some(24.5), ..p };
     assert!(p.describe().contains("24.50 C"));
+}
+
+/// LBNL Self-benchmarking Guide metric A4: airflow efficiency is W/cfm and
+/// W/(L/s) from one division, refuses a flow it did not measure by name, and
+/// prints LBNL's better-practice value as CONTEXT, never as a gate.
+#[test]
+fn airflow_efficiency_is_watts_per_cfm_and_refuses_a_flow_it_did_not_measure() {
+    // The conversion is exact by definition: the international foot is 0.3048 m.
+    // The literal and the arithmetic form are one ulp apart; 1e-12 catches a
+    // dropped digit and tolerates the last bit.
+    assert!(rel(CFM_PER_M3_S, 60.0 / (0.3048 as Scalar).powi(3)) < 1e-12);
+
+    let a = airflow_efficiency(1000.0, 1.0).expect("one cubic metre a second");
+    assert!(rel(a.q_cfm, 2118.880_003_289_315_5) < 1e-12);
+    assert!(rel(a.w_per_cfm, 0.4719474432) < 1e-12);
+    assert_eq!(a.w_per_l_per_s, 1.0); // 1000 W over 1000 L/s, exactly
+    // One ratio, two units: the readings cannot disagree.
+    assert!(rel(a.w_per_cfm * CFM_PER_M3_S, a.w_per_l_per_s * 1000.0) < 1e-13);
+
+    // LBNL's better-practice figure, reproduced exactly.
+    let b = airflow_efficiency(AE_BETTER_PRACTICE_W_PER_CFM * CFM_PER_M3_S, 1.0)
+        .expect("lbnl");
+    assert!(rel(b.w_per_cfm, 0.5) < 1e-15);
+    assert!(rel(b.w_per_l_per_s, 1.0594400016446577) < 1e-12);
+
+    // A flow that was never measured is refused by name, not divided by.
+    for (p, q) in [(1000.0 as Scalar, 0.0 as Scalar), (1000.0, -1.0), (-1.0, 1.0)] {
+        let e = airflow_efficiency(p, q).unwrap_err().to_string();
+        assert!(e.contains("airflow efficiency"), "{e}");
+        assert!(e.contains("flux_weighted_mean"), "the alternative must be stated: {e}");
+    }
+
+    let d = a.describe();
+    assert!(d.contains("0.5 W/cfm"), "the better-practice value is printed: {d}");
+    assert!(d.contains("NOT a gate"), "and it is printed as CONTEXT: {d}");
+    assert!(d.contains("not the same measurement"), "the room/facility gap is named: {d}");
 }
 
 // ==========================================================================

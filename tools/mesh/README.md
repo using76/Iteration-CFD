@@ -11,13 +11,16 @@ config.
 
 ```
 python tools/mesh/step_mesh.py <config.json> [--from-checkpoint] [--stop-after-checkpoint]
-                                              [--tag NAME] [--dry-run]
+                     [--tag NAME] [--run-id ID] [--dry-run]
 ```
 
 writes `<out_dir>/<name>[_TAG].msh` (Gmsh 4.1 ASCII, physical groups = the
 patches), `<name>[_TAG].vtk` (binary, for viewing) and
 `<name>[_TAG]_summary.json` (counts, groups, quality, timings, the config),
-and keeps its checkpoints in `<out_dir>/work/`. Then one command takes the mesh
+and keeps its checkpoints in `<out_dir>/work/`. The `_summary.json` also carries
+an `identity` block naming the mesh (`mesh_id`, stable for a given `out_dir`
+plus name) and the run (`--run-id`, else `OFGPU_RUN_ID`, else null). Then one
+command takes the mesh
 to the solver and to Fluent:
 
 ```

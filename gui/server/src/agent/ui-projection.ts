@@ -46,7 +46,7 @@ export function projectAssistant(
 }
 
 /** A user message; null when it only carries tool results (those are shown on the tool cards). */
-export function projectUser(id: string, message: BetaMessageParam, meta: { createdAt: number; synthetic: boolean; notices?: string[] }): UiMessage | null {
+export function projectUser(id: string, message: BetaMessageParam, meta: { createdAt: number; synthetic: boolean; notices?: string[]; warnings?: string[] }): UiMessage | null {
   const blocks: UiBlock[] = []
   if (typeof message.content === 'string') blocks.push({ kind: 'text', text: message.content })
   else {
@@ -56,6 +56,7 @@ export function projectUser(id: string, message: BetaMessageParam, meta: { creat
     }
   }
   for (const n of meta.notices ?? []) blocks.push({ kind: 'notice', level: 'info', text: n })
+  for (const w of meta.warnings ?? []) blocks.push({ kind: 'notice', level: 'warning', text: w })
   if (!blocks.length) return null
   return { id, role: 'user', blocks, createdAt: meta.createdAt, stopReason: null, model: null, suggestions: [], synthetic: meta.synthetic }
 }

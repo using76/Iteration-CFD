@@ -169,6 +169,8 @@ export function createSessionStore(dir: string, model: string): SessionStore {
 export interface UserTurnOptions {
   synthetic: boolean
   notices?: string[]
+  /** Per image the model could not be shown (describe mode); rendered as level 'warning' notices. */
+  warnings?: string[]
   /** Set the title from this text when the session is still untitled. */
   entitle?: boolean
 }
@@ -176,7 +178,7 @@ export interface UserTurnOptions {
 /** Append a user-role message to both histories; returns the UI message (null for a pure tool_result message). */
 export function appendUserTurn(rec: SessionRecord, message: BetaMessageParam, opts: UserTurnOptions): UiMessage | null {
   rec.messages.push(message)
-  const ui = projectUser(newId('m'), message, { createdAt: Date.now(), synthetic: opts.synthetic, notices: opts.notices })
+  const ui = projectUser(newId('m'), message, { createdAt: Date.now(), synthetic: opts.synthetic, notices: opts.notices, warnings: opts.warnings })
   if (ui) rec.ui.push(ui)
   if (opts.entitle && rec.ui.filter((m) => m.role === 'user').length === 1) {
     const text = ui?.blocks.find((b) => b.kind === 'text')

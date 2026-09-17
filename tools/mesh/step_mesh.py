@@ -6,7 +6,7 @@
 step_mesh.py - a configuration-driven STEP -> Gmsh tetrahedral mesh tool.
 
     python tools/mesh/step_mesh.py <config.json> [--from-checkpoint]
-          [--stop-after-checkpoint] [--tag NAME] [--dry-run]
+          [--stop-after-checkpoint] [--tag NAME] [--run-id ID] [--dry-run]
 
 One JSON config describes the geometry (which solid is the fluid, which solids
 are cut away, which get replaced by a repaired proxy), the sizing (pool,
@@ -15,7 +15,8 @@ removal). One run writes
 
     <out_dir>/<name>[_TAG].msh            Gmsh 4.1 ASCII, physical groups = patches
     <out_dir>/<name>[_TAG].vtk            binary, for viewing only
-    <out_dir>/<name>[_TAG]_summary.json   counts, groups, quality, timings, the config
+    <out_dir>/<name>[_TAG]_summary.json   counts, groups, quality, timings, the config,
+                                          the identity block
     <out_dir>/work/                       checkpoints, repaired solids, run.log
 
 and `ofgpu-convert-mesh <out_dir>/<name>.msh <caseDir> -fluent <name>_fluent.msh`
@@ -45,6 +46,9 @@ import os
 import re
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mesh_identity import identity_block, is_run_id, run_id_from_env  # noqa: E402
 
 import gmsh
 import numpy as np
@@ -137,6 +141,7 @@ REGION_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 # ------------------------------------------------------------------- output
 T0 = time.time()
 SUMMARY = {}
+_IDENTITY = None     # (tool, out_dir, name_with_tag, run_id), resolved in main()
 
 
 def _install_tee() -> None:
@@ -179,6 +184,12 @@ def log(msg):
 
 def tick(name, t):
     SUMMARY['timings_s'][name] = round(time.time() - t, 1)
+
+
+def stamp_identity():
+    """C1's block, with written_at as of NOW, into SUMMARY before a dump."""
+    if _IDENTITY is not None:
+        SUMMARY['identity'] = identity_block(*_IDENTITY)
 
 
 def die(msg, code=1):
@@ -1431,6 +1442,7 @@ def ground_stage(cfg, args, work):
         for name, p in SUMMARY['points'].items():
             print('  ground %-14s (%8.1f, %7.1f) -> z_g = %s'
                   % (name, p['x'], p['y'], p['z_ground']), flush=True)
+        stamp_identity()
         with open(os.path.join(work, 'dry_run_summary.json'), 'w', encoding='utf-8') as f:
             json.dump(SUMMARY, f, indent=1, ensure_ascii=False)
         raise SystemExit(0)
@@ -2305,6 +2317,7 @@ def mesh_stage(cfg, work):
         gmsh.option.setNumber('Mesh.SaveAll', 1)
         gmsh.write(surf)
         SUMMARY['error'] = '3D meshing failed (Delaunay); surface mesh saved for inspection'
+        stamp_identity()
         with open(os.path.join(work, 'failed_summary.json'), 'w', encoding='utf-8') as f:
             json.dump(SUMMARY, f, indent=1, ensure_ascii=False)
         die('the 3-D mesh came out empty; the surface mesh is at %s (see the PLC error above '
@@ -3080,6 +3093,7 @@ def post_and_write_stage(cfg, out_dir, tag):
     SUMMARY['total_s'] = round(time.time() - T0, 1)
     SUMMARY['config'] = cfg
     summary_path = os.path.join(out_dir, '%s%s_summary.json' % (cfg['name'], suffix))
+    stamp_identity()
     with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(SUMMARY, f, indent=1, ensure_ascii=False)
     log('wrote %s (%.0f MB), %s (%.0f MB) and %s'
@@ -3100,6 +3114,10 @@ def parse_args(argv):
                     help='stop after the checkpoint, before the trim and the mesh')
     ap.add_argument('--tag', default='', metavar='NAME',
                     help='suffix the outputs: <name>_<NAME>.msh, .vtk, _summary.json')
+    ap.add_argument('--run-id', default=None, metavar='ID',
+                    help='the run this mesh belongs to, recorded in the summary '
+                         'identity block (1 to 64 characters from [A-Za-z0-9._-]); '
+                         'OFGPU_RUN_ID is the fallback')
     ap.add_argument('--dry-run', action='store_true',
                     help='stop after the import and the cut; print volumes, masses, '
                          'surface counts and ground heights')
@@ -3108,12 +3126,19 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.run_id is not None and not is_run_id(args.run_id):
+        die("--run-id: '%s' is not a run id - 1 to 64 characters from "
+            '[A-Za-z0-9._-]' % args.run_id)
     cfg = load_config(args.config)
     _install_tee()
     out_dir, work = cfg['out_dir'], os.path.join(cfg['out_dir'], 'work')
     os.makedirs(work, exist_ok=True)
     SUMMARY.update({'gmsh': gmsh.__version__, 'timings_s': {}, 'points': {}, 'groups': {},
                     'pools': {}, 'pockets': [], 'regions': {}})
+    global _IDENTITY
+    run_id = args.run_id or run_id_from_env('step_mesh')
+    _IDENTITY = ('step_mesh', cfg['out_dir'],
+                 cfg['name'] + ('_' + args.tag if args.tag else ''), run_id)
     if args.from_checkpoint and args.stop_after_checkpoint:
         die('--from-checkpoint and --stop-after-checkpoint together would do nothing')
     gmsh.initialize()

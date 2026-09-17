@@ -18,12 +18,26 @@
 //!   R. K. Sharma, C. E. Bash, C. D. Patel, AIAA 2002-3091 (2002),
 //!     DOI 10.2514/6.2002-3091 - (S55.4)'s SHI and RHI
 //!   ASHRAE TC 9.9, *Thermal Guidelines for Data Processing Environments*,
-//!     5th ed. (2021), ISBN 978-1-947192-90-4 - the Class A1-A4 recommended
-//!     and allowable envelopes of [`AshraeClass`]
+//!     5th ed. (2021), ISBN 978-1-947192-90-4 - the Class A1-A4 and H1
+//!     recommended and allowable envelopes of [`AshraeClass`]. The book is
+//!     PAYWALLED and was NOT opened; the numbers come from the public
+//!     ASHRAE Journal column below
+//!   D. Quirk, J. Davidson, R. Schmidt, "ASHRAE's Data Center Thermal
+//!     Guidelines - Air-Cooled Evolution", *ASHRAE Journal* May 2022,
+//!     pp. 54-58 - public, by members of the same committee, read for its
+//!     NUMERIC VALUES ONLY (its text is not reproduced); the source of H1's
+//!     18-22 C recommended and 5-25 C allowable bands (§55.1)
+//!   P. Mathew, S. Ganguly, S. Greenberg, D. Sartor, *Self-benchmarking
+//!     Guide for Data Centers: Metrics, Benchmarks, Actions*, LBNL for
+//!     NYSERDA (2009), `https://www.osti.gov/servlets/purl/983248` -
+//!     US-Government sponsored, quotable; LBNL metric A1 (the
+//!     supply-to-return delta-T, `delta_t`) and LBNL metric A4 (airflow
+//!     efficiency in W/cfm, `AirflowEfficiency`) are taken from it (§55.4)
 //!   The Green Grid, *PUE: A Comprehensive Examination of the Metric* (2012)
 //!     - the readable background for §55.4's PUE INPUTS. ISO/IEC 30134-2's
-//!     current edition could NOT be verified from this environment, so no
-//!     standard number is printed here as if it had been checked
+//!     current edition is ed. 2.0, published 2026-01-16 (IEC publication
+//!     111538) - catalogue metadata only; its TEXT is paywalled and was not
+//!     opened, so no number is quoted from it and no PUE is computed
 //!   ofgpu `SPEC-LIT.md` §8.4 (the reduction), §18 (the heat-release zones
 //!     that are the denominator), §52 (the fan power)
 //! No GPL-licensed source was consulted.
@@ -64,9 +78,10 @@ mod tests;
 
 /// ASHRAE TC 9.9 (5th ed., 2021) equipment class.
 ///
-/// The **recommended** range is the same for all four classes (18-27 C); the
-/// **allowable** range is what distinguishes them, and it is what RCI
-/// normalises the excess by. A case that names a class and silently gets
+/// **Both** of the class's bands belong to it: the recommended range AND the
+/// allowable range. The 5th edition's H1 is the one class whose recommended
+/// band is not 18-27 C (it is 18-22 C), and hard-coding 18/27 was the
+/// defect this change removes. A case that names a class and silently gets
 /// A1's numbers is the §13.4.1 defect, so the class is read, its four
 /// temperatures are printed, and a pair test requires two cases differing
 /// only in the class to produce different indices.
@@ -76,34 +91,37 @@ pub enum AshraeClass {
     A2,
     A3,
     A4,
+    H1,
 }
 
 impl AshraeClass {
     /// `(T_lo_all, T_lo_rec, T_hi_rec, T_hi_all)` in degrees Celsius.
     pub fn envelope(self) -> (Scalar, Scalar, Scalar, Scalar) {
-        let (lo, hi) = match self {
-            Self::A1 => (15.0, 32.0),
-            Self::A2 => (10.0, 35.0),
-            Self::A3 => (5.0, 40.0),
-            Self::A4 => (5.0, 45.0),
-        };
-        (lo, 18.0, 27.0, hi)
+        match self {
+            Self::A1 => (15.0, 18.0, 27.0, 32.0),
+            Self::A2 => (10.0, 18.0, 27.0, 35.0),
+            Self::A3 => (5.0, 18.0, 27.0, 40.0),
+            Self::A4 => (5.0, 18.0, 27.0, 45.0),
+            Self::H1 => (5.0, 18.0, 22.0, 25.0),
+        }
     }
 
     /// SPEC-LIT §13.4: a class this solver does not know is an error naming
-    /// the four it does.
+    /// the five it does.
     pub fn from_name(name: &str) -> Result<Self> {
         match name {
             "A1" | "a1" => Ok(Self::A1),
             "A2" | "a2" => Ok(Self::A2),
             "A3" | "a3" => Ok(Self::A3),
             "A4" | "a4" => Ok(Self::A4),
+            "H1" | "h1" => Ok(Self::H1),
             other => Err(Error::Config(format!(
                 "ashraeClass: \"{other}\" is not supported by ofgpu; available: \
-                 A1, A2, A3, A4 (ASHRAE TC 9.9, Thermal Guidelines for Data \
-                 Processing Environments, 5th ed.). The class sets the ALLOWABLE \
-                 range that RCI normalises by; the recommended range 18-27 C is the \
-                 same for all four"
+                 A1, A2, A3, A4, H1 (ASHRAE TC 9.9, Thermal Guidelines for Data \
+                 Processing Environments, 5th ed., 2021). The class sets the ALLOWABLE \
+                 range that RCI normalises by AND - since the 5th edition added H1 - the \
+                 RECOMMENDED range too: 18-27 C for A1-A4, 18-22 C for H1, which is why \
+                 two cases differing only in the class must differ in BOTH indices"
             ))),
         }
     }
@@ -184,6 +202,17 @@ pub fn rti(t_return: Scalar, t_supply: Scalar, dt_equipment: Scalar) -> Scalar {
     (t_return - t_supply) / dt_equipment * 100.0
 }
 
+/// LBNL Self-benchmarking Guide metric A1 (Mathew, Ganguly, Greenberg &
+/// Sartor, LBNL for NYSERDA, 2009): the supply-to-return rise the return air
+/// carries, in kelvin. The sign convention is **return MINUS supply**, never
+/// an absolute value.
+///
+/// Both temperatures are the flux-weighted patch means of §55.5, not area
+/// means, so `dT` inherits that weighting.
+pub fn delta_t(t_return: Scalar, t_supply: Scalar) -> Scalar {
+    t_return - t_supply
+}
+
 /// (S55.4)'s `SHI` and `RHI`, from the two heat sums.
 ///
 /// Returned **as a pair from one division**, which is what makes
@@ -224,10 +253,12 @@ impl PueInputs {
         };
         format!(
             "PUE INPUTS (not a PUE - PUE is a facility energy ratio and CFD cannot \
-             compute one; The Green Grid 2012 is the background, and the current \
-             edition of ISO/IEC 30134-2 was not verifiable here so no standard \
-             number is quoted): fan shaft power {:.1} W over {} fan(s); IT heat \
-             {:.1} W; highest supply temperature holding RCI_HI at 100 %: {ceiling}.",
+             compute one; The Green Grid 2012 is the readable background, and the \
+             current edition is ISO/IEC 30134-2:2026, ed. 2.0, published 2026-01-16, \
+             IEC publication 111538 - catalogue metadata only, its text is paywalled \
+             and was not opened, so no number is quoted from it): fan shaft power \
+             {:.1} W over {} fan(s); IT heat {:.1} W; highest supply temperature \
+             holding RCI_HI at 100 %: {ceiling}.",
             self.fan_power,
             self.fan_power_each.len(),
             self.it_heat
@@ -253,6 +284,99 @@ pub struct MetricReport {
     /// the report says which (§55.2).
     pub dt_measured: bool,
     pub pue: PueInputs,
+}
+
+impl MetricReport {
+    /// LBNL Self-benchmarking Guide metric A1 (LBNL for NYSERDA, 2009): the
+    /// same supply-to-return rise [`delta_t`] names, off the report's own two
+    /// temperatures. The sign convention is **return MINUS supply**, never an
+    /// absolute value. Both temperatures are the flux-weighted patch means of
+    /// §55.5, not area means, so `dT` inherits that weighting - and nothing
+    /// is recomputed here.
+    pub fn delta_t(&self) -> Scalar {
+        delta_t(self.t_return, self.t_supply)
+    }
+}
+
+/// Cubic feet per minute in one cubic metre per second: `60 / 0.3048^3`.
+///
+/// Exact by definition - the international foot is exactly 0.3048 m, so
+/// `1 ft^3 = 0.3048^3 m^3 = 0.028316846592 m^3` and `1 m^3/s` is
+/// `60 / 0.028316846592 = 2118.8800032893155 cfm`, the correctly rounded
+/// f64. **Do not "simplify" the literal into the arithmetic form**:
+/// `60.0 / (0.3048 * 0.3048 * 0.3048)` evaluated in f64 is
+/// 2118.880003289315, one ulp BELOW the correctly rounded value. The tests
+/// pin the literal against the arithmetic form to `rel < 1e-12`, which
+/// catches a dropped digit and tolerates the last bit.
+pub const CFM_PER_M3_S: Scalar = 2118.880_003_289_315_5;
+
+/// LBNL's better-practice airflow efficiency, W/cfm (LBNL Self-benchmarking
+/// Guide metric A4, LBNL for NYSERDA, 2009). CONTEXT, never a gate: the
+/// published figure is a whole-facility measurement this room model does not
+/// reproduce, so no run fails for missing it.
+pub const AE_BETTER_PRACTICE_W_PER_CFM: Scalar = 0.5;
+
+/// LBNL Self-benchmarking Guide metric A4 (Mathew, Ganguly, Greenberg &
+/// Sartor, LBNL for NYSERDA, 2009): airflow efficiency - fan shaft power per
+/// unit of supply airflow, in W/cfm and, from the same division, W/(L/s).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AirflowEfficiency {
+    pub fan_power_w: Scalar,
+    pub q_m3_s: Scalar,
+    pub q_cfm: Scalar,
+    pub w_per_cfm: Scalar,
+    pub w_per_l_per_s: Scalar,
+}
+
+/// LBNL Self-benchmarking Guide metric A4 (LBNL for NYSERDA, 2009):
+/// `AE = W_fan / Q_supply[cfm]`. The two unit readings are one division
+/// apart and cannot disagree.
+pub fn airflow_efficiency(
+    fan_power_w: Scalar,
+    q_supply_m3_s: Scalar,
+) -> Result<AirflowEfficiency> {
+    if !(q_supply_m3_s > 0.0) || !(fan_power_w >= 0.0) {
+        return Err(Error::Config(format!(
+            "airflow efficiency: fan shaft power {fan_power_w} W must be \
+             non-negative and supply flow {q_supply_m3_s} m^3/s must be strictly \
+             positive - (S55.5)'s W/cfm is a ratio, and dividing by a flow that \
+             was never measured would print an infinity as if it were a reading. \
+             Pass the flow the supply patch actually carries (the second value \
+             `flux_weighted_mean` returns), or report no airflow efficiency at all"
+        )));
+    }
+    let q_cfm = q_supply_m3_s * CFM_PER_M3_S;
+    let w_per_cfm = fan_power_w / q_cfm;
+    let w_per_l_per_s = fan_power_w / (q_supply_m3_s * 1000.0);
+    Ok(AirflowEfficiency {
+        fan_power_w,
+        q_m3_s: q_supply_m3_s,
+        q_cfm,
+        w_per_cfm,
+        w_per_l_per_s,
+    })
+}
+
+impl AirflowEfficiency {
+    /// The paragraph a report prints: both unit readings, and LBNL's
+    /// better-practice value as CONTEXT beside them, never as a gate.
+    pub fn describe(&self) -> String {
+        format!(
+            "AIRFLOW EFFICIENCY (LBNL Self-benchmarking Guide metric A4 - CONTEXT, \
+             NOT a gate): {:.3} W/cfm = {:.3} W/(L/s), from {:.1} W of fan shaft \
+             power over {:.3} m^3/s ({:.1} cfm) through the supply patch. LBNL's \
+             better-practice value is {:.1} W/cfm; no run fails for missing it, \
+             because the published figure is a whole-facility supply-PLUS-return fan \
+             power over supply-plus-exhaust airflow and this is a room model's supply \
+             fans over one patch - the two are not the same measurement.",
+            self.w_per_cfm,
+            self.w_per_l_per_s,
+            self.fan_power_w,
+            self.q_m3_s,
+            self.q_cfm,
+            AE_BETTER_PRACTICE_W_PER_CFM
+        )
+    }
 }
 
 // ==========================================================================

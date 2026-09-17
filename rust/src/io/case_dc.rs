@@ -686,9 +686,12 @@ impl DcCase {
         let mut jumps = Vec::new();
         for t in &self.tiles {
             if t.baffle == Some(true) {
-                // SPEC-LIT §53.5. Never succeeds; under `-permissive` it
-                // warns and substitutes the internal-face form, which is
-                // printed.
+                // SPEC-LIT §53.5. Never succeeds. Under `-permissive` the
+                // refusal prints the internal-face form as its substitute,
+                // but the value is DISCARDED here: the tile falls through to
+                // `t.lower()` below and becomes an ordinary boundary jump on
+                // the same patch, with T and Y_v continuous across it. Safe,
+                // and not what the printed line names.
                 crate::fan::refuse_baffle_insertion(&format!("tiles/{}/baffle", t.patch))?;
             }
             let (coeffs, how) = t.lower(self.air.nu as Scalar)?;
@@ -1224,4 +1227,18 @@ impl DcRack {
             samples: sample_cells,
         })
     }
+}
+
+// ==========================================================================
+//  8. The generated schema
+// ==========================================================================
+
+/// The JSON Schema for [`DcCase`], generated from these same types by
+/// `schemars` - the same discipline `crate::io::case_json::emit_schema` and
+/// `crate::io::case_cht::emit_cht_schema` run under: the schema cannot
+/// disagree with the reader, because it IS the reader's own types, printed.
+/// `$schema` in a case file points a human's editor at `docs/schema/dc-1.json`,
+/// which is a byte copy of this output and is tested to be one.
+pub fn emit_dc_schema() -> String {
+    serde_json::to_string_pretty(&schemars::schema_for!(DcCase)).unwrap_or_default()
 }

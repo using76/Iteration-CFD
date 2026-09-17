@@ -8,13 +8,17 @@
 // The script never sees an API key: those are read by the server alone.
 import WebSocket from 'ws'
 import {
+  CHAT_TIMEOUT_MAX_MS,
   ClientMsgSchema,
   ServerMsgSchema,
+  type ChatResponse,
   type ClientMsg,
   type RunInfo,
   type ServerHello,
   type ServerMsg,
+  type SessionState,
   type UiCommand,
+  type UiMessage,
   type UiState,
   type Usage,
 } from '@cfd/shared'
@@ -32,9 +36,11 @@ interface Options {
   timeoutSec: number
   /** Stand in for the GUI: answer ui.command, push ui.state. */
   ui: boolean
+  /** Drive the conversation over POST /api/chat instead of the WebSocket. */
+  http: boolean
 }
 
-const USAGE_LINE = 'usage: npx tsx server/scripts/ai-drive.ts [--url ws://127.0.0.1:$CFD_PORT/ws] [--case cases/plume.jsonc] [--prompt "<text>"] [--autopilot] [--timeout 900] [--ui]'
+const USAGE_LINE = 'usage: npx tsx server/scripts/ai-drive.ts [--url ws://127.0.0.1:$CFD_PORT/ws] [--case cases/plume.jsonc] [--prompt "<text>"] [--autopilot] [--timeout 900] [--ui] [--http]'
 
 /** The server this drives is the one CFD_PORT names, so the two agree without a flag. */
 function defaultUrl(): string {
@@ -43,7 +49,7 @@ function defaultUrl(): string {
 }
 
 function parseOptions(argv: string[]): Options {
-  const o: Options = { url: defaultUrl(), casePath: 'cases/plume.jsonc', prompt: null, autopilot: false, timeoutSec: 900, ui: false }
+  const o: Options = { url: defaultUrl(), casePath: 'cases/plume.jsonc', prompt: null, autopilot: false, timeoutSec: 900, ui: false, http: false }
   for (let i = 0; i < argv.length; i++) {
     const val = (): string => {
       const v = argv[++i]
@@ -57,10 +63,12 @@ function parseOptions(argv: string[]): Options {
       case '--timeout': o.timeoutSec = Number(val()); break
       case '--autopilot': o.autopilot = true; break
       case '--ui': o.ui = true; break
+      case '--http': o.http = true; break
       default: throw new Error(`unknown option ${argv[i]}\n${USAGE_LINE}`)
     }
   }
   if (!Number.isFinite(o.timeoutSec) || o.timeoutSec <= 0) throw new Error('--timeout wants a positive number of seconds')
+  if (o.http && o.ui) throw new Error('--ui needs the WebSocket; drop --http or --ui')
   return o
 }
 
@@ -500,7 +508,7 @@ async function drive(opts: Options): Promise<number> {
     t: 'user.message',
     sessionId: session.id,
     text: prompt,
-    context: { activeFile: opts.casePath, activeRun: null, attachments: [opts.casePath], selection: null },
+    context: { activeFile: opts.casePath, activeRun: null, attachments: [opts.casePath], attachmentIds: [], selection: null },
   })
 
   const timeout = setTimeout(() => finish(`timeout after ${opts.timeoutSec}s`), opts.timeoutSec * 1000)
@@ -518,9 +526,129 @@ async function drive(opts: Options): Promise<number> {
 
 // ---------------------------------------------------------------------------
 
+/** ws://host:port/ws -> http://host:port, so --http needs no second flag. */
+function httpBase(wsUrl: string): { base: string; token: string | null } {
+  const u = new URL(wsUrl)
+  const token = u.searchParams.get('token')
+  u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:'
+  u.pathname = ''
+  u.search = ''
+  u.hash = ''
+  return { base: u.toString().replace(/\/$/, ''), token }
+}
+
+/** The same conversation as drive(), over POST /api/chat. Returns the process exit code. */
+async function driveHttp(opts: Options): Promise<number> {
+  const prompt = opts.prompt ?? `Run the case ${opts.casePath} with the default solver, wait for it to finish, then summarise the final residuals and whether it converged. Use gui_control to show the Velocity field when the run ends.`
+  const promptWantsRun = /\brun\b|solver|솔버|실행/i.test(prompt)
+  const { base, token } = httpBase(opts.url)
+  const auth: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {}
+  say(`connecting to ${base} (http; any token in the url is sent, never logged)`)
+
+  const health = await fetch(`${base}/api/health`, { headers: auth })
+  const healthBody = (await health.json().catch(() => ({}))) as { error?: string }
+  if (!health.ok) {
+    say(`!! /api/health ${health.status}: ${healthBody.error ?? 'no error in body'}`)
+    return 2
+  }
+  const hello = await fetch(`${base}/api/hello`, { headers: auth })
+  const helloBody = (await hello.json().catch(() => null)) as ServerHello | null
+  if (!hello.ok || !helloBody) {
+    say(`!! /api/hello ${hello.status}`)
+    return 2
+  }
+  say(`server v${helloBody.version} mode=${helloBody.mode} llm=${helloBody.llm} model=${helloBody.model} gpu=${helloBody.gpu.state} workspace=${helloBody.workspaceRoot}`)
+
+  say(`prompt: ${prompt}`)
+  const started = Date.now()
+  const res = await fetch(`${base}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...auth },
+    body: JSON.stringify({
+      text: prompt,
+      attachments: [opts.casePath],
+      activeFile: opts.casePath,
+      autoApprove: opts.autopilot ? 'all' : 'reads',
+      timeoutMs: Math.min(opts.timeoutSec * 1000, CHAT_TIMEOUT_MAX_MS),
+    }),
+  })
+  const resBody = (await res.json().catch(() => null)) as (ChatResponse & { error?: string }) | null
+  if (!res.ok || !resBody) {
+    say(`!! POST /api/chat ${res.status}: ${resBody?.error ?? 'no error in body'}`)
+    return 2
+  }
+  let body: ChatResponse = resBody
+
+  let printed = 0
+  let lastAssistantText = ''
+  const printMessages = (messages: UiMessage[]): void => {
+    for (const m of messages) {
+      for (const b of m.blocks) {
+        if (b.kind === 'text') {
+          beginStream('text')
+          process.stdout.write(b.text)
+          endStream()
+          if (m.role === 'assistant') lastAssistantText += b.text
+        } else if (b.kind === 'thinking') say(b.text)
+        else if (b.kind === 'tool') say(`[tool] ${b.call.name} ${b.call.status} — ${b.call.summary}`)
+        else if (b.kind === 'notice') say(`[notice] ${b.text}`)
+        else if (b.kind === 'image') say(`[image] ${b.mime} ${b.base64.length} bytes`)
+        else if (b.kind === 'diff') say(`[diff] ${b.path} (${b.applied ? 'applied' : 'not applied'})`)
+      }
+      printed++
+    }
+  }
+  printMessages(body.messages)
+
+  // 'timeout' means the turn is still running: poll until it ends, as the brief's caller does.
+  if (body.status === 'timeout') {
+    const deadline = started + opts.timeoutSec * 1000
+    let state: SessionState | null = null
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000))
+      const st = await fetch(`${base}/api/sessions/${body.sessionId}`, { headers: auth })
+      if (!st.ok) break
+      const s = (await st.json()) as SessionState
+      if (!s.turnActive) {
+        state = s
+        break
+      }
+    }
+    if (state) {
+      printMessages(state.messages.slice(printed))
+      body = { ...body, status: 'done' }
+    } else {
+      say(`-- timeout after ${opts.timeoutSec}s with the turn still running`)
+    }
+  }
+
+  let exitRun: RunInfo | null = null
+  for (const id of body.runs) {
+    const rr = await fetch(`${base}/api/runs/${id}`, { headers: auth })
+    if (!rr.ok) continue
+    const run = (await rr.json()) as RunInfo
+    exitRun = run
+    say(`[run] ${run.id} exited: status=${run.status} iterations=${run.iter} converged=${run.converged}${run.error ? ` error="${run.error}"` : ''}`)
+  }
+
+  const answered = lastAssistantText.trim().length > 0
+  const sawRun = body.runs.length > 0
+  let code: number
+  if (!promptWantsRun && !sawRun) {
+    // A prompt that asked for no run passes on the answer alone.
+    code = answered ? 0 : 1
+  } else {
+    const runOk = exitRun !== null && (exitRun.status === 'done' || exitRun.converged)
+    code = runOk && answered ? 0 : 1
+  }
+  const u = body.usage
+  say(`VERDICT: ${exitRun ? `run ${exitRun.id} iterations=${exitRun.iter} status=${exitRun.status} converged=${exitRun.converged}` : 'no run reached exit'} | final assistant text: ${answered ? 'yes' : 'no'} | usage input=${u.inputTokens} output=${u.outputTokens} cacheRead=${u.cacheReadTokens} cacheWrite=${u.cacheWriteTokens}`)
+  return code
+}
+
 async function main(): Promise<number> {
   const opts = parseOptions(process.argv.slice(2))
-  return drive(opts)
+  return opts.http ? driveHttp(opts) : drive(opts)
 }
 
 main()

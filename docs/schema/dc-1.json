@@ -1,0 +1,713 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DcCase",
+  "description": "One data-centre room.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "air": {
+      "$ref": "#/$defs/DcAir",
+      "default": {
+        "cp": 1005.0,
+        "gravity": [
+          0.0,
+          0.0,
+          -9.81
+        ],
+        "nu": 0.000015,
+        "pr": 0.71,
+        "prt": 0.85,
+        "rho": 1.2,
+        "tRef": 295.15
+      }
+    },
+    "fans": {
+      "description": "CRAC/CRAH blowers and exhausts - SPEC-LIT §52.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DcFan"
+      }
+    },
+    "humidity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DcHumidity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "metrics": {
+      "$ref": "#/$defs/DcMetricsSpec"
+    },
+    "name": {
+      "type": "string"
+    },
+    "numerics": {
+      "$ref": "#/$defs/DcNumerics",
+      "default": {
+        "maxIterations": 500,
+        "pRelax": 0.3,
+        "tRelax": 0.7,
+        "tolerance": 1e-8,
+        "uRelax": 0.7
+      }
+    },
+    "patches": {
+      "description": "One rule per remaining patch. Every patch must appear here or in a\n`fans`/`tiles` entry.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DcPatchRule"
+      }
+    },
+    "racks": {
+      "description": "Server racks as heat-release zones - see the module doc.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DcRack"
+      }
+    },
+    "room": {
+      "$ref": "#/$defs/DcRoom"
+    },
+    "run": {
+      "$ref": "#/$defs/DcRun"
+    },
+    "tiles": {
+      "description": "Perforated floor tiles, grilles and filters - SPEC-LIT §53.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DcTile"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "room",
+    "metrics",
+    "run"
+  ],
+  "$defs": {
+    "DcAir": {
+      "description": "The air's properties. Every one of them reaches a kernel; none is\ndecoration.",
+      "type": "object",
+      "properties": {
+        "cp": {
+          "description": "Specific heat, J/kg/K - (S55.4)'s `c_p`.",
+          "type": "number",
+          "format": "double"
+        },
+        "gravity": {
+          "description": "Gravity, m/s^2.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "nu": {
+          "description": "Kinematic viscosity, m^2/s.",
+          "type": "number",
+          "format": "double"
+        },
+        "pr": {
+          "description": "Molecular and turbulent Prandtl numbers.",
+          "type": "number",
+          "format": "double"
+        },
+        "prt": {
+          "type": "number",
+          "format": "double"
+        },
+        "rho": {
+          "description": "Reference density, kg/m^3. Divides the manufacturer's curve into this\nsolver's kinematic pressure (S52.2), so it is not optional.",
+          "type": "number",
+          "format": "double"
+        },
+        "tRef": {
+          "description": "The buoyancy reference temperature, K.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "nu",
+        "rho",
+        "cp",
+        "pr",
+        "prt",
+        "tRef",
+        "gravity"
+      ]
+    },
+    "DcBoundaries": {
+      "type": "object",
+      "properties": {
+        "xMax": {
+          "type": "string"
+        },
+        "xMin": {
+          "type": "string"
+        },
+        "yMax": {
+          "type": "string"
+        },
+        "yMin": {
+          "type": "string"
+        },
+        "zMax": {
+          "type": "string"
+        },
+        "zMin": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "xMin",
+        "xMax",
+        "yMin",
+        "yMax",
+        "zMin",
+        "zMax"
+      ]
+    },
+    "DcCurve": {
+      "description": "The pressure-flow characteristic - SPEC-LIT §52.1 and (S52.13).",
+      "type": "object",
+      "properties": {
+        "QMax": {
+          "description": "Free delivery, m^3/s.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "dpMax": {
+          "description": "`dp_max` (quadratic) or the constant rise, Pa.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "efficiency": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "points": {
+          "description": "`[[Q, dp], ...]` manufacturer points.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "rhoCurve": {
+          "description": "AMCA 210's stated measurement conditions, and the ones being run.",
+          "type": "number",
+          "format": "double",
+          "default": 1.2
+        },
+        "speed": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "speedCurve": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "type": {
+          "description": "`\"constantPressure\"`, `\"quadratic\"` or `\"table\"`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "DcFan": {
+      "description": "One fan patch - SPEC-LIT §52.",
+      "type": "object",
+      "properties": {
+        "ambientPressure": {
+          "description": "Ambient **static** pressure on the far side, Pa gauge. Converted to\nthe kinematic pressure this solver carries by dividing by `air.rho`,\nand the conversion is printed.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "curve": {
+          "$ref": "#/$defs/DcCurve"
+        },
+        "direction": {
+          "description": "`\"inflow\"` (a supply blower) or `\"outflow\"` (an exhaust) - (S52.3)'s\n`sigma`. There is no default: which way a machine blows is not\nsomething to guess.",
+          "type": "string"
+        },
+        "patch": {
+          "type": "string"
+        },
+        "relaxation": {
+          "description": "(S52.14)'s under-relaxation of the operating point.",
+          "type": "number",
+          "format": "double",
+          "default": 0.5
+        },
+        "supplyRelativeHumidity": {
+          "description": "Supply relative humidity, `0..1`. Requires a `humidity` block; naming\nit without one is refused.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "supplyTemperature": {
+          "description": "The supply air temperature at an `inflow` fan, K. Required there,\nrefused on an `outflow` one - a temperature on an exhaust is a\nsetting the case can say and the solver must ignore.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "patch",
+        "direction",
+        "curve"
+      ]
+    },
+    "DcHumidity": {
+      "description": "SPEC-LIT §54: humidity transport and psychrometrics.",
+      "type": "object",
+      "properties": {
+        "barometricPressure": {
+          "description": "Total barometric pressure, Pa - (S54.2b)'s `p_atm`, which is NOT this\nsolver's kinematic gauge pressure.",
+          "type": "number",
+          "format": "double",
+          "default": 101325.0
+        },
+        "d": {
+          "description": "Molecular diffusivity of water vapour in air, m^2/s.",
+          "type": "number",
+          "format": "double",
+          "default": 0.000025
+        },
+        "scT": {
+          "description": "Turbulent Schmidt number.",
+          "type": "number",
+          "format": "double",
+          "default": 0.7
+        },
+        "virtualTemperature": {
+          "description": "Whether (S54.7)'s virtual temperature feeds the buoyancy. On by\ndefault, because moist air really is lighter and the correction is\nexact; off is a legitimate comparison and is a §13.4.1 setting.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "DcMetricsSpec": {
+      "description": "SPEC-LIT §55: what the report measures, and over what.",
+      "type": "object",
+      "properties": {
+        "ashraeClass": {
+          "description": "`\"A1\"`..`\"A4\"` - ASHRAE TC 9.9's allowable envelope (S55.1).",
+          "type": "string",
+          "default": "A1"
+        },
+        "rciSamples": {
+          "description": "`\"thirds\"` (Herrlin's convention, mesh-independent) or `\"faces\"`.",
+          "type": "string",
+          "default": "thirds"
+        },
+        "returnPatch": {
+          "description": "The patch the return temperature is measured on.",
+          "type": "string"
+        },
+        "supplyPatch": {
+          "description": "The patch the supply temperature is measured on.",
+          "type": "string"
+        },
+        "supplyTemperatureSweep": {
+          "description": "A supply-temperature sweep for §55.4's free-cooling ceiling: the\nhighest supply temperature at which `RCI_HI` stays at 100 %.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "supplyPatch",
+        "returnPatch"
+      ]
+    },
+    "DcNumerics": {
+      "type": "object",
+      "properties": {
+        "maxIterations": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pRelax": {
+          "type": "number",
+          "format": "double"
+        },
+        "pressureSolver": {
+          "description": "Which pressure backend to use. `\"pbicgstab\"` (the default) and\n`\"pcg\"` are supported; `\"fft\"`, `\"capacitance\"` and `\"woodbury\"` are\nSPEC-LIT §52.9's refusal - the direct Poisson path a fan patch\ndisables, and the rank-1 correction that would put it back and is\n**not implemented**. The entry exists so that refusal can fire.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tRelax": {
+          "type": "number",
+          "format": "double"
+        },
+        "tolerance": {
+          "type": "number",
+          "format": "double"
+        },
+        "uRelax": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "uRelax",
+        "pRelax",
+        "tRelax",
+        "tolerance",
+        "maxIterations"
+      ]
+    },
+    "DcPatchRule": {
+      "description": "One patch rule, for every patch not owned by a fan or a tile.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "`\"wall\"`, `\"adiabaticWall\"`, `\"empty\"`, `\"symmetry\"` or\n`\"fixedPressure\"`.",
+          "type": "string"
+        },
+        "patch": {
+          "type": "string"
+        },
+        "pressure": {
+          "description": "Static pressure, Pa gauge - only on `\"fixedPressure\"`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "temperature": {
+          "description": "Wall temperature, K - only on `\"wall\"`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "patch",
+        "kind"
+      ]
+    },
+    "DcRack": {
+      "description": "One rack - a heat-release zone with a stated flow, plus the box its\ninlet temperature is sampled in. See the module doc for what this is not.",
+      "type": "object",
+      "properties": {
+        "flow": {
+          "description": "Volumetric flow through the rack, m^3/s - (S55.2)'s `mdot_IT/rho`.",
+          "type": "number",
+          "format": "double"
+        },
+        "inletSamples": {
+          "description": "Where the rack-inlet temperature is sampled for RCI (S55.1).",
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "name": {
+          "type": "string"
+        },
+        "power": {
+          "description": "IT power, W.",
+          "type": "number",
+          "format": "double"
+        },
+        "zone": {
+          "description": "The cells the heat is released in.",
+          "$ref": "#/$defs/JsonBounds"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "zone",
+        "power",
+        "flow",
+        "inletSamples"
+      ]
+    },
+    "DcRoom": {
+      "description": "The room: an axis-aligned block, its six patches named by the case.",
+      "type": "object",
+      "properties": {
+        "boundaries": {
+          "description": "The six face names, `-x +x -y +y -z +z`.",
+          "$ref": "#/$defs/DcBoundaries"
+        },
+        "bounds": {
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "grading": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGrading"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "bounds",
+        "cells",
+        "boundaries"
+      ]
+    },
+    "DcRun": {
+      "type": "object",
+      "properties": {
+        "initialTemperature": {
+          "description": "Initial room temperature, K.",
+          "type": "number",
+          "format": "double"
+        },
+        "iterations": {
+          "description": "Outer SIMPLE iterations.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reportEvery": {
+          "description": "How often the metric report is printed. `0` prints only at the end.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "iterations",
+        "initialTemperature"
+      ]
+    },
+    "DcTile": {
+      "description": "One perforated tile / grille / filter - SPEC-LIT §53.\n\nExactly one of `K`, `openAreaRatio` or the `(alpha, C2, thickness)` triple\nmust be given. Naming two is refused: the solver would have to pick, and\nthe one it dropped is a setting the case said and the solver ignored.",
+      "type": "object",
+      "properties": {
+        "C2": {
+          "description": "Inertial resistance factor, 1/m.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "K": {
+          "description": "The loss coefficient on the approach velocity - (S53.3).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "alpha": {
+          "description": "Permeability, m^2 - (S53.1).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "baffle": {
+          "description": "Ask for the jump to be an internal **baffle** - two coincident\nboundary faces the solver would have to create. SPEC-LIT §53.5:\nrefused by name, listing the two routes that exist. The entry is here\nso the refusal can FIRE: a request nobody can express is not a\nrequest that was refused, it is one that was never heard.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "openAreaRatio": {
+          "description": "The tile's open-area fraction, `(0, 1]` - (S53.6) converts it, and\nthe derived `K` is printed.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "patch": {
+          "type": "string"
+        },
+        "plenumPressure": {
+          "description": "The plenum's static pressure behind the tile, Pa gauge.",
+          "type": "number",
+          "format": "double"
+        },
+        "plenumRelativeHumidity": {
+          "description": "The plenum's relative humidity, `0..1`. Requires a `humidity` block;\nnaming it without one is refused, exactly as it is on a fan - a tile\nfed from a plenum carries the plenum's humidity, and (S54.2)/(S54.4)\nconvert it at setup and PRINT what they converted.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "plenumTemperature": {
+          "description": "The plenum air temperature, K.",
+          "type": "number",
+          "format": "double"
+        },
+        "thickness": {
+          "description": "Sheet thickness, m - a PARAMETER, not a mesh dimension.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "patch",
+        "plenumPressure",
+        "plenumTemperature"
+      ]
+    },
+    "JsonBounds": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "min": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "JsonGrading": {
+      "description": "[`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is\nuniform; a present one is validated and lowered by\n[`apply_axis_grading`].",
+      "type": "object",
+      "properties": {
+        "x": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "y": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "z": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGradingAxis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonGradingAxis": {
+      "description": "One axis's worth of [`crate::blockgen::GradedAxis`] grading:\n`expansion` is the ratio `GradedAxis::expansion` documents (last cell over\nfirst for one-sided, centre over wall for `twoSided`) and must be\nstrictly positive - `0` or negative is not a cell-size ratio for any\nmesh, checked in [`apply_axis_grading`] rather than left for `blockgen` to\nsilently degenerate to uniform (`GradedAxis::default`'s own `!(r > 0)`\nguard exists so a bad ratio never produces NaN coordinates, not so a bad\ncase file goes unnoticed - SPEC-LIT §13.4).",
+      "type": "object",
+      "properties": {
+        "expansion": {
+          "type": "number",
+          "format": "double"
+        },
+        "twoSided": {
+          "description": "`true`: grade symmetrically toward BOTH ends of the axis (a channel's\ntwo walls); `false` (the default - most cases graded toward only one\nend, e.g. a pipe's single wall or a boundary layer growing off one\nplate, name that explicitly rather than leaving it to a default that\nsilently picks a physical setup for them): one-sided, `hi`'s cell\n`expansion` times `lo`'s.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expansion"
+      ]
+    }
+  }
+}

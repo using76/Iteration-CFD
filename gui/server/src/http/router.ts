@@ -75,6 +75,25 @@ export function readBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<
   })
 }
 
+/** readBody for bytes: the attachment upload route needs the raw multipart body, not utf-8 text. */
+export function readRawBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new HttpError(413, `request body larger than ${limit} bytes`))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
 export function errorToResponse(err: unknown): { status: number; body: Record<string, unknown> } {
   if (err instanceof WorkspaceError) {
     const status = err.code === 'OUTSIDE_WORKSPACE' ? 403 : err.code === 'NOT_FOUND' ? 404 : 400
