@@ -331,7 +331,7 @@ def load_config(path):
         cfg['pool_specs'] = {}
         for pname, spec in list(cfg['points'].items()):
             if isinstance(spec, dict):
-                extra = set(spec) - {'x', 'y', 'r', 'r_inner', 'h'}
+                extra = set(spec) - {'x', 'y', 'r', 'r_inner', 'h', 'z_min'}
                 if extra:
                     errors.append('config.points.%s: unknown keys %s' % (pname, sorted(extra)))
                 if not (_is_num(spec.get('x')) and _is_num(spec.get('y'))):
@@ -349,8 +349,17 @@ def load_config(path):
                 if not _is_num(h) or h < 0:
                     errors.append('config.points.%s.h: expected a height >= 0 (0 = flat disc)' % pname)
                     continue
+                # z_min: the ground scan under this point starts here instead of GROUND_SCAN[0], so
+                # a source drawn ON a building's roof lands on the roof (the first fluid ABOVE the
+                # solid) instead of on the ground beneath it - which would cut the cylinder through
+                # the building and break the boundary recovery (eight_inlets, 2026-09-17)
+                zmin = spec.get('z_min', None)
+                if zmin is not None and not _is_num(zmin):
+                    errors.append('config.points.%s.z_min: expected a height in metres' % pname)
+                    continue
                 cfg['pool_specs'][pname] = {'x': float(spec['x']), 'y': float(spec['y']),
-                                            'r': float(r), 'r_inner': float(ri), 'h': float(h)}
+                                            'r': float(r), 'r_inner': float(ri), 'h': float(h),
+                                            'z_min': None if zmin is None else float(zmin)}
                 cfg['points'][pname] = [float(spec['x']), float(spec['y'])]
             else:
                 _nums(spec, 2, 'config.points.%s' % pname, errors)
@@ -359,7 +368,7 @@ def load_config(path):
                 if ok:
                     cfg['pool_specs'][pname] = {'x': float(spec[0]), 'y': float(spec[1]),
                                                 'r': float(cfg['pool_radius_m']), 'r_inner': 0.0,
-                                                'h': 0.0}
+                                                'h': 0.0, 'z_min': None}
     if not _is_num(cfg['pool_radius_m']) or cfg['pool_radius_m'] <= 0:
         errors.append('config.pool_radius_m: expected a positive radius')
     if not isinstance(cfg['roof_patches'], dict):
@@ -1374,8 +1383,8 @@ def ground_stage(cfg, args, work):
     fluid = SUMMARY['fluid']
     z0, dz, z1 = GROUND_SCAN
 
-    def ground_z(x, y):
-        z = z0
+    def ground_z(x, y, z_min=None):
+        z = z0 if z_min is None else max(z0, z_min)
         while z < z1:
             if gmsh.model.isInside(3, fluid, [x, y, z]):
                 return z
@@ -1384,7 +1393,7 @@ def ground_stage(cfg, args, work):
 
     SUMMARY['points'] = {}
     for name, (x, y) in cfg['points'].items():
-        zg = ground_z(x, y)
+        zg = ground_z(x, y, cfg['pool_specs'][name].get('z_min'))
         SUMMARY['points'][name] = {'x': x, 'y': y, 'z_ground': zg,
                                    'r': cfg['pool_specs'][name]['r'],
                                    'r_inner': cfg['pool_specs'][name]['r_inner'],

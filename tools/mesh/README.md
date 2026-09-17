@@ -156,7 +156,12 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "sea_z": 3.05,                          // flat faces at this height (± 0.06) -> wall_sea_surface
   "points": {"tank_shell": [-916.9, 349.8],   // refinement/pool points; ground found by isInside
              "qcdc_inner": {"x": 18.5, "y": -7.5, "r": 10.5, "h": 0.5},    // its own radius; h > 0
-             "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5, "h": 0.5}},
+             "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5, "h": 0.5},
+             "roof_src":   {"x": -922.0, "y": 343.0, "r": 9.0, "h": 0.5, "z_min": 9.95}},  // z_min: the ground scan
+                                                                          // starts here, so a source drawn on a
+                                                                          // building lands on its ROOF (the first
+                                                                          // fluid above the solid), not on the
+                                                                          // ground under it
                                           // raises the pool: the circle is pulled up h into a
                                           // cylinder cut from the fluid, its top is the pool
                                           // patch and its side the wall patch wall_pool_<name>;
