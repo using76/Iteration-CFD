@@ -7,8 +7,8 @@
 #   python fluent_check.py <mesh.msh> [geometry.json]
 # Checks: header counts vs bodies; every face's cells exist; each cell closes (sum of its outward
 # face vectors ~ 0) and has positive volume; total volume = box - tetrahedron; boundary faces have
-# exactly one cell and their right-hand normal points OUT of the domain; the c0/c1 orientation
-# convention actually used is measured, not assumed (Fluent accepts thumb toward c0, the inverse of B.3.7's sentence); every zone's
+# exactly one cell and their right-hand normal obeys the same c0/c1 convention the internal faces
+# use - measured, not assumed (Fluent accepts thumb toward c0, the inverse of B.3.7's sentence); every zone's
 # faces lie on the plane or solid they are named after.
 import re, sys, json
 import numpy as np
@@ -82,14 +82,19 @@ for i, (z, nd, c0, c1) in enumerate(faces):
 closure = np.linalg.norm(acc[1:], axis=1) / np.maximum(np.abs(vol[1:]), 1e-300) ** (2 / 3)
 print('cells: volume min %.3e max %.3e total %.6f; negative %d; closure max %.2e' % (vol[1:].min(), vol[1:].max(), vol[1:].sum(), (vol[1:] <= 0).sum(), closure.max()))
 ok = (vol[1:] > 0).all() and closure.max() < 1e-9
-# boundary faces: one cell, normal outward
+# boundary faces: one cell, and the normal obeys the SAME convention the internal faces measured -
+# thumb toward c1 means the normal points out of its one cell; thumb toward c0 (what Fluent accepts,
+# and what the converter writes since 2026-09-10) means it points into it. A boundary face that
+# disagrees with the internal convention is the defect this check exists to catch.
 bnd = [i for i, f in enumerate(faces) if (f[2] == 0) != (f[3] == 0)]
 outward = 0
 for i in bnd:
     z, nd, c0, c1 = faces[i]; c = c0 or c1
     outward += np.dot(S[i], C[i] - cent[c]) > 0
-print('boundary faces %d: normal points out of its cell on %d; c1 == 0 on %d' % (len(bnd), outward, sum(1 for i in bnd if faces[i][3] == 0)))
-ok = ok and outward == len(bnd)
+consistent = outward if rule_c1 else len(bnd) - outward
+print('boundary faces %d: normal points out of its cell on %d, into it on %d; c1 == 0 on %d; consistent with the internal convention on %d' % (
+    len(bnd), outward, len(bnd) - outward, sum(1 for i in bnd if faces[i][3] == 0), consistent))
+ok = ok and consistent == len(bnd)
 if geo:
     v_expect = geo['v_fluid']
     print('expected fluid volume %.6f (box %.1f - tet %.6f): difference %.2e' % (v_expect, geo['v_box'], geo['v_tet'], vol[1:].sum() - v_expect))
