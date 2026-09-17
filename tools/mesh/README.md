@@ -157,7 +157,11 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "points": {"tank_shell": [-916.9, 349.8],   // refinement/pool points; ground found by isInside
              "qcdc_inner": {"x": 18.5, "y": -7.5, "r": 10.5, "h": 0.5},    // its own radius; h > 0
              "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5, "h": 0.5},
-             "roof_src":   {"x": -922.0, "y": 343.0, "r": 9.0, "h": 0.5, "z_min": 9.95}},  // z_min: the ground scan
+             "roof_src":   {"x": -922.0, "y": 343.0, "r": 9.0, "h": 0.5, "z_min": 9.95},   // z_min: the ground scan
+             "wall_only":  {"x": -22.0, "y": -269.0, "r": 9.0, "h": 0.5, "size": 1.0}},    // size: this point's box
+                                                                          // size instead of sizes.pool (a
+                                                                          // cylinder kept as a wall can be
+                                                                          // coarser than the one that emits)
                                                                           // starts here, so a source drawn on a
                                                                           // building lands on its ROOF (the first
                                                                           // fluid above the solid), not on the

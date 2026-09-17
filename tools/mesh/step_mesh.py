@@ -331,7 +331,7 @@ def load_config(path):
         cfg['pool_specs'] = {}
         for pname, spec in list(cfg['points'].items()):
             if isinstance(spec, dict):
-                extra = set(spec) - {'x', 'y', 'r', 'r_inner', 'h', 'z_min'}
+                extra = set(spec) - {'x', 'y', 'r', 'r_inner', 'h', 'z_min', 'size'}
                 if extra:
                     errors.append('config.points.%s: unknown keys %s' % (pname, sorted(extra)))
                 if not (_is_num(spec.get('x')) and _is_num(spec.get('y'))):
@@ -357,9 +357,16 @@ def load_config(path):
                 if zmin is not None and not _is_num(zmin):
                     errors.append('config.points.%s.z_min: expected a height in metres' % pname)
                     continue
+                # size: this point's own box size instead of sizes.pool, so a source that is only
+                # a wall (a cylinder kept for its shape) can be coarser than the one that emits
+                psize = spec.get('size', None)
+                if psize is not None and (not _is_num(psize) or psize <= 0):
+                    errors.append('config.points.%s.size: expected a positive cell size in metres' % pname)
+                    continue
                 cfg['pool_specs'][pname] = {'x': float(spec['x']), 'y': float(spec['y']),
                                             'r': float(r), 'r_inner': float(ri), 'h': float(h),
-                                            'z_min': None if zmin is None else float(zmin)}
+                                            'z_min': None if zmin is None else float(zmin),
+                                            'size': None if psize is None else float(psize)}
                 cfg['points'][pname] = [float(spec['x']), float(spec['y'])]
             else:
                 _nums(spec, 2, 'config.points.%s' % pname, errors)
@@ -368,7 +375,7 @@ def load_config(path):
                 if ok:
                     cfg['pool_specs'][pname] = {'x': float(spec[0]), 'y': float(spec[1]),
                                                 'r': float(cfg['pool_radius_m']), 'r_inner': 0.0,
-                                                'h': 0.0, 'z_min': None}
+                                                'h': 0.0, 'z_min': None, 'size': None}
     if not _is_num(cfg['pool_radius_m']) or cfg['pool_radius_m'] <= 0:
         errors.append('config.pool_radius_m: expected a positive radius')
     if not isinstance(cfg['roof_patches'], dict):
@@ -1837,7 +1844,8 @@ def groups_and_fields_stage(cfg):
         zg = SUMMARY['points'][name]['z_ground']
         half = max(POINT_BOX[0], cfg['pool_specs'][name]['r'] + 15.0)   # a big pool widens its box
         fields.append(box(x - half, x + half, y - half, y + half,
-                          zg - POINT_BOX[1], zg + POINT_BOX[2], cfg['sizes']['pool'],
+                          zg - POINT_BOX[1], zg + POINT_BOX[2],
+                          cfg['pool_specs'][name].get('size') or cfg['sizes']['pool'],
                           POINT_BOX[3]))                                  # pool + first 10 m
         fields.append(box(x - POINT_BOX_FAR[0], x + POINT_BOX_FAR[0],
                           y - POINT_BOX_FAR[0], y + POINT_BOX_FAR[0],
