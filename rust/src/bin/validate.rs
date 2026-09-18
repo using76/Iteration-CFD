@@ -46,8 +46,9 @@
 //!    question with a unique answer, so this measures arithmetic, not physics;
 //! 4. a **manufactured solution** (Roache 1998) solved end to end and refined,
 //!    with the observed order of convergence measured;
-//! 5. **published experimental or benchmark data**, at the bottom of the file
-//!    and `#[ignore]`d so it does not slow the normal run.
+//! 5. **published experimental or benchmark data** - Ghia's cavity as a live
+//!    three-mesh section (Gate 94-D) and the tabulated gates, each key read
+//!    from a file under reference/ where one exists, its sha256 printed.
 //!
 //! Exit code 0 means every check passed, 1 that one did not, 2 that the run
 //! could not be completed at all.
@@ -3061,8 +3062,8 @@ fn run(c: &mut Checks) -> Result<()> {
     // had not fully settled (|U| residual ~5e-2, plateauing on the
     // periodic pressure equation's own null space, SPEC-LIT §31.1) even
     // then. That disqualifies it from both this fast, always-run suite and
-    // from `published_benchmarks`' own ignored-but-quick convention (the
-    // Ghia cavity cases below finish in seconds) - a live multi-minute GPU
+    // from the always-run cavity section (Gate 94-D, three meshes per Re,
+    // its wall time printed) - a live multi-minute GPU
     // run belongs in a driver invocation a human chooses to make, not in
     // `cargo test`. What IS cheap - and unconditionally true regardless of
     // any live run - is the damping functions' own analytic table.
@@ -3231,6 +3232,10 @@ fn run(c: &mut Checks) -> Result<()> {
     // SPEC-LIT S97 - the imported region, and Gate 97-A.
     c.enter_gate("S97 Gate 97-A imported region");
     check_imported_region(c, &gpu)?;
+    c.leave_gate();
+    println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
+    c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
+    published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
     c.leave_gate();
     c.replaying(check_kays_crawford_experiment_replay);
 
@@ -11928,18 +11933,17 @@ const BOUNDED_AFTER_S261: [BoundedRun; 2] = [
 // ==========================================================================
 //  Published benchmarks
 //
-//  These run a whole flow to steady state and take minutes, so they are
-//  `#[ignore]`d and never slow `cargo test`. Run them with
+//  The published-benchmark section `run` calls: the lid-driven cavity of
+//  Ghia, Ghia & Shin (1982) as Gate 94-D (SPEC-LIT §94.4), live on three
+//  meshes per Reynolds number and in the always-run suite since K3, its
+//  answer key read from `reference/` through the answer-key reader.
 //
-//      cargo test --release --bin ofgpu-validate -- --ignored --nocapture
-//
-//  They are the only place in this file where the answer is compared with
+//  This is the only place in this file where the answer is compared with
 //  numbers somebody else produced - and those numbers are *published
 //  benchmark data*, not the output of another program we ran. SPEC-LIT
 //  section 0 rule 4 forbids the second, not the first.
 // ==========================================================================
 
-#[cfg(test)]
 mod published_benchmarks {
     use super::*;
     use ofgpu::fv::interpolate_vector_flux;
@@ -12371,6 +12375,11 @@ mod published_benchmarks {
         (worst_u, worst_v)
     }
 
+    /// SPEC-LIT §94.4 Gate 94-D: §10's lid-driven cavity row, run live on
+    /// three meshes per Reynolds number against Ghia, Ghia & Shin (1982)
+    /// Tables I and II, read from `reference/` through the answer-key reader
+    /// with its sha256 printed at the top of the section.
+    ///
     /// The printed table is the evidence; the tolerance is the tripwire.
     ///
     /// Ghia's numbers come from a 129 x 129 grid and a different
@@ -12381,33 +12390,245 @@ mod published_benchmarks {
     /// speed of 1 is roughly three times the difference actually observed at
     /// 80 x 80, and a solver with a sign error, a broken wall condition or a
     /// first-order convection scheme misses by an order of magnitude more.
-    fn run_case(re: Scalar, n: usize, iters: usize, tol: f64) {
-        let gpu = Gpu::new(0).expect("no CUDA device");
-        let k = Kernels::new(&gpu).expect("kernels");
-        let g = key::ghia_1982().expect("Ghia key");
-        for k in &g.keys {
-            println!("{}", k.digest_line());
+    pub(super) fn check_ghia_cavity(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
+        let key = match key::ghia_1982() {
+            Ok(key) => key,
+            Err(why) => {
+                let why = why.to_string();
+                c.note(&why);
+                c.report(GateReport {
+                    verdict: Verdict::Open,
+                    how: How::Live,
+                    gate: "SPEC-LIT 94.4 Gate 94-D lid-driven cavity",
+                    against: "Ghia, Ghia & Shin (1982) Tables I and II",
+                    headline: "the answer key is absent from reference/, so no comparison was run"
+                        .to_string(),
+                    detail: vec![why],
+                    uncertainty: Some(Uncertainty::SingleMesh(
+                        "no mesh was run: the answer key was absent",
+                    )),
+                });
+                return Ok(());
+            }
+        };
+        for kf in &key.keys {
+            c.note(&kf.digest_line());
+        }
+        check_ghia_cavity_on(c, gpu, k, &key, &[40, 56, 80], &[(100.0, 3000), (400.0, 6000)])
+    }
+
+    /// The worker behind [`check_ghia_cavity`]: the mesh sizes and the
+    /// (Re, iteration budget) list are parameters so the smoke test can run
+    /// the same section on tiny meshes in seconds. `ns` must be strictly
+    /// increasing; the finest level - the one the check rows and the (94.10)
+    /// lines stand on - is the last.
+    fn check_ghia_cavity_on(
+        c: &mut Checks,
+        gpu: &Gpu,
+        k: &Kernels,
+        key: &key::Ghia,
+        ns: &[usize],
+        res: &[(Scalar, usize)],
+    ) -> Result<()> {
+        use ofgpu::vv::{self, Level};
+        assert!(
+            !ns.is_empty() && ns.windows(2).all(|w| w[0] < w[1]),
+            "ns must be strictly increasing, finest last: {ns:?}"
+        );
+        for &(re, max_iters) in res {
+            let (u_table, v_table, v_skip) = match key.columns(re as u32) {
+                Some(cols) => cols,
+                None => {
+                    c.require(
+                        &format!("Gate 94-D Re {}: the key tabulates this Reynolds number", re),
+                        false,
+                    );
+                    continue;
+                }
+            };
+            let mut lv_u: Vec<Level> = Vec::new();
+            let mut lv_v: Vec<Level> = Vec::new();
+            let mut du = 0.0f64;
+            let mut dv = 0.0f64;
+            for &n in ns {
+                let t = std::time::Instant::now();
+                let (m, u, resid, its) = cavity(gpu, k, re, n, max_iters)?;
+                let secs = t.elapsed().as_secs_f64();
+                c.note(&format!(
+                    "Re {}: {} x {}, {} SIMPLE iterations, momentum residual {:.3e}, {:.1} s",
+                    re, n, n, its, resid, secs
+                ));
+                let label = format!("lid-driven cavity, Re = {}, {n} x {n}", f64::from(re));
+                let (worst_u, worst_v) = compare(&m, &u, n, key, re as u32, &label);
+                du = worst_u;
+                dv = worst_v;
+                let uc = Sampled::new(&m, &u, n, 0, [0.0, 0.0, 0.0, 1.0]).at(0.5, 0.5);
+                let vc = Sampled::new(&m, &u, n, 1, [0.0, 0.0, 0.0, 0.0]).at(0.5, 0.5);
+                let h = vv::h_of(1.0, m.n_cells, 2)?;
+                lv_u.push(Level { h, value: uc as Scalar });
+                lv_v.push(Level { h, value: vc as Scalar });
+            }
+            // The rows a verdict stands on are the FINEST level's (§94.7).
+            let n_finest = ns[ns.len() - 1];
+            let erratum = if v_skip.is_empty() { "" } else { ", erratum station excluded" };
+            let name_u = format!(
+                "Gate 94-D Re {}: worst |u - Ghia| over Table I at {n_finest} x {n_finest}, lid speed 1",
+                re
+            );
+            let name_v = format!(
+                "Gate 94-D Re {}: worst |v - Ghia| over Table II at {n_finest} x {n_finest}, lid speed 1{erratum}",
+                re
+            );
+            c.check(&name_u, du as Scalar, 0.02);
+            c.check(&name_v, dv as Scalar, 0.02);
+            let missed = !(du <= 0.02 && du.is_finite()) || !(dv <= 0.02 && dv.is_finite());
+
+            // The §94 declaration, judged by nobody: u and v at the cavity
+            // centre - the one station both tables print exactly - each with a
+            // three-level study and (94.10)'s E +/- u_val against the datum.
+            lv_u.reverse();
+            lv_v.reverse();
+            let study_u = vv::grid_study(&lv_u);
+            let study_v = vv::grid_study(&lv_v);
+            let iu = key.y.iter().position(|&y| y == 0.5);
+            let iv = key.x.iter().position(|&x| x == 0.5);
+            let ns_txt = ns.iter().rev().map(|n| n.to_string()).collect::<Vec<_>>().join("/");
+            let vals = |lv: &[Level]| {
+                lv.iter().map(|l| format!("{:.5}", l.value)).collect::<Vec<_>>().join(" / ")
+            };
+            let mut six: Vec<String> = Vec::new();
+            six.push(format!("  u at (0.5, 0.5), levels {}: {}", ns_txt, vals(&lv_u)));
+            match &study_u {
+                Ok(s) => {
+                    six.push(format!("  {}", s.one_line()));
+                    match iu {
+                        Some(i) => {
+                            let val =
+                                vv::validation(lv_u[0].value, u_table[i] as Scalar, s.u_fine, 0.0, 0.0);
+                            six.push(format!(
+                                "  {}",
+                                val.one_line("u at the cavity centre, finest mesh")
+                            ));
+                        }
+                        None => six.push("  the key tabulates no y = 0.5 station".to_string()),
+                    }
+                }
+                Err(e) => six.push(format!("  study refused by name: {e}")),
+            }
+            six.push(format!("  v at (0.5, 0.5), levels {}: {}", ns_txt, vals(&lv_v)));
+            match &study_v {
+                Ok(s) => {
+                    six.push(format!("  {}", s.one_line()));
+                    match iv {
+                        Some(i) => {
+                            let val =
+                                vv::validation(lv_v[0].value, v_table[i] as Scalar, s.u_fine, 0.0, 0.0);
+                            six.push(format!(
+                                "  {}",
+                                val.one_line("v at the cavity centre, finest mesh")
+                            ));
+                        }
+                        None => six.push("  the key tabulates no x = 0.5 station".to_string()),
+                    }
+                }
+                Err(e) => six.push(format!("  study refused by name: {e}")),
+            }
+            for line in &six {
+                c.note(line);
+            }
+            let detail = six;
+            c.require(
+                &format!(
+                    "Gate 94-D Re {}: both three-level studies at the cavity centre could be formed (SPEC-LIT 94.1)",
+                    re
+                ),
+                study_u.is_ok() && study_v.is_ok(),
+            );
+            c.require(
+                &format!("Gate 94-D Re {}: the key tabulates the centre station", re),
+                iu.is_some() && iv.is_some(),
+            );
+            if missed {
+                let uncertainty = match study_u {
+                    Ok(s) => Some(Uncertainty::Study(s)),
+                    Err(_) => Some(Uncertainty::SingleMesh(
+                        "three meshes were run but the finest triplet was refused by name; the reason is printed above",
+                    )),
+                };
+                c.report(GateReport {
+                    verdict: Verdict::Misses,
+                    how: How::Live,
+                    gate: "SPEC-LIT 94.4 Gate 94-D lid-driven cavity",
+                    against: "Ghia, Ghia & Shin (1982) Tables I and II, 129 x 129 grid, centreline profiles",
+                    headline: format!(
+                        "Re {re}: worst |du| {du:.4}, worst |dv| {dv:.4} at {n_finest} x {n_finest} against 0.02"
+                    ),
+                    detail,
+                    uncertainty,
+                });
+            }
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// This file's own text at compile time.
+        const SRC: &str = include_str!("validate.rs");
+
+        #[test]
+        fn nothing_in_this_file_is_ignored_any_more() {
+            assert_eq!(
+                SRC.matches(concat!("#[", "ignore")).count(),
+                0,
+                "an ignore attribute crept back in: the published benchmarks run live"
+            );
         }
 
-        let (m, u, res, its) = cavity(&gpu, &k, re, n, iters).expect("cavity");
-        let label = format!("lid-driven cavity, Re = {}, {n} x {n}", f64::from(re));
-        println!("\n{label}: {its} SIMPLE iterations, momentum residual {res:.3e}");
-
-        let (du, dv) = compare(&m, &u, n, &g, re as u32, &label);
-        assert!(du < tol, "u centreline differs from Ghia by {du:.4} (> {tol})");
-        assert!(dv < tol, "v centreline differs from Ghia by {dv:.4} (> {tol})");
-    }
-
-    #[test]
-    #[ignore = "runs a flow to steady state; minutes, not seconds"]
-    fn ghia_lid_driven_cavity_re_100() {
-        run_case(100.0, 80, 3000, 0.02);
-    }
-
-    #[test]
-    #[ignore = "runs a flow to steady state; minutes, not seconds"]
-    fn ghia_lid_driven_cavity_re_400() {
-        run_case(400.0, 80, 6000, 0.02);
+        #[test]
+        fn the_sampler_returns_walls_and_the_bilinear_centre() {
+            let m = make_mesh(
+                &scratch_dir("sampler4"),
+                &MeshSpec {
+                    n: [4, 4, 1],
+                    l: [1.0, 1.0, 0.25],
+                    two_d: true,
+                    ..Default::default()
+                },
+            )
+            .expect("mesh");
+            let mut u = Vec::new();
+            for cell in m.c.iter() {
+                u.push(Vec3::new(cell.x, 0.0, 0.0));
+            }
+            // Walls in `-x +x -y +y` order: here the +x wall carries 1.
+            let s = Sampled::new(&m, &u, 4, 0, [0.0, 1.0, 0.0, 0.0]);
+            assert!((s.at(0.5, 0.5) - 0.5).abs() < 1e-12);
+            assert_eq!(s.at(0.0, 0.3), 0.0);
+            assert_eq!(s.at(1.0, 0.5), 1.0);
+            assert!((s.at(0.375, 0.5) - 0.375).abs() < 1e-12);
+        }
+        #[test]
+        fn the_cavity_section_runs_end_to_end_on_tiny_meshes() {
+            let Ok(gpu) = Gpu::new(0) else { return };
+            let k = Kernels::new(&gpu).expect("kernels");
+            let key = key::ghia_1982().expect("the Ghia key is tracked in reference/");
+            let mut c = Checks::new();
+            c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
+            let ran = check_ghia_cavity_on(&mut c, &gpu, &k, &key, &[8, 12, 16], &[(100.0, 60)]);
+            assert!(ran.is_ok(), "the section did not run to the end: {ran:?}");
+            assert!(
+                c.transcript.borrow().iter().any(|(l, _)| l.contains("E = S - D"))
+                    || c
+                        .transcript
+                        .borrow()
+                        .iter()
+                        .any(|(l, _)| l.contains("study refused by name")),
+                "neither a (94.10) line nor a named study refusal in the transcript"
+            );
+            assert!(c.total >= 3, "expected at least 3 rows, got {}", c.total);
+        }
     }
 }
 
@@ -18764,7 +18985,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 13 occurrences, 12 distinct - one gate reports twice.
+    /// same string. 15 occurrences, 13 distinct - two gates report twice.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
     #[test]
@@ -18789,9 +19010,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 13, "13 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 15, "15 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 12, "12 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 13, "13 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
