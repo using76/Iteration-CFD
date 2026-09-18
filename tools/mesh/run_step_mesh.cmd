@@ -3,8 +3,8 @@ rem meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations 
 rem Source-available, not Open Source. See LICENSE at the repository root.
 rem No GPL-licensed source was consulted.
 rem
-rem run_step_mesh.cmd - run step_mesh.py in THIS console, with every line of its
-rem output also copied to <out_dir>/work/run.log.
+rem run_step_mesh.cmd - run step_mesh.py in THIS console, with every line of its stdout and
+rem stderr, in order, also copied to <out_dir>/work/run.log (gmsh's own "Info :" lines: console only).
 rem
 rem     run_step_mesh.cmd <config.json> [--from-checkpoint] [--stop-after-checkpoint]
 rem                       [--tag NAME] [--dry-run]

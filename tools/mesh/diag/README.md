@@ -15,7 +15,7 @@
 | `inspect_point.py <pools.brep> x y z [pad]` | 체크포인트 | 그 점 주변의 솔리드(bbox)·유체 경계면·곡선·정점 |
 | `scan_near_vertices.py <pools.brep> [tol]` | 체크포인트 | 1 mm~tol 근접 정점 쌍과 소속 솔리드, 거리 히스토그램 |
 | `inspect_ring_curves.py <pools.brep> cx cy r` | 체크포인트 | 풀 원기둥 주변 면·곡선·중복 곡선·정점 |
-| `variant_from_checkpoint.py <case.json> <name> key=value…` | 설정 + 체크포인트 | 체크포인트 사본으로 변형 설정 작성(`mesh.algo3d=10`이면 HXT가 실패 정점 좌표를 찍는다) |
+| `variant_from_checkpoint.py <case.json> <name> key=value…` | 설정 + 체크포인트 | 체크포인트 사본으로 변형 설정 작성 — 사본은 설정의 out_dir/work에서 가져오고(<case dir>/mesh 가정 없음), 없으면 이름을 대고 거부(mesh.algo3d=10이면 HXT가 실패 정점 좌표를 찍는다) |
 | `fluent_invert.py in.msh out.msh` | Fluent ASCII 격자 | 모든 면의 절점 순서 반전(c0/c1 유지) — 방향 규약 시험 |
 | `polymesh_to_fluent.py` | polyMesh | foamMeshToFluent 규약의 파이썬 Fluent 작성기 |
 | `export_fluid.py <brep> <out> [--trim z] [--stl-size m] [--stl-only]` | 체크포인트 | 유체 영역을 STEP(mm, 1솔리드)·STL(m)로 |
