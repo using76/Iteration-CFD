@@ -1,5 +1,5 @@
 // Thin fetch wrappers over the REST routes in shared/protocol.ts.
-import { REST, type FsFileResponse, type FsSearchHit, type FsTreeNode, type GeometryInfo, type LlmSettingsPatch, type LlmStateView, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
+import { REST, type FsFileResponse, type FsSearchHit, type FsTreeNode, type GeometryInfo, type GeometryOpenResponse, type GeometrySaveRequest, type LlmSettingsPatch, type LlmStateView, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
 import type { BinarySpec, MeshPreset, ModelSpec } from '@cfd/shared'
 
 export class ApiError extends Error {
@@ -65,6 +65,15 @@ export interface SearchResponse {
   filesScanned: number
 }
 
+/** Reply of POST /api/geometry/edit (geom_tool edit): no id — re-import `path`. */
+export interface GeometryEditResponse {
+  path: string
+  solids: Array<{ tag: number; name: string; volume: number; material: string | null }>
+  applied: string[]
+  stdout: string[]
+  toolMs: number
+}
+
 export const api = {
   tree: (path: string, depth = 1) => request<FsTreeNode>('GET', withQuery(REST.fsTree, { path, depth })),
   readFile: (path: string) => request<FsFileResponse>('GET', withQuery(REST.fsFile, { path })),
@@ -92,4 +101,10 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, `${key} blob failed`, null)
     return res.arrayBuffer()
   },
+  /** Bake the local edits into a written STL; the reply re-opens the written file. */
+  geometrySave: (id: string, body: GeometrySaveRequest) =>
+    request<GeometryOpenResponse>('POST', `${REST.geometry}/${encodeURIComponent(id)}/save`, body),
+  /** Run a geom_edit boolean on a STEP; the reply carries no id — re-import `path`. */
+  geometryEdit: (body: { path: string; ops: string; out: string; overwrite: boolean | null }) =>
+    request<GeometryEditResponse>('POST', `${REST.geometry}/edit`, body),
 }
