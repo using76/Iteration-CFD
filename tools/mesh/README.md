@@ -159,7 +159,16 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "sea_z": 3.05,                          // flat faces at this height (± 0.06) -> wall_sea_surface
   "points": {"tank_shell": [-916.9, 349.8],   // refinement/pool points; ground found by isInside
              "qcdc_inner": {"x": 18.5, "y": -7.5, "r": 10.5, "h": 0.5},    // its own radius; h > 0
-             "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5, "h": 0.5}},
+             "qcdc_ring":  {"x": 18.5, "y": -7.5, "r": 22.1, "r_inner": 10.5, "h": 0.5},
+             "roof_src":   {"x": -922.0, "y": 343.0, "r": 9.0, "h": 0.5, "z_min": 9.95},   // z_min: the ground scan
+             "wall_only":  {"x": -22.0, "y": -269.0, "r": 9.0, "h": 0.5, "size": 1.0}},    // size: this point's box
+                                                                          // size instead of sizes.pool (a
+                                                                          // cylinder kept as a wall can be
+                                                                          // coarser than the one that emits)
+                                                                          // starts here, so a source drawn on a
+                                                                          // building lands on its ROOF (the first
+                                                                          // fluid above the solid), not on the
+                                                                          // ground under it
                                           // raises the pool: the circle is pulled up h into a
                                           // cylinder cut from the fluid, its top is the pool
                                           // patch and its side the wall patch wall_pool_<name>;
@@ -470,14 +479,38 @@ plus Turek-Hron level 2 under `tempfile.mkdtemp` and asserts the M5 table;
 - STEP units are whatever `scale` says they are; the tool never inspects the
   file's unit declaration, it just multiplies.
 
+## The Fluent converter: `ofgpu-convert-mesh` is the official one
+
+`ofgpu-convert-mesh` (`rust/src/bin/convert_mesh.rs`) is the repository's mesh converter and
+the only supported way to take a Gmsh `.msh` to ANSYS Fluent. One call writes both targets:
+
+```
+ofgpu-convert-mesh <mesh.msh> <caseDir> [-type <patch>=<type>]... [-fluent <out.msh>] [-fluentType <patch>=<zone>]... [-keepRegions]
+```
+
+`<caseDir>/constant/polyMesh` for the in-house solver, and with `-fluent` an ASCII Fluent mesh
+whose zones default from the patch names (`wall*` -> wall, `symmetry*` -> symmetry, `east`,
+`inlet*`, `*_source` -> velocity-inlet, else pressure-outlet) and can be set per patch with
+`-fluentType`. Every face's node order is written reversed (thumb toward c0, boundary normals
+into the cell), because that is the convention Fluent 2022 R2 accepted on 2026-09-10 - see
+the next section for the record. The Fluent writer is tet-only and single-zone; a mesh with
+prisms, pyramids or hexahedra converts to polyMesh but refuses `-fluent` by name.
+
+A built copy ships with every release as an asset (`ofgpu-convert-mesh.exe`,
+https://github.com/using76/Iteration-CFD/releases); a copy dated before 2026-09-10 08:44 lacks
+the node-order fix and writes a mesh Fluent reports as every cell negative - replace it.
+`mesh_case.sh` and `run_step_mesh.cmd` call this converter; the site recipes under
+`examples/` and the pool cases on the Desktop were converted with it.
+
 ## Checking a Fluent mesh independently
 
 `tester_mesh.py [size]` builds a small known case - a hexahedral fluid box with a tetrahedral
 solid cut out of its middle - and `fluent_check.py <mesh.msh> [tester_tet_geometry.json]`
 parses any Fluent ASCII mesh from scratch, rebuilds every cell from its faces and checks that
 each cell closes and has positive volume, that the total volume is the box minus the
-tetrahedron, that boundary faces have one cell and point outwards, which c0/c1 orientation
-the file follows (ANSYS B.3.7: the right-hand normal points toward c1), and that every zone
+tetrahedron, that boundary faces have one cell and obey the same c0/c1 convention the internal
+faces do (measured, not assumed; ANSYS B.3.7's sentence says thumb toward c1, Fluent accepts
+the inverse), and that every zone
 lies on the plane or solid it is named after.
 
 ```
