@@ -4,13 +4,14 @@
 // steps and no color maps, and the results viewer assumes it has all three.
 // The camera is framed on the model's bounds center, so what the operator
 // asked to see is in the middle of the pane, not drifting off-corner.
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import type { GeometryInfo } from '@cfd/shared'
 import { api } from '../../api/rest'
 import { basename, useT } from '../../app/hooks'
+import { displayName, matrixOf, useGeometryStore } from '../../state/geometryStore'
 
 interface SceneRefs {
   renderer: THREE.WebGLRenderer
@@ -18,6 +19,8 @@ interface SceneRefs {
   camera: THREE.PerspectiveCamera
   controls: OrbitControls
   mesh: THREE.Mesh | null
+  /** One material per solid (draw groups); swapped and disposed with the mesh. */
+  materials: THREE.MeshStandardMaterial[]
   helpers: THREE.Object3D[]
   raf: number
 }
@@ -39,7 +42,9 @@ export function GeometryTab({ path, active }: { path: string; active: boolean })
   const refsRef = useRef<SceneRefs | null>(null)
   const activeRef = useRef(active)
   activeRef.current = active
-  const [load, setLoad] = useState<{ state: 'loading' | 'error' | 'ready'; message?: string; info?: GeometryInfo; stepNote?: string }>({ state: 'loading' })
+  // The studio state this tab edits — part visibility, selection, renames and
+  // the transform cursor — lives in the geometry store, keyed by this path.
+  const entry = useGeometryStore((s) => s.byPath[path])
   const isStep = /\.ste?p$/i.test(path)
 
   // One renderer per tab mount; the mesh and helpers are swapped per load.
@@ -62,7 +67,7 @@ export function GeometryTab({ path, active }: { path: string; active: boolean })
     const key = new THREE.DirectionalLight(0xffffff, 1.6)
     key.position.set(1, 2, 1.5)
     scene.add(key, new THREE.HemisphereLight(0xdfe8f2, 0x30363d, 1.1))
-    const refs: SceneRefs = { renderer, scene, camera, controls, mesh: null, helpers: [], raf: 0 }
+    const refs: SceneRefs = { renderer, scene, camera, controls, mesh: null, materials: [], helpers: [], raf: 0 }
     refsRef.current = refs
     const ro = new ResizeObserver(() => {
       const w = mount.clientWidth || 1
@@ -91,19 +96,51 @@ export function GeometryTab({ path, active }: { path: string; active: boolean })
     }
   }, [])
 
-  // Load the geometry whenever the path changes; swap the mesh into the scene.
+  // Load the geometry whenever the path changes: open/import through the REST
+  // api and land the info in the store; the meshes are built by the id effect
+  // below and the overlay reads the store.
   useEffect(() => {
     let cancelled = false
-    setLoad({ state: 'loading' })
+    useGeometryStore.getState().begin(path)
+    ;(async () => {
+      try {
+        // geometry/open answers { id, info }; import-step answers the info
+        // itself (with the STEP provenance folded in) — normalise to info.
+        const res = isStep ? await api.geometryImportStep(path) : await api.geometryOpen(path)
+        if (cancelled) return
+        const info = 'info' in res ? res.info : res
+        useGeometryStore.getState().setLoaded(path, { id: info.id, info })
+      } catch (err) {
+        if (!cancelled) useGeometryStore.getState().setError(path, err instanceof Error ? err.message : String(err))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [path, isStep])
+
+  // TabHost keeps every tab mounted and merely hidden when inactive, so this
+  // runs only when the tab is closed: drop the studio entry with it.
+  useEffect(() => () => useGeometryStore.getState().close(path), [path])
+
+  // Build the meshes when a load lands (the entry id changes): one group and
+  // one material per solid, so parts can be toggled and highlighted singly.
+  useEffect(() => {
+    const refs = refsRef.current
+    const ent = entry
+    if (!refs || ent == null || ent.id == null || ent.info == null) return
+    const id: string = ent.id
+    const info: GeometryInfo = ent.info
+    let cancelled = false
     const clearScene = () => {
-      const refs = refsRef.current
-      if (!refs) return
       if (refs.mesh) {
         refs.scene.remove(refs.mesh)
         refs.mesh.geometry.dispose()
-        ;(refs.mesh.material as THREE.Material).dispose()
-        refs.mesh = null
       }
+      // One material per solid: dispose the whole old set on every swap.
+      for (const m of refs.materials) m.dispose()
+      refs.materials = []
+      refs.mesh = null
       for (const h of refs.helpers) refs.scene.remove(h)
       refs.helpers = []
     }
@@ -135,60 +172,81 @@ export function GeometryTab({ path, active }: { path: string; active: boolean })
     }
     ;(async () => {
       try {
-        // geometry/open answers { id, info }; import-step answers the info
-        // itself (with the STEP provenance folded in) — normalise to info.
-        const res = isStep ? await api.geometryImportStep(path) : await api.geometryOpen(path)
-        if (cancelled) return
-        const info = 'info' in res ? res.info : res
         const [posBuf, idxBuf, nrmBuf] = await Promise.all([
-          api.geometryBlob(info.id, 'positions'),
-          api.geometryBlob(info.id, 'indices'),
-          api.geometryBlob(info.id, 'normals'),
+          api.geometryBlob(id, 'positions'),
+          api.geometryBlob(id, 'indices'),
+          api.geometryBlob(id, 'normals'),
         ])
         if (cancelled) return
-        const positions = new Float32Array(posBuf)
-        const indices = new Uint32Array(idxBuf)
-        const normals = new Float32Array(nrmBuf)
         const geometry = new THREE.BufferGeometry()
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-        geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
-        geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(posBuf), 3))
+        geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nrmBuf), 3))
+        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(idxBuf), 1))
         geometry.computeBoundingSphere()
-        const material = new THREE.MeshStandardMaterial({ color: MESH_COLOR, metalness: 0.15, roughness: 0.6, side: THREE.DoubleSide, flatShading: true })
-        const mesh = new THREE.Mesh(geometry, material)
-        const refs = refsRef.current
-        if (refs) {
-          clearScene()
-          refs.mesh = mesh
-          refs.scene.add(mesh)
-          fitCamera(info)
-        }
-        setLoad({ state: 'ready', info, stepNote: isStep ? `${info.solids.length} solid` : undefined })
+        const mkMaterial = () =>
+          new THREE.MeshStandardMaterial({ color: MESH_COLOR, metalness: 0.15, roughness: 0.6, side: THREE.DoubleSide, flatShading: true })
+        const materials = info.solids.map(() => mkMaterial())
+        if (info.solids.length === 0) materials.push(mkMaterial())
+        // One draw group per solid (first/count are triangle offsets, three
+        // indices per triangle), so material k draws solid k.
+        info.solids.forEach((sol, k) => geometry.addGroup(sol.first * 3, sol.count * 3, k))
+        if (info.solids.length === 0) geometry.addGroup(0, geometry.getIndex()?.count ?? 0, 0)
+        const mesh = new THREE.Mesh(geometry, materials)
+        // The composed studio matrix is pushed by the sync effect below; three
+        // must not overwrite it from the identity position/quaternion/scale.
+        mesh.matrixAutoUpdate = false
+        clearScene()
+        refs.mesh = mesh
+        refs.materials = materials
+        refs.scene.add(mesh)
+        fitCamera(info)
       } catch (err) {
-        if (!cancelled) setLoad({ state: 'error', message: err instanceof Error ? err.message : String(err) })
+        if (!cancelled) useGeometryStore.getState().setError(path, err instanceof Error ? err.message : String(err))
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [path, isStep])
+    // The id pins the fetch; the info it carries belongs to that id.
+  }, [entry?.id])
 
-  const solids = useMemo(() => load.info?.solids ?? [], [load.info])
+  // Mirror the studio state onto the scene on every store write: per-part
+  // visibility and the selection highlight, then the composed transform. A
+  // mirror edit (det3 < 0) reverses the winding; the material is DoubleSide,
+  // so the part still shows — indices are deliberately left alone.
+  useEffect(() => {
+    const refs = refsRef.current
+    if (!refs || !entry) return
+    for (let k = 0; k < refs.materials.length; k++) {
+      const sol = (entry.info?.solids ?? [])[k]
+      refs.materials[k].visible = sol ? !entry.hidden.includes(sol.name) : true
+      refs.materials[k].emissive.setHex(entry.selected === sol?.name ? 0x2a4d7a : 0x000000)
+    }
+    const mesh = refs.mesh
+    if (!mesh) return
+    mesh.matrix.set(...(matrixOf(entry) as unknown as Parameters<THREE.Matrix4['set']>))
+    mesh.matrixWorldNeedsUpdate = true
+  }, [entry])
+
+  const solids = useMemo(() => entry?.info?.solids ?? [], [entry?.info])
+  const error = entry?.status === 'error' ? entry.error : null
+  const ready = entry?.status === 'ready' && entry.info ? entry : null
+  const dirty = entry != null && (entry.cursor > 0 || Object.keys(entry.names).length > 0)
 
   return (
     <div className="geometry-tab" data-testid="geometry-tab" style={{ position: 'relative', width: '100%', height: '100%', minHeight: 0 }}>
       <div ref={mountRef} style={{ position: 'absolute', inset: 0 }} />
-      {load.state === 'loading' ? (
+      {ready == null && error == null ? (
         <div className="geometry-overlay" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}>
           <span className="spinner" /> <span style={{ marginLeft: 8 }}>{isStep ? t('geometry.importing') : t('geometry.loading', { name: basename(path) })}</span>
         </div>
       ) : null}
-      {load.state === 'error' ? (
+      {error != null ? (
         <div className="geometry-overlay error-note" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', padding: 24 }}>
-          {t('geometry.failed', { message: load.message ?? '' })}
+          {t('geometry.failed', { message: error })}
         </div>
       ) : null}
-      {load.state === 'ready' && load.info ? (
+      {ready && ready.info ? (
         <div
           className="geometry-info"
           style={{ position: 'absolute', left: 12, top: 12, padding: '8px 10px', fontSize: 'var(--fs-xs)', lineHeight: 1.6, background: 'color-mix(in srgb, var(--bg-panel) 85%, transparent)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', pointerEvents: 'none' }}
@@ -197,13 +255,21 @@ export function GeometryTab({ path, active }: { path: string; active: boolean })
             {path}
           </div>
           <div style={{ opacity: 0.75 }}>
-            {load.info.format} · {load.info.triangleCount.toLocaleString()} △ · {solids.length} solid
+            {ready.info.format} · {ready.info.triangleCount.toLocaleString()} △ · {solids.length} solid
           </div>
-          {solids.slice(0, 8).map((s) => (
-            <div key={s.name + s.first} style={{ opacity: 0.65 }}>
-              {s.closed ? '◆' : '◇'} {s.name} · V {fmt(s.volume)}
-            </div>
-          ))}
+          <div style={{ opacity: 0.75 }}>
+            {t('geometry.history')} {ready.cursor}
+            {dirty ? ' •' : ''}
+          </div>
+          {solids.slice(0, 8).map((s) => {
+            const hidden = ready.hidden.includes(s.name)
+            return (
+              <div key={s.name + s.first} style={{ opacity: hidden ? 0.3 : 0.65 }}>
+                {s.closed ? '◆' : '◇'} {ready.selected === s.name ? '▶ ' : ''}
+                {displayName(ready, s.name)} · V {fmt(s.volume)}
+              </div>
+            )
+          })}
         </div>
       ) : null}
     </div>

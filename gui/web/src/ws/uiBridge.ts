@@ -8,6 +8,7 @@
 import type { ClientMsg, UiCommand, UiState } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
 import { actions, activeCasePath } from './actions'
+import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
 import type { useSessionStore } from '../state/sessionStore'
 import type { useUiStore } from '../state/uiStore'
 
@@ -29,8 +30,20 @@ const FIELD_MAP: Record<string, { name: string; component: 'magnitude' | null }>
   Pressure: { name: 'p', component: null },
 }
 
-const GEOMETRY_EDIT_TYPES = new Set(['geometry_part', 'geometry_transform', 'geometry_boolean', 'geometry_save'])
-const NO_GEOMETRY_EDITS = 'editing geometry on screen (part visibility, transforms, booleans, save) is not implemented in the web studio yet; geometry_open / geometry_import_step do work'
+/** The four geometry edit ui.commands this screen applies through the
+ *  geometry studio store (E1). */
+type GeometryUiCommand = Extract<UiCommand, { type: 'geometry_part' | 'geometry_transform' | 'geometry_boolean' | 'geometry_save' }>
+
+const asVec3 = (v: unknown): v is [number, number, number] => Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number')
+
+/** A number s becomes [s, s, s]; a Vec3 must be all non-zero. */
+const asScale = (v: unknown): [number, number, number] | null => {
+  if (typeof v === 'number') return v === 0 ? null : [v, v, v]
+  if (asVec3(v) && v.every((x) => x !== 0)) return v
+  return null
+}
+
+const partResult = (err: string | null): { ok: true } | { ok: false; error: string } => (err == null ? { ok: true } : { ok: false, error: err })
 
 function unsupported(type: string, why: string): { ok: false; error: string } {
   return { ok: false, error: `UNSUPPORTED (${type}): ${why}` }
@@ -38,6 +51,16 @@ function unsupported(type: string, why: string): { ok: false; error: string } {
 
 export function createUiBridge(deps: UiBridgeDeps) {
   const { send, ui, session } = deps
+
+  /** The geometry tab a command targets and gui_state reports: the active tab
+   *  when it is a geometry tab, else the first geometry tab. */
+  function targetGeometryPath(): string | null {
+    const u = ui.getState()
+    const active = u.tabs.find((t) => t.id === u.activeTabId)
+    if (active?.kind === 'geometry') return active.path
+    const first = u.tabs.find((t) => t.kind === 'geometry')
+    return first?.kind === 'geometry' ? first.path : null
+  }
 
   /** What the model's gui_state reads. Every required field is filled; the
    *  nullable ones this app cannot know stay null rather than being guessed. */
@@ -61,13 +84,15 @@ export function createUiBridge(deps: UiBridgeDeps) {
       tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind })),
       run: null,
       viewer: null,
-      // The open geometry tab, if any: the model reads this to know car.step
-      // (or whatever) is on screen without driving the screen blind.
+      // The target geometry tab's live studio state; a tab whose store entry
+      // has not landed yet still reports its path so gui_state is never blind.
       geometry: (() => {
-        const geoTab = u.tabs.find((t) => t.kind === 'geometry')
-        return geoTab && geoTab.kind === 'geometry'
-          ? { id: null, path: geoTab.path, triangleCount: null, closed: null, openEdges: null, solids: [], selected: null, edits: 0, dirty: false }
-          : null
+        const geoPath = targetGeometryPath()
+        if (geoPath == null) return null
+        const entry = useGeometryStore.getState().byPath[geoPath]
+        return entry
+          ? uiGeometryState(entry)
+          : { id: null, path: geoPath, triangleCount: null, closed: null, openEdges: null, solids: [], selected: null, edits: 0, dirty: false }
       })(),
       problems: Object.values(s.problems).reduce((n, list) => n + list.length, 0),
       connection: s.connection === 'online' ? 'connected' : s.connection,
@@ -77,6 +102,69 @@ export function createUiBridge(deps: UiBridgeDeps) {
 
   function reportState(): void {
     send({ t: 'ui.state', state: snapshot() })
+  }
+
+  /** The four geometry edit commands, applied through the store keyed by the
+   *  target tab's path. Thrown errors — the store's refusals, the save
+   *  route's 409/400 text — propagate to handleCommand's catch, which answers
+   *  ok: false with err.message unchanged. */
+  async function geometryCommand(cmd: GeometryUiCommand): Promise<{ ok: true } | { ok: false; error: string }> {
+    const path = targetGeometryPath()
+    if (path == null) return { ok: false, error: 'no geometry tab is open; geometry_open or geometry_import_step first' }
+    const g = useGeometryStore.getState()
+    const entry = g.byPath[path]
+    if (!entry || entry.status === 'loading') return { ok: false, error: `geometry "${path}" is still loading; try again` }
+    if (entry.status === 'error') return { ok: false, error: `geometry "${path}" failed to open: ${entry.error}` }
+    switch (cmd.type) {
+      case 'geometry_part':
+        return partResult(g.setPart(path, cmd.name, cmd.action, cmd.newName ?? null))
+      case 'geometry_transform': {
+        const op = cmd.op
+        if (op === 'undo') return g.undo(path) ? { ok: true } : { ok: false, error: 'nothing to undo' }
+        if (op === 'redo') return g.redo(path) ? { ok: true } : { ok: false, error: 'nothing to redo' }
+        if (op === 'reset') {
+          g.reset(path)
+          return { ok: true }
+        }
+        if (op === 'translate') {
+          if (!asVec3(cmd.value)) return { ok: false, error: 'translate needs value [x,y,z] in metres' }
+          g.pushEdit(path, { kind: 'translate', t: cmd.value })
+        } else if (op === 'rotate') {
+          if (!asVec3(cmd.value)) return { ok: false, error: 'rotate needs value [ax,ay,az] in degrees' }
+          g.pushEdit(path, { kind: 'rotate', deg: cmd.value, pivot: cmd.pivot ?? 'centre' })
+        } else if (op === 'scale') {
+          const s = asScale(cmd.value)
+          if (!s) return { ok: false, error: 'scale needs one non-zero factor or [sx,sy,sz]' }
+          g.pushEdit(path, { kind: 'scale', s, pivot: cmd.pivot ?? 'centre' })
+        } else {
+          if (!asVec3(cmd.value) || (cmd.value[0] === 0 && cmd.value[1] === 0 && cmd.value[2] === 0)) {
+            return { ok: false, error: 'mirror needs a non-zero plane normal [nx,ny,nz]' }
+          }
+          g.pushEdit(path, { kind: 'mirror', normal: cmd.value, pivot: cmd.pivot ?? 'centre' })
+        }
+        return { ok: true }
+      }
+      case 'geometry_boolean': {
+        const cur = g.byPath[path]
+        if (!cur || cur.info == null || cur.info.source?.kind !== 'step') {
+          return unsupported('geometry_boolean', 'booleans run only on a STEP geometry; this tab opened ' + path + ' - geometry_import_step a .step first')
+        }
+        const { out } = await g.boolean(path, cmd.op, cmd.a, cmd.b)
+        ui.getState().openGeometryTab(out)
+        return { ok: true }
+      }
+      case 'geometry_save': {
+        const reply = await g.save(path, {
+          path: cmd.path,
+          binary: cmd.binary ?? null,
+          keepVisibleOnly: cmd.keepVisibleOnly === true,
+          overwrite: cmd.overwrite === true,
+        })
+        ui.getState().openGeometryTab(reply.info.path)
+        if (reply.asciiForced) session.getState().addNote('info', 'saved as ASCII STL so the part names survive')
+        return { ok: true }
+      }
+    }
   }
 
   /** The tab label a tree step or chart name matches against, best effort. */
@@ -199,6 +287,12 @@ export function createUiBridge(deps: UiBridgeDeps) {
         // its own loading/error state on screen.
         ui.getState().openGeometryTab(cmd.path)
         return { ok: true }
+      case 'geometry_part':
+      case 'geometry_transform':
+      case 'geometry_boolean':
+      case 'geometry_save':
+        // The studio's own edits (E1): real edits through the geometry store.
+        return geometryCommand(cmd)
       case 'open_panel':
         if (cmd.panel === 'AI Assistant') {
           if (!ui.getState().assistantVisible) ui.getState().toggleAssistant()
@@ -219,7 +313,6 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'select_step':
         return unsupported(cmd.type, 'this screen does not implement it')
       default:
-        if (GEOMETRY_EDIT_TYPES.has(cmd.type)) return unsupported(cmd.type, NO_GEOMETRY_EDITS)
         return unsupported(cmd.type, 'this screen does not implement it')
     }
   }
