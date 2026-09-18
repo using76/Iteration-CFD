@@ -1682,6 +1682,7 @@ mod tests {
     //  Lid-driven cavity - Ghia, Ghia & Shin (1982)
     // ----------------------------------------------------------------------
 
+    // answer-key: ghia1982-simple
     /// `u` along the vertical centreline at `Re = 100`, from Table I of
     /// **U. Ghia, K. N. Ghia, C. T. Shin, *J. Comput. Phys.* 48 (1982)
     /// 387-411**. `(y, u)`, `y` measured from the stationary floor and `u`

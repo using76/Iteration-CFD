@@ -139,6 +139,7 @@ fn gate_52a_the_quadratic_operating_point_is_where_the_two_curves_cross() {
 //  §52.12 Gate 52-B - the FDS public-domain cross-check
 // ==========================================================================
 
+// answer-key: fds-fan-test
 /// `reference/fds/Verification/HVAC/fan_test.fds` + `fan_test.csv`.
 ///
 /// The fan duct there carries `LOSS=0,0`, so the fan's rise must equal the

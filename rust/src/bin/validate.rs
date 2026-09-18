@@ -16,8 +16,8 @@
 //!   Swarztrauber, SIAM Review 19 (1977) 490
 //!   Roache, "Verification and Validation in Computational Science and
 //!     Engineering" (1998) - the method of manufactured solutions
-//!   Ghia, Ghia & Shin, J. Comput. Phys. 48 (1982) 387 - the benchmark data
-//!     at the bottom of this file
+//!   Ghia, Ghia & Shin, J. Comput. Phys. 48 (1982) 387 - the benchmark data,
+//!     read from reference/ghia1982/ through validate_key (SPEC-LIT section 10)
 //!   Issa, J. Comput. Phys. 62 (1986) 40 - PISO, SPEC-LIT.md section 14
 //!   Rodi, J. Geophys. Res. 92 (1987) 5305, and Henkes, van der Vlugt &
 //!     Hoogendoorn, Int. J. Heat Mass Transfer 34 (1991) 377 - the buoyancy
@@ -98,6 +98,9 @@ mod common;
 
 #[path = "validate_json/mod.rs"]
 mod json;
+
+#[path = "validate_key/mod.rs"]
+mod key;
 
 use common::sci;
 
@@ -5997,6 +6000,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     {
         const N: usize = 50;
         let nu = run_kp_document(gpu, &dvd_document(N, 1.0e4, 4000, 1e-7), N, false)?;
+        // answer-key: devahldavis1983
         // de Vahl Davis (1983), Int. J. Numer. Meth. Fluids 3, 249-264, quoted
         // from Qi et al., Nanoscale Research Letters 8 (2013) 56, Table 3
         // (open access), which lists it beside two other codes'.
@@ -6056,6 +6060,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         use ofgpu::vv;
         const N: usize = 40;
         const RA: Scalar = 1.0e4;
+        // answer-key: belazizia2012
         // Belazizia et al. (2012) Fig. 6, at Ra = 1e4, D = 0.2, Pr = 0.7.
         const PUBLISHED: [(Scalar, Scalar); 3] = [(0.1, 0.41), (1.0, 1.57), (10.0, 2.28)];
 
@@ -6242,6 +6247,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 //  §79.12's Disclosure 2.
 // ==========================================================================
 
+// answer-key: qu-mudawar2002
 /// Qu & Mudawar's Table 1, in metres, and the three band edges the nine boxes
 /// of §79.8 are cut on.
 const QM_L: f64 = 10.0e-3;
@@ -6258,6 +6264,7 @@ const QM_RHO: f64 = 998.2;
 const QM_CP: f64 = 4182.0;
 const QM_MU: f64 = 1.002e-3;
 
+// answer-key: qu-mudawar2002-fig4
 /// The digitisation of Qu & Mudawar Fig. 4(b) and 4(c) at `Re ~ 140`, in
 /// `C cm^2/W` - SPEC-LIT (79.14). Kawano *et al.*'s marker, the two ends of
 /// its error bar, and Qu & Mudawar's own prediction curve.
@@ -11948,66 +11955,9 @@ mod published_benchmarks {
     //
     //  Unit square, lid at y = 1 moving in +x at u = 1, Re = U L / nu.
     //  Their solutions are on a 129 x 129 uniform grid.
+    //  The tables are reference/ghia1982/table_I_u.csv and table_II_v.csv (see reference/PROVENANCE.md).
     // ----------------------------------------------------------------------
 
-    /// Table I, the `y` column.
-    const GHIA_Y: [f64; 17] = [
-        1.0000, 0.9766, 0.9688, 0.9609, 0.9531, 0.8516, 0.7344, 0.6172, 0.5000,
-        0.4531, 0.2813, 0.1719, 0.1016, 0.0703, 0.0625, 0.0547, 0.0000,
-    ];
-
-    /// Table I, `u` at Re = 100.
-    const GHIA_U_RE100: [f64; 17] = [
-        1.00000, 0.84123, 0.78871, 0.73722, 0.68717, 0.23151, 0.00332, -0.13641,
-        -0.20581, -0.21090, -0.15662, -0.10150, -0.06434, -0.04775, -0.04192,
-        -0.03717, 0.00000,
-    ];
-
-    /// Table I, `u` at Re = 400.
-    const GHIA_U_RE400: [f64; 17] = [
-        1.00000, 0.75837, 0.68439, 0.61756, 0.55892, 0.29093, 0.16256, 0.02135,
-        -0.11477, -0.17119, -0.32726, -0.24299, -0.14612, -0.10338, -0.09266,
-        -0.08186, 0.00000,
-    ];
-
-    /// Table II, the `x` column.
-    const GHIA_X: [f64; 17] = [
-        1.0000, 0.9688, 0.9609, 0.9531, 0.9453, 0.9063, 0.8594, 0.8047, 0.5000,
-        0.2344, 0.2266, 0.1563, 0.0938, 0.0781, 0.0703, 0.0625, 0.0000,
-    ];
-
-    /// Table II, `v` at Re = 100.
-    const GHIA_V_RE100: [f64; 17] = [
-        0.00000, -0.05906, -0.07391, -0.08864, -0.10313, -0.16914, -0.22445,
-        -0.24533, 0.05454, 0.17527, 0.17507, 0.16077, 0.12317, 0.10890, 0.10091,
-        0.09233, 0.00000,
-    ];
-
-    /// Table II, `v` at Re = 400.
-    ///
-    /// The entry at `x = 0.9063`, `-0.23827`, is reproduced here as the paper
-    /// prints it, and it is **wrong in the paper**. It breaks the monotone run
-    /// between `-0.22847` at `x = 0.9453` and the profile's minimum
-    /// `-0.44993` at `x = 0.8594`, where every neighbouring Reynolds number
-    /// varies smoothly, and it is the only station in either table at which
-    /// this solver misses by more than 0.007. Other authors have noticed:
-    /// Nilsson & Wallin, *Lid driven cavity flow using finite difference and
-    /// radial basis function methods*, Uppsala University report 22015 (2022)
-    /// section 5.2, exclude "the reference y-velocity value at x = 0.9063 with
-    /// Re = 400" from their own comparison for the same reason.
-    ///
-    /// It is kept in the constant because the constant is a transcription of
-    /// the paper, not an edited version of it; [`GHIA_V_RE400_ERRATUM`] names
-    /// the station the comparison leaves out.
-    const GHIA_V_RE400: [f64; 17] = [
-        0.00000, -0.12146, -0.15663, -0.19254, -0.22847, -0.23827, -0.44993,
-        -0.38598, 0.05188, 0.30174, 0.30203, 0.28124, 0.22965, 0.20920, 0.19713,
-        0.18360, 0.00000,
-    ];
-
-    /// Index into [`GHIA_X`] of the station excluded from the Re = 400
-    /// `v` comparison; see [`GHIA_V_RE400`]. Nothing else is ever excluded.
-    const GHIA_V_RE400_ERRATUM: &[usize] = &[5];
 
     // ----------------------------------------------------------------------
     //  Sampling a structured 2-D field
@@ -12378,24 +12328,23 @@ mod published_benchmarks {
     ///
     /// `v_skip` names stations of Table II left out of the *worst-difference*
     /// figure; they are still printed, marked, so nothing is hidden. Only the
-    /// erratum of [`GHIA_V_RE400`] is ever passed here.
-    #[allow(clippy::too_many_arguments)]
+    /// Re = 400 erratum station of Table II is ever passed here.
     fn compare(
         m: &HostMesh,
         u: &[Vec3],
         n: usize,
-        u_table: &[f64; 17],
-        v_table: &[f64; 17],
-        v_skip: &[usize],
+        g: &key::Ghia,
+        re: u32,
         label: &str,
     ) -> (f64, f64) {
+        let (u_table, v_table, v_skip) = g.columns(re).expect("Re is 100 or 400");
         // No slip on -x, +x and -y; the lid on +y carries u = 1, v = 0.
         let us = Sampled::new(m, u, n, 0, [0.0, 0.0, 0.0, 1.0]);
         let vs = Sampled::new(m, u, n, 1, [0.0, 0.0, 0.0, 0.0]);
 
         println!("\n{label}  -- Ghia, Ghia & Shin (1982) Table I, u at x = 0.5");
         let mut worst_u = 0.0f64;
-        for (i, y) in GHIA_Y.iter().enumerate() {
+        for (i, y) in g.y.iter().enumerate() {
             let got = us.at(0.5, *y);
             let want = u_table[i];
             worst_u = worst_u.max((got - want).abs());
@@ -12404,7 +12353,7 @@ mod published_benchmarks {
 
         println!("\n{label}  -- Table II, v at y = 0.5");
         let mut worst_v = 0.0f64;
-        for (i, x) in GHIA_X.iter().enumerate() {
+        for (i, x) in g.x.iter().enumerate() {
             let got = vs.at(*x, 0.5);
             let want = v_table[i];
             let skipped = v_skip.contains(&i);
@@ -12432,24 +12381,19 @@ mod published_benchmarks {
     /// speed of 1 is roughly three times the difference actually observed at
     /// 80 x 80, and a solver with a sign error, a broken wall condition or a
     /// first-order convection scheme misses by an order of magnitude more.
-    #[allow(clippy::too_many_arguments)]
-    fn run_case(
-        re: Scalar,
-        n: usize,
-        iters: usize,
-        u_t: &[f64; 17],
-        v_t: &[f64; 17],
-        v_skip: &[usize],
-        tol: f64,
-    ) {
+    fn run_case(re: Scalar, n: usize, iters: usize, tol: f64) {
         let gpu = Gpu::new(0).expect("no CUDA device");
         let k = Kernels::new(&gpu).expect("kernels");
+        let g = key::ghia_1982().expect("Ghia key");
+        for k in &g.keys {
+            println!("{}", k.digest_line());
+        }
 
         let (m, u, res, its) = cavity(&gpu, &k, re, n, iters).expect("cavity");
         let label = format!("lid-driven cavity, Re = {}, {n} x {n}", f64::from(re));
         println!("\n{label}: {its} SIMPLE iterations, momentum residual {res:.3e}");
 
-        let (du, dv) = compare(&m, &u, n, u_t, v_t, v_skip, &label);
+        let (du, dv) = compare(&m, &u, n, &g, re as u32, &label);
         assert!(du < tol, "u centreline differs from Ghia by {du:.4} (> {tol})");
         assert!(dv < tol, "v centreline differs from Ghia by {dv:.4} (> {tol})");
     }
@@ -12457,21 +12401,13 @@ mod published_benchmarks {
     #[test]
     #[ignore = "runs a flow to steady state; minutes, not seconds"]
     fn ghia_lid_driven_cavity_re_100() {
-        run_case(100.0, 80, 3000, &GHIA_U_RE100, &GHIA_V_RE100, &[], 0.02);
+        run_case(100.0, 80, 3000, 0.02);
     }
 
     #[test]
     #[ignore = "runs a flow to steady state; minutes, not seconds"]
     fn ghia_lid_driven_cavity_re_400() {
-        run_case(
-            400.0,
-            80,
-            6000,
-            &GHIA_U_RE400,
-            &GHIA_V_RE400,
-            GHIA_V_RE400_ERRATUM,
-            0.02,
-        );
+        run_case(400.0, 80, 6000, 0.02);
     }
 }
 
