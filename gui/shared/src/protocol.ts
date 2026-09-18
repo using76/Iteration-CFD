@@ -147,6 +147,38 @@ export const ServerHelloSchema = z.object({
 })
 export type ServerHello = z.infer<typeof ServerHelloSchema>
 
+/** Where the key the server would use came from; the raw key never leaves the server. */
+export const LlmKeyViewSchema = z.object({
+  set: z.boolean(),
+  source: z.enum(['ui', 'env', 'file']).nullable(),
+})
+export type LlmKeyView = z.infer<typeof LlmKeyViewSchema>
+
+/** The redacted LLM state the settings UI reads: which provider is live, which keys exist, never the keys themselves. */
+export const LlmStateViewSchema = z.object({
+  /** The provider the next turn will stream from. */
+  provider: z.enum(['anthropic', 'zai', 'mock']),
+  /** The model id the next turn will name. */
+  model: z.string(),
+  keys: z.object({
+    anthropic: LlmKeyViewSchema,
+    zai: LlmKeyViewSchema,
+  }),
+  /** The model ids currently configured per provider (what the model inputs prefill). */
+  models: z.object({ anthropic: z.string(), zai: z.string() }),
+})
+export type LlmStateView = z.infer<typeof LlmStateViewSchema>
+
+/** Body of POST /api/llm/settings. A present field replaces the stored value; null clears it; undefined leaves it untouched. */
+export const LlmSettingsPatchSchema = z.object({
+  provider: z.enum(['anthropic', 'zai', 'mock']).nullable().optional(),
+  anthropicKey: z.string().nullable().optional(),
+  zaiKey: z.string().nullable().optional(),
+  anthropicModel: z.string().nullable().optional(),
+  zaiModel: z.string().nullable().optional(),
+})
+export type LlmSettingsPatch = z.infer<typeof LlmSettingsPatchSchema>
+
 // ---------------------------------------------------------------------------
 // Sessions and the UI projection of the conversation
 // ---------------------------------------------------------------------------
@@ -732,6 +764,8 @@ export const DatasetProgressSchema = z.object({
 
 export const ServerMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('hello'), hello: ServerHelloSchema, sessions: z.array(SessionSummarySchema), runs: z.array(RunInfoSchema) }),
+  /** The LLM provider/model changed at runtime (POST /api/llm/settings); hello carries the same values on the next connect. */
+  z.object({ t: z.literal('llm.changed'), llm: LlmStateViewSchema }),
   z.object({ t: z.literal('pong'), ts: z.number() }),
   z.object({ t: z.literal('error'), message: z.string(), fatal: z.boolean() }),
 
@@ -791,6 +825,7 @@ export type { DatasetProgress }
 export const REST = {
   health: '/api/health',
   hello: '/api/hello',
+  llmSettings: '/api/llm/settings',
   registry: '/api/registry',
   caseSchema: '/api/schema/case-1.json',
   fsTree: '/api/fs/tree',

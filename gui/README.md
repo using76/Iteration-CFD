@@ -38,6 +38,10 @@ npm run dev
 
 브라우저에서 <http://127.0.0.1:5173> 을 엽니다(서버는 8787 포트, Vite가 `/api`·`/ws`를 프록시). 프로덕션 빌드는 `npm run build` 후 `npm start`(서버가 `web/dist`를 직접 서빙).
 
+### AI 어시스턴트 모델과 API 키
+
+어시스턴트는 **GLM 5.3 Flash(z.ai)** 와 **Claude Opus 5(Anthropic)** 를 기본으로 지원합니다. 웹 UI 우상단 **설정 → AI 모델** 에서 제공자를 고르고 API 키를 입력하면 서버가 즉시 전환합니다. 키는 이 컴퓨터의 `gui/config/llm.json`에만 저장되고(깃 이그노어, 다른 창에도 즉시 반영) 서버를 다시 시작해도 유지됩니다. 환경변수(`ANTHROPIC_API_KEY`, `ZAI_API_KEY`)로도 물론 가능하며, `CFD_LLM` 을 명시한 경우 그 지정이 가장 앞선다.
+
 환경변수 전체 목록은 [`.env.example`](.env.example)에 있습니다.
 
 ## 어시스턴트가 쓰는 도구

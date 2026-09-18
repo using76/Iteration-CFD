@@ -1,5 +1,5 @@
 // Thin fetch wrappers over the REST routes in shared/protocol.ts.
-import { REST, type FsFileResponse, type FsSearchHit, type FsTreeNode, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
+import { REST, type FsFileResponse, type FsSearchHit, type FsTreeNode, type GeometryInfo, type LlmSettingsPatch, type LlmStateView, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
 import type { BinarySpec, MeshPreset, ModelSpec } from '@cfd/shared'
 
 export class ApiError extends Error {
@@ -79,4 +79,17 @@ export const api = {
   sessions: () => request<SessionSummary[]>('GET', REST.sessions),
   session: (id: string) => request<SessionState>('GET', `${REST.sessions}/${encodeURIComponent(id)}`),
   residualsCsvUrl: (id: string) => `${REST.runs}/${encodeURIComponent(id)}/residuals.csv`,
+  llmSettings: () => request<LlmStateView>('GET', REST.llmSettings),
+  saveLlmSettings: (patch: LlmSettingsPatch) => request<LlmStateView>('POST', REST.llmSettings, patch),
+  /** Open an STL/OBJ surface in the geometry service (content-addressed cache). */
+  geometryOpen: (path: string) => request<{ id: string; info: GeometryInfo }>('POST', `${REST.geometry}/open`, { path }),
+  /** Convert a STEP to a measurable geometry; the reply carries the merged GeometryInfo (with id). */
+  geometryImportStep: (path: string, stlSize?: number | null) =>
+    request<GeometryInfo & { step: { path: string; solids: number; tags: number[]; warnings: string[] } }>('POST', `${REST.geometry}/import-step`, { path, tags: null, stlSize: stlSize ?? null }),
+  /** Raw binary blob (f32 positions/normals, u32 indices) for a geometry buffer. */
+  geometryBlob: async (id: string, key: 'positions' | 'indices' | 'normals'): Promise<ArrayBuffer> => {
+    const res = await fetch(`${REST.geometry}/${encodeURIComponent(id)}/blob/${key}`)
+    if (!res.ok) throw new ApiError(res.status, `${key} blob failed`, null)
+    return res.arrayBuffer()
+  },
 }

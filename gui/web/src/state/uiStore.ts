@@ -12,6 +12,7 @@ export type Tab =
   | { id: 'viewer'; kind: 'viewer' }
   | { id: 'residuals'; kind: 'residuals'; runId: string | null }
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
+  | { id: string; kind: 'geometry'; path: string }
 
 export type PanelLayout = Record<string, number>
 
@@ -53,6 +54,7 @@ export interface UiActions {
   openTab(tab: Tab): void
   openFile(path: string): void
   openViewerTab(): void
+  openGeometryTab(path: string): void
   openResidualsTab(runId: string | null): void
   openDiffTab(id: string, path: string, toolUseId: string | null): void
   closeTab(id: string): void
@@ -176,10 +178,16 @@ export const useUiStore = create<UiStore>()(
         set((s) => ({ tabs: upsertTab(s.tabs, tab), activeTabId: tab.id }))
       },
       openFile(path) {
-        get().openTab({ id: fileTabId(path), kind: 'file', path })
+        // Surface files are geometry, not text: a binary STL in the text editor
+        // is mojibake and a STEP is 60 KB of B-rep noise — show the 3D view.
+        if (/\.(step|stp|stl|obj)$/i.test(path)) get().openGeometryTab(path)
+        else get().openTab({ id: fileTabId(path), kind: 'file', path })
       },
       openViewerTab() {
         get().openTab({ id: 'viewer', kind: 'viewer' })
+      },
+      openGeometryTab(path) {
+        get().openTab({ id: `geometry:${path}`, kind: 'geometry', path })
       },
       openResidualsTab(runId) {
         set((s) => {

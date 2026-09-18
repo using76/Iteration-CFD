@@ -9,6 +9,7 @@ import { useSessionStore } from '../state/sessionStore'
 import type { Effect } from '../state/types'
 import { useUiStore } from '../state/uiStore'
 import { backoffDelay, encodeClientFrame, parseServerFrame, wsUrlFor } from './frames'
+import { createUiBridge } from './uiBridge'
 import { createViewerBridge, type ViewerBridge } from './viewerBridge'
 
 export const PING_INTERVAL_MS = 20_000
@@ -72,6 +73,10 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
   }
 
   const viewer = createViewerBridge(send, ui)
+  // The agent's gui_control drives this screen through ui.command; the bridge
+  // applies what it can and answers every command, so the model never waits
+  // out the hub's 5 s timeout on a frame nothing would ever answer.
+  const uiBridge = createUiBridge({ send, ui, session, subscribeRun })
 
   function subscribeRun(runId: string) {
     const data = session.getState().runData[runId]
@@ -141,6 +146,8 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
   function onHello() {
     attempt = 0
     session.getState().setConnection('online')
+    // gui_state reads the last reported screen; report it on every (re)connect.
+    uiBridge.reportState()
     openBestSession()
     // A new socket carries none of the old socket's subscriptions.
     subscribed.clear()
@@ -259,7 +266,14 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     }
     sock.onmessage = (ev) => {
       const msg = parseServerFrame(ev.data)
-      if (msg) enqueue(msg)
+      if (!msg) return
+      // gui_control waits on this client's reply; the store ignores the frame,
+      // so the bridge answers it before the batcher ever sees it.
+      if (msg.t === 'ui.command') {
+        void uiBridge.handleCommand(msg.requestId, msg.cmd)
+        return
+      }
+      enqueue(msg)
     }
     sock.onclose = () => {
       if (ws !== sock) return

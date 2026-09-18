@@ -4,8 +4,9 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, LlmSettingsPatchSchema, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, type LlmStateView, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
+import type { LlmSettingsHandle } from '../agent/llmSettings.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import { compileUserRegex, UnsafeRegexError } from '../regex.js'
@@ -39,6 +40,8 @@ export interface ApiDeps {
   agent: AgentService
   datasets: DatasetService
   schema: CaseSchema
+  /** The runtime LLM settings handle (main wires one); when absent the LLM settings routes report unavailable. */
+  llmSettings?: LlmSettingsHandle
   /** The OPTIONAL cht schema (the solver generates docs/schema/cht-1.json); a getter, so a test can flip it between assertions. */
   chtSchema?: () => CaseSchema | null
   gitStatus?: (cwd: string) => Promise<GitStatus>
@@ -120,12 +123,12 @@ const GeometrySaveSchema = z.object({
   overwrite: z.boolean().default(false),
 })
 
-export function buildHello(config: ServerConfig, runs: Pick<RunManager, 'gpu' | 'availableBinaries'>): ServerHello {
+export function buildHello(config: ServerConfig, runs: Pick<RunManager, 'gpu' | 'availableBinaries'>, llm?: Pick<LlmStateView, 'provider' | 'model'>): ServerHello {
   return {
     version: config.version,
     mode: config.demo ? 'demo' : 'real',
-    llm: config.llm,
-    model: config.model,
+    llm: llm?.provider ?? config.llm,
+    model: llm?.model ?? config.model,
     gpu: runs.gpu(),
     workspaceRoot: config.workspaceRoot,
     availableBinaries: runs.availableBinaries(),
@@ -147,7 +150,20 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
   const git = deps.gitStatus ?? defaultGitStatus
 
   router.get('/api/health', () => ({ ok: true, version: config.version, mode: config.demo ? 'demo' : 'real' }))
-  router.get('/api/hello', () => buildHello(config, runs))
+  router.get('/api/hello', () => buildHello(config, runs, deps.llmSettings?.view()))
+  // The redacted provider/key state the settings UI renders. The keys themselves never leave the server.
+  router.get('/api/llm/settings', () => {
+    if (!deps.llmSettings) throw new HttpError(503, 'llm settings unavailable')
+    return deps.llmSettings.view()
+  })
+  router.post('/api/llm/settings', async (ctx) => {
+    if (!deps.llmSettings) throw new HttpError(503, 'llm settings unavailable')
+    const patch = await ctx.json(LlmSettingsPatchSchema)
+    const view = await deps.llmSettings.apply(patch)
+    // Every open tab learns the provider changed; hello carries the same values on the next connect.
+    deps.hub.broadcast({ t: 'llm.changed', llm: view })
+    return view
+  })
   router.get('/api/registry', () => ({ binaries: BINARIES, pipelines: PIPELINES, models: MODELS, pickLists: schema.pickLists, meshPresets: MESH_PRESETS }))
   router.get('/api/schema/case-1.json', ({ res }) => {
     res.writeHead(200, { 'content-type': 'application/schema+json; charset=utf-8', 'cache-control': 'no-cache' })

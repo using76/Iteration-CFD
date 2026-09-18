@@ -163,6 +163,11 @@ export function applyEvent(state: SessionData, msg: ServerMsg, now: number = Dat
     }
     case 'pong':
       return { state, effects: NO_EFFECTS }
+    case 'llm.changed': {
+      // The provider/model the next turn uses; hello carries the same values on the next connect.
+      if (!state.hello) return { state, effects: NO_EFFECTS }
+      return { state: { ...state, hello: { ...state.hello, llm: msg.llm.provider, model: msg.llm.model } }, effects: NO_EFFECTS }
+    }
     case 'error': {
       const next = addOutput({ ...state, serverErrors: pushRing(state.serverErrors, [msg.message], 50) }, { level: 'error', text: msg.message, ts: now, origin: 'server' })
       return { state: next, effects: msg.fatal ? [{ type: 'fatal', message: msg.message }] : NO_EFFECTS }

@@ -6,6 +6,7 @@ import fsp from 'node:fs/promises'
 import { createAgentService } from './agent/service.js'
 import { ChatError, type AgentService } from './agent/types.js'
 import { loadConfig, type ServerConfig } from './config.js'
+import { createLlmSettingsHandle, loadLlmSettings, resolveEffectiveLlm } from './agent/llmSettings.js'
 import { createDatasetService } from './datasets/service.js'
 import type { DatasetService } from './datasets/types.js'
 import { startHostSampler } from './host.js'
@@ -79,14 +80,17 @@ function tryCreate<T>(what: string, create: () => T, fallback: (reason: string) 
 }
 
 function requireApiKey(config: ServerConfig, log: Logger): void {
-  if (config.llm === 'mock' || config.allowNoApiKey) return
-  if (config.llm === 'zai') {
-    if (config.zai?.key) return
-    log.error(`No z.ai API key. Set ZAI_API_KEY, or put the key in CFD_ZAI_KEY_FILE (default ${config.zai?.keyFile ?? '~/.claude/zai-key'}); or run CFD_LLM=anthropic with ANTHROPIC_API_KEY, or CFD_ALLOW_NO_API_KEY=1 / CFD_DEMO=1 for the scripted mock assistant.`)
+  // The stored settings count: a key entered through the UI and saved to
+  // config/llm.json is as good as an env key, including across restarts.
+  const eff = resolveEffectiveLlm(config, loadLlmSettings(config.configDir))
+  if (eff.provider === 'mock' || config.allowNoApiKey) return
+  if (eff.provider === 'zai') {
+    if (eff.zaiKey) return
+    log.error(`No z.ai API key. Enter one in the settings popover, set ZAI_API_KEY, or put the key in CFD_ZAI_KEY_FILE (default ${config.zai?.keyFile ?? '~/.claude/zai-key'}); or run CFD_LLM=anthropic with ANTHROPIC_API_KEY, or CFD_ALLOW_NO_API_KEY=1 / CFD_DEMO=1 for the scripted mock assistant.`)
     process.exit(1)
   }
-  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) return
-  log.error('No API key for the Anthropic client. Set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); or run CFD_LLM=zai with ZAI_API_KEY (or the key file ~/.claude/zai-key); or start with CFD_ALLOW_NO_API_KEY=1 / CFD_LLM=mock / CFD_DEMO=1 to use the scripted mock assistant.')
+  if (eff.anthropicKey) return
+  log.error('No API key for the Anthropic client. Enter one in the settings popover, or set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); or run CFD_LLM=zai with ZAI_API_KEY (or the key file ~/.claude/zai-key); or start with CFD_ALLOW_NO_API_KEY=1 / CFD_LLM=mock / CFD_DEMO=1 to use the scripted mock assistant.')
   process.exit(1)
 }
 
@@ -94,6 +98,9 @@ function requireApiKey(config: ServerConfig, log: Logger): void {
 export async function startStudioServer(config: ServerConfig = loadConfig(), log: Logger = createLogger(config.logLevel)): Promise<StudioServer> {
   requireApiKey(config, log)
   await Promise.all([config.sessionsDir, config.runsDir, config.cacheDir, config.configDir].map((d) => fsp.mkdir(d, { recursive: true })))
+  // The runtime provider/key handle: reads config/llm.json once, rebuilds the
+  // client when the settings UI applies a change, and is what hello reports.
+  const llmSettings = createLlmSettingsHandle(config, log.child('llm'))
 
   const schema = loadCaseSchema(schemaCandidates(config.workspaceRoot, config.guiDir))
   setCaseSchema(schema)
@@ -112,7 +119,7 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
 
   let agent: AgentService | null = null
   const hub = createHub({
-    hello: () => buildHello(config, runs),
+    hello: () => buildHello(config, runs, llmSettings.view()),
     sessions: () => agent?.listSessions() ?? [],
     runs,
     log: log.child('ws'),
@@ -158,7 +165,7 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
   const hostSampler = startHostSampler(hub, log.child('host'))
   const problems = createProblemsTracker({ runs, hub })
 
-  agent = tryCreate('agent service', () => createAgentService({ config, hub, runs, datasets }), unavailableAgent, log)
+  agent = tryCreate('agent service', () => createAgentService({ config, hub, runs, datasets, llmSettings }), unavailableAgent, log)
   hub.onClientMessage(async (client, msg) => {
     await agent!.handleClientMessage(client, msg)
   })
@@ -177,10 +184,11 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
   }
 
   // ---- http ---------------------------------------------------------------
-  const router = registerApiRoutes(new Router(), { config, hub, runs, agent, datasets, schema, chtSchema: () => chtSchema })
+  const router = registerApiRoutes(new Router(), { config, hub, runs, agent, datasets, schema, chtSchema: () => chtSchema, llmSettings })
   const httpServer = createHttpServer({ config, router, hub, staticDir: webDistDir(config), log: log.child('http') })
   const address = await httpServer.listen()
-  log.info(`http://${address.host}:${address.port}  mode=${config.demo ? 'demo' : 'real'} llm=${config.llm} model=${config.model} gpu=${runs.gpu().state} workspace=${config.workspaceRoot}${webDistDir(config) ? '' : ' (web not built; use the Vite dev server)'}`)
+  const eff = llmSettings.view()
+  log.info(`http://${address.host}:${address.port}  mode=${config.demo ? 'demo' : 'real'} llm=${eff.provider} model=${eff.model} gpu=${runs.gpu().state} workspace=${config.workspaceRoot}${webDistDir(config) ? '' : ' (web not built; use the Vite dev server)'}`)
 
   let closing: Promise<void> | null = null
   const shutdown = () => {

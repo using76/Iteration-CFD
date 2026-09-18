@@ -13,6 +13,8 @@ function tabIcon(tab: Tab): IconName {
       return 'chart'
     case 'diff':
       return 'diff'
+    case 'geometry':
+      return 'cube'
     case 'file':
       return /\.jsonc?$/i.test(tab.path) ? 'braces' : /\.rs$/i.test(tab.path) ? 'gear' : 'file'
   }
@@ -42,7 +44,16 @@ export function TabBar() {
     if (tab.kind === 'diff') removeDiff(tab.id)
   }
 
-  const label = (tab: Tab) => (tab.kind === 'file' ? basename(tab.path) : tab.kind === 'viewer' ? t('tab.viewer') : tab.kind === 'residuals' ? t('tab.residuals') : `${t('tab.diff')}: ${basename(tab.path)}`)
+  const label = (tab: Tab) =>
+    tab.kind === 'file'
+      ? basename(tab.path)
+      : tab.kind === 'viewer'
+        ? t('tab.viewer')
+        : tab.kind === 'residuals'
+          ? t('tab.residuals')
+          : tab.kind === 'geometry'
+            ? `${t('tab.geometry')}: ${basename(tab.path)}`
+            : `${t('tab.diff')}: ${basename(tab.path)}`
 
   return (
     <div className="tabbar" data-testid="tabbar">

@@ -5,7 +5,7 @@ import { basename, useT } from '../../app/hooks'
 import { matchPaths } from '../../assistant/mentions'
 import { useExplorerStore } from '../../state/explorerStore'
 import { useSessionStore } from '../../state/sessionStore'
-import { useUiStore, type Tab } from '../../state/uiStore'
+import { selectActiveFile, useUiStore, type Tab } from '../../state/uiStore'
 import { actions } from '../../ws/actions'
 import { Icon, type IconName } from '../common/Icon'
 
@@ -28,6 +28,8 @@ function tabLabel(tab: Tab, t: ReturnType<typeof useT>): string {
       return t('tab.residuals')
     case 'diff':
       return `${t('tab.diff')}: ${basename(tab.path)}`
+    case 'geometry':
+      return `${t('tab.geometry')}: ${basename(tab.path)}`
   }
 }
 
@@ -70,6 +72,23 @@ export function CommandPalette() {
       { id: 'c:bottom', group: 'commands', label: t('palette.toggleBottom'), icon: 'terminal', hint: 'Ctrl+J', run: () => s.toggleBottom() },
       { id: 'c:viewer', group: 'commands', label: t('palette.openViewer'), icon: 'cube', run: () => s.openViewerTab() },
       { id: 'c:residuals', group: 'commands', label: t('palette.openResiduals'), icon: 'chart', run: () => s.openResidualsTab(null) },
+      {
+        id: 'c:geometry',
+        group: 'commands',
+        label: t('palette.openGeometry'),
+        icon: 'cube',
+        // The active editor file when it is a surface, else the explorer's
+        // first surface file, STEP preferred — that is the CAD case.
+        run: () => {
+          const active = selectActiveFile(s)
+          const surfaces = Object.values(nodes)
+            .filter((n) => n.kind === 'file' && /\.(ste?p|stl|obj)$/i.test(n.path))
+            .map((n) => n.path)
+            .sort((a, b) => Number(/\.(ste?p)$/i.test(b)) - Number(/\.(ste?p)$/i.test(a)))
+          const target = active && /\.(ste?p|stl|obj)$/i.test(active) ? active : surfaces[0]
+          if (target) s.openGeometryTab(target)
+        },
+      },
       { id: 'c:newchat', group: 'commands', label: t('palette.newChat'), icon: 'plus', hint: 'Ctrl+Alt+N', run: () => actions.newSession() },
       ...(['mesh', 'run', 'postprocess', 'validate', 'export'] as QuickAction[]).map<Item>((a) => ({
         id: `q:${a}`,
@@ -80,8 +99,8 @@ export function CommandPalette() {
         run: () => actions.quick(a),
       })),
     ]
-    const tabItems: Item[] = tabs.map((tab) => ({ id: `t:${tab.id}`, group: 'tabs', label: tabLabel(tab, t), hint: tab.kind === 'file' ? tab.path : undefined, icon: tab.kind === 'viewer' ? 'cube' : tab.kind === 'residuals' ? 'chart' : tab.kind === 'diff' ? 'diff' : 'file', run: () => s.activateTab(tab.id) }))
-    const fileItems: Item[] = matchPaths(files, q, 12).map((p) => ({ id: `f:${p}`, group: 'files', label: basename(p), hint: p, icon: /\.jsonc?$/.test(p) ? 'braces' : /\.rs$/.test(p) ? 'gear' : 'file', run: () => s.openFile(p) }))
+    const tabItems: Item[] = tabs.map((tab) => ({ id: `t:${tab.id}`, group: 'tabs', label: tabLabel(tab, t), hint: tab.kind === 'file' || tab.kind === 'geometry' ? tab.path : undefined, icon: tab.kind === 'viewer' || tab.kind === 'geometry' ? 'cube' : tab.kind === 'residuals' ? 'chart' : tab.kind === 'diff' ? 'diff' : 'file', run: () => s.activateTab(tab.id) }))
+    const fileItems: Item[] = matchPaths(files, q, 12).map((p) => ({ id: `f:${p}`, group: 'files', label: basename(p), hint: p, icon: /\.(ste?p|stl|obj)$/i.test(p) ? 'cube' : /\.jsonc?$/.test(p) ? 'braces' : /\.rs$/.test(p) ? 'gear' : 'file', run: () => s.openFile(p) }))
     const lq = q.toLowerCase()
     const filt = (i: Item) => !lq || i.label.toLowerCase().includes(lq) || (i.hint ?? '').toLowerCase().includes(lq)
     return [...tabItems.filter(filt), ...fileItems, ...commands.filter(filt)]

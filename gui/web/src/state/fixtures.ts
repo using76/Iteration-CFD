@@ -102,6 +102,7 @@ export const FRAMES: Record<ServerMsg['t'], ServerMsg> = {
     runs: [RUN_1],
   },
   pong: { t: 'pong', ts: NOW },
+  'llm.changed': { t: 'llm.changed', llm: { provider: 'zai', model: 'glm-5.3-flash', keys: { anthropic: { set: false, source: null }, zai: { set: true, source: 'ui' } }, models: { anthropic: 'claude-opus-5', zai: 'glm-5.3-flash' } } },
   error: { t: 'error', message: 'no such run: r_9', fatal: false },
   'session.state': { t: 'session.state', session: SESSION_1 },
   'session.list': { t: 'session.list', sessions: [{ id: 's_2', title: 'Second', createdAt: SESSION_1.createdAt, updatedAt: SESSION_1.updatedAt, messageCount: 0 }] },

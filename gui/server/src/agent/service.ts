@@ -19,6 +19,7 @@ import { resolveInWorkspace } from '../workspace/paths.js'
 import { createAnthropicClient } from './anthropic.js'
 import { createApprovalManager, type ApprovalManager } from './approvals.js'
 import { emptyUsage, type LlmClient } from './llm.js'
+import type { LlmSettingsHandle } from './llmSettings.js'
 import { runTurn, type TurnOutcome } from './loop.js'
 import { createMockLlm } from './mockLlm.js'
 import { loadPolicyOverrides, type PolicyOverrides } from './policy.js'
@@ -33,8 +34,10 @@ export interface AgentServiceDeps {
   hub: Hub
   runs: RunManager
   datasets: DatasetService
-  /** Injected by tests; defaults to the Anthropic client or the mock per config.llm. */
+  /** Injected by tests; defaults to the runtime settings handle's client, else one built from config. */
   llm?: LlmClient
+  /** The runtime provider/key settings (main wires one); the client is re-read per turn, so a key entered mid-session counts. */
+  llmSettings?: LlmSettingsHandle
   store?: SessionStore
   overrides?: PolicyOverrides
   retryDelayMs?: number
@@ -62,7 +65,11 @@ const AGENT_FRAMES = new Set<ClientMsg['t']>(['session.open', 'session.new', 'se
 export function createAgentService(deps: AgentServiceDeps): AgentService {
   const { config, hub, runs, datasets } = deps
   const store = deps.store ?? createSessionStore(config.sessionsDir, config.model)
-  const llm = deps.llm ?? (config.llm === 'mock' ? createMockLlm({ model: config.model }) : config.llm === 'zai' ? createZaiClient(config) : createAnthropicClient(config))
+  // The client a turn uses is picked when the turn starts: the runtime handle
+  // reflects a key or provider the user entered mid-session. Tests that inject
+  // `llm` keep their client, and the config-built one stays as the last resort.
+  const staticLlm: LlmClient | null = deps.llm ?? (config.llm === 'mock' ? createMockLlm({ model: config.model }) : config.llm === 'zai' ? createZaiClient(config) : createAnthropicClient(config))
+  const llmForTurn = (): LlmClient => deps.llm ?? deps.llmSettings?.client() ?? staticLlm!
   const overrides = deps.overrides ?? loadPolicyOverrides(config.configDir)
   const runtimes = new Map<string, SessionRuntime>()
   let customTools: CustomToolSummary[] = []
@@ -115,7 +122,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       hub,
       runs,
       datasets,
-      llm,
+      llm: llmForTurn(),
       approvals: rt.approvals,
       overrides,
       store,

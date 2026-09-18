@@ -8,6 +8,7 @@ import { ViewerTab } from './ViewerTab'
 
 const CodeEditor = lazy(() => import('../../editor/CodeEditor').then((m) => ({ default: m.CodeEditor })))
 const DiffEditorTab = lazy(() => import('../../editor/DiffEditorTab').then((m) => ({ default: m.DiffEditorTab })))
+const GeometryTab = lazy(() => import('./GeometryTab').then((m) => ({ default: m.GeometryTab })))
 
 export function TabHost() {
   const tabs = useUiStore((s) => s.tabs)
@@ -20,7 +21,17 @@ export function TabHost() {
         return (
           <div key={tab.id} className="tab-page" hidden={!active} data-testid={`tab-page-${tab.kind}`}>
             <Suspense fallback={<div className="editor-loading"><span className="spinner" /></div>}>
-              {tab.kind === 'file' ? <CodeEditor path={tab.path} active={active} /> : tab.kind === 'viewer' ? <ViewerTab active={active} /> : tab.kind === 'residuals' ? <ResidualsChart runId={tab.runId} active={active} /> : <DiffEditorTab id={tab.id} />}
+              {tab.kind === 'file' ? (
+                <CodeEditor path={tab.path} active={active} />
+              ) : tab.kind === 'viewer' ? (
+                <ViewerTab active={active} />
+              ) : tab.kind === 'residuals' ? (
+                <ResidualsChart runId={tab.runId} active={active} />
+              ) : tab.kind === 'geometry' ? (
+                <GeometryTab path={tab.path} active={active} />
+              ) : (
+                <DiffEditorTab id={tab.id} />
+              )}
             </Suspense>
           </div>
         )
