@@ -102,7 +102,7 @@ cargo test --release
 
 ## 실행
 
-바이너리는 18개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
+바이너리는 19개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
 
 ```bash
 cargo run --release --bin ofgpu-generate-mesh -- channel ../cases/ch 200 120 1
@@ -165,7 +165,7 @@ rust/
     ├── vof.rs                                 2상 VOF
     ├── blockgen.rs restart.rs potential_flow.rs
     ├── reference.rs                           독립 CPU 구현 (검증 전용)
-    └── bin/                                   바이너리 18개
+    └── bin/                                   바이너리 19개
 ```
 
 ## 알려진 제약

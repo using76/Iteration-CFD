@@ -3233,6 +3233,10 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("S97 Gate 97-A imported region");
     check_imported_region(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT S97 - the region layout, and Gate 97-B.
+    c.enter_gate("S97 Gate 97-B region layout");
+    check_region_layout(c, &gpu)?;
+    c.leave_gate();
     println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
     c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
     published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
@@ -18985,7 +18989,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 15 occurrences, 13 distinct - two gates report twice.
+    /// same string. 16 occurrences, 14 distinct - two gates report twice.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
     #[test]
@@ -19010,9 +19014,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 15, "15 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 16, "16 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 13, "13 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 14, "14 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
@@ -19020,5 +19024,326 @@ mod gate_parent {
                 "no enter_gate scope spells the reported gate {name:?}"
             );
         }
+    }
+}
+
+/// Gate 97-B document A: both regions carry the block mesh, and the one
+/// interface is explicit (SPEC-LIT 97.10).
+const GATE_97B_DOC_A: &str = r#"{
+  "name": "gate97b",
+  "regions": [
+    {
+      "name": "lower",
+      "mesh": { "bounds": { "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0] }, "cells": [4, 4, 4],
+                "boundaries": { "xmin":"xmin","xmax":"xmax","ymin":"ymin","ymax":"ymax","zmin":"zmin","zmax":"lower_to_upper" } },
+      "material": { "rho": 2330.0, "c": 700.0, "kappa": 148.0 },
+      "patches": [
+        { "match": "zmin", "T": { "type": "fixedValue", "value": 380.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    },
+    {
+      "name": "upper",
+      "mesh": { "bounds": { "min": [0.0, 0.0, 1.0], "max": [1.0, 1.0, 2.0] }, "cells": [4, 4, 4],
+                "boundaries": { "xmin":"xmin","xmax":"xmax","ymin":"ymin","ymax":"ymax","zmin":"upper_to_lower","zmax":"zmax" } },
+      "material": { "rho": 8960.0, "c": 385.0, "kappa": 400.0 },
+      "patches": [
+        { "match": "zmax", "T": { "type": "fixedValue", "value": 300.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    }
+  ],
+  "interfaces": [ { "regionA": "lower", "patchA": "lower_to_upper", "regionB": "upper", "patchB": "upper_to_lower" } ],
+  "initial": { "T": 340.0 },
+  "run": { "steady": true },
+  "numerics": { "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-30, "maxIter": 4000 }
+}"#;
+
+/// Gate 97-B document B: the case NAMES the manifest and carries no
+/// per-region mesh and no `interfaces` - the manifest supplies both.
+const GATE_97B_DOC_B: &str = r#"{
+  "mesh": { "regions": "mesh/regions.json" },
+  "name": "gate97b",
+  "regions": [
+    {
+      "name": "lower",
+      "material": { "rho": 2330.0, "c": 700.0, "kappa": 148.0 },
+      "patches": [
+        { "match": "zmin", "T": { "type": "fixedValue", "value": 380.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    },
+    {
+      "name": "upper",
+      "material": { "rho": 8960.0, "c": 385.0, "kappa": 400.0 },
+      "patches": [
+        { "match": "zmax", "T": { "type": "fixedValue", "value": 300.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    }
+  ],
+  "initial": { "T": 340.0 },
+  "run": { "steady": true },
+  "numerics": { "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-30, "maxIter": 4000 }
+}"#;
+
+/// Gate 97-B: the split two-zone block, run through the manifest, IS the
+/// block run - `t`, `bt` (per patch, by name), `steps` and the pair fluxes
+/// bit for bit (SPEC-LIT §97.10). The fixture is rebuilt from the public
+/// API because a `[[bin]]` links `ofgpu` without `cfg(test)`. One fixture,
+/// so a verdict here is single-mesh by name (§94.3).
+fn check_region_layout(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::{run_case, ChtSolution, RegionKind};
+    use ofgpu::error::IoContext;
+    use ofgpu::io::case_cht::read_cht_case;
+    use ofgpu::io::regions::{split_by_zones, write_layout};
+
+    fn same_point(a: Vec3, b: Vec3) -> bool {
+        a.x.to_bits() == b.x.to_bits()
+            && a.y.to_bits() == b.y.to_bits()
+            && a.z.to_bits() == b.z.to_bits()
+    }
+
+    println!("\n=== the region layout (SPEC-LIT 97) ===");
+    println!("  -- S97 Gate 97-B: the split two-zone block, run through the manifest, bit for bit --");
+
+    let dir = scratch_dir("s97_layout");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).path(&dir)?;
+    let spec = BlockSpec {
+        x: GradedAxis { lo: 0.0, hi: 1.0, n: 4, expansion: 1.0, two_sided: false },
+        y: GradedAxis { lo: 0.0, hi: 1.0, n: 4, expansion: 1.0, two_sided: false },
+        z: GradedAxis { lo: 0.0, hi: 2.0, n: 8, expansion: 1.0, two_sided: false },
+        patch_name: ["xmin", "xmax", "ymin", "ymax", "zmin", "zmax"].map(String::from),
+        patch_type: ["patch"; 6].map(String::from),
+        windows: Vec::new(),
+        cyclic: Vec::new(),
+    };
+    let raw = blockgen::raw_mesh(&spec)?;
+    let host = build_host_mesh(&raw)?;
+    let (mut lower, mut upper) = (Vec::new(), Vec::new());
+    for (i, x) in host.c.iter().enumerate() {
+        if x.z < 1.0 {
+            lower.push(i as Label);
+        } else {
+            upper.push(i as Label);
+        }
+    }
+    let zones = vec![("lower".to_string(), lower), ("upper".to_string(), upper)];
+    let (regions, ifaces) = split_by_zones(&raw, &zones)?;
+    write_layout(&dir.join("mesh"), &regions, &[RegionKind::Solid, RegionKind::Solid], &ifaces, None)?;
+    let (pa, pb) = (dir.join("a.jsonc"), dir.join("b.jsonc"));
+    std::fs::write(&pa, GATE_97B_DOC_A).path(&pa)?;
+    std::fs::write(&pb, GATE_97B_DOC_B).path(&pb)?;
+    let la = match read_cht_case(&pa).and_then(|k| k.lower_in(Some(&dir))) {
+        Ok(v) => v,
+        Err(e) => {
+            c.skip("S97 Gate 97-B: the two-zone layout case", &e.to_string());
+            let _ = std::fs::remove_dir_all(&dir);
+            return Ok(());
+        }
+    };
+    let lb = match read_cht_case(&pb).and_then(|k| k.lower_in(Some(&dir))) {
+        Ok(v) => v,
+        Err(e) => {
+            c.skip("S97 Gate 97-B: the two-zone layout case", &e.to_string());
+            let _ = std::fs::remove_dir_all(&dir);
+            return Ok(());
+        }
+    };
+
+    let row1 = la.region_names == ["lower", "upper"]
+        && lb.region_names == ["lower", "upper"]
+        && la.meshes.len() == 2
+        && lb.meshes.len() == 2
+        && la.meshes[0].n_cells == 64
+        && la.meshes[1].n_cells == 64
+        && lb.meshes[0].n_cells == 64
+        && lb.meshes[1].n_cells == 64
+        && la.interfaces.len() == 1
+        && lb.interfaces.len() == 1
+        && lb.notes.is_empty();
+    c.require(
+        "S97 Gate 97-B: the two-zone layout loads and both documents lower to 'lower' and 'upper' of 64 cells",
+        row1,
+    );
+
+    let mut geo_equal = la.meshes.len() == lb.meshes.len() && la.raw.len() == lb.raw.len();
+    let mut geo_why = if geo_equal { None } else { Some("region count differs".to_string()) };
+    for r in 0..la.meshes.len().min(lb.meshes.len()) {
+        let (ma, mb) = (&la.meshes[r], &lb.meshes[r]);
+        let (ra, rb) = (&la.raw[r], &lb.raw[r]);
+        let mut first: Option<String> = None;
+        {
+            let mut diff = |ok: bool, msg: String| {
+                if !ok && first.is_none() {
+                    first = Some(msg);
+                }
+            };
+            diff(ma.n_cells == mb.n_cells, format!("region {r}: n_cells {} against {}", ma.n_cells, mb.n_cells));
+            diff(
+                ra.neighbour == rb.neighbour,
+                format!("region {r}: neighbour lists differ ({} against {} faces)", ra.neighbour.len(), rb.neighbour.len()),
+            );
+            diff(
+                ra.owner[..ra.neighbour.len()] == rb.owner[..rb.neighbour.len()],
+                format!("region {r}: internal-face owners differ"),
+            );
+            diff(
+                ma.v.len() == mb.v.len() && ma.v.iter().zip(&mb.v).all(|(a, b)| a.to_bits() == b.to_bits()),
+                format!("region {r}: cell volumes differ"),
+            );
+            diff(
+                ma.c.len() == mb.c.len() && ma.c.iter().zip(&mb.c).all(|(a, b)| same_point(*a, *b)),
+                format!("region {r}: cell centres differ"),
+            );
+            let mut na: Vec<&str> = ma.patches.iter().map(|p| p.name.as_str()).collect();
+            let mut nb: Vec<&str> = mb.patches.iter().map(|p| p.name.as_str()).collect();
+            na.sort_unstable();
+            nb.sort_unstable();
+            diff(na == nb, format!("region {r}: patch names differ"));
+            let faces_eq = |x: &[Vec3], xs: usize, y: &[Vec3], ys: usize, n: usize| {
+                xs + n <= x.len() && ys + n <= y.len() && (0..n).all(|k| same_point(x[xs + k], y[ys + k]))
+            };
+            for pname in na {
+                let Some(qb) = mb.patches.iter().find(|p| p.name == pname) else {
+                    diff(false, format!("region {r}: patch {pname} absent from the manifest side"));
+                    continue;
+                };
+                let Some(qa) = ma.patches.iter().find(|p| p.name == pname) else {
+                    continue;
+                };
+                diff(qa.size == qb.size, format!("region {r}: patch {pname} size {} against {}", qa.size, qb.size));
+                diff(
+                    faces_eq(&ma.b_sf, qa.start, &mb.b_sf, qb.start, qa.size),
+                    format!("region {r}: patch {pname} b_sf differs"),
+                );
+                diff(
+                    faces_eq(&ma.b_cf, qa.start, &mb.b_cf, qb.start, qa.size),
+                    format!("region {r}: patch {pname} b_cf differs"),
+                );
+            }
+        }
+        geo_equal &= first.is_none();
+        if geo_why.is_none() {
+            geo_why = first;
+        }
+    }
+    if let Some(m) = &geo_why {
+        c.note(&format!("  first difference: {m}"));
+    }
+    c.require(
+        "S97 Gate 97-B: the lowered geometry agrees per patch by name, bit for bit",
+        geo_equal,
+    );
+
+    let sa = run_case(gpu, &la)?;
+    let sb = run_case(gpu, &lb)?;
+    let cat_start = |sol: &ChtSolution, r: usize, p: &str| {
+        let want = format!("{}:{p}", sol.mesh.regions[r].name);
+        sol.mesh.host.patches.iter().find(|q| q.name == want).unwrap_or_else(|| panic!("no patch {want}")).start
+    };
+    let mut diffs: Vec<String> = Vec::new();
+    if sa.t.len() != sb.t.len() {
+        diffs.push(format!("cell temperature t: length {} against {}", sa.t.len(), sb.t.len()));
+    } else if let Some((i, (a, b))) =
+        sa.t.iter().zip(&sb.t).enumerate().find(|(_, (a, b))| a.to_bits() != b.to_bits())
+    {
+        diffs.push(format!("cell temperature t: first difference at [{i}]: {a} against {b}"));
+    }
+    let mut bt_diff: Option<String> = None;
+    for (r, name) in la.region_names.iter().enumerate() {
+        for p in &la.meshes[r].patches {
+            let (ia, ib) = (cat_start(&sa, r, &p.name), cat_start(&sb, r, &p.name));
+            for k in 0..p.size {
+                if sa.bt[ia + k].to_bits() != sb.bt[ib + k].to_bits() {
+                    if bt_diff.is_none() {
+                        bt_diff = Some(format!(
+                            "boundary temperature bt {}:{}: first difference at [{k}]: {} against {}",
+                            name, p.name, sa.bt[ia + k], sb.bt[ib + k]
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(m) = bt_diff {
+        diffs.push(m);
+    }
+    if sa.steps != sb.steps {
+        diffs.push(format!("steps: {} against {}", sa.steps, sb.steps));
+    }
+    if sa.pair_flux.0.len() != sb.pair_flux.0.len() {
+        diffs.push(format!("pair flux A: length {} against {}", sa.pair_flux.0.len(), sb.pair_flux.0.len()));
+    } else if let Some((i, (x, y))) =
+        sa.pair_flux.0.iter().zip(&sb.pair_flux.0).enumerate().find(|(_, (x, y))| x.to_bits() != y.to_bits())
+    {
+        diffs.push(format!("pair flux A: first difference at [{i}]: {x} against {y}"));
+    }
+    if sa.pair_flux.1.len() != sb.pair_flux.1.len() {
+        diffs.push(format!("pair flux B: length {} against {}", sa.pair_flux.1.len(), sb.pair_flux.1.len()));
+    } else if let Some((i, (x, y))) =
+        sa.pair_flux.1.iter().zip(&sb.pair_flux.1).enumerate().find(|(_, (x, y))| x.to_bits() != y.to_bits())
+    {
+        diffs.push(format!("pair flux B: first difference at [{i}]: {x} against {y}"));
+    }
+    let equal = diffs.is_empty();
+    for d in &diffs {
+        c.note(&format!("  {d}"));
+    }
+    c.require(
+        "S97 Gate 97-B: the split block run through the manifest reproduces the block run bit for bit",
+        equal,
+    );
+    let max_rel = sa.t.iter().zip(&sb.t).map(|(a, b)| (a - b).abs() / a.abs().max(1.0)).fold(0.0f64, f64::max);
+    c.note(&format!(
+        "  {} cells, {} boundary faces, {} flux pairs, steps {}; max relative difference {:e}; \
+         residual {:.6e} against {:.6e}",
+        sa.t.len(), sa.bt.len(), sa.pair_flux.0.len(), sa.steps, max_rel, sa.residual, sb.residual
+    ));
+    if !equal {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "S97 Gate 97-B region layout",
+            against: "the split two-zone block against itself, explicit form vs manifest form",
+            headline: "the manifest case did not reproduce the block run bit for bit".to_string(),
+            detail: vec![
+                "  a mismatch here is a layout defect (a split face wound differently, a patch start \
+                 read from the wrong region, an interface paired out of order), and the first \
+                 differing index is printed above - not a tolerance to loosen"
+                    .to_string(),
+            ],
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one fixture, bit-for-bit identity; no discretisation error to extrapolate",
+            )),
+        });
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[cfg(test)]
+mod region_layout {
+    use super::*;
+
+    /// The gate the run calls, driven directly: on a machine with the card
+    /// it takes the three rows green; without one it passes vacuously, as
+    /// the lib test does.
+    #[test]
+    fn gate_97b_runs_green_on_this_machine() {
+        let Ok(gpu) = Gpu::new(0) else { return };
+        let mut c = Checks::new();
+        c.enter_gate("S97 Gate 97-B region layout");
+        check_region_layout(&mut c, &gpu).expect("gate runs");
+        c.leave_gate();
+        assert_eq!(c.failures, 0, "gate 97-B must hold on this machine");
+        assert!(c.total >= 3, "three rows required, took {}", c.total);
+        assert_eq!(c.skipped, 0, "nothing may be skipped");
     }
 }

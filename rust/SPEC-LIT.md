@@ -28561,29 +28561,32 @@ The rules, with the unit that owns each one's check:
 * **R1** Every region's polyMesh is complete and standalone: `owner[f] <
   neighbour[f]`, internal faces ordered by owner then neighbour, patches
   contiguous — what `io::polymesh::build_host_mesh` requires. Every
-  existing driver reads `fluid/polyMesh` unchanged. (M4 checker; S11 reads
-  it.)
+  existing driver reads `fluid/polyMesh` unchanged.
+  (`tools/mesh/regions_check.py` at the producer; `io::regions::load` at the
+  consumer.)
 * **R2** An interface is a pair of boundary patches, one per region, with
   the same number of faces, and the k-th face of one is the k-th face of
   the other with opposite winding (centroid within `tolerance`, normals
   opposed, areas equal). Pairing is by index; §47.4's centroid hash stays
-  the check and the refusal. (M4, S11.)
+  the check and the refusal. (`regions_check.py`; `io::regions::check_layout`.)
 * **R3** Interface patch names are `<this>_to_<other>`; patch `type` is
-  `patch`. (M4.)
+  `patch`. (`regions_check.py`; `io::regions::read_manifest`.)
 * **R4** `kind` is `fluid` or `solid`. A solid region carries one
   `material` name; a solid region that holds two bonded materials (a
   bimetal strip) is ONE region with a `materials` map per `cellZones`-like
-  list in the case, not two regions. (S9, S11.)
+  list in the case, not two regions. (`io::case_cht`'s `materials` list,
+  §96; `io::regions::read_manifest` for `kind`.)
 * **R5** A region's cell numbering is its own; the manifest never refers to
-  global indices. (S11.)
-* **R6** Paths are relative to the manifest's directory. (S11.)
+  global indices. (`io::regions::split_by_zones` renumbers, 97.7.)
+* **R6** Paths are relative to the manifest's directory.
+  (`io::regions::load`'s path rule, 97.6.)
 * **R7** A single polyMesh with `cellZones` becomes this layout through
   `ofgpu-regions split`; faces between two zones become the interface
-  pair, ordered identically on both sides. (S11.)
+  pair, ordered identically on both sides. (`ofgpu-regions split`, 97.7.)
 * **R8** A case names the manifest (`"mesh": {"regions": "mesh/regions.json"}`)
   or lists regions explicitly; both lower to the same `Vec<RegionInput>`
   plus interface requests; the explicit form wins on conflict and the
-  conflict is named. (S11.)
+  conflict is named. (`io::case_cht::ChtCase::lower_in`, 97.8.)
 
 ---
 
@@ -28860,10 +28863,14 @@ Measured by `io::regions::tests::gate_97b_a_split_two_zone_block_run_through_the
 | steps | 1 = 1 |
 | max relative difference | 0 - the field IS the same field, bit for bit |
 
-Gate 97-B is a lib test only, not registered in `ofgpu-validate` - §97.4's
-Gate 97-A is the registered single-mesh gate, and this one composes the
-same claim with the split's. It is single-mesh by name (§94.3): one
-fixture, bit-for-bit identity, no discretisation error to extrapolate.
+Gate 97-B is registered in `ofgpu-validate` beside §97.4's Gate 97-A: the
+`S97 Gate 97-B region layout` scope runs `check_region_layout`, the twin of
+`check_imported_region`, over the same fixture rebuilt from the public API
+(`blockgen::raw_mesh`, `io::regions::split_by_zones`, `write_layout`) and
+the two documents above, and prints the cell, boundary-face and flux-pair
+counts and the max relative difference beside its three rows. It is
+single-mesh by name (§94.3): one fixture, bit-for-bit identity, no
+discretisation error to extrapolate.
 
 ---
 
