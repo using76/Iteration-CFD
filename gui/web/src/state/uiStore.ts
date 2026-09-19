@@ -10,7 +10,7 @@ export type BottomTab = 'terminal' | 'logs' | 'problems' | 'output'
 export type Tab =
   | { id: string; kind: 'file'; path: string }
   | { id: 'viewer'; kind: 'viewer' }
-  | { id: 'residuals'; kind: 'residuals'; runId: string | null }
+  | { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null }
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
   | { id: string; kind: 'geometry'; path: string }
 
@@ -56,6 +56,7 @@ export interface UiActions {
   openViewerTab(): void
   openGeometryTab(path: string): void
   openResidualsTab(runId: string | null): void
+  setCompareRun(runId: string | null): void
   openDiffTab(id: string, path: string, toolUseId: string | null): void
   closeTab(id: string): void
   closeOtherTabs(id: string): void
@@ -192,8 +193,21 @@ export const useUiStore = create<UiStore>()(
       openResidualsTab(runId) {
         set((s) => {
           const existing = s.tabs.find((t) => t.kind === 'residuals')
-          const tab: Tab = { id: 'residuals', kind: 'residuals', runId: runId ?? (existing?.kind === 'residuals' ? existing.runId : null) }
+          const tab: Tab = {
+            id: 'residuals',
+            kind: 'residuals',
+            runId: runId ?? (existing?.kind === 'residuals' ? existing.runId : null),
+            compareRunId: existing?.kind === 'residuals' ? (existing.compareRunId ?? null) : null,
+          }
           return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals', activeRunId: runId ?? s.activeRunId }
+        })
+      },
+      setCompareRun(runId) {
+        set((s) => {
+          const existing = s.tabs.find((t) => t.kind === 'residuals')
+          const primary = existing?.kind === 'residuals' ? existing.runId : s.activeRunId
+          const tab: Tab = { id: 'residuals', kind: 'residuals', runId: primary, compareRunId: runId }
+          return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals' }
         })
       },
       openDiffTab(id, path, toolUseId) {

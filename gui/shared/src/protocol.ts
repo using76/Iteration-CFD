@@ -718,6 +718,8 @@ export const UiStateSchema = z.object({
   /** The GUI's own connection state, e.g. "connected" or "reconnecting". */
   connection: z.string().nullish(),
   locale: z.enum(['ko', 'en']).nullish(),
+  /** The run compare_run overlaid on the residual chart; null or absent = no overlay. */
+  compareRunId: z.string().nullish(),
 })
 export type UiState = z.infer<typeof UiStateSchema>
 

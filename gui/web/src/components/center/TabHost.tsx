@@ -26,7 +26,7 @@ export function TabHost() {
               ) : tab.kind === 'viewer' ? (
                 <ViewerTab active={active} />
               ) : tab.kind === 'residuals' ? (
-                <ResidualsChart runId={tab.runId} active={active} />
+                <ResidualsChart runId={tab.runId} compareRunId={tab.compareRunId ?? null} active={active} />
               ) : tab.kind === 'geometry' ? (
                 <GeometryTab path={tab.path} active={active} />
               ) : (

@@ -246,13 +246,14 @@ describe('ui command coercion and the workspace commands', () => {
       problems: 2,
       connection: 'connected',
       locale: 'ko',
+      compareRunId: 'r_2',
     }
     expect(UiStateSchema.safeParse(full).success).toBe(true)
     // an older client that sends none of the new keys still validates
     const old: Record<string, unknown> = { ...full }
-    for (const k of ['case', 'tabs', 'run', 'viewer', 'problems', 'connection', 'locale']) delete old[k]
+    for (const k of ['case', 'tabs', 'run', 'viewer', 'problems', 'connection', 'locale', 'compareRunId']) delete old[k]
     expect(UiStateSchema.safeParse(old).success).toBe(true)
-    expect(UiStateSchema.safeParse({ ...full, case: null, tabs: null, run: null, viewer: null, problems: null, connection: null, locale: null }).success).toBe(true)
+    expect(UiStateSchema.safeParse({ ...full, case: null, tabs: null, run: null, viewer: null, problems: null, connection: null, locale: null, compareRunId: null }).success).toBe(true)
   })
 
   it('post_warp and a regional open_result parse', () => {

@@ -9,7 +9,7 @@ import { api } from '../api/rest'
 import { Icon } from '../components/common/Icon'
 import { pickActiveRun, selectRunData, sortRuns, useSessionStore } from '../state/sessionStore'
 import { useUiStore } from '../state/uiStore'
-import { hasTimeAxis, seriesColor, seriesKeys, shapeResiduals, type XAxis } from './series'
+import { hasTimeAxis, pairKeys, seriesColor, shapeResidualsPair, type XAxis } from './series'
 
 const SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹'
 const BATCH_MS = 100
@@ -38,20 +38,23 @@ function cssVar(name: string, fallback: string): string {
 
 export interface ResidualsChartProps {
   runId: string | null
+  compareRunId?: string | null
   active?: boolean
   compact?: boolean
 }
 
-export function ResidualsChart({ runId: runIdProp, active = true, compact = false }: ResidualsChartProps) {
+export function ResidualsChart({ runId: runIdProp, compareRunId = null, active = true, compact = false }: ResidualsChartProps) {
   const t = useT()
   const runs = useSessionStore((s) => s.runs)
   const uiActiveRunId = useUiStore((s) => s.activeRunId)
   const setActiveRun = useUiStore((s) => s.setActiveRun)
+  const setCompareRun = useUiStore((s) => s.setCompareRun)
   const theme = useUiStore((s) => s.theme)
   const runList = useMemo(() => sortRuns(runs), [runs])
   const run = useMemo(() => (runIdProp ? (runs[runIdProp] ?? null) : pickActiveRun(runList, uiActiveRunId)), [runIdProp, runs, runList, uiActiveRunId])
   const runId = run?.id ?? null
   const residuals = useSessionStore((s) => selectRunData(runId)(s).residuals)
+  const compareResiduals = useSessionStore((s) => selectRunData(compareRunId)(s).residuals)
 
   const [yScale, setYScale] = useState<'log' | 'linear'>('log')
   const [xAxis, setXAxis] = useState<XAxis>('iter')
@@ -61,7 +64,7 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
   const closeFields = useCallback(() => setFieldsOpen(false), [])
   const fieldsRef = useDismiss(fieldsOpen, closeFields)
 
-  const keys = useMemo(() => seriesKeys(residuals), [residuals])
+  const keys = useMemo(() => pairKeys(residuals, compareResiduals, compareRunId), [residuals, compareResiduals, compareRunId])
   const keysSig = keys.join('|')
   const timeAvailable = useMemo(() => hasTimeAxis(residuals), [residuals])
   const effectiveX: XAxis = xAxis === 'time' && timeAvailable ? 'time' : 'iter'
@@ -71,8 +74,8 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
   const dirtyRef = useRef(true)
   const followRef = useRef(follow)
   followRef.current = follow
-  const latest = useRef({ residuals, keys, yScale, effectiveX })
-  latest.current = { residuals, keys, yScale, effectiveX }
+  const latest = useRef({ residuals, compareResiduals, keys, yScale, effectiveX, compareRunId })
+  latest.current = { residuals, compareResiduals, keys, yScale, effectiveX, compareRunId }
 
   // (Re)create the plot when the series set, scale or theme changes.
   useEffect(() => {
@@ -90,7 +93,23 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
         { stroke: fg, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid, width: 1 }, values: (_u, vals) => vals.map(fmtX), label: compact ? undefined : effectiveX === 'time' ? t('residuals.xTime') : t('residuals.iterations'), labelFont: '12px ' + cssVar('--font-ui', 'sans-serif'), font: '11px ' + cssVar('--font-ui', 'sans-serif'), size: compact ? 28 : 44 },
         { stroke: fg, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid, width: 1 }, values: (_u, vals) => vals.map((v) => (yScale === 'log' ? fmtLogTick(v) : v.toPrecision(2))), font: '11px ' + cssVar('--font-ui', 'sans-serif'), size: compact ? 40 : 52 },
       ],
-      series: [{ label: effectiveX }, ...keys.map((k, i) => ({ label: k, stroke: seriesColor(k, i), width: 1.5, spanGaps: true, show: !hidden.has(k) }))],
+      series: [
+        { label: effectiveX },
+        ...keys.map((k, i) => {
+          // A compare series keeps its base key's primary colour and draws dashed.
+          const prefix = compareRunId !== null && k.startsWith(compareRunId + ':') ? compareRunId : null
+          const base = prefix ? k.slice(prefix.length + 1) : null
+          const baseIdx = base === null ? -1 : keys.indexOf(base)
+          return {
+            label: k,
+            stroke: base === null || baseIdx < 0 ? seriesColor(k, i) : seriesColor(base, baseIdx),
+            width: 1.5,
+            spanGaps: true,
+            show: !hidden.has(k),
+            ...(base !== null ? { dash: [6, 4] } : {}),
+          }
+        }),
+      ],
       hooks: {
         setSelect: [
           (u) => {
@@ -99,7 +118,7 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
         ],
       },
     }
-    const shaped = shapeResiduals(residuals, keys, { log: yScale === 'log', xAxis: effectiveX, maxPoints: MAX_POINTS })
+    const shaped = shapeResidualsPair(residuals, compareResiduals, keys, compareRunId, { log: yScale === 'log', xAxis: effectiveX, maxPoints: MAX_POINTS })
     const plot = new uPlot(opts, [shaped.x, ...shaped.ys] as uPlot.AlignedData, host)
     plotRef.current = plot
     dirtyRef.current = false
@@ -113,7 +132,7 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
       plotRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keysSig, yScale, effectiveX, theme, compact, runId])
+  }, [keysSig, yScale, effectiveX, theme, compact, runId, compareRunId])
 
   useEffect(() => {
     dirtyRef.current = true
@@ -125,8 +144,8 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
       const plot = plotRef.current
       if (!plot || !dirtyRef.current) return
       dirtyRef.current = false
-      const { residuals: recs, keys: ks, yScale: ys, effectiveX: ex } = latest.current
-      const shaped = shapeResiduals(recs, ks, { log: ys === 'log', xAxis: ex, maxPoints: MAX_POINTS })
+      const { residuals: recs, compareResiduals: cmp, keys: ks, yScale: ys, effectiveX: ex, compareRunId: cr } = latest.current
+      const shaped = shapeResidualsPair(recs, cmp, ks, cr, { log: ys === 'log', xAxis: ex, maxPoints: MAX_POINTS })
       plot.setData([shaped.x, ...shaped.ys] as uPlot.AlignedData, followRef.current)
     }, BATCH_MS)
     return () => clearInterval(id)
@@ -174,6 +193,9 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
             {run.label ?? run.binary} · {run.targetIter ? `${run.iter.toLocaleString()} / ${run.targetIter.toLocaleString()}` : run.iter.toLocaleString()}
             {running ? ` · ${formatDuration(now - Date.parse(run.startedAt))}` : ''}
           </span>
+        ) : null}
+        {compareRunId ? (
+          <span className="faint mono" style={{ fontSize: 'var(--fs-xs)' }}>{t('residuals.vs', { run: compareRunId })}</span>
         ) : null}
         <span className="grow" />
         {!follow ? (
@@ -246,6 +268,27 @@ export function ResidualsChart({ runId: runIdProp, active = true, compact = fals
                   {r.label ?? r.binary} ({r.status})
                 </option>
               ))}
+            </select>
+          </label>
+        ) : null}
+        {!compact ? (
+          <label>
+            {t('residuals.compare')}
+            <select
+              className="select"
+              value={compareRunId ?? ''}
+              onChange={(e) => setCompareRun(e.target.value || null)}
+              style={{ maxWidth: 160 }}
+              data-testid="residuals-compare"
+            >
+              <option value="">{t('residuals.compareNone')}</option>
+              {runList
+                .filter((r) => r.id !== runId)
+                .map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.label ?? r.binary} ({r.status})
+                  </option>
+                ))}
             </select>
           </label>
         ) : null}

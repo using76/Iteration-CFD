@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import type { ResidualRecord } from '@cfd/shared'
-import { decimateIndices, formatResidual, hasTimeAxis, leadingField, logSafe, seriesColor, seriesKeys, shapeResiduals } from './series'
+import {
+  compareKey,
+  decimateIndices,
+  formatResidual,
+  hasTimeAxis,
+  isCompareKey,
+  leadingField,
+  logSafe,
+  pairKeys,
+  seriesColor,
+  seriesKeys,
+  shapeResiduals,
+  shapeResidualsPair,
+} from './series'
 
 function rec(seq: number, iter: number, fields: Record<string, number>, time: number | null = null): ResidualRecord {
   return { seq, iter, time, wall: null, fields, solverIters: null, raw: '' }
@@ -75,5 +88,30 @@ describe('leadingField / formatResidual', () => {
     expect(formatResidual(0.0123)).toBe('0.0123')
     expect(formatResidual(0)).toBe('0')
     expect(formatResidual(Number.NaN)).toBe('NaN')
+  })
+})
+
+describe('shapeResidualsPair', () => {
+  const A = [rec(1, 10, { U: 1e-2, p: 2e-2 }), rec(2, 20, { U: 1e-3, p: 2e-3 })]
+  const B = [rec(1, 15, { U: 5e-3 }), rec(2, 20, { U: 5e-4 }), rec(3, 25, { U: 5e-5 })]
+
+  it('overlays a second run on the union x axis with prefixed keys', () => {
+    expect(compareKey('r_2', 'U')).toBe('r_2:U')
+    expect(isCompareKey('r_2:U', 'r_2')).toBe(true)
+    expect(isCompareKey('U', 'r_2')).toBe(false)
+    expect(isCompareKey('r_2:U', null)).toBe(false)
+    const keys = pairKeys(A, B, 'r_2')
+    expect(keys).toEqual(['U', 'p', 'r_2:U'])
+    const s = shapeResidualsPair(A, B, keys, 'r_2', { log: true, xAxis: 'iter' })
+    expect(s.x).toEqual([10, 15, 20, 25])
+    expect(s.ys[0]).toEqual([1e-2, null, 1e-3, null])
+    expect(s.ys[2]).toEqual([null, 5e-3, 5e-4, 5e-5])
+    expect(s.count).toBe(5)
+  })
+
+  it('equals shapeResiduals when there is no compare run', () => {
+    expect(pairKeys(A, B, null)).toEqual(['U', 'p'])
+    const opts = { log: true, xAxis: 'iter' as const }
+    expect(shapeResidualsPair(A, B, ['U', 'p'], null, opts)).toEqual(shapeResiduals(A, ['U', 'p'], opts))
   })
 })

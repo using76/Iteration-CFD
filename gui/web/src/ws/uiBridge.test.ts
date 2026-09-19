@@ -97,6 +97,7 @@ const STEP_INFO: GeometryInfo = {
 }
 
 type GeoTab = { id: string; kind: 'geometry'; path: string }
+type ResTab = { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null }
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
 type RunResult = ResultFrame & { state: UiState }
 
@@ -125,11 +126,39 @@ function resetFake(): void {
   fake.pointOutcome = { ok: false, code: 'NO_STRUCTURED_GRID', message: 'channel (demo) has no structured grid (vtu); a world point cannot be located - probe by fx,fy, x,y or at:"center"' }
 }
 
-function harness(tabs: GeoTab[] = []) {
+function harness(tabs: (GeoTab | ResTab)[] = []) {
   const sent: ClientMsg[] = []
   const saveImage = vi.fn()
-  const ui = { tabs, activeTabId: tabs[0]?.id ?? null, assistantVisible: false, activeRunId: null, locale: 'en' as const, openGeometryTab: vi.fn(), openViewerTab: vi.fn() }
-  const session = { problems: {}, connection: 'online', addNote: vi.fn() }
+  const subscribeRun = vi.fn()
+  const putResTab = (tab: ResTab) => {
+    const i = ui.tabs.findIndex((t) => t.id === tab.id)
+    if (i >= 0) ui.tabs[i] = tab
+    else ui.tabs.push(tab)
+  }
+  const ui = {
+    tabs,
+    activeTabId: tabs[0]?.id ?? null,
+    assistantVisible: false,
+    activeRunId: null as string | null,
+    locale: 'en' as const,
+    openGeometryTab: vi.fn(),
+    openViewerTab: vi.fn(),
+    setActiveRun(runId: string | null) {
+      ui.activeRunId = runId
+    },
+    openResidualsTab(runId: string | null) {
+      const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
+      putResTab({ id: 'residuals', kind: 'residuals', runId: runId ?? (prev ? prev.runId : null) })
+      ui.activeTabId = 'residuals'
+      ui.activeRunId = runId ?? ui.activeRunId
+    },
+    setCompareRun(runId: string | null) {
+      const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
+      putResTab({ id: 'residuals', kind: 'residuals', runId: prev ? prev.runId : ui.activeRunId, compareRunId: runId })
+      ui.activeTabId = 'residuals'
+    },
+  }
+  const session = { problems: {}, connection: 'online', addNote: vi.fn(), runs: {} as Record<string, unknown> }
   const bridge = createUiBridge({
     send: (m) => {
       sent.push(m)
@@ -137,7 +166,7 @@ function harness(tabs: GeoTab[] = []) {
     },
     ui: { getState: () => ui as never },
     session: { getState: () => session as never },
-    subscribeRun: () => {},
+    subscribeRun,
     saveImage,
   })
   return {
@@ -145,6 +174,7 @@ function harness(tabs: GeoTab[] = []) {
     ui,
     session,
     saveImage,
+    subscribeRun,
     async run(cmd: UiCommand): Promise<RunResult> {
       await bridge.handleCommand('r1', cmd)
       const last = sent[sent.length - 1] as ResultFrame
@@ -420,5 +450,52 @@ describe('the viewer commands the bridge drives', () => {
     const r2 = await h.run({ type: 'post_screenshot' })
     for (const msg of h.sent) expect(ClientMsgSchema.safeParse(msg).success).toBe(true)
     expect(r2.state.viewer!.viewport).toBeNull()
+  })
+})
+
+describe('compare_run', () => {
+  const resTab = (runId: string | null, compareRunId?: string | null): ResTab => ({ id: 'residuals', kind: 'residuals', runId, compareRunId })
+
+  it('compare_run r_2 overlays and subscribes', async () => {
+    const h = harness()
+    h.session.runs = { r_1: {} as never, r_2: {} as never }
+    h.ui.activeRunId = 'r_1'
+    const r = await h.run({ type: 'compare_run', runId: 'r_2' })
+    expect(r.ok).toBe(true)
+    expect(r.state.compareRunId).toBe('r_2')
+    expect(h.subscribeRun).toHaveBeenCalledWith('r_2')
+    expect(h.ui.activeTabId).toBe('residuals')
+    expect(h.ui.tabs).toEqual([resTab('r_1', 'r_2')])
+  })
+
+  it('compare_run null removes the overlay', async () => {
+    const h = harness([resTab('r_1')])
+    h.session.runs = { r_1: {} as never, r_2: {} as never }
+    h.ui.activeRunId = 'r_1'
+    expect((await h.run({ type: 'compare_run', runId: 'r_2' })).ok).toBe(true)
+    const r = await h.run({ type: 'compare_run', runId: null })
+    expect(r.ok).toBe(true)
+    expect(r.state.compareRunId).toBeNull()
+    expect(h.ui.tabs).toEqual([resTab('r_1', null)])
+    expect(h.subscribeRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('compare_run refuses an unknown run by name', async () => {
+    const h = harness()
+    h.session.runs = { r_1: {} as never }
+    h.ui.activeRunId = 'r_1'
+    const r = await h.run({ type: 'compare_run', runId: 'r_9' })
+    expect(r.ok).toBe(false)
+    expect(r.error).toBe('UNSUPPORTED (compare_run): no run "r_9" on this screen; known: r_1')
+    expect(h.ui.tabs).toEqual([])
+  })
+
+  it('compare_run refuses the followed run', async () => {
+    const h = harness([resTab('r_1')])
+    h.session.runs = { r_1: {} as never, r_2: {} as never }
+    h.ui.activeRunId = 'r_1'
+    const r = await h.run({ type: 'compare_run', runId: 'r_1' })
+    expect(r.ok).toBe(false)
+    expect(r.error).toBe('UNSUPPORTED (compare_run): run "r_1" is the run the chart already follows; pick another or follow_run first')
   })
 })

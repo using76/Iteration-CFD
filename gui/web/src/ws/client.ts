@@ -89,7 +89,10 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     const u = ui.getState()
     const out = new Set<string>()
     for (const id of [u.activeRunId, u.terminalRunId]) if (id) out.add(id)
-    for (const tab of u.tabs) if (tab.kind === 'residuals' && tab.runId) out.add(tab.runId)
+    for (const tab of u.tabs) {
+      if (tab.kind === 'residuals' && tab.runId) out.add(tab.runId)
+      if (tab.kind === 'residuals' && tab.compareRunId) out.add(tab.compareRunId)
+    }
     return out
   }
 

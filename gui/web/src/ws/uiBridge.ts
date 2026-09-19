@@ -138,6 +138,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
       problems: Object.values(s.problems).reduce((n, list) => n + list.length, 0),
       connection: s.connection === 'online' ? 'connected' : s.connection,
       locale: u.locale,
+      compareRunId: (() => { const r = u.tabs.find((t) => t.kind === 'residuals'); return r && r.kind === 'residuals' ? (r.compareRunId ?? null) : null })(),
     }
   }
 
@@ -418,6 +419,18 @@ export function createUiBridge(deps: UiBridgeDeps) {
         if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused the screenshot' }
         if (!r.image) return { ok: false, error: 'NO_IMAGE (post_screenshot): the viewer returned no image' }
         ;(deps.saveImage ?? defaultSaveImage)(`${v.getState().datasetName ?? 'viewer'}.png`, r.image.base64)
+        return { ok: true }
+      }
+      case 'compare_run': {
+        const known = session.getState().runs
+        if (cmd.runId !== null && !known[cmd.runId])
+          return unsupported('compare_run', `no run "${cmd.runId}" on this screen; known: ${Object.keys(known).slice(0, 8).join(', ') || 'none'}`)
+        const resTab = u.tabs.find((t) => t.kind === 'residuals')
+        const primary = resTab?.kind === 'residuals' ? resTab.runId : u.activeRunId
+        if (cmd.runId !== null && cmd.runId === primary)
+          return unsupported('compare_run', `run "${cmd.runId}" is the run the chart already follows; pick another or follow_run first`)
+        u.setCompareRun(cmd.runId)
+        if (cmd.runId) deps.subscribeRun(cmd.runId)
         return { ok: true }
       }
       case 'show_overlay':
