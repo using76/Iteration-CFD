@@ -31,11 +31,11 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{Error, Result};
 use crate::io::polymesh::{check_patch_name, PolyMeshRaw};
 use crate::surface::classify::classify_points;
-use crate::surface::{Surface, TriIndex};
+use crate::surface::{SoupTri, Surface, TriIndex};
 use crate::{Scalar, Vec3};
 
 use super::octree::{Background, Octree};
-use super::{CastellationSpec, KeepRegion};
+use super::{BodySpec, CastellationSpec, KeepRegion};
 
 /// How many passes of (92.24) the walk will run before it refuses. K only
 /// ever shrinks, so a walk that is still moving after this many passes is a
@@ -61,6 +61,12 @@ pub struct Removed {
     /// One `[xlo, xhi, ylo, yhi, zlo, zhi]` per dropped component, so a
     /// mesher that deletes 900 cells under a building has said where.
     pub dropped_boxes: Vec<[Scalar; 6]>,
+    /// Cells each declared body lost to W1/W2/W3 on its own mask, in
+    /// `castellation.bodies` order - a body that lost nothing has a row of 0.
+    pub per_body: Vec<(String, usize)>,
+    /// Cells the merged surface put inside a body: kept, and counted here
+    /// so `solid` stays "removed as solid" exactly as before.
+    pub kept_in_bodies: usize,
 }
 
 /// The centres of `tree.leaves()`, in that order, and the finest leaf edge
@@ -108,6 +114,103 @@ pub fn classify_leaves(
     }
     let mask = classify_points(surf, &centres, h_min)?;
     Ok(mask.solid)
+}
+
+/// The region of every leaf centre, in `centres` order: `-2` removed as
+/// solid, `-1` fluid, `k >= 0` the k-th declared body. `region_of_cell` on a
+/// [`Castellated`] never holds `-2`.
+///
+/// Each body is classified on its OWN sub-surface (its patches' triangles
+/// alone, `octree::band_surfaces`' pattern) by `classify_points`; a leaf
+/// inside two bodies, a body naming a patch the surface lacks, and a body
+/// whose shell is not closed are refused by name. Returns the region ids and
+/// the body names in `bodies` order.
+pub fn classify_regions(
+    surf: &Surface,
+    centres: &[Vec3],
+    h_min: Scalar,
+    bodies: &[BodySpec],
+) -> Result<(Vec<i32>, Vec<String>)> {
+    // (a) One sub-surface per body, checked before any classification.
+    let mut subs: Vec<Surface> = Vec::with_capacity(bodies.len());
+    for b in bodies {
+        let mut ids: Vec<u32> = Vec::with_capacity(b.patches.len());
+        for p in &b.patches {
+            let Some(id) = surf.patch_names.iter().position(|n| n == p) else {
+                return Err(Error::Mesh(format!(
+                    "castellate: body \"{}\" names patch \"{}\", but the surface's \
+                     patches are {:?} - a patch the surface lacks encloses nothing",
+                    b.name, p, surf.patch_names
+                )));
+            };
+            ids.push(id as u32);
+        }
+        let soup: Vec<SoupTri> = surf
+            .tris
+            .iter()
+            .enumerate()
+            .filter(|(t, _)| ids.contains(&surf.tri_patch[*t]))
+            .map(|(_, tri)| {
+                (
+                    0u32,
+                    [
+                        surf.points[tri[0] as usize],
+                        surf.points[tri[1] as usize],
+                        surf.points[tri[2] as usize],
+                    ],
+                )
+            })
+            .collect();
+        let sub = Surface::from_soup(soup, vec![b.name.clone()])?;
+        let (open, nonman) = sub.edge_defects();
+        if open + nonman > 0 {
+            return Err(Error::Mesh(format!(
+                "castellate: body \"{}\" is not a closed shell - {open} open \
+                 edge(s), {nonman} non-manifold edge(s) among its patches {:?}; \
+                 (92.23) cannot classify a leaf against an open body",
+                b.name, b.patches
+            )));
+        }
+        subs.push(sub);
+    }
+    // (b) The merged classification, the SAME call today's line makes - with
+    // `bodies` empty this function returns today's classification exactly.
+    let merged = classify_points(surf, centres, h_min)?;
+    let mut region0: Vec<i32> =
+        merged.solid.iter().map(|s| if *s { -2 } else { -1 }).collect();
+    let names: Vec<String> = bodies.iter().map(|b| b.name.clone()).collect();
+    // (c) Per body in order: a leaf inside two bodies is refused, a leaf
+    // inside one body belongs to it even where the merged surface called it
+    // solid, and a body that encloses no leaf centre is finer than the mesh.
+    for (k, (b, sub)) in bodies.iter().zip(subs.iter()).enumerate() {
+        let inside = classify_points(sub, centres, h_min)?.solid;
+        for (i, &ins) in inside.iter().enumerate() {
+            if !ins {
+                continue;
+            }
+            if region0[i] >= 0 {
+                return Err(Error::Mesh(format!(
+                    "castellate: leaf centre ({:.3}, {:.3}, {:.3}) is inside body \
+                     \"{}\" and inside body \"{}\" - bodies overlap",
+                    centres[i].x,
+                    centres[i].y,
+                    centres[i].z,
+                    names[region0[i] as usize],
+                    b.name
+                )));
+            }
+            region0[i] = k as i32;
+        }
+        if !inside.iter().any(|&x| x) {
+            return Err(Error::Mesh(format!(
+                "castellate: body \"{}\" holds no leaf centre - it is finer than \
+                 the cells that reached it; raise the level near its patches or \
+                 remove it from castellation.bodies",
+                b.name
+            )));
+        }
+    }
+    Ok((region0, names))
 }
 
 /// The cell's face neighbours currently in K - (92.25)'s count. Two leaves
@@ -507,6 +610,99 @@ pub fn keep_set(
     Ok((keep, rep))
 }
 
+/// (92.24) run ONCE PER REGION: the fluid (`-1`) with `spec` as written, then
+/// each body `k` with `keep_region = "largest"` and no seed - each region is
+/// a mesh of its own after the split, so W1's pinch (92.25) and W2's
+/// component rule (92.4) hold on every region's own boundary, the interface
+/// included. A cell any region's walk removes becomes `-2`. Afterwards the
+/// union of what survived is scanned once with `keep_set` as a CHECK: a pinch
+/// or a disconnected component that appears only across regions is refused
+/// by name, never repaired. Returns the region per cell (`-2` removed) and
+/// the totals over every region.
+pub fn keep_set_regions(
+    full: &PolyMeshRaw,
+    region0: &[i32],
+    centres: &[Vec3],
+    spec: &CastellationSpec,
+    body_names: &[String],
+    tree: &Octree,
+) -> Result<(Vec<i32>, Removed)> {
+    // (a) The fluid's own walk - the ONE call today's stage makes when no
+    // body is declared, and the answer is this function's whole answer then.
+    let solid_f: Vec<bool> = region0.iter().map(|r| *r != -1).collect();
+    let (keep_f, rep_f) = keep_set(full, &solid_f, centres, spec, tree)?;
+    let mut region: Vec<i32> =
+        keep_f.iter().map(|k| if *k { -1 } else { -2 }).collect();
+    if body_names.is_empty() {
+        return Ok((region, Removed { per_body: Vec::new(), kept_in_bodies: 0, ..rep_f }));
+    }
+    // The fluid walk saw the bodies as solid; a body's own cells take their
+    // region back here, and only the body's own walk can take it away.
+    for (i, r) in region.iter_mut().enumerate() {
+        if *r == -2 && region0[i] >= 0 {
+            *r = region0[i];
+        }
+    }
+    let mut rep = Removed { per_body: Vec::new(), ..rep_f };
+    // (b) Each body's own walk: `largest`, no seed - a body is a mesh of its
+    // own after the split and keeps its biggest component.
+    for (k, name) in body_names.iter().enumerate() {
+        let solid_k: Vec<bool> = region0.iter().map(|r| *r != k as i32).collect();
+        let spec_k = CastellationSpec {
+            keep_region: KeepRegion::Largest,
+            seed_point: None,
+            ..spec.clone()
+        };
+        let (keep_k, rep_k) = keep_set(full, &solid_k, centres, &spec_k, tree)
+            .map_err(|e| Error::Mesh(format!("body \"{name}\": {e}")))?;
+        let mut lost = 0;
+        for (i, kflag) in keep_k.iter().enumerate() {
+            if region0[i] == k as i32 && !kflag {
+                region[i] = -2;
+                lost += 1;
+            }
+        }
+        rep.pinch += rep_k.pinch;
+        rep.off_region += rep_k.off_region;
+        rep.starved += rep_k.starved;
+        rep.dropped_boxes.extend(rep_k.dropped_boxes);
+        rep.per_body.push((name.clone(), lost));
+    }
+    // (c) The totals: `solid` stays the merged classification's removals -
+    // NOT the fluid walk's count, which saw the bodies as solid - and every
+    // `keep_set` above has already refused its own residual pinch.
+    rep.solid = region0.iter().filter(|r| **r == -2).count();
+    rep.kept_in_bodies = region.iter().filter(|r| **r >= 0).count();
+    rep.unrepaired_pinch = 0;
+    // (d) The union check: whatever the regions kept together must survive
+    // ONE walk on its own, or the layout is a pinch no region's walk saw.
+    let solid_u: Vec<bool> = region.iter().map(|r| *r == -2).collect();
+    let spec_largest = CastellationSpec {
+        keep_region: KeepRegion::Largest,
+        seed_point: None,
+        ..spec.clone()
+    };
+    let rep_u = match keep_set(full, &solid_u, centres, &spec_largest, tree) {
+        Ok((_, r)) => r,
+        Err(e) => {
+            return Err(Error::Mesh(format!(
+                "castellate: the fluid and the bodies together are not one \
+                 repairable region - {e}"
+            )));
+        }
+    };
+    let across = rep_u.pinch + rep_u.off_region + rep_u.starved;
+    if across > 0 {
+        return Err(Error::Mesh(format!(
+            "castellate: {across} cell(s) would be removed by (92.24) on the \
+             UNION of the fluid and the bodies but by no region's own walk - a \
+             body is pinched against the fluid or is not face-connected to it \
+             (the fluid and {body_names:?}); such a layout is refused, not repaired"
+        )));
+    }
+    Ok((region, rep))
+}
+
 /// W2 (92.4): of `keep`'s connected components - cells joined by the internal
 /// faces whose BOTH cells are kept - leave one standing and drop the rest,
 /// counted and boxed in `rep`. `Largest` keeps the biggest, ties to the
@@ -624,6 +820,12 @@ pub struct Castellated {
     /// that reached it, and a caller whose inlet is that patch must see the row
     /// rather than discover the patch missing.
     pub wall_patches: Vec<(String, usize)>,
+    /// The region of every cell of `mesh`, in `mesh`'s (renumbered) order:
+    /// `-1` fluid, `k >= 0` the k-th entry of `body_names`. All `-1` when
+    /// `castellation.bodies` is empty.
+    pub region_of_cell: Vec<i32>,
+    /// `castellation.bodies[].name`, in config order.
+    pub body_names: Vec<String>,
     /// The gate of §92.3, which this mesh has passed.
     pub report: super::quality::QualityReport,
 }
@@ -675,8 +877,11 @@ pub fn castellate(
              positive jitter length, so the background block needs positive cell sizes"
         )));
     }
-    let solid = classify_points(surf, &centres, h_min)?.solid;
-    let (keep, removed) = keep_set(&full, &solid, &centres, spec, tree)?;
+    let (region0, body_names) =
+        classify_regions(surf, &centres, h_min, &spec.bodies)?;
+    let (region, removed) =
+        keep_set_regions(&full, &region0, &centres, spec, &body_names, tree)?;
+    let keep: Vec<bool> = region.iter().map(|r| *r != -2).collect();
 
     // The renumbering: old ids scanned ascending, so the map is MONOTONE -
     // which is what lets the surviving internal faces inherit (2)'s
@@ -698,6 +903,10 @@ pub fn castellate(
                 .to_string(),
         ));
     }
+    // The regions ride the same monotone renumbering: the map keeps order,
+    // so dropping the removed cells IS the new numbering.
+    let region_of_cell: Vec<i32> =
+        region.iter().copied().filter(|r| *r != -2).collect();
 
     // The wall index (92.26), one for the whole run, hinted by the tree's
     // finest leaf edge - the length the classifier's jitter uses.
@@ -876,6 +1085,8 @@ pub fn castellate(
         removed,
         wall_faces: n_wall,
         wall_patches,
+        region_of_cell,
+        body_names,
         report,
     })
 }
@@ -1097,6 +1308,38 @@ pub(crate) mod tests {
     /// §92.3's default thresholds.
     pub(crate) fn thresholds() -> crate::automesher::quality::QualityThresholds {
         crate::automesher::quality::QualityThresholds::default()
+    }
+
+    /// FNV-1a 64 over points (f64 bits), faces, owner, neighbour and the
+    /// patch list - equal iff the two meshes are the same mesh bit for bit.
+    pub(crate) fn mesh_fingerprint(m: &PolyMeshRaw) -> u64 {
+        let mut b: Vec<u8> = Vec::new();
+        for p in &m.points {
+            for v in [p.x, p.y, p.z] {
+                b.extend_from_slice(&(v as f64).to_bits().to_le_bytes());
+            }
+        }
+        for f in &m.faces {
+            b.extend_from_slice(&(f.len() as u64).to_le_bytes());
+            for q in f {
+                b.extend_from_slice(&(*q as i64).to_le_bytes());
+            }
+        }
+        for o in &m.owner {
+            b.extend_from_slice(&(*o as i64).to_le_bytes());
+        }
+        for n in &m.neighbour {
+            b.extend_from_slice(&(*n as i64).to_le_bytes());
+        }
+        for p in &m.patches {
+            b.extend_from_slice(p.name.as_bytes());
+            b.push(0);
+            b.extend_from_slice(p.type_name.as_bytes());
+            b.push(0);
+            b.extend_from_slice(&(p.start as u64).to_le_bytes());
+            b.extend_from_slice(&(p.size as u64).to_le_bytes());
+        }
+        crate::automesher::identity::fnv1a64(&b)
     }
 
     /// A sphere of radius `r` at `c`: the octahedron subdivided twice - 128
@@ -1671,5 +1914,287 @@ pub(crate) mod tests {
             );
         }
         assert!(checked > 30, "only {checked} of 60 runs produced a keep set");
+    }
+
+    /// Requirement 1's pin (M6 Run 1): with `castellation.bodies` empty the
+    /// castellated mesh is bit for bit what it was before the field existed -
+    /// the cube on the cell planes and the 0.25 m sphere, each to its own
+    /// constant, pinned before any other edit of the run.
+    const PINNED_CUBE_NO_BODY: u64 = 0x1941cd5cc045b35d;
+    const PINNED_SPHERE_NO_BODY: u64 = 0x4133037a9c4931e8;
+
+    #[test]
+    fn the_castellated_mesh_without_bodies_is_pinned() {
+        let (tree, bg, _full, _) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0);
+        let surf = Surface::from_soup(
+            box_soup([2.0; 3], [6.0; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let out = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let cube = mesh_fingerprint(&out.mesh);
+        eprintln!("fingerprint castellated_cube_no_body = {cube:#018x}");
+        assert_eq!(cube, PINNED_CUBE_NO_BODY);
+        // Requirement 7: the default config is the same walk - every cell
+        // fluid, no body named.
+        assert!(out.region_of_cell.iter().all(|r| *r == -1));
+        assert!(out.body_names.is_empty());
+
+        let bg2 = Background::from_domain(&DomainSpec {
+            extent: [0.0, 8.0, 0.0, 8.0, 0.0, 8.0],
+            base_size: 0.25,
+            grading: [1.0; 3],
+        })
+        .expect("background");
+        assert_eq!(bg2.base_n(), [32, 32, 32]);
+        let tree2 = Octree::uniform(bg2.base_n(), 0).expect("uniform");
+        let surf2 = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let out2 = castellate(
+            &tree2,
+            &bg2,
+            &surf2,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let sphere = mesh_fingerprint(&out2.mesh);
+        eprintln!("fingerprint castellated_sphere_no_body = {sphere:#018x}");
+        assert_eq!(sphere, PINNED_SPHERE_NO_BODY);
+    }
+
+    /// Requirement 4 (M6 Run 1): the per-leaf region answers, and the three
+    /// refusals, each naming the body and what it lacks.
+    #[test]
+    fn classify_regions_names_the_body_and_refuses_what_it_cannot() {
+        let (tree, bg, _full, _) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0);
+        let (centres, h_min) = leaf_centres(&tree, &bg);
+        let surf = Surface::from_soup(
+            box_soup([2.0; 3], [6.0; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let cube_body =
+            || BodySpec { name: "cube".to_string(), patches: vec!["cube".to_string()] };
+
+        // The answers: the 64 leaves inside the cube are region 0, the rest
+        // fluid, none removed - the body is the exception to (92.23).
+        let (region, names) = classify_regions(&surf, &centres, h_min, &[cube_body()])
+            .expect("regions");
+        assert_eq!(names, vec!["cube".to_string()]);
+        assert_eq!(region.iter().filter(|r| **r == 0).count(), 64);
+        assert_eq!(region.iter().filter(|r| **r == -1).count(), 448);
+        assert!(!region.iter().any(|r| *r == -2));
+
+        // A patch the surface lacks, named.
+        let bad = BodySpec {
+            name: "cube".to_string(),
+            patches: vec!["cubee".to_string()],
+        };
+        let err = classify_regions(&surf, &centres, h_min, &[bad]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("cubee") && text.contains("cube"), "{err}");
+
+        // An open shell: two triangles short of the cube.
+        let mut open_soup = box_soup([2.0; 3], [6.0; 3]);
+        open_soup.truncate(open_soup.len() - 2);
+        let open = Surface::from_soup(open_soup, vec!["cube".to_string()])
+            .expect("an open soup is still a surface");
+        let err = classify_regions(&open, &centres, h_min, &[cube_body()]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("open edge"), "{err}");
+
+        // Two overlapping bodies: the sphere wholly inside the cube. The
+        // merged parity puts the sphere's leaves OUTSIDE - two crossings -
+        // which is why the overlap check reads the per-body answers.
+        let mut soup = box_soup([2.0; 3], [6.0; 3]);
+        soup.extend(sphere_soup(1.0, [4.0; 3]).into_iter().map(|(_, t)| (1u32, t)));
+        let two = Surface::from_soup(
+            soup,
+            vec!["cube".to_string(), "blob".to_string()],
+        )
+        .expect("surface");
+        let both = vec![
+            cube_body(),
+            BodySpec { name: "blob".to_string(), patches: vec!["blob".to_string()] },
+        ];
+        let err = classify_regions(&two, &centres, h_min, &both).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("blob") && text.contains("cube") && text.contains("overlap"),
+            "{err}"
+        );
+    }
+
+    /// Requirement 5 (M6 Run 1): W1 runs on the body's own mask, so a
+    /// two-cell-wide diagonal pinch loses one cell OF THE BODY, counted in
+    /// `per_body`, and the union check finds nothing left to refuse.
+    #[test]
+    fn a_body_hourglass_loses_one_cell_of_the_body() {
+        let (tree, _bg, full, centres) = setup([0.0, 2.0, 0.0, 2.0, 0.0, 2.0], 1.0);
+        assert_eq!(centres.len(), 8);
+        // Leaf ids are (k, j, i) order: x fastest. The upper four carry the
+        // body on the (x < 1) == (y < 1) diagonal; the other diagonal is
+        // solid to remove, like §92.10's own hourglass.
+        let region0: Vec<i32> = centres
+            .iter()
+            .map(|c| {
+                if c.z < 1.0 {
+                    -1
+                } else if (c.x < 1.0) == (c.y < 1.0) {
+                    0
+                } else {
+                    -2
+                }
+            })
+            .collect();
+        let spec = CastellationSpec::default();
+        let (region, rep) = keep_set_regions(
+            &full,
+            &region0,
+            &centres,
+            &spec,
+            &["blob".to_string()],
+            &tree,
+        )
+        .expect("regions");
+        assert_eq!(rep.per_body, vec![("blob".to_string(), 1)]);
+        assert_eq!(rep.pinch, 1);
+        assert_eq!(rep.solid, 2);
+        assert_eq!(region.iter().filter(|r| **r != -2).count(), 5);
+        // The surviving body cell is the diagonal cell with the LOWER id;
+        // all four fluid cells are kept.
+        let body: Vec<usize> = region
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| **r == 0)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(body, vec![4]);
+        for r in &region[..4] {
+            assert_eq!(*r, -1, "all four fluid cells are kept");
+        }
+    }
+
+    /// Requirement 5 (M6 Run 1): a body touching no fluid cell - nine cells
+    /// sealed off by a solid layer - passes its own walk and the fluid's,
+    /// and is refused only by the union check, by name.
+    #[test]
+    fn a_body_disconnected_from_the_fluid_is_refused() {
+        let (tree, _bg, full, centres) = setup([0.0, 3.0, 0.0, 3.0, 0.0, 3.0], 1.0);
+        assert_eq!(centres.len(), 27);
+        let region0: Vec<i32> = centres
+            .iter()
+            .map(|c| {
+                if c.z < 1.0 {
+                    -1
+                } else if c.z < 2.0 {
+                    -2
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let spec = CastellationSpec::default();
+        let err = keep_set_regions(
+            &full,
+            &region0,
+            &centres,
+            &spec,
+            &["blob".to_string()],
+            &tree,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("blob") && text.contains("not face-connected"),
+            "{err}"
+        );
+    }
+
+    /// Requirement 6 (M6 Run 1): a declared cube ON the cell planes is kept
+    /// as its own region - nothing removed, no wall, the interface faces
+    /// internal, and §92.3's gate passed on the full 512-cell block.
+    #[test]
+    fn a_declared_cube_is_kept_as_its_own_region() {
+        let (tree, bg, _full, _) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0);
+        let surf = Surface::from_soup(
+            box_soup([2.0; 3], [6.0; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let spec = CastellationSpec {
+            bodies: vec![BodySpec {
+                name: "cube".to_string(),
+                patches: vec!["cube".to_string()],
+            }],
+            ..Default::default()
+        };
+        let out =
+            castellate(&tree, &bg, &surf, &patch_names(), &spec, &thresholds())
+                .expect("castellate");
+        assert_eq!(out.report.n_cells, 512);
+        assert_eq!(out.removed.solid, 0);
+        assert_eq!(out.wall_faces, 0);
+        assert_eq!(out.wall_patches, vec![("cube".to_string(), 0)]);
+        assert_eq!(out.mesh.patches.len(), 6);
+        assert_eq!(out.body_names, vec!["cube".to_string()]);
+        assert_eq!(out.region_of_cell.iter().filter(|r| **r == 0).count(), 64);
+        assert_eq!(out.report.n_regions, 1);
+        assert!(out.report.passed());
+        assert_eq!(
+            out.mesh.neighbour.len(),
+            3 * 8 * 8 * 7,
+            "nothing was removed, so the interface faces are among the full \
+             block's internal faces"
+        );
+        // Every body cell's centre - the mean of its face points - lies
+        // inside [2, 6]^3.
+        let n_int = out.mesh.neighbour.len();
+        let n_cells = out.report.n_cells;
+        let mut sum = vec![[0.0f64; 3]; n_cells];
+        let mut cnt = vec![0.0f64; n_cells];
+        for (f, ps) in out.mesh.faces.iter().enumerate() {
+            let mut cells = vec![out.mesh.owner[f] as usize];
+            if f < n_int {
+                cells.push(out.mesh.neighbour[f] as usize);
+            }
+            for c in cells {
+                for &p in ps {
+                    let q = out.mesh.points[p as usize];
+                    sum[c][0] += q.x as f64;
+                    sum[c][1] += q.y as f64;
+                    sum[c][2] += q.z as f64;
+                    cnt[c] += 1.0;
+                }
+            }
+        }
+        for (c, r) in out.region_of_cell.iter().enumerate() {
+            if *r != 0 {
+                continue;
+            }
+            let ctr = [sum[c][0] / cnt[c], sum[c][1] / cnt[c], sum[c][2] / cnt[c]];
+            assert!(
+                ctr[0] >= 2.0
+                    && ctr[0] <= 6.0
+                    && ctr[1] >= 2.0
+                    && ctr[1] <= 6.0
+                    && ctr[2] >= 2.0
+                    && ctr[2] <= 6.0,
+                "body cell {c} has centre {ctr:?}, outside [2,6]^3"
+            );
+        }
     }
 }
