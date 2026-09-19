@@ -5804,6 +5804,19 @@ seconds" names a schedule they have no clock for. The error names `-endTime`
 /`-deltaT` (`ofgpu-lowmach`) and says the driver writes its final state once.
 `interval` absent runs everywhere.
 
+**The command line, since the steady-run defect was found.** `ofgpu-lowmach`
+used to ZERO a `-writeInterval` given to a steady run, silently - the §13.4
+defect in its purest form, and the reason a session that asked for snapshots
+saw none. It now refuses it by the rule above, naming `-writeEvery` and
+`-endTime`/`-deltaT`. A steady run's schedule is **`-writeEvery N`**: every
+N iterations, driven through the SAME schedule with the iteration count as
+its clock (`W = N`, `t = the iteration count`), so `-iters 30 -writeEvery 10`
+writes the time directories `10`, `20` and `30`, the forced final write
+sharing the last label. The disclosure line says `every N iterations`, never
+`every N s`. A transient run given `-writeEvery` is refused by name - it has a
+clock. The case route's `output.*.interval` keeps its meaning and its refusal
+and gains no iteration form here.
+
 ### 44.5 `restart.keep` — retain N, delete older, and delete nothing else
 
 Every driver in this crate writes its checkpoint to one fixed path,
@@ -5884,6 +5897,8 @@ routed through one type instead of three call sites.
 | `output.restart` in `ofgpu-k-epsilon` | errors by name — that driver has no checkpoint at all — naming the three that do |
 | **§13.4.1 pair** | ten pairs — `output` present/absent, `visualisation.format`, `.interval`, `.fields`, `.precision`, `.usdScene`, `exact.format`, `exact.interval`, `restart.interval`, `restart.keep` — each two runs identical in every byte but one, each REQUIRED to write different bytes. Compared as BYTES, not text: `.vdb`/`.nvdb` are binary and `read_to_string` silently skips them |
 | the default does not move | `cargo test`, `ofgpu-validate` and the gate case's three recorded numbers unchanged |
+| steady + `-writeInterval` (command line) | errors by name, naming `-writeEvery` and `-endTime`/`-deltaT`; `-permissive` writes the final state only |
+| `-writeEvery N` | `-iters 30 -writeEvery 10` writes exactly the directories `10`, `20`, `30`, and `-iters 30` alone writes one; on a transient run it errors by name, naming `-writeInterval` |
 
 
 ### 44.8 What the documented example turned out to be

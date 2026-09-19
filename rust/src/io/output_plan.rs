@@ -680,6 +680,11 @@ pub struct OutputPipeline {
     /// `true` when the case's `output` block built this, `false` for the
     /// command line - so a driver can say which is in force.
     from_case: bool,
+    /// What a stage's interval is quoted IN by [`Self::describe`] - `"s"`
+    /// unless the driver says otherwise: `-writeEvery` drives the SAME
+    /// schedule with the driver's iteration count as the clock
+    /// (SPEC-LIT §44.4). Disclosure only; the arithmetic never reads it.
+    clock_unit: &'static str,
 }
 
 impl OutputPipeline {
@@ -709,6 +714,7 @@ impl OutputPipeline {
             restart: None,
             restart_spec: None,
             from_case: false,
+            clock_unit: "s",
         })
     }
 
@@ -745,7 +751,7 @@ impl OutputPipeline {
         let restart = plan
             .restart
             .map(|r| Checkpoints::new(root.to_path_buf(), restart_stem, r.keep, r.interval));
-        Ok(Self { stages, restart, restart_spec: plan.restart, from_case: true })
+        Ok(Self { stages, restart, restart_spec: plan.restart, from_case: true, clock_unit: "s" })
     }
 
     /// Start every schedule from `t0` - a restart resumes at its own time.
@@ -811,6 +817,14 @@ impl OutputPipeline {
         self.restart.is_some()
     }
 
+    /// Name the clock the driver is feeding the schedule, for the
+    /// disclosure line alone - `"iterations"` when `-writeEvery` drives
+    /// the SAME `next = t0 + W` arithmetic with the iteration count as its
+    /// clock (SPEC-LIT §44.4). The schedule itself is unit-blind.
+    pub fn set_clock_unit(&mut self, unit: &'static str) {
+        self.clock_unit = unit;
+    }
+
     /// The disclosure line SPEC-LIT §13.4.2 asks of every setting that
     /// reached the solver: what will be written, how often, of what, at what
     /// precision.
@@ -827,7 +841,7 @@ impl OutputPipeline {
                 s.label,
                 formats.join(", "),
                 if s.interval > 0.0 {
-                    format!("every {} s", s.interval)
+                    format!("every {} {}", s.interval, self.clock_unit)
                 } else {
                     "final state only".to_string()
                 },
@@ -1245,6 +1259,28 @@ mod tests {
         assert!(p.stages[0].take(0.25));
         assert!(!p.any_due(0.25));
         assert!(p.any_due(0.5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §44.4: the disclosure line quotes the interval in the clock
+    /// the driver is feeding - seconds until the driver names iterations,
+    /// and the schedule arithmetic never knows the difference.
+    #[test]
+    fn the_disclosure_line_names_the_clock_unit() {
+        let dir = std::env::temp_dir().join(format!("ofgpu_pipeline_clock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut p =
+            OutputPipeline::from_command_line(&dir, "x", &[OutputFormat::Foam], 10.0).expect("pipeline");
+        assert!(
+            p.describe().contains("every 10 s"),
+            "the default unit is seconds: {}",
+            p.describe()
+        );
+        p.set_clock_unit("iterations");
+        assert_eq!(
+            p.describe(),
+            "output output (command line): foam | every 10 iterations | fields: every field | precision fp32"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

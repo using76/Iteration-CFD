@@ -28,8 +28,10 @@
 //!                     over the whole domain - SPEC-LIT §18's registry.
 //!
 //!   -output LIST      comma list of foam,vtu,nvdb,vdb,usda (default: foam)
-//!   -writeInterval W  write every W seconds of PHYSICAL time (transient
-//!                     only; absent means "write the final state only")
+//!   -writeInterval W  write every W seconds of PHYSICAL time - TRANSIENT
+//!                     runs only; a steady run refuses it by name (§44.4)
+//!   -writeEvery N     write every N iterations - the STEADY run's schedule
+//!                     (§44.4); a transient run refuses it by name
 //!   -restartWrite N   write a `.mcr` checkpoint every N steps
 //!   -restartFrom FILE resume from a checkpoint - p0 and dp0dt included
 //!                     (SPEC-LIT §25.2/§31.2)
@@ -203,6 +205,7 @@ use ofgpu::restart::{self, RestartData};
 //  Command line
 // ==========================================================================
 
+#[derive(Debug)]
 struct Options {
     case_path: PathBuf,
     n_iters: i64,
@@ -214,10 +217,16 @@ struct Options {
     heater_power: Scalar,
     /// `-output foam|vtu|nvdb|vdb|usda`, comma list.
     output: Vec<OutputFormat>,
-    /// `-writeInterval W` - write every W seconds of PHYSICAL time. Non-
-    /// positive means "not given": only the final state is written, exactly
-    /// as `ofgpu-buoyant`/`ofgpu-vof` treat an absent `-writeInterval`.
+    /// `-writeInterval W` - write every W seconds of PHYSICAL time.
+    /// TRANSIENT runs only; a steady run refuses it by name (SPEC-LIT
+    /// §44.4) instead of the silent zero it used to suffer. Non-positive
+    /// means "not given": only the final state is written.
     write_interval: f64,
+    /// `-writeEvery N` - write every N ITERATIONS, the steady run's own
+    /// schedule (SPEC-LIT §44.4): the same `next = t0 + W` arithmetic with
+    /// the iteration count as its clock. A transient run refuses it by
+    /// name - it has a clock, `-writeInterval`.
+    write_every: Option<u64>,
     /// `-restartWrite N` - write a `.mcr` checkpoint every N steps.
     restart_write: Option<u64>,
     /// `-restartFrom FILE` - load state from a checkpoint, skipping
@@ -225,8 +234,8 @@ struct Options {
     /// potential-flow-equivalent `phi` seed, and every field's own initial
     /// condition).
     restart_from: Option<PathBuf>,
-    /// Which of `-output`, `-writeInterval`, `-restartWrite` this command
-    /// line actually NAMED - SPEC-LIT §44.6.
+    /// Which of `-output`, `-writeInterval`, `-writeEvery`, `-restartWrite`
+    /// this command line actually NAMED - SPEC-LIT §44.6.
     ///
     /// Not the same question as "what are they set to": `-output` defaults to
     /// `foam` and `write_interval` to `0`, so every run has values for all
@@ -241,7 +250,7 @@ fn usage() {
     eprintln!(
         "usage: ofgpu-lowmach <case> [-iters N] [-check N] [-endTime T] [-deltaT dt]\n       \
          [-sealed] [-p0 PA] [-heaterPower W] [-output LIST]\n       \
-         [-writeInterval W] [-restartWrite N] [-restartFrom FILE] [-permissive]"
+         [-writeInterval W] [-writeEvery N] [-restartWrite N] [-restartFrom FILE] [-permissive]"
     );
 }
 
@@ -271,6 +280,7 @@ fn parse(args: &[String]) -> Result<Options> {
         heater_power: 0.0,
         output: vec![OutputFormat::Foam],
         write_interval: 0.0,
+        write_every: None,
         restart_write: None,
         restart_from: None,
         output_flags: Vec::new(),
@@ -308,6 +318,16 @@ fn parse(args: &[String]) -> Result<Options> {
                 o.write_interval = parse_time("-writeInterval", &next_arg(args, &mut i)?)?;
                 o.output_flags.push("-writeInterval");
             }
+            "-writeEvery" => {
+                let n = atoi(&next_arg(args, &mut i)?);
+                if n <= 0 {
+                    return Err(Error::Config(
+                        "-writeEvery needs a positive iteration count".to_string(),
+                    ));
+                }
+                o.write_every = Some(n as u64);
+                o.output_flags.push("-writeEvery");
+            }
             "-restartWrite" => {
                 let n = atoi(&next_arg(args, &mut i)?);
                 if n <= 0 {
@@ -340,6 +360,37 @@ fn parse(args: &[String]) -> Result<Options> {
     }
     if o.n_iters <= 0 {
         return Err(Error::Config(format!("-iters is {}; it must be positive", o.n_iters)));
+    }
+
+    // SPEC-LIT §44.4: `-writeInterval` is seconds of PHYSICAL time, and a
+    // steady run advances an iteration counter, not a clock - refused by
+    // name here, exactly as the case route's `output.*.interval` is, rather
+    // than the silent zero this driver used to apply.
+    if !(o.end_time > 0.0) && o.write_interval > 0.0 {
+        ofgpu::io::contract::unsupported_note(
+            "-writeInterval",
+            &format!("{}", o.write_interval),
+            &[],
+            "-writeInterval is seconds of PHYSICAL time, and this ofgpu-lowmach run is steady - it advances an iteration counter, not a clock. Use -writeEvery N to write every N iterations, or -endTime T -deltaT dt for a transient run; without either it writes its final state once",
+            "the final state only",
+            (),
+        )?;
+        o.write_interval = 0.0;
+    }
+    // ... and the mirror image: `-writeEvery` counts iterations, which a
+    // transient run has no use for - it has a clock.
+    if o.end_time > 0.0 {
+        if let Some(n) = o.write_every {
+            ofgpu::io::contract::unsupported_note(
+                "-writeEvery",
+                &format!("{n}"),
+                &[],
+                "-writeEvery counts iterations, and this ofgpu-lowmach run is transient (-endTime/-deltaT given) - it has a clock. Use -writeInterval W to write every W seconds of physical time",
+                "the -writeInterval schedule only",
+                (),
+            )?;
+            o.write_every = None;
+        }
     }
 
     Ok(o)
@@ -2017,7 +2068,10 @@ fn run(o: &Options) -> Result<RunEnd> {
             &out_root_for_writers,
             "lowmach",
             &o.output,
-            if transient { o.write_interval } else { 0.0 },
+            // SPEC-LIT §44.4: a transient run schedules in seconds; a
+            // steady one feeds the SAME schedule its iteration count as
+            // the clock, via `-writeEvery N` (W = N).
+            if transient { o.write_interval } else { o.write_every.map_or(0.0, |n| n as f64) },
         )?,
     };
     // §44.2's EARLY half: the names this run is about to build, checked
@@ -2029,6 +2083,12 @@ fn run(o: &Options) -> Result<RunEnd> {
         let available = output_field_names(&*turb);
         let refs: Vec<&str> = available.iter().map(String::as_str).collect();
         plan.check_fields(&refs)?;
+    }
+    // SPEC-LIT §44.4: the disclosure line names the clock the schedule is
+    // driven by - `every 10 iterations`, never `every 10 s`, for a steady
+    // run's `-writeEvery`.
+    if !transient && o.write_every.is_some() {
+        pipeline.set_clock_unit("iterations");
     }
     println!("{}", pipeline.describe());
 
@@ -2180,7 +2240,11 @@ fn run(o: &Options) -> Result<RunEnd> {
             mem.sample(&gpu)?;
         }
 
-        if transient && pipeline.any_due(t_phys) {
+        // Both clocks feed the SAME schedule (SPEC-LIT §44.4): seconds on
+        // a transient run, the iteration count on a steady one. A steady
+        // run with no `-writeEvery` has a 0 interval, which `any_due`
+        // never fires on.
+        if pipeline.any_due(t_phys) {
             write_time(
                 &gpu,
                 &s,
@@ -3086,8 +3150,13 @@ mod lowmach_tests {
 
     #[test]
     fn output_and_restart_flags_parse() {
-        let o = parse(&argv(&["case", "-output", "foam,vtu", "-writeInterval", "0.5"]))
-            .expect("a valid -output/-writeInterval pair");
+        // SPEC-LIT §44.4: `-writeInterval` needs the clock a transient
+        // command line has; a steady one is refused (see
+        // `a_steady_run_refuses_write_interval_...` below).
+        let o = parse(&argv(&[
+            "case", "-output", "foam,vtu", "-writeInterval", "0.5", "-endTime", "2", "-deltaT", "0.5",
+        ]))
+        .expect("a valid -output/-writeInterval pair on a transient command line");
         assert_eq!(o.output, vec![OutputFormat::Foam, OutputFormat::Vtu]);
         assert!((o.write_interval - 0.5).abs() < 1e-12);
 
@@ -4452,6 +4521,24 @@ mod lowmach_tests {
         out.iter().map(|(n, _)| n.clone()).collect()
     }
 
+    /// The time directories a run wrote: the first path component of each
+    /// name, kept when it parses as a number, deduplicated and in numeric
+    /// order. A `-writeEvery`/`-writeInterval` schedule is proved by
+    /// COUNTING and NAMING these (SPEC-LIT §44.4), not by trusting the log.
+    fn time_dirs(names: &[String]) -> Vec<String> {
+        let mut v: Vec<(f64, String)> = Vec::new();
+        for n in names {
+            let head = n.split('/').next().unwrap_or(n);
+            if let Ok(t) = head.parse::<f64>() {
+                if !v.iter().any(|(x, _)| *x == t) {
+                    v.push((t, head.to_string()));
+                }
+            }
+        }
+        v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        v.into_iter().map(|(_, s)| s).collect()
+    }
+
     // The `output` blocks the pairs below turn. Every one of them is a
     // complete, valid block, so the pair differs in exactly one entry.
     const OUT_VDB: &str = r#", "output": { "visualisation": { "format": "vdb" } }"#;
@@ -4657,6 +4744,11 @@ mod lowmach_tests {
         if Gpu::new(0).is_err() {
             return;
         }
+        // Every assertion below is a STRICT-mode one, and another test in
+        // this binary now sets the process-wide permissive flag - take the
+        // guard so the two cannot interleave (`contract::permissive_test_guard`
+        // documents exactly this flake).
+        let _g = ofgpu::io::contract::permissive_test_guard();
         let case = |k: &Knobs, tag: &str, extra: &[&str]| -> Result<()> {
             let dir = scratch_dir(tag);
             let path = dir.join("case.jsonc");
@@ -4934,5 +5026,170 @@ mod lowmach_tests {
             "run ended: refused | -writeInterval: \"10\" is not supported by ofgpu | exit code 3"
         );
         assert_eq!(run_end_line(&other), "run ended: error | boom | exit code 1");
+    }
+
+    /// SPEC-LIT §44.4: `-writeEvery N` parses into an iteration count and
+    /// refuses a non-positive one, exactly like `-restartWrite` beside it,
+    /// and names itself to §44.6's list of flags a case may not be doubled
+    /// by.
+    #[test]
+    fn write_every_parses_and_needs_a_positive_count() {
+        let o = parse(&argv(&["case", "-writeEvery", "10"])).expect("a positive iteration count");
+        assert_eq!(o.write_every, Some(10));
+        assert_eq!(o.output_flags, vec!["-writeEvery"]);
+
+        assert!(
+            parse(&argv(&["case", "-writeEvery", "0"])).is_err(),
+            "-writeEvery needs a positive iteration count"
+        );
+    }
+
+    /// SPEC-LIT §44.4: the command line gets the refusal the case route has
+    /// always had - a steady run has no clock for `-writeInterval`, a
+    /// transient one no iteration counter for `-writeEvery` - and under
+    /// `-permissive` the substitution the warning names actually happens.
+    #[test]
+    fn a_steady_run_refuses_write_interval_and_a_transient_one_refuses_write_every() {
+        let _g = ofgpu::io::contract::permissive_test_guard();
+        ofgpu::io::contract::set_permissive(false);
+
+        let e = parse(&argv(&["case", "-iters", "30", "-writeInterval", "10"]))
+            .expect_err("a steady command line must refuse -writeInterval by name");
+        assert!(matches!(e, Error::Refused(_)), "a refusal is its own variant");
+        let m = format!("{e}");
+        assert!(m.contains("-writeInterval"), "{m}");
+        assert!(m.contains("-writeEvery"), "the refusal names the steady schedule: {m}");
+        assert!(m.contains("-endTime"), "the refusal names how to get a clock: {m}");
+
+        let e = parse(&argv(&[
+            "case", "-endTime", "0.03", "-deltaT", "0.001", "-writeEvery", "10",
+        ]))
+        .expect_err("a transient command line must refuse -writeEvery by name");
+        assert!(matches!(e, Error::Refused(_)));
+        let m = format!("{e}");
+        assert!(m.contains("-writeEvery"), "{m}");
+        assert!(m.contains("-writeInterval"), "the refusal names the clock it has: {m}");
+
+        // The clock each mode has, named where it is: both parse.
+        parse(&argv(&["case", "-iters", "30", "-writeEvery", "10"]))
+            .expect("a steady run may schedule by iterations");
+        parse(&argv(&[
+            "case", "-endTime", "0.03", "-deltaT", "0.001", "-writeInterval", "0.01",
+        ]))
+        .expect("a transient run may schedule by seconds");
+
+        // §13.4: under -permissive, the substitution named in the warning.
+        ofgpu::io::contract::set_permissive(true);
+        let o = parse(&argv(&["case", "-iters", "30", "-writeInterval", "10"]))
+            .expect("permissive substitutes the final state only");
+        assert_eq!(o.write_interval, 0.0, "\"the final state only\"");
+        let o = parse(&argv(&[
+            "case", "-endTime", "0.03", "-deltaT", "0.001", "-writeEvery", "10",
+        ]))
+        .expect("permissive keeps the -writeInterval schedule");
+        assert_eq!(o.write_every, None, "\"the -writeInterval schedule only\"");
+        ofgpu::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT §44.4, the command-line gate: `-iters 30 -writeEvery 10`
+    /// names the time directories 10, 20 and 30, and the same case without
+    /// the flag writes its final state alone, in the same `30/` the
+    /// schedule ends on. Two runs differing in one flag must write
+    /// different output (SPEC-LIT §13.4.1).
+    #[test]
+    fn write_every_names_three_directories() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let we = run_knobs_bytes(&d, "we10", &["-iters", "30", "-writeEvery", "10", "-check", "100"]);
+        let names = written_names(&we);
+        let dirs = time_dirs(&names);
+        assert_eq!(dirs, vec!["10", "20", "30"], "the -writeEvery schedule: {names:?}");
+        for t in ["10", "20", "30"] {
+            assert!(names.contains(&format!("{t}/U")), "{t}/U is missing: {names:?}");
+        }
+
+        // One flag fewer: one directory, the final state, and it is the
+        // same `30/` the scheduled run ended on.
+        let plain = run_knobs_bytes(&d, "we0", &["-iters", "30", "-check", "100"]);
+        let plain_dirs = time_dirs(&written_names(&plain));
+        assert_eq!(
+            plain_dirs,
+            vec!["30"],
+            "a steady run with no schedule writes its final state alone: {:?}",
+            written_names(&plain)
+        );
+        assert_eq!(plain_dirs.last(), dirs.last(), "the two runs must end on the same label");
+    }
+
+    /// SPEC-LIT §44.4: the transient schedule keeps its own meaning - three
+    /// directories in PHYSICAL seconds, the forced final write sharing the
+    /// last label (`0.03`), exactly §44.4's "one write there, not two".
+    #[test]
+    fn write_interval_names_three_directories_on_a_transient_run() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let wi = run_knobs_bytes(
+            &Knobs::default(),
+            "wi01",
+            &["-endTime", "0.03", "-deltaT", "0.001", "-writeInterval", "0.01", "-check", "100"],
+        );
+        let names = written_names(&wi);
+        assert_eq!(
+            time_dirs(&names),
+            vec!["0.01", "0.02", "0.03"],
+            "the -writeInterval schedule: {names:?}"
+        );
+    }
+
+    /// SPEC-LIT §44.4/§44.9: a steady run's snapshots continue across a
+    /// restart. Run A writes `10/`, `20/` and a checkpoint carrying 20;
+    /// run B, resumed from it for 10 MORE iterations with the same
+    /// `-writeEvery`, writes exactly one new directory, `30/` - not a
+    /// second `10/` from a counter that restarted. And what B writes is
+    /// not what a fresh 10-iteration run writes: `-restartFrom` reached
+    /// the solver (SPEC-LIT §13.4.1).
+    #[test]
+    fn restart_from_continues_the_run_and_writes_its_own_snapshots() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let (a_root, a) = run_knobs_at(
+            &d,
+            "wea",
+            &["-iters", "20", "-writeEvery", "10", "-restartWrite", "20", "-check", "100"],
+        );
+        let a_names = written_names(&a);
+        assert_eq!(time_dirs(&a_names), vec!["10", "20"], "run A's schedule: {a_names:?}");
+        let a_mcr = a_root.join("restart.mcr");
+        assert!(a_mcr.exists(), "run A wrote no restart.mcr: {a_names:?}");
+
+        let a_mcr_s = a_mcr.to_string_lossy().to_string();
+        let (_, b) = run_knobs_at(
+            &d,
+            "web",
+            &["-restartFrom", a_mcr_s.as_str(), "-iters", "10", "-writeEvery", "10", "-check", "100"],
+        );
+        let b_names = written_names(&b);
+        let b_dirs = time_dirs(&b_names);
+        assert_eq!(
+            b_dirs,
+            vec!["30"],
+            "the resumed run continues the count, it does not restart it: {b_names:?}"
+        );
+
+        // A restarted run is not a fresh one: B's `30/U` is the field at
+        // ITERATION 30, C's `10/U` the field at iteration 10.
+        let (_, c) = run_knobs_at(&d, "wec", &["-iters", "10", "-writeEvery", "10", "-check", "100"]);
+        let b_u = b.iter().find(|(n, _)| n == "30/U").map(|(_, v)| v.clone());
+        let c_u = c.iter().find(|(n, _)| n == "10/U").map(|(_, v)| v.clone());
+        assert_ne!(
+            b_u.expect("B wrote 30/U"),
+            c_u.expect("C wrote 10/U"),
+            "the restarted run's 30/U is byte-identical to a fresh run's 10/U: -restartFrom did not reach the solver"
+        );
     }
 }
