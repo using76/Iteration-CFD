@@ -148,6 +148,17 @@
 //! and `ofgpu::restart`'s "Version 2: `dp0dt`" note for the one part of that
 //! state the `.mcr` format did not carry until this section's own gate test
 //! found the gap.
+//!
+//! # How a run ends (SPEC-LIT §31.4)
+//!
+//! The LAST line the driver writes, on stdout, names how it ended:
+//! `run ended: <word> | <detail> | exit code <n>`. The four words and
+//! their codes: `budget` (0) - the `-iters`/`-endTime` budget was
+//! reached; `diverged` (2) - a field went non-finite, and nothing is
+//! written; `refused` (3) - a setting refused by name under §13.4,
+//! including the §93.6 Mach check; `error` (1) - everything else. No
+//! signal handler is installed: a killed process prints no line, and
+//! the parent reads the operating system's termination status.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1358,7 +1369,7 @@ impl MemWatch {
     }
 }
 
-fn run(o: &Options) -> Result<()> {
+fn run(o: &Options) -> Result<RunEnd> {
     let t_total = Instant::now();
 
     let gpu = Gpu::new(0)?;
@@ -2147,7 +2158,10 @@ fn run(o: &Options) -> Result<()> {
         if !report.finite {
             eprintln!("[ofgpu-lowmach] a field went non-finite at step {step} - stopping");
             print_report(step, &report);
-            return Err(Error::Config("solution diverged (NaN/Inf)".to_string()));
+            return Err(Error::Diverged {
+                iteration: step,
+                what: "a field went non-finite (NaN/Inf)".to_string(),
+            });
         }
 
         // SPEC-LIT §93.6: the premise is re-checked on the field every
@@ -2210,6 +2224,13 @@ fn run(o: &Options) -> Result<()> {
             )?;
         }
     }
+
+    // How the run ended, for `main`'s last line (SPEC-LIT §31.4).
+    let run_end = RunEnd {
+        steps: n_steps,
+        transient,
+        t_end: t_phys,
+    };
 
     mem.sample(&gpu)?;
     println!("done in {} s", g(t_total.elapsed().as_secs_f64()));
@@ -2963,27 +2984,63 @@ fn run(o: &Options) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(run_end)
+}
+
+/// How a completed `run` stopped, so `main` can name the way (SPEC-LIT §31.4).
+#[derive(Debug)]
+struct RunEnd {
+    steps: usize,
+    transient: bool,
+    t_end: f64,
+}
+
+/// SPEC-LIT §31.4: 0 the budget was reached, 2 diverged, 3 refused by name
+/// under §13.4, 1 every other error (a parse error included).
+fn exit_code(outcome: &Result<RunEnd>) -> u8 {
+    match outcome {
+        Ok(_) => 0,
+        Err(Error::Diverged { .. }) => 2,
+        Err(Error::Refused(_)) => 3,
+        Err(_) => 1,
+    }
+}
+
+/// SPEC-LIT §31.4/§13.4.2: the LAST line the driver writes names how it
+/// ended - `run ended: <word> | <detail> | exit code <n>`. `<detail>` is
+/// the first line of the error, never a whole multi-line refusal.
+fn run_end_line(outcome: &Result<RunEnd>) -> String {
+    let (word, detail) = match outcome {
+        Ok(end) if end.transient => (
+            "budget",
+            format!("endTime {} s reached in {} steps", g(end.t_end), end.steps),
+        ),
+        Ok(end) => ("budget", format!("{} iterations reached", end.steps)),
+        Err(e) => {
+            let word = match e {
+                Error::Diverged { .. } => "diverged",
+                Error::Refused(_) => "refused",
+                _ => "error",
+            };
+            let first = e.to_string().lines().next().unwrap_or("").to_string();
+            (word, first)
+        }
+    };
+    format!("run ended: {word} | {detail} | exit code {}", exit_code(outcome))
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    let o = match parse(&args) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("\nerror: {e}");
-            return ExitCode::from(1);
-        }
+    let outcome = match parse(&args) {
+        Ok(o) => run(&o),
+        Err(e) => Err(e),
     };
-
-    match run(&o) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("\nerror: {e}");
-            ExitCode::from(1)
-        }
+    if let Err(e) = &outcome {
+        eprintln!("\nerror: {e}");
     }
+    println!("{}", run_end_line(&outcome));
+    ExitCode::from(exit_code(&outcome))
 }
 
 // ==========================================================================
@@ -4608,7 +4665,7 @@ mod lowmach_tests {
                 vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
             args.extend(extra.iter().map(|s| (*s).to_string()));
             let o = parse(&args).expect("the command line must parse");
-            run(&o)
+            run(&o).map(drop)
         };
         let d = Knobs::default;
 
@@ -4618,6 +4675,9 @@ mod lowmach_tests {
         let m = format!("{e}");
         assert!(m.contains("output.visualisation.interval"), "{m}");
         assert!(m.contains("-endTime"), "the error must say how to get a clock: {m}");
+        // SPEC-LIT §31.4: a refusal is its own variant and its own exit code.
+        assert!(matches!(e, Error::Refused(_)));
+        assert_eq!(exit_code(&Err(e)), 3);
 
         // §44.6 - the case and the command line both naming the output.
         let e = case(
@@ -4820,5 +4880,59 @@ mod lowmach_tests {
         let msg = format!("{e}");
         assert!(msg.contains("-endTime"), "the refusal must name the flag: {msg}");
         assert!(msg.contains("iteration count"), "the refusal must say why: {msg}");
+    }
+
+    /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
+    #[test]
+    fn exit_codes_name_the_four_ways_a_run_ends() {
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03 });
+        let diverged = Err(Error::Diverged {
+            iteration: 12,
+            what: "a field went non-finite (NaN/Inf)".to_string(),
+        });
+        let refused = Err(Error::Refused(
+            "-writeInterval: \"10\" is not supported by ofgpu\n  (run with -permissive to substitute the final state only and continue)"
+                .to_string(),
+        ));
+        let other = Err(Error::Config("boom".to_string()));
+        assert_eq!(exit_code(&steady), 0);
+        assert_eq!(exit_code(&transient), 0);
+        assert_eq!(exit_code(&diverged), 2);
+        assert_eq!(exit_code(&refused), 3);
+        assert_eq!(exit_code(&other), 1);
+    }
+
+    /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
+    #[test]
+    fn the_last_line_names_the_reason() {
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03 });
+        let diverged = Err(Error::Diverged {
+            iteration: 12,
+            what: "a field went non-finite (NaN/Inf)".to_string(),
+        });
+        let refused = Err(Error::Refused(
+            "-writeInterval: \"10\" is not supported by ofgpu\n  (run with -permissive to substitute the final state only and continue)"
+                .to_string(),
+        ));
+        let other = Err(Error::Config("boom".to_string()));
+        assert_eq!(
+            run_end_line(&steady),
+            "run ended: budget | 30 iterations reached | exit code 0"
+        );
+        assert_eq!(
+            run_end_line(&transient),
+            "run ended: budget | endTime 0.03 s reached in 30 steps | exit code 0"
+        );
+        assert_eq!(
+            run_end_line(&diverged),
+            "run ended: diverged | diverged at outer iteration 12: a field went non-finite (NaN/Inf) | exit code 2"
+        );
+        assert_eq!(
+            run_end_line(&refused),
+            "run ended: refused | -writeInterval: \"10\" is not supported by ofgpu | exit code 3"
+        );
+        assert_eq!(run_end_line(&other), "run ended: error | boom | exit code 1");
     }
 }

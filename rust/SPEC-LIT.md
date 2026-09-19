@@ -2986,6 +2986,49 @@ warned, and the run produced Inf.
 
 ---
 
+### 31.4 How a run ends: the exit code and the last line
+
+A run that stops before its iteration count used to say so only by accident:
+every failure was exit code 1 with an `error:` line on stderr, a diverged
+run was told apart from a mistyped flag by a reader who knew to look for
+`*** NaN/Inf ***` in the residual line, and a run that reached its budget
+ended on whichever post-run report block happened to print last. §13.4.2's
+rule - what the run did is printed, not inferred - applies to how it ended
+as much as to what it used.
+
+*DESIGN - the contract.* `ofgpu-lowmach` ends in exactly one of four ways,
+and the LAST line it writes, on stdout, names which:
+
+```
+run ended: <word> | <detail> | exit code <n>
+```
+
+| word | when | exit code |
+|---|---|---|
+| `budget` | `-iters N` iterations, or `-endTime`, reached | 0 |
+| `diverged` | a field went non-finite (`Error::Diverged`); nothing is written | 2 |
+| `refused` | a setting refused by name under §13.4 (`Error::Refused`), including the §93.6 Mach check | 3 |
+| `error` | anything else - a bad flag, an unreadable case, an I/O or device failure | 1 |
+
+`<detail>` is the first line of the error, or `N iterations reached` /
+`endTime T s reached in N steps`. The line comes after the stderr `error:`
+line on a failure and after every post-run report on success, so `tail -1`
+of the log is the verdict. A refusal is its own error variant so the driver
+maps it to a code without reading its own message.
+
+**A signal is not one of the four.** No handler is installed: a process
+killed by Ctrl-C or by its parent prints no `run ended:` line and exits with
+the operating system's status, and a parent that needs to know reads that
+status (the GUI reports `killed`). Adding a handler is a dependency, and is
+recorded here as not done rather than done silently.
+
+*Test*: the four outcomes map to `0, 2, 3, 1` and to the five exact lines the
+driver's own test builds; a steady run refused by name through `run` is
+`Error::Refused` and code 3; the binary, spawned on a shipped case, ends on
+that line with that status.
+
+---
+
 ## 32. The thermal wall-function gate, redesigned
 
 §29.3 asked for one number — the wall heat flux at y+ ≈ 30 against the same

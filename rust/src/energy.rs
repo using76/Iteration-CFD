@@ -886,7 +886,7 @@ pub fn mach_number(
     Ok(MachReport { max, cell_of_max, volume_mean: m_sum / v_sum })
 }
 
-/// SPEC-LIT §93.6: `Err(Error::Config)` when `r.max > LOW_MACH_LIMIT` and the
+/// SPEC-LIT §93.6: `Err(Error::Refused)` when `r.max > LOW_MACH_LIMIT` and the
 /// run is strict; under `-permissive` one [`contract::warn_once`] and
 /// `Ok(())`. `when` names the moment ("the initial field", "step 12").
 pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
@@ -894,7 +894,7 @@ pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
         return Ok(());
     }
     if !contract::permissive() {
-        return Err(Error::Config(format!(
+        return Err(Error::Refused(format!(
             "ofgpu-lowmach: max Mach number {:.3} at cell {} ({}) is above {}; \
              SPEC-LIT §25's formulation filters acoustics on the premise M << 1 \
              (p~ << p0), and at M = 0.3 the isentropic density ratio \
