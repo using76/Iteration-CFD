@@ -3774,6 +3774,66 @@ and now the momentum bounded-convection correction are all off the list:
 | the `bounded` token toggled on either leg, everything else fixed | changes the drag balance by ~3.8 points (resolved) / ~0.11 points (wall function) and the energy balance by <0.15 points |
 | the convection scheme's ORDER toggled on either leg | changes `Nu` by less than 0.3 % |
 
+#### 32.5.6 The forces on a wall patch, both of them, and the flat-plate estimate beside them
+
+**Schlichting & Gersten, *Boundary-Layer Theory*, 8th ed., Springer (2000)** — the
+laminar (Blasius, *Z. Math. Phys.* 56 (1908) 1–37) and turbulent
+(Prandtl–Schlichting) smooth-plate skin-friction coefficients, used here as a
+comparison number only. No GPL source was consulted: OpenFOAM's `forces` function
+object and every other GPL/LGPL force integrator were not opened; the integrals
+below are this crate's own face sums over its own `Sf`.
+
+§32.5.1 measures the wall traction and reports its projection on one axis. A body
+in a flow needs the other half — the pressure force — and both as VECTORS, so
+this subsection adds, over every `wall`-kind face (a cut face is one, §24.3):
+
+```
+F_v = sum_f tau_f (dU_par,f/|dU_par,f|) A_f     the viscous force ON the wall, N
+F_p = sum_f rho_f p_f Sf_f                      the pressure force ON the wall, N
+```
+
+`tau_f` is exactly §32.5.1's per-face traction in the form that patch's own wall
+treatment selects — nothing is re-derived and nothing is averaged; `F_v . e_hat`
+is §32.5.1's streamwise drag identically. `p` is this solver's KINEMATIC pressure
+(`p/rho`, the momentum equation carries no density — §32.5.2's own correction),
+so `F_p` multiplies by the wall density `rho_f`; `p_f` is the face's evaluated
+boundary value, which on a `zeroGradient` wall is the owner cell's — first
+order, and the same value the momentum equation saw. `Sf` points out of the
+fluid, so both are the force the fluid exerts on the wall.
+
+*DESIGN — the axis.* The projections and the estimate need an axis. Where the
+run has one (a `massFlux` thermostat's direction or the single cyclic pair,
+§32.5.1) it is used and named. Where it has none the report does not guess a
+global axis (§32.5.1: "never guessed"): each patch takes its OWN mean traction
+direction `F_v/|F_v|`, and the line says `DEFAULT` and why. A patch with no
+traction says so and skips.
+
+*The flat-plate estimate*, per patch, is printed for comparison and never added
+to anything: `F_flat = (1/2) rho_b U_ref^2 C_F(Re_L) A_patch`,
+`Re_L = U_ref L/nu`, with `rho_b = rho(T_b)` (§32.5.2), `U_ref` the domain's
+mass-weighted mean of `U . axis`, `L` the extent of the patch's face centres
+along the axis (about one cell short of the geometric length), and
+
+```
+C_F = 1.328 / sqrt(Re_L)                Re_L < 5e5   (Blasius, laminar)
+C_F = 0.455 / (log10 Re_L)^2.58         Re_L >= 5e5  (Prandtl-Schlichting, turbulent, to ~1e9)
+```
+
+`5e5` is the textbook smooth-plate transition and is *DESIGN*; the regime is
+printed with the number. Only `ofgpu-lowmach` prints this block (it is the
+driver with a density field); the constant-density drivers are a later
+decision.
+
+| Check | Expected |
+|---|---|
+| the viscous force vector's projection on the run axis | `force.dot(e_hat)` equals the streamwise drag `drag` for every `e_hat` (+x, -x, and a wall-normal one) — round-off against `tau_w_mag * area`, not a tolerance |
+| Couette between a wall at rest and one at `S H` | each wall's `force` is `± rho nu S` exactly (a `1 x 1` wall is one face) and the two sum to zero to round-off — the STREAMWISE projection cancels, the vectors do not |
+| laminar plane Poiseuille, `n_y = 64` | each wall's `force.x` within 1 % of the closed form `rho g_x (H/2) A`, and the ratio `1 − 1/(2 n_y)` to `1e-12` — the same one-cell gradient §32.5.4's force-balance row names, now on the force vector |
+| a CLOSED box at uniform `p`, every patch a `wall` | pressure force zero to round-off; at linear `p = a x` exactly `a V e_x` — the face-centre rule is exact for a linear field on a hexahedron |
+| `flat_plate_cf` at the textbook transition | Blasius `1.328/sqrt(Re_L)` below `5e5`, Prandtl-Schlichting `0.455/(log10 Re_L)^2.58` from it up, exact as transcribed; `Re_L <= 0` or non-finite is `None`, the estimate SKIPPED |
+| the axis, when the run has none | each patch projects on its OWN mean traction direction, the line says `DEFAULT` and why, and no global axis is guessed (§32.5.1's rule, one level down) |
+| the printed block | `2 n_wall_patches + 3` lines after one blank — `=== wall forces` first, two lines per patch, one `total:`, one units disclosure — and no line matches a run-status pattern |
+
 ---
 
 ## 33. Low-Reynolds-number k-epsilon

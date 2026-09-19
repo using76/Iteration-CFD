@@ -3018,6 +3018,25 @@ fn run(o: &Options) -> Result<RunEnd> {
                     }
                 }
             }
+
+            // SPEC-LIT §32.5.6: both forces on every wall patch, as vectors,
+            // and the flat-plate estimate beside them - printed AFTER the
+            // §32.5 block so that block's lines stay exactly what the
+            // recorded logs and the GUI read. `p` is this crate's kinematic
+            // pressure, so the pressure force carries the wall density.
+            {
+                use ofgpu::wallfunctions::{drag_report, pressure_force};
+                let p_bf = gpu.download(&s.p().bf)?;
+                let pf = pressure_force(&hm, &p_bf, &rho_bf);
+                let rho_ref = f64::from(gas.rho_at(t_b as Scalar));
+                let report = drag_report(
+                    &hm, &ws, &pf, e_hat, &u_i, &rho_i, rho_ref as Scalar, cc.nu,
+                );
+                println!();
+                for line in report.lines(&hm, &g) {
+                    println!("{line}");
+                }
+            }
         }
 
         // SPEC-LIT §33.2: "The solver should MEASURE and report" the worst
