@@ -206,7 +206,8 @@ ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
 ```
 
 Presets: `channel`, `cavity`, `step`, `big`, `plume`, `room`, `damBreak`. `big`
-is a 1 m cube tunnel and takes a **single** cell count (`n³`).
+is a 1 m cube tunnel and takes either one cell count (`n`, an `n³` cube) or three,
+one per axis (`nx ny nz`, e.g. `big dir 128 52 41`); two numbers are refused by name.
 
 What comes out is a complete, ready-to-run case: `constant/polyMesh`,
 `constant/physicalProperties`, `constant/momentumTransport`,
@@ -1136,6 +1137,14 @@ The case has no `constant/g` and its floor patch is not named `bottomWall`,
 `floor` or `ground`. Rename the patch, or add a `constant/g` if the case really
 needs gravity. **Do not add `g` just to rotate the viewer** — gravity enters the
 equations and changes the solution.
+
+### `-output nvdb` is refused on a cut-cell or graded mesh
+
+`nvdb`/`vdb` are voxel grids that exist only on a uniform Cartesian box. On any
+other mesh the solver refuses before the loop, naming the reason (for example
+`cell volumes are not uniform`). Take a cut-cell run's results with `-output
+foam,vtu`. With `-permissive`, only `nvdb` is dropped from the list and the other
+formats are written as asked.
 
 ### `-output "U,p"` is rejected
 

@@ -200,7 +200,7 @@ ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
 ```
 
 프리셋: `channel`, `cavity`, `step`, `big`, `plume`, `room`, `damBreak`.
-`big`은 한 변 1 m의 정육면체 풍동이고 셀 수를 **하나만** 받습니다(`n³`).
+`big`은 한 변 1 m의 정육면체 풍동이고 셀 수를 하나(`n`, `n³` 정육면체)로 받거나 축별로 셋(`nx ny nz`, 예: `big dir 128 52 41`)으로 받습니다. 둘만 주면 이름을 대고 거부합니다.
 
 생성되는 것은 바로 돌릴 수 있는 완전한 케이스입니다 — `constant/polyMesh`,
 `constant/physicalProperties`, `constant/momentumTransport`,
@@ -1064,6 +1064,13 @@ ofgpu-validate
 아닙니다. 패치 이름을 맞추거나, 중력이 실제로 필요한 케이스라면 `constant/g`를
 넣으십시오. **뷰어를 돌리려는 목적만으로 `g`를 넣지 마십시오** — 중력은
 방정식에 실제로 들어가고 해가 달라집니다.
+
+### 컷셀·경사 격자에서 `-output nvdb`가 거절됨
+
+`nvdb`/`vdb`는 균일 카테시안 상자에만 있는 복셀 격자입니다. 격자가 그 상자가 아니면
+솔버는 루프에 들어가기 전에 이유(예: `cell volumes are not uniform`)를 대고 거절합니다.
+컷셀 해석의 산출물은 `-output foam,vtu`로 받으십시오. `-permissive`를 주면 `nvdb`만
+목록에서 빠지고 나머지 형식은 그대로 쓰입니다.
 
 ### `-output "U,p"` 가 거절됨
 

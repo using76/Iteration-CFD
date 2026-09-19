@@ -1615,6 +1615,17 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
     }
 
+    // SPEC-LIT §44.1 on the command-line route: the same early refusal the
+    // case block gets above, with `cartesian::detect`'s own reason in it.
+    // Consulted only when the command line drives (§44.6).
+    let cli_output: Vec<OutputFormat> = match &output_plan {
+        Some(_) => o.output.clone(),
+        None => ofgpu::io::output_plan::drop_volume_formats_on_a_non_cartesian_mesh(
+            &o.output,
+            ofgpu::pressure::cartesian::detect(&hm).err().as_deref(),
+        )?,
+    };
+
     let gas_props = ctrls.gas;
     let simple_ctrl = ctrls.simple;
 
@@ -2067,7 +2078,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         None => ofgpu::io::OutputPipeline::from_command_line(
             &out_root_for_writers,
             "lowmach",
-            &o.output,
+            &cli_output,
             // SPEC-LIT §44.4: a transient run schedules in seconds; a
             // steady one feeds the SAME schedule its iteration count as
             // the clock, via `-writeEvery N` (W = N).
@@ -5191,5 +5202,44 @@ mod lowmach_tests {
             c_u.expect("C wrote 10/U"),
             "the restarted run's 30/U is byte-identical to a fresh run's 10/U: -restartFrom did not reach the solver"
         );
+    }
+
+    /// SPEC-LIT §44.1 on the command line: `-output nvdb` on a mesh
+    /// `cartesian::detect` refuses is refused BEFORE the loop, naming the
+    /// reason - not at the final write, after the whole run, with `foam` lost.
+    #[test]
+    fn the_command_line_volume_formats_are_refused_before_the_loop_naming_the_reason() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        // Another test in this binary sets the process-wide permissive flag;
+        // every assertion here is a STRICT-mode one, so take the same guard
+        // `the_drivers_own_output_refusals_fire_by_name` takes.
+        let _g = ofgpu::io::contract::permissive_test_guard();
+        // The duct, graded in y: cell volumes are no longer uniform.
+        let graded = knob_case_text(&Knobs::default()).replace(
+            "\"cells\":  [10, 5, 3],",
+            "\"cells\":  [10, 5, 3],\n    \"grading\": { \"y\": { \"expansion\": 4.0 } },",
+        );
+        assert!(graded.contains("\"grading\""), "knob_case_text's cells line moved - fix the anchor");
+        let dir = scratch_dir("nvdb_graded");
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, &graded).expect("write case");
+        let case_arg = path.to_string_lossy().to_string();
+        let args: Vec<String> =
+            ["ofgpu-lowmach", case_arg.as_str(), "-iters", "2", "-output", "foam,nvdb"]
+                .iter().map(|s| s.to_string()).collect();
+        let o = parse(&args).expect("the command line must parse");
+        let e = run(&o).expect_err("nvdb on a graded mesh must be refused");
+        let m = format!("{e}");
+        for want in ["-output nvdb", "cell volumes are not uniform", "vtu", "foam", "-permissive"] {
+            assert!(m.contains(want), "the refusal must say {want:?}: {m}");
+        }
+        let out = common::json_case_output_dir(&path);
+        assert!(written_state(&out).is_empty(), "refused BEFORE the loop: nothing may be written");
+        assert!(!out.join("VDB").exists(), "no empty VDB/ directory may be left behind");
+        // SPEC-LIT §13.4.1's pair: the un-graded duct, same command line, runs and writes the .nvdb.
+        let uniform = run_knobs_bytes(&Knobs::default(), "nvdb_uniform", &["-iters", "2", "-output", "foam,nvdb"]);
+        assert!(uniform.iter().any(|(n, _)| n.ends_with(".nvdb")), "the uniform duct must write the .nvdb");
     }
 }

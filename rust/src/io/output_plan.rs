@@ -909,6 +909,46 @@ pub fn refuse_output_named_twice(plan: &OutputPlan, cli_flags: &[&str]) -> Resul
     )
 }
 
+/// SPEC-LIT §44.1 on the command-line route: `-output nvdb` / `-output vdb`
+/// ask for a dense voxel grid, and a mesh `cartesian::detect` refuses has no
+/// lattice to sample onto. The two volume writers refuse this themselves -
+/// at the FIRST WRITE, which on a steady run is the final write, after the
+/// whole run, and `-output nvdb,foam` then lost the foam write too. Raised
+/// here, before any writer is built, it is raised before anything runs, it
+/// names WHY (`detect`'s own reason) and what does work, and the empty
+/// `VDB/` directory `NvdbWriter::new` would have made is never made.
+///
+/// `not_cartesian` is `cartesian::detect(hm).err()`: `None` on a Cartesian
+/// box, `Some(reason)` otherwise. Strict: `Err` naming the format, the
+/// reason and the menu (§13.4). `-permissive`: one warning per volume format
+/// and the list comes back with `nvdb`/`vdb` dropped, the rest in order -
+/// which is exactly the substitution the warning printed (§13.4.2).
+pub fn drop_volume_formats_on_a_non_cartesian_mesh(
+    formats: &[OutputFormat],
+    not_cartesian: Option<&str>,
+) -> Result<Vec<OutputFormat>> {
+    let Some(reason) = not_cartesian else { return Ok(formats.to_vec()) };
+    let mut kept = Vec::with_capacity(formats.len());
+    for f in formats {
+        if !matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb) {
+            kept.push(*f);
+            continue;
+        }
+        contract::unsupported_note(
+            &format!("-output {}", f.name()),
+            "a non-Cartesian mesh",
+            &["foam", "vtu", "usda (boundary surface only)"],
+            &format!(
+                "a .{} file is a dense voxel grid and this mesh is not a recognised uniform Cartesian box: {reason}. foam and vtu preserve the polyhedra",
+                f.name()
+            ),
+            &format!("dropping {} from -output", f.name()),
+            (),
+        )?;
+    }
+    Ok(kept)
+}
+
 // ==========================================================================
 //  Tests
 // ==========================================================================
@@ -917,7 +957,7 @@ pub fn refuse_output_named_twice(plan: &OutputPlan, cli_flags: &[&str]) -> Resul
 mod tests {
     use super::*;
     use crate::io::case_json::{JsonExact, JsonOutput, JsonRestart, JsonVisualisation};
-    use crate::io::contract::{permissive_test_guard, reset_warnings, set_permissive};
+    use crate::io::contract::{permissive_test_guard, reset_warnings, set_permissive, warned};
     use crate::Scalar;
 
     fn vis(format: &str) -> JsonVisualisation {
@@ -1282,5 +1322,30 @@ mod tests {
             "output output (command line): foam | every 10 iterations | fields: every field | precision fp32"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §44.1 on the command line, and §13.4's two modes of it.
+    #[test]
+    fn the_command_line_volume_formats_are_dropped_on_a_non_cartesian_mesh_naming_the_reason() {
+        use super::drop_volume_formats_on_a_non_cartesian_mesh as drop_volume;
+        let _g = permissive_test_guard();
+        let all = [OutputFormat::Nvdb, OutputFormat::Foam, OutputFormat::Vdb, OutputFormat::Vtu];
+        let why = "cell volumes are not uniform (cell 7 is 1.000000e-03, cell 0 is 2.000000e-03)";
+        set_permissive(false);
+        reset_warnings();
+        assert_eq!(drop_volume(&all, None).unwrap(), all.to_vec(), "Cartesian: the identity");
+        let exact = [OutputFormat::Foam, OutputFormat::Vtu];
+        assert_eq!(drop_volume(&exact, Some(why)).unwrap(), exact.to_vec(), "no volume format: the identity");
+        assert!(!warned("-output nvdb") && !warned("-output vdb"), "and nothing to warn about");
+        let s = drop_volume(&all, Some(why)).unwrap_err().to_string();
+        for want in ["-output nvdb", "a non-Cartesian mesh", why, "foam", "vtu", "-permissive"] {
+            assert!(s.contains(want), "strict must say {want:?}: {s}");
+        }
+        reset_warnings();
+        set_permissive(true);
+        let kept = drop_volume(&all, Some(why)).expect("permissive");
+        assert_eq!(kept, vec![OutputFormat::Foam, OutputFormat::Vtu], "the substitution the warning named");
+        assert!(warned("-output nvdb") && warned("-output vdb"), "one warning per volume format");
+        set_permissive(false);
     }
 }
