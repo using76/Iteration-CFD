@@ -130,9 +130,9 @@ ofgpu-lowmach racecar_case -iters 3000 -check 250 -output foam
 [§6](#6-솔버-고르기--가장-많이-틀리는-곳) — 요약하면 난류 전용 드라이버는
 얼린 `U` 위에서 난류 두 방정식만 풉니다.
 
-끝나면 `racecar_case/0/`에 `U`, `p`, `T`, `k`, `epsilon`, `omega`, `nut`이
-OpenFOAM ASCII로 들어 있습니다. Studio의 3D 뷰어로 열거나 ParaView로 바로
-읽힙니다.
+끝나면 `racecar_case/3000/`(반복 횟수가 디렉터리 이름입니다)에 `U`, `p`, `T`,
+`rho`, `k`, `epsilon`, `nut`이 OpenFOAM ASCII로 들어 있고, `0/`은 초기장 그대로입니다.
+Studio의 3D 뷰어로 열거나 ParaView로 바로 읽힙니다.
 
 자세한 것은 [`cases/racecar.md`](../cases/racecar.md).
 
@@ -1070,11 +1070,13 @@ ofgpu-validate
 `-output`은 형식 목록입니다. `foam`, `vtu`, `nvdb`, `vdb`, `usda` 중에서
 고르십시오.
 
-### 결과가 `1/`이 아니라 `0/`에 쓰임
+### 결과가 어느 디렉터리에 쓰이는가
 
-`system/controlDict`의 `startTime`/`endTime`/`writeControl`이 정합니다. 정상해석
-드라이버는 최종 상태만 쓰며, 어느 시간 디렉터리에 쓸지는 이 설정을 따릅니다.
-초기장을 보존하려면 원본을 따로 두십시오.
+`ofgpu-lowmach`의 정상해석은 반복 횟수를 디렉터리 이름으로 씁니다(`-iters 3000` →
+`3000/`; `-restartFrom`으로 이어 돌리면 이어진 횟수). `0/`은 절대 쓰지 않습니다. 다른
+정상해석 드라이버(`ofgpu-k-epsilon` 등)는 `system/controlDict`의 `endTime`을 이름으로
+씁니다(기본 `1/`). 이전 해에서 이어 가려면 `-restartFrom`을 쓰십시오 — 케이스를 다시
+돌리면 `0/`의 초기장에서 시작합니다(SPEC-LIT §44.9).
 
 ### 인식되지 않는 설정으로 거절됨
 

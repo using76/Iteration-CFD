@@ -11,7 +11,8 @@
 //! ```text
 //! ofgpu-lowmach <case> [options]
 //!
-//!   -iters N          steady outer iterations (default 1000)
+//!   -iters N          steady outer iterations (default 1000); after
+//!                     -restartFrom, N MORE (SPEC-LIT §44.9)
 //!   -check N          print diagnostics every N iterations (default 50)
 //!   -permissive       downgrade unsupported-setting errors to warnings
 //!
@@ -32,6 +33,7 @@
 //!   -restartWrite N   write a `.mcr` checkpoint every N steps
 //!   -restartFrom FILE resume from a checkpoint - p0 and dp0dt included
 //!                     (SPEC-LIT §25.2/§31.2)
+//!                     a steady checkpoint's time is its iteration count (§44.9)
 //! ```
 //!
 //! Written from `ofgpu SPEC-LIT.md` sections 25 (the low-Mach formulation)
@@ -126,6 +128,15 @@
 //! model's own fields (`k`/`epsilon` or `k`/`omega`, `nut` - SPEC-LIT
 //! §30.2's `CoupledTurbulence::output_fields`) and `rho` - `write_time`,
 //! below, `ofgpu-buoyant`/`ofgpu-vof`'s own `io::writer` seam.
+//!
+//! Where the final state goes - SPEC-LIT §44.9: a transient run labels it by
+//! its end time; a steady run labels it by its ITERATION COUNT (`-iters 200`
+//! writes `200/`), and a `.mcr` written by a steady run carries that count in
+//! its `time` slot, so `-restartFrom` continues it (`-iters N` is N more).
+//! `0/` is what the case shipped and is never written. A transient run
+//! resumed from a steady checkpoint needs `-endTime` above the count, and is
+//! refused by name otherwise.
+//!
 //! `-restartWrite N`/`-restartFrom FILE` are
 //! `restart::write_restart`/`read_restart`, in the `.mcr` format of
 //! `docs/05-io-redesign.md` §4.6.
@@ -1371,9 +1382,13 @@ fn run(o: &Options) -> Result<()> {
         Some(p) => {
             let rd = restart::read_restart(p, mesh_hash)?;
             println!(
-                "restart: loaded {} (t = {} s, p0 = {} Pa, mesh hash 0x{:016x} matches)",
+                "restart: loaded {} ({}, p0 = {} Pa, mesh hash 0x{:016x} matches)",
                 p.display(),
-                g(rd.time),
+                if o.end_time > 0.0 {
+                    format!("t = {} s", g(rd.time))
+                } else {
+                    format!("iteration {} - a steady run resumes its count here (SPEC-LIT §44.9)", g(rd.time))
+                },
                 g(rd.p0),
                 mesh_hash
             );
@@ -2012,12 +2027,46 @@ fn run(o: &Options) -> Result<()> {
     // `Schedule::t0` doc for why `t` at step `n` is `t0 + n*dt`, never
     // `n*dt` alone.
     let t0: f64 = restart_data.as_ref().map_or(0.0, |d| d.time);
+    // SPEC-LIT §44.9: a steady checkpoint's `time` is an iteration count, so
+    // a transient run resumed from one with an `-endTime` at or below it
+    // would run exactly one step (`n_steps` floors at 1 below) and say
+    // nothing. §13.4: refuse by name instead.
+    if transient && t0 >= o.end_time {
+        return Err(Error::Config(format!(
+            "-endTime {} is not above the checkpoint's time {}: a checkpoint written by a steady run \
+             carries its iteration count as its time (SPEC-LIT §44.9), so a transient continuation \
+             needs -endTime above {}, or a checkpoint from a transient run",
+            g(o.end_time),
+            g(t0),
+            g(t0)
+        )));
+    }
     let n_steps = if transient {
         (((o.end_time - t0) / o.delta_t).round().max(1.0)) as usize
     } else {
         o.n_iters as usize
     };
     let mut t_phys: f64 = t0;
+    // SPEC-LIT §13.4.2/§44.9: where the final state goes, said before the
+    // loop rather than discovered after it. `0/` is never a candidate.
+    let final_label = if transient {
+        format_time_name((t0 + n_steps as f64 * o.delta_t) as Scalar)
+    } else {
+        format_time_name((t0 + n_steps as f64) as Scalar)
+    };
+    println!(
+        "output final state: {}  ({})",
+        output_root(&o.case_path).join(&final_label).display(),
+        if transient {
+            format!("transient: the label is the end time; t0 = {} s", g(t0))
+        } else {
+            format!(
+                "steady: the label is the iteration count {} + {} (SPEC-LIT §44.9); 0/ is not written",
+                g(t0),
+                n_steps
+            )
+        }
+    );
     // Every schedule starts from the restart's own time, not from zero -
     // SPEC-LIT §44.4, and exactly the `next_write = t0 + W` this replaces.
     pipeline.start(t0);
@@ -2048,6 +2097,15 @@ fn run(o: &Options) -> Result<()> {
             energy.advance_time_step(dt);
             gas.advance_time_levels();
             t_phys += f64::from(dt);
+        } else {
+            // SPEC-LIT §44.9: a steady run's clock is its iteration counter -
+            // the reading `io::case` already takes for controlDict's `endTime`
+            // on a steady run, and the `dt = 1.0` this loop already passes.
+            // It feeds no equation (`outer_iteration` gets `None` for dt on a
+            // steady run); it names the final directory and the checkpoint's
+            // `time`, so a resumed run continues the count instead of
+            // writing `0/` over the case's initial fields.
+            t_phys += 1.0;
         }
 
         let flow = FlowState::new(s.u(), s.phi(), cc.nu);
@@ -4635,5 +4693,132 @@ mod lowmach_tests {
             "ddt Euler and ddt backward wrote bit-identical fields: the case's \
              time scheme is not reaching the solver (SPEC-LIT 13.4.1)"
         );
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §44.9 - where a steady run writes, and what a restart continues
+    // ----------------------------------------------------------------------
+
+    /// `run_knobs_bytes`, but also returning the output root - the pair test
+    /// hands run A's `restart.mcr` to run B, so it needs the path.
+    fn run_knobs_at(k: &Knobs, tag: &str, extra: &[&str]) -> (PathBuf, Vec<(String, Vec<u8>)>) {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, knob_case_text(k)).expect("write case");
+        let mut args: Vec<String> =
+            vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+        args.extend(extra.iter().map(|s| (*s).to_string()));
+        let o = parse(&args).expect("the knob command line must parse");
+        run(&o).expect("the knob case must run");
+        let root = common::json_case_output_dir(&path);
+        let out = written_bytes(&root);
+        assert!(!out.is_empty(), "the run wrote nothing to compare");
+        (root, out)
+    }
+
+    /// SPEC-LIT §44.9: `0/` is what the case shipped and stays byte-identical;
+    /// the final state of `-iters 3` is `3/`. The polyMesh route, because the
+    /// JSONC route never had a `0/` to overwrite.
+    #[test]
+    fn a_steady_run_leaves_0_alone_and_writes_its_iteration_count() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::blockgen::{write_case, CaseKind};
+        let case = scratch_dir("r1zero").join("case");
+        write_case(&case, CaseKind::Big, 6, 4, 4).expect("generate the big case");
+        let before = written_bytes(&case.join("0"));
+        assert!(!before.is_empty(), "the generator wrote no 0/");
+        let case_s = case.to_string_lossy().to_string();
+        let o = parse(&argv(&[case_s.as_str(), "-iters", "3", "-check", "100"])).expect("parse");
+        run(&o).expect("the big case must run");
+        let after = written_bytes(&case.join("0"));
+        assert_eq!(before, after, "0/ changed: the run wrote over the initial fields (SPEC-LIT 44.9)");
+        assert!(!case.join("0").join("rho").exists(), "0/rho appeared: the run wrote into 0/");
+        for f in ["U", "p", "T", "rho", "k", "epsilon", "nut"] {
+            assert!(case.join("3").join(f).exists(), "3/{f} is missing: the final state is not labelled by the iteration count");
+        }
+        println!("steady label gate: 0/ unchanged ({} files), final state in 3/", before.len());
+    }
+
+    /// docs/14 row R1's gate, SPEC-LIT §44.9: run 200 against restart-from-100
+    /// + run 100, BITWISE - every field file of `200/` and the `.mcr` written
+    /// at 200. Not bitwise is a failure that prints the gap per field
+    /// (§31.2: "report the gap rather than hiding it"), never a tolerance.
+    #[test]
+    fn a_restart_from_a_written_checkpoint_reproduces_the_continued_run_bitwise() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let (a_root, a) =
+            run_knobs_at(&d, "r1a", &["-iters", "100", "-restartWrite", "100", "-check", "100"]);
+        let a_mcr = a_root.join("restart.mcr");
+        assert!(a_mcr.exists(), "run A wrote no restart.mcr: {:?}", written_names(&a));
+        assert!(written_names(&a).contains(&"100/U".to_string()), "run A's label: {:?}", written_names(&a));
+        let a_mcr_s = a_mcr.to_string_lossy().to_string();
+        let (b_root, b) = run_knobs_at(
+            &d,
+            "r1b",
+            &["-restartFrom", a_mcr_s.as_str(), "-iters", "100", "-restartWrite", "100", "-check", "100"],
+        );
+        let (c_root, c) =
+            run_knobs_at(&d, "r1c", &["-iters", "200", "-restartWrite", "200", "-check", "100"]);
+
+        // The steady clock: the checkpoint's time IS the count, and B continues it.
+        let hash = restart::mesh_hash(&load_case(&b_root.with_file_name("case.jsonc")).expect("load").0);
+        let a_data = restart::read_restart(&a_mcr, hash).expect("read A's checkpoint");
+        assert_eq!(a_data.time, 100.0, "a steady checkpoint's time is its iteration count");
+        let names_b = written_names(&b);
+        assert!(names_b.contains(&"200/U".to_string()), "B did not write 200/: {names_b:?}");
+        assert!(
+            names_b.iter().all(|n| !n.starts_with("100/") && !n.starts_with("0/")),
+            "B wrote a directory it must not: {names_b:?}"
+        );
+
+        // Bitwise.
+        assert_eq!(names_b, written_names(&c), "B and C wrote different file sets");
+        let differing: Vec<&String> =
+            b.iter().zip(&c).filter(|(x, y)| x.1 != y.1).map(|(x, _)| &x.0).collect();
+        if !differing.is_empty() {
+            let bd = restart::read_restart(&b_root.join("restart.mcr"), hash).expect("read B's checkpoint");
+            let cd = restart::read_restart(&c_root.join("restart.mcr"), hash).expect("read C's checkpoint");
+            let gap = |x: &[f64], y: &[f64]| x.iter().zip(y).map(|(p, q)| (p - q).abs()).fold(0.0, f64::max);
+            for (fb, fc) in bd.fields.iter().zip(&cd.fields) {
+                println!(
+                    "restart gap {}: internal max |delta| = {}, boundary max |delta| = {}",
+                    fb.name,
+                    sci(gap(&fb.internal, &fc.internal), 3),
+                    sci(gap(&fb.boundary, &fc.boundary), 3)
+                );
+            }
+            panic!("SPEC-LIT 44.9: the resumed run is not bitwise the continued run; differing files: {differing:?}");
+        }
+        println!("restart bitwise gate: {} files identical between the resumed and the continued run", b.len());
+    }
+
+    /// SPEC-LIT §44.9/§13.4: a transient continuation of a steady checkpoint
+    /// whose `-endTime` does not reach the count is refused by name, not run
+    /// for one step.
+    #[test]
+    fn a_transient_run_refuses_a_checkpoint_its_end_time_does_not_reach() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let (a_root, _) = run_knobs_at(&d, "r1t", &["-iters", "5", "-restartWrite", "5", "-check", "100"]);
+        let mcr = a_root.join("restart.mcr").to_string_lossy().to_string();
+        let dir = scratch_dir("r1u");
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, knob_case_text(&d)).expect("write case");
+        let path_s = path.to_string_lossy().to_string();
+        let o = parse(&argv(&[
+            path_s.as_str(), "-restartFrom", mcr.as_str(), "-endTime", "0.001", "-deltaT", "0.001", "-check", "100",
+        ]))
+        .expect("parse");
+        let e = run(&o).expect_err("t0 = 5 with -endTime 0.001 must be refused, not run for one step");
+        let msg = format!("{e}");
+        assert!(msg.contains("-endTime"), "the refusal must name the flag: {msg}");
+        assert!(msg.contains("iteration count"), "the refusal must say why: {msg}");
     }
 }

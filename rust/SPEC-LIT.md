@@ -5888,6 +5888,48 @@ doing what this section says, on the documented example's own text.
 
 ---
 
+### 44.9 Where a steady run writes, and what a restart continues
+
+A run never writes into the directory it started from. `ofgpu-lowmach` labelled
+every write `format_time_name(t)`, and on a steady run `t` never moved, so 3000
+iterations ended in `0/` on top of the initial fields: the next run of the same
+case started from the previous answer, and a case could not be re-run from what
+it shipped (the 2026-09-18 race-car session's finding, `docs/14` row R1).
+
+The label of a steady write is the run's iteration count, in the convention
+this crate already reads controlDict's `endTime` by on a steady run (its time
+IS the iteration counter - `io::case`, and the `dt = 1` the steady loop already
+passes): `-iters 200` from a cold start writes `200/`; a run resumed from a
+checkpoint written at iteration 100 that asks for `-iters 100` writes `200/`
+too, because the `.mcr`'s `time` slot carries the count and the loop resumes
+from it. `-iters N` is therefore always "N more". `0/` is what the case
+shipped, and nothing a run does touches it. A transient run keeps
+`format_time_name(t)` with `t = t0 + n * deltaT`, unchanged.
+
+```
+steady:     label = format_time_name(t0 + N),        t0 = 0, or the checkpoint's time
+transient:  label = format_time_name(t0 + n*deltaT),  as before
+```
+
+Two consequences a run says out loud rather than leaves to be discovered. A
+steady checkpoint's time is an iteration count, so a transient run resumed from
+one whose `-endTime` is not above it is refused by name (§13.4) instead of run
+for one step. And the start-time rule is unchanged - `find_start_time` prefers
+`0/` - so re-running a case starts from `0/`; continuing from the previous
+answer is `-restartFrom <root>/restart.mcr`, never the previous answer's own
+directory. The driver prints the final directory before the loop (§13.4.2) and,
+on a resume, which count or time it resumed at.
+
+*Test*: a steady run of 200 iterations and a run of 100 resumed from a
+checkpoint written at 100 write the same bytes - every field file of `200/`
+and the `.mcr` written at 200 - and a polyMesh case's `0/` is byte-identical
+before and after a run. Where the pair is not bitwise, the gap is reported by
+field and magnitude, never hidden (§31.2's rule). The other steady drivers
+label their one write by `endTime` (`"1"` by default) and never wrote `0/`;
+they are outside this subsection.
+
+---
+
 ## 45. Half-precision voxels in the OpenVDB writer
 
 **AcademySoftwareFoundation/openvdb, Apache-2.0, at the `v13.0.0` tag** —
