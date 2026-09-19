@@ -5727,6 +5727,9 @@ selected (`.vdb` if `vdb` is in the list, otherwise `.nvdb`), which is a
 correction: `common::build_writers` hard-coded `"vdb"`, so `-output nvdb,usda`
 has always produced a scene pointing at files that do not exist.
 
+The command-line route gets the same early refusal, with `cartesian::detect`'s
+reason in the message (`drop_volume_formats_on_a_non_cartesian_mesh`).
+
 ### 44.2 `visualisation.fields` — write only these, in this order
 
 ```
@@ -5894,6 +5897,7 @@ routed through one type instead of three call sites.
 | **`keep` deletes nothing else** | a directory seeded with an unrelated file, a decoy `restart_0.9.mcr` this run did not write, and a subdirectory: after 5 writes with `keep: 1`, all three are still there and exactly one run-written checkpoint remains |
 | precedence | case block + `-output` errors naming both; case block alone runs; command line alone is bitwise unchanged |
 | non-Cartesian mesh | a `visualisation` block on a mesh `cartesian::detect` refuses errors BEFORE the loop, naming `exact` |
+| non-Cartesian mesh, command line | `-output nvdb`/`vdb` on a mesh `cartesian::detect` refuses errors BEFORE the loop in `ofgpu-lowmach` and `ofgpu-k-epsilon`, naming `detect`'s reason and `foam, vtu`; under `-permissive` the volume format is dropped, one warning each, and no `VDB/` is made |
 | `output.restart` in `ofgpu-k-epsilon` | errors by name — that driver has no checkpoint at all — naming the three that do |
 | **§13.4.1 pair** | ten pairs — `output` present/absent, `visualisation.format`, `.interval`, `.fields`, `.precision`, `.usdScene`, `exact.format`, `exact.interval`, `restart.interval`, `restart.keep` — each two runs identical in every byte but one, each REQUIRED to write different bytes. Compared as BYTES, not text: `.vdb`/`.nvdb` are binary and `read_to_string` silently skips them |
 | the default does not move | `cargo test`, `ofgpu-validate` and the gate case's three recorded numbers unchanged |
