@@ -458,6 +458,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       return exists
     },
     notifyRunEnded,
+    activeTurns: () => [...runtimes].filter(([, rt]) => rt.active).map(([sessionId, rt]) => ({ sessionId, turnId: rt.active!.turnId })),
     async shutdown() {
       const waits: Promise<unknown>[] = []
       for (const [id, rt] of runtimes) {
@@ -468,4 +469,10 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       await Promise.all(waits)
     },
   }
+}
+
+/** The one line a going-down server owes a session whose turn is still running: to the log
+ *  and to that session's window, so the restart tsx watch is about to do is not a mystery. */
+export function activeTurnWarning(turn: { sessionId: string; turnId: string }): string {
+  return `turn ${turn.turnId} of session ${turn.sessionId} is active; restarting the server kills it (no server-code edits while a turn is running)`
 }

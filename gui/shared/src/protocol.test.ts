@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHAT_TIMEOUT_MAX_MS, ChatRequestSchema, ClientMsgSchema, REST, RunInfoSchema, ServerMsgSchema, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
+import { CHAT_TIMEOUT_MAX_MS, ChatRequestSchema, ClientMsgSchema, GpuStateSchema, REST, RunInfoSchema, ServerMsgSchema, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
 
 // A wire frame must survive JSON.stringify -> parse -> zod parse unchanged:
 // that is exactly the path every message takes in the browser and the server.
@@ -161,5 +161,13 @@ describe('chat REST schemas', () => {
     expect(ChatRequestSchema.safeParse({ text: 'hi', timeoutMs: CHAT_TIMEOUT_MAX_MS + 1 }).success).toBe(false)
     expect(ChatRequestSchema.safeParse({}).success).toBe(false)
     expect(REST.chat).toBe('/api/chat')
+  })
+})
+
+describe('gpu state', () => {
+  it('parses with and without the process list', () => {
+    expect(GpuStateSchema.safeParse({ state: 'ready', name: 'x', memUsedMB: 1, memTotalMB: 2, source: 'nvidia-smi' }).success).toBe(true)
+    const frame = { t: 'gpu' as const, gpu: { state: 'busy' as const, name: 'x', memUsedMB: 1, memTotalMB: 2, source: 'nvidia-smi' as const, processes: [{ pid: 7, name: 'a.exe', memUsedMB: null }], processCount: 1 } }
+    expect(roundTripServer(frame)).toEqual(frame)
   })
 })

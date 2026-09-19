@@ -108,6 +108,9 @@ export type LogLine = z.infer<typeof LogLineSchema>
 // GPU, problems, hello
 // ---------------------------------------------------------------------------
 
+export const GpuProcessSchema = z.object({ pid: z.number(), name: z.string(), memUsedMB: z.number().nullable() })
+export type GpuProcess = z.infer<typeof GpuProcessSchema>
+
 export const GpuStateSchema = z.object({
   state: z.enum(['ready', 'busy', 'absent', 'demo']),
   name: z.string().nullable(),
@@ -115,6 +118,12 @@ export const GpuStateSchema = z.object({
   memTotalMB: z.number().nullable(),
   /** Where the numbers came from. */
   source: z.enum(['nvidia-smi', 'probe', 'demo', 'none']),
+  /** Processes holding a context on the card, as `nvidia-smi --query-compute-apps` lists them
+   *  (basename only; on Windows WDDM every process with a graphics context appears and
+   *  per-process memory is null). Nullish: an older server sends neither; null = not queried;
+   *  [] = none. Sorted by memory then pid and cut at 64 — processCount is the uncut total. */
+  processes: z.array(GpuProcessSchema).nullish(),
+  processCount: z.number().nullish(),
 })
 export type GpuState = z.infer<typeof GpuStateSchema>
 

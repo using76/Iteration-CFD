@@ -9,7 +9,7 @@ import { setSchemaValidator, structuralValidate } from '../tools/case.js'
 import { closeOntologyHandles, ontologyHandle } from '../ontology/handle.js'
 import type { LlmClient } from './llm.js'
 import { createMockLlm } from './mockLlm.js'
-import { createAgentService } from './service.js'
+import { activeTurnWarning, createAgentService } from './service.js'
 import { fakeClient, fakeDatasets, fakeHub, fakeRuns, makeWorkspace, type FakeHub, type FakeRuns, type TempWorkspace } from './test-fakes.js'
 import { until } from './test-util.js'
 import type { AgentService } from './types.js'
@@ -69,6 +69,9 @@ describe('agent service', () => {
     expect(echoed.blocks[0]).toEqual({ kind: 'text', text: 'change cases/plume.jsonc endTime to 7' })
     expect(echoed.blocks.filter((b) => b.kind === 'notice').map((b) => (b.kind === 'notice' ? b.text : ''))).toEqual([expect.stringMatching(/^@cases\/plume\.jsonc \(\d+ bytes\)$/), expect.stringMatching(/^@missing\.txt: /)])
     expect(agent.getSessionState(id)?.turnActive).toBe(true)
+    const turns = agent.activeTurns()
+    expect(turns).toEqual([{ sessionId: id, turnId: expect.stringMatching(/^t_/) }])
+    expect(activeTurnWarning(turns[0])).toBe(`turn ${turns[0].turnId} of session ${id} is active; restarting the server kills it (no server-code edits while a turn is running)`)
     await until(() => hub.of('tool.approval_request').length === 1)
     expect(agent.getSessionState(id)?.pendingApprovals).toHaveLength(1)
     const ids = hub.of('tool.approval_request')[0].approval.toolUseIds
@@ -77,6 +80,7 @@ describe('agent service', () => {
     expect(hub.of('tool.approval_resolved')[0]).toMatchObject({ toolUseIds: ids, decision: 'approved' })
     const state = agent.getSessionState(id)!
     expect(state.turnActive).toBe(false)
+    expect(agent.activeTurns()).toEqual([])
     expect(state.pendingApprovals).toEqual([])
     expect(state.title).toBe('change cases/plume.jsonc endTime to 7')
     expect(await fsp.readFile(path.join(ws.root, 'cases/plume.jsonc'), 'utf8')).toContain('"endTime": 7')

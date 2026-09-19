@@ -24,5 +24,7 @@ export interface AgentService {
   deleteSession(sessionId: string): boolean
   /** Called by the run manager when a run ends; the service may start a notification turn. */
   notifyRunEnded(runId: string): void
+  /** Every session whose turn is running right now; what a shutdown warns about. */
+  activeTurns(): { sessionId: string; turnId: string }[]
   shutdown(): Promise<void>
 }
