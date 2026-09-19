@@ -563,7 +563,7 @@ def test_repair_flip(top):
                       'reseeded_patches', 'flipped_components'}, o
     assert o['reoriented_triangles'] == 1 and o['left_alone'] == 0, o
     assert o['left_alone_reason'] == [] and o['flipped_components'] == 0, o
-    assert isinstance(o['reseeded_patches'], int) and o['reseeded_patches'] >= 0, o
+    assert o['reseeded_patches'] == 0, o
     assert rep['after']['closed'] is True and rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
 
 
@@ -798,7 +798,42 @@ def test_repair_hole_bent(top):
     assert rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent)
+def test_repair_orient_partner(top):
+    """The partner of a two-triangle edge is whichever corner of whichever
+    triangle shares its key - not the slot after the key's first
+    occurrence.  On the closed unit cube every edge is shared exactly
+    twice, so the walk reaches all 12 triangles from one seed and
+    `reseeded_patches` is 0; the flat index map is a permutation of
+    range(3*len(T)), so `e // 3` can never address a triangle that is not
+    there."""
+    d = work(top, 'repair_orient_partner')
+    sys.path.insert(0, os.path.dirname(GEOM_TOOL))
+    import numpy as np
+    import stl_repair as sr
+    P = np.array([[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.],
+                  [0., 0., 1.], [1., 0., 1.], [1., 1., 1.], [0., 1., 1.]])
+    F = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
+         (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+    T = np.array(F, dtype=np.int64)
+    assert sr._defects(T, 8) == (0, 0), sr._defects(T, 8)
+    _, _, key = sr._edge_key(T, 8)
+    uk, eidx, estart, ucount = sr._edge_map(key)
+    assert len(key) == 3 * len(T) == 36, len(key)
+    assert sorted(int(x) for x in eidx) == list(range(36)), eidx
+    assert int(eidx.min()) == 0 and int(eidx.max()) == 35, (eidx.min(), eidx.max())
+    assert set(int(c) for c in ucount) == {2}, ucount
+    for i in range(len(uk)):
+        grp = [int(e) for e in eidx[estart[i]:estart[i] + ucount[i]]]
+        assert len(grp) == 2 and grp[0] != grp[1], grp
+        assert all(int(key[e]) == int(uk[i]) for e in grp), (i, grp)
+        assert all(0 <= e // 3 < len(T) for e in grp), grp
+    assert sr._orient(T.copy(), P, 8) == (0, 0, [], 0), sr._orient(T.copy(), P, 8)
+    Tf = T.copy()
+    Tf[5] = Tf[5][[0, 2, 1]]
+    assert sr._orient(Tf, P, 8) == (1, 0, [], 0), 'one flip, no re-seed'
+
+
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner)
 
 
 def main(argv=None):

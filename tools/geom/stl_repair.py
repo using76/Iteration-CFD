@@ -242,7 +242,26 @@ def _components(T, nP):
     return rank[inv]          # component id per triangle
 
 
-def _flip_makes_same(T, t2, tri2, uk, ustart, ucount, nP):
+def _edge_map(key):
+    """Group the flat edge indices by undirected edge key.  key[3*t + k] is
+    the key of triangle t's corner k, so an edge's users are scattered all
+    over it: np.unique(..., return_index=True) finds only the FIRST of
+    them, which is why the partner has to be looked up here instead.
+    Returns (uk, eidx, estart, ucount): uk holds the distinct keys
+    ascending, and eidx[estart[i] : estart[i] + ucount[i]] holds the flat
+    index 3*t + k of EVERY corner that uses uk[i], ascending.  eidx is a
+    permutation of range(len(key)), so every index a caller reads is a
+    real corner of a real triangle and t = e // 3 is always in range."""
+    uk, inv = np.unique(key, return_inverse=True)
+    inv = np.asarray(inv).reshape(-1)
+    eidx = np.argsort(inv, kind='stable').astype(np.int64)
+    ucount = np.bincount(inv, minlength=len(uk)).astype(np.int64)
+    estart = np.zeros(len(uk), dtype=np.int64)
+    np.cumsum(ucount[:-1], out=estart[1:])
+    return uk, eidx, estart, ucount
+
+
+def _flip_makes_same(T, t2, tri2, uk, eidx, estart, ucount, nP):
     """True iff flipping triangle t2 would turn one of its own two-triangle
     edges from an opposite pair into a same-direction pair - the only move
     that raises non_manifold_edges.  An open edge stays open and an edge
@@ -254,7 +273,7 @@ def _flip_makes_same(T, t2, tri2, uk, ustart, ucount, nP):
         i = np.searchsorted(uk, kk)
         if i >= len(uk) or uk[i] != kk or ucount[i] != 2:
             continue
-        for e in ustart[i] + np.arange(2):
+        for e in eidx[estart[i] : estart[i] + ucount[i]]:
             t3 = int(e) // 3
             if t3 == t2:
                 continue
@@ -274,13 +293,14 @@ def _orient(T, P, nP):
     would make one of its own edges same-direction is left alone, counted
     in left_alone.  A component's remainder the walk did not reach from
     the previous seed is given a fresh seed of its own, counted in
-    reseeded_patches.  Returns (flips, left_alone, left_alone_reasons,
-    reseeded_patches)."""
+    reseeded_patches.  The partner across an edge is found through
+    `_edge_map`, not by the edge key's first-occurrence index.  Returns
+    (flips, left_alone, left_alone_reasons, reseeded_patches)."""
     areas, _ = _area_normals(T, P)
     comp = _components(T, nP)
     ncomp = int(comp.max()) + 1 if len(comp) else 0
     _, _, key = _edge_key(T, nP)
-    uk, ustart, ucount = np.unique(key, return_index=True, return_counts=True)
+    uk, eidx, estart, ucount = _edge_map(key)
     visited = np.zeros(len(T), dtype=bool)
     flips = 0
     refused = 0
@@ -308,14 +328,14 @@ def _orient(T, P, nP):
                     i = np.searchsorted(uk, kk)
                     if i >= len(uk) or uk[i] != kk or ucount[i] != 2:
                         continue
-                    for e in ustart[i] + np.arange(2):
+                    for e in eidx[estart[i] : estart[i] + ucount[i]]:
                         t2 = int(e) // 3
                         if visited[t2]:
                             continue
                         tri2 = T[t2]
                         pos = [j for j in range(3) if (int(tri2[j]), int(tri2[(j + 1) % 3])) == (ca, cb)]
                         if pos:
-                            if _flip_makes_same(T, t2, tri2, uk, ustart, ucount, nP):
+                            if _flip_makes_same(T, t2, tri2, uk, eidx, estart, ucount, nP):
                                 refused += 1     # the flip would break an opposite edge
                             else:
                                 T[t2] = tri2[[0, 2, 1]]

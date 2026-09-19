@@ -216,17 +216,17 @@ needed because a component's remainder was not reached from the previous
 seed; a re-seeded patch is oriented consistently within itself but not
 necessarily with the patch before it.
 
-Worked example, measured 2026-09-19 on the F1 body that session could not
+Worked example, measured 2026-09-20 on the F1 body that session could not
 close (`c42-f1.stl`, 237,482 triangles): before 13,854 open / 810
 non-manifold edges; 1,874 degenerate triangles dropped, 0 points welded;
-the orientation pass reorients 10 triangles, refuses 23 flips
-(`left_alone`) and takes 3,976 extra seeds (`reseeded_patches`); the
+the orientation pass reorients 15 triangles, refuses 55 flips
+(`left_alone`) and takes 274 extra seeds (`reseeded_patches`); the
 stages run input 13,854 open / 810 non-manifold, weld 13,854 / 810,
-orient 13,854 / 802 — the flips lower non-manifold by 8 — and fill
-7,084 / 802; the fill closes 504 loops with 5,762 triangles — 49 of them
-three-edge, 455 ear-clipped — and names 1,372 loops in `holes.unfilled`;
+orient 13,854 / 787 — the flips lower non-manifold by 23 — and fill
+7,084 / 787; the fill closes 504 loops with 5,762 triangles — 49 of them
+three-edge, 455 ear-clipped — and names 1,370 loops in `holes.unfilled`;
 exit 0.  The file is still not closed, with 7,084 open edges: 87 loops
-longer than `--max-hole-edges` 32 (4,364 edges), 1,232 walks that hit a
+longer than `--max-hole-edges` 32 (4,364 edges), 1,230 walks that hit a
 boundary vertex without exactly one unused outgoing open edge (2,048
 edges), 43 loops whose clipped fan would make an edge non-manifold (542
 edges) and 10 loops with no ear (130 edges), so `ofgpu-generate-mesh`
