@@ -97,6 +97,13 @@ pub struct ChtCase {
     /// (SPEC-LIT §47.4), so it is the case's own decision and not this
     /// reader's.
     pub regions: Vec<ChtRegion>,
+    /// R8: the region LAYOUT the case composes from - `mesh/regions.json`,
+    /// one polyMesh per region (SPEC-LIT §97). The path is RELATIVE TO THE
+    /// CASE FILE'S DIRECTORY, resolved through the same rules a region's
+    /// own `polyMesh` path follows. `None` is every case written before §97,
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<ChtMeshManifest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<ChtInterface>,
     /// SPEC-LIT §9's face body force. **Required by a fluid region and
@@ -137,7 +144,12 @@ pub struct ChtRegion {
     /// can be at most one (§47.4's numbering invariant).
     #[serde(default = "solid_kind")]
     pub kind: String,
-    pub mesh: ChtRegionMesh,
+    /// One region's mesh: an axis-aligned block this reader builds, or a
+    /// polyMesh (or a single-volume `.msh`) read from disk - SPEC-LIT §97.1.
+    /// `None` is legal exactly when the case names a `mesh.regions` manifest
+    /// that lists this region (R8): the manifest's own mesh is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<ChtRegionMesh>,
     /// A **solid** region's material - SPEC-LIT §46.5. Required on a solid
     /// region and refused on a fluid one, which carries [`Self::fluid`]
     /// instead.
@@ -205,6 +217,16 @@ pub struct ChtBlockMesh {
 pub struct ChtPolyMeshRef {
     #[serde(rename = "polyMesh")]
     pub poly_mesh: String,
+}
+
+/// R8's `mesh.regions` - the region LAYOUT a case composes from (SPEC-LIT
+/// §97): one polyMesh per region and the conformal interface patch pairs,
+/// written by `ofgpu-regions split`. One key, and the path is RELATIVE TO
+/// THE CASE FILE'S DIRECTORY exactly as a region's own `polyMesh` path is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtMeshManifest {
+    pub regions: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -797,6 +819,11 @@ pub struct LoweredChtCase {
     pub openings: Option<Openings>,
     /// `[n_regions]` uniform volumetric source, W/m^3.
     pub sources: Vec<Scalar>,
+    /// R8's notes, one per region the manifest ALSO lists but the case gives
+    /// its own `mesh` to: the explicit form wins and the conflict is printed
+    /// by `ofgpu-cht` (`  note: ...`), never silently swallowed (SPEC-LIT
+    /// §97).
+    pub notes: Vec<String>,
     pub interfaces: Vec<InterfaceRequest>,
     /// `(region, patch name, condition)`, one per patch that is not an
     /// interface.
@@ -916,6 +943,25 @@ impl ChtCase {
         // SPEC-LIT §96.2: one lowered `mechanics` per region, `None` when
         // the region says nothing.
         let mut mechanics: Vec<Option<LoweredMechanics>> = Vec::new();
+        // R8's notes - one per region the manifest also lists but the case
+        // gives its own `mesh` to. `ofgpu-cht` prints them; nothing swallows
+        // them.
+        let mut notes: Vec<String> = Vec::new();
+        // R8: the layout the case composes from, loaded BEFORE the region
+        // loop so every region can look its manifest entry up by name. The
+        // manifest path resolves through the SAME four checks a region's own
+        // `polyMesh` path follows - there is no second mechanism.
+        let layout = match &self.mesh {
+            Some(m) => {
+                let path = resolve_case_path("mesh/regions", case_dir, &m.regions)?;
+                Some(crate::io::regions::load(&path)?)
+            }
+            None => None,
+        };
+        let by_name: BTreeMap<&str, &crate::io::regions::LoadedRegion> = match &layout {
+            Some(l) => l.regions.iter().map(|r| (r.name.as_str(), r)).collect(),
+            None => BTreeMap::new(),
+        };
 
         for (i, r) in self.regions.iter().enumerate() {
             let kind = match r.kind.as_str() {
@@ -1013,8 +1059,67 @@ impl ChtCase {
                     }
                 }
             }
-            let (mesh, rmesh) =
-                build_region_mesh(r, kind, &empties, &flow_patches, case_dir)?;
+            // R8, the four (mesh, manifest) combinations. The case's own
+            // `mesh` wins over the manifest's, and the conflict is a printed
+            // `note`, not a silence; a region with neither is refused by
+            // name.
+            let (mesh, rmesh) = match (&r.mesh, by_name.get(r.name.as_str())) {
+                (Some(_), manifest) => {
+                    let out =
+                        build_region_mesh(r, kind, &empties, &flow_patches, case_dir)?;
+                    if manifest.is_some() {
+                        notes.push(format!(
+                            "regions/{}: the case gives `mesh` and {} also \
+                             lists the region; the case's mesh is used (R8: \
+                             the explicit form wins)",
+                            r.name,
+                            self.mesh
+                                .as_ref()
+                                .map(|m| m.regions.as_str())
+                                .unwrap_or_default()
+                        ));
+                    }
+                    out
+                }
+                (None, Some(l)) => {
+                    let lkind = match l.kind {
+                        RegionKind::Fluid => "fluid",
+                        RegionKind::Solid => "solid",
+                    };
+                    if lkind != r.kind {
+                        return Err(Error::Config(format!(
+                            "regions/{}/kind: the case says '{}' and the \
+                             manifest {} says '{}' - the two name the \
+                             region's physics, and they must agree",
+                            r.name,
+                            r.kind,
+                            self.mesh
+                                .as_ref()
+                                .map(|m| m.regions.as_str())
+                                .unwrap_or_default(),
+                            lkind
+                        )));
+                    }
+                    check_imported_patches(&r.name, kind, &l.raw, &empties, &flow_patches)?;
+                    (l.mesh.clone(), l.raw.clone())
+                }
+                (None, None) => {
+                    return Err(match &self.mesh {
+                        Some(m) => Error::Config(format!(
+                            "regions/{}: neither a `mesh` nor an entry in {} - \
+                             a region the case composes from a layout still \
+                             needs its own `mesh`, unless the manifest names \
+                             it (R8)",
+                            r.name, m.regions
+                        )),
+                        None => Error::Config(format!(
+                            "regions/{}/mesh: required when the case has no \
+                             `mesh.regions` manifest",
+                            r.name
+                        )),
+                    });
+                }
+            };
 
             // SPEC-LIT §97.2: for an IMPORTED region the patch list lives on
             // disk, not in the document - so the `seen` set, and every
@@ -1134,6 +1239,27 @@ impl ChtCase {
             ));
         }
         let has_fluid = kinds.iter().any(|k| *k == RegionKind::Fluid);
+
+        // R8: with a manifest, every region it lists must be IN the case -
+        // the manifest carries no `material` and no `patches` rule, and a
+        // region needs both, which is exactly why the case cannot silently
+        // drop one of the layout's regions.
+        if let Some(l) = &layout {
+            for lr in &l.regions {
+                if !index.contains_key(lr.name.as_str()) {
+                    return Err(Error::Config(format!(
+                        "the layout {} lists region '{}', which the case does \
+                         not declare - a region needs a `material` and \
+                         `patches`, which the manifest cannot carry (R8)",
+                        self.mesh
+                            .as_ref()
+                            .map(|m| m.regions.as_str())
+                            .unwrap_or_default(),
+                        lr.name
+                    )));
+                }
+            }
+        }
 
         // ---- interfaces --------------------------------------------------
         let mut interfaces = Vec::new();
@@ -1322,6 +1448,92 @@ impl ChtCase {
                 }
 
                 patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t)));
+            }
+        }
+
+        // ---- R8: the manifest's interfaces -------------------------------
+        //
+        // The case's own `interfaces[]` entries went in first and keep their
+        // `Rc`; a manifest interface is added only when no case entry already
+        // names the same unordered patch pair, and REFUSED when a case entry
+        // names one of its two patches with a different partner. The claim
+        // runs after the `patches` rules have claimed theirs, so a patch a
+        // rule already named is refused as claimed - the same refusal a case
+        // interface meets (R8: the explicit form wins, but a patch cannot
+        // have two partners).
+        if let Some(l) = &layout {
+            let manifest_named =
+                self.mesh.as_ref().map(|m| m.regions.as_str()).unwrap_or_default();
+            for mi in &l.interfaces {
+                let (na, nb) =
+                    (&l.manifest.regions[mi.region_a].name, &l.manifest.regions[mi.region_b].name);
+                let ra = *index.get(na.as_str()).ok_or_else(|| {
+                    Error::Config(format!(
+                        "the layout {manifest_named} pairs region '{na}', which \
+                         the case does not declare (R8)"
+                    ))
+                })?;
+                let rb = *index.get(nb.as_str()).ok_or_else(|| {
+                    Error::Config(format!(
+                        "the layout {manifest_named} pairs region '{nb}', which \
+                         the case does not declare (R8)"
+                    ))
+                })?;
+                let (pa, pb) = (&mi.patch_a, &mi.patch_b);
+                let same_pair = |q: &InterfaceRequest| {
+                    (q.region_a == ra && q.patch_a == *pa && q.region_b == rb && q.patch_b == *pb)
+                        || (q.region_a == rb && q.patch_a == *pb && q.region_b == ra && q.patch_b == *pa)
+                };
+                if interfaces.iter().any(same_pair) {
+                    continue; // the case's own entry - and its `Rc` - already cover it
+                }
+                let clash = interfaces.iter().find(|q| {
+                    let mine = [(ra, pa.as_str()), (rb, pb.as_str())];
+                    let theirs = [
+                        (q.region_a, q.patch_a.as_str()),
+                        (q.region_b, q.patch_b.as_str()),
+                    ];
+                    mine.iter().any(|m| theirs.iter().any(|t| t.0 == m.0 && t.1 == m.1))
+                        && !same_pair(q)
+                });
+                if let Some(q) = clash {
+                    return Err(Error::Config(format!(
+                        "interfaces: the case's pair ('{}' of '{}' <-> '{}' of \
+                         '{}') collides with the manifest {manifest_named}'s \
+                         pair ('{}' of '{}' <-> '{}' of '{}') - a patch cannot \
+                         have two partners (R8: the explicit form wins, and \
+                         this case entry names the manifest's patch, with a \
+                         different partner)",
+                        q.patch_a, region_names[q.region_a],
+                        q.patch_b, region_names[q.region_b],
+                        pa, na, pb, nb,
+                    )));
+                }
+                for (ri, patch) in [(ra, pa.as_str()), (rb, pb.as_str())] {
+                    match claimed[ri].get_mut(patch) {
+                        None => {
+                            return Err(Error::Config(format!(
+                                "the manifest's interface: region '{}' has no patch \
+                                 '{patch}'. It has: {}",
+                                region_names[ri],
+                                all_patch_names[ri].join(", ")
+                            )));
+                        }
+                        Some(slot) if *slot != "unnamed" => {
+                            return Err(Error::Config(format!(
+                                "the manifest's interface: patch '{patch}' of region \
+                                 '{}' is already claimed by a {slot}. A patch carries \
+                                 ONE condition (SPEC-LIT 47.6), so an interface face \
+                                 cannot also have a `patches` rule",
+                                region_names[ri]
+                            )));
+                        }
+                        Some(slot) => *slot = "interface",
+                    }
+                }
+                // r_c = 0: perfect contact (SPEC-LIT 47.2) - the manifest
+                // carries no resistance, and `Rc` is the case's own spelling.
+                interfaces.push(InterfaceRequest::new(ra, pa, rb, pb, 0.0));
             }
         }
 
@@ -1669,6 +1881,7 @@ impl ChtCase {
             flow,
             openings,
             sources,
+            notes,
             interfaces,
             patch_bcs,
             initial_t: self.initial.t as Scalar,
@@ -2047,7 +2260,19 @@ fn build_region_mesh(
     openings: &[&str],
     case_dir: Option<&Path>,
 ) -> Result<(HostMesh, PolyMeshRaw)> {
-    let b = match &r.mesh {
+    // `lower_in` resolved R8's four (mesh, manifest) combinations before
+    // calling; this function builds the case's OWN mesh, so `None` - legal
+    // only through a manifest entry - is refused with the same message the
+    // combination check would have raised.
+    let Some(mesh_src) = r.mesh.as_ref() else {
+        return Err(Error::Config(format!(
+            "regions/{}/mesh: required when the case has no `mesh.regions` \
+             manifest - a region the case composes from a layout still needs \
+             its own `mesh`, unless the manifest names it (R8)",
+            r.name
+        )));
+    };
+    let b = match mesh_src {
         ChtRegionMesh::Block(b) => b,
         ChtRegionMesh::PolyMesh(pr) => {
             let path = resolve_mesh_path(&r.name, case_dir, &pr.poly_mesh)?;
@@ -2169,17 +2394,19 @@ fn build_region_mesh(
     Ok((mesh, raw))
 }
 
-/// §97.2's path refusals, in this order. On success the JOINED path is
+/// §97.2's path refusals, in this order, for ANY path a case names - a
+/// region's own `polyMesh` and the `mesh.regions` manifest alike. `setting`
+/// is the message prefix the refusals carry. On success the JOINED path is
 /// returned - not the canonical one, so the reader's own error messages keep
 /// printing the path as the case spelled it against the case directory.
-fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
+fn resolve_case_path(setting: &str, case_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
     let path = Path::new(p);
     // 1. No directory at all. `lower()` is this shape, and a polyMesh path
     //    is RELATIVE TO THE CASE FILE'S DIRECTORY - there is nothing to
     //    resolve it against.
     let Some(dir) = case_dir else {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{p}' is relative to the case file's \
+            "{setting}: '{p}' is relative to the case file's \
              directory, and this document was lowered without one. Call \
              `ChtCase::lower_in(Some(&case_dir))` - as `ofgpu-cht` does with \
              `case_path.parent()` - to import a polyMesh region"
@@ -2191,7 +2418,7 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
     // 2. Absolute.
     if path.is_absolute() {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{p}' is absolute. The path must be \
+            "{setting}: '{p}' is absolute. The path must be \
              RELATIVE to the case file's directory - a case that only opens from \
              one absolute location is a case that cannot be moved (SPEC-LIT 97.2)"
         )));
@@ -2200,7 +2427,7 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
     let joined = dir.join(path);
     if !joined.exists() {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{}' does not exist (case directory \
+            "{setting}: '{}' does not exist (case directory \
              '{}'). A polyMesh directory, a case root or `constant` holding one, \
              or a single-volume `.msh` file",
             joined.display(),
@@ -2215,7 +2442,7 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
         .unwrap_or(false);
     if !inside {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{}' resolves outside the case \
+            "{setting}: '{}' resolves outside the case \
              directory '{}'. A case is self-contained: its regions' meshes live \
              under the directory the case file is in (SPEC-LIT 97.2)",
             joined.display(),
@@ -2223,6 +2450,10 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
         )));
     }
     Ok(joined)
+}
+
+fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
+    resolve_case_path(&format!("regions/{region}/mesh/polyMesh"), case_dir, p)
 }
 
 /// §97.2's patch-TYPE refusals on an imported region. The patch list is the

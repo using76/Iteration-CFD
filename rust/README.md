@@ -108,6 +108,8 @@ cargo test --release
 cargo run --release --bin ofgpu-generate-mesh -- channel ../cases/ch 200 120 1
 cargo run --release --bin ofgpu-k-epsilon     -- ../cases/ch -iters 4000 -check 400
 cargo run --release --bin ofgpu-validate
+# 영역 레이아웃 (SPEC-LIT §97): cellZones가 있는 polyMesh를 영역별 polyMesh + regions.json으로 나누고 검사
+cargo run --release --bin ofgpu-regions -- split <polyMeshDir> <outDir> && cargo run --release --bin ofgpu-regions -- check <outDir>/regions.json
 cargo run --release --bin ofgpu-bench         -- 2000 1000 1 -iters 30
 
 # 저-마하 가변밀도 솔버 (SPEC-LIT §25/§26). JSONC 케이스를 읽습니다:

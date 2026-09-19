@@ -114,6 +114,11 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
     // The case directory is what a region's `polyMesh` path is resolved
     // against (SPEC-LIT 97.2); all-block cases never touch it.
     let low = case.lower_in(case_path.parent())?;
+    // R8's conflict notes - the explicit form won, and the reader says so
+    // (SPEC-LIT 97).
+    for n in &low.notes {
+        println!("  note: {n}");
+    }
 
     println!(
         "ofgpu-cht | case '{}' | {} | {}",

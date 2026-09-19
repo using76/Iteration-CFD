@@ -30,6 +30,17 @@
         "$ref": "#/$defs/ChtInterface"
       }
     },
+    "mesh": {
+      "description": "R8: the region LAYOUT the case composes from - `mesh/regions.json`,\none polyMesh per region (SPEC-LIT §97). The path is RELATIVE TO THE\nCASE FILE'S DIRECTORY, resolved through the same rules a region's\nown `polyMesh` path follows. `None` is every case written before §97,\nunchanged.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChtMeshManifest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "name": {
       "type": "string"
     },
@@ -608,6 +619,19 @@
         "patches"
       ]
     },
+    "ChtMeshManifest": {
+      "description": "R8's `mesh.regions` - the region LAYOUT a case composes from (SPEC-LIT\n§97): one polyMesh per region and the conformal interface patch pairs,\nwritten by `ofgpu-regions split`. One key, and the path is RELATIVE TO\nTHE CASE FILE'S DIRECTORY exactly as a region's own `polyMesh` path is.",
+      "type": "object",
+      "properties": {
+        "regions": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "regions"
+      ]
+    },
     "ChtNumerics": {
       "type": "object",
       "properties": {
@@ -747,7 +771,15 @@
           ]
         },
         "mesh": {
-          "$ref": "#/$defs/ChtRegionMesh"
+          "description": "One region's mesh: an axis-aligned block this reader builds, or a\npolyMesh (or a single-volume `.msh`) read from disk - SPEC-LIT §97.1.\n`None` is legal exactly when the case names a `mesh.regions` manifest\nthat lists this region (R8): the manifest's own mesh is used.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtRegionMesh"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "name": {
           "type": "string"
@@ -770,8 +802,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "mesh"
+        "name"
       ]
     },
     "ChtRegionMesh": {

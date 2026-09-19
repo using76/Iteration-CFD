@@ -28523,3 +28523,367 @@ nothing about what the solver reads from it, which is the whole claim of the
 section.
 
 ---
+
+### 97.5 The region layout — `regions.json`, one polyMesh per region
+
+The layout is a directory, not a mesh: a manifest naming the regions and
+their conformal interface patch pairs, beside one COMPLETE polyMesh per
+region. As a directory it is what every existing driver already reads -
+`<region>/polyMesh` is a polyMesh like any other - and as a manifest it is
+what a CASE composes regions from (97.8) and what `ofgpu-regions` reads
+(97.9):
+
+```
+<case>/mesh/
+  regions.json
+  fluid/polyMesh/{points,faces,owner,neighbour,boundary}
+  flap/polyMesh/{...}
+```
+
+```json
+{
+  "version": 1,
+  "units": "m",
+  "regions": [
+    { "name": "fluid", "kind": "fluid", "polyMesh": "fluid/polyMesh" },
+    { "name": "flap",  "kind": "solid", "polyMesh": "flap/polyMesh", "material": "steel" }
+  ],
+  "interfaces": [
+    { "regions": ["fluid", "flap"], "patches": ["fluid_to_flap", "flap_to_fluid"],
+      "faces": 240, "tolerance": 1e-9 }
+  ],
+  "source": { "tool": "step_mesh", "version": "…", "geometry": "…", "config": "…" }
+}
+```
+
+The rules, with the unit that owns each one's check:
+
+* **R1** Every region's polyMesh is complete and standalone: `owner[f] <
+  neighbour[f]`, internal faces ordered by owner then neighbour, patches
+  contiguous — what `io::polymesh::build_host_mesh` requires. Every
+  existing driver reads `fluid/polyMesh` unchanged. (M4 checker; S11 reads
+  it.)
+* **R2** An interface is a pair of boundary patches, one per region, with
+  the same number of faces, and the k-th face of one is the k-th face of
+  the other with opposite winding (centroid within `tolerance`, normals
+  opposed, areas equal). Pairing is by index; §47.4's centroid hash stays
+  the check and the refusal. (M4, S11.)
+* **R3** Interface patch names are `<this>_to_<other>`; patch `type` is
+  `patch`. (M4.)
+* **R4** `kind` is `fluid` or `solid`. A solid region carries one
+  `material` name; a solid region that holds two bonded materials (a
+  bimetal strip) is ONE region with a `materials` map per `cellZones`-like
+  list in the case, not two regions. (S9, S11.)
+* **R5** A region's cell numbering is its own; the manifest never refers to
+  global indices. (S11.)
+* **R6** Paths are relative to the manifest's directory. (S11.)
+* **R7** A single polyMesh with `cellZones` becomes this layout through
+  `ofgpu-regions split`; faces between two zones become the interface
+  pair, ordered identically on both sides. (S11.)
+* **R8** A case names the manifest (`"mesh": {"regions": "mesh/regions.json"}`)
+  or lists regions explicitly; both lower to the same `Vec<RegionInput>`
+  plus interface requests; the explicit form wins on conflict and the
+  conflict is named. (S11.)
+
+---
+
+### 97.6 The decisions the manifest bakes in, and what loading refuses, by name
+
+*DESIGN — one `tolerance` for three inequalities.* The manifest's
+`tolerance` is ONE dimensionless number used for all three R2 inequalities,
+exactly as M4's `regions_check.py` reads it: centroid relative to
+`sqrt(area)`, area relative, `n_A . n_B + 1`; default `1e-9`. The solver's
+own `PairingTolerances` keeps FOUR numbers (§47.4) and is NOT consulted by
+the manifest check — §47.4's check still runs inside `ThermalMesh::couple`
+at solve time, and `ofgpu-regions check` runs it too, under its own
+heading (97.9). Two consumers of one manifest therefore agree, and neither
+silently overrides the other.
+
+*DESIGN — `faces` is optional, `material` is optional in the manifest.*
+`faces`, when present, must equal BOTH patches' face counts — it is a
+cross-check a producer states and a loader verifies, never a number the
+loader invents. `material` is OPTIONAL on a solid region in the manifest,
+because the material BINDS where the case says it (`regions/<name>/
+material`, §47.14's `material` block): M4 writes a `material` only under
+`--material`, and a manifest name nothing reads would be a §13.4.1 defect
+by construction. A `fluid` region carrying `material` IS refused (R4).
+`source` is kept verbatim as data for a human and never read — §13.4: it
+is not a setting.
+
+*DESIGN — whose order wins.* Manifest region ORDER is the producer's; the
+CASE's own `regions[]` order fixes the concatenated numbering (§47.4, the
+doc on `ChtCase.regions`), and `lower_in` walks the case's order. The
+manifest reader still refuses a fluid that is not `regions[0]` of the
+MANIFEST, so a producer cannot write a layout the solver refuses later.
+
+`read_manifest` (and `load` around it) refuses, each by name:
+
+| refused, by name |
+|---|
+| `version` other than 1 - naming the number |
+| `units` other than `m` - the mesh must be scaled by the tool that made it, and the message says so |
+| a region name declared twice |
+| a region name `check_patch_name` refuses - a boundary file carries names, and it must be writable as one |
+| `kind` not `fluid`/`solid` (R4) |
+| a `fluid` region carrying `material` (R4) |
+| more than one fluid, or a fluid that is not `regions[0]` (SPEC-LIT 47.4) |
+| an interface whose two `regions` are the same region, or name a region the manifest does not declare |
+| an interface whose `patches` are not exactly `["<a>_to_<b>", "<b>_to_<a>"]` (R3) - the expected pair is printed |
+| a `tolerance` that is not `> 0` |
+| a `polyMesh` path that is absolute or climbs out with `..` (R6), naming the path |
+| a region's polyMesh that `read_poly_mesh`/`build_host_mesh` refuses, or whose internal faces are not in `(owner, neighbour)` order (R1, naming the first face that breaks it) |
+
+and `check_layout` refuses, per interface: a patch that does not exist in
+its region's mesh (the region's own patch names listed), a patch not typed
+`patch` (R3), unequal patch sizes or a `faces` that disagrees (R2), and
+any face `k` of the three inequalities failing — naming the interface, k,
+the number, the tolerance and R2. Non-conformal (AMI) is refused here by
+the same two checks that refuse it at §47.4 (size, and distance), and for
+the same stated reason: tier D, not implemented.
+
+What a PASS prints. `check_layout` returns one `PairingCheck` per
+interface — `worst_centroid` (of `|Cf_a - Cf_b|/sqrt|Sf_a|`),
+`worst_area` (of `||Sf_a|-|Sf_b||/|Sf_a|`), `worst_normal` (of
+`n_a . n_b + 1`), all dimensionless, worst over all k — and
+`ofgpu-regions check` prints them under `layout R1-R6: PASS` (97.9). On
+the dyadic fixture of 97.7 the areas and normals are 0 and the worst
+centroid is 0 to one ulp of the fan's division (97.10 measures it).
+
+---
+
+### 97.7 `cellZones`, and the split (R7)
+
+The `cellZones` file is a published case-format FILE (ASCII, learned from
+its shape; no code was read):
+
+```
+FoamFile { version 2.0; format ascii; class regIOobject; location "constant/polyMesh"; object cellZones; }
+2
+(
+lower
+{
+    type cellZone;
+    cellLabels      List<label> 3(0 1 2);
+}
+upper
+{
+    type cellZone;
+    cellLabels      List<label>
+3
+(
+3
+4
+)
+;
+}
+)
+```
+
+`polymesh::read_cell_zones` reads it in both the compact `3(0 1 2)` and the
+long counted form, with or without the `List<label>` word, probing the same
+three polyMesh locations `read_poly_mesh` probes. A missing file is refused
+naming the path, `ofgpu-regions split`, and M4's
+`tools/mesh/regions_from_msh.py` — the route a multi-volume `.msh` takes
+instead, because `io::msh` keeps no volume tags (97.2). A zone dictionary
+without `cellLabels` is refused naming the zone.
+
+`regions::split_by_zones` turns one polyMesh plus the zones into the
+layout. The rules, in the order the splitter applies them:
+
+* every zone name passes `check_patch_name`; no zone is empty; every label
+  is a cell of the mesh; every cell is in EXACTLY one zone (the unassigned
+  are counted and the first named; a doubly-assigned cell names both
+  zones);
+* no cyclic patch in the parent. The refusal attributes carefully: a
+  cyclic pair is DECLARED once and matched THEN, by nearest transformed
+  centroid, under the bijection and the `|Sf|`-equal / `Sf`-opposed
+  invariants (SPEC-LIT 31.1); the "face `k` couples to face `k`" ordering
+  is `mesh::geometry::cyclic_pairing`'s own doc comment, not 31.1. A split
+  renumbers and re-partitions the faces of a patch, so neither survives
+  it - split before the cyclic is declared;
+* cell numbering: local = rank of the cell among its zone's cells in
+  ASCENDING global order (R5; deterministic; keeps `owner < neighbour` and
+  the parent's `(owner, neighbour)` order);
+* internal faces of a zone: STABLE-sorted by `(owner, neighbour)` (R1);
+* interface faces: for each parent internal face crossing two zones (in
+  ascending parent face order), the OWNER's zone takes the face with its
+  own loop and the neighbour's zone takes `reverse_face` of it with the
+  neighbour as owner - so the k-th face of BOTH patches is the k-th such
+  parent face (R2's "ordered identically"). Names `<a>_to_<b>` (R3);
+* *DESIGN* `reverse_face` keeps the FIRST vertex and reverses the rest:
+  `[f[0], f[n-1], ..., f[1]]`. The normal flips, and a hex mesher's own
+  outward loop for the opposite face IS this reversal - blockgen's `zMin`
+  quad `[A, D, C, B]` (`boundary_quad` slot 4) is exactly the internal
+  `+z` quad `[A, B, C, D]` (`internal_quad`'s `_ =>` arm) reversed this
+  way - so `face_geometry`'s fan about the vertex average runs in the same
+  order on the split face as on the sub-block's own face, and the split's
+  geometry is bitwise the sub-block's (97.10). A plain reversal
+  `[D, C, B, A]` gives the same normal and a last-bit-different centroid;
+* a boundary face goes to its owner's zone, keeping its patch; a patch
+  with NO face left in a zone is DROPPED there (an empty patch would be a
+  name the case has to claim for nothing);
+* *DESIGN* patch order: the parent's surviving patches in parent order,
+  THEN the interface patches in ascending other-zone index. Nothing reads
+  two patches of one region by position, so the order is free - and 97.10
+  shows `upper`'s two documents indeed differ in it;
+* points: each region keeps only the points it uses, renumbered by FIRST
+  USE walking its faces in output order; coordinates copied unchanged.
+
+`write_layout` writes `<out>/<region>/polyMesh/...` through
+`write_poly_mesh_raw` and `regions.json` in field order, refuses an
+existing `<out>/regions.json` naming it, and stamps `source` with `tool`,
+`version`, `geometry` (the polyMesh directory exactly as typed) and
+`config` (the flags exactly as typed) - the four keys of the example above.
+
+---
+
+### 97.8 The case (R8) — `"mesh": {"regions": ...}`
+
+A case may name the layout:
+
+```jsonc
+{
+  "name": "...",
+  "mesh": { "regions": "mesh/regions.json" },
+  "regions": [
+    { "name": "lower", "material": {...}, "patches": [ ... ] },
+    { "name": "upper", "material": {...}, "patches": [ ... ] }
+  ]
+}
+```
+
+The path resolves through the SAME four checks a region's own `polyMesh`
+path follows (97.2) - `resolve_case_path` is `resolve_mesh_path`'s body
+with the message prefix as a parameter, and `resolve_mesh_path` is a
+one-line delegate, so there is no second mechanism. What the region loop
+then does is the four combinations of (the region says `mesh`, the
+manifest lists the region):
+
+| case `mesh` | manifest lists it | what lowering does |
+|---|---|---|
+| yes | no | the region's own mesh is built, exactly as before §97 |
+| yes | yes | the case's mesh is used AND `LoweredChtCase.notes` gets one string naming the region, the manifest and the choice - printed by `ofgpu-cht` as `  note: ...`, never swallowed |
+| no | yes | kind must agree (else refused naming `regions/<name>/kind`, both kinds and the manifest path); `check_imported_patches` runs; the mesh and the raw are the manifest's own load - no second build |
+| no | no | refused - `regions/<name>: neither a `mesh` nor an entry in <manifest>` when a manifest is named, `regions/<name>/mesh: required when the case has no `mesh.regions` manifest` when not |
+
+After the region loop, every manifest region must appear in the case; the
+first that does not is refused - a region needs a `material` and a
+`patches` rule, which the manifest cannot carry (R8), and silently running
+a three-region layout as two is how a case comes to say something the
+solver ignores (§13.4).
+
+The interfaces MERGE. The case's own `interfaces[]` entries go in first,
+with their `Rc`; then each manifest interface is added unless a case entry
+already names the same unordered patch pair (the case's `Rc` wins); a case
+entry naming one of the manifest interface's two patches with a DIFFERENT
+partner is refused naming both pairs - a patch cannot have two partners.
+A manifest interface carries `r_c = 0`: perfect contact (S47.2), because
+the manifest has no spelling of a resistance and `Rc` is the case's own.
+The claim runs after the `patches` rules have claimed theirs, so a patch a
+rule already named meets the same "already claimed" refusal a case
+interface meets.
+
+---
+
+### 97.9 `ofgpu-regions` — the three subcommands, and the two verdicts
+
+```
+ofgpu-regions split <polyMeshDir> <outDir> [-fluid <zone>]
+ofgpu-regions check <regions.json>
+ofgpu-regions list <regions.json>
+```
+
+`split` reads the polyMesh and its `cellZones` (97.7) and writes the
+layout; `-fluid` moves that zone to `regions[0]` BEFORE the split, so the
+fluid block keeps §47.4's numbering, and with no `-fluid` every region is
+`solid`. It prints, per region, `name kind cells faces patches`, and per
+interface, `a_to_b <-> b_to_a: N faces`. `check` prints the layout's
+verdict and then the solver's; `list` reads the manifest alone - no mesh
+is read.
+
+`check` prints TWO verdicts, and a failure says WHICH failed:
+
+| verdict | printed on pass | what runs under it |
+|---|---|---|
+| `layout R1-R6: PASS` | one line per `PairingCheck` (`worst centroid/sqrt(area) = .., area = .., normal+1 = ..`), then `cell_regions`' connected-component count per region | `regions::load` - the manifest, R6, R1's ordering check, `build_host_mesh`, and the index-pairing check of the one dimensionless `tolerance` |
+| `solver pairing (SPEC-LIT 47.4):` | `InterfaceReport` - pair count, worst centroid/area/normal, non-orthogonality in degrees, total area | `ThermalMesh::build` with `PairingTolerances::default()`, exactly as the solve would pair |
+
+Either failing exits 1. The layout check is the manifest's own word about
+its own meshes; the solver check is §47.4's, and it is the one that would
+run at solve time - which is why it is printed even when the layout check
+passed, and why the two are headed separately rather than summed into one
+PASS.
+
+---
+
+### 97.10 Gate 97-B — the split two-zone block, run through the manifest, IS the block run
+
+The fixture is dyadic by construction: a 4×4×8 union block on
+`[0,1]^2 × [0,2]` (`x`, `y` at 4 cells, `z` at 8), no windows, no cyclic,
+every node coordinate `i/4` - exact in binary - split into `lower` (cells
+whose centre has `z < 1`) and `upper`. The reference each region is held
+to is the 4×4×4 sub-block the zone occupies, written straight from a
+block. Everything the geometry sweep sums is a sum of products of exact
+dyadic numbers, so `Sf`, the centroids' sum and the volumes are exact; the
+centroid itself divides by 3 inside the fan and agrees to the bit whenever
+the LOOP is the same - which `reverse_face`'s first-vertex rule (97.7)
+arranges for the interface, and `compute`'s per-cell order arranges for
+everything else: every cell touches at most one z-patch, and in both patch
+orders the x/y patches precede the z-patch, so the per-cell face sequence
+- internal ascending, then boundary ascending - is the same sequence in
+spite of `upper`'s differing patch ORDER.
+
+The gate runs the dieStack-shaped two-solid case twice over the SAME
+temp directory: document A, both regions block meshes and one explicit
+interface; document B, `"mesh": {"regions": "mesh/regions.json"}`, no
+per-region mesh, no `interfaces` - the manifest supplies them. Before the
+run the two LOWERED cases are held to A5's equalities, every boundary
+comparison matched BY NAME (the documents put `upper`'s patches in
+different orders), so a failure localises to geometry or to the solve.
+Then `t`, `steps`, `pair_flux` and `bt` are compared with no tolerance.
+`bt` is compared PER PATCH BY NAME over the CONCATENATED mesh: §47.4's
+build extends the concatenated boundary arrays region by region in each
+region's OWN patch order, so the last 32 entries are `upper`'s two z-side
+patches in swapped positions - an entry-by-entry comparison would fail on
+a mesh and a solve that are both correct. The patch start `bt` is indexed
+with is the one `sol.mesh.host.patches` carries (`"<region>:<patch>"`,
+`start = p.start + boundary_face_offset`), never the region-local one,
+which for the second region reads the FIRST region's faces instead.
+
+Measured by `io::regions::tests::gate_97b_a_split_two_zone_block_run_through_the_manifest_is_bitwise_the_block_run`:
+
+| Quantity | Value |
+|---|---|
+| cells (both regions) | 128, `t` bitwise identical per cell |
+| boundary faces | 192, `bt` bitwise identical per patch, by name |
+| flux pairs | 16, `pair_flux` bitwise identical |
+| steps | 1 = 1 |
+| max relative difference | 0 - the field IS the same field, bit for bit |
+
+Gate 97-B is a lib test only, not registered in `ofgpu-validate` - §97.4's
+Gate 97-A is the registered single-mesh gate, and this one composes the
+same claim with the split's. It is single-mesh by name (§94.3): one
+fixture, bit-for-bit identity, no discretisation error to extrapolate.
+
+---
+
+### 97.11 What this does not do
+
+| not done | the named route instead |
+|---|---|
+| non-conformal (AMI) interfaces | refused at the layout check AND at §47.4's pairing - tier D, not implemented, for the reasons §47.4 states |
+| a cyclic pair across a split | refused by `split_by_zones`: declare the cyclic AFTER the split, on one region - §31.1's declaration contract and `cyclic_pairing`'s ordering do not survive a renumbering |
+| a multi-volume `.msh` as one mesh | `io::msh` discards volume tags (97.2); the route is `tools/mesh/regions_from_msh.py` writing the layout, loaded here |
+| Fluent multi-zone export | not written; a Fluent export of the layout is M4's tool's business, and this unit changed nothing in the Fluent path |
+| the automesher's own regions | `ofgpu-automesher`'s region output (§92) is a later unit's (M6); nothing here reads or writes it |
+| units other than metres | refused by name - the tool that made the mesh scales it (97.6) |
+
+The layout is a CONTRACT, not a solver feature: the solver's only new
+knowledge is that a case may hand it a manifest's regions and interfaces
+(97.8), and everything it then computes is what it already computed. The
+three N/A house items of a device unit are N/A here too - no `.cu` (so no
+`KERNEL_UNITS` row), no capture-registry `Stance` row (no device module),
+no `build.rs` change - and no solver numerics moved to make any gate pass:
+the gate is bitwise precisely because nothing moved.
+
+---

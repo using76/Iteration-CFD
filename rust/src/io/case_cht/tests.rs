@@ -2871,9 +2871,9 @@ fn imported_case(base: &std::path::Path, text: &str) -> ChtCase {
     }
     let mut imported = case.clone();
     for r in &mut imported.regions {
-        r.mesh = ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
+        r.mesh = Some(ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
             poly_mesh: format!("{}/polyMesh", r.name),
-        });
+        }));
     }
     imported
 }
@@ -3020,7 +3020,7 @@ fn a_mesh_path_outside_the_case_directory_is_refused() {
     let attempt = |path: String| {
         let mut case = blocks.clone();
         case.regions[0].mesh =
-            ChtRegionMesh::PolyMesh(ChtPolyMeshRef { poly_mesh: path });
+            Some(ChtRegionMesh::PolyMesh(ChtPolyMeshRef { poly_mesh: path }));
         case.lower_in(Some(&case_dir))
     };
 
@@ -3310,9 +3310,9 @@ fn the_shipped_case_round_trips_through_poly_mesh_bit_for_bit() {
     }
     let mut case_b = case.clone();
     for r in &mut case_b.regions {
-        r.mesh = ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
+        r.mesh = Some(ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
             poly_mesh: format!("{}/polyMesh", r.name),
-        });
+        }));
     }
     let low_b = case_b.lower_in(Some(&dir)).expect("lower the imported case");
     for (i, name) in low_a.region_names.iter().enumerate() {

@@ -18815,9 +18815,9 @@ fn check_imported_region(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 
     let mut case_b = case.clone();
     for r in &mut case_b.regions {
-        r.mesh = ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
+        r.mesh = Some(ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
             poly_mesh: format!("{}/polyMesh", r.name),
-        });
+        }));
     }
     let low_b = case_b.lower_in(Some(&dir))?;
     for (i, name) in low_a.region_names.iter().enumerate() {
