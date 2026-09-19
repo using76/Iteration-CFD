@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { describe, expect, it } from 'vitest'
-import { UiCommandSchema, UiStateSchema } from './protocol.js'
+import { UiCommandSchema, UiSelectionSchema, UiStateSchema } from './protocol.js'
 import { ViewerCommandSchema } from './viewerCommands.js'
 
 // What a weaker model sends must not die in validation: numbers and booleans
@@ -262,5 +262,10 @@ describe('ui command coercion and the workspace commands', () => {
     expect(off.scale).toBeUndefined()
     expect(parseOk(UiCommandSchema, { type: 'open_result', path: 'cases/x', region: 'flap' })).toMatchObject({ region: 'flap' })
     expect(parseOk(UiCommandSchema, { type: 'open_mesh_dialog', mode: 'regions', layoutDir: 'cases/site/mesh' })).toMatchObject({ mode: 'regions', layoutDir: 'cases/site/mesh' })
+  })
+
+  it('a cell selection may carry a null centre', () => {
+    parseOk(UiSelectionSchema, { kind: 'cell', id: 3, center: null, value: 1.5, field: 'U' })
+    parseOk(UiSelectionSchema, { kind: 'cell', id: 3, center: [0, 1, 2] })
   })
 })

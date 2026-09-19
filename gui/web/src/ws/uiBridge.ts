@@ -5,8 +5,9 @@
 // same void. Commands this web app can genuinely apply are applied here;
 // everything else is refused immediately with UNSUPPORTED so the model can
 // tell the operator the truth instead of waiting.
-import type { ClientMsg, UiCommand, UiState } from '@cfd/shared'
+import type { ClientMsg, UiCommand, UiSelection, UiState } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
+import type { ProbeOutcome, ViewerTool, ViewportRect } from '../viewer'
 import { actions, activeCasePath } from './actions'
 import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
 import type { useSessionStore } from '../state/sessionStore'
@@ -21,6 +22,8 @@ export interface UiBridgeDeps {
   session: { getState(): SessionStore }
   /** Client.ts owns run subscriptions; a followed run is one of them. */
   subscribeRun(runId: string): void
+  /** Where a post_screenshot PNG goes; the default downloads it like Viewer3D's Snapshot button. Tests inject a recorder. */
+  saveImage?(name: string, base64: string): void
 }
 
 /** show_field / post_field name the three display fields; the solver names them U/p/T. */
@@ -49,8 +52,32 @@ function unsupported(type: string, why: string): { ok: false; error: string } {
   return { ok: false, error: `UNSUPPORTED (${type}): ${why}` }
 }
 
+type UiToolName = 'select' | 'move' | 'pan' | 'box' | 'probe'
+
+/** ui.command tool -> viewer tool: probe IS the select tool (Toolbar.tsx "Select / probe"); box IS the section clip box; move orbits. */
+const TOOL_TO_VIEWER: Record<UiToolName, ViewerTool> = { select: 'select', probe: 'select', pan: 'pan', move: 'rotate', box: 'section' }
+/** viewer tool -> the ui name reported in ui.state.tool; zoom has no ui name and is reported as itself. */
+const TOOL_TO_UI: Record<ViewerTool, string> = { select: 'select', pan: 'pan', rotate: 'move', section: 'box', zoom: 'zoom' }
+
+/** The refusal for a viewer command with no canvas on screen; the case opens the viewer tab first so a retry works. */
+function noViewer(type: string): { ok: false; error: string } {
+  return { ok: false, error: `NO_VIEWER (${type}): no viewer canvas is mounted; the viewer tab has been opened - retry once it shows` }
+}
+
+/** Where a post_screenshot PNG goes without an injected sink: Viewer3D.tsx's Snapshot download, guarded for headless use. */
+function defaultSaveImage(name: string, base64: string): void {
+  if (typeof document === 'undefined') return
+  const a = document.createElement('a')
+  a.href = `data:image/png;base64,${base64}`
+  a.download = name
+  a.click()
+}
+
 export function createUiBridge(deps: UiBridgeDeps) {
   const { send, ui, session } = deps
+
+  /** The last probe's answer, reported as ui.state.selection until the next probe. */
+  let lastSelection: UiSelection | null = null
 
   /** The geometry tab a command targets and gui_state reports: the active tab
    *  when it is a geometry tab, else the first geometry tab. */
@@ -68,22 +95,36 @@ export function createUiBridge(deps: UiBridgeDeps) {
     const u = ui.getState()
     const s = session.getState()
     const casePath = activeCasePath()
+    const v = getViewerApi()
+    const vs = v.getState()
     return {
       activeTab: u.activeTabId,
       activeStep: null,
       rightTab: u.assistantVisible ? 'AI Assistant' : null,
-      tool: null,
+      tool: TOOL_TO_UI[v.getTool()],
       frame: null,
-      projection: null,
+      projection: vs.camera.projection === 'orthographic' ? 'Orthographic' : 'Perspective',
       showAxes: null,
       showColorBars: null,
-      selection: null,
+      selection: lastSelection,
       runId: u.activeRunId,
       sim: null,
       case: casePath ? { path: casePath, name: null, dirty: null } : null,
       tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind })),
       run: null,
-      viewer: null,
+      viewer: {
+        datasetId: vs.datasetId,
+        field: vs.field,
+        time: vs.time?.value ?? null,
+        colormap: vs.colormap,
+        range: vs.range,
+        representation: vs.representation,
+        layers: null,
+        viewport: (() => {
+          const r = v.viewport()
+          return r ? { width: r.width, height: r.height } : null
+        })(),
+      },
       // The target geometry tab's live studio state; a tab whose store entry
       // has not landed yet still reports its path so gui_state is never blind.
       geometry: (() => {
@@ -191,6 +232,33 @@ export function createUiBridge(deps: UiBridgeDeps) {
     }
     const known = ['viewer/뷰어', 'residuals/잔차', 'logs/로그', 'problems/문제']
     return unsupported('select_tab', `no tab matching "${name}"; this screen has: ${known.join(', ')}`)
+  }
+
+  /** Window pixel for a probe command: at:"center" and fx,fy need the canvas rect; x,y are window pixels already. */
+  function probeTarget(cmd: Extract<UiCommand, { type: 'probe' }>, rect: ViewportRect): { x: number; y: number } | { error: string } {
+    if (cmd.at === 'center') return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+    if (cmd.fx != null && cmd.fy != null) {
+      if (cmd.fx < 0 || cmd.fx > 1 || cmd.fy < 0 || cmd.fy > 1) return { error: `INVALID (probe): fx,fy must lie in 0..1 (got ${cmd.fx}, ${cmd.fy})` }
+      return { x: rect.left + cmd.fx * rect.width, y: rect.top + cmd.fy * rect.height }
+    }
+    if (cmd.x != null && cmd.y != null) return { x: cmd.x, y: cmd.y }
+    return { error: 'INVALID (probe): give x,y (window px) or fx,fy (0..1 across the canvas) or point [x,y,z] or at:"center"' }
+  }
+
+  /** A probe outcome becomes the answer and the selection ui.state reports. */
+  function probeAnswer(outcome: ProbeOutcome): { ok: true } | { ok: false; error: string } {
+    if (outcome.ok) {
+      const h = outcome.hit
+      lastSelection = { kind: 'cell', id: h.cell, center: h.center, value: h.value, field: h.field, patch: null }
+      return { ok: true }
+    }
+    if (outcome.code === 'MISS') {
+      lastSelection = { kind: 'none' }
+      return { ok: false, error: `MISS (probe): ${outcome.message}` }
+    }
+    if (outcome.code === 'NO_STRUCTURED_GRID') return { ok: false, error: `UNSUPPORTED (probe): ${outcome.message}` }
+    if (outcome.code === 'NO_DATASET') return { ok: false, error: `NO_DATASET (probe): ${outcome.message}` }
+    return { ok: false, error: `NO_VIEWER (probe): ${outcome.message}` }
   }
 
   async function apply(cmd: UiCommand): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -304,10 +372,54 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'stop_run':
       case 'set_run_setting':
         return unsupported(cmd.type, 'runs are driven by the run_start/run_stop tools on this screen, not by gui_control')
-      case 'probe':
-      case 'post_screenshot':
       case 'set_tool':
-      case 'set_projection':
+        // The controller replays a tool set before the canvas mounts (attachView), so no mount
+        // gate here; it does NOT create the section clip box - Viewer3D's toolbar onTool does
+        // that from the screen only.
+        getViewerApi().setTool(TOOL_TO_VIEWER[cmd.tool])
+        ui.getState().openViewerTab()
+        return { ok: true }
+      case 'set_projection': {
+        const v = getViewerApi()
+        if (!v.isMounted()) {
+          ui.getState().openViewerTab()
+          return noViewer(cmd.type)
+        }
+        const r = await v.execute({
+          type: 'setCamera',
+          preset: null,
+          position: null,
+          target: null,
+          projection: cmd.projection === 'Orthographic' ? 'orthographic' : 'perspective',
+        })
+        ui.getState().openViewerTab()
+        return r.ok ? { ok: true } : { ok: false, error: r.error?.message ?? 'the viewer refused the projection' }
+      }
+      case 'probe': {
+        const v = getViewerApi()
+        const rect = v.viewport()
+        if (!v.isMounted() || !rect || rect.width <= 0 || rect.height <= 0) {
+          ui.getState().openViewerTab()
+          return noViewer(cmd.type)
+        }
+        if (cmd.point != null) return probeAnswer(v.probePoint(cmd.point))
+        const t = probeTarget(cmd, rect)
+        if ('error' in t) return { ok: false, error: t.error }
+        return probeAnswer(v.probePixel(t.x, t.y))
+      }
+      case 'post_screenshot': {
+        const v = getViewerApi()
+        if (!v.isMounted()) {
+          ui.getState().openViewerTab()
+          return noViewer(cmd.type)
+        }
+        const r = await v.execute({ type: 'screenshot', width: null, height: null, includeLegend: true })
+        ui.getState().openViewerTab()
+        if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused the screenshot' }
+        if (!r.image) return { ok: false, error: 'NO_IMAGE (post_screenshot): the viewer returned no image' }
+        ;(deps.saveImage ?? defaultSaveImage)(`${v.getState().datasetName ?? 'viewer'}.png`, r.image.base64)
+        return { ok: true }
+      }
       case 'show_overlay':
       case 'set_centerline':
       case 'select_step':

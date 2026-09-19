@@ -612,7 +612,8 @@ export const UiSelectionSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('cell'),
     id: z.number(),
-    center: z.tuple([z.number(), z.number(), z.number()]),
+    /** Cell centre when the client can compute it (a structured grid without holes, or a point probe); null for a pixel pick on a cut-cell or unstructured mesh. */
+    center: z.tuple([z.number(), z.number(), z.number()]).nullable(),
     // What the probe tool read there. Optional so a client that only picks a
     // cell still parses - and so the model can read back the number it asked
     // the operator's screen for instead of only the cell id.
