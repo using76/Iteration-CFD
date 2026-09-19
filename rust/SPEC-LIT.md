@@ -25257,7 +25257,7 @@ that as a stated absence rather than an omission.
 
 | Check | Expected |
 |---|---|
-| the output of every path | a real-point `PolyMeshRaw`, written by `io::polymesh::write_poly_mesh_raw` |
+| the output of every path | one real-point `PolyMeshRaw` per region, written by `io::polymesh::write_poly_mesh_raw` - a run with no declared body writes one region; a run with `castellation.bodies` writes §92.15's layout |
 | every emitted mesh | passes G1-G7 of §92.3, or the run refused |
 | a refusal | names the gate, the subject it failed on (a cell, or a face for G4 and G7) and its id, its centroid, the measured value and the threshold, in §92.3's exact per-gate form |
 | `AutomeshConfig` | round-trips through serde, and `emit_schema` is generated from the same types that parse it, as `io::case_json` does it |
@@ -25652,6 +25652,7 @@ would renumber every face list for nothing.
 |---|---|
 | a surface entirely outside the domain | every leaf fluid, and the castellated mesh is §92.9's emitted mesh, cell for cell and face for face |
 | a leaf whose centre is inside the surface | removed, whether or not the surface cuts it; a leaf whose centre is outside is kept, likewise |
+| a leaf inside a declared body | kept as that body's region; its interface faces stay internal (§92.15) |
 | an axis-aligned box STL cut from a block on its own cell planes | the wall faces lie ON those planes exactly — no tolerance, because the points are (92.20)'s lattice points |
 | the fluid volume against an analytic solid | within one cell layer's worth of volume, and better as the level rises |
 | a solid that seals a pocket (a slab under a lid) | the pocket is a separate component of (92.4) and is dropped; the emitted mesh has one cell region |
@@ -26669,15 +26670,23 @@ stage, so until there was a driver nobody owned them: **when a run stops**, and
 #### 92.14.1 The stage sequence, and the stop rule
 
 The stages that produce a
-mesh, in order, are the four that return one:
+mesh, in order, are the five of the list - four that return one mesh, and
+the split, which returns the layout:
 
 ```
-S         = [ octree, castellate, snap, layers ]                      (92.55)
+S         = [ octree, castellate, snap, split, layers ]               (92.55)
 
 stopAfter = s in S:  the stages up to and including s are run, the mesh
                      s returned is written, and the run exits 0
 stopAfter absent:    every stage in S is run
 ```
+
+The fifth entry, the split (§92.15.4), returns no mesh of its own - it
+returns the layout - and a run with no `castellation.bodies` records it and
+skips it (`{"skipped": true, "n_regions": 1}`, `seconds` 0), so every
+banner's denominator is 5 whether or not the run splits. A run stopped at
+`-stopAfter snap` with bodies declared has not split yet: it writes ONE mesh,
+the body's cells inside it, no wall patch for the body.
 
 Stage 0 (the background block) and stage 2 (the 2:1 balance) are not in (92.55)
 because neither returns a mesh of its own: stage 0 is the block the octree
@@ -26698,7 +26707,7 @@ changes is how much geometry the mesh has, not whether it is solvable.
 time after:
 
 ```
-=== stage 2/4  castellate ===
+=== stage 2/5  castellate ===
 --- castellate: 412.8 s
 ```
 
@@ -26754,6 +26763,8 @@ input a plan for the next run has. The driver writes, beside the case:
                 "n_boundary_faces",
                 "patches": [ { "name", "kind", "size" }, ... ] },
   "quality":  { the measured numbers of §92.3's report, gate by gate },
+  "layout":   null, or §92.15.6's { "manifest", "regions", "interfaces" }
+                when the split ran - "mesh"/"quality" stay the fluid's,
   "total_seconds",
   "config":   the config exactly as it parsed }                       (92.57)
 ```
@@ -26784,7 +26795,11 @@ and `-check` is how a mesh that already exists is judged.
 `-check` runs §92.3's gate, with this config's
 thresholds, on a polyMesh that already exists — the config's own
 `output.case_dir` by default, or a directory named after the flag. It measures
-and prints and does not write. It is the mode that answers "is this mesh
+and prints and does not write. When the directory holds a written layout -
+`mesh/regions.json`, §92.15.6 - it iterates the layout instead of one mesh:
+`io::regions::load` applies docs/10 §C's R1-R6 and its pairing refusals,
+§92.3's gate runs on every region's polyMesh, and each interface's three
+pairing worsts print. Otherwise it is the mode that answers "is this mesh
 solvable", about a mesh from this mesher, from `ofgpu-convert-mesh`, or from
 anywhere else.
 
@@ -26805,12 +26820,260 @@ anywhere else.
 | Case | The test |
 |---|---|
 | a box with a sphere in it, full pipeline | the run reaches the layer stage, writes `constant/polyMesh` and the summary, and exits 0; `-check` on the written case passes with the same numbers the run printed |
+| a box with a body declared | the run writes `mesh/regions.json` and two polyMesh directories; `-check` loads and pairs them (§92.15.6) |
 | the same config with `-stopAfter octree` | a mesh with no wall patch is written, its cell count is the leaf count, and the summary's `stopped_after` is `"octree"` |
 | `-stopAfter features` against `-stopAfter snap` | the two runs write identical `points` files |
 | a `patch_names` key that names no patch | refused by name, and `constant/polyMesh` does not exist afterwards |
 | two `patch_names` values that collide | refused naming both source patches |
 | a config whose gate cannot be met | exit 1, §92.3's refusal on stderr, and no `constant/polyMesh` and no `<name>_summary.json` written |
 | the summary's `mesh.patches` | equals the boundary file's patches, name for name and size for size |
+
+---
+
+### 92.15 Regions: the cells a declared body keeps, the interface they share, and the meshes the run writes
+
+The implementation-level companion to the regions work, appended after
+§92.14 - every citation already pointing into §92.1-§92.14 keeps its number.
+Until the run took a `castellation.bodies` entry, the automesher could mesh a
+body only by deleting it: (92.23) removes every leaf whose centre is inside
+the surface, which is right for a building the wind flows around and wrong
+for a body a conjugate case must SOLVE on (§47.4). A conjugate mesh needs two
+things that deletion cannot give - the body's own cells, and the two sides of
+the interface being THE SAME FACES, docs/10 §C R2's pairing by index, face k
+to face k, which two independent face sets meet only by luck. This section
+specifies the path that keeps a declared closed body as a region of its own:
+the castellation walk runs once per region, snap moves the shared interface
+points onto the body's own triangles, the split into one polyMesh per region
+comes AFTER snap, layers grow per region, and the run writes §97's layout
+(`mesh/regions.json` and one `<region>/polyMesh` per region, docs/10 §C).
+
+The whole path is `castellation.bodies`' decision. Empty - the default, and
+every config written before this section - is today's mesher exactly, bit for
+bit: four pinned fingerprints hold that
+(`the_castellated_mesh_without_bodies_is_pinned`, cube `0x1941cd5cc045b35d`
+and sphere `0x4133037a9c4931e8`; `the_snapped_mesh_without_bodies_is_pinned`,
+`0x0637e67a829f905e`; `the_full_run_without_bodies_is_pinned`,
+`0xaaab7b6052cce5be`), and with bodies empty `region_of_cell` is all `-1`
+and `body_names` is empty.
+
+#### 92.15.1 A declared body, and the region of a leaf
+
+A `castellation.bodies[]` entry is `{ name, patches }`: `patches` are the STL
+solid names whose triangles together form ONE closed shell, and `name` is the
+region's name in the layout and the prefix of its interface patches
+(`<name>_to_fluid`). A body may take its solid's own name - `sphere` over
+patch `sphere` is the normal case - but `fluid` and the six domain patch
+names are refused, and a patch belongs to one body only. The region of a leaf
+centre `c(P)`:
+
+```
+region(P) = k     if inside(body_k, c(P)) for the one declared body k
+                  (two bodies claiming one leaf is refused, below)
+          = -1    if not inside(surf, c(P))                           (92.58)
+          = removed otherwise - (92.23)'s centre test on the MERGED
+            surface, unchanged; a body's own leaves are exempt from it
+```
+
+Each body is classified on its OWN sub-surface - the triangles of its
+patches alone, `octree::band_surfaces`' pattern - by `surface::classify`'s
+`classify_points` (`castellate::classify_regions`, §23.3's pipeline called
+and not re-implemented). Four refusals, each by name:
+
+- a body naming a patch the surface lacks. The config never sees the STL, so
+  this fires at castellation, not at validation;
+- a body whose shell is not closed - `edge_defects` must be `(0, 0)` on the
+  sub-surface. No permissive path: `require_closed`'s `-permissive` downgrade
+  is the bin's for the MERGED surface, never for a body;
+- a leaf inside two bodies. The MERGED parity cannot see this - a sphere
+  wholly inside a cube reads OUTSIDE in the merged answer, two crossings - so
+  the overlap check reads the per-body answers, not the merged one
+  (`classify_regions_names_the_body_and_refuses_what_it_cannot`: the cube
+  `[2,6]^3` in `[0,8]^3` gives 64 leaves region 0, 448 region `-1`, none
+  `-2`);
+- a body holding NO leaf centre: it is finer than the cells that reached it,
+  and the refusal says to raise the level near its patches or remove it.
+
+#### 92.15.2 The walk, once per region
+
+Each region is a mesh of its own after the split, so (92.24)'s removal walk
+runs once per region - the fluid with the spec as written, each body with
+`keep_region = "largest"` and no seed - and W1's pinch (92.25) and W2's
+component rule (92.4) hold on every region's own boundary, the interface
+included:
+
+```
+K_r = the fixed point of (92.24) on { P : region(P) = r }
+refused: a cell (92.24) would remove from the union no K_r removed    (92.59)
+```
+
+The second line of (92.59) is a CHECK, not a repair - inherited from
+§92.10's W1, which only removes: after the per-region walks, the union of
+what survived is scanned once with `keep_set` as it stands, and a pinch or a
+disconnected component that appears only ACROSS regions - a body pinched
+against the fluid, a body touching no fluid cell - is refused by name and the
+run stops. What a body lost on its own mask is counted into
+`Removed::per_body` (so a report reads `per_body [("blob", 1)]` beside the
+totals), and what the merged classification marked for deletion but the body
+keeps is `kept_in_bodies`, so `solid` stays "removed as solid" exactly as
+§92.10's table says. `a_body_hourglass_loses_one_cell_of_the_body` walks an
+hourglass body and it loses exactly one cell - `per_body [("blob", 1)]`,
+`pinch` 1, `solid` 2, 5 cells kept;
+`a_body_disconnected_from_the_fluid_is_refused` refuses a 9-cell body that
+touches no fluid cell with `not face-connected`.
+
+#### 92.15.3 The interface stays internal, and snap moves it
+
+The face between a fluid cell and a body cell is INTERNAL in the castellated
+mesh: the face walk of §92.10 keeps every face whose two cells survived,
+whatever their regions. That is the whole reason the split can come later -
+nothing about the interface exists yet except which cells own it. Nothing was
+removed either: the kept cube of `a_declared_cube_is_kept_as_its_own_region`
+castellates to the full 8x8x8 block, 512 cells and 1344 internal faces, with
+`wall_faces` 0 and no wall patch for the body.
+
+Snap gains the interface points. §92.11's set `B` of boundary points becomes:
+
+```
+B = { i : point i is carried by a wall face, or by an internal face whose
+          two cells lie in different regions }                        (92.60)
+```
+
+(`snap::snap_regions`, the one function; `snap` is it with no regions given.)
+The interface faces also count toward (92.32)'s area, under (92.26)'s
+nearest-triangle patch, so a kept body far finer than a cell is refused by
+name like any unresolved geometry -
+`a_kept_body_finer_than_a_cell_is_refused_by_area`: 6 m^2 of wall against
+0.478 m^2 of geometry, ratio 12.5 over `max_area_ratio` 4. Why points, not
+new faces: the two sides SHARE the points, so the interface is conformal by
+construction and §47.4's pairing - docs/10 §C R2's face k to face k - holds
+bit for bit. `a_kept_sphere_is_snapped_along_its_interface` moves 2594
+boundary points onto the sphere at p99 residual 6.498e-3 (gate < 0.06) and
+conserves the box volume to 512.000000 at 1e-9 relative - nothing was
+removed - split 409.155474 fluid / 102.844526 body, 0.057 % and 0.227 % off
+the analytic parts.
+
+#### 92.15.4 The split, after snap
+
+(92.55) above has five entries now, and the split is the one that returns a
+LAYOUT instead of a mesh. It runs on the SNAPPED mesh, before layers - so a
+stack grown on one side can never face a split that would have to cut through
+it. The zones are the regions of (92.58), cell ids ascending:
+
+```
+zones = [ ("fluid", { c : region(c) = -1 }),
+          (name_k, { c : region(c) = k }) for each declared body k ]  (92.61)
+```
+
+through `io::regions::split_by_zones` (§97, docs/10 §C R1-R3, R5, R7): the
+fluid is `regions[0]`, each region's cell numbering is its own, and the
+interface patches are `fluid_to_<name_k>` / `<name_k>_to_fluid`, type
+`patch`, the k-th face of one the k-th face of the other with reversed
+winding. Each region passes G1-G7 on its OWN mesh - G3's one-region rule is
+what the split exists to deliver. With `castellation.bodies` empty the split
+stage is RECORDED and SKIPPED - counts `{"skipped": true, "n_regions": 1}`,
+`seconds` 0 - so every banner's denominator is 5 whether or not the run
+splits, and a no-body log reads against the same stage list as a body log.
+The cube of §92.15.3 splits into regions `["fluid", "cube"]`, kinds
+`[fluid, solid]`, the cube region 8 cells, the interface 24 faces
+(`a_declared_body_becomes_its_own_region`). `-stopAfter snap` on a body run
+stops BEFORE the split and writes ONE mesh - the body's cells inside it, no
+wall patch for the body, `layout` null
+(`stopping_before_and_after_the_split`).
+
+#### 92.15.5 Layers, per region
+
+`layers.patches` names the SPLIT names - `fluid_to_<body>` and
+`<body>_to_fluid` - not the STL solid's name: after the split no region's
+mesh carries a patch called `cube`, so a config that says `cube` is refused
+naming every region's patches
+(`a_layer_patch_that_no_region_has_is_refused`). One `LayerSpec` serves
+every region: a patch only one region has grows layers there, and the other
+region's row says `skipped`. The level-0 faces of a stack keep the input
+faces' point lists and coordinates (§92.13), on either side, so the
+interface is still face k to face k after BOTH sides grow - measured at
+162 = 3 x 54 layer cells on each side, `dropped` null, zero retreats, and
+the layered layout's pairing worsts 0.000e0
+(`layers_grow_on_both_sides_of_the_interface`). `output.patch_names` is
+applied per region and NEVER to an interface patch: the interface names are
+the layout's contract (docs/10 §C R3), and a key that names one is refused
+(`patch_names_apply_per_region_and_never_to_an_interface`).
+
+**A body whose shell lies ON the cell planes needs its feature attraction
+and smoothing OFF.** This is a measured limitation, stated the way §92.13
+states what its stage inherits. The driver's layer fixture
+(`driver::tests::planar_config`) runs the body case with `SnapSpec {
+feature_tolerance: 0.0, smoothing_passes: 0, .. }`, and the reason is
+measured, not designed: on such a body the interface is already on the
+surface, and the DEFAULT feature attraction and smoothing still slide the
+interface points tangentially along it - 26 edge and 6 corner attractions,
+`max_step` 9e-4, residual 0.026, every snap gate still passing - which moves
+them off the cell planes §92.13's extrusion reads, and both sides then grow
+0 layer cells. With the attraction off, both sides grow 162. Neither
+`layers.rs` nor `snap.rs` was changed for this: a tangential slide is a
+legal move of every rule §92.11 states - the dead band (92.28) bounds it and
+the gates pass - and it is not a defect either stage could see. The fixture
+turns the two knobs off; a user whose body sits on the cell planes does the
+same, and this section does not call that a fix.
+
+#### 92.15.6 What the run writes, and `-check`
+
+With bodies declared the run writes the layout and ONLY the layout
+(docs/10 §C, §97): `<case_dir>/mesh/regions.json` and
+`<case_dir>/mesh/<region>/polyMesh` per region, through
+`io::regions::write_layout` - and NO `constant/polyMesh` on this path. The
+summary's (92.57) gains `"layout"` after `"quality"`: `null` on a no-body run
+and on any run stopped before the split; on a body run the object, quoting
+the keys the driver writes - `"manifest"` (`"mesh/regions.json"`),
+`"regions"`, each with `"name"`, `"kind"` (`fluid`/`solid`), `"n_points"`,
+`"n_cells"`, `"n_internal_faces"`, `"n_boundary_faces"`, `"patches"`
+(`name`, `kind`, `size`) and its OWN full quality block - and
+`"interfaces"`, each with the `"regions"` pair, the `"patches"` pair and
+`"faces"`. The summary's top-level `"mesh"` and `"quality"` stay the FLUID
+region's, so every reader of one mesh keeps working
+(`the_summary_carries_the_layout`).
+
+`-check` on a case that holds `mesh/regions.json` iterates the LAYOUT, not
+one mesh: `io::regions::load` applies docs/10 §C R1-R6 and its own pairing
+refusals, then §92.3's gate runs on every region's polyMesh, each interface
+prints its three pairing worsts, and any region that fails fails the run.
+`the_layout_of_a_body_run_loads_and_pairs` measures the written cube layout
+at worst centroid 3.948e-15, worst area 4.026e-16, worst normal 2.220e-16 -
+all under the 1e-12 the test asserts.
+
+**What must hold**
+
+| Claim | Why it holds |
+|---|---|
+| the no-body path is bit for bit today's mesher | the four pins of this section's second paragraph, constants in their tests; `region_of_cell` all `-1`, `body_names` empty |
+| a run's stages are the five of (92.55) | the split is recorded-and-skipped without bodies; `Stage::parse` accepts `split` and its refusal names six spellings |
+| a kept body survives castellation | (92.58) and (92.59); `per_body` and `kept_in_bodies` keep §92.10's totals honest; a cross-region pinch is refused by name, not repaired |
+| the interface is conformal by construction | both sides share the snapped points (92.60); R2's pairing measured at 3.948e-15 / 4.026e-16 / 2.220e-16 |
+| every region passes the gate alone | the split runs §92.3's check per region and refuses by region name; G3 is one region per region mesh |
+| layers survive on both sides of an interface | 3 x 54 per side, `dropped` null, layered pairing worsts 0.000e0 |
+| a refused run writes nothing | §92.14.4 unchanged: the layout is written by the bin, only after `run` returns Ok |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| the four no-body fingerprints | `the_castellated_mesh_without_bodies_is_pinned` (`0x1941cd5cc045b35d`, `0x4133037a9c4931e8`), `the_snapped_mesh_without_bodies_is_pinned` (`0x0637e67a829f905e`), `the_full_run_without_bodies_is_pinned` (`0xaaab7b6052cce5be`) |
+| a declared cube kept as a region | `a_declared_cube_is_kept_as_its_own_region` - 512 cells, `removed.solid` 0, `wall_faces` 0, `wall_patches [("cube", 0)]`, 64 cells in region 0, `n_regions` 1, `neighbour.len()` 1344 |
+| a body hourglass, and a body touching no fluid | `a_body_hourglass_loses_one_cell_of_the_body` - `per_body [("blob", 1)]`, `pinch` 1, `solid` 2, 5 cells kept; `a_body_disconnected_from_the_fluid_is_refused` |
+| the kept sphere snapped along its interface | `a_kept_sphere_is_snapped_along_its_interface` - 2594 points, p99 6.498e-3 (< 0.06), total 512.000000 (1e-9 relative), fluid 409.155474 (0.057 %), body 102.844526 (0.227 %) |
+| a kept body finer than a cell | `a_kept_body_finer_than_a_cell_is_refused_by_area` - 6 m^2 against 0.478 m^2, ratio 12.5 over 4, (92.32) in the refusal |
+| the split of the cube | `a_declared_body_becomes_its_own_region` - regions `["fluid", "cube"]`, the cube region 8 cells, the interface 24 faces, patches `[xMin, xMax, yMin, yMax, zMin, zMax, fluid_to_cube]` / `[cube_to_fluid]` |
+| the layout loads and pairs | `the_layout_of_a_body_run_loads_and_pairs` - worsts 3.948e-15 / 4.026e-16 / 2.220e-16, `interfaces[0].faces == Some(24)` |
+| layers on both sides | `layers_grow_on_both_sides_of_the_interface` - 162 = 3 x 54 each side, `dropped` null, worsts 0.000e0 |
+| renames and refusals by name | `patch_names_apply_per_region_and_never_to_an_interface`; `a_layer_patch_that_no_region_has_is_refused`; `a_region_slice_of_the_wrong_length_is_refused` (a `region_of_cell` slice of the wrong length, refused with both lengths) |
+
+What this section does NOT claim: no solver in this tree reads
+`regions.json` - docs/10 §C R8 is chain R's K1, and until it lands a layout
+is written and checked, not solved; a pinch or a disconnected component
+across regions is REFUSED, not repaired; one `LayerSpec` serves every
+region, so no per-region thickness; `sections.py` has no `--region` - it
+takes one `<region>/polyMesh` directory per plot; and §92.15.5's
+planar-body limitation stands as stated - the fixture turns the attraction
+off, the mesher does not.
 
 ---
 

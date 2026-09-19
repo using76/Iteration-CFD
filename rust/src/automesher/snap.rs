@@ -6,7 +6,8 @@
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! Snapping - SPEC-LIT §92.11, the implementation-level companion to §92.2
-//! stage 4. Stage 3 leaves a staircase; this stage moves the boundary points
+//! stage 4. A kept body's interface points join `B` as §92.15 says.
+//! Stage 3 leaves a staircase; this stage moves the boundary points
 //! onto the STL and undoes any move that breaks a cell. The stage moves
 //! `points` and nothing else: the face lists, `owner`, `neighbour` and the
 //! patches leave as they entered them, so `PolyMeshRaw::points` is the only

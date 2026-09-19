@@ -26,16 +26,24 @@ ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME] [-check [<caseDir>
 
 - `ofgpu-automesher <config.json>` - the meshing path, SPEC-LIT §92.14. Reads
   and validates the config, loads and merges `input.surfaces[]`, requires a
-  closed surface, runs the §92.2 stage-0 domain check, then runs the four
-  stages of (92.55) in order - `octree`, `castellate`, `snap`, `layers` -
+  closed surface, runs the §92.2 stage-0 domain check, then runs the five
+  stages of (92.55) in order - `octree`, `castellate`, `snap`, `split`,
+  `layers` -
   printing a banner **before** each one and its elapsed seconds after, so a
   stage that takes forty minutes has said which stage it is. On success it
   writes `<case_dir>/constant/polyMesh` and `<case_dir>/<name>_summary.json`
-  and exits 0. On a gate failure it prints §92.3's refusal - the gate, the cell
+  and exits 0 - unless `castellation.bodies` is declared, in which case the
+  run writes `<case_dir>/mesh/regions.json` and
+  `<case_dir>/mesh/<region>/polyMesh` per region instead (docs/10 §C,
+  SPEC-LIT §97, §92.15.6) and no `constant/polyMesh`. On a gate failure it
+  prints §92.3's refusal - the gate, the cell
   ids, their centroids, the measured values - and exits 1 **having written
   neither file** (§92.14.4).
-- `-stopAfter STAGE` - stop after `octree`, `castellate`, `snap` or `layers`
-  and write what that stage returned. `features` is accepted and means `snap`:
+- `-stopAfter STAGE` - stop after `octree`, `castellate`, `snap`, `split` or
+  `layers` and write what that stage returned. `split` is §92.15.4's: on a
+  body run it stops with the layout written and no layers; on a no-body run
+  it is recorded-and-skipped and the mesh so far is written. `features` is
+  accepted and means `snap`:
   §92.12 folded §92.2's stage 5 into stage 4's own loop, so there is no point
   in the pipeline between them at which a mesh exists (§92.14.1). A stopped run
   is not a way to get an ungated mesh - every stage gates its own output before
@@ -54,7 +62,10 @@ ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME] [-check [<caseDir>
   a directory named after the flag overrides it. Every gate passed: the
   measured summary, exit 0. Any gate failed: the refusal, exit 1. This is how a
   mesh from this mesher, from `ofgpu-convert-mesh`, or from anywhere else is
-  judged before a solver is pointed at it.
+  judged before a solver is pointed at it. A case holding a written layout
+  (`mesh/regions.json`) is checked as a layout: `io::regions::load` applies
+  docs/10 §C's R1-R6 and the pairing refusals, the §92.3 gate runs per
+  region, and each interface's three pairing worsts print (§92.15.6).
 - `-dryRun` - everything up to and including the surface summary, then exit 0
   without attempting the meshing stages. What a config check wants before
   queuing a long run.
@@ -117,6 +128,9 @@ Both carry comments on every block. Every key of
 | `castellation.keep_region` | string | `"largest"` | Which connected component of the fluid survives eq. (92.4): `"largest"` or `"seed"`. |
 | `castellation.seed_point` | number[3] | `null` | The keep point `"seed"` needs; required then, ignored otherwise. |
 | `castellation.min_faces` | integer | `4` | A kept cell with fewer faces than this is dropped - a hole in the addressing, not a control volume. |
+| `castellation.bodies` | array | `[]` | Closed bodies kept as regions of their own instead of removed as solid (§92.15.1); empty is today's castellation exactly - every solid leaf removed. |
+| `castellation.bodies[].name` | string | *(required)* | The region's name in the layout and the prefix of its interface patches (`<name>_to_fluid`); `fluid` and the six domain patch names are refused, and two bodies cannot share a name. |
+| `castellation.bodies[].patches` | string[] | *(required)* | The STL solid names whose triangles together form ONE closed shell; a patch belongs to one body, and a body naming a patch the surface lacks is refused at castellation, by name. |
 | `snap.iterations` | integer | `30` | Snapping iterations, the `k` of eq. (92.5). |
 | `snap.tolerance` | number | `1e-3` | The dead band and the convergence test of eq. (92.28), as a FRACTION of `domain.base_size`: a point within `tolerance * base_size` of the surface is on it, and the loop stops when no point moves further. |
 | `snap.smoothing_passes` | integer | `3` | Laplacian passes over the displacement field, eq. (92.6). |
@@ -147,7 +161,9 @@ Both carry comments on every block. Every key of
 ## The pipeline
 
 SPEC-LIT §92.2's stages, and where each one lives. All of them are built;
-§92.14 is the driver that runs them in order.
+§92.14 is the driver that runs them in order. One entry below is not a
+§92.2 stage: the split of §92.15.4 is a stage of (92.55) that the driver
+runs between snap and layers.
 
 0. **The background block** (`automesher::octree::Background`) - a
    `blockgen::BlockSpec` over `domain.extent` with `base_size` as the target
@@ -177,7 +193,13 @@ SPEC-LIT §92.2's stages, and where each one lives. All of them are built;
    (92.38) pulls a point whose surface target is near a feature edge onto the
    edge, and (92.39) onto a corner that claims it. `-stopAfter features` is
    therefore `-stopAfter snap`; there is no mesh between them.
-6. **Layers** (`layers::add_layers`, §92.13) - the shrink, the extrusion, and
+6. **The split** (`io::regions::split_by_zones`, §92.15.4) - after snap, the
+   one stage of (92.55) that §92.2 does not have: the snapped mesh's cells
+   are split into one polyMesh per region - `fluid` first, then each declared
+   body - with each interface the conformal patch pair `fluid_to_<body>` /
+   `<body>_to_fluid` (docs/10 §C R1-R3, R5, R7). Recorded and skipped when
+   `castellation.bodies` is empty.
+7. **Layers** (`layers::add_layers`, §92.13) - the shrink, the extrusion, and
    the retreat ladder (92.47).
 
    **`layers.patches` is supported on a wall that CASTELLATES ONTO THE CELL
@@ -197,8 +219,8 @@ SPEC-LIT §92.2's stages, and where each one lives. All of them are built;
 
 ## What a run writes
 
-Two files, and only after every stage has returned (§92.14.4 - a refused run
-writes nothing at all):
+Two files on the one-mesh path, and only after every stage has returned
+(§92.14.4 - a refused run writes nothing at all):
 
 - `<case_dir>/constant/polyMesh` - `points`, `faces`, `owner`, `neighbour`,
   `boundary`, written by `io::polymesh::write_poly_mesh_raw`. **Real points**:
@@ -217,6 +239,19 @@ The patch names in `boundary` are the ones `output.patch_names` asked for
 (92.56), applied inside the mesher just before the write - not by a script
 afterwards, because a script that rewrites `boundary` is a second reader of the
 one file the solver may not be allowed to guess at.
+
+**With `castellation.bodies` declared the run writes the layout instead**
+(§92.15.6): `<case_dir>/mesh/regions.json` - the manifest, with each region's
+counts, its own quality block and the interface pairs - and
+`<case_dir>/mesh/<region>/polyMesh` per region, written by
+`io::regions::write_layout`; the run writes NO `constant/polyMesh` on this
+path. The interface patches are `fluid_to_<body>` and `<body>_to_fluid`
+(docs/10 §C R3), and **`layers.patches` names these split names**, not the
+STL solid's name - `fluid_to_cube` / `cube_to_fluid`, not `cube`. On the
+rename map the same rule holds: `output.patch_names` is applied per region
+and never renames an interface patch. `sections.py` takes
+`<case_dir>/mesh/<region>/polyMesh` as its directory - one region per plot,
+no `--region` flag: point it at the region to draw.
 
 ## The quality gate
 

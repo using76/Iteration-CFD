@@ -6,6 +6,7 @@
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! The castellation keep-set - SPEC-LIT §92.10's removal walk.
+//! A declared body kept as its own region, and the per-region walk, are §92.15.
 //!
 //! §92.2 stage 3 decides, of the leaves [`super::octree::emit`] emitted, which
 //! survive to be cells. A leaf is FLUID or SOLID by its centre alone,

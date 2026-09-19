@@ -6,7 +6,8 @@
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! The driver - SPEC-LIT §92.14: §92.9's octree, §92.10's castellation,
-//! §92.11's snapping and §92.13's layers run in (92.55)'s order by one call,
+//! §92.11's snapping and §92.13's layers run in (92.55)'s order by one call
+//! (§92.15's split between snap and layers when bodies are declared),
 //! with the stop rule, the progress lines of §92.14, (92.56)'s patch
 //! rename and (92.57)'s summary. The stages themselves live in their own
 //! files and gate their own output; this file owns only what belongs to no
