@@ -149,9 +149,10 @@ bit-exact weld is measured first (`before` — what
 corners are welded at `--weld` × the bounding-box diagonal (default 1e-6, the
 house convention; `0` = bit-exact only), degenerate triangles are dropped,
 each vertex-connected component is oriented by propagation across manifold
-edges and every closed shell is flipped outward, boundary loops of three
-edges are filled with one triangle, and the result is written with normals
-recomputed from the winding.
+edges and every closed shell is flipped outward, a boundary loop of up to
+`--max-hole-edges` edges is filled — three edges with one triangle, four or
+more by ear clipping in the plane of the loop's Newell normal (Meisters
+1975) — and the result is written with normals recomputed from the winding.
 
 Flags: `--out PATH` (without it the tool only reports), `--json OUT` (the
 report, never stdout), `--weld REL`, `--max-hole-edges N` (default 32),
@@ -161,8 +162,9 @@ bbox, diagonal, triangles_in, triangles_out, degenerate_dropped, weld
 {tol_rel, tol_abs, points_raw, points_bit_exact, points_welded, merged,
 max_move}, orientation {reoriented_triangles, left_alone, left_alone_reason,
 reseeded_patches, flipped_components}, holes
-{max_hole_edges, filled, filled_triangles, unfilled[]}, before {}, after
-{open_edges, non_manifold_edges, closed, volume}, n_components, components[]
+{max_hole_edges, filled, filled_triangles, unfilled[], per_hole[]}, before
+{}, after {open_edges, non_manifold_edges, closed, volume}, n_components,
+components[]
 {index, patch, n_triangles, open_edges, non_manifold_edges, closed, volume,
 flipped}, patches`. Stdout carries six lines (the summary, the weld, the
 orientation, the holes, the after-state, the written file) plus one line per
@@ -176,20 +178,30 @@ a non-finite coordinate, exits 1.
 Limits: the weld tolerance is a geometry EDIT — the tool prints `max_move`,
 the largest distance any corner moved, and the user decides; near pairs can
 CHAIN (`a-b` and `b-c` merge `a` and `c` at up to twice the tolerance), and
-the representative is always a coordinate the file already had. Run 1 fills
-3-edge loops only; every larger loop is named in `holes.unfilled`. Every
-closed shell is oriented outward — a cavity's shell is flipped outward too,
+the representative is always a coordinate the file already had. A loop
+longer than `--max-hole-edges`, and a loop that is not simple in its own
+plane (ear clipping finds no ear), is named in `holes.unfilled` and never
+filled. Every closed shell is oriented outward — a cavity's shell is
+flipped outward too,
 and no cavity is detected. Non-manifold edges are reported, never cut. The
 licence rule: the tool imports numpy (BSD-3) and scipy (BSD-3) only; gmsh
 (GPL-2.0-or-later) stays a separate program used by `info`/`export`/`edit`
 whose files are exchanged and whose source is never read; pymeshlab (GPL-3)
 is not used; no mesh-repair implementation of any licence was read.
 
-A fill is applied only if it leaves every one of the new triangle's three
+A fill is applied only if it leaves every one of the new triangles'
 undirected edges used at most twice: the uses are counted once before the
-walk, a running tally follows the accepted fills, and a loop whose fill
-would push an edge to three uses is reported in `holes.unfilled` as
+walk, a running tally follows the accepted fills, an ear-clipped loop's
+whole candidate fan — its `m − 2` triangles, the edges they share with
+each other counted once per triangle — is tallied before anything is
+committed, and a loop whose fill would push an edge to three uses is
+refused whole and reported in `holes.unfilled` as
 `filling it would make N edge(s) non-manifold` instead of being filled.
+Every loop the walk closes and every walk it abandons is one entry of
+`holes.per_hole`, in walk order — `{"edges", "outcome": "filled" |
+"skipped", "triangles", "reason"}` — whose `triangles` sum is
+`holes.filled_triangles` and whose `skipped` entries mirror
+`holes.unfilled` one for one.
 After the repair the defects are recounted, and a result carrying MORE
 non-manifold edges than the input refuses the write — exit 3,
 `the fill raised non_manifold_edges from A to B - this is a bug, report
@@ -211,7 +223,11 @@ the orientation pass reorients 10 triangles, refuses 23 flips
 (`left_alone`) and takes 3,976 extra seeds (`reseeded_patches`); the
 stages run input 13,854 open / 810 non-manifold, weld 13,854 / 810,
 orient 13,854 / 802 — the flips lower non-manifold by 8 — and fill
-13,707 / 802 (49 three-edge loops fill); exit 0.  The file is still not
-closed: the remaining open edges are holes of more than three edges,
-listed in `holes.unfilled`, so `ofgpu-generate-mesh` still refuses it
-without `-permissive`.
+7,084 / 802; the fill closes 504 loops with 5,762 triangles — 49 of them
+three-edge, 455 ear-clipped — and names 1,372 loops in `holes.unfilled`;
+exit 0.  The file is still not closed, with 7,084 open edges: 87 loops
+longer than `--max-hole-edges` 32 (4,364 edges), 1,232 walks that hit a
+boundary vertex without exactly one unused outgoing open edge (2,048
+edges), 43 loops whose clipped fan would make an edge non-manifold (542
+edges) and 10 loops with no ear (130 edges), so `ofgpu-generate-mesh`
+still refuses it without `-permissive`.

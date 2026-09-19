@@ -16,10 +16,11 @@ corners are welded at a tolerance (a coordinate a cluster already had is
 kept), degenerate triangles are dropped, each component is oriented by
 propagation across edges the input uses exactly twice - a flip that would
 make one of the triangle's own edges same-direction is skipped and counted,
-not applied - and flipped outward when closed, boundary loops of three
-edges are filled with one triangle, and the result is written with
-recomputed normals.  The defect counts after every stage and everything
-the tool could not repair are reported, never hidden.
+not applied - and flipped outward when closed, a boundary loop of up to
+--max-hole-edges edges is filled (three edges with one triangle, four or
+more by ear clipping in the plane of the loop's Newell normal), and the
+result is written with recomputed normals.  The defect counts after every
+stage and everything the tool could not repair are reported, never hidden.
 """
 
 import argparse
@@ -325,13 +326,86 @@ def _orient(T, P, nP):
     return flips, refused, reasons, reseeded
 
 
-# --- holes (E6, Run 1: 3-edge loops only) and outward (E4) ----------------
+# --- holes and outward ----------------------------------------------------
 
-def _fill_holes(T, tri_patch, nP, max_hole):
-    """(T, tri_patch, filled, filled_triangles, unfilled): walk the open
-    directed edges, fill 3-edge loops, report every other loop.  A fill is
-    applied only if it leaves every one of its three undirected edges used
-    at most twice (the use tally is counted once, before the walk)."""
+def _clip_loop(P, loop):
+    """Ear-clip a simple boundary loop in its own plane.  The polygon
+    normal is the Newell normal n = sum_i p_i x p_(i+1) (indices mod m);
+    an ear at p_i is a corner convex about n whose ear triangle, projected
+    onto the plane orthogonal to n, holds no other loop vertex strictly
+    inside it - Meisters's two-ears theorem (G. H. Meisters, "Polygons
+    have ears", Amer. Math. Monthly 82 (1975) 648-651) guarantees a simple
+    polygon has one.  loop holds the m distinct point indices in walk
+    order WITHOUT the repeated first point.  Returns m - 2 index triples,
+    each in reversed walk winding, or None when the Newell normal has zero
+    length or a full pass over the working copy finds no ear."""
+    m = len(loop)
+    pts = P[np.asarray(loop, dtype=np.int64)]
+    n = np.cross(pts, np.roll(pts, -1, axis=0)).sum(axis=0)
+    ln = float(np.linalg.norm(n))
+    if ln == 0.0:
+        return None
+    nh = n / ln
+    ref = np.array([1.0, 0.0, 0.0])
+    if abs(float(ref @ nh)) > 0.9:
+        ref = np.array([0.0, 1.0, 0.0])
+    u = ref - float(ref @ nh) * nh
+    u /= np.linalg.norm(u)
+    v = np.cross(nh, u)
+    p3 = pts.tolist()
+    q = (pts @ np.array([u, v]).T).tolist()
+    nh3 = nh.tolist()
+    work = list(range(m))
+    tris = []
+    while len(work) > 3:
+        ear, L = -1, len(work)
+        for i in range(L):
+            im, ic, ip = work[i - 1], work[i], work[(i + 1) % L]
+            ax, ay, az = p3[im]
+            bx, by, bz = p3[ic]
+            cx, cy, cz = p3[ip]
+            ux, uy, uz = bx - ax, by - ay, bz - az
+            wx, wy, wz = cx - bx, cy - by, cz - bz
+            if (uy * wz - uz * wy) * nh3[0] + (uz * wx - ux * wz) * nh3[1] \
+                    + (ux * wy - uy * wx) * nh3[2] <= 0.0:
+                continue
+            x0, y0 = q[im]
+            e1x, e1y = q[ic][0] - x0, q[ic][1] - y0
+            e2x, e2y = q[ip][0] - x0, q[ip][1] - y0
+            det = e1x * e2y - e1y * e2x
+            if abs(det) <= 1e-12 * (e1x * e1x + e1y * e1y
+                                    + e2x * e2x + e2y * e2y):
+                continue    # a flat projected triangle contains nothing
+            inside = False
+            for j in work:
+                if j in (im, ic, ip):
+                    continue
+                dx, dy = q[j][0] - x0, q[j][1] - y0
+                uu = (dx * e2y - dy * e2x) / det
+                vv = (e1x * dy - e1y * dx) / det
+                if uu > 0.0 and vv > 0.0 and uu + vv < 1.0:
+                    inside = True
+                    break
+            if not inside:
+                ear = i
+                break
+        if ear < 0:
+            return None
+        im, ic, ip = work[ear - 1], work[ear], work[(ear + 1) % len(work)]
+        tris.append((loop[ip], loop[ic], loop[im]))
+        del work[ear]
+    tris.append((loop[work[2]], loop[work[1]], loop[work[0]]))
+    return tris
+
+
+def _fill_holes(T, P, tri_patch, nP, max_hole):
+    """(T, tri_patch, filled, filled_triangles, unfilled, per_hole): walk
+    the open directed edges, fill 3-edge loops with one triangle and
+    ear-clip loops of up to max_hole edges, report every other loop.  A
+    fill is applied only if it leaves every one of its new triangles'
+    undirected edges used at most twice (the use tally is counted once,
+    before the walk; a clipped loop's whole candidate fan is tallied
+    before any of it is committed)."""
     a, b, key = _edge_key(T, nP)
     uk, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
     use = dict(zip(uk.tolist(), counts.tolist()))
@@ -341,7 +415,7 @@ def _fill_holes(T, tri_patch, nP, max_hole):
     for e in open_e:
         out_map.setdefault(int(a[e]), []).append(int(e))
     used = set()
-    filled, filled_tris, unfilled = 0, 0, []
+    filled, filled_tris, unfilled, per_hole = 0, 0, [], []
     newT, newP = [], []
     for e0 in open_e:
         e0 = int(e0)
@@ -361,11 +435,16 @@ def _fill_holes(T, tri_patch, nP, max_hole):
             loop.append(int(b[ne]))
         if dead is not None:
             unfilled.append({'edges': dead[0], 'reason': dead[1]})
+            per_hole.append({'edges': dead[0], 'outcome': 'skipped',
+                             'triangles': 0, 'reason': dead[1]})
             continue
         m = len(loop) - 1
         if m > max_hole:
             unfilled.append({'edges': m, 'reason':
                              'loop of %d edges > max_hole_edges %d' % (m, max_hole)})
+            per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
+                             'reason': 'loop of %d edges > max_hole_edges %d'
+                                       % (m, max_hole)})
         elif m == 3:
             keys = [min(loop[i], loop[i + 1]) * nP + max(loop[i], loop[i + 1])
                     for i in range(3)]
@@ -373,6 +452,9 @@ def _fill_holes(T, tri_patch, nP, max_hole):
             if bad:
                 unfilled.append({'edges': m, 'reason':
                                  'filling it would make %d edge(s) non-manifold' % bad})
+                per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
+                                 'reason': 'filling it would make %d edge(s) non-manifold'
+                                           % bad})
                 continue
             owner = int(e0) // 3
             newT.append((loop[2], loop[1], loop[0]))
@@ -381,13 +463,43 @@ def _fill_holes(T, tri_patch, nP, max_hole):
                 use[k] += 1
             filled += 1
             filled_tris += 1
+            per_hole.append({'edges': m, 'outcome': 'filled',
+                             'triangles': 1, 'reason': None})
         else:
-            unfilled.append({'edges': m, 'reason':
-                             'loop of %d edges: Run 1 fills 3-edge loops only' % m})
+            tris = _clip_loop(P, loop[:-1])
+            if tris is None:
+                unfilled.append({'edges': m, 'reason':
+                                 'no ear found: the loop is not simple in its own plane'})
+                per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
+                                 'reason': 'no ear found: the loop is not simple '
+                                           'in its own plane'})
+                continue
+            cand = {}
+            for t in tris:
+                for i, j in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+                    k = min(i, j) * nP + max(i, j)
+                    cand[k] = cand.get(k, 0) + 1
+            bad = sum(1 for k in cand if use.get(k, 0) + cand[k] > 2)
+            if bad:
+                unfilled.append({'edges': m, 'reason':
+                                 'filling it would make %d edge(s) non-manifold' % bad})
+                per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
+                                 'reason': 'filling it would make %d edge(s) '
+                                           'non-manifold' % bad})
+                continue
+            owner = int(e0) // 3
+            newT.extend(tris)
+            newP.extend([int(tri_patch[owner])] * len(tris))
+            for k, c in cand.items():
+                use[k] = use.get(k, 0) + c
+            filled += 1
+            filled_tris += m - 2
+            per_hole.append({'edges': m, 'outcome': 'filled',
+                             'triangles': m - 2, 'reason': None})
     if newT:
         T = np.vstack([T, np.array(newT, dtype=T.dtype)])
         tri_patch = np.concatenate([tri_patch, np.array(newP, dtype=tri_patch.dtype)])
-    return T, tri_patch, filled, filled_tris, unfilled
+    return T, tri_patch, filled, filled_tris, unfilled, per_hole
 
 
 def _flip_outward(T, P, nP):
@@ -531,8 +643,8 @@ def run_repair(args):
     weld_stage = _defects(T, nP)
     flip3, left_alone, alone_reasons, reseeded = _orient(T, P, nP)
     orient_stage = _defects(T, nP)
-    T, tri_patch, filled, filled_tris, unfilled = _fill_holes(
-        T, patch_k, nP, args.max_hole_edges)
+    T, tri_patch, filled, filled_tris, unfilled, per_hole = _fill_holes(
+        T, P, patch_k, nP, args.max_hole_edges)
     T, flipped_set, comp = _flip_outward(T, P, nP)
     after_open, after_nm = _defects(T, nP)
     stages = [
@@ -585,7 +697,8 @@ def run_repair(args):
                            'reseeded_patches': reseeded,
                            'flipped_components': len(flipped_set)},
            'holes': {'max_hole_edges': args.max_hole_edges, 'filled': filled,
-                     'filled_triangles': filled_tris, 'unfilled': unfilled},
+                     'filled_triangles': filled_tris, 'unfilled': unfilled,
+                     'per_hole': per_hole},
            'stages': stages,
            'before': {'open_edges': before[0], 'non_manifold_edges': before[1],
                       'closed': before == (0, 0)},
@@ -603,8 +716,10 @@ def run_repair(args):
                      % (wst['merged'], tol_abs, args.weld, diag, wst['max_move'], dropped))
     sys.stdout.write('  orient: %d triangle(s) reoriented, %d left alone, %d patch(es) re-seeded, %d component(s) flipped outward\n'
                      % (flip3, left_alone, reseeded, len(flipped_set)))
-    sys.stdout.write('  holes: %d filled with %d triangle(s), %d unfilled\n'
-                     % (filled, filled_tris, len(unfilled)))
+    ear_tris = sum(h['triangles'] for h in per_hole
+                   if h['outcome'] == 'filled' and h['triangles'] > 1)
+    sys.stdout.write('  holes: %d filled with %d triangle(s), %d unfilled, %d by ear clipping\n'
+                     % (filled, filled_tris, len(unfilled), ear_tris))
     sys.stdout.write('  after: %d open edge(s), %d non-manifold edge(s) -> closed %s, volume %s\n'
                      % (after_open, after_nm, 'yes' if after_closed else 'no',
                         '%.9e' % after_vol if after_vol is not None else '-'))

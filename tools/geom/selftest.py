@@ -609,10 +609,14 @@ def test_repair_reports_unrepairable(top):
     b = [t for t in cube_tris((3, 0, 0)) if not all(abs(v[2] - 1.0) < 1e-12 for v in t)]
     write_stl_ascii(src, [('a', cube_tris()), ('b', b)])
     out = os.path.join(d, 'mix_r.stl')
-    p = repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    p = repair(src, '--out', out, '--json', os.path.join(d, 'r.json'),
+               '--max-hole-edges', '3')
     rep = load(os.path.join(d, 'r.json'))
     assert rep['holes']['unfilled'] == [
-        {'edges': 4, 'reason': 'loop of 4 edges: Run 1 fills 3-edge loops only'}], rep['holes']
+        {'edges': 4, 'reason': 'loop of 4 edges > max_hole_edges 3'}], rep['holes']
+    assert rep['holes']['per_hole'] == [
+        {'edges': 4, 'outcome': 'skipped', 'triangles': 0,
+         'reason': 'loop of 4 edges > max_hole_edges 3'}], rep['holes']
     assert rep['components'][0]['closed'] is True and rep['components'][1]['closed'] is False, rep['components']
     assert rep['components'][1]['open_edges'] == 4, rep['components']
     assert rep['after']['volume'] is None and rep['triangles_out'] == 22, rep
@@ -755,7 +759,46 @@ def test_repair_orient_cost(top):
     assert abs(vol6 - 1.0) <= 1e-12, vol6    # the tet's faces are still outward
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost)
+def test_repair_hole4(top):
+    d = work(top, 'repair_hole4')
+    tris = [t for t in cube_tris() if not all(abs(v[2] - 1.0) < 1e-12 for v in t)]
+    src = os.path.join(d, 'hole4.stl')
+    write_stl_ascii(src, [('cube', tris)])
+    out = os.path.join(d, 'hole4_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before'] == {'open_edges': 4, 'non_manifold_edges': 0,
+                             'closed': False}, rep['before']
+    assert rep['patches'] == ['cube'], rep['patches']
+    assert rep['holes']['filled'] == 1 and rep['holes']['filled_triangles'] == 2, rep['holes']
+    assert rep['triangles_out'] == 12 and rep['after']['closed'] is True, rep
+    assert rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+    assert rep['holes']['per_hole'] == [
+        {'edges': 4, 'outcome': 'filled', 'triangles': 2, 'reason': None}], rep['holes']
+    text = open(out, encoding='utf-8').read()
+    assert 'solid cube' in text and 'endsolid cube' in text, text[:200]
+    run('info', out, '--json', os.path.join(d, 'i.json'))
+    k = load(os.path.join(d, 'i.json'))['discrete'][0]
+    assert k['closed'] is True and rel(k['volume'], 1.0) <= 1e-9, k
+
+
+def test_repair_hole_bent(top):
+    d = work(top, 'repair_hole_bent')
+    gone = {(1.0, 0.0, 0.0), (1.0, 1.0, 1.0), (1.0, 0.0, 1.0)}
+    tris = [t for t in cube_tris()
+            if not (all(abs(v[2] - 1.0) < 1e-12 for v in t) or set(t) == gone)]
+    src = os.path.join(d, 'hole_bent.stl')
+    write_stl_ascii(src, [('cube', tris)])
+    out = os.path.join(d, 'hole_bent_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before']['open_edges'] == 5 and rep['before']['non_manifold_edges'] == 0, rep['before']
+    assert rep['holes']['filled'] == 1 and rep['holes']['filled_triangles'] == 3, rep['holes']
+    assert rep['triangles_out'] == 12 and rep['after']['closed'] is True, rep
+    assert rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+
+
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent)
 
 
 def main(argv=None):
