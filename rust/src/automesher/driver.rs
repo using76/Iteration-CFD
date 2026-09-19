@@ -25,20 +25,22 @@ use crate::surface::Surface;
 use crate::Scalar;
 
 use super::quality::QualityReport;
-use super::AutomeshConfig;
+use super::{AutomeshConfig, LayerSpec};
 
 // ==========================================================================
 //  The stages - (92.55)
 // ==========================================================================
 
-/// (92.55)'s stage list - the four stages that return a mesh. Stage 0 (the
-/// background block) and stage 2 (the 2:1 balance) are not here: neither
-/// returns a mesh of its own.
+/// (92.55)'s stage list - the five stages that return a mesh (the split
+/// returns the layout; on a run with no body it is recorded and skipped).
+/// Stage 0 (the background block) and stage 2 (the 2:1 balance) are not
+/// here: neither returns a mesh of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Octree,
     Castellate,
     Snap,
+    Split,
     Layers,
 }
 
@@ -49,6 +51,7 @@ impl Stage {
             Stage::Octree => "octree",
             Stage::Castellate => "castellate",
             Stage::Snap => "snap",
+            Stage::Split => "split",
             Stage::Layers => "layers",
         }
     }
@@ -62,16 +65,19 @@ impl Stage {
             "octree" => Ok(Stage::Octree),
             "castellate" => Ok(Stage::Castellate),
             "features" | "snap" => Ok(Stage::Snap),
+            "split" => Ok(Stage::Split),
             "layers" => Ok(Stage::Layers),
             _ => Err(Error::Config(format!(
                 "stopAfter: unknown stage \"{s}\" - one of \
-                 \"octree\", \"castellate\", \"features\", \"snap\", \"layers\""
+                 \"octree\", \"castellate\", \"features\", \"snap\", \
+                 \"split\", \"layers\""
             ))),
         }
     }
 
-    /// The four, in order.
-    pub const ALL: [Stage; 4] = [Stage::Octree, Stage::Castellate, Stage::Snap, Stage::Layers];
+    /// The five, in order.
+    pub const ALL: [Stage; 5] =
+        [Stage::Octree, Stage::Castellate, Stage::Snap, Stage::Split, Stage::Layers];
 }
 
 // ==========================================================================
@@ -95,6 +101,8 @@ pub struct StageTiming {
 #[derive(Debug, Clone)]
 pub struct PipelineOutput {
     /// The mesh of the last stage that ran, with (92.56) already applied.
+    /// On a split run this is the FLUID region's mesh (a clone of
+    /// `layout.regions[0].mesh`), so every reader of one mesh keeps working.
     pub mesh: PolyMeshRaw,
     /// One row per stage of (92.55) this run did, in order - a stopped run's
     /// vector is shorter, a skipped layers stage still has its row.
@@ -104,6 +112,29 @@ pub struct PipelineOutput {
     pub quality: QualityReport,
     pub stopped_after: Option<Stage>,
     pub total_seconds: f64,
+    /// `None` when `castellation.bodies` is empty or the run stopped before
+    /// the split; `Some` after the split stage ran.
+    pub layout: Option<LayoutOutput>,
+}
+
+/// One region of a split run: its name in the layout, its kind, its mesh
+/// after every stage that ran, and the LAST gate it passed.
+#[derive(Debug, Clone)]
+pub struct RegionOutput {
+    pub name: String,
+    pub kind: crate::cht::RegionKind,
+    pub mesh: PolyMeshRaw,
+    pub quality: QualityReport,
+}
+
+/// What the split stage produced: `regions[0]` is the fluid (SPEC-LIT
+/// §47.4: the fluid is region 0), then the bodies in `castellation.bodies`
+/// order, and the interface pairs `split_by_zones` named (`fluid_to_<b>`,
+/// `<b>_to_fluid`, docs/10 §C R3).
+#[derive(Debug, Clone)]
+pub struct LayoutOutput {
+    pub regions: Vec<RegionOutput>,
+    pub interfaces: Vec<crate::io::regions::SplitInterface>,
 }
 
 /// §92.14's banner: `=== stage 2/4  castellate ===`. One-based, and the
@@ -139,7 +170,10 @@ fn report_lines(progress: &mut dyn FnMut(&str), text: &str) -> String {
 
 /// (92.55)'s stop rule, applied: the stages up to and including `stop_after`
 /// run, every stage gates its own output before returning it, and (92.56) is
-/// applied ONCE, to the mesh that leaves the last stage that ran.
+/// applied ONCE, to the mesh that leaves the last stage that ran. With a
+/// layout (the split ran) the rename applies PER REGION, and a key naming an
+/// interface patch - or a patch of no region - is refused before anything
+/// changes.
 fn finish(
     cfg: &AutomeshConfig,
     stop_after: Option<Stage>,
@@ -147,7 +181,69 @@ fn finish(
     quality: Option<QualityReport>,
     stages: Vec<StageTiming>,
     t0: Instant,
+    layout: Option<LayoutOutput>,
 ) -> Result<PipelineOutput> {
+    if let Some(mut layout) = layout {
+        for from in cfg.output.patch_names.keys() {
+            if let Some(iface) = layout
+                .interfaces
+                .iter()
+                .find(|i| i.patch_a == *from || i.patch_b == *from)
+            {
+                let (a, b) = (
+                    &layout.regions[iface.region_a].name,
+                    &layout.regions[iface.region_b].name,
+                );
+                return Err(Error::Config(format!(
+                    "output.patch_names: key \"{from}\" names the interface \
+                     patch of regions \"{a}\" and \"{b}\" - interface names \
+                     are the layout's contract (docs/10 §C R3) and are not \
+                     renamed"
+                )));
+            }
+            if !layout
+                .regions
+                .iter()
+                .any(|r| r.mesh.patches.iter().any(|p| p.name == *from))
+            {
+                let lists: Vec<String> = layout
+                    .regions
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}: {:?}",
+                            r.name,
+                            r.mesh.patches.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+                        )
+                    })
+                    .collect();
+                return Err(Error::Config(format!(
+                    "output.patch_names: key \"{from}\" names no patch of any \
+                     region ({})"
+                , lists.join("; "))));
+            }
+        }
+        for region in &mut layout.regions {
+            let sub: std::collections::BTreeMap<String, String> = cfg
+                .output
+                .patch_names
+                .iter()
+                .filter(|(k, _)| region.mesh.patches.iter().any(|p| p.name == **k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            rename_patches(&mut region.mesh, &sub)?;
+        }
+        let mesh = layout.regions[0].mesh.clone();
+        let quality = layout.regions[0].quality.clone();
+        return Ok(PipelineOutput {
+            mesh,
+            stages,
+            quality,
+            stopped_after: stop_after,
+            total_seconds: t0.elapsed().as_secs_f64(),
+            layout: Some(layout),
+        });
+    }
     let mut mesh = mesh.expect("a run that ran a stage has a mesh");
     rename_patches(&mut mesh, &cfg.output.patch_names)?;
     Ok(PipelineOutput {
@@ -156,7 +252,230 @@ fn finish(
         quality: quality.expect("the stage that made the mesh gated it"),
         stopped_after: stop_after,
         total_seconds: t0.elapsed().as_secs_f64(),
+        layout: None,
     })
+}
+
+/// The split stage's body when `castellation.bodies` is not empty: one
+/// standalone mesh per region, the fluid first (SPEC-LIT §47.4), each gated
+/// on its own, one log line per region and per interface.
+fn split_stage(
+    progress: &mut dyn FnMut(&str),
+    stages: &mut Vec<StageTiming>,
+    mesh: &mut Option<PolyMeshRaw>,
+    quality: &mut Option<QualityReport>,
+    layout: &mut Option<LayoutOutput>,
+    cast_region: &[i32],
+    body_names: &[String],
+    thr: &super::quality::QualityThresholds,
+) -> Result<()> {
+    let started = Instant::now();
+    let snapped_mesh = mesh.take().expect("snap ran");
+    // SPEC-LIT §47.4: the fluid is regions[0], so its zone is first and the
+    // bodies follow in `castellation.bodies` order, cell ids ascending.
+    let mut zones: Vec<(String, Vec<crate::Label>)> =
+        vec![("fluid".to_string(), Vec::new())];
+    for (c, r) in cast_region.iter().enumerate() {
+        if *r == -1 {
+            zones[0].1.push(c as crate::Label);
+        }
+    }
+    for (k, name) in body_names.iter().enumerate() {
+        let mut cells = Vec::new();
+        for (c, r) in cast_region.iter().enumerate() {
+            if *r == k as i32 {
+                cells.push(c as crate::Label);
+            }
+        }
+        zones.push((name.clone(), cells));
+    }
+    let (parts, ifaces) = crate::io::regions::split_by_zones(&snapped_mesh, &zones)?;
+    let mut regions: Vec<RegionOutput> = Vec::with_capacity(parts.len());
+    let mut region_counts: Vec<serde_json::Value> = Vec::new();
+    let mut log = String::new();
+    for (i, (name, m)) in parts.into_iter().enumerate() {
+        let q = super::quality::check(&m, thr)
+            .map_err(|e| Error::Mesh(format!("split: region \"{name}\": {e}")))?;
+        let kind_word = if i == 0 { "fluid" } else { "solid" };
+        log.push_str(&format!(
+            "split: region \"{name}\" ({kind_word}): {} cells, {} patches\n",
+            q.n_cells,
+            m.patches.len()
+        ));
+        region_counts.push(json!({
+            "name": name,
+            "kind": kind_word,
+            "n_cells": q.n_cells,
+            "n_points": m.points.len(),
+            "n_internal_faces": m.neighbour.len(),
+            "n_boundary_faces": m.faces.len() - m.neighbour.len(),
+            "n_patches": m.patches.len(),
+        }));
+        let kind = if i == 0 {
+            crate::cht::RegionKind::Fluid
+        } else {
+            crate::cht::RegionKind::Solid
+        };
+        regions.push(RegionOutput { name, kind, mesh: m, quality: q });
+    }
+    let interfaces_json: Vec<serde_json::Value> = ifaces
+        .iter()
+        .map(|i| {
+            log.push_str(&format!(
+                "split: interface {} <-> {}: {} faces ({} / {})\n",
+                regions[i.region_a].name,
+                regions[i.region_b].name,
+                i.n_faces,
+                i.patch_a,
+                i.patch_b
+            ));
+            json!({
+                "regions": [regions[i.region_a].name.clone(), regions[i.region_b].name.clone()],
+                "patches": [i.patch_a.clone(), i.patch_b.clone()],
+                "faces": i.n_faces,
+            })
+        })
+        .collect();
+    let counts = json!({
+        "n_regions": regions.len(),
+        "regions": region_counts,
+        "interfaces": interfaces_json,
+    });
+    let mut log = report_lines(progress, &log);
+    for r in &regions {
+        log.push_str(&report_lines(progress, &r.quality.summary()));
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    elapsed(progress, Stage::Split, seconds);
+    stages.push(StageTiming { stage: Stage::Split, seconds, counts, log });
+    *mesh = None;
+    *quality = None;
+    *layout = Some(LayoutOutput { regions, interfaces: ifaces });
+    Ok(())
+}
+
+/// The layers stage on a split run: `layers.patches` names the SPLIT patch
+/// names (`fluid_to_<body>`, `<body>_to_fluid`), so each region filters the
+/// spec down to the patches it carries, a region with none is recorded and
+/// skipped, and the stage's counts are the totals SUMMED over the regions
+/// plus one row per region.
+fn layers_regions_stage(
+    progress: &mut dyn FnMut(&str),
+    stages: &mut Vec<StageTiming>,
+    layout: &mut LayoutOutput,
+    cfg: &AutomeshConfig,
+    surf: &Surface,
+    thr: &super::quality::QualityThresholds,
+) -> Result<()> {
+    let started = Instant::now();
+    // A patch no region carries is a typo or a stale name: refuse naming
+    // every region's patch list, before any region is touched.
+    for name in &cfg.layers.patches {
+        if !layout
+            .regions
+            .iter()
+            .any(|r| r.mesh.patches.iter().any(|p| p.name == *name))
+        {
+            let lists: Vec<String> = layout
+                .regions
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} carries {:?}",
+                        r.name,
+                        r.mesh.patches.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+                    )
+                })
+                .collect();
+            return Err(Error::Mesh(format!(
+                "layers: patch \"{name}\" is not a patch of any region - {}",
+                lists.join("; ")
+            )));
+        }
+    }
+    let mut totals = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut log = String::new();
+    for r in layout.regions.iter_mut() {
+        let mine: Vec<String> = cfg
+            .layers
+            .patches
+            .iter()
+            .filter(|p| r.mesh.patches.iter().any(|q| q.name == **p))
+            .cloned()
+            .collect();
+        if mine.is_empty() {
+            log.push_str(&format!(
+                "layers: region \"{}\": skipped - none of layers.patches is \
+                 a patch of this region\n",
+                r.name
+            ));
+            rows.push(json!({
+                "name": r.name,
+                "skipped": true,
+                "n_layer_cells": 0,
+                "patches": [],
+            }));
+            continue;
+        }
+        let sub = LayerSpec { patches: mine, ..cfg.layers.clone() };
+        let lay = super::layers::add_layers(&r.mesh, surf, &sub, thr)?;
+        let patches: Vec<serde_json::Value> = lay
+            .report
+            .patches
+            .iter()
+            .map(|p| {
+                json!({
+                    "name": p.name,
+                    "n_layers": p.n_layers,
+                    "n_faces": p.n_faces,
+                    "full_area_frac": p.full_area_frac,
+                    "mean_frac": p.mean_frac,
+                    "t1_requested": p.t1_requested,
+                    "t1_mean": p.t1_mean,
+                    "t1_min": p.t1_min,
+                    "dropped": p.dropped,
+                })
+            })
+            .collect();
+        rows.push(json!({
+            "name": r.name,
+            "n_layer_cells": lay.report.n_layer_cells,
+            "n_layer_points": lay.report.n_layer_points,
+            "n_side_internal": lay.report.n_side_internal,
+            "n_side_boundary": lay.report.n_side_boundary,
+            "n_split_sides": lay.report.n_split_sides,
+            "retreats": lay.report.retreats,
+            "patches": patches,
+        }));
+        totals.0 += lay.report.n_layer_cells;
+        totals.1 += lay.report.n_layer_points;
+        totals.2 += lay.report.n_side_internal;
+        totals.3 += lay.report.n_side_boundary;
+        totals.4 += lay.report.n_split_sides;
+        totals.5 += lay.report.retreats;
+        log.push_str(&format!("layers: region \"{}\":\n", r.name));
+        log.push_str(&lay.report.summary());
+        if !log.ends_with('\n') {
+            log.push('\n');
+        }
+        r.mesh = lay.mesh;
+        r.quality = lay.quality;
+    }
+    let counts = json!({
+        "n_layer_cells": totals.0,
+        "n_layer_points": totals.1,
+        "n_side_internal": totals.2,
+        "n_side_boundary": totals.3,
+        "n_split_sides": totals.4,
+        "retreats": totals.5,
+        "regions": rows,
+    });
+    let log = report_lines(progress, &log);
+    let seconds = started.elapsed().as_secs_f64();
+    elapsed(progress, Stage::Layers, seconds);
+    stages.push(StageTiming { stage: Stage::Layers, seconds, counts, log });
+    Ok(())
 }
 
 /// §92.14: run the stages of (92.55) in order, stopping after `stop_after`
@@ -176,6 +495,15 @@ pub fn run(
     let mut stages: Vec<StageTiming> = Vec::new();
     let mut mesh: Option<PolyMeshRaw>;
     let mut quality: Option<QualityReport>;
+    // The split's inputs, taken from the castellate stage: the region of
+    // every cell and the bodies' names. `-1` fluid, `k >= 0` body k; empty
+    // when `castellation.bodies` is, which is what keeps the split skipped.
+    // The empty initial value is read only when the run stops before the
+    // castellate stage fills it.
+    #[allow(unused_assignments)]
+    let (mut cast_region, mut body_names): (Vec<i32>, Vec<String>) =
+        (Vec::new(), Vec::new());
+    let mut layout: Option<LayoutOutput> = None;
 
     // The stop rule: the denominator of every banner is how many stages THIS
     // run will do.
@@ -211,7 +539,7 @@ pub fn run(
     mesh = Some(leaf_mesh);
     quality = Some(leaf_quality);
     if stop_after == Some(Stage::Octree) {
-        return finish(cfg, stop_after, mesh, quality, stages, t0);
+        return finish(cfg, stop_after, mesh, quality, stages, t0, layout);
     }
 
     // ---- stage 2: castellate, on the tree stage 1 left behind.
@@ -240,19 +568,25 @@ pub fn run(
     let log = report_lines(progress, &cast.report.summary());
     elapsed(progress, Stage::Castellate, seconds);
     stages.push(StageTiming { stage: Stage::Castellate, seconds, counts, log });
+    cast_region = cast.region_of_cell;
+    body_names = cast.body_names;
     mesh = Some(cast.mesh);
     quality = Some(cast.report);
     if stop_after == Some(Stage::Castellate) {
-        return finish(cfg, stop_after, mesh, quality, stages, t0);
+        return finish(cfg, stop_after, mesh, quality, stages, t0, layout);
     }
 
     // ---- stage 3: snap. The feature attraction §92.12 folded into this
     // stage's own loop is why `features` parses to Snap and stops here too.
     banner(progress, 3, n, Stage::Snap);
     let started = Instant::now();
-    let snapped = super::snap::snap(
+    // With a declared body the interface faces' points join the snapped set
+    // (§92.11's B), so the interface is moved onto the body's own triangles
+    // and stays conformal bit for bit after the split (docs/10 §C R2).
+    let snapped = super::snap::snap_regions(
         mesh.as_ref().expect("castellate ran"),
         surf,
+        Some(&cast_region),
         cfg.domain.base_size as Scalar,
         cfg.refinement.feature_angle_deg as Scalar,
         &cfg.snap,
@@ -280,13 +614,36 @@ pub fn run(
     mesh = Some(snapped.mesh);
     quality = Some(snapped.quality);
     if stop_after == Some(Stage::Snap) {
-        return finish(cfg, stop_after, mesh, quality, stages, t0);
+        return finish(cfg, stop_after, mesh, quality, stages, t0, layout);
     }
 
-    // ---- stage 4: layers. An empty layer spec makes `add_layers` a no-op
+    // ---- stage 4: the split. `castellation.bodies` empty is every run
+    // before M6: the stage is recorded and skipped, like an empty layer
+    // stage.
+    banner(progress, 4, n, Stage::Split);
+    if cfg.castellation.bodies.is_empty() {
+        let counts = json!({
+            "skipped": true,
+            "n_regions": 1,
+        });
+        let log = report_lines(
+            progress,
+            "split: skipped - castellation.bodies is empty\n",
+        );
+        elapsed(progress, Stage::Split, 0.0);
+        stages.push(StageTiming { stage: Stage::Split, seconds: 0.0, counts, log });
+    } else {
+        split_stage(progress, &mut stages, &mut mesh, &mut quality, &mut layout,
+            &cast_region, &body_names, &thr)?;
+    }
+    if stop_after == Some(Stage::Split) {
+        return finish(cfg, stop_after, mesh, quality, stages, t0, layout);
+    }
+
+    // ---- stage 5: layers. An empty layer spec makes `add_layers` a no-op
     // that still costs a gate pass, so the stage is recorded and skipped
-    // instead of run.
-    banner(progress, 4, n, Stage::Layers);
+    // instead of run. On a split run it runs PER REGION.
+    banner(progress, 5, n, Stage::Layers);
     if cfg.layers.n == 0 || cfg.layers.patches.is_empty() {
         let counts = json!({
             "skipped": true,
@@ -304,6 +661,8 @@ pub fn run(
         );
         elapsed(progress, Stage::Layers, 0.0);
         stages.push(StageTiming { stage: Stage::Layers, seconds: 0.0, counts, log });
+    } else if let Some(lay_out) = layout.as_mut() {
+        layers_regions_stage(progress, &mut stages, lay_out, cfg, surf, &thr)?;
     } else {
         let started = Instant::now();
         let lay = super::layers::add_layers(
@@ -340,7 +699,7 @@ pub fn run(
         mesh = Some(lay.mesh);
         quality = Some(lay.quality);
     }
-    finish(cfg, stop_after, mesh, quality, stages, t0)
+    finish(cfg, stop_after, mesh, quality, stages, t0, layout)
 }
 
 // ==========================================================================
@@ -409,6 +768,39 @@ pub fn rename_patches(
 //  (92.57) - the summary the run leaves
 // ==========================================================================
 
+/// The manifest's word for a region kind (docs/10 §C R4).
+fn kind_word(k: crate::cht::RegionKind) -> &'static str {
+    match k {
+        crate::cht::RegionKind::Fluid => "fluid",
+        crate::cht::RegionKind::Solid => "solid",
+    }
+}
+
+/// (92.57)'s `quality` object - the measured numbers of §92.3's report,
+/// gate by gate. The run's own report on a one-mesh run, one region's on a
+/// split run.
+fn quality_json(q: &QualityReport) -> serde_json::Value {
+    json!({
+        "n_cells": q.n_cells,
+        "min_volume": q.min_volume as f64,
+        "min_volume_cell": q.min_volume_cell,
+        "max_closure": q.max_closure as f64,
+        "max_closure_cell": q.max_closure_cell,
+        "n_regions": q.n_regions,
+        "region_sizes": q.region_sizes,
+        "max_non_orth_deg": q.max_non_orth_deg as f64,
+        "mean_non_orth_deg": q.mean_non_orth_deg as f64,
+        "n_non_orth_over_report": q.n_non_orth_over_report,
+        "min_thickness_ratio": q.min_thickness_ratio as f64,
+        "min_thickness_cell": q.min_thickness_cell,
+        "max_cond": q.max_cond as f64,
+        "max_cond_cell": q.max_cond_cell,
+        "n_duplicate_faces": q.n_duplicate_faces,
+        "ldu_ordered": q.ldu_ordered,
+        "passed": q.passed(),
+    })
+}
+
 /// (92.57): the summary object, ready for `serde_json::to_string_pretty`.
 /// The patch list is the FINAL one - `out.mesh` carries (92.56)'s names -
 /// and `config` is the parsed struct re-serialised, defaults filled in,
@@ -457,6 +849,48 @@ pub fn summary_json(
         .collect();
 
     let q = &out.quality;
+    // (92.57)'s `layout` block: `null` unless the split stage ran, and then
+    // the written layout's own shape - per region the counts and its OWN
+    // gate report, and the interface pairs as the manifest carries them.
+    let layout_json = match &out.layout {
+        None => serde_json::Value::Null,
+        Some(l) => {
+            let regions: Vec<serde_json::Value> = l
+                .regions
+                .iter()
+                .map(|r| {
+                    json!({
+                        "name": r.name,
+                        "kind": kind_word(r.kind),
+                        "n_points": r.mesh.points.len(),
+                        "n_cells": r.quality.n_cells,
+                        "n_internal_faces": r.mesh.neighbour.len(),
+                        "n_boundary_faces": r.mesh.faces.len() - r.mesh.neighbour.len(),
+                        "patches": r.mesh.patches.iter().map(|p| json!({
+                            "name": p.name, "kind": p.type_name, "size": p.size,
+                        })).collect::<Vec<serde_json::Value>>(),
+                        "quality": quality_json(&r.quality),
+                    })
+                })
+                .collect();
+            let interfaces: Vec<serde_json::Value> = l
+                .interfaces
+                .iter()
+                .map(|i| {
+                    json!({
+                        "regions": [l.regions[i.region_a].name, l.regions[i.region_b].name],
+                        "patches": [i.patch_a, i.patch_b],
+                        "faces": i.n_faces,
+                    })
+                })
+                .collect();
+            json!({
+                "manifest": "mesh/regions.json",
+                "regions": regions,
+                "interfaces": interfaces,
+            })
+        }
+    };
     json!({
         "tool": "ofgpu-automesher",
         "config_path": config_path,
@@ -480,25 +914,8 @@ pub fn summary_json(
             "n_boundary_faces": out.mesh.faces.len() - out.mesh.neighbour.len(),
             "patches": mesh_patches,
         },
-        "quality": {
-            "n_cells": q.n_cells,
-            "min_volume": q.min_volume as f64,
-            "min_volume_cell": q.min_volume_cell,
-            "max_closure": q.max_closure as f64,
-            "max_closure_cell": q.max_closure_cell,
-            "n_regions": q.n_regions,
-            "region_sizes": q.region_sizes,
-            "max_non_orth_deg": q.max_non_orth_deg as f64,
-            "mean_non_orth_deg": q.mean_non_orth_deg as f64,
-            "n_non_orth_over_report": q.n_non_orth_over_report,
-            "min_thickness_ratio": q.min_thickness_ratio as f64,
-            "min_thickness_cell": q.min_thickness_cell,
-            "max_cond": q.max_cond as f64,
-            "max_cond_cell": q.max_cond_cell,
-            "n_duplicate_faces": q.n_duplicate_faces,
-            "ldu_ordered": q.ldu_ordered,
-            "passed": q.passed(),
-        },
+        "quality": quality_json(q),
+        "layout": layout_json,
         "total_seconds": out.total_seconds,
         "config": serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
         "identity": ident.to_json(),
@@ -515,8 +932,8 @@ mod tests {
     use std::collections::BTreeMap;
     use crate::automesher::castellate::tests::box_soup;
     use crate::automesher::{
-        CastellationSpec, DistanceBand, DomainSpec, InputSpec, LayerSpec, OutputSpec, QualitySpec,
-        RefinementBand, RefinementSpec, SnapSpec, SurfaceInput,
+        BodySpec, CastellationSpec, DistanceBand, DomainSpec, InputSpec, LayerSpec, OutputSpec,
+        QualitySpec, RefinementBand, RefinementSpec, SnapSpec, SurfaceInput,
     };
     use crate::surface::Surface;
 
@@ -578,6 +995,84 @@ mod tests {
         (out, lines)
     }
 
+    /// `cube_config()` with the cube declared a body and no layers: the
+    /// default `layers.patches = ["cube"]` names no REGION patch after the
+    /// split (the cube region carries `cube_to_fluid` only), so a run with
+    /// layers on is refused at the layer stage - a later test pins that
+    /// refusal by name.
+    fn body_config() -> AutomeshConfig {
+        let mut cfg = cube_config();
+        cfg.castellation.bodies =
+            vec![BodySpec { name: "cube".to_string(), patches: vec!["cube".to_string()] }];
+        cfg.layers = LayerSpec::default();
+        cfg
+    }
+
+    /// The cube ON the cell planes: `[1, 2.5]^3` in a `[0,4]^3` domain at
+    /// level 1 - a 0.5 m lattice puts the cube exactly on cell faces, so the
+    /// body region is 3x3x3 cells with 54 interface faces, both sides.
+    fn planar_config() -> AutomeshConfig {
+        AutomeshConfig {
+            schema: None,
+            input: InputSpec {
+                surfaces: vec![SurfaceInput { path: "cube.stl".to_string(), name: None }],
+            },
+            domain: DomainSpec {
+                extent: [0.0, 4.0, 0.0, 4.0, 0.0, 4.0],
+                base_size: 1.0,
+                grading: [1.0; 3],
+            },
+            refinement: RefinementSpec {
+                levels: vec![RefinementBand {
+                    patch: "cube".to_string(),
+                    bands: vec![DistanceBand { distance: 0.0, level: 1 }],
+                    feature_level: 0,
+                }],
+                feature_angle_deg: 30.0,
+                max_level: 1,
+            },
+            castellation: CastellationSpec {
+                bodies: vec![BodySpec {
+                    name: "cube".to_string(),
+                    patches: vec!["cube".to_string()],
+                }],
+                ..CastellationSpec::default()
+            },
+            // The castellation keeps the cube ON the cell planes, so the
+            // interface already lies on the surface and snap has nothing to
+            // move - the default feature attraction and smoothing would
+            // still slide the interface points along the surface (their own
+            // gates hold, but the points leave the cell planes, which is
+            // all the layer extrusion reads: §92.13). This config turns
+            // that attraction off and keeps the walls snap-clean.
+            snap: SnapSpec {
+                feature_tolerance: 0.0,
+                smoothing_passes: 0,
+                ..SnapSpec::default()
+            },
+            layers: LayerSpec {
+                patches: vec!["fluid_to_cube".to_string(), "cube_to_fluid".to_string()],
+                n: 3,
+                first_thickness: 0.02,
+                normal_passes: 0,
+                min_thickness: 0.0,
+                ..LayerSpec::default()
+            },
+            quality: QualitySpec::default(),
+            output: OutputSpec {
+                case_dir: "out".to_string(),
+                name: "cube".to_string(),
+                patch_names: BTreeMap::new(),
+            },
+        }
+    }
+
+    /// `planar_config`'s surface: the same cube, wound outward, one patch.
+    fn planar_surface() -> Surface {
+        Surface::from_soup(box_soup([1.0; 3], [2.5; 3]), vec!["cube".to_string()])
+            .expect("surface")
+    }
+
     #[test]
     fn stage_parses_features_as_snap() {
         assert_eq!(Stage::parse("octree").unwrap(), Stage::Octree);
@@ -587,10 +1082,11 @@ mod tests {
         // §92.14: the feature attraction lives inside stage 4, so there is
         // no mesh between them to stop at.
         assert_eq!(Stage::parse("features").unwrap(), Stage::Snap);
+        assert_eq!(Stage::parse("split").unwrap(), Stage::Split);
         let err = Stage::parse("featur").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("featur"), "{msg}");
-        for spelling in ["octree", "castellate", "features", "snap", "layers"] {
+        for spelling in ["octree", "castellate", "features", "snap", "split", "layers"] {
             assert!(msg.contains(spelling), "{msg}");
         }
     }
@@ -602,7 +1098,10 @@ mod tests {
         let (out, lines) = run_recording(&cfg, &surf, None);
         assert_eq!(out.stopped_after, None);
         let names: Vec<&str> = out.stages.iter().map(|s| s.stage.name()).collect();
-        assert_eq!(names, ["octree", "castellate", "snap", "layers"]);
+        assert_eq!(names, ["octree", "castellate", "snap", "split", "layers"]);
+        // The no-body split is recorded and skipped, like an empty layer
+        // stage.
+        assert_eq!(out.stages[3].counts["skipped"], json!(true));
         for s in &out.stages {
             assert!(s.seconds >= 0.0, "{}: {}", s.stage.name(), s.seconds);
         }
@@ -611,16 +1110,20 @@ mod tests {
         // Every banner was emitted before its stage ran, and the elapsed
         // line of each stage follows its banner.
         assert!(
-            lines.iter().any(|l| l == "=== stage 1/4  octree ==="),
+            lines.iter().any(|l| l == "=== stage 1/5  octree ==="),
             "{lines:?}"
         );
         assert!(
             lines.iter().any(|l| l.starts_with("--- layers:")),
             "{lines:?}"
         );
+        assert!(
+            lines.iter().any(|l| l == "split: skipped - castellation.bodies is empty"),
+            "{lines:?}"
+        );
         assert_eq!(
             lines.iter().filter(|l| l.starts_with("=== stage")).count(),
-            4
+            5
         );
     }
 
@@ -726,14 +1229,15 @@ mod tests {
         );
         let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
 
-        // The four stages, in order, each with its own counts spliced in.
+        // The five stages, in order, each with its own counts spliced in.
         let stages = s["stages"].as_array().unwrap();
         let names: Vec<&str> =
             stages.iter().map(|v| v["stage"].as_str().unwrap()).collect();
-        assert_eq!(names, ["octree", "castellate", "snap", "layers"]);
+        assert_eq!(names, ["octree", "castellate", "snap", "split", "layers"]);
         assert!(stages[0].get("n_leaves").is_some(), "{}", stages[0]);
         assert!(stages[1].get("wall_faces").is_some(), "{}", stages[1]);
-        assert!(stages[3].get("n_layer_cells").is_some(), "{}", stages[3]);
+        assert!(stages[3].get("skipped").is_some(), "{}", stages[3]);
+        assert!(stages[4].get("n_layer_cells").is_some(), "{}", stages[4]);
 
         // The mesh block describes the WRITTEN mesh: the final names, after
         // (92.56), and the report's own cell count.
@@ -752,8 +1256,10 @@ mod tests {
         assert_eq!(summary_names, mesh_names);
         assert!(summary_names.iter().any(|n| n == "west"), "{summary_names:?}");
 
-        // A full run stops nowhere.
+        // A full run stops nowhere, and a no-body run wrote no layout: the
+        // split stage ran recorded-and-skipped.
         assert_eq!(s["stopped_after"], serde_json::Value::Null);
+        assert!(s["layout"].is_null(), "{}", s["layout"]);
         assert_eq!(s["tool"], "ofgpu-automesher");
         assert_eq!(s["config_path"], "cube.automesher.json");
         assert_eq!(s["surface"]["patches"].as_array().unwrap().len(), 1);
@@ -791,5 +1297,290 @@ mod tests {
         assert_eq!(s["mesh"]["n_cells"].as_u64().unwrap() as usize, out.quality.n_cells);
         let back: AutomeshConfig = serde_json::from_value(s["config"].clone()).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    /// M6 Run 2 requirement 1: the no-body full run is bit for bit what it
+    /// was - the mesh leaves the pipeline unchanged through the split stage
+    /// being recorded and skipped, and `out.layout` staying `None`.
+    #[test]
+    fn the_full_run_without_bodies_is_pinned() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        const PINNED: u64 = 0xaaab7b6052cce5be;
+        let v = crate::automesher::castellate::tests::mesh_fingerprint(&out.mesh);
+        eprintln!("fingerprint full-run-no-body = {v:#018x}");
+        assert_eq!(v, PINNED);
+        assert!(out.layout.is_none(), "a no-body run wrote no layout");
+    }
+
+    /// M6 Run 2 requirement 4: with a body declared the split stage runs,
+    /// the fluid is regions[0], the body follows it, every region passed
+    /// its own gate, and the run's single mesh is the FLUID's.
+    #[test]
+    fn a_declared_body_becomes_its_own_region() {
+        let cfg = body_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let lay = out.layout.as_ref().expect("a body run splits");
+        let names: Vec<&str> = lay.regions.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["fluid", "cube"]);
+        assert_eq!(lay.regions[0].kind, crate::cht::RegionKind::Fluid);
+        assert_eq!(lay.regions[1].kind, crate::cht::RegionKind::Solid);
+        for r in &lay.regions {
+            assert!(r.quality.passed(), "region \"{}\" failed its gate", r.name);
+        }
+        assert_eq!(lay.regions[1].quality.n_cells, 8);
+        assert_eq!(lay.interfaces.len(), 1);
+        assert_eq!(lay.interfaces[0].n_faces, 24);
+        let fluid_names: Vec<&str> =
+            lay.regions[0].mesh.patches.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            fluid_names,
+            ["xMin", "xMax", "yMin", "yMax", "zMin", "zMax", "fluid_to_cube"]
+        );
+        let cube_names: Vec<&str> =
+            lay.regions[1].mesh.patches.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(cube_names, ["cube_to_fluid"]);
+        // `out.mesh` is the fluid region, name for name, and the split
+        // stage's row counts the two regions.
+        let out_names: Vec<&str> =
+            out.mesh.patches.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(out_names, fluid_names);
+        assert_eq!(out.stages[3].counts["n_regions"], json!(2));
+    }
+
+    /// M6 Run 2 requirement 5: the written layout is §C's tree and passes
+    /// R1-R6 with bitwise-conformal interface pairs.
+    #[test]
+    fn the_layout_of_a_body_run_loads_and_pairs() {
+        let cfg = body_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let lay = out.layout.as_ref().expect("a body run splits");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut root = std::env::temp_dir();
+        root.push(format!("ofgpu-m6-{}-{nanos}", std::process::id()));
+        let dir = root.join("mesh");
+        let kinds: Vec<crate::cht::RegionKind> =
+            lay.regions.iter().map(|r| r.kind).collect();
+        let regions: Vec<(String, PolyMeshRaw)> = lay
+            .regions
+            .iter()
+            .map(|r| (r.name.clone(), r.mesh.clone()))
+            .collect();
+        let manifest = crate::io::regions::write_layout(&dir, &regions, &kinds, &lay.interfaces, None)
+            .expect("write_layout");
+        let loaded = crate::io::regions::load(&dir.join("regions.json"))
+            .expect("the written layout loads");
+        println!(
+            "pairing worsts: centroid {:.3e}, area {:.3e}, normal {:.3e}",
+            loaded.pairing[0].worst_centroid,
+            loaded.pairing[0].worst_area,
+            loaded.pairing[0].worst_normal
+        );
+        assert!(loaded.pairing[0].worst_centroid <= 1e-12);
+        assert!(loaded.pairing[0].worst_area <= 1e-12);
+        assert!(loaded.pairing[0].worst_normal <= 1e-12);
+        assert_eq!(loaded.manifest.regions[0].kind, "fluid");
+        assert_eq!(loaded.manifest.regions[1].kind, "solid");
+        assert_eq!(loaded.manifest.interfaces[0].faces, Some(24));
+        assert_eq!(manifest.regions.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// M6 Run 2 requirement 6: `-stopAfter split` stops with the layout and
+    /// no layers; `-stopAfter snap` stops with ONE mesh and no layout even
+    /// when bodies are declared - the split has not run.
+    #[test]
+    fn stopping_before_and_after_the_split() {
+        let cfg = body_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, Some(Stage::Snap));
+        assert_eq!(out.stopped_after, Some(Stage::Snap));
+        assert!(out.layout.is_none());
+        assert_eq!(out.stages.len(), 3);
+        // The kept body has no wall patch: the six domain patches only.
+        assert_eq!(out.mesh.patches.len(), 6);
+
+        let (out, _) = run_recording(&cfg, &surf, Some(Stage::Split));
+        assert_eq!(out.stopped_after, Some(Stage::Split));
+        assert!(out.layout.is_some());
+        assert_eq!(out.stages.len(), 4);
+        assert!(out.layout.as_ref().unwrap().regions[0].quality.passed());
+    }
+
+    /// M6 Run 2 requirement 7: (92.56) applies PER REGION on a split run - a
+    /// key renames the patch in every region that has it, a key no region
+    /// has is refused naming the regions' patch lists, and an interface
+    /// patch is never renamed (docs/10 §C R3).
+    #[test]
+    fn patch_names_apply_per_region_and_never_to_an_interface() {
+        let surf = cube_surface();
+        let mut cfg = body_config();
+        cfg.output.patch_names.insert("xMin".to_string(), "west".to_string());
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let lay = out.layout.as_ref().expect("a body run splits");
+        let fluid: Vec<&str> =
+            lay.regions[0].mesh.patches.iter().map(|p| p.name.as_str()).collect();
+        let cube: Vec<&str> =
+            lay.regions[1].mesh.patches.iter().map(|p| p.name.as_str()).collect();
+        assert!(fluid.contains(&"west"), "{fluid:?}");
+        assert!(!fluid.contains(&"xMin"), "{fluid:?}");
+        // The cube region has no box patch and is untouched.
+        assert_eq!(cube, ["cube_to_fluid"]);
+
+        let mut typo = body_config();
+        typo.output.patch_names.insert("xmin".to_string(), "west".to_string());
+        let err = run(&typo, &surf, None, &mut |_l: &str| {}).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("xmin"), "{msg}");
+        assert!(msg.contains("names no patch of any region"), "{msg}");
+
+        let mut iface = body_config();
+        iface
+            .output
+            .patch_names
+            .insert("fluid_to_cube".to_string(), "wall_cube".to_string());
+        let err = run(&iface, &surf, None, &mut |_l: &str| {}).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("fluid_to_cube"), "{msg}");
+        assert!(msg.contains("interface"), "{msg}");
+    }
+
+    /// M6 Run 2 requirement 8: with the cube ON the cell planes, both
+    /// regions grow 3 x 54 layer cells and the layered layout still pairs
+    /// bit for bit across the interface.
+    #[test]
+    fn layers_grow_on_both_sides_of_the_interface() {
+        let cfg = planar_config();
+        let surf = planar_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let lay = out.layout.as_ref().expect("a body run splits");
+        let rows = out.stages[4].counts["regions"].as_array().cloned().unwrap();
+        for (i, r) in lay.regions.iter().enumerate() {
+            assert!(r.quality.passed(), "region \"{}\" failed its gate", r.name);
+            let row = &rows[i];
+            println!("region \"{}\" layer row: {row}", r.name);
+            assert_eq!(row["n_layer_cells"], json!(3 * 54), "{row}");
+            for p in row["patches"].as_array().unwrap() {
+                assert!(
+                    p["dropped"].is_null(),
+                    "region \"{}\" dropped layers: {p}",
+                    r.name
+                );
+            }
+        }
+        // The layered layout still pairs bit for bit.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut root = std::env::temp_dir();
+        root.push(format!("ofgpu-m6-layers-{}-{nanos}", std::process::id()));
+        let dir = root.join("mesh");
+        let kinds: Vec<crate::cht::RegionKind> = lay.regions.iter().map(|r| r.kind).collect();
+        let regions: Vec<(String, PolyMeshRaw)> = lay
+            .regions
+            .iter()
+            .map(|r| (r.name.clone(), r.mesh.clone()))
+            .collect();
+        crate::io::regions::write_layout(&dir, &regions, &kinds, &lay.interfaces, None)
+            .expect("write_layout");
+        let loaded = crate::io::regions::load(&dir.join("regions.json"))
+            .expect("the layered layout loads");
+        println!(
+            "layered pairing worsts: centroid {:.3e}, area {:.3e}, normal {:.3e}",
+            loaded.pairing[0].worst_centroid,
+            loaded.pairing[0].worst_area,
+            loaded.pairing[0].worst_normal
+        );
+        assert!(loaded.pairing[0].worst_centroid <= 1e-12);
+        assert!(loaded.pairing[0].worst_area <= 1e-12);
+        assert!(loaded.pairing[0].worst_normal <= 1e-12);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// M6 Run 2 requirement 9: a `layers.patches` entry no region carries is
+    /// refused naming the regions' patch lists; an entry one region carries
+    /// grows layers THERE and the other region's row says skipped.
+    #[test]
+    fn a_layer_patch_that_no_region_has_is_refused() {
+        let surf = planar_surface();
+        // No region has the STL patch name: the split names are the layout's
+        // contract, and the refusal lists what each region does carry.
+        let mut bad = planar_config();
+        bad.layers.patches = vec!["cube".to_string()];
+        let err = run(&bad, &surf, None, &mut |_l: &str| {}).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cube"), "{msg}");
+        assert!(msg.contains("fluid_to_cube"), "{msg}");
+        assert!(msg.contains("cube_to_fluid"), "{msg}");
+
+        // Fluid side only: the fluid grows, the cube region is skipped.
+        let mut fluid_only = planar_config();
+        fluid_only.layers.patches = vec!["fluid_to_cube".to_string()];
+        let (out, _) = run_recording(&fluid_only, &surf, None);
+        let rows = out.stages[4].counts["regions"].as_array().cloned().unwrap();
+        assert_eq!(rows[0]["name"], json!("fluid"));
+        assert_eq!(rows[0]["n_layer_cells"], json!(3 * 54), "{}", rows[0]);
+        assert_eq!(rows[1]["name"], json!("cube"));
+        assert_eq!(rows[1]["skipped"], json!(true), "{}", rows[1]);
+
+        // Mirror: the cube side grows, the fluid region is skipped.
+        let mut cube_only = planar_config();
+        cube_only.layers.patches = vec!["cube_to_fluid".to_string()];
+        let (out, _) = run_recording(&cube_only, &surf, None);
+        let rows = out.stages[4].counts["regions"].as_array().cloned().unwrap();
+        assert_eq!(rows[0]["skipped"], json!(true), "{}", rows[0]);
+        assert_eq!(rows[1]["n_layer_cells"], json!(3 * 54), "{}", rows[1]);
+        for p in rows[1]["patches"].as_array().unwrap() {
+            println!("cube-side layer patch row: {p}");
+        }
+        assert!(
+            rows[1]["patches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["dropped"].is_null()),
+            "{}",
+            rows[1]
+        );
+    }
+
+    /// M6 Run 2 requirement 10: (92.57) gains `layout` - `null` on a no-body
+    /// run, the written layout's shape on a body run, with `mesh` and
+    /// `quality` the fluid region's.
+    #[test]
+    fn the_summary_carries_the_layout() {
+        let cfg = body_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let l = &s["layout"];
+        assert!(l.is_object(), "{l}");
+        assert_eq!(l["manifest"], json!("mesh/regions.json"));
+        assert_eq!(l["regions"].as_array().unwrap().len(), 2);
+        assert_eq!(l["regions"][0]["name"], json!("fluid"));
+        assert_eq!(l["regions"][1]["name"], json!("cube"));
+        assert_eq!(l["regions"][1]["quality"]["passed"], json!(true));
+        assert_eq!(l["interfaces"][0]["faces"], json!(24));
+        assert_eq!(
+            s["mesh"]["n_cells"].as_u64().unwrap(),
+            l["regions"][0]["quality"]["n_cells"].as_u64().unwrap()
+        );
+        // `config` round-trips, `bodies` included.
+        let back: AutomeshConfig = serde_json::from_value(s["config"].clone()).unwrap();
+        assert_eq!(back, cfg);
+        assert!(serde_json::to_string(&s["config"]).unwrap().contains("\"bodies\""));
     }
 }

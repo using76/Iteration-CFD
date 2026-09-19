@@ -6,7 +6,7 @@
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! `ofgpu-automesher` - this crate's own mesher, SPEC-LIT §92's hex-dominant
-//! path, all of it: §92.14's driver runs the four stages of (92.55) behind
+//! path, all of it: §92.14's driver runs the five stages of (92.55) behind
 //! one command, and this file is the command.
 //!
 //! ```text
@@ -24,13 +24,18 @@
 //!   the run writes `<case_dir>/constant/polyMesh` and
 //!   `<case_dir>/<name>_summary.json` only after the last stage returned
 //!   Ok, so a refusal - a failed gate, a bad `output.patch_names` map -
-//!   writes NOTHING and exits 1 (§92.14.4).
+//!   writes NOTHING and exits 1 (§92.14.4). With `castellation.bodies`
+//!   declared the run writes `<case_dir>/mesh/regions.json` and
+//!   `<case_dir>/mesh/<region>/polyMesh` per region (docs/10 §C, SPEC-LIT
+//!   §97) and no `constant/polyMesh`.
 //! - `-stopAfter STAGE`: (92.55)'s stop rule. The stages up to and
 //!   including STAGE run and the mesh that stage returned is written and
-//!   exits 0. STAGE is one of `octree`, `castellate`, `snap`, `layers`,
-//!   with `features` accepted as a spelling of `snap`: §92.12 folded the
-//!   feature attraction into snap's own loop, so no mesh exists between
-//!   them. A stopped run is not a way to get an ungated mesh out - every
+//!   exits 0. STAGE is one of `octree`, `castellate`, `snap`, `split`,
+//!   `layers`, with `features` accepted as a spelling of `snap`: §92.12
+//!   folded the feature attraction into snap's own loop, so no mesh exists
+//!   between them. A stopped run with bodies and `-stopAfter split` writes
+//!   the layout; one stopped at `snap` writes ONE mesh - the split has not
+//!   run. A stopped run is not a way to get an ungated mesh out - every
 //!   stop point has already passed the gate.
 //! - `-tag NAME`: this run's output is its own - the case directory becomes
 //!   `<output.case_dir>_<NAME>` and the name `<output.name>_<NAME>`,
@@ -70,7 +75,8 @@ use std::time::Instant;
 
 use ofgpu::automesher::{self, driver, identity, AutomeshConfig};
 use ofgpu::error::IoContext;
-use ofgpu::io::polymesh::{read_poly_mesh, write_poly_mesh_raw};
+use ofgpu::io::polymesh::{read_poly_mesh, write_poly_mesh_raw, PolyMeshRaw};
+use ofgpu::io::regions;
 use ofgpu::surface::{stl::read_stl, Surface};
 use ofgpu::{Error, Result, Scalar};
 
@@ -80,7 +86,7 @@ fn usage() {
                         [-runId ID] [-check [<caseDir>]] [-dryRun] [-schema]
   -stopAfter STAGE: the stop rule of SPEC-LIT §92.14 - the stages up to and
     including STAGE run and the mesh STAGE returned is written. STAGE is
-    octree, castellate, snap or layers; features is a spelling of snap.
+    octree, castellate, snap, split or layers; features is a spelling of snap.
   -tag NAME: this run's output is its own - the case directory and the mesh
     name each gain _NAME, so two runs of one config do not overwrite each
     other. NAME is a suffix, not a path.
@@ -92,6 +98,11 @@ fn usage() {
     next token exists, does not start with a dash, and the config positional
     has already been read; without it the config's own (tag-adjusted) case
     directory is checked. It measures and prints and does not write.
+    With `castellation.bodies` declared the run writes
+    <case_dir>/mesh/regions.json and <case_dir>/mesh/<region>/polyMesh per
+    region (docs/10 §C, SPEC-LIT §97) and no constant/polyMesh; -check on
+    such a case loads the layout, pairs its interfaces and gates every
+    region.
   -dryRun: everything up to the surface summary, then exit 0.
   -schema: the config's JSON Schema on stdout, no config read."
     );
@@ -244,11 +255,48 @@ fn run(args: &[String]) -> Result<()> {
 
 /// `-check <caseDir>`: §92.3's gate on a mesh that already exists, at
 /// `<caseDir>/constant/polyMesh`, measured against THIS config's thresholds.
-/// The run always prints the summary - the refusal a run most needs it is
-/// the one that used to lose it - and then the refusal, the report §92.3
-/// fixed the format of, as `Error::Mesh` when a gate failed, which `main`
-/// prints with exit status 1.
+/// A case holding `<caseDir>/mesh/regions.json` is a LAYOUT instead
+/// (docs/10 §C): it is loaded through `io::regions::load` - which checks
+/// R1-R6 and the index pairing - and every region is gated on its own; the
+/// interface pairing numbers are printed either way. The run always prints
+/// the summaries - the refusal a run most needs them is the one that used
+/// to lose them - and then the refusal, the report §92.3 fixed the format
+/// of, as `Error::Mesh` when a gate failed, which `main` prints with exit
+/// status 1.
 fn check_mode(cfg: &AutomeshConfig, case_dir: &Path) -> Result<()> {
+    let manifest = case_dir.join("mesh").join("regions.json");
+    if manifest.exists() {
+        println!(
+            "ofgpu-automesher: checking layout {} (SPEC-LIT §92.14.5, §97)",
+            manifest.display()
+        );
+        let lay = regions::load(&manifest)?;
+        let t = cfg.quality.thresholds();
+        let mut refused: Vec<String> = Vec::new();
+        for r in &lay.regions {
+            let kind = match r.kind {
+                ofgpu::cht::RegionKind::Fluid => "fluid",
+                ofgpu::cht::RegionKind::Solid => "solid",
+            };
+            println!("region \"{}\" ({}):", r.name, kind);
+            let rep = automesher::quality::measure(&r.raw, &t)?;
+            println!("{}", rep.summary());
+            if !rep.passed() {
+                refused.push(rep.refusal_text());
+            }
+        }
+        for p in &lay.pairing {
+            println!(
+                "interface {}: {} faces, worst centroid {:.3e}, area {:.3e}, \
+                 normal {:.3e}",
+                p.name, p.n_faces, p.worst_centroid, p.worst_area, p.worst_normal
+            );
+        }
+        if !refused.is_empty() {
+            return Err(Error::Mesh(refused.join("\n")));
+        }
+        return Ok(());
+    }
     println!(
         "ofgpu-automesher: checking {} (SPEC-LIT §92.14.5)",
         case_dir.display()
@@ -265,9 +313,10 @@ fn check_mode(cfg: &AutomeshConfig, case_dir: &Path) -> Result<()> {
 }
 
 /// The meshing path: everything the pipeline's front half does, then
-/// §92.14's driver through the four stages of (92.55), and on Ok the two
-/// writes - `constant/polyMesh` and (92.57)'s summary beside it. The config
-/// arrives with `output.case_dir`/`output.name` already tag-adjusted.
+/// §92.14's driver through the five stages of (92.55), and on Ok the
+/// writes - the layout when the split ran, else `constant/polyMesh` - and
+/// (92.57)'s summary beside them. The config arrives with
+/// `output.case_dir`/`output.name` already tag-adjusted.
 fn meshing_mode(
     cfg: &AutomeshConfig,
     config_path: &str,
@@ -304,7 +353,7 @@ fn meshing_mode(
     // run_automesher.cmd pipes the run into a log, so without it a stage
     // that takes forty minutes would put its banner on screen after it
     // returned instead of before it started.
-    let out = driver::run(cfg, &surf, stop, &mut |line| {
+    let mut out = driver::run(cfg, &surf, stop, &mut |line| {
         println!("{line}");
         let _ = std::io::stdout().flush();
     })?;
@@ -315,21 +364,60 @@ fn meshing_mode(
     // a mesh that left its stage through the gate.
     println!("{}", out.quality.summary());
     let case_dir = Path::new(&cfg.output.case_dir);
-    let poly_dir = case_dir.join("constant").join("polyMesh");
-    write_poly_mesh_raw(&poly_dir, &out.mesh)?;
-    let summary_path = case_dir.join(format!("{}_summary.json", cfg.output.name));
+    // Both are in-memory, so they are built before the write branch below
+    // takes `out.layout` apart - and the summary's `source` block can carry
+    // the identity the run computed.
     let ident = identity::MeshIdentity::new("ofgpu-automesher", case_dir, &cfg.output.name, run_id);
     let summary = driver::summary_json(cfg, config_path, &surf, &out, &ident);
+    let poly_dir = case_dir.join("constant").join("polyMesh");
+    if let Some(lay) = out.layout.take() {
+        // A run with declared bodies writes ONLY the layout (docs/10 §C,
+        // SPEC-LIT §97): `mesh/regions.json` and one polyMesh per region.
+        let dir = case_dir.join("mesh");
+        let kinds: Vec<ofgpu::cht::RegionKind> = lay.regions.iter().map(|r| r.kind).collect();
+        let region_meshes: Vec<(String, PolyMeshRaw)> =
+            lay.regions.into_iter().map(|r| (r.name, r.mesh)).collect();
+        let source = Some(serde_json::json!({
+            "tool": "ofgpu-automesher",
+            "config_path": config_path,
+            "identity": ident.to_json(),
+        }));
+        let manifest =
+            regions::write_layout(&dir, &region_meshes, &kinds, &lay.interfaces, source)?;
+        for (i, (name, raw)) in region_meshes.iter().enumerate() {
+            let n_cells = raw
+                .owner
+                .iter()
+                .chain(raw.neighbour.iter())
+                .copied()
+                .max()
+                .map_or(0, |m| m as usize + 1);
+            println!(
+                "ofgpu-automesher: wrote {} ({} cells, {})",
+                dir.join(name).join("polyMesh").display(),
+                n_cells,
+                manifest.regions[i].kind
+            );
+        }
+        println!(
+            "ofgpu-automesher: wrote {} ({} regions, {} interfaces)",
+            dir.join("regions.json").display(),
+            region_meshes.len(),
+            lay.interfaces.len()
+        );
+    } else {
+        write_poly_mesh_raw(&poly_dir, &out.mesh)?;
+        println!(
+            "ofgpu-automesher: wrote {} ({} cells)",
+            poly_dir.display(),
+            out.quality.n_cells
+        );
+    }
+    let summary_path = case_dir.join(format!("{}_summary.json", cfg.output.name));
     let text = serde_json::to_string_pretty(&summary).map_err(|e| {
         Error::Config(format!("summary {}: {e}", summary_path.display()))
     })?;
     std::fs::write(&summary_path, text).path(&summary_path)?;
-
-    println!(
-        "ofgpu-automesher: wrote {} ({} cells)",
-        poly_dir.display(),
-        out.quality.n_cells
-    );
     println!("ofgpu-automesher: wrote {}", summary_path.display());
     println!("ofgpu-automesher: total {:.1} s", t0.elapsed().as_secs_f64());
     Ok(())
