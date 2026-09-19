@@ -10,6 +10,7 @@ import json
 import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,66 @@ def write_open_stl(path):
              'vertex 1 0 0', 'vertex 0 1 0', 'endloop', 'endfacet', 'endsolid one']
     with open(path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
+
+
+RACECAR = os.path.join(os.path.dirname(GEOM_TOOL), '..', '..', 'cases', 'racecar.stl')
+
+
+def cube_tris(origin=(0, 0, 0)):
+    """The unit cube at origin as 12 outward triangles, two per face."""
+    ox, oy, oz = origin
+    p = lambda x, y, z: (ox + x, oy + y, oz + z)
+    return [
+        (p(0, 0, 0), p(0, 1, 0), p(1, 1, 0)), (p(0, 0, 0), p(1, 1, 0), p(1, 0, 0)),
+        (p(0, 0, 1), p(1, 0, 1), p(1, 1, 1)), (p(0, 0, 1), p(1, 1, 1), p(0, 1, 1)),
+        (p(0, 0, 0), p(1, 0, 0), p(1, 0, 1)), (p(0, 0, 0), p(1, 0, 1), p(0, 0, 1)),
+        (p(0, 1, 0), p(0, 1, 1), p(1, 1, 1)), (p(0, 1, 0), p(1, 1, 1), p(1, 1, 0)),
+        (p(0, 0, 0), p(0, 0, 1), p(0, 1, 1)), (p(0, 0, 0), p(0, 1, 1), p(0, 1, 0)),
+        (p(1, 0, 0), p(1, 1, 0), p(1, 1, 1)), (p(1, 0, 0), p(1, 1, 1), p(1, 0, 1)),
+    ]
+
+
+def _tri_normal(t):
+    (ax, ay, az), (bx, by, bz), (cx, cy, cz) = t
+    u, v = (bx - ax, by - ay, bz - az), (cx - ax, cy - ay, cz - az)
+    n = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+    m = math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
+    return (0.0, 0.0, 0.0) if m == 0 else (n[0] / m, n[1] / m, n[2] / m)
+
+
+def write_stl_ascii(path, blocks):
+    lines = []
+    for name, tris in blocks:
+        lines.append('solid %s' % name)
+        for t in tris:
+            lines.append('facet normal %s' % ' '.join('%.17g' % v for v in _tri_normal(t)))
+            lines.append('outer loop')
+            for v in t:
+                lines.append('vertex %s' % ' '.join('%.17g' % c for c in v))
+            lines.append('endloop')
+            lines.append('endfacet')
+        lines.append('endsolid %s' % name)
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
+def write_stl_binary(path, tris, name):
+    with open(path, 'wb') as f:
+        f.write(name.encode('ascii', 'replace')[:80].ljust(80, b'\0'))
+        f.write(struct.pack('<I', len(tris)))
+        for t in tris:
+            f.write(struct.pack('<3f', 0.0, 0.0, 0.0))
+            for v in t:
+                f.write(struct.pack('<3f', *v))
+            f.write(struct.pack('<H', 0))
+
+
+def flip(tri):
+    return (tri[0], tri[2], tri[1])
+
+
+def repair(*args, expect=0):
+    return run('repair', *args, expect=expect)
 
 
 def run(*args, expect=0):
@@ -440,7 +501,261 @@ def test_edit_transforms(top):
                       for nm in ('t', 'r', 's', 'm', 'f')), flush=True)
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms)
+def test_repair_weld(top):
+    d = work(top, 'repair_weld')
+    eps = 1e-8
+    shifted = []
+    for t, tri in enumerate(cube_tris()):
+        row = []
+        for k, v in enumerate(tri):
+            i = 3 * t + k
+            row.append((v[0] + eps * ((i % 5) - 2), v[1] + eps * ((i % 7) - 3),
+                        v[2] + eps * ((i % 3) - 1)))
+        shifted.append(tuple(row))
+    src = os.path.join(d, 'weld.stl')
+    write_stl_ascii(src, [('cube', shifted)])   # %.17g keeps every 1e-8 shift;
+    out = os.path.join(d, 'weld_r.stl')         # float32 bytes could not carry them
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'), '--binary')
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['format_in'] == 'stl-ascii' and rep['format_out'] == 'stl-binary', rep
+    assert rep['before']['open_edges'] == 36 and rep['before']['non_manifold_edges'] == 0, rep['before']
+    w = rep['weld']
+    assert w['points_bit_exact'] == 36 and w['points_welded'] == 8 and w['merged'] == 28, w
+    assert w['max_move'] <= 1e-7 and rep['degenerate_dropped'] == 0, (w, rep['degenerate_dropped'])
+    assert rep['after']['closed'] is True and rel(rep['after']['volume'], 1.0) <= 1e-6, rep['after']
+    assert os.path.getsize(out) == 84 + 50 * 12, os.path.getsize(out)
+    run('info', out, '--json', os.path.join(d, 'i.json'))
+    k = load(os.path.join(d, 'i.json'))['discrete'][0]
+    assert k['closed'] is True and rel(k['volume'], 1.0) <= 1e-6, k
+
+
+def test_repair_hole3(top):
+    d = work(top, 'repair_hole3')
+    src = os.path.join(d, 'hole3.stl')
+    write_stl_ascii(src, [('cube', cube_tris()[:-1])])
+    out = os.path.join(d, 'hole3_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before'] == {'open_edges': 3, 'non_manifold_edges': 0, 'closed': False}, rep['before']
+    assert rep['patches'] == ['cube'], rep['patches']
+    assert rep['holes']['filled'] == 1 and rep['holes']['filled_triangles'] == 1, rep['holes']
+    assert rep['triangles_out'] == 12 and rep['after']['closed'] is True, rep
+    assert rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+    text = open(out, encoding='utf-8').read()
+    assert 'solid cube' in text and 'endsolid cube' in text, text[:200]
+    run('info', out, '--json', os.path.join(d, 'i.json'))
+    k = load(os.path.join(d, 'i.json'))['discrete'][0]
+    assert k['closed'] is True and rel(k['volume'], 1.0) <= 1e-9, k
+
+
+def test_repair_flip(top):
+    d = work(top, 'repair_flip')
+    tris = cube_tris()
+    tris[5] = flip(tris[5])
+    src = os.path.join(d, 'flip.stl')
+    write_stl_binary(src, tris, 'flipcube')
+    out = os.path.join(d, 'flip_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before']['open_edges'] == 0 and rep['before']['non_manifold_edges'] == 3, rep['before']
+    o = rep['orientation']
+    assert set(o) == {'reoriented_triangles', 'left_alone', 'left_alone_reason',
+                      'reseeded_patches', 'flipped_components'}, o
+    assert o['reoriented_triangles'] == 1 and o['left_alone'] == 0, o
+    assert o['left_alone_reason'] == [] and o['flipped_components'] == 0, o
+    assert isinstance(o['reseeded_patches'], int) and o['reseeded_patches'] >= 0, o
+    assert rep['after']['closed'] is True and rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+
+
+def test_repair_inward(top):
+    d = work(top, 'repair_inward')
+    src = os.path.join(d, 'in.stl')
+    write_stl_binary(src, [flip(t) for t in cube_tris()], 'inward')
+    out = os.path.join(d, 'in_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'), '--ascii')
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before']['closed'] is True, rep['before']
+    assert rep['orientation']['reoriented_triangles'] == 0 and \
+        rep['orientation']['flipped_components'] == 1, rep['orientation']
+    assert rel(rep['after']['volume'], 1.0) <= 1e-9 and rep['format_out'] == 'stl-ascii', rep
+    run('info', src, '--json', os.path.join(d, 'i0.json'))
+    k = load(os.path.join(d, 'i0.json'))['discrete'][0]
+    assert k['closed'] is True and abs(k['volume'] + 1.0) <= 1e-9, k
+    run('info', out, '--json', os.path.join(d, 'i.json'))
+    k = load(os.path.join(d, 'i.json'))['discrete'][0]
+    assert k['closed'] is True and rel(k['volume'], 1.0) <= 1e-9, k
+
+
+def test_repair_patch_identity(top):
+    d = work(top, 'repair_patch_identity')
+    src = os.path.join(d, 'two.stl')
+    write_stl_ascii(src, [('a', cube_tris((0, 0, 0))), ('b', cube_tris((3, 0, 0)))])
+    out = os.path.join(d, 'two_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['n_components'] == 2 and rep['patches'] == ['a', 'b'], rep
+    assert [c['patch'] for c in rep['components']] == ['a', 'b'], rep['components']
+    assert rep['after']['closed'] is True and rel(rep['after']['volume'], 2.0) <= 1e-9, rep['after']
+    text = open(out, encoding='utf-8').read()
+    assert 'solid a' in text and 'solid b' in text, text[:200]
+    run('info', out, '--json', os.path.join(d, 'i.json'))
+    disc = load(os.path.join(d, 'i.json'))['discrete']
+    assert [e['name'] for e in disc] == ['a', 'b'] and all(e['closed'] for e in disc), disc
+
+
+def test_repair_reports_unrepairable(top):
+    d = work(top, 'repair_unrepairable')
+    src = os.path.join(d, 'mix.stl')
+    b = [t for t in cube_tris((3, 0, 0)) if not all(abs(v[2] - 1.0) < 1e-12 for v in t)]
+    write_stl_ascii(src, [('a', cube_tris()), ('b', b)])
+    out = os.path.join(d, 'mix_r.stl')
+    p = repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['holes']['unfilled'] == [
+        {'edges': 4, 'reason': 'loop of 4 edges: Run 1 fills 3-edge loops only'}], rep['holes']
+    assert rep['components'][0]['closed'] is True and rep['components'][1]['closed'] is False, rep['components']
+    assert rep['components'][1]['open_edges'] == 4, rep['components']
+    assert rep['after']['volume'] is None and rep['triangles_out'] == 22, rep
+    assert 'component 1 (b, 10 triangle(s)): 4 open, 0 non-manifold' in p.stdout, p.stdout
+    src2 = os.path.join(d, 'fin.stl')
+    v0, v1, _ = cube_tris()[0]
+    write_stl_binary(src2, cube_tris() + [(v0, v1, (0.5, 0.5, 2.0))], 'fincube')
+    p = repair(src2, '--out', os.path.join(d, 'fin_r.stl'), '--json', os.path.join(d, 'r2.json'))
+    rep = load(os.path.join(d, 'r2.json'))
+    assert rep['n_components'] == 1 and rep['before']['non_manifold_edges'] == 1, rep
+    assert rep['after']['non_manifold_edges'] == 1 and rep['after']['open_edges'] == 2, rep['after']
+    assert rep['after']['closed'] is False and rep['orientation']['flipped_components'] == 0, rep
+    assert rep['holes']['filled'] == 0 and len(rep['holes']['unfilled']) == 1, rep['holes']
+    assert rep['holes']['unfilled'][0]['reason'].startswith('boundary vertex with'), rep['holes']
+    assert rep['triangles_out'] == 13, rep
+    assert 'component 0 (' in p.stdout and ': 2 open, 1 non-manifold' in p.stdout, p.stdout
+
+
+def test_repair_racecar(top):
+    d = work(top, 'repair_racecar')
+    out = os.path.join(d, 'racecar_r.stl')
+    repair(RACECAR, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['format_in'] == 'stl-binary' and rep['triangles_in'] == 1040, rep
+    assert rep['patches'] == ['racecar'], rep['patches']
+    assert rep['before'] == {'open_edges': 0, 'non_manifold_edges': 0, 'closed': True}, rep['before']
+    w = rep['weld']
+    assert w['points_raw'] == 3120 and w['points_bit_exact'] == 564 and \
+        w['merged'] == 0 and w['max_move'] == 0.0, w
+    assert rep['degenerate_dropped'] == 0 and rep['n_components'] == 22, rep
+    assert rep['orientation']['reoriented_triangles'] == 0 and \
+        rep['orientation']['flipped_components'] == 4, rep['orientation']
+    flipped = sorted(c['n_triangles'] for c in rep['components'] if c['flipped'])
+    assert flipped == [20, 36, 36, 348], flipped
+    assert rep['after']['closed'] is True and \
+        rel(rep['after']['volume'], 2.7319858267646144e-3) <= 1e-6, rep['after']
+    assert close3(rep['bbox'][:3], [0.1, 0.0015, 0.39044], 1e-5), rep['bbox']
+    assert rel(rep['diagonal'], 0.70532065) <= 1e-6, rep['diagonal']
+    assert os.path.getsize(out) == 84 + 50 * 1040, os.path.getsize(out)
+    run('info', out, '--json', os.path.join(d, 'i.json'))
+    k = load(os.path.join(d, 'i.json'))['discrete'][0]
+    assert k['closed'] is True and k['volume'] > 0, k
+    run('info', RACECAR, '--json', os.path.join(d, 'i0.json'))
+    k = load(os.path.join(d, 'i0.json'))['discrete'][0]
+    assert abs(k['volume'] + 7.887749871e-04) <= 1e-9, k['volume']
+
+
+def test_repair_refusals(top):
+    d = work(top, 'repair_refusals')
+    bad = os.path.join(d, 'x.step')
+    open(bad, 'wb').close()
+    p = repair(bad, expect=2)
+    assert "unsupported extension '.step'" in p.stderr, p.stderr
+    src = os.path.join(d, 'cube.stl')
+    write_stl_binary(src, cube_tris(), 'cube')
+    p = repair(src, '--out', src, '--json', os.path.join(d, 'r.json'), expect=2)
+    assert 'refusing to overwrite' in p.stderr, p.stderr
+    two = os.path.join(d, 'two.stl')
+    write_stl_ascii(two, [('a', cube_tris()), ('b', cube_tris((3, 0, 0)))])
+    p = repair(two, '--out', os.path.join(d, 'o.stl'), '--binary', expect=2)
+    assert 'has 2: a, b' in p.stderr, p.stderr
+    p = repair(os.path.join(d, 'missing.stl'), expect=2)
+    assert 'does not exist' in p.stderr, p.stderr
+    one = os.path.join(d, 'one.stl')
+    write_open_stl(one)
+    p = repair(one, '--out', os.path.join(d, 'one_r.stl'), '--json', os.path.join(d, 'r3.json'))
+    rep = load(os.path.join(d, 'r3.json'))
+    assert rep['n_components'] == 1 and rep['holes']['filled'] == 1, rep
+    assert rep['after']['closed'] is True and abs(rep['after']['volume']) <= 1e-12, rep['after']
+    deg = os.path.join(d, 'deg.stl')
+    write_stl_binary(deg, cube_tris() + [((0, 0, 0), (1, 0, 0), (2, 0, 0))], 'deg')
+    repair(deg, '--out', os.path.join(d, 'deg_r.stl'), '--json', os.path.join(d, 'r4.json'))
+    rep = load(os.path.join(d, 'r4.json'))
+    assert rep['degenerate_dropped'] == 1 and rep['triangles_out'] == 12 and \
+        rep['after']['closed'] is True, rep
+    p = repair(src, '--weld', '-1', expect=2)
+    assert '--weld must be >= 0' in p.stderr, p.stderr
+    p = repair(src, '--max-hole-edges', '2', expect=2)
+    assert '--max-hole-edges must be >= 3' in p.stderr, p.stderr
+
+
+def test_repair_fill_guard(top):
+    """A fin glued on one cube edge (that edge used three times) must not
+    make non-manifold worse: the clean 3-edge hole away from the fin fills,
+    the fin's dead-end chain is reported, and after.nm == before.nm.  The
+    walk only ever closes loops of single-use edges, so the guard's
+    skip-with-reason branch is unreachable today; it stands against a
+    future walk change.  (A tetrahedron base cannot host this: every face
+    shares a vertex with the fin edge, and the pinched hole never fills.)"""
+    d = work(top, 'repair_fill_guard')
+    tris = cube_tris()[:-1]
+    tris.append(((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (-0.5, 0.5, 0.5)))
+    src = os.path.join(d, 'guard.stl')
+    write_stl_ascii(src, [('cube', tris)])
+    out = os.path.join(d, 'guard_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before'] == {'open_edges': 5, 'non_manifold_edges': 1,
+                             'closed': False}, rep['before']
+    assert rep['holes']['filled'] == 1 and rep['holes']['filled_triangles'] == 1, rep['holes']
+    assert len(rep['holes']['unfilled']) == 1, rep['holes']
+    assert rep['holes']['unfilled'][0]['reason'].startswith('boundary vertex with'), rep['holes']
+    assert rep['after']['non_manifold_edges'] == rep['before']['non_manifold_edges'], rep['after']
+    assert rep['after']['open_edges'] == 2 and rep['after']['closed'] is False, rep['after']
+    assert rep['degenerate_dropped'] == 0 and rep['triangles_out'] == 13, rep
+
+
+def test_repair_orient_cost(top):
+    """A fin triangle glued to one tetrahedron edge in the same direction as
+    a face: that edge is used three ways, so the BFS never crosses it, so
+    the fin is reached only by a fresh seed and is counted in
+    `reseeded_patches`.  The tetrahedron keeps its outward winding - the
+    output's signed 6*volume stays +1 (the fin holds the origin, so it adds
+    nothing to the sum) - and non_manifold_edges is exactly the input's."""
+    d = work(top, 'repair_orient_cost')
+    A, B, C, D = (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+    E = (0.5, 0.5, -1.0)
+    tris = [(A, C, B), (A, B, D), (A, D, C), (B, C, D), (A, B, E)]
+    src = os.path.join(d, 'tet.stl')
+    write_stl_ascii(src, [('tet', tris)])
+    out = os.path.join(d, 'tet_r.stl')
+    p = repair(src, '--out', out, '--json', os.path.join(d, 'r.json'), '--ascii')
+    rep = load(os.path.join(d, 'r.json'))
+    assert p.returncode == 0, p
+    assert rep['before'] == {'open_edges': 2, 'non_manifold_edges': 1,
+                             'closed': False}, rep['before']
+    assert rep['after']['non_manifold_edges'] == \
+        rep['before']['non_manifold_edges'], rep['after']
+    assert rep['after']['open_edges'] == 2 and rep['after']['closed'] is False, rep['after']
+    assert rep['orientation']['reseeded_patches'] >= 1, rep['orientation']
+    assert rep['orientation']['reoriented_triangles'] == 0, rep['orientation']
+    assert rep['triangles_out'] == 5, rep
+    text = open(out, encoding='utf-8').read()
+    vs = [tuple(float(x) for x in l.split()[1:4])
+          for l in text.splitlines() if l.startswith('vertex ')]
+    vol6 = sum(va[0] * (vb[1] * vc[2] - vb[2] * vc[1])
+               + va[1] * (vb[2] * vc[0] - vb[0] * vc[2])
+               + va[2] * (vb[0] * vc[1] - vb[1] * vc[0])
+               for va, vb, vc in zip(vs[0::3], vs[1::3], vs[2::3]))
+    assert abs(vol6 - 1.0) <= 1e-12, vol6    # the tet's faces are still outward
+
+
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost)
 
 
 def main(argv=None):

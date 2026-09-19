@@ -8,6 +8,7 @@ which `geom_tool.py` imports for the `edit` subcommand.
 ```
 python tools/geom/geom_tool.py info   <file> [--json <out.json>] [--scale S]
 python tools/geom/geom_tool.py export <file> --out <path> [--scale S] [--stl-size M]
+python tools/geom/geom_tool.py repair <file.stl> [--out <path.stl>] [--json <out.json>] [--weld REL] [--max-hole-edges N] [--ascii | --binary]
 ```
 
 | extension | read by | default `--scale` (file units → metres) | export |
@@ -65,7 +66,11 @@ contract: two solids of 1.0 and 2.0 m³ to 1e-9; the STEP/BREP/XAO round trips
 (12 → 11 and 11 → 11 surfaces, names carried by the sidecar); the sidecar name
 rules (swapped tags, moved centroids); IGES surfaces only (11 faces, 15 m²);
 the STL read-back (a closed cube of volume 1.0 to 1e-6, an open triangle
-null); the refusals. Seconds, no input files needed.
+null); the refusals. The repair tests build their own STLs the same way —
+the perturbed cube (every corner copy shifted by up to 3.8e-8), the holed
+cubes (one triangle and one whole face missing), the flipped and inward
+cubes, the two-solid and fin cubes — and run on the tracked
+`cases/racecar.stl`. Seconds, no input files needed.
 
 ## Known limits
 
@@ -131,3 +136,82 @@ tool all the same. The millimetre STEP export is exact: the model goes out
 through a BREP and back in at `Geometry.OCCScaling = 1000` — the old
 `occ.dilate` dance re-approximated curved faces (a sphere lost 4.4e-4 of its
 volume).
+
+## repair
+
+`repair` (stl_repair.py, also run standalone as
+`python tools/geom/stl_repair.py <file.stl> ...`) repairs an STL to watertight
+WHERE IT CAN BE and reports what it could not, writing a NEW file — the Rust
+reader's weld stays bit-exact (*DESIGN*, SPEC-LIT §23.1), so an epsilon weld
+must live outside the files that reader is pointed at. The order: the
+bit-exact weld is measured first (`before` — what
+`Surface::require_closed` would print for the input today), then duplicate
+corners are welded at `--weld` × the bounding-box diagonal (default 1e-6, the
+house convention; `0` = bit-exact only), degenerate triangles are dropped,
+each vertex-connected component is oriented by propagation across manifold
+edges and every closed shell is flipped outward, boundary loops of three
+edges are filled with one triangle, and the result is written with normals
+recomputed from the winding.
+
+Flags: `--out PATH` (without it the tool only reports), `--json OUT` (the
+report, never stdout), `--weld REL`, `--max-hole-edges N` (default 32),
+`--ascii | --binary` (default: the input's format; binary refuses a
+multi-`solid` file). Report keys: `file, format_in, out, format_out, units,
+bbox, diagonal, triangles_in, triangles_out, degenerate_dropped, weld
+{tol_rel, tol_abs, points_raw, points_bit_exact, points_welded, merged,
+max_move}, orientation {reoriented_triangles, left_alone, left_alone_reason,
+reseeded_patches, flipped_components}, holes
+{max_hole_edges, filled, filled_triangles, unfilled[]}, before {}, after
+{open_edges, non_manifold_edges, closed, volume}, n_components, components[]
+{index, patch, n_triangles, open_edges, non_manifold_edges, closed, volume,
+flipped}, patches`. Stdout carries six lines (the summary, the weld, the
+orientation, the holes, the after-state, the written file) plus one line per
+open component when the result is not closed. Exit 0 whenever a report was
+produced — an unclosed result is reported, not an error; refusals (missing
+file, a non-`.stl` extension, `--out` equal to the input, `--weld < 0`,
+`--max-hole-edges < 3`, `--binary` on a multi-patch file) exit 2 before
+anything is written; a file that is neither binary nor ASCII STL, or carries
+a non-finite coordinate, exits 1.
+
+Limits: the weld tolerance is a geometry EDIT — the tool prints `max_move`,
+the largest distance any corner moved, and the user decides; near pairs can
+CHAIN (`a-b` and `b-c` merge `a` and `c` at up to twice the tolerance), and
+the representative is always a coordinate the file already had. Run 1 fills
+3-edge loops only; every larger loop is named in `holes.unfilled`. Every
+closed shell is oriented outward — a cavity's shell is flipped outward too,
+and no cavity is detected. Non-manifold edges are reported, never cut. The
+licence rule: the tool imports numpy (BSD-3) and scipy (BSD-3) only; gmsh
+(GPL-2.0-or-later) stays a separate program used by `info`/`export`/`edit`
+whose files are exchanged and whose source is never read; pymeshlab (GPL-3)
+is not used; no mesh-repair implementation of any licence was read.
+
+A fill is applied only if it leaves every one of the new triangle's three
+undirected edges used at most twice: the uses are counted once before the
+walk, a running tally follows the accepted fills, and a loop whose fill
+would push an edge to three uses is reported in `holes.unfilled` as
+`filling it would make N edge(s) non-manifold` instead of being filled.
+After the repair the defects are recounted, and a result carrying MORE
+non-manifold edges than the input refuses the write — exit 3,
+`the fill raised non_manifold_edges from A to B - this is a bug, report
+it` — before anything is written.
+
+The orientation pass counts two things separately.  `left_alone` is the
+number of flips it refused because performing them would have turned a
+two-triangle edge into a same-direction pair, named in `left_alone_reason`;
+a triangle that was merely never reached is not left alone.
+`reseeded_patches` is the number of extra seeds the orientation walk
+needed because a component's remainder was not reached from the previous
+seed; a re-seeded patch is oriented consistently within itself but not
+necessarily with the patch before it.
+
+Worked example, measured 2026-09-19 on the F1 body that session could not
+close (`c42-f1.stl`, 237,482 triangles): before 13,854 open / 810
+non-manifold edges; 1,874 degenerate triangles dropped, 0 points welded;
+the orientation pass reorients 10 triangles, refuses 23 flips
+(`left_alone`) and takes 3,976 extra seeds (`reseeded_patches`); the
+stages run input 13,854 open / 810 non-manifold, weld 13,854 / 810,
+orient 13,854 / 802 — the flips lower non-manifold by 8 — and fill
+13,707 / 802 (49 three-edge loops fill); exit 0.  The file is still not
+closed: the remaining open edges are holes of more than three edges,
+listed in `holes.unfilled`, so `ofgpu-generate-mesh` still refuses it
+without `-permissive`.
