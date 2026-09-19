@@ -251,7 +251,203 @@ def test_band_and_skip(top):
     assert doc['wake']['used'] == 1
 
 
-TESTS = (test_usage, test_refusals, test_area_vectors, test_drag_closed_form, test_band_and_skip)
+# ---------------------------------------------------------------- fast_patch
+
+FAST_PATCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fast_patch.py')
+
+
+def run_fast(*args, expect=0):
+    t = time.time()
+    p = subprocess.run([sys.executable, FAST_PATCH] + list(args), capture_output=True,
+                       text=True, encoding='utf-8', errors='replace')
+    print('  [%s] fast_patch %s  %.1f s' % ('ok' if p.returncode == expect else 'FAIL',
+                                            ' '.join(args), time.time() - t), flush=True)
+    assert p.returncode == expect, (list(args), p.returncode, p.stderr[-400:])
+    return p
+
+
+def read_text(path):
+    with open(path, encoding='utf-8', newline='') as f:
+        return f.read()
+
+
+def list_scalar(vals):
+    """A counted scalar list even at length 1 - the writer collapses a single
+    entry to `uniform`, and the swallow test needs the list form to survive."""
+    return 'nonuniform List<scalar> \n%d\n(\n%s)\n;\n' % (len(vals), ''.join('%s\n' % v for v in vals))
+
+
+def fast_field(obj, internal, patches):
+    """One 0/ field file in the writer's layout: a third keyword (inletValue)
+    where a patch carries one, nonuniform lists left uncollapsed."""
+    vec = obj == 'U'
+    ent = vector_entry if vec else scalar_entry
+    parts = [foam_header('volVectorField' if vec else 'volScalarField', '0', obj),
+             'dimensions      %s;\n' % ('[0 1 -1 0 0 0 0]' if vec else '[0 0 0 0 0 0 0]'),
+             'internalField   %s\n' % ent(internal),
+             'boundaryField\n{\n']
+    for name, typ, *kvs in patches:
+        parts.append('    %s\n    {\n        type            %s;\n' % (name, typ))
+        for key, val in kvs:
+            parts.append('        %-16s%s' % (key, val if isinstance(val, str) else ent(val)))
+        parts.append('    }\n')
+    parts.append('}\n')
+    return ''.join(parts) + FOOTER
+
+
+def write_fvsolution(path):
+    """system/fvSolution, byte for byte as src/blockgen.rs write_system writes
+    it - the Rust literal's \\x20 is one space, keywords padded to 16 columns."""
+    def block(fld, prec, tol, rel, it):
+        return ('    %s\n    {\n        solver          PBiCGStab;\n'
+                '        preconditioner  %s;\n        tolerance       %s;\n'
+                '        relTol          %s;\n        maxIter         %s;\n    }\n\n'
+                % (fld, prec, tol, rel, it))
+    blocks = [block('p', 'DIC', '1e-08', '0.01', '1000'),
+              block('Phi', 'DIC', '1e-12', '0', '5000'),
+              block('U', 'diagonal', '1e-08', '0.1', '200'),
+              block('T', 'diagonal', '1e-08', '0.01', '200'),
+              block('k', 'diagonal', '1e-08', '0.01', '200'),
+              block('epsilon', 'diagonal', '1e-08', '0.01', '200'),
+              block('omega', 'diagonal', '1e-08', '0.01', '200'),
+              block('nuTilda', 'diagonal', '1e-08', '0.01', '200')]
+    body = ('solvers\n{\n' + ''.join(blocks[:-1]) + blocks[-1][:-1] + '}\n\n'
+            'SIMPLE\n{\n    nNonOrthogonalCorrectors 0;\n}\n\n'
+            "// U 0.7 with p 0.3 is what OpenFOAM's buoyant cases use, and the two\n"
+            '// summing to one is the usual rule of thumb behind it.\n'
+            'relaxationFactors\n{\n    fields\n    {\n        p               0.3;\n    }\n\n'
+            '    equations\n    {\n'
+            '        U               0.7;\n        T               0.7;\n        k               0.7;\n'
+            '        epsilon         0.7;\n        omega           0.7;\n        nuTilda         0.7;\n    }\n}')
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(foam_header('dictionary', 'system', 'fvSolution') + body + FOOTER)
+
+
+def write_fast_case(top, name):
+    """The fixture in the generator's layout - no polyMesh, fast_patch never
+    reads one: two-cell fields, physicalProperties and fvSolution. Written LF
+    (newline='') so the counted-list assertion and the refusal byte-compare
+    stay exact."""
+    case = work(top, name)
+    for d in ('0', 'constant', 'system'):
+        os.makedirs(os.path.join(case, d))
+
+    def put(rel, text):
+        with open(os.path.join(case, *rel.split('/')), 'w', encoding='utf-8', newline='') as f:
+            f.write(text)
+
+    put('0/U', fast_field('U', [[1, 0, 0], [2, 0, 0]],
+                          [('inlet', 'fixedValue', ('value', [1, 0, 0])),
+                           ('outlet', 'inletOutlet', ('inletValue', [0, 0, 0]), ('value', [1, 0, 0])),
+                           ('car', 'noSlip'), ('walls', 'noSlip')]))
+    put('0/p', fast_field('p', [3, 4],
+                          [('inlet', 'zeroGradient'),
+                           ('outlet', 'fixedValue', ('value', list_scalar([0]))),
+                           ('car', 'zeroGradient'), ('walls', 'zeroGradient')]))
+    put('0/rho', fast_field('rho', 1.2, [('inlet', 'zeroGradient'), ('outlet', 'zeroGradient'),
+                                         ('car', 'zeroGradient'), ('walls', 'zeroGradient')]))
+    put('0/k', fast_field('k', 0.375,
+                          [('inlet', 'fixedValue', ('value', 0.375)),
+                           ('outlet', 'inletOutlet', ('inletValue', 0.375), ('value', 0.375)),
+                           ('car', 'kqRWallFunction', ('value', 0.375)),
+                           ('walls', 'kqRWallFunction', ('value', 0.375))]))
+    put('0/epsilon', fast_field('epsilon', 0.1,
+                                [('inlet', 'fixedValue', ('value', 0.1)),
+                                 ('outlet', 'inletOutlet'),
+                                 ('car', 'epsilonWallFunction', ('value', 0.1)),
+                                 ('walls', 'epsilonWallFunction', ('value', 0.1))]))
+    put('constant/physicalProperties',
+        foam_header('dictionary', 'constant', 'physicalProperties')
+        + 'viscosityModel  constant;\n\nnu              [0 2 -1 0 0 0 0] 1e-05;\n' + FOOTER)
+    write_fvsolution(os.path.join(case, 'system', 'fvSolution'))
+    return case
+
+
+def test_fast_usage(top):
+    p = run_fast(expect=2)
+    assert 'usage' in p.stderr, p.stderr
+
+
+def test_fast_patch_counts(top):
+    """The fixture run: every recorded count in the original's order, the
+    epsilon kqRWallFunction row at exactly 0 without failing, 0/rho gone and
+    every expected text in the patched files (the 0/p outlet's counted value
+    is the swallow test - it must survive the re.S internalField rewrite)."""
+    case = write_fast_case(top, 'fast_counts')
+    p = run_fast(case)
+    want = [('0/U', 'internalField', 1), ('0/U', 'inlet', 1),
+            ('0/p', 'internalField', 1),
+            ('0/k', 'internalField', 1), ('0/k', 'inlet', 1), ('0/k', 'kqRWallFunction', 2),
+            ('0/epsilon', 'internalField', 1), ('0/epsilon', 'inlet', 1),
+            ('0/epsilon', 'kqRWallFunction', 0),
+            ('constant/physicalProperties', 'nu', 1),
+            ('system/fvSolution', 'PBiCGStab tol', 7), ('system/fvSolution', 'p relTol', 1),
+            ('system/fvSolution', 'p maxIter', 1), ('system/fvSolution', 'relax p', 1),
+            ('system/fvSolution', 'relax U', 1)]
+    got = [ln for ln in p.stdout.splitlines() if 'hit(s)' in ln]
+    assert got == ['fast_patch: %s %s: %d hit(s)' % r for r in want], (got, p.stdout)
+    assert 'fast_patch: 0/epsilon kqRWallFunction: 0 hit(s)' in p.stdout, p.stdout
+    assert p.stdout.rstrip().endswith('fast-mode patch done: relTol 0.05, p maxIter 200, U=83.3333 m/s')
+    assert not os.path.isfile(os.path.join(case, '0', 'rho'))
+    checks = [('0/U', 'internalField   uniform (83.3333 0 0);'),
+              ('0/U', 'value           uniform (83.3333 0 0);'),
+              ('0/U', 'inletValue      uniform (0 0 0);'),
+              ('0/p', 'internalField   uniform 0;'),
+              ('0/p', 'nonuniform List<scalar> \n1\n(\n0\n)\n;'),
+              ('0/k', 'internalField   uniform 4.1667;'),
+              ('0/epsilon', 'internalField   uniform 18.632;'),
+              ('0/epsilon', 'value           uniform 18.632;'),
+              ('constant/physicalProperties', 'nu              [0 2 -1 0 0 0 0] 1.5e-05;')]
+    for rel, needle in checks:
+        assert needle in read_text(os.path.join(case, *rel.split('/'))), rel
+    k = read_text(os.path.join(case, '0', 'k'))
+    assert k.count('value           uniform 4.1667;') == 3, k
+    e = read_text(os.path.join(case, '0', 'epsilon'))
+    assert 'epsilonWallFunction' in e and e.count('value           uniform 0.1;') == 2, e
+    fvs = read_text(os.path.join(case, 'system', 'fvSolution'))
+    assert fvs.count('tolerance       1e-06;') == 7 and 'tolerance       1e-08;' not in fvs, fvs
+    assert 'tolerance       1e-12;\n        relTol          0;\n        maxIter         5000;' in fvs, fvs
+    assert 'tolerance       1e-06;\n        relTol          0.05;\n        maxIter         200;' in fvs, fvs
+    assert 'tolerance       1e-06;\n        relTol          0.1;' in fvs, fvs
+    assert 'p               0.25;' in fvs and 'U               0.5;' in fvs and 'T               0.7;' in fvs, fvs
+
+
+def test_fast_refusal_untouched(top):
+    """A required row with no hit refuses by name and writes nothing: every
+    file's bytes are what they were, and the stale rho survives. A missing
+    0/U refuses with the path as given."""
+    case = write_fast_case(top, 'fast_refuse')
+    names = ('0/U', '0/p', '0/rho', '0/k', '0/epsilon',
+             'constant/physicalProperties', 'system/fvSolution')
+    u = os.path.join(case, '0', 'U')
+    renamed = read_text(u).replace('    inlet\n', '    inflow\n')
+    with open(u, 'w', encoding='utf-8', newline='') as f:
+        f.write(renamed)
+    before = {n: read_text(os.path.join(case, *n.split('/'))) for n in names}
+    p = run_fast(case, expect=1)
+    assert 'fast_patch: no match in 0/U for inlet' in p.stderr, p.stderr
+    for n in names:
+        assert read_text(os.path.join(case, *n.split('/'))) == before[n], n
+    assert os.path.isfile(os.path.join(case, '0', 'rho'))
+    empty = work(top, 'fast_missing')
+    p = run_fast(empty, expect=1)
+    assert 'fast_patch: missing file %s' % os.path.join(empty, '0', 'U') in p.stderr, p.stderr
+
+
+def test_fast_idempotent(top):
+    """The second run exits 0: the rows that match only the un-patched
+    literals accept their own output, and rho stays gone."""
+    case = write_fast_case(top, 'fast_twice')
+    run_fast(case)
+    assert not os.path.isfile(os.path.join(case, '0', 'rho'))
+    p = run_fast(case)
+    assert 'fast_patch: system/fvSolution PBiCGStab tol: 0 hit(s)' in p.stdout, p.stdout
+    assert 'fast_patch: system/fvSolution p maxIter: 0 hit(s)' in p.stdout, p.stdout
+    assert not os.path.isfile(os.path.join(case, '0', 'rho'))
+
+
+TESTS = (test_usage, test_refusals, test_area_vectors, test_drag_closed_form, test_band_and_skip,
+         test_fast_usage, test_fast_patch_counts, test_fast_refusal_untouched, test_fast_idempotent)
 
 
 def main(argv=None):
