@@ -208,6 +208,9 @@ a { color: var(--accent); }
 
 /* ---- viewer tab ----------------------------------------------------------- */
 .viewer-tab { flex: 1; min-height: 0; position: relative; background: var(--bg-panel); }
+.viewer-tab.split { display: flex; }
+.viewer-pane { flex: 1; min-width: 0; position: relative; }
+.viewer-tab.split .viewer-pane.focused { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* ---- residual chart ------------------------------------------------------- */
 .residuals { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--bg-panel); }

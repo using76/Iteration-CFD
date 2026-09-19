@@ -5,9 +5,10 @@
 // same void. Commands this web app can genuinely apply are applied here;
 // everything else is refused immediately with UNSUPPORTED so the model can
 // tell the operator the truth instead of waiting.
-import type { ClientMsg, UiCommand, UiSelection, UiState } from '@cfd/shared'
+import type { ClientMsg, UiCommand, UiSelection, UiState, ViewId } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
 import type { ProbeOutcome, ViewerTool, ViewportRect } from '../viewer'
+import { linkCameras } from '../viewer/api/cameraLink'
 import { actions, activeCasePath } from './actions'
 import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
 import type { useSessionStore } from '../state/sessionStore'
@@ -50,6 +51,18 @@ const partResult = (err: string | null): { ok: true } | { ok: false; error: stri
 
 function unsupported(type: string, why: string): { ok: false; error: string } {
   return { ok: false, error: `UNSUPPORTED (${type}): ${why}` }
+}
+
+/** The one-way camera link between the split halves; null while they are free. */
+let unlinkCameras: (() => void) | null = null
+function dropLink(): void {
+  unlinkCameras?.()
+  unlinkCameras = null
+}
+/** The focused half leads; a re-link replaces the old subscription entirely. */
+function relink(leader: ViewId): void {
+  dropLink()
+  unlinkCameras = linkCameras(getViewerApi(leader), getViewerApi(leader === 'A' ? 'B' : 'A'))
 }
 
 type UiToolName = 'select' | 'move' | 'pan' | 'box' | 'probe'
@@ -139,6 +152,15 @@ export function createUiBridge(deps: UiBridgeDeps) {
       connection: s.connection === 'online' ? 'connected' : s.connection,
       locale: u.locale,
       compareRunId: (() => { const r = u.tabs.find((t) => t.kind === 'residuals'); return r && r.kind === 'residuals' ? (r.compareRunId ?? null) : null })(),
+      views: u.viewSplit
+        ? {
+            split: true,
+            focused: u.focusedView,
+            camerasLinked: u.camerasLinked,
+            datasetA: getViewerApi('A').getState().datasetId,
+            datasetB: getViewerApi('B').getState().datasetId,
+          }
+        : null,
     }
   }
 
@@ -433,6 +455,37 @@ export function createUiBridge(deps: UiBridgeDeps) {
         if (cmd.runId) deps.subscribeRun(cmd.runId)
         return { ok: true }
       }
+      case 'split_view':
+        if (cmd.on) {
+          u.openViewerTab()
+          u.setViewSplit(true)
+        } else {
+          dropLink()
+          u.setViewSplit(false)
+        }
+        return { ok: true }
+      case 'focus_view': {
+        if (!u.viewSplit) return unsupported('focus_view', 'the viewport is not split; send split_view true first')
+        u.setFocusedView(cmd.view)
+        if (u.camerasLinked) relink(cmd.view)
+        return { ok: true }
+      }
+      case 'open_result_in_view': {
+        if (cmd.view === 'B' && !u.viewSplit) u.setViewSplit(true)
+        u.openViewerTab()
+        const r = await getViewerApi(cmd.view).execute({ type: 'load', path: cmd.path, timeIndex: cmd.timeIndex ?? 'last', field: null })
+        return r.ok ? { ok: true } : { ok: false, error: r.error?.message ?? 'the result could not be opened' }
+      }
+      case 'link_cameras':
+        if (!u.viewSplit) return unsupported('link_cameras', 'the viewport is not split; send split_view true first')
+        if (cmd.on) {
+          relink(u.focusedView)
+          u.setCamerasLinked(true)
+        } else {
+          dropLink()
+          u.setCamerasLinked(false)
+        }
+        return { ok: true }
       case 'show_overlay':
       case 'set_centerline':
       case 'select_step':

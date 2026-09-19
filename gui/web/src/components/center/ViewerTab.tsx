@@ -14,6 +14,9 @@ export function ViewerTab({ active }: { active: boolean }) {
   const runs = useSessionStore((s) => s.runs)
   const activeRunId = useUiStore((s) => s.activeRunId)
   const openResidualsTab = useUiStore((s) => s.openResidualsTab)
+  const viewSplit = useUiStore((s) => s.viewSplit)
+  const focusedView = useUiStore((s) => s.focusedView)
+  const setFocusedView = useUiStore((s) => s.setFocusedView)
   const run = useMemo(() => pickActiveRun(sortRuns(runs), activeRunId), [runs, activeRunId])
 
   useEffect(() => {
@@ -37,8 +40,19 @@ export function ViewerTab({ active }: { active: boolean }) {
   }, [run])
 
   return (
-    <div className="viewer-tab" data-testid="viewer-tab">
-      <Viewer3D overlay={overlay} locale={locale} onOpenResiduals={() => openResidualsTab(run?.id ?? null)} />
+    <div className={`viewer-tab${viewSplit ? ' split' : ''}`} data-testid="viewer-tab">
+      <div
+        className={`viewer-pane${viewSplit && focusedView === 'A' ? ' focused' : ''}`}
+        data-view="A"
+        onMouseDown={() => viewSplit && setFocusedView('A')}
+      >
+        <Viewer3D view="A" overlay={overlay} locale={locale} onOpenResiduals={() => openResidualsTab(run?.id ?? null)} />
+      </div>
+      {viewSplit ? (
+        <div className={`viewer-pane${focusedView === 'B' ? ' focused' : ''}`} data-view="B" onMouseDown={() => setFocusedView('B')}>
+          <Viewer3D view="B" overlay={null} locale={locale} />
+        </div>
+      ) : null}
     </div>
   )
 }

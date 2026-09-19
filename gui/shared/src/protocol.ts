@@ -720,6 +720,8 @@ export const UiStateSchema = z.object({
   locale: z.enum(['ko', 'en']).nullish(),
   /** The run compare_run overlaid on the residual chart; null or absent = no overlay. */
   compareRunId: z.string().nullish(),
+  /** The split viewport (split_view / focus_view / link_cameras); null or absent = one viewport. */
+  views: z.object({ split: z.boolean(), focused: ViewIdSchema, camerasLinked: z.boolean(), datasetA: z.string().nullable(), datasetB: z.string().nullable() }).nullish(),
 })
 export type UiState = z.infer<typeof UiStateSchema>
 

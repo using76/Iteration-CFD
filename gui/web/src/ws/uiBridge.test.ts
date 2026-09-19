@@ -26,6 +26,7 @@ const fake = {
   pixels: [] as [number, number][],
   noImage: false,
   state: null as unknown as FakeViewerState,
+  listeners: new Set<(s: FakeViewerState) => void>(),
   pixelOutcome: null as unknown as ProbeOutcome,
   pointOutcome: null as unknown as ProbeOutcome,
 }
@@ -43,7 +44,14 @@ const fakeApi = {
     }
   },
   getState: () => fake.state,
-  subscribe: () => () => {},
+  subscribe: (fn: (s: FakeViewerState) => void) => {
+    fake.listeners.add(fn)
+    return () => fake.listeners.delete(fn)
+  },
+  emit: (next: FakeViewerState) => {
+    fake.state = next
+    for (const l of fake.listeners) l(next)
+  },
   isMounted: () => fake.mounted,
   setBaseUrl: () => {},
   setTool: (tool: ViewerTool) => {
@@ -59,7 +67,51 @@ const fakeApi = {
   probePoint: () => fake.pointOutcome,
 }
 
-vi.mock('../viewer', () => ({ getViewerApi: () => fakeApi, setViewerApi: () => {} }))
+// View B: the second viewport half. Same shape as fakeApi, its own state,
+// recorder and listener set, so the split-viewport commands can prove which
+// half a command landed on.
+const fakeB = {
+  mounted: true,
+  toolNow: 'select' as ViewerTool,
+  calls: [] as unknown[],
+  tools: [] as string[],
+  pixels: [] as [number, number][],
+  state: null as unknown as FakeViewerState,
+  listeners: new Set<(s: FakeViewerState) => void>(),
+}
+
+const fakeApiB = {
+  execute: async (cmd: unknown) => {
+    fakeB.calls.push(cmd)
+    const c = cmd as { type: string; projection?: 'perspective' | 'orthographic' }
+    if (c.type === 'setCamera' && c.projection) fakeB.state.camera.projection = c.projection
+    return { ok: true, state: fakeB.state, error: null, image: null }
+  },
+  getState: () => fakeB.state,
+  subscribe: (fn: (s: FakeViewerState) => void) => {
+    fakeB.listeners.add(fn)
+    return () => fakeB.listeners.delete(fn)
+  },
+  isMounted: () => fakeB.mounted,
+  setBaseUrl: () => {},
+  setTool: (tool: ViewerTool) => {
+    fakeB.tools.push(tool)
+    fakeB.toolNow = tool
+  },
+  getTool: () => fakeB.toolNow,
+  viewport: () => (fakeB.mounted ? { left: 100, top: 50, width: 800, height: 600 } : null),
+  probePixel: (x: number, y: number) => {
+    fakeB.pixels.push([x, y])
+    return { ok: false, code: 'NO_VIEWER', message: 'view B has no probe outcome in this test' } as ProbeOutcome
+  },
+  probePoint: () => ({ ok: false, code: 'NO_VIEWER', message: 'view B has no probe outcome in this test' } as ProbeOutcome),
+  emit: (next: FakeViewerState) => {
+    fakeB.state = next
+    for (const l of fakeB.listeners) l(next)
+  },
+}
+
+vi.mock('../viewer', () => ({ getViewerApi: (view: 'A' | 'B' = 'A') => (view === 'B' ? fakeApiB : fakeApi), setViewerApi: () => {} }))
 vi.mock('./actions', () => ({ actions: { setSettings: () => true, openSession: () => true }, activeCasePath: () => null }))
 vi.mock('../api/rest', () => ({ api: { geometrySave: vi.fn(), geometryEdit: vi.fn() }, ApiError: class extends Error {} }))
 
@@ -124,6 +176,18 @@ function resetFake(): void {
   }
   fake.pixelOutcome = { ok: true, hit: { cell: 42, value: 1.5, field: 'U', center: [1, 2, 3] } }
   fake.pointOutcome = { ok: false, code: 'NO_STRUCTURED_GRID', message: 'channel (demo) has no structured grid (vtu); a world point cannot be located - probe by fx,fy, x,y or at:"center"' }
+  fake.listeners = new Set()
+  fakeB.mounted = true
+  fakeB.toolNow = 'select'
+  fakeB.calls = []
+  fakeB.tools = []
+  fakeB.pixels = []
+  fakeB.state = {
+    camera: { position: [10, 10, 10], target: [0, 0, 0], projection: 'perspective' },
+    datasetId: 'dsB', datasetName: 'channel (demo)', field: 'U', time: null,
+    colormap: 'viridis', range: null, representation: 'surface',
+  }
+  fakeB.listeners = new Set()
 }
 
 function harness(tabs: (GeoTab | ResTab)[] = []) {
@@ -141,6 +205,9 @@ function harness(tabs: (GeoTab | ResTab)[] = []) {
     assistantVisible: false,
     activeRunId: null as string | null,
     locale: 'en' as const,
+    viewSplit: false,
+    focusedView: 'A' as 'A' | 'B',
+    camerasLinked: false,
     openGeometryTab: vi.fn(),
     openViewerTab: vi.fn(),
     setActiveRun(runId: string | null) {
@@ -156,6 +223,20 @@ function harness(tabs: (GeoTab | ResTab)[] = []) {
       const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
       putResTab({ id: 'residuals', kind: 'residuals', runId: prev ? prev.runId : ui.activeRunId, compareRunId: runId })
       ui.activeTabId = 'residuals'
+    },
+    setViewSplit(on: boolean) {
+      if (on) ui.viewSplit = true
+      else {
+        ui.viewSplit = false
+        ui.focusedView = 'A'
+        ui.camerasLinked = false
+      }
+    },
+    setFocusedView(view: 'A' | 'B') {
+      ui.focusedView = view
+    },
+    setCamerasLinked(on: boolean) {
+      ui.camerasLinked = on
     },
   }
   const session = { problems: {}, connection: 'online', addNote: vi.fn(), runs: {} as Record<string, unknown> }
@@ -196,9 +277,9 @@ beforeEach(() => {
 describe('the four geometry edit commands', () => {
   it('an unlisted command is still refused by name', async () => {
     const h = harness([])
-    const r = await h.run({ type: 'split_view', on: true })
+    const r = await h.run({ type: 'show_overlay', what: 'axes', on: true })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('UNSUPPORTED (split_view): this screen does not implement it')
+    expect(r.error).toBe('UNSUPPORTED (show_overlay): this screen does not implement it')
   })
 
   it('without a geometry tab the four commands refuse and the snapshot has no geometry', async () => {
@@ -497,5 +578,79 @@ describe('compare_run', () => {
     const r = await h.run({ type: 'compare_run', runId: 'r_1' })
     expect(r.ok).toBe(false)
     expect(r.error).toBe('UNSUPPORTED (compare_run): run "r_1" is the run the chart already follows; pick another or follow_run first')
+  })
+})
+
+describe('the split viewport', () => {
+  it('split_view true opens the viewer tab and reports views', async () => {
+    const h = harness([])
+    const r = await h.run({ type: 'split_view', on: true })
+    expect(r.ok).toBe(true)
+    expect(h.ui.openViewerTab).toHaveBeenCalled()
+    expect(r.state.views).toEqual({ split: true, focused: 'A', camerasLinked: false, datasetA: 'ds1', datasetB: 'dsB' })
+    const off = await h.run({ type: 'split_view', on: false })
+    expect(off.ok).toBe(true)
+    expect(off.state.views).toBeNull()
+  })
+
+  it('open_result_in_view B loads on the B api only', async () => {
+    const h = harness([])
+    const r = await h.run({ type: 'open_result_in_view', view: 'B', path: 'cases/plume.vtu' })
+    expect(r.ok).toBe(true)
+    expect(fakeB.calls).toEqual([{ type: 'load', path: 'cases/plume.vtu', timeIndex: 'last', field: null }])
+    expect(fake.calls.some((c) => (c as { type: string }).type === 'load')).toBe(false)
+    expect(h.ui.viewSplit).toBe(true)
+    expect(h.ui.openViewerTab).toHaveBeenCalled()
+    expect(r.state.views!.split).toBe(true)
+  })
+
+  it('link_cameras true mirrors A\'s camera into B', async () => {
+    const h = harness([])
+    await h.run({ type: 'split_view', on: true })
+    const r = await h.run({ type: 'link_cameras', on: true })
+    expect(r.ok).toBe(true)
+    expect(h.ui.camerasLinked).toBe(true)
+    fakeApi.emit({ ...fake.state, camera: { position: [1, 2, 3], target: [0, 0, 0], projection: 'orthographic' } })
+    expect(fakeB.calls).toContainEqual({ type: 'setCamera', preset: null, position: [1, 2, 3], target: [0, 0, 0], projection: 'orthographic' })
+    expect(fake.calls.some((c) => (c as { type: string }).type === 'setCamera')).toBe(false)
+  })
+
+  it('focus_view B re-links with B as leader', async () => {
+    const h = harness([])
+    await h.run({ type: 'split_view', on: true })
+    await h.run({ type: 'link_cameras', on: true })
+    const r = await h.run({ type: 'focus_view', view: 'B' })
+    expect(r.ok).toBe(true)
+    expect(h.ui.focusedView).toBe('B')
+    // the re-link makes B the leader: B's current pose is pushed into A once
+    const pushed = fake.calls.filter((c) => (c as { type: string }).type === 'setCamera')
+    expect(pushed).toEqual([{ type: 'setCamera', preset: null, position: [10, 10, 10], target: [0, 0, 0], projection: 'perspective' }])
+    fakeApiB.emit({ ...fakeB.state, camera: { position: [4, 5, 6], target: [0, 1, 0], projection: 'perspective' } })
+    expect(fake.calls).toContainEqual({ type: 'setCamera', preset: null, position: [4, 5, 6], target: [0, 1, 0], projection: 'perspective' })
+  })
+
+  it('focus_view and link_cameras refuse when not split', async () => {
+    const h = harness([])
+    const f = await h.run({ type: 'focus_view', view: 'B' })
+    expect(f.ok).toBe(false)
+    expect(f.error).toBe('UNSUPPORTED (focus_view): the viewport is not split; send split_view true first')
+    const l = await h.run({ type: 'link_cameras', on: true })
+    expect(l.ok).toBe(false)
+    expect(l.error).toBe('UNSUPPORTED (link_cameras): the viewport is not split; send split_view true first')
+  })
+
+  it('split_view false unlinks and clears views', async () => {
+    const h = harness([])
+    await h.run({ type: 'split_view', on: true })
+    await h.run({ type: 'link_cameras', on: true })
+    const r = await h.run({ type: 'split_view', on: false })
+    expect(r.ok).toBe(true)
+    expect(r.state.views).toBeNull()
+    expect(h.ui.viewSplit).toBe(false)
+    expect(h.ui.focusedView).toBe('A')
+    expect(h.ui.camerasLinked).toBe(false)
+    const before = fakeB.calls.length
+    fakeApi.emit({ ...fake.state, camera: { position: [9, 9, 9], target: [0, 0, 0], projection: 'perspective' } })
+    expect(fakeB.calls).toHaveLength(before)
   })
 })

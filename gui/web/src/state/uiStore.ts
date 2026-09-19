@@ -1,7 +1,7 @@
 // Layout and preference state, persisted to localStorage (versioned).
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { Locale } from '@cfd/shared'
+import type { Locale, ViewId } from '@cfd/shared'
 
 export type Theme = 'light' | 'dark'
 export type ActivityView = 'explorer' | 'search' | 'scm' | 'run' | 'extensions' | 'cfd'
@@ -38,6 +38,9 @@ export interface UiState {
   settingsOpen: boolean
   cursor: { line: number; col: number } | null
   composerPrefill: { text: string; nonce: number } | null
+  viewSplit: boolean
+  focusedView: ViewId
+  camerasLinked: boolean
 }
 
 export interface UiActions {
@@ -57,6 +60,9 @@ export interface UiActions {
   openGeometryTab(path: string): void
   openResidualsTab(runId: string | null): void
   setCompareRun(runId: string | null): void
+  setViewSplit(on: boolean): void
+  setFocusedView(view: ViewId): void
+  setCamerasLinked(on: boolean): void
   openDiffTab(id: string, path: string, toolUseId: string | null): void
   closeTab(id: string): void
   closeOtherTabs(id: string): void
@@ -103,6 +109,9 @@ const INITIAL: UiState = {
   settingsOpen: false,
   cursor: null,
   composerPrefill: null,
+  viewSplit: false,
+  focusedView: 'A',
+  camerasLinked: false,
 }
 
 export function fileTabId(path: string): string {
@@ -209,6 +218,15 @@ export const useUiStore = create<UiStore>()(
           const tab: Tab = { id: 'residuals', kind: 'residuals', runId: primary, compareRunId: runId }
           return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals' }
         })
+      },
+      setViewSplit(on) {
+        set(on ? { viewSplit: true } : { viewSplit: false, focusedView: 'A', camerasLinked: false })
+      },
+      setFocusedView(view) {
+        set({ focusedView: view })
+      },
+      setCamerasLinked(on) {
+        set({ camerasLinked: on })
       },
       openDiffTab(id, path, toolUseId) {
         get().openTab({ id, kind: 'diff', path, toolUseId })
