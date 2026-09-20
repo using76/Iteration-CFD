@@ -559,6 +559,8 @@ fn count_label(n: usize) -> Label {
 mod tests {
     use super::*;
     use crate::mesh::PatchKind;
+    use crate::mesh::refined::refined_core;
+    use crate::reference::{dilu_apply, dilu_factorise, CpuLdu};
     use crate::types::Vec3;
 
     fn box_mesh(n: [usize; 3]) -> HostMesh {
@@ -651,5 +653,110 @@ mod tests {
         let c = Colouring::greedy(&g);
         assert!(c.is_valid(&g));
         assert_eq!(c.n_colours, 3);
+    }
+
+    #[cfg(not(feature = "single"))]
+    const TWIN_TOL: f64 = 1e-12;
+    #[cfg(feature = "single")]
+    const TWIN_TOL: f64 = 1e-4;
+
+    /// The GATE of §21.1: the twin and the device, three meshes, symmetric
+    /// and asymmetric. The kernel GATHERS a cell's row over the cell-to-face
+    /// CSR; the twin SCATTERS faces - two traversals of one definition - so
+    /// the agreement is round-off and never bitwise. `1e-12` RELATIVE is this
+    /// repository's number for one device operation against its host twin.
+    /// None of the meshes is cyclic: coupled `boundary_coeffs` are not
+    /// factorised on either side, so a cyclic mesh would compare two
+    /// different operators.
+    #[test]
+    fn the_host_twin_matches_the_device_on_three_meshes() {
+        let Ok(gpu) = Gpu::new(0) else { return };
+
+        let refined = match refined_core([4, 4, 4], Vec3::new(0.25, 0.25, 0.25), 0.3, 1) {
+            Ok(r) => r.mesh,
+            Err(e) => {
+                println!("  refined_core([4, 4, 4], ...) failed ({e}); falling back to [8, 8, 8]");
+                refined_core([8, 8, 8], Vec3::new(0.125, 0.125, 0.125), 0.25, 1)
+                    .expect("refined core fallback")
+                    .mesh
+            }
+        };
+        let meshes = [
+            ("hex 5x4x3", box_mesh([5, 4, 3])),
+            ("flat 12x9x1", box_mesh([12, 9, 1])),
+            ("refined 4^3", refined),
+        ];
+
+        for (tag, m) in meshes {
+            let nc = m.n_cells;
+            let nf = m.n_internal_faces;
+            let g = Adjacency::of(&m);
+            let col = Colouring::greedy(&g);
+            assert!(col.is_valid(&g));
+
+            for symmetric in [true, false] {
+                // Off-diagonals that vary face to face, and a strictly
+                // dominant positive diagonal, so the factorisation never
+                // breaks down and the safe reciprocal never fires here.
+                let upper: Vec<Scalar> =
+                    (0..nf).map(|f| -(1.0 + 0.4 * ((f as Scalar) * 0.7).sin())).collect();
+                let lower: Vec<Scalar> = if symmetric {
+                    upper.clone()
+                } else {
+                    (0..nf).map(|f| -(1.0 + 0.4 * ((f as Scalar) * 1.3).cos())).collect()
+                };
+                let mut row = vec![0.0 as Scalar; nc];
+                for f in 0..nf {
+                    row[m.owner[f] as usize] += upper[f].abs();
+                    row[m.neighbour[f] as usize] += lower[f].abs();
+                }
+                let diag: Vec<Scalar> = row.iter().map(|s| 1.0 + 1.05 * s).collect();
+                // Host: the twin.
+                let mut a_h = CpuLdu::new(&m);
+                a_h.diag = diag.clone();
+                a_h.upper = upper.clone();
+                a_h.lower = lower.clone();
+                let want_rd = dilu_factorise(&a_h, &m, &col, symmetric);
+                let x: Vec<Scalar> =
+                    (0..nc).map(|c| 1.0 + 0.5 * ((0.913 * c as Scalar) + 0.37).sin()).collect();
+                let mut want_y = x.clone();
+                dilu_apply(&mut want_y, &want_rd, &a_h, &m, &col);
+
+                // Device: the SAME colouring - that is the contract.
+                let gm = GpuMesh::upload(&gpu, &m).expect("upload mesh");
+                let mut a_d = GpuLduMatrix::new(&gpu, &gm).expect("ldu matrix");
+                a_d.zero(&gpu).expect("zero");
+                gpu.write(&mut a_d.diag, &diag).expect("write diag");
+                gpu.write(&mut a_d.upper, &upper).expect("write upper");
+                gpu.write(&mut a_d.lower, &lower).expect("write lower");
+                let mc = MultiColour::from_colouring(&gpu, &g, &col).expect("multicolour");
+                let mut r_diag: DevBuf<Scalar> = gpu.zeros(nc).expect("zeros");
+                mc.factorise(&gpu, &mut r_diag, &a_d, &gm, symmetric).expect("factorise");
+                let mut y = gpu.upload(&x).expect("upload x");
+                mc.apply(&gpu, &mut y, &r_diag, &a_d, &gm).expect("apply");
+                gpu.sync().expect("sync");
+                let got_rd = gpu.download(&r_diag).expect("download rD");
+                let got_y = gpu.download(&y).expect("download y");
+
+                let rd_max = want_rd.iter().fold(0.0 as Scalar, |w, v| w.max(v.abs()));
+                let y_max = want_y.iter().fold(0.0 as Scalar, |w, v| w.max(v.abs()));
+                let rd_err = got_rd.iter().zip(want_rd.iter()).map(|(g, w)| (g - w).abs())
+                    .fold(0.0 as Scalar, |a, v| a.max(v))
+                    / rd_max;
+                let y_err = got_y.iter().zip(want_y.iter()).map(|(g, w)| (g - w).abs())
+                    .fold(0.0 as Scalar, |a, v| a.max(v))
+                    / y_max;
+                assert!((rd_err as f64) <= TWIN_TOL, "{tag} symmetric={symmetric}: rD {rd_err:e}");
+                assert!(
+                    (y_err as f64) <= TWIN_TOL,
+                    "{tag} symmetric={symmetric}: M^-1 x {y_err:e}"
+                );
+                println!(
+                    "  {tag:<14} symmetric={symmetric:<5} {nc} cells, {} colours, \
+                     rD {rd_err:.2e}, M^-1 x {y_err:.2e}",
+                    col.n_colours
+                );
+            }
+        }
     }
 }

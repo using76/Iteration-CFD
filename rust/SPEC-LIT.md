@@ -1990,6 +1990,46 @@ already held, plus one reciprocal-diagonal array.
 one, in fewer iterations, and the iteration count must not change when the
 colour ordering changes.
 
+### 21.1 The host twin, and what its disagreement would mean
+
+`src/reference.rs` carries a second implementation of the factorisation above,
+written to the statement of §21 rather than to the kernel. It exists because a
+gather kernel checked against a gather mirror measures the compiler and not the
+arithmetic: the mirror in `src/solver.rs`'s tests walks the same cell→face CSR
+the kernel walks, in the same order, so a mistake in the traversal is invisible
+to it. The twin instead SCATTERS, which is `src/reference.rs`'s rule for every
+loop in the file: for each colour in turn it visits **faces**, `0` to
+`n_internal_faces`, and writes into both of the cells a face joins.
+
+Two things are therefore measurable that were not before.
+
+| what must hold | why | where |
+|---|---|---|
+| `diag(M) = diag(A)` | it is the equation that defines `Dt`, and it is a property of the factorisation alone | `reference.rs`, host only |
+| the forward and backward sweeps compose to `M^-1` | the forward sweep solves `(Dt + L) w = x` and the backward one `(Dt + U) y = Dt w`; nothing else makes the pair an inverse | `reference.rs`, host only |
+| device `rD` and device `M^-1 x` equal the twin's | two different traversals of the same definition | `precon.rs`, one GPU test |
+
+The twin takes the colouring as an argument rather than computing one. The
+colour order IS the ordering `u < v` of the factorisation, so a twin that
+coloured the mesh again would be comparing two different matrices and could
+only agree by accident.
+
+Coupled interface coefficients are not factorised on either side (they live in
+`boundary_coeffs`, not in `upper`/`lower`), so the twin reads neither
+`boundary_coeffs` nor `internal_coeffs` and the meshes it is measured on have
+no cyclic patch. The safe reciprocal of a broken-down row is mirrored in all
+three of its branches, and is measured on a two-cell graph built to fire each
+one.
+
+*Measured*: three meshes, each symmetric and asymmetric, relative difference
+between device and host, `max|dev - host| / max|host|`:
+
+| mesh | cells | colours | `rD` sym / asym | `M^-1 x` sym / asym |
+|---|---|---|---|---|
+| structured hex 5x4x3 | 60 | 2 | 1.82e-16 / 1.79e-16 | 2.39e-16 / 3.21e-16 |
+| one cell deep 12x9x1 | 108 | 2 | 1.45e-16 / 1.45e-16 | 2.78e-16 / 1.38e-16 |
+| 2:1 refined core | 120 | 4 | 1.78e-16 / 2.01e-16 | 3.08e-16 / 2.56e-16 |
+
 ---
 
 ## 22. Validation additions
