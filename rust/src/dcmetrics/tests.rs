@@ -306,7 +306,8 @@ fn the_report_offers_pue_inputs_and_not_a_pue() {
     assert!(!d.contains("not verifiable"), "the stale wording must be gone: {d}");
     assert!(d.contains("not a PUE"), "the refusal survives knowing the edition: {d}");
 
-    let p = PueInputs { free_cooling_ceiling: Some(24.5), ..p };
+    let p = PueInputs { free_cooling_ceiling: Some(297.65), ..p };
+    assert!(p.describe().contains("297.65 K"));
     assert!(p.describe().contains("24.50 C"));
 }
 

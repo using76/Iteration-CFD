@@ -33,6 +33,8 @@
 //! `SHI`/`RHI`; the per-fan operating points and shaft powers; and the PUE
 //! **inputs**. It does **not** print a PUE (§55.4): PUE is a facility energy
 //! ratio and a room model cannot compute one.
+//! When the case carries `metrics.supplyTemperatureSweep`, it also runs §55.4's
+//! sweep and prints the free-cooling ceiling beside the PUE inputs.
 //!
 //! Where the case carries a porous jump it also prints §53.6's caveat, naming
 //! what a pressure-jump tile gets wrong.
@@ -47,7 +49,7 @@ use ofgpu::dcmetrics::{
 use ofgpu::error::Result;
 use ofgpu::fan::FlowDevices;
 use ofgpu::field::{BcKind, GpuScalarField};
-use ofgpu::io::case_dc::{DcCase, LoweredDcCase};
+use ofgpu::io::case_dc::{DcCase, LoweredDcCase, SupplySweep};
 use ofgpu::mesh::{GpuMesh, PatchKind};
 use ofgpu::models::k_epsilon::{KEpsilon, KEpsilonCoeffs};
 use ofgpu::momentum::{BuoyancyCoeffs, MomentumControls};
@@ -168,7 +170,12 @@ fn run(
     }
 
     let gpu = Gpu::new(0)?;
-    let sol = solve(&gpu, &lowered)?;
+    let mut sol = solve(&gpu, &lowered)?;
+    if let Some(sw) = &lowered.supply_sweep {
+        let result = run_sweep(&gpu, &case, sw)?;
+        sol.report.pue.free_cooling_ceiling = ceiling_of(&result.points);
+        sol.sweep = Some(result);
+    }
 
     print_report(&lowered, &sol);
 
@@ -219,6 +226,159 @@ struct RoomSolution {
     /// paragraph reports. Carried out of the loop so the document can say it
     /// too.
     probe: Option<ProbeSummary>,
+    /// §55.4's sweep, when the case asked for one.
+    sweep: Option<SweepResult>,
+}
+
+/// One point of §55.4's sweep: the supply temperature the case was SET to, the
+/// flux-weighted one the solve produced, and the two indices.
+#[derive(Debug, Clone, PartialEq)]
+struct SweepPoint {
+    t_set: Scalar,
+    t_supply: Scalar,
+    rci_hi: Scalar,
+    rci_lo: Scalar,
+}
+
+/// The sweep's outcome: every point, and whether `RCI_HI` came out
+/// non-increasing in `t_set`.
+#[derive(Debug, Clone, PartialEq)]
+struct SweepResult {
+    points: Vec<SweepPoint>,
+    monotone: bool,
+}
+
+/// §55.4's ceiling: the highest swept `t_set` whose `RCI_HI` is exactly
+/// `100.0` - which `rci_hi` returns exactly when no sample exceeds the
+/// recommended limit, so equality is the test and never a tolerance.
+/// Order-independent; `None` when no swept value holds.
+fn ceiling_of(points: &[SweepPoint]) -> Option<Scalar> {
+    let mut best: Option<Scalar> = None;
+    for p in points {
+        if p.rci_hi == 100.0 {
+            best = Some(match best {
+                Some(b) if b > p.t_set => b,
+                _ => p.t_set,
+            });
+        }
+    }
+    best
+}
+
+/// §55.4: `RCI_HI` is expected non-increasing in `t_set`. Round-off of one
+/// part in a million per cent is not a rise; a real rise is a physical
+/// impossibility a fixed iteration budget can still produce, and is
+/// reported, never refused.
+fn sweep_is_monotone(points: &[SweepPoint]) -> bool {
+    let mut by_t: Vec<&SweepPoint> = points.iter().collect();
+    by_t.sort_by(|a, b| {
+        a.t_set
+            .partial_cmp(&b.t_set)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    by_t.windows(2).all(|w| w[1].rci_hi <= w[0].rci_hi + 1e-6)
+}
+
+/// The largest rise of `RCI_HI` between consecutive swept temperatures and
+/// the pair that produced it - the `NOT monotone` print. `None` when the
+/// table is monotone in the `sweep_is_monotone` sense.
+fn worst_rise(points: &[SweepPoint]) -> Option<(Scalar, Scalar, Scalar)> {
+    let mut by_t: Vec<&SweepPoint> = points.iter().collect();
+    by_t.sort_by(|a, b| {
+        a.t_set
+            .partial_cmp(&b.t_set)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut worst: Option<(Scalar, Scalar, Scalar)> = None;
+    for w in by_t.windows(2) {
+        let rise = w[1].rci_hi - w[0].rci_hi;
+        if rise > 1e-6 && worst.map_or(true, |(d, _, _)| rise > d) {
+            worst = Some((rise, w[0].t_set, w[1].t_set));
+        }
+    }
+    worst
+}
+
+/// The printed sweep block: empty when the run carried no sweep.
+fn sweep_lines(s: &RoomSolution) -> Vec<String> {
+    let Some(sw) = &s.sweep else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "--- supply-temperature sweep (SPEC-LIT 55.4): {} solve(s) beside the base run ---",
+        sw.points.len()
+    ));
+    lines.push("  T_set          T_supply       RCI_HI       RCI_LO".to_string());
+    for p in &sw.points {
+        lines.push(format!(
+            "  {:8.2} K   {:8.3} K   {:8.3} %   {:8.3} %",
+            p.t_set, p.t_supply, p.rci_hi, p.rci_lo
+        ));
+    }
+    if sw.monotone {
+        lines.push("  monotone in T_set: yes".to_string());
+    } else {
+        let (d, a, b) = worst_rise(&sw.points).unwrap_or((0.0, 0.0, 0.0));
+        lines.push(format!(
+            "  NOT monotone in T_set: RCI_HI rises by {d:.3} between {a:.2} K and {b:.2} K - \
+             two solves of the same iteration budget did not reach the same residual; the \
+             ceiling below still uses the exact-100 rule"
+        ));
+    }
+    match s.report.pue.free_cooling_ceiling {
+        Some(k) => {
+            let c = k - 273.15;
+            lines.push(format!(
+                "  free-cooling ceiling: {k:.2} K ({c:.2} C) - the highest swept supply \
+                 temperature holding RCI_HI at exactly 100 %"
+            ));
+        }
+        None => {
+            let lowest = sw.points.iter().min_by(|a, b| {
+                a.t_set
+                    .partial_cmp(&b.t_set)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if let Some(p) = lowest {
+                lines.push(format!(
+                    "  free-cooling ceiling: none - no swept supply temperature holds RCI_HI \
+                     at 100 %; the lowest, {:.2} K, gives {:.3} %",
+                    p.t_set, p.rci_hi
+                ));
+            }
+        }
+    }
+    lines
+}
+
+/// §55.4's sweep: re-solve the case at every swept supply temperature,
+/// ascending, ALL of them - the monotone verdict needs every point. The
+/// re-lowered cases' notes are not printed again; the base run printed them.
+fn run_sweep(gpu: &Gpu, case: &DcCase, sweep: &SupplySweep) -> Result<SweepResult> {
+    let n = sweep.temperatures.len();
+    let mut points = Vec::new();
+    for (i, t) in sweep.temperatures.iter().enumerate() {
+        println!(
+            "\n=== sweep {}/{}: {} \"{}\" set to {:.2} K ({:.2} C) ===",
+            i + 1,
+            n,
+            sweep.what,
+            sweep.patch,
+            t,
+            t - 273.15
+        );
+        let lc_t = case.with_supply_temperature(f64::from(*t))?.lower()?;
+        let s_t = solve(gpu, &lc_t)?;
+        points.push(SweepPoint {
+            t_set: *t,
+            t_supply: s_t.report.t_supply,
+            rci_hi: s_t.report.rci_hi,
+            rci_lo: s_t.report.rci_lo,
+        });
+    }
+    let monotone = sweep_is_monotone(&points);
+    Ok(SweepResult { points, monotone })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -742,6 +902,7 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
         molar_caveat,
         patch_flow,
         probe: probe_out,
+        sweep: None,
     })
 }
 
@@ -813,6 +974,13 @@ fn print_report(lc: &LoweredDcCase, s: &RoomSolution) {
         }
     }
     println!("\n{}", r.pue.describe());
+    let sweep = sweep_lines(s);
+    if !sweep.is_empty() {
+        println!();
+        for l in sweep {
+            println!("{l}");
+        }
+    }
 
     if let Some(c) = &s.jump_caveat {
         println!("\n--- S53.6 ---\n  {c}");
@@ -845,6 +1013,23 @@ fn write_csv(path: &Path, lc: &LoweredDcCase, s: &RoomSolution) -> Result<()> {
     let _ = writeln!(out, "dT_equipment,{},K", r.dt_equipment);
     let _ = writeln!(out, "IT_heat,{},W", r.pue.it_heat);
     let _ = writeln!(out, "fan_shaft_power,{},W", r.pue.fan_power);
+    match r.pue.free_cooling_ceiling {
+        Some(k) => {
+            let _ = writeln!(out, "free_cooling_ceiling,{k},K");
+        }
+        None => {
+            let _ = writeln!(out, "free_cooling_ceiling,not swept,K");
+        }
+    }
+    if let Some(sw) = &s.sweep {
+        let _ = writeln!(out, "sweep_monotone,{},-", sw.monotone);
+        for (i, p) in sw.points.iter().enumerate() {
+            let _ = writeln!(out, "sweep_{i}_T_set,{},K", p.t_set);
+            let _ = writeln!(out, "sweep_{i}_T_supply,{},K", p.t_supply);
+            let _ = writeln!(out, "sweep_{i}_RCI_HI,{},%", p.rci_hi);
+            let _ = writeln!(out, "sweep_{i}_RCI_LO,{},%", p.rci_lo);
+        }
+    }
     for (patch, q, dp, w) in &s.fans {
         let _ = writeln!(out, "fan_{patch}_Q,{q},m3/s");
         let _ = writeln!(out, "fan_{patch}_dp,{dp},Pa");
@@ -890,6 +1075,20 @@ struct PueDoc<'a> {
     fan_power_each: &'a [Scalar],
     it_heat: Scalar,
     free_cooling_ceiling: Option<Scalar>,
+    /// §55.4's sweep, one row per solve, ascending in `t_supply_set`; `null` when no sweep.
+    supply_temperature_sweep: Option<Vec<SweepPointDoc>>,
+    /// Whether `RCI_HI` was non-increasing in `t_supply_set`; `null` when no sweep.
+    sweep_monotone: Option<bool>,
+}
+
+/// One row of the sweep table, in document key order.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SweepPointDoc {
+    t_supply_set: Scalar,
+    t_supply: Scalar,
+    rci_hi: Scalar,
+    rci_lo: Scalar,
 }
 
 /// The S55 report, field for field what `print_report` prints.
@@ -1286,6 +1485,18 @@ fn build_document<'a>(
                 fan_power_each: &s.report.pue.fan_power_each,
                 it_heat: s.report.pue.it_heat,
                 free_cooling_ceiling: s.report.pue.free_cooling_ceiling,
+                supply_temperature_sweep: s.sweep.as_ref().map(|sw| {
+                    sw.points
+                        .iter()
+                        .map(|p| SweepPointDoc {
+                            t_supply_set: p.t_set,
+                            t_supply: p.t_supply,
+                            rci_hi: p.rci_hi,
+                            rci_lo: p.rci_lo,
+                        })
+                        .collect()
+                }),
+                sweep_monotone: s.sweep.as_ref().map(|sw| sw.monotone),
             },
         },
         fans,
@@ -1448,6 +1659,7 @@ mod tests {
                 constant_coefficient: false,
                 non_separable_reason: "a fan patch".to_string(),
             }),
+            sweep: None,
         }
     }
 
@@ -1503,6 +1715,8 @@ mod tests {
         assert!(v["machine"]["device"].is_null());
         assert!(v["machine"]["computeCapability"].is_null());
         assert!(v["report"]["pue"]["freeCoolingCeiling"].is_null());
+        assert!(v["report"]["pue"]["supplyTemperatureSweep"].is_null());
+        assert!(v["report"]["pue"]["sweepMonotone"].is_null());
         assert!(v["fans"][0]["outerResidualPct"].is_null());
         assert_eq!(v["caveats"].as_array().unwrap().len(), 0);
         for k in TOP_KEYS {
@@ -1521,6 +1735,127 @@ mod tests {
             format!("{json_hi:8.3}"),
             format!("{:8.3}", f64::from(s.report.rci_hi))
         );
+    }
+
+    /// A swept `t_set` of one degree above the base's 295.15-ish fixture
+    /// values, so the points read like the shipped case's kelvin grid.
+    fn sp(t_set: Scalar, rci_hi: Scalar) -> SweepPoint {
+        SweepPoint {
+            t_set,
+            t_supply: t_set + 2.0,
+            rci_hi,
+            rci_lo: 100.0,
+        }
+    }
+
+    #[test]
+    fn the_ceiling_is_the_highest_swept_temperature_holding_exactly_one_hundred() {
+        let pts = vec![
+            sp(285.15, 100.0),
+            sp(287.15, 100.0),
+            sp(289.15, 99.999_999_9),
+            sp(291.15, 97.0),
+        ];
+        assert_eq!(ceiling_of(&pts), Some(287.15), "99.999_999_9 is not exactly 100");
+        let all_hold: Vec<SweepPoint> = [285.15, 287.15, 289.15]
+            .iter()
+            .map(|t| sp(*t, 100.0))
+            .collect();
+        assert_eq!(ceiling_of(&all_hold), Some(289.15), "every point holds: the last");
+        let none_hold: Vec<SweepPoint> = [285.15, 287.15].iter().map(|t| sp(*t, 99.9)).collect();
+        assert_eq!(ceiling_of(&none_hold), None, "nothing holds: no ceiling");
+        let mut shuffled = pts.clone();
+        shuffled.swap(0, 3);
+        shuffled.swap(1, 2);
+        assert_eq!(ceiling_of(&shuffled), Some(287.15), "the rule is order-independent");
+    }
+
+    #[test]
+    fn the_sweep_verdict_tolerates_round_off_and_flags_a_rise() {
+        let m = |rcis: &[Scalar]| {
+            let pts: Vec<SweepPoint> = rcis
+                .iter()
+                .enumerate()
+                .map(|(i, r)| sp(285.15 + i as Scalar, *r))
+                .collect();
+            sweep_is_monotone(&pts)
+        };
+        assert!(m(&[100.0, 100.0, 98.0, 95.0]), "a fall is never a rise");
+        assert!(!m(&[100.0, 98.0, 99.0]), "a real rise is flagged");
+        assert!(m(&[100.0, 100.0 + 5e-7]), "two solves at 100 differ by round-off only");
+        assert!(!m(&[100.0, 100.0 + 5e-6]), "beyond round-off is a rise");
+    }
+
+    #[test]
+    fn the_sweep_block_names_the_ceiling_the_document_carries() {
+        let mut s = solution();
+        s.report.pue.free_cooling_ceiling = Some(287.15);
+        s.sweep = Some(SweepResult {
+            points: vec![sp(283.15, 100.0), sp(287.15, 100.0), sp(291.15, 97.5)],
+            monotone: true,
+        });
+        let lines = sweep_lines(&s);
+        assert!(
+            lines.iter().any(|l| l.contains("287.15 K (14.00 C)")),
+            "the printed ceiling is the document's: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("monotone in T_set: yes")),
+            "{lines:?}"
+        );
+        s.sweep = None;
+        assert!(sweep_lines(&s).is_empty(), "no sweep, no block");
+    }
+
+    #[test]
+    fn a_swept_solution_carries_its_table_and_ceiling_bit_for_bit() {
+        let mut s = solution();
+        s.report.pue.free_cooling_ceiling = Some(287.15);
+        s.sweep = Some(SweepResult {
+            points: vec![sp(285.15, 100.0), sp(289.15, 98.25), sp(293.15, 91.7)],
+            monotone: true,
+        });
+        let text = doc_text(&lowered(), &s, Some("r_1"));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let json_k = v["report"]["pue"]["freeCoolingCeiling"].as_f64().unwrap();
+        #[cfg(not(feature = "single"))]
+        assert_eq!(
+            json_k.to_bits(),
+            f64::from(s.report.pue.free_cooling_ceiling.unwrap()).to_bits()
+        );
+        let table = v["report"]["pue"]["supplyTemperatureSweep"]
+            .as_array()
+            .expect("the sweep table is an array");
+        assert_eq!(table.len(), 3);
+        assert_eq!(v["report"]["pue"]["sweepMonotone"], serde_json::json!(true));
+        // The four keys, in document order, on the PRETTY TEXT - parsed
+        // objects sort, so the order is asserted on the text itself.
+        let anchor = text.find("\"supplyTemperatureSweep\"").expect("the table key");
+        let mut at = anchor;
+        for k in ["tSupplySet", "tSupply", "rciHi", "rciLo"] {
+            let at_k = text[at..]
+                .find(&format!("\"{k}\":"))
+                .unwrap_or_else(|| panic!("key `{k}` missing from the first row"))
+                + at;
+            assert!(at_k > at, "key `{k}` out of order");
+            at = at_k;
+        }
+    }
+
+    #[test]
+    fn the_shipped_case_declares_a_sweep_the_reader_turns_into_five_solves() {
+        let c = DcCase::read(Path::new("../cases/coldAisle.dc.jsonc"))
+            .expect("the shipped case parses");
+        let lc = c.lower().expect("the shipped case lowers");
+        let sw = lc
+            .supply_sweep
+            .as_ref()
+            .expect("the shipped case declares a sweep");
+        assert_eq!(sw.patch, "floorSupply");
+        assert_eq!(sw.temperatures.len(), 5, "285.15 to 293.15 step 2");
+        let r = |a: Scalar, b: Scalar| (a - b).abs() / a.abs().max(b.abs()).max(1e-300);
+        assert!(r(sw.temperatures[0], 285.15) < 1e-12);
+        assert!(r(sw.temperatures[4], 293.15) < 1e-12);
     }
 
     #[test]

@@ -9911,6 +9911,23 @@ the single most valuable number in a data-centre report, because supply
 temperature is what buys free-cooling hours and free-cooling hours are what
 move PUE.
 
+**The sweep is a case setting, not a flag.** `metrics.supplyTemperatureSweep: [lo, hi, step]`,
+all three in kelvin like every other temperature the case carries, asks for one extra solve
+at each of `lo, lo + step, ..., <= hi` (at most sixteen, refused by name above that), with the
+supply patch's own inlet temperature — an inflow fan's `supplyTemperature` or a tile's
+`plenumTemperature`, whichever `metrics.supplyPatch` names — set to that value and everything
+else the case says re-lowered from it, so a tile's `plenumRelativeHumidity` yields a new `Y_v`
+at each temperature through (S54.2)/(S54.4). The base run is solved first and is the report;
+the sweep is printed beside it as a table of `T_set`, the flux-weighted `T_supply` it produced,
+`RCI_HI` and `RCI_LO`. The **free-cooling ceiling** is the highest `T_set` whose `RCI_HI` is
+*exactly* `100 %` — (S55.1) is exactly 100 when no sample exceeds `T_hi_rec`, so equality is the
+test and never a tolerance — reported in kelvin with the Celsius reading beside it, `null` /
+"not swept" when the case asks for no sweep, and "none" when no swept value holds. `RCI_HI` is
+expected non-increasing in `T_set`; the table says whether it was, and a rise is printed as what
+it is — two solves of one iteration budget that did not reach the same residual — never refused.
+A supply patch that carries no inlet temperature (a `fixedPressure` opening, a wall, an outflow
+fan) has nothing to sweep and is refused by name.
+
 **No standard number is printed as if it had been checked.** The current
 edition is ISO/IEC 30134-2:2026, ed. 2.0, published 2026-01-16, IEC webstore
 publication 111538 — that is catalogue metadata, and it is all of the standard
@@ -10004,6 +10021,7 @@ and the output that must differ:
 | `ashraeClass` (A1–A4) | one word | `RCI_LO` and `RCI_HI` |
 | `samples` (`faces`/`thirds`) | one word | `RCI` and the reported `n` |
 | `supplyTemperature` / `plenumTemperature` | one number | the inlet temperature, hence `RTI` and `SHI` |
+| `supplyTemperatureSweep` | present vs absent | `freeCoolingCeiling` (a temperature vs `null`) and the sweep table (N rows vs `null`) |
 
 Each is a test that **fails by name** if the two runs agree. That is the
 §13.4.1 contract, and it matters more than any individual feature here: six
@@ -10031,6 +10049,7 @@ corresponding pair test.
 | every reduction | `solver::device_sum`; no atomic |
 | determinism | two runs bitwise identical |
 | the pair tests of §55.6 | all of them, each failing by name |
+| the free-cooling ceiling | the highest swept `T_set` whose `RCI_HI == 100 %` exactly; `null` with no sweep; "none" when no swept value holds; the table monotone or flagged |
 
 ### 55.8 Validation
 

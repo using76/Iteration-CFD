@@ -708,3 +708,175 @@ fn baffle_insertion_and_the_capacitance_fft_path_are_refused_from_the_case() {
         .lower()
         .expect("baffle: false is the internal-face form, which IS built");
 }
+
+// ==========================================================================
+//  §55.4's supply-temperature sweep
+// ==========================================================================
+
+#[test]
+fn the_sweep_key_lowers_to_its_temperatures_and_its_absence_to_none() {
+    let none = base().lower().expect("the base case lowers");
+    assert!(
+        none.supply_sweep.is_none(),
+        "the base case carries no sweep key, so nothing may be swept"
+    );
+
+    let c = variant(
+        "\"returnPatch\": \"ret\" },",
+        "\"returnPatch\": \"ret\",\n               \"supplyTemperatureSweep\": \
+         [285.15, 295.15, 5.0] },",
+    );
+    let lc = c.lower().expect("a well-formed sweep lowers");
+    let Some(sw) = &lc.supply_sweep else {
+        panic!("the sweep key must lower to Some");
+    };
+    assert_eq!(sw.temperatures.len(), 3, "the grid is lo, lo+step, .., <= hi");
+    for (got, want) in sw.temperatures.iter().zip([285.15, 290.15, 295.15]) {
+        assert!(rel(*got, want) < 1e-12, "{got} vs {want}");
+    }
+    assert_eq!(sw.patch, "supply");
+    assert_eq!(sw.what, "plenumTemperature of tile");
+    assert!(
+        lc.notes
+            .iter()
+            .any(|n| n.contains("supplyTemperatureSweep") && n.contains("3 solve")),
+        "one note must name the key and the solve count: {:?}",
+        lc.notes
+    );
+}
+
+#[test]
+fn the_sweep_is_refused_by_name_for_each_bad_triple() {
+    let tail = "\"returnPatch\": \"ret\", \"supplyTemperatureSweep\": ";
+    // The reader itself refuses a non-finite number before `lower()` ever
+    // sees one, so the finite case is reached through the struct, not the
+    // text - the same `lower()` refusal either way.
+    let mut c = base();
+    c.metrics.supply_temperature_sweep = Some([285.15, f64::INFINITY, 5.0]);
+    let r = c.lower().expect_err("a non-finite entry is refused").to_string();
+    assert!(r.contains("supplyTemperatureSweep"), "{r}");
+    assert!(r.contains("finite"), "{r}");
+
+    let r = refused(
+        "\"returnPatch\": \"ret\" },",
+        &format!("{tail}[0.0, 295.15, 5.0] }},"),
+    );
+    assert!(r.contains("not an absolute temperature"), "{r}");
+
+    let r = refused(
+        "\"returnPatch\": \"ret\" },",
+        &format!("{tail}[285.15, 295.15, 0.0] }},"),
+    );
+    assert!(r.contains("must be > 0"), "{r}");
+
+    let r = refused(
+        "\"returnPatch\": \"ret\" },",
+        &format!("{tail}[295.15, 285.15, 5.0] }},"),
+    );
+    assert!(r.contains("is below lo"), "{r}");
+
+    let r = refused(
+        "\"returnPatch\": \"ret\" },",
+        &format!("{tail}[285.15, 295.15, 0.1] }},"),
+    );
+    assert!(r.contains("the cap is 16"), "{r}");
+
+    // A grid whose solve count overflows every integer there is: the cap is
+    // still what refuses it, and the count is never cast before it is capped.
+    let r = refused(
+        "\"returnPatch\": \"ret\" },",
+        &format!("{tail}[285.15, 1e300, 1e-300] }},"),
+    );
+    assert!(r.contains("the cap is 16"), "{r}");
+}
+
+#[test]
+fn the_sweep_is_refused_when_the_supply_patch_carries_no_temperature() {
+    let r = refused(
+        "\"supplyPatch\": \"supply\", \"returnPatch\": \"ret\" },",
+        "\"supplyPatch\": \"west\", \"returnPatch\": \"ret\",\n               \
+         \"supplyTemperatureSweep\": [285.15, 295.15, 5.0] },",
+    );
+    assert!(r.contains("west"), "{r}");
+    assert!(r.contains("neither an inflow fan"), "{r}");
+    assert!(r.contains("nor a tile"), "{r}");
+
+    // Without the sweep key the very same case lowers exactly as it always
+    // did: nothing to sweep, nothing to refuse.
+    variant(
+        "\"supplyPatch\": \"supply\", \"returnPatch\": \"ret\" },",
+        "\"supplyPatch\": \"west\", \"returnPatch\": \"ret\" },",
+    )
+    .lower()
+    .expect("no sweep, no refusal - west was never a temperature carrier");
+
+    // And the same refusal comes from `with_supply_temperature`.
+    let c = variant(
+        "\"supplyPatch\": \"supply\", \"returnPatch\": \"ret\" },",
+        "\"supplyPatch\": \"west\", \"returnPatch\": \"ret\" },",
+    );
+    let err = c
+        .with_supply_temperature(297.15)
+        .expect_err("west has no inlet temperature to move");
+    assert!(err.to_string().contains("west"), "{err}");
+}
+
+#[test]
+fn with_supply_temperature_moves_a_tile_plenum_and_its_vapour() {
+    let c = base()
+        .with_supply_temperature(297.15)
+        .expect("the supply patch is a tile");
+    assert!(
+        rel(c.tiles[0].plenum_temperature, 297.15) < 1e-12,
+        "the tile's plenumTemperature is what moves"
+    );
+    let lc = c.lower().expect("the moved case lowers");
+    let t = lc
+        .inflow_temperature
+        .get("supply")
+        .copied()
+        .expect("the tile injects its temperature");
+    assert!(rel(t, 297.15) < 1e-12, "{t} vs 297.15");
+
+    let base_lc = base().lower().unwrap();
+    let yv_note = |lc: &LoweredDcCase| {
+        lc.notes
+            .iter()
+            .find(|n| n.contains("Y_v = "))
+            .expect("the tile humidity note")
+            .clone()
+    };
+    assert_ne!(
+        yv_note(&lc),
+        yv_note(&base_lc),
+        "the humidity is re-derived at the new temperature: {:?} vs {:?}",
+        yv_note(&base_lc),
+        yv_note(&lc)
+    );
+    assert_eq!(lc.patch_pressure, base_lc.patch_pressure);
+    assert_eq!(lc.racks.len(), base_lc.racks.len());
+    assert_eq!(lc.fans.len(), base_lc.fans.len());
+}
+
+#[test]
+fn with_supply_temperature_sets_an_inflow_fans_supply_temperature() {
+    let text = BASE
+        .replacen(
+            "\"direction\": \"outflow\"",
+            "\"direction\": \"inflow\", \"supplyTemperature\": 291.15",
+            1,
+        )
+        .replacen(
+            "\"supplyPatch\": \"supply\", \"returnPatch\": \"ret\"",
+            "\"supplyPatch\": \"ret\", \"returnPatch\": \"supply\"",
+            1,
+        );
+    let c = DcCase::parse(&text, "fan").expect("the fan case parses");
+    let moved = c
+        .with_supply_temperature(297.15)
+        .expect("the supply patch is an inflow fan");
+    let t = moved.fans[0]
+        .supply_temperature
+        .expect("the fan carries a supply temperature");
+    assert!(rel(t, 297.15) < 1e-12, "{t} vs 297.15");
+}

@@ -345,8 +345,8 @@ pub struct DcMetricsSpec {
     pub supply_patch: String,
     /// The patch the return temperature is measured on.
     pub return_patch: String,
-    /// A supply-temperature sweep for §55.4's free-cooling ceiling: the
-    /// highest supply temperature at which `RCI_HI` stays at 100 %.
+    /// `[lo, hi, step]` in kelvin: one extra solve at `lo, lo+step, .., <= hi` (at most 16), moving
+    /// the supply patch's inlet temperature; §55.4's ceiling is the highest holding `RCI_HI` at 100 %.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supply_temperature_sweep: Option<[f64; 3]>,
 }
@@ -449,6 +449,8 @@ pub struct LoweredDcCase {
     pub samples: RciSamples,
     pub supply_span: FaceSpan,
     pub return_span: FaceSpan,
+    /// §55.4's free-cooling sweep, when the case asks for one.
+    pub supply_sweep: Option<SupplySweep>,
     /// Per-patch pressure BC kind and value, and per-patch temperature.
     pub patch_pressure: BTreeMap<String, Option<Scalar>>,
     pub patch_temperature: BTreeMap<String, Option<Scalar>>,
@@ -770,6 +772,26 @@ impl DcCase {
             )));
         }
 
+        // §55.4's free-cooling sweep: resolve the grid against the case as
+        // written, so a bad triple or a supply patch carrying no inlet
+        // temperature is refused before anything is solved. The solves
+        // themselves are the driver's, which re-lowers the case at each
+        // swept temperature.
+        let supply_sweep = self.supply_sweep()?;
+        if let (Some([lo, hi, step]), Some(s)) =
+            (self.metrics.supply_temperature_sweep, supply_sweep.as_ref())
+        {
+            notes.push(format!(
+                "metrics: supplyTemperatureSweep [{lo}, {hi}, {step}] K -> {} solve(s) at \
+                 {:.2} .. {:.2} K, moving the {} \"{}\" (SPEC-LIT 55.4)",
+                s.temperatures.len(),
+                s.temperatures[0],
+                s.temperatures[s.temperatures.len() - 1],
+                s.what,
+                s.patch
+            ));
+        }
+
         // ---- the remaining patch rules ------------------------------------
         let mut patch_pressure = BTreeMap::new();
         let mut patch_temperature = BTreeMap::new();
@@ -900,6 +922,7 @@ impl DcCase {
             samples,
             supply_span,
             return_span,
+            supply_sweep,
             patch_pressure,
             patch_temperature,
             inflow_humidity,
@@ -909,6 +932,124 @@ impl DcCase {
             notes,
             solver,
         })
+    }
+}
+
+/// The sweep a case asked for, resolved: ascending kelvin temperatures. (§55.4)
+#[derive(Debug, Clone, PartialEq)]
+pub struct SupplySweep {
+    pub temperatures: Vec<Scalar>,
+    /// The patch whose inlet temperature moves - `metrics.supplyPatch`.
+    pub patch: String,
+    /// `"plenumTemperature of tile"` or `"supplyTemperature of inflow fan"`, for the note.
+    pub what: &'static str,
+}
+
+impl DcCase {
+    /// The sweep `metrics.supplyTemperatureSweep` asks for, resolved to its
+    /// ascending kelvin grid - `Ok(None)` when the key is absent. Refused by
+    /// name: a non-finite or non-absolute entry, a non-positive step, `hi`
+    /// below `lo`, more than sixteen solves, or - checked last - a supply
+    /// patch that carries no inlet temperature at all.
+    pub fn supply_sweep(&self) -> Result<Option<SupplySweep>> {
+        let Some([lo, hi, step]) = self.metrics.supply_temperature_sweep else {
+            return Ok(None);
+        };
+        let triple = format!("[{lo}, {hi}, {step}]");
+        if !(lo.is_finite() && hi.is_finite() && step.is_finite()) {
+            return Err(Error::Config(format!(
+                "metrics: supplyTemperatureSweep {triple}: every entry must be a finite number"
+            )));
+        }
+        if !(lo > 0.0) {
+            return Err(Error::Config(format!(
+                "metrics: supplyTemperatureSweep {triple}: lo {lo} K is not an absolute \
+                 temperature"
+            )));
+        }
+        if !(step > 0.0) {
+            return Err(Error::Config(format!(
+                "metrics: supplyTemperatureSweep {triple}: step {step} K must be > 0"
+            )));
+        }
+        if hi < lo {
+            return Err(Error::Config(format!(
+                "metrics: supplyTemperatureSweep {triple}: hi {hi} K is below lo {lo} K"
+            )));
+        }
+        // Counted in floating point and capped BEFORE the cast: `(hi - lo) /
+        // step` can overflow to infinity, `inf as usize` saturates, and a
+        // cast-then-add would then wrap to zero and hand back an empty grid.
+        let n_f = ((hi - lo) / step + 1e-9).floor() + 1.0;
+        if !(n_f <= 16.0) {
+            return Err(Error::Config(format!(
+                "metrics: supplyTemperatureSweep {triple} asks for {n_f} solves; the cap is \
+                 16 - widen the step or narrow the range"
+            )));
+        }
+        let n = n_f as usize;
+        let patch = &self.metrics.supply_patch;
+        let mut fan_carries = false;
+        for f in &self.fans {
+            if f.patch == *patch {
+                fan_carries =
+                    FanDirection::from_name(&f.direction, &f.patch)? == FanDirection::Inflow;
+                if fan_carries {
+                    break;
+                }
+            }
+        }
+        let tile_carries = self.tiles.iter().any(|t| t.patch == *patch);
+        if !fan_carries && !tile_carries {
+            return Err(Self::no_supply_temperature(patch));
+        }
+        let what = if fan_carries {
+            "supplyTemperature of inflow fan"
+        } else {
+            "plenumTemperature of tile"
+        };
+        let temperatures = (0..n).map(|i| (lo + i as f64 * step) as Scalar).collect();
+        Ok(Some(SupplySweep {
+            temperatures,
+            patch: patch.clone(),
+            what,
+        }))
+    }
+
+    /// The refusal when `metrics.supplyPatch` names a patch that carries no
+    /// inlet temperature to move.
+    fn no_supply_temperature(patch: &str) -> Error {
+        Error::Config(format!(
+            "metrics: supplyTemperatureSweep needs a supply temperature to sweep, and \
+             supplyPatch \"{patch}\" is neither an inflow fan (which carries \
+             supplyTemperature) nor a tile (which carries plenumTemperature)"
+        ))
+    }
+
+    /// A clone of the case with the supply patch's inlet temperature moved to
+    /// `t_k` (kelvin) - an inflow fan's `supplyTemperature` or a tile's
+    /// `plenumTemperature`, whichever `metrics.supplyPatch` names. Does not
+    /// lower; the caller lowers the clone. Refused by name when the supply
+    /// patch carries no inlet temperature.
+    pub fn with_supply_temperature(&self, t_k: f64) -> Result<DcCase> {
+        let mut c = self.clone();
+        let patch = self.metrics.supply_patch.clone();
+        for f in &mut c.fans {
+            if f.patch != patch {
+                continue;
+            }
+            if FanDirection::from_name(&f.direction, &f.patch)? == FanDirection::Inflow {
+                f.supply_temperature = Some(t_k);
+                return Ok(c);
+            }
+        }
+        for t in &mut c.tiles {
+            if t.patch == patch {
+                t.plenum_temperature = t_k;
+                return Ok(c);
+            }
+        }
+        Err(Self::no_supply_temperature(&patch))
     }
 }
 

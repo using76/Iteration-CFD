@@ -152,7 +152,14 @@
     "ashraeClass": "A1",          // recommended 18-27 C, allowable 15-32 C
     "rciSamples": "thirds",       // Herrlin's own convention, mesh-independent
     "supplyPatch": "floorSupply",
-    "returnPatch": "ceilingReturn"
+    "returnPatch": "ceilingReturn",
+    // SPEC-LIT §55.4: [lo, hi, step] in K. The tile's plenumTemperature is set
+    // to each value in turn and the room re-solved; the ceiling is the highest
+    // holding RCI_HI at exactly 100 %. Five solves beside the base run. The
+    // grid stops at 293.15 K because this room, at its 600 iterations, does
+    // not converge at 294.15 K or above - reproduced with no sweep at all, so
+    // it is this case's operating point and not the sweep's doing.
+    "supplyTemperatureSweep": [285.15, 293.15, 2.0]
   },
 
   "run": {
