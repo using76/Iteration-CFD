@@ -486,6 +486,15 @@ impl<'m> Simple<'m> {
         &mut self.phi
     }
 
+    /// The pressure at the top of the current outer corrector.
+    ///
+    /// Read-only, and here so that a capture gate can read back EVERY buffer
+    /// one iteration writes: `§81.5`'s comparison is only as wide as the
+    /// state closure that feeds it.
+    pub fn p_old(&self) -> &DevBuf<Scalar> {
+        &self.p_old
+    }
+
     pub fn controls(&self) -> &SimpleControls {
         &self.ctrl
     }
@@ -1953,9 +1962,133 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    //  Controls
+    //  SPEC-LIT 81.9: the capture gate
     // ----------------------------------------------------------------------
 
+    /// A DRIVEN box, on purpose. `an_isothermal_sealed_box_stays_exactly_at_rest`
+    /// is the wrong fixture for a gate: there every buffer is identically zero,
+    /// three replays would equal three per-launch iterations because neither
+    /// moved a value, and a graph that recorded no work at all would pass -
+    /// the defect `§81.8` names and `src/species.rs` was rewritten to avoid.
+    /// So the lid moves, and the test measures that it moved before it asserts
+    /// that a replay reproduces it.
+    #[test]
+    fn the_simple_outer_corrector_replays_bitwise() {
+        let Some(g) = gpu() else { return };
+        let hm = boxed([4, 4, 4], Vec3::new(0.25, 0.25, 0.25), [PatchKind::Wall; 6]);
+        let m = GpuMesh::upload(&g, &hm).expect("mesh");
+        let n = hm.n_cells;
+
+        let solver = SolverControls {
+            solver: crate::solver::LinearSolverKind::PBiCGStab, // never PCG: its symmetry check downloads
+            precon: crate::solver::Preconditioner::Diagonal, // never DIC: same read-back (§8.2)
+            tolerance: 1e-14,
+            rel_tol: 0.0,
+            max_iter: 4,
+            min_iter: 0,
+            check_interval: 1,
+            fixed_iters: true, // an adaptive residual test DMAs a flag to the host every
+            report_residuals: false, // check_interval sweeps, and the guard refuses that inside a capture
+            ..SolverControls::default()
+        };
+        let ctrl = SimpleControls {
+            momentum: MomentumControls {
+                nu: 1e-2,
+                u_relax: 1.0,
+                steady: false,
+                delta_t: 0.01,
+                ddt: crate::timescheme::DdtScheme::Euler,
+                div_scheme: crate::io::case::DivScheme::Upwind,
+                bounded_convection: true,
+                sn_grad: crate::fv::SnGradScheme::Uncorrected,
+                variable_viscosity_stress: false,
+                u_solver: solver,
+                ..MomentumControls::default()
+            },
+            p_solver: solver,
+            p_relax: 1.0,
+            report_continuity: false, // THE line: one eight-byte copy per iteration, and the only host
+            ..SimpleControls::default() // traffic the loop has left once the solvers are fixed-iteration
+        };
+        let buoy = BuoyancyCoeffs { g: Vec3::ZERO, t_ref: 293.15, t_min: 1.0 };
+        let nut = laminar_nut(&g, &m, &hm).expect("nut");
+        let t = temperature(&g, &m, &hm, &vec![293.15; n], &[None; 6]).expect("T");
+
+        let build = || -> Result<(Simple, PbicgstabBackend)> {
+            let mut s = Simple::new(&g, &hm, &m, ctrl, buoy)?;
+            set_velocity_bcs(
+                &g,
+                s.u_mut(),
+                &hm,
+                &[
+                    Some(Vec3::ZERO),
+                    Some(Vec3::ZERO),
+                    Some(Vec3::ZERO),
+                    Some(Vec3::new(1.0, 0.0, 0.0)), // the moving lid
+                    Some(Vec3::ZERO),
+                    Some(Vec3::ZERO),
+                ],
+            )?;
+            set_scalar_bcs(&g, s.p_mut(), &hm, &[None; 6])?;
+            s.initialise(&g)?;
+            let mut backend = PbicgstabBackend::new(ctrl.p_solver);
+            backend.setup(&g, &hm, &m, &SystemProbe::default())?;
+            Ok((s, backend))
+        };
+
+        // Is there anything for the gate to compare? Three outer correctors of
+        // the per-launch path, and the velocity must have left its seed. A
+        // bitwise replay over a field that does not move holds for a graph
+        // that launched nothing - the point §81.5 makes about empty graphs.
+        {
+            let (mut s, mut backend) = build().expect("build");
+            let before = g.download(&s.u().f).expect("U before");
+            for _ in 0..3 {
+                s.correct(&g, &mut backend, &nut, &t).expect("correct");
+            }
+            let after = g.download(&s.u().f).expect("U after");
+            let moved = before
+                .iter()
+                .zip(&after)
+                .filter(|(a, b)| {
+                    a.x.to_bits() != b.x.to_bits()
+                        || a.y.to_bits() != b.y.to_bits()
+                        || a.z.to_bits() != b.z.to_bits()
+                })
+                .count();
+            assert!(
+                moved > n / 2,
+                "only {moved} of {n} cells moved in three outer correctors: a \
+                 bitwise replay over a field that does not move holds for a \
+                 graph that launched nothing - §81.5"
+            );
+        }
+
+        let report = crate::capture::capture_replays_bitwise(
+            &g,
+            "SIMPLE outer corrector (SPEC-LIT §5.2, §14)",
+            build,
+            |(s, b): &mut (Simple, PbicgstabBackend)| s.correct(&g, b, &nut, &t).map(|_| ()),
+            |(s, _): &(Simple, PbicgstabBackend)| {
+                let u = g.download(&s.u().f)?;
+                let mut flat = Vec::with_capacity(u.len() * 3);
+                for c in &u {
+                    flat.push(c.x);
+                    flat.push(c.y);
+                    flat.push(c.z);
+                }
+                Ok(vec![
+                    ("U", flat),
+                    crate::capture::buf(&g, "p", &s.p().f)?,
+                    crate::capture::buf(&g, "phi", &s.phi().f)?,
+                    crate::capture::buf(&g, "phi_b", &s.phi().bf)?,
+                    ("p_old", g.download(s.p_old())?),
+                ])
+            },
+        )
+        .expect("SPEC-LIT §81.7: the SIMPLE outer corrector must capture and replay bitwise");
+        println!("  SIMPLE: {report}");
+    }
 
     // ----------------------------------------------------------------------
     //  SPEC-LIT §14 and the "PISO vs SIMPLE" row of §22

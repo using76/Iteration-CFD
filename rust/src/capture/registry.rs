@@ -55,6 +55,11 @@ pub enum Stance {
     /// In the iteration, capturable as far as anyone knows, **and not gated**.
     /// This is a debt, it is counted, and [`UNGATED_CEILING`] only ever goes
     /// down.
+    ///
+    /// No row constructs it today - the debt is zero - and it stays here
+    /// anyway, because deleting the stance a ratchet counts would make the
+    /// next ungated module a compile error instead of a defended diff.
+    #[allow(dead_code)]
     Ungated(&'static str),
 }
 
@@ -230,17 +235,22 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              PCG/PBiCGStab, which is gated by src/solver.rs",
         ),
     ),
-    ("src/pressure/fft.rs", Stance::Via("src/pressure/mod.rs")),
     (
-        "src/pressure/mod.rs",
-        Stance::Ungated(
-            "the pressure backend selector dispatches to the Krylov solve \
-             (gated by src/solver.rs) or to the cuFFT Poisson solve. cuFFT \
-             executes on this crate's stream and should capture, but nothing \
-             has captured it, and cuFFT plan execution is library code this \
-             crate does not control",
+        "src/pressure/fft.rs",
+        Stance::Refused(
+            "FftBackend::solve DOWNLOADS the matrix to the host on every \
+             call - `upper` always, `diag` and `lower` under the default \
+             EverySolve - and re-derives the whole operator on the host, \
+             then WRITES the three eigenvalue tables from the host; both \
+             calls are refused inside a capture, by name. Measured, not \
+             asserted: `the_cufft_solve_is_not_capturable_and_says_which_call`. \
+             Alternative: a frozen mode - eigenvalue tables resident, plans \
+             fixed, the structure trusted instead of re-read - which would \
+             remove the per-solve operator check this backend exists to \
+             make; not implemented",
         ),
     ),
+    ("src/pressure/mod.rs", Stance::Gate("the_pressure_backend_dispatch_replays_bitwise")),
     (
         "src/psychro.rs",
         Stance::Gate("the_psychrometric_update_replays_bitwise"),
@@ -251,16 +261,7 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_s2s_exchange_replays_bitwise"),
     ),
     ("src/scalar_transport.rs", Stance::Via("src/species.rs")),
-    (
-        "src/simple.rs",
-        Stance::Ungated(
-            "the SIMPLE outer loop is the one place a whole time step is \
-             assembled, and the bins capture it live (bin/plume.rs, \
-             bin/buoyant.rs). It has no gate of its own because building a \
-             SIMPLE case in a unit test means building a case directory; the \
-             pieces it calls are each gated separately",
-        ),
-    ),
+    ("src/simple.rs", Stance::Gate("the_simple_outer_corrector_replays_bitwise")),
     (
         "src/solid/displacement.rs",
         Stance::Gate("the_displacement_iteration_replays_bitwise"),
@@ -315,16 +316,19 @@ pub const REGISTRY: &[(&str, Stance)] = &[
 /// How many rows may resolve to [`Terminal::Ungated`].
 ///
 /// A ratchet, in the sense of `SPEC-LIT` 80.4: it is allowed to fall and never
-/// to rise. A module added tomorrow with no gate does not quietly join a
-/// list: it pushes this number past the ceiling and the tests stop, and
-/// raising the ceiling is an edit somebody has to defend in a diff.
+/// to rise. The debt is ZERO: the three modules that carried it stand as two
+/// gates - `the_simple_outer_corrector_replays_bitwise` and
+/// `the_pressure_backend_dispatch_replays_bitwise` - and one measured
+/// refusal, `src/pressure/fft.rs`. A module that lands tomorrow without a
+/// gate does not quietly join a list: it has to defend a rise from zero in
+/// its own diff, and raising this ceiling is exactly that edit.
 ///
-/// Back at 3. The rise to 4 was defended in the diff that made it, for
+/// The rise to 4 was defended in the diff that made it, for
 /// `src/models/menter_gamma.rs` (SPEC-LIT 90) before anything could ATTACH
 /// the model; the wiring has since landed, the model rides inside the SST
 /// `correct`, and `the_gamma_transition_correction_replays_bitwise` gates
 /// it - which is the fall the ratchet exists to record.
-pub const UNGATED_CEILING: usize = 3;
+pub const UNGATED_CEILING: usize = 0;
 
 // ==========================================================================
 //  81.8  The population, read off disk

@@ -958,6 +958,46 @@ mod tests {
         }
     }
 
+    /// What is refused, and why: `FftBackend::solve` DOWNLOADS the matrix to
+    /// the host on every call - `upper` always, `diag` and `lower` under the
+    /// default `Verify::EverySolve` - and re-derives the operator on the HOST,
+    /// then writes the three eigenvalue tables from the host. Both
+    /// `Gpu::download` and `Gpu::write` are refused inside a capture, by name.
+    /// The alternative is a frozen mode that keeps the tables resident and
+    /// trusts the structure instead of re-reading it, which would delete the
+    /// per-solve operator check this backend exists to make; it is not
+    /// implemented, so the refusal stands and is measured here rather than
+    /// asserted.
+    #[test]
+    fn the_cufft_solve_is_not_capturable_and_says_which_call() {
+        let Some(sys) = build([9, 6, 4], Vec3::new(0.30, 0.25, 0.50), &[1], 4321) else { return };
+        let mut fftb = FftBackend::new().with_residual_report(false);
+        // No cuFFT on this machine is not a failure of this claim.
+        if !fftb.applicable(&sys.probe) {
+            return;
+        }
+        fftb.setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe).expect("fft setup");
+        let mut psi: DevBuf<Scalar> = sys.gpu.zeros(sys.hm.n_cells).expect("psi");
+        fftb.solve(&sys.gpu, &mut psi, &sys.a, &sys.m).expect("one eager solve");
+        sys.gpu.sync().expect("sync");
+
+        let err = match sys.gpu.capture(|_| {
+            fftb.solve(&sys.gpu, &mut psi, &sys.a, &sys.m).map(|_| ())
+        }) {
+            Ok(_) => panic!(
+                "the cuFFT solve CAPTURED. If it no longer reads the operator back to \
+                 the host, src/pressure/fft.rs should be promoted from Refused to Gate \
+                 in the capture registry, and `§81.11` says the opposite"
+            ),
+            Err(e) => e.to_string(),
+        };
+        println!("  refused, naming the call: {err}");
+        assert!(
+            err.contains("Gpu::download"),
+            "the cuFFT solve must be refused by the download guard, naming the call - got: {err}"
+        );
+    }
+
     /// The sides the backend infers from the coefficients have to be the sides
     /// the boundary conditions actually set. This is the step that would fail
     /// silently: an operator with the wrong end conditions is still a perfectly

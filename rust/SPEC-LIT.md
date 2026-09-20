@@ -20675,9 +20675,10 @@ Four checks, and they fail closed in four different ways.
    a terminal, cycles and dangling owners are errors, and a chain ending at
    `Ungated` makes the *pointing* row ungated too. A new module cannot hide
    behind an owner that has none.
-4. **The debt is capped and only falls.** `UNGATED_CEILING = 3`. Raising it is
-   an edit somebody has to defend in a diff — §80.4's ratchet, applied to
-   coverage instead of citations.
+4. **The debt is capped and only falls.** `UNGATED_CEILING = 0`, and the debt
+   it caps is zero: every module that carried it is now two gates and one
+   measured refusal. Raising it is an edit somebody has to defend in a diff —
+   §80.4's ratchet, applied to coverage instead of citations.
 
 What it does **not** stop: a gate whose `state` closure reads one buffer of the
 five its module writes. That is real, and it is why the protocol's own doc says
@@ -20700,7 +20701,7 @@ that; only reading the gate can.
 
 ### 81.9 The gates, and what they measured
 
-Thirty-seven of fifty-four modules resolved to gated when this was measured, on
+Thirty-six of fifty-two modules resolved to gated when this was measured, on
 an RTX 5070 Ti, CUDA 13.3, default `f64`; `nodes` is `GraphShape::total`, and
 every row replayed three times bit for bit. The counts are a dated measurement
 and §81.14 carries the census as it stands now; the table is quoted for the
@@ -20708,7 +20709,9 @@ SHAPE of the population, which is what does not move.
 
 | module | gate | nodes (kernel / memset) | values compared |
 |---|---|---|---|
+| `simple.rs` | `the_simple_outer_corrector_replays_bitwise` | 523 (479 / 44) | 560 |
 | `solver.rs` | `the_fixed_iteration_solve_replays_bitwise` | 118 (107 / 11) | 29 |
+| `pressure/mod.rs` | `the_pressure_backend_dispatch_replays_bitwise` | 55 (52 / 3) | 64 |
 | `models/k_epsilon.rs` | `a_fixed_iteration_correct_captures_into_a_cuda_graph` | — (pre-existing) | 64 |
 | `parcels.rs`, `parcels/couple.rs`, `parcels/deposit.rs` | three pre-existing gates | — | — |
 | `momentum.rs` | `the_momentum_predictor_replays_bitwise` | 384 (351 / 33) | 192 |
@@ -20725,6 +20728,7 @@ SHAPE of the population, which is what does not move.
 | `psychro.rs` | `the_psychrometric_update_replays_bitwise` | 1 | 320 |
 | `models/des.rs` | `the_des_correction_replays_bitwise` | 1 | 192 |
 | `fan.rs` | `the_fan_source_replays_bitwise` | 1 | 37 |
+| `pressure/fft.rs` | — refused, the per-solve operator read-back (§81.11) | — | — |
 
 **Four of the five pre-existing gates already compared bitwise. The fifth did
 not, and it was `solver.rs`'s** — the module the whole claim rests on.
@@ -20776,9 +20780,9 @@ residual really is zero". Reporting the two as the same number is the confusion
 ### 81.11 The refusals, measured rather than asserted
 
 A refusal written only in prose decays: the module is fixed, or made worse, and
-the sentence beside it stays the same. Both below are **executed**, and each
-must fail *naming the call that makes it impossible*. If either starts to
-succeed, the test fails and says which registry row to promote.
+the sentence beside it stays the same. All three below are **executed**, and
+each must fail *naming the call that makes it impossible*. If any one of them
+starts to succeed, the test fails and says which registry row to promote.
 
 **(a) `vof.rs` — a data-dependent trip count.** `Vof::step` computes the alpha
 Courant number on the device, **downloads it**, and derives from it the MULES
@@ -20802,6 +20806,19 @@ refusal wearing the wrong name. **The consequence for a case is concrete:
 choosing `PCG` in `fvSolution` costs that equation its CUDA graph, whatever
 `fixed_iters` says.** `cht.rs`'s own default controls select `PCG` + `DIC`, and
 its gate therefore runs `PBiCGStab` + `DILU`.
+
+**(c) `pressure/fft.rs` — a safety check that lives on the host.**
+`FftBackend::solve` **downloads** the matrix on every call — `upper` always,
+`diag` and `lower` under the default `Verify::EverySolve` — re-derives the whole
+operator from the download, and then **writes** the three eigenvalue tables
+back from the host. Both calls are refused inside a capture, by name.
+`the_cufft_solve_is_not_capturable_and_says_which_call` runs one eager solve
+and then requires the second to be refused naming `Gpu::download`. The
+alternative is a *frozen* mode — eigenvalue tables resident, plans fixed, the
+structure trusted instead of re-read — which would remove the per-solve
+operator check this backend exists to make: the check is what stands between a
+changed boundary condition and a smooth, plausible, wrong pressure field. It is
+not implemented, so the refusal stands.
 
 `adapt.rs` is refused for a different reason again, and it is the only one that
 is not about the host: AMR *reallocates* every cell-sized buffer, and a captured
@@ -20872,9 +20889,9 @@ never the consideration.
 | 5 | every device module is classified | `every_device_module_is_classified`: population(disk) `==` registry keys, both directions |
 | 6 | a gate names a test that exists and captures | `every_gate_names_a_test_that_runs_the_protocol` |
 | 7 | `Via` terminates and cannot launder coverage | `every_via_chain_terminates`; a chain ending at `Ungated` counts as ungated |
-| 8 | the ungated debt only falls | `the_ungated_debt_is_within_the_published_ceiling`, ceiling 3 |
+| 8 | the ungated debt only falls | `the_ungated_debt_is_within_the_published_ceiling`, ceiling 0 |
 | 9 | `launch_builder` is the only launch path | `no_other_launch_path` |
-| 10 | the refusals are refusals **today** | `the_refusal_is_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call` |
+| 10 | the refusals are refusals **today** | `the_refusal_is_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call`, `the_cufft_solve_is_not_capturable_and_says_which_call` |
 | 11 | defaults are bitwise unchanged | by construction: `mod capture` is `#[cfg(test)]`; the guard adds a relaxed atomic load and no arithmetic; §81.10's report flag defaults to on |
 
 ### 81.14 Validation
@@ -20882,31 +20899,28 @@ never the consideration.
 The registry as the tests print it:
 
 ```
-  CUDA-graph capture registry (48 modules)
-     32  gated
-     10  refused, by name
-      3  outside the iteration
-      3  UNGATED
-    ungated: src/pressure/fft.rs, src/pressure/mod.rs, src/simple.rs
+  CUDA-graph capture registry (52 modules)
+     36  gated
+      4  outside the iteration
+     12  refused, by name
 ```
 
-It read `50 / 36 / 10 / 1 / 3` when §81 was written and the difference is not a
-regression: the population is derived from disk, so it moves as the tree does,
-three rows that were miscounted as one `outside` are three, and the ungated
-debt is where it was. The ceiling only falls, and it did not have to.
+It read `50 / 36 / 10 / 1 / 3` when §81 was written, and `3 UNGATED` right up
+until the debt went to zero: the population is derived from disk, so it moves
+as the tree does. The ceiling only falls, and the fall to `0 ungated` is the
+one this ratchet exists to record.
 
-The three ungated, named because they should be:
-
-* `src/simple.rs` — the SIMPLE outer loop. The binaries capture it live
-  (`bin/plume.rs`, `bin/buoyant.rs`), and every piece it calls is gated
-  separately, but it has no gate of its own because building a SIMPLE case in a
-  unit test means building a case directory;
-* `src/pressure/mod.rs` — the backend selector. It dispatches to the Krylov
-  solve, which `solver.rs` gates, or to the cuFFT Poisson solve;
-* `src/pressure/fft.rs` — `Via` the selector. cuFFT executes on this crate's
-  stream and *should* capture, but nothing has captured it and cuFFT plan
-  execution is library code this crate does not control. This is the honest
-  gap, and it is the one worth closing next.
+The three ungated were closed one by one, each by name. `src/simple.rs` — the
+SIMPLE outer loop the binaries capture live — is gated by
+`the_simple_outer_corrector_replays_bitwise`: a driven box whose lid moves `U`
+in more than half the cells before anything is compared, five buffers read back
+per iteration. `src/pressure/mod.rs` — the backend selector — is gated by
+`the_pressure_backend_dispatch_replays_bitwise`: a solve through
+`&mut dyn PressureBackend`, the trait-object call every real driver makes. And
+`src/pressure/fft.rs`, which rode `Via` the selector, turned out not to be
+uncaptured but uncapturable: its per-solve operator read-back is refused by
+name, §81.11(c) records why, and it stands as a measured refusal rather than a
+gate.
 
 ### 81.15 What this does not do
 
@@ -20919,9 +20933,13 @@ The three ungated, named because they should be:
   k-epsilon, across mesh size and launch count, and the mechanism it isolates —
   launches per unit of GPU work — is not module-specific. A per-module table
   would need a per-module case and is not here.
-* **It does not fix the three refusals.** Two are structural and one is a
-  correctness check that belongs where it is. All three name their alternative;
-  none of the alternatives is implemented.
+* **It does not fix the refusals.** There are more of them now than when
+  §81.11 first measured two — the newest is `pressure/fft.rs`, whose per-solve
+  operator read-back makes the cuFFT path uncapturable (§81.11(c)) — and the
+  count moves with the tree. Two are structural, one is a correctness check
+  that belongs where it is, and one is a safety check this document declined to
+  trade away for a gate. All of them name their alternative; none of the
+  alternatives is implemented.
 * **It cannot see a module that never joins an iteration.** A kernel launched
   only from a binary, never from a module, is outside the population by
   construction — which is correct, and is also a place to hide.

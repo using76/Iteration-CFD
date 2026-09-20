@@ -812,3 +812,93 @@ fn a_pcg_solve_is_not_capturable_and_says_which_call() {
         );
     }
 }
+
+// ----------------------------------------------------------------------
+//  The pressure backend dispatch
+// ----------------------------------------------------------------------
+
+/// The selector, not the solver. `the_fixed_iteration_solve_replays_bitwise`
+/// proves the Krylov solve captures; what this gate adds is the seam the
+/// SIMPLE loop and every driver actually call - a solve reached through
+/// `&mut dyn PressureBackend`, the trait object `choose_pressure_backend`
+/// hands back. The selector dispatches that call to the Krylov solve (what
+/// `src/solver.rs` gates) or to cuFFT, and the point here is that the
+/// TRAIT-OBJECT call itself records into the graph: the shape every real
+/// driver uses. The matrix is built by hand on the 4x4x4 box, diagonally
+/// dominant WITH off-diagonals, so two fixed sweeps do real work - and as
+/// everywhere in this file the test measures that a solve moves the field
+/// before it asserts that a replay reproduces it.
+#[test]
+fn the_pressure_backend_dispatch_replays_bitwise() {
+    use crate::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
+    use crate::solver::{LinearSolverKind, Preconditioner, SolverControls};
+
+    let Some(gpu) = gpu() else { return };
+    let hm = box4();
+    let mesh = GpuMesh::upload(&gpu, &hm).expect("mesh");
+    let n = hm.n_cells;
+
+    let ctrl = SolverControls {
+        solver: LinearSolverKind::PBiCGStab,
+        precon: Preconditioner::Diagonal,
+        tolerance: 1e-14,
+        rel_tol: 0.0,
+        max_iter: 2,
+        fixed_iters: true,
+        report_residuals: false,
+        ..Default::default()
+    };
+
+    let build = || {
+        let mut backend = PbicgstabBackend::new(ctrl);
+        backend.setup(&gpu, &hm, &mesh, &SystemProbe::default())?;
+        let mut a = crate::ldu::GpuLduMatrix::new(&gpu, &mesh)?;
+        a.zero(&gpu)?;
+        gpu.write(&mut a.diag, &vec![4.0 as Scalar; n])?;
+        let off = vec![-0.5 as Scalar; hm.n_internal_faces];
+        gpu.write(&mut a.upper, &off.clone())?;
+        gpu.write(&mut a.lower, &off)?;
+        let src: Vec<Scalar> = (0..n).map(|i| 0.5 + 0.25 * ((i % 7) as Scalar)).collect();
+        gpu.write(&mut a.source, &src)?;
+        let p = gpu.zeros(n)?;
+        Ok((backend, a, p))
+    };
+
+    // Does one solve move the field? Without this the comparison below is a
+    // statement about a constant.
+    {
+        let mut m = build().expect("build");
+        let before = gpu.download(&m.2).expect("p before");
+        let b: &mut dyn PressureBackend = &mut m.0;
+        b.solve(&gpu, &mut m.2, &m.1, &mesh).expect("solve one");
+        let b: &mut dyn PressureBackend = &mut m.0;
+        b.solve(&gpu, &mut m.2, &m.1, &mesh).expect("solve two");
+        let after = gpu.download(&m.2).expect("p after");
+        let moved = before
+            .iter()
+            .zip(&after)
+            .filter(|(x, y)| x.to_bits() != y.to_bits())
+            .count();
+        assert!(
+            moved > n / 2,
+            "only {moved} of {n} cells moved in two pressure-backend solves: \
+             a bitwise replay comparison over a field that does not move \
+             holds for a graph that launched nothing - SPEC-LIT §81.5"
+        );
+    }
+
+    let report = capture_replays_bitwise(
+        &gpu,
+        "pressure backend dispatch (SPEC-LIT §81.9)",
+        build,
+        |m: &mut (PbicgstabBackend, crate::ldu::GpuLduMatrix, DevBuf<Scalar>)| {
+            let b: &mut dyn PressureBackend = &mut m.0;
+            b.solve(&gpu, &mut m.2, &m.1, &mesh).map(|_| ())
+        },
+        |(_, _, p): &(PbicgstabBackend, crate::ldu::GpuLduMatrix, DevBuf<Scalar>)| {
+            Ok(vec![buf(&gpu, "p", p)?])
+        },
+    )
+    .expect("SPEC-LIT §81.7: the pressure backend dispatch must capture and replay bitwise");
+    println!("  pressure backend: {report}");
+}
