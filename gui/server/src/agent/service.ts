@@ -4,12 +4,13 @@
 import fsp from 'node:fs/promises'
 import type { BetaContentBlockParam, BetaMessageParam, BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import type { ChatRequest, ChatResponse, ClientMsg, ClientMsgOf, CustomToolSummary, PendingApproval, ServerMsg, SessionSettings, SessionState, SessionSummary, UiBlock, UiMessage, UserContext } from '@cfd/shared'
-import { CHAT_TIMEOUT_DEFAULT_MS } from '@cfd/shared'
+import { activeTurnWarning, CHAT_TIMEOUT_DEFAULT_MS } from '@cfd/shared'
 import { attachmentObjectBlocks, dehydrateAttachmentImages, MAX_ATTACHMENT_IDS, visionMode } from '../attachments/blocks.js'
 import { looksBinary } from '../attachments/sniff.js'
 import { createAttachmentStore } from '../attachments/store.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
+import type { Logger } from '../log.js'
 import type { RunManager } from '../runs/types.js'
 import { loadCustomTools } from '../tools/custom.js'
 import { mergeTools } from '../tools/defaults.js'
@@ -28,6 +29,10 @@ import { buildQuickMessage } from './quick.js'
 import { createZaiClient } from './zai.js'
 import { appendUserTurn, createSessionStore, newId, stateOf, summaryOf, type SessionRecord, type SessionStore } from './session.js'
 import { ChatError, type AgentService } from './types.js'
+
+// The warning's wording lives in @cfd/shared so the web reducer's test can assert the same
+// string the server sends; every existing importer still reads it from this module.
+export { activeTurnWarning }
 
 export interface AgentServiceDeps {
   config: ServerConfig
@@ -471,8 +476,20 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
   }
 }
 
-/** The one line a going-down server owes a session whose turn is still running: to the log
- *  and to that session's window, so the restart tsx watch is about to do is not a mystery. */
-export function activeTurnWarning(turn: { sessionId: string; turnId: string }): string {
-  return `turn ${turn.turnId} of session ${turn.sessionId} is active; restarting the server kills it (no server-code edits while a turn is running)`
+/** What a going-down server does about turns that are still running: one line per turn, to the
+ *  log at `warn` and to that turn's own session window as a non-fatal `error` frame, BEFORE the
+ *  hub closes. Returns the lines it sent, in order, so a caller (and a test) can see them. */
+export function warnActiveTurns(
+  agent: Pick<AgentService, 'activeTurns'> | null | undefined,
+  hub: Pick<Hub, 'sendToSession'>,
+  log: Pick<Logger, 'warn'>,
+): string[] {
+  const lines: string[] = []
+  for (const turn of agent?.activeTurns() ?? []) {
+    const line = activeTurnWarning(turn)
+    log.warn(line)
+    hub.sendToSession(turn.sessionId, { t: 'error', message: line, fatal: false })
+    lines.push(line)
+  }
+  return lines
 }

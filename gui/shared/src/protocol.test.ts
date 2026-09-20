@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHAT_TIMEOUT_MAX_MS, ChatRequestSchema, ClientMsgSchema, GpuStateSchema, REST, RunInfoSchema, ServerMsgSchema, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
+import { CHAT_TIMEOUT_MAX_MS, ChatRequestSchema, ClientMsgSchema, GpuStateSchema, REST, RunInfoSchema, ServerMsgSchema, activeTurnWarning, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
 
 // A wire frame must survive JSON.stringify -> parse -> zod parse unchanged:
 // that is exactly the path every message takes in the browser and the server.
@@ -169,5 +169,14 @@ describe('gpu state', () => {
     expect(GpuStateSchema.safeParse({ state: 'ready', name: 'x', memUsedMB: 1, memTotalMB: 2, source: 'nvidia-smi' }).success).toBe(true)
     const frame = { t: 'gpu' as const, gpu: { state: 'busy' as const, name: 'x', memUsedMB: 1, memTotalMB: 2, source: 'nvidia-smi' as const, processes: [{ pid: 7, name: 'a.exe', memUsedMB: null }], processCount: 1 } }
     expect(roundTripServer(frame)).toEqual(frame)
+  })
+})
+
+describe('activeTurnWarning', () => {
+  it('is the exact line a going-down server owes an active turn, naming both ids', () => {
+    const line = activeTurnWarning({ sessionId: 's_1', turnId: 't_1' })
+    expect(line).toBe('turn t_1 of session s_1 is active; restarting the server kills it (no server-code edits while a turn is running)')
+    expect(line).toContain('t_1')
+    expect(line).toContain('s_1')
   })
 })

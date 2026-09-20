@@ -3,7 +3,7 @@
 // run/gpu/problems/watcher events wired into the hub.
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
-import { activeTurnWarning, createAgentService } from './agent/service.js'
+import { createAgentService, warnActiveTurns } from './agent/service.js'
 import { ChatError, type AgentService } from './agent/types.js'
 import { loadConfig, type ServerConfig } from './config.js'
 import { createLlmSettingsHandle, loadLlmSettings, resolveEffectiveLlm } from './agent/llmSettings.js'
@@ -201,11 +201,7 @@ export async function startStudioServer(config: ServerConfig = loadConfig(), log
       await watcher?.close()
       // A session whose turn is still running learns why the socket died: the same
       // line goes to the log and to that session's window, before close() cuts them.
-      for (const turn of agent?.activeTurns() ?? []) {
-        const line = activeTurnWarning(turn)
-        log.warn(line)
-        hub.sendToSession(turn.sessionId, { t: 'error', message: line, fatal: false })
-      }
+      warnActiveTurns(agent, hub, log)
       hub.close()
       await httpServer.close()
       await runs.shutdown()

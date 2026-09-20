@@ -994,3 +994,9 @@ export const ChatResponseSchema = z.object({
   runs: z.array(z.string()),
 })
 export type ChatResponse = z.infer<typeof ChatResponseSchema>
+
+/** The one line a going-down server owes a session whose turn is still running: to the log
+ *  and to that session's window, so the restart tsx watch is about to do is not a mystery. */
+export function activeTurnWarning(turn: { sessionId: string; turnId: string }): string {
+  return `turn ${turn.turnId} of session ${turn.sessionId} is active; restarting the server kills it (no server-code edits while a turn is running)`
+}
