@@ -207,7 +207,10 @@ a { color: var(--accent); }
 .diff-del { color: var(--danger); font-weight: 600; }
 
 /* ---- viewer tab ----------------------------------------------------------- */
-.viewer-tab { flex: 1; min-height: 0; position: relative; background: var(--bg-panel); }
+/* display:flex unconditionally, not only when .split: a single .viewer-pane is
+   flex:1 with no height of its own, and .v3d inside it is position:absolute, so a
+   block .viewer-tab collapsed the unsplit viewport to zero height. */
+.viewer-tab { flex: 1; min-height: 0; position: relative; display: flex; background: var(--bg-panel); }
 .viewer-tab.split { display: flex; }
 .viewer-pane { flex: 1; min-width: 0; position: relative; }
 .viewer-tab.split .viewer-pane.focused { outline: 2px solid var(--accent); outline-offset: -2px; }
