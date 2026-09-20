@@ -425,7 +425,10 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
     fill is applied only if it leaves every one of its new triangles'
     undirected edges used at most twice (the use tally is counted once,
     before the walk; a clipped loop's whole candidate fan is tallied
-    before any of it is committed)."""
+    before any of it is committed).  A candidate triangle with zero area
+    at float64 - the same exact test the input degenerate drop applies -
+    is refused with its whole loop, so the tool never writes a triangle
+    it would itself drop on the way back in."""
     a, b, key = _edge_key(T, nP)
     uk, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
     use = dict(zip(uk.tolist(), counts.tolist()))
@@ -476,6 +479,14 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
                                  'reason': 'filling it would make %d edge(s) non-manifold'
                                            % bad})
                 continue
+            zc = np.cross(P[loop[1]] - P[loop[0]], P[loop[2]] - P[loop[0]])
+            if bool(np.all(zc == 0.0)):
+                unfilled.append({'edges': m, 'reason':
+                                 'filling it would add 1 zero-area triangle(s)'})
+                per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
+                                 'reason': 'filling it would add 1 zero-area '
+                                           'triangle(s)'})
+                continue
             owner = int(e0) // 3
             newT.append((loop[2], loop[1], loop[0]))
             newP.append(int(tri_patch[owner]))
@@ -506,6 +517,16 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
                 per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
                                  'reason': 'filling it would make %d edge(s) '
                                            'non-manifold' % bad})
+                continue
+            ta = np.asarray(tris, dtype=np.int64)
+            zc = np.cross(P[ta[:, 1]] - P[ta[:, 0]], P[ta[:, 2]] - P[ta[:, 0]])
+            nz = int(np.count_nonzero(np.all(zc == 0.0, axis=1)))
+            if nz:
+                unfilled.append({'edges': m, 'reason':
+                                 'filling it would add %d zero-area triangle(s)' % nz})
+                per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
+                                 'reason': 'filling it would add %d zero-area '
+                                           'triangle(s)' % nz})
                 continue
             owner = int(e0) // 3
             newT.extend(tris)

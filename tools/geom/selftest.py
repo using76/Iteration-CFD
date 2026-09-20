@@ -833,7 +833,70 @@ def test_repair_orient_partner(top):
     assert sr._orient(Tf, P, 8) == (1, 0, [], 0), 'one flip, no re-seed'
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner)
+def test_repair_zero_area_fill(top):
+    """The fill used to commit a triangle with zero area at float64 - a
+    triangle this tool's own reader drops on the way back in - so the
+    file it delivered did not have the open-edge count the run reported
+    (on c42 the run claimed 7,084 open edges while a re-read of the file
+    it wrote found 7,138 and dropped 18 degenerates).  Both commit sites
+    are pinned here: the one-triangle branch (part A) and the ear-clipped
+    branch's unguarded final triple (parts B and C)."""
+    d = work(top, 'repair_zero_area_fill')
+    A = (0.0, 0.0, 0.0)
+    B = (1.0, 0.0, 0.0)
+    C = (2.0, 0.0, 0.0)
+    D = (0.0, 1.0, 0.0)
+    E = (1.0, 0.5, 1.0)
+    ZA = 'filling it would add 1 zero-area triangle(s)'
+    src = os.path.join(d, 'fan3.stl')
+    write_stl_ascii(src, [('fan3', [(A, B, D), (B, C, D), (C, A, D)])])
+    out = os.path.join(d, 'fan3_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r3.json'))
+    rep = load(os.path.join(d, 'r3.json'))
+    assert rep['before'] == {'open_edges': 3, 'non_manifold_edges': 0,
+                             'closed': False}, rep['before']
+    assert rep['degenerate_dropped'] == 0 and rep['triangles_out'] == 3, rep
+    h = rep['holes']
+    assert h['filled'] == 0 and h['filled_triangles'] == 0, h
+    assert len(h['unfilled']) == 1 and h['unfilled'][0]['edges'] == 3, h
+    assert h['unfilled'][0]['reason'] == ZA, h['unfilled']
+    assert h['per_hole'] == [{'edges': 3, 'outcome': 'skipped', 'triangles': 0,
+                              'reason': ZA}], h['per_hole']
+    assert h['per_hole'][0]['reason'] == h['unfilled'][0]['reason'], h
+    assert rep['after'] == {'open_edges': 3, 'non_manifold_edges': 0,
+                            'closed': False, 'volume': None}, rep['after']
+    repair(out, '--json', os.path.join(d, 'r3b.json'))
+    rep2 = load(os.path.join(d, 'r3b.json'))
+    assert rep2['before']['open_edges'] == 3 and rep2['degenerate_dropped'] == 0, rep2
+    src4 = os.path.join(d, 'fan4.stl')
+    write_stl_ascii(src4, [('fan4', [(D, A, E), (A, B, E), (B, C, E), (C, D, E)])])
+    out4 = os.path.join(d, 'fan4_r.stl')
+    repair(src4, '--out', out4, '--json', os.path.join(d, 'r4.json'))
+    rep4 = load(os.path.join(d, 'r4.json'))
+    assert rep4['before'] == {'open_edges': 4, 'non_manifold_edges': 0,
+                              'closed': False}, rep4['before']
+    h4 = rep4['holes']
+    assert h4['filled'] == 0 and rep4['triangles_out'] == 4, (h4, rep4['triangles_out'])
+    assert rep4['degenerate_dropped'] == 0, rep4
+    assert len(h4['unfilled']) == 1 and h4['unfilled'][0]['edges'] == 4, h4
+    assert h4['unfilled'][0]['reason'] == ZA, h4['unfilled']
+    assert h4['unfilled'][0]['reason'] == h4['per_hole'][0]['reason'], h4
+    assert rep4['after']['open_edges'] == 4 and rep4['after']['closed'] is False, rep4['after']
+    repair(out4, '--json', os.path.join(d, 'r4b.json'))
+    rep4b = load(os.path.join(d, 'r4b.json'))
+    assert rep4b['before']['open_edges'] == 4 and rep4b['degenerate_dropped'] == 0, rep4b
+    sys.path.insert(0, os.path.dirname(GEOM_TOOL))
+    import numpy as np
+    import stl_repair as sr
+    P = np.array([A, B, C, D], dtype=float)
+    clipped = sr._clip_loop(P, [3, 0, 1, 2])
+    assert clipped == [(0, 3, 2), (2, 1, 0)], clipped
+    ta = np.asarray(clipped, dtype=np.int64)
+    zc = np.cross(P[ta[:, 1]] - P[ta[:, 0]], P[ta[:, 2]] - P[ta[:, 0]])
+    assert int(np.count_nonzero(np.all(zc == 0.0, axis=1))) == 1, zc
+
+
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill)
 
 
 def main(argv=None):

@@ -179,10 +179,15 @@ Limits: the weld tolerance is a geometry EDIT — the tool prints `max_move`,
 the largest distance any corner moved, and the user decides; near pairs can
 CHAIN (`a-b` and `b-c` merge `a` and `c` at up to twice the tolerance), and
 the representative is always a coordinate the file already had. A loop
-longer than `--max-hole-edges`, and a loop that is not simple in its own
-plane (ear clipping finds no ear), is named in `holes.unfilled` and never
-filled. Every closed shell is oriented outward — a cavity's shell is
-flipped outward too,
+longer than `--max-hole-edges`, a loop that is not simple in its own
+plane (ear clipping finds no ear), and a loop whose fill would add a
+triangle with zero area at float64 — the same exact test that drops a
+degenerate triangle on the way IN — are named in `holes.unfilled` and
+never filled; the zero-area refusal (`filling it would add N zero-area
+triangle(s)`) skips the loop whole rather than snapping, because filling
+it would have written a triangle this tool's own reader drops, so the
+file would not have the open-edge count the run reported. Every closed
+shell is oriented outward — a cavity's shell is flipped outward too,
 and no cavity is detected. Non-manifold edges are reported, never cut. The
 licence rule: the tool imports numpy (BSD-3) and scipy (BSD-3) only; gmsh
 (GPL-2.0-or-later) stays a separate program used by `info`/`export`/`edit`
@@ -223,11 +228,29 @@ the orientation pass reorients 15 triangles, refuses 55 flips
 (`left_alone`) and takes 274 extra seeds (`reseeded_patches`); the
 stages run input 13,854 open / 810 non-manifold, weld 13,854 / 810,
 orient 13,854 / 787 — the flips lower non-manifold by 23 — and fill
-7,084 / 787; the fill closes 504 loops with 5,762 triangles — 49 of them
-three-edge, 455 ear-clipped — and names 1,370 loops in `holes.unfilled`;
-exit 0.  The file is still not closed, with 7,084 open edges: 87 loops
+7,138 / 787; the fill closes 486 loops with 5,744 triangles — 31 of them
+three-edge, 455 ear-clipped — and names 1,388 loops in `holes.unfilled`;
+exit 0.  The file is still not closed, with 7,138 open edges: 87 loops
 longer than `--max-hole-edges` 32 (4,364 edges), 1,230 walks that hit a
 boundary vertex without exactly one unused outgoing open edge (2,048
 edges), 43 loops whose clipped fan would make an edge non-manifold (542
-edges) and 10 loops with no ear (130 edges), so `ofgpu-generate-mesh`
-still refuses it without `-permissive`.
+edges), 10 loops with no ear (130 edges) and 18 loops whose fill would
+add a zero-area triangle (54 edges) — the five families' edges sum to
+7,138 — so `ofgpu-generate-mesh` still refuses it without
+`-permissive`.  Re-reading the file the run wrote reports the same
+7,138 open edges and 0 degenerate triangles dropped, because the fill
+never writes a triangle the reader would drop.
+
+`--max-hole-edges` is a trade, not a bug report: on the same
+`c42-f1.stl`, `python tools/geom/geom_tool.py repair <file>.stl
+--max-hole-edges 256 --out ... --json ...` (the default stays 32) fills
+561 loops with 9,094 triangles and takes the open-edge total from 7,138
+to 3,638 — the 87 loops longer than the default limit go to 0, at the
+cost of 3,350 more triangles written — while the refusal families grow
+because longer loops are harder to clip without pushing an edge to three
+uses: the non-manifold family rises from 43 loops / 542 edges to 50 / 894
+and the no-ear family from 10 / 130 to 15 / 642, the non-manifold edge
+count itself is unchanged at 787, and the zero-area family is unchanged
+at 18 loops / 54 edges.  A bigger limit closes more of the surface at
+the cost of more ear-clipped triangles and more loops that fail the
+manifold and ear tests, and the default stays 32.
