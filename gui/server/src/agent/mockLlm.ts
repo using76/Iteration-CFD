@@ -145,13 +145,14 @@ export function extractFacts(messages: BetaMessageParam[]): Facts {
 // The script
 // ---------------------------------------------------------------------------
 
-type Scenario = 'refuse' | 'long' | 'error' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'run' | 'default'
+type Scenario = 'refuse' | 'long' | 'error' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'run' | 'default'
 
 export function detectScenario(text: string): Scenario {
   const t = text.toLowerCase()
   if (t.includes('refuse-test')) return 'refuse'
   if (t.includes('long-test')) return 'long'
   if (t.includes('error-test')) return 'error'
+  if (t.includes('split-test')) return 'split'
   // first of the natural arms: every ontology prompt also carries a word a later
   // arm claims (case, run, mesh, show) and the ladder returns on the first match
   if (/\bontology\b|온톨로지/.test(t)) return 'ontology'
@@ -293,6 +294,38 @@ function scenarioRun(f: Facts): MockPlan {
   }
   const wait = [...f.results].reverse().find((r) => r.name === 'run_wait')
   return done([text(wait ? runSummaryText(ko, wait.data) : ko ? '실행 결과를 확인하지 못했습니다.' : 'The run result could not be read.')])
+}
+
+/** The 2-D synthetic channel every viewer half can open without a server: one of
+ *  the two datasets `getViewerController` builds its SyntheticTransport with. Half
+ *  A already holds the 3-D one, so opening this into half B gives the two halves
+ *  two different dataset ids and nothing has to exist on disk. */
+const SPLIT_DEMO_RESULT = 'demo://channel2d'
+
+/**
+ * The split-viewport scenario: one gui_control per turn, split_view then a
+ * result into half B then link_cameras, advancing on the last result's command
+ * type exactly as the viewer scenario does. It exists so the comparison
+ * commands can be driven in a real browser by a test instead of by a person at
+ * a keyboard; demo mode only, and it changes nothing a real model can reach.
+ */
+function scenarioSplit(f: Facts): MockPlan {
+  const ko = f.korean
+  const last = f.lastResult
+  if (!last) {
+    return useTools([
+      text(ko ? '뷰포트를 둘로 나눕니다.' : 'Splitting the viewport into two halves.'),
+      tool('gui_control', { type: 'split_view', on: true }),
+    ])
+  }
+  if (last.name === 'gui_control' && !last.ok) {
+    const code = String((last.data.error as { code?: string } | undefined)?.code ?? '')
+    return done([text(ko ? `화면 전환에 실패했습니다: ${code}` : `The screen could not be switched: ${code}`)])
+  }
+  const type = String(last.input.type ?? '')
+  if (type === 'split_view') return useTools([tool('gui_control', { type: 'open_result_in_view', view: 'B', path: SPLIT_DEMO_RESULT, timeIndex: null })])
+  if (type === 'open_result_in_view') return useTools([tool('gui_control', { type: 'link_cameras', on: true })])
+  return done([text(ko ? '뷰포트를 나누고 오른쪽 화면에 결과를 연 뒤 카메라를 연동했습니다.' : 'The viewport is split, the second result is open in the right half and the two cameras are linked.')])
 }
 
 /**
@@ -476,6 +509,8 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
         return { blocks: [], stopReason: 'end_turn', throwError: new Anthropic.RateLimitError(429, { type: 'error', error: { type: 'rate_limit_error', message: 'mock rate limit' } }, 'mock rate limit', new Headers()) }
       }
       return done([text(f.korean ? '재시도 후 정상적으로 응답했습니다.' : 'Recovered after the retry; this is the normal answer.')])
+    case 'split':
+      return scenarioSplit(f)
     case 'ontology':
       return scenarioOntology(f)
     case 'shell':

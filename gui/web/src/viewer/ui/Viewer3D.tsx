@@ -72,8 +72,15 @@ export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps)
         // Dev only: the controller that actually owns a canvas, published so a
         // script can drive the viewer the way the assistant does. Importing the
         // module from outside is not enough -- an HMR pass gives the module a
-        // second URL and therefore a second, canvas-less singleton.
-        if (import.meta.env.DEV && viewId === 'A') (window as unknown as { __viewer?: ViewerController }).__viewer = controller
+        // second URL and therefore a second, canvas-less singleton. Both halves
+        // are published under their view id: with only the A half readable, the
+        // follower's camera is invisible to any test and a linked orbit cannot
+        // be checked at all. `__viewer` stays as the A alias it has always been.
+        if (import.meta.env.DEV) {
+          const published = window as unknown as Record<string, ViewerController>
+          published[`__viewer_${viewId}`] = controller
+          if (viewId === 'A') published.__viewer = controller
+        }
         const demo = demoDatasetPath()
         if (demo && !controller.dataset) void controller.execute({ type: 'load', path: demo, timeIndex: null, field: null })
       } catch (err) {
