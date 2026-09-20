@@ -1564,4 +1564,39 @@ mod tests {
         }
         crate::io::contract::set_permissive(false);
     }
+
+    /// SPEC-LIT §13.4.1: the refusal has to stop the run BEFORE the device
+    /// is touched. `setup` answers `Err` with `kernels` and `ws` still
+    /// `None` when the case asks for `solvers/p/solver GAMG`, and the
+    /// default controls still set both up.
+    #[test]
+    fn setup_refuses_gamg_on_the_pressure_equation_before_touching_the_device() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let Some(sys) = build([6, 4, 3], Vec3::new(0.3, 0.3, 0.3), &[1], 7) else {
+            return;
+        };
+        let mut be = PbicgstabBackend::new(SolverControls {
+            solver: solver::LinearSolverKind::Gamg,
+            ..SolverControls::default()
+        });
+        let e = be
+            .setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe)
+            .expect_err("GAMG must be refused before the device is touched")
+            .to_string();
+        assert!(e.contains("GAMG"), "{e}");
+        assert!(e.contains("AMGX"), "{e}");
+        assert!(
+            be.kernels.is_none() && be.ws.is_none(),
+            "a refused run must not have built a kernel or a workspace"
+        );
+
+        let mut ok = PbicgstabBackend::new(SolverControls::default());
+        ok.setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe)
+            .expect("the default controls must set up");
+        assert!(ok.kernels.is_some() && ok.ws.is_some());
+
+        crate::io::contract::set_permissive(false);
+    }
 }

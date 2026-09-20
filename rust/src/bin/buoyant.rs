@@ -2882,6 +2882,27 @@ mod buoyant_tests {
                 to: "    T\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;\n        tolerance       1e-02;\n        relTol          0.5;",
                 pre: NO_PRE,
             },
+            // SPEC-LIT 13.4.4: the pressure equation's own solver and
+            // preconditioner reach `crate::pressure::PbicgstabBackend`
+            // through `simple_ctrl.p_solver`, and `relTol 0.01` leaves the
+            // two Krylov methods (and the two preconditioners) at different
+            // iterates, so the written fields differ. PCG is legal on `p`:
+            // the pressure matrix is symmetric, which is why the generated
+            // block can ask for DIC at all (SPEC-LIT 8.2, 21).
+            Knob {
+                label: "solvers/p/solver",
+                file: "system/fvSolution",
+                from: "    p\n    {\n        solver          PBiCGStab;",
+                to: "    p\n    {\n        solver          PCG;",
+                pre: NO_PRE,
+            },
+            Knob {
+                label: "solvers/p/preconditioner",
+                file: "system/fvSolution",
+                from: "    p\n    {\n        solver          PBiCGStab;\n        preconditioner  DIC;",
+                to: "    p\n    {\n        solver          PBiCGStab;\n        preconditioner  diagonal;",
+                pre: NO_PRE,
+            },
             Knob {
                 label: "constant/physicalProperties Prt",
                 file: "constant/physicalProperties",

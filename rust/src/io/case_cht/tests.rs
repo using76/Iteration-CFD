@@ -3389,3 +3389,60 @@ fn a_preconditioner_of_none_lowers_to_none() {
 
     crate::io::contract::set_permissive(false);
 }
+
+/// **The §13.4.1 pair test for `numerics.preconditioner`, on two case
+/// DOCUMENTS differing in one entry (`DIC` vs `none`).** They are required
+/// to produce different output, and BOTH sides must still reproduce Gate 1:
+/// the preconditioner may change the path, not the answer a converged solve
+/// writes.
+#[test]
+fn two_cases_differing_only_in_the_preconditioner_produce_different_output() {
+    let Some(gpu) = gpu() else { return };
+
+    let a = default_slab();
+    let b = a.replace(
+        r#""preconditioner": "DIC""#,
+        r#""preconditioner": "none""#,
+    );
+    assert_ne!(a, b, "the two documents must actually differ");
+
+    let sa = solve(&gpu, &a);
+    let sb = solve(&gpu, &b);
+
+    let dt = sa
+        .t
+        .iter()
+        .zip(&sb.t)
+        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+    let n_a = sa.region_residuals.first().map_or(0, |r| r.n_iterations);
+    let n_b = sb.region_residuals.first().map_or(0, |r| r.n_iterations);
+    println!("preconditioner DIC vs none: dt={dt}");
+    println!("n_a={n_a} n_b={n_b}");
+    println!("residual a={} residual b={}", sa.residual, sb.residual);
+    assert!(
+        dt > 0.0 || n_a != n_b || sa.residual != sb.residual,
+        "the case said `preconditioner` and the solver ignored it (SPEC-LIT 13.4.1)"
+    );
+
+    // Gate 1 on BOTH sides, copied from `the_case_file_route_reproduces_gate_1`.
+    for (name, sol) in [("DIC", &sa), ("none", &sb)] {
+        let area: Scalar = sol
+            .mesh
+            .pairs
+            .iter()
+            .map(|p| sol.mesh.host.b_mag_sf[p.bf_a as usize])
+            .sum();
+        let q_got = -sol.interface.into_a / area;
+        let q_exact = (380.0 - 300.0) / (0.010 / 1.4 + 0.020 / 148.0);
+        println!("{name}: q_got/q_exact = {}", q_got / q_exact);
+        assert!(
+            (q_got / q_exact - 1.0).abs() < 1e-10,
+            "{name}: q = {q_got}, exact {q_exact}"
+        );
+        assert!(
+            sol.interface.imbalance() < 1e-10,
+            "{name}: interface imbalance {}",
+            sol.interface.imbalance()
+        );
+    }
+}
