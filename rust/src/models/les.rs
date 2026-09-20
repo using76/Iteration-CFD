@@ -10,8 +10,9 @@
 //!   Smagorinsky, *Mon. Weather Rev.* 91 (1963) 99-164
 //!   Nicoud & Ducros, *Flow Turbul. Combust.* 62 (1999) 183-200 - WALE
 //!   Deardorff, *Boundary-Layer Meteorol.* 18 (1980) 495-527, in the algebraic
-//!     form used by FDS (NIST, public domain; see `reference/fds`
-//!     `Source/velo.f90` and the FDS Technical Reference Guide), which
+//!     form used by FDS (NIST, public domain; `Source/velo.f90` and the FDS
+//!     Technical Reference Guide, read in a local `reference/fds` clone that
+//!     this repository does not carry), which
 //!     SPEC-LIT §6.5 names as the reference implementation
 //!   Lilly, in *Proc. IBM Sci. Comput. Symp. Environ. Sci.* (1967) - the value
 //!     of `C_s` that the inertial-range argument gives, and why the wall-bounded

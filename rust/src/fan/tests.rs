@@ -7,8 +7,10 @@
 // Provenance: ORIGINAL - the tests for SPEC-LIT S52 and S53. Every expected
 // number here is either a closed form derived in those sections, an identity
 // this code checks against itself, or a published reference value read out of
-// a PUBLIC-DOMAIN input deck (`reference/fds/Verification/HVAC/*.fds` and
-// their `.csv`, NIST, US Government public domain). No FDS SOURCE is read
+// a PUBLIC-DOMAIN input deck (`Verification/HVAC/*.fds` and their `.csv`,
+// NIST, US Government public domain) in a local `reference/fds` clone that
+// this repository does not carry; the numbers here are the transcription.
+// No FDS SOURCE is read
 // here - only its case files and their published results, which are data.
 // No GPL-licensed source was consulted.
 
@@ -140,14 +142,15 @@ fn gate_52a_the_quadratic_operating_point_is_where_the_two_curves_cross() {
 // ==========================================================================
 
 // answer-key: fds-fan-test
-/// `reference/fds/Verification/HVAC/fan_test.fds` + `fan_test.csv`.
+/// `Verification/HVAC/fan_test.fds` + `fan_test.csv`, read in a local FDS
+/// clone this repository does not carry.
 ///
 /// The fan duct there carries `LOSS=0,0`, so the fan's rise must equal the
 /// compartment pressure difference exactly. Evaluating the quadratic curve at
 /// FDS's own reported flow rate must reproduce FDS's own reported pressure.
 ///
-/// Constants are read out of the vendored case deck; **no FDS source is
-/// read**, only its input file and its published CSV, which are data.
+/// The constants below are transcribed from that case deck; **no FDS source
+/// is read**, only its input file and its published CSV, which are data.
 #[test]
 fn gate_52b_the_fds_fan_test_operating_point_is_reproduced() {
     // &HVAC ID='LEFT',TYPE_ID='FAN',MAX_FLOW=0.16,MAX_PRESSURE=10.

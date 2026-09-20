@@ -28,9 +28,10 @@
       Particles", Academic Press (1978) - the drag correlation, with the
       C_d = 24(0.85 + 0.15 Re^0.687)/Re continuity fix at Re = 1 that FDS uses
     K. McGrattan et al., "Fire Dynamics Simulator Technical Reference Guide",
-      NIST SP 1018-1 (NIST, US-Government public domain; reference/fds/
-      LICENSE.md read verbatim), chapter "Lagrangian Particles" and appendix
-      "Fluid-Particle Momentum Transfer" - the EXPONENTIAL integration of the
+      NIST SP 1018-1 (NIST, US-Government public domain; its LICENSE.md read
+      verbatim in a local reference/fds clone that
+      this repository does not carry), chapter "Lagrangian Particles" and
+      the appendix "Fluid-Particle Momentum Transfer" - the EXPONENTIAL integration of the
       linearised drag, which is what removes the dt < tau_p stiffness limit
     G. B. Macpherson, N. Nordin, H. G. Weller, Commun. Numer. Meth. Engng 25
       (2009) 263 - the paper that states why a plane-crossing walk is only
@@ -47,7 +48,8 @@
       cell->face CSR the walk gathers over, and S13.4 for the contract the
       host side serves
 
-  reference/fds/ was read for the physics (it is public domain). It is
+  A local reference/fds clone - which this repository does not carry - was
+  read for the physics (it is public domain). It is
   CPU/Fortran on a Cartesian mesh and answers no GPU question; the
   grid-stride/device-count design below is this project's own.
   No GPL-licensed source was consulted.

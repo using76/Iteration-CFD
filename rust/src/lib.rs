@@ -239,4 +239,60 @@ mod provenance_audit {
             );
         }
     }
+
+    /// **`docs/11` S2.** The FDS clone is a path into a LOCAL copy of the
+    /// NIST tree: `.gitignore` tracks only `reference/PROVENANCE.md` and
+    /// `reference/ghia1982/` under `reference/`, so a file that tells a
+    /// reader this repository CARRIES that tree tells them something
+    /// false. Every source file that cites the clone says in its own words
+    /// that it is not carried, and none of it names the copy as one this
+    /// repository ships. The two needles are built with `concat!` so this
+    /// file does not match its own rule - the device
+    /// `every_reported_gate_has_a_scope` uses.
+    #[test]
+    fn no_source_file_claims_this_repository_carries_the_fds_clone() {
+        let clone: &str = concat!("reference/", "fds");
+        let claim: &str = concat!("vend", "ored");
+        const SENTINEL: &str = "this repository does not carry";
+        let mut citing = Vec::new();
+        let mut silent = Vec::new();
+        let mut claiming = Vec::new();
+        for p in sources() {
+            let t = fs::read_to_string(&p).unwrap_or_default();
+            if !t.contains(clone) {
+                continue;
+            }
+            citing.push(rel(&p));
+            if !t.contains(SENTINEL) {
+                silent.push(rel(&p));
+            }
+            if t.contains(claim) {
+                claiming.push(rel(&p));
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "{} source file(s) cite the FDS clone without saying \"{SENTINEL}\" \
+             on one unbroken line:\n  {}",
+            silent.len(),
+            silent.join("\n  ")
+        );
+        assert!(
+            claiming.is_empty(),
+            "{} source file(s) still call the FDS clone something this \
+             repository does not do to it:\n  {}",
+            claiming.len(),
+            claiming.join("\n  ")
+        );
+        assert_eq!(
+            citing.len(),
+            13,
+            "thirteen source files cite the clone; found {citing:?}"
+        );
+        println!(
+            "  [S2] {} source file(s) cite the local FDS clone, every one of \
+             them saying this repository does not carry it",
+            citing.len()
+        );
+    }
 }

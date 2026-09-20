@@ -24,8 +24,10 @@
 //!   W. H. Press et al., *Numerical Recipes* 3rd ed. §3.3 - the Hermite basis
 //!   AMCA 210 / ASHRAE 51 - what a manufacturer's curve is measured at, and
 //!     hence why (S52.13) has a density and a speed correction
-//!   FDS 6 (NIST, US Government public domain; `reference/fds/LICENSE.md`
-//!     read verbatim) - the DISCIPLINE that the density scaling is applied at
+//!   FDS 6 (NIST, US Government public domain; its `LICENSE.md` read
+//!     verbatim in a local clone - this repository does not carry
+//!     `reference/fds`, see `reference/PROVENANCE.md`) - the DISCIPLINE
+//!     that the density scaling is applied at
 //!     every evaluation, and the WARNING that its tabulated branch resolves
 //!     the operating point by a bisection with a data-dependent trip count.
 //!     Its `Verification/HVAC/fan_test.fds` and `qfan_test.fds` case decks

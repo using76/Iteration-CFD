@@ -632,11 +632,13 @@ row says otherwise.
 
 ### E.4 Named as documentation only (no code read; licence stated per §0 rule 2)
 
-* **PyFR (BSD-3, Imperial College)**, already vendored at `reference/pyfr` — `writers/vtk/` is the
+* **PyFR (BSD-3, Imperial College)**, read in a local clone at `reference/pyfr` that this repository
+  does not carry — `writers/vtk/` is the
   blessed cross-check for the appended-binary VTU encoding when §93 adds `PointData`.
 * **MFEM (BSD-3, LLNL)** and **Kratos Multiphysics (BSD-3)** — published documentation only, named in
   the deferred AMG-near-null-space and region-decomposition discussions. Nothing read, nothing used.
-* **FDS Technical Reference Guide (NIST, US Government public domain)**, vendored at `reference/fds` —
+* **FDS Technical Reference Guide (NIST, US Government public domain)**, read in a local clone at
+  `reference/fds` that this repository does not carry —
   cited as documentation for the same published plume correlations under §0 rule 3, if Gate 101-C
   needs a second statement of them.
 

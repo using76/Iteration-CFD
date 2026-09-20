@@ -37,8 +37,10 @@
 //!   **Nek5000** (BSD-3, UChicago Argonne LLC; licence read) -
 //!     DOCUMENTATION only, for the single-equation-over-the-union framing of
 //!     SPEC-LIT §47.4. No Nek5000 source was read.
-//!   **FDS** (NIST, US Government public domain; `reference/fds/LICENSE.md`
-//!     read verbatim) - the discipline that a solid/gas coupling is built
+//!   **FDS** (NIST, US Government public domain; its `LICENSE.md` read
+//!     verbatim in a local clone - this repository does not carry
+//!     `reference/fds`, see `reference/PROVENANCE.md`) - the discipline
+//!     that a solid/gas coupling is built
 //!     from RESISTANCES, never from averaged temperatures. Its direction
 //!     splitting and its `!$OMP CRITICAL` write-back are deliberately not
 //!     taken.

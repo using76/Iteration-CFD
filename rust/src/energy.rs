@@ -14,7 +14,8 @@
 //!   J. Majda, J. A. Sethian, *Combust. Sci. Technol.* 42 (1985) 185 -
 //!     background on the low-Mach filtering of acoustics this rests on
 //!   the FDS Technical Reference Guide (McGrattan et al., NIST Special
-//!     Publication 1018, public domain) - `reference/fds` was read and
+//!     Publication 1018, public domain) - a local `reference/fds` clone,
+//!     which this repository does not carry, was read and
 //!     adapted for the SHAPE of the divergence constraint and the sealed/open
 //!     `p0` bookkeeping; acknowledged here as SPEC-LIT S0 requires. No FDS
 //!     *code* was copied - this module's assembly is built entirely out of

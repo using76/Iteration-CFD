@@ -400,7 +400,9 @@ and the device field representation, and that representation is our own design.
 
 ### The reference that *is* permitted
 
-`reference/fds` holds the NIST Fire Dynamics Simulator. Its licence states
+`reference/fds` is the path at which a LOCAL clone of the NIST Fire Dynamics
+Simulator is read; this repository does not carry it, and `.gitignore` keeps
+it out. Its licence states
 plainly that *"software developed by NIST employees is not subject to copyright
 protection within the United States"*. It may be read and adapted; where it is,
 the file says so and acknowledges NIST. It is the closest permissive match to

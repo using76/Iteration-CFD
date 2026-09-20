@@ -3220,7 +3220,7 @@ fn run(c: &mut Checks) -> Result<()> {
     check_buckingham_reiner(c);
     check_contact_angle_jurin(c);
     check_non_newtonian_channel(c, &gpu, &k)?;
-    println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes) ===");
+    println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10) ===");
     c.enter_gate("Gate 95-D thick cylinder");
     check_thick_cylinder(c, &gpu)?;
     c.leave_gate();
@@ -13231,6 +13231,7 @@ fn check_parcel_coupling(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     theobald
 }
 
+// answer-key: theobald1981-fds-deck
 /// The 90 Theobald (1981) hose-stream experiments, and what this solver makes
 /// of them - SPEC-LIT §68.12.
 ///
@@ -13239,7 +13240,8 @@ fn check_parcel_coupling(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 /// 1-13. The columns are transcribed from the input-deck generator of the
 /// FDS validation suite, `Validation/Theobald_Hose_Stream/FDS_Input_Files/
 /// Build_Input_Files/paramfile.csv`, which is US-government public domain
-/// (NIST) and vendored in this repository under `reference/fds`; its
+/// (NIST) and was read in a local FDS clone - this repository does not carry
+/// `reference/fds`, and the ninety rows below are the transcription; its
 /// `build_input_files.py` shows exactly how each column was derived from the
 /// experimental record:
 ///
@@ -15237,8 +15239,9 @@ fn check_surface_to_surface_radiation(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 //  computed live on this machine.
 //
 //  ONE external dataset is used and it is public domain: NIST's FDS HVAC
-//  verification decks (`reference/fds/Verification/HVAC/fan_test.fds`,
-//  `qfan_test.fds`) and their published CSVs. The FDS SOURCE is not read -
+//  verification decks (`Verification/HVAC/fan_test.fds`, `qfan_test.fds`)
+//  and their published CSVs, read in a local `reference/fds` clone that this
+//  repository does not carry. The FDS SOURCE is not read -
 //  only its input files and its results, which are data.
 //
 //  What is NOT here, and is said out loud rather than left out quietly:
@@ -18421,7 +18424,7 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 }
 
 // ==========================================================================
-//  Gate 95-D - the thick cylinder heated through the conduction solver
+//  Gate 95-D (§95.10) - the thick cylinder heated through the conduction solver
 // ==========================================================================
 
 /// The thermomechanical chain on three quarter-annulus meshes: the steady
@@ -18430,8 +18433,10 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 /// the thick-walled cylinder's closed form (Timoshenko & Goodier, *Theory
 /// of Elasticity*, 3rd ed., the thermal-stress chapter's long circular
 /// cylinder; Boley & Weiner, *Theory of Thermal Stresses*, ch. 9), plane
-/// strain, on the mean von Mises a mesh study. A pass prints and registers
-/// nothing; a miss is one report carrying the study.
+/// strain, on the mean von Mises a mesh study. §95.10 states the gate: the
+/// body, the three meshes, the closed form (S95.21), the scale (S95.22), and
+/// which numbers are asserted and which only reported. A pass prints and
+/// registers nothing; a miss is one report carrying the study.
 fn check_thick_cylinder(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::cht::{
         Conduction, ConjugateControls, ConjugateHeat, PairingTolerances, RegionInput, RegionKind,
@@ -18609,7 +18614,7 @@ fn check_thick_cylinder(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             verdict: Verdict::Misses,
             how: How::Live,
             gate: "Gate 95-D thick cylinder",
-            against: "Timoshenko & Goodier closed form, plane strain, three meshes r = 2",
+            against: "SPEC-LIT 95.10, Timoshenko & Goodier closed form, plane strain, r = 2",
             headline: format!(
                 "e_rr {:.2e} e_tt {:.2e} e_zz {:.2e} on the finest mesh, hoop-stress order p = {p_hoop:.2}",
                 e_rs[2], e_ts[2], e_zs[2]

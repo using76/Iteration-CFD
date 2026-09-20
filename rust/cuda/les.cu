@@ -30,8 +30,9 @@
   ------------------------------------------------------------------------
 
   The Deardorff kernel below follows the algebraic form used by FDS (NIST,
-  Fire Dynamics Simulator; see reference/fds Source/velo.f90 and the FDS
-  Technical Reference Guide), which SPEC-LIT section 6.5 names as the
+  Fire Dynamics Simulator; Source/velo.f90 and the FDS Technical Reference
+  Guide, read in a local reference/fds clone that
+  this repository does not carry), which SPEC-LIT section 6.5 names as the
   reference implementation: the subgrid kinetic energy is estimated as half
   the squared difference between the resolved velocity and a test-filtered
   copy of it, and nu_t = C_D Delta sqrt(k_sgs). FDS is a work of the United

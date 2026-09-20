@@ -18,8 +18,9 @@
       344 (2017) 51-85 - Theorem 1, the amplification factor that rules out
       the Dirichlet-Neumann partition this file deliberately does not
       implement
-    FDS (NIST, US Government public domain; reference/fds/LICENSE.md read
-      verbatim) - the DISCIPLINE that a solid/gas coupling is built from
+    FDS (NIST, US Government public domain; its LICENSE.md read verbatim in
+      a local reference/fds clone that this repository does not carry) -
+      the DISCIPLINE that a solid/gas coupling is built from
       RESISTANCES and exchanges enthalpy, never temperature directly. Its
       direction splitting and its OMP CRITICAL write-back are deliberately
       NOT taken; the write-back is precisely the scatter this architecture

@@ -9097,7 +9097,8 @@ companion `qfan_test.csv` (`LOSS = 5,5` on both ducts, `HVAC_QFAN=T`) reports
 `dp = (1/2) rho K (Q/A)^2` with `rho = p M_a/(R T) = 1.199338 kg/m^3` at FDS's
 default 20 C and `M_a = 28.85034 g/mol` gives `4.519615 Pa` against FDS's
 `4.5184 Pa` — **2.7e-4 relative**. Both are computed live in the test from
-constants read out of the vendored case files; **no FDS source is read**, only
+constants read out of the FDS case files — read in a local clone that
+this repository does not carry; **no FDS source is read**, only
 its input decks and its published CSVs, which are data.
 
 The closed form for the whole loop, `Q = 0.0491559`, sits between the two FDS
@@ -13566,7 +13567,8 @@ performance of turbulent water jets*, Fire Safety Journal 4 (1981) 1-13 — the
 Fluids* 26 (1983) 883, DOI `10.1063/1.864230` — the equation of motion whose
 drag term is the one being returned. The FDS Technical Reference Guide's
 appendix *Fluid-Particle Momentum Transfer* (NIST, US-government public domain,
-vendored at `reference/fds`) states the same conservation principle — the gas
+read in a local `reference/fds` clone that this repository does not carry)
+states the same conservation principle — the gas
 receives the negative of the droplets' momentum change — and its
 `Validation/Theobald_Hose_Stream` input-deck generator is where §68.12's
 columns are transcribed from. **No GPL-licensed source was consulted**, and in
@@ -13943,7 +13945,8 @@ evaporation, no turbulence model, and a single scalar per experiment.
 **The columns** are transcribed from the FDS validation suite's own input-deck
 generator (`Validation/Theobald_Hose_Stream/FDS_Input_Files/Build_Input_Files/
 paramfile.csv` and `build_input_files.py`, NIST, US-government public domain,
-vendored at `reference/fds`): efflux velocity `3.71 sqrt(dP[psi])` m/s, firing
+read in a local `reference/fds` clone that this repository does not carry):
+efflux velocity `3.71 sqrt(dP[psi])` m/s, firing
 angle as `tan(theta)`, droplet diameter one tenth of the bore, the measured
 maximum throw, and `PRIMARY_BREAKUP_LENGTH` — twice Theobald's own Eq. (2)
 correlation for the length at which the jet is 50 % discontinuous.
@@ -17624,7 +17627,8 @@ relation between the heat and mass transfer coefficients whose failure at
 `Le != 1` is exactly what §76.13's gap is made of. **NIST Chemistry WebBook,
 SRD 69** (US-government public domain) — the water-vapour specific heat and the
 critical constants. The **FDS Technical Reference Guide** (NIST SP 1018-1,
-US-government public domain, vendored at `reference/fds`), chapter *Lagrangian
+US-government public domain, read in a local `reference/fds` clone that
+this repository does not carry), chapter *Lagrangian
 Particles* and the appendix *Development of an Implicit Solution for Droplet
 Evaporation*, states the same model set; its `B_T = B_M`
 simplification is offered here as `massTransfer spalding` and is **not** the
@@ -18199,7 +18203,8 @@ satisfy without a clamp. **R. G. Rehm, H. R. Baum**, *The equations of motion
 for thermally driven, buoyant flows*, J. Res. NBS 83 (1978) 297–308 — the
 low-Mach split whose divergence constraint (§25.1) (77.3) enters. The **FDS
 Technical Reference Guide** (NIST SP 1018-1, US-government public domain,
-vendored at `reference/fds`), chapter *The Divergence* — the same `D_SOURCE`
+read in a local `reference/fds` clone that this repository does not carry),
+chapter *The Divergence* — the same `D_SOURCE`
 term in its general variable-molar-mass form, of which §25's constant-`W` gas
 keeps `mdot/rho` and nothing else (§77.6). **ASHRAE Handbook — Fundamentals**
 (2017), ch. 1, eq. 33 — the adiabatic-saturation relation gate 77-D is measured
@@ -28125,8 +28130,8 @@ name, and the 1:1 and 5:1 beams are the bodies it must let through. When the
 block-coupled matrix exists, Gate 95-A is what it has to earn.
 
 **Said plainly: release 1's solid verdict stands on the compact-body gates** —
-95-B, 95-C, 95-F, and the thick-walled cylinder under a radial temperature
-field that the stress section adds. A slender body is refused, with its
+95-B, 95-C, 95-F, and **Gate 95-D**, the thick-walled cylinder under a radial
+temperature field, which §95.10 states in full. A slender body is refused, with its
 measurement in the message. That is a smaller claim than the plan opened
 with, and it is the one the measurement supports.
 
@@ -28334,6 +28339,88 @@ kappa_ref = 6 (alpha2 - alpha1) DeltaT (1 + m)^2
 R = max |sigma_yy| over the bond cells with |x - l/2| <= h
   / max |sigma_xx| over ALL cells with |x - l/2| <= h                        (S95.20)
 ```
+
+### 95.10 Gate 95-D — the thick-walled cylinder under a radial temperature field, and the chain it tests end to end
+
+Where §95.9's gate is one material with a bond, this one is the chain
+itself. 95-B, 95-C and 95-F each test one link of the thermomechanical
+path; Gate 95-D is the only gate that runs the whole chain in one go:
+the steady temperature comes out of the CONDUCTION solver (`ofgpu::cht`),
+the displacement out of the segregated outer loop of §95.3, and the
+stress out of the readout - and only the last of the three is compared
+with a closed form. A defect in any link - a temperature field wrong by
+a scale factor, a displacement loop that stops short of its fixed point,
+a readout that rotates the stress wrong - shows up here, which is why
+the gate exists even though §95.6's compact bodies are already held.
+
+The body is a quarter annulus with symmetry cuts, `r_in = 0.5 m`,
+`r_out = 1.0 m`, two cells through the thickness in `z`, plane strain
+(`fixtures::quarter_annulus_plane_strain_bcs`). Steel throughout:
+`E = 200 GPa`, `nu = 0.3`, `alpha = 1.2e-5 /K`, and for the conduction
+leg `rho = 7850`, `c = 460`, `kappa = 45`. The inner patch is held at
+`400 K`, the outer at `300 K`, and `T_ref = 300 K`, so
+`DeltaT_in = 100 K` - the difference the stress closed form reads. The
+field is steady and linear, so one conduction solve is the answer and
+the gate takes it in one.
+
+Three meshes: `nr = 12, 24, 48` radial cells, `2 nr` circumferential
+and two in `z`, a refinement ratio `r = 2`. The level size the §94
+study uses is the RADIAL spacing `(r_out - r_in)/nr`, written by hand
+and not taken over the mesh: the two `z` layers stay two at every
+level, so the cell count grows fourfold while the spacing the solution
+actually varies over halves, and a mesh-wide size would misstate the
+order. That is exactly the kind of choice §94 exists to make visible.
+
+The closed form, with `a = r_in`, `b = r_out`, `k = ln(b/a)`,
+`L(r) = ln(b/r)` and `C = alpha E DeltaT_in / (2 (1 - nu) k)`:
+
+```text
+  sigma_rr = C [ -L(r) - (a^2/(b^2 - a^2)) (1 - b^2/r^2) k ]
+  sigma_tt = C [ 1 - L(r) - (a^2/(b^2 - a^2)) (1 + b^2/r^2) k ]
+  sigma_zz = nu (sigma_rr + sigma_tt) - alpha E DeltaT_in L(r) / k         (S95.21)
+```
+
+Timoshenko & Goodier, *Theory of Elasticity*, 3rd ed., the
+thermal-stress chapter's long circular cylinder; Boley & Weiner,
+*Theory of Thermal Stresses*, ch. 9. Both are named in
+`check_thick_cylinder`'s own doc comment - no third source is claimed.
+
+The errors are measured against a scale that is exact, not estimated -
+which is why the gate can quote a relative number at all:
+
+```text
+  S = max over the 2 000 radii r_i = r_in + (r_out - r_in)(i + 1/2)/2000, i = 0..1999,
+      of max( |sigma_rr(r_i)|, |sigma_tt(r_i)|, |sigma_zz(r_i)| )          (S95.22)
+```
+
+Required, on every one of the three meshes: the outer loop must
+CONVERGE - Aitken relaxation, eight decades, `max_outer = 400`, three
+boundary passes, PCG with DIC underneath - and the gate asserts exactly
+that per mesh. On the finest mesh (`nr = 48`) each of
+`Linf|sigma_rr - closed form| / S`, the same for `sigma_thetatheta` and
+the same for `sigma_zz` must be at or under `1e-2`.
+
+Reported and NOT asserted, in §94.3's discipline, and why: the shear
+defect `max|sigma_rtheta| / S` on the finest mesh - the closed form has
+no shear, so this is a pure defect measure, and the gate refuses to put
+a threshold on a quantity whose exact value is zero; the observed order
+of the hoop-stress error between `nr = 24` and `nr = 48`; and a
+three-level §94 grid study on the VOLUME MEAN of von Mises, with the
+closed form's own mean as the datum - composite Simpson, 20 000
+intervals, an error far below `1e-10` relative - printed as a
+validation statement.
+
+Where §95.9 puts its measured table, this section puts none: Gate 95-D
+has not been run for this section's writing, and the three per-mesh
+lines and the study are printed by the run itself. A pass registers
+NOTHING; a miss is ONE `GateReport` (`Verdict::Misses`, `How::Live`,
+gate `Gate 95-D thick cylinder`) whose headline carries the three
+errors and the hoop order, whose detail is the three per-mesh lines the
+run printed, and whose uncertainty is the grid study - §94.3's rule
+that a verdict states its own discretisation error. The gate is
+`check_thick_cylinder` in `ofgpu-validate`, under the scope
+`Gate 95-D thick cylinder`.
+
 
 ## 96. What a thermo-elastic case says, the refusal list, and the pair tests
 

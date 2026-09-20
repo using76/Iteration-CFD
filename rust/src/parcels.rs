@@ -37,8 +37,9 @@
 //!     and Particles*, Academic Press (1978) - the drag correlation
 //!   K. McGrattan, S. Hostikka, R. McDermott, J. Floyd, M. Vanella et al.,
 //!     *Fire Dynamics Simulator Technical Reference Guide*, NIST SP 1018-1
-//!     (NIST, US-Government public domain; `reference/fds/LICENSE.md` read
-//!     verbatim) - chapter "Lagrangian Particles" and appendix
+//!     (NIST, US-Government public domain; its `LICENSE.md` read verbatim in
+//!     a local `reference/fds` clone, which this repository does not carry)
+//!     - chapter "Lagrangian Particles" and appendix
 //!     "Fluid-Particle Momentum Transfer": the exponential integration of the
 //!     linearised drag, and the sub-step CFL bound
 //!   G. B. Macpherson, N. Nordin, H. G. Weller, *Commun. Numer. Meth. Engng*

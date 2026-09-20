@@ -20,8 +20,9 @@
       THREE arrays by one number
     F. N. Fritsch, R. E. Carlson, SIAM J. Numer. Anal. 17 (1980) 238-246 -
       the monotone slope limiter of fanCurveEval
-    FDS (NIST, US Government public domain; reference/fds/LICENSE.md read
-      verbatim) - the DISCIPLINE that a fan curve is scaled by rho/rho_curve
+    FDS (NIST, US Government public domain; its LICENSE.md read verbatim in
+      a local reference/fds clone that this repository does not carry) -
+      the DISCIPLINE that a fan curve is scaled by rho/rho_curve
       at every evaluation, and the WARNING that its tabulated branch resolves
       the operating point by a bisection with a data-dependent trip count,
       which is uncapturable here. Its source was read for those two points
