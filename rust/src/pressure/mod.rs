@@ -351,6 +351,31 @@ impl PbicgstabBackend {
     pub fn controls(&self) -> &SolverControls {
         &self.ctrl
     }
+
+    /// `solvers/p/solver` GAMG cannot be served by this backend, and saying
+    /// so is SPEC-LIT §13.4's rule: algebraic multigrid reaches ofgpu only
+    /// as the AMGX pressure backend (§8.3). Refused here, in `setup`, so
+    /// the run stops before a single pressure solve; under `-permissive`
+    /// the substitution is printed once and `solve` runs PBiCGStab. The
+    /// setting name is `solvers/p/solver` even when the variable is `p_rgh`:
+    /// the backend does not know the variable's name, and `warn_once` keys
+    /// on the setting (`src/io/contract.rs`).
+    fn refuse_gamg(&self) -> Result<()> {
+        if self.ctrl.solver != solver::LinearSolverKind::Gamg {
+            return Ok(());
+        }
+        crate::io::contract::unsupported_note(
+            "solvers/p/solver",
+            "GAMG",
+            &["PBiCGStab", "PCG"],
+            "algebraic multigrid reaches ofgpu only as the AMGX pressure backend \
+             (SPEC-LIT 8.3), which is behind the `amgx` Cargo feature (off by \
+             default, needs libamgx) and is selected only by ofgpu-buoyant's \
+             -backend auto; this backend is PBiCGStab/PCG and cannot serve GAMG",
+            "PBiCGStab on the pressure equation",
+            (),
+        )
+    }
 }
 
 impl PressureBackend for PbicgstabBackend {
@@ -369,13 +394,8 @@ impl PressureBackend for PbicgstabBackend {
         m: &GpuMesh,
         _probe: &SystemProbe,
     ) -> Result<()> {
+        self.refuse_gamg()?;
         self.kernels = Some(SolverKernels::new(gpu)?);
-        if self.ctrl.solver == solver::LinearSolverKind::Gamg {
-            crate::io::contract::warn_once(
-                "solvers/p/solver",
-                "solvers/p/solver GAMG: algebraic multigrid is provided by the                  AMGX backend, not by this one (SPEC-LIT 8.3). The decision                  table below says whether AMGX was available; where it was                  not, the pressure equation runs PBiCGStab.",
-            );
-        }
         self.ws = Some(SolverWorkspace::for_mesh(gpu, m)?);
         Ok(())
     }
@@ -401,14 +421,14 @@ impl PressureBackend for PbicgstabBackend {
         // asymmetric matrix is an error (SPEC-LIT 8.2, 13.4). See
         // `crate::solver::solve`.
         //
-        // `GAMG` is the one entry this backend cannot serve, because algebraic
-        // multigrid reaches ofgpu as the separate AMGX backend (SPEC-LIT 8.3).
-        // Rather than let `solve` refuse it, the request is answered by the
-        // machinery one level up - `choose_pressure_backend` prints AMGX in
-        // its decision table with the reason it is or is not available - and
-        // this backend keeps its role as the always-applicable fallback and
-        // correctness reference. `setup` says so, once, so the substitution is
-        // announced rather than silent.
+        // `GAMG` is the one entry this backend cannot serve, and the request
+        // is refused in `setup` under SPEC-LIT §13.4 - the run stops before a
+        // single pressure solve, and under `-permissive` the substitution is
+        // announced there. This arm is that `-permissive` fallback: it answers
+        // the request with PBiCGStab, `choose_pressure_backend` still prints
+        // AMGX in its decision table with the reason it is or is not
+        // available, and this backend keeps its role as the always-applicable
+        // fallback and correctness reference.
         if self.ctrl.solver == solver::LinearSolverKind::Gamg {
             return solver::solve_pbicgstab(gpu, k, p, a, m, w, &self.ctrl);
         }
@@ -1483,5 +1503,65 @@ mod tests {
     #[test]
     fn the_agreement_tolerance_is_what_the_specification_says() {
         assert_eq!(AGREEMENT_TOL, 1e-8);
+    }
+
+    /// SPEC-LIT §13.4. `solvers/p/solver GAMG` used to print one stderr line
+    /// in `setup` and run PBiCGStab anyway - the silent substitution the rule
+    /// forbids. It is now refused by name in `setup`, before a single pressure
+    /// solve; `-permissive` downgrades it to the announced PBiCGStab fallback
+    /// that `solve`'s `Gamg` arm runs.
+    #[test]
+    fn gamg_on_the_pressure_equation_is_refused_by_name_and_names_amgx() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let be = PbicgstabBackend::new(SolverControls {
+            solver: solver::LinearSolverKind::Gamg,
+            ..SolverControls::default()
+        });
+        let e = be
+            .refuse_gamg()
+            .expect_err("GAMG on the pressure equation must be refused in strict mode")
+            .to_string();
+        assert!(e.contains("solvers/p/solver"), "{e}");
+        assert!(e.contains("GAMG"), "{e}");
+        assert!(e.contains("AMGX"), "{e}");
+        assert!(e.contains("PBiCGStab"), "{e}");
+        assert!(e.contains("amgx"), "{e}");
+        assert!(e.contains("-permissive"), "{e}");
+
+        crate::io::contract::set_permissive(true);
+        assert!(be.refuse_gamg().is_ok(), "permissive must let the run continue");
+        assert!(
+            crate::io::contract::warned("solvers/p/solver"),
+            "the substitution must be announced"
+        );
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// The two Krylov methods this backend actually has pass the refusal and
+    /// say nothing: the refusal is about GAMG, not about the entry point.
+    #[test]
+    fn a_pbicgstab_or_pcg_entry_on_the_pressure_equation_passes_the_refusal() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        for kind in [solver::LinearSolverKind::PBiCGStab, solver::LinearSolverKind::PCG] {
+            let be = PbicgstabBackend::new(SolverControls {
+                solver: kind,
+                ..SolverControls::default()
+            });
+            assert!(
+                be.refuse_gamg().is_ok(),
+                "{kind:?} must pass the pressure-backend refusal"
+            );
+            assert!(
+                !crate::io::contract::warned("solvers/p/solver"),
+                "{kind:?} must not warn"
+            );
+        }
+        crate::io::contract::set_permissive(false);
     }
 }

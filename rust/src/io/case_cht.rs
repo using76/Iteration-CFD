@@ -444,7 +444,7 @@ pub struct ChtNumerics {
     /// `PCG` (the default - a pure conduction matrix is symmetric, including
     /// its coupled interface entries, SPEC-LIT §47.2) or `PBiCGStab`.
     pub solver: String,
-    /// `DIC`, `DILU` or `diagonal`.
+    /// `DIC`, `DILU`, `diagonal` or `none`.
     pub preconditioner: String,
     pub tolerance: f64,
     pub max_iter: u32,
@@ -2224,11 +2224,15 @@ fn lower_precon(name: &str) -> Result<Preconditioner> {
     match name {
         "DIC" => Ok(Preconditioner::Dic),
         "DILU" => Ok(Preconditioner::Dilu),
-        "diagonal" | "none" => Ok(Preconditioner::Diagonal),
+        "diagonal" => Ok(Preconditioner::Diagonal),
+        // `none` used to lower to Jacobi - a silent substitution (SPEC-LIT
+        // 13.4). The crate has `Preconditioner::None` and `solver::solve`
+        // runs it, so the case gets what it asked for.
+        "none" => Ok(Preconditioner::None),
         other => crate::io::contract::unsupported(
             "numerics/preconditioner",
             other,
-            &["DIC", "DILU", "diagonal"],
+            &["DIC", "DILU", "diagonal", "none"],
             "DIC, the incomplete Cholesky factorisation (SPEC-LIT 21)",
             Preconditioner::Dic,
         ),

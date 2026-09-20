@@ -3356,3 +3356,36 @@ fn the_shipped_case_round_trips_through_poly_mesh_bit_for_bit() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// SPEC-LIT §13.4. `none` used to lower to `Diagonal` - Jacobi, a silent
+/// substitution. The crate has `Preconditioner::None` and `solver::solve`
+/// runs it, so the case now gets what it asked for; the refusal menu and the
+/// schema description name it.
+#[test]
+fn a_preconditioner_of_none_lowers_to_none() {
+    let _guard = crate::io::contract::permissive_test_guard();
+    crate::io::contract::set_permissive(false);
+
+    let text = default_slab().replace(
+        r#""preconditioner": "DIC""#,
+        r#""preconditioner": "none""#,
+    );
+    assert_ne!(text, default_slab(), "the entry must actually have changed");
+    let low = read(&text).expect("parse").lower().expect("lower");
+    assert_eq!(low.solver.precon, Preconditioner::None);
+
+    let text = default_slab().replace(
+        r#""preconditioner": "DIC""#,
+        r#""preconditioner": "GaussSeidel""#,
+    );
+    let e = read(&text)
+        .expect("parse")
+        .lower()
+        .expect_err("GaussSeidel must be refused by name");
+    let msg = e.to_string();
+    assert!(msg.contains("numerics/preconditioner"), "{msg}");
+    assert!(msg.contains("GaussSeidel"), "{msg}");
+    assert!(msg.contains("none"), "{msg}");
+
+    crate::io::contract::set_permissive(false);
+}

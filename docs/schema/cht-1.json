@@ -659,7 +659,7 @@
           "minimum": 0
         },
         "preconditioner": {
-          "description": "`DIC`, `DILU` or `diagonal`.",
+          "description": "`DIC`, `DILU`, `diagonal` or `none`.",
           "type": "string"
         },
         "solver": {

@@ -357,7 +357,6 @@ pub const FLUX_SWITCHED_LAST: Label = BcKind::PressureInletOutletVelocity as Lab
 /// rejected name gets. Kept next to the match so the two cannot drift.
 pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "fixedValue",
-    "uniformFixedValue",
     "noSlip",
     "zeroGradient",
     "fixedGradient",
@@ -373,11 +372,9 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "slip",
     "wedge",
     "cyclic",
-    "cyclicAMI",
     "cyclicSlip",
     "processor",
     "inletOutlet",
-    "outletInlet",
     "turbulentIntensityKineticEnergyInlet",
     "turbulentMixingLengthDissipationRateInlet",
     "turbulentMixingLengthFrequencyInlet",
@@ -423,7 +420,7 @@ impl BcKind {
     /// be told which one is wrong.
     pub fn from_name(name: &str, field: &str, patch: &str) -> Result<Self> {
         let k = match name {
-            "fixedValue" | "noSlip" | "uniformFixedValue" => Self::FixedValue,
+            "fixedValue" | "noSlip" => Self::FixedValue,
             "zeroGradient" => Self::ZeroGradient,
             "fixedGradient" | "uniformFixedGradient" => Self::FixedGradient,
             "mixed" | "freestream" | "freestreamVelocity" => Self::Mixed,
@@ -432,8 +429,8 @@ impl BcKind {
             "calculated" => Self::Calculated,
             "empty" => Self::Empty,
             "symmetry" | "symmetryPlane" | "slip" | "wedge" => Self::Symmetry,
-            "cyclic" | "cyclicAMI" | "cyclicSlip" | "processor" => Self::Cyclic,
-            "inletOutlet" | "outletInlet" | "freestreamPressure" => Self::InletOutlet,
+            "cyclic" | "cyclicSlip" | "processor" => Self::Cyclic,
+            "inletOutlet" | "freestreamPressure" => Self::InletOutlet,
 
             "turbulentIntensityKineticEnergyInlet" => {
                 Self::TurbulentIntensityKineticEnergyInlet
@@ -710,6 +707,39 @@ impl BcKind {
                     ),
                 );
                 Self::ThermalWallFunction
+            }
+
+            "outletInlet" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    IMPLEMENTED_BC_NAMES,
+                    "outletInlet is the REVERSE switch of inletOutlet: a fixed value on OUTflow and zero-gradient on inflow (docs/01-model-catalog.md: valueFraction = pos0(phi_b)), while every flux-switched condition this solver implements is Dirichlet on inflow; it used to be mapped to inletOutlet, which is the opposite condition",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            "uniformFixedValue" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    IMPLEMENTED_BC_NAMES,
+                    "uniformFixedValue carries its value as a `uniformValue` Function1 of time, which this reader does not read - only `value` is - so a table or a ramp would silently run as its first `value`; write fixedValue with a `value` entry",
+                    "fixedValue at the file's `value` entry",
+                    Self::FixedValue,
+                );
+            }
+
+            "cyclicAMI" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    IMPLEMENTED_BC_NAMES,
+                    "an arbitrary mesh interface couples two NON-conformal patches through interpolation weights, which this solver does not have; its cyclic couples two conformal patches face by face by position (SPEC-LIT 31.1); write cyclic when the two patches are conformal",
+                    "cyclic, paired face by face by position with no AMI weights (wrong unless the two patches are conformal)",
+                    Self::Cyclic,
+                );
             }
 
             other => {
@@ -1138,5 +1168,52 @@ mod tests {
         gpu.write(&mut f.fr, &fr).expect("write fr");
 
         assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
+    }
+
+    /// SPEC-LIT §13.4 and §13.4.4's audit. The three names used to be aliases
+    /// to conditions that are NOT what they name: `outletInlet` is the reverse
+    /// switch of `inletOutlet`, `uniformFixedValue`'s value lives in a
+    /// `uniformValue` entry this reader never reads, and `cyclicAMI` needs
+    /// interpolation weights the solver does not have. Each is refused by
+    /// name; `-permissive` substitutes the documented fallback and warns once
+    /// per setting.
+    #[test]
+    fn the_three_conditions_that_are_not_their_alias_are_refused_by_name() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        for (name, word) in [
+            ("outletInlet", "inletOutlet"),
+            ("uniformFixedValue", "uniformValue"),
+            ("cyclicAMI", "cyclic"),
+        ] {
+            let e = BcKind::from_name(name, "U", "inlet")
+                .expect_err(&format!("{name} must be refused by name"));
+            let msg = e.to_string();
+            assert!(msg.contains(name), "{msg}");
+            assert!(msg.contains("U: boundaryField/inlet/type"), "{msg}");
+            assert!(msg.contains("-permissive"), "{msg}");
+            assert!(msg.contains(word), "{msg}");
+        }
+
+        crate::io::contract::set_permissive(true);
+        assert!(matches!(
+            BcKind::from_name("outletInlet", "U", "inlet").expect("permissive"),
+            BcKind::Calculated
+        ));
+        assert!(matches!(
+            BcKind::from_name("uniformFixedValue", "U", "inlet").expect("permissive"),
+            BcKind::FixedValue
+        ));
+        assert!(matches!(
+            BcKind::from_name("cyclicAMI", "U", "inlet").expect("permissive"),
+            BcKind::Cyclic
+        ));
+        assert!(
+            crate::io::contract::warned("U: boundaryField/inlet/type"),
+            "the substitution must be announced"
+        );
+        crate::io::contract::set_permissive(false);
     }
 }

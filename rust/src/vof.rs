@@ -3299,16 +3299,20 @@ impl VofControls {
             // keep, and `steadyState` would drop the term a moving interface
             // is entirely made of.
             let raw = s.dict().get_or("ddtSchemes/default", "Euler");
-            let ddt = crate::timescheme::DdtScheme::parse(raw)
-                .unwrap_or(crate::timescheme::DdtScheme::Euler);
-            if ddt != crate::timescheme::DdtScheme::Euler {
-                crate::io::contract::unsupported(
-                    "ddtSchemes/default",
-                    raw.trim(),
-                    &["Euler"],
-                    "Euler - the only time derivative SPEC-LIT §20 assembles",
-                    (),
-                )?;
+            match crate::timescheme::DdtScheme::parse(raw) {
+                Ok(crate::timescheme::DdtScheme::Euler) => {}
+                // `backward` parses and is refused; `CoEuler`, a typo, or
+                // any name `parse` rejects used to fold into Euler with no
+                // message - the silent substitution SPEC-LIT §13.4 forbids.
+                Ok(_) | Err(_) => {
+                    crate::io::contract::unsupported(
+                        "ddtSchemes/default",
+                        raw.trim(),
+                        &["Euler"],
+                        "Euler - the only time derivative SPEC-LIT §20 assembles",
+                        (),
+                    )?;
+                }
             }
         }
 
@@ -3392,6 +3396,50 @@ mod tests {
         let e = VofProperties::from_case(&dir)
             .expect_err("and an unrecognised one is refused too");
         assert!(e.to_string().contains("HerschelBulkley"), "{}", e);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §13.4 and §3.3. `ofgpu-vof` assembles exactly one time
+    /// derivative (`fvm_ddt_euler`), so every other `ddtSchemes/default` is a
+    /// refusal - including a name `DdtScheme::parse` cannot read, which the
+    /// old `unwrap_or(Euler)` fold silently turned into Euler with no message.
+    #[test]
+    fn a_ddt_scheme_that_is_not_euler_is_refused_by_name_even_when_unparseable() {
+        use std::fs;
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let dir = std::env::temp_dir().join(format!(
+            "ofgpuVofDdt_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        crate::blockgen::write_case(&dir, crate::blockgen::CaseKind::DamBreak, 4, 6, 1)
+            .expect("scratch case");
+        assert!(
+            VofControls::from_case(&dir).is_ok(),
+            "the generated DamBreak case parses as written"
+        );
+
+        let file = dir.join("system").join("fvSchemes");
+        let pristine = fs::read_to_string(&file).expect("read fvSchemes");
+        let from = "    default         Euler;";
+        assert!(pristine.contains(from), "generator text drifted: missing {from}");
+        for name in ["CoEuler", "Eulerr", "backward"] {
+            fs::write(
+                &file,
+                pristine.replacen(from, &format!("    default         {name};"), 1),
+            )
+            .expect("rewrite fvSchemes");
+            let e = VofControls::from_case(&dir)
+                .expect_err(&format!("{name} must not fold into Euler"));
+            let msg = e.to_string();
+            assert!(msg.contains("ddtSchemes/default"), "{msg}");
+            assert!(msg.contains(name), "{msg}");
+            assert!(msg.contains("-permissive"), "{msg}");
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }
