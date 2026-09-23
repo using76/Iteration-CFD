@@ -350,3 +350,17 @@ fn the_two_laws_are_what_they_say() {
         "half period: {half:?}"
     );
 }
+
+#[test]
+fn wall_faces_refuses_a_patch_the_rule_table_never_named() {
+    let rig = piston_box();
+    let mut other = rig.rb.mesh.clone();
+    other.patches[1].name = "renamed".to_string();
+    match rig.motion.wall_faces(&other, &["renamed"]) {
+        Err(e) => {
+            let m = e.to_string();
+            assert!(m.contains("MeshMotion::wall_faces") && m.contains("rule table"), "{m}");
+        }
+        Ok(_) => panic!("a patch the rule table never named must be refused"),
+    }
+}

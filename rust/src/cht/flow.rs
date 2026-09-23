@@ -966,8 +966,8 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         let sperf = simple.correct_outer(gpu, &mut backend, &nut_fluid, &t_fluid, false)?;
 
         // 3. the flux, onto the thermal mesh's fluid prefix
-        field_ops::copy_field(gpu, &fldk, &mut phi_thermal.f, &simple.phi().f, n_fluid_if)?;
-        field_ops::copy_field(gpu, &fldk, &mut phi_thermal.bf, &simple.phi().bf, n_fluid_bf)?;
+        field_ops::copy_field(gpu, &fldk, &mut phi_thermal.f, &simple.convective_flux().f, n_fluid_if)?;
+        field_ops::copy_field(gpu, &fldk, &mut phi_thermal.bf, &simple.convective_flux().bf, n_fluid_bf)?;
 
         // 3b. SPEC-LIT §79.5: `inletOutlet`'s value fraction, from the flux
         // that was just written. One launch over the whole thermal boundary;

@@ -180,6 +180,11 @@ use ofgpu::field_setup::{
 };
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField, RawVectorField};
+use ofgpu::io::case_json::{LoweredCase, LoweredMotion};
+use ofgpu::mesh::ale::AleMesh;
+use ofgpu::mesh::gpugeom::flatten_faces;
+use ofgpu::mesh::motion::{MeshMotion, PatchMotion};
+use ofgpu::mesh::PatchKind;
 use ofgpu::models::{
     build_coupled, select_turbulence_model, CoupledTurbulence, RasModel, ThermalCtx,
 };
@@ -486,7 +491,7 @@ pub fn outer_iteration(
     // `U` and `p` at its own top - `crate::field_ops::update_inlet_outlet`'s
     // own doc: "faces of every other kind are untouched", so this is a no-op
     // wherever the case gave `T` a plain fixedValue/zeroGradient instead.
-    update_inlet_outlet_scalar(gpu, &fk, energy.field_mut(), s.phi())?;
+    update_inlet_outlet_scalar(gpu, &fk, energy.field_mut(), s.convective_flux())?;
 
     gas.update_density(gpu, energy.field())?;
 
@@ -520,7 +525,7 @@ pub fn outer_iteration(
         is_final,
     )?;
 
-    energy.correct(gpu, s.phi(), nut, k, nu, gas)?;
+    energy.correct(gpu, s.convective_flux(), nut, k, nu, gas)?;
 
     if let Some(dt) = dt_for_p0 {
         // SPEC-LIT §25.2 integrates the SAME `Q` §25.1's constraint uses, and
@@ -984,6 +989,140 @@ fn load_initial_fields(
     }
 }
 
+/// SPEC-LIT 105.12: what a moving-mesh run of this driver cannot honour,
+/// refused by name before a single field is set up. Not downgradable under
+/// `-permissive`: there is nothing to substitute.
+fn refuse_motion_combinations(o: &Options, l: &LoweredCase, model: RasModel, hm: &HostMesh) -> Result<()> {
+    if l.motion.is_none() {
+        return Ok(());
+    }
+    let refuse = |what: &str, why: &str| -> Result<()> {
+        Err(Error::Config(format!("motion: {what} - {why} (SPEC-LIT 105.12)")))
+    };
+    let writers = "the volume writers take the rest points; a moving mesh writes -output foam";
+    let checkpoint = "a checkpoint carries no mesh points and no volume history";
+    if !(o.end_time > 0.0) {
+        return refuse("a steady run", "a moving mesh needs time to move in; give -endTime and -deltaT");
+    }
+    if o.restart_from.is_some() {
+        return refuse("-restartFrom", checkpoint);
+    }
+    if o.restart_write.is_some() {
+        return refuse("-restartWrite", checkpoint);
+    }
+    if o.heater_power != 0.0 {
+        return refuse("-heaterPower", "the heater is spread over the rest volume, and the volume moves");
+    }
+    if o.sealed {
+        return refuse("-sealed", "the sealed p0 equation holds the domain volume fixed");
+    }
+    if model != RasModel::Laminar {
+        return refuse(
+            model.name(),
+            "a turbulence model's wall distance and time derivatives are the static mesh's; a moving mesh runs laminar",
+        );
+    }
+    if !l.sources.is_empty() {
+        return refuse("sources", "a source's volume integral is the rest mesh's");
+    }
+    if l.output.is_some() {
+        return refuse("the case's output block", writers);
+    }
+    if let Some(f) = o.output.iter().find(|f| !matches!(f, OutputFormat::Foam)) {
+        return refuse(&format!("-output {}", f.name()), writers);
+    }
+    if hm.patches.iter().any(|p| p.kind == PatchKind::Cyclic) {
+        return refuse("a cyclic pair", "the periodic channel's reports divide by the rest volume");
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 105.8 and SPEC-LIT 105.12: a moving wall's velocity is written as
+/// a fixed value, so every `motion.walls` patch must carry one - at its law's
+/// velocity at `t = 0`, the value the first step's flux is seeded from - and
+/// a `move` patch that carries one must be listed as a wall.
+fn check_motion_walls(l: &LoweredCase) -> Result<()> {
+    let Some(lm) = &l.motion else { return Ok(()) };
+    let u_type = |name: &str| -> Result<(String, BcKind)> {
+        let spec = l.u_field.boundary.get(name).ok_or_else(|| {
+            Error::Config(format!("motion: patch {name} has no U condition in this case (SPEC-LIT 105.12)"))
+        })?;
+        Ok((spec.type_name.clone(), BcKind::from_name(&spec.type_name, "U", name)?))
+    };
+    for w in &lm.walls {
+        let (t, k) = u_type(w)?;
+        if k != BcKind::FixedValue {
+            return Err(Error::Config(format!(
+                "motion: motion.walls names {w}, whose U condition is {t}; a moving wall's velocity \
+                 is written as a fixedValue (SPEC-LIT 105.8)"
+            )));
+        }
+        // The case's value is what `seed_phi_from_u` builds the first step's
+        // flux from, before the first `move_mesh` writes the wall's own
+        // velocity: a wall written at any other velocity starts the run with
+        // a flux the moving mesh contradicts, and an impulsive pressure
+        // transient the case never asked for.
+        let law = lm.rules.iter().find_map(|(n, r)| match r {
+            PatchMotion::Move(d) if n == w => Some(*d),
+            _ => None,
+        });
+        if let Some(d) = law {
+            let v0 = match d {
+                ofgpu::mesh::motion::Displacement::Linear { velocity } => velocity,
+                ofgpu::mesh::motion::Displacement::Sine { amplitude, period } => {
+                    amplitude * (2.0 * std::f64::consts::PI as Scalar / period)
+                }
+            };
+            let u = l.u_field.boundary[w.as_str()].value_v.first().copied().unwrap_or(ofgpu::Vec3::ZERO);
+            let scale = v0.mag().max(u.mag()).max(Scalar::MIN_POSITIVE);
+            if (u - v0).mag() > 1e-9 * scale {
+                return Err(Error::Config(format!(
+                    "motion: motion.walls names {w}, whose U value ({} {} {}) is not its law's \
+                     velocity at t = 0 ({} {} {}); the first step's flux is seeded from the case's \
+                     value - write the law's velocity (SPEC-LIT 105.12)",
+                    u.x, u.y, u.z, v0.x, v0.y, v0.z
+                )));
+            }
+        }
+    }
+    for (name, rule) in &lm.rules {
+        if matches!(rule, PatchMotion::Move(_)) && !lm.walls.contains(name) && u_type(name)?.1 == BcKind::FixedValue {
+            return Err(Error::Config(format!(
+                "motion: patch {name} moves and its U is a fixed value, but motion.walls does not name \
+                 it; a fixed velocity on a moving patch would push fluid through it - list it in \
+                 motion.walls (SPEC-LIT 105.12)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 105.12: build the case's motion on its own block mesh and attach
+/// it to `s`. Returns the motion the loop moves the points with.
+fn attach_case_motion(
+    gpu: &Gpu,
+    hm: &HostMesh,
+    mesh: &GpuMesh,
+    s: &mut Simple<'_>,
+    l: &LoweredCase,
+    lm: &LoweredMotion,
+) -> Result<MeshMotion> {
+    let raw = ofgpu::blockgen::raw_mesh(&l.block)?;
+    let motion = MeshMotion::new(hm, &raw.points, &raw.faces, &lm.rule_table())?;
+    let wall_faces = motion.wall_faces(hm, &lm.wall_names())?;
+    let csr = flatten_faces(&raw.faces);
+    let ale = AleMesh::new(gpu, hm, mesh, &raw.points, &csr)?;
+    s.attach_motion(gpu, ale, &wall_faces)?;
+    println!(
+        "motion (SPEC-LIT 105.12): {} patch rules, {} control points, {} free points, {} moving-wall faces; \
+         the written time directories carry the fields, the points at time t are the case's points_at(t)",
+        lm.rules.len(),
+        motion.n_control(),
+        motion.n_free(),
+        wall_faces.len()
+    );
+    Ok(motion)
+}
 /// `Simple` owns `U` and `phi` in the same struct, so
 /// `field_setup::compute_phi_from_u(gpu, s.phi_mut(), s.u(), hm)` cannot be
 /// called directly - the two accessors borrow all of `s`, mutably and
@@ -1579,6 +1718,12 @@ fn run(o: &Options) -> Result<RunEnd> {
     }
     common::refuse_unimplemented_blocks(lowered.as_ref())?;
 
+    // SPEC-LIT 105.12: the `motion` block's refusals, before a field exists.
+    if let Some(l) = &lowered {
+        refuse_motion_combinations(o, l, selection.model, &hm)?;
+        check_motion_walls(l)?;
+    }
+
     // SPEC-LIT §44: the `output` block, which used to be part of the refusal
     // above. Resolved here, before a single field is set up, so a case that
     // asks for something impossible fails before any kernel launches -
@@ -1666,6 +1811,15 @@ fn run(o: &Options) -> Result<RunEnd> {
         seed_phi_from_u(&gpu, &mesh, &mut s, &hm)?;
     }
 
+    // SPEC-LIT 105.12: the case's moving mesh, attached once U, p and phi are seated.
+    let motion: Option<MeshMotion> = match lowered.as_ref() {
+        Some(l) => match &l.motion {
+            Some(lm) => Some(attach_case_motion(&gpu, &hm, &mesh, &mut s, l, lm)?),
+            None => None,
+        },
+        None => None,
+    };
+
     // ---- turbulence -----------------------------------------------------
     //
     // SPEC-LIT §30.2, exactly `ofgpu-buoyant`'s adoption: `wall_faces` reads
@@ -1722,7 +1876,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
     }
 
-    let flow0 = FlowState::new(s.u(), s.phi(), cc.nu);
+    let flow0 = FlowState::new(s.u(), s.convective_flux(), cc.nu);
     turb.initialise(&gpu, &flow0)?;
 
     // ---- energy / gas state ----------------------------------------------
@@ -2190,7 +2344,20 @@ fn run(o: &Options) -> Result<RunEnd> {
             t_phys += 1.0;
         }
 
-        let flow = FlowState::new(s.u(), s.phi(), cc.nu);
+        // SPEC-LIT 105.12: the points at this step's end time, then the mesh
+        // advance, the moving walls' value and the relative flux - all before
+        // anything below reads the flux.
+        if let Some(mm) = &motion {
+            let pts = mm.points_at(t_phys as Scalar);
+            s.motion_mut()
+                .ok_or_else(|| {
+                    Error::Config("ofgpu-lowmach: internal error - the motion is not attached".to_string())
+                })?
+                .set_points(&gpu, &pts)?;
+            s.move_mesh(&gpu)?;
+        }
+
+        let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
         // SPEC-LIT §17/§30.2: `g`/`Prt` feed `G_b`; `self.buoy` (built once
         // by `build_coupled` from `models::buoyancy_settings`) is `None`
         // whenever the case has no gravity, and gates the whole term off
@@ -5260,5 +5427,411 @@ mod lowmach_tests {
         // SPEC-LIT §13.4.1's pair: the un-graded duct, same command line, runs and writes the .nvdb.
         let uniform = run_knobs_bytes(&Knobs::default(), "nvdb_uniform", &["-iters", "2", "-output", "foam,nvdb"]);
         assert!(uniform.iter().any(|(n, _)| n.ends_with(".nvdb")), "the uniform duct must write the .nvdb");
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT 105.12 - the `motion` case block, and the one driver that runs it
+    // ----------------------------------------------------------------------
+
+    /// SPEC-LIT 105.10 (b)'s stroking outlet as an `ofgpu-lowmach` case (SPEC-LIT 105.12).
+    const STROKE_MOTION: &str = r#", "motion": { "patches": [
+      { "patch": "inlet", "rule": "fixed" },
+      { "patch": "outlet", "rule": "move", "law": { "kind": "sine", "amplitude": [0.2, 0, 0], "period": 1.0 } },
+      { "patch": "sideA", "rule": "slide" }, { "patch": "sideB", "rule": "slide" },
+      { "patch": "sideC", "rule": "slide" }, { "patch": "sideD", "rule": "slide" } ] }"#;
+
+    /// SPEC-LIT 105.10 (a)'s piston as a case (SPEC-LIT 105.12).
+    const PISTON_MOTION: &str = r#", "motion": { "patches": [
+      { "patch": "open", "rule": "fixed" },
+      { "patch": "piston", "rule": "move", "law": { "kind": "linear", "velocity": [-0.5, 0, 0] } },
+      { "patch": "sideA", "rule": "slide" }, { "patch": "sideB", "rule": "slide" },
+      { "patch": "sideC", "rule": "slide" }, { "patch": "sideD", "rule": "slide" } ],
+      "walls": ["piston"] }"#;
+
+    /// [`PISTON_MOTION`] without its `walls` entry - the inconsistency
+    /// `check_motion_walls` refuses.
+    const PISTON_MOTION_NO_WALLS: &str = r#", "motion": { "patches": [
+      { "patch": "open", "rule": "fixed" },
+      { "patch": "piston", "rule": "move", "law": { "kind": "linear", "velocity": [-0.5, 0, 0] } },
+      { "patch": "sideA", "rule": "slide" }, { "patch": "sideB", "rule": "slide" },
+      { "patch": "sideC", "rule": "slide" }, { "patch": "sideD", "rule": "slide" } ] }"#;
+
+    const STROKE_ARGS: [&str; 6] = ["-endTime", "0.25", "-deltaT", "0.003125", "-check", "1000"];
+    const PISTON_ARGS: [&str; 6] = ["-endTime", "0.05", "-deltaT", "0.005", "-check", "1000"];
+
+    /// The numerics both motion cases share (SPEC-LIT 105.12): PIMPLE with two
+    /// correctors, Euler, first-order upwind, relaxation 1, tight linear solves.
+    const MOTION_NUMERICS: &str = r#"
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss upwind",
+      "div(phi,T)": "bounded Gauss upwind"
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  }"#;
+
+    /// SPEC-LIT 105.10 (b)'s stroking outlet as a case (SPEC-LIT 105.12): a
+    /// 16x1x1 duct, laminar, isothermal, Euler. `extra` and then `motion` are
+    /// appended after the `"run"` object.
+    fn stroke_case_text(motion: &str, extra: &str) -> String {
+        format!(
+            r#"{{
+  "name": "strokeMotion",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0, 0, 0], "max": [1.0, 0.1, 0.1] }},
+    "cells":  [16, 1, 1],
+    "boundaries": {{
+      "xmin": "inlet", "xmax": "outlet",
+      "ymin": "sideA", "ymax": "sideB",
+      "zmin": "sideC", "zmax": "sideD"
+    }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 0.01, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "patches": [
+    {{
+      "match": "inlet", "kind": "inlet",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 1.0 }},
+      "T": {{ "type": "fixedValue", "value": 293.15 }}
+    }},
+    {{
+      "match": "outlet", "kind": "open",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 0.0 }},
+      "T": {{ "type": "zeroGradient" }}
+    }},
+    {{ "match": "side.*", "kind": "symmetry" }}
+  ],
+  "initial": {{ "U": [0.5, 0, 0], "T": 293.15, "p": 0.0 }},{MOTION_NUMERICS},
+  "run": {{ "endTime": 0.25, "deltaT": 0.003125 }}{extra}{motion}
+}}"#
+        )
+    }
+
+    /// SPEC-LIT 105.10 (a)'s piston as a case (SPEC-LIT 105.12): an 8x3x3 box
+    /// with a moving wall at `xmax` and an open end at `xmin`, laminar,
+    /// isothermal, Euler. `wall_u` is the piston patch's `U` value as the case
+    /// writes it, e.g. `[-0.5, 0, 0]`.
+    fn piston_case_text(motion: &str, wall_u: &str) -> String {
+        format!(
+            r#"{{
+  "name": "pistonMotion",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0, 0, 0], "max": [1.0, 0.75, 0.75] }},
+    "cells":  [8, 3, 3],
+    "boundaries": {{
+      "xmin": "open", "xmax": "piston",
+      "ymin": "sideA", "ymax": "sideB",
+      "zmin": "sideC", "zmax": "sideD"
+    }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 0.01, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "patches": [
+    {{
+      "match": "open", "kind": "open",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 0.0 }},
+      "T": {{ "type": "zeroGradient" }}
+    }},
+    {{
+      "match": "piston", "kind": "wall",
+      "U": {{ "type": "fixedValue", "value": {wall_u} }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "zeroGradient" }}
+    }},
+    {{ "match": "side.*", "kind": "symmetry" }}
+  ],
+  "initial": {{ "U": [-0.5, 0, 0], "T": 293.15, "p": 0.0 }},{MOTION_NUMERICS},
+  "run": {{ "endTime": 0.05, "deltaT": 0.005 }}{motion}
+}}"#
+        )
+    }
+
+    /// Write a case text and run it exactly as `run_knobs` does; the output root.
+    fn run_case_text(text: &str, tag: &str, args: &[&str]) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, text).expect("write case");
+        let mut a: Vec<String> =
+            vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+        a.extend(args.iter().map(|s| (*s).to_string()));
+        let o = parse(&a).expect("the command line must parse");
+        run(&o).expect("the case must run");
+        common::json_case_output_dir(&path)
+    }
+
+    /// The mean internal `Ux` of a written time directory, and its cells.
+    fn mean_ux(root: &Path, time: Scalar, n_cells: usize) -> (f64, Vec<ofgpu::Vec3>) {
+        let f = read_vector_field(&root.join(format_time_name(time)).join("U"), n_cells)
+            .expect("read the written U");
+        let n = f.internal.len() as f64;
+        let mean = f.internal.iter().map(|u| u.x as f64).sum::<f64>() / n;
+        (mean, f.internal)
+    }
+
+    /// Write a case text and lower it, exactly as `common::load_case` does.
+    fn lower_text(text: &str, tag: &str) -> LoweredCase {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, text).expect("write case");
+        read_case_jsonc(&path)
+            .expect("the case must parse")
+            .lower()
+            .expect("the case must lower")
+    }
+
+    #[test]
+    fn the_motion_block_is_refused_by_name_where_it_cannot_be_honoured() {
+        let l = lower_text(&stroke_case_text(STROKE_MOTION, ""), "l1move");
+        let hm = ofgpu::blockgen::build_mesh(&l.block).expect("the duct builds");
+
+        // The honoured path: path + STROKE_ARGS, laminar - no refusal.
+        let mut ok_args: Vec<&str> = vec!["case.jsonc"];
+        ok_args.extend_from_slice(&STROKE_ARGS);
+        let o = parse(&argv(&ok_args)).expect("parse");
+        assert!(
+            refuse_motion_combinations(&o, &l, RasModel::Laminar, &hm).is_ok(),
+            "a transient laminar moving run must be honoured"
+        );
+
+        let refuses = |args: Vec<&str>, model: RasModel, want: &str| {
+            let o = parse(&argv(&args)).expect("parse");
+            let e = match refuse_motion_combinations(&o, &l, model, &hm) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected a refusal naming {want}"),
+            };
+            println!("refusal: {e}");
+            assert!(
+                e.contains("motion: ") && e.contains("SPEC-LIT 105.12") && e.contains(want),
+                "wanted {want:?}: {e}"
+            );
+        };
+
+        refuses(vec!["case.jsonc"], RasModel::Laminar, "a steady run");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-restartFrom", "x.mcr"]);
+        refuses(a, RasModel::Laminar, "-restartFrom");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-restartWrite", "5"]);
+        refuses(a, RasModel::Laminar, "-restartWrite");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-heaterPower", "10"]);
+        refuses(a, RasModel::Laminar, "-heaterPower");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.push("-sealed");
+        refuses(a, RasModel::Laminar, "-sealed");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-output", "foam,vtu"]);
+        refuses(a, RasModel::Laminar, "-output vtu");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        refuses(a, RasModel::KEpsilon, RasModel::KEpsilon.name());
+
+        let l_src = lower_text(
+            &stroke_case_text(
+                STROKE_MOTION,
+                r#", "sources": [ { "type": "momentumSource", "field": "U", "bodyForce": [0.0, 0.0, 0.0] } ]"#,
+            ),
+            "l1src",
+        );
+        let hm_src = ofgpu::blockgen::build_mesh(&l_src.block).expect("the duct builds");
+        let o = parse(&argv(&ok_args)).expect("parse");
+        let e = match refuse_motion_combinations(&o, &l_src, RasModel::Laminar, &hm_src) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected a refusal naming sources"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("sources"), "{e}");
+
+        let l_out = lower_text(&stroke_case_text(STROKE_MOTION, OUT_VDB), "l1out");
+        let hm_out = ofgpu::blockgen::build_mesh(&l_out.block).expect("the duct builds");
+        let e = match refuse_motion_combinations(&o, &l_out, RasModel::Laminar, &hm_out) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected a refusal naming the output block"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("output block"), "{e}");
+
+        // A case without `motion` is never refused here, not even a steady one.
+        let l_stat = lower_text(&stroke_case_text("", ""), "l1stat");
+        let hm_stat = ofgpu::blockgen::build_mesh(&l_stat.block).expect("the duct builds");
+        let o_steady = parse(&argv(&["case.jsonc"])).expect("parse");
+        assert!(
+            refuse_motion_combinations(&o_steady, &l_stat, RasModel::Laminar, &hm_stat).is_ok(),
+            "a static case is never refused by the motion checks"
+        );
+
+        // `check_motion_walls`: a wall whose U is not a fixed value, a moving
+        // fixed-velocity patch outside `walls`, and the consistent piston.
+        let wall_motion = format!(
+            "{}, \"walls\": [\"outlet\"] }}",
+            STROKE_MOTION.strip_suffix(" }").expect("motion shape"),
+        );
+        let l_wall = lower_text(&stroke_case_text(&wall_motion, ""), "l1wall");
+        let e = match check_motion_walls(&l_wall) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("walls on a zeroGradient U must be refused"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("outlet") && e.contains("fixedValue"), "{e}");
+
+        let l_pw = lower_text(&piston_case_text(PISTON_MOTION_NO_WALLS, "[-0.5, 0, 0]"), "l1pw");
+        let e = match check_motion_walls(&l_pw) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a moving fixed-velocity patch outside walls must be refused"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("motion.walls"), "{e}");
+
+        // A moving wall's case value seeds the first step's flux, so it must be
+        // the law's velocity at t = 0 - a wall written "at rest" is refused.
+        let l_rest = lower_text(&piston_case_text(PISTON_MOTION, "[0, 0, 0]"), "l1rest");
+        let e = match check_motion_walls(&l_rest) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a moving wall whose case value is not its t = 0 velocity must be refused"),
+        };
+        println!("refusal: {e}");
+        assert!(
+            e.contains("piston") && e.contains("velocity at t = 0") && e.contains("SPEC-LIT 105.12"),
+            "{e}"
+        );
+
+        let l_p = lower_text(&piston_case_text(PISTON_MOTION, "[-0.5, 0, 0]"), "l1p");
+        assert!(
+            check_motion_walls(&l_p).is_ok(),
+            "the piston's walls are consistent with its motion"
+        );
+    }
+
+    #[test]
+    fn a_driver_that_cannot_move_a_mesh_refuses_the_motion_block_by_name() {
+        let l_moving = lower_text(&stroke_case_text(STROKE_MOTION, ""), "l2move");
+        let e = match common::refuse_motion_block(Some(&l_moving), "ofgpu-k-epsilon") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("ofgpu-k-epsilon must refuse the motion block"),
+        };
+        println!("refusal: {e}");
+        assert!(
+            e.contains("ofgpu-k-epsilon") && e.contains("ofgpu-lowmach") && e.contains("motion"),
+            "{e}"
+        );
+
+        let l_static = lower_text(&stroke_case_text("", ""), "l2stat");
+        assert!(
+            common::refuse_motion_block(Some(&l_static), "ofgpu-k-epsilon").is_ok(),
+            "a case without motion is every case this driver has ever run"
+        );
+        assert!(common::refuse_motion_block(None, "ofgpu-k-epsilon").is_ok());
+    }
+
+    #[test]
+    fn the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::ale_flow::{
+            stroke_exact, STROKE_A, STROKE_L0, STROKE_N, STROKE_P0, STROKE_PERIOD, STROKE_T,
+            STROKE_U0,
+        };
+        assert_eq!(STROKE_L0, 1.0);
+        assert_eq!(STROKE_A, 0.2);
+        assert_eq!(STROKE_PERIOD, 1.0);
+        assert_eq!(STROKE_T, 0.25);
+        assert_eq!(STROKE_U0, 0.5);
+        assert_eq!(STROKE_P0, 1.0);
+        assert_eq!(STROKE_N, [16, 1, 1]);
+
+        let root_static = run_case_text(&stroke_case_text("", ""), "l3stat", &STROKE_ARGS);
+        let root_moving = run_case_text(&stroke_case_text(STROKE_MOTION, ""), "l3move", &STROKE_ARGS);
+        assert_ne!(
+            written_bytes(&root_static),
+            written_bytes(&root_moving),
+            "the motion block changed nothing the run wrote"
+        );
+
+        let (static_ux, _) = mean_ux(&root_static, 0.25, 16);
+        let (moving_ux, _) = mean_ux(&root_moving, 0.25, 16);
+        let exact_static = 0.75_f64;
+        let exact_moving = stroke_exact() as f64;
+        println!(
+            "stroke: static Ux {:.9} (exact 0.75, err {:.9e}); moving Ux {:.9} (exact {:.9}, err {:.9e})",
+            static_ux,
+            static_ux - exact_static,
+            moving_ux,
+            exact_moving,
+            moving_ux - exact_moving
+        );
+        assert!(
+            (static_ux - exact_static).abs() <= 1e-5,
+            "static {static_ux} against 0.75"
+        );
+        assert!(
+            (moving_ux - exact_moving).abs() <= 2e-3,
+            "moving {moving_ux} against {exact_moving}"
+        );
+        assert!(
+            (moving_ux - 0.75).abs() >= 1e-2,
+            "moving {moving_ux} must sit far from the static 0.75"
+        );
+    }
+
+    #[test]
+    fn a_moving_wall_named_in_the_motion_block_carries_the_mesh_velocity() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let root_moving =
+            run_case_text(&piston_case_text(PISTON_MOTION, "[-0.5, 0, 0]"), "l4move", &PISTON_ARGS);
+        let root_static = run_case_text(&piston_case_text("", "[0, 0, 0]"), "l4stat", &PISTON_ARGS);
+        let (_, ucells) = mean_ux(&root_moving, 0.05, 72);
+        let mp = read_scalar_field(
+            &root_moving.join(format_time_name(0.05)).join("p"),
+            72,
+        )
+        .expect("read the written p");
+        let worst_ux = ucells.iter().map(|u| (u.x + 0.5).abs() as f64).fold(0.0_f64, f64::max);
+        let worst_trans = ucells
+            .iter()
+            .map(|u| (u.y.abs() + u.z.abs()) as f64)
+            .fold(0.0_f64, f64::max);
+        let worst_p = mp.internal.iter().map(|v| v.abs() as f64).fold(0.0_f64, f64::max);
+        let (_, scells) = mean_ux(&root_static, 0.05, 72);
+        let worst_static = scells.iter().map(|u| (u.x + 0.5).abs() as f64).fold(0.0_f64, f64::max);
+        println!(
+            "piston: moving max|Ux+0.5| {:.9e} max|Uy|+|Uz| {:.9e} max|p| {:.9e}; static max|Ux+0.5| {:.9e}",
+            worst_ux, worst_trans, worst_p, worst_static
+        );
+        assert!(worst_ux <= 1e-6, "the moving wall must keep U = -c: {worst_ux}");
+        assert!(worst_trans <= 1e-6, "transverse drift: {worst_trans}");
+        assert!(worst_p <= 1e-6, "the open piston stays at p = 0: {worst_p}");
+        assert!(
+            worst_static >= 0.1,
+            "the fixed closed end stops the flow: {worst_static}"
+        );
     }
 }

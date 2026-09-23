@@ -340,11 +340,12 @@ impl MeshMotion {
                     ))
                 })?;
             let p = &m.patches[pi];
-            let ri = self
-                .patch_names
-                .iter()
-                .position(|n| n == name)
-                .expect("the rule table named every patch, checked at new");
+            let ri = self.patch_names.iter().position(|n| n == name).ok_or_else(|| {
+                Error::Config(format!(
+                    "MeshMotion::wall_faces: patch {name} is not in this motion's rule table; the \
+                     mesh given is not the one the motion was built for"
+                ))
+            })?;
             match self.patch_rules[ri] {
                 PatchMotion::Move(l) => {
                     let dir = l.direction();

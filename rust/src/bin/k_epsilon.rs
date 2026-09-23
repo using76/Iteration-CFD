@@ -267,6 +267,7 @@ fn run(o: &Options) -> Result<()> {
     common::refuse_non_orth_correctors_without_another_equation(&cc, "ofgpu-k-epsilon")?;
     common::refuse_rheology_without_momentum(&cc, "ofgpu-k-epsilon")?;
     common::refuse_unimplemented_blocks(json.as_ref())?;
+    common::refuse_motion_block(json.as_ref(), "ofgpu-k-epsilon")?;
 
     // SPEC-LIT §44, resolved before the mesh is uploaded so a case that asks
     // for something this driver cannot do fails before any kernel launches.

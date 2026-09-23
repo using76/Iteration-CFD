@@ -263,6 +263,7 @@ fn column_cmd(
     mean: bool,
 ) -> Result<()> {
     let (m, _cc, _lc) = common::load_case(case)?;
+    common::refuse_motion_block(_lc.as_ref(), "ofgpu-sample")?;
     let (u, t) = read_fields(&common::output_root(case).join(time), m.n_cells)?;
     let letter = (b'x' + axis as u8) as char;
     let col = column_cells(&m, axis, c1, c2);
@@ -347,6 +348,7 @@ fn column_cmd(
 
 fn wall_cmd(case: &Path, time: &str, patch: &str, axis: usize) -> Result<()> {
     let (m, _cc, _lc) = common::load_case(case)?;
+    common::refuse_motion_block(_lc.as_ref(), "ofgpu-sample")?;
     let (u, _t) = read_fields(&common::output_root(case).join(time), m.n_cells)?;
     let letter = (b'x' + axis as u8) as char;
     let pi = m

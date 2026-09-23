@@ -16,6 +16,17 @@
     "mesh": {
       "$ref": "#/$defs/JsonMesh"
     },
+    "motion": {
+      "description": "SPEC-LIT 105.12: a prescribed motion of the mesh's points. Absent (the\ndefault) is every case this reader has ever built; a case without it\nlowers, serialises and runs exactly as before.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonMotion"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "name": {
       "type": "string"
     },
@@ -198,6 +209,62 @@
         "a",
         "b",
         "transform"
+      ]
+    },
+    "JsonDisplacement": {
+      "description": "A displacement from the rest position, tagged on `kind`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "linear"
+            },
+            "velocity": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "velocity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "amplitude": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "kind": {
+              "type": "string",
+              "const": "sine"
+            },
+            "period": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "amplitude",
+            "period"
+          ]
+        }
       ]
     },
     "JsonExact": {
@@ -466,6 +533,28 @@
         "boundaries"
       ]
     },
+    "JsonMotion": {
+      "description": "The `motion` block - SPEC-LIT 105.12. One rule per boundary patch (every\npatch of the mesh named exactly once, which `MeshMotion::new` checks) and\nthe `move` patches whose velocity condition is the moving wall's.",
+      "type": "object",
+      "properties": {
+        "patches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonPatchMotion"
+          }
+        },
+        "walls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "patches"
+      ]
+    },
     "JsonNumerics": {
       "type": "object",
       "properties": {
@@ -552,6 +641,66 @@
         }
       },
       "additionalProperties": false
+    },
+    "JsonPatchMotion": {
+      "description": "One `motion.patches[]` entry, tagged on `rule`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "patch": {
+              "type": "string"
+            },
+            "rule": {
+              "type": "string",
+              "const": "fixed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rule",
+            "patch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "patch": {
+              "type": "string"
+            },
+            "rule": {
+              "type": "string",
+              "const": "slide"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rule",
+            "patch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "law": {
+              "$ref": "#/$defs/JsonDisplacement"
+            },
+            "patch": {
+              "type": "string"
+            },
+            "rule": {
+              "type": "string",
+              "const": "move"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rule",
+            "patch",
+            "law"
+          ]
+        }
+      ]
     },
     "JsonPatchRule": {
       "description": "One ordered rule of the `patches` array.",

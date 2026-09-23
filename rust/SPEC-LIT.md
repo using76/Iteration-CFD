@@ -1508,6 +1508,7 @@ that no reader asks for are listed as owed rather than hidden.
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
 | polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane`, `wedge` → symmetry; `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
+| JSONC `motion` block (`src/io/case_json.rs`, `JsonMotion::lower`; §105.12) | `patches[]` rules `fixed`, `slide`, `move` with a `linear` or `sine` law, and `walls`, in `ofgpu-lowmach` on a transient laminar run | none | an unknown key; a law on `fixed`/`slide`; a `move` without one; a sine period that is not positive; a law that moves nothing; in `ofgpu-lowmach` a steady run, `-restartFrom`, `-restartWrite`, `-heaterPower`, `-sealed`, a turbulence model, `sources`, the `output` block, `-output` other than `foam`, a cyclic pair, a wall whose `U` is not a fixed value, a wall whose `U` value is not its law's velocity at `t = 0`, a moving fixed-velocity patch not in `walls`; the whole block in `ofgpu-k-epsilon`, `ofgpu-sample`, `ofgpu-decompose` | NOT downgradable | `io::case_json::tests::{a_motion_block_lowers_to_its_rule_table, a_motion_law_that_moves_nothing_or_has_no_period_is_refused_by_name, the_motion_reader_refuses_a_law_on_a_fixed_patch_and_a_move_without_one}`; `ofgpu-lowmach`'s `the_motion_block_is_refused_by_name_where_it_cannot_be_honoured` and `the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law` |
 
 **Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
 `writeInterval`, `purgeWrite` are read by no driver; the writer is ASCII at `writePrecision`, and
@@ -29279,7 +29280,7 @@ with a uniform flow uniform to round-off.
 
 §105.1-§105.6 do not own the relative flux in the solver, the moving wall,
 the point smoother or the case block. §105.7-§105.10 own the first three,
-with Gate 105-B; the case block is the next unit's, and §105.11 lists what
+with Gate 105-B; the case block is §105.12's, and §105.11 lists what
 is still not claimed.
 
 No GPL-licensed source was consulted. The sources are this crate's own
@@ -29461,7 +29462,7 @@ boundary face. The residual is the ALE ddt plus Gauss upwind of
 `phi - phi_mesh` assembled at `psi = 1` and evaluated on the constant field -
 `A 1 - b` - which is zero exactly when the space conservation law holds and
 each cell closes its own balance. This proves the uniform state by DIRECT
-assembly; the same statement through the SIMPLE loop is the next unit's.
+assembly; the same statement through the SIMPLE loop is §105.10's.
 
 ```text
 | scheme   | steps | cells | worst SCL | scheme SCL | uniform | volume drift | boundary phi_mesh | min V/V0 |
@@ -29563,7 +29564,7 @@ porous-jump patches of §52 and §53. `flow_state()` hands out `phi_rel` while
 a motion is attached, which routes every model through `FlowState` without
 editing a model file. The drivers' own call sites that read the flux for a
 convective term - energy's `phi_conv` through `src/cht/flow.rs`, the
-drivers' `update_inlet_outlet` calls - are the next unit's, and no driver
+drivers' `update_inlet_outlet` calls - are §105.12's, and no driver
 can attach a motion before it. A `Simple` with no motion launches exactly
 what it launched before this section; the supervisor's byte-for-byte
 checksum of written fields is recorded by the commit, not here.
@@ -29723,8 +29724,8 @@ left around one function, so the reported-gate census stays 19 literals /
 ### 105.11 What is not claimed, and the house items
 
 Not claimed here: tangential moving walls; rotations in the smoother; a
-device smoother; the case block and any driver that runs a moving mesh (the
-next unit's); the energy and turbulence equations' time derivatives on a
+device smoother; a moving mesh in any driver but `ofgpu-lowmach`, whose
+`motion` case block is §105.12's; the energy and turbulence equations' time derivatives on a
 moving mesh in the conservative form - their bounded form keeps the static
 term, which §105.7's argument covers for a constant density only; the wall
 distance a turbulence model reads is computed once and is stale after a
@@ -29742,6 +29743,111 @@ capture row: the two new kernels are launched from `src/mesh/ale.rs`, whose
 nothing and drive no iteration - the moving step that captures is the
 proof. No existing kernel changed and no solver numerics moved to make any
 gate here pass.
+
+### 105.12 The motion case block, and the one driver that runs it
+
+A case asks for the moving mesh of §105.7-§105.10 with a `motion` block, a
+field of the JSONC case beside `sources`:
+
+```jsonc
+"motion": {
+  "patches": [
+    { "patch": "inlet",  "rule": "fixed" },
+    { "patch": "outlet", "rule": "move",
+      "law": { "kind": "sine", "amplitude": [0.2, 0, 0], "period": 1.0 } },
+    { "patch": "sideA",  "rule": "slide" }
+  ],
+  "walls": ["piston"]
+}
+```
+
+One rule per boundary patch - `fixed`, `slide`, or `move` with a `linear`
+(`velocity`) or `sine` (`amplitude`, `period`) law - and `walls`, the `move`
+patches whose `U` condition is the moving wall's (§105.8). The reader
+refuses, naming the path: an unknown key anywhere in the block, a `law` on a
+`fixed` or `slide` patch, and a `move` without a `law`. `JsonMotion::lower`
+refuses by name a law that moves nothing and a sine period that is not
+positive and finite. Everything patch-level - that every patch of the mesh
+is named exactly once, unknown patch names, cyclic rules, conflicting point
+claims, a tangential wall - is `MeshMotion::new`'s and
+`MeshMotion::wall_faces`'s refusals (§105.9), not the reader's.
+
+`ofgpu-lowmach` is the one driver that runs the block: it is the only
+driver that reads a JSONC case AND runs `Simple` transiently. `ofgpu-cht`
+cannot host it - its fluid path hard-codes the steady ddt - and
+`ofgpu-k-epsilon`, `ofgpu-sample` (both commands) and `ofgpu-decompose`
+refuse the whole block by name through `common::refuse_motion_block`.
+
+Per time step, in this order: `begin_time_step` (every step, first step
+included), `points_at` at the step's END time, `set_points`, `move_mesh`,
+then the turbulence correct and the outer corrector exactly as before.
+`move_mesh` advances the mesh with the momentum ddt's own coefficients,
+writes the moving walls' value and refreshes the relative flux. Four flux
+reads route through `Simple::convective_flux` (§105.7): T's
+`update_inlet_outlet_scalar`, `Energy::correct`, and the two `FlowState`s
+the turbulence model and the per-step corrector read. The restart writer's
+`s.phi()` stays ABSOLUTE, and so do the pressure equation and the
+continuity error inside `Simple` (§105.7). With no motion attached
+`convective_flux` hands out `phi` itself - the same buffer - so a case
+without `motion` writes byte-identical output.
+
+What a moving run refuses, by name, before any field is set up, none of it
+downgradable under `-permissive`: a steady run (a moving mesh needs time to
+move in); `-restartFrom` and `-restartWrite` (a checkpoint carries no mesh
+points and no volume history); `-heaterPower` (spread over the rest
+volume); `-sealed` (the sealed `p0` equation holds the domain volume fixed);
+any turbulence model but laminar (a model's wall distance and time
+derivatives are the static mesh's); a `sources[]` entry (a source's volume
+integral is the rest mesh's); the case's `output` block and any `-output`
+but `foam` (the volume writers take the rest points); a cyclic pair (the
+periodic reports divide by the rest volume); a `motion.walls` patch whose
+`U` is not a fixed value (the moving wall's velocity is written as a
+fixedValue, §105.8); a `motion.walls` patch whose `U` value is not its law's
+velocity at `t = 0` (the value seeds the first step's flux before the first
+`move_mesh` writes the wall's own; a wall written at rest under a moving law
+starts the run with a flux the mesh contradicts); a `move` patch whose `U`
+IS a fixed value that `walls` does not list (a fixed velocity on a moving
+patch pushes fluid through it).
+The written time directories carry the FIELDS only; the points at time `t`
+are the case's `points_at(t)`, reproducible from the case file.
+
+The energy equation is solved in its bounded form with the static time
+derivative (§105.11), which keeps a uniform temperature exactly; transport
+of a non-uniform temperature at variable density on a moving mesh is not
+claimed.
+
+The measurement (§105.10 (b)'s stroking outlet as an `ofgpu-lowmach` case:
+16x1x1 cells, laminar, isothermal, `Euler`, `dt = 0.003125`, 80 steps to
+`T = 0.25`): the static case writes `Ux` `0.750000000` against its exact
+`U0 + P0 T / L0 = 0.75` - Euler integrates a constant acceleration exactly
+- and the moving case, the outlet on the sine law, writes `Ux` `0.722709000` against
+`stroke_exact()` = `0.722447238`, far from the static `0.75`. The piston of
+§105.10 (a) as a case - the wall on a `linear` law at `-c`, listed in
+`walls`, its case value `-c` - keeps `|Ux + c|` at `0` in the written field,
+`|Uy| + |Uz|` at `1.883e-16` and `|p|` at `3.965e-12` over ten steps, while
+the same case without the block, its closed end a wall at rest, sits
+`5.614900000e-1` away. Written at rest under the same law, the wall's case
+value seeded the first step's flux against the moving mesh: a pressure
+impulse of `0.125` after one step that decayed to `5.5e-3` after ten - the
+measurement that made the value a refusal.
+
+Measured on this driver and not changed here: `ofgpu-lowmach` calls
+`begin_time_step` before its FIRST step too, so the time state's step
+counter is 1 during it and `backward` takes the BDF2 row with two equal old
+levels, not the Euler row §105.10's loops start from. With `dU/dt(0)` not
+zero that start is first order. The static stroke case under `backward`
+(`U0 + P0 T / L0 = 0.75`, the same 16x1x1 duct, no `motion`) writes `Ux`
+errors of `-6.252e-3`, `-3.126e-3` and `-1.563e-3` at 20, 40 and 80 steps -
+`-dt P0 / (2 L0)`, halving with the step - where `Euler` writes `3e-6`,
+`-1e-6` and `0` (the `fp32` write). Changing a driver's time stepping is a
+numerics decision, so it is reported, not made; a moving run's mesh advance
+takes the same coefficients as its momentum, so the space conservation law
+still closes.
+
+House items. No new file - the source-file count stays 217; no new capture
+row - `src/bin/` is outside the capture registry, and nothing here launches
+a kernel of its own; no kernel and no solver numerics changed;
+`docs/schema/case-1.json` is the regenerated schema, never hand-edited.
 
 ---
 

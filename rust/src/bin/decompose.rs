@@ -548,6 +548,7 @@ fn main() -> Result<()> {
     let args = parse()?;
     let gpu = Gpu::new(0)?;
     let (m, _cc, _lowered) = common::load_case(&args.case)?;
+    common::refuse_motion_block(_lowered.as_ref(), "ofgpu-decompose")?;
 
     if !args.quiet {
         println!("case   : {}", args.case.display());

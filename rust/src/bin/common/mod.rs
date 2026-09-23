@@ -381,6 +381,19 @@ pub fn refuse_unimplemented_blocks(json: Option<&LoweredCase>) -> Result<()> {
     Ok(())
 }
 
+/// SPEC-LIT 105.12: the `motion` block, refused by name in every driver that
+/// cannot move a mesh. `ofgpu-lowmach` is the one driver that runs it, and it
+/// does not call this.
+pub fn refuse_motion_block(json: Option<&LoweredCase>, driver: &str) -> Result<()> {
+    match json.and_then(|l| l.motion.as_ref()) {
+        None => Ok(()),
+        Some(_) => Err(Error::Config(format!(
+            "motion: {driver} cannot move a mesh - the case's `motion` block is run by \
+             ofgpu-lowmach only (SPEC-LIT 105.12)"
+        ))),
+    }
+}
+
 /// Refuse `nNonOrthogonalCorrectors` to a driver whose ONLY equations are
 /// the turbulence ones.
 ///

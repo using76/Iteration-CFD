@@ -106,6 +106,11 @@ pub struct JsonCase {
     /// ([`crate::sources::read_sources`]) cannot express and vice versa.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<JsonSource>,
+    /// SPEC-LIT 105.12: a prescribed motion of the mesh's points. Absent (the
+    /// default) is every case this reader has ever built; a case without it
+    /// lowers, serialises and runs exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<JsonMotion>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -168,6 +173,96 @@ pub enum JsonSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<[f64; 3]>,
     },
+}
+
+/// The `motion` block - SPEC-LIT 105.12. One rule per boundary patch (every
+/// patch of the mesh named exactly once, which `MeshMotion::new` checks) and
+/// the `move` patches whose velocity condition is the moving wall's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonMotion {
+    pub patches: Vec<JsonPatchMotion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub walls: Vec<String>,
+}
+
+/// One `motion.patches[]` entry, tagged on `rule`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "rule", rename_all = "lowercase", deny_unknown_fields)]
+pub enum JsonPatchMotion {
+    Fixed { patch: String },
+    Slide { patch: String },
+    Move { patch: String, law: JsonDisplacement },
+}
+
+/// A displacement from the rest position, tagged on `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum JsonDisplacement {
+    Linear { velocity: [f64; 3] },
+    Sine { amplitude: [f64; 3], period: f64 },
+}
+
+/// The `motion` block, lowered onto the rule table of
+/// `crate::mesh::motion::MeshMotion::new` - SPEC-LIT 105.12.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredMotion {
+    pub rules: Vec<(String, crate::mesh::motion::PatchMotion)>,
+    pub walls: Vec<String>,
+}
+
+impl LoweredMotion {
+    /// The rule table in the borrowed form `MeshMotion::new` takes.
+    pub fn rule_table(&self) -> Vec<(&str, crate::mesh::motion::PatchMotion)> {
+        self.rules.iter().map(|(n, r)| (n.as_str(), *r)).collect()
+    }
+
+    /// The wall names in the borrowed form `MeshMotion::wall_faces` takes.
+    pub fn wall_names(&self) -> Vec<&str> {
+        self.walls.iter().map(String::as_str).collect()
+    }
+}
+
+impl JsonMotion {
+    /// SPEC-LIT 105.12. Refuses by name a law that moves nothing and a sine
+    /// law without a positive, finite period; which patches exist and how
+    /// their rules combine is `MeshMotion::new`'s to refuse.
+    pub fn lower(&self) -> Result<LoweredMotion> {
+        use crate::mesh::motion::{Displacement, PatchMotion};
+        let v = |a: [f64; 3]| Vec3::new(a[0] as Scalar, a[1] as Scalar, a[2] as Scalar);
+        let mut rules = Vec::with_capacity(self.patches.len());
+        for (i, p) in self.patches.iter().enumerate() {
+            let (name, rule) = match p {
+                JsonPatchMotion::Fixed { patch } => (patch, PatchMotion::Fixed),
+                JsonPatchMotion::Slide { patch } => (patch, PatchMotion::Slide),
+                JsonPatchMotion::Move { patch, law } => {
+                    let d = match *law {
+                        JsonDisplacement::Linear { velocity } => {
+                            Displacement::Linear { velocity: v(velocity) }
+                        }
+                        JsonDisplacement::Sine { amplitude, period } => {
+                            if !(period > 0.0) || !period.is_finite() {
+                                return Err(Error::Config(format!(
+                                    "motion.patches[{i}].law.period is {period}; a sine law needs \
+                                     a positive, finite period (SPEC-LIT 105.12)"
+                                )));
+                            }
+                            Displacement::Sine { amplitude: v(amplitude), period: period as Scalar }
+                        }
+                    };
+                    if d.direction().mag() == 0.0 {
+                        return Err(Error::Config(format!(
+                            "motion.patches[{i}].law moves nothing (its direction is zero); a \
+                             patch that does not move is `fixed` (SPEC-LIT 105.12)"
+                        )));
+                    }
+                    (patch, PatchMotion::Move(d))
+                }
+            };
+            rules.push((name.clone(), rule));
+        }
+        Ok(LoweredMotion { rules, walls: self.walls.clone() })
+    }
 }
 
 // ---- mesh ----------------------------------------------------------------
@@ -1295,6 +1390,9 @@ pub struct LoweredCase {
     /// produces - one registry, two ways to name an entry in it. Empty for
     /// every case that names no `sources` block.
     pub sources: Vec<crate::sources::SourceSpec>,
+    /// `motion`, lowered - SPEC-LIT 105.12. `None` for every case that names
+    /// no `motion` block.
+    pub motion: Option<LoweredMotion>,
 }
 
 impl LoweredCase {
@@ -2559,6 +2657,7 @@ impl JsonCase {
             }
         }
 
+        let motion = self.motion.as_ref().map(JsonMotion::lower).transpose()?;
         Ok(LoweredCase {
             name: self.name.clone(),
             block,
@@ -2596,6 +2695,7 @@ impl JsonCase {
             nut_field,
             output: self.output.clone(),
             sources,
+            motion,
         })
     }
 }
@@ -4415,5 +4515,161 @@ mod tests {
             Ok(_) => panic!("expected read_case_jsonc to refuse an out-of-range bodyForce component"),
         };
         assert!(err.contains("finite"), "{err}");
+    }
+
+    /// A minimal six-patch case, with a `motion` block - or none - appended
+    /// after the `"run"` object. The motion tests' fixture (SPEC-LIT 105.12);
+    /// returns the read's `Result` so the refusal tests can match on it.
+    fn motion_case(motion: &str) -> Result<JsonCase> {
+        let text = format!(
+            r#"{{
+                "name": "motionTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                    "cells": [4, 6, 8],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0,0,0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+                    "buoyancy": "densityRatio"
+                }},
+                "patches": [ {{ "match": ".*", "kind": "wall" }} ],
+                "initial": {{ "U": [0,0,0], "p": 0.0 }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }}{motion}
+            }}"#
+        );
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "case_json_motion_test_{}_{n}.jsonc",
+            std::process::id()
+        ));
+        std::fs::write(&path, text).unwrap();
+        let r = read_case_jsonc(&path);
+        let _ = std::fs::remove_file(&path);
+        r
+    }
+
+    #[test]
+    fn a_motion_block_lowers_to_its_rule_table() {
+        let case = motion_case(
+            r#", "motion": {
+                "patches": [
+                    { "patch": "xa", "rule": "fixed" },
+                    { "patch": "xb", "rule": "move",
+                      "law": { "kind": "linear", "velocity": [-0.5, 0, 0] } },
+                    { "patch": "ya", "rule": "slide" },
+                    { "patch": "yb", "rule": "slide" },
+                    { "patch": "za", "rule": "slide" },
+                    { "patch": "zb", "rule": "slide" }
+                ],
+                "walls": ["xb"]
+            }"#,
+        )
+        .expect("the motion case should parse");
+        let lowered = case.lower().expect("the motion case should lower");
+        let Some(m) = &lowered.motion else {
+            panic!("the motion block should lower to Some(LoweredMotion)");
+        };
+        let names: Vec<&str> = m.rules.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["xa", "xb", "ya", "yb", "za", "zb"], "file order");
+        assert_eq!(
+            m.rules[1].1,
+            crate::mesh::motion::PatchMotion::Move(crate::mesh::motion::Displacement::Linear {
+                velocity: Vec3::new(-0.5, 0.0, 0.0)
+            })
+        );
+        assert_eq!(m.walls, vec!["xb".to_string()]);
+        assert_eq!(m.rule_table().iter().map(|(n, _)| *n).collect::<Vec<_>>(), names);
+        assert_eq!(m.wall_names(), vec!["xb"]);
+    }
+
+    #[test]
+    fn a_case_without_motion_lowers_to_none_and_writes_no_motion_key() {
+        let case = motion_case("").expect("the plain case should parse");
+        assert!(
+            case.lower().expect("the plain case should lower").motion.is_none(),
+            "no motion block, no LoweredMotion"
+        );
+        let s = serde_json::to_string(&case).expect("serialise");
+        assert!(!s.contains(r#""motion""#), "{s}");
+    }
+
+    #[test]
+    fn a_motion_law_that_moves_nothing_or_has_no_period_is_refused_by_name() {
+        let case = motion_case(
+            r#", "motion": { "patches": [
+                { "patch": "xa", "rule": "fixed" },
+                { "patch": "xb", "rule": "move",
+                  "law": { "kind": "sine", "amplitude": [0.2, 0, 0], "period": 0.0 } }
+            ] }"#,
+        )
+        .expect("the zero-period case should parse");
+        let e = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a sine law with period 0 must be refused by the lowering"),
+        };
+        println!("zero period: {e}");
+        assert!(
+            e.contains("motion.patches[1].law.period") && e.contains("SPEC-LIT 105.12"),
+            "{e}"
+        );
+
+        let case = motion_case(
+            r#", "motion": { "patches": [
+                { "patch": "xa", "rule": "fixed" },
+                { "patch": "xb", "rule": "move",
+                  "law": { "kind": "linear", "velocity": [0, 0, 0] } }
+            ] }"#,
+        )
+        .expect("the zero-velocity case should parse");
+        let e = match case.lower() {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a law that moves nothing must be refused by the lowering"),
+        };
+        println!("moves nothing: {e}");
+        assert!(e.contains("moves nothing") && e.contains("fixed"), "{e}");
+    }
+
+    #[test]
+    fn the_motion_reader_refuses_a_law_on_a_fixed_patch_and_a_move_without_one() {
+        let e = match motion_case(
+            r#", "motion": { "patches": [
+                { "patch": "xa", "rule": "fixed",
+                  "law": { "kind": "linear", "velocity": [1, 0, 0] } },
+                { "patch": "xb", "rule": "move",
+                  "law": { "kind": "linear", "velocity": [1, 0, 0] } }
+            ] }"#,
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a law on a `fixed` patch must be refused on read"),
+        };
+        println!("law on fixed: {e}");
+        assert!(e.contains("motion.patches"), "{e}");
+
+        let e = match motion_case(
+            r#", "motion": { "patches": [
+                { "patch": "xa", "rule": "fixed" },
+                { "patch": "xb", "rule": "move" }
+            ] }"#,
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a `move` without a law must be refused on read"),
+        };
+        println!("move without a law: {e}");
+        assert!(e.contains("motion.patches"), "{e}");
     }
 }
