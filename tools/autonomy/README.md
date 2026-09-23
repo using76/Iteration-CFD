@@ -293,6 +293,50 @@ committed (docs/15 §E) — only the generators are.
   supervisor under `tools/autonomy/pilot/`. psutil 7.0.0 (BSD-3-Clause) reads
   each child's peak working set for the per-level cost table.
 
+## features.py — the geometry fingerprint
+
+`features.py` computes the `autonomy-fingerprint/1` of one closed STL (docs/15
+§C): `patches` (per-patch `area_m2`, first-appearance order), `area_m2`,
+`volume_m3`, `bbox` `[xlo, xhi, ylo, yhi, zlo, zhi]` in metres,
+`sharp_edge_length_m` at `feature_angle_deg`, curvature radii
+`curvature_radius_p5_m/_p50_m/_p95_m`, `inner_thickness_m` and `outer_gap_m`
+(metres, `None` when not measurable), `planar_frac` (0..1), `commensurate`
+(bool) and `lattice_base_size_m` (metres), plus `stl_sha256` and
+`n_triangles`. The input is welded bit-exactly through
+`tools/geom/stl_repair.py`'s parser and refused by name — open, non-manifold,
+mis-oriented, inward, degenerate — never repaired.
+
+Constants: `FEATURE_ANGLE_DEG` 30 (the automesher's
+`refinement.feature_angle_deg` default), `COORD_TOL` 1e-9 (× bbox diagonal,
+axis-planar test and plane clustering), `FLAT_KAPPA` 1e-6 (κ_max·diagonal
+below this is flat), `BALL_CAP` 0.125, `BALL_EPS` 1e-9, `BALL_MAX_ITER` 100
+(the tangent balls), `FACING_DOT` −0.5 (a limit counts when n_p·n_q < −0.5),
+`LATTICE_LEVELS` 6 (the octree cap) and `LATTICE_TOL` 1e-6.
+
+Sharp edges: the automesher's own dihedral test, degrees(arccos(n_i·n_j)) >
+`feature_angle_deg` (SPEC-LIT (92.34)). Curvature: a per-vertex least-squares
+osculating paraboloid in the vertex-normal frame (do Carmo, *Differential
+Geometry of Curves and Surfaces*, 1976, §3-3), κ_max = |a+c| +
+sqrt((a−c)²+b²), area-weighted p5/p50/p95 over the vertices off sharp edges.
+Thickness and gap: tangent balls shrunk against surface samples through a
+cKDTree (Ma, Bae & Choi 2012, *The Visual Computer* 28(1), DOI
+10.1007/s00371-011-0594-7); the diameter is the local wall-to-wall distance.
+Commensurability: the largest cubic spacing s ≥ max bbox extent/2⁶ on which
+every axis-aligned plane lies, from plane-coordinate differences only.
+
+Honest limits. The balls see sample points only, so the error is the sampling
+error — two spheres whose nearest points are vertices are exact; nearest
+samples θ off the closest-approach line read ≈ R·θ²/g large. Thickness and gap
+exist only below 2·BALL_CAP·diagonal and only for facing limits: a sphere or a
+cube is not thin at diagonal/4 and reports `None`, and a convex single body
+reports `outer_gap_m = None`. Commensurability is origin-free: a single box is
+always commensurate with its own edge; the negatives are incommensurate
+dimensions (BOX-n, two cubes 1.3137 apart), not offsets. The schema carries
+per-patch AREA only — docs/15 §C says "per-patch area, volume and bbox", but
+the AM-1 Fingerprint schema, which wins, has `area_m2` per patch and
+volume/bbox for the whole surface. The fingerprint feeds AM-8's preflight,
+AM-9's rules (R-CURV, R-GAP, R-FEAT, R-PLANE) and AM-13's k-NN.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -304,6 +348,9 @@ committed (docs/15 §E) — only the generators are.
     python tools/autonomy/corpus/gen_wing.py --seed 1 --n 120 --out DIR   # family A STLs + manifest_A.jsonl
     python tools/autonomy/corpus/gen_lathe.py --seed 1 --n 120 --out DIR  # family B
     python tools/autonomy/corpus/gate.py --family A --family B --n 120 --seed 1   # G-CORPUS
+
+    python tools/autonomy/features.py FILE.stl --id NAME [--diag]      # one fingerprint (JSON)
+    python tools/autonomy/features.py --corpus A --seed 1 --n 120        # fingerprint a whole family
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report

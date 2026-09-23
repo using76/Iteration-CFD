@@ -9,7 +9,10 @@ Runs schema.py --selftest (the schemas, fixtures, knob table and lock), then
 score.py --selftest (the G-SCORER probe fixtures, the refusal grammar, the
 content hash and the live automesher), then the four corpus selftests of
 docs/15 §E/§F (corpus/stl_io.py, corpus/gen_wing.py, corpus/gen_lathe.py and
-corpus/gate.py -- G-CORPUS on families A and B), then sensitivity.py --selftest
+corpus/gate.py -- G-CORPUS on families A and B), then features.py --selftest
+(the AM-4 geometry fingerprint: refusals, sphere curvature, cube sharp edges,
+two-sphere gap, NACA0012 thickness, planar fraction, commensurability,
+patches, invariance, schema and speed), then sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
 report), then checks that README.md still
@@ -50,7 +53,8 @@ def main():
         "score.py --selftest failed (exit %d, %d [ok]): %s" % (q.returncode, s_ok,
                                                                (q.stdout + q.stderr)[-2000:])
     corpus = (("corpus/stl_io.py", 4), ("corpus/gen_wing.py", 7),
-              ("corpus/gen_lathe.py", 7), ("corpus/gate.py", 3))
+              ("corpus/gen_lathe.py", 7), ("corpus/gate.py", 3),
+              ("features.py", 11))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:
